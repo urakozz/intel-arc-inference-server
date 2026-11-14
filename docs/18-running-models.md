@@ -90,9 +90,9 @@ is not finished is listed in [open-work.md](open-work.md).
 | `--parallel pp` (two cards, spec 16d) | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
 | `b70-decode` | yes | yes | yes | decode and prefill (spec 20d), **two cards** (the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22) |
 | speed rows in BENCHMARKS | yes | yes | no | no | no |
-| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP where DFlash does not run) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (`auto` = off until spec 22's numbers); `b70-decode` refuses it |
+| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (`auto` = off until spec 22's numbers); `b70-decode` refuses it |
 | `--spec lookup` | yes | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
-| `--spec dflash` (spec 19) | yes, one card (`--spec auto`'s pick there, with prompt lookup folded in), `--parallel replica` or `pp`, bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
+| `--spec dflash` (spec 19) | yes, when asked: one card (with prompt lookup folded in), `--parallel replica` or `pp`, bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes | not built | yes (spec 18e) | refused (bf16 only) | refused (bf16 only) |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
@@ -178,18 +178,9 @@ window, the continuation of that repeat is checked instead of the drafter's gues
 repeat alone, spec 19e) and `dflash-lookup` (the same as one-card `dflash`) stay as developer values;
 `B70_SPEC_LOOKUP=0` serves plain DFlash for A/B runs.
 
-What `--spec auto` (the default) picks, and the startup line `spec: auto -> ...` says why:
-
-| setup | Qwen3.8 | Ornith | other models |
-|---|---|---|---|
-| one card (`--parallel 1`, or `auto` with one card visible or an asked `--max-len`), one request | `dflash` with lookup when `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` is in the HF cache, else `mtp` (the log names the `hf download` command) | `mtp` | off |
-| `--parallel replica` (one request a card) | `dflash` (a drafter per card, no lookup) when cached, else `mtp` | `mtp` | - |
-| `--parallel tp`, or `auto` on two cards (tensor parallel) | `mtp` | - | - |
-| `--parallel pp` | `mtp` | `mtp` | off |
-| several slots a card (`--max-num-seqs` above 1 on one card, above 2 under replica) | `mtp` | - | - |
-
-The engine never downloads: a missing drafter under `auto` falls back to MTP; an explicit `--spec dflash`
-with a missing drafter is an error.
+`--spec auto` (the default) is the MTP head wherever the model has one: no extra memory, so the full context
+stays available. DFlash runs only when asked (`--spec dflash`); its drafter's weights (1.21 GB) come out of the
+context's memory (operator 2026-11-14). The engine never downloads: a missing drafter is an error.
 The verify step of every decode list at M >= 2 runs the small-batch int4 GEMM `gemm_sm` (spec 28b; M = 1
 keeps the GEMV, bitwise as before); the DFlash drafter's int8 linears and Flash-Next's verify lists run
 on it too. Verify attention runs the DPAS kernel (spec 28c) from the depth its table says and the v2
@@ -211,7 +202,7 @@ acceptance pooled -0.016 tokens a round, the code corpus -0.054 accepted). `--dr
 loads the bf16 original, quantised to int8 at load. Its acceptance on our prompts was measured on the Mac CPU
 (`docs/probes/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on
 code, ~2.2 on prose; int8 and 4-bit drafters equal bf16). It has run on the card since 2026-10-27
-(BENCHMARKS "DFlash"); with the packed drafter it is `--spec auto`'s pick on one card.
+(BENCHMARKS "DFlash"); it runs when asked (`--spec dflash`), never as `--spec auto`.
 The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step 16.3 -> 8.9 ms).
 On one card `--spec dflash` runs prompt lookup inside DFlash for edit / copy turns (spec 19f):
 

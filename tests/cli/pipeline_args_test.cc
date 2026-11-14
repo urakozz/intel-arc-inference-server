@@ -139,21 +139,6 @@ void check_names_and_spec() {
   CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::Qwen, "Qwen3.8", false, 0, true); }, "--draft-model needs --spec dflash"));
   CHECK(says([] { cli::parse_spec("eagle"); }, "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup"));
 
-  // --spec auto (operator ruling 2026-11-14): DFlash on one card with the drafter cached, else MTP, else off.
-  cli::AutoSetup one{true, true, "urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound", ""};
-  CHECK(cli::resolve_auto(SpecFamily::Qwen, one).value == "dflash");
-  cli::AutoSetup missing = one;
-  missing.drafter_cached = false;
-  const cli::AutoPick m = cli::resolve_auto(SpecFamily::Qwen, missing);
-  CHECK(m.value == "mtp" && m.why.find("hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound") != std::string::npos);
-  cli::AutoSetup tp = one;
-  tp.refused = "tensor parallel";
-  CHECK(cli::resolve_auto(SpecFamily::Qwen, tp).value == "mtp");
-  cli::AutoSetup ornith = one;
-  ornith.dflash_target = false;
-  CHECK(cli::resolve_auto(SpecFamily::Qwen, ornith).value == "mtp");
-  CHECK(cli::resolve_auto(SpecFamily::None, ornith).value == "off");
-  CHECK(cli::resolve_auto(SpecFamily::Qwen4Exp, ornith).value == "off");
 }
 
 void check_refusals() {

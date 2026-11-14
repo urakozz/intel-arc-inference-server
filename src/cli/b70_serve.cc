@@ -1271,36 +1271,7 @@ int run(int argc, char** argv) {
                                  : is_k2 ? cli::SpecFamily::None
                                          : cli::SpecFamily::Qwen;
   const std::string model_name = is_q4 ? "Qwen3.8-Flash-Next" : is_kol ? "Kolibri-1" : is_k2 ? "K2-Horizon" : "this model";
-  // --spec auto (operator ruling 2026-11-14, cli::resolve_auto): DFlash on one card (or replica's card each) when
-  // Qwen3.8's drafter is in the HF cache, else the MTP head - decided before anything below reads the proposer.
-  if (spec_arg == "auto") {
-    cli::AutoSetup as;
-    as.dflash_target = q_arch == "Qwen3_5ForConditionalGeneration";   // Qwen3.8 (Ornith: MoE, no drafter)
-    as.drafter = dflash.model;
-    try {
-      as.drafter_cached = dflash.have_model || std::filesystem::exists(loader::resolve_snapshot(dflash.model) +
-                                                                       "config.json");
-    } catch (const std::exception&) {
-    }
-    const bool dv = draft_vocab != 0 || !draft_vocab_ids.empty();
-    if (pipe.tp() ||
-        (pipe.mode == cli::Parallel::Auto && max_num_seqs == 1 && as.dflash_target &&
-         cli::tp_auto(q_snap, max_len_arg, hw.cards, dv || (have_pp_backend && pp_backend != runtime::PrefillBackend::L0))))
-      as.refused = "tensor parallel";   // item 22 (DFlash under TP) drops this when it lands
-    else if (pipe.mode == cli::Parallel::Pp)
-      as.refused = "pipeline parallel";
-    else if (max_num_seqs > (pipe.replica() ? 2u : 1u))
-      as.refused = "several sequence slots a card (--max-num-seqs " + std::to_string(max_num_seqs) + ")";
-    const cli::AutoPick pick = cli::resolve_auto(family, as);
-    spec_arg = pick.value;
-    std::fprintf(stderr, "spec: auto -> %s (%s)\n", pick.value.c_str(), pick.why.c_str());
-    if (as.dflash_target)
-      std::fprintf(stderr,
-                   "spec: auto picks, by setup:\n"
-                   "  one card, one request         dflash with prompt lookup if the drafter is downloaded, else mtp\n"
-                   "  --parallel replica            dflash (one request a card) if the drafter is downloaded, else mtp\n"
-                   "  tensor parallel (two cards' default), --parallel pp, several slots a card   mtp\n");
-  }
+  // --spec auto = the MTP head (operator 2026-11-14: no extra VRAM by default; DFlash only on an explicit --spec dflash).
   const cli::Spec spec = cli::resolve_spec(spec_arg, family, model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
   const bool spec_lookup = spec.kind == cli::SpecKind::Lookup;
