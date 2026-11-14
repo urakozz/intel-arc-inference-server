@@ -9,8 +9,9 @@
 //      are projected 8 a replay (the ring wraps at 2048); the last replay's rows equal the twin's projection
 //      (bitwise bf16 within an ulp: the GEMVs' contraction is the box compiler's).
 //   2. A draft at p 2053 (rows reach the window's edge past the wrap), anchor 1234, K 7, T 0: the final-norm rows
-//      (cosine >= 0.99999), the top-16 sets (tie-aware) and the scores (cosine >= 0.99999) against the twin, the walk
-//      equal; ctrl.cur_token[1..7] = the drafts; the readback's k / anchor / pos.
+//      (cosine >= 0.99999) and the scores (cosine >= 0.99999) against the twin - the top-16 sets and the walk
+//      recorded, since the twin follows the DPAS attention part's order without being bitwise (spec 19 v3d, operator
+//      ruling 2026-11-14); ctrl.cur_token[1..7] = the drafts; the readback's k / anchor / pos.
 //   3. Determinism: a second replay's readback is bitwise the first's.
 //   4. K 3 by the control block alone (no recapture): rows past K masked, the twin at K 3 agrees.
 //   5. A sampled walk (T 0.8, a 64-bit seed): the twin's choices, ties within 1e-5 excused.
@@ -265,13 +266,14 @@ int compare_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::
   const runtime::dflash::DFlashDraftOut& o = *b.readback();
   const dfref::DraftOut t = dfref::draft(tw, dfref::Numerics::Engine, ring, rope, anchor, p, K, T, seed);
   const Measure m = measure(o, e.read<float>(b.h, size_t(M) * H), t, p, K, T, seed);
-  std::printf("%s (p %u, K %u, T %.1f): rows cos %.7f, scores cos %.7f, top-16 sets %s, walk %s%s\n", what, p, K,
-              double(T), m.hc, m.sc, m.sets_bad ? "DIFF" : "=", m.walk_bad ? "DIFF" : "=", m.near ? " (a near tie)" : "");
+  std::printf("%s (p %u, K %u, T %.1f): rows cos %.7f, scores cos %.7f, top-16 sets %s, walk %s%s (sets and walk "
+              "recorded)\n", what, p, K, double(T), m.hc, m.sc, m.sets_bad ? "DIFF" : "=", m.walk_bad ? "DIFF" : "=",
+              m.near ? " (a near tie)" : "");
+  // The twin follows the DPAS attention part's order but cannot be bitwise (its in-step rounding is the hardware's):
+  // the cosines gate, the top-16 sets and the walk are recorded (operator ruling 2026-11-14).
   int bad = 0;
   bad += m.hc < 0.99999;
   bad += m.sc < 0.99999;
-  bad += m.sets_bad != 0;
-  bad += m.walk_bad != 0;
   bad += o.k != K || o.anchor != anchor || o.pos != p;
   return bad;
 }
@@ -329,7 +331,7 @@ int judge_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::We
   const bool walk = m.walk_bad == 0 || m.walk_at >= g.walk_at;
   std::printf("%s (p %u, K %u, T %.1f) against the f32 judge: rows cos gemm_sm %.7f / gemv %.7f %s, scores cos %.7f / "
               "%.7f %s, sets off %d / %d %s (recorded), walk to %u / %u of %u%s %s%s\n", what, p, K, double(T), m.hc, g.hc,
-              rows ? "ok" : "FAIL", m.sc, g.sc, scores ? "ok" : "FAIL", m.sets_bad, g.sets_bad, sets ? "ok" : "FAIL",
+              rows ? "ok" : "FAIL", m.sc, g.sc, scores ? "ok" : "FAIL", m.sets_bad, g.sets_bad, sets ? "ok" : "more",
               m.walk_at, g.walk_at, K, m.near ? " (a near tie)" : "", walk ? "ok" : "FAIL",
               m.walk_bad ? (" (the twin's keys there " + std::to_string(m.walk_gap) + " apart, relative)").c_str() : "");
   int bad = !rows + !scores + !walk;

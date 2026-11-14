@@ -67,13 +67,13 @@ int main(int argc, char** argv) {
   CHECK_EQ(s4.ring_k, s.ring_k);
   CHECK_EQ(s4.ring_v, s.ring_v);
   const auto hc = rd::sizes(d, 5120, V, 16384, loader::DraftFormat::Int8, true);
-  CHECK_EQ(hc.tpart, 4 * s.tpart);
-  CHECK_EQ(hc.candidate, size_t(7) * 64 * 4);
+  CHECK_EQ(hc.tpart, 5 * s.tpart);                  // spec 19 v3d: room for 80 candidates a row
+  CHECK_EQ(hc.candidate, size_t(7) * 80 * 4);
   CHECK_EQ(hc.logits, s.logits);
   CHECK_EQ(hc.ring_k + hc.ring_v, s.ring_k + s.ring_v);
   const auto hp = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int8, true);
   CHECK_EQ(hp.weights, loader::dflash_weight_bytes(d, 5120, loader::DraftFormat::Int8).total() +
-                          loader::dflash_linear_bytes(5120, V, loader::DraftFormat::Int4G64));
+                          size_t(V / 16) * (5120 / 64) * 72 * 4);   // the 2-bit candidate head (spec 19 v3d)
   CHECK_EQ(hp.fixed + hp.per_position * 16384, hc.total());
   CHECK_EQ(rd::draft_launches(d, true), 88u);
   CHECK_EQ(s.total() - s32.total(), (s.logits - s32.logits) + (s.tpart - s32.tpart));
