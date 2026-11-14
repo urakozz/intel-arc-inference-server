@@ -84,6 +84,7 @@ def compare_baseline(engine_dir, baseline_path, out_path):
         raise ValueError('missing tap dumps for the recorded anchors')
     report = {'run': lines[0]['run'], 'baseline': os.path.abspath(baseline_path), 'corpora': {}}
     weighted, anchors = 0.0, 0
+    per_corpus = {}   # corpus -> [weighted gap, anchors] over its K rows
     for (corpus, k), row in sorted(totals.items()):
         row['engine_E'] = expected(row['engine_counted'], row['engine_accepted'])
         row['baseline_E'] = expected(row['baseline_counted'], row['baseline_accepted'])
@@ -94,6 +95,9 @@ def compare_baseline(engine_dir, baseline_path, out_path):
         row['gap'] = row['engine_E'] - row['baseline_E']
         weighted += row['gap'] * row['anchors']
         anchors += row['anchors']
+        c = per_corpus.setdefault(corpus, [0.0, 0])
+        c[0] += row['gap'] * row['anchors']
+        c[1] += row['anchors']
         report['corpora'].setdefault(corpus, {})[str(k)] = row
         print(f"G_DRAFTER corpus={corpus} K={k} engine_E={row['engine_E']:.5f} "
               f"baseline_E={row['baseline_E']:.5f} gap={row['gap']:+.5f} (recorded)", flush=True)
@@ -101,6 +105,15 @@ def compare_baseline(engine_dir, baseline_path, out_path):
     passed = report['pooled_gap'] >= -0.05
     print(f"G_DRAFTER_POOLED anchors={anchors} gap={report['pooled_gap']:+.5f} {'PASS' if passed else 'FAIL'}",
           flush=True)
+    # Each corpus pooled over its K rows at the same bar (operator 2026-11-14): one corpus (a4) holds most anchors,
+    # so the all-corpus pool alone would hide a small corpus losing a whole token.
+    report['corpus_gap'] = {}
+    for corpus, (w, n) in sorted(per_corpus.items()):
+        gap = w / n
+        ok = gap >= -0.05
+        passed &= ok
+        report['corpus_gap'][corpus] = gap
+        print(f"G_DRAFTER_CORPUS corpus={corpus} anchors={n} gap={gap:+.5f} {'PASS' if ok else 'FAIL'}", flush=True)
     report['pass'] = passed
     with open(out_path, 'w') as f:
         json.dump(report, f, indent=2)
