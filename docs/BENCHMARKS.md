@@ -1428,8 +1428,24 @@ baseline's anchors: 34 of 35 corpus / K rows within 0.002, cjk K = 3 1.6875 agai
 accepting one more draft). The identity round: 37 of 39 requests bitwise the plain stream, 0 judged FAIL, 2 awaiting
 f32 references. `dflash_draft_test`'s count of top-16 candidates off the f32 judge (gemm_sm / gemv): scalar int8
 4 / 8, int4 5 / 6; two-term DPAS 9 / 5, 6 / 5; three-term 5 / 5, 4 / 2 - deterministic per build, swinging 3-6 under
-attention changes at the 1e-7 cosine level. The operator's rulings on the bar, the cjk row and keeping the form are
-pending.
+attention changes at the 1e-7 cosine level. **Operator go 2026-11-13 night:** the form stays the default (the gate
+missed), the acceptance comparison is one-sided (cjk K = 3 passes), the off-set count is recorded only, occupancy
+before the int8 ring.
+
+**Task 6, occupancy** (`df_attn_dpas.cl`'s KS: a head's 128-key block split KS ways; the twin test at every KS, worst
+cosine 0.99999998). The five parts profiled over three rotated rounds: KS 1 1.548, KS 2 1.444, **KS 4 0.497 ms**.
+KS 4 as production (four process pairs against KS 1): the draft pass 7.00 -> 5.97 ms (0.240 -> 0.205 plain steps), a
+round 43.12 -> 42.10 ms (1.474 -> 1.440); the tests and the identity round pass (37 / 39 bitwise, 2 pass the f32
+judge). But acceptance: code K = 7 -0.125 and opencode K = 3 -0.1875 - one anchor each (2 -> 0, 3 -> 0 accepted) of
+the 16; 4 of the 4256 drafts differ from KS 1's, and the pooled accepted drafts are baseline 14620, KS 1 14622, KS 4
+14615. **KS 1 stays the default** until the operator rules on judging the 16-anchor corpora pooled; KS 4 is
+`CaptureOptions::dflash_attn_ks` / `probe_dflash_iter --attn-ks 4`.
+
+**Task 7 Step 2, the 2-bit candidate head** (gemm_sm's LAYOUT 3: RTN per column and 64-k group, (c - 1.5) x an f16
+scale, made at load; 0.358 GB against the int4 head's 0.675): the candidate GEMM 1.20 -> **0.80 ms** (bar 0.7,
+missed), the draft pass 6.99 -> 6.61 ms, a round 1.475 -> 1.464 plain steps; acceptance 33 of 35 rows, cjk K = 5 and
+K = 6 -0.0625 each (one anchor) - **int4 stays the default** (`load_drafter`'s candidate_bits 2 /
+`--candidate-2bit` reach the 2-bit form).
 
 **Task 7 Step 1, the candidate selection** (same conditions, against the Task 6 build): stage 1 by a radix select
 (`df_candidate_select1`, the same 64 of each chunk; the candidates bitwise the serial picks', a 300-way tie
