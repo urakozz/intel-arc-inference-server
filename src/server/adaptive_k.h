@@ -22,6 +22,9 @@ struct MtpCost {
   // Spec 17d: `--parallel tp`'s table (the int8 head's halves, the head's layer whole on each card), in units of the
   // TP plain step - its verify rows cross at M rows and its drafts read half the head, so the ratios move.
   static MtpCost tp_int8_head();
+  // Spec 19 v3c: DFlash under tensor parallel (the packed W4A16 drafter split over both cards, the 2-bit candidate
+  // head, fp32 crossings) - tp_dflash_test cost at depth 4096.
+  static MtpCost tp_dflash();
 
   // Spec 8 §11: the share of ONE draft's cost that is its lm_head read, per head form -
   // what a reduced draft vocabulary scales. **Derived, not measured:** the head's bytes at

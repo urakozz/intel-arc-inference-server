@@ -1477,6 +1477,7 @@ int run(int argc, char** argv) {
     if (mtp_on && spec.adaptive) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
   }
   if (pipe.tp()) {   // spec 17d: tensor parallel, serve_tp's own flow
+    if (dflash.on) options.mtp_adaptive.cost = server::MtpCost::tp_dflash();   // spec 19 v3c: TP's own table
     TpServe ts;
     ts.backend = pp_path.backend;
     ts.auto_why = tp_why;

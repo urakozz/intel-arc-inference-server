@@ -34,6 +34,16 @@ MtpCost MtpCost::tp_int8_head() {
   return c;
 }
 
+MtpCost MtpCost::tp_dflash() {
+  MtpCost c;
+  // tp_dflash_test cost 4096, 2026-11-14 (both cards held, the CPU reference job running; medians of 5 interleaved
+  // rounds of 16): verify(k) + commit at M = k + 1 in K = 0 iterations (19.083 ms), and the draft (the deferred
+  // projection, both cards' draft lists, the host merge) 3.697 ms whatever K - the block runs whole.
+  c.verify = {1.000, 1.081, 1.104, 1.156, 1.238, 1.311, 1.367, 1.417};
+  c.draft.assign(7, 3.697 / 19.083);
+  return c;
+}
+
 MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
   MtpCost c;
   // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (docs/BENCHMARKS.md); the candidate head's rows re-measured
