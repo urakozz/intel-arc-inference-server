@@ -2775,7 +2775,7 @@ if(B70_KV8)
   add_test(NAME tp_prefill_kv8_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(tp_prefill_kv8_test PROPERTIES
     LABELS "checkpoint;tp;kv8" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
-    ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${_tp_pf_judge}")
+    ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD_KV8}")
 endif()
 
 # Spec 17d: MTP, the snapshots' restore and the server's calls under tensor parallel (gpu_lock.sh box) - tp_mtp_test:
