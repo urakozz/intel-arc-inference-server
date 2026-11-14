@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -12,6 +13,7 @@
 #include "common/repack.h"
 #include "kernels/dflash_dims.h"
 #include "loader/lm_head_int8.h"
+#include "loader/quant.h"
 #include "loader/rtn.h"
 #include "loader/snapshot.h"
 
@@ -104,11 +106,29 @@ void DFlashCheckpoint::open_and_check() {
     refuse(dir_, "ships mask_embedding.pt (a torch pickle, not read here): convert it with "
                  "tools/oracle/dflash_mask_embedding.py to mask_embedding.safetensors");
   set_ = std::make_unique<SafetensorsSet>(dir_, true);
+  // The packed form (dflash_repack.h): the config's quantization_config, by the target loader's rules.
+  std::optional<QuantConfig> qc;
+  if (exists(dir_ + "config.json")) {
+    const common::json::Value cfg = read_json(dir_ + "config.json");
+    if (cfg.find("quantization_config")) qc = QuantConfig::parse(cfg);
+  }
+  packed_ = qc.has_value();
   // Canonical names, refusing what a drafter must not ship.
   std::map<std::string, std::string> canon;
   for (const auto& [name, t] : set_->tensors()) {
     (void)t;
-    const std::string c = dflash_canon(name);
+    std::string c = dflash_canon(name);
+    if (packed_) {
+      // `.qweight` stands for the linear's `.weight`; its `.qzeros` / `.scales` / `.g_idx` are held by the quant scan
+      // (below) and LinearSrc::classify (make_linear).
+      const size_t dot = c.rfind('.');
+      const std::string suffix = dot == std::string::npos ? c : c.substr(dot + 1);
+      if (suffix == "qzeros" || suffix == "scales" || suffix == "g_idx") {
+        if (!set_->tensors().count(name.substr(0, name.rfind('.')) + ".qweight")) refuse(dir_, "unknown tensor " + name);
+        continue;
+      }
+      if (suffix == "qweight") c = c.substr(0, dot) + ".weight";
+    }
     for (const char* own : {"embed_tokens.weight", "lm_head.weight"})
       if (c == own)
         refuse(dir_, "ships " + name + ": a DFlash drafter shares the target's embedding and head and must not own "
@@ -128,7 +148,10 @@ void DFlashCheckpoint::open_and_check() {
 
   // dtypes and shapes.
   const uint32_t H = d_.hidden;
-  const auto& fcs = set_->tensors().at(canon.at("fc.weight")).shape;
+  const std::string& fcn = canon.at("fc.weight");
+  std::vector<uint64_t> fcs = set_->tensors().at(fcn).shape;
+  if (fcn.size() > 8 && fcn.compare(fcn.size() - 8, 8, ".qweight") == 0 && fcs.size() == 2)
+    fcs = {fcs[1], fcs[0] * 8};   // GPTQ's [K/8][N] words
   if (fcs.size() != 2 || fcs[0] != H || fcs[1] == 0 || fcs[1] % d_.taps.size())
     refuse(dir_, "fc.weight must be [hidden, taps x target hidden]");
   fc_k_ = uint32_t(fcs[1]);
@@ -161,12 +184,27 @@ void DFlashCheckpoint::open_and_check() {
   }
   for (const auto& [c, name] : canon) {
     const TensorInfo& t = set_->tensors().at(name);
-    if (t.dtype != "BF16") refuse(dir_, name + " is " + t.dtype + ", not BF16 (our formats: the bf16 drafter)");
-    if (t.shape != shape.at(c)) {
+    std::vector<uint64_t> want = shape.at(c);
+    const bool q = name.size() > 8 && name.compare(name.size() - 8, 8, ".qweight") == 0;
+    if (q) {   // GPTQ's [K/8][N] words for the linear's [N][K]
+      if (want.size() != 2 || want[1] % 8) refuse(dir_, name + " is packed, but " + c + " is not a linear");
+      want = {want[1] / 8, want[0]};
+    }
+    if (t.dtype != (q ? "I32" : "BF16"))
+      refuse(dir_, name + " is " + t.dtype + ", not " + (q ? "I32" : "BF16") +
+                       " (our formats: the bf16 drafter, or its AutoRound int4 export)");
+    if (t.shape != want) {
       std::string got;
       for (uint64_t s : t.shape) got += (got.empty() ? "" : ", ") + std::to_string(s);
       refuse(dir_, name + " has shape [" + got + "], not the config's");
     }
+  }
+  if (packed_) {
+    const QuantScan scan = assert_quant_invariants(*set_);
+    if (!qc->desc_act_declared && scan.g_idx_tensors != 0)
+      refuse(dir_, "config.json declares no desc_act but the checkpoint ships " + std::to_string(scan.g_idx_tensors) +
+                       " g_idx tensors");
+    check_quant_scan(*qc, scan);
   }
 
   // The mask embedding (Review Focus 4).
@@ -274,34 +312,63 @@ DFlashHostLinear dflash_candidate_head2(const int8_t* tiled, const float* row_sc
 
 DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& parts, uint32_t K, DraftFormat f,
                                                unsigned threads) const {
-  // Concatenate the parts' rows ([N_i][K] each, row-major) into one [N][K], then the device form.
-  std::vector<uint16_t> rows;
-  for (const std::string& p : parts) {
-    auto it = std::lower_bound(canon_.begin(), canon_.end(), std::make_pair(p, std::string()));
-    const TensorInfo& t = set_->tensors().at(it->second);
-    const uint16_t* src = bf16(p);
-    rows.insert(rows.end(), src, src + (t.end - t.begin) / 2);
-  }
   if (f == DraftFormat::Exact)
     refuse(dir_, std::string("--draft-format ") + draft_format_name(f) +
                      " is the LiLiCorr drafter's (spec 26b): load bf16, int8 or int4 g64");
+  if (packed_ && f != DraftFormat::Int4G64)
+    refuse(dir_, std::string("an AutoRound int4 drafter loads as int4 (its own packed linears), not ") +
+                     draft_format_name(f));
+  auto name_of = [&](const std::string& p) {
+    return std::lower_bound(canon_.begin(), canon_.end(), std::make_pair(p, std::string()))->second;
+  };
   DFlashHostLinear h;
   h.K = K;
+  if (f == DraftFormat::Int4G64) {
+    // Each part as GPTQ words [K/8][N_i] and f16 scales [K/64][N_i] - the checkpoint's own (packed), else rtn's of
+    // its bf16 rows (per column, so the same as quantising the concatenated rows) - side by side in layout 1.
+    if (K % 64) refuse(dir_, "an int4 g64 linear's K is not a multiple of 64: " + parts[0]);
+    std::vector<LinearSrc> src;
+    std::vector<std::vector<uint32_t>> rtn_q;
+    std::vector<std::vector<uint16_t>> rtn_s;
+    src.reserve(parts.size());
+    rtn_q.reserve(parts.size());
+    rtn_s.reserve(parts.size());
+    std::vector<common::Part> cols;
+    for (const std::string& p : parts) {
+      const std::string name = name_of(p);
+      src.push_back(LinearSrc::classify(*set_, name.substr(0, name.rfind('.'))));
+      const LinearSrc& s = src.back();
+      if (s.K != K) refuse(dir_, p + ": K " + std::to_string(s.K) + ", not " + std::to_string(K));
+      if (s.kind == WKind::Bf16) {
+        rtn_q.emplace_back(size_t(K / 8) * s.N);
+        rtn_s.emplace_back(size_t(K / 64) * s.N);
+        rtn_int4_g64(s.weight, K, s.N, rtn_q.back().data(), rtn_s.back().data());
+        cols.push_back({rtn_q.back().data(), rtn_s.back().data(), s.N});
+      } else {
+        cols.push_back({s.qweight, s.scales, s.N});
+      }
+      h.N += s.N;
+    }
+    if (h.N % 16) refuse(dir_, "a linear's N is not a multiple of 16 (the GEMV tiles): " + parts[0]);
+    h.kind = model::WeightKind::Int4;
+    h.slices = kernels::dflash::int4_slices(K, h.N);
+    h.int4.resize(size_t(h.N / 16) * (K / 64) * 136);
+    common::repack_int4_layout1_cols(K, h.N, common::cols_concat(cols), h.int4.data());
+    return h;
+  }
+  // Concatenate the parts' rows ([N_i][K] each, row-major) into one [N][K], then the device form.
+  std::vector<uint16_t> rows;
+  for (const std::string& p : parts) {
+    const TensorInfo& t = set_->tensors().at(name_of(p));
+    const uint16_t* src = bf16(p);
+    rows.insert(rows.end(), src, src + (t.end - t.begin) / 2);
+  }
   h.N = uint32_t(rows.size() / K);
   if (h.N % 16 || K % 16) refuse(dir_, "a linear's N or K is not a multiple of 16 (the GEMV tiles): " + parts[0]);
   if (f == DraftFormat::Bf16) {
     h.kind = model::WeightKind::Bf16;
     h.bf16.resize(rows.size());
     common::repack_bf16_tiled(rows.data(), K, h.N, h.bf16.data());
-  } else if (f == DraftFormat::Int4G64) {
-    if (K % 64) refuse(dir_, "an int4 g64 linear's K is not a multiple of 64: " + parts[0]);
-    h.kind = model::WeightKind::Int4;
-    h.slices = kernels::dflash::int4_slices(K, h.N);
-    std::vector<uint32_t> q(size_t(K / 8) * h.N);
-    std::vector<uint16_t> scales(size_t(K / 64) * h.N);
-    rtn_int4_g64(rows.data(), K, h.N, q.data(), scales.data());
-    h.int4.resize(size_t(h.N / 16) * (K / 64) * 136);
-    common::repack_int4_layout1(q.data(), scales.data(), K, h.N, h.int4.data());
   } else {
     h.kind = model::WeightKind::Int8;
     h.i8.resize(rows.size());

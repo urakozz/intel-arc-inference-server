@@ -157,7 +157,10 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   std::snprintf(buf, sizeof buf,
                 "DFlash drafter: %s, %u layers, taps %s, block %u, %s (%s %.1f s), mask row from the %s, %zu B, %.1f s",
                 d.architecture.c_str(), d.layers, taps.c_str(), d.block, draft_format_name(format),
-                format == DraftFormat::Bf16 ? "tiled at load" : "quantised at load", quant,
+                format == DraftFormat::Bf16 ? "tiled at load"
+                : ck.packed()               ? "AutoRound, repacked at load"
+                                            : "quantised at load",
+                quant,
                 w.mask_from_checkpoint ? "checkpoint" : "target's embedding", bytes, w.seconds);
   w.line = buf;
   std::printf("%s\n", buf);

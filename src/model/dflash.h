@@ -16,9 +16,9 @@
 // convolutions per layer and the candidate selector; DFlash (v1, `DFlashDraftModel`) has neither and drafts each
 // mask row from its own logits.
 //
-// **Refused by name** (each throw names the key): a quantization_config (our formats only: the drafter's own bf16,
-// quantised by us at load), an activation other than silu, a rope_type other than default or partial rotary,
-// `sample_from_anchor` (not DFlash), `use_aux_hidden_state` false (no fc), target_layer_ids not strictly increasing,
+// **Refused by name** (each throw names the key): a quantization_config other than an AutoRound int4 export's
+// (quant_method auto-round or gptq; its arithmetic held by loader::DFlashCheckpoint), an activation other than silu,
+// a rope_type other than default or partial rotary, `sample_from_anchor` (not DFlash), `use_aux_hidden_state` false (no fc), target_layer_ids not strictly increasing,
 // a draft vocabulary of the drafter's own (`draft_vocab_size` != vocab_size: d2t - undefined for DFlash 2 upstream,
 // not built for v1), attention biases, an attention value scale or sink bias (no checkpoint we serve has one - spec 26b:
 // but the LiLiCorr form's sinks), a conv group that does not divide the hidden size, a block below 2 rows.
