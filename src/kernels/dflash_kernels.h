@@ -54,8 +54,10 @@ inline std::string proj_wide_variant(const Shape& s = kQwen38) {
 inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
   return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
 }
-inline std::string candidate_topk_variant() { return "df_candidate_R7_N248320_U248077_K64"; }
-inline std::string rerank_variant() { return "df_rerank_R7_K5120_U248077_C64_Q4"; }
+inline std::string candidate_topk_variant(unsigned c = 64) {
+  return "df_candidate_R7_N248320_U248077_K" + std::to_string(c);
+}
+inline std::string rerank_variant(unsigned c = 64) { return "df_rerank_R7_K5120_U248077_C" + std::to_string(c) + "_Q4"; }
 inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false) {
   return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
                    (split ? "_H16" : "")

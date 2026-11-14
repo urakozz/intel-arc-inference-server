@@ -31,6 +31,7 @@ struct DFlashWeights {
   uint32_t target_hidden = 0;
   std::unique_ptr<DeviceWeight> candidate_head;      // C3: optional int4 copy; exact int8 head stays in target
   unsigned candidate_bits = 4;                       // spec 19 v3d Task 7: 4 (layout 1) or 2 (gemm_sm's layout 3)
+  unsigned candidates = 64;                          // re-ranked exactly a row: 64 or 80
   std::unique_ptr<DeviceWeight> fc;                  // taps x target hidden -> hidden
   std::unique_ptr<l0::Mem> hidden_norm, final_norm;  // fp32 [hidden] each
   std::vector<DFlashLayerWeights> layers;
@@ -53,7 +54,7 @@ struct DFlashWeights {
 //   mask row from the target's embedding, 2015363072 B, 4.2 s
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
                            DraftFormat format, unsigned threads = 0, bool candidate_head = false,
-                           unsigned candidate_bits = 4);
+                           unsigned candidate_bits = 4, unsigned candidates = 64);
 // The same against a target given by its parts: its descriptor, its lm_head rows and its embedding (bf16
 // [rows][hidden] on this device) - what the overload above reads off a LoadedModel; a device test passes a synthetic
 // target (tests/runtime/dflash_draft_test.cc).

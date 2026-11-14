@@ -46,7 +46,8 @@ l0::Mem upload_f32(l0::Context& ctx, l0::CmdList& imm, const std::vector<float>&
 }  // namespace
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
-                           DraftFormat format, unsigned threads, bool candidate_head, unsigned candidate_bits) {
+                           DraftFormat format, unsigned threads, bool candidate_head, unsigned candidate_bits,
+                           unsigned candidates) {
   if (!target.desc) throw std::runtime_error("load_drafter: the target model is not loaded");
   const auto& head = target.linears.at({kTopLevel, model::LinearId::LmHead});
   if (candidate_head && head.kind != model::WeightKind::Int8)
@@ -64,6 +65,8 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
     const auto h = candidate_bits == 2 ? dflash_candidate_head2(rows.as<int8_t>(), scales.data(), head.shape.K, head.shape.N)
                                        : dflash_candidate_head(rows.as<int8_t>(), scales.data(), head.shape.K, head.shape.N);
     w.candidate_bits = candidate_bits;
+    if (candidates != 64 && candidates != 80) throw std::runtime_error("DFlash candidate head: 64 or 80 candidates");
+    w.candidates = candidates;
     w.quant_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - quant_start).count();
     w.candidate_head = upload_linear_u(ctx, imm, h, w.bytes);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
