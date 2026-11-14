@@ -72,8 +72,8 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     w.seconds += seconds;
     char line[192];
-    std::snprintf(line, sizeof line, "DFlash candidate head: int%u g64, top64 with exact int8 rerank, %zu B, %.1f s",
-                  candidate_bits, h.bytes(), seconds);
+    std::snprintf(line, sizeof line, "DFlash candidate head: int%u g64, top%u with exact int8 rerank, %zu B, %.1f s",
+                  candidate_bits, candidates, h.bytes(), seconds);
     w.line += "; ";
     w.line += line;
     std::printf("%s\n", line);
