@@ -319,16 +319,16 @@ inline __global ushort* pend_at(__global uchar* p, uint par) { return (__global 
 #endif
 
 // ---------------------------------------------------------------------------
-// NORMS_BATCHED (spec 19 v3d Task 3): the SPEC_SLOTS builds at M >= 2
+// NORMS_BATCHED (spec 19 v3d Task 3): the SPEC_SLOTS builds at M >= 2, and (verify-cost-m8) every DEFERRED build
 // ---------------------------------------------------------------------------
 // The rows' l2norms do not depend on the state, so these builds take every row's two trees before the recurrence:
 // the same terms, the same pairwise tree and the same rounding as a row's own (each row keeps its own SLM row), with
 // one set of barriers for all rows instead of one a row. The recurrence then double-buffers kv_red / o_red by row
 // parity, so the barrier that guarded their reuse goes: a row writes the buffer row m - 2 used, and every work-item
 // has passed row m - 1's barriers - after its last read of row m - 2's - before that write. Arithmetic, and so every
-// row's state, gdn_o and ring, is bitwise the per-row form's (gdn_step_slots_test). Every other build (M = 1, the
-// plain and BATCH_ROWS builds) preprocesses to the tokens it always had: QF / KF / KVR / OR expand to the old names.
-#if (defined(SPEC_SLOTS) || defined(DEFERRED)) && M > 1
+// row's state, gdn_o and ring, is bitwise the per-row form's (gdn_step_slots_test). Every other build (M = 1 but
+// DEFERRED's, the plain and BATCH_ROWS builds) preprocesses to the tokens it always had: QF / KF / KVR / OR expand to the old names.
+#if (defined(SPEC_SLOTS) && M > 1) || defined(DEFERRED)
 #define NORMS_BATCHED 1
 #define QF(i) rq[m][i]
 #define KF(i) rk[m][i]
@@ -612,8 +612,8 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // -------------------------------------------------------------------------
   // 3. One token at a time: head scalars, l2norm, the recurrence.
   // -------------------------------------------------------------------------
-#if defined(DEFERRED) && M > 1
-  // The DEFERRED builds at M >= 2: the same operations on S in the same order, one barrier a row instead of two. Row m's
+#ifdef DEFERRED
+  // The DEFERRED builds (M = 1 too): the same operations on S in the same order, one barrier a row instead of two. Row m's
   // o partials (from S after its update) and row m + 1's kv partials (from S after row m + 1's decay - the next
   // operation on S either way) go to SLM together, before one barrier; then every work-item takes row m + 1's kv tree
   // and subgroup 0 row m's o tree. kv_red / o_red are by row parity: a row writes the buffers row m - 2 read, and every
