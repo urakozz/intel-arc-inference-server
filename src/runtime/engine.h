@@ -283,6 +283,11 @@ class Engine {
   void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
   void flush_projection() const;
   uint64_t queue_submissions() const { return queue_.submissions(); }
+  // verify-cost-m8, tests and probes: whether the verify lists commit by replay (gdn_step's DEFERRED build), whether
+  // committed rows are pending (a state read flushes them: one more submission), and the committed GDN state.
+  bool gdn_deferred() const { return gdn_pend_ != nullptr; }
+  bool gdn_rows_pending() const { return gdn_pend_ && (control_->gdn_pend & 0xFFu) != 0; }
+  const void* gdn_state_now() const { return live_gdn_slot(); }
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
   MtpBuffers* mtp_buffers() { return mtp_.get(); }

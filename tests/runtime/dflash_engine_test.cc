@@ -173,6 +173,8 @@ std::vector<float> gdn_slot(Ctx& c, uint32_t s) {
                            : c.e.drafter_slots()->as<uint8_t>() + size_t(s - 1) * kGdnBytes;
   return c.read<float>(src, kGdnBytes);
 }
+// The committed GDN state (Engine::gdn_state_now: the live slot, or with the deferred build the pending rows flushed).
+std::vector<float> committed_state(Ctx& c) { return c.read<float>(c.e.gdn_state_now(), kGdnBytes); }
 std::vector<uint16_t> tap_row(Ctx& c, uint32_t r) {
   return c.read<uint16_t>(c.d.taps().as<uint8_t>() + size_t(r) * kTapRow * 2, kTapRow * 2);
 }
@@ -198,7 +200,7 @@ Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
       r.taps.push_back(tap_row(c, 0));
     }
     c.e.commit(0, c.e.verify_ids()[0]);
-    if (i <= kK) r.state.push_back(gdn_slot(c, c.ctl->gdn_live));
+    if (i <= kK) r.state.push_back(committed_state(c));
     r.g.push_back(c.ctl->cur_token[0]);
     if (i == kK) r.ring = ring_rows(c, s0.pos, kK + 1);
   }
@@ -255,11 +257,12 @@ void batched_case(Ctx& c, const Snap& s0) {
   };
   batched();
   const uint64_t before = c.e.queue_submissions();
+  const bool rows = c.e.gdn_rows_pending();   // verify-cost-m8: and the committed GDN rows, one flush more
   const Snap saved(c);   // a snapshot materializes the deferred projection
-  CHECK(c.e.queue_submissions() == before + 1);
+  CHECK(c.e.queue_submissions() == before + 1 + rows);
   CHECK(std::memcmp(saved.st.ptr(), committed.st.ptr(), c.e.state_bytes()) == 0);
   c.e.flush_projection();
-  CHECK(c.e.queue_submissions() == before + 1);
+  CHECK(c.e.queue_submissions() == before + 1 + rows);
 
   l0::Mem state(c.ctx, l0::MemKind::Host, c.e.state_bytes());
   l0::Mem kv(c.ctx, l0::MemKind::Host, c.e.kv_bytes(committed.pos));
@@ -327,6 +330,17 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
       uint32_t(V));
   for (uint32_t k = 1; k <= kK; ++k) {
     const bool same = same_attn_as_m8(c, s0, k);
+    // Row r's state: its slot after verify(k); with the deferred build (no per-row state) the committed state after
+    // verify(k) + commit(r).
+    std::vector<std::vector<float>> rs;
+    if (c.e.gdn_deferred())
+      for (uint32_t r = 0; r <= k; ++r) {
+        s0.restore(c);
+        for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
+        c.e.verify(k);
+        c.e.commit(r, c.e.verify_ids()[r]);
+        rs.push_back(committed_state(c));
+      }
     s0.restore(c);
     for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
     c.e.verify(k);
@@ -334,7 +348,8 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
     for (uint32_t r = 0; r <= k; ++r) {
       const double cl = cosine(lg.data() + size_t(r) * V, ref.logits[r].data(), VU);
       const bool lbits = std::memcmp(lg.data() + size_t(r) * V, ref.logits[r].data(), V * 4) == 0;
-      const std::vector<float> sl = gdn_slot(c, (c.ctl->gdn_live + r) % runtime::TapVerifyDims::kSlots);
+      const std::vector<float> sl =
+          c.e.gdn_deferred() ? rs[r] : gdn_slot(c, (c.ctl->gdn_live + r) % runtime::TapVerifyDims::kSlots);
       const double cs = cosine(sl.data(), ref.state[r].data(), sl.size());
       const bool sbits = std::memcmp(sl.data(), ref.state[r].data(), kGdnBytes) == 0;
       const std::vector<uint16_t> tr = tap_row(c, r);
@@ -406,7 +421,7 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k, const std::vect
     bool rows_ok = true;
     for (uint32_t r = 0; r <= j; ++r) rows_ok &= c.e.verify_ids()[r] == ref.g[r + 1];
     c.e.commit(j, c.e.verify_ids()[j]);
-    const std::vector<float> live = gdn_slot(c, c.ctl->gdn_live);
+    const std::vector<float> live = committed_state(c);
     const double cs = cosine(live.data(), ref.state[j].data(), live.size());
     const bool sbits = std::memcmp(live.data(), ref.state[j].data(), kGdnBytes) == 0;
     const std::vector<uint16_t> ring = ring_rows(c, s0.pos, kK + 1);

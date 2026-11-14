@@ -60,6 +60,7 @@ struct Record {
   std::vector<float> rows;   // every draft row, then every verify's rows, in order
   Bytes state, kv;
   runtime::Control ctl{};
+  bool deferred = false;   // verify-cost-m8: the one-card engine commits by replay (its live slot stays 0)
   std::vector<float> m2_plain, m2_verify;   // M2: 4 plain rows / one M = 4 verify's rows
   std::vector<Bytes> hooked;                // state + KV at 2048, 4096, 4103
 };
@@ -83,6 +84,7 @@ struct OneCard {
     imm.copy(out.data() + at, e.mtp_logits_device() + size_t(i) * Qwen35::kVocab, Qwen35::kVocab * 4);
   }
   runtime::Control control() { return *c(); }
+  bool deferred() { return e.gdn_deferred(); }
   void check_in_step(const char*) {}
 };
 struct TwoCards {
@@ -101,6 +103,7 @@ struct TwoCards {
     e.read_draft_logits_into(out.data() + at, i);
   }
   runtime::Control control() { return e.control(1); }
+  bool deferred() { return false; }
   void check_in_step(const char* where) {
     if (std::memcmp(&e.control(0), &e.control(1), sizeof(runtime::Control)) != 0) {
       std::fprintf(stderr, "%s: the two Control blocks differ (pos %u / %u, live %u / %u)\n", where,
@@ -150,6 +153,7 @@ void spec_run(E& e, W& w, Record& r) {
   r.state = state_of(e);
   r.kv = kv_of(e, e.pos());
   r.ctl = w.control();
+  r.deferred = w.deferred();
 }
 
 // M2 at the session's pos: 4 plain steps, then (restored) one verify at M = 4 of those ids.
@@ -226,7 +230,7 @@ void compare(const Record& ref, const Record& got, const std::string& what) {
   same(ref.kv, got.kv, what + ": KV with the head's layer");
   CHECK_EQ(ref.ctl.pos, got.ctl.pos);
   CHECK_EQ(ref.ctl.cur_token[0], got.ctl.cur_token[0]);
-  CHECK_EQ(ref.ctl.gdn_live, got.ctl.gdn_live);
+  if (!ref.deferred) CHECK_EQ(ref.ctl.gdn_live, got.ctl.gdn_live);
   same(ref.m2_plain, got.m2_plain, what + ": M2 plain rows");
   same(ref.m2_verify, got.m2_verify, what + ": M2 verify rows");
   CHECK_EQ(ref.hooked.size(), got.hooked.size());
