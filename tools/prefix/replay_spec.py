@@ -3,7 +3,7 @@
 
   python3 tools/prefix/replay_spec.py RECORDING OUT [--model SNAPSHOT] [--draft-model SNAPSHOT]
 
-Takes the whole-box GPU lock, or only --card N, and forces --parallel 1. The lock helper sets device affinity.
+Takes the whole-box GPU lock, or only --card N, and runs --parallel 1 (or --parallel tp: both cards, the box lock). The lock helper sets device affinity.
 For a card run beside another GPU job, first confirm more than 16 CPU threads are available. All arms use the same KV
 form (B70_KV_CACHE, bf16 by default),
 the CLI's fixed int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
@@ -95,7 +95,7 @@ def run(a):
     config = {'orders': orders, 'model': a.model, 'drafter': a.drafter,
               'recording': str(a.log.resolve()), 'recording_sha256': digest.hexdigest(),
               'binary_sha256': binary_sha, 'kernel_directory': str(kernel_dir), 'kernel_sha256': kernels,
-              'prefix_cache_gb': 32, 'parallel': 1,
+              'prefix_cache_gb': 32, 'parallel': a.parallel,
               'max_len': 131072, 'kv_cache': kv_cache, 'mtp_policy': 'per-step default'}
     config_path = a.out/'config.json'
     cards = {}
@@ -132,7 +132,7 @@ def run(a):
             if arm == 'dflash':
                 spec += ['--draft-model', a.drafter]
             command = [str(binary), a.model,
-                       '--parallel', '1', '--max-num-seqs', '1', '--max-len', '131072', '--kv-cache', kv_cache,
+                       '--parallel', a.parallel, '--max-num-seqs', '1', '--max-len', '131072', '--kv-cache', kv_cache,
                        '--prefix-cache-gb', '32', '--port', str(a.port),
                        '--log-requests', str(logs), *spec]
             print(f'REPLAY_SPEC {arm} round {round_}, cache on', flush=True)
@@ -188,11 +188,15 @@ def main(argv=None):
     ap.add_argument('--kernel-dir', type=Path, help='compiled kernels (default: beside the server build)')
     ap.add_argument('--card', type=int, choices=(0, 1), help='reserve only this idle card; otherwise reserve the box')
     ap.add_argument('--port', type=int, default=8218)
+    # spec 19 v3c: the arms under tensor parallel (both cards); recorded in config.json, so --resume refuses a mixed set
+    ap.add_argument('--parallel', choices=('1', 'tp'), default='1', help='1 (one card) or tp (both cards, the box)')
     ap.add_argument('--wait', type=float, default=900)
     ap.add_argument('--judge', type=Path, default=ROOT/'oracle-out-qwen-f32-i8head-forced')
     ap.add_argument('--bf16', type=Path, default=ROOT/'oracle-out-qwen-bf16top-forced')
     ap.add_argument('--under-lock', action='store_true', help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    if a.parallel == 'tp' and a.card is not None:
+        ap.error('--parallel tp runs on both cards: drop --card')
     if not a.under_lock:
         lock = ['box'] if a.card is None else ['card', str(a.card)]
         command = [str(ROOT/'tools/gpu_lock.sh'), *lock, '--', sys.executable, str(Path(__file__).resolve()),
