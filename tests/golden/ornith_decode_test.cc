@@ -129,7 +129,7 @@ SetCmp compare_sets(const uint32_t* got, const uint32_t* ref, uint32_t top_k, bo
   std::sort(gs.begin(), gs.end());
   std::sort(rs.begin(), rs.end());
   if (gs == rs) return SetCmp::Exact;
-  if (!near_tie) return SetCmp::Bad;
+  if (!near_tie || top_k == 0) return SetCmp::Bad;
   std::vector<uint32_t> g7(got, got + top_k - 1), r7(ref, ref + top_k - 1);
   std::sort(g7.begin(), g7.end());
   std::sort(r7.begin(), r7.end());

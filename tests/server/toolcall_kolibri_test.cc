@@ -129,7 +129,7 @@ void expect(const std::string& text, const json& tools, const std::string& reaso
   const ParsedOutput p = parse_checked(text, tools);
   bool ok = p.reasoning == reasoning && p.content == content && p.tool_calls.size() == calls.size();
   for (size_t i = 0; ok && i < calls.size(); ++i)
-    ok = p.tool_calls[i].name == calls[i].at(0) && nlohmann::json(p.tool_calls[i].arguments) == calls[i].at(1);
+    ok = p.tool_calls[i].name == calls[i].at(0).get<std::string>() && nlohmann::json(p.tool_calls[i].arguments) == calls[i].at(1);
   if (!ok) {
     std::fprintf(stderr, "parse of %s\n  got:  %s\n  want: %s\n", json(text).dump().c_str(), show(p).c_str(),
                  json({{"reasoning", reasoning}, {"content", content}, {"calls", calls}}).dump().c_str());
@@ -198,7 +198,7 @@ void case_round_trip(const std::string& dir) {
       const json want_calls = m.contains("tool_calls") ? m.at("tool_calls") : json::array();
       ok = ok && p.tool_calls.size() == want_calls.size();
       for (size_t j = 0; ok && j < want_calls.size(); ++j)
-        ok = p.tool_calls[j].name == want_calls[j].at("function").at("name") &&
+        ok = p.tool_calls[j].name == want_calls[j].at("function").at("name").get<std::string>() &&
              nlohmann::json(p.tool_calls[j].arguments) == want_calls[j].at("function").at("arguments");
       if (!ok) {
         std::fprintf(stderr, "round trip %s turn %zu: %s\n  from %s\n", name.c_str(), k, show(p).c_str(),

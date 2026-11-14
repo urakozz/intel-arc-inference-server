@@ -169,7 +169,7 @@ void case_round_trip(const std::string& dir) {
       const json want_calls = m.contains("tool_calls") ? m.at("tool_calls") : json::array();
       ok = ok && p.tool_calls.size() == want_calls.size();
       for (size_t j = 0; ok && j < want_calls.size(); ++j) {
-        ok = p.tool_calls[j].name == want_calls[j].at("function").at("name") &&
+        ok = p.tool_calls[j].name == want_calls[j].at("function").at("name").get<std::string>() &&
              nlohmann::json(p.tool_calls[j].arguments) == want_calls[j].at("function").at("arguments");
       }
       if (!ok) {
@@ -491,7 +491,7 @@ void case_fuzz() {
     bool ok = p.reasoning == (thinking ? reasoning : "") && p.content == (blank ? "" : content) &&
               p.tool_calls.size() == calls.size();
     for (size_t i = 0; ok && i < calls.size(); ++i) {
-      ok = p.tool_calls[i].name == calls[i].at("name") && nlohmann::json(p.tool_calls[i].arguments) == calls[i].at("arguments");
+      ok = p.tool_calls[i].name == calls[i].at("name").get<std::string>() && nlohmann::json(p.tool_calls[i].arguments) == calls[i].at("arguments");
     }
     if (!ok) {
       std::fprintf(stderr, "fuzz %d (format %d): %s\n  from %s\n", iter, int(format), show(p).c_str(),
