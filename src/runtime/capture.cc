@@ -1135,7 +1135,12 @@ class Capture {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Bf16, "gemv_bf16 bound to an int4 weight");
     kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
-    if (id == LinearId::AB && kCapM >= 2 && opt_.probe_ab_ksplit) t.ksplit = opt_.probe_ab_ksplit;
+    // verify-cost-m8: a||b in the one-card verify lists at M >= 2 splits K 64 ways in the work-group (8 x 64 subgroups
+    // instead of 8 x 16: verify at 8 rows -0.25 ms, at 2 rows -0.15 ms at depth 4096). The sum's order changes - those
+    // rows are graded by the f32 judge; M = 1 and every other list keep gemv_bf16_tiling's. Probes override it.
+    if (id == LinearId::AB && kCapM >= 2 && s.K == 5120 && s.N == 128 &&
+        (mode_ == Mode::Verify || mode_ == Mode::VerifyTaps))
+      t.ksplit = opt_.probe_ab_ksplit ? opt_.probe_ab_ksplit : 64;
     require(s.N % t.cols == 0, "gemv_bf16 N is not a multiple of its work-group width");
     require(out.size() >= size_t(kCapM) * s.N * sizeof(float),
             "the bf16 GEMV's output allocation is smaller than its [M][N] fp32 result");
