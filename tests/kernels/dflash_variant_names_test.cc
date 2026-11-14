@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(defaults.dflash_attn_rows, 4u);
   CHECK(!defaults.dflash_attn_parallel_exp);
   CHECK(defaults.dflash_attn_dpas);
-  CHECK_EQ(defaults.dflash_attn_ks, 1u);
+  CHECK_EQ(defaults.dflash_attn_ks, 4u);
   const auto default_names = kd::draft_variants(true, 1u, true, 0u, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM);
   CHECK(std::find(default_names.begin(), default_names.end(), kd::attn_variant(kd::kQwen38, 1, 4)) != default_names.end());
   CHECK(argc > 2);
