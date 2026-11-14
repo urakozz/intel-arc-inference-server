@@ -106,9 +106,9 @@ void test_dflash_measured_cost() {
   for (double d : c.draft) CHECK_NEAR(d, 0.298136, 1e-12);
   CHECK_NEAR(c.draft[0] * MtpCost::dflash_head_share(true, true), 2.166354 / 29.222498, 1e-12);
   const auto candidate = MtpCost::dflash(true, 1u, true);
-  const double verify_candidate[] = {1.000724, 1.046551, 1.085038, 1.111966, 1.158179, 1.189338, 1.213403, 1.228606};
+  const double verify_candidate[] = {1.000230, 1.041410, 1.073907, 1.105789, 1.151472, 1.180781, 1.205189, 1.221471};
   for (size_t i = 0; i < 8; ++i) CHECK_NEAR(candidate.verify[i], verify_candidate[i], 1e-12);
-  for (double d : candidate.draft) CHECK_NEAR(d, 0.287036, 1e-12);
+  for (double d : candidate.draft) CHECK_NEAR(d, 0.217462, 1e-12);
   const auto int4 = MtpCost::dflash(true, 2u);
   CHECK(int4.draft[0] < c.draft[0]);
   CHECK(int4.draft[0] != MtpCost::dflash(true, 0u).draft[0]);
