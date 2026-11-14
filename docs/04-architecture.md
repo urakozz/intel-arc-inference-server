@@ -88,7 +88,7 @@ better when request sizes vary, at the cost of block tables in every attention k
 the latency spikes it causes. That option was considered and postponed ([low-priority-work.md](low-priority-work.md)).
 
 Two cross-cutting pieces sit on top of the decode and prefill paths. **Speculative decoding**
-(`--spec mtp|lookup|dflash|dflash-lookup`, specs 8, 19, 19e, 19f) checks several guessed tokens in one
+(`--spec auto|off|mtp|dflash`, specs 8, 19, 19e, 19f; one-card `dflash` carries prompt lookup) checks several guessed tokens in one
 verify list. Prefill is bf16 on the Level Zero list by default; `--prefill-backend l0-int8` (Hadamard-rotated
 int8 linears, doc 17) is opt-in (operator 2026-10-27).
 
