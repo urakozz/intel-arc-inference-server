@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -111,7 +112,11 @@ TpEngine::TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedMo
       c.tv.slots = TapVerifyDims::kSlots;
       c.tv.taps = &drafter_->card(r).taps();
       c.tv.layers = drafter_->card(r).tap_layers();
-      capture_tap_lists(r, {});
+      // Experiments only (operator 2026-11-10: env vars for experiments, never a user's handle): B70_TP_FP32_CROSSING
+      // keeps the tap verify lists' crossings in fp32 - the A/B against the bf16 messages they send by default.
+      CaptureOptions o;
+      o.tp_fp32_crossing = std::getenv("B70_TP_FP32_CROSSING") != nullptr;
+      capture_tap_lists(r, o);
     }
   }
   reset();
