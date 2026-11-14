@@ -167,7 +167,9 @@
 #define Q_OFF 0           /* flat qkv channel bases: q 16x128, k 16x128, v 48x128 */
 #define K_OFF 2048
 #define V_OFF 4096
+#ifndef RING              /* overridable for open-work 28's M = 16 probe builds (M + 3 > 16) */
 #define RING 16           /* conv ring depth (runtime::DecodeBuffers::kConvRing) */
+#endif
 #define AB_STRIDE 128     /* ab_out row: a at [0,48), b at [48,96), zero-padded to 128 */
 #define B_OFF 48
 #define V_PER_K 3         /* repeat_interleave(·, 48 / 16): v-heads per k-head */
