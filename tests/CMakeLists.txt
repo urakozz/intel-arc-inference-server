@@ -2791,12 +2791,12 @@ add_dependencies(tp_mtp_test ${B70_PREFILL_KERNELS} ${B70_TP_KERNELS} ${B70_TP_P
 add_test(NAME tp_mtp_test COMMAND tp_mtp_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(tp_mtp_test PROPERTIES
   LABELS "checkpoint;tp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
-  ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
+  ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
 if(B70_KV8)
   add_test(NAME tp_mtp_kv8_test COMMAND tp_mtp_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(tp_mtp_kv8_test PROPERTIES
     LABELS "checkpoint;tp;kv8" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
-    ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${_tp_pf_judge}")
+    ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${_tp_pf_judge};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
 endif()
 
 # b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
