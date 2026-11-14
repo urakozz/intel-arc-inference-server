@@ -2726,6 +2726,10 @@ target_include_directories(tp_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(tp_kernels_test PRIVATE b70_l0 b70_model)
 b70_target_kernel_dir(tp_kernels_test)
 add_dependencies(tp_kernels_test ${B70_TP_KERNELS} kernel_prep_res_fold_M1_K5120_SP4_G20)
+if(TARGET kernel_tp_cross_M8_K5120_G20_S4_F_T16_R0)   # the `stress` mode's 8-row arms (packed / padded trailers)
+  add_dependencies(tp_kernels_test kernel_tp_cross_M8_K5120_G20_S4_F_R0 kernel_tp_cross_M8_K5120_G20_S4_F_R1
+                   kernel_tp_cross_M8_K5120_G20_S4_F_T16_R0 kernel_tp_cross_M8_K5120_G20_S4_F_T16_R1)
+endif()
 add_test(NAME tp_kernels_test COMMAND tp_kernels_test)
 add_executable(tp_decode_test runtime/tp_decode_test.cc)
 target_include_directories(tp_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src

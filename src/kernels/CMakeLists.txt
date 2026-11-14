@@ -925,6 +925,11 @@ if(B70_TP AND B70_MTP AND B70_VERIFY_M8)
     add_ocloc_kernel(tp_argmax_M${MM}_N124160_U123917_B124160 SOURCE ${TP_CL}
                      DEFINES ${_tp_am} VOCAB_USED=123917 ID_BASE=124160)
   endforeach()
+  # tp_kernels_test stress: the 8-row crossing with each trailer on its own 64-byte line (TP_TRAILER_STRIDE 16), the
+  # A/B against the packed trailers. Test-only names (_T16); nothing in the runtime binds them.
+  foreach(R 0 1)
+    add_ocloc_kernel(tp_cross_M8_K5120_G20_S4_F_T16_R${R} SOURCE ${TP_CL}
+                     DEFINES TP_CROSS=1 M=8 K=5120 FOLD_G=20 S_LOC=4 FOLDED=1 RANK=${R} TP_TRAILER_STRIDE=16)
   endforeach()
 endif()
 # The drafter split over both cards (runtime::dflash::TpDFlashDrafter; kernels::dflash::kQwen38Tp): a card's draft and

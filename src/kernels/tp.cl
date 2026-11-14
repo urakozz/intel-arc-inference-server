@@ -36,11 +36,15 @@
 // every later wait on the card skips its spin - a lost peer costs one bound, not 128. The list finishes on garbage; the
 // host throws and the engine stays failed until reset().
 //
-// state: [0] first failure's status, [1] flag read, [2] trailer read, [3] call expected, [4] chunk, [5] failed chunks.
+// state: [0] first failure's status, [1] flag read, [2] trailer read, [3] call expected, [4] chunk, [5] failed chunks,
+// [6] a stale trailer's late arrival: 1 + the loads until it read the call after all, ~0u if never (tp_late).
 #define WG 256
 #define TP_SLOTS 2u
 #define TP_FLAG_STRIDE 16u
 #define TP_PAGE 1024u
+#ifndef TP_TRAILER_STRIDE
+#define TP_TRAILER_STRIDE 1u
+#endif
 
 #define SYS_LOAD(p, order) \
   atomic_load_explicit((volatile __global atomic_uint*)(p), order, memory_scope_all_svm_devices)
@@ -73,8 +77,8 @@
 #define CHUNK ((K + FOLD_G - 1) / FOLD_G)
 #define DATA_WORDS (S_MSG * TP_MROWS * K)
 #define J_CHUNKS (FOLD_G * TP_MROWS)
-#define TRAILER(slot, j) (TP_SLOTS * DATA_WORDS + (slot) * J_CHUNKS + (j))
-#define FLAG_BASE (((TP_SLOTS * DATA_WORDS + TP_SLOTS * J_CHUNKS) + TP_PAGE - 1) / TP_PAGE * TP_PAGE)
+#define TRAILER(slot, j) (TP_SLOTS * DATA_WORDS + ((slot) * J_CHUNKS + (j)) * TP_TRAILER_STRIDE)
+#define FLAG_BASE (((TP_SLOTS * DATA_WORDS + TP_SLOTS * J_CHUNKS * TP_TRAILER_STRIDE) + TP_PAGE - 1) / TP_PAGE * TP_PAGE)
 #define FLAG(slot, j) (FLAG_BASE + ((slot) * J_CHUNKS + (j)) * TP_FLAG_STRIDE)
 
 // prep.cl's two roundings, token for token (the fold's arithmetic is prep_res_fold's).
@@ -93,6 +97,15 @@ inline void tp_record(__global uint* state, uint status, uint got, uint stamp, u
     state[3] = want;
     state[4] = j;
   }
+}
+
+// After a stale trailer: the loads until it reads `want` after all (a late stamp), ~0u if never within the bound (a
+// lost one), in state[6] for the first stale chunk.
+inline void tp_late(__global uint* state, __global const uint* trailer, uint want, uint spin_limit) {
+  uint i = 0u;
+  while (SYS_LOAD(trailer, memory_order_acquire) != want && ++i < spin_limit) {
+  }
+  atomic_cmpxchg((volatile __global uint*)(state + 6), 0u, i < spin_limit ? i + 1u : ~0u);
 }
 
 // This chunk's next call number, and the counters of the rows this list does not run kept level with it.
@@ -167,6 +180,7 @@ __kernel void tp_res_fold(__global const float* restrict mine, __global const ui
       const uint stamp = SYS_LOAD(land + TRAILER(slot, j), memory_order_acquire);
       const uint status = got != want ? 1u : (stamp != want ? 2u : 0u);
       if (status != 0u) tp_record(state, status, got, stamp, want, j);
+      if (status == 2u) tp_late(state, land + TRAILER(slot, j), want, spin_limit);
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
@@ -225,6 +239,7 @@ __kernel void tp_sum(__global const float* restrict mine, __global const uint* l
       const uint stamp = SYS_LOAD(land + TRAILER(slot, j), memory_order_acquire);
       const uint status = got != want ? 1u : (stamp != want ? 2u : 0u);
       if (status != 0u) tp_record(state, status, got, stamp, want, j);
+      if (status == 2u) tp_late(state, land + TRAILER(slot, j), want, spin_limit);
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
