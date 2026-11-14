@@ -1294,6 +1294,12 @@ int run(int argc, char** argv) {
     const cli::AutoPick pick = cli::resolve_auto(family, as);
     spec_arg = pick.value;
     std::fprintf(stderr, "spec: auto -> %s (%s)\n", pick.value.c_str(), pick.why.c_str());
+    if (as.dflash_target)
+      std::fprintf(stderr,
+                   "spec: auto picks, by setup:\n"
+                   "  one card, one request         dflash with prompt lookup if the drafter is downloaded, else mtp\n"
+                   "  --parallel replica            dflash (one request a card) if the drafter is downloaded, else mtp\n"
+                   "  tensor parallel (two cards' default), --parallel pp, several slots a card   mtp\n");
   }
   const cli::Spec spec = cli::resolve_spec(spec_arg, family, model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
