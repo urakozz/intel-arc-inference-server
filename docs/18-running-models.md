@@ -195,11 +195,13 @@ top). Plain, unchanged code paths still gate bitwise.
 ## Qwen3.8-27B with the DFlash draft model (spec 19)
 
 `z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 7 tokens per step from Qwen3.8's own hidden states (the
-outputs of layers 5 / 19 / 33 / 47 / 61). The engine's default is our AutoRound int4 export of it,
-`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (W4A16, group 64, symmetric; 1.21 GB, loaded as shipped onto the
+outputs of layers 5 / 19 / 33 / 47 / 61). `--spec dflash` needs an explicit `--draft-model` (operator ruling
+2026-11-14: the drafter takes memory from the context, so there is no default drafter and the model is a
+deliberate choice; without it the server and b70-decode refuse and name both). One choice is our AutoRound int4
+export of it, `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (W4A16, group 64, symmetric; 1.21 GB, loaded as shipped onto the
 int4 small-batch GEMM - operator ruling 2026-11-14: draft pass 4.41 ms against the int8 drafter's 6.20 at 4,096,
 acceptance pooled -0.016 tokens a round, the code corpus -0.054 accepted). `--draft-model z-lab/Qwen3.8-27B-DFlash2`
-loads the bf16 original, quantised to int8 at load. Its acceptance on our prompts was measured on the Mac CPU
+(2.05 GB) loads the bf16 original, quantised to int8 at load. Its acceptance on our prompts was measured on the Mac CPU
 (`docs/probes/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on
 code, ~2.2 on prose; int8 and 4-bit drafters equal bf16). It has run on the card since 2026-10-27
 (BENCHMARKS "DFlash"); it runs when asked (`--spec dflash`), never as `--spec auto`.
@@ -207,21 +209,23 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
 On one card `--spec dflash` runs prompt lookup inside DFlash for edit / copy turns (spec 19f):
 
 ```sh
-# the default drafter (once): uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
+# the packed drafter (once): uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 # one card: the drafter beside the target (packed int4, 1.21 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
-./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last --spec dflash
+./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last --spec dflash \
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 # the bf16 original instead, quantised to int8 at load (2.05 GB)
 ./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2
 # one card with int8 KV (spec 19v3a): host planner 262144 tokens at 32.530 GB with the packed drafter (254976 int8)
-./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --max-len auto
+./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --max-len auto \
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 # two cards, pipeline parallel: the drafter on the second card beside lm_head
-./build/src/cli/b70-serve $Q --parallel pp --spec dflash
+./build/src/cli/b70-serve $Q --parallel pp --spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 # greedy without the server (one card), K <= 7 per step
 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/code.ids --n 256 --prefill \
-    --spec dflash --spec-max 7
+    --spec dflash --spec-max 7 --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 ```
 
-- **Defaults:** the packed int4 drafter (bf16 KV: `--max-len auto` 158,208 tokens on a 32.530 GB card, 145,664 with
+- **Defaults:** no drafter (`--draft-model` is required); with the packed int4 drafter (bf16 KV: `--max-len auto` 158,208 tokens on a 32.530 GB card, 145,664 with
   the int8 drafter),
   `--spec-max 7`, `--draft-vocab off` (a ranked 32k vocabulary was ranked in-sample; by id it loses up to
   1.4 tokens at K = 7).

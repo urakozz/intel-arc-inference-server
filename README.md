@@ -149,7 +149,7 @@ Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tune
 | `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
 | `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; on one card it also copies repeats of earlier text |
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
-| `--draft-model PATH` | Qwen3.8: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` | the draft model for `--spec dflash` |
+| `--draft-model PATH` | none; required with `--spec dflash` | the draft model, your choice because it takes memory from the context: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB) or `z-lab/Qwen3.8-27B-DFlash2` (bf16, int8 at load, 2.05 GB). Nemotron 3.5 Bolt keeps its own default |
 | `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
 | `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; every mode) |
 | `--prefix-cache-gb auto\|N` | `auto` | the prefix cache in pinned system RAM; `auto` = up to 32 GiB from what is free, `0` = off |
