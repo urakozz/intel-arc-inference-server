@@ -4,6 +4,8 @@
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
 - **123 tokens per second** for one session of Qwen3.8-27B on two cards, at the model's full 262,144-token context.
+- **141.7 tokens per second** for one session of Qwen3.8-27B on **one card** with the DFlash draft model
+  (llama-benchy tg128); 96.2 t/s replaying a real coding-agent session.
 - **258 tokens per second in total** with 8 requests running at once.
 - **3,217 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**
   (measured with the int8 prompt pass as it was before 2026-11-13; re-measurement pending, see below).
@@ -31,10 +33,22 @@ Decode with MTP, t/s - one session, or several at once (the total, per request i
 | setup | 1 request | 2 requests | 4 requests | 8 requests |
 |---|---:|---:|---:|---:|
 | two cards, tensor parallel | **123.1** | - | - | - |
+| one cards, DFlash2 | **141.7** (tg128) | n/d | n/d | n/d |
 | one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
 | two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
 | two cards, `--max-num-seqs 8 --prefill-backend l0-int8` † | 82.0 | 138.5 (76.3) | 202.2 (60.6) | 250.1 (35.0) |
+
+Decode with **DFlash** (`--spec dflash`): a small draft model,
+[`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`](https://huggingface.co/urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound),
+guesses up to 7 tokens and the model checks them in one step. One card, one request, t/s:
+
+| workload | MTP | DFlash | |
+|---|---:|---:|---:|
+| llama-benchy tg128 | 72.5 | **141.7** | 1.95x |
+| llama-benchy tg128 at 32,768 tokens of context | 57.2 | 74.7 | 1.31x |
+| a recorded opencode session, replayed (78 requests, prefix cache on) | 65.9 | **96.2** | 1.46x |
+| short code, prose and tool-call prompts | 74.5 | 100.8 | 1.35x |
 
 Time to the first token, new conversation / prefix cache hit:
 
