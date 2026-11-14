@@ -596,8 +596,8 @@ class Capture {
       // Spec 12b: kv8.cl's attn_decode_v2_kv8 / attn_reduce_v2_kv8 - v2's grid, partials and
       // stride, reading int8 K / V and their fp16 scales; the reduce un-rotates each head's
       // output before the gate.
-      const std::string v =
-          pg(kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads));
+      const uint32_t T = attn_tgt();
+      const std::string v = pg(kernels::attn_v2_kv8_variant(kCapM, T, ad.fa_q_heads, ad.fa_kv_heads));
       {
         // Spec 28c: attn_verify_dpas_kv8 takes attn_decode_v2_kv8's arguments and writes its partials.
         l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2_kv8", kWgAttn);
@@ -609,7 +609,7 @@ class Capture {
         k.arg_ptr(5, kv.vs);
         k.arg_ptr(6, b_.attn_part.ptr());
         if (sb_.pages) k.arg_ptr(7, sb_.pages);   // plan 19v3b Task 0
-        launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+        launch(k, ad.fa_kv_heads, T);
       }
       {
         l0::Kernel& k = kernel(v, "attn_reduce_v2_kv8", kWgAttn);
@@ -805,10 +805,9 @@ class Capture {
 
   // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
   // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
-  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt, bf16 KV).
+  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt).
   uint32_t attn_tgt() const {
-    return vattn_ == VerifyAttn::Dpas && !kv8_ && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
-                                                                      : DecodeBuffers::kAttnV2Blocks;
+    return vattn_ == VerifyAttn::Dpas && opt_.probe_attn_tgt ? opt_.probe_attn_tgt : DecodeBuffers::kAttnV2Blocks;
   }
   l0::Kernel& dpas_kernel() {
     l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_,

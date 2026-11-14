@@ -591,6 +591,12 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
       endif()
       add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
                        DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=0 OPTIONS -cl-intel-256-GRF-per-thread)
+      if(B70_KV8)
+        add_ocloc_kernel(attn_v2_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kv8.cl
+                         DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${TT})
+        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=1 OPTIONS -cl-intel-256-GRF-per-thread)
+      endif()
     endforeach()
   endforeach()
   # verify-cost-m8 probe: a||b at M = 2..8 with a wider in-work-group K split (CaptureOptions::probe_ab_ksplit)

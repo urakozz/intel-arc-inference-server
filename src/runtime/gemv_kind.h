@@ -65,7 +65,7 @@ struct CaptureOptions {
   bool probe_gdn_one_store = false;
   // verify-cost-m8 probe: a||b's K split at M >= 2 (0: gemv_bf16_tiling's).
   uint32_t probe_ab_ksplit = 0;
-  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row at bf16 KV (0: kAttnV2Blocks, 32).
+  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (0: kAttnV2Blocks, 32).
   uint32_t probe_attn_tgt = 0;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
