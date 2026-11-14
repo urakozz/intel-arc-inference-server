@@ -114,7 +114,7 @@ void usage() {
       "  --prefill      run the prompt through the engine's prefill instead of one decode replay per id\n"
       "  --spec S       --ids only: off (default), mtp (the MTP head, adaptive K <= --spec-max 1..3;\n"
       "                 Qwen3.8, Ornith) or dflash (Qwen3.8's DFlash drafter, K <= --spec-max\n"
-      "                 1..7, one card; --draft-model PATH). Greedy: the ids equal the plain run's.\n"
+      "                 1..7, one card; --draft-model PATH, required). Greedy: the ids equal the plain run's.\n"
       "  --max-len L    KV cache and RoPE capacity: default 16384 (bench rows stay comparable); any\n"
       "                 multiple of 256 up to the trained context, refused if it does not fit; auto =\n"
       "                 the largest that fits (spec 6 §10)\n"

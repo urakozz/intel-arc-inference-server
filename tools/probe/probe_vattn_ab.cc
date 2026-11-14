@@ -302,6 +302,7 @@ int main(int argc, char** argv) {
   std::printf("lm_head %s, the stream follows %s\n", loader::lm_head_form_name(head), follow_dpas ? "DPAS" : "v2");
   cli::dflash::Args da;
   da.on = true;
+  da.model = cli::dflash::kPackedDrafter;
   cli::dflash::Loaded dl = cli::dflash::load(ctx, da, model);
   const uint32_t n_fa = model.desc->fa_layers;
   auto drafter = std::make_unique<runtime::dflash::DFlashDrafter>(ctx, std::move(dl.w), dl.head_rows, max_len, da.max_k);
