@@ -855,8 +855,7 @@ add_test(NAME slot_plan_test COMMAND slot_plan_test)
 # refuses (see BENCHMARKS.md). A bare `ctest` must not depend on that pointer,
 # so every add_test below for these five passes a snapshot directory
 # explicitly - resolve_snapshot takes a directory verbatim, bypassing
-# refs/main entirely. Same spirit as tools/probe/run_vllm_gemv_bench.sh's
-# BENCH_SNAP (an overridable default rather than a hardcoded path): here a
+# refs/main entirely. An overridable default rather than a hardcoded path: a
 # CMake cache variable (B70_TEST_SNAPSHOT), defaulted to the gate checkpoint's
 # known-good snapshot, resolved against $HF_HOME (or ~/.cache/huggingface) the
 # same way the loader itself does. Override with -DB70_TEST_SNAPSHOT=<dir> at
