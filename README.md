@@ -132,8 +132,8 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
   per card on two cards) gets the largest context that fits - the main session; the other slots get a shorter
   context, enough for subagent tasks. On two cards every card runs its own copy of the model (`--parallel replica`).
 
-Speculative decoding (the DFlash draft model on one card, the MTP head otherwise) and the prefix cache are on by
-default. Ready-made recipes with their context sizes:
+Speculative decoding (the model's MTP head) and the prefix cache are on by default; the DFlash draft model is
+`--spec dflash --draft-model ...`. Ready-made recipes with their context sizes:
 [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
 Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
 
