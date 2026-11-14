@@ -161,8 +161,10 @@ void require(bool ok, const std::string& what) {
 // Spec 17d: `TpVerify` is build_tp_verify's - the TP walk at M rows with the per-row GDN slots, then the MTP head's KV
 // fill at the head's own (one-card) shapes; `TpDraft` is build_tp_draft's - the head at M = 1 whose lm_head is the
 // card's vocabulary half and whose argmax is tp.cl's (the host merges the two cards' winners).
+// Spec 19 v3c: `TpVerifyTaps` is build_tp_verify_taps' - the TP walk at M rows over a tap drafter's GDN slots, the taps
+// copied from the card's own (folded) residual, no MTP head.
 enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows, DraftRows, Tp,
-                  TpVerify, TpDraft };
+                  TpVerify, TpDraft, TpVerifyTaps };
 
 class Capture {
  public:
@@ -235,6 +237,13 @@ class Capture {
       : Capture(ctx, m, b, nullptr, nullptr, cap_m, &mtp, mode, draft_i) {
     tp_ = &link;
   }
+  // Spec 19 v3c: one TP card's tap verify list at M rows.
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TapVerify& tv, const TpLink& link,
+          uint32_t cap_m)
+      : Capture(ctx, m, b, nullptr, nullptr, cap_m, nullptr, Mode::TpVerifyTaps) {
+    tv_ = &tv;
+    tp_ = &link;
+  }
   // Spec 13c: build_draft_rows' list at M rows.
   Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
           const DraftRowsBind& dr, uint32_t cap_m)
@@ -247,7 +256,7 @@ class Capture {
   // Spec 28c: the test / probe override of the verify-attention rule (runtime/verify_attn.h).
   Capture& options(const CaptureOptions& o) {
     opt_ = o;
-    if (mode_ == Mode::VerifyTaps && kCapM == o.profile_m) prof_ = o.profile;
+    if ((mode_ == Mode::VerifyTaps || mode_ == Mode::TpVerifyTaps) && kCapM == o.profile_m) prof_ = o.profile;
     return *this;
   }
   // Spec 13c: the sequence slot the list binds (capture.h, SlotBind).
@@ -278,6 +287,9 @@ class Capture {
       check_tp();
       check_mtp();
       check_tp_head();
+    } else if (mode_ == Mode::TpVerifyTaps) {   // spec 19 v3c
+      check_tp();
+      check_taps();
     } else if (mode_ != Mode::Plain)
       check_mtp();
     if (mode_ == Mode::StageDraft)
@@ -356,6 +368,9 @@ class Capture {
     }
     require(mode_ != Mode::Tp || step_.kernel_count == tp_launches(d_),
             "the TP list has " + std::to_string(step_.kernel_count) + " launches, not tp_launches()'s " +
+                std::to_string(tp_launches(d_)));
+    require(mode_ != Mode::TpVerifyTaps || step_.kernel_count == tp_launches(d_),
+            "the TP tap verify list has " + std::to_string(step_.kernel_count) + " launches, not tp_launches()'s " +
                 std::to_string(tp_launches(d_)));
     require(mode_ != Mode::TpVerify || step_.kernel_count == tp_verify_launches(d_),
             "the TP verify list has " + std::to_string(step_.kernel_count) + " launches, not tp_verify_launches()'s " +
@@ -960,8 +975,13 @@ class Capture {
                 (!tp_->folded || tp_->own) && tp_->spin_limit != 0 && tp_->rank < model::kTpSize,
             "a TP list needs both landing buffers, the counters, the state words, the spin bound (and the folded "
             "row for the folded form)");
-    require(prof_ == nullptr && (mode_ == Mode::TpVerify ? kCapM <= MtpBuffers::kSlots : kCapM == 1),
-            "a TP list is M = 1 (a verify list M <= 4) with no profiling events (spec 17b / 17d)");
+    // Spec 19 v3c: a tap verify list takes up to its slots' rows, and per-launch events (the crossings' share).
+    require(mode_ == Mode::TpVerifyTaps || prof_ == nullptr, "a TP list other than a tap verify list has no profiling "
+            "events (spec 17b / 17d)");
+    require(mode_ == Mode::TpVerify       ? kCapM <= MtpBuffers::kSlots
+            : mode_ == Mode::TpVerifyTaps ? kCapM <= DecodeBuffers::kM
+                                          : kCapM == 1,
+            "a TP list is M = 1 (an MTP verify list M <= 4, a tap verify list M <= 8)");
     tp_s_ = d_.shape(LinearId::Down).S;
     require(d_.shape(LinearId::OutProj).S == tp_s_ && d_.shape(LinearId::OProj).S == tp_s_,
             "the row-parallel linears of a TP card share one S");
@@ -995,7 +1015,7 @@ class Capture {
   size_t head_kv_stride() const {
     return size_t(b_.max_len) * hd().fa_kv_heads * Qwen35::kFaHeadDim * (kv8_ ? 1 : kBf16);
   }
-  bool tp_main() const { return mode_ == Mode::Tp || mode_ == Mode::TpVerify; }
+  bool tp_main() const { return mode_ == Mode::Tp || mode_ == Mode::TpVerify || mode_ == Mode::TpVerifyTaps; }
   uint32_t gemv(uint32_t layer, LinearId id, const void* x) { return gemv(layer, id, x, b_.partials); }
 
   // Spec 28b: the gemm_sm row this list binds for a shape, or null (gemv / gemv_i8w): the rule
@@ -1184,12 +1204,15 @@ class Capture {
       // verify list binds its own slots' allocation (spec_mem(), pp_gdn_spec_bytes) at its
       // own slice g - the same binary, the same whole-model slot stride.
       const bool slots = mode_ == Mode::Verify || mode_ == Mode::StageVerify || mode_ == Mode::VerifyTaps ||
-                         mode_ == Mode::StageVerifyTaps || mode_ == Mode::TpVerify;   // spec 17d: TP's too
+                         mode_ == Mode::StageVerifyTaps || mode_ == Mode::TpVerify ||   // spec 17d: TP's too
+                         mode_ == Mode::TpVerifyTaps;                                    // spec 19 v3c
       // Spec 19a: the slot count is the buffers' (kSlots on every engine: the historical
       // names); a stage's verify list keeps kSlots (its spec_mem() is pp_gdn_spec_bytes').
       // Spec 19c: a tap drafter's verify list binds its own TapVerifyDims::kSlots (8).
       const uint32_t n_slots = mode_ == Mode::Verify || mode_ == Mode::TpVerify               ? mtp_->slots
-                               : mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps ? tv_->slots
+                               : mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps ||
+                                         mode_ == Mode::TpVerifyTaps
+                                     ? tv_->slots
                                                                                               : MtpBuffers::kSlots;
       l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
                                                                      d_.gdn_v_heads, n_slots)
@@ -1520,7 +1543,7 @@ class Capture {
   // tap buffer, one device copy per row (5 x M <= 40 on Qwen3.8's drafter; copies are commands, not
   // launches, exactly as the residual tap above).
   void tap_copy(uint32_t site) {
-    if (mode_ != Mode::VerifyTaps && mode_ != Mode::StageVerifyTaps) return;
+    if (mode_ != Mode::VerifyTaps && mode_ != Mode::StageVerifyTaps && mode_ != Mode::TpVerifyTaps) return;
     const size_t row = size_t(d_.hidden) * kBf16, n = tv_->layers.size();
     for (uint32_t t : sites_.at(site))
       for (uint32_t m = 0; m < kCapM; ++m)
@@ -1981,6 +2004,14 @@ CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, D
     throw std::runtime_error("runtime::build_verify_taps: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(tv.slots) + "] (TapVerify::slots)");
   return Capture(ctx, m, b, tv, M).options(opt).run();
+}
+
+CapturedStep build_tp_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TapVerify& tv,
+                                  const TpLink& link, uint32_t M, const CaptureOptions& opt) {
+  if (M == 0 || M > tv.slots || M > DecodeBuffers::kM)
+    throw std::runtime_error("runtime::build_tp_verify_taps: M " + std::to_string(M) + " is outside [1, " +
+                             std::to_string(tv.slots) + "] (TapVerify::slots)");
+  return Capture(ctx, m, b, tv, link, M).options(opt).run();
 }
 
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,

@@ -28,6 +28,10 @@ struct Shape {
   constexpr unsigned R() const { return M - 1; }
 };
 inline constexpr Shape kQwen38{};
+// Spec 19 v3c: one TP card's half of that drafter (runtime::dflash::TpDFlashDrafter) - 16 q / 4 kv heads, the MLP's
+// 8704; everything on the hidden size, the ring's slots and the selector is the whole drafter's.
+inline constexpr Shape kQwen38Tp{5120, 8704, 16, 4};
+inline constexpr unsigned kTpVocabHalf = 124160;   // a card's rows of the 248320-row head (card 1's real: 123917)
 
 inline std::string s_(unsigned v) { return std::to_string(v); }
 inline std::string prep_variant(const Shape& s = kQwen38, bool split = false) {
@@ -58,6 +62,17 @@ inline std::string candidate_topk_variant(unsigned c = 64) {
   return "df_candidate_R7_N248320_U248077_K" + std::to_string(c);
 }
 inline std::string rerank_variant(unsigned c = 64) { return "df_rerank_R7_K5120_U248077_C" + std::to_string(c) + "_Q4"; }
+// Spec 19 v3c: a TP card's vocabulary half - its top C of `used` real rows, the rerank's ids offset by the half's first.
+inline std::string candidate_half_variant(unsigned used, unsigned c) {
+  return "df_candidate_R7_N" + s_(kTpVocabHalf) + "_U" + s_(used) + "_K" + s_(c);
+}
+inline std::string rerank_half_variant(unsigned used, unsigned base, unsigned c) {
+  return "df_rerank_R7_K5120_U" + s_(used) + "_C" + s_(c) + "_Q4_B" + s_(base);
+}
+// tp.cl's send and sum at the drafter's 8 rows over a crossing of `s` slices (1: gemm_sm_i8w; 4: the int4 split-K).
+inline std::string tp_sum_variant(unsigned s, unsigned rank) {
+  return "tp_cross_M8_K5120_G20_S" + s_(s) + "_F_R" + s_(rank) + "_sum";
+}
 inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false) {
   return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
                    (split ? "_H16" : "")
@@ -122,6 +137,30 @@ inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
                                                LinearKind k = LinearKind::SmallM) {
   return draft_variants(v2, fmt, int8_head, dv, k, k);
+}
+
+// Spec 19 v3c: every binary a TP card's draft, tail and projection lists bind (runtime::dflash::TpDFlashDrafter) - the
+// candidate head's path only (the production head), `fmt` 1 int8 or 2 int4 g64; `rank` the card.
+inline std::vector<std::string> tp_draft_variants(unsigned fmt, unsigned rank, unsigned candidate_bits = 2,
+                                                  unsigned candidates = 80, unsigned attn_ks = 4) {
+  const Shape& s = kQwen38Tp;
+  const unsigned used = rank == 0 ? kTpVocabHalf : kQwen38.used - kTpVocabHalf;
+  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, 1, 4), attn_dpas_variant(s, attn_ks),
+                                select_variant(true, kQwen38, fmt == 2), tp_sum_variant(fmt == 2 ? 4 : 1, rank)};
+  for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
+                      {s.NH * s.HD, s.H},                                                    // o
+                      {s.H, 2 * s.I},                                                        // gate||up
+                      {s.I, s.H},                                                            // down
+                      {5 * s.H, s.H},                                                        // fc (replicated)
+                      {s.H, 2 * s.NKV * s.HD},                                               // the context's k||v
+                      {s.H, 2 * s.ctaps * (s.H / s.group)},                                  // conv kernel projections
+                      {s.H, s.rank}})                                                        // the selector's
+    v.push_back(linear_variant(fmt, kM, K, N));
+  v.push_back(candidate_bits == 2 ? gemm_sm_variant(kR, *small_m_tuning(s.H, kTpVocabHalf, 1, 3))
+                                  : linear_variant(2u, kR, s.H, kTpVocabHalf));
+  v.push_back(candidate_half_variant(used, candidates));
+  v.push_back(rerank_half_variant(used, rank * kTpVocabHalf, candidates));
+  return v;
 }
 
 // ==== Spec 26b: the LiLiCorr drafter (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr beside Bolt) ====

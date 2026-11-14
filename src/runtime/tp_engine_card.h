@@ -63,11 +63,16 @@ struct TpEngine::Card {
   std::vector<CapturedStep> verifies;                        // [M - 1], M = 1..kSlots, by the rule at row 0's key 1
   std::vector<std::unique_ptr<CapturedStep>> verify_deep;    // [M - 1]: DPAS bound where the rule switches by depth
   std::vector<uint32_t> verify_deep_from;
+  // Spec 19 v3c: with a drafter, its GDN state slots 1..7 at the card's shapes and what the tap verify lists (in
+  // `verifies` / `verify_deep`, M = 1..max_k + 1) bind.
+  std::unique_ptr<l0::Mem> df_slots;
+  TapVerify tv;
   // The live GDN state (slot 0, or a speculative slot after a commit) and the hh rows (row 0 = h_{pos-1}).
   uint8_t* live_gdn() const {
-    const uint32_t live = mtp ? ctl->gdn_live : 0;
-    return live == 0 ? persist.gdn_state.as<uint8_t>()
-                     : mtp->gdn_spec.as<uint8_t>() + size_t(live - 1) * persist.gdn_state.size();
+    const uint32_t live = (mtp || df_slots) ? ctl->gdn_live : 0;
+    if (live == 0) return persist.gdn_state.as<uint8_t>();
+    const uint8_t* spec = df_slots ? df_slots->as<uint8_t>() : mtp->gdn_spec.as<uint8_t>();
+    return const_cast<uint8_t*>(spec) + size_t(live - 1) * persist.gdn_state.size();
   }
 
   size_t bytes_crossing() const {

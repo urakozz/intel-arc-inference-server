@@ -200,6 +200,53 @@ __kernel void tp_res_fold(__global const float* restrict mine, __global const ui
   }
   if (lid == 0) sumsq[(size_t)g * M + m] = red[0];
 }
+
+#ifdef TP_SUM
+// Spec 19 v3c: the DFlash drafter's all-reduce - tp_res_fold's wait and its fixed order (card 0's part first), the sum
+// written whole in fp32 into `out` slice 0 ([M][K]: the conv's finish side folds it into the drafter's fp32 residual)
+// and zeros into slices 1 .. TP_SUM - 1 (a consumer that folds TP_SUM split-K slices then reads the sum, + 0 exactly).
+__attribute__((reqd_work_group_size(WG, 1, 1)))
+__kernel void tp_sum(__global const float* restrict mine, __global const uint* land, __global float* restrict out,
+                     __global uint* ctr, __global uint* state, uint spin_limit) {
+  const uint g = get_group_id(0);
+  const uint m = get_group_id(1);
+  const uint lid = get_local_id(0);
+  const uint j = g * TP_MROWS + m;
+  __local uint s_want;
+  if (lid == 0) {
+    const uint want = tp_next(ctr, g, m);
+    s_want = want;
+    const uint slot = want & 1u;
+    if (SYS_LOAD(state, memory_order_relaxed) == 0u) {
+      uint got = 0u, i = 0u;
+      do {
+        got = SYS_LOAD(land + FLAG(slot, j), memory_order_acquire);
+      } while (got != want && ++i < spin_limit);
+      const uint stamp = SYS_LOAD(land + TRAILER(slot, j), memory_order_acquire);
+      const uint status = got != want ? 1u : (stamp != want ? 2u : 0u);
+      if (status != 0u) tp_record(state, status, got, stamp, want, j);
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+  atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_acquire, memory_scope_all_svm_devices);
+  __global const uint* src = land + (s_want & 1u) * DATA_WORDS;
+  const uint k0 = g * CHUNK;
+  uint k1 = k0 + CHUNK;
+  if (k1 > K) k1 = K;
+  for (uint k = k0 + lid; k < k1; k += WG) {
+    float acc = 0.f;
+#if RANK == 0
+    LOCAL_PART(acc)
+    REMOTE_PART(acc)
+#else
+    REMOTE_PART(acc)
+    LOCAL_PART(acc)
+#endif
+    out[(size_t)m * K + k] = acc;
+    for (uint s = 1; s < TP_SUM; ++s) out[((size_t)s * M + m) * K + k] = 0.f;
+  }
+}
+#endif  // TP_SUM
 #endif  // TP_CROSS
 
 #if TP_ARGMAX

@@ -43,7 +43,11 @@ __kernel void df_rerank(__global const char* restrict w, __global const float* r
         if (tokens[c] != NO_IDX && (scores[c] > value || (scores[c] == value && tokens[c] < token))) {
           best = c; token = tokens[c]; value = scores[c];
         }
+#ifdef ID_BASE   /* spec 19 v3c: a TP card's vocabulary half - its first id */
+      cand[(size_t)r * 16 + j] = token == NO_IDX ? NO_IDX : token + ID_BASE;
+#else
       cand[(size_t)r * 16 + j] = token;
+#endif
       value = value * mult;
       if (cap > 0) value = tanh(value / cap) * cap;
       unary[(size_t)r * 16 + j] = value;

@@ -381,4 +381,17 @@ CapturedStep build_tp_draft(l0::Context& ctx, const loader::LoadedModel& m, Deco
 // tp_launches(d) + the head's 10-launch KV fill: Qwen3.8's card 912 at every M.
 size_t tp_verify_launches(const model::ModelDesc& d);
 
+// --- spec 19 v3c: a tap drafter under tensor parallel (DFlash) ----------------------------------------------------
+//
+// build_tp_verify_taps: build_verify_taps' contract on one TP card - build_tp's walk at M rows (positions pos .. pos +
+// M - 1, ids cur_token[0..M) of the card's Control; the crossings at M rows), gdn_step's SPEC_SLOTS build at the
+// card's heads over the drafter's `tv.slots` (8) state slots (gdn_step_slots_M<M>_N8_GK8V24), tp.cl's argmax at M rows
+// (each row's winner of the card's half and its value: the host merges, TpEngine), and the TAPS from the card's own
+// residual: after every fold both cards hold the same residual bitwise (TpEngine's T1), so each card copies every
+// row's taps into its own drafter half's buffer and nothing crosses for them. No MTP head. tp_launches(d) launches (the
+// taps are copies). `opt` as build_verify_taps' (the deep list: CaptureOptions::force_attn; `profile` at
+// `profile_m`: per-launch events, the probe's crossings' share).
+CapturedStep build_tp_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TapVerify& tv,
+                                  const TpLink& link, uint32_t M, const CaptureOptions& opt = {});
+
 }  // namespace runtime
