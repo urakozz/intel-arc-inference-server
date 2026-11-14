@@ -58,8 +58,9 @@ struct CaptureOptions {
   // and probes clear it for the scalar part (the A/B, the grid forms above).
   bool dflash_attn_dpas = true;
   // The DPAS part's key split a head (df_attn_dpas.cl's KS: 1, 2 or 4). 4 measured 1.55 -> 0.50 ms for the five
-  // attention parts (spec 19 v3d Task 6, occupancy).
-  uint32_t dflash_attn_ks = 4;
+  // attention parts but moved 4 of the 4256 acceptance drafts, two rows below the one-sided bar (code K 7, opencode
+  // K 3: one anchor each) - so 1 stays until that is ruled on (spec 19 v3d Task 6, occupancy).
+  uint32_t dflash_attn_ks = 1;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;
