@@ -348,7 +348,8 @@ speculative stream passes when:
 For logits rows, the verify row's cosine distance to f32 may be at most `kCosSlack` = 2 times
 the plain row's. A kernel error shows as something else entirely: the DPAS verify-attention
 kernel (spec 28c) once put its id at f32 rank 3, 4.0 below a top whose margin was 3.44, and
-was switched off until fixed. The MoE gates use the same judge with a one-ulp tie rule.
+was switched off until fixed. The MoE golden gates have their own, tighter tie rule: candidates within one bf16 ulp of the top count
+as a tie (`golden_common.h`).
 
 Three further rules keep the judge honest without loosening the bars:
 
@@ -399,8 +400,8 @@ three prompts. Regenerating a golden set costs 18 min 16 s for all three prompts
 on an idle machine, and 28% longer under a 12-core compile - the CPU oracle is
 the one thing in this project that genuinely contends for the host.
 
-`tools/box_check.sh` (`ctest -LE checkpoint`, the tests that need no model files) is the check
-before a merge; it counts Passed, Failed and Skipped apart - a Skipped test, such as the gate
+`tools/box_check.sh` (`ctest -LE checkpoint`, the tests that need no model files) is the quick
+check of a branch on the box (it does not gate a merge); it counts Passed, Failed and Skipped apart - a Skipped test, such as the gate
 with no golden set present, is not a pass. The tests that need checkpoints and golden sets
 run as box test stages (`tools/box_validate.sh`), on demand; a test whose inputs are
 byte-identical to a recorded PASS keeps it. What is still unrun is listed in

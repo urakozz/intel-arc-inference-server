@@ -35,12 +35,12 @@ The box is a Linux workstation (a Dell T5810-class Broadwell-EP host) with **two
 | | |
 |---|---|
 | OS | Linux. Ubuntu is what this was developed against; no Windows or macOS runtime exists |
-| CPU / RAM | a many-core CPU and 121 GB of RAM (this box): the CPU oracle wants ~70 GB free for a layer-streamed 27B forward. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not (doc 09) |
+| CPU / RAM | a many-core CPU and 121 GB of RAM (this box): the CPU oracle wants ~70 GB free for a layer-streamed 27B forward. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not ([09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md)) |
 | GPU | **2 x Intel Arc Pro B70** (Battlemage / Xe2), 32 GB each. One card is enough for everything except the two-card modes (tensor parallel, replica, pipeline parallel, [BENCHMARKS.md](BENCHMARKS.md)); the second is also useful as an idle control |
 | Driver | `libze_intel_gpu`, IGC and `intel-ocloc`. The B70 is `bmg-g31`, so kernels build with `ocloc -device bmg-g31` |
 | Level Zero | headers and loader from the distribution packages |
 | Host compilers | `g++` 15.2 and CMake 4.2 or later, plus `ccache` |
-| Rust | needed for the pinned `tokenizers` crate (doc 11). A user-local `rustup` with `--profile minimal` is enough; the build looks in `~/.cargo/bin` first and never changes `PATH`. The crate builds `oniguruma` from source through `cc`, so a working `/usr/bin/cc` is required |
+| Rust | needed for the pinned `tokenizers` crate ([11-tokenizer-and-chat-template.md](11-tokenizer-and-chat-template.md)). A user-local `rustup` with `--profile minimal` is enough; the build looks in `~/.cargo/bin` first and never changes `PATH`. The crate builds `oniguruma` from source through `cc`, so a working `/usr/bin/cc` is required |
 | oneAPI | not used by the engine build. Only the stand-alone oneDNN reference probe (`tools/probe/onednn/CMakeLists.txt`) needs `icpx`, which is usually **not** on `PATH` in a non-interactive shell, so pass its full path |
 
 The C++ side builds **natively on the host**. No container is needed for
@@ -143,8 +143,22 @@ so a second job can use the other card. A both-cards job waiting at the gate sto
 jobs, so timed work cannot starve. The details, and how two validation streams share the
 cards, are in "Two streams, one per card" below.
 
-**Stopping our own jobs** is `tools/box_stop.sh list | cpu-chain | cpu-job <queue name> | hf-tier |
-validation` - it stops only those (TERM, then KILL after 10 s) and refuses anything else.
+**Stopping our own jobs** is `tools/box_stop.sh`. It stops only the kinds of job listed here (TERM, then KILL
+after 10 s) and refuses anything else:
+
+| `tools/box_stop.sh ...` | what it stops |
+|---|---|
+| `list` | nothing: shows what is running |
+| `cpu-chain` | the loop that runs the CPU reference queue; its current job keeps running |
+| `cpu-job <queue name>` | one CPU reference job and its container |
+| `validation` | the newest validation run; starting it again with the same state resumes |
+| `tree <branch>` | every job working in that branch's tree |
+| `job <branch> <pid>`, `main-job <pid>` | one process tree, checked to be working in that branch or in the main tree |
+| `hf-tier`, `dflash-quant`, `q4exp-count-wait` | the model-storage copy, the drafter quantisation, the Flash-Next count driver |
+
+**Seeing what the box is doing** is `tools/box_status.sh` (read-only; `--watch N` refreshes every N seconds): the
+GPU locks and who holds them, the jobs waiting for a card, the CPU reference job and the logs written in the
+last half hour. `tools/box_tidy.sh --dry-run` lists stale branch trees it would move to `~/b70/trash`.
 
 **Validating work in bulk** is one command, `tools/box_validate.sh`
 (`--dry-run` first to read what it will do). It runs the rows and stages of
@@ -289,7 +303,7 @@ enumerates, one card is device 0 of that view, two are devices 0 and 1
 **The two cards are not interchangeable.** Same binary, same checkpoint, same
 ten minutes: prefill loses 3.2% to 3.4% on the second card while decode loses
 only 0.2% to 0.4%. That is a difference in sustained compute rather than in
-bandwidth, and it is unattributed (doc 07). Every series row in
+bandwidth, and it is unattributed ([07-open-questions.md](07-open-questions.md)). Every series row in
 [BENCHMARKS.md](BENCHMARKS.md) is therefore taken on one named card and says
 which.
 

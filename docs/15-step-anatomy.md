@@ -49,7 +49,7 @@ in the one KV allocation, its own GDN states, conv ring, control block and its o
   for the oldest request alone, [probe](probes/probe-batching-2026-10-23.md) section 8.) With more than one slot on a card, a
   DFlash drafter or draft vocabulary is refused at startup.
 - **A batched row is not bitwise its lone run:** the M-row kernels round the last bf16 digit differently from the
-  M = 1 GEMV, so a batched row is judged against its lone run by the f32 judge (a float32 CPU reference, doc 14).
+  M = 1 GEMV, so a batched row is judged against its lone run by the f32 judge (a float32 CPU reference, [14-golden-gate.md](14-golden-gate.md)).
   Slot isolation is bitwise: a rejected row writes only its own slot's speculative state.
 - **The tick:** the scheduler runs at most one prompt chunk, then one decode step over every decoding slot. A chunk
   stalls the other slots while it runs, so the chunk is the engine's own prefill chunk, cut where a single-request
@@ -103,6 +103,11 @@ starting the next chunk.
 ## Part 2 - the one-card decode profile of 2026-08-25
 
 ### Read this before reading a number below
+
+**This profile is a record of the first build, not of today's step.** Two things it measures have since been
+replaced: the decode attention (`attn_decode`, now `attn_decode_v2` and its int8-cache twin) and the output head
+(bf16 then, int8 per row now). The method and the lessons still hold; the per-kernel times do not describe the
+current engine. Part 1 above is the current step.
 
 **Profile mode is not bench mode.** Every launch in a profiled list signals a host-visible kernel-timestamp event,
 which carries a flush an unprofiled list never pays.

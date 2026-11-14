@@ -55,8 +55,8 @@ N=10240, g64):
 Across the whole model `qzeros` + `g_idx` are 0.20 GB of 15.7 GB, a free 1.3%
 that a kernel reading the GPTQ layout verbatim pays every token. AutoRound also
 ships an AWQ-packed variant (`auto_round:auto_awq`) whose nibble order is
-`[0,2,4,6,1,3,5,7]`; converting it to GPTQ order is a lossless permutation and a
-load-time concern.
+`[0,2,4,6,1,3,5,7]`. The loader does not convert it: any packing other than
+`auto_round:auto_gptq` is refused by name.
 
 ### Is AutoRound still needed?
 

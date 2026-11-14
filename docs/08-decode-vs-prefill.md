@@ -91,7 +91,7 @@ registers, so the whole weight read is shared by `M` tokens. That compounds with
 of competing with it, because speculation's cost is otherwise a full weight read on every draft step.
 
 The engine has that kernel. Speculative decoding (the model's MTP head, a DFlash draft model, prompt lookup)
-makes `M` 2..8 on every verify step, and those steps run a small-batch DPAS GEMM (`gemm_sm`, spec 28b, doc 12)
+makes `M` 2..8 on every verify step, and those steps run a small-batch DPAS GEMM (`gemm_sm`, spec 28b, [12-kernels.md](12-kernels.md))
 that reads each weight tile once for all `M` rows. Verifying 8 rows went from 3.17 plain decode steps to 1.57
 (measured on a busy box; the table is in [BENCHMARKS.md](BENCHMARKS.md)). `M = 1` keeps the GEMV, bit for bit.
 
@@ -105,7 +105,7 @@ that reads each weight tile once for all `M` rows. Verifying 8 rows went from 3.
 2. **The decode kernel must split K.** Without it the device cannot be filled at
    realistic output sizes, whatever else is right. **Confirmed on this
    silicon**: at N = 5120, the worst fill case at 320 subgroups, the int4 GEMV
-   runs at **259 GB/s (43% of 600) at S = 1 and 533 GB/s (89%) at S = 16**, and
+   runs at **259 GB/s (44% of the measured 590) at S = 1 and 533 GB/s (90%) at S = 16**, and
    261 to 531 GB/s for `down` at K = 17408. Split-K is worth about **2x** at
    that shape.
 
@@ -113,14 +113,14 @@ that reads each weight tile once for all `M` rows. Verifying 8 rows went from 3.
    N = 16384 the grid already fills the device and S = 1 is the *best* setting
    rather than merely an acceptable one, while `gate‖up` at N = 34816 still
    needs S = 4 despite having 2176 subgroups. **Subgroup count is necessary, not
-   sufficient - measure per shape** (doc 12).
+   sufficient - measure per shape** ([12-kernels.md](12-kernels.md)).
 3. **Dequantise inline in the accumulation loop, at decode.** Never a separate
    pass, never a temporary buffer; that would double the traffic that is the
    entire budget. **At prefill the opposite is true**, and it was measured:
    fusing the dequant into the GEMM produced bitwise-identical output and was
-   slower, because the separate dequant pass already runs at about 90% of
-   hardware peak and moving the same arithmetic into the mainloop costs more
-   than the traffic it removes (doc 05).
+   slower, because the separate dequant pass already runs at 93% of the
+   measured 590 GB/s (86% of the 638 GB/s peak, derived) and moving the same arithmetic into the mainloop costs more
+   than the traffic it removes ([05-perf-model.md](05-perf-model.md)).
 4. **Weight-stationary, activation-broadcast.** Weights are the traffic;
    activations are free. Structure every decode kernel around that asymmetry.
 

@@ -60,7 +60,7 @@ Layer pattern is `[LA, LA, LA, FA] x 16` - full attention at layers 3, 7, 11,
 Quantisation: GPTQ packing produced by AutoRound, int4, **symmetric, group_size
 64**, `desc_act: false`. `lm_head` is **not** quantised. 98 `dynamic` exclusion
 rules keep `mtp.*` and every GDN layer's `in_proj_a`/`in_proj_b` in bf16
-(doc 02).
+([02-formats.md](02-formats.md)).
 
 ### Per-layer tensors, from the headers
 
@@ -110,7 +110,7 @@ acceptance (spec 8 §10) up to `--spec-max`. With `--spec off` it is skipped.
 ### Layer math, verified against the modeling file
 
 From `transformers` 5.15, `models/qwen3_5/modeling_qwen3_5.py`. This is the
-contract the kernels and the CPU oracle (doc 14) must agree on. `x` is one
+contract the kernels and the CPU oracle ([14-golden-gate.md](14-golden-gate.md)) must agree on. `x` is one
 token's hidden vector, `⊙` is elementwise, all norms run in fp32.
 
 **RMSNorm is Gemma-style `(1 + w)`.** `Qwen3_5RMSNorm` (used for
@@ -118,7 +118,7 @@ token's hidden vector, `⊙` is elementwise, all norms run in fp32.
 `k_norm`) computes `x · rsqrt(mean(x²) + 1e-6) ⊙ (1 + w)`. **The `+1` is not in
 the weights**; the loader bakes it in and stores `1 + w` **as fp32**, because
 the reference does the whole product in fp32 and rounding the multiplier back to
-bf16 would add an error it does not have (doc 13). `Qwen3_5RMSNormGated` (the
+bf16 would add an error it does not have ([13-loader.md](13-loader.md)). `Qwen3_5RMSNormGated` (the
 GDN output norm) is plain `w` - no `+1` - and multiplies by `silu(z)` *after*
 normalising.
 
@@ -196,7 +196,7 @@ Index manifest, 2399 tensors across 6 files, **no duplicated names**, total
 
 **`W` = 12.163 + 0.760 + 0.052 + 2.543 = 15.519 GB read per decode token.** The
 loader's own report of what it makes resident is **15.540 GB**, the difference
-being tiling pad and fp32-widened norms, itemised in doc 13. Doc 05 uses the
+being tiling pad and fp32-widened norms, itemised in [13-loader.md](13-loader.md). [05-perf-model.md](05-perf-model.md) uses the
 loader's figure throughout.
 
 Reproduce: `python3 tools/probe/checkpoint_bytes.py <snapshot>`. It reads the
@@ -216,7 +216,7 @@ the zero-config cleanup (`b70-decode --lm-head bf16` was the byte-matched arm); 
    simply absent. No grouped GEMM.
 2. **vLLM was already at 81.7% of the roofline on this model** (its early baseline, 31.01 t/s on the first
    stack): 31.01 t/s times 15.540 GB is 482 GB/s of a measured 590. Decode is not won by one big lever;
-   it is won by several small ones that multiply (doc 05).
+   it is won by several small ones that multiply ([05-perf-model.md](05-perf-model.md)).
 3. **GDN dominates the layer count, not the byte count.** 48 of 64 layers, and
    `sycl-tla` has no example for them - but the recurrent state is
    `48 x 128 x 128 x 4 B` = 3 MB per layer, about 150 MB per token read and

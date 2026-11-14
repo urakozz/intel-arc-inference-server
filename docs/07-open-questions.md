@@ -11,13 +11,13 @@ time decomposition and the rejected optimisations in [05-perf-model.md](05-perf-
 model in [04-architecture.md](04-architecture.md). Recently answered, in one line each:
 
 - **Is W4A4 (int4 weights times int4 activations) reachable?** No: the DPAS rate is real (4.000x bf16) but the
-  activations roughly double the output error ([probe](probes/probe-w4a4-2026-10-28.md), doc 05).
+  activations roughly double the output error ([probe](probes/probe-w4a4-2026-10-28.md), [05-perf-model.md](05-perf-model.md)).
 - **Is W8A8 worth anything for prefill?** Yes: the int8 prefill path (int4 weights turned into rotated int8, int8
-  matrix math) is the `l0-int8` backend, about 30% faster than the bf16 walk (doc 17, BENCHMARKS.md).
+  matrix math) is the `l0-int8` backend, about 30% faster than the bf16 walk ([17-int8-prefill.md](17-int8-prefill.md), BENCHMARKS.md).
 - **Does quantising `lm_head` to int8 cost accuracy?** Not measurably against the gates; it is the serving default
   (spec 9, BENCHMARKS.md "int8 lm_head"). The int4 head is the open part, below.
 - **Why did the DPAS verify-attention kernel pick the wrong token at 8 rows?** It rounded the softmax weights to
-  bf16 before the P x V product. Splitting them into two bf16 halves fixed it, and the f32 judge (doc 14) now
+  bf16 before the P x V product. Splitting them into two bf16 halves fixed it, and the f32 judge ([14-golden-gate.md](14-golden-gate.md)) now
   covers the kernel ([probe](probes/probe-verify-attn-2026-11-03.md)).
 - **Can a profile see inside the prefill walk?** Yes: `B70_PREFILL_PROFILE=1` times each phase with Level Zero
   kernel timestamps (it perturbs the walk, so it attributes and does not give the headline wall).

@@ -9,8 +9,8 @@ converted, branched on, or discovered at run time.
 `src/loader/{snapshot,safetensors,quant,loader}.{h,cc}` plus
 `src/loader/small_layout.h` (the small-tensor block offsets, shared with the
 model description and the device kernels), driven by the model description in
-`src/model/qwen35.{h,cc}` (doc 03) and the canonical layouts in
-`src/common/repack.h` (doc 12). The walk-through below is Qwen3.8-27B; its figures
+`src/model/qwen35.{h,cc}` ([03-models.md](03-models.md)) and the canonical layouts in
+`src/common/repack.h` ([12-kernels.md](12-kernels.md)). The walk-through below is Qwen3.8-27B; its figures
 come from real checkpoint files (the box report of an earlier build; the load is
 not re-measured on every change).
 
@@ -19,12 +19,12 @@ quant-config and `LinearSrc::classify` code described here:
 
 | Loader | Models | Files |
 |---|---|---|
-| `load` (and `load_tp`, which slices every layer for tensor parallel: each card takes half) | Qwen3.8-27B (dense) and Ornith 1.5 35B-A3B (mixture of experts, MoE: many small expert MLPs, a few used per token) - the two model descriptions the engine knows | `loader.cc`, `moe.*` |
+| `load` (and `load_tp`, which slices every layer for tensor parallel: each card takes half) | Qwen3.8-27B (dense) and Ornith 1.5 35B-A3B (mixture of experts, MoE: many small expert MLPs, a few used per token) - the two models that share one loader | `loader.cc`, `moe.*` |
 | `load_k2` | K2-Horizon | `k2_*` |
 | `load_kolibri1` | Kolibri-1 | `kolibri1_*` |
 | `load_qwen4exp` | Qwen3.8-Flash-Next (below) | `qwen4exp_*` |
 | `load_bolt` | Nemotron 3.5 Bolt (below; parked until Flash-Next is done) | `bolt_*` |
-| `load_dflash`, `load_lilicorr` | the draft models (DFlash, LiLiCorr) | `dflash_*`, `lilicorr_*` |
+| `load_drafter`, `load_lilicorr` | the draft models: DFlash (the bf16 original, quantised to int8 at load, or our packed int4 export loaded as shipped) and LiLiCorr | `dflash_*`, `lilicorr_*`, `nvfp4.h` |
 
 **Two Qwen3.8 checkpoint shapes are supported and the loader takes both without a
 conditional anywhere in the walk**: the published one with a bf16 `lm_head`, and a
@@ -92,7 +92,7 @@ exist under its prefix, never by what `config.json` claims:
 | `<prefix>.weight` | bf16 | dtype `BF16` |
 | none of these | - | throws naming the prefix |
 
-Doc 02's rule, that format plurality is a load-time problem, is why: the same
+[02-formats.md](02-formats.md)'s rule, that format plurality is a load-time problem, is why: the same
 `quant_method: "gptq"` string covers checkpoints that ship different tensors,
 and the `dynamic` rules that decide *which* modules were skipped are a regex
 list that has already been observed to lie. This checkpoint carries **98
@@ -121,7 +121,6 @@ an exact restatement of the top level (see the Bolt section) - the pattern that 
 published MTP head unusable (BENCHMARKS.md). It also throws on an unrecognised
 `quant_method` or `packing_format`, and on an `extra_config` module that claims to be
 packed at anything but g64 symmetric int4.
-int4.
 
 ### The three data asserts, and what measured them
 
@@ -133,7 +132,7 @@ scans every word of every `.qzeros`, `.g_idx` and `.scales` in the checkpoint
   the packed nibble `7` means a zero point of 8 - symmetric. Measured over all
   400 `qzeros` tensors of this checkpoint: no other value occurs.
   This is what licenses the dequant `w = (q − 8)·scale` with no zero-point
-  stream in the kernel, and (doc 02) what keeps the native s8×s4 DPAS prefill
+  stream in the kernel, and ([02-formats.md](02-formats.md)) what keeps the native s8×s4 DPAS prefill
   path open.
 - **Every `g_idx[k] == k/64`.** `desc_act: false` means no activation-order
   permutation, so the group index must be the identity. Measured identical over
@@ -204,7 +203,7 @@ sending the reader back with a debugger.
 ## Fusion: why these weights are welded together
 
 The device holds **one buffer per fused linear**, not one per checkpoint tensor.
-The table is `model::Qwen35` (doc 03); the loader executes it.
+The table is `model::Qwen35` ([03-models.md](03-models.md)); the loader executes it.
 
 | Fused | Parts | Fuse | Why |
 |---|---|---|---|
@@ -255,7 +254,7 @@ once at load:
 
 **`1 + w`, stored fp32, for every RMSNorm weight.** `Qwen3_5RMSNorm` is
 Gemma-style: `x·rsqrt(mean(x²)+ε) ⊙ (1 + w)`, and the `+1` is **not** in the
-checkpoint (doc 03, "Layer math"). Storing `1 + w` makes the kernel a plain
+checkpoint ([03-models.md](03-models.md), "Layer math"). Storing `1 + w` makes the kernel a plain
 RMSNorm - one multiply, no constant to materialise per element.
 
 The bake is **one fp32 add, stored as fp32, with no cast back to bf16.** The
@@ -339,7 +338,7 @@ and four FA rows, their offsets and their bakes without touching a device.
 pairs. `rope_parameters` declares interleaved mRoPE with
 `mrope_section [11,11,10]`, but in text mode the model expands one position id
 onto every stream, so `apply_interleaved_mrope` copies each frequency onto
-itself: **plain RoPE** (doc 03). The angles are computed in `double` and stored
+itself: **plain RoPE** ([03-models.md](03-models.md)). The angles are computed in `double` and stored
 `float` - 4.19 MB at the default length, a rounding error against 18 GB, and it
 removes a transcendental from the FA prologue.
 
@@ -352,7 +351,7 @@ the report's buckets must account for every byte allocated.
 ## Layout and split-K come from the table, not from here
 
 The loader does not choose layouts. `model::Qwen35`'s per-linear row carries
-`(layout, S)` from the measured per-shape decision recorded in doc 12:
+`(layout, S)` from the measured per-shape decision recorded in [12-kernels.md](12-kernels.md):
 
 | Linear | K × N | layout | S |
 |---|---|---|---|
@@ -365,7 +364,7 @@ The loader does not choose layouts. `model::Qwen35`'s per-linear row carries
 | `LmHead` (int4, if the checkpoint packed it) | 5120 × 248320 | 1 | 1 |
 
 All rows are layout 1 today, and layout 1 **loses four of the five int4
-shapes** (doc 12): it wins the sum only because `QkvZ` at `N = 16384` is the one
+shapes** ([12-kernels.md](12-kernels.md)): it wins the sum only because `QkvZ` at `N = 16384` is the one
 power-of-two stride where layout 0 collapses from about 550 to 419 GB/s. Flipping
 individual rows to layout 0 would be a measured +3.5% best-per-shape option, but it is
 not a one-row edit: only the *kernel* side of layout 0 exists (`gemv.cl` binds `w`
@@ -415,10 +414,10 @@ allocation total: a layout-1 int4 tile is 136 u32 = 128 of nibbles + 8 of
 scales, so `K·N/2` and `K·N/32` split it exactly; `a‖b`'s 96 real rows and 32
 zero rows split its buffer exactly.
 
-**The `W` cross-check.** Doc 03 measured `W = 15.519 GB` read per decode token
+**The `W` cross-check.** [03-models.md](03-models.md) measured `W = 15.519 GB` read per decode token
 from the checkpoint headers alone. The loader recomputes the same quantity from
 what it actually uploaded and **throws if the two differ by more than 2%**,
-printing the table first. The expected side is doc 03's figure plus this
+printing the table first. The expected side is [03-models.md](03-models.md)'s figure plus this
 loader's own itemised additions - never a widened tolerance:
 
 | Addition | Bytes | Why |
@@ -438,7 +437,7 @@ tolerance: both sides of the cross-check move by exactly the same amount.
 The RoPE table (4 194 304 B) is *not* in this list: it is resident but not
 streamed per token, so it is excluded from both sides rather than added to both.
 
-Measured delta: **-27 072 B, -0.00017%** - the loader is 27 KB *under* doc 03's
+Measured delta: **-27 072 B, -0.00017%** - the loader is 27 KB *under* [03-models.md](03-models.md)'s
 figure, which is the rounding in "15.519". The fp32 RMSNorm store does not move
 it, because the same 1 337 344 B are added to *both* sides. Note the three
 totals the report prints and why they differ: **read/token 15.540 GB** is what
@@ -450,7 +449,7 @@ are printed, labelled.
 bounded below by reading 19 GB off the disk). No thread pool was built: a `std::async` pool
 over the per-linear repack is the known lever and is not worth its complexity at 13 s.
 
-Device VRAM is 32.6 GB (doc 01), so 18.1 GB of weights leaves room for KV, delta-net
+Device VRAM is 32.6 GB ([01-hardware.md](01-hardware.md)), so 18.1 GB of weights leaves room for KV, delta-net
 state and activations - and `l0::Mem` chains `ze_relaxed_allocation_limits_exp_desc_t`
 automatically for the two allocations (`lm_head`, `embed_tokens`) that exceed the device's
 `maxMemAllocSize`.
@@ -526,7 +525,7 @@ second one's), the same 5120-wide model and the same tokenizer.
 anywhere in this project.** vLLM cannot load a quantised head at all, so a
 comparison against it would price an inability of the comparison rather than a
 difference in kernels. The standing numbers are byte-matched with bf16
-`lm_head` on both sides (doc 05). What the packed head buys the *loader* is the
+`lm_head` on both sides ([05-perf-model.md](05-perf-model.md)). What the packed head buys the *loader* is the
 point of this section: one more format its classification has to be right
 about.
 
@@ -573,7 +572,7 @@ classification then drives the staging sizes, the byte buckets, the `W`
 cross-check, and the shape and layout the capture binds.
 
 The int4 row is `{K 5120, N 248320, S 1, layout 1}`. `S = 1` is argued in
-`src/model/qwen35.h` and in doc 12; the short version is that 3880 work-groups
+`src/model/qwen35.h` and in [12-kernels.md](12-kernels.md); the short version is that 3880 work-groups
 already saturate the device and that `S = 1` is what lets the capture write the
 result straight into `logits`.
 
@@ -584,7 +583,7 @@ reports incomparable exactly where they differ.
 
 ### The `W` cross-check across the boundary
 
-doc 03's `W = 15.519 GB` was measured over a checkpoint with a bf16 head. A
+[03-models.md](03-models.md)'s `W = 15.519 GB` was measured over a checkpoint with a bf16 head. A
 packed head is an **itemised term on the expected side**, the same rule the
 padding and the fp32 widening follow - the 2% tolerance never moves:
 
@@ -694,7 +693,7 @@ exactly, and repack, the GEMVs, the prefill dequant and h8 see an ordinary g64 l
 from the same module's `.scales`, so a g_idx and scales that disagree are refused.
 `tests/loader/quant_test.cc` pins the expansion against a direct g128 dequant.
 
-The cost: g64's bytes (4.25 bits per weight instead of g128's 4.125, docs/02), and host
+The cost: g64's bytes (4.25 bits per weight instead of g128's 4.125, [02-formats.md](02-formats.md)), and host
 RAM for the expanded scales during the load. Asymmetric checkpoints (a zero point per
 group) and act-order (`desc_act`) stay refused.
 
@@ -818,7 +817,7 @@ reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant
 - **The PLE table** (a large per-token embedding table, 51.8 GB) is not in device memory.
   The checkpoint's 128 bf16 shards are skipped by design; the engine reads
   `<snapshot>-ple-int8/`, made once by `tools/quantize/qwen4exp/ple_int8.py` (per n-gram
-  head an int8 row table with per-row scales, plus three I64 constants; doc 18 has the
+  head an int8 row table with per-row scales, plus three I64 constants; [18-running-models.md](18-running-models.md) has the
   command). A checkpoint without the file is refused naming the converter's command. The
   I64 tensors are held to the hash formula (`qwen4exp_ple_hash.h`). `load_q4_ple` refuses a
   table larger than MemAvailable - 16 GiB, then pins it as **16 + 16 host-USM ranges** (one
@@ -835,7 +834,7 @@ reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant
   `b70-decode` does (`mtp = true` with `--spec mtp` or `--spec lookup`). The one file it
   checks besides the weights is `tokenizer.json`: the served file must be the original's
   (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and
-  the original's file is linked beside the snapshot (doc 18).
+  the original's file is linked beside the snapshot ([18-running-models.md](18-running-models.md)).
 
 ## Nemotron 3.5 Bolt: the exact relaxations, signed scales, one layout from two sources
 
@@ -883,7 +882,7 @@ before the first allocation; its figures are printed by `bolt_repack_test` /
 ## Deliberately not loaded
 
 - **`model.visual.*`** (333 tensors, 0.921 GB) - this checkpoint is a
-  vision-language model and this project serves text only (doc 03).
+  vision-language model and this project serves text only ([03-models.md](03-models.md)).
 - **`mtp.*`** (15 tensors, 0.849 GB on the published checkpoint; 29 on the
   self-quantised one) - skipped unless the caller asks for the head
   (`load(..., mtp = true)`; `--spec mtp`, spec 8). Without it the skip

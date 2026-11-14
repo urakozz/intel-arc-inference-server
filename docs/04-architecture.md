@@ -5,8 +5,7 @@ and a Level Zero walk of our own OpenCL C kernels for prefill.**
 
 ## Language and toolchain
 
-- **C++17**, `g++` and CMake for everything. No SYCL / icpx in the engine build
-  (the sycl-tla prefill backend was removed on 2026-10-27).
+- **C++20**, `g++` and CMake for everything. No SYCL and no `icpx` in the engine build.
 - **Level Zero** is the runtime. Device kernels are OpenCL C compiled offline
   with `ocloc` to device binaries and loaded with `zeModuleCreate`.
 - **Python appears exactly once**, in `tools/`, for offline weight conversion,
@@ -34,36 +33,44 @@ independent pieces of evidence from the vLLM work that preceded this project:
 So the first product was not a faster GEMM. It was a decode step that issues
 **zero host work per token**. That worked, and it is finished: 99.7% of a decode
 step is now inside the GPU fence and the host spends 97 us per token. What
-remains is kernel efficiency, which is a different problem (doc 05).
+remains is kernel efficiency, which is a different problem
+([05-perf-model.md](05-perf-model.md)).
 
 ## More than one model
 
-The layout below is Qwen3.8's (the focus model, for agentic coding). Every other family has its own engine
-and descriptor on the same foundations (Level Zero lists, our own OpenCL C, the loader, the server): Ornith
-(spec 15, a mixture-of-experts, MoE, where a router picks a few expert networks per token), K2-Horizon (spec 18,
-MoE with routed value-expert attention), Kolibri-1 (spec 20, Aleph Alpha's MoE with sliding-window layers),
-Qwen3.8-Flash-Next (spec 21; it loads its first layers only, until the expert-tiering probe decides how the whole
-model fits two cards) and Nemotron 3.5 Bolt (spec 25: Mamba-2 state-space blocks plus attention plus latent MoE;
-parked until Flash-Next is done). The model is chosen from the checkpoint's `config.json`. LFM2.5, Muse and
-Agnes were dropped; Flint (spec 27) and Nanbeige (spec 29) are parked. Per-model status and commands:
-[18-running-models.md](18-running-models.md).
+The layout below is Qwen3.8's, the focus model, used for agentic coding. Every other family has its own engine
+and descriptor on the same foundations: Level Zero lists, our own OpenCL C kernels, the loader and the server.
+The model is chosen from the checkpoint's `config.json`.
+
+| model | what is different about it |
+|---|---|
+| Ornith 1.5 | a mixture of experts (MoE): a router picks a few expert networks for each token |
+| Qwen3.8-Flash-Next | a larger MoE; today it loads its first layers only, until the whole model is split over two cards ([open-work.md](open-work.md), item 4) |
+| K2-Horizon | MoE with routed value-expert attention; parked |
+| Kolibri-1 | MoE with sliding-window attention layers; parked |
+| Nemotron 3.5 Bolt | Mamba-2 state-space blocks, attention and a latent MoE; parked until Flash-Next is done |
+
+Per-model status and commands: [18-running-models.md](18-running-models.md).
 
 ### Run modes
 
-`b70-serve --parallel` picks how the cards are used. The default, `auto`, runs Qwen3.8 on two cards as `tp` at
-one request and as `replica` above one request; any other model runs on one card when it and the asked context
-fit, else on `pp`.
+`b70-serve --parallel` picks how the cards are used. The default, `auto`, chooses by model and load:
 
-- **one card** (`--parallel 1`): the whole engine on one card.
-- **tp** (tensor parallel, spec 17; Qwen3.8): every layer split over both cards, half the heads and half the
-  MLP each. After each linear that is split by rows, the cards add their halves with P2P writes (one card
-  writing straight into the other's memory). The fastest way to serve one request, with the full context;
-  one request at a time.
-- **replica** (spec 13b; Qwen3.8): a complete copy of the model on each card, one engine per card, requests
+- Qwen3.8 on two cards: `tp` for one request at a time, `replica` when `--max-num-seqs` is above 1.
+- Any other model: one card when the model and the asked context fit, else `pp`.
+
+The four modes:
+
+- **One card** (`--parallel 1`): the whole engine on one card.
+- **`tp`, tensor parallel** (Qwen3.8): every layer is split over both cards, half the attention heads and half
+  the MLP on each. After each split layer the cards add their halves by writing straight into each other's
+  memory over PCIe (peer-to-peer, P2P). The fastest way to serve one request, with the full context; one request
+  at a time.
+- **`replica`** (Qwen3.8 and Ornith): a complete copy of the model on each card, one engine per card, requests
   spread over the cards. The choice for 2 to 8 requests at once.
-- **pp** (pipeline parallel, spec 16): the layers split between the cards, so about one card's speed but
-  each card holds half the weights; for models with no tensor-parallel path or too big for one card. The prefix
-  cache and the MTP head work across the split.
+- **`pp`, pipeline parallel**: the first layers on one card and the rest on the other. About one card's speed,
+  but each card holds only half the weights, so it serves models that are too big for one card or have no
+  tensor-parallel path. The prefix cache and the MTP head work across the split.
 
 Speed numbers per mode are in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -79,7 +86,7 @@ with `length` and is logged.
 Tensor parallel with slots was built and ruled out (replica is faster for several requests at once;
 [low-priority-work.md](low-priority-work.md)).
 
-**Why fixed slots and not a shared KV pool (operator, 2026-11-11).** The engine is tuned for one or two people
+**Why fixed slots and not a shared KV pool.** The engine is tuned for one or two people
 running local agentic sessions: a main session that needs its full context plus a few short helper requests. Each
 slot's KV memory is reserved at startup, so the main session always has its context, nothing is ever preempted
 (stopped and recomputed later to free memory), and no request races another for memory. vLLM's paged pool (one
@@ -87,10 +94,69 @@ pool of small KV blocks shared by all requests, `max_model_len` the most any one
 better when request sizes vary, at the cost of block tables in every attention kernel, a preemption policy and
 the latency spikes it causes. That option was considered and postponed ([low-priority-work.md](low-priority-work.md)).
 
-Two cross-cutting pieces sit on top of the decode and prefill paths. **Speculative decoding**
-(`--spec auto|off|mtp|dflash`, specs 8, 19, 19e, 19f; one-card `dflash` carries prompt lookup) checks several guessed tokens in one
-verify list. Prefill is bf16 on the Level Zero list by default; `--prefill-backend l0-int8` (Hadamard-rotated
-int8 linears, doc 17) is opt-in (operator 2026-10-27).
+### How the two cards stay in step under tensor parallel
+
+Tensor parallel has no host in the loop: each card runs its half of a layer and needs the other card's half
+before it can go on. The cards hand these partial results to each other through a *landing buffer* that lives in
+the reader's memory and that the other card writes into over P2P. The protocol
+(`src/runtime/tp_protocol.h`, device side `src/kernels/tp.cl`) has three parts for each piece of data:
+
+1. **The data.** The sender writes its partial result into the landing buffer.
+2. **The stamp.** The sender then writes the number of this call into a trailer. The stamp fills a whole
+   64-byte line (the unit in which the card's memory is written), 16 identical words.
+3. **The flag.** Last, after a release fence, the sender writes the same call number into a flag, which sits on
+   a separate page.
+
+The reader spins on the flag until it shows the call number it expects, then reads the stamp. If the stamp does
+not match, the flag arrived before its data and the reader reports a *stale* read instead of using old data; if
+the flag never arrives within a bound, it reports a timeout. The first failure is recorded once, and later waits
+skip their spin, so a lost peer costs one bound and not one per layer.
+
+Why a whole line per stamp: every 64-byte line of the landing buffer has exactly one writer, and the data is
+written as whole lines too. When sixteen 4-byte stamps shared one line, each written by a separate store, a
+stamp could reach the reader after its flag: the reader saw the flag of call n with the stamp of call n - 2,
+and one to three requests in a few dozen failed. With one stamp per line the failures went to zero.
+
+## Speculative decoding
+
+A plain decode step produces one token. Speculative decoding guesses several next tokens cheaply and checks all
+of them in one batched step, the *verify*. Guesses that the model itself would have produced are kept, so the
+greedy output is unchanged; the gain is that a verify of several rows costs much less than that many plain
+steps. The guesses come from a *proposer*, chosen with `--spec`:
+
+| `--spec` | proposer | notes |
+|---|---|---|
+| `auto` (default) | the MTP head on Qwen3.8 and Ornith, none on other models | no extra VRAM |
+| `off` | none | |
+| `mtp` | the checkpoint's MTP head (multi-token prediction: a small extra head that predicts up to 3 tokens ahead) | how many guesses to make is decided per step from the head's own confidence |
+| `dflash` | DFlash, a separate small draft model that proposes a block of up to 7 tokens (Qwen3.8) | needs `--draft-model`; the drafter's weights take VRAM from the context, so it is never chosen by default |
+
+**Prompt lookup** is a third source of guesses and is not a mode of its own. When the answer repeats text that is
+already in the context (an edit that copies a file, a tool call that quotes its input), the text that followed
+last time is a very good guess. It runs inside both proposers on one card with one request at a time (and
+inside `dflash` under `tp`): when the lookup finds a long enough match, its copied tokens are verified for that
+step and the proposer's own draft is skipped; otherwise the step is an ordinary MTP or DFlash one. It is on by
+default; `B70_SPEC_LOOKUP=0` turns it off for comparisons.
+
+**Where each proposer runs.**
+
+| | one card | `replica` | `tp` | `pp` | several requests on a card |
+|---|---|---|---|---|---|
+| `mtp` | yes | yes | yes | yes | yes |
+| `dflash` | yes, with prompt lookup | yes, a drafter on each card | yes, see below | yes | refused |
+
+DFlash under `tp` splits the drafter over both cards. It is kept as an explicit choice but it is not faster than
+DFlash on one card for one session, and the server says so at startup, recommending one card
+(`--parallel 1 --spec dflash`), `replica` (a drafter per card) or `--spec mtp` on two cards.
+
+Speculative output is checked against a float32 CPU reference where it differs from the plain run
+([14-golden-gate.md](14-golden-gate.md), the f32 judge). Commands and measured speeds:
+[18-running-models.md](18-running-models.md) and [BENCHMARKS.md](BENCHMARKS.md).
+
+## The prompt pass backends
+
+The prompt pass (prefill) runs in bf16 by default. `--prefill-backend l0-int8` is an opt-in alternative that
+runs the MLP's linears with int8 activations ([17-int8-prefill.md](17-int8-prefill.md)).
 
 ## Component layout
 
@@ -109,7 +175,7 @@ src/
   cli/         b70-serve and b70-decode: arguments, the hardware check, the memory plan,
                the engine adapters (one card, slots, replica, tp, pp)
   tokenizer/   leaf: HF `tokenizers` BPE encode/decode, chat template,
-               streaming detokeniser - see doc 11. Host code, request path only
+               streaming detokeniser (11-tokenizer-and-chat-template.md). Host code, request path only
 third_party/   pinned header-only minja and nlohmann/json
 tools/         weight conversion, the CPU oracle, probes, benchmark drivers
 ```
@@ -168,8 +234,8 @@ SYCL call and no host wait at all**. The int4 weights are dequantised into 1024
 column slabs and multiplied by our own DPAS GEMM, interleaved on that one list (a short chunk, up to 384 rows, uses small tiles
 that read the int4 words directly, `pf_gemm_small` / `pf_gemm_q4`). Attention and the delta net scan are ours too.
 
-That is the second design of this path, and the first one is worth recording because the reason it was
-replaced is not the obvious one. The original prefill called sycl-tla's GEMM from a SYCL queue built by
+This is the second design of this path. The first is worth recording because the reason it was replaced is not
+the obvious one. The original prefill called sycl-tla's GEMM from a SYCL queue built by
 interop from the same `ze_context` and `ze_device`. **The two queues are not orderable against each other on
 this device, and that is a measurement rather than a design preference**:
 `zeDeviceGetCommandQueueGroupProperties` on the B70 reports exactly two groups, ordinal 0
@@ -181,9 +247,7 @@ Level Zero and SYCL was a **host wait**: 656 per chunk at a measured 22.35 us ea
 Moving the GEMM onto the Level Zero list deleted all of them, and the Level Zero walk, with seven times as many
 launches (8,689 against 1,201 a chunk), was faster on an idle card (1502.83 against 1407.63 t/s) and used a
 tenth of the scratch. The worry that thousands of launches would cost host time does not appear at all. The
-sycl-tla path was removed on 2026-10-27 (operator ruling: our own kernels over library layers) after
-`prefill_backend_equivalence_test` had held the two bitwise equal. `--prefill-backend` is `l0` (the default)
-or `l0-int8` (doc 17, opt-in).
+sycl-tla path was removed after `prefill_backend_equivalence_test` had held the two bitwise equal.
 
 Two host-side rules follow from the list being asynchronous, and are stated once
 here rather than at each site:
@@ -219,8 +283,7 @@ have no such problem: their state is fixed-size.
 
 ### Device selection
 
-There is no device flag (the zero-config cleanup, operator 2026-11-06, removed
-`--device` and the `ONEAPI_DEVICE_SELECTOR` parse): the CLIs run on the cards the
+There is no device flag: the CLIs run on the cards the
 driver shows - one card is device 0, two are devices 0 and 1 (`tp`, `replica`, `pp`).
 **`ZE_AFFINITY_MASK`**, a Level Zero *driver*-level filter, decides which cards
 are enumerated at all; we respect it and never set it, and under a mask every
@@ -254,15 +317,17 @@ both.
 
 **Decode** (`src/kernels/`), all bound by `capture.cc` at fixed `M`: 1 for a plain step, 2 to 8 for a
 speculative verify list (`M` = the rows checked at once), 16 for the drafter's blocks. The table is the `M = 1`
-list; since spec 28b every list at `M >= 2` replaces `gemv` / `gemv_i8w` by the small-batch DPAS GEMMs
-`gemm_sm` / `gemm_sm_i8w` (doc 12; DPAS is the card's matrix instruction), which read each weight once for all rows:
+list. Every list at `M >= 2` replaces `gemv` / `gemv_i8w` by the small-batch GEMMs `gemm_sm` / `gemm_sm_i8w`
+([12-kernels.md](12-kernels.md)), which run on DPAS, the card's matrix instruction, and read each weight once
+for all rows:
 
 | Kernel | Notes |
 |--------|-------|
 | `gemv` | the int4 mixers and MLPs, with per-shape split-K |
 | `gemv_bf16` | the `a‖b` projections and the bf16 `lm_head` |
 | `gdn_step` | the recurrent gated delta rule, fused with conv1d, q/k l2norm and the gated RMSNorm |
-| `attn` | split-KV decode attention: per-block partials plus a merge |
+| `attn_decode_v2`, `attn_reduce_v2` | decode attention: partial results per block of the KV cache, then a merge |
+| `attn_verify_dpas` | the verify step's attention on DPAS, for deep contexts |
 | `prep` | residual fold, RMSNorm finish, SiLU-mul, the gated head |
 | `embed_gather`, `argmax` | the token boundary |
 
@@ -310,7 +375,7 @@ adapters; a step over several slots is one batched replay of small-batch kernels
 holds its prefix (else the card with the most free slots), and both cards can prefill at once. Speculative
 decoding (MTP, prompt lookup) runs per slot inside the shared step, within a row budget of 8 rows per step.
 A lone request is bitwise what the one-request server computes; several at once are judged against their lone
-runs by the f32 judge (doc 14), because the many-row kernels round differently.
+runs by the f32 judge ([14-golden-gate.md](14-golden-gate.md)), because the many-row kernels round differently.
 
 **HTTP costs nothing measurable.** On the first server build, decode over HTTP measured 102.0% of the same
 session's CLI control: the per-token host cost of detokenising and writing an SSE frame overlaps the next
@@ -326,21 +391,34 @@ for sampling.
 
 ### Prefix caching
 
-Spec 7 ([superpowers/specs/2026-09-27-spec7-prefix-caching-design.md](superpowers/specs/2026-09-27-spec7-prefix-caching-design.md)):
-one resident session on the card and a write-through store in pinned host RAM
-(`--prefix-cache-gb`, default `auto`: at most 32 GiB, sized from the machine's RAM; `0` = off). The store is 2 GiB pinned
-allocations, never one large one: on two cards the second card maps the first card's allocation through a shared
-import, and an import larger than 4 GiB can fail in the kernel (it answers "busy") while the GPU driver retries
-forever - the 2026-11-11 prefix cache hang. Any host allocation both cards use stays at most 4 GiB. The GDN state cannot be rewound, so
-reuse needs snapshots of it: the store (`src/server/prefix_cache.{h,cc}`) keeps KV
-blocks of 2048 positions and state snapshots (at every block end, at every prompt's
-end, at every request's end) in a tree keyed by exact token ids, LRU over leaves.
-A request continues the resident session when its ids extend it, otherwise gets a prefix cache hit
-from the deepest snapshot that is a prefix of the prompt (state plus the KV the card does
-not already hold), and prefills only the tail; `usage.prompt_tokens_details.cached_tokens`
-reports the restart point. opencode's side requests (titles, subagents) evict the card,
-not the store. With several slots each slot is its own resident session over the one shared store (under `replica`
-a snapshot saved on one card gives a prefix cache hit on the other). Results: [BENCHMARKS.md](BENCHMARKS.md), "Prefix caching (spec 7)".
+An agentic session sends the same long prefix again and again: the system prompt, the tools, the conversation so
+far. The prefix cache lets a request skip the part of its prompt the engine has already read. Design:
+[the prefix caching spec](superpowers/specs/2026-09-27-spec7-prefix-caching-design.md).
+
+**Two levels.** One *resident session* stays on the card. Behind it is a store in pinned host RAM that every
+finished chunk is also written to (`--prefix-cache-gb`, default `auto`: at most 32 GiB, sized from the machine's
+RAM; `0` turns it off).
+
+**What is stored.** The attention layers' KV cache can be cut at any position, but the delta-net layers keep a
+running state that cannot be rewound. So reuse needs snapshots of that state. The store
+(`src/server/prefix_cache.{h,cc}`) keeps KV blocks of 2048 positions and state snapshots (at the end of every
+block, of every prompt and of every request) in a tree keyed by exact token ids, and evicts the least recently
+used leaves.
+
+**What a request gets.** If its token ids extend the resident session, it simply continues it. Otherwise it gets
+a *prefix cache hit* from the deepest snapshot that is a prefix of its prompt: the state and the KV the card does
+not already hold are copied back, and only the tail of the prompt is read.
+`usage.prompt_tokens_details.cached_tokens` reports where it restarted. Side requests of an agent (titles,
+subagents) replace the session on the card, not the store.
+
+**Several requests.** With several slots, each slot is its own resident session over the one shared store. Under
+`replica` a snapshot saved by one card gives a prefix cache hit on the other.
+
+**Why the store is in 2 GiB pieces.** On two cards the second card maps the first card's host allocation. A
+mapping larger than 4 GiB can fail in the kernel, which answers "busy", and the GPU driver retries a busy answer
+forever: a hang, not an error. So any host allocation that both cards use stays at or below 4 GiB.
+
+Results: [BENCHMARKS.md](BENCHMARKS.md), "Prefix caching".
 
 The server owns the **tokenizer and chat template**. Both are host code on the
 request path: encode once per request, detokenise once per token, off the card's

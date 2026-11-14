@@ -6,7 +6,7 @@ with the inputs shown) or **estimated**. Every measured row and its grade lives
 in [BENCHMARKS.md](BENCHMARKS.md); this document is the reasoning over them.
 
 The profile tables here were taken on older stacks (the decode profile before any lever, the prefill
-phases on the 2026-09 compute runtime and IGC; the box now runs runtime 26.40 with IGC 2.42.6, doc 10). The
+phases on the 2026-09 compute runtime and IGC; the box now runs runtime 26.40 with IGC 2.42.6, [10-the-box.md](10-the-box.md)). The
 ceilings are properties of the card and stand; the speed numbers are re-taken in one record-grade run on a quiet
 box (the quiet-box measurement session in [open-work.md](open-work.md)).
 Speculative decoding (MTP, DFlash, lookup) changes the decode arithmetic - one step checks M rows
@@ -26,10 +26,10 @@ At batch 1 every weight is read once per token, so
 tokens/sec_ceiling = read_bandwidth / bytes_read_per_token = 590 GB/s / W
 ```
 
-`590 GB/s` is measured through a plain Level Zero launch (doc 01) - the launch
+`590 GB/s` is measured through a plain Level Zero launch ([01-hardware.md](01-hardware.md)) - the launch
 path this engine actually submits on. `W` is measured by the loader from what it
-makes resident: **15,539,980,288 B = 15.540 GB per token** (doc 13), which is
-doc 03's 15.519 GB of header arithmetic plus 0.016 GB of tiling pad and 0.005 GB
+makes resident: **15,539,980,288 B = 15.540 GB per token** ([13-loader.md](13-loader.md)), which is
+[03-models.md](03-models.md)'s 15.519 GB of header arithmetic plus 0.016 GB of tiling pad and 0.005 GB
 of fp32-widened norms.
 
 ```
@@ -39,16 +39,16 @@ this    =               29.45 t/s -> 458 GB/s -> 77.6% MBU   [derived]
 ```
 
 **Use 590 GB/s and 15.540 GB, and use them on both sides of any comparison.**
-Doc 01 also recommends 600 GB/s as a general hardware denominator and doc 03's
-header arithmetic gives 15.519 GB; those are the same measurements on different
-denominators, not different measurements, and mixing them inside one comparison
-moves a figure by about 2%.
+[01-hardware.md](01-hardware.md) also gives the card's peak, 638 GB/s, and
+[03-models.md](03-models.md)'s header arithmetic gives 15.519 GB; 638 is what the memory could carry and 590 is what a kernel launch reaches, and the two
+weight totals differ only in header arithmetic. Mixing denominators inside one comparison
+moves a figure by up to 8%.
 
 ### Prefill: compute
 
-The forward pass is **48.97 GFLOP/token** (derived from the doc 03 shapes), so
+The forward pass is **48.97 GFLOP/token** (derived from the [03-models.md](03-models.md) shapes), so
 4096 tokens in 2.4516 s is **81.8 TFLOP/s sustained** (derived). The DPAS pipe
-runs bf16 at **183.45 TFLOP/s measured** (doc 01) and our own GEMM reaches
+runs bf16 at **183.45 TFLOP/s measured** ([01-hardware.md](01-hardware.md)) and our own GEMM reaches
 **161.7 TFLOP/s measured** on the largest linear, 88.1% of it.
 
 The gap between 81.8 and 161.7 is not kernel quality: it is everything that is
@@ -86,8 +86,8 @@ Four things that table settled.
 1. **The host-overhead thesis is finished for this engine.** 99.77% of the step
    is inside `execute` plus `fence.wait()`; the host spends 97 us per token
    writing four bytes and submitting. There is no host work left to delete. The
-   thesis was always about vLLM's Python and Triton launch path (doc 09), and
-   replay did exactly what doc 08 said it would - which is precisely why the
+   thesis was always about vLLM's Python and Triton launch path ([09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md)), and
+   replay did exactly what [08-decode-vs-prefill.md](08-decode-vs-prefill.md) said it would - which is precisely why the
    remaining gap is *not* excusable as overhead. It is kernel time.
 2. **The linears are not the problem.** They run at 89-97% of their per-shape
    bandwidth ceilings, and `lm_head` alone is 4.376 ms at **581 GB/s, 98.5% of
@@ -167,8 +167,8 @@ wins did.
 
 | what | why it was rejected |
 |---|---|
-| **Fusing the int4 dequant into the GEMM** | Both variants came out bitwise identical to the two-pass path over all 71,303,168 outputs, and both were slower. The dequant pass already runs at about 546 GB/s, roughly 90% of hardware peak, so there is only 0.826 ms in it at this shape; moving the same arithmetic into the mainloop costs 2.759 ms even when issued exactly once per weight. |
-| **W4A8 on the mixed 4-bit by 8-bit DPAS** | The mixed builtin's K is 32, the same as int8's, so it runs at 2.000x bf16 and not 4x (doc 01). Measured 1.017x the bf16 two-pass control, 0.965x once the activation quantiser it needs is counted, against a 1.53x bar: the per-group rescale costs 3.0 to 3.4 of the 5.440 ms while the matrix math it rescales costs 1.99. Separately, **2.79% relative L2 error** against the bf16 result, worst-row cosine 0.9976, driven by activation outliers. |
+| **Fusing the int4 dequant into the GEMM** | Both variants came out bitwise identical to the two-pass path over all 71,303,168 outputs, and both were slower. The dequant pass already runs at about 546 GB/s (93% of the measured 590; 86% of the 638 GB/s peak, derived), so there is only 0.826 ms in it at this shape; moving the same arithmetic into the mainloop costs 2.759 ms even when issued exactly once per weight. |
+| **W4A8 on the mixed 4-bit by 8-bit DPAS** | The mixed builtin's K is 32, the same as int8's, so it runs at 2.000x bf16 and not 4x ([01-hardware.md](01-hardware.md)). Measured 1.017x the bf16 two-pass control, 0.965x once the activation quantiser it needs is counted, against a 1.53x bar: the per-group rescale costs 3.0 to 3.4 of the 5.440 ms while the matrix math it rescales costs 1.99. Separately, **2.79% relative L2 error** against the bf16 result, worst-row cosine 0.9976, driven by activation outliers. |
 | **Removing barriers from the GDN triangular solve** | The design assumed synchronisation dominated that kernel. Deleting 64 of 128 barriers bought 1.7 ms of a 73.5 ms row, so all 128 are about 4.6% of it and the premise was wrong by roughly 18x. Both barrier-free variants were bit-identical and both were slower. The row is the serialised recurrence itself. |
 | **bf16 intermediate buffers** | Halving the bytes changed nothing: `ocloc` exposes no 16-bit block write wider than 8 rows, so the epilogue is bound by store message count rather than by bytes. |
 | **W4A4: int4 weights times int4 activations** | The DPAS rate is real (4.000x bf16, 733.80 TIOP/s), but after the Hadamard rotation int4 activations roughly double the output error: held-out logits 23.3% relative L2 against the int8 path's 12.5%, and 3.4 argmax positions in 100 lost against 2 allowed. Only `o_proj` alone passes, 2.1% of the prefill GEMM work ([probe](probes/probe-w4a4-2026-10-28.md)). |
@@ -201,7 +201,7 @@ in kernels. The byte-matched rows use the bf16 head on both sides.
 Rearranging weights once at load into the exact order the mainloop wants is free
 at run time. Every CUDA backend does it; vLLM's XPU MXFP4 path does not. This
 engine does it, which is why the decode kernel has no layout branch in the hot
-path (doc 02).
+path ([02-formats.md](02-formats.md)).
 
 ### 3. Delete per-step allocations
 

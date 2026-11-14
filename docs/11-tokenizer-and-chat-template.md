@@ -77,7 +77,7 @@ SSE chunk ◄── UTF-8-safe incremental detokenise ◄── token id ◄─�
 - **Stop check**: compare each token id against the `eos_token_id` list, plus
   user `stop` strings matched on the decoded text.
 
-Nothing here touches the decode command list. The control block (doc 04)
+Nothing here touches the decode command list. The control block ([04-architecture.md](04-architecture.md))
 carries `cur_token` out; the host detokenises it while the next replay runs.
 
 ## Options for the BPE encoder
@@ -93,8 +93,8 @@ carries `cur_token` out; the host detokenises it while the next replay runs.
 ### What is built
 
 **The first option**: HF `tokenizers` (Rust) via C FFI, as the leaf
-`src/tokenizer/` library, behind a four-function C interface (`encode`,
-`decode`, `token_to_piece`, `free`) so that nothing else knows which
+`src/tokenizer/` library, behind a small C interface (`b70_tok_encode`,
+`b70_tok_decode`, the two id/token lookups, the vocabulary size and the frees) so that nothing else knows which
 implementation is behind it. The crate is pinned to `tokenizers 0.22.2`; its
 C++ RAII wrapper is `tok::Tokenizer`. The committed Python-reference corpus has
 10,240 cases and reports zero encode and zero decode mismatches.
@@ -226,9 +226,9 @@ swappable.
 - `src/tokenizer/` is a leaf: it depends on nothing in `src/` and nothing in
   `src/` except `server/` depends on it. Keep it that way.
 - The build gains a Rust step. Cache it the way `ccache` caches the C++ side
-  (doc 09); it is one crate, compiled once.
+  ([09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md)); it is one crate, compiled once.
 - `tools/` gains a Python script that dumps golden vectors. Python appears in
-  `tools/` only, as doc 04 requires.
+  `tools/` only, as [04-architecture.md](04-architecture.md) requires.
 - Owning every dependency is deferred for this one component, explicitly, with
   the parity test as the path back. That is a named trade-off: a correct server
   now against a dependency-free one later.

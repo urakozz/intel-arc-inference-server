@@ -1,10 +1,16 @@
-# 17. The int8 prefill: how 2104.50 t/s is computed
+# The int8 prompt pass
 
-The short version of spec 5 and the two weeks of probes behind it. The
-evidence is `docs/probes/probe-w4a8-2026-09-23.md` (sections 1 to 15), the design is
-`docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md`, and the rows are
-in `BENCHMARKS.md`. Every number is **measured** unless marked **derived**, and comes from the 2026-09-24 one-card stack (the
-current speeds are in `BENCHMARKS.md`).
+The prompt pass (prefill) runs in bf16 by default. `--prefill-backend l0-int8` is an optional faster form that
+feeds the MLP's linears int8 activations, which the card's matrix instruction multiplies at twice the bf16
+rate. This guide says what runs in int8, how it was arrived at, what it gains and where it fails. Today it
+reads a 4,096-token prompt about 1.2x faster than bf16 on one card (the "Status" section has the current
+numbers).
+
+The evidence is [the W4A8 probe record](probes/probe-w4a8-2026-09-23.md) (sections 1 to 15), the design is
+[the int8 prefill spec](superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md), and the rows are in
+[BENCHMARKS.md](BENCHMARKS.md). Every number is **measured** unless marked **derived**. The numbers in "What
+runs", "How we got here" and "What the speed is made of" come from the first one-card build of this path
+(2,104.50 t/s then); "Status" is current.
 
 ## What runs
 
@@ -65,7 +71,7 @@ padded local path keeps TP's wavefront and the established rotation size.
 
 `tp_prefill_int8_test` covers four golden and 36 tool-call prompts, teacher-forces
 one card's bf16 ids, and judges differences on that same context. It uses the
-documented f32 near-miss bar of eight ulps (`spec_judge.h`, doc 14); missing
+documented f32 near-miss bar of eight ulps (`spec_judge.h`, [14-golden-gate.md](14-golden-gate.md)); missing
 references print their context keys and SKIP. `--one-card` diagnoses the existing
 one-card int8 pass on the same contexts. The int8 prefill + int8 KV warning stays.
 

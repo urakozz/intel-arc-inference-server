@@ -17,7 +17,7 @@ example targets this silicon directly.
 | `05_bmg_gemm_with_epilogues` | Fusing SiLU, bias and residual into the GEMM |
 | `06_bmg_flash_attention` | Flash attention, a different approach from the engine's own `pf_flash_attn` |
 | `04_bmg_grouped_gemm`, `10_bmg_grouped_gemm_mixed_dtype` | MoE grouped GEMM (the engine's MoE models use their own kernels) |
-| `08_bmg_gemm_f8`, `09_bmg_grouped_gemm_f8` | FP8 - not used; there is no reachable FP8 matmul on this device (doc 01) |
+| `08_bmg_gemm_f8`, `09_bmg_grouped_gemm_f8` | FP8 - not used; there is no reachable FP8 matmul on this device ([01-hardware.md](01-hardware.md)) |
 | `50_xe35_*`, `51_xe35_*` | Block-scaled MX - **Xe3.5, not Battlemage** |
 | `12_xe20_moe_gemm_cute_interface` | Xe2 MoE via the CuTe interface |
 | `examples/cute/tutorial/xe_gemm_quantization.cpp` | Quantised GEMM tutorial - read before writing anything |
@@ -37,7 +37,7 @@ That was, for a while, the most attractive-looking opening in this whole
 document. It is closed: the mixed builtin's K is 32, the same as int8's, so it
 runs at 2.000x bf16 rather than 4x, and a W4A8 kernel built on it measured
 slower than the bf16 two-pass control once its activation quantiser was counted
-(docs 01 and 02).
+([01-hardware.md](01-hardware.md) and 02).
 
 ### `vllm-xpu-kernels/csrc/xpu/gdn_attn` - the GDN reference
 
@@ -52,7 +52,7 @@ About 6,000 lines of SYCL for exactly the layer `sycl-tla` lacks:
 | `xe_2/l2norm_kernel.hpp` | The q/k L2 norm GDN applies before the recurrence |
 
 Read the recurrent kernel for the *math* and the index arithmetic; do not lift
-its torch/ATen plumbing. Two of the twelve patches in the postmortem (doc 09)
+its torch/ATen plumbing. Two of the twelve patches in the postmortem ([09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md))
 touched these files, so their failure modes are already known.
 
 ## The other checkouts worth having
@@ -62,11 +62,11 @@ touched these files, so their failure modes are already known.
 | `level-zero` | The L0 spec and loader - the command-list API this design lives on |
 | `compute-runtime` | Intel NEO. When L0 behaviour surprises you, the answer is here |
 | `intel-graphics-compiler` | IGC, what `ocloc` runs. Relevant the moment you read generated assembly |
-| `another stack` | A working C++ LLM pipeline. Read its scheduling and KV handling; ignore its model format. Also the reference for the **tokenizer layer**: `another tokenizer` for BPE, `google/minja` for chat templates, and `text_streamer.cpp` for incremental UTF-8-safe detokenisation (doc 11) |
+| `another stack` | A working C++ LLM pipeline. Read its scheduling and KV handling; ignore its model format. Also the reference for the **tokenizer layer**: `another tokenizer` for BPE, `google/minja` for chat templates, and `text_streamer.cpp` for incremental UTF-8-safe detokenisation ([11-tokenizer-and-chat-template.md](11-tokenizer-and-chat-template.md)) |
 | `auto-round` | The quantiser we use for every checkpoint (our own AutoRound int4 g64 re-quants), and `auto_round_extension/ark` - the runtime we replaced |
 | `vllm`, `vllm-xpu-kernels` | The incumbent and the speed baseline. Their XPU kernels are the reference implementation to beat |
 | **`oneDNN`** | **The most valuable checkout after `sycl-tla`.** Intel's own JIT GEMM generator (`gemmstone`), where another stack's prefill actually runs, and where hardware capability is written down as explicit gates |
-| `another stack` | The GPU plugin: `fully_connected_gpu_gemv.cl` is the decode kernel that beats vLLM. Read it (doc 08) |
+| `another stack` | The GPU plugin: `fully_connected_gpu_gemv.cl` is the decode kernel that beats vLLM. Read it ([08-decode-vs-prefill.md](08-decode-vs-prefill.md)) |
 | `model_server` | another server, OpenAI-compatible serving on top of another stack. Reference for the HTTP/SSE layer, not for the engine |
 | `oneAPI-samples` | SYCL and L0 idioms with working build recipes. Fastest way to sanity-check a toolchain |
 

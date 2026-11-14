@@ -40,22 +40,29 @@ Device-to-device, three buffer sizes, 20 iterations after 5 warm-ups:
 | 2.0 GB | **601 GB/s** | 529 GB/s |
 | 8.0 GB | **601 GB/s** | 529 GB/s |
 
-Flat from 0.5 GB upward, so this is DRAM bandwidth, not cache. That is about
-99% of a 256-bit GDDR6 at 19 Gbps theoretical peak (608 GB/s), which also tells
-you the hardware peak.
+The rate does not fall as the buffer grows far past the 24 MB cache, so this is
+DRAM bandwidth, not cache.
+
+The card's peak is **638 GB/s**, as the vendor's monitoring tool (`hw-smi`)
+reads it under load (615 GB/s current, 638 GB/s peak). The 601 GB/s above is
+94 % of that peak (derived: 601 / 638).
 
 Re-measured with a plain Level Zero launch (`tools/probe/probe_bw`, `bw_sum.cl`):
 **590 GB/s** median at 2 GB (min 585, max 592) and 584 GB/s median at 8 GB
 (min 580, max 588), 20 timed iterations after 5 warm-ups. Agrees with the torch
-probe within 3%.
+probe within 3%, and is 92 % of the peak (derived: 590 / 638).
 
 **Use 590 GB/s as the roofline denominator.** It is the rate through the launch
 path this engine actually submits on, and it is the one every roofline figure in
-`docs/BENCHMARKS.md` and `05-perf-model.md` divides by.
+`docs/BENCHMARKS.md` and `05-perf-model.md` divides by. So there are two bases
+in these documents, and each figure should say which it uses: "of the measured
+590" (what a kernel can reach) and "of the 638 peak" (what the memory could
+carry). Older records took the peak as 608 GB/s, a 19 Gbps figure; their
+percentages of peak are about 5 % too high.
 
 Seed the buffer with incompressible data. The B70 compresses device-local
 memory losslessly, so a `zeCommandListAppendMemoryFill` of one repeated 32-bit
-word reads back at 1022 GB/s, above the 608 GB/s theoretical peak, because most
+word reads back at 1022 GB/s, above the 638 GB/s peak, because most
 of those loads never reach DRAM. Timing is not the culprit: at 1, 2 and 4
 launches per submission the elapsed time was 2.102 / 4.203 / 8.402 ms, exactly
 linear. Any probe reporting bandwidth above the theoretical peak is measuring
@@ -125,10 +132,13 @@ linear path is 2.000x bf16, exactly the same as a W8A8 one, and none of a W4A8
 win could come from the math pipe.
 
 That prediction was tested with a real kernel on real weights and real
-activations, and **W4A8 was rejected**: the per-group rescale costs more than
-the 2x instruction rate buys, and the activation outliers cost 2.79% relative
-L2 error against the bf16 result. See
-[probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md).
+activations, and **W4A8 was rejected for Qwen3.8's dense layers**: the
+per-group rescale costs more than the 2x instruction rate buys, and the
+activation outliers cost 2.79% relative L2 error against the bf16 result. See
+[probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md). (The one place
+W4A8 runs today is the expert layers of MoE models under the optional int8
+prompt pass, `--prefill-backend l0-int8`; see
+[17-int8-prefill.md](17-int8-prefill.md).)
 
 The one DPAS lever on this device worth more than 2x is **4-bit by 4-bit**, at
 4.000x. W4A4 is not reachable at acceptable accuracy: int4 activations at group 256, even after the
@@ -188,20 +198,26 @@ a first-class path in Intel's own kernel library either.
 
 ## Two cards, and which software stack these numbers come from
 
-The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM. Peer-to-peer access (P2P: one
-card writing straight into the other's memory over PCIe, without bouncing through host RAM) works natively on
-the mainline Linux 7.4.0-rc2 kernel; earlier kernels needed a local patch. The engine uses it for the
-pipeline-parallel hand-off of the hidden state (a device-to-device copy into the second card's memory) and for
-the two-card tensor-parallel runs. The second card is not interchangeable with the first: prefill runs 3.2-3.4%
-slower on it ([10-the-box.md](10-the-box.md)).
+**The host.** The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM.
 
-The card's firmware caps each card's BAR (the window the CPU sees its memory through) at 16 GB (ReBarState 14;
-15 does not POST); the xe kernel driver resizes both cards to the full 32 GB when it loads. The Level Zero
-runtime retries an ioctl that returns EBUSY forever, so a lasting EBUSY is a hang, not an error. This is why
-any host allocation that both cards map stays at or below 4 GiB (the prefix cache is pinned in 2 GiB pieces).
+**Peer-to-peer access** (P2P: one card writing straight into the other's memory over PCIe, without bouncing
+through host RAM) works natively on the mainline Linux 7.4.0-rc2 kernel. The engine uses it in both two-card
+modes: the layer split hands the hidden state to the second card with a device-to-device copy, and tensor
+parallel exchanges partial results every layer.
 
-The software is compute runtime 26.40.40196.8 (held at that version), IGC (the Intel Graphics Compiler)
-2.42.6 and Level Zero loader 1.34. The `driver_version` line and the rates measured in this document come
-from earlier stacks. The hardware rates (DPAS, bandwidth) are properties of the silicon and are not expected
-to move; the kernel timings in the other documents are re-measured in one quiet-box session
-([open-work.md](open-work.md), item 5), as the opening sentence of this file says to do after any driver bump.
+**The second card.** An early measurement had prefill 3.2-3.4 % slower on the second card
+([10-the-box.md](10-the-box.md)). The cause was never pinned down.
+
+**The memory window (BAR).** The BAR is the window through which the CPU sees a card's memory. The firmware caps
+it at 16 GB per card (ReBarState 14; 15 does not boot); the xe kernel driver resizes both cards to the full 32 GB
+when it loads.
+
+**A lasting "busy" is a hang.** The Level Zero runtime retries an ioctl that returns EBUSY forever, so a lasting
+EBUSY never surfaces as an error. This is why any host allocation that both cards map stays at or below 4 GiB:
+the prefix cache, for one, is pinned in 2 GiB pieces.
+
+**The software stack.** Compute runtime 26.40.40196.8 (held at that version), IGC (the Intel Graphics Compiler)
+2.42.6 and Level Zero loader 1.34. The `driver_version` line at the top and the rates measured in this document
+come from earlier stacks. The hardware rates (DPAS, bandwidth) are properties of the silicon and are not
+expected to move. The kernel timings in the other documents will be re-measured in the quiet-box measurement
+session ([open-work.md](open-work.md), item 5).

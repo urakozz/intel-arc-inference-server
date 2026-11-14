@@ -75,26 +75,26 @@ is not finished is listed in [open-work.md](open-work.md).
 - **Qwen3.8-Flash-Next** is next. It runs only truncated (`--layers N`) because the whole model does not
   fit two cards; open-work.md has the plan for the full size.
 - **K2-Horizon and Kolibri-1** are supported by the code and parked (out of focus); no speed rows.
-- **Nemotron 3.5 Bolt** is parked until Flash-Next is done (operator, 2026-11-11). Its section stays
+- **Nemotron 3.5 Bolt** is parked until Flash-Next is done. Its section stays
   because the code still serves it.
 - Dropped and no longer supported: LFM2.5, Muse-Glimmer and Agnes 3.0 Flash (a `config.json` naming
   `AgnesForConditionalGeneration` is refused by name). Flint and Nanbeige are parked and not built.
   LiLiCorr is Bolt's draft model (`--spec dflash`, Bolt's section).
 
-| | Qwen3.8-27B | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) | Qwen3.8-Flash-Next (spec 21) |
+| | Qwen3.8-27B | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 | Qwen3.8-Flash-Next |
 |---|---|---|---|---|---|
-| checkpoint | published (ours, int4 g64) | published (ours, spec 15 §13) | published (ours) | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); our own is not made |
-| `b70-serve` | yes | yes | yes (spec 18d) | yes (spec 20e), **two cards** by default | `--layers N` only (spec 21e; the whole model is refused, naming spec 22) |
+| checkpoint | published (ours, int4 g64) | published (ours) | published (ours) | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); our own is not made |
+| `b70-serve` | yes | yes | yes | yes, **two cards** by default | `--layers N` only (the whole model is refused until the expert tier is built) |
 | `--parallel tp` | yes | refused | refused | refused | refused |
 | `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request a card); more refused | refused | refused | refused |
-| `--parallel pp` (two cards, spec 16d) | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
-| `b70-decode` | yes | yes | yes | decode and prefill (spec 20d), **two cards** (the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22) |
+| `--parallel pp` (two cards) | yes | yes | **refused** (one card) | its default (its own engine) | yes, `--layers N` |
+| `b70-decode` | yes | yes | yes | decode and prefill, **two cards** (the default) | decode and prefill, **`--layers N` required** |
 | speed rows in BENCHMARKS | yes | yes | no | no | no |
-| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (`auto` = off until spec 22's numbers); `b70-decode` refuses it |
-| `--spec lookup` | yes | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
-| `--spec dflash` (spec 19) | yes, when asked: one card (with prompt lookup folded in), `--parallel replica` or `pp`, bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
-| `--kv-cache int8` | yes | not built | yes (spec 18e) | refused (bf16 only) | refused (bf16 only) |
-| prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
+| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed number of guesses = `--spec-max` 1..3 (`auto` = off until the whole model is measured); `b70-decode` refuses it |
+| `--spec lookup` (developer value) | yes | yes (needs the head) | no | no | yes (needs the head) |
+| `--spec dflash` | yes, when asked: one card (with prompt lookup inside), `replica`, `tp` or `pp`, bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
+| `--kv-cache int8` | yes | not built | yes | refused (bf16 only) | refused (bf16 only) |
+| prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only | `l0` only |
 | KV per position (bf16) | 64 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
 | `--max-len auto`, one card, int8 head (derived) | 171008 with MTP (the default); ~201k with `--spec off` | 262144, with or without MTP (measured by the operator, bf16 KV, 27.3 GB planned of 32.5) | ~46k served; `b70-decode` ~50k decode-only | 262144 on two cards (split 25) | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
 | with `--kv-cache int8` (derived) | 262144, with or without MTP | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
@@ -170,96 +170,83 @@ Startup prints the split (`split: auto -> N`), the plan per card and both cards'
 
 ## Speculative decoding and how its output is judged
 
-A *proposer* guesses the next few tokens and the main model checks them all in one pass (a "verify" step
-of M rows), so every correct guess is a token for free. `--spec` picks the proposer: `mtp` (the model's
-own MTP head, spec 8) or `dflash` (a small draft model, spec 19). On one card `dflash` also runs prompt
-lookup inside it (spec 19f): where the text repeats something earlier than the drafter's 2,048-token
-window, the continuation of that repeat is checked instead of the drafter's guesses. `lookup` (the
-repeat alone, spec 19e) and `dflash-lookup` (the same as one-card `dflash`) stay as developer values.
-`mtp` (and so `auto`) runs prompt lookup inside it the same way on one card, one slot (open-work 27): where
-the answer repeats 8 or more tokens of earlier text, up to 3 tokens of the repeat's continuation are checked
-instead of the head's guesses; elsewhere the head drafts as before. `B70_SPEC_LOOKUP=0` serves plain MTP /
-plain DFlash for A/B runs.
+A *proposer* guesses the next few tokens and the main model checks them all in one pass (a *verify* step of
+several rows), so every correct guess is a token almost for free. `--spec` picks the proposer:
 
-`--spec auto` (the default) is the MTP head wherever the model has one: no extra memory, so the full context
-stays available. DFlash runs only when asked (`--spec dflash`); its drafter's weights (1.21 GB) come out of the
-context's memory (operator 2026-11-14). The engine never downloads: a missing drafter is an error.
-The verify step of every decode list at M >= 2 runs the small-batch int4 GEMM `gemm_sm` (spec 28b; M = 1
-keeps the GEMV, bitwise as before); the DFlash drafter's int8 linears and Flash-Next's verify lists run
-on it too. Verify attention runs the DPAS kernel (spec 28c) from the depth its table says and the v2
-decode kernel below it.
+| `--spec` | what proposes | where |
+|---|---|---|
+| `auto` (the default) | the model's own MTP head where it has one (Qwen3.8, Ornith); nothing elsewhere | every run mode |
+| `mtp` | the MTP head, up to 3 tokens a step | every run mode |
+| `dflash` | DFlash, a small draft model, up to 7 tokens a step (Qwen3.8) | one card, `replica`, `tp`, `pp`; needs `--draft-model` |
+| `off` | nothing | |
 
-Because the verify rows no longer run the same kernel as a plain step, speculative output is not
-compared bit for bit with plain decode. It is graded by the **f32 judge** (`tests/server/spec_judge.h`,
-doc 14): a speculative stream passes when it is no further from a float32 reference than plain decode on
-the same context, or when every miss is a near-miss (`golden::NearMiss`, within 8 bf16 ulps of the f32
-top). Plain, unchanged code paths still gate bitwise.
+`auto` is the MTP head because the head costs no extra memory, so the full context stays available. DFlash runs
+only when asked: its weights (1.21 GB) come out of the context's memory. The engine never downloads, so a
+missing drafter is an error.
 
-## Qwen3.8-27B with the DFlash draft model (spec 19)
+**Prompt lookup** runs inside both proposers on one card with one request at a time. Where the answer repeats 8
+or more tokens of earlier text, the tokens that followed that text last time are checked instead of the
+proposer's guesses: up to 3 tokens inside MTP, up to 7 inside DFlash (there the repeat must lie outside the
+drafter's own 2,048-token window). Elsewhere the proposer drafts as usual. It is on by default;
+`B70_SPEC_LOOKUP=0` serves plain MTP or plain DFlash for comparisons. (`--spec lookup` and
+`--spec dflash-lookup` remain as developer values.)
 
-`z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 7 tokens per step from Qwen3.8's own hidden states (the
-outputs of layers 5 / 19 / 33 / 47 / 61). `--spec dflash` needs an explicit `--draft-model` (operator ruling
-2026-11-14: the drafter takes memory from the context, so there is no default drafter and the model is a
-deliberate choice; without it the server and b70-decode refuse and name both). One choice is our AutoRound int4
-export of it, `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (W4A16, group 64, symmetric; 1.21 GB, loaded as shipped onto the
-int4 small-batch GEMM - operator ruling 2026-11-14: draft pass 4.41 ms against the int8 drafter's 6.20 at 4,096,
-acceptance pooled -0.016 tokens a round, the code corpus -0.054 accepted). `--draft-model z-lab/Qwen3.8-27B-DFlash2`
-(2.05 GB) loads the bf16 original, quantised to int8 at load. Its acceptance on our prompts was measured on the Mac CPU
-(`docs/probes/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on
-code, ~2.2 on prose; int8 and 4-bit drafters equal bf16). It has run on the card since 2026-10-27
-(BENCHMARKS "DFlash"); it runs when asked (`--spec dflash`), never as `--spec auto`.
-The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step 16.3 -> 8.9 ms).
-On one card `--spec dflash` runs prompt lookup inside DFlash for edit / copy turns (spec 19f):
+**How the output is judged.** The verify rows run other kernels than a plain step (the small-batch GEMM
+`gemm_sm` instead of the one-row GEMV, and a DPAS attention kernel at depth), and those round differently. So
+speculative output is not compared bit for bit with plain decode. It is graded by the **f32 judge**
+(`tests/server/spec_judge.h`, [14-golden-gate.md](14-golden-gate.md)): a speculative stream passes when it is
+no further from a float32 reference than plain decode on the same context, or when every miss is a near-miss
+(within 8 bf16 ulps of the reference's top choice). Plain code paths are still checked bitwise.
+
+## Qwen3.8-27B with the DFlash draft model
+
+DFlash drafts a block of up to 7 tokens per step from Qwen3.8's own hidden states (the outputs of layers 5, 19,
+33, 47 and 61). `--spec dflash` needs an explicit `--draft-model`; without it `b70-serve` and `b70-decode`
+refuse and name the two choices:
+
+| `--draft-model` | size | notes |
+|---|---:|---|
+| `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` | 1.21 GB | our int4 export, loaded as shipped. The recommended one: draft pass 4.41 ms at a 4,096-token context |
+| `z-lab/Qwen3.8-27B-DFlash2` | 2.05 GB | the bf16 original, quantised to int8 at load: draft pass 6.20 ms |
+
+The int4 drafter accepts slightly fewer tokens a round than the int8 one (0.016 fewer, pooled over the test
+prompts) and is faster overall.
 
 ```sh
-# the packed drafter (once): uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
-# one card: the drafter beside the target (packed int4, 1.21 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
-./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last --spec dflash \
-    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
-# the bf16 original instead, quantised to int8 at load (2.05 GB)
-./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2
-# one card with int8 KV (spec 19v3a): host planner 262144 tokens at 32.530 GB with the packed drafter (254976 int8)
-./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --max-len auto \
-    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
-# two cards, pipeline parallel: the drafter on the second card beside lm_head
-./build/src/cli/b70-serve $Q --parallel pp --spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
-# greedy without the server (one card), K <= 7 per step
+# the packed drafter (once)
+uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
+D=urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
+
+# one card, with prompt lookup inside
+./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last --spec dflash --draft-model $D
+# one card with the int8 KV cache
+./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --draft-model $D
+# two cards, two sessions: a drafter on each card
+./build/src/cli/b70-serve $Q --max-num-seqs 2 --spec dflash --draft-model $D
+# two cards, tensor parallel: the drafter split over both cards
+./build/src/cli/b70-serve $Q --parallel tp --spec dflash --draft-model $D
+# two cards, the layers split: the drafter on the second card
+./build/src/cli/b70-serve $Q --parallel pp --spec dflash --draft-model $D
+# greedy without the server (one card)
 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/code.ids --n 256 --prefill \
-    --spec dflash --spec-max 7 --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
+    --spec dflash --spec-max 7 --draft-model $D
 ```
 
-- **Defaults:** no drafter (`--draft-model` is required); with the packed int4 drafter (bf16 KV: `--max-len auto` 158,208 tokens on a 32.530 GB card, 145,664 with
-  the int8 drafter),
-  `--spec-max 7`, `--draft-vocab off` (a ranked 32k vocabulary was ranked in-sample; by id it loses up to
-  1.4 tokens at K = 7).
-- **KV cache:** bf16 and int8 are wired for one card and `--parallel pp` (spec 19v3a). The int8 mode
-  host planner gives **262,144 tokens** (the full context) on a 32.530 GB card with a 1.5 GB reserve (int8 head,
-  the packed drafter and the 2-bit candidate head; 254,976 with the int8 drafter). Allocation at that length, full acceptance, f32 serving and speed gates are pending;
-  no int8 speed claim is made yet.
-- **Refused, by name:** `--parallel tp` and `replica`, several slots a card
-  (`--max-num-seqs` above 1 on one card), `b70-decode --parallel pp`, every other model.
-- **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot, so a conversation that gets a prefix cache hit
-  from a request's prompt-end or request-end snapshot drafts exactly as an unbroken one. **Caveat:** a
-  snapshot at a block end inside a long prefill holds the ring as that prefill left it (the prefill
-  projects only its last 2048 positions), so a prefix cache hit there drafts worse - never differently - until 2048
-  new positions have refilled the ring.
+- **Which mode.** DFlash is fastest on one card. Under `--parallel tp` it works but is not faster than on one
+  card for one session, and the server prints a note at startup recommending one card, `replica` or MTP on two
+  cards.
+- **Context.** With the packed drafter and the bf16 KV cache, `--max-len auto` gives 158,208 tokens on one
+  card (145,664 with the int8 drafter). With `--kv-cache int8` the memory planner gives the full 262,144
+  (254,976 with the int8 drafter).
+- **Refused, by name:** several requests on one card (`--max-num-seqs` above 1 on one card, above 2 on two),
+  and every other model.
+- **The prefix cache** keeps the drafter's context (41.9 MB) with every snapshot, so a conversation that gets a
+  prefix cache hit at the end of a prompt or of a request drafts exactly as an unbroken one. A hit at a
+  snapshot inside a long prompt drafts worse (never differently) until 2,048 new positions have refilled the
+  drafter's window.
 
-Re-running the acceptance measurement (a Mac or the box CPU; ~20-25 h on a 64 GB Mac with the container at
-~54 GB):
-
-```sh
-# downloads (HF cache): the target in bf16 (~54 GB), the drafter (3.85 GB); optional 4-bit drafter arm
-uvx --from huggingface_hub hf download Qwen/Qwen3.8-27B
-uvx --from huggingface_hub hf download z-lab/Qwen3.8-27B-DFlash2
-uvx --from huggingface_hub hf download syvai/Qwen3.8-27B-DFlash2-W4A16
-# plans and estimates only, no model loaded
-DRY_RUN=1 tools/oracle/dflash_p0.sh
-# the run: tap dumps, the draft-vocabulary ranking, acceptance per drafter arm (resumable, detached)
-MEM=54g nohup tools/oracle/dflash_p0.sh > /dev/null 2>&1 &
-tail -f oracle-out-19a/p0.log                       # then oracle-out-19a/accept/summary.md
-# one arm again, e.g. after a new ranking
-STEPS="accept" ARMS=int8 tools/oracle/dflash_p0.sh
-```
+How the drafter's acceptance was measured, and how to repeat it: `tools/oracle/README.md`, "The DFlash P0", and
+[the probe record](probes/probe-dflash-2026-10-08.md).
 
 ## Ornith 1.5 35B-A3B
 

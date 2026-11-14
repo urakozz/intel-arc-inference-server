@@ -20,7 +20,7 @@ Every figure says which kind it is: **measured**, **derived** (arithmetic over m
   microseconds. Those loops print and never assert.
 
 Weight buffers in every probe are filled with **random** nibbles, never a repeated value: the B70 losslessly
-compresses device-local memory, so a buffer of one repeated word reads back above the 608 GB/s theoretical
+compresses device-local memory, so a buffer of one repeated word reads back above the 638 GB/s
 peak and any timing taken from it is fiction ([01-hardware.md](01-hardware.md)). Real weights are
 incompressible within a cache line, and so is the probe's data.
 
@@ -205,7 +205,7 @@ above as the engine's choice, not as a result reproduced here.
 
 - **Shuffle-broadcast of the activations** (hold `x` in registers, broadcast to all lanes) instead of the
   plain `vload8` whose 16 lanes read one cache line: not measured. `x` is 10 KB, L1-resident, against a weight
-  stream three orders larger. Consistent with 88 to 97% of peak, not proof; the first thing to try if a profile
+  stream three orders larger. Consistent with the 533 to 584 GB/s the linears reach (90 to 99% of the measured 590; 83 to 92% of the 638 GB/s peak, derived), not proof; the first thing to try if a profile
   ever disagrees.
 - **SIMD32**: not measured; it halves the sub-group count where the fill is already the problem.
 - **fp32 accumulation vs half**: fp32 was chosen because the partials are summed by another kernel and bf16
@@ -258,8 +258,8 @@ sub-groups split one 16-column tile's K, each into its own accumulator, merged t
 function of `N`: `kernels::gemv_bf16_tiling(N)` gives `{64, 1}` when the default grid already puts a work-group
 on every Xe-core and `{16, 16}` otherwise.
 
-**`lm_head` (N = 248320) needs neither knob**: 3880 work-groups, 584 GB/s in the probe (97% of the roofline
-denominator, 99% of what the bandwidth probe measures through the same launch path). Nothing to recover.
+**`lm_head` (N = 248320) needs neither knob**: 3880 work-groups, 584 GB/s in the probe (99% of the 590 GB/s the
+bandwidth probe measures through the same launch path; 92% of the 638 GB/s peak, derived). Nothing to recover.
 
 **a‖b is the shape that needed both, and the measurement is the lesson of this section.** At `{64, 1}` the
 whole launch is 8 sub-groups reading 1.31 MB at 26.9 GB/s. Three things that did *not* help, then the one that did
@@ -301,7 +301,7 @@ numerics" is not airtight for any kernel here, which is why the gate and not a h
 checkpoint's row-major `[N][K]` lane-per-`n` would give each lane a 10 KB stride on the largest tensor in the
 model, so it was not built to lose.
 
-**Rejected.** Split-K for `lm_head` (argued away by the 97%; a future small-`N` bf16 matrix on the decode path
+**Rejected.** Split-K for `lm_head` (argued away by the 99%; a future small-`N` bf16 matrix on the decode path
 needs re-measuring). A separate small-`N` kernel for a‖b: what it needed was two `#define`s here.
 
 ---
@@ -1059,8 +1059,8 @@ wait per slab (a 4096-token prompt, 7616 launches each) gave `slab_dequant` 274.
 **What is dead, and each died to a number.** The negative results cost less than re-discovering them:
 
 - **Fusing the int4 dequant into the GEMM mainloop.** Both variants were bitwise identical to the two-pass path
-  over all 71,303,168 outputs and both were slower: the dequant pass already runs at about 546 GB/s (about 90%
-  of peak), so only 0.826 ms is in it at that shape, and doing the same arithmetic in the mainloop cost 2.759
+  over all 71,303,168 outputs and both were slower: the dequant pass already runs at about 546 GB/s (93% of the measured
+  590; 86% of the 638 GB/s peak, derived), so only 0.826 ms is in it at that shape, and doing the same arithmetic in the mainloop cost 2.759
   ms even issued once per weight ([details](probes/probe-fused-dequant-2026-09-22.md)).
 - **W4A8 on the mixed 4-bit by 8-bit DPAS**: 1.017× the bf16 control (0.965× counting the activation quantiser),
   against a bar of 1.53×, and 2.79% relative L2 error from activation outliers
