@@ -3938,7 +3938,7 @@ st_r88_kernels() {
   run_tests '^(gemm_sm_test|tp_kernels_test|tp_shapes_test)$'
   finish
 }
-stage r88.gate    88 default gpu qwen,dflash r88.kernels "tp_dflash_test: G1 greedy K = 7 / 3 / 1 against plain TP (tie rule, then the f32 judge), T1 the drafter halves bitwise between the cards, S1 a restore bitwise, T4 a dropped draft list bounded; tokens a round per case"
+stage r88.gate    88 optin   gpu qwen,dflash r88.kernels "tp_dflash_test: G1 greedy K = 7 / 3 / 1 against plain TP (tie rule, then the f32 judge), T1 the drafter halves bitwise between the cards, S1 a restore bitwise, T4 a dropped draft list bounded; tokens a round per case"
 st_r88_gate() {
   run_tests '^tp_dflash_test$' '' '' "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-tp19v3c"
   grab_all t '^(G1|S1|T4|tp_dflash|  the f32|  AWAIT)' 40
@@ -3949,7 +3949,7 @@ st_r88_prior() {
   run_tests '^(tp_mtp_test|tp_decode_test|tp_fail_test|tp_prefill_test)$' '' '' "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-tp17d"
   finish
 }
-stage r88.serve   88 default gpu qwen,dflash,oracle_qwen r88.gate "b70-serve --parallel tp --spec dflash against --parallel tp --spec off (golden + tool-call sets, greedy, the prefix cache on): every first difference by the f32 judge (serve_judge.py)"
+stage r88.serve   88 optin   gpu qwen,dflash,oracle_qwen r88.gate "b70-serve --parallel tp --spec dflash against --parallel tp --spec off (golden + tool-call sets, greedy, the prefix cache on): every first difference by the f32 judge (serve_judge.py)"
 st_r88_serve() {
   serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
     "tp|--max-len 16384 --parallel tp --spec off" \

@@ -910,6 +910,10 @@ int serve_tp(const TpServe& a, server::Options options) {
                loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  false, card.name);
+  if (engine.has_drafter())   // operator 2026-11-14: kept as an explicit choice, with the advice
+    std::fprintf(stderr, "note: DFlash under --parallel tp is not faster than DFlash on one card for one session; for "
+                         "speed use --parallel 1 --spec dflash (one card), --parallel replica --spec dflash (a drafter "
+                         "per card) or --spec mtp on two cards\n");
   return listen_until_stopped(server, options);
 }
 
