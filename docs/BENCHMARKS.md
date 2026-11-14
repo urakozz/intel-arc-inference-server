@@ -1508,6 +1508,25 @@ int8 drafter in the same table, from the final round of spec 19 v3d):
 Item 21's draft-pass target (5.0 ms or less) is met: 4.41 ms at 4096. `MtpCost::dflash`'s int4 draft cost is this
 round's 0.151.
 
+**Decode speed on one card** (2026-11-14, card 0, **busy box**: the other card and CPU jobs of other agents ran, load
+average 18-129; bf16 KV; three rounds, the arm order rotated - MTP / int8 / packed, int8 / packed / MTP, packed / MTP /
+int8; median of the three). Arms: `--spec auto` (adaptive MTP, the default), `--spec dflash --draft-model
+z-lab/Qwen3.8-27B-DFlash2` (int8 at load), `--spec dflash` (the packed drafter). Replay and sets: decode t/s from the
+server's request records (ids after the first / time after the first token, summed over the requests); llama-benchy
+`--pp 128 --tg 128 --exact-tg`, 3 runs a round (its own spread is +-1-19 t/s, so its rows are rough).
+
+| workload | MTP auto | DFlash int8 | DFlash packed | packed / MTP | packed / int8 |
+|---|---:|---:|---:|---:|---:|
+| opencode-session-int8 replay (78 requests, prefix cache 32 GB) | 65.90 | 92.94 | **96.16** | 1.459 | 1.035 |
+| golden + tool-call sets (40 requests, 256 ids) | 74.50 | 96.89 | **100.82** | 1.353 | 1.041 |
+| llama-benchy tg128, depth 0 | 72.53 | 130.07 | **141.73** | 1.954 | 1.090 |
+| llama-benchy tg128, depth 32768 | 57.17 | 76.52 | **74.66** | 1.306 | 0.976 |
+
+Rounds: replay MTP 65.90 / 66.14 / 65.38, int8 92.94 / 92.61 / 93.64, packed 96.16 / 96.41 / 96.11; sets MTP 74.50 /
+74.42 / 75.20, int8 94.07 / 98.80 / 96.89, packed 100.06 / 101.53 / 100.82; tg128 d0 MTP 72.5 / 68.7 / 74.8, int8
+130.1 / 142.1 / 130.1, packed 141.7 / 131.2 / 147.3; d32768 MTP 58.9 / 57.2 / 56.0, int8 70.1 / 76.5 / 78.8, packed
+92.1 / 73.5 / 74.7. The replay's ids: packed = int8 on 78 / 78 in every round; the sets: 38 / 40.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,
