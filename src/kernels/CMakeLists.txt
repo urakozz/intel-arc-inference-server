@@ -574,32 +574,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     add_ocloc_kernel(gdn_step_defer_M${MM} SOURCE ${GDN_CL}
                      DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=6438912 M=${MM})
   endforeach()
-  # verify-cost-m8: the DPAS verify attention (and its v2 reduce) at 16 key blocks a row - the M = 5..8 lists'
-  # (runtime::verify_attn_dpas_blocks) - and 8 for the probe (CaptureOptions::probe_attn_tgt); M = 2..4 at the PAIR
-  # levers, 5..8 at the plain ones - the production lines' levers
-  foreach(TT 8 16)
-    foreach(MM 2 3 4 5 6 7 8)
-      add_ocloc_kernel(attn_v2_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} EXP2=${ATTN_V2_EXP2})
-      if(MM LESS_EQUAL 4)
-        set(_pvx 2)
-        if(MM EQUAL 2)
-          set(_pvx 0)
-        endif()
-        set(_lv KT=32 PACK_H=0 KS=4 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1 PVX=${_pvx})
-      else()
-        set(_lv KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
-      endif()
-      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=0 OPTIONS -cl-intel-256-GRF-per-thread)
-      if(B70_KV8)
-        add_ocloc_kernel(attn_v2_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kv8.cl
-                         DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${TT})
-        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
-                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=1 OPTIONS -cl-intel-256-GRF-per-thread)
-      endif()
-    endforeach()
-  endforeach()
   # verify-cost-m8: a||b at M = 2..8 with a wider in-work-group K split - 64 the verify lists' (capture.cc's gemv_bf16),
   # 32 for the probe (CaptureOptions::probe_ab_ksplit)
   foreach(MM 2 3 4 5 6 7 8)
@@ -857,6 +831,34 @@ if(B70_VERIFY_DPAS AND B70_MTP)
                        DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
                                KV8=1 KV_PAGED=${KV_PAGE}
                        OPTIONS ${VDPAS_OPTIONS})
+    endforeach()
+  endif()
+  if(B70_VERIFY_M8)
+    # verify-cost-m8: the DPAS verify attention (and its v2 reduce) at 16 key blocks a row - the M = 5..8 lists'
+    # (runtime::verify_attn_dpas_blocks) - and 8 for the probe (CaptureOptions::probe_attn_tgt); M = 2..4 at the PAIR
+    # levers, 5..8 at the plain ones - the production lines' levers
+    foreach(TT 8 16)
+      foreach(MM 2 3 4 5 6 7 8)
+        add_ocloc_kernel(attn_v2_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} EXP2=${ATTN_V2_EXP2})
+        if(MM LESS_EQUAL 4)
+          set(_pvx 2)
+          if(MM EQUAL 2)
+            set(_pvx 0)
+          endif()
+          set(_lv KT=32 PACK_H=0 KS=4 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1 PVX=${_pvx})
+        else()
+          set(_lv KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
+        endif()
+        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=0 OPTIONS -cl-intel-256-GRF-per-thread)
+        if(B70_KV8)
+          add_ocloc_kernel(attn_v2_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kv8.cl
+                           DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${TT})
+          add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
+                           DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=1 OPTIONS -cl-intel-256-GRF-per-thread)
+        endif()
+      endforeach()
     endforeach()
   endif()
 endif()

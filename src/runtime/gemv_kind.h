@@ -63,7 +63,7 @@ struct CaptureOptions {
   // verify-cost-m8 probe only: a tap verify list binds gdn_step_slots_M<M>_N8_P1 (row 0's state stored alone - wrong
   // states, timing only).
   bool probe_gdn_one_store = false;
-  // verify-cost-m8 probe: a||b's K split in the one-card verify lists at M >= 2 (0: capture.cc's 64).
+  // verify-cost-m8 probe: a||b's K split at any M >= 2 (0: capture.cc's rule - 64 in the DFlash lists at M >= 5).
   uint32_t probe_ab_ksplit = 0;
   // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (0: runtime::verify_attn_dpas_blocks).
   uint32_t probe_attn_tgt = 0;
