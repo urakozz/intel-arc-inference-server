@@ -70,6 +70,15 @@
 #else
 #define S_MSG S_LOC
 #endif
+// Spec 19 v3c, the crossing lever: BF16_MSG 1 (folded only) - the card's summed row crosses as bf16 (half the bytes;
+// the data region keeps its fp32 capacity, so the trailers and flags sit where every other list's do) and each card
+// folds its own row rounded the same way (`own` holds it), so the cards stay bitwise each other.
+#ifndef BF16_MSG
+#define BF16_MSG 0
+#endif
+#if BF16_MSG && !FOLDED
+#error "tp.cl: BF16_MSG is a folded crossing's"
+#endif
 #define CHUNK ((K + FOLD_G - 1) / FOLD_G)
 #define DATA_WORDS (S_MSG * TP_MROWS * K)
 #define J_CHUNKS (FOLD_G * TP_MROWS)
@@ -122,7 +131,13 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
   uint k1 = k0 + CHUNK;
   if (k1 > K) k1 = K;
   for (uint k = k0 + lid; k < k1; k += WG) {
-#if FOLDED
+#if FOLDED && BF16_MSG
+    float acc = 0.f;
+    for (uint s = 0; s < S_LOC; ++s) acc += partials[((size_t)s * M + m) * K + k];
+    const ushort b = rne_bf16(acc);
+    own[(size_t)m * K + k] = bf16f(b);
+    ((__global ushort*)d)[(size_t)m * K + k] = b;
+#elif FOLDED
     float acc = 0.f;
     for (uint s = 0; s < S_LOC; ++s) acc += partials[((size_t)s * M + m) * K + k];
     own[(size_t)m * K + k] = acc;
@@ -143,8 +158,17 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
 // One part's contribution to the fold's chain: S slices of [S][M][K], from this card's memory or (remote) the landing.
 #define LOCAL_PART(acc)                                                                   \
   for (uint s = 0; s < S_MSG; ++s) acc += mine[((size_t)s * M + m) * K + k];
+#if BF16_MSG
+// The bf16 element (m, k) of the message: the half of its 32-bit word (K even, little-endian: even k the low half).
+#define REMOTE_PART(acc)                                                                  \
+  {                                                                                       \
+    const uint w = SYS_LOAD(src + (((size_t)m * K + k) >> 1), memory_order_relaxed);      \
+    acc += bf16f((ushort)((k & 1u) ? (w >> 16) : (w & 0xFFFFu)));                         \
+  }
+#else
 #define REMOTE_PART(acc)                                                                  \
   for (uint s = 0; s < S_MSG; ++s) acc += as_float(SYS_LOAD(src + ((size_t)s * M + m) * K + k, memory_order_relaxed));
+#endif
 
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void tp_res_fold(__global const float* restrict mine, __global const uint* land, __global ushort* restrict resid,

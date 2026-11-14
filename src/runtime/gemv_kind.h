@@ -60,6 +60,8 @@ struct CaptureOptions {
   // The DPAS part's key split a head (df_attn_dpas.cl's KS: 1, 2 or 4). 4: the five attention parts 1.55 -> 0.50 ms;
   // acceptance judged pooled (operator ruling 2026-11-14; spec 19 v3d Task 6, occupancy).
   uint32_t dflash_attn_ks = 4;
+  // Spec 19 v3c, tests and probes: a TP tap verify list's crossings at M >= 2 in fp32 (the production lists send bf16).
+  bool tp_fp32_crossing = false;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;

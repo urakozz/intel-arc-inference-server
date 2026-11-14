@@ -15,10 +15,11 @@ inline constexpr unsigned kTpMRows = 8;
 
 // tp_send + tp_res_fold for card `rank`: M rows of `hidden`, FOLD_G work-groups, `s_loc` local split-K slices, the
 // slices or the folded form.
+// Spec 19 v3c: `bf16` - the folded crossing's bf16 message (tp.cl BF16_MSG), suffix _B16.
 inline std::string tp_cross_variant(unsigned M, unsigned hidden, unsigned fold_g, unsigned s_loc, bool folded,
-                                    unsigned rank) {
+                                    unsigned rank, bool bf16 = false) {
   return "tp_cross_M" + std::to_string(M) + "_K" + std::to_string(hidden) + "_G" + std::to_string(fold_g) + "_S" +
-         std::to_string(s_loc) + (folded ? "_F" : "_X") + "_R" + std::to_string(rank);
+         std::to_string(s_loc) + (folded ? "_F" : "_X") + "_R" + std::to_string(rank) + (bf16 ? "_B16" : "");
 }
 // tp_argmax_stage1 / _stage2 over a card's `rows` logits, `used` of them real, its first id `base`.
 inline std::string tp_argmax_variant(unsigned M, unsigned rows, unsigned used, unsigned base) {
