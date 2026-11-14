@@ -1030,12 +1030,12 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     if (e.slots() > 1) {
       slots_engines.push_back(
           std::make_unique<cli::SlotsEngine>(e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup, hooked));
-      cards.push_back({nullptr, caps[i], slots_engines.back().get()});
+      cards.push_back({nullptr, caps[i], slots_engines.back().get(), e.prefill_tail()});
     } else {
       adapters.push_back(std::make_unique<EngineAdapter>(e, tokenizer.vocab_used(),
                                                          a.dflash.on ? a.dflash.max_k : a.mtp_k, a.spec_lookup,
                                                          a.dflash.on));
-      cards.push_back({adapters.back().get(), caps[i], nullptr});
+      cards.push_back({adapters.back().get(), caps[i], nullptr, e.prefill_tail()});
     }
     requests += e.slots();
   }
@@ -1587,7 +1587,7 @@ int run(int argc, char** argv) {
   model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
-  // Plan 5d: the prefill chunk cap - the default, or kPrefillChunkCapRule's choice (cli/max_len.h) -
+  // Plan 5d: the prefill chunk cap - 2048, or 4096 when the plan has room (cli/settle_chunk_cap) -
   // planned with max_len and given to the engine.
   pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};

@@ -113,7 +113,8 @@ struct DecodeScratch : DecodeScratchDims {
 // paragraph stands for the 2048 default. The int8 path at 4096 rows (2026-11-01 / 11-06, plan
 // 5d "As built"): the linears alone gain nothing (h8 -1.1 %), the whole prefill +4.2 % at
 // pp4096, +5.3 % at 32k, +1.5 % at 128k (the other per-chunk fixed costs halve) - below the
-// plan's +5 % bar at pp4096, so 2048 stays the default and 4096 is opt-in (--prefill-chunk).
+// plan's +5 % bar at pp4096, so 2048 stays the engine's default; the CLIs take 4096 when the plan has room
+// (cli/max_len.h settle_chunk_cap; Qwen3.8 since open-work 18).
 //
 // **kC = 2048, not plan 6b's 4096 - ruling A13, and every byte was recomputed
 // rather than halved.** Basis (spec §3.3, progress ledger): four of P2's six

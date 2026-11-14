@@ -107,6 +107,7 @@ class ReplicaEngine : public server::BatchEngineIface {
     server::EngineIface* engine = nullptr;
     uint32_t chunk_cap = 2048;   // the card's runtime::Engine::prefill_chunk_cap()
     server::BatchEngineIface* slots = nullptr;
+    uint32_t tail = 0;           // the card's runtime::Engine::prefill_tail() (open-work 18)
   };
   // `hooked`: the prefix cache is on (the serial server then hooks its engine, which cuts every chunk at a stride
   // end); `wide_stride`: the model's prefill passes it to runtime::prefill_chunk_rows (Qwen3.8: yes).
@@ -188,9 +189,10 @@ class ReplicaEngine : public server::BatchEngineIface {
 
   // A card with slots cuts as cli::SlotsEngine::prefill_cut does (the same rule over its Card::chunk_cap - the card
   // engine's prefill_chunk_cap() - and runtime::Engine::kBlock), without a call on the card.
+  // The scheduler passes the prompt's whole rest, so the card's tail applies (open-work 18); the cards' loops below
+  // re-cut one such chunk, whose cut is made (tail 0 leaves it whole).
   uint32_t prefill_cut(uint32_t slot, uint32_t pos, uint32_t remaining) override {
-    return runtime::prefill_chunk_rows(pos, remaining, cards_.at(slot_card_.at(slot)).chunk_cap, hooked_,
-                                       facts_.at(slot).block, wide_);
+    return cut(slot, pos, remaining, cards_.at(slot_card_.at(slot)).tail);
   }
   bool overlaps_prefill() override { return true; }
   // Synchronous: every chunk's card started, then each joined (a failure names its chunk only).
@@ -234,7 +236,7 @@ class ReplicaEngine : public server::BatchEngineIface {
           }
           size_t at = 0;
           while (at < ids.size()) {
-            const uint32_t n = prefill_cut(slot, b.pos(l), static_cast<uint32_t>(ids.size() - at));
+            const uint32_t n = cut(slot, b.pos(l), static_cast<uint32_t>(ids.size() - at), 0);
             b.prefill({{l, ids.data() + at, n, last && at + n == ids.size(), false}});
             at += n;
           }
@@ -250,7 +252,7 @@ class ReplicaEngine : public server::BatchEngineIface {
         // One Engine::prefill call per card chunk: the cut the serial server's one call makes (bitwise, R1).
         size_t at = 0;
         while (at < ids.size()) {
-          const uint32_t n = prefill_cut(slot, e.pos(), static_cast<uint32_t>(ids.size() - at));
+          const uint32_t n = cut(slot, e.pos(), static_cast<uint32_t>(ids.size() - at), 0);
           e.prefill(std::vector<uint32_t>(ids.begin() + long(at), ids.begin() + long(at + n)));
           at += n;
         }
@@ -389,6 +391,10 @@ class ReplicaEngine : public server::BatchEngineIface {
   server::EngineIface& card(uint32_t slot) { return *cards_.at(slot_card_.at(slot)).engine; }
   server::BatchEngineIface& batch(uint32_t slot) { return *cards_.at(slot_card_.at(slot)).slots; }
   CardWorker& worker(uint32_t slot) { return *workers_.at(slot_card_.at(slot)); }
+  uint32_t cut(uint32_t slot, uint32_t pos, uint32_t remaining, uint32_t tail) const {
+    return runtime::prefill_chunk_rows(pos, remaining, cards_.at(slot_card_.at(slot)).chunk_cap, hooked_,
+                                       facts_.at(slot).block, wide_, tail);
+  }
   // Runs fn on slot `slot`'s card's thread (card `c`'s) and waits; rethrows what it threw.
   void on(uint32_t slot, std::function<void()> fn) { worker(slot).post(std::move(fn)).get(); }
   void on_card(uint32_t c, std::function<void()> fn) { workers_.at(c)->post(std::move(fn)).get(); }

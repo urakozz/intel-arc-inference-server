@@ -117,6 +117,51 @@ void check_chunks() {
           CHECK(c.rows <= 4096);
           if (c.hook) CHECK_EQ(c.end() % 4096, 0u);
         }
+  // Open-work 18: Qwen3.8's tail (runtime::kPrefillTail, 6144). A hooked 32k prompt runs 4096-row chunks to
+  // 26624 = (32768 - 6144) rounded down to a block (the last of them 2048 rows), then 2048-row chunks, so the
+  // hooks land 2048 apart over the tail: a follow-up turn that leaves the prompt at 32767 restarts at 30720.
+  const uint32_t tail = runtime::kPrefillTail;
+  const auto ends = [](const std::vector<PpChunk>& v) {
+    std::vector<uint32_t> e;
+    for (const PpChunk& c : v) e.push_back(c.end());
+    return e;
+  };
+  const std::vector<PpChunk> t = runtime::pp_prefill_chunks(0, 32768, 4096, true, kBlock, tail);
+  CHECK((ends(t) == std::vector<uint32_t>{4096, 8192, 12288, 16384, 20480, 24576, 26624, 28672, 30720, 32768}));
+  for (size_t j = 0; j + 1 < t.size(); ++j) CHECK(t[j].hook);
+  CHECK(!t.back().hook);
+  // 64 ids past 32k: the tail starts at the same block; the prompt end is its own chunk.
+  const std::vector<PpChunk> t2 = runtime::pp_prefill_chunks(0, 32832, 4096, true, kBlock, tail);
+  CHECK(t2.size() == 11 && t2[5].end() == 24576 && t2[6].end() == 26624 && t2[9].end() == 32768 &&
+        t2[10].rows == 64);
+  // The follow-up turn restored at 30720: all tail, 2048-row chunks as before.
+  const std::vector<PpChunk> t3 = runtime::pp_prefill_chunks(30720, 2112 + 1000, 4096, true, kBlock, tail);
+  CHECK((ends(t3) == std::vector<uint32_t>{32768, 33832}));
+  // Up to 6144 + 2047 ids the whole prompt is tail: today's 2048 hooks (snapshot_test's D and E).
+  CHECK(same(runtime::pp_prefill_chunks(0, 5000, 4096, true, kBlock, tail), runtime::pp_prefill_chunks(0, 5000, 2048, true)));
+  CHECK(same(runtime::pp_prefill_chunks(300, 4000, 4096, true, kBlock, tail),
+             runtime::pp_prefill_chunks(300, 4000, 2048, true)));
+  // Unhooked (no prefix cache, b70-decode), a 2048 chunk, or a MoE model (tail 0): as before.
+  CHECK(same(runtime::pp_prefill_chunks(0, 32768, 4096, false, kBlock, tail),
+             runtime::pp_prefill_chunks(0, 32768, 4096, false)));
+  CHECK(same(runtime::pp_prefill_chunks(0, 32768, 2048, true, kBlock, tail),
+             runtime::pp_prefill_chunks(0, 32768, 2048, true)));
+  // The rule's invariants over bases and lengths: every chunk <= 4096, a hook only at a block end, 2048-row chunks
+  // from the tail on, and each chunk re-cut on its own with tail 0 is whole (the replica / slots servers cut a prompt
+  // with the tail and hand the engine one chunk a call).
+  for (uint32_t base : {0u, 300u, 2048u, 6144u, 10000u, 30100u})
+    for (size_t n : {size_t{1}, size_t{2048}, size_t{6144}, size_t{8191}, size_t{8192}, size_t{12289}, size_t{32768},
+                     size_t{65537}}) {
+      const uint64_t end = base + n;
+      const uint64_t from = end > tail ? (end - tail) / kBlock * kBlock : 0;
+      for (const PpChunk& c : runtime::pp_prefill_chunks(base, n, 4096, true, kBlock, tail)) {
+        CHECK(c.rows <= 4096);
+        if (c.hook) CHECK_EQ(c.end() % kBlock, 0u);
+        if (c.pos >= from) CHECK(c.rows <= kBlock);
+        if (c.pos < from) CHECK(c.end() <= from);
+        CHECK_EQ(runtime::prefill_chunk_rows(c.pos, c.rows, 4096, true, kBlock, true, 0), c.rows);
+      }
+    }
 }
 
 std::string ops(const std::vector<PpPfStep>& s) {

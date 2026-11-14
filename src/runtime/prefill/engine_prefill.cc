@@ -225,7 +225,8 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const prefill::PrefillSlot* slot = slots() > 1 ? &pslot : nullptr;
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
-    C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock, /*wide_stride=*/true);
+    C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock, /*wide_stride=*/true,
+                           prefill_tail());
     pfx_->cx.wait();                       // before touching `ids` or `Control`
     std::memcpy(pf_->ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = base + uint32_t(off);

@@ -1092,7 +1092,9 @@ target_include_directories(snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(snapshot_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(snapshot_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
 add_test(NAME snapshot_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
-set_tests_properties(snapshot_test PROPERTIES LABELS checkpoint
+# Open-work 18: at chunk cap 4096 the hooks of D-F are unchanged (the tail) and case G checks the mixed chunks.
+add_test(NAME snapshot_cap4096_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT} --chunk-cap 4096)
+set_tests_properties(snapshot_test snapshot_cap4096_test PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
 # Spec 5 T3 (plan 5b Task 2): l0-int8 on the engine - a smoke cosine against l0 and the
 # l0 + 128 launch delta (open-work 17: two quantisers a layer, the MLP's). The int8 kernels are in

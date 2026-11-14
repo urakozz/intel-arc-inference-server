@@ -15,6 +15,11 @@
 //   F: the hook saves the state and the new KV range at every call; restoring the 4096
 //      snapshot + KV [0,4096) and prefilling [4096,5000) gives the hooked run's first
 //      id and 64 greedy ids, bitwise.
+//   G (open-work 18, --chunk-cap 4096 only): a hooked 14000-id prefill runs 4096-row chunks
+//      to 6144 = (14000 - 6144) rounded down to a block, then 2048-row ones: calls (4096,
+//      6144, 8192, 10240, 12288, 14000). Its first id and 64 greedy ids are bitwise those of
+//      2048-row chunks (the cap 2048 server's) and of 4096-row chunks all through. D-F hold
+//      at cap 4096 unchanged: up to 6144 + 2047 ids a hooked prompt is all tail.
 // Spec 12b: every case runs in the engine's KV form (B70_KV_CACHE=int8: snapshot_kv8_test).
 // The host layout is save_kv's - per tensor (K, V) every layer's rows, then at int8 every
 // layer's fp16 scales - so the runs below are KvLayout's, not 2 x fa_layers equal runs.
@@ -27,6 +32,7 @@
 #include <vector>
 
 #include "check.h"
+#include "chunk_cap_arg.h"
 #include "golden_common.h"
 #include "l0/memory.h"
 #include "loader/loader.h"
@@ -101,6 +107,7 @@ void check_restore(l0::Context& ctx, runtime::Engine& e, const std::vector<uint3
 }  // namespace
 
 int main(int argc, char** argv) {
+  const uint32_t cap = b70test::take_chunk_cap_arg(argc, argv);
   const std::string checkpoint =
       argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   l0::Context ctx(0);
@@ -263,6 +270,32 @@ int main(int argc, char** argv) {
     CHECK_EQ(first, first2);
     CHECK(x == y);
     std::puts("case F OK");
+  }
+  if (cap == 4096) {   // G
+    calls.clear();
+    e.set_block_hook(record);
+    e.reset();
+    e.prefill(head(ids, 14000));
+    e.set_block_hook({});
+    CHECK((calls ==
+           Calls{{4096, true}, {6144, true}, {8192, true}, {10240, true}, {12288, true}, {14000, false}}));
+    const auto first_and_64 = [&](uint32_t chunk) {
+      if (chunk != 0) {   // an unhooked run at `chunk` rows a chunk
+        e.reset();
+        e.prefill(head(ids, 14000), chunk);
+      }
+      std::vector<uint32_t> out{e.buffers().control.as<runtime::Control>()->cur_token[0]};
+      for (uint32_t id : e.generate(64)) out.push_back(id);
+      return out;
+    };
+    const auto mixed = first_and_64(0);   // the hooked run above
+    const auto c2048 = first_and_64(2048), c4096 = first_and_64(4096);
+    std::printf("G: first id %u (mixed) %u (2048) %u (4096); 64 greedy ids %s / %s\n", mixed[0], c2048[0], c4096[0],
+                mixed == c2048 ? "identical to 2048" : "DIFFER from 2048",
+                mixed == c4096 ? "identical to 4096" : "DIFFER from 4096");
+    CHECK(mixed == c2048);
+    CHECK(mixed == c4096);
+    std::puts("case G OK");
   }
   std::puts("snapshot_test OK");
 }

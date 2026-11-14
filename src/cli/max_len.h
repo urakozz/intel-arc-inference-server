@@ -214,16 +214,15 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
 //   cap = settle_chunk_cap(..., slot lengths, path, ..., asked)   what the engine is given
 //
 // An asked cap (b70-decode's --prefill-chunk) is planned and kept as it is: an explicit 4096
-// shortens what auto gives the context. With nothing asked, a dense model (Qwen3.8) runs 2048; a MoE
-// model takes operator ruling (i) of 2026-10-27 (context first, plan 2026-11-12 D2: the expert GEMMs
-// and l0-int8's quantiser amortise over twice the rows) - max_len (and every request slot) is planned
+// shortens what auto gives the context. With nothing asked, every model takes operator ruling (i) of
+// 2026-10-27 (context first; a MoE model: plan 2026-11-12 D2, the expert GEMMs and l0-int8's quantiser
+// amortise over twice the rows; Qwen3.8: open-work 18, ~5.6 % faster cold,
+// docs/probes/probe-qwen-pf-gemm-2026-11-13.md section 6) - max_len (and every request slot) is planned
 // at 2048 and 4096 is taken only when the plan at those lengths has room for it
 // (runtime::prefill_chunk_cap_that_fits, or runtime::plan_slots beside --max-num-seqs). Qwen3.8's
-// 4096-row walk is ~5.6 % faster cold but snapshots the prefix cache every 4096 positions, so a hit
-// restarts up to 4095 rows back instead of 2047 (open-work 18, docs/probes/probe-qwen-pf-gemm-2026-11-13.md
-// section 6: a 64-id turn at 32k 1.73x slower); it stays 2048 until that is decided. There is no
+// hooked prefill keeps 2048-row chunks over a prompt's last 6144+ positions (runtime::kPrefillTail),
+// so a prefix-cache hit after a turn still restarts at most 2047 rows back. There is no
 // environment variable or server flag for it (operator, 2026-11-03): the engine side chooses.
-inline constexpr bool kPrefillChunkCapRule = false;
 inline uint32_t planned_chunk_cap(uint32_t asked) {
   return asked != 0 ? asked : runtime::PrefillScratchDims::kCDefault;
 }
@@ -241,7 +240,7 @@ inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
   if (!path.prefill) return path.chunk_cap;
   const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
-  if (why == nullptr && (kPrefillChunkCapRule || m.desc->is_moe())) {
+  if (why == nullptr) {
     const size_t weights = m.report.total() - m.report.rope_bytes;
     if (lens.size() == 1) {
       cap = runtime::prefill_chunk_cap_that_fits(*m.desc, m.mtp != nullptr, weights, ctx.memory_bytes(),

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "check.h"
+#include "runtime/prefill_chunks.h"
 #include "server/prefix_cache.h"
 
 namespace {
@@ -440,7 +441,42 @@ void test_wide_chunks() {
   std::printf("wide chunks (plan 5d, ruling A): even / odd block / request-end restores\n");
 }
 
+// Open-work 18: Qwen3.8's mixed chunks - the hook calls Engine::prefill makes under runtime::prefill_chunk_rows
+// with a tail (the rule itself, scaled by 512: block 4 = 2048, chunk 8 = 4096, tail 12 = 6144). A 64-id prompt
+// (32768) hooks every 8 up to 48, then at 52 (= (64 - 12) rounded down to a block), 56, 60 and the end; a next turn
+// that keeps a[0:d] restores at the last block end <= d over the tail - 60 (30720) for d = 63, where the hook every 8
+// gave 56 (28672) - and on the 8-grid before it.
+void prefill_mixed(PrefixCache& c, const Ids& ids, uint32_t from) {
+  const uint32_t len = uint32_t(ids.size());
+  for (uint32_t p = from; p < len;) {
+    p += runtime::prefill_chunk_rows(p, len - p, 2 * kB, true, kB, /*wide_stride=*/true, 3 * kB);
+    if (p < len && p % kB == 0) store(c, ids, p);
+  }
+  store(c, ids, len);
+  c.release();
+}
+
+void test_tail() {
+  MallocAlloc m;
+  PrefixCache c(1 << 20, kState, kKv, kB, m);
+  const Ids a = seq(64, 100);
+  prefill_mixed(c, a, 0);
+  // 16 blocks; snapshots at 8, 16, .., 48, 52, 56, 60 and the end 64.
+  CHECK_EQ(c.entries(), size_t{16 + 10});
+  const uint32_t cases[][2] = {{63, 60}, {61, 60}, {57, 56}, {53, 52}, {51, 48}, {47, 40}};
+  for (const auto& dr : cases) {
+    const Ids p = cat(head(a, dr[0]), seq(5, 900));
+    const PrefixCache::Plan pl = c.plan(p, {}, false);
+    CHECK(pl.kind == PrefixCache::Plan::Restore);
+    CHECK_EQ(pl.restart, dr[1]);
+    check_plan(pl, p);
+    c.release();
+  }
+  std::printf("mixed chunks (open-work 18): restarts a block apart over the tail, two before it\n");
+}
+
 int main() {
+  test_tail();
   test_wide_chunks();
   test_plans();
   test_kv_bytes_fn();
