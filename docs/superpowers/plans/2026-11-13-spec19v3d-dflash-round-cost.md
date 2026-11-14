@@ -161,6 +161,11 @@ stays reachable through `CaptureOptions` for the A/B), `tests/kernels/dflash_ker
   top-16 candidates off the f32 judge is recorded, not gated - the rows' cosine against the judge gates at its bar;
   (4) next for the attention: occupancy first (64-key blocks, more work-groups), Step 3 only if more than 0.6 ms
   is left and time allows.
+- **Operator ruling 2026-11-14:** (1) acceptance is judged **pooled** over every draft (each corpus / K row weighted
+  by its anchors, one-sided 0.05; the rows recorded) - the 16-anchor corpora cannot resolve a row below one anchor;
+  (2) occupancy: `df_attn_dpas.cl`'s KS 4 (a head's block keys split four ways) is the default - the five parts
+  1.55 -> 0.50 ms, which meets the 0.9 ms gate; (3) `dflash_draft_test`'s CPU twin follows the DPAS part's order
+  (`dfref::attention`'s dpas_ks) and every list binds the production part. Step 3 (the int8 ring) is not needed.
 - [ ] **Step 3 (only if Step 2 leaves > 0.6 ms):** the ring in int8 by the target's rotation scheme (`kv8`). It
   changes `ring_bytes()` and the drafter's key, so old prefix cache entries are not restored beside it (the key
   already guards that). Same gates.
@@ -184,8 +189,9 @@ form), `src/loader/dflash_loader.cc` and `lm_head_int8.*` (a 2-bit copy of the h
     (printed).
   - Missed on acceptance at 80: keep int4, record.
   - **As measured (2026-11-14, card 0, busy box):** GEMM 0.80 ms (gate 0.7 missed); at 64 candidates cjk K = 5 / 6
-    -0.0625 (one anchor each); at 80 all 35 rows pass, round 1.4746 -> 1.4658 plain steps. Int4 stays the default
-    pending the operator's ruling (HANDOFF decision 2).
+    -0.0625 (one anchor each); at 80 all 35 rows pass, round 1.4746 -> 1.4658 plain steps.
+  - **Operator ruling 2026-11-14:** the 2-bit head with 80 candidates is the default; the 0.7 ms GEMM target is
+    waived (0.80 ms measured).
 
 ### Task 8: the body's bytes (box) - waits for the export
 
