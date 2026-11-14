@@ -56,6 +56,26 @@ void check_prefill() {
   CHECK(runtime::tp_prefill_chunks(0, 6000, 2048) == (C{{0, 2048}, {2048, 2048}, {4096, 960}, {5056, 944}}));
   CHECK(runtime::tp_prefill_chunks(100, 42, 2048) == (C{{100, 42}}));    // one chunk: no pair
   CHECK(runtime::tp_prefill_chunks(7, 100, 2048) == (C{{7, 64}, {71, 36}}));
+  // Open-work 29: with the hook (block 2048) and the tail (6144), pairs end on 4096 multiples before the tail's start
+  // ((end - 6144) rounded down to 2048) and on every 2048 multiple in it - two 1024-row chunks a pair.
+  {
+    const auto ch = runtime::tp_prefill_chunks(0, 20000, 2048, 2048, 6144);   // the tail from 12288
+    std::vector<uint32_t> ends;
+    for (size_t j = 0; j < ch.size(); j += 2) ends.push_back(ch[std::min(j + 1, ch.size() - 1)][0] +
+                                                             ch[std::min(j + 1, ch.size() - 1)][1]);
+    CHECK(ends == (std::vector<uint32_t>{4096, 8192, 12288, 14336, 16384, 18432, 20000}));
+    CHECK(ch[6] == (std::array<uint32_t, 2>{12288, 1024}));
+    CHECK(ch[7] == (std::array<uint32_t, 2>{13312, 1024}));
+    CHECK(ch[0] == (std::array<uint32_t, 2>{0, 2048}));
+  }
+  CHECK(runtime::tp_prefill_chunks(0, 10000, 2048, 2048, 6144) ==   // the tail from 2048: one 2048-row pair first
+        (C{{0, 1024}, {1024, 1024}, {2048, 1024}, {3072, 1024}, {4096, 1024}, {5120, 1024}, {6144, 1024}, {7168, 1024},
+           {8192, 960}, {9152, 848}}));
+  CHECK(runtime::tp_prefill_chunks(0, 6000, 2048, 2048, 6144) ==   // short: all tail
+        (C{{0, 1024}, {1024, 1024}, {2048, 1024}, {3072, 1024}, {4096, 960}, {5056, 944}}));
+  CHECK(runtime::tp_prefill_chunks(4096, 1904, 2048, 2048, 6144) == (C{{4096, 960}, {5056, 944}}));   // a restore's rest
+  CHECK(runtime::tp_prefill_chunks(0, 6000, 2048, 2048) ==   // no tail: the 4096 stride
+        (C{{0, 2048}, {2048, 2048}, {4096, 960}, {5056, 944}}));
   bool threw = false;
   try {
     runtime::tp_prefill_chunks(0, 10, 1000);

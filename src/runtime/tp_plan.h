@@ -22,15 +22,14 @@ namespace runtime {
 // rows and splits them on the 64-grid (the first chunk min(chunk, half rounded up to 64), never shorter than the
 // second), so a 2048-id prompt is two 1024-row chunks whose crossings hide behind each other's compute. `chunk` a
 // positive multiple of 64. Host arithmetic (tp_plan_test).
-// Spec 17d: `stride` non-zero (a block hook is set: tp_hook_stride) - a pair never crosses a multiple of it, so every
-// pair ends on one or at the prompt's end (Engine's prefill_chunk_rows rule, per pair).
+// Spec 17d: `block` non-zero (a block hook is set) - a pair never crosses a snapshot point (runtime/prefill_chunks.h's
+// prefill_snapshot_point, open-work 29) at the pair's stride: its rows (2 x chunk) rounded up to whole `block`s, 4096
+// at the default 2048-row cap (plan 5d's rule (A): the blocks between are stored as KV by the hook's store call), and
+// `block` over the prompt's last `tail` positions (prefill_tail), where a pair is two half-block chunks and the hook
+// fires at every block end. `n` is the call's whole rest of the prompt.
 inline constexpr uint32_t kTpPrefillChunks = 2;
-std::vector<std::array<uint32_t, 2>> tp_prefill_chunks(uint32_t pos, size_t n, uint32_t chunk, uint32_t stride = 0);
-// Spec 17d: the block hook's stride under TP - a pair's rows (2 x chunk) rounded up to whole `block`s: 4096 at the
-// default 2048-row cap (plan 5d's rule (A): the blocks between are stored as KV by the hook's store call).
-inline uint32_t tp_hook_stride(uint32_t chunk, uint32_t block) {
-  return (kTpPrefillChunks * chunk + block - 1) / block * block;
-}
+std::vector<std::array<uint32_t, 2>> tp_prefill_chunks(uint32_t pos, size_t n, uint32_t chunk, uint32_t block = 0,
+                                                       uint32_t tail = 0);
 // The device bytes TpEngine's prefill holds on a card beside its PrefillScratch: the second chunk's residual, each
 // chunk's own half of the row-parallel output and its two landing slots.
 size_t tp_prefill_extra_bytes(const model::ModelDesc& card, uint32_t chunk_cap);

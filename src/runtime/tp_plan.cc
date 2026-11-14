@@ -7,24 +7,31 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "model/model_desc.h"
 #include "runtime/buffer_sizes.h"
+#include "runtime/prefill_chunks.h"
 #include "runtime/tp_protocol.h"
 
 namespace runtime {
 
-std::vector<std::array<uint32_t, 2>> tp_prefill_chunks(uint32_t pos, size_t n, uint32_t chunk, uint32_t stride) {
+std::vector<std::array<uint32_t, 2>> tp_prefill_chunks(uint32_t pos, size_t n, uint32_t chunk, uint32_t block,
+                                                       uint32_t tail) {
   if (chunk == 0 || chunk % 64 != 0)
     throw std::invalid_argument("runtime::tp_prefill_chunks: chunk " + std::to_string(chunk) +
                                 " is not a positive multiple of 64");
-  if (stride % 64 != 0)
-    throw std::invalid_argument("runtime::tp_prefill_chunks: stride " + std::to_string(stride) +
+  if (block % 64 != 0)
+    throw std::invalid_argument("runtime::tp_prefill_chunks: block " + std::to_string(block) +
                                 " is not a multiple of 64");
   std::vector<std::array<uint32_t, 2>> out;
   size_t off = 0;
   while (off < n) {
     // A pair takes up to two chunks' rows; split evenly on the 64-grid so both halves of the wavefront have work,
-    // A never shorter than B. Spec 17d: never past the next multiple of the hook's stride.
-    size_t r = std::min<size_t>(n - off, size_t(2) * chunk);
-    if (stride != 0) r = std::min<size_t>(r, stride - (pos + off) % stride);
+    // A never shorter than B. Spec 17d: never past the next snapshot point (open-work 29: prefill_snapshot_point at
+    // the pair's stride).
+    const uint32_t p = pos + uint32_t(off);
+    size_t r = std::min<size_t>(n - off, size_t(kTpPrefillChunks) * chunk);
+    if (block != 0)
+      r = std::min<uint64_t>(r, prefill_snapshot_point(p, uint64_t(pos) + n,
+                                                       prefill_hook_stride(kTpPrefillChunks * chunk, block, true),
+                                                       block, tail) - p);
     uint32_t a = uint32_t(r);
     if (r > 64) a = uint32_t(std::min<size_t>(chunk, (r / 2 + 63) / 64 * 64));
     out.push_back({pos + uint32_t(off), a});

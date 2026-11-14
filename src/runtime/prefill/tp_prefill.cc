@@ -37,9 +37,10 @@
 // last unit's halves and the final norm of every row (prefill::step_tp_final) into the hidden rows (row 0 = h_{pos-1},
 // copied from MtpBuffers::hh row 0), the head's KV (prefill::step_tp_mtp_kv, in passes the card's scratch holds), and
 // the chunk's last hidden back into hh row 0 - Engine::prefill's per-chunk MTP steps. The prompt's head then reads the
-// last row's normed hidden. With a block hook every pair ends on a multiple of the hook's stride (tp_hook_stride: a
-// pair's rows rounded up to whole blocks) or at the prompt's end; the hook runs after such a pair has drained on both
-// cards (Control pos = the end, n_active 0) and after the prompt's head, as Engine::prefill's.
+// last row's normed hidden. With a block hook every pair ends on a multiple of the hook's stride (tp_prefill_chunks: a
+// pair's rows rounded up to whole blocks; one block over the prompt's last prefill_tail() positions, open-work 29) or
+// at the prompt's end; the hook runs after such a pair has drained on both cards (Control pos = the end, n_active 0)
+// and after the prompt's head, as Engine::prefill's.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -58,6 +59,7 @@
 #include "model/qwen35.h"
 #include "runtime/buffers.h"
 #include "runtime/control.h"
+#include "runtime/prefill_chunks.h"
 #include "runtime/prefill/attn.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/gemm_l0.h"
@@ -355,7 +357,7 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   }
   const bool hooked = static_cast<bool>(block_hook_);
   const std::vector<std::array<uint32_t, 2>> chunks =
-      tp_prefill_chunks(base, ids.size(), chunk, hooked ? tp_hook_stride(chunk, kBlock) : 0);
+      tp_prefill_chunks(base, ids.size(), chunk, hooked ? kBlock : 0, prefill_tail(d.is_moe()));
   for (size_t j = 0; j < chunks.size(); j += kPair) {
     PairPlan pp;
     const uint32_t n_ch = uint32_t(std::min<size_t>(kPair, chunks.size() - j));

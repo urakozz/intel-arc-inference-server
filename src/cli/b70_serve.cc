@@ -738,7 +738,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
 // both cards in one Level Zero context with peer access both ways, each card's slice loaded straight onto it (with the
 // MTP head whole on each card when a proposer needs it), max_len planned on both cards with the prefill scratch and
 // the head, the two-card prefill prepared before the first request. The prefix cache's entries are the one-card host
-// layouts (runtime/tp_gather.h), keyed like one card's, and its hook fires at the TP pair stride (tp_hook_stride).
+// layouts (runtime/tp_gather.h), keyed like one card's, and its hook fires at the TP pair stride (tp_prefill_chunks).
 // --parallel's refusals ran in run(), before the device.
 struct TpServe {
   runtime::PrefillBackend backend = runtime::PrefillBackend::L0;
