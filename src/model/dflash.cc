@@ -78,9 +78,13 @@ namespace {
 DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture, bool lili) {
   DFlashDesc d;
   d.architecture = architecture;
-  if (!lili && opt(c, "quantization_config"))
-    refuse("quantization_config: a quantised drafter is not one of our formats - load the bf16 drafter "
-           "(it is quantised to int8 at load)");
+  // The AutoRound int4 export (auto-round / gptq) is the loader's to hold (loader::DFlashCheckpoint, QuantConfig).
+  if (const Value* qc = lili ? nullptr : opt(c, "quantization_config")) {
+    const Value* m = qc->is_object() ? opt(*qc, "quant_method") : nullptr;
+    if (!m || !m->is_string() || (m->str() != "auto-round" && m->str() != "gptq"))
+      refuse("quantization_config: a quantised drafter is one of our formats only as an AutoRound int4 export "
+             "(quant_method auto-round or gptq) - else load the bf16 drafter (it is quantised to int8 at load)");
+  }
   // dc = eagle_config, overlaid by dflash_config (config_from_dict).
   Value::Object dco;
   for (const char* k : {"eagle_config", "dflash_config"})

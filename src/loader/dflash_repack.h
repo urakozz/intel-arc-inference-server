@@ -26,6 +26,13 @@
 // when the checkpoint ships one - `mask_embedding.safetensors` (one tensor `embedding`, [hidden] or [1, hidden], bf16
 // or fp32; optional metadata `mask_token_id`, which must equal the config's): it replaces the row. vLLM's
 // `mask_embedding.pt` is a torch pickle and is refused naming the converter (tools/oracle/dflash_mask_embedding.py).
+//
+// **The packed drafter** (urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound): a config.json quantization_config - held
+// to what the target's loader accepts (loader::QuantConfig::parse, assert_quant_invariants, check_quant_scan: int4
+// symmetric, g64 or g128, qzeros 0x77777777, no activation order) - and a linear shipped as GPTQ `.qweight` /
+// `.qzeros` / `.scales` (`.g_idx` the identity) stands for its `.weight` (I32 [K/8][N]); every other tensor stays bf16.
+// Such a checkpoint loads as DraftFormat::Int4G64 only: its packed words and f16 scales go into layout 1 unchanged
+// (a linear it left in bf16 is quantised by rtn.h as at load).
 namespace loader {
 
 // Every tensor name of a drafter of `d` (canonical spelling), sorted.
@@ -35,7 +42,8 @@ std::string dflash_canon(const std::string& name);
 
 // One linear in its device form: Bf16 - gemv_bf16's tiles [N/16][K/8][8][16] as uint16; Int8 - gemv_i8w's tiles
 // [N/16][K/16][16][16] as int8 + fp32 row scales [N]; Int4 (spec 19v2 / 26b, DraftFormat::Int4G64) -
-// rtn's GPTQ words and f16 scales repacked into gemv.cl's layout-1 tiles [N/16][K/64][136] u32.
+// GPTQ words and f16 scales (the packed checkpoint's own, else rtn's) repacked into gemv.cl's layout-1 tiles
+// [N/16][K/64][136] u32.
 struct DFlashHostLinear {
   model::WeightKind kind = model::WeightKind::Bf16;
   uint32_t K = 0, N = 0, slices = 1;
@@ -77,6 +85,8 @@ class DFlashCheckpoint {
   uint32_t fc_k() const { return fc_k_; }                     // taps x the target's hidden, as shipped
   uint32_t target_hidden() const { return fc_k_ / uint32_t(d_.taps.size()); }
   size_t tensors() const { return set_->tensors().size(); }
+  // The checkpoint ships packed int4 linears (config.json's quantization_config): it loads as DraftFormat::Int4G64.
+  bool packed() const { return packed_; }
 
   // model::check_dflash_target, plus fc's K = taps x target.hidden.
   void check_target(const model::ModelDesc& target, uint32_t target_vocab_rows) const;
@@ -109,6 +119,7 @@ class DFlashCheckpoint {
   std::vector<std::pair<std::string, std::string>> canon_;   // canonical -> the checkpoint's name (sorted)
   uint32_t fc_k_ = 0;
   std::string mask_path_;
+  bool packed_ = false;
 };
 
 }  // namespace loader

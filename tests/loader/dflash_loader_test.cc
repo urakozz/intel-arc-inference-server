@@ -14,6 +14,10 @@
 //      fp32 widenings, the codebooks the shard's own rows, mask_embedding.safetensors read; and the pieces' bytes ==
 //      loader::dflash_weight_bytes (the planner's formula).
 //   4. The real shapes' byte totals (printed; the planner's numbers): bf16 and int8.
+//   5. The AutoRound int4 export's form on the tiny drafter: its linears shipped as GPTQ qweight / qzeros / scales (rtn's
+//      words), config.json carrying quantization_config. It loads as int4 only, every linear bitwise the bf16
+//      checkpoint's at-load int4 form (one left in bf16 quantised at load), bytes == the formula; a qzeros word other
+//      than 0x77777777, an asymmetric config and a packed norm refused.
 #include <unistd.h>
 
 #include <cstdio>
@@ -181,7 +185,7 @@ void test_config_refusals(const std::string& path) {
       {"\"DFlash2DraftModel\"", "\"EagleDraftModel\"", "architectures"},
       {"\"conv_group_size\": 16", "\"conv_group_size\": 17", "conv_group_size"},
       {"\"block_size\": 8", "\"block_size\": 1", "block_size"},
-      {"\"dtype\": \"bfloat16\"", "\"dtype\": \"bfloat16\", \"quantization_config\": {\"quant_method\": \"gptq\"}",
+      {"\"dtype\": \"bfloat16\"", "\"dtype\": \"bfloat16\", \"quantization_config\": {\"quant_method\": \"awq\"}",
        "quantization_config"},
       {"\"block_size\": 8,", "\"block_size\": 8, \"attention_value_scale\": 0.5,", "attention_value_scale"},
       {"\"block_size\": 8,", "\"block_size\": 8, \"attention_sink_bias\": true,", "attention_sink_bias"},
@@ -402,6 +406,88 @@ void test_real_bytes(const std::string& path) {
   CHECK(!loader::parse_draft_format("int4", f));
 }
 
+template <class T>
+std::vector<uint8_t> bytes_of(const std::vector<T>& v) {
+  const auto* p = reinterpret_cast<const uint8_t*>(v.data());
+  return std::vector<uint8_t>(p, p + v.size() * sizeof(T));
+}
+
+void test_packed() {
+  fx::Shape s;
+  s.inter = 128;
+  const fx::Tensors ts = fx::make(s, 9);
+  const std::string kept = "candidate_selector.hidden_projection.weight";   // left in bf16, as AutoRound may
+  fx::Tensors pk;
+  for (const auto& [n, t] : ts) {
+    const bool linear = t.shape.size() == 2 && n.size() > 7 && n.compare(n.size() - 7, 7, ".weight") == 0;
+    if (!linear || n == kept) {
+      pk[n] = t;
+      continue;
+    }
+    const uint32_t N = uint32_t(t.shape[0]), K = uint32_t(t.shape[1]);
+    std::vector<uint32_t> q(size_t(K / 8) * N);
+    std::vector<uint16_t> sc(size_t(K / 64) * N);
+    loader::rtn_int4_g64(reinterpret_cast<const uint16_t*>(t.bytes.data()), K, N, q.data(), sc.data());
+    const std::string b = n.substr(0, n.size() - 7);
+    pk[b + ".qweight"] = {"I32", {K / 8, N}, bytes_of(q)};
+    pk[b + ".scales"] = {"F16", {K / 64, N}, bytes_of(sc)};
+    pk[b + ".qzeros"] = {"I32", {K / 64, N / 8}, bytes_of(std::vector<uint32_t>(size_t(K / 64) * (N / 8), 0x77777777u))};
+  }
+  const std::string qc = "\"quantization_config\":{\"bits\":4,\"group_size\":64,\"sym\":true,"
+                         "\"quant_method\":\"auto-round\",\"packing_format\":\"auto_round:auto_gptq\"}";
+  auto write = [&](const fs::path& dir, const fx::Tensors& t2, const std::string& q) {
+    fx::write(dir, s, t2);
+    std::string c = fx::config_json(s);
+    c.insert(c.size() - 1, "," + q);
+    std::ofstream(dir / "config.json") << c;
+  };
+  const fs::path dir = tmpdir("packed"), plain = tmpdir("plain");
+  write(dir, pk, qc);
+  fx::write(plain, s, ts);
+  const loader::DFlashCheckpoint ck(dir.string()), bf(plain.string());
+  CHECK(ck.packed() && !bf.packed());
+  const model::DFlashDesc& d = ck.desc();
+  const loader::DraftFormat f = loader::DraftFormat::Int4G64;
+  auto same = [](const loader::DFlashHostLinear& a, const loader::DFlashHostLinear& b) {
+    CHECK(a.kind == b.kind && a.K == b.K && a.N == b.N && a.slices == b.slices && a.int4 == b.int4);
+    return a.bytes();
+  };
+  size_t linears = same(ck.fc(f), bf.fc(f));
+  for (uint32_t l = 0; l < s.layers; ++l)
+    for (auto w : {loader::DFlashLinear::Qkv, loader::DFlashLinear::O, loader::DFlashLinear::GateUp,
+                   loader::DFlashLinear::Down, loader::DFlashLinear::AttnKproj, loader::DFlashLinear::MlpKproj})
+      linears += same(ck.layer_linear(l, w, f), bf.layer_linear(l, w, f));
+  linears += same(ck.selector_projection(f), bf.selector_projection(f));
+  CHECK_EQ(loader::dflash_weight_bytes(d, ck.target_hidden(), f).linears, linears);
+  CHECK(ck.hidden_norm() == bf.hidden_norm() && ck.conv_bases() == bf.conv_bases());
+  for (loader::DraftFormat other : {loader::DraftFormat::Int8, loader::DraftFormat::Bf16})
+    CHECK(throws_with([&] { ck.fc(other); }, "loads as int4"));
+
+  auto refused = [&](const fx::Tensors& t2, const std::string& q, const std::string& needle) {
+    const fs::path d2 = tmpdir("packed_bad");
+    write(d2, t2, q);
+    const bool ok = throws_with([&] { loader::DFlashCheckpoint x(d2.string()); }, needle);
+    fs::remove_all(d2);
+    return ok;
+  };
+  {
+    fx::Tensors t2 = pk;
+    t2["layers.1.mlp.down_proj.qzeros"].bytes[0] = 0x78;
+    CHECK(refused(t2, qc, "qzeros"));
+  }
+  CHECK(refused(pk, with(qc, "\"sym\":true", "\"sym\":false"), "sym"));
+  {
+    fx::Tensors t2 = pk;
+    t2.erase("norm.weight");
+    t2["norm.qweight"] = {"I32", {8, 8}, std::vector<uint8_t>(256)};
+    CHECK(refused(t2, qc, "not a linear"));
+  }
+  fs::remove_all(dir);
+  fs::remove_all(plain);
+  std::printf("packed: AutoRound int4 form == the at-load int4 form bitwise, int4 only, bytes == the formula, "
+              "refusals by name\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -411,6 +497,7 @@ int main(int argc, char** argv) {
   test_checkpoint(2);
   test_checkpoint(1);
   test_real_bytes(cfg);
+  test_packed();
   std::printf("dflash_loader_test: PASS\n");
   return 0;
 }
