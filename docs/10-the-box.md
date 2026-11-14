@@ -147,8 +147,8 @@ cards, are in "Two streams, one per card" below.
 validation` - it stops only those (TERM, then KILL after 10 s) and refuses anything else.
 
 **Validating work in bulk** is one command, `tools/box_validate.sh`
-(`--dry-run` first to read what it will do). It runs the rows of
-[box-validation-queue.md](superpowers/plans/box-validation-queue.md) as stages in one
+(`--dry-run` first to read what it will do). It runs the rows and stages of
+`tools/box_validate/stages.sh` (`tools/box_validate.sh --list` prints them) in one
 detached orchestrator on the box, under the GPU lock, with the identical-binaries check "G0" (kernel
 binaries and gate outputs identical to a baseline build) first and stopping the run when it fails, resumable after an ssh
 drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its results are on the box under `~/b70-validate/`, the latest result of every stage in

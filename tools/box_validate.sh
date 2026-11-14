@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The box validation queue (docs/superpowers/plans/box-validation-queue.md) as one resumable,
+# The box validation queue (the rows and stages of tools/box_validate/stages.sh) as one resumable,
 # detached runbook. From the Mac, in the checkout to validate (normally main):
 #
 #   tools/box_validate.sh                 sync, launch every default stage on the box, wait,

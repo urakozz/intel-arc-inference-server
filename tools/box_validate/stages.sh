@@ -1,8 +1,7 @@
 # tools/box_validate/stages.sh - the box validation queue as stages.
 #
-# docs/superpowers/plans/box-validation-queue.md is the list of work merged into main
-# without running on the card; each `row` below is one of its rows, each `stage` one step
-# of that row's "how to validate", in the order the queue and its checklists require.
+# Each `row` below is one piece of merged work to validate on the card, each `stage` one step of
+# validating it, in the order its checklist requires.
 # Registry fields and helpers: tools/box_validate/lib.sh. A stage body runs ON THE BOX from
 # the tree under test ($TREE); in a dry-run on the Mac every helper prints instead of running.
 #

@@ -67,10 +67,10 @@
 #           oracle-out-q4exp/site, the box oracle-out-q4exp-site - tools/oracle/qwen4exp_env.sh makes
 #           it in the container once). Q4_LAYERS=N truncates as the engine's --layers N (a test run;
 #           the A4 reference is the whole model). Prepared for spec 22: the engine's A4 run on the
-#           whole model waits for it (box-validation-queue row 34's r34.a4_ref makes the reference).
+#           whole model waits for it (validation row 34's r34.a4_ref makes the reference).
 #           Score with `score.py` (Qwen XML; 0 parse failures of the reference).
 # Then on the box: tools/toolcall/engine_generate.sh with the same set and N_NEW, and
-# tools/toolcall/score.py <dir> bf16 <engine runs> (box-validation-queue rows 16 / 25).
+# tools/toolcall/score.py <dir> bf16 <engine runs> (validation rows 16 / 25).
 #
 # Where it runs:
 #   the Mac  one container (image agnes-ref-img:latest - torch 2.14.1+cpu, transformers 5.15, g++ /

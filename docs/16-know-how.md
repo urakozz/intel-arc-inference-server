@@ -4,20 +4,22 @@ The transferable findings from writing an LLM inference engine from scratch
 against Intel Arc Pro B70 cards. Every number is measured on the box unless
 marked otherwise; the derivation for each lives in the doc cited.
 
-**The headline (one card, 2026-09 stack, same checkpoint files as vLLM).** An
-engine in pure Level Zero and OpenCL C - no PyTorch, no vLLM, no vendor kernel
-library in the hot path - ran prefill at **1670.72 t/s against vLLM's 1610.04**
-and decode at **29.45 t/s against 31.01** (the opt-in int8 prefill,
-`--prefill-backend l0-int8`, reached 2125 t/s, docs/17). Good prefill, decode
-behind; speculative decoding, several requests at once and two cards have moved
-the picture since (current numbers: BENCHMARKS.md). It reproduces a CPU-torch
-oracle element-exact on every determined token row and replays bitwise
-deterministically.
+**Where it stands.** An engine in pure Level Zero and OpenCL C - no PyTorch, no
+vLLM, no vendor kernel library in the hot path - serves Qwen3.8-27B (int4) at
+**141.7 t/s on one card** with the DFlash draft model (llama-benchy tg128),
+**123 t/s on two cards** with the model's own MTP head at the full 262,144-token
+context, and reads prompts at up to **3,217 t/s**; Ornith 1.5 35B-A3B reads at
+8,877 t/s and writes at 180.5 t/s on one card (README, BENCHMARKS.md). On the same
+card and model files it is ahead of vLLM by +25 % prefill and +44 % decode with
+MTP. Every speculative token is graded against a float32 reference run.
 
-**What that headline is not.** It was not efficient yet. Decode sat at 77.6% of
-the measured bandwidth against vLLM's 81.7%, and prefill sustained about
-81.8 TFLOP/s against a 183.45 TFLOP/s pipe. Beating the reference
-implementation and using the silicon well turned out to be different questions.
+**How it got there, and what the first headline was not.** The first one-card
+result (2026-09) was prefill 1,671 t/s against vLLM's 1,610 and decode 29.45
+against 31.01 - not efficient yet: decode at 77.6 % of the measured bandwidth,
+prefill at about 81.8 TFLOP/s of a 183.45 TFLOP/s pipe. Beating the reference
+implementation and using the silicon well are different questions; most of the
+gain since came from doing less work per token (speculative decoding, packed
+weights, prompt lookup), not from faster single kernels.
 
 ## 1. The hardware (BMG-G31 / B70)
 
@@ -30,12 +32,14 @@ implementation and using the silicon well turned out to be different questions.
   native and real - the assembly carries `:s4` on one operand of a single
   instruction - and it runs at *exactly* the int8 rate, because its K is 32.
   A W4A8 kernel built on that assumption measured slower than the bf16 control.
-- **Real bandwidth is about 590 GB/s**, and the card **compresses uniform-fill
-  buffers losslessly**, so naive probes read impossible numbers (1022 GB/s above
-  a 608 GB/s theoretical peak). Seed probe buffers with xorshift.
+- **The memory peaks at about 640 GB/s** (hw-smi reads up to 638 under load);
+  our probes sustain about 590. The card **compresses uniform-fill buffers
+  losslessly**, so naive probes read impossible numbers (1022 GB/s). Seed probe
+  buffers with xorshift. (Older docs quote 608 GB/s, a 19 Gbps figure; the card
+  reads higher.)
 - **Per-shape GEMV ceilings, not one number**: 533 to 584 GB/s depending on
-  shape, 89% to 99% of peak (docs/12). Plan against the per-shape ceiling; a
-  single "peak bandwidth" figure lies by up to 11%.
+  shape (docs/12), 83 % to 91 % of the peak. Plan against the per-shape ceiling;
+  a single "peak bandwidth" figure misleads by up to 17 %.
 - **The subgroup is the occupancy unit, not the work-group.** A bit-identical
   8-work-group rewrite of a 2-work-group kernel bought exactly zero; splitting
   the same work across 8 → 32 → 128 *subgroups* took it from 48.8 to 13.1 to
@@ -200,6 +204,17 @@ implementation and using the silicon well turned out to be different questions.
   judge, doc 14), accept a near-miss of at most 8 bf16 ulps, and still fail a real error - the
   DPAS verify-attention kernel's token was at f32 rank 3, 4.0 below a top whose margin was 3.44,
   and the kernel was switched off for it.
+- **Decide from the evidence, then verify once.** When a log line or an error
+  message points at a cause, read it, fix it, and check the fix with the one test
+  that would fail without it. The cross-card failure below was explained by its
+  own error message ("the trailer arrived 0 loads later") within minutes of the
+  first reproduction; hours of stress runs added nothing. Re-measure an old build
+  only when the gate is within noise (a 1 % bar); otherwise compare against the
+  numbers already logged.
+- **Run the cheap stop-rule measurement before a multi-day build.** DFlash on two
+  cards was built on a derived 157-189 t/s; the measured round cost (30.7 ms
+  against a 22.5 ms bar) would have shown in an hour that two cards do not beat
+  one for a single DFlash session.
 - **The cards are the check.** A Mac-side build and test run proves the host code compiles, not that
   the cards behave. Merges go in after the checks that need no card; the full validation
   (`tools/box_validate.sh`) runs on main on demand, counts Passed / Failed / Skipped apart (a Skipped
@@ -227,3 +242,38 @@ implementation and using the silicon well turned out to be different questions.
 - **A one-card copy test cannot reproduce a two-card import problem.** The prefix cache hang lived in the second card's
   mapping of memory shared with the first, and copy stress that did not use that path passed cleanly. Test the
   path with both cards taking part.
+- **A 4-byte flag beside 4-byte data is not a message.** Each card writes its part
+  of an all-reduce into the other card's memory with a stamp (the call number) and
+  a flag. With 16 stamps packed into one 64-byte line, a stamp sometimes reached the
+  reader after its flag under real serving load (flag n, stamp n - 2, n on the very
+  next read). Every stamp is now a whole 64-byte line of its own, written like data.
+  A synthetic stress test never failed in about 8 million exchanges; only serving
+  reproduced it, so the serving run is the test.
+- **Tensor parallel over PCIe pays where each step computes a lot per exchange.**
+  Two all-reduces per layer cost the same whether a step checks 1 token or 8, so
+  MTP gains from two cards (123 t/s against ~73 on one) while an 8-row DFlash round
+  does not (about 135 t/s on two cards against 141.7 on one). At long context the
+  split attention may change that; the quiet-box run settles it.
+
+## 8. Speculative decoding
+
+- **The verify step is a small GEMM.** Checking K drafted tokens is a matrix
+  multiply with M = K + 1 rows: too few rows for the full prefill GEMM, too many
+  for the decode GEMV. A dedicated small-M kernel on the matrix engines checks 8
+  rows for about 1.2 plain steps on one card, so every accepted token beyond the
+  first is nearly free.
+- **Bytes per draft decide the drafter.** The DFlash drafter's pass went from
+  8.4 ms to 4.41 ms by packing it to int4 (W4A16) and replacing its full output
+  head with a 2-bit candidate head that re-ranks 80 candidates exactly; a round
+  fell from 1.56 to 1.40 plain steps. Acceptance moved by under 2 %.
+- **Agentic sessions repeat themselves; use it.** Prompt lookup - proposing the
+  continuation of text that already appears in the context - is checked by the
+  same verify lists. Inside MTP it gives +22 % on edit/copy prompts and +2.4 % on a
+  recorded coding session, where about 28 % of tokens came from lookup at 89 %
+  acceptance. The longer the copied run the engine may propose, the larger the
+  gain.
+- **Grade every speculative token against float32.** Verify rows differ from
+  plain rows at the last bf16 rounding, so greedy output can flip on near-ties.
+  The f32 judge accepts a choice within a few bf16 ulps of the float32 top and
+  fails real errors; rows the operator reviewed are listed by name, never
+  absorbed by a looser bar.

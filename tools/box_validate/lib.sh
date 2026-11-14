@@ -58,7 +58,7 @@ quick_form() { BV_QUICKS[$(bv_index "$1")]="$2"; }
 merge() { local id; for id in "$@"; do BV_MERGES[$(bv_index "$id")]="same"; done; }
 # quick_or FULL QUICK - the value for this run
 quick_or() { if [ "${BV_QUICK:-0}" = 1 ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
-# row N TITLE - a row of docs/superpowers/plans/box-validation-queue.md (0: the gate itself)
+# row N TITLE - a validation row (0: the gate itself)
 row() { BV_ROW_IDS+=("$1"); BV_ROW_TITLES+=("$2"); }
 # rownote N TEXT - something the row asks for that no stage runs, and why
 rownote() { BV_NOTES+=("$1	$2"); }
