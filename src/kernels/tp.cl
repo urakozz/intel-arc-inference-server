@@ -28,10 +28,10 @@
 //   [slot 0 data | slot 1 data | trailers [2][J] x 16 words | pad to 4 KiB | flags [2][J] x 16 words | pad to 4 KiB]
 //   data = S_MSG x TP_MROWS x K words (capacity at 8 rows; a call at M rows uses [S_MSG][M][K]), J = FOLD_G x TP_MROWS
 //
-// Every 64-byte line of the landing has one writing work-group: a data chunk is whole lines, each trailer and each flag
-// has a line of its own. Trailers packed 16 to a line (TP_TRAILER_STRIDE 1, kept for tp_kernels_test stress) lost
-// stamps: a work-group's trailer store into a line other work-groups of the sender also wrote reached the reader after
-// its flag, or never (a stale crossing, 1-3 of 39 DFlash requests under --parallel tp, 2026-11-14).
+// Every 64-byte line of the landing has one writing work-group, and the stamp goes out as a whole line (16 lanes, n in
+// every word), as the data's lines do. Trailers packed 16 to a line, one 4-byte store each (TP_TRAILER_STRIDE 1, kept
+// for tp_kernels_test stress), reached the reader after their flag: under DFlash serving the reader saw flag n with
+// trailer n - 2 and read n on its next load (tp_late), once a 78-request opencode replay (2026-11-14).
 //
 // Chunk j = g x TP_MROWS + m: work-group (g, m) of either kernel - the K range [g CHUNK, + CHUNK) of row m, every slice.
 // Call numbers come from per-chunk counters in device memory advanced by the kernels (send's and fold's own), so a
@@ -149,7 +149,7 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
     for (uint s = 0; s < S_LOC; ++s) d[((size_t)s * M + m) * K + k] = as_uint(partials[((size_t)s * M + m) * K + k]);
 #endif
   }
-  if (lid == 0) land[TRAILER(slot, j)] = n;
+  if (lid < TP_TRAILER_STRIDE) land[TRAILER(slot, j) + lid] = n;   // the stamp as a whole line, like the data's
   atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
   barrier(CLK_GLOBAL_MEM_FENCE);
   if (lid == 0) {

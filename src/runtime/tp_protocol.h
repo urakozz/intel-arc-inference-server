@@ -11,7 +11,7 @@
 //
 // data = s_msg x kMRows x hidden words (a call at M rows uses [s_msg][M][hidden]); J = fold_g x kMRows chunks, chunk
 // j = g x kMRows + m (the K range [g chunk, + chunk) of row m, every slice). Call n uses slot n & 1. Per chunk:
-//   send  the part's words, trailer = n, a release fence, flag = n (a plain store, then a fence);
+//   send  the part's words, the trailer's line = n (every word), a release fence, flag = n (a plain store, then a fence);
 //   fold  spin (bounded) on flag == n with acquire loads unless a failure is already recorded; trailer must be n
 //         (else STALE: the flag came without its data); the data read; the parts summed from 0 in one fixed order -
 //         card 0's part first, so both cards compute the same bits (and, with slices, one card's chain).
@@ -101,7 +101,7 @@ inline void send_chunk(const Layout& L, uint32_t* land, uint32_t* ctr, const flo
         const size_t e = (size_t(s) * M + m) * L.hidden + k;
         std::memcpy(&land[L.data(slot) + e], &part[e], 4);
       }
-    land[L.trailer(slot, j)] = n;
+    for (uint32_t w = 0; w < kTrailerStride; ++w) land[L.trailer(slot, j) + w] = n;   // the stamp as a whole line
   }
   std::atomic_thread_fence(std::memory_order_release);
   store_rel(&land[L.flag(slot, j)], n);
