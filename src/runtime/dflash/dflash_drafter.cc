@@ -34,7 +34,7 @@ DFlashDrafter::DFlashDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   imm.copy(norms.data(), w_.hidden_norm->ptr(), w_.hidden_norm->size());
   imm.copy(norms.data() + w_.hidden_norm->size(), w_.final_norm->ptr(), w_.final_norm->size());
-  key_ = drafter_key(w_.desc, w_.format, norms.data(), norms.size());
+  key_ = drafter_key(w_.desc, w_.format, norms.data(), norms.size(), w_.packed);
 }
 
 void DFlashDrafter::save_ring(l0::CmdList& imm, void* host) const {

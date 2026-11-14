@@ -72,8 +72,10 @@ size_t project_launches(const model::DFlashDesc& d);
 size_t ring_snapshot_bytes(const model::DFlashDesc& d, uint32_t max_len);
 // The drafter's name in the prefix store's keys (TapDrafter::key): FNV-1a 64 over the descriptor's shapes and taps,
 // the weight format and `norms` (the drafter's hidden_norm and final_norm weights as loaded - two checkpoints of one
-// shape differ there). Never 0 (0 means "no drafter" to server::store_root).
-uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const void* norms, size_t norm_bytes);
+// shape differ there), and `packed` - an int4 drafter's own packed linears (an AutoRound export) against int4 quantised
+// at load, two forms of one format. Never 0 (0 means "no drafter" to server::store_root).
+uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const void* norms, size_t norm_bytes,
+                     bool packed = false);
 
 struct DFlashCtl;
 // The one way to set a draft's K, temperature and seed in the control block (before a replay, under the drain rule):

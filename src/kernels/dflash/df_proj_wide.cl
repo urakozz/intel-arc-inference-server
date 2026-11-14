@@ -6,6 +6,9 @@
 //   df_w_slab_i8    grid (NS / 256, K / 16), WG 256: NS columns from n0 of an int8 linear ([N/16][K/16][16 k][16 n],
 //                   loader/lm_head_int8.h) as pf_gemm's B, bf16 [K][NS] - the exact integers, unscaled
 //   df_w_slab_bf16  grid (NS / 256, K / 8), WG 256: the same of a bf16 linear in gemv_bf16's tiled layout - a copy
+//   df_w_slab_q4    grid (NS / 256, K / 64), WG 256: the same of an int4 g64 linear in layout 1 ([N/16][K/64] tiles of
+//                   136 u32, common/repack.h) - scale x (q - 8) rounded once to bf16, the target's prefill dequant
+//                   (prefill/pf_dequant_slab.cl) statement for statement, so the GEMM output needs no scale
 //   df_w_norm       grid (1, rows), WG 256: df_norm over the GEMM's rows, the int8 column scales folded in first
 //                   (`scaled`; gemm_sm_i8w scales its output, pf_gemm does not); writes the bf16 x only
 //   df_w_ctx_store  grid (2 NKV, rows), WG HD: df_ctx_store for ONE layer - row r is position pos0 + r, k (k_norm,
@@ -13,6 +16,7 @@
 //                   scaled as above
 // A row's values depend on its own row only, so the ring does not depend on how a prompt was cut into passes.
 #pragma OPENCL FP_CONTRACT OFF
+#pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
 #ifndef H
 #error "H (the drafter's hidden size) must be defined"
@@ -49,6 +53,22 @@ __kernel void df_w_slab_bf16(__global const ushort* restrict w, __global ushort*
   __global const ushort* restrict blk = w + ((size_t)(n / 16) * (K / 8) + k8) * 128 + n % 16;
   __global ushort* restrict o = out + (size_t)k8 * 8 * NS + j;
   for (uint i = 0; i < 8; ++i) o[(size_t)i * NS] = blk[i * 16];
+}
+
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void df_w_slab_q4(__global const uint* restrict w, __global ushort* restrict out, const uint n0,
+                           const uint K, const uint NS) {
+  const uint j = get_global_id(0), g = get_group_id(1), n = n0 + j;
+  __global const uint* restrict tile = w + ((size_t)(n / 16) * (K / 64) + g) * 136;
+  const float scale = (float)as_half(((__global const ushort*)(tile + 128))[n % 16]);
+  __global ushort* restrict o = out + (size_t)g * 64 * NS + j;
+  for (uint jj = 0; jj < 8; ++jj) {
+    const uint u = tile[jj * 16 + n % 16] ^ 0x88888888u;
+    for (int i = 0; i < 8; ++i) {
+      const int qm8 = ((int)(u << (28 - 4 * i))) >> 28;
+      o[(size_t)(jj * 8 + i) * NS] = f2bf((float)qm8 * scale);
+    }
+  }
 }
 
 // The fixed Σ: lane partials then strides WG/2 .. 1 (df_prep.cl's wg_sum).

@@ -98,7 +98,7 @@ class TapDrafter : public TapSink {
   // in one pass over the weights, in the chunk's dead scratch `s` (x, the slab, partials past the rows step_head
   // still reads). Nothing is waited for: the caller waits before the ring is read. The ring rows agree with
   // projection()'s within the GEMM's summation order, not bitwise. False, with nothing appended, when it is not
-  // built for the drafter's format (int4) - the caller projects through projection().
+  // built for the drafter - the caller projects through projection().
   virtual bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const void* taps,
                             uint32_t pos, uint32_t n) = 0;
   // False when the drafter drafts greedily only (a DFlash v1 drafter: its sampled q is a full-vocabulary softmax

@@ -106,7 +106,8 @@ struct Fnv {
 };
 }  // namespace
 
-uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const void* norms, size_t norm_bytes) {
+uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const void* norms, size_t norm_bytes,
+                     bool packed) {
   Fnv h;
   h.bytes(d.architecture.data(), d.architecture.size());
   for (uint32_t v : {d.version, d.layers, d.hidden, d.q_heads, d.kv_heads, d.head_dim, d.inter, d.vocab, d.block,
@@ -118,6 +119,7 @@ uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const vo
   h.f64(d.theta);
   h.f64(d.eps);
   h.u32(f == loader::DraftFormat::Int4G64 ? 4u : f == loader::DraftFormat::Int8 ? 8u : 16u);
+  if (packed) h.u32(0x504B4434u);   // "PKD4": the other forms' keys stay as they were
   if (norm_bytes != 0) h.bytes(norms, norm_bytes);
   return h.h != 0 ? h.h : 1;
 }

@@ -93,6 +93,7 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   DFlashWeights w;
   w.desc = d;
   w.format = format;
+  w.packed = ck.packed();
   w.target_hidden = ck.target_hidden();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   size_t bytes = 0;

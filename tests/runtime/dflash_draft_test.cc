@@ -447,7 +447,7 @@ int main(int argc, char** argv) {
       e.run(proj);
     }
     const dfref::Ring ring = read_ring(e, b);
-    if (f != loader::DraftFormat::Int4G64) {
+    {
       // 1w. the same 2053 positions at prefill width (project_wide: pf_gemm, three passes - 1000 rows on the small
       // tile, 1048 on pf_gemm's, 5 across the wrap) against the 8-row replays' ring: every slot of every layer,
       // per position and layer the K and the V row within 2e-3 relative L2, about a bf16 half-ulp (2^-9) of the
