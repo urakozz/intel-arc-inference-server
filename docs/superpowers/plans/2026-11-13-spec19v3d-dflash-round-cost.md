@@ -166,6 +166,12 @@ stays reachable through `CaptureOptions` for the A/B), `tests/kernels/dflash_ker
   (2) occupancy: `df_attn_dpas.cl`'s KS 4 (a head's block keys split four ways) is the default - the five parts
   1.55 -> 0.50 ms, which meets the 0.9 ms gate; (3) `dflash_draft_test`'s CPU twin follows the DPAS part's order
   (`dfref::attention`'s dpas_ks) and every list binds the production part. Step 3 (the int8 ring) is not needed.
+- **Review fixes (2026-11-14):** the acceptance gate also holds each corpus pooled over its K rows at the same
+  one-sided 0.05 (a4 holds 544 of the 608 anchors a K; KS 4: code -0.018, opencode -0.027 - pass; the 2-bit / 80
+  head: a4 -0.0008 - pass); `dflash_kernels_test` plants one dominant key at the window's edge, before it, at the
+  ring's wrap and at each KS slice boundary (KS 1 / 2 / 4); at KS 4 `df_attn_dpas` declares 65,920 B of work-group
+  local memory against the B70's 131,072 (clinfo). **A thin margin, kept:** the int8 drafter's forced-gemv_i8w
+  list against the DPAS-order twin reads rows cosine 0.9999903 at the 0.99999 bar - the bar is not loosened.
 - [ ] **Step 3 (only if Step 2 leaves > 0.6 ms):** the ring in int8 by the target's rotation scheme (`kv8`). It
   changes `ring_bytes()` and the drafter's key, so old prefix cache entries are not restored beside it (the key
   already guards that). Same gates.
