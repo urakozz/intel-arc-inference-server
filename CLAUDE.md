@@ -9,6 +9,14 @@ An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and b
 - Mention unrelated dead code you notice; don't remove it.
 - No single-use abstractions, and no error handling for cases that cannot happen.
 
+## Deciding and testing
+
+- Decide from the evidence: once a log, error line or probe points to a cause, pick the fix and make it. Read the
+  evidence (logs, error messages) yourself before running more tests.
+- Verify a change with ONE targeted check sized to it: the test or run that would fail without the fix. No repeated
+  rounds, sweeps or stress series unless that check fails. A one-line change gets one check.
+- Stop when the work is merged or reported: stop your box jobs, leave nothing queued.
+
 ## Git
 
 - Commits are signed and carry no trailers (no Signed-off-by, Co-authored-by or similar):
