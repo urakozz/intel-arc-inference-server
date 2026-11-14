@@ -236,7 +236,12 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
     std::printf("RANK_MARGIN rows=%u worst_top1=%u worst_top16=%u p99_top16=%u over64=%u over80=%u (candidate rank of the "
                 "exact int8 head's top-1 / worst of its top-16; recorded)\n", rm.rows, rm.worst1, rm.worst16,
                 rm.ranks16[size_t(rm.ranks16.size() * 0.99)], rm.over64, rm.over80);
+    std::fflush(stdout);
   }
+  // The scratch kernel, module and logits go before the Engine and its context (main declares rm before them).
+  rm.k.reset();
+  rm.mod.reset();
+  rm.exact.reset();
 }
 
 void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds, unsigned attn_ks) {
