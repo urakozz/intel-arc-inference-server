@@ -10,7 +10,8 @@
 //      lines (the built names passed as arguments by tests/CMakeLists.txt), and an (M, KV form) without a row
 //      returns V2 (M = 9);
 //   7. spec 17d: a tensor-parallel card's 12 / 2 heads follow the same table at every row and override, and the
-//      MTP verify rows (M = 2..4, both forms) have their per-card binary built (the 17d block).
+//      MTP verify rows (M = 2..4, both forms) have their per-card binary built (the 17d block); spec 19 v3c: M = 5..8
+//      as well (the DFlash tap verify rows).
 #include <cstdio>
 #include <set>
 #include <string>
@@ -65,7 +66,8 @@ int main(int argc, char** argv) {
       for (uint32_t keys : depths)
         CHECK(runtime::verify_attn_kind(r.m, keys, r.kv8, 12, 2, ov) == runtime::verify_attn_kind(r.m, keys, r.kv8, 24, 4, ov));
     CHECK(runtime::verify_attn_deep_from(r.m, r.kv8, 12, 2) == runtime::verify_attn_deep_from(r.m, r.kv8, 24, 4));
-    if (r.m <= 4) CHECK(built.count(kernels::attn_verify_dpas_variant(r.m, 32, r.kv8, 12, 2)) == 1);
+    // spec 19 v3c: M = 5..8 too (a DFlash drafter's verify rows under TP)
+    CHECK(built.count(kernels::attn_verify_dpas_variant(r.m, 32, r.kv8, 12, 2)) == 1);
     std::printf("row M=%u %s: dpas_from %s\n", r.m, r.kv8 ? "int8" : "bf16",
                 r.dpas_from == runtime::kDpasNever ? "never" : std::to_string(r.dpas_from).c_str());
   }
