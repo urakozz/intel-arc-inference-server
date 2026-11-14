@@ -428,6 +428,32 @@ int cost(l0::Context& d0, l0::Context& d1, uint32_t depth) {
               median(ab[0]), median(ab[1]), median(ab[0]) - median(ab[1]));
   return 0;
 }
+// `stress <n>`: n speculative runs (K = 7, the long prompt) with the tap verify lists' crossings in fp32 and n in
+// bf16, alternating; every failed crossing caught, counted by status and reset() - how often each form loses one.
+int stress(l0::Context& d0, l0::Context& d1, uint32_t n) {
+  Tp tp(d0, d1, 16384);
+  runtime::TpEngine& e = *tp.e;
+  const std::vector<uint32_t> p = golden::read_ids("tests/golden/prompts/long.ids");
+  uint32_t fails[2] = {0, 0}, runs[2] = {0, 0};
+  for (uint32_t i = 0; i < 2 * n; ++i) {
+    const int f = int(i % 2);
+    std::array<runtime::CaptureOptions, 2> o;
+    o[0].tp_fp32_crossing = o[1].tp_fp32_crossing = f == 0;
+    e.reset();
+    e.recapture_verify(o);
+    ++runs[f];
+    try {
+      e.prefill(p);
+      speculative(e, 7);
+    } catch (const std::exception& ex) {
+      ++fails[f];
+      std::printf("STRESS %s run %u: %s\n", f == 0 ? "fp32" : "bf16", i / 2, ex.what());
+    }
+  }
+  std::printf("STRESS fp32 crossings: %u of %u runs lost a crossing; bf16: %u of %u (64 ids a run, ~%u crossings each)\n",
+              fails[0], runs[0], fails[1], runs[1], 64u / 3u * 138u);
+  return fails[0] + fails[1] ? 1 : 0;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -445,6 +471,7 @@ int main(int argc, char** argv) {
     std::printf("SKIP: the cards cannot access each other's memory (zeDeviceCanAccessPeer)\n");
     return 77;
   }
+  if (mode == "stress") return stress(d0, d1, argc > 4 ? uint32_t(std::atoi(argv[4])) : 20);
   if (mode == "cost") {
     if (argc < 5) {
       std::fprintf(stderr, "usage: tp_dflash_test <ckpt> <drafter> cost <depth>\n");
