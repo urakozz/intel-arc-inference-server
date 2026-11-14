@@ -48,7 +48,7 @@ no activation-order permutation). Start with 200 tuning iterations and 128 calib
 record the pinned AutoRound commit and the actual recipe with the export. This replaces the failed at-load RTN
 experiment; int8 stays the serving format until the calibrated export passes acceptance.
 
-**The full export is built** (2026-11-13 ~21:00, AutoRound `local-patches-v2` 8186d8b6, 200 iterations; checked: 47 packed linears = every drafter linear, 1.2 GB) at `~/b70/hdd/quant/Qwen3.8-27B-DFlash2-W4A16-g64-2026-11-13`, log `~/b70/logs/dflash-quant/run-20261113-172524.log`. **Published** 2026-11-14 as `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (revision `8b58c130`, in the box's Hugging Face cache). **The packed DFlash loader is still missing**, so the export cannot be
+**The full export is built** (2026-11-13 ~21:00, AutoRound `local-patches-v2` 8186d8b6, 200 iterations; checked: 47 packed linears = every drafter linear, 1.2 GB), log `~/b70/logs/dflash-quant/run-20261113-172524.log`. **Published** 2026-11-14 as `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (revision `8b58c130`, in the box's Hugging Face cache); use the repo id everywhere, not the local export. **The packed DFlash loader is still missing**, so the export cannot be
 served or accepted yet. On the box, in the repo tree:
 
 ```sh
