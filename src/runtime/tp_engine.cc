@@ -407,6 +407,19 @@ void TpEngine::load_state(const void* host, uint32_t pos) {
   if (pos > max_len_)
     throw std::runtime_error("runtime::TpEngine::load_state: pos " + std::to_string(pos) + " exceeds max_len " +
                              std::to_string(max_len_));
+  // A restore replaces the whole session, so it clears a failed crossing as reset() does (the crossings' buffers,
+  // counters and state words zeroed after both cards settle) - the prefix cache's hit path calls no reset() first, and
+  // without this every later request on the engine failed (the TP DFlash replay, 2026-11-14: 1 stale crossing, then 8
+  // requests refused).
+  if (broken_) {
+    for (uint32_t r = 0; r < model::kTpSize; ++r)
+      if (!settle(r))
+        throw std::runtime_error("runtime::TpEngine::load_state: card " + std::to_string(r) +
+                                 "'s failed step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
+    for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).zero_crossing();
+    broken_ = false;
+    drop_ = -1;
+  }
   std::array<std::vector<uint8_t>, 2> gdn, conv;
   uint8_t* gp[2];
   uint8_t* cp[2];
