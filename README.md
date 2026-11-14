@@ -132,7 +132,8 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
   per card on two cards) gets the largest context that fits - the main session; the other slots get a shorter
   context, enough for subagent tasks. On two cards every card runs its own copy of the model (`--parallel replica`).
 
-MTP and the prefix cache are on by default. Ready-made recipes with their context sizes:
+Speculative decoding (the DFlash draft model on one card, the MTP head otherwise) and the prefix cache are on by
+default. Ready-made recipes with their context sizes:
 [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
 Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
 
@@ -146,7 +147,7 @@ Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tune
 | `--max-num-seqs N` | `1` | how many requests run at once; the context follows. Slot 0 gets the largest context that fits beside N - 1 slots of 32,768 tokens. Up to 4 per card; on two cards N > 1 runs a model copy per card |
 | `--max-len auto\|L` | `auto` | context length (slot 0's with `--max-num-seqs`). `auto`: the largest that fits, up to the model's 262,144 |
 | `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
-| `--spec auto\|off\|mtp\|lookup\|dflash\|dflash-lookup` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` = the MTP head on Qwen-family models |
+| `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` picks the DFlash draft model on one card when it is in the Hugging Face cache, otherwise the model's MTP head (also under `tp`, `pp` and several requests a card); on one card `dflash` also copies repeats of earlier text |
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
 | `--draft-model PATH` | Qwen3.8: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` | the draft model for `--spec dflash` |
 | `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
@@ -180,6 +181,7 @@ Developer flags (`b70-decode`):
 | `--profile`, `--steps N`, `--repeats R` | -, `32`, `1` | per-launch timing of the decode step |
 | `--pipeline-split auto\|N` | `auto` | with `pp`: where the layers are cut |
 | `--draft-vocab off\|32k\|64k\|128k`, `--draft-vocab-ids FILE` | `off` | MTP guesses from a smaller vocabulary (also on `b70-serve`) |
+| `--spec lookup\|dflash-lookup` (`b70-serve`) | - | prompt lookup alone (verified through the MTP lists), or inside DFlash (what one-card `dflash` already does) |
 
 Environment variables (test switches, tool settings, the Hugging Face cache): [docs/environment-variables.md](docs/environment-variables.md).
 
