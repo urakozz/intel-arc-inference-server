@@ -75,6 +75,13 @@ struct HasDeferredCommit : std::false_type {};
 template <class E>
 struct HasDeferredCommit<E, std::void_t<decltype(std::declval<E&>().commit(0u, 0u, true))>> : std::true_type {};
 
+// Spec 19 v3c: engines whose drafter can verify prompt-lookup drafts on its tap lists (runtime::TpEngine) - --spec
+// dflash-lookup (spec 19f) is compiled only for those.
+template <class E, class = void>
+struct HasDrafterWindow : std::false_type {};
+template <class E>
+struct HasDrafterWindow<E, std::void_t<decltype(std::declval<const E&>().drafter_window())>> : std::true_type {};
+
 template <class Engine>
 struct PipelineEngineAdapterT : server::EngineIface {
   static constexpr bool kTap = HasTapDrafter<Engine>::value;
@@ -83,9 +90,13 @@ struct PipelineEngineAdapterT : server::EngineIface {
   // model's whole vocabulary, model::Qwen35::kVocab). `mtp_k` > 0 needs the head loaded;
   // `lookup` verifies prompt-lookup drafts through the same verify lists (spec 19e).
   // `dflash` (spec 19d): draft with the engine's drafter on device 1, `mtp_k` its deepest K (--spec-max, 1..7).
+  // `dflash_lookup` (spec 19 v3c, an engine with HasDrafterWindow): prompt lookup inside DFlash (spec 19f) -
+  // EngineAdapter::step_drafts_or_many line for line.
   PipelineEngineAdapterT(Engine& engine, uint32_t vocab, uint32_t V, uint32_t mtp_k = 0, bool lookup = false,
-                         bool dflash = false)
-      : eng(engine), vocab_used(vocab), V_(V), k_(mtp_k), lookup_(lookup), df_(dflash) {
+                         bool dflash = false, bool dflash_lookup = false)
+      : eng(engine), vocab_used(vocab), V_(V), k_(mtp_k), lookup_(lookup), df_(dflash), dflash_lookup_(dflash_lookup) {
+    if (dflash_lookup_ && (!df_ || !HasDrafterWindow<Engine>::value))
+      throw std::runtime_error("--spec dflash-lookup: this engine's drafter does not verify lookup drafts");
     if (vocab_used == 0 || vocab_used > V_)
       throw std::runtime_error("PipelineEngineAdapter: vocab_used " + std::to_string(vocab_used) +
                                " is outside the logits row (" + std::to_string(V_) + ")");
@@ -130,7 +141,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
       std::fprintf(stderr, "gen: %u tokens, %.3f ms, %.4f ms/token\n", gen_tokens_, ms, ms / gen_tokens_);
       std::fflush(stderr);
     }
-    if ((k_ > 0 || lookup_) && mtp_iters > 0) {
+    if ((k_ > 0 || lookup_) && (mtp_iters > 0 || lk_iters_ > 0)) {
       std::fprintf(stderr,
                    "%s: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), iterations at "
                    "K 0/1/2/3: %llu/%llu/%llu/%llu",
@@ -144,9 +155,14 @@ struct PipelineEngineAdapterT : server::EngineIface {
         std::fprintf(stderr, ", K 4/5/6/7: %llu/%llu/%llu/%llu", (unsigned long long)mtp_iters_at_k[4],
                      (unsigned long long)mtp_iters_at_k[5], (unsigned long long)mtp_iters_at_k[6],
                      (unsigned long long)mtp_iters_at_k[7]);
+      if (dflash_lookup_)   // spec 19f: the lookup iterations (not in the counts above) and the ids they produced
+        std::fprintf(stderr, "; lookup: %llu iterations, %llu/%llu drafts accepted, %llu of %u ids",
+                     (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
+                     (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
       std::fprintf(stderr, "\n");
     }
     mtp_iters = mtp_drafted = mtp_accepted = 0;
+    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = 0;
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
@@ -300,6 +316,58 @@ struct PipelineEngineAdapterT : server::EngineIface {
     return out;
   }
 
+  // --- spec 19 v3c: prompt lookup inside DFlash (EngineAdapter::step_drafts_or_many, spec 19f) ----------------
+  // Lookup drafts d_1..d_k (k <= --spec-max and max_verify_k) go into both cards' cur_token[1..k] and through the tap
+  // verify list (the drafter's draft list does not run); the commit replays the drafter's projection of the committed
+  // rows, so the ring stays current and the exit to DFlash is warm. No drafts: one DFlash iteration.
+  uint32_t dflash_window() override {
+    if constexpr (HasDrafterWindow<Engine>::value) return dflash_lookup_ ? eng.drafter_window() : 0;
+    return 0;
+  }
+  std::vector<uint32_t> step_drafts_or_many(const server::Sampling& sampling, uint32_t k_dflash,
+                                            const Proposer& propose) override {
+    if constexpr (HasDrafterWindow<Engine>::value && kTap) {
+      if (!dflash_lookup_) throw std::logic_error("PipelineEngineAdapter::step_drafts_or_many without --spec dflash-lookup");
+      flush_commit(HasDeferredCommit<Engine>::value);
+      const uint32_t x = eng.pending();
+      const std::vector<uint32_t> d = propose(x);
+      if (d.empty()) return step_dflash(sampling, k_dflash);
+      const uint32_t k = std::min<uint32_t>({static_cast<uint32_t>(d.size()), k_, eng.max_verify_k()});
+      ++lk_iters_;
+      if (k == 0) {   // the last positions of max_len: one plain step
+        ++lk_ids_;
+        return {step(sampling)};
+      }
+      const uint32_t n = eng.pos();
+      for (uint32_t i = 0; i < k; ++i) eng.set_draft_input(i, d[i]);
+      eng.verify(k);
+      server::AcceptResult a{};
+      if (sampling.greedy) {
+        a = server::accept_greedy(eng.verify_ids(), d.data(), k);
+      } else {
+        seed_rng(sampling);
+        float* p = rows_;
+        eng.read_logits_into(p, k + 1);
+        a = server::accept_point_mass(p, d.data(), k, vocab_used, V_, sampling, rng);
+      }
+      pending_ = true;
+      pending_pos_ = n;
+      pending_j_ = a.accepted;
+      pending_next_ = a.next_token;
+      pending_drafts_.assign(d.begin(), d.begin() + k);
+      lk_drafted_ += k;
+      lk_accepted_ += a.accepted;
+      std::vector<uint32_t> out{x};
+      out.insert(out.end(), d.begin(), d.begin() + a.accepted);
+      gen_tokens_ += static_cast<uint32_t>(out.size());
+      lk_ids_ += out.size();
+      pending_lookup_ = true;   // a truncate_to of this run takes its dropped ids off lk_ids_
+      return out;
+    } else {
+      throw std::logic_error("PipelineEngineAdapter::step_drafts_or_many: no tap drafter");
+    }
+  }
+
   // --- spec 19e: drafts proposed outside the engine (EngineAdapter::step_drafts) ------------
   uint32_t verify_k() override { return lookup_ ? Engine::kMaxDraft : 0; }
 
@@ -349,7 +417,9 @@ struct PipelineEngineAdapterT : server::EngineIface {
                              std::to_string(pending_pos_ + pending_j_ + 1) + "]");
     const uint32_t m = p - pending_pos_ - 1;
     gen_tokens_ -= pending_j_ - m;
+    if (pending_lookup_) lk_ids_ -= pending_j_ - m;   // spec 19f: the lookup share counts kept ids only
     pending_ = false;
+    pending_lookup_ = false;
     eng.commit(m, m < pending_j_ ? pending_drafts_[m] : pending_next_);
   }
 
@@ -357,6 +427,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
   void flush_commit(bool defer = false) {
     if (!pending_) return;
     pending_ = false;
+    pending_lookup_ = false;
     if constexpr (HasDeferredCommit<Engine>::value)
       eng.commit(pending_j_, pending_next_, defer);
     else
@@ -421,6 +492,8 @@ struct PipelineEngineAdapterT : server::EngineIface {
   uint32_t k_ = 0;
   bool lookup_ = false;
   bool df_ = false;   // spec 19d: step_many drafts with the engine's drafter
+  bool dflash_lookup_ = false, pending_lookup_ = false;   // spec 19 v3c: prompt lookup inside DFlash (spec 19f)
+  uint64_t lk_iters_ = 0, lk_drafted_ = 0, lk_accepted_ = 0, lk_ids_ = 0;
   bool pending_ = false;
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
   std::vector<uint32_t> pending_drafts_;

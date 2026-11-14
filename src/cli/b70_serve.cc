@@ -809,6 +809,7 @@ struct TpServe {
   std::vector<uint32_t> eos;
   std::string auto_why;   // set when --parallel auto chose tp (D3): the reason, printed
   cli::dflash::Args dflash;   // spec 19 v3c: --spec dflash, the drafter split over both cards
+  bool dflash_lookup = false;   // spec 19 v3c: --spec dflash-lookup (spec 19f's policy under TP)
 };
 
 int serve_tp(const TpServe& a, server::Options options) {
@@ -887,7 +888,7 @@ int serve_tp(const TpServe& a, server::Options options) {
   TemplateAdapter chat_template(a.snapshot_dir);
   cli::pp::PipelineEngineAdapterT<runtime::TpEngine> engine_adapter(
       engine, tokenizer.vocab_used(), model::Qwen35::kVocab, a.dflash.on ? a.dflash.max_k : a.mtp_k, a.spec_lookup,
-      a.dflash.on);
+      a.dflash.on, a.dflash_lookup);
   options.eos_ids = a.eos;
   // Pinned host memory of the one context both cards share: either card's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
@@ -1308,7 +1309,7 @@ int run(int argc, char** argv) {
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
-  cli::check_tp(pipe, {dflash_lookup, false, is_q4 || is_kol || is_k2,   // spec 19 v3c: --spec dflash is served
+  cli::check_tp(pipe, {false, false, is_q4 || is_kol || is_k2,   // spec 19 v3c: dflash and dflash-lookup are served
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
@@ -1493,6 +1494,7 @@ int run(int argc, char** argv) {
     ts.prefix_cache_gb = prefix_cache_gb;
     ts.eos = eos;
     ts.dflash = dflash;   // spec 19 v3c
+    ts.dflash_lookup = dflash_lookup;
     return serve_tp(ts, options);
   }
   if (pipe.replica()) {   // plan 13b: one engine per card behind the scheduler

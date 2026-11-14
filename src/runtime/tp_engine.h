@@ -200,6 +200,7 @@ class TpEngine {
   const dflash::DFlashDraftOut& draft_tap(uint32_t k, float temperature, uint64_t seed);
   bool tap_samples() const { return drafter_ && drafter_->samples(); }
   uint64_t drafter_key() const { return drafter_ ? drafter_->key() : 0; }
+  uint32_t drafter_window() const { return drafter_ ? drafter_->card(0).window() : 0; }   // spec 19f's lookup policy
   void flush_projection();
   // The crossing a card's lists use (TpDFlashDrafter's draft lists cross through the same landing buffers and
   // counters), and the drafter's GDN state slots 1..7 of a card (tests).
