@@ -7,8 +7,7 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 - **141.7 tokens per second** for one session of Qwen3.8-27B on **one card** with the DFlash draft model
   (llama-benchy tg128); 96.2 t/s replaying a real coding-agent session.
 - **258 tokens per second in total** with 8 requests running at once.
-- **3,217 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**
-  (measured with the int8 prompt pass as it was before 2026-11-13; re-measurement pending, see below).
+- **3,217 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**.
 - **Ornith 1.5 35B-A3B:** prompts read at **8,877 t/s**, answers written at **180.5 t/s on one card, 351.9 t/s on two**.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 - **Faster than vLLM** on the same card and the same model files: up to **+56 %** writing and **+25 %** reading.
@@ -37,7 +36,7 @@ Decode with MTP, t/s - one session, or several at once (the total, per request i
 | one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
 | two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
-| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` † | 82.0 | 138.5 (76.3) | 202.2 (60.6) | 250.1 (35.0) |
+| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` | 82.0 | 138.5 (76.3) | 202.2 (60.6) | 250.1 (35.0) |
 
 Decode with **DFlash** (`--spec dflash`): a small draft model,
 [`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`](https://huggingface.co/urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound),
@@ -57,7 +56,7 @@ Time to the first token, new conversation / prefix cache hit:
 | two cards, tensor parallel (the default for one session) | **1.84 / 1.34 s** | | | |
 | two cards, `--max-num-seqs 8` | 2.30 / 1.08 s | 2.36 / 1.10 s | 3.61 / 1.65 s | 7.27 / 2.79 s |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 2.33 / 1.09 s | 2.37 / 1.11 s | 3.63 / 1.64 s | 7.30 / 2.81 s |
-| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` † | **1.80 / 0.86 s** | 1.88 / 0.89 s | 2.82 / 1.33 s | 5.76 / 2.24 s |
+| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` | **1.80 / 0.86 s** | 1.88 / 0.89 s | 2.82 / 1.33 s | 5.76 / 2.24 s |
 | one card, `--max-num-seqs 4` | 2.32 / 1.09 s | 3.52 / 1.65 s | 5.91 / 2.77 s | |
 
 Prefill, t/s:
@@ -69,18 +68,13 @@ Prefill, t/s:
 | two cards, TP | 2,939 | 2,686 |
 | two cards, TP, `--prefill-backend l0-int8` | **3,217** | **2,937** |
 
-Since 2026-11-13 `l0-int8` on Qwen3.8 runs int8 only in the MLP; the four attention / delta-net projections stay
-bf16, because in int8 they changed a token on a 2,820-token prompt ([docs/17](docs/17-int8-prefill.md)). The one-card
-and TP rows above are measured with it (interleaved against main: 0.92x / 0.97x the old form at 4,096 tokens). Rows
-marked † were measured with the old form and are expected to come down; they wait for a quiet-box re-run.
-
 **Against vLLM** - the same model files on one B70, one request, a 4,096-token prompt:
 
 | t/s | this engine | vLLM | |
 |---|---:|---:|---:|
 | Ornith 1.5 35B-A3B, prefill | **8,877** | 7,723 | +15 % |
 | Ornith 1.5 35B-A3B, decode with MTP | **180.5** | 115.8 | +56 % |
-| Qwen3.8-27B, prefill (`--prefill-backend l0-int8`) † | **2,470** | 1,973 | +25 % |
+| Qwen3.8-27B, prefill (`--prefill-backend l0-int8`) | **2,470** | 1,973 | +25 % |
 | Qwen3.8-27B, decode with MTP | **65.1** | 45.2 | +44 % |
 | Qwen3.8-27B, decode without MTP | **33.6** | 31.5 | +7 % |
 
@@ -147,7 +141,7 @@ Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tune
 | `--max-num-seqs N` | `1` | how many requests run at once; the context follows. Slot 0 gets the largest context that fits beside N - 1 slots of 32,768 tokens. Up to 4 per card; on two cards N > 1 runs a model copy per card |
 | `--max-len auto\|L` | `auto` | context length (slot 0's with `--max-num-seqs`). `auto`: the largest that fits, up to the model's 262,144 |
 | `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
-| `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; on one card it also copies repeats of earlier text |
+| `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; it also copies repeats of earlier text |
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
 | `--draft-model PATH` | none; required with `--spec dflash` | the draft model, your choice because it takes memory from the context: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB) or `z-lab/Qwen3.8-27B-DFlash2` (bf16, int8 at load, 2.05 GB). Nemotron 3.5 Bolt keeps its own default |
 | `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
@@ -181,7 +175,7 @@ Developer flags (`b70-decode`):
 | `--profile`, `--steps N`, `--repeats R` | -, `32`, `1` | per-launch timing of the decode step |
 | `--pipeline-split auto\|N` | `auto` | with `pp`: where the layers are cut |
 | `--draft-vocab off\|32k\|64k\|128k`, `--draft-vocab-ids FILE` | `off` | MTP guesses from a smaller vocabulary (also on `b70-serve`) |
-| `--spec lookup\|dflash-lookup` (`b70-serve`) | - | prompt lookup alone (verified through the MTP lists), or inside DFlash (what one-card `dflash` already does) |
+| `--spec lookup\|dflash-lookup` (`b70-serve`) | - | prompt lookup alone (verified through the MTP lists), or inside DFlash (what `dflash` already does) |
 
 Environment variables (test switches, tool settings, the Hugging Face cache): [docs/environment-variables.md](docs/environment-variables.md).
 
