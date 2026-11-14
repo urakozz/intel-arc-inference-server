@@ -608,6 +608,7 @@ int main(int argc, char** argv) {
         else if (!loader::parse_draft_format(f, format)) throw std::runtime_error("--format int8|bf16|int4");
       }
       else if (arg == "--anchors") anchors = std::stoul(argv[++i]);
+      else if (arg == "--attn-tgt") vbase.probe_attn_tgt = std::stoul(argv[++i]);   // verify-cost-m8
       else if (arg == "--ab-ksplit") vbase.probe_ab_ksplit = std::stoul(argv[++i]);   // verify-cost-m8
       else if (arg == "--attn-ks") attn_ks = std::stoul(argv[++i]);   // spec 19 v3d: the profiled list's key split
       else if (arg == "--engine-taps" && i + 2 < argc) { sources_path = argv[++i]; out = argv[++i]; }

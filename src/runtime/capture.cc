@@ -623,8 +623,8 @@ class Capture {
     }
     // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
     // row from Control::pos on the device, so one list serves every depth.
-    const std::string v =
-        pg(kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads));
+    const uint32_t T = attn_tgt();
+    const std::string v = pg(kernels::attn_v2_variant(kCapM, T, ad.fa_q_heads, ad.fa_kv_heads));
     {
       // Spec 28c: attn_verify_dpas takes attn_decode_v2's arguments and writes its partials.
       l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2", kWgAttn);
@@ -634,7 +634,7 @@ class Capture {
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
       if (sb_.pages) k.arg_ptr(5, sb_.pages);   // plan 19v3b Task 0
-      launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+      launch(k, ad.fa_kv_heads, T);
     }
     // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
     {
@@ -805,8 +805,13 @@ class Capture {
 
   // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
   // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
+  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt, bf16 KV).
+  uint32_t attn_tgt() const {
+    return vattn_ == VerifyAttn::Dpas && !kv8_ && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
+                                                                      : DecodeBuffers::kAttnV2Blocks;
+  }
   l0::Kernel& dpas_kernel() {
-    l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
+    l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_,
                                                                 d_.fa_q_heads, d_.fa_kv_heads)),
                            kv8_ ? "attn_verify_dpas_kv8" : "attn_verify_dpas", 0);
     ze_kernel_properties_t p{};
