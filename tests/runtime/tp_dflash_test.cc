@@ -90,13 +90,6 @@ struct Tp {
   }
 };
 
-uint32_t argmax_of(const float* row) {
-  uint32_t b = 0;
-  for (uint32_t i = 1; i < kUsed; ++i)
-    if (row[i] > row[b]) b = i;
-  return b;
-}
-
 // Plain TP greedy ids one replay at a time, each deciding row kept.
 Run plain(l0::Context& d0, l0::Context& d1, const std::vector<uint32_t>& prompt, uint32_t max_len) {
   runtime::TpEngine e(d0, d1, load_cards(d0, d1, max_len), max_len, {}, runtime::KvCache::Bf16);

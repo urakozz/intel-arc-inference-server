@@ -3866,6 +3866,13 @@ target_link_libraries(dflash_loader_test PRIVATE b70_dflash_loader)
 add_test(NAME dflash_loader_test COMMAND dflash_loader_test
   ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
 set_tests_properties(dflash_loader_test PROPERTIES LABELS dflash)
+# Spec 19 v3c Task 2: the drafter's halves for --parallel tp (loader/dflash_tp_split.h) in every device form, and a TP
+# card's plan with its half at 262,144 positions. Host only.
+add_executable(dflash_tp_split_test loader/dflash_tp_split_test.cc)
+target_include_directories(dflash_tp_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_tp_split_test PRIVATE b70_dflash_loader b70_dflash_plan b70_plan b70_model)
+add_test(NAME dflash_tp_split_test COMMAND dflash_tp_split_test)
+set_tests_properties(dflash_tp_split_test PROPERTIES LABELS "dflash;tp")
 add_executable(dflash_head_test loader/dflash_head_test.cc)
 target_include_directories(dflash_head_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dflash_head_test PRIVATE b70_dflash_loader)
