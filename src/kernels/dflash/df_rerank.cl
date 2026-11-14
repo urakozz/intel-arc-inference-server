@@ -1,4 +1,5 @@
-// Spec 19v2 C3: gather 64 original int8 head rows and rerank their exact dots to the selector's top16.
+// Spec 19v2 C3: gather the C (64, or 80 for spec 19 v3d's 2-bit head) original int8 head rows and rerank their exact
+// dots to the selector's top16.
 // Four contiguous K slices per candidate, merged ascending. The original head stays shared with verify.
 #pragma OPENCL FP_CONTRACT OFF
 #ifndef C

@@ -66,7 +66,8 @@ class Walk {
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
                                                    compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head), opt_.dflash_attn_parallel_exp,
-                                                   opt_.dflash_attn_dpas, opt_.dflash_attn_ks))
+                                                   opt_.dflash_attn_dpas, opt_.dflash_attn_ks, w_.candidate_bits,
+                                                   w_.candidates))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();

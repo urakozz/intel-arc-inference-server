@@ -89,7 +89,8 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
                                                LinearKind k, LinearKind head, unsigned attn_heads = 1, unsigned attn_rows = 4,
                                                bool candidate_head = false, bool parallel_exp = false,
-                                               bool attn_dpas = false, unsigned attn_ks = 1) {
+                                               bool attn_dpas = false, unsigned attn_ks = 1,
+                                               unsigned candidate_bits = 2, unsigned candidates = 80) {
   const Shape& s = kQwen38;
   std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads, attn_rows, parallel_exp), select_variant(v2, s, fmt == 2)};
   if (attn_dpas) v.push_back(attn_dpas_variant(s, attn_ks));   // its part; the reduce stays attn_variant's
@@ -105,10 +106,13 @@ inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_
     v.push_back(linear_variant(fmt, kM, s.H, s.rank, k));                          // the selector's projection
   }
   const unsigned N = dv ? dv : s.vocab;
-  if (candidate_head) {
-    v.push_back(linear_variant(2u, kR, s.H, s.vocab, head));
-    v.push_back(candidate_topk_variant());
-    v.push_back(rerank_variant());
+  if (candidate_head) {   // spec 19 v3d: the 2-bit head (gemm_sm's layout 3) with 80 candidates by default
+    if (candidate_bits == 2)
+      v.push_back(gemm_sm_variant(kR, *small_m_tuning(s.H, s.vocab, 1, 3)));
+    else
+      v.push_back(linear_variant(2u, kR, s.H, s.vocab, head));
+    v.push_back(candidate_topk_variant(candidates));
+    v.push_back(rerank_variant(candidates));
   } else {
     v.push_back(linear_variant(int8_head, kR, s.H, N, head));
     v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));

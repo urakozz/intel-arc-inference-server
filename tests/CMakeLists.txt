@@ -3877,6 +3877,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   list(APPEND B70_DFLASH_KERNELS kernel_df_candidate_R7_N248320_U248077_K64
        kernel_df_rerank_R7_K5120_U248077_C64_Q4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep)
+  list(APPEND B70_DFLASH_KERNELS kernel_df_candidate_R7_N248320_U248077_K80 kernel_df_rerank_R7_K5120_U248077_C80_Q4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas   # spec 19 v3d Task 6
        kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2 kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_proj_wide_H5120_KV8_D128_R2048)
@@ -3908,7 +3909,8 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   foreach(NV 32768 65536 131072 248320)
     list(APPEND _v19b_reused kernel_gemm_sm_i8w_M7_K5120_N${NV}_wg)
   endforeach()
-  list(APPEND _v19b_reused kernel_gemm_sm_M7_K5120_N248320_S1_L1_mg kernel_gemv_M7_K5120_N248320_S1_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M7_K5120_N248320_S1_L1_mg kernel_gemv_M7_K5120_N248320_S1_L1
+       kernel_gemm_sm_M7_K5120_N248320_S1_L3)   # spec 19 v3d: the 2-bit candidate head
   foreach(t ${B70_DFLASH_KERNELS} ${_v19b_reused})
     if(NOT TARGET ${t})
       message(FATAL_ERROR "spec 19b: ${t} is not built (src/kernels/CMakeLists.txt)")

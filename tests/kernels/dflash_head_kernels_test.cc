@@ -42,8 +42,9 @@ struct Env {
   }
 };
 
-void check_candidates(Env& e) {
-  constexpr unsigned N = 248320, used = 248077, R = 7, C = 64, chunks = (N + 4095) / 4096;
+// C: 64 (the int4 head's) or 80 (spec 19 v3d's 2-bit head's default)
+void check_candidates(Env& e, unsigned C) {
+  constexpr unsigned N = 248320, used = 248077, R = 7, chunks = (N + 4095) / 4096;
   std::mt19937 g(91);
   std::uniform_real_distribution<float> rand(-2, 2);
   std::vector<float> logits(size_t(R) * N);
@@ -59,7 +60,7 @@ void check_candidates(Env& e) {
   auto in = e.up(logits);
   auto part = e.up(std::vector<float>(size_t(R) * chunks * C * 2));
   auto cand = e.up(std::vector<uint32_t>(size_t(R) * C));
-  l0::Module mod(e.ctx, kernels::path(kd::candidate_topk_variant()));
+  l0::Module mod(e.ctx, kernels::path(kd::candidate_topk_variant(C)));
   l0::Kernel k1(mod, "df_candidate_stage1"), k2(mod, "df_candidate_stage2");
   k1.group_size(256);
   k1.arg_ptr(0, in.ptr());
@@ -80,12 +81,12 @@ void check_candidates(Env& e) {
       for (unsigned c = 0; c < C; ++c) CHECK_EQ(got[r * C + c], want[c].i);
     }
   }
-  std::puts("candidate top64 OK: real shape, padding mask, NaN, ties and deterministic replay; the radix-select stage 1 "
-            "the same");
+  std::printf("candidate top%u OK: real shape, padding mask, NaN, ties and deterministic replay; the radix-select stage 1 "
+              "the same\n", C);
 }
 
-void check_rerank(Env& e) {
-  constexpr unsigned K = 5120, N = 128, R = 7, C = 64;
+void check_rerank(Env& e, unsigned C) {
+  constexpr unsigned K = 5120, N = 128, R = 7;
   std::mt19937 g(92);
   std::vector<int8_t> w(size_t(N) * K);
   for (auto& v : w) v = int8_t(int(g() % 255) - 127);
@@ -103,9 +104,9 @@ void check_rerank(Env& e) {
   auto bw = e.up(w), bs = e.up(scale), bx = e.up(x), bi = e.up(ids);
   auto out = e.up(std::vector<uint32_t>(R * 16));
   auto unary = e.up(std::vector<float>(R * 16));
-  l0::Module mod(e.ctx, kernels::path(kd::rerank_variant()));
+  l0::Module mod(e.ctx, kernels::path(kd::rerank_variant(C)));
   l0::Kernel k(mod, "df_rerank");
-  k.group_size(256);
+  k.group_size(C * 4);
   k.arg_ptr(0, bw.ptr());
   k.arg_ptr(1, bs.ptr());
   k.arg_ptr(2, bx.ptr());
@@ -120,7 +121,7 @@ void check_rerank(Env& e) {
     const auto vals = e.read<float>(unary, R * 16);
     for (unsigned r = 0; r < R; ++r) {
       const auto want = dfref::rerank_candidates(w.data(), scale.data(), K, N, x.data() + size_t(r) * K,
-                                                ids.data() + r * C, 1.5f, cap);
+                                                ids.data() + r * C, 1.5f, cap, C);
       for (unsigned c = 0; c < 16; ++c) {
         CHECK_EQ(got[r * 16 + c], want[c].i);
         CHECK(vals[r * 16 + c] == want[c].v ||
@@ -128,12 +129,14 @@ void check_rerank(Env& e) {
       }
     }
   }
-  std::puts("exact int8 rerank OK: all64 candidates, real K, masked ids, ties, scaling and softcap");
+  std::printf("exact int8 rerank OK: all %u candidates, real K, masked ids, ties, scaling and softcap\n", C);
 }
 
 int main() {
   Env e;
-  check_candidates(e);
-  check_rerank(e);
+  for (unsigned C : {64u, 80u}) {
+    check_candidates(e, C);
+    check_rerank(e, C);
+  }
   std::puts("dflash_head_kernels_test: PASS");
 }

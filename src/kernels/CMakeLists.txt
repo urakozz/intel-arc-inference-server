@@ -539,7 +539,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_candidate_R7_N248320_U248077_K64 SOURCE ${DF_DIR}/df_candidate.cl
                    DEFINES R=7 N=248320 USED=248077)
   add_ocloc_kernel(df_rerank_R7_K5120_U248077_C64_Q4 SOURCE ${DF_DIR}/df_rerank.cl DEFINES K=5120 USED=248077)
-  # Spec 19 v3d Task 7: 80 candidates a row (the 2-bit head's fallback)
+  # Spec 19 v3d Task 7: 80 candidates a row - the 2-bit head's default (64: the int4 head's)
   add_ocloc_kernel(df_candidate_R7_N248320_U248077_K80 SOURCE ${DF_DIR}/df_candidate.cl
                    DEFINES R=7 N=248320 USED=248077 C=80)
   add_ocloc_kernel(df_rerank_R7_K5120_U248077_C80_Q4 SOURCE ${DF_DIR}/df_rerank.cl DEFINES K=5120 USED=248077 C=80)
