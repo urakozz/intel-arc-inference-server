@@ -4089,9 +4089,12 @@ b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolib
   --spec dflash EXPECT "no DFlash drafter exists for Kolibri-1")
 # spec 19d: b70-decode stays one card (b70-serve --parallel pp serves the drafter).
 b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --parallel pp
-  EXPECT "b70-decode --spec dflash runs on one card")
+  --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "b70-decode --spec dflash runs on one card")
+# Qwen3.8's --spec dflash has no default drafter (operator 2026-11-14): the refusal names the two choices.
+b70_cli_reject(cli_reject_dflash_no_draft_model ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash
+  EXPECT "needs --draft-model")
 set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_spec_max
-  cli_reject_dflash_kolibri cli_reject_dflash_pp PROPERTIES LABELS dflash)
+  cli_reject_dflash_kolibri cli_reject_dflash_pp cli_reject_dflash_no_draft_model PROPERTIES LABELS dflash)
 # b70-serve --spec dflash's refusals before the device (cli/dflash_args.h).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_model_alone ${B70_NO_MODEL} --draft-model x EXPECT "needs --spec dflash")
@@ -4102,19 +4105,24 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
   # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
   b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
-    EXPECT "--spec dflash-lookup is built for one card")
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup is built for one card")
+  b70_serve_reject(cli_reject_serve_dflash_no_draft_model ${B70_NO_MODEL} --spec dflash
+    EXPECT "needs --draft-model")
+  b70_serve_reject(cli_reject_serve_dflash_lookup_no_draft_model ${B70_NO_MODEL} --spec dflash-lookup
+    EXPECT "--draft-model z-lab/Qwen3.8-27B-DFlash2")
   b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
     --spec dflash-lookup EXPECT "built for Qwen3.8 beside its drafter")
   b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
     EXPECT "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup")
   set_tests_properties(cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
-    cli_reject_serve_spec_value PROPERTIES LABELS dflash)
+    cli_reject_serve_spec_value cli_reject_serve_dflash_no_draft_model cli_reject_serve_dflash_lookup_no_draft_model
+    PROPERTIES LABELS dflash)
   # --parallel replica serves --spec dflash (a drafter on each card, bf16 or int8 KV); what it does not: lookup inside
   # DFlash, several slots a card beside the drafter (Qwen3.8's config.json: the snapshot, read before the device).
   b70_serve_reject(cli_reject_serve_dflash_replica_lookup ${B70_TEST_SNAPSHOT} --parallel replica
-    --spec dflash-lookup EXPECT "--spec dflash-lookup is built for one card")
+    --spec dflash-lookup --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup is built for one card")
   b70_serve_reject(cli_reject_serve_dflash_replica_slots ${B70_TEST_SNAPSHOT} --parallel replica --spec dflash
-    --max-num-seqs 4 EXPECT "--spec dflash / --draft-vocab beside slots are not built")
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound --max-num-seqs 4 EXPECT "--spec dflash / --draft-vocab beside slots are not built")
   set_tests_properties(cli_reject_serve_dflash_replica_lookup cli_reject_serve_dflash_replica_slots
     PROPERTIES LABELS "dflash;checkpoint")
 endif()

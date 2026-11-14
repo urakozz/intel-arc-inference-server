@@ -125,6 +125,7 @@ int main(int argc, char** argv) {
   loader::LoadedModel model = loader::load(ctx, argv[1], max_len, /*mtp=*/false, head);
   cli::dflash::Args da;
   da.on = true;
+  da.model = cli::dflash::kPackedDrafter;
   cli::dflash::Loaded dl = cli::dflash::load(ctx, da, model);
   auto drafter = std::make_unique<runtime::dflash::DFlashDrafter>(ctx, std::move(dl.w), dl.head_rows, max_len, da.max_k);
   runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, runtime::default_kv_cache(), drafter.get());

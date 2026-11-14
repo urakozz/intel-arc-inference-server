@@ -5,10 +5,11 @@
 //
 //   --spec dflash          the proposer is the drafter (spec 19 decision 3: one per server; the MTP head is not
 //                          loaded)
-//   --draft-model PATH     the drafter: a snapshot directory or a repo id in the HF cache (default
-//                          urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound, our AutoRound int4 export of z-lab's
-//                          drafter - operator ruling 2026-11-14; z-lab/Qwen3.8-27B-DFlash2 loads as int8 at load);
-//                          never downloaded here
+//   --draft-model PATH     the drafter, required (operator ruling 2026-11-14: it takes VRAM from the context, so
+//                          the model is a deliberate choice, no default): a snapshot directory or a repo id in the
+//                          HF cache - urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound (our AutoRound int4 export of
+//                          z-lab's drafter) or z-lab/Qwen3.8-27B-DFlash2 (loads as int8 at load); never downloaded
+//                          here
 //   --spec-max K           the deepest block, 1..7 (default 7: DFlash 2's block of 8 - 1)
 //   --draft-vocab N        (b70-serve) the drafter's head over a draft vocabulary (spec 8 §11's, built without the
 //                          MTP head)
@@ -42,17 +43,26 @@
 
 namespace cli::dflash {
 
+// Our packed int4 drafter (the probes name it; check_flags' message offers it).
+inline constexpr const char* kPackedDrafter = "urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound";
+
 struct Args {
   bool on = false;
-  std::string model = "urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound";
+  std::string model;
   loader::DraftFormat format = loader::DraftFormat::Int8;
   uint32_t max_k = 7;
   bool have_model = false;
 };
 
-// --draft-model belongs to --spec dflash.
+// --draft-model belongs to --spec dflash, and Qwen3.8's --spec dflash / dflash-lookup needs it (no default drafter).
+// Nemotron 3.5 Bolt's drafter keeps its default (cli/bolt_spec.h, LiLiCorr): Bolt is served before this check.
 inline void check_flags(const Args& a) {
   if (!a.on && a.have_model) throw std::runtime_error("--draft-model needs --spec dflash");
+  if (a.on && !a.have_model)
+    throw std::runtime_error(std::string("--spec dflash / dflash-lookup needs --draft-model (the drafter's weights take "
+                                         "memory from the context, so the model is your choice): --draft-model ") +
+                             kPackedDrafter + " (our packed int4 drafter, 1.21 GB) or --draft-model "
+                             "z-lab/Qwen3.8-27B-DFlash2 (bf16, int8 at load, 2.05 GB)");
   if (a.on && (a.max_k == 0 || a.max_k > 7))
     throw std::runtime_error("--spec-max with --spec dflash expects 1..7 (the drafter's block of 8)");
 }
