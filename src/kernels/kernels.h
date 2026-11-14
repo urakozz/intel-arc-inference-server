@@ -409,12 +409,6 @@ inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, un
   return "attn_verify_dpas_M" + std::to_string(M) + "_T" + std::to_string(T) + fa_suffix(q, kv) +
          (kv8 ? "_KV8" : "");
 }
-// Plan 19v3b Task 0: the sequence slots' KV in pages of kKvPage positions (runtime::kKvPage, CMake's KV_PAGE). The
-// paged twin of a binary that reads or writes the full-attention KV - any of the attention variants above, their row
-// builds (batch_kernels.h) and the prefill writers and flash forms (prefill/pf_kernels.h) - is its name with
-// `_PG<page>` (-DKV_PAGED=<page>): it takes the layer's whole cache and the page table as a last argument.
-inline constexpr unsigned kKvPage = 2048;
-inline std::string kv_paged(const std::string& variant) { return variant + "_PG" + std::to_string(kKvPage); }
 // SPEC_SLOT_STRIDE (one slot of MtpBuffers::gdn_spec, gdn_layers x 48 x 128 x 128
 // floats) is baked, so a model with another GDN layer count is another binary:
 // Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`; the

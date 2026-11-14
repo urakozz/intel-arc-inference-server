@@ -181,8 +181,7 @@ void check_pages() {
   CHECK_EQ(lay.kv_base(1), 131072u);
   CHECK_EQ(lay.kv_base(2), 131072u + 32768u);
   CHECK_EQ(lay.total(), runtime::slots_kv_len({130000, 32768, 32768}));
-  std::printf("| --max-num-seqs | KV | slots (MTP, --max-len auto) | KV pages | positions lost to the pages |
-");
+  std::printf("| --max-num-seqs | KV | slots (MTP, --max-len auto) | KV pages | positions lost to the pages |\n");
   for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
     for (uint32_t seqs : {1u, 2u, 4u}) {
       const uint32_t l0 = runtime::slot0_len_that_fits(q, seqs, true, w, kDevice, kReserve, kTrained, {}, kv);
@@ -195,8 +194,7 @@ void check_pages() {
         lost += r - x;
       }
       CHECK_EQ(runtime::plan_slots(q, l, true, w, {}, {}, kv).max_len, total);
-      std::printf("| %u | %s | %s | %s | %u |
-", seqs, runtime::kv_cache_name(kv), runtime::slot_layout_name(l).c_str(),
+      std::printf("| %u | %s | %s | %s | %u |\n", seqs, runtime::kv_cache_name(kv), runtime::slot_layout_name(l).c_str(),
                   seqs > 1 ? std::to_string(total / P).c_str() : "-", lost);
     }
 }
