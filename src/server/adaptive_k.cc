@@ -37,11 +37,11 @@ MtpCost MtpCost::tp_int8_head() {
 MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
   MtpCost c;
   // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (docs/BENCHMARKS.md); the candidate head's rows re-measured
-  // after spec 19 v3d's GDN step (2026-11-13, BENCHMARKS "Round cost (spec 19 v3d)").
+  // with spec 19 v3d's final form (2026-11-14, BENCHMARKS "Round cost (spec 19 v3d)").
   // The bf16 and experimental RTN int4 verify rows are derived equal to int8.
   c.verify = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};
   if (candidate_head)
-    c.verify = {1.000724, 1.046551, 1.085038, 1.111966, 1.158179, 1.189338, 1.213403, 1.228606};
+    c.verify = {1.000230, 1.041410, 1.073907, 1.105789, 1.151472, 1.180781, 1.205189, 1.221471};
   const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
                        drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
   double d = body + (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);

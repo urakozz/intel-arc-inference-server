@@ -1447,7 +1447,20 @@ missed), the draft pass 6.99 -> 6.61 ms, a round 1.475 -> 1.464 plain steps; acc
 K = 6 -0.0625 each (one anchor) - **int4 stays the default** (`load_drafter`'s candidate_bits 2 /
 `--candidate-2bit` reach the 2-bit form). With **80 candidates re-ranked** (`--candidates-80`): all 35 rows pass
 (worst a4 K = 6 -0.0055), the draft pass 0.2405 -> 0.2303 and a round 1.4746 -> 1.4658 plain steps against the int4
-head at 64 in the same session; the operator's ruling is pending.
+head at 64 in the same session.
+
+**The final form (operator rulings 2026-11-14: KS 4, the 2-bit head with 80 candidates, acceptance pooled and per
+corpus; card 0, busy box, one round of the record).** Acceptance on the v2 anchors: pooled -0.00235 (4256 anchors),
+per corpus a4 -0.0011, cjk -0.0089, code -0.0179, opencode -0.0268, prose 0 - pass. `probe_dflash_iter`:
+
+| arm | depth 4096 | / plain | depth 32768 | / plain |
+|---|---:|---:|---:|---:|
+| draft, K = 7 | 6.46 ms | 0.217 (was 0.287) | 5.86 ms | 0.177 |
+| verify at 8 rows | 35.92 ms | 1.221 (was 1.245) | 41.70 ms | 1.249 |
+| one round (iteration7) | 41.88 ms | **1.429** (was 1.559) | 48.47 ms | **1.448** |
+
+`MtpCost::dflash`'s candidate-head rows and draft cost are refreshed from this round. Task 9's record runs (the serving
+bench, the replay) need a quiet box.
 
 **Task 7 Step 1, the candidate selection** (same conditions, against the Task 6 build): stage 1 by a radix select
 (`df_candidate_select1`, the same 64 of each chunk; the candidates bitwise the serial picks', a 300-way tie

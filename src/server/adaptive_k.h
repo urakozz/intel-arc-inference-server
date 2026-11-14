@@ -53,7 +53,9 @@ struct MtpCost {
   static constexpr double kDFlashHeadInt8 = 2.166354 / 29.222498, kDFlashHeadBf16 = 2 * kDFlashHeadInt8;
   static constexpr double kDFlashDrafterInt8 = 0.298136 - kDFlashHeadInt8;
   static constexpr double kDFlashDrafterBf16 = kDFlashDrafterInt8 + 3.185105 / 29.222498;
-  static constexpr double kDFlashDraftCandidateInt8 = 0.287036;
+  // Spec 19 v3d (2026-11-14, card 0, busy box): the DPAS attention at KS 4, the radix candidate selection and the
+  // 2-bit head with 80 candidates - the draft pass 0.217462 of a plain step at depth 4096 (was 0.287036).
+  static constexpr double kDFlashDraftCandidateInt8 = 0.217462;
   // Experimental PRE-H1/B4 RTN estimates; this form failed acceptance and is not selected by the CLI.
   // Candidate is DERIVED from that full-head row and int8 candidate saving. Re-measure after the calibrated
   // AutoRound export passes acceptance; the operator deferred that conversion.
