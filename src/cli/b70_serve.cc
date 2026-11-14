@@ -1300,7 +1300,7 @@ int run(int argc, char** argv) {
   dflash.on = spec.kind == cli::SpecKind::DFlash || dflash_lookup;   // spec 19c / 19f
   dflash.max_k = dflash.on ? spec.max_k : dflash.max_k;
   // Operator ruling 2026-11-14: prompt lookup is folded into --spec dflash where lookup inside DFlash is built (one card,
-  // one slot - the engine below); B70_SPEC_LOOKUP=0 keeps plain DFlash there (A/B runs). --spec dflash-lookup asks it
+  // one slot - the engine below; --parallel tp - serve_tp); B70_SPEC_LOOKUP=0 keeps plain DFlash there (A/B runs). --spec dflash-lookup asks it
   // explicitly and is refused where it is not built.
   const bool lookup_fold = spec.kind == cli::SpecKind::DFlash && [] {
     const char* env = std::getenv("B70_SPEC_LOOKUP");
@@ -1495,7 +1495,7 @@ int run(int argc, char** argv) {
     ts.prefix_cache_gb = prefix_cache_gb;
     ts.eos = eos;
     ts.dflash = dflash;   // spec 19 v3c
-    ts.dflash_lookup = dflash_lookup;
+    ts.dflash_lookup = dflash_lookup || lookup_fold;
     return serve_tp(ts, options);
   }
   if (pipe.replica()) {   // plan 13b: one engine per card behind the scheduler
