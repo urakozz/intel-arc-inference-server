@@ -59,9 +59,10 @@ struct PpChunk {
   uint32_t end() const { return pos + rows; }
 };
 // Engine::prefill's chunks of `n` ids from `base` (runtime::prefill_chunk_rows - the same
-// function): throws std::invalid_argument for n == 0 or chunk == 0.
+// function, `tail` its open-work 18 tail: Engine::prefill_tail()): throws std::invalid_argument
+// for n == 0 or chunk == 0.
 std::vector<PpChunk> pp_prefill_chunks(uint32_t base, size_t n, uint32_t chunk, bool hooked,
-                                       uint32_t block = kPpPfBlock);
+                                       uint32_t block = kPpPfBlock, uint32_t tail = 0);
 
 // --- the host's order ---------------------------------------------------------------------
 //

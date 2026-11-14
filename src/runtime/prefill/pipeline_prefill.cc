@@ -52,6 +52,7 @@
 #include "runtime/pipeline_engine.h"
 #include "runtime/pipeline_prefill_plan.h"
 #include "runtime/pipeline_stage.h"
+#include "runtime/prefill_chunks.h"
 #include "runtime/prefill/attn.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/context.h"
@@ -631,7 +632,8 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     p.ensure_shadows(st(0).persist, st(1).persist, mtp() ? size_t(st(1).model.desc->hidden) * 2 : 0,
                      mtp() ? head_row_bytes(*st(1).mtp) : 0);
   mtp_before_prefill();   // spec 16d: the live verify slot into slot 0 on both devices
-  const std::vector<PpChunk> chunks = pp_prefill_chunks(base, ids.size(), chunk, hooked);
+  const std::vector<PpChunk> chunks =
+      pp_prefill_chunks(base, ids.size(), chunk, hooked, kPpPfBlock, prefill_tail(st(0).model.desc->is_moe()));
   const std::vector<PpPfStep> steps = pp_prefill_schedule(chunks);
   const std::string bad = pp_prefill_check(steps, chunks);
   if (!bad.empty()) throw std::logic_error("runtime::PipelineEngine::prefill: the order breaks a rule: " + bad);

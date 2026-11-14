@@ -294,6 +294,22 @@ void test_prefill_cut() {
     cli::ReplicaEngine wide({{&c0, 4096}, {&c1, 4096}}, true, true);
     CHECK_EQ(wide.prefill_cut(0, 5000, 100000), 8192U - 5000U);
   }
+  {
+    // Open-work 18's tail, scaled (block 4, chunk 8, tail 12): a 30-id prompt runs 8-id chunks to 16 = (30 - 12)
+    // rounded down to a block, then block-wide ones. The scheduler's cut carries the tail; the card's loop re-cuts
+    // that one chunk with none, so an 8-id chunk reaches the card whole.
+    CardMock c0, c1;
+    setup(c0);
+    setup(c1);
+    cli::ReplicaEngine eng({{&c0, 8, nullptr, 12}, {&c1, 8, nullptr, 12}}, true, true);
+    MallocAlloc alloc;
+    server::PrefixSlots cache(eng, 1 << 20, alloc);
+    Scheduler s(eng, SchedulerOptions{}, &cache);
+    Out a;
+    CHECK(s.submit(req(P(7, 30), 2, a)) != nullptr);
+    drain(s);
+    CHECK(c0.prefill_calls == std::vector<size_t>({8, 8, 4, 4, 4, 2}));
+  }
   std::printf("prefill cut: 8/8/8/6 hooked, a continuation from 32 cut at 40; unhooked from the call's start\n");
 }
 

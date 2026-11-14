@@ -19,6 +19,7 @@
 #include "runtime/control.h"
 #include "runtime/memory_plan.h"
 #include "runtime/prefill_backend.h"
+#include "runtime/prefill_chunks.h"
 #include "runtime/tap_drafter.h"
 
 namespace runtime {
@@ -133,6 +134,9 @@ class Engine {
   // are sized once; set it before prepare_prefill()). Defined in engine_prefill.cc.
   void set_prefill_chunk_cap(uint32_t cap);
   uint32_t prefill_chunk_cap() const;
+  // Open-work 18: the positions at a hooked prefill's end cut at kBlock under a 4096-row chunk
+  // (runtime::prefill_chunk_rows' `tail`): Qwen3.8 kPrefillTail, a MoE model 0.
+  uint32_t prefill_tail() const { return runtime::prefill_tail(model_.desc->is_moe()); }
 
   // Spec 6 (plan 6b): one line summing the device memory this engine holds --
   //   memory: model <GB>, kv <GB>, decode state <GB>, prefill scratch <GB>, int8 <GB>,
@@ -192,7 +196,8 @@ class Engine {
   // every chunk ends at a block end or at the prompt end: chunk rows are
   // min(chunk, S - pos % S, remaining), S = chunk rounded up to whole kBlocks
   // (runtime/prefill_chunks.h) - kBlock itself up to 2048 rows, 4096 at a 4096-row chunk
-  // (plan 5d, ruling A: the hook then fires at every second block end). S follows the call's
+  // (plan 5d, ruling A: the hook then fires at every second block end), and kBlock again over
+  // the last prefill_tail() positions of the call (open-work 18). S follows the call's
   // `chunk`, not the cap: prefill(ids, 1024) at cap 4096 still hooks every 2048. Without one (an empty function, the
   // default), chunking is exactly as before. If the hook throws, the exception propagates
   // with pos == end_pos: the state holds exactly the chunks written.

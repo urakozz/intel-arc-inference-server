@@ -82,7 +82,7 @@ class SlotsEngine : public server::BatchEngineIface {
   // it).
   uint32_t prefill_cut(uint32_t /*slot*/, uint32_t pos, uint32_t remaining) override {
     return runtime::prefill_chunk_rows(pos, remaining, e_.prefill_chunk_cap(), hooked_, runtime::Engine::kBlock,
-                                       /*wide_stride=*/true);
+                                       /*wide_stride=*/true, e_.prefill_tail());
   }
   void prefill(const std::vector<Chunk>& chunks) override {
     for (const Chunk& c : chunks) {
