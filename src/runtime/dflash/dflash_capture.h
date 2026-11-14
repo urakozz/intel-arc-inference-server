@@ -63,4 +63,24 @@ CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights&
 bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const loader::DFlashWeights& w,
                   DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n);
 
+// Spec 19 v3c: a `--parallel tp` card's half of the drafter (runtime::dflash::TpDFlashDrafter; `w` loaded with
+// load_drafter's tp_rank, `b` at its descriptor with host candidates, `t` the card's target: the whole embedding, its
+// vocabulary half of the int8 head).
+//   build_dflash_draft_tp  the draft list's walk at the card's shapes up to the candidates - after o and down the
+//                          crossing (tp_send, then tp_sum: the wait and card 0's part + card 1's into the fp32 output,
+//                          through `link`'s landing buffers and counters - the target's, so a round's lists keep one
+//                          call count) and the conv's finish over the whole output; the head is the card's half of the
+//                          candidate head, its top C and the exact re-rank against its int8 head half, its top 16 with
+//                          their global ids and exact scores into cand / unary. tp_draft_launches(d) launches.
+//   build_dflash_tail      the selector over cand / unary (the host's merge of both halves) and the final norm's rows
+//                          the draft list left in x: [v2: the selector's projection], df_select - drafts into
+//                          `control`.cur_token[1..k] and the readback. tail_launches(d) launches.
+// The projection list is build_dflash_project's at the card's shapes (the replicated fc, the card's k||v columns into
+// its half of the ring).
+CapturedStep build_dflash_draft_tp(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
+                                   DFlashBuffers& b, const l0::Mem& control, const TpLink& link,
+                                   const CaptureOptions& opt = {});
+CapturedStep build_dflash_tail(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
+                               const l0::Mem& control, const CaptureOptions& opt = {});
+
 }  // namespace runtime::dflash

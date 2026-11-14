@@ -59,6 +59,8 @@
 #include "runtime/prefill/backend.h"
 #include "runtime/tp_engine.h"   // spec 17d: --parallel tp
 #include "runtime/tp_plan.h"
+#include "cli/tp_dflash.h"
+#include "runtime/dflash/tp_dflash_drafter.h"
 #include "server/lookup_in_dflash.h"   // spec 19f: --spec dflash-lookup's constants (the startup line)
 #include "server/server.h"
 
@@ -806,6 +808,7 @@ struct TpServe {
   uint32_t trained = 0;
   std::vector<uint32_t> eos;
   std::string auto_why;   // set when --parallel auto chose tp (D3): the reason, printed
+  cli::dflash::Args dflash;   // spec 19 v3c: --spec dflash, the drafter split over both cards
 };
 
 int serve_tp(const TpServe& a, server::Options options) {
@@ -836,10 +839,17 @@ int serve_tp(const TpServe& a, server::Options options) {
   const std::array<size_t, 2> weights{cards[0].report.total() - cards[0].report.rope_bytes,
                                       cards[1].report.total() - cards[1].report.rope_bytes};
   const std::array<size_t, 2> dev{d0.memory_bytes(), d1.memory_bytes()};
+  // Spec 19 v3c: the drafter's halves beside the cards' slices, planned with them.
+  std::unique_ptr<cli::dflash::TpLoaded> halves;
+  if (a.dflash.on) {
+    StdoutToStderr redirect;
+    halves = std::make_unique<cli::dflash::TpLoaded>(cli::dflash::load_tp({&d0, &d1}, a.dflash, cards));
+  }
+  const runtime::DrafterPlan drafter_plan = halves ? halves->plan : runtime::DrafterPlan{};
   uint32_t len = a.max_len_arg.value;
   if (a.max_len_arg.is_auto) {
     len = runtime::tp_max_len_that_fits(card, crossing, weights, dev, a.mem_reserve, cards[0].trained_max_len,
-                                        a.kv_cache, path, head);
+                                        a.kv_cache, path, head, drafter_plan);
     if (len == 0)
       throw std::runtime_error("--parallel tp --max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
                                " positions fit both cards beside the weights");
@@ -851,14 +861,20 @@ int serve_tp(const TpServe& a, server::Options options) {
     for (uint32_t r = 0; r < 2; ++r) loader::set_max_len(r == 0 ? d0 : d1, cards[r], len);
   } else {
     for (uint32_t r = 0; r < 2; ++r) {
-      const runtime::MemoryPlan p = runtime::tp_card_plan(card, crossing, len, weights[r], a.kv_cache, path, head);
+      const runtime::MemoryPlan p =
+          runtime::tp_card_plan(card, crossing, len, weights[r], a.kv_cache, path, head, drafter_plan);
       if (p.total() + a.mem_reserve > dev[r])
         throw std::runtime_error("--parallel tp --max-len " + std::to_string(len) + " does not fit card " +
                                  std::to_string(r) + ": " + runtime::describe(p, dev[r], a.mem_reserve) +
                                  " - --max-len auto gives the largest that fits");
     }
   }
-  runtime::TpEngine engine(d0, d1, std::move(cards), len, {}, a.kv_cache);
+  std::unique_ptr<runtime::dflash::TpDFlashDrafter> drafter;
+  if (halves)
+    drafter = std::make_unique<runtime::dflash::TpDFlashDrafter>(
+        std::array<l0::Context*, 2>{&d0, &d1}, std::move(halves->halves), len, a.dflash.max_k);
+  runtime::TpEngine engine(d0, d1, std::move(cards), len, {}, a.kv_cache, drafter.get());
+  if (drafter) drafter->attach(engine);
   engine.set_prefill_backend(a.backend);
   engine.set_prefill_chunk_cap(path.chunk_cap);
   engine.prepare_prefill();   // the two cards' prefill scratch, crossings and head rows at load, not in a request
@@ -869,8 +885,9 @@ int serve_tp(const TpServe& a, server::Options options) {
                          "from %u\n",
                  tokenizer.vocab_used(), card.vocab_used, tokenizer.vocab_used());
   TemplateAdapter chat_template(a.snapshot_dir);
-  cli::pp::PipelineEngineAdapterT<runtime::TpEngine> engine_adapter(engine, tokenizer.vocab_used(),
-                                                                    model::Qwen35::kVocab, a.mtp_k, a.spec_lookup);
+  cli::pp::PipelineEngineAdapterT<runtime::TpEngine> engine_adapter(
+      engine, tokenizer.vocab_used(), model::Qwen35::kVocab, a.dflash.on ? a.dflash.max_k : a.mtp_k, a.spec_lookup,
+      a.dflash.on);
   options.eos_ids = a.eos;
   // Pinned host memory of the one context both cards share: either card's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
@@ -885,7 +902,10 @@ int serve_tp(const TpServe& a, server::Options options) {
                a.auto_why.c_str(), model::tp_crossing_name(engine.crossing()),
                runtime::prefill_backend_name(engine.prefill_backend()), engine.prefill_chunk_cap(),
                engine.prefill_overlaps() ? "on the copy engines" : "on the compute lists",
-               a.mtp_auto ? "auto, max " : "", a.mtp_k, engine.mtp() ? " (the head whole on each card)" : "",
+               a.mtp_auto ? "auto, max " : "", a.mtp_k,
+               engine.mtp()            ? " (the head whole on each card)"
+               : engine.has_drafter() ? ", DFlash drafter split over both cards"
+                                       : "",
                loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  false, card.name);
@@ -1288,7 +1308,7 @@ int run(int argc, char** argv) {
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
-  cli::check_tp(pipe, {dflash.on, false, is_q4 || is_kol || is_k2,
+  cli::check_tp(pipe, {dflash_lookup, false, is_q4 || is_kol || is_k2,   // spec 19 v3c: --spec dflash is served
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
@@ -1472,6 +1492,7 @@ int run(int argc, char** argv) {
     ts.prefix_auto = prefix_auto;
     ts.prefix_cache_gb = prefix_cache_gb;
     ts.eos = eos;
+    ts.dflash = dflash;   // spec 19 v3c
     return serve_tp(ts, options);
   }
   if (pipe.replica()) {   // plan 13b: one engine per card behind the scheduler

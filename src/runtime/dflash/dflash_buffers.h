@@ -18,8 +18,11 @@ namespace runtime::dflash {
 
 struct DFlashBuffers {
   // head_rows: the target's lm_head rows, or a draft vocabulary's |V'| (the head GEMV's N).
+  // `host_candidates` (spec 19 v3c, a TP card's half): cand and unary in shared memory - the host merges the two
+  // cards' top-16 lists between the draft list and the tail.
   DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows,
-                uint32_t max_len, loader::DraftFormat format = loader::DraftFormat::Int8, bool candidate_head = false);
+                uint32_t max_len, loader::DraftFormat format = loader::DraftFormat::Int8, bool candidate_head = false,
+                bool host_candidates = false);
 
   model::DFlashDesc desc;
   uint32_t target_hidden, head_rows, max_len;

@@ -138,10 +138,10 @@ void TpEngine::capture_tap_lists(uint32_t card, const CaptureOptions& opt) {
   }
 }
 
-void TpEngine::recapture_verify(const CaptureOptions& opt) {
+void TpEngine::recapture_verify(const std::array<CaptureOptions, model::kTpSize>& opt) {
   if (!drafter_) throw std::runtime_error("runtime::TpEngine::recapture_verify: built for the drafter's lists only");
   flush_projection();
-  for (uint32_t r = 0; r < model::kTpSize; ++r) capture_tap_lists(r, opt);
+  for (uint32_t r = 0; r < model::kTpSize; ++r) capture_tap_lists(r, opt[r]);
 }
 
 // Spec 17d: a card's MTP buffers and lists - the draft lists i = 0..kMaxDraft - 1 and the verify lists at
@@ -562,7 +562,7 @@ uint32_t TpEngine::max_verify_k() const {
 const uint32_t* TpEngine::verify_ids() const { return cd(0).ctl->out_token; }
 
 void TpEngine::set_draft_input(uint32_t i, uint32_t id) {
-  if (i >= kMaxDraft || id >= model::Qwen35::kVocab)
+  if (i >= std::max(kMaxDraft, max_draft()) || id >= model::Qwen35::kVocab)   // spec 19 v3c: a drafter's 7
     throw std::runtime_error("runtime::TpEngine::set_draft_input: draft " + std::to_string(i) + ", id " +
                              std::to_string(id));
   for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).ctl->cur_token[1 + i] = id;

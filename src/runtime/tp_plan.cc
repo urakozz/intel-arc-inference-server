@@ -50,8 +50,8 @@ size_t tp_prefill_mtp_bytes(const model::ModelDesc& card, uint32_t chunk_cap) {
 }
 
 MemoryPlan tp_card_plan(const model::ModelDesc& card, model::TpCrossing c, uint32_t max_len, size_t model_bytes,
-                        KvCache kv, const PrefillPath& path, bool mtp) {
-  MemoryPlan p = plan(card, max_len, /*mtp=*/false, model_bytes, path, {}, kv);
+                        KvCache kv, const PrefillPath& path, bool mtp, const DrafterPlan& drafter) {
+  MemoryPlan p = plan(card, max_len, /*mtp=*/false, model_bytes, path, {}, kv, drafter);
   p.decode_state += tp_crossing_bytes(card, c);
   if (path.prefill) p.prefill_scratch += tp_prefill_extra_bytes(card, path.chunk_cap);
   if (mtp) {
@@ -65,12 +65,13 @@ MemoryPlan tp_card_plan(const model::ModelDesc& card, model::TpCrossing c, uint3
 
 uint32_t tp_max_len_that_fits(const model::ModelDesc& card, model::TpCrossing c,
                               const std::array<size_t, 2>& model_bytes, const std::array<size_t, 2>& device_bytes,
-                              size_t reserve_bytes, uint32_t cap, KvCache kv, const PrefillPath& path, bool mtp) {
+                              size_t reserve_bytes, uint32_t cap, KvCache kv, const PrefillPath& path, bool mtp,
+                              const DrafterPlan& drafter) {
   // The crossings (and spec 17c's prefill buffers beside the one-card scratch plan() counts) do not grow with
   // max_len; spec 17d's head buffers do (its KV layer), so the search holds the whole card plan to each device.
   const auto fits = [&](uint32_t len) {
     for (uint32_t r = 0; r < model::kTpSize; ++r)
-      if (tp_card_plan(card, c, len, model_bytes[r], kv, path, mtp).total() + reserve_bytes > device_bytes[r])
+      if (tp_card_plan(card, c, len, model_bytes[r], kv, path, mtp, drafter).total() + reserve_bytes > device_bytes[r])
         return false;
     return true;
   };
@@ -80,7 +81,7 @@ uint32_t tp_max_len_that_fits(const model::ModelDesc& card, model::TpCrossing c,
     for (uint32_t r = 0; r < model::kTpSize; ++r) {
       if (device_bytes[r] < fixed) return 0;
       best = std::min(best, max_len_that_fits(card, false, model_bytes[r], device_bytes[r] - fixed, reserve_bytes,
-                                              cap, path, {}, kv));
+                                              cap, path, {}, kv, drafter));
     }
     return best;
   }

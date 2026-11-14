@@ -10,7 +10,7 @@ l0::Mem dev(l0::Context& ctx, size_t bytes) { return l0::Mem(ctx, l0::MemKind::D
 }  // namespace
 
 DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint32_t th, uint32_t rows, uint32_t ml,
-                             loader::DraftFormat format, bool candidate_head)
+                             loader::DraftFormat format, bool candidate_head, bool host_candidates)
     : desc(d),
       target_hidden(th),
       head_rows(rows),
@@ -34,8 +34,8 @@ DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint3
       kv(dev(ctx, sz.kv)),
       logits(dev(ctx, sz.logits)),
       tpart(dev(ctx, sz.tpart)),
-      cand(dev(ctx, sz.cand)),
-      unary(dev(ctx, sz.unary)) {
+      cand(ctx, host_candidates ? l0::MemKind::Shared : l0::MemKind::Device, sz.cand),
+      unary(ctx, host_candidates ? l0::MemKind::Shared : l0::MemKind::Device, sz.unary) {
   if (sz.co) co = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.co);
   if (sz.candidate) candidate = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.candidate);
   if (sz.hid) hid = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.hid);

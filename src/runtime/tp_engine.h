@@ -208,9 +208,9 @@ class TpEngine {
   // Runs one list a card (both submitted back to back, each after its card's deferred projection), bounded as a
   // step, the crossings' state words checked - no head merge (TpDFlashDrafter's draft lists; tests).
   void run_aux(const std::array<l0::CmdList*, model::kTpSize>& lists, const char* what);
-  // Tests and probes: the tap verify lists captured again under `opt` (CaptureOptions::force_attn, ::profile at
-  // ::profile_m). Session state is untouched.
-  void recapture_verify(const CaptureOptions& opt);
+  // Tests and probes: the tap verify lists captured again under each card's `opt` (CaptureOptions::force_attn, ::profile
+  // at ::profile_m - one ProfileEvents a card, on its context). Session state is untouched.
+  void recapture_verify(const std::array<CaptureOptions, model::kTpSize>& opt);
 
   // The last step's logits, `rows` full rows of kVocab: each row card 0's half then card 1's (D9: the gather).
   void read_logits_into(float* host, uint32_t rows = 1) const;
@@ -249,6 +249,7 @@ class TpEngine {
   void require_mtp(const char* what) const;
   void capture_mtp_lists(uint32_t card);
   void capture_tap_lists(uint32_t card, const CaptureOptions& opt);   // spec 19 v3c
+  void drafter_project_staged(uint32_t from, uint32_t pos, uint32_t n);   // spec 19 v3c, tp_prefill.cc
   void require_spec(const char* what) const;                          // MTP or a drafter
   std::array<std::vector<l0::CmdList*>, model::kTpSize> take_front(bool tails);
   void merge_heads();

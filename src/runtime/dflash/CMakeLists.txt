@@ -11,7 +11,9 @@ target_link_libraries(b70_dflash_plan PUBLIC b70_dflash_model b70_plan b70_bolt_
 # b70_dflash_runtime: DFlashBuffers and the captured draft / projection lists (Level Zero).
 # Spec 19c: + DFlashDrafter (dflash_drafter.cc), the drafter behind runtime::TapDrafter in the Engine's loop.
 # Spec 26b: + LiliDrafter (lilicorr_drafter.cc), the LiLiCorr drafter behind runtime::TapSink beside Bolt (26c binds it).
-add_library(b70_dflash_runtime STATIC dflash_buffers.cc dflash_capture.cc dflash_drafter.cc lilicorr_drafter.cc)
+# Spec 19 v3c: + TpDFlashDrafter (tp_dflash_drafter.cc), the drafter split over both cards behind runtime::TpTapDrafter.
+add_library(b70_dflash_runtime STATIC dflash_buffers.cc dflash_capture.cc dflash_drafter.cc lilicorr_drafter.cc
+                                      tp_dflash_drafter.cc)
 target_include_directories(b70_dflash_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_dflash_runtime PUBLIC b70_l0 b70_dflash_loader b70_dflash_plan b70_runtime b70_prefill_host)
 b70_target_kernel_dir(b70_dflash_runtime)

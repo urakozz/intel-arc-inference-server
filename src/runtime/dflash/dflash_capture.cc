@@ -35,9 +35,20 @@ const uint8_t* at(const void* p, size_t off) { return static_cast<const uint8_t*
 
 class Walk {
  public:
-  Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b, const CaptureOptions& opt)
-      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {
+  Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b, const CaptureOptions& opt,
+       const TpLink* tp = nullptr)
+      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), tp_(tp), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {
     if (opt_.profile) opt_.profile->events.clear();
+  }
+
+  // Spec 19 v3c: the selector's tail of a TP card's half (build_dflash_tail) - over the merged candidates in cand /
+  // unary and the final norm's rows the card's draft list left in x.
+  CapturedStep tail(const l0::Mem& control) {
+    check_common();
+    require(tp_ == nullptr && control.size() >= sizeof(Control), "the tail is captured without a crossing");
+    if (d_.v2()) gemv(*w_.sel_proj, b_.x.ptr(), b_.hid->ptr());
+    select(control.ptr());
+    return finish(tail_launches(d_), "tail");
   }
 
   CapturedStep draft(const DFlashTarget& t, const l0::Mem& control) {
@@ -58,16 +69,26 @@ class Walk {
       require(known && t.ids->size() >= size_t(N) * 4,
               "the draft vocabulary's head has " + std::to_string(N) + " rows: compiled for 32768 / 65536 / 131072");
     } else {
-      require(N == d_.vocab, "the full head has " + std::to_string(N) + " rows, not vocab_size");
+      // Spec 19 v3c: a TP card's head is its vocabulary half.
+      require(N == (tp_ ? kd::kTpVocabHalf : d_.vocab),
+              "the full head has " + std::to_string(N) + " rows, not vocab_size (a TP card's: its half)");
     }
     require(b_.head_rows == N, "the buffers were sized for a head of " + std::to_string(b_.head_rows) + " rows, not " +
                                    std::to_string(N));
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
-    for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
-                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head), opt_.dflash_attn_parallel_exp,
-                                                   opt_.dflash_attn_dpas, opt_.dflash_attn_ks, w_.candidate_bits,
-                                                   w_.candidates))
+    // Spec 19 v3c: a TP card's half - the candidate head's path at its vocabulary half, the DPAS attention.
+    require(!tp_ || (w_.candidate_head && !compact && fmt != 0 && opt_.dflash_attn_dpas &&
+                     lkind() == kernels::LinearKind::SmallM && d_.v2()),
+            "a TP card's draft list is built for DFlash 2 with the candidate head, int8 or int4 linears on gemm_sm and "
+            "the DPAS attention");
+    const std::vector<std::string> variants =
+        tp_ ? kd::tp_draft_variants(fmt, tp_->rank, w_.candidate_bits, w_.candidates, opt_.dflash_attn_ks)
+            : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8, compact ? N : 0, lkind(),
+                                 hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head),
+                                 opt_.dflash_attn_parallel_exp, opt_.dflash_attn_dpas, opt_.dflash_attn_ks,
+                                 w_.candidate_bits, w_.candidates);
+    for (const std::string& v : variants)
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();
@@ -75,7 +96,7 @@ class Walk {
 
     layer_ = -1;
     {   // df_embed(ctrl, embed, mask_row, in_scale, resid), grid (1, M)
-      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+      l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              "df_embed", kd::kWg);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, t.embed->ptr());
@@ -101,7 +122,7 @@ class Walk {
       }
       gemv(L.qkv, qkv_in, b_.gout.ptr());
       {   // df_qkv_prep(ctrl, qkv, qn_kn, rope, q, kb, vb), grid (NH + 2 NKV, M), WG HD
-        l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+        l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              "df_qkv_prep", d_.head_dim);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.gout.ptr());
@@ -114,9 +135,9 @@ class Walk {
       }
       {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128 (DPAS: 16 a q head)
         l0::Kernel& k = opt_.dflash_attn_dpas
-                            ? kernel(kd::attn_dpas_variant(kd::kQwen38, opt_.dflash_attn_ks), "df_attn_part",
+                            ? kernel(kd::attn_dpas_variant(sh_, opt_.dflash_attn_ks), "df_attn_part",
                                      16 * (d_.q_heads / d_.kv_heads) * opt_.dflash_attn_ks)
-                            : kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
+                            : kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.q.ptr());
@@ -131,7 +152,7 @@ class Walk {
                  d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
       }
       {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
-        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_reduce", d_.head_dim);
+        l0::Kernel& k = kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_reduce", d_.head_dim);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.part.ptr());
@@ -143,6 +164,7 @@ class Walk {
         launch(k, d_.q_heads, M);
       }
       gemv(L.o, b_.xa.ptr(), b_.gout.ptr());
+      cross(L.o);   // spec 19 v3c: the two cards' partial sums, whole on both
       fold(b_.gout.ptr(), attn_base);
       // MLP sub-block
       norm(b_.resid.ptr(), norms + H);
@@ -154,13 +176,14 @@ class Walk {
       }
       gemv(L.gate_up, mlp_in, b_.gout.ptr());
       {   // df_silu_mul(gu, a), grid (ceil(I / 256), M)
-        l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+        l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              "df_silu_mul", kd::kWg);
         k.arg_ptr(0, b_.gout.ptr());
         k.arg_ptr(1, b_.xa.ptr());
         launch(k, (d_.inter + kd::kWg - 1) / kd::kWg, M);
       }
       gemv(L.down, b_.xa.ptr(), b_.gout.ptr());
+      cross(L.down);
       fold(b_.gout.ptr(), mlp_base);
     }
     layer_ = -1;
@@ -168,20 +191,26 @@ class Walk {
     if (w_.candidate_head) {
       i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr(),
                 w_.candidate_bits == 2 ? 3u : 1u);
+      // Spec 19 v3c: a TP card's vocabulary half - its real rows, its ids offset by its first.
+      const uint32_t used = tp_ ? (tp_->rank == 0 ? kd::kTpVocabHalf : kd::kQwen38.used - kd::kTpVocabHalf) : 0;
       {
-        auto& k = kernel(kd::candidate_topk_variant(w_.candidates), "df_candidate_select1", kd::kWg);   // spec 19 v3d Task 7
+        auto& k = kernel(tp_ ? kd::candidate_half_variant(used, w_.candidates) : kd::candidate_topk_variant(w_.candidates),
+                         "df_candidate_select1", kd::kWg);   // spec 19 v3d Task 7
         k.arg_ptr(0, b_.logits.ptr());
         k.arg_ptr(1, b_.tpart.ptr());
         launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
       }
       {
-        auto& k = kernel(kd::candidate_topk_variant(w_.candidates), "df_candidate_stage2", kd::kWg);
+        auto& k = kernel(tp_ ? kd::candidate_half_variant(used, w_.candidates) : kd::candidate_topk_variant(w_.candidates),
+                         "df_candidate_stage2", kd::kWg);
         k.arg_ptr(0, b_.tpart.ptr());
         k.arg_ptr(1, b_.candidate->ptr());
         launch(k, kd::kR);
       }
       {
-        auto& k = kernel(kd::rerank_variant(w_.candidates), "df_rerank", w_.candidates * 4);
+        auto& k = kernel(tp_ ? kd::rerank_half_variant(used, tp_->rank * kd::kTpVocabHalf, w_.candidates)
+                             : kd::rerank_variant(w_.candidates),
+                         "df_rerank", w_.candidates * 4);
         k.arg_ptr(0, t.head->mem.ptr());
         k.arg_ptr(1, t.head->scales->ptr());
         k.arg_ptr(2, at(b_.x.ptr(), size_t(H) * 2));
@@ -225,8 +254,15 @@ class Walk {
         launch(k, kd::kR);
       }
     }
+    if (tp_) return finish(tp_draft_launches(d_), "TP draft");   // spec 19 v3c: the selector is the tail's
     if (d_.v2()) gemv(*w_.sel_proj, b_.x.ptr(), b_.hid->ptr());
-    {   // df_select(ctrl, dctl, cand, unary, hid, pred, succ, out), grid (1), WG 256
+    select(ctrl);
+    return finish(draft_launches(d_, bool(w_.candidate_head)), "draft");
+  }
+
+  // df_select(ctrl, dctl, cand, unary, hid, pred, succ, out), grid (1), WG 256
+  void select(const void* ctrl) {
+    {
       l0::Kernel& k = kernel(kd::select_variant(d_.v2(), kd::kQwen38, w_.format == loader::DraftFormat::Int4G64), "df_select", kd::kWg);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, b_.dctl.ptr());
@@ -239,13 +275,12 @@ class Walk {
       k.arg_ptr(7, b_.out.ptr());
       launch(k, 1);
     }
-    return finish(draft_launches(d_, bool(w_.candidate_head)), "draft");
   }
 
   CapturedStep project() {
     check_common();
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
-    for (const std::string& v : {kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+    for (const std::string& v : {kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                                  kd::linear_variant(fmt, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden, lkind()),
                                  kd::linear_variant(fmt, kd::kM, d_.hidden, 2 * d_.kv_n(), lkind())})
       require(std::ifstream(kernels::path(v)).good(),
@@ -253,7 +288,7 @@ class Walk {
     layer_ = -1;
     gemv(*w_.fc, b_.taps.ptr(), b_.gout.ptr());
     {   // df_norm(src, w, h, x) with hidden_norm
-      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+      l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              w_.format == loader::DraftFormat::Int4G64 ? "df_norm_fc" : "df_norm", kd::kWg);
       k.arg_ptr(0, b_.gout.ptr());
       k.arg_ptr(1, w_.hidden_norm->ptr());
@@ -287,7 +322,7 @@ class Walk {
     }
     layer_ = -1;
     {   // df_ctx_store(dctl, kv, qk_norm, rope, ring_k, ring_v), grid (L x 2 NKV, M), WG HD
-      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+      l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              "df_ctx_store", d_.head_dim);
       k.arg_ptr(0, b_.dctl.ptr());
       k.arg_ptr(1, b_.kv.ptr());
@@ -305,7 +340,7 @@ class Walk {
   // config is refused here by name before a command is appended (its binaries are its stage's: Ornith's v1 drafter
   // has a full-attention layer and a 16-row block).
   void check_common() {
-    const kd::Shape& s = kd::kQwen38;
+    const kd::Shape& s = sh_;
     require(d_.hidden == s.H && d_.inter == s.I && d_.q_heads == s.NH && d_.kv_heads == s.NKV && d_.head_dim == s.HD &&
                 d_.layers == 5 && d_.taps.size() == 5 && w_.target_hidden == s.H,
             "the drafter's shapes are not z-lab/Qwen3.8-27B-DFlash2's (the kernels bake them)");
@@ -325,8 +360,35 @@ class Walk {
     require(b_.max_len >= 1, "the buffers' max_len is 0");
   }
 
+  // Spec 19 v3c: after a row-parallel linear of a TP card's half - tp_send (its gout slices summed into the link's
+  // `own` and pushed into the peer's landing buffer) and tp_sum (the wait, then card 0's part + card 1's in fp32 into
+  // gout's slice 0, zeros in the rest): both cards then fold the same whole output. Nothing on one card.
+  void cross(const loader::DeviceWeight& w) {
+    if (!tp_) return;
+    const uint32_t s = w.kind == model::WeightKind::Int4 ? w.shape.S : 1u;
+    const std::string v = kd::tp_sum_variant(s, tp_->rank);
+    {   // tp_send(partials, peer_land, ctr, own), grid (FOLD_G, M)
+      l0::Kernel& k = kernel(v, "tp_send", kd::kWg);
+      k.arg_ptr(0, b_.gout.ptr());
+      k.arg_ptr(1, tp_->peer_land);
+      k.arg_ptr(2, tp_->send_ctr);
+      k.arg_ptr(3, tp_->own);
+      launch(k, DecodeBuffers::kNormGroups, kd::kM);
+    }
+    {   // tp_sum(mine, land, out, ctr, state, spin_limit), grid (FOLD_G, M)
+      l0::Kernel& k = kernel(v, "tp_sum", kd::kWg);
+      k.arg_ptr(0, tp_->own);
+      k.arg_ptr(1, tp_->land);
+      k.arg_ptr(2, b_.gout.ptr());
+      k.arg_ptr(3, tp_->fold_ctr);
+      k.arg_ptr(4, tp_->state);
+      k.arg(5, tp_->spin_limit);
+      launch(k, DecodeBuffers::kNormGroups, kd::kM);
+    }
+  }
+
   void norm(const void* src, const float* w) {   // df_norm(src, w, h, x), grid (1, M)
-    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+    l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              "df_norm", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, w);
@@ -336,7 +398,7 @@ class Walk {
   }
   // df_conv_prep(src, co, base, out) (prepare: out bf16) - only the prepare side goes through here.
   void conv(bool prep, const void* src, const void* base, const void* out) {
-    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+    l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                            prep ? "df_conv_prep" : "df_conv_add", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, b_.co->ptr());
@@ -350,7 +412,7 @@ class Walk {
       conv(false, src, base, b_.resid.ptr());
       return;
     }
-    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+    l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              "df_add", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, b_.resid.ptr());
@@ -461,6 +523,9 @@ class Walk {
   const model::DFlashDesc& d_;
   DFlashBuffers& b_;
   const CaptureOptions opt_;
+  const TpLink* tp_;
+  // The kernels' shapes: the whole drafter's, or (spec 19 v3c) a TP card's half by its descriptor.
+  const kd::Shape& sh_ = d_.q_heads == kd::kQwen38Tp.NH && d_.inter == kd::kQwen38Tp.I ? kd::kQwen38Tp : kd::kQwen38;
   CapturedStep step_;
   const float scale_ = float(1.0 / std::sqrt(double(d_.head_dim)));
   int layer_ = -1;
@@ -493,6 +558,17 @@ CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w
 CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
                                   const CaptureOptions& opt) {
   return Walk(ctx, w, b, opt).project();
+}
+
+CapturedStep build_dflash_draft_tp(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
+                                   DFlashBuffers& b, const l0::Mem& control, const TpLink& link,
+                                   const CaptureOptions& opt) {
+  return Walk(ctx, w, b, opt, &link).draft(t, control);
+}
+
+CapturedStep build_dflash_tail(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
+                               const l0::Mem& control, const CaptureOptions& opt) {
+  return Walk(ctx, w, b, opt).tail(control);
 }
 
 // project_wide: the projection list's walk (Walk::project above) with every GEMM on pf_gemm - per

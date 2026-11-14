@@ -50,7 +50,7 @@ void check_parse() {
   cli::parse_parallel("tp", p);
   CHECK(p.mode == cli::Parallel::Tp && p.tp() && !p.on() && !p.replica() && p.given() && p.devices == 1u);
   cli::check_tp(p, {});   // plain decode: nothing to refuse
-  CHECK(says([&] { cli::check_tp(p, {true, false, false}); }, "--spec dflash / dflash-lookup under tensor parallel are not built"));
+  CHECK(says([&] { cli::check_tp(p, {true, false, false}); }, "--spec dflash-lookup under tensor parallel is not built"));
   CHECK(says([&] { cli::check_tp(p, {false, true, false}); }, "it has no --parallel tp"));
   CHECK(says([&] { cli::check_tp(p, {false, false, true}); }, "--parallel tp is built for Qwen3.8"));
   CHECK(says([&] { cli::check_tp(p, {false, false, false, true}); }, "--draft-vocab is not built under tensor parallel"));

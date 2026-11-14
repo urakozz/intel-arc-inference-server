@@ -68,6 +68,13 @@ struct HasDraftProbs : std::false_type {};
 template <class E>
 struct HasDraftProbs<E, std::void_t<decltype(std::declval<const E&>().draft_probs())>> : std::true_type {};
 
+// Spec 19 v3c: engines whose commit can defer the drafter's projection to the next submit (runtime::TpEngine) - the
+// DFlash iteration's commit then rides with the next draft.
+template <class E, class = void>
+struct HasDeferredCommit : std::false_type {};
+template <class E>
+struct HasDeferredCommit<E, std::void_t<decltype(std::declval<E&>().commit(0u, 0u, true))>> : std::true_type {};
+
 template <class Engine>
 struct PipelineEngineAdapterT : server::EngineIface {
   static constexpr bool kTap = HasTapDrafter<Engine>::value;
@@ -162,10 +169,13 @@ struct PipelineEngineAdapterT : server::EngineIface {
   uint32_t mtp_k() override { return k_; }
 
   std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
-    flush_commit();
     if constexpr (kTap) {
-      if (df_) return step_dflash(sampling, k_req);   // spec 19d
+      if (df_) {   // spec 19d; spec 19 v3c: the commit's projection rides with the next draft where it can
+        flush_commit(HasDeferredCommit<Engine>::value);
+        return step_dflash(sampling, k_req);
+      }
     }
+    flush_commit();
     const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
     ++mtp_iters_at_k[k];
     if (k == 0) return {step(sampling)};   // K = 0, or the last positions of max_len: plain
@@ -255,10 +265,11 @@ struct PipelineEngineAdapterT : server::EngineIface {
     const uint32_t x = eng.pending();
     server::AcceptResult a{};
     std::vector<uint32_t> drafts;
+    // Spec 19 v3c: the readback is read after verify(k) - under TP the drafter's tails (the selector) ride with it.
     if (sampling.greedy) {
       const runtime::dflash::DFlashDraftOut& o = eng.draft_tap(k, 0.0f, 0);
-      drafts.assign(o.ids, o.ids + k);
       eng.verify(k);
+      drafts.assign(o.ids, o.ids + k);
       a = server::accept_greedy(eng.verify_ids(), drafts.data(), k);
     } else {
       // EngineAdapter::dflash_sampled's RNG order: the walk's Gumbel key, the uniforms, the correction draw.
@@ -266,11 +277,11 @@ struct PipelineEngineAdapterT : server::EngineIface {
       const uint64_t seed = rng();
       const float T = server::dflash_temperature(sampling);
       const runtime::dflash::DFlashDraftOut& o = eng.draft_tap(k, T, seed);
+      eng.verify(k);
       drafts.assign(o.ids, o.ids + k);
       server::SparseQ q[kMaxIterK];
       for (uint32_t j = 0; j < k; ++j)
         q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T);
-      eng.verify(k);
       float* p = rows_;
       eng.read_logits_into(p, k + 1);
       a = server::accept_sparse(p, q, drafts.data(), k, vocab_used, V_, sampling, rng);
@@ -342,10 +353,14 @@ struct PipelineEngineAdapterT : server::EngineIface {
     eng.commit(m, m < pending_j_ ? pending_drafts_[m] : pending_next_);
   }
 
-  void flush_commit() {
+  // `defer` (spec 19 v3c, an engine with HasDeferredCommit): the drafter's projection stays pending for the next submit.
+  void flush_commit(bool defer = false) {
     if (!pending_) return;
     pending_ = false;
-    eng.commit(pending_j_, pending_next_);
+    if constexpr (HasDeferredCommit<Engine>::value)
+      eng.commit(pending_j_, pending_next_, defer);
+    else
+      eng.commit(pending_j_, pending_next_);
   }
 
   void seed_rng(const server::Sampling& sampling) {

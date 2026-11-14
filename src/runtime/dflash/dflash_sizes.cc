@@ -126,6 +126,10 @@ size_t draft_launches(const model::DFlashDesc& d, bool candidate_head) {
   return 1 + size_t(d.layers) * (d.v2() ? 16 : 12) + (d.v2() ? 6 : 5) + size_t(candidate_head);
 }
 size_t project_launches(const model::DFlashDesc& d) { return 3 + d.layers; }
+size_t tail_launches(const model::DFlashDesc& d) { return d.v2() ? 2 : 1; }
+size_t tp_draft_launches(const model::DFlashDesc& d) {
+  return draft_launches(d, true) - tail_launches(d) + 4 * size_t(d.layers);
+}
 
 void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, float temperature, uint64_t seed) {
   if (k < 1 || k > kd::kR || k > d.max_k())
