@@ -248,7 +248,11 @@ void TpEngine::run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, 
       fail("card " + std::to_string(r) + "'s wait for card " + std::to_string(1 - r) + "'s part " +
            status_name(w[tp::kStatus]) + ": call " + std::to_string(w[tp::kWant]) + ", chunk " +
            std::to_string(w[tp::kChunk]) + ", flag " + std::to_string(w[tp::kFlag]) + ", trailer " +
-           std::to_string(w[tp::kStamp]) + "; " + std::to_string(w[tp::kFailed]) + " failed chunk(s)" + dropped);
+           std::to_string(w[tp::kStamp]) + "; " + std::to_string(w[tp::kFailed]) + " failed chunk(s)" +
+           (w[tp::kLate] == 0u    ? std::string()
+            : w[tp::kLate] == ~0u ? std::string("; the trailer never arrived")
+                                  : "; the trailer arrived " + std::to_string(w[tp::kLate] - 1u) + " loads later") +
+           dropped);
   }
   if (drop >= 0) fail("card " + std::to_string(drop) + "'s list was not submitted (drop_next()) but no wait failed");
   if (heads) merge_heads();

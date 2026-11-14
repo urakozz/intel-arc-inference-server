@@ -7,11 +7,11 @@
 // One landing buffer a direction, in the READER's memory (spec 17a §3.3: a card sees flags only in its own VRAM), of
 // 32-bit words:
 //
-//   [slot 0 data | slot 1 data | trailers [2][J] | pad to 4 KiB | flags [2][J] x 16 words | pad to 4 KiB]
+//   [slot 0 data | slot 1 data | trailers [2][J] x 16 words | pad to 4 KiB | flags [2][J] x 16 words | pad to 4 KiB]
 //
 // data = s_msg x kMRows x hidden words (a call at M rows uses [s_msg][M][hidden]); J = fold_g x kMRows chunks, chunk
 // j = g x kMRows + m (the K range [g chunk, + chunk) of row m, every slice). Call n uses slot n & 1. Per chunk:
-//   send  the part's words, trailer = n, a release fence, flag = n (a plain store, then a fence);
+//   send  the part's words, the trailer's line = n (every word), a release fence, flag = n (a plain store, then a fence);
 //   fold  spin (bounded) on flag == n with acquire loads unless a failure is already recorded; trailer must be n
 //         (else STALE: the flag came without its data); the data read; the parts summed from 0 in one fixed order -
 //         card 0's part first, so both cards compute the same bits (and, with slices, one card's chain).
@@ -33,8 +33,9 @@ namespace tp {
 
 enum : uint32_t { kOk = 0, kTimeout = 1, kStale = 2 };
 // state words (shared memory, read by the host after the fences)
-enum : uint32_t { kStatus = 0, kFlag = 1, kStamp = 2, kWant = 3, kChunk = 4, kFailed = 5, kStateWords = 8 };
-constexpr uint32_t kSlots = 2, kFlagStride = 16, kPageWords = 1024;
+// kLate: a stale trailer's late arrival, 1 + the loads until it read the call, ~0u if never (tp.cl tp_late).
+enum : uint32_t { kStatus = 0, kFlag = 1, kStamp = 2, kWant = 3, kChunk = 4, kFailed = 5, kLate = 6, kStateWords = 8 };
+constexpr uint32_t kSlots = 2, kFlagStride = 16, kTrailerStride = 16, kPageWords = 1024;   // one 64-byte line each
 constexpr uint32_t kMRows = 8;     // tp.cl TP_MROWS: DecodeScratchDims::kM
 constexpr uint32_t kFoldG = 20;    // the fold's work-groups: DecodeScratchDims::kNormGroups
 constexpr uint32_t kDefaultSpinLimit = 1u << 22;
@@ -47,8 +48,12 @@ struct Layout {
   uint32_t chunk_words() const { return (hidden + fold_g - 1) / fold_g; }   // tp.cl CHUNK
   size_t data_words() const { return size_t(s_msg) * kMRows * hidden; }
   size_t data(uint32_t slot) const { return size_t(slot) * data_words(); }
-  size_t trailer(uint32_t slot, uint32_t j) const { return kSlots * data_words() + size_t(slot) * chunks() + j; }
-  size_t flag_base() const { return round_up(kSlots * data_words() + size_t(kSlots) * chunks(), kPageWords); }
+  size_t trailer(uint32_t slot, uint32_t j) const {
+    return kSlots * data_words() + (size_t(slot) * chunks() + j) * kTrailerStride;
+  }
+  size_t flag_base() const {
+    return round_up(kSlots * data_words() + size_t(kSlots) * chunks() * kTrailerStride, kPageWords);
+  }
   size_t flag(uint32_t slot, uint32_t j) const { return flag_base() + (size_t(slot) * chunks() + j) * kFlagStride; }
   size_t total_words() const { return round_up(flag_base() + size_t(kSlots) * chunks() * kFlagStride, kPageWords); }
   size_t total_bytes() const { return total_words() * 4; }
@@ -96,7 +101,7 @@ inline void send_chunk(const Layout& L, uint32_t* land, uint32_t* ctr, const flo
         const size_t e = (size_t(s) * M + m) * L.hidden + k;
         std::memcpy(&land[L.data(slot) + e], &part[e], 4);
       }
-    land[L.trailer(slot, j)] = n;
+    for (uint32_t w = 0; w < kTrailerStride; ++w) land[L.trailer(slot, j) + w] = n;   // the stamp as a whole line
   }
   std::atomic_thread_fence(std::memory_order_release);
   store_rel(&land[L.flag(slot, j)], n);

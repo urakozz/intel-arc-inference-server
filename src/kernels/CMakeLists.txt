@@ -925,7 +925,17 @@ if(B70_TP AND B70_MTP AND B70_VERIFY_M8)
     add_ocloc_kernel(tp_argmax_M${MM}_N124160_U123917_B124160 SOURCE ${TP_CL}
                      DEFINES ${_tp_am} VOCAB_USED=123917 ID_BASE=124160)
   endforeach()
+  # tp_kernels_test stress: the crossing with its trailers packed 16 to a line (TP_TRAILER_STRIDE 1, the layout before
+  # 2026-11-14 that lost stamps), the A/B against the production binaries. Test-only names (_T1); nothing binds them.
+  foreach(MM 1 2 3 4 5 6 7 8)
+    foreach(R 0 1)
+      add_ocloc_kernel(tp_cross_M${MM}_K5120_G20_S4_F_T1_R${R} SOURCE ${TP_CL}
+                       DEFINES TP_CROSS=1 M=${MM} K=5120 FOLD_G=20 S_LOC=4 FOLDED=1 RANK=${R} TP_TRAILER_STRIDE=1)
+      list(APPEND B70_TP_STRESS_KERNELS kernel_tp_cross_M${MM}_K5120_G20_S4_F_T1_R${R}
+                                        kernel_tp_cross_M${MM}_K5120_G20_S4_F_R${R})
+    endforeach()
   endforeach()
+  set(B70_TP_STRESS_KERNELS ${B70_TP_STRESS_KERNELS} CACHE INTERNAL "tp_kernels_test stress: both trailer layouts")
 endif()
 # The drafter split over both cards (runtime::dflash::TpDFlashDrafter; kernels::dflash::kQwen38Tp): a card's draft and
 # projection lists at its half shapes - 16 q / 4 kv heads, the MLP's 8704, its vocabulary half of the candidate head:
