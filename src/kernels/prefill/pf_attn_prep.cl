@@ -117,6 +117,10 @@
 
 #define WG_PREP 256
 
+// KV_PAGED (plan 19v3b Task 0: the KV page in positions, runtime::kKvPage; undefined on every other command line):
+// kv_k / kv_v are the layer's whole cache and a last argument `pages` maps the KV pages - position pos + m is cache
+// row pages[(pos + m) / KV_PAGED] x KV_PAGED + (pos + m) % KV_PAGED. The values written are unchanged.
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 inline ushort rne_bf16(float f) {
@@ -144,7 +148,11 @@ __kernel void pf_attn_prep(__global const uint* restrict ctrl,
                            __global float* restrict attn_q,
                            __global float* restrict attn_gate,
                            __global ushort* restrict kv_k,
-                           __global ushort* restrict kv_v) {
+                           __global ushort* restrict kv_v
+#ifdef KV_PAGED
+                           , __global const uint* restrict pages
+#endif
+                           ) {
   const uint wg = get_group_id(0);
   const uint m = get_group_id(1);
   const uint i = get_local_id(0);
@@ -201,7 +209,12 @@ __kernel void pf_attn_prep(__global const uint* restrict ctrl,
         bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + HD + i)));
 #endif
   } else {
+#ifndef KV_PAGED
     const size_t slot = ((size_t)(pos + m) * KV_HEADS + h) * HD + i;
+#else
+    const uint vp = pos + m;
+    const size_t slot = (((size_t)pages[vp / KV_PAGED] * KV_PAGED + vp % KV_PAGED) * KV_HEADS + h) * HD + i;
+#endif
     kv_k[slot] = rne_bf16(outv);
     kv_v[slot] = rne_bf16(qkv_sum(qkv_partials, m, V_OFF + (size_t)h * HD + i));
   }

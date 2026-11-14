@@ -92,9 +92,12 @@ bool kv8_split_in_place(const model::ModelDesc& d, uint32_t pos, uint32_t C);
 //     shared `Control` block, which the caller has already set (and waited for).
 //     Writes `s.pf_q` -- bf16 [C][24][256], ruling A9 -- and the two caches.
 //     ONE launch (`pf_attn_prep_q16`, grid (28, C)).
+//     Plan 19v3b Task 0: `pages` (a sequence slot's KV page table, its first entry - runtime/buffer_sizes.h) set,
+//     kv_k / kv_v are the layer's whole cache and the paged twin writes the slot's rows through the table; the same
+//     for every call below that takes it (Qwen3.8's flash forms only).
 void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                      const float* qkv_partials, const float* fa_small, const float* rope,
-                     uint16_t* kv_k, uint16_t* kv_v);
+                     uint16_t* kv_k, uint16_t* kv_v, const void* pages = nullptr);
 
 // (2) Causal attention of the C queries over the cache rows [0, pos + C).
 //     Writes `s.pf_o` -- fp32 [24][rows][256], per-head stride `rows * 256`
@@ -109,7 +112,8 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 //     (3) below in its epilogue and writes `gate_out` instead of pf_o; it returns whether it did.
 bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                 const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
-                PrefillBackend backend, const float* gate_src = nullptr, uint16_t* gate_out = nullptr);
+                PrefillBackend backend, const float* gate_src = nullptr, uint16_t* gate_out = nullptr,
+                const void* pages = nullptr);
 
 // (3) The output gate (ruling A16): `out[m][h*256+d] =
 //     rne_bf16(f32(rne_bf16(o)) . sigmoid(f32(rne_bf16(gate))))`, with the gate
@@ -129,9 +133,9 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 void require_kv8_path(PrefillBackend backend);
 void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                          const float* qkv_partials, const float* fa_small, const float* rope,
-                         const KvLayer& kv);
+                         const KvLayer& kv, const void* pages = nullptr);
 void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
-                    const uint16_t* q, const KvLayer& kv, PrefillBackend backend);
+                    const uint16_t* q, const KvLayer& kv, PrefillBackend backend, const void* pages = nullptr);
 void attn_gate_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,
                          uint32_t rows, const float* qkv_partials, uint16_t* out);
 

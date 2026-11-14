@@ -27,11 +27,19 @@
 //       the lm_head's small-batch GEMM rounds differently from the M = 1 GEMV), and B3 for drafts: slot 3 (not
 //       drafting) and every slot's state and committed KV byte-identical (a draft writes only its slot's head KV
 //       rows past its last committed position).
+//   S7  plan 19v3b Task 0, the slots' KV in pages: with the identity page table and with a scattered one (slot 1's
+//       pages interleaved with slot 0's, slot 3's reversed, slot 2's after them) - S1's session alone in every slot
+//       (a prompt over three pages; ids and every step's logits), the four slots batched (verify_rows, with MTP K = 1
+//       each: ids), every slot's KV rows (hashed in position order) and slot 1's snapshot image (save_kv): all
+//       bitwise the same under both tables, and every slot's lone session the same as slot 0's. S1 prints its
+//       session's digest - the same line on main (contiguous slots) is the "bitwise to main" check.
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "check.h"
@@ -86,18 +94,24 @@ struct Ctx {
     if (v.hh) h = dev_hash(v.hh, size_t(runtime::DecodeScratchDims::kM + 1) * e.model().desc->hidden * 2, h);
     return kv_hash(q, 0, npos, h);
   }
-  // KV rows [p, p + n) of slot q, every layer, main and head, rows and scales.
+  // KV rows [p, p + n) of slot q, every layer, main and head, rows and scales - in position order through the page
+  // table (plan 19v3b Task 0: Engine::kv_row), so the hash is the same whatever the table.
   uint64_t kv_hash(uint32_t q, uint32_t p, uint32_t n, uint64_t h = 1469598103934665603ull) {
-    const Engine::SlotView v = e.slot_view(q);
+    std::vector<std::pair<uint32_t, uint32_t>> runs;   // (cache row, rows), one page at most each
+    for (uint32_t i = p; i < p + n;) {
+      const uint32_t m = std::min(p + n, (i / runtime::kKvPage + 1) * runtime::kKvPage) - i;
+      runs.push_back({e.kv_row(q, i), m});
+      i += m;
+    }
     const auto one = [&](const runtime::KvLayout& L, void* k, void* vv) {
       for (uint32_t l = 0; l < L.layers; ++l) {
-        const runtime::KvLayer x = L.at_base(L.layer(k, vv, l), v.base + p);
-        h = dev_hash(x.k, size_t(n) * L.row_bytes(), h);
-        h = dev_hash(x.v, size_t(n) * L.row_bytes(), h);
-        if (x.int8()) {
-          h = dev_hash(x.ks, size_t(n) * L.scale_row_bytes(), h);
-          h = dev_hash(x.vs, size_t(n) * L.scale_row_bytes(), h);
-        }
+        const runtime::KvLayer x = L.layer(k, vv, l);
+        for (int t = 0; t < 4; ++t)
+          for (const auto& [row, m] : runs) {
+            const runtime::KvLayer y = L.at_base(x, row);
+            void* ptr = t == 0 ? y.k : t == 1 ? y.v : t == 2 ? y.ks : y.vs;
+            if (ptr) h = dev_hash(ptr, size_t(m) * (t < 2 ? L.row_bytes() : L.scale_row_bytes()), h);
+          }
       }
     };
     one(e.buffers().kv_lay, e.buffers().kv_k.ptr(), e.buffers().kv_v.ptr());
@@ -163,6 +177,8 @@ bool s1(Ctx& c, const std::vector<uint32_t>& prompt) {
   const bool ok = a == b && l0 == l2;
   std::printf("S1 slot 0 vs slot 2, the same session alone (%zu ids, %zu verify steps): %s\n", a.size(), l0.size(),
               ok ? "PASS (ids and every step's logits bitwise)" : "FAIL");
+  std::printf("S1 digest: ids %016llx logits %016llx\n", (unsigned long long)fnv(a.data(), a.size() * 4),
+              (unsigned long long)fnv(l0.data(), l0.size() * 8));
   return ok;
 }
 
@@ -404,6 +420,111 @@ bool s6(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts) {
   return iso;
 }
 
+// S7 (plan 19v3b Task 0).
+bool s7(Ctx& c, const std::vector<uint32_t>& prompt, const std::vector<std::vector<uint32_t>>& prompts) {
+  Engine& e = c.e;
+  const uint32_t S = e.slots();
+  const std::vector<uint32_t> identity = e.kv_page_table();
+  // The scattered table: the physical pages handed out in the order slot 0 / slot 1 alternating while both have pages
+  // left, then slot 2's, then slot 3's last page first.
+  std::vector<std::vector<uint32_t>> virt(S);   // each slot's virtual pages
+  for (uint32_t q = 0; q < S; ++q)
+    for (uint32_t i = 0; i < runtime::kv_pages(e.slot_len(q)); ++i) virt[q].push_back(e.slot_base(q) / runtime::kKvPage + i);
+  std::vector<uint32_t> order;   // virtual pages in physical order
+  for (size_t i = 0; i < std::max(virt[0].size(), virt[1].size()); ++i) {
+    if (i < virt[0].size()) order.push_back(virt[0][i]);
+    if (i < virt[1].size()) order.push_back(virt[1][i]);
+  }
+  for (uint32_t q = 2; q < S; ++q)
+    for (size_t i = 0; i < virt[q].size(); ++i) order.push_back(q == 3 ? virt[q][virt[q].size() - 1 - i] : virt[q][i]);
+  CHECK_EQ(order.size(), identity.size());
+  std::vector<uint32_t> scattered(identity.size());
+  for (uint32_t phys = 0; phys < order.size(); ++phys) scattered[order[phys]] = phys;
+  struct Out {
+    std::vector<std::vector<uint32_t>> ids;   // [slot] the lone session's, then [S + slot] the batched run's
+    std::vector<std::vector<uint64_t>> logits;
+    std::vector<uint64_t> kv;                 // [slot] after its lone session, then [S + slot] after the batched run
+    uint64_t snapshot = 0;                    // slot 1's save_kv image after its lone session
+  };
+  auto reset_all = [&]() {
+    for (uint32_t q = S; q-- > 0;) {
+      e.select(q);
+      e.reset();
+    }
+  };
+  auto all = [&]() {
+    Out o;
+    o.ids.resize(2 * S);
+    o.logits.resize(S);
+    o.kv.resize(2 * S);
+    for (uint32_t q = 0; q < S; ++q) {   // the lone sessions
+      e.select(q);
+      e.reset();
+      e.prefill(prompt);
+      for (int i = 0; i < 16; ++i)
+        for (uint32_t id : lone_step(c, 0, &o.logits[q])) o.ids[q].push_back(id);
+      for (int i = 0; i < 4; ++i)
+        for (uint32_t id : lone_step(c, e.mtp() ? 3 : 0, &o.logits[q])) o.ids[q].push_back(id);
+      o.kv[q] = c.kv_hash(q, 0, e.pos());
+      if (q == 1) {
+        l0::Mem kv(c.ctx, l0::MemKind::Host, e.kv_bytes(e.pos()));
+        e.save_kv(0, e.pos(), kv.ptr());
+        o.snapshot = fnv(kv.ptr(), kv.size());
+      }
+    }
+    for (uint32_t q = 0; q < S; ++q) {   // the batched run
+      e.select(q);
+      e.reset();
+      e.prefill(prompts[q]);
+    }
+    for (int i = 0; i < 8; ++i) {
+      std::vector<Engine::Run> runs;
+      std::vector<std::vector<uint32_t>> d(S);
+      for (uint32_t q = 0; q < S; ++q) {
+        e.select(q);
+        o.ids[S + q].push_back(e.control()->cur_token[0]);
+        if (e.mtp()) {
+          e.draft(1);
+          d[q] = e.draft_ids();
+        }
+        runs.push_back({q, e.mtp() ? 1u : 0u});
+      }
+      e.verify_rows(runs);
+      for (uint32_t q = 0; q < S; ++q) {
+        const uint32_t* ids = e.rows_ids() + (e.mtp() ? 2 * q : q);
+        const uint32_t j = e.mtp() && d[q][0] == ids[0] ? 1 : 0;
+        if (j) o.ids[S + q].push_back(d[q][0]);
+        e.select(q);
+        e.commit(j, ids[j]);
+      }
+    }
+    for (uint32_t q = 0; q < S; ++q) {
+      e.select(q);
+      o.kv[S + q] = c.kv_hash(q, 0, e.pos());
+    }
+    return o;
+  };
+  reset_all();
+  const Out a = all();
+  e.set_kv_page_table(scattered);
+  reset_all();
+  const Out b = all();
+  e.set_kv_page_table(identity);
+  reset_all();
+  bool same_slots = true;
+  for (uint32_t q = 1; q < S; ++q) same_slots = same_slots && a.ids[q] == a.ids[0] && a.logits[q] == a.logits[0];
+  const bool lone = a.ids == b.ids && a.logits == b.logits;
+  const bool kv = a.kv == b.kv && a.snapshot == b.snapshot;
+  std::printf("S7 pages: identity vs scattered (%zu pages; slot 0 %u..%u at physical %u, %u, ...): lone sessions in "
+              "every slot %s, batched ids %s, every slot's KV rows and slot 1's snapshot %s; every slot's lone session "
+              "as slot 0's: %s\n",
+              identity.size(), virt[0].front(), virt[0].back(), scattered[virt[0][0]], scattered[virt[0][1]],
+              lone ? "bitwise (ids, logits)" : "DIFFER - FAIL",
+              std::equal(a.ids.begin() + S, a.ids.end(), b.ids.begin() + S) ? "bitwise" : "DIFFER - FAIL",
+              kv ? "bitwise" : "DIFFER - FAIL", same_slots ? "yes" : "NO - FAIL");
+  return same_slots && lone && kv;
+}
+
 // S4 / S5: four requests alone and together.
 struct Streams {
   std::vector<std::vector<uint32_t>> ids;
@@ -500,8 +621,7 @@ bool s4(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts, const std::st
 
 int main(int argc, char** argv) {
   const std::string checkpoint = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
-  uint32_t total = 0;
-  for (uint32_t l : kSlots) total += l;
+  const uint32_t total = runtime::slots_kv_len(kSlots);
   l0::Context ctx(0);
   const bool mtp = !(argc > 3 && std::string(argv[2]) == "--mtp" && std::string(argv[3]) == "off");
   Engine e(ctx, loader::load(ctx, checkpoint, total, mtp, loader::LmHeadForm::Int8), total, false,
@@ -527,6 +647,7 @@ int main(int argc, char** argv) {
   const std::string tag = std::string("slots_") + runtime::kv_cache_name(e.kv_cache()) + (e.mtp() ? "" : "_nomtp");
   ok &= s4(c, {p_deep, p1, p2, p3}, tag);
   if (e.mtp()) ok &= s6(c, {p_deep, p1, p2, p3});
+  ok &= s7(c, cut(long32k, 0, 5000), {p_deep, p1, p2, p3});
   std::printf("slots_test: %s\n", ok ? "PASS" : "FAIL");
   return spec_judge::exit_code(ok, "slots_test");
 }

@@ -47,15 +47,13 @@ uint32_t checked_max_len(const loader::LoadedModel& m, uint32_t max_len) {
 // Spec 13c: the slot lengths, checked against max_len before anything is allocated (empty: one slot of max_len).
 std::vector<uint32_t> checked_slots(const loader::LoadedModel& m, uint32_t max_len, std::vector<uint32_t> slots) {
   if (slots.empty()) return {max_len};
-  uint64_t sum = 0;
-  for (uint32_t l : slots) {
+  for (uint32_t l : slots)
     if (l == 0) throw std::runtime_error("runtime::Engine: a sequence slot of 0 positions");
-    sum += l;
-  }
+  const uint32_t sum = slots_kv_len(slots);   // plan 19v3b Task 0: several slots are whole KV pages each
   if (sum != max_len)
     throw std::runtime_error("runtime::Engine: the sequence slots hold " + std::to_string(sum) +
-                             " positions, but max_len is " + std::to_string(max_len) +
-                             " - the KV caches are one allocation at the slots' sum");
+                             " positions (runtime::slots_kv_len), but max_len is " + std::to_string(max_len) +
+                             " - the KV caches are one allocation of the slots' pages");
   if (slots.size() > SlotDims::kMaxSeqs)
     throw std::runtime_error("runtime::Engine: " + std::to_string(slots.size()) + " sequence slots; at most " +
                              std::to_string(SlotDims::kMaxSeqs));
@@ -122,8 +120,8 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
     // and the verify lists at M = 1..kSlots. Only the head's model carries these.
     hctl_ = mtp_->hctl.as<Control>();
     seqs_[0].hctl = hctl_;
-    for (uint32_t i = 0; i < kMaxDraft; ++i)
-      seqs_[0].draft_steps.push_back(build_draft(ctx, model_, buffers_, *mtp_, i));
+    for (uint32_t i = 0; i < kMaxDraft; ++i)   // plan 19v3b Task 0: slot 0 of several binds its KV pages
+      seqs_[0].draft_steps.push_back(build_draft(ctx, model_, buffers_, *mtp_, i, seqs_[0].bind));
     // Open-work 13: the same lists ending with the draft's probability, for the serial server's per-step K (an
     // engine of one slot: several slots run under the scheduler, whose K stays per request).
     if (slots() == 1)
@@ -132,6 +130,8 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
     for (uint32_t M = 1; M <= MtpBuffers::kSlots; ++M) capture_verify(M, {});
   }
   // Spec 13c: every further slot's own lists, then the row lists; then every slot reset (slot 0 last: selected).
+  // Plan 19v3b Task 0: slot 0 of several has its own paged plain list too (step_ stays the one-slot engine's).
+  if (slots() > 1) seqs_[0].plain.push_back(build(ctx, model_, buffers_, nullptr, nullptr, 1, {}, seqs_[0].bind));
   for (uint32_t q = 1; q < slots(); ++q) capture_slot(q);
   if (slots() > 1)
     for (uint32_t M = 2; M <= kMaxRows; ++M) rows_steps_.push_back(build_rows(ctx, model_, buffers_, rows_bind_, M));
@@ -152,14 +152,12 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens) {
   const size_t state = persist_.gdn_state.size(), ring = persist_.conv_ring.size();
   const size_t hid = size_t(d.hidden) * 2;
   seqs_.resize(S);
-  uint32_t base = 0;
   for (uint32_t q = 0; q < S; ++q) {
-    seqs_[q].base = base;
     seqs_[q].len = lens[q];
     layout_.slots.push_back({lens[q], mtp_ != nullptr});
-    base += lens[q];
+    seqs_[q].base = layout_.kv_base(q);   // plan 19v3b Task 0: with several slots, a page boundary
   }
-  Seq& z = seqs_[0];   // slot 0: the buffers' own state, today's binding (bind all null)
+  Seq& z = seqs_[0];   // slot 0: the buffers' own state, today's binding (bind all null but, of several, its pages)
   z.control = control_;
   z.state0 = persist_.gdn_state.as<uint8_t>();
   z.ring = persist_.conv_ring.as<uint8_t>();
@@ -169,7 +167,14 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens) {
     z.hh = mtp_->hh.as<uint8_t>();
   }
   if (S == 1) return;
-  slot_bufs_ = std::make_unique<SlotBuffers>(ctx_, d, S, mtp_ != nullptr);
+  // Plan 19v3b Task 0: the KV page table - the identity, written once: slot q's pages are its own range.
+  const uint32_t n_pages = persist_.max_len / kKvPage;
+  slot_bufs_ = std::make_unique<SlotBuffers>(ctx_, d, S, mtp_ != nullptr, n_pages);
+  pages_.resize(n_pages);
+  for (uint32_t p = 0; p < n_pages; ++p) pages_[p] = p;
+  imm_.copy(slot_bufs_->pages.ptr(), pages_.data(), size_t(n_pages) * 4);
+  const uint32_t* table = slot_bufs_->pages.as<uint32_t>();
+  z.bind.pages = table;
   // GDN index i >= 1 lives at pool + (i - 1) whole states: with MTP MtpBuffers::gdn_spec (slot 0's three, then every
   // further slot's four - MtpDims' `seqs`), without SlotBuffers::states (one a further slot).
   uint8_t* pool = mtp_ ? mtp_->gdn_spec.as<uint8_t>() : slot_bufs_->states->as<uint8_t>();
@@ -191,6 +196,7 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens) {
     s.bind.kv_base = s.base;
     s.bind.hctl = s.hctl;
     s.bind.hh = s.hh;
+    s.bind.pages = table + s.base / kKvPage;
   }
   // The row lists' bindings (capture.h, build_rows): their own Control blocks and tables, the pools above, and with
   // MTP the gather over MtpBuffers::hh - every slot's rows (slot q's h_{pos-1} at row q x (kM + 1)), then the saved
@@ -200,6 +206,8 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens) {
   b.control = slot_bufs_->control_block(SlotDims::rows_control_at(S));
   b.state_pool = pool;
   b.ring_pool = slot_bufs_->rings.ptr();
+  b.pages = table;
+  draft_bind_.pages = table;
   if (mtp_) {
     b.mtp = mtp_.get();
     b.head_rows = slot_bufs_->control_block(SlotDims::head_table_at(S));
@@ -249,20 +257,63 @@ void Engine::zero_slot() {
     imm_.fill(s.spec, 0u, state * (MtpBuffers::kSlots - 1));
     imm_.fill(s.hh, 0u, size_t(DecodeScratchDims::kM + 1) * model_.desc->hidden * 2);
   }
-  // Its KV range, every layer (K, V and at int8 the scales; the head's layer too).
+  // Its KV range, every layer (K, V and at int8 the scales; the head's layer too) - plan 19v3b Task 0: its pages.
+  const std::vector<std::pair<uint32_t, uint32_t>> rows = kv_rows(s, 0, s.len);
   const auto range = [&](const KvLayout& L, l0::Mem& k, l0::Mem& v) {
-    for (uint32_t l = 0; l < L.layers; ++l) {
-      const KvLayer x = L.at_base(L.layer(k.ptr(), v.ptr(), l), s.base);
-      imm_.fill(x.k, 0u, size_t(s.len) * L.row_bytes());
-      imm_.fill(x.v, 0u, size_t(s.len) * L.row_bytes());
-      if (x.int8()) {
-        imm_.fill(x.ks, 0u, size_t(s.len) * L.scale_row_bytes());
-        imm_.fill(x.vs, 0u, size_t(s.len) * L.scale_row_bytes());
+    for (uint32_t l = 0; l < L.layers; ++l)
+      for (const auto& [row, n] : rows) {
+        const KvLayer x = L.at_base(L.layer(k.ptr(), v.ptr(), l), row);
+        imm_.fill(x.k, 0u, size_t(n) * L.row_bytes());
+        imm_.fill(x.v, 0u, size_t(n) * L.row_bytes());
+        if (x.int8()) {
+          imm_.fill(x.ks, 0u, size_t(n) * L.scale_row_bytes());
+          imm_.fill(x.vs, 0u, size_t(n) * L.scale_row_bytes());
+        }
       }
-    }
   };
   range(persist_.kv_lay, persist_.kv_k, persist_.kv_v);
   if (mtp_) range(mtp_->kv_lay, mtp_->kv_k, mtp_->kv_v);
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> Engine::kv_rows(const Seq& s, uint32_t begin, uint32_t end) const {
+  std::vector<std::pair<uint32_t, uint32_t>> runs;
+  if (pages_.empty()) {   // one slot: its positions are the rows
+    if (begin < end) runs.push_back({s.base + begin, end - begin});
+    return runs;
+  }
+  for (uint32_t p = begin; p < end;) {
+    const uint32_t n = std::min(end, (p / kKvPage + 1) * kKvPage) - p;   // to the page's end
+    const uint32_t row = pages_[(s.base + p) / kKvPage] * kKvPage + p % kKvPage;
+    if (!runs.empty() && runs.back().first + runs.back().second == row)
+      runs.back().second += n;
+    else
+      runs.push_back({row, n});
+    p += n;
+  }
+  return runs;
+}
+
+uint32_t Engine::kv_row(uint32_t slot, uint32_t p) const {
+  const Seq& s = seqs_.at(slot);
+  if (p >= s.len)
+    throw std::out_of_range("runtime::Engine::kv_row: position " + std::to_string(p) + " of slot " +
+                            std::to_string(slot) + "'s " + std::to_string(s.len));
+  return kv_rows(s, p, p + 1).at(0).first;
+}
+
+void Engine::set_kv_page_table(const std::vector<uint32_t>& table) {
+  if (pages_.empty()) throw std::runtime_error("runtime::Engine::set_kv_page_table: one slot has no page table");
+  std::vector<bool> seen(pages_.size(), false);
+  if (table.size() != pages_.size())
+    throw std::runtime_error("runtime::Engine::set_kv_page_table: " + std::to_string(table.size()) + " pages; the KV "
+                             "has " + std::to_string(pages_.size()));
+  for (uint32_t p : table) {
+    if (p >= seen.size() || seen[p])
+      throw std::runtime_error("runtime::Engine::set_kv_page_table: not a permutation of the KV's pages");
+    seen[p] = true;
+  }
+  pages_ = table;
+  imm_.copy(slot_bufs_->pages.ptr(), pages_.data(), pages_.size() * 4);
 }
 
 void Engine::verify_rows(const std::vector<Run>& runs) {
@@ -810,33 +861,37 @@ void Engine::load_state(const void* host, uint32_t pos) {
 // so fa_layers (16 on Qwen3.8) copies each for K and V, plus as many scale
 // runs at int8 (spec 12b). The two loops below walk the same (allocation, offset, bytes)
 // list in the same order, one copying out and the other in. Spec 13c: the selected slot's
-// positions, from its KV base.
+// positions, from its KV base. Plan 19v3b Task 0: its rows through the page table (Engine::kv_rows) - a layer's
+// range one copy per run of consecutive pages, in position order, so the host image is the same whatever the table.
 namespace {
 struct KvRun {
   uint8_t* dev;
   size_t bytes;
 };
-// Every device run of positions [begin, end), in host order: per tensor (K, V), the rows of
-// every layer (the head's last), then at int8 the scales the same way.
-std::vector<KvRun> kv_runs(const PersistentBuffers& p, const MtpBuffers* mtp, uint32_t begin,
-                           uint32_t end) {
+// Every device run of the rows `rows` ((first row, rows) runs, position order), in host order: per tensor (K, V),
+// the rows of every layer (the head's last), then at int8 the scales the same way.
+std::vector<KvRun> kv_runs(const PersistentBuffers& p, const MtpBuffers* mtp,
+                           const std::vector<std::pair<uint32_t, uint32_t>>& rows) {
   std::vector<KvRun> runs;
   const KvLayout& L = p.kv_lay;
-  const size_t n = end - begin;
   for (int kv = 0; kv < 2; ++kv) {
     uint8_t* base = (kv == 0 ? p.kv_k : p.kv_v).as<uint8_t>();
     uint8_t* hbase = mtp ? (kv == 0 ? mtp->kv_k : mtp->kv_v).as<uint8_t>() : nullptr;
     for (uint32_t l = 0; l < L.layers; ++l)
-      runs.push_back({base + L.rows_offset(l) + begin * L.row_bytes(), n * L.row_bytes()});
+      for (const auto& [begin, n] : rows)
+        runs.push_back({base + L.rows_offset(l) + size_t(begin) * L.row_bytes(), size_t(n) * L.row_bytes()});
     if (mtp)   // the head's layer, after the last FA layer
-      runs.push_back({hbase + mtp->kv_lay.rows_offset(0) + begin * L.row_bytes(), n * L.row_bytes()});
+      for (const auto& [begin, n] : rows)
+        runs.push_back({hbase + mtp->kv_lay.rows_offset(0) + size_t(begin) * L.row_bytes(), size_t(n) * L.row_bytes()});
     if (L.scale_row_bytes() == 0) continue;
     for (uint32_t l = 0; l < L.layers; ++l)
-      runs.push_back({base + L.scales_offset(l) + begin * L.scale_row_bytes(),
-                      n * L.scale_row_bytes()});
+      for (const auto& [begin, n] : rows)
+        runs.push_back({base + L.scales_offset(l) + size_t(begin) * L.scale_row_bytes(),
+                        size_t(n) * L.scale_row_bytes()});
     if (mtp)
-      runs.push_back({hbase + mtp->kv_lay.scales_offset(0) + begin * L.scale_row_bytes(),
-                      n * L.scale_row_bytes()});
+      for (const auto& [begin, n] : rows)
+        runs.push_back({hbase + mtp->kv_lay.scales_offset(0) + size_t(begin) * L.scale_row_bytes(),
+                        size_t(n) * L.scale_row_bytes()});
   }
   return runs;
 }
@@ -847,8 +902,7 @@ void Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
   check_range(begin, end, max_len(), "save_kv");
   if (begin == end) return;
   auto* h = static_cast<uint8_t*>(host);
-  const uint32_t b = seq().base;
-  for (const KvRun& r : kv_runs(persist_, mtp_.get(), b + begin, b + end)) {
+  for (const KvRun& r : kv_runs(persist_, mtp_.get(), kv_rows(seq(), begin, end))) {
     imm_.copy(h, r.dev, r.bytes);
     h += r.bytes;
   }
@@ -858,8 +912,7 @@ void Engine::load_kv(uint32_t begin, uint32_t end, const void* host) {
   check_range(begin, end, max_len(), "load_kv");
   if (begin == end) return;
   const auto* h = static_cast<const uint8_t*>(host);
-  const uint32_t b = seq().base;
-  for (const KvRun& r : kv_runs(persist_, mtp_.get(), b + begin, b + end)) {
+  for (const KvRun& r : kv_runs(persist_, mtp_.get(), kv_rows(seq(), begin, end))) {
     imm_.copy(r.dev, h, r.bytes);
     h += r.bytes;
   }

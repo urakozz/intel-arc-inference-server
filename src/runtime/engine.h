@@ -66,8 +66,9 @@ class Engine {
   // lists at M = 1 .. drafter->max_k() + 1 with the taps (build_verify_taps); ingest(), generate() and commit() keep
   // the drafter's ring filled (see "spec 19c" below). Not with the MTP head (one proposer per engine): throws.
   //
-  // `slots` (spec 13c): the lengths of the engine's sequence slots, summing to max_len - see "spec 13c" below. Empty
-  // (the default) is one slot of max_len: today's engine, allocation for allocation and list for list.
+  // `slots` (spec 13c): the lengths of the engine's sequence slots, max_len their slots_kv_len (runtime/buffer_sizes.h:
+  // each slot whole KV pages) - see "spec 13c" below. Empty (the default) is one slot of max_len: today's engine,
+  // allocation for allocation and list for list.
   Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len,
          bool debug_resid = false, KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr,
          std::vector<uint32_t> slot_lens = {});
@@ -329,12 +330,19 @@ class Engine {
 
   // --- spec 13c: sequence slots - several requests on one card ------------------------------------------------
   //
-  // `slots` (the constructor's): the engine's sequence slots, their lengths summing to max_len (empty: one slot of
-  // max_len - today's engine). Slot q is the position range [slot_base(q), + slot_len(q)) of the KV caches (the main
-  // one and the MTP head's), with its own GDN states (gdn_slots() of them: the live one and, with MTP, three
-  // speculative), conv ring, Control, head Control and hh rows, and its own copy of every captured list (plain, verify
-  // and draft) bound to them - so a slot alone runs exactly today's kernels over its own state: bitwise what a
-  // one-slot engine computes for that session.
+  // `slots` (the constructor's): the engine's sequence slots, max_len their slots_kv_len (empty: one slot of max_len -
+  // today's engine). Slot q is the positions [slot_base(q), + slot_len(q)) of the KV caches (the main one and the MTP
+  // head's), with its own GDN states (gdn_slots() of them: the live one and, with MTP, three speculative), conv ring,
+  // Control, head Control and hh rows, and its own copy of every captured list (plain, verify and draft) bound to them
+  // - so a slot alone runs exactly today's arithmetic over its own state: bitwise what a one-slot engine computes for
+  // that session.
+  //
+  // Plan 19v3b Task 0: with several slots those positions are KV pages (runtime/buffer_sizes.h, kKvPage): slot q's
+  // page p is the cache's page kv_page_table()[slot_base(q) / kKvPage + p] of every FA layer, main and head, and every
+  // slot's lists - slot 0's too - and the row lists bind the paged binaries over that table (capture.h, SlotBind). The
+  // engine writes the table once, the identity (each slot's pages its own range), so the bytes lie where a contiguous
+  // slot's would. set_kv_page_table (tests and probes) maps them elsewhere; snapshots (save_kv / load_kv) keep their
+  // format whatever the table.
   //
   // Every single-sequence call above and below (reset, ingest, prefill, generate, draft, verify, commit,
   // max_verify_k, pos, max_len, the snapshots, control) acts on the SELECTED slot - select(q); 0 at construction.
@@ -354,6 +362,14 @@ class Engine {
   uint32_t selected() const { return cur_; }
   uint32_t slot_len(uint32_t slot) const { return seqs_.at(slot).len; }
   uint32_t slot_base(uint32_t slot) const { return seqs_.at(slot).base; }
+  // Plan 19v3b Task 0 - the KV page table (empty with one slot) and, tests and probes, a new one: a permutation of the
+  // pages, written to the card and the host's copy. The KV moves no byte, so every slot is reset() after it (the
+  // caller's: a slot's session continues only across an identity rewrite). Throws for a wrong length or no
+  // permutation, or with one slot.
+  const std::vector<uint32_t>& kv_page_table() const { return pages_; }
+  void set_kv_page_table(const std::vector<uint32_t>& table);
+  // The cache row (every FA layer's, main and head) of slot q's position p.
+  uint32_t kv_row(uint32_t slot, uint32_t p) const;
   struct Run {
     uint32_t slot = 0;
     uint32_t k = 0;   // drafts in the slot's cur_token[1..k]
@@ -459,7 +475,7 @@ class Engine {
     uint8_t* spec = nullptr;        // states 1..: MTP's (kSlots - 1) or the drafter's (slot 0 only)
     uint8_t* ring = nullptr;
     uint8_t* hh = nullptr;          // MTP: [kM + 1] rows, row 0 = h_{pos-1}
-    std::vector<CapturedStep> plain;   // slots >= 1: the plain list (slot 0's is step_)
+    std::vector<CapturedStep> plain;   // the plain list of each slot of several (one slot's is step_)
     std::vector<CapturedStep> draft_steps;    // [kMaxDraft], MTP on only
     std::vector<CapturedStep> draft_prob_steps;   // open-work 13: the same ending in draft_prob, slot 0 of one slot
     std::vector<CapturedStep> verify_steps;   // [M - 1] for M = 1..kSlots
@@ -479,8 +495,9 @@ class Engine {
   uint32_t cur_ = 0;
   Seq& seq() { return seqs_[cur_]; }
   const Seq& seq() const { return seqs_[cur_]; }
-  const CapturedStep& plain() const { return cur_ == 0 ? step_ : seqs_[cur_].plain.at(0); }
-  CapturedStep& plain() { return cur_ == 0 ? step_ : seqs_[cur_].plain.at(0); }
+  // Slot 0 of several is paged (plan 19v3b Task 0): its own plain list, like every further slot's.
+  const CapturedStep& plain() const { return seqs_[cur_].plain.empty() ? step_ : seqs_[cur_].plain.at(0); }
+  CapturedStep& plain() { return seqs_[cur_].plain.empty() ? step_ : seqs_[cur_].plain.at(0); }
   // Spec 13c: the row lists at M = 2..kMaxRows (index M - 2) and what they read - several slots only.
   std::vector<CapturedStep> rows_steps_;
   BatchRowsBind rows_bind_;
@@ -492,6 +509,10 @@ class Engine {
   void capture_slot(uint32_t q);
   uint32_t gdn_index(uint32_t slot, uint32_t k) const { return slot * gdn_slots() + k; }
   void zero_slot();
+  // Plan 19v3b Task 0: the KV page table's host copy (empty with one slot) and the cache rows of slot `s`'s positions
+  // [begin, end) as (first row, rows) runs - consecutive pages merged, so one run unless the table scatters them.
+  std::vector<uint32_t> pages_;
+  std::vector<std::pair<uint32_t, uint32_t>> kv_rows(const Seq& s, uint32_t begin, uint32_t end) const;
 
   double verify_deep_ms_ = 0;   // the deep lists' capture time
   void capture_verify(uint32_t M, const CaptureOptions& opt);

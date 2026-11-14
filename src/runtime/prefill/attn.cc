@@ -100,13 +100,20 @@ const char* attn_mode_name(AttnMode m) { return m == AttnMode::Flash ? "flash" :
 
 void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                      const float* qkv_partials, const float* fa_small, const float* rope,
-                     uint16_t* kv_k, uint16_t* kv_v) {
+                     uint16_t* kv_k, uint16_t* kv_v, const void* pages) {
   // Spec 15b: grid (q-heads + kv-heads, C) - 28 work-groups per row on Qwen3.8.
   const uint32_t q_heads = s.desc().fa_q_heads, kv_heads = s.desc().fa_kv_heads;
   // Argument 5 is `attn_gate`, which the Q_BF16 build does not write (the gate
   // is read from `qkv_partials` by `pf_attn_gate`). Null rather than a spare
   // buffer, so a build that DID write it would fault at once instead of
   // silently filling scratch nobody reads.
+  if (pages) {   // plan 19v3b Task 0: a slot's paged KV
+    cx.launch(kc(kernels::kv_paged(kernels::pf_attn_prep_q16_variant(q_heads, kv_heads)), "pf_attn_prep"),
+              q_heads + kv_heads, C, 1,
+              {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope), PtrArg(s.pf_q.ptr()),
+               PtrArg(nullptr), PtrArg(kv_k), PtrArg(kv_v), PtrArg(pages)});
+    return;
+  }
   cx.launch(kc(kernels::pf_attn_prep_q16_variant(q_heads, kv_heads), "pf_attn_prep"), q_heads + kv_heads, C, 1,
             {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope),
              PtrArg(s.pf_q.ptr()), PtrArg(nullptr), PtrArg(kv_k), PtrArg(kv_v)});
@@ -114,7 +121,7 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 
 bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                 const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
-                PrefillBackend backend, const float* gate_src, uint16_t* gate_out) {
+                PrefillBackend backend, const float* gate_src, uint16_t* gate_out, const void* pages) {
   require(C > 0 && C <= s.chunk_cap(), "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   // Spec 15b: the head counts are the descriptor's (Qwen3.8: 24 q-heads, 4 kv-heads,
   // groups of 6). Row pitches, named so a GemmBatch field says which buffer it
@@ -143,9 +150,15 @@ bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
             "pf_o is undersized");
     if (const uint32_t span = flash_split_span(s.desc(), pos, C)) {   // 3l (2): a short chunk deep in the cache
       const SplitArea a = split_area(s, pos, C, span);
-      cx.launch(kc(kernels::pf_flash_attn_split_variant(q_heads, kv_heads), "pf_flash_attn"), (C + 7u) / 8u, kv_heads,
-                a.n, {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(a.part), arg_val(pos), arg_val(C), arg_val(rows),
-                      PtrArg(a.ml), arg_val(span)});
+      if (pages)   // plan 19v3b Task 0: a slot's paged KV
+        cx.launch(kc(kernels::kv_paged(kernels::pf_flash_attn_split_variant(q_heads, kv_heads)), "pf_flash_attn"),
+                  (C + 7u) / 8u, kv_heads, a.n,
+                  {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(a.part), arg_val(pos), arg_val(C), arg_val(rows),
+                   PtrArg(a.ml), arg_val(span), PtrArg(pages)});
+      else
+        cx.launch(kc(kernels::pf_flash_attn_split_variant(q_heads, kv_heads), "pf_flash_attn"), (C + 7u) / 8u, kv_heads,
+                  a.n, {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(a.part), arg_val(pos), arg_val(C), arg_val(rows),
+                        PtrArg(a.ml), arg_val(span)});
       launch_merge(cx, kc, s, C, rows, a);
       profile_wait(cx, Phase::kAttnFlash);
       return false;
@@ -154,6 +167,15 @@ bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     // binary, which Qwen3.8 keeps (slower there at HPW 6) and the TP card's 12 / 2.
     const bool r32 = q_heads == 16 && kv_heads == 2;
     const uint32_t rpw = r32 ? kernels::kPfFlashR32Rows : 8u;
+    require(!pages || !r32, "a paged KV (sequence slots) is Qwen3.8's: the r32 flash has no paged form");
+    if (pages) {   // plan 19v3b Task 0: a slot's paged KV
+      cx.launch(kc(kernels::kv_paged(kernels::pf_flash_attn_variant(q_heads, kv_heads)), "pf_flash_attn"),
+                (C + rpw - 1u) / rpw, kv_heads, 1,
+                {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C),
+                 arg_val(rows), PtrArg(pages)});
+      profile_wait(cx, Phase::kAttnFlash);
+      return false;
+    }
     // Phase 3: the walk passes the gate's source and target; r32 then gates in its epilogue (bitwise pf_attn_gate).
     if (r32 && gate_out) {
       require(gate_src != nullptr, "the fused gate needs qkv_partials");
@@ -172,6 +194,7 @@ bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     profile_wait(cx, Phase::kAttnFlash);
     return false;
   }
+  require(!pages, "a paged KV (sequence slots) prefills through the flash attention only");
   // Spec 2.1 §3.4: the depth pads to 256 -- pf_gemm's tile -- and every per-head slot is
   // strided by the 256-padded row count.
   const uint32_t rows = attn_rows(C, backend);
@@ -290,11 +313,18 @@ void require_kv8_path(PrefillBackend) {
 
 void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                          const float* qkv_partials, const float* fa_small, const float* rope,
-                         const KvLayer& kv) {
+                         const KvLayer& kv, const void* pages) {
   require(kv.int8(), "attn_prep_chunk_kv8 needs the int8 cache's scales");
   const uint32_t q_heads = s.desc().fa_q_heads, kv_heads = s.desc().fa_kv_heads;
   // kv8.cl's attn_prep_kv8 at PF = 1: grid (q-heads + kv-heads, C), no gate (null, as for
   // pf_attn_prep_q16), bf16 rotated q into pf_q, the int8 rows and scales.
+  if (pages) {   // plan 19v3b Task 0: a slot's paged KV
+    cx.launch(kc(kernels::kv_paged(kernels::pf_attn_prep_kv8_variant(q_heads, kv_heads)), "attn_prep_kv8"),
+              q_heads + kv_heads, C, 1,
+              {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope), PtrArg(s.pf_q.ptr()),
+               PtrArg(nullptr), PtrArg(kv.k), PtrArg(kv.v), PtrArg(kv.ks), PtrArg(kv.vs), PtrArg(pages)});
+    return;
+  }
   cx.launch(kc(kernels::pf_attn_prep_kv8_variant(q_heads, kv_heads), "attn_prep_kv8"),
             q_heads + kv_heads, C, 1,
             {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope),
@@ -303,7 +333,7 @@ void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32
 }
 
 void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
-                    const uint16_t* q, const KvLayer& kv, PrefillBackend backend) {
+                    const uint16_t* q, const KvLayer& kv, PrefillBackend backend, const void* pages) {
   require(C > 0 && C <= s.chunk_cap(), "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   require(kv.int8(), "attn_chunk_kv8 needs the int8 cache's scales");
   require_kv8_path(backend);
@@ -324,33 +354,55 @@ void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t po
   auto* v = k + size_t(s.kv8_len) * kv_heads * kHeadDim;
   const uint32_t count = (pos + C) * kv_heads * kHeadDim;
   const uint32_t span = flash_split_span(s.desc(), pos, C);
+  // Plan 19v3b Task 0: a slot's paged KV binds every launch below in its paged twin (the merge and the widened rows
+  // are the sequence's own, unpaged).
+  const auto pg = [&](const std::string& v) { return pages ? kernels::kv_paged(v) : v; };
   if (span && kv8_split_in_place(s.desc(), pos, C)) {   // 3l (2): a short chunk deep in the cache, read in place
     const SplitArea a = split_area(s, pos, C, span);
-    cx.launch(kc(kernels::pf_flash_attn_kv8_split_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
-              (C + 7u) / 8u, kv_heads, a.n,
-              {PtrArg(q), PtrArg(kv.k), PtrArg(kv.ks), PtrArg(kv.v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
-               arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span)});
+    l0::Kernel& kk = kc(pg(kernels::pf_flash_attn_kv8_split_variant(q_heads, kv_heads)), "pf_flash_attn_kv8");
+    if (pages)
+      cx.launch(kk, (C + 7u) / 8u, kv_heads, a.n,
+                {PtrArg(q), PtrArg(kv.k), PtrArg(kv.ks), PtrArg(kv.v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
+                 arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span), PtrArg(pages)});
+    else
+      cx.launch(kk, (C + 7u) / 8u, kv_heads, a.n,
+                {PtrArg(q), PtrArg(kv.k), PtrArg(kv.ks), PtrArg(kv.v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
+                 arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span)});
     launch_merge(cx, kc, s, C, rows, a);
     profile_wait(cx, Phase::kAttnFlash);
     return;
   }
-  const auto variant = kernels::pf_flash_attn_kv8_raw_variant(q_heads, kv_heads);
-  cx.launch(kc(variant, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,
-            {PtrArg(kv.k), PtrArg(kv.v), PtrArg(k), PtrArg(v), arg_val(count)});
+  const auto variant = pg(kernels::pf_flash_attn_kv8_raw_variant(q_heads, kv_heads));
+  if (pages)
+    cx.launch(kc(variant, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,
+              {PtrArg(kv.k), PtrArg(kv.v), PtrArg(k), PtrArg(v), arg_val(count), PtrArg(pages)});
+  else
+    cx.launch(kc(variant, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,
+              {PtrArg(kv.k), PtrArg(kv.v), PtrArg(k), PtrArg(v), arg_val(count)});
   if (span) {   // 3l (2): a short chunk deep in the cache, over the widened rows
     const SplitArea a = split_area(s, pos, C, span);
-    cx.launch(kc(kernels::pf_flash_attn_kv8_raw_split_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
-              (C + 7u) / 8u, kv_heads, a.n,
-              {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
-               arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span)});
+    l0::Kernel& kk = kc(pg(kernels::pf_flash_attn_kv8_raw_split_variant(q_heads, kv_heads)), "pf_flash_attn_kv8");
+    if (pages)
+      cx.launch(kk, (C + 7u) / 8u, kv_heads, a.n,
+                {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
+                 arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span), PtrArg(pages)});
+    else
+      cx.launch(kk, (C + 7u) / 8u, kv_heads, a.n,
+                {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
+                 arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span)});
     launch_merge(cx, kc, s, C, rows, a);
     profile_wait(cx, Phase::kAttnFlash);
     return;
   }
-  cx.launch(kc(variant, "pf_flash_attn_kv8"),
-            (C + 7u) / 8u, kv_heads, 1,
-            {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs),
-             PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C), arg_val(rows)});
+  if (pages)
+    cx.launch(kc(variant, "pf_flash_attn_kv8"), (C + 7u) / 8u, kv_heads, 1,
+              {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(s.pf_o.ptr()), arg_val(pos),
+               arg_val(C), arg_val(rows), PtrArg(pages)});
+  else
+    cx.launch(kc(variant, "pf_flash_attn_kv8"),
+              (C + 7u) / 8u, kv_heads, 1,
+              {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs),
+               PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C), arg_val(rows)});
   profile_wait(cx, Phase::kAttnFlash);
 }
 

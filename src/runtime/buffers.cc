@@ -215,18 +215,19 @@ size_t MtpBuffers::bytes() const {
 
 // --- SlotBuffers (spec 13c) --------------------------------------------------
 
-SlotBuffers::SlotBuffers(l0::Context& ctx, const model::ModelDesc& desc, uint32_t n_seqs, bool mtp)
+SlotBuffers::SlotBuffers(l0::Context& ctx, const model::ModelDesc& desc, uint32_t n_seqs, bool mtp, uint32_t kv_pages)
     : states(SlotDims::sizes(desc, n_seqs, mtp).states
                  ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, SlotDims::sizes(desc, n_seqs, mtp).states)
                  : nullptr),
       rings(ctx, l0::MemKind::Device, SlotDims::sizes(desc, n_seqs, mtp).rings),
       controls(ctx, l0::MemKind::Shared, SlotDims::sizes(desc, n_seqs, mtp).controls),
+      pages(ctx, l0::MemKind::Device, SlotDims::sizes(desc, n_seqs, mtp, kv_pages).pages),
       seqs(n_seqs) {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
 }
 
-size_t SlotBuffers::bytes() const { return (states ? states->size() : 0) + rings.size() + controls.size(); }
+size_t SlotBuffers::bytes() const { return (states ? states->size() : 0) + rings.size() + controls.size() + pages.size(); }
 
 void SlotBuffers::zero(l0::CmdList& imm) {
   if (states) imm.fill(states->ptr(), 0u, states->size());

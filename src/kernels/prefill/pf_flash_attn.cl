@@ -94,6 +94,14 @@ inline ushort rne_bf16(float f) {
 #ifndef SPLIT
 #define SPLIT 0
 #endif
+// KV_PAGED (plan 19v3b Task 0: the KV page in positions, runtime::kKvPage; undefined on every other command line): Kc /
+// Vc are the layer's whole cache and a last argument `pages` maps the KV pages - key p is cache row
+// pages[p / KV_PAGED] x KV_PAGED + p % KV_PAGED. A tile of KT keys starts at a multiple of KT and KT divides
+// KV_PAGED, so a tile is in one page: its K and V reads take that page as the surface (rows to the page's end or to
+// `depth`, the zeros past it as before). Every value and order is the contiguous kernel's.
+#if defined(KV_PAGED) && (KV_PAGED % KT != 0 || GATE_EPI || FLASH_MERGE)
+#error "pf_flash_attn KV_PAGED: whole tiles a page; the r8 / split forms only"
+#endif
 #ifndef GATE_EPI
 #define GATE_EPI 0
 #endif
@@ -114,7 +122,11 @@ __attribute__((intel_reqd_sub_group_size(SG)))
 #if SPLIT
 __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const ushort* restrict Kc,
                   __global const ushort* restrict Vc, __global float* restrict O,
-                  uint pos, uint C, uint rows, __global float* restrict ML, uint span) {
+                  uint pos, uint C, uint rows, __global float* restrict ML, uint span
+#ifdef KV_PAGED
+                  , __global const uint* restrict pages
+#endif
+                  ) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);                                  // kv head
   const uint hgs = FA_GQA / HPW;                                   // head groups per kv head
@@ -126,6 +138,9 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
                   uint pos, uint C, uint rows
 #if GATE_EPI
                   , __global const float* restrict G, __global ushort* restrict Out
+#endif
+#ifdef KV_PAGED
+                  , __global const uint* restrict pages
 #endif
                   ) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
@@ -166,6 +181,14 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #if !QREG
     LOAD_Q();
 #endif
+#ifdef KV_PAGED
+    // The tile's page: its rows from Kp / Vp, the tile's keys at t0 - pgs there, ph rows readable.
+    const uint pgs = t0 / KV_PAGED * KV_PAGED;
+    const size_t ppr = (size_t)pages[t0 / KV_PAGED] * KV_PAGED * FA_KVH * HD;
+    __global const ushort* const Kp = Kc + ppr;
+    __global const ushort* const Vp = Vc + ppr;
+    const int ph = (int)min(depth - pgs, (uint)KV_PAGED);
+#endif
     float8 sacc[NKA];
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) sacc[b] = (float8)(0.0f);
@@ -174,9 +197,15 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #pragma unroll
       for (uint b = 0; b < NKA; ++b) {
         uint kb[8];
+#ifndef KV_PAGED
         intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
             (__global void*)Kc, kt_w, kt_h, kt_p,
             (int2)((int)((j * HD + 16u * kk) / 2u), (int)(t0 + 16u * b)), kb);
+#else
+        intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+            (__global void*)Kp, kt_w, ph, kt_p,
+            (int2)((int)((j * HD + 16u * kk) / 2u), (int)(t0 - pgs + 16u * b)), kb);
+#endif
         sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[kk], as_int8(vload8(0, kb)), sacc[b]);
       }
     // scale, mask, running max per row (component r = row r0 + r; lane = key t0 + 16 b + l)
@@ -218,8 +247,13 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #pragma unroll
       for (uint dd = 0; dd < NDA; dd += 2) {
         uint vb[32];   // 32 keys x 32 dims: [c*16 + jj], c = dim half, jj = key pair
+#ifndef KV_PAGED
         intel_sub_group_2d_block_read_transform_16b_32r16x2c(
             (__global void*)Vc, v_w, v_h, v_p, (int2)((int)(j * HD + 16u * dd), (int)(t0 + 16u * b)), vb);
+#else
+        intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+            (__global void*)Vp, v_w, ph, v_p, (int2)((int)(j * HD + 16u * dd), (int)(t0 - pgs + 16u * b)), vb);
+#endif
 #pragma unroll
         for (uint c = 0; c < 2u; ++c)
 #pragma unroll

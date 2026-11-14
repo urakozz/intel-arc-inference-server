@@ -2,12 +2,17 @@
 // engine API (host writes, submit, fence - what the server pays per step, without HTTP and the scheduler).
 //
 //   probe_slots_speed <snapshot> [--kv bf16|int8] [--slots L0,L1,..] [--depth 4096] [--steps 48] [--rounds 3]
+//                     [--depths D0,D1,..] [--arms "NAME|NAME|.."]
+//
+// --depths: each slot's prefill length (default every slot `depth`) - e.g. slot 0 deep beside short slots.
+// --arms: only the arms of these names (as printed, e.g. "1 plain|4 K=1,1,1,1"), in the order below.
 //
 // One engine (Qwen3.8, its MTP head, the int8 lm_head - the served form) with the given slots (default 4 x 32768),
 // every slot prefilled with `depth` ids of tests/golden/prompts/long32k.ids (each from its own offset). Then, per
 // round, every arm in a rotated order, `steps` steps each, greedy - real drafts, real acceptance:
 //
 //   1 plain        slot 0 alone, its own lists: verify(0) + commit (today's --spec off step with the head loaded)
+//   1 plain s<q>   the same on slot q >= 1 (its own depth, --depths)
 //   1 mtp K=k      slot 0 alone, its own lists: draft(k) + verify(k) + the longest agreeing prefix (today's --spec mtp)
 //   n plain        n slots, one verify_rows step of n rows (k = 0 each) + n commits
 //   n K=a,b,..     n slots at those K: the drafts of every slot with K > 0 - ONE draft_rows step per draft index
@@ -65,6 +70,7 @@ double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std
 struct Arm {
   std::string name;
   uint32_t n = 1, k = 0;     // n slots; k: one slot's K (n = 1)
+  uint32_t slot = 0;         // n = 1: the slot
   std::vector<uint32_t> ks;  // n > 1: every slot's K
   bool own = false;          // n > 1: every slot's own draft lists (no draft_rows)
   std::vector<double> ms, ids, draft_ms;
@@ -102,7 +108,7 @@ Arm rows_arm(const std::vector<uint32_t>& ks, bool own) {
 // One step of an arm; returns ids emitted, adds the draft time to *draft_ms.
 uint32_t step(Engine& e, const Arm& a, double* draft_ms) {
   if (a.n == 1) {
-    e.select(0);
+    e.select(a.slot);
     uint32_t j = 0;
     if (a.k > 0) {
       const Clock::time_point t0 = Clock::now();
@@ -159,6 +165,8 @@ int main(int argc, char** argv) {
   std::string kv_s = "bf16";
   std::vector<uint32_t> slots = {32768, 32768, 32768, 32768};
   uint32_t depth = 4096, steps = 48, rounds = 3;
+  std::vector<uint32_t> depths;
+  std::vector<std::string> only;
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -167,6 +175,15 @@ int main(int argc, char** argv) {
     else if (a == "--depth") depth = uint32_t(std::stoul(next()));
     else if (a == "--steps") steps = uint32_t(std::stoul(next()));
     else if (a == "--rounds") rounds = uint32_t(std::stoul(next()));
+    else if (a == "--depths") depths = parse_list(next());
+    else if (a == "--arms") {
+      const std::string l = next();
+      for (size_t b = 0; b <= l.size();) {
+        const size_t e2 = std::min(l.find('|', b), l.size());
+        only.push_back(l.substr(b, e2 - b));
+        b = e2 + 1;
+      }
+    }
     else {
       std::fprintf(stderr, "unknown argument %s\n", a.c_str());
       return 2;
@@ -178,8 +195,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "tests/golden/prompts/long32k.ids not found (run from the source tree)\n");
     return 2;
   }
-  uint32_t total = 0;
-  for (uint32_t l : slots) total += l;
+  const uint32_t total = runtime::slots_kv_len(slots);   // plan 19v3b Task 0: whole KV pages a slot
   const uint32_t S = uint32_t(slots.size());
   l0::Context ctx(0);
   Engine e(ctx, loader::load(ctx, argv[1], total, /*mtp=*/true, loader::LmHeadForm::Int8), total, false, kv, nullptr,
@@ -188,17 +204,26 @@ int main(int argc, char** argv) {
   std::printf("probe_slots_speed: %u slots (%s), %s KV, depth %u, %u steps an arm, median of %u rounds\n%s\n", S,
               runtime::slot_layout_name(slots).c_str(), runtime::kv_cache_name(kv), depth, steps, rounds,
               e.memory_line().c_str());
+  if (depths.empty()) depths.assign(S, depth);
+  if (depths.size() != S) {
+    std::fprintf(stderr, "--depths names %zu slots, the engine has %u\n", depths.size(), S);
+    return 2;
+  }
   for (uint32_t q = 0; q < S; ++q) {
     std::vector<uint32_t> ids;
-    for (uint32_t i = 0; i < depth; ++i) ids.push_back(file[(size_t(q) * 7919 + i) % file.size()]);
+    for (uint32_t i = 0; i < depths[q]; ++i) ids.push_back(file[(size_t(q) * 7919 + i) % file.size()]);
     e.select(q);
     const Clock::time_point t0 = Clock::now();
     e.prefill(ids);
-    std::printf("prefill: slot %u, %u ids in %.2f s\n", q, depth, ms_since(t0) / 1000);
+    std::printf("prefill: slot %u, %u ids in %.2f s\n", q, depths[q], ms_since(t0) / 1000);
   }
   std::vector<Arm> arms;
   arms.push_back(arm("1 plain", 1, 0));
   for (uint32_t k = 1; k <= 3; ++k) arms.push_back(arm("1 mtp K=" + std::to_string(k), 1, k));
+  for (uint32_t q = 1; q < S; ++q) {
+    arms.push_back(arm("1 plain s" + std::to_string(q), 1, 0));
+    arms.back().slot = q;
+  }
   // n slots: plain; K the same everywhere (rows draft and, for the record, own drafts); and the 8-row budget's two
   // allocations at 3 / 4 slots - the oldest request first (3, then what is left) or one at a time round the rows.
   for (uint32_t n = 2; n <= S; ++n) {
@@ -217,6 +242,16 @@ int main(int argc, char** argv) {
   if (S >= 4) {
     arms.push_back(rows_arm({3, 1, 0, 0}, false));
     arms.push_back(rows_arm({3, 0, 0, 0}, false));
+  }
+  if (!only.empty()) {
+    std::vector<Arm> kept;
+    for (Arm& a : arms)
+      if (std::find(only.begin(), only.end(), a.name) != only.end()) kept.push_back(std::move(a));
+    if (kept.size() != only.size()) {
+      std::fprintf(stderr, "--arms: %zu of the %zu names are arms of this layout\n", kept.size(), only.size());
+      return 2;
+    }
+    arms = std::move(kept);
   }
   for (Arm& a : arms) {   // warm-up
     double d = 0;
@@ -248,7 +283,7 @@ int main(int argc, char** argv) {
     double plain = 0, best = 0;
     std::string best_name;
     for (const Arm& a : arms) {
-      if (a.n != n) continue;
+      if (a.n != n || a.slot != 0) continue;
       const double tps = median(a.ids) * 1000 / median(a.ms);
       if (a.plain()) plain = tps;
       if (tps > best) {
