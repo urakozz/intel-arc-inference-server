@@ -925,13 +925,6 @@ if(B70_TP AND B70_MTP AND B70_VERIFY_M8)
     add_ocloc_kernel(tp_argmax_M${MM}_N124160_U123917_B124160 SOURCE ${TP_CL}
                      DEFINES ${_tp_am} VOCAB_USED=123917 ID_BASE=124160)
   endforeach()
-  # The crossing lever (plan Task 9 Step 2): the tap verify lists' crossings at M = 2..8 as bf16 messages (tp.cl
-  # BF16_MSG); M = 1 and MTP's lists keep the fp32 crossing.
-  foreach(MM 2 3 4 5 6 7 8)
-    foreach(R 0 1)
-      add_ocloc_kernel(tp_cross_M${MM}_K5120_G20_S4_F_R${R}_B16 SOURCE ${TP_CL}
-                       DEFINES TP_CROSS=1 M=${MM} K=5120 FOLD_G=20 S_LOC=4 FOLDED=1 RANK=${R} BF16_MSG=1)
-    endforeach()
   endforeach()
 endif()
 # The drafter split over both cards (runtime::dflash::TpDFlashDrafter; kernels::dflash::kQwen38Tp): a card's draft and

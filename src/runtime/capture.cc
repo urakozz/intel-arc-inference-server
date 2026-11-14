@@ -968,10 +968,7 @@ class Capture {
     launch(k, DecodeBuffers::kNormGroups, kCapM);
   }
   std::string tp_cross() const {
-    // Spec 19 v3c: a tap verify list's rows at M >= 2 cross as bf16 messages (CaptureOptions::tp_fp32_crossing: the
-    // test / probe A/B); M = 1 and every other TP list keep the fp32 crossing.
-    const bool bf16 = mode_ == Mode::TpVerifyTaps && kCapM >= 2 && !opt_.tp_fp32_crossing;
-    return kernels::tp_cross_variant(kCapM, d_.hidden, DecodeBuffers::kNormGroups, tp_s_, tp_->folded, tp_->rank, bf16);
+    return kernels::tp_cross_variant(kCapM, d_.hidden, DecodeBuffers::kNormGroups, tp_s_, tp_->folded, tp_->rank);
   }
   void check_tp() {
     require(tp_ != nullptr && tp_->peer_land && tp_->land && tp_->send_ctr && tp_->fold_ctr && tp_->state &&

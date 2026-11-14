@@ -380,52 +380,7 @@ int cost(l0::Context& d0, l0::Context& d1, uint32_t depth) {
               median(dr), median(dv), median(dc), median(dr) + median(dv) + median(dc), kRounds, kReps);
   crossings(e, 1);
   crossings(e, 8);
-  // The crossing lever's A/B: the tap verify lists at M = 8 with fp32 against bf16 messages (the production lists),
-  // interleaved rounds after a warm-up - each round recaptures both cards' lists in its form.
-  std::vector<double> ab[2];
-  for (int round = 0; round <= kRounds; ++round)
-    for (int f = 0; f < 2; ++f) {
-      std::array<runtime::CaptureOptions, 2> o;
-      o[0].tp_fp32_crossing = o[1].tp_fp32_crossing = f == 0;
-      e.recapture_verify(o);
-      const auto t0 = Clock::now();
-      for (int i = 0; i < kReps; ++i) {
-        for (uint32_t m = 0; m < 7; ++m) e.set_draft_input(m, e.pending());
-        e.verify(7);
-        e.commit(0, e.verify_ids()[0], true);
-      }
-      if (round) ab[f].push_back(ms(t0) / kReps);
-    }
-  e.recapture_verify({});
-  std::printf("  verify at M = 8 + commit: fp32 crossings %.3f ms, bf16 crossings %.3f ms (%.3f ms saved)\n",
-              median(ab[0]), median(ab[1]), median(ab[0]) - median(ab[1]));
   return 0;
-}
-// `stress <n>`: n speculative runs (K = 7, the long prompt) with the tap verify lists' crossings in fp32 and n in
-// bf16, alternating; every failed crossing caught, counted by status and reset() - how often each form loses one.
-int stress(l0::Context& d0, l0::Context& d1, uint32_t n) {
-  Tp tp(d0, d1, 16384);
-  runtime::TpEngine& e = *tp.e;
-  const std::vector<uint32_t> p = golden::read_ids("tests/golden/prompts/long.ids");
-  uint32_t fails[2] = {0, 0}, runs[2] = {0, 0};
-  for (uint32_t i = 0; i < 2 * n; ++i) {
-    const int f = int(i % 2);
-    std::array<runtime::CaptureOptions, 2> o;
-    o[0].tp_fp32_crossing = o[1].tp_fp32_crossing = f == 0;
-    e.reset();
-    e.recapture_verify(o);
-    ++runs[f];
-    try {
-      e.prefill(p);
-      speculative(e, 7);
-    } catch (const std::exception& ex) {
-      ++fails[f];
-      std::printf("STRESS %s run %u: %s\n", f == 0 ? "fp32" : "bf16", i / 2, ex.what());
-    }
-  }
-  std::printf("STRESS fp32 crossings: %u of %u runs lost a crossing; bf16: %u of %u (64 ids a run, ~%u crossings each)\n",
-              fails[0], runs[0], fails[1], runs[1], 64u / 3u * 138u);
-  return fails[0] + fails[1] ? 1 : 0;
 }
 }  // namespace
 
@@ -444,7 +399,6 @@ int main(int argc, char** argv) {
     std::printf("SKIP: the cards cannot access each other's memory (zeDeviceCanAccessPeer)\n");
     return 77;
   }
-  if (mode == "stress") return stress(d0, d1, argc > 4 ? uint32_t(std::atoi(argv[4])) : 20);
   if (mode == "cost") {
     if (argc < 5) {
       std::fprintf(stderr, "usage: tp_dflash_test <ckpt> <drafter> cost <depth>\n");
