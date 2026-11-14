@@ -456,8 +456,7 @@ class Capture {
                    ? verify_attn_kind(kCapM, vattn_keys_, kv8_, d_.fa_q_heads, d_.fa_kv_heads, opt_.force_attn)
                    : VerifyAttn::V2;
       if (vattn_ == VerifyAttn::Dpas)
-        attn_bins.push_back(pg(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
-                                                                 d_.fa_q_heads, d_.fa_kv_heads)));
+        attn_bins.push_back(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_, d_.fa_q_heads, d_.fa_kv_heads)));
     }
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
@@ -805,9 +804,11 @@ class Capture {
 
   // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
   // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
-  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt).
+  // verify-cost-m8: the DPAS verify attention's key blocks a row (runtime/verify_attn.h; CaptureOptions::probe_attn_tgt
+  // overrides it for probes); v2 and the paged lists (plan 19v3b: no paged 16-block binaries) keep kAttnV2Blocks.
   uint32_t attn_tgt() const {
-    return vattn_ == VerifyAttn::Dpas && opt_.probe_attn_tgt ? opt_.probe_attn_tgt : DecodeBuffers::kAttnV2Blocks;
+    if (vattn_ != VerifyAttn::Dpas || sb_.pages) return DecodeBuffers::kAttnV2Blocks;
+    return opt_.probe_attn_tgt ? opt_.probe_attn_tgt : verify_attn_dpas_blocks(kCapM, d_.fa_q_heads, d_.fa_kv_heads);
   }
   l0::Kernel& dpas_kernel() {
     l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_,

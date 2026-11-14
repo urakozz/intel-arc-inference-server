@@ -86,6 +86,15 @@ inline VerifyAttn verify_attn_kind(uint32_t M, uint32_t keys, bool kv8, uint32_t
   return r->dpas_from != kDpasNever && keys >= r->dpas_from ? VerifyAttn::Dpas : VerifyAttn::V2;
 }
 
+// verify-cost-m8: the key blocks a row the DPAS verify attention walks (the grid's y extent and the partials' block count,
+// TGT of attn_verify_dpas and of its reduce's v2 binary). v2 keeps 32 (DecodeScratch::kAttnV2Blocks); at M >= 5 on the
+// one-card heads the DPAS lists take 16 - twice the keys a work-group, half the partials written and reduced: verify at
+// 8 rows -0.5 ms at depth 4096 (interleaved pairs, BENCHMARKS "verify-cost-m8"). Another block count merges a row's
+// keys in other groups, so those rows are graded by the f32 judge, not bitwise the 32-block form.
+inline uint32_t verify_attn_dpas_blocks(uint32_t M, uint32_t q_heads, uint32_t kv_heads) {
+  return M >= 5 && q_heads == 24 && kv_heads == 4 ? 16 : 32;
+}
+
 // dpas_from is 0 / 1 or never (or the row is absent): one list serves every depth.
 inline bool verify_attn_depth_free(uint32_t M, bool kv8) {
   const VerifyAttnRow* r = verify_attn_row(M, kv8);
