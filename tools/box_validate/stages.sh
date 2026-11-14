@@ -3907,6 +3907,24 @@ st_r86_replay() {
   idle after
   judged_finish
 }
+row 87 "spec 19v3d - a cheaper DFlash round on one card: verify at 8 rows by kernel family, then the draft pass (plan 2026-11-13-spec19v3d-dflash-round-cost)"
+rownote 87 "Card 0 is the plan's card. Plain decode (1 row) does not move: G0's g0.sha checks every unchanged binary, the 1-row list's among them. r87.vprofile is instrumented (per-launch timestamps): it attributes; its VPROFILE_PAIR lines (uninstrumented interleaved pairs) decide."
+stage r87.k0 87 default cpu - g0.sha "DFlash host checks; the 1-row binaries unchanged (G0)"
+st_r87_k0() {
+  run_tests '^(adaptive_k_test|dflash_engine_host_test|dflash_plan_test)$'
+  finish
+}
+stage r87.vprofile 87 optin gpu qwen,dflash r87.k0 "verify at 1 / 2 / 4 / 8 rows by kernel family at 4096 / 32768 (Task 1's stop / continue table)"
+st_r87_vprofile() {
+  idle before
+  local depth
+  for depth in 4096 32768; do
+    chk "build/tools/probe/probe_dflash_iter $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --format int8 --candidate-head --depth $depth --verify-profile" "verify by family at $depth"
+  done
+  idle after
+  grab_all vprofile '^VPROFILE' 120
+  finish
+}
 
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest_2card x default gpu qwen,oracle_qwen - "x.rest's two-card part: the pp-labelled tests among them (the rest is x.rest, on one card)"

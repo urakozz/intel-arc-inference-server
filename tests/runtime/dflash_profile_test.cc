@@ -14,12 +14,13 @@
 #include "loader/snapshot.h"
 #include "runtime/dflash/dflash_drafter.h"
 
-// Same real weights and ring, with only the attention grid changed. Interleave timestamp measurements.
+// Same real weights and ring, with only the attention grid changed. Interleave timestamp measurements. The scalar
+// forms agree bitwise with each other; the DPAS part (spec 19 v3d Task 6, production) with the production draft.
 void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint32_t K) {
-  struct Grid { unsigned heads, rows; bool parallel_exp; };
-  constexpr std::array<Grid, 7> forms = {{{0, 0, false}, {1, 0, false}, {2, 0, false},
-                                          {1, 4, false}, {1, 2, false}, {1, 1, false},
-                                          {1, 4, true}}};
+  struct Grid { unsigned heads, rows; bool parallel_exp, dpas; };
+  constexpr std::array<Grid, 8> forms = {{{0, 0, false, false}, {1, 0, false, false}, {2, 0, false, false},
+                                          {1, 4, false, false}, {1, 2, false, false}, {1, 1, false, false},
+                                          {1, 4, true, false}, {1, 4, false, true}}};
   std::array<std::unique_ptr<runtime::ProfileEvents>, forms.size()> events;
   std::array<std::unique_ptr<runtime::CapturedStep>, forms.size()> lists;
   for (unsigned h = 0; h < forms.size(); ++h) {
@@ -28,6 +29,7 @@ void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint
     opt.dflash_attn_heads = forms[h].heads;
     opt.dflash_attn_rows = forms[h].rows;
     opt.dflash_attn_parallel_exp = forms[h].parallel_exp;
+    opt.dflash_attn_dpas = forms[h].dpas;
     opt.profile = events[h].get();
     lists[h] = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_draft(
         e.context(), d.weights(), runtime::dflash::dflash_target(e.model()), d.buffers(), e.buffers().control, opt));
@@ -37,15 +39,21 @@ void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint
   l0::CmdList imm = l0::CmdList::immediate(e.context());
   std::vector<uint8_t> hidden(d.buffers().h.size()), observed(hidden.size());
   imm.copy(hidden.data(), d.buffers().h.ptr(), hidden.size());
+  // The scalar forms' reference: the first scalar list's own readback and hidden.
+  for (auto& event : events[0]->events) event.reset();
+  e.replay_aux(lists[0]->list);
+  const auto scalar_base = *d.buffers().readback();
+  std::vector<uint8_t> scalar_hidden(hidden.size());
+  imm.copy(scalar_hidden.data(), d.buffers().h.ptr(), scalar_hidden.size());
   std::array<std::vector<double>, forms.size()> timings;
   for (unsigned r = 0; r < 6; ++r)
     for (unsigned a = 0; a < forms.size(); ++a) {
       const unsigned h = (a + r) % forms.size();
       for (auto& event : events[h]->events) event.reset();
       e.replay_aux(lists[h]->list);
-      CHECK(std::memcmp(&base, d.buffers().readback(), sizeof(base)) == 0);
+      CHECK(std::memcmp(forms[h].dpas ? &base : &scalar_base, d.buffers().readback(), sizeof(base)) == 0);
       imm.copy(observed.data(), d.buffers().h.ptr(), observed.size());
-      CHECK(hidden == observed);
+      CHECK((forms[h].dpas ? hidden : scalar_hidden) == observed);
       double ms = 0;
       for (size_t i = 0; i < lists[h]->labels.size(); ++i)
         if (lists[h]->labels[i].find(" df_attn_part ") != std::string::npos)
@@ -55,8 +63,9 @@ void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint
     }
   for (unsigned h = 0; h < forms.size(); ++h) {
     std::sort(timings[h].begin(), timings[h].end());
-    std::printf("DFLASH_ATTN_HEADS pos=%u K=%u heads=%u rows=%u parallel_exp=%d ms=%.6f readback_hidden=bitwise\n",
-                e.pos(), K, forms[h].heads ? forms[h].heads : 4, forms[h].rows ? forms[h].rows : 8, forms[h].parallel_exp, timings[h][2]);
+    std::printf("DFLASH_ATTN_HEADS pos=%u K=%u heads=%u rows=%u parallel_exp=%d dpas=%d ms=%.6f readback_hidden=bitwise\n",
+                e.pos(), K, forms[h].heads ? forms[h].heads : 4, forms[h].rows ? forms[h].rows : 8, forms[h].parallel_exp,
+                forms[h].dpas, timings[h][2]);
   }
 }
 

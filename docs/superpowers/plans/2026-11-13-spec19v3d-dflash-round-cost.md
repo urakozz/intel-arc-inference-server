@@ -114,6 +114,9 @@ Candidates, each its own commit, in Task 1's order:
 - [ ] The head: argmax and the logits rows at 8 rows, if named.
 - **Gate:** property R (a row's output does not depend on its neighbours) and the fp64 check of `gemm_sm_test` at
   every built M; the f32 judge on the golden and tool-call sets; the saving at its bar.
+- **Operator ruling (2026-11-13):** a lever that is bitwise the form it replaces stays when it is measurably faster,
+  under the bar too. Applied: gate||up's 2D block read (-0.18 ms at 8 rows, -0.17 at 4; bitwise its plain-read twin
+  at every M, `gemm_sm_test`).
 
 ### Task 5: the verify half's record (box)
 
@@ -150,6 +153,25 @@ stays reachable through `CaptureOptions` for the A/B), `tests/kernels/dflash_ker
     identity on golden + tool calls.
   - Acceptance lost: the rounding is the suspect (the target's kernel needed the two-halves P for the same reason,
     `attn_verify_dpas.cl`'s header); fix with a failing test, do not widen the bar.
+- **Operator go 2026-11-13 night, recommendations applied (revisit in the morning):** (1) the DPAS part (q and p as
+  three bf16 terms) stays the default although it misses the 0.9 ms gate - measured 2.14 -> 1.54 ms for the 5
+  parts, a saving of 0.60 ms, the round 1.508 -> 1.486 plain steps; (2) the acceptance comparison is one-sided as
+  spec §3.2 words it - a row fails only when the engine is lower than the baseline by more than 0.05
+  (`dflash_engine_accept.py`, signed gap printed; cjk K = 3's +0.0625 passes); (3) `dflash_draft_test`'s count of
+  top-16 candidates off the f32 judge is recorded, not gated - the rows' cosine against the judge gates at its bar;
+  (4) next for the attention: occupancy first (64-key blocks, more work-groups), Step 3 only if more than 0.6 ms
+  is left and time allows.
+- **Operator ruling 2026-11-14:** (1) acceptance is judged **pooled** over every draft (each corpus / K row weighted
+  by its anchors, one-sided 0.05; the rows recorded) - the 16-anchor corpora cannot resolve a row below one anchor;
+  (2) occupancy: `df_attn_dpas.cl`'s KS 4 (a head's block keys split four ways) is the default - the five parts
+  1.55 -> 0.50 ms, which meets the 0.9 ms gate; (3) `dflash_draft_test`'s CPU twin follows the DPAS part's order
+  (`dfref::attention`'s dpas_ks) and every list binds the production part. Step 3 (the int8 ring) is not needed.
+- **Review fixes (2026-11-14):** the acceptance gate also holds each corpus pooled over its K rows at the same
+  one-sided 0.05 (a4 holds 544 of the 608 anchors a K; KS 4: code -0.018, opencode -0.027 - pass; the 2-bit / 80
+  head: a4 -0.0008 - pass); `dflash_kernels_test` plants one dominant key at the window's edge, before it, at the
+  ring's wrap and at each KS slice boundary (KS 1 / 2 / 4); at KS 4 `df_attn_dpas` declares 65,920 B of work-group
+  local memory against the B70's 131,072 (clinfo). **A thin margin, kept:** the int8 drafter's forced-gemv_i8w
+  list against the DPAS-order twin reads rows cosine 0.9999903 at the 0.99999 bar - the bar is not loosened.
 - [ ] **Step 3 (only if Step 2 leaves > 0.6 ms):** the ring in int8 by the target's rotation scheme (`kv8`). It
   changes `ring_bytes()` and the drafter's key, so old prefix cache entries are not restored beside it (the key
   already guards that). Same gates.
@@ -172,6 +194,10 @@ form), `src/loader/dflash_loader.cc` and `lm_head_int8.*` (a 2-bit copy of the h
     candidate GEMM <= 0.7 ms (a saving >= 0.4 ms); `--max-len auto` with the drafter rises by ~0.3 GB of context
     (printed).
   - Missed on acceptance at 80: keep int4, record.
+  - **As measured (2026-11-14, card 0, busy box):** GEMM 0.80 ms (gate 0.7 missed); at 64 candidates cjk K = 5 / 6
+    -0.0625 (one anchor each); at 80 all 35 rows pass, round 1.4746 -> 1.4658 plain steps.
+  - **Operator ruling 2026-11-14:** the 2-bit head with 80 candidates is the default; the 0.7 ms GEMM target is
+    waived (0.80 ms measured).
 
 ### Task 8: the body's bytes (box) - waits for the export
 

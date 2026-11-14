@@ -65,7 +65,9 @@ class Walk {
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
-                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head), opt_.dflash_attn_parallel_exp))
+                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head), opt_.dflash_attn_parallel_exp,
+                                                   opt_.dflash_attn_dpas, opt_.dflash_attn_ks, w_.candidate_bits,
+                                                   w_.candidates))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();
@@ -110,8 +112,11 @@ class Walk {
         k.arg_ptr(6, b_.vb.ptr());
         launch(k, d_.q_heads + 2 * d_.kv_heads, M);
       }
-      {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128
-        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
+      {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128 (DPAS: 16 a q head)
+        l0::Kernel& k = opt_.dflash_attn_dpas
+                            ? kernel(kd::attn_dpas_variant(kd::kQwen38, opt_.dflash_attn_ks), "df_attn_part",
+                                     16 * (d_.q_heads / d_.kv_heads) * opt_.dflash_attn_ks)
+                            : kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.q.ptr());
@@ -119,8 +124,11 @@ class Walk {
         k.arg_ptr(4, at(b_.ring_v.ptr(), l * ring_layer));
         k.arg(5, scale_);
         k.arg_ptr(6, b_.part.ptr());
-        launch(k, opt_.dflash_attn_heads ? d_.q_heads / opt_.dflash_attn_heads : d_.kv_heads,
-               d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
+        if (opt_.dflash_attn_dpas)
+          launch(k, d_.kv_heads, d_.window[l] / kd::kAttnPb, 1);
+        else
+          launch(k, opt_.dflash_attn_heads ? d_.q_heads / opt_.dflash_attn_heads : d_.kv_heads,
+                 d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
       }
       {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
         l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_reduce", d_.head_dim);
@@ -158,21 +166,22 @@ class Walk {
     layer_ = -1;
     norm(b_.resid.ptr(), w_.final_norm->as<float>());
     if (w_.candidate_head) {
-      i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
+      i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr(),
+                w_.candidate_bits == 2 ? 3u : 1u);
       {
-        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_stage1", kd::kWg);
+        auto& k = kernel(kd::candidate_topk_variant(w_.candidates), "df_candidate_select1", kd::kWg);   // spec 19 v3d Task 7
         k.arg_ptr(0, b_.logits.ptr());
         k.arg_ptr(1, b_.tpart.ptr());
         launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
       }
       {
-        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_stage2", kd::kWg);
+        auto& k = kernel(kd::candidate_topk_variant(w_.candidates), "df_candidate_stage2", kd::kWg);
         k.arg_ptr(0, b_.tpart.ptr());
         k.arg_ptr(1, b_.candidate->ptr());
         launch(k, kd::kR);
       }
       {
-        auto& k = kernel(kd::rerank_variant(), "df_rerank", kd::kWg);
+        auto& k = kernel(kd::rerank_variant(w_.candidates), "df_rerank", w_.candidates * 4);
         k.arg_ptr(0, t.head->mem.ptr());
         k.arg_ptr(1, t.head->scales->ptr());
         k.arg_ptr(2, at(b_.x.ptr(), size_t(H) * 2));
@@ -375,11 +384,12 @@ class Walk {
       launch(k, N / kernels::kGemvI8wCols);
   }
   // Int4 g64 layout 1, grid split-K, at the block's M rows; scales travel inside the weight tiles.
-  void i4_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* x, const void* out) {
-    const unsigned S = kd::int4_slices(K, N);
+  // layout 3: spec 19 v3d's 2-bit candidate head (gemm_sm only, one slice).
+  void i4_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* x, const void* out, unsigned layout = 1) {
+    const unsigned S = layout == 3 ? 1 : kd::int4_slices(K, N);
     const auto kind = M == kd::kR ? hkind() : lkind();
     const kernels::SmallMTuning* t =
-        kind == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, S, 1) : nullptr;
+        kind == kernels::LinearKind::SmallM || layout == 3 ? kernels::small_m_tuning(K, N, S, layout) : nullptr;
     require(kind == kernels::LinearKind::Gemv || t, "no gemm_sm row for the int4 linear " + std::to_string(K) +
                                                        " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
     l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))

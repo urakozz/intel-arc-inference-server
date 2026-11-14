@@ -286,6 +286,45 @@ inline bool run_start(__global const uint* rows, uint m) {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// NORMS_BATCHED (spec 19 v3d Task 3): the SPEC_SLOTS builds at M >= 2
+// ---------------------------------------------------------------------------
+// The rows' l2norms do not depend on the state, so these builds take every row's two trees before the recurrence:
+// the same terms, the same pairwise tree and the same rounding as a row's own (each row keeps its own SLM row), with
+// one set of barriers for all rows instead of one a row. The recurrence then double-buffers kv_red / o_red by row
+// parity, so the barrier that guarded their reuse goes: a row writes the buffer row m - 2 used, and every work-item
+// has passed row m - 1's barriers - after its last read of row m - 2's - before that write. Arithmetic, and so every
+// row's state, gdn_o and ring, is bitwise the per-row form's (gdn_step_slots_test). Every other build (M = 1, the
+// plain and BATCH_ROWS builds) preprocesses to the tokens it always had: QF / KF / KVR / OR expand to the old names.
+#if defined(SPEC_SLOTS) && M > 1
+#define NORMS_BATCHED 1
+#define QF(i) rq[m][i]
+#define KF(i) rk[m][i]
+#define KVR kv_red[m & 1]
+#define OR o_red[m & 1]
+// The band tree of one column pair (header, "The reduction trees"), read from SLM into registers: the same pairwise
+// adds in the same order, without a barrier between the steps.
+inline void band_sum(__local float (*r)[CHUNK_V], uint lane, float* x0, float* x1) {
+  float a[SG], b[SG];
+  for (uint s = 0; s < SG; ++s) {
+    a[s] = r[s][lane];
+    b[s] = r[s][lane + SG];
+  }
+  for (uint stride = SG / 2; stride > 0; stride >>= 1)
+    for (uint s = 0; s < stride; ++s) {
+      a[s] += a[s + stride];
+      b[s] += b[s + stride];
+    }
+  *x0 = a[0];
+  *x1 = b[0];
+}
+#else
+#define QF(i) qf_s[i]
+#define KF(i) kf_s[i]
+#define KVR kv_red
+#define OR o_red
+#endif
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 // f32 -> bf16, round-to-nearest-even. Same add-and-shift as common::f32_to_bf16
@@ -327,10 +366,17 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   const uint lane = lid % SG;              // owns columns 32c+lane and 32c+lane+16
 
   __local ushort xs[3][M][DIM];            // conv+silu outputs: [0] q, [1] k, [2] v
+#ifdef NORMS_BATCHED
+  __local float rq[M][DIM], rk[M][DIM];    // every row's two l2norm sums of squares, then its qf / kf in place
+  __local float inv_qs[M], inv_ks[M];
+  __local float kv_red[2][SG][CHUNK_V];    // by row parity
+  __local float o_red[2][SG][CHUNK_V];
+#else
   __local float rq[DIM], rk[DIM];          // the two l2norm sums of squares
   __local float qf_s[DIM], kf_s[DIM];      // normalised q (scaled) and k, fp32
   __local float kv_red[SG][CHUNK_V];       // kv band partials: [band][column − 32c]
   __local float o_red[SG][CHUNK_V];        // o  band partials
+#endif
 
 #ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
@@ -436,6 +482,43 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   const float negA = gdn_small[NEGA_OFF + h];      // the loader's -exp(A_log), fp32
   const float dt_bias = gdn_small[DTBIAS_OFF + h];
 
+#ifdef NORMS_BATCHED
+  // 3a. Every row's l2norm (header, NORMS_BATCHED): section 3's terms, tree and rounding, row by row in SLM.
+  for (uint m = 0; m < n_act; ++m) {
+    if (lid < DIM) {
+      const float t = bf16f(xs[0][m][lid]);
+      rq[m][lid] = t * t;
+    } else {
+      const float t = bf16f(xs[1][m][lid - DIM]);
+      rk[m][lid - DIM] = t * t;
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  // A step's 2 x n_act x stride sums are spread over the work-group (one each from stride 16 down), so the rows'
+  // trees run side by side rather than one after another in a work-item.
+  for (uint stride = DIM / 2; stride > 0; stride >>= 1) {
+    const uint per = n_act * stride;
+    for (uint w = lid; w < 2 * per; w += WG_GDN) {
+      const uint r = w < per ? w : w - per, m = r / stride, i = r % stride;
+      if (w < per) rq[m][i] += rq[m][i + stride];
+      else rk[m][i] += rk[m][i + stride];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (lid < n_act) {
+    inv_qs[lid] = 1.0f / sqrt(rq[lid][0] + 1e-6f);   // never rsqrt
+    inv_ks[lid] = 1.0f / sqrt(rk[lid][0] + 1e-6f);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint m = 0; m < n_act; ++m) {
+    if (lid < DIM)
+      rq[m][lid] = bf16f(rne_bf16(bf16f(xs[0][m][lid]) * inv_qs[m])) * Q_SCALE;
+    else
+      rk[m][lid - DIM] = bf16f(rne_bf16(bf16f(xs[1][m][lid - DIM]) * inv_ks[m]));
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+
   // -------------------------------------------------------------------------
   // 3. One token at a time: head scalars, l2norm, the recurrence.
   // -------------------------------------------------------------------------
@@ -457,6 +540,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     const float beta = 1.0f / (1.0f + exp(-bf16f(b_b)));
     const float decay = exp(g);
 
+#ifndef NORMS_BATCHED
     // l2norm over the 128-wide q and k: one term per lane, then 128 -> 1.
     if (lid < DIM) {
       const float t = bf16f(xs[0][m][lid]);
@@ -478,6 +562,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     else
       kf_s[lid - DIM] = bf16f(rne_bf16(bf16f(xs[1][m][lid - DIM]) * inv_k)); // ref: kf, not scaled
     barrier(CLK_LOCAL_MEM_FENCE);
+#endif
 
     // The recurrence (doc 03), pure fp32 - nothing below rounds.
     for (uint kk = 0; kk < BAND_K; ++kk) {          // S *= exp(g)
@@ -487,53 +572,68 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 
     float p0 = 0.0f, p1 = 0.0f;                     // kv[v] = Σ_k S[k][v]·kf[k]
     for (uint kk = 0; kk < BAND_K; ++kk) {          // ascending kk within the band
-      const float kfv = kf_s[sgid * BAND_K + kk];
+      const float kfv = KF(sgid * BAND_K + kk);
       p0 = fma(S[kk][0], kfv, p0);
       p1 = fma(S[kk][1], kfv, p1);
     }
-    kv_red[sgid][lane] = p0;
-    kv_red[sgid][lane + SG] = p1;
+    KVR[sgid][lane] = p0;
+    KVR[sgid][lane + SG] = p1;
     barrier(CLK_LOCAL_MEM_FENCE);
+#ifdef NORMS_BATCHED
+    float kv0, kv1;   // every work-item takes its columns' tree itself
+    band_sum(KVR, lane, &kv0, &kv1);
+#else
     for (uint stride = SG / 2; stride > 0; stride >>= 1) {
       if (sgid < stride) {
-        kv_red[sgid][lane] += kv_red[sgid + stride][lane];
-        kv_red[sgid][lane + SG] += kv_red[sgid + stride][lane + SG];
+        KVR[sgid][lane] += KVR[sgid + stride][lane];
+        KVR[sgid][lane + SG] += KVR[sgid + stride][lane + SG];
       }
       barrier(CLK_LOCAL_MEM_FENCE);
     }
-    const float kv0 = kv_red[0][lane], kv1 = kv_red[0][lane + SG];
+    const float kv0 = KVR[0][lane], kv1 = KVR[0][lane + SG];
+#endif
 
     // Δ[v] = (v − kv)·β, then the rank-1 update, both entirely local to the
     // work-item's own columns.
     const float d0 = (bf16f(xs[2][m][c * CHUNK_V + lane]) - kv0) * beta;
     const float d1 = (bf16f(xs[2][m][c * CHUNK_V + lane + SG]) - kv1) * beta;
     for (uint kk = 0; kk < BAND_K; ++kk) {          // S[k][v] += kf[k]·Δ[v]
-      const float kfv = kf_s[sgid * BAND_K + kk];
+      const float kfv = KF(sgid * BAND_K + kk);
       S[kk][0] = fma(kfv, d0, S[kk][0]);
       S[kk][1] = fma(kfv, d1, S[kk][1]);
     }
 
     float r0 = 0.0f, r1 = 0.0f;                     // o[v] = Σ_k qf[k]·S[k][v]
     for (uint kk = 0; kk < BAND_K; ++kk) {
-      const float qfv = qf_s[sgid * BAND_K + kk];
+      const float qfv = QF(sgid * BAND_K + kk);
       r0 = fma(qfv, S[kk][0], r0);
       r1 = fma(qfv, S[kk][1], r1);
     }
-    o_red[sgid][lane] = r0;
-    o_red[sgid][lane + SG] = r1;
+    OR[sgid][lane] = r0;
+    OR[sgid][lane + SG] = r1;
     barrier(CLK_LOCAL_MEM_FENCE);
+#ifdef NORMS_BATCHED
+    if (sgid == 0) {   // subgroup 0 takes the tree and writes the work-group's 32 columns, fp32
+      float o0, o1;
+      band_sum(OR, lane, &o0, &o1);
+      __global float* restrict op = gdn_o + ((size_t)m * HEADS + h) * DIM + c * CHUNK_V;
+      op[lane] = o0;
+      op[lane + SG] = o1;
+    }
+#else
     for (uint stride = SG / 2; stride > 0; stride >>= 1) {
       if (sgid < stride) {
-        o_red[sgid][lane] += o_red[sgid + stride][lane];
-        o_red[sgid][lane + SG] += o_red[sgid + stride][lane + SG];
+        OR[sgid][lane] += OR[sgid + stride][lane];
+        OR[sgid][lane + SG] += OR[sgid + stride][lane + SG];
       }
       barrier(CLK_LOCAL_MEM_FENCE);
     }
     if (sgid == 0) {   // 16 lanes x 2 = the work-group's 32 columns, fp32
       __global float* restrict op = gdn_o + ((size_t)m * HEADS + h) * DIM + c * CHUNK_V;
-      op[lane] = o_red[0][lane];
-      op[lane + SG] = o_red[0][lane + SG];
+      op[lane] = OR[0][lane];
+      op[lane + SG] = OR[0][lane + SG];
     }
+#endif
 #ifdef SPEC_SLOTS
     {   // the state after row m, into its slot (header, SPEC_SLOTS)
       __global float* restrict dst = slot_base(state, state_spec, (live + m) % N_SLOTS);
@@ -552,7 +652,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
       }
     }
 #endif
+#ifndef NORMS_BATCHED
     barrier(CLK_LOCAL_MEM_FENCE);   // the next token reuses rq/rk/kv_red/o_red
+#endif
   }
 
   // -------------------------------------------------------------------------

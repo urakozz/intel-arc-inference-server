@@ -55,6 +55,10 @@ struct DFlashHostLinear {
 // Spec 19v2 C3: an int4 candidate copy of the loaded int8 head. Quantise its effective fp32 weights directly;
 // the original int8 rows remain the exact rerank source. K%64=0, N%16=0, as for every target head.
 DFlashHostLinear dflash_candidate_head(const int8_t* tiled, const float* row_scales, uint32_t K, uint32_t N);
+// Spec 19 v3d Task 7: the same head as 2-bit codes - per column and 64-k group, scale = amax / 1.5 (f16), code c =
+// round(v / scale + 1.5) clamped to 0..3, value (c - 1.5) x scale - in gemm_sm.cl's LAYOUT 3 tiles (72 u32 a
+// 16-column tile and group: 16 lanes x 4 words, word d = k 16 d .. 16 d + 15 two bits each, then 16 f16 scales).
+DFlashHostLinear dflash_candidate_head2(const int8_t* tiled, const float* row_scales, uint32_t K, uint32_t N);
 
 enum class DFlashLinear { Qkv, O, GateUp, Down, AttnKproj, MlpKproj };
 

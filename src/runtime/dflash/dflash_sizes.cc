@@ -67,8 +67,8 @@ DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t h
     s.hid *= kd::int4_slices(d.hidden, d.sel_rank);
   }
   if (candidate_head) {
-    s.tpart *= 4;   // top64 rather than top16
-    s.candidate = R * 64 * 4;
+    s.tpart *= 5;   // up to top80 rather than top16 (spec 19 v3d: 80 candidates for the 2-bit head)
+    s.candidate = R * 80 * 4;
   }
   return s;
 }
@@ -77,7 +77,8 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
                          loader::DraftFormat f, bool candidate_head) {
   DrafterPlan p;
   p.weights = loader::dflash_weight_bytes(d, target_hidden, f).total();
-  if (candidate_head) p.weights += loader::dflash_linear_bytes(target_hidden, head_rows, loader::DraftFormat::Int4G64);
+  // the 2-bit candidate head (spec 19 v3d): 72 u32 a 16-column tile and 64-row group
+  if (candidate_head) p.weights += size_t(head_rows / 16) * (target_hidden / 64) * 72 * 4;
   // Linear in max_len: the difference between two lengths is the per-position term.
   const size_t a = sizes(d, target_hidden, head_rows, 4096, f, candidate_head).total();
   const size_t b = sizes(d, target_hidden, head_rows, 8192, f, candidate_head).total();

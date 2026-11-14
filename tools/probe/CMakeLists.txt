@@ -836,7 +836,8 @@ list(APPEND PSM_TARGETS kernel_psm_ctl_gemv_M16_K5120_N16384_S1_L1 kernel_psm_ct
 # N2 / N3. Probe-only names: nothing binds one unless kernels::kSmallMTuning adopts it (src/kernels builds it then).
 set(GEMM_SM_TARGETS "")
 set(GEMM_SM_LEVERS "5120 16384 1 1" "5120 16384 1 1 MG G256" "6144 5120 4 0 B2D" "5120 14336 2 0 B2D" "5120 34816 8 0"
-                   "5120 34816 8 0 MG" "17408 5120 4 0 B2D" "5120 248320 1 2")
+                   "5120 34816 8 0 MG" "17408 5120 4 0 B2D" "5120 248320 1 2"
+                   "6144 5120 4 0 MG G256 B2D" "6144 5120 4 0 MG" "5120 34816 1 0 WG MG G256" "5120 34816 1 0 WG MG")
 set(_psm_lever_m 2 3 4 5 6 7 8 16)
 gemm_sm_rows(GEMM_SM_LEVERS _psm_lever_m)
 list(APPEND PSM_TARGETS ${GEMM_SM_TARGETS})
@@ -1279,3 +1280,13 @@ target_include_directories(probe_qwen_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_qwen_pf_gemm PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
 b70_target_kernel_dir(probe_qwen_pf_gemm)
 add_dependencies(probe_qwen_pf_gemm ${PCR_PF_KERNELS} ${_qpg_targets})
+# --- probe_gdn_slots: spec 19 v3d Task 3 Step 1, the GDN step's excess at 8 rows split into the row chain and the
+# per-row snapshots. probe_gdn_plain_M8 is the shipped gdn_step.cl without SPEC_SLOTS at M = 8 (gdn_step's
+# Qwen3.8 defines, src/kernels/CMakeLists.txt): no runtime path binds it.
+add_ocloc_kernel(probe_gdn_plain_M8 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gdn_step.cl
+                 DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 NEGA_OFF=40960 DTBIAS_OFF=41008 M=8)
+add_executable(probe_gdn_slots probe_gdn_slots.cc)
+target_include_directories(probe_gdn_slots PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_gdn_slots PRIVATE b70_l0)
+b70_target_kernel_dir(probe_gdn_slots)
+add_dependencies(probe_gdn_slots kernel_probe_gdn_plain_M8 kernel_gdn_step_slots_M1_N8 kernel_gdn_step_slots_M8_N8)

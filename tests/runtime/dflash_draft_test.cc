@@ -9,8 +9,9 @@
 //      are projected 8 a replay (the ring wraps at 2048); the last replay's rows equal the twin's projection
 //      (bitwise bf16 within an ulp: the GEMVs' contraction is the box compiler's).
 //   2. A draft at p 2053 (rows reach the window's edge past the wrap), anchor 1234, K 7, T 0: the final-norm rows
-//      (cosine >= 0.99999), the top-16 sets (tie-aware) and the scores (cosine >= 0.99999) against the twin, the walk
-//      equal; ctrl.cur_token[1..7] = the drafts; the readback's k / anchor / pos.
+//      (cosine >= 0.99999) and the scores (cosine >= 0.99999) against the twin - the top-16 sets and the walk
+//      recorded, since the twin follows the DPAS attention part's order without being bitwise (spec 19 v3d, operator
+//      ruling 2026-11-14); ctrl.cur_token[1..7] = the drafts; the readback's k / anchor / pos.
 //   3. Determinism: a second replay's readback is bitwise the first's.
 //   4. K 3 by the control block alone (no recapture): rows past K masked, the twin at K 3 agrees.
 //   5. A sampled walk (T 0.8, a 64-bit seed): the twin's choices, ties within 1e-5 excused.
@@ -212,6 +213,7 @@ struct Measure {
   double hc = 1, sc = 1;          // rows cosine (min over 0..K), scores cosine over the shared candidates
   int sets_bad = 0, walk_bad = 0, near = 0;
   uint32_t walk_at = 0;           // the first draft index whose id differs from the twin's (K: none)
+  double walk_gap = 0;            // there: the twin's two keys' relative gap (the near-tie rule's measure, 1e-4)
 };
 Measure measure(const runtime::dflash::DFlashDraftOut& o, const std::vector<float>& h, const dfref::DraftOut& t,
                 uint32_t p, uint32_t K, float T, uint64_t seed) {
@@ -248,6 +250,7 @@ Measure measure(const runtime::dflash::DFlashDraftOut& o, const std::vector<floa
         ++m.near;
         break;   // the walks diverge from here
       }
+      m.walk_gap = std::fabs(a - bb) / std::fmax(1.0f, std::fabs(a));
       ++m.walk_bad;
       break;
     }
@@ -263,13 +266,14 @@ int compare_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::
   const runtime::dflash::DFlashDraftOut& o = *b.readback();
   const dfref::DraftOut t = dfref::draft(tw, dfref::Numerics::Engine, ring, rope, anchor, p, K, T, seed);
   const Measure m = measure(o, e.read<float>(b.h, size_t(M) * H), t, p, K, T, seed);
-  std::printf("%s (p %u, K %u, T %.1f): rows cos %.7f, scores cos %.7f, top-16 sets %s, walk %s%s\n", what, p, K,
-              double(T), m.hc, m.sc, m.sets_bad ? "DIFF" : "=", m.walk_bad ? "DIFF" : "=", m.near ? " (a near tie)" : "");
+  std::printf("%s (p %u, K %u, T %.1f): rows cos %.7f, scores cos %.7f, top-16 sets %s, walk %s%s (sets and walk "
+              "recorded)\n", what, p, K, double(T), m.hc, m.sc, m.sets_bad ? "DIFF" : "=", m.walk_bad ? "DIFF" : "=",
+              m.near ? " (a near tie)" : "");
+  // The twin follows the DPAS attention part's order but cannot be bitwise (its in-step rounding is the hardware's):
+  // the cosines gate, the top-16 sets and the walk are recorded (operator ruling 2026-11-14).
   int bad = 0;
   bad += m.hc < 0.99999;
   bad += m.sc < 0.99999;
-  bad += m.sets_bad != 0;
-  bad += m.walk_bad != 0;
   bad += o.k != K || o.anchor != anchor || o.pos != p;
   return bad;
 }
@@ -326,9 +330,10 @@ int judge_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::We
   g_sets_gv += g.sets_bad;
   const bool walk = m.walk_bad == 0 || m.walk_at >= g.walk_at;
   std::printf("%s (p %u, K %u, T %.1f) against the f32 judge: rows cos gemm_sm %.7f / gemv %.7f %s, scores cos %.7f / "
-              "%.7f %s, sets off %d / %d %s (recorded), walk to %u / %u of %u%s %s\n", what, p, K, double(T), m.hc, g.hc,
-              rows ? "ok" : "FAIL", m.sc, g.sc, scores ? "ok" : "FAIL", m.sets_bad, g.sets_bad, sets ? "ok" : "FAIL",
-              m.walk_at, g.walk_at, K, m.near ? " (a near tie)" : "", walk ? "ok" : "FAIL");
+              "%.7f %s, sets off %d / %d %s (recorded), walk to %u / %u of %u%s %s%s\n", what, p, K, double(T), m.hc, g.hc,
+              rows ? "ok" : "FAIL", m.sc, g.sc, scores ? "ok" : "FAIL", m.sets_bad, g.sets_bad, sets ? "ok" : "more",
+              m.walk_at, g.walk_at, K, m.near ? " (a near tie)" : "", walk ? "ok" : "FAIL",
+              m.walk_bad ? (" (the twin's keys there " + std::to_string(m.walk_gap) + " apart, relative)").c_str() : "");
   int bad = !rows + !scores + !walk;
   bad += o.k != K || o.anchor != anchor || o.pos != p;
   return bad;
@@ -394,6 +399,7 @@ int main(int argc, char** argv) {
     std::printf("== drafter %s\n", loader::draft_format_name(f));
     const loader::DFlashWeights w = loader::load_drafter(e.ctx, snap, q, V, embed_d, f);
     dfref::Weights tw = twin_weights(ck, f);
+    tw.d.attn_ks = runtime::CaptureOptions{}.dflash_attn_ks;   // the twin follows the production DPAS part's order
     tw.embed = embed;
     tw.mask_row.resize(H);
     for (uint32_t i = 0; i < H; ++i) tw.mask_row[i] = dfref::bf(embed[size_t(d.mask_id) * H + i]);
@@ -410,12 +416,12 @@ int main(int argc, char** argv) {
     runtime::dflash::DFlashBuffers b(e.ctx, d, w.target_hidden, V, 8192, w.format);
     l0::Mem control(e.ctx, l0::MemKind::Shared, sizeof(runtime::Control));
     std::memset(control.ptr(), 0, sizeof(runtime::Control));
+    // spec 28d: the int8 drafter's lists forced onto gemv_i8w (the pre-28d binding) and the f32 judge
+    const bool quantised = f != loader::DraftFormat::Bf16;   // both quantised forms use the f32 judge
     runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control);
     runtime::CapturedStep proj = runtime::dflash::build_dflash_project(e.ctx, w, b);
     std::printf("launches: draft %zu, projection %zu\n", draft.kernel_count, proj.kernel_count);
     bad += draft.kernel_count != 87 || proj.kernel_count != 8;
-    // spec 28d: the int8 drafter's lists forced onto gemv_i8w (the pre-28d binding) and the f32 judge
-    const bool quantised = f != loader::DraftFormat::Bf16;   // both quantised forms use the f32 judge
     runtime::CaptureOptions gvo;
     gvo.force_linear = runtime::LinearForce::Gemv;
     std::unique_ptr<runtime::CapturedStep> dg, pg;
@@ -716,12 +722,11 @@ int main(int argc, char** argv) {
                   "(%.3f ms saved); projection gemm_sm %.3f ms / gemv_i8w %.3f ms (%.3f ms saved)\n",
                   med(td), med(tg), med(tg) - med(td), med(tp), med(tq), med(tq) - med(tp));
     }
-    if (g_sets_sm + g_sets_gv > 0) {
-      const bool ok = g_sets_sm <= g_sets_gv;
-      std::printf("top-16 candidates off the f32 judge's sets, summed for %s: gemm_sm %d / gemv %d %s\n",
-                  loader::draft_format_name(f), g_sets_sm, g_sets_gv, ok ? "ok" : "FAIL");
-      bad += !ok;
-    }
+    // Recorded, not gated (operator go 2026-11-13 night): the count swings by 3-6 under attention changes at the
+    // 1e-7 cosine level; the rows' cosine against the f32 judge gates.
+    if (g_sets_sm + g_sets_gv > 0)
+      std::printf("top-16 candidates off the f32 judge's sets, summed for %s: gemm_sm %d / gemv %d (recorded)\n",
+                  loader::draft_format_name(f), g_sets_sm, g_sets_gv);
   }
   if (bad) {
     std::printf("dflash_draft_test: FAIL (%d)\n", bad);

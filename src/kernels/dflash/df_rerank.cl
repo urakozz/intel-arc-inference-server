@@ -1,7 +1,10 @@
-// Spec 19v2 C3: gather 64 original int8 head rows and rerank their exact dots to the selector's top16.
+// Spec 19v2 C3: gather the C (64, or 80 for spec 19 v3d's 2-bit head) original int8 head rows and rerank their exact
+// dots to the selector's top16.
 // Four contiguous K slices per candidate, merged ascending. The original head stays shared with verify.
 #pragma OPENCL FP_CONTRACT OFF
-#define C 64
+#ifndef C
+#define C 64   /* the candidates a row (spec 19 v3d Task 7: 80 for the 2-bit head) */
+#endif
 #define Q 4
 #define WG (C * Q)
 #define NO_IDX 0x7FFFFFFFu

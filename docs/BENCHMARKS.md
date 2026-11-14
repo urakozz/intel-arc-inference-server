@@ -1329,6 +1329,144 @@ new kernel commands are additive, existing commands unchanged. Full G0 binary co
 Evidence: `~/b70/logs/dflash-int8-v3a/{quick,quick-final}.log` (kernel check rc0); validation regression logs
 are in the branch's local plan workspace.
 
+### Round cost (spec 19 v3d)
+
+**Task 1, verify at 1 / 2 / 4 / 8 rows by kernel family** (2026-11-13, branch `spec19v3d-dflash-round-cost`,
+`probe_dflash_iter --verify-profile`, card 0, bf16 KV, int8 drafter, candidate head). **Busy box:** card 0 idle,
+card 1 ran the drafter quant and CPU reference jobs ran. Per-launch timestamps (instrumented), the four widths
+captured in turn inside each round after a warm-up; medians of three rounds of 16 calls. The families' excess sums to
+the instrumented wall excess (7.170 / 7.171 ms) and is within 2.5 % of the uninstrumented interleaved pair's 7.354 ms,
+so the attribution is trusted.
+
+| family | 1 row | 2 rows | 4 rows | 8 rows | excess 8 - 1 | at 32768: 1 / 8 rows, excess | lever candidate (>= 0.5 ms) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| GDN step (`gdn_step_slots`) | 0.734 | 1.045 | 1.679 | 3.091 | **2.356** | 0.746 / 3.142, 2.397 | **yes: Task 3** |
+| gate\|\|up | 11.088 | 11.438 | 11.849 | 12.454 | **1.366** | 11.126 / 12.380, 1.255 | **yes: Task 4** |
+| out_proj (GDN) | 1.615 | 1.777 | 2.159 | 2.814 | **1.199** | 1.597 / 2.785, 1.188 | **yes: Task 4** |
+| attention (v2 at 1 row, `attn_verify_dpas` at 2+) | 0.706 | 1.156 | 1.479 | 1.779 | **1.073** | 4.578 / 7.159, 2.581 | by size yes; no Task 2-4 lever (see below) |
+| a\|\|b (`gemv_bf16`) | 0.237 | 0.351 | 0.413 | 0.698 | 0.461 | 0.239 / 0.701, 0.462 | no (under the bar) |
+| o_proj (FA) | 0.519 | 0.524 | 0.550 | 0.715 | 0.196 | 0.517 / 0.619, 0.101 | no |
+| qkv\|\|z | 3.842 | 3.931 | 3.997 | 4.021 | 0.180 | 3.843 / 4.025, 0.182 | no |
+| down | 5.423 | 5.358 | 5.419 | 5.532 | 0.109 | 5.428 / 5.543, 0.115 | no |
+| residual fold | 0.241 | 0.275 | 0.334 | 0.324 | 0.083 | 0.249 / 0.330, 0.081 | no (Task 2) |
+| attention reduce | 0.076 | 0.083 | 0.112 | 0.133 | 0.057 | 0.122 / 0.227, 0.105 | no |
+| gated head | 0.086 | 0.092 | 0.100 | 0.121 | 0.034 | 0.088 / 0.118, 0.030 | no (Task 2) |
+| q\|\|k\|\|v | 1.097 | 1.098 | 1.113 | 1.132 | 0.034 | 1.095 / 1.134, 0.040 | no |
+| argmax | 0.007 | 0.010 | 0.018 | 0.034 | 0.027 | 0.007 / 0.034, 0.027 | no |
+| gaps after the tap copies | 0.012 | 0.017 | 0.024 | 0.040 | 0.027 | 0.012 / 0.040, 0.028 | no (Task 2) |
+| norm | 0.204 | 0.207 | 0.222 | 0.230 | 0.026 | 0.211 / 0.234, 0.023 | no (Task 2) |
+| other gaps between launches | 0.801 | 0.812 | 0.824 | 0.823 | 0.021 | 0.810 / 0.828, 0.018 | no |
+| attention prepare | 0.052 | 0.053 | 0.053 | 0.059 | 0.007 | 0.052 / 0.059, 0.007 | no |
+| embedding | 0.009 | 0.009 | 0.009 | 0.009 | 0.000 | 0.009 / 0.009, 0.000 | no |
+| head (int8, `gemv_i8w` / `gemm_sm_i8w`) | 2.211 | 2.149 | 2.161 | 2.199 | -0.011 | 2.208 / 2.199, -0.010 | no |
+| SiLU (the S1 build at 2+) | 0.692 | 0.633 | 0.634 | 0.629 | -0.063 | 0.704 / 0.638, -0.066 | no (Task 2) |
+| **sum (device + gaps)** | 29.661 | 31.015 | 33.155 | 36.832 | **7.171** | 33.658 / 42.200, 8.543 | |
+| wall, instrumented | 29.784 | 31.103 | 33.261 | 36.955 | 7.170 | 33.981 / 42.512, 8.530 | |
+| **wall, uninstrumented pair against 1 row** | 29.259 | 30.624 (1.048) | 32.816 (1.123) | 36.617 (**1.251**) | **7.354** | 33.605 / 42.461 (1.264), 8.856 | |
+
+**Stop / continue: continue.** Four families clear 0.5 ms and make 6.0 of the 7.2 ms: the GDN step (2.36, Task 3),
+gate\|\|up (1.37) and out_proj (1.20) at `gemm_sm` (Task 4), and the attention (1.07; 2.58 at 32768). **The glue is not
+where the excess is:** fold, norm, SiLU, gated head and the tap copies together are +0.13 ms at 8 rows, under Task 2's
+0.3 ms bar for any one of them, so Task 2 has no candidate. The head and argmax at 8 rows cost what they cost at 1 (no
+Task 4 head lever). The attention's excess is 1-row v2 against 8-row DPAS over the same keys; it is no Task 2-4
+lever and stays with the attention work (int8 KV, plan 19v3a). The instrumented 1-row list is 0.53 ms slower than
+the uninstrumented one (the per-launch signals); the excess is not.
+
+**Task 3, the GDN step at 8 rows** (same day, card 0, busy box). `probe_gdn_slots` (48 launches of one layer's step
+over a 48-layer state, standalone, medians of 7 interleaved rounds) splits the step's excess: the row chain (the
+same source without per-row slots at M = 8, against the 1-row slots build) **1.78 ms**, the 7 extra snapshot writes
+(8 x 151 MB a verify) **1.35 ms**. The chain was barrier-bound: 20 work-group barriers a row (the two l2norm trees
+and the kv / o band trees). The kept lever: the slots builds at M >= 2 take every row's l2norm before the recurrence
+(one set of trees for all rows, spread over the work-group) and each band tree in registers (2 barriers a row), the
+kv / o buffers double-buffered by row parity. Bitwise the per-row form (`gdn_step_slots_test`, 4 and 8 slots, 92
+rows); only the 19 SPEC_SLOTS M >= 2 binaries change, every other binary is byte-identical. **Verify at 8 rows
+36.59 -> 35.88 ms (1.250 -> 1.225 plain steps, -0.70 ms)**, four interleaved process pairs against the pre-lever
+build (uninstrumented, each a median of 3 rounds of 16 calls). The snapshot stores in other forms, standalone
+against the kept lever: block writes -0.02 ms, LSC L1UC_L3WB -0.02, L1S_L3WB -0.08, the uncached forms +8.7 to
++15 ms - none kept. **MTP's lists bind the same builds:** `mtp_verify_test` and `slots_test` pass, `mtp_gpu_test`
+fails the same 2 near-tie prompts as main's kernels (all 60 f32-judge verdicts identical); MTP verify at 4 rows
+(`probe_mtp_steps`, int8 head, depth 4096, four process pairs) **33.83 -> 33.34 ms (1.112 -> 1.100 x verify at 1
+row)**, at 2 rows 31.66 -> 31.42 ms.
+
+**Task 4, the linears at 8 rows.** Re-profiled after Task 3: the GDN step at 8 rows 3.09 -> 2.44 ms; verify at 8
+rows 1.227 plain steps (uninstrumented pair). `probe_small_m prod` (standalone, medians of 7 interleaved rounds):
+out_proj's `gemm_sm` at 8 rows is 30.7 us against `gemv`'s 30.5 at 1 row - no excess of the kernel's own, so its
+in-list +1.19 ms is not a tuning row's to remove (256 GRF 1.32x, without the 2D read 1.01x); gate\|\|up's
+production at 8 rows 178.0 us against 171 at 1 row, with the 2D block read 0.975x production at 2 / 4 / 8 rows,
+256 GRF 1.10x. **The 2D read on gate\|\|up in list** (four process pairs against the post-Task-3 build, depth 4096):
+verify at 8 rows 35.89 -> 35.71 ms (**-0.18 ms**, 1.2255 -> 1.2185), at 4 rows 32.49 -> 32.32 ms (-0.17) - under the
+0.3 ms bar - removed, then **kept** by the operator's ruling (2026-11-13: a bitwise lever stays when it is
+measurably faster): `gemm_sm_test` holds it bitwise its plain-read twin at every M. Task 4 keeps this one lever;
+the head and argmax have no excess at 8 rows.
+
+**Task 5, the verify half's record** (same day, branch head after Task 4, card 0, busy box: card 1 ran the drafter
+quant, CPU reference jobs ran; uninstrumented interleaved pairs, medians of 3 rounds of 16 calls; `box_validate
+--quick` not run - operator ruling). `probe_dflash_iter` (int8 drafter, candidate head), / paired plain step:
+
+| arm | depth 4096, ms | / plain | depth 32768, ms | / plain |
+|---|---:|---:|---:|---:|
+| verify at 2 rows | 30.58 | 1.047 | 33.71 | 1.012 |
+| verify at 4 rows | 32.52 | 1.112 | 36.49 | 1.095 |
+| verify at 8 rows | 35.96 | **1.229** (was 1.245) | 41.83 | **1.254** (was 1.272) |
+| draft, K = 7 | 7.72 | 0.265 | 7.87 | 0.237 |
+| projection | 0.50 | 0.017 | 0.49 | 0.015 |
+| one round (iteration7) | 44.19 | **1.508** (was 1.559) | 50.09 | 1.500 |
+
+`probe_mtp_steps` (int8 head, 4096): verify at 2 / 3 / 4 rows 1.039 / 1.073 / 1.100, drafts 0.134 / 0.266 / 0.400 a
+step. `probe_slots_speed` (4 x 32768 slots, 4096): 4 plain rows a step 1.199 x the lone plain step, 4 K = 1 rows
+(8 rows) 1.674 with 144.6 t/s aggregate. `MtpCost::dflash`'s candidate-head verify rows and `MtpCost::int8_head`'s
+verify rows (1.04 / 1.07 / 1.10; the K boundaries move from 0.477 / 0.620 to 0.445 / 0.607) are refreshed from these.
+**Gate missed:** verify at 8 rows 1.229, not <= 1.10. What is left of the excess at 8 rows (re-profile, instrumented,
+6.53 ms): the GDN step 1.70 (of it the per-row snapshot writes), gate\|\|up 1.38, out_proj 1.19 (in list only - the
+kernel has none standalone), attention 1.09, a\|\|b 0.47, o_proj 0.19, qkv\|\|z 0.18, down 0.10, the glue 0.13.
+
+**Task 6, the drafter's attention on DPAS** (`df_attn_dpas.cl`: the part kernel on the matrix unit, q and p as three
+bf16 terms; the reduce unchanged; card 0, busy box, four process pairs against the scalar part, depth 4096): the
+5 attention parts 2.14 -> 1.54 ms, the draft pass 7.77 -> 7.25 ms (0.267 -> 0.249 plain steps), a round 44.16 ->
+43.47 ms (1.508 -> 1.486). **The 0.9 ms gate is missed** (a saving of 0.60, bar 1.2). Acceptance on the v2
+baseline's anchors: 34 of 35 corpus / K rows within 0.002, cjk K = 3 1.6875 against 1.6250 (one of 16 anchors
+accepting one more draft). The identity round: 37 of 39 requests bitwise the plain stream, 0 judged FAIL, 2 awaiting
+f32 references. `dflash_draft_test`'s count of top-16 candidates off the f32 judge (gemm_sm / gemv): scalar int8
+4 / 8, int4 5 / 6; two-term DPAS 9 / 5, 6 / 5; three-term 5 / 5, 4 / 2 - deterministic per build, swinging 3-6 under
+attention changes at the 1e-7 cosine level. **Operator go 2026-11-13 night:** the form stays the default (the gate
+missed), the acceptance comparison is one-sided (cjk K = 3 passes), the off-set count is recorded only, occupancy
+before the int8 ring.
+
+**Task 6, occupancy** (`df_attn_dpas.cl`'s KS: a head's 128-key block split KS ways; the twin test at every KS, worst
+cosine 0.99999998). The five parts profiled over three rotated rounds: KS 1 1.548, KS 2 1.444, **KS 4 0.497 ms**.
+KS 4 as production (four process pairs against KS 1): the draft pass 7.00 -> 5.97 ms (0.240 -> 0.205 plain steps), a
+round 43.12 -> 42.10 ms (1.474 -> 1.440); the tests and the identity round pass (37 / 39 bitwise, 2 pass the f32
+judge). But acceptance: code K = 7 -0.125 and opencode K = 3 -0.1875 - one anchor each (2 -> 0, 3 -> 0 accepted) of
+the 16; 4 of the 4256 drafts differ from KS 1's, and the pooled accepted drafts are baseline 14620, KS 1 14622, KS 4
+14615. **KS 1 stays the default** until the operator rules on judging the 16-anchor corpora pooled; KS 4 is
+`CaptureOptions::dflash_attn_ks` / `probe_dflash_iter --attn-ks 4`.
+
+**Task 7 Step 2, the 2-bit candidate head** (gemm_sm's LAYOUT 3: RTN per column and 64-k group, (c - 1.5) x an f16
+scale, made at load; 0.358 GB against the int4 head's 0.675): the candidate GEMM 1.20 -> **0.80 ms** (bar 0.7,
+missed), the draft pass 6.99 -> 6.61 ms, a round 1.475 -> 1.464 plain steps; acceptance 33 of 35 rows, cjk K = 5 and
+K = 6 -0.0625 each (one anchor) - **int4 stays the default** (`load_drafter`'s candidate_bits 2 /
+`--candidate-2bit` reach the 2-bit form). With **80 candidates re-ranked** (`--candidates-80`): all 35 rows pass
+(worst a4 K = 6 -0.0055), the draft pass 0.2405 -> 0.2303 and a round 1.4746 -> 1.4658 plain steps against the int4
+head at 64 in the same session.
+
+**The final form (operator rulings 2026-11-14: KS 4, the 2-bit head with 80 candidates, acceptance pooled and per
+corpus; card 0, busy box, one round of the record).** Acceptance on the v2 anchors: pooled -0.00235 (4256 anchors),
+per corpus a4 -0.0011, cjk -0.0089, code -0.0179, opencode -0.0268, prose 0 - pass. `probe_dflash_iter`:
+
+| arm | depth 4096 | / plain | depth 32768 | / plain |
+|---|---:|---:|---:|---:|
+| draft, K = 7 | 6.46 ms | 0.217 (was 0.287) | 5.86 ms | 0.177 |
+| verify at 8 rows | 35.92 ms | 1.221 (was 1.245) | 41.70 ms | 1.249 |
+| one round (iteration7) | 41.88 ms | **1.429** (was 1.559) | 48.47 ms | **1.448** |
+
+`MtpCost::dflash`'s candidate-head rows and draft cost are refreshed from this round. Task 9's record runs (the serving
+bench, the replay) need a quiet box.
+
+**Task 7 Step 1, the candidate selection** (same conditions, against the Task 6 build): stage 1 by a radix select
+(`df_candidate_select1`, the same 64 of each chunk; the candidates bitwise the serial picks', a 300-way tie
+included) - stage 1 0.369 -> 0.111 ms, the selection 0.444 -> **0.187 ms** (bar 0.2, a saving of 0.26), the draft
+pass 7.25 -> 6.99 ms (0.249 -> 0.240 plain steps). Kept.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,
