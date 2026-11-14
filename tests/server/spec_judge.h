@@ -100,6 +100,9 @@ inline constexpr const char* kInt8PrefillKvReason =
     "known fail of l0-int8 prefill with int8 KV, accepted 2026-11-10 (docs/probes/a4-int8-prefill-int8-kv-2026-11-10.md)";
 inline constexpr const char* kInt8KvNoiseReason =
     "int8 KV cache noise under the operator's rule 2026-11-13: plain rejected too or verify-vs-plain <= 8 ulp";
+inline constexpr const char* kTpVerifyNarrowReason =
+    "TP verify rows on a bf16-narrow row, the small-M GEMM's rounding, no defect; operator 2026-11-14 (item 24, "
+    "docs/probes/probe-tp-verify-m24-2026-11-14.md)";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
 inline constexpr double kReviewedGapUlp = 0.01;
 // The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
@@ -137,6 +140,11 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     // mtp_gpu_kv8_test t1_define-rotation K 1-3: first difference a 0.46 ulp near-tie, plain not rejected
     // (row 195 passes by the bf16-unstable rule; row 199 is the rejected one)
     {"mtp_gpu_bf16_t1_define-rotation_7d7630d760d6d025", 199, 248068, 846, 21.26, "2026-11-13", kInt8KvNoiseReason},
+    // tp_mtp_test / tp_dflash_test long, output 62: the TP verify rows (M = 2..4) pick 271 where f32 leads with 198
+    // by 2.87 logits; identical to plain TP through layer 20, rounding-size drift after, no closer one-card verify
+    {"tp_mtp_m2_long_44f7f924c8179828", 0, 198, 271, 22.96, "2026-11-14", kTpVerifyNarrowReason},
+    {"tp_dflash_long_k1_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
+    {"tp_dflash_long_k3_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
 // tags streams() saw - an entry whose tag ran and never matched is stale.
