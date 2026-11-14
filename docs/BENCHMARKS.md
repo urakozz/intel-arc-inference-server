@@ -1445,7 +1445,9 @@ the 16; 4 of the 4256 drafts differ from KS 1's, and the pooled accepted drafts 
 scale, made at load; 0.358 GB against the int4 head's 0.675): the candidate GEMM 1.20 -> **0.80 ms** (bar 0.7,
 missed), the draft pass 6.99 -> 6.61 ms, a round 1.475 -> 1.464 plain steps; acceptance 33 of 35 rows, cjk K = 5 and
 K = 6 -0.0625 each (one anchor) - **int4 stays the default** (`load_drafter`'s candidate_bits 2 /
-`--candidate-2bit` reach the 2-bit form).
+`--candidate-2bit` reach the 2-bit form). With **80 candidates re-ranked** (`--candidates-80`): all 35 rows pass
+(worst a4 K = 6 -0.0055), the draft pass 0.2405 -> 0.2303 and a round 1.4746 -> 1.4658 plain steps against the int4
+head at 64 in the same session; the operator's ruling is pending.
 
 **Task 7 Step 1, the candidate selection** (same conditions, against the Task 6 build): stage 1 by a radix select
 (`df_candidate_select1`, the same 64 of each chunk; the candidates bitwise the serial picks', a 300-way tie

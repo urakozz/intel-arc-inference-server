@@ -183,6 +183,9 @@ form), `src/loader/dflash_loader.cc` and `lm_head_int8.*` (a 2-bit copy of the h
     candidate GEMM <= 0.7 ms (a saving >= 0.4 ms); `--max-len auto` with the drafter rises by ~0.3 GB of context
     (printed).
   - Missed on acceptance at 80: keep int4, record.
+  - **As measured (2026-11-14, card 0, busy box):** GEMM 0.80 ms (gate 0.7 missed); at 64 candidates cjk K = 5 / 6
+    -0.0625 (one anchor each); at 80 all 35 rows pass, round 1.4746 -> 1.4658 plain steps. Int4 stays the default
+    pending the operator's ruling (HANDOFF decision 2).
 
 ### Task 8: the body's bytes (box) - waits for the export
 
