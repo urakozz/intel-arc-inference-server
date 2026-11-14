@@ -103,6 +103,9 @@ inline constexpr const char* kInt8KvNoiseReason =
 inline constexpr const char* kTpVerifyNarrowReason =
     "TP verify rows on a bf16-narrow row, the small-M GEMM's rounding, no defect; operator 2026-11-14 (item 24, "
     "docs/probes/probe-tp-verify-m24-2026-11-14.md)";
+inline constexpr const char* kTpPrefillNarrowReason =
+    "TP with int8 KV on long's bf16-narrow output 62 (item 24's row: 271 for the f32 top 198), rounding, no defect; "
+    "operator 2026-11-14";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
 inline constexpr double kReviewedGapUlp = 0.01;
 // The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
@@ -145,6 +148,8 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"tp_mtp_m2_long_44f7f924c8179828", 0, 198, 271, 22.96, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k1_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k3_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
+    // tp_prefill_kv8_test long: TP's plain decode after its int8-KV prefill takes the same flip at output 62
+    {"tp_prefill_kv8_long_fa12c9167b2eaa28", 62, 198, 271, 24.80, "2026-11-14", kTpPrefillNarrowReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
 // tags streams() saw - an entry whose tag ran and never matched is stale.

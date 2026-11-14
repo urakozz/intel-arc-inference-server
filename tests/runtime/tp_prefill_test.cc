@@ -49,6 +49,7 @@
 #include "runtime/engine.h"
 #include "runtime/tp_engine.h"
 #include "runtime/tp_plan.h"
+#include "spec_judge.h"
 
 namespace {
 constexpr uint32_t kMaxLen = 16384;
@@ -291,7 +292,16 @@ int main(int argc, char** argv) {
           golden::judge_explain(*judge, row, r.ids[row], model::Qwen35::kVocab, model::Qwen35::kVocabUsed, "one card's");
         std::printf("  the f32 judge at id %u: tp's %u %s, one card's %u %s\n", row, g.ids[row],
                     tp_ok ? "accepted" : "REJECTED", r.ids[row], ref_ok ? "accepted" : "rejected");
-        ok &= tp_ok;
+        // A rejected id passes as an operator-reviewed row (spec_judge.h kReviewedRows: this key, row and ids).
+        bool reviewed = false;
+        if (!tp_ok) {
+          const uint32_t V = model::Qwen35::kVocab;
+          const float* jrow = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * V) + size_t(row) * V;
+          const uint32_t top = golden::judge_row(jrow, V, model::Qwen35::kVocabUsed).top;
+          reviewed = spec_judge::match_reviewed(k, row, top, g.ids[row]) >= 0;
+          if (reviewed) std::printf("  REVIEWED row: %s row %u, f32 top %u, tp's %u\n", k.c_str(), row, top, g.ids[row]);
+        }
+        ok &= tp_ok || reviewed;
       }
     }
   }
