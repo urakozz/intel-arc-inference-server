@@ -3866,6 +3866,13 @@ add_test(NAME dflash_load_checkpoint_test COMMAND dflash_load_checkpoint_test ${
   ${B70_DFLASH_SNAPSHOT})
 set_tests_properties(dflash_load_checkpoint_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
   TIMEOUT 1800)
+# The AutoRound int4 drafter (B70_DFLASH_PACKED_SNAPSHOT): its packed linears on the card, every one unpacked bitwise
+# the CPU dequant of the shard.
+set(B70_DFLASH_PACKED_SNAPSHOT "urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound" CACHE STRING
+  "The AutoRound int4 DFlash drafter the packed checkpoint tests load")
+add_test(NAME dflash_load_packed_test COMMAND dflash_load_checkpoint_test ${B70_TEST_SNAPSHOT}
+  ${B70_DFLASH_PACKED_SNAPSHOT})
+set_tests_properties(dflash_load_packed_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 # Task 2: the host twin (tests/kernels/dflash_ref.h) against tools/oracle/dflash_ref.py's own outputs
 # (tests/loader/dflash_ref_fixture.safetensors, tools/oracle/dflash_fixture.py). Host only.
 add_executable(dflash_ref_test kernels/dflash_ref_test.cc)
@@ -3979,6 +3986,8 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_dependencies(dflash_draft_test ${B70_DFLASH_KERNELS} ${_v19b_reused})
   add_test(NAME dflash_draft_test COMMAND dflash_draft_test ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_draft_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_test(NAME dflash_draft_packed_test COMMAND dflash_draft_test ${B70_DFLASH_PACKED_SNAPSHOT})
+  set_tests_properties(dflash_draft_packed_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   add_executable(dflash_profile_test runtime/dflash_profile_test.cc)
   target_include_directories(dflash_profile_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(dflash_profile_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime)

@@ -188,7 +188,11 @@ top). Plain, unchanged code paths still gate bitwise.
 ## Qwen3.8-27B with the DFlash draft model (spec 19)
 
 `z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 7 tokens per step from Qwen3.8's own hidden states (the
-outputs of layers 5 / 19 / 33 / 47 / 61). Its acceptance on our prompts was measured on the Mac CPU
+outputs of layers 5 / 19 / 33 / 47 / 61). The engine's default is our AutoRound int4 export of it,
+`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (W4A16, group 64, symmetric; 1.21 GB, loaded as shipped onto the
+int4 small-batch GEMM - operator ruling 2026-11-14: draft pass 4.41 ms against the int8 drafter's 6.20 at 4,096,
+acceptance pooled -0.016 tokens a round, the code corpus -0.054 accepted). `--draft-model z-lab/Qwen3.8-27B-DFlash2`
+loads the bf16 original, quantised to int8 at load. Its acceptance on our prompts was measured on the Mac CPU
 (`docs/probes/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on
 code, ~2.2 on prose; int8 and 4-bit drafters equal bf16). It has run on the card since 2026-10-27
 (BENCHMARKS "DFlash"), and the verdict is an option, not the default: `--spec auto` stays the adaptive MTP,
@@ -197,10 +201,12 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
 `--spec dflash-lookup` (spec 19f) adds prompt lookup inside DFlash for edit / copy turns (one card):
 
 ```sh
-# one card: the drafter beside the target (int8 at load, 2.05 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
-./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last \
-    --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2
-# one card with int8 KV (spec 19v3a): host planner 246528 tokens at 32.530 GB, including candidate64
+# the default drafter (once): uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
+# one card: the drafter beside the target (packed int4, 1.21 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
+./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last --spec dflash
+# the bf16 original instead, quantised to int8 at load (2.05 GB)
+./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2
+# one card with int8 KV (spec 19v3a): host planner 262144 tokens at 32.530 GB with the packed drafter (254976 int8)
 ./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --max-len auto
 # two cards, pipeline parallel: the drafter on the second card beside lm_head
 ./build/src/cli/b70-serve $Q --parallel pp --spec dflash
@@ -209,12 +215,13 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
     --spec dflash --spec-max 7
 ```
 
-- **Defaults:** the drafter quantised to int8 at load (same acceptance as bf16 at half the bytes),
+- **Defaults:** the packed int4 drafter (bf16 KV: `--max-len auto` 158,208 tokens on a 32.530 GB card, 145,664 with
+  the int8 drafter),
   `--spec-max 7`, `--draft-vocab off` (a ranked 32k vocabulary was ranked in-sample; by id it loses up to
   1.4 tokens at K = 7).
 - **KV cache:** bf16 and int8 are wired for one card and `--parallel pp` (spec 19v3a). The int8 mode
-  host planner gives **246,528 tokens** on a 32.530 GB card with a 1.5 GB reserve (int8 head/drafter and
-  candidate64). Allocation at that length, full acceptance, f32 serving and speed gates are pending;
+  host planner gives **262,144 tokens** (the full context) on a 32.530 GB card with a 1.5 GB reserve (int8 head,
+  the packed drafter and the 2-bit candidate head; 254,976 with the int8 drafter). Allocation at that length, full acceptance, f32 serving and speed gates are pending;
   no int8 speed claim is made yet.
 - **Refused, by name:** `--parallel tp` and `replica`, several slots a card
   (`--max-num-seqs` above 1 on one card), `b70-decode --parallel pp`, every other model.

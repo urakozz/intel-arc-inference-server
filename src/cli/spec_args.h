@@ -17,7 +17,8 @@
 //                  request's own ids, verified through the MTP verify lists (the head is loaded for them); K <=
 //                  --spec-max (1..3, default 3) per iteration.
 //   dflash         the DFlash drafter (spec 19c, Qwen3.8 only; --draft-model PATH, default
-//                  z-lab/Qwen3.8-27B-DFlash2 from the HF cache): K <= --spec-max (1..7, default 7) drafts a block.
+//                  urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound from the HF cache): K <= --spec-max (1..7,
+//                  default 7) drafts a block.
 //   dflash-lookup  dflash with prompt lookup inside it (spec 19f; opt-in until queue row 70 measures it).
 //
 // Nemotron 3.5 Bolt (spec 26c, SpecFamily::Bolt; b70-serve only - b70-decode decodes it plainly): no MTP head, but

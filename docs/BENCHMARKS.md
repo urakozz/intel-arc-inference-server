@@ -1467,6 +1467,66 @@ bench, the replay) need a quiet box.
 included) - stage 1 0.369 -> 0.111 ms, the selection 0.444 -> **0.187 ms** (bar 0.2, a saving of 0.26), the draft
 pass 7.25 -> 6.99 ms (0.249 -> 0.240 plain steps). Kept.
 
+### The packed drafter (`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`, 2026-11-14)
+
+Our AutoRound W4A16 g64 symmetric export of `z-lab/Qwen3.8-27B-DFlash2` (revision `8b58c130`), loaded as shipped:
+its 47 packed linears go into the int4 layout-1 tiles unchanged (1.21 GB on the card, 2.3 s to load) and run on
+`gemm_sm`. Branch `dflash-packed-loader`, card 0, busy box (other agents' jobs and a nice'd CPU reference ran).
+**Operator ruling 2026-11-14: the packed drafter is the default**; the code corpus's -0.054 against the 0.05 bar is
+accepted (pooled -0.016, draft pass 4.41 against 6.20 ms).
+
+- **Unpack check:** all 47 linears (1,796,997,120 weights) read back from the card and unpacked equal the CPU dequant
+  of the safetensors (`w = scale x (q - (z + 1))`) bitwise (`dflash_load_packed_test`).
+- **`dflash_draft_test`, "W4A16 packed" list** against the f32 judge: rows cosine 0.99983 (gemm_sm) / 0.99982
+  (gemv), scores 0.99999 / 0.99999, the walk equal to the judge's at K = 7 / 3 and sampled; top-16 sets off the
+  judge's, summed: 6 / 3 (recorded). PASS.
+- **Greedy identity** (39 golden + tool-call prompts through `b70-serve --spec dflash --draft-model <packed>`, bf16
+  KV): 38 identical; golden/prose differs at index 10 with the same id as the int8 drafter's (judged a pass there),
+  awaiting its own f32 reference (not judged).
+
+Acceptance on the v2 anchors against the original int8 baseline (`dflash_engine_accept.py --baseline`; the current
+int8 drafter in the same table, from the final round of spec 19 v3d):
+
+| corpus | anchors | packed gap | int8 gap |
+|---|---:|---:|---:|
+| a4 | 3808 | -0.0144 | -0.0011 |
+| cjk | 112 | +0.0268 | -0.0089 |
+| code | 112 | **-0.0536** (over the bar, accepted) | -0.0179 |
+| opencode | 112 | -0.0446 | -0.0268 |
+| prose | 112 | -0.0365 | 0 |
+| **pooled** | 4256 | **-0.0157** | -0.0024 |
+
+`probe_dflash_iter`, candidate head (2-bit, 80), one round per depth, int8 then packed:
+
+| arm | int8, 4096 | packed, 4096 | int8, 32768 | packed, 32768 |
+|---|---:|---:|---:|---:|
+| draft, K = 7 | 6.20 ms (0.210) | **4.41 ms (0.151)** | 6.13 ms (0.183) | **4.72 ms (0.142)** |
+| verify at 8 rows | 1.221 | 1.224 | 1.252 | 1.246 |
+| projection | 0.51 ms | 0.33 ms | 0.58 ms | 0.33 ms |
+| one round (iteration7) | 1.434 | **1.398** | 1.434 | **1.388** |
+
+Item 21's draft-pass target (5.0 ms or less) is met: 4.41 ms at 4096. `MtpCost::dflash`'s int4 draft cost is this
+round's 0.151.
+
+**Decode speed on one card** (2026-11-14, card 0, **busy box**: the other card and CPU jobs of other agents ran, load
+average 18-129; bf16 KV; three rounds, the arm order rotated - MTP / int8 / packed, int8 / packed / MTP, packed / MTP /
+int8; median of the three). Arms: `--spec auto` (adaptive MTP, the default), `--spec dflash --draft-model
+z-lab/Qwen3.8-27B-DFlash2` (int8 at load), `--spec dflash` (the packed drafter). Replay and sets: decode t/s from the
+server's request records (ids after the first / time after the first token, summed over the requests); llama-benchy
+`--pp 128 --tg 128 --exact-tg`, 3 runs a round (its own spread is +-1-19 t/s, so its rows are rough).
+
+| workload | MTP auto | DFlash int8 | DFlash packed | packed / MTP | packed / int8 |
+|---|---:|---:|---:|---:|---:|
+| opencode-session-int8 replay (78 requests, prefix cache 32 GB) | 65.90 | 92.94 | **96.16** | 1.459 | 1.035 |
+| golden + tool-call sets (40 requests, 256 ids) | 74.50 | 96.89 | **100.82** | 1.353 | 1.041 |
+| llama-benchy tg128, depth 0 | 72.53 | 130.07 | **141.73** | 1.954 | 1.090 |
+| llama-benchy tg128, depth 32768 | 57.17 | 76.52 | **74.66** | 1.306 | 0.976 |
+
+Rounds: replay MTP 65.90 / 66.14 / 65.38, int8 92.94 / 92.61 / 93.64, packed 96.16 / 96.41 / 96.11; sets MTP 74.50 /
+74.42 / 75.20, int8 94.07 / 98.80 / 96.89, packed 100.06 / 101.53 / 100.82; tg128 d0 MTP 72.5 / 68.7 / 74.8, int8
+130.1 / 142.1 / 130.1, packed 141.7 / 131.2 / 147.3; d32768 MTP 58.9 / 57.2 / 56.0, int8 70.1 / 76.5 / 78.8, packed
+92.1 / 73.5 / 74.7. The replay's ids: packed = int8 on 78 / 78 in every round; the sets: 38 / 40.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,

@@ -116,7 +116,8 @@ void usage() {
                "                  drafter on the last card), both over its own verify lists.\n"
                "  --spec-max K    the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash; Bolt's lookup\n"
                "                  too). Default the most.\n"
-               "  --draft-model P --spec dflash's drafter (default z-lab/Qwen3.8-27B-DFlash2; Bolt's\n"
+               "  --draft-model P --spec dflash's drafter (default\n"
+               "                  urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound; Bolt's\n"
                "                  nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr).\n"
                "  --max-num-seqs N   how many requests run at once (vLLM's flag); the context follows. 1\n"
                "                  (default): one request at the largest context that fits. N > 1 (Qwen3.8): a\n"
@@ -1319,6 +1320,7 @@ int run(int argc, char** argv) {
                              "an MTP head) or --spec dflash");
   // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table).
   if (dflash.on) {
+    cli::dflash::resolve_format(dflash);
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;
     options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab);
