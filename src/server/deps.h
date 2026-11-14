@@ -177,6 +177,20 @@ struct EngineIface {
     return step_many(s, k);
   }
 
+  // Open-work 27 (prompt lookup inside MTP, `--spec auto` / `mtp`): mtp_lookup() == false (the default) means the
+  // server never calls step_drafts_or_chosen(). Otherwise step_drafts_or_chosen(s, k, propose, choose) runs one
+  // iteration as step_drafts_or_many() does - propose(x) exactly once; drafts d_1 .. d_m (m <= mtp_k()) verified
+  // exactly as step_drafts() verifies them, the head's draft lists skipped (the verify rewrites the head's KV and
+  // hidden as an MTP verify does) - except that no drafts is one MTP iteration: step_chosen(s, k, choose) when
+  // `choose` is set (greedy requests, the per-step draft choice), step_many(s, k) otherwise.
+  virtual bool mtp_lookup() { return false; }
+  virtual std::vector<uint32_t> step_drafts_or_chosen(const Sampling& s, uint32_t k, const Proposer& propose,
+                                                      const DraftChoice& choose) {
+    (void)propose;
+    (void)choose;
+    return step_many(s, k);
+  }
+
  private:
   template <class T>
   static T unsupported() {

@@ -175,8 +175,11 @@ of M rows), so every correct guess is a token for free. `--spec` picks the propo
 own MTP head, spec 8) or `dflash` (a small draft model, spec 19). On one card `dflash` also runs prompt
 lookup inside it (spec 19f): where the text repeats something earlier than the drafter's 2,048-token
 window, the continuation of that repeat is checked instead of the drafter's guesses. `lookup` (the
-repeat alone, spec 19e) and `dflash-lookup` (the same as one-card `dflash`) stay as developer values;
-`B70_SPEC_LOOKUP=0` serves plain DFlash for A/B runs.
+repeat alone, spec 19e) and `dflash-lookup` (the same as one-card `dflash`) stay as developer values.
+`mtp` (and so `auto`) runs prompt lookup inside it the same way on one card, one slot (open-work 27): where
+the answer repeats 8 or more tokens of earlier text, up to 3 tokens of the repeat's continuation are checked
+instead of the head's guesses; elsewhere the head drafts as before. `B70_SPEC_LOOKUP=0` serves plain MTP /
+plain DFlash for A/B runs.
 
 `--spec auto` (the default) is the MTP head wherever the model has one: no extra memory, so the full context
 stays available. DFlash runs only when asked (`--spec dflash`); its drafter's weights (1.21 GB) come out of the

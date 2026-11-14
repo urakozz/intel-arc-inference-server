@@ -169,7 +169,8 @@ struct EngineAdapter : server::EngineIface {
         std::fprintf(stderr, ", K 4/5/6/7: %llu/%llu/%llu/%llu", (unsigned long long)mtp_iters_at_k[4],
                      (unsigned long long)mtp_iters_at_k[5], (unsigned long long)mtp_iters_at_k[6],
                      (unsigned long long)mtp_iters_at_k[7]);
-      if (dflash_lookup_)   // spec 19f: the lookup iterations (not in the counts above) and the ids they produced
+      // spec 19f / open-work 27: the lookup iterations (not in the counts above) and the ids they produced
+      if (dflash_lookup_ || lk_iters_ > 0)
         std::fprintf(stderr, "; lookup: %llu iterations, %llu/%llu drafts accepted, %llu of %u ids",
                      (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
                      (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
@@ -405,6 +406,33 @@ struct EngineAdapter : server::EngineIface {
     const uint32_t x = control->cur_token[0];
     const std::vector<uint32_t> d = propose(x);
     if (d.empty()) return step_dflash(sampling, k_dflash);
+    return lookup_run(sampling, x, d);
+  }
+
+  // --- open-work 27: prompt lookup inside MTP (`--spec auto` / `mtp`) ----------------------------------------------
+  //
+  // step_drafts_or_many's lookup iteration on the MTP head's verify lists (M <= kMaxDraft + 1 = 4: K <= 3 lookup
+  // drafts, the head's --spec-max): the head's draft lists are not run, the verify rewrites the head's KV and hidden
+  // at n-1 .. n+k-1 as an MTP verify does, so the next MTP iteration drafts from the same state as after an MTP
+  // iteration that kept the same ids. No drafts: one MTP iteration - step_chosen (the per-step choice) when the server
+  // passes `choose`, step_many otherwise.
+  bool mtp_lookup() override { return !df_ && k_ > 0; }
+
+  std::vector<uint32_t> step_drafts_or_chosen(const server::Sampling& sampling, uint32_t k_mtp,
+                                              const Proposer& propose, const DraftChoice& choose) override {
+    if (!mtp_lookup()) throw std::logic_error("EngineAdapter::step_drafts_or_chosen without the MTP head");
+    flush_commit();
+    const uint32_t x = eng.control()->cur_token[0];
+    const std::vector<uint32_t> d = propose(x);
+    if (d.empty()) return choose ? step_chosen(sampling, k_mtp, choose) : step_many(sampling, k_mtp);
+    return lookup_run(sampling, x, d);
+  }
+
+  // One lookup iteration at pos = n, x_n pending, drafts `d` (the proposer's): d_1..d_k (k <= --spec-max, the
+  // engine's max_verify_k) into cur_token[1..k], the verify, the host acceptance (greedy: argmax; sampled: the
+  // point-mass rule) and the deferred commit; returns x and the kept drafts (counted as lookup's, lk_*).
+  std::vector<uint32_t> lookup_run(const server::Sampling& sampling, uint32_t x, const std::vector<uint32_t>& d) {
+    auto* control = eng.control();
     const uint32_t k = std::min<uint32_t>({static_cast<uint32_t>(d.size()), k_, eng.max_verify_k()});
     ++lk_iters_;
     if (k == 0) {   // the last positions of max_len: one plain step

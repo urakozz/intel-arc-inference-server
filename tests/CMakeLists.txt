@@ -181,6 +181,12 @@ add_executable(dflash_lookup_server_test server/dflash_lookup_server_test.cc)
 target_include_directories(dflash_lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dflash_lookup_server_test PRIVATE b70_server)
 add_test(NAME dflash_lookup_server_test COMMAND dflash_lookup_server_test)
+# Open-work 27: prompt lookup inside MTP through the server - identical output, the policy's proposals, the per-step
+# choice kept on the MTP iterations, the refusals.
+add_executable(mtp_lookup_server_test server/mtp_lookup_server_test.cc)
+target_include_directories(mtp_lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(mtp_lookup_server_test PRIVATE b70_server)
+add_test(NAME mtp_lookup_server_test COMMAND mtp_lookup_server_test)
 
 # Spec 8 §10: the --spec mtp policy on synthetic acceptance sequences, host only.
 add_executable(adaptive_k_test server/adaptive_k_test.cc)
@@ -1582,6 +1588,19 @@ if(B70_MTP)
       LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT
       "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+    # Open-work 27: prompt lookup inside MTP through EngineAdapter - D2 against the plain loop on golden, A4 and the
+    # edit / copy set's 8k / 32k prompts by the f32 judge (the int8 head's references), the warm head, a truncate
+    # inside a lookup burst, a seeded sampled run reproducible.
+    add_executable(mtp_lookup_gpu_test server/mtp_lookup_gpu_test.cc)
+    target_include_directories(mtp_lookup_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+      ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+    target_link_libraries(mtp_lookup_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
+      b70_model b70_l0 b70_prefill_host)
+    add_dependencies(mtp_lookup_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
+    add_test(NAME mtp_lookup_gpu_test COMMAND mtp_lookup_gpu_test ${B70_TEST_SNAPSHOT})
+    set_tests_properties(mtp_lookup_gpu_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
   endif()
   # Spec 8 §12 (MTP at every context length; box queue row 6): mtp_verify_test (M2, RF3 at
   # max_len - 4, RF4 deep - spec 7 C1 with MTP at ~70k on the 131072 run) and mtp_gpu_test's

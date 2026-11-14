@@ -94,6 +94,9 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     impl_->batch = batch;
     if (opts_.spec_dflash_lookup)
       throw std::invalid_argument("--spec dflash-lookup is built for one engine (spec 19f); not under the scheduler");
+    if (opts_.spec_mtp_lookup)
+      throw std::invalid_argument("prompt lookup inside MTP is built for one engine (open-work 27); not under the "
+                                  "scheduler");
   }
   if (opts_.spec_lookup) {
     if (deps_.engine.verify_k() == 0)
@@ -111,6 +114,16 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
       throw std::invalid_argument("--spec dflash-lookup: this engine has no DFlash drafter to fall back to");
     LookupInDFlashOptions o;
     o.window = deps_.engine.dflash_window();
+    o.max_k = deps_.engine.mtp_k();
+    impl_->lookup_in_dflash.emplace(o);
+  }
+  if (opts_.spec_mtp_lookup) {   // open-work 27: the same policy, no window
+    if (opts_.spec_lookup || opts_.spec_dflash_lookup)
+      throw std::invalid_argument("prompt lookup inside MTP and --spec lookup / dflash-lookup are one proposer each");
+    if (!deps_.engine.mtp_lookup())
+      throw std::invalid_argument("prompt lookup inside MTP: this engine has no MTP head to fall back to");
+    LookupInDFlashOptions o;
+    o.window = 0;
     o.max_k = deps_.engine.mtp_k();
     impl_->lookup_in_dflash.emplace(o);
   }
@@ -187,7 +200,8 @@ bool Server::listen() {
     } else if (e.mtp_k() > 0) {
       spec = std::string(e.dflash_window() > 0 ? "dflash" : "mtp") + ", K <= " + std::to_string(e.mtp_k()) +
              (opts_.mtp_auto ? (impl_->step_k ? " adaptive per step" : " adaptive per request") : " fixed") +
-             (opts_.spec_dflash_lookup ? ", lookup inside dflash" : "");
+             (opts_.spec_dflash_lookup ? ", lookup inside dflash" : "") +
+             (opts_.spec_mtp_lookup ? ", lookup inside mtp" : "");
     }
     std::string ctx;
     if (impl_->batch) {
@@ -397,7 +411,9 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   // Spec 19f: --spec dflash-lookup indexes the matcher as --spec lookup does; the DFlash iterations' K comes from the
   // --spec mtp policy below.
   const bool dflash_lookup = opts_.spec_dflash_lookup;
-  if (dflash_lookup) {
+  // Open-work 27: lookup inside MTP - the same matcher and policy; its MTP iterations keep the per-step choice below.
+  const bool mtp_lookup = opts_.spec_mtp_lookup;
+  if (dflash_lookup || mtp_lookup) {
     lookup_begin(outcome.prompt_ids);
     impl_->lookup_in_dflash->reset();
   }
@@ -446,27 +462,40 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   };
   // Spec 19f: one iteration asks the policy first (the pending id indexed in the proposer, as next_lookup's); lookup
   // drafts feed the policy's STAY / EXIT, a DFlash iteration feeds AdaptiveK - each proposer learns from its own.
-  const auto next_dflash_lookup = [&]() -> uint32_t {
+  // Open-work 27: inside MTP the same, through step_drafts_or_chosen - an MTP iteration is the per-step choice (StepK,
+  // begun before the engine call: begin() only resets the iteration, so a lookup iteration leaves StepK as it was)
+  // or AdaptiveK's K.
+  const char* const lookup_call =
+      mtp_lookup ? "EngineIface::step_drafts_or_chosen" : "EngineIface::step_drafts_or_many";
+  const auto next_lookup_inside = [&]() -> uint32_t {
     if (burst_at == burst.size()) {
       LookupInDFlash& lid = *impl_->lookup_in_dflash;
-      const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
+      const uint32_t k = step_k ? step_k->begin() : policy ? policy->next() : deps_.engine.mtp_k();
       uint32_t proposed = 0;
       burst_head_indexed = false;
-      burst = deps_.engine.step_drafts_or_many(sampling, k, [&](uint32_t pending) {
-        if (burst_head_indexed) throw std::logic_error("EngineIface::step_drafts_or_many: propose twice");
+      const EngineIface::Proposer propose = [&](uint32_t pending) {
+        if (burst_head_indexed) throw std::logic_error(std::string(lookup_call) + ": propose twice");
         matcher.append(pending);
         burst_head_indexed = true;
         const std::vector<uint32_t> d = lid.propose(matcher);
         proposed = static_cast<uint32_t>(d.size());
         return d;
-      });
+      };
+      if (mtp_lookup) {
+        EngineIface::DraftChoice choose;
+        if (step_k) choose = [&](uint32_t j, float p) { return step_k->choose(j, p); };
+        burst = deps_.engine.step_drafts_or_chosen(sampling, k, propose, choose);
+      } else {
+        burst = deps_.engine.step_drafts_or_many(sampling, k, propose);
+      }
       burst_at = 0;
-      if (burst.empty()) throw std::runtime_error("EngineIface::step_drafts_or_many returned no ids");
+      if (burst.empty()) throw std::runtime_error(std::string(lookup_call) + " returned no ids");
       const uint32_t kept = static_cast<uint32_t>(burst.size() - 1);
       if (proposed > 0) {
-        if (kept > proposed)
-          throw std::runtime_error("EngineIface::step_drafts_or_many returned more ids than drafts + 1");
+        if (kept > proposed) throw std::runtime_error(std::string(lookup_call) + " returned more ids than drafts + 1");
         lid.observe(proposed, kept);
+      } else if (step_k) {
+        step_k->observe(kept);
       } else if (policy) {
         policy->observe(k, std::min(k, kept));
       }
@@ -478,7 +507,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   };
   const auto next_id = [&]() -> uint32_t {
     if (lookup) return next_lookup();
-    if (dflash_lookup) return next_dflash_lookup();
+    if (dflash_lookup || mtp_lookup) return next_lookup_inside();
     if (!speculative) return deps_.engine.step(sampling);
     if (burst_at == burst.size() && step_k) {
       burst = deps_.engine.step_chosen(sampling, step_k->begin(),
