@@ -141,6 +141,15 @@ int main(int argc, char** argv) {
                                        runtime::KvCache::Int8, hp).total() + reserve > card);
     std::printf("DFlash int8 KV + candidate64 --max-len auto on 32.530 GB: %u (target %zu B, reserve %zu B)\n",
                 len, target, reserve);
+    // The packed int4 drafter (the default since 2026-11-14): 0.84 GB fewer drafter bytes, so as long or longer.
+    const auto hp4 = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int4G64, true);
+    for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8}) {
+      const uint32_t l4 = runtime::max_len_that_fits(q, false, target, card, reserve, 262144, {}, {}, kv, hp4),
+                     l8 = runtime::max_len_that_fits(q, false, target, card, reserve, 262144, {}, {}, kv, hp);
+      CHECK(l4 >= l8);
+      std::printf("DFlash %s KV --max-len auto on 32.530 GB: packed int4 drafter %u, int8 drafter %u\n",
+                  kv == runtime::KvCache::Int8 ? "int8" : "bf16", l4, l8);
+    }
   }
 
   // 4. the table and the launches

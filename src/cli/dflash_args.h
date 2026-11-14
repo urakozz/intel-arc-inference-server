@@ -6,13 +6,15 @@
 //   --spec dflash          the proposer is the drafter (spec 19 decision 3: one per server; the MTP head is not
 //                          loaded)
 //   --draft-model PATH     the drafter: a snapshot directory or a repo id in the HF cache (default
-//                          z-lab/Qwen3.8-27B-DFlash2, the published drafter for Qwen3.8); never downloaded here
+//                          urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound, our AutoRound int4 export of z-lab's
+//                          drafter - operator ruling 2026-11-14; z-lab/Qwen3.8-27B-DFlash2 loads as int8 at load);
+//                          never downloaded here
 //   --spec-max K           the deepest block, 1..7 (default 7: DFlash 2's block of 8 - 1)
 //   --draft-vocab N        (b70-serve) the drafter's head over a draft vocabulary (spec 8 §11's, built without the
 //                          MTP head)
-// The drafter's linears are int8 (spec 19 decision 2: per-row RTN at load; --draft-format went in the zero-config
-// cleanup - Args::format stays the tests' seam), or int4 g64 when --draft-model is an AutoRound int4 export (its own
-// packed linears, resolve_format). Its AdaptiveK cost table is MtpCost::dflash's (--spec-cost went with it).
+// The drafter's linears are int4 g64 for an AutoRound int4 export, the default (its own packed linears,
+// resolve_format), else int8 (spec 19 decision 2: per-row RTN at load; --draft-format went in the zero-config cleanup -
+// Args::format stays the tests' seam). Its AdaptiveK cost table is MtpCost::dflash's (--spec-cost went with it).
 //
 // What is refused here, by name, before the device (each is a later stage's, or has no binaries):
 //   pipeline parallel      b70-decode: one card (b70-serve --parallel pp serves it)
@@ -42,7 +44,7 @@ namespace cli::dflash {
 
 struct Args {
   bool on = false;
-  std::string model = "z-lab/Qwen3.8-27B-DFlash2";
+  std::string model = "urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound";
   loader::DraftFormat format = loader::DraftFormat::Int8;
   uint32_t max_k = 7;
   bool have_model = false;

@@ -56,11 +56,11 @@ struct MtpCost {
   // Spec 19 v3d (2026-11-14, card 0, busy box): the DPAS attention at KS 4, the radix candidate selection and the
   // 2-bit head with 80 candidates - the draft pass 0.217462 of a plain step at depth 4096 (was 0.287036).
   static constexpr double kDFlashDraftCandidateInt8 = 0.217462;
-  // Experimental PRE-H1/B4 RTN estimates; this form failed acceptance and is not selected by the CLI.
-  // Candidate is DERIVED from that full-head row and int8 candidate saving. Re-measure after the calibrated
-  // AutoRound export passes acceptance; the operator deferred that conversion.
+  // The full-head int4 row: the experimental PRE-H1/B4 RTN estimate (the draft-vocabulary path only).
   static constexpr double kDFlashDrafterInt4 = 0.269526 - kDFlashHeadInt8;
-  static constexpr double kDFlashDraftCandidateInt4 = 0.257769;
+  // The packed AutoRound drafter (urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound, the default; 2026-11-14, card 0,
+  // busy box): the draft pass 0.151481 of a plain step at depth 4096 (4.41 ms; int8 0.210086 in the same run).
+  static constexpr double kDFlashDraftCandidateInt4 = 0.151481;
   // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
   static double dflash_head_share(bool i8_head, unsigned drafter_format);
 

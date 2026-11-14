@@ -41,7 +41,7 @@ difference is neither passed nor failed (the test reports SKIP). Each row: what 
 
 ## DFlash drafter quant (follow-up)
 
-**Next: the packed drafter loader** (carries item 21's draft-pass target, 5.0 ms or less; the int8 body's linears are now its largest cost, 3.3 ms): load the published W4A16 drafter's packed linears on the int4 small-batch GEMM, then acceptance against the int8 drafter on the same anchors.
+**The packed drafter loader is built and the packed drafter is the default** (branch `dflash-packed-loader`, operator ruling 2026-11-14; BENCHMARKS "The packed drafter"): draft pass 4.41 ms at 4,096 (item 21's 5.0 ms target met; int8 6.20), a round 1.398 plain steps; acceptance pooled -0.016, code -0.054 accepted. Open: the golden/prose identity context's f32 reference; the one-card t/s rounds (MTP / int8 drafter / packed).
 
 Quantise `z-lab/Qwen3.8-27B-DFlash2` with **tuned AutoRound W4A16, group size 64, symmetric**, exported as
 `auto_round:auto_gptq` (4-bit weights, 16-bit activations; `w = (q - 8) * scale`, symmetric GPTQ zeros,
@@ -49,8 +49,7 @@ no activation-order permutation). Start with 200 tuning iterations and 128 calib
 record the pinned AutoRound commit and the actual recipe with the export. This replaces the failed at-load RTN
 experiment; int8 stays the serving format until the calibrated export passes acceptance.
 
-**The full export is built** (2026-11-13 ~21:00, AutoRound `local-patches-v2` 8186d8b6, 200 iterations; checked: 47 packed linears = every drafter linear, 1.2 GB), log `~/b70/logs/dflash-quant/run-20261113-172524.log`. **Published** 2026-11-14 as `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (revision `8b58c130`, in the box's Hugging Face cache); use the repo id everywhere, not the local export. **The packed DFlash loader is still missing**, so the export cannot be
-served or accepted yet. On the box, in the repo tree:
+**The full export is built** (2026-11-13 ~21:00, AutoRound `local-patches-v2` 8186d8b6, 200 iterations; checked: 47 packed linears = every drafter linear, 1.2 GB), log `~/b70/logs/dflash-quant/run-20261113-172524.log`. **Published** 2026-11-14 as `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (revision `8b58c130`, in the box's Hugging Face cache); use the repo id everywhere, not the local export. It is served by `loader::DFlashCheckpoint`'s packed form. On the box, in the repo tree:
 
 ```sh
 tools/quantize/quantize_dflash.sh start    # detached; card 1 (CARD=0 for the other) through gpu_lock, logs under ~/b70/logs/dflash-quant/
@@ -76,11 +75,8 @@ peak 9.8 GiB RAM, 7.3 GiB VRAM). The `sources` stage finds 69 requests in the tw
 requests' taps, 200 iterations) has not run.
 
 The generic `MODEL=... tools/quantize_qwen38_tuned.sh` is not a DFlash conversion command: the source config
-says `model_type=qwen3` but `architectures=[DFlash2DraftModel]`, and our current DFlash checkpoint reader accepts
-BF16 tensors rather than packed GPTQ linears. The calibration forward exists now (above); the packed loader
-does not. Before promotion: validate packing/unquantised tensors, run the f32 numerical checks, compare
-all K/corpora against the original int8/full-head acceptance baseline (loss <= 0.05 tokens/verify), then G-D2
-and the updated-MTP serving comparison. Sources: [drafter config](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2/blob/main/config.json),
+says `model_type=qwen3` but `architectures=[DFlash2DraftModel]`. The packing, the f32 checks and the acceptance
+against the original int8 baseline are done (above); the updated-MTP serving comparison is the t/s rounds. Sources: [drafter config](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2/blob/main/config.json),
 [AutoRound schemes/API](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md),
 [our quantisation rules](../tools/quantize/README.md).
 
