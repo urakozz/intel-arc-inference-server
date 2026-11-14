@@ -75,7 +75,8 @@ import time  # noqa: E402
 # mtp_verify_test's qwen3.8_int8 is the KV cache, not the head. Spec 17c's tp_prefill_test (tp_prefill_, both KV forms) and
 # spec 17d's tp_mtp_test (tp_mtp_)
 # runs b70-decode's int8 head; the TP twin count (tools/box_validate/twin_count.py: tp_twin_) b70-decode's and b70-serve's.
-I8HEAD_RE = r"^(dflash_|mtp_gpu_(rf1_)?int8_|serve_int8_|slots_|tp_prefill_|tp_mtp_|tp_twin_)"
+# Open-work 27's mtp_lookup_gpu_test (mtp_lookup_gpu_int8_) loads the int8 head and prefills as the DFlash tests do.
+I8HEAD_RE = r"^(dflash_|mtp_gpu_(rf1_)?int8_|mtp_lookup_gpu_int8_|serve_int8_|slots_|tp_prefill_|tp_mtp_|tp_twin_)"
 # The tests that prefill with l0-int8 (tests/CMakeLists.txt: mtp_gpu_test <snapshot> l0-int8 ..., every form).
 PFI8_RE = r"^mtp_gpu_"
 REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
