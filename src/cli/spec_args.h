@@ -15,8 +15,8 @@
 //   lookup         prompt lookup (spec 19e): the continuation of the longest earlier match (>= 3 ids) of the
 //                  request's own ids, verified through the MTP verify lists (the head is loaded for them); K <=
 //                  --spec-max (1..3, default 3) per iteration.
-//   dflash         the DFlash drafter (spec 19c, Qwen3.8 only; --draft-model PATH, default
-//                  urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound from the HF cache): K <= --spec-max (1..7,
+//   dflash         the DFlash drafter (spec 19c, Qwen3.8 only; --draft-model PATH, required: no default
+//                  drafter, cli/dflash_args.h check_flags says which two): K <= --spec-max (1..7,
 //                  default 7) drafts a block.
 //                  b70-serve on one card folds prompt lookup into it (spec 19f, operator ruling 2026-11-14):
 //                  `dflash` there IS `dflash-lookup`; B70_SPEC_LOOKUP=0 turns the fold off (A/B runs).
