@@ -27,18 +27,18 @@ weights, prompt lookup), not from faster single kernels.
   type.** Ops per second therefore scale exactly with the builtin's K depth:
   bf16 and fp16 at k16 are 183.45 TFLOP/s, int8 and *every* mixed 4-by-8 form at
   k32 are 2.000x, int4 and int2 at k64 are 4.000x. The bf16 figure is 99.97% of
-  the clock-derived peak. Depth scaling is free; width is not (docs/01).
+  the clock-derived peak. Depth scaling is free; width is not ([01-hardware.md](01-hardware.md)).
 - **Halving an operand only helps when it halves K.** The mixed s8 x s4 DPAS is
   native and real - the assembly carries `:s4` on one operand of a single
   instruction - and it runs at *exactly* the int8 rate, because its K is 32.
   A W4A8 kernel built on that assumption measured slower than the bf16 control.
-- **The memory peaks at about 640 GB/s** (hw-smi reads up to 638 under load);
+- **The memory peaks at 638 GB/s** (hw-smi, under load);
   our probes sustain about 590. The card **compresses uniform-fill buffers
   losslessly**, so naive probes read impossible numbers (1022 GB/s). Seed probe
   buffers with xorshift. (Older docs quote 608 GB/s, a 19 Gbps figure; the card
   reads higher.)
 - **Per-shape GEMV ceilings, not one number**: 533 to 584 GB/s depending on
-  shape (docs/12), 83 % to 91 % of the peak. Plan against the per-shape ceiling;
+  shape ([12-kernels.md](12-kernels.md)), 83 % to 91 % of the peak. Plan against the per-shape ceiling;
   a single "peak bandwidth" figure misleads by up to 17 %.
 - **The subgroup is the occupancy unit, not the work-group.** A bit-identical
   8-work-group rewrite of a 2-work-group kernel bought exactly zero; splitting
@@ -49,7 +49,7 @@ weights, prompt lookup), not from faster single kernels.
   was worth 0.15 ms.
 - **Idle early-out work-groups cost about 15 ns each**, so fixed grids with
   device-side early-out beat context-bucketed command lists at every depth
-  measured (docs/04).
+  measured ([04-architecture.md](04-architecture.md)).
 - **`ocloc` has no 16-bit block write wider than 8 rows**, so a bf16 epilogue is
   bound by store message count rather than by bytes. Halving intermediate buffer
   widths changed nothing at all.
@@ -63,7 +63,7 @@ weights, prompt lookup), not from faster single kernels.
   argument baked - 774 kernels - replays at 0.4 to 0.7 us per
   launch, and per-token host work is 97 us, 0.3% of the step. The three values
   that change per token live in a device-resident control block the kernels read
-  and the sampler writes (docs/04).
+  and the sampler writes ([04-architecture.md](04-architecture.md)).
 - **Arguments are resolved at append time**, proven by test, so mutable-argument
   extensions are unnecessary for decode.
 - **More launches can be faster.** The Level Zero prefill walk issued 8,689
@@ -85,14 +85,14 @@ weights, prompt lookup), not from faster single kernels.
   about 3x to host overhead; with graphs it reaches 81.7% MBU. We removed host
   overhead more thoroughly - 99.7% of the step is in-kernel - and still trail at
   batch 1. The endgame there is kernel efficiency against per-shape bandwidth
-  ceilings, not the host (docs/05).
+  ceilings, not the host ([05-perf-model.md](05-perf-model.md)).
 
 ## 3. Numerics you can trust
 
 - **Per-op bf16 round-to-nearest-even discipline makes GPU-equals-CPU
   token-exact reproduction achievable.** Mirror torch's op-by-op rounding and
   the golden gate holds across kernel rewrites; the worst gated drift across a
-  whole rewrite ladder was two words at 1 ulp (docs/14).
+  whole rewrite ladder was two words at 1 ulp ([14-golden-gate.md](14-golden-gate.md)).
 - **Tokens are robust far beyond intuition.** A 21% relative hidden-state
   deviation at one position still produced identical greedy tokens, and cosine
   diagnostics move in *both* directions under legal reassociation. Token
@@ -101,7 +101,7 @@ weights, prompt lookup), not from faster single kernels.
   bf16 grid, so it cannot resolve two candidates inside one ulp. A row whose
   golden top-1 is not unique is undetermined, and the gate asserts membership of
   the argmax set there rather than grading the engine on `torch.argmax`'s
-  lowest-index tie-break (docs/14).
+  lowest-index tie-break ([14-golden-gate.md](14-golden-gate.md)).
 - **Real checkpoints contain subnormal f16 scales** - 1,658 of them here.
   `-cl-denorms-are-zero` corrupts real models, so our build makes it a fatal
   error. OpenCL's default divide is 2.5 ulp; pass
@@ -109,7 +109,7 @@ weights, prompt lookup), not from faster single kernels.
 - **A cross-implementation oracle is worth its weight.** Dequant fixture
   (bit-exact in both languages) → CPU-torch golden files → engine gate → vLLM
   cross-check. When all three agree, every future divergence has a clean
-  three-way baseline (docs/14).
+  three-way baseline ([14-golden-gate.md](14-golden-gate.md)).
 - **A green gate is not evidence unless the run says which kernel it
   dispatched.** A record was once claimed for a kernel that never ran: the
   selector resolved, the gates went green, and the old kernel was what launched.
@@ -198,10 +198,10 @@ weights, prompt lookup), not from faster single kernels.
   standing.
 - **When a feature must change the kernel, change the judge, not the bar.** Bit-for-bit
   equality with a CPU reference is the right gate only where the code path is unchanged. The
-  small-batch verify GEMM (spec 28b) made speculative rows differ from plain rows at the last
+  small-batch verify GEMM made speculative rows differ from plain rows at the last
   bf16 rounding, so greedy decoding flips on near-ties. The fix was not a looser tolerance but
   a better reference: grade each output against a float32 run on the same context (the f32
-  judge, doc 14), accept a near-miss of at most 8 bf16 ulps, and still fail a real error - the
+  judge, [14-golden-gate.md](14-golden-gate.md)), accept a near-miss of at most 8 bf16 ulps, and still fail a real error - the
   DPAS verify-attention kernel's token was at f32 rank 3, 4.0 below a top whose margin was 3.44,
   and the kernel was switched off for it.
 - **Decide from the evidence, then verify once.** When a log line or an error
@@ -277,3 +277,25 @@ weights, prompt lookup), not from faster single kernels.
   The f32 judge accepts a choice within a few bf16 ulps of the float32 top and
   fails real errors; rows the operator reviewed are listed by name, never
   absorbed by a looser bar.
+
+## 9. What patching vLLM first taught us
+
+Before this engine existed, months went into patching the GPU kernels inside vLLM's own runtime. The lessons
+that outlived that work:
+
+- **Check that the kernel is the bottleneck before optimising it.** Two unrelated kernel paths (MXFP4 and
+  GPTQ int4) landed within 1 % of each other, 72.65 against 73.31 t/s, and turning the captured graphs off cost
+  about 3x. The limit was the host: Python and the launch path, not the kernels.
+- **Patching kernels inside someone else's runtime caps the gain.** The whole patch stack bought +9 % prefill
+  and cost up to 19 % of decode. The wins that mattered needed the layer above the kernels: what is launched,
+  when, and how often. That is why this engine owns the whole runtime.
+- **A kernel's selection rule matters as much as the kernel.** A rule that sent too many shapes to a
+  vector-times-matrix kernel cost 15-16 % of decode; switching it off recovered 102.0 -> 118.5 t/s on one
+  checkpoint.
+- **"It only affects X" is false when kernels share headers.** A change meant for one path moved another.
+- **Bugs that exist only under graph capture are invisible in eager mode.** One of them capped the server at
+  two requests at once.
+- **Use a clean source build as the control,** never a released binary: two release tags turned out to be the
+  same source.
+- **Know each number's noise before chasing it.** Decode repeated within 0.1 % between runs, prefill varied by
+  up to 4 %, so a 3 % prefill gain was not a result.
