@@ -397,6 +397,7 @@ int main(int argc, char** argv) {
     std::printf("== drafter %s\n", loader::draft_format_name(f));
     const loader::DFlashWeights w = loader::load_drafter(e.ctx, snap, q, V, embed_d, f);
     dfref::Weights tw = twin_weights(ck, f);
+    tw.d.attn_ks = runtime::CaptureOptions{}.dflash_attn_ks;   // the twin follows the production DPAS part's order
     tw.embed = embed;
     tw.mask_row.resize(H);
     for (uint32_t i = 0; i < H; ++i) tw.mask_row[i] = dfref::bf(embed[size_t(d.mask_id) * H + i]);
@@ -415,18 +416,12 @@ int main(int argc, char** argv) {
     std::memset(control.ptr(), 0, sizeof(runtime::Control));
     // spec 28d: the int8 drafter's lists forced onto gemv_i8w (the pre-28d binding) and the f32 judge
     const bool quantised = f != loader::DraftFormat::Bf16;   // both quantised forms use the f32 judge
-    // Spec 19 v3d Task 6: the twin (Numerics::Engine) is the scalar attention part's order, so the lists compared
-    // with it - the bf16 drafter's and the forced gemv_i8w ones - bind the scalar part; the quantised drafters'
-    // production lists bind the DPAS part (dflash_kernels_test holds it to the twin by cosine) and face the f32 judge.
-    runtime::CaptureOptions lo;
-    lo.dflash_attn_dpas = quantised;
-    runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, lo);
+    runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control);
     runtime::CapturedStep proj = runtime::dflash::build_dflash_project(e.ctx, w, b);
     std::printf("launches: draft %zu, projection %zu\n", draft.kernel_count, proj.kernel_count);
     bad += draft.kernel_count != 87 || proj.kernel_count != 8;
     runtime::CaptureOptions gvo;
     gvo.force_linear = runtime::LinearForce::Gemv;
-    gvo.dflash_attn_dpas = false;
     std::unique_ptr<runtime::CapturedStep> dg, pg;
     dfref::Weights tj;
     if (quantised) {
@@ -584,7 +579,6 @@ int main(int argc, char** argv) {
         runtime::CaptureOptions mixed;
         mixed.force_linear = body_gemv ? runtime::LinearForce::Gemv : runtime::LinearForce::SmallM;
         mixed.force_dflash_head = body_gemv ? runtime::LinearForce::SmallM : runtime::LinearForce::Gemv;
-        mixed.dflash_attn_dpas = !body_gemv;   // its base's attention part (dg binds the scalar one)
         auto step = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, mixed);
         const auto& base = body_gemv ? *dg : draft;
         CHECK_EQ(step.labels.size(), base.labels.size());
@@ -636,7 +630,7 @@ int main(int argc, char** argv) {
       runtime::dflash::DFlashBuffers bc(e.ctx, d, w.target_hidden, NV, 8192, w.format);
       e.imm.copy(bc.ring_k.ptr(), b.ring_k.ptr(), b.ring_k.size());
       e.imm.copy(bc.ring_v.ptr(), b.ring_v.ptr(), b.ring_v.size());
-      runtime::CapturedStep dc = runtime::dflash::build_dflash_draft(e.ctx, w, tc, bc, control, lo);
+      runtime::CapturedStep dc = runtime::dflash::build_dflash_draft(e.ctx, w, tc, bc, control);
       bc.ctl()->k = 7;
       bc.ctl()->temperature = 0.0f;
       e.run(dc);
