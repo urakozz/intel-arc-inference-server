@@ -3926,6 +3926,53 @@ st_r87_vprofile() {
   finish
 }
 
+row 88 "spec 19v3c - DFlash under tensor parallel (b70-serve --parallel tp --spec dflash): the drafter split over both cards like the target (its heads, its MLP half, its vocabulary half of the candidate head; ten all-reduces a draft pass), the tap verify lists at M = 1..8 per card, a two-phase round, the ring in the snapshots (plan 2026-11-13-spec19v3c-dflash-tensor-parallel)"
+rownote 88 "Every two-card stage is kind gpu (the whole box, gpu_lock.sh box). Run in order (--only r88, --with r88.cost on an idle box). A divergence without its f32 judge SKIPs: dump it (B70_DUMP_FORCED), then tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_dflash_' (CPU). Hand back: r88.gate's G1 / S1 / T4 lines and tokens a round, r88.serve's IDENTICAL / JUDGED lines, r88.cost's tables."
+stage r88.host    88 default cpu -    g0.sha     "host: dflash_tp_split_test (the halves in every device form, the card's plan at 262144), tp_desc_test, verify_attn_test (the per-card DPAS rows at M = 5..8), gemm_sm_names_test (the per-card rows at M = 2..8, the drafter's half rows), pipeline_args_test (--parallel tp serves --spec dflash, refuses dflash-lookup)"
+st_r88_host() {
+  run_tests '^(dflash_tp_split_test|tp_desc_test|verify_attn_test|gemm_sm_names_test|pipeline_args_test|cli_reject_tp_spec)$'
+  finish
+}
+stage r88.kernels 88 default gpu -    r88.host   "gemm_sm_test (every row: the per-card rows at M = 2..8, the drafter's half rows at 8, the candidate heads' half at 7), tp_kernels_test, tp_shapes_test"
+st_r88_kernels() {
+  run_tests '^(gemm_sm_test|tp_kernels_test|tp_shapes_test)$'
+  finish
+}
+stage r88.gate    88 default gpu qwen,dflash r88.kernels "tp_dflash_test: G1 greedy K = 7 / 3 / 1 against plain TP (tie rule, then the f32 judge), T1 the drafter halves bitwise between the cards, S1 a restore bitwise, T4 a dropped draft list bounded; tokens a round per case"
+st_r88_gate() {
+  run_tests '^tp_dflash_test$' '' '' "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-tp19v3c"
+  grab_all t '^(G1|S1|T4|tp_dflash|  the f32|  AWAIT)' 40
+  finish
+}
+stage r88.prior   88 default gpu qwen r88.kernels "17b-d's tests unchanged: tp_mtp_test, tp_decode_test, tp_fail_test, tp_prefill_test (TpEngine gained the drafter seam)"
+st_r88_prior() {
+  run_tests '^(tp_mtp_test|tp_decode_test|tp_fail_test|tp_prefill_test)$' '' '' "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-tp17d"
+  finish
+}
+stage r88.serve   88 default gpu qwen,dflash,oracle_qwen r88.gate "b70-serve --parallel tp --spec dflash against --parallel tp --spec off (golden + tool-call sets, greedy, the prefix cache on): every first difference by the f32 judge (serve_judge.py)"
+st_r88_serve() {
+  serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
+    "tp|--max-len 16384 --parallel tp --spec off" \
+    "tp-dflash|--max-len 16384 --parallel tp --spec dflash --draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref tp"
+  serve_judge "$STATE/$STAGE" tp "every first difference from --parallel tp --spec off by the f32 judge"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
+  judged_finish
+}
+stage r88.cost    88 optin   gpu qwen,dflash r88.gate "the TP DFlash round (idle box): tp_dflash_test cost at depth 4096 and 32768 - verify at M = 1..8 in units of the K = 0 iteration, the round's parts at K = 7, the crossings' share at M = 1 and 8"
+st_r88_cost() {
+  idle before
+  local d
+  for d in 4096 32768; do
+    chk "build/tests/tp_dflash_test $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} cost $d" "depth $d"
+  done
+  idle after
+  grab_all cost '^(tp dflash cost|  verify|  ms:|  the round|  crossings)' 20
+  grab_all idle '^IDLE '
+  finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest_2card x default gpu qwen,oracle_qwen - "x.rest's two-card part: the pp-labelled tests among them (the rest is x.rest, on one card)"
 st_x_rest_2card() {
