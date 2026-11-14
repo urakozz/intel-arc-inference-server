@@ -130,14 +130,23 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
   const uint k0 = g * CHUNK;
   uint k1 = k0 + CHUNK;
   if (k1 > K) k1 = K;
-  for (uint k = k0 + lid; k < k1; k += WG) {
 #if FOLDED && BF16_MSG
-    float acc = 0.f;
-    for (uint s = 0; s < S_LOC; ++s) acc += partials[((size_t)s * M + m) * K + k];
-    const ushort b = rne_bf16(acc);
-    own[(size_t)m * K + k] = bf16f(b);
-    ((__global ushort*)d)[(size_t)m * K + k] = b;
-#elif FOLDED
+  // Two elements a lane, one 32-bit store into the peer's memory (a 16-bit store across the link lost the trailer's
+  // order against the flag: tp_dflash_test stress, 15 of 15 runs stale).
+  for (uint k = k0 + 2 * lid; k + 1 < k1; k += 2 * WG) {
+    float a0 = 0.f, a1 = 0.f;
+    for (uint s = 0; s < S_LOC; ++s) {
+      a0 += partials[((size_t)s * M + m) * K + k];
+      a1 += partials[((size_t)s * M + m) * K + k + 1];
+    }
+    const ushort b0 = rne_bf16(a0), b1 = rne_bf16(a1);
+    own[(size_t)m * K + k] = bf16f(b0);
+    own[(size_t)m * K + k + 1] = bf16f(b1);
+    d[((size_t)m * K + k) >> 1] = (uint)b0 | ((uint)b1 << 16);
+  }
+#else
+  for (uint k = k0 + lid; k < k1; k += WG) {
+#if FOLDED
     float acc = 0.f;
     for (uint s = 0; s < S_LOC; ++s) acc += partials[((size_t)s * M + m) * K + k];
     own[(size_t)m * K + k] = acc;
@@ -146,6 +155,7 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
     for (uint s = 0; s < S_LOC; ++s) d[((size_t)s * M + m) * K + k] = as_uint(partials[((size_t)s * M + m) * K + k]);
 #endif
   }
+#endif
   if (lid == 0) land[TRAILER(slot, j)] = n;
   atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
   barrier(CLK_GLOBAL_MEM_FENCE);
