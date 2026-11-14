@@ -81,6 +81,36 @@ gpu_lock_status() {
     n=${f##*/b70-gpu}; n=${n%.lock}
     if flock -n -x "$f" true; then echo "card $n  free"; else echo "card $n  held"; fi
   done
+  gpu_lock_holders
+}
+
+# gpu_lock_holders - who HOLDS each lock, for how long, and whether any process of that job has a GPU open right
+# now; "NO GPU OPEN" marks a job holding a lock it is not using. /proc/locks names the short-lived flock(1) helper,
+# not the job, so the holders are found from the lock file's openers: a waiter is a process with a flock(1) child
+# still blocked; the rest of the openers are held jobs, reported by their topmost process.
+gpu_lock_holders() {
+  local d f pid kids p gpu all waiting; d=$(gpu_lock_dir)
+  for f in "$d/b70-gpu.lock" "$d"/b70-gpu[0-9]*.lock; do
+    [ -e "$f" ] || continue
+    all=" $(fuser "$f" 2>/dev/null | tr -s ' ' | sed 's/^ //') "
+    waiting=" "
+    for pid in $all; do
+      [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = flock ] && waiting="$waiting$pid $(ps -o ppid= -p "$pid" | tr -d ' ') "
+    done
+    for pid in $all; do
+      case "$waiting" in *" $pid "*) continue ;; esac
+      case "$all" in *" $(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ') "*) continue ;; esac   # a child of a holder
+      [ -d "/proc/$pid" ] || continue
+      kids=$pid; p=$pid
+      while p=$(pgrep -d ' ' -P "${p// /,}" 2>/dev/null) && [ -n "$p" ]; do kids="$kids $p"; done
+      gpu="NO GPU OPEN"
+      for p in $kids; do
+        if ls -l "/proc/$p/fd" 2>/dev/null | grep -q '/dev/dri/renderD'; then gpu="GPU in use"; break; fi
+      done
+      printf '  %-14s held by %s, %s, %s: %s\n' "${f##*/}" "$pid" "$(ps -o etime= -p "$pid" | tr -d ' ')" "$gpu" \
+        "$(ps -o args= -p "$pid" | cut -c1-110)"
+    done
+  done
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
