@@ -30,7 +30,7 @@
 //   kv           fp32 [layers][S][M][2 kv_n]: the projection's k || v rows
 //   logits       fp32 [R][head_rows]; tpart fp32 [R][ceil(head_rows / 4096)][16][2]; cand u32 / unary fp32 [R][16]
 //   hid          fp32 [S][M][selector rank] (DFlash 2)
-//   candidate    u32 [R][64] with the candidate head; tpart then holds top64 per chunk
+//   candidate    u32 [R][80] with the candidate head (64 or 80 used); tpart then holds up to top80 per chunk
 namespace runtime::dflash {
 
 struct DFlashSizes {

@@ -81,13 +81,14 @@ int main(int argc, char** argv) {
   CHECK(candidate && kernels::gemm_sm_built_m(*candidate) == std::vector<unsigned>{7});
   for (bool v2 : {false, true})
     for (unsigned fmt : {0u, 1u, 2u})
-      for (auto k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv}) {
-        const auto names = kd::draft_variants(v2, fmt, true, 0, k, k, 0, 0, true);
-        CHECK(std::find(names.begin(), names.end(), kd::candidate_topk_variant()) != names.end());
-        CHECK(std::find(names.begin(), names.end(), kd::rerank_variant()) != names.end());
-        CHECK(std::find(names.begin(), names.end(), kd::topk_variant(248320, 248077, false)) == names.end());
-        bound.insert(names.begin(), names.end());
-      }
+      for (auto k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv})
+        for (auto [bits, c] : {std::pair<unsigned, unsigned>{4, 64}, {2, 80}}) {   // spec 19 v3d: 2 / 80 the default
+          const auto names = kd::draft_variants(v2, fmt, true, 0, k, k, 0, 0, true, false, false, 1, bits, c);
+          CHECK(std::find(names.begin(), names.end(), kd::candidate_topk_variant(c)) != names.end());
+          CHECK(std::find(names.begin(), names.end(), kd::rerank_variant(c)) != names.end());
+          CHECK(std::find(names.begin(), names.end(), kd::topk_variant(248320, 248077, false)) == names.end());
+          bound.insert(names.begin(), names.end());
+        }
   bound.insert(kd::proj_wide_variant());   // DFlashDrafter::project_wide
   {   // spec 19 v3d Task 6: the DPAS part beside the H1 / B4 reduce
     for (unsigned ks : {1u, 2u, 4u}) {

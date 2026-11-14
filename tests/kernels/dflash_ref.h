@@ -463,9 +463,10 @@ inline void gemv_i8w(const int8_t* q, const float* scales, uint32_t K, uint32_t 
 }
 // C3: exact int8 rows, four contiguous dot slices, then the best 16 real ids (before logit processing).
 inline std::vector<Cand> rerank_candidates(const int8_t* w, const float* scales, uint32_t K, uint32_t N,
-                                           const uint16_t* x, const uint32_t* ids, float mult, float cap) {
+                                           const uint16_t* x, const uint32_t* ids, float mult, float cap,
+                                           unsigned count = 64) {
   std::vector<Cand> scores;
-  for (unsigned c = 0; c < 64; ++c) {
+  for (unsigned c = 0; c < count; ++c) {
     const uint32_t id = ids[c];
     if (id >= N) continue;
     float sum = 0;
