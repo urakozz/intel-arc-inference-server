@@ -116,11 +116,12 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // verify-gemm-design.md, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
-enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3 };
+enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4 };
 struct SmallMTuning {
   unsigned K, N, S, layout;
   bool wg, magic, grf256, blk2d;
-  // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head)
+  // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head);
+  // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter)
   unsigned char mset = kSmAll;
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
@@ -189,13 +190,29 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     // Spec 17d: a tensor-parallel card's shapes (model::tp_card_desc, the folded crossing) at its verify lists'
     // M = 2..4 - each the one-card row's knobs for the per-card cell (gemv's S / layout, magic dequant, the 2D read
     // where the one-card cell has it); gate||up at gemv's grid S 8 (its SiLU the S 8 build), the int8 head's
-    // vocabulary half in the in-work-group form, as the one-card head's.
-    {5120, 8192, 1, 1, false, true, false, false, kSmVerify4},       // qkv||z, a card's heads
-    {5120, 7168, 2, 0, false, true, false, true, kSmVerify4},        // q||k||v
-    {5120, 17408, 8, 0, false, true, false, false, kSmVerify4},      // gate||up, the card's half
-    {3072, 5120, 4, 0, false, true, false, true, kSmVerify4},        // out_proj, o_proj: the card's K rows
-    {8704, 5120, 4, 0, false, true, false, true, kSmVerify4},        // down
-    {5120, 124160, 1, 2, true, false, false, false, kSmVerify4},     // the int8 head's vocabulary half
+    // vocabulary half in the in-work-group form, as the one-card head's. Spec 19 v3c: built at M = 2..8 (kSmVerify8) -
+    // a DFlash drafter's verify rows; M = 2..4 are the same binaries as before.
+    {5120, 8192, 1, 1, false, true, false, false, kSmVerify8},       // qkv||z, a card's heads
+    {5120, 7168, 2, 0, false, true, false, true, kSmVerify8},        // q||k||v
+    {5120, 17408, 8, 0, false, true, false, false, kSmVerify8},      // gate||up, the card's half
+    {3072, 5120, 4, 0, false, true, false, true, kSmVerify8},        // out_proj, o_proj: the card's K rows
+    {8704, 5120, 4, 0, false, true, false, true, kSmVerify8},        // down
+    {5120, 124160, 1, 2, true, false, false, false, kSmVerify8},     // the int8 head's vocabulary half
+    // Spec 19 v3c: the DFlash drafter's half on a TP card (kernels::dflash::kQwen38Tp) at its block's M = 8 - each the
+    // one-card drafter row's knobs at the half shape (int8: the in-work-group form; int4 g64 layout 1: the grid
+    // split-K the split prep folds); the candidate heads' vocabulary half at its 7 draft rows.
+    {5120, 3072, 1, 2, true, false, false, false, kSmDraft8},        // q||k||v (16 q / 4 kv heads)
+    {2048, 5120, 1, 2, true, false, false, false, kSmDraft8},        // o (its K rows)
+    {5120, 17408, 1, 2, true, false, false, false, kSmDraft8},       // gate||up (the MLP's half)
+    {8704, 5120, 1, 2, true, false, false, false, kSmDraft8},        // down (its K rows)
+    {5120, 1024, 1, 2, true, false, false, false, kSmDraft8},        // the context's k||v (4 kv heads)
+    {5120, 3072, 4, 1, false, true, false, false, kSmDraft8},
+    {2048, 5120, 4, 1, false, true, false, false, kSmDraft8},
+    {5120, 17408, 8, 1, false, true, false, false, kSmDraft8},
+    {8704, 5120, 4, 1, false, true, false, false, kSmDraft8},
+    {5120, 1024, 8, 1, false, true, false, false, kSmDraft8},
+    {5120, 124160, 1, 1, false, true, false, false, kSmDraft7},      // the int4 candidate head's half
+    {5120, 124160, 1, 3, false, false, false, false, kSmDraft7},     // the 2-bit candidate head's half
 };
 // The row of a shape, or null (that shape keeps gemv / gemv_i8w at every M). int8: layout 2, S 1.
 inline constexpr const SmallMTuning* small_m_tuning(unsigned K, unsigned N, unsigned S, unsigned layout) {
@@ -237,6 +254,7 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
 inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
   switch (t.mset) {
     case kSmVerify4: return {2, 3, 4};
+    case kSmVerify8: return {2, 3, 4, 5, 6, 7, 8};
     case kSmDraft8: return {8};
     case kSmDraft7: return {7};
     default: return {2, 3, 4, 5, 6, 7, 8, 16};

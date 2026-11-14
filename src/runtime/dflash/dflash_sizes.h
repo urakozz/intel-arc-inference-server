@@ -65,6 +65,11 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
 // (one launch for every layer): 3 + layers = 8.
 size_t draft_launches(const model::DFlashDesc& d, bool candidate_head = false);
 size_t project_launches(const model::DFlashDesc& d);
+// Spec 19 v3c: a TP card's half (runtime::dflash::TpDFlashDrafter; the candidate head's path): its draft list - the
+// draft list without the selector (v2: its projection and the walk), plus tp_send and tp_sum before each of the two
+// folds a layer - and its tail (v2: the selector's projection and the walk; v1: the walk).
+size_t tp_draft_launches(const model::DFlashDesc& d);
+size_t tail_launches(const model::DFlashDesc& d);
 
 // Spec 19d (spec 19 decision 5): what a session snapshot adds with a drafter - its whole ring, ring_k then ring_v
 // (sizes(...).ring_k + ring_v: 41,943,040 B for Qwen3.8's drafter, whatever max_len - every layer slides). The

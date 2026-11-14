@@ -31,7 +31,7 @@ TpEngine::Card& TpEngine::cd(uint32_t card) const {
 }
 
 TpEngine::TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedModel, 2> cards, uint32_t max_len,
-                   const TpOptions& opt, KvCache kv)
+                   const TpOptions& opt, KvCache kv, TpTapDrafter* drafter)
     : max_len_(max_len), opt_(opt), kv_(kv), pf_cap_(default_prefill_chunk_cap()) {
   if (d1.handle() != d0.handle())
     throw std::invalid_argument("runtime::TpEngine: card 1 is not a view of card 0's Level Zero context");
@@ -62,6 +62,20 @@ TpEngine::TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedMo
   if (mtp_ && crossing_ != model::TpCrossing::Folded)
     throw std::invalid_argument("runtime::TpEngine: MTP under tensor parallel is built for the folded crossing "
                                 "(runtime::kTpDefaultCrossing); the slices form runs plain decode");
+  // Spec 19 v3c: a tap drafter - one proposer, the folded crossing, its block within the 8 GDN slots on both halves.
+  if (drafter) {
+    if (mtp_)
+      throw std::invalid_argument("runtime::TpEngine: a tap drafter and the MTP head are two proposers - load the "
+                                  "cards without the head (one proposer per server, spec 19 decision 3)");
+    if (crossing_ != model::TpCrossing::Folded)
+      throw std::invalid_argument("runtime::TpEngine: DFlash under tensor parallel is built for the folded crossing");
+    const uint32_t mk = drafter->card(0).max_k();
+    if (mk == 0 || mk + 1 > TapVerifyDims::kSlots || drafter->card(1).max_k() != mk)
+      throw std::invalid_argument("runtime::TpEngine: the drafter's halves draft " + std::to_string(mk) + " / " +
+                                  std::to_string(drafter->card(1).max_k()) + " ids a block; the verify lists take "
+                                  "1.." + std::to_string(TapVerifyDims::kSlots - 1) + " on both cards");
+    drafter_ = drafter;
+  }
   if (opt.timeout_ms == 0 || opt.spin_limit == 0)
     throw std::invalid_argument("runtime::TpEngine: a crossing needs non-zero bounds");
   layout_ = tp::layout(*desc, crossing_);
@@ -91,8 +105,43 @@ TpEngine::TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedMo
     c.link = link;
     c.step.emplace(build_tp(c.ctx, c.model, c.buffers, link, c.tap.get()));
     if (mtp_) capture_mtp_lists(r);
+    if (drafter_) {   // spec 19 v3c: the drafter's slots at the card's shapes, its half's taps
+      c.df_slots = std::make_unique<l0::Mem>(c.ctx, l0::MemKind::Device, TapVerifyDims::gdn_spec_bytes(*c.model.desc));
+      c.tv.gdn_spec = c.df_slots.get();
+      c.tv.slots = TapVerifyDims::kSlots;
+      c.tv.taps = &drafter_->card(r).taps();
+      c.tv.layers = drafter_->card(r).tap_layers();
+      capture_tap_lists(r, {});
+    }
   }
   reset();
+}
+
+// Spec 19 v3c: a card's tap verify lists at M = 1..max_k + 1, each captured twice where spec 28c's table switches its
+// attention by depth (Engine::capture_verify's rule; a forced kind or a profiled width keeps one list per M).
+void TpEngine::capture_tap_lists(uint32_t card, const CaptureOptions& opt) {
+  Card& c = cd(card);
+  c.verifies.clear();
+  c.verify_deep.clear();
+  c.verify_deep_from.clear();
+  const model::ModelDesc& d = *c.model.desc;
+  for (uint32_t M = 1; M <= drafter_->card(card).max_k() + 1; ++M) {
+    const uint32_t from = opt.force_attn == VerifyAttnForce::Auto && opt.profile == nullptr
+                              ? verify_attn_deep_from(M, kv_ == KvCache::Int8, d.fa_q_heads, d.fa_kv_heads)
+                              : kDpasNever;
+    c.verifies.push_back(build_tp_verify_taps(c.ctx, c.model, c.buffers, c.tv, c.link, M, opt));
+    c.verify_deep.push_back(from != kDpasNever
+                                ? std::make_unique<CapturedStep>(build_tp_verify_taps(
+                                      c.ctx, c.model, c.buffers, c.tv, c.link, M, attn_forced(VerifyAttnForce::Dpas)))
+                                : nullptr);
+    c.verify_deep_from.push_back(from);
+  }
+}
+
+void TpEngine::recapture_verify(const std::array<CaptureOptions, model::kTpSize>& opt) {
+  if (!drafter_) throw std::runtime_error("runtime::TpEngine::recapture_verify: built for the drafter's lists only");
+  flush_projection();
+  for (uint32_t r = 0; r < model::kTpSize; ++r) capture_tap_lists(r, opt[r]);
 }
 
 // Spec 17d: a card's MTP buffers and lists - the draft lists i = 0..kMaxDraft - 1 and the verify lists at
@@ -141,7 +190,10 @@ void TpEngine::reset() {
     cd(r).persist.zero(cd(r).imm);
     cd(r).zero_crossing();
     if (cd(r).mtp) cd(r).mtp->zero(cd(r).imm);   // spec 17d: the head's KV, slots, hidden rows and Control
+    if (drafter_) drafter_->card(r).reset(cd(r).imm);   // spec 19 v3c: a cold drafter half
   }
+  pending_projection_ = {};
+  pending_tail_ = {};
   broken_ = false;
   drop_ = -1;
   verify_k_ = kNoVerify;
@@ -163,13 +215,21 @@ void TpEngine::step_once() {
   run_lists({&cd(0).step->list, &cd(1).step->list}, true, "step");
 }
 
-void TpEngine::run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, bool crossings, const char* what) {
+void TpEngine::run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, bool crossings, const char* what,
+                         bool heads, const std::array<std::vector<l0::CmdList*>, model::kTpSize>& front) {
   if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
   const int drop = drop_;
   drop_ = -1;
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     if (int(r) == drop) continue;
-    cd(r).queue.execute(*lists[r], &cd(r).fence);
+    if (front[r].empty()) {
+      cd(r).queue.execute(*lists[r], &cd(r).fence);
+    } else {   // spec 19 v3c: the deferred projection / the drafter's tails first, one submit
+      std::vector<ze_command_list_handle_t> h;
+      for (l0::CmdList* l : front[r]) h.push_back(l->handle());
+      h.push_back(lists[r]->handle());
+      cd(r).queue.execute(uint32_t(h.size()), h.data(), &cd(r).fence);
+    }
     pending_[r] = true;
   }
   const std::string dropped =
@@ -191,8 +251,47 @@ void TpEngine::run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, 
            std::to_string(w[tp::kStamp]) + "; " + std::to_string(w[tp::kFailed]) + " failed chunk(s)" + dropped);
   }
   if (drop >= 0) fail("card " + std::to_string(drop) + "'s list was not submitted (drop_next()) but no wait failed");
-  merge_heads();
+  if (heads) merge_heads();
 }
+
+// Spec 19 v3c: what rides at the front of the next submit - each card's deferred projection, and (`tails`) the
+// drafter's pending tails - taken, so a failed submit does not replay them.
+std::array<std::vector<l0::CmdList*>, model::kTpSize> TpEngine::take_front(bool tails) {
+  std::array<std::vector<l0::CmdList*>, model::kTpSize> f;
+  for (uint32_t r = 0; r < model::kTpSize; ++r) {
+    if (pending_projection_[r]) f[r].push_back(pending_projection_[r]);
+    if (tails && pending_tail_[r]) f[r].push_back(pending_tail_[r]);
+  }
+  pending_projection_ = {};
+  if (tails) pending_tail_ = {};
+  return f;
+}
+
+void TpEngine::flush_projection() {
+  if (!pending_projection_[0] && !pending_projection_[1]) return;
+  const std::array<l0::CmdList*, model::kTpSize> lists = pending_projection_;
+  pending_projection_ = {};
+  run_lists(lists, false, "drafter projection");
+}
+
+void TpEngine::run_aux(const std::array<l0::CmdList*, model::kTpSize>& lists, const char* what) {
+  run_lists(lists, true, what, false, take_front(false));
+}
+
+const dflash::DFlashDraftOut& TpEngine::draft_tap(uint32_t k, float temperature, uint64_t seed) {
+  if (!drafter_) throw std::runtime_error("runtime::TpEngine::draft_tap: no drafter (built without --spec dflash)");
+  if (k == 0 || k > max_verify_k())
+    throw std::runtime_error("runtime::TpEngine::draft_tap: k " + std::to_string(k) + " is outside [1, " +
+                             std::to_string(max_verify_k()) + "] at pos " + std::to_string(pos()));
+  if (pending_tail_[0] || pending_tail_[1])
+    throw std::logic_error("runtime::TpEngine::draft_tap: the last block's drafts were never verified");
+  run_aux(drafter_->draft_lists(k, temperature, seed), "draft list");
+  pending_tail_ = drafter_->merge();
+  return drafter_->readback();
+}
+
+const TpLink& TpEngine::link(uint32_t card) const { return cd(card).link; }
+const l0::Mem* TpEngine::drafter_slots(uint32_t card) const { return cd(card).df_slots.get(); }
 
 void TpEngine::merge_heads() {
   Control& a = *cd(0).ctl;
@@ -221,10 +320,11 @@ void TpEngine::set_token(uint32_t id) {
 uint32_t TpEngine::pending() const { return cd(0).ctl->cur_token[0]; }
 
 void TpEngine::ingest(const std::vector<uint32_t>& ids) {
+  flush_projection();
   for (uint32_t id : ids) {
     for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).ctl->n_active = 1;
     set_token(id);
-    if (mtp_)
+    if (mtp_ || drafter_)
       mtp_step1();
     else
       step_once();
@@ -240,7 +340,7 @@ std::vector<uint32_t> TpEngine::generate(uint32_t n, const std::function<void(ui
   for (uint32_t i = 0; i < n; ++i) {
     const uint32_t id = cd(0).ctl->cur_token[0];   // == card 1's after the merge
     const Clock::time_point f0 = Clock::now();
-    if (mtp_)
+    if (mtp_ || drafter_)
       mtp_step1();
     else
       step_once();
@@ -270,7 +370,8 @@ size_t hid_bytes(const model::ModelDesc& d) { return size_t(d.hidden) * 2; }
 size_t TpEngine::state_bytes() const {
   size_t t = 0;
   for (uint32_t r = 0; r < model::kTpSize; ++r) t += cd(r).persist.gdn_state.size() + cd(r).persist.conv_ring.size();
-  return t + (mtp_ ? hid_bytes(*cd(0).model.desc) : 0);   // spec 17d: the head's h_{pos-1}
+  // spec 17d: the head's h_{pos-1}; spec 19 v3c: the drafter's ring, one card's layout
+  return t + (mtp_ ? hid_bytes(*cd(0).model.desc) : 0) + (drafter_ ? drafter_->ring_bytes() : 0);
 }
 
 size_t TpEngine::kv_bytes(uint32_t n_pos) const {
@@ -280,6 +381,7 @@ size_t TpEngine::kv_bytes(uint32_t n_pos) const {
 }
 
 void TpEngine::save_state(void* host) const {
+  const_cast<TpEngine*>(this)->flush_projection();   // the logical session is unchanged (Engine::save_state's rule)
   std::array<std::vector<uint8_t>, 2> gdn, conv;
   const uint8_t* gp[2];
   const uint8_t* cp[2];
@@ -298,12 +400,26 @@ void TpEngine::save_state(void* host) const {
     const size_t off = state_bytes() - hid_bytes(*cd(0).model.desc);
     cd(0).imm.copy(static_cast<uint8_t*>(host) + off, cd(0).mtp->hh.ptr(), hid_bytes(*cd(0).model.desc));
   }
+  if (drafter_) drafter_->save_ring(static_cast<uint8_t*>(host) + state_bytes() - drafter_->ring_bytes());
 }
 
 void TpEngine::load_state(const void* host, uint32_t pos) {
   if (pos > max_len_)
     throw std::runtime_error("runtime::TpEngine::load_state: pos " + std::to_string(pos) + " exceeds max_len " +
                              std::to_string(max_len_));
+  // A restore replaces the whole session, so it clears a failed crossing as reset() does (the crossings' buffers,
+  // counters and state words zeroed after both cards settle) - the prefix cache's hit path calls no reset() first, and
+  // without this every later request on the engine failed (the TP DFlash replay, 2026-11-14: 1 stale crossing, then 8
+  // requests refused).
+  if (broken_) {
+    for (uint32_t r = 0; r < model::kTpSize; ++r)
+      if (!settle(r))
+        throw std::runtime_error("runtime::TpEngine::load_state: card " + std::to_string(r) +
+                                 "'s failed step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
+    for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).zero_crossing();
+    broken_ = false;
+    drop_ = -1;
+  }
   std::array<std::vector<uint8_t>, 2> gdn, conv;
   uint8_t* gp[2];
   uint8_t* cp[2];
@@ -314,6 +430,8 @@ void TpEngine::load_state(const void* host, uint32_t pos) {
     cp[r] = conv[r].data();
   }
   const auto* h = static_cast<const uint8_t*>(host);
+  pending_projection_ = {};   // spec 19 v3c: a restore discards a deferred projection (Engine's rule)
+  pending_tail_ = {};
   tp::scatter_state(*cd(0).model.desc, h, gp, cp);
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     Card& c = cd(r);
@@ -323,9 +441,11 @@ void TpEngine::load_state(const void* host, uint32_t pos) {
       c.imm.copy(c.mtp->hh.ptr(), h + state_bytes() - hid_bytes(*c.model.desc), hid_bytes(*c.model.desc));
       c.ctl->gdn_live = 0;   // the state went into slot 0
     }
+    if (drafter_) c.ctl->gdn_live = 0;   // spec 19 v3c: the same
     c.ctl->pos = pos;
     c.ctl->n_active = 0;
   }
+  if (drafter_) drafter_->load_ring(h + state_bytes() - drafter_->ring_bytes());
   verify_k_ = kNoVerify;
 }
 
@@ -436,16 +556,26 @@ void TpEngine::require_mtp(const char* what) const {
                              ": MTP is off - load both cards with the head (loader::load_tp's mtp, --spec mtp)");
 }
 
+void TpEngine::require_spec(const char* what) const {
+  if (!mtp_ && !drafter_)
+    throw std::runtime_error(std::string("runtime::TpEngine::") + what +
+                             ": no proposer - load both cards with the MTP head (--spec mtp) or build the engine with a "
+                             "drafter (--spec dflash)");
+}
+
+uint32_t TpEngine::max_draft() const { return mtp_ ? kMaxDraft : drafter_ ? drafter_->card(0).max_k() : 0; }
+
 uint32_t TpEngine::max_verify_k() const {
   const uint32_t pos = cd(0).ctl->pos;
-  if (!mtp_ || pos == 0 || pos + 1 >= max_len_) return 0;
-  return std::min<uint32_t>(kMaxDraft, max_len_ - pos - 1);
+  // Spec 19 v3c: a drafter's verify needs no h_{pos-1}, so pos 0 verifies too (Engine's rule).
+  if ((!mtp_ && !drafter_) || (mtp_ && pos == 0) || pos + 1 >= max_len_) return 0;
+  return std::min<uint32_t>(max_draft(), max_len_ - pos - 1);
 }
 
 const uint32_t* TpEngine::verify_ids() const { return cd(0).ctl->out_token; }
 
 void TpEngine::set_draft_input(uint32_t i, uint32_t id) {
-  if (i >= kMaxDraft || id >= model::Qwen35::kVocab)
+  if (i >= std::max(kMaxDraft, max_draft()) || id >= model::Qwen35::kVocab)   // spec 19 v3c: a drafter's 7
     throw std::runtime_error("runtime::TpEngine::set_draft_input: draft " + std::to_string(i) + ", id " +
                              std::to_string(id));
   for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).ctl->cur_token[1 + i] = id;
@@ -506,14 +636,18 @@ void TpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick,
 bool TpEngine::draft_probs() const { return mtp_ && !cd(0).draft_probs.empty(); }
 
 void TpEngine::verify(uint32_t k) {
-  require_mtp("verify");
+  require_spec("verify");
   const uint32_t pos = cd(0).ctl->pos;
-  if (k > kMaxDraft || pos == 0 || size_t(pos) + k + 1 > max_len_)
+  if (k > max_draft() || (mtp_ && pos == 0) || size_t(pos) + k + 1 > max_len_)
     throw std::runtime_error("runtime::TpEngine::verify: k " + std::to_string(k) + " at pos " + std::to_string(pos) +
                              " (max_verify_k() = " + std::to_string(max_verify_k()) + "; k <= " +
-                             std::to_string(kMaxDraft) + ", pos >= 1, and pos + k + 1 <= max_len " +
+                             std::to_string(max_draft()) + ", pos >= 1 with the MTP head, and pos + k + 1 <= max_len " +
                              std::to_string(max_len_) + ")");
-  for (uint32_t r = 0; r <= k; ++r)
+  // Spec 19 v3c: with the drafter's tails pending, rows 1..k are written on the cards by the tails - checked after.
+  const bool tails = pending_tail_[0] != nullptr;
+  if (tails != (pending_tail_[1] != nullptr))
+    throw std::logic_error("runtime::TpEngine::verify: the drafter's tail is pending on one card only");
+  for (uint32_t r = 0; r <= (tails ? 0 : k); ++r)
     if (cd(0).ctl->cur_token[r] >= model::Qwen35::kVocab || cd(1).ctl->cur_token[r] != cd(0).ctl->cur_token[r])
       throw std::runtime_error("runtime::TpEngine::verify: row " + std::to_string(r) + "'s id " +
                                std::to_string(cd(0).ctl->cur_token[r]) +
@@ -521,6 +655,7 @@ void TpEngine::verify(uint32_t k) {
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     Card& c = cd(r);
     c.ctl->n_active = k + 1;
+    if (!mtp_) continue;
     // The head's KV fill of the same rows at pos - 1 .. pos + k - 1 (Engine::verify).
     c.hctl->pos = pos - 1;
     c.hctl->n_active = k + 1;
@@ -534,11 +669,16 @@ void TpEngine::verify(uint32_t k) {
     Card& c = cd(r);
     lists[r] = c.verify_deep[k] && pos + 1 >= c.verify_deep_from[k] ? &c.verify_deep[k]->list : &c.verifies[k].list;
   }
-  run_lists(lists, true, "verify step");
+  run_lists(lists, true, "verify step", true, take_front(true));
+  if (tails)
+    for (uint32_t r = 1; r <= k; ++r)
+      if (cd(1).ctl->cur_token[r] != cd(0).ctl->cur_token[r])
+        fail("the drafter's tails wrote draft " + std::to_string(r) + " as " + std::to_string(cd(0).ctl->cur_token[r]) +
+             " on card 0 and " + std::to_string(cd(1).ctl->cur_token[r]) + " on card 1");
 }
 
-void TpEngine::commit(uint32_t j, uint32_t next_token) {
-  require_mtp("commit");
+void TpEngine::commit(uint32_t j, uint32_t next_token, bool defer_projection) {
+  require_spec("commit");
   if (verify_k_ == kNoVerify || j > verify_k_)
     throw std::runtime_error("runtime::TpEngine::commit: j " + std::to_string(j) +
                              (verify_k_ == kNoVerify ? " with no verify() pending"
@@ -549,26 +689,31 @@ void TpEngine::commit(uint32_t j, uint32_t next_token) {
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     Card& c = cd(r);
     const size_t row = hid_bytes(*c.model.desc);
-    c.ctl->gdn_live = (c.ctl->gdn_live + j) % MtpBuffers::kSlots;   // row j's state live (Engine::commit)
-    c.imm.copy(c.mtp->hh.ptr(), c.mtp->hh.as<uint8_t>() + (1 + size_t(j)) * row, row);   // row j's hidden
+    // Row j's state live (Engine::commit): MTP's 4 slots, the drafter's 8.
+    c.ctl->gdn_live = (c.ctl->gdn_live + j) % (mtp_ ? MtpBuffers::kSlots : TapVerifyDims::kSlots);
+    if (mtp_) c.imm.copy(c.mtp->hh.ptr(), c.mtp->hh.as<uint8_t>() + (1 + size_t(j)) * row, row);   // row j's hidden
     c.ctl->pos = verify_pos_ + j + 1;
     c.ctl->n_active = 1;
     c.ctl->cur_token[0] = next_token;
+    // Spec 19 v3c: the committed rows' taps (rows 0..j) into each card's half of the ring - before anything rewrites
+    // the taps (the next verify), at the front of the next submit when deferred.
+    if (drafter_) pending_projection_[r] = &drafter_->card(r).projection(verify_pos_, j + 1);
   }
   verify_k_ = kNoVerify;
+  if (drafter_ && !defer_projection) flush_projection();
 }
 
 void TpEngine::mtp_normalise_live() {
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     Card& c = cd(r);
-    if (!c.mtp || c.ctl->gdn_live == 0) continue;
+    if ((!c.mtp && !c.df_slots) || c.ctl->gdn_live == 0) continue;
     c.imm.copy(c.persist.gdn_state.ptr(), c.live_gdn(), c.persist.gdn_state.size());
     c.ctl->gdn_live = 0;
   }
 }
 
 void TpEngine::mtp_step1() {
-  if (cd(0).ctl->pos == 0) {
+  if (cd(0).ctl->pos == 0 && !drafter_) {   // spec 19 v3c: a drafter verifies at pos 0 too
     // No h_{-1}: the plain list, which reads and writes slot 0, then its hidden into hh row 0 (Engine::mtp_step1).
     mtp_normalise_live();
     step_once();
@@ -577,11 +722,12 @@ void TpEngine::mtp_step1() {
     return;
   }
   verify(0);
-  commit(0, verify_ids()[0]);
+  // Spec 19 v3c: a drafter's projection of the row rides at the front of the next submit (one submit a plain token).
+  commit(0, verify_ids()[0], drafter_ != nullptr);
 }
 
 void TpEngine::read_logits_into(float* host, uint32_t rows) const {
-  if (rows == 0 || rows > MtpBuffers::kSlots)
+  if (rows == 0 || rows > DecodeBuffers::kM)   // spec 19 v3c: a drafter's verify rows, up to 8
     throw std::runtime_error("runtime::TpEngine::read_logits_into: rows " + std::to_string(rows));
   // D9: the gather - each card's [rows][N] half into the full [rows][kVocab] row.
   const uint32_t N = cd(0).model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
@@ -607,7 +753,7 @@ float* TpEngine::host_rows(size_t floats) {
 }
 
 const CapturedStep& TpEngine::verify_step(uint32_t card, uint32_t M) const {
-  require_mtp("verify_step");
+  require_spec("verify_step");
   return cd(card).verifies.at(M - 1);
 }
 const CapturedStep& TpEngine::draft_step(uint32_t card, uint32_t i) const {
@@ -644,7 +790,9 @@ MemoryComponents TpEngine::memory_use(uint32_t card) const {
   m.model = model_device_bytes(c.model);
   m.kv = c.persist.kv_k.size() + c.persist.kv_v.size();
   m.decode_state = c.persist.bytes() - m.kv + c.scratch.bytes() + c.bytes_crossing() + (c.tap ? c.tap->size() : 0) +
-                   (c.mtp ? c.mtp->bytes() : 0);   // spec 17d: the head's buffers
+                   (c.mtp ? c.mtp->bytes() : 0) +           // spec 17d: the head's buffers
+                   (c.df_slots ? c.df_slots->size() : 0);   // spec 19 v3c: the drafter's GDN slots
+  m.drafter = drafter_ ? drafter_->card(card).bytes() : 0;   // its half's weights and buffers
   m.prefill_scratch = pf_bytes_[card];   // spec 17c: after prepare_prefill()
   m.int8 = pf_int8_bytes_[card];
   return m;

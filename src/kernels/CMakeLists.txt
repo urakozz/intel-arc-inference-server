@@ -876,6 +876,96 @@ if(B70_TP AND B70_MTP)
 endif()
 # ==== Spec 17d ============================================================= (end) ====
 
+# ==== Spec 19 v3c: DFlash under tensor parallel (`--parallel tp --spec dflash`, Qwen3.8) ===== (begin) ====
+# Plan: docs/superpowers/plans/2026-11-13-spec19v3c-dflash-tensor-parallel.md. Additive only: new names; no engine binds
+# any of these without a drafter. What a card's tap verify list (runtime::build_tp_verify_taps) binds at M = 1..8 beyond
+# spec 17d's M = 1..4 lists, at model::tp_card_desc's shapes (the folded crossing):
+#   GDN      gdn_step_slots_M<M>_N8_GK8V24, M = 1..8 (the drafter's 8 state slots at the card's stride: 48 x 24 x
+#            128 x 128 floats); prep_gated_head_M<M>_GK8V24, M = 5..8
+#   FA       attn_prep / attn_v2 at M = 5..8, 12 q / 2 kv, and their _KV8 twins; attn_verify_dpas at 12 / 2 with the
+#            one-card M = 5..8 lines' levers (VDPAS_LEVERS: the PAIR split of 2..4 rows does not fit 6+ row blocks)
+#   MLP      prep_silu_mul_M<M>_I8704, M = 5..8
+#   tp.cl    tp_cross at M = 5..8 (folded, S4) per rank, tp_argmax at M = 5..8 per vocabulary half
+#   linears  the per-card gemm_sm rows (kernels::kSmallMTuning's spec 17d rows, now at M = 2..8: the 28b block below)
+if(B70_TP AND B70_MTP AND B70_VERIFY_M8)
+  set(TP_GDN_SLOT8_DEFINES ${CTRL_DEFINES} NEGA_OFF=20480 DTBIAS_OFF=20504 ${TP_GDN_HEADS}
+                           SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=18874368 N_SLOTS=8)
+  foreach(MM 1 2 3 4 5 6 7 8)
+    add_ocloc_kernel(gdn_step_slots_M${MM}_N8_GK8V24 SOURCE ${GDN_CL} DEFINES ${TP_GDN_SLOT8_DEFINES} M=${MM})
+  endforeach()
+  foreach(MM 5 6 7 8)
+    add_ocloc_kernel(prep_gated_head_M${MM}_GK8V24 SOURCE ${PREP_CL} DEFINES M=${MM} ${TP_GDN_HEADS})
+    add_ocloc_kernel(prep_silu_mul_M${MM}_I8704 SOURCE ${PREP_CL} DEFINES M=${MM} INTERMEDIATE=8704)
+    add_ocloc_kernel(attn_prep_M${MM}_Q12KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} ${TP_FA_HEADS})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${TP_FA_HEADS})
+    if(B70_KV8)
+      add_ocloc_kernel(attn_prep_M${MM}_Q12KV2_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 ${TP_FA_HEADS})
+      add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q12KV2_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} ${TP_FA_HEADS})
+    endif()
+    if(B70_VERIFY_DPAS)
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_Q12KV2 SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=0 ${TP_FA_HEADS}
+                       OPTIONS ${VDPAS_OPTIONS})
+      if(B70_KV8)
+        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_Q12KV2_KV8 SOURCE ${VDPAS_CL}
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=1 ${TP_FA_HEADS}
+                         OPTIONS ${VDPAS_OPTIONS})
+      endif()
+    endif()
+    foreach(R 0 1)
+      add_ocloc_kernel(tp_cross_M${MM}_K5120_G20_S4_F_R${R} SOURCE ${TP_CL}
+                       DEFINES TP_CROSS=1 M=${MM} K=5120 FOLD_G=20 S_LOC=4 FOLDED=1 RANK=${R})
+    endforeach()
+    set(_tp_am ${CTRL_DEFINES} CTRL_OUTV=20 TP_ARGMAX=1 M=${MM} VOCAB=124160)
+    add_ocloc_kernel(tp_argmax_M${MM}_N124160_U124160_B0 SOURCE ${TP_CL}
+                     DEFINES ${_tp_am} VOCAB_USED=124160 ID_BASE=0)
+    add_ocloc_kernel(tp_argmax_M${MM}_N124160_U123917_B124160 SOURCE ${TP_CL}
+                     DEFINES ${_tp_am} VOCAB_USED=123917 ID_BASE=124160)
+  endforeach()
+  endforeach()
+endif()
+# The drafter split over both cards (runtime::dflash::TpDFlashDrafter; kernels::dflash::kQwen38Tp): a card's draft and
+# projection lists at its half shapes - 16 q / 4 kv heads, the MLP's 8704, its vocabulary half of the candidate head:
+#   df_prep / df_prep_split   at I 8704, Q16KV4 (df_qkv_prep, df_silu_mul, df_ctx_store; the rest is the hidden's)
+#   df_attn                   the DPAS part (KS 4) and its reduce (the H1 B4 binary) at 16 / 4 heads
+#   df_candidate              a half's top C of its candidate rows (N 124160; card 1's real rows end at 123917)
+#   df_rerank                 against the card's int8 head half, its ids offset by the half's first (ID_BASE)
+#   tp.cl                     tp_send + tp_sum at M 8 per rank: the all-reduce after o and down, the sum in fp32 into
+#                             the conv's finish side - S1 (gemm_sm_i8w's one slice) and S4 (the int4 grid split-K)
+# The linears: kernels::kSmallMTuning's spec 19 v3c rows (the 28b block below).
+if(B70_TP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(DF_TP_SHAPE M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2 INTER=8704 NH=16 NKV=4 HD=128 RING=2048)
+  add_ocloc_kernel(df_prep_M8_H5120_I8704_Q16KV4_D128_G16T2_R2048_V248320 SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} ${DF_TP_SHAPE})
+  add_ocloc_kernel(df_prep_M8_H5120_I8704_Q16KV4_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8 SOURCE ${DF_DIR}/df_prep_split.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} ${DF_TP_SHAPE})
+  add_ocloc_kernel(df_attn_M8_Q16KV4_D128_R2048_W2048_P128_H1_B4 SOURCE ${DF_DIR}/df_attn_rows.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=16 NKV=4 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
+                           CAUSAL=0 HPW=1 RPW=4)
+  add_ocloc_kernel(df_attn_M8_Q16KV4_D128_R2048_W2048_P128_dpas_k4 SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=16 NKV=4 HD=128 RING=2048 WIN=2048 PB=128 KS=4)
+  foreach(CC 64 80)
+    add_ocloc_kernel(df_candidate_R7_N124160_U124160_K${CC} SOURCE ${DF_DIR}/df_candidate.cl
+                     DEFINES R=7 N=124160 USED=124160 C=${CC})
+    add_ocloc_kernel(df_candidate_R7_N124160_U123917_K${CC} SOURCE ${DF_DIR}/df_candidate.cl
+                     DEFINES R=7 N=124160 USED=123917 C=${CC})
+    add_ocloc_kernel(df_rerank_R7_K5120_U124160_C${CC}_Q4_B0 SOURCE ${DF_DIR}/df_rerank.cl
+                     DEFINES K=5120 USED=124160 C=${CC} ID_BASE=0u)
+    add_ocloc_kernel(df_rerank_R7_K5120_U123917_C${CC}_Q4_B124160 SOURCE ${DF_DIR}/df_rerank.cl
+                     DEFINES K=5120 USED=123917 C=${CC} ID_BASE=124160u)
+  endforeach()
+  foreach(S 1 4)
+    foreach(R 0 1)
+      add_ocloc_kernel(tp_cross_M8_K5120_G20_S${S}_F_R${R}_sum SOURCE ${TP_CL}
+                       DEFINES TP_CROSS=1 M=8 K=5120 FOLD_G=20 S_LOC=${S} FOLDED=1 RANK=${R} TP_SUM=${S})
+    endforeach()
+  endforeach()
+endif()
+# ==== Spec 19 v3c ========================================================== (end) ====
+
 # ==== Spec 18b: K2-Horizon decode (model::k2()) ============================= (begin) ====
 # Additive only: no existing source is edited, so every binary above keeps its name, its
 # command line and its bytes (tools/kernel_cmdlines' diff: additions only). K2-only
@@ -2168,8 +2258,18 @@ endif()
 set(GEMM_SM_TP17D "5120 8192 1 1 MG" "5120 7168 2 0 MG B2D" "5120 17408 8 0 MG" "3072 5120 4 0 MG B2D"
                   "8704 5120 4 0 MG B2D" "5120 124160 1 2 WG")
 if(B70_TP AND B70_MTP)
-  set(_m234 2 3 4)
-  gemm_sm_rows(GEMM_SM_TP17D _m234)
+  set(_m2to8 2 3 4 5 6 7 8)   # spec 19 v3c: M = 5..8 for a DFlash drafter's verify rows (kSmVerify8)
+  gemm_sm_rows(GEMM_SM_TP17D _m2to8)
+endif()
+# Spec 19 v3c: the DFlash drafter's half on a TP card at its block's 8 rows, the candidate heads' half at its 7.
+set(GEMM_SM_DFLASH_TP "5120 3072 1 2 WG" "2048 5120 1 2 WG" "5120 17408 1 2 WG" "8704 5120 1 2 WG" "5120 1024 1 2 WG"
+                      "5120 3072 4 1 MG" "2048 5120 4 1 MG" "5120 17408 8 1 MG" "8704 5120 4 1 MG" "5120 1024 8 1 MG")
+set(GEMM_SM_DFLASH_TP_HEAD "5120 124160 1 1 MG" "5120 124160 1 3")
+if(B70_TP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(_m8 8)
+  set(_m7 7)
+  gemm_sm_rows(GEMM_SM_DFLASH_TP _m8)
+  gemm_sm_rows(GEMM_SM_DFLASH_TP_HEAD _m7)
 endif()
 # tests/CMakeLists.txt reads the list (gemm_sm_names_test, gemm_sm_test).
 set_property(GLOBAL PROPERTY B70_GEMM_SM_KERNELS ${GEMM_SM_TARGETS})

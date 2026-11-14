@@ -2799,9 +2799,26 @@ if(B70_KV8)
     ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD_KV8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
 endif()
 
+# Spec 19 v3c: DFlash under tensor parallel (gpu_lock.sh box) - tp_dflash_test: speculative greedy ids at K = 7, 3, 1
+# with the drafter split over both cards against plain TP decode (the golden tie rule, then the f32 judge:
+# QWEN_KEYS_RE='^tp_dflash_'), T1 of the drafter halves between the cards, a restore bitwise, a dropped draft list
+# bounded. `<ckpt> <drafter> cost <depth>` measures plan 19v3c's verify table and round. Built where the drafter's TP
+# kernels are (B70_TP, B70_DFLASH, B70_VERIFY_M8, B70_MTP).
+if(B70_TP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(tp_dflash_test runtime/tp_dflash_test.cc)
+  target_include_directories(tp_dflash_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden ${CMAKE_SOURCE_DIR}/tests/server)
+  target_link_libraries(tp_dflash_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader b70_l0
+    b70_model)
+  add_test(NAME tp_dflash_test COMMAND tp_dflash_test ${B70_TEST_SNAPSHOT})
+  set_tests_properties(tp_dflash_test PROPERTIES
+    LABELS "checkpoint;tp;dflash" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
+    ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+endif()
+
 # b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
 b70_cli_reject(cli_reject_tp_spec ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --spec dflash
-  --draft-model ${B70_NO_MODEL} EXPECT "--spec dflash / dflash-lookup under tensor parallel are not built")
+  --draft-model ${B70_NO_MODEL} EXPECT "b70-decode --parallel tp drafts with the MTP head only")
 b70_cli_reject(cli_reject_tp_split ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --pipeline-split 32
   EXPECT "--pipeline-split belongs to --parallel pp")
 b70_cli_reject(cli_reject_tp_profile ${B70_NO_MODEL} --profile --parallel tp
@@ -3849,6 +3866,13 @@ target_link_libraries(dflash_loader_test PRIVATE b70_dflash_loader)
 add_test(NAME dflash_loader_test COMMAND dflash_loader_test
   ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
 set_tests_properties(dflash_loader_test PROPERTIES LABELS dflash)
+# Spec 19 v3c Task 2: the drafter's halves for --parallel tp (loader/dflash_tp_split.h) in every device form, and a TP
+# card's plan with its half at 262,144 positions. Host only.
+add_executable(dflash_tp_split_test loader/dflash_tp_split_test.cc)
+target_include_directories(dflash_tp_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_tp_split_test PRIVATE b70_dflash_loader b70_dflash_plan b70_plan b70_model)
+add_test(NAME dflash_tp_split_test COMMAND dflash_tp_split_test)
+set_tests_properties(dflash_tp_split_test PROPERTIES LABELS "dflash;tp")
 add_executable(dflash_head_test loader/dflash_head_test.cc)
 target_include_directories(dflash_head_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dflash_head_test PRIVATE b70_dflash_loader)

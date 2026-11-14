@@ -896,7 +896,8 @@ int run(int argc, char** argv) {
   const bool mtp_auto = mtp_on && spec.adaptive;
   const uint32_t mtp_k = mtp_on ? spec.max_k : 0;
   // Spec 17b: --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp).
-  // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash does not.
+  // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash only in b70-serve
+  // (spec 19 v3c).
   cli::check_tp(pipe, {spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
                        fam_bolt || fam_kol || fam_q4 || fam_k2});
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure

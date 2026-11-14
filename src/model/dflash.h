@@ -118,5 +118,9 @@ void check_dflash_target(const DFlashDesc& d, const DFlashTargetShape& target);
 // convolutions 2 taps x groups of 16, rms_norm_eps 1e-6, the head's 1024 hidden / 2 layers / 8 heads / MLP 2048 / factor
 // 1024, top-8 candidates.
 void check_lilicorr(const DFlashDesc& d);
+// Spec 19 v3c: one `--parallel tp` card's half of a drafter (runtime::dflash::TpDFlashDrafter) - half the q and kv heads
+// and half the MLP; every other field the whole drafter's (its hidden, layers, taps, window, convolutions, selector,
+// vocabulary). Throws unless the heads and the MLP halve into whole 16-row tiles.
+DFlashDesc dflash_tp_card_desc(const DFlashDesc& d);
 
 }  // namespace model

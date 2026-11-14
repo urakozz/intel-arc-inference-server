@@ -41,7 +41,9 @@ target_link_libraries(b70_qwen4exp_loader PUBLIC b70_loader b70_qwen4exp_model b
 # Spec 26b: + the LiLiCorr drafter's host half beside it (nvfp4.cc - NVFP4 decoded exactly and the formats from (W', g);
 # lilicorr_repack.cc - its checkpoint held to its config and names, every piece in its device form; lilicorr_loader.cc -
 # the upload: loader::load_lilicorr).
-add_library(b70_dflash_loader STATIC dflash_repack.cc dflash_loader.cc nvfp4.cc lilicorr_repack.cc lilicorr_loader.cc)
+# Spec 19 v3c: + dflash_tp_split.cc - a TP card's half of every drafter linear, on the host.
+add_library(b70_dflash_loader STATIC dflash_repack.cc dflash_loader.cc dflash_tp_split.cc nvfp4.cc lilicorr_repack.cc
+                                     lilicorr_loader.cc)
 target_include_directories(b70_dflash_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_dflash_loader PUBLIC b70_loader b70_dflash_model b70_l0)
 

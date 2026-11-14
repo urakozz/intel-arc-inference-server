@@ -15,6 +15,9 @@ inline constexpr unsigned int4_slices(unsigned K, unsigned N) {
   if ((K == 5120 && N == 6144) || (K == 4096 && N == 5120) || (K == 17408 && N == 5120)) return 4;
   if ((K == 5120 && (N == 34816 || N == 2048)) || (K == 25600 && N == 5120)) return 8;
   if (K == 5120 && (N == 1280 || N == 256)) return 16;
+  // Spec 19 v3c: a TP card's half (16 q / 4 kv heads, the MLP's 8704) - the one-card linear's S (df_prep_split folds it)
+  if ((K == 5120 && N == 3072) || (K == 2048 && N == 5120) || (K == 8704 && N == 5120)) return 4;
+  if (K == 5120 && (N == 17408 || N == 1024)) return 8;
   return 1;
 }
 

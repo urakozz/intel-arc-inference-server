@@ -54,14 +54,18 @@ struct DFlashWeights {
 // lm_head rows). One load line:
 //   DFlash drafter: DFlash2DraftModel, 5 layers, taps 5/19/33/47/61, block 8, int8 (quantised at load 3.1 s),
 //   mask row from the target's embedding, 2015363072 B, 4.2 s
+//
+// Spec 19 v3c: `tp_rank` 0 / 1 loads that `--parallel tp` card's half beside the card's target (loader::load_tp): the
+// descriptor model::dflash_tp_card_desc, every layer linear its piece (loader/dflash_tp_split.h), the rest whole, and
+// the candidate head made from the card's vocabulary half of the int8 head (its first id rank x the half's rows).
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
                            DraftFormat format, unsigned threads = 0, bool candidate_head = false,
-                           unsigned candidate_bits = 2, unsigned candidates = 80);
+                           unsigned candidate_bits = 2, unsigned candidates = 80, int tp_rank = -1);
 // The same against a target given by its parts: its descriptor, its lm_head rows and its embedding (bf16
 // [rows][hidden] on this device) - what the overload above reads off a LoadedModel; a device test passes a synthetic
 // target (tests/runtime/dflash_draft_test.cc).
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
                            uint32_t target_vocab_rows, const l0::Mem& target_embed, DraftFormat format,
-                           unsigned threads = 0);
+                           unsigned threads = 0, int tp_rank = -1);
 
 }  // namespace loader

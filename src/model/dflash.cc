@@ -331,4 +331,17 @@ void check_lilicorr(const DFlashDesc& d) {
         std::to_string(d.factor_dim) + ", not 1024 / 2 / 8 / 2048 / 1024");
 }
 
+DFlashDesc dflash_tp_card_desc(const DFlashDesc& d) {
+  if (d.q_heads % 2 || d.kv_heads % 2 || d.inter % 32 || (d.q_heads / 2 * d.head_dim) % 64 ||
+      (d.kv_heads / 2 * d.head_dim) % 16)
+    throw std::invalid_argument("model::dflash_tp_card_desc: " + std::to_string(d.q_heads) + " q / " +
+                                std::to_string(d.kv_heads) + " kv heads and intermediate " + std::to_string(d.inter) +
+                                " do not halve into whole tiles");
+  DFlashDesc c = d;
+  c.q_heads /= 2;
+  c.kv_heads /= 2;
+  c.inter /= 2;
+  return c;
+}
+
 }  // namespace model

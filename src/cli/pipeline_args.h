@@ -78,7 +78,9 @@ inline void parse_parallel(const std::string& v, PipelineArgs& a) {
 // Spec 17b: --parallel tp's refusals that need no device. What 17b / 17c do not run under tensor parallel is refused
 // by name, with the plan that builds it (or why not).
 struct TpContext {
-  bool dflash = false;         // --spec dflash / dflash-lookup (spec 17d: not built under TP)
+  // A drafter the caller does not serve under TP: b70-decode's --spec dflash / dflash-lookup (spec 19 v3c: b70-serve
+  // --parallel tp serves the split drafter, with prompt lookup inside it too).
+  bool dflash = false;
   bool profile = false;        // --profile
   bool other_family = false;   // Bolt / Kolibri-1 / Qwen3.8-Flash-Next / K2-Horizon
   bool draft_vocab = false;    // --draft-vocab / --draft-vocab-ids (spec 17d: the draft head is the card's half)
@@ -91,8 +93,8 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
   if (c.other_family)
     throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b); this model runs --parallel auto, 1 or pp");
   if (c.dflash)
-    throw std::runtime_error("--parallel tp drafts with the MTP head (--spec auto, mtp or lookup - spec 17d); --spec "
-                             "dflash / dflash-lookup under tensor parallel are not built - one card or --parallel pp");
+    throw std::runtime_error("b70-decode --parallel tp drafts with the MTP head only - b70-serve --parallel tp --spec "
+                             "dflash / dflash-lookup serves the drafter split over both cards");
   if (c.draft_vocab)
     throw std::runtime_error("--parallel tp's draft head is each card's vocabulary half of lm_head (spec 17d); "
                              "--draft-vocab is not built under tensor parallel - drop it");

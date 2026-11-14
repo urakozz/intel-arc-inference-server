@@ -20,6 +20,7 @@
 #include "runtime/memory_plan.h"
 #include "runtime/tp_protocol.h"
 #include "runtime/prefill_backend.h"
+#include "runtime/tap_drafter.h"
 
 // Spec 17b: Qwen3.8 decode with tensor parallelism over two B70s (`b70-decode --parallel tp`).
 //
@@ -71,8 +72,21 @@
 // one-card host layouts both ways (runtime/tp_gather.h: save gathers, load scatters; with MTP the head's hidden row
 // and KV layer, card 0's - the cards' are the same bytes), and prefill's block hook (runtime/prefill/tp_prefill.cc).
 //
-// Not here: DFlash / prompt lookup's own proposer (lookup verifies through the MTP verify lists, so it needs the head
-// loaded), profiling.
+// **DFlash (spec 19 v3c).** With a TpTapDrafter (runtime/tap_drafter.h; runtime::dflash::TpDFlashDrafter) the drafter
+// is split over both cards like the target, and Engine's tap-drafter contract runs on both:
+//   verify(k)        each card's tap verify list at M = k + 1 (runtime::build_tp_verify_taps: the TP walk over the
+//                    drafter's 8 GDN slots, the taps copied from the card's own residual into its drafter half), after
+//                    any deferred projection and the drafter's pending tails, as one submit a card; the per-row merge;
+//   commit(j, t)     both cards: gdn_live += j (mod 8), pos, the pending id; each card's projection of rows 0..j into
+//                    its half of the ring (deferred with `defer_projection`: it rides at the front of the next submit);
+//   draft_tap(k, T, seed)  the drafter's first phase on both cards (one submit a card, the deferred projection first),
+//                    the host's merge of the two candidate halves; the tails ride with the next verify(k), after which
+//                    the returned readback is valid (call verify(k) next, then read it).
+// ingest() / generate() run verify(0) + commit(0) at every pos (Engine's rule with a drafter). save_state / load_state
+// carry the drafter's ring in one card's layout after the target's state. Not with the MTP head (one proposer).
+//
+// Not here: prompt lookup's own proposer (lookup verifies through the MTP verify lists, so it needs the head loaded),
+// profiling.
 namespace runtime {
 
 struct TpPrefill;   // runtime/prefill/tp_prefill.cc
@@ -99,8 +113,10 @@ class TpEngine {
   // `cards` are loader::load_tp's rank 0 (on d0) and rank 1 (on d1), one crossing, loaded at `max_len`. `d1` is a
   // view of d0's context. Throws when either card cannot access the other's memory (each card writes the other's
   // landing buffer).
+  // `drafter` (spec 19 v3c, `--spec dflash`): borrowed, it must outlive the engine; its halves' tap buffers are bound
+  // into the verify lists here, then drafter->attach(engine) captures its draft lists (TpDFlashDrafter).
   TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedModel, 2> cards, uint32_t max_len,
-           const TpOptions& opt = {}, KvCache kv = default_kv_cache());
+           const TpOptions& opt = {}, KvCache kv = default_kv_cache(), TpTapDrafter* drafter = nullptr);
   ~TpEngine();
   TpEngine(const TpEngine&) = delete;
   TpEngine& operator=(const TpEngine&) = delete;
@@ -163,7 +179,8 @@ class TpEngine {
   // --- spec 17d: MTP (the header's **MTP**) ------------------------------------------------------------------------
   static constexpr uint32_t kMaxDraft = MtpBuffers::kMaxK;   // 3
   bool mtp() const { return mtp_; }
-  uint32_t max_draft() const { return mtp_ ? kMaxDraft : 0; }
+  // The deepest k verify() takes: kMaxDraft with the MTP head, the drafter's max_k() with a drafter (spec 19 v3c).
+  uint32_t max_draft() const;
   uint32_t draft_vocab() const { return 0; }
   uint32_t max_verify_k() const;
   // `more` (open-work 13): Engine::draft's - the head's probability for the merged draft from both cards' halves.
@@ -173,8 +190,29 @@ class TpEngine {
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   void verify(uint32_t k);
   const uint32_t* verify_ids() const;   // the merged argmax of each verify row (both Controls hold it)
-  void commit(uint32_t j, uint32_t next_token);
+  // `defer_projection` (spec 19 v3c, a drafter only): the projection of the committed rows rides at the front of the
+  // next submit; snapshots, prefill and reset materialise or drop it as Engine's.
+  void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
   void set_draft_input(uint32_t i, uint32_t id);   // cur_token[1 + i] of both Controls (prompt lookup's drafts)
+  // --- spec 19 v3c: DFlash (the header's **DFlash**) ------------------------------------------------------------
+  bool has_drafter() const { return drafter_ != nullptr; }
+  TpTapDrafter* tap_drafter() const { return drafter_; }
+  const dflash::DFlashDraftOut& draft_tap(uint32_t k, float temperature, uint64_t seed);
+  bool tap_samples() const { return drafter_ && drafter_->samples(); }
+  uint64_t drafter_key() const { return drafter_ ? drafter_->key() : 0; }
+  uint32_t drafter_window() const { return drafter_ ? drafter_->card(0).window() : 0; }   // spec 19f's lookup policy
+  void flush_projection();
+  // The crossing a card's lists use (TpDFlashDrafter's draft lists cross through the same landing buffers and
+  // counters), and the drafter's GDN state slots 1..7 of a card (tests).
+  const TpLink& link(uint32_t card) const;
+  const l0::Mem* drafter_slots(uint32_t card) const;
+  // Runs one list a card (both submitted back to back, each after its card's deferred projection), bounded as a
+  // step, the crossings' state words checked - no head merge (TpDFlashDrafter's draft lists; tests).
+  void run_aux(const std::array<l0::CmdList*, model::kTpSize>& lists, const char* what);
+  // Tests and probes: the tap verify lists captured again under each card's `opt` (CaptureOptions::force_attn, ::profile
+  // at ::profile_m - one ProfileEvents a card, on its context). Session state is untouched.
+  void recapture_verify(const std::array<CaptureOptions, model::kTpSize>& opt);
+
   // The last step's logits, `rows` full rows of kVocab: each row card 0's half then card 1's (D9: the gather).
   void read_logits_into(float* host, uint32_t rows = 1) const;
   void read_draft_logits_into(float* host, uint32_t i) const;   // draft i's full row, the same gather
@@ -203,11 +241,18 @@ class TpEngine {
   void step_once();
   // Spec 17d: one step of the given lists (each card's), bounded as step_once; with `crossings` (a decode or verify
   // list) the cards' state words are read and the head's rows merged after the fences (a draft list merges itself).
-  void run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, bool crossings, const char* what);
+  // Spec 19 v3c: `heads` false - the crossings' state words checked without the head merge (a draft list's);
+  // `front` - lists submitted before each card's own in the same execute (a deferred projection, the drafter's tails).
+  void run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, bool crossings, const char* what,
+                 bool heads = true, const std::array<std::vector<l0::CmdList*>, model::kTpSize>& front = {});
   void mtp_step1();
   void mtp_normalise_live();
   void require_mtp(const char* what) const;
   void capture_mtp_lists(uint32_t card);
+  void capture_tap_lists(uint32_t card, const CaptureOptions& opt);   // spec 19 v3c
+  void drafter_project_staged(uint32_t from, uint32_t pos, uint32_t n);   // spec 19 v3c, tp_prefill.cc
+  void require_spec(const char* what) const;                          // MTP or a drafter
+  std::array<std::vector<l0::CmdList*>, model::kTpSize> take_front(bool tails);
   void merge_heads();
   bool settle(uint32_t card);
   [[noreturn]] void fail(const std::string& what);
@@ -228,6 +273,10 @@ class TpEngine {
   bool mtp_ = false;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   std::vector<uint32_t> draft_ids_;
+  // Spec 19 v3c: the borrowed drafter, its deferred projection (each card's list) and its pending tails.
+  TpTapDrafter* drafter_ = nullptr;
+  std::array<l0::CmdList*, model::kTpSize> pending_projection_{};
+  std::array<l0::CmdList*, model::kTpSize> pending_tail_{};
   BlockHook block_hook_;
   std::unique_ptr<l0::Mem> host_rows_;
   // Spec 17c: the prefill half (allocated by prepare_prefill; deleted through the pointer prefill code set, so this

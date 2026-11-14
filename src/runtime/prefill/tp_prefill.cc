@@ -145,7 +145,7 @@ struct TpPfCard {
   uint32_t* ids_of(uint32_t h) { return ids.as<uint32_t>() + size_t(h) * s.chunk_cap(); }
   size_t device_bytes() const {
     return s.bytes() + s.lazy_bytes() + resid_b.size() + own.size() + land.size() + (hid ? hid->size() : 0) +
-           (hslab ? hslab->size() : 0) + (int8 ? int8->bytes() : 0);
+           (hslab ? hslab->size() : 0) + (int8 ? int8->bytes() : 0) + (df_taps ? df_taps->size() : 0);
   }
 
   // The crossing's copy, on the copy engine after `ready`, or in order on the compute list.
@@ -177,6 +177,9 @@ struct TpPfCard {
   l0::Mem ids;       // u32 [kPair][cap]
   ze_command_list_handle_t bcs = nullptr;   // the copy engine's list (null: crossings on the compute list)
   std::unique_ptr<l0::Mem> hid, hslab, hctl;   // spec 17d: the MTP head's (make_mtp)
+  // Spec 19 v3c: with a drafter, the taps of the prompt's last window() positions, bf16 [window][taps][hidden] - row i
+  // is the window's position df_from + i, copied from this card's residual (bitwise the other card's).
+  std::unique_ptr<l0::Mem> df_taps;
 };
 
 struct TpPrefill {
@@ -272,8 +275,29 @@ void TpEngine::prepare_prefill() {
     }
     k.s.slab_buffer();   // the l0 linears' slab (l0-int8's mixer linears too): outside the first timed chunk
     if (mtp_) k.make_mtp(pf_cap_);   // spec 17d
+    if (drafter_)                     // spec 19 v3c: the window's tap rows
+      k.df_taps = std::make_unique<l0::Mem>(
+          k.ctx, l0::MemKind::Device,
+          TapVerifyDims::prefill_taps_bytes(d, uint32_t(drafter_->card(r).tap_layers().size()),
+                                            drafter_->card(r).window()));
     pf_int8_bytes_[r] = k.int8 ? k.int8->bytes() : 0;
     pf_bytes_[r] = k.device_bytes() - pf_int8_bytes_[r];
+  }
+}
+
+// Spec 19 v3c: staged rows [pos, pos + n) (staging row pos - from on) projected into each card's ring half, 8 rows a
+// replay of both cards' projection lists (Engine::drafter_project_staged's fallback form; no wide projection under TP).
+void TpEngine::drafter_project_staged(uint32_t from, uint32_t pos, uint32_t n) {
+  const size_t row = drafter_->card(0).tap_layers().size() * size_t(cd(0).model.desc->hidden) * 2;
+  for (uint32_t i = 0; i < n; i += 8) {
+    const uint32_t g = std::min<uint32_t>(8, n - i);
+    std::array<l0::CmdList*, model::kTpSize> lists{};
+    for (uint32_t r = 0; r < model::kTpSize; ++r) {
+      TapSink& s = drafter_->card(r);
+      cd(r).imm.copy(s.taps().ptr(), pf_->c[r]->df_taps->as<uint8_t>() + size_t(pos + i - from) * row, size_t(g) * row);
+      lists[r] = &s.projection(pos + i, g);
+    }
+    run_lists(lists, false, "drafter projection");
   }
 }
 
@@ -310,6 +334,24 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (mtp_) {
     mtp_normalise_live();
     verify_k_ = kNoVerify;
+  }
+  // Spec 19 v3c: with a drafter, slot 0 holds the state the prefill reads (a deferred projection lands first), and
+  // each card taps the rows of this call's last window() positions into its staging (Engine::prefill's rule: positions
+  // before keep the ring's own rows); after each pair both cards project the pair's staged rows into their ring halves
+  // 8 rows a replay (drafter_project_staged), so a block hook's snapshot holds the ring up to the pair's end.
+  std::vector<std::vector<uint32_t>> df_sites;
+  uint32_t df_from = 0, df_projected = 0;
+  if (drafter_) {
+    flush_projection();
+    mtp_normalise_live();
+    verify_k_ = kNoVerify;
+    df_sites = tap_sites(d, drafter_->card(0).tap_layers());
+    if (!df_sites.back().empty())
+      throw std::runtime_error("runtime::TpEngine::prefill: the drafter taps the last layer's output, whose fold the "
+                               "prefill runs for the last row only - not built (no published drafter does)");
+    const uint64_t end = uint64_t(base) + ids.size(), w = drafter_->card(0).window();
+    df_from = uint32_t(end > w ? std::max<uint64_t>(base, end - w) : base);
+    df_projected = df_from;
   }
   const bool hooked = static_cast<bool>(block_hook_);
   const std::vector<std::array<uint32_t, 2>> chunks =
@@ -359,6 +401,15 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
           prefill::step_tp_unit(k.cx, k.kc, k.s, card.model, max_len_, k.control(h), pp.pos[h], C, u,
                                 card.persist.gdn_state, card.persist.conv_ring, card.persist.kv_k, card.persist.kv_v,
                                 card.persist.kv_lay, io, pf_backend_, k.int8.get());
+          // Spec 19 v3c: a mixer unit's fold left layer u / 2 - 1's output in resid - its taps of the window's rows.
+          if (drafter_ && u % 2 == 0 && pp.pos[h] + C > df_from) {
+            const uint32_t r0 = df_from > pp.pos[h] ? df_from - pp.pos[h] : 0;
+            const uint32_t nt = uint32_t(drafter_->card(r).tap_layers().size());
+            const size_t trow = size_t(d.hidden) * 2;
+            for (uint32_t t : df_sites.at(u / 2))
+              k.cx.copy_2d(k.df_taps->as<uint8_t>() + (size_t(pp.pos[h] + r0 - df_from) * nt + t) * trow, nt * trow,
+                           static_cast<const uint8_t*>(k.resid(h)) + size_t(r0) * trow, trow, trow, C - r0);
+          }
           if (!cross) continue;
           if (u + 1 < U || mtp_) {   // spec 17d: with the head the last unit's every row crosses too
             k.send(peer.land_of(h, u & 1u), k.own_of(h), size_t(C) * row, p.ev.handle(p.ready(r, h, u)),
@@ -442,6 +493,10 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     p.in_flight = false;
     // Spec 17d: a mid-prompt pair that ends on a block end - the state is exactly at its end on both cards.
     const uint32_t end = pp.pos[last_h] + pp.rows[last_h];
+    if (drafter_ && end > df_projected) {   // spec 19 v3c: the pair's staged rows into both ring halves
+      drafter_project_staged(df_from, df_projected, end - df_projected);
+      df_projected = end;
+    }
     if (hooked && !last_pair && end % kBlock == 0) {
       for (uint32_t r = 0; r < model::kTpSize; ++r) {
         cd(r).ctl->pos = end;

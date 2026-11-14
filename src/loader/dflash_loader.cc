@@ -8,6 +8,7 @@
 #include "common/bf16.h"
 #include "l0/cmdlist.h"
 #include "loader/dflash_repack.h"
+#include "loader/dflash_tp_split.h"
 #include "model/qwen35.h"
 
 // dflash_loader.cc - the upload half of the DFlash drafter loader (dflash_loader.h). Each piece is built on the host
@@ -47,12 +48,14 @@ l0::Mem upload_f32(l0::Context& ctx, l0::CmdList& imm, const std::vector<float>&
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
                            DraftFormat format, unsigned threads, bool candidate_head, unsigned candidate_bits,
-                           unsigned candidates) {
+                           unsigned candidates, int tp_rank) {
   if (!target.desc) throw std::runtime_error("load_drafter: the target model is not loaded");
   const auto& head = target.linears.at({kTopLevel, model::LinearId::LmHead});
   if (candidate_head && head.kind != model::WeightKind::Int8)
     throw std::runtime_error("DFlash candidate head needs the target's int8 head for exact rerank");
-  auto w = load_drafter(ctx, snapshot_or_repo, *target.desc, head.shape.N, target.embed, format, threads);
+  // Spec 19 v3c: a TP card's head is its vocabulary half; the drafter is held to the whole vocabulary.
+  auto w = load_drafter(ctx, snapshot_or_repo, *target.desc, head.shape.N * (tp_rank >= 0 ? 2u : 1u), target.embed,
+                        format, threads, tp_rank);
   if (candidate_head) {
     const auto start = std::chrono::steady_clock::now();
     l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -82,13 +85,16 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
 }
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
-                           uint32_t vocab_rows, const l0::Mem& target_embed, DraftFormat format, unsigned threads) {
+                           uint32_t vocab_rows, const l0::Mem& target_embed, DraftFormat format, unsigned threads,
+                           int tp_rank) {
   const auto t0 = std::chrono::steady_clock::now();
   const DFlashCheckpoint ck(snapshot_or_repo);
   ck.check_target(target, vocab_rows);
   if (target_embed.size() < size_t(vocab_rows) * target.hidden * 2)
     throw std::runtime_error("load_drafter: the target embedding is smaller than [vocab rows][hidden] bf16");
-  const model::DFlashDesc& d = ck.desc();
+  // Spec 19 v3c: a TP card's half - its descriptor, its piece of every layer linear (loader/dflash_tp_split.h).
+  if (tp_rank > 1) throw std::runtime_error("load_drafter: tp_rank " + std::to_string(tp_rank));
+  const model::DFlashDesc d = tp_rank < 0 ? ck.desc() : model::dflash_tp_card_desc(ck.desc());
 
   DFlashWeights w;
   w.desc = d;
@@ -109,7 +115,10 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   w.final_norm = std::make_unique<l0::Mem>(upload_f32(ctx, imm, ck.final_norm(), bytes));
   for (uint32_t l = 0; l < d.layers; ++l) {
     using L = DFlashLinear;
-    auto lin = [&](L which) { return timed([&] { return ck.layer_linear(l, which, format, threads); }); };
+    auto lin = [&](L which) {
+      DFlashHostLinear h = timed([&] { return ck.layer_linear(l, which, format, threads); });
+      return tp_rank < 0 ? h : dflash_tp_layer_linear(ck.desc(), which, uint32_t(tp_rank), h);
+    };
     DeviceWeight qkv = upload_linear(ctx, imm, lin(L::Qkv), bytes);
     DeviceWeight o = upload_linear(ctx, imm, lin(L::O), bytes);
     DeviceWeight gu = upload_linear(ctx, imm, lin(L::GateUp), bytes);

@@ -39,9 +39,11 @@ size_t tp_prefill_extra_bytes(const model::ModelDesc& card, uint32_t chunk_cap);
 size_t tp_crossing_bytes(const model::ModelDesc& card, model::TpCrossing c);
 
 // One card's plan at max_len; `model_bytes` the card's loaded weights without the RoPE table.
+// Spec 19 v3c: `drafter` - a card's half of the DFlash drafter (runtime::dflash::drafter_plan at the half's shapes),
+// with the engine's 7 more GDN slots and the prefill's tap staging at the card's shapes (runtime::plan's drafter term).
 MemoryPlan tp_card_plan(const model::ModelDesc& card, model::TpCrossing c, uint32_t max_len, size_t model_bytes,
                         KvCache kv = default_kv_cache(), const PrefillPath& path = PrefillPath{false},
-                        bool mtp = false);
+                        bool mtp = false, const DrafterPlan& drafter = {});
 // Spec 17d: the prefill buffers a card adds with the MTP head beside tp_prefill_extra_bytes - its hidden rows
 // ([cap + 1][hidden]) and its bf16 slab ([2 x hidden][1024]: fc's K).
 size_t tp_prefill_mtp_bytes(const model::ModelDesc& card, uint32_t chunk_cap);
@@ -51,6 +53,7 @@ size_t tp_prefill_mtp_bytes(const model::ModelDesc& card, uint32_t chunk_cap);
 uint32_t tp_max_len_that_fits(const model::ModelDesc& card, model::TpCrossing c,
                               const std::array<size_t, 2>& model_bytes, const std::array<size_t, 2>& device_bytes,
                               size_t reserve_bytes, uint32_t cap, KvCache kv = default_kv_cache(),
-                              const PrefillPath& path = PrefillPath{false}, bool mtp = false);
+                              const PrefillPath& path = PrefillPath{false}, bool mtp = false,
+                              const DrafterPlan& drafter = {});
 
 }  // namespace runtime

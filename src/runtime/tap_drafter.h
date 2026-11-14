@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -104,6 +105,35 @@ class TapDrafter : public TapSink {
   // False when the drafter drafts greedily only (a DFlash v1 drafter: its sampled q is a full-vocabulary softmax
   // the readback cannot carry) - a sampled request then decodes plainly.
   virtual bool samples() const = 0;
+};
+
+// Spec 19 v3c: a tap drafter split over the two cards of `--parallel tp` (runtime::dflash::TpDFlashDrafter), as the
+// target is - each card holds its half (its heads of the attention, its half of the MLP, its vocabulary half of the
+// candidate head; the rest replicated) and runtime::TpEngine drives both. TpEngine knows it through this interface (the
+// drafter's code links b70_runtime, not the other way round). A round is two phases (spec 19 v3 §6.2 C4):
+//   draft_lists(k, T, seed)  each card's draft list (the block over its half, ten all-reduces with the other card, its
+//                            vocabulary half's top 16 with exact scores); TpEngine submits both - after any deferred
+//                            projection - and waits;
+//   merge()                  on the host: the two halves' top-16 lists per row into one (exact score, ties to the lower
+//                            id), written to both cards' selector input; returns each card's tail list (the selector),
+//                            which TpEngine submits at the front of the next verify - each tail writes its own card's
+//                            Control.cur_token[1..k], the same ids on both (the same inputs, the same arithmetic);
+//   readback()               the drafts, their candidates and scores - valid once the tails ran (after that verify).
+// card(r) is card r's half as a TapSink: its tap buffer (TpEngine's tap verify lists write it from the card's own
+// residual), its projection list (the committed rows into its half of the ring) and reset. The snapshot's ring is ONE
+// card's layout (both halves gathered by KV head; ring_bytes() of it), so a snapshot moves between one card and TP.
+class TpTapDrafter {
+ public:
+  virtual ~TpTapDrafter() = default;
+  virtual TapSink& card(uint32_t r) = 0;
+  virtual std::array<l0::CmdList*, 2> draft_lists(uint32_t k, float temperature, uint64_t seed) = 0;
+  virtual std::array<l0::CmdList*, 2> merge() = 0;
+  virtual const dflash::DFlashDraftOut& readback() const = 0;
+  virtual bool samples() const = 0;
+  virtual size_t ring_bytes() const = 0;
+  virtual void save_ring(void* host) const = 0;
+  virtual void load_ring(const void* host) = 0;
+  virtual uint64_t key() const = 0;
 };
 
 }  // namespace runtime
