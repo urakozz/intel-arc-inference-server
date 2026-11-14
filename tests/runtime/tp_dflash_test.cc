@@ -6,10 +6,10 @@
 //   dflash  --parallel tp with the split drafter (argv[2]: int4 g64 when it is an AutoRound export, else int8 at load;
 //           the 2-bit candidate head):
 //             G1  greedy speculative decoding at K = 7, 3, 1 (draft_tap -> verify(K) -> the longest agreeing prefix ->
-//                 commit, its projection deferred to the next draft) against `plain`: identical, or each first
-//                 difference a near-tie (<= 1 bf16 ulp) or accepted by the f32 judge of its context (forced_judge.h:
-//                 B70_DUMP_FORCED dumps it, tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_dflash_'
-//                 makes it, B70_FORCED_JUDGE reads it); without a judge the test ends SKIP (77) "awaiting", never PASS.
+//                 commit, its projection deferred to the next draft) against `plain`, graded by the spec judge
+//                 (tests/server/spec_judge.h streams: the tie rule, the f32 judges of the first divergence's context,
+//                 the bf16-unstable rule, the reviewed rows); a context without its f32 reference ends SKIP (77)
+//                 "awaiting" (B70_DUMP_FORCED dumps it, f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_dflash_').
 //                 Tokens a round printed per case and K;
 //             T1  after each run both Controls agree, and both drafter halves hold the same residual and final-norm
 //                 rows bitwise (every all-reduce leaves the same sum on both cards);
@@ -40,6 +40,7 @@
 #include "forced_judge.h"
 #include "golden_common.h"
 #include "greedy_tie.h"
+#include "spec_judge.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "loader/dflash_loader.h"
@@ -162,53 +163,35 @@ void t1(runtime::TpEngine& e, runtime::dflash::TpDFlashDrafter& d) {
   }
 }
 
-struct Judged {
-  bool ok = true, awaiting = false;
-};
-
-// tp_mtp_test's judge: the tie rule, then the f32 judge of the context for a non-tie divergence.
-Judged judge(const std::string& what, const std::string& tag, const std::vector<uint32_t>& prompt, const Run& ref,
-             const Run& got) {
+// tp_mtp_test's judge (spec_judge.h's streams: the tie rule, the f32 judges of the first divergence's context, the
+// bf16-unstable rule with `plain_row`, the reviewed rows; awaiting a judge is counted for spec_judge::exit_code).
+bool judge(const std::string& what, const std::string& tag, const std::vector<uint32_t>& prompt, const Run& ref,
+           const Run& got, const spec_judge::PlainRow& plain_row = {}) {
   std::vector<greedy_tie::RefStep> steps;
   for (const std::vector<float>& row : ref.rows)
     steps.push_back(row.empty() ? greedy_tie::RefStep{} : greedy_tie::ref_step(row.data(), kUsed));
-  const greedy_tie::Result v = greedy_tie::classify(ref.ids, steps, got.ids);
-  const char* verdict = v.v == greedy_tie::Verdict::Same  ? "identical ids"
-                        : v.v == greedy_tie::Verdict::Tie ? "a near-tie divergence (<= 1 bf16 ulp)"
-                                                          : "DIVERGED (not a near-tie)";
-  std::printf("%s: %s", what.c_str(), verdict);
-  if (v.v != greedy_tie::Verdict::Same)
-    std::printf(" at id %zu (ref %u, got %u, margin %.2f ulp, candidate rank %u)", v.at, ref.ids[v.at], got.ids[v.at],
-                v.margin_ulps, v.cand_rank);
+  const spec_judge::StreamVerdict v =
+      spec_judge::streams(golden::ForcedJudge{}, tag, prompt, ref.ids, steps, got.ids, kV, kUsed, plain_row);
+  std::printf("%s: %s", what.c_str(), v.line().c_str());
   if (got.rounds)
     std::printf("; %.3f tokens a round (%llu rounds, %llu accepted)",
                 double(got.rounds + got.accepted) / double(got.rounds), (unsigned long long)got.rounds,
                 (unsigned long long)got.accepted);
   std::printf("\n");
-  Judged j;
-  if (v.v != greedy_tie::Verdict::Diverged) return j;
-  if (v.at == 0) {
-    j.ok = false;
-    return j;
-  }
-  const golden::ForcedJudge fj;
-  const std::string k = golden::ForcedJudge::key(tag, prompt, got.ids);
-  fj.dump(k, prompt, got.ids);
-  const std::unique_ptr<golden::Golden> g = fj.open(k, kGen, kV);
-  if (!g) {
-    std::printf("  AWAITING the f32 judge of %s (B70_DUMP_FORCED, then tools/box_validate/f32_refs.sh forced-qwen "
-                "with QWEN_KEYS_RE='^tp_dflash_'; B70_FORCED_JUDGE=<the int8-head judges' dir>)\n", k.c_str());
-    j.awaiting = true;
-    return j;
-  }
-  const uint32_t row = uint32_t(v.at);
-  const bool got_ok = golden::judge_accepts(*g, row, got.ids[row], kV, kUsed);
-  const bool ref_ok = golden::judge_accepts(*g, row, ref.ids[row], kV, kUsed);
-  if (!got_ok) golden::judge_explain(*g, row, got.ids[row], kV, kUsed, "got");
-  std::printf("  the f32 judge at id %u: %u %s, the reference's %u %s\n", row, got.ids[row],
-              got_ok ? "accepted" : "REJECTED", ref.ids[row], ref_ok ? "accepted" : "rejected");
-  j.ok = got_ok;
-  return j;
+  return v.pass;
+}
+
+// The bf16-unstable rule's plain row: prompt + `generated` through the M = 1 path (reset, prefill, one ingest a decoded
+// id) and the gathered row. Clobbers the session.
+spec_judge::PlainRow plain_row(runtime::TpEngine& e, const std::vector<uint32_t>& prompt) {
+  return [&e, prompt](const std::vector<uint32_t>& generated) {
+    e.reset();
+    e.prefill(prompt);
+    for (uint32_t id : generated) e.ingest({id});
+    float* pinned = e.host_rows(kV);
+    e.read_logits_into(pinned, 1);
+    return std::vector<float>(pinned, pinned + kV);
+  };
 }
 
 // `only`: G1 on the named case only (a diagnostic run); empty: every case.
@@ -229,7 +212,7 @@ int gate(l0::Context& d0, l0::Context& d1, const std::string& only) {
   Tp tp(d0, d1, kMaxLen);
   runtime::TpEngine& e = *tp.e;
   for (uint32_t r = 0; r < 2; ++r) std::printf("%s\n", e.memory_line(r).c_str());
-  bool ok = true, awaiting = false;
+  bool ok = true;
   for (size_t i = 0; i < cases.size(); ++i)
     for (uint32_t K : {7u, 3u, 1u}) {
       if (!only.empty() && cases[i].name != only) continue;
@@ -237,10 +220,9 @@ int gate(l0::Context& d0, l0::Context& d1, const std::string& only) {
       e.prefill(cases[i].ids);
       const Run got = speculative(e, K);
       t1(e, *tp.drafter);
-      const Judged j = judge("G1 " + cases[i].name + " K = " + std::to_string(K),
-                             "tp_dflash_" + cases[i].name + "_k" + std::to_string(K), cases[i].ids, ref[i], got);
-      ok = ok && j.ok;
-      awaiting = awaiting || j.awaiting;
+      ok &= judge("G1 " + cases[i].name + " K = " + std::to_string(K),
+                  "tp_dflash_" + cases[i].name + "_k" + std::to_string(K), cases[i].ids, ref[i], got,
+                  plain_row(e, cases[i].ids));
     }
 
   // S1: the snapshot after the prefill, restored: the same ids and drafts every round, bitwise.
@@ -288,24 +270,15 @@ int gate(l0::Context& d0, l0::Context& d1, const std::string& only) {
       e.reset();
       e.prefill(cases[0].ids);
       const Run again = speculative(e, 7);
-      const Judged j = judge("T4 prose after reset, K = 7", "tp_dflash_prose_k7", cases[0].ids, ref[0], again);
-      ok = ok && j.ok;
-      awaiting = awaiting || j.awaiting;
+      ok &= judge("T4 prose after reset, K = 7", "tp_dflash_prose_k7", cases[0].ids, ref[0], again,
+                  plain_row(e, cases[0].ids));
     } catch (const std::exception& ex) {
       std::printf("T4 FAIL: the run after reset threw at pos %u: %s\n", e.pos(), ex.what());
       ok = false;
     }
   }
-  if (!ok) {
-    std::printf("tp_dflash_test FAIL\n");
-    return 1;
-  }
-  if (awaiting) {
-    std::printf("tp_dflash_test SKIP: every bar but the f32 judges above passed; awaiting their references\n");
-    return 77;
-  }
-  std::printf("tp_dflash_test PASS\n");
-  return 0;
+  std::printf("tp_dflash_test %s\n", ok ? "every check passed (f32 references: below)" : "FAIL");
+  return spec_judge::exit_code(ok, "tp_dflash_test");
 }
 
 double median(std::vector<double> v) {

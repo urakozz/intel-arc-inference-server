@@ -2813,7 +2813,7 @@ if(B70_TP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_test(NAME tp_dflash_test COMMAND tp_dflash_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(tp_dflash_test PROPERTIES
     LABELS "checkpoint;tp;dflash" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
-    ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
+    ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
 endif()
 
 # b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
