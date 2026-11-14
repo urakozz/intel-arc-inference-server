@@ -107,11 +107,11 @@ void usage() {
                "  is refused at startup, naming why. Cards: Intel Arc Pro B70, one or two (peer access between\n"
                "  them); ZE_AFFINITY_MASK picks which the driver shows.\n"
                "\n"
-               "  --spec S        speculative decoding (default auto: the model's own MTP head with an adaptive\n"
-               "                  K per request where it has one and its cost table is measured - Qwen3.8,\n"
-               "                  Ornith; off elsewhere). off; mtp; lookup (prompt lookup, verified\n"
-               "                  through the MTP lists); dflash (Qwen3.8's DFlash drafter, from the HF cache);\n"
-               "                  dflash-lookup (lookup inside DFlash, opt-in). Greedy output unchanged.\n"
+               "  --spec S        speculative decoding: auto (default), off, mtp, dflash. auto: Qwen3.8's DFlash\n"
+               "                  drafter on one card (and replica) when it is in the HF cache, else the model's\n"
+               "                  MTP head (Qwen3.8 under --parallel tp or pp or with slots; Ornith), off\n"
+               "                  elsewhere; the startup log says which and why. dflash on one card\n"
+               "                  also copies earlier repeats (prompt lookup). Greedy output unchanged.\n"
                "                  Nemotron 3.5 Bolt (spec 26c, opt-in): lookup and dflash (its LiLiCorr\n"
                "                  drafter on the last card), both over its own verify lists.\n"
                "  --spec-max K    the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash; Bolt's lookup\n"
@@ -1057,7 +1057,7 @@ int run(int argc, char** argv) {
   // Spec 7: system RAM, not VRAM; auto by default (cli/prefix_cache_size.h).
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
-  // --spec auto|off|mtp|lookup|dflash|dflash-lookup (cli/spec_args.h); --spec-max K its one cap.
+  // --spec auto|off|mtp|dflash (+ the developer values lookup, dflash-lookup; cli/spec_args.h); --spec-max K its one cap.
   std::string spec_arg = "auto";
   uint32_t spec_max = 0;
   bool have_spec_max = false;
@@ -1249,18 +1249,20 @@ int run(int argc, char** argv) {
   const bool is_kol = !is_q4 && cli::kolibri::is_kolibri(path);
   // A path that does not resolve is the Qwen family here: every flag refusal below keeps its order, and the
   // snapshot's own error comes after them.
-  std::string model_type;
+  std::string model_type, q_snap, q_arch;
   if (!is_q4 && !is_kol) {
-    std::string snap;
     try {
-      snap = loader::resolve_snapshot(path);
+      q_snap = loader::resolve_snapshot(path);
     } catch (const std::exception&) {
     }
-    if (std::ifstream cf(snap + "config.json"); !snap.empty() && cf) {
+    if (std::ifstream cf(q_snap + "config.json"); !q_snap.empty() && cf) {
       std::stringstream cs;
       cs << cf.rdbuf();
       const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
       if (cj.is_object()) model_type = cj.value("model_type", std::string());
+      if (cj.is_object() && cj.contains("architectures") && cj.at("architectures").is_array() &&
+          !cj.at("architectures").empty() && cj.at("architectures").at(0).is_string())
+        q_arch = cj.at("architectures").at(0).get<std::string>();
     }
   }
   const bool is_k2 = model_type == "k2_horizon";
@@ -1269,13 +1271,43 @@ int run(int argc, char** argv) {
                                  : is_k2 ? cli::SpecFamily::None
                                          : cli::SpecFamily::Qwen;
   const std::string model_name = is_q4 ? "Qwen3.8-Flash-Next" : is_kol ? "Kolibri-1" : is_k2 ? "K2-Horizon" : "this model";
+  // --spec auto (operator ruling 2026-11-14, cli::resolve_auto): DFlash on one card (or replica's card each) when
+  // Qwen3.8's drafter is in the HF cache, else the MTP head - decided before anything below reads the proposer.
+  if (spec_arg == "auto") {
+    cli::AutoSetup as;
+    as.dflash_target = q_arch == "Qwen3_5ForConditionalGeneration";   // Qwen3.8 (Ornith: MoE, no drafter)
+    as.drafter = dflash.model;
+    try {
+      as.drafter_cached = dflash.have_model || std::filesystem::exists(loader::resolve_snapshot(dflash.model) +
+                                                                       "config.json");
+    } catch (const std::exception&) {
+    }
+    const bool dv = draft_vocab != 0 || !draft_vocab_ids.empty();
+    if (pipe.tp() ||
+        (pipe.mode == cli::Parallel::Auto && max_num_seqs == 1 && as.dflash_target &&
+         cli::tp_auto(q_snap, max_len_arg, hw.cards, dv || (have_pp_backend && pp_backend != runtime::PrefillBackend::L0))))
+      as.refused = "tensor parallel";   // item 22 (DFlash under TP) drops this when it lands
+    else if (pipe.mode == cli::Parallel::Pp)
+      as.refused = "pipeline parallel";
+    else if (max_num_seqs > (pipe.replica() ? 2u : 1u))
+      as.refused = "several sequence slots a card (--max-num-seqs " + std::to_string(max_num_seqs) + ")";
+    const cli::AutoPick pick = cli::resolve_auto(family, as);
+    spec_arg = pick.value;
+    std::fprintf(stderr, "spec: auto -> %s (%s)\n", pick.value.c_str(), pick.why.c_str());
+  }
   const cli::Spec spec = cli::resolve_spec(spec_arg, family, model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
   const bool spec_lookup = spec.kind == cli::SpecKind::Lookup;
   const bool dflash_lookup = spec.kind == cli::SpecKind::DFlashLookup;
   dflash.on = spec.kind == cli::SpecKind::DFlash || dflash_lookup;   // spec 19c / 19f
   dflash.max_k = dflash.on ? spec.max_k : dflash.max_k;
-  options.spec_dflash_lookup = dflash_lookup;
+  // Operator ruling 2026-11-14: prompt lookup is folded into --spec dflash where lookup inside DFlash is built (one card,
+  // one slot - the engine below); B70_SPEC_LOOKUP=0 keeps plain DFlash there (A/B runs). --spec dflash-lookup asks it
+  // explicitly and is refused where it is not built.
+  const bool lookup_fold = spec.kind == cli::SpecKind::DFlash && [] {
+    const char* env = std::getenv("B70_SPEC_LOOKUP");
+    return !(env != nullptr && std::string(env) == "0");
+  }();
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
@@ -1598,8 +1630,10 @@ int run(int argc, char** argv) {
                  tokenizer.vocab_used(), served.name.c_str(), served.vocab_used,
                  tokenizer.vocab_used());
   TemplateAdapter chat_template(snapshot_dir);
+  const bool lookup_inside = dflash_lookup || (lookup_fold && engine.slots() == 1);   // spec 19f, folded into dflash
+  options.spec_dflash_lookup = lookup_inside;
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), dflash.on ? dflash.max_k : mtp_k, spec_lookup,
-                               dflash.on, dflash_lookup);
+                               dflash.on, lookup_inside);
   options.eos_ids = eos;
   // Sized after the model is loaded, so "available" already excludes the process's own load.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
@@ -1636,12 +1670,14 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
     for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
     std::fprintf(stderr, " (plain steps)\n");
-    if (dflash_lookup)   // spec 19f
+    if (lookup_inside)   // spec 19f
       std::fprintf(stderr,
                    "spec dflash-lookup: prompt lookup inside DFlash - ENTER a match of >= %u ids beyond the drafter's "
                    "window %u, STAY while a verify keeps >= %u (and a match of >= %u remains), K %u lookup drafts\n",
                    server::LookupInDFlash::kEnterMatch, drafter->window(), server::LookupInDFlash::kStayAccepted,
                    server::LookupInDFlash::kStayMatch, dflash.max_k);
+    else if (spec.kind == cli::SpecKind::DFlash)
+      std::fprintf(stderr, "spec dflash: prompt lookup inside DFlash off (B70_SPEC_LOOKUP=0)\n");
   }
 
   return listen_until_stopped(server, options);

@@ -4,11 +4,12 @@
 // 2026-11-06) merged the old `--mtp off|K|auto` into it and dropped the tuning flags (--mtp-max, --mtp-cost,
 // --spec-cost, --spec-min-match, --spec-history, --draft-format): the engine uses the measured defaults.
 //
-//   auto           the model's validated proposer: MTP with an adaptive K (spec 8 §10, AdaptiveK over the int8
-//                  head's measured cost table) on the Qwen family (Qwen3.8, Ornith - the models with an
-//                  MTP head and that table); none elsewhere (K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt have no head;
+//   auto           b70-serve (operator ruling 2026-11-14, resolve_auto below): dflash on one card (and replica, a
+//                  drafter per card) when the model has a DFlash drafter and it is in the HF cache; else MTP with
+//                  an adaptive K (spec 8 §10) on the Qwen family (Qwen3.8, Ornith - an MTP head and its cost
+//                  table); none elsewhere (K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt have no head;
 //                  Qwen3.8-Flash-Next's MTP is not validated; Bolt's drafter becomes its auto only on spec 26 §7's
-//                  D5 rule, box row 65). b70-serve's default; b70-decode's is off.
+//                  D5 rule, box row 65). b70-serve's default; b70-decode's is off (its auto is the MTP rule).
 //   off            no proposer.
 //   mtp            the checkpoint's MTP head: K <= --spec-max (1..3, default 3) per iteration, chosen per request
 //                  from its own acceptance (the Qwen family); Qwen3.8-Flash-Next drafts a fixed K = --spec-max
@@ -19,7 +20,11 @@
 //   dflash         the DFlash drafter (spec 19c, Qwen3.8 only; --draft-model PATH, default
 //                  urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound from the HF cache): K <= --spec-max (1..7,
 //                  default 7) drafts a block.
-//   dflash-lookup  dflash with prompt lookup inside it (spec 19f; opt-in until queue row 70 measures it).
+//                  b70-serve on one card folds prompt lookup into it (spec 19f, operator ruling 2026-11-14):
+//                  `dflash` there IS `dflash-lookup`; B70_SPEC_LOOKUP=0 turns the fold off (A/B runs).
+//   dflash-lookup  dflash with prompt lookup inside it (spec 19f); a developer value, `dflash`'s one-card default.
+// `lookup` and `dflash-lookup` stay accepted for b70-decode, tests and A/B runs; the user-facing values are auto, off,
+// mtp and dflash.
 //
 // Nemotron 3.5 Bolt (spec 26c, SpecFamily::Bolt; b70-serve only - b70-decode decodes it plainly): no MTP head, but
 // its own verify lists at M = K + 1 <= 8 rows, so `lookup` (prompt lookup over them) and `dflash` (the LiLiCorr
@@ -50,6 +55,35 @@ struct Spec {
   uint32_t max_k = 0;      // the cap: the head's / lookup's / the drafter's drafts per iteration at most
   bool adaptive = false;   // K per iteration from the request's acceptance (AdaptiveK); else K = max_k
 };
+
+// --spec auto's pick for b70-serve (operator ruling 2026-11-14): DFlash where it runs and its drafter is at hand, the
+// MTP head where the model has one, else off. The engine never downloads: a drafter missing from the HF cache falls
+// back to MTP, and `why` names the command that fetches it.
+struct AutoSetup {
+  bool dflash_target = false;    // the model has a DFlash drafter (Qwen3.8)
+  bool drafter_cached = false;   // its drafter (--draft-model, default the packed one) resolves in the HF cache
+  std::string drafter;           // that drafter's repo id or path, for the log line
+  // Where DFlash cannot run, named for the log line ("" = one card, or replica's drafter per card): tensor parallel,
+  // pipeline parallel, several slots a card.
+  std::string refused;
+};
+struct AutoPick {
+  std::string value;   // "dflash", "mtp" or "off"
+  std::string why;     // the startup log's reason
+};
+// Item 22 (DFlash under tensor parallel) lands here: when TP serves the drafter, the caller stops naming
+// "tensor parallel" in AutoSetup::refused.
+inline AutoPick resolve_auto(SpecFamily family, const AutoSetup& s) {
+  const bool mtp = family == SpecFamily::Qwen;
+  const std::string fallback = mtp ? "mtp" : "off";
+  const std::string head = mtp ? "the model's MTP head" : "no proposer (no MTP head)";
+  if (!s.dflash_target) return {fallback, head + "; the model has no DFlash drafter"};
+  if (!s.refused.empty()) return {fallback, head + "; DFlash is not built under " + s.refused};
+  if (!s.drafter_cached)
+    return {fallback, head + "; the DFlash drafter " + s.drafter + " is not in the HF cache (the engine never "
+                      "downloads it: `hf download " + s.drafter + "`, then restart)"};
+  return {"dflash", "the DFlash drafter " + s.drafter + " (in the HF cache)"};
+}
 
 // `model` names the model in a refusal ("K2-Horizon", "Kolibri-1", ...).
 inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::string& model, bool have_max,
