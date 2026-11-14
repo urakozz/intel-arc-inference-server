@@ -54,7 +54,7 @@ class AcceptanceTest(unittest.TestCase):
             self.assertEqual(report['corpora']['opencode']['7']['engine_E'], 8.0)
             self.assertEqual(report['corpora']['opencode']['7']['gap'], 0.0)
 
-    def test_precision_gate_does_not_pool_away_a_smaller_width_regression(self):
+    def test_precision_gate_pools_a_one_row_regression(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dump, rows = self.baseline_fixture(root)
@@ -63,9 +63,11 @@ class AcceptanceTest(unittest.TestCase):
             (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
             with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
                  contextlib.redirect_stdout(io.StringIO()):
-                self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
+                # pooled (operator ruling 2026-11-14): one row of 35 a token down is -1/35 a round - within 0.05
+                self.assertTrue(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
             report = json.loads((root/'report.json').read_text())
             self.assertEqual(report['corpora']['code']['1']['gap'], -1.0)
+            self.assertAlmostEqual(report['pooled_gap'], -1.0 / 35)
             self.assertEqual(report['corpora']['code']['7']['gap'], 0.0)
 
     def test_precision_gate_is_one_sided(self):
@@ -83,6 +85,17 @@ class AcceptanceTest(unittest.TestCase):
                 self.assertTrue(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
             report = json.loads((root/'report.json').read_text())
             self.assertEqual(report['corpora']['code']['1']['gap'], 1.0)
+
+    def test_precision_gate_fails_a_pooled_regression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump, rows = self.baseline_fixture(root)
+            for r in rows[1:]:
+                if r['dump'] in ('code', 'a4') and r['k'] <= 2: r['ids'] = [99] * r['k']
+            (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
 
     def test_precision_gate_rejects_missing_anchors(self):
         with tempfile.TemporaryDirectory() as tmp:

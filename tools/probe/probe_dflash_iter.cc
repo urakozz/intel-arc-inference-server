@@ -500,18 +500,18 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-2bit] [--candidates-80]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-int4] [--candidates-64]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
     bool candidate_head = false, vprofile = false, vpairs = false;
-    unsigned candidate_bits = 4, attn_ks = 0, candidates = 64;
+    unsigned candidate_bits = 2, attn_ks = 0, candidates = 80;   // the loader's defaults
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--candidate-head") { candidate_head = true; continue; }
-      if (arg == "--candidate-2bit") { candidate_bits = 2; continue; }   // spec 19 v3d Task 7
-      if (arg == "--candidates-80") { candidates = 80; continue; }
+      if (arg == "--candidate-int4") { candidate_bits = 4; continue; }   // spec 19 v3d Task 7: the earlier form
+      if (arg == "--candidates-64") { candidates = 64; continue; }
       if (arg == "--verify-profile") { vprofile = true; continue; }
       if (arg == "--verify-pairs") { vprofile = vpairs = true; continue; }
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
