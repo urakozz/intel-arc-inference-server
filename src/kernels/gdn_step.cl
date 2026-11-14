@@ -635,6 +635,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     }
 #endif
 #ifdef SPEC_SLOTS
+#ifdef PROBE_ONE_STORE
+    if (m == 0)   // probe only: one slot write a step, the traffic a deferred commit would leave
+#endif
     {   // the state after row m, into its slot (header, SPEC_SLOTS)
       __global float* restrict dst = slot_base(state, state_spec, (live + m) % N_SLOTS);
       for (uint kk = 0; kk < BAND_K; ++kk) {

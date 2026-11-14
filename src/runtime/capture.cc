@@ -1224,8 +1224,10 @@ class Capture {
                                          mode_ == Mode::TpVerifyTaps
                                      ? tv_->slots
                                                                                               : MtpBuffers::kSlots;
+      const bool one_store = opt_.probe_gdn_one_store && mode_ == Mode::VerifyTaps;
       l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
-                                                                     d_.gdn_v_heads, n_slots)
+                                                                     d_.gdn_v_heads, n_slots) +
+                                         (one_store ? "_P1" : "")
                                    : kernels::gdn_step_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads),
                              "gdn_step", kWgGdn);
       k.arg_ptr(0, ctrl());
