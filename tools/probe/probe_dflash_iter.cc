@@ -12,6 +12,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -19,7 +20,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include "kernels/kernels.h"
+#include "l0/cmdlist.h"
 #include "l0/fence.h"
+#include "l0/kernel.h"
+#include "l0/module.h"
 #include "l0/queue.h"
 #include "loader/loader.h"
 #include "runtime/dflash/dflash_drafter.h"
@@ -67,8 +72,70 @@ void write_dump(const std::string& path, const Json& meta, const std::vector<int
   for (const auto& [ptr, bytes] : data) out.write(static_cast<const char*>(ptr), bytes);
 }
 
+// Spec 19 v3d Task 7 (--rank-margin): after every recorded draft, the exact int8 head over the draft rows' hidden
+// (gemm_sm_i8w, the target's head) beside the candidate head's logits: the candidate rank of the exact top-1 and of
+// the worst of the exact top-16 (ranks from 1; the candidates re-ranked are the first 64 / 80). Recorded only.
+struct RankMargin {
+  bool on = false;
+  l0::Mem exact;
+  std::unique_ptr<l0::Module> mod;
+  std::unique_ptr<l0::Kernel> k;
+  std::vector<float> cl, el;
+  uint32_t worst1 = 0, worst16 = 0, rows = 0, over64 = 0, over80 = 0;
+  std::vector<uint32_t> ranks16;
+};
+void rank_margin(runtime::Engine& e, df::DFlashDrafter& d, RankMargin& rm, uint32_t k) {
+  const uint32_t H = e.model().desc->hidden;
+  const auto& head = e.model().linears.at({loader::kTopLevel, model::LinearId::LmHead});
+  const uint32_t N = head.shape.N, used = e.model().desc->vocab_used;
+  if (!rm.k) {
+    const kernels::SmallMTuning* t = kernels::small_m_tuning(H, N, 1, 2);
+    rm.exact = l0::Mem(e.context(), l0::MemKind::Device, size_t(7) * N * 4);
+    rm.mod = std::make_unique<l0::Module>(e.context(), kernels::path(kernels::gemm_sm_variant(7, *t)));
+    rm.k = std::make_unique<l0::Kernel>(*rm.mod, kernels::gemm_sm_entry(*t));
+    rm.k->group_size(kernels::gemm_sm_wg_size(*t));
+    rm.k->arg_ptr(0, head.mem.ptr());
+    rm.k->arg_ptr(1, head.scales->ptr());
+    rm.k->arg_ptr(2, static_cast<uint8_t*>(d.buffers().x.ptr()) + size_t(H) * 2);
+    rm.k->arg_ptr(3, rm.exact.ptr());
+    rm.cl.resize(size_t(7) * N);
+    rm.el.resize(size_t(7) * N);
+  }
+  const kernels::SmallMTuning* t = kernels::small_m_tuning(H, N, 1, 2);
+  l0::CmdList list = l0::CmdList::regular(e.context());
+  list.launch(*rm.k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+  list.close();
+  e.replay_aux(list);
+  l0::CmdList imm = l0::CmdList::immediate(e.context());
+  imm.copy(rm.cl.data(), d.buffers().logits.ptr(), rm.cl.size() * 4);
+  imm.copy(rm.el.data(), rm.exact.ptr(), rm.el.size() * 4);
+  std::vector<uint32_t> idx(used);
+  for (uint32_t j = 0; j < k; ++j) {
+    const float* c = rm.cl.data() + size_t(j) * N;
+    const float* x = rm.el.data() + size_t(j) * N;
+    std::iota(idx.begin(), idx.end(), 0u);
+    std::nth_element(idx.begin(), idx.begin() + 15, idx.end(), [&](uint32_t a, uint32_t b) { return x[a] > x[b]; });
+    uint32_t top1 = idx[0];
+    for (uint32_t i = 1; i < 16; ++i)
+      if (x[idx[i]] > x[top1]) top1 = idx[i];
+    float low = c[idx[0]];
+    for (uint32_t i = 1; i < 16; ++i) low = std::min(low, c[idx[i]]);
+    uint32_t r1 = 1, r16 = 1;
+    for (uint32_t v = 0; v < used; ++v) {
+      r1 += c[v] > c[top1];
+      r16 += c[v] > low;
+    }
+    rm.worst1 = std::max(rm.worst1, r1);
+    rm.worst16 = std::max(rm.worst16, r16);
+    rm.over64 += r16 > 64;
+    rm.over80 += r16 > 80;
+    rm.ranks16.push_back(r16);
+    ++rm.rows;
+  }
+}
+
 void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, const std::string& dir,
-                 unsigned anchors) {
+                 unsigned anchors, RankMargin& rm) {
   std::filesystem::create_directories(dir);
   l0::CmdList imm = l0::CmdList::immediate(e.context());
   const uint32_t hidden = e.model().desc->hidden;
@@ -129,6 +196,7 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
           e.load_state(saved.ptr(), p);
           e.control()->cur_token[0] = ids[p];
           const df::DFlashDraftOut out = d.draft(e, k, 0.0f, 0);
+          if (rm.on) rank_margin(e, d, rm, k);
           e.verify(k);
           const std::vector<uint32_t> target(e.verify_ids(), e.verify_ids() + k + 1);
           const auto accept = server::accept_greedy(target.data(), out.ids, k);
@@ -162,6 +230,12 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
                ids, greedy, taps, layers, hidden);
     std::printf("ENGINE_TAPS %s prompt=%u n=%u from=%u anchors=%zu\n", name.c_str(), np, n, from, ps.size());
     std::fflush(stdout);
+  }
+  if (rm.on && rm.rows) {
+    std::sort(rm.ranks16.begin(), rm.ranks16.end());
+    std::printf("RANK_MARGIN rows=%u worst_top1=%u worst_top16=%u p99_top16=%u over64=%u over80=%u (candidate rank of the "
+                "exact int8 head's top-1 / worst of its top-16; recorded)\n", rm.rows, rm.worst1, rm.worst16,
+                rm.ranks16[size_t(rm.ranks16.size() * 0.99)], rm.over64, rm.over80);
   }
 }
 
@@ -500,11 +574,12 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-int4] [--candidates-64]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-int4] [--candidates-64]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N] [--rank-margin]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
     bool candidate_head = false, vprofile = false, vpairs = false;
+    RankMargin rm;
     unsigned candidate_bits = 2, attn_ks = 0, candidates = 80;   // the loader's defaults
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
@@ -514,6 +589,7 @@ int main(int argc, char** argv) {
       if (arg == "--candidates-64") { candidates = 64; continue; }
       if (arg == "--verify-profile") { vprofile = true; continue; }
       if (arg == "--verify-pairs") { vprofile = vpairs = true; continue; }
+      if (arg == "--rank-margin") { rm.on = true; continue; }   // spec 19 v3d Task 7, with --engine-taps
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
@@ -548,7 +624,7 @@ int main(int argc, char** argv) {
     drafter.attach(e, false);
     if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs);
     else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds, attn_ks);
-    else engine_taps(e, drafter, sources, out, anchors);
+    else engine_taps(e, drafter, sources, out, anchors, rm);
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "probe_dflash_iter: %s\n", ex.what());
     return 2;
