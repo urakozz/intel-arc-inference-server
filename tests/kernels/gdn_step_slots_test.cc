@@ -194,6 +194,57 @@ void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t kSlots, uint32_t live,
   }
   std::printf("gdn_step_slots M=%u slots=%u live=%u: gdn_o cos %.9f max abs %.3e, ring bitwise\n", M, kSlots,
               live, oc, oma);
+
+  // verify-cost-m8: the DEFERRED build over the same M rows (parity 0 in, the rows' inputs to parity 1) - gdn_o and
+  // the ring bitwise the reference's, the state untouched; then for every j the flush (gdn_step_defer_M1 at n_active
+  // 0, rows 0..j pending in parity 1) from state0 - bitwise the reference state after row j.
+  if (kSlots != 8 || live != 0) return;
+  l0::Mem pend(d.ctx, l0::MemKind::Device, 2 * kernels::kGdnPendParityBytes);
+  l0::Module md(d.ctx, kernels::path(kernels::gdn_step_defer_variant(M)));
+  l0::Kernel kd(md, "gdn_step");
+  kd.group_size(256);
+  l0::Module mf(d.ctx, kernels::path(kernels::gdn_step_defer_variant(1)));
+  l0::Kernel kf(mf, "gdn_step");
+  kf.group_size(256);
+  for (l0::Kernel* k : {&kd, &kf}) {
+    k->arg_ptr(0, ctrl.ptr());
+    k->arg_ptr(1, qb.ptr());
+    k->arg_ptr(2, abb.ptr());
+    k->arg_ptr(3, sb.ptr());
+    k->arg_ptr(4, rb.ptr());
+    k->arg_ptr(5, st.ptr());
+    k->arg_ptr(6, ob.ptr());
+    k->arg_ptr(7, pend.ptr());
+  }
+  d.imm.copy(st.ptr(), state0.data(), kStateElems * 4);
+  d.imm.copy(rb.ptr(), ring0.data(), kRingElems * 2);
+  d.imm.fill(ob.ptr(), 0u, ob.size());
+  *c = runtime::Control{};
+  c->pos = pos;
+  c->n_active = M;
+  run(d, kd, kHeads, kChunks);
+  std::vector<float> dst(kStateElems);
+  d.imm.copy(dst.data(), st.ptr(), kStateElems * 4);
+  d.imm.copy(got_o.data(), ob.ptr(), got_o.size() * 4);
+  d.imm.copy(got_ring.data(), rb.ptr(), kRingElems * 2);
+  CHECK(std::memcmp(dst.data(), state0.data(), kStateElems * 4) == 0);
+  CHECK(std::memcmp(got_o.data(), ref_o.data(), ref_o.size() * 4) == 0);
+  CHECK(std::memcmp(got_ring.data(), ref_ring.data(), kRingElems * 2) == 0);
+  for (uint32_t j = 0; j < M; ++j) {
+    d.imm.copy(st.ptr(), state0.data(), kStateElems * 4);
+    *c = runtime::Control{};
+    c->pos = pos + j + 1;
+    c->n_active = 0;
+    c->gdn_pend = (j + 1) | (1u << 8);
+    run(d, kf, kHeads, kChunks);
+    d.imm.copy(dst.data(), st.ptr(), kStateElems * 4);
+    const bool bits = std::memcmp(dst.data(), ref_state[j].data(), kStateElems * 4) == 0;
+    std::printf("  deferred M=%u: rows 0..%u replayed%s\n", M, j, bits ? " (bitwise)" : " - DIFFERS");
+    CHECK(bits);
+  }
+  d.imm.copy(got_ring.data(), rb.ptr(), kRingElems * 2);
+  CHECK(std::memcmp(got_ring.data(), ref_ring.data(), kRingElems * 2) == 0);   // the flush writes no ring
+  std::printf("gdn_step_defer M=%u: gdn_o, ring and every replayed state bitwise\n", M);
 }
 }  // namespace
 

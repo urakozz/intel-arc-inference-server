@@ -287,6 +287,38 @@ inline bool run_start(__global const uint* rows, uint m) {
 #endif
 
 // ---------------------------------------------------------------------------
+// DEFERRED (verify-cost-m8): the one-card verify lists' state, committed by replay
+// ---------------------------------------------------------------------------
+// Undefined, this file is the kernels above. Defined, the kernel takes an eighth argument `pend` (this layer's slice of
+// the engine's pending-row buffer, two parities of PEND_PAR bytes) and writes NO per-row state: the rows' recurrence
+// inputs - kf (bf16, k-head-major), v (bf16) and the head's decay and beta (fp32) - go to parity `par ^ 1`, where
+// par = (ctrl[CTRL_PEND] >> 8) & 1. Committing j accepted drafts is the host setting ctrl[CTRL_PEND] = (j + 1) |
+// ((par ^ 1) << 8); the NEXT launch reads the tile from `state`, replays those j + 1 rows from parity par (decay, the
+// kv band tree, the rank-1 update - the chain's own operations on the chain's own values, so the state is bitwise the
+// state after row j of the step that wrote them), stores it back in place, and only then runs its own rows. One state
+// read and one write a step at every M, instead of a read and M writes. The host clears the count after every launch
+// of a list (Engine::verify), so a list replayed twice does not replay the rows twice; n_active 0 (Engine's flush
+// list) replays and stores only. Safe without a cross-work-group barrier: a work-item reads and writes its own 16
+// cells of `state`; the pending rows it reads (parity par) are written by no work-group of this launch (they write
+// par ^ 1); the replay's kf rows reach SLM before any work-item uses them.
+#ifdef DEFERRED
+#if defined(SPEC_SLOTS) || defined(BATCH_ROWS)
+#error "gdn_step: DEFERRED, SPEC_SLOTS and BATCH_ROWS are three different builds"
+#endif
+#if !defined(CTRL_PEND) || !defined(PEND_PAR)
+#error "gdn_step DEFERRED: CTRL_PEND and PEND_PAR (bytes a parity) must be defined"
+#endif
+#define PR 8                                       /* rows a step can leave: the verify lists' M <= 8 */
+#if M > PR
+#error "gdn_step DEFERRED: at most PR rows a step"
+#endif
+#define KHEADS (HEADS / V_PER_K)
+#define PEND_V_OFF (PR * KHEADS * DIM)             /* ushorts: kf [PR][KHEADS][DIM], then v [PR][HEADS][DIM] */
+#define PEND_S_OFF (PR * (KHEADS + HEADS) * DIM / 2)   /* floats: then {decay, beta} [PR][HEADS] */
+inline __global ushort* pend_at(__global uchar* p, uint par) { return (__global ushort*)(p + (size_t)par * PEND_PAR); }
+#endif
+
+// ---------------------------------------------------------------------------
 // NORMS_BATCHED (spec 19 v3d Task 3): the SPEC_SLOTS builds at M >= 2
 // ---------------------------------------------------------------------------
 // The rows' l2norms do not depend on the state, so these builds take every row's two trees before the recurrence:
@@ -296,12 +328,19 @@ inline bool run_start(__global const uint* rows, uint m) {
 // has passed row m - 1's barriers - after its last read of row m - 2's - before that write. Arithmetic, and so every
 // row's state, gdn_o and ring, is bitwise the per-row form's (gdn_step_slots_test). Every other build (M = 1, the
 // plain and BATCH_ROWS builds) preprocesses to the tokens it always had: QF / KF / KVR / OR expand to the old names.
-#if defined(SPEC_SLOTS) && M > 1
+#if (defined(SPEC_SLOTS) || defined(DEFERRED)) && M > 1
 #define NORMS_BATCHED 1
 #define QF(i) rq[m][i]
 #define KF(i) rk[m][i]
 #define KVR kv_red[m & 1]
 #define OR o_red[m & 1]
+#else
+#define QF(i) qf_s[i]
+#define KF(i) kf_s[i]
+#define KVR kv_red
+#define OR o_red
+#endif
+#if defined(NORMS_BATCHED) || defined(DEFERRED)
 // The band tree of one column pair (header, "The reduction trees"), read from SLM into registers: the same pairwise
 // adds in the same order, without a barrier between the steps.
 inline void band_sum(__local float (*r)[CHUNK_V], uint lane, float* x0, float* x1) {
@@ -318,11 +357,6 @@ inline void band_sum(__local float (*r)[CHUNK_V], uint lane, float* x0, float* x
   *x0 = a[0];
   *x1 = b[0];
 }
-#else
-#define QF(i) qf_s[i]
-#define KF(i) kf_s[i]
-#define KVR kv_red
-#define OR o_red
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -358,6 +392,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
                        , __global float* restrict state_pool, __global ushort* restrict ring_pool,
                        __global const uint* restrict rows
 #endif
+#ifdef DEFERRED
+                       , __global uchar* restrict pend
+#endif
                        ) {
   const uint h = get_group_id(0);          // v-head
   const uint c = get_group_id(1);          // state-column chunk
@@ -377,13 +414,19 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   __local float kv_red[SG][CHUNK_V];       // kv band partials: [band][column − 32c]
   __local float o_red[SG][CHUNK_V];        // o  band partials
 #endif
+#ifdef DEFERRED
+  __local float rep_k[PR][DIM];            // the replayed rows' kf
+  __local float rep_red[2][SG][CHUNK_V];   // their kv band partials, by row parity
+#endif
 
 #ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
 #endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;                // the compiled variant is the ceiling
+#ifndef DEFERRED
   if (n_act == 0) return;                  // uniform across the work-group
+#endif
 
   // -------------------------------------------------------------------------
   // 1. conv1d update + SiLU for this work-group's 384 channels, all tokens.
@@ -482,6 +525,51 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   const float negA = gdn_small[NEGA_OFF + h];      // the loader's -exp(A_log), fp32
   const float dt_bias = gdn_small[DTBIAS_OFF + h];
 
+#ifdef DEFERRED
+  // 2a. The previous step's committed rows (header, DEFERRED): its recurrence on its stored inputs, then the tile back.
+  const uint pend_word = ctrl[CTRL_PEND];
+  const uint par = (pend_word >> 8) & 1u;
+  const uint n_rep = min(pend_word & 0xFFu, (uint)PR);
+  if (n_rep) {
+    const __global ushort* restrict pr = pend_at(pend, par);
+    const __global float* restrict ps = (const __global float*)pr + PEND_S_OFF;
+    for (uint i = lid; i < n_rep * DIM; i += WG_GDN)
+      rep_k[i / DIM][i % DIM] = bf16f(pr[((i / DIM) * KHEADS + kh) * DIM + i % DIM]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint r = 0; r < n_rep; ++r) {
+      const float decay = ps[(r * HEADS + h) * 2], beta = ps[(r * HEADS + h) * 2 + 1];
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        S[kk][0] *= decay;
+        S[kk][1] *= decay;
+      }
+      float p0 = 0.0f, p1 = 0.0f;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rep_k[r][sgid * BAND_K + kk];
+        p0 = fma(S[kk][0], kfv, p0);
+        p1 = fma(S[kk][1], kfv, p1);
+      }
+      rep_red[r & 1][sgid][lane] = p0;
+      rep_red[r & 1][sgid][lane + SG] = p1;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      float kv0, kv1;
+      band_sum(rep_red[r & 1], lane, &kv0, &kv1);
+      const __global ushort* restrict pv = pr + PEND_V_OFF + (r * HEADS + h) * DIM + c * CHUNK_V;
+      const float d0 = (bf16f(pv[lane]) - kv0) * beta;
+      const float d1 = (bf16f(pv[lane + SG]) - kv1) * beta;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rep_k[r][sgid * BAND_K + kk];
+        S[kk][0] = fma(kfv, d0, S[kk][0]);
+        S[kk][1] = fma(kfv, d1, S[kk][1]);
+      }
+    }
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      state[sbase + (size_t)kk * DIM] = S[kk][0];
+      state[sbase + (size_t)kk * DIM + SG] = S[kk][1];
+    }
+  }
+  __global ushort* restrict pw = pend_at(pend, par ^ 1u);   // this step's rows' inputs
+#endif
+
 #ifdef NORMS_BATCHED
   // 3a. Every row's l2norm (header, NORMS_BATCHED): section 3's terms, tree and rounding, row by row in SLM.
   for (uint m = 0; m < n_act; ++m) {
@@ -564,6 +652,17 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     barrier(CLK_LOCAL_MEM_FENCE);
 #endif
 
+#ifdef DEFERRED
+    if (c == 0) {   // row m's recurrence inputs (header, DEFERRED): v by every head, kf by the k-head's first
+      if (lid < DIM) pw[PEND_V_OFF + (m * HEADS + h) * DIM + lid] = xs[2][m][lid];
+      else if (h % V_PER_K == 0) pw[(m * KHEADS + kh) * DIM + lid - DIM] = (ushort)(as_uint(KF(lid - DIM)) >> 16);
+      if (lid == 0) {
+        __global float* restrict psw = (__global float*)pw + PEND_S_OFF + (m * HEADS + h) * 2;
+        psw[0] = decay;
+        psw[1] = beta;
+      }
+    }
+#endif
     // The recurrence (doc 03), pure fp32 - nothing below rounds.
     for (uint kk = 0; kk < BAND_K; ++kk) {          // S *= exp(g)
       S[kk][0] *= decay;
@@ -663,7 +762,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // -------------------------------------------------------------------------
   // 4. The tile goes back once, after every token of this step.
   // -------------------------------------------------------------------------
-#if !defined(SPEC_SLOTS) && !defined(BATCH_ROWS)
+#if !defined(SPEC_SLOTS) && !defined(BATCH_ROWS) && !defined(DEFERRED)
   for (uint kk = 0; kk < BAND_K; ++kk) {
     state[sbase + (size_t)kk * DIM] = S[kk][0];
     state[sbase + (size_t)kk * DIM + SG] = S[kk][1];

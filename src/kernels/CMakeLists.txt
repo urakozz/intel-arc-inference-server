@@ -567,6 +567,19 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   foreach(MM 1 2 3 4)
     add_ocloc_kernel(gdn_step_slots_M${MM}_N8 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM})
   endforeach()
+  # verify-cost-m8: the one-card verify lists' DEFERRED build (gdn_step.cl): no per-row state, the committed rows
+  # replayed by the next launch. CTRL_PEND = Control::gdn_pend; PEND_PAR = one parity of the pending rows, 48 layers x
+  # (8 rows x (16 + 48) x 128 bf16 + 8 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes). Qwen3.8's shapes only.
+  foreach(MM 1 2 3 4 5 6 7 8)
+    add_ocloc_kernel(gdn_step_defer_M${MM} SOURCE ${GDN_CL}
+                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=6438912 M=${MM})
+  endforeach()
+  # verify-cost-m8 probe: a||b at M = 2..8 with a wider in-work-group K split (CaptureOptions::probe_ab_ksplit)
+  foreach(MM 2 3 4 5 6 7 8)
+    foreach(SS 32 64)
+      add_gemv_bf16_variant(${MM} 5120 128 16 ${SS})
+    endforeach()
+  endforeach()
   # verify-cost-m8 probe only: the slot build storing row 0's state alone (PROBE_ONE_STORE); no engine binds it
   foreach(MM 1 2 3 4 5 6 7 8)
     add_ocloc_kernel(gdn_step_slots_M${MM}_N8_P1 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM} PROBE_ONE_STORE=1)

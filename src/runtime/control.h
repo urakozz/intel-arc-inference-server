@@ -25,7 +25,10 @@ struct Control {
   // Open-work 13: a draft list's softmax max and normaliser (fp32 bits, draft_prob.cl) - the head's probability for
   // its draft is 1 / normaliser. Written only by the draft lists captured with the probability (runtime::build_draft).
   uint32_t draft_stat[2];
-  uint32_t pad[2];         // pad to 128 B
+  // verify-cost-m8: the one-card verify lists' committed rows (gdn_step.cl, DEFERRED): bits 0..7 the rows the next
+  // launch replays, bit 8 the parity they sit in. Engine::commit sets it, Engine::verify clears the count. 0 elsewhere.
+  uint32_t gdn_pend;
+  uint32_t pad[1];         // pad to 128 B
 };
 static_assert(sizeof(Control) == 128, "control block is two cache lines");
 }  // namespace runtime

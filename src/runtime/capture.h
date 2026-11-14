@@ -141,6 +141,10 @@ struct SlotBind {
   void* hctl = nullptr;        // its head Control (null: MtpBuffers::hctl)
   void* hh = nullptr;          // its hh rows, bf16 [kM + 1][hidden] (null: MtpBuffers::hh)
   const void* pages = nullptr; // plan 19v3b Task 0: its KV page table (null: the KV contiguous from kv_base)
+  // verify-cost-m8: the engine's pending GDN rows (two parities of kernels::kGdnPendParityBytes). Set, a verify list
+  // binds gdn_step's DEFERRED build over them instead of the slot build (no per-row state; the next launch replays the
+  // committed rows). Null: the slot build, as always.
+  void* gdn_pend = nullptr;
 };
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
@@ -206,9 +210,13 @@ struct TapVerify {
   uint32_t slots = 0;                  // TapVerifyDims::kSlots
   l0::Mem* taps = nullptr;             // bf16 [DecodeBuffers::kM][layers.size()][hidden]
   std::vector<uint32_t> layers;        // the tapped layers' OUTPUTS: ascending, each < the model's layers
+  l0::Mem* gdn_pend = nullptr;         // verify-cost-m8: SlotBind::gdn_pend's meaning; null binds the slot build
 };
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const TapVerify& tv, uint32_t M, const CaptureOptions& opt = {});
+// verify-cost-m8: one launch a GDN layer of gdn_step_defer_M1 over `pend` - run with Control::n_active 0 it replays
+// the committed rows into gdn_state and nothing else (the engine's flush before anything reads the state).
+CapturedStep build_gdn_flush(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, void* pend);
 
 // (spec 28c: the stage verify builders below take CaptureOptions too - PipelineEngine's deep lists force DPAS.)
 // --- spec 16b: pipeline parallel decode ----------------------------------------------

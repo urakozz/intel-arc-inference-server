@@ -63,6 +63,8 @@ struct CaptureOptions {
   // verify-cost-m8 probe only: a tap verify list binds gdn_step_slots_M<M>_N8_P1 (row 0's state stored alone - wrong
   // states, timing only).
   bool probe_gdn_one_store = false;
+  // verify-cost-m8 probe: a||b's K split at M >= 2 (0: gemv_bf16_tiling's).
+  uint32_t probe_ab_ksplit = 0;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;
