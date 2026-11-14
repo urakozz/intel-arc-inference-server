@@ -13,7 +13,8 @@
 // kernel of the list.
 //
 //   pos      the row's position in its sequence (RoPE, the causal bound, the conv ring's slot)
-//   kv_base  the slot's first position in the KV allocation: the row's K / V row is kv_base + pos
+//   kv_base  the slot's first position in the KV allocation: the row's K / V row is kv_base + pos (plan 19v3b Task 0:
+//            with the page table, that position's page in the table - the paged builds look the row up there)
 //   src      the GDN state index read at the slot's FIRST row (index 0 = PersistentBuffers::gdn_state, i >= 1 the
 //            pool's slot i - 1); later rows of the slot carry the state in registers
 //   dst      the GDN state index the state after THIS row is written to
@@ -50,19 +51,23 @@ struct SlotSpec {
   bool mtp = true;
 };
 
-// The slots' KV ranges: one allocation at the slots' sum, slot s at the positions after slots 0..s-1.
+// The slots' KV ranges: one allocation at the slots' sum, slot s at the positions after slots 0..s-1 - with several
+// slots each range whole KV pages (plan 19v3b Task 0: runtime::slots_kv_len, SlotDims).
 struct BatchLayout {
   std::vector<SlotSpec> slots;
+  uint32_t kv_len(uint32_t slot) const {   // the positions slot `slot`'s range takes
+    return slots.size() > 1 ? kv_pages(slots[slot].max_len) * kKvPage : slots[slot].max_len;
+  }
   uint32_t total() const {
     uint64_t t = 0;
-    for (const SlotSpec& s : slots) t += s.max_len;
+    for (uint32_t s = 0; s < slots.size(); ++s) t += kv_len(s);
     if (t > 0xFFFFFFFFull) throw std::invalid_argument("BatchLayout: the slots' positions overflow 32 bits");
     return static_cast<uint32_t>(t);
   }
   uint32_t kv_base(uint32_t slot) const {
     if (slot >= slots.size()) throw std::out_of_range("BatchLayout: no slot " + std::to_string(slot));
     uint32_t b = 0;
-    for (uint32_t s = 0; s < slot; ++s) b += slots[s].max_len;
+    for (uint32_t s = 0; s < slot; ++s) b += kv_len(s);
     return b;
   }
 };

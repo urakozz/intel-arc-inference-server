@@ -116,7 +116,7 @@ struct MemoryPlan : MemoryComponents {
   // prefill_scratch, counted with prefill only). 0 without a drafter.
   size_t drafter_slots = 0;
   size_t drafter_taps = 0;
-  // Spec 13c, an engine with sequence slots (plan_slots): their lengths (max_len is their sum: the
+  // Spec 13c, an engine with sequence slots (plan_slots): their lengths (max_len is slots_kv_len of them: the
   // KV, the RoPE table and the head's KV are at it), and the further slots' state, inside
   // decode_state - SlotDims (rings, control blocks, the GDN states without MTP) and with MTP the
   // further slots' GDN states and hh rows in MtpBuffers. Empty / 0 for one sequence: plan() itself.
@@ -179,9 +179,10 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
 
 // --- spec 13c: sequence slots on one card (spec 13 §11.2) ----------------------------------------------------------
 //
-// An engine of `lens.size()` sequence slots (runtime::Engine's `slots`): plan() at the summed positions (one KV
-// allocation; the RoPE table and the head's KV at it too) plus the further slots' state - SlotDims' rings, controls
-// and (MTP off) GDN states, and with MTP the further slots' GDN states and hh rows in MtpBuffers (MtpDims' `seqs`).
+// An engine of `lens.size()` sequence slots (runtime::Engine's `slots`): plan() at slots_kv_len(lens) positions (one
+// KV allocation of whole pages; the RoPE table and the head's KV at it too) plus the further slots' state - SlotDims'
+// rings, controls, page table and (MTP off) GDN states, and with MTP the further slots' GDN states and hh rows in
+// MtpBuffers (MtpDims' `seqs`).
 // Int8 prefill's widening scratch is at the LONGEST slot (3j: one sequence prefills at a time; PrefillScratch::kv8_len).
 // One length is plan(desc, lens[0], ...) exactly. Throws std::invalid_argument for no slot, more than
 // SlotDims::kMaxSeqs, or a draft vocabulary beside slots (not built).
