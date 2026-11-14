@@ -76,6 +76,13 @@ struct Options {
   // only DFlash iterations feed). Through EngineIface::step_drafts_or_many; needs an engine with mtp_k() > 0 and
   // dflash_window() > 0, and not spec_lookup - the Server constructor refuses anything else. Off: nothing here runs.
   bool spec_dflash_lookup = false;
+  // Open-work 27 (`--spec auto` / `mtp`, B70_SPEC_LOOKUP=0 off): prompt lookup inside MTP. spec_dflash_lookup's policy
+  // with no window (the head attends to the whole context: any earlier source counts) and K up to mtp_k(); without
+  // lookup drafts the iteration is an MTP one - the per-step draft choice (server::StepK) for greedy requests where
+  // mtp_auto has it, AdaptiveK otherwise, each fed only by its own iterations. Through
+  // EngineIface::step_drafts_or_chosen; needs an engine with mtp_lookup(), one engine (not under the scheduler), and
+  // neither spec_lookup nor spec_dflash_lookup - the Server constructor refuses anything else.
+  bool spec_mtp_lookup = false;
   // How b70-serve runs the model on the cards, for the startup line ("1 card", "pp - ...", "replica - ..."); empty
   // when the family's own runner says it.
   std::string parallel_desc;

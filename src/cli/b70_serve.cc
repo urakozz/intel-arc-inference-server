@@ -1300,12 +1300,14 @@ int run(int argc, char** argv) {
   dflash.on = spec.kind == cli::SpecKind::DFlash || dflash_lookup;   // spec 19c / 19f
   dflash.max_k = dflash.on ? spec.max_k : dflash.max_k;
   // Operator ruling 2026-11-14: prompt lookup is folded into --spec dflash where lookup inside DFlash is built (one card,
-  // one slot - the engine below; --parallel tp - serve_tp); B70_SPEC_LOOKUP=0 keeps plain DFlash there (A/B runs). --spec dflash-lookup asks it
-  // explicitly and is refused where it is not built.
-  const bool lookup_fold = spec.kind == cli::SpecKind::DFlash && [] {
+  // one slot - the engine below; --parallel tp - serve_tp); B70_SPEC_LOOKUP=0 keeps plain DFlash there (A/B runs).
+  // --spec dflash-lookup asks it explicitly and is refused where it is not built. Open-work 27: the same inside MTP
+  // (--spec auto / mtp, one card, one slot), B70_SPEC_LOOKUP=0 plain MTP.
+  const bool lookup_env = [] {
     const char* env = std::getenv("B70_SPEC_LOOKUP");
     return !(env != nullptr && std::string(env) == "0");
   }();
+  const bool lookup_fold = spec.kind == cli::SpecKind::DFlash && lookup_env;
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
@@ -1633,6 +1635,7 @@ int run(int argc, char** argv) {
   TemplateAdapter chat_template(snapshot_dir);
   const bool lookup_inside = dflash_lookup || (lookup_fold && engine.slots() == 1);   // spec 19f, folded into dflash
   options.spec_dflash_lookup = lookup_inside;
+  options.spec_mtp_lookup = mtp_on && lookup_env && engine.slots() == 1;   // open-work 27
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), dflash.on ? dflash.max_k : mtp_k, spec_lookup,
                                dflash.on, lookup_inside);
   options.eos_ids = eos;
@@ -1663,6 +1666,14 @@ int run(int argc, char** argv) {
                runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, spec_lookup, options.lookup_min_match, spec.max_k, options.lookup_history,
                  mtp_on && spec.adaptive, served.is_moe(), served.name);
+  if (options.spec_mtp_lookup)   // open-work 27
+    std::fprintf(stderr,
+                 "spec mtp: prompt lookup inside MTP - ENTER a match of >= %u ids, STAY while a verify keeps >= %u (and "
+                 "a match of >= %u remains), K %u lookup drafts\n",
+                 server::LookupInDFlash::kEnterMatch, server::LookupInDFlash::kStayAccepted,
+                 server::LookupInDFlash::kStayMatch, mtp_k);
+  else if (mtp_on && engine.slots() == 1)
+    std::fprintf(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
   if (drafter) {   // spec 19c: the drafter's policy line (print_proposer's format)
     const server::MtpCost& c = options.mtp_adaptive.cost;
     std::fprintf(stderr, "spec dflash: %s drafter, K <= %u, cost verify M=1..%zu",

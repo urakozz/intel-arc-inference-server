@@ -192,6 +192,34 @@ struct MockEngine : server::EngineIface {
   uint32_t dflash_window() override { return window; }
   std::vector<uint32_t> step_drafts_or_many(const server::Sampling& s, uint32_t k, const Proposer& propose) override {
     if (window == 0 || mtp == 0) throw std::logic_error("mock: step_drafts_or_many without a drafter");
+    return drafts_or(s, propose, [&] { return step_many(s, k); });   // step_many projects its own burst
+  }
+
+  // Open-work 27: an MTP engine with lookup inside it (mtp > 0, mtp_lookup_on). step_drafts_or_chosen() is
+  // step_drafts_or_many()'s iteration whose own iteration (counted in dflash_iterations) is step_chosen(s, k, choose)
+  // when `choose` is set, step_many(s, k) otherwise. With `chooses` the engine reports the head's probabilities:
+  // step_chosen asks choose(j, 0.9) after each scripted draft (up to k) and returns step_many at the K it answered.
+  bool mtp_lookup_on = false, chooses = false;
+  size_t chosen_iterations = 0;
+  bool mtp_lookup() override { return mtp_lookup_on; }
+  bool chooses_drafts() override { return chooses; }
+  std::vector<uint32_t> step_chosen(const server::Sampling& s, uint32_t k, const DraftChoice& choose) override {
+    if (!chooses) throw std::logic_error("mock: step_chosen without chooses");
+    ++chosen_iterations;
+    int v = -1;
+    uint32_t j = 0;
+    while (v < 0 && j < k) v = choose(++j, 0.9f);
+    return step_many(s, v < 0 ? j : static_cast<uint32_t>(v));
+  }
+  std::vector<uint32_t> step_drafts_or_chosen(const server::Sampling& s, uint32_t k, const Proposer& propose,
+                                              const DraftChoice& choose) override {
+    if (!mtp_lookup_on || mtp == 0) throw std::logic_error("mock: step_drafts_or_chosen without the MTP head");
+    return drafts_or(s, propose, [&] { return choose ? step_chosen(s, k, choose) : step_many(s, k); });
+  }
+
+  // The lookup-inside iteration: the proposer's drafts kept while they equal the script, or the engine's own.
+  template <class Own>
+  std::vector<uint32_t> drafts_or(const server::Sampling& s, const Proposer& propose, Own own) {
     pendings.push_back(target(at));
     const std::vector<uint32_t> d = propose(target(at));
     if (d.size() > mtp) throw std::logic_error("mock: more lookup drafts than mtp_k()");
@@ -199,7 +227,7 @@ struct MockEngine : server::EngineIface {
     std::vector<uint32_t> out;
     if (d.empty()) {
       ++dflash_iterations;
-      out = step_many(s, k);   // projects its own burst
+      out = own();
     } else {
       ++lookup_iterations;
       size_t j = 0;

@@ -16,7 +16,7 @@
 #       <out stem>-f32.golden.safetensors and <out stem>-bf16.golden.safetensors
 #   tools/box_validate/f32_refs.sh <data tree> forced-qwen <dir> [<dir>...]
 #       Qwen3.8's spec tests (spec 28 N4 / N6, tests/server/spec_judge.h: mtp_verify_test, mtp_gpu_test and its
-#       twins, the DFlash tests): every Qwen3.8 context of the dirs (keys QWEN_KEYS_RE; a key in two dirs is one
+#       twins, mtp_lookup_gpu_test, the DFlash tests): every Qwen3.8 context of the dirs (keys QWEN_KEYS_RE; a key in two dirs is one
 #       context) through tools/oracle/qwen_forced.py - ONE layer-major f32 forward over the contexts' token trie,
 #       not a run a context (~250 contexts / ~450k ids are ~48k distinct positions) -> <data tree>/
 #       oracle-out-qwen-f32-forced/ (the checkpoint's bf16 head) and oracle-out-qwen-f32-i8head-forced/ (the int8
@@ -88,7 +88,7 @@ case "$what" in
     [ $# -gt 0 ] || { echo "f32_refs: $what <dir> [<dir>...]" >&2; exit 2; }
     out="$data/oracle-out-qwen-f32-forced" out8="$data/oracle-out-qwen-f32-i8head-forced"
     part="oracle-out-qwen-forced.partial"   # in the tree: the container sees only the tree (at /ws)
-    keys="${QWEN_KEYS_RE:-^(mtp_verify_qwen3\.8_|mtp_gpu_|dflash_)}" pfi8=""
+    keys="${QWEN_KEYS_RE:-^(mtp_verify_qwen3\.8_|mtp_gpu_|mtp_lookup_gpu_|dflash_)}" pfi8=""
     if [ "${what%-kv8}" = forced-qwen-pfi8 ]; then
       out="$data/oracle-out-qwen-f32-pfi8mlp-forced" out8="$out" part="oracle-out-qwen-pfi8mlp-forced.partial"
       keys="^mtp_gpu_" pfi8="--pfi8-re '^mtp_gpu_'" QWEN_FIRST_RE=""
@@ -151,7 +151,7 @@ case "$what" in
         k=$(basename "$f" .prompt.ids)
         case "$k" in
           mtp_gpu_*) c="$part/ctx-pfi8" ;;
-          mtp_verify_qwen3.8_*|dflash_*|serve_*|slots_*) c="$part/ctx" ;;   # serve / slots: serve_judge.py's contexts
+          mtp_verify_qwen3.8_*|mtp_lookup_gpu_*|dflash_*|serve_*|slots_*) c="$part/ctx" ;;   # serve / slots: serve_judge.py's contexts
           *) continue ;;
         esac
         [ -e "$c/$k.prompt.ids" ] && continue
