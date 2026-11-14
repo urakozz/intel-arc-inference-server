@@ -54,7 +54,7 @@ class AcceptanceTest(unittest.TestCase):
             self.assertEqual(report['corpora']['opencode']['7']['engine_E'], 8.0)
             self.assertEqual(report['corpora']['opencode']['7']['gap'], 0.0)
 
-    def test_precision_gate_does_not_pool_away_a_smaller_width_regression(self):
+    def test_precision_gate_pools_rows_but_gates_each_corpus(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dump, rows = self.baseline_fixture(root)
@@ -63,10 +63,55 @@ class AcceptanceTest(unittest.TestCase):
             (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
             with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
                  contextlib.redirect_stdout(io.StringIO()):
+                # pooled (operator ruling 2026-11-14): one row of 35 a token down is -1/35 a round - within 0.05;
+                # but code pooled over its 7 K rows is -1/7: the per-corpus gate fails it
                 self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
             report = json.loads((root/'report.json').read_text())
-            self.assertEqual(report['corpora']['code']['1']['gap'], 1.0)
+            self.assertEqual(report['corpora']['code']['1']['gap'], -1.0)
+            self.assertAlmostEqual(report['pooled_gap'], -1.0 / 35)
             self.assertEqual(report['corpora']['code']['7']['gap'], 0.0)
+
+    def test_precision_gate_is_one_sided(self):
+        # Spec 19 v3 §3.2: acceptance may rise; only a drop of more than 0.05 fails (the gap is engine - baseline).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump, _ = self.baseline_fixture(root)
+            base = json.loads((root/'baseline.json').read_text())
+            for d in base['drafts']:
+                if d['name'] == 'code' and d['k'] == 1: d['engine'] = [99]
+            base['corpora']['code']['1']['engine_E'] = 1.0
+            (root/'baseline.json').write_text(json.dumps(base))
+            with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
+            report = json.loads((root/'report.json').read_text())
+            self.assertEqual(report['corpora']['code']['1']['gap'], 1.0)
+
+    def test_precision_gate_fails_a_pooled_regression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump, rows = self.baseline_fixture(root)
+            for r in rows[1:]:
+                if r['dump'] in ('code', 'a4') and r['k'] <= 2: r['ids'] = [99] * r['k']
+            (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
+
+    def test_precision_gate_fails_one_corpus_losing_a_token(self):
+        # The all-corpus pool can hold while one corpus drops: every K of code a token down is -1 for code, -0.2 pooled.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump, rows = self.baseline_fixture(root)
+            for r in rows[1:]:
+                if r['dump'] == 'code': r['ids'] = [r['ids'][0]] + [99] * (r['k'] - 1) if r['k'] > 1 else [99]
+            (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
+            report = json.loads((root/'report.json').read_text())
+            self.assertLess(report['corpus_gap']['code'], -0.05)
+            self.assertGreaterEqual(report['corpus_gap']['a4'], 0.0)
 
     def test_precision_gate_rejects_missing_anchors(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -516,6 +516,13 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
                      DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                              CAUSAL=0 HPW=1 RPW=${RPW})
   endforeach()
+  # Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl); its reduce is the _H1_B4 binary's.
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128)
+  foreach(KSP 2 4)   # the occupancy forms: the block's keys split KSP ways a head
+    add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k${KSP} SOURCE ${DF_DIR}/df_attn_dpas.cl
+                     DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=${KSP})
+  endforeach()
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep SOURCE ${DF_DIR}/df_attn_exp.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0 HPW=1 RPW=4)
@@ -532,6 +539,10 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_candidate_R7_N248320_U248077_K64 SOURCE ${DF_DIR}/df_candidate.cl
                    DEFINES R=7 N=248320 USED=248077)
   add_ocloc_kernel(df_rerank_R7_K5120_U248077_C64_Q4 SOURCE ${DF_DIR}/df_rerank.cl DEFINES K=5120 USED=248077)
+  # Spec 19 v3d Task 7: 80 candidates a row - the 2-bit head's default (64: the int4 head's)
+  add_ocloc_kernel(df_candidate_R7_N248320_U248077_K80 SOURCE ${DF_DIR}/df_candidate.cl
+                   DEFINES R=7 N=248320 USED=248077 C=80)
+  add_ocloc_kernel(df_rerank_R7_K5120_U248077_C80_Q4 SOURCE ${DF_DIR}/df_rerank.cl DEFINES K=5120 USED=248077 C=80)
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320 SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16 SOURCE ${DF_DIR}/df_select_split.cl
@@ -2088,7 +2099,7 @@ function(add_gemm_sm_variant M K N S L)
 endfunction()
 # The production rows, kernels::kSmallMTuning's order: "K N S L flags...".
 # (S is the OUTPUT's slices: gate||up's 2x8 work-group row compiles at S 1 - kernels::gemm_sm_out_s.)
-set(GEMM_SM_QWEN38 "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG"
+set(GEMM_SM_QWEN38 "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG B2D"
                    "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG")
 macro(gemm_sm_rows ROWS MLIST)
   foreach(row IN LISTS ${ROWS})
@@ -2128,7 +2139,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   gemm_sm_rows(GEMM_SM_DFLASH _m8)
   gemm_sm_rows(GEMM_SM_DFLASH_INT4 _m8)
   gemm_sm_rows(GEMM_SM_DFLASH_HEAD _m7)
-  set(GEMM_SM_DFLASH_CANDIDATE "5120 248320 1 1 MG")
+  set(GEMM_SM_DFLASH_CANDIDATE "5120 248320 1 1 MG" "5120 248320 1 3")   # 3: spec 19 v3d's 2-bit candidates
   gemm_sm_rows(GEMM_SM_DFLASH_CANDIDATE _m7)
   add_gemv_variant(7 5120 248320 1 1)
   foreach(row "5120 6144 4" "4096 5120 4" "5120 34816 8" "17408 5120 4" "25600 5120 8"

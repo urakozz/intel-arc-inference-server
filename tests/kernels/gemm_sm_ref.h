@@ -29,7 +29,7 @@ constexpr uint32_t kGroup = 64;
 constexpr uint32_t kTileU32 = 136;
 
 // The weights as the device holds them. kind: 0 = int4 layout 0, 1 = int4 layout 1,
-// 2 = int8 head (tiled, column scale).
+// 2 = int8 head (tiled, column scale), 3 = spec 19 v3d's 2-bit tiles (72 u32 a tile and group).
 struct WeightView {
   uint32_t K = 0, N = 0, kind = 0;
   const uint32_t* words = nullptr;   // int4: qweight (L0) or tiles (L1)
@@ -44,6 +44,10 @@ struct WeightView {
       const uint32_t* tile = words + (size_t(n / 16) * (K / kGroup) + k / kGroup) * kTileU32;
       return int((tile[((k % kGroup) / 8) * 16 + n % 16] >> (4 * (k % 8))) & 0xFu) - 8;
     }
+    if (kind == 3) {   // 2 (c - 1.5): the 2-bit value doubled to an integer; scale() halves the f16 scale
+      const uint32_t* tile = words + (size_t(n / 16) * (K / kGroup) + k / kGroup) * 72;
+      return 2 * int((tile[((k % kGroup) / 16) * 16 + n % 16] >> (2 * (k % 16))) & 3u) - 3;
+    }
     return q8[(size_t(n / 16) * (K / 16) + k / 16) * 256 + size_t(k % 16) * 16 + n % 16];
   }
   // int4: the f16 group scale of (k, n); int8: the column scale.
@@ -54,6 +58,12 @@ struct WeightView {
       uint16_t h;
       std::memcpy(&h, reinterpret_cast<const uint16_t*>(tile + 128) + n % 16, 2);
       return common::f16_to_f32(h);
+    }
+    if (kind == 3) {
+      const uint32_t* tile = words + (size_t(n / 16) * (K / kGroup) + k / kGroup) * 72;
+      uint16_t h;
+      std::memcpy(&h, reinterpret_cast<const uint16_t*>(tile + 64) + n % 16, 2);
+      return 0.5f * common::f16_to_f32(h);
     }
     return colscale[n];
   }

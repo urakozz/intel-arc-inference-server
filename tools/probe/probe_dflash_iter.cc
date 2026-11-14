@@ -1,5 +1,7 @@
 // Spec 19 v2: production DFlash list costs, and engine taps on recorded continuations.
 // probe_dflash_iter TARGET DRAFTER [--depth 4096] [--calls 16] [--rounds 3]
+// probe_dflash_iter TARGET DRAFTER --verify-profile [--depth 4096]: spec 19 v3d Task 1, verify at 1 / 2 / 4 / 8 rows
+//   by kernel family (VPROFILE_* lines); --verify-pairs: only the uninstrumented pairs (VPROFILE_PAIR)
 // probe_dflash_iter TARGET DRAFTER --engine-taps SOURCES.json OUT_DIR [--anchors 16]
 // SOURCES: [{name, prompt_ids, cont_ids}]. Taps use dump_taps.py's safetensors format.
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -17,7 +20,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include "kernels/kernels.h"
+#include "l0/cmdlist.h"
 #include "l0/fence.h"
+#include "l0/kernel.h"
+#include "l0/module.h"
 #include "l0/queue.h"
 #include "loader/loader.h"
 #include "runtime/dflash/dflash_drafter.h"
@@ -65,8 +72,70 @@ void write_dump(const std::string& path, const Json& meta, const std::vector<int
   for (const auto& [ptr, bytes] : data) out.write(static_cast<const char*>(ptr), bytes);
 }
 
+// Spec 19 v3d Task 7 (--rank-margin): after every recorded draft, the exact int8 head over the draft rows' hidden
+// (gemm_sm_i8w, the target's head) beside the candidate head's logits: the candidate rank of the exact top-1 and of
+// the worst of the exact top-16 (ranks from 1; the candidates re-ranked are the first 64 / 80). Recorded only.
+struct RankMargin {
+  bool on = false;
+  std::unique_ptr<l0::Mem> exact;
+  std::unique_ptr<l0::Module> mod;
+  std::unique_ptr<l0::Kernel> k;
+  std::vector<float> cl, el;
+  uint32_t worst1 = 0, worst16 = 0, rows = 0, over64 = 0, over80 = 0;
+  std::vector<uint32_t> ranks16;
+};
+void rank_margin(runtime::Engine& e, df::DFlashDrafter& d, RankMargin& rm, uint32_t k) {
+  const uint32_t H = e.model().desc->hidden;
+  const auto& head = e.model().linears.at({loader::kTopLevel, model::LinearId::LmHead});
+  const uint32_t N = head.shape.N, used = e.model().desc->vocab_used;
+  if (!rm.k) {
+    const kernels::SmallMTuning* t = kernels::small_m_tuning(H, N, 1, 2);
+    rm.exact = std::make_unique<l0::Mem>(e.context(), l0::MemKind::Device, size_t(7) * N * 4);
+    rm.mod = std::make_unique<l0::Module>(e.context(), kernels::path(kernels::gemm_sm_variant(7, *t)));
+    rm.k = std::make_unique<l0::Kernel>(*rm.mod, kernels::gemm_sm_entry(*t));
+    rm.k->group_size(kernels::gemm_sm_wg_size(*t));
+    rm.k->arg_ptr(0, head.mem.ptr());
+    rm.k->arg_ptr(1, head.scales->ptr());
+    rm.k->arg_ptr(2, static_cast<uint8_t*>(d.buffers().x.ptr()) + size_t(H) * 2);
+    rm.k->arg_ptr(3, rm.exact->ptr());
+    rm.cl.resize(size_t(7) * N);
+    rm.el.resize(size_t(7) * N);
+  }
+  const kernels::SmallMTuning* t = kernels::small_m_tuning(H, N, 1, 2);
+  l0::CmdList list = l0::CmdList::regular(e.context());
+  list.launch(*rm.k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+  list.close();
+  e.replay_aux(list);
+  l0::CmdList imm = l0::CmdList::immediate(e.context());
+  imm.copy(rm.cl.data(), d.buffers().logits.ptr(), rm.cl.size() * 4);
+  imm.copy(rm.el.data(), rm.exact->ptr(), rm.el.size() * 4);
+  std::vector<uint32_t> idx(used);
+  for (uint32_t j = 0; j < k; ++j) {
+    const float* c = rm.cl.data() + size_t(j) * N;
+    const float* x = rm.el.data() + size_t(j) * N;
+    std::iota(idx.begin(), idx.end(), 0u);
+    std::nth_element(idx.begin(), idx.begin() + 15, idx.end(), [&](uint32_t a, uint32_t b) { return x[a] > x[b]; });
+    uint32_t top1 = idx[0];
+    for (uint32_t i = 1; i < 16; ++i)
+      if (x[idx[i]] > x[top1]) top1 = idx[i];
+    float low = c[idx[0]];
+    for (uint32_t i = 1; i < 16; ++i) low = std::min(low, c[idx[i]]);
+    uint32_t r1 = 1, r16 = 1;
+    for (uint32_t v = 0; v < used; ++v) {
+      r1 += c[v] > c[top1];
+      r16 += c[v] > low;
+    }
+    rm.worst1 = std::max(rm.worst1, r1);
+    rm.worst16 = std::max(rm.worst16, r16);
+    rm.over64 += r16 > 64;
+    rm.over80 += r16 > 80;
+    rm.ranks16.push_back(r16);
+    ++rm.rows;
+  }
+}
+
 void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, const std::string& dir,
-                 unsigned anchors) {
+                 unsigned anchors, RankMargin& rm) {
   std::filesystem::create_directories(dir);
   l0::CmdList imm = l0::CmdList::immediate(e.context());
   const uint32_t hidden = e.model().desc->hidden;
@@ -127,6 +196,7 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
           e.load_state(saved.ptr(), p);
           e.control()->cur_token[0] = ids[p];
           const df::DFlashDraftOut out = d.draft(e, k, 0.0f, 0);
+          if (rm.on) rank_margin(e, d, rm, k);
           e.verify(k);
           const std::vector<uint32_t> target(e.verify_ids(), e.verify_ids() + k + 1);
           const auto accept = server::accept_greedy(target.data(), out.ids, k);
@@ -161,9 +231,15 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
     std::printf("ENGINE_TAPS %s prompt=%u n=%u from=%u anchors=%zu\n", name.c_str(), np, n, from, ps.size());
     std::fflush(stdout);
   }
+  if (rm.on && rm.rows) {
+    std::sort(rm.ranks16.begin(), rm.ranks16.end());
+    std::printf("RANK_MARGIN rows=%u worst_top1=%u worst_top16=%u p99_top16=%u over64=%u over80=%u (candidate rank of the "
+                "exact int8 head's top-1 / worst of its top-16; recorded)\n", rm.rows, rm.worst1, rm.worst16,
+                rm.ranks16[size_t(rm.ranks16.size() * 0.99)], rm.over64, rm.over80);
+  }
 }
 
-void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds) {
+void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds, unsigned attn_ks) {
   if (!depth) throw std::runtime_error("cost depth must be positive");
   std::ifstream input("tests/golden/prompts/long32k.ids");
   std::vector<uint32_t> file;
@@ -245,6 +321,7 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
   // Profile separate lists: timestamp signals must not contaminate the wall-time medians above.
   runtime::ProfileEvents dp(e.context()), pp(e.context());
   runtime::CaptureOptions opt;
+  if (attn_ks) opt.dflash_attn_ks = attn_ks;   // the profiled draft list's DPAS key split (--attn-ks; 0: production)
   opt.profile = &dp;
   auto draft = df::build_dflash_draft(e.context(), d.weights(), df::dflash_target(e.model()), d.buffers(),
                                      e.buffers().control, opt);
@@ -328,19 +405,191 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
               depth, median(outside), median(projection_outside));
   e.recapture_verify({});   // the engine's lists must release vp's events before it dies
 }
+
+// Spec 19 v3d Task 1: a verify list's launch -> its kernel family. Linears are named by their order in the layer
+// (a GDN layer: qkv||z, a||b, out_proj, gate||up, down; an FA layer: q||k||v, o_proj, gate||up, down).
+std::vector<std::string> verify_families(const std::vector<std::string>& labels) {
+  std::vector<std::string> out(labels.size());
+  for (size_t i = 0; i < labels.size();) {
+    const std::string layer = labels[i].substr(0, labels[i].find(' '));
+    size_t end = i;
+    bool gdn = false;
+    while (end < labels.size() && labels[end].compare(0, layer.size() + 1, layer + " ") == 0) {
+      gdn |= labels[end].find(" gdn_step ") != std::string::npos;
+      ++end;
+    }
+    static const char* gdn_linears[] = {"qkv||z", "a||b", "out_proj", "gate||up", "down"};
+    static const char* fa_linears[] = {"q||k||v", "o_proj", "gate||up", "down"};
+    unsigned linear = 0;
+    for (size_t j = i; j < end; ++j) {
+      const auto start = labels[j].find(' ') + 1;
+      const std::string entry = labels[j].substr(start, labels[j].find(' ', start) - start);
+      std::string& f = out[j];
+      if (entry.rfind("gemv", 0) == 0 || entry.rfind("gemm_sm", 0) == 0)
+        f = layer == "--" ? "head" : (gdn ? gdn_linears : fa_linears)[std::min(linear++, gdn ? 4u : 3u)];
+      else if (entry == "prep_res_fold") f = "residual fold";
+      else if (entry == "prep_norm_finish") f = "norm";
+      else if (entry == "prep_silu_mul") f = "silu";
+      else if (entry == "prep_gated_head") f = "gated head";
+      else if (entry == "gdn_step") f = "gdn";
+      else if (entry.rfind("attn_prep", 0) == 0) f = "attn prepare";
+      else if (entry.rfind("attn_reduce", 0) == 0) f = "attn reduce";
+      else if (entry.rfind("attn_", 0) == 0) f = "attention";
+      else if (entry.rfind("argmax", 0) == 0) f = "argmax";
+      else if (entry == "embed_gather") f = "embedding";
+      else f = entry;
+    }
+    i = end;
+  }
+  return out;
+}
+
+// --verify-profile: the tap verify lists at 1 / 2 / 4 / 8 rows with per-launch events, summed by family, plus the
+// gaps between launches (a launch's start minus its predecessor's end; the tap copies sit in the gaps after the
+// input norm of every tapped layer's successor, and after the final norm). The widths are captured in turn inside
+// every round, each after a warm-up, so clock drift spreads over all of them. Then the same widths uninstrumented
+// as interleaved pairs against verify at 1 row (the decision numbers).
+void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds,
+                    bool pairs_only) {
+  std::ifstream input("tests/golden/prompts/long32k.ids");
+  std::vector<uint32_t> file;
+  for (uint32_t id; input >> id;) file.push_back(id);
+  if (file.empty()) throw std::runtime_error("no long32k.ids");
+  std::vector<uint32_t> prompt(depth);
+  for (size_t i = 0; i < prompt.size(); ++i) prompt[i] = file[i % file.size()];
+  e.prefill(std::vector<uint32_t>(prompt.begin(), prompt.end() - 1));
+  l0::Mem saved(e.context(), l0::MemKind::Host, e.state_bytes());
+  e.save_state(saved.ptr());
+  auto restore = [&]() {
+    e.load_state(saved.ptr(), depth - 1);
+    e.control()->cur_token[0] = prompt.back();
+    e.control()->n_active = 1;
+    e.verify(0);
+    e.commit(0, e.verify_ids()[0]);
+  };
+  auto verify = [&](uint32_t m) {
+    for (uint32_t j = 1; j < m; ++j) e.control()->cur_token[j] = file[j % file.size()];
+    e.verify(m - 1);
+  };
+  // The sites after which build_verify_taps appends the tap copies: layer t + 1's input norm, or the final norm.
+  std::vector<std::string> tap_sites;
+  for (uint32_t t : d.tap_layers())
+    tap_sites.push_back(t + 1 < e.model().desc->layers ? "L" + std::to_string(t + 1) + " " : std::string("-- "));
+  const std::vector<uint32_t> widths = {1, 2, 4, 8};
+  std::map<uint32_t, std::map<std::string, std::vector<double>>> fam;   // width -> family -> per-round ms
+  std::map<uint32_t, std::vector<double>> walls, devices, gaps, spans;
+  std::map<uint32_t, size_t> launches;
+  for (unsigned r = 0; !pairs_only && r <= rounds; ++r) {   // --verify-pairs: no instrumented round
+    for (uint32_t m : widths) {
+      runtime::ProfileEvents vp(e.context());
+      runtime::CaptureOptions opt;
+      opt.profile = &vp;
+      opt.profile_m = m;
+      opt.profile_keys = depth + 1;
+      e.recapture_verify(opt);
+      const runtime::CapturedStep& step = e.verify_step_at(m, depth + 1);
+      if (vp.events.size() != step.kernel_count) throw std::runtime_error("the profiled list is not the one verify submits");
+      const auto families = verify_families(step.labels);
+      std::vector<bool> after_tap(step.labels.size(), false);
+      for (const auto& site : tap_sites)
+        for (size_t i = 0; i + 1 < step.labels.size(); ++i)
+          if (step.labels[i].rfind(site, 0) == 0 && families[i] == "norm") { after_tap[i + 1] = true; break; }
+      // Every replay of the instrumented list starts from reset events - restore() replays the 1-row list too.
+      auto reset = [&]() { for (auto& event : vp.events) event.reset(); };
+      for (unsigned w = 0; w < 4; ++w) {   // warm-up after the capture's idle host time
+        reset();
+        restore();
+        reset();
+        verify(m);
+      }
+      std::map<std::string, double> sums;
+      double wall = 0, device = 0, gap = 0, span = 0;
+      for (unsigned c = 0; c < calls; ++c) {
+        reset();
+        restore();
+        reset();
+        wall += timed([&]() { verify(m); });
+        double prev_end = 0;
+        for (size_t i = 0; i < vp.events.size(); ++i) {
+          const double dur = vp.events[i].duration_us() / 1000.0;
+          const double end = vp.events[i].elapsed_us(vp.events.front()) / 1000.0;
+          sums[families[i]] += dur;
+          device += dur;
+          if (i) {
+            const double g = end - dur - prev_end;
+            sums[after_tap[i] ? "gap: tap copies" : "gap: between launches"] += g;
+            gap += g;
+          }
+          prev_end = end;
+        }
+        span += prev_end;
+      }
+      const size_t count = step.kernel_count;
+      e.recapture_verify({});   // release vp's events before it dies (and `step` with them)
+      if (!r) continue;
+      for (const auto& [f, ms] : sums) fam[m][f].push_back(ms / calls);
+      walls[m].push_back(wall / calls);
+      devices[m].push_back(device / calls);
+      gaps[m].push_back(gap / calls);
+      spans[m].push_back(span / calls);
+      launches[m] = count;
+    }
+  }
+  if (!pairs_only) std::printf("VPROFILE depth=%u calls=%u rounds=%u (instrumented: per-launch timestamps)\n", depth, calls, rounds);
+  if (!pairs_only) for (const auto& [f, ms] : fam[8]) {
+    std::printf("VPROFILE_FAMILY depth=%u family=\"%s\"", depth, f.c_str());
+    for (uint32_t m : widths) std::printf(" m%u=%.4f", m, fam[m].count(f) ? median(fam[m][f]) : 0.0);
+    std::printf(" excess8=%.4f\n", median(fam[8][f]) - (fam[1].count(f) ? median(fam[1][f]) : 0.0));
+  }
+  if (!pairs_only) for (uint32_t m : widths)
+    std::printf("VPROFILE_TOTAL depth=%u m=%u launches=%zu wall_ms=%.4f device_ms=%.4f gaps_ms=%.4f span_ms=%.4f "
+                "host_ms=%.4f\n", depth, m, launches[m], median(walls[m]), median(devices[m]), median(gaps[m]),
+                median(spans[m]), median(walls[m]) - median(spans[m]));
+  if (!pairs_only) std::printf("VPROFILE_EXCESS depth=%u wall8_minus_wall1=%.4f device_plus_gaps=%.4f\n", depth,
+              median(walls[8]) - median(walls[1]),
+              median(devices[8]) + median(gaps[8]) - median(devices[1]) - median(gaps[1]));
+  // Uninstrumented: each width against verify at 1 row, interleaved pairs, the order flipped every round.
+  for (uint32_t m : {2u, 4u, 8u}) {
+    std::vector<double> one_ms, m_ms, excess, ratio;
+    for (unsigned r = 0; r <= rounds; ++r) {
+      double a = 0, b = 0;
+      for (unsigned c = 0; c < calls; ++c)
+        for (unsigned side = 0; side < 2; ++side) {
+          const bool one = (side == 0) == (r % 2 == 0);
+          restore();
+          (one ? a : b) += timed([&]() { verify(one ? 1 : m); });
+        }
+      if (r) {
+        one_ms.push_back(a / calls);
+        m_ms.push_back(b / calls);
+        excess.push_back((b - a) / calls);
+        ratio.push_back(b / a);
+      }
+    }
+    std::printf("VPROFILE_PAIR depth=%u m=%u ms=%.4f m1_ms=%.4f excess=%.4f ratio=%.4f (uninstrumented)\n", depth, m,
+                median(m_ms), median(one_ms), median(excess), median(ratio));
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head] [--depth N] [--calls N] [--rounds N] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-int4] [--candidates-64]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N] [--rank-margin]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
-    bool candidate_head = false;
+    bool candidate_head = false, vprofile = false, vpairs = false;
+    RankMargin rm;
+    unsigned candidate_bits = 2, attn_ks = 0, candidates = 80;   // the loader's defaults
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--candidate-head") { candidate_head = true; continue; }
+      if (arg == "--candidate-int4") { candidate_bits = 4; continue; }   // spec 19 v3d Task 7: the earlier form
+      if (arg == "--candidates-64") { candidates = 64; continue; }
+      if (arg == "--verify-profile") { vprofile = true; continue; }
+      if (arg == "--verify-pairs") { vprofile = vpairs = true; continue; }
+      if (arg == "--rank-margin") { rm.on = true; continue; }   // spec 19 v3d Task 7, with --engine-taps
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
@@ -351,6 +600,7 @@ int main(int argc, char** argv) {
         else if (!loader::parse_draft_format(f, format)) throw std::runtime_error("--format int8|bf16|int4");
       }
       else if (arg == "--anchors") anchors = std::stoul(argv[++i]);
+      else if (arg == "--attn-ks") attn_ks = std::stoul(argv[++i]);   // spec 19 v3d: the profiled list's key split
       else if (arg == "--engine-taps" && i + 2 < argc) { sources_path = argv[++i]; out = argv[++i]; }
       else throw std::runtime_error("unknown option: " + arg);
     }
@@ -366,15 +616,16 @@ int main(int argc, char** argv) {
     }
     l0::Context ctx(0);
     auto model = loader::load(ctx, argv[1], max_len, false, loader::LmHeadForm::Int8);
-    auto weights = loader::load_drafter(ctx, argv[2], model, format, 0, candidate_head);
+    auto weights = loader::load_drafter(ctx, argv[2], model, format, 0, candidate_head, candidate_bits, candidates);
     const auto rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     df::DFlashDrafter drafter(ctx, std::move(weights), rows, max_len, 7);
     const runtime::KvCache kv = runtime::default_kv_cache();
     runtime::Engine e(ctx, std::move(model), max_len, false, kv, &drafter);
     std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
     drafter.attach(e, false);
-    if (sources_path.empty()) costs(e, drafter, depth, calls, rounds);
-    else engine_taps(e, drafter, sources, out, anchors);
+    if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs);
+    else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds, attn_ks);
+    else engine_taps(e, drafter, sources, out, anchors, rm);
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "probe_dflash_iter: %s\n", ex.what());
     return 2;

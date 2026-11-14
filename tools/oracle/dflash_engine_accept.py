@@ -44,7 +44,8 @@ def expected(counted, accepted):
 
 
 def compare_baseline(engine_dir, baseline_path, out_path):
-    """G-drafter: same anchors, all widths/corpora, within 0.05 of the original int8 engine; no CPU model load."""
+    """G-drafter: same anchors, all widths/corpora; pooled over every draft (each corpus / K row weighted by its anchors)
+    not below the original int8 engine by more than 0.05 tokens a round; the rows are recorded. No CPU model load."""
     with open(baseline_path) as f:
         baseline = json.load(f)
     with open(os.path.join(engine_dir, 'engine.jsonl')) as f:
@@ -82,18 +83,37 @@ def compare_baseline(engine_dir, baseline_path, out_path):
     if seen != set(current):
         raise ValueError('missing tap dumps for the recorded anchors')
     report = {'run': lines[0]['run'], 'baseline': os.path.abspath(baseline_path), 'corpora': {}}
-    passed = True
+    weighted, anchors = 0.0, 0
+    per_corpus = {}   # corpus -> [weighted gap, anchors] over its K rows
     for (corpus, k), row in sorted(totals.items()):
         row['engine_E'] = expected(row['engine_counted'], row['engine_accepted'])
         row['baseline_E'] = expected(row['baseline_counted'], row['baseline_accepted'])
         if abs(row['baseline_E'] - baseline['corpora'][corpus][str(k)]['engine_E']) > 1e-9:
             raise ValueError(f'{corpus} K={k}: original acceptance does not calibrate on these taps/greedy ids')
-        row['gap'] = abs(row['engine_E'] - row['baseline_E'])
-        ok = row['gap'] <= 0.05
-        passed &= ok
+        # Signed (engine - baseline). Operator ruling 2026-11-14: the 16-anchor corpora cannot resolve a row below one
+        # anchor (0.0625), so a row is recorded and the gate is pooled - one-sided, as spec 19 v3 §3.2 words it.
+        row['gap'] = row['engine_E'] - row['baseline_E']
+        weighted += row['gap'] * row['anchors']
+        anchors += row['anchors']
+        c = per_corpus.setdefault(corpus, [0.0, 0])
+        c[0] += row['gap'] * row['anchors']
+        c[1] += row['anchors']
         report['corpora'].setdefault(corpus, {})[str(k)] = row
         print(f"G_DRAFTER corpus={corpus} K={k} engine_E={row['engine_E']:.5f} "
-              f"baseline_E={row['baseline_E']:.5f} gap={row['gap']:.5f} {'PASS' if ok else 'FAIL'}", flush=True)
+              f"baseline_E={row['baseline_E']:.5f} gap={row['gap']:+.5f} (recorded)", flush=True)
+    report['pooled_gap'] = weighted / anchors
+    passed = report['pooled_gap'] >= -0.05
+    print(f"G_DRAFTER_POOLED anchors={anchors} gap={report['pooled_gap']:+.5f} {'PASS' if passed else 'FAIL'}",
+          flush=True)
+    # Each corpus pooled over its K rows at the same bar (operator 2026-11-14): one corpus (a4) holds most anchors,
+    # so the all-corpus pool alone would hide a small corpus losing a whole token.
+    report['corpus_gap'] = {}
+    for corpus, (w, n) in sorted(per_corpus.items()):
+        gap = w / n
+        ok = gap >= -0.05
+        passed &= ok
+        report['corpus_gap'][corpus] = gap
+        print(f"G_DRAFTER_CORPUS corpus={corpus} anchors={n} gap={gap:+.5f} {'PASS' if ok else 'FAIL'}", flush=True)
     report['pass'] = passed
     with open(out_path, 'w') as f:
         json.dump(report, f, indent=2)

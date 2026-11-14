@@ -14,6 +14,9 @@
 //   df_attn        at p 5, 2046, 2047, 2048, 2049, 4100, 131000 and K 7 / 3 / 1: bitwise the twin (both use df_exp /
 //                  dfref::attn_exp, not the device's exp - spec 19f: outputs that cancel toward 0 turned the device
 //                  exp's 1-2 fp32 ulps into up to 45 bf16 ulps), rows past K zero
+//   df_attn_dpas   (spec 19 v3d Task 6) df_attn_part on DPAS + the H1 / B4 reduce, the same cases: cosine >= 0.99999
+//                  per (head, row) against the twin (q and p carried as bf16 hi + lo, DPAS's sums - not bitwise), rows
+//                  past K zero, and property R: a row bitwise unchanged when every other row's q changes
 //   df_topk        the full head (248320, the mask at 248077, planted ties / NaN / -inf rows) and a 32768-id draft
 //                  vocabulary (indices mapped through an ascending id table): ids and values exact
 //   df_select      the walk at rank 256 over 248320-row codebooks, K 7: greedy - ids, choices, scores bitwise and
@@ -542,6 +545,175 @@ int check_attn(Dev& d, Bins& b) {
   return bad;
 }
 
+// Spec 19 v3d Task 6: df_attn_dpas.cl's part with `b`'s reduce (the H1 / B4 binary production pairs it with).
+int check_attn_dpas(Dev& d, Bins& b, unsigned ks = 1) {
+  int bad = 0;
+  l0::Module dpas(d.ctx, kernels::path(kd::attn_dpas_variant(S, ks)));
+  const float scale = float(1.0 / std::sqrt(double(HD)));
+  const size_t ring_elems = size_t(RING) * KVN;
+  const std::vector<uint16_t> rk = rnd_bf16(ring_elems, -1, 1, 20), rv = rnd_bf16(ring_elems, -1, 1, 21);
+  std::vector<float> fk(ring_elems), fv(ring_elems);
+  for (size_t i = 0; i < ring_elems; ++i) {
+    fk[i] = bf(rk[i]);
+    fv[i] = bf(rv[i]);
+  }
+  l0::Mem brk = d.up(rk), brv = d.up(rv);
+  const uint32_t tgt = RING / kd::kAttnPb;
+  for (auto [p, K] : {std::pair<uint32_t, uint32_t>{5, 7}, {2046, 7}, {2047, 3}, {2048, 7}, {2049, 1}, {4100, 7},
+                      {131000, 5}}) {
+    std::vector<float> q = rnd_f32(size_t(M) * QN, -1.5f, 1.5f, 22 + p);
+    const std::vector<float> kb = rnd_f32(size_t(M) * KVN, -1, 1, 23 + p), vb = rnd_f32(size_t(M) * KVN, -1, 1, 24 + p);
+    runtime::Control c{};
+    c.pos = p;
+    runtime::dflash::DFlashCtl dc{};
+    dc.k = K;
+    l0::Mem ctrl(d.ctx, l0::MemKind::Shared, sizeof c), dctl(d.ctx, l0::MemKind::Shared, sizeof dc);
+    std::memcpy(ctrl.ptr(), &c, sizeof c);
+    std::memcpy(dctl.ptr(), &dc, sizeof dc);
+    l0::Mem bkb = d.up(kb), bvb = d.up(vb), part = d.zeros(size_t(NH) * tgt * M * (HD + 2) * 4);
+    auto run = [&](const std::vector<float>& qv) {
+      l0::Mem bq = d.up(qv), out = d.zeros(size_t(M) * QN * 2);
+      l0::Kernel k1(dpas, "df_attn_part"), k2(b.attn, "df_attn_reduce");
+      k1.group_size(16 * (NH / NKV) * ks);
+      k1.arg_ptr(0, ctrl.ptr());
+      k1.arg_ptr(1, dctl.ptr());
+      k1.arg_ptr(2, bq.ptr());
+      k1.arg_ptr(3, brk.ptr());
+      k1.arg_ptr(4, brv.ptr());
+      k1.arg(5, scale);
+      k1.arg_ptr(6, part.ptr());
+      k2.group_size(HD);
+      k2.arg_ptr(0, ctrl.ptr());
+      k2.arg_ptr(1, dctl.ptr());
+      k2.arg_ptr(2, part.ptr());
+      k2.arg_ptr(3, bq.ptr());
+      k2.arg_ptr(4, bkb.ptr());
+      k2.arg_ptr(5, bvb.ptr());
+      k2.arg(6, scale);
+      k2.arg_ptr(7, out.ptr());
+      d.run(k1, NKV, tgt);
+      d.run(k2, NH, M);
+      return d.read<uint16_t>(out, size_t(M) * QN);
+    };
+    const std::vector<uint16_t> got = run(q);
+    std::vector<float> want(size_t(M) * QN);
+    dfref::attention({NH, NKV, HD, M, RING, S.win, kd::kAttnPb, scale}, q.data(), kb.data(), vb.data(), fk.data(),
+                     fv.data(), p, K, false, want.data());
+    double worst_cos = 1.0;
+    int worst_ulp = 0, nonzero = 0;
+    for (uint32_t r = 0; r < M; ++r)
+      for (uint32_t h = 0; h < NH; ++h) {
+        double ab = 0, aa = 0, bb = 0;
+        for (uint32_t i = 0; i < HD; ++i) {
+          const size_t at = size_t(r) * QN + size_t(h) * HD + i;
+          const double x = bf(got[at]), y = bf(rne(want[at]));
+          ab += x * y;
+          aa += x * x;
+          bb += y * y;
+          worst_ulp = std::max(worst_ulp, ulps(got[at], rne(want[at])));
+          nonzero += r > K && got[at] != 0;
+        }
+        if (r <= K) worst_cos = std::min(worst_cos, aa == 0 && bb == 0 ? 1.0 : ab / std::sqrt(aa * bb));
+      }
+    // Property R: row 3's output with every other row's q replaced.
+    std::vector<float> q2 = rnd_f32(size_t(M) * QN, -1.5f, 1.5f, 99 + p);
+    std::copy_n(q.begin() + size_t(3) * QN, QN, q2.begin() + size_t(3) * QN);
+    const std::vector<uint16_t> got2 = run(q2);
+    const bool row_r = std::equal(got.begin() + size_t(3) * QN, got.begin() + size_t(4) * QN, got2.begin() + size_t(3) * QN);
+    std::printf("df_attn_dpas (KS %u) at p %u, K %u: worst cosine %.9f per (head, row), worst %d bf16 ulp, %d nonzero past K, "
+                "row 3 independent of the others: %s\n", ks, p, K, worst_cos, worst_ulp, nonzero, row_r ? "yes" : "NO");
+    bad += (worst_cos < 0.99999) + (nonzero != 0) + !row_r;
+  }
+  return bad;
+}
+
+// Spec 19 v3d: the DPAS part's masks, where random keys cannot see a one-key error (it moves a row's cosine ~1e-7).
+// One dominant key (its k along every q's shared direction, its v far from the others') at a time, at p 4100 (every
+// ring position is context): the window's edge (position p - 2047, visible to row 0 only) and just before it (p -
+// 2048, visible to none), the ring's wrap (slots 2047 and 0) and block 5's KS slice boundaries (offsets 31 / 32, 63 /
+// 64, 95 / 96); each against the twin at cosine >= 0.99999 per (head, row) - a missed or wrongly kept key moves its
+// rows far more.
+int check_attn_dpas_masks(Dev& d, Bins& b, unsigned ks) {
+  int bad = 0;
+  l0::Module dpas(d.ctx, kernels::path(kd::attn_dpas_variant(S, ks)));
+  const float scale = float(1.0 / std::sqrt(double(HD)));
+  const uint32_t tgt = RING / kd::kAttnPb, p = 4100, K = 7;
+  const size_t ring_elems = size_t(RING) * KVN;
+  const std::vector<uint16_t> rk0 = rnd_bf16(ring_elems, -1, 1, 30), rv0 = rnd_bf16(ring_elems, -1, 1, 31);
+  std::vector<float> q = rnd_f32(size_t(M) * QN, -1.0f, 1.0f, 32);
+  for (auto& x : q) x += 0.5f;   // a shared direction, so one key can dominate every head and row
+  const std::vector<float> kb = rnd_f32(size_t(M) * KVN, -1, 1, 33), vb = rnd_f32(size_t(M) * KVN, -1, 1, 34);
+  runtime::Control c{};
+  c.pos = p;
+  runtime::dflash::DFlashCtl dc{};
+  dc.k = K;
+  l0::Mem ctrl(d.ctx, l0::MemKind::Shared, sizeof c), dctl(d.ctx, l0::MemKind::Shared, sizeof dc);
+  std::memcpy(ctrl.ptr(), &c, sizeof c);
+  std::memcpy(dctl.ptr(), &dc, sizeof dc);
+  l0::Mem bq = d.up(q), bkb = d.up(kb), bvb = d.up(vb), part = d.zeros(size_t(NH) * tgt * M * (HD + 2) * 4);
+  std::vector<std::pair<const char*, int64_t>> sites = {{"window edge", int64_t(p) - 2047},
+                                                        {"before the edge", int64_t(p) - 2048}};
+  for (int64_t pos = int64_t(p) - 2048; pos < int64_t(p); ++pos)
+    if (pos % RING == RING - 1 || pos % RING == 0) sites.push_back({"ring wrap", pos});
+  for (uint32_t off : {31u, 32u, 63u, 64u, 95u, 96u})
+    sites.push_back({"slice boundary", int64_t(p) - int64_t(RING) + 5 * int64_t(kd::kAttnPb) + off});
+  for (const auto& [what, pos] : sites) {
+    std::vector<uint16_t> rk = rk0, rv = rv0;
+    const size_t slot = size_t(pos % RING);
+    for (uint32_t i = 0; i < KVN; ++i) {
+      rk[slot * KVN + i] = rne(3.0f);
+      rv[slot * KVN + i] = rne(2.0f);
+    }
+    std::vector<float> fk(ring_elems), fv(ring_elems);
+    for (size_t i = 0; i < ring_elems; ++i) {
+      fk[i] = bf(rk[i]);
+      fv[i] = bf(rv[i]);
+    }
+    l0::Mem brk = d.up(rk), brv = d.up(rv), out = d.zeros(size_t(M) * QN * 2);
+    l0::Kernel k1(dpas, "df_attn_part"), k2(b.attn, "df_attn_reduce");
+    k1.group_size(16 * (NH / NKV) * ks);
+    k1.arg_ptr(0, ctrl.ptr());
+    k1.arg_ptr(1, dctl.ptr());
+    k1.arg_ptr(2, bq.ptr());
+    k1.arg_ptr(3, brk.ptr());
+    k1.arg_ptr(4, brv.ptr());
+    k1.arg(5, scale);
+    k1.arg_ptr(6, part.ptr());
+    k2.group_size(HD);
+    k2.arg_ptr(0, ctrl.ptr());
+    k2.arg_ptr(1, dctl.ptr());
+    k2.arg_ptr(2, part.ptr());
+    k2.arg_ptr(3, bq.ptr());
+    k2.arg_ptr(4, bkb.ptr());
+    k2.arg_ptr(5, bvb.ptr());
+    k2.arg(6, scale);
+    k2.arg_ptr(7, out.ptr());
+    d.run(k1, NKV, tgt);
+    d.run(k2, NH, M);
+    const std::vector<uint16_t> got = d.read<uint16_t>(out, size_t(M) * QN);
+    std::vector<float> want(size_t(M) * QN);
+    dfref::attention({NH, NKV, HD, M, RING, S.win, kd::kAttnPb, scale}, q.data(), kb.data(), vb.data(), fk.data(),
+                     fv.data(), p, K, false, want.data());
+    double worst = 1.0;
+    for (uint32_t r = 0; r <= K; ++r)
+      for (uint32_t h = 0; h < NH; ++h) {
+        double ab = 0, aa = 0, bb = 0;
+        for (uint32_t i = 0; i < HD; ++i) {
+          const size_t at = size_t(r) * QN + size_t(h) * HD + i;
+          const double x = bf(got[at]), y = bf(rne(want[at]));
+          ab += x * y;
+          aa += x * x;
+          bb += y * y;
+        }
+        worst = std::min(worst, ab / std::sqrt(aa * bb));
+      }
+    std::printf("df_attn_dpas (KS %u) masks: a dominant key at position %lld (slot %zu, %s): worst cosine %.9f\n", ks,
+                (long long)pos, slot, what, worst);
+    bad += worst < 0.99999;
+  }
+  return bad;
+}
+
 int check_topk(Dev& d, Bins& b) {
   int bad = 0;
   const uint32_t R = kd::kR;
@@ -694,6 +866,11 @@ int main() {
   }
   Bins parallel(d, false, 1, 4, true);
   bad += check_attn(d, parallel);
+  Bins rows4(d, false, 1, 4);
+  for (unsigned ks : {1u, 2u, 4u}) {
+    bad += check_attn_dpas(d, rows4, ks);
+    bad += check_attn_dpas_masks(d, rows4, ks);
+  }
   if (bad) {
     std::printf("dflash_kernels_test: FAIL (%d)\n", bad);
     return 1;

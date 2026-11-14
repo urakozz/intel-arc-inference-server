@@ -128,7 +128,8 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 16384, 1, 1, false, true, false, false},   // qkv||z      48 layers
     {6144, 5120, 4, 0, false, true, false, true},     // out_proj, o_proj
     {5120, 14336, 2, 0, false, true, false, true},    // q||k||v
-    {5120, 34816, 8, 0, true, true, false, false},    // gate||up (2x8 work-group: one slice, SiLU at S 1)
+    {5120, 34816, 8, 0, true, true, false, true},     // gate||up (2x8 work-group: one slice, SiLU at S 1; the 2D read:
+                                                      // spec 19 v3d Task 4)
     {17408, 5120, 4, 0, false, true, false, true},    // down
     {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the operator's 28b addition, 2026-11-01) at its verify
@@ -176,6 +177,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 256, 16, 1, false, true, false, false, kSmDraft8},
     // Spec 19v2 C3: full int4 candidate head, followed by exact int8-row reranking.
     {5120, 248320, 1, 1, false, true, false, false, kSmDraft7},
+    {5120, 248320, 1, 3, false, false, false, false, kSmDraft7},   // spec 19 v3d Task 7: the 2-bit candidate head
     // Spec 28d: Qwen3.8-Flash-Next's dense int4 projections (GPTQ layout 0, model::qwen4exp's S) and its int8 head at
     // its verify lists' M = 2..4 (runtime/qwen4exp/qwen4exp_capture.cc) - magic dequant (bit-identical to the shift
     // form), no lever swept; the head the in-work-group form (28b's int8-head choice). Its bf16 linears (a||b, the

@@ -178,9 +178,78 @@ struct AttnDims {
 // df_attn_part + df_attn_reduce for one layer. q [M][NH][HD], kb / vb [M][NKV][HD] (fp32), ring_k / ring_v
 // [RING][NKV][HD] (floats - the device's bf16 rows widened), anchor position p, K drafts (rows 0..K valid; rows past K
 // are zero). Output out [M][NH·HD] fp32 (the kernel rounds it to bf16).
+// Spec 19 v3d Task 6: df_attn_dpas.cl's order for a block's partial (dpas_ks > 0: its KS). q and p as three bf16
+// terms (hi, mid, lo); a DPAS step sums its 16 products exactly (in double here) and adds them to the fp32 accumulator
+// once, the terms in the order hi, mid, lo; a dot product walks the dim atoms ascending, P V the slice's key atoms;
+// l is each lane's (key mod 16) sum over the slice's atoms, the lanes then summed in order, and the KS slices' l and
+// acc added to slice 0's in slice order. The device's in-step rounding and its sub-group reduction order are the
+// hardware's, so this twin is close to the kernel, not bitwise.
+inline void split3_f(float x, float t[3]) {
+  t[0] = common::bf16_to_f32(common::f32_to_bf16(x));
+  const float r1 = x - t[0];
+  t[1] = common::bf16_to_f32(common::f32_to_bf16(r1));
+  t[2] = common::bf16_to_f32(common::f32_to_bf16(r1 - t[1]));
+}
+inline void dpas_block(const AttnDims& a, const float* qr, const float* ring_k, const float* ring_v, uint32_t p,
+                       uint32_t r, uint32_t K, uint32_t kvh, uint32_t b, uint32_t ks,
+                       const std::function<float(float)>& expf_, float& m_out, float& l_out, float* acc_out) {
+  const uint32_t HD = a.HD, KA = a.PB / 16, KPS = KA / ks;
+  std::vector<float> qt(size_t(3) * HD);
+  for (uint32_t i = 0; i < HD; ++i) split3_f(qr[i], &qt[size_t(3) * i]);
+  std::vector<float> s(a.PB, -INFINITY);
+  for (uint32_t t = 0; t < a.PB; ++t) {
+    const uint32_t off = b * a.PB + t;
+    const int64_t pos = int64_t(p) - int64_t(a.RING) + off;
+    const int64_t lo = int64_t(p) + r - int64_t(a.WIN - 1);
+    const uint32_t slot = uint32_t((uint64_t(p) + off) % a.RING);
+    const float* k = ring_k + (size_t(slot) * a.NKV + kvh) * HD;
+    float acc = 0.0f;
+    for (uint32_t at = 0; at < HD / 16; ++at)
+      for (uint32_t term = 0; term < 3; ++term) {
+        double step = 0;
+        for (uint32_t i = at * 16; i < at * 16 + 16; ++i) step += double(qt[size_t(3) * i + term]) * double(k[i]);
+        acc = float(double(acc) + step);
+      }
+    if (pos >= 0 && pos >= lo && r <= K) s[t] = acc * a.scale;
+  }
+  float m = -INFINITY;
+  for (uint32_t t = 0; t < a.PB; ++t) m = std::fmax(m, s[t]);
+  std::vector<float> e(a.PB, 0.0f);
+  for (uint32_t t = 0; t < a.PB; ++t) e[t] = (m == -INFINITY || s[t] == -INFINITY) ? 0.0f : expf_(s[t] - m);
+  float l = 0.0f;
+  std::vector<float> acc(HD, 0.0f), sacc(HD);
+  for (uint32_t sl = 0; sl < ks; ++sl) {
+    float lane[16] = {};
+    std::fill(sacc.begin(), sacc.end(), 0.0f);
+    for (uint32_t ka = sl * KPS; ka < (sl + 1) * KPS; ++ka) {
+      float pt[16][3];
+      for (uint32_t j = 0; j < 16; ++j) {
+        lane[j] += e[ka * 16 + j];
+        split3_f(e[ka * 16 + j], pt[j]);
+      }
+      for (uint32_t d = 0; d < HD; ++d)
+        for (uint32_t term = 0; term < 3; ++term) {
+          double step = 0;
+          for (uint32_t j = 0; j < 16; ++j) {
+            const uint32_t slot = uint32_t((uint64_t(p) + b * a.PB + ka * 16 + j) % a.RING);
+            step += double(pt[j][term]) * double(ring_v[(size_t(slot) * a.NKV + kvh) * HD + d]);
+          }
+          sacc[d] = float(double(sacc[d]) + step);
+        }
+    }
+    float ls = 0.0f;
+    for (uint32_t j = 0; j < 16; ++j) ls += lane[j];
+    l = sl ? l + ls : ls;
+    for (uint32_t d = 0; d < HD; ++d) acc[d] = sl ? acc[d] + sacc[d] : sacc[d];
+  }
+  m_out = m;
+  l_out = l;
+  std::copy(acc.begin(), acc.end(), acc_out);
+}
+
 inline void attention(const AttnDims& a, const float* q, const float* kb, const float* vb, const float* ring_k,
                       const float* ring_v, uint32_t p, uint32_t K, bool causal, float* out,
-                      const std::function<float(float)>& expf_ = attn_exp) {
+                      const std::function<float(float)>& expf_ = attn_exp, uint32_t dpas_ks = 0) {
   const uint32_t HD = a.HD, G = a.g();
   std::fill(out, out + size_t(a.M) * a.NH * HD, 0.0f);
   for (uint32_t h = 0; h < a.NH; ++h) {
@@ -190,6 +259,10 @@ inline void attention(const AttnDims& a, const float* q, const float* kb, const 
       // the blocks' partials
       std::vector<float> bm(a.tgt()), bl(a.tgt()), bacc(size_t(a.tgt()) * HD, 0.0f);
       for (uint32_t b = 0; b < a.tgt(); ++b) {
+        if (dpas_ks) {
+          dpas_block(a, qr, ring_k, ring_v, p, r, K, kvh, b, dpas_ks, expf_, bm[b], bl[b], &bacc[size_t(b) * HD]);
+          continue;
+        }
         std::vector<float> s(a.PB, -INFINITY);
         for (uint32_t t = 0; t < a.PB; ++t) {
           const uint32_t off = b * a.PB + t;
@@ -390,9 +463,10 @@ inline void gemv_i8w(const int8_t* q, const float* scales, uint32_t K, uint32_t 
 }
 // C3: exact int8 rows, four contiguous dot slices, then the best 16 real ids (before logit processing).
 inline std::vector<Cand> rerank_candidates(const int8_t* w, const float* scales, uint32_t K, uint32_t N,
-                                           const uint16_t* x, const uint32_t* ids, float mult, float cap) {
+                                           const uint16_t* x, const uint32_t* ids, float mult, float cap,
+                                           unsigned count = 64) {
   std::vector<Cand> scores;
-  for (unsigned c = 0; c < 64; ++c) {
+  for (unsigned c = 0; c < count; ++c) {
     const uint32_t id = ids[c];
     if (id >= N) continue;
     float sum = 0;
@@ -482,6 +556,7 @@ struct Dims {
   float eps = 1e-6f, in_scale = 1.0f, out_mult = 1.0f, softcap = 0.0f, scale = 0.0f;
   double theta = 1e6;
   bool causal = false;
+  uint32_t attn_ks = 0;   // spec 19 v3d: 0 the scalar attention part; > 0 df_attn_dpas.cl's order at that KS (Engine)
   uint32_t qn() const { return NH * HD; }
   uint32_t kvn() const { return NKV * HD; }
   uint32_t qkvn() const { return qn() + 2 * kvn(); }
@@ -643,7 +718,8 @@ inline DraftOut draft(const Weights& w, Numerics nm, const Ring& ring, const std
       }
     }
     const size_t lay = size_t(d.ring) * d.kvn();
-    attention(ad, q.data(), kb.data(), vb.data(), &ring.k[l * lay], &ring.v[l * lay], p, K, d.causal, ao.data());
+    attention(ad, q.data(), kb.data(), vb.data(), &ring.k[l * lay], &ring.v[l * lay], p, K, d.causal, ao.data(),
+              attn_exp, eng ? d.attn_ks : 0);
     as_input(ao, d.qn(), xb);
     L.o.apply(xb.data(), ao.data(), M, oo.data());
     if (v2) {

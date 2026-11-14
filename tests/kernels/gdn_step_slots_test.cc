@@ -4,12 +4,14 @@
 // One synthetic GDN layer. The reference is the shipped M = 1 kernel run M times in a
 // row (row m at pos + m, carrying the ring and the state); the candidate is
 // gdn_step_slots_M<M> once over the M rows, reading the state from slot `live` and
-// writing the state after row m into slot (live + m) % 4. Each written slot must equal
-// the reference state after that row (cosine >= 0.99999, max abs recorded; the two do
-// the same per-row arithmetic, so bitwise equality is expected and reported), gdn_o
-// and the conv ring must match, the slots not written must be untouched, and a second
-// run must be bitwise identical. Cases: M = 1..4, live 0 and 3 (the slot index wraps),
-// pos 14 (the conv ring's position index wraps inside the rows at M >= 3).
+// writing the state after row m into slot (live + m) % slots. Each written slot must equal
+// the reference state after that row bitwise (the two do the same per-row arithmetic),
+// gdn_o too, the conv ring must match, the slots not written must be untouched, and a
+// second run must be bitwise identical. Cases: M = 1..4 over 4 slots (MTP's builds), live
+// 0 and 3, and M = 1..8 over 8 slots (DFlash's gdn_step_slots_M<M>_N8), live 0 and 5 (the
+// slot index wraps); pos 14 (the conv ring's position index wraps inside the rows at
+// M >= 3). Spec 19 v3d Task 3: the M >= 2 builds batch the rows' l2norms (gdn_step.cl,
+// NORMS_BATCHED) - this is their bitwise gate.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -43,7 +45,7 @@ constexpr size_t kSmallFloats = 164480 / 4;
 constexpr size_t kStateElems = size_t(kHeads) * kDim * kDim;       // one layer
 constexpr size_t kSlotStride = 48 * kStateElems;                    // SPEC_SLOT_STRIDE
 constexpr size_t kRingElems = size_t(kRing) * kConvRows;
-constexpr uint32_t kSlots = 4;
+constexpr uint32_t kMaxSlots = 8;
 
 std::vector<float> normal(size_t n, uint32_t seed, float sigma) {
   std::mt19937 rng(seed);
@@ -80,7 +82,7 @@ double cosine(const float* a, const float* b, size_t n, double* max_abs) {
   return ab / std::sqrt(aa * bb);
 }
 
-void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t live, uint32_t pos, uint32_t seed) {
+void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t kSlots, uint32_t live, uint32_t pos, uint32_t seed) {
   std::vector<float> qkvz = normal(size_t(M) * kQkvzN, seed + 1, 1.f);
   std::vector<float> ab = normal(size_t(M) * kAbStride, seed + 2, 1.f);
   std::vector<float> small = normal(kSmallFloats, seed + 3, 0.3f);
@@ -132,7 +134,7 @@ void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t live, uint32_t pos, ui
   d.imm.copy(ref_ring.data(), rb.ptr(), kRingElems * 2);
 
   // Candidate: the slots build over all M rows, state in slot `live`.
-  l0::Module ms(d.ctx, kernels::path(kernels::gdn_step_slots_variant(M, 48)));
+  l0::Module ms(d.ctx, kernels::path(kernels::gdn_step_slots_variant(M, 48, kernels::kRefGdnKHeads, kernels::kRefGdnVHeads, kSlots)));
   l0::Kernel ks(ms, "gdn_step");
   ks.group_size(256);
   auto slot = [&](uint32_t s) -> float* {
@@ -172,7 +174,7 @@ void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t live, uint32_t pos, ui
   CHECK(std::memcmp(got_ring.data(), ref_ring.data(), kRingElems * 2) == 0);
   double oma = 0;
   const double oc = cosine(got_o.data(), ref_o.data(), ref_o.size(), &oma);
-  CHECK(oc >= 0.99999);
+  CHECK(std::memcmp(got_o.data(), ref_o.data(), ref_o.size() * 4) == 0);
   for (uint32_t m = 0; m < M; ++m) {
     const float* g = got[0].data() + size_t((live + m) % kSlots) * kStateElems;
     double ma = 0;
@@ -180,7 +182,7 @@ void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t live, uint32_t pos, ui
     const bool bits = std::memcmp(g, ref_state[m].data(), kStateElems * 4) == 0;
     std::printf("  M=%u live=%u pos=%u row %u -> slot %u: cos %.9f max abs %.3e%s\n", M, live, pos,
                 m, (live + m) % kSlots, cs, ma, bits ? " (bitwise)" : "");
-    CHECK(cs >= 0.99999);
+    CHECK(bits);
   }
   // Slots the rows did not reach keep the sentinel.
   for (uint32_t s = 0; s < kSlots; ++s) {
@@ -190,17 +192,19 @@ void run_case(Dev& d, l0::Mem& spec, uint32_t M, uint32_t live, uint32_t pos, ui
       CHECK(std::memcmp(got[0].data() + size_t(s) * kStateElems, sentinel.data(),
                         kStateElems * 4) == 0);
   }
-  std::printf("gdn_step_slots M=%u live=%u: gdn_o cos %.9f max abs %.3e, ring bitwise\n", M, live,
-              oc, oma);
+  std::printf("gdn_step_slots M=%u slots=%u live=%u: gdn_o cos %.9f max abs %.3e, ring bitwise\n", M, kSlots,
+              live, oc, oma);
 }
 }  // namespace
 
 int main() {
   Dev d;
-  l0::Mem spec(d.ctx, l0::MemKind::Device, size_t(kSlots - 1) * kSlotStride * 4);
+  l0::Mem spec(d.ctx, l0::MemKind::Device, size_t(kMaxSlots - 1) * kSlotStride * 4);
   uint32_t seed = 100;
   for (uint32_t M = 1; M <= 4; ++M)
-    for (uint32_t live : {0u, 3u}) run_case(d, spec, M, live, 14, seed += 10);
+    for (uint32_t live : {0u, 3u}) run_case(d, spec, M, 4, live, 14, seed += 10);
+  for (uint32_t M = 1; M <= 8; ++M)
+    for (uint32_t live : {0u, 5u}) run_case(d, spec, M, 8, live, 14, seed += 10);
   std::puts("gdn_step_slots_test OK");
   return 0;
 }

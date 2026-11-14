@@ -40,6 +40,12 @@ inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, un
          s_(s.win) + "_P" + s_(s.pb) + (heads ? "_H" + s_(heads) : "") +
          (rows ? "_B" + s_(rows) : "") + (parallel_exp ? "_Ep" : "");
 }
+// Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl), one sub-group a q head; its reduce is attn_variant(s, 1, 4)'s.
+// ks > 1: the occupancy form, a head's block keys split ks ways (df_attn_dpas.cl's KS).
+inline std::string attn_dpas_variant(const Shape& s = kQwen38, unsigned ks = 1) {
+  return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
+         s_(s.win) + "_P" + s_(s.pb) + "_dpas" + (ks > 1 ? "_k" + s_(ks) : "");
+}
 // The context projection at prefill width (df_proj_wide.cl; runtime::dflash::DFlashDrafter::project_wide).
 inline std::string proj_wide_variant(const Shape& s = kQwen38) {
   return "df_proj_wide_H" + s_(s.H) + "_KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring);
@@ -48,8 +54,10 @@ inline std::string proj_wide_variant(const Shape& s = kQwen38) {
 inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
   return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
 }
-inline std::string candidate_topk_variant() { return "df_candidate_R7_N248320_U248077_K64"; }
-inline std::string rerank_variant() { return "df_rerank_R7_K5120_U248077_C64_Q4"; }
+inline std::string candidate_topk_variant(unsigned c = 64) {
+  return "df_candidate_R7_N248320_U248077_K" + std::to_string(c);
+}
+inline std::string rerank_variant(unsigned c = 64) { return "df_rerank_R7_K5120_U248077_C" + std::to_string(c) + "_Q4"; }
 inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false) {
   return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
                    (split ? "_H16" : "")
@@ -80,9 +88,12 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
                                                LinearKind k, LinearKind head, unsigned attn_heads = 1, unsigned attn_rows = 4,
-                                               bool candidate_head = false, bool parallel_exp = false) {
+                                               bool candidate_head = false, bool parallel_exp = false,
+                                               bool attn_dpas = false, unsigned attn_ks = 1,
+                                               unsigned candidate_bits = 2, unsigned candidates = 80) {
   const Shape& s = kQwen38;
   std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads, attn_rows, parallel_exp), select_variant(v2, s, fmt == 2)};
+  if (attn_dpas) v.push_back(attn_dpas_variant(s, attn_ks));   // its part; the reduce stays attn_variant's
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
@@ -95,10 +106,13 @@ inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_
     v.push_back(linear_variant(fmt, kM, s.H, s.rank, k));                          // the selector's projection
   }
   const unsigned N = dv ? dv : s.vocab;
-  if (candidate_head) {
-    v.push_back(linear_variant(2u, kR, s.H, s.vocab, head));
-    v.push_back(candidate_topk_variant());
-    v.push_back(rerank_variant());
+  if (candidate_head) {   // spec 19 v3d: the 2-bit head (gemm_sm's layout 3) with 80 candidates by default
+    if (candidate_bits == 2)
+      v.push_back(gemm_sm_variant(kR, *small_m_tuning(s.H, s.vocab, 1, 3)));
+    else
+      v.push_back(linear_variant(2u, kR, s.H, s.vocab, head));
+    v.push_back(candidate_topk_variant(candidates));
+    v.push_back(rerank_variant(candidates));
   } else {
     v.push_back(linear_variant(int8_head, kR, s.H, N, head));
     v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));

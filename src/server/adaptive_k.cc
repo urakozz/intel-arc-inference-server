@@ -11,12 +11,12 @@ namespace server {
 MtpCost MtpCost::bf16_head() { return MtpCost{}; }
 
 // The int8 head, in units of the int8 plain step. Verify: spec 28b's gemm_sm rows, measured 2026-11-01 by
-// probe_mtp_steps' interleaved pairs at depth 4096 (1.037 / 1.086 / 1.131; busy-box timing, to be re-checked on a
-// quiet box; before 28b 1.18 / 1.56 / 1.79, derived from spec 9 H2). Drafts: spec 9 H2 (34 % cheaper than bf16's),
+// probe_mtp_steps' interleaved pairs at depth 4096 (1.037 / 1.086 / 1.131; before 28b 1.18 / 1.56 / 1.79, derived from
+// spec 9 H2); spec 19 v3d's GDN step at M >= 2 (2026-11-13, the same probe, busy box): 1.039 / 1.073 / 1.100. Drafts: spec 9 H2 (34 % cheaper than bf16's),
 // which the same run measured at 0.133 / 0.256 / 0.369.
 MtpCost MtpCost::int8_head() {
   MtpCost c;
-  c.verify = {1.00, 1.04, 1.09, 1.13};
+  c.verify = {1.00, 1.04, 1.07, 1.10};
   c.draft = {0.13, 0.26, 0.38};
   return c;
 }
@@ -36,11 +36,12 @@ MtpCost MtpCost::tp_int8_head() {
 
 MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
   MtpCost c;
-  // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (docs/BENCHMARKS.md).
+  // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (docs/BENCHMARKS.md); the candidate head's rows re-measured
+  // with spec 19 v3d's final form (2026-11-14, BENCHMARKS "Round cost (spec 19 v3d)").
   // The bf16 and experimental RTN int4 verify rows are derived equal to int8.
   c.verify = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};
   if (candidate_head)
-    c.verify = {0.997314, 1.045223, 1.094038, 1.114742, 1.161674, 1.208605, 1.230177, 1.242865};
+    c.verify = {1.000230, 1.041410, 1.073907, 1.105789, 1.151472, 1.180781, 1.205189, 1.221471};
   const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
                        drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
   double d = body + (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
