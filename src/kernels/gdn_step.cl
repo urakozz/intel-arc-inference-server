@@ -434,6 +434,14 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // are its own registers and only the pre-step history touches the ring.
   // -------------------------------------------------------------------------
   const uint kh = h / V_PER_K;             // repeat_interleave(·, V_PER_K): v-head -> k-head
+#ifdef DEFERRED
+  // The previous step's committed rows (header, DEFERRED): their kf into SLM now, read after section 1's barrier.
+  const uint pend_word = ctrl[CTRL_PEND];
+  const uint par = (pend_word >> 8) & 1u;
+  const uint n_rep = min(pend_word & 0xFFu, (uint)PR);
+  for (uint i = lid; i < n_rep * DIM; i += WG_GDN)
+    rep_k[i / DIM][i % DIM] = bf16f(pend_at(pend, par)[((i / DIM) * KHEADS + kh) * DIM + i % DIM]);
+#endif
   for (uint cid = lid; cid < CH_PER_WG; cid += WG_GDN) {
     const uint which = cid >> 7;           // 0 = q, 1 = k, 2 = v
     const uint i = cid & (DIM - 1);
@@ -527,15 +535,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 
 #ifdef DEFERRED
   // 2a. The previous step's committed rows (header, DEFERRED): its recurrence on its stored inputs, then the tile back.
-  const uint pend_word = ctrl[CTRL_PEND];
-  const uint par = (pend_word >> 8) & 1u;
-  const uint n_rep = min(pend_word & 0xFFu, (uint)PR);
-  if (n_rep) {
+  if (n_rep) {   // the rows' kf reached rep_k before section 1's barrier
     const __global ushort* restrict pr = pend_at(pend, par);
     const __global float* restrict ps = (const __global float*)pr + PEND_S_OFF;
-    for (uint i = lid; i < n_rep * DIM; i += WG_GDN)
-      rep_k[i / DIM][i % DIM] = bf16f(pr[((i / DIM) * KHEADS + kh) * DIM + i % DIM]);
-    barrier(CLK_LOCAL_MEM_FENCE);
     for (uint r = 0; r < n_rep; ++r) {
       const float decay = ps[(r * HEADS + h) * 2], beta = ps[(r * HEADS + h) * 2 + 1];
       for (uint kk = 0; kk < BAND_K; ++kk) {
@@ -610,6 +612,86 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // -------------------------------------------------------------------------
   // 3. One token at a time: head scalars, l2norm, the recurrence.
   // -------------------------------------------------------------------------
+#if defined(DEFERRED) && M > 1
+  // The DEFERRED builds at M >= 2: the same operations on S in the same order, one barrier a row instead of two. Row m's
+  // o partials (from S after its update) and row m + 1's kv partials (from S after row m + 1's decay - the next
+  // operation on S either way) go to SLM together, before one barrier; then every work-item takes row m + 1's kv tree
+  // and subgroup 0 row m's o tree. kv_red / o_red are by row parity: a row writes the buffers row m - 2 read, and every
+  // work-item has passed row m - 1's barrier, after its last read of them, before that write.
+  float dec[M], bet[M];
+  for (uint m = 0; m < n_act; ++m) {   // head scalars, as the per-row loop computes them
+    const ushort a_b = rne_bf16(ab_out[(size_t)m * AB_STRIDE + h]);
+    const ushort b_b = rne_bf16(ab_out[(size_t)m * AB_STRIDE + B_OFF + h]);
+    bet[m] = 1.0f / (1.0f + exp(-bf16f(b_b)));
+    dec[m] = exp(negA * softplus_f32(bf16f(a_b) + dt_bias));
+  }
+  if (c == 0)   // every row's recurrence inputs (header, DEFERRED): v by every head, kf by the k-head's first
+    for (uint m = 0; m < n_act; ++m) {
+      if (lid < DIM) pw[PEND_V_OFF + (m * HEADS + h) * DIM + lid] = xs[2][m][lid];
+      else if (h % V_PER_K == 0) pw[(m * KHEADS + kh) * DIM + lid - DIM] = (ushort)(as_uint(rk[m][lid - DIM]) >> 16);
+      if (lid == 0) {
+        __global float* restrict psw = (__global float*)pw + PEND_S_OFF + (m * HEADS + h) * 2;
+        psw[0] = dec[m];
+        psw[1] = bet[m];
+      }
+    }
+  if (n_act) {   // row 0's decay and kv partials
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      S[kk][0] *= dec[0];
+      S[kk][1] *= dec[0];
+    }
+    float p0 = 0.0f, p1 = 0.0f;
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      const float kfv = rk[0][sgid * BAND_K + kk];
+      p0 = fma(S[kk][0], kfv, p0);
+      p1 = fma(S[kk][1], kfv, p1);
+    }
+    kv_red[0][sgid][lane] = p0;
+    kv_red[0][sgid][lane + SG] = p1;
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  for (uint m = 0; m < n_act; ++m) {
+    float kv0, kv1;
+    band_sum(kv_red[m & 1], lane, &kv0, &kv1);
+    const float d0 = (bf16f(xs[2][m][c * CHUNK_V + lane]) - kv0) * bet[m];
+    const float d1 = (bf16f(xs[2][m][c * CHUNK_V + lane + SG]) - kv1) * bet[m];
+    for (uint kk = 0; kk < BAND_K; ++kk) {          // S[k][v] += kf[k]·Δ[v]
+      const float kfv = rk[m][sgid * BAND_K + kk];
+      S[kk][0] = fma(kfv, d0, S[kk][0]);
+      S[kk][1] = fma(kfv, d1, S[kk][1]);
+    }
+    float r0 = 0.0f, r1 = 0.0f;                     // o[v] = Σ_k qf[k]·S[k][v]
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      const float qfv = rq[m][sgid * BAND_K + kk];
+      r0 = fma(qfv, S[kk][0], r0);
+      r1 = fma(qfv, S[kk][1], r1);
+    }
+    o_red[m & 1][sgid][lane] = r0;
+    o_red[m & 1][sgid][lane + SG] = r1;
+    if (m + 1 < n_act) {                            // row m + 1: S *= exp(g), its kv partials
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        S[kk][0] *= dec[m + 1];
+        S[kk][1] *= dec[m + 1];
+      }
+      float p0 = 0.0f, p1 = 0.0f;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rk[m + 1][sgid * BAND_K + kk];
+        p0 = fma(S[kk][0], kfv, p0);
+        p1 = fma(S[kk][1], kfv, p1);
+      }
+      kv_red[(m + 1) & 1][sgid][lane] = p0;
+      kv_red[(m + 1) & 1][sgid][lane + SG] = p1;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sgid == 0) {
+      float o0, o1;
+      band_sum(o_red[m & 1], lane, &o0, &o1);
+      __global float* restrict op = gdn_o + ((size_t)m * HEADS + h) * DIM + c * CHUNK_V;
+      op[lane] = o0;
+      op[lane + SG] = o1;
+    }
+  }
+#else
   for (uint m = 0; m < n_act; ++m) {
 #ifdef BATCH_ROWS
     if (run_start(rows, m)) {   // a slot's first row: its tile from GDN state index src
@@ -758,6 +840,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     barrier(CLK_LOCAL_MEM_FENCE);   // the next token reuses rq/rk/kv_red/o_red
 #endif
   }
+#endif
 
   // -------------------------------------------------------------------------
   // 4. The tile goes back once, after every token of this step.
