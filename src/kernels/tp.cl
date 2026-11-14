@@ -25,8 +25,13 @@
 // data with system-scope loads. Two slots a direction (call n uses slot n & 1): a writer at call n + 2 has consumed the
 // reader's call n + 1, which the reader sent after finishing call n. Layout of one landing buffer, in 32-bit words:
 //
-//   [slot 0 data | slot 1 data | trailers [2][J] | pad to 4 KiB | flags [2][J] x 16 words | pad to 4 KiB]
+//   [slot 0 data | slot 1 data | trailers [2][J] x 16 words | pad to 4 KiB | flags [2][J] x 16 words | pad to 4 KiB]
 //   data = S_MSG x TP_MROWS x K words (capacity at 8 rows; a call at M rows uses [S_MSG][M][K]), J = FOLD_G x TP_MROWS
+//
+// Every 64-byte line of the landing has one writing work-group: a data chunk is whole lines, each trailer and each flag
+// has a line of its own. Trailers packed 16 to a line (TP_TRAILER_STRIDE 1, kept for tp_kernels_test stress) lost
+// stamps: a work-group's trailer store into a line other work-groups of the sender also wrote reached the reader after
+// its flag, or never (a stale crossing, 1-3 of 39 DFlash requests under --parallel tp, 2026-11-14).
 //
 // Chunk j = g x TP_MROWS + m: work-group (g, m) of either kernel - the K range [g CHUNK, + CHUNK) of row m, every slice.
 // Call numbers come from per-chunk counters in device memory advanced by the kernels (send's and fold's own), so a
@@ -43,7 +48,7 @@
 #define TP_FLAG_STRIDE 16u
 #define TP_PAGE 1024u
 #ifndef TP_TRAILER_STRIDE
-#define TP_TRAILER_STRIDE 1u
+#define TP_TRAILER_STRIDE 16u
 #endif
 
 #define SYS_LOAD(p, order) \

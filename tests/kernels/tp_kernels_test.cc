@@ -106,54 +106,16 @@ void replay(Side& a, Side& b) {
   for (Side* s : {&a, &b}) CHECK_EQ(s->state.as<uint32_t>()[runtime::tp::kStatus], 0u);
 }
 
-// `stress <seconds> [pairs]`: how often the 8-row folded crossing goes stale. Each arm is a list a card of `pairs`
-// tp_send + tp_res_fold at M = 8 (the verify lists' crossing), replayed on both cards; arms take turns, a list each,
-// until `seconds` pass. Arms: the trailers packed (the production binary) or each on its own 64-byte line (_T16),
-// back to back or with a 32 MiB copy between pairs (memory traffic, as the linears between real crossings). A failed
-// list is printed with its state words and the arm reset (landing, counters, state on both cards).
+// `stress <seconds> [pairs]`: how often the folded crossing goes stale, as the verify lists run it. Each arm is a list a
+// card of `pairs` tp_send + tp_res_fold, the pairs' M cycling through 1..8 in a fixed mixed order (verify lists of
+// every K: the per-row counters levelled, the grid and so the work-groups' cores changing between calls), replayed on
+// both cards; arms take turns, a list each, until `seconds` pass. Arms: the trailers packed 16 to a line (the _T1
+// binaries, the layout that lost stamps) or the production layout (one 64-byte line a trailer); alone, or beside a
+// second queue of 32 MiB copies on each card (memory traffic and other work on the cores, as in serving). A failed list
+// is printed with its state words and the arm reset (landing, counters, state on both cards).
+constexpr uint32_t kStressM[16] = {8, 3, 8, 1, 6, 8, 2, 5, 8, 4, 7, 8, 1, 8, 6, 2};
+
 struct StressArm {
-  StressArm(l0::Context& c0, l0::Context& c1, uint32_t stride, bool gap, uint32_t pairs)
-      : stride(stride), gap(gap), sides{std::make_unique<SSide>(c0, stride, 0u), std::make_unique<SSide>(c1, stride, 1u)} {
-    for (uint32_t r = 0; r < 2; ++r) {
-      SSide& s = *sides[r];
-      SSide& peer = *sides[1 - r];
-      const std::string v = stride == 1 ? kernels::tp_cross_variant(8, K, G, 4, true, r)
-                                        : "tp_cross_M8_K5120_G20_S4_F_T16_R" + std::to_string(r);
-      s.mod = std::make_unique<l0::Module>(s.ctx, kernels::path(v));
-      s.send = std::make_unique<l0::Kernel>(*s.mod, "tp_send");
-      s.fold = std::make_unique<l0::Kernel>(*s.mod, "tp_res_fold");
-      s.send->group_size(256);
-      s.fold->group_size(256);
-      s.send->arg_ptr(0, s.partials.ptr());
-      s.send->arg_ptr(1, peer.land.ptr());
-      s.send->arg_ptr(2, s.send_ctr.ptr());
-      s.send->arg_ptr(3, s.own.ptr());
-      s.fold->arg_ptr(0, s.own.ptr());
-      s.fold->arg_ptr(1, s.land.ptr());
-      s.fold->arg_ptr(2, s.resid.ptr());
-      s.fold->arg_ptr(3, s.sumsq.ptr());
-      s.fold->arg_ptr(4, s.fold_ctr.ptr());
-      s.fold->arg_ptr(5, s.state.ptr());
-      s.fold->arg(6, uint32_t(1u << 22));
-      s.list = std::make_unique<l0::CmdList>(l0::CmdList::regular(s.ctx));
-      for (uint32_t i = 0; i < pairs; ++i) {
-        s.list->launch(*s.send, G, 8);
-        s.list->launch(*s.fold, G, 8);
-        if (gap) s.list->copy(s.gap_dst.ptr(), s.gap_src.ptr(), s.gap_src.size());
-      }
-      s.list->close();
-    }
-    reset();
-  }
-  // The landing at the trailer stride: data, trailers, page, flags, page (runtime::tp::Layout's at stride 1).
-  static size_t land_bytes(uint32_t stride) {
-    const Layout L{K, 1, G};
-    const size_t flag_base = runtime::tp::round_up(runtime::tp::kSlots * L.data_words() +
-                                                   size_t(runtime::tp::kSlots) * L.chunks() * stride,
-                                                   runtime::tp::kPageWords);
-    return runtime::tp::round_up(flag_base + size_t(runtime::tp::kSlots) * L.chunks() * runtime::tp::kFlagStride,
-                                 runtime::tp::kPageWords) * 4;
-  }
   struct SSide {
     SSide(l0::Context& c, uint32_t stride, uint32_t rank)
         : ctx(c),
@@ -165,10 +127,12 @@ struct StressArm {
           fold_ctr(c, l0::MemKind::Device, size_t(G) * 8 * 4),
           state(c, l0::MemKind::Shared, runtime::tp::kStateWords * 4),
           own(c, l0::MemKind::Device, size_t(8) * K * 4),
-          gap_src(c, l0::MemKind::Device, size_t(32) << 20),
-          gap_dst(c, l0::MemKind::Device, size_t(32) << 20),
+          load_src(c, l0::MemKind::Device, size_t(32) << 20),
+          load_dst(c, l0::MemKind::Device, size_t(32) << 20),
           queue(c),
           fence(queue),
+          load_queue(c),
+          load_fence(load_queue),
           imm(l0::CmdList::immediate(c)) {
       std::mt19937 rng(rank + 5u);
       std::normal_distribution<float> nd(0.f, 0.05f);
@@ -178,14 +142,64 @@ struct StressArm {
       imm.fill(resid.ptr(), 0u, resid.size());
     }
     l0::Context& ctx;
-    l0::Mem partials, resid, sumsq, land, send_ctr, fold_ctr, state, own, gap_src, gap_dst;
+    l0::Mem partials, resid, sumsq, land, send_ctr, fold_ctr, state, own, load_src, load_dst;
     l0::Queue queue;
     l0::Fence fence;
+    l0::Queue load_queue;
+    l0::Fence load_fence;
     l0::CmdList imm;
-    std::unique_ptr<l0::Module> mod;
-    std::unique_ptr<l0::Kernel> send, fold;
-    std::unique_ptr<l0::CmdList> list;
+    std::unique_ptr<l0::Module> mod[8];
+    std::unique_ptr<l0::Kernel> send[8], fold[8];
+    std::unique_ptr<l0::CmdList> list, load;
   };
+
+  StressArm(l0::Context& c0, l0::Context& c1, uint32_t stride, bool load, uint32_t pairs)
+      : load(load), sides{std::make_unique<SSide>(c0, stride, 0u), std::make_unique<SSide>(c1, stride, 1u)} {
+    for (uint32_t r = 0; r < 2; ++r) {
+      SSide& s = *sides[r];
+      SSide& peer = *sides[1 - r];
+      for (uint32_t M = 1; M <= 8; ++M) {
+        const std::string v = kernels::tp_cross_variant(M, K, G, 4, true, r);
+        s.mod[M - 1] = std::make_unique<l0::Module>(
+            s.ctx, kernels::path(stride == 1 ? v.substr(0, v.size() - 3) + "_T1" + v.substr(v.size() - 3) : v));
+        l0::Kernel& snd = *(s.send[M - 1] = std::make_unique<l0::Kernel>(*s.mod[M - 1], "tp_send"));
+        l0::Kernel& fld = *(s.fold[M - 1] = std::make_unique<l0::Kernel>(*s.mod[M - 1], "tp_res_fold"));
+        snd.group_size(256);
+        fld.group_size(256);
+        snd.arg_ptr(0, s.partials.ptr());
+        snd.arg_ptr(1, peer.land.ptr());
+        snd.arg_ptr(2, s.send_ctr.ptr());
+        snd.arg_ptr(3, s.own.ptr());
+        fld.arg_ptr(0, s.own.ptr());
+        fld.arg_ptr(1, s.land.ptr());
+        fld.arg_ptr(2, s.resid.ptr());
+        fld.arg_ptr(3, s.sumsq.ptr());
+        fld.arg_ptr(4, s.fold_ctr.ptr());
+        fld.arg_ptr(5, s.state.ptr());
+        fld.arg(6, uint32_t(1u << 22));
+      }
+      s.list = std::make_unique<l0::CmdList>(l0::CmdList::regular(s.ctx));
+      for (uint32_t i = 0; i < pairs; ++i) {
+        const uint32_t M = kStressM[i % 16];
+        s.list->launch(*s.send[M - 1], G, M);
+        s.list->launch(*s.fold[M - 1], G, M);
+      }
+      s.list->close();
+      s.load = std::make_unique<l0::CmdList>(l0::CmdList::regular(s.ctx));
+      for (uint32_t i = 0; i < 16; ++i) s.load->copy(s.load_dst.ptr(), s.load_src.ptr(), s.load_src.size());
+      s.load->close();
+    }
+    reset();
+  }
+  // The landing at a trailer stride: data, trailers, page, flags, page (runtime::tp::Layout's at kTrailerStride).
+  static size_t land_bytes(uint32_t stride) {
+    const Layout L{K, 1, G};
+    const size_t flag_base = runtime::tp::round_up(runtime::tp::kSlots * L.data_words() +
+                                                   size_t(runtime::tp::kSlots) * L.chunks() * stride,
+                                                   runtime::tp::kPageWords);
+    return runtime::tp::round_up(flag_base + size_t(runtime::tp::kSlots) * L.chunks() * runtime::tp::kFlagStride,
+                                 runtime::tp::kPageWords) * 4;
+  }
   void reset() {
     for (auto& s : sides) {
       s->imm.fill(s->land.ptr(), 0u, s->land.size());
@@ -196,32 +210,36 @@ struct StressArm {
   }
   // One list on both cards; false (printed, the arm reset) when either card recorded a failure.
   bool run(const char* name, uint64_t list_no) {
+    if (load)
+      for (auto& s : sides) s->load_queue.execute(*s->load, &s->load_fence);
     for (auto& s : sides) s->queue.execute(*s->list, &s->fence);
     for (auto& s : sides) CHECK(s->fence.wait_for(uint64_t(60) * 1000000000ull));
+    if (load)
+      for (auto& s : sides) CHECK(s->load_fence.wait_for(uint64_t(60) * 1000000000ull));
     bool ok = true;
     for (uint32_t r = 0; r < 2; ++r) {
       const uint32_t* w = sides[r]->state.as<uint32_t>();
       if (w[runtime::tp::kStatus] == 0u) continue;
       ok = false;
+      const std::string late = w[6] == 0u ? "-" : w[6] == ~0u ? "never (lost)" : std::to_string(w[6] - 1u) + " loads";
       std::printf("FAIL %s list %llu card %u: status %u (1 timeout, 2 stale), call %u, chunk %u (g %u, m %u), flag %u, "
-                  "trailer %u, %u failed chunk(s), late %s\n",
+                  "trailer %u, %u failed chunk(s), trailer arrived late: %s\n",
                   name, (unsigned long long)list_no, r, w[0], w[3], w[4], w[4] / 8, w[4] % 8, w[1], w[2], w[5],
-                  w[6] == 0u ? "-" : w[6] == ~0u ? "never (lost)" : std::to_string(w[6] - 1u).append(" loads").c_str());
+                  late.c_str());
     }
     if (!ok) reset();
     return ok;
   }
-  uint32_t stride;
-  bool gap;
+  bool load;
   std::unique_ptr<SSide> sides[2];
   uint64_t lists = 0, fails = 0;
 };
 
 int stress(l0::Context& d0, l0::Context& d1, double seconds, uint32_t pairs) {
   std::vector<std::unique_ptr<StressArm>> arms;
-  const char* names[] = {"packed", "packed+gap", "padded", "padded+gap"};
-  for (uint32_t stride : {1u, 16u})
-    for (bool gap : {false, true}) arms.push_back(std::make_unique<StressArm>(d0, d1, stride, gap, pairs));
+  const char* names[] = {"packed", "packed+load", "production", "production+load"};
+  for (uint32_t stride : {1u, runtime::tp::kTrailerStride})
+    for (bool load : {false, true}) arms.push_back(std::make_unique<StressArm>(d0, d1, stride, load, pairs));
   const auto t0 = std::chrono::steady_clock::now();
   while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < seconds)
     for (size_t i = 0; i < arms.size(); ++i) {
@@ -229,14 +247,14 @@ int stress(l0::Context& d0, l0::Context& d1, double seconds, uint32_t pairs) {
       if (!a.run(names[i], a.lists)) ++a.fails;
       ++a.lists;
     }
-  uint64_t total = 0;
+  uint64_t fails = 0;
   for (size_t i = 0; i < arms.size(); ++i) {
-    std::printf("STRESS %-11s %llu of %llu lists failed (%llu crossings at M = 8, %u a list)\n", names[i],
+    std::printf("STRESS %-15s %llu of %llu lists failed (%llu crossings, %u a list, M 1..8 mixed)\n", names[i],
                 (unsigned long long)arms[i]->fails, (unsigned long long)arms[i]->lists,
                 (unsigned long long)(arms[i]->lists * pairs), pairs);
-    total += arms[i]->fails;
+    if (i >= 2) fails += arms[i]->fails;
   }
-  return total ? 1 : 0;
+  return fails ? 1 : 0;   // the packed arms are the reproducer; only the production layout must not fail
 }
 }  // namespace
 
