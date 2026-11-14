@@ -77,7 +77,7 @@ void write_dump(const std::string& path, const Json& meta, const std::vector<int
 // the worst of the exact top-16 (ranks from 1; the candidates re-ranked are the first 64 / 80). Recorded only.
 struct RankMargin {
   bool on = false;
-  l0::Mem exact;
+  std::unique_ptr<l0::Mem> exact;
   std::unique_ptr<l0::Module> mod;
   std::unique_ptr<l0::Kernel> k;
   std::vector<float> cl, el;
@@ -90,14 +90,14 @@ void rank_margin(runtime::Engine& e, df::DFlashDrafter& d, RankMargin& rm, uint3
   const uint32_t N = head.shape.N, used = e.model().desc->vocab_used;
   if (!rm.k) {
     const kernels::SmallMTuning* t = kernels::small_m_tuning(H, N, 1, 2);
-    rm.exact = l0::Mem(e.context(), l0::MemKind::Device, size_t(7) * N * 4);
+    rm.exact = std::make_unique<l0::Mem>(e.context(), l0::MemKind::Device, size_t(7) * N * 4);
     rm.mod = std::make_unique<l0::Module>(e.context(), kernels::path(kernels::gemm_sm_variant(7, *t)));
     rm.k = std::make_unique<l0::Kernel>(*rm.mod, kernels::gemm_sm_entry(*t));
     rm.k->group_size(kernels::gemm_sm_wg_size(*t));
     rm.k->arg_ptr(0, head.mem.ptr());
     rm.k->arg_ptr(1, head.scales->ptr());
     rm.k->arg_ptr(2, static_cast<uint8_t*>(d.buffers().x.ptr()) + size_t(H) * 2);
-    rm.k->arg_ptr(3, rm.exact.ptr());
+    rm.k->arg_ptr(3, rm.exact->ptr());
     rm.cl.resize(size_t(7) * N);
     rm.el.resize(size_t(7) * N);
   }
@@ -108,7 +108,7 @@ void rank_margin(runtime::Engine& e, df::DFlashDrafter& d, RankMargin& rm, uint3
   e.replay_aux(list);
   l0::CmdList imm = l0::CmdList::immediate(e.context());
   imm.copy(rm.cl.data(), d.buffers().logits.ptr(), rm.cl.size() * 4);
-  imm.copy(rm.el.data(), rm.exact.ptr(), rm.el.size() * 4);
+  imm.copy(rm.el.data(), rm.exact->ptr(), rm.el.size() * 4);
   std::vector<uint32_t> idx(used);
   for (uint32_t j = 0; j < k; ++j) {
     const float* c = rm.cl.data() + size_t(j) * N;
