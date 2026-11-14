@@ -34,8 +34,8 @@
 //
 // **The projection at prefill width** (project_wide; runtime/tap_drafter.h has the contract): a prompt's staged tap
 // rows, any count up to the prefill chunk cap, in one pass over the weights - the same walk with every linear on
-// pf_gemm (slabs of its columns from df_w_slab_i8 / df_w_slab_bf16) and df_w_norm / df_w_ctx_store
-// (src/kernels/dflash/df_proj_wide.cl) around them. int8 and bf16; false for the int4 drafter.
+// pf_gemm (slabs of its columns from df_w_slab_i8 / df_w_slab_q4 / df_w_slab_bf16) and df_w_norm / df_w_ctx_store
+// (src/kernels/dflash/df_proj_wide.cl) around them. int8, int4 and bf16.
 //
 // The drafter's embedding and head are the TARGET's (Review Focus 3): DFlashTarget points at them.
 namespace runtime::dflash {

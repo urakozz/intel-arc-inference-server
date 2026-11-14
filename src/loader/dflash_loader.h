@@ -28,6 +28,7 @@ struct DFlashLayerWeights {
 struct DFlashWeights {
   model::DFlashDesc desc;
   DraftFormat format = DraftFormat::Int8;
+  bool packed = false;                               // the checkpoint's own packed int4 linears (DFlashCheckpoint)
   uint32_t target_hidden = 0;
   std::unique_ptr<DeviceWeight> candidate_head;      // C3: optional int4 copy; exact int8 head stays in target
   // Spec 19 v3d Task 7 (operator ruling 2026-11-14): the 2-bit head with 80 candidates by default; 4 (layout 1) / 64

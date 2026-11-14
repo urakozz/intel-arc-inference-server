@@ -197,6 +197,9 @@ int main(int argc, char** argv) {
     const uint64_t k16 = rd::drafter_key(d, loader::DraftFormat::Bf16, norms.data(), norms.size() * 4);
     const uint64_t k4 = rd::drafter_key(d, loader::DraftFormat::Int4G64, norms.data(), norms.size() * 4);
     CHECK(k4 != 0 && k4 != k8 && k4 != k16);
+    // the packed int4 drafter and int4 quantised at load never share a key
+    const uint64_t k4p = rd::drafter_key(d, loader::DraftFormat::Int4G64, norms.data(), norms.size() * 4, true);
+    CHECK(k4p != 0 && k4p != k4 && k4p != k8 && k4p != k16);
     norms[17] = 1.0078125f;   // one norm weight another checkpoint has
     const uint64_t k8b = rd::drafter_key(d, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
     model::DFlashDesc other = d;
