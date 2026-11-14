@@ -207,7 +207,8 @@ Judged judge(const std::string& what, const std::string& tag, const std::vector<
   return j;
 }
 
-int gate(l0::Context& d0, l0::Context& d1) {
+// `only`: G1 on the named case only (a diagnostic run); empty: every case.
+int gate(l0::Context& d0, l0::Context& d1, const std::string& only) {
   constexpr uint32_t kMaxLen = 16384;
   std::vector<uint32_t> six = golden::read_ids("tests/golden/prompts/long32k.ids");
   six.resize(6000);
@@ -216,7 +217,9 @@ int gate(l0::Context& d0, l0::Context& d1) {
                                 {"long", golden::read_ids("tests/golden/prompts/long.ids")},
                                 {"long32k[:6000]", six}};
   std::vector<Run> ref;
-  for (const Case& c : cases) ref.push_back(plain(d0, d1, c.ids, kMaxLen));
+  for (const Case& c : cases)
+    ref.push_back(only.empty() || c.name == only || c.name == "prose" || c.name == "long" ? plain(d0, d1, c.ids, kMaxLen)
+                                                                                         : Run{});
   std::printf("plain --parallel tp: %zu cases x %u ids\n", cases.size(), kGen);
 
   Tp tp(d0, d1, kMaxLen);
@@ -225,6 +228,7 @@ int gate(l0::Context& d0, l0::Context& d1) {
   bool ok = true, awaiting = false;
   for (size_t i = 0; i < cases.size(); ++i)
     for (uint32_t K : {7u, 3u, 1u}) {
+      if (!only.empty() && cases[i].name != only) continue;
       e.reset();
       e.prefill(cases[i].ids);
       const Run got = speculative(e, K);
@@ -236,7 +240,7 @@ int gate(l0::Context& d0, l0::Context& d1) {
     }
 
   // S1: the snapshot after the prefill, restored: the same ids and drafts every round, bitwise.
-  {
+  try {
     const std::vector<uint32_t>& p = cases[2].ids;
     e.reset();
     e.prefill(p);
@@ -244,7 +248,9 @@ int gate(l0::Context& d0, l0::Context& d1) {
     std::vector<uint8_t> state(e.state_bytes()), kv(e.kv_bytes(pos));
     e.save_state(state.data());
     e.save_kv(0, pos, kv.data());
+    std::printf("S1 cold run from pos %u\n", pos);
     const Run cold = speculative(e, 7);
+    std::printf("S1 restore\n");
     e.reset();
     e.load_state(state.data(), pos);
     e.load_kv(0, pos, kv.data());
@@ -253,6 +259,9 @@ int gate(l0::Context& d0, l0::Context& d1) {
     const bool same = cold.ids == warm.ids && cold.drafts == warm.drafts;
     std::printf("S1 a restore after the prefill: %s\n", same ? "the same ids and drafts, bitwise" : "DIFFERENT");
     ok = ok && same;
+  } catch (const std::exception& ex) {
+    std::printf("S1 FAIL: threw at pos %u: %s\n", e.pos(), ex.what());
+    ok = false;
   }
 
   // T4: a dropped draft list fails within its bounds; reset() recovers.
@@ -271,12 +280,17 @@ int gate(l0::Context& d0, l0::Context& d1) {
     const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::printf("T4 threw %s after %.2f s\n", threw ? "yes" : "NO", s);
     ok = ok && threw;
-    e.reset();
-    e.prefill(cases[0].ids);
-    const Run again = speculative(e, 7);
-    const Judged j = judge("T4 prose after reset, K = 7", "tp_dflash_prose_k7", cases[0].ids, ref[0], again);
-    ok = ok && j.ok;
-    awaiting = awaiting || j.awaiting;
+    try {
+      e.reset();
+      e.prefill(cases[0].ids);
+      const Run again = speculative(e, 7);
+      const Judged j = judge("T4 prose after reset, K = 7", "tp_dflash_prose_k7", cases[0].ids, ref[0], again);
+      ok = ok && j.ok;
+      awaiting = awaiting || j.awaiting;
+    } catch (const std::exception& ex) {
+      std::printf("T4 FAIL: the run after reset threw at pos %u: %s\n", e.pos(), ex.what());
+      ok = false;
+    }
   }
   if (!ok) {
     std::printf("tp_dflash_test FAIL\n");
@@ -415,5 +429,5 @@ int main(int argc, char** argv) {
     }
     return cost(d0, d1, uint32_t(std::atoi(argv[4])));
   }
-  return gate(d0, d1);
+  return gate(d0, d1, mode == "gate" ? std::string() : mode);   // any other mode: G1 on that case only
 }
