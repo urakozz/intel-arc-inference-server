@@ -4,6 +4,8 @@
 // host twin tests/kernels/dflash_ref.h fed the same weights (the loader's own host forms) and the card's ring.
 //
 //   dflash_draft_test <drafter repo or dir> [int8|bf16|int4]  (all formats when none is given; SKIP 77 without it)
+//   An AutoRound int4 drafter (urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound) runs one list, "W4A16 packed": its own
+//   packed linears, the int4 form's cases and bars, the f32 judge over their dequant.
 //
 //   1. The lists capture to their formulas' launch counts (87 draft, 8 projection); 2053 positions of random taps
 //      are projected 8 a replay (the ring wraps at 2048); the last replay's rows equal the twin's projection
@@ -361,8 +363,10 @@ int main(int argc, char** argv) {
     std::printf("SKIP: no DFlash drafter (%s)\n", e.what());
     return 77;
   }
+  const loader::DFlashCheckpoint ck(snap);
   std::vector<loader::DraftFormat> formats = {loader::DraftFormat::Int8, loader::DraftFormat::Bf16,
                                            loader::DraftFormat::Int4G64};
+  if (ck.packed()) formats = {loader::DraftFormat::Int4G64};
   if (argc > 2) {
     loader::DraftFormat f;
     if (std::string(argv[2]) == "int4") f = loader::DraftFormat::Int4G64;
@@ -389,14 +393,13 @@ int main(int argc, char** argv) {
   loader::DeviceWeight head_d{e.upload(head_q.data(), head_q.size()),
                               std::make_unique<l0::Mem>(e.upload(head_s.data(), head_s.size() * 4)),
                               {H, V, 1, 0}, model::WeightKind::Int8};
-  const loader::DFlashCheckpoint ck(snap);
   const model::DFlashDesc& d = ck.desc();
   const std::vector<float> rope = dfref::rope_table(d.theta, d.head_dim, 8192 + M);
   int bad = 0;
 
   for (loader::DraftFormat f : formats) {
     g_sets_sm = g_sets_gv = 0;
-    std::printf("== drafter %s\n", loader::draft_format_name(f));
+    std::printf("== drafter %s\n", ck.packed() ? "W4A16 packed" : loader::draft_format_name(f));
     const loader::DFlashWeights w = loader::load_drafter(e.ctx, snap, q, V, embed_d, f);
     dfref::Weights tw = twin_weights(ck, f);
     tw.d.attn_ks = runtime::CaptureOptions{}.dflash_attn_ks;   // the twin follows the production DPAS part's order

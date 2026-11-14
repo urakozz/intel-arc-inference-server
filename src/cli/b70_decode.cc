@@ -1220,6 +1220,7 @@ int run(int argc, char** argv) {
   std::unique_ptr<cli::dflash::Loaded> drafter_load;
   if (dflash.on) {
     StdoutToStderr redirect;
+    cli::dflash::resolve_format(dflash);
     drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(ctx, dflash, model));
   }
   // Spec 15c: --prefill-length / --prefill on a model whose prefill is not built stop here with the

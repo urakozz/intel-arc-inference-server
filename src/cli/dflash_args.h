@@ -11,8 +11,8 @@
 //   --draft-vocab N        (b70-serve) the drafter's head over a draft vocabulary (spec 8 §11's, built without the
 //                          MTP head)
 // The drafter's linears are int8 (spec 19 decision 2: per-row RTN at load; --draft-format went in the zero-config
-// cleanup - Args::format stays the tests' seam) and its AdaptiveK cost table is MtpCost::dflash's (--spec-cost went
-// with it).
+// cleanup - Args::format stays the tests' seam), or int4 g64 when --draft-model is an AutoRound int4 export (its own
+// packed linears, resolve_format). Its AdaptiveK cost table is MtpCost::dflash's (--spec-cost went with it).
 //
 // What is refused here, by name, before the device (each is a later stage's, or has no binaries):
 //   pipeline parallel      b70-decode: one card (b70-serve --parallel pp serves it)
@@ -62,6 +62,12 @@ inline void check_engine(const Args& a, bool pipeline, runtime::KvCache, bool pi
   if (pipeline && !pipeline_served)
     throw std::runtime_error("b70-decode --spec dflash runs on one card (b70-serve --parallel pp --spec dflash serves "
                              "the drafter beside a split target): --parallel 1");
+}
+
+// The drafter's form from its checkpoint: an AutoRound int4 export (loader::DFlashCheckpoint::packed) loads its own
+// packed linears as int4 g64; a bf16 drafter keeps Args::format. Before cost() and the planner read the format.
+inline void resolve_format(Args& a) {
+  if (a.on && loader::DFlashCheckpoint(a.model).packed()) a.format = loader::DraftFormat::Int4G64;
 }
 
 // Spec 19v2 C3: ranked32k failed quality; full int8 heads use the candidate64/exact-rerank fallback.

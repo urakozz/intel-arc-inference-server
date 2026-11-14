@@ -1319,6 +1319,7 @@ int run(int argc, char** argv) {
                              "an MTP head) or --spec dflash");
   // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table).
   if (dflash.on) {
+    cli::dflash::resolve_format(dflash);
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;
     options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab);
