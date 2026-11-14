@@ -168,19 +168,19 @@ class Walk {
       i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr(),
                 w_.candidate_bits == 2 ? 3u : 1u);
       {
-        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_select1", kd::kWg);   // spec 19 v3d Task 7
+        auto& k = kernel(kd::candidate_topk_variant(w_.candidates), "df_candidate_select1", kd::kWg);   // spec 19 v3d Task 7
         k.arg_ptr(0, b_.logits.ptr());
         k.arg_ptr(1, b_.tpart.ptr());
         launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
       }
       {
-        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_stage2", kd::kWg);
+        auto& k = kernel(kd::candidate_topk_variant(w_.candidates), "df_candidate_stage2", kd::kWg);
         k.arg_ptr(0, b_.tpart.ptr());
         k.arg_ptr(1, b_.candidate->ptr());
         launch(k, kd::kR);
       }
       {
-        auto& k = kernel(kd::rerank_variant(), "df_rerank", kd::kWg);
+        auto& k = kernel(kd::rerank_variant(w_.candidates), "df_rerank", w_.candidates * 4);
         k.arg_ptr(0, t.head->mem.ptr());
         k.arg_ptr(1, t.head->scales->ptr());
         k.arg_ptr(2, at(b_.x.ptr(), size_t(H) * 2));

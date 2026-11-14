@@ -67,8 +67,8 @@ DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t h
     s.hid *= kd::int4_slices(d.hidden, d.sel_rank);
   }
   if (candidate_head) {
-    s.tpart *= 4;   // top64 rather than top16
-    s.candidate = R * 64 * 4;
+    s.tpart *= 5;   // up to top80 rather than top16 (spec 19 v3d: 80 candidates for the 2-bit head)
+    s.candidate = R * 80 * 4;
   }
   return s;
 }

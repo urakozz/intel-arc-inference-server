@@ -4,7 +4,9 @@
 #pragma OPENCL FP_CONTRACT OFF
 #define WG 256
 #define SG 16
-#define C 64
+#ifndef C
+#define C 64   /* the candidates a row (spec 19 v3d Task 7: 80 for the 2-bit head) */
+#endif
 #define CH 4096
 #define CHUNKS ((N + CH - 1) / CH)
 #define PER1 (CH / WG)
