@@ -29,7 +29,9 @@ cd "$(dirname "$0")/.."
 
 sync_tree() {
   echo "box: $BOX:$REMOTE_DIR" >&2
-  rsync -az --delete \
+  # No -t and --checksum: a changed file lands with the box's current time, so it is newer than its
+  # build outputs (the Mac's older mtime made `make` skip a file edited during a box build).
+  rsync -az --no-times --checksum --delete \
     --exclude build --exclude 'build-*' --exclude .git --exclude 'cmake-build-*' --exclude .idea \
     --exclude oracle-out --exclude 'oracle-out-*' --exclude oracle-forced-dumps --exclude q4exp-site --exclude .claude/worktrees \
     ./ "$BOX:$REMOTE_DIR/"
