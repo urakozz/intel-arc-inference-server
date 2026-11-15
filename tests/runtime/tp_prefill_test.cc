@@ -296,6 +296,31 @@ int main(int argc, char** argv) {
           golden::judge_explain(*judge, row, r.ids[row], model::Qwen35::kVocab, model::Qwen35::kVocabUsed, "one card's");
         std::printf("  the f32 judge at id %u: tp's %u %s, one card's %u %s\n", row, g.ids[row],
                     tp_ok ? "accepted" : "REJECTED", r.ids[row], ref_ok ? "accepted" : "rejected");
+        // Open-work 30 (2): each engine's distance from the judge over the rows both decide on one context (1..row;
+        // docs/probes/probe-tp-verify-m24-2026-11-14.md's table) - printed, not gated. Row 0 has no recorded row.
+        if (row > 0) {
+          const uint32_t V = model::Qwen35::kVocab, VU = model::Qwen35::kVocabUsed;
+          const float* jl = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * V);
+          const uint32_t a = g.ids[row], b = r.ids[row];
+          std::printf("  distance from the f32 judge over rows 1-%u (both engines on the same context):", row);
+          for (const Record* x : {&r, &g}) {
+            double sum = 0;
+            std::string off;
+            for (uint32_t i = 1; i <= row; ++i) {
+              const float* jrow = jl + size_t(i) * V;
+              const std::vector<float>& er = x->rows[i];
+              for (uint32_t t = 0; t < VU; ++t) sum += std::fabs(double(er[t]) - double(jrow[t]));
+              const uint32_t pick = uint32_t(std::max_element(er.begin(), er.begin() + VU) - er.begin());
+              if (pick != golden::judge_row(jrow, V, VU).top) off += " " + std::to_string(i);
+            }
+            std::printf(" %s mean |logit - f32| %.3f, rows whose pick is not the f32 top:%s;",
+                        x == &r ? "one card" : "tp", sum / (double(row) * VU), off.empty() ? " none" : off.c_str());
+          }
+          const float* jrow = jl + size_t(row) * V;
+          std::printf("\n  row %u, ids %u (one card) / %u (tp): f32 %.3f, one card %.3f, tp %.3f logits (%u minus %u)\n",
+                      row, b, a, double(jrow[b]) - jrow[a], double(r.rows[row][b]) - r.rows[row][a],
+                      double(g.rows[row][b]) - g.rows[row][a], b, a);
+        }
         // A rejected id passes as an operator-reviewed row (spec_judge.h kReviewedRows: this key, row and ids).
         bool reviewed = false;
         if (!tp_ok) {

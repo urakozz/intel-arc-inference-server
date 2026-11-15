@@ -483,7 +483,7 @@ int main(int argc, char** argv) {
       if (J && gd.determined() && id != gam) ++bf16_det_bad;
       if (jok) ++v.exact;
       const bool row_fails = jd.determined() ? !jok : !jd.contains(id);
-      const bool acc = accept.has(pname, p);
+      const bool acc = accept.has(pname, p, id);
       if (jd.determined()) {
         ++v.n_determined;
         if (jok) ++v.det_exact;

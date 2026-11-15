@@ -6,7 +6,7 @@
 The key against qwen_forced.py's hash and forced_judge.h's name rule; then the N6 cases: identical, a difference
 without its references (SKIP, dumped), with them - no more speculative misses than plain (PASS), more but every one a
 near-miss (PASS), one beyond 8 ulp (FAIL; PASS when spec_judge.h's kReviewedRows names it, exactly or by tag / row /
-ids / gap), the one-ulp tie rule, a length-only difference (FAIL), a missing request (FAIL), an unknown prompt (SKIP).
+ids / gap, or when the bf16 reference moved toward and picks the speculative id), the one-ulp tie rule, a length-only difference (FAIL), a missing request (FAIL), an unknown prompt (SKIP).
 """
 import importlib.util
 import json
@@ -185,6 +185,52 @@ def test_beyond_near_miss_fails_unless_reviewed():
     assert rc == 1, out
 
 
+def write_bf16top(path, rows):
+    """rows: [{id: bf16 logit}] -> `ids` int32 / `logits` f32 [len(rows)][C] (qwen_bf16_top.py's form)."""
+    C = max(len(r) for r in rows)
+    ids, lg = [], []
+    for r in rows:
+        items = list(r.items()) + [(0, 0.0)] * (C - len(r))
+        ids += [i for i, _ in items]
+        lg += [v for _, v in items]
+    ib = struct.pack(f"<{len(ids)}i", *ids)
+    fb = struct.pack(f"<{len(lg)}f", *lg)
+    h = {"ids": {"dtype": "I32", "shape": [len(rows), C], "data_offsets": [0, len(ib)]},
+         "logits": {"dtype": "F32", "shape": [len(rows), C], "data_offsets": [len(ib), len(ib) + len(fb)]}}
+    hb = json.dumps(h).encode()
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(hb)) + hb + ib + fb)
+
+
+def test_bf16_unstable_one_sided():
+    """Item 30 (4), operator 2026-11-15: a miss beyond 8 ulp is bf16-unstable only when the bf16 reference moved TOWARD
+    the speculative pick by more than 8 ulp; it passes (no plain row here) when the bf16 reference picks it."""
+    c = Case()
+    c.arm("off", 1, OFF)
+    c.arm("k3", 1, SPEC)
+    c.refs([(6, {}), (7, {}), (0, {})], [(1, {}), (3, {1: 1.0}), (0, {})])   # row 1: 3 / 1, 16 ulp
+    bf = os.path.join(c.tmp, "bf16")
+    os.makedirs(bf)
+    _, ks = c.keys()
+    u = 0.0625
+
+    def bf16(g):                                           # the pair (3, 1) g ulp apart at row 1
+        write_bf16top(os.path.join(bf, ks + ".bf16top.safetensors"),
+                      [{1: TOP}, {3: TOP, 1: TOP - g * u}, {0: TOP}])
+        return c.run("--bf16", bf)
+
+    rc, out = bf16(-1)                                     # toward, and bf16 picks the speculative id: PASS
+    assert rc == 0, out
+    assert "bf16 gap -1.00 ulp - bf16-UNSTABLE, the bf16 reference picks the speculative id: PASS" in out, out
+    rc, out = bf16(2)                                      # toward by 14 but bf16 keeps the f32 top: no plain row, FAIL
+    assert rc == 1, out
+    assert "bf16 gap 2.00 ulp - bf16-UNSTABLE, but no plain row" in out, out
+    rc, out = bf16(25)                                     # away (|diff| 9 > 8 was unstable two-sided): stable, FAIL
+    assert rc == 1, out
+    assert "bf16 gap 25.00 ulp - bf16 stable (moved -9.00 toward the speculative pick, <= 8): the strict bar: FAIL" \
+        in out, out
+
+
 def test_structural_failures_and_unknown_prompt():
     c = Case()
     c.arm("off", 1, OFF)
@@ -270,7 +316,7 @@ def test_end_of_turn():
 def test_reviewed_rows_of_the_header():
     rows = sj.reviewed_rows(sj.HEADER)
     assert rows and all(len(e) == 6 for e in rows), rows
-    assert rows[0][0].startswith("mtp_gpu_") and rows[0][1] == 0
+    assert rows[0][0].startswith("tp_mtp_m2_long_") and rows[0][1] == 0
 
 
 def test_decode_records():

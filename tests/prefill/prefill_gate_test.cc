@@ -360,7 +360,7 @@ int main(int argc, char** argv) {
                         compare_f32(grow, jrow, std::min(Vj, Vcmp), sa, sb).cos - 1e-5)) {
           ++v.near_miss;
           accepted_near_miss = true;
-        } else if (accept.has(pname, p)) {
+        } else if (accept.has(pname, p, id)) {
           ++v.acc_det;
         } else if (v.first_bad < 0) {
           v.first_bad = int(p);
@@ -370,7 +370,7 @@ int main(int argc, char** argv) {
         v.tie_steps.push_back(p);
         if (jok) ++v.tie_agree;
         else if (jd.contains(id)) ++v.tie_member;
-        else if (accept.has(pname, p)) ++v.acc_tie;
+        else if (accept.has(pname, p, id)) ++v.acc_tie;
         else if (v.first_bad < 0) v.first_bad = int(p);
       }
       const bool row_fails = jd.determined() ? !(jok || accepted_near_tie || accepted_near_miss) : !jd.contains(id);
@@ -411,8 +411,8 @@ int main(int argc, char** argv) {
         std::printf("  cos vs f32: engine %.6f, bf16 twin %.6f",
                     compare_f32(dec.data(), jrow, std::min(Vj, Vcmp), sa, sb).cos,
                     compare_f32(grow, jrow, std::min(Vj, Vcmp), sa, sb).cos);
-      if (accept.has(pname, p) && row_fails) std::printf("  %s, gap %.4f", golden::kAcceptNote, jr.gap);
-      if (accept.has(pname, p) && !row_fails) std::printf("  accepted row now passes - remove it");
+      if (accept.has(pname, p, id) && row_fails) std::printf("  %s, gap %.4f", golden::kAcceptNote, jr.gap);
+      if (accept.has(pname, p, id) && !row_fails) std::printf("  accepted row now passes - remove it");
       std::printf("\n");
       if (!jok && int(p) == v.first_diverge) {
         std::printf("      first divergence at generated position %u: engine %u, %s %u"

@@ -26,12 +26,15 @@
 //   g16 = the same pair's gap in a standard transformers bf16 reference of the same context
 //         (<B70_FORCED_BF16>/<key>.bf16top.safetensors, tools/oracle/qwen_bf16_top.py: top-k ids and logits per row
 //         plus the f32 top and the forced id), in the same unit
-//   the row is bf16-UNSTABLE when |g16 - g32| > golden::kNearMissUlp; then
+//   the row is bf16-UNSTABLE when g32 - g16 > golden::kNearMissUlp - the bf16 reference moved TOWARD the speculative
+//   pick by more than the bar (one-sided, item 30 (4), operator 2026-11-15: a bf16 reference more confident in the
+//   f32 top than f32 is says nothing for the flip); then
 //   gp  = the pair's gap in the ENGINE's plain (M = 1) row on the same context (the test's PlainRow: a plain replay
 //         of prompt + plain[0, d) + spec[d, d + r))
-//   and the miss passes when g32 <= max(kNearMissUlp, |gp - g32|) - no further from f32 than plain decoding itself
-//   is on that pair. A miss with no bf16 reference, a stable row, or no plain row stays on the strict bar. Every row
-//   judged by this rule is printed (ids, the three gaps, the allowance, the verdict).
+//   and the miss passes when g32 <= max(kNearMissUlp, g32 - gp) - plain decoding itself moved toward the speculative
+//   pick at least as far as the flip needs (gp <= 0); a plain row more confident in the f32 top (gp > g32) allows
+//   nothing beyond the bar. A miss with no bf16 reference, a stable row, or no plain row stays on the strict bar.
+//   Every row judged by this rule is printed (ids, the three gaps, the allowance, the verdict).
 //
 // A judge must be the one for the test's head form (the tag carries it: the int8 head's references are the
 // --lm-head int8 runs, f32_refs.sh's -i8head suffix).
@@ -101,8 +104,9 @@ inline constexpr const char* kTpVerifyNarrowReason =
     "TP verify rows on a bf16-narrow row, the small-M GEMM's rounding, no defect; operator 2026-11-14 (item 24, "
     "docs/probes/probe-tp-verify-m24-2026-11-14.md)";
 inline constexpr const char* kTpPrefillNarrowReason =
-    "TP with int8 KV on long's bf16-narrow output 62 (item 24's row: 271 for the f32 top 198), rounding, no defect; "
-    "operator 2026-11-14";
+    "unexplained, accepted (operator 2026-11-15): TP plain decode on int8 KV is further from f32 than one card on "
+    "int8 KV over long's outputs 1-62 (mean |logit - f32| 0.496 vs 0.410, beyond item 24's one-card band), and output "
+    "62 moves 4.26 logits toward 271 against one card's 2.50 (f32 lead 3.10)";
 inline constexpr const char* kWideLookupTieReason =
     "a three-way near tie the 16-row lookup verify flips (row 0 too: the kernels' rounding, no defect; "
     "docs/probes/probe-lookup-wide-verify-2026-11-14.md), reviewed row operator 2026-11-15";
@@ -118,7 +122,8 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"tp_mtp_m2_long_44f7f924c8179828", 0, 198, 271, 22.96, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k1_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k3_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
-    // tp_prefill_kv8_test long: TP's plain decode after its int8-KV prefill takes the same flip at output 62
+    // tp_prefill_kv8_test long: TP's plain decode after its int8-KV prefill takes the same flip at output 62; measured
+    // 2026-11-15 (open-work 30 (2)) outside one card's distance band - unexplained, accepted
     {"tp_prefill_kv8_long_fa12c9167b2eaa28", 62, 198, 271, 24.80, "2026-11-14", kTpPrefillNarrowReason},
     // mtp_lookup_gpu_test, output 45: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
     {"mtp_lookup_gpu_int8_t4_comment-openai_54315f9e12fec99e", 0, 248068, 1005, 21.64, "2026-11-15", kWideLookupTieReason},
@@ -236,15 +241,16 @@ struct UnstableRow {
       std::snprintf(buf, sizeof buf, "row %zu: ids %u (f32 top) / %u (speculative): f32 gap %.2f ulp; no bf16 reference - "
                     "the strict bar %.0f: FAIL", row, a, b, g32, golden::kNearMissUlp);
     else if (!unstable)
-      std::snprintf(buf, sizeof buf, "row %zu: ids %u / %u: f32 gap %.2f, bf16 gap %.2f ulp - bf16 stable (|diff| %.2f <= "
-                    "%.0f): the strict bar: FAIL", row, a, b, g32, g16, std::fabs(g16 - g32), golden::kNearMissUlp);
+      std::snprintf(buf, sizeof buf, "row %zu: ids %u / %u: f32 gap %.2f, bf16 gap %.2f ulp - bf16 stable (moved %.2f "
+                    "toward the speculative pick, <= %.0f): the strict bar: FAIL", row, a, b, g32, g16, g32 - g16,
+                    golden::kNearMissUlp);
     else if (!have_plain)
       std::snprintf(buf, sizeof buf, "row %zu: ids %u / %u: f32 gap %.2f, bf16 gap %.2f ulp - bf16-UNSTABLE, but no plain "
                     "row: the strict bar: FAIL", row, a, b, g32, g16);
     else
       std::snprintf(buf, sizeof buf, "row %zu: ids %u / %u: f32 gap %.2f, bf16 gap %.2f, plain gap %.2f ulp - "
-                    "bf16-UNSTABLE: allowance max(%.0f, |plain - f32| = %.2f) = %.2f: %s", row, a, b, g32, g16, gp,
-                    golden::kNearMissUlp, std::fabs(gp - g32), allow, pass ? "PASS" : "FAIL");
+                    "bf16-UNSTABLE: allowance max(%.0f, f32 - plain = %.2f) = %.2f: %s", row, a, b, g32, g16, gp,
+                    golden::kNearMissUlp, g32 - gp, allow, pass ? "PASS" : "FAIL");
     return buf;
   }
 };
@@ -363,13 +369,13 @@ inline UnstableRow unstable_rule(const float* jrow, uint32_t V, uint32_t VU, siz
     u.have_bf16 = !std::isnan(fa) && !std::isnan(fb);
     if (u.have_bf16) u.g16 = (fa - fb) / jr.ulp;
   }
-  u.unstable = u.have_bf16 && std::fabs(u.g16 - u.g32) > golden::kNearMissUlp;
+  u.unstable = u.have_bf16 && u.g32 - u.g16 > golden::kNearMissUlp;   // one-sided: toward the speculative pick
   if (u.unstable && plain_row) {
     const std::vector<float> p = plain_row();
     u.have_plain = p.size() >= V;
     if (u.have_plain) {
       u.gp = (double(p[u.a]) - double(p[b])) / jr.ulp;
-      u.allow = std::max(golden::kNearMissUlp, std::fabs(u.gp - u.g32));
+      u.allow = std::max(golden::kNearMissUlp, u.g32 - u.gp);
     }
   }
   u.pass = u.unstable && u.have_plain && u.g32 <= u.allow;

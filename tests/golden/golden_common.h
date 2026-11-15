@@ -324,11 +324,20 @@ std::string take_judge(int& argc, char** argv) { return take_flag(argc, argv, "-
 //     leave the state's distance to f32 flat (0.996 prose) and flip the rows non-monotonically
 //     (prose 18 wrong at 32 and 16, right at 8 and 2048) - chunk-boundary rounding of the GDN scan.
 //   cjk 15 is a 3-4-way f32 near tie (four ids within 0.31) that different variants resolve differently.
+// An entry may name the engine's id too, `prompt:step=id` (item 30 (4), operator 2026-11-15: `cjk:15=99737`): it
+// then accepts that id at that row only; without `=id` any id.
 constexpr const char* kAcceptNote = "ACCEPTED (known divergence, 2026-10-23, debug 2026-10-26)";
 struct AcceptList {
-  std::vector<std::pair<std::string, uint32_t>> rows;
-  bool has(const std::string& prompt, uint32_t step) const {
-    return std::find(rows.begin(), rows.end(), std::make_pair(prompt, step)) != rows.end();
+  static constexpr uint32_t kAnyId = UINT32_MAX;
+  struct Row {
+    std::string prompt;
+    uint32_t step, id;
+  };
+  std::vector<Row> rows;
+  bool has(const std::string& prompt, uint32_t step, uint32_t id) const {
+    return std::any_of(rows.begin(), rows.end(), [&](const Row& r) {
+      return r.prompt == prompt && r.step == step && (r.id == kAnyId || r.id == id);
+    });
   }
 };
 AcceptList take_accept(int& argc, char** argv) {
@@ -339,9 +348,11 @@ AcceptList take_accept(int& argc, char** argv) {
     size_t j = v.find(',', i);
     if (j == std::string::npos) j = v.size();
     const std::string item = v.substr(i, j - i);
-    const size_t c = item.find(':');
-    CHECK(c != std::string::npos && c > 0 && c + 1 < item.size());
-    a.rows.emplace_back(item.substr(0, c), uint32_t(std::stoul(item.substr(c + 1))));
+    const size_t c = item.find(':'), e = item.find('=');
+    CHECK(c != std::string::npos && c > 0 && c + 1 < item.size() &&
+          (e == std::string::npos || (e > c + 1 && e + 1 < item.size())));
+    a.rows.push_back({item.substr(0, c), uint32_t(std::stoul(item.substr(c + 1, e - c - 1))),
+                      e == std::string::npos ? AcceptList::kAnyId : uint32_t(std::stoul(item.substr(e + 1)))});
     i = j + 1;
   }
   return a;
