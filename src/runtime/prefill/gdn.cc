@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -83,7 +84,7 @@ void dump_gdn_inputs(Context& cx, const PrefillScratch& s, uint32_t C) {
   }
   FILE* f = std::fopen((base + ".txt").c_str(), "w");
   require(f != nullptr, "B70_PF_GDN_DUMP: write " + base + ".txt");
-  std::fprintf(f, "%u %u %u %u\n", C, d.gdn_k_heads, d.gdn_v_heads, d.gdn_conv_dim());
+  std::print(f, "{:d} {:d} {:d} {:d}\n", C, d.gdn_k_heads, d.gdn_v_heads, d.gdn_conv_dim());
   std::fclose(f);
 }
 

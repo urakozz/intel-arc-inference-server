@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <format>
 #include <utility>
 
 namespace server {
@@ -66,9 +67,9 @@ uint64_t next_seed() {
 std::string call_id(uint64_t seed, uint32_t index) {
   const uint64_t a = splitmix64(seed ^ (2ull * index + 1));
   const uint64_t b = splitmix64(a);
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "call_%016llx%08llx", static_cast<unsigned long long>(a),
-                static_cast<unsigned long long>(b & 0xFFFFFFFFull));
+  std::string buf;
+  buf = std::format("call_{:016x}{:08x}", static_cast<unsigned long long>(a),
+    static_cast<unsigned long long>(b & 0xFFFFFFFFull));
   return buf;
 }
 
@@ -193,8 +194,8 @@ bool escape_raw_controls(const std::string& text, std::string& out) {
         case '\b': out += "\\b"; break;
         case '\f': out += "\\f"; break;
         default: {
-          char u[8];
-          std::snprintf(u, sizeof(u), "\\u%04x", static_cast<unsigned>(c));
+          std::string u;
+          u = std::format("\\u{:04x}", static_cast<unsigned>(c));
           out += u;
         }
       }

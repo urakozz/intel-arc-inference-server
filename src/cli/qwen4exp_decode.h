@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <memory>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -182,8 +183,8 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     if (layers == 0)
       throw std::runtime_error("--layers auto: not even " + std::to_string(full.ple_layer + 1) + " layers fit " +
                                std::to_string(devs) + " card(s) at max_len " + std::to_string(len));
-    std::fprintf(stderr, "layers: auto -> %u of %u (the largest N whose truncated model fits %u card(s) at max_len %u "
-                 "with a %.3f GB reserve)\n", layers, full.layers, devs, len, a.reserve / 1e9);
+    std::print(stderr, "layers: auto -> {:d} of {:d} (the largest N whose truncated model fits {:d} card(s) at max_len {:d} "
+               "with a {:.3f} GB reserve)\n", layers, full.layers, devs, len, a.reserve / 1e9);
   }
   if (layers > full.layers)
     throw std::runtime_error("--layers " + std::to_string(layers) + " exceeds the checkpoint's " + std::to_string(full.layers));
@@ -204,20 +205,20 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
       throw std::runtime_error("--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) + " positions fit - " +
                                rq::describe(rq::plan(d, p, runtime::kMinAutoMaxLen, int8, hd, false, pf), p,
                                             runtime::kMinAutoMaxLen, dev, a.reserve));
-    std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of %u that fits every card with a %.3f GB "
-                 "reserve; trained context %u)\n", len, runtime::kMaxLenQuantum, a.reserve / 1e9, cap);
+    std::print(stderr, "max_len: auto -> {:d} (the largest multiple of {:d} that fits every card with a {:.3f} GB "
+               "reserve; trained context {:d})\n", len, runtime::kMaxLenQuantum, a.reserve / 1e9, cap);
   } else {
     if (len > cap)
       throw std::runtime_error("--max-len " + std::to_string(len) + " exceeds Qwen3.8-Flash-Next's trained context " +
                                std::to_string(cap));
     if (devs == 2 && a.pipe.split_auto) p = model::Q4Placement::two(d, rq::pp_split(d, len, int8, hd, pf).split);
-    std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
+    std::print(stderr, "max_len: {:d} (--max-len)\n", len);
   }
   rq::require_fits(rq::plan(d, p, len, int8, hd, false, pf), dev, a.reserve);
   if (devs == 2)
-    std::fprintf(stderr, "split: %s%u (layers [0, %u) on device 0, [%u, %u) and the head on device 1)\n",
-                 a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
-  std::fprintf(stderr, "%s\n", rq::describe(rq::plan(d, p, len, int8, hd, false, pf), p, len, dev, a.reserve).c_str());
+    std::print(stderr, "split: {}{:d} (layers [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
+               a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
+  std::print(stderr, "{}\n", rq::describe(rq::plan(d, p, len, int8, hd, false, pf), p, len, dev, a.reserve).c_str());
   s.placement = p;
   s.max_len = len;
   return s;
@@ -249,9 +250,9 @@ int run_decode(const DecodeArgs& a) {
   if (c1) ctx.push_back(c1.get());
   std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : c0->memory_bytes()};
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
+    std::print(stderr, "device: {} ({:d} EUs)\n", c0->name().c_str(), c0->eu_count());
   else
-    std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
+    std::print(stderr, "devices: {} + {} (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
                              "the hand-off writes it (docs/10-the-box.md)");
@@ -263,14 +264,14 @@ int run_decode(const DecodeArgs& a) {
     Redirect redirect;
     return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head, s.desc.layers, false);
   }();
-  std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode; the final mixer reads layer %u's "
-               "H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
+  std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the final mixer reads layer {:d}'s "
+             "H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
   runtime::PipelineOptions opt;
   runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
-  std::fprintf(stderr, "engine: Qwen3.8-Flash-Next, %u device(s)%s, %zu launches a token (%s attention, B70_Q4_ATTN), "
-               "max_len %u; the PLE table's %zu host pages read back by the device\n", eng.devices(),
-               devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
-               eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked());
+  std::print(stderr, "engine: Qwen3.8-Flash-Next, {:d} device(s){}, {:d} launches a token ({} attention, B70_Q4_ATTN), "
+             "max_len {:d}; the PLE table's {:d} host pages read back by the device\n", eng.devices(),
+             devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
+             eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked());
   // Spec 21d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
   // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
   // cur_token (argmax_stage2 is its last launch).
@@ -279,14 +280,14 @@ int run_decode(const DecodeArgs& a) {
   if (a.prefills()) {
     eng.prepare_prefill();
     pp_launches0 = eng.prefill_launches();
-    std::fprintf(stderr, "prefill: l0 backend, chunk %u, attention %s (B70_Q4_ATTN), %zu launches for a chunk of %u at "
-                 "pos 0 (%s; they depend on its dense / sparse rows) + %zu for the head%s\n", chunk,
-                 runtime::qwen4exp::q4_attn_name(eng.attention()),
-                 runtime::qwen4exp::prefill_chunk_launches(eng.model().desc, eng.model().placement, 0, chunk), chunk,
-                 devs == 2 ? "both cards" : "one card", runtime::qwen4exp::kPrefillHeadLaunches,
-                 devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+    std::print(stderr, "prefill: l0 backend, chunk {:d}, attention {} (B70_Q4_ATTN), {:d} launches for a chunk of {:d} at "
+               "pos 0 ({}; they depend on its dense / sparse rows) + {:d} for the head{}\n", chunk,
+               runtime::qwen4exp::q4_attn_name(eng.attention()),
+               runtime::qwen4exp::prefill_chunk_launches(eng.model().desc, eng.model().placement, 0, chunk), chunk,
+               devs == 2 ? "both cards" : "one card", runtime::qwen4exp::kPrefillHeadLaunches,
+               devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
   }
-  std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
+  std::print(stderr, "{}\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
   if (a.prefills())
     eng.prefill(ids, chunk);
@@ -294,43 +295,43 @@ int run_decode(const DecodeArgs& a) {
     eng.ingest(ids);
   const double ingest_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   if (a.prefills())
-    std::fprintf(stderr, "%s: %zu ids in %.1f ms (%.2f t/s) - device-side, loader excluded, first prefill launch to the "
-                 "first generated id; chunk %u, %zu L0 launches, pos %u\n", a.pp ? "pp" : "prefill", ids.size(), ingest_ms,
-                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0, chunk,
-                 eng.prefill_launches() - pp_launches0, eng.pos());
+    std::print(stderr, "{}: {:d} ids in {:.1f} ms ({:.2f} t/s) - device-side, loader excluded, first prefill launch to the "
+               "first generated id; chunk {:d}, {:d} L0 launches, pos {:d}\n", a.pp ? "pp" : "prefill", ids.size(), ingest_ms,
+               ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0, chunk,
+               eng.prefill_launches() - pp_launches0, eng.pos());
   else
-    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
-                 ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+    std::print(stderr, "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token, one decode replay per id), pos {:d}\n", ids.size(),
+               ingest_ms, ingest_ms / double(ids.size()), eng.pos());
   const uint32_t n = a.bench ? a.tg : a.n;
   eng.generate(n, [&](uint32_t id) {
     if (a.bench) return;
-    std::printf("%u\n", id);
+    std::print("{:d}\n", id);
     std::fflush(stdout);
   });
-  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (%.1f%% of it inside the fence)\n", n,
-               eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
-               eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
+  std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token ({:.1f}% of it inside the fence)\n", n,
+             eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
+             eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   if (!a.bench) return 0;
   const double ms_per_token = eng.last_gen_ms() / double(a.tg);
   const double gb = double(eng.model().read_per_token) / 1e9;
-  std::fprintf(stderr, "  MBU: %.2f t/s x %.3f GB = %.0f GB/s (W = this load's derived read/token: both HCs, the "
-               "mixers, the top-10 + shared experts, the routers, the head; the 16 PLE rows from host memory apart); %zu "
-               "launches/token\n", eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.launches());
+  std::print(stderr, "  MBU: {:.2f} t/s x {:.3f} GB = {:.0f} GB/s (W = this load's derived read/token: both HCs, the "
+             "mixers, the top-10 + shared experts, the routers, the head; the 16 PLE rows from host memory apart); {:d} "
+             "launches/token\n", eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.launches());
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
-  std::printf("| b70-decode %s qwen4exp L%u%s%s %s%s | %u | %u | %.2f | %.2f |\n", sha, eng.model().desc.layers,
-              a.int8_head() ? " int8-head" : "",
-              eng.model().desc.forms.dense == model::Q4Form::Bf16 ? " bf16-dense" : "",
-              runtime::qwen4exp::q4_attn_name(eng.attention()),
-              devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
-              a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
+  std::print("| b70-decode {} qwen4exp L{:d}{}{} {}{} | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha, eng.model().desc.layers,
+             a.int8_head() ? " int8-head" : "",
+             eng.model().desc.forms.dense == model::Q4Form::Bf16 ? " bf16-dense" : "",
+             runtime::qwen4exp::q4_attn_name(eng.attention()),
+             devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
+             a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
   // Spec 21d: the pp row, a second line as the Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)
-    std::printf("| b70-decode %s qwen4exp L%u%s%s %s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha, eng.model().desc.layers,
-                a.int8_head() ? " int8-head" : "", eng.model().desc.forms.dense == model::Q4Form::Bf16 ? " bf16-dense" : "",
-                runtime::qwen4exp::q4_attn_name(eng.attention()),
-                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth, chunk,
-                ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
+    std::print("| b70-decode {} qwen4exp L{:d}{}{} {}{} l0 pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, eng.model().desc.layers,
+               a.int8_head() ? " int8-head" : "", eng.model().desc.forms.dense == model::Q4Form::Bf16 ? " bf16-dense" : "",
+               runtime::qwen4exp::q4_attn_name(eng.attention()),
+               devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth, chunk,
+               ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   return 0;
 }
 

@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -61,8 +62,8 @@ int run_tp_decode(const TpDecodeArgs& a) {
   require_two_devices_for_tp(l0::Context::gpu_count());
   l0::Context d0(0u);
   l0::Context d1(d0, 1u);
-  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel tp: one context]\n", d0.name().c_str(),
-               d0.eu_count(), d1.name().c_str(), d1.eu_count());
+  std::print(stderr, "devices: 0 {} ({:d} EUs), 1 {} ({:d} EUs) [--parallel tp: one context]\n", d0.name().c_str(),
+             d0.eu_count(), d1.name().c_str(), d1.eu_count());
   if (!d0.can_access_peer(d1) || !d1.can_access_peer(d0))
     throw std::runtime_error(
         "--parallel tp: the cards cannot access each other's memory (zeDeviceCanAccessPeer 0 -> 1 and 1 -> 0), and "
@@ -106,21 +107,21 @@ int run_tp_decode(const TpDecodeArgs& a) {
   a.check_len(len);
 
   runtime::TpEngine eng(d0, d1, std::move(cards), len, {}, a.kv);
-  std::fprintf(stderr,
-               "engine: --parallel tp, crossing %s; %zu launches a card (%zu modules / %zu), max_len %u, kv cache %s%s\n",
-               model::tp_crossing_name(eng.crossing()), eng.step(0).kernel_count, eng.step(0).modules.size(),
-               eng.step(1).modules.size(), eng.max_len(), runtime::kv_cache_name(eng.kv_cache()),
-               eng.mtp() ? ", MTP head on both cards (verify lists M = 1..4, draft lists on each card's vocabulary half)"
-                         : "");
+  std::print(stderr,
+             "engine: --parallel tp, crossing {}; {:d} launches a card ({:d} modules / {:d}), max_len {:d}, kv cache {}{}\n",
+             model::tp_crossing_name(eng.crossing()), eng.step(0).kernel_count, eng.step(0).modules.size(),
+             eng.step(1).modules.size(), eng.max_len(), runtime::kv_cache_name(eng.kv_cache()),
+             eng.mtp() ? ", MTP head on both cards (verify lists M = 1..4, draft lists on each card's vocabulary half)"
+                       : "");
   if (a.prefill) {   // outside the timed window, as one card's prepare_prefill
     eng.set_prefill_backend(a.backend);
     eng.set_prefill_chunk_cap(path.chunk_cap);
     eng.prepare_prefill();
-    std::fprintf(stderr, "prefill backend: %s, chunk cap %u, crossings %s\n",
-                 runtime::prefill_backend_name(eng.prefill_backend()), eng.prefill_chunk_cap(),
-                 eng.prefill_overlaps() ? "on the copy engines (the wavefront)" : "on the compute lists (no overlap)");
+    std::print(stderr, "prefill backend: {}, chunk cap {:d}, crossings {}\n",
+               runtime::prefill_backend_name(eng.prefill_backend()), eng.prefill_chunk_cap(),
+               eng.prefill_overlaps() ? "on the copy engines (the wavefront)" : "on the compute lists (no overlap)");
   }
-  for (uint32_t r = 0; r < 2; ++r) std::fprintf(stderr, "%s\n", eng.memory_line(r).c_str());
+  for (uint32_t r = 0; r < 2; ++r) std::print(stderr, "{}\n", eng.memory_line(r).c_str());
 
   const size_t launches0 = eng.prefill_launches();
   const auto t0 = std::chrono::steady_clock::now();
@@ -128,23 +129,23 @@ int run_tp_decode(const TpDecodeArgs& a) {
   else eng.ingest(a.ids);
   const double ingest_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   if (a.prefill)
-    std::fprintf(stderr,
-                 "pp: %zu ids in %.1f ms (%.2f t/s) -- both cards, first prefill launch to the first generated id in "
-                 "cur_token; chunk %u, %zu L0 launches (both cards), pos %u\n",
-                 a.ids.size(), ingest_ms, ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0,
-                 a.chunk ? a.chunk : eng.prefill_chunk_cap(), eng.prefill_launches() - launches0, eng.pos());
+    std::print(stderr,
+               "pp: {:d} ids in {:.1f} ms ({:.2f} t/s) -- both cards, first prefill launch to the first generated id in "
+               "cur_token; chunk {:d}, {:d} L0 launches (both cards), pos {:d}\n",
+               a.ids.size(), ingest_ms, ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0,
+               a.chunk ? a.chunk : eng.prefill_chunk_cap(), eng.prefill_launches() - launches0, eng.pos());
   else
-    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", a.ids.size(), ingest_ms,
-                 a.ids.empty() ? 0.0 : ingest_ms / double(a.ids.size()), eng.pos());
+    std::print(stderr, "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token), pos {:d}\n", a.ids.size(), ingest_ms,
+               a.ids.empty() ? 0.0 : ingest_ms / double(a.ids.size()), eng.pos());
   const auto report = [&](uint32_t n) {
-    std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (%.1f%% of it inside the fences)\n", n,
-                 eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
-                 eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
+    std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token ({:.1f}% of it inside the fences)\n", n,
+               eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
+               eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   };
   if (!a.bench && a.mtp) return a.run_mtp(eng);   // spec 17d
   if (!a.bench) {
     eng.generate(a.n, [](uint32_t id) {
-      std::printf("%u\n", id);
+      std::print("{:d}\n", id);
       std::fflush(stdout);
     });
     report(a.n);
@@ -158,15 +159,15 @@ int run_tp_decode(const TpDecodeArgs& a) {
   const std::string tags = std::string(a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "") +
                            (a.kv == runtime::KvCache::Int8 ? " int8-kv" : "") + " tp2-" +
                            model::tp_crossing_name(eng.crossing());
-  std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, tags.c_str(), a.depth, a.tg, eng.last_tok_per_s(),
-              eng.last_gen_ms() / double(a.tg));
+  std::print("| b70-decode {}{} | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha, tags.c_str(), a.depth, a.tg, eng.last_tok_per_s(),
+             eng.last_gen_ms() / double(a.tg));
   if (a.bench_prefill)   // spec 17c: one card's pp row, the configuration in the tag
-    std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, tags.c_str(),
-                runtime::prefill_backend_name(a.backend), a.depth, a.chunk ? a.chunk : eng.prefill_chunk_cap(), ingest_ms,
-                ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
-  std::fprintf(stderr,
-               "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box, interleaved with\n"
-               " the one-card row.)\n");
+    std::print("| b70-decode {}{} {} pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, tags.c_str(),
+               runtime::prefill_backend_name(a.backend), a.depth, a.chunk ? a.chunk : eng.prefill_chunk_cap(), ingest_ms,
+               ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
+  std::print(stderr,
+             "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box, interleaved with\n"
+             " the one-card row.)\n");
   return 0;
 }
 

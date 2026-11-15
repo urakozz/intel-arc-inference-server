@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <print>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -213,19 +214,19 @@ struct KolibriEngineAdapterT : server::EngineIface {
 
   void report() {
     if (k_ > 0 && iters_ > 0) {   // Kolibri DSpark: the previous request's speculative line
-      std::fprintf(stderr, "dspark: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), %.3f tokens a verify, iterations "
-                   "at K 0..7:", k_, (unsigned long long)iters_, (unsigned long long)accepted_,
-                   (unsigned long long)drafted_, drafted_ ? double(accepted_) / double(drafted_) : 0.0,
-                   1.0 + double(accepted_) / double(iters_));
-      for (uint32_t k = 0; k <= kMaxK; ++k) std::fprintf(stderr, "%s%llu", k ? "/" : " ", (unsigned long long)iters_at_k_[k]);
-      std::fprintf(stderr, "\n");
+      std::print(stderr, "dspark: K {:d}, {:d} iterations, {:d}/{:d} drafts accepted ({:.3f}), {:.3f} tokens a verify, iterations "
+                 "at K 0..7:", k_, (unsigned long long)iters_, (unsigned long long)accepted_,
+                 (unsigned long long)drafted_, drafted_ ? double(accepted_) / double(drafted_) : 0.0,
+                 1.0 + double(accepted_) / double(iters_));
+      for (uint32_t k = 0; k <= kMaxK; ++k) std::print(stderr, "{}{:d}", k ? "/" : " ", (unsigned long long)iters_at_k_[k]);
+      std::print(stderr, "\n");
     }
     iters_ = accepted_ = drafted_ = 0;
     for (auto& c : iters_at_k_) c = 0;
     if (gen_tokens_ == 0) return;
     const double ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gen_start_).count();
-    std::fprintf(stderr, "gen: %u tokens, %.3f ms, %.4f ms/token\n", gen_tokens_, ms, ms / gen_tokens_);
+    std::print(stderr, "gen: {:d} tokens, {:.3f} ms, {:.4f} ms/token\n", gen_tokens_, ms, ms / gen_tokens_);
     std::fflush(stderr);
     gen_tokens_ = 0;
   }

@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <map>
 #include <iterator>
+#include <print>
 #include <stdexcept>
 #include <utility>
 #include <memory>
@@ -152,33 +153,33 @@ struct EngineAdapter : server::EngineIface {
       const double ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - gen_start_)
                             .count();
-      std::fprintf(stderr, "gen: %u tokens, %.3f ms, %.4f ms/token\n", gen_tokens_, ms,
-                   ms / gen_tokens_);
+      std::print(stderr, "gen: {:d} tokens, {:.3f} ms, {:.4f} ms/token\n", gen_tokens_, ms,
+                 ms / gen_tokens_);
       std::fflush(stderr);
     }
     if ((k_ > 0 || lookup_) && (mtp_iters > 0 || lk_iters_ > 0)) {
-      std::fprintf(stderr,
-                   "%s: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), iterations at "
-                   "K 0/1/2/3: %llu/%llu/%llu/%llu",
-                   lookup_ ? "lookup" : df_ ? "dflash" : "mtp", lookup_ ? runtime::Engine::kMaxDraft : k_,
-                   (unsigned long long)mtp_iters, (unsigned long long)mtp_accepted,
-                   (unsigned long long)mtp_drafted,
-                   mtp_drafted ? double(mtp_accepted) / double(mtp_drafted) : 0.0,
-                   (unsigned long long)mtp_iters_at_k[0], (unsigned long long)mtp_iters_at_k[1],
-                   (unsigned long long)mtp_iters_at_k[2], (unsigned long long)mtp_iters_at_k[3]);
+      std::print(stderr,
+                 "{}: K {:d}, {:d} iterations, {:d}/{:d} drafts accepted ({:.3f}), iterations at "
+                 "K 0/1/2/3: {:d}/{:d}/{:d}/{:d}",
+                 lookup_ ? "lookup" : df_ ? "dflash" : "mtp", lookup_ ? runtime::Engine::kMaxDraft : k_,
+                 (unsigned long long)mtp_iters, (unsigned long long)mtp_accepted,
+                 (unsigned long long)mtp_drafted,
+                 mtp_drafted ? double(mtp_accepted) / double(mtp_drafted) : 0.0,
+                 (unsigned long long)mtp_iters_at_k[0], (unsigned long long)mtp_iters_at_k[1],
+                 (unsigned long long)mtp_iters_at_k[2], (unsigned long long)mtp_iters_at_k[3]);
       if (df_)   // spec 19c: K 4..7 as well
-        std::fprintf(stderr, ", K 4/5/6/7: %llu/%llu/%llu/%llu", (unsigned long long)mtp_iters_at_k[4],
-                     (unsigned long long)mtp_iters_at_k[5], (unsigned long long)mtp_iters_at_k[6],
-                     (unsigned long long)mtp_iters_at_k[7]);
+        std::print(stderr, ", K 4/5/6/7: {:d}/{:d}/{:d}/{:d}", (unsigned long long)mtp_iters_at_k[4],
+                   (unsigned long long)mtp_iters_at_k[5], (unsigned long long)mtp_iters_at_k[6],
+                   (unsigned long long)mtp_iters_at_k[7]);
       // spec 19f / open-work 27: the lookup iterations (not in the counts above) and the ids they produced
       if (dflash_lookup_ || lk_iters_ > 0)
-        std::fprintf(stderr, "; lookup: %llu iterations, %llu/%llu drafts accepted, %llu of %u ids",
-                     (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
-                     (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
+        std::print(stderr, "; lookup: {:d} iterations, {:d}/{:d} drafts accepted, {:d} of {:d} ids",
+                   (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
+                   (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
       if (lk_wide_ > 0)
-        std::fprintf(stderr, ", %llu of them 16 rows wide, %llu entered on the head's confirmation",
-                     (unsigned long long)lk_wide_, (unsigned long long)lk_confirmed_);
-      std::fprintf(stderr, "\n");
+        std::print(stderr, ", {:d} of them 16 rows wide, {:d} entered on the head's confirmation",
+                   (unsigned long long)lk_wide_, (unsigned long long)lk_confirmed_);
+      std::print(stderr, "\n");
     }
     mtp_iters = mtp_drafted = mtp_accepted = 0;
     lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = lk_wide_ = lk_confirmed_ = 0;

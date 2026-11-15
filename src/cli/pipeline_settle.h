@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <print>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -123,10 +124,10 @@ inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& 
                                " positions fit on both devices - " +
                                runtime::pp_describe(runtime::pp_plan(d, s, at, w, kv, pf, x), dev, reserve));
     }
-    std::fprintf(stderr,
-                 "max_len: auto -> %u (the largest multiple of %u that fits BOTH devices, %.3f and"
-                 " %.3f GB, with a %.3f GB reserve each; trained context %u)\n",
-                 len, runtime::kMaxLenQuantum, dev[0] / gb, dev[1] / gb, reserve / gb, cap);
+    std::print(stderr,
+               "max_len: auto -> {:d} (the largest multiple of {:d} that fits BOTH devices, {:.3f} and"
+               " {:.3f} GB, with a {:.3f} GB reserve each; trained context {:d})\n",
+               len, runtime::kMaxLenQuantum, dev[0] / gb, dev[1] / gb, reserve / gb, cap);
   } else {
     if (pipe.split_auto) split = runtime::pp_auto_split(d, w, len, kv, pf, x);
     const runtime::PpPlan p = runtime::pp_plan(d, split, len, w, kv, pf, x);
@@ -143,15 +144,15 @@ inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& 
                                  " is " + std::to_string(best) +
                                  " (--max-len auto)");
       }
-    std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
+    std::print(stderr, "max_len: {:d} (--max-len)\n", len);
   }
   if (pipe.split_auto)
-    std::fprintf(stderr, "split: auto -> %u (the split whose heavier device holds the fewest bytes"
-                 " at max_len %u)\n", split, len);
+    std::print(stderr, "split: auto -> {:d} (the split whose heavier device holds the fewest bytes"
+               " at max_len {:d})\n", split, len);
   else
-    std::fprintf(stderr, "split: %u (--pipeline-split)\n", split);
-  std::fprintf(stderr, "%s\n",
-               runtime::pp_describe(runtime::pp_plan(d, split, len, w, kv, pf, x), dev, reserve).c_str());
+    std::print(stderr, "split: {:d} (--pipeline-split)\n", split);
+  std::print(stderr, "{}\n",
+             runtime::pp_describe(runtime::pp_plan(d, split, len, w, kv, pf, x), dev, reserve).c_str());
   return {split, len};
 }
 

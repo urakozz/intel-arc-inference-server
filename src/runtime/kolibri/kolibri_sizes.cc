@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 
 #include "loader/kolibri1_layout.h"
@@ -310,20 +311,20 @@ bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_b
 
 std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement& pl, uint32_t max_len,
                      const std::array<size_t, kPpDevices>& device_bytes, size_t reserve) {
-  char head[256];
+  std::string head;
   if (pl.devices > 1)
-    std::snprintf(head, sizeof head, "pipeline plan at max_len %u, split %u (device 0 layers [0, %u), device 1 "
-                  "layers [%u, %u)):", max_len, pl.split, pl.split, pl.split, pl.layers);
+    head = std::format("pipeline plan at max_len {:d}, split {:d} (device 0 layers [0, {:d}), device 1 "
+      "layers [{:d}, {:d})):", max_len, pl.split, pl.split, pl.split, pl.layers);
   else
-    std::snprintf(head, sizeof head, "plan at max_len %u (one card, layers [0, %u)):", max_len, pl.layers);
+    head = std::format("plan at max_len {:d} (one card, layers [0, {:d})):", max_len, pl.layers);
   std::string out = head;
   for (const DevicePlan& dp : p) {
     const std::string label = "\n  device " + std::to_string(dp.device);
     out += format_memory(label.c_str(), dp, device_bytes[dp.device]);
-    char tail[200];
-    std::snprintf(tail, sizeof tail, "; + reserve %.3f GB = %.3f GB (weights %.3f GB, RoPE %.3f GB, full KV %.3f GB, "
-                  "rings %.3f GB, hand-off %zu B)", reserve / 1e9, (dp.total() + reserve) / 1e9, dp.weights / 1e9,
-                  dp.rope / 1e9, dp.full_kv / 1e9, dp.rings / 1e9, dp.link);
+    std::string tail;
+    tail = std::format("; + reserve {:.3f} GB = {:.3f} GB (weights {:.3f} GB, RoPE {:.3f} GB, full KV {:.3f} GB, "
+      "rings {:.3f} GB, hand-off {:d} B)", reserve / 1e9, (dp.total() + reserve) / 1e9, dp.weights / 1e9,
+      dp.rope / 1e9, dp.full_kv / 1e9, dp.rings / 1e9, dp.link);
     out += tail;
   }
   return out;

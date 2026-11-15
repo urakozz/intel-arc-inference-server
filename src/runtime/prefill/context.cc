@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -18,8 +19,8 @@ namespace runtime::prefill {
 namespace {
 void zc(ze_result_t r, const char* what) {
   if (r == ZE_RESULT_SUCCESS) return;
-  char b[24];
-  std::snprintf(b, sizeof b, "0x%X", unsigned(r));
+  std::string b;
+  b = std::format("0x{:X}", unsigned(r));
   throw std::runtime_error(std::string("prefill::Context: ") + what + " failed: " + b);
 }
 std::string kernel_name(ze_kernel_handle_t k) {
@@ -157,8 +158,8 @@ void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz
   for (const KernelArg& a : args) {
     const ze_result_t r = zeKernelSetArgumentValue(k, i, a.size, a.ptr);
     if (r != ZE_RESULT_SUCCESS) {
-      char b[24];
-      std::snprintf(b, sizeof b, "0x%X", unsigned(r));
+      std::string b;
+      b = std::format("0x{:X}", unsigned(r));
       throw std::runtime_error("prefill::Context::launch: " + kernel_name(k) + " argument " +
                                std::to_string(i) + " (" + std::to_string(a.size) +
                                " bytes) rejected: " + b);

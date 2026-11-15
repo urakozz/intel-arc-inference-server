@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <format>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -83,9 +84,9 @@ inline PrefixCacheChoice auto_prefix_cache(const HostMemory& m) {
   const uint64_t half = m.total / 2;
   const uint64_t spare = m.available > kPrefixCacheHeadroom ? m.available - kPrefixCacheHeadroom : 0;
   const uint64_t pick = std::min<uint64_t>({kPrefixCacheMaxGiB * kGiB, half, spare}) / kGiB;
-  char buf[160];
-  std::snprintf(buf, sizeof buf, "auto: %.0f GiB RAM, %.0f GiB available", double(m.total) / kGiB,
-                double(m.available) / kGiB);
+  std::string buf;
+  buf = std::format("auto: {:.0f} GiB RAM, {:.0f} GiB available", double(m.total) / kGiB,
+     double(m.available) / kGiB);
   std::string why = buf;
   if (pick < kPrefixCacheMinGiB) return {0, why + "; under " + std::to_string(kPrefixCacheMinGiB) +
                                                 " GiB to spare, off"};

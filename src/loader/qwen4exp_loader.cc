@@ -3,6 +3,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <print>
 #include <stdexcept>
 
 #include "common/json.h"
@@ -231,30 +232,30 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   const double gb = 1e9;
-  std::printf("load_qwen4exp: %s\n  model       %s (%s): %u of %u layers (%u QSA), dense %s, shared %s, routed experts "
-              "int4 g%u%s, %zu subnormal f16 scales; %zu tensors, every name accounted for, 0 unconsumed\n",
-              o.snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.layers, full.layers, d.qsa_before(d.layers),
-              model::q4_form_name(d.forms.dense), model::q4_form_name(d.forms.shared), d.forms.expert_group,
-              d.forms.expert_group == 128 ? " (expanded exactly to g64)" : "", scan.subnormal_scales,
-              set.tensors().size());
-  std::printf("  skipped     by design: %zu visual tensors, %zu bf16 PLE shards (the int8 file replaces them)%s\n", visual,
-              shards, mtp ? "" : (", " + std::to_string(mtp_skipped) + " mtp.* (the head not loaded)").c_str());
+  std::print("load_qwen4exp: {}\n  model       {} ({}): {:d} of {:d} layers ({:d} QSA), dense {}, shared {}, routed experts "
+             "int4 g{:d}{}, {:d} subnormal f16 scales; {:d} tensors, every name accounted for, 0 unconsumed\n",
+             o.snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.layers, full.layers, d.qsa_before(d.layers),
+             model::q4_form_name(d.forms.dense), model::q4_form_name(d.forms.shared), d.forms.expert_group,
+             d.forms.expert_group == 128 ? " (expanded exactly to g64)" : "", scan.subnormal_scales,
+             set.tensors().size());
+  std::print("  skipped     by design: {:d} visual tensors, {:d} bf16 PLE shards (the int8 file replaces them){}\n", visual,
+             shards, mtp ? "" : (", " + std::to_string(mtp_skipped) + " mtp.* (the head not loaded)").c_str());
   if (m.skipped)
-    std::printf("  note        development mode (--layers %u): layers %u..%u not loaded (%zu tensors consumed by "
-                "design); the final mixer reads layer %u's streams\n",
-                d.layers, d.layers, full.layers - 1, m.skipped, d.layers - 1);
+    std::print("  note        development mode (--layers {:d}): layers {:d}..{:d} not loaded ({:d} tensors consumed by "
+               "design); the final mixer reads layer {:d}'s streams\n",
+               d.layers, d.layers, full.layers - 1, m.skipped, d.layers - 1);
   for (const Q4DevicePart& P : m.parts)
-    std::printf("  device %u    layers [%u, %u): weights %13zu B %7.3f GB%s%s%s, RoPE %zu B (max_len %u)\n", P.device, P.first,
-                P.end, P.bytes, P.bytes / gb, P.embed ? " + embed" : "",
-                P.lm_head ? (int8 ? " + int8 head" : " + bf16 head") : "", P.mtp ? " + MTP head (RTN int4 g64 experts)" : "",
-                P.rope_bytes, max_len);
-  std::printf("  host PLE    %u + %u host-USM ranges via device %u: %13zu B %7.3f GB (%s scales), pinned in %.1f s; %zu "
-              "page tags read back, %zu rows compared; MemAvailable %.1f GB before, %.1f GB after\n",
-              d.ple_heads, d.ple_heads, m.ple_device, m.ple.bytes, m.ple.bytes / gb, q4_ple_scale_name(m.ple.scale),
-              m.ple.seconds, m.ple.page_words.size(), m.ple.rows_checked, m.ple.mem_before / gb, m.ple.mem_after / gb);
-  std::printf("  read/token  %13zu B %7.3f GB   (top-%u + shared experts, HC, mixers, routers, head; derived)\n"
-              "  load        %.1f s\n",
-              m.read_per_token, m.read_per_token / gb, d.top_k, m.seconds);
+    std::print("  device {:d}    layers [{:d}, {:d}): weights {:13d} B {:7.3f} GB{}{}{}, RoPE {:d} B (max_len {:d})\n", P.device, P.first,
+               P.end, P.bytes, P.bytes / gb, P.embed ? " + embed" : "",
+               P.lm_head ? (int8 ? " + int8 head" : " + bf16 head") : "", P.mtp ? " + MTP head (RTN int4 g64 experts)" : "",
+               P.rope_bytes, max_len);
+  std::print("  host PLE    {:d} + {:d} host-USM ranges via device {:d}: {:13d} B {:7.3f} GB ({} scales), pinned in {:.1f} s; {:d} "
+             "page tags read back, {:d} rows compared; MemAvailable {:.1f} GB before, {:.1f} GB after\n",
+             d.ple_heads, d.ple_heads, m.ple_device, m.ple.bytes, m.ple.bytes / gb, q4_ple_scale_name(m.ple.scale),
+             m.ple.seconds, m.ple.page_words.size(), m.ple.rows_checked, m.ple.mem_before / gb, m.ple.mem_after / gb);
+  std::print("  read/token  {:13d} B {:7.3f} GB   (top-{:d} + shared experts, HC, mixers, routers, head; derived)\n"
+             "  load        {:.1f} s\n",
+             m.read_per_token, m.read_per_token / gb, d.top_k, m.seconds);
   return m;
 }
 

@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <optional>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -221,15 +222,15 @@ inline runtime::bolt::BoltPlan settle(const model::BoltDesc& d, const DecodeArgs
   const rb::BoltPlan p = rb::plan(d, a.max_len.is_auto ? 0 : a.max_len.value, dev, extra,
                                   devs == 2 ? std::optional<uint32_t>(place.split) : std::nullopt, reserve, a.int8_head);
   if (a.max_len.is_auto)
-    std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of 256 that fits every card; trained context %u)\n",
-                 p.max_len, d.max_pos);
+    std::print(stderr, "max_len: auto -> {:d} (the largest multiple of 256 that fits every card; trained context {:d})\n",
+               p.max_len, d.max_pos);
   else
-    std::fprintf(stderr, "max_len: %u (--max-len)\n", p.max_len);
+    std::print(stderr, "max_len: {:d} (--max-len)\n", p.max_len);
   for (uint32_t i = 0; i < p.place.devices; ++i)
-    std::fprintf(stderr, "plan, device %u: %s\n", i, rb::describe(p.device[i], dev[i]).c_str());
+    std::print(stderr, "plan, device {:d}: {}\n", i, rb::describe(p.device[i], dev[i]).c_str());
   if (p.place.devices == 2)
-    std::fprintf(stderr, "split: %s%u (blocks [0, %u) on device 0, [%u, %u) and the head on device 1)\n",
-                 a.pipe.split_auto ? "auto -> " : "", p.place.split, p.place.split, p.place.split, d.layers);
+    std::print(stderr, "split: {}{:d} (blocks [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
+               a.pipe.split_auto ? "auto -> " : "", p.place.split, p.place.split, p.place.split, d.layers);
   return p;
 }
 
@@ -265,9 +266,9 @@ int run_decode(const DecodeArgs& a) {
   std::vector<size_t> dev = {c0->memory_bytes()};
   if (c1) dev.push_back(c1->memory_bytes());
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
+    std::print(stderr, "device: {} ({:d} EUs)\n", c0->name().c_str(), c0->eu_count());
   else
-    std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
+    std::print(stderr, "devices: {} + {} (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and the "
                              "hand-off writes it (docs/10-the-box.md)");
@@ -285,15 +286,15 @@ int run_decode(const DecodeArgs& a) {
   }();
   runtime::PipelineOptions opt;
   rb::BoltEngine eng(ctx, std::move(model), pl.max_len, /*debug_tap=*/false, opt, a.profile, attn, fuse, state);
-  std::fprintf(stderr, "engine: Nemotron 3.5 Bolt, %u block(s), %u device(s)%s, %zu launches a token (%s attention "
-               "B70_BOLT_ATTN, fuse %s B70_BOLT_FUSE, %s SSM state B70_BOLT_SSM), %s head, max_len %u\n",
-               eng.model().desc.layers, eng.devices(),
-               devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
-               eng.launches(), rb::bolt_attn_name(eng.attention()), rb::bolt_fuse_name(eng.fuse()).c_str(),
-               rb::bolt_state_name(eng.state()), a.int8_head ? "int8" : "bf16", eng.max_len());
+  std::print(stderr, "engine: Nemotron 3.5 Bolt, {:d} block(s), {:d} device(s){}, {:d} launches a token ({} attention "
+             "B70_BOLT_ATTN, fuse {} B70_BOLT_FUSE, {} SSM state B70_BOLT_SSM), {} head, max_len {:d}\n",
+             eng.model().desc.layers, eng.devices(),
+             devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
+             eng.launches(), rb::bolt_attn_name(eng.attention()), rb::bolt_fuse_name(eng.fuse()).c_str(),
+             rb::bolt_state_name(eng.state()), a.int8_head ? "int8" : "bf16", eng.max_len());
   if (a.layers)
-    std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode; the head reads block %u's "
-                 "residual)\n", eng.model().desc.layers, eng.model().checkpoint_layers, eng.model().desc.layers - 1);
+    std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the head reads block {:d}'s "
+               "residual)\n", eng.model().desc.layers, eng.model().checkpoint_layers, eng.model().desc.layers - 1);
   // Spec 25d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens here,
   // outside the timed window, which is then the whole prefill() call: first launch to the first generated id in cur_token.
   const uint32_t chunk = a.pp_chunk ? a.pp_chunk : rb::kPfC;
@@ -301,15 +302,15 @@ int run_decode(const DecodeArgs& a) {
   if (a.prefills()) {
     eng.prepare_prefill();
     pp_launches0 = eng.prefill_launches();
-    std::fprintf(stderr, "prefill: l0 backend, chunk %u (every chunk ends on the absolute 64-grid), attention %s "
-                 "(B70_BOLT_ATTN), %s SSM state (B70_BOLT_SSM), %zu launches per chunk (%s) + %zu for the head%s\n", chunk,
-                 rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),
-                 rb::prefill_chunk_launches(eng.model().desc, eng.model().place), devs == 2 ? "both cards" : "one card",
-                 rb::kPrefillHeadLaunches,
-                 devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+    std::print(stderr, "prefill: l0 backend, chunk {:d} (every chunk ends on the absolute 64-grid), attention {} "
+               "(B70_BOLT_ATTN), {} SSM state (B70_BOLT_SSM), {:d} launches per chunk ({}) + {:d} for the head{}\n", chunk,
+               rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),
+               rb::prefill_chunk_launches(eng.model().desc, eng.model().place), devs == 2 ? "both cards" : "one card",
+               rb::kPrefillHeadLaunches,
+               devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
     runtime::prefill::profile_reset();
   }
-  std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
+  std::print(stderr, "{}\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
   if (a.prefills())
     eng.prefill(ids, chunk);
@@ -319,51 +320,51 @@ int run_decode(const DecodeArgs& a) {
   const double pp_tps = ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0;
   const double pp_params = prefill_params_per_token(eng.model().desc);
   if (a.prefills()) {
-    std::fprintf(stderr, "%s: %zu ids in %.1f ms (%.2f t/s, %.2f TFLOP/s at 2 x %.3f B matmul parameters a token - "
-                 "derived, attention's depth term excluded) - device-side, loader excluded, first prefill launch to the "
-                 "first generated id; chunk %u, %zu L0 launches, pos %u\n", a.pp ? "pp" : "prefill", ids.size(), ingest_ms,
-                 pp_tps, pp_tps * 2.0 * pp_params / 1e12, pp_params / 1e9, chunk, eng.prefill_launches() - pp_launches0,
-                 eng.pos());
+    std::print(stderr, "{}: {:d} ids in {:.1f} ms ({:.2f} t/s, {:.2f} TFLOP/s at 2 x {:.3f} B matmul parameters a token - "
+               "derived, attention's depth term excluded) - device-side, loader excluded, first prefill launch to the "
+               "first generated id; chunk {:d}, {:d} L0 launches, pos {:d}\n", a.pp ? "pp" : "prefill", ids.size(), ingest_ms,
+               pp_tps, pp_tps * 2.0 * pp_params / 1e12, pp_params / 1e9, chunk, eng.prefill_launches() - pp_launches0,
+               eng.pos());
     if (runtime::prefill::profile_enabled()) runtime::prefill::profile_report("Nemotron 3.5 Bolt prefill", ingest_ms);
   } else {
-    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
-                 ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+    std::print(stderr, "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token, one decode replay per id), pos {:d}\n", ids.size(),
+               ingest_ms, ingest_ms / double(ids.size()), eng.pos());
   }
   if (a.profile) {
     eng.clear_profile();
     for (uint32_t r = 0; r < a.repeats; ++r) eng.generate(a.steps);
-    std::printf("# b70-decode --profile - Nemotron 3.5 Bolt in-situ step anatomy\ndepth %u, steps %u, repeats %u, %zu "
-                "launches/step, max_len %u, %s head (a profiled list signals a kernel-timestamp event per launch: never a "
-                "bench row)\n\n%s", a.depth, a.steps, a.repeats, eng.launches(), pl.max_len, a.int8_head ? "int8" : "bf16",
-                eng.profile_table().c_str());
+    std::print("# b70-decode --profile - Nemotron 3.5 Bolt in-situ step anatomy\ndepth {:d}, steps {:d}, repeats {:d}, {:d} "
+               "launches/step, max_len {:d}, {} head (a profiled list signals a kernel-timestamp event per launch: never a "
+               "bench row)\n\n{}", a.depth, a.steps, a.repeats, eng.launches(), pl.max_len, a.int8_head ? "int8" : "bf16",
+               eng.profile_table().c_str());
     return 0;
   }
   const uint32_t n = a.bench ? a.tg : a.n;
   eng.generate(n, [&](uint32_t id) {
     if (a.bench) return;
-    std::printf("%u\n", id);
+    std::print("{:d}\n", id);
     std::fflush(stdout);
   });
-  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (%.1f%% of it inside the fence)\n", n,
-               eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
-               eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
+  std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token ({:.1f}% of it inside the fence)\n", n,
+             eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
+             eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   if (!a.bench) return 0;
   const double gb = double(read_per_token(eng.model().desc, a.int8_head)) / 1e9;
-  std::fprintf(stderr, "  MBU: %.2f t/s x %.3f GB = %.0f GB/s (W = the derived weights read a token, KV and SSM state "
-               "excluded); %zu launches/token\n", eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.launches());
+  std::print(stderr, "  MBU: {:.2f} t/s x {:.3f} GB = {:.0f} GB/s (W = the derived weights read a token, KV and SSM state "
+             "excluded); {:d} launches/token\n", eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.launches());
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
-  std::printf("| b70-decode %s bolt %s-head %s fuse-%s ssm-%s%s | %u | %u | %.2f | %.2f |\n", sha,
-              a.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()), rb::bolt_fuse_name(eng.fuse()).c_str(),
-              rb::bolt_state_name(eng.state()),
-              devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
-              a.depth, a.tg, eng.last_tok_per_s(), eng.last_gen_ms() / double(a.tg));
+  std::print("| b70-decode {} bolt {}-head {} fuse-{} ssm-{}{} | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha,
+             a.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()), rb::bolt_fuse_name(eng.fuse()).c_str(),
+             rb::bolt_state_name(eng.state()),
+             devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
+             a.depth, a.tg, eng.last_tok_per_s(), eng.last_gen_ms() / double(a.tg));
   // Spec 25d: the pp row, a second line as the Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)
-    std::printf("| b70-decode %s bolt %s-head %s ssm-%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
-                a.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),
-                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth, chunk,
-                ingest_ms, pp_tps);
+    std::print("| b70-decode {} bolt {}-head {} ssm-{}{} l0 pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha,
+               a.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),
+               devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth, chunk,
+               ingest_ms, pp_tps);
   return 0;
 }
 

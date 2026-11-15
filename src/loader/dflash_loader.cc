@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <format>
+#include <print>
 #include <stdexcept>
 #include <string>
 
@@ -65,12 +67,12 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
     w.candidate_head = upload_linear_u(ctx, imm, h, w.bytes);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     w.seconds += seconds;
-    char line[192];
-    std::snprintf(line, sizeof line, "DFlash candidate head: int%u g64, top%u with exact int8 rerank, %zu B, %.1f s",
-                  candidate_bits, candidates, h.bytes(), seconds);
+    std::string line;
+    line = std::format("DFlash candidate head: int{:d} g64, top{:d} with exact int8 rerank, {:d} B, {:.1f} s",
+      candidate_bits, candidates, h.bytes(), seconds);
     w.line += "; ";
     w.line += line;
-    std::printf("%s\n", line);
+    std::print("{}\n", line);
   }
   return w;
 }
@@ -155,17 +157,17 @@ DFlashWeights load_checked(l0::Context& ctx, const DFlashCheckpoint& ck, uint32_
   w.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   std::string taps;
   for (uint32_t t : d.taps) taps += (taps.empty() ? "" : "/") + std::to_string(t);
-  char buf[512];
-  std::snprintf(buf, sizeof buf,
-                "DFlash drafter: %s, %u layers, taps %s, block %u, %s (%s %.1f s), mask row from the %s, %zu B, %.1f s",
-                d.architecture.c_str(), d.layers, taps.c_str(), d.block, draft_format_name(format),
-                format == DraftFormat::Bf16 ? "tiled at load"
-                : ck.packed()               ? "AutoRound, repacked at load"
-                                            : "quantised at load",
-                quant,
-                w.mask_from_checkpoint ? "checkpoint" : "target's embedding", bytes, w.seconds);
+  std::string buf;
+  buf = std::format(
+    "DFlash drafter: {}, {:d} layers, taps {}, block {:d}, {} ({} {:.1f} s), mask row from the {}, {:d} B, {:.1f} s",
+    d.architecture.c_str(), d.layers, taps.c_str(), d.block, draft_format_name(format),
+    format == DraftFormat::Bf16 ? "tiled at load"
+    : ck.packed()               ? "AutoRound, repacked at load"
+                                : "quantised at load",
+    quant,
+    w.mask_from_checkpoint ? "checkpoint" : "target's embedding", bytes, w.seconds);
   w.line = buf;
-  std::printf("%s\n", buf);
+  std::print("{}\n", buf);
   return w;
 }
 }  // namespace

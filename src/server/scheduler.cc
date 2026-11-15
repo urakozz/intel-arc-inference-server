@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <deque>
 #include <mutex>
+#include <print>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -402,14 +403,14 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
     const uint32_t slot = static_cast<uint32_t>(job->slot);
     // --max-num-seqs (operator 2026-11-11): a request cut by its slot's end, not its max_tokens, is said.
     if (reason == Finish::Length && job->req.prompt.size() + job->steps >= impl_->slot_len[slot])
-      std::fprintf(stderr, "scheduler: a request reached the end of slot %u (%u positions%s): finished with length\n",
-                   slot, impl_->slot_len[slot],
-                   impl_->n_cards > 1 ? (", card " + std::to_string(impl_->slot_card[slot])).c_str() : "");
+      std::print(stderr, "scheduler: a request reached the end of slot {:d} ({:d} positions{}): finished with length\n",
+                 slot, impl_->slot_len[slot],
+                 impl_->n_cards > 1 ? (", card " + std::to_string(impl_->slot_card[slot])).c_str() : "");
     if (job->inflight) {   // a chunk still on the card: join it first (the tick only gets here once it is ready)
       try {
         engine_.prefill_end(slot);
       } catch (const std::exception& e) {
-        std::fprintf(stderr, "scheduler: slot %u's prefill failed at the request's end: %s\n", slot, e.what());
+        std::print(stderr, "scheduler: slot {:d}'s prefill failed at the request's end: {}\n", slot, e.what());
       }
       job->inflight = false;
       --impl_->inflight;
@@ -422,8 +423,8 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
         if (reason == Finish::Error) cache_->fail(slot);
         else cache_->end(slot);
       } catch (const std::exception& e) {
-        std::fprintf(stderr, "scheduler: request-end snapshot on slot %u failed: %s\n", slot,
-                     e.what());
+        std::print(stderr, "scheduler: request-end snapshot on slot {:d} failed: {}\n", slot,
+                   e.what());
         cache_->fail(slot);
       }
     }
@@ -442,9 +443,9 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
     try {
       job->req.on_done(job->fin);
     } catch (const std::exception& e) {
-      std::fprintf(stderr, "scheduler: a request's on_done threw: %s\n", e.what());
+      std::print(stderr, "scheduler: a request's on_done threw: {}\n", e.what());
     } catch (...) {
-      std::fprintf(stderr, "scheduler: a request's on_done threw\n");
+      std::print(stderr, "scheduler: a request's on_done threw\n");
     }
   }
 }
@@ -923,7 +924,7 @@ void Scheduler::start() {
       try {
         did = tick();
       } catch (const std::exception& error) {
-        std::fprintf(stderr, "scheduler: tick failed: %s\n", error.what());
+        std::print(stderr, "scheduler: tick failed: {}\n", error.what());
       }
       if (did) continue;
       const double hold = hold_remaining();

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 
 #include "kernels/prefill/pf_kernels.h"
@@ -28,8 +29,8 @@ size_t qsa_state_per_layer(const model::Qwen4ExpDesc& d, uint32_t max_len) {
 }
 
 std::string gb(size_t b) {
-  char s[32];
-  std::snprintf(s, sizeof s, "%.3f GB", double(b) / 1e9);
+  std::string s;
+  s = std::format("{:.3f} GB", double(b) / 1e9);
   return s;
 }
 
@@ -428,21 +429,21 @@ void require_fits(const std::vector<DevicePlan>& p, const std::array<size_t, kPp
 
 std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement& pl, uint32_t max_len,
                      const std::array<size_t, kPpDevices>& device_bytes, size_t reserve) {
-  char head[256];
+  std::string head;
   if (pl.devices > 1)
-    std::snprintf(head, sizeof head, "pipeline plan at max_len %u, split %u (device 0 layers [0, %u), device 1 "
-                  "layers [%u, %u)):", max_len, pl.split, pl.split, pl.split, pl.layers);
+    head = std::format("pipeline plan at max_len {:d}, split {:d} (device 0 layers [0, {:d}), device 1 "
+      "layers [{:d}, {:d})):", max_len, pl.split, pl.split, pl.split, pl.layers);
   else
-    std::snprintf(head, sizeof head, "plan at max_len %u (one card, layers [0, %u)):", max_len, pl.layers);
+    head = std::format("plan at max_len {:d} (one card, layers [0, {:d})):", max_len, pl.layers);
   std::string out = head;
   for (const DevicePlan& dp : p) {
     const std::string label = "\n  device " + std::to_string(dp.device);
     out += format_memory(label.c_str(), dp, device_bytes[dp.device]);
-    char tail[300];
-    std::snprintf(tail, sizeof tail, "; + reserve %.3f GB = %.3f GB (weights %.3f GB%s, RoPE %.3f GB, KV + indexer "
-                  "keys %.3f GB, GDN / PLE state %.3f GB, decode scratch %.3f GB%s)", reserve / 1e9,
-                  (dp.total() + reserve) / 1e9, dp.weights / 1e9, dp.mtp ? " with the MTP head" : "", dp.rope / 1e9,
-                  dp.kv / 1e9, dp.state / 1e9, dp.scratch / 1e9, dp.link ? ", hand-off" : "");
+    std::string tail;
+    tail = std::format("; + reserve {:.3f} GB = {:.3f} GB (weights {:.3f} GB{}, RoPE {:.3f} GB, KV + indexer "
+      "keys {:.3f} GB, GDN / PLE state {:.3f} GB, decode scratch {:.3f} GB{})", reserve / 1e9,
+      (dp.total() + reserve) / 1e9, dp.weights / 1e9, dp.mtp ? " with the MTP head" : "", dp.rope / 1e9,
+      dp.kv / 1e9, dp.state / 1e9, dp.scratch / 1e9, dp.link ? ", hand-off" : "");
     out += tail;
   }
   return out;
@@ -504,8 +505,8 @@ std::string budget_json(const ExpertBudget& b) {
   };
   size_t sum = 0;
   for (uint32_t i = 0; i < b.devices; ++i) sum += b.cache[i];
-  char f[64];
-  std::snprintf(f, sizeof f, "%.6f", b.f());
+  std::string f;
+  f = std::format("{:.6f}", b.f());
   std::string s = "{\"max_len\":" + std::to_string(b.max_len) + ",\"devices\":" + std::to_string(b.devices) +
                   ",\"mtp\":" + (b.mtp ? "true" : "false") + ",\"prefill\":" + (b.prefill ? "true" : "false") +
                   ",\"int8_head\":" + (b.int8_head ? "true" : "false") + ",\"dense\":\"" +

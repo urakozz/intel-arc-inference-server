@@ -2,6 +2,7 @@
 #include <level_zero/ze_api.h>
 #include <cstdio>
 #include <cstdlib>
+#include <print>
 #include <stdexcept>
 #include <string>
 
@@ -21,7 +22,7 @@ struct Error : std::runtime_error {
     ze_result_t _r = (call);                                                  \
     if (_r != ZE_RESULT_SUCCESS) {                                            \
       if (_r == ZE_RESULT_ERROR_DEVICE_LOST) {                                \
-        std::fprintf(stderr, "FATAL: ZE_RESULT_ERROR_DEVICE_LOST in %s\n", #call); \
+        std::print(stderr, "FATAL: ZE_RESULT_ERROR_DEVICE_LOST in {}\n", #call); \
         std::abort();                                                         \
       }                                                                       \
       throw ::l0::Error(#call, _r);                                           \

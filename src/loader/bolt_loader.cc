@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <print>
 
 #include "common/json.h"
 #include "l0/cmdlist.h"
@@ -171,18 +172,18 @@ BoltLoaded load_bolt(const std::vector<l0::Context*>& devices, const std::string
   m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   const double gb = 1e9;
-  std::printf("load_bolt: %s\n  model       %s (%s over %s): %u of %u blocks, trunk '%s', int4 %s sym%s, %zu subnormal f16 "
-              "scales%s; %zu tensors, every name accounted for, 0 unconsumed\n",
-              snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.llm_model_type.c_str(), d.layers, full.layers,
-              trunk.c_str(), m.group_mask == 3 ? "g64 + g128 (expanded)" : m.group_mask == 2 ? "g128 (expanded to g64)" : "g64",
-              qc.dynamic_restating ? (", " + std::to_string(qc.dynamic_restating) + " restating '+:' rule(s) accepted").c_str() : "",
-              scan.subnormal_scales, scan.gptq_bf16_scales ? ", BF16 scales converted exactly" : "", set.tensors().size());
-  for (const std::string& s : m.skipped) std::printf("  note        %s\n", s.c_str());
+  std::print("load_bolt: {}\n  model       {} ({} over {}): {:d} of {:d} blocks, trunk '{}', int4 {} sym{}, {:d} subnormal f16 "
+             "scales{}; {:d} tensors, every name accounted for, 0 unconsumed\n",
+             snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.llm_model_type.c_str(), d.layers, full.layers,
+             trunk.c_str(), m.group_mask == 3 ? "g64 + g128 (expanded)" : m.group_mask == 2 ? "g128 (expanded to g64)" : "g64",
+             qc.dynamic_restating ? (", " + std::to_string(qc.dynamic_restating) + " restating '+:' rule(s) accepted").c_str() : "",
+             scan.subnormal_scales, scan.gptq_bf16_scales ? ", BF16 scales converted exactly" : "", set.tensors().size());
+  for (const std::string& s : m.skipped) std::print("  note        {}\n", s.c_str());
   for (const BoltDevicePart& P : m.parts)
-    std::printf("  device %u    blocks [%u, %u): weights %13zu B %7.3f GB%s%s (max_len %u)\n", P.device, P.first, P.end, P.bytes,
-                P.bytes / gb, P.embed_tiles ? " + embed" : "", P.head ? (o.int8_head ? " + int8 head" : " + bf16 head") : "",
-                o.max_len);
-  std::printf("  load        %.1f s\n", m.seconds);
+    std::print("  device {:d}    blocks [{:d}, {:d}): weights {:13d} B {:7.3f} GB{}{} (max_len {:d})\n", P.device, P.first, P.end, P.bytes,
+               P.bytes / gb, P.embed_tiles ? " + embed" : "", P.head ? (o.int8_head ? " + int8 head" : " + bf16 head") : "",
+               o.max_len);
+  std::print("  load        {:.1f} s\n", m.seconds);
   return m;
 }
 
