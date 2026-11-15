@@ -7,6 +7,8 @@
 #                                                     data, 16 caches) beside probe_verify_attn (real q / KV, one
 #                                                     layer, L0 timestamps), the cards' clocks sampled throughout
 #   tools/probe/verify_attn_wide.sh decompose CARD OUT  today's 16-row line: random / real KV x 16 caches / one
+#   tools/probe/verify_attn_wide.sh bitwise CARD OUT PREFIX...  16 rows bitwise against the frozen copy, + negative
+#   tools/probe/verify_attn_wide.sh inplace CARD OUT TAG  the 16-row list in place, 4k / 32k keys
 #   tools/probe/verify_attn_wide.sh kernel CARD OUT   today's 16-row line against the candidates, 4k / 32k / 98k keys
 set -u
 mode="$1"
@@ -68,6 +70,24 @@ case "$mode" in
     run real16 env PKD_KV_DUMP="$dump" build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
     run real1 env PKD_KV_DUMP="$dump" PKD_ONE_CACHE=1 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
     echo DECOMPOSE_DONE
+    ;;
+  bitwise)   # attn_verify_bitwise_test at 16 rows: the candidates (probe builds) against the frozen copy, then V zeroed
+    card="$1" out="$2"
+    shift 2
+    mkdir -p "$out"
+    for c in "$@"; do
+      run "bitwise_$c" build/tests/attn_verify_bitwise_test --cand "$c" --min-m 16 --max-m 16
+    done
+    run bitwise_negative build/tests/attn_verify_bitwise_test --negative --min-m 16 --max-m 16
+    echo BITWISE_DONE
+    ;;
+  inplace)   # the engine's 16-row list in place against the plain step (probe_mtp_steps wide16), 4k / 32k keys
+    card="$1" out="$2" tag="$3"
+    mkdir -p "$out"
+    snap=$(tools/box_validate/data.sh resolve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ) || exit 2
+    run "wide16_4096_$tag" build/tools/probe/probe_mtp_steps "$snap" 4096 16 5 int8 off 16384 4 wide16
+    run "wide16_32768_$tag" build/tools/probe/probe_mtp_steps "$snap" 32768 16 5 int8 off 65536 4 wide16
+    echo INPLACE_DONE
     ;;
   kernel)
     card="$1" out="$2"
