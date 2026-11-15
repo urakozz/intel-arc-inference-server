@@ -94,12 +94,12 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
                         __global const float* restrict hid, __global const ushort* restrict pred,
                         __global const ushort* restrict succ, __global uint* restrict out) {
 #endif
-  __local float part[TOPK * QS];
-  __local float s[TOPK];
-  __local uint prev_l;
 #ifdef FOLD   // spec 19v2: the int4 selector projection's 16 split-K slices, folded once a row for every candidate
   __local float folded[RANK];
 #endif
+  __local float part[TOPK * QS];
+  __local float s[TOPK];
+  __local uint prev_l;
   const uint lid = get_local_id(0);
 #ifdef SEQS
   const uint z = get_group_id(0), row0 = SQ(z, 0);

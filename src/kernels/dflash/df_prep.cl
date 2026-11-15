@@ -52,20 +52,6 @@ inline ushort f2bf(float f) {
   return (ushort)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
 }
 
-// The fixed Σ: lane partials then strides WG/2 .. 1 (prep.cl's tree). `red` holds WG floats.
-inline float wg_sum(float v, __local float* red) {
-  const uint lid = get_local_id(0);
-  red[lid] = v;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  for (uint s = WG / 2; s > 0; s >>= 1) {
-    if (lid < s) red[lid] = red[lid] + red[lid + s];
-    barrier(CLK_LOCAL_MEM_FENCE);
-  }
-  const float r = red[0];
-  barrier(CLK_LOCAL_MEM_FENCE);
-  return r;
-}
-
 // FOLD (the int4 drafter's split-K consumers, spec 19v2): the producers leave S partial slices and each consumer sums
 // them as it reads; without FOLD a read is the plain element.
 #ifdef FOLD
@@ -83,6 +69,20 @@ inline float fold_at(__global const float* src, size_t stride, size_t i, uint sl
 #define CONV_SLICES_P
 #define CONV_SLICES(n)
 #endif
+
+// The fixed Σ: lane partials then strides WG/2 .. 1 (prep.cl's tree). `red` holds WG floats.
+inline float wg_sum(float v, __local float* red) {
+  const uint lid = get_local_id(0);
+  red[lid] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint s = WG / 2; s > 0; s >>= 1) {
+    if (lid < s) red[lid] = red[lid] + red[lid + s];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float r = red[0];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  return r;
+}
 
 #ifdef VOCAB
 __attribute__((reqd_work_group_size(WG, 1, 1)))
