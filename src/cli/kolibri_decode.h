@@ -88,6 +88,9 @@ struct DecodeArgs {
   runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   // What else was asked for, for the refusals.
   bool mtp = false, kv8 = false, profile = false;
+  // Kolibri DSpark (b70-serve --spec dflash): the verify lists' and the drafter's bytes in the plan (cli/kolibri_spec.h
+  // spec_reserve); empty for a plain run.
+  runtime::kolibri::SpecReserve spec;
   bool prefills() const { return prefill || pp; }
 };
 
@@ -118,7 +121,7 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
   if (devs == 1) {
     if (a.pipe.have_split)
       throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
-    if (!runtime::kolibri::fits_one_card(d, int8, a.card_bytes, a.reserve, a.prefills())) {
+    if (!runtime::kolibri::fits_one_card(d, int8, a.card_bytes, a.reserve, a.prefills(), a.spec)) {
       const size_t w = loader::kol_device_weight_bytes(d, model::KolPlacement::one(d), 0, int8);
       char msg[400];
       std::snprintf(msg, sizeof msg,
@@ -167,21 +170,21 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
   uint32_t len = a.max_len.value;
   if (a.max_len.is_auto) {
     if (devs == 2 && a.pipe.split_auto) {
-      const runtime::PpChoice c = rk::pp_split_and_len(d, int8, dev, a.reserve, cap, pf);
+      const runtime::PpChoice c = rk::pp_split_and_len(d, int8, dev, a.reserve, cap, pf, a.spec);
       if (c.max_len == 0)
         throw std::runtime_error("--max-len auto: no split fits " + std::to_string(runtime::kMinAutoMaxLen) +
                                  " positions on both cards - " +
                                  rk::describe(rk::plan(d, model::KolPlacement::two(d, d.layers / 2), runtime::kMinAutoMaxLen, int8,
-                                                       false, at, pf),
+                                                       false, at, pf, a.spec),
                                               model::KolPlacement::two(d, d.layers / 2), runtime::kMinAutoMaxLen, dev, a.reserve));
       p = model::KolPlacement::two(d, c.split);
       len = c.max_len;
     } else {
-      len = rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap, pf);
+      len = rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap, pf, a.spec);
       if (len == 0)
         throw std::runtime_error("--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
                                  " positions fit - " +
-                                 rk::describe(rk::plan(d, p, runtime::kMinAutoMaxLen, int8, false, at, pf), p,
+                                 rk::describe(rk::plan(d, p, runtime::kMinAutoMaxLen, int8, false, at, pf, a.spec), p,
                                               runtime::kMinAutoMaxLen, dev, a.reserve));
     }
     std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of %u that fits every card with a %.3f GB "
@@ -191,20 +194,20 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
       throw std::runtime_error("--max-len " + std::to_string(len) + " exceeds Kolibri-1's trained context " +
                                std::to_string(cap) + " - a longer context is spec 20 decision 3");
     if (devs == 2 && a.pipe.split_auto)
-      p = model::KolPlacement::two(d, rk::pp_split(d, len, int8, at, pf).split);
-    const std::vector<rk::DevicePlan> pl = rk::plan(d, p, len, int8, false, at, pf);
+      p = model::KolPlacement::two(d, rk::pp_split(d, len, int8, at, pf, a.spec).split);
+    const std::vector<rk::DevicePlan> pl = rk::plan(d, p, len, int8, false, at, pf, a.spec);
     for (uint32_t i = 0; i < p.devices; ++i)
       if (pl[i].total() + a.reserve > dev[i])
         throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit device " + std::to_string(i) +
                                  ": " + rk::describe(pl, p, len, dev, a.reserve) + ". The largest that fits is " +
-                                 std::to_string(rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap, pf)) +
+                                 std::to_string(rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap, pf, a.spec)) +
                                  " (--max-len auto)");
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }
   if (devs == 2)
     std::fprintf(stderr, "split: %s%u (layers [0, %u) on device 0, [%u, %u) and the head on device 1)\n",
                  a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
-  std::fprintf(stderr, "%s\n", rk::describe(rk::plan(d, p, len, int8, false, at, pf), p, len, dev, a.reserve).c_str());
+  std::fprintf(stderr, "%s\n", rk::describe(rk::plan(d, p, len, int8, false, at, pf, a.spec), p, len, dev, a.reserve).c_str());
   return {p, len};
 }
 

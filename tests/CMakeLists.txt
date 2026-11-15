@@ -2986,7 +2986,7 @@ endif()
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
   b70_serve_reject(cli_reject_serve_kolibri_spec_mtp ${_kol_cfg} --spec mtp EXPECT "no MTP head")
-  b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "Kolibri-1's engine does not capture")
+  b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "is not built for Kolibri-1")
   b70_serve_reject(cli_reject_serve_kolibri_kv8 ${_kol_cfg} --kv-cache int8 EXPECT "bf16 only")
   b70_serve_reject(cli_reject_serve_kolibri_prefill_int8 ${_kol_cfg} --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
@@ -4581,6 +4581,26 @@ target_include_directories(kolibri_spec_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/sr
 target_link_libraries(kolibri_spec_plan_test PRIVATE b70_kolibri_plan)
 add_test(NAME kolibri_spec_plan_test COMMAND kolibri_spec_plan_test)
 set_tests_properties(kolibri_spec_plan_test PROPERTIES LABELS kolibri)
+# The adapter's speculative loop over a device-free engine and a fake drafter: greedy step_many == plain step() token for token
+# at every K (the masked bonus ids among them), truncate_to inside a run, the deferred commit, the sampled path's seed and
+# defined ids. Host only.
+add_executable(kolibri_spec_test server/kolibri_spec_test.cc)
+target_include_directories(kolibri_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_spec_test PRIVATE b70_server)
+add_test(NAME kolibri_spec_test COMMAND kolibri_spec_test)
+set_tests_properties(kolibri_spec_test PROPERTIES LABELS kolibri)
+# b70-serve's --spec refusals for Kolibri-1, before the device (tests/model/kolibri1: config.json only; the drafter's checks
+# read tests/model/dspark: config.json only, so a drafter refusal is the safetensors' absence or the config's own).
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  set(_kds_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
+  b70_serve_reject(cli_reject_serve_kolibri_dspark_no_model ${_kds_cfg} --spec dflash EXPECT "needs --draft-model")
+  b70_serve_reject(cli_reject_serve_kolibri_dspark_spec_max ${_kds_cfg} --spec dflash --spec-max 8
+    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "expects 1..7")
+  b70_serve_reject(cli_reject_serve_kolibri_dflash_lookup ${_kds_cfg} --spec dflash-lookup
+    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "is not built for Kolibri-1")
+  set_tests_properties(cli_reject_serve_kolibri_dspark_no_model cli_reject_serve_kolibri_dspark_spec_max
+    cli_reject_serve_kolibri_dflash_lookup PROPERTIES LABELS kolibri)
+endif()
 # Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark
 # block). Host only (reads the kernel directory).
 if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)

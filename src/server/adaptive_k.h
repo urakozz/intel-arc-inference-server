@@ -82,6 +82,15 @@ struct MtpCost {
   static constexpr double kBoltDraft[3] = {0.500, 0.306, 0.214};
   static constexpr double kBoltUnionM1 = 9.0, kBoltUnionM8 = 30.0;
 
+  // Kolibri DSpark: Kolibri-1's rows with the bf16 DSpark drafter, DERIVED from the bytes a step reads (loader/kolibri1_layout.h
+  // at 50 layers, int4 attention; TODO(card): the first card run measures them): a plain step reads 1.7696 GB of layers
+  // (attention, router, the top-6 + shared experts) + the head; a verify row adds its own 6 experts a layer (0.6267 GB - the
+  // M-row MoE reads each row's experts; the weights of every GEMV are read once for the M rows); a draft pass reads the bf16
+  // drafter's 0.6946 GB (fc, 5 layers) + the head once at its 7 rows - flat in K (one block drafts all 7).
+  static MtpCost kolibri_dspark(bool i8_head);
+  static constexpr double kKolPlainGB = 1.7696, kKolRowGB = 0.6267, kKolDrafterGB = 0.6946;
+  static constexpr double kKolHeadInt8GB = 0.3282, kKolHeadBf16GB = 0.6554;
+
   uint32_t max_k() const;              // the deepest K both lists cover
   double cost(uint32_t k) const;       // K = 0: 1 (a plain step)
 };

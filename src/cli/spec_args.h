@@ -30,6 +30,11 @@
 // the HF cache) both take --spec-max 1..7 (default 7), K per iteration from the request's acceptance; `mtp` and
 // `dflash-lookup` (built for Qwen3.8) are refused. The drafter's format (int8) and its draft distribution (vLLM's
 // lattice) are the engine's choice (cli/bolt_spec.h).
+//
+// Kolibri-1 (Kolibri DSpark, SpecFamily::Kolibri; b70-serve only): no MTP head, its own verify lists at M = K + 1 <= 8
+// rows; `dflash` with --draft-model <a DSpark drafter> (intuit/Kolibri-1-dspark; no default: the drafter's config picks
+// DSpark) takes --spec-max 1..7 (default 7), K per iteration from the request's acceptance (cli/kolibri_spec.h).
+// `mtp`, `lookup` and `dflash-lookup` are refused; --spec auto stays off.
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -44,8 +49,9 @@ inline std::string parse_spec(const std::string& v) {
 
 // Which proposers a model family has: Qwen (Qwen3.8, Ornith: the MTP head and its cost table; the
 // drafter for Qwen3.8), Qwen4Exp (Qwen3.8-Flash-Next: the head, fixed K), Bolt (Nemotron 3.5 Bolt: no head, its
-// own verify lists to M = 8 - prompt lookup and the LiLiCorr drafter, spec 26c), None (no head, no drafter).
-enum class SpecFamily { Qwen, Qwen4Exp, Bolt, None };
+// own verify lists to M = 8 - prompt lookup and the LiLiCorr drafter, spec 26c), Kolibri (Kolibri-1: no head, its own
+// verify lists to M = 8 - the DSpark drafter), None (no head, no drafter).
+enum class SpecFamily { Qwen, Qwen4Exp, Bolt, Kolibri, None };
 enum class SpecKind { Off, Mtp, Lookup, DFlash, DFlashLookup };
 
 struct Spec {
@@ -75,6 +81,19 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
       throw std::runtime_error("--spec-max with " + model + " expects 1..7 (LiLiCorr's block of 8 - 1, spec 26 "
                                "Decision 5; the verify lists' M <= 8)");
     s.kind = v == "dflash" ? SpecKind::DFlash : SpecKind::Lookup;
+    s.max_k = have_max ? max : 7;
+    s.adaptive = true;
+    return s;
+  }
+  if (family == SpecFamily::Kolibri) {   // Kolibri DSpark: the DSpark drafter over Kolibri's verify lists (M <= 8)
+    if (v == "mtp") throw std::runtime_error(model + " has no MTP head: drop --spec mtp (its --spec auto is off)");
+    if (v == "lookup" || v == "dflash-lookup")
+      throw std::runtime_error("--spec " + v + " is not built for " + model + ": its verify lists serve the DSpark "
+                               "drafter - --spec dflash --draft-model <the DSpark drafter>");
+    if (have_max && (max == 0 || max > 7))
+      throw std::runtime_error("--spec-max with " + model + " expects 1..7 (DSpark's block of 8 - 1; the verify lists' "
+                               "M <= 8)");
+    s.kind = SpecKind::DFlash;
     s.max_k = have_max ? max : 7;
     s.adaptive = true;
     return s;
