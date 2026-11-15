@@ -298,15 +298,14 @@ int main(int argc, char** argv) {
     std::vector<std::string> iters;
     const Gen g = generate_lookup(mtp, prompt, kGen, greedy, false, nullptr, &iters);
     const std::vector<uint8_t> kv_lk = head_k_rows(mtp, e, b, end);
-    const bool same_ids = g.ids == pm.ids;
+    // Open-work 28: the 16-row list's attention is not the 4-row lists' kernel, so a row the model is sensitive at moves
+    // (its hidden, then the head's K row); the same rows move between plain decode and plain MTP. The yardstick: the
+    // plain one-row decode's head rows against MTP's, row by row.
+    const Gen p1 = generate_plain(mtp, prompt, kGen, greedy, false);
+    const std::vector<uint8_t> kv_one = head_k_rows(mtp, e, b, end);
+    const bool same_ids = g.ids == pm.ids && p1.ids == pm.ids;
     const size_t rb = e.mtp_buffers()->kv_lay.row_bytes();
-    double min_cos = 1;
-    uint32_t bitwise_rows = 0;
-    bool bad = false;
-    for (uint32_t r = 0; r < end - b; ++r) {
-      const uint8_t* x = kv_lk.data() + size_t(r) * rb;
-      const uint8_t* y = kv_mtp.data() + size_t(r) * rb;
-      bitwise_rows += std::memcmp(x, y, rb) == 0;
+    auto cosine = [&](const uint8_t* x, const uint8_t* y) {
       double dot = 0, na = 0, nb = 0;
       for (size_t i = 0; i < rb; i += 2) {
         uint16_t u, v;
@@ -317,17 +316,27 @@ int main(int argc, char** argv) {
         na += fx * fx;
         nb += fy * fy;
       }
-      const double cs = dot / std::sqrt(std::max(na * nb, 1e-300));
-      if (cs < 0.99) std::printf("H: row %u (position %u): cosine %.6f\n", r, b + r, cs);
-      if (cs < 0.99) bad = true;
+      return dot / std::sqrt(std::max(na * nb, 1e-300));
+    };
+    double min_cos = 1, min_one = 1;
+    uint32_t bitwise_rows = 0;
+    bool bad = false;
+    for (uint32_t r = 0; r < end - b; ++r) {
+      const uint8_t* y = kv_mtp.data() + size_t(r) * rb;
+      bitwise_rows += std::memcmp(kv_lk.data() + size_t(r) * rb, y, rb) == 0;
+      const double cs = cosine(kv_lk.data() + size_t(r) * rb, y), c1 = cosine(kv_one.data() + size_t(r) * rb, y);
+      if (cs < 0.99 || c1 < 0.99)
+        std::printf("H: row %u (position %u): lookup against mtp %.6f, plain decode against mtp %.6f\n", r, b + r, cs, c1);
+      bad |= cs < 0.99;
       min_cos = std::min(min_cos, cs);
+      min_one = std::min(min_one, c1);
     }
     if (bad)
       for (const std::string& it : iters) std::printf("H: iteration %s\n", it.c_str());
     std::printf("H: after %llu lookup iterations (%llu ids) the head's K rows of the %u generated positions against "
-                "plain --spec mtp's (ids %s): min cosine %.6f, %u rows bitwise\n",
+                "plain --spec mtp's (ids %s): min cosine %.6f (plain decode's: %.6f), %u rows bitwise\n",
                 (unsigned long long)g.lookup_iters, (unsigned long long)g.lookup_ids, end - b,
-                same_ids ? "identical" : "DIFFER", min_cos, bitwise_rows);
+                same_ids ? "identical" : "DIFFER", min_cos, min_one, bitwise_rows);
     ok &= g.lookup_iters > 0 && (!same_ids || min_cos >= 0.99);
     bool did_cut = false;
     const Gen c = generate_lookup(mtp, prompt, kGen, greedy, /*cut=*/true, &did_cut);
