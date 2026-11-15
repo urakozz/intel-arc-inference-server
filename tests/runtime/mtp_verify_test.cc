@@ -127,6 +127,13 @@ std::vector<float> gdn_slot(Ctx& c, uint32_t s) {
   return v;
 }
 
+// The committed GDN state (Engine::gdn_state_now: the live slot, or with the deferred build the pending rows flushed).
+std::vector<float> committed_state(Ctx& c) {
+  std::vector<float> v(kGdnBytes / 4);
+  c.imm.copy(v.data(), c.e.gdn_state_now(), kGdnBytes);
+  return v;
+}
+
 struct Ref {
   std::vector<uint32_t> g;                     // g[0] = pending at S0, g[i+1] = argmax of step i
   std::vector<greedy_tie::RefStep> steps;      // step i's decision (top-2, margin) - it decided g[i+1]
@@ -143,7 +150,7 @@ Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
     r.steps.push_back(greedy_tie::ref_step(row.data(), uint32_t(VU)));
     if (i <= runtime::Engine::kMaxDraft) r.logits.push_back(row);
     c.e.commit(0, c.e.verify_ids()[0]);
-    if (i <= runtime::Engine::kMaxDraft) r.state.push_back(gdn_slot(c, c.ctl->gdn_live));
+    if (i <= runtime::Engine::kMaxDraft) r.state.push_back(committed_state(c));
     r.g.push_back(c.ctl->cur_token[0]);
   }
   return r;
@@ -159,6 +166,17 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& pro
       uint32_t(V));
   // M2a
   for (uint32_t k = 1; k <= runtime::Engine::kMaxDraft; ++k) {
+    // Row r's state: its slot after verify(k); with the deferred build (no per-row state) the committed state after
+    // verify(k) + commit(r).
+    std::vector<std::vector<float>> rs;
+    if (c.e.gdn_deferred())
+      for (uint32_t r = 0; r <= k; ++r) {
+        s0.restore(c);
+        for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
+        c.e.verify(k);
+        c.e.commit(r, c.e.verify_ids()[r]);
+        rs.push_back(committed_state(c));
+      }
     s0.restore(c);
     for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
     c.e.verify(k);
@@ -167,7 +185,8 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& pro
       double lma = 0;
       const double cl = cosine(lg.data() + size_t(r) * V, ref.logits[r].data(), VU, &lma);
       const bool lbits = std::memcmp(lg.data() + size_t(r) * V, ref.logits[r].data(), V * 4) == 0;
-      const std::vector<float> sl = gdn_slot(c, (c.ctl->gdn_live + r) % runtime::MtpBuffers::kSlots);
+      const std::vector<float> sl =
+          c.e.gdn_deferred() ? rs[r] : gdn_slot(c, (c.ctl->gdn_live + r) % runtime::MtpBuffers::kSlots);
       double ma = 0;
       const double cs = cosine(sl.data(), ref.state[r].data(), sl.size(), &ma);
       const bool sbits = std::memcmp(sl.data(), ref.state[r].data(), kGdnBytes) == 0;

@@ -424,7 +424,7 @@ std::vector<std::string> verify_families(const std::vector<std::string>& labels)
       ++end;
     }
     static const char* gdn_linears[] = {"qkv||z", "a||b", "out_proj", "gate||up", "down"};
-    static const char* fa_linears[] = {"q||k||v", "o_proj", "gate||up", "down"};
+    static const char* fa_linears[] = {"q||k||v", "o_proj", "gate||up (FA)", "down (FA)"};
     unsigned linear = 0;
     for (size_t j = i; j < end; ++j) {
       const auto start = labels[j].find(' ') + 1;
@@ -455,7 +455,8 @@ std::vector<std::string> verify_families(const std::vector<std::string>& labels)
 // every round, each after a warm-up, so clock drift spreads over all of them. Then the same widths uninstrumented
 // as interleaved pairs against verify at 1 row (the decision numbers).
 void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds,
-                    bool pairs_only) {
+                    bool pairs_only, const runtime::CaptureOptions& base) {
+  e.recapture_verify(base);
   std::ifstream input("tests/golden/prompts/long32k.ids");
   std::vector<uint32_t> file;
   for (uint32_t id; input >> id;) file.push_back(id);
@@ -487,7 +488,7 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
   for (unsigned r = 0; !pairs_only && r <= rounds; ++r) {   // --verify-pairs: no instrumented round
     for (uint32_t m : widths) {
       runtime::ProfileEvents vp(e.context());
-      runtime::CaptureOptions opt;
+      runtime::CaptureOptions opt = base;
       opt.profile = &vp;
       opt.profile_m = m;
       opt.profile_keys = depth + 1;
@@ -530,7 +531,7 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
         span += prev_end;
       }
       const size_t count = step.kernel_count;
-      e.recapture_verify({});   // release vp's events before it dies (and `step` with them)
+      e.recapture_verify(base);   // release vp's events before it dies (and `step` with them)
       if (!r) continue;
       for (const auto& [f, ms] : sums) fam[m][f].push_back(ms / calls);
       walls[m].push_back(wall / calls);
@@ -585,6 +586,7 @@ int main(int argc, char** argv) {
     std::string sources_path, out;
     bool candidate_head = false, vprofile = false, vpairs = false;
     RankMargin rm;
+    runtime::CaptureOptions vbase;   // --verify-profile / --verify-pairs: the lists' options
     unsigned candidate_bits = 2, attn_ks = 0, candidates = 80;   // the loader's defaults
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
@@ -595,6 +597,7 @@ int main(int argc, char** argv) {
       if (arg == "--verify-profile") { vprofile = true; continue; }
       if (arg == "--verify-pairs") { vprofile = vpairs = true; continue; }
       if (arg == "--rank-margin") { rm.on = true; continue; }   // spec 19 v3d Task 7, with --engine-taps
+      if (arg == "--probe-one-store") { vbase.probe_gdn_one_store = true; continue; }   // verify-cost-m8: timing only
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
@@ -605,6 +608,8 @@ int main(int argc, char** argv) {
         else if (!loader::parse_draft_format(f, format)) throw std::runtime_error("--format int8|bf16|int4");
       }
       else if (arg == "--anchors") anchors = std::stoul(argv[++i]);
+      else if (arg == "--attn-tgt") vbase.probe_attn_tgt = std::stoul(argv[++i]);   // verify-cost-m8
+      else if (arg == "--ab-ksplit") vbase.probe_ab_ksplit = std::stoul(argv[++i]);   // verify-cost-m8
       else if (arg == "--attn-ks") attn_ks = std::stoul(argv[++i]);   // spec 19 v3d: the profiled list's key split
       else if (arg == "--engine-taps" && i + 2 < argc) { sources_path = argv[++i]; out = argv[++i]; }
       else throw std::runtime_error("unknown option: " + arg);
@@ -628,7 +633,7 @@ int main(int argc, char** argv) {
     runtime::Engine e(ctx, std::move(model), max_len, false, kv, &drafter);
     std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
     drafter.attach(e, false);
-    if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs);
+    if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs, vbase);
     else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds, attn_ks);
     else engine_taps(e, drafter, sources, out, anchors, rm);
   } catch (const std::exception& ex) {

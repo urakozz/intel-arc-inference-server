@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -434,6 +435,12 @@ inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, un
 // `slots` is the kernel's N_SLOTS (the ring of states row m writes into, (live + m) %
 // slots): spec 8's 4 keeps every historical name; spec 19a's verify probe at M = 5..8
 // binds the 8-slot build, `_N8` (runtime::MtpBuffers::slots).
+// verify-cost-m8: gdn_step.cl's DEFERRED build at M rows (M = 1..8), Qwen3.8's 48 GDN layers and heads only - the
+// pending rows' parity stride is baked: kGdnPendParityBytes = 48 layers x kGdnPendLayerBytes.
+inline constexpr size_t kGdnPendLayerBytes = 8 * (16 + 48) * 128 * 2 + 8 * 48 * 2 * 4;
+inline constexpr size_t kGdnPendParityBytes = 48 * kGdnPendLayerBytes;
+static_assert(kGdnPendParityBytes == 6438912, "src/kernels/CMakeLists.txt's PEND_PAR");
+inline std::string gdn_step_defer_variant(unsigned M) { return "gdn_step_defer_M" + std::to_string(M); }
 inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers,
                                           unsigned gdn_k = kRefGdnKHeads,
                                           unsigned gdn_v = kRefGdnVHeads, unsigned slots = 4) {
@@ -456,6 +463,7 @@ inline constexpr unsigned kCurToken = 2;    // Control::cur_token[8]
 inline constexpr unsigned kOutToken = 10;   // Control::out_token[8]
 inline constexpr unsigned kDebugFlag = 18;  // Control::debug_flag
 inline constexpr unsigned kGdnLive = 19;    // Control::gdn_live (spec 8, SPEC_SLOTS only)
+inline constexpr unsigned kGdnPend = 30;    // Control::gdn_pend (gdn_step.cl's DEFERRED build, CTRL_PEND)
 inline constexpr unsigned kDraftStat = 28;  // Control::draft_stat[2] (open-work 13, draft_prob.cl's CTRL_DSTAT)
 }  // namespace ctrl_index
 

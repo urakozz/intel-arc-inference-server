@@ -74,6 +74,8 @@ static_assert(offsetof(Control, debug_flag) == kernels::ctrl_index::kDebugFlag *
               "CTRL_DEBUG moved");
 // Spec 8: CTRL_LIVE=19 in src/kernels/CMakeLists.txt's GDN_SLOT_DEFINES.
 static_assert(offsetof(Control, gdn_live) == kernels::ctrl_index::kGdnLive * 4, "CTRL_LIVE moved");
+// verify-cost-m8: CTRL_PEND=30 in src/kernels/CMakeLists.txt's gdn_step_defer_M<M> block.
+static_assert(offsetof(Control, gdn_pend) == kernels::ctrl_index::kGdnPend * 4, "CTRL_PEND moved");
 // Open-work 13: CTRL_DSTAT=28 in src/kernels/CMakeLists.txt's draft_prob lines.
 static_assert(offsetof(Control, draft_stat) == kernels::ctrl_index::kDraftStat * 4, "CTRL_DSTAT moved");
 // Spec 15c: the MoE route row - buffer_sizes.h sizes it, moe.cl (RW) writes it.
@@ -166,7 +168,7 @@ void require(bool ok, const std::string& what) {
 // Spec 19 v3c: `TpVerifyTaps` is build_tp_verify_taps' - the TP walk at M rows over a tap drafter's GDN slots, the taps
 // copied from the card's own (folded) residual, no MTP head.
 enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows, DraftRows, Tp,
-                  TpVerify, TpDraft, TpVerifyTaps };
+                  TpVerify, TpDraft, TpVerifyTaps, GdnFlush };
 
 class Capture {
  public:
@@ -294,7 +296,7 @@ class Capture {
     } else if (mode_ == Mode::TpVerifyTaps) {   // spec 19 v3c
       check_tp();
       check_taps();
-    } else if (mode_ != Mode::Plain)
+    } else if (mode_ != Mode::Plain && mode_ != Mode::GdnFlush)
       check_mtp();
     if (mode_ == Mode::StageDraft)
       require(stage_ != nullptr && stage_->has_head(d_),
@@ -330,6 +332,18 @@ class Capture {
     // profiled one second, so neither hits it; that ordering is the pattern to
     // copy, not an accident of how they were written.
     if (prof_) prof_->events.clear();
+
+    if (mode_ == Mode::GdnFlush) {   // build_gdn_flush: the DEFERRED gdn_step of every GDN layer at n_active 0
+      uint32_t g = 0;
+      for (const model::LayerDesc& layer : d_.layer_descs())
+        if (layer.kind == model::LayerKind::GDN) {
+          layer_ = static_cast<int>(layer.index);
+          gdn_step(layer.index, g++);
+        }
+      require(step_.kernel_count == d_.gdn_layers, "the GDN flush list has one launch a GDN layer");
+      step_.list.close();
+      return std::move(step_);
+    }
 
     // `layer_` is what the labels' "L<n>" prefix reads; the six launches
     // outside the layer loop belong to the token boundary and get "--".
@@ -442,8 +456,7 @@ class Capture {
                    ? verify_attn_kind(kCapM, vattn_keys_, kv8_, d_.fa_q_heads, d_.fa_kv_heads, opt_.force_attn)
                    : VerifyAttn::V2;
       if (vattn_ == VerifyAttn::Dpas)
-        attn_bins.push_back(pg(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
-                                                                 d_.fa_q_heads, d_.fa_kv_heads)));
+        attn_bins.push_back(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_, d_.fa_q_heads, d_.fa_kv_heads)));
     }
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
@@ -582,8 +595,8 @@ class Capture {
       // Spec 12b: kv8.cl's attn_decode_v2_kv8 / attn_reduce_v2_kv8 - v2's grid, partials and
       // stride, reading int8 K / V and their fp16 scales; the reduce un-rotates each head's
       // output before the gate.
-      const std::string v =
-          pg(kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads));
+      const uint32_t T = attn_tgt();
+      const std::string v = pg(kernels::attn_v2_kv8_variant(kCapM, T, ad.fa_q_heads, ad.fa_kv_heads));
       {
         // Spec 28c: attn_verify_dpas_kv8 takes attn_decode_v2_kv8's arguments and writes its partials.
         l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2_kv8", kWgAttn);
@@ -595,7 +608,7 @@ class Capture {
         k.arg_ptr(5, kv.vs);
         k.arg_ptr(6, b_.attn_part.ptr());
         if (sb_.pages) k.arg_ptr(7, sb_.pages);   // plan 19v3b Task 0
-        launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+        launch(k, ad.fa_kv_heads, T);
       }
       {
         l0::Kernel& k = kernel(v, "attn_reduce_v2_kv8", kWgAttn);
@@ -609,8 +622,8 @@ class Capture {
     }
     // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
     // row from Control::pos on the device, so one list serves every depth.
-    const std::string v =
-        pg(kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads));
+    const uint32_t T = attn_tgt();
+    const std::string v = pg(kernels::attn_v2_variant(kCapM, T, ad.fa_q_heads, ad.fa_kv_heads));
     {
       // Spec 28c: attn_verify_dpas takes attn_decode_v2's arguments and writes its partials.
       l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2", kWgAttn);
@@ -620,7 +633,7 @@ class Capture {
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
       if (sb_.pages) k.arg_ptr(5, sb_.pages);   // plan 19v3b Task 0
-      launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+      launch(k, ad.fa_kv_heads, T);
     }
     // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
     {
@@ -659,6 +672,66 @@ class Capture {
   }
 
   // gdn_step's row build: (ctrl, partials, ab_out, gdn_small, conv_ring, state, gdn_o, state_pool, ring_pool, rows).
+  // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o)
+  // - src/kernels/gdn_step.cl (Task 4), grid (48 v-heads, 4 state-column
+  // chunks), WG 256. `conv_ring` and `state` are this GDN layer's slices;
+  // `gdn_small` is the layer's GDN block base as a `const float*` (the
+  // kernel finds conv/negA/dt_bias inside it at loader/small_layout.h's
+  // offsets, passed to ocloc as NEGA_OFF/DTBIAS_OFF).
+  void gdn_step(uint32_t layer, uint32_t g) {
+    // verify-cost-m8: a one-card verify list (or the flush list) handed the engine's pending rows binds the DEFERRED
+    // build, whose eighth argument is this layer's slice of them (gdn_step.cl, DEFERRED).
+    void* pend = mode_ == Mode::Verify || mode_ == Mode::GdnFlush ? sb_.gdn_pend
+                 : mode_ == Mode::VerifyTaps && tv_->gdn_pend    ? tv_->gdn_pend->ptr()
+                                                                 : nullptr;
+    if (pend) {
+      require(d_.gdn_layers == 48 && d_.gdn_k_heads == kernels::kRefGdnKHeads &&
+                  d_.gdn_v_heads == kernels::kRefGdnVHeads,
+              "gdn_step_defer_M<M> is built at Qwen3.8's GDN shapes only");
+      l0::Kernel& k = kernel(kernels::gdn_step_defer_variant(kCapM), "gdn_step", kWgGdn);
+      k.arg_ptr(0, ctrl());
+      k.arg_ptr(1, b_.partials.ptr());
+      k.arg_ptr(2, b_.ab_out.ptr());
+      k.arg_ptr(3, small_of(layer).gdn.ptr());
+      k.arg_ptr(4, ring0() + size_t(g) * conv_ring_stride());
+      k.arg_ptr(5, state0() + size_t(g) * gdn_state_stride());
+      k.arg_ptr(6, b_.gdn_o.ptr());
+      k.arg_ptr(7, static_cast<uint8_t*>(pend) + size_t(g) * kernels::kGdnPendLayerBytes);
+      launch(k, d_.gdn_v_heads, kGdnStateChunks);
+      return;
+    }
+    // Spec 8: the verify list binds the SPEC_SLOTS build, whose eighth argument is
+    // this layer's slice of slot 1 (MtpBuffers::gdn_spec is slot-major, so slot s
+    // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS). Spec 16d: a stage's
+    // verify list binds its own slots' allocation (spec_mem(), pp_gdn_spec_bytes) at its
+    // own slice g - the same binary, the same whole-model slot stride.
+    const bool slots = mode_ == Mode::Verify || mode_ == Mode::StageVerify || mode_ == Mode::VerifyTaps ||
+                       mode_ == Mode::StageVerifyTaps || mode_ == Mode::TpVerify ||   // spec 17d: TP's too
+                       mode_ == Mode::TpVerifyTaps;                                    // spec 19 v3c
+    // Spec 19a: the slot count is the buffers' (kSlots on every engine: the historical
+    // names); a stage's verify list keeps kSlots (its spec_mem() is pp_gdn_spec_bytes').
+    // Spec 19c: a tap drafter's verify list binds its own TapVerifyDims::kSlots (8).
+    const uint32_t n_slots = mode_ == Mode::Verify || mode_ == Mode::TpVerify ? mtp_->slots
+                             : mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps || mode_ == Mode::TpVerifyTaps
+                                 ? tv_->slots
+                                 : MtpBuffers::kSlots;
+    const bool one_store = opt_.probe_gdn_one_store && mode_ == Mode::VerifyTaps;
+    l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
+                                                                   d_.gdn_v_heads, n_slots) +
+                                       (one_store ? "_P1" : "")
+                                 : kernels::gdn_step_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads),
+                           "gdn_step", kWgGdn);
+    k.arg_ptr(0, ctrl());
+    k.arg_ptr(1, b_.partials.ptr());
+    k.arg_ptr(2, b_.ab_out.ptr());
+    k.arg_ptr(3, small_of(layer).gdn.ptr());
+    k.arg_ptr(4, ring0() + size_t(g) * conv_ring_stride());
+    k.arg_ptr(5, state0() + size_t(g) * gdn_state_stride());
+    k.arg_ptr(6, b_.gdn_o.ptr());
+    if (slots) k.arg_ptr(7, spec0() + size_t(g) * gdn_state_stride());
+    launch(k, d_.gdn_v_heads, kGdnStateChunks);
+  }
+
   void gdn_step_rows(uint32_t layer, uint32_t g) {
     l0::Kernel& k = kernel(kernels::gdn_step_rows_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads),
                            "gdn_step", kWgGdn);
@@ -731,8 +804,15 @@ class Capture {
 
   // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
   // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
+  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt; 16 at M = 8:
+  // -0.5 ms, not merged - it moves pp_dflash_test's two-card rows off the one card's). v2, the paged lists and every
+  // production list keep kAttnV2Blocks.
+  uint32_t attn_tgt() const {
+    return vattn_ == VerifyAttn::Dpas && !sb_.pages && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
+                                                                          : DecodeBuffers::kAttnV2Blocks;
+  }
   l0::Kernel& dpas_kernel() {
-    l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
+    l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_,
                                                                 d_.fa_q_heads, d_.fa_kv_heads)),
                            kv8_ ? "attn_verify_dpas_kv8" : "attn_verify_dpas", 0);
     ze_kernel_properties_t p{};
@@ -1055,7 +1135,11 @@ class Capture {
     const loader::DeviceWeight& w = m_.linears.at({layer, id});
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Bf16, "gemv_bf16 bound to an int4 weight");
-    const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
+    kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
+    // verify-cost-m8 probe: a||b's K split at M >= 2 (CaptureOptions::probe_ab_ksplit; 64 at M = 8: -0.25 ms, not
+    // merged with the 16-block attention).
+    if (id == LinearId::AB && kCapM >= 2 && s.K == 5120 && s.N == 128 && opt_.probe_ab_ksplit)
+      t.ksplit = opt_.probe_ab_ksplit;
     require(s.N % t.cols == 0, "gemv_bf16 N is not a multiple of its work-group width");
     require(out.size() >= size_t(kCapM) * s.N * sizeof(float),
             "the bf16 GEMV's output allocation is smaller than its [M][N] fp32 result");
@@ -1200,44 +1284,7 @@ class Capture {
     } else {
       gemv_bf16(layer, LinearId::AB, b_.x.ptr(), b_.ab_out);
     }
-    // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o)
-    // - src/kernels/gdn_step.cl (Task 4), grid (48 v-heads, 4 state-column
-    // chunks), WG 256. `conv_ring` and `state` are this GDN layer's slices;
-    // `gdn_small` is the layer's GDN block base as a `const float*` (the
-    // kernel finds conv/negA/dt_bias inside it at loader/small_layout.h's
-    // offsets, passed to ocloc as NEGA_OFF/DTBIAS_OFF).
-    if (mode_ == Mode::Rows) gdn_step_rows(layer, g); else   // spec 13a: the BATCH_ROWS build
-    {
-      // Spec 8: the verify list binds the SPEC_SLOTS build, whose eighth argument is
-      // this layer's slice of slot 1 (MtpBuffers::gdn_spec is slot-major, so slot s
-      // is that plus (s - 1) whole slots - gdn_step.cl, SPEC_SLOTS). Spec 16d: a stage's
-      // verify list binds its own slots' allocation (spec_mem(), pp_gdn_spec_bytes) at its
-      // own slice g - the same binary, the same whole-model slot stride.
-      const bool slots = mode_ == Mode::Verify || mode_ == Mode::StageVerify || mode_ == Mode::VerifyTaps ||
-                         mode_ == Mode::StageVerifyTaps || mode_ == Mode::TpVerify ||   // spec 17d: TP's too
-                         mode_ == Mode::TpVerifyTaps;                                    // spec 19 v3c
-      // Spec 19a: the slot count is the buffers' (kSlots on every engine: the historical
-      // names); a stage's verify list keeps kSlots (its spec_mem() is pp_gdn_spec_bytes').
-      // Spec 19c: a tap drafter's verify list binds its own TapVerifyDims::kSlots (8).
-      const uint32_t n_slots = mode_ == Mode::Verify || mode_ == Mode::TpVerify               ? mtp_->slots
-                               : mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps ||
-                                         mode_ == Mode::TpVerifyTaps
-                                     ? tv_->slots
-                                                                                              : MtpBuffers::kSlots;
-      l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
-                                                                     d_.gdn_v_heads, n_slots)
-                                   : kernels::gdn_step_variant(kCapM, d_.gdn_k_heads, d_.gdn_v_heads),
-                             "gdn_step", kWgGdn);
-      k.arg_ptr(0, ctrl());
-      k.arg_ptr(1, b_.partials.ptr());
-      k.arg_ptr(2, b_.ab_out.ptr());
-      k.arg_ptr(3, small_of(layer).gdn.ptr());
-      k.arg_ptr(4, ring0() + size_t(g) * conv_ring_stride());
-      k.arg_ptr(5, state0() + size_t(g) * gdn_state_stride());
-      k.arg_ptr(6, b_.gdn_o.ptr());
-      if (slots) k.arg_ptr(7, spec0() + size_t(g) * gdn_state_stride());
-      launch(k, d_.gdn_v_heads, kGdnStateChunks);
-    }
+    if (mode_ == Mode::Rows) gdn_step_rows(layer, g); else gdn_step(layer, g);   // spec 13a: the BATCH_ROWS build
     // prep_gated_head(qkvz_partials, gdn_o, gated_w, x_out) - prep.cl (Task 2),
     // grid (48 v-heads, M), WG 128. `gated_w` is the GDN block's RMSNormGated
     // weight: plain `w`, and bf16 - the kernel takes it as `const ushort*`, so
@@ -2034,6 +2081,12 @@ CapturedStep build_tp_verify_taps(l0::Context& ctx, const loader::LoadedModel& m
     throw std::runtime_error("runtime::build_tp_verify_taps: M " + std::to_string(M) + " is outside [1, " +
                              std::to_string(tv.slots) + "] (TapVerify::slots)");
   return Capture(ctx, m, b, tv, link, M).options(opt).run();
+}
+
+CapturedStep build_gdn_flush(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, void* pend) {
+  SlotBind sb;
+  sb.gdn_pend = pend;
+  return Capture(ctx, m, b, nullptr, nullptr, 1, nullptr, Mode::GdnFlush).slot(sb).run();
 }
 
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,

@@ -283,6 +283,11 @@ class Engine {
   void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
   void flush_projection() const;
   uint64_t queue_submissions() const { return queue_.submissions(); }
+  // verify-cost-m8, tests and probes: whether the verify lists commit by replay (gdn_step's DEFERRED build), whether
+  // committed rows are pending (a state read flushes them: one more submission), and the committed GDN state.
+  bool gdn_deferred() const { return gdn_pend_ != nullptr; }
+  bool gdn_rows_pending() const { return gdn_pend_ && (control_->gdn_pend & 0xFFu) != 0; }
+  const void* gdn_state_now() const { return live_gdn_slot(); }
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
   MtpBuffers* mtp_buffers() { return mtp_.get(); }
@@ -438,7 +443,11 @@ class Engine {
   // Spec 19c: from the drafter's slots as well.
   void mtp_normalise_live();
   // The live GDN slot's device address (slot 0 = gdn_state; MTP's or the drafter's slots) - the selected sequence's.
+  // verify-cost-m8: with the pending rows, flushes them first (the state is then gdn_state, slot 0).
   const void* live_gdn_slot() const;
+  // verify-cost-m8: the committed rows the next verify would replay (Control::gdn_pend), into gdn_state now - the
+  // flush list at n_active 0. Every reader of the GDN state calls it first; nothing to do without pending rows.
+  void flush_gdn() const;
   // Spec 19c (defined in engine_prefill.cc): the prefill tail of the drafter's ring - the n staged tap rows
   // (df_pf_taps_ rows 0..n-1) at positions pos .. pos + n - 1, projected at prefill width (TapDrafter::project_wide)
   // or, where the drafter has no such path, 8 rows a replay.
@@ -528,6 +537,12 @@ class Engine {
   TapDrafter* drafter_ = nullptr;
   std::unique_ptr<l0::Mem> df_slots_;
   TapVerify df_tv_;
+  // verify-cost-m8: one sequence slot with a proposer on Qwen3.8's GDN shapes - the verify lists bind gdn_step's
+  // DEFERRED build (no per-row state; the committed rows are replayed by the next launch) over these pending rows
+  // (two parities of kernels::kGdnPendParityBytes), and gdn_flush_ applies them where the state is read. Null
+  // elsewhere: the slot builds, gdn_live moved at commit.
+  std::unique_ptr<l0::Mem> gdn_pend_;
+  std::unique_ptr<CapturedStep> gdn_flush_;
   std::unique_ptr<l0::Mem> df_pf_taps_;
   mutable l0::CmdList* pending_projection_ = nullptr;
   l0::CmdList* profile_projection_ = nullptr;   // CaptureOptions test/probe override, borrowed

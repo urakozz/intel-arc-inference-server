@@ -60,6 +60,13 @@ struct CaptureOptions {
   // The DPAS part's key split a head (df_attn_dpas.cl's KS: 1, 2 or 4). 4: the five attention parts 1.55 -> 0.50 ms;
   // acceptance judged pooled (operator ruling 2026-11-14; spec 19 v3d Task 6, occupancy).
   uint32_t dflash_attn_ks = 4;
+  // verify-cost-m8 probe only: a tap verify list binds gdn_step_slots_M<M>_N8_P1 (row 0's state stored alone - wrong
+  // states, timing only).
+  bool probe_gdn_one_store = false;
+  // verify-cost-m8 probe: a||b's K split at any M >= 2 (0: gemv_bf16_tiling's).
+  uint32_t probe_ab_ksplit = 0;
+  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (0: DecodeScratch::kAttnV2Blocks).
+  uint32_t probe_attn_tgt = 0;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;

@@ -567,6 +567,23 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   foreach(MM 1 2 3 4)
     add_ocloc_kernel(gdn_step_slots_M${MM}_N8 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM})
   endforeach()
+  # verify-cost-m8: the one-card verify lists' DEFERRED build (gdn_step.cl): no per-row state, the committed rows
+  # replayed by the next launch. CTRL_PEND = Control::gdn_pend; PEND_PAR = one parity of the pending rows, 48 layers x
+  # (8 rows x (16 + 48) x 128 bf16 + 8 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes). Qwen3.8's shapes only.
+  foreach(MM 1 2 3 4 5 6 7 8)
+    add_ocloc_kernel(gdn_step_defer_M${MM} SOURCE ${GDN_CL}
+                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=6438912 M=${MM})
+  endforeach()
+  # verify-cost-m8 probe: a||b at M = 2..8 with a wider in-work-group K split (CaptureOptions::probe_ab_ksplit)
+  foreach(MM 2 3 4 5 6 7 8)
+    foreach(SS 32 64)
+      add_gemv_bf16_variant(${MM} 5120 128 16 ${SS})
+    endforeach()
+  endforeach()
+  # verify-cost-m8 probe only: the slot build storing row 0's state alone (PROBE_ONE_STORE); no engine binds it
+  foreach(MM 1 2 3 4 5 6 7 8)
+    add_ocloc_kernel(gdn_step_slots_M${MM}_N8_P1 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM} PROBE_ONE_STORE=1)
+  endforeach()
   foreach(MM 5 6 8)
     add_gemv_bf16_variant(${MM} 5120 248320 64 1)
   endforeach()
@@ -813,6 +830,33 @@ if(B70_VERIFY_DPAS AND B70_MTP)
                        DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
                                KV8=1 KV_PAGED=${KV_PAGE}
                        OPTIONS ${VDPAS_OPTIONS})
+    endforeach()
+  endif()
+  if(B70_VERIFY_M8)
+    # verify-cost-m8 probe: the DPAS verify attention (and its v2 reduce) at 8 / 16 key blocks a row
+    # (CaptureOptions::probe_attn_tgt); M = 2..4 at the PAIR levers, 5..8 at the plain ones - the production lines' levers
+    foreach(TT 8 16)
+      foreach(MM 2 3 4 5 6 7 8)
+        add_ocloc_kernel(attn_v2_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} EXP2=${ATTN_V2_EXP2})
+        if(MM LESS_EQUAL 4)
+          set(_pvx 2)
+          if(MM EQUAL 2)
+            set(_pvx 0)
+          endif()
+          set(_lv KT=32 PACK_H=0 KS=4 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1 PVX=${_pvx})
+        else()
+          set(_lv KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
+        endif()
+        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=0 OPTIONS -cl-intel-256-GRF-per-thread)
+        if(B70_KV8)
+          add_ocloc_kernel(attn_v2_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kv8.cl
+                           DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${TT})
+          add_ocloc_kernel(attn_verify_dpas_M${MM}_T${TT}_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
+                           DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=1 OPTIONS -cl-intel-256-GRF-per-thread)
+        endif()
+      endforeach()
     endforeach()
   endif()
 endif()

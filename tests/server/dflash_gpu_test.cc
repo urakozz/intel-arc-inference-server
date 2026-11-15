@@ -176,12 +176,14 @@ int main(int argc, char** argv) {
       (void)a.step_many(greedy, kK);
       CHECK(e.queue_submissions() == before + 1);
       if (truncate) a.truncate_to(pos + 1);
+      // verify-cost-m8: the snapshot commits the run, whose rows the deferred GDN build then flushes - one more
+      const uint64_t rows = e.gdn_deferred();
       a.save_state(actual.ptr());
-      CHECK(e.queue_submissions() == before + 2);
+      CHECK(e.queue_submissions() == before + 2 + rows);
       CHECK(a.pos() == pos + accepted + 1 && e.control()->cur_token[0] == next);
       CHECK(std::memcmp(expected.ptr(), actual.ptr(), e.state_bytes()) == 0);
       a.flush_commit();
-      CHECK(e.queue_submissions() == before + 2);
+      CHECK(e.queue_submissions() == before + 2 + rows);
     }
     std::printf("BATCH: truncated and complete request-end snapshots bitwise; one final projection\n");
   }

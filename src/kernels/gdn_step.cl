@@ -287,21 +287,60 @@ inline bool run_start(__global const uint* rows, uint m) {
 #endif
 
 // ---------------------------------------------------------------------------
-// NORMS_BATCHED (spec 19 v3d Task 3): the SPEC_SLOTS builds at M >= 2
+// DEFERRED (verify-cost-m8): the one-card verify lists' state, committed by replay
+// ---------------------------------------------------------------------------
+// Undefined, this file is the kernels above. Defined, the kernel takes an eighth argument `pend` (this layer's slice of
+// the engine's pending-row buffer, two parities of PEND_PAR bytes) and writes NO per-row state: the rows' recurrence
+// inputs - kf (bf16, k-head-major), v (bf16) and the head's decay and beta (fp32) - go to parity `par ^ 1`, where
+// par = (ctrl[CTRL_PEND] >> 8) & 1. Committing j accepted drafts is the host setting ctrl[CTRL_PEND] = (j + 1) |
+// ((par ^ 1) << 8); the NEXT launch reads the tile from `state`, replays those j + 1 rows from parity par (decay, the
+// kv band tree, the rank-1 update - the chain's own operations on the chain's own values, so the state is bitwise the
+// state after row j of the step that wrote them), stores it back in place, and only then runs its own rows. One state
+// read and one write a step at every M, instead of a read and M writes. The host clears the count after every launch
+// of a list (Engine::verify), so a list replayed twice does not replay the rows twice; n_active 0 (Engine's flush
+// list) replays and stores only. Safe without a cross-work-group barrier: a work-item reads and writes its own 16
+// cells of `state`; the pending rows it reads (parity par) are written by no work-group of this launch (they write
+// par ^ 1); the replay's kf rows reach SLM before any work-item uses them.
+#ifdef DEFERRED
+#if defined(SPEC_SLOTS) || defined(BATCH_ROWS)
+#error "gdn_step: DEFERRED, SPEC_SLOTS and BATCH_ROWS are three different builds"
+#endif
+#if !defined(CTRL_PEND) || !defined(PEND_PAR)
+#error "gdn_step DEFERRED: CTRL_PEND and PEND_PAR (bytes a parity) must be defined"
+#endif
+#define PR 8                                       /* rows a step can leave: the verify lists' M <= 8 */
+#if M > PR
+#error "gdn_step DEFERRED: at most PR rows a step"
+#endif
+#define KHEADS (HEADS / V_PER_K)
+#define PEND_V_OFF (PR * KHEADS * DIM)             /* ushorts: kf [PR][KHEADS][DIM], then v [PR][HEADS][DIM] */
+#define PEND_S_OFF (PR * (KHEADS + HEADS) * DIM / 2)   /* floats: then {decay, beta} [PR][HEADS] */
+inline __global ushort* pend_at(__global uchar* p, uint par) { return (__global ushort*)(p + (size_t)par * PEND_PAR); }
+#endif
+
+// ---------------------------------------------------------------------------
+// NORMS_BATCHED (spec 19 v3d Task 3): the SPEC_SLOTS builds at M >= 2, and (verify-cost-m8) every DEFERRED build
 // ---------------------------------------------------------------------------
 // The rows' l2norms do not depend on the state, so these builds take every row's two trees before the recurrence:
 // the same terms, the same pairwise tree and the same rounding as a row's own (each row keeps its own SLM row), with
 // one set of barriers for all rows instead of one a row. The recurrence then double-buffers kv_red / o_red by row
 // parity, so the barrier that guarded their reuse goes: a row writes the buffer row m - 2 used, and every work-item
 // has passed row m - 1's barriers - after its last read of row m - 2's - before that write. Arithmetic, and so every
-// row's state, gdn_o and ring, is bitwise the per-row form's (gdn_step_slots_test). Every other build (M = 1, the
-// plain and BATCH_ROWS builds) preprocesses to the tokens it always had: QF / KF / KVR / OR expand to the old names.
-#if defined(SPEC_SLOTS) && M > 1
+// row's state, gdn_o and ring, is bitwise the per-row form's (gdn_step_slots_test). Every other build (M = 1 but
+// DEFERRED's, the plain and BATCH_ROWS builds) preprocesses to the tokens it always had: QF / KF / KVR / OR expand to the old names.
+#if (defined(SPEC_SLOTS) && M > 1) || defined(DEFERRED)
 #define NORMS_BATCHED 1
 #define QF(i) rq[m][i]
 #define KF(i) rk[m][i]
 #define KVR kv_red[m & 1]
 #define OR o_red[m & 1]
+#else
+#define QF(i) qf_s[i]
+#define KF(i) kf_s[i]
+#define KVR kv_red
+#define OR o_red
+#endif
+#if defined(NORMS_BATCHED) || defined(DEFERRED)
 // The band tree of one column pair (header, "The reduction trees"), read from SLM into registers: the same pairwise
 // adds in the same order, without a barrier between the steps.
 inline void band_sum(__local float (*r)[CHUNK_V], uint lane, float* x0, float* x1) {
@@ -318,11 +357,6 @@ inline void band_sum(__local float (*r)[CHUNK_V], uint lane, float* x0, float* x
   *x0 = a[0];
   *x1 = b[0];
 }
-#else
-#define QF(i) qf_s[i]
-#define KF(i) kf_s[i]
-#define KVR kv_red
-#define OR o_red
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -358,6 +392,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
                        , __global float* restrict state_pool, __global ushort* restrict ring_pool,
                        __global const uint* restrict rows
 #endif
+#ifdef DEFERRED
+                       , __global uchar* restrict pend
+#endif
                        ) {
   const uint h = get_group_id(0);          // v-head
   const uint c = get_group_id(1);          // state-column chunk
@@ -377,13 +414,19 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   __local float kv_red[SG][CHUNK_V];       // kv band partials: [band][column − 32c]
   __local float o_red[SG][CHUNK_V];        // o  band partials
 #endif
+#ifdef DEFERRED
+  __local float rep_k[PR][DIM];            // the replayed rows' kf
+  __local float rep_red[2][SG][CHUNK_V];   // their kv band partials, by row parity
+#endif
 
 #ifndef BATCH_ROWS
   const uint pos = ctrl[CTRL_POS];
 #endif
   uint n_act = ctrl[CTRL_NACT];
   if (n_act > M) n_act = M;                // the compiled variant is the ceiling
+#ifndef DEFERRED
   if (n_act == 0) return;                  // uniform across the work-group
+#endif
 
   // -------------------------------------------------------------------------
   // 1. conv1d update + SiLU for this work-group's 384 channels, all tokens.
@@ -391,6 +434,14 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // are its own registers and only the pre-step history touches the ring.
   // -------------------------------------------------------------------------
   const uint kh = h / V_PER_K;             // repeat_interleave(·, V_PER_K): v-head -> k-head
+#ifdef DEFERRED
+  // The previous step's committed rows (header, DEFERRED): their kf into SLM now, read after section 1's barrier.
+  const uint pend_word = ctrl[CTRL_PEND];
+  const uint par = (pend_word >> 8) & 1u;
+  const uint n_rep = min(pend_word & 0xFFu, (uint)PR);
+  for (uint i = lid; i < n_rep * DIM; i += WG_GDN)
+    rep_k[i / DIM][i % DIM] = bf16f(pend_at(pend, par)[((i / DIM) * KHEADS + kh) * DIM + i % DIM]);
+#endif
   for (uint cid = lid; cid < CH_PER_WG; cid += WG_GDN) {
     const uint which = cid >> 7;           // 0 = q, 1 = k, 2 = v
     const uint i = cid & (DIM - 1);
@@ -482,6 +533,45 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   const float negA = gdn_small[NEGA_OFF + h];      // the loader's -exp(A_log), fp32
   const float dt_bias = gdn_small[DTBIAS_OFF + h];
 
+#ifdef DEFERRED
+  // 2a. The previous step's committed rows (header, DEFERRED): its recurrence on its stored inputs, then the tile back.
+  if (n_rep) {   // the rows' kf reached rep_k before section 1's barrier
+    const __global ushort* restrict pr = pend_at(pend, par);
+    const __global float* restrict ps = (const __global float*)pr + PEND_S_OFF;
+    for (uint r = 0; r < n_rep; ++r) {
+      const float decay = ps[(r * HEADS + h) * 2], beta = ps[(r * HEADS + h) * 2 + 1];
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        S[kk][0] *= decay;
+        S[kk][1] *= decay;
+      }
+      float p0 = 0.0f, p1 = 0.0f;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rep_k[r][sgid * BAND_K + kk];
+        p0 = fma(S[kk][0], kfv, p0);
+        p1 = fma(S[kk][1], kfv, p1);
+      }
+      rep_red[r & 1][sgid][lane] = p0;
+      rep_red[r & 1][sgid][lane + SG] = p1;
+      barrier(CLK_LOCAL_MEM_FENCE);
+      float kv0, kv1;
+      band_sum(rep_red[r & 1], lane, &kv0, &kv1);
+      const __global ushort* restrict pv = pr + PEND_V_OFF + (r * HEADS + h) * DIM + c * CHUNK_V;
+      const float d0 = (bf16f(pv[lane]) - kv0) * beta;
+      const float d1 = (bf16f(pv[lane + SG]) - kv1) * beta;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rep_k[r][sgid * BAND_K + kk];
+        S[kk][0] = fma(kfv, d0, S[kk][0]);
+        S[kk][1] = fma(kfv, d1, S[kk][1]);
+      }
+    }
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      state[sbase + (size_t)kk * DIM] = S[kk][0];
+      state[sbase + (size_t)kk * DIM + SG] = S[kk][1];
+    }
+  }
+  __global ushort* restrict pw = pend_at(pend, par ^ 1u);   // this step's rows' inputs
+#endif
+
 #ifdef NORMS_BATCHED
   // 3a. Every row's l2norm (header, NORMS_BATCHED): section 3's terms, tree and rounding, row by row in SLM.
   for (uint m = 0; m < n_act; ++m) {
@@ -522,6 +612,86 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // -------------------------------------------------------------------------
   // 3. One token at a time: head scalars, l2norm, the recurrence.
   // -------------------------------------------------------------------------
+#ifdef DEFERRED
+  // The DEFERRED builds (M = 1 too): the same operations on S in the same order, one barrier a row instead of two. Row m's
+  // o partials (from S after its update) and row m + 1's kv partials (from S after row m + 1's decay - the next
+  // operation on S either way) go to SLM together, before one barrier; then every work-item takes row m + 1's kv tree
+  // and subgroup 0 row m's o tree. kv_red / o_red are by row parity: a row writes the buffers row m - 2 read, and every
+  // work-item has passed row m - 1's barrier, after its last read of them, before that write.
+  float dec[M], bet[M];
+  for (uint m = 0; m < n_act; ++m) {   // head scalars, as the per-row loop computes them
+    const ushort a_b = rne_bf16(ab_out[(size_t)m * AB_STRIDE + h]);
+    const ushort b_b = rne_bf16(ab_out[(size_t)m * AB_STRIDE + B_OFF + h]);
+    bet[m] = 1.0f / (1.0f + exp(-bf16f(b_b)));
+    dec[m] = exp(negA * softplus_f32(bf16f(a_b) + dt_bias));
+  }
+  if (c == 0)   // every row's recurrence inputs (header, DEFERRED): v by every head, kf by the k-head's first
+    for (uint m = 0; m < n_act; ++m) {
+      if (lid < DIM) pw[PEND_V_OFF + (m * HEADS + h) * DIM + lid] = xs[2][m][lid];
+      else if (h % V_PER_K == 0) pw[(m * KHEADS + kh) * DIM + lid - DIM] = (ushort)(as_uint(rk[m][lid - DIM]) >> 16);
+      if (lid == 0) {
+        __global float* restrict psw = (__global float*)pw + PEND_S_OFF + (m * HEADS + h) * 2;
+        psw[0] = dec[m];
+        psw[1] = bet[m];
+      }
+    }
+  if (n_act) {   // row 0's decay and kv partials
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      S[kk][0] *= dec[0];
+      S[kk][1] *= dec[0];
+    }
+    float p0 = 0.0f, p1 = 0.0f;
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      const float kfv = rk[0][sgid * BAND_K + kk];
+      p0 = fma(S[kk][0], kfv, p0);
+      p1 = fma(S[kk][1], kfv, p1);
+    }
+    kv_red[0][sgid][lane] = p0;
+    kv_red[0][sgid][lane + SG] = p1;
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  for (uint m = 0; m < n_act; ++m) {
+    float kv0, kv1;
+    band_sum(kv_red[m & 1], lane, &kv0, &kv1);
+    const float d0 = (bf16f(xs[2][m][c * CHUNK_V + lane]) - kv0) * bet[m];
+    const float d1 = (bf16f(xs[2][m][c * CHUNK_V + lane + SG]) - kv1) * bet[m];
+    for (uint kk = 0; kk < BAND_K; ++kk) {          // S[k][v] += kf[k]·Δ[v]
+      const float kfv = rk[m][sgid * BAND_K + kk];
+      S[kk][0] = fma(kfv, d0, S[kk][0]);
+      S[kk][1] = fma(kfv, d1, S[kk][1]);
+    }
+    float r0 = 0.0f, r1 = 0.0f;                     // o[v] = Σ_k qf[k]·S[k][v]
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      const float qfv = rq[m][sgid * BAND_K + kk];
+      r0 = fma(qfv, S[kk][0], r0);
+      r1 = fma(qfv, S[kk][1], r1);
+    }
+    o_red[m & 1][sgid][lane] = r0;
+    o_red[m & 1][sgid][lane + SG] = r1;
+    if (m + 1 < n_act) {                            // row m + 1: S *= exp(g), its kv partials
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        S[kk][0] *= dec[m + 1];
+        S[kk][1] *= dec[m + 1];
+      }
+      float p0 = 0.0f, p1 = 0.0f;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rk[m + 1][sgid * BAND_K + kk];
+        p0 = fma(S[kk][0], kfv, p0);
+        p1 = fma(S[kk][1], kfv, p1);
+      }
+      kv_red[(m + 1) & 1][sgid][lane] = p0;
+      kv_red[(m + 1) & 1][sgid][lane + SG] = p1;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sgid == 0) {
+      float o0, o1;
+      band_sum(o_red[m & 1], lane, &o0, &o1);
+      __global float* restrict op = gdn_o + ((size_t)m * HEADS + h) * DIM + c * CHUNK_V;
+      op[lane] = o0;
+      op[lane + SG] = o1;
+    }
+  }
+#else
   for (uint m = 0; m < n_act; ++m) {
 #ifdef BATCH_ROWS
     if (run_start(rows, m)) {   // a slot's first row: its tile from GDN state index src
@@ -564,6 +734,17 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     barrier(CLK_LOCAL_MEM_FENCE);
 #endif
 
+#ifdef DEFERRED
+    if (c == 0) {   // row m's recurrence inputs (header, DEFERRED): v by every head, kf by the k-head's first
+      if (lid < DIM) pw[PEND_V_OFF + (m * HEADS + h) * DIM + lid] = xs[2][m][lid];
+      else if (h % V_PER_K == 0) pw[(m * KHEADS + kh) * DIM + lid - DIM] = (ushort)(as_uint(KF(lid - DIM)) >> 16);
+      if (lid == 0) {
+        __global float* restrict psw = (__global float*)pw + PEND_S_OFF + (m * HEADS + h) * 2;
+        psw[0] = decay;
+        psw[1] = beta;
+      }
+    }
+#endif
     // The recurrence (doc 03), pure fp32 - nothing below rounds.
     for (uint kk = 0; kk < BAND_K; ++kk) {          // S *= exp(g)
       S[kk][0] *= decay;
@@ -635,6 +816,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     }
 #endif
 #ifdef SPEC_SLOTS
+#ifdef PROBE_ONE_STORE
+    if (m == 0)   // probe only: one slot write a step, the traffic a deferred commit would leave
+#endif
     {   // the state after row m, into its slot (header, SPEC_SLOTS)
       __global float* restrict dst = slot_base(state, state_spec, (live + m) % N_SLOTS);
       for (uint kk = 0; kk < BAND_K; ++kk) {
@@ -656,11 +840,12 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     barrier(CLK_LOCAL_MEM_FENCE);   // the next token reuses rq/rk/kv_red/o_red
 #endif
   }
+#endif
 
   // -------------------------------------------------------------------------
   // 4. The tile goes back once, after every token of this step.
   // -------------------------------------------------------------------------
-#if !defined(SPEC_SLOTS) && !defined(BATCH_ROWS)
+#if !defined(SPEC_SLOTS) && !defined(BATCH_ROWS) && !defined(DEFERRED)
   for (uint kk = 0; kk < BAND_K; ++kk) {
     state[sbase + (size_t)kk * DIM] = S[kk][0];
     state[sbase + (size_t)kk * DIM + SG] = S[kk][1];

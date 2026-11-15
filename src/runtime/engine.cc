@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 
+#include "kernels/kernels.h"
 #include "model/qwen35.h"
 
 namespace runtime {
@@ -93,6 +94,16 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
       imm_(l0::CmdList::immediate(ctx)),
       control_(buffers_.control.as<Control>()) {
   setup_slots(checked_slots(model_, max_len, std::move(slot_lens)));
+  {
+    const model::ModelDesc& d = *model_.desc;
+    if (slots() == 1 && (mtp_ || drafter) && d.gdn_layers == 48 && d.gdn_k_heads == kernels::kRefGdnKHeads &&
+        d.gdn_v_heads == kernels::kRefGdnVHeads) {
+      gdn_pend_ = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, 2 * kernels::kGdnPendParityBytes);
+      seqs_[0].bind.gdn_pend = gdn_pend_->ptr();
+      df_tv_.gdn_pend = gdn_pend_.get();
+      gdn_flush_ = std::make_unique<CapturedStep>(build_gdn_flush(ctx, model_, buffers_, gdn_pend_->ptr()));
+    }
+  }
   if (drafter && seqs_.size() > 1)
     throw std::runtime_error("runtime::Engine: a tap drafter beside sequence slots is not built (spec 13c: MTP or "
                              "prompt lookup per slot)");
@@ -535,6 +546,7 @@ void Engine::reset() {
   // Spec 19c: the drafter's slots (as MtpBuffers::zero does the head's) and a cold drafter.
   if (df_slots_) imm_.fill(df_slots_->ptr(), 0u, df_slots_->size());
   if (drafter_) drafter_->reset(imm_);
+  control_->gdn_pend = 0;
   seq().verify_k = kNoVerify;
   seq().draft_ids.clear();
 }
@@ -732,6 +744,7 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
   }
   fence_.wait();
   pending_projection_ = nullptr;
+  control_->gdn_pend &= ~0xFFu;   // the list replayed the committed rows: a second replay must not (gdn_step.cl, DEFERRED)
 }
 
 void Engine::commit(uint32_t j, uint32_t next_token, bool defer_projection) {
@@ -749,7 +762,12 @@ void Engine::commit(uint32_t j, uint32_t next_token, bool defer_projection) {
   // Row j's GDN state is slot (live + j) % slots (gdn_step.cl SPEC_SLOTS; spec 13c's row
   // lists write the same indices): make it live. Row j's hidden is the next iteration's
   // h_{pos-1}.
-  control_->gdn_live = (control_->gdn_live + j) % gdn_slots();
+  // verify-cost-m8: with the pending rows, rows 0..j are what the next launch replays - they sit in the parity the
+  // verify wrote, the other one (gdn_step.cl, DEFERRED).
+  if (gdn_pend_)
+    control_->gdn_pend = (j + 1) | ((((control_->gdn_pend >> 8) & 1u) ^ 1u) << 8);
+  else
+    control_->gdn_live = (control_->gdn_live + j) % gdn_slots();
   if (mtp_) imm_.copy(s.hh, s.verify_hidden + size_t(j) * hid_bytes(*model_.desc), hid_bytes(*model_.desc));
   control_->pos = s.verify_pos + j + 1;
   control_->n_active = 1;
@@ -773,7 +791,7 @@ void Engine::mtp_step1() {
   if (control_->pos == 0) {
     // No h_{-1}: the plain list, which reads and writes slot 0 (live is 0 at pos 0 -
     // reset() and load_state() both leave it so), then its hidden into hh row 0.
-    if (control_->gdn_live != 0) mtp_normalise_live();
+    mtp_normalise_live();
     replay();
     imm_.copy(seq().hh, buffers_.x.ptr(), hid_bytes(*model_.desc));
     return;
@@ -782,7 +800,18 @@ void Engine::mtp_step1() {
   commit(0, control_->out_token[0]);
 }
 
+void Engine::flush_gdn() const {
+  if (!gdn_pend_ || (control_->gdn_pend & 0xFFu) == 0) return;
+  const uint32_t n = control_->n_active;
+  control_->n_active = 0;
+  queue_.execute(gdn_flush_->list, &fence_);
+  fence_.wait();
+  control_->gdn_pend &= ~0xFFu;
+  control_->n_active = n;
+}
+
 const void* Engine::live_gdn_slot() const {
+  flush_gdn();
   const uint32_t live = (mtp_ || drafter_) ? control_->gdn_live : 0;
   const Seq& s = seq();
   if (live == 0) return s.state0;
@@ -790,6 +819,7 @@ const void* Engine::live_gdn_slot() const {
 }
 
 void Engine::mtp_normalise_live() {
+  flush_gdn();
   const uint32_t live = control_->gdn_live;
   if ((!mtp_ && !drafter_) || live == 0) return;
   imm_.copy(seq().state0, live_gdn_slot(), persist_.gdn_state.size());
@@ -847,6 +877,7 @@ void Engine::load_state(const void* host, uint32_t pos) {
     control_->gdn_live = 0;   // the state went into slot 0
     s.verify_k = kNoVerify;
   }
+  control_->gdn_pend = 0;   // verify-cost-m8: no committed rows over a loaded state
   if (drafter_) {   // spec 19c: the state went into slot 0; spec 19d: and the ring is the snapshot's
     drafter_->load_ring(imm_, h + persist_.gdn_state.size() + persist_.conv_ring.size());
     control_->gdn_live = 0;
