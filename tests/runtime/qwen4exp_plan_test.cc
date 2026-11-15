@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
     const std::vector<rq::DevicePlan> full = rq::plan(*d, Q4Placement::two(*d, rq::pp_split(*d, 32768, true, false).split),
                                                       32768, true, false);
     CHECK(full[0].whole && !rq::fits(full, caps, kReserve));
-    throws_naming("spec 22", [&] { rq::require_fits(full, caps, kReserve); });
+    throws_naming("whole model needs the expert-offload tier", [&] { rq::require_fits(full, caps, kReserve); });
     throws_naming("expert-offload tier", [&] { rq::require_fits(full, caps, kReserve); });
     throws_naming(std::to_string(kCard) + " B", [&] { rq::require_fits(full, caps, kReserve); });
   }
@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
     const Q4Placement p38 = rq::placement_for(i38, 2, 32768, true, false, kCard, kReserve);
     CHECK(rq::fits(rq::plan(i38, p38, 32768, true, false), caps, kReserve));
     const Q4Placement p48 = Q4Placement::two(intel, rq::pp_split(intel, 32768, true, false).split);
-    throws_naming("spec 22", [&] { rq::require_fits(rq::plan(intel, p48, 32768, true, false), caps, kReserve); });
+    throws_naming("whole model needs the expert-offload tier", [&] { rq::require_fits(rq::plan(intel, p48, 32768, true, false), caps, kReserve); });
     const std::vector<rq::DevicePlan> pd = rq::plan(i18, Q4Placement::one(i18), 32768, true, false, true);
     CHECK_EQ(pd[0].scratch, rq::scratch_sizes(i18, 32768, F).total() + rq::tap_bytes(i18));
     std::printf("21c: %zu launches a token at 48 layers on one card (flash), %zu eager, %zu injected, 75 at --layers 4, "
@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
                 budget_path ? budget_path : "");
   }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
-              "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused naming spec 22\n",
+              "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused naming the expert-offload tier\n",
               n_intel_1, n_intel_2, b16, b16 / 1e9, f32, f32 / 1e9);
   return 0;
 }

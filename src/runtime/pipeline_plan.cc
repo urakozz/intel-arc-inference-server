@@ -229,7 +229,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
   if (x.draft_vocab != 0 && !x.mtp && !x.drafter.on())
     throw std::invalid_argument("runtime::pp_plan: a draft vocabulary drafts with the MTP head or a drafter");
   if (x.mtp && x.drafter.on())
-    throw std::invalid_argument("runtime::pp_plan: the MTP head and a drafter are two proposers (spec 19 decision 3)");
+    throw std::invalid_argument("runtime::pp_plan: the MTP head and a drafter are two proposers");
   PpPlan p;
   p.max_len = max_len;
   p.split = split;

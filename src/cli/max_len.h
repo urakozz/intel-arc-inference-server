@@ -63,7 +63,7 @@ inline void check_before_load(const MaxLenArg& a, uint32_t trained, bool require
   if (require_quantum && a.value % runtime::kMaxLenQuantum != 0)
     throw std::runtime_error("--max-len " + std::to_string(a.value) + " is not a multiple of " +
                              std::to_string(runtime::kMaxLenQuantum) +
-                             " (the L0 prefill backends' grid, spec 2.1 §3.1)");
+                             " (the L0 prefill backends' grid)");
 }
 
 // Step 3: the max_len to hand loader::load().

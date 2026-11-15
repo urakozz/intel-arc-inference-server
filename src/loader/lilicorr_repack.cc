@@ -149,7 +149,7 @@ void LiliCheckpoint::open_and_check() {
     (void)t;
     const std::string c = dflash_canon(name);
     for (const char* own : {"embed_tokens.weight", "lm_head.weight"})
-      if (c == own) refuse(dir_, "ships " + name + ": LiLiCorr shares the target's embedding and head (spec 26 §1)");
+      if (c == own) refuse(dir_, "ships " + name + ": LiLiCorr shares the target's embedding and head");
     if (c == "d2t" || c == "t2d" || c.find(".d2t") != std::string::npos || c.find(".t2d") != std::string::npos)
       refuse(dir_, "ships " + name + ": a drafter vocabulary of its own (d2t / t2d) is not supported");
     if (c.find("mask_hidden") != std::string::npos) refuse(dir_, "ships " + name + ": DFlash ships no mask_hidden");
@@ -287,7 +287,7 @@ LiliDecoded LiliCheckpoint::decoded(const std::string& base) const {
 DFlashHostLinear LiliCheckpoint::make_linear(const std::vector<std::string>& bases, DraftFormat f,
                                              unsigned threads) const {
   if (f == DraftFormat::Bf16)
-    refuse(dir_, "--draft-format bf16 is not a LiLiCorr format: exact is (W' bf16 + g, spec 26 §3)");
+    refuse(dir_, "--draft-format bf16 is not a LiLiCorr format: exact is (W' bf16 + g)");
   DFlashHostLinear h;
   bool any_nvfp4 = false;
   std::vector<LiliDecoded> parts;

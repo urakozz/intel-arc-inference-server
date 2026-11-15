@@ -347,7 +347,7 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   const model::ModelDesc& d = *m.desc;
   require(&s.desc() == &d, "the prefill scratch was sized for another model");
   require(st.first < st.last && st.last <= d.layers && (st.has_embed() || st.has_head(d)),
-          "spec 16c walks two stages: layers [0, s) and [s, layers)");
+          "the pipeline prefill walks two stages: layers [0, s) and [s, layers)");
   require(st.has_embed() == (ids != nullptr),
           "the first stage embeds (ids given), the second resumes from the hand-off (none)");
   require(m.layer_small.size() == st.layers() && (!d.is_moe() || m.moe.size() == st.layers()),
@@ -389,7 +389,7 @@ void require_tp(const PrefillScratch& s, const LoadedModel& m, const KvLayout& k
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem) {
   const model::ModelDesc& d = *m.desc;
   require(&s.desc() == &d, "the prefill scratch was sized for another model");
-  require(!d.is_moe(), "tensor parallel prefill is built for the dense Qwen3.8 (spec 17c)");
+  require(!d.is_moe(), "tensor parallel prefill is built for the dense Qwen3.8");
   require(attn_mode() == AttnMode::Flash, "a TP card runs the flash attention only");
   require(kv.max_len == max_len && kv.layers == d.fa_layers && kv.bytes() == kv_k_mem.size() &&
               kv.bytes() == kv_v_mem.size(),

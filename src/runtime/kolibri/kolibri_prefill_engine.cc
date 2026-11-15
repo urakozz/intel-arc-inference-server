@@ -78,7 +78,7 @@ void KolibriEngine::prepare_prefill() {
   // rule); the head's binaries are decode's, which the capture already checked.
   for (const std::string& v : kernels::kolibri::prefill_variants(d.attn, eager))
     require(std::ifstream(kernels::path(v)).good(),
-            v + " is not compiled (" + kernels::path(v) + "): build with B70_KOLIBRI=ON (spec 20d)");
+            v + " is not compiled (" + kernels::path(v) + "): build with B70_KOLIBRI=ON");
   auto* ps = new KolibriPrefillState();
   pf_ = std::unique_ptr<KolibriPrefillState, void (*)(KolibriPrefillState*)>(ps, &destroy_prefill);
   ps->timeout_ns = uint64_t(opt_.prefill_timeout_ms) * 1000000ull;

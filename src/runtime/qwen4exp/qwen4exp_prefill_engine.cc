@@ -78,11 +78,11 @@ void Qwen4ExpEngine::prepare_prefill() {
   // binaries are decode's, which the capture already checked.
   for (const std::string& v : kernels::qwen4exp::prefill_variants(d, eager, model_.ple.scale == loader::Q4PleScale::Bf16))
     require(std::ifstream(kernels::path(v)).good(),
-            v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON (spec 21d)");
+            v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON");
   if (mtp_)   // spec 21e: the head's pass per chunk
     for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_norm_ == MtpNorm::Single))
       require(std::ifstream(kernels::path(v)).good(),
-              v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_MTP=ON (spec 21e)");
+              v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_MTP=ON");
   auto* ps = new Qwen4ExpPrefillState();
   pf_ = std::unique_ptr<Qwen4ExpPrefillState, void (*)(Qwen4ExpPrefillState*)>(ps, &destroy_prefill);
   ps->timeout_ns = uint64_t(opt_.prefill_timeout_ms) * 1000000ull;

@@ -82,7 +82,7 @@ json request_template_kwargs(const ChatFormat& format, const json& kwargs, const
     if (!off && !efficient && !full)
       throw std::invalid_argument("reasoning_effort must be one of none, minimal, low, medium, high, xhigh (Nemotron 3.5 "
                                   "Bolt: none / minimal -> enable_thinking false, low / medium -> medium_effort true, "
-                                  "high -> the default; spec 25 decision 13)");
+                                  "high -> the default)");
     json out = kwargs.is_object() ? kwargs : json::object();
     if (off && !out.contains("enable_thinking")) out["enable_thinking"] = false;
     if (efficient && !out.contains("medium_effort")) out["medium_effort"] = true;

@@ -422,9 +422,9 @@ void require_fits(const std::vector<DevicePlan>& p, const std::array<size_t, kPp
                 std::to_string(p.size()) + " card(s): " + std::to_string(total) + " B planned"
           : "Qwen3.8-Flash-Next holds " + gb(weights) + " of weights (" + std::to_string(weights) +
                 " B) and " + std::to_string(p.size()) + " B70(s) " + gb(caps) +
-                ": it runs whole only with spec 22's expert-offload tier";
+                ": it runs whole only with the expert-offload tier, not built yet";
   throw std::runtime_error(head + per + " - use --layers N (the planner's N: runtime::qwen4exp::layers_that_fit); the "
-                           "whole model needs spec 22");
+                           "whole model needs the expert-offload tier");
 }
 
 std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement& pl, uint32_t max_len,
@@ -531,7 +531,7 @@ MtpNorm mtp_norm() {
   if (std::strcmp(e, "single") == 0) return MtpNorm::Single;
   if (std::strcmp(e, "per_stream") == 0) return MtpNorm::PerStream;
   throw std::runtime_error(std::string("B70_Q4_MTP_NORM=") + e + ": expected single or per_stream (unset: single - "
-                           "vLLM's one RMS over the 4 x 2560 values, spec 21 decision 4)");
+                           "vLLM's one RMS over the 4 x 2560 values)");
 }
 const char* mtp_norm_name(MtpNorm n) { return n == MtpNorm::PerStream ? "per_stream" : "single"; }
 

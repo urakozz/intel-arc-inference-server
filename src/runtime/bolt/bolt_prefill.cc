@@ -149,11 +149,11 @@ class Walk {
   // then pf_gemm_T0: A [C][K] (pitch K) x slab [K][ns] into out + n0.
   void linear(const loader::DeviceWeight& w, const void* A, const l0::Mem& out) {
     const model::GemvShape& sh = w.shape;
-    require(w.kind == model::WeightKind::Int4, "a Bolt linear is int4 (spec 25 §5)");
+    require(w.kind == model::WeightKind::Int4, "a Bolt linear is int4");
     require(sh.layout == 1 || bool(w.scales), "a layout-0 linear has no scales allocation");
     const std::string v = kb::pf_slab_variant(sh);
     require(!v.empty(), "no prefill slab covers a layout-1 linear of N " + std::to_string(sh.N) +
-                            " (not whole 1024-column slabs): a P0 re-pick to that cell needs its slab kernel first");
+                            " (not whole 1024-column slabs): re-picking that cell needs its slab kernel first");
     require(sh.K % 64 == 0 && sh.N % 16 == 0, "the linear is not whole k-groups / tiles");
     require(s_.slab.size() >= size_t(sh.K) * kPfSlab * 2, "the slab buffer is smaller than [K][1024]");
     const uint32_t ld = pf_ld(sh.N);

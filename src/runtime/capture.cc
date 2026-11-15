@@ -1076,7 +1076,7 @@ class Capture {
             "row for the folded form)");
     // Spec 19 v3c: a tap verify list takes up to its slots' rows, and per-launch events (the crossings' share).
     require(mode_ == Mode::TpVerifyTaps || prof_ == nullptr, "a TP list other than a tap verify list has no profiling "
-            "events (spec 17b / 17d)");
+            "events");
     require(mode_ == Mode::TpVerify       ? kCapM <= MtpBuffers::kSlots
             : mode_ == Mode::TpVerifyTaps ? kCapM <= DecodeBuffers::kM
                                           : kCapM == 1,
@@ -1470,7 +1470,7 @@ class Capture {
             "the stage model holds " + std::to_string(m_.layer_small.size()) +
                 " layers' small tensors, not layers [" + std::to_string(st.first) + ", " +
                 std::to_string(st.last) + ")");
-    require(st.has_embed() || st.has_head(d_), "spec 16b builds two stages: one holds the "
+    require(st.has_embed() || st.has_head(d_), "the pipeline has two stages: one holds the "
                                                "embedding, the other the head");
     const bool verify = mode_ == Mode::StageVerify;
     if (verify) check_stage_verify();

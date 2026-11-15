@@ -265,7 +265,7 @@ class Walk {
   // own layout (the descriptor's {S, layout}: layout 0 reads its separate scales, layout 1 the tiles' inline ones).
   void gemv(const loader::DeviceWeight& w, const void* x, size_t off = 0) {
     const model::GemvShape& s = w.shape;
-    require(w.kind == model::WeightKind::Int4, "a Bolt linear is int4 (spec 25 §5)");
+    require(w.kind == model::WeightKind::Int4, "a Bolt linear is int4");
     require(s.layout == 1 || bool(w.scales), "a layout-0 linear has no scales allocation");
     require(s_.slices->size() >= off + size_t(s.S) * M_ * s.N * 4, "the slices are smaller than [S][M][N]");
     l0::Kernel& k = kernel(kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout), "gemv", 64);

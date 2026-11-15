@@ -143,7 +143,7 @@ void check_q4_ple_host_fit(size_t table_bytes, size_t mem_available) {
                              "but MemAvailable is " + std::to_string(mem_available) + " B (" +
                              std::to_string(mem_available / 1000000000.0).substr(0, 6) +
                              " GB) and the rule keeps a 16 GiB margin (the measured pinned cap, docs/probes/probe-prefix-"
-                             "cache-2026-09-27.md §1) - free host memory first");
+                             "cache-2026-09-27.md) - free host memory first");
 }
 
 size_t q4_mem_available() {
@@ -163,7 +163,7 @@ std::string q4_ple_dir(const std::string& snapshot_dir) {
   struct stat st {};
   if (::stat((dir + "model.safetensors.index.json").c_str(), &st) != 0)
     throw std::runtime_error("no PLE int8 table at " + dir + ": the engine reads the n-gram "
-                             "table as int8 rows from a one-time file beside the checkpoint (spec 21 decision 7) - "
+                             "table as int8 rows from a one-time file beside the checkpoint - "
                              "make it with: python3 tools/quantize/qwen4exp/ple_int8.py " + snapshot_dir + " " + dir);
   return dir;
 }

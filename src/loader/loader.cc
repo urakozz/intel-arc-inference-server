@@ -969,7 +969,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   // Spec 17b: under TP the card's descriptor; `one` stays the checkpoint's (the slices are cut from its rows).
   // Spec 17d: the MTP head loads whole on each card (replicated at one card's shapes); a draft vocabulary does not.
   if (tp && draft_vocab.size != 0)
-    throw std::runtime_error("tensor parallel loads no draft vocabulary (spec 17d: the draft's head is the card's "
+    throw std::runtime_error("tensor parallel loads no draft vocabulary (the draft's head is the card's "
                              "vocabulary half of lm_head); drop --draft-vocab");
   const model::ModelDesc& desc = tp ? model::tp_card_desc(one, tp->crossing) : one;
   // Spec 15b: a described model the engine cannot run yet (Ornith: "MoE not
@@ -1037,7 +1037,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
                                "--spec dflash");
     if (lm_int4)
       throw std::runtime_error(
-          "--draft-vocab gathers rows of an int8 or bf16 lm_head (spec 8 §11); this "
+          "--draft-vocab gathers rows of an int8 or bf16 lm_head; this "
           "checkpoint ships it int4");
     if (std::find(std::begin(kDraftVocabSizes), std::end(kDraftVocabSizes), draft_vocab.size) ==
         std::end(kDraftVocabSizes))
@@ -1350,7 +1350,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   if (m.draft_vocab) {
     const DraftVocabCounts& c = r.draft_vocab_counts;
     std::print("  draft vocab {}: {:d} ids ({:d} added/EOS + {:d} ranked + {:d} lowest), {:d} B {:.3f} GB"
-               " - {} + u32 ids, gathered from lm_head in {:.0f} ms (spec 8 §11; not in total)\n",
+               " - {} + u32 ids, gathered from lm_head in {:.0f} ms (not in total)\n",
                draft_vocab_name(m.draft_vocab->size()).c_str(), m.draft_vocab->size(), c.forced,
                c.ranked, c.lowest, r.draft_vocab_bytes, r.draft_vocab_bytes / gb,
                lm_int8 ? "int8 rows + fp32 scales" : "bf16 rows",

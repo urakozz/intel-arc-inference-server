@@ -105,7 +105,7 @@ void validate(const KolPlacement& p, const Kolibri1Desc& d) {
   }
   if (p.devices != 2)
     throw std::invalid_argument("KolPlacement: " + std::to_string(p.devices) +
-                                " devices (spec 16 builds and gates two)");
+                                " devices (two are supported)");
   if (p.split < 1 || p.split + 1 > d.layers)
     throw std::invalid_argument("KolPlacement: split " + std::to_string(p.split) + " is outside [1, " +
                                 std::to_string(d.layers > 0 ? d.layers - 1 : 0) +

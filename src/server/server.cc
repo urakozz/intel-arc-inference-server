@@ -95,9 +95,9 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
   if (batch != nullptr && batch->slots() > 1) {
     impl_->batch = batch;
     if (opts_.spec_dflash_lookup)
-      throw std::invalid_argument("--spec dflash-lookup is built for one engine (spec 19f); not under the scheduler");
+      throw std::invalid_argument("--spec dflash-lookup runs on one engine; not under the scheduler");
     if (opts_.spec_mtp_lookup && !batch->mtp_lookup())   // open-work 27: replica's one request a card has it
-      throw std::invalid_argument("prompt lookup inside MTP is built for one request a card (open-work 27); not "
+      throw std::invalid_argument("prompt lookup inside MTP is built for one request a card; not "
                                   "beside several slots on a card");
   }
   if (opts_.spec_lookup) {

@@ -99,7 +99,7 @@ void BoltEngine::prepare_prefill() {
   // A missing binary is named here, before anything is allocated or appended (the decode capture's rule).
   for (const std::string& v : need)
     require(std::ifstream(kernels::path(v)).good(),
-            v + " is not compiled (" + kernels::path(v) + "): build with B70_BOLT=ON (spec 25d)");
+            v + " is not compiled (" + kernels::path(v) + "): build with B70_BOLT=ON");
   auto* ps = new BoltPrefillState();
   pf_ = std::unique_ptr<BoltPrefillState, void (*)(BoltPrefillState*)>(ps, &destroy_prefill);
   ps->timeout_ns = uint64_t(opt_.prefill_timeout_ms) * 1000000ull;

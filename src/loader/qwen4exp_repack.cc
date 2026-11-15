@@ -77,7 +77,7 @@ void agree(const SafetensorsSet& st, const std::string& base, Q4Form f, const ch
   if (ts.contains(other) && !ts.contains(mine))
     throw std::runtime_error("load_qwen4exp: '" + other + "' mixes the " + group + " forms - " + first + " is " +
                              model::q4_form_name(f) + ", and every member of the group in every layer must agree "
-                             "(one checkpoint, one form per group: spec 21b)");
+                             "(one checkpoint, one form per group)");
 }
 
 }  // namespace
@@ -111,7 +111,7 @@ model::Q4Forms q4_forms(const SafetensorsSet& st, const Qwen4ExpDesc& d) {
     if (ts.contains(lp + "mlp.experts.gate_up_proj"))
       throw std::runtime_error("load_qwen4exp: '" + lp + "mlp.experts.gate_up_proj' is the bf16 original's fused "
                                "experts - the original is the reference's input, never the engine's (one format: "
-                               "AutoRound int4 g64, or Intel's g128 expanded exactly; spec 21 §5)");
+                               "AutoRound int4 g64, or Intel's g128 expanded exactly)");
     for (uint32_t e = 0; e < d.experts; ++e)
       for (const char* m : kMlp) {
         const std::string b = lp + "mlp.experts." + std::to_string(e) + "." + m;
@@ -234,7 +234,7 @@ void Q4Checkpoint::check_names(bool mtp) const {
                              std::to_string(d_.forms.expert_group) + ") does not describe: " + bad +
                              (n_bad > 5 ? ", ..." : "") +
                              " - refusing to guess what they are (a quantised router or HC, an extra expert or layer, "
-                             "another packing are all outside spec 21's one format)");
+                             "another packing are all outside the one supported format)");
   for (const std::string& name : exp) {
     if (ends_with(name, ".qzeros")) continue;   // never read; assert_quant_invariants checks it when shipped
     if (!set_.tensors().contains(name))
@@ -262,7 +262,7 @@ LinearSrc Q4Checkpoint::int4(const std::string& prefix, uint32_t K, uint32_t N, 
 LinearSrc Q4Checkpoint::bf16(const std::string& prefix, uint32_t K, uint32_t N) {
   LinearSrc s = LinearSrc::classify(set_, prefix);
   if (s.kind != WKind::Bf16)
-    throw std::runtime_error("load_qwen4exp: '" + prefix + "' is int4; " + d_.name + " keeps it bf16 (spec 21 §5)");
+    throw std::runtime_error("load_qwen4exp: '" + prefix + "' is int4; " + d_.name + " keeps it bf16");
   if (s.K != K || s.N != N)
     throw std::runtime_error("load_qwen4exp: '" + prefix + ".weight' is [" + std::to_string(s.N) + "][" +
                              std::to_string(s.K) + "], the descriptor says [" + std::to_string(N) + "][" +
@@ -276,7 +276,7 @@ TensorInfo Q4Checkpoint::take(const std::string& name, uint64_t elems, const cha
   if (it == set_.tensors().end()) throw std::runtime_error("load_qwen4exp: no tensor '" + name + "'");
   const TensorInfo t = it->second;   // a copy (loader.cc's -Wdangling-reference note)
   if (t.dtype != dtype)
-    throw std::runtime_error("load_qwen4exp: '" + name + "' is " + t.dtype + ", expected " + dtype + " (spec 21 §5)");
+    throw std::runtime_error("load_qwen4exp: '" + name + "' is " + t.dtype + ", expected " + dtype);
   uint64_t n = 1;
   for (uint64_t x : t.shape) n *= x;
   if (n != elems)

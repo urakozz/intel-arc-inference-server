@@ -117,15 +117,16 @@ void usage() {
       "                 1..7, one card; --draft-model PATH, required). Greedy: the ids equal the plain run's.\n"
       "  --max-len L    KV cache and RoPE capacity: default 16384 (bench rows stay comparable); any\n"
       "                 multiple of 256 up to the trained context, refused if it does not fit; auto =\n"
-      "                 the largest that fits (spec 6 §10)\n"
+      "                 the largest that fits\n"
       "  --parallel P   auto (default): one card when the model and the context fit it, else pp; 1;\n"
-      "                 pp: the layers over two cards (spec 16; --prefill runs the two-card chunk\n"
+      "                 pp: the layers over two cards (--prefill runs the two-card chunk\n"
       "                 pipeline). Kolibri-1 and Nemotron 3.5 Bolt default to two cards.\n"
-      "                 tp (Qwen3.8): tensor parallel, every layer split over two cards (spec 17;\n"
-      "                 --prefill and --spec mtp / auto run on both cards).\n"
+      "                 tp (Qwen3.8): tensor parallel, every layer split over two cards\n"
+      "                 (--prefill and --spec mtp / auto run on both cards).\n"
       "  --pipeline-split auto|N   pp: device 0 runs layers [0, N); an override, it implies pp.\n"
       "  Kolibri-1 / Nemotron 3.5 Bolt / Qwen3.8-Flash-Next: --layers N (and Flash-Next's REQUIRED\n"
-      "                 --layers N|auto, until spec 22) loads only the first N layers (development mode).\n"
+      "                 --layers N|auto: the whole model needs the expert tier, not built yet) loads only\n"
+      "                 the first N layers (development mode).\n"
       "\n"
       "developer (benchmarks and profiles):\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones; a markdown row\n"
@@ -543,7 +544,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
       "  fence wall (submit + wait)    {:10.3f} us   [{:.3f} .. {:.3f}]   MEASURED, profiled list\n"
       "  gap = wall - sum              {:10.3f} us   = {:.3f} us/launch over {:d} launches\n"
       "                                                 UPPER BOUND: includes one host-scope\n"
-      "                                                 flush per launch (spec 1.5 §3.3)\n"
+      "                                                 flush per launch\n"
       "  sum / wall                    {:10.4f}\n",
       replays, n, sum_us, sum_lo, sum_hi, wall_us, wall_lo, wall_hi, wall_us - sum_us,
       (wall_us - sum_us) / double(n), n, sum_us / wall_us);
@@ -920,7 +921,7 @@ int run(int argc, char** argv) {
                              " (the session's chunk cap)");
   if (have_pp_chunk && pp_chunk > runtime::PrefillScratchDims::kCMax)
     throw std::runtime_error("--prefill-chunk " + std::to_string(pp_chunk) + " exceeds the widest chunk, " +
-                             std::to_string(runtime::PrefillScratchDims::kCMax) + " (plan 5d)");
+                             std::to_string(runtime::PrefillScratchDims::kCMax));
   if (have_pp_backend && !have_prefill_len && !prefill)
     throw std::runtime_error("--prefill-backend belongs to --prefill-length and --prefill; the"
                              " decode path has no GEMM backend");
@@ -956,7 +957,7 @@ int run(int argc, char** argv) {
   // cli/bolt_decode.h: the prefill's backend and chunk (spec 25d: l0 only, chunk a multiple of 64 <= 2048), --spec mtp (no MTP
   // head), --spec (spec 26: lookup / dflash), int8 KV (Decision 17)). A path that does not resolve is not Bolt - the flows below report it.
   if (cli::bolt::is_bolt(path)) {
-    if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Nemotron 3.5 Bolt takes --layers N");
+    if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's; Nemotron 3.5 Bolt takes --layers N");
     cli::bolt::DecodeArgs ba;
     ba.path = path;
     ba.ids_path = ids_path;
@@ -994,8 +995,8 @@ int run(int argc, char** argv) {
   // not Kolibri - the flows below report it, so every rejection keeps its order.
   if (cli::kolibri::is_kolibri(path)) {
     if (dflash.on)
-      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); Kolibri-1 has none");
-    if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Kolibri-1 takes --layers N");
+      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter; Kolibri-1 has none");
+    if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's; Kolibri-1 takes --layers N");
     cli::kolibri::DecodeArgs ka;
     ka.path = path;
     ka.ids_path = ids_path;
@@ -1026,7 +1027,7 @@ int run(int argc, char** argv) {
   // model without --layers (spec 22)). A path that does not resolve is not this family - the flows below report it.
   if (cli::qwen4exp::is_qwen4exp(path)) {
     if (dflash.on)
-      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); Qwen3.8-Flash-Next has none");
+      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter; Qwen3.8-Flash-Next has none");
     cli::qwen4exp::DecodeArgs qa;
     qa.path = path;
     qa.ids_path = ids_path;
@@ -1053,8 +1054,8 @@ int run(int argc, char** argv) {
     return cli::qwen4exp::run_decode<StdoutToStderr>(qa);
   }
   if (have_layers)
-    throw std::runtime_error("--layers belongs to Kolibri-1's and Qwen3.8-Flash-Next's development modes (spec 20c / "
-                             "21c: load only the first N layers); this checkpoint is neither model_type kolibri1 nor "
+    throw std::runtime_error("--layers belongs to Kolibri-1's and Qwen3.8-Flash-Next's development modes (load only "
+                             "the first N layers); this checkpoint is neither model_type kolibri1 nor "
                              "qwen4_exp");
   runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,

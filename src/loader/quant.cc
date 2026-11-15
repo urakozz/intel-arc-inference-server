@@ -57,7 +57,7 @@ std::string show(const common::json::Value& v) {
                             const std::string& why) {
   throw std::runtime_error("quantization_config." + field + " = " + value + ": " + why +
                            " - this loader reads compressed-tensors pack-quantized int4 "
-                           "symmetric g64 / g128 only (spec 20 §9, docs/13)");
+                           "symmetric g64 / g128 only (docs/13)");
 }
 
 // An object, `{}` or null: "nothing configured". Anything with content is.
@@ -221,7 +221,7 @@ LinearSrc classify_ct(const SafetensorsSet& set, const std::string& prefix,
                              "(compressed-tensors) - one packing per linear");
   if (ts.contains(prefix + ".weight_zero_point"))
     throw std::runtime_error(prefix + ".weight_zero_point: an asymmetric compressed-tensors "
-                             "linear - refused (spec 20 §9: no zero-point kernels, no exact "
+                             "linear - refused (no zero-point kernels, no exact "
                              "conversion to symmetric int4)");
   auto sc = ts.find(prefix + ".weight_scale");
   auto sh = ts.find(prefix + ".weight_shape");
@@ -551,7 +551,7 @@ QuantScan assert_quant_invariants(const SafetensorsSet& set) {
                                    std::to_string(group));
     } else if (ends_with(name, ".weight_zero_point")) {
       throw std::runtime_error(name + ": an asymmetric compressed-tensors linear - refused "
-                               "(spec 20 §9: no zero-point kernels, no exact conversion to "
+                               "(no zero-point kernels, no exact conversion to "
                                "symmetric int4)");
     } else if (ends_with(name, ".weight_packed")) {
       ++scan.ct_linears;
@@ -642,7 +642,7 @@ void check_quant_scan(const QuantConfig& qc, const QuantScan& scan) {
         "quantization_config actorder \"" + qc.ct_actorder + "\" stores a per-column group "
         "map, but only " + std::to_string(scan.ct_g_idx_tensors) + " of " +
         std::to_string(scan.ct_linears) + " linears ship a weight_g_idx - an activation-order "
-        "permutation the checkpoint did not write down is refused (spec 20 §9)");
+        "permutation the checkpoint did not write down is refused");
 }
 
 std::string ct_conversion_note(const QuantScan& scan) {

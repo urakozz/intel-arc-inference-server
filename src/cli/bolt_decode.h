@@ -108,21 +108,21 @@ inline uint32_t devices_of(const DecodeArgs& a, const model::BoltDesc& d) {
 // Every refusal that needs no device - in this order, each by name (tests/CMakeLists.txt's cli_reject_bolt_*).
 inline void check_args(const DecodeArgs& a, const model::BoltDesc& d) {
   if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
-    throw std::runtime_error("Nemotron 3.5 Bolt prefills on the l0 backend only (spec 25d), not l0-int8: int8 prefill for "
-                             "this family is out of scope (spec 25 §11) - --prefill-backend l0, or omit it");
+    throw std::runtime_error("Nemotron 3.5 Bolt prefills on the l0 backend only, not l0-int8: int8 prefill for "
+                             "this family is out of scope - --prefill-backend l0, or omit it");
   if (a.pp_chunk > runtime::bolt::kPfC)
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Nemotron 3.5 Bolt's prefill chunk " +
                              std::to_string(runtime::bolt::kPfC) + " (the scratch is sized for it)");
   if (a.pp_chunk && a.pp_chunk % runtime::bolt::kPfSub)
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " is not a multiple of " +
                              std::to_string(runtime::bolt::kPfSub) + ": the SSD's sub-chunks are absolute 64-row windows "
-                             "and every chunk ends on that grid (spec 25d)");
-  if (a.mtp) throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --spec mtp");
+                             "and every chunk ends on that grid");
+  if (a.mtp) throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (num_nextn_predict_layers 0): drop --spec mtp");
   if (a.spec)
-    throw std::runtime_error("--spec: Bolt's speculative decoding (spec 26, the LiLiCorr drafter) is served by b70-serve "
+    throw std::runtime_error("--spec: Bolt's speculative decoding (the LiLiCorr drafter) is served by b70-serve "
                              "--spec dflash / lookup; b70-decode decodes plainly");
   if (a.kv8)
-    throw std::runtime_error("--kv-cache int8: Nemotron 3.5 Bolt's KV is bf16 (spec 25 Decision 17: 8 KiB a position)");
+    throw std::runtime_error("--kv-cache int8: Nemotron 3.5 Bolt's KV is bf16 (8 KiB a position)");
   const uint32_t devs = devices_of(a, d);
   if (devs == 1) {
     if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --parallel pp (the block device 1 starts at)");
@@ -307,7 +307,7 @@ int run_decode(const DecodeArgs& a) {
                rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),
                rb::prefill_chunk_launches(eng.model().desc, eng.model().place), devs == 2 ? "both cards" : "one card",
                rb::kPrefillHeadLaunches,
-               devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+               devs == 2 ? "; the chunk crosses by copy, sequentially (an overlapped hand-off is not built yet)" : "");
     runtime::prefill::profile_reset();
   }
   std::print(stderr, "{}\n", eng.memory_line().c_str());

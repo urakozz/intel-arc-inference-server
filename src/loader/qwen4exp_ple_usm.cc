@@ -64,7 +64,7 @@ Q4PleTable load_q4_ple(l0::Context& ctx, const model::Qwen4ExpDesc& d, const std
       std::memcpy(&got, static_cast<const uint8_t*>(m.ptr()) + p * kQ4PlePage, 8);
       if (got != q4_ple_tag(r, p))
         throw std::runtime_error("load_q4_ple: host range " + std::to_string(r) + " page " + std::to_string(p) +
-                                 " reads back another tag - two pinned allocations alias (spec 22 P0.5)");
+                                 " reads back another tag - two pinned allocations alias");
       t.tag_checksum += got;
     }
   }

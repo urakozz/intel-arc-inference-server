@@ -60,10 +60,10 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
     : max_len_(max_len), opt_(opt), kv_(kv), drafter_(drafter) {
   if (stages.size() != kPpDevices)
     throw std::invalid_argument("runtime::PipelineEngine: " + std::to_string(stages.size()) +
-                                " stage models (spec 16b builds two)");
+                                " stage models (the pipeline has two)");
   if (d1.handle() != d0.handle())
     throw std::invalid_argument("runtime::PipelineEngine: device 1 is not a view of device 0's "
-                                "Level Zero context (spec 16 decision 1)");
+                                "Level Zero context");
   // P4: the hand-off writes device 1's memory from device 0 (the copy path's peer copy).
   // Refused here, by name, rather than as a fault on the first token.
   if (!d0.can_access_peer(d1))
@@ -87,7 +87,7 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
   if (drafter) {   // spec 19d
     if (stages[1].mtp)
       throw std::invalid_argument("runtime::PipelineEngine: a tap drafter and the MTP head are two proposers - "
-                                  "load the model without its head (spec 19 decision 3)");
+                                  "load the model without its head");
     if (drafter->max_k() == 0 || drafter->max_k() + 1 > TapVerifyDims::kSlots)
       throw std::invalid_argument("runtime::PipelineEngine: the drafter drafts " + std::to_string(drafter->max_k()) +
                                   " ids a block; the verify lists take 1.." + std::to_string(TapVerifyDims::kSlots - 1));

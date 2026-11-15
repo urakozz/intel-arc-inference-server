@@ -50,10 +50,10 @@ struct ServeArgs {
 // Every refusal that needs no device and no tensor, in this order (tests/CMakeLists.txt's cli_reject_serve_qwen4exp_*).
 inline void check_serve(const ServeArgs& s) {
   if (s.draft_vocab)
-    throw std::runtime_error("--draft-vocab is not built for Qwen3.8-Flash-Next's MTP head (spec 8 §11's compact head is "
+    throw std::runtime_error("--draft-vocab is not built for Qwen3.8-Flash-Next's MTP head (the compact head is "
                              "Qwen3.8's): drop --draft-vocab");
   if (s.args.kv8)
-    throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (spec 21 decision 8: int8 later - kv8.cl "
+    throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (int8 later - kv8.cl "
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
   if (s.mtp_k > runtime::qwen4exp::kMaxDraft)
     throw std::runtime_error("--spec-max " + std::to_string(s.mtp_k) + ": Qwen3.8-Flash-Next verifies at M <= 4 (K 1..3)");
@@ -85,7 +85,7 @@ inline void check_tokenizer(const std::string& path) {
   if (!holds_mark_class(j.at("pre_tokenizer")))
     throw std::runtime_error("'" + path + "' splits without \\p{M}: it is Qwen3.8's tokenizer.json (Intel's "
                              "Qwen3.8-Flash-Next-W4A16-AutoRound ships it), not Qwen3.8-Flash-Next's - the original's "
-                             "split regex keeps combining marks with their letters (spec 21 §12, finding 3). Serve a snapshot "
+                             "split regex keeps combining marks with their letters. Serve a snapshot "
                              "that ships Qwen/Qwen3.8-Flash-Next's tokenizer.json");
 }
 

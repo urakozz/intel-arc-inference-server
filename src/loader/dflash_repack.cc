@@ -132,7 +132,7 @@ void DFlashCheckpoint::open_and_check() {
     for (const char* own : {"embed_tokens.weight", "lm_head.weight"})
       if (c == own)
         refuse(dir_, "ships " + name + ": a DFlash drafter shares the target's embedding and head and must not own "
-                     "a copy (spec 19 §2)");
+                     "a copy");
     if (c == "d2t" || c == "t2d" || c.find(".d2t") != std::string::npos || c.find(".t2d") != std::string::npos)
       refuse(dir_, "ships " + name + ": a drafter vocabulary of its own (d2t / t2d) is not supported");
     if (c.find("mask_hidden") != std::string::npos)
@@ -324,7 +324,7 @@ DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& p
                                                unsigned threads) const {
   if (f == DraftFormat::Exact)
     refuse(dir_, std::string("--draft-format ") + draft_format_name(f) +
-                     " is the LiLiCorr drafter's (spec 26b): load bf16, int8 or int4 g64");
+                     " is the LiLiCorr drafter's: load bf16, int8 or int4 g64");
   if (packed_ && f != DraftFormat::Int4G64)
     refuse(dir_, std::string("an AutoRound int4 drafter loads as int4 (its own packed linears), not ") +
                      draft_format_name(f));

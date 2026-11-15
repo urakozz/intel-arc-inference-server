@@ -80,7 +80,7 @@ inline SpecArgs spec_args(const std::string& spec_arg, bool have_max, uint32_t m
 // The refusals that need the placement (the header's list), after spec_args.
 inline void check_spec(const SpecArgs& s) {
   if (s.on() && (s.max_k == 0 || s.max_k > kSpecMaxK))
-    throw std::runtime_error("--spec-max with Nemotron 3.5 Bolt expects 1..7 (LiLiCorr's block of 8 - 1, spec 26 Decision 5)");
+    throw std::runtime_error("--spec-max with Nemotron 3.5 Bolt expects 1..7 (LiLiCorr's block of 8 - 1)");
 }
 
 inline unsigned format_index(loader::DraftFormat f) {   // MtpCost::bolt_lilicorr's: 0 exact, 1 int8, 2 int4 g64

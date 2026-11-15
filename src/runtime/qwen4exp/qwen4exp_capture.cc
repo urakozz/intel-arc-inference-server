@@ -151,7 +151,7 @@ class Walk {
       require(d_.linear(model::Q4LinearId::GdnQkvz).shape.S == 1 && d_.qkvg_s == 2 && d_.gdn_out_s == 4 && d_.o_s == 4,
               "the int4 cells moved from S1 / S2 / S4 / S4 (the names spell them)");
     require((d_.forms.dense == model::Q4Form::Int4) == (d_.forms.shared == model::Q4Form::Int4),
-            "the dense and shared forms differ (21b reads them together: ours int4, Intel's bf16)");
+            "the dense and shared forms differ (they are read together: ours int4, Intel's bf16)");
     const bool int8 = part_.lm_head ? part_.lm_head->kind == model::WeightKind::Int8 : false;
     const bool bf16s = m_.ple.scale == loader::Q4PleScale::Bf16, eager = b_.attn == Q4Attn::Eager;
     std::vector<std::string> need;
@@ -181,7 +181,7 @@ class Walk {
     for (const std::string& v : need)   // a missing binary is named before a command is appended
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON" +
-                  (spec_.kind == ListKind::Decode ? "" : " and B70_MTP=ON (spec 21e)"));
+                  (spec_.kind == ListKind::Decode ? "" : " and B70_MTP=ON"));
     if (spec_.kind == ListKind::Draft) require(last, "a draft list off the last device");
   }
 

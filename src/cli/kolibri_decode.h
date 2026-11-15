@@ -104,19 +104,19 @@ inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.dev
 // and the index's names only).
 inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
   if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
-    throw std::runtime_error("Kolibri-1 prefills on the l0 backend only (spec 20d), not l0-int8: its h8 linears "
+    throw std::runtime_error("Kolibri-1 prefills on the l0 backend only, not l0-int8: its h8 linears "
                              "rotate in whole 1024-k Hadamard blocks and Kolibri's hidden is 2560 - "
                              "--prefill-backend l0, or omit it");
   if (a.pp_chunk > runtime::kolibri::kPfC)
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Kolibri-1's prefill chunk " +
                              std::to_string(runtime::kolibri::kPfC) + " (the scratch and the 4096-slot ring's "
                              "headroom are sized for it)");
-  if (a.mtp) throw std::runtime_error("Kolibri-1 has no MTP head (spec 20 §1); drop --spec mtp");
+  if (a.mtp) throw std::runtime_error("Kolibri-1 has no MTP head; drop --spec mtp");
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Kolibri-1's KV is bf16 only - 20 KiB a position on its 10 full "
-                             "layers, 5.4 GB at 262144 (spec 20 §2)");
+                             "layers, 5.4 GB at 262144");
   if (a.profile)
-    throw std::runtime_error("--profile is not built for Kolibri-1 (spec 20c Task 8, the box's speed work); "
+    throw std::runtime_error("--profile is not built for Kolibri-1; "
                              "--bench times it");
   const uint32_t devs = devices_of(a);
   const bool int8 = a.lm_head == loader::LmHeadForm::Int8;
@@ -194,7 +194,7 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
   } else {
     if (len > cap)
       throw std::runtime_error("--max-len " + std::to_string(len) + " exceeds Kolibri-1's trained context " +
-                               std::to_string(cap) + " - a longer context is spec 20 decision 3");
+                               std::to_string(cap) + " - a longer context is not supported");
     if (devs == 2 && a.pipe.split_auto)
       p = model::KolPlacement::two(d, rk::pp_split(d, len, int8, at, pf, a.spec).split);
     const std::vector<rk::DevicePlan> pl = rk::plan(d, p, len, int8, false, at, pf, a.spec);
@@ -278,7 +278,7 @@ int run_decode(const DecodeArgs& a) {
                "({}) + {:d} for the head{}\n", chunk, runtime::kolibri::kol_attn_name(eng.attention()),
                runtime::kolibri::prefill_chunk_launches(eng.model().desc, eng.model().placement),
                devs == 2 ? "both cards" : "one card", runtime::kolibri::kPrefillHeadLaunches,
-               devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+               devs == 2 ? "; the chunk crosses by copy, sequentially (an overlapped hand-off is not built yet)" : "");
   }
   std::print(stderr, "{}\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();

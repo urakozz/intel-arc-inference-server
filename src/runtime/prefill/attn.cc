@@ -201,7 +201,7 @@ bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   const uint32_t npad = pad256(depth);
   require(npad <= s.max_len, "the padding of depth " + std::to_string(depth) + " exceeds max_len " +
                                  std::to_string(s.max_len));
-  require(s.max_len % 256 == 0, "the L0 backend needs max_len % 256 == 0 (spec 2.1 §3.1)");
+  require(s.max_len % 256 == 0, "the L0 backend needs max_len % 256 == 0");
   const uint32_t ld = s.max_len;                       // pf_s / pf_p row pitch
   const size_t stride_l = size_t(rows) * ld;           // one head slot of pf_s / pf_p
   // pf_softmax_causal takes the head-slot stride as a uint32 argument (below): a chunk of

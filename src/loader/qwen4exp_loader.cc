@@ -127,7 +127,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   if (max_len == 0) throw std::runtime_error(full.name + ": max_len 0 is not a model length");
   if (max_len > full.trained_max_len)
     throw std::runtime_error(full.name + ": max_len " + std::to_string(max_len) + " exceeds the trained context " +
-                             std::to_string(full.trained_max_len) + " (context against cache is spec 21 decision 9)");
+                             std::to_string(full.trained_max_len));
   if (max_len % runtime::kMaxLenQuantum != 0)
     throw std::runtime_error(full.name + ": max_len " + std::to_string(max_len) + " is not a multiple of " +
                              std::to_string(runtime::kMaxLenQuantum) + " (the indexer's blocks of 4 and the prefill grid)");
@@ -137,8 +137,8 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
                              std::to_string(scan.g_idx_tensors) + " g_idx tensors");
   check_quant_scan(qc, scan);
   if (scan.ct_linears != 0)
-    throw std::runtime_error("load_qwen4exp: compressed-tensors linears in a qwen4_exp checkpoint - spec 21 serves "
-                             "AutoRound auto_round:auto_gptq exports only (§5, one format)");
+    throw std::runtime_error("load_qwen4exp: compressed-tensors linears in a qwen4_exp checkpoint - this engine serves "
+                             "AutoRound auto_round:auto_gptq exports only (one format)");
   if (qc.group_size != full.forms.expert_group)
     throw std::runtime_error("load_qwen4exp: quantization_config.group_size is " + std::to_string(qc.group_size) +
                              " but the routed experts' scales are g" + std::to_string(full.forms.expert_group) +
