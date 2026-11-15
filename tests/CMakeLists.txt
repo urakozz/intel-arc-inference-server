@@ -2034,10 +2034,11 @@ if(B70_ORNITH)
     if(b STREQUAL "l0-int8")
       # Plan 2026-11-12 (operator): l0-int8's experts are W4A8, judged by the PLAIN f32 reference (the pfi8 judge
       # simulates the rotated int8 form it replaced) under the gate's near-miss rule (prefill_gate_test.cc), no
-      # per-row accept lists.
+      # per-row accept lists - except cjk row 15 (f32 margin 3.02 ulp; l0 misses it at c16 too), operator
+      # 2026-11-15.
       set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
-      set(_acc_one "")
-      set(_acc_c16 "")
+      set(_acc_one "cjk:15")
+      set(_acc_c16 "cjk:15")
     endif()
     add_test(NAME prefill_gate_ornith_${b}_test COMMAND prefill_gate_test
       ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${_judge}
