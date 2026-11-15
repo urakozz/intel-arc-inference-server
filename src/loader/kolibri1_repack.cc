@@ -29,8 +29,6 @@ void add_int4(std::vector<std::string>& v, const std::string& base) {
   v.push_back(base + ".qzeros");
 }
 
-size_t int4_src_bytes(const LinearSrc& s) { return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2; }
-
 }  // namespace
 
 KolAttnForm kol_attn_form(const SafetensorsSet& st, const Kolibri1Desc& d) {

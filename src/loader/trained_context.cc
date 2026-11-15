@@ -1,9 +1,9 @@
 #include "loader/trained_context.h"
 
 #include <cmath>
-#include <fstream>
-#include <sstream>
 #include <stdexcept>
+
+#include "loader/snapshot.h"
 
 namespace loader {
 
@@ -24,12 +24,6 @@ uint32_t trained_context(const common::json::Value& config) {
   return 0;
 }
 
-uint32_t trained_context(const std::string& snapshot_dir) {
-  std::ifstream f(snapshot_dir + "config.json");
-  if (!f) throw std::runtime_error("cannot read " + snapshot_dir + "config.json");
-  std::stringstream s;
-  s << f.rdbuf();
-  return trained_context(common::json::parse(s.str()));
-}
+uint32_t trained_context(const std::string& snapshot_dir) { return trained_context(read_json(snapshot_dir + "config.json")); }
 
 }  // namespace loader

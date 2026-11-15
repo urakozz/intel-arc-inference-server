@@ -29,14 +29,6 @@ std::string with_slash(std::string p) {
   return p;
 }
 
-common::json::Value read_json(const std::string& path) {
-  std::ifstream f(path);
-  if (!f) throw std::runtime_error("cannot read " + path);
-  std::stringstream s;
-  s << f.rdbuf();
-  return common::json::parse(s.str());
-}
-
 bool ends_with(const std::string& s, const std::string& suf) {
   return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }

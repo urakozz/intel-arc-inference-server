@@ -3,8 +3,6 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
-#include <fstream>
-#include <sstream>
 #include <stdexcept>
 
 #include "common/json.h"
@@ -19,29 +17,6 @@
 
 namespace loader {
 namespace {
-
-common::json::Value read_json(const std::string& path) {
-  std::ifstream f(path);
-  if (!f) throw std::runtime_error("cannot read " + path);
-  std::stringstream s;
-  s << f.rdbuf();
-  return common::json::parse(s.str());
-}
-
-std::string model_type_of(const common::json::Value& cfg) {
-  if (!cfg.is_object()) return "";
-  const common::json::Value* v = cfg.find("model_type");
-  return v && v->is_string() ? v->str() : "";
-}
-
-l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  l0::Mem m(ctx, l0::MemKind::Device, bytes);
-  imm.copy(m.ptr(), src, bytes);
-  return m;
-}
-std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
-}
 std::unique_ptr<DeviceWeight> upload_w(l0::Context& ctx, l0::CmdList& imm, const Q4HostWeight& w, size_t& bytes) {
   bytes += w.bytes();
   if (w.kind == model::WeightKind::Int4)
@@ -230,24 +205,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
       P.final_mixer = upload_u(ctx, imm, fm.data(), fm.size());
       P.bytes += fm.size();
       // lm_head: spec 9's int8 rows + fp32 scales for gemv_i8w, or bf16 tiles for gemv_bf16.
-      const uint16_t* w = ck.lm_head();
-      const model::GemvShape sh{d.hidden, d.vocab, 1, 0};
-      if (int8) {
-        const auto q0 = std::chrono::steady_clock::now();
-        std::vector<int8_t> q(size_t(d.vocab) * d.hidden);
-        std::vector<float> s(d.vocab);
-        quantise_int8_tiled(w, d.hidden, d.vocab, q.data(), s.data());
-        m.lm_head_quant_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - q0).count();
-        P.lm_head = std::make_unique<DeviceWeight>(DeviceWeight{
-            upload(ctx, imm, q.data(), q.size()), upload_u(ctx, imm, s.data(), s.size() * 4), sh, model::WeightKind::Int8});
-        P.bytes += q.size() + s.size() * 4;
-      } else {
-        std::vector<uint16_t> t(size_t(d.vocab) * d.hidden);
-        common::repack_bf16_tiled(w, d.hidden, d.vocab, t.data());
-        P.lm_head = std::make_unique<DeviceWeight>(
-            DeviceWeight{upload(ctx, imm, t.data(), t.size() * 2), nullptr, sh, model::WeightKind::Bf16});
-        P.bytes += t.size() * 2;
-      }
+      P.lm_head = upload_lm_head(ctx, imm, ck.lm_head(), d.hidden, d.vocab, int8, m.lm_head_quant_seconds, P.bytes);
       if (mtp) {
         ck.repack_mtp(host);
         P.mtp = std::make_unique<Q4Layer>(upload_layer(ctx, imm, host, P.bytes));

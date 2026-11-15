@@ -14,15 +14,6 @@
 // the host holds one linear at a time beside the mmapped checkpoint.
 namespace loader {
 namespace {
-
-l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  l0::Mem m(ctx, l0::MemKind::Device, bytes);
-  imm.copy(m.ptr(), src, bytes);
-  return m;
-}
-std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
-}
 l0::Mem upload_f32(l0::Context& ctx, l0::CmdList& imm, const std::vector<float>& v, size_t& bytes) {
   bytes += v.size() * 4;
   return upload(ctx, imm, v.data(), v.size() * 4);

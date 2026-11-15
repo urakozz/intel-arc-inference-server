@@ -2,8 +2,6 @@
 
 #include <chrono>
 #include <cstdio>
-#include <fstream>
-#include <sstream>
 
 #include "common/json.h"
 #include "l0/cmdlist.h"
@@ -12,14 +10,6 @@
 
 namespace loader {
 namespace {
-
-common::json::Value read_json(const std::string& path) {
-  std::ifstream f(path);
-  if (!f) throw std::runtime_error("cannot read " + path);
-  std::stringstream s;
-  s << f.rdbuf();
-  return common::json::parse(s.str());
-}
 
 model::BoltDesc desc_of(const common::json::Value& cfg, uint32_t layers_limit) {
   model::BoltDesc d = model::bolt_desc(cfg);
@@ -32,14 +22,6 @@ model::BoltDesc desc_of(const common::json::Value& cfg, uint32_t layers_limit) {
   return d;
 }
 
-l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  l0::Mem m(ctx, l0::MemKind::Device, bytes);
-  imm.copy(m.ptr(), src, bytes);
-  return m;
-}
-std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
-}
 // `shape.layout` picks whether `scales` is a real, separate allocation (0: DeviceWeight::scales, loader.h's rule) or null (1:
 // inline in `words` already).
 std::unique_ptr<DeviceWeight> upload_linear(l0::Context& ctx, l0::CmdList& imm, const BoltHostLinear& ln, model::GemvShape shape) {
@@ -172,25 +154,8 @@ BoltLoaded load_bolt(const std::vector<l0::Context*>& devices, const std::string
       const std::vector<float> fn = ck.final_norm();
       P.final_norm = upload_u(ctx, imm, fn.data(), fn.size() * 4);
       P.bytes += fn.size() * 4;
-      const model::GemvShape sh{d.hidden, d.vocab, 1, 0};
-      if (o.int8_head) {
-        const auto q0 = std::chrono::steady_clock::now();
-        std::vector<int8_t> q(size_t(d.vocab) * d.hidden);
-        std::vector<float> s(d.vocab);
-        quantise_int8_tiled(ck.lm_head(), d.hidden, d.vocab, q.data(), s.data());
-        m.lm_head_quant_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - q0).count();
-        P.head = std::make_unique<DeviceWeight>(DeviceWeight{upload(ctx, imm, q.data(), q.size()),
-                                                             upload_u(ctx, imm, s.data(), s.size() * 4), sh,
-                                                             model::WeightKind::Int8});
-        P.bytes += q.size() + s.size() * 4;
-      } else {
-        // the untied bf16 head: its OWN tiles (not the embedding's)
-        std::vector<uint16_t> tiles(size_t(d.hidden) * d.vocab);
-        common::repack_bf16_tiled(ck.lm_head(), d.hidden, d.vocab, tiles.data());
-        P.head = std::make_unique<DeviceWeight>(
-            DeviceWeight{upload(ctx, imm, tiles.data(), tiles.size() * 2), nullptr, sh, model::WeightKind::Bf16});
-        P.bytes += tiles.size() * 2;
-      }
+      // the untied head: its OWN tiles or int8 rows (not the embedding's)
+      P.head = upload_lm_head(ctx, imm, ck.lm_head(), d.hidden, d.vocab, o.int8_head, m.lm_head_quant_seconds, P.bytes);
     }
     const size_t want = bolt::device_weight_bytes(d, place, dev, o.int8_head);
     if (P.bytes != want)

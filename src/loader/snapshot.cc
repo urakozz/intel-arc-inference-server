@@ -2,6 +2,7 @@
 #include <sys/stat.h>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 
 namespace loader {
@@ -44,5 +45,19 @@ std::string resolve_snapshot(const std::string& arg) {
   if (!is_file(snap + "config.json"))
     throw std::runtime_error("snapshot incomplete (no config.json): " + snap);
   return snap;
+}
+
+common::json::Value read_json(const std::string& path) {
+  std::ifstream f(path);
+  if (!f) throw std::runtime_error("cannot read " + path);
+  std::stringstream s;
+  s << f.rdbuf();
+  return common::json::parse(s.str());
+}
+
+std::string model_type_of(const common::json::Value& cfg) {
+  if (!cfg.is_object()) return "";
+  const common::json::Value* v = cfg.find("model_type");
+  return v && v->is_string() ? v->str() : "";
 }
 }  // namespace loader
