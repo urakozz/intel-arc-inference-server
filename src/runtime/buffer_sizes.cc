@@ -96,7 +96,7 @@ size_t partials_bytes(const model::ModelDesc& desc) {
     if (fl.kind != model::WeightKind::Int4) continue;
     if (fl.shape.S > max_s) max_s = fl.shape.S;
   }
-  return size_t{max_s} * DecodeScratchDims::kM * max_int4_n(desc) * kFp32;
+  return size_t{max_s} * DecodeScratchDims::kWideM * max_int4_n(desc) * kFp32;
 }
 
 // One GDN state slot: fp32 [gdn_layers][v-heads][128 k][128 v] (150.99 MB on Qwen3.8).
@@ -180,25 +180,25 @@ PersistentSizes PersistentDims::stage_sizes(uint32_t max_len, const model::Model
 
 DecodeScratchSizes DecodeScratchDims::sizes(uint32_t /*max_len*/, const model::ModelDesc& desc) {
   DecodeScratchSizes s{};
-  s.resid = size_t{kM} * desc.hidden * kBf16;
-  s.x = size_t{kM} * x_width(desc) * kBf16;
+  s.resid = size_t{kWideM} * desc.hidden * kBf16;
+  s.x = size_t{kWideM} * x_width(desc) * kBf16;
   s.partials = partials_bytes(desc);
-  s.ab_out = size_t{kM} * desc.shape(model::LinearId::AB).N * kFp32;
+  s.ab_out = size_t{kWideM} * desc.shape(model::LinearId::AB).N * kFp32;
   // prep_res_fold's chunk sums-of-squares, one fp32 per (work-group,
-  // token): 20 x 8 x 4 = 640 B, one allocation reused by all 129 sites
+  // token): 20 x 16 x 4 = 1280 B, one allocation reused by all 129 sites
   // because the list is in-order and each site's stage B consumes what its
   // own stage A wrote before the next site's stage A overwrites it.
-  s.norm_sumsq = size_t{kNormGroups} * kM * kFp32;
-  s.gdn_o = size_t{kM} * desc.gdn_value_dim() * kFp32;
-  s.attn_q = size_t{kM} * desc.fa_value_dim() * kFp32;
-  s.attn_gate = size_t{kM} * desc.fa_value_dim() * kFp32;
+  s.norm_sumsq = size_t{kNormGroups} * kWideM * kFp32;
+  s.gdn_o = size_t{kWideM} * desc.gdn_value_dim() * kFp32;
+  s.attn_q = size_t{kWideM} * desc.fa_value_dim() * kFp32;
+  s.attn_gate = size_t{kWideM} * desc.fa_value_dim() * kFp32;
   // v2 never has more than kAttnV2Blocks per row, [q-heads][32][M][258], whatever max_len
   // is - 6.34 MB on Qwen3.8 (the removed v1 strided every block of the cache: 405.8 MB at
   // 131072).
-  s.attn_part = size_t{desc.fa_q_heads} * kAttnV2Blocks * kM * kAttnPartStride * kFp32;
-  s.attn_out = size_t{kM} * desc.fa_value_dim() * kBf16;
-  s.logits = size_t{kM} * Q::kVocab * kFp32;
-  s.argmax_part = size_t{kM} * kArgmaxGroups * 2 * kFp32;
+  s.attn_part = size_t{desc.fa_q_heads} * kAttnV2Blocks * kWideM * kAttnPartStride * kFp32;
+  s.attn_out = size_t{kWideM} * desc.fa_value_dim() * kBf16;
+  s.logits = size_t{kWideM} * Q::kVocab * kFp32;
+  s.argmax_part = size_t{kWideM} * kArgmaxGroups * 2 * kFp32;
   s.moe = moe_scratch_layout(desc).total;
   return s;
 }
@@ -294,7 +294,8 @@ MtpSizes MtpDims::tp_sizes(uint32_t max_len, const model::ModelDesc& card, const
 
 uint32_t MtpDims::hh_rows(uint32_t seqs) {
   const uint32_t one = DecodeScratchDims::kM + 1;
-  return seqs <= 1 ? one : seqs * one + 3 * DecodeScratchDims::kM;
+  // Open-work 28: one sequence's rows reach the wide verify list's 16 (the slots' layout keeps kM).
+  return seqs <= 1 ? DecodeScratchDims::kWideM + 1 : seqs * one + 3 * DecodeScratchDims::kM;
 }
 
 // --- spec 13c: SlotDims --------------------------------------------------------------------

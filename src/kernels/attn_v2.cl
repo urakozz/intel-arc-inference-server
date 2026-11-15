@@ -101,8 +101,9 @@
 // M = 5..8: spec 19a's verify probe (B70_VERIFY_M8). qpack is 6 KB x M (48 KB at 8, under
 // the 128 KB a work-group may hold) and mx / sm / acc hold 6 x M floats per lane; the rows
 // of one launch still span at most two strides (ppw moves every 2048 keys).
-#if M < 1 || M > 8
-#error "attn_v2: M is 1..8"
+// M = 16 (open-work 28): built only for its attn_reduce_v2 - the 16-row verify list's attention is attn_verify_dpas.
+#if M < 1 || (M > 8 && M != 16)
+#error "attn_v2: M is 1..8 (16 for the wide verify list's reduce)"
 #endif
 
 // BATCH_ROWS (spec 13 §9, plan 13a; undefined on every existing command line): rows of DIFFERENT sequences. Both

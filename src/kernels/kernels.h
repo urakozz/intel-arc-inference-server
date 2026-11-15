@@ -437,9 +437,9 @@ inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, un
 // binds the 8-slot build, `_N8` (runtime::MtpBuffers::slots).
 // verify-cost-m8: gdn_step.cl's DEFERRED build at M rows (M = 1..8), Qwen3.8's 48 GDN layers and heads only - the
 // pending rows' parity stride is baked: kGdnPendParityBytes = 48 layers x kGdnPendLayerBytes.
-inline constexpr size_t kGdnPendLayerBytes = 8 * (16 + 48) * 128 * 2 + 8 * 48 * 2 * 4;
+inline constexpr size_t kGdnPendLayerBytes = 16 * (16 + 48) * 128 * 2 + 16 * 48 * 2 * 4;   // PR = 16 rows (open-work 28)
 inline constexpr size_t kGdnPendParityBytes = 48 * kGdnPendLayerBytes;
-static_assert(kGdnPendParityBytes == 6438912, "src/kernels/CMakeLists.txt's PEND_PAR");
+static_assert(kGdnPendParityBytes == 12877824, "src/kernels/CMakeLists.txt's PEND_PAR");
 inline std::string gdn_step_defer_variant(unsigned M) { return "gdn_step_defer_M" + std::to_string(M); }
 inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers,
                                           unsigned gdn_k = kRefGdnKHeads,
@@ -465,6 +465,8 @@ inline constexpr unsigned kDebugFlag = 18;  // Control::debug_flag
 inline constexpr unsigned kGdnLive = 19;    // Control::gdn_live (spec 8, SPEC_SLOTS only)
 inline constexpr unsigned kGdnPend = 30;    // Control::gdn_pend (gdn_step.cl's DEFERRED build, CTRL_PEND)
 inline constexpr unsigned kDraftStat = 28;  // Control::draft_stat[2] (open-work 13, draft_prob.cl's CTRL_DSTAT)
+inline constexpr unsigned kWideCur = 32;    // Control::wide_cur[16] (open-work 28: the 16-row builds' CTRL_CUR)
+inline constexpr unsigned kWideOut = 48;    // Control::wide_out[16] (their CTRL_OUT)
 }  // namespace ctrl_index
 
 // The token-boundary kernels (src/kernels/embed_gather.cl, argmax.cl). `M` is
@@ -482,7 +484,8 @@ inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
 }
 // Stage 2 is a single work-group that loops m < ctrl.n_active internally: no
 // variants at all, so the binary is named after the entry point.
-inline std::string argmax_stage2_variant() { return "argmax_stage2"; }
+// Open-work 28: the 16-row list's stage 2 writes Control::wide_out and wide_cur[0] (CTRL_OUT 48, CTRL_CUR 32).
+inline std::string argmax_stage2_variant(unsigned M = 1) { return M > 8 ? "argmax_stage2_W16" : "argmax_stage2"; }
 // Open-work 13: the draft's probability over a logits row of `rows` entries, `used` of them real ids
 // (src/kernels/draft_prob.cl: draft_prob_stage1 / _stage2 in one binary, WG 256, 1024 logits per stage-1 group).
 inline std::string draft_prob_variant(unsigned rows, unsigned used) {

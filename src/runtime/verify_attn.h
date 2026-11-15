@@ -48,6 +48,7 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {6, false, 0},      // 1.91 | 1.20 | 2.28 | 3.90 | 5.36 | 6.21  (DFlash only, M = 6..8)
     {7, false, 0},      // 2.22 | 1.70 | 2.90 | 4.71 | 6.34 | 7.06
     {8, false, 0},      // 2.89 | 3.43 | 6.10 | 5.77 | 8.22 | 8.91
+    {16, false, 0},     // open-work 28: the wide list's 16 rows - no v2 there (DPAS KS 1 at 32 key blocks)
     // int8: N1 now holds at every depth (worst 0.9999984 at 130816; the 4096 row that needed the operator ruling of
     // 2026-11-03 - P in bf16 - is 0.9999999). M = 2 at 4096 is 1.01 with its low end 0.999: v2 there.
     {2, true, 11585},   // 0.57 | 0.59 | 1.01 | 1.75 | 2.05 | 2.36

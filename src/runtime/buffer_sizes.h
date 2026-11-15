@@ -84,7 +84,7 @@ struct PersistentSizes {
 };
 
 struct PersistentDims {
-  static constexpr uint32_t kConvRing = 16;   // ring depth >= M + 3 (spec §9.4)
+  static constexpr uint32_t kConvRing = 32;   // ring depth >= M + 3 (spec §9.4; open-work 28: the 16-row verify)
   // kv_k / kv_v are kv_layout(max_len, desc, fa_layers, kv).bytes() each (spec 12b).
   static PersistentSizes sizes(uint32_t max_len, const model::ModelDesc& desc,
                                KvCache kv = default_kv_cache());
@@ -132,6 +132,9 @@ MoeScratchLayout moe_scratch_layout(const model::ModelDesc& desc);   // all zero
 
 struct DecodeScratchDims {
   static constexpr uint32_t kM = 8;
+  // Open-work 28: the one-card wide verify list's rows (long prompt-lookup runs) - the row dimension the decode
+  // scratch and one sequence's hh rows are sized for. Every other list (rows, TP, taps, drafts) stays at kM.
+  static constexpr uint32_t kWideM = 16;
   // KV positions per `attn_decode` work-group - spec 1.5's lever L5 took it
   // from 256 to 64. Since the zero-config cleanup (2026-11-06) decode attention v1
   // (attn.cl's attn_decode / attn_reduce) is no engine's: it survives only as the

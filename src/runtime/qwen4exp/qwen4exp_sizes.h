@@ -39,7 +39,7 @@ namespace runtime::qwen4exp {
 //                                                                          addressing, 21b planned [2] + [9])
 // An empty group (a device with no QSA / no GDN layer, the PLE state off the PLE layer's device) still
 // allocates one 64-byte line.
-inline constexpr uint32_t kConvRing = 16;   // = PersistentDims::kConvRing (Qwen3.8's gdn_step ring)
+inline constexpr uint32_t kConvRing = 32;   // = PersistentDims::kConvRing (Qwen3.8's gdn_step ring)
 inline constexpr uint32_t kIdxTail = 8;     // the open block's raw keys (kernels::qwen4exp::kTailSlots)
 inline constexpr uint32_t kPleRing = 16;    // the PLE id and conv rings (kernels::qwen4exp::kPleRing)
 struct PersistentSizes {

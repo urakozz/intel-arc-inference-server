@@ -8,7 +8,7 @@ namespace runtime {
 // The host writes cur_token[0] before a replay only during prompt ingestion,
 // and reads out_token[0] after the fence. Nothing else moves per token.
 // 128 B = two cache lines (the spec's §8.2 sketch said 64 B but its own
-// fields need 96 - corrected here, noted in the spec by Task 6).
+// fields need 96 - corrected here, noted in the spec by Task 6); 256 B since open-work 28 (the wide rows' ids).
 struct Control {
   uint32_t pos;            // KV slot / position of token 0 of this step
   uint32_t n_active;       // tokens in this step (1 in this plan)
@@ -28,7 +28,11 @@ struct Control {
   // verify-cost-m8: the one-card verify lists' committed rows (gdn_step.cl, DEFERRED): bits 0..7 the rows the next
   // launch replays, bit 8 the parity they sit in. Engine::commit sets it, Engine::verify clears the count. 0 elsewhere.
   uint32_t gdn_pend;
-  uint32_t pad[1];         // pad to 128 B
+  uint32_t pad[1];
+  // Open-work 28: the one-card 16-row verify list's ids (its builds read CTRL_CUR 32 and write CTRL_OUT 48, so the
+  // 8-id fields above keep their offsets for every other list): wide_cur[0..15] in, wide_out[0..15] out.
+  uint32_t wide_cur[16];
+  uint32_t wide_out[16];
 };
-static_assert(sizeof(Control) == 128, "control block is two cache lines");
+static_assert(sizeof(Control) == 256, "control block is four cache lines");
 }  // namespace runtime

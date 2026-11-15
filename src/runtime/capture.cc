@@ -541,7 +541,11 @@ class Capture {
     require(mtp_->max_len == b_.max_len, "MtpBuffers max_len != buffers max_len");
     // Spec 19a: a buffer with more slots (probe_mtp_steps' M = 5..8 lists) takes up to
     // `slots` rows; every engine's buffers have kSlots.
-    require(kCapM <= mtp_->slots, "an MTP verify list has at most MtpBuffers::slots rows");
+    // Open-work 28: the one-card wide list (DecodeScratchDims::kWideM rows) needs no slot a row - it binds the
+    // DEFERRED GDN build, which keeps the state once whatever M.
+    require(kCapM <= mtp_->slots || (kCapM == DecodeScratchDims::kWideM && mode_ == Mode::Verify && sb_.gdn_pend),
+            "an MTP verify list has at most MtpBuffers::slots rows (the wide list: the deferred GDN build)");
+    require(kCapM <= DecodeScratchDims::kM || !kv8_, "the wide verify list is built for the bf16 KV cache");
     require(mtp_->slots == MtpBuffers::kSlots || mode_ == Mode::Verify,
             "only a single-card verify list binds a GDN slot count other than kSlots");
     require((mode_ != Mode::Draft && mode_ != Mode::StageDraft) ||
@@ -1442,7 +1446,7 @@ class Capture {
     // only writer of `pos` and `cur_token` inside the list, and therefore the
     // last kernel of the step.
     {
-      l0::Kernel& k = kernel(kernels::argmax_stage2_variant(), "argmax_stage2", kWgArgmax);
+      l0::Kernel& k = kernel(kernels::argmax_stage2_variant(kCapM), "argmax_stage2", kWgArgmax);
       k.arg_ptr(0, ctrl());
       k.arg_ptr(1, b_.argmax_part.ptr());
       launch(k, 1, 1);
@@ -2072,7 +2076,10 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
                           const SlotBind& slot) {
   // Spec 19a: up to the buffers' slot count (kSlots = 4 on every engine; 8 for
   // probe_mtp_steps' M = 5..8 lists), never past DecodeBuffers::kM.
-  if (M == 0 || M > mtp.slots || M > DecodeBuffers::kM)
+  // Open-work 28: or the one-card wide list at DecodeScratchDims::kWideM rows (the deferred GDN build: SlotBind's
+  // gdn_pend).
+  const bool wide = M == DecodeScratchDims::kWideM && slot.gdn_pend != nullptr;
+  if (M == 0 || (!wide && (M > mtp.slots || M > DecodeBuffers::kM)))
     throw std::runtime_error("runtime::build_verify: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(mtp.slots) +
                              "] (MtpBuffers::slots)");

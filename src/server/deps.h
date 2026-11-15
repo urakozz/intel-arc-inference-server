@@ -190,6 +190,23 @@ struct EngineIface {
     (void)choose;
     return step_many(s, k);
   }
+  // Open-work 28 (one card, the engine's wide verify list): lookup_wide_k() is the deepest lookup verify the engine
+  // takes (runtime::Engine::kWideK, 15; 0: none - the server's policy then never proposes past mtp_k()).
+  // step_drafts_or_confirmed is step_drafts_or_chosen that may also take a lookup run the MTP head confirms: when
+  // propose(x) gave no drafts and `choose` is set, it asks confirm.candidate() once; with a candidate, the head's first
+  // two drafts are compared with it and, when both agree, the candidate is verified instead of the head's drafts and confirm.confirmed() is
+  // called (the iteration is then a lookup iteration with candidate.size() drafts); otherwise the MTP iteration runs as
+  // step_drafts_or_chosen's. The default ignores `confirm`.
+  struct LookupConfirm {
+    std::function<std::vector<uint32_t>()> candidate;
+    std::function<void()> confirmed;
+  };
+  virtual uint32_t lookup_wide_k() { return 0; }
+  virtual std::vector<uint32_t> step_drafts_or_confirmed(const Sampling& s, uint32_t k, const Proposer& propose,
+                                                         const DraftChoice& choose, const LookupConfirm& confirm) {
+    (void)confirm;
+    return step_drafts_or_chosen(s, k, propose, choose);
+  }
 
  private:
   template <class T>
