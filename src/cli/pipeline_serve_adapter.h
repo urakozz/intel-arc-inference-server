@@ -217,7 +217,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
       eng.read_logits_into(p, k + 1);
       a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V_, sampling, rng);
     }
-    return spec_run(n, x, k, a);
+    return spec_run(n, x, k, a, eng.draft_ids());
   }
 
   // Open-work 13: EngineAdapter::step_chosen - the head's drafts chosen one at a time, greedy.
@@ -245,26 +245,36 @@ struct PipelineEngineAdapterT : server::EngineIface {
       const uint32_t kv = v < 0 ? static_cast<uint32_t>(eng.draft_ids().size()) : static_cast<uint32_t>(v);
       ++mtp_iters_at_k[kv];
       eng.verify(kv);
-      return spec_run(n, x, kv, server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv));
+      const server::AcceptResult a = server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv);
+    return spec_run(n, x, kv, a, eng.draft_ids());
     } else {
       (void)choose;
       return step_many(sampling, k_req);   // chooses_drafts() is false: the server never calls this
     }
   }
 
-  // The iteration's deferred commit and counters; returns x and the kept drafts.
-  std::vector<uint32_t> spec_run(uint32_t n, uint32_t x, uint32_t k, const server::AcceptResult& a) {
+  // The iteration's deferred commit and counters - an MTP or DFlash iteration's, or (`lookup`) a lookup run's: `drafts`'
+  // first k are the run, its first a.accepted are kept. Returns x and the kept drafts.
+  std::vector<uint32_t> spec_run(uint32_t n, uint32_t x, uint32_t k, const server::AcceptResult& a,
+                                 const std::vector<uint32_t>& drafts, bool lookup = false) {
     pending_ = true;
     pending_pos_ = n;
     pending_j_ = a.accepted;
     pending_next_ = a.next_token;
-    pending_drafts_ = eng.draft_ids();
-    ++mtp_iters;
-    mtp_drafted += k;
-    mtp_accepted += a.accepted;
+    pending_drafts_.assign(drafts.begin(), drafts.begin() + k);
     std::vector<uint32_t> out{x};
-    out.insert(out.end(), pending_drafts_.begin(), pending_drafts_.begin() + a.accepted);
+    out.insert(out.end(), drafts.begin(), drafts.begin() + a.accepted);
     gen_tokens_ += static_cast<uint32_t>(out.size());
+    if (lookup) {
+      lk_drafted_ += k;
+      lk_accepted_ += a.accepted;
+      lk_ids_ += out.size();
+      pending_lookup_ = true;   // a truncate_to of this run takes its dropped ids off lk_ids_
+    } else {
+      ++mtp_iters;
+      mtp_drafted += k;
+      mtp_accepted += a.accepted;
+    }
     return out;
   }
 
@@ -303,18 +313,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
       eng.read_logits_into(p, k + 1);
       a = server::accept_sparse(p, q, drafts.data(), k, vocab_used, V_, sampling, rng);
     }
-    pending_ = true;
-    pending_pos_ = n;
-    pending_j_ = a.accepted;
-    pending_next_ = a.next_token;
-    pending_drafts_ = drafts;
-    ++mtp_iters;
-    mtp_drafted += k;
-    mtp_accepted += a.accepted;
-    std::vector<uint32_t> out{x};
-    out.insert(out.end(), drafts.begin(), drafts.begin() + a.accepted);
-    gen_tokens_ += static_cast<uint32_t>(out.size());
-    return out;
+    return spec_run(n, x, k, a, drafts);
   }
 
   // --- spec 19 v3c: prompt lookup inside DFlash (EngineAdapter::step_drafts_or_many, spec 19f) ----------------
@@ -351,19 +350,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
         eng.read_logits_into(p, k + 1);
         a = server::accept_point_mass(p, d.data(), k, vocab_used, V_, sampling, rng);
       }
-      pending_ = true;
-      pending_pos_ = n;
-      pending_j_ = a.accepted;
-      pending_next_ = a.next_token;
-      pending_drafts_.assign(d.begin(), d.begin() + k);
-      lk_drafted_ += k;
-      lk_accepted_ += a.accepted;
-      std::vector<uint32_t> out{x};
-      out.insert(out.end(), d.begin(), d.begin() + a.accepted);
-      gen_tokens_ += static_cast<uint32_t>(out.size());
-      lk_ids_ += out.size();
-      pending_lookup_ = true;   // a truncate_to of this run takes its dropped ids off lk_ids_
-      return out;
+      return spec_run(n, x, k, a, d, true);
     } else {
       throw std::logic_error("PipelineEngineAdapter::step_drafts_or_many: no tap drafter");
     }
@@ -392,18 +379,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
       eng.read_logits_into(p, k + 1);
       a = server::accept_point_mass(p, d.data(), k, vocab_used, V_, sampling, rng);
     }
-    pending_ = true;
-    pending_pos_ = n;
-    pending_j_ = a.accepted;
-    pending_next_ = a.next_token;
-    pending_drafts_.assign(d.begin(), d.begin() + k);
-    ++mtp_iters;
-    mtp_drafted += k;
-    mtp_accepted += a.accepted;
-    std::vector<uint32_t> out{x};
-    out.insert(out.end(), d.begin(), d.begin() + a.accepted);
-    gen_tokens_ += static_cast<uint32_t>(out.size());
-    return out;
+    return spec_run(n, x, k, a, d);
   }
 
   // Keep x_n, d_1 .. d_m of the last iteration (EngineAdapter::truncate_to).
