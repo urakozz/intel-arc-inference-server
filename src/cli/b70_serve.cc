@@ -918,6 +918,7 @@ struct ReplicaServe {
   std::vector<uint32_t> eos;
   uint32_t max_num_seqs = 2;
   cli::dflash::Args dflash;   // --spec dflash: a drafter on each card
+  bool mtp_lookup = false;    // open-work 27: lookup inside MTP on each card (one request a card; B70_SPEC_LOOKUP=0 off)
 };
 
 int serve_replica(const ReplicaServe& a, server::Options options) {
@@ -1012,6 +1013,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     requests += e.slots();
   }
   cli::ReplicaEngine replica(cards, hooked, /*wide_stride=*/true);
+  options.spec_mtp_lookup = a.mtp_lookup && slots_engines.empty();   // open-work 27: one request a card, as one card
   // The serial server's view (startup line, refusals): card 0's engine - its slot 0's adapter when it has slots.
   server::EngineIface& first = cards[0].engine != nullptr ? *cards[0].engine : slots_engines[0]->adapter(0);
   options.parallel_desc = "replica - one copy of the model per card, " + std::to_string(requests) + " requests at once";
@@ -1027,6 +1029,16 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
                loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engines[0]->kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  engines[0]->model().desc->is_moe(), engines[0]->model().desc->name);
+  if (options.spec_mtp_lookup)   // open-work 27 / 28 on each card, one card's lines
+    std::fprintf(stderr,
+                 "spec mtp: prompt lookup inside MTP on each card - ENTER a match of >= %u ids, STAY while a verify "
+                 "keeps >= %u (and a match of >= %u remains), K %u lookup drafts; long runs in one %u-row verify on "
+                 "card 0 %s, card 1 %s\n",
+                 server::LookupInDFlash::kEnterMatch, server::LookupInDFlash::kStayAccepted,
+                 server::LookupInDFlash::kStayMatch, a.mtp_k, runtime::Engine::kWideK + 1,
+                 engines[0]->wide_built() ? "yes" : "no", engines[1]->wide_built() ? "yes" : "no");
+  else if (a.mtp_k > 0 && slots_engines.empty())
+    std::fprintf(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
   for (uint32_t i = 0; a.dflash.on && i < 2; ++i) {   // spec 19c: each card's drafter policy line, as on one card
     const server::MtpCost& c = options.mtp_adaptive.cost;
     std::fprintf(stderr, "card %u: spec dflash: %s drafter, K <= %u, cost verify M=1..%zu", i,
@@ -1276,7 +1288,7 @@ int run(int argc, char** argv) {
   // Operator ruling 2026-11-14: prompt lookup is folded into --spec dflash where lookup inside DFlash is built (one card,
   // one slot - the engine below; --parallel tp - serve_tp); B70_SPEC_LOOKUP=0 keeps plain DFlash there (A/B runs).
   // --spec dflash-lookup asks it explicitly and is refused where it is not built. Open-work 27: the same inside MTP
-  // (--spec auto / mtp, one card, one slot), B70_SPEC_LOOKUP=0 plain MTP.
+  // (--spec auto / mtp, one card, one slot; --parallel replica, one request a card), B70_SPEC_LOOKUP=0 plain MTP.
   const bool lookup_env = [] {
     const char* env = std::getenv("B70_SPEC_LOOKUP");
     return !(env != nullptr && std::string(env) == "0");
@@ -1492,6 +1504,7 @@ int run(int argc, char** argv) {
     rs.eos = eos;
     rs.max_num_seqs = max_num_seqs;
     rs.dflash = dflash;
+    rs.mtp_lookup = mtp_on && lookup_env;   // open-work 27: the cards' one-slot engines; serve_replica checks
     return serve_replica(rs, options);
   }
   // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else

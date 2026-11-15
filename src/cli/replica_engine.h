@@ -134,6 +134,9 @@ class ReplicaEngine : public server::BatchEngineIface {
             f.block = e->block();
             f.kv_form = e->kv_form();
             f.drafter_key = e->drafter_key();
+            f.mtp_lookup = e->mtp_lookup();
+            f.wide_k = e->lookup_wide_k();
+            f.chooses = e->chooses_drafts();
           } else {
             server::BatchEngineIface& b = *cards_[c].slots;
             f.max_len = b.slot_max_len(l);
@@ -294,9 +297,23 @@ class ReplicaEngine : public server::BatchEngineIface {
     return ids;
   }
 
-  // MTP (the head on each card), DFlash (each card's drafter) or prompt lookup (a row with a proposer).
+  // MTP (the head on each card), DFlash (each card's drafter), prompt lookup (a row with a proposer) or lookup inside
+  // MTP (open-work 27: a row with mtp_lookup, the card's step_drafts_or_confirmed).
   uint32_t spec_k() override { return facts_[0].mtp_k; }
   uint32_t verify_k() override { return facts_[0].verify_k; }
+  // Open-work 27: lookup inside MTP on every card (each a single-sequence engine: a card with slots has none), each
+  // card's own wide verify depth (open-work 28), the per-step draft choice on every card (open-work 13).
+  bool mtp_lookup() override {
+    for (const Facts& f : facts_)
+      if (!f.mtp_lookup) return false;
+    return true;
+  }
+  uint32_t lookup_wide_k(uint32_t slot) override { return facts_.at(slot).wide_k; }
+  bool chooses_drafts() override {
+    for (const Facts& f : facts_)
+      if (!f.chooses) return false;
+    return true;
+  }
   // Replica x slots: each card's own budget for its rows (a single-sequence card: none, as before).
   uint32_t card_row_budget(uint32_t c, uint32_t active) override {
     return cards_.at(c).slots != nullptr ? cards_[c].slots->row_budget(active) : 0;
@@ -310,8 +327,13 @@ class ReplicaEngine : public server::BatchEngineIface {
       const SpecRow row = rows[r];
       if (!single(row.slot)) continue;
       done.push_back({worker(row.slot).post([this, row, &runs, r] {
-                        server::EngineIface& e = card(row.slot);
-                        if (row.propose != nullptr) runs[r] = e.step_drafts(*row.sampling, *row.propose);
+                        using E = server::EngineIface;
+                        E& e = card(row.slot);
+                        if (row.mtp_lookup)
+                          runs[r] = e.step_drafts_or_confirmed(*row.sampling, row.k, *row.propose,
+                                                               row.choose ? *row.choose : E::DraftChoice{},
+                                                               row.confirm ? *row.confirm : E::LookupConfirm{});
+                        else if (row.propose != nullptr) runs[r] = e.step_drafts(*row.sampling, *row.propose);
                         else if (facts_[row.slot].mtp_k > 0) runs[r] = e.step_many(*row.sampling, row.k);
                         else runs[r] = {e.step(*row.sampling)};
                       }),
@@ -380,6 +402,8 @@ class ReplicaEngine : public server::BatchEngineIface {
   struct Facts {
     uint32_t max_len = 0, mtp_k = 0, verify_k = 0, block = 0;
     uint64_t kv_form = 0, drafter_key = 0;
+    bool mtp_lookup = false, chooses = false;   // open-work 27 / 13: single-sequence cards only
+    uint32_t wide_k = 0;                        // open-work 28
   };
   // A posted call and the rows (of the multi-slot call) it serves.
   struct Post {

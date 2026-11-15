@@ -44,6 +44,13 @@
 //     every id it consumed, plus with lookup_history the slot's earlier requests' generated
 //     ids) - never another slot's (Review Focus 4); its K from its own AdaptiveK over
 //     lookup_adaptive, fed (drafts proposed, drafts kept) as server.cc's loop feeds it;
+//   - open-work 27 under replica (SchedulerOptions::mtp_lookup, one request a card: an engine
+//     with mtp_lookup()): prompt lookup inside MTP per request, server.cc's lookup-inside loop
+//     per row - the request's own server::LookupInDFlash (stay / enter, open-work 28's hot run
+//     at the slot's lookup_wide_k) over its slot's matcher (re-indexed to the request's prompt at
+//     the grant, as lookup_begin does for --spec lookup), its own server::StepK for a greedy row
+//     (SchedulerOptions::step_k; over its card's DraftCalib, the head's calibration on that card)
+//     or AdaptiveK; nothing of it is read by another request or card;
 //   - replica x slots (several slots per card, BatchEngineIface::card_of): at most one chunk in
 //     flight per card; while it runs that card's rows sit out the step and nothing else touches
 //     the card; a card with rows decoding starts its next chunk after the step (chunk, step,
@@ -70,7 +77,9 @@
 #include "server/adaptive_k.h"
 #include "server/batch_engine.h"
 #include "server/deps.h"
+#include "server/lookup_in_dflash.h"
 #include "server/prefix_cache.h"
+#include "server/step_k.h"
 
 namespace server {
 
@@ -95,6 +104,11 @@ struct SchedulerOptions {
   uint32_t lookup_min_match = 3;
   uint32_t lookup_history = 0;
   AdaptiveKOptions lookup_adaptive;
+  // Open-work 27 under replica: lookup inside MTP per request (above; an engine with mtp_lookup() and spec_k() > 0,
+  // not beside `lookup`), and with step_k a greedy row's MTP iterations by the per-step choice (open-work 13: StepK at
+  // spec's max_k and cost, the engine's chooses_drafts()).
+  bool mtp_lookup = false;
+  bool step_k = false;
 };
 
 struct Finish {
@@ -153,6 +167,13 @@ class Job {
   uint32_t iter_k = 0, proposed = 0;
   bool head_indexed = false;
   std::vector<uint32_t> out;
+  // Open-work 27 under replica: the request's lookup inside MTP - its policy, its per-step choice (greedy), the row's
+  // callbacks and the candidate an MTP iteration may confirm (open-work 28).
+  std::unique_ptr<LookupInDFlash> inside;
+  std::unique_ptr<StepK> step_k;
+  EngineIface::DraftChoice choose;
+  EngineIface::LookupConfirm confirm;
+  std::vector<uint32_t> cand;
   // Plan 13b, an overlapping engine: a chunk of this request is in flight (prefill_begin'd, not
   // yet joined), and which.
   bool inflight = false;

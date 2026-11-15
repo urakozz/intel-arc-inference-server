@@ -133,7 +133,7 @@ steps. The guesses come from a *proposer*, chosen with `--spec`:
 **Prompt lookup** is a third source of guesses and is not a mode of its own. When the answer repeats text that is
 already in the context (an edit that copies a file, a tool call that quotes its input), the text that followed
 last time is a very good guess. It runs inside both proposers on one card with one request at a time (and
-inside `dflash` under `tp`): when the lookup finds a long enough match, its copied tokens are verified for that
+inside `mtp` under `replica` with one request a card, inside `dflash` under `tp`): when the lookup finds a long enough match, its copied tokens are verified for that
 step and the proposer's own draft is skipped; otherwise the step is an ordinary MTP or DFlash one. It is on by
 default; `B70_SPEC_LOOKUP=0` turns it off for comparisons.
 

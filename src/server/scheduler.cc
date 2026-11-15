@@ -123,6 +123,8 @@ struct Scheduler::Impl {
   std::vector<uint32_t> slot_len;             // plan 13b: slot_max_len per slot
   bool spec = false;                          // step_spec rounds (a speculative engine or lookup)
   bool lookup = false;                        // plan 13b: prompt lookup per request
+  bool mtp_lookup = false;                    // open-work 27: lookup inside MTP per request (replica)
+  std::vector<DraftCalib> calib;              // open-work 27 + 13: per card, the head's calibration there
   uint32_t cap = 0;                           // drafts per row at most (spec_k or verify_k)
   std::vector<std::unique_ptr<PromptLookup>> matchers;            // plan 13b: one per slot
   std::vector<std::deque<std::vector<uint32_t>>> history;        // per slot (lookup_history)
@@ -166,6 +168,17 @@ Scheduler::Scheduler(BatchEngineIface& engine, SchedulerOptions opts, SlotCacheI
     impl_->lookup = true;
     for (uint32_t s = 0; s < impl_->n_slots; ++s) impl_->matchers.push_back(std::make_unique<PromptLookup>());
     impl_->history.resize(impl_->n_slots);
+  }
+  if (opts_.mtp_lookup) {   // open-work 27 under replica: server.cc's refusals, per engine
+    if (opts_.lookup)
+      throw std::invalid_argument("prompt lookup inside MTP and --spec lookup are one proposer each");
+    if (!engine_.mtp_lookup() || engine_.spec_k() == 0)
+      throw std::invalid_argument("prompt lookup inside MTP is built for one request a card (each card's engine with "
+                                  "the MTP head); not beside several slots on a card");
+    impl_->mtp_lookup = true;
+    for (uint32_t s = 0; s < impl_->n_slots; ++s) impl_->matchers.push_back(std::make_unique<PromptLookup>());
+    impl_->history.resize(impl_->n_slots);
+    impl_->calib.resize(impl_->n_cards);
   }
   impl_->spec = engine_.spec_k() > 0 || impl_->lookup;
   impl_->cap = impl_->lookup ? engine_.verify_k() : engine_.spec_k();
@@ -316,7 +329,13 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
   job->max_tokens = std::min(job->max_tokens,
                              impl_->slot_len[slot] - static_cast<uint32_t>(job->req.prompt.size()));
   job->split = job->req.split_last && cache_ != nullptr;
-  if (impl_->spec && (impl_->lookup || opts_.spec_fixed_k == 0)) {   // the request's own K policy
+  // Open-work 27 under replica: a greedy row's MTP iterations by the per-step choice, as server.cc's.
+  if (impl_->mtp_lookup && opts_.step_k && job->req.sampling.greedy) {
+    StepKOptions o;
+    o.max_k = std::min(opts_.spec.max_k, impl_->cap);
+    o.cost = opts_.spec.cost;
+    job->step_k = std::make_unique<StepK>(o, impl_->calib.at(impl_->slot_card[slot]));
+  } else if (impl_->spec && (impl_->lookup || opts_.spec_fixed_k == 0)) {   // the request's own K policy
     AdaptiveKOptions o = impl_->lookup ? opts_.lookup_adaptive : opts_.spec;
     o.max_k = std::min(o.max_k, impl_->cap);
     job->policy = std::make_unique<AdaptiveK>(o);
@@ -334,6 +353,32 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
       return d;
     };
   }
+  if (impl_->mtp_lookup) {   // open-work 27: server.cc's next_lookup_inside, on this request's own state
+    LookupInDFlashOptions o;
+    o.window = 0;
+    o.max_k = impl_->cap;
+    o.wide_k = engine_.lookup_wide_k(slot);   // open-work 28: long runs in the card's wide verify list
+    job->inside = std::make_unique<LookupInDFlash>(o);
+    Job* raw = job.get();
+    job->propose = [this, raw](uint32_t pending) {
+      if (raw->head_indexed) throw std::logic_error("BatchEngineIface::step_spec: propose twice");
+      PromptLookup& m = *impl_->matchers[static_cast<uint32_t>(raw->slot)];
+      m.append(pending);
+      raw->head_indexed = true;
+      std::vector<uint32_t> d = raw->inside->propose(m);
+      raw->proposed = static_cast<uint32_t>(d.size());
+      return d;
+    };
+    if (raw->step_k) raw->choose = [raw](uint32_t j, float p) { return raw->step_k->choose(j, p); };
+    raw->confirm.candidate = [this, raw]() {
+      raw->cand = raw->inside->candidate(*impl_->matchers[static_cast<uint32_t>(raw->slot)]);
+      return raw->cand;
+    };
+    raw->confirm.confirmed = [raw]() {
+      raw->inside->confirmed();
+      raw->proposed = static_cast<uint32_t>(raw->cand.size());
+    };
+  }
   try {
     // Review Focus 5: the prefix plan is taken here, at the grant, against what the slot
     // and the host store hold now - not when the request arrived.
@@ -342,7 +387,7 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
     else engine_.reset(slot);
     job->prefilled = restart;
     job->fin.cached_tokens = restart;
-    if (impl_->lookup) lookup_begin(slot, job->req.prompt);
+    if (impl_->lookup || impl_->mtp_lookup) lookup_begin(slot, job->req.prompt);
   } catch (const std::exception& error) {
     finish(job, Finish::Error, error.what());
   }
@@ -488,7 +533,9 @@ bool Scheduler::spec_round() {
   for (const auto& j : impl_->slots) {
     if (!j || j->state != Job::State::Decoding || busy[impl_->slot_card[static_cast<uint32_t>(j->slot)]]) continue;
     jobs.push_back(j);
-    const uint32_t k = j->policy ? j->policy->next() : std::min(opts_.spec_fixed_k, cap);
+    const uint32_t k = j->step_k   ? j->step_k->begin()
+                       : j->policy ? j->policy->next()
+                                   : std::min(opts_.spec_fixed_k, cap);
     ks.push_back(std::min(k, cap));
   }
   // Spec 13c: the engine's row budget for this many rows (0: none) - every row keeps its pending id, and the drafts
@@ -528,11 +575,16 @@ bool Scheduler::spec_round() {
   for (size_t i = 0; i < jobs.size(); ++i) {
     const auto& j = jobs[i];
     BatchEngineIface::SpecRow row{static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, ks[i], nullptr};
-    if (impl_->lookup) {
+    if (impl_->lookup || impl_->mtp_lookup) {
       j->iter_k = row.k;
       j->proposed = 0;
       j->head_indexed = false;
       row.propose = &j->propose;
+    }
+    if (impl_->mtp_lookup) {   // open-work 27: the iteration is lookup's when the request's policy proposes
+      row.mtp_lookup = true;
+      if (j->step_k) row.choose = &j->choose;
+      row.confirm = &j->confirm;
     }
     rows.push_back(row);
   }
@@ -552,7 +604,8 @@ bool Scheduler::spec_round() {
                              " runs for " + std::to_string(rows.size()) + " rows");
     for (size_t i = 0; i < runs.size(); ++i) {
       if (!failed[i].empty()) continue;
-      const uint32_t most = impl_->lookup ? jobs[i]->proposed : rows[i].k;
+      const bool own = impl_->lookup || jobs[i]->proposed > 0;   // the request's drafts (open-work 27: lookup's)
+      const uint32_t most = own ? jobs[i]->proposed : rows[i].k;
       if (runs[i].empty() || runs[i].size() > size_t(most) + 1)
         throw std::logic_error("BatchEngineIface::step_spec returned " + std::to_string(runs[i].size()) +
                                " ids for a row of " + std::to_string(most) + " drafts");
@@ -571,20 +624,27 @@ bool Scheduler::spec_round() {
     try {   // plan 13b review: a throwing callback ends this request only; the next rows still get their ids
       const std::vector<uint32_t>& run = runs[i];
       const uint32_t kept_drafts = static_cast<uint32_t>(run.size() - 1);
+      // Open-work 27: each proposer learns from its own iterations, as server.cc's next_lookup_inside.
+      const bool own = impl_->lookup || j->proposed > 0;
       if (impl_->lookup) {
         if (j->policy) j->policy->observe(j->proposed, kept_drafts);   // server.cc's next_lookup
+      } else if (own) {
+        j->inside->observe(j->proposed, kept_drafts);
+      } else if (j->step_k) {
+        j->step_k->observe(kept_drafts);
       } else if (j->policy) {
         j->policy->observe(k, std::min(k, kept_drafts));
       }
       ++j->fin.spec_iters;
-      j->fin.spec_drafted += impl_->lookup ? j->proposed : k;
+      j->fin.spec_drafted += own ? j->proposed : k;
       // server.cc's per-id rules over the run; `end` = the reason, at the id that ends the request.
       bool ended = false;
       Finish::Reason reason = Finish::Length;
       size_t used = 0;
       for (; used < run.size() && !ended;) {
         const uint32_t id = run[used++];
-        if (impl_->lookup && (used > 1 || !j->head_indexed)) impl_->matchers[slot]->append(id);
+        if ((impl_->lookup || impl_->mtp_lookup) && (used > 1 || !j->head_indexed))
+          impl_->matchers[slot]->append(id);
         if (cache_) cache_->fed(slot, id);
         ++j->steps;
         const bool is_eos = impl_->eos.contains(id);

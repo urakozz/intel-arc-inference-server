@@ -3051,7 +3051,7 @@ rownote 77 "Task 6 (speed and record) is not staged yet: aggregate t/s at concur
 stage r77.host    77 default cpu  -    -                          "host: scheduler_test, dflash_scheduler_test, replica_engine_test, replica_server_test, pipeline_args_test and the serial server's protocol / prefix / mtp / lookup server tests"
 st_r77_host() {
   chk "python3 tools/box_validate/test_replica_check.py" "replica comparison and f32 judge plumbing (synthetic logs)"
-  run_tests '^(scheduler_test|dflash_scheduler_test|replica_engine_test|replica_server_test|pipeline_args_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|dflash_lookup_server_test)$'
+  run_tests '^(scheduler_test|dflash_scheduler_test|replica_engine_test|replica_server_test|replica_lookup_server_test|pipeline_args_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|dflash_lookup_server_test)$'
   finish
 }
 stage r77.reject  77 default gpu  qwen r77.host                   "the refusals: another model by name (the Kolibri test config), more than one Ornith request a card (its test config), no config, the pp flags, b70-decode; one visible card (ZE_AFFINITY_MASK=0) refused before any context"
@@ -3062,14 +3062,14 @@ st_r77_reject() {
 }
 stage r77.r1      77 default gpu  qwen r77.reject                 "R1: every request (golden prose / code / cjk, completion and chat, greedy and seeded) sent two at a time to --parallel replica equals it alone on the card that served it (--parallel 1 on card 0 and on card 1) - bitwise alone on its card, otherwise the f32 judge (awaiting references SKIP); --spec off, mtp and lookup, --max-len 65536"
 st_r77_r1() {
-  # The one-card arms run plain MTP (B70_SPEC_LOOKUP=0): replica builds no prompt lookup inside MTP (open-work 27 is one
-  # engine's), and a seeded request's ids follow its proposer's drafts.
+  # Both sides run MTP with prompt lookup inside it (open-work 27: each replica card's one-slot engine has it, on by
+  # default as on one card); a seeded request's ids follow its proposer's drafts.
   local sp rc
   BV_JUDGE_RC=0
   for sp in off mtp lookup; do
     chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/replica 0,1 $SNAP_QWEN --parallel replica --max-num-seqs 2 --spec $sp --max-len 65536 -- --mode pairs" "--spec $sp: pairs on the replica server"
-    chk "B70_SPEC_LOOKUP=0 PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card0 0 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 0"
-    chk "B70_SPEC_LOOKUP=0 PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card1 1 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 1"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card0 0 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 0"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card1 1 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 1"
     x "python3 tools/box_validate/replica_check.py compare --replica $STATE/r1/$sp/replica/requests.jsonl --server-log $STATE/r1/$sp/replica/server-log --card0 $STATE/r1/$sp/card0/requests.jsonl --card1 $STATE/r1/$sp/card1/requests.jsonl --dump $DATA/oracle-forced-dumps/qwen-serve --judge $DATA/oracle-out-qwen-f32-i8head-forced --bf16 $DATA/oracle-out-qwen-bf16top-forced"
     rc=$?
     [ "$rc" != 77 ] || BV_JUDGE_RC=77
@@ -3116,12 +3116,12 @@ st_r77_batch() {
 }
 stage r77.ornith  77 default gpu  ornith r77.reject               "Ornith on --parallel replica (one request a card: no slots): R1 - every request sent two at a time equals it alone on the card that served it (--parallel 1 on card 0 and on card 1), bitwise; --spec off and mtp, --max-len 65536; then B3 - a snapshot from card 0 used as a prefix cache hit on card 1"
 st_r77_ornith() {
-  # B70_SPEC_LOOKUP=0 on the one-card arms: replica runs MTP without lookup inside it (st_r77_r1).
+  # Both sides run MTP with prompt lookup inside it (st_r77_r1).
   local sp
   for sp in off mtp; do
     chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/replica 0,1 $SNAP_ORNITH --parallel replica --max-num-seqs 2 --spec $sp --max-len 65536 -- --mode pairs" "Ornith --spec $sp: pairs on the replica server"
-    chk "B70_SPEC_LOOKUP=0 PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/card0 0 $SNAP_ORNITH --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "Ornith --spec $sp: alone on card 0"
-    chk "B70_SPEC_LOOKUP=0 PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/card1 1 $SNAP_ORNITH --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "Ornith --spec $sp: alone on card 1"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/card0 0 $SNAP_ORNITH --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "Ornith --spec $sp: alone on card 0"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/card1 1 $SNAP_ORNITH --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "Ornith --spec $sp: alone on card 1"
     chk "python3 tools/box_validate/replica_check.py compare --replica $STATE/$STAGE/$sp/replica/requests.jsonl --server-log $STATE/$STAGE/$sp/replica/server-log --card0 $STATE/$STAGE/$sp/card0/requests.jsonl --card1 $STATE/$STAGE/$sp/card1/requests.jsonl" "Ornith --spec $sp: R1"
   done
   chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/b3/replica 0,1 $SNAP_ORNITH --parallel replica --spec off --max-len 65536 -- --mode b3" "Ornith b3 on the replica server"

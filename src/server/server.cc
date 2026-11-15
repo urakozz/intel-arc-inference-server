@@ -94,9 +94,9 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     impl_->batch = batch;
     if (opts_.spec_dflash_lookup)
       throw std::invalid_argument("--spec dflash-lookup is built for one engine (spec 19f); not under the scheduler");
-    if (opts_.spec_mtp_lookup)
-      throw std::invalid_argument("prompt lookup inside MTP is built for one engine (open-work 27); not under the "
-                                  "scheduler");
+    if (opts_.spec_mtp_lookup && !batch->mtp_lookup())   // open-work 27: replica's one request a card has it
+      throw std::invalid_argument("prompt lookup inside MTP is built for one request a card (open-work 27); not "
+                                  "beside several slots on a card");
   }
   if (opts_.spec_lookup) {
     if (deps_.engine.verify_k() == 0)
@@ -129,9 +129,12 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     impl_->lookup_in_dflash.emplace(o);
   }
   {
+    // Open-work 27 under replica: the scheduler's greedy rows choose their drafts per step beside lookup inside MTP,
+    // as the serial server's do.
     const char* env = std::getenv("B70_MTP_STEP_K");
-    impl_->step_k = opts_.mtp_auto && !impl_->batch && deps_.engine.chooses_drafts() &&
-                    !(env != nullptr && std::string(env) == "0");
+    const bool chooses = impl_->batch ? opts_.spec_mtp_lookup && impl_->batch->chooses_drafts()
+                                      : deps_.engine.chooses_drafts();
+    impl_->step_k = opts_.mtp_auto && chooses && !(env != nullptr && std::string(env) == "0");
   }
   // Plan 13b: under the scheduler the cache is per slot (PrefixSlots) and deps_.engine is never hooked or driven.
   impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, impl_->batch ? 0 : opts_.prefix_cache_bytes,
@@ -149,6 +152,8 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     so.lookup_min_match = opts_.lookup_min_match;
     so.lookup_history = opts_.lookup_history;
     so.lookup_adaptive = opts_.lookup_adaptive;
+    so.mtp_lookup = opts_.spec_mtp_lookup;   // open-work 27: per request on its card
+    so.step_k = impl_->step_k;
     if (opts_.prefix_cache_bytes != 0) {
       if (opts_.prefix_alloc == nullptr) throw std::invalid_argument("Server: a prefix cache budget needs an allocator");
       impl_->slot_cache = std::make_unique<PrefixSlots>(b, opts_.prefix_cache_bytes, *opts_.prefix_alloc);
