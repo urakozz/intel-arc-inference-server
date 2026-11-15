@@ -1,6 +1,6 @@
 // pf_moe_sort_mw.cl - plan 2026-11-12 (Ornith MoE prefill) Task 2: the prefill MoE sort as a multi-work-group
-// histogram + scan + scatter. It writes the SAME buffers as pf_moe.cl's pf_moe_sort and q4_pf_moe.cl's q4_pf_sort,
-// byte for byte (the header, the tile table padded to tmax, row_tok, pair_row - their layout is restated in
+// histogram + scan + scatter. It writes the SAME buffers as the one-work-group pf_moe_sort (pf_moe.cl's until
+// 2026-11-15) and q4_pf_moe.cl's q4_pf_sort, byte for byte (the header, the tile table padded to tmax, row_tok, pair_row - their layout is restated in
 // pf_moe.cl), from the same route rows, without the one-work-group serial walk (1.5 ms a layer and chunk at C = 2048)
 // and without the SLM staging of the whole chunk (KC), so the chunk is not capped by the sort. One binary per
 // (experts, top_k) (`pf_moe_sort_mw_E<experts>_T<top_k>`, kernels::pf_moe_sort_mw_variant), three entry points:

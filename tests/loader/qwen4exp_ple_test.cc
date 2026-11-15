@@ -31,54 +31,17 @@
 #include "loader/qwen4exp_ple_hash.h"
 #include "model/qwen4exp.h"
 #include "qwen4exp_ple_fixture.h"
+#include "safetensors_writer.h"
 
 namespace {
 
 namespace fs = std::filesystem;
 
-struct Tensor {
-  std::string dtype;
-  std::vector<uint64_t> shape;
-  std::vector<uint8_t> bytes;
-};
-using Tensors = std::map<std::string, Tensor>;
+using safetensors_writer::Tensor;
+using safetensors_writer::Tensors;
 
-void write_checkpoint(const fs::path& dir, const Tensors& ts) {
-  fs::create_directories(dir);
-  std::string hdr = "{\"__metadata__\":{\"rule\":\"row-int8-spec9\"}";
-  uint64_t off = 0;
-  for (const auto& [name, t] : ts) {
-    hdr += ",\"" + name + "\":{\"dtype\":\"" + t.dtype + "\",\"shape\":[";
-    for (size_t i = 0; i < t.shape.size(); ++i) hdr += (i ? "," : "") + std::to_string(t.shape[i]);
-    hdr += "],\"data_offsets\":[" + std::to_string(off) + "," + std::to_string(off + t.bytes.size()) + "]}";
-    off += t.bytes.size();
-    off = (off + 7) / 8 * 8;
-  }
-  hdr += "}";
-  while ((8 + hdr.size()) % 8 != 0) hdr += ' ';
-  std::ofstream f(dir / "ple_int8-00001-of-00001.safetensors", std::ios::binary);
-  const uint64_t hlen = hdr.size();
-  f.write(reinterpret_cast<const char*>(&hlen), 8);
-  f.write(hdr.data(), std::streamsize(hdr.size()));
-  uint64_t pos = 0;
-  for (const auto& [name, t] : ts) {
-    (void)name;
-    f.write(reinterpret_cast<const char*>(t.bytes.data()), std::streamsize(t.bytes.size()));
-    pos += t.bytes.size();
-    const uint64_t pad = (pos + 7) / 8 * 8 - pos;
-    const char zeros[8] = {};
-    f.write(zeros, std::streamsize(pad));
-    pos += pad;
-  }
-  std::ofstream ix(dir / "model.safetensors.index.json");
-  ix << "{\"metadata\":{},\"weight_map\":{";
-  bool first = true;
-  for (const auto& [name, t] : ts) {
-    (void)t;
-    ix << (first ? "" : ",") << "\"" << name << "\":\"ple_int8-00001-of-00001.safetensors\"";
-    first = false;
-  }
-  ix << "}}";
+void write_ple_checkpoint(const fs::path& dir, const Tensors& ts) {
+  safetensors_writer::write_checkpoint(dir, ts, "ple_int8-00001-of-00001.safetensors", {{"rule", "row-int8-spec9"}});
 }
 
 template <class T>
@@ -198,7 +161,7 @@ int main() {
   CHECK(sp.size() == 2 && sp[0] == 53 && sp[1] == 59);
   for (bool bf16 : {false, true}) {
     const fs::path dir = tmpdir(bf16 ? "bf16" : "f32");
-    write_checkpoint(dir, ple_file(sd, bf16));
+    write_ple_checkpoint(dir, ple_file(sd, bf16));
     const loader::Q4PleHost h(dir.string());
     CHECK(h.scale() == (bf16 ? loader::Q4PleScale::Bf16 : loader::Q4PleScale::F32));
     CHECK(h.heads() == 2 && h.dim() == 160 && h.rows(0) == 53 && h.rows(1) == 59);
@@ -228,7 +191,7 @@ int main() {
         {"rows are 128 wide", ple_file(sd, true, {}, {}, {}, 128)}};
     for (const auto& [what, ts] : bad) {
       const fs::path dir = tmpdir("bad");
-      write_checkpoint(dir, ts);
+      write_ple_checkpoint(dir, ts);
       const loader::Q4PleHost h(dir.string());
       throws_naming(what, [&] { loader::check_q4_ple(sd, h); });
       fs::remove_all(dir);
@@ -236,7 +199,7 @@ int main() {
     model::Qwen4ExpDesc three = sd;
     three.ple_heads = 3;
     const fs::path dir = tmpdir("heads");
-    write_checkpoint(dir, ple_file(sd, false));
+    write_ple_checkpoint(dir, ple_file(sd, false));
     const loader::Q4PleHost h(dir.string());
     throws_naming("2 heads", [&] { loader::check_q4_ple(three, h); });
     model::Qwen4ExpDesc other_base = sd;
@@ -247,7 +210,7 @@ int main() {
     const fs::path empty = tmpdir("empty");
     Tensors ts = ple_file(sd, false);
     ts.erase("ple.h1.s");
-    write_checkpoint(empty, ts);
+    write_ple_checkpoint(empty, ts);
     throws_naming("ple.h1.s", [&] { loader::Q4PleHost x(empty.string()); });
     fs::remove_all(empty);
   }
@@ -263,7 +226,7 @@ int main() {
     fs::create_directories(snap);
     throws_naming("ple_int8.py", [&] { loader::q4_ple_dir(snap.string() + "/"); });
     const fs::path ple = fs::path(snap.string() + "-ple-int8");
-    write_checkpoint(ple, ple_file(sd, true));
+    write_ple_checkpoint(ple, ple_file(sd, true));
     CHECK_EQ(loader::q4_ple_dir(snap.string() + "/"), ple.string() + "/");
     CHECK_EQ(loader::q4_ple_dir(snap.string()), ple.string() + "/");   // with or without the trailing slash
     fs::remove_all(snap);

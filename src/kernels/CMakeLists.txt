@@ -111,8 +111,6 @@ function(add_prep_res_norm M K SP)
 endfunction()
 add_prep_res_norm(1 5120 0)    # first norm of a layer: no mixer partials to fold in
 add_prep_res_norm(1 5120 4)    # Task 4: after out_proj / o_proj / down (S = 4)
-add_prep_res_norm(1 5120 16)   # pre-Task-4 control retained for prep_test/probes
-add_prep_res_norm(2 5120 16)   # spec 1 §9: the M loop must compile at M=2
 
 # The two-stage split of prep_res_norm - spec 1.5 lever L1. The runtime binds
 # THIS pair at all 129 sites; the single-WG `prep_res_norm` above stays compiled
@@ -598,10 +596,11 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   endforeach()
   # verify-cost-m8: the one-card verify lists' DEFERRED build (gdn_step.cl): no per-row state, the committed rows
   # replayed by the next launch. CTRL_PEND = Control::gdn_pend; PEND_PAR = one parity of the pending rows, 48 layers x
-  # (8 rows x (16 + 48) x 128 bf16 + 8 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes). Qwen3.8's shapes only.
-  foreach(MM 1 2 3 4 5 6 7 8)
+  # (16 rows x (16 + 48) x 128 bf16 + 16 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes; 16 rows since open-work
+  # 28). Qwen3.8's shapes only. M = 16: open-work 28's wide verify list.
+  foreach(MM 1 2 3 4 5 6 7 8 16)
     add_ocloc_kernel(gdn_step_defer_M${MM} SOURCE ${GDN_CL}
-                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=6438912 M=${MM})
+                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=12877824 M=${MM})
   endforeach()
   # verify-cost-m8 probe: a||b at M = 2..8 with a wider in-work-group K split (CaptureOptions::probe_ab_ksplit)
   foreach(MM 2 3 4 5 6 7 8)
@@ -897,6 +896,43 @@ if(B70_VERIFY_DPAS AND B70_MTP)
     endforeach()
   endif()
 endif()
+
+# ==== Open-work 28: the one-card 16-row verify list (long prompt-lookup runs), bf16 KV ==== (begin) ====
+# Additive only: new names; the one-card Engine binds them in its one wide list (runtime::Engine::verify at
+# kWideK). Ids through Control::wide_cur / wide_out (CTRL_CUR 32 / CTRL_OUT 48: embed_gather, argmax and
+# argmax_stage2_W16 only - no other kernel reads the ids). The linears are gemm_sm's M = 16 rows (built below),
+# the GDN step gdn_step_defer_M16 (above), the attention attn_verify_dpas at 16 rows with the key split
+# across work-groups (KS 1, DSPLIT 128: the production KS 4 needs 768 lanes at 16 rows; docs/probes/
+# probe-lookup-wide-verify-2026-11-14.md) and attn_v2_M16's reduce.
+if(B70_MTP AND B70_VERIFY_M8)
+  set(WIDE_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=32 CTRL_OUT=48 CTRL_DEBUG=18)
+  add_ocloc_kernel(embed_gather_M16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                   DEFINES ${WIDE_CTRL_DEFINES} M=16 HIDDEN=5120 VOCAB=248320)
+  add_ocloc_kernel(argmax_stage1_M16 SOURCE ${ARGMAX_CL} DEFINES ${WIDE_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=16)
+  add_ocloc_kernel(argmax_stage2_W16 SOURCE ${ARGMAX_CL} DEFINES ${WIDE_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=16)
+  add_prep_res_fold(16 5120 0 20)
+  add_prep_res_fold(16 5120 4 20)
+  add_prep_norm_finish(16 5120 20 20)
+  add_ocloc_kernel(prep_silu_mul_M16 SOURCE ${PREP_CL} DEFINES M=16)
+  add_ocloc_kernel(prep_gated_head_M16 SOURCE ${PREP_CL} DEFINES M=16)
+  add_attn_prep(16)
+  add_ocloc_kernel(attn_v2_M16_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                   DEFINES ${CTRL_DEFINES} M=16 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
+  add_ocloc_kernel(attn_verify_dpas_M16_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
+                   DEFINES ${CTRL_DEFINES} M=16 TGT=${ATTN_V2_TGT} KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 KV8=0
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_gemv_bf16_variant(16 5120 128 16 16)       # a||b
+  add_gemv_bf16_variant(16 5120 128 16 64)       # a||b, the K split of the lists at M >= 5
+  # the MTP head's KV fill of 16 rows
+  add_gemv_bf16_variant(16 10240 5120 64 1)      # fc
+  add_gemv_bf16_variant(16 5120 14336 64 1)      # q||k||v
+  add_ocloc_kernel(prep_norm_finish_M16_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
+                   DEFINES M=16 K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+  add_ocloc_kernel(prep_res_fold_M16_K5120_SP1_G20_Z SOURCE ${PREP_CL}
+                   DEFINES M=16 K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+  add_ocloc_kernel(attn_prep_M16_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=16 QKV_S=1)
+endif()
+# ==== Open-work 28 ============================================================ (end) ====
 
 # ==== Spec 17d: tensor parallel MTP verify (`--parallel tp --spec mtp|auto`, Qwen3.8) ======= (begin) ====
 # Additive only: new names (attn_verify_dpas.cl takes the per-card 12 / 2 heads by define; its default lines keep
@@ -1225,68 +1261,79 @@ endif()
 # What a decode list binds (runtime/qwen4exp/qwen4exp_capture.cc): 15 launches a GDN layer, 19 a QSA layer (18
 # under B70_Q4_ATTN=eager), + 4 on the PLE layer, + embed + 6 at the head: 779 at 48 layers (derived).
 option(B70_Q4EXP "build the Qwen3.8-Flash-Next decode variants (spec 21c)" ON)
-if(B70_Q4EXP)
-  set(Q4_CL ${CMAKE_CURRENT_SOURCE_DIR}/qwen4exp)
-  add_gemv_variant(1 2560 16384 1 0)            # qkv||z int4                     S1 L0 (fixed)
-  add_gemv_variant(1 2560 13312 2 0)            # q||gate||k||v int4              PROVISIONAL S2 L0
-  # out_proj / o_proj int4 PROVISIONAL S4 L0 is gemv_M1_K6144_N2560_S4_L0 (Kolibri's o_proj); the bf16 6144 x 2560
-  # is Kolibri's o_proj bf16: built here only without Kolibri.
-  if(NOT B70_KOLIBRI)
-    add_gemv_variant(1 6144 2560 4 0)
-    add_gemv_bf16_variant(1 6144 2560 64 1)
+# One row count's decode set: 21c's at M = 1 and spec 21e's verify lists at M = 2..4, by the same names and defines.
+# At M = 1 the int4 and bf16 out_proj / o_proj 6144 x 2560 are Kolibri's o_proj binaries: built here only without
+# Kolibri.
+function(add_q4_decode_rows MM)
+  add_gemv_variant(${MM} 2560 16384 1 0)            # qkv||z int4                     S1 L0 (fixed)
+  add_gemv_variant(${MM} 2560 13312 2 0)            # q||gate||k||v int4              PROVISIONAL S2 L0
+  if(MM GREATER 1 OR NOT B70_KOLIBRI)
+    add_gemv_variant(${MM} 6144 2560 4 0)           # out_proj / o_proj int4          PROVISIONAL S4 L0
+    add_gemv_bf16_variant(${MM} 6144 2560 64 1)     # out_proj / o_proj bf16
   endif()
-  add_gemv_bf16_variant(1 2560 128 16 16)       # a||b {16, 16}
-  add_gemv_bf16_variant(1 2560 16384 64 1)      # qkv||z bf16 (Intel's)
-  add_gemv_bf16_variant(1 2560 13312 64 1)      # q||gate||k||v bf16 (Intel's)
-  add_gemv_bf16_variant(1 10240 336 16 16)      # HC down || block_inject (324 rows used)
-  add_gemv_bf16_variant(1 10240 320 16 16)      # the final mixer's down
-  add_gemv_bf16_variant(1 2560 640 16 16)       # the indexer's index_qk_proj
-  add_gemv_bf16_variant(1 2560 528 16 16)       # the router (512) + shared_expert_gate (row 512), zero to 528
-  add_gemv_bf16_variant(1 2560 12800 64 1)      # the PLE key || value projections
-  add_gemv_bf16_variant(1 2560 248320 64 1)     # lm_head bf16
-  add_gemv_i8w_variant(1 2560 248320)           # lm_head int8 (spec 9)
-  add_ocloc_kernel(embed_gather_M1_D2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
-                   DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2560 VOCAB=248320)
-  add_ocloc_kernel(prep_gated_head_M1_SIG SOURCE ${PREP_CL} DEFINES M=1 GDN_GATE_SIGMOID=1)
-  set(Q4_FA_HEADS FA_Q_HEADS=24 FA_KV_HEADS=2)
-  add_ocloc_kernel(attn_prep_M1_Q24KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 ${Q4_FA_HEADS})
-  add_ocloc_kernel(attn_prep_M1_Q24KV2_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 QKV_S=1 ${Q4_FA_HEADS})
-  add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
-                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${Q4_FA_HEADS})
+  add_gemv_bf16_variant(${MM} 2560 128 16 16)       # a||b {16, 16}
+  add_gemv_bf16_variant(${MM} 2560 16384 64 1)      # qkv||z bf16 (Intel's)
+  add_gemv_bf16_variant(${MM} 2560 13312 64 1)      # q||gate||k||v bf16 (Intel's, the MTP head's)
+  add_gemv_bf16_variant(${MM} 10240 336 16 16)      # HC down || block_inject (324 rows used)
+  add_gemv_bf16_variant(${MM} 10240 320 16 16)      # the final mixer's down
+  add_gemv_bf16_variant(${MM} 2560 640 16 16)       # the indexer's index_qk_proj
+  add_gemv_bf16_variant(${MM} 2560 528 16 16)       # the router (512) + shared_expert_gate (row 512), zero to 528
+  add_gemv_bf16_variant(${MM} 2560 12800 64 1)      # the PLE key || value projections
+  add_gemv_bf16_variant(${MM} 2560 248320 64 1)     # lm_head bf16
+  add_gemv_i8w_variant(${MM} 2560 248320)           # lm_head int8 (spec 9)
+  add_ocloc_kernel(embed_gather_M${MM}_D2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=2560 VOCAB=248320)
+  add_ocloc_kernel(prep_gated_head_M${MM}_SIG SOURCE ${PREP_CL} DEFINES M=${MM} GDN_GATE_SIGMOID=1)
+  add_ocloc_kernel(attn_prep_M${MM}_Q24KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} ${Q4_FA_HEADS})
+  add_ocloc_kernel(attn_prep_M${MM}_Q24KV2_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 ${Q4_FA_HEADS})
   # q4_hc.cl: the combine + grouped norm by what it folds (_E embedding, _S<S> the mixer's slices, _Y the MoE's y,
   # _X nothing; _NN without the norm) and the up-mix (_I with the 4 inject rows; the final mixer without).
-  add_ocloc_kernel(q4_hc_combine_norm_M1_E SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=0 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M${MM}_E SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=0 HC_NORM=1)
   foreach(S 1 4)
-    add_ocloc_kernel(q4_hc_combine_norm_M1_S${S} SOURCE ${Q4_CL}/q4_hc.cl
-                     DEFINES ${CTRL_DEFINES} M=1 HC_SRC=1 SRC_S=${S} HC_NORM=1)
+    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_S${S} SOURCE ${Q4_CL}/q4_hc.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=1 SRC_S=${S} HC_NORM=1)
   endforeach()
-  add_ocloc_kernel(q4_hc_combine_norm_M1_Y SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=2 HC_NORM=1)
-  add_ocloc_kernel(q4_hc_combine_norm_M1_Y_NN SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=2 HC_NORM=0)
-  add_ocloc_kernel(q4_hc_combine_norm_M1_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=3 HC_NORM=1)
-  add_ocloc_kernel(q4_hc_up_mix_M1_I SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 UP_DOWN=336 UP_INJECT=1)
-  add_ocloc_kernel(q4_hc_up_mix_M1 SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 UP_DOWN=320 UP_INJECT=0)
-  # q4_ple.cl: the gather from host USM by the table's scale dtype (+ q4_ple_check), the block.
-  add_ocloc_kernel(q4_ple_gather_M1_BF16 SOURCE ${Q4_CL}/q4_ple.cl
-                   DEFINES ${CTRL_DEFINES} M=1 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1)
-  add_ocloc_kernel(q4_ple_gather_M1_F32 SOURCE ${Q4_CL}/q4_ple.cl
-                   DEFINES ${CTRL_DEFINES} M=1 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0)
-  add_ocloc_kernel(q4_ple_block_M1 SOURCE ${Q4_CL}/q4_ple.cl DEFINES ${CTRL_DEFINES} M=1 PLE_BLOCK=1)
-  # q4_qsa.cl (prep, score, select), q4_qsa_attn.cl (flash: attn + reduce), q4_qsa_attn_eager.cl. LIST_ROW / COUNT_W /
-  # LISTMAX: kernels::qwen4exp::kListRow / kCountWord / kListMax; TGT: kAttnTgt.
-  set(Q4_LIST_DEFINES LIST_ROW=2064 COUNT_W=2052)
-  add_ocloc_kernel(q4_qsa_M1_T512_W1024 SOURCE ${Q4_CL}/q4_qsa.cl
-                   DEFINES ${CTRL_DEFINES} M=1 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES})
-  add_ocloc_kernel(q4_qsa_attn_M1_T32 SOURCE ${Q4_CL}/q4_qsa_attn.cl DEFINES ${CTRL_DEFINES} M=1 TGT=32 ${Q4_LIST_DEFINES})
-  add_ocloc_kernel(q4_qsa_attn_eager_M1 SOURCE ${Q4_CL}/q4_qsa_attn_eager.cl
-                   DEFINES ${CTRL_DEFINES} M=1 ${Q4_LIST_DEFINES} LISTMAX=2052)
+  add_ocloc_kernel(q4_hc_combine_norm_M${MM}_Y SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=2 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M${MM}_Y_NN SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=2 HC_NORM=0)
+  add_ocloc_kernel(q4_hc_combine_norm_M${MM}_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=3 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_up_mix_M${MM}_I SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=336 UP_INJECT=1)
+  add_ocloc_kernel(q4_hc_up_mix_M${MM} SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=320 UP_INJECT=0)
+  # q4_ple.cl: the gather from host USM by the table's scale dtype (+ q4_ple_check).
+  add_ocloc_kernel(q4_ple_gather_M${MM}_BF16 SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1)
+  add_ocloc_kernel(q4_ple_gather_M${MM}_F32 SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0)
+  # q4_qsa.cl (prep, score, select), q4_qsa_attn.cl (flash: attn + reduce), q4_qsa_attn_eager.cl.
+  add_ocloc_kernel(q4_qsa_M${MM}_T512_W1024 SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES})
+  add_ocloc_kernel(q4_qsa_attn_M${MM}_T32 SOURCE ${Q4_CL}/q4_qsa_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} TGT=32 ${Q4_LIST_DEFINES})
+  add_ocloc_kernel(q4_qsa_attn_eager_M${MM} SOURCE ${Q4_CL}/q4_qsa_attn_eager.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} ${Q4_LIST_DEFINES} LISTMAX=2052)
   # q4_moe.cl: the 512-expert softmax route (two experts a lane), the 11-slot block by the shared expert's form.
   # UP_KS / DN_KS PROVISIONAL (kernels::qwen4exp::kUpKs / kDnKs; Task 7 sweeps them).
-  add_ocloc_kernel(q4_route_M1_E512_T10_N528_L256 SOURCE ${Q4_CL}/q4_moe.cl
-                   DEFINES M=1 ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=528)
-  add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I640_SH4 SOURCE ${Q4_CL}/q4_moe.cl
-                   DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=0)
-  add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I640_SHB SOURCE ${Q4_CL}/q4_moe.cl
-                   DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=1)
+  add_ocloc_kernel(q4_route_M${MM}_E512_T10_N528_L256 SOURCE ${Q4_CL}/q4_moe.cl
+                   DEFINES M=${MM} ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=528)
+  foreach(SHB 0 1)
+    if(SHB)
+      set(_sh SHB)
+    else()
+      set(_sh SH4)
+    endif()
+    add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I640_${_sh} SOURCE ${Q4_CL}/q4_moe.cl
+                     DEFINES M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=${SHB})
+  endforeach()
+endfunction()
+if(B70_Q4EXP)
+  set(Q4_CL ${CMAKE_CURRENT_SOURCE_DIR}/qwen4exp)
+  set(Q4_FA_HEADS FA_Q_HEADS=24 FA_KV_HEADS=2)
+  # LIST_ROW / COUNT_W / LISTMAX: kernels::qwen4exp::kListRow / kCountWord / kListMax; TGT: kAttnTgt.
+  set(Q4_LIST_DEFINES LIST_ROW=2064 COUNT_W=2052)
+  add_q4_decode_rows(1)
+  add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${Q4_FA_HEADS})
+  add_ocloc_kernel(q4_ple_block_M1 SOURCE ${Q4_CL}/q4_ple.cl DEFINES ${CTRL_DEFINES} M=1 PLE_BLOCK=1)   # the PLE block
 endif()
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
 
@@ -1429,60 +1476,9 @@ if(B70_Q4EXP AND B70_MTP)
       endif()
       add_ocloc_kernel(q4_mtp_M${MM}_${NF} SOURCE ${Q4_CL}/q4_mtp.cl DEFINES ${CTRL_DEFINES} M=${MM} MTP_NORM_SINGLE=${_single})
     endforeach()
-    if(MM EQUAL 1)
-      continue()
+    if(MM GREATER 1)
+      add_q4_decode_rows(${MM})
     endif()
-    add_gemv_variant(${MM} 2560 16384 1 0)            # qkv||z int4
-    add_gemv_variant(${MM} 2560 13312 2 0)            # q||gate||k||v int4
-    add_gemv_variant(${MM} 6144 2560 4 0)             # out_proj / o_proj int4
-    add_gemv_bf16_variant(${MM} 2560 16384 64 1)      # qkv||z bf16 (Intel's)
-    add_gemv_bf16_variant(${MM} 2560 13312 64 1)      # q||gate||k||v bf16 (Intel's, the head's)
-    add_gemv_bf16_variant(${MM} 6144 2560 64 1)       # out_proj / o_proj bf16
-    add_gemv_bf16_variant(${MM} 2560 128 16 16)       # a||b
-    add_gemv_bf16_variant(${MM} 10240 336 16 16)      # HC down || block_inject
-    add_gemv_bf16_variant(${MM} 10240 320 16 16)      # the final mixer's down
-    add_gemv_bf16_variant(${MM} 2560 640 16 16)       # the indexer
-    add_gemv_bf16_variant(${MM} 2560 528 16 16)       # the router + shared gate
-    add_gemv_bf16_variant(${MM} 2560 12800 64 1)      # the PLE key || value
-    add_gemv_bf16_variant(${MM} 2560 248320 64 1)     # lm_head bf16
-    add_gemv_i8w_variant(${MM} 2560 248320)           # lm_head int8 (spec 9)
-    add_ocloc_kernel(embed_gather_M${MM}_D2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=2560 VOCAB=248320)
-    add_ocloc_kernel(prep_gated_head_M${MM}_SIG SOURCE ${PREP_CL} DEFINES M=${MM} GDN_GATE_SIGMOID=1)
-    add_ocloc_kernel(attn_prep_M${MM}_Q24KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} ${Q4_FA_HEADS})
-    add_ocloc_kernel(attn_prep_M${MM}_Q24KV2_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 ${Q4_FA_HEADS})
-    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_E SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=0 HC_NORM=1)
-    foreach(S 1 4)
-      add_ocloc_kernel(q4_hc_combine_norm_M${MM}_S${S} SOURCE ${Q4_CL}/q4_hc.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=1 SRC_S=${S} HC_NORM=1)
-    endforeach()
-    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_Y SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=2 HC_NORM=1)
-    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_Y_NN SOURCE ${Q4_CL}/q4_hc.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=2 HC_NORM=0)
-    add_ocloc_kernel(q4_hc_combine_norm_M${MM}_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=3 HC_NORM=1)
-    add_ocloc_kernel(q4_hc_up_mix_M${MM}_I SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=336 UP_INJECT=1)
-    add_ocloc_kernel(q4_hc_up_mix_M${MM} SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=320 UP_INJECT=0)
-    add_ocloc_kernel(q4_ple_gather_M${MM}_BF16 SOURCE ${Q4_CL}/q4_ple.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1)
-    add_ocloc_kernel(q4_ple_gather_M${MM}_F32 SOURCE ${Q4_CL}/q4_ple.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0)
-    add_ocloc_kernel(q4_qsa_M${MM}_T512_W1024 SOURCE ${Q4_CL}/q4_qsa.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES})
-    add_ocloc_kernel(q4_qsa_attn_M${MM}_T32 SOURCE ${Q4_CL}/q4_qsa_attn.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=32 ${Q4_LIST_DEFINES})
-    add_ocloc_kernel(q4_qsa_attn_eager_M${MM} SOURCE ${Q4_CL}/q4_qsa_attn_eager.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} ${Q4_LIST_DEFINES} LISTMAX=2052)
-    add_ocloc_kernel(q4_route_M${MM}_E512_T10_N528_L256 SOURCE ${Q4_CL}/q4_moe.cl
-                     DEFINES M=${MM} ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=528)
-    foreach(SHB 0 1)
-      if(SHB)
-        set(_sh SHB)
-      else()
-        set(_sh SH4)
-      endif()
-      add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I640_${_sh} SOURCE ${Q4_CL}/q4_moe.cl
-                       DEFINES M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=${SHB})
-    endforeach()
   endforeach()
   add_ocloc_kernel(q4_pf_ple_C4 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=4)
   # the prefill's head pass (kernels::qwen4exp::mtp_prefill_variants; 21d's binaries otherwise)
@@ -2027,8 +2023,8 @@ set(B70_BOLT_VERIFY_KERNELS ${B70_BOLT_VERIFY_KERNELS} CACHE INTERNAL "spec 26c'
 # BROW_DEFINES is the row table's word layout (runtime::BatchRow, kernels::batch_row - the host mirror).
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set(BROW_DEFINES BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SRC=2 BROW_DST=3 BROW_SLOT=4)
-  # One whole-model GDN state (gdn_layers x 48 x 128 x 128 floats) and conv ring (gdn_layers x 16 x 10240 ushorts).
-  set(BR_GDN_QWEN SPEC_SLOT_STRIDE=37748736 RING_SLOT_STRIDE=7864320)
+  # One whole-model GDN state (gdn_layers x 48 x 128 x 128 floats) and conv ring (gdn_layers x 32 x 10240 ushorts).
+  set(BR_GDN_QWEN SPEC_SLOT_STRIDE=37748736 RING_SLOT_STRIDE=15728640)
   foreach(MM 1 2 3 4 5 6 7 8)
     add_ocloc_kernel(gdn_step_rows_M${MM} SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} ${BROW_DEFINES} ${BR_GDN_QWEN} M=${MM})
     add_ocloc_kernel(attn_prep_M${MM}_ROWS SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM})
@@ -2174,7 +2170,7 @@ set(GEMM_SM_CONSUMERS "")
 if(B70_MTP)
   gemm_sm_rows(GEMM_SM_QWEN38 GEMM_SM_M)
   # gate||up's SiLU after the one-slice 2x8 work-group (kernels::gemm_sm_silu_variant): SILU_S 1 at the lists' M
-  foreach(MM 2 3 4 5 6 7 8)
+  foreach(MM 2 3 4 5 6 7 8 16)
     add_ocloc_kernel(prep_silu_mul_M${MM}_S1 SOURCE ${PREP_CL} DEFINES M=${MM} SILU_S=1)
     list(APPEND GEMM_SM_CONSUMERS kernel_prep_silu_mul_M${MM}_S1)
   endforeach()

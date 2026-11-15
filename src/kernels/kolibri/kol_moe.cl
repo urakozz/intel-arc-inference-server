@@ -50,12 +50,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #define KOL_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 

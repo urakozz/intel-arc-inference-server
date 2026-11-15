@@ -94,12 +94,7 @@
 // factor so everything before it stays bit-comparable with the host. The two
 // files must be edited together -- pf_prep.cl's header already says that of
 // prep.cl, and this is the same relationship one level out.
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 #endif
 

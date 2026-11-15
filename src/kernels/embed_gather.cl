@@ -29,9 +29,9 @@
 #ifndef M
 #define M 1
 #endif
-#if M > 8
-// cur_token[] holds 8 ids (runtime::Control); a larger M has nowhere to read from.
-#error "embed_gather: M > 8 exceeds Control::cur_token[]"
+// cur_token[] holds 8 ids (runtime::Control); a larger M reads Control::wide_cur[16] (open-work 28: CTRL_CUR 32).
+#if M > 16 || (M > 8 && CTRL_CUR != 32)
+#error "embed_gather: M > 8 needs Control::wide_cur (CTRL_CUR 32), M <= 16"
 #endif
 #ifndef HIDDEN
 #define HIDDEN 5120        /* model::Qwen35::kHidden */

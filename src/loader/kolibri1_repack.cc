@@ -29,17 +29,15 @@ void add_int4(std::vector<std::string>& v, const std::string& base) {
   v.push_back(base + ".qzeros");
 }
 
-size_t int4_src_bytes(const LinearSrc& s) { return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2; }
-
 }  // namespace
 
 KolAttnForm kol_attn_form(const SafetensorsSet& st, const Kolibri1Desc& d) {
   const auto& ts = st.tensors();
   const std::string l0 = Kolibri1Desc::layer_prefix(0) + "self_attn.q_proj";
   KolAttnForm a;
-  if (ts.count(l0 + ".qweight"))
+  if (ts.contains(l0 + ".qweight"))
     a = KolAttnForm::Int4;
-  else if (ts.count(l0 + ".weight"))
+  else if (ts.contains(l0 + ".weight"))
     a = KolAttnForm::Bf16;
   else
     throw std::runtime_error("load_kolibri1: the checkpoint has neither " + l0 + ".qweight nor " + l0 +
@@ -48,7 +46,7 @@ KolAttnForm kol_attn_form(const SafetensorsSet& st, const Kolibri1Desc& d) {
     for (const char* p : kAttnParts) {
       const std::string base = Kolibri1Desc::layer_prefix(l) + "self_attn." + p;
       const std::string other = base + (a == KolAttnForm::Int4 ? ".weight" : ".qweight");
-      if (ts.count(other))
+      if (ts.contains(other))
         throw std::runtime_error("load_kolibri1: '" + other + "' mixes the attention arms - layer 0's q_proj is " +
                                  model::kol_attn_form_name(a) +
                                  ", and every attention projection of every layer must agree (spec 20 decision 2)");
@@ -87,10 +85,10 @@ void KolCheckpoint::check_names() const {
   size_t n_bad = 0;
   for (const auto& [name, info] : set_.tensors()) {
     (void)info;
-    if (all.count(name)) continue;
+    if (all.contains(name)) continue;
     // `.g_idx` beside an expected int4 linear is allowed (assert_quant_invariants proves it the
     // identity); `.qzeros` is expected (AutoRound writes it).
-    if (ends_with(name, ".g_idx") && all.count(name.substr(0, name.size() - 6) + ".qweight")) continue;
+    if (ends_with(name, ".g_idx") && all.contains(name.substr(0, name.size() - 6) + ".qweight")) continue;
     if (n_bad++ < 5) bad += (bad.empty() ? "" : ", ") + name;
   }
   if (n_bad != 0)
@@ -101,7 +99,7 @@ void KolCheckpoint::check_names() const {
                              "extra expert or layer, another packing are all outside spec 20's one format)");
   for (const std::string& name : exp) {
     if (ends_with(name, ".qzeros")) continue;   // never read; assert_quant_invariants checks it when shipped
-    if (!set_.tensors().count(name))
+    if (!set_.tensors().contains(name))
       throw std::runtime_error("load_kolibri1: the checkpoint has no tensor '" + name + "', which " + d_.name +
                                " needs");
   }
@@ -292,7 +290,7 @@ size_t KolCheckpoint::unconsumed(std::string* names) const {
   size_t n = 0;
   for (const auto& [name, info] : set_.tensors()) {
     (void)info;
-    if (consumed_.count(name) || ends_with(name, ".qzeros") || ends_with(name, ".g_idx")) continue;
+    if (consumed_.contains(name) || ends_with(name, ".qzeros") || ends_with(name, ".g_idx")) continue;
     if (names && n < 5) *names += (names->empty() ? "" : ", ") + name;
     ++n;
   }

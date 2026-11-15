@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
 #include "loader/draft_vocab.h"
@@ -28,6 +29,15 @@ struct DeviceWeight {
   model::GemvShape shape;      // K, N, S, layout as the kernel variant needs
   model::WeightKind kind;
 };
+
+// A device allocation holding `bytes` from `src`, one immediate copy; upload_u owned.
+l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes);
+std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes);
+
+// The family loaders' lm_head [vocab][hidden] bf16 on the card: int8 rows + fp32 scales for gemv_i8w (spec 9;
+// quantise_int8_tiled's seconds into quant_seconds) or bf16 tiles for gemv_bf16. Its bytes are added to `bytes`.
+std::unique_ptr<DeviceWeight> upload_lm_head(l0::Context& ctx, l0::CmdList& imm, const uint16_t* w, uint32_t hidden,
+                                             uint32_t vocab, bool int8, double& quant_seconds, size_t& bytes);
 
 struct SmallTensors {          // per layer: everything that is not a GEMV weight
   l0::Mem norms;               // input_ln(1+w) ‖ post_ln(1+w) fp32 [2][hidden]

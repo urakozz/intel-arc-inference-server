@@ -65,13 +65,8 @@
 #error "pf_moe_q4gemm: the SiLU epilogue pairs atoms (NB even)"
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
+#include "bf16.h"
 // pf_moe_gemm.cl's chain, verbatim (the numerics contract with pf_prep.cl).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
 #if SILU_EPI
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 #endif

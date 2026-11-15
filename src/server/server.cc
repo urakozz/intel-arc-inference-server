@@ -125,6 +125,7 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     LookupInDFlashOptions o;
     o.window = 0;
     o.max_k = deps_.engine.mtp_k();
+    o.wide_k = deps_.engine.lookup_wide_k();   // open-work 28: long runs in the engine's wide verify list
     impl_->lookup_in_dflash.emplace(o);
   }
   {
@@ -484,7 +485,18 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       if (mtp_lookup) {
         EngineIface::DraftChoice choose;
         if (step_k) choose = [&](uint32_t j, float p) { return step_k->choose(j, p); };
-        burst = deps_.engine.step_drafts_or_chosen(sampling, k, propose, choose);
+        // Open-work 28: a short match the head confirms enters lookup (LookupInDFlash::candidate / confirmed).
+        std::vector<uint32_t> cand;
+        EngineIface::LookupConfirm confirm;
+        confirm.candidate = [&]() {
+          cand = lid.candidate(matcher);
+          return cand;
+        };
+        confirm.confirmed = [&]() {
+          lid.confirmed();
+          proposed = static_cast<uint32_t>(cand.size());
+        };
+        burst = deps_.engine.step_drafts_or_confirmed(sampling, k, propose, choose, confirm);
       } else {
         burst = deps_.engine.step_drafts_or_many(sampling, k, propose);
       }
@@ -533,7 +545,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     session.fed(id);
     if (penalised) seen.add(id);
     if (generated == 0) outcome.t_first_token = steady_seconds();
-    const bool is_eos = impl_->eos.count(id) != 0;
+    const bool is_eos = impl_->eos.contains(id);
     if (is_eos && !r.ignore_eos && outcome.out_ids.size() >= r.min_tokens) {
       outcome.finish_reason = "stop";
       eos_stop = true;

@@ -148,6 +148,7 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
       for (uint32_t i = 0; i < kMaxDraft; ++i)
         seqs_[0].draft_prob_steps.push_back(build_draft(ctx, model_, buffers_, *mtp_, i, {}, true));
     for (uint32_t M = 1; M <= MtpBuffers::kSlots; ++M) capture_verify(M, {});
+    capture_wide({});
   }
   // Spec 13c: every further slot's own lists, then the row lists; then every slot reset (slot 0 last: selected).
   // Plan 19v3b Task 0: slot 0 of several has its own paged plain list too (step_ stays the one-slot engine's).
@@ -530,6 +531,25 @@ void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
   }
 }
 
+// Open-work 28: the wide list where it is built - one slot with the deferred GDN rows, the bf16 KV cache, the int8 head
+// (gemm_sm_i8w's 16-row build; the bf16 head has none) and Qwen3.8's attention heads. One list for every depth: the
+// 16-row attention is DPAS from the first key (runtime/verify_attn.h).
+void Engine::capture_wide(const CaptureOptions& opt) {
+  const model::ModelDesc& d = *model_.desc;
+  if (!mtp_ || !gdn_pend_ || slots() != 1 || kv_cache() != KvCache::Bf16 || model_.draft_vocab ||
+      d.fa_q_heads != 24 || d.fa_kv_heads != 4 ||
+      model_.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind != model::WeightKind::Int8)
+    return;
+  seqs_[0].wide = std::make_unique<CapturedStep>(
+      build_verify(ctx_, model_, buffers_, *mtp_, DecodeScratchDims::kWideM, nullptr, opt, seqs_[0].bind));
+}
+
+uint32_t Engine::max_wide_k() const {
+  const uint32_t pos = control_->pos;
+  if (!seq().wide || pos == 0 || size_t(pos) + kWideK + 1 > max_len()) return 0;
+  return kWideK;
+}
+
 void Engine::recapture_verify(const CaptureOptions& opt) {
   flush_projection();
   profile_projection_ = opt.profile_projection;
@@ -547,6 +567,7 @@ void Engine::recapture_verify(const CaptureOptions& opt) {
     for (uint32_t M = 1; M <= n; ++M) capture_verify(M, opt);
   }
   select(keep);
+  if (seqs_[0].wide) capture_wide(opt);
 }
 
 uint32_t Engine::verify_deep_lists() const {
@@ -752,17 +773,20 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
   if (!draft || !rows_commits_.empty()) flush_projection();
   Seq& s = seq();
   const uint32_t pos = control_->pos;
-  if (k > max_draft() || (mtp_ && pos == 0) || size_t(pos) + k + 1 > max_len())
+  const bool wide = k == kWideK && s.wide && !draft;   // open-work 28
+  if ((k > max_draft() && !wide) || (mtp_ && pos == 0) || size_t(pos) + k + 1 > max_len())
     throw std::runtime_error("runtime::Engine::verify: k " + std::to_string(k) + " at pos " +
                              std::to_string(pos) + " (max_verify_k() = " +
                              std::to_string(max_verify_k()) + "; k <= " + std::to_string(max_draft()) +
                              ", pos >= 1 with the MTP head, and pos + k + 1 <= max_len " +
                              std::to_string(max_len()) + ")");
   // df_select writes the other rows on the device in the batched path.
+  // Open-work 28: the wide list's rows are Control::wide_cur (its embed_gather's CTRL_CUR 32), row 0 the pending id.
+  uint32_t* const ids = wide ? control_->wide_cur : control_->cur_token;
+  if (wide) ids[0] = control_->cur_token[0];
   for (uint32_t r = 0; r <= (draft ? 0 : k); ++r)
-    if (control_->cur_token[r] >= Qwen35::kVocab)
-      throw std::runtime_error("runtime::Engine::verify: id " +
-                               std::to_string(control_->cur_token[r]) + " in row " +
+    if (ids[r] >= Qwen35::kVocab)
+      throw std::runtime_error("runtime::Engine::verify: id " + std::to_string(ids[r]) + " in row " +
                                std::to_string(r) + " is outside the vocabulary");
   control_->n_active = k + 1;
   if (mtp_) {
@@ -770,15 +794,17 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
     // (hh[r], cur_token[r]) = (h_{pos-1+r}, x[pos+r]) - capture.h, build_verify.
     hctl_->pos = pos - 1;
     hctl_->n_active = k + 1;
-    for (uint32_t r = 0; r <= k; ++r) hctl_->cur_token[r] = control_->cur_token[r];
+    uint32_t* const hids = wide ? hctl_->wide_cur : hctl_->cur_token;
+    for (uint32_t r = 0; r <= k; ++r) hids[r] = ids[r];
   }
   s.verify_pos = pos;
   s.verify_k = k;
   s.from_rows = false;
   s.verify_hidden = mtp_ ? s.hh + hid_bytes(*model_.desc) : nullptr;   // hh row 1 + j: row j's hidden
   // Spec 28c: the deep list (DPAS bound) once row 0's keys reach the table's threshold.
-  CapturedStep& list =
-      s.verify_deep[k] && pos + 1 >= s.verify_deep_from[k] ? *s.verify_deep[k] : s.verify_steps[k];
+  CapturedStep& list = wide ? *s.wide
+                       : s.verify_deep[k] && pos + 1 >= s.verify_deep_from[k] ? *s.verify_deep[k]
+                                                                              : s.verify_steps[k];
   if (draft) {
     ze_command_list_handle_t lists[3];
     uint32_t count = 0;

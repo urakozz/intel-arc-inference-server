@@ -46,57 +46,18 @@
 #include "common/repack.h"
 #include "loader/quant.h"
 #include "loader/safetensors.h"
+#include "safetensors_writer.h"
 
 namespace {
 
 namespace fs = std::filesystem;
 
-struct Tensor {
-  std::string dtype;
-  std::vector<uint64_t> shape;
-  std::vector<uint8_t> bytes;
-};
-using Tensors = std::map<std::string, Tensor>;
+using safetensors_writer::Tensor;
+using safetensors_writer::Tensors;
 
 const char* kShard = "model-00001-of-00001.safetensors";
 
-void write_checkpoint(const fs::path& dir, const Tensors& ts) {
-  fs::create_directories(dir);
-  std::string hdr = "{";
-  uint64_t off = 0;
-  bool first = true;
-  for (const auto& [name, t] : ts) {
-    hdr += (first ? "" : ",");
-    first = false;
-    hdr += "\"" + name + "\":{\"dtype\":\"" + t.dtype + "\",\"shape\":[";
-    for (size_t i = 0; i < t.shape.size(); ++i) hdr += (i ? "," : "") + std::to_string(t.shape[i]);
-    hdr += "],\"data_offsets\":[" + std::to_string(off) + "," +
-           std::to_string(off + t.bytes.size()) + "]}";
-    off = (off + t.bytes.size() + 7) / 8 * 8;
-  }
-  hdr += "}";
-  while ((8 + hdr.size()) % 8 != 0) hdr += ' ';
-  std::ofstream f(dir / kShard, std::ios::binary);
-  const uint64_t hlen = hdr.size();
-  f.write(reinterpret_cast<const char*>(&hlen), 8);
-  f.write(hdr.data(), std::streamsize(hdr.size()));
-  for (const auto& [name, t] : ts) {
-    (void)name;
-    f.write(reinterpret_cast<const char*>(t.bytes.data()), std::streamsize(t.bytes.size()));
-    const size_t pad = (t.bytes.size() + 7) / 8 * 8 - t.bytes.size();
-    const char zeros[8] = {};
-    f.write(zeros, std::streamsize(pad));
-  }
-  std::ofstream ix(dir / "model.safetensors.index.json");
-  ix << "{\"metadata\":{},\"weight_map\":{";
-  first = true;
-  for (const auto& [name, t] : ts) {
-    (void)t;
-    ix << (first ? "" : ",") << "\"" << name << "\":\"" << kShard << "\"";
-    first = false;
-  }
-  ix << "}}";
-}
+using safetensors_writer::write_checkpoint;
 
 void remove_checkpoint(const fs::path& dir) {
   fs::remove(dir / kShard);

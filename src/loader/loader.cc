@@ -23,6 +23,36 @@
 #include "loader/trained_context.h"
 
 namespace loader {
+
+l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
+  l0::Mem mem(ctx, l0::MemKind::Device, bytes);
+  imm.copy(mem.ptr(), src, bytes);
+  return mem;
+}
+std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
+  return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
+}
+
+std::unique_ptr<DeviceWeight> upload_lm_head(l0::Context& ctx, l0::CmdList& imm, const uint16_t* w, uint32_t hidden,
+                                             uint32_t vocab, bool int8, double& quant_seconds, size_t& bytes) {
+  const model::GemvShape sh{hidden, vocab, 1, 0};
+  if (int8) {
+    const auto q0 = std::chrono::steady_clock::now();
+    std::vector<int8_t> q(size_t(vocab) * hidden);
+    std::vector<float> s(vocab);
+    quantise_int8_tiled(w, hidden, vocab, q.data(), s.data());
+    quant_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - q0).count();
+    bytes += q.size() + s.size() * 4;
+    return std::make_unique<DeviceWeight>(DeviceWeight{
+        upload(ctx, imm, q.data(), q.size()), upload_u(ctx, imm, s.data(), s.size() * 4), sh, model::WeightKind::Int8});
+  }
+  std::vector<uint16_t> t(size_t(vocab) * hidden);
+  common::repack_bf16_tiled(w, hidden, vocab, t.data());
+  bytes += t.size() * 2;
+  return std::make_unique<DeviceWeight>(
+      DeviceWeight{upload(ctx, imm, t.data(), t.size() * 2), nullptr, sh, model::WeightKind::Bf16});
+}
+
 namespace {
 
 using model::Qwen35;
@@ -218,12 +248,6 @@ void bake_small(const model::SmallTensor& t, const uint8_t* src, uint8_t* dst, W
       return;
   }
   std::memcpy(dst, f.data(), n * 4);
-}
-
-l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  l0::Mem mem(ctx, l0::MemKind::Device, bytes);
-  imm.copy(mem.ptr(), src, bytes);
-  return mem;
 }
 
 const char* id_name(model::LinearId id) {
@@ -575,7 +599,7 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
     MoeSource src;
     src.has = [&](const std::string& part) {
       for (const std::string& m : LinearSrc::marker_suffixes())
-        if (view.names.count(L + part + m) != 0) return true;
+        if (view.names.contains(L + part + m)) return true;
       return false;
     };
     src.linear = [&](const std::string& part) {
@@ -656,7 +680,7 @@ MoeLayer load_moe_layer(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
   MoeSource src;
   src.has = [&](const std::string& part) {
     for (const std::string& m : LinearSrc::marker_suffixes())
-      if (view.names.count(lp + part + m) != 0) return true;
+      if (view.names.contains(lp + part + m)) return true;
     return false;
   };
   src.linear = [&](const std::string& part) {
@@ -1198,7 +1222,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   std::string unconsumed;
   for (const auto& [stripped, full] : view.names) {
     (void)full;
-    if (view.consumed.count(stripped)) continue;
+    if (view.consumed.contains(stripped)) continue;
     if (has_suffix(stripped, ".qzeros")) continue;
     if (has_suffix(stripped, ".g_idx")) continue;
     if (is_kv_scale(stripped)) continue;

@@ -278,7 +278,15 @@ class Engine {
   uint32_t draft_vocab() const { return model_.draft_vocab ? model_.draft_vocab->size() : 0; }
   // A tap drafter may supply its list: pending projection, draft and verify run in one submit.
   void verify(uint32_t k, l0::CmdList* draft = nullptr);
-  const uint32_t* verify_ids() const { return control_->out_token; }
+  const uint32_t* verify_ids() const { return seq().verify_k == kWideK ? control_->wide_out : control_->out_token; }
+  // Open-work 28: the one-card wide verify list - prompt lookup's long runs, checked 16 rows at once. Built with the
+  // MTP head on one sequence slot (the deferred GDN build), the bf16 KV cache and the int8 head; its drafts are an
+  // external proposer's (no draft list goes this deep). The caller writes the 15 drafts into control()->wide_cur[1..15]
+  // and calls verify(kWideK) (row 0 is cur_token[0]); verify_ids() then reads Control::wide_out, and commit(j, t)
+  // takes j up to 15 as after any verify. max_wide_k(): kWideK where the list is built and the rows fit, else 0.
+  static constexpr uint32_t kWideK = DecodeScratchDims::kWideM - 1;   // 15
+  uint32_t max_wide_k() const;
+  bool wide_built() const { return seq().wide != nullptr; }
   const float* verify_logits_device() const;   // [k + 1][kVocab] fp32, device memory
   void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
   void flush_projection() const;
@@ -501,7 +509,7 @@ class Engine {
     bool from_rows = false;
     uint32_t rows_row0 = 0;
     uint8_t* ring = nullptr;
-    uint8_t* hh = nullptr;          // MTP: [kM + 1] rows, row 0 = h_{pos-1}
+    uint8_t* hh = nullptr;          // MTP: [kM + 1] rows ([kWideM + 1] on one slot), row 0 = h_{pos-1}
     std::vector<CapturedStep> plain;   // the plain list of each slot of several (one slot's is step_)
     std::vector<CapturedStep> draft_steps;    // [kMaxDraft], MTP on only
     std::vector<CapturedStep> draft_prob_steps;   // open-work 13: the same ending in draft_prob, slot 0 of one slot
@@ -513,6 +521,7 @@ class Engine {
     // where one list serves every depth.
     std::vector<std::unique_ptr<CapturedStep>> verify_deep;   // [M - 1], parallel to verify_steps
     std::vector<uint32_t> verify_deep_from;
+    std::unique_ptr<CapturedStep> wide;   // open-work 28: the 16-row list (slot 0 of one slot), null where not built
     std::vector<uint32_t> draft_ids;
     uint32_t verify_k = kNoVerify, verify_pos = 0;
     // Where commit(j) takes row j's hidden: hh row 1 after verify(), the row list's saved row r0 after verify_rows.
@@ -545,6 +554,7 @@ class Engine {
 
   double verify_deep_ms_ = 0;   // the deep lists' capture time
   void capture_verify(uint32_t M, const CaptureOptions& opt);
+  void capture_wide(const CaptureOptions& opt);   // open-work 28: the 16-row list where it is built
   std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [chunk_cap + 1][hidden], lazy
   // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims; plan 19v3b: and the further slots' states), and
   // the prefill's tap staging (bf16 [chunk_cap][taps][hidden], lazy: the first prefill).

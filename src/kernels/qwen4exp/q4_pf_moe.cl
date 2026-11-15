@@ -82,13 +82,7 @@
 #define Q4_EXPERT_DN(base, id) ((base) + (size_t)(id) * DN_BLK_U32)
 // --------------------------------------------------------------------------------------------------------------
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-// f32 -> bf16, round-to-nearest-even (q4_moe.cl's; NaN is not expected and not handled).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 
 // ---------------------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 #pragma once
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 
@@ -30,3 +31,9 @@
       std::exit(1);                                                             \
     }                                                                           \
   } while (0)
+
+// The distance between two bf16 words in units in the last place (sign-magnitude order, so -0 and +0 are 0 apart).
+inline int ulps16(uint16_t a, uint16_t b) {
+  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
+  return std::abs(key(a) - key(b));
+}

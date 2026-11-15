@@ -118,8 +118,8 @@ int main(int argc, char** argv) {
   const auto other = repeat_to(golden::read_ids("tests/golden/prompts/code.ids"), 3000);
   // The sizes are written out per model, not derived from the descriptor (that would check the
   // formula against itself). State: GDN layers x 48 v-heads x 128 x 128 x 4 B, plus the conv ring
-  // GDN layers x 16 x 10240 x 2 B - Qwen3.8 48 layers: 150,994,944 + 15,728,640.
-  CHECK_EQ(e.state_bytes(), size_t(166723584));
+  // GDN layers x 32 x 10240 x 2 B - Qwen3.8 48 layers: 150,994,944 + 31,457,280 (the ring 32 deep: open-work 28).
+  CHECK_EQ(e.state_bytes(), size_t(182452224));
   // 2048 positions x K and V x FA layers (16 on Qwen3.8) x 4 kv heads x (256 x 2 B)
   // = 134,217,728 at bf16; x (256 + 2) B at int8 (spec 12b: the rows and their
   // fp16 scales).

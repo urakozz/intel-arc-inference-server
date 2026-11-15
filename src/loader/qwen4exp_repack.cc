@@ -6,6 +6,7 @@
 
 #include "common/bf16.h"
 #include "common/repack.h"
+#include "loader/rope_table.h"
 #include "loader/rtn.h"
 
 namespace loader {
@@ -56,8 +57,6 @@ void qsa_names(std::vector<std::string>& v, const std::string& b, bool dense_int
   for (const char* n : kQsaDense) lin(v, b + n, dense_int4);
 }
 
-size_t int4_src_bytes(const LinearSrc& s) { return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2; }
-
 // gate||up interleaved in 16-row blocks of an [N][K] row-major pair (cols_interleave16's column order, as
 // rows), then gemv_bf16's tiles (kolibri1_repack.cc's helper).
 void tiled_interleave16(const uint16_t* gate, const uint16_t* up, uint32_t I, uint32_t K, uint16_t* out) {
@@ -75,7 +74,7 @@ void agree(const SafetensorsSet& st, const std::string& base, Q4Form f, const ch
   const auto& ts = st.tensors();
   const std::string other = base + (f == Q4Form::Int4 ? ".weight" : ".qweight");
   const std::string mine = base + (f == Q4Form::Int4 ? ".qweight" : ".weight");
-  if (ts.count(other) && !ts.count(mine))
+  if (ts.contains(other) && !ts.contains(mine))
     throw std::runtime_error("load_qwen4exp: '" + other + "' mixes the " + group + " forms - " + first + " is " +
                              model::q4_form_name(f) + ", and every member of the group in every layer must agree "
                              "(one checkpoint, one form per group: spec 21b)");
@@ -86,8 +85,8 @@ void agree(const SafetensorsSet& st, const std::string& base, Q4Form f, const ch
 model::Q4Forms q4_forms(const SafetensorsSet& st, const Qwen4ExpDesc& d) {
   const auto& ts = st.tensors();
   const auto form_of = [&](const std::string& base, const char* what) {
-    if (ts.count(base + ".qweight")) return Q4Form::Int4;
-    if (ts.count(base + ".weight")) return Q4Form::Bf16;
+    if (ts.contains(base + ".qweight")) return Q4Form::Int4;
+    if (ts.contains(base + ".weight")) return Q4Form::Bf16;
     throw std::runtime_error("load_qwen4exp: the checkpoint has neither " + base + ".qweight nor " + base +
                              ".weight - no " + what + " to read");
   };
@@ -109,14 +108,14 @@ model::Q4Forms q4_forms(const SafetensorsSet& st, const Qwen4ExpDesc& d) {
   f.expert_group = 0;
   for (uint32_t l = 0; l < d.layers; ++l) {
     const std::string lp = Qwen4ExpDesc::layer_prefix(l);
-    if (ts.count(lp + "mlp.experts.gate_up_proj"))
+    if (ts.contains(lp + "mlp.experts.gate_up_proj"))
       throw std::runtime_error("load_qwen4exp: '" + lp + "mlp.experts.gate_up_proj' is the bf16 original's fused "
                                "experts - the original is the reference's input, never the engine's (one format: "
                                "AutoRound int4 g64, or Intel's g128 expanded exactly; spec 21 §5)");
     for (uint32_t e = 0; e < d.experts; ++e)
       for (const char* m : kMlp) {
         const std::string b = lp + "mlp.experts." + std::to_string(e) + "." + m;
-        if (ts.count(b + ".weight"))
+        if (ts.contains(b + ".weight"))
           throw std::runtime_error("load_qwen4exp: '" + b + ".weight' is a bf16 routed expert - the main model's "
                                    "routed experts are int4 (g64, or Intel's g128 expanded at load); a bf16 one is "
                                    "the reference's input, never the engine's");
@@ -140,8 +139,8 @@ model::Q4Forms q4_forms(const SafetensorsSet& st, const Qwen4ExpDesc& d) {
   if (f.expert_group == 0) f.expert_group = 64;   // no expert shipped: check_names names the first missing one
   // The MTP head's experts (Bf16 when the checkpoint has no head).
   const std::string m0 = "mtp.layers.0.mlp.experts.0.gate_proj";
-  f.mtp_experts = ts.count(m0 + ".qweight") ? Q4Form::Int4 : Q4Form::Bf16;
-  if (ts.count(m0 + ".qweight") || ts.count(m0 + ".weight"))
+  f.mtp_experts = ts.contains(m0 + ".qweight") ? Q4Form::Int4 : Q4Form::Bf16;
+  if (ts.contains(m0 + ".qweight") || ts.contains(m0 + ".weight"))
     for (uint32_t e = 0; e < d.experts; ++e)
       for (const char* m : kMlp)
         agree(st, "mtp.layers.0.mlp.experts." + std::to_string(e) + "." + m, f.mtp_experts, "MTP expert", m0.c_str());
@@ -189,18 +188,7 @@ std::vector<std::string> q4_expected_names(const Qwen4ExpDesc& d, const model::Q
 }
 
 std::vector<float> q4_rope_table(const Qwen4ExpDesc& d, uint32_t max_len) {
-  const uint32_t half = d.rope_dims / 2;
-  const float base = float(d.rope_theta);   // 1e7 is exact in fp32
-  std::vector<float> inv(half);
-  for (uint32_t i = 0; i < half; ++i) inv[i] = 1.0f / std::pow(base, float(2 * i) / float(d.rope_dims));
-  std::vector<float> t(size_t(max_len) * 2 * half);
-  for (uint32_t p = 0; p < max_len; ++p)
-    for (uint32_t i = 0; i < half; ++i) {
-      const float ang = float(p) * inv[i];
-      t[(size_t(p) * 2 + 0) * half + i] = common::bf16_to_f32(common::f32_to_bf16(float(std::cos(double(ang)))));
-      t[(size_t(p) * 2 + 1) * half + i] = common::bf16_to_f32(common::f32_to_bf16(float(std::sin(double(ang)))));
-    }
-  return t;
+  return bf16_rope_table(d.rope_dims, float(d.rope_theta), max_len);   // 1e7 is exact in fp32
 }
 
 Q4LayerBytes Q4HostLayer::bytes() const {
@@ -234,9 +222,9 @@ void Q4Checkpoint::check_names(bool mtp) const {
   size_t n_bad = 0;
   for (const auto& [name, info] : set_.tensors()) {
     (void)info;
-    if (all.count(name)) continue;
+    if (all.contains(name)) continue;
     if (starts_with(name, "model.visual.") || starts_with(name, shards) || (!mtp && starts_with(name, "mtp."))) continue;
-    if (ends_with(name, ".g_idx") && all.count(name.substr(0, name.size() - 6) + ".qweight")) continue;
+    if (ends_with(name, ".g_idx") && all.contains(name.substr(0, name.size() - 6) + ".qweight")) continue;
     if (n_bad++ < 5) bad += (bad.empty() ? "" : ", ") + name;
   }
   if (n_bad != 0)
@@ -249,7 +237,7 @@ void Q4Checkpoint::check_names(bool mtp) const {
                              "another packing are all outside spec 21's one format)");
   for (const std::string& name : exp) {
     if (ends_with(name, ".qzeros")) continue;   // never read; assert_quant_invariants checks it when shipped
-    if (!set_.tensors().count(name))
+    if (!set_.tensors().contains(name))
       throw std::runtime_error("load_qwen4exp: the checkpoint has no tensor '" + name + "', which " + d_.name + " needs" +
                                (starts_with(name, "mtp.") ? " for its MTP head (load without --spec mtp)" : ""));
   }
@@ -629,7 +617,7 @@ size_t Q4Checkpoint::unconsumed(std::string* names) const {
   size_t n = 0;
   for (const auto& [name, info] : set_.tensors()) {
     (void)info;
-    if (consumed_.count(name) || ends_with(name, ".qzeros") || ends_with(name, ".g_idx")) continue;
+    if (consumed_.contains(name) || ends_with(name, ".qzeros") || ends_with(name, ".g_idx")) continue;
     if (names && n < 5) *names += (names->empty() ? "" : ", ") + name;
     ++n;
   }

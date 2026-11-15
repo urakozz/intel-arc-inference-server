@@ -461,7 +461,7 @@ int main(int argc, char** argv) {
       runtime::prefill::Context cx(e.ctx);
       runtime::prefill::KernelCache kc(e.ctx);
       l0::Mem staged(e.ctx, l0::MemKind::Device, size_t(2048) * width * 2);
-      for (const auto [pos, n] : {std::pair<uint32_t, uint32_t>{0, 1000}, {1000, 1048}, {2048, P - 2048}}) {
+      for (const auto& [pos, n] : {std::pair<uint32_t, uint32_t>{0, 1000}, {1000, 1048}, {2048, P - 2048}}) {
         for (uint32_t r = 0; r < n; ++r)
           e.imm.copy(static_cast<uint8_t*>(staged.ptr()) + size_t(r) * width * 2, taps_rows(pos + r, 1, width).data(),
                      size_t(width) * 2);

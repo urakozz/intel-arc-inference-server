@@ -106,12 +106,12 @@ void check_memory() {
   const runtime::BatchMemory q1 = runtime::batch_memory(q, {{1, true}}, KvCache::Int8, 0, 0);
   const runtime::BatchMemory q0 = runtime::batch_memory(q, {{0, true}}, KvCache::Int8, 0, 0);
   CHECK_EQ(q1.kv - q0.kv, size_t{35088});
-  CHECK_EQ(q0.state, size_t{4} * 150994944 + 15728640);   // 0.620 GB
+  CHECK_EQ(q0.state, size_t{4} * 150994944 + 31457280);   // 0.635 GB (the conv ring 32 deep: open-work 28)
   // Without MTP: no head layer, one GDN state.
   CHECK_EQ(runtime::batch_memory(q, {{1, false}}, KvCache::Int8, 0, 0).kv -
                runtime::batch_memory(q, {{0, false}}, KvCache::Int8, 0, 0).kv,
            size_t{33024});
-  CHECK_EQ(runtime::batch_memory(q, {{0, false}}, KvCache::Int8, 0, 0).state, size_t{150994944} + 15728640);
+  CHECK_EQ(runtime::batch_memory(q, {{0, false}}, KvCache::Int8, 0, 0).state, size_t{150994944} + 31457280);
 
   std::printf("| %-56s | KV GB | state | weights | scratch | total | spare |\n", "layout (int8 KV unless said; DERIVED)");
   const auto mk = runtime::main_and_short;
@@ -122,13 +122,13 @@ void check_memory() {
   // 3e adds one layer's unscaled bf16 K/V temporary at the longest slot's capacity.
   const double raw128 = gb(size_t{131072} * 4 * 256 * 2 * 2);
   CHECK_NEAR(gb(qd.weights), 17.70, 0.015);
-  CHECK_NEAR(gb(qd.scratch), 0.78 + raw128, 0.015);
-  CHECK_NEAR(gb(qd.total()), 29.01 + raw128, 0.015);
-  CHECK_NEAR((double(kBudget) - double(qd.total())) / kGB, 2.02 - raw128, 0.015);
+  CHECK_NEAR(gb(qd.scratch), 0.808 + raw128, 0.015);   // open-work 28: the decode scratch at 16 rows
+  CHECK_NEAR(gb(qd.total()), 29.093 + raw128, 0.015);
+  CHECK_NEAR((double(kBudget) - double(qd.total())) / kGB, 1.937 - raw128, 0.015);
   const runtime::BatchMemory q4 = runtime::batch_memory(q, mk(4, 65536, 65536, true), KvCache::Int8, kQwenInt8Weights, kMtpWeights);
   print("Qwen3.8 4 x 65536, MTP", q4);
   CHECK_NEAR((double(kBudget) - double(q4.total())) / kGB,
-             0.89 - gb(size_t{65536} * 4 * 256 * 2 * 2), 0.015);
+             0.804 - gb(size_t{65536} * 4 * 256 * 2 * 2), 0.015);
   print("Qwen3.8 1 x 131072 + 3 x 32768, MTP, bf16 KV",
         runtime::batch_memory(q, mk(4, 131072, 32768, true), KvCache::Bf16, kQwenInt8Weights, kMtpWeights));
   print("Qwen3.8 1 x 131072 (today's engine), MTP",

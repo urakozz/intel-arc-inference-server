@@ -137,6 +137,11 @@ struct LinearSrc {
   static const std::vector<std::string>& marker_suffixes();
 };
 
+// An Int4 linear's checkpoint bytes: the GPTQ qweight [K/8][N] u32 plus the scales [K/group][N] f16.
+inline size_t int4_src_bytes(const LinearSrc& s) {
+  return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2;
+}
+
 // What the scan counted but did not reject.
 struct QuantScan {
   size_t subnormal_scales = 0;   // see assert_quant_invariants

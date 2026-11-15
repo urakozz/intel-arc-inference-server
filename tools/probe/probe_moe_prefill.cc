@@ -9,7 +9,8 @@
 //   F1.*      fused bf16, per-sub-group conversion          (probe_moe_prefill.cl FORM 1)
 //   F2.*      fused bf16, the B slab converted once into SLM (FORM 2)
 //   F3.*      W4A8, int8 activations x the s4 operand          (FORM 3; quantiser timed beside it)
-//   sort      pf_moe_sort / q4_pf_sort against pf_moe_sort_mw's hist + scan + scatter
+//   sort      q4_pf_sort against pf_moe_sort_mw's hist + scan + scatter (Flash-Next; Ornith's one-work-group
+//             pf_moe_sort was removed 2026-11-15)
 //   c4        (phase 3 Task 1) F1 with the EXACT integer weights (q - 8) and the g64 scale on the accumulator, per
 //             64-k group: acc = fma(tile, scale, acc); checked bitwise against a host oracle of the same order on
 //             integer-valued A rows (the DPAS partial sums are then exact whatever its summation order)
@@ -19,10 +20,10 @@
 //             epilogue) for gate||up and pf_dequant_slab + pf_gemm for down on the chunk's rows in token order, the
 //             routed items alone in the chosen arm's walk; timed as the sum against the chosen arm's full walk
 //
-// Gates before any time: the mw sort's four buffers equal the one-work-group sort's (C <= 2048) and the host twin's
-// (tests/kernels/pf_moe_ref.h, every C) on the checked layer-chunks; every F1 / F2 arm's h and y equal the control's
-// over every used row as raw 32-bit words; every F3 arm's fp32 result (its EPI 2 binary) equals an integer-exact host
-// oracle on every row of the checked tiles. An arm that fails is reported and not timed.
+// Gates before any time: the mw sort's four buffers equal the one-work-group sort's (Flash-Next, C <= 2048) and the
+// host twin's (tests/kernels/pf_moe_ref.h, every C) on the checked layer-chunks; every F1 / F2 arm's h and y equal the
+// control's over every used row as raw 32-bit words; every F3 arm's fp32 result (its EPI 2 binary) equals an
+// integer-exact host oracle on every row of the checked tiles. An arm that fails is reported and not timed.
 //
 // Timing: each sample is one arm's whole walk over every layer-chunk of the dump between two global timestamps,
 // after a warm-up of every arm; `rounds` rounds with the arms in a rotating order (interleaved). Medians, divided by
@@ -333,7 +334,7 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
   l0::Kernel& k_gemm_dn = kc(kernels::pf_moe_gemm_variant(I, H, false, false), "pf_moe_gemm");
   l0::Kernel& k_deq_gu = kc(pv, m.q4exp ? "q4_pf_dequant_gu" : "pf_moe_dequant_gu");
   l0::Kernel& k_deq_dn = kc(pv, m.q4exp ? "q4_pf_dequant_dn" : "pf_moe_dequant_dn");
-  l0::Kernel& k_sort = kc(pv, m.q4exp ? "q4_pf_sort" : "pf_moe_sort");
+  l0::Kernel* k_sort = m.q4exp ? &kc(pv, "q4_pf_sort") : nullptr;
   l0::Kernel& k_gather = kc(pv, m.q4exp ? "q4_pf_gather" : "pf_moe_gather");
   l0::Kernel& k_hist = kc(sv, "pf_moe_hist");
   l0::Kernel& k_scan = kc(sv, "pf_moe_scan");
@@ -341,8 +342,8 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
   const uint32_t nblk = (C + 63) / 64;
 
   auto sort_old = [&](const uint32_t* r) {
-    cx.launch(k_sort, 1, 1, 1, {PtrArg(r), PtrArg(hdr.ptr()), PtrArg(tiles.ptr()), PtrArg(row_tok.ptr()),
-                                PtrArg(pair_row.ptr()), arg_val(C), arg_val(T)});
+    cx.launch(*k_sort, 1, 1, 1, {PtrArg(r), PtrArg(hdr.ptr()), PtrArg(tiles.ptr()), PtrArg(row_tok.ptr()),
+                                 PtrArg(pair_row.ptr()), arg_val(C), arg_val(T)});
   };
   auto sort_mw = [&](const uint32_t* r) {
     cx.launch(k_hist, nblk, 1, 1, {PtrArg(r), PtrArg(cnt.ptr()), arg_val(C)});
@@ -351,7 +352,7 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
     cx.launch(k_scat, nblk, 1, 1, {PtrArg(r), PtrArg(cnt.ptr()), PtrArg(row_tok.ptr()), PtrArg(pair_row.ptr()),
                                    arg_val(C)});
   };
-  const bool have_old = C <= 2048;
+  const bool have_old = m.q4exp && C <= 2048;
 
   // control: gate||up and down, today's walk
   auto ctl_gu = [&](const l0::Mem& tl, const l0::Mem& hd, int copy, void* hout) {

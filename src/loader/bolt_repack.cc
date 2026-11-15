@@ -19,8 +19,8 @@ void add_int4(std::vector<std::string>& v, const std::string& base) {
 }  // namespace
 
 std::string bolt_trunk_prefix(const SafetensorsSet& set) {
-  const bool model = set.tensors().count("language_model.model.embeddings.weight") != 0;
-  const bool backbone = set.tensors().count("language_model.backbone.embeddings.weight") != 0;
+  const bool model = set.tensors().contains("language_model.model.embeddings.weight");
+  const bool backbone = set.tensors().contains("language_model.backbone.embeddings.weight");
   if (model && backbone)
     throw std::runtime_error("load_bolt: the checkpoint ships the embedding under both 'language_model.model.' and "
                              "'language_model.backbone.' - one trunk spelling per checkpoint");

@@ -46,11 +46,6 @@ using qr::f32;
 using qr::rf;
 using qr::rne;
 
-int ulps16(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
-
 // Element-wise comparison: the count of differing elements and the worst ulp distance.
 struct Diff {
   size_t n = 0, differ = 0;

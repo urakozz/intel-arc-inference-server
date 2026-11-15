@@ -65,12 +65,7 @@
 #define NPR (M * GQA)
 #define SSCALE 0.08838834764831845f   /* 1 / sqrt(128) */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 inline uint v2_ppw(uint len) {
   uint p = (len + TGT - 1) / TGT;

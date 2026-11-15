@@ -9,8 +9,8 @@
 //      row (so prefill and decode route from the same logits for the same x), and the
 //      route rows' ids the reference's (near-ties excepted, as moe_test);
 //   2. the sort: header, the whole padded tile table, pair_row and the used rows' tokens
-//      exactly the host walk's - on the device routes and on crafted ones (all tokens to
-//      experts 0..7; one-row experts, the tile bound's adversary; C = 1);
+//      exactly the host walk's - on the device routes and, in its own buffers, on crafted
+//      ones (all tokens to experts 0..7; one-row experts, the tile bound's adversary; C = 1);
 //   3. the gathers: bf16 rows and int8 rows + scales exactly the host gather of the
 //      device's own inputs;
 //   4. GROUPED == DENSE, bitwise, per (token, expert), for a sample of experts (the most
@@ -130,11 +130,12 @@ std::vector<uint16_t> random_bf16(size_t n, float lo, float hi, uint32_t seed) {
 
 // Every binary the walk and its dense references bind.
 struct Kernels {
-  l0::Module pf, dec, router, gemv, g_gu, g_gu8, g_dn, quant, requant, dense, dense_silu, dense_i8;
-  l0::Kernel route, sort, gather, gather_i8, dq_gu, dq_dn, combine, rgemv, dgemv, kg_gu, kg_gu8,
+  l0::Module pf, mw, dec, router, gemv, g_gu, g_gu8, g_dn, quant, requant, dense, dense_silu, dense_i8;
+  l0::Kernel route, hist, scan, scat, gather, gather_i8, dq_gu, dq_dn, combine, rgemv, dgemv, kg_gu, kg_gu8,
       kg_dn, kquant, krequant, kcolmax, kdense, kdense_silu, kdense_i8;
   explicit Kernels(Dev& d)
       : pf(d.ctx, kernels::path(kernels::pf_moe_variant(256, 8, kH, kI))),
+        mw(d.ctx, kernels::path(kernels::pf_moe_sort_mw_variant(256, 8))),
         dec(d.ctx, kernels::path(kernels::moe_variant(1, 256, 8, kH, kI))),
         router(d.ctx, kernels::path(kernels::pf_moe_router_variant(kH, 272))),
         gemv(d.ctx, kernels::path(kernels::gemv_bf16_variant(1, kH, 272, kernels::gemv_bf16_tiling(272)))),
@@ -146,7 +147,8 @@ struct Kernels {
         dense(d.ctx, kernels::path(kernels::pf_gemm_variant(false))),
         dense_silu(d.ctx, kernels::path(kernels::pf_gemm_silu_variant())),
         dense_i8(d.ctx, kernels::path(kernels::pf_gemm_i8_variant(true))),
-        route(dec, "moe_route"), sort(pf, "pf_moe_sort"), gather(pf, "pf_moe_gather"),
+        route(dec, "moe_route"), hist(mw, "pf_moe_hist"), scan(mw, "pf_moe_scan"), scat(mw, "pf_moe_scatter"),
+        gather(pf, "pf_moe_gather"),
         gather_i8(pf, "pf_moe_gather_i8"), dq_gu(pf, "pf_moe_dequant_gu"),
         dq_dn(pf, "pf_moe_dequant_dn"), combine(pf, "pf_moe_combine"), rgemv(router, "pf_ab_proj"),
         dgemv(gemv, "gemv_bf16"), kg_gu(g_gu, "pf_moe_gemm"), kg_gu8(g_gu8, "pf_moe_gemm"),
@@ -154,7 +156,9 @@ struct Kernels {
         krequant(requant, "pf_requant_rot"), kcolmax(requant, "pf_colmax_rot"),
         kdense(dense, "pf_gemm"), kdense_silu(dense_silu, "pf_gemm"), kdense_i8(dense_i8, "pf_gemm_i8") {
     route.group_size(256);
-    sort.group_size(256);
+    hist.group_size(256);
+    scan.group_size(256);
+    scat.group_size(256);
     gather.group_size(64);
     gather_i8.group_size(64);
     dq_gu.group_size(16);
@@ -233,7 +237,7 @@ struct Run {
 };
 
 struct Bufs {   // device scratch for one walk, sized for kKc (+256 rows for the dense refs)
-  l0::Mem x, logits, route, hdr, tiles, row_tok, pair_row, xq, xs, xg, xg8, xsg, h, h8, y, w, resid;
+  l0::Mem x, logits, route, hdr, tiles, row_tok, pair_row, xq, xs, xg, xg8, xsg, h, h8, y, w, resid, cnt, items;
 };
 Bufs alloc(Dev& d) {
   const uint32_t T = pf_moe_ref::tmax(kS, kKc), R = T * kTm + 256;
@@ -243,7 +247,8 @@ Bufs alloc(Dev& d) {
               z(size_t(kKc) * 8 * 4), z(size_t(pad256(kKc)) * kH), z(size_t(pad256(kKc)) * 4),
               z(size_t(R) * kH * 2), z(size_t(R) * kH), z(size_t(R) * 4), z(size_t(R) * kI * 2),
               z(size_t(R) * kI * 2), z(size_t(R) * kH * 2), z(size_t(129) * kH * kNG * 2),
-              z(size_t(kKc) * kH * 2)};
+              z(size_t(kKc) * kH * 2), z(size_t(kKc / 64) * 256 * 4),
+              z(size_t(pf_moe_ref::items_bound(kS, kKc, kernels::pf_moe::kItemM)) * 16)};
 }
 
 Run walk(Dev& d, Kernels& k, Layer& L, Bufs& b, const std::vector<uint16_t>& x,
@@ -263,15 +268,27 @@ Run walk(Dev& d, Kernels& k, Layer& L, Bufs& b, const std::vector<uint16_t>& x,
   k.route.arg_ptr(0, b.logits.ptr());
   k.route.arg_ptr(1, b.route.ptr());
   d.run(k.route, 1, C);
-  // sort
-  k.sort.arg_ptr(0, b.route.ptr());
-  k.sort.arg_ptr(1, b.hdr.ptr());
-  k.sort.arg_ptr(2, b.tiles.ptr());
-  k.sort.arg_ptr(3, b.row_tok.ptr());
-  k.sort.arg_ptr(4, b.pair_row.ptr());
-  k.sort.arg(5, C);
-  k.sort.arg(6, r.tmax);
-  d.run(k.sort, 1);
+  // sort (pf_moe_sort_mw: hist, scan, scatter over 64-token blocks)
+  const uint32_t nblk = (C + 63) / 64;
+  k.hist.arg_ptr(0, b.route.ptr());
+  k.hist.arg_ptr(1, b.cnt.ptr());
+  k.hist.arg(2, C);
+  d.run(k.hist, nblk);
+  k.scan.arg_ptr(0, b.cnt.ptr());
+  k.scan.arg_ptr(1, b.hdr.ptr());
+  k.scan.arg_ptr(2, b.tiles.ptr());
+  k.scan.arg_ptr(3, b.row_tok.ptr());
+  k.scan.arg_ptr(4, b.items.ptr());
+  k.scan.arg(5, C);
+  k.scan.arg(6, r.tmax);
+  k.scan.arg(7, pf_moe_ref::items_bound(kS, C, kernels::pf_moe::kItemM));
+  d.run(k.scan, 1);
+  k.scat.arg_ptr(0, b.route.ptr());
+  k.scat.arg_ptr(1, b.cnt.ptr());
+  k.scat.arg_ptr(2, b.row_tok.ptr());
+  k.scat.arg_ptr(3, b.pair_row.ptr());
+  k.scat.arg(4, C);
+  d.run(k.scat, nblk);
   // bf16: gather, then gate||up in batches of 129 blocks (the engine's: 257 = 129 + 128)
   k.gather.arg_ptr(0, b.x.ptr());
   k.gather.arg_ptr(1, b.hdr.ptr());
@@ -832,41 +849,11 @@ int main() {
     std::printf("  1. router GEMV rows bitwise decode's gemv_bf16; %u route rows' ids the "
                 "reference's (%zu near-ties at the boundary)\n", C, ties);
   }
-  // 2. the sort on the device routes, and crafted routes through the sort alone
+  // 2. the walk's sort on the device routes
   check_sort(a.route, a);
-  {
-    auto sort_only = [&](const std::vector<uint32_t>& route, uint32_t Cc, const char* what) {
-      d.imm.copy(b.route.ptr(), route.data(), route.size() * 4);
-      Run r;
-      r.C = Cc;
-      r.tmax = pf_moe_ref::tmax(kS, Cc);
-      k.sort.arg_ptr(0, b.route.ptr());
-      k.sort.arg(5, Cc);
-      k.sort.arg(6, r.tmax);
-      d.run(k.sort, 1);
-      r.hdr = d.read<uint32_t>(b.hdr, kernels::pf_moe::hdr_words(256));
-      r.tiles = d.read<uint32_t>(b.tiles, size_t(r.tmax) * 2);
-      r.row_tok = d.read<uint32_t>(b.row_tok, size_t(r.tmax) * kTm);
-      r.pair_row = d.read<uint32_t>(b.pair_row, size_t(Cc) * 8);
-      check_sort(route, r);
-      std::printf("     sort %-22s C %4u: %3u tiles of %3u - exact\n", what, Cc,
-                  r.hdr[kernels::pf_moe::kHdrTiles], r.tmax);
-    };
-    std::vector<uint32_t> rt(size_t(C) * 32, 0);
-    for (uint32_t t = 0; t < C; ++t)
-      for (uint32_t s = 0; s < 8; ++s) rt[size_t(t) * 32 + s] = 7 - s;
-    sort_only(rt, C, "all to experts 0..7");
-    uint32_t single = 8;
-    for (uint32_t t = 0; t < C; ++t) {
-      for (uint32_t s = 0; s < 8; ++s) rt[size_t(t) * 32 + s] = s;
-      if (single < 256) rt[size_t(t) * 32] = single++;
-    }
-    sort_only(rt, C, "one-row experts");
-    sort_only(rt, 1, "C = 1");
-  }
-  std::puts("  2. pf_moe_sort: header, padded tile table, pair_row, rows exactly the host walk's");
-  // 2b. plan 2026-11-12 Task 2: pf_moe_sort_mw (hist + scan + scatter) - every buffer exactly the host walk's (so
-  // pf_moe_sort's), and its work items the host's, on the device routes, the crafted ones, C = 1 / 37, and random routes past the old KC (4096,
+  std::puts("  2. the sort: header, padded tile table, pair_row, rows exactly the host walk's");
+  // 2b. plan 2026-11-12 Task 2: pf_moe_sort_mw (hist + scan + scatter) - every buffer exactly the host walk's,
+  // and its work items the host's, on the device routes, the crafted ones, C = 1 / 37, and random routes past the old KC (4096,
   // 16384), in its own buffers
   {
     l0::Module mw(d.ctx, kernels::path(kernels::pf_moe_sort_mw_variant(256, 8)));
@@ -967,14 +954,7 @@ int main() {
     CHECK_EQ(bad8, size_t(0));
     CHECK_EQ(bads, size_t(0));
   }
-  // 4. grouped == dense. Section 2's crafted sorts rewrote the device header, tile table,
-  // row_tok and pair_row (its last: C = 1, experts 1..8 only), and pf_moe_dequant_* skips a
-  // routed block whose header count is 0 - so the chunk's own sort goes back first, or the
-  // dequant of an expert the C = 1 header does not route is skipped and reads as zeros.
-  d.imm.copy(b.hdr.ptr(), a.hdr.data(), a.hdr.size() * 4);
-  d.imm.copy(b.tiles.ptr(), a.tiles.data(), a.tiles.size() * 4);
-  d.imm.copy(b.row_tok.ptr(), a.row_tok.data(), a.row_tok.size() * 4);
-  d.imm.copy(b.pair_row.ptr(), a.pair_row.data(), a.pair_row.size() * 4);
+  // 4. grouped == dense (section 2b's crafted sorts ran in their own buffers: the walk's are the chunk's).
   std::puts("  4. grouped == dense, bitwise, per (token, expert):");
   for (uint32_t e : sample_experts(a)) grouped_vs_dense(d, k, L, b, a, e);
   fused_vs_grouped(d, L, b, a);

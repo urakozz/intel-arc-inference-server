@@ -121,13 +121,7 @@
 // kv_k / kv_v are the layer's whole cache and a last argument `pages` maps the KV pages - position pos + m is cache
 // row pages[(pos + m) / KV_PAGED] x KV_PAGED + (pos + m) % KV_PAGED. The values written are unchanged.
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // The fold before the linear's bf16 rounding. attn.cl sums `QKV_S` slices at
 // stride `s * M`; at QKV_S = 1 there is one slice, the stride is unreachable

@@ -15,15 +15,6 @@
 // by DFlashCheckpoint and uploaded at once on a synchronous immediate list, so the host holds one linear at a time.
 namespace loader {
 namespace {
-
-l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  l0::Mem m(ctx, l0::MemKind::Device, bytes);
-  imm.copy(m.ptr(), src, bytes);
-  return m;
-}
-std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
-}
 DeviceWeight upload_linear(l0::Context& ctx, l0::CmdList& imm, const DFlashHostLinear& h, size_t& bytes) {
   bytes += h.bytes();
   if (h.kind == model::WeightKind::Int4)

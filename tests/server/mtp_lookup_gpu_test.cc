@@ -13,8 +13,10 @@
 //        (busy-box timing, informational: the server A/B is the measurement).
 //   H    the head stays warm: after an mtp-lookup run that used lookup (reemit-8k, 256 ids) the head's KV rows of the
 //        generated positions against plain --spec mtp's on the same ids - a lookup verify rewrites them as an MTP
-//        verify does, so no row is stale (min cosine >= 0.99; the bitwise share printed: the two runs verify at other
-//        M, and an M = 1 row is not bitwise an M >= 2 row). A truncate_to inside a lookup burst, then continued: the
+//        verify does, so no row is stale. Open-work 28: the 16-row list's attention is another kernel than the 4-row
+//        lists', and the rows the model is sensitive at move (the same rows move between plain decode and plain MTP;
+//        tools/probe/probe_wide_repeat): the bar is no more rows below 0.99 against MTP's than twice plain decode's
+//        (one-row) own on the same prompt; the bitwise share and the minimums printed. A truncate_to inside a lookup burst, then continued: the
 //        ids equal the untruncated run's.
 //   S    a seeded sampled mtp-lookup run (T 0.7, top-k 20, top-p 0.95; its MTP iterations step_many at AdaptiveK's K,
 //        as the server's) twice from fresh adapters: ids bitwise; its lookup share printed.
@@ -137,10 +139,11 @@ Gen generate_plain(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32
   return g;
 }
 
-// Server::generate's loop with lookup inside MTP, minus the text: greedy requests' MTP iterations by the per-step
+// Server::generate's loop with lookup inside MTP, minus the text (open-work 28: with the engine's wide list, the long
+// runs' 16-row verifies and the head-confirmed entries, through step_drafts_or_confirmed as the server): greedy requests' MTP iterations by the per-step
 // choice, sampled ones by AdaptiveK. `cut`: the first lookup burst of >= 3 ids is truncated to 2.
 Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, const server::Sampling& s,
-                    bool cut = false, bool* did_cut = nullptr) {
+                    bool cut = false, bool* did_cut = nullptr, std::vector<std::string>* log = nullptr) {
   a.reset();
   a.prefill(prompt);
   Gen g;
@@ -152,14 +155,26 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
   server::LookupInDFlashOptions lo;
   lo.window = 0;
   lo.max_k = kK;
+  lo.wide_k = a.lookup_wide_k();
   server::LookupInDFlash lid(lo);
   const auto t0 = std::chrono::steady_clock::now();
   while (g.ids.size() < n) {
     const uint32_t k = s.greedy ? sk.begin() : ak.next();
+    const size_t at = prompt.size() + g.ids.size();   // the pending id's position
     uint32_t proposed = 0;
     server::EngineIface::DraftChoice choose;
     if (s.greedy) choose = [&](uint32_t j, float p) { return sk.choose(j, p); };
-    std::vector<uint32_t> burst = a.step_drafts_or_chosen(
+    std::vector<uint32_t> cand;
+    server::EngineIface::LookupConfirm confirm;
+    confirm.candidate = [&]() {
+      cand = lid.candidate(m);
+      return cand;
+    };
+    confirm.confirmed = [&]() {
+      lid.confirmed();
+      proposed = uint32_t(cand.size());
+    };
+    std::vector<uint32_t> burst = a.step_drafts_or_confirmed(
         s, k,
         [&](uint32_t x) {
           m.append(x);
@@ -167,9 +182,12 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
           proposed = uint32_t(d.size());
           return d;
         },
-        choose);
+        choose, confirm);
     ++g.iters;
     const uint32_t kept = uint32_t(burst.size() - 1);
+    if (log)
+      log->push_back("pos " + std::to_string(at) + (proposed ? " lookup " + std::to_string(proposed) : " mtp k " + std::to_string(k)) +
+                     (cand.size() && proposed == cand.size() ? " (confirmed)" : "") + " kept " + std::to_string(kept));
     if (proposed > 0) {
       lid.observe(proposed, kept);
       ++g.lookup_iters;
@@ -229,11 +247,13 @@ int main(int argc, char** argv) {
   bool ok = true;
   server::Sampling greedy;
 
+  // `H` as the second argument: part H alone (open-work 28's head-row diagnosis).
+  const bool only_h = argc > 2 && std::string(argv[2]) == "H";
   // --- D2 -------------------------------------------------------------------------------------------------
   uint64_t fails = 0, far_lookup_iters = 0, tot_iters = 0, tot_lookup_ids = 0, tot_ids = 0, ties = 0, beyond = 0,
            judged = 0;
   const golden::ForcedJudge fj;
-  for (const Prompt& p : prompts()) {
+  for (const Prompt& p : only_h ? std::vector<Prompt>{} : prompts()) {
     std::vector<greedy_tie::RefStep> steps;
     const Gen plain = generate_plain(mtp, p.ids, kGen, greedy, false, &steps, &e);
     const Gen g = generate_lookup(mtp, p.ids, kGen, greedy);
@@ -269,7 +289,7 @@ int main(int argc, char** argv) {
               (unsigned long long)judged, double(tot_ids) / double(tot_iters), 100.0 * tot_lookup_ids / tot_ids,
               (unsigned long long)far_lookup_iters);
   ok &= fails == 0;
-  ok &= far_lookup_iters > 0;   // the long repeats entered lookup (else D2 proved nothing new)
+  ok &= only_h || far_lookup_iters > 0;   // the long repeats entered lookup (else D2 proved nothing new)
 
   // --- H: the warm head ---------------------------------------------------------------------------------------
   {
@@ -277,16 +297,17 @@ int main(int argc, char** argv) {
     const uint32_t b = uint32_t(prompt.size()), end = b + kGen - 1;   // the generated positions, the last one aside
     const Gen pm = generate_plain(mtp, prompt, kGen, greedy, true);
     const std::vector<uint8_t> kv_mtp = head_k_rows(mtp, e, b, end);
-    const Gen g = generate_lookup(mtp, prompt, kGen, greedy);
+    std::vector<std::string> iters;
+    const Gen g = generate_lookup(mtp, prompt, kGen, greedy, false, nullptr, &iters);
     const std::vector<uint8_t> kv_lk = head_k_rows(mtp, e, b, end);
-    const bool same_ids = g.ids == pm.ids;
+    // Open-work 28: the 16-row list's attention is not the 4-row lists' kernel, so a row the model is sensitive at moves
+    // (its hidden, then the head's K row); the same rows move between plain decode and plain MTP. The yardstick: the
+    // plain one-row decode's head rows against MTP's, row by row.
+    const Gen p1 = generate_plain(mtp, prompt, kGen, greedy, false);
+    const std::vector<uint8_t> kv_one = head_k_rows(mtp, e, b, end);
+    const bool same_ids = g.ids == pm.ids && p1.ids == pm.ids;
     const size_t rb = e.mtp_buffers()->kv_lay.row_bytes();
-    double min_cos = 1;
-    uint32_t bitwise_rows = 0;
-    for (uint32_t r = 0; r < end - b; ++r) {
-      const uint8_t* x = kv_lk.data() + size_t(r) * rb;
-      const uint8_t* y = kv_mtp.data() + size_t(r) * rb;
-      bitwise_rows += std::memcmp(x, y, rb) == 0;
+    auto cosine = [&](const uint8_t* x, const uint8_t* y) {
       double dot = 0, na = 0, nb = 0;
       for (size_t i = 0; i < rb; i += 2) {
         uint16_t u, v;
@@ -297,13 +318,34 @@ int main(int argc, char** argv) {
         na += fx * fx;
         nb += fy * fy;
       }
-      min_cos = std::min(min_cos, dot / std::sqrt(std::max(na * nb, 1e-300)));
+      return dot / std::sqrt(std::max(na * nb, 1e-300));
+    };
+    double min_cos = 1, min_one = 1;
+    uint32_t bitwise_rows = 0, off_lk = 0, off_one = 0;   // rows below 0.99 against MTP's
+    bool bad = false;
+    for (uint32_t r = 0; r < end - b; ++r) {
+      const uint8_t* y = kv_mtp.data() + size_t(r) * rb;
+      bitwise_rows += std::memcmp(kv_lk.data() + size_t(r) * rb, y, rb) == 0;
+      const double cs = cosine(kv_lk.data() + size_t(r) * rb, y), c1 = cosine(kv_one.data() + size_t(r) * rb, y);
+      if (cs < 0.99 || c1 < 0.99)
+        std::printf("H: row %u (position %u): lookup against mtp %.6f, plain decode against mtp %.6f\n", r, b + r, cs, c1);
+      bad |= cs < 0.99;
+      off_lk += cs < 0.99;
+      off_one += c1 < 0.99;
+      min_cos = std::min(min_cos, cs);
+      min_one = std::min(min_one, c1);
     }
+    if (bad)
+      for (const std::string& it : iters) std::printf("H: iteration %s\n", it.c_str());
     std::printf("H: after %llu lookup iterations (%llu ids) the head's K rows of the %u generated positions against "
-                "plain --spec mtp's (ids %s): min cosine %.6f, %u rows bitwise\n",
+                "plain --spec mtp's (ids %s): min cosine %.6f (plain decode's: %.6f), %u rows bitwise\n",
                 (unsigned long long)g.lookup_iters, (unsigned long long)g.lookup_ids, end - b,
-                same_ids ? "identical" : "DIFFER", min_cos, bitwise_rows);
-    ok &= g.lookup_iters > 0 && (!same_ids || min_cos >= 0.99);
+                same_ids ? "identical" : "DIFFER", min_cos, min_one, bitwise_rows);
+    // The bar (open-work 28; the 16-row list is not bitwise the 4-row lists, item 27's narrow lookup was): no more rows
+    // off MTP's than twice plain decode's own on the same prompt.
+    std::printf("H: rows below 0.99 against MTP's: lookup %u, plain decode %u (bar: lookup <= 2 x plain decode)\n", off_lk,
+                off_one);
+    ok &= g.lookup_iters > 0 && (!same_ids || off_lk <= 2 * off_one);
     bool did_cut = false;
     const Gen c = generate_lookup(mtp, prompt, kGen, greedy, /*cut=*/true, &did_cut);
     std::printf("H: a lookup burst truncated to 2 ids, then continued: %s\n",

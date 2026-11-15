@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <regex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -23,6 +22,7 @@
 #include "check.h"
 #include "server/lookup_in_dflash.h"
 #include "server/mock.h"
+#include "server/normalise.h"
 #include "server/prompt_lookup.h"
 #include "server/server.h"
 
@@ -65,30 +65,6 @@ struct Fixture {
   MockEngine engine;
   std::unique_ptr<server::Server> server;
 };
-
-std::string normalise(const std::string& raw, bool sse) {
-  const std::string body = std::regex_replace(raw, std::regex("call_[0-9a-f]+"), "call_X");
-  if (!sse) {
-    json j = json::parse(body);
-    j.erase("created");
-    return j.dump();
-  }
-  std::string out;
-  size_t begin = 0;
-  while (begin < body.size()) {
-    const size_t end = body.find("\n\n", begin);
-    if (end == std::string::npos) break;
-    std::string frame = body.substr(begin, end - begin);
-    begin = end + 2;
-    if (frame.rfind("data: {", 0) == 0) {
-      json j = json::parse(frame.substr(6));
-      j.erase("created");
-      frame = "data: " + j.dump();
-    }
-    out += frame + "\n";
-  }
-  return out;
-}
 
 std::string post(Fixture& f, const std::string& path, const json& body) {
   httplib::Client client("127.0.0.1", f.server->bound_port());

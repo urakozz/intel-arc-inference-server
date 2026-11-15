@@ -94,7 +94,7 @@
 #define Q_OFF 0           /* flat qkv channel bases: q 16x128, k 16x128, v 48x128 */
 #define K_OFF 2048
 #define V_OFF 4096
-#define RING 16           /* conv ring depth (runtime::PersistentBuffers::kConvRing) */
+#define RING 32           /* conv ring depth (runtime::PersistentBuffers::kConvRing) */
 #ifndef AB_STRIDE         /* phase 3 Task 8: Flash-Next's _AB256 build reads the dense GEMM's rows at pitch 256 */
 #define AB_STRIDE 128     /* ab_out row: a at [0,48), b at [48,96), zero-padded to 128 */
 #endif
@@ -113,7 +113,7 @@
 #define Q_OFF 0
 #define K_OFF (GDN_K_HEADS * DIM)
 #define V_OFF (2 * GDN_K_HEADS * DIM)
-#define RING 16
+#define RING 32
 #ifndef AB_STRIDE         /* phase 3 Task 2: _AB<P> builds read the dense GEMM's rows at pitch P */
 #define AB_STRIDE 128     /* the a||b GEMV's padded row (model_desc.cc kAbPaddedN) */
 #endif
@@ -129,15 +129,7 @@
 #define WG_NORM 128       /* one lane per head dim */
 #define WG_GATE 64        /* one lane per position of a 64-chunk */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-// f32 -> bf16, round-to-nearest-even. The same add-and-shift every .cl in the
-// tree uses (common::f32_to_bf16); NaN is not expected and not handled.
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // silu(x) = x / (1 + exp(-x)), plain `exp` (not `native_exp`) - gdn_step.cl's.
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }

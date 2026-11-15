@@ -84,7 +84,7 @@ constexpr uint32_t kQkvzS = 1;           // qkv‖z split-K slices; gdn_step.cl 
 constexpr uint32_t kConvRows = 10240;    // the qkv channels the depthwise conv covers
 constexpr uint32_t kConvTaps = 4;
 constexpr uint32_t kQOff = 0, kKOff = 2048, kVOff = 4096;   // flat qkv channel bases
-constexpr uint32_t kRing = 16;           // conv ring depth (>= M + 3)
+constexpr uint32_t kRing = 32;           // conv ring depth (>= M + 3; 32 since open-work 28)
 constexpr uint32_t kNegAOff = 40960;     // gdn_small, in floats: 163840 / 4
 constexpr uint32_t kDtBiasOff = 41008;   //                       164032 / 4
 constexpr uint32_t kAbStride = 128;      // ab_out row: a at [0,48), b at [48,96)
@@ -109,7 +109,7 @@ inline float softplus_f32(float x) { return x > 20.0f ? x : std::log1p(std::exp(
 //   ab    fp32 [M][128]       a at [0,48), b at [48,96)
 //   small fp32                the layer's GDN block: conv[10240][4] at 0,
 //                             negA[48] at kNegAOff, dt_bias[48] at kDtBiasOff
-//   ring  bf16 [16][10240]    this layer's conv ring, slot-major
+//   ring  bf16 [kRing][10240] this layer's conv ring, slot-major
 //   state fp32 [48][128][128] this layer's S, k-major rows and v columns
 //   o     fp32 [M][48][128]
 inline void step(uint32_t pos, uint32_t n_act, uint32_t M, const float* qkvz, const float* ab,

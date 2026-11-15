@@ -51,6 +51,10 @@ guesses up to 7 tokens and the model checks them in one step. One card, one requ
 | a recorded opencode session, replayed (78 requests, prefix cache on) | 65.9 | **96.2** | 1.46x |
 | short code, prose and tool-call prompts | 74.5 | 100.8 | 1.35x |
 
+Editing and re-emitting code: when the answer copies text already in the context, prompt lookup (on by default) proposes
+up to 15 tokens and the model checks them in one 16-row step. One card, MTP, 12 edit / copy prompts of 8k-99k tokens:
+**181 t/s** (92.3 with 3-token lookup).
+
 Time to the first token, new conversation / prefix cache hit:
 
 | setup | 1 request | 2 requests | 4 requests | 8 requests |

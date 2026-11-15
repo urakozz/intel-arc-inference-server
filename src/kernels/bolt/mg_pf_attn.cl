@@ -55,11 +55,7 @@
 #define HD 128
 #define SSCALE 0.08838834764831845f    /* 1 / sqrt(128), as fp32 (the reference's d ** -0.5) */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  return (ushort)((u + (((u >> 16) & 1u) + 0x7FFFu)) >> 16);
-}
+#include "bf16.h"
 
 #if EAGER
 // =====================================================================================================================

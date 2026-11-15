@@ -50,11 +50,6 @@ using kr::rf;
 using kr::rne;
 constexpr uint32_t W = kr::kWords;
 
-int ulps16(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
-
 // A kol_route row from the reference's Route.
 void put_row(uint32_t* row, const kr::Route& r) {
   std::fill(row, row + W, 0u);

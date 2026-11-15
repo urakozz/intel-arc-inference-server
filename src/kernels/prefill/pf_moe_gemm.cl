@@ -1,6 +1,6 @@
 // pf_moe_gemm - spec 15d: the GROUPED expert GEMM of a prefill chunk (spec 15 §4.4): ONE
 // launch covers every expert's tiles. Work-group (tile, n-block) reads its tile's weight
-// block and first sorted row from the tile table pf_moe.cl's pf_moe_sort wrote, and
+// block and first sorted row from the tile table pf_moe_sort_mw.cl wrote, and
 // computes that tile's TM = 32 rows x 256 columns of its expert's linear. A padding tile
 // (block NONE), and a tile whose block is outside this launch's batch [b0, b1), returns at
 // once - there is no barrier in this kernel, so the early return is legal - which is how
@@ -74,13 +74,8 @@
 #error "pf_moe_gemm: K must be whole k-steps"
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
+#include "bf16.h"
 // pf_gemm.cl's / pf_int8.cl's chain, verbatim (the numerics contract with pf_prep.cl).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
 #if SILU_EPI
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 #endif

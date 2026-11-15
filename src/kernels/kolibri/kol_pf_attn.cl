@@ -84,11 +84,7 @@
 #define EXPF(x) exp(x)
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  return (ushort)((u + (((u >> 16) & 1u) + 0x7FFFu)) >> 16);
-}
+#include "bf16.h"
 // One score as the walk uses it: the default path scales the fp32 dot; the eager one rounds the dot (the
 // bf16 matmul's output) and the scaled score (the bf16 multiply).
 inline float score_of(float dot) {

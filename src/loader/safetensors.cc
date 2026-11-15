@@ -98,7 +98,7 @@ SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, bool single_file
   std::map<std::string, std::map<std::string, TensorInfo>> per_file;  // file -> header map
   for (const auto& [tensor, filev] : wm) {
     const std::string& fname = filev.str();
-    if (file_id.find(fname) == file_id.end()) {
+    if (!file_id.contains(fname)) {
       file_id[fname] = uint32_t(files_.size());
       files_.emplace_back(snapshot_dir + fname);
       names_.push_back(fname);

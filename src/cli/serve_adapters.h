@@ -121,7 +121,8 @@ struct EngineAdapter : server::EngineIface {
       // kMaxDraft (3); spec 19c: DFlash's p rows alone, up to [8][V] (its q is the 16-candidate readback).
       spec_logits_ = std::make_unique<l0::Mem>(
           engine.context(), l0::MemKind::Host,
-          size_t(std::max<uint32_t>(2 * runtime::Engine::kMaxDraft + 1, kMaxIterK + 1)) *
+          size_t(std::max<uint32_t>({2 * runtime::Engine::kMaxDraft + 1, kMaxIterK + 1,
+                                     runtime::Engine::kWideK + 1})) *   // open-work 28: a wide lookup's p rows
               model::Qwen35::kVocab * sizeof(float));
     }
   }
@@ -174,10 +175,13 @@ struct EngineAdapter : server::EngineIface {
         std::fprintf(stderr, "; lookup: %llu iterations, %llu/%llu drafts accepted, %llu of %u ids",
                      (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
                      (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
+      if (lk_wide_ > 0)
+        std::fprintf(stderr, ", %llu of them 16 rows wide, %llu entered on the head's confirmation",
+                     (unsigned long long)lk_wide_, (unsigned long long)lk_confirmed_);
       std::fprintf(stderr, "\n");
     }
     mtp_iters = mtp_drafted = mtp_accepted = 0;
-    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = 0;
+    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = lk_wide_ = lk_confirmed_ = 0;
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
@@ -420,12 +424,58 @@ struct EngineAdapter : server::EngineIface {
 
   std::vector<uint32_t> step_drafts_or_chosen(const server::Sampling& sampling, uint32_t k_mtp,
                                               const Proposer& propose, const DraftChoice& choose) override {
+    return step_drafts_or_confirmed(sampling, k_mtp, propose, choose, {});
+  }
+
+  // Open-work 28: lookup runs of up to 15 drafts in the engine's wide verify list (runtime::Engine::kWideK), and
+  // lookup entered on a short match the head confirms (EngineIface::step_drafts_or_confirmed): with a candidate, the
+  // head drafts as step_chosen does but its first two drafts are compared with the candidate before `choose` answers
+  // (the answers are then given in order, only when the drafts disagree); agreement verifies the candidate.
+  uint32_t lookup_wide_k() override { return mtp_lookup() && eng.wide_built() ? runtime::Engine::kWideK : 0; }
+
+  std::vector<uint32_t> step_drafts_or_confirmed(const server::Sampling& sampling, uint32_t k_mtp,
+                                                 const Proposer& propose, const DraftChoice& choose,
+                                                 const LookupConfirm& confirm) override {
     if (!mtp_lookup()) throw std::logic_error("EngineAdapter::step_drafts_or_chosen without the MTP head");
     flush_commit();
     const uint32_t x = eng.control()->cur_token[0];
     const std::vector<uint32_t> d = propose(x);
-    if (d.empty()) return choose ? step_chosen(sampling, k_mtp, choose) : step_many(sampling, k_mtp);
-    return lookup_run(sampling, x, d);
+    if (!d.empty()) return lookup_run(sampling, x, d);
+    if (!choose) return step_many(sampling, k_mtp);
+    const uint32_t k = std::min({k_mtp, k_, eng.max_verify_k()});
+    std::vector<uint32_t> cand;
+    if (confirm.candidate && k > 0 && k_ >= 2 && eng.max_verify_k() >= 2 && eng.max_wide_k() > 0)
+      cand = confirm.candidate();
+    if (cand.empty()) return step_chosen(sampling, k_mtp, choose);
+    // step_chosen with the comparison first: up to max(k, 2) drafts; `choose` answers in order for the drafts it covers
+    // (j <= k), deferred past the first while the head agrees with the candidate.
+    const uint32_t n = eng.pos();
+    const uint32_t kd = std::max<uint32_t>(k, 2);
+    float p[runtime::Engine::kMaxDraft] = {};
+    int v = -1;
+    uint32_t asked = 0;
+    bool agree = false;
+    eng.draft(kd, {}, [&](uint32_t i, float pi) {
+      p[i] = pi;
+      const std::vector<uint32_t>& dr = eng.draft_ids();
+      if (i == 0 && dr[0] == cand[0]) return true;   // the second draft decides
+      if (i == 1 && dr[0] == cand[0] && dr[1] == cand[1]) {
+        agree = true;
+        return false;
+      }
+      for (; asked <= i && asked < k && v < 0; ++asked) v = choose(asked + 1, p[asked]);
+      return v < 0 && i + 1 < kd;
+    });
+    if (agree) {
+      ++lk_confirmed_;
+      confirm.confirmed();
+      return lookup_run(sampling, x, cand);
+    }
+    const uint32_t kv = v < 0 ? std::min<uint32_t>(k, static_cast<uint32_t>(eng.draft_ids().size()))
+                              : static_cast<uint32_t>(v);
+    ++mtp_iters_at_k[kv];
+    eng.verify(kv);
+    return spec_run(n, x, kv, server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv));
   }
 
   // One lookup iteration at pos = n, x_n pending, drafts `d` (the proposer's): d_1..d_k (k <= --spec-max, the
@@ -433,22 +483,33 @@ struct EngineAdapter : server::EngineIface {
   // point-mass rule) and the deferred commit; returns x and the kept drafts (counted as lookup's, lk_*).
   std::vector<uint32_t> lookup_run(const server::Sampling& sampling, uint32_t x, const std::vector<uint32_t>& d) {
     auto* control = eng.control();
-    const uint32_t k = std::min<uint32_t>({static_cast<uint32_t>(d.size()), k_, eng.max_verify_k()});
+    // Open-work 28: more drafts than the head's lists take go to the wide list (15 rows of drafts; a shorter run is
+    // padded with its last draft - the padding sits past the drafts the acceptance reads, so it never changes a kept
+    // id or the row after them).
+    const bool wide = d.size() > k_ && eng.max_wide_k() > 0;
+    const uint32_t k = wide ? std::min<uint32_t>(static_cast<uint32_t>(d.size()), runtime::Engine::kWideK)
+                            : std::min<uint32_t>({static_cast<uint32_t>(d.size()), k_, eng.max_verify_k()});
     ++lk_iters_;
     if (k == 0) {   // the last positions of max_len: one plain step
       ++lk_ids_;
       return {step(sampling)};
     }
     const uint32_t n = eng.pos();
-    for (uint32_t i = 0; i < k; ++i) control->cur_token[1 + i] = d[i];
-    eng.verify(k);
+    if (wide) {
+      for (uint32_t i = 0; i < runtime::Engine::kWideK; ++i) control->wide_cur[1 + i] = d[std::min(i, k - 1)];
+      eng.verify(runtime::Engine::kWideK);
+      ++lk_wide_;
+    } else {
+      for (uint32_t i = 0; i < k; ++i) control->cur_token[1 + i] = d[i];
+      eng.verify(k);
+    }
     server::AcceptResult a{};
     if (sampling.greedy) {
       a = server::accept_greedy(eng.verify_ids(), d.data(), k);
     } else {
       seed_rng(sampling);
       constexpr size_t V = model::Qwen35::kVocab;
-      float* p = spec_logits_->as<float>();   // p rows 0..k (k + 1 <= 8 rows: the DFlash readback's room)
+      float* p = spec_logits_->as<float>();   // p rows 0..k (k + 1 <= 16 rows: the readback's room)
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
       a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng);
     }
@@ -572,6 +633,7 @@ struct EngineAdapter : server::EngineIface {
   bool dflash_lookup_ = false;          // spec 19f: step_drafts_or_many() on
   bool pending_lookup_ = false;         // spec 19f: the pending run was a lookup verify
   uint64_t lk_iters_ = 0, lk_drafted_ = 0, lk_accepted_ = 0, lk_ids_ = 0;   // spec 19f, since the last prefill
+  uint64_t lk_wide_ = 0, lk_confirmed_ = 0;   // open-work 28: lookup iterations on the wide list, entered confirmed
   std::unique_ptr<l0::Mem> spec_logits_;   // pinned q rows then p rows, MTP and lookup
   bool pending_ = false;
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;

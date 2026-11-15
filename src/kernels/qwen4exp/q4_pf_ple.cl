@@ -45,12 +45,7 @@
 #define NC_OFF (2 * HCN)
 #define TAP_OFF (3 * HCN)
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 inline float exp_torch(float d) {
   const int q = convert_int_rte(d * 1.442695040888963407359924681001892137426645954152985934135449406931f);

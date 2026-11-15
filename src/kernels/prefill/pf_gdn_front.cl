@@ -30,7 +30,7 @@
 #endif
 #define DIM 128
 #define CONV_TAPS 4
-#define RING 16
+#define RING 32           /* runtime::PersistentBuffers::kConvRing */
 #define WG_CH 256
 #define SG 16
 #define FB 32               /* positions a work-group */
@@ -38,12 +38,7 @@
 #error "pf_gdn_front: a work-group must be all q / k or all v channels"
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 
 __attribute__((reqd_work_group_size(WG_CH, 1, 1)))
