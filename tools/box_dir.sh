@@ -11,8 +11,8 @@
 #                           spec<N>[.<M>][<letter>] (spec7a-toolcall-probe, spec8-mtp,
 #                           spec2.1-...) -> b70/trees/spec7a / spec8 / spec2.1;
 #                           research-* -> b70/trees/research; any other branch
-#                           -> b70/trees/<branch> (a / becomes -); main (or a detached
-#                           HEAD) -> the base tree b70-inference-server, which also
+#                           -> b70/trees/<branch> (a / becomes -); a detached HEAD -> b70/trees/detached-<sha>; main
+#                           -> the base tree b70-inference-server, which also
 #                           holds the golden sets (oracle-out*, never synced over).
 #
 # A new remote tree starts empty: its first `tools/box.sh build` is a full build.
@@ -42,6 +42,11 @@ b70_remote_dir() {
       return
     elif [ -n "$branch" ] && [ "$branch" != main ] && [ "$branch" != HEAD ]; then
       printf 'b70/trees/%s\n' "${branch//\//-}"
+      return
+    elif [ "$branch" = HEAD ]; then
+      # A detached HEAD (a rebase in progress, a checked-out commit) never syncs into the base tree: on
+      # 2026-11-15 a detached worktree's --delete sync overwrote the main tree's sources and build.
+      printf 'b70/trees/detached-%s\n' "$(git -C "$1" rev-parse --short HEAD 2>/dev/null || echo unknown)"
       return
     fi
   fi
