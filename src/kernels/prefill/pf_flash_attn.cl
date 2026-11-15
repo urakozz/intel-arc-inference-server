@@ -86,10 +86,7 @@
 #define EXPF(x) exp(x)
 #endif
 
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  return (ushort)((u + (((u >> 16) & 1u) + 0x7FFFu)) >> 16);
-}
+#include "bf16.h"
 
 #ifndef SPLIT
 #define SPLIT 0
@@ -110,7 +107,6 @@ inline ushort rne_bf16(float f) {
 // out[m][h.256 + d] = rne_bf16(f32(rne_bf16(o)) . sigmoid_f32(f32(rne_bf16(gate)))), the gate read from qkv_partials.
 #define QKV_N ((2 * FA_Q_HEADS + 2 * FA_KV_HEADS) * HD)
 #define OUT_N (FA_Q_HEADS * HD)
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 #endif
 #ifndef FLASH_MERGE

@@ -75,12 +75,7 @@
 #define INTRA_DBG 0
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // Tile ti (0..19) of the 8 x 4 grid of 8-row x 16-column tiles with a row i >= some column j:
 // M-tile mi = rows 8mi.., N-tile nj = columns 16nj.., nj <= (8mi + 7) / 16.

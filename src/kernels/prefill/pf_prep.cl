@@ -98,15 +98,7 @@
 #endif
 #define SILU_CHUNK 4096   /* 5 work-groups cover 17408; the last does 1024 */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-// f32 -> bf16, round-to-nearest-even. Same add-and-shift as common::f32_to_bf16
-// and prep.cl's; NaN is not expected and not handled.
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // silu(x) = x / (1 + exp(-x)), plain `exp` (not `native_exp`), kept as the LAST
 // factor so everything before it stays bit-comparable with the host.

@@ -112,14 +112,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #define MOE_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-// f32 -> bf16, round-to-nearest-even (prep.cl's; NaN is not expected and not handled).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // prep.cl's silu, plain `exp`; the sigmoid as attn.cl spells it.
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }

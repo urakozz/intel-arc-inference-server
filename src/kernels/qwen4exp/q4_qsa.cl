@@ -71,12 +71,7 @@
 #define IDX_KNORM_OFF 640
 #define SQRT_IDX 11.313708498984761f
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 inline uint n_rows(__global const uint* restrict ctrl) {
   const uint n = ctrl[CTRL_NACT];

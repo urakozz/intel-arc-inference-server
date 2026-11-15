@@ -33,12 +33,7 @@
 #error "pf_norm_fused: a fold group wider than the work-group (pf_res_fold's lanes would add twice)"
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))

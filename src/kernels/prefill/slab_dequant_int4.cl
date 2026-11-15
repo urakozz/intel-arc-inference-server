@@ -27,11 +27,7 @@
 #error "pf_int4_slab_dequant: K must be whole 64-k groups, N whole 16-column tiles"
 #endif
 
-inline ushort rne_bf16(float f) {
-  const uint u = as_uint(f);
-  const uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 __attribute__((reqd_work_group_size(SG, 1, 1)))
 __kernel void pf_int4_slab_dequant(__global const uint* restrict w,

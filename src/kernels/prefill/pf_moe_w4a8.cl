@@ -51,12 +51,7 @@
 #error "pf_moe_w4a8: N whole work-group blocks, K whole 64-k groups, NB even (gate, up atom pairs)"
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 
 // One sub-group a 64-k group of one token row: 4 values a lane.

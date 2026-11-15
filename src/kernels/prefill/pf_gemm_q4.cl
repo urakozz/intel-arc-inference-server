@@ -83,17 +83,10 @@
 #define NR (R / RA)
 #define CN (16 * NB)        /* a sub-group's columns */
 
-// **Copied verbatim from pf_dequant_slab.cl** (and pf_prep.cl's, the SiLU chain's): round to
-// nearest even at the f32 -> bf16 point.
-inline ushort rne_bf16(float f) {
-  const uint u = as_uint(f);
-  const uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 #if SILU_EPI || SILU_SPLIT == 2 || SILU_SLM
 // **Copied verbatim from pf_prep.cl** (pf_gemm.cl / pf_gemm_small.cl carry the same copy): both
 // bf16 RNE steps, plain `exp` (never `native_exp`), silu the LAST factor.
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 #endif
 

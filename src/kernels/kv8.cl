@@ -142,12 +142,7 @@
 __constant uint KV8_SIGNS[8] = {0xA197D809u, 0xA6850592u, 0xB205A73Eu, 0x20AFA769u,
                                 0x45C2CF64u, 0xBEAEAACBu, 0x75F39ADDu, 0x2385A70Cu};
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 
 // s[j] applied as the sign bit: exact, and the same bits as a multiply by -1.

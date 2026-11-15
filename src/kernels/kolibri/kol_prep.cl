@@ -28,13 +28,7 @@
 #endif
 #define KOL_EPS 1e-6f
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-// f32 -> bf16, round-to-nearest-even (prep.cl's; NaN is not expected and not handled).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 // One element of Kolibri's RMSNorm: rne(f32(rne(x · rstd)) · w).
 inline ushort kol_norm_elem(float x, float rstd, float w) { return rne_bf16(rf(x * rstd) * w); }

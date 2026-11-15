@@ -53,11 +53,7 @@
 #define NKA (KT / 16)          /* key atoms per tile */
 #define SSCALE 0.0625f         /* 1 / sqrt(256) */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  return (ushort)((u + (((u >> 16) & 1u) + 0x7FFFu)) >> 16);
-}
+#include "bf16.h"
 inline float score_of(float dot) {
 #if EAGER
   return bf16f(rne_bf16(bf16f(rne_bf16(dot)) * SSCALE));

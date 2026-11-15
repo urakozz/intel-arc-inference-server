@@ -87,12 +87,7 @@
 #define FLAG(slot, j) (FLAG_BASE + ((slot) * J_CHUNKS + (j)) * TP_FLAG_STRIDE)
 
 // prep.cl's two roundings, token for token (the fold's arithmetic is prep_res_fold's).
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 inline void tp_record(__global uint* state, uint status, uint got, uint stamp, uint want, uint j) {
   atomic_inc((volatile __global uint*)(state + 5));

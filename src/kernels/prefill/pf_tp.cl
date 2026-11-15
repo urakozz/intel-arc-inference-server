@@ -24,12 +24,7 @@
 #define WG_FOLD 256
 #define FOLD_CHUNK ((K + FOLD_G - 1) / FOLD_G)
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // Grid (FOLD_G, M), WG 256: pf_res_fold's.
 __attribute__((reqd_work_group_size(WG_FOLD, 1, 1)))

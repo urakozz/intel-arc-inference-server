@@ -69,13 +69,7 @@
 #define WG_COMBINE 256
 #define TILE_U32 136            /* layout 1: 128 u32 of nibbles + 8 u32 of f16 scales */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-// f32 -> bf16, round-to-nearest-even (kol_moe.cl's; NaN is not expected and not handled).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // ---------------------------------------------------------------------------------------
 // kol_pf_sort - one work-group of PF_WG lanes; lane l owns experts l + q x PF_WG, q < PF_EPL (< PF_E):

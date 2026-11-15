@@ -315,15 +315,7 @@
 #error "attn: MAXLEN must be a multiple of ATTN_BLOCK (the grid is MAXLEN/ATTN_BLOCK blocks)"
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-// f32 -> bf16, round-to-nearest-even. Same add-and-shift as common::f32_to_bf16
-// and prep.cl's / gdn_step.cl's; NaN is not expected and not handled.
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // sigmoid(x) = 1 / (1 + exp(-x)), plain `exp` (not `native_exp`). It is the
 // LAST op of attn_reduce for the same reason prep.cl keeps its SiLU last:

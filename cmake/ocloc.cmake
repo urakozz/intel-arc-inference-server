@@ -3,6 +3,8 @@ find_program(OCLOC_EXECUTABLE ocloc REQUIRED)
 set(B70_KERNEL_DIR "${CMAKE_BINARY_DIR}/kernels" CACHE INTERNAL "directory of compiled device binaries")
 set(B70_OCLOC_DEVICE "bmg-g31" CACHE STRING "ocloc -device target (B70 = Battlemage G31)")
 file(MAKE_DIRECTORY "${B70_KERNEL_DIR}")
+# src/kernels is on every kernel's include path: `#include "bf16.h"` (the shared bf16 <-> fp32 pair) from any source.
+get_filename_component(B70_KERNEL_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/kernels" ABSOLUTE)
 # The compiler's identity (cmake/ocloc_stamp.cmake), refreshed every build and rewritten only when it changes: every
 # kernel depends on it, so a driver / IGC upgrade recompiles them all.
 set(B70_OCLOC_STAMP "${B70_KERNEL_DIR}/.ocloc-toolchain")
@@ -40,9 +42,10 @@ function(add_ocloc_kernel NAME)
   if(NOT K_SOURCE)
     message(FATAL_ERROR "add_ocloc_kernel(${NAME}): SOURCE is required")
   endif()
-  # The two project-wide options: the language version and the correctly
-  # rounded divide/sqrt every host-comparable kernel needs (see above).
-  set(opts "-cl-std=CL3.0 -cl-fp32-correctly-rounded-divide-sqrt")
+  # The project-wide options: the language version, the correctly rounded
+  # divide/sqrt every host-comparable kernel needs (see above) and src/kernels
+  # on the include path (bf16.h).
+  set(opts "-cl-std=CL3.0 -cl-fp32-correctly-rounded-divide-sqrt -I${B70_KERNEL_SRC_DIR}")
   foreach(d IN LISTS K_DEFINES)
     string(APPEND opts " -D${d}")
   endforeach()
@@ -59,7 +62,7 @@ function(add_ocloc_kernel NAME)
             -file "${K_SOURCE}" -device "${B70_OCLOC_DEVICE}"
             -output "${NAME}" -output_no_suffix -out_dir "${B70_KERNEL_DIR}"
             -options "${opts}"
-    DEPENDS "${K_SOURCE}" ${K_DEPENDS} "${B70_OCLOC_STAMP}"
+    DEPENDS "${K_SOURCE}" ${K_DEPENDS} "${B70_KERNEL_SRC_DIR}/bf16.h" "${B70_OCLOC_STAMP}"
     COMMENT "ocloc ${NAME}"
     VERBATIM)
   add_custom_target("kernel_${NAME}" ALL DEPENDS "${out}")
