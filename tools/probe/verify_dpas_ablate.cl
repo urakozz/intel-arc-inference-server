@@ -13,6 +13,8 @@
 //   ABL_KONE / ABL_VONE 1: only row block 0's sub-groups load (and widen) K / V; the others take registers (not PAIR)
 //   ABL_SDUP   1: (not PAIR, DS 2) sub-group ds == 1 of a row block skips its K loads and score DPAS and takes
 //                 index-formed scores - the duplicated half of S at the 16-row line
+//   ABL_SHALF  1: (not PAIR, DS 2, bf16) sub-group ds of a row block computes key atom ds of S only and takes
+//                 index-formed scores for the other - option B's halved score chain a sub-group, without its exchange
 // The bound arm of spec 33 §7: ABL_SDUP + ABL_VONE at 16 rows (what the PAIR split at KS 1 removes, none of its cost);
 // ABL_VONE at 8 rows.
 //
@@ -55,6 +57,9 @@
 #endif
 #ifndef ABL_SDUP
 #define ABL_SDUP 0
+#endif
+#ifndef ABL_SHALF
+#define ABL_SHALF 0
 #endif
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -121,6 +126,9 @@
 #endif
 #if PAIR && (ABL_KONE || ABL_VONE || ABL_SDUP)
 #error "verify_dpas_ablate: ABL_KONE / ABL_VONE / ABL_SDUP are for the plain lines (PAIR reads V once a slice already)"
+#endif
+#if ABL_SHALF && (DS != 2 || NKA != 2 || KV8 || PAIR)
+#error "verify_dpas_ablate: ABL_SHALF is for the bf16 16-row line (two sub-groups, two key atoms a row block)"
 #endif
 #if ABL_SDUP && DS != 2
 #error "verify_dpas_ablate: ABL_SDUP needs two sub-groups a row block (DSPLIT 128)"
@@ -459,6 +467,9 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #endif
 #pragma unroll
             for (uint b = 0; b < NKA; ++b) {
+#if ABL_SHALF
+              if (b != ds) continue;            // uniform per sub-group
+#endif
               uint kb[8];
               K_READ16(kb, kk, t0 + 16u * b)
 #if ABL_QK
@@ -471,6 +482,11 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #endif
             }
           }
+#if ABL_SHALF
+#pragma unroll
+          for (uint b = 0; b < NKA; ++b)
+            if (b != ds) sacc[b] = S_INDEX(t0 + 16u * b);
+#endif
 #endif
         }
         // ---- scale, mask, the row max (component r = A row r, lane = key t0 + 16 b + l) ----

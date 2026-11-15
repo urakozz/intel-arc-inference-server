@@ -5,6 +5,7 @@
 #   tools/probe/verify_attn_depth.sh compile OUT       plan 33b's line through ocloc (no GPU): builds or not, SLM, spills
 #   tools/probe/verify_attn_depth.sh gate CARD OUT     G0: the unablated probe copies bitwise production
 #   tools/probe/verify_attn_depth.sh session CARD OUT  Task 1's lines
+#   tools/probe/verify_attn_depth.sh half CARD OUT     16 rows: option B's halved score chain beside the bound arm
 set -u
 mode="$1"
 shift
@@ -44,6 +45,13 @@ case "$mode" in
     run gate_bitwise_M8 build/tests/attn_verify_bitwise_test --cand vdpas_vad_full_ --min-m 8 --max-m 8
     echo GATE_DONE
     ;;
+  half)   # the 16-row arms with option B's halved score chain a sub-group (beside the rule's bound arm)
+    card="$1" out="$2"
+    mkdir -p "$out"
+    run bf16_M16_half $B 16 $D "$(prod 16 "")" "$(p bound16 16 "")" "$(p shalf 16 "")" "$(p bhalf16 16 "")" \
+      "$(p nok 16 "")" "$(p nov 16 "")"
+    echo HALF_DONE
+    ;;
   session)
     card="$1" out="$2"
     mkdir -p "$out"
@@ -70,7 +78,7 @@ case "$mode" in
     echo SESSION_DONE
     ;;
   *)
-    echo "usage: $0 compile OUT | gate CARD OUT | session CARD OUT" >&2
+    echo "usage: $0 compile OUT | gate CARD OUT | session CARD OUT | half CARD OUT" >&2
     exit 2
     ;;
 esac

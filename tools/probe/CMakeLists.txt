@@ -1108,14 +1108,16 @@ endif()
 # the production lever line of each row count - 4 rows the PAIR line (PVX 2), 8 rows the plain KS 4 line, 16 rows the
 # KS 1 line - unablated (`full`, bitwise production) and with one part removed; the bound arms (16 rows: ABL_SDUP +
 # ABL_VONE; 8 rows: ABL_VONE), the 16-row `sdup` / `vone` halves and `noloads` (the repeats of a 32 / 64-row chunk
-# with no reads); int8 at 4 and 8 rows with the two widening removals. Timed by probe_kv8_decode.
+# with no reads), `shalf` / `bhalf16` (each sub-group computes only its own key atom of S: option B's halved score
+# chain, alone and with ABL_VONE); int8 at 4 and 8 rows with the two widening removals. Timed by probe_kv8_decode.
 if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set(_vad_lv_4 KT=32 PACK_H=0 KS=4 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1 PVX=2)
   set(_vad_lv_8 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
   set(_vad_lv_16 KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1)
   foreach(_abl "full;" "nok;ABL_K=1" "nov;ABL_V=1" "noqk;ABL_QK=1" "nosoft;ABL_SOFT=1" "nopv;ABL_PV=1"
                "noout;ABL_OUT=1" "nokcvt;ABL_KCVT=1" "novcvt;ABL_VCVT=1" "bound8;ABL_VONE=1"
-               "bound16;ABL_SDUP=1;ABL_VONE=1" "sdup;ABL_SDUP=1" "vone;ABL_VONE=1" "noloads;ABL_K=1;ABL_V=1")
+               "bound16;ABL_SDUP=1;ABL_VONE=1" "sdup;ABL_SDUP=1" "vone;ABL_VONE=1" "noloads;ABL_K=1;ABL_V=1"
+               "shalf;ABL_SHALF=1" "bhalf16;ABL_SHALF=1;ABL_VONE=1")
     list(GET _abl 0 _tag)
     list(REMOVE_AT _abl 0)
     foreach(MM 4 8 16)
@@ -1128,11 +1130,11 @@ if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
         if(_tag MATCHES "^(nokcvt|novcvt)$" AND (NOT _kv OR MM EQUAL 16))
           continue()
         endif()
-        if(_kv AND (MM EQUAL 16 OR _tag MATCHES "^(bound8|bound16|sdup|vone|noloads)$"))
+        if(_kv AND (MM EQUAL 16 OR _tag MATCHES "^(bound8|bound16|sdup|vone|noloads|shalf|bhalf16)$"))
           continue()
         endif()
         if((_tag STREQUAL "bound8" AND NOT MM EQUAL 8) OR
-           (_tag MATCHES "^(bound16|sdup|vone|noloads)$" AND NOT MM EQUAL 16))
+           (_tag MATCHES "^(bound16|sdup|vone|noloads|shalf|bhalf16)$" AND NOT MM EQUAL 16))
           continue()
         endif()
         add_ocloc_kernel(vdpas_vad_${_tag}_M${MM}${_sfx} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/verify_dpas_ablate.cl
