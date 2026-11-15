@@ -3778,7 +3778,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     PROPERTIES LABELS dflash)
   # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
   b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
-    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup is built for one card")
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup runs on one card")
   b70_serve_reject(cli_reject_serve_dflash_no_draft_model ${B70_NO_MODEL} --spec dflash
     EXPECT "needs --draft-model")
   b70_serve_reject(cli_reject_serve_dflash_lookup_no_draft_model ${B70_NO_MODEL} --spec dflash-lookup
