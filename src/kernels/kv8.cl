@@ -624,27 +624,20 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
 #ifndef BATCH_ROWS
     const uint pgo = 0;
 #endif
-    // The page the loads are at (attn_v2.cl's KV_PAGED walk): virtual page pgv from position pgs, its rows and scales,
-    // its last readable row lastp; and the page the prefetch PFD waves ahead is at (ppv, the same from pps), looked up
-    // as the prefetch reaches it, so a page's first waves are prefetched like any other.
-    uint pgv = bstart / KV_PAGED, pgs = pgv * KV_PAGED;
+    // Paged (attn_v2.cl's KV_PAGED walk): the loads take cache rows - a wave's positions plus its page's delta (the
+    // page's first cache row less its first position; uint arithmetic, wrapping) - through the unmoved bases, lastr the
+    // page's last readable cache row. The prefetch keeps the page of the wave PFD ahead (pdelta, plastr), looked up as
+    // it enters one, so a page's first waves are prefetched like any other.
+    uint pgv = bstart / KV_PAGED;
 #ifndef BATCH_ROWS
-    size_t pr = (size_t)(live0 && pgv == pg0v ? pg0p : pages[pgv]) * KV_PAGED * KV_HEADS;
+    uint delta = (live0 && pgv == pg0v ? pg0p : pages[pgv]) * KV_PAGED - pgv * KV_PAGED;
 #else
-    size_t pr = (size_t)pages[pgo + pgv] * KV_PAGED * KV_HEADS;
+    uint delta = pages[pgo + pgv] * KV_PAGED - pgv * KV_PAGED;
 #endif
-    __global const char* kpg = kv_k + pr * HD;
-    __global const char* vpg = kv_v + pr * HD;
-    __global const ushort* kspg = k_scale + pr;
-    __global const ushort* vspg = v_scale + pr;
-    uint lastp = min(last - pgs, KV_PAGED - 1u);
-    uint ppv = pgv, pps = pgs, plast = lastp;
-    __global const char* kpp = kpg;
-    __global const char* vpp = vpg;
-    __global const ushort* kspp = kspg;
-    __global const ushort* vspp = vspg;
-    load_k8(kpg, kspg, bstart + sgid - pgs, j, bstart + sgid <= last, kq, &ksc);
-    load_v8(vpg, vspg, bstart - pgs, j, sgid, lane, lastp, vreg);
+    uint lastr = min(last, pgv * KV_PAGED + KV_PAGED - 1u) + delta;
+    uint ppv = pgv, pdelta = delta, plastr = lastr;
+    load_k8(kv_k, k_scale, bstart + sgid + delta, j, bstart + sgid <= last, kq, &ksc);
+    load_v8(kv_v, v_scale, bstart + delta, j, sgid, lane, lastr, vreg);
 #endif
     for (uint w = 0; w < nwaves; ++w, ++wc) {
       const uint p0 = bstart + w * WAVE_P;
@@ -659,25 +652,20 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
       if (w + PFD < nwaves && (sgid == 8u || sgid == 9u))
         prefetch((sgid == 8u ? k_scale : v_scale) + (size_t)(p0 + PFD * WAVE_P) * KV_HEADS, WAVE_P * KV_HEADS);
 #else
-      // Paged: the same hints through the page of the wave PFD ahead (looked up when the prefetch enters it).
+      // Paged: the same hints at the cache rows of the wave PFD ahead (its page looked up as the prefetch enters it).
       if (w + PFD < nwaves) {   // uniform
         const uint pf0 = p0 + PFD * WAVE_P;
         if (pf0 / KV_PAGED != ppv) {
           ppv = pf0 / KV_PAGED;
-          pps = ppv * KV_PAGED;
-          const size_t ppr = (size_t)pages[pgo + ppv] * KV_PAGED * KV_HEADS;
-          kpp = kv_k + ppr * HD;
-          vpp = kv_v + ppr * HD;
-          kspp = k_scale + ppr;
-          vspp = v_scale + ppr;
-          plast = min(last - pps, KV_PAGED - 1u);
+          pdelta = pages[pgo + ppv] * KV_PAGED - ppv * KV_PAGED;
+          plastr = min(last, ppv * KV_PAGED + KV_PAGED - 1u) + pdelta;
         }
         if (sgid < 8u)
           intel_sub_group_2d_block_prefetch_16b_16r16x2c(
-              (__global void*)((sgid < 4u ? kpp : vpp) + (size_t)j * HD), HD, plast + 1, KV_HEADS * HD,
-              (int2)((int)(32u * (sgid & 3u)), (int)(pf0 - pps)));
+              (__global void*)((sgid < 4u ? (__global const char*)kv_k : kv_v) + (size_t)j * HD), HD,
+              plastr + 1, KV_HEADS * HD, (int2)((int)(32u * (sgid & 3u)), (int)(pf0 + pdelta)));
         if (sgid == 8u || sgid == 9u)
-          prefetch((sgid == 8u ? kspp : vspp) + (size_t)(pf0 - pps) * KV_HEADS, WAVE_P * KV_HEADS);
+          prefetch((sgid == 8u ? k_scale : v_scale) + (size_t)(pf0 + pdelta) * KV_HEADS, WAVE_P * KV_HEADS);
       }
 #endif
 #pragma unroll
@@ -760,18 +748,18 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
         load_v8(kv_v, v_scale, p0 + WAVE_P, j, sgid, lane, last, vreg);
 #else
         const uint q0 = p0 + WAVE_P;
-        if (q0 / KV_PAGED != pgv) {   // uniform: the next wave starts a page
+        if (q0 / KV_PAGED != pgv) {   // uniform: the next wave starts a page (the prefetch's, unless it stopped short)
           pgv = q0 / KV_PAGED;
-          pgs = pgv * KV_PAGED;
-          pr = (size_t)pages[pgo + pgv] * KV_PAGED * KV_HEADS;
-          kpg = kv_k + pr * HD;
-          vpg = kv_v + pr * HD;
-          kspg = k_scale + pr;
-          vspg = v_scale + pr;
-          lastp = min(last - pgs, KV_PAGED - 1u);
+          if (pgv == ppv) {
+            delta = pdelta;
+            lastr = plastr;
+          } else {
+            delta = pages[pgo + pgv] * KV_PAGED - pgv * KV_PAGED;
+            lastr = min(last, pgv * KV_PAGED + KV_PAGED - 1u) + delta;
+          }
         }
-        load_k8(kpg, kspg, q0 + sgid - pgs, j, q0 + sgid <= last, kq, &ksc);
-        load_v8(vpg, vspg, q0 - pgs, j, sgid, lane, lastp, vreg);
+        load_k8(kv_k, k_scale, q0 + sgid + delta, j, q0 + sgid <= last, kq, &ksc);
+        load_v8(kv_v, v_scale, q0 + delta, j, sgid, lane, lastr, vreg);
 #endif
       }
     }

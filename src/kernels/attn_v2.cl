@@ -123,9 +123,9 @@
 // attn_decode_v2's kv_k / kv_v are the layer's whole cache and its last argument `pages` maps the KV pages - position
 // p of the walk (with BATCH_ROWS: kv_base + p, the slot's first position in the table's positions) is cache row
 // pages[p / KV_PAGED] x KV_PAGED + p % KV_PAGED. A wave's 16 positions are 16-aligned, so they never cross a page:
-// the walk looks a page up when its next wave starts in another one (once per KV_PAGED keys) and loads the wave
-// through that page's base, its V surface no taller than the page. Every block, wave, value and order is the
-// contiguous kernel's, so the partials are bitwise.
+// the walk looks a page up when its next wave starts in another one (once per KV_PAGED keys) and loads the wave at its
+// cache rows through the unmoved bases, the V surface ending at the page's last readable row. Every block, wave, value
+// and order is the contiguous kernel's, so the partials are bitwise.
 #if defined(KV_PAGED) && (KV_PAGED % WAVE_P != 0)
 #error "attn_v2 KV_PAGED: a page must hold whole waves"
 #endif
@@ -281,18 +281,17 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
 #ifndef BATCH_ROWS
     const uint pgo = 0;
 #endif
-    // The page the loads are at: virtual page pgv (its first position pgs), its K / V rows from kpg / vpg.
-    uint pgv = bstart / KV_PAGED, pgs = pgv * KV_PAGED;
+    // The loads take cache rows: a wave's positions plus its page's delta (the page's first cache row less its first
+    // position; uint arithmetic, wrapping), through the unmoved bases; lastr the page's last readable cache row.
+    uint pgv = bstart / KV_PAGED;
 #ifndef BATCH_ROWS
-    size_t pr = (size_t)(live0 && pgv == pg0v ? pg0p : pages[pgv]) * KV_PAGED * KV_HEADS * HD;
+    uint delta = (live0 && pgv == pg0v ? pg0p : pages[pgv]) * KV_PAGED - pgv * KV_PAGED;
 #else
-    size_t pr = (size_t)pages[pgo + pgv] * KV_PAGED * KV_HEADS * HD;
+    uint delta = pages[pgo + pgv] * KV_PAGED - pgv * KV_PAGED;
 #endif
-    __global const ushort* kpg = kv_k + pr;
-    __global const ushort* vpg = kv_v + pr;
-    uint lastp = min(last - pgs, KV_PAGED - 1u);   // the page's last readable row
-    load_k(kpg, bstart + sgid - pgs, j, bstart + sgid <= last, kreg);
-    load_v(vpg, bstart - pgs, j, sgid, lastp, vreg);
+    uint lastr = min(last, pgv * KV_PAGED + KV_PAGED - 1u) + delta;
+    load_k(kv_k, bstart + sgid + delta, j, bstart + sgid <= last, kreg);
+    load_v(kv_v, bstart + delta, j, sgid, lastr, vreg);
 #endif
     for (uint w = 0; w < nwaves; ++w, ++wc) {
       const uint p0 = bstart + w * WAVE_P;
@@ -359,14 +358,11 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
         const uint q0 = p0 + WAVE_P;
         if (q0 / KV_PAGED != pgv) {           // uniform: the next wave starts a page
           pgv = q0 / KV_PAGED;
-          pgs = pgv * KV_PAGED;
-          pr = (size_t)pages[pgo + pgv] * KV_PAGED * KV_HEADS * HD;
-          kpg = kv_k + pr;
-          vpg = kv_v + pr;
-          lastp = min(last - pgs, KV_PAGED - 1u);
+          delta = pages[pgo + pgv] * KV_PAGED - pgv * KV_PAGED;
+          lastr = min(last, pgv * KV_PAGED + KV_PAGED - 1u) + delta;
         }
-        load_k(kpg, q0 + sgid - pgs, j, q0 + sgid <= last, kreg);
-        load_v(vpg, q0 - pgs, j, sgid, lastp, vreg);
+        load_k(kv_k, q0 + sgid + delta, j, q0 + sgid <= last, kreg);
+        load_v(kv_v, q0 + delta, j, sgid, lastr, vreg);
 #endif
       }
     }
