@@ -104,6 +104,16 @@ int main(int argc, char** argv) {
     };
     std::vector<uint8_t> pkv, wkv;
     main_kv(pkv);
+    // The same ids through the 4-row lists (verify(3) + commit(3), 4 ids a step): MTP's rows.
+    std::vector<uint8_t> qh(16 * R * hid1);
+    e.load_state(saved.ptr(), pos);
+    e.control()->cur_token[0] = pending;
+    for (uint32_t i = 0; i < 16 * R; i += 4) {
+      for (uint32_t t = 0; t < 3; ++t) e.control()->cur_token[1 + t] = pids[i + t];
+      e.verify(3);
+      im.copy(qh.data() + i * hid1, static_cast<const uint8_t*>(mb.hh.ptr()) + hid1, 4 * hid1);
+      e.commit(3, pids[i + 3]);
+    }
     e.load_state(saved.ptr(), pos);
     e.control()->cur_token[0] = pending;
     uint32_t kept_all = 0;
@@ -153,6 +163,11 @@ int main(int argc, char** argv) {
     }
     for (uint32_t m = 0; m < 16 * R; ++m) {
       const double ch = cosine(wh.data() + m * hid1, ph.data() + m * hid1, hid1);
+      const double c4 = cosine(wh.data() + m * hid1, qh.data() + m * hid1, hid1);
+      const double c41 = cosine(qh.data() + m * hid1, ph.data() + m * hid1, hid1);
+      if (c4 < 0.999 || c41 < 0.999)
+        std::printf("WIDE_VS_PLAIN verify %u row %2u: hidden cos wide-vs-4row %.6f, 4row-vs-1row %.6f  <<<\n", m / 16,
+                    m % 16, c4, c41);
       const double ck = cosine(wk.data() + m * rb1, pk.data() + m * rb1, rb1);
       std::printf("WIDE_VS_PLAIN verify %u row %2u: hidden cos %.6f | head K row (position %u) cos %.6f%s\n", m / 16,
                   m % 16, ch, pos - 1 + m, ck, ch < 0.999 || ck < 0.999 ? "  <<<" : "");
