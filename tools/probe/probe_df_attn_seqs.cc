@@ -6,16 +6,16 @@
 //
 // No checkpoint: random bf16 rings (5 layers x 2048 positions x 8 kv heads x 128 a slot, 4 slots, each its own
 // allocation as DFlashSession's), random fp32 q / block K / V. Arms, each the drafter's 5 layers of (part, reduce):
-//   base   today's production pair (df_attn_..._dpas_k4 part + _H1_B4 reduce), 8 rows K 7, one ring
-//   s1x8   the SEQS pair, one block of 8 rows (the form's own overhead)
-//   s2x4   the SEQS pair, 2 blocks of 4 rows (K 3), two rings
-//   s4x2   the SEQS pair, 4 blocks of 2 rows (K 1), four rings
-//   b2 / b4  today's pair launched once a block (2 or 4 times a layer) - the form without a row table
+//   ks4        the part before plan 19v3b (df_attn_..._dpas_k4, 128 GRF) + the _H1_B4 reduce: 8 rows K 7, one ring
+//   ks4 g256   the same source at 256 GRF a thread (_dpas_k4_g256) - production since plan 19v3b
+//   ks1 g256   the part at KS 1, 256 GRF (_dpas_g256), one ring - the SEQS form's one-block twin
+//   SEQS b x r the row-table pair (_dpas_g256_SEQS + _H1_B4_SEQS): b blocks of r rows (K r - 1), b rings
 // Timing: one list per arm of --reps passes, executed + fenced; rounds after a warm-up, arms rotated per round; the
-// median ms a pass per arm and the median paired difference to base, also in plain steps (--plain-ms: the int8-head
+// median ms a pass per arm and the median paired difference to ks4, also in plain steps (--plain-ms: the int8-head
 // plain step at depth 4096, 6.46 ms / 0.217 from BENCHMARKS "the final form").
-// Check first: each SEQS block's output rows are bitwise the production pair run on that block alone (rows moved to
-// 0.., its ring, its position, its K) - df_attn_dpas.cl's property R.
+// Checks: ks4 g256 bitwise ks4; each SEQS block bitwise the ks1 g256 pair on that block alone (rows moved to 0.., its
+// ring, its position, its K) - df_attn_dpas.cl's property R; and each SEQS block against the production pair alone
+// (KS 4: another summation order) - the worst cosine and largest bf16 difference printed.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -40,7 +40,7 @@
 namespace {
 
 constexpr uint32_t kM = 8, kNH = 32, kNKV = 8, kHD = 128, kRing = 2048, kPB = 128, kTGT = kRing / kPB, kL = 5;
-constexpr uint32_t kKS = 4, kSeqs = 4, kPart = kHD + 2;
+constexpr uint32_t kSeqs = 4, kPart = kHD + 2;
 constexpr size_t kRingLayer = size_t(kRing) * kNKV * kHD * 2;   // bytes, K or V, one layer
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 const std::string kBase = "df_attn_M8_Q32KV8_D128_R2048_W2048_P128";
@@ -53,6 +53,12 @@ uint16_t to_bf(float f) {
   uint32_t u;
   std::memcpy(&u, &f, 4);
   return uint16_t((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+}
+float bf(uint16_t h) {
+  const uint32_t u = uint32_t(h) << 16;
+  float f;
+  std::memcpy(&f, &u, 4);
+  return f;
 }
 void upload(l0::Context& ctx, void* dev, const void* host, size_t bytes) {
   l0::CmdList c = l0::CmdList::immediate(ctx);
@@ -113,22 +119,23 @@ int main(int argc, char** argv) {
   const float scale = 1.0f / std::sqrt(float(kHD));
 
   // ---- kernels ---------------------------------------------------------------------------------------------------
-  l0::Module m_part(ctx, kernels::path(kBase + "_dpas_k4")), m_red(ctx, kernels::path(kBase + "_H1_B4"));
-  l0::Module m_spart(ctx, kernels::path(kBase + "_dpas_k4_SEQS")), m_sred(ctx, kernels::path(kBase + "_H1_B4_SEQS"));
-  // One Kernel object per launch: a list bakes the arguments at append time, but a Kernel's arguments are its state,
-  // so per-launch objects keep the arms' lists independent of each other.
+  l0::Module m_k4(ctx, kernels::path(kBase + "_dpas_k4")), m_k4g(ctx, kernels::path(kBase + "_dpas_k4_g256"));
+  l0::Module m_k1g(ctx, kernels::path(kBase + "_dpas_g256")), m_red(ctx, kernels::path(kBase + "_H1_B4"));
+  l0::Module m_spart(ctx, kernels::path(kBase + "_dpas_g256_SEQS")), m_sred(ctx, kernels::path(kBase + "_H1_B4_SEQS"));
+  // One Kernel object per launch (a list bakes the arguments at append time; per-launch objects keep the lists apart).
   std::vector<l0::Kernel> ks;
-  ks.reserve(4096);
+  ks.reserve(8192);
   auto make = [&](l0::Module& mod, const char* name, uint32_t wg) -> l0::Kernel& {
     ks.push_back(mod.kernel(name));
     ks.back().group_size(wg);
     return ks.back();
   };
-  const uint32_t part_wg = 16 * (kNH / kNKV) * kKS;
+  const uint32_t G = kNH / kNKV;
 
-  // the production pair over one ring: ctrl / dctl given (each block alone in its own control buffers)
-  auto base_layer = [&](l0::CmdList& list, uint32_t l, const void* c, const void* dc, uint32_t slot) {
-    l0::Kernel& p = make(m_part, "df_attn_part", part_wg);
+  // a one-ring pair: part `mp` at key split `kss`, ctrl / dctl given (each block alone in its own control buffers)
+  auto one_layer = [&](l0::CmdList& list, uint32_t l, const void* c, const void* dc, uint32_t slot, l0::Module& mp,
+                       uint32_t kss) {
+    l0::Kernel& p = make(mp, "df_attn_part", 16 * G * kss);
     p.arg_ptr(0, c);
     p.arg_ptr(1, dc);
     p.arg_ptr(2, q.ptr());
@@ -149,7 +156,7 @@ int main(int argc, char** argv) {
     list.launch(r, kNH, kM);
   };
   auto seqs_layer = [&](l0::CmdList& list, uint32_t l, const void* tab, uint32_t blocks) {
-    l0::Kernel& p = make(m_spart, "df_attn_part", part_wg);
+    l0::Kernel& p = make(m_spart, "df_attn_part", 16 * G);
     p.arg_ptr(0, tab);
     p.arg_ptr(1, q.ptr());
     for (uint32_t s = 0; s < kSeqs; ++s) {
@@ -191,7 +198,6 @@ int main(int argc, char** argv) {
     }
     return t;
   };
-  // per layout its table and, per block, the block-alone control buffers
   struct Layout {
     std::vector<Block> blocks;
     l0::Mem tab;
@@ -214,53 +220,72 @@ int main(int argc, char** argv) {
     lay.push_back(std::move(L));
   }
 
-  // ---- check: each block bitwise its block alone (layer 0) -------------------------------------------------------
+  // ---- checks (layer 0) ------------------------------------------------------------------------------------------
   auto run = [&](l0::CmdList& list) {
     queue.execute(list, &fence);
     fence.wait();
   };
-  const size_t row_bytes = size_t(kNH) * kHD * 2;
+  const size_t row_n = size_t(kNH) * kHD;
+  auto out_of = [&](const std::function<void(l0::CmdList&)>& f) {
+    l0::CmdList list = l0::CmdList::regular(ctx);
+    f(list);
+    list.close();
+    run(list);
+    std::vector<uint16_t> o(kM * row_n);
+    download(ctx, o.data(), out.ptr(), o.size() * 2);
+    return o;
+  };
+  auto set_inputs = [&](const std::vector<float>& qs, const std::vector<float>& kbs, const std::vector<float>& vbs) {
+    upload(ctx, q.ptr(), qs.data(), q_n * 4);
+    upload(ctx, kb.ptr(), kbs.data(), kb_n * 4);
+    upload(ctx, vb.ptr(), vbs.data(), kb_n * 4);
+  };
   bool all_ok = true;
+  set_inputs(q_h, kb_h, vb_h);
+  {
+    const auto a = out_of([&](l0::CmdList& li) { one_layer(li, 0, lay[0].c[0].ptr(), lay[0].dc[0].ptr(), 0, m_k4, 4); });
+    const auto b = out_of([&](l0::CmdList& li) { one_layer(li, 0, lay[0].c[0].ptr(), lay[0].dc[0].ptr(), 0, m_k4g, 4); });
+    std::printf("# check ks4 g256 against ks4, 8 rows one ring: %s\n", a == b ? "bitwise" : "DIFFERS");
+    all_ok &= a == b;
+  }
   for (Layout& L : lay) {
-    std::vector<uint16_t> got(size_t(kM) * kNH * kHD);
-    upload(ctx, q.ptr(), q_h.data(), q_n * 4);
-    upload(ctx, kb.ptr(), kb_h.data(), kb_n * 4);
-    upload(ctx, vb.ptr(), vb_h.data(), kb_n * 4);
-    {
-      l0::CmdList list = l0::CmdList::regular(ctx);
-      seqs_layer(list, 0, L.tab.ptr(), uint32_t(L.blocks.size()));
-      list.close();
-      run(list);
-      download(ctx, got.data(), out.ptr(), got.size() * 2);
-    }
+    set_inputs(q_h, kb_h, vb_h);
+    const auto got = out_of([&](l0::CmdList& li) { seqs_layer(li, 0, L.tab.ptr(), uint32_t(L.blocks.size())); });
     for (uint32_t s = 0; s < L.blocks.size(); ++s) {
       const Block& b = L.blocks[s];
       // the block's rows moved to rows 0.. of q / kb / vb; the rest of the rows as they were (past K: zeroed)
       std::vector<float> qs = q_h, kbs = kb_h, vbs = vb_h;
-      const size_t qr = size_t(kNH) * kHD, kr = size_t(kNKV) * kHD;
-      std::memcpy(qs.data(), q_h.data() + b.row0 * qr, b.rows * qr * 4);
+      const size_t kr = size_t(kNKV) * kHD;
+      std::memcpy(qs.data(), q_h.data() + b.row0 * row_n, b.rows * row_n * 4);
       std::memcpy(kbs.data(), kb_h.data() + b.row0 * kr, b.rows * kr * 4);
       std::memcpy(vbs.data(), vb_h.data() + b.row0 * kr, b.rows * kr * 4);
-      upload(ctx, q.ptr(), qs.data(), q_n * 4);
-      upload(ctx, kb.ptr(), kbs.data(), kb_n * 4);
-      upload(ctx, vb.ptr(), vbs.data(), kb_n * 4);
-      l0::CmdList list = l0::CmdList::regular(ctx);
-      base_layer(list, 0, L.c[s].ptr(), L.dc[s].ptr(), s);
-      list.close();
-      run(list);
-      std::vector<uint16_t> want(size_t(kM) * kNH * kHD);
-      download(ctx, want.data(), out.ptr(), want.size() * 2);
-      const bool ok = std::memcmp(got.data() + size_t(b.row0) * kNH * kHD, want.data(), b.rows * row_bytes) == 0;
+      set_inputs(qs, kbs, vbs);
+      const auto twin = out_of([&](l0::CmdList& li) { one_layer(li, 0, L.c[s].ptr(), L.dc[s].ptr(), s, m_k1g, 1); });
+      const auto prod = out_of([&](l0::CmdList& li) { one_layer(li, 0, L.c[s].ptr(), L.dc[s].ptr(), s, m_k4g, 4); });
+      const uint16_t* g = got.data() + size_t(b.row0) * row_n;
+      const bool ok = std::memcmp(g, twin.data(), b.rows * row_n * 2) == 0;
       bool nonzero = false;
-      for (size_t i = 0; i < b.rows * size_t(kNH) * kHD; ++i) nonzero |= want[i] != 0;
-      std::printf("# check %zu blocks, block %u (rows %u..%u, pos %u, K %u): %s%s\n", L.blocks.size(), s, b.row0,
-                  b.row0 + b.rows - 1, b.pos, b.K, ok ? "bitwise" : "DIFFERS", nonzero ? "" : " (all zero!)");
+      double worst_cos = 1.0, max_abs = 0.0;
+      for (uint32_t r = 0; r < b.rows; ++r)
+        for (uint32_t h = 0; h < kNH; ++h) {
+          double xy = 0, xx = 0, yy = 0;
+          for (uint32_t d = 0; d < kHD; ++d) {
+            const size_t i = size_t(r) * row_n + h * kHD + d;
+            const double x = bf(g[i]), y = bf(prod[i]);
+            nonzero |= g[i] != 0;
+            xy += x * y, xx += x * x, yy += y * y;
+            max_abs = std::max(max_abs, std::fabs(x - y));
+          }
+          if (xx > 0 && yy > 0) worst_cos = std::min(worst_cos, xy / std::sqrt(xx * yy));
+        }
+      std::printf("# check %zu blocks, block %u (rows %u..%u, pos %u, K %u): %s the KS 1 pair alone%s; against the "
+                  "production pair alone worst cosine %.8f, max |diff| %.3g\n",
+                  L.blocks.size(), s, b.row0, b.row0 + b.rows - 1, b.pos, b.K, ok ? "bitwise" : "DIFFERS",
+                  nonzero ? "" : " (all zero!)", worst_cos, max_abs);
       all_ok &= ok && nonzero;
     }
   }
-  upload(ctx, q.ptr(), q_h.data(), q_n * 4);
-  upload(ctx, kb.ptr(), kb_h.data(), kb_n * 4);
-  upload(ctx, vb.ptr(), vb_h.data(), kb_n * 4);
+  set_inputs(q_h, kb_h, vb_h);
 
   // ---- arms ------------------------------------------------------------------------------------------------------
   struct Arm {
@@ -276,17 +301,14 @@ int main(int argc, char** argv) {
     list.close();
     arms.push_back({name, std::move(list), {}});
   };
-  // base: 8 rows, K 7, one ring at 4096 (layout 0's block-alone control)
-  add_arm("base 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { base_layer(li, l, lay[0].c[0].ptr(), lay[0].dc[0].ptr(), 0); });
+  const void* c0 = lay[0].c[0].ptr();
+  const void* d0 = lay[0].dc[0].ptr();
+  add_arm("ks4, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_k4, 4); });
+  add_arm("ks4 g256, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_k4g, 4); });
+  add_arm("ks1 g256, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_k1g, 1); });
   add_arm("SEQS 1 x 8", [&](l0::CmdList& li, uint32_t l) { seqs_layer(li, l, lay[0].tab.ptr(), 1); });
   add_arm("SEQS 2 x 4", [&](l0::CmdList& li, uint32_t l) { seqs_layer(li, l, lay[1].tab.ptr(), 2); });
   add_arm("SEQS 4 x 2", [&](l0::CmdList& li, uint32_t l) { seqs_layer(li, l, lay[2].tab.ptr(), 4); });
-  add_arm("today's pair a block, 2 x 4", [&](l0::CmdList& li, uint32_t l) {
-    for (uint32_t s = 0; s < 2; ++s) base_layer(li, l, lay[1].c[s].ptr(), lay[1].dc[s].ptr(), s);
-  });
-  add_arm("today's pair a block, 4 x 2", [&](l0::CmdList& li, uint32_t l) {
-    for (uint32_t s = 0; s < 4; ++s) base_layer(li, l, lay[2].c[s].ptr(), lay[2].dc[s].ptr(), s);
-  });
   for (Arm& a : arms) run(a.list);   // warm-up
   for (uint32_t rd = 0; rd < rounds; ++rd)
     for (size_t i = 0; i < arms.size(); ++i) {
@@ -296,7 +318,7 @@ int main(int argc, char** argv) {
       run(a.list);
       a.ms.push_back(t.ms() / reps);
     }
-  std::printf("\n| arm (5 layers of part + reduce) | ms a pass (median) | - base ms (median pair) | plain steps |\n"
+  std::printf("\n| arm (5 layers of part + reduce) | ms a pass (median) | - ks4 ms (median pair) | plain steps |\n"
               "|---|---:|---:|---:|\n");
   for (Arm& a : arms) {
     std::vector<double> d;
@@ -304,6 +326,6 @@ int main(int argc, char** argv) {
     const double dm = median(d);
     std::printf("| %s | %.4f | %+.4f | %+.4f |\n", a.name.c_str(), median(a.ms), dm, dm / plain_ms);
   }
-  std::printf("\n# check: %s\n", all_ok ? "every block bitwise its block alone" : "FAILED");
+  std::printf("\n# check: %s\n", all_ok ? "every check passed" : "FAILED");
   return all_ok ? 0 : 1;
 }

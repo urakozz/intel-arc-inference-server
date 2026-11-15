@@ -525,10 +525,19 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k${KSP} SOURCE ${DF_DIR}/df_attn_dpas.cl
                      DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=${KSP})
   endforeach()
-  # Plan 19v3b: the row-table forms (SEQS: up to 4 blocks of rows, each its own slot's ring and position) - the KS 4
-  # DPAS part and the H1 B4 reduce.
-  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4_SEQS SOURCE ${DF_DIR}/df_attn_dpas.cl
-                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=4 SEQS=4)
+  # Plan 19v3b: the KS 4 DPAS part at 256 GRF a thread (-cl-intel-256-GRF-per-thread: the same arithmetic, bitwise the
+  # 128-GRF binary above, 0.535 -> 0.446 ms the five parts) - production; and the row-table forms of the batched draft
+  # (SEQS: up to 4 blocks of rows, each its own slot's ring and position) - the part at KS 1 (fastest at 2 and 4
+  # blocks), its one-ring twin (tests) and the H1 B4 reduce.
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4_g256 SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=4
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_g256 SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_g256_SEQS SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=1 SEQS=4
+                   OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_SEQS SOURCE ${DF_DIR}/df_attn_rows.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0 HPW=1 RPW=4 SEQS=4)

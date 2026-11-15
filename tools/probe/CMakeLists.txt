@@ -534,10 +534,9 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   target_include_directories(probe_df_attn_seqs PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(probe_df_attn_seqs PRIVATE b70_l0)
   b70_target_kernel_dir(probe_df_attn_seqs)
-  add_dependencies(probe_df_attn_seqs kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4
-                   kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4
-                   kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4_SEQS
-                   kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_SEQS)
+  foreach(V dpas_k4 dpas_k4_g256 dpas_g256 dpas_g256_SEQS H1_B4 H1_B4_SEQS)
+    add_dependencies(probe_df_attn_seqs kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_${V})
+  endforeach()
 endif()
 # --- probe_draft_cost: spec 19a Task 4, one DFlash2 block's GEMVs (int8 / bf16 / int4) ---
 # Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Random weights of
