@@ -495,6 +495,11 @@ if(B70_MTP)
   get_property(MS_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
+  # Open-work 28: the 16-row verify list run repeatedly from one state, compared bitwise.
+  add_executable(probe_wide_repeat probe_wide_repeat.cc)
+  target_include_directories(probe_wide_repeat PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_wide_repeat PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  add_dependencies(probe_wide_repeat ${MS_KERNELS} ${MS_PF_KERNELS})
   add_dependencies(probe_longctx_decode ${MS_KERNELS} ${MS_PF_KERNELS})
   # 3l (2): a short turn's whole-chunk wall time deep in a session, the split-K attention against today's.
   add_executable(probe_turn_chunks probe_turn_chunks.cc)
