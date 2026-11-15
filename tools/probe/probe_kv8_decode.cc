@@ -26,6 +26,9 @@
 //   PKD_KV_DUMP=<dir>  every layer's K / V rows (and q, its 8 rows repeated) from probe_decode_attn capture's dump
 //                      (kv_k.bin / kv_v.bin, q_<depth>.bin of the first depth) instead of the random fill
 //   PKD_ONE_CACHE=1    all 16 layers read layer 0's cache
+//   PKD_CAP_PAD=<rows> rows added to every cache's capacity (moves the buffers' relative addresses)
+//   PKD_EVENTS=1       every decode launch signals a timestamp event; each arm also prints the median of its decode
+//                      kernels' summed durations (`ts dec`)
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -42,6 +45,7 @@
 #include "kernels/kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
+#include "l0/event.h"
 #include "l0/fence.h"
 #include "l0/kernel.h"
 #include "l0/memory.h"
@@ -86,6 +90,7 @@ struct Arm {
   std::unique_ptr<l0::Module> module, red_module, rep_module;
   std::unique_ptr<l0::CmdList> list;
   std::vector<l0::Kernel> kernels;
+  std::vector<l0::Event> ev;
 };
 }  // namespace
 
@@ -98,7 +103,8 @@ int main(int argc, char** argv) {
     std::stringstream ss(argv[2]);
     for (std::string t; std::getline(ss, t, ',');) depths.push_back(uint32_t(std::stoul(t)));
   }
-  const uint32_t capacity = ((*std::max_element(depths.begin(), depths.end()) + M + 255u) & ~255u);
+  const uint32_t capacity = ((*std::max_element(depths.begin(), depths.end()) + M + 255u) & ~255u) +
+                            uint32_t(std::getenv("PKD_CAP_PAD") ? std::stoul(std::getenv("PKD_CAP_PAD")) : 0ul);
   l0::Context ctx(0);
   l0::Queue q(ctx);
   l0::Fence fence(q);
@@ -200,8 +206,13 @@ int main(int argc, char** argv) {
     for (auto& x : h) x = nd(rng) * 30.0f;
     imm.copy(gate.ptr(), h.data(), gate.size());
   }
+  const bool events = std::getenv("PKD_EVENTS") != nullptr;
+  std::unique_ptr<l0::EventPool> pool;
+  if (events) pool = std::make_unique<l0::EventPool>(ctx, uint32_t(arms.size()) * kLayers * 8);
+  uint32_t evi = 0;
   for (Arm& arm : arms) {
     arm.kernels.reserve((arm.reps + 1) * kLayers);
+    if (events) arm.ev.reserve(size_t(arm.reps) * kLayers);
     arm.list = std::make_unique<l0::CmdList>(l0::CmdList::regular(ctx));
     const std::string dn = arm.dpas ? (arm.kv8 ? "attn_verify_dpas_kv8" : "attn_verify_dpas")
                                     : (arm.kv8 ? "attn_decode_v2_kv8" : "attn_decode_v2");
@@ -228,7 +239,8 @@ int main(int argc, char** argv) {
         } else {
           k.arg_ptr(2, k16[l]->ptr()); k.arg_ptr(3, v16[l]->ptr()); k.arg_ptr(4, part.ptr());
         }
-        arm.list->launch(k, 4, kBlocks);
+        if (events) arm.ev.emplace_back(*pool, evi++);
+        arm.list->launch(k, 4, kBlocks, 1, events ? &arm.ev.back() : nullptr);
       }
       if (arm.red) {
         arm.kernels.push_back((arm.red_module ? arm.red_module : arm.module)->kernel(rn.c_str()));
@@ -241,11 +253,17 @@ int main(int argc, char** argv) {
     }
     arm.list->close();
   }
+  std::vector<std::vector<double>> ts(arms.size());
   auto once = [&](Arm& arm) {
+    for (l0::Event& e : arm.ev) e.reset();
     const auto t0 = Clock::now();
     q.execute(*arm.list, &fence);
     fence.wait();
-    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    double d = 0;
+    for (l0::Event& e : arm.ev) d += e.duration_us();
+    if (!arm.ev.empty()) ts[&arm - arms.data()].push_back(d / 1000.0);
+    return ms;
   };
   std::printf("probe_kv8_decode: M %u capacity %u, %u layers per list, %zu arms\n", M, capacity, kLayers, arms.size());
   for (const uint32_t depth : depths) {
@@ -255,6 +273,7 @@ int main(int argc, char** argv) {
     c->n_active = M;
     for (int w = 0; w < 6; ++w)
       for (Arm& arm : arms) once(arm);
+    for (auto& t : ts) t.clear();
     const size_t n = arms.size();
     std::vector<std::vector<double>> ms(n), ratio(n);
     for (uint32_t round = 0; round < 11; ++round) {
@@ -271,6 +290,12 @@ int main(int argc, char** argv) {
     for (size_t a = 0; a < n; ++a) {
       std::sort(ms[a].begin(), ms[a].end());
       std::sort(ratio[a].begin(), ratio[a].end());
+      if (events && !ts[a].empty()) {
+        std::sort(ts[a].begin(), ts[a].end());
+        std::printf("depth %6u M %2u %-48s ts dec %8.3f ms (decode kernels' timestamps, summed)\n", depth, M,
+                    arms[a].spec.c_str(), ts[a][ts[a].size() / 2]);
+        ts[a].clear();
+      }
       const double bytes = double(depth + M) * kKvRow * 2 * (arms[a].kv8 ? 1 : 2) * kLayers +
                            (arms[a].kv8 ? double(depth + M) * 4 * 2 * 2 * kLayers : 0.0);
       // four products of rows x keys x 256 dims a q head (row m reads depth + m + 1 keys)

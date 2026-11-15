@@ -9,7 +9,7 @@
 #   tools/probe/verify_attn_wide.sh decompose CARD OUT  today's 16-row line: random / real KV x 16 caches / one
 #   tools/probe/verify_attn_wide.sh bitwise CARD OUT PREFIX...  16 rows bitwise against the frozen copy, + negative
 #   tools/probe/verify_attn_wide.sh inplace CARD OUT TAG  the 16-row list in place, 4k / 32k keys
-#   tools/probe/verify_attn_wide.sh kernel CARD OUT   today's 16-row line against the candidates, 4k / 32k / 98k keys
+#   tools/probe/verify_attn_wide.sh kernel CARD OUT   today's 16-row line against the candidates at pos 4096 / 32768 / 98304 (one row group), then 32767 / 98303 (rows across a block-size change: two walks)
 set -u
 mode="$1"
 shift
@@ -69,6 +69,8 @@ case "$mode" in
     run random1 env PKD_ONE_CACHE=1 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
     run real16 env PKD_KV_DUMP="$dump" build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
     run real1 env PKD_KV_DUMP="$dump" PKD_ONE_CACHE=1 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
+    run pad8 env PKD_CAP_PAD=8 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
+    run pad8real1 env PKD_CAP_PAD=8 PKD_KV_DUMP="$dump" PKD_ONE_CACHE=1 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
     echo DECOMPOSE_DONE
     ;;
   bitwise)   # attn_verify_bitwise_test at 16 rows: the candidates (probe builds) against the frozen copy, then V zeroed
@@ -96,7 +98,8 @@ case "$mode" in
     r="attn_verify_dpas_M16_T32+attn_v2_M16_T32"
     arms=("$r")
     for c in "$@"; do arms+=("$c+attn_v2_M16_T32"); done
-    run kernel_M16 build/tools/probe/probe_kv8_decode 16 4095,32767,98303 "${arms[@]}"
+    run kernel_M16 build/tools/probe/probe_kv8_decode 16 4096,32768,98304 "${arms[@]}"
+    run kernel_M16_straddle build/tools/probe/probe_kv8_decode 16 32767,98303 "${arms[@]}"
     echo KERNEL_DONE
     ;;
   *)
