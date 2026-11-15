@@ -5,9 +5,9 @@
 // agreeing prefix, commit). Its record: the ids, and after the last iteration the drafter session's ring and taps, and
 // the slot's live GDN state - each hashed.
 //
-//   A   the session in a one-slot engine (max_len 32768, the slots' sum: the same attention builds): the reference.
-//   B1  a slot alone is the one-slot engine: in an engine of slots 16384 + 8192 + 8192, the session in slot 0, in
-//       slot 1 and in slot 2 gives A's record bitwise (slot 0 binds today's 8-state lists over its pages, a further
+//   A   the session in a one-slot engine (max_len 40960, the slots' sum: the same attention builds): the reference.
+//   B1  a slot alone is the one-slot engine: in an engine of slots 16384 + 3 x 8192, the session in every slot gives
+//       A's record bitwise (slot 0 binds today's 8-state lists over its pages, a further
 //       slot its 4-state lists - the same kernels and arithmetic over its own state, session and KV).
 //   B2  isolation: slots 1 and 2 run the session in turn (one iteration each, alternating) - both give A's record,
 //       and slot 0 (not stepped) keeps every byte (Control, GDN states, conv ring, drafter session).
@@ -22,10 +22,14 @@
 //       worst row cosine >= 0.999 (the row kernels round as the small-batch GEMMs do).
 //   B7  the batched session: slots 1 and 2, 24 iterations of batched draft + row step + commit each, against A's ids -
 //       the first difference printed (the row kernels' rounding; judged at the server, Task 7).
+//   T   (timing, informational, busy-box grade) the draft list of one slot at K = 7 against the batched draft of 2
+//       slots x K 3 and 4 slots x K 1, interleaved, medians of 15 rounds; the batched one in the lone draft's plain
+//       steps (0.217 at 4k, BENCHMARKS "the final form").
 //
 // usage: dflash_slots_test <target snapshot> <drafter>   (cwd = the source tree)
 // SKIP (77) when either checkpoint is missing.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -49,7 +53,7 @@
 
 namespace {
 constexpr uint32_t kK = 3, kPrompt = 1998, kIters = 24;
-const std::vector<uint32_t> kSlots = {16384, 8192, 8192};
+const std::vector<uint32_t> kSlots = {16384, 8192, 8192, 8192};
 
 uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
   const uint8_t* b = static_cast<const uint8_t*>(p);
@@ -163,7 +167,7 @@ int main(int argc, char** argv) {
 
   Record ref;
   {   // A
-    Rig r(ctx, snap, dsnap, {32768});
+    Rig r(ctx, snap, dsnap, {40960});
     ref = session(r, 0, prompt);
     print("A  one slot", ref);
   }
@@ -398,6 +402,33 @@ int main(int argc, char** argv) {
       std::printf("B7 slot %u: %zu ids, the first %zu equal A's%s\n", x == &a ? 1u : 2u, x->size(), same,
                   same == n ? " (all)" : "");
     }
+  }
+
+  {   // T
+    for (uint32_t q = 0; q < kSlots.size(); ++q) start(r, q, prompt);
+    std::vector<double> lone, two, four;
+    const auto ms = [](auto f) {
+      const auto t0 = std::chrono::steady_clock::now();
+      f();
+      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+    for (int round = 0; round < 16; ++round) {
+      const double a = ms([&] {
+        r.e->select(0);
+        r.d->draft(*r.e, 7, 0.0f, 0);
+      });
+      const double b = ms([&] { r.d->draft_rows(*r.e, {{0, 3, 0.0f, 0}, {1, 3, 0.0f, 0}}); });
+      const double c = ms([&] { r.d->draft_rows(*r.e, {{0, 1, 0.0f, 0}, {1, 1, 0.0f, 0}, {2, 1, 0.0f, 0}, {3, 1, 0.0f, 0}}); });
+      if (round == 0) continue;   // warm-up
+      lone.push_back(a), two.push_back(b), four.push_back(c);
+    }
+    const auto med = [](std::vector<double> v) {
+      std::sort(v.begin(), v.end());
+      return v[v.size() / 2];
+    };
+    std::printf("T: the draft pass, one slot K 7 %.3f ms; batched 2 x K 3 %.3f ms (%.3f plain), 4 x K 1 %.3f ms (%.3f "
+                "plain) - busy box\n",
+                med(lone), med(two), 0.217 * med(two) / med(lone), med(four), 0.217 * med(four) / med(lone));
   }
 
   std::printf("dflash_slots_test: %s\n", ok ? "PASS" : "FAIL");
