@@ -3466,7 +3466,6 @@ if(B70_Q4EXP)
 endif()
 if(TARGET b70-serve)
   set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-  b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "serving it comes next")
   b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --spec mtp --draft-vocab 32k
     EXPECT "--draft-vocab is not built for Qwen3.8-Flash-Next")
   b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
@@ -3478,7 +3477,7 @@ if(TARGET b70-serve)
     EXPECT "Serve a snapshot that ships")
   b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --layers 4
     EXPECT "belongs to Qwen3.8-Flash-Next")
-  set_tests_properties(cli_reject_serve_qwen4exp_full
+  set_tests_properties(
     cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
     cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
     cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)

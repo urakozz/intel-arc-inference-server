@@ -531,11 +531,13 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   const cq::Settled s = cq::settle(full, da, dev, a.snapshot_dir);
   loader::Q4LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head(),
+    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head,
+                                 s.desc.layers == full.layers ? 0 : s.desc.layers, a.loads_head(),
                                  s.tier ? &*s.tier : nullptr);
   }();
-  std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode until the expert tier is built)\n",
-             model.desc.layers, model.checkpoint_layers);
+  if (model.desc.layers < model.checkpoint_layers)
+    std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode)\n", model.desc.layers,
+               model.checkpoint_layers);
   runtime::PipelineOptions opt;
   runtime::qwen4exp::Qwen4ExpEngine engine(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request

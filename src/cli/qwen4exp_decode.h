@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -151,8 +152,26 @@ struct Settled {
                                                        // none: every expert resident (or B70_Q4_RESIDENT's, the loader)
 };
 
-// The whole model's context until the planner chooses it (spec 21 v2 §9's rule comes with serving the whole model).
-inline constexpr uint32_t kWholeMaxLen = 32768;
+// The whole model's --max-len auto (spec 21 v2 §9): each GB of context is a GB of experts out of VRAM, so the largest
+// of 32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's. The projection (derived): a
+// token reads the non-routed bytes and h of the routed ones from VRAM at kTierVramGbps and the rest from host memory at
+// kTierHostGbps, one after the other (measured on the card: a kernel's host reads add to its VRAM time); h is the
+// share of the profile's routes the fill keeps resident (without a profile: the resident fraction).
+inline constexpr uint32_t kWholeMinLen = 32768;
+inline constexpr double kTierVramGbps = 457.8;   // 77.6 % of the B70's 590 GB/s (Qwen3.8's decode)
+inline constexpr double kTierHostGbps = 11.2;    // one expert read in place from pinned host memory (PCIe 3.0 x16)
+inline double tier_decode_ms(const runtime::qwen4exp::ExpertBudget& b, const runtime::qwen4exp::ExpertTier& t,
+                             const std::vector<uint32_t>& prof) {
+  double hit = 0, all = 0;
+  for (uint32_t l = 0; l < t.layers; ++l)
+    for (uint32_t e = 0; e < t.experts; ++e) {
+      const double c = prof.empty() ? 1.0 : prof[size_t(l) * t.experts + e];
+      all += c;
+      hit += t.resident(l, e) ? c : 0.0;
+    }
+  const double h = all > 0 ? hit / all : 1.0, R = double(b.read_routed);
+  return ((double(b.read_non_routed) + h * R) / kTierVramGbps + (1.0 - h) * R / kTierHostGbps) / 1e6;
+}
 
 // The layer count, placement and max_len for this run, from the planner (before the load: each layer goes straight
 // onto its device). `full` is the checkpoint's descriptor (all its layers). Prints the choice and the plan.
@@ -170,19 +189,44 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     const char* forced = std::getenv("B70_Q4_RESIDENT");
     s.desc = full;
     const model::Qwen4ExpDesc& d = s.desc;
-    s.max_len = a.max_len.is_auto ? kWholeMaxLen : a.max_len.value;
-    if (s.max_len > cap)
-      throw std::runtime_error("--max-len " + std::to_string(s.max_len) + " exceeds Qwen3.8-Flash-Next's trained context " +
-                               std::to_string(cap));
-    s.placement = devs == 1 ? model::Q4Placement::one(d)
-                            : model::Q4Placement::two(d, a.pipe.split_auto ? rq::pp_split(d, s.max_len, int8, hd, pf).split
-                                                                           : a.pipe.split);
-    std::print(stderr, "layers: all {:d} (the routed experts that do not fit the card{} in pinned host memory); max_len {:d}{}\n",
-               d.layers, devs == 2 ? "s" : "", s.max_len, a.max_len.is_auto ? " (the whole model's default)" : " (--max-len)");
     std::string prof_path;
     const std::vector<uint32_t> prof = loader::load_q4_profile(snapshot, full, &prof_path);
-    const rq::ExpertBudget b = rq::expert_budget(d, s.placement, s.max_len, int8, hd, pf, dev, a.reserve);
-    s.tier = rq::fill_tier(d, b, prof.empty() ? nullptr : &prof, forced ? forced : "");
+    const auto place = [&](uint32_t len) {
+      return devs == 1 ? model::Q4Placement::one(d)
+                       : model::Q4Placement::two(d, a.pipe.split_auto ? rq::pp_split(d, len, int8, hd, pf).split : a.pipe.split);
+    };
+    const auto tier_at = [&](uint32_t len, rq::ExpertBudget* out = nullptr) {
+      const rq::ExpertBudget b = rq::expert_budget(d, place(len), len, int8, hd, pf, dev, a.reserve);
+      if (out) *out = b;
+      return rq::fill_tier(d, b, prof.empty() ? nullptr : &prof, forced ? forced : "");
+    };
+    if (a.max_len.is_auto) {
+      rq::ExpertBudget b;
+      const double t0 = tier_decode_ms(b, tier_at(kWholeMinLen, &b), prof);
+      s.max_len = kWholeMinLen;
+      std::string tried;
+      for (uint32_t len = kWholeMinLen; len <= cap; len *= 2) {
+        const rq::ExpertTier t = tier_at(len, &b);
+        std::vector<rq::DevicePlan> pl = rq::plan(d, place(len), len, int8, hd, false, pf);
+        rq::apply_tier(pl, d, t);
+        if (!rq::fits(pl, dev, a.reserve)) break;
+        const double ms = tier_decode_ms(b, t, prof);
+        tried += std::format("{}{:d}: {:.2f} ms", tried.empty() ? "" : ", ", len, ms);
+        if (ms > 1.05 * t0) break;
+        s.max_len = len;
+      }
+      std::print(stderr, "max_len: auto -> {:d} (the longest whose projected decode stays within 5% of {:d}'s; derived "
+                 "ms a token: {})\n", s.max_len, kWholeMinLen, tried.c_str());
+    } else {
+      s.max_len = a.max_len.value;
+      if (s.max_len > cap)
+        throw std::runtime_error("--max-len " + std::to_string(s.max_len) + " exceeds Qwen3.8-Flash-Next's trained "
+                                 "context " + std::to_string(cap));
+    }
+    s.placement = place(s.max_len);
+    std::print(stderr, "layers: all {:d} (the routed experts that do not fit the card{} in pinned host memory); max_len {:d}\n",
+               d.layers, devs == 2 ? "s" : "", s.max_len);
+    s.tier = tier_at(s.max_len);
     std::print(stderr, "experts: {}{}\n", s.tier->source.c_str(),
                prof.empty() ? "" : (" (" + prof_path + ")").c_str());
     std::vector<rq::DevicePlan> pl = rq::plan(d, s.placement, s.max_len, int8, hd, false, pf);

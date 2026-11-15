@@ -6,8 +6,8 @@
 // runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's cli::pp::PipelineEngineAdapterT (src/cli/pipeline_serve_adapter.h:
 // EngineAdapter's logic over the engine's host calls - no third copy of the speculative loop), on one card or two.
 //
-//   --layers N|auto        REQUIRED until spec 22 (b70-decode's development mode): without it the whole model is
-//                          refused naming its bytes and spec 22 (the expert-offload tier)
+//   --layers N|auto        b70-decode's development mode; without it the whole model is served with the expert tier
+//                          (cli/qwen4exp_decode.h settle: the experts that do not fit the cards in pinned host memory)
 //   the PLE int8 file      <snapshot>-ple-int8/, beside the checkpoint (no flag)
 //   the tokenizer          the snapshot's tokenizer.json, held to the original's (Qwen/Qwen3.8-Flash-Next): 21a found the
 //                          original's split regex adds \p{M}, and Intel's checkpoint ships Qwen3.8's file - a snapshot
@@ -22,8 +22,7 @@
 //                          compressed-key blocks; with the head its tail, R, KV and keys)
 // Refused before the device, each by name (the adaptive K waits for spec 22's full-model cost numbers: cli::resolve_spec
 // gives this family a fixed K), --draft-vocab (spec 8 §11's compact head is not built for this head), --kv-cache int8 (decision 8),
-// --prefill-backend l0-int8 (b70-decode's message), --pipeline-split on one card, the whole
-// model without --layers.
+// --prefill-backend l0-int8 (b70-decode's message), --pipeline-split on one card.
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -62,9 +61,6 @@ inline void check_serve(const ServeArgs& s) {
   a.kv8 = false;
   a.profile = false;
   check_args(a);
-  if (a.layers == 0 && !a.layers_auto)
-    throw std::runtime_error("b70-serve serves Qwen3.8-Flash-Next with --layers N or --layers auto for now: the whole "
-                             "model (its experts partly in host memory) runs in b70-decode, and serving it comes next");
 }
 
 // True when a JSON value (recursively) holds a string containing \p{M} - the original's split regex (21a's finding 3).
