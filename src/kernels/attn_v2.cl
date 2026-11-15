@@ -212,6 +212,12 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
   const bool live0 = blk * s0 < pos + msplit;
   const bool live1 = msplit < n_act && blk * s1 < pos + n_act;
   if (!live0 && !live1) return;
+#ifdef KV_PAGED
+  // The first group's first page, read before q is staged so its latency hides behind that (the walk's first loads
+  // need it); a block past the sequence reads no entry.
+  const uint pg0v = blk * s0 / KV_PAGED;
+  const uint pg0p = live0 ? pages[pg0v] : 0u;
+#endif
 #else
   // The rows' positions, slots and KV bases; the block is live for a row when it starts at or before the row's
   // position at the row's stride (a group is live iff its last row is).
@@ -277,11 +283,16 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
 #endif
     // The page the loads are at: virtual page pgv (its first position pgs), its K / V rows from kpg / vpg.
     uint pgv = bstart / KV_PAGED, pgs = pgv * KV_PAGED;
+#ifndef BATCH_ROWS
+    size_t pr = (size_t)(live0 && pgv == pg0v ? pg0p : pages[pgv]) * KV_PAGED * KV_HEADS * HD;
+#else
     size_t pr = (size_t)pages[pgo + pgv] * KV_PAGED * KV_HEADS * HD;
+#endif
     __global const ushort* kpg = kv_k + pr;
     __global const ushort* vpg = kv_v + pr;
+    uint lastp = min(last - pgs, KV_PAGED - 1u);   // the page's last readable row
     load_k(kpg, bstart + sgid - pgs, j, bstart + sgid <= last, kreg);
-    load_v(vpg, bstart - pgs, j, sgid, min(last - pgs, KV_PAGED - 1u), vreg);
+    load_v(vpg, bstart - pgs, j, sgid, lastp, vreg);
 #endif
     for (uint w = 0; w < nwaves; ++w, ++wc) {
       const uint p0 = bstart + w * WAVE_P;
@@ -352,9 +363,10 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
           pr = (size_t)pages[pgo + pgv] * KV_PAGED * KV_HEADS * HD;
           kpg = kv_k + pr;
           vpg = kv_v + pr;
+          lastp = min(last - pgs, KV_PAGED - 1u);
         }
         load_k(kpg, q0 + sgid - pgs, j, q0 + sgid <= last, kreg);
-        load_v(vpg, q0 - pgs, j, sgid, min(last - pgs, KV_PAGED - 1u), vreg);
+        load_v(vpg, q0 - pgs, j, sgid, lastp, vreg);
 #endif
       }
     }
