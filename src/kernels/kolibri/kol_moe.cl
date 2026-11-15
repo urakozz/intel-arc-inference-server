@@ -5,10 +5,10 @@
 //   kol_moe_gate_up(route, x, w_gu, w_sh_gu, h)       MOE_E     grid (SLOTS x NT_UP / 4, M), WG 64 x UP_KS
 //   kol_moe_down(route, h, w_dn, w_sh_dn, mo)         MOE_E     grid (HIDDEN / 16, M), WG 16 x SLOTS x DN_KS
 //
-// spec 15c's moe.cl / spec 18b's k2_moe.cl carried to Kolibri's semantics (tools/oracle/kolibri_ref.py,
+// spec 15c's moe.cl carried to Kolibri's semantics (tools/oracle/kolibri_ref.py,
 // spec 20a; docs/probes/probe-kolibri-2026-10-05.md "The router, exactly") - the layout-1 GEMV inner loop
 // (tile_dot) and the fixed-order, atomic-free reductions are theirs; what differs is why this is a new
-// source and moe.cl / k2_moe.cl are untouched:
+// source and moe.cl is untouched:
 //
 //   * the router: logits fp32 (the bf16 GEMV's fp32 output, NEVER rounded to bf16 - GateLinear's
 //       out_dtype fp32); sel = logit + bias (fp32, the bias widened) selects the top 6, ties to the
@@ -23,7 +23,7 @@
 //       (w_sh, the routed blocks' layout at the same widths - shared_inter == moe_inter) through the same
 //       tile_dot - one launch serves the 6 routed and the shared expert.
 //   * the block's output `mo` is NOT folded into the residual: post_ffn_norm comes first (the
-//       sandwich; prep_res_fold SP0 then kol_post_add, kol_prep.cl) - k2_moe_down folds, this does not.
+//       sandwich; prep_res_fold SP0 then kol_post_add, kol_prep.cl).
 //
 // The route row (u32 words per (layer, token); host mirror kernels::kolibri::route):
 //   [R_IDS + j]   expert id of slot j, ASCENDING, j < TOP_K              (u32)

@@ -26,7 +26,7 @@ def main() -> None:
     try:
         from tokenizers import Tokenizer
         tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
-        # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+        # A tokenizer.json may carry truncation / padding (a quantised repo has shipped truncation at 2048 ids);
         # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
         tok.no_truncation()
         tok.no_padding()

@@ -5,7 +5,7 @@ The engine runs `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ` (int4 g64 sym,
 per-expert `mlp.experts.E.{gate,up,down}_proj`, a||b int4 too - spec 15 §13). A reference made
 from the SAME int4 weights - dequantised by the repo's one rule (dequant.py, stream.py's
 bit-identical C++ dequant_t: bf16_rne(float(q - 8) x float(scale))) - is one the engine can match
-token for token, as spec 18a did for K2. The model is transformers' own Qwen3_5MoeForCausalLM
+token for token. The model is transformers' own Qwen3_5MoeForCausalLM
 (transformers 5.15, the box image's and agnes-ref-img's version), built on `meta` from the
 checkpoint's text config and LAYER-STREAMED (stream.py): embed / final norm / lm_head resident,
 each decoder layer's weights made by a forward pre-hook and dropped after.

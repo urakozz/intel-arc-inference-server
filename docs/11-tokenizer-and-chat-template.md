@@ -124,7 +124,7 @@ checkpoint's template file.
 The renderer is patched where minja was not Jinja (Undefined apart from None, `is sameas`, `str.split()`, the
 `replace` filter, `dict`, index attribute getters, empty mappings falsy, `none`; the tool-call capability probe),
 each listed in `third_party/VERSIONS` and tested against Jinja2 by `minja_ext_test` (the patches came with
-K2-Horizon's template, spec 18d; K2-Horizon was removed on 2026-11-15). The request's `chat_template_kwargs` reach
+a model's template since removed). The request's `chat_template_kwargs` reach
 the template through `chat::Template::render(..., kwargs)` for models whose `server::ChatFormat` reads them (Kolibri
 and Bolt; Qwen only gets `enable_thinking`). Ornith, Kolibri and Bolt have their own template tests
 (`template_ornith_test`, `template_kolibri_test`, `template_bolt_test`).

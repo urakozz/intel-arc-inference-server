@@ -64,9 +64,9 @@ size_t host_ple_bytes(const model::Qwen4ExpDesc& d, loader::Q4PleScale s);
 inline constexpr uint32_t kM = 1;   // decode builds M = 1 (21e's verify adds M = 2..4)
 // Which decode attention every capture binds: q4_qsa_attn.cl's flash form or q4_qsa_attn_eager.cl's (the
 // reference's bf16 chain). `B70_Q4_ATTN=flash|eager`, read at each call; unset or empty is the default;
-// anything else throws (spec 18 §10.1's switch).
+// anything else throws.
 enum class Q4Attn { Flash, Eager };
-inline constexpr Q4Attn kDefaultQ4Attn = Q4Attn::Flash;   // until the box A/B (spec 18 §10.1's rule)
+inline constexpr Q4Attn kDefaultQ4Attn = Q4Attn::Flash;   // until the box A/B
 Q4Attn q4_attn();
 const char* q4_attn_name(Q4Attn a);
 // The QSA selection row (kernels::qwen4exp: kListMax / kListRow / kCountWord), the route row, the slices.
@@ -148,7 +148,7 @@ inline constexpr uint32_t kPfTm = 32;                          // the grouped GE
 inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab of a dense linear
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks
 inline constexpr uint32_t kPfDenseLast = 2050;                 // the last position with <= 2051 visible (dense flash)
-// The dense linears' slab walk over N columns: slabs of kPfSlab and one tail of pad256(N - n0) (k2_pf_dequant_slab /
+// The dense linears' slab walk over N columns: slabs of kPfSlab and one tail of pad256(N - n0) (pf_int4_slab_dequant /
 // kol_pf_bf16_slab zero-fill its padding); the output row pitch pad256(N).
 inline uint32_t pf_pad256(uint32_t n) { return (n + 255) / 256 * 256; }
 inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }

@@ -767,7 +767,7 @@ dropped by name and counted in the report line, because this engine's KV cache i
 its own int8.
 
 **The startup note.** A compressed-tensors load prints one line to stderr (and keeps it in
-`LoadReport::quant_note` / `K2LoadReport::quant_note`; `ct_conversion_note` is the
+`LoadReport::quant_note`; `ct_conversion_note` is the
 host-testable source):
 
 ```

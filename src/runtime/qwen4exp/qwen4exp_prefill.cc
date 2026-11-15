@@ -119,14 +119,14 @@ class Walk {
   // One linear over the chunk: per slab the slab kernel then pf_gemm_T0 [C][K] x slab [K][ns] into out + n0 at pitch
   // ld - slabs of 1024 and one zero-padded tail (pf_slab_width).
   //   int4 (layout 0): pf_dequant_slab(w, scales, slab, n0)            whole slabs, grid (1024 / 16, K / 64)
-  //                    k2_pf_dequant_slab(w, scales, slab, n0, ns)     with a tail, grid (ns / 16, K / 64)
+  //                    pf_int4_slab_dequant(w, scales, slab, n0, ns)     with a tail, grid (ns / 16, K / 64)
   //   bf16 (tiled):    kol_pf_bf16_slab(w, slab, n0, ns)               grid (ns / 16, K / 8)
   void slabs(bool int4, const void* w, const void* scales, uint32_t K, uint32_t N, const void* x, void* out, uint32_t ld) {
     require(K % 64 == 0 && N % 16 == 0, "a linear is not whole k-groups / tiles");
     require(s_.slab.size() >= size_t(K) * pf_slab_width(N, 0) * 2, "the slab buffer is smaller than [K][slab]");
     require(ld >= pf_ld(N), "the output pitch does not hold the padded columns");
     const bool tail = kq::pf_int4_slab_tail(N);
-    l0::Kernel& sk = int4 ? kc_(kq::pf_int4_slab_variant(K, N), tail ? "k2_pf_dequant_slab" : "pf_dequant_slab")
+    l0::Kernel& sk = int4 ? kc_(kq::pf_int4_slab_variant(K, N), tail ? "pf_int4_slab_dequant" : "pf_dequant_slab")
                           : kc_(kq::pf_bf16_slab_variant(K, N), "kol_pf_bf16_slab");
     for (uint32_t n0 = 0; n0 < N;) {
       const uint32_t ns = pf_slab_width(N, n0);

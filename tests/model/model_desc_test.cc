@@ -258,7 +258,7 @@ int main() {
   model::require_loadable(o);
   model::require_loadable(q);
   // A MoE shape the kernels are not written for is refused by name (here: no shared
-  // expert gate; top-k 9, past the 8-slot route row; and - spec 18b - 96 and 100 experts:
+  // expert gate; top-k 9, past the 8-slot route row; and 96 and 100 experts:
   // a multiple of 16 and not, but neither the power of two moe.cl's route work-group is).
   for (int variant = 0; variant < 4; ++variant) {
     ModelDesc bad = o;

@@ -1,10 +1,10 @@
-// kol_pf_linear.cl - spec 20d: one bf16 slab of a Kolibri-1 bf16 attention linear (decision 2's bf16 arm)
-// for the prefill GEMM (pf_gemm.cl's pf_gemm_T0, unchanged). The int4 arm's slabs are 18c's
-// k2_pf_dequant_slab at Kolibri's shapes (layout 0, the same contract); this is its bf16 twin.
+// slab_bf16.cl - spec 20d: one bf16 slab of a bf16 linear (Kolibri-1's bf16 attention arm, Flash-Next's bf16
+// linears) for the prefill GEMM (pf_gemm.cl's pf_gemm_T0, unchanged). The int4 arm's slabs are
+// slab_dequant_int4.cl's pf_int4_slab_dequant at these shapes (layout 0, the same contract); this is its bf16 twin.
 //
 // Why not prefill/pf_bf16_slab.cl (spec 8's): it writes exactly NS = 1024 columns from a multiple of 1024,
 // and o_proj is N 2560 = 1024 + 1024 + 512 - its last slab would read 512 columns past the weight. This
-// is that kernel's copy with k2_pf_dequant_slab's two changes:
+// is that kernel's copy with pf_int4_slab_dequant's two changes:
 //
 //   1. the slab width `ns` is a runtime argument (the output pitch; the grid is ns / 16), so a linear is
 //      walked in slabs of 1024 and ONE tail slab of pad256(N - n0) columns (runtime::kolibri::pf_slab_width);

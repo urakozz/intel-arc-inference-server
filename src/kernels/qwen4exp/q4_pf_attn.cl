@@ -25,7 +25,7 @@
 // O / l at the end - natural `exp` (EXP2 0: q4_qsa_attn's decode form, never native_exp). m_safe is 0 while a row
 // has seen no key (a row's first tile always holds one: count >= 2048).
 // **EAGER 1** (B70_Q4_ATTN=eager - one switch for decode and prefill): the reference's ROUNDING POINTS, not its sum
-// orders (spec 18 §11's rule): s = rne(rne(q . k) x 1/16) (the bf16 matmul's output and the bf16 multiply), pass 1
+// orders: s = rne(rne(q . k) x 1/16) (the bf16 matmul's output and the bf16 multiply), pass 1
 // the row's max and sum, pass 2 p = rne(exp(s - m) / l) (the softmax's bf16 output), O = sum p v rounded once
 // (written as its bf16 value: pf_attn_gate's own rounding of O is then exact).
 //

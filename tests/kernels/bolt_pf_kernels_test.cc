@@ -11,7 +11,7 @@
 //   3. the grouped MoE at I 1536 / 2560: nb_pf_sort, nb_pf_gather, nb_pf_dequant_up / _dn and nb_pf_combine bitwise; the
 //      grouped GEMMs (nb_pf_moe_gemm up relu2 / down) BITWISE pf_gemm_T0 on the busiest expert's rows + the host epilogue,
 //      and against the twin's decode-order rows at cosine >= 0.9999 (PROPOSED); every tile of the table run twice, equal
-//   4. the linears' slabs: pf_dequant_slab (N 4096, both layouts) and k2_pf_dequant_slab (in_proj 18560, q||k||v 4608,
+//   4. the linears' slabs: pf_dequant_slab (N 4096, both layouts) and pf_int4_slab_dequant (in_proj 18560, q||k||v 4608,
 //      fc1||shared_up 6400: the zero-padded tail) exactly the GPTQ columns; in_proj's tail slab through pf_gemm_T0 lands
 //      zeros in the padding columns [18560, 18688)
 //   5. 25c's per-row kernels at M 2048 (the norm folds _NF / _S1 / _S1_T1, the router, the route, the shared act, the
@@ -429,7 +429,7 @@ void slabs(Dev& dv) {
     for (uint32_t n0 = 0; n0 < c.N; n0 += kb::kPfSlab) {
       const uint32_t ns = c.N - n0 >= kb::kPfSlab ? kb::kPfSlab : runtime::prefill::pad256(c.N - n0);
       if (kb::pf_slab_tail(sh))
-        dv.go(v, "k2_pf_dequant_slab", ns / 16, c.K / 64, 1,
+        dv.go(v, "pf_int4_slab_dequant", ns / 16, c.K / 64, 1,
               {PtrArg(w.ptr()), PtrArg(sc.ptr()), PtrArg(slab.ptr()), arg_val(n0), arg_val(ns)});
       else
         dv.go(v, "pf_dequant_slab", kb::kPfSlab / 16, c.K / 64, 1,

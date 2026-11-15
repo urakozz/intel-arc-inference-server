@@ -22,7 +22,7 @@
 //        GDN's sub-chunks move: not asserted bitwise - plan 21d's "chunk 16 bitwise" assumed no GDN, recorded);
 //     4. Review Focus 5, prefill against decode's M = 1 fill (ingest, one id per replay) of the same prompt, per
 //        layer: K and V cosine per position (QSA), the compressed keys per block, the GDN state and conv ring, the PLE
-//        conv ring - gated (PROPOSED, spec 18c's family): every row of the first QSA layer >= 0.999, all rows' median
+//        conv ring - gated (PROPOSED): every row of the first QSA layer >= 0.999, all rows' median
 //        >= 0.9998, 1st percentile >= 0.99; the QSA tail rings' raw keys as cosine rows (a linear's output: the GEMM's
 //        and the GEMV's sums round apart), the PLE id ring bitwise; the GDN conv rings' live slots only (pos - 3 ..
 //        pos - 1: prefill writes a chunk's last three, decode every position - the rest is not state); printed per

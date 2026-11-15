@@ -671,7 +671,7 @@ def main() -> None:
     from transformers import GenerationConfig
 
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
-    # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+    # A tokenizer.json may carry truncation / padding (a quantised repo has shipped truncation at 2048 ids);
     # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
     tok.no_truncation()
     tok.no_padding()
@@ -706,7 +706,7 @@ def save(out: str, name: str, new: list[int], text: str, i: int, n: int, n_promp
     if gaps is not None:      # the MoE paths: each greedy step's top-1 minus top-2 logit (fp32, exact)
         write_atomic(os.path.join(out, f"{name}.{RUN}.gap"), " ".join("%.9g" % g for g in gaps) + "\n")
     write_atomic(os.path.join(out, f"{name}.{RUN}.txt"), text)
-    call = "<tool_call>" in text or "<ifm|tool_call>" in text or "<|tool_call_start|>" in text
+    call = "<tool_call>" in text or "<|tool_call_start|>" in text
     low = f", min gap {min(gaps):.3g}" if gaps else ""
     print(f"[{i}/{n}] {name}: {n_prompt} prompt ids, {len(new)} new, {time.time() - t:.0f}s, call={call}{low}",
           flush=True)
@@ -730,7 +730,7 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
     if mtype in BOLT_TYPES:     # spec 25 Decision 12: EOS {2, 11} for every form (an export's file may list 11 only)
         eos = set(BOLT_EOS)
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
-    # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+    # A tokenizer.json may carry truncation / padding (a quantised repo has shipped truncation at 2048 ids);
     # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
     tok.no_truncation()
     tok.no_padding()

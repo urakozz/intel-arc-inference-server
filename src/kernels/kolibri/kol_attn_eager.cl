@@ -1,8 +1,7 @@
-// kol_attn_eager.cl - Kolibri-1's EAGER decode attention (B70_KOLIBRI_ATTN=eager; spec 18 §10.1's
-// switch, spec 20c): the reference's bf16 eager chain (tools/oracle/kolibri_ref.py attention() =
-// transformers' eager path in bf16) on the device - k2_attn_eager.cl's four launches without K2's
-// gate, over a SLIDING window through the ring or a FULL layer's growing cache. k2_attn_eager.cl and
-// its binaries are untouched.
+// kol_attn_eager.cl - Kolibri-1's EAGER decode attention (B70_KOLIBRI_ATTN=eager, the
+// eager / flash switch, spec 20c): the reference's bf16 eager chain (tools/oracle/kolibri_ref.py attention() =
+// transformers' eager path in bf16) on the device - four launches, no
+// gate, over a SLIDING window through the ring or a FULL layer's growing cache.
 //
 //   kol_attn_eager_score  (ctrl, attn_q, kv_k, attn_s, stride)       grid (KV_HEADS, TGT)
 //   kol_attn_eager_softmax(ctrl, attn_s, stride)                     grid (Q_HEADS, M)
@@ -22,7 +21,7 @@
 // i = p - lo_m - the cached decode pass's row (its cache holds exactly the visible keys), so the
 // softmax's 8 lanes take i % 8. tests/kernels/kolibri_ref.h attention_eager is the host twin.
 //
-// **The op chain** (k2_attn_eager.cl's, its account of what is bitwise against torch holds here):
+// **The op chain** (tests/kernels/eager_attn_ref.h's, its account of what is bitwise against torch holds here):
 //   score    s_i = rne(f32(rne(Σ_d q_d·k_pd)) · SCALE)   one fma chain, d ascending (exact products)
 //   softmax  torch's fp32 softmax over the row (Sleef exp, reduce_all's 8-lane sum), then bf16
 //   P·V      o_d = Σ_i p_i·v_pd: per block an fma chain ascending, the blocks added ascending
@@ -71,7 +70,7 @@ inline ushort rne_bf16(float f) {
 }
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 
-// Sleef_expf8_u10 (sleefsimdsp.c xexpf, AVX2 + FMA) - k2_ref::exp_torch / k2_attn_eager.cl's, the same lines.
+// Sleef_expf8_u10 (sleefsimdsp.c xexpf, AVX2 + FMA) - eager_attn_ref::exp_torch's, the same lines.
 inline float exp_torch(float d) {
   const int q = convert_int_rte(d * 1.442695040888963407359924681001892137426645954152985934135449406931f);
   const float qf = (float)q;

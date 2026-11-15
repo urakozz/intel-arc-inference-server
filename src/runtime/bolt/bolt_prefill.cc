@@ -144,7 +144,7 @@ class Walk {
 
   // One int4 linear at ITS layout (the descriptor's {K, N, layout}) into `out` at pitch pad256(N): per 1024-column slab
   //   pf_dequant_slab(w, scales, slab, n0)                 grid (1024 / 16, K / 64)      whole slabs, either layout
-  //   k2_pf_dequant_slab(w, scales, slab, n0, ns)          grid (ns / 16, K / 64)        layout 0 with a tail: the last
+  //   pf_int4_slab_dequant(w, scales, slab, n0, ns)          grid (ns / 16, K / 64)        layout 0 with a tail: the last
   //                                                                                       slab pad256(N - n0) wide, zeros past N
   // then pf_gemm_T0: A [C][K] (pitch K) x slab [K][ns] into out + n0.
   void linear(const loader::DeviceWeight& w, const void* A, const l0::Mem& out) {

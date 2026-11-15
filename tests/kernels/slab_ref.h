@@ -1,11 +1,10 @@
 #pragma once
 // CPU references for the shared prefill slab kernels, each with a twin on the device; edit the two together.
-//   dequant_slab()   src/kernels/prefill/slab_dequant_int4.cl (entry k2_pf_dequant_slab, binaries pf_int4_slab_K*_N*):
+//   dequant_slab()   src/kernels/prefill/slab_dequant_int4.cl (entry pf_int4_slab_dequant, binaries pf_int4_slab_K*_N*):
 //                    a layout-0 int4 linear's [K][ns] bf16 slab from column n0, the columns past N zero
 //   bf16_slab()      src/kernels/prefill/slab_bf16.cl (entry kol_pf_bf16_slab): a gemv_bf16-tiled bf16 linear's
 //                    [K][ns] slab from column n0, the columns past N zero
-// Used by the Flash-Next and Kolibri-1 prefill kernel tests. Moved out of K2-Horizon's k2_pf_ref.h
-// (removed, tag archive/k2-horizon) and kolibri_pf_ref.h unchanged.
+// Used by the Flash-Next and Kolibri-1 prefill kernel tests.
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -17,7 +16,7 @@ namespace slab_ref {
 
 using moe_ref::rne;
 
-// k2_pf_dequant_slab: columns [n0, n0 + ns) of a layout-0 K x N int4 linear (words
+// pf_int4_slab_dequant: columns [n0, n0 + ns) of a layout-0 K x N int4 linear (words
 // [K/8][N] u32, scales [K/64][N] f16 bits) as bf16 [K][ns]; columns >= N are zero.
 inline std::vector<uint16_t> dequant_slab(const uint32_t* words, const uint16_t* scales, uint32_t K,
                                           uint32_t N, uint32_t n0, uint32_t ns) {
@@ -40,7 +39,7 @@ inline std::vector<uint16_t> dequant_slab(const uint32_t* words, const uint16_t*
 }
 
 // kol_pf_bf16_slab: columns [n0, n0 + ns) of a gemv_bf16-tiled K x N linear as bf16 [K][ns]; c with
-// n0 + c >= N exact zeros (the slab / tail contract of k2_pf_dequant_slab).
+// n0 + c >= N exact zeros (the slab / tail contract of pf_int4_slab_dequant).
 inline std::vector<uint16_t> bf16_slab(const uint16_t* tiles, uint32_t K, uint32_t N, uint32_t n0, uint32_t ns) {
   std::vector<uint16_t> out(size_t(K) * ns, 0);
   const uint32_t K8 = K / 8;

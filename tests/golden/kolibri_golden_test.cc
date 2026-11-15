@@ -1,6 +1,5 @@
 // kolibri_golden_test - spec 20 §5 KL2 (decode): Kolibri-1's engine against tools/oracle/kolibri_ref.py
 // (spec 20a) - each golden prompt x 32 greedy tokens - with the per-layer ROUTING DIAGNOSTIC.
-// K2-Horizon's golden test's copy (removed with K2, tag archive/k2-horizon), Kolibri's semantics.
 //
 // **The golden files** (kolibri_ref.py `run`; tools/box_validate/kolibri_oracle.sh synth|real):
 //   <oracle dir>/<prompt>.ids                 Kolibri's tokenisation, no BOS
@@ -41,11 +40,11 @@
 //   tokens   forced_judge.h's near-miss rule with the bf16 golden as the twin - the judge rejects no more of the
 //            engine's ids than of the golden's, or every extra miss is a near-tie and the logits rows are as close;
 //   routing  the (row, layer) expert sets differing from the judge's: the engine's count no larger than the golden's
-//            (the Ornith / K2 rule of 2026-10-28/29; the near-tie diagnostic above printed beside it);
+//            (the Ornith rule of 2026-10-28/29; the near-tie diagnostic above printed beside it);
 //   tap      (decode only) per layer, the MEDIAN over the prompt rows of the residual's cosine to the judge's within
 //            kCosSlack (2) of the golden's cosine distance - the per-layer median, not one worst row (the minima
 //            printed beside).
-// The EAGER attention (B70_KOLIBRI_ATTN=eager; flash is Kolibri's default) is DIAGNOSTIC under the judge, as K2's
+// The EAGER attention (B70_KOLIBRI_ATTN=eager; flash is Kolibri's default) is DIAGNOSTIC under the judge
 // (operator ruling 2026-10-29: eager prints, never binds) - the verdicts printed, the test does not fail on them.
 //
 // argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [prefill | prefill:<chunk>] [--judge=<dir>]

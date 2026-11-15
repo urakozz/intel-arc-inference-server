@@ -1,7 +1,7 @@
-// mg_attn_eager.cl - spec 23c: Muse-Glimmer-30B's EAGER decode attention (B70_MUSE_ATTN=eager; spec 18 §10.1's
-// switch): the reference's bf16 eager chain (transformers 5.19.0 eager_attention_forward in bf16, then the output
+// mg_attn_eager.cl - spec 23c: Muse-Glimmer-30B's EAGER decode attention (B70_MUSE_ATTN=eager, the
+// eager / flash switch): the reference's bf16 eager chain (transformers 5.19.0 eager_attention_forward in bf16, then the output
 // gate, M:263-269 / M:357-358) on the device, over a SLIDING window of 2048 keys through the 4096-slot ring or a FULL
-// (NoPE) layer's growing cache. ONE launch a layer (k2 / Kolibri's eager forms are four): eager exists for the A/B
+// (NoPE) layer's growing cache. ONE launch a layer (Kolibri's eager form is four): eager exists for the A/B
 // against the reference's rounding points, not for speed.
 //
 //   mg_attn_eager(ctrl, attn_q, kv_k, kv_v, gate, attn_s, attn_out, stride)     grid (Q_HEADS, M), WG 128
@@ -16,7 +16,7 @@
 // of the ring (sliding) or row p of the cache (full). A row's score index is i = p - lo (the cached decode pass's
 // row: its cache holds exactly the visible keys), so the softmax's 8 lanes take i % 8.
 //
-// **The op chain** (k2_attn_eager.cl's, its account of what is bitwise against torch holds here; tests/kernels/
+// **The op chain** (tests/kernels/eager_attn_ref.h's, its account of what is bitwise against torch holds here; tests/kernels/
 // muse_ref.h attention_eager is the host twin, itself bitwise to transformers' eager_attention_forward on the
 // fixture - scores, probabilities and outputs):
 //   score    s_i = rne(f32(rne(Σ_d q_d·k_pd)) · SCALE)   one fma chain, d ascending (exact products)
@@ -62,7 +62,7 @@ inline ushort rne_bf16(float f) {
 }
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 
-// Sleef_expf8_u10 (sleefsimdsp.c xexpf, AVX2 + FMA) - k2_ref::exp_torch / k2_attn_eager.cl's, the same lines.
+// Sleef_expf8_u10 (sleefsimdsp.c xexpf, AVX2 + FMA) - eager_attn_ref::exp_torch's, the same lines.
 inline float exp_torch(float d) {
   const int q = convert_int_rte(d * 1.442695040888963407359924681001892137426645954152985934135449406931f);
   const float qf = (float)q;

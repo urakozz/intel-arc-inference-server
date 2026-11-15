@@ -195,8 +195,8 @@ class chat_template {
         const json dummy_args_obj {{"argument_needle", "print('Hello, World!')"}};
 
         // Note: the arguments are rendered in both cases, but may be double-escaped, which we don't want.
-        // b70 patch (spec 18d): ">argument_needle<" too - an argument name between tags, as
-        // K2-Horizon's <ifm|arg_key>NAME</ifm|arg_key> writes it.
+        // b70 patch: ">argument_needle<" too - an argument name between tags
+        // (<arg_key>NAME</arg_key>).
         // b70 patch (spec 23e): `name="argument_needle"` too - an argument name as a double-quoted attribute, as
         // Muse-Glimmer's ATEM <atem:parameter name="NAME"> writes it.
         // b70 patch (spec 24e): `(argument_needle=` too - a pythonic keyword argument opening the call's

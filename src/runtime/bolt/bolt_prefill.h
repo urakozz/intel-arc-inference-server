@@ -19,7 +19,7 @@
 //   device 0     nb_pf_embed_gather (the chunk's ids -> h0)                                                           1
 //   every block  nb_res_norm at M 2048 (_NF over the gathered rows; _S1 after a Mamba / attention block; _S1_T1 after a
 //                MoE block - the next site folds a block's GEMM rows, S 1: every prefill linear is one unsplit GEMM)
-//   Mamba        in_proj 19 x (k2_pf_dequant_slab + pf_gemm_T0) into pa (pitch 18688) · nb_pf_seed · nb_pf_conv ·
+//   Mamba        in_proj 19 x (pf_int4_slab_dequant + pf_gemm_T0) into pa (pitch 18688) · nb_pf_seed · nb_pf_conv ·
 //                nb_pf_dt · nb_pf_cb (DPAS) · nb_pf_ssd (the state read and written in the decode buffers) · nb_pf_gnorm ·
 //                out_proj 4 x 2                                                                                      53
 //   attention    q||k||v 5 x 2 · nb_attn_prep (M 2048: K / V rows pos .. pos + C - 1) · mg_pf_flash_attn (flash or

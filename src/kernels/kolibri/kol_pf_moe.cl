@@ -9,11 +9,11 @@
 //   kol_pf_dequant_dn(w_dn, w_sh_dn, hdr, out, b0, b1)                grid (D / 16, I / 64, b1 - b0), WG 16
 //   kol_pf_moe_combine(route, hdr, pair_row, y, mo, C)               grid (D / 256, C), WG 256
 //
-// Why not 18c's k2_pf_moe.cl (or 15d's pf_moe.cl) at Kolibri's defines - the three things this file
+// Why not 15d's pf_moe.cl at Kolibri's defines - the three things this file
 // changes, the design (the sorted layout, the header, the tmax bound, the determinism argument) being
 // theirs, restated below:
 //
-//   * 384 experts. k2_pf_sort stages the chunk's ids as BYTES (PF_E <= 255) and gives each lane ONE
+//   * 384 experts. A byte-id sort stages the chunk's ids as BYTES (PF_E <= 255) and gives each lane ONE
 //     expert (PF_WG >= PF_E, 256 lanes at most). Here the ids are staged as ushort
 //     and lane l owns experts l and l + 256 (PF_EPL 2; 20c's route has the same 512 slots on 256 lanes).
 //   * The shared expert is int4 (operator ruling 2026-10-31: the operator's export quantises it): block
@@ -171,7 +171,7 @@ __kernel void kol_pf_sort(__global const uint* restrict route, __global uint* re
 // ---------------------------------------------------------------------------------------
 // kol_pf_gather - the grouped GEMM's A operand in sorted order: row r of xg is row row_tok[r] of the
 // chunk's normed activations (bf16 [C][PF_D]); a padding row (NONE) is zeros. Rows past hdr[H_ROWS]
-// belong to no tile and are not touched. k2_pf_gather's text.
+// belong to no tile and are not touched.
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
 __kernel void kol_pf_gather(__global const uint4* restrict x, __global const uint* restrict hdr,
                             __global const uint* restrict row_tok, __global uint4* restrict xg) {
@@ -186,7 +186,7 @@ __kernel void kol_pf_gather(__global const uint4* restrict x, __global const uin
 // ---------------------------------------------------------------------------------------
 // The bf16 B operand of pf_moe_gemm.cl: weight blocks [b0, b1) of one layer into out[b - b0] = bf16
 // [K][N] row-major. Block b < PF_E: the routed expert's int4 layout-1 block (loader/kolibri1_layout.h:
-// block b at b x its stride), k2_pf_dequant's arithmetic statement for statement (the same xor,
+// block b at b x its stride), the layout-1 dequant's arithmetic statement for statement (the same xor,
 // sign-extension shift and single RNE of (q - 8) x scale); an expert with no row this chunk
 // (hdr[H_COUNT + b] == 0) returns at once - no tile reads it. Block PF_E: the shared expert's own
 // layout-1 block (w_sh, the same layout at the same widths), every chunk.

@@ -7,7 +7,7 @@
 //
 //   1. exactness, g64 and g128, f16 and bf16 scales: every weight the converted
 //      (GPTQ-layout) linear dequantises to - by common::Int4Gptq::at, the kernels' host
-//      reference, and by decoding the layout-1 tiles the MoE / K2 / layout-1 GEMV read -
+//      reference, and by decoding the layout-1 tiles the MoE / layout-1 GEMV read -
 //      equals the format definition's dequant (u - 8) x s of the compressed-tensors
 //      tensors, which equals the quantisation q x s of the source floats; and the
 //      converted qweight / scales are BYTE-equal to a GPTQ checkpoint of the same q, s;
@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
         h.N = N;
         h.qweight.assign(c.qweight, c.qweight + size_t(K / 8) * N);
         h.scales.assign(c.scales, c.scales + size_t(K / 64) * N);
-        const std::vector<uint32_t> tiles = h.tiled();   // layout 1 (MoE, K2 experts)
+        const std::vector<uint32_t> tiles = h.tiled();   // layout 1 (MoE experts)
         for (uint32_t n = 0; n < N; ++n)
           for (uint32_t k = 0; k < K; ++k) {
             const float want = w.value(n, k);

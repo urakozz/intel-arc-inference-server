@@ -1,6 +1,6 @@
 // q4_qsa_attn_eager.cl - spec 21c: Qwen3.8-Flash-Next's QSA decode attention as the reference computes it
 // (eager_attention_forward + the gate, M:786-808 / M:889-892), over q4_qsa_select's list - the engine binds it
-// for q4_qsa_attn + q4_qsa_reduce under B70_Q4_ATTN=eager (spec 18 §10.1's switch). One launch:
+// for q4_qsa_attn + q4_qsa_reduce under B70_Q4_ATTN=eager (the eager / flash switch). One launch:
 //
 //   q4_qsa_attn_eager(ctrl, attn_q, attn_gate, kv_k, kv_v, list, attn_out)    grid (Q_HEADS, M), WG 256
 //
@@ -9,7 +9,7 @@
 //   s_i   = rne(rne(sum_d q_b[d] k_i[d]) x 1/16)    one fma chain, d ascending (bf16 x bf16 products exact)
 //   p     = torch's fp32 softmax over the list, rounded to bf16: mx exact; e_i = exp_torch(s_i - mx); the sum in
 //           reduce_all's order (8 lane sums, lane l: e_l, e_{l+8}, ... ascending, then ((l0 + l4) + (l2 + l6)) +
-//           ((l1 + l5) + (l3 + l7))); p_i = rne(e_i x (1 / sum))   (k2_ref::eager_softmax, k2_attn_eager.cl's)
+//           ((l1 + l5) + (l3 + l7))); p_i = rne(e_i x (1 / sum))   (eager_attn_ref::eager_softmax)
 //   o_d   = sum_i p_i v_i[d]                one fma chain, i ascending, rounded once
 //   out   = rne(f32(rne(o)) x rne(sigmoid(gate)))
 // tests/kernels/qwen4exp_ref.h qsa_attn_eager is this chain; kernel against it is bitwise. Against torch it parts

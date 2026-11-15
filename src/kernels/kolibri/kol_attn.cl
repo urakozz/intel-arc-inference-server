@@ -1,7 +1,7 @@
-// kol_attn.cl - spec 20c: Kolibri-1's decode attention, spec 10's v2 (src/kernels/attn_v2.cl) as
-// k2_attn.cl carries it to head_dim 128, here at GQA 12 without a gate, over a SLIDING window through
-// the ring (WINDOW 513, RING 4096) or a FULL (NoPE) layer's growing cache (WINDOW 0). attn_v2.cl and
-// k2_attn.cl are untouched.
+// kol_attn.cl - spec 20c: Kolibri-1's decode attention, spec 10's v2 (src/kernels/attn_v2.cl)
+// carried to head_dim 128, here at GQA 12 without a gate, over a SLIDING window through
+// the ring (WINDOW 513, RING 4096) or a FULL (NoPE) layer's growing cache (WINDOW 0). attn_v2.cl is
+// untouched.
 //
 //   kol_attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part)    grid (KV_HEADS, TGT), WG 128
 //   kol_attn_reduce(ctrl, attn_part, attn_out)              grid (Q_HEADS, M),    WG 128
@@ -10,7 +10,7 @@
 //     attn_part  fp32 [Q_HEADS][TGT][M][130]   {mx, sm, acc[128]} per block
 //     attn_out   bf16 [M][Q_HEADS x 128]    o_proj's input
 //
-// **What is k2_attn.cl's, unchanged:** a work-group of 128 = 8 sub-groups x 16 lanes, work-item d
+// **What is v2's at head_dim 128, unchanged:** a work-group of 128 = 8 sub-groups x 16 lanes, work-item d
 // owning dim d of every q head of the kv head; waves of 16 positions, sub-group s owning two; a K row
 // one sub-group block read; the score dot 8 fmas per lane then the 16-lane shuffle tree; the online
 // softmax in fp32 with `exp`; the ascending orders of the sums and of the block merge; the V 2D block

@@ -19,7 +19,7 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | File | What it is |
 |---|---|
 | `dequant.py` | The one meaning of the int4 GPTQ bits: `(q - 8) * scale`, product in fp32, one RNE cast to bf16. Also writes `tests/golden/dequant_fixture.safetensors`, which the C++ loader test matches bit-exactly. |
-| `tokenize.py` | `encode` a prompt file to ids / `decode` ids back. Raw text, no chat template, no special tokens - except `encode --bos` for a tokenizer that prepends its BOS (K2-Horizon, spec 18a), which checks that BOS is the only token added. |
+| `tokenize.py` | `encode` a prompt file to ids / `decode` ids back. Raw text, no chat template, no special tokens - except `encode --bos` for a tokenizer that prepends its BOS, which checks that BOS is the only token added. |
 | `dump.py` | Builds `Qwen3_5ForCausalLM` from the config, loads a `dequant.py`-produced bf16 state dict `strict=True`, forwards the prompt with hooks, greedy-decodes, writes one safetensors file. |
 | `run_in_container.sh` | Wraps `docker run` for the box: read-only HF cache at `/hf`, repo at `/ws`, `$SNAP` resolved to the snapshot directory, **`-u $(id -u):$(id -g)`** so outputs are not root-owned, no memory limit. |
 | `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. `PROMPTS` names which sets to build; `--max-prompt 4096` since spec 2. |
@@ -460,7 +460,7 @@ docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 to
 `dtype: float16` is AutoRound's export label; its text config and every unquantised tensor are
 bf16) on `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ` dequantised by `dequant.py`'s rule
 (stream.py's C++ `dequant_t`), so the engine - which loads the same int4 weights - can match it
-token for token (spec 18a's argument for K2). Layer-streamed (`stream.attach`); the per-expert GPTQ
+token for token. Layer-streamed (`stream.attach`); the per-expert GPTQ
 tensors are stacked into the class's 3D `gate_up_proj` (gate rows first) / `down_proj` only for
 the experts a forward routes to, in one buffer pair shared by all layers - bitwise the fully
 materialised model (`test_ornith_ref.py`, both experts implementations), and a decode step
@@ -689,8 +689,7 @@ short_code,4k,32k,agentic}.ids` (`bolt_prompts.py`; no BOS).
 `tools/toolcall/oracle_generate.py --batch N|auto --resident none|auto` (what
 `tools/toolcall/a4_ref.sh` runs by default since branch `a4-ref-batched`: `BATCH=auto
 RESIDENT=auto`; `BATCH=1 RESIDENT=none` is the old run, byte for byte the old code path) for the
-MoE references, Ornith (`ornith_ref.layer_major`) and Kolibri (`KolibriRef.forward_many`) (K2-Horizon's
-`K2Ref.forward_many` went with K2, tag archive/k2-horizon):
+MoE references, Ornith (`ornith_ref.layer_major`) and Kolibri (`KolibriRef.forward_many`):
 
 - **Layer-major, each sequence alone.** Up to N scenarios are in flight; a pass takes every one
   through decoder layer 0, then every one through layer 1, ... - each layer's weights read (and

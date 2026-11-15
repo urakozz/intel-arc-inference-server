@@ -80,7 +80,7 @@ struct Kolibri1Desc {
   float rms_eps = 0;
   KolAttnForm attn = KolAttnForm::Int4;
   // The int4 arm's split-K (gemv.cl S; layout 0). PROVISIONAL - q||k||v S2 and o_proj S4 are
-  // copied from K2's measured-nearest cells (spec 18b) until Task 8's sweep.
+  // copied from the measured-nearest cells of a model of the same shapes until Task 8's sweep.
   uint32_t qkv_s = 0, oproj_s = 0;
 
   bool is_sliding(uint32_t l) const { return l % full_every != full_every - 1; }

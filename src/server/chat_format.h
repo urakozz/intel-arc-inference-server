@@ -1,13 +1,12 @@
 #pragma once
 
-// Spec 18d: how the server reads a model's chat requests and outputs - the per-model choice
-// behind one Server. b70-serve picks it from config.json's model_type (spec 18 §5.1:
-// "b70-serve dispatches on model_type"); the request path asks it, never the model name.
+// How the server reads a model's chat requests and outputs - the per-model choice
+// behind one Server. b70-serve picks it from config.json's model_type; the request path asks
+// it, never the model name.
 //
 //   Qwen        Qwen3.8 (and anything not listed): the template reads
 //               enable_thinking only; the output opens with reasoning when the prompt ends
-//               in "<think>\n"; tool calls are Qwen XML (server/toolcall.h). Exactly the
-//               server before spec 18d.
+//               in "<think>\n"; tool calls are Qwen XML (server/toolcall.h).
 //   Kolibri     Kolibri-1 (model_type kolibri1, spec 20e): ChatML; the template also reads the
 //               request's chat_template_kwargs (reasoning_effort none | minimal | low | medium |
 //               high | xhigh | max, enable_thinking, preserve_thinking); the MODEL opens its

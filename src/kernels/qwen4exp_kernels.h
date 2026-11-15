@@ -32,7 +32,7 @@
 //
 // Every sigmoid / SiLU in the q4_ kernels (and in prep_gated_head _SIG) is 1 / (1 + exp_torch(-x)) /
 // x / (1 + exp_torch(-x)): exp_torch is Sleef's expf u10 step for step (torch's Vectorized<float>::exp,
-// k2_attn_eager.cl's), so a kernel and its host twin (tests/kernels/qwen4exp_ref.h) agree bit for bit and
+// tests/kernels/eager_attn_ref.h's), so a kernel and its host twin (tests/kernels/qwen4exp_ref.h) agree bit for bit and
 // both sit on torch's own value.
 namespace kernels::qwen4exp {
 

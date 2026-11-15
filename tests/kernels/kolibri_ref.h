@@ -17,7 +17,7 @@
 //   combine()       kol_moe_down's epilogue: Σ_j fp32(rne(down_j)) × w_j in ascending id (mul rounded,
 //                   then add), + fp32(rne(shared down)), one rounding; NOT folded into the residual
 //   gate_up() / down()   the whole MoE block over layout-1 blocks, the shared slot's own block included
-//   attention_eager()    kol_attn_eager.cl: k2_attn_eager's chain without the gate, over the row's
+//   attention_eager()    kol_attn_eager.cl: eager_attn_ref's chain without a gate, over the row's
 //                   keys [lo, hi] indexed from lo (the cached decode pass's row)
 //   attention()     decode attention in fp64 over [lo, hi] (a tolerance reference for flash)
 //   ring_row()      the sliding ring's key -> row map

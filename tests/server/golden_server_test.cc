@@ -188,14 +188,13 @@ std::vector<uint32_t> run_decode(const std::string& decode, const std::string& s
 
 }  // namespace
 
-// Spec 18d: `--chat` (a 5th argument) sends each prompt's text as one user message to
-// /v1/chat/completions instead (the checkpoint's own chat template renders it - K2-Horizon's
-// writes its BOS and ends in its think tag), and runs b70-decode on the response's
+// `--chat` (a 5th argument) sends each prompt's text as one user message to
+// /v1/chat/completions instead (the checkpoint's own chat template renders it), and runs b70-decode on the response's
 // prompt_token_ids, written to a temporary file under $TMPDIR. The prompt ids are not compared
 // with <name>.ids (another model's tokenisation); the generated ids are, as in the default
 // mode. This is
 // "a short greedy chat through the server equal to b70-decode on the same ids" for a model
-// whose golden .ids are not its own (K2-Horizon, box stage r25.chat).
+// whose golden .ids are not its own.
 std::string write_ids_file(const std::string& name, const std::vector<uint32_t>& ids) {
   const char* dir = std::getenv("TMPDIR");
   const std::string path = std::string(dir && *dir ? dir : "/tmp") + "/golden_server_test." +

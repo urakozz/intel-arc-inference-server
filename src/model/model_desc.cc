@@ -407,7 +407,7 @@ void require_loadable(const ModelDesc& d) {
     // expert's width; the route row holds at most 8 slots; the router kernel puts
     // one expert per lane of a work-group of `experts` lanes and sums the softmax by a
     // pairwise tree - moe.cl's `#error`: a POWER OF TWO in [16, 256], checked here too
-    // (spec 18b) so another model fails at load naming its shape, not at capture naming
+    // so another model fails at load naming its shape, not at capture naming
     // a binary nobody could build.
     const MoeDesc& m = d.moe;
     const bool pow2 = m.experts != 0 && (m.experts & (m.experts - 1)) == 0;

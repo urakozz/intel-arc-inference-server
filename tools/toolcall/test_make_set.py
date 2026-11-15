@@ -1,4 +1,4 @@
-"""make_set.py --from: the re-tokenised set's template variables and key order (spec 18d); --lang de:
+"""make_set.py --from: the re-tokenised set's template variables and key order; --lang de:
 Kolibri-1's German set (spec 20e, KL4) - the German table, key-sorted renders, thinking off.
 
     python3 tools/toolcall/test_make_set.py     (pytest also collects it, where installed)

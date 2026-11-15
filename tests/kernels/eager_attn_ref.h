@@ -1,8 +1,7 @@
 #pragma once
 // The bf16 eager decode attention chain on the host: transformers' eager path, torch's CPU fp32 softmax
 // bit for bit. Shared by the eager references of Kolibri-1 (kolibri_ref.h), Bolt (mg_attn_ref.h),
-// Qwen3.8-Flash-Next (qwen4exp_ref.h, qwen4exp_pf_ref.h). Moved out of K2-Horizon's k2_ref.h (removed,
-// tag archive/k2-horizon), which first carried the chain.
+// Qwen3.8-Flash-Next (qwen4exp_ref.h, qwen4exp_pf_ref.h).
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -28,8 +27,7 @@ using moe_ref::rf;
 //         one reciprocal), then .to(bf16)
 //   o_d = Σ_p p_p·v_pd                           the bf16 GEMM: fp32 sum, rounded once
 //
-// What is bitwise against torch, and why (measured by K2-Horizon's k2_attn_eager_ref_test against a
-// torch dump; the test went with K2, tag archive/k2-horizon):
+// What is bitwise against torch, and why (measured against a torch dump of the eager path):
 //   * the softmax: exact. exp_torch() is Sleef's expf u10 step for step (fma as the AVX2 build
 //     has it), the sum is reduce_all's order (8 lane accumulators, then the permute tree), the
 //     reciprocal and the multiply are torch's. Probed on 22,760 probabilities: 0 fp32

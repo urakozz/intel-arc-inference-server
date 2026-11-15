@@ -418,7 +418,7 @@ def load_dense_layer(src, c: KConfig, i: int) -> dict:
 # the model
 
 class Recorder:
-    """What a forward leaves behind, in the golden layout (k2_ref's names)."""
+    """What a forward leaves behind, in the golden layout (the other references' names)."""
 
     def __init__(self, prompt_len: int):
         self.prompt_len = prompt_len

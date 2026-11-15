@@ -77,8 +77,7 @@ is not finished is listed in [open-work.md](open-work.md).
 - **Kolibri-1** is supported by the code and parked (out of focus); no speed rows.
 - **Nemotron 3.5 Bolt** is parked until Flash-Next is done. Its section stays
   because the code still serves it.
-- Dropped and no longer supported: K2-Horizon (removed 2026-11-15; the code is in the local tag
-  `archive/k2-horizon`), LFM2.5, Muse-Glimmer and Agnes 3.0 Flash (a `config.json` naming
+- Dropped and no longer supported: LFM2.5, Muse-Glimmer and Agnes 3.0 Flash (a `config.json` naming
   `AgnesForConditionalGeneration` is refused by name). Flint and Nanbeige are parked and not built.
   LiLiCorr is Bolt's draft model (`--spec dflash`, Bolt's section).
 

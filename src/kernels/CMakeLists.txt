@@ -1046,8 +1046,8 @@ endif()
 #   kol_pf_moe.cl     the 384-expert sort (ids as ushort, two experts a lane), gather, the dequant of a
 #                     weight batch (block 384 = the bf16 shared expert, copied), the combine into `mo`
 #   kol_pf_attn.cl    the windowed flash attention over the 4096-slot ring (sliding) and the growing
-#                     cache (full), the DPAS walk of K2-Horizon's k2_pf_attn.cl (removed, tag
-#                     archive/k2-horizon) at GQA 12, no gate; and its eager twin
+#                     cache (full), spec 6's DPAS flash walk at head_dim 128 and GQA 12, no gate; and
+#                     its eager twin
 #   (prefill/slab_bf16.cl: the bf16 attention arm's slabs with a zero-padded tail, o_proj's 512 columns)
 # Reused at Kolibri's shapes: kol_prep.cl at M = 2048 (kernels::kolibri::kPfC: the norm, the post-add,
 # the attention prep at S 1), prefill/pf_embed.cl, prefill/pf_prep.cl's pf_res_fold (SP0, and _Z over

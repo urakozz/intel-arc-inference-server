@@ -23,7 +23,7 @@
 //   7. the attention (Review Focus 1): pf_flash_attn_Q24KV2 against fp64 causal on the dense rows of chunks (0,
 //      2048) and (2000, 2048) (its 51 dense rows); q4_pf_sparse_attn against sparse_attn_fp64 (cosine >= 0.99999,
 //      spec 6 K1) at chunk starts 2048 (rows 3..), 4096, 30000, 131072 and a 300-row tail; the EAGER build against
-//      sparse_row_eager (0.9999: the rounding points, not the sum order - spec 18 §11) and fp64 (0.999); replay
+//      sparse_row_eager (0.9999: the rounding points, not the sum order) and fp64 (0.999); replay
 //      bitwise; pf_attn_gate over the sparse O within 1 bf16 ulp of rne(rne(o) x sigmoid(gate)).
 // (gdn_chunk_q4 against decode's gdn_step + prep_gated_head_M1_SIG lives in tests/runtime/qwen4exp_prefill_test.cc's
 // `gdn` mode: it needs the runtime's gdn_chunk_q4.)
@@ -191,7 +191,7 @@ void slabs(Dev& dv) {
     for (uint32_t n0 = 0; n0 < N;) {
       const uint32_t ns = slab_width(N, n0);
       if (tail)
-        dv.go(kq::pf_int4_slab_variant(K, N), "k2_pf_dequant_slab", ns / 16, K / 64, 1,
+        dv.go(kq::pf_int4_slab_variant(K, N), "pf_int4_slab_dequant", ns / 16, K / 64, 1,
               {PtrArg(dw.ptr()), PtrArg(ds.ptr()), PtrArg(slab.ptr()), arg_val(n0), arg_val(ns)});
       else
         dv.go(kq::pf_int4_slab_variant(K, N), "pf_dequant_slab", ns / 16, K / 64, 1,

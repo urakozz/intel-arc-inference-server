@@ -2,7 +2,7 @@
 // names runtime/qwen4exp/qwen4exp_prefill.cc forms) for both dense arms (ours int4 / Intel's bf16), both attention
 // forms and both PLE scale forms, against the ones the build makes for it (passed as arguments: tests/CMakeLists.txt's
 // B70_Q4EXP_PREFILL_KERNELS, `kernel_<name>` - src/kernels/CMakeLists.txt's spec 21d block, plus the reused names other
-// blocks build: pf_gemm_T0, Qwen3.8's pf_gdn_*, 21c's q4_route_M1, K2's / Kolibri's 6144 x 2560 slab). Host only: a
+// blocks build: pf_gemm_T0, Qwen3.8's pf_gdn_*, 21c's q4_route_M1, Kolibri's 6144 x 2560 slab). Host only: a
 // name the walk would ask for that no CMake line builds fails here on the Mac, not at prepare_prefill on the box; and
 // nothing listed is dead. Also pins the prefill constants the walk and the planner share with the kernels' names.
 #include <cstdio>

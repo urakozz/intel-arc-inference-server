@@ -1,7 +1,6 @@
-// k2_pf_linear.cl - spec 18c: one bf16 slab of a K2-Horizon int4 linear for the prefill GEMM
-// (pf_gemm.cl, unchanged). K2's linears are GPTQ layout 0 (loader/k2_layout.h), but three of
-// their widths are not whole 1024-column slabs - o_proj and the dense down are N 2560, the
-// MoVA layers' q||k||gate||v_router N 9280 (9216 + the router's 64) - which
+// slab_dequant_int4.cl - one bf16 slab of an int4 GPTQ layout-0 linear for the prefill GEMM
+// (pf_gemm.cl, unchanged), for widths that are not whole 1024-column slabs (Flash-Next's and
+// Kolibri-1's o_proj at N 2560, Bolt's in_proj 18560, q||k||v 4608, fc1||shared_up 6400), which
 // prefill/pf_dequant_slab.cl's NS 1024 refuses (`N % NS`). This is that kernel's layout-0
 // branch with two changes and its arithmetic untouched (the same xor, sign-extension shift
 // and single RNE of (q - 8) x scale):
@@ -10,22 +9,22 @@
 //      a linear is walked in slabs of 1024 and ONE tail slab of pad256(N - n0) columns;
 //   2. a column n >= N (the tail's padding up to the GEMM's 256-column tile) is written as
 //      exact zeros, so the GEMM's padded output columns are exact zeros too and land in the
-//      partials row's own padding (the walk's pitch is pad256(N), runtime/k2/k2_prefill.cc).
+//      partials row's own padding (the walk's pitch is pad256(N)).
 //
-//   k2_pf_dequant_slab(w, scales, out, n0, ns)   grid (ns / 16, K / 64), WG 16
+//   pf_int4_slab_dequant(w, scales, out, n0, ns)   grid (ns / 16, K / 64), WG 16
 //     out[k][c] = bf16 of column n0 + c of the [K][N] weight, c < ns, k < K
 //
 // No sub-group function (the layout-0 reads are plain loads, the scale through vload_half).
 #ifndef K
-#error "k2_pf_dequant_slab: K must be defined"
+#error "pf_int4_slab_dequant: K must be defined"
 #endif
 #ifndef N
-#error "k2_pf_dequant_slab: N must be defined"
+#error "pf_int4_slab_dequant: N must be defined"
 #endif
 #define SG 16
 #define GROUP 64
 #if K % GROUP != 0 || N % SG != 0
-#error "k2_pf_dequant_slab: K must be whole 64-k groups, N whole 16-column tiles"
+#error "pf_int4_slab_dequant: K must be whole 64-k groups, N whole 16-column tiles"
 #endif
 
 inline ushort rne_bf16(float f) {
@@ -35,7 +34,7 @@ inline ushort rne_bf16(float f) {
 }
 
 __attribute__((reqd_work_group_size(SG, 1, 1)))
-__kernel void k2_pf_dequant_slab(__global const uint* restrict w,
+__kernel void pf_int4_slab_dequant(__global const uint* restrict w,
                                  __global const half* restrict scales,
                                  __global ushort* restrict out, const uint n0, const uint ns) {
   const uint lane = get_local_id(0);

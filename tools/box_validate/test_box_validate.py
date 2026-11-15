@@ -298,7 +298,7 @@ class ReuseTest(Tmp):
         os.environ["ZE_AFFINITY_MASK"] = "0,1"
         self.assertEqual(self.claim(self.tree), {}, "two cards visible, recorded with whatever the box showed")
         del os.environ["ZE_AFFINITY_MASK"]
-        write(os.path.join(self.tree, "build/kernels/k.bin"), "K2")
+        write(os.path.join(self.tree, "build/kernels/k.bin"), "changed")
         self.assertEqual(self.claim(self.tree), {}, "a kernel binary")
 
     def test_same_binary_after_an_unrelated_change(self):

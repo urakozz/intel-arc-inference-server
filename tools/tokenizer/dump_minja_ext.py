@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Expected outputs of the renderer extensions (spec 18d), from Jinja2 itself.
+"""Expected outputs of the renderer extensions (the b70 minja patches), from Jinja2 itself.
 
     dump_minja_ext.py
 
 The b70 patches to third_party/minja (third_party/VERSIONS lists them) exist because
-K2-Horizon's chat template uses Jinja that minja did not render as Jinja does. Each case
+chat templates use Jinja that minja did not render as Jinja does. Each case
 below is a small template exercising one patch; this renders it with Jinja2 configured as
 transformers' chat-template renderer is (ImmutableSandboxedEnvironment, trim_blocks,
 lstrip_blocks, the tojson filter with ensure_ascii=False) and writes
@@ -35,7 +35,7 @@ cases = [
     ("defined", "{{ n is defined }} {{ d.n is defined }} {{ d.k is defined }} {{ d.missing is defined }} "
                 "{{ missing is defined }} {{ d['n'] is not defined }} {{ d.get('missing') is defined }}"),
     # (Printing None itself differs - Jinja writes "None", minja nothing - and is left alone:
-    # changing it would move the Qwen3.8 renders; K2's template never prints a bare None.)
+    # changing it would move the Qwen3.8 renders.)
     ("defined_none", "{{ n is none }} {{ d.n is none }} {% if d.n is defined %}[{{ d.n is none }}]{% endif %}"
                      "{% set ns = namespace(v=d.missing) %}{{ ns.v is defined }}"),
     # is sameas: True / False / None are singletons.

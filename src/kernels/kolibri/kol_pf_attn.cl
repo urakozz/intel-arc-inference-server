@@ -1,5 +1,5 @@
-// kol_pf_attn.cl - spec 20d: Kolibri-1's prefill attention - 18c's k2_pf_attn.cl (spec 6's flash
-// attention carried to head_dim 128) at GQA 12, with Kolibri's two layer kinds and no output gate:
+// kol_pf_attn.cl - spec 20d: Kolibri-1's prefill attention - spec 6's flash
+// attention carried to head_dim 128, at GQA 12, with Kolibri's two layer kinds and no output gate:
 //
 //   kol_pf_flash_attn(q, kv_k, kv_v, out, pos, C)   grid (ceil(C / RPW), KV_HEADS, GQA / HPW), 256 GRF
 //     q      fp32 [kPfC][Q_HEADS][128]   kol_attn_prep's q (bf16 values: q/k head norm, RoPE in a sliding
@@ -22,11 +22,11 @@
 // row's FIRST tile may hold none of ITS keys (the group's first row reaches further back): the online
 // softmax runs with m_safe = (m_new == -INF ? 0 : m_new), so such a tile leaves (m, l, o) exactly as
 // they were (corr = exp(-INF) = 0 on zeros, p = exp(-INF) = 0); once a key was seen the update is
-// k2_pf_attn's, unchanged (m_safe = m_new). So a row's result depends on the tiles that hold its keys -
+// the plain flash update (m_safe = m_new). So a row's result depends on the tiles that hold its keys -
 // a function of its ABSOLUTE position alone, whatever chunk or row group it rides in: the prefill
 // split argument (a split at a multiple of 64 is bitwise).
 //
-// **What is k2_pf_attn's, unchanged in structure:** a sub-group owns 8 query rows of one head; O is NDA
+// **The flash walk at head_dim 128:** a sub-group owns 8 query rows of one head; O is NDA
 // float8 (8 rows x 128 dims) in registers; S for one KV tile is KT/16 float8 with the row in the
 // component and the key in the lane - the bf16 DPAS A-operand layout, so P goes to P·V with no data
 // movement; K^T through the transposed 32-bit 2D read, V through the VNNI-transform read; the fp32
@@ -35,10 +35,10 @@
 // past C reads row C - 1: finite, never written); the scale 1 / sqrt(128).
 //
 // **EAGER (B70_KOLIBRI_ATTN=eager, the switch 20c's decode reads too - one parser,
-// runtime::kolibri::kolibri_attn()).** k2_pf_attn's two passes: pass 1 the running max and sum (fp32,
+// runtime::kolibri::kolibri_attn()).** Two passes: pass 1 the running max and sum (fp32,
 // online), pass 2 p = rne(exp(s - m) / l) - the softmax's bf16 output - and o += p·V; s = rne(f32(rne(
 // q·k)) x 128^-0.5); the epilogue rounds o once (p already normalised). The reference's ROUNDING POINTS
-// (tests/kernels/kolibri_pf_ref.h eager_window), not its sum orders (DPAS, the tile walk): spec 18 §11.
+// (tests/kernels/kolibri_pf_ref.h eager_window), not its sum orders (DPAS, the tile walk).
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #ifndef KT

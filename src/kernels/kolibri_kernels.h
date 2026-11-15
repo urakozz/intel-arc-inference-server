@@ -117,13 +117,13 @@ inline std::vector<std::string> decode_variants(model::KolAttnForm a, bool int8_
 // (src/kernels/kolibri/kol_pf_{moe,attn,linear}.cl); 20c's kol_prep.cl is built again at M = kPfC (the
 // norm, the sandwich's post-add, the attention prep - decode's chains row for row); the route is 20c's
 // decode binary on grid (1, C); the rest are reused sources at Kolibri's shapes (pf_embed, pf_prep's
-// pf_res_fold, pf_gemv_bf16's router, pf_moe_gemm, pf_gemm_T0, 18c's k2_pf_dequant_slab for the int4
+// pf_res_fold, pf_gemv_bf16's router, pf_moe_gemm, pf_gemm_T0, pf_int4_slab_dequant for the int4
 // attention arm). runtime/kolibri/kolibri_sizes.h spells the same constants device-free.
 inline constexpr unsigned kPfC = 2048, kPfTm = 32, kPfSlab = 1024;
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;   // one weight batch of bf16 expert blocks
 inline constexpr unsigned kPfKt = 64, kPfRpw = 8, kPfHpw = 4;  // kol_pf_flash_attn: key tile, rows, heads per WG
 inline constexpr unsigned kPfSortWg = 256, kPfGatherWg = 64, kPfCombineWg = 256, kPfDequantWg = 16;
-inline constexpr unsigned kPfSlabWg = 16;                    // kol_pf_bf16_slab / k2_pf_dequant_slab
+inline constexpr unsigned kPfSlabWg = 16;                    // kol_pf_bf16_slab / pf_int4_slab_dequant
 // kol_pf_moe.cl's header words (H_*): [0] tiles used, [1] the shared expert's first row, [2] rows used,
 // [3] C, [4 + e] expert e's rows (e < 384), [4 + 384] C.
 namespace pf_hdr {

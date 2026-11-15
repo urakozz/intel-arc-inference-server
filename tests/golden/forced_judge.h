@@ -175,11 +175,11 @@ struct CosRows {
 
 // ---- the near-miss rule (operator ruling 2026-10-31, round 2) --------------------------------------------------
 // An engine path the f32 judge rejects at MORE rows than its bf16 twin (the plain bf16 reference on the same
-// context: B70_FORCED_BF16, a gate's bf16 golden, k2_ref's bf16+kv8 twin) still passes when both hold:
+// context: B70_FORCED_BF16, a gate's bf16 golden) still passes when both hold:
 //   1. every EXTRA miss - a row where the judge rejects the path's id but accepts the twin's - is a near-tie: the
 //      id at most kNearMissUlp bf16 ulp (golden_common.h bf16_ulp_at, of the f32 top) below the judge's top. The
 //      judge's own rule calls one ulp a tie; the extra misses measured on 2026-10-30/31 sat 1.8 - 6.2 ulp below it
-//      (K2 prefix split c row 8: 4.72, a 3-way f32 near-tie; Ornith prefix l0 a / e: 6.24, 5.36, 3.05), and the
+//      (Ornith prefix l0 a / e: 6.24, 5.36, 3.05), and the
 //      bf16 twins' OWN misses on the same contexts 3.1 - 8.6 ulp - what bf16 arithmetic alone does there.
 //   2. the path's logits rows are no further from the judge's than the twin's are: the cosine distance (1 - cos)
 //      of its min row and of its median row each at most kCosSlack times the twin's. kCosSlack is the "tiny

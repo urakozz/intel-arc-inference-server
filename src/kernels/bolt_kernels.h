@@ -275,7 +275,7 @@ inline std::string pf_attn_prep_variant() { return attn_prep_variant(kPfC, 1); }
 inline std::string pf_flash_variant(bool eager) { return std::string("mg_pf_flash_attn_Q32KV2_F") + (eager ? "_EAGER" : ""); }
 inline std::string pf_gemm_t0_variant() { return pf_gemm_variant(false); }
 // One int4 linear's slab binary at ITS layout (the descriptor's {K, N, layout}): whole 1024-column slabs -> pf_dequant_slab
-// at that layout; a layout-0 linear with a tail -> 18c's k2_pf_dequant_slab (one zero-padded tail slab of pad256 columns).
+// at that layout; a layout-0 linear with a tail -> prefill/slab_dequant_int4.cl's pf_int4_slab_dequant (one zero-padded tail slab of pad256 columns).
 // "" when neither covers it (layout 1 with a tail): the walk refuses it naming the linear (a P0 re-pick to that cell needs
 // its kernel first).
 inline std::string pf_slab_variant(const model::GemvShape& s) {
@@ -285,7 +285,7 @@ inline std::string pf_slab_variant(const model::GemvShape& s) {
 }
 inline bool pf_slab_tail(const model::GemvShape& s) { return s.N % kPfSlab != 0; }
 inline const char* pf_slab_entry(const model::GemvShape& s) {
-  return pf_slab_tail(s) ? "k2_pf_dequant_slab" : "pf_dequant_slab";
+  return pf_slab_tail(s) ? "pf_int4_slab_dequant" : "pf_dequant_slab";
 }
 // The prefill rows' pitch of a linear's GEMM output: pad256(N) (the tail slab's padding columns land there).
 inline constexpr unsigned pf_ld(unsigned N) { return (N + 255) / 256 * 256; }

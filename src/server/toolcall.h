@@ -83,7 +83,7 @@ class OutputStream : public OutputParser {
 nlohmann::ordered_json convert_value(const std::string& value, const std::string& function,
                              const std::string& key, const nlohmann::json& tools);
 
-// Shared with the other families' parsers (spec 18d): how the tool's schema types `key` of `function` -
+// Shared with the other families' parsers: how the tool's schema types `key` of `function` -
 // 1 a string (or string | null), 0 another type, -1 no type (no such tool or key, or no
 // "type"); and the call ids, "call_" + 24 hex chars from a per-stream seed.
 int schema_string_type(const std::string& function, const std::string& key,
@@ -91,7 +91,7 @@ int schema_string_type(const std::string& function, const std::string& key,
 uint64_t new_call_seed();
 std::string make_call_id(uint64_t seed, uint32_t index);
 
-// A JSON call body (spec 18d), Kolibri-1's hermes calls
+// A JSON call body, Kolibri-1's hermes calls
 // (spec 20e, server/toolcall_kolibri.h): the trimmed `body` is {"name": <string without whitespace>,
 // "arguments": <object | a string holding an object | null | absent>}; an argument the tool's schema
 // types as a string but written as another JSON value becomes its JSON text. Fills call.name and
