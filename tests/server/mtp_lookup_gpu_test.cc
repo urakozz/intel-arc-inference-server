@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
               (unsigned long long)judged, double(tot_ids) / double(tot_iters), 100.0 * tot_lookup_ids / tot_ids,
               (unsigned long long)far_lookup_iters);
   ok &= fails == 0;
-  ok &= far_lookup_iters > 0;   // the long repeats entered lookup (else D2 proved nothing new)
+  ok &= only_h || far_lookup_iters > 0;   // the long repeats entered lookup (else D2 proved nothing new)
 
   // --- H: the warm head ---------------------------------------------------------------------------------------
   {
