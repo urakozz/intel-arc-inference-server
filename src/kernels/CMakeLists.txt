@@ -1043,7 +1043,7 @@ endif()
 # ==== Spec 18c: K2-Horizon prefill (model::k2()) ============================ (begin) ====
 # Additive only, as 18b's block: no existing source changes, so every binary above (and in
 # prefill/) keeps its name and command line. New K2-only sources in src/kernels/k2/
-# (k2_pf_linear.cl, k2_pf_moe.cl, k2_pf_attn.cl); reused sources at K2's shapes:
+# (k2_pf_moe.cl, k2_pf_attn.cl); reused sources at K2's shapes (and prefill/slab_dequant_int4.cl):
 #   prefill/pf_embed.cl     the chunk's embedding gather (K2's vocabulary in the name)
 #   prefill/pf_prep.cl      pf_res_fold at K 2560 (stage A of the grouped norm, runtime M)
 #   k2/k2_prep.cl           k2_norm_finish and k2_attn_prep at M = 2048 (kernels::k2::kPfC),
@@ -1074,7 +1074,7 @@ if(B70_K2)
     separate_arguments(f UNIX_COMMAND "${row}")
     list(GET f 0 K)
     list(GET f 1 N)
-    add_ocloc_kernel(k2_pf_dequant_slab_K${K}_N${N} SOURCE ${K2_PF_SRC}/k2_pf_linear.cl
+    add_ocloc_kernel(pf_int4_slab_K${K}_N${N} SOURCE ${K2_PF_REUSE}/slab_dequant_int4.cl
                      DEFINES K=${K} N=${N})
   endforeach()
   set(K2_PF_PREP_DEFINES ${CTRL_DEFINES} M=2048 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=128)
@@ -1236,11 +1236,11 @@ endif()
 #                     weight batch (block 384 = the bf16 shared expert, copied), the combine into `mo`
 #   kol_pf_attn.cl    the windowed flash attention over the 4096-slot ring (sliding) and the growing
 #                     cache (full), k2_pf_attn.cl's DPAS walk at GQA 12, no gate; and its eager twin
-#   kol_pf_linear.cl  the bf16 attention arm's slabs with a zero-padded tail (o_proj's 512 columns)
+#   (prefill/slab_bf16.cl: the bf16 attention arm's slabs with a zero-padded tail, o_proj's 512 columns)
 # Reused at Kolibri's shapes: kol_prep.cl at M = 2048 (kernels::kolibri::kPfC: the norm, the post-add,
 # the attention prep at S 1), prefill/pf_embed.cl, prefill/pf_prep.cl's pf_res_fold (SP0, and _Z over
 # o_proj's one slice), prefill/pf_gemv_bf16.cl (the router at decode's {16, 16} tiling),
-# prefill/pf_moe_gemm.cl (gate||up 2560 x 1024 SiLU, down 512 x 2560), k2/k2_pf_linear.cl (the int4
+# prefill/pf_moe_gemm.cl (gate||up 2560 x 1024 SiLU, down 512 x 2560), prefill/slab_dequant_int4.cl (the int4
 # arm's layout-0 slabs) and the shape-free pf_gemm_T0. The route is 20c's decode binary on grid (1, C).
 # What a Kolibri prefill chunk binds: runtime/kolibri/kolibri_prefill.cc (45 launches a layer + 2,
 # 2252 at 50 layers; derived in runtime/kolibri/kolibri_sizes.cc).
@@ -1252,15 +1252,15 @@ if(B70_KOLIBRI)
   # built here only without K2, so no target is defined twice.
   if(NOT B70_K2)
     add_ocloc_kernel(pf_res_fold_K2560_SP0_G20 SOURCE ${KOL_PF_REUSE}/pf_prep.cl DEFINES K=2560 S_PREV=0 FOLD_G=20)
-    add_ocloc_kernel(k2_pf_dequant_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=6144 N=2560)
+    add_ocloc_kernel(pf_int4_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=6144 N=2560)
   endif()
   add_ocloc_kernel(pf_res_fold_K2560_SP1_G20_Z SOURCE ${KOL_PF_REUSE}/pf_prep.cl DEFINES K=2560 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
-  add_ocloc_kernel(k2_pf_dequant_slab_K2560_N7168 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=2560 N=7168)
+  add_ocloc_kernel(pf_int4_slab_K2560_N7168 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=2560 N=7168)
   foreach(row "2560 7168" "6144 2560")
     separate_arguments(f UNIX_COMMAND "${row}")
     list(GET f 0 K)
     list(GET f 1 N)
-    add_ocloc_kernel(kol_pf_bf16_slab_K${K}_N${N} SOURCE ${KOL_PF_SRC}/kol_pf_linear.cl DEFINES K=${K} N=${N})
+    add_ocloc_kernel(kol_pf_bf16_slab_K${K}_N${N} SOURCE ${KOL_PF_REUSE}/slab_bf16.cl DEFINES K=${K} N=${N})
   endforeach()
   add_ocloc_kernel(kol_norm_M2048_K2560_G20_W20 SOURCE ${KOL_PF_SRC}/kol_prep.cl DEFINES M=2048 K=2560 NORM_G=20 NORM_WGS=20)
   add_ocloc_kernel(kol_post_add_M2048_K2560_G20 SOURCE ${KOL_PF_SRC}/kol_prep.cl DEFINES M=2048 K=2560 POST_G=20)
@@ -1404,11 +1404,11 @@ endif()
 #   q4_pf_ple.cl    the PLE block over a chunk in three launches (gate, conv, the rings)
 # Reused at this family's shapes: 21c's q4_hc.cl at M = 2048 (combine _E / _S1 / _Y / _X / _Y_NN, up-mix _I at the
 # GEMM's pitch 512), prefill/pf_embed.cl and pf_gemv_bf16.cl (a||b, the router at decode's {16, 16} tiling) at hidden
-# 2560, pf_dequant_slab.cl (qkv||z, q||gate||k||v int4 layout 0), kolibri/kol_pf_linear.cl's bf16 slab (q4_ prefix),
+# 2560, pf_dequant_slab.cl (qkv||z, q||gate||k||v int4 layout 0), prefill/slab_bf16.cl's bf16 slab (q4_ prefix),
 # pf_attn_prep.cl (q16), pf_attn.cl (the gate) and pf_flash_attn.cl at 24 q / 2 kv heads (HPW 6 of GQA 12, KT 64, RPW
 # 8, EXP2 as the existing binary, 256 GRF), pf_moe_gemm.cl (gate||up 2560 x 1280 SiLU, down 640 x 2560); bound by
 # name, nothing built here: Qwen3.8's pf_gdn_conv / _wy / _scan (the GDN shape is Qwen3.8's), pf_gemm_T0, 21c's
-# q4_route_M1 (grid (1, C)); K2's / Kolibri's k2_pf_dequant_slab_K6144_N2560 (out_proj / o_proj int4) is built here
+# q4_route_M1 (grid (1, C)); K2's / Kolibri's pf_int4_slab_K6144_N2560 (out_proj / o_proj int4) is built here
 # only when neither block is on. What a chunk binds: runtime/qwen4exp/qwen4exp_prefill.cc (launch counts in
 # runtime/qwen4exp/qwen4exp_sizes.cc: they depend on the chunk's dense / sparse rows).
 if(B70_Q4EXP)
@@ -1436,7 +1436,7 @@ if(B70_Q4EXP)
     add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L0 SOURCE ${Q4_PF_REUSE}/pf_dequant_slab.cl DEFINES K=${K} N=${N} LAYOUT=0)
   endforeach()
   if(NOT B70_K2 AND NOT B70_KOLIBRI)
-    add_ocloc_kernel(k2_pf_dequant_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=6144 N=2560)
+    add_ocloc_kernel(pf_int4_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=6144 N=2560)
   endif()
   # the bf16 slabs: Intel's dense rows (qkv||z, q||gate||k||v, out / o), the indexer, the HC down||inject (336 rows,
   # a 512-column slab), the PLE key||value
@@ -1444,7 +1444,7 @@ if(B70_Q4EXP)
     separate_arguments(f UNIX_COMMAND "${row}")
     list(GET f 0 K)
     list(GET f 1 N)
-    add_ocloc_kernel(q4_pf_bf16_slab_K${K}_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_linear.cl
+    add_ocloc_kernel(q4_pf_bf16_slab_K${K}_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_bf16.cl
                      DEFINES K=${K} N=${N})
   endforeach()
   # 21c's sources at M = 2048 (kernels::qwen4exp::kPfC)
@@ -1590,7 +1590,7 @@ if(B70_Q4EXP AND B70_MTP)
                    DEFINES ${CTRL_DEFINES} M=2048 MTP_NORM_SINGLE=1 MTP_PF=1)
   add_ocloc_kernel(q4_mtp_M2048_STREAM_PF SOURCE ${Q4_CL}/q4_mtp.cl
                    DEFINES ${CTRL_DEFINES} M=2048 MTP_NORM_SINGLE=0 MTP_PF=1)
-  add_ocloc_kernel(q4_pf_bf16_slab_K2560_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_linear.cl
+  add_ocloc_kernel(q4_pf_bf16_slab_K2560_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_bf16.cl
                    DEFINES K=2560 N=2560)
 endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next MTP ==== (end) ====
@@ -1841,7 +1841,7 @@ endif()
 # Reused sources at Bolt's shapes: nb_prep.cl / nb_moe.cl at M = 2048 (the norm sites `_NF` / `_S1` / `_S1_T1`, the router,
 # the route, the shared expert's relu2 and the latent, the NoPE attention prep at S 1 - decode's chains row for row);
 # prefill/pf_dequant_slab.cl for the N 4096 linears (out_proj 8192, o_proj 4096, fc2 1024, shared_down 5376 - both layouts,
-# so a P0 re-pick needs no new line); k2/k2_pf_linear.cl for the layout-0 linears that are not whole 1024-column slabs
+# so a P0 re-pick needs no new line); prefill/slab_dequant_int4.cl for the layout-0 linears that are not whole 1024-column slabs
 # (in_proj 18560, q||k||v 4608, fc1||shared_up 6400: one zero-padded tail slab); the shape-free pf_gemm_T0 (prefill/,
 # built there); mg_pf_attn.cl's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15: spec 23d's kernel,
 # kept with its names and command lines when Muse-Glimmer was dropped, 2026-10-27). What a Bolt prefill chunk binds:
@@ -1889,7 +1889,7 @@ if(B70_BOLT)
     endforeach()
   endforeach()
   foreach(N 18560 4608 6400)
-    add_ocloc_kernel(k2_pf_dequant_slab_K4096_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=4096 N=${N})
+    add_ocloc_kernel(pf_int4_slab_K4096_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=4096 N=${N})
   endforeach()
   add_ocloc_kernel(mg_pf_flash_attn_Q32KV2_F SOURCE ${NB_CL}/mg_pf_attn.cl
                    DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=2 EAGER=0 WINDOW=0 RING=0

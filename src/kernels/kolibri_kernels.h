@@ -135,13 +135,13 @@ inline std::string pf_moe_variant() { return "kol_pf_moe_E384_T6_D2560_I512_L256
 inline std::string pf_flash_variant(bool sliding, bool eager) {
   return std::string("kol_pf_flash_attn_Q48KV4") + (sliding ? "_W513_R4096" : "_F") + (eager ? "_EAGER" : "");
 }
-// kol_pf_linear.cl: one bf16-tiled linear's slab (the bf16 attention arm), any width (the tail zero-padded).
+// prefill/slab_bf16.cl: one bf16-tiled linear's slab (the bf16 attention arm), any width (the tail zero-padded).
 inline std::string pf_bf16_slab_variant(unsigned K, unsigned N) {
   return "kol_pf_bf16_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
 }
-// 18c's k2_pf_linear.cl at Kolibri's widths: the int4 attention arm's layout-0 slabs.
+// prefill/slab_dequant_int4.cl at Kolibri's widths: the int4 attention arm's layout-0 slabs.
 inline std::string pf_int4_slab_variant(unsigned K, unsigned N) {
-  return "k2_pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
+  return "pf_int4_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
 }
 inline std::string pf_slab_variant(model::KolAttnForm a, unsigned K, unsigned N) {
   return a == model::KolAttnForm::Int4 ? pf_int4_slab_variant(K, N) : pf_bf16_slab_variant(K, N);

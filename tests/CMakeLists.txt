@@ -2226,9 +2226,9 @@ if(B70_K2)
   set(B70_K2_PREFILL_KERNELS
     kernel_k2_pf_embed_gather_D2560_V250624 kernel_pf_res_fold_K2560_SP0_G20
     kernel_pf_res_fold_K2560_SP1_G20 kernel_k2_norm_M2048_K2560_G20_W20_NG2
-    kernel_k2_pf_dequant_slab_K2560_N10240 kernel_k2_pf_dequant_slab_K2560_N9280
-    kernel_k2_pf_dequant_slab_K4096_N2560 kernel_k2_pf_dequant_slab_K2560_N12288
-    kernel_k2_pf_dequant_slab_K6144_N2560 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
+    kernel_pf_int4_slab_K2560_N10240 kernel_pf_int4_slab_K2560_N9280
+    kernel_pf_int4_slab_K4096_N2560 kernel_pf_int4_slab_K2560_N12288
+    kernel_pf_int4_slab_K6144_N2560 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
     kernel_k2_attn_prep_M2048_N10240_S1_Q32KV8_V kernel_k2_attn_prep_M2048_N9472_S1_Q32KV8
     kernel_k2_pf_flash_attn_Q32KV8 kernel_k2_pf_flash_attn_Q32KV8_O
     kernel_k2_route_M1_E64_T4_N9472_O9216_S1 kernel_k2_pf_mova_E64_T4_D2560_N1024
@@ -3202,7 +3202,7 @@ if(B70_KOLIBRI)
   set(B70_KOLIBRI_PREFILL_KERNELS
     kernel_kol_pf_embed_gather_D2560_V128000 kernel_pf_res_fold_K2560_SP0_G20 kernel_pf_res_fold_K2560_SP1_G20_Z
     kernel_kol_norm_M2048_K2560_G20_W20 kernel_kol_post_add_M2048_K2560_G20
-    kernel_k2_pf_dequant_slab_K2560_N7168 kernel_k2_pf_dequant_slab_K6144_N2560
+    kernel_pf_int4_slab_K2560_N7168 kernel_pf_int4_slab_K6144_N2560
     kernel_kol_pf_bf16_slab_K2560_N7168 kernel_kol_pf_bf16_slab_K6144_N2560 kernel_pf_gemm_T0
     kernel_kol_attn_prep_M2048_N7168_S1_Q48KV4_R4096 kernel_kol_attn_prep_M2048_N7168_S1_Q48KV4_F
     kernel_kol_pf_flash_attn_Q48KV4_W513_R4096 kernel_kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER
@@ -3587,7 +3587,7 @@ if(B70_Q4EXP)
     kernel_pf_moe_router_K2560_N528 kernel_q4_route_M1_E512_T10_N528_L256 kernel_q4_pf_moe_E512_T10_D2560_I640_L256
     kernel_pf_moe_gemm_K2560_N1280_SILU kernel_pf_moe_gemm_K640_N2560 kernel_q4_ple_gather_M2048_BF16_PF
     kernel_q4_ple_gather_M2048_F32_PF kernel_q4_pf_bf16_slab_K2560_N12800 kernel_q4_pf_ple_C2048
-    kernel_pf_dequant_slab_K2560_N16384_L0 kernel_pf_dequant_slab_K2560_N13312_L0 kernel_k2_pf_dequant_slab_K6144_N2560
+    kernel_pf_dequant_slab_K2560_N16384_L0 kernel_pf_dequant_slab_K2560_N13312_L0 kernel_pf_int4_slab_K6144_N2560
     kernel_q4_pf_bf16_slab_K2560_N16384 kernel_q4_pf_bf16_slab_K2560_N13312 kernel_q4_pf_bf16_slab_K6144_N2560)
   # Host: the names the walk binds (kernels::qwen4exp::prefill_variants) are exactly this list.
   add_executable(qwen4exp_pf_variant_names_test kernels/qwen4exp_pf_variant_names_test.cc)
@@ -4495,8 +4495,8 @@ if(B70_BOLT)
     kernel_nb_res_norm_M2048_K4096_W8_S1_T1 kernel_nb_router_M2048_K4096 kernel_nb_route_M2048_T9
     kernel_nb_sh_act_M2048_L1024_SH5376_S1 kernel_nb_attn_prep_M2048_KV2_S1
     kernel_pf_dequant_slab_K8192_N4096_L1 kernel_pf_dequant_slab_K4096_N4096_L1 kernel_pf_dequant_slab_K1024_N4096_L1
-    kernel_pf_dequant_slab_K5376_N4096_L1 kernel_k2_pf_dequant_slab_K4096_N18560 kernel_k2_pf_dequant_slab_K4096_N4608
-    kernel_k2_pf_dequant_slab_K4096_N6400)
+    kernel_pf_dequant_slab_K5376_N4096_L1 kernel_pf_int4_slab_K4096_N18560 kernel_pf_int4_slab_K4096_N4608
+    kernel_pf_int4_slab_K4096_N6400)
   foreach(I 1536 2048 2304 2560)
     list(APPEND B70_BOLT_PREFILL_KERNELS kernel_nb_pf_moe_I${I}_L1024_T9_TM32 kernel_nb_pf_moe_gemm_K1024_N${I}_RELU2
       kernel_nb_pf_moe_gemm_K${I}_N1024)

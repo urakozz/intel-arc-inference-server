@@ -19,7 +19,7 @@
 // table). Every binding site names the kernel it honours; argument orders are each __kernel's, in
 // src/kernels/qwen4exp/{q4_pf_moe,q4_pf_attn,q4_pf_ple,q4_hc,q4_qsa,q4_ple,q4_moe}.cl and the reused sources
 // (prefill/pf_embed.cl, pf_gemv_bf16.cl, pf_dequant_slab.cl, pf_attn_prep.cl, pf_attn.cl, pf_flash_attn.cl,
-// pf_gemm.cl, pf_moe_gemm.cl, k2/k2_pf_linear.cl, kolibri/kol_pf_linear.cl).
+// pf_gemm.cl, pf_moe_gemm.cl, slab_dequant_int4.cl, slab_bf16.cl).
 namespace runtime::qwen4exp {
 namespace {
 

@@ -1536,7 +1536,7 @@ st_r26_host() {
 }
 stage r26.k1 26 default card - r26.host "K1 for the prefill, no checkpoint: the 17 binaries built (kbins) and kolibri_pf_kernels_test - slabs exact, norm / sandwich / prep at M 2048 bit-exact (the ring wrapping at 4090), the router rows bitwise decode's, sort / gather / dequant exact (block 384 the bf16 shared tiles), GROUPED == DENSE bitwise (a 1-ulp difference is a finding), reversed chunk and replay bitwise, the shared expert alone; the flash against fp64 (>= 0.99999) sliding at 0 / 1000 / 4396 / a 300-row tail / single rows and full to 62048, EAGER (0.9999 / 0.999), a split at 64 bitwise"
 st_r26_k1() {
-  kbins kol_pf_embed_gather_D2560_V128000 pf_res_fold_K2560_SP1_G20_Z k2_pf_dequant_slab_K2560_N7168 \
+  kbins kol_pf_embed_gather_D2560_V128000 pf_res_fold_K2560_SP1_G20_Z pf_int4_slab_K2560_N7168 \
     kol_pf_bf16_slab_K2560_N7168 kol_pf_bf16_slab_K6144_N2560 kol_norm_M2048_K2560_G20_W20 kol_post_add_M2048_K2560_G20 \
     kol_attn_prep_M2048_N7168_S1_Q48KV4_R4096 kol_attn_prep_M2048_N7168_S1_Q48KV4_F kol_pf_flash_attn_Q48KV4_W513_R4096 \
     kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER kol_pf_flash_attn_Q48KV4_F kol_pf_flash_attn_Q48KV4_F_EAGER \
@@ -2844,7 +2844,7 @@ st_r61_k1() {
     nb_pf_moe_I1536_L1024_T9_TM32 nb_pf_moe_I2560_L1024_T9_TM32 nb_pf_moe_gemm_K1024_N1536_RELU2 \
     nb_pf_moe_gemm_K1536_N1024 nb_pf_moe_gemm_K1024_N2560_RELU2 nb_pf_moe_gemm_K2560_N1024 \
     nb_pf_embed_gather_K4096_V131072 nb_res_norm_M2048_K4096_W8_S1_T1 nb_router_M2048_K4096 nb_route_M2048_T9 \
-    k2_pf_dequant_slab_K4096_N18560 pf_dequant_slab_K8192_N4096_L1 mg_pf_flash_attn_Q32KV2_F mg_pf_flash_attn_Q32KV2_F_EAGER
+    pf_int4_slab_K4096_N18560 pf_dequant_slab_K8192_N4096_L1 mg_pf_flash_attn_Q32KV2_F mg_pf_flash_attn_Q32KV2_F_EAGER
   run_tests '^bolt_pf_kernels_test$'
   jgrab k1 '^bolt_pf_kernels_test$' 'bitwise|cosine|DPAS|grouped|slab|OK'
   finish

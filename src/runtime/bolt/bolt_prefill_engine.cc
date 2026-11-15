@@ -79,7 +79,7 @@ std::vector<const char*> prefill_entries(const std::string& v) {
   if (starts("nb_sh_act")) return {"nb_sh_act"};
   if (starts("nb_attn_prep")) return {"nb_attn_prep"};
   if (starts("mg_pf_flash_attn")) return {"mg_pf_flash_attn"};
-  if (starts("k2_pf_dequant_slab")) return {"k2_pf_dequant_slab"};
+  if (starts("pf_int4_slab")) return {"k2_pf_dequant_slab"};
   if (starts("pf_dequant_slab")) return {"pf_dequant_slab"};
   if (starts("pf_gemm")) return {"pf_gemm"};
   if (starts("gemv_i8w")) return {"gemv_i8w"};

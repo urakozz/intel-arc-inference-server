@@ -46,6 +46,7 @@
 #include "kernels/kolibri_ref.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/prep_ref.h"
+#include "kernels/slab_ref.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -172,7 +173,7 @@ void slabs(Dev& dv) {
       dv.go(kk::pf_int4_slab_variant(K, N), "k2_pf_dequant_slab", kk::kPfSlab / 16, K / 64, 1,
             {PtrArg(dw.ptr()), PtrArg(ds.ptr()), PtrArg(slab.ptr()), arg_val(n0), arg_val(kk::kPfSlab)});
       CHECK(dv.rd<uint16_t>(slab, size_t(K) * kk::kPfSlab) ==
-            k2_pf_ref::dequant_slab(words.data(), sc.data(), K, N, n0, kk::kPfSlab));
+            slab_ref::dequant_slab(words.data(), sc.data(), K, N, n0, kk::kPfSlab));
     }
   }
   // bf16 o_proj: the slabs, then the linear through pf_gemm_T0 into partials [kC][2560]

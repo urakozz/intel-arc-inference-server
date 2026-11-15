@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(kq::pf_ple_variant(), std::string("q4_pf_ple_C2048"));
   CHECK_EQ(kq::pf_bf16_slab_variant(10240, 336), std::string("q4_pf_bf16_slab_K10240_N336"));
   CHECK_EQ(kq::pf_int4_slab_variant(2560, 16384), std::string("pf_dequant_slab_K2560_N16384_L0"));
-  CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560), std::string("k2_pf_dequant_slab_K6144_N2560"));
+  CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560), std::string("pf_int4_slab_K6144_N2560"));
   CHECK_EQ(kq::pf_qsa_variant(), std::string("q4_qsa_M2048_T512_W1024_PF"));
   CHECK_EQ(kq::pf_ple_gather_variant(true), std::string("q4_ple_gather_M2048_BF16_PF"));
   CHECK_EQ(kq::pf_hc_up_mix_variant(), std::string("q4_hc_up_mix_M2048_I_D512"));

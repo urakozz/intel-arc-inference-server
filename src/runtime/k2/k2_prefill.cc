@@ -17,8 +17,8 @@
 
 // k2_prefill.cc - K2-Horizon's prefill chunk (k2_prefill.h has the walk in one table). Every
 // binding site names the kernel it honours; argument orders are each __kernel's, in
-// src/kernels/k2/{k2_pf_linear,k2_pf_moe,k2_pf_attn,k2_prep,k2_moe}.cl and the reused
-// prefill sources (pf_embed.cl, pf_prep.cl, pf_gemv_bf16.cl, pf_gemm.cl, pf_moe_gemm.cl).
+// src/kernels/k2/{k2_pf_moe,k2_pf_attn,k2_prep,k2_moe}.cl and the reused
+// prefill sources (slab_dequant_int4.cl, pf_embed.cl, pf_prep.cl, pf_gemv_bf16.cl, pf_gemm.cl, pf_moe_gemm.cl).
 namespace runtime::k2 {
 namespace {
 
@@ -107,7 +107,7 @@ class Walk {
 
   // One int4 linear: per slab k2_pf_dequant_slab(w, scales, slab, n0, ns) then pf_gemm
   // x [C][K] x slab [K][ns] into partials + n0 at pitch pf_ld(N) - slabs of 1024 and one
-  // zero-padded tail (k2_pf_linear.cl).
+  // zero-padded tail (prefill/slab_dequant_int4.cl).
   void linear(const loader::DeviceWeight& w, const uint16_t* x) {
     check_int4(w);
     const model::GemvShape& sh = w.shape;

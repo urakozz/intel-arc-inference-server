@@ -21,7 +21,7 @@
 //   gated_head_sig()   prep_gated_head _SIG: Qwen4ExpTextRMSNormGated with the sigmoid gate
 //
 // **exp:** every sigmoid / SiLU is 1 / (1 + exp_torch(-x)) / x / (1 + exp_torch(-x)) on both sides
-// (k2_ref::exp_torch = Sleef's expf u10, torch's Vectorized<float>::exp), so the kernels and this file agree
+// (eager_attn_ref::exp_torch = Sleef's expf u10, torch's Vectorized<float>::exp), so the kernels and this file agree
 // bit for bit; the GEMV-fed values are exact where the GEMV is (the tests feed the kernels' own GEMV
 // outputs). Not bit-exact against torch: the fp32 ACCUMULATION orders of torch's reductions (its matmul,
 // its sums, its softmax's sum), which are its own - the fixture's coarse inputs make every such sum exact in
@@ -36,7 +36,7 @@
 #include <vector>
 
 #include "common/bf16.h"
-#include "kernels/k2_ref.h"    // exp_torch, eager_softmax (torch's fp32 softmax), lowbias32
+#include "kernels/eager_attn_ref.h"   // exp_torch, eager_softmax (torch's fp32 softmax), lowbias32
 #include "kernels/moe_ref.h"   // f32 / rne / rf, the layout-1 tile_dot / split_dot, gate_col / up_col
 #include "loader/qwen4exp_ple_hash.h"
 
@@ -60,7 +60,7 @@ constexpr uint32_t kWords = 32, kIds = 0, kWeights = 16, kSharedGate = 26, kP10 
 constexpr float kSqrtHidden = 50.596442562694070f, kSqrtIdx = 11.313708498984761f;
 constexpr float kAttnScale = 0.0625f;   // 256 ** -0.5
 
-inline float exp_torch(float x) { return k2_ref::exp_torch(x); }
+inline float exp_torch(float x) { return eager_attn_ref::exp_torch(x); }
 inline float sigmoid_t(float x) { return 1.0f / (1.0f + exp_torch(-x)); }
 inline float silu_t(float x) { return x / (1.0f + exp_torch(-x)); }
 
@@ -78,7 +78,7 @@ inline uint32_t as_u32(float f) {
 // --- the fixture's inputs and its hex arrays (tools/oracle/qwen4exp_fixture.py val()) ---------------------------
 // Element i of input tensor t. coarse: (h % 17 - 8) x step; fine: ((h >> 8) x 2^-23 - 1) x amp, rounded to bf16.
 inline float fixture_val(bool coarse, uint32_t t, uint32_t i, uint32_t seed, float step = 0.125f, float amp = 1.0f) {
-  const uint32_t h = k2_ref::lowbias32(k2_ref::lowbias32(seed * 3 + t) ^ i);
+  const uint32_t h = eager_attn_ref::lowbias32(eager_attn_ref::lowbias32(seed * 3 + t) ^ i);
   if (coarse) return float(int(h % 17) - 8) * step;
   const float f = (float(h >> 8) * 0x1p-23f - 1.0f) * amp;
   return rf(f);
@@ -347,7 +347,7 @@ inline uint32_t qsa_count(uint32_t p) {
 // q4_qsa_attn_eager, one q head h of one row over the list (kv caches [rows][2][256] bf16, rows by position):
 //   q_b = rne(attn_q) (attn_prep keeps the RoPE'd q in fp32; the reference's q is bf16);
 //   s_i = rne(rne(sum_d q_b k_i) / 16) (one fma chain, d ascending; the /16 exact);
-//   p = torch's fp32 softmax over the list (k2_ref::eager_softmax: exp_torch, 8 lane sums, the tree), bf16;
+//   p = torch's fp32 softmax over the list (eager_attn_ref::eager_softmax: exp_torch, 8 lane sums, the tree), bf16;
 //   o_d = rne(sum_i p_i v_i[d]) (one fma chain, i ascending); out = rne(f32(o) x rne(sigmoid(gate))).
 struct EagerHead {
   std::vector<float> s, p;
@@ -368,7 +368,7 @@ inline EagerHead qsa_attn_eager(const float* attn_q, const float* attn_gate, con
     for (uint32_t d = 0; d < kHd; ++d) a = std::fma(qb[d], f32(k[d]), a);
     r.s[i] = rf(rf(a) * kAttnScale);
   }
-  k2_ref::eager_softmax(r.s.data(), count, r.p.data());
+  eager_attn_ref::eager_softmax(r.s.data(), count, r.p.data());
   for (uint32_t d = 0; d < kHd; ++d) {
     float o = 0.0f;
     for (uint32_t i = 0; i < count; ++i) o = std::fma(r.p[i], f32(kv_v[(size_t(list[i]) * kKvHeads + j) * kHd + d]), o);

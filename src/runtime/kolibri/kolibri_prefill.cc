@@ -15,8 +15,8 @@
 
 // kolibri_prefill.cc - Kolibri-1's prefill chunk on one device (kolibri_prefill.h has the walk in one
 // table). Every binding site names the kernel it honours; argument orders are each __kernel's, in
-// src/kernels/kolibri/{kol_pf_moe,kol_pf_attn,kol_pf_linear,kol_prep,kol_moe}.cl and the reused sources
-// (prefill/pf_embed.cl, pf_prep.cl, pf_gemv_bf16.cl, pf_gemm.cl, pf_moe_gemm.cl, k2/k2_pf_linear.cl).
+// src/kernels/kolibri/{kol_pf_moe,kol_pf_attn,kol_prep,kol_moe}.cl and the reused sources
+// (prefill/pf_embed.cl, pf_prep.cl, pf_gemv_bf16.cl, pf_gemm.cl, pf_moe_gemm.cl, slab_dequant_int4.cl, slab_bf16.cl).
 namespace runtime::kolibri {
 namespace {
 

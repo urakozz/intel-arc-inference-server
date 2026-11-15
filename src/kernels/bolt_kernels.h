@@ -238,7 +238,7 @@ inline std::vector<std::string> verify_variants(const model::BoltDesc& d, unsign
 // kernels are built again at M = kPfC (the M in the name is the prefill line: the norm sites `_NF` / `_S1` / `_S1_T1` -
 // every prefill linear is one unsplit GEMM, so S 1 whatever decode's S -, the router, the route, the shared expert's act,
 // the attention prep at S 1 - decode's chains row for row); the rest are reused sources at Bolt's shapes: prefill/
-// pf_dequant_slab.cl (a layout-1 linear of whole 1024-column slabs), 18c's k2/k2_pf_linear.cl (a layout-0 one, one
+// pf_dequant_slab.cl (a layout-1 linear of whole 1024-column slabs), prefill/slab_dequant_int4.cl (a layout-0 one, one
 // zero-padded tail slab where N is not whole slabs: in_proj 18560, q||k||v 4608, fc1||shared_up 6400), the shape-free
 // pf_gemm_T0 and spec 23d's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15).
 inline constexpr unsigned kPfC = 2048, kPfSub = 64, kPfTm = 32, kPfSlab = 1024;
@@ -280,7 +280,7 @@ inline std::string pf_gemm_t0_variant() { return pf_gemm_variant(false); }
 // its kernel first).
 inline std::string pf_slab_variant(const model::GemvShape& s) {
   if (s.N % kPfSlab == 0) return pf_dequant_slab_variant(s.K, s.N, s.layout);
-  if (s.layout == 0) return "k2_pf_dequant_slab_K" + std::to_string(s.K) + "_N" + std::to_string(s.N);
+  if (s.layout == 0) return "pf_int4_slab_K" + std::to_string(s.K) + "_N" + std::to_string(s.N);
   return "";
 }
 inline bool pf_slab_tail(const model::GemvShape& s) { return s.N % kPfSlab != 0; }

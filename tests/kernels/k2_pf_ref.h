@@ -28,6 +28,7 @@
 #include "common/bf16.h"
 #include "kernels/k2_ref.h"
 #include "kernels/pf_moe_ref.h"
+#include "kernels/slab_ref.h"
 
 namespace k2_pf_ref {
 
@@ -117,27 +118,7 @@ void grouped(const Sorted& st, uint32_t b0, uint32_t b1, F f) {
   }
 }
 
-// k2_pf_dequant_slab: columns [n0, n0 + ns) of a layout-0 K x N int4 linear (words
-// [K/8][N] u32, scales [K/64][N] f16 bits) as bf16 [K][ns]; columns >= N are zero.
-inline std::vector<uint16_t> dequant_slab(const uint32_t* words, const uint16_t* scales, uint32_t K,
-                                          uint32_t N, uint32_t n0, uint32_t ns) {
-  std::vector<uint16_t> out(size_t(K) * ns, 0);
-  for (uint32_t c = 0; c < ns; ++c) {
-    const uint32_t n = n0 + c;
-    if (n >= N) continue;
-    for (uint32_t g = 0; g < K / 64; ++g) {
-      const float scale = common::f16_to_f32(scales[size_t(g) * N + n]);
-      for (uint32_t j = 0; j < 8; ++j) {
-        const uint32_t word = words[size_t(g * 8 + j) * N + n];
-        for (uint32_t i = 0; i < 8; ++i) {
-          const int q = int((word >> (4 * i)) & 0xFu) - 8;
-          out[size_t(g * 64 + j * 8 + i) * ns + c] = rne(float(q) * scale);
-        }
-      }
-    }
-  }
-  return out;
-}
+using slab_ref::dequant_slab;   // tests/kernels/slab_ref.h
 
 // k2_pf_moe_combine for token t, column n: `route_row` the token's k2_route row, y the
 // rne'd down outputs per sorted row (pitch `hidden`), resid the column's residual in.

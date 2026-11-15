@@ -166,9 +166,9 @@ inline constexpr unsigned kPfFoldWg = 256;   // pf_prep.cl's pf_res_fold
 inline std::string pf_embed_variant(unsigned hidden, unsigned vocab) {
   return "k2_pf_embed_gather_D" + std::to_string(hidden) + "_V" + std::to_string(vocab);
 }
-// k2_pf_linear.cl: one layout-0 linear's bf16 slabs, any width (the tail zero-padded).
+// prefill/slab_dequant_int4.cl: one layout-0 linear's bf16 slabs, any width (the tail zero-padded).
 inline std::string pf_slab_variant(unsigned K, unsigned N) {
-  return "k2_pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
+  return "pf_int4_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
 }
 // k2_prep.cl's stage B at M = kPfC: pf_res_fold (runtime M) writes sumsq [G][kPfC] when the
 // walk passes m_count = kPfC, which is the layout this build reads.

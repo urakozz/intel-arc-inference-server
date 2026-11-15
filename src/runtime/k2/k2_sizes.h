@@ -133,7 +133,7 @@ inline constexpr uint32_t kPfSlab = 1024;  // a whole slab of an int4 linear
 inline uint32_t pad256(uint32_t n) { return (n + 255) / 256 * 256; }
 
 // The prefill linear's slab walk over N columns: slabs of kPfSlab and one tail of
-// pad256(N - n0) (k2_pf_linear.cl zero-fills its padding). Its count, and the widest slab.
+// pad256(N - n0) (prefill/slab_dequant_int4.cl zero-fills its padding). Its count, and the widest slab.
 inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }
 inline uint32_t pf_slab_width(uint32_t N, uint32_t n0) {
   return N - n0 >= kPfSlab ? kPfSlab : pad256(N - n0);

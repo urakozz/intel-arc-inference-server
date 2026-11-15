@@ -16,7 +16,7 @@
 
 // bolt_prefill.cc - Nemotron 3.5 Bolt's prefill chunk on one device (bolt_prefill.h has the walk in one table). Every binding
 // site names the kernel it honours; argument orders are each __kernel's, in src/kernels/bolt/{nb_pf_mamba,nb_pf_moe,
-// nb_pf_moe_gemm,nb_pf_prep,nb_prep,nb_moe}.cl and the reused sources (prefill/pf_dequant_slab.cl, k2/k2_pf_linear.cl,
+// nb_pf_moe_gemm,nb_pf_prep,nb_prep,nb_moe}.cl and the reused sources (prefill/pf_dequant_slab.cl, prefill/slab_dequant_int4.cl,
 // prefill/pf_gemm.cl, bolt/mg_pf_attn.cl).
 namespace runtime::bolt {
 namespace {
