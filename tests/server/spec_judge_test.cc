@@ -201,6 +201,20 @@ int main() {
     // (e) bf16-unstable but no plain row: the strict bar
     sv = run("unstable, no plain row", spec_judge::PlainRow{});
     CHECK(!sv.pass && sv.beyond[0].unstable && !sv.beyond[0].have_plain);
+    // one-sided (item 30 (4), operator 2026-11-15): only a move TOWARD the speculative pick counts.
+    // (e2) plain more confident in the f32 top than f32 (gap 25): |plain - f32| = 13 would have allowed the flip;
+    //      f32 - plain = -13 allows the bar alone - FAIL
+    sv = run("unstable, plain more confident than f32", plain_gap(25));
+    CHECK(!sv.pass && sv.beyond[0].unstable && sv.beyond[0].have_plain);
+    CHECK(std::fabs(sv.beyond[0].allow - 8.0) < 1e-3);
+    // (e3) the bf16 reference more confident in the f32 top (gap 25): |bf16 - f32| = 13 would have called the row
+    //      unstable; it moved away from the speculative pick - stable, the strict bar, no plain replay
+    const size_t asked_before = asked.size();
+    bf16(25);
+    sv = run("bf16 away from the speculative pick", plain_gap(-3));
+    CHECK(!sv.pass && sv.beyond[0].have_bf16 && !sv.beyond[0].unstable);
+    CHECK_EQ(asked.size(), asked_before);
+    bf16(-5);
     // (g) the reviewed rows (operator 2026-11-05): case (c)'s miss (row 0, f32 top 4, speculative 9) fails the rules.
     //     An entry with another id, or at another row, does not pass it; the exact entry does, printed as REVIEWED.
     static const std::string kks = ks;   // the entries keep the key's char*
@@ -299,6 +313,18 @@ int main() {
     CHECK(sv.line().find("past end of turn (row 2): not graded") != std::string::npos);
     CHECK_EQ(spec_judge::awaiting().divergences, before);
     golden::end_of_turn_ids().clear();
+  }
+
+  // 5. the gates' accept lists (golden_common.h AcceptList; item 30 (4), operator 2026-11-15): `prompt:step` accepts
+  //    any id at that row, `prompt:step=id` that id only.
+  {
+    char a0[] = "gate", a1[] = "--accept=cjk:15=99737,prose:18", a2[] = "x";
+    char* av[] = {a0, a1, a2};
+    int ac = 3;
+    const golden::AcceptList acc = golden::take_accept(ac, av);
+    CHECK_EQ(ac, 2);
+    CHECK(acc.has("cjk", 15, 99737) && !acc.has("cjk", 15, 99736) && !acc.has("cjk", 16, 99737));
+    CHECK(acc.has("prose", 18, 0) && acc.has("prose", 18, 99737) && !acc.has("code", 18, 0));
   }
   std::puts("spec_judge_test OK");
   return 0;
