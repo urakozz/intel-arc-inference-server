@@ -886,6 +886,7 @@ bool deep_numerics(l0::Context& ctx, l0::Queue& q, l0::Fence& f, const Inputs& i
   for (bool g256 : {false, true}) {
     kernels::SmallMTuning g = t;
     g.grf256 = g256;
+    g.g256_from = 0;
     const std::string n = kernels::gemm_sm_variant(M, g);
     if (!file_exists(kernels::path(n))) continue;
     auto L = make_prod(ctx, g, M);
@@ -948,8 +949,8 @@ std::unique_ptr<Launch> make_v2(l0::Context& ctx, const V2Arm& a, const kernels:
 void print_device_limits(l0::Context& ctx) {
   const ze_device_compute_properties_t& c = ctx.compute();
   std::printf("device limits (zeDeviceGetComputeProperties): maxTotalGroupSize %u, maxGroupSizeX %u, "
-              "maxSharedLocalMemory %u B, maxNumSubGroups %u\n", c.maxTotalGroupSize, c.maxGroupSizeX,
-              c.maxSharedLocalMemory, c.maxNumSubGroups);
+              "maxSharedLocalMemory %u B, sub-group sizes %u\n", c.maxTotalGroupSize, c.maxGroupSizeX,
+              c.maxSharedLocalMemory, c.numSubGroupSizes);
 }
 // A v2 arm's kernel properties; false (printed) when the work-group or its SLM is over the device's limit.
 bool v2_fits(l0::Context& ctx, const Launch& L, uint32_t wg) {
@@ -1090,7 +1091,8 @@ int run_prod(l0::Context& ctx, const Opts& o) {
       if (M < 2) continue;
       std::unique_ptr<Timed> ctlM;
       if (file_exists(kernels::path(ctl_name(s, M)))) ctlM = make_timed(ctx, make_control(ctx, s, M), in, nl);
-      if (!grf_ok(kernels::gemm_sm_variant(M, *t), t->grf256)) continue;
+      const bool prod256 = kernels::gemm_sm_variant(M, *t).find("_g256") != std::string::npos;   // g256_from
+      if (!grf_ok(kernels::gemm_sm_variant(M, *t), prod256)) continue;
       auto pr = make_timed(ctx, make_prod(ctx, *t, M), in, nl);
       std::vector<std::unique_ptr<Timed>> al;
       // Spec 32a: at 32 / 64 rows the production row's knobs at the other GRF mode is the one alternate (the lever
@@ -1099,7 +1101,8 @@ int run_prod(l0::Context& ctx, const Opts& o) {
         if (!deep_numerics(ctx, q, f, in, *t, M)) deep_fail = true;
         set_rows(ctx, in, random_rows(kMaxM, s.K, 5 + s.K));
         kernels::SmallMTuning g = *t;
-        g.grf256 = !g.grf256;
+        g.g256_from = 0;
+        g.grf256 = !prod256;
         const std::string n = kernels::gemm_sm_variant(M, g);
         if (!file_exists(kernels::path(n))) std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M);
         else if (grf_ok(n, g.grf256)) al.push_back(make_timed(ctx, make_prod(ctx, g, M), in, nl));
