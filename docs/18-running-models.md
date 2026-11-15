@@ -92,7 +92,7 @@ is not finished is listed in [open-work.md](open-work.md).
 | speed rows in BENCHMARKS | yes | yes | no | no |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed number of guesses = `--spec-max` 1..3 (`auto` = off until the whole model is measured); `b70-decode` refuses it |
 | `--spec lookup` (developer value) | yes | yes (needs the head) | no | yes (needs the head) |
-| `--spec dflash` | yes, when asked: one card (with prompt lookup inside), `replica`, `tp` or `pp`, bf16 or int8 KV | no | refused | refused |
+| `--spec dflash` | yes, when asked: one card (with prompt lookup inside), up to 4 requests a card (`--max-num-seqs`), `replica`, `tp` or `pp`, bf16 or int8 KV | no | refused | refused |
 | `--kv-cache int8` | yes | not built | refused (bf16 only) | refused (bf16 only) |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only |
 | KV per position (bf16) | 64 KiB | 20 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
@@ -221,6 +221,8 @@ D=urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 ./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last --spec dflash --draft-model $D
 # one card with the int8 KV cache
 ./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --draft-model $D
+# one card, up to four requests at once (the int8 KV cache: 135,168 + 3 x 32,768 positions)
+./build/src/cli/b70-serve $Q --parallel 1 --max-num-seqs 4 --kv-cache int8 --spec dflash --draft-model $D
 # two cards, two sessions: a drafter on each card
 ./build/src/cli/b70-serve $Q --max-num-seqs 2 --spec dflash --draft-model $D
 # two cards, tensor parallel: the drafter split over both cards
@@ -238,8 +240,12 @@ D=urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 - **Context.** With the packed drafter and the bf16 KV cache, `--max-len auto` gives 158,208 tokens on one
   card (145,664 with the int8 drafter). With `--kv-cache int8` the memory planner gives the full 262,144
   (254,976 with the int8 drafter).
-- **Refused, by name:** several requests on one card (`--max-num-seqs` above 1 on one card, above 2 on two),
-  and every other model.
+- **Several requests on a card** (`--max-num-seqs` up to 4 a card): each request keeps its own drafter context;
+  a request alone drafts up to 7 tokens as on one slot, several share one draft pass of 8 rows (3 tokens each for
+  two, 1 for four). Against `--spec mtp` in the same mode (one card, int8 KV): 1.15x with one request, 1.12x with
+  two, 0.97x with four. Slot 0 is 135,168 positions beside three of 32,768 (the drafter takes the difference).
+- **Refused, by name:** `--spec dflash-lookup` and `--draft-vocab` beside several requests on a card, more than
+  four requests a card, and every other model.
 - **The prefix cache** keeps the drafter's context (41.9 MB) with every snapshot, so a conversation that gets a
   prefix cache hit at the end of a prompt or of a request drafts exactly as an unbroken one. A hit at a
   snapshot inside a long prompt drafts worse (never differently) until 2,048 new positions have refilled the
