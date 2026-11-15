@@ -104,6 +104,11 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
 // descriptor is the one built, model::tp_card_desc).
 inline void check_tp_model(const std::string& architecture, const std::string& model) {
   if (architecture == "Qwen3_5ForConditionalGeneration") return;
+  if (architecture == "Qwen3_5MoeForConditionalGeneration")   // Ornith: ~3B active parameters a token
+    throw std::runtime_error("--parallel tp is not built for " + (model.empty() ? std::string("Qwen3.5-MoE") : model) +
+                             ": its active weights are too small to split - two cards would synchronise every layer "
+                             "over PCIe and decode slower than one. Use --parallel replica (a copy per card) to speed "
+                             "up parallel requests");
   throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b-d); " +
                            (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
                            " runs --parallel auto, 1 or pp");
