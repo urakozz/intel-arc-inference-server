@@ -18,7 +18,7 @@ using pf_harness::random_bf16;
 using pf_harness::random_f32;
 using pf_harness::upload;
 
-constexpr uint32_t kHk = 16, kHv = 32, kConv = (2 * kHk + kHv) * 128, kQkvz = kConv + kHv * 128, kRing = 16;
+constexpr uint32_t kHk = 16, kHv = 32, kConv = (2 * kHk + kHv) * 128, kQkvz = kConv + kHv * 128, kRing = 32;
 
 struct Out {
   std::vector<uint16_t> xb, ring;

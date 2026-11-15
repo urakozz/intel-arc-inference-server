@@ -62,7 +62,7 @@ void check_sizes_qwen38() {
   // 128k (spec 6): KV 8,589,934,592.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
   for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
-    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 8 * 258 * 4);
+    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 16 * 258 * 4);
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(s.eager(), size_t{699514776});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q, runtime::PrefillScratchDims::kCDefault).eager(), size_t{699514776});
@@ -132,7 +132,7 @@ void check_sizes_ornith() {
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, o);
   CHECK_EQ(d.moe, size_t{472576});
   CHECK_EQ(d.x, size_t{8} * 4096 * 2);                              // 2 x hidden > 512
-  CHECK_EQ(d.attn_part, size_t{16} * 32 * 8 * 258 * 4);             // v2 at 16 q-heads
+  CHECK_EQ(d.attn_part, size_t{16} * 32 * 16 * 258 * 4);            // v2 at 16 q-heads, 16 rows
   // Dense models carry no MoE scratch: their sizes are what they were.
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
   // The plan (decode only: Ornith's prefill is spec 15d) carries both MoE terms, and the

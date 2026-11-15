@@ -86,7 +86,7 @@ void check_decided_layout() {
            size_t{402653184});
   CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
-  CHECK_EQ(p.slot_state, size_t{3} * (4 * size_t{150994944} + 15728640) + hh + ctl + pages);
+  CHECK_EQ(p.slot_state, size_t{3} * (4 * size_t{150994944} + 31457280) + hh + ctl + pages);
   // §9.1: "total 29.10 GB, 1.93 GB spare" (l0-int8); on the l0 default 0.087 GB less (batch_rows_test's 29.01).
   CHECK_NEAR(p.total() / kGB, 29.03 + double(size_t{131072} * 4 * 256 * 2 * 2) / kGB, 0.01);
   std::printf("plan_slots 131072 + 3 x 32768, int8 KV, MTP: %.3f GB (batch_memory %.3f + RoPE %.3f + hh %.6f + "
@@ -95,7 +95,7 @@ void check_decided_layout() {
               (double(kDevice - kReserve) - p.total()) / kGB);
   // Without MTP: one GDN state a further slot (SlotDims' states), no head KV, no hh rows.
   const runtime::MemoryPlan n = runtime::plan_slots(q, lens, false, kQwenInt8Weights, {}, {}, KvCache::Int8);
-  CHECK_EQ(n.slot_state, size_t{3} * (size_t{150994944} + 15728640) + ctl + pages);
+  CHECK_EQ(n.slot_state, size_t{3} * (size_t{150994944} + 31457280) + ctl + pages);
   // ... less the widening scratch's further 98304 positions (3j: at the longest slot, not the sum).
   CHECK_EQ(n.total() - n.slot_state,
            runtime::plan(q, 229376, false, kQwenInt8Weights, {}, {}, KvCache::Int8).total() - size_t{402653184});

@@ -111,7 +111,7 @@ void check_memory() {
   CHECK_EQ(runtime::batch_memory(q, {{1, false}}, KvCache::Int8, 0, 0).kv -
                runtime::batch_memory(q, {{0, false}}, KvCache::Int8, 0, 0).kv,
            size_t{33024});
-  CHECK_EQ(runtime::batch_memory(q, {{0, false}}, KvCache::Int8, 0, 0).state, size_t{150994944} + 15728640);
+  CHECK_EQ(runtime::batch_memory(q, {{0, false}}, KvCache::Int8, 0, 0).state, size_t{150994944} + 31457280);
 
   std::printf("| %-56s | KV GB | state | weights | scratch | total | spare |\n", "layout (int8 KV unless said; DERIVED)");
   const auto mk = runtime::main_and_short;

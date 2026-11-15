@@ -9,7 +9,7 @@
 // the fp32 recurrence - is bit-reproducible, which is why the bars below are
 // tight and why the ring is held to **bit-exact**:
 //
-//   * `conv_ring` - bit-exact over all 163840 words. The written slots carry
+//   * `conv_ring` - bit-exact over all kRing x 10240 words. The written slots carry
 //     `rne_bf16` of the qkv linear's fp32 output, which is a rounding and not an
 //     arithmetic; the untouched slots prove no work-group wrote outside the ones
 //     it owns (see gdn_step.cl, "Ring ownership").
