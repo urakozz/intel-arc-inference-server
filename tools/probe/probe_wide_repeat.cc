@@ -130,6 +130,7 @@ int main(int argc, char** argv) {
                   m % 16, ch, pos - 1 + m, ck, ch < 0.999 || ck < 0.999 ? "  <<<" : "");
     }
   }
+  const size_t hid = size_t(e.model().desc->hidden) * 2, rb = mb.kv_lay.row_bytes();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   std::vector<uint8_t> hh0, k0;
   std::vector<uint32_t> v0;
