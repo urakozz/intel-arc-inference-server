@@ -156,6 +156,19 @@
 #if !((M >= 2 && M <= 8) || M == 16)
 #error "attn_verify_dpas: M is 2..8 (16 for the probe's record)"
 #endif
+// RCHUNK (spec 32 §5.3; undefined on every other command line): the 32- or 64-row verify list's attention as row
+// chunks of 16. The build is M 16 (the 16-row line's levers); grid dimension 2 is the chunk c, and work-group
+// (j, blk, c) is exactly the 16-row kernel's work-group launched at pos + 16 c with rows 16 c .. 16 c + 15 - the
+// same walk, operands and order (property R), so each row is bitwise the 16-row list's row at the same key count.
+// It reads q rows 16 c .. and writes the partials of a list of RCHUNK rows ([24][TGT][RCHUNK][258]).
+#ifdef RCHUNK
+#if M != 16 || (RCHUNK != 32 && RCHUNK != 64) || EAGER
+#error "attn_verify_dpas RCHUNK: an M 16 DPAS build, 32 or 64 rows"
+#endif
+#define PROWS RCHUNK
+#else
+#define PROWS M
+#endif
 #if KT != 32 && KT != 64
 #error "attn_verify_dpas: KT is 32 or 64"
 #endif
@@ -512,8 +525,17 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   const uint rb = helper ? 0u : qi / DS;        // row block
   const uint ds = qi % DS;                      // dim half (PAIR: key atom)
 
+#ifdef RCHUNK
+  const uint c0 = 16u * get_group_id(2);        // the chunk's first row
+  const uint pos = ctrl[CTRL_POS] + c0;
+  uint n_act = ctrl[CTRL_NACT];
+  n_act = n_act > c0 ? n_act - c0 : 0u;
+  attn_q += (size_t)c0 * Q_HEADS * HD;
+  attn_part += (size_t)c0 * PART;
+#else
   const uint pos = ctrl[CTRL_POS];
   uint n_act = ctrl[CTRL_NACT];
+#endif
   if (n_act > M) n_act = M;
   if (n_act == 0) return;
   const uint s0 = v2_ppw(pos + 1), s1 = v2_ppw(pos + n_act);
@@ -917,7 +939,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
     bool oo;                                                                            \
     row_of(r2, r, &qq, &mm, &oo);                                                       \
     if (oo && mm < n_act && (mm < msplit ? live0 : live1)) {                            \
-      __global float* restrict out = attn_part + (((size_t)(j * GQA + qq) * TGT + blk) * M + mm) * PART; \
+      __global float* restrict out = attn_part + (((size_t)(j * GQA + qq) * TGT + blk) * PROWS + mm) * PART; \
       _Pragma("unroll") for (uint a = 0; a < NAM; ++a)                                  \
         if (a < na) out[2 + 16u * (a0 + a) + l] = o[r2][a].s##r;                        \
       if (r2 == rb && ds == 0u && l == 0u && !helper) { out[0] = mrow.s##r; out[1] = lsum.s##r; } \
@@ -934,7 +956,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #define OUT(r)                                                                          \
   if (okv.s##r && ((mv.s##r < msplit) ? live0 : live1)) {                               \
     __global float* restrict out =                                                      \
-        attn_part + (((size_t)(j * GQA + qhv.s##r) * TGT + blk) * M + mv.s##r) * PART;  \
+        attn_part + (((size_t)(j * GQA + qhv.s##r) * TGT + blk) * PROWS + mv.s##r) * PART; \
     _Pragma("unroll") for (uint dd = 0; dd < NDD; ++dd) out[2 + ds * DSPLIT + 16u * dd + l] = o[dd].s##r; \
     if (ds == 0 && l == 0) { out[0] = mrow.s##r; out[1] = lsum.s##r; }                  \
   }

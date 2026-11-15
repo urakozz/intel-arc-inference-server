@@ -913,6 +913,42 @@ if(B70_MTP AND B70_VERIFY_M8)
 endif()
 # ==== Open-work 28 ============================================================ (end) ====
 
+# ==== Spec 32: the one-card 32- and 64-row verify lists (deep prompt-lookup runs), bf16 KV ==== (begin) ====
+# Additive only: new names. Ids through Control::deep_cur / deep_out (CTRL_CUR 64 / CTRL_OUT 128). The attention is
+# the 16-row line (KS 1, DSPLIT 128) in row chunks of 16 (RCHUNK: grid dimension 2) with attn_v2's reduce alone at the
+# list's rows; the linears are gemm_sm's rows at 32 / 64 (below); the rest the 16-row list's per-row builds at W.
+set(DEEP_W 32 64)
+if(B70_MTP AND B70_VERIFY_M8)
+  set(DEEP_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=64 CTRL_OUT=128 CTRL_DEBUG=18)
+  foreach(MM ${DEEP_W})
+    add_ocloc_kernel(embed_gather_M${MM} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                     DEFINES ${DEEP_CTRL_DEFINES} M=${MM} HIDDEN=5120 VOCAB=248320)
+    add_ocloc_kernel(argmax_stage1_M${MM} SOURCE ${ARGMAX_CL} DEFINES ${DEEP_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=${MM})
+    add_ocloc_kernel(argmax_stage2_W${MM} SOURCE ${ARGMAX_CL} DEFINES ${DEEP_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=${MM})
+    add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
+                     DEFINES ${CTRL_DEFINES} M=16 RCHUNK=${MM} TGT=${ATTN_V2_TGT} KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1
+                             PSPLIT=1 KV8=0
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} REDUCE_ONLY=1)
+    add_gemv_bf16_variant(${MM} 5120 128 16 64)    # a||b, the K split of the lists at M >= 5
+    add_prep_res_fold(${MM} 5120 0 20)
+    add_prep_res_fold(${MM} 5120 4 20)
+    add_prep_norm_finish(${MM} 5120 20 20)
+    add_ocloc_kernel(prep_gated_head_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
+    add_attn_prep(${MM})
+    # the MTP head's KV fill of W rows
+    add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
+    add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+    add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+    add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
+  endforeach()
+endif()
+# ==== Spec 32 ================================================================== (end) ====
+
 # ==== Spec 17d: tensor parallel MTP verify (`--parallel tp --spec mtp|auto`, Qwen3.8) ======= (begin) ====
 # Additive only: new names (attn_verify_dpas.cl takes the per-card 12 / 2 heads by define; its default lines keep
 # their preprocessed source). What a card's verify list at M = 1..4 binds (runtime::build_tp_verify, capture.cc) at
@@ -2140,6 +2176,27 @@ if(B70_MTP)
     add_ocloc_kernel(prep_silu_mul_M${MM}_S1 SOURCE ${PREP_CL} DEFINES M=${MM} SILU_S=1)
     list(APPEND GEMM_SM_CONSUMERS kernel_prep_silu_mul_M${MM}_S1)
   endforeach()
+  # Spec 32: the same rows at the deep lists' 32 / 64 rows (DEEP_W), each with the 256-GRF option from the row's
+  # kernels::SmallMTuning::g256_from on (GEMM_SM_QWEN38_G256: the row's flags with G256).
+  if(B70_VERIFY_M8)
+    set(GEMM_SM_QWEN38_G256 "5120 16384 1 1 MG G256" "6144 5120 4 0 MG G256 B2D" "5120 14336 2 0 MG G256 B2D"
+                            "5120 34816 1 0 WG MG G256 B2D" "17408 5120 4 0 MG G256 B2D" "5120 248320 1 2 WG G256")
+    set(GEMM_SM_G256_FROM 0 0 0 0 0 0)   # kSmallMTuning's g256_from of the six rows, in order (0: never)
+    foreach(MM ${DEEP_W})
+      foreach(i RANGE 5)
+        list(GET GEMM_SM_G256_FROM ${i} _from)
+        if(_from GREATER 0 AND NOT MM LESS _from)
+          list(GET GEMM_SM_QWEN38_G256 ${i} _row)
+        else()
+          list(GET GEMM_SM_QWEN38 ${i} _row)
+        endif()
+        separate_arguments(f UNIX_COMMAND "${_row}")
+        add_gemm_sm_variant(${MM} ${f})
+      endforeach()
+      add_ocloc_kernel(prep_silu_mul_M${MM}_S1 SOURCE ${PREP_CL} DEFINES M=${MM} SILU_S=1)
+      list(APPEND GEMM_SM_CONSUMERS kernel_prep_silu_mul_M${MM}_S1)
+    endforeach()
+  endif()
 endif()
 # Ornith's dense projections at its verify lists' M = 2..4 (kSmVerify4; spec 15e's block builds the lists' gemv)
 set(GEMM_SM_ORNITH "2048 12288 1 1 MG" "4096 2048 4 0 MG" "2048 9216 2 0 MG" "2048 128 1 1 MG" "2048 248320 1 2")

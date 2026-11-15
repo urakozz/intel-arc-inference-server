@@ -46,8 +46,8 @@ void check_sizes_qwen38() {
   const model::ModelDesc& q = model::qwen38();
   // buffers_test's tables at max_len 16384, every field.
   const runtime::PersistentSizes p = runtime::PersistentDims::sizes(16384, q);
-  // Open-work 28: Control 256 B, the conv ring 32 deep, the scratch 16 rows (twice every row term below).
-  CHECK_EQ(p.control, size_t{256});
+  // Open-work 28: the conv ring 32 deep, the scratch 16 rows (twice every row term below). Spec 32: Control 768 B.
+  CHECK_EQ(p.control, size_t{768});
   CHECK_EQ(p.gdn_state, size_t{150994944});
   CHECK_EQ(p.conv_ring, size_t{31457280});
   CHECK_EQ(p.kv_k, size_t{536870912});

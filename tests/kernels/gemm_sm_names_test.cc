@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
   for (const kernels::SmallMTuning& t : kernels::kSmallMTuning)
     if (t.layout != 2 && kernels::gemm_sm_out_s(t) != t.S)
       for (unsigned M : kernels::gemm_sm_built_m(t))
-        if (M <= 8 || (M == 16 && t.N == 34816)) want_c.insert(kernels::gemm_sm_silu_variant(M, t.N / 2, kernels::gemm_sm_out_s(t), t.S));
+        if (M <= 8 || (M >= 16 && t.N == 34816)) want_c.insert(kernels::gemm_sm_silu_variant(M, t.N / 2, kernels::gemm_sm_out_s(t), t.S));
   CHECK(want_c == consumers);
   std::set<std::string> want;
   for (const kernels::SmallMTuning& t : kernels::kSmallMTuning)

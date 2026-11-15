@@ -122,8 +122,11 @@ struct SmallMTuning {
   unsigned K, N, S, layout;
   bool wg, magic, grf256, blk2d;
   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head);
-  // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter)
+  // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter). kSmAll also 32 and 64 (spec 32).
   unsigned char mset = kSmAll;
+  // Spec 32: from this M on the variant carries 256 GRF (0: never; grf256 already means every M). GRF changes who
+  // holds a value, not the value, so it is the one knob that may vary with M (property R).
+  unsigned g256_from = 0;
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
     // Qwen3.8
@@ -244,7 +247,7 @@ static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #err
 // missing file at capture.
 inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   const std::string mk = "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N);
-  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 ? "_g256" : "") +
+  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 || (t.g256_from && M >= t.g256_from) ? "_g256" : "") +
                             (t.blk2d ? "_b2d" : "");
   if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
@@ -258,7 +261,7 @@ inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
     case kSmVerify8: return {2, 3, 4, 5, 6, 7, 8};
     case kSmDraft8: return {8};
     case kSmDraft7: return {7};
-    default: return {2, 3, 4, 5, 6, 7, 8, 16};
+    default: return {2, 3, 4, 5, 6, 7, 8, 16, 32, 64};   // 32 / 64: spec 32's deep verify lists
   }
 }
 inline constexpr const char* gemm_sm_entry(const SmallMTuning& t) { return t.layout == 2 ? "gemm_sm_i8w" : "gemm_sm"; }
@@ -467,6 +470,8 @@ inline constexpr unsigned kGdnPend = 30;    // Control::gdn_pend (gdn_step.cl's 
 inline constexpr unsigned kDraftStat = 28;  // Control::draft_stat[2] (open-work 13, draft_prob.cl's CTRL_DSTAT)
 inline constexpr unsigned kWideCur = 32;    // Control::wide_cur[16] (open-work 28: the 16-row builds' CTRL_CUR)
 inline constexpr unsigned kWideOut = 48;    // Control::wide_out[16] (their CTRL_OUT)
+inline constexpr unsigned kDeepCur = 64;    // Control::deep_cur[64] (spec 32: the 32- / 64-row builds' CTRL_CUR)
+inline constexpr unsigned kDeepOut = 128;   // Control::deep_out[64] (their CTRL_OUT)
 }  // namespace ctrl_index
 
 // The token-boundary kernels (src/kernels/embed_gather.cl, argmax.cl). `M` is
@@ -485,7 +490,9 @@ inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
 // Stage 2 is a single work-group that loops m < ctrl.n_active internally: no
 // variants at all, so the binary is named after the entry point.
 // Open-work 28: the 16-row list's stage 2 writes Control::wide_out and wide_cur[0] (CTRL_OUT 48, CTRL_CUR 32).
-inline std::string argmax_stage2_variant(unsigned M = 1) { return M > 8 ? "argmax_stage2_W16" : "argmax_stage2"; }
+inline std::string argmax_stage2_variant(unsigned M = 1) {
+  return M > 16 ? "argmax_stage2_W" + std::to_string(M) : M > 8 ? "argmax_stage2_W16" : "argmax_stage2";   // W32 / W64: spec 32
+}
 // Open-work 13: the draft's probability over a logits row of `rows` entries, `used` of them real ids
 // (src/kernels/draft_prob.cl: draft_prob_stage1 / _stage2 in one binary, WG 256, 1024 logits per stage-1 group).
 inline std::string draft_prob_variant(unsigned rows, unsigned used) {

@@ -1,7 +1,7 @@
 // gemm_sm_test - spec 28 N2 and N3 for the production small-M GEMM (plan 28b Task 1; box, one card).
 //
 // For every row of kernels::kSmallMTuning (src/kernels/kernels.h) at every M src/kernels/CMakeLists.txt builds
-// for it (M = 2..8 and 16; Ornith's rows at 2..4), on random weights
+// for it (M = 2..8, 16, 32 and 64; Ornith's rows at 2..4), on random weights
 // of the shape and random bf16 rows:
 //
 //   N2  the output (the S slices summed in s order, as the consumers fold them) against the fp64 reference
@@ -244,12 +244,12 @@ int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t s
   bf.sc = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, sb);
   if (t.layout == 2) imm.copy(bf.sc->ptr(), w.cs.data(), sb);
   if (t.layout == 0) imm.copy(bf.sc->ptr(), w.i4.scales.data(), sb);
-  bf.x = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, size_t(16) * t.K * 2);
-  bf.out_bytes = size_t(std::max(t.S, 1u)) * 16 * t.N * 4;
+  bf.x = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, size_t(Mmax) * t.K * 2);
+  bf.out_bytes = size_t(std::max(t.S, 1u)) * Mmax * t.N * 4;
   bf.out = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, bf.out_bytes);
 
-  // 16 random rows (bf16 in [-1, 1)), the fp64 reference over the checked columns.
-  const std::vector<uint16_t> x = random_bf16(size_t(16) * t.K, seed * 7 + 1);
+  // Mmax random rows (bf16 in [-1, 1)), the fp64 reference over the checked columns.
+  const std::vector<uint16_t> x = random_bf16(size_t(Mmax) * t.K, seed * 7 + 1);
   const std::vector<float> xf = gemm_sm::bf16_rows(x);
   const std::vector<uint32_t> cols = checked_columns(t.N);
   std::vector<double> ref, bound;
