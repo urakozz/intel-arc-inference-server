@@ -5,7 +5,7 @@ and a Level Zero walk of our own OpenCL C kernels for prefill.**
 
 ## Language and toolchain
 
-- **C++20**, `g++` and CMake for everything. No SYCL and no `icpx` in the engine build.
+- **C++23**, `g++` and CMake for everything. No SYCL and no `icpx` in the engine build.
 - **Level Zero** is the runtime. Device kernels are OpenCL C compiled offline
   with `ocloc` to device binaries and loaded with `zeModuleCreate`.
 - **Python appears exactly once**, in `tools/`, for offline weight conversion,

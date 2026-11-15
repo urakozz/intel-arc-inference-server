@@ -130,7 +130,7 @@ struct Step {
 // counts the output words that are finite bf16, so a case that only compares NaN to NaN is visible.
 size_t compare(pf_harness::Dev& d, Step& a, Step& b, size_t* finite) {
   size_t bad = 0;
-  for (const auto pair : {std::pair<l0::Mem*, l0::Mem*>{&a.partial, &b.partial}, {&a.out, &b.out}}) {
+  for (const auto& pair : {std::pair<l0::Mem*, l0::Mem*>{&a.partial, &b.partial}, {&a.out, &b.out}}) {
     std::vector<uint32_t> lhs(pair.first->size() / 4), rhs(lhs.size());
     d.imm.copy(lhs.data(), pair.first->ptr(), pair.first->size());
     d.imm.copy(rhs.data(), pair.second->ptr(), pair.second->size());
