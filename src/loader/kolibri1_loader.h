@@ -15,7 +15,7 @@
 // Spec 20c: Kolibri-1 on one or two B70s - the checkpoint's tensors in the layouts
 // src/kernels/kolibri/*.cl and the reused gemv / gemv_bf16 / gemv_i8w kernels read
 // (loader/kolibri1_layout.h sizes every allocation; loader/kolibri1_repack.h is the host half).
-// A loader BESIDE loader::load and load_k2 (spec 20 §4): their files are untouched; the public
+// A loader BESIDE loader::load (spec 20 §4): their files are untouched; the public
 // pieces are reused - resolve_snapshot, QuantConfig::parse, SafetensorsSet,
 // assert_quant_invariants, LinearSrc::classify, the int8 lm_head quantiser.
 //

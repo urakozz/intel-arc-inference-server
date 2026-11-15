@@ -15,7 +15,7 @@
 
 // Spec 21b Task 6: Qwen3.8-Flash-Next on one or two B70s - the checkpoint's tensors in the layouts
 // loader/qwen4exp_layout.h sizes (loader/qwen4exp_repack.h is the host half), the PLE table pinned in host USM
-// (loader/qwen4exp_ple.h). A loader BESIDE loader::load, load_k2 and load_kolibri1 (spec 21 §6): their files
+// (loader/qwen4exp_ple.h). A loader BESIDE loader::load and load_kolibri1 (spec 21 §6): their files
 // are untouched; the public pieces are reused - resolve_snapshot, QuantConfig::parse, SafetensorsSet,
 // assert_quant_invariants, check_quant_scan, LinearSrc::classify (its exact g128 -> g64 expansion), the int8
 // lm_head quantiser, rtn_int4_g64.
