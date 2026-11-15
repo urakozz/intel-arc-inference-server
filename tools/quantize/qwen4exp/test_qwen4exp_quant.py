@@ -291,6 +291,36 @@ def test_hash_tensors():
           f"= 21a's facts and transformers' builders; base 1000 likewise; the synthetic's I64 tensors = the formula")
 
 
+def test_scales_f16():
+    """scales_f16.py: bf16 scales that f16 holds exactly - normal ones and subnormals down to 2^-17 (1.0e-5, as
+    our RTN export's in_proj_qkv / in_proj_z carry) - are converted; one with no exact f16 value (2^-20 + 2^-27) is
+    refused and its shard left as it was."""
+    import subprocess
+    from safetensors import safe_open
+    from safetensors.torch import save_file
+    d = tempfile.mkdtemp(prefix="scales_f16_")
+    try:
+        good = torch.tensor([0.0, 1.0e-5, 2.0 ** -17, 3.0e-3, 1.5], dtype=torch.bfloat16)
+        save_file({"a.scales": good, "a.qweight": torch.zeros(4, dtype=torch.int32)}, os.path.join(d, "m1.safetensors"))
+        json.dump({"weight_map": {"a.scales": "m1.safetensors", "a.qweight": "m1.safetensors"}},
+                  open(os.path.join(d, "model.safetensors.index.json"), "w"))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "scales_f16.py"), d], capture_output=True, text=True)
+        assert r.returncode == 0 and "2 subnormal" in r.stdout, r.stdout + r.stderr
+        with safe_open(os.path.join(d, "m1.safetensors"), "pt") as f:
+            t = f.get_tensor("a.scales")
+        assert t.dtype == torch.float16 and torch.equal(t.float(), good.float())
+        bad = torch.tensor([2.0 ** -20 + 2.0 ** -27], dtype=torch.float32).to(torch.bfloat16)
+        assert bad.float().item() != bad.to(torch.float16).float().item()
+        save_file({"b.scales": bad}, os.path.join(d, "m2.safetensors"))
+        json.dump({"weight_map": {"b.scales": "m2.safetensors"}}, open(os.path.join(d, "model.safetensors.index.json"), "w"))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "scales_f16.py"), d], capture_output=True, text=True)
+        assert r.returncode != 0 and "no exact f16 value" in r.stdout, r.stdout + r.stderr
+        with safe_open(os.path.join(d, "m2.safetensors"), "pt") as f:
+            assert f.get_tensor("b.scales").dtype == torch.bfloat16
+    finally:
+        shutil.rmtree(d)
+
+
 def main(argv) -> None:
     tests = [(n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)]
     if argv:
