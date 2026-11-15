@@ -606,7 +606,8 @@ void test_slots_chunk_step_alternate() {
   Scheduler s(eng, SchedulerOptions{});
   Out a, b;
   CHECK(s.submit(req(P(41, 5), 300, a)) != nullptr);   // card 0 (2 free against 1): slot 0
-  for (int i = 0; i < 50 && a.ids.size() < 3; ++i) s.tick();
+  // A tick only polls the card's prefill (it runs on the card's thread): as drain, bound by ticks, not by time.
+  for (long i = 0; i < 1000000 && a.ids.size() < 3; ++i) s.tick();
   CHECK(a.ids.size() >= 3);
   CHECK(s.submit(req(P(42, 40), 4, b)) != nullptr);    // 1 free each: the lower slot, card 0's slot 1 - 5 chunks of 8
   drain(s);
