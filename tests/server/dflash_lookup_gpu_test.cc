@@ -205,6 +205,7 @@ int main(int argc, char** argv) {
     std::printf("SKIP: %s\n", ex.what());
     return 77;
   }
+  golden::load_end_of_turn(snap);
   l0::Context ctx(0);
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen, /*mtp=*/false, loader::LmHeadForm::Int8);
   loader::DFlashWeights w = loader::load_drafter(ctx, dsnap, model, loader::DraftFormat::Int8);

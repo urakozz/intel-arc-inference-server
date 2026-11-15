@@ -3,7 +3,13 @@
 rows whose bar was "greedy output identical to --spec off" (r2.auto_rows, r12.a4).
 
   serve_judge.py --dir D --ref ARM --dump DIR --judge DIR [--bf16 DIR] [--tag serve_int8] [--header FILE]
-                 [--vocab-used 248077]
+                 [--snapshot DIR] [--vocab-used 248077]
+
+THE END OF TURN (item 30 (3), operator 2026-11-15; golden_common.h turn_end): a server stops at the model's end-of-turn
+id and sends it, the arms run with ignore_eos. Each stream is graded up to and including its first end-of-turn id -
+the model's eos list, from --snapshot's generation_config.json, else the `eos [..]` list b70-serve printed in the arms'
+server.log. The rows after it are not graded and not counted (a rejected one is printed "past end of turn (row R): not
+graded"); a first difference after the shared end of turn is not judged at all (TURN, nothing dumped).
 
 Since the small-batch verify kernels (spec 28b / 28c) a speculative arm's verify rows round differently from the
 M = 1 rows, so its greedy stream may leave the plain one; identity is a recorded number, not the bar. The bar is
@@ -47,6 +53,7 @@ plan), else plain Python (slow, for tests).
 """
 import argparse
 import array
+import glob
 import json
 import math
 import os
@@ -194,17 +201,46 @@ def row_accepts(row, i, used):
     return i == top if len(s) == 1 else i in s
 
 
-def misses(j, force, used):
-    """[(row, f32 top, the forced id, its distance below the top in bf16 ulps of the top)] - the rows where the
-    judge rejects force[row] (spec_judge.h misses())."""
-    out = []
+def misses(j, force, used, graded):
+    """([(row, f32 top, the forced id, its distance below the top in bf16 ulps of the top)] of the rows < graded where
+    the judge rejects force[row], the same of the rows from graded on - past the stream's end of turn, not graded)
+    (spec_judge.h misses())."""
+    out, past = [], []
     for r, fid in enumerate(force):
         row = j.row(r)
         top, s, ulp = judge_row(row, used)
         if (fid == top) if len(s) == 1 else (fid in s):
             continue
-        out.append((r, top, fid, (float(row[top]) - float(row[fid])) / ulp))
-    return out
+        (out if r < graded else past).append((r, top, fid, (float(row[top]) - float(row[fid])) / ulp))
+    return out, past
+
+
+# ---- the end of turn (golden_common.h turn_end, item 30 (3), operator 2026-11-15) -------------------------------
+def turn_end(ids, stops):
+    """The graded rows of a generated stream: [0, turn_end) - up to and including its first end-of-turn id."""
+    return next((i + 1 for i, x in enumerate(ids) if x in stops), len(ids))
+
+
+def end_of_turn_ids(a):
+    """(ids, source): the model's eos list - --snapshot's generation_config.json eos_token_id (an integer or a list),
+    else the `eos [..]` list b70-serve printed at startup in the arms' server.log files (one list, or an error)."""
+    if a.snapshot:
+        p = os.path.join(a.snapshot, "generation_config.json")
+        with open(p, encoding="utf-8") as f:
+            e = json.load(f)["eos_token_id"]
+        return set(e if isinstance(e, list) else [e]), p
+    found = {}
+    for log in glob.glob(os.path.join(a.dir, "**", "server.log"), recursive=True):
+        with open(log, encoding="utf-8", errors="replace") as f:
+            m = re.search(r"\beos \[([0-9, ]+)\]", f.read())
+        if m:
+            found.setdefault(tuple(sorted(int(x) for x in m.group(1).split(","))), log)
+    if len(found) > 1:
+        raise SystemExit(f"serve_judge: the arms' server.log files print different eos lists: {sorted(found)}")
+    if found:
+        (ids, log), = found.items()
+        return set(ids), log
+    return set(), ""
 
 
 # ---- spec_judge.h kReviewedRows --------------------------------------------------------------------------------
@@ -258,7 +294,7 @@ def prompt_of(rec, root):
 
 
 class Verdict:
-    PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
+    PASS, FAIL, SKIP, TURN = "PASS", "FAIL", "SKIP", "TURN"   # TURN: identical to the shared end of turn
 
 
 def judge_pair(r0, r, a, cache, reviewed):
@@ -267,6 +303,10 @@ def judge_pair(r0, r, a, cache, reviewed):
     n = min(len(x), len(y))
     d = next((i for i in range(n) if x[i] != y[i]), n)
     where = f"at index {d} ({len(y)} vs {len(x)} ids)"
+    ex = turn_end(x, a.stops)
+    if ex <= d:
+        return Verdict.TURN, (f"{where}: past end of turn (row {d}): not graded - the streams are identical through "
+                              f"their shared end-of-turn id at {ex - 1}"), []
     if d == n:
         return Verdict.FAIL, f"{where}: one stream is a prefix of the other - a length difference, not judged: FAIL", []
     p0, p1 = prompt_of(r0, a.root), prompt_of(r, a.root)
@@ -284,14 +324,17 @@ def judge_pair(r0, r, a, cache, reviewed):
     dump(a.dump, ks, ctx, fs)
     tail = f" (ids [{n}, {max(len(x), len(y))}) of the longer stream have no counterpart: not judged)" \
         if len(x) != len(y) else ""
+    # each stream graded to its own end of turn: the judge rows [0, graded) of its suffix from d
+    gp, gs = min(ex, n) - d, min(turn_end(y, a.stops), n) - d
     if (kp, ks) not in cache:
-        cache[(kp, ks)] = judge_context(a, kp, ks, fp, fs, reviewed)
+        cache[(kp, ks)] = judge_context(a, kp, ks, fp, fs, gp, gs, reviewed)
     v, text, keys = cache[(kp, ks)]
     return v, f"{where}: {text}{tail}", keys
 
 
-def judge_context(a, kp, ks, fp, fs, reviewed):
-    """(verdict, text, awaiting keys) of one forced context pair: the plain suffix fp (key kp), the speculative fs."""
+def judge_context(a, kp, ks, fp, fs, gp, gs, reviewed):
+    """(verdict, text, awaiting keys) of one forced context pair: the plain suffix fp (key kp), the speculative fs,
+    each graded on its rows [0, gp) / [0, gs) - to its end of turn."""
     paths = {k: os.path.join(a.judge, k + ".golden.safetensors") for k in (kp, ks)}
     absent = [k for k in (kp, ks) if not os.path.exists(paths[k])]
     if absent:
@@ -302,7 +345,7 @@ def judge_context(a, kp, ks, fp, fs, reviewed):
     except (ValueError, KeyError) as e:
         return Verdict.FAIL, f"a reference does not fit its context: {e}: FAIL", []
     used = min(a.vocab_used, jp.V)
-    mp, ms = misses(jp, fp, used), misses(js, fs, used)
+    (mp, pp), (ms, ps) = misses(jp, fp, used, gp), misses(js, fs, used, gs)
     worst = max((m[3] for m in ms), default=0.0)
     ok = len(ms) <= len(mp) or worst <= NEAR_MISS_ULP
     lines = []
@@ -339,8 +382,14 @@ def judge_context(a, kp, ks, fp, fs, reviewed):
     v = Verdict.PASS if ok else Verdict.FAIL
     text = (f"the f32 judge rejects {len(ms)} speculative / {len(mp)} plain ids from there (worst "
             f"speculative miss {worst:.2f} ulp) - {v}")
+    if gs < len(fs) or gp < len(fp):
+        text += f"; graded to each stream's end of turn: {gs} speculative / {gp} plain of {len(fs)} rows"
     for ln in lines:
         text += "\n      ** the bf16-unstable rule (operator 2026-11-04): " + ln
+    for who, past in (("plain", pp), ("speculative", ps)):
+        for row, top, fid, g in past:
+            text += (f"\n      past end of turn (row {row}): not graded - the judge rejects the {who} id {fid} there, "
+                     f"{g:.2f} bf16 ulp below its top {top}")
     return v, text, []
 
 
@@ -354,6 +403,10 @@ def run(a):
         print(f"serve_judge: no requests of arm '{a.ref}' under {a.dir}")
         return 1
     ref = refs[min(refs)]
+    a.stops, src = end_of_turn_ids(a)
+    print(f"serve_judge: end of turn: ids {sorted(a.stops)} ({src}) - each stream graded up to and including its "
+          f"first one" if a.stops else
+          "serve_judge: end of turn: no eos list (no --snapshot, no server.log 'eos [..]' line) - every row graded")
     reviewed = reviewed_rows(a.header)
     cache = {}
     fail = skip = 0
@@ -361,7 +414,7 @@ def run(a):
     for (label, rnd), reqs in sorted(by.items(), key=lambda kv: (str(kv[0][0]), kv[0][1] or 0)):
         if label == a.ref:
             continue
-        c = {Verdict.PASS: 0, Verdict.FAIL: 0, Verdict.SKIP: 0}
+        c = {Verdict.PASS: 0, Verdict.FAIL: 0, Verdict.SKIP: 0, Verdict.TURN: 0}
         same = 0
         for key, r0 in sorted(ref.items()):
             r = reqs.get(key)
@@ -375,12 +428,13 @@ def run(a):
             v, text, keys = judge_pair(r0, r, a, cache, reviewed)
             c[v] += 1
             awaiting.update(keys)
-            word = "SKIP" if v == Verdict.SKIP else "JUDGE"
+            word = "SKIP" if v == Verdict.SKIP else "TURN" if v == Verdict.TURN else "JUDGE"
             print(f"{word} {label} r{rnd} vs {a.ref} {key[0]}/{key[1]} {text}")
         fail += c[Verdict.FAIL]
         skip += c[Verdict.SKIP]
         print(f"JUDGED {label} r{rnd} vs {a.ref}: {len(ref)} requests - {same} identical, {c[Verdict.PASS]} differ "
-              f"and pass the f32 judge, {c[Verdict.FAIL]} FAIL, {c[Verdict.SKIP]} SKIPPED (not judged)")
+              f"and pass the f32 judge, {c[Verdict.FAIL]} FAIL, {c[Verdict.SKIP]} SKIPPED (not judged), "
+              f"{c[Verdict.TURN]} differ only past the end of turn (not graded)")
     if awaiting:
         print(f"serve_judge: the contexts are dumped to {a.dump}; tools/box_validate/f32_refs.sh <data> forced-qwen "
               f"(QWEN_KEYS_RE='^{a.tag}_') makes their references into {a.judge}")
@@ -402,6 +456,8 @@ def main(argv=None):
     ap.add_argument("--bf16", default="", help="the bf16 top-k references (<key>.bf16top.safetensors)")
     ap.add_argument("--tag", default="serve_int8", help="the key's test tag (carries the head form)")
     ap.add_argument("--header", default=HEADER, help="spec_judge.h (its kReviewedRows)")
+    ap.add_argument("--snapshot", default="", help="the model's snapshot (its generation_config.json eos_token_id is "
+                    "the end of turn); default: the eos list in the arms' server.log")
     ap.add_argument("--vocab-used", type=int, default=VOCAB_USED)
     ap.add_argument("--root", default=ROOT)
     return run(ap.parse_args(argv))

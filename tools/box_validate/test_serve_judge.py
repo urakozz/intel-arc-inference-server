@@ -85,9 +85,10 @@ class Case:
         write_judge(os.path.join(self.judge, kp + ".golden.safetensors"), plain_rows, OFF[2:])
         write_judge(os.path.join(self.judge, ks + ".golden.safetensors"), spec_rows, SPEC[2:])
 
-    def run(self):
+    def run(self, *extra):
         r = subprocess.run([sys.executable, os.path.join(HERE, "serve_judge.py"), "--dir", self.dir, "--ref", "off",
-                            "--dump", self.dump, "--judge", self.judge, "--header", self.header, "--vocab-used", str(V)],
+                            "--dump", self.dump, "--judge", self.judge, "--header", self.header, "--vocab-used", str(V),
+                            *extra],
                            capture_output=True, text=True)
         return r.returncode, r.stdout + r.stderr
 
@@ -199,6 +200,71 @@ def test_structural_failures_and_unknown_prompt():
     rc, out = c.run()
     assert rc == 77, out
     assert "the context is unknown, not judged" in out
+
+
+def test_end_of_turn():
+    """Item 30 (3), operator 2026-11-15: each stream graded up to and including its first end-of-turn id (7 here)."""
+    off = [4, 5, 6, 7, 2, 2]                               # ends its turn at 3
+
+    def case(spec, plain_rows, spec_rows, log=True):
+        c = Case()
+        c.arm("off", 1, off)
+        c.arm("k3", 1, spec)
+        if log:                                            # the eos list b70-serve prints at startup
+            with open(os.path.join(c.dir, "off.r1", "server.log"), "w") as f:
+                f.write("b70-serve: ornith on http://127.0.0.1:8013, max_len 16384, eos [7], ...\n")
+        d = next(i for i in range(len(off)) if off[i] != spec[i])
+        ctx = PROMPT + off[:d]
+        for force, rows in ((off[d:], plain_rows), (spec[d:], spec_rows)):
+            k = sj.forced_key("serve_int8_golden_prose", ctx, force)
+            if rows:
+                write_judge(os.path.join(c.judge, k + ".golden.safetensors"), rows, force)
+        return c
+
+    # (a) both end at 3 (suffix row 1); the speculative rows after it rejected 80 ulp below: not graded - PASS
+    c = case([4, 5, 1, 7, 3, 3], [(6, {}), (7, {}), (2, {}), (2, {}), (0, {})],
+             [(1, {}), (7, {}), (0, {}), (0, {}), (0, {})])
+    rc, out = c.run()
+    assert rc == 0, out
+    assert "end of turn: ids [7]" in out, out
+    assert "rejects 0 speculative / 0 plain ids from there" in out, out
+    assert "graded to each stream's end of turn: 2 speculative / 2 plain of 4 rows" in out, out
+    assert "past end of turn (row 2): not graded - the judge rejects the speculative id 3" in out, out
+    rc, out = c.run("--snapshot", c.tmp)                   # without its generation_config.json: refused
+    assert rc != 0, out
+    with open(os.path.join(c.tmp, "generation_config.json"), "w") as f:
+        json.dump({"eos_token_id": 7}, f)
+    rc, out = c.run("--snapshot", c.tmp)
+    assert rc == 0 and "generation_config.json) - each stream graded" in out, out
+    # (b) the stop row itself is graded: the judge rejects the speculative end-of-turn id - FAIL
+    c = case([4, 5, 1, 7, 3, 3], [(6, {}), (7, {}), (2, {}), (2, {}), (0, {})],
+             [(1, {}), (0, {}), (3, {}), (3, {}), (0, {})])
+    rc, out = c.run()
+    assert rc == 1, out
+    assert "row 1: ids 0 (f32 top) / 7 (speculative)" in out, out
+    # (c) the streams end at different offsets: plain at 3, the speculative stream at 5. Plain's rejected rows after its
+    #     end do not count; the speculative stream is graded to its own end
+    c = case([4, 5, 1, 3, 3, 7], [(6, {}), (7, {}), (0, {}), (0, {}), (0, {})],
+             [(1, {}), (3, {}), (3, {}), (7, {}), (0, {})])
+    rc, out = c.run()
+    assert rc == 0, out
+    assert "graded to each stream's end of turn: 4 speculative / 2 plain of 4 rows" in out, out
+    assert "past end of turn (row 2): not graded - the judge rejects the plain id 2" in out, out
+    c = case([4, 5, 1, 3, 3, 7], [(6, {}), (7, {}), (0, {}), (0, {}), (0, {})],
+             [(1, {}), (3, {}), (0, {}), (7, {}), (0, {})])
+    rc, out = c.run()
+    assert rc == 1 and "row 2: ids 0 (f32 top) / 3 (speculative)" in out, out
+    # (d) a first difference after the shared end of turn: not judged, nothing dumped, no reference needed
+    c = case([4, 5, 6, 7, 1, 1], [], [], log=True)
+    rc, out = c.run()
+    assert rc == 0, out
+    assert "TURN k3 r1 vs off golden/prose at index 4 (6 vs 6 ids): past end of turn (row 4): not graded" in out, out
+    assert "1 differ only past the end of turn (not graded)" in out, out
+    assert not os.path.exists(c.dump), out
+    # without the eos list every row is graded, said so: the same difference awaits its references
+    c = case([4, 5, 6, 7, 1, 1], [], [], log=False)
+    rc, out = c.run()
+    assert rc == 77 and "no eos list" in out, out
 
 
 def test_reviewed_rows_of_the_header():

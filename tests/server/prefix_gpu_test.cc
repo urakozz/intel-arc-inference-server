@@ -222,6 +222,7 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
   const std::string jkey = golden::ForcedJudge::key("prefix_" + want.name.substr(0, 1), final_prompt, cand_tok);
   fj.dump(jkey, final_prompt, cand_tok);
   const std::unique_ptr<golden::Golden> judge = fj.open(jkey, kGen, Qwen35::kVocab);
+  const uint32_t turn = uint32_t(golden::turn_end(cand_tok.data(), kGen));   // judged to the end of turn
   uint32_t judge_cached = 0, judge_cold = 0;
   golden::CosRows cos_cached, cos_cold, cos_twin;   // each path's rows against the judge's
   rig.eng.reset();
@@ -238,7 +239,12 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     const golden::GoldenDecision gd =
         golden::golden_decision(ref.data(), Qwen35::kVocab, Qwen35::kVocabUsed);
     const uint32_t id = cand_tok[p];
-    if (judge) {
+    if (judge && p >= turn) {
+      const float* jl = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * Qwen35::kVocab);
+      const std::string past = golden::past_turn(jl + size_t(p) * Qwen35::kVocab, p, id, Qwen35::kVocab,
+                                                 Qwen35::kVocabUsed, "cached run's");
+      if (!past.empty()) std::printf("    %s\n", past.c_str());
+    } else if (judge) {
       const bool cached_ok = golden::judge_accepts(*judge, p, id, Qwen35::kVocab, Qwen35::kVocabUsed);
       const bool cold_ok = golden::judge_accepts(*judge, p, gd.set[0], Qwen35::kVocab, Qwen35::kVocabUsed);
       judge_cached += !cached_ok;
@@ -278,14 +284,14 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
   // Operator ruling 2026-10-31: with the judge's bf16 twin the bar is the twin's own count of rejected ids, not
   // the cold run's (an engine path like the cached one, with its own bf16-sized misses).
   const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, Qwen35::kVocab) : nullptr;
-  const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, kGen, Qwen35::kVocab, Qwen35::kVocabUsed) : 0;
+  const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, turn, Qwen35::kVocab, Qwen35::kVocabUsed) : 0;
   const uint32_t judge_bar = twin ? judge_twin : judge_cold;
   // Round 2 of the ruling: more misses than the twin pass by the near-miss rule (forced_judge.h NearMiss).
   golden::NearMiss nm;
   if (twin) {
     const float* tl = twin->f32("logits", size_t(twin->dim("logits", 2, 0)) * Qwen35::kVocab);
     const float* jl = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * Qwen35::kVocab);
-    for (uint32_t p = 0; p < kGen; ++p) {
+    for (uint32_t p = 0; p < turn; ++p) {
       cos_twin.c.push_back(golden::judge_cos(*judge, p, tl + size_t(p) * Qwen35::kVocab, Qwen35::kVocab, Qwen35::kVocabUsed));
       nm.add(p, jl + size_t(p) * Qwen35::kVocab, cand_tok[p], cand_rows[p].data(), tl + size_t(p) * Qwen35::kVocab,
              Qwen35::kVocab, Qwen35::kVocabUsed, "cached run's", true);
@@ -318,6 +324,7 @@ int main(int argc, char** argv) {
   // At 4096-row chunks the hook runs every 4096 positions, so f's 3500-id prompt has no block snapshot: cold.
   const bool wide = b70test::take_chunk_cap_arg(argc, argv) > runtime::PrefillScratchDims::kCDefault;
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  golden::load_end_of_turn(snap);
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
   if (argc > 3) CHECK(runtime::parse_prefill_backend(argv[3], backend));

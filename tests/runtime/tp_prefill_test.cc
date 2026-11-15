@@ -115,6 +115,7 @@ Record run(E& e, const Case& c, const Logits& logits, const std::function<void()
 
 int main(int argc, char** argv) {
   const std::string ckpt = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  golden::load_end_of_turn(ckpt);
   const runtime::KvCache kv = runtime::default_kv_cache();
   const uint32_t gpus = l0::Context::gpu_count();
   if (gpus < 2) {
@@ -263,7 +264,10 @@ int main(int argc, char** argv) {
       std::printf("  one card over TP's chunk list of long: first differs from one card's at id %zu, from tp's at id "
                   "%zu (of %u)\n", d, dt, kGen);
     }
-    if (v.v == greedy_tie::Verdict::Diverged) {
+    if (v.v == greedy_tie::Verdict::Diverged && golden::turn_end(g.ids.data(), g.ids.size()) <= v.at) {
+      std::printf("  first difference at id %zu: past end of turn (row %zu): not graded (golden_common.h turn_end)\n",
+                  v.at, v.at);
+    } else if (v.v == greedy_tie::Verdict::Diverged) {
       // The f32 judge decides (operator ruling 2026-10-29; tests/golden/forced_judge.h): the context is the prompt
       // and TP's own ids, the judge's row v.at the decision of TP's id there. Without a judge the case awaits one.
       const golden::ForcedJudge fj;

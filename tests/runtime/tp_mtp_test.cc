@@ -348,6 +348,7 @@ int cost(l0::Context& d0, l0::Context& d1, const std::string& ckpt, uint32_t dep
 
 int main(int argc, char** argv) {
   const std::string ckpt = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  golden::load_end_of_turn(ckpt);
   const std::string mode = argc > 2 ? argv[2] : "gate";
   const runtime::KvCache kv = runtime::default_kv_cache();
   if (mode == "rows1") {   // one card: its own lock (gpu_lock.sh card N)

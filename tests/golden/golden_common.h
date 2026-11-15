@@ -30,6 +30,7 @@
 #include "check.h"
 #include "common/bf16.h"
 #include "loader/safetensors.h"
+#include "loader/snapshot.h"
 #include "model/qwen35.h"
 
 namespace golden {
@@ -387,6 +388,52 @@ JudgedRow judge_row(const float* row, uint32_t n, uint32_t used) {
       if (double(row[j.top]) - double(row[i]) <= j.ulp) j.d.set.push_back(i);
   }
   return j;
+}
+
+// ---- the end of turn (item 30 (3), operator 2026-11-15) -----------------------------------
+// A real server stops at the model's end-of-turn id and sends it; the tests force a fixed length (ignore_eos), so a
+// generated stream can run on past it into text no server sends. Every judge grades a generated stream only up to
+// and including its first end-of-turn id: the rows after it are not graded and not counted as misses, and a row the
+// judge rejects there is printed "past end of turn (row R): not graded". The ids are the model's eos list - its
+// generation_config.json's eos_token_id (an integer or a list), the list b70-serve prints at startup - loaded once
+// per process from the test's snapshot (load_end_of_turn). Without it every row is graded, said so.
+inline std::vector<uint32_t>& end_of_turn_ids() {
+  static std::vector<uint32_t> ids;
+  return ids;
+}
+inline void load_end_of_turn(const std::string& snapshot) {
+  std::string p = snapshot + "/generation_config.json";   // an unresolvable snapshot: the test skips or fails on it
+  try {
+    p = loader::resolve_snapshot(snapshot) + "generation_config.json";
+  } catch (const std::exception&) {
+  }
+  std::vector<uint32_t>& ids = end_of_turn_ids();
+  ids.clear();
+  if (exists(p)) {
+    const common::json::Value g = loader::read_json(p);
+    if (const common::json::Value* e = g.find("eos_token_id")) {
+      if (e->is_array())
+        for (const common::json::Value& v : e->arr()) ids.push_back(uint32_t(v.num()));
+      else
+        ids.push_back(uint32_t(e->num()));
+    }
+  }
+  std::printf("end of turn: ");
+  if (ids.empty()) {
+    std::printf("no eos_token_id in %s - every generated row is graded\n", p.c_str());
+    return;
+  }
+  for (size_t i = 0; i < ids.size(); ++i) std::printf("%s%u", i ? ", " : "ids ", ids[i]);
+  std::printf(" (%s): a generated stream is graded up to and including its first one\n", p.c_str());
+}
+// The graded rows of a generated stream ids[0, n): [0, turn_end) - up to and including its first end-of-turn id
+// (n when it has none).
+template <class Id>
+size_t turn_end(const Id* ids, size_t n) {
+  const std::vector<uint32_t>& stop = end_of_turn_ids();
+  for (size_t i = 0; i < n; ++i)
+    if (std::find(stop.begin(), stop.end(), uint32_t(ids[i])) != stop.end()) return i + 1;
+  return n;
 }
 
 // The judge of one prompt: the bf16 golden's rows, teacher-forced on exactly its `tokens` (a

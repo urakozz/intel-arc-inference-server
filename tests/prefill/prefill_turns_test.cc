@@ -106,6 +106,7 @@ int main(int argc, char** argv) {
   CHECK(argc >= 3 && argc <= 4);
   const std::string kv_name = argv[2];
   const auto kv = runtime::parse_kv_cache(argv[2]);
+  golden::load_end_of_turn(argv[1]);
   std::vector<uint32_t> depths = {16000, 32000};
   if (argc > 3) {
     depths.clear();
@@ -154,8 +155,14 @@ int main(int argc, char** argv) {
         continue;
       }
       const float* jl = j->f32("logits", size_t(kGen + 1) * V);
+      const size_t end = golden::turn_end(r.ids.data(), kGen);   // graded to the end of turn (golden_common.h)
       for (uint32_t row = 0; row < kGen; ++row) {
         const float* jr = jl + size_t(row) * V;
+        if (row >= end) {
+          const std::string p = golden::past_turn(jr, row, r.ids[row], V, used, names[a]);
+          if (!p.empty()) std::printf("    %s\n", p.c_str());
+          continue;
+        }
         if (!golden::row_accepts(jr, r.ids[row], V, used)) {
           ++res[a].misses;
           const golden::JudgedRow t = golden::judge_row(jr, V, used);
@@ -164,8 +171,8 @@ int main(int argc, char** argv) {
         }
         res[a].cos.c.push_back(golden::row_cos(jr, r.logits[row].data(), used));
       }
-      std::printf("  %-5s run: the f32 judge rejects %u of %u ids; logits cos to the judge min / median %s\n", names[a],
-                  res[a].misses, kGen, res[a].cos.str().c_str());
+      std::printf("  %-5s run: the f32 judge rejects %u of %zu ids (to the end of turn, of %u); logits cos to the judge "
+                  "min / median %s\n", names[a], res[a].misses, end, kGen, res[a].cos.str().c_str());
     }
     if (!judged_all) continue;
     const double rmin = golden::cos_dist_ratio(res[1].cos.min(), res[0].cos.min());

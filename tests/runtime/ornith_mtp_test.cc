@@ -237,6 +237,7 @@ int main(int argc, char** argv) {
                 snap.c_str(), e.what());
     return 77;
   }
+  golden::load_end_of_turn(snap);
   l0::Context ctx(0);
   constexpr uint32_t kGen = 128;
   const char* const prompts[] = {"prose", "code", "cjk"};

@@ -621,6 +621,7 @@ bool s4(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts, const std::st
 
 int main(int argc, char** argv) {
   const std::string checkpoint = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  golden::load_end_of_turn(checkpoint);
   const uint32_t total = runtime::slots_kv_len(kSlots);
   l0::Context ctx(0);
   const bool mtp = !(argc > 3 && std::string(argv[2]) == "--mtp" && std::string(argv[3]) == "off");

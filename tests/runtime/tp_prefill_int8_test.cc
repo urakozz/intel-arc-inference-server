@@ -55,9 +55,15 @@ int gate(E& e, const std::vector<Case>& cases, const Pending& pending, const cha
       continue;
     }
     const float* rows = judge->f32("logits", size_t(kGen + 1) * model::Qwen35::kVocab);
+    const size_t end = golden::turn_end(c.ref.data(), kGen);   // graded to the end of turn (golden_common.h)
     for (uint32_t i = 0; i < kGen; ++i) {
       if (got[i] == c.ref[i]) continue;
       const float* row = rows + size_t(i) * model::Qwen35::kVocab;
+      if (i >= end) {
+        const std::string p = golden::past_turn(row, i, got[i], model::Qwen35::kVocab, model::Qwen35::kVocabUsed, label);
+        if (!p.empty()) std::printf("%s %s\n", c.name.c_str(), p.c_str());
+        continue;
+      }
       const golden::JudgedRow jr = golden::judge_row(row, model::Qwen35::kVocab, model::Qwen35::kVocabUsed);
       const double below = (double(row[jr.top]) - row[got[i]]) / jr.ulp;
       const bool accepted = golden::judge_accepts(*judge, i, got[i], model::Qwen35::kVocab,
@@ -93,6 +99,7 @@ int gate(E& e, const std::vector<Case>& cases, const Pending& pending, const cha
 
 int main(int argc, char** argv) {
   const std::string ckpt = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  golden::load_end_of_turn(ckpt);
   if (l0::Context::gpu_count() < 2) {
     std::printf("SKIP: TP int8 prefill needs two GPUs\n");
     return 77;
