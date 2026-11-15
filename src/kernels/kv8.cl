@@ -79,6 +79,17 @@
 #endif
 #endif
 
+// KV_PAGED (plan 19v3b Task 0: the KV page in positions, runtime::kKvPage; undefined on every other command line): the
+// writer, the decode reader, kv8_widen and the flash readers take the layer's whole cache (rows and scales) and a last
+// argument `pages` mapping the KV pages - position p (with BATCH_ROWS kv_base + p, the slot's first position in the
+// table's positions) is cache row pages[p / KV_PAGED] x KV_PAGED + p % KV_PAGED, its scale the same row of the scales.
+// Readers look a page up once per page (attn_v2.cl's KV_PAGED note; a flash tile of KT keys never crosses one) and read
+// through its base; every value and order is the contiguous kernel's. The widened scratch stays the sequence's own
+// positions, contiguous.
+#if defined(KV_PAGED) && KV8_GATE
+#error "kv8 KV_PAGED: the gate reads no KV"
+#endif
+
 #if KV8_DEC || KV8_FLASH
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -271,6 +282,9 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 #ifdef BATCH_ROWS
                             , __global const uint* restrict rows
 #endif
+#ifdef KV_PAGED
+                            , __global const uint* restrict pages
+#endif
                             ) {
   const uint wg = get_group_id(0);
   const uint m = get_group_id(1);
@@ -339,7 +353,14 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
         bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + HD + i)));
 #endif
   } else {
+#if defined(KV_PAGED)
 #ifndef BATCH_ROWS
+    const uint vp = pos + m;
+#else
+    const uint vp = kvb + pm;
+#endif
+    const size_t row = ((size_t)pages[vp / KV_PAGED] * KV_PAGED + vp % KV_PAGED) * KV_HEADS + h;
+#elif !defined(BATCH_ROWS)
     const size_t row = (size_t)(pos + m) * KV_HEADS + h;
 #else
     const size_t row = (size_t)(kvb + pm) * KV_HEADS + h;
@@ -495,6 +516,9 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
 #ifdef BATCH_ROWS
                                  , __global const uint* restrict rows
 #endif
+#ifdef KV_PAGED
+                                 , __global const uint* restrict pages
+#endif
                                  ) {
   const uint j = get_group_id(0);
   const uint blk = get_group_id(1);
@@ -517,6 +541,12 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
   const bool live0 = blk * s0 < pos + msplit;
   const bool live1 = msplit < n_act && blk * s1 < pos + n_act;
   if (!live0 && !live1) return;
+#ifdef KV_PAGED
+  // The first group's first page, read before q is staged so its latency hides behind that (the walk's first loads
+  // need it); a block past the sequence reads no entry.
+  const uint pg0v = blk * s0 / KV_PAGED;
+  const uint pg0p = live0 ? pages[pg0v] : 0u;
+#endif
 #else
   uint rp[M], rs[M], rb[M];   // attn_v2.cl's BATCH_ROWS build, line for line
   bool live = false;
@@ -565,11 +595,19 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
     mhi = mlo + 1;
     while (mhi < n_act && rs[mhi] == rs[mlo] && v2_ppw(rp[mhi] + 1) == s) ++mhi;
     const uint end = rp[mhi - 1] + 1;
+#ifndef KV_PAGED
     const size_t r0 = (size_t)rb[mlo] * KV_HEADS;   // the slot's first (position, kv head) row
     __global const char* restrict kv_k = kv_k_all + r0 * HD;
     __global const ushort* restrict k_scale = k_scale_all + r0;
     __global const char* restrict kv_v = kv_v_all + r0 * HD;
     __global const ushort* restrict v_scale = v_scale_all + r0;
+#else
+    __global const char* restrict kv_k = kv_k_all;
+    __global const ushort* restrict k_scale = k_scale_all;
+    __global const char* restrict kv_v = kv_v_all;
+    __global const ushort* restrict v_scale = v_scale_all;
+    const uint pgo = rb[mlo] / KV_PAGED;   // the slot's first page in the table
+#endif
 #endif
     const uint bstart = blk * s;
     if (bstart >= end) continue;
@@ -579,19 +617,57 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
 
     char kq[PER_LANE];
     float ksc, vreg[WAVE_P];
+#ifndef KV_PAGED
     load_k8(kv_k, k_scale, bstart + sgid, j, bstart + sgid <= last, kq, &ksc);
     load_v8(kv_v, v_scale, bstart, j, sgid, lane, last, vreg);
+#else
+#ifndef BATCH_ROWS
+    const uint pgo = 0;
+#endif
+    // Paged (attn_v2.cl's KV_PAGED walk): the loads take cache rows - a wave's positions plus its page's delta (the
+    // page's first cache row less its first position; uint arithmetic, wrapping) - through the unmoved bases, lastr the
+    // page's last readable cache row. The prefetch keeps the page of the wave PFD ahead (pdelta, plastr), looked up as
+    // it enters one, so a page's first waves are prefetched like any other.
+    uint pgv = bstart / KV_PAGED;
+#ifndef BATCH_ROWS
+    uint delta = (live0 && pgv == pg0v ? pg0p : pages[pgv]) * KV_PAGED - pgv * KV_PAGED;
+#else
+    uint delta = pages[pgo + pgv] * KV_PAGED - pgv * KV_PAGED;
+#endif
+    uint lastr = min(last, pgv * KV_PAGED + KV_PAGED - 1u) + delta;
+    uint ppv = pgv, pdelta = delta, plastr = lastr;
+    load_k8(kv_k, k_scale, bstart + sgid + delta, j, bstart + sgid <= last, kq, &ksc);
+    load_v8(kv_v, v_scale, bstart + delta, j, sgid, lane, lastr, vreg);
+#endif
     for (uint w = 0; w < nwaves; ++w, ++wc) {
       const uint p0 = bstart + w * WAVE_P;
       const uint buf = wc & 1u;
       // 3h: the wave PFD ahead into the cache - 64-byte quarters of its K rows (sub-groups
       // 0..3) and V rows (4..7), its K and V scales (8, 9). Hints only: no value depends on them.
+#ifndef KV_PAGED
       if (w + PFD < nwaves && sgid < 8u)
         intel_sub_group_2d_block_prefetch_16b_16r16x2c(
             (__global void*)((sgid < 4u ? (__global const char*)kv_k : kv_v) + (size_t)j * HD), HD,
             last + 1, KV_HEADS * HD, (int2)((int)(32u * (sgid & 3u)), (int)(p0 + PFD * WAVE_P)));
       if (w + PFD < nwaves && (sgid == 8u || sgid == 9u))
         prefetch((sgid == 8u ? k_scale : v_scale) + (size_t)(p0 + PFD * WAVE_P) * KV_HEADS, WAVE_P * KV_HEADS);
+#else
+      // Paged: the same hints at the cache rows of the wave PFD ahead (its page looked up as the prefetch enters it).
+      if (w + PFD < nwaves) {   // uniform
+        const uint pf0 = p0 + PFD * WAVE_P;
+        if (pf0 / KV_PAGED != ppv) {
+          ppv = pf0 / KV_PAGED;
+          pdelta = pages[pgo + ppv] * KV_PAGED - ppv * KV_PAGED;
+          plastr = min(last, ppv * KV_PAGED + KV_PAGED - 1u) + pdelta;
+        }
+        if (sgid < 8u)
+          intel_sub_group_2d_block_prefetch_16b_16r16x2c(
+              (__global void*)((sgid < 4u ? (__global const char*)kv_k : kv_v) + (size_t)j * HD), HD,
+              plastr + 1, KV_HEADS * HD, (int2)((int)(32u * (sgid & 3u)), (int)(pf0 + pdelta)));
+        if (sgid == 8u || sgid == 9u)
+          prefetch((sgid == 8u ? k_scale : v_scale) + (size_t)(pf0 + pdelta) * KV_HEADS, WAVE_P * KV_HEADS);
+      }
+#endif
 #pragma unroll
       for (uint pr = 0; pr < NPR; ++pr) {
         const uint m = pr / GQA;
@@ -667,8 +743,24 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
         acc[pr] = fma(acc[pr], rs_x[buf][pr], tsum);
       }
       if (w + 1 < nwaves) {
+#ifndef KV_PAGED
         load_k8(kv_k, k_scale, p0 + WAVE_P + sgid, j, p0 + WAVE_P + sgid <= last, kq, &ksc);
         load_v8(kv_v, v_scale, p0 + WAVE_P, j, sgid, lane, last, vreg);
+#else
+        const uint q0 = p0 + WAVE_P;
+        if (q0 / KV_PAGED != pgv) {   // uniform: the next wave starts a page (the prefetch's, unless it stopped short)
+          pgv = q0 / KV_PAGED;
+          if (pgv == ppv) {
+            delta = pdelta;
+            lastr = plastr;
+          } else {
+            delta = pages[pgo + pgv] * KV_PAGED - pgv * KV_PAGED;
+            lastr = min(last, pgv * KV_PAGED + KV_PAGED - 1u) + delta;
+          }
+        }
+        load_k8(kv_k, k_scale, q0 + sgid + delta, j, q0 + sgid <= last, kq, &ksc);
+        load_v8(kv_v, v_scale, q0 + delta, j, sgid, lane, lastr, vreg);
+#endif
       }
     }
 #pragma unroll
@@ -836,10 +928,21 @@ __attribute__((reqd_work_group_size(256, 1, 1)))
 __kernel void kv8_widen(__global const char* restrict K,
                        __global const char* restrict V,
                        __global ushort* restrict Kr,
-                       __global ushort* restrict Vr, uint count) {
+                       __global ushort* restrict Vr, uint count
+#ifdef KV_PAGED
+                       , __global const uint* restrict pages
+#endif
+                       ) {
   const size_t i = get_global_id(0) * 16u;
   if (i >= count) return;
+#ifndef KV_PAGED
   const char16 k = vload16(0, K + i), v = vload16(0, V + i);
+#else
+  // Position i / row's cache row (16 values never cross a row of KV8F_KV x HD).
+  const uint p = (uint)(i / (KV8F_KVU * HD));
+  const size_t src = ((size_t)pages[p / KV_PAGED] * KV_PAGED + p % KV_PAGED) * KV8F_KVU * HD + i % (KV8F_KVU * HD);
+  const char16 k = vload16(0, K + src), v = vload16(0, V + src);
+#endif
   vstore16(convert_ushort16(as_uint16(convert_float16(k)) >> 16), 0, Kr + i);
   vstore16(convert_ushort16(as_uint16(convert_float16(v)) >> 16), 0, Vr + i);
 }
@@ -860,7 +963,11 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
                                 __global const KV8_VALUE* restrict Vc,
                                 __global const ushort* restrict Vs,
                                 __global float* restrict O, uint pos, uint C, uint rows,
-                                __global float* restrict ML, uint span) {
+                                __global float* restrict ML, uint span
+#ifdef KV_PAGED
+                                , __global const uint* restrict pages
+#endif
+                                ) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);
   const uint hgs = KV8F_GQAU / HPW;
@@ -872,7 +979,11 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
                                 __global const ushort* restrict Ks,
                                 __global const KV8_VALUE* restrict Vc,
                                 __global const ushort* restrict Vs,
-                                __global float* restrict O, uint pos, uint C, uint rows) {
+                                __global float* restrict O, uint pos, uint C, uint rows
+#ifdef KV_PAGED
+                                , __global const uint* restrict pages
+#endif
+                                ) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);
   const uint h = j * KV8F_GQAU + get_group_id(2) * HPW + s / (RPW / 8u);
@@ -908,6 +1019,17 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
 #if !QREG
     LOAD_Q();
 #endif
+#ifdef KV_PAGED
+    // The tile's page (KT divides KV_PAGED and every tile start is a multiple of KT): its first cache row ppr, the
+    // tile's keys key - pgs + ppr there. The raw form reads the widened, contiguous rows and only the scales by page.
+    const uint pgs = t0 / KV_PAGED * KV_PAGED;
+    const size_t ppr = (size_t)pages[t0 / KV_PAGED] * KV_PAGED;
+#if !KV8_RAW
+    __global const KV8_VALUE* const Kp = Kc + ppr * KV8F_KVU * HD;
+    __global const KV8_VALUE* const Vp = Vc + ppr * KV8F_KVU * HD;
+    const int ph = (int)min(depth - pgs, (uint)KV_PAGED);   // the page's rows the surfaces may read
+#endif
+#endif
     float8 sacc[NKA];
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) sacc[b] = (float8)(0.0f);
@@ -928,9 +1050,15 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
 #pragma unroll
       for (uint b = 0; b < NKA; ++b) {
         uint k4[8], kb[16];
+#ifndef KV_PAGED
         intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
             (__global void*)Kc, KV8F_KV * HD, (int)depth, KV8F_KV * HD,
             (int2)((int)((j * HD + 16u * kk) / 4u), (int)(t0 + 16u * b)), k4);
+#else
+        intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+            (__global void*)Kp, KV8F_KV * HD, ph, KV8F_KV * HD,
+            (int2)((int)((j * HD + 16u * kk) / 4u), (int)(t0 - pgs + 16u * b)), k4);
+#endif
 #pragma unroll
         for (uint z = 0; z < 8u; ++z) {
           const uint2 pair = kv8_bf4(k4[z]);
@@ -948,8 +1076,14 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
     for (uint b = 0; b < NKA; ++b) {
       const uint key = t0 + 16u * b + l;
       const bool live = key < depth;
+#ifndef KV_PAGED
       const float sk = live ? kv8_flash_scale(Ks, (size_t)key * KV8F_KVU + j) : 0.0f;
       svl[b] = live ? kv8_flash_scale(Vs, (size_t)key * KV8F_KVU + j) : 0.0f;
+#else
+      const size_t krow = ppr + (key - pgs);
+      const float sk = live ? kv8_flash_scale(Ks, krow * KV8F_KVU + j) : 0.0f;
+      svl[b] = live ? kv8_flash_scale(Vs, krow * KV8F_KVU + j) : 0.0f;
+#endif
 #define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && live) ? (sacc[b].s##r * sk) * SCORE_SCALE : -INFINITY;
       MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
 #undef MASK
@@ -994,9 +1128,15 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
 #pragma unroll
         for (uint c = 0; c < 2u; ++c) {
           uint v4[8];
+#ifndef KV_PAGED
           intel_sub_group_2d_block_read_transform_8b_32r16x1c(
               (__global void*)Vc, KV8F_KV * HD, (int)depth, KV8F_KV * HD,
               (int2)((int)(j * HD + 16u * (dd + c)), (int)(t0 + 16u * b)), v4);
+#else
+          intel_sub_group_2d_block_read_transform_8b_32r16x1c(
+              (__global void*)Vp, KV8F_KV * HD, ph, KV8F_KV * HD,
+              (int2)((int)(j * HD + 16u * (dd + c)), (int)(t0 - pgs + 16u * b)), v4);
+#endif
 #pragma unroll
           for (uint z = 0; z < 8u; ++z) {
             const uint2 pair = kv8_bf4(v4[z]);

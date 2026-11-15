@@ -159,8 +159,8 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
 
 // Step 4 under --max-num-seqs (operator 2026-11-11): a card's `seqs` > 1 sequence slots (plan 13c), slot 0 the
 // largest context that fits beside seqs - 1 slots of SlotDims::kShortLen (auto) or exactly the asked N, refused with
-// the plan's numbers when it does not fit beside them. `m` is re-tabled at the slots' sum (one RoPE table, one KV
-// allocation). Returns the layout; prints the choice and the plan's breakdown like settle(). No drafter and no draft
+// the plan's numbers when it does not fit beside them. `m` is re-tabled at runtime::slots_kv_len (one RoPE table, one
+// KV allocation of the slots' pages). Returns the layout; prints the choice and the plan's breakdown like settle(). No drafter and no draft
 // vocabulary beside slots (refused before the load).
 inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg& a, uint32_t seqs,
                                           size_t reserve_bytes, const runtime::PrefillPath& path, runtime::KvCache kv) {
@@ -198,9 +198,8 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
                  len, runtime::kMaxLenQuantum, beside.c_str(), device / gb, reserve_bytes / gb, m.trained_max_len);
   else
     std::fprintf(stderr, "max_len: slot 0 %u (--max-len)%s\n", len, beside.c_str());
-  uint32_t total = 0;
-  for (uint32_t l : lens) total += l;
-  loader::set_max_len(ctx, m, total, len);   // slot 0 is the longest; the sum may pass the trained context
+  // slot 0 is the longest; the slots' page-rounded sum may pass the trained context
+  loader::set_max_len(ctx, m, runtime::slots_kv_len(lens), len);
   std::fprintf(stderr, "%s\n", runtime::describe(p, device, reserve_bytes).c_str());
   return lens;
 }

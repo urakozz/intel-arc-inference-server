@@ -303,7 +303,16 @@ namespace {
 constexpr size_t kCtl = sizeof(Control), kTable = 256;   // runtime::BatchRowTable (batch_rows.h)
 }  // namespace
 
-SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp) {
+uint32_t slots_kv_len(const std::vector<uint32_t>& lens) {
+  if (lens.empty()) throw std::invalid_argument("runtime::slots_kv_len: no slot");
+  if (lens.size() == 1) return lens[0];
+  uint64_t total = 0;
+  for (uint32_t l : lens) total += uint64_t(kv_pages(l)) * kKvPage;
+  if (total > 0xFFFFFFFFull) throw std::invalid_argument("runtime::slots_kv_len: the slots' positions overflow 32 bits");
+  return static_cast<uint32_t>(total);
+}
+
+SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages) {
   if (seqs == 0 || seqs > kMaxSeqs)
     throw std::invalid_argument("runtime::SlotDims::sizes: " + std::to_string(seqs) + " sequence slots is outside [1, " +
                                 std::to_string(kMaxSeqs) + "]");
@@ -313,6 +322,7 @@ SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp)
   s.states = mtp ? 0 : more * gdn_state_bytes(desc);
   s.rings = more * PersistentDims::sizes(0, desc).conv_ring;
   s.controls = draft_table_at(seqs) + kTable;
+  s.pages = size_t(kv_pages) * 4;
   return s;
 }
 // The controls block: [slot 1..seqs-1 Control][their head Control][rows][rows head][gather][draft head]

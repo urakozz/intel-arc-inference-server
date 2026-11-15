@@ -222,6 +222,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   pslot.gdn_state = sq.state0;
   pslot.conv_ring = sq.ring;
   pslot.kv_base = sq.base;
+  pslot.pages = sq.bind.pages;   // plan 19v3b Task 0: several slots' KV is paged
   const prefill::PrefillSlot* slot = slots() > 1 ? &pslot : nullptr;
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
@@ -252,7 +253,9 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
                       drafter_ ? &df_taps : nullptr, slot);
     if (mtp_)
       prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C, hid,
-                           mtp_->kv_lay.at_base(mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0), sq.base));
+                           mtp_->kv_lay.at_base(mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0),
+                                                pslot.pages ? 0 : sq.base),
+                           pslot.pages);
     pfx_->cx.wait();                       // the chunk's state has landed
     if (drafter_ && df_taps.r0 < C) drafter_project_staged(cpos + df_taps.r0, C - df_taps.r0);   // spec 19c
     if (mtp_)   // h_{end-1}: the next chunk's row 0, a snapshot's hidden, the first draft's h

@@ -931,7 +931,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     std::fprintf(stderr, "card %u: ", i);
     if (seqs > 1) {
       slot_lens = cli::settle_slots(c, model, a.max_len_arg, seqs, a.mem_reserve, pf, a.kv_cache);
-      for (uint32_t l : slot_lens) max_len += l;   // one RoPE table, one KV allocation at the slots' sum
+      max_len = runtime::slots_kv_len(slot_lens);   // one RoPE table, one KV allocation of the slots' pages
     } else {
       max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache, drafter_plan);
       slot_lens = {max_len};
@@ -1521,7 +1521,7 @@ int run(int argc, char** argv) {
   uint32_t max_len = 0;
   if (max_num_seqs > 1) {
     slot_lens = cli::settle_slots(context, model, max_len_arg, max_num_seqs, mem_reserve, pp_path, kv_cache);
-    for (uint32_t l : slot_lens) max_len += l;   // one RoPE table, one KV allocation at the slots' sum
+    max_len = runtime::slots_kv_len(slot_lens);   // one RoPE table, one KV allocation of the slots' pages
   } else {
     max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
     slot_lens = {max_len};

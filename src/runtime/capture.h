@@ -129,6 +129,9 @@ struct CapturedStep {
 // Spec 13c: `slot` - the sequence slot whose persistent state the list reads and writes, for an engine with several
 // (runtime::Engine's slots). Every pointer null and kv_base 0 (the default) binds exactly what the list always bound:
 // the same commands with the same arguments. build, build_verify and build_draft take it.
+// Plan 19v3b Task 0: `pages` set, the slot's KV is paged (runtime/buffer_sizes.h, SlotDims): every binary that reads or
+// writes the full-attention KV (main and head) is its paged twin (kernels::kv_paged) over the layer's whole cache, with
+// `pages` - the slot's first page table entry - as its last argument; kv_base then moves no pointer.
 struct SlotBind {
   void* control = nullptr;     // the slot's Control (null: DecodeBuffers::control)
   void* gdn_state = nullptr;   // its GDN state 0, one whole-model state (null: DecodeBuffers::gdn_state)
@@ -137,6 +140,7 @@ struct SlotBind {
   uint32_t kv_base = 0;        // its first position in the KV allocations, the main cache's and the head's
   void* hctl = nullptr;        // its head Control (null: MtpBuffers::hctl)
   void* hh = nullptr;          // its hh rows, bf16 [kM + 1][hidden] (null: MtpBuffers::hh)
+  const void* pages = nullptr; // plan 19v3b Task 0: its KV page table (null: the KV contiguous from kv_base)
 };
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
@@ -304,6 +308,9 @@ struct BatchRowsBind {
   const void* table = nullptr;          // bf16 rows of hidden the gather reads (embed_gather's `embed`)
   void* saved = nullptr;                // bf16 [M][hidden], rows of `table`: the rows' hidden
   void* hin = nullptr;                  // bf16 [M][hidden]: the head's input rows
+  // Plan 19v3b Task 0: the KV page table, every slot's (SlotBind's paged binding over the row builds' twins; a row's
+  // KV base is then its slot's first position in the table's positions). Null: the KV contiguous, kv_base apart.
+  const void* pages = nullptr;
 };
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
                         uint32_t M);
@@ -322,6 +329,7 @@ struct DraftRowsBind {
   void* head_rows = nullptr;   // runtime::BatchRowTable, shared: each row's draft position, KV base, slot
   void* dh = nullptr;          // bf16 [M][hidden]: in, each row's chain hidden; out, the next
   void* logits = nullptr;      // fp32 [M][kVocab]
+  const void* pages = nullptr; // plan 19v3b Task 0: the KV page table (BatchRowsBind's)
 };
 CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
                               const DraftRowsBind& dr, uint32_t M);

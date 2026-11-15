@@ -356,15 +356,31 @@ struct MtpDims {
 //   controls  shared memory: slots 1..seqs-1's Control (and with MTP their head's), the row
 //             lists' Control, head Control and gather Control, the row draft list's head Control,
 //             and their three row tables
+//   pages     the page table (plan 19v3b Task 0, below): one u32 a KV page of every slot, device memory
+//
+// The slots' KV in pages (plan 19v3b Task 0): every slot's full-attention KV - the main cache's layers and the MTP
+// head's - is whole pages of kKvPage positions. Slot q's KV range is kv_pages(len_q) pages from its KV base (a
+// multiple of kKvPage: the slots' summed page-rounded lengths before it), and the table maps the allocation's pages:
+// position p of slot q is row table[base_q / kKvPage + p / kKvPage] x kKvPage + p % kKvPage of every FA layer
+// (KvLayout's rows and scales). The engine fills the table once, the identity (slot q's pages are its range), so the
+// layout is the contiguous one; the kernels look a page up once per kKvPage keys. 2048 is the prefill chunk and the
+// prefix cache's snapshot stride. One slot has no table.
+inline constexpr uint32_t kKvPage = 2048;
+inline constexpr uint32_t kv_pages(uint32_t len) { return uint32_t((uint64_t(len) + kKvPage - 1) / kKvPage); }
+// The KV positions an engine of these slots allocates (its max_len, the loader's RoPE table's too): one slot its
+// length, several the sum of their lengths each rounded up to whole pages. Throws std::invalid_argument for no slot or
+// past 32 bits.
+uint32_t slots_kv_len(const std::vector<uint32_t>& lens);
 struct SlotSizes {
-  size_t states = 0, rings = 0, controls = 0;
-  size_t total() const { return states + rings + controls; }
+  size_t states = 0, rings = 0, controls = 0, pages = 0;
+  size_t total() const { return states + rings + controls + pages; }
 };
 struct SlotDims {
   static constexpr uint32_t kMaxSeqs = 4;         // slot 0 and at most 3 short slots (spec 13 §11.2)
   static constexpr uint32_t kShortLen = 32768;    // a short slot's positions (none shorter)
-  // All zero at seqs = 1. Throws std::invalid_argument outside [1, kMaxSeqs].
-  static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp);
+  // All zero at seqs = 1. Throws std::invalid_argument outside [1, kMaxSeqs]. `kv_pages`: the slots' KV pages
+  // (slots_kv_len / kKvPage), the page table's entries.
+  static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages = 0);
   // Byte offsets inside SlotBuffers::controls (a Control is 128 B, a row table 256 B).
   static size_t control_at(uint32_t seqs, uint32_t seq);        // slot seq's Control, 1 <= seq < seqs
   static size_t head_control_at(uint32_t seqs, uint32_t seq);   // its head's Control (MTP)

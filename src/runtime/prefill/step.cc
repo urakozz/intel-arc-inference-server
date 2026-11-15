@@ -100,7 +100,8 @@ void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_pre
 void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, void* ctrl, uint32_t pos,
                 uint32_t C, const model::LayerDesc& L, const loader::SmallTensors& small, uint8_t* gdn_base,
                 uint8_t* ring_base, uint32_t kv_base, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem, const KvLayout& kv,
-                PrefillBackend backend, Int8State* q, uint32_t& gdn, uint32_t& fa, float* out = nullptr) {
+                PrefillBackend backend, Int8State* q, uint32_t& gdn, uint32_t& fa, float* out = nullptr,
+                const void* pages = nullptr) {
   const model::ModelDesc& d = *m.desc;
   const uint32_t l = L.index;
   const bool kv8 = kv.form == KvCache::Int8;
@@ -147,17 +148,17 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   // ruling R5's, and ruling A14 retired it with the M = 64 route).
   if (kv8) {   // spec 12b: the same three launches over the int8 cache
     attn_prep_chunk_kv8(cx, kc, s, C, ctrl, s.partials.as<float>(),
-                        small.gdn.as<float>(), m.rope.as<float>(), lay);
+                        small.gdn.as<float>(), m.rope.as<float>(), lay, pages);
     profile_wait(cx, Phase::kAttnPrep);
-    attn_chunk_kv8(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), lay, backend);
+    attn_chunk_kv8(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), lay, backend, pages);
     attn_gate_chunk_kv8(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
                         s.mixer_out.as<uint16_t>());
   } else {
     attn_prep_chunk(cx, kc, s, C, ctrl, s.partials.as<float>(),
-                    small.gdn.as<float>(), m.rope.as<float>(), kk, vv);
+                    small.gdn.as<float>(), m.rope.as<float>(), kk, vv, pages);
     profile_wait(cx, Phase::kAttnPrep);
     if (!attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv, backend, s.partials.as<float>(),
-                    s.mixer_out.as<uint16_t>()))
+                    s.mixer_out.as<uint16_t>(), pages))
       attn_gate_chunk(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
                       s.mixer_out.as<uint16_t>());
   }
@@ -210,7 +211,9 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   // Spec 13c: a sequence slot's state, ring and KV range (step.h, PrefillSlot); the buffers' own otherwise.
   uint8_t* const gdn_base = static_cast<uint8_t*>(slot && slot->gdn_state ? slot->gdn_state : gdn_state_mem.ptr());
   uint8_t* const ring_base = static_cast<uint8_t*>(slot && slot->conv_ring ? slot->conv_ring : conv_ring_mem.ptr());
-  const uint32_t kv_base = slot ? slot->kv_base : 0;
+  // Plan 19v3b Task 0: a paged slot's layers are the whole cache, its rows found through its page table.
+  const void* const pages = slot ? slot->pages : nullptr;
+  const uint32_t kv_base = slot && !pages ? slot->kv_base : 0;
   bool resume = w.resume;
   bool normed = false;   // phase 3 Task 5: the previous layer's combine already wrote this layer's x
   for (const model::LayerDesc& L : d.layer_descs()) {
@@ -242,7 +245,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     }
 
     mixer_body(cx, kc, s, m, ctrl, pos, C, L, small, gdn_base, ring_base, kv_base, kv_k_mem, kv_v_mem, kv,
-               backend, q, gdn, fa);
+               backend, q, gdn, fa, nullptr, pages);
 
     // Spec 15d: a MoE model's FFN - the post-attention norm into x (pitch hidden), then
     // the routed experts and the shared expert through the grouped GEMMs, folded into
@@ -548,7 +551,7 @@ void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWe
 }  // namespace
 
 void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
-                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv) {
+                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv, const void* pages) {
   require(m.mtp != nullptr, "step_mtp_kv without the MTP head");
   // Spec 15e: a MoE head (Ornith's) fills its KV through this same front - fc, the input
   // norm, q||k||v, attn_prep; its MoE FFN never runs in prefill. The only MoE term is the
@@ -596,10 +599,10 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
               s.partials.as<float>(), h.qkv.shape.N);
   if (kv.int8())   // spec 12b: the head's KV in the main cache's form
     attn_prep_chunk_kv8(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
-                        m.rope.as<float>(), kv);
+                        m.rope.as<float>(), kv, pages);
   else
     attn_prep_chunk(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
-                    m.rope.as<float>(), static_cast<uint16_t*>(kv.k), static_cast<uint16_t*>(kv.v));
+                    m.rope.as<float>(), static_cast<uint16_t*>(kv.k), static_cast<uint16_t*>(kv.v), pages);
   profile_wait(cx, Phase::kAttnPrep);
 }
 

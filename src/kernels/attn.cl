@@ -354,6 +354,11 @@ inline float qkv_sum(__global const float* restrict p, uint m, size_t col) {
 // `rows` (runtime::BatchRowTable, words BROW_*), and row m's position and KV base come from it - RoPE at the row's
 // position, K / V at kv_base + position - instead of Control::pos + m. The chain is otherwise this one, token for
 // token, so a row equals the M = 1 kernel at that position over that slot's KV.
+//
+// KV_PAGED (plan 19v3b Task 0: the KV page in positions, runtime::kKvPage; undefined on every other command line):
+// kv_k / kv_v are the layer's whole cache and a last argument `pages` maps the KV pages - position p (pos + m, or
+// with BATCH_ROWS kv_base + position: the row table's KV base is then the slot's first position in the page table's
+// positions) is cache row pages[p / KV_PAGED] x KV_PAGED + p % KV_PAGED. The values written are unchanged.
 // ---------------------------------------------------------------------------
 #ifdef BATCH_ROWS
 #if !defined(BROW_WORDS) || !defined(BROW_POS) || !defined(BROW_KVB)
@@ -369,6 +374,9 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
                         __global ushort* restrict kv_k, __global ushort* restrict kv_v
 #ifdef BATCH_ROWS
                         , __global const uint* restrict rows
+#endif
+#ifdef KV_PAGED
+                        , __global const uint* restrict pages
 #endif
                         ) {
   const uint wg = get_group_id(0);
@@ -436,7 +444,14 @@ __kernel void attn_prep(__global const uint* restrict ctrl,
     attn_gate[((size_t)m * Q_HEADS + h) * HD + i] =
         bf16f(rne_bf16(qkv_sum(qkv_partials, m, base + HD + i)));
   } else {
+#if defined(KV_PAGED)
 #ifndef BATCH_ROWS
+    const uint vp = pos + m;
+#else
+    const uint vp = kvb + pm;
+#endif
+    const size_t slot = (((size_t)pages[vp / KV_PAGED] * KV_PAGED + vp % KV_PAGED) * KV_HEADS + h) * HD + i;
+#elif !defined(BATCH_ROWS)
     const size_t slot = ((size_t)(pos + m) * KV_HEADS + h) * HD + i;
 #else
     const size_t slot = ((size_t)(kvb + pm) * KV_HEADS + h) * HD + i;

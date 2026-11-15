@@ -34,4 +34,11 @@ inline std::string fa_suffix(unsigned q_heads, unsigned kv_heads) {
              : "_Q" + std::to_string(q_heads) + "KV" + std::to_string(kv_heads);
 }
 
+// Plan 19v3b Task 0: the sequence slots' KV in pages of kKvPage positions (runtime::kKvPage, CMake's KV_PAGE). The
+// paged twin of a binary that reads or writes the full-attention KV - the decode attention variants (kernels.h), their
+// row builds (batch_kernels.h) and the prefill writers and flash forms (prefill/pf_kernels.h) - is its name with
+// `_PG<page>` (-DKV_PAGED=<page>): it takes the layer's whole cache and the page table as a last argument.
+inline constexpr unsigned kKvPage = 2048;
+inline std::string kv_paged(const std::string& variant) { return variant + "_PG" + std::to_string(kKvPage); }
+
 }  // namespace kernels

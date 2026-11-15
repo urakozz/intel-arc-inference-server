@@ -309,6 +309,8 @@ set(ATTN_V2_TGT 32 CACHE INTERNAL
 # (cjk row 9 flips, spec 10 §8) and its build option is gone (zero-config cleanup, 2026-11-06).
 # EXP2=0 stays on the command lines, inert, so no existing binary's command line moves.
 set(ATTN_V2_EXP2 0)
+# Plan 19v3b Task 0: the positions a KV page of the sequence slots holds (the _PG<page> twins, below and in prefill/).
+set(KV_PAGE 2048 CACHE INTERNAL "positions a KV page holds; must equal runtime::kKvPage and kernels::kKvPage")
 foreach(MM 1 2 3 4)
   add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                    DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
@@ -799,6 +801,19 @@ if(B70_VERIFY_DPAS AND B70_MTP)
                          OPTIONS ${VDPAS_OPTIONS})
       endforeach()
     endif()
+  endif()
+  # Plan 19v3b Task 0: the slots' paged twins (block above) of the MTP verify lists' M = 2..4, both KV forms.
+  if(B70_VERIFY_M8 AND B70_KV8)
+    foreach(MM 2 3 4)
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_PG${KV_PAGE} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
+                               KV8=0 KV_PAGED=${KV_PAGE}
+                       OPTIONS ${VDPAS_OPTIONS})
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8_PG${KV_PAGE} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
+                               KV8=1 KV_PAGED=${KV_PAGE}
+                       OPTIONS ${VDPAS_OPTIONS})
+    endforeach()
   endif()
 endif()
 
@@ -1957,6 +1972,52 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   endforeach()
 endif()
 # ==== Spec 13a / 13c ==== (end) ====
+
+# ==== Plan 19v3b Task 0: the slots' KV in pages ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-11-13-spec19v3b-dflash-slots.md (Task 0). An engine with sequence slots holds every
+# slot's full-attention KV in pages of KV_PAGE positions behind a page table (runtime/buffer_sizes.h, SlotDims), and its
+# lists - every slot's, slot 0's too, and the row lists - bind these paged twins of the binaries that read or write the
+# KV: the name `_PG<page>` after the unpaged one's (kernels::kv_paged), -DKV_PAGED=<page>, and the table as a last
+# argument. Additive only: the KV_PAGED blocks are undefined on every other command line, so every other binary's
+# preprocessed source is unchanged; a one-slot engine binds none of these. The prefill twins are in
+# prefill/CMakeLists.txt.
+#   attn_prep_M<M>[_S1][_KV8]_PG<page>          the per-slot lists' writers (M = 1..4: plain, verify, the head's)
+#   attn_v2_M<M>_T32[_KV8]_PG<page>             their decode attention (and the head's draft attention)
+#   attn_prep_M<M>[_S1][_KV8]_ROWS_PG<page>     the row lists' (M = 2..8)
+#   attn_v2_M<M>_T32[_KV8]_ROWS_PG<page>
+#   attn_verify_dpas_M<M>_T32[_KV8]_PG<page>    the verify lists' DPAS attention (M = 2..4, VDPAS_LEVERS_PAIR)
+if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
+  set(PG _PG${KV_PAGE})
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(attn_prep_M${MM}${PG} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} KV_PAGED=${KV_PAGE})
+  endforeach()
+  foreach(MM 2 3 4 5 6 7 8)
+    add_ocloc_kernel(attn_prep_M${MM}_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_ROWS${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2}
+                             KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=2 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} KV_PAGED=${KV_PAGE})
+  endforeach()
+endif()
+# ==== Plan 19v3b Task 0 ==== (end; the DPAS twins follow spec 28c's block) ====
 
 # ==== Spec 28b: the small-M GEMM (gemm_sm.cl) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-10-27-spec28b-small-m-build.md. Additive only: no existing variant's name or

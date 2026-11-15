@@ -86,6 +86,8 @@ static_assert(offsetof(BatchRow, kv_base) == kernels::batch_row::kKvBase * 4, "B
 static_assert(offsetof(BatchRow, src) == kernels::batch_row::kSrc * 4, "BROW_SRC moved");
 static_assert(offsetof(BatchRow, dst) == kernels::batch_row::kDst * 4, "BROW_DST moved");
 static_assert(offsetof(BatchRow, slot) == kernels::batch_row::kSlot * 4, "BROW_SLOT moved");
+// Plan 19v3b Task 0: the KV page the _PG builds bake (KV_PAGE, src/kernels/CMakeLists.txt).
+static_assert(kKvPage == kernels::kKvPage, "the KV page: runtime/buffer_sizes.h and kernels/kernels.h (KV_PAGE)");
 
 // The captured list's M is `build`'s `M` argument (default 1, what ships). The
 // default build compiles M = 1 only (spec §9: the M loop exists in every
@@ -225,6 +227,7 @@ class Capture {
     br_ = &br;
     sb_.control = br.control;
     sb_.hctl = br.hctl;
+    sb_.pages = br.pages;
   }
   // Spec 17b: one TP card's decode list (M = 1).
   Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, l0::Mem* tap, const TpLink& link)
@@ -250,6 +253,7 @@ class Capture {
       : Capture(ctx, m, b, nullptr, nullptr, cap_m, &mtp, Mode::DraftRows) {
     dr_ = &dr;
     sb_.hctl = dr.hctl;
+    sb_.pages = dr.pages;
   }
 
   // Spec 28b: the test / probe override of runtime::gemv_kind (runtime/gemv_kind.h).
@@ -420,12 +424,12 @@ class Capture {
     // Spec 10: decode attention v2 bakes no MAXLEN (one binary per M, `_T<kAttnV2Blocks>`); spec 12b: the
     // int8 cache is read by its kv8 twin. (v1, which baked MAXLEN, was removed in the zero-config cleanup.)
     std::vector<std::string> attn_bins =
-        kv8_ ? std::vector<std::string>{kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
-             : std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)};
+        kv8_ ? std::vector<std::string>{pg(kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads))}
+             : std::vector<std::string>{pg(kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads))};
     // Spec 13a: a row list binds the `_ROWS` pair (attn_pair_rows), not the production one - which at M = 5..8 over
     // int8 KV nothing builds (B70_KV8's decode block stops at M = 4).
     if (mode_ == Mode::Rows)
-      attn_bins = {kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads)};
+      attn_bins = {pg(kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads))};
     // attn_part is sized by DecodeScratchDims::sizes: v2's fixed 32 blocks per row.
     require(b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_).attn_part,
             std::string("attn_part (") + std::to_string(b_.attn_part.size()) + " B) is smaller than decode attention "
@@ -438,8 +442,8 @@ class Capture {
                    ? verify_attn_kind(kCapM, vattn_keys_, kv8_, d_.fa_q_heads, d_.fa_kv_heads, opt_.force_attn)
                    : VerifyAttn::V2;
       if (vattn_ == VerifyAttn::Dpas)
-        attn_bins.push_back(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
-                                                              d_.fa_q_heads, d_.fa_kv_heads));
+        attn_bins.push_back(pg(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
+                                                                 d_.fa_q_heads, d_.fa_kv_heads)));
     }
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
@@ -578,7 +582,8 @@ class Capture {
       // Spec 12b: kv8.cl's attn_decode_v2_kv8 / attn_reduce_v2_kv8 - v2's grid, partials and
       // stride, reading int8 K / V and their fp16 scales; the reduce un-rotates each head's
       // output before the gate.
-      const std::string v = kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads);
+      const std::string v =
+          pg(kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads));
       {
         // Spec 28c: attn_verify_dpas_kv8 takes attn_decode_v2_kv8's arguments and writes its partials.
         l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2_kv8", kWgAttn);
@@ -589,6 +594,7 @@ class Capture {
         k.arg_ptr(4, kv.v);
         k.arg_ptr(5, kv.vs);
         k.arg_ptr(6, b_.attn_part.ptr());
+        if (sb_.pages) k.arg_ptr(7, sb_.pages);   // plan 19v3b Task 0
         launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
       }
       {
@@ -603,7 +609,8 @@ class Capture {
     }
     // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
     // row from Control::pos on the device, so one list serves every depth.
-    const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads);
+    const std::string v =
+        pg(kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads));
     {
       // Spec 28c: attn_verify_dpas takes attn_decode_v2's arguments and writes its partials.
       l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2", kWgAttn);
@@ -612,6 +619,7 @@ class Capture {
       k.arg_ptr(2, kk);
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
+      if (sb_.pages) k.arg_ptr(5, sb_.pages);   // plan 19v3b Task 0
       launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
     }
     // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
@@ -672,7 +680,7 @@ class Capture {
 
   // attn_prep's (or attn_prep_kv8's) row build over one KV layer; `s1` the MTP head's QKV_S 1 build.
   void attn_prep_rows(void* ctrl, const void* fa_small, const KvLayer& kv, bool s1, void* rows) {
-    l0::Kernel& k = kernel(kernels::attn_prep_rows_variant(kCapM, s1, kv8_, d_.fa_q_heads, d_.fa_kv_heads),
+    l0::Kernel& k = kernel(pg(kernels::attn_prep_rows_variant(kCapM, s1, kv8_, d_.fa_q_heads, d_.fa_kv_heads)),
                            kv8_ ? "attn_prep_kv8" : "attn_prep", kWgAttn);
     k.arg_ptr(0, ctrl);
     k.arg_ptr(1, b_.partials.ptr());
@@ -687,14 +695,15 @@ class Capture {
       k.arg_ptr(i++, kv.ks);
       k.arg_ptr(i++, kv.vs);
     }
-    k.arg_ptr(i, rows);
+    k.arg_ptr(i++, rows);
+    if (sb_.pages) k.arg_ptr(i, sb_.pages);   // plan 19v3b Task 0
     launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
   }
 
   // Decode attention v2's row build (bf16 or its kv8 twin): the layer's whole cache, each group at its slot's base.
   void attn_pair_rows(void* ctrl, const KvLayer& kv) {
     const std::string v =
-        kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads);
+        pg(kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads));
     {
       l0::Kernel& k = kernel(v, kv8_ ? "attn_decode_v2_kv8" : "attn_decode_v2", kWgAttn);
       uint32_t i = 0;
@@ -705,7 +714,8 @@ class Capture {
       k.arg_ptr(i++, kv.v);
       if (kv8_) k.arg_ptr(i++, kv.vs);
       k.arg_ptr(i++, b_.attn_part.ptr());
-      k.arg_ptr(i, rows_table());
+      k.arg_ptr(i++, rows_table());
+      if (sb_.pages) k.arg_ptr(i, sb_.pages);   // plan 19v3b Task 0
       launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
     }
     {
@@ -722,8 +732,8 @@ class Capture {
   // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
   // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
   l0::Kernel& dpas_kernel() {
-    l0::Kernel& k = kernel(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
-                                                             d_.fa_q_heads, d_.fa_kv_heads),
+    l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
+                                                                d_.fa_q_heads, d_.fa_kv_heads)),
                            kv8_ ? "attn_verify_dpas_kv8" : "attn_verify_dpas", 0);
     ze_kernel_properties_t p{};
     p.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
@@ -1252,8 +1262,9 @@ class Capture {
     // This FA layer's KV cache slices - bf16 [max_len][4][256] each, indexed by
     // absolute position inside the kernels; at int8 (spec 12b) the int8 rows and their
     // fp16 scales [max_len][4] (KvLayout).
-    // Spec 13c: at the bound slot's KV base (0: the allocation's first position).
-    const KvLayer kv = b_.kv_lay.at_base(b_.kv_lay.layer(b_.kv_k.ptr(), b_.kv_v.ptr(), f), sb_.kv_base);
+    // Spec 13c: at the bound slot's KV base (0: the allocation's first position). Plan 19v3b Task 0: paged, the
+    // layer's whole cache (the kernels find the slot's rows through its page table).
+    const KvLayer kv = b_.kv_lay.at_base(b_.kv_lay.layer(b_.kv_k.ptr(), b_.kv_v.ptr(), f), kv_base());
     void* kk = kv.k;
     void* vv = kv.v;
     // attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v)
@@ -1265,7 +1276,8 @@ class Capture {
     else if (kv8_) {
       // Spec 12b: kv8.cl's attn_prep_kv8 - attn_prep's chain, then q rotated (attn_q stays
       // fp32) and K, V rotated and quantised into the int8 rows + scales. Two more args.
-      l0::Kernel& k = kernel(kernels::attn_prep_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
+      l0::Kernel& k =
+          kernel(pg(kernels::attn_prep_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads)), "attn_prep_kv8", kWgAttn);
       k.arg_ptr(0, ctrl());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, small_of(layer).gdn.ptr());
@@ -1276,9 +1288,10 @@ class Capture {
       k.arg_ptr(7, kv.v);
       k.arg_ptr(8, kv.ks);
       k.arg_ptr(9, kv.vs);
+      if (sb_.pages) k.arg_ptr(10, sb_.pages);   // plan 19v3b Task 0
       launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
     } else {
-      l0::Kernel& k = kernel(kernels::attn_prep_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep", kWgAttn);
+      l0::Kernel& k = kernel(pg(kernels::attn_prep_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads)), "attn_prep", kWgAttn);
       k.arg_ptr(0, ctrl());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, small_of(layer).gdn.ptr());
@@ -1287,6 +1300,7 @@ class Capture {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, kk);
       k.arg_ptr(7, vv);
+      if (sb_.pages) k.arg_ptr(8, sb_.pages);   // plan 19v3b Task 0
       launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
     }
     // Decode attention (attn_pair): v2's fixed grid of (4 kv-heads, kAttnV2Blocks) work-groups, the
@@ -1649,7 +1663,8 @@ class Capture {
     if (mode_ == Mode::Rows || mode_ == Mode::DraftRows)   // spec 13a / 13c: the head's rows over its own table
       attn_prep_rows(hctl(), h.fa.ptr(), kv, true, mode_ == Mode::Rows ? br_->head_rows : dr_->head_rows);
     else if (kv8_) {   // spec 12b: the head's KV in the main cache's form
-      l0::Kernel& k = kernel(kernels::attn_prep_s1_kv8_variant(kCapM, hd_.fa_q_heads, hd_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
+      l0::Kernel& k = kernel(pg(kernels::attn_prep_s1_kv8_variant(kCapM, hd_.fa_q_heads, hd_.fa_kv_heads)),
+                             "attn_prep_kv8", kWgAttn);
       k.arg_ptr(0, hctl());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, h.fa.ptr());
@@ -1660,9 +1675,11 @@ class Capture {
       k.arg_ptr(7, kv.v);
       k.arg_ptr(8, kv.ks);
       k.arg_ptr(9, kv.vs);
+      if (sb_.pages) k.arg_ptr(10, sb_.pages);   // plan 19v3b Task 0: the head's layer has the slot's pages too
       launch(k, hd_.fa_q_heads + hd_.fa_kv_heads, kCapM);
     } else {
-      l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM, hd_.fa_q_heads, hd_.fa_kv_heads), "attn_prep", kWgAttn);
+      l0::Kernel& k =
+          kernel(pg(kernels::attn_prep_s1_variant(kCapM, hd_.fa_q_heads, hd_.fa_kv_heads)), "attn_prep", kWgAttn);
       k.arg_ptr(0, hctl());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, h.fa.ptr());
@@ -1671,14 +1688,19 @@ class Capture {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, kv.k);   // layer 0 of the head's cache (at the bound slot's base)
       k.arg_ptr(7, kv.v);
+      if (sb_.pages) k.arg_ptr(8, sb_.pages);   // plan 19v3b Task 0: the head's layer has the slot's pages too
       launch(k, hd_.fa_q_heads + hd_.fa_kv_heads, kCapM);
     }
   }
 
   // The MTP head's one KV layer (MtpBuffers::kv_lay), either form.
   KvLayer head_kv() const {
-    return mtp_->kv_lay.at_base(mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0), sb_.kv_base);
+    return mtp_->kv_lay.at_base(mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0), kv_base());
   }
+  // Plan 19v3b Task 0: the bound slot's KV base as a pointer offset - 0 when it is paged (capture.h, SlotBind).
+  uint32_t kv_base() const { return sb_.pages ? 0 : sb_.kv_base; }
+  // The binary a KV site binds: its paged twin when the slot is paged.
+  std::string pg(const std::string& v) const { return sb_.pages ? kernels::kv_paged(v) : v; }
 
   // The verify list's tail: only the head's K/V of the M rows are needed (the next
   // drafts attend over them); its output hidden and logits are not, so the walk stops

@@ -335,6 +335,29 @@ if(B70_KV8)
   add_ocloc_kernel(pf_attn_gate_kv8 SOURCE ${KV8_CL} DEFINES KV8_GATE=1)
 endif()
 
+# Plan 19v3b Task 0 (src/kernels/CMakeLists.txt's block of that name): a slot's prefill over its paged KV - the writers
+# and the flash forms Qwen3.8's slots run, each its unpaged twin's command line plus KV_PAGED (the name `_PG<page>`).
+# The merge and the gates read no KV. Additive only.
+if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
+  add_ocloc_kernel(pf_attn_prep_q16_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 KV_PAGED=${KV_PAGE})
+  add_ocloc_kernel(pf_flash_attn_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV_PAGED=${KV_PAGE} OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_split_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 SPLIT=1 KV_PAGED=${KV_PAGE}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_attn_prep_kv8_PG${KV_PAGE} SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1 KV_PAGED=${KV_PAGE})
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_PG${KV_PAGE} SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV_PAGED=${KV_PAGE}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_kv8_split_PG${KV_PAGE} SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV_PAGED=${KV_PAGE}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_split_PG${KV_PAGE} SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV_PAGED=${KV_PAGE}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+endif()
+
 # --- Spec 15d: Ornith 1.5 35B-A3B prefill (model::ornith()) -------------------------------
 # Additive only: every binary above keeps its name and its command line (tools/kernel_cmdlines
 # diff), and the .cl edits that made the prefill head counts overridable (GDN_K_HEADS /

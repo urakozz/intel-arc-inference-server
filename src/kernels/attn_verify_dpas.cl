@@ -207,6 +207,34 @@
 #error "attn_verify_dpas: SLM over 128 KB (q staging + slice merge)"
 #endif
 
+// KV_PAGED (plan 19v3b Task 0: the KV page in positions, runtime::kKvPage; undefined on every other command line): the
+// KV arguments are the layer's whole cache and a last argument `pages` maps the KV pages - key p is cache row
+// pages[p / KV_PAGED] x KV_PAGED + p % KV_PAGED (its scales the same row). A tile (KT keys from a multiple of KT) is in
+// one page: the walk looks the page up when a tile starts in another one, and every K / V read and scale load of the
+// tile goes through that page (KV_K / KV_V / KV_KS / KV_VS), its surface rows the page's up to `end` (KV_H), its keys
+// page-relative (KV_Y, KV_KEY). Masks and bounds stay in the walk's positions. Unpaged the names below are the
+// arguments and the walk's own values, token for token.
+#ifdef KV_PAGED
+#if EAGER || KV_PAGED % KT != 0
+#error "attn_verify_dpas KV_PAGED: the DPAS kernel, whole tiles a page"
+#endif
+#define KV_K kpg
+#define KV_V vpg
+#define KV_KS kspg
+#define KV_VS vspg
+#define KV_H ph
+#define KV_Y(t) ((t) - pgs)
+#define KV_KEY(k) ((k) - pgs)
+#else
+#define KV_K kv_k
+#define KV_V kv_v
+#define KV_KS k_scale
+#define KV_VS v_scale
+#define KV_H end
+#define KV_Y(t) t
+#define KV_KEY(k) k
+#endif
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline ushort rne_bf16(float f) {
   uint u = as_uint(f);
@@ -416,9 +444,9 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #define S_ATOM(sacc_b, kbase)                                                                          \
   _Pragma("unroll") for (uint kp = 0; kp < NDA / 2; ++kp) {                                           \
     uint k8[8];                                                                                       \
-    intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)kv_k, KV_HEADS * HD, (int)end, \
+    intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)KV_K, KV_HEADS * HD, (int)KV_H, \
                                                         KV_HEADS * HD,                                \
-                                                        (int2)((int)((j * HD + 32u * kp) / 4u), (int)(kbase)), k8); \
+                                                        (int2)((int)((j * HD + 32u * kp) / 4u), (int)(KV_Y(kbase))), k8); \
     _Pragma("unroll") for (uint h = 0; h < 2u; ++h) {                                                 \
       const uint kk = 2u * kp + h;                                                                    \
       uint kb[8];                                                                                     \
@@ -434,9 +462,9 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #define S_ATOM(sacc_b, kbase)                                                                          \
   _Pragma("unroll") for (uint kk = 0; kk < NDA; ++kk) {                                               \
     uint kb[8];                                                                                       \
-    intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)kv_k, KV_HEADS * HD * 2, (int)end, \
+    intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)KV_K, KV_HEADS * HD * 2, (int)KV_H, \
                                                         KV_HEADS * HD * 2,                            \
-                                                        (int2)((int)((j * HD + 16u * kk) / 2u), (int)(kbase)), kb); \
+                                                        (int2)((int)((j * HD + 16u * kk) / 2u), (int)(KV_Y(kbase))), kb); \
     S_DPAS(sacc_b, kk, kb)                                                                            \
   }
 #endif
@@ -460,7 +488,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #define S_MASK(sacc_b, kbase)                                                                          \
   {                                                                                                   \
     const int key = (int)((kbase) + l);                                                               \
-    const float sk = (uint)key < end ? kv8_f16f(k_scale[(size_t)key * KV_HEADS + j]) : 0.0f;          \
+    const float sk = (uint)key < end ? kv8_f16f(KV_KS[(size_t)KV_KEY(key) * KV_HEADS + j]) : 0.0f;    \
     _Pragma("unroll") for (uint r = 0; r < 8u; ++r)                                                   \
       sacc_b[r] = key <= bnd[r] ? (sacc_b[r] * sk) * SSCALE : -INFINITY;                              \
   }
@@ -475,7 +503,11 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* restrict attn_q, KV_ARGS,
-                    __global float* restrict attn_part) {
+                    __global float* restrict attn_part
+#ifdef KV_PAGED
+                    , __global const uint* restrict pages
+#endif
+                    ) {
   const uint j = get_group_id(0), blk = get_group_id(1);
   const uint lid = get_local_id(0);
   const uint sgid = get_sub_group_id(), l = get_sub_group_local_id();
@@ -551,6 +583,33 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   for (uint dd = 0; dd < NDD; ++dd) o[dd] = (float8)(0.0f);
 #endif
   float8 mrow = (float8)(-INFINITY), lsum = (float8)(0.0f);
+#ifdef KV_PAGED
+  // The page the reads are at: virtual page pgv (from position pgs), its rows and scales.
+  uint pgv = ~0u, pgs = 0;
+#if KV8
+  __global const char* kpg = kv_k;
+  __global const char* vpg = kv_v;
+  __global const ushort* kspg = k_scale;
+  __global const ushort* vspg = v_scale;
+#else
+  __global const ushort* kpg = kv_k;
+  __global const ushort* vpg = kv_v;
+#endif
+#define KV_PAGE_AT(t)                                                                   \
+  if ((t) / KV_PAGED != pgv) {                                                          \
+    pgv = (t) / KV_PAGED;                                                               \
+    pgs = pgv * KV_PAGED;                                                               \
+    const size_t pr = (size_t)pages[pgv] * KV_PAGED * KV_HEADS;                         \
+    kpg = kv_k + pr * HD;                                                               \
+    vpg = kv_v + pr * HD;                                                               \
+    KV_PAGE_SCALES(pr)                                                                  \
+  }
+#if KV8
+#define KV_PAGE_SCALES(pr) kspg = k_scale + (pr); vspg = v_scale + (pr);
+#else
+#define KV_PAGE_SCALES(pr)
+#endif
+#endif
 
   for (uint g = 0; g < 2; ++g) {
     const bool live = g ? live1 : live0;
@@ -567,12 +626,16 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
       const uint ti = k + it * KS;
       const uint t0 = bstart + ti * KT;
       const bool act = ti < ntile, qk = act && !helper;
+#ifdef KV_PAGED
+      if (act) { KV_PAGE_AT(t0) }
+      const int ph = (int)min(end - pgs, (uint)KV_PAGED);   // the page's rows the surfaces may read
+#endif
 #if PVX
       if (helper && act) {                      // the step's V rows into the cache while the pairs compute S
         for (uint c = qi - RB * DS; c < HD * (KV8 ? 1u : 2u) / 64u; c += PVX)
           intel_sub_group_2d_block_prefetch_16b_32r16x2c(
-              (__global void*)((__global const char*)kv_v + (size_t)j * HD * (KV8 ? 1u : 2u)), HD * (KV8 ? 1 : 2),
-              (int)end, KV_HEADS * HD * (KV8 ? 1 : 2), (int2)((int)(32u * c), (int)t0));
+              (__global void*)((__global const char*)KV_V + (size_t)j * HD * (KV8 ? 1u : 2u)), HD * (KV8 ? 1 : 2),
+              (int)KV_H, KV_HEADS * HD * (KV8 ? 1 : 2), (int2)((int)(32u * c), (int)KV_Y(t0)));
       }
 #endif
       // ---- S's key atom ds, scaled and masked, swapped with the pair's other atom ----
@@ -596,12 +659,16 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #pragma unroll
         for (uint b = 0; b < NKA; ++b) {
           const uint key = t0 + 16u * b + l;
-          svl[b] = key < end ? kv8_f16f(v_scale[(size_t)key * KV_HEADS + j]) : 0.0f;
+          svl[b] = key < end ? kv8_f16f(KV_VS[(size_t)KV_KEY(key) * KV_HEADS + j]) : 0.0f;
         }
 #endif
 #else
     for (uint ti = k; ti < ntile; ti += KS) {   // uniform per sub-group; no barrier inside
       const uint t0 = bstart + ti * KT;
+#ifdef KV_PAGED
+      KV_PAGE_AT(t0)
+      const int ph = (int)min(end - pgs, (uint)KV_PAGED);
+#endif
       {
         // ---- S = q K^T over 16 dim atoms ----
         float8 sacc[NKA];
@@ -621,8 +688,8 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
           for (uint b = 0; b < NKA; ++b) {
             uint kb[8];
             intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
-                (__global void*)kv_k, KV_HEADS * HD * 2, (int)end, KV_HEADS * HD * 2,
-                (int2)((int)((j * HD + 16u * kk) / 2u), (int)(t0 + 16u * b)), kb);
+                (__global void*)KV_K, KV_HEADS * HD * 2, (int)KV_H, KV_HEADS * HD * 2,
+                (int2)((int)((j * HD + 16u * kk) / 2u), (int)(KV_Y(t0) + 16u * b)), kb);
             sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa, as_int8(vload8(0, kb)), sacc[b]);
 #if QSPLIT
             sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(ql, as_int8(vload8(0, kb)), sacc[b]);
@@ -640,7 +707,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
           S_MASK(sacc[b], t0 + 16u * b)
 #if KV8
           const uint key = t0 + 16u * b + l;
-          svl[b] = key < end ? kv8_f16f(v_scale[(size_t)key * KV_HEADS + j]) : 0.0f;
+          svl[b] = key < end ? kv8_f16f(KV_VS[(size_t)KV_KEY(key) * KV_HEADS + j]) : 0.0f;
 #endif
           tmax = fmax(tmax, sacc[b]);
         }
@@ -717,7 +784,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #if KV8
           uint v4[8];
           intel_sub_group_2d_block_read_transform_8b_32r16x1c(
-              (__global void*)kv_v, KV_HEADS * HD, (int)end, KV_HEADS * HD, (int2)((int)(j * HD + dim0), (int)t0), v4);
+              (__global void*)KV_V, KV_HEADS * HD, (int)KV_H, KV_HEADS * HD, (int2)((int)(j * HD + dim0), (int)KV_Y(t0)), v4);
 #pragma unroll
           for (uint i = 0; i < 8u; ++i) {
             const uint2 pw = kv8_bf4(v4[i]);
@@ -726,7 +793,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
           }
 #else
           intel_sub_group_2d_block_read_transform_16b_32r16x1c(
-              (__global void*)kv_v, KV_HEADS * HD * 2, (int)end, KV_HEADS * HD * 2, (int2)((int)(j * HD + dim0), (int)t0),
+              (__global void*)KV_V, KV_HEADS * HD * 2, (int)KV_H, KV_HEADS * HD * 2, (int2)((int)(j * HD + dim0), (int)KV_Y(t0)),
               vb);
 #endif
 #pragma unroll
@@ -757,8 +824,8 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
               // rows past `end` read as 0), then each key pair as two exact bf16
               uint v4[8];
               intel_sub_group_2d_block_read_transform_8b_32r16x1c(
-                  (__global void*)kv_v, KV_HEADS * HD, (int)end, KV_HEADS * HD,
-                  (int2)((int)(j * HD + dim0 + 16u * c), (int)(t0 + 16u * b)), v4);
+                  (__global void*)KV_V, KV_HEADS * HD, (int)KV_H, KV_HEADS * HD,
+                  (int2)((int)(j * HD + dim0 + 16u * c), (int)(KV_Y(t0) + 16u * b)), v4);
 #pragma unroll
               for (uint i = 0; i < 8u; ++i) {
                 const uint2 pw = kv8_bf4(v4[i]);
@@ -768,8 +835,8 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
             }
 #else
             intel_sub_group_2d_block_read_transform_16b_32r16x2c(
-                (__global void*)kv_v, KV_HEADS * HD * 2, (int)end, KV_HEADS * HD * 2,
-                (int2)((int)(j * HD + dim0), (int)(t0 + 16u * b)), vb);
+                (__global void*)KV_V, KV_HEADS * HD * 2, (int)KV_H, KV_HEADS * HD * 2,
+                (int2)((int)(j * HD + dim0), (int)(KV_Y(t0) + 16u * b)), vb);
 #endif
 #pragma unroll
             for (uint c = 0; c < 2u; ++c)

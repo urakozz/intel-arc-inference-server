@@ -298,11 +298,13 @@ struct MtpBuffers : MtpDims {
 //   rings     slots 1..seqs-1's conv ring, one whole-model ring each, slot-major
 //   controls  shared: their Control blocks, their head Control blocks, the row lists' Control / head Control /
 //             gather Control and the two row tables, at SlotDims' offsets
+//   pages     device: the KV page table (plan 19v3b Task 0), `kv_pages` u32 - the engine writes it; zero() keeps it
 struct SlotBuffers : SlotDims {
-  SlotBuffers(l0::Context& ctx, const model::ModelDesc& desc, uint32_t seqs, bool mtp);
+  SlotBuffers(l0::Context& ctx, const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages);
   std::unique_ptr<l0::Mem> states;
   l0::Mem rings;
   l0::Mem controls;
+  l0::Mem pages;
   uint32_t seqs;
 
   size_t bytes() const;

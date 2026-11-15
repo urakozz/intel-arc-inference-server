@@ -49,11 +49,14 @@ struct PrefillTaps {
 // (one whole-model state / ring each, in place of gdn_state_mem / conv_ring_mem, which then only size-check the
 // layout) and its KV range from `kv_base` (every layer's rows and scales moved there, KvLayout::at_base: the
 // attention writes and reads the slot's positions only). `pos` is the slot's own position. Null is the walk
-// above, unchanged.
+// above, unchanged. Plan 19v3b Task 0: `pages` set (the slot's KV page table, its first entry), the KV range is
+// paged - the attention's paged twins (runtime/prefill/attn.h) over each layer's whole cache; kv_base moves no
+// pointer then.
 struct PrefillSlot {
   void* gdn_state = nullptr;
   void* conv_ring = nullptr;
   uint32_t kv_base = 0;
+  const void* pages = nullptr;
 };
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C,
@@ -168,9 +171,11 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Lo
 // reads. `hctl` must hold pos = max(pos, 1) - 1 and n_active = the row count (the
 // caller sets both, like Control before step_chunk). L0 backends only (pf_gemm).
 // `kv` is the head's one layer (MtpBuffers::kv_lay.layer(...)): bf16, or (spec 12b) the
-// int8 rows and scales, written by attn_prep_chunk_kv8.
+// int8 rows and scales, written by attn_prep_chunk_kv8. Plan 19v3b Task 0: `pages` a slot's KV page table (the
+// layer whole), as PrefillSlot's.
 void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
-                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv);
+                 void* hctl, uint32_t pos, uint32_t C, uint16_t* hid, const KvLayer& kv,
+                 const void* pages = nullptr);
 // Rows step_mtp_kv runs the head over, and its L0 launches (for the arithmetic).
 inline uint32_t mtp_kv_rows(uint32_t pos, uint32_t C) { return pos == 0 ? C - 1 : C; }
 size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
