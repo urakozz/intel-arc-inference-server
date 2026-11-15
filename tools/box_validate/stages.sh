@@ -2014,10 +2014,10 @@ st_r36_hostbw() {
   grab_all hostbw '^po hostbw ' 8
   finish
 }
-stage r36.pin 36 default gpu - r36.build,r36.links "P0.5: probe_offload pin --dev both - the largest single pinned range (doubling from 1 GiB, then bisection to 1 GiB) and 48 per-layer ranges + the PLE's 16 + 16 shards: where it fails, MemAvailable before / after, s per GB, every page's tag read back on both cards (SKIP 'host RAM' below 110 GB available or with a container up)"
+stage r36.pin 36 default gpu - r36.build,r36.links "P0.5: probe_offload pin --dev 0, then --dev both - the largest single pinned range (doubling from 1 GiB, then bisection to 1 GiB; one card only: a range above 4 GiB both cards map hangs the driver) and the whole model's host side in pieces of at most 2 GiB (the PLE's 16 + 16 shards, 48 mirrors of the experts not in VRAM at f 0.80): where it fails, MemAvailable before / after, s per GB, every page's tag read back on each card (SKIP 'host RAM' below 110 GB available or with a container up)"
 st_r36_pin() {
   local off="$DATA/oracle-out-q4exp-offload"
-  chk "a=\$(awk '/^MemAvailable:/ { print int(\$2 / 1048576) }' /proc/meminfo); c=\$(docker ps -q 2>/dev/null | wc -l); if [ \"\$a\" -lt 110 ] || [ \"\$c\" -gt 0 ]; then echo \"SKIP_REASON host RAM: MemAvailable \$a GB (< 110) or \$c container(s) up - the pinned arms never run beside a CPU oracle\"; exit 77; fi; ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_offload pin --dev both | tee $off/po-pin.txt" \
+  chk "a=\$(awk '/^MemAvailable:/ { print int(\$2 / 1048576) }' /proc/meminfo); c=\$(docker ps -q 2>/dev/null | wc -l); if [ \"\$a\" -lt 110 ] || [ \"\$c\" -gt 0 ]; then echo \"SKIP_REASON host RAM: MemAvailable \$a GB (< 110) or \$c container(s) up - the pinned arms never run beside a CPU oracle\"; exit 77; fi; ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_offload pin --dev 0 | tee $off/po-pin.txt && ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_offload pin --dev both | tee -a $off/po-pin.txt" \
     "pinned capacity and the page tags"
   grab_all pin '^po pin .*(cap_gib|single_largest|ranges|FAIL|SKIP)' 8
   finish

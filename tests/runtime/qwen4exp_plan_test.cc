@@ -142,9 +142,51 @@ int main(int argc, char** argv) {
     const std::vector<rq::DevicePlan> full = rq::plan(*d, Q4Placement::two(*d, rq::pp_split(*d, 32768, true, false).split),
                                                       32768, true, false);
     CHECK(full[0].whole && !rq::fits(full, caps, kReserve));
-    throws_naming("whole model needs the expert-offload tier", [&] { rq::require_fits(full, caps, kReserve); });
-    throws_naming("expert-offload tier", [&] { rq::require_fits(full, caps, kReserve); });
+    throws_naming("its routed experts partly in host memory", [&] { rq::require_fits(full, caps, kReserve); });
     throws_naming(std::to_string(kCard) + " B", [&] { rq::require_fits(full, caps, kReserve); });
+  }
+  // plan 21v2a Task 8: the expert tier - the whole model on two cards with the budget's fill fits (each device's
+  // arenas within its cache: the same count a layer), the planned weights less the host experts; the fill takes the
+  // top n by the profile (ties to the lower id) or by id; the forced placements; a model that does not fit even with
+  // every expert on host is refused naming the host bytes.
+  {
+    const size_t eb = loader::q4_gate_up_block_bytes(ours) + loader::q4_down_block_bytes(ours);
+    const Q4Placement p2 = Q4Placement::two(ours, rq::pp_split(ours, 32768, true, true, true).split);
+    const rq::ExpertBudget b = rq::expert_budget(ours, p2, 32768, true, true, true, caps, kReserve);
+    std::vector<uint32_t> prof(size_t(ours.layers) * ours.experts, 7);
+    for (uint32_t l = 0; l < ours.layers; ++l) prof[size_t(l) * ours.experts + 500] = 9;   // expert 500 the most routed
+    const rq::ExpertTier t = rq::fill_tier(ours, b, &prof);
+    std::vector<rq::DevicePlan> pl = rq::plan(ours, p2, 32768, true, true, false, true);
+    const size_t w0 = pl[0].weights;
+    rq::apply_tier(pl, ours, t);
+    CHECK(rq::fits(pl, caps, kReserve) && !t.all());
+    for (uint32_t dev = 0; dev < 2; ++dev) {
+      const uint32_t n = t.n_vram(b.first[dev]);
+      CHECK_EQ(size_t(n), b.cache[dev] / (size_t(b.end[dev] - b.first[dev]) * eb));
+      for (uint32_t l = b.first[dev]; l < b.end[dev]; ++l) {
+        CHECK_EQ(t.n_vram(l), n);
+        CHECK(t.resident(l, 500) && t.resident(l, 0) && t.resident(l, n - 2) && !t.resident(l, n - 1));
+      }
+      CHECK_EQ(pl[dev].host_experts, size_t(pl[dev].routed_experts - pl[dev].vram_experts) * eb);
+    }
+    CHECK_EQ(w0 - pl[0].weights, pl[0].host_experts);
+    CHECK_EQ(pl[0].host_experts + pl[1].host_experts, t.host_bytes(ours));
+    const rq::ExpertTier byid = rq::fill_tier(ours, b, nullptr);
+    CHECK(byid.resident(3, 0) && !byid.resident(3, ours.experts - 1) && byid.n_vram(3) == t.n_vram(3));
+    CHECK(rq::fill_tier(ours, b, nullptr, "all").all() && rq::fill_tier(ours, b, nullptr, "none").host_bytes(ours) ==
+                                                          size_t(ours.layers) * ours.experts * eb);
+    const rq::ExpertTier r1 = rq::fill_tier(ours, b, nullptr, "random:0.5:7"), r2 = rq::fill_tier(ours, b, nullptr, "random:0.5:7");
+    CHECK(r1.vram == r2.vram && r1.n_vram(0) == ours.experts / 2 && r1.vram != rq::fill_tier(ours, b, nullptr, "random:0.5:8").vram);
+    const rq::ExpertTier adv = rq::fill_tier(ours, b, &prof, "adversarial");
+    CHECK(!adv.resident(0, 500) && adv.n_vram(0) == t.n_vram(0));
+    throws_naming("all, none, random", [&] { rq::fill_tier(ours, b, nullptr, "half"); });
+    std::vector<rq::DevicePlan> tiny = rq::plan(ours, p2, 32768, true, true, false, true);
+    rq::apply_tier(tiny, ours, rq::fill_tier(ours, b, nullptr, "none"));
+    const std::array<size_t, runtime::kPpDevices> small = {size_t(4e9), size_t(4e9)};
+    throws_naming("routed experts in pinned host memory", [&] { rq::require_fits(tiny, small, kReserve); });
+    std::printf("21v2a: the whole model with the tier at 32768 on two cards: %u / %u experts a layer resident (f %.3f), "
+                "%.2f GB pinned\n", t.n_vram(0), t.n_vram(47), 1.0 - double(t.host_bytes(ours)) / (48.0 * 512 * eb),
+                t.host_bytes(ours) / 1e9);
   }
   {
     const Qwen4ExpDesc t38 = rq::truncated(intel, 38);
@@ -234,7 +276,7 @@ int main(int argc, char** argv) {
     const Q4Placement p38 = rq::placement_for(i38, 2, 32768, true, false, kCard, kReserve);
     CHECK(rq::fits(rq::plan(i38, p38, 32768, true, false), caps, kReserve));
     const Q4Placement p48 = Q4Placement::two(intel, rq::pp_split(intel, 32768, true, false).split);
-    throws_naming("whole model needs the expert-offload tier", [&] { rq::require_fits(rq::plan(intel, p48, 32768, true, false), caps, kReserve); });
+    throws_naming("its routed experts partly in host memory", [&] { rq::require_fits(rq::plan(intel, p48, 32768, true, false), caps, kReserve); });
     const std::vector<rq::DevicePlan> pd = rq::plan(i18, Q4Placement::one(i18), 32768, true, false, true);
     CHECK_EQ(pd[0].scratch, rq::scratch_sizes(i18, 32768, F).total() + rq::tap_bytes(i18));
     std::printf("21c: %zu launches a token at 48 layers on one card (flash), %zu eager, %zu injected, 75 at --layers 4, "
@@ -409,7 +451,7 @@ int main(int argc, char** argv) {
                 budget_path ? budget_path : "");
   }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
-              "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused naming the expert-offload tier\n",
+              "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused without the expert tier\n",
               n_intel_1, n_intel_2, b16, b16 / 1e9, f32, f32 / 1e9);
   return 0;
 }

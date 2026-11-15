@@ -528,10 +528,11 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
                              "and the hand-off writes it (docs/10-the-box.md)");
-  const cq::Settled s = cq::settle(full, da, dev);
+  const cq::Settled s = cq::settle(full, da, dev, a.snapshot_dir);
   loader::Q4LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head());
+    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head(),
+                                 s.tier ? &*s.tier : nullptr);
   }();
   std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode until the expert tier is built)\n",
              model.desc.layers, model.checkpoint_layers);

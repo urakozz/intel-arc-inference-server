@@ -26,10 +26,13 @@
 //   hostbw  P0.4  a STREAM triad over 3 x 2 GiB on 1 and on all hardware threads (GPUs idle); then arm C on both
 //                 cards (the zero-copy aggregate) with the CPU idle, beside a 64 MiB copy loop on one thread
 //                 (PROPOSED stand-in for the server's per-token host work), and beside the all-thread triad.
-//   pin     P0.5  the largest pinned host allocation as one range (doubling from 1 GiB, then bisection to 1 GiB),
-//                 then 48 per-layer ranges of 1,336,934,400 B + the PLE's 16 + 16 shards (21b's rule): where it
-//                 fails, MemAvailable before / after, seconds per GB; every range tagged per 2 MiB page by the host
-//                 and read back by po_page_check on each card. Never above MemAvailable - 16 GiB (spec 7's rule).
+//   pin     P0.5  the largest pinned host allocation as one range (doubling from 1 GiB, then bisection to 1 GiB) -
+//                 one card only (--dev 0 or 1): a range above 4 GiB that both cards map hung the driver (2026-11-11),
+//                 so with --dev both this arm is skipped; then the whole model's host side in pieces of at most
+//                 2 GiB - the PLE's 16 + 16 shards and 48 per-layer mirrors of the experts not in VRAM (--resident-f,
+//                 0.80: 102 experts a layer, 266,342,400 B): where it fails, MemAvailable before / after, seconds per
+//                 GB; every piece tagged per 2 MiB page by the host and read back by po_page_check on each card.
+//                 Never above MemAvailable - 16 GiB (spec 7's rule).
 //   alias   P0.5  a model-sized allocation history on the card (18 layers' allocations at 21b's sizes, the int8 head,
 //                 the PLE pointer table; then freed), then one device arena of --arena-gb (22): po_page_tag writes a
 //                 salted tag at every 2 MiB page, po_page_check gathers them, the host compares; a second salt
@@ -105,6 +108,7 @@ struct Opts {
   std::vector<uint32_t> pairs = {1, 2, 7, 26};
   uint32_t reps = 5, n = 10000, replay_pairs = 7;
   double arena_gb = 22, seconds = 20, max_gb = 0, timeout_s = 20;
+  double resident_f = 0.80;   // pin: the share of each layer's experts in VRAM - the mirror pins the rest
   uint64_t timeout_ns() const { return uint64_t(timeout_s * 1e9); }
 };
 Opts g_opt;
@@ -1228,8 +1232,11 @@ int pin_mode() {
   const auto populated = [](uint64_t before, uint64_t after, double bytes) {
     return bytes > 0 && before > after ? double(before - after) / bytes : 0.0;
   };
-  // 1. one range: doubling from 1 GiB, then bisection to 1 GiB
-  {
+  // 1. one range: doubling from 1 GiB, then bisection to 1 GiB - one card only (no range above 4 GiB both map)
+  if (dv.cards.size() > 1) {
+    std::printf("po pin dev=%s single skipped=1 reason=\"both cards: a range above 4 GiB mapped by both hangs the driver; "
+                "run --dev 0 or --dev 1 for this arm\"\n", dv.label.c_str());
+  } else {
     double good = 0, bad = 0;
     const auto attempt = [&](double gib) {
       if (gib * kGiB > cap) {
@@ -1271,17 +1278,25 @@ int pin_mode() {
     }
     std::printf("po pin dev=%s single_largest_gib=%.0f first_refused_gib=%.0f\n", dv.label.c_str(), good, bad);
   }
-  // 2. 48 per-layer ranges + the PLE's 16 + 16 shards (bf16 scales: decision 7's default)
+  // 2. the whole model's host side: the PLE's 16 + 16 shards (bf16 scales: decision 7's default), then 48 per-layer
+  //    mirrors of the non-resident experts, every range in pieces of at most 2 GiB
   {
     struct Range {
       std::string name;
       size_t bytes;
     };
     std::vector<Range> want;
-    for (uint32_t l = 0; l < md.layers; ++l) want.push_back({"layer" + std::to_string(l), s.layer});
+    const size_t piece = size_t(2) << 30;
+    const auto add = [&](const std::string& name, size_t b) {
+      for (size_t off = 0, i = 0; off < b; off += piece, ++i)
+        want.push_back({b > piece ? name + "." + std::to_string(i) : name, std::min(piece, b - off)});
+    };
     const std::vector<uint64_t> primes = loader::q4_ple_primes(md.ple_base, md.ple_heads, 0);
-    for (uint32_t h = 0; h < md.ple_heads; ++h) want.push_back({"ple_q" + std::to_string(h), size_t(primes[h]) * md.ple_dim});
-    for (uint32_t h = 0; h < md.ple_heads; ++h) want.push_back({"ple_s" + std::to_string(h), size_t(primes[h]) * 2});
+    for (uint32_t h = 0; h < md.ple_heads; ++h) add("ple_q" + std::to_string(h), size_t(primes[h]) * md.ple_dim);
+    for (uint32_t h = 0; h < md.ple_heads; ++h) add("ple_s" + std::to_string(h), size_t(primes[h]) * 2);
+    const uint32_t misses = s.E - uint32_t(std::lround(g_opt.resident_f * s.E));
+    if (misses > 0)
+      for (uint32_t l = 0; l < md.layers; ++l) add("mirror" + std::to_string(l), size_t(misses) * s.expert);
     double total_want = 0;
     for (const Range& r : want) total_want += double(r.bytes);
     std::vector<std::unique_ptr<l0::Mem>> got;
@@ -1311,9 +1326,10 @@ int pin_mode() {
     const uint64_t after = mem_available();
     const std::string chk = ptrs.empty() ? std::string(" none") : check_all(ptrs, bytes);
     const double pop = populated(before, after, sum);
-    std::printf("po pin dev=%s ranges allocated=%zu of %zu bytes=%.0f of %.0f (experts 48 x %zu + PLE 32 shards) stopped_at=%s "
-                "s_per_gb=%.4f mem_before_gib=%.1f mem_after_gib=%.1f populated=%.3f%s check=%s\n",
-                dv.label.c_str(), got.size(), want.size(), sum, total_want, s.layer, stop.c_str(),
+    std::printf("po pin dev=%s ranges allocated=%zu of %zu bytes=%.0f of %.0f (PLE 32 shards + mirrors 48 x %u experts at "
+                "f %.2f, pieces <= 2 GiB) stopped_at=%s s_per_gb=%.4f mem_before_gib=%.1f mem_after_gib=%.1f populated=%.3f%s "
+                "check=%s\n",
+                dv.label.c_str(), got.size(), want.size(), sum, total_want, misses, g_opt.resident_f, stop.c_str(),
                 sum > 0 ? secs / (sum / 1e9) : 0.0, before / kGiB, after / kGiB, pop, pop < 0.9 ? " NOT_POPULATED" : "",
                 chk.c_str());
   }
@@ -1583,7 +1599,7 @@ std::vector<uint32_t> parse_list(const std::string& v) {
 int usage() {
   std::fprintf(stderr,
                "usage: probe_offload copy|zc|replay|hostbw|pin|alias|hold|peer [--dev 0|1|both] [--pairs 1,2,7,26] [--reps 5] "
-               "[--n 10000] [--replay-pairs 7] [--arena-gb 22] [--seconds 20] [--max-gb G] [--timeout-s 20]\n");
+               "[--n 10000] [--replay-pairs 7] [--arena-gb 22] [--seconds 20] [--max-gb G] [--resident-f 0.80] [--timeout-s 20]\n");
   return 2;
 }
 
@@ -1608,6 +1624,7 @@ int main(int argc, char** argv) {
       else if (a == "--arena-gb") g_opt.arena_gb = std::stod(val());
       else if (a == "--seconds") g_opt.seconds = std::stod(val());
       else if (a == "--max-gb") g_opt.max_gb = std::stod(val());
+      else if (a == "--resident-f") g_opt.resident_f = std::stod(val());
       else if (a == "--timeout-s") g_opt.timeout_s = std::stod(val());
       else return usage();
     }

@@ -57,11 +57,14 @@ inline void check_serve(const ServeArgs& s) {
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
   if (s.mtp_k > runtime::qwen4exp::kMaxDraft)
     throw std::runtime_error("--spec-max " + std::to_string(s.mtp_k) + ": Qwen3.8-Flash-Next verifies at M <= 4 (K 1..3)");
-  DecodeArgs a = s.args;   // b70-decode's refusals: the prefill backends, the --parallel sub-flags, --layers
+  DecodeArgs a = s.args;   // b70-decode's refusals: the prefill backends, the --parallel sub-flags
   a.mtp = false;
   a.kv8 = false;
   a.profile = false;
-  check_args(a, "b70-serve");
+  check_args(a);
+  if (a.layers == 0 && !a.layers_auto)
+    throw std::runtime_error("b70-serve serves Qwen3.8-Flash-Next with --layers N or --layers auto for now: the whole "
+                             "model (its experts partly in host memory) runs in b70-decode, and serving it comes next");
 }
 
 // True when a JSON value (recursively) holds a string containing \p{M} - the original's split regex (21a's finding 3).

@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 #include <utility>
 
@@ -622,6 +623,18 @@ std::string Qwen4ExpEngine::memory_line() const {
   for (uint32_t i = 0; i < st_.size(); ++i) {
     const std::string label = st_.size() > 1 ? "memory, device " + std::to_string(i) : std::string("memory");
     s += (i ? "\n" : "") + format_memory(label.c_str(), memory_use(i), st(i).ctx.memory_bytes());
+  }
+  // The expert tier (plan 21v2a Task 8): the routed experts in VRAM per device and the pinned host bytes.
+  const loader::Q4LoadedModel& m = model();
+  if (!m.tier.all()) {
+    s += "\nexperts:";
+    for (const loader::Q4DevicePart& P : m.parts) {
+      uint32_t nv = 0;
+      for (uint32_t l = P.first; l < P.end; ++l) nv += m.tier.n_vram(l);
+      s += std::format(" device {:d} {:d} of {:d} resident (f {:.3f});", P.device, nv, (P.end - P.first) * m.desc.experts,
+                       double(nv) / ((P.end - P.first) * m.desc.experts));
+    }
+    s += std::format(" {:.3f} GB pinned in host memory, read in place", m.mirror_bytes / 1e9);
   }
   return s;
 }

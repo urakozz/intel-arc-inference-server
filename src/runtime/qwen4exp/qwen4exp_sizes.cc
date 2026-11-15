@@ -1,10 +1,12 @@
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <random>
 #include <stdexcept>
 
 #include "kernels/prefill/pf_kernels.h"
@@ -416,15 +418,21 @@ void require_fits(const std::vector<DevicePlan>& p, const std::array<size_t, kPp
            gb(dp.weights) + ", KV " + gb(dp.kv) + ", state " + gb(dp.state) + ") + reserve " + gb(reserve) +
            " against " + std::to_string(device_bytes[dp.device]) + " B (" + gb(device_bytes[dp.device]) + ")";
   }
+  size_t host = 0;
+  for (const DevicePlan& dp : p) host += dp.host_experts;
+  if (host != 0)
+    throw std::runtime_error("Qwen3.8-Flash-Next does not fit " + std::to_string(p.size()) + " card(s) even with " +
+                             gb(host) + " of routed experts in pinned host memory: the rest of the model, its KV and "
+                             "scratch need more than the cards hold" + per + " - use a shorter --max-len");
   const std::string head =
       p.empty() || !p[0].whole
           ? "Qwen3.8-Flash-Next at layers [0, " + std::to_string(p.empty() ? 0 : p.back().end) + ") does not fit " +
                 std::to_string(p.size()) + " card(s): " + std::to_string(total) + " B planned"
           : "Qwen3.8-Flash-Next holds " + gb(weights) + " of weights (" + std::to_string(weights) +
                 " B) and " + std::to_string(p.size()) + " B70(s) " + gb(caps) +
-                ": it runs whole only with the expert-offload tier, not built yet";
-  throw std::runtime_error(head + per + " - use --layers N (the planner's N: runtime::qwen4exp::layers_that_fit); the "
-                           "whole model needs the expert-offload tier");
+                ": it runs whole only with its routed experts partly in host memory";
+  throw std::runtime_error(head + per + " - use --layers N (the planner's N: runtime::qwen4exp::layers_that_fit), or "
+                           "load the whole model, which keeps the experts that do not fit in host memory");
 }
 
 std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement& pl, uint32_t max_len,
@@ -445,6 +453,10 @@ std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement&
       (dp.total() + reserve) / 1e9, dp.weights / 1e9, dp.mtp ? " with the MTP head" : "", dp.rope / 1e9,
       dp.kv / 1e9, dp.state / 1e9, dp.scratch / 1e9, dp.link ? ", hand-off" : "");
     out += tail;
+    if (dp.host_experts)
+      out += std::format("; routed experts {:d} of {:d} in VRAM (f {:.3f}), {:.3f} GB in pinned host memory",
+                         dp.vram_experts, dp.routed_experts, double(dp.vram_experts) / dp.routed_experts,
+                         dp.host_experts / 1e9);
   }
   return out;
 }
@@ -522,6 +534,114 @@ std::string budget_json(const ExpertBudget& b) {
                   ",\"non_routed\":" + arr(b.non_routed) + ",\"cache\":" + arr(b.cache) + ",\"cache_total\":" +
                   std::to_string(sum) + ",\"routed_total\":" + std::to_string(b.routed_total) + ",\"f\":" + f + "}";
   return s;
+}
+
+// --- plan 21v2a Task 8: the expert tier ---------------------------------------------------------------------------
+uint32_t ExpertTier::n_vram(uint32_t l) const {
+  uint32_t n = 0;
+  for (uint32_t e = 0; e < experts; ++e) n += resident(l, e);
+  return n;
+}
+
+bool ExpertTier::all() const {
+  return std::all_of(vram.begin(), vram.end(), [](uint8_t v) { return v != 0; });
+}
+
+size_t ExpertTier::host_bytes(const model::Qwen4ExpDesc& d) const {
+  size_t n = 0;
+  for (uint8_t v : vram) n += v == 0;
+  return n * (loader::q4_gate_up_block_bytes(d) + loader::q4_down_block_bytes(d));
+}
+
+ExpertTier all_resident(const model::Qwen4ExpDesc& d) {
+  ExpertTier t;
+  t.layers = d.layers;
+  t.experts = d.experts;
+  t.vram.assign(size_t(d.layers) * d.experts, 1);
+  t.source = "every expert resident";
+  return t;
+}
+
+ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const std::vector<uint32_t>* counts,
+                     const std::string& forced) {
+  ExpertTier t;
+  t.layers = d.layers;
+  t.experts = d.experts;
+  t.vram.assign(size_t(d.layers) * d.experts, 0);
+  if (counts && counts->size() < size_t(d.layers) * d.experts)
+    throw std::invalid_argument("qwen4exp::fill_tier: the profile has fewer than " + std::to_string(d.layers) + " x " +
+                                std::to_string(d.experts) + " counts");
+  // A layer's experts by descending profile count (ties to the lower id), or by id without a profile.
+  const auto ranked = [&](uint32_t l) {
+    std::vector<uint32_t> o(d.experts);
+    for (uint32_t e = 0; e < d.experts; ++e) o[e] = e;
+    if (counts) {
+      const uint32_t* c = counts->data() + size_t(l) * d.experts;
+      std::stable_sort(o.begin(), o.end(), [&](uint32_t x, uint32_t y) { return c[x] > c[y]; });
+    }
+    return o;
+  };
+  // The budget's count a layer: each device's cache over its layers, at most every expert.
+  const auto budget_n = [&](uint32_t l) {
+    for (uint32_t dev = 0; dev < b.devices; ++dev)
+      if (l >= b.first[dev] && l < b.end[dev])
+        return uint32_t(std::min<size_t>(d.experts, b.cache[dev] / (size_t(b.end[dev] - b.first[dev]) * b.expert_bytes)));
+    throw std::logic_error("qwen4exp::fill_tier: layer " + std::to_string(l) + " is on no device of the budget");
+  };
+  const auto take = [&](uint32_t l, const std::vector<uint32_t>& order, uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i) t.vram[size_t(l) * d.experts + order[i]] = 1;
+  };
+  if (forced.empty()) {
+    for (uint32_t l = 0; l < d.layers; ++l) take(l, ranked(l), budget_n(l));
+    t.source = counts ? "the routing profile's most-routed experts, the same count a layer"
+                      : "id order (no routing profile beside the checkpoint)";
+  } else if (forced == "all" || forced == "none") {
+    std::fill(t.vram.begin(), t.vram.end(), uint8_t(forced == "all"));
+  } else if (forced == "adversarial") {
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      std::vector<uint32_t> o = ranked(l);
+      std::reverse(o.begin(), o.end());
+      take(l, o, budget_n(l));
+    }
+  } else if (forced.rfind("random:", 0) == 0) {
+    const size_t c = forced.find(':', 7);
+    double f = -1;
+    uint64_t seed = 0;
+    try {
+      f = std::stod(forced.substr(7, c - 7));
+      seed = c == std::string::npos ? 0 : std::stoull(forced.substr(c + 1));
+    } catch (const std::exception&) {
+    }
+    if (c == std::string::npos || !(f >= 0.0 && f <= 1.0))
+      throw std::invalid_argument("B70_Q4_RESIDENT=" + forced + ": random:<fraction 0..1>:<seed>");
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      std::vector<uint32_t> o(d.experts);
+      for (uint32_t e = 0; e < d.experts; ++e) o[e] = e;
+      std::mt19937_64 rng(seed * 1000003ull + l);
+      for (uint32_t i = d.experts - 1; i > 0; --i) std::swap(o[i], o[uint32_t(rng() % (i + 1))]);
+      take(l, o, uint32_t(std::lround(f * d.experts)));
+    }
+  } else {
+    throw std::invalid_argument("B70_Q4_RESIDENT=" + forced + ": all, none, random:<fraction>:<seed> or adversarial");
+  }
+  if (!forced.empty()) t.source = "B70_Q4_RESIDENT=" + forced + " (a test placement)";
+  return t;
+}
+
+void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t) {
+  if (t.layers != d.layers || t.experts != d.experts)
+    throw std::logic_error("qwen4exp::apply_tier: the tier is not this descriptor's layers x experts");
+  const size_t eb = loader::q4_gate_up_block_bytes(d) + loader::q4_down_block_bytes(d);
+  for (DevicePlan& dp : p) {
+    dp.vram_experts = dp.routed_experts = 0;
+    for (uint32_t l = dp.first; l < dp.end; ++l) {
+      dp.vram_experts += t.n_vram(l);
+      dp.routed_experts += d.experts;
+    }
+    dp.host_experts = size_t(dp.routed_experts - dp.vram_experts) * eb;
+    dp.weights -= dp.host_experts;
+    dp.model -= dp.host_experts;
+  }
 }
 
 // --- spec 21e: the MTP head, the verify and draft lists ---------------------------------------------------------

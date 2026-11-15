@@ -3170,7 +3170,6 @@ endif()
 # model_type stub config.json (spec 21 §13 departure 1: the checkpoint's own config is not vendored), which is all the
 # dispatch and the refusals read.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "expert-offload tier")
 b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "its MTP head is served by b70-serve")
 b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
 # (spec 21e removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21e's block's)
@@ -3467,7 +3466,7 @@ if(B70_Q4EXP)
 endif()
 if(TARGET b70-serve)
   set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-  b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "expert-offload tier")
+  b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "serving it comes next")
   b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --spec mtp --draft-vocab 32k
     EXPECT "--draft-vocab is not built for Qwen3.8-Flash-Next")
   b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")

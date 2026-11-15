@@ -1,8 +1,13 @@
 #include "loader/qwen4exp_loader.h"
 
+#include <sys/stat.h>
+
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string_view>
 #include <print>
 #include <stdexcept>
 
@@ -28,8 +33,60 @@ std::unique_ptr<DeviceWeight> upload_w(l0::Context& ctx, l0::CmdList& imm, const
       DeviceWeight{upload(ctx, imm, w.tiles.data(), w.tiles.size() * 2), nullptr, w.shape, model::WeightKind::Bf16});
 }
 
-// One host layer onto its device (the fields of the other layer kind stay null).
-Q4Layer upload_layer(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, size_t& bytes) {
+// Plan 21v2a Task 8: a layer's routed experts by the tier's row `res` ([experts], 1 = VRAM): the resident experts'
+// blocks into the layer's VRAM arena (id order), the rest into its pinned host mirror (gate||up blocks, then down
+// blocks, id order); `row` gets the 1024 block addresses (gate||up of expert e at [e], down at [512 + e]).
+void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, uint32_t experts, const uint8_t* res,
+                    Q4Layer& L, size_t& bytes, size_t& host_bytes, uint64_t* row) {
+  const size_t gu = h.gate_up.size() * 4 / experts, dn = h.down.size() * 4 / experts;
+  const uint8_t* gsrc = reinterpret_cast<const uint8_t*>(h.gate_up.data());
+  const uint8_t* dsrc = reinterpret_cast<const uint8_t*>(h.down.data());
+  uint32_t nv = 0;
+  for (uint32_t e = 0; e < experts; ++e) nv += res[e] != 0;
+  const uint32_t nh = experts - nv;
+  if (nv != 0) {
+    std::vector<uint8_t> g(size_t(nv) * gu), dd(size_t(nv) * dn);
+    for (uint32_t e = 0, s = 0; e < experts; ++e)
+      if (res[e]) {
+        std::memcpy(g.data() + size_t(s) * gu, gsrc + size_t(e) * gu, gu);
+        std::memcpy(dd.data() + size_t(s) * dn, dsrc + size_t(e) * dn, dn);
+        ++s;
+      }
+    L.gate_up = upload_u(ctx, imm, g.data(), g.size());
+    L.down = upload_u(ctx, imm, dd.data(), dd.size());
+    bytes += g.size() + dd.size();
+  }
+  if (nh != 0) {
+    // One pinned range a layer, at most experts x 2.6 MB (1.34 GB): under the 4 GiB a range both cards may map.
+    L.mirror = std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, size_t(nh) * (gu + dn), size_t(2) << 20);
+    uint8_t* m = L.mirror->as<uint8_t>();
+    for (uint32_t e = 0, s = 0; e < experts; ++e)
+      if (!res[e]) {
+        std::memcpy(m + size_t(s) * gu, gsrc + size_t(e) * gu, gu);
+        std::memcpy(m + size_t(nh) * gu + size_t(s) * dn, dsrc + size_t(e) * dn, dn);
+        ++s;
+      }
+    host_bytes += L.mirror->size();
+  }
+  if (!row) return;
+  for (uint32_t e = 0, s = 0, t = 0; e < experts; ++e) {
+    if (res[e]) {
+      row[e] = uint64_t(uintptr_t(L.gate_up->as<uint8_t>() + size_t(s) * gu));
+      row[experts + e] = uint64_t(uintptr_t(L.down->as<uint8_t>() + size_t(s) * dn));
+      ++s;
+    } else {
+      row[e] = uint64_t(uintptr_t(L.mirror->as<uint8_t>() + size_t(t) * gu));
+      row[experts + e] = uint64_t(uintptr_t(L.mirror->as<uint8_t>() + size_t(nh) * gu + size_t(t) * dn));
+      ++t;
+    }
+  }
+}
+
+// One host layer onto its device (the fields of the other layer kind stay null). `res` / `row`: the expert tier
+// (upload_experts); null `res`: every expert in one VRAM range, as before the tier.
+Q4Layer upload_layer(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, size_t& bytes,
+                     const uint8_t* res = nullptr, uint32_t experts = 0, size_t* host_bytes = nullptr,
+                     uint64_t* row = nullptr) {
   Q4Layer L;
   const auto blob = [&](const std::vector<uint8_t>& v) {
     bytes += v.size();
@@ -50,9 +107,13 @@ Q4Layer upload_layer(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, s
     L.qsa_small = blob(h.qsa_small);
   }
   L.router = upload_w(ctx, imm, h.router, bytes);
-  L.gate_up = upload_u(ctx, imm, h.gate_up.data(), h.gate_up.size() * 4);
-  L.down = upload_u(ctx, imm, h.down.data(), h.down.size() * 4);
-  bytes += (h.gate_up.size() + h.down.size()) * 4;
+  if (res) {
+    upload_experts(ctx, imm, h, experts, res, L, bytes, *host_bytes, row);
+  } else {
+    L.gate_up = upload_u(ctx, imm, h.gate_up.data(), h.gate_up.size() * 4);
+    L.down = upload_u(ctx, imm, h.down.data(), h.down.size() * 4);
+    bytes += (h.gate_up.size() + h.down.size()) * 4;
+  }
   L.shared = blob(h.shared);
   L.shared_down_offset = h.shared_gate_up;
   L.ple = blob(h.ple);
@@ -107,6 +168,36 @@ bool is_qwen4exp_checkpoint(const std::string& snapshot_dir) {
   return model::is_qwen4exp_model_type(model_type_of(read_json(snapshot_dir + "config.json")));
 }
 
+std::vector<uint32_t> load_q4_profile(const std::string& snapshot_or_repo, const model::Qwen4ExpDesc& full,
+                                      std::string* path_out) {
+  std::string s = resolve_snapshot(snapshot_or_repo);
+  while (!s.empty() && s.back() == '/') s.pop_back();
+  const std::string path = s + "-expert-profile.safetensors";
+  struct stat st {};
+  if (::stat(path.c_str(), &st) != 0) return {};
+  if (path_out) *path_out = path;
+  const MappedFile f(path);
+  uint64_t hlen = 0;
+  if (f.size() >= 8) std::memcpy(&hlen, f.data(), 8);
+  if (f.size() < 8 || hlen > f.size() - 8 ||
+      std::string_view(reinterpret_cast<const char*>(f.data()) + 8, hlen).find("\"spec22-profile-1\"") ==
+          std::string_view::npos)
+    throw std::runtime_error(path + " is not a routing profile (format spec22-profile-1, written by "
+                             "tools/oracle/offload_curve.py profile) - move it away or remake it");
+  for (const auto& [name, t] : SafetensorsSet::parse_header(f.data(), f.size())) {
+    if (name != "counts") continue;
+    const uint64_t n = uint64_t(full.layers) * full.experts;
+    if (t.dtype != "U32" || t.shape.size() != 2 || t.shape[0] != full.layers || t.shape[1] != full.experts ||
+        t.end - t.begin != n * 4 || 8 + hlen + t.end > f.size())
+      throw std::runtime_error(path + ": 'counts' is not u32 [" + std::to_string(full.layers) + "][" +
+                               std::to_string(full.experts) + "] - a profile of another model");
+    std::vector<uint32_t> c(n);
+    std::memcpy(c.data(), f.data() + 8 + hlen + t.begin, n * 4);
+    return c;
+  }
+  throw std::runtime_error(path + " holds no 'counts' tensor (offload_curve.py profile writes it)");
+}
+
 model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit) {
   const Opened o = open(snapshot_or_repo);
   const SafetensorsSet set(o.snap);   // the headers only: the forms are read from the names
@@ -116,7 +207,7 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement, LmHeadForm lm_form,
-                            uint32_t layers_limit, bool mtp) {
+                            uint32_t layers_limit, bool mtp, const runtime::qwen4exp::ExpertTier* tier) {
   const auto t0 = std::chrono::steady_clock::now();
   const Opened o = open(snapshot_or_repo);
   const QuantConfig qc = check_qwen4exp_checkpoint_config(o.cfg);
@@ -152,12 +243,35 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
     throw std::invalid_argument("load_qwen4exp: " + std::to_string(devices.size()) + " device(s) for a " +
                                 std::to_string(placement.devices) + "-device placement");
   const bool int8 = lm_form == LmHeadForm::Int8;
-  // The plan before the first allocation: the full model is refused here, naming spec 22.
+  // The expert tier (plan 21v2a Task 8): where each routed expert lives, and which form the layers bind. Without
+  // one, every expert is resident - or B70_Q4_RESIDENT's test placement (any caller: the golden tests and tools run
+  // under it unchanged).
+  std::array<size_t, runtime::kPpDevices> caps{};
+  for (uint32_t i = 0; i < placement.devices; ++i) caps[i] = devices[i]->memory_bytes();
+  const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+  const char* forced = std::getenv("B70_Q4_RESIDENT");
+  const runtime::qwen4exp::ExpertTier T =
+      tier ? *tier
+      : forced && *forced
+          ? runtime::qwen4exp::fill_tier(
+                d, runtime::qwen4exp::expert_budget(d, placement, max_len, lm_form == LmHeadForm::Int8, mtp, true, caps, reserve),
+                nullptr, forced)
+          : runtime::qwen4exp::all_resident(d);
+  if (T.layers != d.layers || T.experts != d.experts)
+    throw std::invalid_argument("load_qwen4exp: the expert tier is not " + std::to_string(d.layers) + " layers x " +
+                                std::to_string(d.experts) + " experts");
+  const char* ex = std::getenv("B70_Q4_EXPERTS");
+  const std::string form = ex && *ex ? ex : "table";
+  if (form != "table" && form != "direct")
+    throw std::runtime_error("B70_Q4_EXPERTS=" + form + ": table (the default) or direct");
+  if (form == "direct" && !T.all())
+    throw std::runtime_error("B70_Q4_EXPERTS=direct reads every expert from the layer's VRAM range, but " +
+                             std::to_string(T.host_bytes(d)) + " B of experts are in host memory: unset it");
+  // The plan before the first allocation: a model that does not fit is refused here, naming the bytes.
   {
-    std::array<size_t, runtime::kPpDevices> caps{};
-    for (uint32_t i = 0; i < placement.devices; ++i) caps[i] = devices[i]->memory_bytes();
-    runtime::qwen4exp::require_fits(runtime::qwen4exp::plan(d, placement, max_len, int8, mtp), caps,
-                                    size_t(runtime::kDefaultReserveGb * 1e9));
+    std::vector<runtime::qwen4exp::DevicePlan> pl = runtime::qwen4exp::plan(d, placement, max_len, int8, mtp);
+    runtime::qwen4exp::apply_tier(pl, d, T);
+    runtime::qwen4exp::require_fits(pl, caps, reserve);
   }
   const std::string ple_dir = q4_ple_dir(o.snap);
   check_ple_constants(d, ck.ple_constants());
@@ -176,6 +290,16 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   // The PLE table, once, through the context of the device holding the PLE layer.
   m.ple_device = placement.device_of(d.ple_layer);
   m.ple = load_q4_ple(*devices[m.ple_device], d, ple_dir);
+  m.tier = T;
+  m.expert_table = form == "table";
+  // The mirror's pinned bytes beside the PLE table's, before the first pin (check_q4_ple_host_fit's rule).
+  const size_t mirror = T.host_bytes(d), avail = q4_mem_available();
+  if (mirror != 0 && avail != 0 && mirror + kQ4PleHostMargin > avail)
+    throw std::runtime_error("the experts that do not fit the cards need " + std::to_string(mirror) + " B (" +
+                             std::to_string(mirror / 1e9).substr(0, 6) + " GB) of pinned host memory beside the PLE "
+                             "table, but MemAvailable is " + std::to_string(avail) + " B (" +
+                             std::to_string(avail / 1e9).substr(0, 6) + " GB) with a 16 GiB margin kept - free host "
+                             "memory first");
 
   const std::vector<float> rope = q4_rope_table(d, max_len);
   Q4HostLayer host;
@@ -197,9 +321,26 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
       if (P.rope_bytes != d.rope_table_bytes(max_len))
         throw std::logic_error("load_qwen4exp: the RoPE table is not Qwen4ExpDesc::rope_table_bytes");
     }
+    std::vector<uint64_t> rows(m.expert_table ? size_t(P.end - P.first) * 2 * d.experts : 0);
     for (uint32_t l = P.first; l < P.end; ++l) {
       ck.repack_layer(l, host);
-      P.layers.push_back(upload_layer(ctx, imm, host, P.bytes));
+      uint64_t* row = rows.empty() ? nullptr : rows.data() + size_t(l - P.first) * 2 * d.experts;
+      if (T.n_vram(l) == d.experts && !row)
+        P.layers.push_back(upload_layer(ctx, imm, host, P.bytes));
+      else
+        P.layers.push_back(upload_layer(ctx, imm, host, P.bytes, T.vram.data() + size_t(l) * d.experts, d.experts,
+                                        &m.mirror_bytes, row));
+    }
+    if (!rows.empty()) {
+      // The table, then read back: the rows the kernels will read are the rows the map says.
+      P.expert_table = upload_u(ctx, imm, rows.data(), rows.size() * 8);
+      std::vector<uint64_t> back(rows.size());
+      imm.copy(back.data(), P.expert_table->ptr(), back.size() * 8);   // an immediate list: complete on return
+      if (back != rows)
+        throw std::runtime_error("load_qwen4exp: device " + std::to_string(dev) + "'s expert table reads back different "
+                                 "addresses than were written");
+      for (uint32_t l = P.first; l < P.end; ++l)
+        P.layers[l - P.first].expert_row = P.expert_table->as<uint8_t>() + size_t(l - P.first) * 2 * d.experts * 8;
     }
     if (dev + 1 == placement.devices) {
       const std::vector<uint8_t> fm = ck.final_mixer();
@@ -216,10 +357,14 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
         P.bytes += fc.size() + mm.size();
       }
     }
-    const size_t want = q4_device_weight_bytes(d, placement, dev, int8, mtp);
+    size_t host_experts = 0;
+    for (uint32_t l = P.first; l < P.end; ++l)
+      host_experts += size_t(d.experts - T.n_vram(l)) * (q4_gate_up_block_bytes(d) + q4_down_block_bytes(d));
+    const size_t want = q4_device_weight_bytes(d, placement, dev, int8, mtp) - host_experts;
     if (P.bytes != want)
       throw std::logic_error("load_qwen4exp: device " + std::to_string(dev) + " allocated " + std::to_string(P.bytes) +
-                             " B of weights, loader::q4_device_weight_bytes says " + std::to_string(want));
+                             " B of weights, loader::q4_device_weight_bytes less the experts in host memory says " +
+                             std::to_string(want));
   }
 
   std::string names;
@@ -253,6 +398,15 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
              "page tags read back, {:d} rows compared; MemAvailable {:.1f} GB before, {:.1f} GB after\n",
              d.ple_heads, d.ple_heads, m.ple_device, m.ple.bytes, m.ple.bytes / gb, q4_ple_scale_name(m.ple.scale),
              m.ple.seconds, m.ple.page_words.size(), m.ple.rows_checked, m.ple.mem_before / gb, m.ple.mem_after / gb);
+  {
+    uint32_t nv = 0;
+    for (uint32_t l = 0; l < d.layers; ++l) nv += T.n_vram(l);
+    std::print("  experts     {:d} of {:d} routed experts in VRAM (f {:.3f}; {}), {:d} B {:.3f} GB in pinned host memory "
+               "(one range a layer); the kernels read them through {}\n",
+               nv, d.layers * d.experts, double(nv) / (d.layers * d.experts), T.source.c_str(), m.mirror_bytes,
+               m.mirror_bytes / gb,
+               m.expert_table ? "each layer's table of block addresses (read back equal)" : "the layer's range (direct)");
+  }
   std::print("  read/token  {:13d} B {:7.3f} GB   (top-{:d} + shared experts, HC, mixers, routers, head; derived)\n"
              "  load        {:.1f} s\n",
              m.read_per_token, m.read_per_token / gb, d.top_k, m.seconds);
