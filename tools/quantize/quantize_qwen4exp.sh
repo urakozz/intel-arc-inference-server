@@ -154,7 +154,7 @@ stage_check() {
 
 - tool: auto-round at \`$AR_COMMIT\` (the operator's fork, branch \`$AR_REF\`: intel/auto-round main \`$AR_BASE\` + the cached-OpenCodeInstruct commit; version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)'))
 - recipe: \`tools/quantize/quantize_qwen4exp.sh\` - W4A16, group 64, symmetric, format
-  auto_round:auto_gptq, tuned: $ITERS iterations, $NSAMPLES x $SEQLEN rows of \`$DATASET\`, batch $BATCH;
+  auto_round:auto_gptq, $( [ "$ITERS" = 0 ] && echo "RTN weighted by the activation importance (imatrix) of" || echo "tuned: $ITERS iterations on") $NSAMPLES x $SEQLEN rows of \`$DATASET\`, batch $BATCH;
   kept bf16: routers, hyper-connections, shared_expert_gate, GDN in_proj_a / in_proj_b, the QSA indexer, the
   PLE layer, norms, the embedding, vision, the MTP head's attention and shared expert; the MTP head's routed
   experts RTN int4 g64 (not tuned: transformers does not build the head); \`lm_head\` $( [ "$HEAD" = int4 ] && echo 'RTN int4 g64 by the engine'"'"'s rule (tools/quantize/qwen4exp/head_rtn.py)' || echo 'kept bf16 (the engine builds its int8 head at load)'); qwen4exp_recipe.json has the call
