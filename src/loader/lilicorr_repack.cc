@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
 
@@ -412,11 +413,11 @@ LiliHostHead LiliCheckpoint::head_linear(LiliHead which, uint32_t layer) const {
   if (biases.empty())
     for (const std::string& b : bases) biases.push_back(b + ".bias");
   LiliHostHead h;
-  for (size_t i = 0; i < bases.size(); ++i) {
-    const LiliDecoded p = decoded(bases[i]);
+  for (const auto& [base, bias_name] : std::views::zip(bases, biases)) {
+    const LiliDecoded p = decoded(base);
     if (h.K && p.K != h.K) refuse(dir_, "the parts of " + bases[0] + " differ in K");
     h.K = p.K;
-    const std::vector<float> b = widen(biases[i], p.N);
+    const std::vector<float> b = widen(bias_name, p.N);
     h.gs.insert(h.gs.end(), p.N, p.g);
     h.bias.insert(h.bias.end(), b.begin(), b.end());
     h.N += p.N;

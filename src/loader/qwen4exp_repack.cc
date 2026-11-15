@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <ranges>
 #include <stdexcept>
 
 #include "common/bf16.h"
@@ -327,8 +328,8 @@ void Q4Checkpoint::dense(const Qwen4ExpDesc& d, const std::string& lp, Q4LinearI
     std::vector<LinearSrc> srcs;
     std::vector<common::Part> parts;
     srcs.reserve(fl.parts.size());
-    for (size_t i = 0; i < fl.parts.size(); ++i) {
-      srcs.push_back(int4(lp + fl.parts[i], sh.K, part_n[i], 64));
+    for (const auto& [part, n] : std::views::zip(fl.parts, part_n)) {
+      srcs.push_back(int4(lp + part, sh.K, n, 64));
       parts.push_back({srcs.back().qweight, srcs.back().scales, srcs.back().N});
       L.src_int4_bytes += int4_src_bytes(srcs.back());
     }
@@ -340,8 +341,8 @@ void Q4Checkpoint::dense(const Qwen4ExpDesc& d, const std::string& lp, Q4LinearI
   // bf16: the parts' [N_i][K] rows stacked in column order, zero rows to the padded N (a||b), then tiles.
   std::vector<uint16_t> rows(size_t(sh.N) * sh.K, 0);
   size_t at = 0;
-  for (size_t i = 0; i < fl.parts.size(); ++i) {
-    const LinearSrc s = bf16(lp + fl.parts[i], sh.K, part_n[i]);
+  for (const auto& [part, n] : std::views::zip(fl.parts, part_n)) {
+    const LinearSrc s = bf16(lp + part, sh.K, n);
     std::memcpy(rows.data() + at, s.weight, size_t(s.N) * s.K * 2);
     at += size_t(s.N) * s.K;
     L.src_bf16_bytes += size_t(s.N) * s.K * 2;

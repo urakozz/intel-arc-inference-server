@@ -10,6 +10,7 @@
 #include <fstream>
 #include <memory>
 #include <print>
+#include <ranges>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -332,11 +333,11 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     srcs.push_back(s);
   }
   uint32_t n_sum = 0;
-  for (size_t i = 0; i < srcs.size(); ++i) {
-    if (srcs[i].K != sh.K)
-      throw std::runtime_error(id + ": part '" + fl.parts[i] + "' has K=" + std::to_string(srcs[i].K) +
+  for (const auto& [part_src, part] : std::views::zip(srcs, fl.parts)) {
+    if (part_src.K != sh.K)
+      throw std::runtime_error(id + ": part '" + part + "' has K=" + std::to_string(part_src.K) +
                                ", the shape table says " + std::to_string(sh.K));
-    n_sum += srcs[i].N;
+    n_sum += part_src.N;
   }
   // `pad_n` is the model description's *unpadded* N - the columns the checkpoint
   // actually ships; 0 means "no padding, the parts fill shape.N exactly".
@@ -558,7 +559,7 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
     rows_buf.assign(elems, 0);
     tiled.resize(elems);
     std::vector<const uint16_t*> src;
-    for (size_t i = 0; i < parts.size(); ++i) src.push_back(tensor(parts[i], ns[i], K));
+    for (const auto& [part, part_n] : std::views::zip(parts, ns)) src.push_back(tensor(part, part_n, K));
     if (interleave16) {
       for (uint32_t r = 0; r < N; ++r) {
         const uint32_t blk = r / 32, in = r % 32;
@@ -567,9 +568,9 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
       }
     } else {
       size_t row = 0;
-      for (size_t i = 0; i < src.size(); ++i) {
-        std::memcpy(rows_buf.data() + row * K, src[i], size_t(ns[i]) * K * 2);
-        row += ns[i];
+      for (const auto& [part_rows, part_n] : std::views::zip(src, ns)) {
+        std::memcpy(rows_buf.data() + row * K, part_rows, size_t(part_n) * K * 2);
+        row += part_n;
       }
     }
     common::repack_bf16_tiled(rows_buf.data(), K, N, tiled.data());

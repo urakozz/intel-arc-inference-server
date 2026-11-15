@@ -39,6 +39,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -203,11 +204,11 @@ class ReplicaEngine : public server::BatchEngineIface {
     prefill_begin(chunks);
     std::vector<std::string> errors(chunks.size());
     bool failed = false;
-    for (size_t i = 0; i < chunks.size(); ++i) {
+    for (auto&& [chunk, error] : std::views::zip(chunks, errors)) {
       try {
-        prefill_end(chunks[i].slot);
+        prefill_end(chunk.slot);
       } catch (const std::exception& e) {
-        errors[i] = e.what()[0] != '\0' ? e.what() : "a card failed";
+        error = e.what()[0] != '\0' ? e.what() : "a card failed";
         failed = true;
       }
     }
@@ -453,7 +454,7 @@ class ReplicaEngine : public server::BatchEngineIface {
         if (got.size() != mine.size())
           throw std::logic_error("ReplicaEngine: card " + std::to_string(c) + " returned " +
                                  std::to_string(got.size()) + " results for " + std::to_string(mine.size()) + " rows");
-        for (size_t i = 0; i < mine.size(); ++i) runs[mine[i]] = std::move(got[i]);
+        for (auto&& [row, run] : std::views::zip(mine, got)) runs[row] = std::move(run);
       } catch (const server::SlotsFailed& f) {
         scatter(f, mine, &runs, &errors);
       }

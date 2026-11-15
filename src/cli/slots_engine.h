@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <memory>
 #include <random>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -270,9 +271,9 @@ class SlotsEngine : public server::BatchEngineIface {
       e_.select(rows[i].slot);
       drafts[i] = e_.draft_ids();
     }
-    for (size_t i = 0; i < rows.size(); ++i) {
-      ++adapters_.at(rows[i].slot)->mtp_iters_at_k[ks[i]];
-      runs.push_back({rows[i].slot, ks[i]});
+    for (const auto& [row, k] : std::views::zip(rows, ks)) {
+      ++adapters_.at(row.slot)->mtp_iters_at_k[k];
+      runs.push_back({row.slot, k});
     }
     e_.verify_rows(runs);
     const uint32_t* ids = e_.rows_ids();

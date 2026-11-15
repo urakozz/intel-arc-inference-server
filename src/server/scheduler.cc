@@ -9,6 +9,7 @@
 #include <deque>
 #include <mutex>
 #include <print>
+#include <ranges>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -815,9 +816,9 @@ bool Scheduler::overlapped_prefills(bool after_step) {
     for (const auto& j : start.jobs) finish(j, Finish::Error, error.what());
     return true;
   }
-  for (size_t i = 0; i < start.jobs.size(); ++i) {
-    start.jobs[i]->inflight = true;
-    start.jobs[i]->chunk = start.chunks[i];
+  for (const auto& [job, chunk] : std::views::zip(start.jobs, start.chunks)) {
+    job->inflight = true;
+    job->chunk = chunk;
     ++impl_->inflight;
   }
   return true;
