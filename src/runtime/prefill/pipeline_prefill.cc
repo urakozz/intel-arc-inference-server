@@ -439,10 +439,17 @@ struct PipelineEngine::PrefillDriver {
     e.pf_stats_.busy_max_ms[d] = std::max(e.pf_stats_.busy_max_ms[d], busy);
     // Spec 19d: both devices have finished chunk j (device 0's wait comes first in every order): its tapped rows into
     // the drafter's ring now - before its hook (save_state reads the ring) and before chunk j + 2 reuses the staging.
+    // Engine::drafter_project_staged's rule: at prefill width on device 1's prefill context where the drafter has it
+    // (the ring's rows then bitwise one card's), waited for here; else a replay per 8 rows.
     if (d == 1 && df_sites) {
       const PpChunk& c = chunks->at(j);
       const prefill::PrefillTaps t = taps_of(c, j);
-      if (t.r0 < c.rows) e.drafter_project(t.dst, c.pos + t.r0, c.rows - t.r0);
+      if (t.r0 < c.rows) {
+        if (e.drafter_->project_wide(D.cx, D.kc, D.scratch, t.dst, c.pos + t.r0, c.rows - t.r0))
+          D.cx.wait();
+        else
+          e.drafter_project(t.dst, c.pos + t.r0, c.rows - t.r0);
+      }
     }
   }
 
