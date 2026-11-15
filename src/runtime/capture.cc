@@ -804,11 +804,12 @@ class Capture {
 
   // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
   // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
-  // verify-cost-m8: the DPAS verify attention's key blocks a row (runtime/verify_attn.h; CaptureOptions::probe_attn_tgt
-  // overrides it for probes); v2 and the paged lists (plan 19v3b: no paged 16-block binaries) keep kAttnV2Blocks.
+  // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt; 16 at M = 8:
+  // -0.5 ms, not merged - it moves pp_dflash_test's two-card rows off the one card's). v2, the paged lists and every
+  // production list keep kAttnV2Blocks.
   uint32_t attn_tgt() const {
-    if (vattn_ != VerifyAttn::Dpas || sb_.pages) return DecodeBuffers::kAttnV2Blocks;
-    return opt_.probe_attn_tgt ? opt_.probe_attn_tgt : verify_attn_dpas_blocks(kCapM, d_.fa_q_heads, d_.fa_kv_heads);
+    return vattn_ == VerifyAttn::Dpas && !sb_.pages && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
+                                                                          : DecodeBuffers::kAttnV2Blocks;
   }
   l0::Kernel& dpas_kernel() {
     l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_,
@@ -1135,15 +1136,10 @@ class Capture {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Bf16, "gemv_bf16 bound to an int4 weight");
     kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
-    // verify-cost-m8: a||b in the DFlash verify lists at M >= 5 (the one card's and a pipeline stage's alike) splits K
-    // 64 ways in the work-group (8 x 64 subgroups instead of 8 x 16: verify at 8 rows -0.25 ms at depth 4096). The
-    // sum's order changes - those rows are graded by the f32 judge, as the 16-block attention's already are; MTP's
-    // M <= 4 rows, the lists forced to the 1-row GEMVs (tests' bitwise twins) and every other list keep
-    // gemv_bf16_tiling's (bitwise). Probes override it at any M >= 2.
-    if (id == LinearId::AB && kCapM >= 2 && s.K == 5120 && s.N == 128 &&
-        (opt_.probe_ab_ksplit || (kCapM >= 5 && opt_.force_linear != LinearForce::Gemv &&
-                                  (mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps || mode_ == Mode::Verify))))
-      t.ksplit = opt_.probe_ab_ksplit ? opt_.probe_ab_ksplit : 64;
+    // verify-cost-m8 probe: a||b's K split at M >= 2 (CaptureOptions::probe_ab_ksplit; 64 at M = 8: -0.25 ms, not
+    // merged with the 16-block attention).
+    if (id == LinearId::AB && kCapM >= 2 && s.K == 5120 && s.N == 128 && opt_.probe_ab_ksplit)
+      t.ksplit = opt_.probe_ab_ksplit;
     require(s.N % t.cols == 0, "gemv_bf16 N is not a multiple of its work-group width");
     require(out.size() >= size_t(kCapM) * s.N * sizeof(float),
             "the bf16 GEMV's output allocation is smaller than its [M][N] fp32 result");
