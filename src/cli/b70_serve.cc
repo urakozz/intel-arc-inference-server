@@ -1031,15 +1031,15 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  engines[0]->model().desc->is_moe(), engines[0]->model().desc->name);
   if (options.spec_mtp_lookup)   // open-work 27 / 28 on each card, one card's lines
-    std::fprintf(stderr,
-                 "spec mtp: prompt lookup inside MTP on each card - ENTER a match of >= %u ids, STAY while a verify "
-                 "keeps >= %u (and a match of >= %u remains), K %u lookup drafts; long runs in one %u-row verify on "
-                 "card 0 %s, card 1 %s\n",
-                 server::LookupInDFlash::kEnterMatch, server::LookupInDFlash::kStayAccepted,
-                 server::LookupInDFlash::kStayMatch, a.mtp_k, runtime::Engine::kWideK + 1,
-                 engines[0]->wide_built() ? "yes" : "no", engines[1]->wide_built() ? "yes" : "no");
+    std::print(stderr,
+               "spec mtp: prompt lookup inside MTP on each card - ENTER a match of >= {:d} ids, STAY while a verify "
+               "keeps >= {:d} (and a match of >= {:d} remains), K {:d} lookup drafts; long runs in one {:d}-row verify on "
+               "card 0 {}, card 1 {}\n",
+               server::LookupInDFlash::kEnterMatch, server::LookupInDFlash::kStayAccepted,
+               server::LookupInDFlash::kStayMatch, a.mtp_k, runtime::Engine::kWideK + 1,
+               engines[0]->wide_built() ? "yes" : "no", engines[1]->wide_built() ? "yes" : "no");
   else if (a.mtp_k > 0 && slots_engines.empty())
-    std::fprintf(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
+    std::print(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
   for (uint32_t i = 0; a.dflash.on && i < 2; ++i) {   // spec 19c: each card's drafter policy line, as on one card
     const server::MtpCost& c = options.mtp_adaptive.cost;
     std::print(stderr, "card {:d}: spec dflash: {} drafter, K <= {:d}, cost verify M=1..{:d}", i,
