@@ -366,6 +366,7 @@ int trace(Ctx& c, const std::vector<uint32_t>& prompt, uint32_t n, uint32_t k) {
 
 int main(int argc, char** argv) {
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  golden::load_end_of_turn(snap);
   if (argc > 2) kMaxLen = uint32_t(std::stoul(argv[2]));
   CHECK(kMaxLen >= 16384 && kMaxLen % 256 == 0);
   const auto ids = [] {

@@ -244,6 +244,62 @@ int main() {
     CHECK(sv.pass && sv.beyond.empty());
     unsetenv("B70_FORCED_BF16");
   }
+
+  // 4. the end of turn (item 30 (3), operator 2026-11-15): each stream graded up to and including its first end-of-turn
+  //    id, read from the snapshot's generation_config.json; the rows after it are printed, not graded.
+  {
+    std::ofstream(dir + "/config.json") << "{}\n";
+    std::ofstream(dir + "/generation_config.json") << "{\"eos_token_id\": [7, 15]}\n";
+    golden::load_end_of_turn(dir);
+    CHECK(golden::end_of_turn_ids() == std::vector<uint32_t>({7, 15}));
+    const std::vector<uint32_t> s = {3, 7, 5, 15};
+    CHECK_EQ(golden::turn_end(s.data(), s.size()), size_t(2));   // the stop row 1 is graded, rows 2 and 3 are not
+    CHECK_EQ(golden::turn_end(s.data(), size_t(1)), size_t(1));   // no stop: every row
+    const golden::ForcedJudge fj;
+    const std::vector<greedy_tie::RefStep> far5 = {step(3, 0, 50), step(4, 9, 40), step(7, 0, 50), step(5, 0, 50),
+                                                   step(6, 0, 50)};
+    // judges for plain {3, 4, 7, 5, 6} and a speculative stream from its first difference at 1; rows: the f32 tops
+    auto judged = [&](const char* tag, const std::vector<uint32_t>& sp, const std::vector<uint32_t>& plain_tops,
+                      const std::vector<uint32_t>& spec_tops) {
+      const std::vector<uint32_t> pl = {3, 4, 7, 5, 6};
+      const std::vector<uint32_t> c = {1, 2, 3}, p(pl.begin() + 1, pl.end()), q(sp.begin() + 1, sp.end());
+      write_judge(dir + "/" + golden::ForcedJudge::key(tag, c, p) + ".golden.safetensors", rows_for(plain_tops));
+      write_judge(dir + "/" + golden::ForcedJudge::key(tag, c, q) + ".golden.safetensors", rows_for(spec_tops));
+      const spec_judge::StreamVerdict sv = spec_judge::streams(fj, tag, prompt, pl, far5, sp, V, V);
+      std::printf("%s: %s\n", tag, sv.line().c_str());
+      CHECK(sv.judged);
+      return sv;
+    };
+    // (a) both end their turn at stream row 2 (suffix row 1); the speculative rows after it are rejected 10 below the
+    //     f32 top - past the end of turn, not graded: PASS, each printed
+    spec_judge::StreamVerdict sv = judged("t_turn_a", {3, 9, 7, 8, 8}, {4, 7, 5, 6, 0}, {9, 7, 1, 1, 0});
+    CHECK(sv.pass && sv.miss_spec == 0 && sv.miss_plain == 0);
+    CHECK(sv.graded_spec == 2 && sv.graded_plain == 2 && sv.rows == 4);
+    CHECK_EQ(sv.past.size(), size_t(2));
+    CHECK(sv.line().find("past end of turn (row 2): not graded") != std::string::npos);
+    // (b) the stop row itself is graded: the judge rejects the speculative end-of-turn id - a miss, FAIL
+    sv = judged("t_turn_b", {3, 9, 7, 8, 8}, {4, 7, 5, 6, 0}, {9, 5, 8, 8, 0});
+    CHECK(!sv.pass && sv.miss_spec == 1 && sv.beyond.size() == 1 && sv.beyond[0].row == 1);
+    // (c) the two streams end at different offsets: plain at stream row 2, the speculative stream at 4. Plain's
+    //     rejected rows after its end do not count; the speculative stream's rows count up to its own end
+    sv = judged("t_turn_c", {3, 9, 8, 8, 7}, {4, 7, 1, 1, 0}, {9, 8, 8, 7, 0});
+    CHECK(sv.pass && sv.miss_plain == 0 && sv.graded_plain == 2 && sv.graded_spec == 4);
+    CHECK_EQ(sv.past.size(), size_t(2));   // plain's rows 2 and 3
+    sv = judged("t_turn_c2", {3, 9, 8, 8, 7}, {4, 7, 1, 1, 0}, {9, 8, 1, 7, 0});
+    CHECK(!sv.pass && sv.miss_spec == 1 && sv.beyond[0].row == 2);   // its row 2 lies before its own end: graded
+    // (d) a first difference after the shared end of turn: nothing graded, nothing dumped or awaited
+    const uint64_t before = spec_judge::awaiting().divergences;
+    unsetenv("B70_FORCED_JUDGE");
+    const golden::ForcedJudge none;
+    const std::vector<uint32_t> pl = {3, 7, 4, 5}, sp = {3, 7, 9, 9};
+    const std::vector<greedy_tie::RefStep> far2 = {step(3, 0, 50), step(7, 0, 50), step(4, 9, 40), step(5, 0, 50)};
+    sv = spec_judge::streams(none, "t_turn_d", prompt, pl, far2, sp, V, V);
+    std::printf("t_turn_d: %s\n", sv.line().c_str());
+    CHECK(sv.pass && !sv.judged && !sv.awaiting && sv.tie.at == 2);
+    CHECK(sv.line().find("past end of turn (row 2): not graded") != std::string::npos);
+    CHECK_EQ(spec_judge::awaiting().divergences, before);
+    golden::end_of_turn_ids().clear();
+  }
   std::puts("spec_judge_test OK");
   return 0;
 }

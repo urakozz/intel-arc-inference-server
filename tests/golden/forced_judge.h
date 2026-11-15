@@ -18,6 +18,9 @@
 //
 // <key> = <name>_<FNV-1a 64 of the prompt and the forced ids, hex>: two configurations that reach the same tokens
 // share one reference, and a judge can never be applied to another context than its own.
+//
+// Every judged stream is graded only up to and including its first end-of-turn id (golden_common.h turn_end,
+// operator 2026-11-15): the rows after it are text a server never sends. The dumps and keys keep the whole stream.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -106,6 +109,17 @@ inline bool judge_accepts(const Golden& j, uint32_t row, uint32_t id, uint32_t v
   return row_accepts(j.f32("logits", size_t(j.dim("logits", 2, 0)) * vocab) + size_t(row) * vocab, id, vocab, used);
 }
 
+// A row past its stream's end of turn (golden_common.h turn_end) is not graded and not a miss. The line for one the
+// judge rejects ("past end of turn (row R): not graded" and the margin); empty when it accepts the id.
+inline std::string past_turn(const float* r, size_t row, uint32_t id, uint32_t vocab, uint32_t used, const char* who) {
+  if (row_accepts(r, id, vocab, used)) return "";
+  const JudgedRow jr = judge_row(r, vocab, used);
+  char b[200];
+  std::snprintf(b, sizeof b, "past end of turn (row %zu): not graded - the judge rejects the %s id %u there, %.2f bf16 "
+                "ulp below its top %u", row, who, id, (double(r[jr.top]) - double(r[id])) / jr.ulp, jr.top);
+  return b;
+}
+
 // The judge's margin at a row where it rejects one run's id (`who`): how far below the f32 top that id sits, in
 // the judge's own units - the top-2 gap and one bf16 ulp of the top logit (judge_row's near-tie width). Printed
 // beside every rejection, so a reader can tell a near-miss (a gap of a few ulp) from a divergence.
@@ -125,7 +139,7 @@ inline void judge_explain(const Golden& j, uint32_t row, uint32_t id, uint32_t v
 
 namespace golden {
 
-// The bf16 twin's own misses over rows [0, rows): rows where the judge rejects every id of the twin's argmax set
+// The bf16 twin's own misses over rows [0, rows) (a caller passes its stream's turn_end): rows where the judge rejects every id of the twin's argmax set
 // (golden_decision: a bf16 tie is any of its ids), each printed with its margin.
 inline uint32_t twin_misses(const Golden& judge, const Golden& twin, uint32_t rows, uint32_t vocab, uint32_t used) {
   const float* t = twin.f32("logits", size_t(twin.dim("logits", 2, 0)) * vocab);

@@ -238,6 +238,7 @@ int main(int argc, char** argv) {
     std::printf("SKIP: %s\n", ex.what());
     return 77;
   }
+  golden::load_end_of_turn(snap);
   l0::Context ctx(0);
   runtime::Engine e(ctx, loader::load(ctx, snap, kMaxLen, /*mtp=*/true, loader::LmHeadForm::Int8), kMaxLen,
                     /*debug_resid=*/false, runtime::KvCache::Bf16);

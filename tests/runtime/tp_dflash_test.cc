@@ -386,6 +386,7 @@ int cost(l0::Context& d0, l0::Context& d1, uint32_t depth) {
 
 int main(int argc, char** argv) {
   g_ckpt = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+  golden::load_end_of_turn(g_ckpt);
   g_drafter = argc > 2 ? argv[2] : "z-lab/Qwen3.8-27B-DFlash2";
   const std::string mode = argc > 3 ? argv[3] : "gate";
   const uint32_t gpus = l0::Context::gpu_count();

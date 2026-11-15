@@ -11,7 +11,9 @@
 //                 is a near-miss (<= golden::kNearMissUlp bf16 ulp below the f32 top: forced_judge.h's rule 1 - the
 //                 streams' logits rows are not read back, so its cosine half does not apply). Without a judge for a
 //                 context a near-tie passes by the golden tie rule (greedy_tie.h), and anything beyond it AWAITS its
-//                 reference (below).
+//                 reference (below). Each stream is graded up to and including its own first end-of-turn id
+//                 (golden_common.h turn_end, operator 2026-11-15); a first difference after the shared end of turn
+//                 is not graded at all (nothing dumped, nothing awaited).
 //   N4 (rows)     a verify row against the plain row of the same context and the judge's row there: the verify row's
 //                 cosine distance to f32 at most golden::kCosSlack x the plain row's (forced_judge.h's "tiny
 //                 tolerance": two bf16 paths whose rounding points differ), or the old bar (cosine >= 0.99999
@@ -301,10 +303,21 @@ struct StreamVerdict {
   uint32_t miss_spec = 0, miss_plain = 0;
   double worst_spec_ulp = 0;         // the speculative stream's furthest miss below the f32 top
   std::vector<UnstableRow> beyond;   // the speculative misses beyond the near-miss bar, each by the bf16-unstable rule
+  // The end of turn (golden_common.h turn_end, operator 2026-11-15): each stream graded up to and including its first
+  // end-of-turn id. `turn` is the plain stream's turn_end (at or before the first difference: both streams ended their
+  // turn there, nothing is graded); `graded_*` the judge rows graded in each suffix, of `rows`; `past` the rows past
+  // either end the judge rejects (printed, not graded).
+  size_t turn = 0, graded_plain = 0, graded_spec = 0, rows = 0;
+  std::vector<std::string> past;
   std::string line() const {
     char b[256];
     if (tie.v == greedy_tie::Verdict::Same) return "identical";
     const char* tv = tie.v == greedy_tie::Verdict::Tie ? "near-tie" : "beyond the 1-ulp tie rule";
+    if (turn && turn <= tie.at) {
+      std::snprintf(b, sizeof b, "first difference at %zu: past end of turn (row %zu): not graded - the streams are "
+                    "identical through their shared end-of-turn id at %zu", tie.at, tie.at, turn - 1);
+      return b;
+    }
     if (!judged) {
       std::snprintf(b, sizeof b, "first difference at %zu (%s, rank %u, %.3f ulp below the plain top); no f32 judge "
                     "yet - %s", tie.at, tv, tie.cand_rank, tie.cand_gap,
@@ -317,19 +330,31 @@ struct StreamVerdict {
                     tie.cand_gap, miss_spec, miss_plain, worst_spec_ulp, pass ? "PASS" : "FAIL");
     }
     std::string out = b;
+    if (judged && (graded_spec < rows || graded_plain < rows)) {
+      std::snprintf(b, sizeof b, "; graded to each stream's end of turn: %zu speculative / %zu plain of %zu rows",
+                    graded_spec, graded_plain, rows);
+      out += b;
+    }
     for (const UnstableRow& u : beyond) out += "\n      ** the bf16-unstable rule (operator 2026-11-04): " + u.line();
+    for (const std::string& p : past) out += "\n      " + p;
     return out;
   }
 };
 
-// The misses of one forced stream against its judge: rows r in [0, gen) where the judge rejects force[r]; the worst
-// one's distance below the f32 top in bf16 ulps.
-inline uint32_t misses(const golden::Golden& j, const std::vector<uint32_t>& force, uint32_t V, uint32_t VU,
-                       double* worst) {
+// The misses of one forced stream against its judge: rows r in [0, graded) where the judge rejects force[r]; the
+// worst one's distance below the f32 top in bf16 ulps. Rows from `graded` on lie past the stream's end of turn: not
+// graded, each one the judge rejects noted in `past` (`who` names the stream).
+inline uint32_t misses(const golden::Golden& j, const std::vector<uint32_t>& force, size_t graded, uint32_t V,
+                       uint32_t VU, double* worst, std::vector<std::string>* past, const char* who) {
   const float* rows = j.f32("logits", size_t(j.dim("logits", 2, 0)) * V);
   uint32_t n = 0;
   for (size_t r = 0; r < force.size(); ++r) {
     const float* row = rows + r * V;
+    if (r >= graded) {
+      const std::string p = golden::past_turn(row, r, force[r], V, VU, who);
+      if (!p.empty()) past->push_back(p);
+      continue;
+    }
     if (golden::row_accepts(row, force[r], V, VU)) continue;
     ++n;
     const golden::JudgedRow jr = golden::judge_row(row, V, VU);
@@ -406,11 +431,16 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
   StreamVerdict v;
   reviewed().tags.insert(tag);
   v.tie = greedy_tie::classify(plain, steps, spec);
-  if (v.tie.v == greedy_tie::Verdict::Same) {
+  v.turn = golden::turn_end(plain.data(), plain.size());
+  if (v.tie.v == greedy_tie::Verdict::Same || v.turn <= v.tie.at) {   // identical to the (shared) end of turn
     v.pass = true;
     return v;
   }
   const size_t d = v.tie.at, n = std::min(plain.size(), spec.size());
+  // Each stream graded to its own end of turn: the judge rows [0, graded) of its suffix from d.
+  v.rows = n - d;
+  v.graded_plain = std::min(v.turn, n) - d;
+  v.graded_spec = std::min(golden::turn_end(spec.data(), spec.size()), n) - d;
   std::vector<uint32_t> ctx = prompt;
   ctx.insert(ctx.end(), plain.begin(), plain.begin() + d);
   const std::vector<uint32_t> fp(plain.begin() + d, plain.begin() + n), fs(spec.begin() + d, spec.begin() + n);
@@ -426,15 +456,15 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
   }
   v.judged = true;
   double unused = 0;
-  v.miss_plain = misses(*jp, fp, V, VU, &unused);
-  v.miss_spec = misses(*js, fs, V, VU, &v.worst_spec_ulp);
+  v.miss_plain = misses(*jp, fp, v.graded_plain, V, VU, &unused, &v.past, "plain");
+  v.miss_spec = misses(*js, fs, v.graded_spec, V, VU, &v.worst_spec_ulp, &v.past, "speculative");
   v.pass = v.miss_spec <= v.miss_plain || v.worst_spec_ulp <= golden::kNearMissUlp;
   if (v.pass) return v;
   // More misses than plain, one beyond the near-miss bar: each such miss by the bf16-unstable rule.
   const Bf16Top bt = open_bf16top(fj, ks, fs.size());
   const float* rows = js->f32("logits", size_t(js->dim("logits", 2, 0)) * V);
   bool all = true;
-  for (size_t r = 0; r < fs.size(); ++r) {
+  for (size_t r = 0; r < v.graded_spec; ++r) {
     const float* jrow = rows + r * V;
     if (golden::row_accepts(jrow, fs[r], V, VU)) continue;
     const golden::JudgedRow jr = golden::judge_row(jrow, V, VU);

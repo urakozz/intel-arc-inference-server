@@ -200,6 +200,7 @@ struct Loaded {
 };
 
 int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpts& head) {
+  golden::load_end_of_turn(snap);
   Loaded L(snap, backend, true, head);
   if (kVattn != runtime::VerifyAttnForce::Auto) L.eng.recapture_verify(runtime::attn_forced(kVattn));
   std::printf("verify attention: %s (spec 28c; --vattn), %u deep verify lists (%.0f ms to capture)\n",
