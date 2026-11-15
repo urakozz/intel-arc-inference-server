@@ -297,6 +297,10 @@ class Engine {
   uint32_t max_wide_k() const;
   bool wide_built() const { return seq().wide != nullptr; }
   bool deep_built() const { return seq().deep != nullptr; }
+  // The deepest k max_wide_k() can return at any position (0 without the 16-row list).
+  uint32_t widest_k() const {
+    return !wide_built() ? 0 : deep_built() && kDeepK + 1 <= deep_rows_ ? kDeepK : kWideK;
+  }
   const float* verify_logits_device() const;   // [k + 1][kVocab] fp32, device memory
   void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
   void flush_projection() const;

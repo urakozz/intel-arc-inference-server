@@ -128,6 +128,7 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     o.window = 0;
     o.max_k = deps_.engine.mtp_k();
     o.wide_k = deps_.engine.lookup_wide_k();   // open-work 28: long runs in the engine's wide verify list
+    o.deep_k = deps_.engine.lookup_deep_k();   // spec 32: and in its 32-row list
     impl_->lookup_in_dflash.emplace(o);
   }
   {

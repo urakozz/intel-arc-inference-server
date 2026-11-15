@@ -1581,11 +1581,13 @@ int run(int argc, char** argv) {
                "a match of >= {:d} remains), K {:d} lookup drafts\n",
                server::LookupInDFlash::kEnterMatch, server::LookupInDFlash::kStayAccepted,
                server::LookupInDFlash::kStayMatch, mtp_k);
-  if (options.spec_mtp_lookup && engine.wide_built())   // open-work 28
+  if (options.spec_mtp_lookup && engine.wide_built()) {   // open-work 28; spec 32: the 32-row list where it is built
+    const uint32_t wk = engine.widest_k();
     std::print(stderr,
                "spec mtp: long lookup runs - up to {:d} drafts in one {:d}-row verify while a run keeps them; a match of "
                ">= {:d} ids enters when the head's first two drafts agree with it\n",
-               runtime::Engine::kWideK, runtime::Engine::kWideK + 1, server::LookupInDFlash::kConfirmMatch);
+               wk, wk + 1, server::LookupInDFlash::kConfirmMatch);
+  }
   else if (mtp_on && engine.slots() == 1 && !options.spec_mtp_lookup)
     std::print(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
   if (drafter) {   // spec 19c: the drafter's policy line (print_proposer's format)
