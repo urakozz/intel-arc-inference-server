@@ -167,7 +167,8 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"tp_prefill_kv8_long_fa12c9167b2eaa28", 62, 198, 271, 24.80, "2026-11-14", kTpPrefillNarrowReason},
     // mtp_lookup_gpu_test, output 45: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
     {"mtp_lookup_gpu_int8_t4_comment-openai_54315f9e12fec99e", 0, 248068, 1005, 21.64, "2026-11-15", kWideLookupTieReason},
-    // the same row of t5_test-openai: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
+    // t5_test-openai output 45: near tie 846 (f32) / 272 (one-row decode) / 248068, flips at row 0 too (272 -> 248068);
+    // the lookup run's own history picks 248046; bf16 rounding, operator 2026-11-15
     {"mtp_lookup_gpu_int8_t5_test-openai_ff1eedc7423171f6", 0, 846, 248046, 21.05, "2026-11-15", kWideLookupTieReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test

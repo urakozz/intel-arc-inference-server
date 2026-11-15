@@ -1540,6 +1540,11 @@ if(B70_MTP)
   set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  # Open-work 28: the 16-row verify list (W16 alone; the int8 head, the int8 head's judges).
+  add_test(NAME mtp_verify_wide_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT} 16384 rule wide)
+  set_tests_properties(mtp_verify_wide_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
+    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
   # Spec 13c (plan 13c Tasks 2-3): runtime::Engine's sequence slots - S1 a slot alone is today's engine, S2 the slots'
   # isolation (prefill, decode, reset, snapshots), S3 B1 / B3 for the row kernels (bitwise, mixed K and depth), S4 B1
   # by the f32 judge (the int8 head's references; a divergence without one AWAITS it: 77), S5 determinism. Both KV forms.
