@@ -68,5 +68,10 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
                            uint32_t target_vocab_rows, const l0::Mem& target_embed, DraftFormat format,
                            unsigned threads = 0, int tp_rank = -1);
+// Kolibri DSpark: the same against a target given by its shape (Kolibri-1: model::DFlashTargetShape) and the embedding the
+// mask row is read from (the drafter's device's replica). A DSpark drafter's Markov head lands in `pred` / `succ` (bf16
+// [vocab][rank], markov_w1 / markov_w2 - df_select V2's codebooks).
+DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::DFlashTargetShape& target,
+                           const l0::Mem& target_embed, DraftFormat format, unsigned threads = 0);
 
 }  // namespace loader

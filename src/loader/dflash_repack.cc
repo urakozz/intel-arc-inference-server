@@ -86,6 +86,14 @@ std::vector<std::string> dflash_expected_names(const model::DFlashDesc& d) {
     for (const char* n : {"candidate_selector.hidden_projection.weight", "candidate_selector.predecessor_codebook",
                           "candidate_selector.successor_codebook"})
       v.push_back(n);
+  if (d.dspark()) {   // Kolibri DSpark: the Markov head, and the confidence head when it ships (read for its shape only)
+    v.push_back("markov_head.markov_w1.weight");
+    v.push_back("markov_head.markov_w2.weight");
+    if (d.conf_in) {
+      v.push_back("confidence_head.proj.weight");
+      v.push_back("confidence_head.proj.bias");
+    }
+  }
   std::sort(v.begin(), v.end());
   return v;
 }
@@ -182,6 +190,12 @@ void DFlashCheckpoint::open_and_check() {
     shape["candidate_selector.predecessor_codebook"] = {d_.vocab, d_.sel_rank};
     shape["candidate_selector.successor_codebook"] = {d_.vocab, d_.sel_rank};
   }
+  if (d_.dspark()) {
+    shape["markov_head.markov_w1.weight"] = {d_.vocab, d_.sel_rank};
+    shape["markov_head.markov_w2.weight"] = {d_.vocab, d_.sel_rank};
+    shape["confidence_head.proj.weight"] = {1, d_.conf_in};
+    shape["confidence_head.proj.bias"] = {1};
+  }
   for (const auto& [c, name] : canon) {
     const TensorInfo& t = set_->tensors().at(name);
     std::vector<uint64_t> want = shape.at(c);
@@ -236,7 +250,11 @@ void DFlashCheckpoint::open_and_check() {
 }
 
 void DFlashCheckpoint::check_target(const model::ModelDesc& target, uint32_t target_vocab_rows) const {
-  model::check_dflash_target(d_, target, target_vocab_rows);
+  check_target(model::DFlashTargetShape{target.name, target.layers, target.hidden, target_vocab_rows});
+}
+
+void DFlashCheckpoint::check_target(const model::DFlashTargetShape& target) const {
+  model::check_dflash_target(d_, target);
   if (fc_k_ != d_.fc_k(target.hidden))
     refuse(dir_, "fc.weight's K " + std::to_string(fc_k_) + " is not " + std::to_string(d_.taps.size()) +
                      " taps x the target's hidden " + std::to_string(target.hidden));
@@ -453,7 +471,8 @@ std::vector<float> DFlashCheckpoint::conv_bases() const {
   return v;
 }
 const uint16_t* DFlashCheckpoint::codebook(bool successor) const {
-  if (!d_.v2()) refuse(dir_, "the codebooks are DFlash 2's");
+  if (d_.dspark()) return bf16(successor ? "markov_head.markov_w2.weight" : "markov_head.markov_w1.weight");
+  if (!d_.v2()) refuse(dir_, "the codebooks are DFlash 2's (or DSpark's Markov head)");
   return bf16(successor ? "candidate_selector.successor_codebook" : "candidate_selector.predecessor_codebook");
 }
 std::vector<float> DFlashCheckpoint::mask_embedding() const {

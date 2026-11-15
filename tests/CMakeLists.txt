@@ -4561,6 +4561,13 @@ target_include_directories(dspark_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(dspark_desc_test PRIVATE b70_dflash_model b70_kolibri_model)
 add_test(NAME dspark_desc_test COMMAND dspark_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark/config.json)
 set_tests_properties(dspark_desc_test PROPERTIES LABELS "kolibri;dflash")
+# The loader's host half on a tiny DSpark checkpoint the test writes: names both ways, the Markov tables as the codebooks,
+# the bytes formula, a target by its parts. Host only.
+add_executable(dspark_loader_test loader/dspark_loader_test.cc)
+target_include_directories(dspark_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dspark_loader_test PRIVATE b70_dflash_loader)
+add_test(NAME dspark_loader_test COMMAND dspark_loader_test)
+set_tests_properties(dspark_loader_test PROPERTIES LABELS "kolibri;dflash")
 # ==== Kolibri DSpark ==== (end) ====
 # Fix round A: every test executable declared above gets a line-buffered stdout
 # (common/line_buffered_stdout.cc - a static initializer, so no main changes): crash logs
