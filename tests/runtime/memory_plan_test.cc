@@ -46,18 +46,19 @@ void check_sizes_qwen38() {
   const model::ModelDesc& q = model::qwen38();
   // buffers_test's tables at max_len 16384, every field.
   const runtime::PersistentSizes p = runtime::PersistentDims::sizes(16384, q);
-  CHECK_EQ(p.control, size_t{128});
+  // Open-work 28: Control 256 B, the conv ring 32 deep, the scratch 16 rows (twice every row term below).
+  CHECK_EQ(p.control, size_t{256});
   CHECK_EQ(p.gdn_state, size_t{150994944});
-  CHECK_EQ(p.conv_ring, size_t{15728640});
+  CHECK_EQ(p.conv_ring, size_t{31457280});
   CHECK_EQ(p.kv_k, size_t{536870912});
   CHECK_EQ(p.kv_v, size_t{536870912});
-  CHECK_EQ(p.total(), size_t{1240465536});
-  // Decode attention v2's attn_part: [24][32][8][258] fp32 whatever max_len is, 6,340,608 B
-  // (the removed v1 strided every 64-position block: 50,724,864 B at 16384).
+  CHECK_EQ(p.total(), size_t{1240465536 + 128 + 15728640});
+  // Decode attention v2's attn_part: [24][32][16][258] fp32 whatever max_len is, 12,681,216 B
+  // (the removed v1 strided every 64-position block: 50,724,864 B at 16384, at 8 rows).
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, q);
-  CHECK_EQ(d.partials, size_t{8912896});
-  CHECK_EQ(d.logits, size_t{7946240});
-  CHECK_EQ(d.total(), size_t{68652864 - 50724864 + 6340608});
+  CHECK_EQ(d.partials, size_t{2} * 8912896);
+  CHECK_EQ(d.logits, size_t{2} * 7946240);
+  CHECK_EQ(d.total(), size_t{2} * (68652864 - 50724864 + 6340608));
   // 128k (spec 6): KV 8,589,934,592.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
   for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
@@ -114,7 +115,7 @@ void check_sizes_ornith() {
   const model::ModelDesc& o = model::ornith();
   const runtime::PersistentSizes p = runtime::PersistentDims::sizes(16384, o);
   CHECK_EQ(p.gdn_state, size_t{30} * 32 * 128 * 128 * 4);          //  62,914,560
-  CHECK_EQ(p.conv_ring, size_t{30} * 16 * 8192 * 2);               //   7,864,320
+  CHECK_EQ(p.conv_ring, size_t{30} * 32 * 8192 * 2);               //  15,728,640
   // 20 KiB of KV per position (spec 15 §2): 10 FA layers x 2 kv-heads x 256 x bf16, K and V.
   CHECK_EQ(runtime::PersistentDims::sizes(1, o).kv_k * 2, size_t{20} * 1024);
   // The MoE scratch (runtime::moe_scratch_layout): router logits and route rows per layer
@@ -215,7 +216,7 @@ void check_spec6_line() {
   CHECK_EQ(p.model, size_t{18116331520ull});   // the 16384 load re-tabled to 131072
   CHECK_EQ(p.kv, size_t{8589934592ull});
   // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
-  CHECK_EQ(p.decode_state, size_t{150994944 + 15728640 + 128} + (68652864 - 50724864 + 6340608));
+  CHECK_EQ(p.decode_state, size_t{150994944 + 31457280 + 256} + 2 * (68652864 - 50724864 + 6340608));
   CHECK_EQ(p.decode_state, size_t{190992320});
   // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
   // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.

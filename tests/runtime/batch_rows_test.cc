@@ -106,7 +106,7 @@ void check_memory() {
   const runtime::BatchMemory q1 = runtime::batch_memory(q, {{1, true}}, KvCache::Int8, 0, 0);
   const runtime::BatchMemory q0 = runtime::batch_memory(q, {{0, true}}, KvCache::Int8, 0, 0);
   CHECK_EQ(q1.kv - q0.kv, size_t{35088});
-  CHECK_EQ(q0.state, size_t{4} * 150994944 + 15728640);   // 0.620 GB
+  CHECK_EQ(q0.state, size_t{4} * 150994944 + 31457280);   // 0.635 GB (the conv ring 32 deep: open-work 28)
   // Without MTP: no head layer, one GDN state.
   CHECK_EQ(runtime::batch_memory(q, {{1, false}}, KvCache::Int8, 0, 0).kv -
                runtime::batch_memory(q, {{0, false}}, KvCache::Int8, 0, 0).kv,

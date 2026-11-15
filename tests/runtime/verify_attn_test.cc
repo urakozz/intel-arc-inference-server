@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
   size_t rows = 0;
   for (const runtime::VerifyAttnRow& r : runtime::kVerifyAttnTable) {
     ++rows;
-    CHECK(r.m >= 2 && r.m <= 8);
+    CHECK(r.m >= 2 && (r.m <= 8 || (r.m == 16 && !r.kv8)));   // open-work 28: the one-card wide list, bf16
     const std::string name = kernels::attn_verify_dpas_variant(r.m, 32, r.kv8);
     CHECK(built.count(name) == 1);
     CHECK(runtime::verify_attn_kind(r.m, 4096, r.kv8, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::Dpas);
@@ -66,12 +66,12 @@ int main(int argc, char** argv) {
       for (uint32_t keys : depths)
         CHECK(runtime::verify_attn_kind(r.m, keys, r.kv8, 12, 2, ov) == runtime::verify_attn_kind(r.m, keys, r.kv8, 24, 4, ov));
     CHECK(runtime::verify_attn_deep_from(r.m, r.kv8, 12, 2) == runtime::verify_attn_deep_from(r.m, r.kv8, 24, 4));
-    // spec 19 v3c: M = 5..8 too (a DFlash drafter's verify rows under TP)
-    CHECK(built.count(kernels::attn_verify_dpas_variant(r.m, 32, r.kv8, 12, 2)) == 1);
+    // spec 19 v3c: M = 5..8 too (a DFlash drafter's verify rows under TP); the wide list is one card's only
+    if (r.m <= 8) CHECK(built.count(kernels::attn_verify_dpas_variant(r.m, 32, r.kv8, 12, 2)) == 1);
     std::printf("row M=%u %s: dpas_from %s\n", r.m, r.kv8 ? "int8" : "bf16",
                 r.dpas_from == runtime::kDpasNever ? "never" : std::to_string(r.dpas_from).c_str());
   }
-  CHECK(rows == 14);   // bf16 and int8 at M = 2..8
+  CHECK(rows == 15);   // bf16 and int8 at M = 2..8, bf16 at 16
   for (uint32_t M : {5u, 6u, 7u, 8u}) {
     CHECK(runtime::verify_attn_row(M, true)->dpas_from == 0);
     CHECK(runtime::verify_attn_depth_free(M, true));
@@ -80,7 +80,9 @@ int main(int argc, char** argv) {
       CHECK(runtime::verify_attn_kind(M, keys, true, 24, 4) == VerifyAttn::Dpas);
   }
   CHECK(runtime::verify_attn_kind(9, 32768, false, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
-  CHECK(runtime::verify_attn_kind(16, 32768, false, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
+  CHECK(runtime::verify_attn_kind(16, 1, false, 24, 4) == VerifyAttn::Dpas);   // open-work 28: DPAS from the first key
+  CHECK(runtime::verify_attn_kind(16, 32768, true, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
+  CHECK(runtime::verify_attn_dpas_blocks(16, 24, 4) == 32);
   std::printf("verify_attn_test: PASS (%zu table rows, %zu built names)\n", rows, built.size());
   return 0;
 }

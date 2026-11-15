@@ -58,7 +58,7 @@ void check_one_slot() {
       }
   // SlotDims and MtpDims at one sequence: nothing more than today.
   CHECK_EQ(runtime::SlotDims::sizes(q, 1, true).total(), size_t{0});
-  CHECK_EQ(runtime::MtpDims::hh_rows(1), runtime::DecodeScratchDims::kM + 1);
+  CHECK_EQ(runtime::MtpDims::hh_rows(1), runtime::DecodeScratchDims::kWideM + 1);   // open-work 28
   CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Bf16, 4, 1).total(),
            runtime::MtpDims::sizes(16384, q).total());
 }
@@ -76,7 +76,7 @@ void check_decided_layout() {
   const size_t rope = model::Qwen35::rope_table_bytes(229376) - model::Qwen35::rope_table_bytes(131072);
   const size_t hh = size_t(runtime::MtpDims::hh_rows(4) - runtime::MtpDims::hh_rows(1)) * q.hidden * 2;
   const size_t ctl = runtime::SlotDims::sizes(q, 4, true).controls;
-  CHECK_EQ(ctl, size_t{10} * 128 + 3 * 256);
+  CHECK_EQ(ctl, size_t{10} * 256 + 3 * 256);   // Control 256 B (open-work 28)
   const size_t pages = size_t(229376 / runtime::kKvPage) * 4;   // plan 19v3b Task 0: the page table, 112 pages
   CHECK_EQ(runtime::SlotDims::sizes(q, 4, true, 112).pages, pages);
   CHECK_EQ(p.total(), b.total() + rope + hh + ctl + pages);

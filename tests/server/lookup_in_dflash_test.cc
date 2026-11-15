@@ -1,6 +1,6 @@
 // Spec 19f (spec 19 §13.1): server::LookupInDFlash - the ENTER / STAY / EXIT transitions on scripted acceptances,
 // the window filter (a match whose source is inside the drafter's window never enters), the full-depth K and its caps
-// (max_k, the engine's cap, a boundary). Host only.
+// (max_k, the engine's cap, a boundary); open-work 28's wide runs (HOT) and confirmed candidates. Host only.
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -149,12 +149,71 @@ void k_caps() {
   std::printf("K: max_k, the engine's cap, a boundary; a context inside the window never enters\n");
 }
 
+// Open-work 28: no window (lookup inside MTP), max_k 3, wide_k 15.
+void wide_runs() {
+  LookupInDFlashOptions o = opts(0, 3);
+  o.wide_k = 15;
+  {
+    LookupInDFlash p(o);
+    const PromptLookup m = context(200, 64, 8);
+    CHECK_EQ(p.propose(m).size(), size_t(3));   // enters at max_k
+    p.observe(3, 3);                            // every draft kept: hot
+    const std::vector<uint32_t> d = p.propose(m);
+    CHECK_EQ(d.size(), size_t(15));             // a long source: wide
+    CHECK_EQ(d[14], 1008u + 14);
+    p.observe(15, 9);                           // >= 8 kept: stays hot
+    CHECK_EQ(p.propose(m).size(), size_t(15));
+    p.observe(15, 5);                           // < 8 kept: lookup, not hot
+    CHECK_EQ(p.propose(m).size(), size_t(3));
+    p.observe(3, 2);                            // < 3 kept: exit
+    CHECK(!p.in_lookup());
+    CHECK_EQ(p.wide, uint64_t(2));
+  }
+  {
+    // Hot, but the source has fewer than 8 ids before a boundary: the usual max_k.
+    LookupInDFlash p(o);
+    PromptLookup m;
+    for (uint32_t i = 0; i < 14; ++i) m.append(1000 + i);
+    m.boundary();
+    for (uint32_t i = 0; i < 64; ++i) m.append(100000 + i);
+    for (uint32_t i = 0; i < 8; ++i) m.append(1000 + i);
+    CHECK_EQ(p.propose(m).size(), size_t(3));
+    p.observe(3, 3);
+    CHECK_EQ(p.propose(m).size(), size_t(3));   // 6 ids left: not wide
+  }
+  {
+    // Without wide_k the policy is the old one: max_k after every full keep.
+    LookupInDFlash p(opts(0, 3));
+    const PromptLookup m = context(200, 64, 8);
+    CHECK_EQ(p.propose(m).size(), size_t(3));
+    p.observe(3, 3);
+    CHECK_EQ(p.propose(m).size(), size_t(3));
+    CHECK(p.candidate(context(200, 64, 2)).empty());
+  }
+  {
+    // A candidate: a match of 2 (below ENTER) with >= 8 ids to copy; confirmed enters hot.
+    LookupInDFlash p(o);
+    const PromptLookup m = context(200, 64, 2);
+    CHECK(p.propose(m).empty());
+    const std::vector<uint32_t> c = p.candidate(m);
+    CHECK_EQ(c.size(), size_t(15));
+    CHECK_EQ(c[0], 1002u);
+    p.confirmed();
+    CHECK(p.in_lookup());
+    p.observe(15, 15);
+    CHECK_EQ(p.confirms, uint64_t(1));
+    CHECK(p.candidate(m).empty());   // in lookup: no candidate
+  }
+  std::printf("wide: hot after a full keep, wide while >= 8 kept and the source holds >= 8; confirmed enters hot\n");
+}
+
 }  // namespace
 
 int main() {
   enter_needs_eight_beyond_the_window();
   stay_and_exit();
   k_caps();
+  wide_runs();
   std::printf("lookup_in_dflash_test: ok\n");
   return 0;
 }

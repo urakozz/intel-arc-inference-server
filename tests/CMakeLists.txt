@@ -410,7 +410,7 @@ add_test(NAME attn_verify_ref_test COMMAND attn_verify_ref_test)
 # Spec 28c (plan 28c Task 5): the capture's verify-attention rule (runtime/verify_attn.h), host only; the built
 # attn_verify_dpas names are its arguments (every (M, KV form) the rule can bind must be on a CMake line).
 set(_vattn_built)
-foreach(MM 2 3 4 5 6 7 8)
+foreach(MM 2 3 4 5 6 7 8 16)   # 16: open-work 28's wide list
   foreach(SFX "" _KV8 _Q12KV2 _Q12KV2_KV8)   # spec 17d: the per-card 12 / 2 builds
     if(TARGET kernel_attn_verify_dpas_M${MM}_T32${SFX})
       list(APPEND _vattn_built attn_verify_dpas_M${MM}_T32${SFX})
