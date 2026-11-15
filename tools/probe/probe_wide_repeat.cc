@@ -3,7 +3,7 @@
 // ids after a copy point, so the rows are a plausible copy), verify(15) - and every run's verify ids, the hh rows the
 // list wrote (the rows' post-final-norm hidden) and the head's K rows of the 16 positions compared bitwise with the
 // first run's. Differences name the rows.
-//   probe_wide_repeat <snapshot> <prompt.ids> [runs = 20] [max_len = 16384] [attn = rule|v2]   (cwd = the source tree)
+//   probe_wide_repeat <snapshot> <prompt.ids> [runs = 20] [max_len = 16384] [attn = rule|v2] [flush]   (cwd = the source tree)
 // attn v2: the lists recaptured with the verify attention forced to v2 (CaptureOptions::force_attn) - which kernel
 // a difference comes from.
 #include <algorithm>
@@ -60,6 +60,7 @@ int main(int argc, char** argv) {
   const uint32_t pending = e.control()->cur_token[0];
   l0::Mem saved(ctx, l0::MemKind::Host, e.state_bytes());
   e.save_state(saved.ptr());
+  l0::Mem saved2(ctx, l0::MemKind::Host, e.state_bytes());
   // Drafts: the 15 prompt ids after the earliest occurrence of the pending id (a copy), else the prompt's first 15.
   std::vector<uint32_t> d(ids.begin(), ids.begin() + 15);
   for (size_t i = 0; i + 16 < ids.size(); ++i)
@@ -68,16 +69,20 @@ int main(int argc, char** argv) {
       break;
     }
   const runtime::MtpBuffers& mb = *e.mtp_buffers();
-  // The plain reference: 16 one-row steps (verify(0) + commit) from the same state - their ids become the drafts (every
-  // one kept), their hidden rows and the head's K rows of positions pos - 1 .. pos + 14 the comparison.
+  // The plain reference: 16 R one-row steps (verify(0) + commit) from the same state - their ids become the drafts of R
+  // consecutive wide verifies (every one kept, each committed at 15), their hidden rows and the head's K rows of
+  // positions pos - 1 .. pos + 16 R - 2 the comparison. `flush` (6th argument) flushes the deferred GDN rows between the
+  // wide verifies (save_state does), to tell the replay of 16 rows from the rest.
   {
+    const uint32_t R = 3;
+    const bool flush = argc > 6 && std::string(argv[6]) == "flush";
     const size_t hid1 = size_t(e.model().desc->hidden) * 2, rb1 = mb.kv_lay.row_bytes();
     l0::CmdList im = l0::CmdList::immediate(ctx);
     e.load_state(saved.ptr(), pos);
     e.control()->cur_token[0] = pending;
-    std::vector<uint8_t> ph(16 * hid1), pk(16 * rb1), wh(17 * hid1), wk(16 * rb1);
+    std::vector<uint8_t> ph(16 * R * hid1), pk(16 * R * rb1), wh(16 * R * hid1), wk(16 * R * rb1), row(17 * hid1);
     std::vector<uint32_t> pids;
-    for (uint32_t i = 0; i < 16; ++i) {
+    for (uint32_t i = 0; i < 16 * R; ++i) {
       e.verify(0);
       const uint32_t id = e.verify_ids()[0];
       im.copy(ph.data() + i * hid1, static_cast<const uint8_t*>(mb.hh.ptr()) + hid1, hid1);
@@ -87,19 +92,26 @@ int main(int argc, char** argv) {
     im.copy(pk.data(), static_cast<const uint8_t*>(mb.kv_k.ptr()) + size_t(pos - 1) * rb1, pk.size());
     e.load_state(saved.ptr(), pos);
     e.control()->cur_token[0] = pending;
-    for (uint32_t i = 0; i < 15; ++i) e.control()->wide_cur[1 + i] = pids[i];
-    e.verify(runtime::Engine::kWideK);
-    uint32_t kept = 0;
-    while (kept < 15 && e.verify_ids()[kept] == pids[kept]) ++kept;
-    im.copy(wh.data(), mb.hh.ptr(), wh.size());
+    uint32_t kept_all = 0;
+    for (uint32_t v = 0; v < R; ++v) {
+      if (v > 0 && flush) e.save_state(saved2.ptr());
+      for (uint32_t i = 0; i < 15; ++i) e.control()->wide_cur[1 + i] = pids[16 * v + i];
+      e.verify(runtime::Engine::kWideK);
+      uint32_t kept = 0;
+      while (kept < 15 && e.verify_ids()[kept] == pids[16 * v + kept]) ++kept;
+      kept_all += kept;
+      im.copy(row.data(), mb.hh.ptr(), row.size());
+      std::memcpy(wh.data() + size_t(16 * v) * hid1, row.data() + hid1, 16 * hid1);
+      e.commit(15, pids[16 * v + 15]);
+    }
     im.copy(wk.data(), static_cast<const uint8_t*>(mb.kv_k.ptr()) + size_t(pos - 1) * rb1, wk.size());
     auto cosine = [](const uint8_t* x, const uint8_t* y, size_t bytes) {
       double dot = 0, na = 0, nb = 0;
       for (size_t i = 0; i < bytes; i += 2) {
-        uint16_t u, v;
+        uint16_t u, w;
         std::memcpy(&u, x + i, 2);
-        std::memcpy(&v, y + i, 2);
-        uint32_t a = uint32_t(u) << 16, c = uint32_t(v) << 16;
+        std::memcpy(&w, y + i, 2);
+        uint32_t a = uint32_t(u) << 16, c = uint32_t(w) << 16;
         float fa, fc;
         std::memcpy(&fa, &a, 4);
         std::memcpy(&fc, &c, 4);
@@ -109,13 +121,15 @@ int main(int argc, char** argv) {
       }
       return dot / std::sqrt(std::max(na * nb, 1e-300));
     };
-    std::printf("WIDE_VS_PLAIN keeps %u of 15 plain ids\n", kept);
-    for (uint32_t m = 0; m < 16; ++m)
-      std::printf("WIDE_VS_PLAIN row %2u: hidden cos %.6f | head K row (position %u) cos %.6f\n", m,
-                  cosine(wh.data() + (m + 1) * hid1, ph.data() + m * hid1, hid1), pos - 1 + m,
-                  cosine(wk.data() + m * rb1, pk.data() + m * rb1, rb1));
+    std::printf("WIDE_VS_PLAIN %u wide verifies%s keep %u of %u plain ids\n", R, flush ? " (GDN flushed between)" : "",
+                kept_all, 15 * R);
+    for (uint32_t m = 0; m < 16 * R; ++m) {
+      const double ch = cosine(wh.data() + m * hid1, ph.data() + m * hid1, hid1);
+      const double ck = cosine(wk.data() + m * rb1, pk.data() + m * rb1, rb1);
+      std::printf("WIDE_VS_PLAIN verify %u row %2u: hidden cos %.6f | head K row (position %u) cos %.6f%s\n", m / 16,
+                  m % 16, ch, pos - 1 + m, ck, ch < 0.999 || ck < 0.999 ? "  <<<" : "");
+    }
   }
-  const size_t hid = size_t(e.model().desc->hidden) * 2, rb = mb.kv_lay.row_bytes();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   std::vector<uint8_t> hh0, k0;
   std::vector<uint32_t> v0;
