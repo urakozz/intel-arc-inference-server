@@ -8,9 +8,9 @@
 // force_attn; no environment variable) - timed as interleaved chunks -
 // the in-list check of the verify-attention table (S1) and verify(8)'s attention saving (S2); nothing else runs.
 //
-// `mode` wide16 (spec 32, plan 32a Task 1; max_m 4, int8 head): the engine's built 16-row list in place -
-// Engine::verify(kWideK) with 15 file ids in Control::wide_cur, then commit(0) or commit(15) (the next launch replays
-// 1 or 16 rows, as in a run) - as interleaved pairs against verify(0) + commit(0), pos rewound to `depth` before every
+// `mode` wide16 (spec 32, plan 32a Task 1; max_m 4, int8 head): the engine's built 16-row list in place (and the
+// 32-row one, where built) - Engine::verify(k) with k file ids in Control::wide_cur / deep_cur, then commit(0) or
+// commit(k) (the next launch replays 1 or k + 1 rows, as in a run) - as interleaved pairs against verify(0) + commit(0), pos rewound to `depth` before every
 // chunk, the pair's order alternating by round, after a warm-up; median over rounds with the range.
 //
 // `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
@@ -270,55 +270,57 @@ int main(int argc, char** argv) {
   }
 
   if (mode == "wide16") {
-    // Spec 32 (plan 32a Task 1): the built 16-row list against the plain step, interleaved pairs.
+    // Spec 32 (plan 32a Task 1): the built 16-row list (and the 32-row one where built) against the plain step,
+    // interleaved pairs; commit(0) and the full commit (the next launch replays every row).
     if (!e.wide_built()) {
       std::fprintf(stderr, "wide16: the engine built no 16-row list (int8 head, bf16 KV, one slot)\n");
       return 1;
     }
-    auto chunk = [&](uint32_t j, bool wide16, uint32_t n) {
+    auto chunk = [&](uint32_t K, uint32_t j, uint32_t n) {   // K 0: the plain step
       ctl->pos = depth;
       const auto t0 = Clock::now();
       for (uint32_t i = 0; i < n; ++i) {
-        if (wide16) {
-          for (uint32_t r = 1; r <= runtime::Engine::kWideK; ++r) ctl->wide_cur[r] = file[(depth + r) % file.size()];
-          e.verify(runtime::Engine::kWideK);
-          e.commit(j, e.verify_ids()[j]);
-        } else {
-          e.verify(0);
-          e.commit(0, e.verify_ids()[0]);
-        }
+        uint32_t* cur = K == runtime::Engine::kWideK ? ctl->wide_cur : ctl->deep_cur;
+        for (uint32_t r = 1; r <= K; ++r) cur[r] = file[(depth + r) % file.size()];
+        e.verify(K);
+        e.commit(j, e.verify_ids()[j]);
       }
       return std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / n;
     };
-    chunk(0, false, 8);
-    chunk(0, true, 8);
-    chunk(runtime::Engine::kWideK, true, 8);
+    std::vector<uint32_t> ks{runtime::Engine::kWideK};
+    if (e.deep_built()) ks.push_back(runtime::Engine::kDeepK);
+    chunk(0, 0, 8);
+    for (uint32_t K : ks) {
+      chunk(K, 0, 8);
+      chunk(K, K, 8);
+    }
     std::printf("wide16: depth %u (rewound before every chunk), %u calls x %u rounds, interleaved pairs\n", depth,
                 calls, rounds);
     std::printf("| arm | ms | plain ms | x plain [range] |\n|---|---|---|---|\n");
-    for (uint32_t j : {0u, runtime::Engine::kWideK}) {
-      std::vector<double> t1, tw, ratio;
-      for (uint32_t r = 0; r < rounds; ++r) {
-        double a, b;
-        if (r % 2 == 0) {
-          a = chunk(0, false, calls);
-          b = chunk(j, true, calls);
-        } else {
-          b = chunk(j, true, calls);
-          a = chunk(0, false, calls);
+    for (uint32_t K : ks)
+      for (uint32_t j : {0u, K}) {
+        std::vector<double> t1, tw, ratio;
+        for (uint32_t r = 0; r < rounds; ++r) {
+          double a, b;
+          if (r % 2 == 0) {
+            a = chunk(0, 0, calls);
+            b = chunk(K, j, calls);
+          } else {
+            b = chunk(K, j, calls);
+            a = chunk(0, 0, calls);
+          }
+          t1.push_back(a);
+          tw.push_back(b);
+          ratio.push_back(b / a);
         }
-        t1.push_back(a);
-        tw.push_back(b);
-        ratio.push_back(b / a);
+        std::vector<double> rs = ratio;
+        std::sort(rs.begin(), rs.end());
+        std::printf("| verify %u rows, commit(%u) | %.3f | %.3f | %.4f [%.4f-%.4f] |\n", K + 1, j, median_of(tw),
+                    median_of(t1), median_of(ratio), rs.front(), rs.back());
+        std::printf("WIDE%u depth=%u commit=%u wide=%.3f plain=%.3f ratio=%.4f lo=%.4f hi=%.4f\n", K + 1, depth, j,
+                    median_of(tw), median_of(t1), median_of(ratio), rs.front(), rs.back());
+        std::fflush(stdout);
       }
-      std::vector<double> rs = ratio;
-      std::sort(rs.begin(), rs.end());
-      std::printf("| verify 16 rows, commit(%u) | %.3f | %.3f | %.4f [%.4f-%.4f] |\n", j, median_of(tw), median_of(t1),
-                  median_of(ratio), rs.front(), rs.back());
-      std::printf("WIDE16 depth=%u commit=%u wide=%.3f plain=%.3f ratio=%.4f lo=%.4f hi=%.4f\n", depth, j,
-                  median_of(tw), median_of(t1), median_of(ratio), rs.front(), rs.back());
-      std::fflush(stdout);
-    }
     return 0;
   }
 
