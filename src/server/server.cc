@@ -411,7 +411,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   // is indexed when the engine hands it to the proposer: it is consumed next, always).
   const bool lookup = opts_.spec_lookup;
   if (lookup) {
-    lookup_begin(outcome.prompt_ids);
+    lookup_begin(impl_->lookup, impl_->lookup_history, opts_.lookup_history, outcome.prompt_ids);
     AdaptiveKOptions o = opts_.lookup_adaptive;
     o.max_k = std::min(o.max_k, deps_.engine.verify_k());
     policy.emplace(o);
@@ -422,7 +422,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   // Open-work 27: lookup inside MTP - the same matcher and policy; its MTP iterations keep the per-step choice below.
   const bool mtp_lookup = opts_.spec_mtp_lookup;
   if (dflash_lookup || mtp_lookup) {
-    lookup_begin(outcome.prompt_ids);
+    lookup_begin(impl_->lookup, impl_->lookup_history, opts_.lookup_history, outcome.prompt_ids);
     impl_->lookup_in_dflash->reset();
   }
   bool burst_head_indexed = false;   // burst[0] went into the matcher in the proposer
@@ -590,37 +590,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   flush_pending(true);
   if (eos_stop && !outcome.parsed.tool_calls.empty()) outcome.finish_reason = "tool_calls";
   outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
-  if (lookup) lookup_end(outcome.out_ids);
-}
-
-// Spec 19e: index the request. Without history the matcher is reused from the longest
-// common prefix of what it holds (the previous request's prompt and kept ids) and this
-// prompt - an agentic turn re-sends the conversation, so the tail is all that is new. With
-// history it is rebuilt: the earlier requests' generated ids, each behind a boundary, then
-// the prompt (the prompt's matches are the more recent on ties).
-void Server::lookup_begin(const std::vector<uint32_t>& prompt_ids) {
-  PromptLookup& lk = impl_->lookup;
-  if (opts_.lookup_history == 0) {
-    const std::vector<uint32_t>& held = lk.ids();
-    size_t common = 0;
-    const size_t n = std::min(held.size(), prompt_ids.size());
-    while (common < n && held[common] == prompt_ids[common]) ++common;
-    lk.truncate(common);
-    for (size_t i = common; i < prompt_ids.size(); ++i) lk.append(prompt_ids[i]);
-    return;
-  }
-  lk.clear();
-  for (const std::vector<uint32_t>& earlier : impl_->lookup_history) {
-    lk.append(earlier);
-    lk.boundary();
-  }
-  lk.append(prompt_ids);
-}
-
-void Server::lookup_end(const std::vector<uint32_t>& out_ids) {
-  if (!opts_.spec_lookup || opts_.lookup_history == 0) return;
-  impl_->lookup_history.push_back(out_ids);
-  while (impl_->lookup_history.size() > opts_.lookup_history) impl_->lookup_history.pop_front();
+  if (lookup) lookup_end(impl_->lookup_history, opts_.lookup_history, outcome.out_ids);
 }
 
 void Server::finish_request() {

@@ -173,9 +173,7 @@ struct PpPlan {
   size_t max_total() const;
 };
 PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
-               KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());
-PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
-               KvCache kv, const PrefillPath& pf, const PpExtras& x);
+               KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill(), const PpExtras& x = {});
 
 // Spec 16d: one device's MTP verify slots - gdn_step_slots' `state_spec` for the device's
 // `stage_gdn` GDN layers. The binary bakes one slot's stride as the WHOLE model's
@@ -225,9 +223,8 @@ PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, 
 // `--pipeline-split auto` at an explicit max_len: the split whose heavier device holds the
 // fewest bytes; ties go to the smaller difference between the two, then to the smaller s.
 uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len,
-                       KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill());
-uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
-                       const PrefillPath& pf, const PpExtras& x);
+                       KvCache kv = default_kv_cache(), const PrefillPath& pf = pp_no_prefill(),
+                       const PpExtras& x = {});
 
 // `--max-len auto` under a split: the largest multiple of kMaxLenQuantum up to `cap` whose
 // plan + `reserve` fits EACH device (the min over the devices); 0 when not even
@@ -235,11 +232,7 @@ uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t m
 uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
                               const std::array<size_t, kPpDevices>& device_bytes,
                               size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),
-                              const PrefillPath& pf = pp_no_prefill());
-uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
-                              const std::array<size_t, kPpDevices>& device_bytes,
-                              size_t reserve, uint32_t cap, KvCache kv, const PrefillPath& pf,
-                              const PpExtras& x);
+                              const PrefillPath& pf = pp_no_prefill(), const PpExtras& x = {});
 
 // Both auto: the split whose min-over-devices max_len is the largest, ties broken as
 // pp_auto_split breaks them at that length. {0, 0} when no split fits min(4096, cap).
@@ -249,11 +242,7 @@ struct PpChoice {
 PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
                                const std::array<size_t, kPpDevices>& device_bytes,
                                size_t reserve, uint32_t cap, KvCache kv = default_kv_cache(),
-                               const PrefillPath& pf = pp_no_prefill());
-PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
-                               const std::array<size_t, kPpDevices>& device_bytes,
-                               size_t reserve, uint32_t cap, KvCache kv, const PrefillPath& pf,
-                               const PpExtras& x);
+                               const PrefillPath& pf = pp_no_prefill(), const PpExtras& x = {});
 
 // "pipeline plan at max_len N, split s (layers [0, s) | [s, L)):" and one memory_line()-style
 // line per device ("device 0: model ... total ... of ...; + reserve").

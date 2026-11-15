@@ -419,7 +419,6 @@ void Engine::verify_rows(const std::vector<Run>& runs) {
   }
   queue_.execute(rows_steps_.at(M - 2).list, &fence_);
   fence_.wait();
-  rows_m_ = M;
   // Per run: committable as after its own verify(k) - row j's hidden is the saved row r0 + j.
   const size_t hid = size_t(model_.desc->hidden) * 2;
   uint32_t r0 = 0;

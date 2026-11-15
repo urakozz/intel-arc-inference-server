@@ -1,5 +1,6 @@
 #include "server/prompt_lookup.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -173,6 +174,31 @@ std::vector<uint32_t> PromptLookup::propose(uint32_t max_k, uint32_t min_n, Matc
     out.push_back(id);
   }
   return out;
+}
+
+void lookup_begin(PromptLookup& lk, const std::deque<std::vector<uint32_t>>& history, uint32_t keep,
+                  const std::vector<uint32_t>& prompt) {
+  if (keep == 0) {
+    const std::vector<uint32_t>& held = lk.ids();
+    size_t common = 0;
+    const size_t n = std::min(held.size(), prompt.size());
+    while (common < n && held[common] == prompt[common]) ++common;
+    lk.truncate(common);
+    for (size_t i = common; i < prompt.size(); ++i) lk.append(prompt[i]);
+    return;
+  }
+  lk.clear();
+  for (const std::vector<uint32_t>& earlier : history) {
+    lk.append(earlier);
+    lk.boundary();
+  }
+  lk.append(prompt);
+}
+
+void lookup_end(std::deque<std::vector<uint32_t>>& history, uint32_t keep, const std::vector<uint32_t>& out) {
+  if (keep == 0) return;
+  history.push_back(out);
+  while (history.size() > keep) history.pop_front();
 }
 
 }  // namespace server

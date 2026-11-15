@@ -109,9 +109,6 @@ inline std::string ple_check_variant(bool bf16_scale) { return ple_gather_varian
 inline std::string qsa_variant(unsigned M) {
   return "q4_qsa" + m_(M) + "_T" + std::to_string(kTopBlocks) + "_W" + std::to_string(kSelectWg);
 }
-inline std::string qsa_prep_variant(unsigned M) { return qsa_variant(M); }
-inline std::string qsa_score_variant(unsigned M) { return qsa_variant(M); }
-inline std::string qsa_select_variant(unsigned M) { return qsa_variant(M); }
 // "q4_qsa_attn_M1_T32" (q4_qsa_attn + q4_qsa_reduce) | "q4_qsa_attn_eager_M1" (one kernel, B70_Q4_ATTN=eager).
 inline std::string qsa_attn_variant(unsigned M, bool eager) {
   return eager ? "q4_qsa_attn_eager" + m_(M) : "q4_qsa_attn" + m_(M) + "_T" + std::to_string(kAttnTgt);

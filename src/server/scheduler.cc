@@ -291,33 +291,6 @@ int Scheduler::pick_slot(const Job& job) const {
   return best;
 }
 
-// Spec 19e's lookup_begin (server.cc), on the slot's matcher.
-void Scheduler::lookup_begin(uint32_t slot, const std::vector<uint32_t>& prompt) {
-  PromptLookup& lk = *impl_->matchers[slot];
-  if (opts_.lookup_history == 0) {
-    const std::vector<uint32_t>& held = lk.ids();
-    size_t common = 0;
-    const size_t n = std::min(held.size(), prompt.size());
-    while (common < n && held[common] == prompt[common]) ++common;
-    lk.truncate(common);
-    for (size_t i = common; i < prompt.size(); ++i) lk.append(prompt[i]);
-    return;
-  }
-  lk.clear();
-  for (const std::vector<uint32_t>& earlier : impl_->history[slot]) {
-    lk.append(earlier);
-    lk.boundary();
-  }
-  lk.append(prompt);
-}
-
-void Scheduler::lookup_end(uint32_t slot, const std::vector<uint32_t>& out) {
-  if (opts_.lookup_history == 0) return;
-  auto& h = impl_->history[slot];
-  h.push_back(out);
-  while (h.size() > opts_.lookup_history) h.pop_front();
-}
-
 void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -388,7 +361,8 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
     else engine_.reset(slot);
     job->prefilled = restart;
     job->fin.cached_tokens = restart;
-    if (impl_->lookup || impl_->mtp_lookup) lookup_begin(slot, job->req.prompt);
+    if (impl_->lookup || impl_->mtp_lookup)
+      lookup_begin(*impl_->matchers[slot], impl_->history[slot], opts_.lookup_history, job->req.prompt);
   } catch (const std::exception& error) {
     finish(job, Finish::Error, error.what());
   }
@@ -430,7 +404,7 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
     }
     if (impl_->lookup && (reason == Finish::Stop || reason == Finish::Length)) {
       try {
-        lookup_end(slot, job->out);
+        lookup_end(impl_->history[slot], opts_.lookup_history, job->out);
       } catch (const std::exception&) {
       }
     }

@@ -28,6 +28,7 @@
 #include "cli/bolt_spec.h"      // spec 26c: --spec dflash / lookup for Bolt (LiLiCorr)
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
 #include "cli/hardware_gate.h"
+#include "cli/stdout_to_stderr.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
 #include "cli/kolibri_spec.h"     // Kolibri DSpark: --spec dflash with the DSpark drafter
@@ -66,29 +67,7 @@
 
 namespace {
 
-class StdoutToStderr {
- public:
-  StdoutToStderr() {
-    std::fflush(stdout);
-    saved_ = ::dup(1);
-    if (saved_ >= 0 && ::dup2(2, 1) < 0) {
-      ::close(saved_);
-      saved_ = -1;
-    }
-  }
-  ~StdoutToStderr() {
-    std::fflush(stdout);
-    if (saved_ >= 0) {
-      ::dup2(saved_, 1);
-      ::close(saved_);
-    }
-  }
-  StdoutToStderr(const StdoutToStderr&) = delete;
-  StdoutToStderr& operator=(const StdoutToStderr&) = delete;
-
- private:
-  int saved_ = -1;
-};
+using cli::StdoutToStderr;
 
 server::Server* g_server = nullptr;
 
@@ -593,27 +572,27 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
+// The tail of a speculative policy's startup line: its AdaptiveK cost table, in plain steps.
+void print_cost_table(const server::MtpCost& c) {
+  std::print(stderr, "cost verify M=1..{:d}", c.verify.size());
+  for (double v : c.verify) std::print(stderr, " {:.3f}", v);
+  std::print(stderr, ", draft k=1..{:d}", c.draft.size());
+  for (double v : c.draft) std::print(stderr, " {:.3f}", v);
+  std::print(stderr, " (plain steps)\n");
+}
+
 // The speculative proposer's startup lines (spec 19e's lookup, spec 8 §10's auto policy) -
 // one card's and --parallel pp's.
 void print_proposer(const server::Options& options, bool spec_lookup, uint32_t spec_min_match,
                     uint32_t spec_max, uint32_t spec_history, bool mtp_auto, bool moe_default_costs,
                     const std::string& model_name) {
   if (spec_lookup) {
-    const server::MtpCost& c = options.lookup_adaptive.cost;
-    std::print(stderr, "spec lookup: min match {:d}, K <= {:d}, history {:d}, cost verify M=1..{:d}",
-               spec_min_match, spec_max, spec_history, c.verify.size());
-    for (double v : c.verify) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, ", draft k=1..{:d}", c.draft.size());
-    for (double v : c.draft) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, " (plain steps)\n");
+    std::print(stderr, "spec lookup: min match {:d}, K <= {:d}, history {:d}, ", spec_min_match, spec_max, spec_history);
+    print_cost_table(options.lookup_adaptive.cost);
   }
   if (mtp_auto) {
-    const server::MtpCost& c = options.mtp_adaptive.cost;
-    std::print(stderr, "mtp auto: cost verify M=1..{:d}", c.verify.size());
-    for (double v : c.verify) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, ", draft k=1..{:d}", c.draft.size());
-    for (double v : c.draft) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, " (plain steps)\n");
+    std::print(stderr, "mtp auto: ");
+    print_cost_table(options.mtp_adaptive.cost);
     // A MoE model's verify at M rows touches up to top_k x M distinct experts, so its costs differ from Qwen3.8's;
     // Ornith's measured table (docs/BENCHMARKS.md) was 6-10 % slower in the speed A/B than Qwen3.8's, so it keeps these.
     if (moe_default_costs)
@@ -746,13 +725,9 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  served.is_moe(), served.name);
   if (drafter) {   // spec 19d: the drafter's policy line, as on one card
-    const server::MtpCost& c = options.mtp_adaptive.cost;
-    std::print(stderr, "spec dflash (--parallel pp, device 1): {} drafter, K <= {:d}, cost verify M=1..{:d}",
-               loader::draft_format_name(a.dflash.format), a.dflash.max_k, c.verify.size());
-    for (double v : c.verify) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, ", draft k=1..{:d}", c.draft.size());
-    for (double v : c.draft) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, " (plain steps)\n");
+    std::print(stderr, "spec dflash (--parallel pp, device 1): {} drafter, K <= {:d}, ",
+               loader::draft_format_name(a.dflash.format), a.dflash.max_k);
+    print_cost_table(options.mtp_adaptive.cost);
   }
   return listen_until_stopped(server, options);
 }
@@ -1041,13 +1016,9 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
   else if (a.mtp_k > 0 && slots_engines.empty())
     std::print(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
   for (uint32_t i = 0; a.dflash.on && i < 2; ++i) {   // spec 19c: each card's drafter policy line, as on one card
-    const server::MtpCost& c = options.mtp_adaptive.cost;
-    std::print(stderr, "card {:d}: spec dflash: {} drafter, K <= {:d}, cost verify M=1..{:d}", i,
-               loader::draft_format_name(a.dflash.format), a.dflash.max_k, c.verify.size());
-    for (double v : c.verify) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, ", draft k=1..{:d}", c.draft.size());
-    for (double v : c.draft) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, " (plain steps)\n");
+    std::print(stderr, "card {:d}: spec dflash: {} drafter, K <= {:d}, ", i, loader::draft_format_name(a.dflash.format),
+               a.dflash.max_k);
+    print_cost_table(options.mtp_adaptive.cost);
   }
   return listen_until_stopped(server, options);
 }
@@ -1667,13 +1638,8 @@ int run(int argc, char** argv) {
   else if (mtp_on && engine.slots() == 1 && !options.spec_mtp_lookup)
     std::print(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
   if (drafter) {   // spec 19c: the drafter's policy line (print_proposer's format)
-    const server::MtpCost& c = options.mtp_adaptive.cost;
-    std::print(stderr, "spec dflash: {} drafter, K <= {:d}, cost verify M=1..{:d}",
-               loader::draft_format_name(dflash.format), dflash.max_k, c.verify.size());
-    for (double v : c.verify) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, ", draft k=1..{:d}", c.draft.size());
-    for (double v : c.draft) std::print(stderr, " {:.3f}", v);
-    std::print(stderr, " (plain steps)\n");
+    std::print(stderr, "spec dflash: {} drafter, K <= {:d}, ", loader::draft_format_name(dflash.format), dflash.max_k);
+    print_cost_table(options.mtp_adaptive.cost);
     if (lookup_inside)   // spec 19f
       std::print(stderr,
                  "spec dflash-lookup: prompt lookup inside DFlash - ENTER a match of >= {:d} ids beyond the drafter's "

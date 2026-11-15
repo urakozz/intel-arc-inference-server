@@ -540,7 +540,6 @@ class Engine {
   std::vector<CapturedStep> draft_rows_steps_;   // MTP: the row draft lists at M = 2..min(slots, kMaxDraftRows)
   DraftRowsBind draft_bind_;
   BatchLayout layout_;
-  uint32_t rows_m_ = 0;   // the rows of the last verify_rows
   void setup_slots(const std::vector<uint32_t>& lens);
   void capture_slot(uint32_t q);
   uint32_t gdn_index(uint32_t slot, uint32_t k) const { return seqs_[slot].first + k; }

@@ -48,6 +48,14 @@ struct OutputParser {
   virtual std::vector<Delta> finish() = 0;                         // end of generation
 };
 
+// The whole of `text` through `stream` (push, then finish), its deltas folded into one ParsedOutput: every family's
+// parse_output.
+ParsedOutput fold_output(OutputParser& stream, const std::string& text);
+
+// Length of the longest suffix of s that is a proper prefix of tag: text that may still become the tag once more
+// pieces arrive. The families' streams hold that much back.
+size_t tag_prefix_suffix(const std::string& s, const std::string& tag);
+
 // Incremental form of parse_output: the concatenation of the deltas of any split of
 // a text equals parse_output of the whole text (call ids aside, which each stream
 // draws itself). Holds back only what may still be a tag.

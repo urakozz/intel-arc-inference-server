@@ -41,6 +41,7 @@
 // Real ids must be below kBoundaryFloor.
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <vector>
 
 namespace server {
@@ -111,5 +112,14 @@ class PromptLookup {
   std::vector<uint32_t> prev_[kNumLevels];   // [size()], kNone = end of chain
   uint32_t next_boundary_ = 0xFFFFFFFFu;
 };
+
+// Spec 19e: index a request (the server's matcher and each scheduler slot's). Without history (`keep` 0) the matcher is
+// reused from the longest common prefix of what it holds (the previous request's prompt and kept ids) and this prompt -
+// an agentic turn re-sends the conversation, so the tail is all that is new. With history it is rebuilt: the earlier
+// requests' generated ids, each behind a boundary, then the prompt (the prompt's matches are the more recent on ties).
+void lookup_begin(PromptLookup& lk, const std::deque<std::vector<uint32_t>>& history, uint32_t keep,
+                  const std::vector<uint32_t>& prompt);
+// A finished request's generated ids into the history, the newest `keep` kept (none when `keep` is 0).
+void lookup_end(std::deque<std::vector<uint32_t>>& history, uint32_t keep, const std::vector<uint32_t>& out);
 
 }  // namespace server

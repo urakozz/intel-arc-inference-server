@@ -32,15 +32,6 @@ bool prefix_of(const std::string& s, size_t at, const std::string& tag) {
   return n < tag.size() && tag.compare(0, n, s, at, n) == 0;
 }
 
-// Length of the longest suffix of s that is a proper prefix of tag.
-size_t tag_prefix_suffix(const std::string& s, const std::string& tag) {
-  const size_t max = std::min(s.size(), tag.size() - 1);
-  for (size_t n = max; n > 0; --n) {
-    if (s.compare(s.size() - n, n, tag, 0, n) == 0) return n;
-  }
-  return 0;
-}
-
 }  // namespace
 
 KolibriOutputStream::KolibriOutputStream(json tools) : tools_(std::move(tools)), seed_(new_call_seed()) {}
@@ -205,16 +196,7 @@ std::vector<Delta> KolibriOutputStream::finish() {
 
 ParsedOutput parse_output_kolibri(const std::string& text, const json& tools) {
   KolibriOutputStream stream(tools);
-  std::vector<Delta> deltas = stream.push(text);
-  std::vector<Delta> tail = stream.finish();
-  deltas.insert(deltas.end(), std::make_move_iterator(tail.begin()), std::make_move_iterator(tail.end()));
-  ParsedOutput out;
-  for (Delta& d : deltas) {
-    if (d.kind == Delta::Reasoning) out.reasoning += d.text;
-    else if (d.kind == Delta::Content) out.content += d.text;
-    else out.tool_calls.push_back(std::move(d.call));
-  }
-  return out;
+  return fold_output(stream, text);
 }
 
 }  // namespace server
