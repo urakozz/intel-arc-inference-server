@@ -2042,7 +2042,7 @@ if(B70_ORNITH)
     # the rows that failed that day - golden_common.h AcceptList. cjk 15's engine id at c16 is 99737 (the l0 c16 runs of
     # 2026-11-12 / 13), so the entry names it (item 30 (4)).
     set(_acc_one "")
-    set(_acc_c16 "prose:18,cjk:15=99737")
+    set(_acc_c16 "cjk:15=99737")
     if(b STREQUAL "l0-int8")
       # Plan 2026-11-12 (operator): l0-int8's experts are W4A8, judged by the PLAIN f32 reference (the pfi8 judge
       # simulates the rotated int8 form it replaced) under the gate's near-miss rule (prefill_gate_test.cc), no
