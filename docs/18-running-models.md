@@ -381,13 +381,61 @@ German tool-call set `tests/golden/toolcall-kolibri-de` (`tools/toolcall/engine_
 
 **Limits.** Prefill on `--prefill-backend l0` only (`l0-int8` refused: its h8 linears rotate in
 1024-k Hadamard blocks and the hidden is 2560), `--prefill-chunk`
-at most 2048; no `--spec mtp` / `lookup` / `dflash` (no head, no verify lists; its `--spec auto` is off),
+at most 2048; no `--spec mtp` / `lookup` (no head; its `--spec auto` is off - `--spec dflash` is the DSpark drafter below),
 `--kv-cache int8` refused (20 KiB a position: bf16 only), no `--profile`, context capped at the trained
 262144 (decision 3) - `b70-decode` and `b70-serve` alike. The
 bench prompt is the first 42 ids of `de_prose.txt` through Kolibri's tokenizer (spec 20e).
 
 **Relevant variables:** `B70_KOLIBRI_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_KOL_TIE_TOL`
 (the golden test).
+
+## Kolibri-1 with the DSpark draft model
+
+**Status: built, not yet run on the cards.** `b70-serve` serves Kolibri-1 with speculative decoding from the community
+DSpark drafter `intuit/Kolibri-1-dspark` (5 layers, hidden 2560, 826 MB bf16): the drafter reads Kolibri's residual stream
+at the outputs of layers 3 / 13 / 23 / 33 / 43, drafts a block of up to 7 ids in one pass and Kolibri checks them in one
+step of up to 8 rows. Greedy output is plain decoding's, token for token; a sampled request keeps the model's own
+distribution (the lossless acceptance). It is what the DFlash drafter is for Qwen3.8, with three differences: each block row
+predicts the NEXT position (the first draft comes from the anchor's own row), the block's attention is causal, and a small
+Markov head (rank 256) corrects each row's candidates by the previously chosen id. The drafter's `config.json` picks all of
+this - there is no extra flag.
+
+```sh
+K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ
+D=intuit/Kolibri-1-dspark                                  # in the HF cache; b70 never downloads it
+
+# every command below: not yet run on the cards; needs two cards
+./build/src/cli/b70-serve $K --spec dflash --draft-model $D                 # K per iteration from the acceptance, up to 7
+./build/src/cli/b70-serve $K --spec dflash --draft-model $D --spec-max 4
+```
+
+What it costs: the drafter (bf16, ~1 GB with its buffers) and a copy of Kolibri's embedding (655 MB) on the second card,
+the verify scratch on both; `--max-len auto` takes them out of the context it gives. The log's `dspark:` line after each
+request gives the accepted drafts and the tokens per verify (the model card reports about 3 tokens a verify on chat and
+about 4 on maths on vLLM).
+
+**Limits.** `b70-serve` only (`b70-decode` decodes Kolibri plainly); `--spec lookup`, `dflash-lookup` and `mtp` are refused;
+`B70_KOLIBRI_ATTN=eager` is refused with `--spec` (the verify lists are flash only); the drafter runs in bf16 (an int8 or
+int4 drafter is a later step). The speed is unmeasured: the cost table that picks K is derived from the bytes a step reads,
+and each verified row reads its own six experts a layer, so deep blocks cost more than on a dense model.
+
+**Card tests (waiting for the first run):** `ctest -R 'kolibri_verify|kolibri_dspark'` - the verify lists against the plain
+decode list (synthetic set and the real model), and the real model with the drafter (greedy equals plain, tokens a verify,
+a seeded sampled request).
+
+**To check on the first card run** (each marked `TODO(card)` in the code):
+1. The load copies Kolibri's 655 MB embedding from card 0 to card 1 for the drafter (`cli/kolibri_spec.h`). If the first run
+   stalls at load, look there first, and upload the replica from the host instead.
+2. The cost table that picks K (`MtpCost::kolibri_dspark`) is derived from bytes: measure the verify at M = 1..8 and the
+   draft pass.
+3. `kol_attn_decode` spills a few registers at M 3 / 4 (ocloc's warning): time the attention's two halves of a deep verify.
+4. Each verify row reads its own six experts a layer: price it, then decide on reading each distinct expert once (Bolt's
+   union form).
+5. The taps are the outputs of layers 3 / 13 / 23 / 33 / 43 (the drafter's ids minus one, vLLM's rule): a low acceptance
+   points here first.
+6. The Markov walk looks at the head's top 16 a row, not the whole vocabulary: measure the acceptance gap.
+7. The prompt's last 2048 positions reach the drafter 8 rows a replay (256 replays): time it.
+8. `kolibri_dspark_test`'s bar (1.2 tokens a verify) is a placeholder: set it from the run.
 
 ## Qwen3.8-Flash-Next (spec 21)
 

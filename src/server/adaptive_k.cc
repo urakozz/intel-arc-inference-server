@@ -104,6 +104,16 @@ MtpCost MtpCost::bolt_lilicorr(bool i8_head, unsigned drafter_format, bool union
   return c;
 }
 
+MtpCost MtpCost::kolibri_dspark(bool i8_head) {
+  const double plain = kKolPlainGB + (i8_head ? kKolHeadInt8GB : kKolHeadBf16GB);
+  MtpCost c;
+  c.verify.clear();
+  for (uint32_t M = 1; M <= 8; ++M) c.verify.push_back(std::round((1.0 + double(M - 1) * kKolRowGB / plain) * 1000.0) / 1000.0);
+  const double d = (kKolDrafterGB + (i8_head ? kKolHeadInt8GB : kKolHeadBf16GB)) / plain;
+  c.draft.assign(7, std::round(d * 1000.0) / 1000.0);
+  return c;
+}
+
 MtpCost MtpCost::with_free_drafts() const {
   MtpCost c = *this;
   c.draft.assign(verify.empty() ? 0 : verify.size() - 1, 0.0);

@@ -41,7 +41,7 @@ struct DFlashBuffers {
   DFlashSizes sz;
   l0::Mem dctl, out;   // shared
   l0::Mem rope, ring_k, ring_v, taps, resid, h, x, xa, gout, q, kb, vb, part, kv, logits, tpart, cand, unary;
-  std::unique_ptr<l0::Mem> co, hid, candidate;   // DFlash 2 only
+  std::unique_ptr<l0::Mem> co, hid, candidate;   // DFlash 2 only (hid also Kolibri DSpark's: ones, its Markov walk)
 
   // Plan 19v3b: sessions 1..n-1 for an engine of n sequence slots (session 0 is the members above).
   std::vector<std::unique_ptr<DFlashSession>> sessions;

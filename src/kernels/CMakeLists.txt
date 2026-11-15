@@ -2242,4 +2242,97 @@ set_property(GLOBAL PROPERTY B70_GEMM_SM_KERNELS ${GEMM_SM_TARGETS})
 set_property(GLOBAL PROPERTY B70_GEMM_SM_CONSUMERS ${GEMM_SM_CONSUMERS})
 # ==== Spec 28b ==== (end) ====
 
+# ==== Kolibri DSpark: speculative decoding for Kolibri-1 ==== (begin) ====
+# Additive only: no existing source is edited and every name below is new (a name some other block already builds is
+# skipped, not rebuilt), so every binary above keeps its name, its command line and its bytes; nothing is bound without
+# `--spec dflash` on Kolibri-1 (runtime::kolibri::KolibriEngine::enable_spec, runtime::dflash::DSparkDrafter).
+#   The verify lists (src/kernels/kolibri_kernels.h verify_variants): Kolibri's decode kernels at M = 2..8 - kol_prep.cl,
+#   kol_moe.cl, embed_gather.cl, argmax.cl stage 1, prep.cl's folds, gemv.cl (int4 S2 / S4), gemv_bf16.cl (the bf16 arm,
+#   the router, the bf16 head), gemv_i8w.cl (the int8 head); kol_attn.cl at M 2..4 (a verify of more rows runs it twice).
+#   The drafter (src/kernels/dflash_kernels.h kDSpark, dspark_draft_variants): df_prep.cl at H 2560, Q20 / KV4, FF 6144,
+#   RING 2048, VOCAB 128000; df_attn.cl CAUSAL=1 (`_C`); df_topk.cl over 128000 rows of which 127998 are tokens;
+#   df_select.cl's V2 walk at RANK 256 over 128000 codebook rows (the Markov head); gemv_bf16 at M 8 for its linears and
+#   the head at the 7 draft rows (gemv_i8w / gemv_bf16).
+if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(KDS_KOL ${CMAKE_CURRENT_SOURCE_DIR}/kolibri)
+  set(KDS_DF ${CMAKE_CURRENT_SOURCE_DIR}/dflash)
+  set(KDS_DCTL DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5)
+  # --- the verify lists, M = 2..8 ---
+  foreach(M 2 3 4 5 6 7 8)
+    if(NOT TARGET kernel_gemv_M${M}_K2560_N7168_S2_L0)
+      add_gemv_variant(${M} 2560 7168 2 0)                 # q||k||v int4
+    endif()
+    if(NOT TARGET kernel_gemv_M${M}_K6144_N2560_S4_L0)
+      add_gemv_variant(${M} 6144 2560 4 0)                 # o_proj int4
+    endif()
+    if(NOT TARGET kernel_gemv_bf16_M${M}_K2560_N7168)
+      add_gemv_bf16_variant(${M} 2560 7168 64 1)           # q||k||v bf16
+    endif()
+    if(NOT TARGET kernel_gemv_bf16_M${M}_K6144_N2560)
+      add_gemv_bf16_variant(${M} 6144 2560 64 1)           # o_proj bf16
+    endif()
+    if(NOT TARGET kernel_gemv_bf16_M${M}_K2560_N512_C16_S16)
+      add_gemv_bf16_variant(${M} 2560 512 16 16)           # the router
+    endif()
+    if(NOT TARGET kernel_gemv_bf16_M${M}_K2560_N128000)
+      add_gemv_bf16_variant(${M} 2560 128000 64 1)         # lm_head bf16
+    endif()
+    if(NOT TARGET kernel_gemv_i8w_M${M}_K2560_N128000)
+      add_gemv_i8w_variant(${M} 2560 128000)               # lm_head int8
+    endif()
+    if(NOT TARGET kernel_prep_res_fold_M${M}_K2560_SP0_G20)
+      add_prep_res_fold(${M} 2560 0 20)
+    endif()
+    foreach(SP 1 4)
+      if(NOT TARGET kernel_prep_res_fold_M${M}_K2560_SP${SP}_G20_Z)
+        add_ocloc_kernel(prep_res_fold_M${M}_K2560_SP${SP}_G20_Z SOURCE ${PREP_CL}
+                         DEFINES M=${M} K=2560 S_PREV=${SP} FOLD_G=20 ZERO_RESID=1)
+      endif()
+    endforeach()
+    add_ocloc_kernel(kol_embed_gather_M${M}_D2560_V128000 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                     DEFINES ${CTRL_DEFINES} M=${M} HIDDEN=2560 VOCAB=128000)
+    add_ocloc_kernel(kol_argmax_stage1_M${M}_N128000_V128000 SOURCE ${ARGMAX_CL}
+                     DEFINES ${CTRL_DEFINES} VOCAB=128000 VOCAB_USED=128000 M=${M})
+    add_ocloc_kernel(kol_norm_M${M}_K2560_G20_W20 SOURCE ${KDS_KOL}/kol_prep.cl DEFINES M=${M} K=2560 NORM_G=20 NORM_WGS=20)
+    add_ocloc_kernel(kol_post_add_M${M}_K2560_G20 SOURCE ${KDS_KOL}/kol_prep.cl DEFINES M=${M} K=2560 POST_G=20)
+    foreach(S 1 2)
+      add_ocloc_kernel(kol_attn_prep_M${M}_N7168_S${S}_Q48KV4_R4096 SOURCE ${KDS_KOL}/kol_prep.cl
+                       DEFINES ${CTRL_DEFINES} M=${M} QKV_N=7168 QKV_S=${S} Q_HEADS=48 KV_HEADS=4 HD=128 SLIDING=1 RING=4096)
+      add_ocloc_kernel(kol_attn_prep_M${M}_N7168_S${S}_Q48KV4_F SOURCE ${KDS_KOL}/kol_prep.cl
+                       DEFINES ${CTRL_DEFINES} M=${M} QKV_N=7168 QKV_S=${S} Q_HEADS=48 KV_HEADS=4 HD=128 SLIDING=0 RING=0)
+    endforeach()
+    add_ocloc_kernel(kol_moe_M${M}_E384_T6_D2560_I512_SH SOURCE ${KDS_KOL}/kol_moe.cl
+                     DEFINES M=${M} MOE_E=384 MOE_K=6 HIDDEN=2560 INTER=512 UP_KS=4 DN_KS=2)
+  endforeach()
+  foreach(M 2 3 4)   # kol_attn.cl's own bound (M <= 4): rows 4..7 of a deeper verify are a second launch
+    add_ocloc_kernel(kol_attn_M${M}_T${ATTN_V2_TGT}_Q48KV4_W513_R4096 SOURCE ${KDS_KOL}/kol_attn.cl
+                     DEFINES ${CTRL_DEFINES} M=${M} TGT=${ATTN_V2_TGT} Q_HEADS=48 KV_HEADS=4 WINDOW=513 RING=4096)
+    add_ocloc_kernel(kol_attn_M${M}_T${ATTN_V2_TGT}_Q48KV4_F SOURCE ${KDS_KOL}/kol_attn.cl
+                     DEFINES ${CTRL_DEFINES} M=${M} TGT=${ATTN_V2_TGT} Q_HEADS=48 KV_HEADS=4 WINDOW=0 RING=0)
+  endforeach()
+  # --- the drafter ---
+  add_ocloc_kernel(df_prep_M8_H2560_I6144_Q20KV4_D128_G16T2_R2048_V128000 SOURCE ${KDS_DF}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${KDS_DCTL} M=8 H=2560 WG=256 EPS=1e-06f VOCAB=128000 GROUP=16 CTAPS=2
+                           INTER=6144 NH=20 NKV=4 HD=128 RING=2048)
+  add_ocloc_kernel(df_attn_M8_Q20KV4_D128_R2048_W2048_P128_C SOURCE ${KDS_DF}/df_attn.cl
+                   DEFINES ${CTRL_DEFINES} ${KDS_DCTL} M=8 NH=20 NKV=4 HD=128 RING=2048 WIN=2048 PB=128 WGA=128 CAUSAL=1)
+  add_ocloc_kernel(df_topk_R7_N128000_U127998 SOURCE ${KDS_DF}/df_topk.cl
+                   DEFINES R=7 N=128000 USED=127998 TOPK=16 CH=4096 COMPACT=0)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V128000 SOURCE ${KDS_DF}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${KDS_DCTL} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=128000)
+  foreach(KN "2560 3584" "2560 2560" "2560 12288" "6144 2560" "12800 2560")   # q||k||v, o, gate||up, down, fc
+    separate_arguments(KN)
+    list(GET KN 0 _k)
+    list(GET KN 1 _n)
+    if(NOT TARGET kernel_gemv_bf16_M8_K${_k}_N${_n})
+      add_gemv_bf16_variant(8 ${_k} ${_n} 64 1)
+    endif()
+  endforeach()
+  if(NOT TARGET kernel_gemv_bf16_M8_K2560_N1024_C16_S16)
+    add_gemv_bf16_variant(8 2560 1024 16 16)               # the context's k||v rows of q||k||v
+  endif()
+  # The head at the 7 draft rows: M 7 is also a verify M above (built there).
+endif()
+# ==== Kolibri DSpark ==== (end) ====
+
 add_subdirectory(prefill)

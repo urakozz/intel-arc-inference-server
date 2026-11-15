@@ -2991,7 +2991,7 @@ endif()
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
   b70_serve_reject(cli_reject_serve_kolibri_spec_mtp ${_kol_cfg} --spec mtp EXPECT "no MTP head")
-  b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "Kolibri-1's engine does not capture")
+  b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "is not built for Kolibri-1")
   b70_serve_reject(cli_reject_serve_kolibri_kv8 ${_kol_cfg} --kv-cache int8 EXPECT "bf16 only")
   b70_serve_reject(cli_reject_serve_kolibri_prefill_int8 ${_kol_cfg} --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
@@ -3754,7 +3754,7 @@ b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXP
 b70_cli_reject(cli_reject_dflash_spec_max ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --spec-max 9
   EXPECT "expects 1..7")
 b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
-  --spec dflash EXPECT "no DFlash drafter exists for Kolibri-1")
+  --spec dflash EXPECT "b70-decode runs Kolibri-1 plainly")
 # spec 19d: b70-decode stays one card (b70-serve --parallel pp serves the drafter).
 b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --parallel pp
   --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "b70-decode --spec dflash runs on one card")
@@ -4556,6 +4556,97 @@ if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
   endif()
 endif()
 # ==== Spec 26c: LiLiCorr in Bolt's loop and server ==== (end) ====
+
+# ==== Kolibri DSpark: speculative decoding for Kolibri-1 (label kolibri) ==== (begin) ====
+# intuit/Kolibri-1-dspark beside Kolibri-1 (docs/18-running-models.md "Kolibri-1 with DSpark"). Host tests run on the Mac's
+# build tree and the box's; the card tests wait for the operator's first run (after Flash-Next).
+# The descriptor: the speculators config -> the DSpark form, held to its kernels and to Kolibri-1. Host only.
+add_executable(dspark_desc_test model/dspark_desc_test.cc)
+target_include_directories(dspark_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dspark_desc_test PRIVATE b70_dflash_model b70_kolibri_model)
+add_test(NAME dspark_desc_test COMMAND dspark_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark/config.json)
+set_tests_properties(dspark_desc_test PROPERTIES LABELS "kolibri;dflash")
+# The loader's host half on a tiny DSpark checkpoint the test writes: names both ways, the Markov tables as the codebooks,
+# the bytes formula, a target by its parts. Host only.
+add_executable(dspark_loader_test loader/dspark_loader_test.cc)
+target_include_directories(dspark_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dspark_loader_test PRIVATE b70_dflash_loader)
+add_test(NAME dspark_loader_test COMMAND dspark_loader_test)
+set_tests_properties(dspark_loader_test PROPERTIES LABELS "kolibri;dflash")
+# The drafter's buffers, launch counts, snapshot bytes and key (runtime/dflash/dflash_sizes.h). Host only.
+add_executable(dspark_plan_test runtime/dspark_plan_test.cc)
+target_include_directories(dspark_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dspark_plan_test PRIVATE b70_dflash_plan b70_dflash_loader)
+add_test(NAME dspark_plan_test COMMAND dspark_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark/config.json)
+set_tests_properties(dspark_plan_test PROPERTIES LABELS "kolibri;dflash")
+# Kolibri's verify lists in the plan: the scratch at 8 rows, the second Control block, the verify link, the launch counts,
+# the drafter's prefill tail rule, and the two-card plan with the drafter and its replica on device 1 (DERIVED). Host only.
+add_executable(kolibri_spec_plan_test runtime/kolibri_spec_plan_test.cc)
+target_include_directories(kolibri_spec_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_spec_plan_test PRIVATE b70_kolibri_plan)
+add_test(NAME kolibri_spec_plan_test COMMAND kolibri_spec_plan_test)
+set_tests_properties(kolibri_spec_plan_test PROPERTIES LABELS kolibri)
+# The adapter's speculative loop over a device-free engine and a fake drafter: greedy step_many == plain step() token for token
+# at every K (the masked bonus ids among them), truncate_to inside a run, the deferred commit, the sampled path's seed and
+# defined ids. Host only.
+add_executable(kolibri_spec_test server/kolibri_spec_test.cc)
+target_include_directories(kolibri_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_spec_test PRIVATE b70_server)
+add_test(NAME kolibri_spec_test COMMAND kolibri_spec_test)
+set_tests_properties(kolibri_spec_test PROPERTIES LABELS kolibri)
+# On the cards (box only, NOT YET RUN: the operator's first card run after Flash-Next; SKIP 77 without the data):
+#   kolibri_verify_test   the verify lists against the plain decode list - every row's argmax the plain run's, its logits row
+#                         cosine >= 0.99999 (bitwise expected, counted), partial commits, greedy lossless with the plain
+#                         run's own ids as drafts, the launches at M 2..8 - on the synthetic set (one card, two) and the real
+#                         checkpoint on two cards;
+#   kolibri_dspark_test   the real Kolibri-1 with the DSpark drafter through b70-serve's glue: greedy step_many == plain token
+#                         for token (D2), the tokens a verify (the drafter wired right), a seeded sampled request.
+set(B70_DSPARK_SNAPSHOT "intuit/Kolibri-1-dspark" CACHE STRING "Kolibri-1's DSpark drafter (Kolibri DSpark)")
+if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(kolibri_verify_test runtime/kolibri_verify_test.cc)
+  target_include_directories(kolibri_verify_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_verify_test PRIVATE b70_kolibri_prefill b70_l0 b70_server)
+  add_executable(kolibri_dspark_test runtime/kolibri_dspark_test.cc)
+  target_include_directories(kolibri_dspark_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_dspark_test PRIVATE b70_kolibri_prefill b70_dflash_runtime b70_l0 b70_server)
+  b70_target_kernel_dir(kolibri_dspark_test)
+  set(_kds_synth ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt)
+  set(_kds_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_verify_synth_test COMMAND kolibri_verify_test ${_kds_synth} ${_kds_ids})
+  add_test(NAME kolibri_verify_synth_pp_test COMMAND kolibri_verify_test ${_kds_synth} ${_kds_ids} pp2:3)
+  add_test(NAME kolibri_verify_test COMMAND kolibri_verify_test ${B70_KOLIBRI_SNAPSHOT} ${_kds_ids} pp2 int8)
+  add_test(NAME kolibri_dspark_test COMMAND kolibri_dspark_test ${B70_KOLIBRI_SNAPSHOT} ${B70_DSPARK_SNAPSHOT} ${_kds_ids})
+  set_tests_properties(kolibri_verify_synth_test kolibri_verify_synth_pp_test kolibri_verify_test kolibri_dspark_test
+    PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
+# b70-serve's --spec refusals for Kolibri-1, before the device (tests/model/kolibri1: config.json only; the drafter's checks
+# read tests/model/dspark: config.json only, so a drafter refusal is the safetensors' absence or the config's own).
+if(TARGET b70-serve AND COMMAND b70_serve_reject)
+  set(_kds_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
+  b70_serve_reject(cli_reject_serve_kolibri_dspark_no_model ${_kds_cfg} --spec dflash EXPECT "intuit/Kolibri-1-dspark")
+  b70_serve_reject(cli_reject_serve_kolibri_dspark_draft_vocab ${_kds_cfg} --spec dflash --draft-vocab 32k
+    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "reads the whole lm_head")
+  b70_serve_reject(cli_reject_serve_kolibri_dspark_spec_max ${_kds_cfg} --spec dflash --spec-max 8
+    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "expects 1..7")
+  b70_serve_reject(cli_reject_serve_kolibri_dflash_lookup ${_kds_cfg} --spec dflash-lookup
+    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "is not built for Kolibri-1")
+  set_tests_properties(cli_reject_serve_kolibri_dspark_no_model cli_reject_serve_kolibri_dspark_draft_vocab
+    cli_reject_serve_kolibri_dspark_spec_max
+    cli_reject_serve_kolibri_dflash_lookup PROPERTIES LABELS kolibri)
+endif()
+# Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark
+# block). Host only (reads the kernel directory).
+if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(dspark_names_test kernels/dspark_names_test.cc)
+  target_include_directories(dspark_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dspark_names_test PRIVATE b70_kolibri_model)
+  b70_target_kernel_dir(dspark_names_test)
+  add_test(NAME dspark_names_test COMMAND dspark_names_test)
+  set_tests_properties(dspark_names_test PROPERTIES LABELS "kolibri;dflash")
+endif()
+# ==== Kolibri DSpark ==== (end) ====
 # Fix round A: every test executable declared above gets a line-buffered stdout
 # (common/line_buffered_stdout.cc - a static initializer, so no main changes): crash logs
 # keep the phase line printed just before the crash, under any launcher. Keep this last.

@@ -1,4 +1,7 @@
 #pragma once
+#include <cstdint>
+#include <vector>
+
 #include "l0/context.h"
 #include "l0/memory.h"
 #include "loader/kolibri1_loader.h"
@@ -36,5 +39,26 @@ namespace runtime::kolibri {
 CapturedStep build(l0::Context& ctx, const loader::KolDevicePart& part, const model::Kolibri1Desc& d,
                    KolibriBuffers& b, const runtime::StageLink* link, l0::Mem* tap = nullptr,
                    TapAt tap_at = TapAt::LayerOut);
+
+// Kolibri DSpark: the verify lists - the same walk at M = 1..8 rows over the device's KolibriVerifyBuffers scratch (the
+// persistent group, KV and rings, is KolibriBuffers'), the anchor and up to 7 drafts at positions pos .. pos + M - 1
+// (n_active = M; the gather reads Control::cur_token[0..M-1] on device 0), with these changes:
+//   every M-row launch runs exactly M real rows (one captured list per M); the attention is the flash form only, and at
+//   M > 4 runs twice (kol_attn.cl's M <= 4 builds) - rows 0..3 over the Control block, rows 4..M-1 over control_hi (pos
+//   + 4, M - 4 rows), each with its own attn_q / attn_out rows (verify_device_launches counts the second pair);
+//   the head at M rows writes [M][vocab] fp32 logits; argmax stage 2 writes out_token[0..M-1] - and advances the last
+//   device's Control::pos / cur_token[0], which KolibriEngine::verify puts back (the host commits);
+//   with a drafter (`taps`), after layer l's last kol_post_add (l in tap_layers) every row's residual is copied into taps
+//   [row][tap][hidden] - device 0's tap layers write the last device's buffer, in its list BEFORE the hand-off's barrier;
+//   two cards: the hand-off moves M rows and their [kNormG][M] sums through `link` (the verify link: a landing for 8).
+// The launch count is runtime::kolibri::verify_device_launches' (asserted).
+struct VerifyBind {
+  KolibriVerifyBuffers* vb = nullptr;                 // the device's verify scratch and control_hi
+  uint32_t M = 1;
+  l0::Mem* taps = nullptr;                            // a drafter's taps() bf16 [8][taps][hidden] (the last device's), or null
+  const std::vector<uint32_t>* tap_layers = nullptr;  // ascending, each < the target's layers
+};
+CapturedStep build_verify(l0::Context& ctx, const loader::KolDevicePart& part, const model::Kolibri1Desc& d,
+                          KolibriBuffers& b, const runtime::StageLink* link, const VerifyBind& v);
 
 }  // namespace runtime::kolibri

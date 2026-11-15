@@ -75,13 +75,12 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   return w;
 }
 
-DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
-                           uint32_t vocab_rows, const l0::Mem& target_embed, DraftFormat format, unsigned threads,
-                           int tp_rank) {
-  const auto t0 = std::chrono::steady_clock::now();
-  const DFlashCheckpoint ck(snapshot_or_repo);
-  ck.check_target(target, vocab_rows);
-  if (target_embed.size() < size_t(vocab_rows) * target.hidden * 2)
+namespace {
+// The upload once the checkpoint is held to its target (both overloads below).
+DFlashWeights load_checked(l0::Context& ctx, const DFlashCheckpoint& ck, uint32_t target_hidden, uint32_t vocab_rows,
+                           const l0::Mem& target_embed, DraftFormat format, unsigned threads, int tp_rank,
+                           std::chrono::steady_clock::time_point t0) {
+  if (target_embed.size() < size_t(vocab_rows) * target_hidden * 2)
     throw std::runtime_error("load_drafter: the target embedding is smaller than [vocab rows][hidden] bf16");
   // Spec 19 v3c: a TP card's half - its descriptor, its piece of every layer linear (loader/dflash_tp_split.h).
   if (tp_rank > 1) throw std::runtime_error("load_drafter: tp_rank " + std::to_string(tp_rank));
@@ -127,6 +126,8 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   if (d.v2()) {
     w.conv_base = std::make_unique<l0::Mem>(upload_f32(ctx, imm, ck.conv_bases(), bytes));
     w.sel_proj = upload_linear_u(ctx, imm, timed([&] { return ck.selector_projection(format, threads); }), bytes);
+  }
+  if (d.v2() || d.dspark()) {   // Kolibri DSpark: the Markov head's w1 / w2 as the selector's codebooks (df_select V2)
     const size_t cb = size_t(d.vocab) * d.sel_rank * 2;
     w.pred = upload_u(ctx, imm, ck.codebook(false), cb);
     w.succ = upload_u(ctx, imm, ck.codebook(true), cb);
@@ -166,6 +167,24 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   w.line = buf;
   std::printf("%s\n", buf);
   return w;
+}
+}  // namespace
+
+DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
+                           uint32_t vocab_rows, const l0::Mem& target_embed, DraftFormat format, unsigned threads,
+                           int tp_rank) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const DFlashCheckpoint ck(snapshot_or_repo);
+  ck.check_target(target, vocab_rows);
+  return load_checked(ctx, ck, target.hidden, vocab_rows, target_embed, format, threads, tp_rank, t0);
+}
+
+DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::DFlashTargetShape& target,
+                           const l0::Mem& target_embed, DraftFormat format, unsigned threads) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const DFlashCheckpoint ck(snapshot_or_repo);
+  ck.check_target(target);
+  return load_checked(ctx, ck, target.hidden, target.vocab_rows, target_embed, format, threads, -1, t0);
 }
 
 }  // namespace loader

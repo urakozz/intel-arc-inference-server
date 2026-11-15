@@ -55,7 +55,7 @@ DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t h
   s.logits = R * head_rows * 4;
   s.tpart = R * ((head_rows + kd::kTopkChunk - 1) / kd::kTopkChunk) * kd::kTopK * 2 * 4;
   s.cand = s.unary = R * kd::kTopK * 4;
-  s.hid = d.v2() ? M * d.sel_rank * 4 : 0;
+  s.hid = (d.v2() || d.dspark()) ? M * d.sel_rank * 4 : 0;   // Kolibri DSpark: ones (the Markov walk, df_select V2)
   if (format == loader::DraftFormat::Int4G64 && !d.lilicorr()) {
     s.gout = M * std::max({size_t(d.qkv_n()) * kd::int4_slices(d.hidden, d.qkv_n()),
                            H * kd::int4_slices(d.q_n(), d.hidden),

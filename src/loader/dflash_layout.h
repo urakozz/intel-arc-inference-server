@@ -25,7 +25,7 @@
 // The small tensors (fp32): hidden_norm and the final norm [hidden] each; per layer input / post norms [2][hidden],
 // q_norm || k_norm [2][head_dim] (one [layers][2][head_dim] block), v2 the conv bases [2 convs][2 sides][taps][hidden]
 // (one [layers][...] block); the mask row [hidden] fp32 (the target's embedding row, or mask_embedding.safetensors).
-// v2: the codebooks, bf16 [vocab][sel_rank] each.
+// v2: the codebooks, bf16 [vocab][sel_rank] each (Kolibri DSpark: the Markov head's markov_w1 / markov_w2, the same form).
 namespace loader {
 
 // Spec 19v2 / 26b: Int4G64 - our int4 g64 symmetric RTN, quantised at load by loader/rtn.h, stored in gemv.cl's layout 1
@@ -67,7 +67,7 @@ inline DFlashBytes dflash_weight_bytes(const model::DFlashDesc& d, uint32_t targ
             + size_t(d.layers) * 2 * d.head_dim * 4             // q_norm || k_norm
             + size_t(H) * 4;                                    // the mask row
   if (d.v2()) b.small += size_t(d.layers) * 2 * 2 * d.conv_taps * H * 4;   // conv bases
-  if (d.v2()) b.codebooks = size_t(2) * d.vocab * d.sel_rank * 2;
+  if (d.v2() || d.dspark()) b.codebooks = size_t(2) * d.vocab * d.sel_rank * 2;   // DSpark: the Markov head's w1 / w2
   return b;
 }
 

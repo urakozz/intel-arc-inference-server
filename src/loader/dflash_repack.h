@@ -90,6 +90,7 @@ class DFlashCheckpoint {
 
   // model::check_dflash_target, plus fc's K = taps x target.hidden.
   void check_target(const model::ModelDesc& target, uint32_t target_vocab_rows) const;
+  void check_target(const model::DFlashTargetShape& target) const;   // Kolibri DSpark: a target by its parts
 
   // The device-form pieces (each built from the mmapped bf16 tensors when called). `threads` = 0: all cores; the
   // result does not depend on it.
@@ -101,7 +102,8 @@ class DFlashCheckpoint {
   std::vector<float> layer_norms(uint32_t layer) const;      // [input_layernorm | post_attention_layernorm]
   std::vector<float> qk_norms() const;                       // [layers][q_norm | k_norm][head_dim]
   std::vector<float> conv_bases() const;                     // v2: [layers][attn, mlp][side][tap][hidden]
-  // v2: the codebook's bf16 rows [vocab][sel_rank], straight from the mmapped shard.
+  // v2: the codebook's bf16 rows [vocab][sel_rank], straight from the mmapped shard. Kolibri DSpark: the Markov head's
+  // markov_w1 (`successor` false: the previous token's row) and markov_w2 (true: the candidate's row), the same shape.
   const uint16_t* codebook(bool successor) const;
   // The shipped mask embedding (fp32 [hidden]), empty when none ships.
   std::vector<float> mask_embedding() const;

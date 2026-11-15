@@ -17,6 +17,7 @@
 #include "runtime/kolibri/kolibri_buffers.h"
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_engine.h"   // PipelineOptions, PipelineLink (spec 16b's, unchanged)
+#include "runtime/tap_drafter.h"      // Kolibri DSpark: TapSink (an interface: no link dependency)
 
 // Spec 20c: Kolibri-1's decode loop - runtime::Engine's contract on one card
 // or, spec 16b's pieces, two: it owns the weights (each layer on its device: loader::load_kolibri1's
@@ -159,6 +160,49 @@ class KolibriEngine {
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
+  // --- Kolibri DSpark: speculative decoding (--spec dflash with the DSpark drafter; Bolt's spec 26c contract) -----------
+  // enable_spec allocates every device's KolibriVerifyBuffers (the verify scratch at 8 rows, control_hi) and, two cards,
+  // the verify link (a copy hand-off sized for 8 rows); the verify lists are captured on first use per M
+  // (runtime/kolibri/kolibri_capture.h build_verify). Before it nothing of this exists: a plain run allocates, captures and
+  // replays exactly 20c's. B70_KOLIBRI_ATTN=eager is refused (the verify lists are flash only). Two cards: the taps ride on
+  // the hand-off's barrier. At pos = n with x_n pending:
+  //   verify(drafts, k)  rows [x_n, d_1 .. d_k] at n .. n + k (device 0's Control::cur_token[1..k] = the drafts, n_active
+  //                      k + 1 on both cards; control_hi = {n + 4, k - 3} when k + 1 > 4); row r's argmax in
+  //                      verify_ids()[r], its raw fp32 logits row in the last device's verify scratch
+  //                      (read_verify_logits); every row's full-layer KV and ring slot written; with a drafter, every row's
+  //                      five taps in its taps(). pos is NOT advanced (the last device's Control is put back).
+  //   commit(j, t)       j accepted drafts (0 <= j <= k): pos = n + j + 1, pending t, n_active 1 on every card; with a
+  //                      drafter, its projection of rows 0..j (positions n .. n + j) into the ring, replayed on the last
+  //                      device now (a rejected row's taps never reach the ring). The rejected rows' KV rows and ring slots
+  //                      sit past pos: no key bound reads them before a later step rewrites them (the ring's slot of a
+  //                      position p is rewritten by p itself; 4096 slots against the 513 window).
+  // verify(nullptr, 0) + commit(0, verify_ids()[0]) is one plain token; with the verify lists on, ingest() and generate()
+  // run exactly that (a drafter's ring stays filled). Positions: verify(k) needs pos + k + 1 <= max_len (max_verify_k()).
+  // attach_drafter: the drafter (runtime::dflash::DSparkDrafter behind TapSink) on the LAST device, borrowed - it must
+  // outlive the engine; after enable_spec, before the first verify; its max_k() <= 7, its tap layers < the target's. It
+  // captures every verify list (M = 1..8) with the taps, so a missing binary fails there, at startup.
+  // reset() resets it; state_bytes / save_state / load_state carry its ring after the target's state (19d's rule);
+  // drafter_key() names it; prefill() stages each chunk's tap rows inside its window (drafter_prefill_r0) and projects them
+  // 8 a replay.
+  void enable_spec();
+  bool spec_on() const { return !vb_.empty(); }
+  void attach_drafter(TapSink& d);
+  uint64_t drafter_key() const { return drafter_ ? drafter_->key() : 0; }
+  uint32_t max_verify_k() const;
+  void verify(const uint32_t* drafts, uint32_t k);
+  const uint32_t* verify_ids() const { return verify_ids_; }
+  void read_verify_logits(float* host, uint32_t rows);   // rows <= the last verify's k + 1
+  void commit(uint32_t j, uint32_t next_token);
+  size_t verify_launches(uint32_t M) const;   // a captured verify list's, every device (0 before its first use)
+  // Runs a list that is not the engine's own (the drafter's draft / projection lists) on the LAST device's queue and waits.
+  void replay_aux(l0::CmdList& list);
+  // What the drafter binds: the last device's context and Control block, the target's lm_head, and device 0's embedding
+  // (the CLI copies it into the drafter's replica on the last device).
+  l0::Context& context(uint32_t dev) const { return stage_ctx(dev); }
+  const l0::Mem& control_mem(uint32_t dev) const;
+  const loader::DeviceWeight& lm_head() const;
+  const l0::Mem& embedding() const;
+
  private:
   struct Stage;
   // Spec 20d: a device's pieces for the prefill half (b70_kolibri_prefill), which cannot see Stage.
@@ -172,6 +216,9 @@ class KolibriEngine {
   Stage& st(uint32_t dev) const;
   l0::Mem& snap_mem(uint32_t dev, SnapTensor t) const;   // spec 20e: a snapshot run's allocation
   void settle_all(const char* what);
+  void run_verify(uint32_t M);                           // Kolibri DSpark: one verify replay on every device
+  void capture_verify(uint32_t M);                       // Kolibri DSpark: device lists at M not captured yet
+  void drafter_project_staged(uint32_t pos, uint32_t n);   // Kolibri DSpark: the prefill tail's staged rows, 8 a replay
 
   loader::KolLoadedModel model_;
   uint32_t max_len_;
@@ -185,6 +232,18 @@ class KolibriEngine {
   std::vector<bool> pending_;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
   BlockHook block_hook_;   // spec 20d: empty = no hook (uniform chunks)
+  // Kolibri DSpark: the verify buffers (one a device), the verify link (two cards), the verify lists [device][M - 1]
+  // (captured on first use; declared after the buffers they bind, so destroyed first), the borrowed drafter and its prefill
+  // staging (lazy, on the last device), the last verify's (k, pos) a commit must match and its ids, read_logits' row.
+  std::vector<std::unique_ptr<KolibriVerifyBuffers>> vb_;
+  std::unique_ptr<PipelineLink> vlink_;
+  std::vector<std::vector<std::optional<CapturedStep>>> vsteps_;
+  TapSink* drafter_ = nullptr;
+  std::unique_ptr<l0::Mem> pf_taps_;
+  static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
+  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
+  uint32_t verify_ids_[kVerifyRows] = {};
+  int logits_row_ = -1;   // -1 the decode scratch's row, j the verify scratch's row j (the last commit's)
   // Spec 20d: set by prepare_prefill (b70_kolibri_prefill) - releases a prefill list waiting on a hand-off
   // that will not come and waits (bounded) for every prefill list to go idle; reset() calls it.
   std::function<bool()> pf_settle_;

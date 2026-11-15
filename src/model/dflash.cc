@@ -42,7 +42,7 @@ constexpr const char* kSliding = "sliding_attention";
 }  // namespace
 
 bool is_dflash_architecture(const std::string& a) {
-  return a == "DFlashDraftModel" || a == "DFlash2DraftModel" || a == kLiLiCorrArchitecture;
+  return a == "DFlashDraftModel" || a == "DFlash2DraftModel" || a == kLiLiCorrArchitecture || a == kDSparkArchitecture;
 }
 
 bool DFlashDesc::all_sliding() const {
@@ -62,6 +62,7 @@ namespace {
 // through the same rules: block_size from the top level when dflash_config has none, no selector, sinks allowed).
 DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture, bool lili);
 DFlashDesc lilicorr_desc_from_config(const Value& c);
+DFlashDesc dspark_desc_from_config(const Value& c);
 }  // namespace
 
 DFlashDesc dflash_desc_from_config(const Value& c) {
@@ -71,6 +72,7 @@ DFlashDesc dflash_desc_from_config(const Value& c) {
       !is_dflash_architecture(arch->arr()[0].str()))
     refuse("architectures[0] must be DFlashDraftModel or DFlash2DraftModel");
   if (arch->arr()[0].str() == kLiLiCorrArchitecture) return lilicorr_desc_from_config(c);
+  if (arch->arr()[0].str() == kDSparkArchitecture) return dspark_desc_from_config(c);
   return vllm_desc_from_config(c, arch->arr()[0].str(), false);
 }
 
@@ -268,6 +270,53 @@ DFlashDesc lilicorr_desc_from_config(const Value& c) {
   if (!(d.vector_eps > 0.0f)) refuse("lilicorr_vector_eps must be positive");
   return d;
 }
+
+// Kolibri DSpark: the speculators form (algos.py update_dspark) - the layer config flattened to the top level and the
+// DSpark keys mapped into the dflash_config vllm_desc_from_config reads (taps = aux ids - 1), then the DSpark fields.
+DFlashDesc dspark_desc_from_config(const Value& c) {
+  const Value* tl = opt(c, "transformer_layer_config");
+  if (!tl || !tl->is_object()) refuse("transformer_layer_config missing: a DSpark drafter is a speculators checkpoint");
+  if (opt(c, "quantization_config") || opt(*tl, "quantization_config"))
+    refuse("quantization_config: the DSpark drafter runs in bf16 (an int8 / int4 drafter is a later step)");
+  const Value* sfa = opt(c, "sample_from_anchor");
+  if (!sfa || !sfa->is_bool() || !sfa->boolean())
+    refuse("sample_from_anchor must be true (anchor-as-first-prediction; the fill-in form is not built)");
+  if (const Value* t = opt(c, "markov_head_type"); t && (!t->is_string() || t->str() != "vanilla"))
+    refuse("markov_head_type must be vanilla (the first-order Markov bias)");
+  if (bool_or(c, "sliding_window_non_causal", false))
+    refuse("sliding_window_non_causal=true: the DSpark kernels attend causally inside the block");
+  if (bool_or(c, "tie_word_embeddings", false) || bool_or(*tl, "tie_word_embeddings", false))
+    refuse("tie_word_embeddings: the drafter shares the target's untied embedding and lm_head");
+  const uint32_t rank = u32(c, "markov_rank");
+  if (rank == 0) refuse("markov_rank 0 (no Markov head) is DFlash, not DSpark");
+  Value::Object o = tl->obj();
+  if (const Value* dv = opt(c, "draft_vocab_size")) o["draft_vocab_size"] = *dv;
+  Value::Object dc;
+  dc["block_size"] = Value::make_num(u32(c, "block_size"));
+  dc["mask_token_id"] = Value::make_num(u32(c, "mask_token_id"));
+  const Value* aux = opt(c, "aux_hidden_state_layer_ids");
+  if (!aux || !aux->is_array() || aux->arr().empty()) refuse("aux_hidden_state_layer_ids missing");
+  // TODO(card): update_dspark's `aux - 1` (the input of target layer `aux` = the output of layer aux - 1) assumes the
+  // aleph-alpha plugin captures Kolibri's aux states as vLLM's own models do; a low acceptance on the first run (well under
+  // the card's ~3 tokens a verify) points here first.
+  Value::Array taps;
+  for (const Value& v : aux->arr()) {
+    if (!v.is_number() || v.num() < 1 || v.num() != double(uint32_t(v.num())))
+      refuse("aux_hidden_state_layer_ids holds a value below 1 (each is the input of a target layer: tap = id - 1)");
+    taps.push_back(Value::make_num(v.num() - 1));
+  }
+  dc["target_layer_ids"] = Value::make_arr(std::move(taps));
+  o["dflash_config"] = Value::make_obj(std::move(dc));
+  DFlashDesc d = vllm_desc_from_config(Value::make_obj(std::move(o)), kDSparkArchitecture, false);
+  if (const Value* th = opt(c, "target_hidden_size"); th && u32(c, "target_hidden_size") != d.hidden)
+    refuse("target_hidden_size is not hidden_size: the drafter shares the target's embedding and head");
+  d.form = DFlashForm::DSpark;
+  d.sel_rank = rank;
+  d.sel_top_k = 16;   // the Markov walk's candidates: the head's top 16 a row (vLLM's dspark_draft_topk at 16)
+  if (bool_or(c, "enable_confidence_head", false))
+    d.conf_in = d.hidden + (bool_or(c, "confidence_head_with_markov", false) ? rank : 0);
+  return d;
+}
 }  // namespace
 
 void check_dflash_target(const DFlashDesc& d, const ModelDesc& t, uint32_t target_vocab_rows) {
@@ -329,6 +378,29 @@ void check_lilicorr(const DFlashDesc& d) {
     bad("the LiLiCorr head is " + std::to_string(d.lil_hidden) + " hidden / " + std::to_string(d.lil_layers) +
         " layers / " + std::to_string(d.lil_heads) + " heads / MLP " + std::to_string(d.lil_mlp) + " / factor " +
         std::to_string(d.factor_dim) + ", not 1024 / 2 / 8 / 2048 / 1024");
+}
+
+void check_dspark(const DFlashDesc& d) {
+  auto bad = [](const std::string& what) {
+    throw std::runtime_error("DSpark drafter: " + what + " - the drafter's kernels are built for intuit/Kolibri-1-dspark's "
+                             "shapes (kernels::dflash::kDSpark)");
+  };
+  if (!d.dspark()) bad("architectures[0] is " + d.architecture + ", not DSparkDraftModel");
+  if (d.hidden != 2560) bad("hidden_size " + std::to_string(d.hidden) + " is not 2560");
+  if (d.q_heads != 20 || d.kv_heads != 4 || d.head_dim != 128)
+    bad("heads " + std::to_string(d.q_heads) + " / " + std::to_string(d.kv_heads) + " x " + std::to_string(d.head_dim) +
+        " are not 20 / 4 x 128");
+  if (d.inter != 6144) bad("intermediate_size " + std::to_string(d.inter) + " is not 6144");
+  if (d.taps.size() != 5) bad("aux_hidden_state_layer_ids holds " + std::to_string(d.taps.size()) + " layers, not 5");
+  if (d.block != 8) bad("block_size " + std::to_string(d.block) + " is not 8");
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (d.window[l] != 2048)
+      bad("layer " + std::to_string(l) + "'s sliding_window " + std::to_string(d.window[l]) + " is not 2048");
+    if (!d.causal[l]) bad("layer " + std::to_string(l) + " is not causal");
+  }
+  if (d.sel_rank != 256) bad("markov_rank " + std::to_string(d.sel_rank) + " is not 256");
+  if (d.eps != 1e-6f) bad("rms_norm_eps is not 1e-6 (df_prep bakes it)");
+  if (d.vocab != 128000) bad("vocab_size " + std::to_string(d.vocab) + " is not 128000");
 }
 
 DFlashDesc dflash_tp_card_desc(const DFlashDesc& d) {

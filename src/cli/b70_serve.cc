@@ -29,6 +29,7 @@
 #include "cli/hardware_gate.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
+#include "cli/kolibri_spec.h"     // Kolibri DSpark: --spec dflash with the DSpark drafter
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
@@ -249,11 +250,14 @@ struct KolibriServe {
   cli::kolibri::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
+  cli::kolibri::SpecArgs spec;     // Kolibri DSpark: --spec dflash (cli/kolibri_spec.h)
 };
 
 int serve_kolibri(const KolibriServe& a, server::Options options) {
-  const cli::kolibri::DecodeArgs& da = a.args;
   const model::Kolibri1Desc pre = loader::kolibri1_checkpoint_desc(a.snapshot_dir, 0);
+  // Kolibri DSpark: the drafter's checks and its plan terms (its config.json and safetensors header), before the device.
+  cli::kolibri::DecodeArgs da = a.args;
+  da.spec = cli::kolibri::spec_reserve(a.spec, pre, da.max_len.is_auto ? pre.trained_max_len : da.max_len.value);
   cli::kolibri::check_args(da, pre);
   // Spec 20 decision 3: the served context is capped at the trained 262144 - refused here, before the device
   // (settle() refuses it too, after the cards are open).
@@ -296,15 +300,34 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   }();
   runtime::PipelineOptions opt;
   runtime::kolibri::KolibriEngine engine(ctx, std::move(model), max_len, /*debug_tap=*/false, opt);
+  // Kolibri DSpark: the verify lists (their buffers; the lists on first use) and the drafter, before the adapter: snapshots
+  // carry its ring.
+  cli::kolibri::KolibriDrafter drafter;
+  if (a.spec.on) {
+    engine.enable_spec();
+    StdoutToStderr redirect;
+    drafter = cli::kolibri::attach_drafter(engine, a.spec);
+  }
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
+  if (a.spec.on) {   // the server's adaptive loop over the derived cost table (AdaptiveK, K to --spec-max)
+    options.mtp_auto = true;
+    options.mtp_adaptive.max_k = a.spec.max_k;
+    options.mtp_adaptive.cost = server::MtpCost::kolibri_dspark(da.lm_head == loader::LmHeadForm::Int8);
+    std::fprintf(stderr, "spec dflash: DSpark %s (bf16), --spec-max %u, drafter key %016llx, %zu B + the embedding replica "
+                 "%zu B on device %u - NOT YET RUN ON THE CARDS (docs/18-running-models.md)\n", a.spec.draft_model.c_str(),
+                 a.spec.max_k, (unsigned long long)engine.drafter_key(), drafter.drafter->bytes(), drafter.replica->size(),
+                 engine.devices() - 1);
+  }
   TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
   if (tokenizer.vocab_used() != engine.vocab())
     std::fprintf(stderr, "note: tokenizer.json defines %u ids, Kolibri-1's head has %u rows; sampling masks from "
                          "%u, and a greedy argmax on a row without a token takes the masked row's argmax\n",
                  tokenizer.vocab_used(), engine.vocab(), tokenizer.vocab_used());
   TemplateAdapter chat_template(a.snapshot_dir);
-  cli::kolibri::KolibriEngineAdapterT<runtime::kolibri::KolibriEngine> engine_adapter(engine, tokenizer.vocab_used());
+  cli::kolibri::KolibriEngineAdapterT<runtime::kolibri::KolibriEngine> engine_adapter(
+      engine, tokenizer.vocab_used(), a.spec.on ? a.spec.max_k : 0,
+      drafter.drafter ? cli::kolibri::draft_hooks(engine, *drafter.drafter) : cli::kolibri::KolibriDraftHooks{});
   options.eos_ids = eos;
   options.sampling_defaults = defaults;
   // Pinned host memory of the one context both cards share: either device's copies reach it.
@@ -323,10 +346,11 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   print_eos(eos);
   std::fprintf(stderr,
                ", Kolibri-1 (%s chat format), %s, prefill backend l0 (chunk %u), attention %s (B70_KOLIBRI_ATTN), "
-               "mtp none, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-p %.2f top-k %u, prefix "
+               "spec %s, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-p %.2f top-k %u, prefix "
                "snapshots: the rings' last %u positions + the full layers' KV\n",
                options.chat_format.name(), placement.c_str(), runtime::kolibri::kPfC,
-               runtime::kolibri::kol_attn_name(engine.attention()), loader::lm_head_form_name(da.lm_head),
+               runtime::kolibri::kol_attn_name(engine.attention()), a.spec.on ? "dflash (DSpark)" : "none",
+               loader::lm_head_form_name(da.lm_head),
                defaults.greedy ? "greedy" : "sampled", defaults.temperature, defaults.top_p, defaults.top_k,
                runtime::kolibri::state_positions(engine.model().desc));
   return listen_until_stopped(server, options);
@@ -1239,7 +1263,7 @@ int run(int argc, char** argv) {
     }
   }
   const cli::SpecFamily family = is_q4 ? cli::SpecFamily::Qwen4Exp
-                                 : is_kol ? cli::SpecFamily::None
+                                 : is_kol ? cli::SpecFamily::Kolibri
                                          : cli::SpecFamily::Qwen;
   const std::string model_name = is_q4 ? "Qwen3.8-Flash-Next" : is_kol ? "Kolibri-1" : "this model";
   // --spec auto = the MTP head (operator 2026-11-14: no extra VRAM by default; DFlash only on an explicit --spec dflash).
@@ -1263,6 +1287,13 @@ int run(int argc, char** argv) {
   // dispatch, so another model under --parallel tp is refused by name.
   cli::check_tp(pipe, {false, false, is_q4 || is_kol,   // spec 19 v3c: dflash and dflash-lookup are served
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
+  // Kolibri DSpark: Kolibri-1's drafter by name, and no draft vocabulary (DSpark reads the whole lm_head).
+  if (is_kol && dflash.on && !dflash.have_model)
+    throw std::runtime_error("--spec dflash on Kolibri-1 needs --draft-model: --draft-model intuit/Kolibri-1-dspark (the "
+                             "DSpark drafter, bf16, from the HF cache)");
+  if (is_kol && dflash.on && (draft_vocab != 0 || !draft_vocab_ids.empty()))
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a DFlash drafter's vocabulary; "
+                             "Kolibri-1's DSpark drafter reads the whole lm_head");
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true);
@@ -1308,8 +1339,9 @@ int run(int argc, char** argv) {
   if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && !mtp_on && !dflash.on)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --spec mtp (the default where the model has "
                              "an MTP head) or --spec dflash");
-  // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table).
-  if (dflash.on) {
+  // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table). Kolibri DSpark sets
+  // its own (serve_kolibri).
+  if (dflash.on && !is_kol) {
     cli::dflash::resolve_format(dflash);
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;
@@ -1362,10 +1394,13 @@ int run(int argc, char** argv) {
     ka.prefill = true;      // every request prefills: the plan carries the prefill scratch
     ka.pp_backend_given = have_pp_backend;
     ka.pp_backend = pp_backend;
-    ka.mtp = false;         // cli::resolve_spec refused every proposer
+    ka.mtp = false;         // cli::resolve_spec refused --spec mtp
     ka.kv8 = kv_cache == runtime::KvCache::Int8;
     ks.prefix_auto = prefix_auto;
     ks.prefix_cache_gb = prefix_cache_gb;
+    ks.spec.on = dflash.on;   // Kolibri DSpark: --spec dflash (cli::resolve_spec, SpecFamily::Kolibri)
+    ks.spec.draft_model = dflash.model;
+    ks.spec.max_k = dflash.on ? spec.max_k : 7;
     return serve_kolibri(ks, options);
   }
 
