@@ -309,7 +309,9 @@ int main(int argc, char** argv) {
         na += fx * fx;
         nb += fy * fy;
       }
-      min_cos = std::min(min_cos, dot / std::sqrt(std::max(na * nb, 1e-300)));
+      const double cs = dot / std::sqrt(std::max(na * nb, 1e-300));
+      if (cs < 0.99) std::printf("H: row %u (position %u): cosine %.6f\n", r, b + r, cs);
+      min_cos = std::min(min_cos, cs);
     }
     std::printf("H: after %llu lookup iterations (%llu ids) the head's K rows of the %u generated positions against "
                 "plain --spec mtp's (ids %s): min cosine %.6f, %u rows bitwise\n",
