@@ -429,15 +429,16 @@ size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc, uint32_t chunk_cap
 // The three scratch buffers Int8State's constructor allocates for its `max_k` (the
 // MLP intermediate: down's K), and - separately, because they are built per weight
 // on first use - the rotated column scales: ws and 1/ws, fp32 [N] each, for every
-// h8 linear of every layer (lm_head excluded: it is never an h8 linear; a dense model's
-// mixer linears neither, l0_int8_bf16_linear). Both are
+// h8 linear of every layer (lm_head excluded: it is never an h8 linear; the mixer linears
+// neither, l0_int8_bf16_linear). Both are
 // what `Int8State::bytes()` counts. The per-K sign tables (`signs_f32`, `sign_bits`:
 // K x 4 + K / 8 bytes for each of the 3-4 distinct K, ~0.1 MB) are NOT in bytes() and
 // so are not here either; they are inside the reserve (memory_plan.h).
 //
 // Open-work 17: on a dense model `l0-int8` runs the four mixer linears (qkv||z, out_proj, q||k||v, o_proj) on the
 // bf16 l0 walk and keeps int8 for the MLP (gate||up, down) - the rotated int8 mixer linears carried the long-prompt
-// miss. A MoE model keeps every dense int4 linear on h8 (open-work 16). True for those four on a dense model.
+// miss. Open-work 16: a MoE model the same (its MLP is the experts: W4A8 for the routed ones, the shared expert bf16,
+// prefill::moe_chunk). True for those four.
 bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id);
 struct Int8ScratchSizes {
   size_t xq, xs, w8;
@@ -450,8 +451,8 @@ size_t int8_scale_bytes(const model::ModelDesc& desc);
 size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last);
 // The `max_k` Engine::prepare_prefill builds Int8State with: the widest int4 K the h8
 // walk runs - the MLP intermediate (down's K) on a dense model, as since spec 14; on a
-// MoE model (spec 15d) the widest dense linear's K, out_proj / o_proj's 4096 on Ornith
-// (the experts' gate||up K is the hidden size; their down is not an h8 linear).
+// MoE model the hidden size, the routed experts' W4A8 quantiser's K (open-work 16: no
+// dense linear runs h8 there).
 uint32_t prefill_int8_max_k(const model::ModelDesc& desc);
 inline uint32_t int8_padded_k(uint32_t K) { return (K + 1023) / 1024 * 1024; }
 

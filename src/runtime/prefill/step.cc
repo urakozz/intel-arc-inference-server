@@ -48,7 +48,7 @@ const void* at_const(const l0::Mem& m, size_t off) {
 // One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The l0 side is S2's
 // slab walk; the l0-int8 side is spec 5's h8 walk (quantiser, then requant + i8 GEMM per slab).
 // `out` (spec 17c): the row-parallel linears' output buffer under tensor parallel (linear_l0's); null is partials.
-// Open-work 17: a dense model's four mixer linears take the l0 side on l0-int8 too (l0_int8_bf16_linear).
+// Open-work 16 / 17: the four mixer linears take the l0 side on l0-int8 too (l0_int8_bf16_linear).
 void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, uint32_t l, LinearId id,
                const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q, float* out = nullptr) {
   const DeviceWeight& w = m.linears.at({l, id});
@@ -703,8 +703,8 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // depends on C again: Flash, C <= 320: 1 + 48 x 19 + 16 x 11 = 1089. Open-work 3d's SLM
 // gate/up epilogue keeps one launch at 193..320. At 321..384 gate||up returns to its 68 slab
 // launches, 1 + 48 x 86 + 16 x 78 = 5377; above, 8449 as before (derived). l0-int8's
-// h8 linears are its own walk (linear_i8) and keep the slab count; its mixer linears on a dense model are the
-// l0 walk's (open-work 17), pf_gemm_q4 included.
+// h8 linears are its own walk (linear_i8) and keep the slab count; its mixer linears are the
+// l0 walk's (open-work 17; a MoE model's too, open-work 16), pf_gemm_q4 included.
 namespace {
 constexpr size_t kGdnLayerFixed = 2 + 1 + kGdnChunkLaunches + 2 + 1;
 // One int4 linear's launches on backend b at C rows: the slab walk's 2 x N / 1024, or 1 when L0
@@ -730,20 +730,18 @@ size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_
 }
 }  // namespace
 // Spec 15d, a MoE model. Per layer: the input norm 2, the mixer's two
-// int4 linears (2 x N / 1024 slab launches each, plus the quantiser per linear on
-// l0-int8), the mixer itself (GDN: a||b + gdn_chunk; FA: attn_prep + attention + gate),
+// int4 linears (2 x N / 1024 slab launches each; l0's walk on l0-int8 too, open-work 16),
+// the mixer itself (GDN: a||b + gdn_chunk; FA: attn_prep + attention + gate),
 // the post-attention norm 2 and moe_chunk_launches. Ornith at C <= 2048, flash:
 // GDN 2 + 24 + 1 + 10 + 4 + 2 + 11 = 54, FA 2 + 18 + 1 + 1 + 1 + 4 + 2 + 11 = 40 on l0,
-// so 1 + 30 x 54 + 10 x 40 = 2021; l0-int8 2 more per layer (the quantisers) and 1 fewer
-// (the MoE block's 10): 1 + 30 x 55 + 10 x 41 = 2061 (derived). Phase 3 Task 5: a walk's every layer but its last
-// runs the next layer's input norm inside its combine, so a chunk is layers - 1 fewer: 1982 / 2022.
+// so 1 + 30 x 54 + 10 x 40 = 2021 (derived; l0-int8 differs in moe_chunk_launches and gdn_chunk_launches only).
+// Phase 3 Task 5: a walk's every layer but its last runs the next layer's input norm inside its combine, so a chunk
+// is layers - 1 fewer.
 namespace {
 // A pf_res_norm's launches: the fold and the finish, or phase 2 Task 5's one.
 size_t res_norm_launches(const model::ModelDesc& d) { return d.is_moe() ? 1 : 2; }
 size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv) {
-  auto lin = [&](LinearId id) {
-    return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
-  };
+  auto lin = [&](LinearId id) { return linear_launches(d, id, b, C); };
   const size_t nrm = res_norm_launches(d);
   const size_t ffn = nrm + moe_chunk_launches(d, b);
   const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
@@ -772,9 +770,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   const bool gdn = kind == model::LayerKind::GDN;
   const size_t widen = !gdn && kv == KvCache::Int8 && !kv8_split_in_place(d, pos, C) ? 1 : 0;
   if (d.is_moe()) {
-    auto lin = [&](LinearId id) {
-      return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
-    };
+    auto lin = [&](LinearId id) { return linear_launches(d, id, b, C); };
     const size_t nrm = res_norm_launches(d);
     const size_t ffn = nrm + moe_chunk_launches(d, b);
     return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn

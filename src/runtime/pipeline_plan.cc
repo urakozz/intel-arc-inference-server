@@ -250,8 +250,8 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     dp.decode_state = ps.total() - dp.kv + scratch + dp.link;
     if (pf.prefill) {   // spec 16c: memory_plan.cc's prefill terms, per device
       const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, d, pf.chunk_cap);
-      // l0-int8 on a dense model: the mixer linears walk the slab too (open-work 17).
-      dp.prefill_scratch = s.eager() + (pf.backend == PrefillBackend::L0 || !d.is_moe() ? s.slab : 0);
+      // l0-int8: the mixer linears walk the slab too (open-work 16 / 17).
+      dp.prefill_scratch = s.eager() + s.slab;
       // Phase 3 Task 2: the stage's router / a||b B slabs (a MoE model on l0).
       if (pf.backend == PrefillBackend::L0) dp.prefill_scratch += route_slab_bytes(d, st[i].first, st[i].last);
       if (kv == KvCache::Int8) dp.prefill_scratch += s.kv8_raw;
@@ -274,10 +274,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
                                ? w.draft_vocab
                                : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
         if (pf.prefill) {
-          dp.mtp_prefill = pp_mtp_prefill_bytes(d, pf.chunk_cap);
-          // step_mtp_kv's bf16 linears walk the L0 slab; the l0 backend and a dense model already hold it.
-          if (pf.backend == PrefillBackend::L0Int8 && d.is_moe())
-            dp.prefill_scratch += PrefillScratchDims::sizes(max_len, d, pf.chunk_cap).slab;
+          dp.mtp_prefill = pp_mtp_prefill_bytes(d, pf.chunk_cap);   // step_mtp_kv's bf16 linears: the slab above
         }
       } else {
         dp.mtp_buffers = pp_gdn_spec_bytes(d, st[i].gdn);

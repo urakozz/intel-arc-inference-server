@@ -1,5 +1,6 @@
 // pf_moe_w4a8 - plan 2026-11-12 (Ornith MoE prefill) Task 5: l0-int8's routed + shared gate||up as W4A8 (operator
-// ruling D1, revised 2026-11-12). The chunk's normed rows are quantised to int8 per token AND 64-k group (one fp32
+// ruling D1, revised 2026-11-12); a null W_sh skips the shared block's items (open-work 16: l0-int8 runs the shared
+// expert bf16). The chunk's normed rows are quantised to int8 per token AND 64-k group (one fp32
 // scale a row and group, no rotation: the int4 weights are not rotated), gathered into sorted order with their
 // scales, then multiplied by the int4 expert blocks as the native s4 DPAS operand (the nibble xor 8 is the whole
 // weight conversion: exact), accumulated in int32 per 64-k group and rescaled in fp32 per group by the block's f16
@@ -93,7 +94,8 @@ __kernel void pf_moe_w4a8(__global const uint* restrict items, __global const uc
                           __global const uint* restrict W_sh, __global ushort* restrict out) {
   const uint it = get_group_id(1);
   const uint e = items[4 * it];
-  if (e == NONE) return;                              // uniform; no barrier below
+  if (e == NONE || (e == EXPERTS && W_sh == 0)) return;   // uniform; no barrier below (no W_sh: the shared block
+                                                          // runs bf16, pf_moe_q4gemm - open-work 16)
   const uint row0 = items[4 * it + 1];
   const uint rows = items[4 * it + 2];
   const uint s = get_sub_group_id();

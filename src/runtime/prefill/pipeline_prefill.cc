@@ -590,12 +590,12 @@ void PipelineEngine::prepare_prefill() {
   if (b != PrefillBackend::L0Int8) return;
   PipelinePrefill& p = as_pf(*pf_);
   // Engine::prepare_prefill's l0-int8 pass, per device over ITS linears: every h8
-  // linear's rotated column scales (not lm_head, not a||b, not a dense model's mixer linears), and a MoE layer's
-  // expert arrays.
+  // linear's rotated column scales (not lm_head, not a||b, not the mixer linears; none on a MoE model).
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     PfDevice& D = *p.dev[i];
     const loader::LoadedModel& m = st(i).model;
     if (!D.int8) D.int8 = std::make_unique<prefill::Int8State>(D.ctx, prefill_int8_max_k(d), p.cap);
+    if (d.is_moe()) continue;   // open-work 16: no h8 linear on a MoE model (W4A8 routed experts only)
     for (const auto& [key, w] : m.linears)
       if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
           w.kind == model::WeightKind::Int4 && !l0_int8_bf16_linear(d, key.second))

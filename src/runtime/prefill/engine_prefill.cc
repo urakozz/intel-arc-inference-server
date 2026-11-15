@@ -114,15 +114,16 @@ void Engine::prepare_prefill() {
     prefill::make_route_slabs(pfx_->cx, pfx_->kc, *pf_, model_, 0, model_.desc->layers);
   if (prefill_backend() != PrefillBackend::L0Int8) return;
   if (!pfx_->int8)   // the largest int4 K the h8 walk runs: down's on a dense model (spec
-                     // 14), the widest mixer linear's on a MoE model (spec 15d)
+                     // 14), the hidden size on a MoE model (the W4A8 experts' quantiser, open-work 16)
     pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_, prefill_int8_max_k(*model_.desc), pf_->chunk_cap());
+  if (model_.desc->is_moe()) return;   // open-work 16: no h8 linear on a MoE model (W4A8 routed experts only)
   // Every h8 linear's rotated column scales (spec 5 T2), outside any chunk and
   // any recording: cached by weight, so after the first call this loop only
   // looks them up, and no recorded list ever holds the host finish of
   // pf_colmax_rot.
   // Not a||b: prefill runs it as a bf16 GEMV (pf_ab_proj) on every backend, over the
   // checkpoint's bf16 weight or (spec 15 §13) an int4 a||b's bf16 copy - never through h8.
-  // Not a dense model's mixer linears either: l0-int8 runs them on the l0 walk (open-work 17).
+  // Not the mixer linears either: l0-int8 runs them on the l0 walk (open-work 16 / 17).
   for (const auto& [key, w] : model_.linears)
     if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
         w.kind == model::WeightKind::Int4 && !l0_int8_bf16_linear(*model_.desc, key.second))

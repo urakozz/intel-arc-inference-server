@@ -59,9 +59,9 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
 
   if (path.prefill) {
     const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, desc, path.chunk_cap);
-    // linear_l0 walks the slab for every int4 linear; on l0-int8 a dense model's mixer linears
-    // (open-work 17, l0_int8_bf16_linear) and the MTP head's bf16 linears do (step_mtp_kv).
-    if (path.backend == PrefillBackend::L0 || mtp || !desc.is_moe()) p.prefill_lazy += s.slab;
+    // linear_l0 walks the slab for every int4 linear; on l0-int8 the mixer linears (open-work 16 / 17,
+    // l0_int8_bf16_linear) and the MTP head's bf16 linears do (step_mtp_kv).
+    p.prefill_lazy += s.slab;
     // Phase 3 Task 2: a MoE model's router / a||b B slabs, made by Engine::prepare_prefill on l0.
     if (path.backend == PrefillBackend::L0) p.prefill_lazy += route_slab_bytes(desc, 0, desc.layers);
     if (kv == KvCache::Int8) p.prefill_lazy += s.kv8_raw;
