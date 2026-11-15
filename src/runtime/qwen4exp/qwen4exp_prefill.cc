@@ -399,7 +399,9 @@ class Walk {
       const uint32_t ib = pf_items(d_, C_);
       const uint32_t NG = 2 * d_.moe_inter;
       // The expert tier (plan 21v2a Task 8): with a table row the _TBL GEMMs read each block from its address - the
-      // misses straight from pinned host memory (a staging ring for them is the next step)
+      // misses straight from pinned host memory, each block once a chunk at the bus rate (2026-11-15, 4 real-width
+      // layers all on host: 4096 rows in 978 ms; copying each layer's misses to VRAM first, in order, took 1052 ms - a
+      // copy-engine ring overlapped with the previous layer's work is the lever, not built)
       const bool tbl = L.expert_row != nullptr;
       const void* w_gu = tbl ? L.expert_row : L.gate_up->ptr();
       const void* w_dn = tbl ? static_cast<const uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr();
