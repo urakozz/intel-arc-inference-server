@@ -37,8 +37,8 @@
 namespace runtime::kolibri {
 
 // Spec 20d: prefill() and its accessors are DEFINED in b70_kolibri_prefill
-// (runtime/kolibri/kolibri_prefill_engine.cc), not in b70_kolibri_runtime - K2Engine's arrangement
-// (runtime/k2/k2_engine.h): a target that never prefills links what it always linked; one that does links
+// (runtime/kolibri/kolibri_prefill_engine.cc), not in b70_kolibri_runtime, so
+// a target that never prefills links what it always linked; one that does links
 // b70_kolibri_prefill. The prefill state is lazy (allocated by the first prefill or prepare_prefill), so a
 // decode-only engine holds exactly what it did.
 struct KolibriPrefillState;   // runtime/kolibri/kolibri_prefill_engine.cc

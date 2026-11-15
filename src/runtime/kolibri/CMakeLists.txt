@@ -1,5 +1,5 @@
-# Spec 20c: Kolibri-1's runtime, beside runtime::Engine and runtime/k2 (spec 20 §4: KolibriEngine and
-# its capture; the qwen3_5 and K2 paths are untouched).
+# Spec 20c: Kolibri-1's runtime, beside runtime::Engine (spec 20 §4: KolibriEngine and
+# its capture; the qwen3_5 path is untouched).
 #
 # b70_kolibri_plan: the allocations' sizes, the planner and the split by bytes as device-free
 # arithmetic (kolibri_sizes.cc) - host only, so tests/runtime/kolibri_plan_test.cc runs on the Mac.
@@ -17,7 +17,7 @@ target_link_libraries(b70_kolibri_runtime PUBLIC b70_l0 b70_kolibri_loader b70_k
 b70_target_kernel_dir(b70_kolibri_runtime)
 
 # Spec 20d: Kolibri-1's prefill (the chunk walk, its scratch, and KolibriEngine::prefill's definitions) -
-# its own archive, as b70_k2_prefill is beside b70_k2_runtime: a target that never prefills Kolibri links
+# its own archive beside b70_kolibri_runtime: a target that never prefills Kolibri links
 # what it always linked. It runs the prefill path's Level Zero half (runtime::prefill::Context,
 # KernelCache, gemm_l0).
 add_library(b70_kolibri_prefill STATIC kolibri_prefill.cc kolibri_prefill_engine.cc)

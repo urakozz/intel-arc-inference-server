@@ -2,7 +2,7 @@
 // The f32 judges of the gates f32_oracle.sh's three golden prompts do not cover (operator ruling 2026-10-29): a
 // test's engine run is the reference context - a prompt and the ids every compared row is teacher-forced on - and
 // the f32 reference is run on exactly that context afterwards, on the box CPU (tools/box_validate/f32_refs.sh
-// forced <model> <dir>: ornith_ref.py / k2_ref.py run --lean --force).
+// forced <model> <dir>: ornith_ref.py run --lean --force).
 //
 //   B70_DUMP_FORCED=<dir>    the test writes <dir>/<key>.prompt.ids and <key>.force.ids for every context it
 //                            would judge (the engine is deterministic: a second run is the same context)

@@ -51,7 +51,7 @@ config = json.load(open(os.path.join(snapshot, "tokenizer_config.json"), encodin
 def case_inputs(case):
     tools = None if case["tools"] is None else [spec["tools"][n] for n in case["tools"]]
     # The engine holds a request as nlohmann::json, whose objects are KEY-SORTED: render HF's side
-    # from the same sorted objects (dump_k2.py's rule), or the comparison grades key order.
+    # from the same sorted objects, or the comparison grades key order.
     msgs, tools = json.loads(json.dumps([case["messages"], tools], sort_keys=True))
     return msgs, tools
 

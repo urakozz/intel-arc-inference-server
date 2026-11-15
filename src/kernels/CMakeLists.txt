@@ -976,190 +976,6 @@ if(B70_TP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
 endif()
 # ==== Spec 19 v3c ========================================================== (end) ====
 
-# ==== Spec 18b: K2-Horizon decode (model::k2()) ============================= (begin) ====
-# Additive only: no existing source is edited, so every binary above keeps its name, its
-# command line and its bytes (tools/kernel_cmdlines' diff: additions only). K2-only
-# kernels live in src/kernels/k2/ and are named `k2_*` with every shape define in the name
-# (src/kernels/k2_kernels.h is the host half); the reused sources run at K2's shapes:
-#   gemv.cl         q||k||gate||v 2560x10240, q||k||gate||v_router 2560x9280 (S2 L0),
-#                   o_proj 4096x2560, gate||up 2560x12288, down 6144x2560 (S4 L0) - all
-#                   PROVISIONAL cells (model::K2Desc's {S, layout}, no GEMV_* tuning
-#                   defines) until 18b Task 4's sweep
-#   gemv_bf16.cl    the MoE router 2560 -> 128 rows ({16, 16}), lm_head 2560 -> 250624
-#   gemv_i8w.cl     the int8 lm_head (spec 9)
-#   prep.cl         prep_res_fold at K 2560 (stage A of the grouped norm, unchanged)
-#   embed_gather.cl / argmax.cl at K2's vocabulary 250624 (fully used)
-# What K2's decode list binds (runtime/k2/k2_capture.cc): 717 launches = embed + 3 dense
-# layers x 12 + 45 MoVA/MoE layers x 15 + 5.
-option(B70_K2 "build the K2-Horizon decode variants (spec 18b)" ON)
-if(B70_K2)
-  set(K2_CL ${CMAKE_CURRENT_SOURCE_DIR}/k2)
-  add_gemv_variant(1 2560 10240 2 0)    # q||k||gate||v        PROVISIONAL S2 L0
-  add_gemv_variant(1 2560 9280 2 0)     # q||k||gate||v_router PROVISIONAL S2 L0
-  add_gemv_variant(1 4096 2560 4 0)     # o_proj               PROVISIONAL S4 L0
-  add_gemv_variant(1 2560 12288 4 0)    # dense gate||up       PROVISIONAL S4 L0
-  add_gemv_variant(1 6144 2560 4 0)     # dense down           PROVISIONAL S4 L0
-  add_gemv_bf16_variant(1 2560 128 16 16)       # the MoE router, rows 100..127 zero
-  add_gemv_bf16_variant(1 2560 250624 64 1)     # lm_head bf16
-  add_gemv_i8w_variant(1 2560 250624)           # lm_head int8 (spec 9)
-  add_prep_res_fold(1 2560 0 20)        # after embed_gather and after every MoE block
-  add_prep_res_fold(1 2560 4 20)        # after o_proj and the dense down (S4)
-  add_ocloc_kernel(k2_embed_gather_M1_D2560_V250624 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
-                   DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2560 VOCAB=250624)
-  set(K2_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=250624 VOCAB_USED=250624)
-  add_ocloc_kernel(k2_argmax_stage1_M1_N250624_V250624 SOURCE ${ARGMAX_CL}
-                   DEFINES ${K2_ARGMAX_DEFINES} M=1)
-  add_ocloc_kernel(k2_argmax_stage2_N250624 SOURCE ${ARGMAX_CL} DEFINES ${K2_ARGMAX_DEFINES})
-  # k2_prep.cl: the grouped norm's stage B (2 groups of 1280, plain w), the dense SiLU x up,
-  # and the attention prep (q / k RoPE over all 128 dims, the gate, the cache write).
-  add_ocloc_kernel(k2_norm_M1_K2560_G20_W20_NG2 SOURCE ${K2_CL}/k2_prep.cl
-                   DEFINES M=1 K=2560 NORM_G=20 NORM_WGS=20 NORM_GROUPS=2)
-  add_ocloc_kernel(k2_silu_M1_I6144_S4 SOURCE ${K2_CL}/k2_prep.cl DEFINES M=1 SILU_I=6144 SILU_S=4)
-  set(K2_PREP_DEFINES ${CTRL_DEFINES} M=1 QKV_S=2 Q_HEADS=32 KV_HEADS=8 HD=128)
-  add_ocloc_kernel(k2_attn_prep_M1_N10240_S2_Q32KV8_V SOURCE ${K2_CL}/k2_prep.cl
-                   DEFINES ${K2_PREP_DEFINES} QKV_N=10240 V_FROM_PARTIALS=1)
-  add_ocloc_kernel(k2_attn_prep_M1_N9280_S2_Q32KV8 SOURCE ${K2_CL}/k2_prep.cl
-                   DEFINES ${K2_PREP_DEFINES} QKV_N=9280 V_FROM_PARTIALS=0)
-  # k2_attn.cl: decode attention v2 at head_dim 128 / GQA 4 with the softplus gate.
-  add_ocloc_kernel(k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8 SOURCE ${K2_CL}/k2_attn.cl
-                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8)
-  # (k2_attn_eager.cl, the eager decode attention behind B70_K2_ATTN=eager, was removed in the
-  # zero-config cleanup: flash is K2's attention.)
-  # k2_moe.cl: the sigmoid router (MoVA's over the fused GEMV's v_router columns, the MoE's
-  # over its bf16 GEMV), the MoE block (100 + 1 shared, top-8), MoVA's value experts.
-  add_ocloc_kernel(k2_route_M1_E64_T4_N9280_O9216_S2 SOURCE ${K2_CL}/k2_moe.cl
-                   DEFINES M=1 ROUTE_E=64 ROUTE_K=4 ROUTE_WG=64 ROUTE_LN=9280 ROUTE_LOFF=9216
-                           ROUTE_LS=2 ROUTE_SCALE=2.5f)
-  add_ocloc_kernel(k2_route_M1_E100_T8_N128_O0_S1 SOURCE ${K2_CL}/k2_moe.cl
-                   DEFINES M=1 ROUTE_E=100 ROUTE_K=8 ROUTE_WG=128 ROUTE_LN=128 ROUTE_LOFF=0
-                           ROUTE_LS=1 ROUTE_SCALE=2.5f)
-  add_ocloc_kernel(k2_moe_M1_E100_T8_D2560_I768 SOURCE ${K2_CL}/k2_moe.cl
-                   DEFINES M=1 MOE_E=100 MOE_K=8 HIDDEN=2560 INTER=768 UP_KS=4 DN_KS=2)
-  add_ocloc_kernel(k2_mova_M1_E64_T4_D2560_N1024 SOURCE ${K2_CL}/k2_moe.cl
-                   DEFINES ${CTRL_DEFINES} M=1 MOVA_E=64 MOVA_K=4 MOVA_D=2560 MOVA_N=1024 MOVA_KS=4)
-endif()
-# ==== Spec 18b: K2-Horizon decode ============================================ (end) ====
-
-# ==== Spec 18c: K2-Horizon prefill (model::k2()) ============================ (begin) ====
-# Additive only, as 18b's block: no existing source changes, so every binary above (and in
-# prefill/) keeps its name and command line. New K2-only sources in src/kernels/k2/
-# (k2_pf_moe.cl, k2_pf_attn.cl); reused sources at K2's shapes (and prefill/slab_dequant_int4.cl):
-#   prefill/pf_embed.cl     the chunk's embedding gather (K2's vocabulary in the name)
-#   prefill/pf_prep.cl      pf_res_fold at K 2560 (stage A of the grouped norm, runtime M)
-#   k2/k2_prep.cl           k2_norm_finish and k2_attn_prep at M = 2048 (kernels::k2::kPfC),
-#                           S 1: decode's chains, row for row, over the prefill GEMM's one slice
-#   k2/k2_moe.cl            k2_route over [C][ln] logits, grid (1, C): MoVA's from the fused
-#                           row's v_router columns at pitch 9472; the MoE's is decode's binary
-#   prefill/pf_gemv_bf16.cl the MoE router GEMV over the chunk at decode's {16, 16} tiling
-#   prefill/pf_moe_gemm.cl  the grouped expert GEMMs: gate||up 2560 x 1536 (SiLU epilogue),
-#                           down 768 x 2560, MoVA's value experts 2560 x 1024 (plain)
-#   prefill/pf_gemm.cl      the dense and attention linears over k2_pf_dequant_slab's slabs
-#                           (pf_gemm_T0 / pf_gemm_T0_SILU, shape-free: the existing binaries)
-# What K2's prefill chunk binds: runtime/k2/k2_prefill.cc (2392 launches at every C, derived in
-# runtime/k2/k2_sizes.cc); the head is decode's binaries.
-if(B70_K2)
-  set(K2_PF_SRC ${CMAKE_CURRENT_SOURCE_DIR}/k2)
-  set(K2_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
-  add_ocloc_kernel(k2_pf_embed_gather_D2560_V250624 SOURCE ${K2_PF_REUSE}/pf_embed.cl
-                   DEFINES HIDDEN=2560 VOCAB=250624)
-  foreach(SP 0 1)
-    add_ocloc_kernel(pf_res_fold_K2560_SP${SP}_G20 SOURCE ${K2_PF_REUSE}/pf_prep.cl
-                     DEFINES K=2560 S_PREV=${SP} FOLD_G=20)
-  endforeach()
-  add_ocloc_kernel(k2_norm_M2048_K2560_G20_W20_NG2 SOURCE ${K2_PF_SRC}/k2_prep.cl
-                   DEFINES M=2048 K=2560 NORM_G=20 NORM_WGS=20 NORM_GROUPS=2)
-  # The int4 linears' slabs (layout 0): q||k||gate||v, q||k||gate||v_router (a 256-column
-  # tail holding the router's 64), o_proj, dense gate||up, dense down.
-  foreach(row "2560 10240" "2560 9280" "4096 2560" "2560 12288" "6144 2560")
-    separate_arguments(f UNIX_COMMAND "${row}")
-    list(GET f 0 K)
-    list(GET f 1 N)
-    add_ocloc_kernel(pf_int4_slab_K${K}_N${N} SOURCE ${K2_PF_REUSE}/slab_dequant_int4.cl
-                     DEFINES K=${K} N=${N})
-  endforeach()
-  set(K2_PF_PREP_DEFINES ${CTRL_DEFINES} M=2048 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=128)
-  add_ocloc_kernel(k2_attn_prep_M2048_N10240_S1_Q32KV8_V SOURCE ${K2_PF_SRC}/k2_prep.cl
-                   DEFINES ${K2_PF_PREP_DEFINES} QKV_N=10240 V_FROM_PARTIALS=1)
-  add_ocloc_kernel(k2_attn_prep_M2048_N9472_S1_Q32KV8 SOURCE ${K2_PF_SRC}/k2_prep.cl
-                   DEFINES ${K2_PF_PREP_DEFINES} QKV_N=9472 V_FROM_PARTIALS=0)
-  # The flash attention at head_dim 128 / GQA 4 (fp32 scores and probabilities), gated (the
-  # walk's) and ungated (_O, the K1 test's). Natural exp (EXP2 0), as K2's decode attention and
-  # the reference. 256 GRF as pf_flash_attn. (The eager-mirroring _EAGER builds went with
-  # B70_K2_ATTN in the zero-config cleanup; EAGER=0 stays on these command lines, the source's
-  # eager branch being Kolibri-1's.)
-  foreach(GT 0 1)
-    set(_n k2_pf_flash_attn_Q32KV8)
-    if(NOT GT)
-      string(APPEND _n _O)
-    endif()
-    add_ocloc_kernel(${_n} SOURCE ${K2_PF_SRC}/k2_pf_attn.cl
-                     DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=8 EXP2=0 EAGER=0
-                             GATE_EPI=${GT}
-                     OPTIONS -cl-intel-256-GRF-per-thread)
-  endforeach()
-  add_ocloc_kernel(k2_route_M1_E64_T4_N9472_O9216_S1 SOURCE ${K2_PF_SRC}/k2_moe.cl
-                   DEFINES M=1 ROUTE_E=64 ROUTE_K=4 ROUTE_WG=64 ROUTE_LN=9472 ROUTE_LOFF=9216
-                           ROUTE_LS=1 ROUTE_SCALE=2.5f)
-  add_ocloc_kernel(k2_pf_moe_E100_T8_D2560_I768 SOURCE ${K2_PF_SRC}/k2_pf_moe.cl
-                   DEFINES PF_E=100 PF_K=8 PF_WG=128 PF_SHARED=1 PF_D=2560 PF_INTER=768 TM=32 KC=2048)
-  add_ocloc_kernel(k2_pf_mova_E64_T4_D2560_N1024 SOURCE ${K2_PF_SRC}/k2_pf_moe.cl
-                   DEFINES PF_E=64 PF_K=4 PF_WG=64 PF_SHARED=0 PF_D=2560 PF_VN=1024 TM=32 KC=2048)
-  add_ocloc_kernel(pf_moe_router_K2560_N128 SOURCE ${K2_PF_REUSE}/pf_gemv_bf16.cl
-                   DEFINES K=2560 N=128 COLS_PER_WG=16 KSPLIT=16)
-  add_ocloc_kernel(pf_moe_gemm_K2560_N1536_SILU SOURCE ${K2_PF_REUSE}/pf_moe_gemm.cl
-                   DEFINES K=2560 N=1536 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
-  add_ocloc_kernel(pf_moe_gemm_K768_N2560 SOURCE ${K2_PF_REUSE}/pf_moe_gemm.cl
-                   DEFINES K=768 N=2560 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
-  add_ocloc_kernel(pf_moe_gemm_K2560_N1024 SOURCE ${K2_PF_REUSE}/pf_moe_gemm.cl
-                   DEFINES K=2560 N=1024 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
-endif()
-# ==== Spec 18c: K2-Horizon prefill ============================================ (end) ====
-
-# ==== Spec 18e: K2-Horizon's int8 KV cache (`--kv-cache int8`) ============== (begin) ====
-# rotkv at head_dim 128 (spec 12 §8; src/common/kv8.h hd128): every binary that writes or reads
-# K2's int8 cache, from ONE new source (k2/k2_kv8.cl, per-family defines as kv8.cl) plus
-# k2_moe.cl's k2_mova_value at MOVA_STAGE 1 (its routed mix into a staging row, which the
-# writer quantises). Additive only: every existing binary keeps its name and command line, and
-# a `--kv-cache bf16` K2 engine (the default) binds none of these. Suffix `_KV8` (spec 12b's) on
-# the names that carry K2's `Q32KV8` heads already.
-#   decode   k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 / ..._N9280_S2_Q32KV8_KV8   the writer
-#            k2_mova_M1_E64_T4_D2560_N1024_STAGE                             MoVA's v, staged
-#            k2_attn_M1_T<TGT>_Q32KV8_KV8           flash decode + the un-rotating reduce
-#   prefill  k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 / ..._N9472_S1_Q32KV8_KV8  the writer
-#            k2_pf_flash_attn_Q32KV8[_O]_KV8        the flash over int8 (gated, and the K1
-#                                                   test's ungated un-rotated o)
-#            (MoVA's combine is k2_pf_mova's binary with pos 0 into the staging row)
-if(B70_K2 AND B70_KV8)
-  set(K2_KV8_CL ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_kv8.cl)
-  set(K2_KV8_HEADS Q_HEADS=32 KV_HEADS=8)
-  add_ocloc_kernel(k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 SOURCE ${K2_KV8_CL}
-                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=1 QKV_S=2 ${K2_KV8_HEADS} QKV_N=10240
-                           V_FROM_PARTIALS=1)
-  add_ocloc_kernel(k2_attn_prep_M1_N9280_S2_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
-                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=1 QKV_S=2 ${K2_KV8_HEADS} QKV_N=9280
-                           V_FROM_PARTIALS=0)
-  add_ocloc_kernel(k2_mova_M1_E64_T4_D2560_N1024_STAGE SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_moe.cl
-                   DEFINES ${CTRL_DEFINES} M=1 MOVA_E=64 MOVA_K=4 MOVA_D=2560 MOVA_N=1024 MOVA_KS=4
-                           MOVA_STAGE=1)
-  add_ocloc_kernel(k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
-                   DEFINES ${CTRL_DEFINES} K2KV8_DEC=1 M=1 TGT=${ATTN_V2_TGT} ${K2_KV8_HEADS})
-  add_ocloc_kernel(k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 SOURCE ${K2_KV8_CL}
-                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=2048 QKV_S=1 ${K2_KV8_HEADS} QKV_N=10240
-                           V_FROM_PARTIALS=1)
-  add_ocloc_kernel(k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
-                   DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=2048 QKV_S=1 ${K2_KV8_HEADS} QKV_N=9472
-                           V_FROM_PARTIALS=0)
-  foreach(GT 0 1)   # EAGER=0, inert since the eager arm went (zero-config cleanup)
-    set(_n k2_pf_flash_attn_Q32KV8)
-    if(NOT GT)
-      string(APPEND _n _O)
-    endif()
-    add_ocloc_kernel(${_n}_KV8 SOURCE ${K2_KV8_CL}
-                     DEFINES K2KV8_FLASH=1 KT=64 RPW=8 HPW=4 ${K2_KV8_HEADS} EAGER=0 GATE_EPI=${GT}
-                     OPTIONS -cl-intel-256-GRF-per-thread)
-  endforeach()
-endif()
-# ==== Spec 18e: K2-Horizon's int8 KV cache ==================================== (end) ====
 # ==== Spec 20c: Kolibri-1 decode (model::kolibri1()) ======================= (begin) ====
 # Additive only: no existing source is edited, so every binary above keeps its name, its command line
 # and its bytes (tools/kernel_cmdlines' diff: additions only). Kolibri-only kernels live in
@@ -1179,13 +995,8 @@ option(B70_KOLIBRI "build the Kolibri-1 decode variants (spec 20c)" ON)
 if(B70_KOLIBRI)
   set(KOL_CL ${CMAKE_CURRENT_SOURCE_DIR}/kolibri)
   add_gemv_variant(1 2560 7168 2 0)            # q||k||v int4        PROVISIONAL S2 L0
-  # o_proj int4 PROVISIONAL S4 L0 is gemv_M1_K6144_N2560_S4_L0, the binary K2's dense down already
-  # builds (spec 18b block); prep_res_fold_M1_K2560_SP0_G20 likewise. Built here only without K2, so
-  # no target is defined twice:
-  if(NOT B70_K2)
-    add_gemv_variant(1 6144 2560 4 0)
-    add_prep_res_fold(1 2560 0 20)
-  endif()
+  add_gemv_variant(1 6144 2560 4 0)            # o_proj int4         PROVISIONAL S4 L0
+  add_prep_res_fold(1 2560 0 20)
   add_gemv_bf16_variant(1 2560 7168 64 1)      # q||k||v bf16 (decision 2's bf16 arm)
   add_gemv_bf16_variant(1 6144 2560 64 1)      # o_proj bf16
   add_gemv_bf16_variant(1 2560 512 16 16)      # the router, rows 384..511 zero; fp32 logits
@@ -1235,7 +1046,8 @@ endif()
 #   kol_pf_moe.cl     the 384-expert sort (ids as ushort, two experts a lane), gather, the dequant of a
 #                     weight batch (block 384 = the bf16 shared expert, copied), the combine into `mo`
 #   kol_pf_attn.cl    the windowed flash attention over the 4096-slot ring (sliding) and the growing
-#                     cache (full), k2_pf_attn.cl's DPAS walk at GQA 12, no gate; and its eager twin
+#                     cache (full), the DPAS walk of K2-Horizon's k2_pf_attn.cl (removed, tag
+#                     archive/k2-horizon) at GQA 12, no gate; and its eager twin
 #   (prefill/slab_bf16.cl: the bf16 attention arm's slabs with a zero-padded tail, o_proj's 512 columns)
 # Reused at Kolibri's shapes: kol_prep.cl at M = 2048 (kernels::kolibri::kPfC: the norm, the post-add,
 # the attention prep at S 1), prefill/pf_embed.cl, prefill/pf_prep.cl's pf_res_fold (SP0, and _Z over
@@ -1248,12 +1060,8 @@ if(B70_KOLIBRI)
   set(KOL_PF_SRC ${CMAKE_CURRENT_SOURCE_DIR}/kolibri)
   set(KOL_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
   add_ocloc_kernel(kol_pf_embed_gather_D2560_V128000 SOURCE ${KOL_PF_REUSE}/pf_embed.cl DEFINES HIDDEN=2560 VOCAB=128000)
-  # K2's spec 18c block builds these two names (pf_res_fold SP0 at K 2560, o_proj's 6144 x 2560 slab):
-  # built here only without K2, so no target is defined twice.
-  if(NOT B70_K2)
-    add_ocloc_kernel(pf_res_fold_K2560_SP0_G20 SOURCE ${KOL_PF_REUSE}/pf_prep.cl DEFINES K=2560 S_PREV=0 FOLD_G=20)
-    add_ocloc_kernel(pf_int4_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=6144 N=2560)
-  endif()
+  add_ocloc_kernel(pf_res_fold_K2560_SP0_G20 SOURCE ${KOL_PF_REUSE}/pf_prep.cl DEFINES K=2560 S_PREV=0 FOLD_G=20)
+  add_ocloc_kernel(pf_int4_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=6144 N=2560)
   add_ocloc_kernel(pf_res_fold_K2560_SP1_G20_Z SOURCE ${KOL_PF_REUSE}/pf_prep.cl DEFINES K=2560 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
   add_ocloc_kernel(pf_int4_slab_K2560_N7168 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=2560 N=7168)
   foreach(row "2560 7168" "6144 2560")
@@ -1271,7 +1079,7 @@ if(B70_KOLIBRI)
                    DEFINES ${CTRL_DEFINES} M=2048 QKV_N=7168 QKV_S=1 ${KOL_PF_HEADS} SLIDING=0 RING=0)
   # The flash attention: sliding (window 513 over the ring) and full, the default (fp32 scores and
   # probabilities, natural exp) and the eager-mirroring form (B70_KOLIBRI_ATTN=eager). 256 GRF as
-  # k2_pf_attn / pf_flash_attn.
+  # pf_flash_attn.
   foreach(SL 1 0)
     foreach(EG 0 1)
       if(SL)
@@ -1325,17 +1133,13 @@ if(B70_Q4EXP)
   set(Q4_CL ${CMAKE_CURRENT_SOURCE_DIR}/qwen4exp)
   add_gemv_variant(1 2560 16384 1 0)            # qkv||z int4                     S1 L0 (fixed)
   add_gemv_variant(1 2560 13312 2 0)            # q||gate||k||v int4              PROVISIONAL S2 L0
-  # out_proj / o_proj int4 PROVISIONAL S4 L0 is gemv_M1_K6144_N2560_S4_L0 (K2's dense down, Kolibri's o_proj);
-  # the bf16 6144 x 2560 is Kolibri's o_proj bf16; a||b {16, 16} is K2's router: built here only without them.
-  if(NOT B70_K2 AND NOT B70_KOLIBRI)
-    add_gemv_variant(1 6144 2560 4 0)
-  endif()
+  # out_proj / o_proj int4 PROVISIONAL S4 L0 is gemv_M1_K6144_N2560_S4_L0 (Kolibri's o_proj); the bf16 6144 x 2560
+  # is Kolibri's o_proj bf16: built here only without Kolibri.
   if(NOT B70_KOLIBRI)
+    add_gemv_variant(1 6144 2560 4 0)
     add_gemv_bf16_variant(1 6144 2560 64 1)
   endif()
-  if(NOT B70_K2)
-    add_gemv_bf16_variant(1 2560 128 16 16)
-  endif()
+  add_gemv_bf16_variant(1 2560 128 16 16)       # a||b {16, 16}
   add_gemv_bf16_variant(1 2560 16384 64 1)      # qkv||z bf16 (Intel's)
   add_gemv_bf16_variant(1 2560 13312 64 1)      # q||gate||k||v bf16 (Intel's)
   add_gemv_bf16_variant(1 10240 336 16 16)      # HC down || block_inject (324 rows used)
@@ -1408,8 +1212,8 @@ endif()
 # pf_attn_prep.cl (q16), pf_attn.cl (the gate) and pf_flash_attn.cl at 24 q / 2 kv heads (HPW 6 of GQA 12, KT 64, RPW
 # 8, EXP2 as the existing binary, 256 GRF), pf_moe_gemm.cl (gate||up 2560 x 1280 SiLU, down 640 x 2560); bound by
 # name, nothing built here: Qwen3.8's pf_gdn_conv / _wy / _scan (the GDN shape is Qwen3.8's), pf_gemm_T0, 21c's
-# q4_route_M1 (grid (1, C)); K2's / Kolibri's pf_int4_slab_K6144_N2560 (out_proj / o_proj int4) is built here
-# only when neither block is on. What a chunk binds: runtime/qwen4exp/qwen4exp_prefill.cc (launch counts in
+# q4_route_M1 (grid (1, C)); Kolibri's pf_int4_slab_K6144_N2560 (out_proj / o_proj int4) is built here
+# only when Kolibri's block is off. What a chunk binds: runtime/qwen4exp/qwen4exp_prefill.cc (launch counts in
 # runtime/qwen4exp/qwen4exp_sizes.cc: they depend on the chunk's dense / sparse rows).
 if(B70_Q4EXP)
   set(Q4_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
@@ -1435,7 +1239,7 @@ if(B70_Q4EXP)
     list(GET f 1 N)
     add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L0 SOURCE ${Q4_PF_REUSE}/pf_dequant_slab.cl DEFINES K=${K} N=${N} LAYOUT=0)
   endforeach()
-  if(NOT B70_K2 AND NOT B70_KOLIBRI)
+  if(NOT B70_KOLIBRI)
     add_ocloc_kernel(pf_int4_slab_K6144_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl DEFINES K=6144 N=2560)
   endif()
   # the bf16 slabs: Intel's dense rows (qkv||z, q||gate||k||v, out / o), the indexer, the HC down||inject (336 rows,

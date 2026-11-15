@@ -312,7 +312,7 @@ int run_decode(const DecodeArgs& a) {
               eng.model().desc.attn == model::KolAttnForm::Bf16 ? " bf16-attn" : "",
               devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
-  // Spec 20d: the pp row, a second line as the K2 / Qwen paths print it (depth, chunk, ms, t/s).
+  // Spec 20d: the pp row, a second line as the Qwen path prints it (depth, chunk, ms, t/s).
   if (a.pp)
     std::printf("| b70-decode %s kolibri%s%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
                 a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "",

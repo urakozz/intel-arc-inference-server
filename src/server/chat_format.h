@@ -8,13 +8,6 @@
 //               enable_thinking only; the output opens with reasoning when the prompt ends
 //               in "<think>\n"; tool calls are Qwen XML (server/toolcall.h). Exactly the
 //               server before spec 18d.
-//   K2Horizon   K2-Horizon (model_type k2_horizon): the template also reads the request's
-//               chat_template_kwargs (tool_call_format xml | xml_typed | json,
-//               reasoning_effort high | medium | low, tool_presentation_format ...); the
-//               output opens with reasoning when the prompt ends in <ifm|think>\n,
-//               <ifm|think_fast>\n or <ifm|think_faster>\n; tool calls in the request's
-//               tool_call_format (server/toolcall_k2.h). EOS is generation_config.json's
-//               [1, 250019], read by b70-serve as for every model.
 //   Kolibri     Kolibri-1 (model_type kolibri1, spec 20e): ChatML; the template also reads the
 //               request's chat_template_kwargs (reasoning_effort none | minimal | low | medium |
 //               high | xhigh | max, enable_thinking, preserve_thinking); the MODEL opens its
@@ -46,19 +39,17 @@
 namespace server {
 
 struct ChatFormat {
-  enum class Kind { Qwen, K2Horizon, Kolibri, Bolt };
+  enum class Kind { Qwen, Kolibri, Bolt };
   Kind kind = Kind::Qwen;
 
-  // config.json's model_type -> the format; anything but "k2_horizon", "kolibri1" and "nemotron_h_omni" reads as Qwen.
+  // config.json's model_type -> the format; anything but "kolibri1" and "nemotron_h_omni" reads as Qwen.
   static ChatFormat for_model_type(const std::string& model_type);
-  static ChatFormat k2_horizon() { return ChatFormat{Kind::K2Horizon}; }
   static ChatFormat kolibri() { return ChatFormat{Kind::Kolibri}; }
   static ChatFormat bolt() { return ChatFormat{Kind::Bolt}; }
   const char* name() const;
   // The request's chat_template_kwargs reach the template beside enable_thinking.
   bool template_kwargs() const {
-    return kind == Kind::K2Horizon || kind == Kind::Kolibri ||
-           kind == Kind::Bolt;
+    return kind == Kind::Kolibri || kind == Kind::Bolt;
   }
   // The template reads every message's content as a string (spec 20e: Kolibri-1).
   bool string_content() const { return kind == Kind::Kolibri; }
@@ -70,8 +61,7 @@ struct ChatFormat {
 nlohmann::ordered_json template_messages(const ChatFormat& format, const nlohmann::ordered_json& messages);
 
 // The request's chat_template_kwargs that this format reads, checked before anything runs
-// (a bad value is the client's error, a 400): K2's tool_call_format and reasoning_effort;
-// Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool);
+// (a bad value is the client's error, a 400): Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool);
 // Bolt's enable_thinking, medium_effort, truncate_history_thinking and
 // force_nonempty_content (booleans). Throws std::invalid_argument naming the field.
 void check_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs);

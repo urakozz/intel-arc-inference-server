@@ -11,7 +11,7 @@
 
 // Spec 20c: Kolibri-1's runtime allocations as device-free arithmetic, the planner over them
 // (`--max-len auto`, spec 6 §10) and the split by bytes (`--pipeline-split auto`, spec 16b's
-// runtime::pp_balance - not a second rule) - runtime/k2/k2_sizes.h's arrangement for Kolibri: the
+// runtime::pp_balance - not a second rule) - the
 // KolibriBuffers constructor allocates exactly what these return, per device, and the plan adds the
 // same numbers up before anything is allocated. Host only (tests/runtime/kolibri_plan_test.cc).
 namespace runtime::kolibri {

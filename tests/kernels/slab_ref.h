@@ -4,8 +4,8 @@
 //                    a layout-0 int4 linear's [K][ns] bf16 slab from column n0, the columns past N zero
 //   bf16_slab()      src/kernels/prefill/slab_bf16.cl (entry kol_pf_bf16_slab): a gemv_bf16-tiled bf16 linear's
 //                    [K][ns] slab from column n0, the columns past N zero
-// Used by the Flash-Next, Kolibri-1, Bolt and K2-Horizon prefill tests. Moved out of k2_pf_ref.h and
-// kolibri_pf_ref.h unchanged.
+// Used by the Flash-Next and Kolibri-1 prefill kernel tests. Moved out of K2-Horizon's k2_pf_ref.h
+// (removed, tag archive/k2-horizon) and kolibri_pf_ref.h unchanged.
 #include <cstddef>
 #include <cstdint>
 #include <vector>

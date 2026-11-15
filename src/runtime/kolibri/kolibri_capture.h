@@ -5,10 +5,9 @@
 #include "runtime/capture.h"   // CapturedStep, StageLink - the same records
 #include "runtime/kolibri/kolibri_buffers.h"
 
-// Spec 20c: one device's Kolibri-1 decode step, captured once and replayed per token - K2's
-// arrangement (runtime/k2/k2_capture.h: a straight walk, every per-token value read from
-// runtime::Control at execution, the expert ids produced and consumed on the device) over the
-// device's layers [first, end):
+// Spec 20c: one device's Kolibri-1 decode step, captured once and replayed per token - a
+// straight walk (every per-token value read from runtime::Control at execution, the expert ids
+// produced and consumed on the device) over the device's layers [first, end):
 //
 //   device 0     kol_embed_gather, prep_res_fold SP0 (Σ resid² for layer 0's norm)
 //   every layer  kol_norm_finish (input_layernorm), q||k||v GEMV (gemv int4 S2 | gemv_bf16),

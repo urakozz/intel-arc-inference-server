@@ -5,8 +5,7 @@
                                                                       transformers 5.15, g++ / ninja)
 
 Tiny random checkpoints in each reference's real format - Ornith (Qwen3.5-MoE, int4 GPTQ, layer-
-streamed, experts on demand: tools/oracle/test_ornith_ref.py's), K2-Horizon (int4 GPTQ with MoVA:
-test_k2_ref.py's tiny config) and Kolibri-1 (bf16, sliding + full layers: test_kolibri_ref.py's) -
+streamed, experts on demand: tools/oracle/test_ornith_ref.py's) and Kolibri-1 (bf16, sliding + full layers: test_kolibri_ref.py's) -
 are loaded through oracle_generate.moe_runner exactly as the A4 run loads the real ones. Five
 ragged prompts (1..17 ids), a different new-id cap per prompt, and an EOS set picked from the
 free-running continuations so that the sequences stop at different points (by EOS at different
@@ -52,7 +51,6 @@ def _load(path: str, name: str):
 
 
 TO = _load(os.path.join(ORACLE, "test_ornith_ref.py"), "tb_test_ornith_ref")
-TK = _load(os.path.join(ORACLE, "test_k2_ref.py"), "tb_test_k2_ref")
 TL = _load(os.path.join(ORACLE, "test_kolibri_ref.py"), "tb_test_kolibri_ref")
 
 LENS = [9, 3, 17, 1, 12]
@@ -65,30 +63,6 @@ CAPS = [7, 10, 5, 8, 12]
 def ornith_snapshot(tmp: str):
     TO.make_checkpoint(tmp, seed=3)
     return "qwen3_5_moe", 512
-
-
-def k2_snapshot(tmp: str):
-    """test_k2_ref.test_gptq_checkpoint's int4 layout: every layer linear int4 g64 except the MoE
-    router; embed / head / norms bf16, v_router.bias f16."""
-    over = dict(hidden_size=128, intermediate_size=128, num_attention_heads=4, num_key_value_heads=2, head_dim=32,
-                rope_head_dim=32, moe_intermediate_size=64, mova_num_experts=8, vocab_size=256)
-    d, c, sd = TK.tiny(seed=21, **over)
-    d["quantization_config"] = {"bits": 4, "group_size": 64, "sym": True, "desc_act": False,
-                                "quant_method": "gptq", "provider": "auto-round"}
-    g = torch.Generator().manual_seed(21)
-    files = {}
-    for name, t in sd.items():
-        if not (t.dim() == 2 and name.startswith("model.layers.") and not name.endswith("mlp.gate.weight")):
-            files[name] = t.to(torch.float16) if name.endswith("v_router.bias") else t
-            continue
-        N, K = t.shape
-        q = torch.randint(0, 16, (N, K), generator=g)
-        sc = (torch.rand(K // 64, N, generator=g) * 0.05 + 0.01).to(torch.float16)
-        qw, qz, gi = TK.gptq_pack(q, sc, 64)
-        base = name[:-len(".weight")]
-        files.update({base + ".qweight": qw, base + ".scales": sc, base + ".qzeros": qz, base + ".g_idx": gi})
-    TK.write_checkpoint(tmp, d, files)
-    return "k2_horizon", c.vocab_size
 
 
 def kolibri_snapshot(tmp: str):
@@ -122,7 +96,7 @@ def bolt_snapshot(tmp: str):
     return "nemotron_h_omni", 131072
 
 
-SNAPSHOTS = {"ornith": ornith_snapshot, "k2": k2_snapshot, "kolibri": kolibri_snapshot, "qwen4exp": qwen4exp_snapshot,
+SNAPSHOTS = {"ornith": ornith_snapshot, "kolibri": kolibri_snapshot, "qwen4exp": qwen4exp_snapshot,
              "bolt": bolt_snapshot}
 
 
@@ -273,10 +247,6 @@ def test_ornith():
     check("ornith")
 
 
-def test_k2():
-    check("k2")
-
-
 def test_kolibri():
     check("kolibri")
 
@@ -378,20 +348,9 @@ def test_cli_resume():
 
 
 def test_plan_real_configs():
-    """The memory plan on the real configs (K2's vendored config.json; Ornith's text config as
-    published): the per-sequence and base terms in the expected range, auto within the cap."""
-    with open(os.path.join(ORACLE, "third_party", "k2_horizon", "config.json"), encoding="utf-8") as f:
-        k2 = json.load(f)
+    """The memory plan on a real config (Ornith's text config as published): the per-sequence and base
+    terms in the expected range, auto within the cap."""
     lens = [960, 1036, 2998, 2200, 2737, 2899, 1144, 2905, 2748, 2816]
-    for cap in (28, 60):
-        p = OG.batch_plan("k2_horizon", k2, lens, 512, cap * OG.GiB, "auto", "auto")
-        print(f"  K2 at {cap} GiB: {p['text']}")
-        assert 1 <= p["batch"] <= OG.MAX_AUTO_BATCH["k2_horizon"]
-    mm = OG.mem_model("k2_horizon", k2)
-    per = mm["per_seq"](3510)
-    assert 1.2 * OG.GiB < per < 1.5 * OG.GiB, per / OG.GiB          # 48 layers x 8 x 128 x fp32 K and V
-    assert sum(1 for x in mm["experts"] if x) == 45                    # mlp_only_layers 0-2
-    assert 1.4 * OG.GiB < max(mm["experts"]) < 1.6 * OG.GiB           # 100 x 3 x 768 x 2560 + 64 MoVA, bf16
     ornith = {"text_config": dict(num_hidden_layers=40, hidden_size=2048, vocab_size=248320, full_attention_interval=4,
                                   linear_num_key_heads=16, linear_key_head_dim=128, linear_num_value_heads=32,
                                   linear_value_head_dim=128, linear_conv_kernel_dim=4, num_experts=256,
@@ -405,8 +364,6 @@ def test_plan_real_configs():
     assert 0.1 * OG.GiB < per < 0.2 * OG.GiB, per / OG.GiB          # 63 MiB GDN state + 10 layers' bf16 KV
     assert 2.5 * OG.GiB < sum(mo["dense"]) < 3.5 * OG.GiB              # ~2.8 GB a step re-dequantises (plan 15a)
     assert abs(mo["experts"][0] - 1.61e9) < 0.01e9                     # 1.61 GB per layer (ornith_ref.py)
-    p = OG.batch_plan("k2_horizon", k2, lens[:3], 512, 28 * OG.GiB, "7")
-    assert p["batch"] == 3 and p["keep_dense"] == p["keep_experts"] == 0   # a count, capped by the scenarios
 
 
 def test_bolt():
@@ -424,7 +381,7 @@ def test_bolt():
         print(f"  SKIP: {e}")
 
 
-TESTS = [test_plan_real_configs, test_ornith, test_k2, test_kolibri, test_cli_resume, test_qwen4exp, test_bolt]
+TESTS = [test_plan_real_configs, test_ornith, test_kolibri, test_cli_resume, test_qwen4exp, test_bolt]
 
 
 def main() -> None:

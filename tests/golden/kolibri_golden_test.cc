@@ -1,6 +1,6 @@
 // kolibri_golden_test - spec 20 §5 KL2 (decode): Kolibri-1's engine against tools/oracle/kolibri_ref.py
 // (spec 20a) - each golden prompt x 32 greedy tokens - with the per-layer ROUTING DIAGNOSTIC.
-// k2_golden_test's copy (tests/golden/k2_golden_test.cc), Kolibri's semantics.
+// K2-Horizon's golden test's copy (removed with K2, tag archive/k2-horizon), Kolibri's semantics.
 //
 // **The golden files** (kolibri_ref.py `run`; tools/box_validate/kolibri_oracle.sh synth|real):
 //   <oracle dir>/<prompt>.ids                 Kolibri's tokenisation, no BOS

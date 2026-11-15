@@ -1,14 +1,13 @@
 #pragma once
 // The bf16 eager decode attention chain on the host: transformers' eager path, torch's CPU fp32 softmax
 // bit for bit. Shared by the eager references of Kolibri-1 (kolibri_ref.h), Bolt (mg_attn_ref.h),
-// Qwen3.8-Flash-Next (qwen4exp_ref.h, qwen4exp_pf_ref.h) and K2-Horizon (k2_ref.h). Moved out of
-// k2_ref.h unchanged.
+// Qwen3.8-Flash-Next (qwen4exp_ref.h, qwen4exp_pf_ref.h). Moved out of K2-Horizon's k2_ref.h (removed,
+// tag archive/k2-horizon), which first carried the chain.
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <vector>
 
 #include "common/bf16.h"
 #include "kernels/moe_ref.h"   // f32 / rf
@@ -18,8 +17,8 @@ namespace eager_attn_ref {
 using moe_ref::f32;
 using moe_ref::rf;
 
-// --- eager decode attention (the host chain; K2's own kernel went in the zero-config cleanup) --
-// transformers' bf16 eager path as tools/oracle/k2_ref.py attention() runs it, one q head over
+// --- eager decode attention (the host chain) ---------------------------------------------------
+// transformers' bf16 eager path, one q head over
 // keys 0..len-1, every rounding point at the reference's place:
 //
 //   s_p = rne(f32(rne(Σ_d q_d·k_pd)) · scale)    the bf16 GEMM's one rounding, then `* scaling`
@@ -27,10 +26,10 @@ using moe_ref::rf;
 //   p_p = rne(e_p · (1 / Σ e))  e_p = exp(s_p - max)   torch's fp32 softmax on the CPU
 //         (SoftMaxKernel.cpp _vec_softmax_lastdim at AVX2: Sleef_expf8_u10, the 8-lane sum,
 //         one reciprocal), then .to(bf16)
-//   o_d = Σ_p p_p·v_pd                           the bf16 GEMM: fp32 sum, rounded by attn_gate()
+//   o_d = Σ_p p_p·v_pd                           the bf16 GEMM: fp32 sum, rounded once
 //
-// What is bitwise against torch, and why (tests/kernels/k2_attn_eager_ref_test.cc measures each
-// against tools/oracle/k2_attn_eager_fixture.py's dump):
+// What is bitwise against torch, and why (measured by K2-Horizon's k2_attn_eager_ref_test against a
+// torch dump; the test went with K2, tag archive/k2-horizon):
 //   * the softmax: exact. exp_torch() is Sleef's expf u10 step for step (fma as the AVX2 build
 //     has it), the sum is reduce_all's order (8 lane accumulators, then the permute tree), the
 //     reciprocal and the multiply are torch's. Probed on 22,760 probabilities: 0 fp32
@@ -97,48 +96,7 @@ inline void eager_softmax(const float* s, uint32_t len, float* p) {
   for (uint32_t i = 0; i < len; ++i) p[i] = rf(p[i] * inv);
 }
 
-// Σ_p p_p·v_pd over keys [0, len) of kv head j (a [max][kvh][hd] cache), in `blk`-key blocks:
-// each block an fma chain ascending from 0, the blocks added ascending from 0 (k2_attn_eager_pv
-// then k2_attn_eager_reduce). blk >= len is one chain.
-inline float eager_pv(const float* p, const uint16_t* kv_v, uint32_t len, uint32_t j, uint32_t kvh,
-                      uint32_t hd, uint32_t d, uint32_t blk) {
-  float o = 0.0f;
-  for (uint32_t b0 = 0; b0 < len; b0 += blk) {
-    float acc = 0.0f;
-    for (uint32_t pp = b0; pp < std::min(len, b0 + blk); ++pp)
-      acc = std::fma(p[pp], f32(kv_v[(size_t(pp) * kvh + j) * hd + d]), acc);
-    o += acc;
-  }
-  return o;
-}
-
-// One q head over keys 0..len-1: s and p [len] (bf16 values), o [hd] the fp32 sums attn_gate()
-// rounds. `blk`: the device's block (eager_block); len for one chain.
-struct EagerHead {
-  std::vector<float> s, p, o;
-};
-inline EagerHead attention_eager(const float* q, const uint16_t* kv_k, const uint16_t* kv_v,
-                                 uint32_t len, uint32_t j, uint32_t kvh, uint32_t hd, uint32_t blk) {
-  EagerHead r;
-  r.s.resize(len);
-  r.p.resize(len);
-  r.o.resize(hd);
-  for (uint32_t pp = 0; pp < len; ++pp) r.s[pp] = eager_score(q, kv_k + (size_t(pp) * kvh + j) * hd, hd);
-  eager_softmax(r.s.data(), len, r.p.data());
-  for (uint32_t d = 0; d < hd; ++d) r.o[d] = eager_pv(r.p.data(), kv_v, len, j, kvh, hd, d, blk);
-  return r;
-}
-
-// The device's key block for a step at `pos` with `n_act` rows: v2's ppw over the longest row
-// (k2_attn_eager.cl eager_ppw), so no row has more than tgt blocks.
-inline uint32_t eager_block(uint32_t pos, uint32_t n_act, uint32_t tgt) {
-  const uint32_t len = pos + n_act;
-  uint32_t p = (len + tgt - 1) / tgt;
-  p = (p + 63u) & ~63u;
-  return std::max(64u, p);
-}
-
-// tools/oracle/k2_attn_eager_fixture.py val(): element i of tensor t (0 q, 1 k, 2 v).
+// A 32-bit integer hash (the families' synthetic test inputs).
 inline uint32_t lowbias32(uint32_t x) {
   x ^= x >> 16;
   x *= 0x7FEB352Du;
@@ -146,12 +104,6 @@ inline uint32_t lowbias32(uint32_t x) {
   x *= 0x846CA68Bu;
   x ^= x >> 16;
   return x;
-}
-inline float eager_fixture_val(bool coarse, uint32_t t, uint32_t i, uint32_t seed) {
-  const uint32_t h = lowbias32(lowbias32(seed * 3 + t) ^ i);
-  if (coarse) return float(int(h % 17) - 8) * (t == 0 ? 0.5f : 0.125f);
-  const float f = float(h >> 8) * 0x1p-23f - 1.0f;   // exact
-  return rf(f * (t == 0 ? 4.0f : 1.0f));
 }
 
 }  // namespace eager_attn_ref

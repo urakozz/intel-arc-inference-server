@@ -17,22 +17,19 @@ The repository is read from this script's tree (/ws in the reference
 container); the prompts call it /work. Run inside the reference container
 (tools/oracle/run_in_container.sh) so the tokenizer is the pinned one.
 
---from with another model's checkpoint (Ornith, K2-Horizon) renders the SAME
+--from with another model's checkpoint (Ornith, Bolt) renders the SAME
 conversations with that checkpoint's template and tokenizer. `--kwargs JSON` passes
 template variables (chat_template_kwargs) to every render and records them in each
 <name>.json as "chat_template_kwargs" (serve_client.py sends them with the request).
-K2-Horizon (config.json model_type k2_horizon, spec 18d) defaults to
-{"tool_call_format": "xml", "reasoning_effort": "low"} - its template always opens the
-reply with reasoning, and `low` (<ifm|think_faster>) keeps it short inside the token
-budget - and renders from KEY-SORTED messages and tools: b70-serve holds a request in
-nlohmann::json, whose objects are sorted, so the server's render of the same request is
-these ids (tools/tokenizer/dump_k2.py's rule).
+Models whose server render is of KEY-SORTED messages and tools (b70-serve holds a request in
+nlohmann::json, whose objects are sorted) render from key-sorted objects, so the server's
+render of the same request is these ids.
 
 Nemotron 3.5 Bolt (config.json model_type nemotron_h_omni, spec 25a Task 6) renders --from the same 36 conversations
-with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like K2 / Kolibri
+with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like Kolibri
 (b70-serve's nlohmann::json), with enable_thinking TRUE (the template's default and the agentic mode: the prompt ends
 in `<|im_start|>assistant\n<think>\n`, every reply reasons first) and the default kwargs {"medium_effort": true}
-(K2's precedent for a reasoning-first model: the effort that keeps the reasoning inside the 2048-id budget;
+(the effort that keeps a reasoning-first model's reasoning inside the 2048-id budget;
 Decision 13 maps reasoning_effort low / medium to it); each <name>.json records "enable_thinking": true and the kwargs.
 The history calls come out as Qwen3-Coder XML through the template. The plan's spelling
     make_set.py --from <set dir> --model bolt --tokenizer <Bolt snapshot> <out dir> [--kwargs JSON]
@@ -41,7 +38,7 @@ is the same call; tools/toolcall/a4_ref.sh bolt set copies the committed tests/g
 --lang de (spec 20e, KL4: Kolibri-1's German A4-style set): the same six templates over the same
 six files with the system prompt and the user turns in German (the DE table below); the tool
 results stay what the tools print. Kolibri-1 (model_type kolibri1) renders from KEY-SORTED
-messages and tools as K2 does (b70-serve's nlohmann::json), with enable_thinking=False (its
+messages and tools (b70-serve's nlohmann::json), with enable_thinking=False (its
 template's prompt then ends in "<think>\n\n</think>\n\n": the reply is the call). Each
 <name>.json records "lang".
 """
@@ -60,9 +57,7 @@ MIN_IDS, MAX_IDS = 800, 3000
 # Spec 25a: Bolt's template writes every tool as an XML block with the Qwen3-Coder calling instructions: the same 36
 # conversations render to 1085..3098 ids (72,519 in all), so its ceiling is higher; the conversations are unchanged.
 MAX_IDS_FROM = {"nemotron_h_omni": 4096}
-# K2-Horizon's template (xml calls, reasoning_effort low) is terser: the shortest scenario (t1_define-linear_l0) renders
-# to 718 ids, under 800 (r25.a4_ref's first run, 2026-11-01); the conversations are unchanged.
-MIN_IDS_FROM = {"k2_horizon": 600}
+MIN_IDS_FROM: dict = {}
 
 FILES = [
     "src/runtime/prefill/linear_l0.cc",
@@ -344,9 +339,8 @@ def load_tokenizer(snap: str):
         else AutoTokenizer.from_pretrained(snap)
 
 
-K2_KWARGS = {"tool_call_format": "xml", "reasoning_effort": "low"}
 # Models whose server render is of key-sorted objects (their template tests are recorded that way).
-SORTED_MODELS = ("k2_horizon", "kolibri1", "nemotron_h_omni")
+SORTED_MODELS = ("kolibri1", "nemotron_h_omni")
 # Spec 25a: Nemotron 3.5 Bolt - reasoning on (the template's default), medium effort (module docstring).
 BOLT_TYPES = ("nemotron_h_omni",)
 BOLT_KWARGS = {"medium_effort": True}
@@ -372,13 +366,12 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
     """--from: the SAME conversations as an existing set (its <name>.json: messages and
     tools as rendered then), re-rendered with another checkpoint's template and tokenizer.
     Rescanning the repository would change the conversations with the tree. `kwargs`: the
-    template variables (K2-Horizon's default K2_KWARGS); `tok` / `mtype` for the tests."""
+    template variables (Bolt's default BOLT_KWARGS); `tok` / `mtype` for the tests."""
     mtype = model_type(snap) if mtype is None else mtype
-    k2 = mtype == "k2_horizon"
     bolt = mtype in BOLT_TYPES
     sort = mtype in SORTED_MODELS
     if kwargs is None:
-        kwargs = dict(K2_KWARGS) if k2 else dict(BOLT_KWARGS) if bolt else {}
+        kwargs = dict(BOLT_KWARGS) if bolt else {}
     tok = load_tokenizer(snap) if tok is None else tok
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
@@ -388,7 +381,7 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
         with open(os.path.join(src, f"{name}.json"), encoding="utf-8") as f:
             sc = json.load(f)
         msgs, tools = sc["messages"], sc["tools"]
-        if sort:   # the server's (nlohmann::json) key order, dump_k2.py's rule
+        if sort:   # the server's (nlohmann::json) key order
             msgs, tools = json.loads(json.dumps([msgs, tools], sort_keys=True))
         if bolt:   # Bolt's agentic mode: reasoning on (the set's scenarios say False: Qwen3.8's render)
             sc = dict(sc, enable_thinking=True)

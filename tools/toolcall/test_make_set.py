@@ -70,24 +70,25 @@ def keys_sorted(x):
     return True
 
 
-def test_k2_defaults_sorted_and_recorded():
-    tok, out = run("k2_horizon")
+def test_sorted_and_recorded():
+    kw = {"enable_thinking_extra": 1}
+    tok, out = run("kolibri1", dict(kw))
     assert len(tok.calls) == 2
     for c in tok.calls:
-        assert c["kwargs"] == {"tool_call_format": "xml", "reasoning_effort": "low"}
+        assert c["kwargs"] == kw
         assert keys_sorted(c["msgs"]) and keys_sorted(c["tools"])
     for n in ("t1_a", "t2_b"):
         sc = json.load(open(os.path.join(out, f"{n}.json"), encoding="utf-8"))
-        assert sc["chat_template_kwargs"] == {"tool_call_format": "xml", "reasoning_effort": "low"}
+        assert sc["chat_template_kwargs"] == kw
     man = json.load(open(os.path.join(out, "manifest.json"), encoding="utf-8"))
     for e in man:
         raw = open(os.path.join(out, f"{e['name']}.ids"), "rb").read()
         assert e["ids"] == 900 and e["sha256"] == hashlib.sha256(raw).hexdigest()
 
 
-def test_k2_explicit_kwargs_win():
-    kw = {"tool_call_format": "json", "reasoning_effort": "medium"}
-    tok, out = run("k2_horizon", dict(kw))
+def test_explicit_kwargs_win():
+    kw = {"medium_effort": False}
+    tok, out = run("nemotron_h_omni", dict(kw))
     assert all(c["kwargs"] == kw for c in tok.calls)
     assert json.load(open(os.path.join(out, "t1_a.json"), encoding="utf-8"))["chat_template_kwargs"] == kw
 

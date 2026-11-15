@@ -5,7 +5,7 @@
 // --spec-cost, --spec-min-match, --spec-history, --draft-format): the engine uses the measured defaults.
 //
 //   auto           MTP with an adaptive K (spec 8 §10) on the Qwen family (Qwen3.8, Ornith - an MTP head and its
-//                  cost table; operator 2026-11-14: no extra VRAM by default, DFlash only when asked); none elsewhere (K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt have no head;
+//                  cost table; operator 2026-11-14: no extra VRAM by default, DFlash only when asked); none elsewhere (Kolibri-1, Nemotron 3.5 Bolt have no head;
 //                  Qwen3.8-Flash-Next's MTP is not validated; Bolt's drafter becomes its auto only on spec 26 §7's
 //                  D5 rule, box row 65). b70-serve's default; b70-decode's is off (its auto is the MTP rule).
 //   off            no proposer.
@@ -54,7 +54,7 @@ struct Spec {
   bool adaptive = false;   // K per iteration from the request's acceptance (AdaptiveK); else K = max_k
 };
 
-// `model` names the model in a refusal ("K2-Horizon", "Kolibri-1", ...).
+// `model` names the model in a refusal ("Kolibri-1", ...).
 inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::string& model, bool have_max,
                          uint32_t max, bool have_draft_model) {
   std::string v = arg;

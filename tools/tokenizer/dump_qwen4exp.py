@@ -111,7 +111,7 @@ for b in range(0, len(corpus), step):
 
 def render(case, tokenize):
     # The engine holds a request as nlohmann::json, whose objects are KEY-SORTED: render HF's side from
-    # the same sorted objects (dump_k2.py's rule), or the comparison grades key order.
+    # the same sorted objects, or the comparison grades key order.
     msgs, tools = json.loads(json.dumps([case["messages"], case["tools"]], sort_keys=True))
     return tok.apply_chat_template(msgs, tools=tools, tokenize=tokenize, add_generation_prompt=True,
                                    enable_thinking=case["think"])

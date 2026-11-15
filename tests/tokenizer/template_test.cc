@@ -52,11 +52,11 @@ void diff_report(const char* name, const std::string& got, const std::string& wa
 // Spec 15e: an optional fifth argument names the reference files' prefix (`ornith` ->
 // <dir>/ornith_template_<name>.txt). A snapshot without its two template files is a
 // SKIP (77), not a failure - the test is about the renderer, not about the cache.
-// Spec 18d: the cases file may also be an object (k2_template_cases.json, prefix `k2`):
+// Spec 18d: the cases file may also be an object (e.g. kolibri_template_cases.json):
 // "bos_token" / "eos_token" the snapshot's tokenizer_config must name, "tools" a table of tool
 // objects by name, and "cases" whose "tools" lists names from it and whose "kwargs" are the
-// request's chat_template_kwargs (tool_call_format, reasoning_effort, ...); "think" defaults to
-// true (tools/tokenizer/dump_k2.py writes the references).
+// request's chat_template_kwargs (reasoning_effort, ...); "think" defaults to
+// true (the families' tools/tokenizer/dump_*.py write the references).
 int run_cases(const std::string& dir, const std::string& snap, const std::string& cases_file,
               const std::string& prefix) {
   if (!std::ifstream(snap + "/tokenizer_config.json").good()) {

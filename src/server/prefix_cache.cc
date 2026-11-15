@@ -194,7 +194,7 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   }
   const size_t kv = end > base ? kv_bytes_(end - base) : 0;
   const size_t bytes = state_bytes_ + kv;
-  // Spec 18d: an engine without recurrent state (K2-Horizon: state_bytes() == 0) has an
+  // Spec 18d: an engine without recurrent state (state_bytes() == 0) has an
   // empty snapshot at a block end - a restore point that costs nothing. It gets no
   // allocation (a HostAlloc need not hand out zero bytes) and a non-null marker, so the
   // slot is still filled (save_state of zero bytes) and plan() still hands it to

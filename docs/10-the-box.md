@@ -58,9 +58,9 @@ host memory filled RAM and swap; the kernel killed the reference, and the next j
 beside a GPU job's weight reads took the NVMe off the bus.
 
 **One CPU model job at a time.** Every CPU reference script (the f32 judges `tools/box_validate/f32_oracle.sh`
-and `f32_refs.sh`, the K2 / Kolibri / Bolt oracles) holds `/tmp/b70-cpu-model.lock` for its whole run and first
+and `f32_refs.sh`, the Kolibri / Bolt oracles) holds `/tmp/b70-cpu-model.lock` for its whole run and first
 checks MemAvailable (the kernel's estimate of RAM free for a new job) against its own floor (`F32_REF_MIN_GB`,
-`K2_REF_MIN_GB`, `KOL_REF_MIN_GB`, ...): below it the script exits 77, which a stage records as SKIP, not FAIL. They
+`KOL_REF_MIN_GB`, ...): below it the script exits 77, which a stage records as SKIP, not FAIL. They
 run beside non-timed GPU work with `ORACLE_THREADS=22` (half the cores, so the GPU tests keep their host threads),
 never during a build (a compile slows a CPU reference by ~28 %, "Why an idle box matters") and never during a timed
 row. A finished reference lands in the data tree (`~/b70-inference-server/oracle-out-*`);

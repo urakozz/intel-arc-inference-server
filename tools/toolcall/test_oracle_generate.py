@@ -1,4 +1,4 @@
-"""oracle_generate.py's MoE greedy loop (Ornith / K2-Horizon, spec 15e / 18d) without a model.
+"""oracle_generate.py's MoE greedy loop (Ornith, spec 15e) without a model.
 
     python3 tools/toolcall/test_oracle_generate.py     (pytest also collects it, where installed)
 

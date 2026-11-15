@@ -86,8 +86,8 @@ def load_set(spec, root):
             if sc.get("tools"):
                 body["tools"] = sc["tools"]
             body["chat_template_kwargs"] = {"enable_thinking": bool(sc.get("enable_thinking", False))}
-            # make_set.py --from records a model's template variables (K2-Horizon's
-            # tool_call_format / reasoning_effort, spec 18d): the set's ids were rendered with them
+            # make_set.py --from records a model's template variables (Bolt's, Kolibri-1's): the set's
+            # ids were rendered with them
             body["chat_template_kwargs"].update(sc.get("chat_template_kwargs", {}))
             out.append((tag, n, "/v1/chat/completions", body, read_ids(os.path.join(d, n + ".ids"))))
         return out

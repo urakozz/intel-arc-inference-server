@@ -46,7 +46,6 @@ The model is chosen from the checkpoint's `config.json`.
 |---|---|
 | Ornith 1.5 | a mixture of experts (MoE): a router picks a few expert networks for each token |
 | Qwen3.8-Flash-Next | a larger MoE; today it loads its first layers only, until the whole model is split over two cards ([open-work.md](open-work.md), item 4) |
-| K2-Horizon | MoE with routed value-expert attention; parked |
 | Kolibri-1 | MoE with sliding-window attention layers; parked |
 | Nemotron 3.5 Bolt | Mamba-2 state-space blocks, attention and a latent MoE; parked until Flash-Next is done |
 

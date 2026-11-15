@@ -30,13 +30,6 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
 | `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
-| `eagle3_ref.py` | The EAGLE3 K2 P0: the CPU reference of the EAGLE-3 drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (speculators 0.8.0 `Eagle3DraftModel`; the semantics pinned from source in its docstring and `docs/probes/probe-eagle3-k2-2026-10-08.md`): step 0 over the context, the greedy chain, the `d2t` check, the int8 / int4 g64 RTN arms, the derived bytes; `facts`. `test_eagle3_ref.py` holds it to an independent build from transformers' Llama modules in speculators' TTT wiring. "The EAGLE3 K2 P0" below. |
-| `k2_taps.py` | The EAGLE3 K2 P0: `k2_ref.py` over [prompt + K2's recorded continuation], one forward per source: the aux taps (the INPUT of K2 layers 2 / 24 / 45), the pre-norm final hidden, K2's greedy, top-16, and the MoE / MoVA routes. `test_k2_taps.py`: the tap points bitwise against the vendored model with the vLLM plugin's capture emulated. |
-| `eagle3_accept.py` | The EAGLE3 K2 P0: teacher-forced acceptance (K = 1..5, arms bf16 / int8 / int8h / int4h), spec 19e's prompt lookup on the same anchors, and the summary with the derived speed-up. `test_eagle3_accept.py`. |
-| `eagle3_cost.py` | The EAGLE3 K2 P0: K2's verify bytes at M = 1..6 rows from the recorded routes (distinct experts per layer, model::K2Desc's blocks), the drafter's bytes per draft step. `test_eagle3_cost.py`. |
-| `eagle3_k2_p0.sh` | The four above on the Mac: the A4 reference as a prerequisite, then check / facts / golden / sources / dump / accept / lookup / cost / summary, resumable, 54 GB container, one oracle at a time; `DRY_RUN=1` plans only (no container). |
-| `third_party/eagle3_k2/` | The drafter's `config.json` (Apache-2.0), unmodified: what the tests parse. |
-| `k2_ref.py` | Spec 18a: the K2-Horizon CPU reference - a plain-torch port of the checkpoint's `modeling_k2_horizon.py`, layer at a time, bf16 or int4 GPTQ checkpoints by name; `run` (golden file + MoE / MoVA routing dumps), `hfcheck` (against the vendored HF model, layer-streamed), `facts`. `test_k2_ref.py` checks it on tiny random weights. "The K2-Horizon reference" below. |
 | `ornith_ref.py` | Spec 15a: Ornith 1.5 35B-A3B from its **int4** checkpoint - transformers' `Qwen3_5MoeForCausalLM`, layer-streamed, the routed experts dequantised on demand; `run` (golden file + every layer's router / shared-gate logits and routes, and with `--mtp-out` the MoE MTP head's M1 reference), `facts` (the checkpoint facts spec 15 §13 rests on). `test_ornith_ref.py` checks it on tiny random weights; `ornith_golden.sh` is the Mac run. "The Ornith reference" below. |
 | `kolibri_ref.py` | Spec 20a: the Kolibri-1 reference - layer at a time, bf16 or int4 GPTQ by name (sandwich norms, RoPE sliding / NoPE full layers, window 513 incl. the query, fp32 router on logit + expert_bias with sigmoid weights, ungated shared expert, fp32 head); `run`, `ppl`, `hfcheck`, `facts`, layer-major `run_batch` (the quantisation script's coverage and eval). `test_kolibri_ref.py` (KL0, 21 tests): the transformers port == it bitwise. Facts: `docs/probes/probe-kolibri-2026-10-05.md`. |
 | `qwen4exp_ref.py` | Spec 21a: the Qwen3.8-Flash-Next (`qwen4_exp`) CPU reference - transformers **5.19.0**'s own `Qwen4ExpForCausalLM` (refused on another version), layer-streamed, the QSA indexer's block keys cached (bitwise transformers' per-query recomputation), the PLE table by mmap (bf16 shards or 21b's int8 file), routed experts lazy in every form (fused bf16, int4 g128 / g64, per-expert); `run` (golden layout), `ppl`, `hfcheck`, `trace` (spec 22's routing traces), `facts`; `expected_names`, `PleTable`, the restated ops 21b / 21c import. `test_qwen4exp_ref.py` (F1, bitwise on the tiny model). "The Qwen3.8-Flash-Next reference" below. |
@@ -55,13 +48,9 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `kolibri_fixture.py` | Spec 20c Task 1: `kolibri_ref.py`'s own functions (rms_norm, q/k norm + RoPE, route, the combine, eager attention) on hash inputs at the real widths, written as `tests/kernels/kolibri_fixture.h` for `kolibri_ref_test` / `kolibri1_rope_test`; no checkpoint, seconds - the docker line is in its docstring. |
 | `kolibri_chat_ids.py` | Spec 20c Task 1: a chat-formatted golden prompt's ids through the checkpoint's own template (`apply_chat_template(messages, tools, add_generation_prompt, reasoning_effort)`) - `de_chat`'s, for `tools/box_validate/kolibri_oracle.sh real`. |
 | `../quantize/kolibri/make_synth.py` | Spec 20c Task 1: a synthetic Kolibri-1 checkpoint at the REAL widths, N layers, int4 or bf16 attention, RTN-packed into AutoRound's `auto_round:auto_gptq` export form (accepted by `check.py`) - what KL2 / KL3 run on before 20b's checkpoint exists. `tools/box_validate/kolibri_oracle.sh synth` builds both arms and their golden sets (prose, de_prose) on the box CPU; `real` the real checkpoint's (prose, code, de_prose, de_chat). |
-| `k2_attn_eager_fixture.py` | Spec 18 §10.1: `k2_ref.py attention()` on hash inputs, written as `tests/kernels/k2_attn_eager_fixture.h` (scores, probabilities, output) for `k2_attn_eager_ref_test`; no checkpoint, seconds - the docker line is in its docstring. |
-| `third_party/k2_horizon/` | `modeling_k2_horizon.py`, `configuration_k2_horizon.py`, `config.json` from `IFM/K2-Horizon-MoVA-36B-A4B` @ `cca48b66`, unmodified (Apache-2.0, headers kept): the semantics source of truth, imported by the tests and `hfcheck` without network. |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probes/probe-int8-kv-2026-09-28.md`. |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probes/probe-int8-kv-2026-09-28.md`. Takes the bf16 base checkpoint too (no `quantization_config`) and `--cont-ids` (teacher-forced ids from a file). |
 | `kv8_qwen38_repeat.sh` | Spec 12 §8 "Before 12b" on the Mac: the 12a probe on `Qwen/Qwen3.8-27B` (bf16) in a 28 GB container, golden rows, A4, long32k[:4096] + replay, resumable; how to run and what decides the tolerances: plan 12b "Task A". |
-| `k2_kv8_probe.py` | Spec 18e Task 1 (Review Focus 1): the int8 KV probe on K2-Horizon over `k2_ref.py` - variants bf16 (the reference), `rotkv` (the engine's head_dim-128 scheme bit for bit: `src/common/kv8.h` hd128), per token, fp32 attention, each with its own residual stream and KV cache; `run` (decision-row logits metrics + the routing diagnostic + q/K/V capture), `replay` (fp64, real and tiled depths), `summary`. `test_k2_kv8_probe.py` checks it on tiny weights (no checkpoint, seconds). |
-| `kv8_k2_repeat.sh` | Spec 18e Task 1 on the Mac: `k2_kv8_probe.py` on the int4 K2 checkpoint (`hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ`, 22.2 GB) in a 28 GB container - check, K2 tokenisation (BOS 0), golden rows (18a's tokens when `oracle-out-k2/` is here, else 32 greedy steps), long[:4096] + capture, replay to 64k; resumable, `STEPS=` subsets. |
 | `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md`, "The third implementation"). |
 
 Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English, **42 ids**),
@@ -464,128 +453,6 @@ docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 to
 docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_accept.py
 ```
 
-### The EAGLE3 K2 P0 (2026-10-08)
-
-Is EAGLE-3 worth building for K2-Horizon? `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (one
-Llama layer fed with K2's hidden states at the INPUT of layers 2 / 24 / 45, a 32k draft head
-mapped back by `d2t`) measured teacher-forced on K2's own greedy text, its verify cost derived
-from the routes, against the prompt lookup K2 already has. Semantics, citations, the derived
-prior and the results: `docs/probes/probe-eagle3-k2-2026-10-08.md`.
-
-```bash
-# from the repo (or worktree) root; detached, resumable, log in oracle-out-eagle3-k2/p0.log
-DRY_RUN=1 tools/oracle/eagle3_k2_p0.sh                    # the plan + estimates, no container, seconds
-nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &     # 1st: starts the A4 reference, exits 4
-tools/toolcall/a4_ref.sh k2 status                        # hours, until DONE
-nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &     # 2nd: the P0 itself (54 GB container)
-A4=0 nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &   # or: golden prompts only, ~1 h
-```
-
-- **Prerequisites:** `uvx --from huggingface_hub hf download Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3`
-  (1.67 GB) and `... urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ` (22.2 GB); the
-  driver checks both are complete (no `.incomplete` blob, every shard) and never downloads.
-  The `a4` step runs `tools/toolcall/a4_ref.sh k2 set` + `ref` (`oracle-out-k2-a4`, its own
-  container `a4-ref-k2` capped at `A4_MEM` (MEM, 54g), `BATCH=auto RESIDENT=auto`: "The A4
-  reference, batched" below) and stops until `oracle-out-k2-a4/DONE`; `A4_PARTIAL=1` goes on
-  with the scenarios already done.
-- **`k2_taps.py`** writes `oracle-out-eagle3-k2/dumps/<corpus>__<label>.k2taps.safetensors`:
-  `aux.{2,24,45}` (= k2_ref's `resid.L{1,23,44}`) from `n_prompt - 2049` (the drafter's
-  window), and from `n_prompt - 1`: the pre-norm final hidden, K2's greedy next id (the
-  argmax of the logits as the A4 reference computes them), `greedy_flatnorm` (the same through
-  a ONE-group final norm: speculators' `verifier_norm`, a training-target diagnostic), top-16,
-  logsumexp, the MoE (8) / MoVA (4) expert ids per sparse layer. fp32 GEMMs with one bf16
-  rounding by default (`--matmul bf16`: bitwise k2_ref, ~6x slower here).
-- **`eagle3_accept.py run`** builds the drafter's context with step 0 over every row (the
-  target's taps, as vLLM rebuilds it each round), drafts a chain of 5 at every anchor of the
-  continuation and scores K = 1..5 with dflash_accept.py's `accept_rows` (censored where the
-  recorded text leaves K2's greedy). `lookup` replays spec 19e's matcher on the same anchors.
-  `eagle3_cost.py run` turns the routes into bytes per verify of M rows; `summary` writes
-  `oracle-out-eagle3-k2/summary.md`: E_K, the per-position acceptance a_j (the model card's
-  0.44 / 0.17 metric), alpha_j, and the DERIVED S_K = E_K / (V(K + 1) + D(K)) at `DEPTH` (4096)
-  and at 0 / 4k / 32k.
-- **Cost (ESTIMATED by `DRY_RUN`, assumed rates):** the A4 reference ~1-1.5 days sequential, ~0.6-1
-  day batched + resident ("The A4 reference, batched" below); golden ~15
-  min a prompt at 128 ids; the dump ~1.6 h (39 sources, ~87k tokens at the 512-id cap), peak
-  RSS ~12 GiB, dumps ~1.3 GB on disk; acceptance ~5-10 min per arm (the real drafter's smoke
-  rates on 2 CPUs: 40-58 anchors/s), ~3-4 GiB; lookup / cost seconds.
-- **Measured before the run** (the drafter's files; `docs/probes/probe-eagle3-k2-2026-10-08.md`): the
-  32k draft vocabulary holds none of K2's tool-call markers (250043 / 44, 250054-250061) nor
-  `<ifm|think_fast>` / `<ifm|think_faster>` - on tool-call text a marker is never drafted. One oracle at a time: a model step refuses while another `agnes-ref-img` container
-  runs (`FORCE=1` overrides; it never stops one).
-
-Tests (tiny models; ~10 min for the five on 2 CPUs, measured 2026-10-08 - eagle3_ref 2 min,
-k2_taps 1-2, eagle3_accept 2, eagle3_cost 0.3, dflash_accept 3; the driver's `check` step runs
-them and test_dflash_accept.py):
-
-```bash
-for t in test_eagle3_ref test_k2_taps test_eagle3_accept test_eagle3_cost; do
-  docker run --rm --cpus 2 --memory 8g -v "$PWD":/ws -w /ws -e HF_HOME=/tmp/hf \
-    -e TORCH_EXTENSIONS_DIR=/tmp/torch_ext agnes-ref-img:latest python3 tools/oracle/$t.py || break
-done
-```
-
-### The K2-Horizon reference (spec 18a, 2026-10-05)
-
-`k2_ref.py` ports `modeling_k2_horizon.py` (vendored in `third_party/k2_horizon/`) to plain torch,
-one decoder layer at a time: stream.py's `_Prefetch` loads the next layer's attention, router,
-norm and dense / shared tensors on a worker thread, and the MoE / MoVA experts are read on first
-use and dropped with the layer - a decode step reads only the 8 + 4 experts it routes to. Mode
-`bf16` (default) rounds exactly where the HF model in bf16 rounds and uses torch's own bf16 GEMMs:
-on the same torch it is **bit-identical** to the vendored model (eager attention), prompt and
-cached decode. Mode `f32` never rounds. Ties at the top-k cut go to the lower expert id (HF's
-`torch.topk` leaves them unspecified). Semantics, rounding points, the HF-vs-vLLM differences and
-the checkpoint facts: `docs/probes/probe-k2-2026-10-05.md`.
-
-Output (`run`): `dump.py`'s layout - `resid.L{i}` / `mixer.L{i}` / `mlp.L{i}` bf16 [T, 2560],
-`logits` f32 [T + gen, V], `tokens` i32 [gen] - plus plan 8d's routing records for every sparse
-layer and every forward (prompt rows, then one row per generated step): `route.moe.ids.L{i}` i32
-[T + gen, 8] and `route.mova.ids.L{i}` [T + gen, 4] (ascending id), `route.*.w.L{i}` bf16 (the
-multiplier each id gets), `route.*.gap.L{i}` f32 [T + gen] (selection score of the k-th minus the
-(k+1)-th: 0 = a tie at the cut), and `rope.cos` / `rope.sin` bf16 [T + gen, 128].
-
-The tests (tiny random weights; 18 tests, ~45 s of which ~30 s build stream.py's C++ dequant; `test_real_index` SKIPs unless
-`K2_INDEX_BF16` / `K2_INDEX_INT4` name directories holding a real `config.json` +
-`model.safetensors.index.json`):
-
-```bash
-# from the repo (or worktree) root on the Mac
-docker run --rm --memory 28g --memory-swap 28g -v "$PWD":/ws -w /ws \
-  -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
-  agnes-ref-img:latest python3 tools/oracle/test_k2_ref.py
-```
-
-**The real run (not yet done).** `run` needs torch + safetensors only (`hfcheck` also needs
-transformers >= 5.13 and huggingface_hub with `dataclasses.strict`, as in `agnes-ref-img`). Memory:
-embed + head 2.6 GB resident, one bf16 sparse layer 1.6 GB (two while prefetching), the experts a
-prompt touches; ~6-8 GiB RSS (estimated) plus the page cache over the shards. Which checkpoint:
-the **int4** one is what the engine runs (golden sets it can match token for token; 22.2 GB, fits
-the Mac's 28 GB container too); the **bf16** one (74.9 GB, the box) is the quantisation-damage
-reference. On the box, from the tree root, one prompt at a time, detached:
-
-```bash
-M=models--IFM--K2-Horizon-MoVA-36B-A4B          # or models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
-mkdir -p oracle-out-k2 && free -g               # >= 70 GB available for the bf16 page cache
-for p in prose code cjk; do                     # K2 prompts start with BOS 0 (docs/probes/probe-k2-2026-10-05.md)
-  ORACLE_MODEL=$M tools/oracle/run_in_container.sh \
-    "python3 tools/oracle/tokenize.py \"\$SNAP\" encode --bos tests/golden/prompts/$p.txt > /ws/oracle-out-k2/$p.ids"
-done
-ORACLE_MODEL=$M setsid nohup tools/oracle/run_in_container.sh \
-  'for p in prose code cjk; do python3 tools/oracle/k2_ref.py run "$SNAP" --prompt /ws/oracle-out-k2/$p.ids \
-     --out /ws/oracle-out-k2/$p.golden.safetensors --gen 32 > /ws/oracle-out-k2/$p.log 2>&1; done;
-   python3 tools/oracle/k2_ref.py hfcheck "$SNAP" --prompt /ws/oracle-out-k2/prose.ids \
-     --against /ws/oracle-out-k2/prose.golden.safetensors > /ws/oracle-out-k2/hfcheck.log 2>&1' \
-  > ~/b70/logs/k2-ref.log 2>&1 < /dev/null &
-```
-
-Time (estimated from the 4-layer timing at real shapes on the Mac and the bytes read): bf16 - a
-decode step reads 10.6 GB of weights (8 + 1 + 4 experts per layer, all attention, the head),
-~4-6 s warm; the prompt touches ~55 of 100 experts per layer, ~1-2 min, plus the first cold read
-of the 75 GB shards; **~5 min per prompt warm, ~15-20 min for the three**. int4 - 3.8 GB read
-per step but dequantised on the fly (stream.py's C++ `dequant_t`, 1-3 GB/s of bf16 output on the
-Mac), ~7 s per step, ~5-6 min per prompt. `hfcheck` runs the vendored model layer-streamed with
-every expert of each layer resident (prompt forward only). The `run` log prints the gap
-distribution (`#==0` = ties at the cut).
-
 ### The Ornith reference (spec 15a, from the int4 checkpoint, 2026-10-06)
 
 `ornith_ref.py` runs transformers 5.15's own `Qwen3_5MoeForCausalLM` (eager attention, the
@@ -822,18 +689,18 @@ short_code,4k,32k,agentic}.ids` (`bolt_prompts.py`; no BOS).
 `tools/toolcall/oracle_generate.py --batch N|auto --resident none|auto` (what
 `tools/toolcall/a4_ref.sh` runs by default since branch `a4-ref-batched`: `BATCH=auto
 RESIDENT=auto`; `BATCH=1 RESIDENT=none` is the old run, byte for byte the old code path) for the
-three MoE references, Ornith (`ornith_ref.layer_major`), K2 (`K2Ref.forward_many`) and Kolibri
-(`KolibriRef.forward_many`):
+MoE references, Ornith (`ornith_ref.layer_major`) and Kolibri (`KolibriRef.forward_many`) (K2-Horizon's
+`K2Ref.forward_many` went with K2, tag archive/k2-horizon):
 
 - **Layer-major, each sequence alone.** Up to N scenarios are in flight; a pass takes every one
   through decoder layer 0, then every one through layer 1, ... - each layer's weights read (and
   dequantised) once for the pass: stream.py's hold mode keeps an Ornith layer materialised until
-  every sequence has run it, `LazyExperts` fills each routed expert once per layer pass, K2's /
+  every sequence has run it, `LazyExperts` fills each routed expert once per layer pass,
   Kolibri's `LayerWeights` (dense part and expert cache) are shared by the pass. Nothing else is
   shared: each sequence runs the sequential path's own calls on its own `[1, T]` tensors and its
   own cache (Ornith: what `Qwen3_5MoeTextModel.forward` does before its layer loop - embed,
   positions from the cache length, the two masks, rotary - restated with the module's own
-  functions, then each `Qwen3_5MoeDecoderLayer` with the arguments that loop passes; K2 / Kolibri:
+  functions, then each `Qwen3_5MoeDecoderLayer` with the arguments that loop passes; Kolibri:
   `forward()` split at its layer loop, one `decoder_layer` body for both). No op ever sees two
   sequences - no padding, no concatenated rows, no batch-shaped GEMM - so a row's bits cannot
   depend on what else is in the batch, ragged prompts and positions are free, and the head runs
@@ -841,24 +708,22 @@ three MoE references, Ornith (`ornith_ref.layer_major`), K2 (`K2Ref.forward_many
   (EOS kept, or its cap) is written at once and its slot refilled: a new prompt's forward shares
   a pass with the others' decode steps.
 - **Resident weights.** `--resident auto` keeps dequantised weights once read in what the
-  memory plan leaves: every layer's dense part (stream.py's `keep` / `K2Ref(keep_dense=)`), then
+  memory plan leaves: every layer's dense part (stream.py's `keep`), then
   whole layers of experts (`LazyExperts(keep=)`: per-layer buffers filled on demand and never
-  overwritten; `K2Ref(keep_experts=)`). The values are the dequant's, read from RAM instead of
+  overwritten). The values are the dequant's, read from RAM instead of
   recomputed. Kolibri: batching only.
 - **The memory plan** (`batch_plan`, printed first in `ref.log`, ESTIMATES from config.json): the
   cap (the cgroup's, i.e. MEM), the base (embed + head, the streamed layer and its prefetch, the
   expert buffers), the largest single forward (the longest prompt: `[T, V]` logits, eager
   attention's scores - sequences run one at a time, so one is live), per sequence (KV / GDN
-  state at the longest prompt + N new ids: Ornith 0.13 GiB, K2 1.32 GiB - k2_ref keeps K / V in
-  fp32 tensors), in 85% of the cap less 2 GiB; auto batch at most 4 (Ornith, Kolibri) / 8 (K2).
-  Ornith at 60g: batch 4, 40/40 dense + 26/40 expert layers resident (~49 GiB peak); K2 at 54g:
-  batch 8, 48/48 dense + 11/45 expert layers (~43 GiB); at 28g Ornith keeps 8 expert layers, K2
-  runs 6 sequences and 13 dense layers.
+  state at the longest prompt + N new ids: Ornith 0.13 GiB), in 85% of the cap less 2 GiB; auto batch at
+  most 4 (Ornith, Kolibri). Ornith at 60g: batch 4, 40/40 dense + 26/40 expert layers resident (~49 GiB
+  peak); at 28g Ornith keeps 8 expert layers.
 - **Each greedy step's top-1 minus top-2 logit** goes to `<name>.bf16.gap` (both modes), and
   `tools/toolcall/compare_ref.py A B` compares two runs id for id - the first differing position
   and both gaps there - and gap for gap where both wrote them.
 - **Tests** (`tools/toolcall/test_oracle_batched.py`, agnes-ref-img, 2 CPUs, ~1 min; run
-  2026-10-08, all pass): tiny random Ornith (int4, streamed, lazy experts), K2 (int4, MoVA) and
+  2026-10-08, all pass): tiny random Ornith (int4, streamed, lazy experts) and
   Kolibri (bf16, sliding + full) checkpoints through `moe_runner` as the A4 run loads them; five
   ragged prompts (1-17 ids), a cap per prompt, an EOS set making two sequences stop early at
   different lengths and others at their caps; batch 2 (refills), 3 (reverse order) and 5 - **ids
@@ -867,9 +732,8 @@ three MoE references, Ornith (`ornith_ref.layer_major`), K2 (`K2Ref.forward_many
   (`--batch 1` and `--batch 3` file for file, one scenario resumed untouched, `--only`,
   `--resident auto`); the plan on the real configs. `test_oracle_generate.py` (no torch): the
   scheduler feeds every sequence exactly greedy()'s (ids, pos) at batch 1 / 2 / 4 / 6;
-  compare_ref. The existing test_ornith_ref / test_k2_ref / test_kolibri_ref / test_k2_taps /
-  test_k2_kv8_probe pass unchanged. Weight reads on the tiny models, sequential -> batch 5:
-  Ornith 80 -> 32 layer loads, 236 -> 130 expert dequants; K2 64 -> 32, 630 -> 328 (tiny models
+  compare_ref. The existing test_ornith_ref / test_kolibri_ref pass unchanged. Weight reads on the tiny models, sequential -> batch 5:
+  Ornith 80 -> 32 layer loads, 236 -> 130 expert dequants (tiny models
   share experts far more than real ones: 6-12 experts; timing there means nothing).
 - **Where Ornith's time goes** (MEASURED: the sequential run, 6 of 36 done, 920-2694 s a
   scenario; py-spy over 800 s of it, 600 s of them decode at ~1150-1200 ids of context): a decode
@@ -882,10 +746,7 @@ three MoE references, Ornith (`ornith_ref.layer_major`), K2 (`K2Ref.forward_many
   ids, derived from two scenarios of near-equal prompt length) is attention 29%, `grouped_mm`
   22%, expert fill 22%, linears 10%, the head over every prompt row 7%, GDN 7%. So for Ornith the
   per-step cost is mostly per-sequence compute: **batching alone ~5%, batching + 26 resident
-  expert layers ~1.25x (ESTIMATED: ~11.5 h for the 29 scenarios left instead of ~14.5 h)**. K2
-  (README's estimate above: ~7 s an int4 step, ~70% of it dequant; weights-resident compute
-  0.12-0.17 s per 4 layers) gains more - ESTIMATED ~0.6-1 day for the set instead of ~1-1.5 -
-  to be read off its `ref.log` pass lines.
+  expert layers ~1.25x (ESTIMATED: ~11.5 h for the 29 scenarios left instead of ~14.5 h)**.
 
 Resume Ornith batched (after stopping the sequential container: outputs resume per scenario) and
 the cross-check of the four scenarios the sequential run made first:

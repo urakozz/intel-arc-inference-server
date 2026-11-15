@@ -8,7 +8,7 @@
 #include "model/qwen35.h"   // GemvShape, WeightKind, Fuse - the shared vocabulary, nothing else
 
 // Spec 21b: Qwen3.8-Flash-Next (`Qwen4ExpForConditionalGeneration`, config.json model_type `qwen4_exp`)
-// as data - a fourth model BESIDE qwen3_5, K2-Horizon and Kolibri-1 (spec 21 §6: its own table, loader,
+// as data - a fourth model BESIDE qwen3_5 and Kolibri-1 (spec 21 §6: its own table, loader,
 // kernels and engine; their files untouched). Every number of `qwen4exp()` is the checkpoint's
 // (config.json text_config, the index and every shard header; docs/probes/probe-qwen4exp-2026-10-09.md):
 //

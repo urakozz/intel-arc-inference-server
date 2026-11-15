@@ -14,11 +14,9 @@
 # and the resolved tokenizer.json mounted.
 # Env: B70_DECODE (default build/src/cli/b70-decode), PYTHON (default python3),
 #      ORACLE_IMAGE (the int8 lm_head: outputs are <name>.<backend>-i8head.*),
-#      N_NEW (the greedy ids per scenario, default 384 - the reference run's --new-tokens:
-#      K2-Horizon's A4 uses 512, spec 18d), MAX_LEN (default 16384), PREFILL_CHUNK (plan 5d:
+#      N_NEW (the greedy ids per scenario, default 384 - the reference run's --new-tokens),
+#      MAX_LEN (default 16384), PREFILL_CHUNK (plan 5d:
 #      passed as b70-decode's existing --prefill-chunk, e.g. 4096; unset = the engine's default).
-# K2-Horizon (spec 18d): b70-decode dispatches on config.json, so the same line runs K2's
-# engine; its backend is l0 (the only one K2 prefills on).
 set -euo pipefail
 [ $# -eq 4 ] || { echo "usage: $0 <snapshot> <set dir> <out dir> <backend>" >&2; exit 2; }
 SNAP="$1" SET="$2" OUT="$3" BACKEND="$4"

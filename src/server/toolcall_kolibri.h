@@ -7,8 +7,8 @@
 //   <tool_call>\n{"name": "NAME", "arguments": {...}}\n</tool_call>
 // one call per block, several blocks separated by "\n" (the template's render of an assistant turn
 // with tool_calls). The tags are added tokens (127907-127910, not special), present in the text as
-// the server detokenises. Not Qwen XML (server/toolcall.h) and not K2's tags (server/toolcall_k2.h):
-// the tags are Qwen's, the call body K2's json format - server::parse_json_call, shared.
+// the server detokenises. Not Qwen XML (server/toolcall.h): the
+// tags are Qwen's, the call body JSON - server::parse_json_call, shared.
 //
 // Reasoning is opened BY THE MODEL: with thinking on the prompt ends in "<|im_start|>assistant\n" and
 // the output begins "<think>\n...</think>\n\n"; with thinking off (reasoning_effort none, or
@@ -25,7 +25,7 @@
 //     Any other first non-whitespace byte makes the whole output body;
 //   - body: text outside calls is content, verbatim, except: whitespace after a call is dropped, a
 //     segment's whitespace right before a call is dropped (the template writes "\n" between content
-//     and a call and between calls), and content that is only whitespace is dropped (K2's rule);
+//     and a call and between calls), and content that is only whitespace is dropped;
 //   - <tool_call> ... </tool_call> (the first close): the trimmed body through parse_json_call, the
 //     call emitted at its close tag (raw newlines / tabs inside its string arguments repaired -
 //     parse_json_call's escape_raw_controls); a body that does not parse becomes content verbatim, with its

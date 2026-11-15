@@ -1386,8 +1386,6 @@ b70_cli_reject(cli_reject_mtp_with_bench ${B70_NO_MODEL} --bench --spec mtp
   EXPECT "--spec belongs to --ids")
 b70_cli_reject(cli_reject_mtp_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec mtp --spec-max 4
   EXPECT "expects 1..3")
-b70_cli_reject(cli_reject_mtp_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
-  --spec mtp EXPECT "K2-Horizon has no MTP head")
 
 
 # --- spec 3 T1: tokenizer (host-only; needs the checkpoint's tokenizer.json) ---
@@ -1396,7 +1394,7 @@ if(B70_TOKENIZER_ENABLED)
   target_include_directories(tokenizer_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(tokenizer_smoke_test PRIVATE b70_tokenizer)
   add_test(NAME tokenizer_smoke_test COMMAND tokenizer_smoke_test)
-  # A tokenizer.json's truncation / padding never apply (K2's int4 repo ships truncation at
+  # A tokenizer.json's truncation / padding never apply (a quantised repo has shipped truncation at
   # 2048, which cut every long prompt's tail): a synthetic file, no data needed.
   add_executable(no_truncation_test tokenizer/no_truncation_test.cc)
   target_include_directories(no_truncation_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -2072,215 +2070,7 @@ if(B70_ORNITH)
 
 endif()
 
-# ==== Spec 18b: K2-Horizon decode (label `k2`) ============================ (begin) ====
-# One delimited block for every K2 registration, so the branches in flight (spec 15d's
-# Ornith prefill beside it) never edit the same lines. Host tests first (they run on the
-# Mac: tools/box_check.sh), then the card's (box only; docs/superpowers/plans/
-# box-validation-queue.md has the order).
-set(B70_K2_SNAPSHOT "urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ"
-  CACHE STRING "K2-Horizon int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
 
-# Task 1: the model table, the RoPE table, the loader's host half on a synthetic fixture.
-add_executable(k2_horizon_test model/k2_horizon_test.cc)
-target_include_directories(k2_horizon_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_horizon_test PRIVATE b70_k2_model)
-add_test(NAME k2_horizon_test COMMAND k2_horizon_test ${CMAKE_SOURCE_DIR}/tests/model/k2/config.json)
-add_executable(k2_rope_test loader/k2_rope_test.cc)
-target_include_directories(k2_rope_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_rope_test PRIVATE b70_k2_loader)
-add_test(NAME k2_rope_test COMMAND k2_rope_test)
-add_executable(k2_repack_test loader/k2_repack_test.cc)
-target_include_directories(k2_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_repack_test PRIVATE b70_k2_loader)
-add_test(NAME k2_repack_test COMMAND k2_repack_test ${CMAKE_SOURCE_DIR}/tests/model/k2/config.json)
-# ... and the real checkpoint on the card: every bucket, readbacks (both head forms).
-add_executable(k2_load_checkpoint_test loader/k2_load_checkpoint_test.cc)
-target_include_directories(k2_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_load_checkpoint_test PRIVATE b70_k2_loader b70_l0)
-add_test(NAME k2_load_checkpoint_test COMMAND k2_load_checkpoint_test ${B70_K2_SNAPSHOT})
-add_test(NAME k2_load_checkpoint_i8head_test COMMAND k2_load_checkpoint_test ${B70_K2_SNAPSHOT} int8)
-set_tests_properties(k2_load_checkpoint_test k2_load_checkpoint_i8head_test PROPERTIES
-  LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 1800)
-
-# Task 2: the K2 kernels' host reference (tests/kernels/k2_ref.h) against spec 18 §3 -
-# the norm traps, the softplus threshold, the router (padding never selected), the
-# ascending-id combine, the RoPE chain, MoVA. Host only.
-add_executable(k2_ref_test kernels/k2_ref_test.cc)
-target_include_directories(k2_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_ref_test PRIVATE b70_k2_loader)
-add_test(NAME k2_ref_test COMMAND k2_ref_test)
-# Spec 18 §10: the eager attention's host chain (k2_ref.h attention_eager) against torch's own
-# scores, probabilities and output (tests/kernels/k2_attn_eager_fixture.h, generated in the
-# oracle container by tools/oracle/k2_attn_eager_fixture.py), and against flash. Host only.
-add_executable(k2_attn_eager_ref_test kernels/k2_attn_eager_ref_test.cc)
-target_include_directories(k2_attn_eager_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-add_test(NAME k2_attn_eager_ref_test COMMAND k2_attn_eager_ref_test)
-if(B70_K2)
-  # Every binary K2's decode list binds (src/kernels/CMakeLists.txt's K2 block).
-  set(B70_K2_DECODE_KERNELS
-    kernel_k2_embed_gather_M1_D2560_V250624 kernel_k2_argmax_stage1_M1_N250624_V250624
-    kernel_k2_argmax_stage2_N250624
-    kernel_prep_res_fold_M1_K2560_SP0_G20 kernel_prep_res_fold_M1_K2560_SP4_G20
-    kernel_k2_norm_M1_K2560_G20_W20_NG2 kernel_k2_silu_M1_I6144_S4
-    kernel_k2_attn_prep_M1_N10240_S2_Q32KV8_V kernel_k2_attn_prep_M1_N9280_S2_Q32KV8
-    kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8
-    kernel_k2_route_M1_E64_T4_N9280_O9216_S2 kernel_k2_route_M1_E100_T8_N128_O0_S1
-    kernel_k2_moe_M1_E100_T8_D2560_I768 kernel_k2_mova_M1_E64_T4_D2560_N1024
-    kernel_gemv_M1_K2560_N10240_S2_L0 kernel_gemv_M1_K2560_N9280_S2_L0
-    kernel_gemv_M1_K4096_N2560_S4_L0 kernel_gemv_M1_K2560_N12288_S4_L0
-    kernel_gemv_M1_K6144_N2560_S4_L0 kernel_gemv_bf16_M1_K2560_N128_C16_S16
-    kernel_gemv_bf16_M1_K2560_N250624 kernel_gemv_i8w_M1_K2560_N250624)
-  # Host: the names the capture binds (kernels::k2::decode_variants) are exactly this list.
-  add_executable(k2_variant_names_test kernels/k2_variant_names_test.cc)
-  target_include_directories(k2_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(k2_variant_names_test PRIVATE b70_k2_model)
-  b70_target_kernel_dir(k2_variant_names_test)
-  add_test(NAME k2_variant_names_test COMMAND k2_variant_names_test ${B70_K2_DECODE_KERNELS})
-  # K1 on the card: every K2 kernel at K2's real shapes against k2_ref.h (no checkpoint).
-  add_executable(k2_kernels_test kernels/k2_kernels_test.cc)
-  target_include_directories(k2_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(k2_kernels_test PRIVATE b70_l0 b70_k2_loader)
-  b70_target_kernel_dir(k2_kernels_test)
-  add_dependencies(k2_kernels_test ${B70_K2_DECODE_KERNELS})
-  add_test(NAME k2_kernels_test COMMAND k2_kernels_test)
-  set_tests_properties(k2_kernels_test PROPERTIES LABELS k2 TIMEOUT 900)
-endif()
-
-# Task 3: the runtime. The planner and the launch count on the host ...
-add_executable(k2_plan_test runtime/k2_plan_test.cc)
-target_include_directories(k2_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_plan_test PRIVATE b70_k2_plan)
-add_test(NAME k2_plan_test COMMAND k2_plan_test)
-# ... and on the card with the real checkpoint: the list (717 launches, Review Focus 5), the
-# plan against the allocation, K3 replay determinism (k2_decode_test); K2, the golden gate
-# with the routing diagnostic against 18a's oracle-out-k2 (k2_golden_test, SKIP 77 until it
-# exists). Both head forms (`int8`: spec 9's head, b70-serve's default once 18d serves K2).
-if(B70_K2)
-  set(B70_K2_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2"
-    CACHE PATH "The CPU-oracle golden set of K2-Horizon (spec 18a): <prompt>.ids + .golden.safetensors")
-  # Operator ruling 2026-10-23: the token gates' judge (tests/golden/golden_common.h, `--judge=`) -
-  # the f32 teacher-forced reference, tools/box_validate/f32_oracle.sh <data tree> k2.
-  set(B70_K2_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-f32"
-    CACHE PATH "K2-Horizon's f32 teacher-forced reference (the golden gates' judge)")
-  # ... and its quantisation-aware twin for the int8 head (k2_ref.py --lm-head int8; f32_oracle.sh k2-i8head)
-  set(B70_K2_F32_I8HEAD_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head"
-    CACHE PATH "K2-Horizon's f32 reference through the int8 head (the *_i8head gates' judge)")
-  # ... and through the int8 KV cache (k2_ref.py --sim-kv8; f32_oracle.sh k2-kv8 / k2-i8head-kv8): the kv8 gates'
-  # judges (operator ruling 2026-10-29).
-  set(B70_K2_F32_KV8_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-kv8"
-    CACHE PATH "K2-Horizon's f32 reference through the int8 KV cache (the *_kv8 gates' judge)")
-  set(B70_K2_F32_I8HEAD_KV8_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head-kv8"
-    CACHE PATH "K2-Horizon's f32 reference through the int8 head and KV cache (the *_i8head_kv8 gates' judge)")
-  foreach(t k2_decode_test k2_golden_test)
-    if(t STREQUAL "k2_decode_test")
-      add_executable(${t} runtime/${t}.cc)
-    else()
-      add_executable(${t} golden/${t}.cc)
-    endif()
-    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-    target_link_libraries(${t} PRIVATE b70_k2_runtime b70_l0)
-    b70_target_kernel_dir(${t})
-    add_dependencies(${t} ${B70_K2_DECODE_KERNELS})
-  endforeach()
-  add_test(NAME k2_decode_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
-  add_test(NAME k2_decode_i8head_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids int8)
-  add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
-  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8
-    --accept=prose:1)   # a known divergence, 2026-10-23 (debug 2026-10-26)
-  # (The k2_golden_eager_* rows, the gate through the EAGER attention, went with B70_K2_ATTN in
-  # the zero-config cleanup: flash is K2's attention, operator rulings 2026-10-23 / 2026-11-06.)
-  set_tests_properties(k2_decode_test k2_decode_i8head_test k2_golden_test k2_golden_i8head_test
-    PROPERTIES LABELS "checkpoint;golden;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-endif()
-# b70-decode's model_type dispatch, before the device: tests/model/k2/ holds only the
-# checkpoint's config.json, which is all the dispatch reads, so these run on any box with the
-# binary (b70_cli_reject's "exit 1, no `device:` line, the message").
-# (cli_reject_k2_prefill / cli_reject_k2_pp lived here until spec 18c built K2's prefill; the
-# 18c block below rejects the backends K2 does not prefill on instead. cli_reject_k2_kv8 lived
-# here until spec 18e built K2's int8 KV cache: `--kv-cache int8` is accepted for K2 now.)
-# ==== Spec 18b: K2-Horizon decode ========================================== (end) ====
-
-# ==== Spec 18c: K2-Horizon prefill (labels `k2;prefill`) =================== (begin) ====
-# Written blind on the Mac (docs/superpowers/plans/box-validation-queue.md, the K2 prefill row,
-# has the order to run these in). Host tests first (the Mac runs them: tools/box_check.sh),
-# then the card's; the checkpoint ones SKIP (77) until the K2 int4 checkpoint and 18a's
-# oracle-out-k2/ are on the machine, as 18b's do.
-#   k2_pf_ref_test (host): the routing scatter with ties, the tile bound, grouped-GEMM row
-#       independence, the combines == decode's chains, the slab tail, the eager reference;
-#   k2_variant_names_test prefill (host): every name the walk binds is built, nothing dead;
-#   k2_pf_kernels_test (a B70, no checkpoint): K1 for every prefill kernel incl. the flash
-#       attention at depths 0 .. 62048 against fp64, grouped == dense, Review Focus 1-3;
-#   k2_prefill_test (checkpoint): the walk, K3 determinism / replay / chunking, prefill KV and
-#       routing against decode's fill, tokens; its `split` mode is prefill_split on K2;
-#   k2_golden_test prefill (checkpoint + oracle): K2 on prefill, the routing diagnostic.
-add_executable(k2_pf_ref_test kernels/k2_pf_ref_test.cc)
-target_include_directories(k2_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_pf_ref_test PRIVATE b70_k2_plan)
-add_test(NAME k2_pf_ref_test COMMAND k2_pf_ref_test)
-set_tests_properties(k2_pf_ref_test PROPERTIES LABELS "k2;prefill")
-if(B70_K2)
-  # Every binary the prefill walk binds and the K1 test's ungated attention builds
-  # (src/kernels/CMakeLists.txt's spec 18c block; pf_gemm_T0 / _SILU are prefill/'s own).
-  set(B70_K2_PREFILL_KERNELS
-    kernel_k2_pf_embed_gather_D2560_V250624 kernel_pf_res_fold_K2560_SP0_G20
-    kernel_pf_res_fold_K2560_SP1_G20 kernel_k2_norm_M2048_K2560_G20_W20_NG2
-    kernel_pf_int4_slab_K2560_N10240 kernel_pf_int4_slab_K2560_N9280
-    kernel_pf_int4_slab_K4096_N2560 kernel_pf_int4_slab_K2560_N12288
-    kernel_pf_int4_slab_K6144_N2560 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
-    kernel_k2_attn_prep_M2048_N10240_S1_Q32KV8_V kernel_k2_attn_prep_M2048_N9472_S1_Q32KV8
-    kernel_k2_pf_flash_attn_Q32KV8 kernel_k2_pf_flash_attn_Q32KV8_O
-    kernel_k2_route_M1_E64_T4_N9472_O9216_S1 kernel_k2_pf_mova_E64_T4_D2560_N1024
-    kernel_pf_moe_gemm_K2560_N1024 kernel_pf_moe_router_K2560_N128
-    kernel_k2_route_M1_E100_T8_N128_O0_S1 kernel_k2_pf_moe_E100_T8_D2560_I768
-    kernel_pf_moe_gemm_K2560_N1536_SILU kernel_pf_moe_gemm_K768_N2560)
-  add_test(NAME k2_pf_variant_names_test COMMAND k2_variant_names_test prefill ${B70_K2_PREFILL_KERNELS})
-  set_tests_properties(k2_pf_variant_names_test PROPERTIES LABELS "k2;prefill")
-
-  add_executable(k2_pf_kernels_test kernels/k2_pf_kernels_test.cc)
-  target_include_directories(k2_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(k2_pf_kernels_test PRIVATE b70_prefill_host b70_k2_loader b70_k2_plan b70_l0)
-  b70_target_kernel_dir(k2_pf_kernels_test)
-  add_dependencies(k2_pf_kernels_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
-  add_test(NAME k2_pf_kernels_test COMMAND k2_pf_kernels_test)
-  set_tests_properties(k2_pf_kernels_test PROPERTIES LABELS "k2;prefill" TIMEOUT 1800)
-
-  add_executable(k2_prefill_test runtime/k2_prefill_test.cc)
-  b70_target_kernel_dir(k2_prefill_test)
-  target_include_directories(k2_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
-    ${CMAKE_SOURCE_DIR}/tests/golden)
-  target_link_libraries(k2_prefill_test PRIVATE b70_k2_prefill b70_l0)
-  add_dependencies(k2_prefill_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
-  add_test(NAME k2_prefill_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
-  add_test(NAME k2_prefill_i8head_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all int8)
-  # Operator ruling 2026-10-29: section 6's rows judged by the f32 reference of the forced context once f32_refs.sh
-  # made it (tests/golden/forced_judge.h); the int8 head by its quantisation-aware twin.
-  set_tests_properties(k2_prefill_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
-  set_tests_properties(k2_prefill_i8head_test PROPERTIES
-    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
-  add_test(NAME prefill_split_k2_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
-  set_tests_properties(k2_prefill_test k2_prefill_i8head_test prefill_split_k2_test
-    PROPERTIES LABELS "checkpoint;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-
-  # K2 on prefill: 18b's golden test in its prefill mode (one chunk, and chunks of 16).
-  target_link_libraries(k2_golden_test PRIVATE b70_k2_prefill)
-  add_dependencies(k2_golden_test ${B70_K2_PREFILL_KERNELS})
-  add_test(NAME k2_golden_prefill_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} prefill)
-  add_test(NAME k2_golden_prefill_c16_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
-    prefill:16)
-  add_test(NAME k2_golden_prefill_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR}
-    int8 prefill)
-  set_tests_properties(k2_golden_prefill_test k2_golden_prefill_c16_test k2_golden_prefill_i8head_test
-    PROPERTIES LABELS "checkpoint;golden;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-endif()
-# b70-decode's K2 prefill backends, before the device (tests/model/k2: config.json only).
-b70_cli_reject(cli_reject_k2_prefill_length_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench
-  --prefill-length 64 --prefill-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
-# ==== Spec 18c: K2-Horizon prefill ========================================= (end) ====
 
 # ==== Spec 15e: Ornith 1.5 35B-A3B served, and its MoE MTP head (label `ornith`) == (begin) ==
 # One delimited block for every 15e registration (the branches in flight beside it edit
@@ -2415,109 +2205,13 @@ if(B70_ORNITH AND B70_MTP)
 endif()
 # ==== Spec 15e ============================================================= (end) ====
 
-# ==== Spec 18d: K2-Horizon served (label `k2`) ============================== (begin) ==
-# One delimited block for every 18d registration. Host tests first - they run on the Mac
-# (tools/box_check.sh) - then the card's (box-validation-queue row 25), which SKIP (77)
-# without the K2 int4 checkpoint. The host side as built: spec 18 §12; the engine side
-# (K2Engine behind b70-serve, KV-only snapshots): spec 18 §14.
-#
 # The renderer extensions - third_party/minja's b70 patches (third_party/VERSIONS) - each
 # against Jinja2's own render (tools/tokenizer/dump_minja_ext.py).
 add_executable(minja_ext_test tokenizer/minja_ext_test.cc)
 target_include_directories(minja_ext_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(minja_ext_test PRIVATE b70_third_party_minja)
 add_test(NAME minja_ext_test COMMAND minja_ext_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
-# K2's tool calls and reasoning (xml, xml_typed, json): whole text = byte at a time = random
-# pieces, the HF renders' assistant turns parsed back to their messages, a fuzz; and the
-# server's model dispatch (server::ChatFormat) over a mock engine.
-add_executable(toolcall_k2_test server/toolcall_k2_test.cc)
-target_include_directories(toolcall_k2_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(toolcall_k2_test PRIVATE b70_server)
-add_test(NAME toolcall_k2_test COMMAND toolcall_k2_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
-add_executable(k2_server_test server/k2_server_test.cc)
-target_include_directories(k2_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_server_test PRIVATE b70_server)
-add_test(NAME k2_server_test COMMAND k2_server_test)
-set_tests_properties(toolcall_k2_test k2_server_test PROPERTIES LABELS k2)
-if(B70_TOKENIZER_ENABLED)
-  # K2's chat template - the int4 repo's, the one served, vendored with its tokenizer_config
-  # and generation_config at tests/tokenizer/k2/ (Apache-2.0, urakozz/IFM-K2-Horizon-MoVA-
-  # 36B-A4B-W4A16-AutoRound-GPTQ at 0e38c26c) - on 18 message lists (every tool_call_format
-  # and tool_presentation_format, reasoning_effort, history with and without thinking, list
-  # content, tool results, null defaults, $ref schemas) against transformers'
-  # apply_chat_template (tools/tokenizer/dump_k2.py).
-  add_test(NAME template_k2_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
-    ${CMAKE_SOURCE_DIR}/tests/tokenizer/k2 k2_template_cases.json k2)
-  set_tests_properties(template_k2_test PROPERTIES LABELS k2 SKIP_RETURN_CODE 77)
-  # ... and its tokenizer against HF's (a text set with every tag and the BOS, corpus.txt's
-  # digests, three chat renders' ids). tokenizer.json (20.6 MB) is not vendored: the int4
-  # snapshot's in the HF cache, or -DB70_K2_TOKENIZER_JSON / the environment variable of the
-  # same name. Absent: disabled on the Mac (host_only), SKIP (77) elsewhere.
-  b70_hf_snapshot(B70_K2_TOKENIZER_JSON models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
-    0e38c26ca3ce5899a0cb93ae8d085669d9565720 /tokenizer.json FILEPATH "K2-Horizon's tokenizer.json for k2_tokenizer_test")
-  add_executable(k2_tokenizer_test tokenizer/k2_tokenizer_test.cc)
-  target_include_directories(k2_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(k2_tokenizer_test PRIVATE b70_tokenizer)
-  add_test(NAME k2_tokenizer_test COMMAND k2_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
-    ${CMAKE_SOURCE_DIR}/tests/tokenizer/k2 ${B70_K2_TOKENIZER_JSON})
-  set_tests_properties(k2_tokenizer_test PROPERTIES LABELS k2 SKIP_RETURN_CODE 77)
-endif()
-# The engine side, on the host: cli::k2::K2EngineAdapterT (b70-serve's adapter) over a
-# device-free engine with K2's real KV layout - the snapshot runs on K2's shapes (bf16 and
-# int8), save / load on host buffers, Review Focus 3 through spec 7's request path (KV-only
-# snapshots, every cached turn bitwise a cold run's, K2's own store key), and the server: a
-# greedy chat's ids = the decode run on its prompt_token_ids, a cached second turn, seeded
-# sampling reproducible.
-add_executable(k2_serve_test server/k2_serve_test.cc)
-target_include_directories(k2_serve_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_serve_test PRIVATE b70_server b70_k2_plan)
-add_test(NAME k2_serve_test COMMAND k2_serve_test)
-set_tests_properties(k2_serve_test PROPERTIES LABELS k2)
-# On the card (row 25), checkpoint: K2Engine's snapshot calls byte-exact, C1 bitwise at a block
-# end, C2 (prefix_gpu_test's sequences a-g through PrefixSession over the adapter) - bf16 KV,
-# and the `_kv8` twin under B70_KV_CACHE=int8 (spec 18e's cache).
-# serve_adapters.h (PinnedAlloc) and golden_common.h, as prefix_gpu_test: it links what
-# b70-serve links.
-if(B70_K2 AND B70_TOKENIZER_ENABLED AND TARGET b70_k2_prefill)
-  # On the card, checkpoint: the pass key retrieved past 2048 positions, text through the
-  # engine's tokenizer (the int4 repo's tokenizer.json truncates at 2048 - no_truncation_test)
-  # into K2Engine: prefill at ~2100 / ~8000 ids, decode-only at ~2100; bf16 and int8 KV.
-  add_executable(k2_passkey_test server/k2_passkey_test.cc)
-  target_include_directories(k2_passkey_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(k2_passkey_test PRIVATE b70_tokenizer b70_k2_prefill b70_runtime b70_loader b70_model
-    b70_l0)
-  add_dependencies(k2_passkey_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
-  add_test(NAME k2_passkey_test COMMAND k2_passkey_test ${B70_K2_SNAPSHOT})
-  set_tests_properties(k2_passkey_test PROPERTIES LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 1800)
-  if(B70_KV8)
-    add_test(NAME k2_passkey_kv8_test COMMAND k2_passkey_test ${B70_K2_SNAPSHOT})
-    set_tests_properties(k2_passkey_kv8_test PROPERTIES LABELS "checkpoint;k2" SKIP_RETURN_CODE 77
-      TIMEOUT 1800 ENVIRONMENT "B70_KV_CACHE=int8")
-  endif()
-  add_executable(k2_prefix_gpu_test server/k2_prefix_gpu_test.cc)
-  target_include_directories(k2_prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
-    ${CMAKE_SOURCE_DIR}/tests/golden)
-  target_link_libraries(k2_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_k2_prefill b70_runtime
-    b70_loader b70_model b70_l0 b70_prefill_host)
-  add_dependencies(k2_prefix_gpu_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
-  add_test(NAME k2_prefix_gpu_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
-  add_test(NAME k2_prefix_gpu_split_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts 0 1)
-  # Operator ruling 2026-10-29: judged by the f32 reference of each forced context once f32_refs.sh made it
-  # (tests/golden/forced_judge.h; without the file a sequence keeps the cold-run rule and says so).
-  set_tests_properties(k2_prefix_gpu_test k2_prefix_gpu_split_test PROPERTIES
-    LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600
-    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
-  if(B70_KV8)
-    add_test(NAME k2_prefix_gpu_kv8_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
-      ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
-    set_tests_properties(k2_prefix_gpu_kv8_test PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8"
-      LABELS "checkpoint;k2;kv8" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  endif()
-endif()
-# b70-serve's K2 refusals, before the device (tests/model/k2: config.json only) - what K2's
-# engine does not have, by name - and the one-card refusal of --parallel (any model).
+# b70-serve's refusals before the device (b70-decode's b70_cli_reject, for b70-serve).
 if(TARGET b70-serve)
   function(b70_serve_reject name)
     cmake_parse_arguments(R "" "EXPECT" "" ${ARGN})
@@ -2543,94 +2237,10 @@ then
   exit 1
 fi
 ]==] b70_serve_reject "${R_EXPECT}" $<TARGET_FILE:b70-serve> ${R_UNPARSED_ARGUMENTS})
-    set_tests_properties(${name} PROPERTIES TIMEOUT 60 LABELS k2)
+    set_tests_properties(${name} PROPERTIES TIMEOUT 60)
   endfunction()
-  b70_serve_reject(cli_reject_serve_k2_spec_mtp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec mtp
-    EXPECT "K2-Horizon has no MTP head")
-  b70_serve_reject(cli_reject_serve_k2_lookup ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec lookup
-    EXPECT "K2-Horizon's engine does not capture")
-  b70_serve_reject(cli_reject_serve_k2_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2
-    --prefill-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
-  # Spec 16d: --parallel pp serves the Qwen family on two cards; K2 stays refused, by name.
-  b70_serve_reject(cli_reject_serve_pp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --parallel pp
-    EXPECT "K2-Horizon runs its own engine")
 endif()
-# ==== Spec 18d ============================================================= (end) ====
 
-# ==== Spec 18e: K2-Horizon's int8 KV cache (labels `k2;kv8`) =============== (begin) ====
-# rotkv at head_dim 128 (spec 12 §8 carried to K2: src/common/kv8.h hd128, src/kernels/k2/
-# k2_kv8.cl), written blind on the Mac (docs/superpowers/plans/box-validation-queue.md, the K2
-# int8 KV row). Host tests first (the Mac runs them), then the card's; the checkpoint ones SKIP
-# (77) without the K2 int4 checkpoint / 18a's oracle-out-k2, as 18b's and 18c's do.
-#   kv8_test (host, spec 12b's, extended): the 128-point scheme - torch's hadamard(128, 0) signs
-#       pinned, the rotations against fp64, the quantiser, rotkv beating per token at K2's shape;
-#   k2_kv8_ref_test (host): the references - the flash epilogue's FWHT decomposition == unrotate
-#       bitwise, the writer, Review Focus 2 (MoVA's mix quantised after the combine), the readers;
-#   k2_kv8_variant_names_test (host): every int8 binary the walks bind is built, nothing dead;
-#   k2_kv8_kernels_test (a B70, no checkpoint): K1 for every int8 kernel;
-#   the `_kv8` twins (checkpoint): the SAME binaries and command lines as the bf16 registrations
-#       of 18b / 18c with B70_KV_CACHE=int8 (K2Engine's default form) - K3 replay and the plan,
-#       the golden gate with its routing diagnostic (flash, eager, int8 head, prefill), the
-#       prefill walk / determinism / chunking / prefill-vs-decode and the split test.
-add_executable(k2_kv8_ref_test kernels/k2_kv8_ref_test.cc)
-target_include_directories(k2_kv8_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(k2_kv8_ref_test PRIVATE b70_k2_loader)
-add_test(NAME k2_kv8_ref_test COMMAND k2_kv8_ref_test)
-set_tests_properties(k2_kv8_ref_test PROPERTIES LABELS "k2;kv8")
-if(B70_K2 AND B70_KV8)
-  # Every binary the int8 cache adds (src/kernels/CMakeLists.txt's spec 18e block).
-  set(B70_K2_KV8_KERNELS
-    kernel_k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 kernel_k2_attn_prep_M1_N9280_S2_Q32KV8_KV8
-    kernel_k2_mova_M1_E64_T4_D2560_N1024_STAGE kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8_KV8
-    kernel_k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 kernel_k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8
-    kernel_k2_pf_flash_attn_Q32KV8_KV8 kernel_k2_pf_flash_attn_Q32KV8_O_KV8)
-  add_test(NAME k2_kv8_variant_names_test COMMAND k2_variant_names_test kv8 ${B70_K2_KV8_KERNELS})
-  set_tests_properties(k2_kv8_variant_names_test PROPERTIES LABELS "k2;kv8")
-
-  # K1 on the card: the writers bitwise, MoVA's staged row bitwise the bf16 binary's, the decode
-  # flash pair within 2 ulps of fp64, the prefill flash vs fp64.
-  add_executable(k2_kv8_kernels_test kernels/k2_kv8_kernels_test.cc)
-  target_include_directories(k2_kv8_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(k2_kv8_kernels_test PRIVATE b70_prefill_host b70_k2_loader b70_k2_plan b70_l0)
-  b70_target_kernel_dir(k2_kv8_kernels_test)
-  add_dependencies(k2_kv8_kernels_test ${B70_K2_KV8_KERNELS} ${B70_K2_DECODE_KERNELS})
-  add_test(NAME k2_kv8_kernels_test COMMAND k2_kv8_kernels_test)
-  set_tests_properties(k2_kv8_kernels_test PROPERTIES LABELS "k2;kv8" TIMEOUT 1800)
-
-  # The twins: B70_KV_CACHE=int8, the bf16 tests' argv.
-  foreach(t k2_decode_test k2_golden_test k2_prefill_test)
-    add_dependencies(${t} ${B70_K2_KV8_KERNELS})
-  endforeach()
-  add_test(NAME k2_decode_kv8_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
-  # Operator ruling 2026-10-31 (round 2): the kv8 token gates' bar is the judge's bf16 twin through the same cache
-  # (f32_oracle.sh k2-kv8-twin; k2_golden_test.cc `--twin=`); without the file the judge's rule applies.
-  set(B70_K2_BF16_KV8_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-kv8"
-    CACHE PATH "K2-Horizon's bf16 reference through the int8 KV cache (the kv8 judge's twin, the token gates' bar)")
-  add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
-    --twin=${B70_K2_BF16_KV8_DIR})
-  add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_KV8_DIR} int8)
-  add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
-    --twin=${B70_K2_BF16_KV8_DIR} prefill)
-  add_test(NAME k2_golden_prefill_c16_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
-    --twin=${B70_K2_BF16_KV8_DIR} prefill:16)
-  add_test(NAME k2_prefill_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
-  add_test(NAME prefill_split_k2_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
-  set(_k2kv8_flash k2_decode_kv8_test k2_golden_kv8_test k2_golden_i8head_kv8_test k2_golden_prefill_kv8_test
-    k2_golden_prefill_c16_kv8_test k2_prefill_kv8_test prefill_split_k2_kv8_test)
-  set_tests_properties(${_k2kv8_flash} PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8")
-  set_tests_properties(${_k2kv8_flash} PROPERTIES
-    LABELS "checkpoint;golden;k2;kv8" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  # Section 6 over the int8 cache judged as k2_prefill_test's (operator rulings 2026-10-29 / 2026-10-31): the
-  # kv8-aware f32 reference of its forced context (f32_refs.sh forced k2 <dir> -kv8 --sim-kv8) and its bf16+kv8 twin.
-  set_property(TEST k2_prefill_kv8_test APPEND PROPERTY ENVIRONMENT
-    "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-kv8-forced"
-    "B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-kv8-forced")
-endif()
-# Passkey near the one-card int8 ceiling (opt-in, box, by hand): tools/probe/k2_passkey.sh.
-# ==== Spec 18e: K2-Horizon's int8 KV cache ================================ (end) ====
 
 # ==== Spec 16b: pipeline parallel decode across two B70s ================================
 # Written blind on the Mac (no box, and no multi-device Level Zero on a Mac at all);
@@ -2638,11 +2248,11 @@ endif()
 # `pp` labels the device ones: `ctest -L pp`.
 #
 # Host, no device: the planner (stages, weights by device, the per-device plan, auto split
-# and auto length for Qwen3.8 / Ornith, K2-Horizon's bytes per card), and b70-decode's
+# and auto length for Qwen3.8 / Ornith), and b70-decode's
 # --parallel flag.
 add_executable(pipeline_plan_test runtime/pipeline_plan_test.cc)
 target_include_directories(pipeline_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(pipeline_plan_test PRIVATE b70_plan b70_k2_plan)
+target_link_libraries(pipeline_plan_test PRIVATE b70_plan)
 add_test(NAME pipeline_plan_test COMMAND pipeline_plan_test)
 find_package(Threads REQUIRED)
 # Spec 17a (plan 17a Task 1): the TP all-reduce's crossing protocol (tools/probe/tp_protocol.h, the host mirror of
@@ -2699,8 +2309,6 @@ b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_ID
 # --pipeline-handoff went 2026-11-13 (the peer hand-off measured no gain): an unknown option now.
 b70_cli_reject(cli_reject_pipeline_handoff_removed ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel pp
   --pipeline-handoff copy EXPECT "unknown option '--pipeline-handoff'")
-b70_cli_reject(cli_reject_pipeline_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4 --parallel pp
-  EXPECT "K2 across two cards is future work")
 add_test(NAME cli_reject_pipeline_one_gpu COMMAND sh -c [==[
 out=$(ZE_AFFINITY_MASK=0 "$@" 2>&1)
 rc=$?
@@ -2987,8 +2595,7 @@ if(B70_TOKENIZER_ENABLED)
 endif()
 
 # b70-serve's --parallel refusals before the device (cli/pipeline_serve.h): the model's with
-# tests/model/kolibri1 (config.json only; K2's is 18d's cli_reject_serve_pp, its expectation
-# updated), the rest before the snapshot is resolved (the model path does not exist).
+# tests/model/kolibri1 (config.json only), the rest before the snapshot is resolved (the model path does not exist).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_pp_value ${B70_NO_MODEL} --parallel 4096
     EXPECT "--parallel expects auto, 1, pp, replica or tp")
@@ -2999,8 +2606,6 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   # Plan 13b: --parallel replica is Qwen3.8's and Ornith's - other models by name (their config.json), an unreadable
   # checkpoint, the pp override flags, more than one Ornith request a card (tests/model/ornith: config.json only); all
   # before the device.
-  b70_serve_reject(cli_reject_serve_replica_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --parallel replica
-    EXPECT "--parallel replica serves Qwen3.8 and Ornith only")
   b70_serve_reject(cli_reject_serve_replica_ornith_slots ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --parallel replica
     --max-num-seqs 4 EXPECT "runs one request a card")
   b70_serve_reject(cli_reject_serve_replica_ornith_auto ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --max-num-seqs 3
@@ -3015,7 +2620,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--pipeline-split belongs to --parallel pp")
   set_tests_properties(cli_reject_serve_pp_value
     cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_removed
-    cli_reject_serve_replica_k2 cli_reject_serve_replica_kolibri cli_reject_serve_replica_no_model
+    cli_reject_serve_replica_kolibri cli_reject_serve_replica_no_model
     cli_reject_serve_replica_split cli_reject_serve_replica_ornith_slots cli_reject_serve_replica_ornith_auto
     cli_reject_serve_replica_ornith_one
     PROPERTIES LABELS pp)
@@ -3062,7 +2667,7 @@ add_test(NAME kolibri_ref_test COMMAND kolibri_ref_test)
 set_tests_properties(kolibri_ref_test PROPERTIES LABELS kolibri)
 if(B70_KOLIBRI)
   # Every binary a Kolibri decode list binds, any arm / head / attention (src/kernels/CMakeLists.txt's
-  # Kolibri block; the two K2 already builds are bound too).
+  # Kolibri block).
   set(B70_KOLIBRI_DECODE_KERNELS
     kernel_kol_embed_gather_M1_D2560_V128000 kernel_kol_argmax_stage1_M1_N128000_V128000
     kernel_kol_argmax_stage2_N128000 kernel_prep_res_fold_M1_K2560_SP0_G20
@@ -3198,7 +2803,7 @@ add_test(NAME kolibri_pf_ref_test COMMAND kolibri_pf_ref_test)
 set_tests_properties(kolibri_pf_ref_test PROPERTIES LABELS "kolibri;prefill")
 if(B70_KOLIBRI)
   # Task 2: every binary the prefill walk binds, both attention arms and forms (src/kernels/CMakeLists.txt's
-  # spec 20d block; pf_gemm_T0, 20c's kol_route and K2's pf_res_fold SP0 / 6144 x 2560 slab are reused).
+  # spec 20d block; pf_gemm_T0 and 20c's kol_route are reused).
   set(B70_KOLIBRI_PREFILL_KERNELS
     kernel_kol_pf_embed_gather_D2560_V128000 kernel_pf_res_fold_K2560_SP0_G20 kernel_pf_res_fold_K2560_SP1_G20_Z
     kernel_kol_norm_M2048_K2560_G20_W20 kernel_kol_post_add_M2048_K2560_G20
@@ -3467,7 +3072,7 @@ set_tests_properties(qwen4exp_f32_judge_test PROPERTIES LABELS qwen4exp)
 if(B70_Q4EXP)
   # Task 2: every binary a Qwen3.8-Flash-Next decode list binds, any dense arm / head / attention / PLE scale form
   # (src/kernels/CMakeLists.txt's spec 21c block; the reused binaries other blocks build - Qwen3.8's gdn_step_M1 and
-  # argmax, K2's a||b and 6144 x 2560 int4, Kolibri's 6144 x 2560 bf16 - are bound by name and listed too).
+  # argmax, Kolibri's 6144 x 2560 int4 and bf16 - are bound by name and listed too).
   set(B70_Q4EXP_DECODE_KERNELS
     kernel_embed_gather_M1_D2560 kernel_q4_hc_combine_norm_M1_E kernel_q4_hc_combine_norm_M1_S1
     kernel_q4_hc_combine_norm_M1_S4 kernel_q4_hc_combine_norm_M1_Y kernel_q4_hc_combine_norm_M1_Y_NN
@@ -3572,7 +3177,7 @@ set_tests_properties(qwen4exp_pf_ref_test PROPERTIES LABELS "qwen4exp;prefill" T
 if(B70_Q4EXP)
   # Task 2: every binary a prefill chunk binds, both dense arms / attention forms / PLE scale forms
   # (src/kernels/CMakeLists.txt's spec 21d block; the reused binaries other blocks build - pf_gemm_T0, Qwen3.8's
-  # pf_gdn_*, 21c's q4_route_M1, K2's / Kolibri's 6144 x 2560 int4 slab - are bound by name and listed too).
+  # pf_gdn_*, 21c's q4_route_M1, Kolibri's 6144 x 2560 int4 slab - are bound by name and listed too).
   set(B70_Q4EXP_PREFILL_KERNELS
     kernel_pf_embed_gather_D2560 kernel_q4_hc_combine_norm_M2048_E kernel_q4_hc_combine_norm_M2048_S1
     kernel_q4_hc_combine_norm_M2048_Y kernel_q4_hc_combine_norm_M2048_X kernel_q4_hc_combine_norm_M2048_Y_NN
@@ -3856,7 +3461,7 @@ if(TARGET b70-serve)
     EXPECT "--pipeline-split belongs to --parallel pp")
   b70_serve_reject(cli_reject_serve_qwen4exp_tokenizer ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp-q38tok --layers 4
     EXPECT "Serve a snapshot that ships")
-  b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --layers 4
+  b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --layers 4
     EXPECT "belongs to Qwen3.8-Flash-Next")
   set_tests_properties(cli_reject_serve_qwen4exp_full
     cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
@@ -4146,10 +3751,8 @@ set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_spec_max
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_model_alone ${B70_NO_MODEL} --draft-model x EXPECT "needs --spec dflash")
   b70_serve_reject(cli_reject_serve_dflash_spec_max ${B70_NO_MODEL} --spec dflash --spec-max 8 EXPECT "expects 1..7")
-  b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
-    EXPECT "no DFlash drafter exists for K2-Horizon")
   set_tests_properties(cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
-    cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
+    PROPERTIES LABELS dflash)
   # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
   b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
     --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup is built for one card")

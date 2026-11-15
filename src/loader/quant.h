@@ -124,7 +124,7 @@ struct LinearSrc {
   // `.qweight` + `.scales` (GPTQ v1) or `.weight_packed` + `.weight_scale` +
   // `.weight_shape` (compressed-tensors pack-quantized, symmetric; converted here -
   // the ONE conversion point every loader path goes through: dense,
-  // the MoE experts, the MTP head's MoE layer, K2); Bf16 is `.weight`.
+  // the MoE experts, the MTP head's MoE layer); Bf16 is `.weight`.
   static LinearSrc classify(const SafetensorsSet& set, const std::string& prefix);
   // The kind alone, from the same suffixes, without reading or converting a byte.
   static WKind kind_of(const SafetensorsSet& set, const std::string& prefix);

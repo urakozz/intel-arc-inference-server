@@ -5,9 +5,10 @@ cannot hardcode the things this one hardcodes, and specialisation is the whole s
 for agentic coding first, then Qwen3.8-Flash-Next; the order is kept in [open-work.md](open-work.md).
 
 The other models each have their own engine, specialised the same way, and their own spec: Ornith (spec 15),
-K2-Horizon (18), Kolibri-1 (20), Qwen3.8-Flash-Next (`qwen4_exp`, spec 21) and Nemotron 3.5 Bolt (25), which is
+Kolibri-1 (20), Qwen3.8-Flash-Next (`qwen4_exp`, spec 21) and Nemotron 3.5 Bolt (25), which is
 parked until Flash-Next is done. LFM2.5, Muse-Glimmer and LiLiCorr as a model were dropped on 2026-10-27 (LiLiCorr
-lives on as Bolt's draft model) and Agnes 3.0 Flash on 2026-11-07; Flint (spec 27) and Nanbeige (spec 29) are
+lives on as Bolt's draft model), Agnes 3.0 Flash on 2026-11-07 and K2-Horizon (spec 18) on 2026-11-15 (its code is
+in the local tag `archive/k2-horizon`); Flint (spec 27) and Nanbeige (spec 29) are
 parked and not built.
 
 Qwen3.8-Flash-Next is 12 QSA sparse-attention layers and 36 GDN layers, a 512-expert MoE (mixture of experts: a

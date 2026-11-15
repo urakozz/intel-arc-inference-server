@@ -12,7 +12,7 @@
 #include "runtime/prefill/kernels.h"
 
 // Spec 20d: Kolibri-1's prefill - one chunk of at most kPfC positions through one device's layers on
-// the Level Zero list (spec 20 §4; 18c's arrangement, runtime/k2/k2_prefill.h), no host wait inside it.
+// the Level Zero list (spec 20 §4), no host wait inside it.
 // The walk, per chunk on a device (kolibri_sizes.h counts it):
 //
 //   device 0     pf_embed_gather (the chunk's ids), pf_res_fold SP0 (Σ resid² for layer 0's norm)       2

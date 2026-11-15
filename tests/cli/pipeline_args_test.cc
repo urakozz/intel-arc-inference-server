@@ -116,20 +116,20 @@ void check_names_and_spec() {
   CHECK(cli::served_name("/home/u/.cache/huggingface/hub/models--urakozz--Kolibri-1/snapshots/abc/") ==
         "urakozz/Kolibri-1");
   CHECK(cli::served_name("/data/checkpoints/my-model/") == "my-model");
-  CHECK(cli::served_name("./tests/model/k2") == "k2");
+  CHECK(cli::served_name("./tests/model/kolibri1") == "kolibri1");
 
   using cli::SpecFamily;
   using cli::SpecKind;
   const cli::Spec q = cli::resolve_spec("auto", SpecFamily::Qwen, "Qwen3.8", false, 0, false);
   CHECK(q.kind == SpecKind::Mtp && q.adaptive && q.max_k == 3u);
-  CHECK(cli::resolve_spec("auto", SpecFamily::None, "K2-Horizon", false, 0, false).kind == SpecKind::Off);
+  CHECK(cli::resolve_spec("auto", SpecFamily::None, "Kolibri-1", false, 0, false).kind == SpecKind::Off);
   CHECK(cli::resolve_spec("auto", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", false, 0, false).kind == SpecKind::Off);
   const cli::Spec f = cli::resolve_spec("mtp", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", true, 2, false);
   CHECK(f.kind == SpecKind::Mtp && !f.adaptive && f.max_k == 2u);
   const cli::Spec d = cli::resolve_spec("dflash", SpecFamily::Qwen, "Qwen3.8", false, 0, true);
   CHECK(d.kind == SpecKind::DFlash && d.max_k == 7u);
   CHECK(cli::resolve_spec("lookup", SpecFamily::Qwen, "Qwen3.8", true, 1, false).max_k == 1u);
-  CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::None, "K2-Horizon", false, 0, false); }, "K2-Horizon has no MTP head"));
+  CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::None, "Kolibri-1", false, 0, false); }, "Kolibri-1 has no MTP head"));
   CHECK(says([] { cli::resolve_spec("lookup", SpecFamily::None, "Kolibri-1", false, 0, false); }, "--spec lookup verifies"));
   CHECK(says([] { cli::resolve_spec("dflash", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", false, 0, false); },
              "built for Qwen3.8 beside its drafter"));
@@ -184,7 +184,7 @@ void check_serve() {
   two.devices = 2;
   cli::ServePipelineContext c;
   // One card: nothing refused, whatever the model or flags.
-  for (const char* mt : {"qwen3_5", "k2_horizon", "kolibri1", ""}) {
+  for (const char* mt : {"qwen3_5", "kolibri1", ""}) {
     c = {};
     c.model_type = mt;
     cli::check_serve_pipeline(one, c);
@@ -201,20 +201,16 @@ void check_serve() {
       c.mtp = mtp;
       cli::check_serve_pipeline(two, c);
     }
-  // The refusals, by name.
-  c = {};
-  c.model_type = "k2_horizon";
-  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "K2-Horizon runs its own engine"));
-  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "serve it on one card"));
   // Spec 20e: Kolibri-1 is served by its own engine (two cards by default) - nothing refused here; its
   // rules are cli::kolibri::check_args's (a --pipeline-split under --parallel auto is Kolibri's default two cards).
+  c = {};
   c.model_type = "kolibri1";
   cli::check_serve_pipeline(two, c);
   cli::check_serve_pipeline(split_only, c);
   c = {};
   c.prefill_profile = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_PROFILE=1"));
-  std::printf("b70-serve --parallel: one card untouched, pp serves the Qwen family, the refusals by name, Kolibri-1 its own\n");
+  std::printf("b70-serve --parallel: one card untouched, pp serves the Qwen family, Kolibri-1 its own\n");
 }
 
 // The hardware gate's rule on made-up driver reports: one or two B70s pass, with the smaller card's memory;

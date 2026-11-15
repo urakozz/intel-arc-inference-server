@@ -1,5 +1,5 @@
 // b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine (Qwen3.8,
-// Ornith), runtime::k2::K2Engine (K2-Horizon, spec 18d) or runtime::kolibri::KolibriEngine
+// Ornith) or runtime::kolibri::KolibriEngine
 // (Kolibri-1, spec 20e: two cards by default), picked by config.json's model_type; with --parallel pp
 // (spec 16d) over runtime::PipelineEngine, the Qwen-family model split over two B70s
 // (cli/pipeline_serve.h has what it serves and refuses); with --parallel tp (spec 17d) over runtime::TpEngine, Qwen3.8
@@ -26,9 +26,7 @@
 #include "cli/bolt_serve.h"     // spec 25e: BoltEngineAdapterT, the generation defaults, the refusals
 #include "cli/bolt_spec.h"      // spec 26c: --spec dflash / lookup for Bolt (LiLiCorr)
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
-#include "cli/k2_decode.h"
 #include "cli/hardware_gate.h"
-#include "cli/k2_serve_adapter.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
 #include "cli/max_len.h"
@@ -102,7 +100,7 @@ void usage() {
                "                 [--max-len auto|L] [--parallel auto|1|pp|replica|tp] [--host 0.0.0.0] [--port 8000]\n"
                "\n"
                "  The model is chosen from the checkpoint's config.json (Qwen3.8, Ornith 1.5,\n"
-               "  K2-Horizon, Kolibri-1, Qwen3.8-Flash-Next, Nemotron 3.5 Bolt) and served under its name\n"
+               "  Kolibri-1, Qwen3.8-Flash-Next, Nemotron 3.5 Bolt) and served under its name\n"
                "  (the repo id, or the directory's). Everything else - the device memory the plan leaves free,\n"
                "  the int8 lm_head, the drafter's form, the speculative cost tables, the tokenizer, the chat\n"
                "  template and the generation defaults (the snapshot's) - the engine decides; what does not fit\n"
@@ -194,7 +192,7 @@ void print_eos(const std::vector<uint32_t>& ids) {
 
 // Spec 7: the prefix cache's pinned system RAM, sized after the model is loaded (so
 // "available" already excludes the process's own load) - shared by the Qwen-family and the
-// K2 paths. Returns null when the cache is off; sets options.prefix_cache_bytes / prefix_alloc.
+// other families' paths. Returns null when the cache is off; sets options.prefix_cache_bytes / prefix_alloc.
 std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix_auto,
                                                uint32_t prefix_cache_gb, server::Options& options) {
   std::unique_ptr<PinnedAlloc> prefix_alloc;
@@ -235,57 +233,6 @@ int listen_until_stopped(server::Server& server, const server::Options& options)
     throw std::runtime_error("failed to bind http://" + options.host + ":" +
                              std::to_string(options.port));
   return 0;
-}
-
-// Spec 18d: K2-Horizon served - runtime::k2::K2Engine behind cli::k2::K2EngineAdapterT (KV-only
-// prefix-cache snapshots, host sampling), K2's chat format (server::ChatFormat, set by run()
-// from model_type), its EOS [1, 250019] from generation_config.json. The refusals are run()'s,
-// before this is called (before the device).
-struct K2Serve {
-  std::string path, snapshot_dir;
-  cli::MaxLenArg max_len_arg;
-  size_t mem_reserve = 0;
-  runtime::KvCache kv_cache = runtime::KvCache::Bf16;
-  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
-  bool prefix_auto = true;
-  uint32_t prefix_cache_gb = 0;
-};
-
-int serve_k2(const K2Serve& a, server::Options options) {
-  const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
-  const uint32_t trained = loader::trained_context(a.snapshot_dir);
-  cli::check_before_load(a.max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
-  l0::Context context(0u);
-  std::fprintf(stderr, "device: %s (%u EUs)\n", context.name().c_str(), context.eu_count());
-  loader::K2LoadedModel model = [&] {
-    StdoutToStderr redirect;
-    return loader::load_k2(context, a.path, cli::load_len(a.max_len_arg, trained), a.lm_head);
-  }();
-  // The server prefills every request: the plan carries K2's prefill scratch (spec 18c).
-  const uint32_t max_len =
-      cli::k2::settle(context, model, a.max_len_arg, a.mem_reserve, /*prefill=*/true, a.kv_cache);
-  runtime::k2::K2Engine engine(context, std::move(model), max_len, /*debug_tap=*/false, a.kv_cache);
-  engine.prepare_prefill();   // the scratch and the binaries' check at load, not in a request
-  std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
-  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
-  if (tokenizer.vocab_used() != engine.vocab())
-    std::fprintf(stderr, "note: tokenizer.json defines %u ids, K2-Horizon's vocabulary is %u; "
-                         "sampling masks from %u\n",
-                 tokenizer.vocab_used(), engine.vocab(), tokenizer.vocab_used());
-  TemplateAdapter chat_template(a.snapshot_dir);
-  cli::k2::K2EngineAdapterT<runtime::k2::K2Engine> engine_adapter(engine, tokenizer.vocab_used());
-  options.eos_ids = eos;
-  const std::unique_ptr<PinnedAlloc> prefix_alloc =
-      make_prefix_alloc(context, a.prefix_auto, a.prefix_cache_gb, options);
-  options.parallel_desc = "1 card";
-  server::Server server({tokenizer, chat_template, engine_adapter}, options);
-  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
-               options.host.c_str(), options.port, max_len);
-  print_eos(eos);
-  std::fprintf(stderr, ", K2-Horizon (%s chat format), prefill backend l0, attention flash, "
-                       "mtp none, lm_head %s, kv cache %s, prefix snapshots KV-only\n",
-               options.chat_format.name(), loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
-  return listen_until_stopped(server, options);
 }
 
 // Spec 20e: Kolibri-1 served - runtime::kolibri::KolibriEngine (one card or, the default, two: spec 16b's
@@ -1290,12 +1237,10 @@ int run(int argc, char** argv) {
         q_arch = cj.at("architectures").at(0).get<std::string>();
     }
   }
-  const bool is_k2 = model_type == "k2_horizon";
   const cli::SpecFamily family = is_q4 ? cli::SpecFamily::Qwen4Exp
                                  : is_kol ? cli::SpecFamily::None
-                                 : is_k2 ? cli::SpecFamily::None
                                          : cli::SpecFamily::Qwen;
-  const std::string model_name = is_q4 ? "Qwen3.8-Flash-Next" : is_kol ? "Kolibri-1" : is_k2 ? "K2-Horizon" : "this model";
+  const std::string model_name = is_q4 ? "Qwen3.8-Flash-Next" : is_kol ? "Kolibri-1" : "this model";
   // --spec auto = the MTP head (operator 2026-11-14: no extra VRAM by default; DFlash only on an explicit --spec dflash).
   const cli::Spec spec = cli::resolve_spec(spec_arg, family, model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
@@ -1315,7 +1260,7 @@ int run(int argc, char** argv) {
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
-  cli::check_tp(pipe, {false, false, is_q4 || is_kol || is_k2,   // spec 19 v3c: dflash and dflash-lookup are served
+  cli::check_tp(pipe, {false, false, is_q4 || is_kol,   // spec 19 v3c: dflash and dflash-lookup are served
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
@@ -1428,34 +1373,12 @@ int run(int argc, char** argv) {
     pipe_ctx.prefill_profile = profile != nullptr && std::string(profile) == "1";
   }
   const std::string snapshot_dir = loader::resolve_snapshot(path);
-  // Spec 18b / 18d: dispatch on config.json's model_type. The chat format (template variables,
-  // reasoning tags, tool-call syntax) follows it (server/chat_format.h: anything but
-  // k2_horizon is the Qwen path Qwen3.8 and Ornith share); K2-Horizon runs its own
-  // engine (runtime/k2, cli::k2::K2EngineAdapterT) - what that engine does not have is refused
-  // here by name, before the device.
+  // The chat format (template variables, reasoning tags, tool-call syntax) follows config.json's model_type
+  // (server/chat_format.h).
   options.chat_format = server::ChatFormat::for_model_type(model_type);
-  // Spec 16d: the model's parallel refusals, before the model dispatch below - so K2 under --parallel pp is
-  // refused by name rather than served on one card.
+  // Spec 16d: the model's parallel refusals, before the device.
   pipe_ctx.model_type = model_type;
   cli::check_serve_pipeline(pipe, pipe_ctx);
-  if (is_k2) {
-    if (have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
-      throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), "
-                                           "not ") + runtime::prefill_backend_name(pp_backend) +
-                               ": l0-int8's h8 linears need K in whole 1024-k Hadamard blocks and "
-                               "K2's hidden is 2560 - --prefill-backend "
-                               "l0, or omit it");
-    K2Serve k2;
-    k2.path = path;
-    k2.snapshot_dir = snapshot_dir;
-    k2.max_len_arg = max_len_arg;
-    k2.mem_reserve = mem_reserve;
-    k2.kv_cache = kv_cache;
-    k2.lm_head = lm_head;
-    k2.prefix_auto = prefix_auto;
-    k2.prefix_cache_gb = prefix_cache_gb;
-    return serve_k2(k2, options);
-  }
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
   cli::check_before_load(max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
