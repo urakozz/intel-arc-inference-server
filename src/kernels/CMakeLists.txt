@@ -111,8 +111,6 @@ function(add_prep_res_norm M K SP)
 endfunction()
 add_prep_res_norm(1 5120 0)    # first norm of a layer: no mixer partials to fold in
 add_prep_res_norm(1 5120 4)    # Task 4: after out_proj / o_proj / down (S = 4)
-add_prep_res_norm(1 5120 16)   # pre-Task-4 control retained for prep_test/probes
-add_prep_res_norm(2 5120 16)   # spec 1 §9: the M loop must compile at M=2
 
 # The two-stage split of prep_res_norm - spec 1.5 lever L1. The runtime binds
 # THIS pair at all 129 sites; the single-WG `prep_res_norm` above stays compiled

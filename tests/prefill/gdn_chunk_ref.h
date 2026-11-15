@@ -65,10 +65,10 @@
 //   * **Q_SCALE is folded into q at read**, not applied as FLA's trailing
 //     `* scale` (chunk_o.py:137). Algebraically the same for both terms of `o`,
 //     and it is what makes our `q` decode's `qf_s` (gdn_step.cl:312).
-//     (`pf_gdn_scan_dpas`, the reverted DPAS kernel kept in the same `.cl`,
-//     folds it onto the ACCUMULATED dot instead - one fp32 multiply where there
-//     are 128 - because the DPAS A operand must be the bf16 word itself. That
-//     variant is launched by nothing; the line above is what `pf_gdn_scan`
+//     (`pf_gdn_scan_dpas`, the reverted DPAS kernel, removed 2026-11-15,
+//     folded it onto the ACCUMULATED dot instead - one fp32 multiply where there
+//     are 128 - because the DPAS A operand must be the bf16 word itself. The
+//     line above is what `pf_gdn_scan`
 //     does. docs/prefill-gdn-scan-dpas-2026-09-05.md §3.4.)
 //
 // Two deliberate deviations from FLA, both plan 6b ruling R8: its `solve_tril`
@@ -122,9 +122,9 @@
 //     takes bf16 operands, so it rounds `S`, `vn`, `D` and `A2` at the multiply
 //     (five new roundings, "R1-R4"), and `prefill_gate_rtn_test` fell to 92/93
 //     determined rows while Vishva's `code` prompt's `gdn_state` cosine fell to
-//     0.998499499 from 0.999780657. The kernel is kept as `pf_gdn_scan_dpas` in the same `.cl`,
-//     launched by nothing, and **this file mirrors `pf_gdn_scan`**, which has
-//     none of those roundings. docs/prefill-gdn-scan-dpas-2026-09-05.md §4-5.
+//     0.998499499 from 0.999780657. The kernel, `pf_gdn_scan_dpas`, was
+//     launched by nothing and removed 2026-11-15 (git keeps it); **this file
+//     mirrors `pf_gdn_scan`**, which has none of those roundings. docs/prefill-gdn-scan-dpas-2026-09-05.md §4-5.
 //   * every triangular sum (`u`, `w`, and o's A2 term) runs `j` ASCENDING with
 //     explicit `fma` and one accumulator. **Ruling A27 re-tiled `pf_gdn_wu`
 //     (an 8 x 2 output tile on a mirror-paired position block, `vb`/`kb` staged

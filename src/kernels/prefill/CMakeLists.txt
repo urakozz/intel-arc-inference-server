@@ -375,8 +375,8 @@ endif()
 #   FA        pf_attn_prep_q16, pf_attn (softmax + gate) and pf_flash_attn at 16 q / 2 kv
 #             heads; flash at HPW 8 = the GQA group, so its grid.z stays 1
 #   MoE       the router GEMV over the chunk (N 272, {16, 16}), decode's moe_route binary
-#             (moe_M1_E256_T8_D2048_I512, grid (1, C)), pf_moe.cl (sort, gather, dequant,
-#             combine) and the grouped GEMMs: gate||up bf16 and int8 (h8) with the SiLU
+#             (moe_M1_E256_T8_D2048_I512, grid (1, C)), pf_moe.cl (gather, dequant, combine),
+#             pf_moe_sort_mw.cl and the grouped GEMMs: gate||up bf16 and int8 (h8) with the SiLU
 #             epilogue, down bf16 (its K 512 is not whole 1024-k rotation blocks)
 # Not built for Ornith: the composed attention's identity prep (pf_attn_prep, fp32 q), the
 # int8 KV cache's prefill (spec 12b, Qwen3.8's shapes), the MTP head's (spec 15e).
@@ -455,16 +455,14 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_flash_attn_r32g_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=32 HPW=8 QREG=1 EXP2=1 GATE_EPI=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
-  # The MoE block. TM (the tile rows) and KC (PrefillScratchDims::kCDefault, the sort's SLM
-  # staging) are mirrored by kernels::pf_moe::kTileM and runtime::PrefillScratchDims::kCDefault
-  # (plan 5d: a MoE model's chunk cap stays 2048 - check_prefill_chunk_cap).
+  # The MoE block. TM (the tile rows) is mirrored by kernels::pf_moe::kTileM.
   add_ocloc_kernel(pf_moe_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
                    DEFINES K=2048 N=272 COLS_PER_WG=16 KSPLIT=16)
   add_ocloc_kernel(pf_moe_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl
-                   DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 KC=2048)
+                   DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32)
   # Phase 3 Task 5: the combine + the next layer's leading norm (pf_res_norm at S_PREV 0) in one launch, bitwise.
   add_ocloc_kernel(pf_moe_combine_norm_E256_T8_D2048_I512_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl
-                   DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 KC=2048 FOLD_G=20)
+                   DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 FOLD_G=20)
   set(PF_MOE_GEMM_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_gemm.cl)
   add_ocloc_kernel(pf_moe_gemm_K2048_N1024_SILU SOURCE ${PF_MOE_GEMM_CL}
                    DEFINES K=2048 N=1024 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
