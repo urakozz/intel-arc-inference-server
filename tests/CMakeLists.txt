@@ -3096,7 +3096,8 @@ if(B70_Q4EXP)
     kernel_gemv_M1_K2560_N13312_S2_L0 kernel_gemv_bf16_M1_K2560_N13312 kernel_gemv_bf16_M1_K2560_N640_C16_S16
     kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_S1 kernel_q4_qsa_M1_T512_W1024 kernel_q4_qsa_attn_M1_T32
     kernel_q4_qsa_attn_eager_M1 kernel_gemv_bf16_M1_K2560_N528_C16_S16 kernel_q4_route_M1_E512_T10_N528_L256
-    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4 kernel_q4_moe_M1_E512_T10_D2560_I640_SHB kernel_q4_ple_gather_M1_BF16
+    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4 kernel_q4_moe_M1_E512_T10_D2560_I640_SHB
+    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M1_E512_T10_D2560_I640_SHB_TBL kernel_q4_ple_gather_M1_BF16
     kernel_q4_ple_gather_M1_F32 kernel_q4_ple_block_M1 kernel_gemv_bf16_M1_K2560_N12800
     kernel_gemv_bf16_M1_K2560_N248320 kernel_gemv_i8w_M1_K2560_N248320 kernel_argmax_stage1_M1 kernel_argmax_stage2)
   # Host: the names the capture binds (kernels::qwen4exp::decode_variants) are exactly this list.
@@ -3199,6 +3200,7 @@ if(B70_Q4EXP)
     kernel_pf_route_slab_K2560_N528_P768 kernel_pf_route_slab_K2560_N128_P256
     kernel_q4_route_M1_E512_T10_N528_L256_P768 kernel_pf_gdn_conv_AB256
     kernel_pf_moe_sort_mw_E512_T10 kernel_pf_moe_q4gemm_K2560_N1280_SILU kernel_pf_moe_q4gemm_K640_N2560
+    kernel_pf_moe_q4gemm_K2560_N1280_SILU_TBL kernel_pf_moe_q4gemm_K640_N2560_TBL
     kernel_pf_gated_head_SIG kernel_q4_pf_bf16_slab_K2560_N640
     kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF kernel_pf_flash_attn_Q24KV2
     kernel_q4_pf_sparse_attn_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_EAGER kernel_pf_attn_Q24KV2
@@ -3402,7 +3404,8 @@ if(B70_Q4EXP AND B70_MTP)
         kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I kernel_q4_hc_up_mix_M${MM}
         kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024
         kernel_q4_qsa_attn_M${MM}_T32 kernel_q4_qsa_attn_eager_M${MM} kernel_q4_route_M${MM}_E512_T10_N528_L256
-        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB)
+        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB
+        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_TBL)
     endif()
   endforeach()
   # Spec 28d: the verify lists' dense int4 projections and int8 head at M 2..4 on gemm_sm (spec 28b's block builds
