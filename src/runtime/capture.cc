@@ -1138,10 +1138,11 @@ class Capture {
     // verify-cost-m8: a||b in the DFlash verify lists at M >= 5 (the one card's and a pipeline stage's alike) splits K
     // 64 ways in the work-group (8 x 64 subgroups instead of 8 x 16: verify at 8 rows -0.25 ms at depth 4096). The
     // sum's order changes - those rows are graded by the f32 judge, as the 16-block attention's already are; MTP's
-    // M <= 4 rows and every other list keep gemv_bf16_tiling's (bitwise). Probes override it at any M >= 2.
+    // M <= 4 rows, the lists forced to the 1-row GEMVs (tests' bitwise twins) and every other list keep
+    // gemv_bf16_tiling's (bitwise). Probes override it at any M >= 2.
     if (id == LinearId::AB && kCapM >= 2 && s.K == 5120 && s.N == 128 &&
-        (opt_.probe_ab_ksplit || (kCapM >= 5 && (mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps ||
-                                                 mode_ == Mode::Verify))))
+        (opt_.probe_ab_ksplit || (kCapM >= 5 && opt_.force_linear != LinearForce::Gemv &&
+                                  (mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps || mode_ == Mode::Verify))))
       t.ksplit = opt_.probe_ab_ksplit ? opt_.probe_ab_ksplit : 64;
     require(s.N % t.cols == 0, "gemv_bf16 N is not a multiple of its work-group width");
     require(out.size() >= size_t(kCapM) * s.N * sizeof(float),
