@@ -12,6 +12,8 @@
 //       deferred review item).
 //   (spec 19 v3d) a row with the 2D block read is bitwise its plain-read twin at every M, where that twin is built.
 //   N3  property R: every row of every M bitwise equal (every slice) to the same row at the largest built M;
+//       (spec 32e) where the row binds gemm_sm_v2 past 16 rows, rows 16..M-1 also bitwise gemm_sm at 16 rows over
+//       the same inputs placed in its rows 0..15, and every gemm_sm_v2 binary has no spill and no private memory;
 //       then `trials` trials (default 1000 a row) of a probe row at a random index among fresh random rows,
 //       at a random built M - row bitwise equal to its reference. The output buffer is filled with a NaN
 //       pattern before EVERY run (28a's deferred item: a stale result can never pass as a fresh one).
@@ -125,8 +127,8 @@ struct Bound {
 Bound bind_gemm_sm(Dev& d, const kernels::SmallMTuning& t, uint32_t M) {
   Bound b;
   b.mod = std::make_unique<l0::Module>(d.ctx, kernels::path(kernels::gemm_sm_variant(M, t)));
-  b.k = std::make_unique<l0::Kernel>(*b.mod, kernels::gemm_sm_entry(t));
-  b.k->group_size(kernels::gemm_sm_wg_size(t));
+  b.k = std::make_unique<l0::Kernel>(*b.mod, kernels::gemm_sm_entry(M, t));   // gemm_sm_v2 past 16 (spec 32e)
+  b.k->group_size(kernels::gemm_sm_wg_size(M, t));
   b.gx = t.N / kernels::gemm_sm_cols(t);
   b.gy = kernels::gemm_sm_grid_y(t);
   b.S = kernels::gemm_sm_out_s(t);
@@ -318,6 +320,35 @@ int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t s
       ++r_rows;
       if (!bitwise(row_slices(p, b.S, M, t.N, m), row_slices(pmax, bmax.S, Mmax, t.N, m))) ++r_diff;
     }
+  }
+  // R, spec 32e: gemm_sm_v2's rows past 16 against gemm_sm at 16 rows over the same 16 rows (rows 0..15 are part 1),
+  // and its binaries keep every value in registers (no spill, no private memory: zeKernelGetProperties).
+  size_t v2_diff = 0, v2_rows = 0;
+  for (uint32_t M : ms) {
+    if (!kernels::gemm_sm_v2_arm(M, t)) continue;
+    Bound b = bind_gemm_sm(d, t, M);
+    ze_kernel_properties_t kp{};
+    kp.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+    ZE_CHECK(zeKernelGetProperties(b.k->handle(), &kp));
+    if (kp.spillMemSize || kp.privateMemSize) {
+      std::printf("FAIL %s: spill %u B, private memory %u B (gemm_sm_v2 must keep every value in registers)\n",
+                  kernels::gemm_sm_variant(M, t).c_str(), kp.spillMemSize, kp.privateMemSize);
+      ++fails;
+    }
+  }
+  if (kernels::gemm_sm_v2_arm(Mmax, t)) {
+    Bound b16 = bind_gemm_sm(d, t, 16);
+    for (uint32_t c = 1; c < Mmax / 16; ++c) {
+      const std::vector<uint16_t> xc(x.begin() + size_t(16) * c * t.K, x.begin() + size_t(16) * (c + 1) * t.K);
+      const std::vector<float> p16 = run(d, bf, b16, xc, t.N);
+      for (uint32_t m = 0; m < 16; ++m, ++v2_rows)
+        if (!bitwise(row_slices(p16, b16.S, 16, t.N, m), row_slices(pmax, bmax.S, Mmax, t.N, 16 * c + m))) ++v2_diff;
+    }
+  }
+  if (v2_diff) {
+    std::printf("FAIL %s: %zu of %zu rows past 16 differ from gemm_sm at 16 rows over the same inputs\n",
+                name0.c_str(), v2_diff, v2_rows);
+    ++fails;
   }
   // R, part 2: probe rows at random indices among fresh random rows, at random built M.
   std::mt19937 g(seed * 31 + 5);

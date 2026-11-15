@@ -118,26 +118,36 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
 enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4 };
+// Spec 32e: an int4 row's gemm_sm_v2 shape past 16 rows (src/kernels/gemm_sm_v2.cl; plan 34a Task 1 measured both):
+// kV2Rc32 - row chunks of 32 a sub-group, a weight prefetch one group ahead, 256 GRF; kV2Swap - one sub-group for
+// every row, the prefetch two groups ahead, 128 GRF.
+enum : unsigned char { kV2None = 0, kV2Rc32 = 1, kV2Swap = 2 };
 struct SmallMTuning {
   unsigned K, N, S, layout;
   bool wg, magic, grf256, blk2d;
   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head);
-  // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter). kSmAll also 32 (spec 32).
+  // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter). kSmAll also 32 and 64 (spec 32).
   unsigned char mset = kSmAll;
   // Spec 32: from this M on the variant carries 256 GRF (0: never; grf256 already means every M). GRF changes who
   // holds a value, not the value, so it is the one knob that may vary with M (property R).
   unsigned g256_from = 0;
+  // Spec 32e: the gemm_sm_v2 shape at 32 and at 64 rows (kV2None: gemm_sm, which spills there). Same arguments,
+  // output, grid and per-row arithmetic as gemm_sm, so every row is bitwise gemm_sm's at 16 rows (property R).
+  unsigned char v2_32 = kV2None, v2_64 = kV2None;
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
     // Qwen3.8
-    // (g256_from 32, spec 32: at 32 rows every row spills at 128 GRF - qkv||z 1285 us against 99 at 256)
-    {5120, 16384, 1, 1, false, true, false, false, kSmAll, 32},   // qkv||z      48 layers
-    {6144, 5120, 4, 0, false, true, false, true, kSmAll, 32},     // out_proj, o_proj
-    {5120, 14336, 2, 0, false, true, false, true, kSmAll, 32},    // q||k||v
-    {5120, 34816, 8, 0, true, true, false, true, kSmAll, 32},     // gate||up (2x8 work-group: one slice, SiLU at S 1;
-                                                                  // the 2D read: spec 19 v3d Task 4)
-    {17408, 5120, 4, 0, false, true, false, true, kSmAll, 32},    // down
-    {5120, 248320, 1, 2, true, false, false, false, kSmAll, 32},  // the int8 lm_head
+    // (g256_from 32, spec 32: at 32 rows gemm_sm spills at 128 GRF - qkv||z 1285 us against 99 at 256; the int4
+    // rows take gemm_sm_v2 at 32 and 64 rows instead, spec 32e: the per-shape best of plan 34a Task 1's arms, a
+    // token's int4 linears 29.85 ms at 32 rows and 44.13 ms at 64)
+    {5120, 16384, 1, 1, false, true, false, false, kSmAll, 0, kV2Rc32, kV2Rc32},   // qkv||z      48 layers
+    {6144, 5120, 4, 0, false, true, false, true, kSmAll, 0, kV2Swap, kV2Rc32},     // out_proj, o_proj
+    {5120, 14336, 2, 0, false, true, false, true, kSmAll, 0, kV2Rc32, kV2Rc32},    // q||k||v
+    {5120, 34816, 8, 0, true, true, false, true, kSmAll, 0, kV2Rc32, kV2Rc32},     // gate||up (2x8 work-group: one
+                                                                                   // slice, SiLU at S 1; the 2D read:
+                                                                                   // spec 19 v3d Task 4)
+    {17408, 5120, 4, 0, false, true, false, true, kSmAll, 0, kV2Rc32, kV2Rc32},    // down
+    {5120, 248320, 1, 2, true, false, false, false, kSmAll, 32},  // the int8 lm_head (gemm_sm_i8w at 32 and 64 too)
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the operator's 28b addition, 2026-11-01) at its verify
     // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
     // and the bf16 router stay as they are (spec 28m)
@@ -239,6 +249,7 @@ inline constexpr bool small_m_table_ok() {
     if (t.blk2d && t.layout != 0) return false;
     if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % 8 != 0)) return false;
     if (t.N % gemm_sm_cols(t) != 0) return false;
+    if ((t.v2_32 || t.v2_64) && t.layout > 1) return false;   // gemm_sm_v2 is int4 layouts 0 / 1
   }
   return true;
 }
@@ -246,8 +257,16 @@ static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #err
 // gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256][_b2d] (int4; S the OUTPUT's slices, the binary's S define) /
 // gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8): every knob is in the name, so a table row CMake does not build is a
 // missing file at capture.
+// Spec 32e: gemm_sm_v2_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_b2d]_rc32_pf1_g256 | _sw_pf2 where a row binds v2 at M.
+inline constexpr unsigned char gemm_sm_v2_arm(unsigned M, const SmallMTuning& t) {
+  return M == 64 ? t.v2_64 : M == 32 ? t.v2_32 : (unsigned char)kV2None;
+}
 inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   const std::string mk = "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N);
+  if (const unsigned char a = gemm_sm_v2_arm(M, t))
+    return "gemm_sm_v2" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) +
+           (t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.blk2d ? "_b2d" : "") +
+           (a == kV2Rc32 ? "_rc32_pf1_g256" : "_sw_pf2");
   const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 || (t.g256_from && M >= t.g256_from) ? "_g256" : "") +
                             (t.blk2d ? "_b2d" : "");
   if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
@@ -262,10 +281,18 @@ inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
     case kSmVerify8: return {2, 3, 4, 5, 6, 7, 8};
     case kSmDraft8: return {8};
     case kSmDraft7: return {7};
-    default: return {2, 3, 4, 5, 6, 7, 8, 16, 32};   // 32: spec 32's deep verify list
+    default: return {2, 3, 4, 5, 6, 7, 8, 16, 32, 64};   // 32 / 64: spec 32's deep verify lists
   }
 }
 inline constexpr const char* gemm_sm_entry(const SmallMTuning& t) { return t.layout == 2 ? "gemm_sm_i8w" : "gemm_sm"; }
+// The entry and work-group size of the variant at M rows: gemm_sm's, or gemm_sm_v2's (the row-chunk shape's work-group
+// holds M / 32 chunks of gemm_sm's); the grid is gemm_sm's at every M (gemm_sm_cols, gemm_sm_grid_y).
+inline constexpr const char* gemm_sm_entry(unsigned M, const SmallMTuning& t) {
+  return gemm_sm_v2_arm(M, t) ? "gemm_sm_v2" : gemm_sm_entry(t);
+}
+inline constexpr unsigned gemm_sm_wg_size(unsigned M, const SmallMTuning& t) {
+  return gemm_sm_wg_size(t) * (gemm_sm_v2_arm(M, t) == kV2Rc32 ? M / 32 : 1);
+}
 // The int4 / int8 linear a capture binds at M rows of kind `k` - the one naming rule the captures and
 // the names tests share.
 inline std::string int4_linear_variant(LinearKind k, unsigned M, unsigned K, unsigned N, unsigned S, unsigned L) {

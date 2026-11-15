@@ -1045,13 +1045,14 @@ class Capture {
     // Spec 28b: at M >= 2 (runtime::gemv_kind) a tuned shape binds gemm_sm (gemm_sm.cl) - gemv's four
     // arguments in gemv's order, gemv's [S][M][N] output at the shape's S (the consumer's fold unchanged),
     // except gate||up under the 2x8 work-group: one slice, and mlp() binds the SiLU's _S1 build. Only the
-    // variant, the entry, the work-group and the grid differ.
+    // variant, the entry, the work-group and the grid differ. Spec 32e: past 16 rows the int4 rows bind gemm_sm_v2 (the
+    // same arguments, output and grid; its own work-group).
     const kernels::SmallMTuning* t = small_m(s.K, s.N, s.S, s.layout);
     if (t)
       require(kernels::gemm_sm_out_s(*t) == s.S || id == LinearId::GateUp,
               "gemm_sm writes another split-K S than the consumer folds (only gate||up's SiLU has an S 1 build)");
-    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(*t),
-                               kernels::gemm_sm_wg_size(*t))
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(kCapM, *t),
+                               kernels::gemm_sm_wg_size(kCapM, *t))
                       : kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, s.layout == 0 ? w.scales->ptr() : w.mem.ptr());
@@ -1198,8 +1199,8 @@ class Capture {
     require(s.N % kernels::kGemvI8wCols == 0, "gemv_i8w N is not a multiple of 64");
     // Spec 28b: at M >= 2 a tuned shape binds gemm_sm_i8w - gemv_i8w's arguments and [M][N] output.
     const kernels::SmallMTuning* t = small_m(s.K, s.N, 1, 2);
-    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(*t),
-                               kernels::gemm_sm_wg_size(*t))
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(kCapM, *t),
+                               kernels::gemm_sm_wg_size(kCapM, *t))
                       : kernel(kernels::gemv_i8w_variant(kCapM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, w.scales->ptr());
