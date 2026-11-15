@@ -400,7 +400,7 @@ void set_default_prefill_chunk_cap(uint32_t cap) {
 }
 }  // namespace testing
 
-bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id) {
+bool l0_int8_bf16_linear(const model::ModelDesc&, model::LinearId id) {
   return id == model::LinearId::QkvZ || id == model::LinearId::OutProj || id == model::LinearId::Qkv ||
          id == model::LinearId::OProj;
 }
