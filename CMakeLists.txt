@@ -14,6 +14,12 @@ if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSIO
   message(FATAL_ERROR "${CMAKE_CXX_COMPILER} is ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}: this build "
                       "needs GCC 16 (C++26 with -freflection), ${B70_GXX} on the box")
 endif()
+# GCC 16's libstdc++ is newer than the system's: every binary finds it through its rpath, not LD_LIBRARY_PATH.
+execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so OUTPUT_VARIABLE B70_LIBSTDCXX
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+file(REAL_PATH ${B70_LIBSTDCXX} B70_LIBSTDCXX)
+get_filename_component(B70_LIBSTDCXX_DIR ${B70_LIBSTDCXX} DIRECTORY)
+add_link_options(-Wl,-rpath,${B70_LIBSTDCXX_DIR})
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
