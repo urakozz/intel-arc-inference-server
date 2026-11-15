@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "server/json_struct.h"
 #include "server/toolcall_bolt.h"
 #include "server/toolcall_kolibri.h"
 
@@ -13,6 +14,25 @@ using json = nlohmann::json;
 bool ends_with(const std::string& s, const std::string& tail) {
   return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
 }
+
+// Bolt's template reads enable_thinking, medium_effort, truncate_history_thinking by truthiness; the output parser reads
+// force_nonempty_content as `is True`. A non-boolean is the client's error, not a silent truthy / falsy reading.
+struct BoltKwargs {
+  std::optional<bool> enable_thinking, medium_effort, truncate_history_thinking, force_nonempty_content;
+};
+
+// Kolibri's template: its seven efforts (none disables thinking; minimal = low; xhigh, max = high), or null.
+bool kolibri_effort(const std::string& e) {
+  for (const char* k : {"none", "minimal", "low", "medium", "high", "xhigh", "max"})
+    if (e == k) return true;
+  return false;
+}
+struct KolibriKwargs {
+  [[=json_struct::null_is_absent, =json_struct::Says("must be one of none, minimal, low, medium, high, xhigh, max"),
+    =json_struct::Holds<std::string>(kolibri_effort)]]
+  std::optional<std::string> reasoning_effort;
+  std::optional<bool> preserve_thinking;
+};
 
 }  // namespace
 
@@ -49,27 +69,15 @@ nlohmann::ordered_json template_messages(const ChatFormat& format, const nlohman
 }
 
 void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
+  const auto fail = [](const std::string& what) {
+    throw std::invalid_argument("chat_template_kwargs." + what);
+  };
   if (format.kind == ChatFormat::Kind::Bolt && kwargs.is_object()) {
-    // The template reads enable_thinking, medium_effort, truncate_history_thinking by truthiness; the output parser reads
-    // force_nonempty_content as `is True`. A non-boolean is the client's error, not a silent truthy / falsy reading.
-    for (const char* key : {"enable_thinking", "medium_effort", "truncate_history_thinking", "force_nonempty_content"})
-      if (kwargs.contains(key) && !kwargs.at(key).is_boolean())
-        throw std::invalid_argument(std::string("chat_template_kwargs.") + key + " must be a boolean");
-    return;
-  }
-  if (format.kind == ChatFormat::Kind::Kolibri && kwargs.is_object()) {
-    // The template's seven efforts (none disables thinking; minimal = low; xhigh, max = high).
-    if (kwargs.contains("reasoning_effort")) {
-      const json& v = kwargs.at("reasoning_effort");
-      bool ok = v.is_null();
-      for (const char* e : {"none", "minimal", "low", "medium", "high", "xhigh", "max"}) ok = ok || v == e;
-      if (!ok)
-        throw std::invalid_argument("chat_template_kwargs.reasoning_effort must be one of none, minimal, low, "
-                                    "medium, high, xhigh, max");
-    }
-    if (kwargs.contains("preserve_thinking") && !kwargs.at("preserve_thinking").is_boolean())
-      throw std::invalid_argument("chat_template_kwargs.preserve_thinking must be a boolean");
-    return;
+    BoltKwargs k;
+    json_struct::read(kwargs, k, fail);
+  } else if (format.kind == ChatFormat::Kind::Kolibri && kwargs.is_object()) {
+    KolibriKwargs k;
+    json_struct::read(kwargs, k, fail);
   }
 }
 
