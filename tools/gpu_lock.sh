@@ -12,9 +12,10 @@
 # The protocol - flock(2) on three kinds of file in $B70_LOCK_DIR (default $HOME):
 #   b70-gpu.lock    the box. Whole box: EXCLUSIVE. Card job: SHARED, held for the whole job.
 #   b70-gpu<N>.lock card N, exclusive (card jobs only).
-#   b70-gpu.wait    the gate. A whole-box taker holds it exclusively while it WAITS for
-#                   b70-gpu.lock and drops it once it has the box; a card taker takes it and
-#                   drops it at once, just before its shared b70-gpu.lock.
+#   b70-gpu.wait    the gate. A whole-box taker that has waited past its grace (B70_BOX_GRACE,
+#                   default 600 s) holds it exclusively while it WAITS for b70-gpu.lock and drops
+#                   it once it has the box; a card taker takes it and drops it at once, just
+#                   before its shared b70-gpu.lock.
 # Order: card <N> -> gate -> box. A whole-box taker never takes a card lock, a card job
 # never waits for anything once it holds the box shared, so there is no cycle. Taking the card
 # first means a card job that waits for its card holds nothing a whole-box job needs.
@@ -22,10 +23,13 @@
 # Why the gate: Linux flock(2) has no queue and no fairness. A shared lock is granted whenever
 # no EXCLUSIVE lock is HELD - an exclusive request that is only WAITING does not stop it - and
 # a release wakes every waiter to race. Two card streams that overlap (one always running)
-# would starve a whole-box job forever. With the gate, once a whole-box job waits, a new card
-# job stops at the gate: the box drains to the card jobs already running and the whole-box job
-# runs next. Whole-box jobs queue behind each other on the gate and win over card jobs (timed
-# work first); card jobs only ever wait for running jobs.
+# would starve a whole-box job forever. With the gate, once a whole-box job has waited past its
+# grace, a new card job stops at the gate: the box drains to the card jobs already running and
+# the whole-box job runs next. During the grace the gate stays open, so a free card keeps taking
+# card jobs instead of idling while the other card finishes (2026-11-15: a waiting whole-box job
+# held the gate from the start and idled a free card for up to 90 min). Whole-box jobs past
+# their grace queue behind each other on the gate and win over card jobs; card jobs only ever
+# wait for running jobs.
 #
 # Backward compatible: `flock ~/b70-gpu.lock <cmd>` (exclusive, no gate) still excludes every
 # card job and every other whole-box job - it only lacks the priority, so while card streams
@@ -41,12 +45,18 @@ _gpu_take() {
   flock "$2" "$1"
 }
 
-# gpu_lock_box - the whole box: the gate (fd 6) while waiting, then b70-gpu.lock exclusive (fd 9)
+# gpu_lock_box - the whole box. First a grace period (B70_BOX_GRACE seconds, default 600) waiting for b70-gpu.lock
+# exclusive WITHOUT the gate: card jobs keep starting on a free card, and the box is taken the moment both cards
+# are idle at once. Only after the grace does it take the gate (fd 6), so new card jobs stop and the running ones
+# drain: a whole-box job waits at most the grace plus the longest card job then running, never forever.
 gpu_lock_box() {
-  local d; d=$(gpu_lock_dir)
+  local d grace="${B70_BOX_GRACE:-600}"; d=$(gpu_lock_dir)
+  exec 9> "$d/b70-gpu.lock" || return 2
+  if flock -n -x 9; then return 0; fi
+  echo "gpu_lock: waiting for the whole box, card jobs still start for ${grace} s ($(date '+%F %T'))" >&2
+  if flock -x -w "$grace" 9; then return 0; fi
   exec 6> "$d/b70-gpu.wait" || return 2
   _gpu_take 6 -x "the gate (another whole-box job waits first)" || return 2
-  exec 9> "$d/b70-gpu.lock" || return 2
   _gpu_take 9 -x "the whole box (b70-gpu.lock: running jobs drain)" || return 2
   exec 6>&-
 }
