@@ -167,7 +167,9 @@
 #define Q_OFF 0           /* flat qkv channel bases: q 16x128, k 16x128, v 48x128 */
 #define K_OFF 2048
 #define V_OFF 4096
-#define RING 16           /* conv ring depth (runtime::DecodeBuffers::kConvRing) */
+#ifndef RING
+#define RING 32           /* conv ring depth (runtime::DecodeBuffers::kConvRing; open-work 28: 32 for the 16-row verify) */
+#endif
 #define AB_STRIDE 128     /* ab_out row: a at [0,48), b at [48,96), zero-padded to 128 */
 #define B_OFF 48
 #define V_PER_K 3         /* repeat_interleave(·, 48 / 16): v-heads per k-head */
@@ -183,7 +185,7 @@
 #define Q_OFF 0
 #define K_OFF (GDN_K_HEADS * DIM)
 #define V_OFF (2 * GDN_K_HEADS * DIM)
-#define RING 16
+#define RING 32
 #define AB_STRIDE 128     /* the a||b GEMV's padded row (model_desc.cc kAbPaddedN) */
 #define B_OFF GDN_V_HEADS
 #define V_PER_K (GDN_V_HEADS / GDN_K_HEADS)
@@ -308,7 +310,7 @@ inline bool run_start(__global const uint* rows, uint m) {
 #if !defined(CTRL_PEND) || !defined(PEND_PAR)
 #error "gdn_step DEFERRED: CTRL_PEND and PEND_PAR (bytes a parity) must be defined"
 #endif
-#define PR 8                                       /* rows a step can leave: the verify lists' M <= 8 */
+#define PR 16                                      /* rows a step can leave: the verify lists' M <= 16 (open-work 28) */
 #if M > PR
 #error "gdn_step DEFERRED: at most PR rows a step"
 #endif

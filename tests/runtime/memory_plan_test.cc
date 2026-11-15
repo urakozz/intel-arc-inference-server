@@ -46,22 +46,23 @@ void check_sizes_qwen38() {
   const model::ModelDesc& q = model::qwen38();
   // buffers_test's tables at max_len 16384, every field.
   const runtime::PersistentSizes p = runtime::PersistentDims::sizes(16384, q);
-  CHECK_EQ(p.control, size_t{128});
+  // Open-work 28: Control 256 B, the conv ring 32 deep, the scratch 16 rows (twice every row term below).
+  CHECK_EQ(p.control, size_t{256});
   CHECK_EQ(p.gdn_state, size_t{150994944});
-  CHECK_EQ(p.conv_ring, size_t{15728640});
+  CHECK_EQ(p.conv_ring, size_t{31457280});
   CHECK_EQ(p.kv_k, size_t{536870912});
   CHECK_EQ(p.kv_v, size_t{536870912});
-  CHECK_EQ(p.total(), size_t{1240465536});
-  // Decode attention v2's attn_part: [24][32][8][258] fp32 whatever max_len is, 6,340,608 B
-  // (the removed v1 strided every 64-position block: 50,724,864 B at 16384).
+  CHECK_EQ(p.total(), size_t{1240465536 + 128 + 15728640});
+  // Decode attention v2's attn_part: [24][32][16][258] fp32 whatever max_len is, 12,681,216 B
+  // (the removed v1 strided every 64-position block: 50,724,864 B at 16384, at 8 rows).
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, q);
-  CHECK_EQ(d.partials, size_t{8912896});
-  CHECK_EQ(d.logits, size_t{7946240});
-  CHECK_EQ(d.total(), size_t{68652864 - 50724864 + 6340608});
+  CHECK_EQ(d.partials, size_t{2} * 8912896);
+  CHECK_EQ(d.logits, size_t{2} * 7946240);
+  CHECK_EQ(d.total(), size_t{2} * (68652864 - 50724864 + 6340608));
   // 128k (spec 6): KV 8,589,934,592.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
   for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
-    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 8 * 258 * 4);
+    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 16 * 258 * 4);
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(s.eager(), size_t{699514776});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q, runtime::PrefillScratchDims::kCDefault).eager(), size_t{699514776});
@@ -72,7 +73,7 @@ void check_sizes_qwen38() {
   const runtime::MtpSizes m = runtime::MtpDims::sizes(16384, q);
   CHECK_EQ(m.gdn_spec, size_t{3} * 150994944);
   CHECK_EQ(m.kv_k, size_t{33554432});
-  CHECK_EQ(m.total(), size_t{523176064});
+  CHECK_EQ(m.total(), size_t{523176064 + 81920 + 128});   // hh at 16 + 1 rows, hctl 256 B (open-work 28)
   // Spec 19a: probe_mtp_steps' 8-slot buffer (verify M = 5..8) - 7 gdn_state copies, the
   // rest as at 4 slots; the default stays the 4 slots above, and [4, 8] is the range.
   const runtime::MtpSizes m8 = runtime::MtpDims::sizes(16384, q, 0, runtime::KvCache::Bf16, 8);
@@ -114,7 +115,7 @@ void check_sizes_ornith() {
   const model::ModelDesc& o = model::ornith();
   const runtime::PersistentSizes p = runtime::PersistentDims::sizes(16384, o);
   CHECK_EQ(p.gdn_state, size_t{30} * 32 * 128 * 128 * 4);          //  62,914,560
-  CHECK_EQ(p.conv_ring, size_t{30} * 16 * 8192 * 2);               //   7,864,320
+  CHECK_EQ(p.conv_ring, size_t{30} * 32 * 8192 * 2);               //  15,728,640
   // 20 KiB of KV per position (spec 15 §2): 10 FA layers x 2 kv-heads x 256 x bf16, K and V.
   CHECK_EQ(runtime::PersistentDims::sizes(1, o).kv_k * 2, size_t{20} * 1024);
   // The MoE scratch (runtime::moe_scratch_layout): router logits and route rows per layer
@@ -130,8 +131,8 @@ void check_sizes_ornith() {
   CHECK_EQ(ml.route_at(40), ml.route_off + 40 * size_t{1024});
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, o);
   CHECK_EQ(d.moe, size_t{472576});
-  CHECK_EQ(d.x, size_t{8} * 4096 * 2);                              // 2 x hidden > 512
-  CHECK_EQ(d.attn_part, size_t{16} * 32 * 8 * 258 * 4);             // v2 at 16 q-heads
+  CHECK_EQ(d.x, size_t{16} * 4096 * 2);                             // 2 x hidden > 512, 16 rows
+  CHECK_EQ(d.attn_part, size_t{16} * 32 * 16 * 258 * 4);            // v2 at 16 q-heads, 16 rows
   // Dense models carry no MoE scratch: their sizes are what they were.
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
   // The plan (decode only: Ornith's prefill is spec 15d) carries both MoE terms, and the
@@ -210,13 +211,13 @@ void check_spec6_line() {
   const runtime::PrefillPath i8{true, PrefillBackend::L0Int8};   // measured on l0-int8, then the default
   const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights, i8);
   CHECK_EQ(runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights).decode_state,
-           size_t{590450624} - 405798912 + 6340608);
+           size_t{590450624} - 405798912 + 6340608 + 39997376);   // + open-work 28's ring, Control and 16-row scratch
   CHECK_EQ(p.rope, size_t{131072} * 256);
   CHECK_EQ(p.model, size_t{18116331520ull});   // the 16384 load re-tabled to 131072
   CHECK_EQ(p.kv, size_t{8589934592ull});
   // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
-  CHECK_EQ(p.decode_state, size_t{150994944 + 15728640 + 128} + (68652864 - 50724864 + 6340608));
-  CHECK_EQ(p.decode_state, size_t{190992320});
+  CHECK_EQ(p.decode_state, size_t{150994944 + 31457280 + 256} + 2 * (68652864 - 50724864 + 6340608));
+  CHECK_EQ(p.decode_state, size_t{230989696});
   // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
   // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.
   CHECK_EQ(p.prefill_scratch, size_t{699514776} + 35651584);
@@ -225,8 +226,8 @@ void check_spec6_line() {
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.191 GB, prefill scratch 0.735 GB,"
-        " int8 0.074 GB, total 27.706 GB of 32.530 GB");
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.231 GB, prefill scratch 0.735 GB,"
+        " int8 0.074 GB, total 27.746 GB of 32.530 GB");
 }
 
 void check_paths() {

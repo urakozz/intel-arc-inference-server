@@ -495,6 +495,11 @@ if(B70_MTP)
   get_property(MS_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
+  # Open-work 28: the 16-row verify list run repeatedly from one state, compared bitwise.
+  add_executable(probe_wide_repeat probe_wide_repeat.cc)
+  target_include_directories(probe_wide_repeat PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_wide_repeat PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  add_dependencies(probe_wide_repeat ${MS_KERNELS} ${MS_PF_KERNELS})
   add_dependencies(probe_longctx_decode ${MS_KERNELS} ${MS_PF_KERNELS})
   # 3l (2): a short turn's whole-chunk wall time deep in a session, the split-K attention against today's.
   add_executable(probe_turn_chunks probe_turn_chunks.cc)
@@ -833,7 +838,8 @@ set(PVD_TAGS
     K32_Pg_S2_D128_Q1_G256 K32_Pg_S4_D128_Q1_G128                        # DSPLIT
     K32_Pg_S4_D256_Q0_G256                                               # QSPLIT
     K32_Pg_S4_D256_Q1_G128                                               # GRF
-    K32_Pg_S4_D256_Q1_G256_P1)                                           # the production line since 2026-11-04
+    K32_Pg_S4_D256_Q1_G256_P1                                            # the production line since 2026-11-04
+    K32_Pg_S1_D256_Q1_G256_P1 K32_Pg_S1_D128_Q1_G256_P1)                 # open-work 28: what builds at M = 16 with P1
 set(PVD_TARGETS)
 foreach(tag IN LISTS PVD_TAGS)
   string(REGEX MATCH "^K([0-9]+)_P([gh])_S([0-9]+)_D([0-9]+)_Q([01])_G(128|256)(_P([01]))?$" _m ${tag})
@@ -1248,8 +1254,18 @@ add_dependencies(probe_qwen_pf_gemm ${PCR_PF_KERNELS} ${_qpg_targets})
 # Qwen3.8 defines, src/kernels/CMakeLists.txt): no runtime path binds it.
 add_ocloc_kernel(probe_gdn_plain_M8 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gdn_step.cl
                  DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 NEGA_OFF=40960 DTBIAS_OFF=41008 M=8)
+# Open-work 28 (the 16-row verify): the same at M = 16 over a 32-deep conv ring (RING is overridable for these two
+# probe builds only) - probe_gdn_plain_M16 (the chain, the state written once) and probe_gdn_slots_M16_N16 (16
+# snapshot slots, the NORMS_BATCHED build the M >= 2 slots lists bind).
+add_ocloc_kernel(probe_gdn_plain_M16 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gdn_step.cl
+                 DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 NEGA_OFF=40960 DTBIAS_OFF=41008 M=16
+                         RING=32)
+add_ocloc_kernel(probe_gdn_slots_M16_N16 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gdn_step.cl
+                 DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 NEGA_OFF=40960 DTBIAS_OFF=41008 M=16
+                         RING=32 SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=37748736 N_SLOTS=16)
 add_executable(probe_gdn_slots probe_gdn_slots.cc)
 target_include_directories(probe_gdn_slots PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_gdn_slots PRIVATE b70_l0)
 b70_target_kernel_dir(probe_gdn_slots)
-add_dependencies(probe_gdn_slots kernel_probe_gdn_plain_M8 kernel_gdn_step_slots_M1_N8 kernel_gdn_step_slots_M8_N8)
+add_dependencies(probe_gdn_slots kernel_probe_gdn_plain_M8 kernel_gdn_step_slots_M1_N8 kernel_gdn_step_slots_M8_N8
+                 kernel_probe_gdn_plain_M16 kernel_probe_gdn_slots_M16_N16)

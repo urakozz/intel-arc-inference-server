@@ -166,7 +166,7 @@ namespace gdn_chunk_ref {
 constexpr uint32_t kHeads = 48, kKHeads = 16, kDim = 128, kCT = 64;
 constexpr uint32_t kConvRows = 10240, kConvTaps = 4, kQkvzN = 16384;
 constexpr uint32_t kQOff = 0, kKOff = 2048, kVOff = 4096;
-constexpr uint32_t kRing = 16, kAbStride = 128, kBOff = 48;
+constexpr uint32_t kRing = 32, kAbStride = 128, kBOff = 48;   // kRing: PersistentDims::kConvRing
 constexpr uint32_t kNegAOff = 40960, kDtBiasOff = 41008;   // gdn_small, in floats
 constexpr float kQScale = 0.08838834764831845f;            // 1/sqrt(128)
 constexpr uint32_t kBands = 16, kBandK = 8;                // the 128-term dot's tree

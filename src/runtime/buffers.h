@@ -40,7 +40,7 @@ namespace runtime {
 // formula the memory planner (runtime/memory_plan.h) adds up before allocating.
 
 // Everything that survives a token boundary. Layouts are decode's, unchanged.
-// kConvRing = 16 (ring depth >= M + 3, spec §9.4): PersistentDims.
+// kConvRing = 32 (ring depth >= M + 3, spec §9.4; 32 since open-work 28): PersistentDims.
 struct PersistentBuffers : PersistentDims {
   // Spec 14: per-layer state is sized from the model descriptor (gdn_layers,
   // fa_layers); there is no default - a caller has to say which model.

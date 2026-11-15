@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(12) * (2 * 512 * 2 + 128 * 2 / 4));
   CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(25344));
   CHECK_EQ(rq::gdn_state_bytes_per_layer(ours), size_t(48) * 128 * 128 * 4);
-  CHECK_EQ(rq::conv_ring_bytes_per_layer(ours), size_t(16) * 10240 * 2);
+  CHECK_EQ(rq::conv_ring_bytes_per_layer(ours), size_t(32) * 10240 * 2);   // open-work 28: 32 deep
   CHECK_EQ(rq::ple_state_bytes(ours), size_t(64) + size_t(16) * 10240 * 2);   // 21c: the 16-slot id and conv rings
   {
     const uint32_t L = 262144;

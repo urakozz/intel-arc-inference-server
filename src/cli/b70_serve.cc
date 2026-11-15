@@ -1610,7 +1610,12 @@ int run(int argc, char** argv) {
                  "a match of >= %u remains), K %u lookup drafts\n",
                  server::LookupInDFlash::kEnterMatch, server::LookupInDFlash::kStayAccepted,
                  server::LookupInDFlash::kStayMatch, mtp_k);
-  else if (mtp_on && engine.slots() == 1)
+  if (options.spec_mtp_lookup && engine.wide_built())   // open-work 28
+    std::fprintf(stderr,
+                 "spec mtp: long lookup runs - up to %u drafts in one %u-row verify while a run keeps them; a match of "
+                 ">= %u ids enters when the head's first two drafts agree with it\n",
+                 runtime::Engine::kWideK, runtime::Engine::kWideK + 1, server::LookupInDFlash::kConfirmMatch);
+  else if (mtp_on && engine.slots() == 1 && !options.spec_mtp_lookup)
     std::fprintf(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
   if (drafter) {   // spec 19c: the drafter's policy line (print_proposer's format)
     const server::MtpCost& c = options.mtp_adaptive.cost;

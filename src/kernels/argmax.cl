@@ -40,9 +40,10 @@
 #ifndef M
 #define M 1
 #endif
-#if M > 8
-// out_token[] holds 8 ids (runtime::Control); a larger M has nowhere to write.
-#error "argmax: M > 8 exceeds Control::out_token[]"
+// out_token[] holds 8 ids (runtime::Control); a larger M writes Control::wide_out[16] (open-work 28: CTRL_OUT 48,
+// CTRL_CUR 32 - argmax_stage2's wide build, argmax_stage2_W16).
+#if M > 16 || (M > 8 && CTRL_OUT != 48)
+#error "argmax: M > 8 needs Control::wide_out (CTRL_OUT 48), M <= 16"
 #endif
 #ifndef VOCAB
 #define VOCAB 248320       /* model::Qwen35::kVocab - the logits row length */

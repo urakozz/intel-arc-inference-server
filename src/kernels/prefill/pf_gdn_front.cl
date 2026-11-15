@@ -30,7 +30,7 @@
 #endif
 #define DIM 128
 #define CONV_TAPS 4
-#define RING 16
+#define RING 32           /* runtime::PersistentBuffers::kConvRing */
 #define WG_CH 256
 #define SG 16
 #define FB 32               /* positions a work-group */

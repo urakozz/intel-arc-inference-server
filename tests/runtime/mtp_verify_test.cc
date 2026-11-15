@@ -30,7 +30,14 @@
 //        to pos 16384 without a throw and produce the plain run's ids; then verify and
 //        draft refuse.
 //
-// usage: mtp_verify_test <snapshot> [max_len = 16384] [vattn = rule]   (cwd = the source tree)
+//   W16  (open-work 28, `mtp_verify_test <snapshot> 16384 rule wide`: the int8 head, whose engine builds the 16-row
+//        list) at the M2 positions: (a) for j in 0, 1, 4, 7, 11, 14 the 16-row verify with drafts g[1..j] true, a WRONG
+//        id at j + 1 and junk after - its rows 0..j bitwise the all-true verify's (no later row leaks into an
+//        earlier one) - then commit(j) and 64 plain ids bitwise the all-true run's; (b) every row of the all-true
+//        verify against the plain step's row by the f32 judge (spec_judge::row: cosine >= 0.99999 against plain, or a
+//        distance to f32 at most kCosSlack (2) x the plain row's).
+//
+// usage: mtp_verify_test <snapshot> [max_len = 16384] [vattn = rule] [wide]   (cwd = the source tree)
 //
 // Spec 28c: `vattn` v2 | dpas | rule (test-only) - the verify lists' attention forced (Engine::recapture_verify) or
 // the capture's measured rule. Where DPAS is bound the verify rows are no longer bitwise their M = 1 steps: M2a's
@@ -241,6 +248,57 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& pro
   return ok;
 }
 
+// W16 (header): the 16-row list against 16 plain steps from S0.
+bool w16(Ctx& c, const Snap& s0, const std::vector<uint32_t>& prompt, const std::string& tag) {
+  constexpr uint32_t K = runtime::Engine::kWideK;
+  bool ok = true;
+  s0.restore(c);
+  std::vector<uint32_t> g{c.ctl->cur_token[0]};
+  std::vector<std::vector<float>> plain;
+  for (uint32_t i = 0; i <= K + 1; ++i) {
+    c.e.verify(0);
+    if (i <= K) plain.push_back(logits_rows(c, c.e.verify_logits_device(), 1));
+    c.e.commit(0, c.e.verify_ids()[0]);
+    g.push_back(c.ctl->cur_token[0]);
+  }
+  const auto wide = [&](uint32_t j) {   // drafts g[1..j] true, then a wrong id and junk (j = K: every draft true)
+    s0.restore(c);
+    for (uint32_t i = 1; i <= K; ++i)
+      c.ctl->wide_cur[i] = i <= j ? g[i] : i == j + 1 ? (g[i] + 7919) % uint32_t(VU) : (g[i] + 104729 * i) % uint32_t(VU);
+    c.e.verify(K);
+  };
+  wide(K);
+  const std::vector<float> all = logits_rows(c, c.e.verify_logits_device(), K + 1);
+  // (b)
+  const golden::ForcedJudge fj;
+  const spec_judge::RowJudge rj =
+      spec_judge::open_rows(fj, tag + "_w16", prompt, std::vector<uint32_t>(g.begin(), g.begin() + K + 2), uint32_t(V));
+  for (uint32_t r = 0; r <= K; ++r) {
+    const double cl = cosine(all.data() + size_t(r) * V, plain[r].data(), VU);
+    const spec_judge::RowVerdict rv = spec_judge::row(all.data() + size_t(r) * V, plain[r].data(), rj, r + 1, cl,
+                                                      uint32_t(VU));
+    const bool id_ok = c.e.verify_ids()[r] == g[r + 1];
+    std::printf("  W16 row %2u: logits cos against plain %.9f, id %s%s\n", r, cl, id_ok ? "ok" : "DIFFERS",
+                spec_judge::row_line(rv).c_str());
+    ok &= rv.pass;
+  }
+  // (a)
+  for (uint32_t j : {0u, 1u, 4u, 7u, 11u, 14u}) {
+    wide(K);
+    c.e.commit(j, c.e.verify_ids()[j]);
+    const std::vector<uint32_t> clean = c.e.generate(64);
+    wide(j);
+    const std::vector<float> lg = logits_rows(c, c.e.verify_logits_device(), j + 1);
+    const bool rows_ok = std::memcmp(lg.data(), all.data(), size_t(j + 1) * V * 4) == 0;
+    c.e.commit(j, c.e.verify_ids()[j]);
+    const std::vector<uint32_t> ids = c.e.generate(64);
+    std::printf("  W16 j=%2u: rows 0..%u %s the all-true verify's, 64 further ids %s\n", j, j,
+                rows_ok ? "bitwise" : "DIFFER from", ids == clean ? "bitwise the clean run's" : "DIFFER");
+    ok &= rows_ok && ids == clean;
+  }
+  return ok;
+}
+
 // One greedy speculative iteration at depth k (0 = plain step): returns ids emitted.
 std::vector<uint32_t> iterate(Ctx& c, uint32_t k) {
   std::vector<uint32_t> out{c.ctl->cur_token[0]};   // the pending id, emitted by this step
@@ -321,7 +379,11 @@ int main(int argc, char** argv) {
   if (deep) std::printf("max_len %u: M2 also at n = %u, RF4 also at %u\n", kMaxLen, kMaxLen - 1026,
                         kMaxLen / 2 + 4395);
   l0::Context ctx(0);
-  runtime::Engine e(ctx, loader::load(ctx, snap, kMaxLen, /*mtp=*/true), kMaxLen);
+  const bool wide_mode = argc > 4 && std::string(argv[4]) == "wide";   // open-work 28: W16 alone, the int8 head
+  runtime::Engine e(ctx,
+                    loader::load(ctx, snap, kMaxLen, /*mtp=*/true,
+                                 wide_mode ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint),
+                    kMaxLen);
   if (argc > 3) {   // spec 28c
     const std::string v = argv[3];
     CHECK(v == "v2" || v == "dpas" || v == "rule");
@@ -342,10 +404,23 @@ int main(int argc, char** argv) {
   // Sizes with the head (Review Focus 4): +hh0 in the state, a 17th KV layer.
   // Qwen3.8: 166723584 + 10240 and 134217728 / 16 x 17 (the gdn_state + conv ring of
   // 48 GDN layers; 2048 positions of 16 FA layers' K and V).
-  CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 16 * 10240 * 2 + 10240);
+  CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 32 * 10240 * 2 + 10240);   // the ring 32 deep (open-work 28)
   // Spec 12b: 4 x 256 x 2 B per layer and position at bf16, 4 x (256 + 2) B at int8.
   CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *
                                  (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));
+
+  if (wide_mode) {   // W16 (header)
+    CHECK(e.wide_built());
+    for (uint32_t n : {1998u, 2053u}) {
+      e.reset();
+      e.prefill(head(ids, n));
+      std::printf("W16 at n = %u\n", n);
+      const Snap s0(c);
+      ok &= w16(c, s0, head(ids, n), "mtp_verify_qwen3.8_wide_int8_n" + std::to_string(n));
+    }
+    std::printf("W16: %s\n", ok ? "PASS" : "FAIL");
+    return spec_judge::exit_code(ok, "mtp_verify_wide_test");
+  }
 
   // --- M2 at two prompt lengths ----------------------------------------------------
   std::vector<uint32_t> m2_at = {1998u, 2053u};

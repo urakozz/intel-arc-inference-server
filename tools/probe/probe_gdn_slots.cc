@@ -11,6 +11,9 @@
 // of a gdn_step change in the same rounds. --variant adds an M = 8 slots arm from another binary of this build,
 // compared with slots_M8 (Step 2's store forms - block writes, LSC cache controls - measured this way 2026-11-13:
 // none saved more than 0.08 ms, the uncached ones cost 8-15 ms; removed).
+// Open-work 28 adds the same pair at 16 rows (probe builds over a 32-deep conv ring; every arm's ring slice is 32 deep):
+//   plain_M16  probe_gdn_plain_M16      the chain over 16 rows, the state written once
+//   slots_M16  probe_gdn_slots_M16_N16  16 snapshot slots
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -33,7 +36,7 @@
 
 namespace {
 constexpr uint32_t kLayers = 48, kHeads = 48, kDim = 128, kChunks = 4, kQkvzN = 16384, kAbStride = 128;
-constexpr uint32_t kRing = 16, kConvRows = 10240, kSlots = 8, kM = 8;
+constexpr uint32_t kRing = 32, kConvRows = 10240, kSlots = 16, kM = 16;
 constexpr size_t kSmallFloats = 41056;   // conv [10240][4], negA [48] at 40960, dt_bias [48] at 41008
 constexpr size_t kState = size_t(kHeads) * kDim * kDim;   // one layer
 constexpr size_t kSlot = kLayers * kState;                // SPEC_SLOT_STRIDE
@@ -95,7 +98,9 @@ int main(int argc, char** argv) {
     };
     std::vector<Arm> arms = {{"slots_M1", kernels::gdn_step_slots_variant(1, 48, 16, 48, 8), 1, true},
                                    {"plain_M8", "probe_gdn_plain_M8", 8, false},
-                                   {"slots_M8", kernels::gdn_step_slots_variant(8, 48, 16, 48, 8), 8, true}};
+                                   {"slots_M8", kernels::gdn_step_slots_variant(8, 48, 16, 48, 8), 8, true},
+                                   {"plain_M16", "probe_gdn_plain_M16", 16, false},
+                                   {"slots_M16", "probe_gdn_slots_M16_N16", 16, true}};
     if (!ref_dir.empty()) arms.push_back({"ref_M8", ref_dir + "/gdn_step_slots_M8_N8.bin", 8, true});
     for (const auto& v : variants) arms.push_back({v, v, 8, true});
     std::vector<std::unique_ptr<l0::Module>> mods;
@@ -140,7 +145,9 @@ int main(int argc, char** argv) {
       std::printf("GDN_SLOTS arm=%s ms=%.4f (48 launches, wall per list)\n", arms[a].name.c_str(), median(ms[a]));
     std::printf("GDN_SLOTS_SPLIT excess8=%.4f chain=%.4f snapshots=%.4f\n", median(ms[2]) - median(ms[0]),
                 median(ms[1]) - median(ms[0]), median(ms[2]) - median(ms[1]));
-    for (size_t a = 3; a < arms.size(); ++a)
+    std::printf("GDN_SLOTS_SPLIT16 excess16=%.4f chain=%.4f snapshots=%.4f\n", median(ms[4]) - median(ms[0]),
+                median(ms[3]) - median(ms[0]), median(ms[4]) - median(ms[3]));
+    for (size_t a = 5; a < arms.size(); ++a)
       std::printf("GDN_SLOTS_AB slots_M8 - %s = %.4f ms\n", arms[a].name.c_str(), median(ms[2]) - median(ms[a]));
   } catch (const std::exception& e) {
     std::fprintf(stderr, "probe_gdn_slots: %s\n", e.what());

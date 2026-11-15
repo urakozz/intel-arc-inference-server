@@ -54,6 +54,8 @@ static_assert(offsetof(runtime::Control, cur_token) == 4 * kernels::ctrl_index::
               "CTRL_CUR disagrees with runtime::Control");
 static_assert(offsetof(runtime::Control, out_token) == 4 * kernels::ctrl_index::kOutToken,
               "CTRL_OUT disagrees with runtime::Control");
+static_assert(offsetof(runtime::Control, wide_cur) == 4 * kernels::ctrl_index::kWideCur, "wide_cur offset");
+static_assert(offsetof(runtime::Control, wide_out) == 4 * kernels::ctrl_index::kWideOut, "wide_out offset");
 static_assert(offsetof(runtime::Control, debug_flag) == 4 * kernels::ctrl_index::kDebugFlag,
               "CTRL_DEBUG disagrees with runtime::Control");
 
