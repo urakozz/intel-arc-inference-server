@@ -121,6 +121,7 @@ class Server {
     bool cancelled = false;   // the client hung up: generation stopped early
   };
   struct Impl;
+  struct TextRouter;
 
   // `gone` is true once the client has hung up: checked before the prefill (ClientGone) and before every id (the
   // request then stops as the scheduler's cancel does, its state kept for the prefix cache).

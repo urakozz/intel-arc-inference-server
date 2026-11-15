@@ -342,6 +342,76 @@ Server::Outcome Server::generate(const Request& r,
   return outcome;
 }
 
+// One request's text rules, the serial loop's and the scheduler's alike: each id's text through the streamer and the
+// chat format's tool-call parser (spec 7 §3.5), content held back by the longest stop string less one byte, the stop
+// strings, and the end-of-text rules. Every delta goes to `emit` in order.
+struct Server::TextRouter {
+  Outcome& out;
+  std::unique_ptr<StreamerIface> streamer;
+  std::unique_ptr<OutputParser> parser;
+  std::vector<std::string> stops;
+  std::function<void(const Delta&)> emit;
+  std::string pending;   // content not yet emitted
+  size_t hold = 0;
+
+  TextRouter(Outcome& o, std::unique_ptr<StreamerIface> s, std::unique_ptr<OutputParser> p,
+             std::vector<std::string> stop, std::function<void(const Delta&)> e)
+      : out(o), streamer(std::move(s)), parser(std::move(p)), stops(std::move(stop)), emit(std::move(e)) {
+    if (!streamer) throw BadRequest("tokenizer did not provide a streamer");
+    for (const std::string& st : stops) hold = std::max(hold, st.empty() ? 0U : st.size() - 1);
+  }
+  void flush_pending(bool final) {
+    const size_t keep = final ? 0 : std::min(hold, pending.size());
+    if (pending.size() <= keep) return;
+    Delta d;
+    d.kind = Delta::Content;
+    d.text = pending.substr(0, pending.size() - keep);
+    out.text += d.text;
+    out.parsed.content += d.text;
+    pending.erase(0, d.text.size());
+    emit(d);
+  }
+  void route(const std::vector<Delta>& deltas) {
+    for (const Delta& d : deltas) {
+      if (d.kind == Delta::Content) {
+        pending += d.text;
+        continue;
+      }
+      flush_pending(true);
+      if (d.kind == Delta::Reasoning) out.parsed.reasoning += d.text;
+      else out.parsed.tool_calls.push_back(d.call);
+      emit(d);
+    }
+  }
+  void add_text(const std::string& text) {
+    out.raw_text += text;
+    if (parser) route(parser->push(text));
+    else pending += text;
+  }
+  // One generated id (already in out.out_ids): its text, then the stop strings. True when one ended the request.
+  bool push_id(uint32_t id, bool is_eos) {
+    if (!is_eos) add_text(streamer->push(id));
+    for (const std::string& stop : stops) {
+      const size_t at = pending.find(stop);
+      if (at != std::string::npos) {
+        pending.erase(at);
+        out.finish_reason = "stop";
+        flush_pending(true);
+        return true;
+      }
+    }
+    flush_pending(false);
+    return false;
+  }
+  // The end of a request that stopped on EOS (`eos_stop`), a stop string or the length.
+  void finish(bool eos_stop) {
+    if (out.finish_reason == "length") add_text(streamer->flush());
+    if (parser && (eos_stop || out.finish_reason == "length")) route(parser->finish());
+    flush_pending(true);
+    if (eos_stop && !out.parsed.tool_calls.empty()) out.finish_reason = "tool_calls";
+  }
+};
+
 void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
                            Outcome& outcome, const std::function<void(const Delta&)>& emit,
                            const std::function<bool()>& gone) {
@@ -355,48 +425,11 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     for (uint32_t id : outcome.prompt_ids) seen.add(id);
     sampling.seen = &seen;
   }
-  std::unique_ptr<StreamerIface> streamer = deps_.tok.streamer();
-  if (!streamer) throw BadRequest("tokenizer did not provide a streamer");
-
-  size_t hold = 0;
-  for (const std::string& stop : r.stop) {
-    hold = std::max(hold, stop.empty() ? 0U : stop.size() - 1);
-  }
-  // Stop strings apply to content; `pending` holds content not yet emitted.
-  std::string pending;
-  const auto flush_pending = [&](bool final) {
-    const size_t keep = final ? 0 : std::min(hold, pending.size());
-    if (pending.size() <= keep) return;
-    Delta d;
-    d.kind = Delta::Content;
-    d.text = pending.substr(0, pending.size() - keep);
-    outcome.text += d.text;
-    outcome.parsed.content += d.text;
-    pending.erase(0, d.text.size());
-    emit(d);
-  };
-  // Chat: the text goes through the tool-call parser (spec 7 §3.5) of the model's format
-  // (server/chat_format.h). Qwen: with thinking on, the prompt ends in "<think>\n"
-  // and the output opens with reasoning.
-  std::unique_ptr<OutputParser> parser;
-  if (r.chat) parser = make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools);
-  const auto route = [&](const std::vector<Delta>& deltas) {
-    for (const Delta& d : deltas) {
-      if (d.kind == Delta::Content) {
-        pending += d.text;
-        continue;
-      }
-      flush_pending(true);
-      if (d.kind == Delta::Reasoning) outcome.parsed.reasoning += d.text;
-      else outcome.parsed.tool_calls.push_back(d.call);
-      emit(d);
-    }
-  };
-  const auto add_text = [&](const std::string& text) {
-    outcome.raw_text += text;
-    if (parser) route(parser->push(text));
-    else pending += text;
-  };
+  // Chat: the text goes through the tool-call parser of the model's format (server/chat_format.h). Qwen: with
+  // thinking on, the prompt ends in "<think>\n" and the output opens with reasoning.
+  TextRouter text(outcome, deps_.tok.streamer(),
+                  r.chat ? make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools) : nullptr, r.stop,
+                  emit);
 
   outcome.finish_reason = "length";
   bool eos_stop = false;
@@ -557,23 +590,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       break;
     }
     outcome.out_ids.push_back(id);
-    if (!is_eos) add_text(streamer->push(id));
-
-    bool stopped = false;
-    for (const std::string& stop : r.stop) {
-      const size_t at = pending.find(stop);
-      if (at != std::string::npos) {
-        pending.erase(at);
-        stopped = true;
-        break;
-      }
-    }
-    if (stopped) {
-      outcome.finish_reason = "stop";
-      flush_pending(true);
-      break;
-    }
-    flush_pending(false);
+    if (text.push_id(id, is_eos)) break;
   }
   if (burst_at < burst.size())
     deps_.engine.truncate_to(deps_.engine.pos() - static_cast<uint32_t>(burst.size() - burst_at));
@@ -583,10 +600,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     std::fflush(stderr);
     return;
   }
-  if (outcome.finish_reason == "length") add_text(streamer->flush());
-  if (parser && (eos_stop || outcome.finish_reason == "length")) route(parser->finish());
-  flush_pending(true);
-  if (eos_stop && !outcome.parsed.tool_calls.empty()) outcome.finish_reason = "tool_calls";
+  text.finish(eos_stop);
   outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
   if (lookup) lookup_end(outcome.out_ids);
 }
@@ -808,11 +822,7 @@ struct Server::BatchedRun {
     Outcome out;
     Finish fin;
     SeenIds seen;
-    std::unique_ptr<StreamerIface> streamer;
-    std::unique_ptr<OutputParser> parser;
-    std::vector<std::string> stops;
-    std::string pending;
-    size_t hold = 0;
+    std::unique_ptr<TextRouter> text;
     bool stopped = false;   // a stop string ended it
     std::string error;      // the end-of-request text rules threw (on_done): the request fails with it
     const char* kind = "none";   // the slot's prefix plan, read on the tick thread (PrefixSlots::last_kind)
@@ -838,11 +848,15 @@ std::shared_ptr<Server::BatchedRun> Server::submit_batched(const Request& r) {
   }
   outcome.usage.prompt_tokens = static_cast<uint32_t>(outcome.prompt_ids.size());
   outcome.finish_reason = "length";
-  run->streamer = deps_.tok.streamer();
-  if (!run->streamer) throw BadRequest("tokenizer did not provide a streamer");
-  run->stops = r.stop;
-  for (const std::string& stop : r.stop) run->hold = std::max(run->hold, stop.empty() ? 0U : stop.size() - 1);
-  if (r.chat) run->parser = make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools);
+  // The deltas queue for the request's HTTP thread (the run owns its router: a raw pointer back, no cycle).
+  run->text = std::make_unique<TextRouter>(
+      outcome, deps_.tok.streamer(),
+      r.chat ? make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools) : nullptr, r.stop,
+      [rp = run.get()](const Delta& d) {
+        std::lock_guard<std::mutex> lock(rp->mu);
+        rp->deltas.push_back(d);
+        rp->cv.notify_all();
+      });
 
   SchedRequest sr;
   sr.prompt = outcome.prompt_ids;
@@ -857,63 +871,18 @@ std::shared_ptr<Server::BatchedRun> Server::submit_batched(const Request& r) {
     sr.sampling.seen = &run->seen;
   }
   const std::shared_ptr<Run> rp = run;   // the callbacks keep the run alive until the scheduler drops them
-  const auto push = [rp](const Delta& d) {
-    std::lock_guard<std::mutex> lock(rp->mu);
-    rp->deltas.push_back(d);
-    rp->cv.notify_all();
-  };
-  // generate_tail's flush_pending / route / add_text over the run's state (the tick thread).
-  const auto flush_pending = [rp, push](bool final) {
-    const size_t keep = final ? 0 : std::min(rp->hold, rp->pending.size());
-    if (rp->pending.size() <= keep) return;
-    Delta d;
-    d.kind = Delta::Content;
-    d.text = rp->pending.substr(0, rp->pending.size() - keep);
-    rp->out.text += d.text;
-    rp->out.parsed.content += d.text;
-    rp->pending.erase(0, d.text.size());
-    push(d);
-  };
-  const auto route = [rp, push, flush_pending](const std::vector<Delta>& deltas) {
-    for (const Delta& d : deltas) {
-      if (d.kind == Delta::Content) {
-        rp->pending += d.text;
-        continue;
-      }
-      flush_pending(true);
-      if (d.kind == Delta::Reasoning) rp->out.parsed.reasoning += d.text;
-      else rp->out.parsed.tool_calls.push_back(d.call);
-      push(d);
-    }
-  };
-  const auto add_text = [rp, route](const std::string& text) {
-    rp->out.raw_text += text;
-    if (rp->parser) route(rp->parser->push(text));
-    else rp->pending += text;
-  };
   const std::set<uint32_t>* eos = &impl_->eos;
-  sr.on_token = [rp, eos, penalised, add_text, flush_pending](uint32_t id) {
+  sr.on_token = [rp, eos, penalised](uint32_t id) {
     Outcome& o = rp->out;
     if (penalised) rp->seen.add(id);
     if (o.out_ids.empty() && o.t_first_token == 0) o.t_first_token = steady_seconds();
     const bool is_eos = eos->count(id) != 0;
     o.out_ids.push_back(id);
-    if (!is_eos) add_text(rp->streamer->push(id));
-    for (const std::string& stop : rp->stops) {
-      const size_t at = rp->pending.find(stop);
-      if (at != std::string::npos) {
-        rp->pending.erase(at);
-        o.finish_reason = "stop";
-        rp->stopped = true;
-        flush_pending(true);
-        return false;
-      }
-    }
-    flush_pending(false);
-    return true;
+    rp->stopped = rp->text->push_id(id, is_eos);
+    return !rp->stopped;
   };
   PrefixSlots* const slot_cache = impl_->slot_cache.get();
-  sr.on_done = [rp, add_text, route, flush_pending, slot_cache](const Finish& fin) {
+  sr.on_done = [rp, slot_cache](const Finish& fin) {
     Outcome& o = rp->out;
     rp->fin = fin;
     // Plan 13b review: done is set whatever the text rules below throw - the HTTP thread waits for it.
@@ -925,10 +894,7 @@ std::shared_ptr<Server::BatchedRun> Server::submit_batched(const Request& r) {
           o.finish_reason = "stop";
           if (o.t_first_token == 0) o.t_first_token = steady_seconds();   // the EOS was the first id
         }
-        if (o.finish_reason == "length") add_text(rp->streamer->flush());
-        if (rp->parser && (eos_stop || o.finish_reason == "length")) route(rp->parser->finish());
-        flush_pending(true);
-        if (eos_stop && !o.parsed.tool_calls.empty()) o.finish_reason = "tool_calls";
+        rp->text->finish(eos_stop);
       }
       o.usage.completion_tokens = static_cast<uint32_t>(o.out_ids.size());
       o.usage.cached_tokens = fin.cached_tokens;
