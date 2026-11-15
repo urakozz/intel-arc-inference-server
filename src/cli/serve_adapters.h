@@ -239,7 +239,7 @@ struct EngineAdapter : server::EngineIface {
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
       a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V, sampling, rng);
     }
-    return spec_run(n, x, k, a);
+    return spec_run(n, x, k, a, eng.draft_ids());
   }
 
   // Open-work 13: the MTP head's drafts chosen one at a time (EngineIface::step_chosen), greedy - the draft lists with
@@ -264,22 +264,32 @@ struct EngineAdapter : server::EngineIface {
     const uint32_t kv = v < 0 ? static_cast<uint32_t>(eng.draft_ids().size()) : static_cast<uint32_t>(v);
     ++mtp_iters_at_k[kv];
     eng.verify(kv);
-    return spec_run(n, x, kv, server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv));
+    const server::AcceptResult a = server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv);
+    return spec_run(n, x, kv, a, eng.draft_ids());
   }
 
-  // The iteration's deferred commit and counters; returns x and the kept drafts.
-  std::vector<uint32_t> spec_run(uint32_t n, uint32_t x, uint32_t k, const server::AcceptResult& a) {
+  // The iteration's deferred commit and counters - an MTP or DFlash iteration's, or (`lookup`) a lookup run's: `drafts`'
+  // first k are the run, its first a.accepted are kept. Returns x and the kept drafts.
+  std::vector<uint32_t> spec_run(uint32_t n, uint32_t x, uint32_t k, const server::AcceptResult& a,
+                                 const std::vector<uint32_t>& drafts, bool lookup = false) {
     pending_ = true;
     pending_pos_ = n;
     pending_j_ = a.accepted;
     pending_next_ = a.next_token;
-    pending_drafts_ = eng.draft_ids();
-    ++mtp_iters;
-    mtp_drafted += k;
-    mtp_accepted += a.accepted;
+    pending_drafts_.assign(drafts.begin(), drafts.begin() + k);
     std::vector<uint32_t> out{x};
-    out.insert(out.end(), pending_drafts_.begin(), pending_drafts_.begin() + a.accepted);
+    out.insert(out.end(), drafts.begin(), drafts.begin() + a.accepted);
     gen_tokens_ += static_cast<uint32_t>(out.size());
+    if (lookup) {
+      lk_drafted_ += k;
+      lk_accepted_ += a.accepted;
+      lk_ids_ += out.size();
+      pending_lookup_ = true;   // a truncate_to of this run takes its dropped ids off lk_ids_
+    } else {
+      ++mtp_iters;
+      mtp_drafted += k;
+      mtp_accepted += a.accepted;
+    }
     return out;
   }
 
@@ -310,18 +320,7 @@ struct EngineAdapter : server::EngineIface {
     } else {
       a = dflash_sampled(sampling, k, drafts);
     }
-    pending_ = true;
-    pending_pos_ = n;
-    pending_j_ = a.accepted;
-    pending_next_ = a.next_token;
-    pending_drafts_ = drafts;
-    ++mtp_iters;
-    mtp_drafted += k;
-    mtp_accepted += a.accepted;
-    std::vector<uint32_t> out{x};
-    out.insert(out.end(), drafts.begin(), drafts.begin() + a.accepted);
-    gen_tokens_ += static_cast<uint32_t>(out.size());
-    return out;
+    return spec_run(n, x, k, a, drafts);
   }
 
   // The sampled half (spec 19c Task 3, D4): one 64-bit draw from the request's RNG keys the drafter's Gumbel walk
@@ -377,18 +376,7 @@ struct EngineAdapter : server::EngineIface {
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
       a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng);
     }
-    pending_ = true;
-    pending_pos_ = n;
-    pending_j_ = a.accepted;
-    pending_next_ = a.next_token;
-    pending_drafts_.assign(d.begin(), d.begin() + k);
-    ++mtp_iters;
-    mtp_drafted += k;
-    mtp_accepted += a.accepted;
-    std::vector<uint32_t> out{x};
-    out.insert(out.end(), d.begin(), d.begin() + a.accepted);
-    gen_tokens_ += static_cast<uint32_t>(out.size());
-    return out;
+    return spec_run(n, x, k, a, d);
   }
 
   // --- spec 19f: prompt lookup inside DFlash (`--spec dflash-lookup`) --------------------------
@@ -436,7 +424,7 @@ struct EngineAdapter : server::EngineIface {
   std::vector<uint32_t> step_drafts_or_confirmed(const server::Sampling& sampling, uint32_t k_mtp,
                                                  const Proposer& propose, const DraftChoice& choose,
                                                  const LookupConfirm& confirm) override {
-    if (!mtp_lookup()) throw std::logic_error("EngineAdapter::step_drafts_or_chosen without the MTP head");
+    if (!mtp_lookup()) throw std::logic_error("EngineAdapter::step_drafts_or_confirmed without the MTP head");
     flush_commit();
     const uint32_t x = eng.control()->cur_token[0];
     const std::vector<uint32_t> d = propose(x);
@@ -475,7 +463,8 @@ struct EngineAdapter : server::EngineIface {
                               : static_cast<uint32_t>(v);
     ++mtp_iters_at_k[kv];
     eng.verify(kv);
-    return spec_run(n, x, kv, server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv));
+    const server::AcceptResult a = server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv);
+    return spec_run(n, x, kv, a, eng.draft_ids());
   }
 
   // One lookup iteration at pos = n, x_n pending, drafts `d` (the proposer's): d_1..d_k (k <= --spec-max, the
@@ -513,19 +502,7 @@ struct EngineAdapter : server::EngineIface {
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
       a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng);
     }
-    pending_ = true;
-    pending_pos_ = n;
-    pending_j_ = a.accepted;
-    pending_next_ = a.next_token;
-    pending_drafts_.assign(d.begin(), d.begin() + k);
-    lk_drafted_ += k;
-    lk_accepted_ += a.accepted;
-    std::vector<uint32_t> out{x};
-    out.insert(out.end(), d.begin(), d.begin() + a.accepted);
-    gen_tokens_ += static_cast<uint32_t>(out.size());
-    lk_ids_ += out.size();
-    pending_lookup_ = true;   // a truncate_to of this run takes its dropped ids off lk_ids_
-    return out;
+    return spec_run(n, x, k, a, d, true);
   }
 
   // Keep x_n, d_1 .. d_m of the last iteration (pos = n + m + 1), pending d_{m+1} (or the

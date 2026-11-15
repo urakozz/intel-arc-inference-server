@@ -417,28 +417,32 @@ endif()
 option(B70_VERIFY_M8 "build the M = 5..8 verify and DFlash draft-cost probe variants (spec 19a)" ON)
 if(B70_VERIFY_M8 AND B70_MTP)
   set(VM8_SLOT_DEFINES ${GDN_DEFINES} SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=37748736 N_SLOTS=8)
-  foreach(MM 5 6 7 8)
-    # the decode list at M rows (B70_MTP's M = 2..4 block's rows, int8 lm_head only)
-    add_gemv_variant(${MM} 5120 16384 1 1)     # qkv||z
-    add_gemv_variant(${MM} 6144 5120 4 0)      # out_proj, o_proj
-    add_gemv_variant(${MM} 5120 34816 8 0)     # gate||up (and the drafter's, M = 8)
-    add_gemv_variant(${MM} 17408 5120 4 0)     # down (and the drafter's, M = 8)
-    add_gemv_variant(${MM} 5120 14336 2 0)     # qkv
-    add_gemv_i8w_variant(${MM} 5120 248320)    # lm_head (int8; at M = 7 also the draft head)
+  # M = 16: open-work 28's wide list (its own ids, argmax and attention in its block below) shares the rest.
+  foreach(MM 5 6 7 8 16)
+    if(MM LESS 16)
+      # the decode list at M rows (B70_MTP's M = 2..4 block's rows, int8 lm_head only)
+      add_gemv_variant(${MM} 5120 16384 1 1)     # qkv||z
+      add_gemv_variant(${MM} 6144 5120 4 0)      # out_proj, o_proj
+      add_gemv_variant(${MM} 5120 34816 8 0)     # gate||up (and the drafter's, M = 8)
+      add_gemv_variant(${MM} 17408 5120 4 0)     # down (and the drafter's, M = 8)
+      add_gemv_variant(${MM} 5120 14336 2 0)     # qkv
+      add_gemv_i8w_variant(${MM} 5120 248320)    # lm_head (int8; at M = 7 also the draft head)
+      add_ocloc_kernel(embed_gather_M${MM} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                       DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=5120 VOCAB=248320)
+      add_ocloc_kernel(argmax_stage1_M${MM} SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES} M=${MM})
+      # the verify list's own 8-slot gdn_step
+      add_ocloc_kernel(gdn_step_slots_M${MM}_N8 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM})
+    endif()
     add_gemv_bf16_variant(${MM} 5120 128 16 16)    # a||b
     add_prep_res_fold(${MM} 5120 0 20)
     add_prep_res_fold(${MM} 5120 4 20)
     add_prep_norm_finish(${MM} 5120 20 20)
     add_ocloc_kernel(prep_silu_mul_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
     add_ocloc_kernel(prep_gated_head_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
-    add_ocloc_kernel(embed_gather_M${MM} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=5120 VOCAB=248320)
-    add_ocloc_kernel(argmax_stage1_M${MM} SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES} M=${MM})
     add_attn_prep(${MM})
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                      DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
-    # the verify list's own: the 8-slot gdn_step and the MTP head's KV fill of M rows
-    add_ocloc_kernel(gdn_step_slots_M${MM}_N8 SOURCE ${GDN_CL} DEFINES ${VM8_SLOT_DEFINES} M=${MM})
+    # the MTP head's KV fill of M rows
     add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
     add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
     add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
@@ -849,23 +853,21 @@ if(B70_VERIFY_DPAS AND B70_MTP)
   endif()
   # Plan 19v3b Task 0: the slots' paged twins (block above) of the MTP verify lists' M = 2..4, both KV forms.
   if(B70_VERIFY_M8 AND B70_KV8)
-    foreach(MM 2 3 4)
-      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_PG${KV_PAGE} SOURCE ${VDPAS_CL}
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
-                               KV8=0 KV_PAGED=${KV_PAGE}
-                       OPTIONS ${VDPAS_OPTIONS})
-      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8_PG${KV_PAGE} SOURCE ${VDPAS_CL}
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
-                               KV8=1 KV_PAGED=${KV_PAGE}
-                       OPTIONS ${VDPAS_OPTIONS})
-    endforeach()
-    foreach(MM 5 6 7 8)   # plan 19v3b Tasks 3-7: slot 0's DFlash verify lists
-      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_PG${KV_PAGE} SOURCE ${VDPAS_CL}
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=0 KV_PAGED=${KV_PAGE}
-                       OPTIONS ${VDPAS_OPTIONS})
-      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8_PG${KV_PAGE} SOURCE ${VDPAS_CL}
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=1 KV_PAGED=${KV_PAGE}
-                       OPTIONS ${VDPAS_OPTIONS})
+    foreach(MM 2 3 4 5 6 7 8)   # M = 5..8 (plan 19v3b Tasks 3-7): slot 0's DFlash verify lists, the plain levers
+      if(MM LESS_EQUAL 4)
+        set(_pg_lv ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}})
+      else()
+        set(_pg_lv ${VDPAS_LEVERS})
+      endif()
+      foreach(KV8 0 1)
+        set(_kv "")
+        if(KV8)
+          set(_kv _KV8)
+        endif()
+        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}${_kv}_PG${KV_PAGE} SOURCE ${VDPAS_CL}
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${_pg_lv} KV8=${KV8} KV_PAGED=${KV_PAGE}
+                         OPTIONS ${VDPAS_OPTIONS})
+      endforeach()
     endforeach()
   endif()
   if(B70_VERIFY_M8)
@@ -910,27 +912,12 @@ if(B70_MTP AND B70_VERIFY_M8)
                    DEFINES ${WIDE_CTRL_DEFINES} M=16 HIDDEN=5120 VOCAB=248320)
   add_ocloc_kernel(argmax_stage1_M16 SOURCE ${ARGMAX_CL} DEFINES ${WIDE_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=16)
   add_ocloc_kernel(argmax_stage2_W16 SOURCE ${ARGMAX_CL} DEFINES ${WIDE_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=16)
-  add_prep_res_fold(16 5120 0 20)
-  add_prep_res_fold(16 5120 4 20)
-  add_prep_norm_finish(16 5120 20 20)
-  add_ocloc_kernel(prep_silu_mul_M16 SOURCE ${PREP_CL} DEFINES M=16)
-  add_ocloc_kernel(prep_gated_head_M16 SOURCE ${PREP_CL} DEFINES M=16)
-  add_attn_prep(16)
-  add_ocloc_kernel(attn_v2_M16_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
-                   DEFINES ${CTRL_DEFINES} M=16 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
+  # the rest of the list's per-row binaries (the norms, the MLP's, attn_prep / attn_v2, the head's KV fill) come
+  # from the M = 5..8 loop above, at M = 16
   add_ocloc_kernel(attn_verify_dpas_M16_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
                    DEFINES ${CTRL_DEFINES} M=16 TGT=${ATTN_V2_TGT} KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 KV8=0
                    OPTIONS -cl-intel-256-GRF-per-thread)
-  add_gemv_bf16_variant(16 5120 128 16 16)       # a||b
   add_gemv_bf16_variant(16 5120 128 16 64)       # a||b, the K split of the lists at M >= 5
-  # the MTP head's KV fill of 16 rows
-  add_gemv_bf16_variant(16 10240 5120 64 1)      # fc
-  add_gemv_bf16_variant(16 5120 14336 64 1)      # q||k||v
-  add_ocloc_kernel(prep_norm_finish_M16_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
-                   DEFINES M=16 K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
-  add_ocloc_kernel(prep_res_fold_M16_K5120_SP1_G20_Z SOURCE ${PREP_CL}
-                   DEFINES M=16 K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
-  add_ocloc_kernel(attn_prep_M16_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=16 QKV_S=1)
 endif()
 # ==== Open-work 28 ============================================================ (end) ====
 
@@ -2065,21 +2052,8 @@ endif()
 #   attn_verify_dpas_M<M>_T32[_KV8]_PG<page>    the verify lists' DPAS attention (M = 2..4, VDPAS_LEVERS_PAIR)
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set(PG _PG${KV_PAGE})
-  foreach(MM 1 2 3 4)
-    add_ocloc_kernel(attn_prep_M${MM}${PG} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
-    add_ocloc_kernel(attn_prep_M${MM}_S1${PG} SOURCE ${ATTN_CL}
-                     DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
-    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
-                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} KV_PAGED=${KV_PAGE})
-    add_ocloc_kernel(attn_prep_M${MM}_KV8${PG} SOURCE ${KV8_CL}
-                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 KV_PAGED=${KV_PAGE})
-    add_ocloc_kernel(attn_prep_M${MM}_S1_KV8${PG} SOURCE ${KV8_CL}
-                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
-    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8${PG} SOURCE ${KV8_CL}
-                     DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} KV_PAGED=${KV_PAGE})
-  endforeach()
-  # Plan 19v3b Tasks 3-7: slot 0 beside the DFlash drafter verifies at M = 5..8 too (its tap verify lists).
-  foreach(MM 5 6 7 8)
+  # M = 1..4; plan 19v3b Tasks 3-7: slot 0 beside the DFlash drafter verifies at M = 5..8 too (its tap verify lists).
+  foreach(MM 1 2 3 4 5 6 7 8)
     add_ocloc_kernel(attn_prep_M${MM}${PG} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
     add_ocloc_kernel(attn_prep_M${MM}_S1${PG} SOURCE ${ATTN_CL}
                      DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
