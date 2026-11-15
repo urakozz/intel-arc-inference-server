@@ -405,16 +405,20 @@ class Walk {
       const bool tbl = L.expert_row != nullptr;
       const void* w_gu = tbl ? L.expert_row : L.gate_up->ptr();
       const void* w_dn = tbl ? static_cast<const uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr();
-      launch(kc_(kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true, tbl), "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN,
-             ib, 1,
+      l0::Kernel& gu = kc_(kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true, tbl), "pf_moe_q4gemm");
+      l0::Kernel& dn = kc_(kernels::pf_moe_q4gemm_variant(d_.moe_inter, d_.hidden, false, tbl), "pf_moe_q4gemm");
+      if (tbl) {   // the host-memory experts are reached through the table row
+        gu.indirect_host();
+        dn.indirect_host();
+      }
+      launch(gu, NG / kernels::pf_moe::kQ4WgN, ib, 1,
              {PtrArg(s_.items.ptr()), PtrArg(s_.xg.ptr()), PtrArg(w_gu),
               PtrArg(shb ? nullptr : L.shared->ptr()), PtrArg(s_.h.ptr())});
       prefill::profile_wait(cx_, Phase::kMoeGemm);
       // (the shared block alone: `blocks` is never read - the walk starts at block d_.experts)
       if (shb) grouped("q4_pf_dequant_gu_shb", w_gu, L.shared->ptr(), 1, d_.hidden, NG, true, s_.xg.ptr(),
                        s_.h.ptr(), tmax, d_.experts);
-      launch(kc_(kernels::pf_moe_q4gemm_variant(d_.moe_inter, d_.hidden, false, tbl), "pf_moe_q4gemm"),
-             d_.hidden / kernels::pf_moe::kQ4WgN, ib, 1,
+      launch(dn, d_.hidden / kernels::pf_moe::kQ4WgN, ib, 1,
              {PtrArg(s_.items.ptr()), PtrArg(s_.h.ptr()), PtrArg(w_dn),
               PtrArg(shb ? nullptr : at(*L.shared, L.shared_down_offset)), PtrArg(s_.xg.ptr())});
       prefill::profile_wait(cx_, Phase::kMoeGemm);

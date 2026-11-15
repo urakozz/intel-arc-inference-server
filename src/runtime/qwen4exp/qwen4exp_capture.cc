@@ -563,6 +563,7 @@ class Walk {
     {
       // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M)
       l0::Kernel& k = kernel(mv, "q4_moe_gate_up", kq::moe_gate_up_wg());
+      if (tbl) k.indirect_host();   // the host-memory experts are reached through the table row
       k.arg_ptr(0, rt);
       k.arg_ptr(1, b_.x.ptr());
       k.arg_ptr(2, tbl ? L.expert_row : L.gate_up->ptr());
@@ -573,6 +574,7 @@ class Walk {
     {
       // q4_moe_down(route, h, w_dn, w_sh_dn, y), grid (2560 / 16, M) - y is NOT folded: the next combine does
       l0::Kernel& k = kernel(mv, "q4_moe_down", kq::moe_down_wg());
+      if (tbl) k.indirect_host();
       k.arg_ptr(0, rt);
       k.arg_ptr(1, b_.moe_h.ptr());
       k.arg_ptr(2, tbl ? static_cast<uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr());
