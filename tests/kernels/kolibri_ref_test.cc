@@ -29,10 +29,6 @@ using kr::f32;
 using kr::rf;
 using kr::rne;
 
-int ulps16(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 int64_t ulps32(float a, float b) {
   auto key = [](float v) {
     const int32_t i = int32_t(kr::as_u32(v));

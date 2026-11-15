@@ -125,10 +125,6 @@ double cosine(const double* a, const float* b, size_t n) {
   }
   return (aa == 0 && bb == 0) ? 1.0 : ab / std::sqrt(aa * bb);
 }
-int ulps16(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 
 struct Dev {
   l0::Context ctx{0};

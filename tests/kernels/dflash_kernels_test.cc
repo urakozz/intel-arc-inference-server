@@ -103,10 +103,6 @@ std::vector<uint16_t> rnd_bf16(size_t n, float lo, float hi, uint32_t seed) {
   for (size_t i = 0; i < n; ++i) v[i] = rne(f[i]);
   return v;
 }
-int ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 
 struct Bins {
   bool split;
@@ -285,7 +281,7 @@ int check_prep(Dev& d, Bins& b) {
     int e = 0, off = 0;
     for (uint32_t r = 0; r < M; ++r)
       for (uint32_t i = 0; i < I; ++i) {
-        const int u = ulps(a[size_t(r) * I + i], rne(dfref::silu_mul(gu[size_t(r) * 2 * I + i], gu[size_t(r) * 2 * I + I + i])));
+        const int u = ulps16(a[size_t(r) * I + i], rne(dfref::silu_mul(gu[size_t(r) * 2 * I + i], gu[size_t(r) * 2 * I + I + i])));
         off += u != 0;
         e += u > 1;
       }
@@ -534,7 +530,7 @@ int check_attn(Dev& d, Bins& b) {
     const std::vector<uint16_t> got = d.read<uint16_t>(out, size_t(M) * QN);
     int e = 0, worst = 0;
     for (size_t i = 0; i < got.size(); ++i) {
-      const int u = ulps(got[i], rne(want[i]));
+      const int u = ulps16(got[i], rne(want[i]));
       e += u != 0;
       worst = std::max(worst, u);
     }
@@ -610,7 +606,7 @@ int check_attn_dpas(Dev& d, Bins& b, unsigned ks = 1) {
           ab += x * y;
           aa += x * x;
           bb += y * y;
-          worst_ulp = std::max(worst_ulp, ulps(got[at], rne(want[at])));
+          worst_ulp = std::max(worst_ulp, ulps16(got[at], rne(want[at])));
           nonzero += r > K && got[at] != 0;
         }
         if (r <= K) worst_cos = std::min(worst_cos, aa == 0 && bb == 0 ? 1.0 : ab / std::sqrt(aa * bb));

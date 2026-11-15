@@ -34,10 +34,6 @@ using moe_ref::rf;
 using moe_ref::rne;
 
 // bf16 ulps between two bf16 values of the same sign (or both ~0).
-int ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 
 // --- 1, 2: the route -------------------------------------------------------------
 void test_route_ties() {
@@ -113,7 +109,7 @@ void test_silu_up() {
     const double gb = f32(rne(g)), ub = f32(rne(u));
     const double sb = f32(rne(float(gb / (1.0 + std::exp(-gb)))));
     const uint16_t want = rne(float(sb * ub));
-    worst = std::max(worst, ulps(got, want));
+    worst = std::max(worst, ulps16(got, want));
   }
   CHECK(worst <= 1);
 }
@@ -245,7 +241,7 @@ void test_block() {
     const std::vector<uint16_t> want = naive_block(s, logits, x, ex, resid, ids);
     for (uint32_t k = 0; k < s.top_k; ++k) CHECK_EQ(r.ids[k], ids[k]);
     for (uint32_t n = 0; n < s.hidden; ++n) {
-      const int u = ulps(got[n], want[n]);
+      const int u = ulps16(got[n], want[n]);
       worst = std::max(worst, u);
       exact += u == 0;
       ++total;

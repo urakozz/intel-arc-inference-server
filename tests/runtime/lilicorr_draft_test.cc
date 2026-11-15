@@ -80,10 +80,6 @@ std::vector<uint16_t> rnd_bf16(size_t n, float amp, uint64_t seed) {
   for (std::thread& th : pool) th.join();
   return v;
 }
-int ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 
 }  // namespace
 
@@ -172,7 +168,7 @@ int main(int argc, char** argv) {
       for (uint32_t l = 0; l < D.layers; ++l)
         for (uint32_t i = 0; i < D.kvn(); ++i) {
           const size_t at = (size_t(l) * D.ring + pos % D.ring) * D.kvn() + i;
-          over += ulps(rk[at], dfref::rne(ring.k[at])) > 1 || ulps(rv[at], dfref::rne(ring.v[at])) > 1;
+          over += ulps16(rk[at], dfref::rne(ring.k[at])) > 1 || ulps16(rv[at], dfref::rne(ring.v[at])) > 1;
         }
     const double ac = dfref::cosine(anchor.data(), twin_anchor.data(), H);
     std::printf("1. projection: %u positions, the last replay's ring rows %d over 1 bf16 ulp; anchor cosine %.9f\n", NPOS,
@@ -227,7 +223,7 @@ int main(int argc, char** argv) {
         for (uint32_t i = 0; i < H; ++i) {
           const size_t at = size_t(r) * H + i;
           mx = std::fmax(mx, std::fabs(double(ch[at]) - want.hidden[at]));
-          const int u = ulps(cx[at], dfref::rne(want.hidden[at]));
+          const int u = ulps16(cx[at], dfref::rne(want.hidden[at]));
           flips += u != 0;
           worst = std::max(worst, u);
         }

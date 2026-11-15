@@ -50,11 +50,6 @@ static_assert(kernels::moe_route::kWords == moe_ref::kWords && kernels::moe_rout
 using moe_ref::f32;
 using moe_ref::rne;
 
-int ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
-
 struct Dev {
   l0::Context ctx{0};
   l0::Queue q{ctx};
@@ -124,12 +119,12 @@ void check_route(const std::vector<uint32_t>& row, const moe_ref::Route& want, c
     float w, p;
     std::memcpy(&w, &row[moe_ref::kWeights + k], 4);
     std::memcpy(&p, &row[moe_ref::kProbs + k], 4);
-    CHECK(ulps(rne(w), rne(want.w[k])) <= 1);
+    CHECK(ulps16(rne(w), rne(want.w[k])) <= 1);
     CHECK_NEAR(p, want.p[k], 1e-5 * want.p[k] + 1e-12);
   }
   float sg;
   std::memcpy(&sg, &row[moe_ref::kSharedGate], 4);
-  CHECK(ulps(rne(sg), rne(want.sg)) <= 1);
+  CHECK(ulps16(rne(sg), rne(want.sg)) <= 1);
 }
 
 }  // namespace
@@ -235,7 +230,7 @@ int main() {
   for (uint32_t slot = 0; slot < kS.slots(); ++slot) {
     int worst = 0;
     for (uint32_t i = 0; i < kS.inter; ++i)
-      worst = std::max(worst, ulps(hd[size_t(slot) * kS.inter + i], hr[size_t(slot) * kS.inter + i]));
+      worst = std::max(worst, ulps16(hd[size_t(slot) * kS.inter + i], hr[size_t(slot) * kS.inter + i]));
     if (worst > 2) {
       std::fprintf(stderr, "moe_gate_up slot %u (expert %u): %d bf16 ulps off its expert's reference"
                    " - wrong id or block stride?\n", slot, slot < 8 ? ids[slot] : kS.experts, worst);
@@ -260,7 +255,7 @@ int main() {
   int worst = 0;
   size_t exact = 0;
   for (uint32_t n = 0; n < kS.hidden; ++n) {
-    worst = std::max(worst, ulps(rd[n], rr[n]));
+    worst = std::max(worst, ulps16(rd[n], rr[n]));
     exact += rd[n] == rr[n];
   }
   std::printf("  moe_down: %zu / %u columns exact, worst %d bf16 ulps\n", exact, kS.hidden, worst);
