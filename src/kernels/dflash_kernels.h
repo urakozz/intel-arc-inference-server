@@ -230,4 +230,30 @@ inline std::vector<std::string> lilicorr_draft_variants(unsigned fmt, bool int8_
   return v;
 }
 
+// ==== Kolibri DSpark: the DSpark drafter (intuit/Kolibri-1-dspark beside Kolibri-1) ====
+// kDSpark: hidden 2560, 20 / 4 heads x 128, FF 6144, the 2048 window (|q - k| <= 2047) over a 2048-slot ring, the 8-row
+// block, the Markov rank 256, Kolibri's 128000-row head of which 127998 are tokens (the drafts never name 127998 - the mask
+// row - or 127999). df_prep is reused at these defines (the conv defines unused: no convolution is bound), df_attn with
+// CAUSAL=1 (the name's `_C`), df_topk over the head's rows 0..6 (anchor-first: block row r predicts p + r + 1), df_select's
+// V2 walk with the Markov head as its codebooks and a hidden of ones (model/dflash.h). The linears bf16 at M 8 (gemv_bf16),
+// the target's head at the 7 rows (gemv_i8w / gemv_bf16).
+inline constexpr Shape kDSpark{2560, 6144, 20, 4, 128, 2048, 2048, 16, 2, 256, 128000, 127998, kM, kAttnPb};
+inline std::string dspark_attn_variant() { return attn_variant(kDSpark) + "_C"; }
+inline std::string dspark_topk_variant() { return topk_variant(kDSpark.vocab, kDSpark.used, false); }
+// Every binary the DSpark draft and projection lists bind for the target's head form (bf16 drafter linears).
+// tests/kernels/dspark_names_test.cc holds the union to the CMake Kolibri DSpark block.
+inline std::vector<std::string> dspark_draft_variants(bool int8_head) {
+  const Shape& s = kDSpark;
+  std::vector<std::string> v = {prep_variant(s), dspark_attn_variant(), dspark_topk_variant(), select_variant(true, s)};
+  for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
+                      {s.NH * s.HD, s.H},                                                    // o
+                      {s.H, 2 * s.I},                                                        // gate||up
+                      {s.I, s.H},                                                            // down
+                      {5 * s.H, s.H},                                                        // fc (5 taps)
+                      {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
+    v.push_back(gemv_bf16_variant(kM, K, N, gemv_bf16_tiling(N)));
+  v.push_back(int8_head ? gemv_i8w_variant(kR, s.H, s.vocab) : gemv_bf16_variant(kR, s.H, s.vocab, gemv_bf16_tiling(s.vocab)));
+  return v;
+}
+
 }  // namespace kernels::dflash

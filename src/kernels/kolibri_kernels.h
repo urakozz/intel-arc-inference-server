@@ -68,18 +68,21 @@ inline std::string embed_variant(unsigned M) { return "kol_embed_gather" + m_(M)
 inline std::string argmax1_variant(unsigned M) { return "kol_argmax_stage1" + m_(M) + "_N128000_V128000"; }
 inline std::string argmax2_variant() { return "kol_argmax_stage2_N128000"; }
 
-// The attention arm's GEMV rows (the int4 arm's S from the descriptor: PROVISIONAL S2 / S4).
-inline std::string qkv_variant(model::KolAttnForm a, unsigned qkv_s = 2) {
-  return a == model::KolAttnForm::Int4 ? gemv_variant(1, kHidden, kQkvN, qkv_s, 0)
-                                       : gemv_bf16_variant(1, kHidden, kQkvN, gemv_bf16_tiling(kQkvN));
+// The attention arm's GEMV rows (the int4 arm's S from the descriptor: PROVISIONAL S2 / S4). `M`: Kolibri DSpark's
+// verify lists run them at M = K + 1 rows (gemv.cl / gemv_bf16.cl / gemv_i8w.cl compute each row as at M = 1).
+inline std::string qkv_variant(model::KolAttnForm a, unsigned qkv_s = 2, unsigned M = 1) {
+  return a == model::KolAttnForm::Int4 ? gemv_variant(M, kHidden, kQkvN, qkv_s, 0)
+                                       : gemv_bf16_variant(M, kHidden, kQkvN, gemv_bf16_tiling(kQkvN));
 }
-inline std::string oproj_variant(model::KolAttnForm a, unsigned oproj_s = 4) {
-  return a == model::KolAttnForm::Int4 ? gemv_variant(1, kQHeads * kHd, kHidden, oproj_s, 0)
-                                       : gemv_bf16_variant(1, kQHeads * kHd, kHidden, gemv_bf16_tiling(kHidden));
+inline std::string oproj_variant(model::KolAttnForm a, unsigned oproj_s = 4, unsigned M = 1) {
+  return a == model::KolAttnForm::Int4 ? gemv_variant(M, kQHeads * kHd, kHidden, oproj_s, 0)
+                                       : gemv_bf16_variant(M, kQHeads * kHd, kHidden, gemv_bf16_tiling(kHidden));
 }
-inline std::string router_variant() { return gemv_bf16_variant(1, kHidden, kRouterN, gemv_bf16_tiling(kRouterN)); }
-inline std::string lm_head_variant(bool int8) {
-  return int8 ? gemv_i8w_variant(1, kHidden, kVocab) : gemv_bf16_variant(1, kHidden, kVocab, gemv_bf16_tiling(kVocab));
+inline std::string router_variant(unsigned M = 1) {
+  return gemv_bf16_variant(M, kHidden, kRouterN, gemv_bf16_tiling(kRouterN));
+}
+inline std::string lm_head_variant(bool int8, unsigned M = 1) {
+  return int8 ? gemv_i8w_variant(M, kHidden, kVocab) : gemv_bf16_variant(M, kHidden, kVocab, gemv_bf16_tiling(kVocab));
 }
 
 // Every binary a Kolibri M = 1 decode list binds (runtime/kolibri/kolibri_capture.cc forms the same
@@ -110,6 +113,48 @@ inline std::vector<std::string> decode_variants(model::KolAttnForm a, bool int8_
       argmax2_variant(),
   };
 }
+
+// ==== Kolibri DSpark: the verify lists (begin) ================================================
+// The decode list at M = K + 1 rows, 2..8 (runtime/kolibri/kolibri_capture.h build_verify): every Kolibri kernel takes M
+// as a define and computes row m as at M = 1 (kol_prep.cl, kol_moe.cl, gemv*.cl, argmax.cl, embed_gather.cl); the route is
+// decode's M = 1 binary on grid (1, M), as the prefill runs it. kol_attn.cl is built to M 4 (its register file), so a
+// verify of M > 4 rows runs the attention in two launches - rows 0..3 at M 4, rows 4..M-1 at M - 4 over a second
+// Control block at pos + 4 (verify_attn_rows).
+inline constexpr unsigned kVerifyRows = 8, kAttnMaxM = 4;
+inline unsigned verify_attn_rows(unsigned M, unsigned half) {   // the rows of attention launch `half` (0 or 1)
+  return half == 0 ? (M < kAttnMaxM ? M : kAttnMaxM) : (M > kAttnMaxM ? M - kAttnMaxM : 0);
+}
+// Every binary a verify list at M rows binds for an attention arm and a head form (flash attention only: the verify
+// lists refuse B70_KOLIBRI_ATTN=eager). M = 1 is decode_variants' (the plain token with the verify lists on).
+inline std::vector<std::string> verify_variants(model::KolAttnForm a, bool int8_head, unsigned M) {
+  const bool i4 = a == model::KolAttnForm::Int4;
+  const unsigned S = i4 ? 2u : 1u, OS = i4 ? 4u : 1u;
+  std::vector<std::string> v = {
+      embed_variant(M),
+      fold_variant(M),
+      fold_zero_variant(M, OS),
+      norm_variant(M),
+      post_add_variant(M),
+      qkv_variant(a, 2, M),
+      oproj_variant(a, 4, M),
+      attn_prep_variant(M, S, true),
+      attn_prep_variant(M, S, false),
+      attn_variant(verify_attn_rows(M, 0), true),
+      attn_variant(verify_attn_rows(M, 0), false),
+      router_variant(M),
+      route_variant(1),
+      moe_variant(M),
+      lm_head_variant(int8_head, M),
+      argmax1_variant(M),
+      argmax2_variant(),
+  };
+  if (verify_attn_rows(M, 1) != 0) {
+    v.push_back(attn_variant(verify_attn_rows(M, 1), true));
+    v.push_back(attn_variant(verify_attn_rows(M, 1), false));
+  }
+  return v;
+}
+// ==== Kolibri DSpark: the verify lists (end) ==================================================
 
 // ==== Spec 20d: Kolibri-1 prefill (begin) ====================================================
 // One chunk of at most kPfC positions through the whole model on the Level Zero list

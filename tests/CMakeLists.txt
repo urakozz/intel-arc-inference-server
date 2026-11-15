@@ -4568,6 +4568,16 @@ target_include_directories(dspark_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(dspark_loader_test PRIVATE b70_dflash_loader)
 add_test(NAME dspark_loader_test COMMAND dspark_loader_test)
 set_tests_properties(dspark_loader_test PROPERTIES LABELS "kolibri;dflash")
+# Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark
+# block). Host only (reads the kernel directory).
+if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(dspark_names_test kernels/dspark_names_test.cc)
+  target_include_directories(dspark_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dspark_names_test PRIVATE b70_kolibri_model)
+  b70_target_kernel_dir(dspark_names_test)
+  add_test(NAME dspark_names_test COMMAND dspark_names_test)
+  set_tests_properties(dspark_names_test PROPERTIES LABELS "kolibri;dflash")
+endif()
 # ==== Kolibri DSpark ==== (end) ====
 # Fix round A: every test executable declared above gets a line-buffered stdout
 # (common/line_buffered_stdout.cc - a static initializer, so no main changes): crash logs
