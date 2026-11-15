@@ -342,7 +342,7 @@ int main(int argc, char** argv) {
   // Sizes with the head (Review Focus 4): +hh0 in the state, a 17th KV layer.
   // Qwen3.8: 166723584 + 10240 and 134217728 / 16 x 17 (the gdn_state + conv ring of
   // 48 GDN layers; 2048 positions of 16 FA layers' K and V).
-  CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 16 * 10240 * 2 + 10240);
+  CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 32 * 10240 * 2 + 10240);   // the ring 32 deep (open-work 28)
   // Spec 12b: 4 x 256 x 2 B per layer and position at bf16, 4 x (256 + 2) B at int8.
   CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *
                                  (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));

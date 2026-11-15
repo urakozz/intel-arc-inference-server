@@ -515,7 +515,7 @@ int main(int argc, char** argv) {
     for (uint32_t M = 1; M <= kK + 1; ++M) l_ok &= e.verify_step(M).kernel_count == runtime::decode_launches(md);
     l_ok &= d.draft_step()->kernel_count == runtime::dflash::draft_launches(d.desc());
     l_ok &= d.project_step().kernel_count == runtime::dflash::project_launches(d.desc());
-    l_ok &= e.state_bytes() == kGdnBytes + size_t(md.gdn_layers) * 16 * 10240 * 2 + 41943040;   // + the ring (19d)
+    l_ok &= e.state_bytes() == kGdnBytes + size_t(md.gdn_layers) * 32 * 10240 * 2 + 41943040;   // + the ring (19d)
     l_ok &= d.ring_bytes() == 41943040 && d.key() != 0;
     std::printf("L: verify M = 1..8 %zu launches each, draft %zu, projection %zu, state %zu B: %s\n",
                 e.verify_step(1).kernel_count, d.draft_step()->kernel_count, d.project_step().kernel_count,
