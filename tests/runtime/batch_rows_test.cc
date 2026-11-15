@@ -60,7 +60,7 @@ void check_rules() {
   CHECK_EQ(lay.kv_base(1), 36864u);
   CHECK_EQ(lay.kv_base(3), 36864u + 2 * 8192);
   // 2 slots x 4 rows (an MTP-shaped step): every row's base, src, dst, position.
-  const std::vector<BatchRow> t = runtime::make_rows(lay, {{0, 32768, 4, 0, {4, 5, 6, 7}}, {2, 4096, 4, 2, {8, 9, 10, 11}}});
+  const runtime::RowTable t = runtime::make_rows(lay, {{0, 32768, 4, 0, {4, 5, 6, 7}}, {2, 4096, 4, 2, {8, 9, 10, 11}}});
   CHECK_EQ(t.size(), size_t{8});
   CHECK_EQ(t[3].pos, 32771u);
   CHECK_EQ(t[4].kv_base, 36864u + 8192);
@@ -80,7 +80,7 @@ void check_rules() {
   CHECK(throws([&] { runtime::make_rows(lay, {{1, 10, 1, 3, {5}}, {2, 10, 1, 3, {6}}}); }));          // one src, two runs
   CHECK(throws([&] { runtime::make_rows(lay, {{1, 10, 2, 1, {5}}}); }));                            // dsts != rows
   // Rows built by hand: a position gap and a src change inside a run, a wrong base.
-  std::vector<BatchRow> r = runtime::make_rows(lay, {{1, 10, 3, 1, {5, 6, 7}}});
+  runtime::RowTable r = runtime::make_rows(lay, {{1, 10, 3, 1, {5, 6, 7}}});
   r[2].pos = 13;
   CHECK(throws([&] { runtime::check_rows(r, lay); }));
   r[2].pos = 12;

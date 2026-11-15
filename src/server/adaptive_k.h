@@ -3,6 +3,7 @@
 // from the request's own acceptance so far. Pure host code, unit-tested by
 // tests/server/adaptive_k_test.cc; the server keeps one AdaptiveK per request.
 #include <cstdint>
+#include <inplace_vector>
 #include <string>
 #include <vector>
 
@@ -12,10 +13,11 @@ namespace server {
 // (verify[0] = the plain step), draft[k - 1] for k drafts. Data, not code: defaults per
 // head form, overridable with `the cost table` so the box can calibrate.
 struct MtpCost {
+  static constexpr uint32_t kMaxRows = 8;   // a verify step's rows at most: runtime::DecodeScratchDims::kM
   // Spec 28b: the verify rows on gemm_sm (the small-M GEMM) - measured 2026-11-01 by probe_mtp_steps at depth 4096,
   // bf16 head (busy-box timing on one card, to be re-checked on a quiet box; before 28b: 1.17 / 1.52 / 1.74).
-  std::vector<double> verify{1.00, 1.04, 1.09, 1.13};
-  std::vector<double> draft{0.19, 0.37, 0.55};
+  std::inplace_vector<double, kMaxRows> verify{1.00, 1.04, 1.09, 1.13};
+  std::inplace_vector<double, kMaxRows - 1> draft{0.19, 0.37, 0.55};
 
   static MtpCost bf16_head();   // measured (verify: spec 28b; drafts: spec 8 P0 / §8)
   static MtpCost int8_head();   // verify measured (spec 28b, interleaved pairs); drafts derived from spec 9 H2

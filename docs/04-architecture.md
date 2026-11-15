@@ -6,8 +6,9 @@ and a Level Zero walk of our own OpenCL C kernels for prefill.**
 ## Language and toolchain
 
 - **C++26**, GCC 16 (`g++-16.2`) and CMake for everything; static reflection (`-freflection`) holds Kolibri's,
-  Flash-Next's and Bolt's config.json to their descriptors (`src/common/json_reflect.h`). No SYCL and no `icpx` in
-  the engine build.
+  Flash-Next's and Bolt's config.json to their descriptors (`src/common/json_reflect.h`), maps the server's OpenAI
+  request, responses and stream chunks to structs (`src/server/json_struct.h`) and makes each binary's flags one
+  struct that generates its parser and `--help` (`src/cli/flags.h`). No SYCL and no `icpx` in the engine build.
 - **Level Zero** is the runtime. Device kernels are OpenCL C compiled offline
   with `ocloc` to device binaries and loaded with `zeModuleCreate`.
 - **Python appears exactly once**, in `tools/`, for offline weight conversion,

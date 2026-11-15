@@ -71,3 +71,9 @@ target_link_libraries(b70-decode PRIVATE b70_bolt_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_bolt_runtime b70_bolt_prefill)
 endif()
+
+# Static reflection (P2996 + P3394 annotations, cli/flags.h): each binary's flags are one struct.
+target_compile_options(b70-decode PRIVATE -freflection)
+if(TARGET b70-serve)
+  target_compile_options(b70-serve PRIVATE -freflection)
+endif()

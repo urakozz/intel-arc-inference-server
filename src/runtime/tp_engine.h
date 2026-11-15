@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <inplace_vector>
 #include <memory>
 #include <optional>
 #include <string>
@@ -244,8 +245,9 @@ class TpEngine {
   // list) the cards' state words are read and the head's rows merged after the fences (a draft list merges itself).
   // Spec 19 v3c: `heads` false - the crossings' state words checked without the head merge (a draft list's);
   // `front` - lists submitted before each card's own in the same execute (a deferred projection, the drafter's tails).
+  using Front = std::array<std::inplace_vector<l0::CmdList*, 2>, model::kTpSize>;   // a card's projection, its tail
   void run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, bool crossings, const char* what,
-                 bool heads = true, const std::array<std::vector<l0::CmdList*>, model::kTpSize>& front = {});
+                 bool heads = true, const Front& front = {});
   void mtp_step1();
   void mtp_normalise_live();
   void require_mtp(const char* what) const;
@@ -253,7 +255,7 @@ class TpEngine {
   void capture_tap_lists(uint32_t card, const CaptureOptions& opt);   // spec 19 v3c
   void drafter_project_staged(uint32_t from, uint32_t pos, uint32_t n);   // spec 19 v3c, tp_prefill.cc
   void require_spec(const char* what) const;                          // MTP or a drafter
-  std::array<std::vector<l0::CmdList*>, model::kTpSize> take_front(bool tails);
+  Front take_front(bool tails);
   void merge_heads();
   bool settle(uint32_t card);
   [[noreturn]] void fail(const std::string& what);
