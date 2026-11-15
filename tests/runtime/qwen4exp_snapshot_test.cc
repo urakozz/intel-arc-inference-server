@@ -16,7 +16,7 @@
 //      bytes back into their slots;
 //   5. the open block's raw keys: 3 rows at 2051 (positions 2048, 2049, 2050 at tail slots 0, 1, 2), 1 at 2049, 0
 //      at 2052 and 5000 (3 pad rows); the head's, one position behind: 3 rows at 2052 (2048..2050), 0 at 2049;
-//   6. the GDN conv rows are p - 3 .. p - 1 at slots p % 16 (wrapping at 16 = 2048 + 16k), the PLE's p - 9 .. p - 1.
+//   6. the GDN conv rows are p - 3 .. p - 1 at slots p % kConvRing (32: wrapping at 2048 + 32k), the PLE's p - 9 .. p - 1.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -262,11 +262,12 @@ void history(const Qwen4ExpDesc& d, uint32_t max_len) {
     CHECK_EQ(hreal, size_t(c.head_rows) * key);
     std::printf("pos %u: %u raw key rows a QSA layer (from slot %u), the head's %u\n", c.pos, c.rows, c.slot, c.head_rows);
   }
-  {   // the GDN window wraps: pos 2050 reads positions 2047..2049, slots 15, 0, 1 - two runs
+  {   // the GDN window wraps: pos 2050 reads positions 2047..2049, slots kConvRing - 1 (2047 % 32), 0, 1 - two runs
     const std::vector<SnapRun> runs = rq::state_runs(d, one, 2050, false);
     const std::vector<SnapRun> cr = of(runs, SnapTensor::ConvRing);
     CHECK_EQ(cr.size(), size_t(gdn) * 2);
-    CHECK(cr[0].offset == 15 * conv && cr[0].bytes == conv && cr[1].offset == 0 && cr[1].bytes == 2 * conv);
+    CHECK(cr[0].offset == (rq::kConvRing - 1) * conv && cr[0].bytes == conv && cr[1].offset == 0 &&
+          cr[1].bytes == 2 * conv);
     // the PLE's p - 9 .. p - 1 = 2041..2049: slots 9..15 then 0..1
     const std::vector<SnapRun> pr = of(runs, SnapTensor::PleRing);
     CHECK_EQ(pr.size(), size_t(2));

@@ -950,7 +950,7 @@ int run_gdn() {
     return m;
   };
   l0::Mem dq = up(qkvz.data(), qkvz.size() * 4), da = up(ab.data(), ab.size() * 4), ds = up(small.data(), small_bytes);
-  l0::Mem st(ctx, l0::MemKind::Device, state_elems * 4), rg(ctx, l0::MemKind::Device, size_t(16) * CONV * 2),
+  l0::Mem st(ctx, l0::MemKind::Device, state_elems * 4), rg(ctx, l0::MemKind::Device, size_t(rq::kConvRing) * CONV * 2),
       y(ctx, l0::MemKind::Device, size_t(P) * MIX * 2);
   const rq::GdnScratchSizes gs = rq::gdn_scratch_sizes(rq::kPfC);
   l0::Mem scratch(ctx, l0::MemKind::Device, gs.total());
@@ -985,7 +985,7 @@ int run_gdn() {
       imm.copy(ys.data() + size_t(p) * MIX, y.ptr(), size_t(std::min(width, P - p)) * MIX * 2);
     }
     state.resize(state_elems);
-    ring.resize(size_t(16) * CONV);
+    ring.resize(size_t(rq::kConvRing) * CONV);
     imm.copy(state.data(), st.ptr(), st.size());
     imm.copy(ring.data(), rg.ptr(), rg.size());
   };

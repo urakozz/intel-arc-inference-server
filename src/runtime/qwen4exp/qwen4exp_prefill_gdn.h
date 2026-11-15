@@ -26,7 +26,7 @@ namespace runtime::qwen4exp {
 //   qkvz      fp32 [C][16384]   the qkv||z linear at S = 1 (rounded to bf16 inside, gdn_step's single point)
 //   ab        fp32 [C][128]     a at [0, 48), b at [48, 96)
 //   state     fp32 [48][128][128]  the layer's decode state (in place)
-//   ring      bf16 [16][10240]  the layer's decode conv ring (in place)
+//   ring      bf16 [32][10240]  the layer's decode conv ring (in place; kConvRing slots)
 //   small     the layer's GDN small block (conv weights, negA, dt_bias, the gated norm at gated_norm_off)
 //   y         bf16 [C][6144]    the gated head's output (out_proj's A)
 //   the chain's scratch at gdn_scratch_sizes(C) (qwen4exp_sizes.h)
