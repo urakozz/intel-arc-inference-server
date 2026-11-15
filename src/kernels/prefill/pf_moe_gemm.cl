@@ -1,6 +1,6 @@
 // pf_moe_gemm - spec 15d: the GROUPED expert GEMM of a prefill chunk (spec 15 §4.4): ONE
 // launch covers every expert's tiles. Work-group (tile, n-block) reads its tile's weight
-// block and first sorted row from the tile table pf_moe.cl's pf_moe_sort wrote, and
+// block and first sorted row from the tile table pf_moe_sort_mw.cl wrote, and
 // computes that tile's TM = 32 rows x 256 columns of its expert's linear. A padding tile
 // (block NONE), and a tile whose block is outside this launch's batch [b0, b1), returns at
 // once - there is no barrier in this kernel, so the early return is legal - which is how

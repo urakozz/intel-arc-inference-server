@@ -2,9 +2,8 @@
 // the grouped GEMMs (those are pf_moe_gemm.cl). Spec 15 §4.4 and §9 ("prefill routing
 // entirely on the device, with a tile table padded with -1 so the host never reads
 // per-expert counts"). One binary per shape (`pf_moe_E<experts>_T<top_k>_D<hidden>_I<inter>`,
-// kernels::pf_moe_variant), five entry points:
+// kernels::pf_moe_variant), five entry points after the sort (pf_moe_sort_mw.cl):
 //
-//   pf_moe_sort(route, hdr, tiles, row_tok, pair_row, C, tmax)   grid (1),        WG EXPERTS
 //   pf_moe_gather(x, hdr, row_tok, xg)                          grid (rows),     WG 64
 //   pf_moe_gather_i8(xq, xs, hdr, row_tok, xg, xsg)             grid (rows),     WG 64
 //   pf_moe_dequant_gu / _dn(w, hdr, out, b0)                    grid (N/16, K/64, nb), WG 16
@@ -31,14 +30,14 @@
 // (Σ_e ceil(c_e / TM) <= (Σ c_e + EXPERTS (TM - 1)) / TM with Σ c_e = C x TOP_K; the host's
 // runtime::moe_prefill_tiles is the one home of the formula and passes it here.)
 //
-// The header (u32, kernels::pf_moe), written by pf_moe_sort, read by everything after it:
+// The header (u32, kernels::pf_moe), written by the sort, read by everything after it:
 //   [H_TILES]       tiles used (<= tmax)          [H_SHARED_ROW]  Rs, the shared expert's row 0
 //   [H_ROWS]        rows used = TM x tiles        [H_C]           C
 //   [H_COUNT + e]   rows of expert e (unpadded), e < EXPERTS; [H_COUNT + EXPERTS] = C
 //
-// **Determinism.** No atomic anywhere. The sort is one work-group: lane e counts and then
-// scatters expert e's pairs by walking the chunk in ascending (token, slot) order, so
-// every row's position is a function of the route rows alone. Gather and dequant are
+// **Determinism.** No atomic anywhere. The sort (pf_moe_sort_mw.cl) places expert e's pairs
+// in ascending (token, slot) order, so every row's position is a function of the route
+// rows alone. Gather and dequant are
 // copies. The combine sums each token's TOP_K terms in FIXED slot order - moe_down's chain
 // (moe.cl), rounding for rounding - then the shared expert by its gate, then folds into
 // the residual, exactly as decode's moe_down does, so prefill and decode combine by one
@@ -48,8 +47,8 @@
 // vload_half, so no cl_khr_fp16.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 
-#if !defined(EXPERTS) || !defined(TOP_K) || !defined(HIDDEN) || !defined(INTER) || !defined(TM) || !defined(KC)
-#error "pf_moe: EXPERTS, TOP_K, HIDDEN, INTER, TM and KC must be defined (src/kernels/prefill/CMakeLists.txt)"
+#if !defined(EXPERTS) || !defined(TOP_K) || !defined(HIDDEN) || !defined(INTER) || !defined(TM)
+#error "pf_moe: EXPERTS, TOP_K, HIDDEN, INTER and TM must be defined (src/kernels/prefill/CMakeLists.txt)"
 #endif
 #if TOP_K < 1 || TOP_K > 8
 #error "pf_moe: TOP_K is 1..8 (moe.cl's route row holds 8 slots)"
@@ -89,90 +88,6 @@ inline ushort rne_bf16(float f) {
   uint u = as_uint(f);
   uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
   return (ushort)((u + rounding) >> 16);
-}
-
-// ---------------------------------------------------------------------------
-// pf_moe_sort - one work-group of EXPERTS lanes; lane e owns expert e.
-//
-//   1. stage the chunk's expert ids into SLM as bytes (min(id, EXPERTS - 1): moe_route
-//      never writes a larger one, and a clamped id keeps every pair inside the table);
-//   2. lane e counts its pairs: c_e = #{(t, k) : id[t][k] == e};
-//   3. lane 0's serial prefix over e of ceil(c_e / TM) - expert e's first tile - and the
-//      shared expert's tiles after the last routed one;
-//   4. lane e writes its tiles, then walks (t, k) ascending and gives each pair the next
-//      row: row_tok[row] = t, pair_row[t][k] = row; its padding rows get NONE;
-//   5. every lane: a share of the shared expert's tiles and rows, of the NONE tail of the
-//      tile table, and its count into the header.
-//
-// No pair is lost: the counts and the scatter read the same SLM bytes, and a token's
-// slots name distinct experts (moe_route's ranks are a permutation), so expert e's rows
-// [r0, r0 + c_e) are exactly its pairs. tests/kernels/pf_moe_ref.h is the same walk.
-__attribute__((reqd_work_group_size(EXPERTS, 1, 1)))
-__kernel void pf_moe_sort(__global const uint* restrict route, __global uint* restrict hdr,
-                          __global uint* restrict tiles, __global uint* restrict row_tok,
-                          __global uint* restrict pair_row, uint C, uint tmax) {
-  __local uchar sid[KC * TOP_K];
-  __local uint cnts[EXPERTS];
-  __local uint toff[EXPERTS + 1];
-  const uint e = get_local_id(0);
-  const uint n = min(C, (uint)KC);       // the host bounds C by kC; never past the SLM
-  for (uint i = e; i < n * TOP_K; i += EXPERTS) {
-    const uint id = route[(size_t)(i / TOP_K) * RW + R_IDS + i % TOP_K];
-    sid[i] = (uchar)min(id, (uint)(EXPERTS - 1));
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  uint cnt = 0;
-  for (uint i = 0; i < n * TOP_K; ++i) cnt += (uint)sid[i] == e ? 1u : 0u;
-  cnts[e] = cnt;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (e == 0) {
-    uint acc = 0;
-    for (uint j = 0; j < EXPERTS; ++j) {
-      toff[j] = acc;
-      acc += (cnts[j] + TM - 1) / TM;
-    }
-    toff[EXPERTS] = acc;
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  const uint ts = toff[EXPERTS];                 // the shared expert's first tile
-  const uint st = (n + TM - 1) / TM;             // its tiles
-  const uint ntiles = ts + st;
-  const uint rs = ts * TM;                       // its first row
-  const uint t0 = toff[e];
-  const uint nt = toff[e + 1] - t0;
-  const uint r0 = t0 * TM;
-  for (uint i = 0; i < nt; ++i)
-    if (t0 + i < tmax) {
-      tiles[2 * (t0 + i)] = e;
-      tiles[2 * (t0 + i) + 1] = r0 + i * TM;
-    }
-  uint p = 0;
-  for (uint t = 0; t < n; ++t)
-    for (uint k = 0; k < TOP_K; ++k)
-      if ((uint)sid[t * TOP_K + k] == e) {
-        row_tok[r0 + p] = t;
-        pair_row[t * TOP_K + k] = r0 + p;
-        ++p;
-      }
-  for (; p < nt * TM; ++p) row_tok[r0 + p] = NONE;
-  for (uint i = e; i < st; i += EXPERTS)
-    if (ts + i < tmax) {
-      tiles[2 * (ts + i)] = SHARED;
-      tiles[2 * (ts + i) + 1] = rs + i * TM;
-    }
-  for (uint i = e; i < st * TM; i += EXPERTS) row_tok[rs + i] = i < n ? i : NONE;
-  for (uint i = ntiles + e; i < tmax; i += EXPERTS) {
-    tiles[2 * i] = NONE;
-    tiles[2 * i + 1] = 0;
-  }
-  hdr[H_COUNT + e] = cnt;
-  if (e == 0) {
-    hdr[H_TILES] = ntiles;
-    hdr[H_SHARED_ROW] = rs;
-    hdr[H_ROWS] = ntiles * TM;
-    hdr[H_C] = n;
-    hdr[H_COUNT + EXPERTS] = n;
-  }
 }
 
 // ---------------------------------------------------------------------------

@@ -254,7 +254,7 @@ inline std::string pf_gemm_i8_variant(bool silu) { return silu ? "pf_gemm_i8_SIL
 inline std::string pf_moe_router_variant(unsigned hidden, unsigned router_n) {
   return "pf_moe_router_K" + std::to_string(hidden) + "_N" + std::to_string(router_n);
 }
-// pf_moe.cl's five entry points (sort, gather, gather_i8, dequant_gu / _dn, combine), one
+// pf_moe.cl's five entry points (gather, gather_i8, dequant_gu / _dn, combine), one
 // binary per shape, named as moe.cl's decode binary is (kernels::moe_variant).
 inline std::string pf_moe_variant(unsigned experts, unsigned top_k, unsigned hidden,
                                   unsigned inter) {
@@ -290,7 +290,7 @@ inline std::string pf_moe_gemm_variant(unsigned K, unsigned N, bool i8, bool sil
          std::to_string(N) + (silu ? "_SILU" : "");
 }
 // The host's mirror of pf_moe.cl's constants (its #defines; src/kernels/prefill/CMakeLists.txt
-// passes TM and KC). tests/kernels/pf_moe_ref.h reads them by name.
+// passes TM). tests/kernels/pf_moe_ref.h reads them by name.
 namespace pf_moe {
 inline constexpr unsigned kTileM = 32;           // TM: rows per grouped-GEMM tile
 inline constexpr unsigned kItemM = 64;           // MI: rows per fused-GEMM work item (pf_moe_sort_mw's items)

@@ -226,7 +226,7 @@ struct PrefillScratchSizes {
 //   route    u32  [layers][kC][32]          moe_route's rows, PER LAYER: after a prefill every
 //                                           layer's routing is still there for R2 and the
 //                                           prefill-vs-decode routing check to read back
-//   hdr      u32  [pf_moe::hdr_words]       pf_moe_sort's header (counts, tiles used, Rs)
+//   hdr      u32  [pf_moe::hdr_words]       the sort's header (counts, tiles used, Rs)
 //   tiles    u32  [tmax][2]                 the padded tile table: (weight block, first row)
 //   row_tok  u32  [rows]                    the token of every sorted row (NONE: padding)
 //   pair_row u32  [kC][top_k]               the sorted row of every (token, slot)
