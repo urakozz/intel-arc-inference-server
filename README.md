@@ -3,14 +3,10 @@
 **A fast LLM server for one or two Intel Arc Pro B70 cards, written from scratch.** Hand-crafted GPU kernels,
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
-- **123 tokens per second** for one session of Qwen3.8-27B on two cards, at the model's full 262,144-token context.
-- **138.5 tokens per second** for one session of Qwen3.8-27B on **one card** with the DFlash draft model
-  (llama-benchy tg128); 96.2 t/s replaying a real coding-agent session.
-- **342 tokens per second in total** with 8 requests running at once (Qwen3.8-27B, two cards).
-- **2,931 tokens per second** reading a prompt on two cards.
-- **Ornith 1.5 35B-A3B:** prompts read at **9,026 t/s**, answers written at **210.0 t/s on one card** (llama-benchy tg128), 453 t/s for two requests on two cards.
+- **Qwen3.8-27B:** 164 t/s writing code for one session on one card (DFlash); 342 t/s in total with 8 requests on two cards.
+- **Prompts read at 1,788 t/s on one card, 2,931 t/s on two** (Qwen3.8-27B, 4,096 tokens).
+- **Ornith 1.5 35B-A3B:** prompts read at 9,026 t/s, answers written at 312 t/s on one card, 581 t/s for two requests on two cards.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
-- **Faster than vLLM** on the same card and the same model files: up to **+56 %** writing and **+25 %** reading.
 
 One choice to make - how many requests run at once. The engine sizes everything else.
 
@@ -24,49 +20,40 @@ arrives faster. A **prefix cache hit** is a follow-up turn whose earlier convers
 
 Prefill, t/s:
 
-| setup | 4,096-token prompt | 16,384-token prompt |
+| setup | 4k prompt | 16k prompt |
 |---|---:|---:|
 | one card | 1,788 | 1,624 |
-| two cards, `--parallel tp` | **2,931** | **2,683** |
+| two cards, `tp` | 2,931 | 2,683 |
 
-Generation, t/s (several requests: the total over all of them; DFlash is `--spec dflash` with
-[`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`](https://huggingface.co/urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound)):
+Generation, t/s (several requests: the total; llama-benchy tg128 at 0 / 32k tokens of context):
 
-| setup | code | prose | tool calls | llama-benchy tg128 |
+| setup | code | prose | tool calls | llama-benchy |
 |---|---:|---:|---:|---:|
-| MTP, 1 request, one card | 138.2 | 56.6 | 100.1 | |
-| MTP, 1 request, two cards `tp` | 122.5 | 73.9 | 114.6 | |
-| MTP, 2 requests, two cards `replica` | 163.8 | 108.4 | 144.0 | |
-| MTP, 4 requests, two cards `replica` | 282.2 | 189.3 | 205.8 | |
-| MTP, 8 requests, two cards `replica` | 342.1 | 299.6 | 233.0 | |
-| DFlash, 1 request, one card | 163.5 | 64.8 | 111.1 | |
-| DFlash, 2 requests, two cards `replica` | 316.8 | 127.2 | 190.7 | |
-| MTP, one card, depth 0 | | | | 121.0 |
-| MTP, one card, depth 32,768 | | | | 60.9 |
-| MTP, two cards `tp`, depth 0 | | | | 112.1 |
-| MTP, two cards `tp`, depth 32,768 | | | | 87.7 |
-| DFlash, one card, depth 0 | | | | 138.5 |
-| DFlash, one card, depth 32,768 | | | | 82.9 |
+| MTP, 1 request, one card | 138 | 57 | 100 | 121 / 61 |
+| MTP, 1 request, two cards `tp` | 123 | 74 | 115 | 112 / 88 |
+| MTP, 2 requests, two cards `replica` | 164 | 108 | 144 | |
+| MTP, 4 requests, two cards `replica` | 282 | 189 | 206 | |
+| MTP, 8 requests, two cards `replica` | 342 | 300 | 233 | |
+| DFlash, 1 request, one card | 164 | 65 | 111 | 139 / 83 |
+| DFlash, 2 requests, two cards `replica` | 317 | 127 | 191 | |
+
+DFlash is `--spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`.
 
 ### Ornith 1.5 35B-A3B
 
-A mixture-of-experts model (Qwen3.5 35B A3B), with the full 262,144-token context on each card.
-
 Prefill, t/s:
 
-| setup | 4,096-token prompt | 16,384-token prompt |
+| setup | 4k prompt | 16k prompt |
 |---|---:|---:|
 | one card | 9,026 | 7,494 |
-| two cards, `--parallel replica`, 2 requests (total) | **15,874** | **11,880** |
+| two cards `replica`, 2 requests (total) | 15,874 | 11,880 |
 
-Generation with MTP, t/s (two requests: the total over both):
+Generation with MTP, t/s:
 
-| setup | code | prose | tool calls | llama-benchy tg128 |
+| setup | code | prose | tool calls | llama-benchy |
 |---|---:|---:|---:|---:|
-| MTP, 1 request, one card | 311.9 | 325.6 | 263.6 | |
-| MTP, 2 requests, two cards `replica` | 580.8 | 605.1 | 453.0 | |
-| MTP, one card, depth 0 | | | | 210.0 |
-| MTP, one card, depth 32,768 | | | | 131.0 |
+| 1 request, one card | 312 | 326 | 264 | 210 / 131 |
+| 2 requests, two cards `replica` (total) | 581 | 605 | 453 | |
 
 How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
