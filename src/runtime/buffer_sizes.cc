@@ -299,7 +299,7 @@ MtpSizes MtpDims::tp_sizes(uint32_t max_len, const model::ModelDesc& card, const
 
 uint32_t MtpDims::hh_rows(uint32_t seqs) {
   const uint32_t one = DecodeScratchDims::kM + 1;
-  // Open-work 28 / spec 32: one sequence's rows reach the deep verify lists' 64 (the slots' layout keeps kM).
+  // Open-work 28 / spec 32: one sequence's rows reach the deep verify list's 32 (the slots' layout keeps kM).
   return seqs <= 1 ? DecodeScratchDims::kDeepM + 1 : seqs * one + 3 * DecodeScratchDims::kM;
 }
 

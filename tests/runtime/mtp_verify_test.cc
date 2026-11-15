@@ -30,11 +30,11 @@
 //        to pos 16384 without a throw and produce the plain run's ids; then verify and
 //        draft refuse.
 //
-//   W32 / W64 (spec 32, `... 16384 rule deep`): the deep lists against the 16-row list from the same state - (a) every
+//   W32  (spec 32, `... 16384 rule deep`): the 32-row list against the 16-row list from the same state - (a) every
 //        row bitwise the 16-row list's row (rows past 15: after 16-row verifies committing 15 of the same inputs);
-//        (b) for j in 0, 7, 15, 16, 31, 32, 47, 62 a wrong draft at j + 1 and junk after leave rows 0..j bitwise and the
+//        (b) for j in 0, 7, 15, 16, 17, 29 a wrong draft at j + 1 and junk after leave rows 0..j bitwise and the
 //        next 64 plain ids bitwise the clean run's; (c) greedy lookup iterations with commits in between emit the
-//        same ids through the deep list as through the 16-row one (the captured lists replayed across commits).
+//        same ids through the 32-row list as through the 16-row one (the captured lists replayed across commits).
 //   W16  (open-work 28, `mtp_verify_test <snapshot> 16384 rule wide`: the int8 head, whose engine builds the 16-row
 //        list) at the M2 positions: (a) for j in 0, 1, 4, 7, 11, 14 the 16-row verify with drafts g[1..j] true, a WRONG
 //        id at j + 1 and junk after - its rows 0..j bitwise the all-true verify's (no later row leaks into an
@@ -304,7 +304,7 @@ bool w16(Ctx& c, const Snap& s0, const std::vector<uint32_t>& prompt, const std:
   return ok;
 }
 
-// W32 / W64 (header): the deep list of W rows against the 16-row list from the same state.
+// W32 (header): the deep list of W rows against the 16-row list from the same state.
 bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
   constexpr uint32_t K16 = runtime::Engine::kWideK;
   const uint32_t K = W - 1;
@@ -339,7 +339,7 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
   std::printf("  W%u (a): %zu of %u rows differ from the 16-row list's (bitwise)\n", W, diff_rows, W);
   ok &= diff_rows == 0;
   // (b) a wrong draft at j + 1 and junk after: rows 0..j bitwise the all-true verify's, the next 64 plain ids too
-  for (uint32_t j : {0u, 7u, 15u, 16u, 31u, 32u, 47u, 62u}) {
+  for (uint32_t j : {0u, 7u, 15u, 16u, 17u, 29u}) {
     if (j >= K) continue;
     deep(K);
     c.e.commit(j, c.e.verify_ids()[j]);
@@ -462,7 +462,7 @@ int main(int argc, char** argv) {
   if (deep) std::printf("max_len %u: M2 also at n = %u, RF4 also at %u\n", kMaxLen, kMaxLen - 1026,
                         kMaxLen / 2 + 4395);
   l0::Context ctx(0);
-  // open-work 28: W16 alone, the int8 head; spec 32: W32 / W64 alone (deep), the same
+  // open-work 28: W16 alone, the int8 head; spec 32: W32 alone (deep), the same
   const bool wide_mode = argc > 4 && (std::string(argv[4]) == "wide" || std::string(argv[4]) == "deep");
   runtime::Engine e(ctx,
                     loader::load(ctx, snap, kMaxLen, /*mtp=*/true,
@@ -493,17 +493,16 @@ int main(int argc, char** argv) {
   CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *
                                  (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));
 
-  if (argc > 4 && std::string(argv[4]) == "deep") {   // W32 / W64 (header)
-    CHECK(e.deep_built(runtime::Engine::kDeepK32) && e.deep_built(runtime::Engine::kDeepK64));
-    for (uint32_t n : {1998u, 2053u})
-      for (uint32_t W : {32u, 64u}) {
-        e.reset();
-        e.prefill(head(ids, n));
-        std::printf("W%u at n = %u\n", W, n);
-        const Snap s0(c);
-        ok &= w_deep(c, s0, W);
-      }
-    std::printf("W32 / W64: %s\n", ok ? "PASS" : "FAIL");
+  if (argc > 4 && std::string(argv[4]) == "deep") {   // W32 (header)
+    CHECK(e.deep_built());
+    for (uint32_t n : {1998u, 2053u}) {
+      e.reset();
+      e.prefill(head(ids, n));
+      std::printf("W32 at n = %u\n", n);
+      const Snap s0(c);
+      ok &= w_deep(c, s0, runtime::Engine::kDeepK + 1);
+    }
+    std::printf("W32: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
   }
   if (wide_mode) {   // W16 (header)

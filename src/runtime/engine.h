@@ -282,7 +282,7 @@ class Engine {
   void verify(uint32_t k, l0::CmdList* draft = nullptr);
   const uint32_t* verify_ids() const {
     const uint32_t k = seq().verify_k;
-    return k == kWideK ? control_->wide_out : k == kDeepK32 || k == kDeepK64 ? control_->deep_out : control_->out_token;
+    return k == kWideK ? control_->wide_out : k == kDeepK ? control_->deep_out : control_->out_token;
   }
   // Open-work 28: the one-card wide verify list - prompt lookup's long runs, checked 16 rows at once. Built with the
   // MTP head on one sequence slot (the deferred GDN build), the bf16 KV cache and the int8 head; its drafts are an
@@ -290,13 +290,13 @@ class Engine {
   // and calls verify(kWideK) (row 0 is cur_token[0]); verify_ids() then reads Control::wide_out, and commit(j, t)
   // takes j up to 15 as after any verify. max_wide_k(): kWideK where the list is built and the rows fit, else 0.
   static constexpr uint32_t kWideK = DecodeScratchDims::kWideM - 1;   // 15
-  // Spec 32: the deep lists beside it - 32 and 64 rows (31 / 63 drafts in control()->deep_cur[1..], ids in
-  // Control::deep_out), built where the 16-row list is. max_wide_k() is then the deepest k (63, 31, 15) whose list
-  // is built, whose rows fit before max_len and that B70_SPEC_LOOKUP_ROWS (a test handle: 16, 32 or 64) allows.
-  static constexpr uint32_t kDeepK32 = 31, kDeepK64 = 63;
+  // Spec 32: the deep list beside it - 32 rows (31 drafts in control()->deep_cur[1..31], ids in Control::deep_out),
+  // built where the 16-row list is. max_wide_k() is then the deepest k (31, 15) whose list is built, whose rows fit
+  // before max_len and that B70_SPEC_LOOKUP_ROWS (a test handle: 16 or 32) allows.
+  static constexpr uint32_t kDeepK = DecodeScratchDims::kDeepM - 1;   // 31
   uint32_t max_wide_k() const;
   bool wide_built() const { return seq().wide != nullptr; }
-  bool deep_built(uint32_t k) const { return (k == kDeepK32 ? seq().deep32 : seq().deep64) != nullptr; }
+  bool deep_built() const { return seq().deep != nullptr; }
   const float* verify_logits_device() const;   // [k + 1][kVocab] fp32, device memory
   void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
   void flush_projection() const;
@@ -532,7 +532,7 @@ class Engine {
     std::vector<std::unique_ptr<CapturedStep>> verify_deep;   // [M - 1], parallel to verify_steps
     std::vector<uint32_t> verify_deep_from;
     std::unique_ptr<CapturedStep> wide;   // open-work 28: the 16-row list (slot 0 of one slot), null where not built
-    std::unique_ptr<CapturedStep> deep32, deep64;   // spec 32: the 32- and 64-row lists, where the 16-row one is
+    std::unique_ptr<CapturedStep> deep;   // spec 32: the 32-row list, where the 16-row one is
     std::vector<uint32_t> draft_ids;
     uint32_t verify_k = kNoVerify, verify_pos = 0;
     // Where commit(j) takes row j's hidden: hh row 1 after verify(), the row list's saved row r0 after verify_rows.
@@ -576,13 +576,13 @@ class Engine {
   // elsewhere: the slot builds, gdn_live moved at commit.
   std::unique_ptr<l0::Mem> gdn_pend_;
   std::unique_ptr<CapturedStep> gdn_flush_;
-  // Spec 32: the deep lists' chain scratch (SlotBind::gdn_x / conv_x) and the ring copy a commit of rows 16.. runs
-  // (gdn_ring_commit.cl); deep_rows_ the widest rows B70_SPEC_LOOKUP_ROWS allows (64 unset).
+  // Spec 32: the deep list's chain scratch (SlotBind::gdn_x / conv_x) and the ring copy a commit of rows 16.. runs
+  // (gdn_ring_commit.cl); deep_rows_ the widest rows B70_SPEC_LOOKUP_ROWS allows (32 unset).
   std::unique_ptr<l0::Mem> gdn_x_, conv_x_;
   std::unique_ptr<l0::Module> ring_mod_;
   std::unique_ptr<l0::Kernel> ring_k_;
   std::unique_ptr<l0::CmdList> ring_list_;
-  uint32_t deep_rows_ = 64;
+  uint32_t deep_rows_ = DecodeScratchDims::kDeepM;
   std::unique_ptr<l0::Mem> df_pf_taps_;
   // Plan 19v3b: the commits of verify_rows runs not yet projected - one rows projection replay for all of them.
   mutable std::vector<TapDrafter::RowsCommit> rows_commits_;

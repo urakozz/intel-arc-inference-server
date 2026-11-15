@@ -30,9 +30,9 @@
 #define M 1
 #endif
 // cur_token[] holds 8 ids (runtime::Control); a larger M reads Control::wide_cur[16] (open-work 28: CTRL_CUR 32).
-// M = 32 / 64 (spec 32) read Control::deep_cur[64] (CTRL_CUR 64).
-#if (M > 16 && !((M == 32 || M == 64) && CTRL_CUR == 64)) || (M > 8 && M <= 16 && CTRL_CUR != 32)
-#error "embed_gather: M 9..16 needs Control::wide_cur (CTRL_CUR 32), M 32 / 64 Control::deep_cur (CTRL_CUR 64)"
+// M = 32 (spec 32) reads Control::deep_cur[32] (CTRL_CUR 64).
+#if (M > 16 && !(M == 32 && CTRL_CUR == 64)) || (M > 8 && M <= 16 && CTRL_CUR != 32)
+#error "embed_gather: M 9..16 needs Control::wide_cur (CTRL_CUR 32), M 32 Control::deep_cur (CTRL_CUR 64)"
 #endif
 #ifndef HIDDEN
 #define HIDDEN 5120        /* model::Qwen35::kHidden */

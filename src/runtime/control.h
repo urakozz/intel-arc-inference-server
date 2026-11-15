@@ -8,7 +8,7 @@ namespace runtime {
 // The host writes cur_token[0] before a replay only during prompt ingestion,
 // and reads out_token[0] after the fence. Nothing else moves per token.
 // 128 B = two cache lines (the spec's §8.2 sketch said 64 B but its own
-// fields need 96 - corrected here, noted in the spec by Task 6); 256 B since open-work 28 (the wide rows' ids), 768 B
+// fields need 96 - corrected here, noted in the spec by Task 6); 256 B since open-work 28 (the wide rows' ids), 512 B
 // since spec 32 (the deep rows' ids).
 struct Control {
   uint32_t pos;            // KV slot / position of token 0 of this step
@@ -29,17 +29,17 @@ struct Control {
   // verify-cost-m8: the one-card verify lists' committed rows (gdn_step.cl, DEFERRED): bits 0..7 the rows the next
   // launch replays, bit 8 the parity they sit in. Engine::commit sets it, Engine::verify clears the count. 0 elsewhere.
   uint32_t gdn_pend;
-  // Spec 32: after a 32- / 64-row verify, j + 1 when its accepted rows 16.. must reach the conv ring (gdn_ring_commit.cl
+  // Spec 32: after a 32-row verify, j + 1 when its accepted rows 16.. must reach the conv ring (gdn_ring_commit.cl
   // copies rows max(16, j - 2) .. j from the conv scratch); 0 otherwise. Engine::commit sets it and runs the copy.
   uint32_t ring_commit;
   // Open-work 28: the one-card 16-row verify list's ids (its builds read CTRL_CUR 32 and write CTRL_OUT 48, so the
   // 8-id fields above keep their offsets for every other list): wide_cur[0..15] in, wide_out[0..15] out.
   uint32_t wide_cur[16];
   uint32_t wide_out[16];
-  // Spec 32: the 32- and 64-row verify lists' ids (their embed_gather reads CTRL_CUR 64, their argmax writes
-  // CTRL_OUT 128; every other list keeps its offsets): deep_cur[0..63] in, deep_out[0..63] out.
-  uint32_t deep_cur[64];
-  uint32_t deep_out[64];
+  // Spec 32: the 32-row verify list's ids (its embed_gather reads CTRL_CUR 64, its argmax writes CTRL_OUT 96; every
+  // other list keeps its offsets): deep_cur[0..31] in, deep_out[0..31] out.
+  uint32_t deep_cur[32];
+  uint32_t deep_out[32];
 };
-static_assert(sizeof(Control) == 768, "control block is twelve cache lines");
+static_assert(sizeof(Control) == 512, "control block is eight cache lines");
 }  // namespace runtime
