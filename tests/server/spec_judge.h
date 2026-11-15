@@ -137,6 +137,10 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"dflash_gpu_int8_t1_define-rotation_82e33a10f2dcba43", 0, 248046, 248068, 34.64, "2026-11-13", kReviewedReason},
     // dflash_gpu_kv8_test t4_comment-linear_l0 K 3: verify-vs-plain gap 5.06 ulp, plain not rejected
     {"dflash_gpu_int8_t4_comment-linear_l0_b5da87bdd96dd7e5", 0, 74455, 248068, 15.22, "2026-11-13", kInt8KvNoiseReason},
+    // the same context served (b70-serve --spec dflash, 2 and 4 requests a card, int8 KV): bf16 gap 4.94, operator
+    // 2026-11-15
+    {"serve_int8_toolcall_t4_comment-linear_l0_b5da87bdd96dd7e5", 0, 74455, 248068, 14.86, "2026-11-15",
+     kInt8KvNoiseReason},
     // dflash_gpu_kv8_test t2_explain-loader K 7: plain rejected too (2 ids)
     {"dflash_gpu_int8_t2_explain-loader_ad0f46fdba65f454", 0, 248068, 61369, 70.10, "2026-11-13", kInt8KvNoiseReason},
     // mtp_gpu_kv8_test t4_comment-linear_l0 K 1-3: verify-vs-plain gap 4.37 ulp, plain not rejected

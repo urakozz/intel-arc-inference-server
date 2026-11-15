@@ -659,6 +659,11 @@ class Capture {
             "a row list needs its row table (runtime::BatchRowTable) and its Control");
     require(stage_ == nullptr && tap_ == nullptr && prof_ == nullptr,
             "a row list is single-card, with no residual tap and no profiling events");
+    if (br_->taps) {   // plan 19v3b: the drafter's taps of every row
+      sites_ = tap_sites(d_, br_->tap_layers);
+      require(br_->taps->size() >= size_t(DecodeBuffers::kM) * br_->tap_layers.size() * d_.hidden * kBf16,
+              "the rows' tap buffer is smaller than [kM][taps][hidden] bf16");
+    }
     if (!mtp_) return;
     // The head's KV fill: its buffers in the main cache's form and length, its table and Control, the gather.
     require(m_.mtp != nullptr, "a row list with the head needs the loaded MTP head");
@@ -1574,7 +1579,11 @@ class Capture {
   void* ctrl() const { return sb_.control ? sb_.control : b_.control.ptr(); }
   uint8_t* state0() const { return static_cast<uint8_t*>(sb_.gdn_state ? sb_.gdn_state : b_.gdn_state.ptr()); }
   uint8_t* ring0() const { return static_cast<uint8_t*>(sb_.conv_ring ? sb_.conv_ring : b_.conv_ring.ptr()); }
-  uint8_t* spec0() const { return static_cast<uint8_t*>(sb_.gdn_spec && !tv_ && !gdn_spec_ ? sb_.gdn_spec : spec_mem().ptr()); }
+  // Plan 19v3b: a slot's tap verify list binds its own states too (stage lists keep theirs).
+  uint8_t* spec0() const {
+    return static_cast<uint8_t*>(sb_.gdn_spec && (!tv_ || mode_ == Mode::VerifyTaps) && !gdn_spec_ ? sb_.gdn_spec
+                                                                                                   : spec_mem().ptr());
+  }
   void* hctl() const { return sb_.hctl ? sb_.hctl : mtp_->hctl.ptr(); }
   // The row table decode attention's row build reads: a row list's main rows, a row draft list's head rows.
   void* rows_table() const { return mode_ == Mode::DraftRows ? dr_->head_rows : br_->rows; }
@@ -1583,15 +1592,16 @@ class Capture {
   // Spec 19c: what a tap drafter's verify list needs - its slots (one whole gdn_state each, slot 0
   // being gdn_state itself), the tap buffer at [kM][taps][hidden] and the tapped layers.
   void check_taps() {
-    require(tv_ != nullptr && tv_->gdn_spec != nullptr && tv_->taps != nullptr,
+    require(tv_ != nullptr && (tv_->gdn_spec != nullptr || sb_.gdn_spec != nullptr) && tv_->taps != nullptr,
             "a tap verify list needs its GDN slots and its tap buffer");
     require(stage_ == nullptr && tap_ == nullptr,
             "a tap verify list is single-card, with no residual tap");
-    require(tv_->slots == TapVerifyDims::kSlots,
+    require(tv_->slots == TapVerifyDims::kSlots || (sb_.gdn_spec && tv_->slots == MtpBuffers::kSlots),
             "a tap verify list binds gdn_step_slots_M<M>_N" + std::to_string(TapVerifyDims::kSlots) +
-                ": " + std::to_string(tv_->slots) + " slots are not built");
+                " (a slot's own states also _N" + std::to_string(MtpBuffers::kSlots) + "): " +
+                std::to_string(tv_->slots) + " slots are not built");
     require(kCapM <= tv_->slots, "a tap verify list has at most its slot count of rows");
-    require(tv_->gdn_spec->size() == gdn_state_stride() * d_.gdn_layers * (tv_->slots - 1),
+    require(sb_.gdn_spec || tv_->gdn_spec->size() == gdn_state_stride() * d_.gdn_layers * (tv_->slots - 1),
             "the tap verify slots are not (slots - 1) x " + std::to_string(d_.gdn_layers) +
                 " GDN slices");
     sites_ = tap_sites(d_, tv_->layers);   // throws on an empty, unordered or out-of-range list
@@ -1604,11 +1614,13 @@ class Capture {
   // tap buffer, one device copy per row (5 x M <= 40 on Qwen3.8's drafter; copies are commands, not
   // launches, exactly as the residual tap above).
   void tap_copy(uint32_t site) {
-    if (mode_ != Mode::VerifyTaps && mode_ != Mode::StageVerifyTaps && mode_ != Mode::TpVerifyTaps) return;
-    const size_t row = size_t(d_.hidden) * kBf16, n = tv_->layers.size();
+    const bool rows = mode_ == Mode::Rows && br_->taps;   // plan 19v3b: a row list beside a drafter
+    if (mode_ != Mode::VerifyTaps && mode_ != Mode::StageVerifyTaps && mode_ != Mode::TpVerifyTaps && !rows) return;
+    l0::Mem& taps = rows ? *br_->taps : *tv_->taps;
+    const size_t row = size_t(d_.hidden) * kBf16, n = rows ? br_->tap_layers.size() : tv_->layers.size();
     for (uint32_t t : sites_.at(site))
       for (uint32_t m = 0; m < kCapM; ++m)
-        step_.list.copy(at(*tv_->taps, (size_t(m) * n + t) * row), at(b_.resid, size_t(m) * row), row);
+        step_.list.copy(at(taps, (size_t(m) * n + t) * row), at(b_.resid, size_t(m) * row), row);
   }
 
   // Spec 19d: a stage's tap verify list - its slots (pp_gdn_spec_bytes(d, stage gdn, 8): the whole model's slot
@@ -2068,11 +2080,11 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
 }
 
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                               const TapVerify& tv, uint32_t M, const CaptureOptions& opt) {
+                               const TapVerify& tv, uint32_t M, const CaptureOptions& opt, const SlotBind& slot) {
   if (M == 0 || M > tv.slots || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build_verify_taps: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(tv.slots) + "] (TapVerify::slots)");
-  return Capture(ctx, m, b, tv, M).options(opt).run();
+  return Capture(ctx, m, b, tv, M).options(opt).slot(slot).run();
 }
 
 CapturedStep build_tp_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TapVerify& tv,

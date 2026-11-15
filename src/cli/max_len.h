@@ -160,10 +160,12 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
 // Step 4 under --max-num-seqs (operator 2026-11-11): a card's `seqs` > 1 sequence slots (plan 13c), slot 0 the
 // largest context that fits beside seqs - 1 slots of SlotDims::kShortLen (auto) or exactly the asked N, refused with
 // the plan's numbers when it does not fit beside them. `m` is re-tabled at runtime::slots_kv_len (one RoPE table, one
-// KV allocation of the slots' pages). Returns the layout; prints the choice and the plan's breakdown like settle(). No drafter and no draft
-// vocabulary beside slots (refused before the load).
+// KV allocation of the slots' pages). Returns the layout; prints the choice and the plan's breakdown like settle().
+// `drafter` (plan 19v3b): a DFlash drafter's plan - slot 0's drafter and every further slot's session and states. No
+// draft vocabulary beside slots (refused before the load).
 inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg& a, uint32_t seqs,
-                                          size_t reserve_bytes, const runtime::PrefillPath& path, runtime::KvCache kv) {
+                                          size_t reserve_bytes, const runtime::PrefillPath& path, runtime::KvCache kv,
+                                          const runtime::DrafterPlan& drafter = {}) {
   const model::ModelDesc& d = *m.desc;
   const bool mtp = m.mtp != nullptr;
   const size_t weights = m.report.total() - m.report.rope_bytes;
@@ -172,7 +174,7 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
   const uint32_t cap = m.trained_max_len != 0 ? m.trained_max_len : a.value;
   const uint32_t fit = cap < runtime::kMaxLenQuantum
                            ? 0
-                           : runtime::slot0_len_that_fits(d, seqs, mtp, weights, device, reserve_bytes, cap, path, kv);
+                           : runtime::slot0_len_that_fits(d, seqs, mtp, weights, device, reserve_bytes, cap, path, kv, drafter);
   const std::string beside = " beside " + std::to_string(seqs - 1) + " slot" + (seqs > 2 ? "s" : "") + " of " +
                              std::to_string(runtime::SlotDims::kShortLen) + " (--max-num-seqs " +
                              std::to_string(seqs) + ")";
@@ -182,11 +184,11 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
         "--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) + " positions fit slot 0" + beside +
         " - " +
         runtime::describe(runtime::plan_slots(d, runtime::slot_layout(runtime::kMinAutoMaxLen, seqs), mtp, weights,
-                                              path, {}, kv),
+                                              path, {}, kv, drafter),
                           device, reserve_bytes) +
         ". A smaller --max-num-seqs");
   const std::vector<uint32_t> lens = runtime::slot_layout(len, seqs);
-  const runtime::MemoryPlan p = runtime::plan_slots(d, lens, mtp, weights, path, {}, kv);
+  const runtime::MemoryPlan p = runtime::plan_slots(d, lens, mtp, weights, path, {}, kv, drafter);
   if (!a.is_auto && p.total() + reserve_bytes > device)
     throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit" + beside + ": " +
                              runtime::describe(p, device, reserve_bytes) + ". The largest slot 0 that fits beside them is " +
@@ -247,7 +249,7 @@ inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
     } else {   // the slots' plan (settle_slots'), not slot 0's alone
       runtime::PrefillPath wide = path;
       wide.chunk_cap = runtime::PrefillScratchDims::kCMax;
-      cap = runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, wide, draft_vocab_plan(m), kv).total() +
+      cap = runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, wide, draft_vocab_plan(m), kv, drafter).total() +
                         reserve_bytes <=
                     ctx.memory_bytes()
                 ? runtime::PrefillScratchDims::kCMax

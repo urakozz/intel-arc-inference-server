@@ -148,25 +148,50 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
   }
 }
 
+// SEQS (plan 19v3b, df_attn_dpas.cl's header): the rows are blocks from the row table `seqs` (no ctrl / dctl); row r
+// of block z sees only its own block's keys row0 .. row0 + K, and a row past its block's K (or in no block) writes zeros.
+// The skipped keys weigh exactly 0, so a block is bitwise the same block alone at rows 0..
 __attribute__((reqd_work_group_size(HD, 1, 1)))
+#ifdef SEQS
+__kernel void df_attn_reduce(__global const uint* restrict seqs,
+                             __global const float* restrict part, __global const float* restrict q,
+                             __global const float* restrict kb, __global const float* restrict vb, const float scale,
+                             __global ushort* restrict out) {
+#else
 __kernel void df_attn_reduce(__global const uint* restrict ctrl, __global const uint* restrict dctl,
                              __global const float* restrict part, __global const float* restrict q,
                              __global const float* restrict kb, __global const float* restrict vb, const float scale,
                              __global ushort* restrict out) {
+#endif
   __local float sb[M];
   __local float wts[TGT + M];
   __local float mlsum[2];
   const uint h = get_group_id(0), r = get_group_id(1), d = get_local_id(0);
+#ifdef SEQS
+  const uint z = seqs[r];
+  const uint row0 = z == 0xFFFFFFFFu ? 0 : seqs[M + 8 * z], K = z == 0xFFFFFFFFu ? 0 : seqs[M + 8 * z + 3];
+  const uint kvh = h / G;
+  __global ushort* o = out + (size_t)r * NH * HD + (size_t)h * HD;
+  if (z == 0xFFFFFFFFu || r - row0 > K) {
+    o[d] = 0;
+    return;
+  }
+#else
   const uint K = dctl[DCTL_K], kvh = h / G;
   __global ushort* o = out + (size_t)r * NH * HD + (size_t)h * HD;
   if (r > K) {
     o[d] = 0;
     return;
   }
+#endif
   __global const float* qr = q + ((size_t)r * NH + h) * HD;
   if (d < M) {
     float sc = -INFINITY;
+#ifdef SEQS
+    if (d >= row0 && d - row0 <= K && (!CAUSAL || d <= r)) {
+#else
     if (d <= K && (!CAUSAL || d <= r)) {
+#endif
       __global const float* k = kb + ((size_t)d * NKV + kvh) * HD;
       float a = 0.0f;
       for (uint i = 0; i < HD; ++i) a = a + qr[i] * k[i];

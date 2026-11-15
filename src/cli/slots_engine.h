@@ -17,6 +17,12 @@
 // (runtime::Engine::kMaxRows), and with more than mtp_active_max rows decoding no drafts at all (plain batched decode:
 // the measured costs decide, docs/probes/probe-batching-2026-10-23.md "Engine"). The scheduler clips the rows' K to it.
 //
+// Plan 19v3b, `--spec dflash` beside slots: a lone row is its slot's EngineAdapter::step_dflash (bitwise the one-slot
+// server); a step of several rows drafts them in ONE batched draft pass (runtime::TapDrafter::draft_rows: each slot's
+// block of k + 1 rows, k by the row budget and its slot's 4 GDN states - 3 at most in a further slot), then the row
+// verify, the acceptance per row as step_dflash's (greedy: the argmax prefix; sampled: accept_sparse with the slot's
+// readback q and its own generator), and the deferred commits' projection as ONE rows projection at the next step.
+//
 // One device, one thread: every call comes from the scheduler's tick thread (under --parallel replica, from its card's
 // worker thread - cli::ReplicaEngine); nothing here is thread-safe.
 #include <algorithm>
@@ -40,13 +46,18 @@ class SlotsEngine : public server::BatchEngineIface {
   // `mtp_k` / `lookup`: the server's --spec (EngineAdapter's arguments, every slot alike). `hooked`: the prefix cache
   // is on - a prompt is then cut where the serial server's hooked Engine::prefill call cuts it (prefill_cut).
   // `mtp_active_max`: above this many decoding rows a step drafts nothing.
+  // `dflash` (plan 19v3b): the engine's drafter proposes, `mtp_k` is then its deepest K (--spec-max).
   SlotsEngine(runtime::Engine& engine, uint32_t vocab_used, uint32_t mtp_k, bool lookup, bool hooked,
-              uint32_t mtp_active_max = runtime::Engine::kMaxRows)
-      : e_(engine), vocab_used_(vocab_used), hooked_(hooked), mtp_active_max_(mtp_active_max) {
+              uint32_t mtp_active_max = runtime::Engine::kMaxRows, bool dflash = false)
+      : e_(engine), vocab_used_(vocab_used), hooked_(hooked), mtp_active_max_(mtp_active_max),
+        df_(dflash ? engine.tap_drafter() : nullptr) {
     if (e_.slots() < 2) throw std::invalid_argument("SlotsEngine: the engine has one sequence slot");
+    if (dflash && !df_) throw std::invalid_argument("SlotsEngine: --spec dflash without the engine's drafter");
     for (uint32_t s = 0; s < e_.slots(); ++s) {
       e_.select(s);
-      adapters_.push_back(std::make_unique<EngineAdapter>(e_, vocab_used, mtp_k, lookup));
+      // beside a drafter a further slot verifies K <= 3 (its 4 GDN states): its adapter's deepest K is its own
+      const uint32_t k = dflash ? std::min(mtp_k, e_.max_draft()) : mtp_k;
+      adapters_.push_back(std::make_unique<EngineAdapter>(e_, vocab_used, k, lookup, dflash));
     }
     e_.select(0);
     pending_.resize(e_.slots());
@@ -175,7 +186,7 @@ class SlotsEngine : public server::BatchEngineIface {
     if (!q.on) return;
     q.on = false;
     e_.select(slot);
-    e_.commit(q.j, q.next);
+    e_.commit(q.j, q.next, /*defer_projection=*/true);   // beside a drafter: one rows projection for every slot
   }
   void flush_all() {
     for (uint32_t s = 0; s < e_.slots(); ++s) {
@@ -187,6 +198,7 @@ class SlotsEngine : public server::BatchEngineIface {
 
   // One batched iteration over several rows (the class comment). Returns per row its pending id and the kept drafts.
   std::vector<std::vector<uint32_t>> batched(const std::vector<SpecRow>& rows) {
+    if (df_) return batched_dflash(rows);
     ++batched_steps_;
     flush_all();   // every slot committed: the row lists' saved rows are rewritten below
     constexpr size_t V = model::Qwen35::kVocab;
@@ -306,10 +318,90 @@ class SlotsEngine : public server::BatchEngineIface {
     return out;
   }
 
+  // Plan 19v3b: the class comment's DFlash step of several rows.
+  std::vector<std::vector<uint32_t>> batched_dflash(const std::vector<SpecRow>& rows) {
+    ++batched_steps_;
+    flush_all();
+    constexpr size_t V = model::Qwen35::kVocab;
+    float* p_host = host_->as<float>() + runtime::Engine::kMaxRows * V;
+    std::vector<runtime::Engine::Run> runs;
+    std::vector<runtime::TapDrafter::DraftRun> draft;
+    std::vector<uint32_t> xs(rows.size());
+    std::vector<float> temps(rows.size(), 0.0f);
+    for (size_t i = 0; i < rows.size(); ++i) {
+      const SpecRow& r = rows[i];
+      EngineAdapter& a = *adapters_.at(r.slot);
+      e_.select(r.slot);
+      xs[i] = e_.control()->cur_token[0];
+      uint32_t k = std::min({r.k, a.mtp_k(), e_.max_verify_k()});
+      if (!r.sampling->greedy && !df_->samples()) k = 0;
+      runs.push_back({r.slot, k});
+      ++a.mtp_iters_at_k[k];
+      if (k == 0) continue;
+      runtime::TapDrafter::DraftRun d{r.slot, k, 0.0f, 0};
+      if (!r.sampling->greedy) {   // step_dflash's keying: a fresh draw from the request's own generator
+        a.seed_rng(*r.sampling);
+        d.seed = a.rng();
+        d.temperature = temps[i] = server::dflash_temperature(*r.sampling);
+      }
+      draft.push_back(d);
+    }
+    if (!draft.empty()) df_->draft_rows(e_, draft);
+    std::vector<std::vector<uint32_t>> drafts(rows.size());
+    for (size_t i = 0; i < rows.size(); ++i)
+      if (runs[i].k > 0) {
+        const runtime::dflash::DFlashDraftOut& o = df_->readback(rows[i].slot);
+        drafts[i].assign(o.ids, o.ids + runs[i].k);
+      }
+    e_.verify_rows(runs);
+    const uint32_t* ids = e_.rows_ids();
+    std::vector<std::vector<uint32_t>> out(rows.size());
+    uint32_t r0 = 0;
+    for (size_t i = 0; i < rows.size(); ++i) {
+      const SpecRow& r = rows[i];
+      EngineAdapter& a = *adapters_.at(r.slot);
+      const uint32_t k = runs[i].k;
+      server::AcceptResult acc{};
+      if (r.sampling->greedy) {
+        acc = server::accept_greedy(ids + r0, drafts[i].data(), k);
+      } else {
+        a.seed_rng(*r.sampling);
+        a.imm.copy(p_host, e_.rows_logits_device() + size_t(r0) * V, (k + 1) * V * sizeof(float));
+        if (k == 0) {
+          acc.next_token = sample(p_host, vocab_used_, *r.sampling, a.rng);
+        } else {
+          const runtime::dflash::DFlashDraftOut& o = df_->readback(r.slot);
+          server::SparseQ q[runtime::Engine::kMaxRows];
+          for (uint32_t j = 0; j < k; ++j)
+            q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, temps[i]);
+          acc = server::accept_sparse(p_host, q, drafts[i].data(), k, vocab_used_, V, *r.sampling, a.rng);
+        }
+      }
+      Pending& pd = pending_[r.slot];
+      pd.on = true;
+      e_.select(r.slot);
+      pd.pos = e_.pos();
+      pd.j = acc.accepted;
+      pd.next = acc.next_token;
+      pd.drafts = drafts[i];
+      if (k > 0) {
+        ++a.mtp_iters;
+        a.mtp_drafted += k;
+        a.mtp_accepted += acc.accepted;
+      }
+      out[i].push_back(xs[i]);
+      out[i].insert(out[i].end(), drafts[i].begin(), drafts[i].begin() + acc.accepted);
+      a.gen_tokens_ += static_cast<uint32_t>(out[i].size());
+      r0 += k + 1;
+    }
+    return out;
+  }
+
   runtime::Engine& e_;
   uint32_t vocab_used_;
   bool hooked_;
   uint32_t mtp_active_max_;
+  runtime::TapDrafter* df_ = nullptr;   // plan 19v3b: --spec dflash
   std::vector<std::unique_ptr<EngineAdapter>> adapters_;
   std::vector<Pending> pending_;
   std::unique_ptr<l0::Mem> host_;

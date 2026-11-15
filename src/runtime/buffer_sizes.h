@@ -379,8 +379,11 @@ struct SlotDims {
   static constexpr uint32_t kMaxSeqs = 4;         // slot 0 and at most 3 short slots (spec 13 §11.2)
   static constexpr uint32_t kShortLen = 32768;    // a short slot's positions (none shorter)
   // All zero at seqs = 1. Throws std::invalid_argument outside [1, kMaxSeqs]. `kv_pages`: the slots' KV pages
-  // (slots_kv_len / kKvPage), the page table's entries.
-  static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages = 0);
+  // (slots_kv_len / kKvPage), the page table's entries. `drafter` (plan 19v3b, MTP off): a further slot's states are
+  // kDrafterStates (its live state and 3 speculative - K <= 3; slot 0's 8 are the engine's, TapVerifyDims).
+  static constexpr uint32_t kDrafterStates = 4;
+  static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages = 0,
+                         bool drafter = false);
   // Byte offsets inside SlotBuffers::controls (a Control is 128 B, a row table 256 B).
   static size_t control_at(uint32_t seqs, uint32_t seq);        // slot seq's Control, 1 <= seq < seqs
   static size_t head_control_at(uint32_t seqs, uint32_t seq);   // its head's Control (MTP)

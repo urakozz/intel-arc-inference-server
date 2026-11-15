@@ -152,6 +152,41 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Plan 19v3b Task 2: sequence slots with the drafter. One slot plans what plan() does; every further slot adds its
+  // drafter session (ring, taps, control, readback) and 4 GDN states (K <= 3); --max-len auto at 2 and 4 slots.
+  {
+    constexpr size_t target = 16'812'371'968ull, card = 32'530'000'000ull;
+    const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+    const auto hp4 = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int4G64, true);
+    const rd::DFlashSizes s4 = rd::sizes(d, 5120, V, 4096, loader::DraftFormat::Int4G64, true);
+    CHECK_EQ(hp4.session_per_position, size_t(0));   // no full-attention layer: a session does not grow
+    CHECK_EQ(hp4.session(32768), s4.ring_k + s4.ring_v + s4.taps + s4.dctl + s4.out);
+    CHECK_EQ(s4.ring_k + s4.ring_v, rd::ring_snapshot_bytes(d, 4096));
+    for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8}) {
+      const auto one = runtime::plan_slots(q, {65536}, false, target, {}, {}, kv, hp4);
+      const auto ref = runtime::plan(q, 65536, false, target, {}, {}, kv, hp4);
+      CHECK_EQ(one.total(), ref.total());
+      CHECK_EQ(one.drafter, ref.drafter);
+      CHECK_EQ(one.slot_state, size_t(0));
+      const std::vector<uint32_t> lens{65536, 32768, 32768};
+      const auto three = runtime::plan_slots(q, lens, false, target, {}, {}, kv, hp4);
+      const size_t states = size_t(2) * runtime::SlotDims::kDrafterStates * runtime::PersistentDims::sizes(0, q).gdn_state;
+      CHECK_EQ(three.slot_state, runtime::SlotDims::sizes(q, 3, false, runtime::slots_kv_len(lens) / runtime::kKvPage,
+                                                          true).total() + 2 * hp4.session(32768));
+      CHECK_EQ(runtime::SlotDims::sizes(q, 3, false, 0, true).states, states);
+      CHECK_EQ(three.drafter, hp4.bytes(runtime::slots_kv_len(lens)));
+      CHECK_EQ(three.drafter_slots, runtime::TapVerifyDims::gdn_spec_bytes(q));   // slot 0's 7 more
+      for (uint32_t seqs : {2u, 4u}) {
+        const uint32_t s0 = runtime::slot0_len_that_fits(q, seqs, false, target, card, reserve, 262144, {}, kv, hp4);
+        const uint32_t m0 = runtime::slot0_len_that_fits(q, seqs, false, target, card, reserve, 262144, {}, kv);
+        CHECK(s0 <= m0);
+        std::printf("DFlash slots --max-len auto on 32.530 GB, %s KV, packed int4 drafter: %s (%u slots; without the "
+                    "drafter slot 0 %u)\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16",
+                    s0 ? runtime::slot_layout_name(runtime::slot_layout(s0, seqs)).c_str() : "does not fit", seqs, m0);
+      }
+    }
+  }
+
   // 4. the table and the launches
   const std::vector<float> t = rd::rope_table(1e7, 128, 131072);
   const std::vector<float> tw = dfref::rope_table(1e7, 128, 131072);

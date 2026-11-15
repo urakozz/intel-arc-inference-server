@@ -85,6 +85,13 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
   p.per_position = (b - a) / 4096;
   p.fixed = a - p.per_position * 4096;
   p.n_taps = uint32_t(d.taps.size());   // spec 19c: the engine's prefill tap staging
+  // Plan 19v3b: a sequence's session - ring, taps, control, readback - the same way (a full layer's ring grows).
+  const auto session = [&](uint32_t L) {
+    const DFlashSizes s = sizes(d, target_hidden, head_rows, L, f, candidate_head);
+    return s.ring_k + s.ring_v + s.taps + s.dctl + s.out;
+  };
+  p.session_per_position = (session(8192) - session(4096)) / 4096;
+  p.session_fixed = session(4096) - p.session_per_position * 4096;
   return p;
 }
 

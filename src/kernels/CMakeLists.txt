@@ -525,6 +525,22 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k${KSP} SOURCE ${DF_DIR}/df_attn_dpas.cl
                      DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=${KSP})
   endforeach()
+  # Plan 19v3b: the KS 4 DPAS part at 256 GRF a thread (-cl-intel-256-GRF-per-thread: the same arithmetic, bitwise the
+  # 128-GRF binary above, 0.535 -> 0.446 ms the five parts) - production; and the row-table forms of the batched draft
+  # (SEQS: up to 4 blocks of rows, each its own slot's ring and position) - the part at KS 1 (fastest at 2 and 4
+  # blocks), its one-ring twin (tests) and the H1 B4 reduce.
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4_g256 SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=4
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_g256 SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_g256_SEQS SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=1 SEQS=4
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_SEQS SOURCE ${DF_DIR}/df_attn_rows.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
+                           CAUSAL=0 HPW=1 RPW=4 SEQS=4)
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep SOURCE ${DF_DIR}/df_attn_exp.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0 HPW=1 RPW=4)
@@ -549,6 +565,19 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16 SOURCE ${DF_DIR}/df_select_split.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
+  # Plan 19v3b: the batched draft's row-table forms (SEQS) of the block-aware kernels - df_prep (embed, the
+  # convolutions, qkv prep; both forms) and the DFlash 2 selector walk (both forms).
+  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_SEQS SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                           INTER=17408 NH=32 NKV=8 HD=128 RING=2048 SEQS=4)
+  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8_SEQS
+                   SOURCE ${DF_DIR}/df_prep_split.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                           INTER=17408 NH=32 NKV=8 HD=128 RING=2048 SEQS=4)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_SEQS SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16_SEQS SOURCE ${DF_DIR}/df_select_split.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
   add_ocloc_kernel(df_select_v1_M8_K16 SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=0)
   add_gemv_bf16_variant(7 5120 248320 64 1)           # the full bf16 head at 7 rows
@@ -829,6 +858,14 @@ if(B70_VERIFY_DPAS AND B70_MTP)
       add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8_PG${KV_PAGE} SOURCE ${VDPAS_CL}
                        DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
                                KV8=1 KV_PAGED=${KV_PAGE}
+                       OPTIONS ${VDPAS_OPTIONS})
+    endforeach()
+    foreach(MM 5 6 7 8)   # plan 19v3b Tasks 3-7: slot 0's DFlash verify lists
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_PG${KV_PAGE} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=0 KV_PAGED=${KV_PAGE}
+                       OPTIONS ${VDPAS_OPTIONS})
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8_PG${KV_PAGE} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=1 KV_PAGED=${KV_PAGE}
                        OPTIONS ${VDPAS_OPTIONS})
     endforeach()
   endif()
@@ -2033,6 +2070,20 @@ endif()
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set(PG _PG${KV_PAGE})
   foreach(MM 1 2 3 4)
+    add_ocloc_kernel(attn_prep_M${MM}${PG} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} KV_PAGED=${KV_PAGE})
+  endforeach()
+  # Plan 19v3b Tasks 3-7: slot 0 beside the DFlash drafter verifies at M = 5..8 too (its tap verify lists).
+  foreach(MM 5 6 7 8)
     add_ocloc_kernel(attn_prep_M${MM}${PG} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
     add_ocloc_kernel(attn_prep_M${MM}_S1${PG} SOURCE ${ATTN_CL}
                      DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})

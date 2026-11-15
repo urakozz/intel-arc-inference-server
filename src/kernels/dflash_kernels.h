@@ -46,10 +46,18 @@ inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, un
 }
 // Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl), one sub-group a q head; its reduce is attn_variant(s, 1, 4)'s.
 // ks > 1: the occupancy form, a head's block keys split ks ways (df_attn_dpas.cl's KS).
+// Plan 19v3b: the one-card KS 4 part is the 256-GRF build (_g256: the same arithmetic, bitwise, faster).
 inline std::string attn_dpas_variant(const Shape& s = kQwen38, unsigned ks = 1) {
+  const bool g256 = ks == 4 && s.NH == kQwen38.NH && s.NKV == kQwen38.NKV;
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
-         s_(s.win) + "_P" + s_(s.pb) + "_dpas" + (ks > 1 ? "_k" + s_(ks) : "");
+         s_(s.win) + "_P" + s_(s.pb) + "_dpas" + (ks > 1 ? "_k" + s_(ks) : "") + (g256 ? "_g256" : "");
 }
+// Plan 19v3b: the batched draft's row-table part (df_attn_dpas.cl SEQS, KS 1, 256 GRF) and its reduce.
+inline std::string attn_seqs_part_variant(const Shape& s = kQwen38) {
+  return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
+         s_(s.win) + "_P" + s_(s.pb) + "_dpas_g256_SEQS";
+}
+inline std::string attn_seqs_reduce_variant(const Shape& s = kQwen38) { return attn_variant(s, 1, 4) + "_SEQS"; }
 // The context projection at prefill width (df_proj_wide.cl; runtime::dflash::DFlashDrafter::project_wide).
 inline std::string proj_wide_variant(const Shape& s = kQwen38) {
   return "df_proj_wide_H" + s_(s.H) + "_KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring);

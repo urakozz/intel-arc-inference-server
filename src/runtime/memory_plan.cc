@@ -136,15 +136,15 @@ uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, siz
 }
 
 MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>& lens, bool mtp, size_t model_bytes,
-                      const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv) {
+                      const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv, const DrafterPlan& drafter) {
   if (lens.empty() || lens.size() > SlotDims::kMaxSeqs)
     throw std::invalid_argument("runtime::plan_slots: " + std::to_string(lens.size()) + " slots (1.." +
                                 std::to_string(SlotDims::kMaxSeqs) + ")");
-  if (lens.size() == 1) return plan(desc, lens[0], mtp, model_bytes, path, dv, kv);
+  if (lens.size() == 1) return plan(desc, lens[0], mtp, model_bytes, path, dv, kv, drafter);
   if (dv.rows != 0) throw std::invalid_argument("runtime::plan_slots: a draft vocabulary beside sequence slots is not built");
   const uint32_t total = slots_kv_len(lens);
   const uint32_t seqs = static_cast<uint32_t>(lens.size());
-  MemoryPlan p = plan(desc, total, mtp, model_bytes, path, dv, kv);
+  MemoryPlan p = plan(desc, total, mtp, model_bytes, path, dv, kv, drafter);
   // 3j: int8 prefill's widening scratch holds one sequence's rows (one prefills at a time, slot-relative), so the
   // engine sizes it at the longest slot (PrefillScratch::kv8_len), not at the sum plan() counted.
   if (path.prefill && kv == KvCache::Int8) {
@@ -155,7 +155,8 @@ MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>&
     p.prefill_scratch -= extra;
   }
   p.slot_lens = lens;
-  p.slot_state = SlotDims::sizes(desc, seqs, mtp, total / kKvPage).total();
+  p.slot_state = SlotDims::sizes(desc, seqs, mtp, total / kKvPage, drafter.on()).total();
+  for (uint32_t q = 1; q < seqs; ++q) p.slot_state += drafter.session(lens[q]);   // plan 19v3b: their sessions
   if (mtp) {   // the further slots' GDN states and hh rows: MtpBuffers at `seqs`
     const size_t more = MtpDims::sizes(p.max_len, desc, 0, kv, MtpDims::kSlots, seqs).total() -
                         MtpDims::sizes(p.max_len, desc, 0, kv).total();
@@ -174,14 +175,14 @@ std::vector<uint32_t> slot_layout(uint32_t slot0, uint32_t seqs) {
 
 uint32_t slot0_len_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, size_t model_bytes,
                              size_t device_bytes, size_t reserve_bytes, uint32_t cap, const PrefillPath& path,
-                             KvCache kv) {
+                             KvCache kv, const DrafterPlan& drafter) {
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("slot0_len_that_fits: the cap " + std::to_string(cap) + " is below one " +
                                 std::to_string(kMaxLenQuantum) + "-position quantum");
   // plan_slots is plan() at the summed positions plus terms of the slot count (or the longest slot), so it is
   // non-decreasing in slot 0 like plan() in max_len.
   return largest_that_fits(cap, [&](uint32_t len) {
-    return plan_slots(desc, slot_layout(len, seqs), mtp, model_bytes, path, {}, kv).total() + reserve_bytes <=
+    return plan_slots(desc, slot_layout(len, seqs), mtp, model_bytes, path, {}, kv, drafter).total() + reserve_bytes <=
            device_bytes;
   });
 }

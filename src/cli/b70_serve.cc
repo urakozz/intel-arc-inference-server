@@ -930,7 +930,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     uint32_t max_len = 0;
     std::fprintf(stderr, "card %u: ", i);
     if (seqs > 1) {
-      slot_lens = cli::settle_slots(c, model, a.max_len_arg, seqs, a.mem_reserve, pf, a.kv_cache);
+      slot_lens = cli::settle_slots(c, model, a.max_len_arg, seqs, a.mem_reserve, pf, a.kv_cache, drafter_plan);
       max_len = runtime::slots_kv_len(slot_lens);   // one RoPE table, one KV allocation of the slots' pages
     } else {
       max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache, drafter_plan);
@@ -976,7 +976,8 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     runtime::Engine& e = *engines[i];
     if (e.slots() > 1) {
       slots_engines.push_back(
-          std::make_unique<cli::SlotsEngine>(e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup, hooked));
+          std::make_unique<cli::SlotsEngine>(e, tokenizer.vocab_used(), a.dflash.on ? a.dflash.max_k : a.mtp_k,
+                                             a.spec_lookup, hooked, runtime::Engine::kMaxRows, a.dflash.on));
       cards.push_back({nullptr, caps[i], slots_engines.back().get(), e.prefill_tail()});
     } else {
       adapters.push_back(std::make_unique<EngineAdapter>(e, tokenizer.vocab_used(),
@@ -1266,12 +1267,20 @@ int run(int argc, char** argv) {
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true);
   cli::check_replica_flags(pipe, dflash_lookup);   // replica serves --spec dflash, not lookup inside it
-  // --max-num-seqs: a card's several slots run beside no drafter and no draft vocabulary (not built).
-  if (max_num_seqs > (pipe.replica() ? 2u : 1u) && (dflash.on || draft_vocab != 0 || !draft_vocab_ids.empty()))
+  // --max-num-seqs: a card's several slots run beside no draft vocabulary and no lookup inside DFlash (not built);
+  // plan 19v3b: --spec dflash serves up to kDflashSlots requests a card (above it MTP is faster).
+  const uint32_t per_card = pipe.replica() ? (max_num_seqs + 1) / 2 : max_num_seqs;
+  if (per_card > 1 && (dflash_lookup || draft_vocab != 0 || !draft_vocab_ids.empty()))
     throw std::runtime_error("--max-num-seqs " + std::to_string(max_num_seqs) +
-                             " gives a card several slots, and --spec dflash / --draft-vocab beside slots are not "
-                             "built - --spec auto, mtp or lookup, or --max-num-seqs " +
+                             " gives a card several slots, and --spec dflash-lookup / --draft-vocab beside slots are "
+                             "not built - --spec dflash, auto, mtp or lookup, or --max-num-seqs " +
                              (pipe.replica() ? "2" : "1"));
+  if (dflash.on && per_card > cli::dflash::kDflashSlots)
+    throw std::runtime_error("--max-num-seqs " + std::to_string(max_num_seqs) + " gives a card " +
+                             std::to_string(per_card) + " requests at once; --spec dflash serves up to " +
+                             std::to_string(cli::dflash::kDflashSlots) +
+                             " a card (more are faster with MTP) - use --spec mtp, or --max-num-seqs " +
+                             std::to_string(pipe.replica() ? 2 * cli::dflash::kDflashSlots : cli::dflash::kDflashSlots));
   if (dflash_lookup && pipe.on())   // spec 19f: EngineAdapter's step_drafts_or_many; the pipeline adapter has none
     throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f); --parallel pp serves --spec dflash");
   if (spec_lookup) {
@@ -1520,7 +1529,8 @@ int run(int argc, char** argv) {
   std::vector<uint32_t> slot_lens;
   uint32_t max_len = 0;
   if (max_num_seqs > 1) {
-    slot_lens = cli::settle_slots(context, model, max_len_arg, max_num_seqs, mem_reserve, pp_path, kv_cache);
+    slot_lens = cli::settle_slots(context, model, max_len_arg, max_num_seqs, mem_reserve, pp_path, kv_cache,
+                                  drafter_plan);
     max_len = runtime::slots_kv_len(slot_lens);   // one RoPE table, one KV allocation of the slots' pages
   } else {
     max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
@@ -1574,8 +1584,9 @@ int run(int argc, char** argv) {
   // row lists for a step of several requests).
   std::unique_ptr<cli::SlotsEngine> slots_engine;
   if (engine.slots() > 1) {
-    slots_engine = std::make_unique<cli::SlotsEngine>(engine, tokenizer.vocab_used(), mtp_k, spec_lookup,
-                                                      /*hooked=*/options.prefix_cache_bytes != 0);
+    slots_engine = std::make_unique<cli::SlotsEngine>(engine, tokenizer.vocab_used(), dflash.on ? dflash.max_k : mtp_k,
+                                                      spec_lookup, /*hooked=*/options.prefix_cache_bytes != 0,
+                                                      runtime::Engine::kMaxRows, dflash.on);
     options.parallel_desc = "1 card, " + std::to_string(engine.slots()) + " sequence slots (" +
                             runtime::slot_layout_name(slot_lens) + ")";
   }

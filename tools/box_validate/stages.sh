@@ -3630,6 +3630,28 @@ st_r88_cost() {
   finish
 }
 
+row 89 "spec 19v3b - --spec dflash with several requests on one card (b70-serve --spec dflash --max-num-seqs N): a drafter session per slot, the row steps' taps and one rows projection, one batched draft pass for the active slots (plan 2026-11-13-spec19v3b-dflash-slots)"
+rownote 89 "One card (kind card). Hand back: r89.engine's A / B / T lines, r89.serve's IDENTICAL / JUDGED lines and serve_judge's SKIP_REASON (contexts awaiting their f32 reference)."
+stage r89.engine  89 default card qwen,dflash - "dflash_slots_test: a session in every slot bitwise the one-slot engine (B1), slots stepped in turn isolated (B2), a further slot K <= 3 (B3), reset / snapshot / restore isolated (B4), the batched draft and a row step against each slot alone (B5 / B6), the batched session (B7), the batched draft's time (T)"
+st_r89_engine() {
+  run_tests '^dflash_slots_test$'
+  grab_all t '^(A |B[0-9]|T:|dflash_slots_test)' 40
+  finish
+}
+stage r89.serve   89 default card qwen,dflash,oracle_qwen r89.engine "b70-serve --spec dflash --max-num-seqs 4 --kv-cache int8 at 1, 2 and 4 requests at once against --spec off in the same mode (golden + tool-call sets, greedy, prefix cache off): every first difference by the f32 judge (serve_judge.py)"
+st_r89_serve() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" c
+  chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/s/off.r1 off 1 $SNAP_QWEN --max-num-seqs 4 --kv-cache int8 --spec off --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128" "--spec off"
+  for c in 1 2 4; do
+    chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/s/dflash-c$c.r1 dflash-c$c 1 $SNAP_QWEN --max-num-seqs 4 --kv-cache int8 --spec dflash $dm --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128 --concurrency $c" "--spec dflash, $c at a time"
+  done
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE/s --ref off"
+  serve_judge "$STATE/$STAGE/s" off "every first difference from --spec off by the f32 judge"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
+  judged_finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest_2card x default gpu qwen,oracle_qwen - "x.rest's two-card part: the pp-labelled tests among them (the rest is x.rest, on one card)"
 st_x_rest_2card() {

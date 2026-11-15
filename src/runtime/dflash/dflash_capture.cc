@@ -36,8 +36,9 @@ const uint8_t* at(const void* p, size_t off) { return static_cast<const uint8_t*
 class Walk {
  public:
   Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b, const CaptureOptions& opt,
-       const TpLink* tp = nullptr)
-      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), tp_(tp), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {
+       const TpLink* tp = nullptr, uint32_t session = 0)
+      : ctx_(ctx), w_(w), d_(w.desc), b_(b), s_(b.session(session)), opt_(opt), tp_(tp),
+        step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {
     if (opt_.profile) opt_.profile->events.clear();
   }
 
@@ -51,7 +52,18 @@ class Walk {
     return finish(tail_launches(d_), "tail");
   }
 
-  CapturedStep draft(const DFlashTarget& t, const l0::Mem& control) {
+  CapturedStep draft(const DFlashTarget& t, const l0::Mem& control) { return draft(t, control.ptr(), control.size()); }
+  // Plan 19v3b: the batched draft - the same walk over the row table (DFlashBuffers::seqs), block z the engine's slot
+  // z: its Control ctrls[z], its session z's ring and readback. Only the block-aware launches change binary.
+  CapturedStep draft_seqs(const DFlashTarget& t, const std::vector<const void*>& ctrls) {
+    require(ctrls.size() >= 2 && ctrls.size() <= kd::kSeqs && b_.seqs && b_.sessions.size() + 1 == ctrls.size() &&
+                !tp_ && opt_.dflash_attn_dpas && sh_.NH == kd::kQwen38.NH && d_.v2(),
+            "the batched draft is built for 2..4 slots, one card, DFlash 2 with the DPAS attention");
+    ctrls_ = &ctrls;
+    return draft(t, ctrls[0], sizeof(Control));
+  }
+  // Plan 19v3b: a further slot's Control lives in the engine's slot block, not an allocation of its own.
+  CapturedStep draft(const DFlashTarget& t, const void* ctrl, size_t ctrl_bytes) {
     check_common();
     require(t.embed && t.head, "the target's embedding and head are not given");
     require(t.head->kind == model::WeightKind::Int8 || t.head->kind == model::WeightKind::Bf16,
@@ -75,7 +87,7 @@ class Walk {
     }
     require(b_.head_rows == N, "the buffers were sized for a head of " + std::to_string(b_.head_rows) + " rows, not " +
                                    std::to_string(N));
-    require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
+    require(ctrl_bytes >= sizeof(Control), "the control block is smaller than runtime::Control");
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     // Spec 19 v3c: a TP card's half - the candidate head's path at its vocabulary half, the DPAS attention.
     require(!tp_ || (w_.candidate_head && !compact && fmt != 0 && opt_.dflash_attn_dpas &&
@@ -88,17 +100,20 @@ class Walk {
                                  hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head),
                                  opt_.dflash_attn_parallel_exp, opt_.dflash_attn_dpas, opt_.dflash_attn_ks,
                                  w_.candidate_bits, w_.candidates);
-    for (const std::string& v : variants)
+    std::vector<std::string> need = variants;
+    if (ctrls_)
+      for (const std::string& v : {kd::prep_variant(sh_, int4()) + "_SEQS", kd::attn_seqs_part_variant(sh_),
+                                   kd::attn_seqs_reduce_variant(sh_), kd::select_variant(true, sh_, int4()) + "_SEQS"})
+        need.push_back(v);
+    for (const std::string& v : need)
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
-    const void* ctrl = control.ptr();
     const uint32_t M = kd::kM, H = d_.hidden;
 
     layer_ = -1;
     {   // df_embed(ctrl, embed, mask_row, in_scale, resid), grid (1, M)
-      l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
-                             "df_embed", kd::kWg);
-      k.arg_ptr(0, ctrl);
+      l0::Kernel& k = kernel(seqs_prep(), "df_embed", kd::kWg);
+      k.arg_ptr(0, ctrls_ ? b_.seqs->ptr() : ctrl);
       k.arg_ptr(1, t.embed->ptr());
       k.arg_ptr(2, w_.mask_row->ptr());
       k.arg(3, d_.in_scale);
@@ -122,9 +137,8 @@ class Walk {
       }
       gemv(L.qkv, qkv_in, b_.gout.ptr());
       {   // df_qkv_prep(ctrl, qkv, qn_kn, rope, q, kb, vb), grid (NH + 2 NKV, M), WG HD
-        l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
-                             "df_qkv_prep", d_.head_dim);
-        k.arg_ptr(0, ctrl);
+        l0::Kernel& k = kernel(seqs_prep(), "df_qkv_prep", d_.head_dim);
+        k.arg_ptr(0, ctrls_ ? b_.seqs->ptr() : ctrl);
         k.arg_ptr(1, b_.gout.ptr());
         k.arg_ptr(2, at(w_.qk_norm->ptr(), loader::dflash_qk_norm_off(d_, l, 0) * 4));
         k.arg_ptr(3, b_.rope.ptr());
@@ -133,16 +147,28 @@ class Walk {
         k.arg_ptr(6, b_.vb.ptr());
         launch(k, d_.q_heads + 2 * d_.kv_heads, M);
       }
-      {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128 (DPAS: 16 a q head)
+      if (ctrls_) {   // plan 19v3b: df_attn_part(seqs, q, ring_k0..3, ring_v0..3, scale, part), grid (NKV, TGT, slots)
+        l0::Kernel& k = kernel(kd::attn_seqs_part_variant(sh_), "df_attn_part", 16 * (d_.q_heads / d_.kv_heads));
+        k.arg_ptr(0, b_.seqs->ptr());
+        k.arg_ptr(1, b_.q.ptr());
+        for (uint32_t z = 0; z < kd::kSeqs; ++z) {
+          const DFlashBuffers::Session x = b_.session(z < ctrls_->size() ? z : 0);
+          k.arg_ptr(2 + z, at(x.ring_k->ptr(), l * ring_layer));
+          k.arg_ptr(6 + z, at(x.ring_v->ptr(), l * ring_layer));
+        }
+        k.arg(10, scale_);
+        k.arg_ptr(11, b_.part.ptr());
+        launch(k, d_.kv_heads, d_.window[l] / kd::kAttnPb, uint32_t(ctrls_->size()));
+      } else {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128 (DPAS: 16 a q head)
         l0::Kernel& k = opt_.dflash_attn_dpas
                             ? kernel(kd::attn_dpas_variant(sh_, opt_.dflash_attn_ks), "df_attn_part",
                                      16 * (d_.q_heads / d_.kv_heads) * opt_.dflash_attn_ks)
                             : kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
         k.arg_ptr(0, ctrl);
-        k.arg_ptr(1, b_.dctl.ptr());
+        k.arg_ptr(1, s_.dctl->ptr());
         k.arg_ptr(2, b_.q.ptr());
-        k.arg_ptr(3, at(b_.ring_k.ptr(), l * ring_layer));
-        k.arg_ptr(4, at(b_.ring_v.ptr(), l * ring_layer));
+        k.arg_ptr(3, at(s_.ring_k->ptr(), l * ring_layer));
+        k.arg_ptr(4, at(s_.ring_v->ptr(), l * ring_layer));
         k.arg(5, scale_);
         k.arg_ptr(6, b_.part.ptr());
         if (opt_.dflash_attn_dpas)
@@ -151,10 +177,20 @@ class Walk {
           launch(k, opt_.dflash_attn_heads ? d_.q_heads / opt_.dflash_attn_heads : d_.kv_heads,
                  d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
       }
-      {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
+      if (ctrls_) {   // plan 19v3b: df_attn_reduce(seqs, part, q, kb, vb, scale, out), grid (NH, M), WG HD
+        l0::Kernel& k = kernel(kd::attn_seqs_reduce_variant(sh_), "df_attn_reduce", d_.head_dim);
+        k.arg_ptr(0, b_.seqs->ptr());
+        k.arg_ptr(1, b_.part.ptr());
+        k.arg_ptr(2, b_.q.ptr());
+        k.arg_ptr(3, b_.kb.ptr());
+        k.arg_ptr(4, b_.vb.ptr());
+        k.arg(5, scale_);
+        k.arg_ptr(6, b_.xa.ptr());
+        launch(k, d_.q_heads, M);
+      } else {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
         l0::Kernel& k = kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_reduce", d_.head_dim);
         k.arg_ptr(0, ctrl);
-        k.arg_ptr(1, b_.dctl.ptr());
+        k.arg_ptr(1, s_.dctl->ptr());
         k.arg_ptr(2, b_.part.ptr());
         k.arg_ptr(3, b_.q.ptr());
         k.arg_ptr(4, b_.kb.ptr());
@@ -262,21 +298,44 @@ class Walk {
 
   // df_select(ctrl, dctl, cand, unary, hid, pred, succ, out), grid (1), WG 256
   void select(const void* ctrl) {
+    if (ctrls_) {   // plan 19v3b: df_select(seqs, ctrl0..3, cand, unary, hid, pred, succ, out0..3), grid (slots)
+      l0::Kernel& k = kernel(kd::select_variant(true, sh_, int4()) + "_SEQS", "df_select", kd::kWg);
+      k.arg_ptr(0, b_.seqs->ptr());
+      for (uint32_t z = 0; z < kd::kSeqs; ++z) {
+        k.arg_ptr(1 + z, (*ctrls_)[z < ctrls_->size() ? z : 0]);
+        k.arg_ptr(10 + z, b_.session(z < ctrls_->size() ? z : 0).out->ptr());
+      }
+      k.arg_ptr(5, b_.cand.ptr());
+      k.arg_ptr(6, b_.unary.ptr());
+      k.arg_ptr(7, b_.hid->ptr());
+      k.arg_ptr(8, w_.pred->ptr());
+      k.arg_ptr(9, w_.succ->ptr());
+      launch(k, uint32_t(ctrls_->size()));
+      return;
+    }
     {
       l0::Kernel& k = kernel(kd::select_variant(d_.v2(), kd::kQwen38, w_.format == loader::DraftFormat::Int4G64), "df_select", kd::kWg);
       k.arg_ptr(0, ctrl);
-      k.arg_ptr(1, b_.dctl.ptr());
+      k.arg_ptr(1, s_.dctl->ptr());
       k.arg_ptr(2, b_.cand.ptr());
       k.arg_ptr(3, b_.unary.ptr());
       // v1's build reads none of the selector's buffers: any valid pointer
       k.arg_ptr(4, d_.v2() ? b_.hid->ptr() : b_.unary.ptr());
       k.arg_ptr(5, d_.v2() ? w_.pred->ptr() : b_.unary.ptr());
       k.arg_ptr(6, d_.v2() ? w_.succ->ptr() : b_.unary.ptr());
-      k.arg_ptr(7, b_.out.ptr());
+      k.arg_ptr(7, s_.out->ptr());
       launch(k, 1);
     }
   }
 
+  // Plan 19v3b: the rows projection - project()'s walk over the row lists' taps, the store in its SEQS form (each
+  // committed row into its own slot's ring at its position, DFlashBuffers::proj_seqs).
+  CapturedStep project_rows(uint32_t slots) {
+    require(b_.rows_taps && slots >= 2 && slots <= kd::kSeqs && b_.sessions.size() + 1 == slots,
+            "the rows projection is built beside 2..4 slots");
+    rows_ = slots;
+    return project();
+  }
   CapturedStep project() {
     check_common();
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
@@ -286,7 +345,7 @@ class Walk {
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     layer_ = -1;
-    gemv(*w_.fc, b_.taps.ptr(), b_.gout.ptr());
+    gemv(*w_.fc, rows_ ? b_.rows_taps->ptr() : s_.taps->ptr(), b_.gout.ptr());
     {   // df_norm(src, w, h, x) with hidden_norm
       l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
                              w_.format == loader::DraftFormat::Int4G64 ? "df_norm_fc" : "df_norm", kd::kWg);
@@ -321,15 +380,27 @@ class Walk {
       }
     }
     layer_ = -1;
-    {   // df_ctx_store(dctl, kv, qk_norm, rope, ring_k, ring_v), grid (L x 2 NKV, M), WG HD
-      l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
-                             "df_ctx_store", d_.head_dim);
-      k.arg_ptr(0, b_.dctl.ptr());
+    if (rows_) {   // plan 19v3b: df_ctx_store(proj_seqs, kv, qk_norm, rope, ring_k0..3, ring_v0..3)
+      l0::Kernel& k = kernel(kd::prep_variant(sh_, int4()) + "_SEQS", "df_ctx_store", d_.head_dim);
+      k.arg_ptr(0, b_.proj_seqs->ptr());
       k.arg_ptr(1, b_.kv.ptr());
       k.arg_ptr(2, w_.qk_norm->ptr());
       k.arg_ptr(3, b_.rope.ptr());
-      k.arg_ptr(4, b_.ring_k.ptr());
-      k.arg_ptr(5, b_.ring_v.ptr());
+      for (uint32_t z = 0; z < kd::kSeqs; ++z) {
+        const DFlashBuffers::Session x = b_.session(z < rows_ ? z : 0);
+        k.arg_ptr(4 + z, x.ring_k->ptr());
+        k.arg_ptr(8 + z, x.ring_v->ptr());
+      }
+      launch(k, d_.layers * 2 * d_.kv_heads, kd::kM);
+    } else {   // df_ctx_store(dctl, kv, qk_norm, rope, ring_k, ring_v), grid (L x 2 NKV, M), WG HD
+      l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
+                             "df_ctx_store", d_.head_dim);
+      k.arg_ptr(0, s_.dctl->ptr());
+      k.arg_ptr(1, b_.kv.ptr());
+      k.arg_ptr(2, w_.qk_norm->ptr());
+      k.arg_ptr(3, b_.rope.ptr());
+      k.arg_ptr(4, s_.ring_k->ptr());
+      k.arg_ptr(5, s_.ring_v->ptr());
       launch(k, d_.layers * 2 * d_.kv_heads, kd::kM);
     }
     return finish(project_launches(d_), "projection");
@@ -398,12 +469,13 @@ class Walk {
   }
   // df_conv_prep(src, co, base, out) (prepare: out bf16) - only the prepare side goes through here.
   void conv(bool prep, const void* src, const void* base, const void* out) {
-    l0::Kernel& k = kernel(kd::prep_variant(sh_, w_.format == loader::DraftFormat::Int4G64),
-                           prep ? "df_conv_prep" : "df_conv_add", kd::kWg);
-    k.arg_ptr(0, src);
-    k.arg_ptr(1, b_.co->ptr());
-    k.arg_ptr(2, base);
-    k.arg_ptr(3, out);
+    l0::Kernel& k = kernel(seqs_prep(), prep ? "df_conv_prep" : "df_conv_add", kd::kWg);
+    const uint32_t a = ctrls_ ? 1 : 0;   // plan 19v3b: the SEQS form takes the row table first
+    if (ctrls_) k.arg_ptr(0, b_.seqs->ptr());
+    k.arg_ptr(a + 0, src);
+    k.arg_ptr(a + 1, b_.co->ptr());
+    k.arg_ptr(a + 2, base);
+    k.arg_ptr(a + 3, out);
     launch(k, (d_.hidden + kd::kWg - 1) / kd::kWg, kd::kM);
   }
   // The sub-block's output into the residual: df_conv_add with the finish side (v2) or df_add (v1).
@@ -418,6 +490,9 @@ class Walk {
     k.arg_ptr(1, b_.resid.ptr());
     launch(k, (d_.hidden + kd::kWg - 1) / kd::kWg, kd::kM);
   }
+  bool int4() const { return w_.format == loader::DraftFormat::Int4G64; }
+  // The block-aware prep kernels' binary: the SEQS form in the batched draft.
+  std::string seqs_prep() const { return kd::prep_variant(sh_, int4()) + (ctrls_ ? "_SEQS" : ""); }
   // The int8 linears' kernel (runtime/gemv_kind.h): the lists are M >= 2, so SmallM unless a test forces gemv.
   kernels::LinearKind lkind() const { return linear_kind(kd::kM, opt_); }
   kernels::LinearKind hkind() const {
@@ -522,6 +597,9 @@ class Walk {
   const loader::DFlashWeights& w_;
   const model::DFlashDesc& d_;
   DFlashBuffers& b_;
+  const DFlashBuffers::Session s_;   // plan 19v3b: the session the list binds (0: the buffers' own)
+  const std::vector<const void*>* ctrls_ = nullptr;   // plan 19v3b: the batched draft's slot Controls
+  uint32_t rows_ = 0;                                  // plan 19v3b: the rows projection's slots (0: one session's)
   const CaptureOptions opt_;
   const TpLink* tp_;
   // The kernels' shapes: the whole drafter's, or (spec 19 v3c) a TP card's half by its descriptor.
@@ -555,9 +633,25 @@ CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w
   return Walk(ctx, w, b, opt).draft(t, control);
 }
 
+CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
+                                DFlashBuffers& b, const void* control, uint32_t session, const CaptureOptions& opt) {
+  return Walk(ctx, w, b, opt, nullptr, session).draft(t, control, sizeof(Control));
+}
+
+CapturedStep build_dflash_draft_seqs(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
+                                     DFlashBuffers& b, const std::vector<const void*>& controls,
+                                     const CaptureOptions& opt) {
+  return Walk(ctx, w, b, opt).draft_seqs(t, controls);
+}
+
+CapturedStep build_dflash_project_rows(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
+                                       uint32_t slots, const CaptureOptions& opt) {
+  return Walk(ctx, w, b, opt).project_rows(slots);
+}
+
 CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
-                                  const CaptureOptions& opt) {
-  return Walk(ctx, w, b, opt).project();
+                                  const CaptureOptions& opt, uint32_t session) {
+  return Walk(ctx, w, b, opt, nullptr, session).project();
 }
 
 CapturedStep build_dflash_draft_tp(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
@@ -576,7 +670,8 @@ CapturedStep build_dflash_tail(l0::Context& ctx, const loader::DFlashWeights& w,
 // each, df_w_add), then the rows against each. fc's slab is 512 columns:
 // [25600][512] fits the scratch's slab ([17408][1024] on Qwen3.8), a 1024-column one does not.
 bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const loader::DFlashWeights& w,
-                  DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n) {
+                  DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n, uint32_t session) {
+  const DFlashBuffers::Session ss = b.session(session);
   using prefill::PtrArg, prefill::arg_val;
   const model::DFlashDesc& d = w.desc;
   const uint32_t H = d.hidden, KV = 2 * d.kv_n(), cap = s.chunk_cap(), scaled = w.format == loader::DraftFormat::Int8;
@@ -624,8 +719,8 @@ bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch
     const void* const scales = scaled ? static_cast<const void*>(qkv.scales->as<float>() + q_n) : kv;
     cx.launch(kc(v, "df_w_ctx_store"), 2 * d.kv_heads, n, 1,
               {PtrArg(kv), PtrArg(scales), PtrArg(w.qk_norm->as<float>() + (size_t(l) * 2 + 1) * d.head_dim),
-               PtrArg(b.rope.ptr()), PtrArg(static_cast<uint8_t*>(b.ring_k.ptr()) + l * ring_layer),
-               PtrArg(static_cast<uint8_t*>(b.ring_v.ptr()) + l * ring_layer), arg_val(pos), arg_val(scaled)});
+               PtrArg(b.rope.ptr()), PtrArg(static_cast<uint8_t*>(ss.ring_k->ptr()) + l * ring_layer),
+               PtrArg(static_cast<uint8_t*>(ss.ring_v->ptr()) + l * ring_layer), arg_val(pos), arg_val(scaled)});
   }
   return true;
 }

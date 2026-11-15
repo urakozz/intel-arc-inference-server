@@ -312,14 +312,14 @@ uint32_t slots_kv_len(const std::vector<uint32_t>& lens) {
   return static_cast<uint32_t>(total);
 }
 
-SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages) {
+SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages, bool drafter) {
   if (seqs == 0 || seqs > kMaxSeqs)
     throw std::invalid_argument("runtime::SlotDims::sizes: " + std::to_string(seqs) + " sequence slots is outside [1, " +
                                 std::to_string(kMaxSeqs) + "]");
   SlotSizes s;
   if (seqs == 1) return s;
   const size_t more = seqs - 1;
-  s.states = mtp ? 0 : more * gdn_state_bytes(desc);
+  s.states = mtp ? 0 : more * (drafter ? kDrafterStates : 1) * gdn_state_bytes(desc);
   s.rings = more * PersistentDims::sizes(0, desc).conv_ring;
   s.controls = draft_table_at(seqs) + kTable;
   s.pages = size_t(kv_pages) * 4;

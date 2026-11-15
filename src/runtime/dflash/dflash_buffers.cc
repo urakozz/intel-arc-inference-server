@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "kernels/dflash_dims.h"
+
 namespace runtime::dflash {
 
 namespace {
@@ -45,6 +47,51 @@ DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint3
   imm.copy(rope.ptr(), t.data(), t.size() * 4);
 }
 
+DFlashSession::DFlashSession(l0::Context& ctx, const DFlashSizes& sz)
+    : dctl(ctx, l0::MemKind::Shared, sz.dctl),
+      out(ctx, l0::MemKind::Shared, sz.out),
+      ring_k(dev(ctx, sz.ring_k)),
+      ring_v(dev(ctx, sz.ring_v)),
+      taps(dev(ctx, sz.taps)) {
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  zero(imm);
+}
+
+size_t DFlashSession::bytes() const { return dctl.size() + out.size() + ring_k.size() + ring_v.size() + taps.size(); }
+
+void DFlashSession::zero(l0::CmdList& imm) {
+  for (l0::Mem* m : {&ring_k, &ring_v, &taps}) imm.fill(m->ptr(), 0u, m->size());
+  std::memset(dctl.ptr(), 0, dctl.size());
+  std::memset(out.ptr(), 0, out.size());
+}
+
+void DFlashBuffers::add_sessions(l0::Context& ctx, uint32_t n) {
+  while (sessions.size() + 1 < n) sessions.push_back(std::make_unique<DFlashSession>(ctx, sz));
+  if (n > 1 && !seqs) {
+    const size_t t = (kernels::dflash::kM + 8 * kernels::dflash::kSeqs) * 4;
+    seqs = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, t);
+    proj_seqs = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, t);
+    rows_taps = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.taps);
+    std::memset(seqs->ptr(), 0, t);
+    std::memset(proj_seqs->ptr(), 0, t);
+    l0::CmdList imm = l0::CmdList::immediate(ctx);
+    imm.fill(rows_taps->ptr(), 0u, rows_taps->size());
+  }
+}
+
+DFlashBuffers::Session DFlashBuffers::session(uint32_t s) {
+  if (s == 0) return {&dctl, &out, &ring_k, &ring_v, &taps};
+  DFlashSession& x = *sessions.at(s - 1);
+  return {&x.dctl, &x.out, &x.ring_k, &x.ring_v, &x.taps};
+}
+
+void DFlashBuffers::zero_session(l0::CmdList& imm, uint32_t s) {
+  const Session x = session(s);
+  for (l0::Mem* m : {x.ring_k, x.ring_v, x.taps}) imm.fill(m->ptr(), 0u, m->size());
+  std::memset(x.dctl->ptr(), 0, x.dctl->size());
+  std::memset(x.out->ptr(), 0, x.out->size());
+}
+
 size_t DFlashBuffers::bytes() const {
   size_t b = 0;
   for (const l0::Mem* m : {&dctl, &out, &rope, &ring_k, &ring_v, &taps, &resid, &h, &x, &xa, &gout, &q, &kb, &vb,
@@ -53,6 +100,8 @@ size_t DFlashBuffers::bytes() const {
   if (co) b += co->size();
   if (hid) b += hid->size();
   if (candidate) b += candidate->size();
+  for (const auto& s : sessions) b += s->bytes();
+  if (seqs) b += seqs->size() + proj_seqs->size() + rows_taps->size();
   return b;
 }
 
