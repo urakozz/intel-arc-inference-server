@@ -22,6 +22,7 @@
 
 #include "check.h"
 #include "cli/kolibri_serve.h"
+#include "server/adaptive_k.h"
 
 namespace {
 

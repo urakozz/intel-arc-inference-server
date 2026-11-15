@@ -4589,6 +4589,33 @@ target_include_directories(kolibri_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(kolibri_spec_test PRIVATE b70_server)
 add_test(NAME kolibri_spec_test COMMAND kolibri_spec_test)
 set_tests_properties(kolibri_spec_test PROPERTIES LABELS kolibri)
+# On the cards (box only, NOT YET RUN: the operator's first card run after Flash-Next; SKIP 77 without the data):
+#   kolibri_verify_test   the verify lists against the plain decode list - every row's argmax the plain run's, its logits row
+#                         cosine >= 0.99999 (bitwise expected, counted), partial commits, greedy lossless with the plain
+#                         run's own ids as drafts, the launches at M 2..8 - on the synthetic set (one card, two) and the real
+#                         checkpoint on two cards;
+#   kolibri_dspark_test   the real Kolibri-1 with the DSpark drafter through b70-serve's glue: greedy step_many == plain token
+#                         for token (D2), the tokens a verify (the drafter wired right), a seeded sampled request.
+set(B70_DSPARK_SNAPSHOT "intuit/Kolibri-1-dspark" CACHE STRING "Kolibri-1's DSpark drafter (Kolibri DSpark)")
+if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(kolibri_verify_test runtime/kolibri_verify_test.cc)
+  target_include_directories(kolibri_verify_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_verify_test PRIVATE b70_kolibri_prefill b70_l0 b70_server)
+  add_executable(kolibri_dspark_test runtime/kolibri_dspark_test.cc)
+  target_include_directories(kolibri_dspark_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(kolibri_dspark_test PRIVATE b70_kolibri_prefill b70_dflash_runtime b70_l0 b70_server)
+  b70_target_kernel_dir(kolibri_dspark_test)
+  set(_kds_synth ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt)
+  set(_kds_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
+  add_test(NAME kolibri_verify_synth_test COMMAND kolibri_verify_test ${_kds_synth} ${_kds_ids})
+  add_test(NAME kolibri_verify_synth_pp_test COMMAND kolibri_verify_test ${_kds_synth} ${_kds_ids} pp2:3)
+  add_test(NAME kolibri_verify_test COMMAND kolibri_verify_test ${B70_KOLIBRI_SNAPSHOT} ${_kds_ids} pp2 int8)
+  add_test(NAME kolibri_dspark_test COMMAND kolibri_dspark_test ${B70_KOLIBRI_SNAPSHOT} ${B70_DSPARK_SNAPSHOT} ${_kds_ids})
+  set_tests_properties(kolibri_verify_synth_test kolibri_verify_synth_pp_test kolibri_verify_test kolibri_dspark_test
+    PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 # b70-serve's --spec refusals for Kolibri-1, before the device (tests/model/kolibri1: config.json only; the drafter's checks
 # read tests/model/dspark: config.json only, so a drafter refusal is the safetensors' absence or the config's own).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
