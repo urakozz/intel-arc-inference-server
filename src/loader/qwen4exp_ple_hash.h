@@ -2,6 +2,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -64,9 +65,9 @@ inline std::vector<uint64_t> q4_ple_primes(uint64_t base, uint32_t heads, uint32
 inline std::vector<uint64_t> q4_ple_offsets(const std::vector<uint64_t>& sizes) {
   std::vector<uint64_t> o(sizes.size());
   uint64_t at = 0;
-  for (size_t h = 0; h < sizes.size(); ++h) {
-    o[h] = at;
-    at += sizes[h];
+  for (auto&& [off, size] : std::views::zip(o, sizes)) {
+    off = at;
+    at += size;
   }
   return o;
 }

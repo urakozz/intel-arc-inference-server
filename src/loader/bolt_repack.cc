@@ -1,5 +1,6 @@
 #include "loader/bolt_repack.h"
 
+#include <ranges>
 #include <stdexcept>
 
 #include "common/bf16.h"
@@ -113,7 +114,7 @@ std::vector<float> widen_bolt_bf16(const uint16_t* w, size_t n) {
 
 std::vector<float> bolt_neg_exp(const std::vector<float>& a_log) {
   std::vector<float> a(a_log.size());
-  for (size_t i = 0; i < a.size(); ++i) a[i] = -common::exp_torch(a_log[i]);
+  for (auto&& [x, l] : std::views::zip(a, a_log)) x = -common::exp_torch(l);
   return a;
 }
 

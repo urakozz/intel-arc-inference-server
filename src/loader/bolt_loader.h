@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <ranges>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -267,7 +268,7 @@ class BoltCheckpoint {
   void fused_linear(const std::string& m, const model::BoltLinear& ln, BoltHostLinear& out) {
     std::vector<LinearSrc> srcs;
     srcs.reserve(ln.parts.size());
-    for (size_t i = 0; i < ln.parts.size(); ++i) srcs.push_back(int4(m + ln.parts[i], ln.shape.K, ln.part_n[i]));
+    for (const auto& [part, part_n] : std::views::zip(ln.parts, ln.part_n)) srcs.push_back(int4(m + part, ln.shape.K, part_n));
     out = repack_bolt_linear(ln, srcs);
   }
 
