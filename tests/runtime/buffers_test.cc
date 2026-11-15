@@ -294,7 +294,7 @@ int main() {
     CHECK_EQ(mb.kv_v.size(), size_t{33554432});
     CHECK_EQ(mb.hh.size(), size_t{174080});   // (16 + 1) rows since open-work 28
     CHECK_EQ(mb.logits.size(), size_t{2979840});
-    CHECK_EQ(mb.bytes(), size_t{523176064 + 81920});
+    CHECK_EQ(mb.bytes(), size_t{523176064 + 81920 + 128});
     const uint32_t* hw = mb.hctl.as<uint32_t>();
     for (size_t i = 0; i < sizeof(runtime::Control) / sizeof(uint32_t); ++i) CHECK_EQ(hw[i], 0u);
     CHECK_EQ(runtime::MtpBuffers::kSlots, 4u);
@@ -330,7 +330,7 @@ int main() {
     runtime::MtpBuffers mb(ctx, 16384, model::qwen38(), 0, i8);
     CHECK_EQ(mb.kv_k.size(), size_t{16384} * 1032);
     CHECK_EQ(mb.kv_lay.layers, 1u);
-    CHECK_EQ(mb.bytes(), size_t{523176064} - 2 * size_t{16384} * (2048 - 1032));
+    CHECK_EQ(mb.bytes(), size_t{523176064 + 81920 + 128} - 2 * size_t{16384} * (2048 - 1032));
   }
 
   std::puts("buffers_test OK");

@@ -73,7 +73,7 @@ void check_sizes_qwen38() {
   const runtime::MtpSizes m = runtime::MtpDims::sizes(16384, q);
   CHECK_EQ(m.gdn_spec, size_t{3} * 150994944);
   CHECK_EQ(m.kv_k, size_t{33554432});
-  CHECK_EQ(m.total(), size_t{523176064});
+  CHECK_EQ(m.total(), size_t{523176064 + 81920 + 128});   // hh at 16 + 1 rows, hctl 256 B (open-work 28)
   // Spec 19a: probe_mtp_steps' 8-slot buffer (verify M = 5..8) - 7 gdn_state copies, the
   // rest as at 4 slots; the default stays the 4 slots above, and [4, 8] is the range.
   const runtime::MtpSizes m8 = runtime::MtpDims::sizes(16384, q, 0, runtime::KvCache::Bf16, 8);
@@ -131,7 +131,7 @@ void check_sizes_ornith() {
   CHECK_EQ(ml.route_at(40), ml.route_off + 40 * size_t{1024});
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, o);
   CHECK_EQ(d.moe, size_t{472576});
-  CHECK_EQ(d.x, size_t{8} * 4096 * 2);                              // 2 x hidden > 512
+  CHECK_EQ(d.x, size_t{16} * 4096 * 2);                             // 2 x hidden > 512, 16 rows
   CHECK_EQ(d.attn_part, size_t{16} * 32 * 16 * 258 * 4);            // v2 at 16 q-heads, 16 rows
   // Dense models carry no MoE scratch: their sizes are what they were.
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
@@ -211,13 +211,13 @@ void check_spec6_line() {
   const runtime::PrefillPath i8{true, PrefillBackend::L0Int8};   // measured on l0-int8, then the default
   const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights, i8);
   CHECK_EQ(runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights).decode_state,
-           size_t{590450624} - 405798912 + 6340608);
+           size_t{590450624} - 405798912 + 6340608 + 39997376);   // + open-work 28's ring, Control and 16-row scratch
   CHECK_EQ(p.rope, size_t{131072} * 256);
   CHECK_EQ(p.model, size_t{18116331520ull});   // the 16384 load re-tabled to 131072
   CHECK_EQ(p.kv, size_t{8589934592ull});
   // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
   CHECK_EQ(p.decode_state, size_t{150994944 + 31457280 + 256} + 2 * (68652864 - 50724864 + 6340608));
-  CHECK_EQ(p.decode_state, size_t{190992320});
+  CHECK_EQ(p.decode_state, size_t{230989696});
   // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
   // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.
   CHECK_EQ(p.prefill_scratch, size_t{699514776} + 35651584);
@@ -226,8 +226,8 @@ void check_spec6_line() {
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.191 GB, prefill scratch 0.735 GB,"
-        " int8 0.074 GB, total 27.706 GB of 32.530 GB");
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.231 GB, prefill scratch 0.735 GB,"
+        " int8 0.074 GB, total 27.746 GB of 32.530 GB");
 }
 
 void check_paths() {
