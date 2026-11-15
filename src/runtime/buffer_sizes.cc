@@ -401,8 +401,8 @@ void set_default_prefill_chunk_cap(uint32_t cap) {
 }  // namespace testing
 
 bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id) {
-  return !desc.is_moe() && (id == model::LinearId::QkvZ || id == model::LinearId::OutProj ||
-                             id == model::LinearId::Qkv || id == model::LinearId::OProj);
+  return id == model::LinearId::QkvZ || id == model::LinearId::OutProj || id == model::LinearId::Qkv ||
+         id == model::LinearId::OProj;
 }
 
 Int8ScratchSizes int8_scratch_sizes(uint32_t max_k, uint32_t chunk_cap) {

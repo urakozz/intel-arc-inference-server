@@ -122,7 +122,7 @@ void Engine::prepare_prefill() {
   // pf_colmax_rot.
   // Not a||b: prefill runs it as a bf16 GEMV (pf_ab_proj) on every backend, over the
   // checkpoint's bf16 weight or (spec 15 §13) an int4 a||b's bf16 copy - never through h8.
-  // Not a dense model's mixer linears either: l0-int8 runs them on the l0 walk (open-work 17).
+  // Not the mixer linears either: l0-int8 runs them on the l0 walk (open-work 16 / 17).
   for (const auto& [key, w] : model_.linears)
     if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
         w.kind == model::WeightKind::Int4 && !l0_int8_bf16_linear(*model_.desc, key.second))

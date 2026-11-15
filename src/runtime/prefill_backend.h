@@ -10,8 +10,8 @@ namespace runtime {
 
 enum class PrefillBackend {
   L0,        // spec 2.1: every GEMM on the Level Zero list, no host waits (the default)
-  L0Int8,    // spec 5: L0, with the int4 linears on the h8 int8 path (opt-in); on a dense model only the MLP's
-             // (open-work 17: its mixer linears stay bf16, runtime::l0_int8_bf16_linear)
+  L0Int8,    // spec 5: L0, with the MLP's int4 linears on the h8 int8 path (opt-in; open-work 17: the mixer
+             // linears stay bf16, runtime::l0_int8_bf16_linear); a MoE model: W4A8 routed experts only (open-work 16)
 };
 
 inline const char* prefill_backend_name(PrefillBackend b) {

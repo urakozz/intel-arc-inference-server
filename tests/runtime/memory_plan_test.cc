@@ -179,10 +179,9 @@ void check_sizes_ornith() {
   CHECK_EQ(runtime::prefill_int8_max_k(model::qwen38()), uint32_t(17408));
   CHECK_EQ(runtime::prefill_int8_max_k(model::tp_card_desc(model::qwen38(), model::TpCrossing::Folded)), uint32_t(9216));
   CHECK_EQ(runtime::prefill_int8_max_k(o), uint32_t(4096));
-  // h8's column scales: the four mixer linears (the shared expert's GateUp / Down rows are
-  // inside the expert blocks, not linears) + every layer's 257 x 1024-column gate||up array.
-  CHECK_EQ(runtime::int8_scale_bytes(o),
-           size_t{8} * (30 * (12288 + 2048) + 10 * (9216 + 2048)) + size_t{40} * 8 * 257 * 1024);
+  // h8's column scales: none for the four mixer linears (bf16 on l0-int8, open-work 16; the shared expert's
+  // GateUp / Down rows are inside the expert blocks, not linears) + every layer's 257 x 1024-column gate||up array.
+  CHECK_EQ(runtime::int8_scale_bytes(o), size_t{40} * 8 * 257 * 1024);
   for (PrefillBackend b : {PrefillBackend::L0Int8, PrefillBackend::L0}) {
     runtime::PrefillPath path;
     path.backend = b;

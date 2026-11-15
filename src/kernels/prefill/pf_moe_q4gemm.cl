@@ -109,6 +109,7 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
   const uint e = items[4 * it];
   if (e == NONE || (e == EXPERTS && W_sh == 0)) return;   // uniform; no barrier below (no W_sh: the shared block's
                                                           // bf16 form runs the batch path, Flash-Next's Intel form)
+  if (e != EXPERTS && W == 0) return;   // no W: the shared block's items only (l0-int8's bf16 shared expert, open-work 16)
   const uint row0 = items[4 * it + 1];
   const uint rows = items[4 * it + 2];
   const uint s = get_sub_group_id();

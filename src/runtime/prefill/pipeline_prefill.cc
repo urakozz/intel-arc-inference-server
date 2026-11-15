@@ -590,7 +590,7 @@ void PipelineEngine::prepare_prefill() {
   if (b != PrefillBackend::L0Int8) return;
   PipelinePrefill& p = as_pf(*pf_);
   // Engine::prepare_prefill's l0-int8 pass, per device over ITS linears: every h8
-  // linear's rotated column scales (not lm_head, not a||b, not a dense model's mixer linears), and a MoE layer's
+  // linear's rotated column scales (not lm_head, not a||b, not the mixer linears), and a MoE layer's
   // expert arrays.
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     PfDevice& D = *p.dev[i];
