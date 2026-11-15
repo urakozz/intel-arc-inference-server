@@ -52,7 +52,6 @@ struct CaptureOptions {
   LinearForce force_dflash_head = LinearForce::Auto;
   // DFlash H1/B4 measured geometry; tests/probes may force the original H4/B8 with zeros.
   uint32_t dflash_attn_heads = 1;
-  bool dflash_attn_parallel_exp = false;
   uint32_t dflash_attn_rows = 4;
   // Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl; the reduce stays the H1/B4 binary's) - production; tests
   // and probes clear it for the scalar part (the A/B, the grid forms above).

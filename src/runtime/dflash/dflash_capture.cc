@@ -98,7 +98,7 @@ class Walk {
         tp_ ? kd::tp_draft_variants(fmt, tp_->rank, w_.candidate_bits, w_.candidates, opt_.dflash_attn_ks)
             : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8, compact ? N : 0, lkind(),
                                  hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head),
-                                 opt_.dflash_attn_parallel_exp, opt_.dflash_attn_dpas, opt_.dflash_attn_ks,
+                                 opt_.dflash_attn_dpas, opt_.dflash_attn_ks,
                                  w_.candidate_bits, w_.candidates);
     std::vector<std::string> need = variants;
     if (ctrls_)
@@ -163,7 +163,7 @@ class Walk {
         l0::Kernel& k = opt_.dflash_attn_dpas
                             ? kernel(kd::attn_dpas_variant(sh_, opt_.dflash_attn_ks), "df_attn_part",
                                      16 * (d_.q_heads / d_.kv_heads) * opt_.dflash_attn_ks)
-                            : kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
+                            : kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows), "df_attn_part", kd::kAttnWg);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, s_.dctl->ptr());
         k.arg_ptr(2, b_.q.ptr());
@@ -188,7 +188,7 @@ class Walk {
         k.arg_ptr(6, b_.xa.ptr());
         launch(k, d_.q_heads, M);
       } else {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
-        l0::Kernel& k = kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_reduce", d_.head_dim);
+        l0::Kernel& k = kernel(kd::attn_variant(sh_, opt_.dflash_attn_heads, opt_.dflash_attn_rows), "df_attn_reduce", d_.head_dim);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, s_.dctl->ptr());
         k.arg_ptr(2, b_.part.ptr());

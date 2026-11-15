@@ -496,8 +496,8 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320 SOURCE ${DF_DIR}/df_prep.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
                            INTER=17408 NH=32 NKV=8 HD=128 RING=2048)
-  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8 SOURCE ${DF_DIR}/df_prep_split.cl
-                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8 SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
                            INTER=17408 NH=32 NKV=8 HD=128 RING=2048)
   # The prompt's staged rows projected at prefill width (DFlashDrafter::project_wide): slabs for pf_gemm, the norm
   # and the ring store at any row count.
@@ -506,11 +506,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128 SOURCE ${DF_DIR}/df_attn.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0)
-  foreach(HPW 1 2)
-    add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H${HPW} SOURCE ${DF_DIR}/df_attn_heads.cl
-                     DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
-                             CAUSAL=0 HPW=${HPW})
-  endforeach()
   foreach(RPW 1 2 4)
     add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B${RPW} SOURCE ${DF_DIR}/df_attn_rows.cl
                      DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
@@ -539,9 +534,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_SEQS SOURCE ${DF_DIR}/df_attn_rows.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0 HPW=1 RPW=4 SEQS=4)
-  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep SOURCE ${DF_DIR}/df_attn_exp.cl
-                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
-                           CAUSAL=0 HPW=1 RPW=4)
   add_ocloc_kernel(df_topk_R7_N248320_U248077 SOURCE ${DF_DIR}/df_topk.cl DEFINES R=7 N=248320 USED=248077 TOPK=16
                    CH=4096 COMPACT=0)
   foreach(NV 32768 65536 131072)
@@ -561,21 +553,21 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_rerank_R7_K5120_U248077_C80_Q4 SOURCE ${DF_DIR}/df_rerank.cl DEFINES K=5120 USED=248077 C=80)
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320 SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
-  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16 SOURCE ${DF_DIR}/df_select_split.cl
-                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16 SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
   # Plan 19v3b: the batched draft's row-table forms (SEQS) of the block-aware kernels - df_prep (embed, the
   # convolutions, qkv prep; both forms) and the DFlash 2 selector walk (both forms).
   add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_SEQS SOURCE ${DF_DIR}/df_prep.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
                            INTER=17408 NH=32 NKV=8 HD=128 RING=2048 SEQS=4)
   add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8_SEQS
-                   SOURCE ${DF_DIR}/df_prep_split.cl
-                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                   SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
                            INTER=17408 NH=32 NKV=8 HD=128 RING=2048 SEQS=4)
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_SEQS SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
-  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16_SEQS SOURCE ${DF_DIR}/df_select_split.cl
-                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16_SEQS SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
   add_ocloc_kernel(df_select_v1_M8_K16 SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=0)
   add_gemv_bf16_variant(7 5120 248320 64 1)           # the full bf16 head at 7 rows
@@ -1071,7 +1063,7 @@ if(B70_TP AND B70_MTP AND B70_VERIFY_M8)
 endif()
 # The drafter split over both cards (runtime::dflash::TpDFlashDrafter; kernels::dflash::kQwen38Tp): a card's draft and
 # projection lists at its half shapes - 16 q / 4 kv heads, the MLP's 8704, its vocabulary half of the candidate head:
-#   df_prep / df_prep_split   at I 8704, Q16KV4 (df_qkv_prep, df_silu_mul, df_ctx_store; the rest is the hidden's)
+#   df_prep (plain and FOLD)   at I 8704, Q16KV4 (df_qkv_prep, df_silu_mul, df_ctx_store; the rest is the hidden's)
 #   df_attn                   the DPAS part (KS 4) and its reduce (the H1 B4 binary) at 16 / 4 heads
 #   df_candidate              a half's top C of its candidate rows (N 124160; card 1's real rows end at 123917)
 #   df_rerank                 against the card's int8 head half, its ids offset by the half's first (ID_BASE)
@@ -1082,8 +1074,8 @@ if(B70_TP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   set(DF_TP_SHAPE M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2 INTER=8704 NH=16 NKV=4 HD=128 RING=2048)
   add_ocloc_kernel(df_prep_M8_H5120_I8704_Q16KV4_D128_G16T2_R2048_V248320 SOURCE ${DF_DIR}/df_prep.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} ${DF_TP_SHAPE})
-  add_ocloc_kernel(df_prep_M8_H5120_I8704_Q16KV4_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8 SOURCE ${DF_DIR}/df_prep_split.cl
-                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} ${DF_TP_SHAPE})
+  add_ocloc_kernel(df_prep_M8_H5120_I8704_Q16KV4_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8 SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 ${DF_TP_SHAPE})
   add_ocloc_kernel(df_attn_M8_Q16KV4_D128_R2048_W2048_P128_H1_B4 SOURCE ${DF_DIR}/df_attn_rows.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=16 NKV=4 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0 HPW=1 RPW=4)

@@ -39,10 +39,10 @@ inline std::string prep_variant(const Shape& s = kQwen38, bool split = false) {
          s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) +
          (split ? "_F8Q4R4U8C16H16K8" : "");
 }
-inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, unsigned rows = 0, bool parallel_exp = false) {
+inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, unsigned rows = 0) {
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
          s_(s.win) + "_P" + s_(s.pb) + (heads ? "_H" + s_(heads) : "") +
-         (rows ? "_B" + s_(rows) : "") + (parallel_exp ? "_Ep" : "");
+         (rows ? "_B" + s_(rows) : "");
 }
 // Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl), one sub-group a q head; its reduce is attn_variant(s, 1, 4)'s.
 // ks > 1: the occupancy form, a head's block keys split ks ways (df_attn_dpas.cl's KS).
@@ -111,11 +111,11 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
                                                LinearKind k, LinearKind head, unsigned attn_heads = 1, unsigned attn_rows = 4,
-                                               bool candidate_head = false, bool parallel_exp = false,
+                                               bool candidate_head = false,
                                                bool attn_dpas = false, unsigned attn_ks = 1,
                                                unsigned candidate_bits = 2, unsigned candidates = 80) {
   const Shape& s = kQwen38;
-  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads, attn_rows, parallel_exp), select_variant(v2, s, fmt == 2)};
+  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads, attn_rows), select_variant(v2, s, fmt == 2)};
   if (attn_dpas) v.push_back(attn_dpas_variant(s, attn_ks));   // its part; the reduce stays attn_variant's
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o

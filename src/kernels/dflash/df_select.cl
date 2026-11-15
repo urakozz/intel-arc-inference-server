@@ -94,6 +94,9 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
                         __global const float* restrict hid, __global const ushort* restrict pred,
                         __global const ushort* restrict succ, __global uint* restrict out) {
 #endif
+#ifdef FOLD   // spec 19v2: the int4 selector projection's 16 split-K slices, folded once a row for every candidate
+  __local float folded[RANK];
+#endif
   __local float part[TOPK * QS];
   __local float s[TOPK];
   __local uint prev_l;
@@ -133,10 +136,22 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
     __global const uint* cj = cand + (size_t)RJ(j) * TOPK;
     __global const float* uj = unary + (size_t)RJ(j) * TOPK;
 #if V2
+#ifdef FOLD
+    for (uint r = lid; r < RANK; r += WG) {
+      float a = 0.0f;
+      for (uint s = 0; s < 16; ++s) a = a + hid[((size_t)s * MAXR + RJ(j) + 1) * RANK + r];
+      folded[r] = a;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+#endif
     {
       const uint c = lid / QS, q = lid % QS, per = RANK / QS;
       const uint id = cj[c];
+#ifdef FOLD
+      __local const float* hr = folded;
+#else
       __global const float* hr = hid + (size_t)(RJ(j) + 1) * RANK;
+#endif
       float a = 0.0f;
       if (prev < VROWS)   // an engine bug (an id past the codebooks) scores 0, never reads past them
         for (uint r = q * per; r < (q + 1) * per; ++r) {
