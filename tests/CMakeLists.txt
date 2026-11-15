@@ -4568,6 +4568,12 @@ target_include_directories(dspark_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(dspark_loader_test PRIVATE b70_dflash_loader)
 add_test(NAME dspark_loader_test COMMAND dspark_loader_test)
 set_tests_properties(dspark_loader_test PROPERTIES LABELS "kolibri;dflash")
+# The drafter's buffers, launch counts, snapshot bytes and key (runtime/dflash/dflash_sizes.h). Host only.
+add_executable(dspark_plan_test runtime/dspark_plan_test.cc)
+target_include_directories(dspark_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dspark_plan_test PRIVATE b70_dflash_plan b70_dflash_loader)
+add_test(NAME dspark_plan_test COMMAND dspark_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark/config.json)
+set_tests_properties(dspark_plan_test PROPERTIES LABELS "kolibri;dflash")
 # Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark
 # block). Host only (reads the kernel directory).
 if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
