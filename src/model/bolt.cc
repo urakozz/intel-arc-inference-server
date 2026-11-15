@@ -3,6 +3,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "common/json_reflect.h"
+
 namespace model {
 namespace {
 
@@ -39,13 +41,7 @@ BoltDesc make_bolt() {
   throw std::invalid_argument("config.json: " + what + " - nemotron-3.5-bolt-74b-a9b (model/bolt.h) is not written for it");
 }
 
-std::string show(const common::json::Value& v) {
-  if (v.is_null()) return "null";
-  if (v.is_bool()) return v.boolean() ? "true" : "false";
-  if (v.is_string()) return "'" + v.str() + "'";
-  if (v.is_number()) return std::to_string(v.num());
-  return v.is_array() ? "[...]" : "{...}";
-}
+using common::json::show;
 
 const common::json::Value* get(const common::json::Value& c, const char* key) { return c.is_object() ? c.find(key) : nullptr; }
 
@@ -56,43 +52,28 @@ uint32_t need_u32(const common::json::Value& c, const char* key) {
   return uint32_t(v->num());
 }
 
-void want_u32(const common::json::Value& c, const char* key, uint32_t want) {
-  const uint32_t got = need_u32(c, key);
-  if (got != want)
-    bad(std::string("'") + key + "' is " + std::to_string(got) + ", the descriptor says " + std::to_string(want));
-}
-
-// An optional integer key: when present it must equal `want`.
-void opt_u32(const common::json::Value& c, const char* key, uint32_t want) {
-  if (get(c, key)) want_u32(c, key, want);
-}
-
-void want_bool(const common::json::Value& c, const char* key, bool want, bool absent_as) {
-  const common::json::Value* v = get(c, key);
-  if (v && !v->is_bool()) bad(std::string("'") + key + "' is " + show(*v) + ", not a boolean");
-  const bool got = v ? v->boolean() : absent_as;
-  if (got != want)
-    bad(std::string("'") + key + "' is " + (got ? "true" : "false") + ", the descriptor needs " + (want ? "true" : "false"));
-}
-
-void want_str(const common::json::Value& c, const char* key, const char* want) {
-  const common::json::Value* v = get(c, key);
-  if (!v || !v->is_string() || v->str() != want)
-    bad(std::string("'") + key + "' is " + (v ? show(*v) : std::string("absent")) + ", the descriptor needs '" + want + "'");
-}
-
-void want_num(const common::json::Value& c, const char* key, double want, bool required) {
-  const common::json::Value* v = get(c, key);
-  if (!v && !required) return;
-  if (!v || !v->is_number() || v->num() != want)
-    bad(std::string("'") + key + "' is " + (v ? show(*v) : std::string("absent")) + ", the descriptor says " +
-        std::to_string(want));
-}
-
-void want_null(const common::json::Value& c, const char* key) {
-  const common::json::Value* v = get(c, key);
-  if (v && !v->is_null()) bad(std::string("'") + key + "' is " + show(*v) + ", the descriptor needs null (no sliding window)");
-}
+// config.json's keys held to the descriptor by common::json::expect, in the order the checks run: a member without an
+// initializer is required, the rest may be absent (their initializer is the class default the engine is written for).
+struct BoltLlmKeys {
+  std::string model_type;
+  bool tie_word_embeddings = false;
+  uint32_t hidden_size, vocab_size, num_attention_heads, num_key_value_heads, head_dim, mamba_num_heads, mamba_head_dim,
+      n_groups, ssm_state_size, conv_kernel, moe_latent_size, moe_shared_expert_intermediate_size, n_shared_experts = 1,
+      chunk_size = 128, expand = 2;
+  uint32_t num_nextn_predict_layers = 0;   // MTP: Bolt has none (the drafter is spec 26's, separate)
+  bool residual_in_fp32 = false, use_qk_norm = false;
+  uint32_t n_group = 1, topk_group = 1;
+  std::string scoring_func = "sigmoid";
+  bool norm_topk_prob = true;
+  double routed_scaling_factor;
+  bool mamba_proj_bias = false, attention_bias = false, mlp_bias = false, use_bias = false, use_conv_bias = true;
+  std::string hidden_act = "relu2", mlp_hidden_act = "relu2", mamba_hidden_act = "silu";
+};
+struct BoltKeys {
+  std::string model_type;
+  bool tie_word_embeddings = false;
+  BoltLlmKeys llm_config;
+};
 
 // transformers' special-float encoding: {"__float__": "Infinity"}.
 bool is_inf(const common::json::Value& v) {
@@ -206,54 +187,24 @@ bool is_bolt(const common::json::Value& config) {
 void check_bolt_config(const common::json::Value& c) {
   const BoltDesc& d = bolt();
   if (!c.is_object()) bad("not a JSON object");
-  want_str(c, "model_type", d.model_type.c_str());
-  want_bool(c, "tie_word_embeddings", false, false);
-  const common::json::Value* llm = c.find("llm_config");
-  if (!llm || !llm->is_object()) bad("'llm_config' is missing or not an object");
-  const common::json::Value& m = *llm;
-  want_str(m, "model_type", d.llm_model_type.c_str());
-  want_bool(m, "tie_word_embeddings", false, false);
-
-  want_u32(m, "hidden_size", d.hidden);
-  want_u32(m, "vocab_size", d.vocab);
-  want_u32(m, "num_attention_heads", d.q_heads);
-  want_u32(m, "num_key_value_heads", d.kv_heads);
-  want_u32(m, "head_dim", d.head_dim);
-  want_u32(m, "mamba_num_heads", d.m_heads);
-  want_u32(m, "mamba_head_dim", d.m_head_dim);
-  want_u32(m, "n_groups", d.m_groups);
-  want_u32(m, "ssm_state_size", d.m_state);
-  want_u32(m, "conv_kernel", d.m_conv);
-  want_u32(m, "moe_latent_size", d.latent);
-  want_u32(m, "moe_shared_expert_intermediate_size", d.shared_inter);
-  opt_u32(m, "n_shared_experts", 1);
-  opt_u32(m, "chunk_size", 128);
-  opt_u32(m, "expand", 2);
+  common::json::expect<true>(
+      c,
+      BoltKeys{.model_type = d.model_type,
+               .llm_config = {.model_type = d.llm_model_type, .hidden_size = d.hidden, .vocab_size = d.vocab,
+                              .num_attention_heads = d.q_heads, .num_key_value_heads = d.kv_heads,
+                              .head_dim = d.head_dim, .mamba_num_heads = d.m_heads, .mamba_head_dim = d.m_head_dim,
+                              .n_groups = d.m_groups, .ssm_state_size = d.m_state, .conv_kernel = d.m_conv,
+                              .moe_latent_size = d.latent, .moe_shared_expert_intermediate_size = d.shared_inter,
+                              .routed_scaling_factor = d.routed_scale}},
+      bad);
+  const common::json::Value& m = c.at("llm_config");
   need_u32(m, "max_position_embeddings");
-
-  // MTP: Bolt has none (the drafter is spec 26's, separate).
-  opt_u32(m, "num_nextn_predict_layers", 0);
   if (const common::json::Value* v = get(m, "mtp_block_configs"); v && !(v->is_array() && v->arr().empty()))
     bad("'mtp_block_configs' is " + show(*v) + ", the descriptor needs []");
   if (const common::json::Value* v = get(m, "mtp_layers_block_type"); v && !(v->is_array() && v->arr().empty()))
     bad("'mtp_layers_block_type' is " + show(*v) + ", the descriptor needs []");
-
-  want_bool(m, "residual_in_fp32", false, false);
-  want_bool(m, "use_qk_norm", false, false);
-  opt_u32(m, "n_group", 1);
-  opt_u32(m, "topk_group", 1);
-  if (get(m, "scoring_func")) want_str(m, "scoring_func", "sigmoid");
-  want_bool(m, "norm_topk_prob", true, true);
-  want_num(m, "routed_scaling_factor", d.routed_scale, true);
-  want_null(m, "sliding_window");
-  want_bool(m, "mamba_proj_bias", false, false);
-  want_bool(m, "attention_bias", false, false);
-  want_bool(m, "mlp_bias", false, false);
-  want_bool(m, "use_bias", false, false);
-  want_bool(m, "use_conv_bias", true, true);
-  if (get(m, "hidden_act")) want_str(m, "hidden_act", "relu2");
-  if (get(m, "mlp_hidden_act")) want_str(m, "mlp_hidden_act", "relu2");
-  if (get(m, "mamba_hidden_act")) want_str(m, "mamba_hidden_act", "silu");
+  if (const common::json::Value* v = get(m, "sliding_window"); v && !v->is_null())
+    bad("'sliding_window' is " + show(*v) + ", the descriptor needs null (no sliding window)");
 
   // The RMSNorm eps (R's `layer_norm_epsilon`); the two other spellings, when present, agree.
   const common::json::Value* eps = get(m, "layer_norm_epsilon");

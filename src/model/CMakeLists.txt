@@ -32,3 +32,8 @@ target_link_libraries(b70_dflash_model PUBLIC b70_model)
 add_library(b70_bolt_model STATIC bolt.cc)
 target_include_directories(b70_bolt_model PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_bolt_model PUBLIC b70_model)
+
+# Static reflection (P2996, common/json_reflect.h): Kolibri, Flash-Next and Bolt hold config.json to their descriptors.
+foreach(_t b70_kolibri_model b70_qwen4exp_model b70_bolt_model)
+  target_compile_options(${_t} PRIVATE -freflection)
+endforeach()

@@ -3,6 +3,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "common/json_reflect.h"
+
 namespace model {
 namespace {
 
@@ -46,31 +48,16 @@ uint32_t need_u32(const Kolibri1Desc& d, const common::json::Value& c, const cha
   return uint32_t(v->num());
 }
 
-void want_u32(const Kolibri1Desc& d, const common::json::Value& c, const char* key, uint32_t want) {
-  const uint32_t got = need_u32(d, c, key);
-  if (got != want)
-    bad(d, std::string("'") + key + "' is " + std::to_string(got) + ", the descriptor says " +
-               std::to_string(want));
-}
-
-void want_bool(const Kolibri1Desc& d, const common::json::Value& c, const char* key, bool want,
-               bool absent_as) {
-  const common::json::Value* v = c.find(key);
-  if (v && !v->is_bool()) bad(d, std::string("'") + key + "' is not a boolean");
-  const bool got = v ? v->boolean() : absent_as;
-  if (got != want)
-    bad(d, std::string("'") + key + "' is " + (got ? "true" : "false") + ", the descriptor needs " +
-               (want ? "true" : "false"));
-}
-
-void want_str(const Kolibri1Desc& d, const common::json::Value& c, const char* key, const char* want,
-              bool absent_ok) {
-  const common::json::Value* v = c.find(key);
-  if (!v && absent_ok) return;
-  if (!v || !v->is_string() || v->str() != want)
-    bad(d, std::string("'") + key + "' is " + (v && v->is_string() ? "'" + v->str() + "'" : "absent") +
-               ", the descriptor needs '" + want + "'");
-}
+// config.json's keys held to the descriptor by common::json::expect: a member without an initializer is required, the
+// rest may be absent (their initializer is the class default the engine is written for).
+struct KolibriKeys {
+  std::string model_type;
+  uint32_t num_hidden_layers, hidden_size, num_attention_heads, num_key_value_heads, head_dim, num_experts,
+      num_experts_per_tok, moe_intermediate_size, shared_expert_intermediate_size, vocab_size, sliding_window,
+      max_position_embeddings;
+  bool use_sliding_window = true, norm_topk_prob = false, tie_word_embeddings = false, attention_bias = false;
+  std::string hidden_act = "silu";
+};
 
 // layer_types: `layers` entries, the real pattern's prefix (full exactly at l % 5 == 4).
 void check_layer_types(const Kolibri1Desc& d, const common::json::Value& c, uint32_t layers) {
@@ -151,29 +138,19 @@ bool is_kolibri1_model_type(const std::string& t) { return t == "kolibri1"; }
 
 void check_kolibri1_config(const Kolibri1Desc& d, const common::json::Value& c) {
   if (!c.is_object()) bad(d, "not a JSON object");
-  want_str(d, c, "model_type", d.model_type.c_str(), false);
+  common::json::expect(c,
+                       KolibriKeys{.model_type = d.model_type, .num_hidden_layers = d.layers, .hidden_size = d.hidden,
+                                   .num_attention_heads = d.q_heads, .num_key_value_heads = d.kv_heads,
+                                   .head_dim = d.head_dim, .num_experts = d.experts, .num_experts_per_tok = d.top_k,
+                                   .moe_intermediate_size = d.moe_inter,
+                                   .shared_expert_intermediate_size = d.shared_inter, .vocab_size = d.vocab,
+                                   .sliding_window = d.window, .max_position_embeddings = d.trained_max_len},
+                       [&](const std::string& what) { bad(d, what); });
   const common::json::Value* archs = c.find("architectures");
   if (!archs || !archs->is_array() || archs->arr().empty() || !archs->arr()[0].is_string() ||
       archs->arr()[0].str() != d.architecture)
     bad(d, "architectures[0] is not '" + d.architecture + "'");
-  want_u32(d, c, "num_hidden_layers", d.layers);
   check_layer_types(d, c, d.layers);
-  want_u32(d, c, "hidden_size", d.hidden);
-  want_u32(d, c, "num_attention_heads", d.q_heads);
-  want_u32(d, c, "num_key_value_heads", d.kv_heads);
-  want_u32(d, c, "head_dim", d.head_dim);
-  want_u32(d, c, "num_experts", d.experts);
-  want_u32(d, c, "num_experts_per_tok", d.top_k);
-  want_u32(d, c, "moe_intermediate_size", d.moe_inter);
-  want_u32(d, c, "shared_expert_intermediate_size", d.shared_inter);
-  want_u32(d, c, "vocab_size", d.vocab);
-  want_u32(d, c, "sliding_window", d.window);
-  want_u32(d, c, "max_position_embeddings", d.trained_max_len);
-  want_bool(d, c, "use_sliding_window", true, true);
-  want_bool(d, c, "norm_topk_prob", false, false);
-  want_bool(d, c, "tie_word_embeddings", false, false);
-  want_bool(d, c, "attention_bias", false, false);
-  want_str(d, c, "hidden_act", "silu", true);
   const common::json::Value* eps = c.find("rms_norm_eps");
   if (!eps || !eps->is_number() || float(eps->num()) != d.rms_eps) bad(d, "'rms_norm_eps' is not 1e-6");
   // rope_parameters (transformers 5) or the top-level rope_theta (the checkpoint's).
