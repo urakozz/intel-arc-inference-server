@@ -47,8 +47,12 @@ struct DrafterPlan {
   // the ENGINE's side of it (runtime/tap_drafter.h): TapVerifyDims' 7 more GDN state slots for the verify lists at
   // M <= 8 (in decode_state) and, when the engine prefills, the tap staging (in prefill_scratch, lazy).
   uint32_t n_taps = 0;
+  // Plan 19v3b: one sequence's session inside `fixed` / `per_position` - its context ring, tap buffer, control block
+  // and readback (runtime/dflash/dflash_buffers.h); every further sequence slot holds its own.
+  size_t session_fixed = 0, session_per_position = 0;
   bool on() const { return weights != 0; }
   size_t bytes(uint32_t max_len) const { return weights + fixed + per_position * size_t(max_len); }
+  size_t session(uint32_t len) const { return session_fixed + session_per_position * size_t(len); }
 };
 
 // "<label>: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch
@@ -186,8 +190,12 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
 // Int8 prefill's widening scratch is at the LONGEST slot (3j: one sequence prefills at a time; PrefillScratch::kv8_len).
 // One length is plan(desc, lens[0], ...) exactly. Throws std::invalid_argument for no slot, more than
 // SlotDims::kMaxSeqs, or a draft vocabulary beside slots (not built).
+// Plan 19v3b: with a drafter (MTP off), plan() counts slot 0's drafter, its 7 more GDN states and the tap staging;
+// every further slot adds its drafter session (DrafterPlan::session at its length) and its GDN states, 1 + 3
+// speculative (SlotDims with a drafter).
 MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>& lens, bool mtp, size_t model_bytes,
-                      const PrefillPath& path = {}, const DraftVocabPlan& dv = {}, KvCache kv = default_kv_cache());
+                      const PrefillPath& path = {}, const DraftVocabPlan& dv = {}, KvCache kv = default_kv_cache(),
+                      const DrafterPlan& drafter = {});
 
 // --max-num-seqs N's layout on a card (operator 2026-11-11; spec 13 §11.2's shape): slot 0 at `slot0`, then
 // seqs - 1 slots of SlotDims::kShortLen positions.
@@ -199,7 +207,7 @@ std::vector<uint32_t> slot_layout(uint32_t slot0, uint32_t seqs);
 // [1, SlotDims::kMaxSeqs].
 uint32_t slot0_len_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, size_t model_bytes,
                              size_t device_bytes, size_t reserve_bytes, uint32_t cap, const PrefillPath& path = {},
-                             KvCache kv = default_kv_cache());
+                             KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 // "131072 + 3 x 32768" - the startup line's form of a layout.
 std::string slot_layout_name(const std::vector<uint32_t>& lens);
 

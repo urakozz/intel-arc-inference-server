@@ -45,6 +45,28 @@ DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint3
   imm.copy(rope.ptr(), t.data(), t.size() * 4);
 }
 
+DFlashSession::DFlashSession(l0::Context& ctx, const DFlashSizes& sz)
+    : dctl(ctx, l0::MemKind::Shared, sz.dctl),
+      out(ctx, l0::MemKind::Shared, sz.out),
+      ring_k(dev(ctx, sz.ring_k)),
+      ring_v(dev(ctx, sz.ring_v)),
+      taps(dev(ctx, sz.taps)) {
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  zero(imm);
+}
+
+size_t DFlashSession::bytes() const { return dctl.size() + out.size() + ring_k.size() + ring_v.size() + taps.size(); }
+
+void DFlashSession::zero(l0::CmdList& imm) {
+  for (l0::Mem* m : {&ring_k, &ring_v, &taps}) imm.fill(m->ptr(), 0u, m->size());
+  std::memset(dctl.ptr(), 0, dctl.size());
+  std::memset(out.ptr(), 0, out.size());
+}
+
+void DFlashBuffers::add_sessions(l0::Context& ctx, uint32_t n) {
+  while (sessions.size() + 1 < n) sessions.push_back(std::make_unique<DFlashSession>(ctx, sz));
+}
+
 size_t DFlashBuffers::bytes() const {
   size_t b = 0;
   for (const l0::Mem* m : {&dctl, &out, &rope, &ring_k, &ring_v, &taps, &resid, &h, &x, &xa, &gout, &q, &kb, &vb,
@@ -53,6 +75,7 @@ size_t DFlashBuffers::bytes() const {
   if (co) b += co->size();
   if (hid) b += hid->size();
   if (candidate) b += candidate->size();
+  for (const auto& s : sessions) b += s->bytes();
   return b;
 }
 
