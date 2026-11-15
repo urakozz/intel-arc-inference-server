@@ -57,6 +57,35 @@ int main(int argc, char** argv) {
   }
   e.prefill(ids);
   const uint32_t pos = e.pos();
+  // `flip <t>` (7th, 8th arguments): which 16-row verifies emit output t differently from one-row decode - the plain
+  // ids first, then for every start s = t - 15 .. t the wide verify from one-row decode's state at s, its row t - s.
+  if (argc > 8 && std::string(argv[7]) == "flip") {
+    const uint32_t t = std::stoul(argv[8]);
+    l0::Mem st(ctx, l0::MemKind::Host, e.state_bytes());
+    e.save_state(st.ptr());
+    const uint32_t first = e.control()->cur_token[0];
+    std::vector<uint32_t> out{first};
+    for (uint32_t i = 0; i < t + 16; ++i) {
+      e.verify(0);
+      const uint32_t id = e.verify_ids()[0];
+      e.commit(0, id);
+      out.push_back(id);
+    }
+    for (uint32_t s0 = t >= 15 ? t - 15 : 0; s0 <= t; ++s0) {
+      e.load_state(st.ptr(), pos);
+      e.control()->cur_token[0] = first;
+      for (uint32_t i = 0; i < s0; ++i) {
+        e.verify(0);
+        e.commit(0, out[i + 1]);
+      }
+      for (uint32_t i = 0; i < 15; ++i) e.control()->wide_cur[1 + i] = out[s0 + 1 + i];
+      e.verify(runtime::Engine::kWideK);
+      const uint32_t r = t - s0;
+      std::printf("FLIP start %u row %u: wide %u, one-row %u%s\n", s0, r, e.verify_ids()[r], out[t + 1],
+                  e.verify_ids()[r] == out[t + 1] ? "" : "  <<< differs");
+    }
+    return 0;
+  }
   const uint32_t pending = e.control()->cur_token[0];
   l0::Mem saved(ctx, l0::MemKind::Host, e.state_bytes());
   e.save_state(saved.ptr());
