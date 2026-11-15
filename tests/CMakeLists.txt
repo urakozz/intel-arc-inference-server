@@ -219,6 +219,12 @@ target_include_directories(replica_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src $
 target_link_libraries(replica_server_test PRIVATE b70_server)
 add_test(NAME replica_server_test COMMAND replica_server_test)
 
+# Open-work 27 under --parallel replica: lookup inside MTP per request on each card, against the serial server.
+add_executable(replica_lookup_server_test server/replica_lookup_server_test.cc)
+target_include_directories(replica_lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(replica_lookup_server_test PRIVATE b70_server)
+add_test(NAME replica_lookup_server_test COMMAND replica_lookup_server_test)
+
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(protocol_test PRIVATE b70_server)

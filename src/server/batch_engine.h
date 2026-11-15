@@ -15,8 +15,8 @@
 // (cli::ReplicaEngine: one runtime::Engine per card) also says how a prompt is cut between
 // ticks (prefill_cut), runs a prefill call beside a step (overlaps_prefill), fails one slot
 // without the others (SlotsFailed), verifies drafts proposed outside it per row
-// (SpecRow::propose, prompt lookup) and feeds --prefix-split-last's last prompt id through
-// the decode replay (Chunk::replay).
+// (SpecRow::propose, prompt lookup; open-work 27: lookup inside MTP, SpecRow::mtp_lookup) and
+// feeds --prefix-split-last's last prompt id through the decode replay (Chunk::replay).
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -125,6 +125,10 @@ struct BatchEngineIface {
   // propose(x) exactly once with the slot's pending id x, verifies what it answers (at most
   // verify_k() ids; the proposer has already cut them to the row's k) and returns x and the
   // kept drafts. verify_k() == 0 (the default): no row ever carries a proposer.
+  //
+  // Open-work 27 under replica (one request a card): a row with `mtp_lookup` set is the serial server's lookup inside
+  // MTP iteration on its card - EngineIface::step_drafts_or_confirmed(*sampling, k, *propose, choose, confirm), with
+  // `choose` / `confirm` the request's own (unset: none). mtp_lookup() == false (the default): no row ever sets it.
   using Proposer = std::function<std::vector<uint32_t>(uint32_t pending)>;
   struct SpecRow {
     uint32_t slot;
@@ -132,9 +136,17 @@ struct BatchEngineIface {
     std::mt19937_64* rng;
     uint32_t k;      // drafts asked for this iteration (the request's own policy, server::AdaptiveK)
     const Proposer* propose = nullptr;   // plan 13b: the request's own drafts (prompt lookup)
+    bool mtp_lookup = false;                                // open-work 27: lookup inside MTP (propose set)
+    const EngineIface::DraftChoice* choose = nullptr;       // ... the request's per-step choice (server::StepK)
+    const EngineIface::LookupConfirm* confirm = nullptr;    // ... open-work 28's confirmed entry
   };
   virtual uint32_t spec_k() { return 0; }
   virtual uint32_t verify_k() { return 0; }
+  // Open-work 27 / 28 / 13 under replica: every slot's engine runs lookup inside MTP, slot `slot`'s deepest lookup
+  // verify (EngineIface::lookup_wide_k), and every slot's engine chooses its drafts (EngineIface::chooses_drafts).
+  virtual bool mtp_lookup() { return false; }
+  virtual uint32_t lookup_wide_k(uint32_t /*slot*/) { return 0; }
+  virtual bool chooses_drafts() { return false; }
   // Spec 13c (the 8-row budget, spec 13 §9): the most rows one step_spec may carry when `active` rows decode (each
   // row's pending id counts one, each draft one more); 0 = no limit, every engine before 13c. The scheduler clips the
   // rows' K to it - every row keeps its pending id, the drafts go to the longest-running requests first - and feeds

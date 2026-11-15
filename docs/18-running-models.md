@@ -184,7 +184,8 @@ several rows), so every correct guess is a token almost for free. `--spec` picks
 only when asked: its weights (1.21 GB) come out of the context's memory. The engine never downloads, so a
 missing drafter is an error.
 
-**Prompt lookup** runs inside both proposers on one card with one request at a time. Where the answer repeats 8
+**Prompt lookup** runs inside both proposers on one card with one request at a time, and inside MTP on each card
+of `--parallel replica` with one request a card. Where the answer repeats 8
 or more tokens of earlier text, the tokens that followed that text last time are checked instead of the
 proposer's guesses: up to 3 tokens inside MTP, up to 7 inside DFlash (there the repeat must lie outside the
 drafter's own 2,048-token window). Elsewhere the proposer drafts as usual. It is on by default;
