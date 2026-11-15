@@ -103,8 +103,12 @@
 //   QSPLIT  0 | 1
 //   PSPLIT  0 | 1              P in bf16 (0) or as hi + lo (1, the production line)
 //   KV8     0 | 1
-//   PAIR    0 | 1              (default 0) the 3l split above: needs KT 32, DSPLIT 128, KS > 1
+//   PAIR    0 | 1              (default 0) the 3l split above: needs KT 32, DSPLIT 128; at KS 1 (spec 33, the
+//                              16-row line, bf16) there is no slice merge and the exchange is the pair sub-groups'
 //   PVX     0 | 2 | ...        (default 0, PAIR) P V-only sub-groups a slice, keeping it even
+//   PVR     1 | 2 | ...        (default 1, PAIR at KS 1) the sub-groups split into PVR groups, each owning RB / PVR
+//                              row blocks' P V (its dim atoms over SPS / PVR sub-groups): V read PVR times, fewer
+//                              accumulators and P V DPAS a sub-group
 //   EAGER   1: the eager build - plain loads, no sub-group
 //           function at all: one work-item per (q head, row) runs the same walk (blocks, tiles,
 //           slices, masks, the P rounding, the slice merge order, the partial layout) with a scalar
@@ -112,7 +116,7 @@
 //   GRF     the ocloc option -cl-intel-256-GRF-per-thread on the command line (not a define).
 // Work-group = 16 (RB DS + PVX) KS lanes: at most 512 (a 256-GRF work-group's 32 sub-groups); the probe
 // builds the 1024-lane shapes at 128 GRF only. SLM: q (RB x 4 KB, x 2 at QSPLIT) + the slice merge
-// (RB x 8 KB at KS > 1) + PAIR's exchange (2 KB a sub-group, 3 KB a slice and row block) <= 128 KB.
+// (RB x 8 KB at KS > 1) + PAIR's exchange (512 B a sub-group, 1.5 KB a slice and row block) <= 128 KB.
 //
 // Heads: Qwen3.8's 24 q / 4 kv (Agnes shares them), or (spec 17d) a tensor-parallel card's half, 12 q / 2 kv - the
 // same groups of 6, so a work-group's walk, operands and order are the 24 / 4 build's for those heads (property R:
@@ -189,11 +193,20 @@
 #define RB ((GQA * M + 7) / 8)
 #endif
 #define SPS (RB * DS + PVX)           /* sub-groups a slice */
-#if PAIR && (KT != 32 || DSPLIT != 128 || KS == 1)
-#error "attn_verify_dpas: PAIR needs KT 32, DSPLIT 128 and KS > 1"
+#ifndef PVR
+#define PVR 1
+#endif
+#if PAIR && (KT != 32 || DSPLIT != 128)
+#error "attn_verify_dpas: PAIR needs KT 32 and DSPLIT 128"
 #endif
 #if PVX && (!PAIR || SPS % 2)
 #error "attn_verify_dpas: PVX needs PAIR and keeps a slice's sub-group count even"
+#endif
+#if PVR != 1 && (!PAIR || KS != 1 || RB % PVR || SPS % PVR)
+#error "attn_verify_dpas: PVR needs PAIR at KS 1 and divides the row blocks and the sub-groups"
+#endif
+#if PAIR && KS == 1 && KV8
+#error "attn_verify_dpas: PAIR at KS 1 (the 16-row line) is built for bf16 KV only"
 #endif
 #define NSG (SPS * KS)
 #define WG (SG * NSG)
@@ -201,8 +214,10 @@
 #error "attn_verify_dpas: more than 1024 lanes a work-group (RB x DS x KS sub-groups of 16)"
 #endif
 #define QS_BYTES (RB * NDA * 128 * 2 * (1 + QSPLIT))
-#define MERGE_BYTES (KS > 1 ? RB * 8 * HD * 4 + RB * DS * 8 * 2 * 4 : 0)
-#define PAIR_BYTES (PAIR ? NSG * 1024 + KS * RB * (4 * 256 + 512) + (KS + 1) * RB * 32 : 0)
+#define MERGE_BYTES (KS > 1 ? RB * 8 * HD * 4 + (PAIR ? 0 : RB * DS * 8 * 2 * 4) : 0)
+// PAIR's arrays at their sizes: the S exchange (at KS 1 for the pair sub-groups only), P and corr a slice and row
+// block, and at KS > 1 the slices' row maxima and the merged sums.
+#define PAIR_BYTES (PAIR ? (KS == 1 ? RB * DS : NSG) * 512 + KS * RB * (4 * 256 + 512) + (KS > 1 ? (KS + 1) * RB * 32 : 0) : 0)
 #if QS_BYTES + MERGE_BYTES + PAIR_BYTES > 131072
 #error "attn_verify_dpas: SLM over 128 KB (q staging + slice merge)"
 #endif
@@ -561,7 +576,23 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   FOR8(ROWS)
 #undef ROWS
 
-#if PAIR
+#if PAIR && KS == 1
+  // KS 1 (the 16-row line): the slice's sub-groups form PVR groups of PG; group h owns row blocks [h NRO, + NRO) and
+  // its sub-groups split the dim atoms over them as below. Each V atom is read PVR times a work-group.
+#define PG (SPS / PVR)
+#define NRO (RB / PVR)
+#define NAM ((NDA + PG - 1) / PG)               /* the most dim atoms a sub-group owns */
+  const uint rb0 = (qi / PG) * NRO, qo = qi % PG;
+  const uint a0 = (NDA * qo) / PG, na = (NDA * (qo + 1u)) / PG - a0;   // its dim atoms [a0, a0 + na)
+  float8 o[NRO][NAM];                           // [row block - rb0][owned atom]
+#pragma unroll
+  for (uint r3 = 0; r3 < NRO; ++r3)
+#pragma unroll
+    for (uint a = 0; a < NAM; ++a) o[r3][a] = (float8)(0.0f);
+  __local float sx[RB * DS * 128];              // [pair sub-group][r * 16 + lane]: its key atom of S
+  __local ushort spp[RB * 4 * 128];             // [row block][pa 0, pa 1, pl 0, pl 1][r * 16 + lane]
+  __local float spc[RB * 128];                  // [row block][r * 16 + lane]: the step's corr
+#elif PAIR
 #define NAM ((NDA + SPS - 1) / SPS)             /* the most dim atoms a sub-group owns */
   const uint a0 = (NDA * qi) / SPS, na = (NDA * (qi + 1u)) / SPS - a0;   // its dim atoms [a0, a0 + na)
   float8 o[RB][NAM];                            // [row block][owned atom]
@@ -759,6 +790,35 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
         }
       }
       barrier(CLK_LOCAL_MEM_FENCE);
+#if KS == 1
+      if (act) {
+        // ---- O += P V: this sub-group's dim atoms, its group's row blocks; P and corr read a row block at a time ----
+#pragma unroll
+        for (uint a = 0; a < NAM; ++a) {
+          if (a >= na) break;                   // uniform
+          const uint dim0 = 16u * (a0 + a);
+          uint vb[16];                          // 32 keys x 16 dims as key pairs (VNNI; rows past `end`: 0)
+          intel_sub_group_2d_block_read_transform_16b_32r16x1c(
+              (__global void*)KV_V, KV_HEADS * HD * 2, (int)KV_H, KV_HEADS * HD * 2, (int2)((int)(j * HD + dim0), (int)KV_Y(t0)),
+              vb);
+#pragma unroll
+          for (uint r3 = 0; r3 < NRO; ++r3) {
+            const uint r2 = rb0 + r3;
+            const float8 cr = as_float8(intel_sub_group_block_read8((__local const uint*)&spc[r2 * 128u]));
+            short8 pr[4];
+#pragma unroll
+            for (uint i = 0; i < 4u; ++i) pr[i] = as_short8(intel_sub_group_block_read_us8(&spp[(r2 * 4u + i) * 128u]));
+            o[r3][a] *= cr;
+            o[r3][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[0], as_int8(vload8(0, vb)), o[r3][a]);
+            o[r3][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[1], as_int8(vload8(0, vb + 8u)), o[r3][a]);
+#if PSPLIT
+            o[r3][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[2], as_int8(vload8(0, vb)), o[r3][a]);
+            o[r3][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[3], as_int8(vload8(0, vb + 8u)), o[r3][a]);
+#endif
+          }
+        }
+      }
+#else
       if (act) {
         // ---- O += P V: this sub-group's dim atoms, every row block ----
         short8 pr[RB][4];
@@ -802,6 +862,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
           }
         }
       }
+#endif  // KS == 1
 #else
 #pragma unroll
         for (uint dd = 0; dd < NDD; ++dd) o[dd] *= corr;
@@ -854,7 +915,36 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   }
 
   // ---- the slice merge (slice order) and the partial write ----
-#if PAIR
+#if PAIR && KS == 1
+  // No slice merge: the dim owners write O for their row blocks, the pair's ds 0 its row maxima and sums.
+#pragma unroll
+  for (uint r3 = 0; r3 < NRO; ++r3) {
+#define OUT(r)                                                                          \
+  {                                                                                     \
+    uint qq, mm;                                                                        \
+    bool oo;                                                                            \
+    row_of(rb0 + r3, r, &qq, &mm, &oo);                                                 \
+    if (oo && mm < n_act && (mm < msplit ? live0 : live1)) {                            \
+      __global float* restrict out = attn_part + (((size_t)(j * GQA + qq) * TGT + blk) * M + mm) * PART; \
+      _Pragma("unroll") for (uint a = 0; a < NAM; ++a)                                  \
+        if (a < na) out[2 + 16u * (a0 + a) + l] = o[r3][a].s##r;                        \
+    }                                                                                   \
+  }
+    FOR8(OUT)
+#undef OUT
+  }
+  if (ds == 0u && l == 0u && !helper) {
+#define OUTS(r)                                                                         \
+  if (okv.s##r && ((mv.s##r < msplit) ? live0 : live1)) {                               \
+    __global float* restrict out =                                                      \
+        attn_part + (((size_t)(j * GQA + qhv.s##r) * TGT + blk) * M + mv.s##r) * PART;  \
+    out[0] = mrow.s##r;                                                                 \
+    out[1] = lsum.s##r;                                                                 \
+  }
+    FOR8(OUTS)
+#undef OUTS
+  }
+#elif PAIR
   // Split as P V was (header): the dim owners merge O for every row block, the pair's ds 0 its sums and maxima.
   __local float macc[RB * 8 * HD];              // [rb][r][dim]
   __local float mown[KS * RB * 8];              // [slice][rb][r]: the slice's own row maximum

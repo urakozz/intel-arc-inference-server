@@ -477,6 +477,12 @@ if(B70_VERIFY_DPAS AND B70_MTP AND B70_KV8)
                              kernel_attn_v2_M${MM}_T32${_sfx})
     endforeach()
   endforeach()
+  if(B70_VERIFY_M8)   # spec 33: the 16-row line (open-work 28's levers, KS 1 DSPLIT 128) against the same frozen copy
+    add_ocloc_kernel(attn_verify_control_M16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/attn_verify_control.cl
+      DEFINES CTRL_POS=0 CTRL_NACT=1 M=16 TGT=32 KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 KV8=0
+      OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND _vctl_deps kernel_attn_verify_control_M16 kernel_attn_verify_dpas_M16_T32 kernel_attn_v2_M16_T32)
+  endif()
   add_executable(attn_verify_bitwise_test kernels/attn_verify_bitwise_test.cc)
   target_include_directories(attn_verify_bitwise_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(attn_verify_bitwise_test PRIVATE b70_l0)
