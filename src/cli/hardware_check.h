@@ -16,6 +16,7 @@
 //                 other card's memory)
 #include <cstdint>
 #include <cstdio>
+#include <format>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -43,8 +44,8 @@ struct Hardware {
 };
 
 inline std::string hex4(uint32_t v) {
-  char b[16];
-  std::snprintf(b, sizeof b, "0x%04X", v);
+  std::string b;
+  b = std::format("0x{:04X}", v);
   return b;
 }
 

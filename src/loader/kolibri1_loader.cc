@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <print>
 #include <sstream>
 #include <stdexcept>
 
@@ -193,21 +194,21 @@ KolLoadedModel load_kolibri1(const std::vector<l0::Context*>& devices, const std
   m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   const double gb = 1e9;
-  std::printf("load_kolibri1: %s\n  model       %s (%s): %u of %u layers (%u full / NoPE), %s attention, "
-              "int4 g%u sym, %zu subnormal f16 scales; %zu tensors, every name accounted for, 0 unconsumed\n",
-              snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.layers, full.layers, d.full_before(d.layers),
-              model::kol_attn_form_name(d.attn), qc.group_size, scan.subnormal_scales, set.tensors().size());
+  std::print("load_kolibri1: {}\n  model       {} ({}): {:d} of {:d} layers ({:d} full / NoPE), {} attention, "
+             "int4 g{:d} sym, {:d} subnormal f16 scales; {:d} tensors, every name accounted for, 0 unconsumed\n",
+             snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.layers, full.layers, d.full_before(d.layers),
+             model::kol_attn_form_name(d.attn), qc.group_size, scan.subnormal_scales, set.tensors().size());
   if (skipped)
-    std::printf("  note        development mode (--layers %u): layers %u..%u not loaded (%zu tensors consumed by "
-                "design); the head reads layer %u's residual\n",
-                d.layers, d.layers, full.layers - 1, skipped, d.layers - 1);
+    std::print("  note        development mode (--layers {:d}): layers {:d}..{:d} not loaded ({:d} tensors consumed by "
+               "design); the head reads layer {:d}'s residual\n",
+               d.layers, d.layers, full.layers - 1, skipped, d.layers - 1);
   for (const KolDevicePart& P : m.parts)
-    std::printf("  device %u    layers [%u, %u): weights %13zu B %7.3f GB%s%s, RoPE %zu B (max_len %u)\n", P.device,
-                P.first, P.end, P.bytes, P.bytes / gb, P.embed ? " + embed" : "",
-                P.lm_head ? (int8 ? " + int8 head" : " + bf16 head") : "", P.rope_bytes, max_len);
-  std::printf("  read/token  %13zu B %7.3f GB   (top-%u + shared experts, attention, routers, head; derived)\n"
-              "  load        %.1f s\n",
-              m.read_per_token, m.read_per_token / gb, d.top_k, m.seconds);
+    std::print("  device {:d}    layers [{:d}, {:d}): weights {:13d} B {:7.3f} GB{}{}, RoPE {:d} B (max_len {:d})\n", P.device,
+               P.first, P.end, P.bytes, P.bytes / gb, P.embed ? " + embed" : "",
+               P.lm_head ? (int8 ? " + int8 head" : " + bf16 head") : "", P.rope_bytes, max_len);
+  std::print("  read/token  {:13d} B {:7.3f} GB   (top-{:d} + shared experts, attention, routers, head; derived)\n"
+             "  load        {:.1f} s\n",
+             m.read_per_token, m.read_per_token / gb, d.top_k, m.seconds);
   return m;
 }
 

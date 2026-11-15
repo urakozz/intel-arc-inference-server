@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <format>
+#include <print>
 #include <stdexcept>
 #include <string>
 
@@ -127,14 +129,14 @@ LiliWeights load_lilicorr(l0::Context& ctx, const std::string& snapshot_or_repo,
   w.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   std::string taps;
   for (uint32_t t : d.taps) taps += (taps.empty() ? "" : "/") + std::to_string(t);
-  char buf[512];
-  std::snprintf(buf, sizeof buf,
-                "LiLiCorr drafter: %u layers, taps %s, block %u, %s (decoded%s at load %.1f s), %zu NVFP4 linears, the "
-                "head exact, %zu B, %.1f s",
-                d.layers, taps.c_str(), d.block, draft_format_name(format),
-                format == DraftFormat::Exact ? "" : " + quantised", quant, ck.nvfp4_linears(), bytes, w.seconds);
+  std::string buf;
+  buf = std::format(
+    "LiLiCorr drafter: {:d} layers, taps {}, block {:d}, {} (decoded{} at load {:.1f} s), {:d} NVFP4 linears, the "
+    "head exact, {:d} B, {:.1f} s",
+    d.layers, taps.c_str(), d.block, draft_format_name(format),
+    format == DraftFormat::Exact ? "" : " + quantised", quant, ck.nvfp4_linears(), bytes, w.seconds);
   w.line = buf;
-  std::printf("%s\n", buf);
+  std::print("{}\n", buf);
   return w;
 }
 

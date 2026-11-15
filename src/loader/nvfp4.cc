@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <format>
 #include <stdexcept>
 #include <string>
 
@@ -39,8 +40,8 @@ std::vector<uint16_t> decode_nvfp4(const uint8_t* weight, const uint8_t* scale, 
     for (uint32_t b = 0; b < B; ++b) {
       const uint8_t sc = scale[size_t(n) * B + b];
       if (e4m3_is_nan(sc)) {
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "0x%02x", unsigned(sc));
+        std::string buf;
+        buf = std::format("0x{:02x}", unsigned(sc));
         throw std::runtime_error("NVFP4 " + name + ": weight_scale[" + std::to_string(n) + "][" + std::to_string(b) +
                                  "] is an e4m3 NaN code (" + buf + ")");
       }

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <string>
 #include <stdexcept>
 
@@ -17,14 +18,14 @@ uint32_t device_blocks(const model::BoltDesc& d, const model::BoltPlacement& p, 
 
 [[noreturn]] void no_fit(const model::BoltDesc& d, const DevicePlan& p, uint32_t dev, uint32_t max_len, size_t device_bytes,
                          bool one_card) {
-  char buf[900];
-  std::snprintf(buf, sizeof buf,
-                "runtime::bolt: the plan at max_len %u does not fit device %u's %zu B (weights %zu, kv %zu, ssm %zu, "
-                "conv_rings %zu, decode_scratch %zu, prefill_scratch %zu, drafter %zu, drafter_embed_replica %zu, reserve "
-                "%zu; total %zu)%s",
-                max_len, dev, device_bytes, p.weights, p.kv, p.ssm, p.conv_rings, p.decode_scratch, p.prefill_scratch,
-                p.drafter, p.drafter_embed_replica, p.reserve, p.total(),
-                one_card ? " - " : "");
+  std::string buf;
+  buf = std::format(
+    "runtime::bolt: the plan at max_len {:d} does not fit device {:d}'s {:d} B (weights {:d}, kv {:d}, ssm {:d}, "
+    "conv_rings {:d}, decode_scratch {:d}, prefill_scratch {:d}, drafter {:d}, drafter_embed_replica {:d}, reserve "
+    "{:d}; total {:d}){}",
+    max_len, dev, device_bytes, p.weights, p.kv, p.ssm, p.conv_rings, p.decode_scratch, p.prefill_scratch,
+    p.drafter, p.drafter_embed_replica, p.reserve, p.total(),
+    one_card ? " - " : "");
   std::string msg = buf;
   if (one_card)
     msg += d.name + " does not fit one 32 GB card (Decision 4: two cards by default, --parallel pp; one card only through "
@@ -59,13 +60,13 @@ DevicePlan device_plan(const model::BoltDesc& d, const model::BoltPlacement& p, 
 
 void require_fits(const DevicePlan& p, uint32_t dev, uint32_t max_len, size_t device_bytes) {
   if (p.total() <= device_bytes) return;
-  char buf[700];
-  std::snprintf(buf, sizeof buf,
-                "runtime::bolt: the plan at max_len %u does not fit device %u's %zu B (weights %zu, kv %zu, ssm %zu, "
-                "conv_rings %zu, decode_scratch %zu, prefill_scratch %zu, drafter %zu, drafter_embed_replica %zu, reserve "
-                "%zu; total %zu)",
-                max_len, dev, device_bytes, p.weights, p.kv, p.ssm, p.conv_rings, p.decode_scratch, p.prefill_scratch,
-                p.drafter, p.drafter_embed_replica, p.reserve, p.total());
+  std::string buf;
+  buf = std::format(
+    "runtime::bolt: the plan at max_len {:d} does not fit device {:d}'s {:d} B (weights {:d}, kv {:d}, ssm {:d}, "
+    "conv_rings {:d}, decode_scratch {:d}, prefill_scratch {:d}, drafter {:d}, drafter_embed_replica {:d}, reserve "
+    "{:d}; total {:d})",
+    max_len, dev, device_bytes, p.weights, p.kv, p.ssm, p.conv_rings, p.decode_scratch, p.prefill_scratch,
+    p.drafter, p.drafter_embed_replica, p.reserve, p.total());
   throw std::runtime_error(buf);
 }
 
@@ -137,13 +138,13 @@ BoltPlan plan(const model::BoltDesc& d, uint32_t max_len, const std::vector<size
 }
 
 std::string describe(const DevicePlan& p, size_t device_bytes) {
-  char buf[512];
-  std::snprintf(buf, sizeof buf,
-                "weights %.3f GB, kv %.3f GB, ssm %.3f GB, conv rings %zu B, scratch %.3f GB, drafter %.3f GB, reserve %.3f "
-                "GB, total %.3f GB",
-                double(p.weights) / 1e9, double(p.kv) / 1e9, double(p.ssm) / 1e9, p.conv_rings,
-                double(p.decode_scratch + p.prefill_scratch) / 1e9, double(p.drafter + p.drafter_embed_replica) / 1e9,
-                double(p.reserve) / 1e9, double(p.total()) / 1e9);
+  std::string buf;
+  buf = std::format(
+    "weights {:.3f} GB, kv {:.3f} GB, ssm {:.3f} GB, conv rings {:d} B, scratch {:.3f} GB, drafter {:.3f} GB, reserve {:.3f} "
+    "GB, total {:.3f} GB",
+    double(p.weights) / 1e9, double(p.kv) / 1e9, double(p.ssm) / 1e9, p.conv_rings,
+    double(p.decode_scratch + p.prefill_scratch) / 1e9, double(p.drafter + p.drafter_embed_replica) / 1e9,
+    double(p.reserve) / 1e9, double(p.total()) / 1e9);
   std::string s = buf;
   if (device_bytes) s += " of " + std::to_string(double(device_bytes) / 1e9) + " GB";
   return s;

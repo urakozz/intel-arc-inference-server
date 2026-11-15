@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <format>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -13,15 +14,15 @@ namespace runtime {
 
 std::string format_memory(const char* label, const MemoryComponents& c, size_t device_bytes) {
   const double gb = 1e9;
-  char dv[48] = "", dr[48] = "";
-  if (c.draft_vocab) std::snprintf(dv, sizeof dv, " draft vocab %.3f GB,", c.draft_vocab / gb);
-  if (c.drafter) std::snprintf(dr, sizeof dr, " drafter %.3f GB,", c.drafter / gb);   // spec 19b
-  char buf[384];
-  std::snprintf(buf, sizeof buf,
-                "%s: model %.3f GB, kv %.3f GB, decode state %.3f GB, prefill scratch %.3f GB,"
-                " int8 %.3f GB,%s%s total %.3f GB of %.3f GB",
-                label, c.model / gb, c.kv / gb, c.decode_state / gb, c.prefill_scratch / gb,
-                c.int8 / gb, dv, dr, c.total() / gb, device_bytes / gb);
+  std::string dv, dr;
+  if (c.draft_vocab) dv = std::format(" draft vocab {:.3f} GB,", c.draft_vocab / gb);
+  if (c.drafter) dr = std::format(" drafter {:.3f} GB,", c.drafter / gb);   // spec 19b
+  std::string buf;
+  buf = std::format(
+    "{}: model {:.3f} GB, kv {:.3f} GB, decode state {:.3f} GB, prefill scratch {:.3f} GB,"
+    " int8 {:.3f} GB,{}{} total {:.3f} GB of {:.3f} GB",
+    label, c.model / gb, c.kv / gb, c.decode_state / gb, c.prefill_scratch / gb,
+    c.int8 / gb, dv, dr, c.total() / gb, device_bytes / gb);
   return buf;
 }
 
@@ -204,37 +205,37 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
   const double gb = 1e9;
   const std::string label = "plan at max_len " + std::to_string(p.max_len);
   std::string s = format_memory(label.c_str(), p, device_bytes);
-  char buf[256];
-  std::snprintf(buf, sizeof buf, "; + reserve %.3f GB = %.3f GB (RoPE %.3f GB in model",
-                reserve_bytes / gb, (p.total() + reserve_bytes) / gb, p.rope / gb);
+  std::string buf;
+  buf = std::format("; + reserve {:.3f} GB = {:.3f} GB (RoPE {:.3f} GB in model",
+     reserve_bytes / gb, (p.total() + reserve_bytes) / gb, p.rope / gb);
   s += buf;
   if (p.mtp) {
-    std::snprintf(buf, sizeof buf, ", MTP %.3f GB in decode state", (p.mtp_buffers + p.mtp_hidden) / gb);
+    buf = std::format(", MTP {:.3f} GB in decode state", (p.mtp_buffers + p.mtp_hidden) / gb);
     s += buf;
   }
   if (p.moe_weights != 0) {
-    std::snprintf(buf, sizeof buf, ", MoE experts %.3f GB in model", p.moe_weights / gb);
+    buf = std::format(", MoE experts {:.3f} GB in model", p.moe_weights / gb);
     s += buf;
   }
   if (p.moe_prefill != 0) {
-    std::snprintf(buf, sizeof buf, ", MoE prefill %.3f GB in prefill scratch", p.moe_prefill / gb);
+    buf = std::format(", MoE prefill {:.3f} GB in prefill scratch", p.moe_prefill / gb);
     s += buf;
   }
   if (p.prefill_lazy != 0) {
-    std::snprintf(buf, sizeof buf, ", lazy %.3f GB in prefill scratch", p.prefill_lazy / gb);
+    buf = std::format(", lazy {:.3f} GB in prefill scratch", p.prefill_lazy / gb);
     s += buf;
   }
   if (p.drafter_slots != 0) {   // spec 19c
-    std::snprintf(buf, sizeof buf, ", drafter's verify slots %.3f GB in decode state", p.drafter_slots / gb);
+    buf = std::format(", drafter's verify slots {:.3f} GB in decode state", p.drafter_slots / gb);
     s += buf;
   }
   if (p.drafter_taps != 0) {
-    std::snprintf(buf, sizeof buf, ", drafter's prefill taps %.3f GB in prefill scratch", p.drafter_taps / gb);
+    buf = std::format(", drafter's prefill taps {:.3f} GB in prefill scratch", p.drafter_taps / gb);
     s += buf;
   }
   if (!p.slot_lens.empty()) {   // spec 13c
-    std::snprintf(buf, sizeof buf, ", %zu slots (%s), their state %.3f GB in decode state", p.slot_lens.size(),
-                  slot_layout_name(p.slot_lens).c_str(), p.slot_state / gb);
+    buf = std::format(", {:d} slots ({}), their state {:.3f} GB in decode state", p.slot_lens.size(),
+       slot_layout_name(p.slot_lens).c_str(), p.slot_state / gb);
     s += buf;
   }
   if (p.kv_cache == KvCache::Int8) s += ", int8 KV cache";   // spec 12b; bf16 says nothing

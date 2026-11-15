@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <format>
 #include <stdexcept>
 #include "loader/draft_vocab.h"
 #include "loader/moe_layout.h"
@@ -444,51 +445,51 @@ std::string pp_describe(const PpPlan& p, const std::array<size_t, kPpDevices>& d
   const double gb = 1e9;
   const PpStage& s0 = p.dev[0].stage;
   const PpStage& s1 = p.dev[1].stage;
-  char head[256];
-  std::snprintf(head, sizeof head,
-                "pipeline plan at max_len %u, split %u (device 0 layers [0, %u): %u GDN + %u FA, "
-                "device 1 layers [%u, %u): %u GDN + %u FA)%s%s%s%s",
-                p.max_len, p.split, s0.last, s0.gdn, s0.fa, s1.first, s1.last, s1.gdn, s1.fa,
-                p.kv_cache == KvCache::Int8 ? ", int8 KV cache" : "",
-                p.prefill.prefill ? ", prefill " : "",
-                p.prefill.prefill ? prefill_backend_name(p.prefill.backend) : "",
-                p.extras.mtp ? ", the MTP head on device 1" : p.extras.drafter.on() ? ", the DFlash drafter on device 1" : "");
+  std::string head;
+  head = std::format(
+   "pipeline plan at max_len {:d}, split {:d} (device 0 layers [0, {:d}): {:d} GDN + {:d} FA, "
+   "device 1 layers [{:d}, {:d}): {:d} GDN + {:d} FA){}{}{}{}",
+   p.max_len, p.split, s0.last, s0.gdn, s0.fa, s1.first, s1.last, s1.gdn, s1.fa,
+   p.kv_cache == KvCache::Int8 ? ", int8 KV cache" : "",
+   p.prefill.prefill ? ", prefill " : "",
+   p.prefill.prefill ? prefill_backend_name(p.prefill.backend) : "",
+   p.extras.mtp ? ", the MTP head on device 1" : p.extras.drafter.on() ? ", the DFlash drafter on device 1" : "");
   std::string out = head;
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     const std::string label = "\n  device " + std::to_string(i);
     out += format_memory(label.c_str(), p.dev[i], device_bytes[i]);
-    char tail[224];
-    std::snprintf(tail, sizeof tail, "; + reserve %.3f GB = %.3f GB (weights %.3f GB, RoPE %.3f GB, "
-                  "hand-off %zu B)",
-                  reserve / gb, (p.dev[i].total() + reserve) / gb, p.dev[i].weights / gb,
-                  p.dev[i].rope / gb, p.dev[i].link);
+    std::string tail;
+    tail = std::format("; + reserve {:.3f} GB = {:.3f} GB (weights {:.3f} GB, RoPE {:.3f} GB, "
+      "hand-off {:d} B)",
+      reserve / gb, (p.dev[i].total() + reserve) / gb, p.dev[i].weights / gb,
+      p.dev[i].rope / gb, p.dev[i].link);
     out += tail;
     if (p.dev[i].prefill_link != 0) {   // spec 16c; 16b's line is unchanged without it
-      std::snprintf(tail, sizeof tail, " + prefill hand-off %zu B", p.dev[i].prefill_link);
+      tail = std::format(" + prefill hand-off {:d} B", p.dev[i].prefill_link);
       out += tail;
     }
     // Spec 16d's terms, only when present: 16b's and 16c's lines are unchanged without them.
     if (p.extras.mtp && p.dev[i].embed_replica + p.dev[i].mtp_weights != 0) {
-      std::snprintf(tail, sizeof tail,
-                    "; MTP: head %.3f GB + embedding replica %.3f GB in model, %.3f GB in decode state",
-                    p.dev[i].mtp_weights / gb, p.dev[i].embed_replica / gb,
-                    (p.dev[i].mtp_buffers + p.dev[i].mtp_prefill) / gb);
+      tail = std::format(
+       "; MTP: head {:.3f} GB + embedding replica {:.3f} GB in model, {:.3f} GB in decode state",
+       p.dev[i].mtp_weights / gb, p.dev[i].embed_replica / gb,
+       (p.dev[i].mtp_buffers + p.dev[i].mtp_prefill) / gb);
       out += tail;
     } else if (p.extras.mtp && p.dev[i].mtp_buffers != 0) {
-      std::snprintf(tail, sizeof tail, "; MTP: its layers' verify slots %.3f GB in decode state",
-                    p.dev[i].mtp_buffers / gb);
+      tail = std::format("; MTP: its layers' verify slots {:.3f} GB in decode state",
+        p.dev[i].mtp_buffers / gb);
       out += tail;
     }
     if (p.dev[i].drafter_slots != 0) {   // spec 19d
-      std::snprintf(tail, sizeof tail,
-                    "; DFlash: embedding replica %.3f GB in model, its layers' verify slots %.3f GB in decode state, "
-                    "prefill tap stagings %.3f GB",
-                    p.dev[i].embed_replica / gb, p.dev[i].drafter_slots / gb, p.dev[i].drafter_taps / gb);
+      tail = std::format(
+       "; DFlash: embedding replica {:.3f} GB in model, its layers' verify slots {:.3f} GB in decode state, "
+       "prefill tap stagings {:.3f} GB",
+       p.dev[i].embed_replica / gb, p.dev[i].drafter_slots / gb, p.dev[i].drafter_taps / gb);
       out += tail;
     }
     if (p.dev[i].shadows != 0) {
-      std::snprintf(tail, sizeof tail, "; prefix-cache block shadows %.3f GB in prefill scratch",
-                    p.dev[i].shadows / gb);
+      tail = std::format("; prefix-cache block shadows {:.3f} GB in prefill scratch",
+        p.dev[i].shadows / gb);
       out += tail;
     }
   }

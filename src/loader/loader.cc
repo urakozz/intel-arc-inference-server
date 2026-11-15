@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <memory>
+#include <print>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -1005,7 +1007,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   // Operator requirement (2026-10-05): one note per load, not per tensor, when the
   // checkpoint is compressed-tensors - what is converted, and the recommended format.
   const std::string quant_note = ct_conversion_note(scan);
-  if (!quant_note.empty()) std::fprintf(stderr, "loader: %s\n", quant_note.c_str());
+  if (!quant_note.empty()) std::print(stderr, "loader: {}\n", quant_note.c_str());
   NameView view = build_view(set, mtp);
   Widen widen;
 
@@ -1233,22 +1235,22 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   const LoadReport& r = m.report;
   const double gb = 1e9;
   // Spec 9 §3: the form, and for int8 the host quantisation time.
-  char lm_buf[160];
+  std::string lm_buf;
   if (lm_int8)
-    std::snprintf(lm_buf, sizeof lm_buf,
-                  "int8 per row + fp32 scales, quantised at load from bf16 in %.0f ms",
-                  r.lm_head_quant_seconds * 1e3);
+    lm_buf = std::format(
+   "int8 per row + fp32 scales, quantised at load from bf16 in {:.0f} ms",
+   r.lm_head_quant_seconds * 1e3);
   else
-    std::snprintf(lm_buf, sizeof lm_buf, "%s, by checkpoint content",
-                  lm_int4 ? "int4 g64" : "bf16");
+    lm_buf = std::format("{}, by checkpoint content",
+    lm_int4 ? "int4 g64" : "bf16");
   const std::string lm_desc = lm_buf;
-  char mtp_buf[240];
-  std::snprintf(mtp_buf, sizeof mtp_buf, "MTP head: %zu tensors, %.3f GB in the checkpoint",
-                r.mtp_tensors, r.mtp_checkpoint_bytes / 1e9);
+  std::string mtp_buf;
+  mtp_buf = std::format("MTP head: {:d} tensors, {:.3f} GB in the checkpoint",
+ r.mtp_tensors, r.mtp_checkpoint_bytes / 1e9);
   std::string mtp_line = mtp_buf;
   if (r.mtp_rtn_linears != 0) {   // spec 15e: a MoE head's bf16 experts, int4 g64 RTN at load
-    std::snprintf(mtp_buf, sizeof mtp_buf, "; %zu expert linears int4 g64 RTN at load in %.1f s",
-                  r.mtp_rtn_linears, r.mtp_rtn_seconds);
+    mtp_buf = std::format("; {:d} expert linears int4 g64 RTN at load in {:.1f} s",
+   r.mtp_rtn_linears, r.mtp_rtn_seconds);
     mtp_line += mtp_buf;
   }
   // The two vocabularies print as one line, naming whichever one this
@@ -1306,29 +1308,29 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   const double delta = have_w ? (double(per_token) - expected) / expected : 0.0;
   m.report.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
-  std::printf(
-      "loader: %s\n"
-      "  model     %s (%s): %u layers = %u GDN + %u FA, MLP intermediate %u\n"
-      "  quant     int4 g%u sym desc_act=false (%s), %s\n"
-      "  tensors   %zu language-model + %zu top-level; skipped %zu visual, %zu mtp;\n"
-      "            dropped %zu qzeros + %zu g_idx (invariants asserted), %zu unconsumed%s%s\n"
-      "  scales    %zu subnormal f16 (exact on device and in f16_to_f32; not an error)\n"
-      "  linears   %zu fused weights, %zu layers\n"
-      "  int4        %13zu B  %7.3f GB\n"
-      "  scales      %13zu B  %7.3f GB\n"
-      "  bf16_linear %13zu B  %7.3f GB   (a‖b real rows; %.3f GB with padding)\n"
-      "  lm_head     %13zu B  %7.3f GB   (%s)\n"
-      "  small       %13zu B  %7.3f GB   (per-layer blocks + final norm)\n"
-      "  pad         %13zu B  %7.3f GB\n"
-      "  read/token  %13zu B  %7.3f GB\n"
-      "  embed       %13zu B  %7.3f GB   (resident, gathered - not per-token)\n"
-      "  rope        %13zu B  %7.3f GB   (resident, ~256 B per token - not per-token)\n"
-      "  mtp         %13zu B  %7.3f GB   (%s)\n"
-      "  total       %13zu B  %7.3f GB\n"
-      "  W check     %.3f GB vs %.3f GB expected = %.3f doc-03 + %.3f pad + %.6f widen"
-      " %+.3f lm_head\n"
-      "              widen = %zu B RMSNorm fp32 (1+w) + %zu B GDN fp32  ->  %+.3f%%%s\n"
-      "  load        %.1f s\n",
+  std::print(
+      "loader: {}\n"
+      "  model     {} ({}): {:d} layers = {:d} GDN + {:d} FA, MLP intermediate {:d}\n"
+      "  quant     int4 g{:d} sym desc_act=false ({}), {}\n"
+      "  tensors   {:d} language-model + {:d} top-level; skipped {:d} visual, {:d} mtp;\n"
+      "            dropped {:d} qzeros + {:d} g_idx (invariants asserted), {:d} unconsumed{}{}\n"
+      "  scales    {:d} subnormal f16 (exact on device and in f16_to_f32; not an error)\n"
+      "  linears   {:d} fused weights, {:d} layers\n"
+      "  int4        {:13d} B  {:7.3f} GB\n"
+      "  scales      {:13d} B  {:7.3f} GB\n"
+      "  bf16_linear {:13d} B  {:7.3f} GB   (a‖b real rows; {:.3f} GB with padding)\n"
+      "  lm_head     {:13d} B  {:7.3f} GB   ({})\n"
+      "  small       {:13d} B  {:7.3f} GB   (per-layer blocks + final norm)\n"
+      "  pad         {:13d} B  {:7.3f} GB\n"
+      "  read/token  {:13d} B  {:7.3f} GB\n"
+      "  embed       {:13d} B  {:7.3f} GB   (resident, gathered - not per-token)\n"
+      "  rope        {:13d} B  {:7.3f} GB   (resident, ~256 B per token - not per-token)\n"
+      "  mtp         {:13d} B  {:7.3f} GB   ({})\n"
+      "  total       {:13d} B  {:7.3f} GB\n"
+      "  W check     {:.3f} GB vs {:.3f} GB expected = {:.3f} doc-03 + {:.3f} pad + {:.6f} widen"
+      " {:+.3f} lm_head\n"
+      "              widen = {:d} B RMSNorm fp32 (1+w) + {:d} B GDN fp32  ->  {:+.3f}%{}\n"
+      "  load        {:.1f} s\n",
       snap.c_str(), desc.name.c_str(), desc.architecture.c_str(), desc.layers, desc.gdn_layers,
       desc.fa_layers, desc.intermediate, qc.group_size,
       qc.desc_act_declared ? "declared" : "inferred, 0 g_idx",
@@ -1347,36 +1349,36 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
       delta * 100.0, have_w ? "" : "   (void: no measured W for this model)", m.report.seconds);
   if (m.draft_vocab) {
     const DraftVocabCounts& c = r.draft_vocab_counts;
-    std::printf("  draft vocab %s: %u ids (%u added/EOS + %u ranked + %u lowest), %zu B %.3f GB"
-                " - %s + u32 ids, gathered from lm_head in %.0f ms (spec 8 §11; not in total)\n",
-                draft_vocab_name(m.draft_vocab->size()).c_str(), m.draft_vocab->size(), c.forced,
-                c.ranked, c.lowest, r.draft_vocab_bytes, r.draft_vocab_bytes / gb,
-                lm_int8 ? "int8 rows + fp32 scales" : "bf16 rows",
-                r.draft_vocab_seconds * 1e3);
+    std::print("  draft vocab {}: {:d} ids ({:d} added/EOS + {:d} ranked + {:d} lowest), {:d} B {:.3f} GB"
+               " - {} + u32 ids, gathered from lm_head in {:.0f} ms (spec 8 §11; not in total)\n",
+               draft_vocab_name(m.draft_vocab->size()).c_str(), m.draft_vocab->size(), c.forced,
+               c.ranked, c.lowest, r.draft_vocab_bytes, r.draft_vocab_bytes / gb,
+               lm_int8 ? "int8 rows + fp32 scales" : "bf16 rows",
+               r.draft_vocab_seconds * 1e3);
   }
 
   if (desc.is_moe()) {
     const MoeLayerBytes mb = moe_layer_bytes(desc);
-    std::printf("  moe       %13zu B  %7.3f GB   (%u layers x [router||gate %zu + %u x (gate||up %zu"
-                " + down %zu)], per-expert %s; %.3f GB read per token: top-%u + shared; repacked"
-                " in %.1f s; all of it in total, the per-token share in read/token)\n",
-                r.moe_bytes, r.moe_bytes / gb, desc.layers, mb.router, mb.blocks,
-                mb.gate_up_block, mb.down_block,
-                moe_host.fused_gate_up ? "gate_up_proj" : "gate_proj / up_proj",
-                moe_per_token / gb, desc.moe.top_k, r.moe_repack_seconds);
-    std::printf("  W check   %+.6f GB of it is the routers' zero rows (%u layers x %u rows), on the"
-                " expected side above\n",
-                router_pad / gb, desc.layers, desc.moe.router_n() - desc.moe.experts - 1);
+    std::print("  moe       {:13d} B  {:7.3f} GB   ({:d} layers x [router||gate {:d} + {:d} x (gate||up {:d}"
+               " + down {:d})], per-expert {}; {:.3f} GB read per token: top-{:d} + shared; repacked"
+               " in {:.1f} s; all of it in total, the per-token share in read/token)\n",
+               r.moe_bytes, r.moe_bytes / gb, desc.layers, mb.router, mb.blocks,
+               mb.gate_up_block, mb.down_block,
+               moe_host.fused_gate_up ? "gate_up_proj" : "gate_proj / up_proj",
+               moe_per_token / gb, desc.moe.top_k, r.moe_repack_seconds);
+    std::print("  W check   {:+.6f} GB of it is the routers' zero rows ({:d} layers x {:d} rows), on the"
+               " expected side above\n",
+               router_pad / gb, desc.layers, desc.moe.router_n() - desc.moe.experts - 1);
   }
   // Spec 15 §13: a checkpoint's int4 a||b (only then: a bf16 one prints nothing new).
   if (ab_int4)
-    std::printf("  a‖b       int4 g64, the checkpoint's: %u real columns in int4/scales, %zu B of"
-                " zero columns in pad; prefill's bf16 copy %zu B %.3f GB (resident, in total,"
-                " not per-token)\n",
-                ab_row->pad_n, ab_i4_pad, r.ab_prefill_bytes, r.ab_prefill_bytes / gb);
+    std::print("  a‖b       int4 g64, the checkpoint's: {:d} real columns in int4/scales, {:d} B of"
+               " zero columns in pad; prefill's bf16 copy {:d} B {:.3f} GB (resident, in total,"
+               " not per-token)\n",
+               ab_row->pad_n, ab_i4_pad, r.ab_prefill_bytes, r.ab_prefill_bytes / gb);
   // doc_w 0: no W exists for this model - nothing to cross-check against.
   if (!have_w) {
-    std::printf("  W check   skipped: %s has no W (model_desc.cc doc_w)\n", desc.name.c_str());
+    std::print("  W check   skipped: {} has no W (model_desc.cc doc_w)\n", desc.name.c_str());
     return m;
   }
   if (std::fabs(delta) > 0.02)

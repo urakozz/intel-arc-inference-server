@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -82,9 +83,9 @@ inline runtime::PrefillPath prefill_path(bool prefill, runtime::PrefillBackend b
 // (docs/probes/a4-int8-prefill-int8-kv-2026-11-10.md) - one of the 36 tool-call scenarios writes an invalid edit.
 inline void warn_int8_prefill_kv8(runtime::PrefillBackend backend, runtime::KvCache kv) {
   if (backend == runtime::PrefillBackend::L0Int8 && kv == runtime::KvCache::Int8)
-    std::fprintf(stderr, "warning: --prefill-backend l0-int8 with --kv-cache int8 is a known fail: ~3%% of tool calls "
-                         "that copy exact text from a long prompt can come out wrong; use the l0 prefill or the bf16 "
-                         "cache\n");
+    std::print(stderr, "warning: --prefill-backend l0-int8 with --kv-cache int8 is a known fail: ~3% of tool calls "
+                       "that copy exact text from a long prompt can come out wrong; use the l0 prefill or the bf16 "
+                       "cache\n");
 }
 
 // Spec 12b: `--kv-cache bf16|int8` (default runtime::default_kv_cache(): B70_KV_CACHE, unset
@@ -130,10 +131,10 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
                             device, reserve_bytes));
     len = fit;
     loader::set_max_len(ctx, m, len);
-    std::fprintf(stderr,
-                 "max_len: auto -> %u (the largest multiple of %u that fits %.3f GB with a %.3f GB"
-                 " reserve; trained context %u)\n",
-                 len, runtime::kMaxLenQuantum, device / gb, reserve_bytes / gb, m.trained_max_len);
+    std::print(stderr,
+               "max_len: auto -> {:d} (the largest multiple of {:d} that fits {:.3f} GB with a {:.3f} GB"
+               " reserve; trained context {:d})\n",
+               len, runtime::kMaxLenQuantum, device / gb, reserve_bytes / gb, m.trained_max_len);
   } else {
     const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, path, dv, kv, drafter);
     if (p.total() + reserve_bytes > device) {
@@ -148,12 +149,12 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
           runtime::describe(p, device, reserve_bytes) + ". The largest that fits is " +
           std::to_string(fit) + " (--max-len auto)");
     }
-    std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
+    std::print(stderr, "max_len: {:d} (--max-len)\n", len);
   }
-  std::fprintf(stderr, "%s\n",
-               runtime::describe(runtime::plan(d, len, mtp, weights, path, dv, kv, drafter), device,
-                                 reserve_bytes)
-                   .c_str());
+  std::print(stderr, "{}\n",
+             runtime::describe(runtime::plan(d, len, mtp, weights, path, dv, kv, drafter), device,
+                               reserve_bytes)
+                 .c_str());
   return len;
 }
 
@@ -194,15 +195,15 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
                              runtime::describe(p, device, reserve_bytes) + ". The largest slot 0 that fits beside them is " +
                              std::to_string(fit) + " (--max-len auto), or a smaller --max-num-seqs");
   if (a.is_auto)
-    std::fprintf(stderr,
-                 "max_len: auto -> slot 0 %u (the largest multiple of %u that fits%s in %.3f GB with a %.3f GB "
-                 "reserve; trained context %u)\n",
-                 len, runtime::kMaxLenQuantum, beside.c_str(), device / gb, reserve_bytes / gb, m.trained_max_len);
+    std::print(stderr,
+               "max_len: auto -> slot 0 {:d} (the largest multiple of {:d} that fits{} in {:.3f} GB with a {:.3f} GB "
+               "reserve; trained context {:d})\n",
+               len, runtime::kMaxLenQuantum, beside.c_str(), device / gb, reserve_bytes / gb, m.trained_max_len);
   else
-    std::fprintf(stderr, "max_len: slot 0 %u (--max-len)%s\n", len, beside.c_str());
+    std::print(stderr, "max_len: slot 0 {:d} (--max-len){}\n", len, beside.c_str());
   // slot 0 is the longest; the slots' page-rounded sum may pass the trained context
   loader::set_max_len(ctx, m, runtime::slots_kv_len(lens), len);
-  std::fprintf(stderr, "%s\n", runtime::describe(p, device, reserve_bytes).c_str());
+  std::print(stderr, "{}\n", runtime::describe(p, device, reserve_bytes).c_str());
   return lens;
 }
 
@@ -258,7 +259,7 @@ inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
     why = cap == runtime::PrefillScratchDims::kCMax ? "the plan at this max_len has room for it"
                                                    : "4096 would not fit beside this max_len";
   }
-  if (why) std::fprintf(stderr, "prefill chunk cap: %u (%s)\n", cap, why);   // the default says nothing
+  if (why) std::print(stderr, "prefill chunk cap: {:d} ({})\n", cap, why);   // the default says nothing
   return cap;
 }
 

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <print>
 #include <string>
 #include <utility>
 
@@ -92,32 +93,32 @@ void profile_report(const char* label, double wall_ms) {
     launch.host_submit_ms += g_acc.launch[i].host_submit_ms;
     launch.launches += g_acc.launch[i].launches;
   }
-  std::fprintf(stderr,
-               "\nprefill phase attribution -- %s (INSTRUMENTED: timestamp events and phase waits)\n"
-               "  phase          wait_ms   L0_gpu_ms  L0_submit_ms   waits  L0_launches\n",
-               label);
+  std::print(stderr,
+             "\nprefill phase attribution -- {} (INSTRUMENTED: timestamp events and phase waits)\n"
+             "  phase          wait_ms   L0_gpu_ms  L0_submit_ms   waits  L0_launches\n",
+             label);
   for (uint32_t i = 0; i < kN; ++i)
-    std::fprintf(stderr, "  %-13s %8.1f   %9.1f   %11.1f  %6zu  %11zu\n", kName[i],
-                 g_acc.ms[i], g_acc.launch[i].gpu_ms, g_acc.launch[i].host_submit_ms,
-                 g_acc.waits[i], g_acc.launch[i].launches);
-  std::fprintf(stderr, "  %-13s %8.1f   %9.1f   %11.1f  %6zu  %11zu\n", "TOTAL",
-               total, launch.gpu_ms, launch.host_submit_ms, waits, launch.launches);
+    std::print(stderr, "  {:<13} {:8.1f}   {:9.1f}   {:11.1f}  {:6d}  {:11d}\n", kName[i],
+               g_acc.ms[i], g_acc.launch[i].gpu_ms, g_acc.launch[i].host_submit_ms,
+               g_acc.waits[i], g_acc.launch[i].launches);
+  std::print(stderr, "  {:<13} {:8.1f}   {:9.1f}   {:11.1f}  {:6d}  {:11d}\n", "TOTAL",
+             total, launch.gpu_ms, launch.host_submit_ms, waits, launch.launches);
   if (wall_ms > 0.0)
-    std::fprintf(stderr, "  instrumented prefill call wall: %.1f ms (includes setup and host work)\n",
-                 wall_ms);
+    std::print(stderr, "  instrumented prefill call wall: {:.1f} ms (includes setup and host work)\n",
+               wall_ms);
   if (!g_acc.trace.empty()) {
-    std::fprintf(stderr, "  per-launch trace (B70_PREFILL_PROFILE=2): phase, entry, launches, L0_gpu_ms\n");
+    std::print(stderr, "  per-launch trace (B70_PREFILL_PROFILE=2): phase, entry, launches, L0_gpu_ms\n");
     for (const auto& [key, t] : g_acc.trace)
-      std::fprintf(stderr, "    %-13s %-36s %8zu %10.2f\n", kName[key.first], key.second.c_str(), t.first,
-                   t.second);
+      std::print(stderr, "    {:<13} {:<36} {:8d} {:10.2f}\n", kName[key.first], key.second.c_str(), t.first,
+                 t.second);
   }
-  std::fprintf(stderr,
-               "  wait_ms is residual host synchronization time, not phase execution time.\n"
-               "  L0_gpu_ms is kernel timestamp duration.\n"
-               "  L0_submit_ms covers Context::launch, including event creation on first use.\n"
-               "  GPU and host columns overlap: do not add them. Timestamp reads and other\n"
-               "  host work are included only in call wall. Compare an independent unprofiled\n"
-               "  run to measure instrumentation overhead. This table is diagnostic only.\n");
+  std::print(stderr,
+             "  wait_ms is residual host synchronization time, not phase execution time.\n"
+             "  L0_gpu_ms is kernel timestamp duration.\n"
+             "  L0_submit_ms covers Context::launch, including event creation on first use.\n"
+             "  GPU and host columns overlap: do not add them. Timestamp reads and other\n"
+             "  host work are included only in call wall. Compare an independent unprofiled\n"
+             "  run to measure instrumentation overhead. This table is diagnostic only.\n");
 }
 
 }  // namespace runtime::prefill

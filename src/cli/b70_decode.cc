@@ -18,6 +18,7 @@
 //
 // There is no tokenizer here (spec 2 owns it): ids in, ids out.
 // tools/oracle/tokenize.py is what turns text into an `--ids` file today.
+#include <print>
 #include <unistd.h>
 
 #include <algorithm>
@@ -95,7 +96,7 @@ constexpr size_t kBenchPromptLen = sizeof(kBenchPrompt) / sizeof(kBenchPrompt[0]
 constexpr double kDeviceGBs = 590.0;              // GB/s, measured
 
 void usage() {
-  std::fprintf(
+  std::print(
       stderr,
       "usage: b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill] [--spec mtp|dflash]\n"
       "                                     [--max-len 16384|auto] [--parallel auto|1|pp|tp]\n"
@@ -204,9 +205,9 @@ std::vector<uint32_t> read_ids(const std::string& path) {
 // One line for both modes, so the ingest and the generate halves are always
 // reported the same way.
 void report_generate(const runtime::Engine& eng, uint32_t n) {
-  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (%.1f%% of it inside the fence)\n",
-               n, eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
-               eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
+  std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token ({:.1f}% of it inside the fence)\n",
+             n, eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
+             eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
 }
 
 // --- --profile: the in-situ step anatomy (spec 1.5 §3.4) ---------------------
@@ -258,11 +259,11 @@ Label split_label(const std::string& s) {
 void print_rollup(const char* title, const char* what, std::vector<Agg> rows, uint32_t steps,
                   double total_us) {
   std::sort(rows.begin(), rows.end(), [](const Agg& x, const Agg& y) { return x.us > y.us; });
-  std::printf("\n%s\n  %-34s  launches    us/step   share   us/launch\n", title, what);
+  std::print("\n{}\n  {:<34}  launches    us/step   share   us/launch\n", title, what);
   for (const Agg& a : rows) {
     const double us = a.us / steps;
-    std::printf("  %-34s  %8zu  %9.3f  %5.2f%%  %10.3f\n", a.name.c_str(), a.launches, us,
-                100.0 * us / total_us, a.launches ? us / double(a.launches) : 0.0);
+    std::print("  {:<34}  {:8d}  {:9.3f}  {:5.2f}%  {:10.3f}\n", a.name.c_str(), a.launches, us,
+               100.0 * us / total_us, a.launches ? us / double(a.launches) : 0.0);
   }
 }
 
@@ -335,14 +336,14 @@ void print_repeat_table(const char* title, const char* what, std::vector<Series>
   std::sort(rows.begin(), rows.end(), [](const Series& x, const Series& y) {
     return Stat::of(x.us).mean > Stat::of(y.us).mean;
   });
-  std::printf("\n%s\n  %-34s   mean us/step        sd     sd%%        min .. max"
-              "    2sigma-resolvable\n",
-              title, what);
+  std::print("\n{}\n  {:<34}   mean us/step        sd     sd%        min .. max"
+             "    2sigma-resolvable\n",
+             title, what);
   for (const Series& r : rows) {
     const Stat s = Stat::of(r.us);
-    std::printf("  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n", r.name.c_str(), s.mean,
-                s.sd, s.mean != 0.0 ? 100.0 * s.sd / s.mean : 0.0, s.lo, s.hi,
-                s.resolvable_2sigma(sessions));
+    std::print("  {:<34}  {:13.3f}  {:8.3f}  {:6.3f}%  {:9.3f} .. {:9.3f}  {:10.3f}\n", r.name.c_str(), s.mean,
+               s.sd, s.mean != 0.0 ? 100.0 * s.sd / s.mean : 0.0, s.lo, s.hi,
+               s.resolvable_2sigma(sessions));
   }
 }
 
@@ -362,11 +363,11 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   runtime::ProfileEvents prof(ctx);
   runtime::CapturedStep instr = runtime::build(ctx, model, buffers, nullptr, &prof);
   const size_t n = instr.kernel_count;
-  std::fprintf(stderr,
-               "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state"
-               ", decode attention %s (profiled list: %zu events)\n",
-               n, instr.modules.size(), buffers.max_len, buffers.persistent_bytes() / 1e9,
-               "v2", prof.events.size());
+  std::print(stderr,
+             "engine: {:d} kernels, {:d} modules, max_len {:d}, {:.2f} GB of persistent state"
+             ", decode attention {} (profiled list: {:d} events)\n",
+             n, instr.modules.size(), buffers.max_len, buffers.persistent_bytes() / 1e9,
+             "v2", prof.events.size());
 
   // One queue for both lists: the ingestion and the measured replays go through
   // the same ordering domain the Engine would use, so nothing about the
@@ -402,10 +403,10 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   }
   const double ingest_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr,
-               "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u - un-instrumented list, so"
-               " this half is a normal decode\n",
-               ids.size(), ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), c->pos);
+  std::print(stderr,
+             "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token), pos {:d} - un-instrumented list, so"
+             " this half is a normal decode\n",
+             ids.size(), ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), c->pos);
 
   // The measured half. Every event is reset before EVERY replay (re-signalling
   // an un-reset event is undefined) and nothing is queried before the fence
@@ -465,46 +466,46 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
     session_sum.push_back(sum_r / steps);
     session_wall.push_back(wall_r / steps);
     if (repeats > 1)
-      std::fprintf(stderr, "session %u/%u: %.3f us Σ, %.3f us wall, pos %u → %u, last id %u\n",
-                   r + 1, repeats, session_sum.back(), session_wall.back(), ingest_pos, c->pos,
-                   c->out_token[0]);
+      std::print(stderr, "session {:d}/{:d}: {:.3f} us Σ, {:.3f} us wall, pos {:d} → {:d}, last id {:d}\n",
+                 r + 1, repeats, session_sum.back(), session_wall.back(), ingest_pos, c->pos,
+                 c->out_token[0]);
   }
   const uint32_t replays = steps * repeats;
   const double sum_us = sum_all / replays;    // Σ per-kernel device time, per step
   const double wall_us = wall_all / replays;  // submit + fence, per step
 
   // --- the report. stdout: it is this mode's answer. ------------------------
-  std::printf(
+  std::print(
       "# b70-decode --profile - in-situ step anatomy\n"
-      "depth %zu, steps %u, repeats %u (%u profiled replays), %zu launches/step, max_len %u,\n"
-      "device %s (%u EUs)\n"
+      "depth {:d}, steps {:d}, repeats {:d} ({:d} profiled replays), {:d} launches/step, max_len {:d},\n"
+      "device {} ({:d} EUs)\n"
       "PROFILE MODE IS NOT BENCH MODE: every launch below signals a host-visible\n"
       "kernel-timestamp event, a per-launch flush an unprofiled list never pays. Per-kernel\n"
       "durations are kernelStart->kernelEnd and EXCLUDE that flush (it lands after kernelEnd),\n"
       "so they are comparable to probe per-kernel numbers; the gap at the bottom INCLUDES it\n"
       "and is an upper bound. The engine's ms/token comes from --bench, never from here.\n"
       "Every `share` below is of the sum of kernel durations, not of the fence wall.\n"
-      "%s",
+      "{}",
       ids.size(), steps, repeats, replays, n, buffers.max_len, ctx.name().c_str(), ctx.eu_count(),
       repeats > 1 ? "REPEATED-RUN AVERAGING IS ON: the rollups below are the grand mean over every\n"
-                    "replay of every session; the repeatability table after them is what prices an\n"
-                    "attribution. A session is `steps` replays after a rewind of Control::pos to the\n"
-                    "post-ingest value, so every session profiles the identical launch shape.\n"
-                  : "");
+                   "replay of every session; the repeatability table after them is what prices an\n"
+                   "attribution. A session is `steps` replays after a rewind of Control::pos to the\n"
+                   "post-ingest value, so every session profiles the identical launch shape.\n"
+                 : "");
 
   std::vector<size_t> order(n);
   for (size_t i = 0; i < n; ++i) order[i] = i;
   std::sort(order.begin(), order.end(),
             [&](size_t a, size_t b) { return per_launch[a] > per_launch[b]; });
   const size_t top = std::min<size_t>(30, n);
-  std::printf("\ntop %zu launches by mean us/step (measured, mean of %u profiled replays)\n"
-              "  rank  launch    us/step   share  label\n",
-              top, replays);
+  std::print("\ntop {:d} launches by mean us/step (measured, mean of {:d} profiled replays)\n"
+             "  rank  launch    us/step   share  label\n",
+             top, replays);
   for (size_t r = 0; r < top; ++r) {
     const size_t i = order[r];
     const double us = per_launch[i] / replays;
-    std::printf("  %4zu  %6zu  %9.3f  %5.2f%%  %s\n", r + 1, i, us, 100.0 * us / sum_us,
-                instr.labels[i].c_str());
+    std::print("  {:4d}  {:6d}  {:9.3f}  {:5.2f}%  {}\n", r + 1, i, us, 100.0 * us / sum_us,
+               instr.labels[i].c_str());
   }
 
   // The three rollups. `family` is the entry point (what docs/12 has a section
@@ -535,15 +536,15 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
                replays, sum_us);
   print_rollup("per-layer-kind rollup", "layer kind", by_kind, replays, sum_us);
 
-  std::printf(
-      "\ntotals per step (mean of %u profiled replays; the per-replay spread is in brackets)\n"
-      "  sum of %zu kernel durations   %10.3f us   [%.3f .. %.3f]   MEASURED, per-kernel,\n"
+  std::print(
+      "\ntotals per step (mean of {:d} profiled replays; the per-replay spread is in brackets)\n"
+      "  sum of {:d} kernel durations   {:10.3f} us   [{:.3f} .. {:.3f}]   MEASURED, per-kernel,\n"
       "                                                                   flush-free\n"
-      "  fence wall (submit + wait)    %10.3f us   [%.3f .. %.3f]   MEASURED, profiled list\n"
-      "  gap = wall - sum              %10.3f us   = %.3f us/launch over %zu launches\n"
+      "  fence wall (submit + wait)    {:10.3f} us   [{:.3f} .. {:.3f}]   MEASURED, profiled list\n"
+      "  gap = wall - sum              {:10.3f} us   = {:.3f} us/launch over {:d} launches\n"
       "                                                 UPPER BOUND: includes one host-scope\n"
       "                                                 flush per launch (spec 1.5 §3.3)\n"
-      "  sum / wall                    %10.4f\n",
+      "  sum / wall                    {:10.4f}\n",
       replays, n, sum_us, sum_lo, sum_hi, wall_us, wall_lo, wall_hi, wall_us - sum_us,
       (wall_us - sum_us) / double(n), n, sum_us / wall_us);
   // --- the repeatability report, and the attribution floor it prices -------
@@ -569,27 +570,27 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
     print_repeat_table("per-family repeatability across the sessions (measured)", "family", fam,
                        repeats);
     const Stat ss = Stat::of(session_sum), sw = Stat::of(session_wall), sg = Stat::of(gap);
-    std::printf("\n  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n"
-                "  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n"
-                "  %-34s  %13.3f  %8.3f  %6.3f%%  %9.3f .. %9.3f  %10.3f\n",
-                "SUM of kernel durations", ss.mean, ss.sd, 100.0 * ss.sd / ss.mean, ss.lo, ss.hi,
-                ss.resolvable_2sigma(repeats), "fence wall (profiled)", sw.mean, sw.sd,
-                100.0 * sw.sd / sw.mean, sw.lo, sw.hi, sw.resolvable_2sigma(repeats),
-                "gap = wall - SUM (derived)", sg.mean, sg.sd,
-                sg.mean != 0.0 ? 100.0 * sg.sd / sg.mean : 0.0, sg.lo, sg.hi,
-                sg.resolvable_2sigma(repeats));
-    std::printf(
+    std::print("\n  {:<34}  {:13.3f}  {:8.3f}  {:6.3f}%  {:9.3f} .. {:9.3f}  {:10.3f}\n"
+               "  {:<34}  {:13.3f}  {:8.3f}  {:6.3f}%  {:9.3f} .. {:9.3f}  {:10.3f}\n"
+               "  {:<34}  {:13.3f}  {:8.3f}  {:6.3f}%  {:9.3f} .. {:9.3f}  {:10.3f}\n",
+               "SUM of kernel durations", ss.mean, ss.sd, 100.0 * ss.sd / ss.mean, ss.lo, ss.hi,
+               ss.resolvable_2sigma(repeats), "fence wall (profiled)", sw.mean, sw.sd,
+               100.0 * sw.sd / sw.mean, sw.lo, sw.hi, sw.resolvable_2sigma(repeats),
+               "gap = wall - SUM (derived)", sg.mean, sg.sd,
+               sg.mean != 0.0 ? 100.0 * sg.sd / sg.mean : 0.0, sg.lo, sg.hi,
+               sg.resolvable_2sigma(repeats));
+    std::print(
         "\n  The `2sigma-resolvable` column is the ATTRIBUTION FLOOR of this instrument at\n"
-        "  --repeats %u: two binaries measured this way have means whose difference carries a\n"
+        "  --repeats {:d}: two binaries measured this way have means whose difference carries a\n"
         "  standard error of sd*sqrt(2/R), so a family-level delta below the column is not a\n"
-        "  measurement. It is a LOWER bound on the real floor -- these %u sessions are\n"
+        "  measurement. It is a LOWER bound on the real floor -- these {:d} sessions are\n"
         "  consecutive inside ONE process, so they see short-timescale drift only, while a\n"
         "  before/after comparison spans two processes and usually a build. The across-process\n"
         "  figure is in docs/15-step-anatomy.md and it is the one to quote.\n",
         repeats, repeats);
   }
 
-  std::printf(
+  std::print(
       "\nreading these numbers\n"
       "  - Per-kernel us are in-situ and flush-free: compare them directly with the\n"
       "    probe-transplant floors in docs/12 (`gemv` -> Measured) and with docs/05's table.\n"
@@ -636,7 +637,7 @@ int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::Lm
   uint64_t iters = 0, drafted = 0, accepted = 0, at_k[runtime::Engine::kMaxDraft + 1] = {};
   const auto emit = [&](uint32_t id) {
     if (printed == n) return;
-    std::printf("%u\n", id);
+    std::print("{:d}\n", id);
     std::fflush(stdout);
     ++printed;
   };
@@ -666,16 +667,16 @@ int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::Lm
   }
   const double ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (--spec mtp %s, greedy)\n", n,
-               ms > 0.0 ? 1000.0 * n / ms : 0.0, n ? ms / n : 0.0,
-               mtp_auto ? "auto" : std::to_string(mtp_k).c_str());
-  std::fprintf(stderr,
-               "mtp: %llu iterations (K=0 %llu, K=1 %llu, K=2 %llu, K=3 %llu), acceptance %.4f"
-               " (%llu/%llu), %.3f ids per iteration, pos %u\n",
-               (unsigned long long)iters, (unsigned long long)at_k[0], (unsigned long long)at_k[1],
-               (unsigned long long)at_k[2], (unsigned long long)at_k[3],
-               drafted ? double(accepted) / double(drafted) : 0.0, (unsigned long long)accepted,
-               (unsigned long long)drafted, iters ? double(n) / double(iters) : 0.0, eng.pos());
+  std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token (--spec mtp {}, greedy)\n", n,
+             ms > 0.0 ? 1000.0 * n / ms : 0.0, n ? ms / n : 0.0,
+             mtp_auto ? "auto" : std::to_string(mtp_k).c_str());
+  std::print(stderr,
+             "mtp: {:d} iterations (K=0 {:d}, K=1 {:d}, K=2 {:d}, K=3 {:d}), acceptance {:.4f}"
+             " ({:d}/{:d}), {:.3f} ids per iteration, pos {:d}\n",
+             (unsigned long long)iters, (unsigned long long)at_k[0], (unsigned long long)at_k[1],
+             (unsigned long long)at_k[2], (unsigned long long)at_k[3],
+             drafted ? double(accepted) / double(drafted) : 0.0, (unsigned long long)accepted,
+             (unsigned long long)drafted, iters ? double(n) / double(iters) : 0.0, eng.pos());
   return 0;
 }
 
@@ -691,7 +692,7 @@ int generate_dflash(runtime::Engine& eng, uint32_t n, uint32_t max_k) {
   uint64_t iters = 0, drafted = 0, accepted = 0, at_k[8] = {};
   const auto emit = [&](uint32_t id) {
     if (printed == n) return;
-    std::printf("%u\n", id);
+    std::print("{:d}\n", id);
     std::fflush(stdout);
     ++printed;
   };
@@ -720,13 +721,13 @@ int generate_dflash(runtime::Engine& eng, uint32_t n, uint32_t max_k) {
   }
   const double ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (--spec dflash, K %u, greedy)\n", n,
-               ms > 0.0 ? 1000.0 * n / ms : 0.0, n ? ms / n : 0.0, max_k);
-  std::fprintf(stderr, "dflash: %llu iterations (K=0..7:", (unsigned long long)iters);
-  for (uint64_t c : at_k) std::fprintf(stderr, " %llu", (unsigned long long)c);
-  std::fprintf(stderr, "), acceptance %.4f (%llu/%llu), %.3f ids per iteration, pos %u\n",
-               drafted ? double(accepted) / double(drafted) : 0.0, (unsigned long long)accepted,
-               (unsigned long long)drafted, iters ? double(n) / double(iters) : 0.0, eng.pos());
+  std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token (--spec dflash, K {:d}, greedy)\n", n,
+             ms > 0.0 ? 1000.0 * n / ms : 0.0, n ? ms / n : 0.0, max_k);
+  std::print(stderr, "dflash: {:d} iterations (K=0..7:", (unsigned long long)iters);
+  for (uint64_t c : at_k) std::print(stderr, " {:d}", (unsigned long long)c);
+  std::print(stderr, "), acceptance {:.4f} ({:d}/{:d}), {:.3f} ids per iteration, pos {:d}\n",
+             drafted ? double(accepted) / double(drafted) : 0.0, (unsigned long long)accepted,
+             (unsigned long long)drafted, iters ? double(n) / double(iters) : 0.0, eng.pos());
   return 0;
 }
 
@@ -1128,7 +1129,7 @@ int run(int argc, char** argv) {
     pipe.devices = cli::parallel_auto(loader::resolve_snapshot(path), max_len_arg, mtp_on, kv_cache, pp_path,
                                       hw.card_bytes, mem_reserve);
     if (pipe.on()) {
-      std::fprintf(stderr, "parallel: auto -> pp (the model and the context do not fit one card)\n");
+      std::print(stderr, "parallel: auto -> pp (the model and the context do not fit one card)\n");
       if (hw.cards < 2)
         throw std::runtime_error("--parallel auto: this model at this --max-len does not fit one card and Level Zero "
                                  "shows one - a shorter --max-len, or both cards visible (ZE_AFFINITY_MASK=0,1)");
@@ -1162,7 +1163,7 @@ int run(int argc, char** argv) {
   }
 
   l0::Context ctx(0u);
-  std::fprintf(stderr, "device: %s (%u EUs)\n", ctx.name().c_str(), ctx.eu_count());
+  std::print(stderr, "device: {} ({:d} EUs)\n", ctx.name().c_str(), ctx.eu_count());
 
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
@@ -1204,13 +1205,13 @@ int run(int argc, char** argv) {
                                                                max_len, dflash.max_k);
   runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get());
   if (drafter) drafter->attach(eng, /*draft_vocab=*/false);
-  std::fprintf(stderr,
-               "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state, "
-               "decode attention %s, kv cache %s\n",
-               eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
-               eng.buffers().persistent_bytes() / 1e9,
-               "v2",
-               runtime::kv_cache_name(eng.kv_cache()));
+  std::print(stderr,
+             "engine: {:d} kernels, {:d} modules, max_len {:d}, {:.2f} GB of persistent state, "
+             "decode attention {}, kv cache {}\n",
+             eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
+             eng.buffers().persistent_bytes() / 1e9,
+             "v2",
+             runtime::kv_cache_name(eng.kv_cache()));
 
   // Ingestion is one replay per prompt token unless `--prefill-length` or `--prefill` is
   // given, in which case it is `Engine::prefill`. The measured window is
@@ -1224,12 +1225,12 @@ int run(int argc, char** argv) {
   if (have_prefill_len || prefill) {
     if (have_pp_backend) eng.set_prefill_backend(pp_backend);
     eng.set_prefill_chunk_cap(chunk_cap);   // plan 5d: the cap the plan counted
-    std::fprintf(stderr, "prefill backend: %s\n", runtime::prefill_backend_name(eng.prefill_backend()));
+    std::print(stderr, "prefill backend: {}\n", runtime::prefill_backend_name(eng.prefill_backend()));
     eng.prepare_prefill();
     pp_launches_setup = eng.prefill_launches();
   }
   // Spec 6: every device byte this engine holds, before the first prefill.
-  std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
+  std::print(stderr, "{}\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
   size_t pp_launches = 0;
   if (have_prefill_len || prefill) {
@@ -1242,25 +1243,25 @@ int run(int argc, char** argv) {
   const double ingest_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   if (have_prefill_len)
-    std::fprintf(stderr,
-                 "pp: %zu ids in %.1f ms (%.2f t/s) -- device-side, loader excluded, first"
-                 " prefill launch to the first generated id in cur_token; chunk %u, %zu L0"
-                 " launches, pos %u\n",
-                 ids.size(), ingest_ms,
-                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
-                 pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), pp_launches, eng.pos());
+    std::print(stderr,
+               "pp: {:d} ids in {:.1f} ms ({:.2f} t/s) -- device-side, loader excluded, first"
+               " prefill launch to the first generated id in cur_token; chunk {:d}, {:d} L0"
+               " launches, pos {:d}\n",
+               ids.size(), ingest_ms,
+               ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
+               pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), pp_launches, eng.pos());
   if (have_prefill_len) runtime::prefill::profile_report("--prefill-length", ingest_ms);
   if (!have_prefill_len && !prefill)
-    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
-                 ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
+    std::print(stderr, "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token), pos {:d}\n", ids.size(),
+               ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());
   if (prefill)
-    std::fprintf(stderr, "prefill: %zu ids, pos %u\n", ids.size(), eng.pos());
+    std::print(stderr, "prefill: {:d} ids, pos {:d}\n", ids.size(), eng.pos());
 
   if (!bench && mtp_on) return generate_mtp(eng, n, mtp_auto, mtp_k, lm_head);
   if (!bench && drafter) return generate_dflash(eng, n, dflash.max_k);   // spec 19c
   if (!bench) {
     eng.generate(n, [](uint32_t id) {
-      std::printf("%u\n", id);
+      std::print("{:d}\n", id);
       std::fflush(stdout);   // one id per line, as it is sampled
     });
     report_generate(eng, n);
@@ -1276,12 +1277,12 @@ int run(int argc, char** argv) {
 
   const double ms_per_token = eng.last_gen_ms() / double(tg);
   const double host_ms = eng.last_gen_ms() - eng.last_fence_ms();
-  std::fprintf(stderr,
-               "  wall %.1f ms, fence %.1f ms, host %.1f ms  (host = wall - fence: argument-free\n"
-               "  replay, so this is submit + the four bytes of shared memory, nothing else)\n"
-               "  per token: %.3f ms total = %.3f ms fence + %.3f ms host\n",
-               eng.last_gen_ms(), eng.last_fence_ms(), host_ms, ms_per_token,
-               eng.last_fence_ms() / double(tg), host_ms / double(tg));
+  std::print(stderr,
+             "  wall {:.1f} ms, fence {:.1f} ms, host {:.1f} ms  (host = wall - fence: argument-free\n"
+             "  replay, so this is submit + the four bytes of shared memory, nothing else)\n"
+             "  per token: {:.3f} ms total = {:.3f} ms fence + {:.3f} ms host\n",
+             eng.last_gen_ms(), eng.last_fence_ms(), host_ms, ms_per_token,
+             eng.last_fence_ms() / double(tg), host_ms / double(tg));
 
   // MBU against the two measured constants, spelled out so the reader can
   // check the arithmetic without leaving the terminal. The kernel-count line
@@ -1291,16 +1292,16 @@ int run(int argc, char** argv) {
   const double bytes_per_token = double(eng.model().report.read_per_token) / 1e9;
   const double achieved_gbs = eng.last_tok_per_s() * bytes_per_token;
   const double dispatch_ms = double(eng.step().kernel_count) * 0.52e-3;
-  std::fprintf(stderr,
-               "  MBU: %.2f t/s x %.3f GB = %.0f GB/s of %.0f GB/s measured = %.1f%%\n"
-               "       (W is this checkpoint's own read/token, from the loader report above;\n"
-               "        roofline at %.0f GB/s = %.2f t/s = %.3f ms/token)\n"
-               "  dispatch floor (estimated): %zu kernels x 0.52 us = %.3f ms/token,"
-               " %.1f%% of the fence\n",
-               eng.last_tok_per_s(), bytes_per_token, achieved_gbs, kDeviceGBs,
-               100.0 * achieved_gbs / kDeviceGBs, kDeviceGBs, kDeviceGBs / bytes_per_token,
-               1000.0 * bytes_per_token / kDeviceGBs, eng.step().kernel_count, dispatch_ms,
-               100.0 * dispatch_ms / (eng.last_fence_ms() / double(tg)));
+  std::print(stderr,
+             "  MBU: {:.2f} t/s x {:.3f} GB = {:.0f} GB/s of {:.0f} GB/s measured = {:.1f}%\n"
+             "       (W is this checkpoint's own read/token, from the loader report above;\n"
+             "        roofline at {:.0f} GB/s = {:.2f} t/s = {:.3f} ms/token)\n"
+             "  dispatch floor (estimated): {:d} kernels x 0.52 us = {:.3f} ms/token,"
+             " {:.1f}% of the fence\n",
+             eng.last_tok_per_s(), bytes_per_token, achieved_gbs, kDeviceGBs,
+             100.0 * achieved_gbs / kDeviceGBs, kDeviceGBs, kDeviceGBs / bytes_per_token,
+             1000.0 * bytes_per_token / kDeviceGBs, eng.step().kernel_count, dispatch_ms,
+             100.0 * dispatch_ms / (eng.last_fence_ms() / double(tg)));
 
   // The row's identity comes from the environment, not from a configure-time
   // git call: tools/box.sh syncs the tree WITHOUT .git, so the box cannot know
@@ -1313,20 +1314,20 @@ int run(int argc, char** argv) {
   // Spec 12b: likewise an int8-KV row (`int8-kv`), so the interleaved pairs sort apart.
   const std::string head_tag = std::string(lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "") +
                                (kv_cache == runtime::KvCache::Int8 ? " int8-kv" : "");
-  std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, head_tag.c_str(), depth, tg,
-              eng.last_tok_per_s(), ms_per_token);
+  std::print("| b70-decode {}{} | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha, head_tag.c_str(), depth, tg,
+             eng.last_tok_per_s(), ms_per_token);
   // The tg row above is byte-identical to what it always was, and the pp row
   // is a SECOND line rather than extra columns on it, so every existing parser
   // of docs/BENCHMARKS.md's table keeps working (interfaces.md's CLI contract;
   // tools/bench_decode.sh --prefill-length reads both).
   if (have_prefill_len)
-    std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, head_tag.c_str(),
-                runtime::prefill_backend_name(eng.prefill_backend()), depth,
-                pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), ingest_ms,
-                ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
-  std::fprintf(stderr,
-               "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
-               " tools/bench_decode.sh is that harness. B70_GIT_SHA unset prints `unknown`.)\n");
+    std::print("| b70-decode {}{} {} pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, head_tag.c_str(),
+               runtime::prefill_backend_name(eng.prefill_backend()), depth,
+               pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), ingest_ms,
+               ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
+  std::print(stderr,
+             "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
+             " tools/bench_decode.sh is that harness. B70_GIT_SHA unset prints `unknown`.)\n");
   return 0;
 }
 }  // namespace
@@ -1335,7 +1336,7 @@ int main(int argc, char** argv) {
   try {
     return run(argc, argv);
   } catch (const std::exception& e) {
-    std::fprintf(stderr, "b70-decode: %s\n", e.what());
+    std::print(stderr, "b70-decode: {}\n", e.what());
     return 1;
   }
 }

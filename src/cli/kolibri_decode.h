@@ -28,7 +28,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <fstream>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -123,12 +125,12 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
       throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
     if (!runtime::kolibri::fits_one_card(d, int8, a.card_bytes, a.reserve, a.prefills(), a.spec)) {
       const size_t w = loader::kol_device_weight_bytes(d, model::KolPlacement::one(d), 0, int8);
-      char msg[400];
-      std::snprintf(msg, sizeof msg,
-                    "--parallel 1: Kolibri-1 holds ~%.1f GB of weights at int4 (%u layers, %s attention, %s head), one card "
-                    "%.1f GB: run it with --parallel pp (the default), or load fewer layers with --layers N (development "
-                    "mode)", w / 1e9, d.layers, model::kol_attn_form_name(d.attn), int8 ? "int8" : "bf16",
-                    a.card_bytes / 1e9);
+      std::string msg;
+      msg = std::format(
+        "--parallel 1: Kolibri-1 holds ~{:.1f} GB of weights at int4 ({:d} layers, {} attention, {} head), one card "
+        "{:.1f} GB: run it with --parallel pp (the default), or load fewer layers with --layers N (development "
+        "mode)", w / 1e9, d.layers, model::kol_attn_form_name(d.attn), int8 ? "int8" : "bf16",
+        a.card_bytes / 1e9);
       throw std::runtime_error(msg);
     }
     return;
@@ -187,8 +189,8 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
                                  rk::describe(rk::plan(d, p, runtime::kMinAutoMaxLen, int8, false, at, pf, a.spec), p,
                                               runtime::kMinAutoMaxLen, dev, a.reserve));
     }
-    std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of %u that fits every card with a %.3f GB "
-                 "reserve; trained context %u)\n", len, runtime::kMaxLenQuantum, a.reserve / 1e9, cap);
+    std::print(stderr, "max_len: auto -> {:d} (the largest multiple of {:d} that fits every card with a {:.3f} GB "
+               "reserve; trained context {:d})\n", len, runtime::kMaxLenQuantum, a.reserve / 1e9, cap);
   } else {
     if (len > cap)
       throw std::runtime_error("--max-len " + std::to_string(len) + " exceeds Kolibri-1's trained context " +
@@ -202,12 +204,12 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
                                  ": " + rk::describe(pl, p, len, dev, a.reserve) + ". The largest that fits is " +
                                  std::to_string(rk::max_len_that_fits(d, p, int8, dev, a.reserve, cap, pf, a.spec)) +
                                  " (--max-len auto)");
-    std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
+    std::print(stderr, "max_len: {:d} (--max-len)\n", len);
   }
   if (devs == 2)
-    std::fprintf(stderr, "split: %s%u (layers [0, %u) on device 0, [%u, %u) and the head on device 1)\n",
-                 a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
-  std::fprintf(stderr, "%s\n", rk::describe(rk::plan(d, p, len, int8, false, at, pf, a.spec), p, len, dev, a.reserve).c_str());
+    std::print(stderr, "split: {}{:d} (layers [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
+               a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
+  std::print(stderr, "{}\n", rk::describe(rk::plan(d, p, len, int8, false, at, pf, a.spec), p, len, dev, a.reserve).c_str());
   return {p, len};
 }
 
@@ -239,9 +241,9 @@ int run_decode(const DecodeArgs& a) {
   if (c1) ctx.push_back(c1.get());
   std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : 0};
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
+    std::print(stderr, "device: {} ({:d} EUs)\n", c0->name().c_str(), c0->eu_count());
   else
-    std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
+    std::print(stderr, "devices: {} + {} (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
                              "the hand-off writes it (docs/10-the-box.md)");
@@ -256,14 +258,14 @@ int run_decode(const DecodeArgs& a) {
     return loader::load_kolibri1(ctx, a.path, max_len, placement, a.lm_head, a.layers);
   }();
   if (a.layers)
-    std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode; the head reads layer %u's "
-                 "residual)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
+    std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the head reads layer {:d}'s "
+               "residual)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
   runtime::PipelineOptions opt;
   runtime::kolibri::KolibriEngine eng(ctx, std::move(model), max_len, /*debug_tap=*/false, opt);
-  std::fprintf(stderr, "engine: Kolibri-1, %u device(s)%s, %zu launches a token (%s attention, B70_KOLIBRI_ATTN), "
-               "max_len %u\n", eng.devices(),
-               devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
-               eng.launches(), runtime::kolibri::kol_attn_name(eng.attention()), eng.max_len());
+  std::print(stderr, "engine: Kolibri-1, {:d} device(s){}, {:d} launches a token ({} attention, B70_KOLIBRI_ATTN), "
+             "max_len {:d}\n", eng.devices(),
+             devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
+             eng.launches(), runtime::kolibri::kol_attn_name(eng.attention()), eng.max_len());
   // Spec 20d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check)
   // happens here, outside the timed window, which is then the whole prefill() call: first launch to the
   // first generated id in cur_token (argmax_stage2 is its last launch).
@@ -272,13 +274,13 @@ int run_decode(const DecodeArgs& a) {
   if (a.prefills()) {
     eng.prepare_prefill();
     pp_launches0 = eng.prefill_launches();
-    std::fprintf(stderr, "prefill: l0 backend, chunk %u, attention %s (B70_KOLIBRI_ATTN), %zu launches per chunk "
-                 "(%s) + %zu for the head%s\n", chunk, runtime::kolibri::kol_attn_name(eng.attention()),
-                 runtime::kolibri::prefill_chunk_launches(eng.model().desc, eng.model().placement),
-                 devs == 2 ? "both cards" : "one card", runtime::kolibri::kPrefillHeadLaunches,
-                 devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+    std::print(stderr, "prefill: l0 backend, chunk {:d}, attention {} (B70_KOLIBRI_ATTN), {:d} launches per chunk "
+               "({}) + {:d} for the head{}\n", chunk, runtime::kolibri::kol_attn_name(eng.attention()),
+               runtime::kolibri::prefill_chunk_launches(eng.model().desc, eng.model().placement),
+               devs == 2 ? "both cards" : "one card", runtime::kolibri::kPrefillHeadLaunches,
+               devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
   }
-  std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
+  std::print(stderr, "{}\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
   if (a.prefills())
     eng.prefill(ids, chunk);
@@ -286,42 +288,42 @@ int run_decode(const DecodeArgs& a) {
     eng.ingest(ids);
   const double ingest_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   if (a.prefills())
-    std::fprintf(stderr, "%s: %zu ids in %.1f ms (%.2f t/s) - device-side, loader excluded, first prefill launch to "
-                 "the first generated id; chunk %u, %zu L0 launches, pos %u\n", a.pp ? "pp" : "prefill", ids.size(),
-                 ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0, chunk,
-                 eng.prefill_launches() - pp_launches0, eng.pos());
+    std::print(stderr, "{}: {:d} ids in {:.1f} ms ({:.2f} t/s) - device-side, loader excluded, first prefill launch to "
+               "the first generated id; chunk {:d}, {:d} L0 launches, pos {:d}\n", a.pp ? "pp" : "prefill", ids.size(),
+               ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0, chunk,
+               eng.prefill_launches() - pp_launches0, eng.pos());
   else
-    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token, one decode replay per id), pos %u\n", ids.size(),
-                 ingest_ms, ingest_ms / double(ids.size()), eng.pos());
+    std::print(stderr, "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token, one decode replay per id), pos {:d}\n", ids.size(),
+               ingest_ms, ingest_ms / double(ids.size()), eng.pos());
   const uint32_t n = a.bench ? a.tg : a.n;
   eng.generate(n, [&](uint32_t id) {
     if (a.bench) return;
-    std::printf("%u\n", id);
+    std::print("{:d}\n", id);
     std::fflush(stdout);
   });
-  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (%.1f%% of it inside the fence)\n", n,
-               eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
-               eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
+  std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token ({:.1f}% of it inside the fence)\n", n,
+             eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
+             eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   if (!a.bench) return 0;
   const double ms_per_token = eng.last_gen_ms() / double(a.tg);
   const double gb = double(eng.model().read_per_token) / 1e9;
-  std::fprintf(stderr, "  MBU: %.2f t/s x %.3f GB = %.0f GB/s (W = this load's derived read/token: top-6 + shared "
-               "experts, attention, routers, head); %zu launches/token\n",
-               eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.launches());
+  std::print(stderr, "  MBU: {:.2f} t/s x {:.3f} GB = {:.0f} GB/s (W = this load's derived read/token: top-6 + shared "
+             "experts, attention, routers, head); {:d} launches/token\n",
+             eng.last_tok_per_s(), gb, eng.last_tok_per_s() * gb, eng.launches());
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
-  std::printf("| b70-decode %s kolibri%s%s%s | %u | %u | %.2f | %.2f |\n", sha,
-              a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "",
-              eng.model().desc.attn == model::KolAttnForm::Bf16 ? " bf16-attn" : "",
-              devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
-              a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
+  std::print("| b70-decode {} kolibri{}{}{} | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha,
+             a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "",
+             eng.model().desc.attn == model::KolAttnForm::Bf16 ? " bf16-attn" : "",
+             devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
+             a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
   // Spec 20d: the pp row, a second line as the Qwen path prints it (depth, chunk, ms, t/s).
   if (a.pp)
-    std::printf("| b70-decode %s kolibri%s%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
-                a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "",
-                eng.model().desc.attn == model::KolAttnForm::Bf16 ? " bf16-attn" : "",
-                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth,
-                chunk, ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
+    std::print("| b70-decode {} kolibri{}{}{} l0 pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha,
+               a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "",
+               eng.model().desc.attn == model::KolAttnForm::Bf16 ? " bf16-attn" : "",
+               devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth,
+               chunk, ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   return 0;
 }
 

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 #include <utility>
 
@@ -210,18 +211,18 @@ std::string BoltEngine::profile_table() const {
   const size_t L = launches();
   std::string out = "| launch family (kernel binary) | launches / step | in-situ us / step | us / launch | share of Σ |\n"
                     "|---|---:|---:|---:|---:|\n";
-  char buf[512];
+  std::string buf;
   for (const auto& [fam, v] : rows) {
     const double us = v.first / n;
-    std::snprintf(buf, sizeof buf, "| %s | %zu | %.2f | %.3f | %.1f %% |\n", fam.c_str(), v.second, us,
-                  v.second ? us / double(v.second) : 0.0, sum > 0 ? 100.0 * us / sum : 0.0);
+    buf = std::format("| {} | {:d} | {:.2f} | {:.3f} | {:.1f} % |\n", fam.c_str(), v.second, us,
+       v.second ? us / double(v.second) : 0.0, sum > 0 ? 100.0 * us / sum : 0.0);
     out += buf;
   }
-  std::snprintf(buf, sizeof buf,
-                "\nMEASURED over %zu profiled replays (%zu launches a step, %s attention, fuse %s, %s SSM state): Σ in-situ "
-                "%.1f us, fence wall %.1f us (submit + wait, profiled: a per-launch flush), gap per launch %.3f us\n",
-                prof_replays_, L, bolt_attn_name(attn_), bolt_fuse_name(fuse_).c_str(), bolt_state_name(state_), sum, wall,
-                L ? (wall - sum) / double(L) : 0.0);
+  buf = std::format(
+    "\nMEASURED over {:d} profiled replays ({:d} launches a step, {} attention, fuse {}, {} SSM state): Σ in-situ "
+    "{:.1f} us, fence wall {:.1f} us (submit + wait, profiled: a per-launch flush), gap per launch {:.3f} us\n",
+    prof_replays_, L, bolt_attn_name(attn_), bolt_fuse_name(fuse_).c_str(), bolt_state_name(state_), sum, wall,
+    L ? (wall - sum) / double(L) : 0.0);
   out += buf;
   return out;
 }

@@ -8,8 +8,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <format>
 #include <mutex>
 #include <optional>
+#include <print>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -221,11 +223,11 @@ bool Server::listen() {
     const std::string prefix = opts_.prefix_cache_bytes
                                    ? std::to_string(opts_.prefix_cache_bytes >> 30) + " GiB of system RAM"
                                    : std::string(impl_->batch ? "per card, one host store" : "off");
-    std::fprintf(stderr, "b70-serve: ready on http://%s:%d - model %s%s%s; speculative decoding %s; context %s;"
-                         " prefix cache %s\n",
-                 opts_.host.c_str(), impl_->port, opts_.served_model.c_str(),
-                 opts_.parallel_desc.empty() ? "" : "; parallel ", opts_.parallel_desc.c_str(), spec.c_str(),
-                 ctx.c_str(), prefix.c_str());
+    std::print(stderr, "b70-serve: ready on http://{}:{:d} - model {}{}{}; speculative decoding {}; context {};"
+                       " prefix cache {}\n",
+               opts_.host.c_str(), impl_->port, opts_.served_model.c_str(),
+               opts_.parallel_desc.empty() ? "" : "; parallel ", opts_.parallel_desc.c_str(), spec.c_str(),
+               ctx.c_str(), prefix.c_str());
     std::fflush(stderr);
   }
   return impl_->svr.listen_after_bind();
@@ -322,12 +324,12 @@ Server::Outcome Server::generate(const Request& r,
   outcome.prefix = session.begin(outcome.prompt_ids, r.chat && opts_.prefix_split_last);
   outcome.usage.cached_tokens = outcome.prefix.restart;
   if (session.enabled()) {
-    std::fprintf(stderr,
-                 "prefix: kind %s restart %u of %zu kv_bytes %zu restore_ms %.1f prefill_ms %.1f"
-                 " store_ms %.1f\n",
-                 plan_kind_name(outcome.prefix.kind), outcome.prefix.restart,
-                 outcome.prompt_ids.size(), outcome.prefix.kv_bytes, outcome.prefix.restore_ms,
-                 outcome.prefix.prefill_ms, outcome.prefix.store_ms);
+    std::print(stderr,
+               "prefix: kind {} restart {:d} of {:d} kv_bytes {:d} restore_ms {:.1f} prefill_ms {:.1f}"
+               " store_ms {:.1f}\n",
+               plan_kind_name(outcome.prefix.kind), outcome.prefix.restart,
+               outcome.prompt_ids.size(), outcome.prefix.kv_bytes, outcome.prefix.restore_ms,
+               outcome.prefix.prefill_ms, outcome.prefix.store_ms);
     std::fflush(stderr);
   }
   try {
@@ -338,7 +340,7 @@ Server::Outcome Server::generate(const Request& r,
   }
   // --max-num-seqs (operator 2026-11-11): a request cut by the slot's end, not its max_tokens, is said.
   if (!outcome.cancelled && outcome.finish_reason == "length" && max_tokens == budget)
-    std::fprintf(stderr, "request: reached the end of slot 0 (%u positions): finished with length\n", max_len);
+    std::print(stderr, "request: reached the end of slot 0 ({:d} positions): finished with length\n", max_len);
   return outcome;
 }
 
@@ -579,7 +581,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     deps_.engine.truncate_to(deps_.engine.pos() - static_cast<uint32_t>(burst.size() - burst_at));
   if (outcome.cancelled) {   // as the scheduler's cancel: no end-of-text rules, no lookup history
     outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
-    std::fprintf(stderr, "request: the client hung up; stopped after %zu generated ids\n", outcome.out_ids.size());
+    std::print(stderr, "request: the client hung up; stopped after {:d} generated ids\n", outcome.out_ids.size());
     std::fflush(stderr);
     return;
   }
@@ -625,10 +627,10 @@ void Server::finish_request() {
   if (!impl_->prefix->enabled()) return;
   try {
     const double ms = impl_->prefix->end();
-    std::fprintf(stderr, "prefix: request end, pos %u, store_ms %.1f\n", deps_.engine.pos(), ms);
+    std::print(stderr, "prefix: request end, pos {:d}, store_ms {:.1f}\n", deps_.engine.pos(), ms);
     std::fflush(stderr);
   } catch (const std::exception& error) {
-    std::fprintf(stderr, "b70-serve: request-end snapshot failed: %s\n", error.what());
+    std::print(stderr, "b70-serve: request-end snapshot failed: {}\n", error.what());
   }
 }
 
@@ -650,12 +652,12 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
     const size_t used = prompt + out;
     const size_t capacity = impl_->batch ? impl_->batch->slot_max_len(static_cast<uint32_t>(std::max(outcome.slot, 0)))
                                          : deps_.engine.max_len();
-    std::fprintf(stderr,
-                 "request: prompt %zu ids (%zu cached, %zu read), first token after %.2f s = %.0f t/s read;"
-                 " %zu ids generated in %.2f s = %.1f t/s; context %zu of %zu (%.0f %%)%s\n",
-                 prompt, cached, prompt - cached, first_s, read_tps, out, decode_s, gen_tps, used, capacity,
-                 capacity ? 100.0 * double(used) / double(capacity) : 0.0,
-                 outcome.slot >= 0 ? (std::string(", card ") + std::to_string(outcome.slot)).c_str() : "");
+    std::print(stderr,
+               "request: prompt {:d} ids ({:d} cached, {:d} read), first token after {:.2f} s = {:.0f} t/s read;"
+               " {:d} ids generated in {:.2f} s = {:.1f} t/s; context {:d} of {:d} ({:.0f} %){}\n",
+               prompt, cached, prompt - cached, first_s, read_tps, out, decode_s, gen_tps, used, capacity,
+               capacity ? 100.0 * double(used) / double(capacity) : 0.0,
+               outcome.slot >= 0 ? (std::string(", card ") + std::to_string(outcome.slot)).c_str() : "");
     std::fflush(stderr);
   }
   if (opts_.log_requests_dir.empty()) return;
@@ -672,13 +674,13 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
   if (outcome.slot >= 0) record["slot"] = outcome.slot;   // plan 13b: which card (the serial record is unchanged)
   if (outcome.slot >= 0 && impl_->batch != nullptr && impl_->batch->overlaps_prefill())   // replica x slots: the card
     record["card"] = impl_->batch->card_of(static_cast<uint32_t>(outcome.slot));
-  char name[32];
-  std::snprintf(name, sizeof(name), "/%06llu.json",
-                static_cast<unsigned long long>(++impl_->next_log));
+  std::string name;
+  name = std::format("/{:06d}.json",
+   static_cast<unsigned long long>(++impl_->next_log));
   const std::string path = opts_.log_requests_dir + name;
   std::FILE* f = std::fopen(path.c_str(), "wb");
   if (f == nullptr) {
-    std::fprintf(stderr, "b70-serve: cannot write request log %s\n", path.c_str());
+    std::print(stderr, "b70-serve: cannot write request log {}\n", path.c_str());
     return;
   }
   const std::string text = record.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
@@ -985,8 +987,8 @@ Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(con
   }
   const Finish& fin = run->fin;
   if (impl_->slot_cache) {
-    std::fprintf(stderr, "prefix: slot %d kind %s restart %u of %zu\n", fin.slot, run->kind, fin.cached_tokens,
-                 outcome.prompt_ids.size());
+    std::print(stderr, "prefix: slot {:d} kind {} restart {:d} of {:d}\n", fin.slot, run->kind, fin.cached_tokens,
+               outcome.prompt_ids.size());
     std::fflush(stderr);
   }
   if (fin.reason == Finish::Error) throw std::runtime_error(fin.error);

@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <print>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -71,8 +72,8 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   require_two_devices(l0::Context::gpu_count());
   l0::Context d0(0u);
   l0::Context d1(d0, 1u);
-  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel pp: one context]\n",
-               d0.name().c_str(), d0.eu_count(), d1.name().c_str(), d1.eu_count());
+  std::print(stderr, "devices: 0 {} ({:d} EUs), 1 {} ({:d} EUs) [--parallel pp: one context]\n",
+             d0.name().c_str(), d0.eu_count(), d1.name().c_str(), d1.eu_count());
   if (!d0.can_access_peer(d1))
     throw std::runtime_error(
         "--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 "
@@ -103,34 +104,34 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   }
   runtime::PipelineOptions opt;
   runtime::PipelineEngine eng(d0, d1, std::move(stages), len, opt, a.kv);
-  std::fprintf(stderr,
-               "engine: --parallel pp, split %u; device 0 layers [0, %u): %zu launches,"
-               " %zu modules; device 1 layers [%u, %u): %zu launches, %zu modules; max_len %u,"
-               " decode attention %s, kv cache %s\n",
-               eng.split(), eng.split(),
-               eng.step(0).kernel_count, eng.step(0).modules.size(), eng.stage(1).first,
-               eng.stage(1).last, eng.step(1).kernel_count, eng.step(1).modules.size(),
-               eng.max_len(), "v2",
-               runtime::kv_cache_name(eng.kv_cache()));
+  std::print(stderr,
+             "engine: --parallel pp, split {:d}; device 0 layers [0, {:d}): {:d} launches,"
+             " {:d} modules; device 1 layers [{:d}, {:d}): {:d} launches, {:d} modules; max_len {:d},"
+             " decode attention {}, kv cache {}\n",
+             eng.split(), eng.split(),
+             eng.step(0).kernel_count, eng.step(0).modules.size(), eng.stage(1).first,
+             eng.stage(1).last, eng.step(1).kernel_count, eng.step(1).modules.size(),
+             eng.max_len(), "v2",
+             runtime::kv_cache_name(eng.kv_cache()));
   if (eng.mtp())   // spec 16d: the head on device 1, the verify lists on both
-    std::fprintf(stderr,
-                 "mtp: the head on device 1; verify lists M = 1..%u (%zu + %zu launches at every M),"
-                 " %u draft lists of %zu launches on device 1\n",
-                 runtime::MtpBuffers::kSlots, eng.verify_step(0, 1).kernel_count,
-                 eng.verify_step(1, 1).kernel_count, runtime::PipelineEngine::kMaxDraft,
-                 eng.draft_step(0).kernel_count);
+    std::print(stderr,
+               "mtp: the head on device 1; verify lists M = 1..{:d} ({:d} + {:d} launches at every M),"
+               " {:d} draft lists of {:d} launches on device 1\n",
+               runtime::MtpBuffers::kSlots, eng.verify_step(0, 1).kernel_count,
+               eng.verify_step(1, 1).kernel_count, runtime::PipelineEngine::kMaxDraft,
+               eng.draft_step(0).kernel_count);
   // Spec 16c: the prefill set up before the window (each device's scratch and context, the
   // l0-int8 column scales), so the memory lines below hold it, as one card's do.
   const bool prefill = a.prefill || a.bench_prefill;
   if (prefill) {
     eng.set_prefill_backend(a.pf.backend);
     eng.set_prefill_chunk_cap(pf.chunk_cap);   // plan 5d: the cap the plan counted
-    std::fprintf(stderr, "prefill backend: %s, both devices (spec 16c: the chunk pipeline)\n",
-                 runtime::prefill_backend_name(eng.prefill_backend()));
+    std::print(stderr, "prefill backend: {}, both devices (spec 16c: the chunk pipeline)\n",
+               runtime::prefill_backend_name(eng.prefill_backend()));
     eng.prepare_prefill();
   }
   for (uint32_t i = 0; i < runtime::kPpDevices; ++i)
-    std::fprintf(stderr, "%s\n", eng.memory_line(i).c_str());
+    std::print(stderr, "{}\n", eng.memory_line(i).c_str());
 
   const auto t0 = std::chrono::steady_clock::now();
   if (prefill)
@@ -142,36 +143,36 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   const uint32_t chunk = a.chunk ? a.chunk : eng.prefill_chunk_cap();
   if (prefill) {
     const runtime::PipelineEngine::PrefillStats& st = eng.last_prefill();
-    std::fprintf(stderr,
-                 "pp: %zu ids in %.1f ms (%.2f t/s) -- --parallel pp, %u chunks of %u, the first "
-                 "prefill launch to the first generated id in cur_token; pos %u\n",
-                 a.ids.size(), ingest_ms,
-                 ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0, st.chunks,
-                 chunk, eng.pos());
+    std::print(stderr,
+               "pp: {:d} ids in {:.1f} ms ({:.2f} t/s) -- --parallel pp, {:d} chunks of {:d}, the first "
+               "prefill launch to the first generated id in cur_token; pos {:d}\n",
+               a.ids.size(), ingest_ms,
+               ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0, st.chunks,
+               chunk, eng.pos());
     // Plan 16c Review Focus 5: each card's busy time (its chunks' walks, device timestamps)
     // against the wall - the pipeline's rate is the slower card's.
     for (uint32_t i = 0; i < runtime::kPpDevices; ++i)
-      std::fprintf(stderr,
-                   "pp: device %u busy %.1f ms (%.1f%% of the wall), %.2f ms per chunk, the "
-                   "longest %.2f ms; %zu launches (%zu expected)%s\n",
-                   i, st.busy_ms[i], st.wall_ms > 0.0 ? 100.0 * st.busy_ms[i] / st.wall_ms : 0.0,
-                   st.chunks ? st.busy_ms[i] / st.chunks : 0.0, st.busy_max_ms[i], st.launches[i],
-                   st.expected_launches[i], i == 1 ? " (with the head)" : "");
+      std::print(stderr,
+                 "pp: device {:d} busy {:.1f} ms ({:.1f}% of the wall), {:.2f} ms per chunk, the "
+                 "longest {:.2f} ms; {:d} launches ({:d} expected){}\n",
+                 i, st.busy_ms[i], st.wall_ms > 0.0 ? 100.0 * st.busy_ms[i] / st.wall_ms : 0.0,
+                 st.chunks ? st.busy_ms[i] / st.chunks : 0.0, st.busy_max_ms[i], st.launches[i],
+                 st.expected_launches[i], i == 1 ? " (with the head)" : "");
   } else {
-    std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", a.ids.size(),
-                 ingest_ms, a.ids.empty() ? 0.0 : ingest_ms / double(a.ids.size()), eng.pos());
+    std::print(stderr, "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token), pos {:d}\n", a.ids.size(),
+               ingest_ms, a.ids.empty() ? 0.0 : ingest_ms / double(a.ids.size()), eng.pos());
   }
 
   const auto report = [&](uint32_t n) {
-    std::fprintf(stderr,
-                 "generate: %u ids, %.2f t/s, %.2f ms/token (%.1f%% of it inside the fences)\n", n,
-                 eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
-                 eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
+    std::print(stderr,
+               "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token ({:.1f}% of it inside the fences)\n", n,
+               eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
+               eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   };
   if (!a.bench && a.mtp && a.run_mtp) return a.run_mtp(eng);   // spec 16d
   if (!a.bench) {
     eng.generate(a.n, [](uint32_t id) {
-      std::printf("%u\n", id);
+      std::print("{:d}\n", id);
       std::fflush(stdout);
     });
     report(a.n);
@@ -187,17 +188,17 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   const std::string tags = std::string(a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "") +
                            (a.kv == runtime::KvCache::Int8 ? " int8-kv" : "") + " pipeline2-copy-s" +
                            std::to_string(eng.split());
-  std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, tags.c_str(), a.depth, a.tg,
-              eng.last_tok_per_s(), ms_per_token);
+  std::print("| b70-decode {}{} | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha, tags.c_str(), a.depth, a.tg,
+             eng.last_tok_per_s(), ms_per_token);
   // Spec 16c: the pp row, one card's columns (tools/box_validate/summary.py reads a field
   // ending in " pp"), the configuration in the tag.
   if (a.bench_prefill)
-    std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, tags.c_str(),
-                runtime::prefill_backend_name(eng.prefill_backend()), a.depth, chunk, ingest_ms,
-                ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
-  std::fprintf(stderr,
-               "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
-               " spec 16b S1 compares it with the one-card row, interleaved.)\n");
+    std::print("| b70-decode {}{} {} pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, tags.c_str(),
+               runtime::prefill_backend_name(eng.prefill_backend()), a.depth, chunk, ingest_ms,
+               ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
+  std::print(stderr,
+             "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
+             " spec 16b S1 compares it with the one-card row, interleaved.)\n");
   return 0;
 }
 
