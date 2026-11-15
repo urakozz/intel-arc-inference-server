@@ -4,11 +4,11 @@
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
 - **123 tokens per second** for one session of Qwen3.8-27B on two cards, at the model's full 262,144-token context.
-- **141.7 tokens per second** for one session of Qwen3.8-27B on **one card** with the DFlash draft model
+- **138.5 tokens per second** for one session of Qwen3.8-27B on **one card** with the DFlash draft model
   (llama-benchy tg128); 96.2 t/s replaying a real coding-agent session.
 - **258 tokens per second in total** with 8 requests running at once.
-- **3,217 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**.
-- **Ornith 1.5 35B-A3B:** prompts read at **8,877 t/s**, answers written at **180.5 t/s on one card, 351.9 t/s on two**.
+- **2,931 tokens per second** reading a prompt on two cards.
+- **Ornith 1.5 35B-A3B:** prompts read at **9,026 t/s**, answers written at **210.0 t/s on one card** (llama-benchy tg128), 453 t/s for two requests on two cards.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 - **Faster than vLLM** on the same card and the same model files: up to **+56 %** writing and **+25 %** reading.
 
@@ -22,78 +22,51 @@ arrives faster. A **prefix cache hit** is a follow-up turn whose earlier convers
 
 ### Qwen3.8-27B
 
-One session on two cards (the default) with TP 2: **123.1 t/s**; first token in 1.84 s for a new conversation, 1.34 s
-on a prefix cache hit.
+Prefill, t/s:
 
-The serving-bench requests contain 3,425 prompt tokens and generate 512 tokens.
+| setup | 4,096-token prompt | 16,384-token prompt |
+|---|---:|---:|
+| one card | 1,788 | 1,624 |
+| two cards, `--parallel tp` | **2,931** | **2,683** |
 
-Decode with MTP, t/s - one session, or several at once (the total, per request in brackets):
+Generation, t/s (several requests: the total over all of them; DFlash is `--spec dflash` with
+[`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`](https://huggingface.co/urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound)):
 
-| setup | 1 request | 2 requests | 4 requests | 8 requests |
+| setup | code | prose | tool calls | llama-benchy tg128 |
 |---|---:|---:|---:|---:|
-| two cards, tensor parallel | **123.1** | - | - | - |
-| one card, DFlash2 | **141.7** (tg128) | - | - | - |
-| one card, DFlash2, `--max-num-seqs 4 --kv-cache int8` | 85.9 | **140.3** | 125.8 | |
-| one card, MTP, `--max-num-seqs 4 --kv-cache int8` | 75.0 | 125.4 | 129.6 | |
-| one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
-| two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
-| two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
-| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` | 82.0 | 138.5 (76.3) | 202.2 (60.6) | 250.1 (35.0) |
+| MTP, 1 request, one card | 138.2 | 56.6 | 100.1 | |
+| MTP, 1 request, two cards `tp` | 122.5 | 73.9 | 114.6 | |
+| MTP, 2 requests, two cards `replica` | 163.8 | 108.4 | 144.0 | |
+| MTP, 4 requests, two cards `replica` | 282.2 | 189.3 | 205.8 | |
+| MTP, 8 requests, two cards `replica` | 342.1 | 299.6 | 233.0 | |
+| DFlash, 1 request, one card | 163.5 | 64.8 | 111.1 | |
+| DFlash, 2 requests, two cards `replica` | 316.8 | 127.2 | 190.7 | |
+| MTP, one card, depth 0 | | | | 121.0 |
+| MTP, one card, depth 32,768 | | | | 60.9 |
+| MTP, two cards `tp`, depth 0 | | | | 112.1 |
+| MTP, two cards `tp`, depth 32,768 | | | | 87.7 |
+| DFlash, one card, depth 0 | | | | 138.5 |
+| DFlash, one card, depth 32,768 | | | | 82.9 |
 
-Decode with **DFlash** (`--spec dflash`): a small draft model,
-[`urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`](https://huggingface.co/urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound),
-guesses up to 7 tokens and the model checks them in one step. One card, one request, t/s:
+### Ornith 1.5 35B-A3B
 
-| workload | MTP | DFlash | |
-|---|---:|---:|---:|
-| llama-benchy tg128 | 72.5 | **141.7** | 1.95x |
-| llama-benchy tg128 at 32,768 tokens of context | 57.2 | 74.7 | 1.31x |
-| a recorded opencode session, replayed (78 requests, prefix cache on) | 65.9 | **96.2** | 1.46x |
-| short code, prose and tool-call prompts | 74.5 | 100.8 | 1.35x |
-
-Editing and re-emitting code: when the answer copies text already in the context, prompt lookup (on by default) proposes
-up to 15 tokens and the model checks them in one 16-row step. One card, MTP, 12 edit / copy prompts of 8k-99k tokens:
-**181 t/s** (92.3 with 3-token lookup).
-
-Time to the first token, new conversation / prefix cache hit:
-
-| setup | 1 request | 2 requests | 4 requests | 8 requests |
-|---|---:|---:|---:|---:|
-| two cards, tensor parallel (the default for one session) | **1.84 / 1.34 s** | | | |
-| two cards, `--max-num-seqs 8` | 2.30 / 1.08 s | 2.36 / 1.10 s | 3.61 / 1.65 s | 7.27 / 2.79 s |
-| two cards, `--max-num-seqs 8 --kv-cache int8` | 2.33 / 1.09 s | 2.37 / 1.11 s | 3.63 / 1.64 s | 7.30 / 2.81 s |
-| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` | **1.80 / 0.86 s** | 1.88 / 0.89 s | 2.82 / 1.33 s | 5.76 / 2.24 s |
-| one card, `--max-num-seqs 4` | 2.32 / 1.09 s | 3.52 / 1.65 s | 5.91 / 2.77 s | |
+A mixture-of-experts model (Qwen3.5 35B A3B), with the full 262,144-token context on each card.
 
 Prefill, t/s:
 
 | setup | 4,096-token prompt | 16,384-token prompt |
 |---|---:|---:|
-| one card | 1,709 | 1,539 |
-| one card, `--prefill-backend l0-int8` | 2,083 | 1,845 |
-| two cards, TP | 2,939 | 2,686 |
-| two cards, TP, `--prefill-backend l0-int8` | **3,217** | **2,937** |
+| one card | 9,026 | 7,494 |
+| two cards, `--parallel replica`, 2 requests (total) | **15,874** | **11,880** |
 
-**Against vLLM** - the same model files on one B70, one request, a 4,096-token prompt:
+Generation with MTP, t/s (two requests: the total over both):
 
-| t/s | this engine | vLLM | |
-|---|---:|---:|---:|
-| Ornith 1.5 35B-A3B, prefill | **8,877** | 7,723 | +15 % |
-| Ornith 1.5 35B-A3B, decode with MTP | **180.5** | 115.8 | +56 % |
-| Qwen3.8-27B, prefill (`--prefill-backend l0-int8`) | **2,470** | 1,973 | +25 % |
-| Qwen3.8-27B, decode with MTP | **65.1** | 45.2 | +44 % |
-| Qwen3.8-27B, decode without MTP | **33.6** | 31.5 | +7 % |
-
-### Ornith 1.5 35B-A3B
-
-A mixture-of-experts model (Qwen3.5 35B A3B), with the full 262,144-token context on each card. One request runs on
-one card; two requests run one per card and the number is the total.
-
-| t/s | 4,096-token prompt, 1 request | 2 requests | 16,384-token prompt, 1 request | 2 requests |
+| setup | code | prose | tool calls | llama-benchy tg128 |
 |---|---:|---:|---:|---:|
-| prefill | **8,877** | **15,223** | 7,135 | 12,116 |
-| decode | 140.7 | 274.2 | 126.1 | 222.7 |
-| decode with MTP | **180.5** | **351.9** | 157.0 | 260.2 |
+| MTP, 1 request, one card | 311.9 | 325.6 | 263.6 | |
+| MTP, 2 requests, two cards `replica` | 580.8 | 605.1 | 453.0 | |
+| MTP, one card, depth 0 | | | | 210.0 |
+| MTP, one card, depth 32,768 | | | | 131.0 |
 
 How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
