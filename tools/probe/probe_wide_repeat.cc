@@ -3,7 +3,9 @@
 // ids after a copy point, so the rows are a plausible copy), verify(15) - and every run's verify ids, the hh rows the
 // list wrote (the rows' post-final-norm hidden) and the head's K rows of the 16 positions compared bitwise with the
 // first run's. Differences name the rows.
-//   probe_wide_repeat <snapshot> <prompt.ids> [runs = 20] [max_len = 16384]   (cwd = the source tree)
+//   probe_wide_repeat <snapshot> <prompt.ids> [runs = 20] [max_len = 16384] [attn = rule|v2]   (cwd = the source tree)
+// attn v2: the lists recaptured with the verify attention forced to v2 (CaptureOptions::force_attn) - which kernel
+// a difference comes from.
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -14,6 +16,7 @@
 #include "l0/memory.h"
 #include "loader/loader.h"
 #include "runtime/buffers.h"
+#include "runtime/capture.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
 
@@ -43,6 +46,12 @@ int main(int argc, char** argv) {
   if (!e.wide_built()) {
     std::fprintf(stderr, "probe_wide_repeat: the engine has no wide verify list\n");
     return 2;
+  }
+  if (argc > 5 && std::string(argv[5]) == "v2") {
+    runtime::CaptureOptions o;
+    o.force_attn = runtime::VerifyAttnForce::V2;
+    e.recapture_verify(o);
+    std::printf("WIDE_REPEAT: verify attention forced to v2\n");
   }
   e.prefill(ids);
   const uint32_t pos = e.pos();
