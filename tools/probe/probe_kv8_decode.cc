@@ -7,12 +7,19 @@
 // by round against the first arm are printed.
 //
 //   probe_kv8_decode <M> <depths,...> <arm> [<arm> ...]
-//     arm = <binary>[+<reduce binary>][@dec|@red]
+//     arm = <binary>[+<reduce binary>][:x<N>[=<repeat binary>]][@dec|@red]
 //                                 int8 when the binary's name holds "KV8" or "kv8", else bf16;
 //                                 @dec: the decode launches only, @red: the reduces only;
 //                                 3l: `+<v2 binary>` takes the reduce from that binary, and a decode
 //                                 binary named *verify_dpas* / *vdpas* binds attn_verify_dpas[_kv8] at its
 //                                 own reqd_work_group_size (the verify list's pair)
+//                                 plan 33a: `:x<N>` issues the decode launch N times a layer (a 32- / 64-row
+//                                 list's chunks of the 16-row line), `=<repeat binary>` takes launches 2..N from
+//                                 that binary (a no-loads ablation: what a shared read could save)
+// M is 1..4, 8 or 16 (the verify lines spec 33 times). After each depth's rounds every arm with both halves and no
+// repeats runs once more on cleared buffers and its partials and outputs are compared word for word with arm 0's
+// (the bitwise line: 0 bad words for a probe copy of arm 0's kernel). TFLOP/s counts a DPAS arm's four products
+// (q hi / lo against K, P hi / lo against V) over its rows' keys.
 //
 // Depth is Control::pos (row 0 reads pos + 1 keys).
 #include <algorithm>
@@ -67,9 +74,10 @@ void seed(l0::Context& ctx, l0::CmdList& imm, void* dst, size_t bytes, uint32_t 
 }
 
 struct Arm {
-  std::string spec, binary, red_binary;
+  std::string spec, binary, red_binary, rep_binary;
   bool kv8 = false, dec = true, red = true, dpas = false;
-  std::unique_ptr<l0::Module> module, red_module;
+  uint32_t reps = 1;
+  std::unique_ptr<l0::Module> module, red_module, rep_module;
   std::unique_ptr<l0::CmdList> list;
   std::vector<l0::Kernel> kernels;
 };
@@ -78,7 +86,7 @@ struct Arm {
 int main(int argc, char** argv) {
   if (argc < 4) fail("usage: probe_kv8_decode <M> <depths,...> <arm> [<arm> ...]");
   const uint32_t M = uint32_t(std::stoul(argv[1]));
-  if (M < 1 || M > 4) fail("M is 1..4");
+  if (!(M >= 1 && M <= 4) && M != 8 && M != 16) fail("M is 1..4, 8 or 16");
   std::vector<uint32_t> depths;
   {
     std::stringstream ss(argv[2]);
@@ -96,6 +104,17 @@ int main(int argc, char** argv) {
     Arm& arm = arms[a];
     arm.spec = argv[3 + a];
     arm.binary = arm.spec.substr(0, arm.spec.find('@'));
+    if (arm.binary.find(':') != std::string::npos) {
+      std::string r = arm.binary.substr(arm.binary.find(':') + 1);
+      arm.binary = arm.binary.substr(0, arm.binary.find(':'));
+      if (r.empty() || r[0] != 'x') fail(arm.spec + ": a repeat is :x<N>[=<binary>]");
+      if (r.find('=') != std::string::npos) {
+        arm.rep_binary = r.substr(r.find('=') + 1);
+        r = r.substr(0, r.find('='));
+      }
+      arm.reps = uint32_t(std::stoul(r.substr(1)));
+      if (arm.reps < 1) fail(arm.spec + ": :x<N> needs N >= 1");
+    }
     if (arm.binary.find('+') != std::string::npos) {
       arm.red_binary = arm.binary.substr(arm.binary.find('+') + 1);
       arm.binary = arm.binary.substr(0, arm.binary.find('+'));
@@ -110,6 +129,7 @@ int main(int argc, char** argv) {
     (arm.kv8 ? any8 : any16) = true;
     arm.module = std::make_unique<l0::Module>(ctx, kernels::path(arm.binary));
     if (!arm.red_binary.empty()) arm.red_module = std::make_unique<l0::Module>(ctx, kernels::path(arm.red_binary));
+    if (!arm.rep_binary.empty()) arm.rep_module = std::make_unique<l0::Module>(ctx, kernels::path(arm.rep_binary));
   }
   // Per layer: its own K / V (and scales) at `capacity` positions.
   const size_t kv8_bytes = size_t(capacity) * kKvRow, kv16_bytes = kv8_bytes * 2, sc_bytes = size_t(capacity) * 4 * 2;
@@ -158,14 +178,14 @@ int main(int argc, char** argv) {
     imm.copy(gate.ptr(), h.data(), gate.size());
   }
   for (Arm& arm : arms) {
-    arm.kernels.reserve(2 * kLayers);
+    arm.kernels.reserve((arm.reps + 1) * kLayers);
     arm.list = std::make_unique<l0::CmdList>(l0::CmdList::regular(ctx));
     const std::string dn = arm.dpas ? (arm.kv8 ? "attn_verify_dpas_kv8" : "attn_verify_dpas")
                                     : (arm.kv8 ? "attn_decode_v2_kv8" : "attn_decode_v2");
     const std::string rn = arm.kv8 ? "attn_reduce_v2_kv8" : "attn_reduce_v2";
     for (uint32_t l = 0; l < kLayers; ++l) {
-      if (arm.dec) {
-        arm.kernels.push_back(arm.module->kernel(dn.c_str()));
+      for (uint32_t r = 0; arm.dec && r < arm.reps; ++r) {
+        arm.kernels.push_back((r > 0 && arm.rep_module ? arm.rep_module : arm.module)->kernel(dn.c_str()));
         l0::Kernel& k = arm.kernels.back();
         if (arm.dpas) {
           ze_kernel_properties_t p{};
@@ -229,11 +249,36 @@ int main(int argc, char** argv) {
       std::sort(ratio[a].begin(), ratio[a].end());
       const double bytes = double(depth + M) * kKvRow * 2 * (arms[a].kv8 ? 1 : 2) * kLayers +
                            (arms[a].kv8 ? double(depth + M) * 4 * 2 * 2 * kLayers : 0.0);
-      std::printf("depth %6u M %u %-34s %8.3f ms  %6.1f GB/s  x arm0 %.4f [%.4f, %.4f]\n", depth, M,
-                  arms[a].spec.c_str(), ms[a][5], arms[a].dec ? bytes / ms[a][5] / 1e6 : 0.0, ratio[a][5],
-                  ratio[a].front(), ratio[a].back());
+      // four products of rows x keys x 256 dims a q head (row m reads depth + m + 1 keys)
+      const double flops = 8.0 * 256 * kHeads * (double(depth) * M + double(M) * (M + 1) / 2) * kLayers * arms[a].reps;
+      std::printf("depth %6u M %2u %-48s %8.3f ms  %6.1f GB/s  %5.1f TFLOP/s  x arm0 %.4f [%.4f, %.4f]\n", depth, M,
+                  arms[a].spec.c_str(), ms[a][5], arms[a].dec ? bytes / ms[a][5] / 1e6 : 0.0,
+                  arms[a].dec && arms[a].dpas ? flops / ms[a][5] / 1e9 : 0.0, ratio[a][5], ratio[a].front(),
+                  ratio[a].back());
     }
     std::fflush(stdout);
+    // The bitwise line: every arm with both halves and no repeats against arm 0, on cleared buffers.
+    if (arms[0].dec && arms[0].red && arms[0].reps == 1) {
+      auto snap = [&](Arm& arm, std::vector<uint32_t>& words) {
+        imm.fill(part.ptr(), 0x7FAFF00Du, part.size());
+        imm.fill(out.ptr(), 0xA55AA55Au, out.size());
+        once(arm);
+        words.resize((part.size() + out.size()) / 4);
+        imm.copy(words.data(), part.ptr(), part.size());
+        imm.copy(words.data() + part.size() / 4, out.ptr(), out.size());
+      };
+      std::vector<uint32_t> ref, got;
+      snap(arms[0], ref);
+      for (size_t a = 1; a < n; ++a) {
+        if (!arms[a].dec || !arms[a].red || arms[a].reps != 1) continue;
+        snap(arms[a], got);
+        size_t bad = 0;
+        for (size_t i = 0; i < ref.size(); ++i) bad += ref[i] != got[i];
+        std::printf("depth %6u M %2u bitwise %-40s vs arm0: %zu bad words of %zu\n", depth, M, arms[a].spec.c_str(),
+                    bad, ref.size());
+      }
+      std::fflush(stdout);
+    }
   }
   return 0;
 }

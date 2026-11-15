@@ -3,7 +3,7 @@
 // word of v2's reduce over them, bf16 KV at M = 2..8 (the built lists) and int8 KV at M = 2..4. Depths through the
 // block-stride changes and the long tails, all rows and one inactive, two input fills (patterned scales with -0,
 // subnormals and the largest finite code; then every finite fp16 code cycled over the positions).
-//   attn_verify_bitwise_test [--negative] [--cand <prefix>] [--max-m <M>]
+//   attn_verify_bitwise_test [--negative] [--cand <prefix>] [--min-m <M>] [--max-m <M>]
 //     --negative: V is zeroed between the two runs - the comparison must fail;
 //     --cand: the candidate is <prefix>M<M>[_KV8] (a kernel-dir-relative probe build) instead of production's.
 #include <algorithm>
@@ -152,11 +152,12 @@ size_t compare(pf_harness::Dev& d, Step& a, Step& b, size_t* finite) {
 int main(int argc, char** argv) {
   bool negative = false;
   std::string cand;
-  uint32_t max_m = 8;
+  uint32_t min_m = 2, max_m = 8;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--negative") negative = true;
     else if (arg == "--cand" && i + 1 < argc) cand = argv[++i];
+    else if (arg == "--min-m" && i + 1 < argc) min_m = uint32_t(std::stoul(argv[++i]));
     else if (arg == "--max-m" && i + 1 < argc) max_m = uint32_t(std::stoul(argv[++i]));
     else { std::fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
   }
@@ -174,7 +175,7 @@ int main(int argc, char** argv) {
     if (fill == 1) input.every_scale(d);
     for (const auto& [M, kv8] : shapes) {
       if (fill == 1 && !kv8) continue;   // the scales are the int8 form's
-      if (M > max_m) continue;
+      if (M < min_m || M > max_m) continue;
       Step before(d, input, true, M, kv8), candidate(d, input, false, M, kv8, cand);
       for (uint32_t pos : {0u, 1u, 15u, 31u, 32u, 63u, 64u, 2047u, 2048u, 2049u, 4093u, 4095u, 4096u, 11583u, 11585u,
                            32768u, 81920u, 149999u, 150000u, 150015u}) {
