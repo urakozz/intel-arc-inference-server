@@ -367,6 +367,7 @@ class Engine {
   // caller's: a slot's session continues only across an identity rewrite). Throws for a wrong length or no
   // permutation, or with one slot.
   const std::vector<uint32_t>& kv_page_table() const { return pages_; }
+  const void* kv_page_table_device() const { return slot_bufs_ ? slot_bufs_->pages.ptr() : nullptr; }
   void set_kv_page_table(const std::vector<uint32_t>& table);
   // The cache row (every FA layer's, main and head) of slot q's position p.
   uint32_t kv_row(uint32_t slot, uint32_t p) const;

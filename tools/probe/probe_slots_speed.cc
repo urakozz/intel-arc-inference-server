@@ -6,6 +6,10 @@
 //
 // --depths: each slot's prefill length (default every slot `depth`) - e.g. slot 0 deep beside short slots.
 // --arms: only the arms of these names (as printed, e.g. "1 plain|4 K=1,1,1,1"), in the order below.
+// --list-ab N (plan 19v3b Task 0): instead of the arms, slot 0's plain decode list captured twice on the same buffers -
+//   contiguous (runtime::build's default binding: one-slot's binaries) and paged (the slot's page table, the identity) -
+//   and N replays of each, alternating (A B, then B A), each replay one plain step at slot 0's growing position: the
+//   median ms a step of each and paged / contiguous. Same process, same KV, same clocks: the paging's whole-step cost.
 //
 // One engine (Qwen3.8, its MTP head, the int8 lm_head - the served form) with the given slots (default 4 x 32768),
 // every slot prefilled with `depth` ids of tests/golden/prompts/long32k.ids (each from its own offset). Then, per
@@ -34,6 +38,8 @@
 #include <vector>
 
 #include "l0/context.h"
+#include "l0/fence.h"
+#include "l0/queue.h"
 #include "loader/loader.h"
 #include "runtime/engine.h"
 
@@ -167,6 +173,7 @@ int main(int argc, char** argv) {
   uint32_t depth = 4096, steps = 48, rounds = 3;
   std::vector<uint32_t> depths;
   std::vector<std::string> only;
+  uint32_t list_ab = 0;
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -176,6 +183,7 @@ int main(int argc, char** argv) {
     else if (a == "--steps") steps = uint32_t(std::stoul(next()));
     else if (a == "--rounds") rounds = uint32_t(std::stoul(next()));
     else if (a == "--depths") depths = parse_list(next());
+    else if (a == "--list-ab") list_ab = uint32_t(std::stoul(next()));
     else if (a == "--arms") {
       const std::string l = next();
       for (size_t b = 0; b <= l.size();) {
@@ -216,6 +224,37 @@ int main(int argc, char** argv) {
     const Clock::time_point t0 = Clock::now();
     e.prefill(ids);
     std::printf("prefill: slot %u, %u ids in %.2f s\n", q, depths[q], ms_since(t0) / 1000);
+  }
+  if (list_ab) {
+    e.select(0);
+    runtime::SlotBind paged;
+    paged.pages = e.kv_page_table_device();
+    runtime::CapturedStep la = runtime::build(ctx, e.model(), e.buffers()),
+                          lb = runtime::build(ctx, e.model(), e.buffers(), nullptr, nullptr, 1, {}, paged);
+    l0::Queue q(ctx);
+    l0::Fence f(q);
+    e.control()->n_active = 1;
+    auto one = [&](runtime::CapturedStep& l) {
+      const Clock::time_point t0 = Clock::now();
+      q.execute(l.list, &f);
+      f.wait();
+      return ms_since(t0);
+    };
+    for (int i = 0; i < 8; ++i) one(la), one(lb);   // warm-up
+    std::vector<double> ta, tb;
+    for (uint32_t i = 0; i < list_ab; ++i) {
+      if (i % 2) {
+        tb.push_back(one(lb));
+        ta.push_back(one(la));
+      } else {
+        ta.push_back(one(la));
+        tb.push_back(one(lb));
+      }
+    }
+    const double ma = median(ta), mb = median(tb);
+    std::printf("list-ab: slot 0 at %u..%u, %u steps an arm: contiguous %.3f ms, paged %.3f ms, paged / contiguous "
+                "%.4f\n", depths[0], e.pos(), list_ab, ma, mb, mb / ma);
+    return 0;
   }
   std::vector<Arm> arms;
   arms.push_back(arm("1 plain", 1, 0));
