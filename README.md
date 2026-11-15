@@ -6,7 +6,7 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 - **123 tokens per second** for one session of Qwen3.8-27B on two cards, at the model's full 262,144-token context.
 - **138.5 tokens per second** for one session of Qwen3.8-27B on **one card** with the DFlash draft model
   (llama-benchy tg128); 96.2 t/s replaying a real coding-agent session.
-- **258 tokens per second in total** with 8 requests running at once.
+- **342 tokens per second in total** with 8 requests running at once (Qwen3.8-27B, two cards).
 - **2,931 tokens per second** reading a prompt on two cards.
 - **Ornith 1.5 35B-A3B:** prompts read at **9,026 t/s**, answers written at **210.0 t/s on one card** (llama-benchy tg128), 453 t/s for two requests on two cards.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
