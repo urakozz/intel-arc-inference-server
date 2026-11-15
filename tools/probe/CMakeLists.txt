@@ -528,6 +528,17 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   b70_target_kernel_dir(probe_kv_paged_attn)
   add_dependencies(probe_kv_paged_attn ${BS_KERNELS})
 endif()
+# --- probe_df_attn_seqs: plan 19v3b, the drafter's attention as blocks of several slots over their own rings ---
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(probe_df_attn_seqs probe_df_attn_seqs.cc)
+  target_include_directories(probe_df_attn_seqs PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(probe_df_attn_seqs PRIVATE b70_l0)
+  b70_target_kernel_dir(probe_df_attn_seqs)
+  add_dependencies(probe_df_attn_seqs kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4
+                   kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4
+                   kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4_SEQS
+                   kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_SEQS)
+endif()
 # --- probe_draft_cost: spec 19a Task 4, one DFlash2 block's GEMVs (int8 / bf16 / int4) ---
 # Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Random weights of
 # the drafter's shapes (draft_cost_shapes.h); the binaries are B70_VERIFY_M8's
