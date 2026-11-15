@@ -15,6 +15,8 @@ An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and b
 - Every changed line should trace to the task. Match the surrounding code's style, naming and comment density.
 - Mention unrelated dead code you notice; don't remove it.
 - No single-use abstractions, and no error handling for cases that cannot happen.
+- Text a user sees (help, errors, warnings, startup and log lines) never names internal specs, plans, items or
+  decision codes ("spec 19f", "plan 13c", "D5"): say what is true and what to do instead. Code comments may cite them.
 
 ## Deciding and testing
 
