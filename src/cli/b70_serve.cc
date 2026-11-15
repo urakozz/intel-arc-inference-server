@@ -561,11 +561,14 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
              options.host.c_str(), options.port, s.max_len);
   print_eos(eos);
   std::print(stderr,
-             ", Qwen3.8-Flash-Next --layers {:d} ({} chat format), {}, prefill backend l0 (chunk {:d}), attention {} "
+             ", Qwen3.8-Flash-Next {} ({} chat format), {}, prefill backend l0 (chunk {:d}), attention {} "
              "(B70_Q4_ATTN), mtp {:d}{}, lm_head {}, kv cache bf16, sampling defaults: greedy unless the request "
              "samples, prefix snapshots: state {:d} B (GDN, PLE, indexer tails{}), blocks {:d} B a "
              "position\n",
-             engine.model().desc.layers, options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
+             engine.model().desc.layers < engine.model().checkpoint_layers
+                 ? "--layers " + std::to_string(engine.model().desc.layers)
+                 : std::string("whole"),
+             options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
              runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
              engine.mtp() ? (std::string(" (the head, fixed K: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
                              " norm, reuse selection" +
