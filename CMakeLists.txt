@@ -1,7 +1,21 @@
 cmake_minimum_required(VERSION 3.22)
+# C++26 with static reflection (src/common/json_reflect.h) needs GCC 16: the box's /usr/local/bin/g++-16.2 unless a
+# compiler is named (-DCMAKE_CXX_COMPILER or CXX). Set before project(), which fixes the compiler.
+set(B70_GXX /usr/local/bin/g++-16.2)
+if(NOT CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+  if(NOT EXISTS ${B70_GXX})
+    message(FATAL_ERROR "${B70_GXX} not found: this build needs GCC 16 (C++26 with -freflection). Install GCC 16.2 "
+                        "there, or name another GCC 16 with -DCMAKE_CXX_COMPILER=...")
+  endif()
+  set(CMAKE_CXX_COMPILER ${B70_GXX})
+endif()
 project(b70_inference_server LANGUAGES CXX)
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
+  message(FATAL_ERROR "${CMAKE_CXX_COMPILER} is ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}: this build "
+                      "needs GCC 16 (C++26 with -freflection), ${B70_GXX} on the box")
+endif()
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 if(NOT CMAKE_BUILD_TYPE)

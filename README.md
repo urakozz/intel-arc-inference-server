@@ -59,7 +59,7 @@ How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Install
 
-You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, g++, CMake and
+You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, GCC 16 (`g++-16.2`), CMake and
 Rust (for the tokenizer). The fast single session on two cards needs peer-to-peer between them (native from kernel
 7.4).
 
