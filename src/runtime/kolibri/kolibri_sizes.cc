@@ -53,20 +53,47 @@ size_t partials_floats(const model::Kolibri1Desc& d) {
   return m;
 }
 
-ScratchSizes scratch_sizes(const model::Kolibri1Desc& d) {
+ScratchSizes scratch_sizes(const model::Kolibri1Desc& d, uint32_t M) {
   ScratchSizes s;
-  s.resid = s.x = s.a = s.mo = size_t(kM) * d.hidden * 2;
-  s.partials = partials_floats(d) * kM * 4;
-  s.sumsq_a = s.sumsq_r = size_t(kNormG) * kM * 4;
-  s.attn_q = size_t(kM) * d.q_n() * 4;
-  s.attn_part = size_t(d.q_heads) * kAttnTgt * kM * kAttnPart * 4;
-  s.attn_out = size_t(kM) * d.q_n() * 2;
-  s.logits_r = size_t(kM) * d.router_n() * 4;
-  s.routes = size_t(d.layers) * kM * kRouteWords * 4;
-  s.moe_h = size_t(kM) * kSlots * d.moe_inter * 2;
-  s.logits = size_t(kM) * d.vocab * 4;
-  s.argmax_part = size_t(kM) * ((d.vocab + kArgmaxChunk - 1) / kArgmaxChunk) * 2 * 4;
+  s.resid = s.x = s.a = s.mo = size_t(M) * d.hidden * 2;
+  s.partials = partials_floats(d) * M * 4;
+  s.sumsq_a = s.sumsq_r = size_t(kNormG) * M * 4;
+  s.attn_q = size_t(M) * d.q_n() * 4;
+  s.attn_part = size_t(d.q_heads) * kAttnTgt * std::min(M, kAttnRowsMax) * kAttnPart * 4;
+  s.attn_out = size_t(M) * d.q_n() * 2;
+  s.logits_r = size_t(M) * d.router_n() * 4;
+  s.routes = size_t(d.layers) * M * kRouteWords * 4;
+  s.moe_h = size_t(M) * kSlots * d.moe_inter * 2;
+  s.logits = size_t(M) * d.vocab * 4;
+  s.argmax_part = size_t(M) * ((d.vocab + kArgmaxChunk - 1) / kArgmaxChunk) * 2 * 4;
   return s;
+}
+
+// --- Kolibri DSpark: the verify lists ------------------------------------------------------------------
+VerifySizes verify_sizes(const model::Kolibri1Desc& d) {
+  VerifySizes v;
+  v.scratch = scratch_sizes(d, kVerifyRows);
+  v.control_hi = sizeof(Control);
+  return v;
+}
+PpLandingLayout verify_landing_layout(const model::Kolibri1Desc& d) {
+  return pp_landing_layout(size_t(kVerifyRows) * d.hidden * 2, size_t(kNormG) * kVerifyRows * 4);
+}
+size_t verify_link_bytes(const model::Kolibri1Desc& d, uint32_t dev) { return dev == 0 ? 0 : verify_landing_layout(d).total; }
+size_t verify_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, uint32_t M) {
+  return device_launches(d, p, dev, KolAttn::Flash) + (M > kAttnRowsMax ? size_t(p.count(dev)) * 2 : 0);
+}
+uint32_t drafter_prefill_r0(uint32_t pos, uint32_t C, uint32_t end, uint32_t window, bool hooked, uint32_t block) {
+  const uint32_t stop = pos + C;
+  if (hooked && block != 0 && stop < end && stop % block == 0) return C > window ? C - window : 0;
+  const uint32_t from = end > window ? end - window : 0;
+  return from > pos ? std::min(C, from - pos) : 0;
+}
+size_t spec_device_bytes(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, const SpecReserve& s) {
+  size_t b = 0;
+  if (s.verify) b += verify_sizes(d).total() + (p.devices == 2 ? verify_link_bytes(d, dev) : 0);
+  if (dev + 1 == p.devices) b += s.drafter + s.replica;
+  return b;
 }
 
 size_t attn_scores_bytes(const model::Kolibri1Desc& d, uint32_t max_len, KolAttn a) {
@@ -188,17 +215,20 @@ size_t prefill_state(const model::Kolibri1Desc& d, uint32_t devices, uint32_t de
 }
 }  // namespace
 
-PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, KolAttn a, bool prefill) {
+PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, KolAttn a, bool prefill,
+                   const SpecReserve& spec) {
   if (d.layers < 2) throw std::invalid_argument(d.name + ": " + std::to_string(d.layers) + " layer(s), nothing to split");
   const size_t rope = d.rope_table_bytes(max_len), state = fixed_state(d, max_len, a);
-  const size_t dev0 = loader::kol_embed_bytes(d) + rope + state + link_bytes(d, 0) + prefill_state(d, 2, 0, prefill);
+  const model::KolPlacement two = model::KolPlacement::two(d, 1);   // the spec terms do not depend on the split
+  const size_t dev0 = loader::kol_embed_bytes(d) + rope + state + link_bytes(d, 0) + prefill_state(d, 2, 0, prefill) +
+                      spec_device_bytes(d, two, 0, spec);
   const size_t dev1 = loader::kol_final_norm_bytes(d) + loader::kol_lm_head_bytes(d, int8_head) + rope + state +
-                      link_bytes(d, 1) + prefill_state(d, 2, 1, prefill);
+                      link_bytes(d, 1) + prefill_state(d, 2, 1, prefill) + spec_device_bytes(d, two, 1, spec);
   return pp_balance(pp_layer_bytes(d, max_len), dev0, dev1);
 }
 
 std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,
-                             bool int8_head, bool debug_tap, KolAttn a, bool prefill) {
+                             bool int8_head, bool debug_tap, KolAttn a, bool prefill, const SpecReserve& spec) {
   model::validate(p, d);
   std::vector<DevicePlan> out(p.devices);
   for (uint32_t dev = 0; dev < p.devices; ++dev) {
@@ -215,19 +245,22 @@ std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlace
     dp.decode_state = ps.control + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a) +
                       (debug_tap ? tap_bytes(d) : 0) + dp.link;
     dp.prefill_scratch = prefill_state(d, p.devices, dev, prefill);
+    if (spec.verify)   // Kolibri DSpark: the verify scratch, control_hi and (device 1) the verify link
+      dp.decode_state += verify_sizes(d).total() + (p.devices > 1 ? verify_link_bytes(d, dev) : 0);
+    if (dev + 1 == p.devices) dp.drafter = spec.drafter + spec.replica;
   }
   return out;
 }
 
 uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlacement& p, bool int8_head,
                            const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap,
-                           bool prefill) {
+                           bool prefill, const SpecReserve& spec) {
   if (cap == 0 || cap > d.trained_max_len) cap = d.trained_max_len;
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("kolibri::max_len_that_fits: the cap " + std::to_string(cap) + " is below one " +
                                 std::to_string(kMaxLenQuantum) + "-position quantum");
   const auto fits = [&](uint32_t len) {
-    const std::vector<DevicePlan> pl = plan(d, p, len, int8_head, false, kolibri_attn(), prefill);
+    const std::vector<DevicePlan> pl = plan(d, p, len, int8_head, false, kolibri_attn(), prefill, spec);
     for (uint32_t i = 0; i < p.devices; ++i)
       if (pl[i].total() + reserve > device_bytes[i]) return false;
     return true;
@@ -247,28 +280,31 @@ uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlaceme
 
 PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,
                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap,
-                          bool prefill) {
+                          bool prefill, const SpecReserve& spec) {
   uint32_t best_len = 0;
   for (uint32_t s = 1; s < d.layers; ++s) {
     const uint32_t len =
-        max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill);
+        max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill, spec);
     best_len = std::max(best_len, len);
   }
   if (best_len == 0) return {};
   // At that length, the split by bytes - 16b's rule - among the splits that reach it.
-  const PpBalance b = pp_split(d, best_len, int8_head, kolibri_attn(), prefill);
-  if (max_len_that_fits(d, model::KolPlacement::two(d, b.split), int8_head, device_bytes, reserve, cap, prefill) ==
+  const PpBalance b = pp_split(d, best_len, int8_head, kolibri_attn(), prefill, spec);
+  if (max_len_that_fits(d, model::KolPlacement::two(d, b.split), int8_head, device_bytes, reserve, cap, prefill, spec) ==
       best_len)
     return {b.split, best_len};
   for (uint32_t s = 1; s < d.layers; ++s)   // the balanced split does not reach it: the first that does
-    if (max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill) == best_len)
+    if (max_len_that_fits(d, model::KolPlacement::two(d, s), int8_head, device_bytes, reserve, cap, prefill, spec) ==
+        best_len)
       return {s, best_len};
   return {};
 }
 
-bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve, bool prefill) {
+bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve, bool prefill,
+                   const SpecReserve& spec) {
   const uint32_t len = std::min(kMinAutoMaxLen, d.trained_max_len);
-  const std::vector<DevicePlan> pl = plan(d, model::KolPlacement::one(d), len, int8_head, false, kolibri_attn(), prefill);
+  const std::vector<DevicePlan> pl =
+      plan(d, model::KolPlacement::one(d), len, int8_head, false, kolibri_attn(), prefill, spec);
   return pl[0].total() + reserve <= device_bytes;
 }
 

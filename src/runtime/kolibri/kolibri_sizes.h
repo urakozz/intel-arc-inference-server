@@ -78,7 +78,9 @@ struct ScratchSizes {
            moe_h + logits + argmax_part;
   }
 };
-ScratchSizes scratch_sizes(const model::Kolibri1Desc& d);
+// `M` (Kolibri DSpark): the verify lists' scratch at M rows; attn_part holds at most kol_attn.cl's 4 rows (a deeper verify
+// runs its attention in two launches over the same parts).
+ScratchSizes scratch_sizes(const model::Kolibri1Desc& d, uint32_t M = kM);
 size_t partials_floats(const model::Kolibri1Desc& d);
 // Eager's score row, fp32 [M][q_heads][max_len]; 0 under flash.
 size_t attn_scores_bytes(const model::Kolibri1Desc& d, uint32_t max_len, KolAttn a = kolibri_attn());
@@ -186,14 +188,54 @@ size_t prefill_device_launches(const model::Kolibri1Desc& d, const model::KolPla
 size_t prefill_chunk_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p);
 inline constexpr size_t kPrefillHeadLaunches = 5;   // fold + norm over the last row, lm_head, argmax x 2
 
+// --- Kolibri DSpark: the verify lists (speculative decoding, KolibriEngine::enable_spec) ------------
+// The decode list at M = K + 1 rows, 2..8, one captured list per M and device (runtime/kolibri/kolibri_capture.h
+// build_verify), over its OWN scratch at kVerifyRows rows - a plain run allocates and binds exactly 20c's - plus a second
+// Control block (control_hi: the attention's rows 4..M-1 at pos + 4, kol_attn.cl being built to M 4) and, two cards, a
+// verify link sized for 8 rows. Every kernel computes row m as at M = 1, so a verify row is decode's row at that position
+// (the GEMVs' and the norms' per-row order; kol_attn.cl's per-row key bound and absolute 64-key blocks).
+inline constexpr uint32_t kVerifyRows = 8;     // M <= 8: Control::cur_token's 8 ids, DSpark's block
+inline constexpr uint32_t kAttnRowsMax = 4;    // kol_attn.cl's M bound (kernels::kolibri::kAttnMaxM)
+struct VerifySizes {
+  ScratchSizes scratch;   // scratch_sizes(d, kVerifyRows)
+  size_t control_hi = 0;  // runtime::Control, shared memory
+  size_t total() const { return scratch.total() + control_hi; }
+};
+VerifySizes verify_sizes(const model::Kolibri1Desc& d);
+// The verify hand-off: kVerifyRows rows of the residual and their [kNormG][M] sums (a step moves M rows).
+PpLandingLayout verify_landing_layout(const model::Kolibri1Desc& d);
+size_t verify_link_bytes(const model::Kolibri1Desc& d, uint32_t dev);
+// A verify list's launches on one device (the hand-off's and the taps' copies excluded): the flash decode list's at M rows,
+// plus the second attention half (decode + reduce) in every layer when M > 4.
+size_t verify_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, uint32_t M);
+// Layer l's route rows in a scratch of M rows (route_at at M = 1).
+inline size_t route_at_rows(uint32_t layer, uint32_t M) { return size_t(layer) * M * kRouteWords * 4; }
+// The drafter's prefill tail (Bolt's rule, spec 26 Decision 7): the first row of chunk [pos, pos + C) whose taps the drafter
+// projects - the rows inside its window of the call's end, and with a block hook the last min(C, window) rows of a chunk
+// ending at a mid-prompt block end. C when none.
+uint32_t drafter_prefill_r0(uint32_t pos, uint32_t C, uint32_t end, uint32_t window, bool hooked, uint32_t block);
+// The staging those rows land in: bf16 [window][taps][hidden] on the drafter's device (52,428,800 B for DSpark).
+inline size_t prefill_taps_bytes(uint32_t window, uint32_t n_taps, uint32_t hidden) {
+  return size_t(window) * n_taps * hidden * 2;
+}
+// What the verify lists and a drafter add on each device, for the planner (DevicePlan::decode_state and drafter): the
+// verify scratch and control_hi on every device, the verify link on device 1; `drafter` (weights + buffers + its
+// prefill staging) and `replica` (the embedding the draft list gathers from: 655,360,000 B) on the LAST device.
+struct SpecReserve {
+  bool verify = false;
+  size_t drafter = 0, replica = 0;
+};
+size_t spec_device_bytes(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, const SpecReserve& s);
+
 // --- the split by bytes (16b's rule) -------------------------------------------------------------
 // layer_bytes[l] = kol_layer_bytes(d).total() + (is_sliding(l) ? ring_bytes_per_layer : max_len x 2 x kv_n x 2)
 std::vector<size_t> pp_layer_bytes(const model::Kolibri1Desc& d, uint32_t max_len);
 // dev0_fixed = embedding + RoPE + decode scratch + control + link (device 0); dev1_fixed = final norm +
 // lm_head + RoPE + decode scratch + control + link (device 1) - then runtime::pp_balance. `prefill`
 // (spec 20d): both devices' fixed bytes also hold the prefill scratch and the prefill link.
+// `spec` (Kolibri DSpark): the verify lists' and the drafter's bytes (spec_device_bytes) on each device.
 PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, KolAttn a = kolibri_attn(),
-                   bool prefill = false);
+                   bool prefill = false, const SpecReserve& spec = {});
 
 // --- the planner -----------------------------------------------------------------------------------
 // One device's plan in memory_line()'s components: model = its weights + its RoPE table; kv = its
@@ -203,21 +245,24 @@ struct DevicePlan : MemoryComponents {
   uint32_t device = 0;
   size_t weights = 0, rope = 0, link = 0, full_kv = 0, rings = 0;
 };
+// `spec` (Kolibri DSpark): decode_state += the verify scratch, control_hi and link; drafter = the drafter + its replica on
+// the last device.
 std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t max_len,
-                             bool int8_head, bool debug_tap = false, KolAttn a = kolibri_attn(), bool prefill = false);
+                             bool int8_head, bool debug_tap = false, KolAttn a = kolibri_attn(), bool prefill = false,
+                             const SpecReserve& spec = {});
 // The largest multiple of kMaxLenQuantum, at most min(cap, trained 262144), whose plan + reserve fits
 // EVERY device; 0 when not even min(kMinAutoMaxLen, cap) does.
 uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlacement& p, bool int8_head,
                            const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,
-                           bool prefill = false);
+                           bool prefill = false, const SpecReserve& spec = {});
 // `--pipeline-split auto` with `--max-len auto`: pp_auto_split_and_len's rule over pp_split - the split
 // whose min-over-devices max_len is the largest, ties broken by pp_balance at that length.
 PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,
                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,
-                          bool prefill = false);
+                          bool prefill = false, const SpecReserve& spec = {});
 // Whether `--parallel 1` may run: the one-card plan at min(kMinAutoMaxLen, trained) fits device_bytes - reserve.
 bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve,
-                   bool prefill = false);
+                   bool prefill = false, const SpecReserve& spec = {});
 // "pipeline plan at max_len N, split s (layers [0, s) | [s, L)):" + one line per device
 // (runtime::pp_describe's text; "plan at max_len N (one card):" for one device).
 std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement& pl, uint32_t max_len,

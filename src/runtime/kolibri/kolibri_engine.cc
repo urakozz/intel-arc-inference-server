@@ -1,5 +1,6 @@
 #include "runtime/kolibri/kolibri_engine.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
@@ -110,6 +111,10 @@ void KolibriEngine::reset() {
                              std::to_string(opt_.prefill_timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
   if (link_) link_->zero(st(1).imm);
+  if (vlink_) vlink_->zero(st(1).imm);                                // Kolibri DSpark
+  if (drafter_) drafter_->reset(st(uint32_t(st_.size()) - 1).imm);    // Kolibri DSpark: a cold drafter
+  verify_k_ = kNoVerify;
+  logits_row_ = -1;
   broken_ = false;
   drop_next_ = false;
 }
@@ -121,6 +126,7 @@ void KolibriEngine::fail(const std::string& what) {
 
 void KolibriEngine::step_once() {
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
+  logits_row_ = -1;   // Kolibri DSpark: this step's row is the decode scratch's
   Stage& last = st(uint32_t(st_.size()) - 1);
   const size_t pos = last.ctl->pos, n = last.ctl->n_active;
   if (pos + n > size_t(max_len_))
@@ -170,6 +176,11 @@ void KolibriEngine::ingest(const std::vector<uint32_t>& ids) {
   for (uint32_t id : ids) {
     for (auto& s : st_) s->ctl->n_active = 1;
     set_token(id);
+    if (spec_on()) {   // Kolibri DSpark: one plain token through the M = 1 verify list (a drafter's ring stays filled)
+      verify(nullptr, 0);
+      commit(0, verify_ids()[0]);
+      continue;
+    }
     step_once();
   }
 }
@@ -183,7 +194,12 @@ std::vector<uint32_t> KolibriEngine::generate(uint32_t n, const std::function<vo
   for (uint32_t i = 0; i < n; ++i) {
     const uint32_t id = st(uint32_t(st_.size()) - 1).ctl->cur_token[0];   // == device 0's after the mirror
     const Clock::time_point f0 = Clock::now();
-    step_once();
+    if (spec_on()) {   // Kolibri DSpark: the plain token through the M = 1 verify list
+      verify(nullptr, 0);
+      commit(0, verify_ids()[0]);
+    } else {
+      step_once();
+    }
     fence_ms += ms_since(f0);
     out.push_back(id);
     if (on_token) on_token(id);
@@ -230,14 +246,19 @@ std::vector<uint32_t> KolibriEngine::read_routes() {
 }
 
 std::vector<float> KolibriEngine::read_logits() {
-  Stage& s = st(uint32_t(st_.size()) - 1);
   std::vector<float> v(model_.desc.vocab);
-  s.imm.copy(v.data(), s.buffers.logits.ptr(), v.size() * 4);
+  read_logits_into(v.data());
   return v;
 }
 
 void KolibriEngine::read_logits_into(float* host) {
-  Stage& s = st(uint32_t(st_.size()) - 1);
+  const uint32_t last = uint32_t(st_.size()) - 1;
+  Stage& s = st(last);
+  if (logits_row_ >= 0) {   // Kolibri DSpark: the last commit's row j of the verify scratch (the row its next id came from)
+    s.imm.copy(host, static_cast<const uint8_t*>(vb_[last]->logits.ptr()) + size_t(logits_row_) * model_.desc.vocab * 4,
+               size_t(model_.desc.vocab) * 4);
+    return;
+  }
   s.imm.copy(host, s.buffers.logits.ptr(), size_t(model_.desc.vocab) * 4);
 }
 
@@ -262,7 +283,10 @@ void KolibriEngine::settle_all(const char* what) {
                                std::to_string(opt_.timeout_ms) + " ms");
 }
 
-size_t KolibriEngine::state_bytes() const { return state_snapshot_bytes(model_.desc); }
+// Kolibri DSpark: with a drafter, its ring after the target's state (19d's rule).
+size_t KolibriEngine::state_bytes() const {
+  return state_snapshot_bytes(model_.desc) + (drafter_ ? drafter_->ring_bytes() : 0);
+}
 size_t KolibriEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, n_pos); }
 
 void KolibriEngine::save_state(void* host) {
@@ -275,6 +299,7 @@ void KolibriEngine::save_state(void* host) {
       st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, r.bytes);
     h += r.bytes;
   }
+  if (drafter_) drafter_->save_ring(st(uint32_t(st_.size()) - 1).imm, h);   // Kolibri DSpark: the ring
 }
 
 void KolibriEngine::load_state(const void* host, uint32_t p) {
@@ -288,6 +313,9 @@ void KolibriEngine::load_state(const void* host, uint32_t p) {
     st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, r.tensor).ptr()) + r.offset, h, r.bytes);
     h += r.bytes;
   }
+  if (drafter_) drafter_->load_ring(st(uint32_t(st_.size()) - 1).imm, h);   // Kolibri DSpark
+  verify_k_ = kNoVerify;
+  logits_row_ = -1;
   for (auto& s : st_) {
     s->ctl->pos = p;
     s->ctl->n_active = 0;
@@ -339,7 +367,194 @@ MemoryComponents KolibriEngine::memory_use(uint32_t dev) const {
   c.decode_state = b.control.size() + b.scratch_bytes() + (taps_[dev] ? taps_[dev]->size() : 0) +
                    (link_ ? link_->bytes(dev) : 0);
   c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 20d: 0 until prepared
+  if (dev < vb_.size()) c.decode_state += vb_[dev]->bytes() + (vlink_ ? vlink_->bytes(dev) : 0);   // Kolibri DSpark
+  if (dev + 1 == st_.size()) {
+    if (drafter_) c.drafter = drafter_->bytes();   // its weights + buffers (the embedding replica is the CLI's)
+    if (pf_taps_) c.prefill_scratch += pf_taps_->size();
+  }
   return c;
+}
+
+// --- Kolibri DSpark: speculative decoding ---------------------------------------------------------------------------------
+void KolibriEngine::enable_spec() {
+  if (spec_on()) throw std::logic_error("runtime::kolibri::KolibriEngine::enable_spec: the verify lists are already on");
+  if (attn_ != KolAttn::Flash)
+    throw std::runtime_error("runtime::kolibri::KolibriEngine::enable_spec: the verify lists run the flash attention only - "
+                             "unset B70_KOLIBRI_ATTN=eager for --spec");
+  settle_all("enable_spec");
+  const model::Kolibri1Desc& d = model_.desc;
+  for (uint32_t i = 0; i < st_.size(); ++i) {
+    vb_.push_back(std::make_unique<KolibriVerifyBuffers>(st(i).ctx, d));
+    if (vb_.back()->bytes() != verify_sizes(d).total())
+      throw std::logic_error("runtime::kolibri::KolibriEngine::enable_spec: device " + std::to_string(i) +
+                             "'s verify buffers are not verify_sizes()'");
+  }
+  if (st_.size() == 2) {
+    vlink_ = std::make_unique<PipelineLink>(st(0).ctx, st(1).ctx, verify_landing_layout(d));
+    for (uint32_t i = 0; i < 2; ++i)
+      if (vlink_->bytes(i) != verify_link_bytes(d, i))
+        throw std::logic_error("runtime::kolibri::KolibriEngine::enable_spec: the verify link is not verify_link_bytes()'");
+    vlink_->zero(st(1).imm);
+  }
+  vsteps_.resize(st_.size());
+  for (auto& dev : vsteps_) dev.resize(kVerifyRows);
+  verify_k_ = kNoVerify;
+}
+
+void KolibriEngine::attach_drafter(TapSink& dr) {
+  const model::Kolibri1Desc& d = model_.desc;
+  if (!spec_on())
+    throw std::logic_error("runtime::kolibri::KolibriEngine::attach_drafter: enable_spec first (the verify lists write its taps)");
+  if (drafter_) throw std::logic_error("runtime::kolibri::KolibriEngine::attach_drafter: a drafter is already attached");
+  if (dr.max_k() == 0 || dr.max_k() + 1 > kVerifyRows)
+    throw std::invalid_argument("runtime::kolibri::KolibriEngine::attach_drafter: the drafter drafts up to " +
+                                std::to_string(dr.max_k()) + ", the verify lists hold 8 rows (K 1..7)");
+  for (uint32_t t : dr.tap_layers())
+    if (t >= d.layers)
+      throw std::invalid_argument("runtime::kolibri::KolibriEngine::attach_drafter: the drafter taps layer " +
+                                  std::to_string(t) + " of a " + std::to_string(d.layers) + "-layer target");
+  if (dr.taps().size() < size_t(kVerifyRows) * dr.tap_layers().size() * d.hidden * 2)
+    throw std::invalid_argument("runtime::kolibri::KolibriEngine::attach_drafter: the drafter's tap buffer is smaller than "
+                                "[8][taps][hidden] bf16");
+  settle_all("attach_drafter");
+  for (auto& dev : vsteps_)
+    for (auto& s : dev) s.reset();   // lists captured before bound no taps: recaptured with them
+  drafter_ = &dr;
+  drafter_->reset(st(uint32_t(st_.size()) - 1).imm);
+}
+
+uint32_t KolibriEngine::max_verify_k() const {
+  if (!spec_on()) return 0;
+  const uint32_t k = drafter_ ? std::min(drafter_->max_k(), kVerifyRows - 1) : kVerifyRows - 1;
+  const uint32_t p = pos();
+  if (size_t(p) + 1 >= size_t(max_len_)) return 0;
+  return std::min<uint32_t>(k, max_len_ - p - 1);
+}
+
+void KolibriEngine::run_verify(uint32_t M) {
+  const model::Kolibri1Desc& d = model_.desc;
+  const uint32_t nd = uint32_t(st_.size());
+  StageLink binding;
+  if (vlink_) binding = vlink_->binding();
+  for (uint32_t i = 0; i < nd; ++i) {
+    std::optional<CapturedStep>& s = vsteps_[i].at(M - 1);
+    if (s) continue;
+    VerifyBind v;
+    v.vb = vb_[i].get();
+    v.M = M;
+    if (drafter_) {
+      v.taps = &drafter_->taps();
+      v.tap_layers = &drafter_->tap_layers();
+    }
+    s.emplace(build_verify(st(i).ctx, model_.parts[i], d, st(i).buffers, vlink_ ? &binding : nullptr, v));
+  }
+  if (nd == 1) {
+    st(0).queue.execute(vsteps_[0][M - 1]->list, &st(0).fence);
+    st(0).fence.wait();
+    return;
+  }
+  vlink_->event->host_reset();
+  st(0).queue.execute(vsteps_[0][M - 1]->list, &st(0).fence);
+  pending_[0] = true;
+  st(1).queue.execute(vsteps_[1][M - 1]->list, &st(1).fence);
+  pending_[1] = true;
+  if (!settle(1)) {
+    vlink_->event->host_signal();   // release device 1 so its queue drains on garbage, then report
+    const bool drained = settle(1);
+    settle(0);
+    fail("device 1's M = " + std::to_string(M) + " verify did not finish within " + std::to_string(opt_.timeout_ms) +
+         " ms - device 0's rows never arrived (the verify link's event was not signalled; device 1 " +
+         (drained ? "released" : "did not drain either") + ")");
+  }
+  if (!settle(0)) fail("device 0's M = " + std::to_string(M) + " verify did not finish within " +
+                       std::to_string(opt_.timeout_ms) + " ms");
+}
+
+void KolibriEngine::verify(const uint32_t* drafts, uint32_t k) {
+  if (!spec_on()) throw std::logic_error("runtime::kolibri::KolibriEngine::verify: no verify lists (enable_spec)");
+  if (broken_) throw std::runtime_error("runtime::kolibri::KolibriEngine::verify: a hand-off failed earlier; reset() first");
+  if (k > max_verify_k())
+    throw std::invalid_argument("runtime::kolibri::KolibriEngine::verify: k " + std::to_string(k) + " exceeds " +
+                                std::to_string(max_verify_k()) + " at pos " + std::to_string(pos()));
+  Control& c0 = *st(0).ctl;
+  Control& cl = *st(uint32_t(st_.size()) - 1).ctl;
+  const uint32_t n = cl.pos, x = cl.cur_token[0], M = k + 1;
+  if (size_t(n) + M > size_t(max_len_))
+    throw std::runtime_error("runtime::kolibri::KolibriEngine::verify: pos " + std::to_string(n) + " + " +
+                             std::to_string(M) + " rows exceeds max_len " + std::to_string(max_len_));
+  for (uint32_t i = 0; i < k; ++i) {
+    if (drafts[i] >= model_.desc.vocab)
+      throw std::invalid_argument("runtime::kolibri::KolibriEngine::verify: draft " + std::to_string(drafts[i]) +
+                                  " is outside the vocabulary");
+    c0.cur_token[1 + i] = drafts[i];   // the gather reads cur_token[0 .. k] on device 0
+  }
+  for (uint32_t i = 0; i < st_.size(); ++i) {
+    st(i).ctl->n_active = M;
+    Control& hi = *vb_[i]->control_hi.as<Control>();   // the attention's rows 4..M-1 (a list at M <= 4 never reads it)
+    hi.pos = n + kAttnRowsMax;
+    hi.n_active = M > kAttnRowsMax ? M - kAttnRowsMax : 0;
+  }
+  run_verify(M);
+  for (uint32_t r = 0; r < M; ++r) verify_ids_[r] = cl.out_token[r];
+  // argmax_stage2 advanced the last device's pos and wrote its last id into cur_token[0]: the host commits, so put both back.
+  cl.pos = n;
+  cl.cur_token[0] = x;
+  verify_k_ = k;
+  verify_pos_ = n;
+}
+
+void KolibriEngine::read_verify_logits(float* host, uint32_t rows) {
+  if (verify_k_ == kNoVerify || rows == 0 || rows > verify_k_ + 1)
+    throw std::logic_error("runtime::kolibri::KolibriEngine::read_verify_logits: " + std::to_string(rows) +
+                           " rows after no verify / a verify of fewer");
+  const uint32_t last = uint32_t(st_.size()) - 1;
+  st(last).imm.copy(host, vb_[last]->logits.ptr(), size_t(rows) * model_.desc.vocab * 4);
+}
+
+void KolibriEngine::commit(uint32_t j, uint32_t next_token) {
+  Control& cl = *st(uint32_t(st_.size()) - 1).ctl;
+  if (verify_k_ == kNoVerify || cl.pos != verify_pos_)
+    throw std::logic_error("runtime::kolibri::KolibriEngine::commit: no verify at pos " + std::to_string(cl.pos));
+  if (j > verify_k_)
+    throw std::invalid_argument("runtime::kolibri::KolibriEngine::commit: j " + std::to_string(j) + " > k " +
+                                std::to_string(verify_k_));
+  if (next_token >= model_.desc.vocab)
+    throw std::invalid_argument("runtime::kolibri::KolibriEngine::commit: id " + std::to_string(next_token) +
+                                " is outside the vocabulary");
+  const uint32_t n = cl.pos;
+  verify_k_ = kNoVerify;
+  if (drafter_) replay_aux(drafter_->projection(n, j + 1));   // rows 0..j of the taps: positions n .. n + j
+  for (auto& s : st_) {
+    s->ctl->pos = n + j + 1;
+    s->ctl->cur_token[0] = next_token;
+    s->ctl->n_active = 1;
+  }
+  logits_row_ = int(j);   // read_logits: the row next_token came from
+}
+
+void KolibriEngine::replay_aux(l0::CmdList& list) {
+  Stage& s = st(uint32_t(st_.size()) - 1);
+  s.queue.execute(list, &s.fence);
+  s.fence.wait();
+}
+
+size_t KolibriEngine::verify_launches(uint32_t M) const {
+  size_t n = 0;
+  if (M == 0 || M > kVerifyRows) return 0;
+  for (const auto& dev : vsteps_)
+    if (dev[M - 1]) n += dev[M - 1]->kernel_count;
+  return n;
+}
+
+const l0::Mem& KolibriEngine::control_mem(uint32_t dev) const { return st(dev).buffers.control; }
+const loader::DeviceWeight& KolibriEngine::lm_head() const {
+  const loader::KolDevicePart& p = model_.parts.back();
+  if (!p.lm_head) throw std::logic_error("runtime::kolibri::KolibriEngine: the last device holds no lm_head");
+  return *p.lm_head;
+}
+const l0::Mem& KolibriEngine::embedding() const {
+  if (!model_.parts.front().embed) throw std::logic_error("runtime::kolibri::KolibriEngine: device 0 holds no embedding");
+  return *model_.parts.front().embed;
 }
 
 std::string KolibriEngine::memory_line() const {

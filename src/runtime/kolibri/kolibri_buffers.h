@@ -46,4 +46,15 @@ struct KolibriBuffers {
   void zero(l0::CmdList& imm);
 };
 
+// Kolibri DSpark: one device's verify allocations (runtime::kolibri::verify_sizes, exactly those) - the decode scratch at
+// kVerifyRows rows under the same names, so the capture binds either, and the second Control block the attention's rows
+// 4..M-1 read (pos + 4, M - 4 rows; the host writes it before each verify). Allocated only by KolibriEngine::enable_spec.
+struct KolibriVerifyBuffers {
+  KolibriVerifyBuffers(l0::Context& ctx, const model::Kolibri1Desc& d);
+  l0::Mem resid, x, a, mo, partials, sumsq_a, sumsq_r, attn_q, attn_part, attn_out, logits_r, routes, moe_h, logits,
+      argmax_part;
+  l0::Mem control_hi;   // runtime::Control, shared memory
+  size_t bytes() const;
+};
+
 }  // namespace runtime::kolibri

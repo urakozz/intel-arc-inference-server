@@ -159,6 +159,22 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const bool eager = attn_ == KolAttn::Eager;
   const uint32_t ndev = devices();
   const uint64_t tmo = P.timeout_ns;
+  verify_k_ = kNoVerify;   // Kolibri DSpark: the head writes the decode scratch's row
+  logits_row_ = -1;
+  // Kolibri DSpark: with a drafter every chunk stages its tap rows inside the drafter's window (drafter_prefill_r0) into the
+  // last device's staging - device 0's tap layers write it across - and projects them after the chunk, before the block
+  // hook (so a snapshot at a block end carries the ring of the window before it).
+  if (drafter_) {
+    const size_t bytes = prefill_taps_bytes(drafter_->window(), uint32_t(drafter_->tap_layers().size()), d.hidden);
+    if (!pf_taps_ || pf_taps_->size() != bytes)
+      pf_taps_ = std::make_unique<l0::Mem>(stage_ctx(ndev - 1), l0::MemKind::Device, bytes);
+  }
+  const uint32_t end_pos = base + uint32_t(ids.size());
+  PrefillTaps dtaps;   // this chunk's (r0 set per chunk)
+  if (drafter_) {
+    dtaps.dst = pf_taps_->ptr();
+    dtaps.layers = &drafter_->tap_layers();
+  }
   const auto set_ctl = [&](uint32_t pos, uint32_t n) {
     for (uint32_t i = 0; i < ndev; ++i) {
       stage_control(i)->pos = pos;
@@ -174,7 +190,10 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   // One device's walk for a chunk (appended immediately).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C) {
     KolibriPrefillState::Dev& D = *P.dev[i];
-    auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager, D.tap.get(), tap_at_); };
+    auto encode = [&] {
+      prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager, D.tap.get(), tap_at_,
+                    drafter_ ? &dtaps : nullptr);
+    };
     encode();
   };
 
@@ -185,6 +204,7 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   for (size_t off = 0; off < ids.size(); off += C) {
     C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock);
     const uint32_t pos = base + uint32_t(off);
+    if (drafter_) dtaps.r0 = drafter_prefill_r0(pos, C, end_pos, drafter_->window(), hooked, kBlock);
     wait_all("before a chunk");   // before touching the ids buffer or a Control block
     std::memcpy(P.dev[0]->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
     set_ctl(pos, C);
@@ -231,6 +251,8 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
              std::to_string(opt_.prefill_timeout_ms) + " ms");
     }
     const uint32_t end = pos + C;
+    // Kolibri DSpark: the chunk's staged tap rows through the drafter's projection (every device idle: waited above).
+    if (drafter_ && dtaps.r0 < C) drafter_project_staged(pos + dtaps.r0, C - dtaps.r0);
     if (hooked && off + C < ids.size() && end % kBlock == 0) {
       // A mid-prompt block end: the KV holds exactly [0, end); say so in every Control before the hook
       // runs, so a hook that throws leaves pos matching the chunks written.
@@ -254,6 +276,22 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (hooked) {   // the prompt end, the first generated id in cur_token
     const uint32_t end = base + uint32_t(ids.size());
     block_hook_(end, end % kBlock == 0);
+  }
+}
+
+// Kolibri DSpark: the staged rows [n][taps][hidden] (pf_taps_, the last device) at positions pos .. pos + n - 1 through the
+// drafter's projection, 8 a replay (Bolt's replay fallback, plan 26c Task 5: no projection at prefill width is built).
+// TODO(card): 256 replays for a 2048-row window - measure; a prefill-width projection (DFlash's project_wide) is the lever.
+void KolibriEngine::drafter_project_staged(uint32_t pos, uint32_t n) {
+  const uint32_t last = devices() - 1;
+  const size_t row = drafter_->tap_layers().size() * size_t(model_.desc.hidden) * 2;
+  require(pf_taps_ && pf_taps_->size() >= size_t(n) * row,
+          "the drafter's prefill staging holds fewer than " + std::to_string(n) + " rows");
+  for (uint32_t r = 0; r < n; r += kVerifyRows) {
+    const uint32_t g = std::min<uint32_t>(kVerifyRows, n - r);
+    stage_imm(last).copy(drafter_->taps().ptr(), static_cast<const uint8_t*>(pf_taps_->ptr()) + size_t(r) * row,
+                         size_t(g) * row);
+    replay_aux(drafter_->projection(pos + r, g));
   }
 }
 

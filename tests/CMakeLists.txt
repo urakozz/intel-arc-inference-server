@@ -4574,6 +4574,13 @@ target_include_directories(dspark_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 target_link_libraries(dspark_plan_test PRIVATE b70_dflash_plan b70_dflash_loader)
 add_test(NAME dspark_plan_test COMMAND dspark_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark/config.json)
 set_tests_properties(dspark_plan_test PROPERTIES LABELS "kolibri;dflash")
+# Kolibri's verify lists in the plan: the scratch at 8 rows, the second Control block, the verify link, the launch counts,
+# the drafter's prefill tail rule, and the two-card plan with the drafter and its replica on device 1 (DERIVED). Host only.
+add_executable(kolibri_spec_plan_test runtime/kolibri_spec_plan_test.cc)
+target_include_directories(kolibri_spec_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kolibri_spec_plan_test PRIVATE b70_kolibri_plan)
+add_test(NAME kolibri_spec_plan_test COMMAND kolibri_spec_plan_test)
+set_tests_properties(kolibri_spec_plan_test PROPERTIES LABELS kolibri)
 # Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark
 # block). Host only (reads the kernel directory).
 if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)

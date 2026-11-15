@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -64,9 +65,18 @@ bool prefill_attn_eager();
 // (l - part.first) of [layers][kPfC][hidden] bf16 - copies, no launch. Leaves: the K / V rows [pos, pos + C) of
 // the device's layers (the ring slots (pos + t) & 4095 of a sliding one), the residual rows and their sums
 // after its last layer, and its layers' route rows of this chunk in s.routes.
+// Kolibri DSpark (`taps`, a drafter's prefill tail - Bolt's spec 26 Decision 7): after layer l's last kol_post_add (l one of
+// `layers`), rows r0 .. C - 1 are copied into `dst` [row - r0][layers.size()][hidden] bf16 (one 2D copy a tap layer);
+// r0 >= C copies nothing.
+struct PrefillTaps {
+  void* dst = nullptr;
+  const std::vector<uint32_t>* layers = nullptr;
+  uint32_t r0 = 0;
+};
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s,
                    const loader::KolDevicePart& part, const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos,
-                   uint32_t C, bool eager, l0::Mem* tap = nullptr, TapAt tap_at = TapAt::LayerOut);
+                   uint32_t C, bool eager, l0::Mem* tap = nullptr, TapAt tap_at = TapAt::LayerOut,
+                   const PrefillTaps* taps = nullptr);
 
 // The tail only the LAST chunk runs, on the last device: the final norm of row `last_row` into the decode
 // buffers' x, the lm_head, the two argmax stages - decode's binaries, so the first generated id is chosen

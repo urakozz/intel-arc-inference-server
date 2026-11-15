@@ -46,8 +46,10 @@ const float* fat(const l0::Mem& m, size_t floats) { return static_cast<const flo
 class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s, const loader::KolDevicePart& part,
-       const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos, uint32_t C, bool eager, l0::Mem* tap, TapAt tap_at)
-      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager), tap_(tap), tap_at_(tap_at) {}
+       const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos, uint32_t C, bool eager, l0::Mem* tap, TapAt tap_at,
+       const PrefillTaps* dtaps)
+      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager), tap_(tap), tap_at_(tap_at),
+        dtaps_(dtaps) {}
 
   void run() {
     check();
@@ -242,6 +244,18 @@ class Walk {
     post_add(s_.mo, fat(nw, d_.norm_off_post_ffn()));
     // tap (debug): layer l's output rows into tap row block (l - first) - a copy, not a launch
     if (tap_ && tap_at_ == TapAt::LayerOut) cx_.copy(at(*tap_, size_t(l - part_.first) * kPfC * d_.hidden * 2), s_.resid.ptr(), size_t(C_) * d_.hidden * 2);
+    if (dtaps_) stage_taps(l);
+  }
+
+  // Kolibri DSpark: rows r0 .. C - 1 of layer l's output into the drafter's staging [row - r0][tap][hidden] - one 2D copy a
+  // tap layer (device 0's land in the last device's staging: the drafter's device).
+  void stage_taps(uint32_t l) {
+    const std::vector<uint32_t>& tl = *dtaps_->layers;
+    const auto it = std::find(tl.begin(), tl.end(), l);
+    if (it == tl.end() || dtaps_->r0 >= C_) return;
+    const size_t row = size_t(d_.hidden) * 2, t = size_t(it - tl.begin());
+    cx_.copy_2d(static_cast<uint8_t*>(dtaps_->dst) + t * row, tl.size() * row, at(s_.resid, size_t(dtaps_->r0) * row), row,
+                row, C_ - dtaps_->r0);
   }
 
   prefill::Context& cx_;
@@ -254,6 +268,7 @@ class Walk {
   const bool eager_;
   l0::Mem* tap_;
   const TapAt tap_at_;
+  const PrefillTaps* dtaps_;   // Kolibri DSpark: null without a drafter
   size_t n_ = 0;
 };
 
@@ -292,10 +307,12 @@ bool prefill_attn_eager() { return kolibri_attn() == KolAttn::Eager; }   // one 
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s,
                    const loader::KolDevicePart& part, const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos,
-                   uint32_t C, bool eager, l0::Mem* tap, TapAt tap_at) {
+                   uint32_t C, bool eager, l0::Mem* tap, TapAt tap_at, const PrefillTaps* taps) {
   if (tap && tap->size() < size_t(part.end - part.first) * kPfC * d.hidden * 2)
     throw std::runtime_error("runtime::kolibri::prefill_chunk: the tap is smaller than [layers][kPfC][hidden] bf16");
-  Walk(cx, kc, s, part, d, b, pos, C, eager, tap, tap_at).run();
+  if (taps && (!taps->dst || !taps->layers || taps->layers->empty()))
+    throw std::runtime_error("runtime::kolibri::prefill_chunk: the drafter's prefill taps without a staging / layers");
+  Walk(cx, kc, s, part, d, b, pos, C, eager, tap, tap_at, taps).run();
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s,
