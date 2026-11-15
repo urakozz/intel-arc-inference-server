@@ -10,7 +10,9 @@
 //   probe_small_m numerics <snapshot> [--shape all] [--trials 1000]
 //   probe_small_m prod     [--shape all] [--m 2,4,8,16] [--rounds 5]   (plan 28b: production gemm_sm + levers;
 //                          Qwen3.8's shapes, the token sum over them; --m 32,64: spec 32a's probe builds, 128 and
-//                          256 GRF, property R against M = 16 and N2 on random rows)
+//                          256 GRF, property R against M = 16 and N2 on random rows; spec 32e: the psm_v2 arms
+//                          at 32 / 64 rows - property R against gemm_sm at 16 rows over --trials trials, N2 on
+//                          the first, the device's work-group / SLM limits and each arm's spill, the int4 token sum)
 //   (every mode: [--device 0]; the card is whatever ZE_AFFINITY_MASK leaves at index 0)
 //
 // check:    every built variant of the selected shapes and M against the fp64 reference
@@ -39,6 +41,7 @@
 // Any timed arm whose binary carries a GRF mode other than its name says (the zebin's
 // .ze_info `grf_count`) is refused before it runs (spec 28 §2.1's pitfall).
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -49,6 +52,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -899,6 +903,158 @@ bool deep_numerics(l0::Context& ctx, l0::Queue& q, l0::Fence& f, const Inputs& i
   }
   return ok;
 }
+// Spec 32e (plan 32e Task 1): the psm_v2 arms (probe_small_m.cl, V2) of an int4 production row at 32 / 64 rows.
+struct V2Arm {
+  std::string base;   // rc16 | rc32 | swap
+  uint32_t pf = 0;    // weight prefetch, groups ahead
+  bool g256 = false;
+  uint32_t rc(uint32_t M) const { return base == "rc16" ? 16 : base == "rc32" ? 32 : M; }
+  std::string label() const {
+    return base + (pf ? "_pf" + std::to_string(pf) : "") + (g256 ? "_g256" : "");
+  }
+};
+std::vector<V2Arm> v2_arms() {
+  std::vector<V2Arm> v;
+  for (const char* b : {"rc16", "rc32", "swap", "swap256"})
+    for (uint32_t pf : {0u, 1u, 2u}) {
+      V2Arm a;
+      a.base = std::string(b) == "swap256" ? "swap" : b;
+      a.g256 = std::string(b) == "rc32" || std::string(b) == "swap256";
+      a.pf = pf;
+      v.push_back(a);
+    }
+  return v;
+}
+std::string v2_name(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
+  return "psm_v2_" + a.label() + "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N) +
+         "_S" + std::to_string(kernels::gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout);
+}
+uint32_t v2_wg(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
+  return kernels::gemm_sm_wg_size(t) * (M / a.rc(M));
+}
+std::unique_ptr<Launch> make_v2(l0::Context& ctx, const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
+  auto L = std::make_unique<Launch>();
+  L->name = v2_name(a, t, M);
+  L->M = M;
+  L->mod = std::make_unique<l0::Module>(ctx, kernels::path(L->name));
+  L->k = std::make_unique<l0::Kernel>(*L->mod, "psm_v2");
+  L->k->group_size(v2_wg(a, t, M));
+  L->gx = t.N / kernels::gemm_sm_cols(t);
+  L->gy = kernels::gemm_sm_grid_y(t);
+  L->S = kernels::gemm_sm_out_s(t);
+  return L;
+}
+// The device's limits a v2 work-group must fit (read from the device, not assumed - review finding 4).
+void print_device_limits(l0::Context& ctx) {
+  const ze_device_compute_properties_t& c = ctx.compute();
+  std::printf("device limits (zeDeviceGetComputeProperties): maxTotalGroupSize %u, maxGroupSizeX %u, "
+              "maxSharedLocalMemory %u B, maxNumSubGroups %u\n", c.maxTotalGroupSize, c.maxGroupSizeX,
+              c.maxSharedLocalMemory, c.maxNumSubGroups);
+}
+// A v2 arm's kernel properties; false (printed) when the work-group or its SLM is over the device's limit.
+bool v2_fits(l0::Context& ctx, const Launch& L, uint32_t wg) {
+  ze_kernel_properties_t p{};
+  p.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+  ZE_CHECK(zeKernelGetProperties(L.k->handle(), &p));
+  const ze_device_compute_properties_t& c = ctx.compute();
+  const bool ok = wg <= c.maxTotalGroupSize && wg <= c.maxGroupSizeX && p.localMemSize <= c.maxSharedLocalMemory;
+  std::printf("| %s | wg %u | SLM %u B | spill %u B | private %u B | %s |\n", L.name.c_str(), wg, p.localMemSize,
+              p.spillMemSize, p.privateMemSize, ok ? "fits" : "**OVER THE DEVICE LIMIT**");
+  return ok;
+}
+// Random bf16 rows, cheap enough for 1000 trials (sign, exponent 2^-6 .. 2^1, mantissa random).
+std::vector<uint16_t> trial_rows(uint32_t M, uint32_t K, uint32_t seed) {
+  std::vector<uint16_t> x(size_t(M) * K);
+  uint32_t st = seed * 2654435761u + 7;
+  for (auto& e : x) {
+    const uint32_t r = xorshift(st);
+    e = uint16_t((r & 0x807f) | ((0x79 + ((r >> 8) % 8)) << 7));
+  }
+  return x;
+}
+// One run on copy 0 reading `x` from row `row0` of the rows buffer; the raw partials (S, M, N).
+std::vector<float> run_partials(l0::Context& ctx, l0::Queue& q, l0::Fence& f, Launch& L, const Inputs& in,
+                                uint32_t row0) {
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  l0::CmdList list = l0::CmdList::regular(ctx);
+  bind(L, in, 0);
+  L.k->arg_ptr(2, static_cast<const char*>(in.x->ptr()) + size_t(row0) * in.sh->K * 2);
+  append(list, L);
+  list.close();
+  q.execute(list, &f);
+  f.wait();
+  std::vector<float> p(size_t(L.S) * L.M * in.sh->N);
+  imm.copy(p.data(), in.out->ptr(), p.size() * 4);
+  return p;
+}
+// Property R of every v2 arm at M against the production gemm_sm row at 16 rows: over `trials` sets of M random rows,
+// row 16 c + m of the arm (every slice) bitwise row m of gemm_sm run on rows 16 c .. 16 c + 15. N2 against fp64 on
+// the first trial (first 512 columns, every row). Arms are the launches given; returns false on any failure.
+bool v2_numerics(l0::Context& ctx, l0::Queue& q, l0::Fence& f, const Inputs& in, const kernels::SmallMTuning& t,
+                 uint32_t M, std::vector<std::unique_ptr<Launch>>& arms, uint32_t trials) {
+  const Shape& s = *in.sh;
+  auto L16 = make_prod(ctx, t, 16);
+  struct Acc { size_t words = 0, bits = 0, rows = 0; gemm_sm::N2 e; };
+  std::vector<Acc> acc(arms.size());
+  const uint32_t nc = std::min(512u, s.N), nt = 8;
+  for (uint32_t tr = 0; tr < trials; ++tr) {
+    const std::vector<uint16_t> x = trial_rows(M, s.K, 77 + tr * 131 + M + s.N);
+    set_rows(ctx, in, x);
+    std::vector<std::vector<float>> ref(M / 16);
+    for (uint32_t c = 0; c < M / 16; ++c) ref[c] = run_partials(ctx, q, f, *L16, in, 16 * c);
+    std::vector<double> R, B;
+    if (tr == 0) {
+      const std::vector<float> xf = gemm_sm::bf16_rows(x);
+      R.assign(size_t(M) * s.N, 0.0);
+      B.assign(size_t(M) * s.N, 0.0);
+      std::vector<std::vector<double>> rr(nt), bb(nt);
+      std::vector<std::thread> th;
+      for (uint32_t i = 0; i < nt; ++i)
+        th.emplace_back([&, i] { gemm_sm::ref(in.view(), xf, M, rr[i], bb[i], nc / nt * i, nc / nt * (i + 1)); });
+      for (auto& h : th) h.join();
+      for (uint32_t i = 0; i < nt; ++i)
+        for (uint32_t m = 0; m < M; ++m)
+          for (uint32_t n = nc / nt * i; n < nc / nt * (i + 1); ++n) {
+            R[size_t(m) * s.N + n] = rr[i][size_t(m) * s.N + n];
+            B[size_t(m) * s.N + n] = bb[i][size_t(m) * s.N + n];
+          }
+    }
+    for (size_t a = 0; a < arms.size(); ++a) {
+      Launch& L = *arms[a];
+      const std::vector<float> pm = run_partials(ctx, q, f, L, in, 0);
+      for (uint32_t sl = 0; sl < L.S; ++sl)
+        for (uint32_t m = 0; m < M; ++m) {
+          const float* got = &pm[(size_t(sl) * M + m) * s.N];
+          const float* want = &ref[m / 16][(size_t(sl) * 16 + m % 16) * s.N];
+          ++acc[a].rows;
+          if (std::memcmp(got, want, size_t(s.N) * 4) == 0) continue;
+          for (uint32_t n = 0; n < s.N; ++n) {
+            uint32_t gu, wu;
+            std::memcpy(&gu, got + n, 4);
+            std::memcpy(&wu, want + n, 4);
+            if (gu != wu) { ++acc[a].words; acc[a].bits += size_t(__builtin_popcount(gu ^ wu)); }
+          }
+        }
+      if (tr == 0) {
+        std::vector<float> sum(size_t(M) * s.N, 0.f);
+        for (uint32_t sl = 0; sl < L.S; ++sl)
+          for (size_t i = 0; i < sum.size(); ++i) sum[i] += pm[size_t(sl) * M * s.N + i];
+        acc[a].e = gemm_sm::n2(sum, R, B, M, s.N, 0, nc);
+      }
+    }
+  }
+  bool ok = true;
+  for (size_t a = 0; a < arms.size(); ++a) {
+    const bool pass = acc[a].words == 0 && acc[a].e.pass();
+    ok = ok && pass;
+    std::printf("| %s numerics | %u | R vs gemm_sm at 16 rows: %zu row-slices over %u trials, %zu words / %zu bits "
+                "differ | N2 (trial 0) max ratio %.3g, min cos %.9f | %s |\n", arms[a]->name.c_str(), M, acc[a].rows,
+                trials, acc[a].words, acc[a].bits, acc[a].e.max_ratio, acc[a].e.min_cos, pass ? "pass" : "**FAIL**");
+  }
+  std::fflush(stdout);
+  return ok;
+}
+
 int run_prod(l0::Context& ctx, const Opts& o) {
   l0::Queue q(ctx);
   l0::Fence f(q);
@@ -907,8 +1063,11 @@ int run_prod(l0::Context& ctx, const Opts& o) {
   std::printf("prod: the production gemm_sm rows and their lever alternates, %u rounds interleaved after 3 warm-up "
               "executions per list, with gemv at M = 1 and at M\n", o.rounds);
   std::map<std::string, std::map<uint32_t, double>> ctl, prod_us, best_us;
+  std::map<std::string, std::map<std::string, std::map<uint32_t, double>>> v2_us;   // [arm][shape][M]
   std::vector<const Shape*> done;
+  std::set<std::array<uint32_t, 3>> v2_checked;
   bool deep_fail = false;
+  if (std::any_of(o.ms.begin(), o.ms.end(), [](uint32_t M) { return M > 16; })) print_device_limits(ctx);
   for (const Shape* sp : shapes) {
     const Shape& s = *sp;
     const unsigned lay = s.kind == 2 ? 2 : s.L;
@@ -951,6 +1110,29 @@ int run_prod(l0::Context& ctx, const Opts& o) {
         if (!grf_ok(n, a.grf256)) continue;
         al.push_back(make_timed(ctx, make_prod(ctx, a, M), in, nl));
       }
+      // Spec 32e: the psm_v2 arms (int4 rows): limits and spill, property R / N2, then timed with the rest.
+      std::vector<std::string> al_v2(al.size());
+      if (M > 16 && s.kind == 0) {
+        std::vector<std::unique_ptr<Launch>> v2;
+        std::vector<std::string> labels;
+        for (const V2Arm& a : v2_arms()) {
+          const std::string n = v2_name(a, *t, M);
+          if (!file_exists(kernels::path(n))) { std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M); continue; }
+          if (!grf_ok(n, a.g256)) continue;
+          auto L = make_v2(ctx, a, *t, M);
+          if (!v2_fits(ctx, *L, v2_wg(a, *t, M))) continue;
+          v2.push_back(std::move(L));
+          labels.push_back(a.label());
+        }
+        // out_proj and o_proj are one shape: its numerics once
+        if (v2_checked.insert({s.K, s.N, M}).second && !v2_numerics(ctx, q, f, in, *t, M, v2, o.trials))
+          deep_fail = true;
+        set_rows(ctx, in, random_rows(kMaxM, s.K, 5 + s.K));
+        for (size_t i = 0; i < v2.size(); ++i) {
+          al.push_back(make_timed(ctx, std::move(v2[i]), in, nl));
+          al_v2.push_back(labels[i]);
+        }
+      }
       std::vector<Timed*> ts = {ctl1.get(), pr.get()};
       if (ctlM) ts.push_back(ctlM.get());
       for (auto& a : al) ts.push_back(a.get());
@@ -965,9 +1147,11 @@ int run_prod(l0::Context& ctx, const Opts& o) {
                     median(ratios(*ctlM, *ctl1)), range_str(ratios(*ctlM, *ctl1)).c_str());
       std::printf("| **%s** (production) | %u | %.1f | %.4f (%s) | %.4f | 1 |\n", pr->L->name.c_str(), M, pu,
                   median(ratios(*pr, *ctl1)), range_str(ratios(*pr, *ctl1)).c_str(), vs_m(*pr));
-      for (auto& a : al) {
+      for (size_t ai = 0; ai < al.size(); ++ai) {
+        auto& a = al[ai];
         const double u = median(a->us);
         best = std::min(best, u);
+        if (!al_v2[ai].empty()) v2_us[al_v2[ai]][s.key][M] = u;
         std::printf("| %s | %u | %.1f | %.4f (%s) | %.4f | %.4f (%s) |\n", a->L->name.c_str(), M, u,
                     median(ratios(*a, *ctl1)), range_str(ratios(*a, *ctl1)).c_str(), vs_m(*a),
                     median(ratios(*a, *pr)), range_str(ratios(*a, *pr)).c_str());
@@ -1002,6 +1186,46 @@ int run_prod(l0::Context& ctx, const Opts& o) {
     for (const Shape* s : done) b += s->layers * best_us[s->key][M];
     std::printf("DEEP_SUM M=%u best_us=%.1f m16_us=%.1f added_ms=%.3f marginal_tflops=%.1f\n", M, b, b16,
                 (b - b16) / 1e3, flop_row * (M - 16) / ((b - b16) * 1e-6) / 1e12);
+  }
+  // Spec 32e: a token's int4 linears (the head left out) through each v2 arm and through the best arm per shape,
+  // against the production gemm_sm at 16 rows and at M (plan 32e's gate G1 is on these sums).
+  if (!v2_us.empty()) {
+    auto int4_sum = [&](const std::map<std::string, std::map<uint32_t, double>>& byS, uint32_t M, int* on) {
+      double t = 0;
+      for (const Shape* s : done)
+        if (s->kind == 0) {
+          auto it = byS.find(s->key);
+          if (it == byS.end() || !it->second.count(M)) return -1.0;
+          t += s->layers * it->second.at(M);
+          if (on) ++*on;
+        }
+      return t;
+    };
+    std::printf("\n## spec 32e: a token's int4 linears (layers x median us, no head) - derived\n\n"
+                "| arm | M | int4 sum ms |\n|---|---|---|\n");
+    for (uint32_t M : o.ms) {
+      const double p = int4_sum(prod_us, M, nullptr);
+      if (p > 0) std::printf("| gemm_sm (production row) | %u | %.2f |\n", M, p / 1e3);
+    }
+    std::map<std::string, std::map<uint32_t, double>> best_v2;
+    std::map<std::string, std::map<uint32_t, std::string>> best_v2_arm;
+    for (uint32_t M : o.ms) {
+      if (M <= 16) continue;
+      for (auto& [label, byS] : v2_us) {
+        const double v = int4_sum(byS, M, nullptr);
+        if (v > 0) std::printf("| %s | %u | %.2f |\n", label.c_str(), M, v / 1e3);
+        for (auto& [key, byM] : byS)
+          if (byM.count(M) && (!best_v2[key].count(M) || byM.at(M) < best_v2[key][M])) {
+            best_v2[key][M] = byM.at(M);
+            best_v2_arm[key][M] = label;
+          }
+      }
+      const double b = int4_sum(best_v2, M, nullptr);
+      std::printf("| **best v2 arm per shape** | %u | **%.2f** |\n", M, b / 1e3);
+      for (const Shape* s : done)
+        if (s->kind == 0 && best_v2_arm[s->key].count(M))
+          std::printf("V2_BEST M=%u %s %s %.1f us\n", M, s->key, best_v2_arm[s->key][M].c_str(), best_v2[s->key][M]);
+    }
   }
   if (deep_fail) std::printf("\nprod at 32 / 64 rows: **numerics FAIL**\n");
   return deep_fail ? 1 : 0;

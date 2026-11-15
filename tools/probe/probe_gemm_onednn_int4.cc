@@ -25,6 +25,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <sycl/sycl.hpp>
@@ -233,16 +235,207 @@ void* usm_upload(sycl::queue& q, const void* host, size_t bytes) {
   return p;
 }
 
+// ---------------------------------------------------------------------------
+// Spec 32e (plan 32e Task 1, review finding 2): `--verify-rows` - the token's int4 linears through oneDNN at a
+// verify's 16 / 32 / 64 rows in the configuration timed on 2026-11-15 (29.12 / 35.02 / 42.51 ms a token): bf16
+// rows, u4 weights K-contiguous per column (tag ba, element k of column n in byte n K/2 + k/2, even k in the low
+// nibble), bf16 g64 scales and u8 g64 zero points of 8, f32 out, fpmath bf16. Three checks:
+//   (1) rows 0 and M - 1 against the fp64 reference of the same inputs, every column (gemm_sm's N2 rule: |err| <=
+//       sum |w x| 2^-16, cos >= 0.9999999), and against a second reference with each weight (q - 8) x scale
+//       rounded to bf16 first (where the decompressed weight would lose bits);
+//   (2) row independence: rows 0..15 of the 16-row call and 0..31 of the 32-row call bitwise rows of the 64-row call;
+//   (3) the implementation selected (impl_info_str) and its kernels, read from the primitive's cache blob (each
+//       zebin's .ze_info name, simd, GRF count and required work-group).
+// ---------------------------------------------------------------------------
+struct VShape {
+  uint32_t K, N;
+  const char* name;
+};
+constexpr VShape kVShapes[] = {
+    {5120, 16384, "qkv‖z"}, {6144, 5120, "out/o_proj"}, {5120, 14336, "q‖k‖v"},
+    {5120, 34816, "gate‖up"}, {17408, 5120, "down"},
+};
+
+// Every `<key> <value>` line of the .ze_info sections in a blob, for the keys asked.
+void print_zeinfo(const std::vector<uint8_t>& blob) {
+  const std::string s(blob.begin(), blob.end());
+  size_t at = 0;
+  int kernels = 0;
+  while ((at = s.find("- name:", at)) != std::string::npos) {
+    const size_t end = s.find("- name:", at + 7);
+    const std::string k = s.substr(at, (end == std::string::npos ? s.size() : end) - at);
+    auto field = [&](const char* key) -> std::string {
+      const size_t p = k.find(key);
+      if (p == std::string::npos) return "-";
+      const size_t e = k.find('\n', p);
+      std::string v = k.substr(p + std::strlen(key), e - p - std::strlen(key));
+      while (!v.empty() && (v.front() == ' ' || v.front() == ':')) v.erase(v.begin());
+      return v;
+    };
+    std::printf("#   kernel %s | simd %s | grf_count %s | required_work_group_size %s | slm %s\n",
+                field("- name").c_str(), field("simd_size").c_str(), field("grf_count").c_str(),
+                field("required_work_group_size").c_str(), field("slm_size").c_str());
+    ++kernels;
+    at += 7;
+  }
+  if (!kernels) std::printf("#   (no .ze_info kernel entries in the %zu-byte cache blob)\n", blob.size());
+}
+
+int run_verify_rows(sycl::queue& q, engine& eng, stream& strm) {
+  using dt = memory::data_type;
+  using tag = memory::format_tag;
+  constexpr uint32_t kMs16[] = {16, 32, 64}, MMAX = 64;
+  bool all_ok = true;
+  for (const VShape& sh : kVShapes) {
+    const uint32_t K = sh.K, N = sh.N, KG = K / kGroup;
+    uint32_t seed = 0x5EED0000u ^ K ^ N;
+    std::vector<uint8_t> hp(size_t(N) * K / 2);
+    for (auto& v : hp) v = uint8_t(xorshift(seed));
+    std::vector<uint16_t> hs(size_t(KG) * N);   // bf16 [K/64][N]
+    for (auto& v : hs) v = common::f32_to_bf16(0.01f + 0.05f * float(xorshift(seed) & 0xFFFFu) / 65535.0f);
+    std::vector<uint8_t> hz(hs.size(), 8);
+    std::vector<uint16_t> hx(size_t(MMAX) * K);
+    for (auto& v : hx) v = random_bf16(seed);
+    void* d_p = usm_upload(q, hp.data(), hp.size());
+    void* d_s = usm_upload(q, hs.data(), hs.size() * 2);
+    void* d_z = usm_upload(q, hz.data(), hz.size());
+    void* d_x = usm_upload(q, hx.data(), hx.size() * 2);
+    float* d_y = sycl::malloc_device<float>(size_t(MMAX) * N, q);
+    std::printf("\n## %s - K %u, N %u\n", sh.name, K, N);
+    std::vector<std::vector<float>> out;   // per M: [M][N]
+    for (uint32_t M : kMs16) {
+      memory::desc src({M, K}, dt::bf16, tag::ab), wei({K, N}, dt::u4, tag::ba), dst({M, N}, dt::f32, tag::ab);
+      memory::desc smd({KG, N}, dt::bf16, tag::ab), zmd({KG, N}, dt::u8, tag::ab);
+      primitive_attr attr;
+      attr.set_scratchpad_mode(scratchpad_mode::user);
+      attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {kGroup, 1}, dt::bf16);
+      attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {kGroup, 1}, dt::u8);
+      attr.set_fpmath_mode(fpmath_mode::bf16, true);
+      matmul::primitive_desc pd(eng, src, wei, dst, attr);
+      matmul prim(pd);
+      std::printf("# M=%u impl_info_str: %s\n", M, pd.impl_info_str());
+      try {
+        print_zeinfo(prim.get_cache_blob());
+      } catch (const std::exception& e) {
+        std::printf("#   (no cache blob: %s)\n", e.what());
+      }
+      const size_t scr_bytes = pd.scratchpad_desc().get_size();
+      void* scr = scr_bytes ? sycl::malloc_device(scr_bytes, q) : nullptr;
+      std::unordered_map<int, memory> a;
+      a[DNNL_ARG_SRC] = sycl_interop::make_memory(src, eng, sycl_interop::memory_kind::usm, d_x);
+      a[DNNL_ARG_WEIGHTS] = sycl_interop::make_memory(wei, eng, sycl_interop::memory_kind::usm, d_p);
+      a[DNNL_ARG_DST] = sycl_interop::make_memory(dst, eng, sycl_interop::memory_kind::usm, d_y);
+      a[DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS] = sycl_interop::make_memory(smd, eng, sycl_interop::memory_kind::usm, d_s);
+      a[DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS] =
+          sycl_interop::make_memory(zmd, eng, sycl_interop::memory_kind::usm, d_z);
+      if (scr) a[DNNL_ARG_SCRATCHPAD] = sycl_interop::make_memory(pd.scratchpad_desc(), eng, sycl_interop::memory_kind::usm, scr);
+      q.memset(d_y, 0xFF, size_t(MMAX) * N * 4).wait();   // NaN: an unwritten output fails every check
+      prim.execute(strm, a);
+      q.wait_and_throw();
+      out.emplace_back(size_t(M) * N);
+      q.memcpy(out.back().data(), d_y, out.back().size() * 4).wait();
+      if (scr) sycl::free(scr, q);
+    }
+    // (1) fp64 references of rows 0, 15, 31, 63 (row 0 and M - 1 of every M), threads over columns
+    const uint32_t refrows[] = {0, 15, 31, 63};
+    std::vector<double> ref(4 * size_t(N)), refw(4 * size_t(N)), bnd(4 * size_t(N));
+    {
+      std::vector<std::thread> th;
+      const uint32_t nt = 16;
+      for (uint32_t t = 0; t < nt; ++t)
+        th.emplace_back([&, t] {
+          for (uint32_t n = N / nt * t; n < N / nt * (t + 1); ++n)
+            for (int r = 0; r < 4; ++r) {
+              const uint16_t* xr = &hx[size_t(refrows[r]) * K];
+              double e = 0, ew = 0, b = 0;
+              for (uint32_t k = 0; k < K; ++k) {
+                const uint8_t byte = hp[size_t(n) * (K / 2) + k / 2];
+                const int qv = (k & 1) ? (byte >> 4) : (byte & 15);
+                const float sc = common::bf16_to_f32(hs[size_t(k / kGroup) * N + n]);
+                const double xv = common::bf16_to_f32(xr[k]);
+                const double wexact = double(qv - 8) * double(sc);
+                const double wb = common::bf16_to_f32(common::f32_to_bf16(float(qv - 8) * sc));
+                e += xv * wexact;
+                ew += xv * wb;
+                b += std::fabs(xv * wexact);
+              }
+              ref[size_t(r) * N + n] = e;
+              refw[size_t(r) * N + n] = ew;
+              bnd[size_t(r) * N + n] = b;
+            }
+        });
+      for (auto& h : th) h.join();
+    }
+    for (size_t mi = 0; mi < 3; ++mi) {
+      const uint32_t M = kMs16[mi];
+      for (uint32_t row : {0u, M - 1}) {
+        const int r = row == 0 ? 0 : row == 15 ? 1 : row == 31 ? 2 : 3;
+        for (int which = 0; which < 2; ++which) {
+          const std::vector<double>& R = which ? refw : ref;
+          double max_ratio = 0, dot = 0, gg = 0, rr = 0;
+          size_t over = 0;
+          for (uint32_t n = 0; n < N; ++n) {
+            const double g = out[mi][size_t(row) * N + n], want = R[size_t(r) * N + n];
+            const double lim = std::ldexp(bnd[size_t(r) * N + n], -16);
+            const double qr = std::isfinite(g) ? std::fabs(g - want) / lim : 1e30;
+            max_ratio = std::max(max_ratio, qr);
+            over += qr > 1.0;
+            dot += g * want; gg += g * g; rr += want * want;
+          }
+          const double cs = dot / std::sqrt(gg * rr);
+          const bool pass = over == 0 && cs >= 0.9999999;
+          if (which == 0) all_ok = all_ok && pass;
+          std::printf("| %s | M %u | row %u | vs %s | max err / (sum|wx| 2^-16) %.3g | over %zu of %u | cos %.9f | %s |\n",
+                      sh.name, M, row, which ? "bf16-rounded weights" : "fp64 exact", max_ratio, over, N, cs,
+                      pass ? "pass" : "FAIL");
+        }
+      }
+    }
+    // (2) row independence across M
+    for (size_t mi = 0; mi < 2; ++mi) {
+      const uint32_t M = kMs16[mi];
+      size_t words = 0, bits = 0;
+      double maxd = 0;
+      for (size_t i = 0; i < size_t(M) * N; ++i) {
+        uint32_t a, b;
+        std::memcpy(&a, &out[mi][i], 4);
+        std::memcpy(&b, &out[2][i], 4);
+        if (a != b) {
+          ++words;
+          bits += size_t(__builtin_popcount(a ^ b));
+          maxd = std::max(maxd, double(std::fabs(out[mi][i] - out[2][i])));
+        }
+      }
+      std::printf("| %s | rows 0..%u at M %u vs the same rows at M 64 | %zu of %zu words differ (%zu bits), max |diff| "
+                  "%.3g | %s |\n", sh.name, M - 1, M, words, size_t(M) * N, bits, maxd,
+                  words ? "NOT row-independent" : "row-independent");
+    }
+    std::fflush(stdout);
+    sycl::free(d_p, q); sycl::free(d_s, q); sycl::free(d_z, q); sycl::free(d_x, q); sycl::free(d_y, q);
+  }
+  std::printf("\nverify-rows: fp64 check %s\n", all_ok ? "PASS" : "FAIL (see the rows above)");
+  return all_ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
     std::string snapshot = "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
+    bool verify_rows = false;
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg.rfind("--ckpt=", 0) == 0) snapshot = arg.substr(7);
+      if (arg == "--verify-rows") verify_rows = true;
     }
     sycl::queue q(sycl::gpu_selector_v, sycl::property::queue::in_order{});
+    if (verify_rows) {
+      std::printf("# spec 32e: oneDNN int4 matmul at a verify's 16 / 32 / 64 rows - fp64, row independence, kernels\n");
+      std::printf("# device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
+      engine veng = sycl_interop::make_engine(q.get_device(), q.get_context());
+      stream vstrm = sycl_interop::make_stream(veng, q);
+      return run_verify_rows(q, veng, vstrm);
+    }
     std::printf("# P-C: oneDNN bf16_int4 matmul (vLLM's real prefill GEMM path, gemmstone JIT)\n");
     std::printf("# device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
     engine eng = sycl_interop::make_engine(q.get_device(), q.get_context());
