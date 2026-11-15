@@ -25,7 +25,6 @@ int main(int argc, char** argv) {
   const runtime::CaptureOptions defaults;
   CHECK_EQ(defaults.dflash_attn_heads, 1u);
   CHECK_EQ(defaults.dflash_attn_rows, 4u);
-  CHECK(!defaults.dflash_attn_parallel_exp);
   CHECK(defaults.dflash_attn_dpas);
   CHECK_EQ(defaults.dflash_attn_ks, 4u);
   const auto default_names = kd::draft_variants(true, 1u, true, 0u, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM);
@@ -68,22 +67,16 @@ int main(int argc, char** argv) {
       for (bool int8_head : {true, false})
         for (unsigned dv : {0u, 32768u, 65536u, 131072u})
           for (kernels::LinearKind k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv})   // spec 28d + the override
-            for (unsigned heads : {0u, 1u, 2u})
-              for (unsigned rows : {0u, 1u, 2u, 4u}) {
-                if (rows && heads != 1) continue;
-                for (bool parallel : {false, true}) {
-                  if (parallel && (heads != 1 || rows != 4)) continue;
-                  for (const auto& v : kd::draft_variants(v2, fmt, int8_head, dv, k, k, heads, rows, false, parallel))
-                    bound.insert(v);
-                }
-              }
+            for (const auto& [heads, rows] : {std::pair<unsigned, unsigned>{0, 0}, {1, 1}, {1, 2}, {1, 4}})
+              for (const auto& v : kd::draft_variants(v2, fmt, int8_head, dv, k, k, heads, rows))
+                bound.insert(v);
   const auto* candidate = kernels::small_m_tuning(5120, 248320, 1, 1);
   CHECK(candidate && kernels::gemm_sm_built_m(*candidate) == std::vector<unsigned>{7});
   for (bool v2 : {false, true})
     for (unsigned fmt : {0u, 1u, 2u})
       for (auto k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv})
         for (auto [bits, c] : {std::pair<unsigned, unsigned>{4, 64}, {2, 80}}) {   // spec 19 v3d: 2 / 80 the default
-          const auto names = kd::draft_variants(v2, fmt, true, 0, k, k, 0, 0, true, false, false, 1, bits, c);
+          const auto names = kd::draft_variants(v2, fmt, true, 0, k, k, 0, 0, true, false, 1, bits, c);
           CHECK(std::find(names.begin(), names.end(), kd::candidate_topk_variant(c)) != names.end());
           CHECK(std::find(names.begin(), names.end(), kd::rerank_variant(c)) != names.end());
           CHECK(std::find(names.begin(), names.end(), kd::topk_variant(248320, 248077, false)) == names.end());
@@ -93,7 +86,7 @@ int main(int argc, char** argv) {
   {   // spec 19 v3d Task 6: the DPAS part beside the H1 / B4 reduce
     for (unsigned ks : {1u, 2u, 4u}) {
       const auto names = kd::draft_variants(true, 1u, true, 0u, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM,
-                                            1, 4, true, false, true, ks);
+                                            1, 4, true, true, ks);
       CHECK(std::find(names.begin(), names.end(), kd::attn_dpas_variant(kd::kQwen38, ks)) != names.end());
       bound.insert(names.begin(), names.end());
     }

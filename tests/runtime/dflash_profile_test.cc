@@ -17,10 +17,8 @@
 // Same real weights and ring, with only the attention grid changed. Interleave timestamp measurements. The scalar
 // forms agree bitwise with each other; the DPAS part (spec 19 v3d Task 6, production) with the production draft.
 void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint32_t K) {
-  struct Grid { unsigned heads, rows; bool parallel_exp, dpas; };
-  constexpr std::array<Grid, 8> forms = {{{0, 0, false, false}, {1, 0, false, false}, {2, 0, false, false},
-                                          {1, 4, false, false}, {1, 2, false, false}, {1, 1, false, false},
-                                          {1, 4, true, false}, {1, 4, false, true}}};
+  struct Grid { unsigned heads, rows; bool dpas; };
+  constexpr std::array<Grid, 5> forms = {{{0, 0, false}, {1, 4, false}, {1, 2, false}, {1, 1, false}, {1, 4, true}}};
   std::array<std::unique_ptr<runtime::ProfileEvents>, forms.size()> events;
   std::array<std::unique_ptr<runtime::CapturedStep>, forms.size()> lists;
   for (unsigned h = 0; h < forms.size(); ++h) {
@@ -28,7 +26,6 @@ void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint
     runtime::CaptureOptions opt;
     opt.dflash_attn_heads = forms[h].heads;
     opt.dflash_attn_rows = forms[h].rows;
-    opt.dflash_attn_parallel_exp = forms[h].parallel_exp;
     opt.dflash_attn_dpas = forms[h].dpas;
     opt.profile = events[h].get();
     lists[h] = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_draft(
@@ -63,9 +60,9 @@ void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint
     }
   for (unsigned h = 0; h < forms.size(); ++h) {
     std::sort(timings[h].begin(), timings[h].end());
-    std::printf("DFLASH_ATTN_HEADS pos=%u K=%u heads=%u rows=%u parallel_exp=%d dpas=%d ms=%.6f readback_hidden=bitwise\n",
-                e.pos(), K, forms[h].heads ? forms[h].heads : 4, forms[h].rows ? forms[h].rows : 8, forms[h].parallel_exp,
-                forms[h].dpas, timings[h][2]);
+    std::printf("DFLASH_ATTN_HEADS pos=%u K=%u heads=%u rows=%u dpas=%d ms=%.6f readback_hidden=bitwise\n",
+                e.pos(), K, forms[h].heads ? forms[h].heads : 4, forms[h].rows ? forms[h].rows : 8, forms[h].dpas,
+                timings[h][2]);
   }
 }
 

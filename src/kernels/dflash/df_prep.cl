@@ -66,6 +66,24 @@ inline float wg_sum(float v, __local float* red) {
   return r;
 }
 
+// FOLD (the int4 drafter's split-K consumers, spec 19v2): the producers leave S partial slices and each consumer sums
+// them as it reads; without FOLD a read is the plain element.
+#ifdef FOLD
+// Producers write [S][M][N]; folding is ascending and stays inside the consumer's launch.
+inline float fold_at(__global const float* src, size_t stride, size_t i, uint slices) {
+  float a = 0.0f;
+  for (uint s = 0; s < slices; ++s) a = a + src[(size_t)s * stride + i];
+  return a;
+}
+#define FOLD_AT(p, stride, i, n) fold_at(p, stride, i, n)
+#define CONV_SLICES_P , uint slices
+#define CONV_SLICES(n) , n
+#else
+#define FOLD_AT(p, stride, i, n) p[i]
+#define CONV_SLICES_P
+#define CONV_SLICES(n)
+#endif
+
 #ifdef VOCAB
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 #ifdef SEQS
@@ -103,6 +121,24 @@ __kernel void df_norm(__global const float* restrict src, __global const float* 
     x[(size_t)r * H + i] = f2bf(v);
   }
 }
+#ifdef FOLD
+__attribute__((reqd_work_group_size(WG, 1, 1)))
+__kernel void df_norm_fc(__global const float* restrict src, __global const float* restrict w, __global float* restrict h,
+                      __global ushort* restrict x) {
+  __local float red[WG];
+  const uint r = get_group_id(1), lid = get_local_id(0);
+  __global const float* s = src + (size_t)r * H;
+  float a = 0.0f;
+  for (uint i = lid; i < H; i += WG) { const float v = fold_at(src, (size_t)M * H, (size_t)r * H + i, 8); a = a + v * v; }
+  const float ss = wg_sum(a, red);
+  const float rstd = 1.0f / sqrt(ss / (float)H + EPS);
+  for (uint i = lid; i < H; i += WG) {
+    const float v = (fold_at(src, (size_t)M * H, (size_t)r * H + i, 8) * rstd) * w[i];
+    h[(size_t)r * H + i] = v;
+    x[(size_t)r * H + i] = f2bf(v);
+  }
+}
+#endif
 
 #ifdef CTAPS
 #define G (H / GROUP)
@@ -120,33 +156,34 @@ __kernel void df_norm(__global const float* restrict src, __global const float* 
 #define CONV_SEQS
 #endif
 inline float conv_at(__global const float* src, __global const float* co, __global const float* base, uint side,
-                     uint r, uint i CONV_LO) {
+                     uint r, uint i CONV_SLICES_P CONV_LO) {
   const uint g = i / GROUP;
   __global const float* cs = co + (size_t)r * KPN + side * CTAPS * G;
   __global const float* bs = base + (size_t)side * CTAPS * H;
-  float o = (bs[i] + cs[g]) * src[(size_t)r * H + i];
+  float o = (bs[i] + FOLD_AT(cs, (size_t)M * KPN, g, 16)) * FOLD_AT(src, (size_t)M * H, (size_t)r * H + i, slices);
   for (uint t = 1; t < CTAPS; ++t)
-    if (TAP_OK(r, t)) o = o + (bs[(size_t)t * H + i] + cs[t * G + g]) * src[(size_t)(r - t) * H + i];
+    if (TAP_OK(r, t)) o = o + (bs[(size_t)t * H + i] + FOLD_AT(cs, (size_t)M * KPN, t * G + g, 16)) *
+                       FOLD_AT(src, (size_t)M * H, (size_t)(r - t) * H + i, slices);
   return o;
 }
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void df_conv_prep(CONV_SEQS __global const float* restrict src, __global const float* restrict co,
                            __global const float* restrict base, __global ushort* restrict out) {
   const uint r = get_group_id(1), i = get_group_id(0) * WG + get_local_id(0);
-  if (i < H) out[(size_t)r * H + i] = f2bf(conv_at(src, co, base, 0, r, i CONV_ROW0));
+  if (i < H) out[(size_t)r * H + i] = f2bf(conv_at(src, co, base, 0, r, i CONV_SLICES(1) CONV_ROW0));
 }
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void df_conv_add(CONV_SEQS __global const float* restrict src, __global const float* restrict co,
                           __global const float* restrict base, __global float* restrict resid) {
   const uint r = get_group_id(1), i = get_group_id(0) * WG + get_local_id(0);
-  if (i < H) resid[(size_t)r * H + i] = resid[(size_t)r * H + i] + conv_at(src, co, base, 1, r, i CONV_ROW0);
+  if (i < H) resid[(size_t)r * H + i] = resid[(size_t)r * H + i] + conv_at(src, co, base, 1, r, i CONV_SLICES(4) CONV_ROW0);
 }
 #endif
 
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void df_add(__global const float* restrict src, __global float* restrict resid) {
   const uint r = get_group_id(1), i = get_group_id(0) * WG + get_local_id(0);
-  if (i < H) resid[(size_t)r * H + i] = resid[(size_t)r * H + i] + src[(size_t)r * H + i];
+  if (i < H) resid[(size_t)r * H + i] = resid[(size_t)r * H + i] + FOLD_AT(src, (size_t)M * H, (size_t)r * H + i, 4);
 }
 
 #ifdef INTER
@@ -154,7 +191,8 @@ __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void df_silu_mul(__global const float* restrict gu, __global ushort* restrict a) {
   const uint r = get_group_id(1), i = get_group_id(0) * WG + get_local_id(0);
   if (i >= INTER) return;
-  const float g = gu[(size_t)r * 2 * INTER + i], u = gu[(size_t)r * 2 * INTER + INTER + i];
+  const float g = FOLD_AT(gu, (size_t)M * 2 * INTER, (size_t)r * 2 * INTER + i, 8),
+              u = FOLD_AT(gu, (size_t)M * 2 * INTER, (size_t)r * 2 * INTER + INTER + i, 8);
   a[(size_t)r * INTER + i] = f2bf(g / (1.0f + exp(-g)) * u);
 }
 #endif
@@ -198,7 +236,7 @@ __kernel void df_qkv_prep(__global const uint* restrict ctrl, __global const flo
                           __global float* restrict q, __global float* restrict kb, __global float* restrict vb) {
   __local float y[HD];
   const uint s = get_group_id(0), r = get_group_id(1), i = get_local_id(0);
-  const float x = qkv[(size_t)r * QKVN + (size_t)s * HD + i];
+  const float x = FOLD_AT(qkv, (size_t)M * QKVN, (size_t)r * QKVN + (size_t)s * HD + i, 4);
 #ifdef SEQS
   const uint z = seqs[r];
   const uint pos = z == SEQ_NONE ? 0 : SQ(z, 2) + (r - SQ(z, 0));
@@ -246,7 +284,12 @@ __kernel void df_ctx_store(__global const uint* restrict dctl, __global const fl
   const bool is_v = rem >= NKV;
   const uint pos = dctl[DCTL_PPOS] + r, slot = pos % RING;
 #endif
+#ifdef FOLD
+  const float x = fold_at(kv + (size_t)l * 8 * M * 2 * KVN, (size_t)M * 2 * KVN,
+                          (size_t)r * 2 * KVN + (is_v ? KVN : 0) + (size_t)head * HD + i, 8);
+#else
   const float x = kv[((size_t)l * M + r) * 2 * KVN + (is_v ? KVN : 0) + (size_t)head * HD + i];
+#endif
   const size_t at = (((size_t)l * RING + slot) * NKV + head) * HD + i;
   if (is_v) {
     ring_v[at] = f2bf(x);
