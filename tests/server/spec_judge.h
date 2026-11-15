@@ -97,20 +97,12 @@ struct ReviewedRow {
   const char* date;
   const char* reason;
 };
-inline constexpr const char* kReviewedReason = "chaotic turn boundary, reviewed 2026-11-05, see spec 28 sec 10";
-inline constexpr const char* kInt8PrefillKvReason =
-    "known fail of l0-int8 prefill with int8 KV, accepted 2026-11-10 (docs/probes/a4-int8-prefill-int8-kv-2026-11-10.md)";
-inline constexpr const char* kInt8KvNoiseReason =
-    "int8 KV cache noise under the operator's rule 2026-11-13: plain rejected too or verify-vs-plain <= 8 ulp";
 inline constexpr const char* kTpVerifyNarrowReason =
     "TP verify rows on a bf16-narrow row, the small-M GEMM's rounding, no defect; operator 2026-11-14 (item 24, "
     "docs/probes/probe-tp-verify-m24-2026-11-14.md)";
 inline constexpr const char* kTpPrefillNarrowReason =
     "TP with int8 KV on long's bf16-narrow output 62 (item 24's row: 271 for the f32 top 198), rounding, no defect; "
     "operator 2026-11-14";
-inline constexpr const char* kNearTieNoiseReason =
-    "after a near-tie first difference, an 11-12 ulp miss on main as well; bf16 format noise by the per-layer "
-    "diagnostic (operator 2026-11-13), reviewed row operator 2026-11-14";
 inline constexpr const char* kWideLookupTieReason =
     "a three-way near tie the 16-row lookup verify flips (row 0 too: the kernels' rounding, no defect; "
     "docs/probes/probe-lookup-wide-verify-2026-11-14.md), reviewed row operator 2026-11-15";
@@ -121,50 +113,11 @@ inline constexpr double kReviewedGapUlp = 0.01;
 // mtp_gpu_dv128k_test: the int8 head). mtp_gpu_32k_test / mtp_gpu_128k_test (bf16 head) reach the bf16-head rows
 // with other keys (their streams differ after the row) and match by tag / row / ids / f32 gap (operator 2026-11-07).
 inline constexpr ReviewedRow kReviewedRows[] = {
-    // t6_usage-openai row 0: bf16 gap 12.05, plain 3.31 - the bf16-unstable allowance 25.32 is 3.31 short
-    {"mtp_gpu_bf16_t6_usage-openai_46b9c791485d35e0", 0, 248068, 248046, 28.63, "2026-11-05", kReviewedReason},
-    // the same row, int8 head: bf16 gap 12.17, plain 3.28 - allowance 25.60
-    {"mtp_gpu_int8_t6_usage-openai_3ed728d9449e7b65", 0, 248068, 248046, 28.87, "2026-11-05", kReviewedReason},
-    // t6_usage-rotation row 20, bf16 head: the int8-aware f32 judge's top flips (-3.94 -> +9.06); bf16 gap 3.87
-    {"mtp_gpu_bf16_t6_usage-rotation_de17c7ad87da9bb2", 20, 74455, 248068, 9.06, "2026-11-05", kReviewedReason},
-    // dflash_gpu_test t5_test-box: the verify on the DFlash history (an M = 1 row on that history picks the same ids)
-    {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 128, 248068, 248046, 10.53, "2026-11-05", kReviewedReason},
-    {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 137, 248068, 248046, 11.68, "2026-11-05", kReviewedReason},
-    {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 143, 248046, 248068, 16.27, "2026-11-05", kReviewedReason},
-    // mtp_gpu_kv8_test (int8 KV under the l0-int8 prefill): the accepted known fail of that combination (3o),
-    // operator 2026-11-11; mtp_verify_kv8_test shows the verify rows bitwise the plain steps
-    {"mtp_gpu_bf16_t5_test-linear_l0_48240f936b6319ce", 58, 248046, 248045, 20.94, "2026-11-11", kInt8PrefillKvReason},
-    {"mtp_gpu_bf16_t2_explain-openai_7aefc7634c90dcf3", 0, 248045, 248046, 23.86, "2026-11-11", kInt8PrefillKvReason},
-    {"mtp_gpu_bf16_t4_comment-loader_fcc02a22cb3a07cd", 0, 74455, 846, 13.01, "2026-11-11", kInt8PrefillKvReason},
-    // dflash_gpu_kv8_test t1_define-rotation (K 4-7 and auto): DPAS verify attention + gemm_sm linears on a
-    // bf16-unstable row, no defect - the exact lists are bitwise the plain steps (dflash_verify_kv8_test); operator
-    // 2026-11-13 (docs/probes/probe-dflash-kv8-verify-m8-2026-11-13.md)
-    {"dflash_gpu_int8_t1_define-rotation_82e33a10f2dcba43", 0, 248046, 248068, 34.64, "2026-11-13", kReviewedReason},
-    // dflash_gpu_kv8_test t4_comment-linear_l0 K 3: verify-vs-plain gap 5.06 ulp, plain not rejected
-    {"dflash_gpu_int8_t4_comment-linear_l0_b5da87bdd96dd7e5", 0, 74455, 248068, 15.22, "2026-11-13", kInt8KvNoiseReason},
-    // the same context served (b70-serve --spec dflash, 2 and 4 requests a card, int8 KV): bf16 gap 4.94, operator
-    // 2026-11-15
-    {"serve_int8_toolcall_t4_comment-linear_l0_b5da87bdd96dd7e5", 0, 74455, 248068, 14.86, "2026-11-15",
-     kInt8KvNoiseReason},
-    // dflash_gpu_kv8_test t2_explain-loader K 7: plain rejected too (2 ids)
-    {"dflash_gpu_int8_t2_explain-loader_ad0f46fdba65f454", 0, 248068, 61369, 70.10, "2026-11-13", kInt8KvNoiseReason},
-    // mtp_gpu_kv8_test t4_comment-linear_l0 K 1-3: verify-vs-plain gap 4.37 ulp, plain not rejected
-    {"mtp_gpu_bf16_t4_comment-linear_l0_b9725217706f86bb", 0, 74455, 248068, 8.88, "2026-11-13", kInt8KvNoiseReason},
-    // mtp_gpu_kv8_test t6_usage-step K 1-3: verify-vs-plain gap 4.68 ulp, plain not rejected
-    {"mtp_gpu_bf16_t6_usage-step_9773766fbdbc0a4e", 0, 74455, 248046, 12.40, "2026-11-13", kInt8KvNoiseReason},
-    // mtp_gpu_kv8_test t1_define-rotation K 1-3: first difference a 0.46 ulp near-tie, plain not rejected
-    // (row 195 passes by the bf16-unstable rule; row 199 is the rejected one)
-    {"mtp_gpu_bf16_t1_define-rotation_7d7630d760d6d025", 199, 248068, 846, 21.26, "2026-11-13", kInt8KvNoiseReason},
     // tp_mtp_test / tp_dflash_test long, output 62: the TP verify rows (M = 2..4) pick 271 where f32 leads with 198
     // by 2.87 logits; identical to plain TP through layer 20, rounding-size drift after, no closer one-card verify
     {"tp_mtp_m2_long_44f7f924c8179828", 0, 198, 271, 22.96, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k1_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k3_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
-    // mtp_gpu_test (the pfi8mlp judges), K 1-3, the same rows on main: t1_define-step row 79 after a 0.015-ulp tie at
-    // 142; t2_explain-openai row 0 after a 0.437-ulp tie at 83 (bf16-unstable allowance 10.66, 0.44 short). Other K's
-    // keys match by tag, row, ids and gap
-    {"mtp_gpu_bf16_t1_define-step_037d2c4e65c58a24", 79, 248046, 846, 11.70, "2026-11-14", kNearTieNoiseReason},
-    {"mtp_gpu_bf16_t2_explain-openai_201e835f5ad80f51", 0, 248068, 846, 11.10, "2026-11-14", kNearTieNoiseReason},
     // tp_prefill_kv8_test long: TP's plain decode after its int8-KV prefill takes the same flip at output 62
     {"tp_prefill_kv8_long_fa12c9167b2eaa28", 62, 198, 271, 24.80, "2026-11-14", kTpPrefillNarrowReason},
     // mtp_lookup_gpu_test, output 45: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
