@@ -46,10 +46,6 @@ using br::rne;
 constexpr uint32_t X = bp::kX, LD = bp::kInLd, IN = bp::kInner, NH = bp::kHeads;
 const std::vector<uint32_t> kHeadsSel = {0, 1, 2, 3, 4, 5, 6, 77, 127};
 
-int ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 float fval(bool coarse, uint32_t t, uint32_t i, uint32_t seed, float amp = 1.0f) {
   return br::fixture_val(coarse, t, i, seed, 0.125f, amp);
 }
@@ -184,7 +180,7 @@ void test_conv() {
   int worst = 0;
   for (uint32_t r = 0; r < nr; ++r)
     for (uint32_t j = 0; j < nc; ++j) {
-      const int u = ulps(whole[size_t(pfx::kConvRows[r]) * X + j * pfx::kConvStride], fxc[size_t(r) * nc + j]);
+      const int u = ulps16(whole[size_t(pfx::kConvRows[r]) * X + j * pfx::kConvStride], fxc[size_t(r) * nc + j]);
       diff += u != 0;
       worst = std::max(worst, u);
     }
@@ -341,7 +337,7 @@ void test_fixture() {
     for (uint32_t r = 0; r < nr; ++r)
       for (uint32_t j = 0; j < nh; ++j)
         for (uint32_t p = 0; p < bp::kP; ++p) {
-          const int u = ulps(y[size_t(pfx::kSsdRows[r]) * IN + size_t(pfx::kSsdHeads[j]) * bp::kP + p],
+          const int u = ulps16(y[size_t(pfx::kSsdRows[r]) * IN + size_t(pfx::kSsdHeads[j]) * bp::kP + p],
                              fy[(size_t(r) * nh + j) * bp::kP + p]);
           diff += u != 0;
           worst = std::max(worst, u);

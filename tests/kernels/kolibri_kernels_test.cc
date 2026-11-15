@@ -58,11 +58,6 @@ static_assert(kk::route::kWords == kr::kWords && kk::route::kIds == kr::kIds &&
                   kk::route::kNext == kr::kNext && kk::route::kLogitMin == kr::kLogitMin,
               "the Kolibri route row: kol_moe.cl R_*, kernels::kolibri::route and kolibri_ref disagree");
 
-int ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
-
 struct Dev {
   l0::Context ctx{0};
   l0::Queue q{ctx};
@@ -352,10 +347,10 @@ int main() {
       const std::vector<uint16_t> mo = run_moe(g, dw, sg, sd, h);
       const std::vector<uint16_t> h_ref = kr::gate_up(ids, x.data(), g.data(), sg.data(), kk::kUpKs);
       int wh = 0, wo = 0;
-      for (size_t i = 0; i < h.size(); ++i) wh = std::max(wh, ulps(h[i], h_ref[i]));
+      for (size_t i = 0; i < h.size(); ++i) wh = std::max(wh, ulps16(h[i], h_ref[i]));
       // the down + combine from the DEVICE's h (the gate_up's exp apart)
       const std::vector<uint16_t> mo_ref = kr::down(ids, ws, h, dw.data(), sd.data(), kk::kDnKs);
-      for (uint32_t n = 0; n < H; ++n) wo = std::max(wo, ulps(mo[n], mo_ref[n]));
+      for (uint32_t n = 0; n < H; ++n) wo = std::max(wo, ulps16(mo[n], mo_ref[n]));
       CHECK(wh <= 2 && wo <= 2);
       std::printf("  moe %-28s gate||up worst %d ulp, down + combine worst %d ulp\n", what, wh, wo);
       return mo;

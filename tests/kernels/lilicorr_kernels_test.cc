@@ -102,10 +102,6 @@ std::vector<uint16_t> rnd_bf16(size_t n, float lo, float hi, uint32_t seed) {
   for (size_t i = 0; i < n; ++i) v[i] = rne(f[i]);
   return v;
 }
-int ulps(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 
 // --- ll_gemv_bf16_g -------------------------------------------------------------------------------------------------
 int check_gemv_g(Dev& d) {
@@ -211,10 +207,10 @@ int check_attn(Dev& d) {
       for (uint32_t i = 0; i < QN; ++i) {
         const size_t j = size_t(r) * QN + i;
         if (r > K) zero += got[j] != 0;
-        else if (ulps(got[j], rne(want[j])) > 1 && std::fabs(dfref::bf(got[j]) - want[j]) > floor) {
+        else if (ulps16(got[j], rne(want[j])) > 1 && std::fabs(dfref::bf(got[j]) - want[j]) > floor) {
           ++over;
           std::printf("  miss: row %u col %u got %.9g want %.9g (%d ulps; the row's largest |value| %.6g)\n", r, i,
-                      double(dfref::bf(got[j])), double(want[j]), ulps(got[j], rne(want[j])), double(row));
+                      double(dfref::bf(got[j])), double(want[j]), ulps16(got[j], rne(want[j])), double(row));
         }
       }
     }

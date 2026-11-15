@@ -31,54 +31,17 @@
 #include "loader/qwen4exp_ple_hash.h"
 #include "model/qwen4exp.h"
 #include "qwen4exp_ple_fixture.h"
+#include "safetensors_writer.h"
 
 namespace {
 
 namespace fs = std::filesystem;
 
-struct Tensor {
-  std::string dtype;
-  std::vector<uint64_t> shape;
-  std::vector<uint8_t> bytes;
-};
-using Tensors = std::map<std::string, Tensor>;
+using safetensors_writer::Tensor;
+using safetensors_writer::Tensors;
 
 void write_checkpoint(const fs::path& dir, const Tensors& ts) {
-  fs::create_directories(dir);
-  std::string hdr = "{\"__metadata__\":{\"rule\":\"row-int8-spec9\"}";
-  uint64_t off = 0;
-  for (const auto& [name, t] : ts) {
-    hdr += ",\"" + name + "\":{\"dtype\":\"" + t.dtype + "\",\"shape\":[";
-    for (size_t i = 0; i < t.shape.size(); ++i) hdr += (i ? "," : "") + std::to_string(t.shape[i]);
-    hdr += "],\"data_offsets\":[" + std::to_string(off) + "," + std::to_string(off + t.bytes.size()) + "]}";
-    off += t.bytes.size();
-    off = (off + 7) / 8 * 8;
-  }
-  hdr += "}";
-  while ((8 + hdr.size()) % 8 != 0) hdr += ' ';
-  std::ofstream f(dir / "ple_int8-00001-of-00001.safetensors", std::ios::binary);
-  const uint64_t hlen = hdr.size();
-  f.write(reinterpret_cast<const char*>(&hlen), 8);
-  f.write(hdr.data(), std::streamsize(hdr.size()));
-  uint64_t pos = 0;
-  for (const auto& [name, t] : ts) {
-    (void)name;
-    f.write(reinterpret_cast<const char*>(t.bytes.data()), std::streamsize(t.bytes.size()));
-    pos += t.bytes.size();
-    const uint64_t pad = (pos + 7) / 8 * 8 - pos;
-    const char zeros[8] = {};
-    f.write(zeros, std::streamsize(pad));
-    pos += pad;
-  }
-  std::ofstream ix(dir / "model.safetensors.index.json");
-  ix << "{\"metadata\":{},\"weight_map\":{";
-  bool first = true;
-  for (const auto& [name, t] : ts) {
-    (void)t;
-    ix << (first ? "" : ",") << "\"" << name << "\":\"ple_int8-00001-of-00001.safetensors\"";
-    first = false;
-  }
-  ix << "}}";
+  safetensors_writer::write_checkpoint(dir, ts, "ple_int8-00001-of-00001.safetensors", {{"rule", "row-int8-spec9"}});
 }
 
 template <class T>

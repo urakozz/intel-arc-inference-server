@@ -95,10 +95,6 @@ static_assert(qk::kListMax == qr::kListMax && qk::kTailSlots == qr::kTailSlots &
 constexpr uint32_t D = qk::kHidden, HCN = qk::kHcN, HD = qk::kHd, QH = qk::kQHeads, KVH = qk::kKvHeads;
 constexpr uint32_t QN = QH * HD, KVN = KVH * HD;
 
-int ulps16(uint16_t a, uint16_t b) {
-  auto key = [](uint16_t v) { return (v & 0x8000) ? -int(v & 0x7FFF) : int(v); };
-  return std::abs(key(a) - key(b));
-}
 std::vector<uint16_t> random_bf16(size_t n, float lo, float hi, uint32_t seed) {
   std::mt19937 rng(seed);
   std::uniform_real_distribution<float> d(lo, hi);
