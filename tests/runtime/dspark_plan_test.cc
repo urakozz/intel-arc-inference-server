@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
 
   // --- 1. the buffers ---------------------------------------------------------------------------------------------------
   const rd::DFlashSizes s = rd::sizes(d, TH, V, ML, loader::DraftFormat::Bf16);
+  std::printf("  hid %zu, ring %zu, taps %zu, part %zu\n", s.hid, s.ring_k + s.ring_v, s.taps, s.part);
   CHECK_EQ(s.ring_k + s.ring_v, size_t(20971520));
   CHECK_EQ(s.taps, size_t(8) * 5 * 2560 * 2);
   CHECK_EQ(s.hid, size_t(8) * 256 * 4);

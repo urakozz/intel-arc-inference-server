@@ -237,6 +237,8 @@ inline std::vector<std::string> lilicorr_draft_variants(unsigned fmt, bool int8_
 // CAUSAL=1 (the name's `_C`), df_topk over the head's rows 0..6 (anchor-first: block row r predicts p + r + 1), df_select's
 // V2 walk with the Markov head as its codebooks and a hidden of ones (model/dflash.h). The linears bf16 at M 8 (gemv_bf16),
 // the target's head at the 7 rows (gemv_i8w / gemv_bf16).
+// TODO(card): the Markov bias over the top 16 (vLLM's dspark_draft_topk form) against the full-vocabulary walk (vLLM's
+// default) - acceptance only, never the output; measure the gap on the first run before a wider top-k.
 inline constexpr Shape kDSpark{2560, 6144, 20, 4, 128, 2048, 2048, 16, 2, 256, 128000, 127998, kM, kAttnPb};
 inline std::string dspark_attn_variant() { return attn_variant(kDSpark) + "_C"; }
 inline std::string dspark_topk_variant() { return topk_variant(kDSpark.vocab, kDSpark.used, false); }

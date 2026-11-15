@@ -296,6 +296,9 @@ DFlashDesc dspark_desc_from_config(const Value& c) {
   dc["mask_token_id"] = Value::make_num(u32(c, "mask_token_id"));
   const Value* aux = opt(c, "aux_hidden_state_layer_ids");
   if (!aux || !aux->is_array() || aux->arr().empty()) refuse("aux_hidden_state_layer_ids missing");
+  // TODO(card): update_dspark's `aux - 1` (the input of target layer `aux` = the output of layer aux - 1) assumes the
+  // aleph-alpha plugin captures Kolibri's aux states as vLLM's own models do; a low acceptance on the first run (well under
+  // the card's ~3 tokens a verify) points here first.
   Value::Array taps;
   for (const Value& v : aux->arr()) {
     if (!v.is_number() || v.num() < 1 || v.num() != double(uint32_t(v.num())))

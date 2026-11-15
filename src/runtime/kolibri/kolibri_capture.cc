@@ -267,6 +267,8 @@ class Walk {
       k.arg_ptr(2, rt);
       launch(k, 1, M_);
     }
+    // TODO(card): the M-row MoE reads each row's 6 experts (the bitwise reference); a union-aware form (Bolt's Decision 10:
+    // each distinct expert once a verify) is the lever once the card run prices the rows.
     const std::string mv = kk::moe_variant(M_);
     {
       l0::Kernel& k = kernel(mv, "kol_moe_gate_up", kk::moe_gate_up_wg());
@@ -294,6 +296,8 @@ class Walk {
   // kol_attn_reduce(ctrl, attn_part, attn_out)             grid (q heads, M)
   // Kolibri DSpark: `half` 1 is a verify's rows 4..M-1 - the M - 4 build over the second Control block (pos + 4, M - 4 rows,
   // KolibriEngine::verify writes it), attn_q / attn_out from row 4 on; the parts are reused after half 0's reduce.
+  // TODO(card): ocloc reports kol_attn_decode at M 3 / 4 spilling (3-6 registers); time the two halves against the M = 1
+  // list - a verify-shaped attention (spec 28c's) is the lever if they cost more than the rows' KV reads.
   void attention_flash(bool sliding, void* kv_k, void* kv_v, uint32_t half) {
     const uint32_t rows = kk::verify_attn_rows(M_, half);
     const std::string v = kk::attn_variant(rows, sliding);
