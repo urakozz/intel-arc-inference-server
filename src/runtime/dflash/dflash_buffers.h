@@ -46,6 +46,20 @@ struct DFlashBuffers {
   // Plan 19v3b: sessions 1..n-1 for an engine of n sequence slots (session 0 is the members above).
   std::vector<std::unique_ptr<DFlashSession>> sessions;
   void add_sessions(l0::Context& ctx, uint32_t n);
+  // Session s's buffers (0: the members above) and its reset - ring and taps zeroed, control and readback reset.
+  struct Session {
+    l0::Mem *dctl, *out, *ring_k, *ring_v, *taps;
+    DFlashCtl* ctl() const { return dctl->as<DFlashCtl>(); }
+    const DFlashDraftOut* readback() const { return out->as<DFlashDraftOut>(); }
+  };
+  Session session(uint32_t s);
+  void zero_session(l0::CmdList& imm, uint32_t s);
+  // Plan 19v3b: the batched draft's row table (shared, uint [kM + 8 kSeqs]: per row its slot or 0xFFFFFFFF, then per
+  // slot row0, rows, pos, K, anchor, temperature bits, seed lo, seed hi - df_prep.cl's SEQS) - with sessions only.
+  std::unique_ptr<l0::Mem> seqs;
+  // Plan 19v3b: the row lists' taps (every row's, [kM][taps][hidden] bf16 as `taps`) and the rows projection's table
+  // (`seqs`' layout: per slot row0, its committed rows, its first position) - with sessions only.
+  std::unique_ptr<l0::Mem> rows_taps, proj_seqs;
 
   DFlashCtl* ctl() const { return dctl.as<DFlashCtl>(); }
   const DFlashDraftOut* readback() const { return out.as<DFlashDraftOut>(); }

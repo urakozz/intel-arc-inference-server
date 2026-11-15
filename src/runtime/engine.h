@@ -328,10 +328,14 @@ class Engine {
   bool has_drafter() const { return drafter_ != nullptr; }
   TapDrafter* tap_drafter() const { return drafter_; }
   // The deepest k verify() takes: kMaxDraft with the MTP head, drafter->max_k() with a drafter, 0 otherwise.
+  // Plan 19v3b: the selected slot's - a further slot beside a drafter holds 4 GDN states, so K <= 3 there.
   uint32_t max_draft() const;
-  // The GDN slot count of the verify lists: MtpBuffers::kSlots (MTP) or TapVerifyDims::kSlots (drafter).
-  uint32_t gdn_slots() const;
-  // Spec 19c: the drafter's GDN state slots 1..7 (slot-major, one gdn_state each); null without a drafter.
+  // The GDN slot count of the verify lists: MtpBuffers::kSlots (MTP) or TapVerifyDims::kSlots (drafter) - the
+  // selected slot's (plan 19v3b: a further slot beside a drafter, SlotDims::kDrafterStates).
+  uint32_t gdn_slots() const { return seq().states; }
+  // Spec 19c: the drafter's GDN state slots 1..7 (slot-major, one gdn_state each); null without a drafter. Plan
+  // 19v3b: with several slots, every further slot's 4 states follow (slot q's state 0 at 7 + 4 (q - 1)) - the row
+  // lists' state pool.
   const l0::Mem* drafter_slots() const { return df_slots_.get(); }
   // Replays a list that is not the Engine's own (the drafter's draft and projection lists) on this engine's queue
   // and waits for it: nothing of the Engine's is in flight before or after. The list must only read Control and
@@ -412,7 +416,7 @@ class Engine {
   };
   SlotView slot_view(uint32_t q) const {
     const Seq& s = seqs_.at(q);
-    return {s.state0, s.spec, gdn_slots(), s.ring, s.hh, s.control, s.base, s.len};
+    return {s.state0, s.spec, s.states, s.ring, s.hh, s.control, s.base, s.len};
   }
 
   l0::Context& context() const { return ctx_; }
@@ -487,7 +491,15 @@ class Engine {
     Control* control = nullptr;
     Control* hctl = nullptr;        // MTP
     uint8_t* state0 = nullptr;      // GDN state 0, one whole-model state
-    uint8_t* spec = nullptr;        // states 1..: MTP's (kSlots - 1) or the drafter's (slot 0 only)
+    uint8_t* spec = nullptr;        // states 1..: MTP's (kSlots - 1) or the drafter's (7 slot 0, 3 a further slot)
+    uint32_t states = 1;            // its GDN states (gdn_slots())
+    uint32_t first = 0;             // the GDN index of its state 0 (the row lists' pool numbering, gdn_index)
+    TapVerify tv;                   // spec 19c / plan 19v3b: what its verify lists bind beside a drafter
+    // A deferred commit's projection of its drafter session (spec 19c; plan 19v3b: one a slot).
+    mutable l0::CmdList* pending = nullptr;
+    // Plan 19v3b: its last verify was a verify_rows step's run at rows row0 .. (its taps in the rows' tap buffer).
+    bool from_rows = false;
+    uint32_t rows_row0 = 0;
     uint8_t* ring = nullptr;
     uint8_t* hh = nullptr;          // MTP: [kM + 1] rows, row 0 = h_{pos-1}
     std::vector<CapturedStep> plain;   // the plain list of each slot of several (one slot's is step_)
@@ -522,7 +534,9 @@ class Engine {
   uint32_t rows_m_ = 0;   // the rows of the last verify_rows
   void setup_slots(const std::vector<uint32_t>& lens);
   void capture_slot(uint32_t q);
-  uint32_t gdn_index(uint32_t slot, uint32_t k) const { return slot * gdn_slots() + k; }
+  uint32_t gdn_index(uint32_t slot, uint32_t k) const { return seqs_[slot].first + k; }
+  uint32_t max_draft_of(const Seq& s) const;
+  void drop_rows_commits();   // the selected slot's unprojected rows commits (reset / restore discard them)
   void zero_slot();
   // Plan 19v3b Task 0: the KV page table's host copy (empty with one slot) and the cache rows of slot `s`'s positions
   // [begin, end) as (first row, rows) runs - consecutive pages merged, so one run unless the table scatters them.
@@ -532,11 +546,10 @@ class Engine {
   double verify_deep_ms_ = 0;   // the deep lists' capture time
   void capture_verify(uint32_t M, const CaptureOptions& opt);
   std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [chunk_cap + 1][hidden], lazy
-  // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims), what the verify lists bind, and the
-  // prefill's tap staging (bf16 [chunk_cap][taps][hidden], lazy: the first prefill).
+  // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims; plan 19v3b: and the further slots' states), and
+  // the prefill's tap staging (bf16 [chunk_cap][taps][hidden], lazy: the first prefill).
   TapDrafter* drafter_ = nullptr;
   std::unique_ptr<l0::Mem> df_slots_;
-  TapVerify df_tv_;
   // verify-cost-m8: one sequence slot with a proposer on Qwen3.8's GDN shapes - the verify lists bind gdn_step's
   // DEFERRED build (no per-row state; the committed rows are replayed by the next launch) over these pending rows
   // (two parities of kernels::kGdnPendParityBytes), and gdn_flush_ applies them where the state is read. Null
@@ -544,7 +557,8 @@ class Engine {
   std::unique_ptr<l0::Mem> gdn_pend_;
   std::unique_ptr<CapturedStep> gdn_flush_;
   std::unique_ptr<l0::Mem> df_pf_taps_;
-  mutable l0::CmdList* pending_projection_ = nullptr;
+  // Plan 19v3b: the commits of verify_rows runs not yet projected - one rows projection replay for all of them.
+  mutable std::vector<TapDrafter::RowsCommit> rows_commits_;
   l0::CmdList* profile_projection_ = nullptr;   // CaptureOptions test/probe override, borrowed
   // Snapshots materialize a deferred projection without changing the logical session.
   mutable l0::Queue queue_;

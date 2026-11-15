@@ -565,6 +565,19 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16 SOURCE ${DF_DIR}/df_select_split.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
+  # Plan 19v3b: the batched draft's row-table forms (SEQS) of the block-aware kernels - df_prep (embed, the
+  # convolutions, qkv prep; both forms) and the DFlash 2 selector walk (both forms).
+  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_SEQS SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                           INTER=17408 NH=32 NKV=8 HD=128 RING=2048 SEQS=4)
+  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8_SEQS
+                   SOURCE ${DF_DIR}/df_prep_split.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                           INTER=17408 NH=32 NKV=8 HD=128 RING=2048 SEQS=4)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_SEQS SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16_SEQS SOURCE ${DF_DIR}/df_select_split.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
   add_ocloc_kernel(df_select_v1_M8_K16 SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=0)
   add_gemv_bf16_variant(7 5120 248320 64 1)           # the full bf16 head at 7 rows

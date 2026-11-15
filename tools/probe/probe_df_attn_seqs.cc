@@ -187,14 +187,14 @@ int main(int argc, char** argv) {
     return b;
   };
   auto table = [&](const std::vector<Block>& bl) {
-    std::vector<uint32_t> t(kM + 4 * kSeqs, 0);
+    std::vector<uint32_t> t(kM + 8 * kSeqs, 0);
     for (uint32_t r = 0; r < kM; ++r) t[r] = kNone;
     for (uint32_t s = 0; s < bl.size(); ++s) {
       for (uint32_t r = bl[s].row0; r < bl[s].row0 + bl[s].rows; ++r) t[r] = s;
-      t[kM + 4 * s] = bl[s].row0;
-      t[kM + 4 * s + 1] = bl[s].rows;
-      t[kM + 4 * s + 2] = bl[s].pos;
-      t[kM + 4 * s + 3] = bl[s].K;
+      t[kM + 8 * s] = bl[s].row0;
+      t[kM + 8 * s + 1] = bl[s].rows;
+      t[kM + 8 * s + 2] = bl[s].pos;
+      t[kM + 8 * s + 3] = bl[s].K;
     }
     return t;
   };

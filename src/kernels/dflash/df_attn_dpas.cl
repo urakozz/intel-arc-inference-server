@@ -24,7 +24,7 @@
 // SEQS (plan 19v3b, the batched draft of several slots): the M rows are up to SEQS blocks, each its own slot's ring
 // and anchor position, read from a row table instead of ctrl / dctl:
 //   df_attn_part(seqs, q, ring_k0..3, ring_v0..3, scale, part)   grid (NKV, TGT, blocks)
-//   seqs uint [M + 4 SEQS]: per row its block (SEQ_NONE: unused), then per block row0, rows, pos, K
+//   seqs uint [M + 8 SEQS]: per row its block (SEQ_NONE: unused), then per block row0, rows, pos, K (df_prep.cl's table)
 // Work-group z is block z: its ring (ring_k<z> / ring_v<z>), its rows at their positions pos + (i - row0), live while
 // i - row0 <= K; it writes only its own rows' partials. By property R a block's rows are bitwise the same block drafted
 // alone at rows 0.. (the probe probe_df_attn_seqs checks it).
@@ -134,9 +134,10 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
   const uint lane = get_sub_group_local_id(), h = kvh * G + g;
 #ifdef SEQS
   const uint z = get_group_id(2);
-  const uint row0 = seqs[M + 4 * z], rows = seqs[M + 4 * z + 1], p = seqs[M + 4 * z + 2], K = seqs[M + 4 * z + 3];
+  const uint row0 = seqs[M + 8 * z], rows = seqs[M + 8 * z + 1], p = seqs[M + 8 * z + 2], K = seqs[M + 8 * z + 3];
   __global const ushort* restrict ring_k = z == 0 ? ring_k0 : z == 1 ? ring_k1 : z == 2 ? ring_k2 : ring_k3;
   __global const ushort* restrict ring_v = z == 0 ? ring_v0 : z == 1 ? ring_v1 : z == 2 ? ring_v2 : ring_v3;
+  if (rows == 0) return;   // a slot with no rows this step (uniform: the whole group returns before any barrier)
 #else
   const uint p = ctrl[CTRL_POS], K = dctl[DCTL_K];
 #endif

@@ -36,6 +36,14 @@
 #ifndef EPS
 #define EPS 1e-06f
 #endif
+// SEQS (plan 19v3b, the batched draft): the M rows are blocks of several slots, read from the row table `seqs` -
+// uint [M + 8 SEQS]: per row its block (SEQ_NONE: unused), then per block row0, rows, pos, K, anchor, temperature,
+// seed lo, seed hi. Block-aware here: df_embed (each block's anchor row), the convolutions (a tap reaches back only
+// inside its block) and df_qkv_prep (RoPE at the block's pos + the row's index in it). Every other kernel is row-wise.
+#ifdef SEQS
+#define SEQ_NONE 0xFFFFFFFFu
+#define SQ(z, f) seqs[M + 8 * (z) + (f)]
+#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline ushort f2bf(float f) {
@@ -60,13 +68,22 @@ inline float wg_sum(float v, __local float* red) {
 
 #ifdef VOCAB
 __attribute__((reqd_work_group_size(WG, 1, 1)))
+#ifdef SEQS
+__kernel void df_embed(__global const uint* restrict seqs, __global const ushort* restrict embed,
+                       __global const float* restrict mask_row, const float in_scale, __global float* restrict resid) {
+  const uint r = get_group_id(1), lid = get_local_id(0), z = seqs[r];
+  const bool anchor_row = z != SEQ_NONE && r == SQ(z, 0);
+  uint id = anchor_row ? SQ(z, 4) : 0;
+#else
 __kernel void df_embed(__global const uint* restrict ctrl, __global const ushort* restrict embed,
                        __global const float* restrict mask_row, const float in_scale, __global float* restrict resid) {
   const uint r = get_group_id(1), lid = get_local_id(0);
+  const bool anchor_row = r == 0;
   uint id = ctrl[CTRL_CUR];
+#endif
   if (id >= (uint)VOCAB) id = 0;   // an engine bug, not a token: never read past the table
   __global const ushort* e = embed + (size_t)id * H;
-  for (uint i = lid; i < H; i += WG) resid[(size_t)r * H + i] = (r == 0 ? bf16f(e[i]) : mask_row[i]) * in_scale;
+  for (uint i = lid; i < H; i += WG) resid[(size_t)r * H + i] = (anchor_row ? bf16f(e[i]) : mask_row[i]) * in_scale;
 }
 #endif
 
@@ -91,27 +108,38 @@ __kernel void df_norm(__global const float* restrict src, __global const float* 
 #define G (H / GROUP)
 #define KPN (2 * CTAPS * G)
 // co: kernel_projection's output [M][KPN]; base: this convolution's [side][tap][H]; side 0 prepare, 1 finish.
+#ifdef SEQS   // the block's first row: a tap reaches row r - t only inside the block
+#define CONV_LO , uint lo
+#define TAP_OK(r, t) ((r) >= lo + (t))
+#define CONV_ROW0 , (seqs[r] == SEQ_NONE ? r : SQ(seqs[r], 0))
+#define CONV_SEQS __global const uint* restrict seqs,
+#else
+#define CONV_LO
+#define TAP_OK(r, t) ((r) >= (t))
+#define CONV_ROW0
+#define CONV_SEQS
+#endif
 inline float conv_at(__global const float* src, __global const float* co, __global const float* base, uint side,
-                     uint r, uint i) {
+                     uint r, uint i CONV_LO) {
   const uint g = i / GROUP;
   __global const float* cs = co + (size_t)r * KPN + side * CTAPS * G;
   __global const float* bs = base + (size_t)side * CTAPS * H;
   float o = (bs[i] + cs[g]) * src[(size_t)r * H + i];
   for (uint t = 1; t < CTAPS; ++t)
-    if (r >= t) o = o + (bs[(size_t)t * H + i] + cs[t * G + g]) * src[(size_t)(r - t) * H + i];
+    if (TAP_OK(r, t)) o = o + (bs[(size_t)t * H + i] + cs[t * G + g]) * src[(size_t)(r - t) * H + i];
   return o;
 }
 __attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void df_conv_prep(__global const float* restrict src, __global const float* restrict co,
+__kernel void df_conv_prep(CONV_SEQS __global const float* restrict src, __global const float* restrict co,
                            __global const float* restrict base, __global ushort* restrict out) {
   const uint r = get_group_id(1), i = get_group_id(0) * WG + get_local_id(0);
-  if (i < H) out[(size_t)r * H + i] = f2bf(conv_at(src, co, base, 0, r, i));
+  if (i < H) out[(size_t)r * H + i] = f2bf(conv_at(src, co, base, 0, r, i CONV_ROW0));
 }
 __attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void df_conv_add(__global const float* restrict src, __global const float* restrict co,
+__kernel void df_conv_add(CONV_SEQS __global const float* restrict src, __global const float* restrict co,
                           __global const float* restrict base, __global float* restrict resid) {
   const uint r = get_group_id(1), i = get_group_id(0) * WG + get_local_id(0);
-  if (i < H) resid[(size_t)r * H + i] = resid[(size_t)r * H + i] + conv_at(src, co, base, 1, r, i);
+  if (i < H) resid[(size_t)r * H + i] = resid[(size_t)r * H + i] + conv_at(src, co, base, 1, r, i CONV_ROW0);
 }
 #endif
 
@@ -161,13 +189,22 @@ inline float head_norm_rope(float x, __global const float* restrict w, __global 
 
 // qn_kn: this layer's [q_norm | k_norm][HD] (loader/dflash_layout.h).
 __attribute__((reqd_work_group_size(HD, 1, 1)))
+#ifdef SEQS
+__kernel void df_qkv_prep(__global const uint* restrict seqs, __global const float* restrict qkv,
+#else
 __kernel void df_qkv_prep(__global const uint* restrict ctrl, __global const float* restrict qkv,
+#endif
                           __global const float* restrict qn_kn, __global const float* restrict rope,
                           __global float* restrict q, __global float* restrict kb, __global float* restrict vb) {
   __local float y[HD];
   const uint s = get_group_id(0), r = get_group_id(1), i = get_local_id(0);
   const float x = qkv[(size_t)r * QKVN + (size_t)s * HD + i];
+#ifdef SEQS
+  const uint z = seqs[r];
+  const uint pos = z == SEQ_NONE ? 0 : SQ(z, 2) + (r - SQ(z, 0));
+#else
   const uint pos = ctrl[CTRL_POS] + r;
+#endif
   if (s < NH) {
     q[((size_t)r * NH + s) * HD + i] = head_norm_rope(x, qn_kn, rope, pos, y);
   } else if (s < NH + NKV) {
@@ -181,6 +218,24 @@ __kernel void df_qkv_prep(__global const uint* restrict ctrl, __global const flo
 // kv: the projection GEMVs' outputs [L][M][2 KVN] (layer l's k || v rows of q||k||v); qk_norm [L][q | k][HD];
 // ring_k / ring_v [L][RING][NKV][HD] bf16.
 __attribute__((reqd_work_group_size(HD, 1, 1)))
+#ifdef SEQS
+// The rows projection (plan 19v3b): row r of the row table's slot z - committed while r - row0 < rows - into slot z's
+// ring (ring_k<z> / ring_v<z>) at its position pos + (r - row0).
+__kernel void df_ctx_store(__global const uint* restrict seqs, __global const float* restrict kv,
+                           __global const float* restrict qk_norm, __global const float* restrict rope,
+                           __global ushort* restrict ring_k0, __global ushort* restrict ring_k1,
+                           __global ushort* restrict ring_k2, __global ushort* restrict ring_k3,
+                           __global ushort* restrict ring_v0, __global ushort* restrict ring_v1,
+                           __global ushort* restrict ring_v2, __global ushort* restrict ring_v3) {
+  __local float y[HD];
+  const uint grp = get_group_id(0), r = get_group_id(1), i = get_local_id(0), z = seqs[r];
+  if (z == SEQ_NONE || r - SQ(z, 0) >= SQ(z, 1)) return;   // uniform over the work-group
+  __global ushort* restrict ring_k = z == 0 ? ring_k0 : z == 1 ? ring_k1 : z == 2 ? ring_k2 : ring_k3;
+  __global ushort* restrict ring_v = z == 0 ? ring_v0 : z == 1 ? ring_v1 : z == 2 ? ring_v2 : ring_v3;
+  const uint l = grp / (2 * NKV), rem = grp % (2 * NKV), head = rem % NKV;
+  const bool is_v = rem >= NKV;
+  const uint pos = SQ(z, 2) + (r - SQ(z, 0)), slot = pos % RING;
+#else
 __kernel void df_ctx_store(__global const uint* restrict dctl, __global const float* restrict kv,
                            __global const float* restrict qk_norm, __global const float* restrict rope,
                            __global ushort* restrict ring_k, __global ushort* restrict ring_v) {
@@ -190,6 +245,7 @@ __kernel void df_ctx_store(__global const uint* restrict dctl, __global const fl
   const uint l = grp / (2 * NKV), rem = grp % (2 * NKV), head = rem % NKV;
   const bool is_v = rem >= NKV;
   const uint pos = dctl[DCTL_PPOS] + r, slot = pos % RING;
+#endif
   const float x = kv[((size_t)l * M + r) * 2 * KVN + (is_v ? KVN : 0) + (size_t)head * HD + i];
   const size_t at = (((size_t)l * RING + slot) * NKV + head) * HD + i;
   if (is_v) {

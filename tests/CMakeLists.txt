@@ -3551,7 +3551,8 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep)
   list(APPEND B70_DFLASH_KERNELS kernel_df_candidate_R7_N248320_U248077_K80 kernel_df_rerank_R7_K5120_U248077_C80_Q4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas   # spec 19 v3d Task 6
-       kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2 kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4)
+       kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2
+       kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4_g256)   # plan 19v3b: KS 4 at 256 GRF
   list(APPEND B70_DFLASH_KERNELS kernel_df_proj_wide_H5120_KV8_D128_R2048)
   foreach(NV 32768 65536 131072)
     list(APPEND B70_DFLASH_KERNELS kernel_df_topk_R7_N${NV}_U${NV}_C kernel_gemv_bf16_M7_K5120_N${NV})
@@ -3696,6 +3697,16 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_test(NAME dflash_engine_test COMMAND dflash_engine_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+  # Plan 19v3b Task 3: the drafter beside sequence slots - a session per slot, bitwise the one-slot engine, isolated.
+  add_executable(dflash_slots_test runtime/dflash_slots_test.cc)
+  target_include_directories(dflash_slots_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(dflash_slots_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader
+    b70_l0 b70_model)
+  add_dependencies(dflash_slots_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
+  add_test(NAME dflash_slots_test COMMAND dflash_slots_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_slots_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # The DFlash verify at M = 2..8 on the int8 KV cache against the plain loop: v2 + gemv lists bitwise (ids and the
   # KV rows they wrote) at every K, the production / gemm_sm / DPAS arms' first difference recorded.
   add_executable(dflash_verify_kv8_test runtime/dflash_verify_kv8_test.cc)

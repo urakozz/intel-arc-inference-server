@@ -36,7 +36,7 @@ class DFlashDrafter final : public TapDrafter {
 
   // Captures the draft list against the engine's target model (embedding, head: the full one, or with
   // `draft_vocab` the compact one LoadedModel::draft_vocab holds) and its Control block. `e` must have been built
-  // with this drafter. Once.
+  // with this drafter. Once. Plan 19v3b: one draft list per engine slot, each over its slot's Control and session.
   void attach(Engine& e, bool draft_vocab);
   bool attached() const { return draft_ != nullptr; }
 
@@ -54,28 +54,46 @@ class DFlashDrafter final : public TapDrafter {
                      bool draft_vocab) override;
   const DFlashDraftOut& draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k, float temperature,
                                    uint64_t seed) override;
+  void add_sessions(l0::Context& ctx, uint32_t n) override;
+  void select(uint32_t slot) override;
+  uint32_t sessions() const { return uint32_t(b_.sessions.size()) + 1; }
+
+  // Plan 19v3b, the batched draft (an engine of several slots): ONE pass of the block's 8 rows shared by the runs -
+  // each run a slot's block of k + 1 rows (its anchor cur_token[0] at its pos, k drafts, 1 <= k <= its
+  // max_verify_k()), in run order, at most 8 rows. Each slot's k drafts land in its Control's cur_token[1..k] (what
+  // Engine::verify_rows reads) and its session's readback (readback(slot)). Any deferred projection runs first.
+  struct Run {
+    uint32_t slot = 0, k = 0;
+    float temperature = 0.0f;
+    uint64_t seed = 0;
+  };
+  void draft_rows(Engine& e, const std::vector<Run>& runs);
+  l0::Mem& rows_taps() override { return *b_.rows_taps; }
+  l0::CmdList& rows_projection(const std::vector<RowsCommit>& commits) override;
+  const DFlashDraftOut& readback(uint32_t slot) { return *b_.session(slot).readback(); }
+  const CapturedStep* draft_rows_step() const { return seqs_draft_.get(); }
 
   const model::DFlashDesc& desc() const { return w_.desc; }
   const loader::DFlashWeights& weights() const { return w_; }
   DFlashBuffers& buffers() { return b_; }
   const CapturedStep& project_step() const { return project_; }
   const CapturedStep* draft_step() const { return draft_.get(); }
-  // The projection's last replay arguments (tests): its first position and its row count.
-  uint32_t projected_pos() const { return b_.ctl()->proj_pos; }
-  uint32_t projected_n() const { return b_.ctl()->proj_n; }
+  // The projection's last replay arguments (tests): its first position and its row count - the selected session's.
+  uint32_t projected_pos() const { return ses().ctl()->proj_pos; }
+  uint32_t projected_n() const { return ses().ctl()->proj_n; }
 
   // --- TapDrafter ---
   uint32_t max_k() const override { return max_k_; }
   const std::vector<uint32_t>& tap_layers() const override { return w_.desc.taps; }
-  l0::Mem& taps() override { return b_.taps; }
+  l0::Mem& taps() override { return *ses().taps; }
   uint32_t window() const override;
   l0::CmdList& projection(uint32_t pos, uint32_t n) override;
-  void reset(l0::CmdList& imm) override { b_.zero(imm); }
+  void reset(l0::CmdList& imm) override;
   size_t bytes() const override { return w_.bytes + b_.bytes(); }
   // Spec 19d: the ring in a snapshot - ring_k's bytes then ring_v's, as the device holds them (every layer, every
   // slot): 41,943,040 B for Qwen3.8's drafter. The key: FNV-1a over the descriptor's shapes, the format and the
   // hidden / final norm weights' bytes (read once at construction).
-  size_t ring_bytes() const override { return b_.ring_k.size() + b_.ring_v.size(); }
+  size_t ring_bytes() const override { return b_.ring_k.size() + b_.ring_v.size(); }   // every session's size
   void save_ring(l0::CmdList& imm, void* host) const override;
   void load_ring(l0::CmdList& imm, const void* host) override;
   uint64_t key() const override { return key_; }
@@ -88,6 +106,13 @@ class DFlashDrafter final : public TapDrafter {
   CapturedStep project_;
   std::unique_ptr<CapturedStep> draft_;
   Engine* engine_ = nullptr;
+  // Plan 19v3b: the selected session, the further sessions' projection lists and the further slots' draft lists.
+  uint32_t cur_ = 0;
+  std::vector<CapturedStep> projects_;
+  std::vector<CapturedStep> drafts_;
+  std::unique_ptr<CapturedStep> seqs_draft_;   // the batched draft list (several slots)
+  std::unique_ptr<CapturedStep> rows_project_;   // the rows projection (several slots)
+  DFlashBuffers::Session ses() const { return const_cast<DFlashBuffers&>(b_).session(cur_); }
 };
 
 }  // namespace runtime::dflash

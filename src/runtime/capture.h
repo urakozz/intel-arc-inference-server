@@ -205,15 +205,20 @@ CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeB
 // argmax_stage2 advances pos by M (the caller rewinds it at commit) - exactly build_verify's contract
 // without the MTP head's KV fill: decode_launches(d) launches at every M. runtime/tap_drafter.h says what
 // the Engine does with the taps.
+//
+// Plan 19v3b (a drafter beside sequence slots): `slot` binds the slot's Control, states, conv ring and KV pages as for
+// build_verify; with its gdn_spec set, the speculative states are the slot's (TapVerify::gdn_spec is then unused) and
+// `slots` may be 4 - a further slot's short verify (gdn_step_slots_M<M>_N4, M <= 4, the MTP lists' binaries).
 struct TapVerify {
   const l0::Mem* gdn_spec = nullptr;   // slots 1..slots-1, slot-major, one gdn_state each (slot 0 = gdn_state)
-  uint32_t slots = 0;                  // TapVerifyDims::kSlots
+  uint32_t slots = 0;                  // TapVerifyDims::kSlots (or 4 with a SlotBind's states)
   l0::Mem* taps = nullptr;             // bf16 [DecodeBuffers::kM][layers.size()][hidden]
   std::vector<uint32_t> layers;        // the tapped layers' OUTPUTS: ascending, each < the model's layers
   l0::Mem* gdn_pend = nullptr;         // verify-cost-m8: SlotBind::gdn_pend's meaning; null binds the slot build
 };
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                               const TapVerify& tv, uint32_t M, const CaptureOptions& opt = {});
+                               const TapVerify& tv, uint32_t M, const CaptureOptions& opt = {},
+                               const SlotBind& slot = {});
 // verify-cost-m8: one launch a GDN layer of gdn_step_defer_M1 over `pend` - run with Control::n_active 0 it replays
 // the committed rows into gdn_state and nothing else (the engine's flush before anything reads the state).
 CapturedStep build_gdn_flush(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, void* pend);
@@ -319,6 +324,10 @@ struct BatchRowsBind {
   // Plan 19v3b Task 0: the KV page table, every slot's (SlotBind's paged binding over the row builds' twins; a row's
   // KV base is then its slot's first position in the table's positions). Null: the KV contiguous, kv_base apart.
   const void* pages = nullptr;
+  // Plan 19v3b: beside a drafter, every row's taps (TapVerify's sites and layout) into this buffer - bf16
+  // [kM][tap_layers.size()][hidden], row r at row r (the rows projection reads them). Null: no taps.
+  l0::Mem* taps = nullptr;
+  std::vector<uint32_t> tap_layers;
 };
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
                         uint32_t M);

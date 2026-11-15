@@ -58,10 +58,26 @@ DFlashTarget dflash_target(const loader::LoadedModel& m, bool draft_vocab = fals
 // signals add overhead, so profile families separately from the uninstrumented lists' wall timings.
 CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
                                 DFlashBuffers& b, const l0::Mem& control, const CaptureOptions& opt = {});
+// Plan 19v3b: `session` - the drafter session the list binds (DFlashBuffers::session: its control block, readback,
+// ring and taps; 0 the buffers' own); a further slot's draft list binds that slot's Control (`control`, a
+// runtime::Control in the engine's slot block). Weights and scratch are shared by every session.
+CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
+                                DFlashBuffers& b, const void* control, uint32_t session, const CaptureOptions& opt = {});
+// Plan 19v3b, the batched draft: one block a slot of `controls` (the engine's slots, 2..4; slot z = session z), the rows
+// and each block's anchor, pos, K, temperature and seed from DFlashBuffers::seqs (set_draft_rows); the same walk with the
+// block-aware launches in their SEQS form (df_embed, the convolutions, df_qkv_prep, df_attn_part / reduce, df_select:
+// each block's drafts into its slot's Control and its session's readback). draft_launches(d) launches.
+CapturedStep build_dflash_draft_seqs(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
+                                     DFlashBuffers& b, const std::vector<const void*>& controls,
+                                     const CaptureOptions& opt = {});
+// Plan 19v3b, the rows projection: build_dflash_project's walk over DFlashBuffers::rows_taps (the row lists' taps), its
+// ring store in the SEQS form - each row of DFlashBuffers::proj_seqs' slots committed into that slot's session ring.
+CapturedStep build_dflash_project_rows(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
+                                       uint32_t slots, const CaptureOptions& opt = {});
 CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
-                                  const CaptureOptions& opt = {});
+                                  const CaptureOptions& opt = {}, uint32_t session = 0);
 bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const loader::DFlashWeights& w,
-                  DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n);
+                  DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n, uint32_t session = 0);
 
 // Spec 19 v3c: a `--parallel tp` card's half of the drafter (runtime::dflash::TpDFlashDrafter; `w` loaded with
 // load_drafter's tp_rank, `b` at its descriptor with host candidates, `t` the card's target: the whole embedding, its

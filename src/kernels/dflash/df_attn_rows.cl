@@ -169,7 +169,7 @@ __kernel void df_attn_reduce(__global const uint* restrict ctrl, __global const 
   const uint h = get_group_id(0), r = get_group_id(1), d = get_local_id(0);
 #ifdef SEQS
   const uint z = seqs[r];
-  const uint row0 = z == 0xFFFFFFFFu ? 0 : seqs[M + 4 * z], K = z == 0xFFFFFFFFu ? 0 : seqs[M + 4 * z + 3];
+  const uint row0 = z == 0xFFFFFFFFu ? 0 : seqs[M + 8 * z], K = z == 0xFFFFFFFFu ? 0 : seqs[M + 8 * z + 3];
   const uint kvh = h / G;
   __global ushort* o = out + (size_t)r * NH * HD + (size_t)h * HD;
   if (z == 0xFFFFFFFFu || r - row0 > K) {

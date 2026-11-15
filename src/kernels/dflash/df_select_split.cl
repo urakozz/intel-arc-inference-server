@@ -72,21 +72,51 @@ inline float murmur3_uniform(uint seed_lo, uint seed_hi, uint pos, uint key) {
   return (float)(h >> 16) * 0x1p-16f + ((float)(h & 0xFFFFu) + 0.5f) * 0x1p-32f;
 }
 
+// SEQS (plan 19v3b, the batched draft): grid (blocks) - block z of the row table (df_prep.cl's `seqs`) walks its own
+// rows: its anchor, pos, K, temperature and seed from the table, its candidates at head rows row0 + j (hid row
+// row0 + j + 1), its drafts into its slot's Control (ctrl<z>) and readback (out<z>).
+#ifdef SEQS
+#define SQ(z, f) seqs[MAXR + 8 * (z) + (f)]
+#define RJ(j) (row0 + (j))
+#else
+#define RJ(j) (j)
+#endif
 __attribute__((reqd_work_group_size(WG, 1, 1)))
+#ifdef SEQS
+__kernel void df_select(__global const uint* restrict seqs, __global uint* restrict ctrl0, __global uint* restrict ctrl1,
+                        __global uint* restrict ctrl2, __global uint* restrict ctrl3,
+                        __global const uint* restrict cand, __global const float* restrict unary,
+                        __global const float* restrict hid, __global const ushort* restrict pred,
+                        __global const ushort* restrict succ, __global uint* restrict out0, __global uint* restrict out1,
+                        __global uint* restrict out2, __global uint* restrict out3) {
+#else
 __kernel void df_select(__global uint* restrict ctrl, __global const uint* restrict dctl,
                         __global const uint* restrict cand, __global const float* restrict unary,
                         __global const float* restrict hid, __global const ushort* restrict pred,
                         __global const ushort* restrict succ, __global uint* restrict out) {
+#endif
   __local float folded[RANK];
   __local float part[TOPK * QS];
   __local float s[TOPK];
   __local uint prev_l;
   const uint lid = get_local_id(0);
+#ifdef SEQS
+  const uint z = get_group_id(0), row0 = SQ(z, 0);
+  if (SQ(z, 1) == 0) return;   // the slot drafts nothing this step (uniform: the whole group returns)
+  __global uint* restrict ctrl = z == 0 ? ctrl0 : z == 1 ? ctrl1 : z == 2 ? ctrl2 : ctrl3;
+  __global uint* restrict out = z == 0 ? out0 : z == 1 ? out1 : z == 2 ? out2 : out3;
+  const uint p = SQ(z, 2), anchor = SQ(z, 4);
+  uint K = SQ(z, 3);
+  if (K > MAXR - 1 - row0) K = MAXR - 1 - row0;
+  const float T = as_float(SQ(z, 5));
+  const uint seed_lo = SQ(z, 6), seed_hi = SQ(z, 7);
+#else
   const uint p = ctrl[CTRL_POS], anchor = ctrl[CTRL_CUR];
   uint K = dctl[DCTL_K];
   if (K > MAXR - 1) K = MAXR - 1;
   const float T = as_float(dctl[DCTL_TEMP]);
   const uint seed_lo = dctl[DCTL_SEED_LO], seed_hi = dctl[DCTL_SEED_HI];
+#endif
 #if !V2
   // v1 samples over its whole head, which this readback cannot carry: at T != 0 (an engine bug past the host's
   // runtime::dflash::set_draft_params) draft nothing - k 0, Control untouched - rather than greedy drafts that a
@@ -102,12 +132,12 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint j = 0; j < K; ++j) {
     const uint prev = prev_l;
-    __global const uint* cj = cand + (size_t)j * TOPK;
-    __global const float* uj = unary + (size_t)j * TOPK;
+    __global const uint* cj = cand + (size_t)RJ(j) * TOPK;
+    __global const float* uj = unary + (size_t)RJ(j) * TOPK;
 #if V2
     for (uint r = lid; r < RANK; r += WG) {
       float a = 0.0f;
-      for (uint s = 0; s < 16; ++s) a = a + hid[((size_t)s * MAXR + j + 1) * RANK + r];
+      for (uint s = 0; s < 16; ++s) a = a + hid[((size_t)s * MAXR + RJ(j) + 1) * RANK + r];
       folded[r] = a;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
