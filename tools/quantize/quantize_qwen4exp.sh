@@ -19,6 +19,8 @@
 #          files of the calibration activations, 21.5 GB, overwritten each block) - after a stop, `start` again
 #          continues at the first unfinished block. The PLE table (102 GB) is streamed once into a raw file in
 #          PLE_DIR (NVMe) and read from there by mmap (autoround_run.py: AutoRound's own load would need ~190 GB).
+#   scales every int4 group scale in f16 (tools/quantize/qwen4exp/scales_f16.py): at ITERS=0 AutoRound writes the
+#          non-expert linears' scales in bf16; converted exactly or refused
 #   bf16   every tensor AutoRound did not quantise is bitwise the source's (the ignore list, routers, norms, the
 #          PLE table, ...); on DEVICE=cpu its fp32 widenings are restored to bf16 (tools/quantize/qwen4exp/bf16_same.py)
 #   head   lm_head packed by the engine's RTN g64 rule and declared 4-bit (tools/quantize/qwen4exp/head_rtn.py):
@@ -81,8 +83,8 @@ CURRENT="$QUANT_ROOT/flash-next-current"
 # HEAD=bf16 (default, operator 2026-11-12): lm_head stays bf16 in the export and the engine builds its int8 head at load,
 # as for Qwen3.8 - no RTN int4 head; HEAD=int4 runs the head stage (RTN g64, head_rtn.py) instead.
 HEAD=${HEAD:-bf16}
-STAGES=(quant bf16 head ple check)
-[ "$HEAD" = bf16 ] && STAGES=(quant bf16 ple check)
+STAGES=(quant scales bf16 head ple check)
+[ "$HEAD" = bf16 ] && STAGES=(quant scales bf16 ple check)
 
 die() { echo "quantize_qwen4exp: $*" >&2; exit 2; }
 
@@ -126,6 +128,10 @@ stage_quant() {
   AR_WORK_SPACE="$OUT/work" AR_RESUME_DIR="$OUT/resume" locked "$VENVPY" "$Q/autoround_run.py" \
     --model "$SNAP" --out "$OUT/export" --device "$DEVICE" --iters "$ITERS" --nsamples "$NSAMPLES" \
     --seqlen "$SEQLEN" --batch-size "$BATCH" --ple-dir "$PLE_DIR" --dataset "$DATASET"
+}
+
+stage_scales() {
+  "$VENVPY" "$Q/scales_f16.py" "$(export_dir)"
 }
 
 stage_bf16() {
