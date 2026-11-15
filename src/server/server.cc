@@ -533,7 +533,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     session.fed(id);
     if (penalised) seen.add(id);
     if (generated == 0) outcome.t_first_token = steady_seconds();
-    const bool is_eos = impl_->eos.count(id) != 0;
+    const bool is_eos = impl_->eos.contains(id);
     if (is_eos && !r.ignore_eos && outcome.out_ids.size() >= r.min_tokens) {
       outcome.finish_reason = "stop";
       eos_stop = true;

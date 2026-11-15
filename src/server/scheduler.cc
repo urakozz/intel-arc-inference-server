@@ -587,7 +587,7 @@ bool Scheduler::spec_round() {
         if (impl_->lookup && (used > 1 || !j->head_indexed)) impl_->matchers[slot]->append(id);
         if (cache_) cache_->fed(slot, id);
         ++j->steps;
-        const bool is_eos = impl_->eos.count(id) != 0;
+        const bool is_eos = impl_->eos.contains(id);
         if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
           ended = true;
           reason = Finish::Stop;
@@ -669,7 +669,7 @@ bool Scheduler::decode_round() {
     try {   // plan 13b review: a throwing on_token ends this request only; the next rows still get their ids
       if (cache_) cache_->fed(rows[i].slot, id);
       ++j->steps;
-      const bool is_eos = impl_->eos.count(id) != 0;
+      const bool is_eos = impl_->eos.contains(id);
       if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
         finish(j, Finish::Stop);
         continue;

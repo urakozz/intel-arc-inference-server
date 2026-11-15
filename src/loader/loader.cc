@@ -599,7 +599,7 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
     MoeSource src;
     src.has = [&](const std::string& part) {
       for (const std::string& m : LinearSrc::marker_suffixes())
-        if (view.names.count(L + part + m) != 0) return true;
+        if (view.names.contains(L + part + m)) return true;
       return false;
     };
     src.linear = [&](const std::string& part) {
@@ -680,7 +680,7 @@ MoeLayer load_moe_layer(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
   MoeSource src;
   src.has = [&](const std::string& part) {
     for (const std::string& m : LinearSrc::marker_suffixes())
-      if (view.names.count(lp + part + m) != 0) return true;
+      if (view.names.contains(lp + part + m)) return true;
     return false;
   };
   src.linear = [&](const std::string& part) {
@@ -1222,7 +1222,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   std::string unconsumed;
   for (const auto& [stripped, full] : view.names) {
     (void)full;
-    if (view.consumed.count(stripped)) continue;
+    if (view.consumed.contains(stripped)) continue;
     if (has_suffix(stripped, ".qzeros")) continue;
     if (has_suffix(stripped, ".g_idx")) continue;
     if (is_kv_scale(stripped)) continue;

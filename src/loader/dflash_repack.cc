@@ -116,7 +116,7 @@ void DFlashCheckpoint::open_and_check() {
       const size_t dot = c.rfind('.');
       const std::string suffix = dot == std::string::npos ? c : c.substr(dot + 1);
       if (suffix == "qzeros" || suffix == "scales" || suffix == "g_idx") {
-        if (!set_->tensors().count(name.substr(0, name.rfind('.')) + ".qweight")) refuse(dir_, "unknown tensor " + name);
+        if (!set_->tensors().contains(name.substr(0, name.rfind('.')) + ".qweight")) refuse(dir_, "unknown tensor " + name);
         continue;
       }
       if (suffix == "qweight") c = c.substr(0, dot) + ".weight";
@@ -133,7 +133,7 @@ void DFlashCheckpoint::open_and_check() {
   }
   const std::vector<std::string> want = dflash_expected_names(d_);
   for (const std::string& n : want)
-    if (!canon.count(n)) refuse(dir_, "missing tensor " + n);
+    if (!canon.contains(n)) refuse(dir_, "missing tensor " + n);
   for (const auto& [c, name] : canon)
     if (!std::binary_search(want.begin(), want.end(), c)) refuse(dir_, "unknown tensor " + name);
   canon_.assign(canon.begin(), canon.end());

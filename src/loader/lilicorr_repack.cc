@@ -123,7 +123,7 @@ std::vector<std::string> lilicorr_expected_names(const model::DFlashDesc& d) {
 }
 
 bool lilicorr_is_linear(const model::DFlashDesc& d, const std::string& w) {
-  return ends_with(w, ".weight") && linear_shapes(d, 0).count(w.substr(0, w.size() - 7)) != 0;
+  return ends_with(w, ".weight") && linear_shapes(d, 0).contains(w.substr(0, w.size() - 7));
 }
 
 LiliCheckpoint::LiliCheckpoint(const std::string& snapshot_or_repo)
@@ -159,7 +159,7 @@ void LiliCheckpoint::open_and_check() {
   auto info = [&](const std::string& c) -> const TensorInfo& { return set_->tensors().at(canon.at(c)); };
 
   // fc's K first (every other shape is the config's).
-  if (!canon.count("fc.weight")) refuse(dir_, "missing tensor fc.weight");
+  if (!canon.contains("fc.weight")) refuse(dir_, "missing tensor fc.weight");
   {
     const TensorInfo& t = info("fc.weight");
     if (t.shape.size() != 2) refuse(dir_, "fc.weight is not 2-D");
@@ -173,20 +173,20 @@ void LiliCheckpoint::open_and_check() {
     for (const char* sfx : {".weight_scale_2", ".weight_scale", ".input_scale"}) {
       if (!ends_with(c, sfx)) continue;
       const std::string base = c.substr(0, c.size() - std::strlen(sfx));
-      if (!lin.count(base)) refuse(dir_, "unknown tensor " + name + " (no linear " + base + ")");
-      if (!canon.count(base + ".weight") || info(base + ".weight").dtype != "U8")
+      if (!lin.contains(base)) refuse(dir_, "unknown tensor " + name + " (no linear " + base + ")");
+      if (!canon.contains(base + ".weight") || info(base + ".weight").dtype != "U8")
         refuse(dir_, name + ": a quantised tensor outside a complete NVFP4 linear (" + base + ".weight is not U8)");
       break;
     }
   }
   // the names both ways
   for (const auto& [base, nk] : lin)
-    if (!canon.count(base + ".weight")) refuse(dir_, "missing tensor " + base + ".weight");
+    if (!canon.contains(base + ".weight")) refuse(dir_, "missing tensor " + base + ".weight");
   for (const auto& [n, s] : other)
-    if (!canon.count(n)) refuse(dir_, "missing tensor " + n);
+    if (!canon.contains(n)) refuse(dir_, "missing tensor " + n);
   for (const auto& [c, name] : canon) {
-    bool known = other.count(c) != 0;
-    if (!known && ends_with(c, ".weight")) known = lin.count(c.substr(0, c.size() - 7)) != 0;
+    bool known = other.contains(c);
+    if (!known && ends_with(c, ".weight")) known = lin.contains(c.substr(0, c.size() - 7));
     for (const char* sfx : {".weight_scale_2", ".weight_scale", ".input_scale"})
       known |= ends_with(c, sfx);
     if (!known) refuse(dir_, "unknown tensor " + name);
@@ -206,7 +206,7 @@ void LiliCheckpoint::open_and_check() {
         refuse(dir_, base + ".weight (NVFP4) has shape " + shape_str(w.shape) + ", not [" + std::to_string(N) + ", " +
                          std::to_string(K / 2) + "]");
       for (const char* need : {".weight_scale", ".weight_scale_2"})
-        if (!canon.count(base + need)) refuse(dir_, "missing tensor " + base + need + " (NVFP4 " + base + ")");
+        if (!canon.contains(base + need)) refuse(dir_, "missing tensor " + base + need + " (NVFP4 " + base + ")");
       const TensorInfo& s = info(base + ".weight_scale");
       if (s.dtype != "F8_E4M3" || s.shape != std::vector<uint64_t>{N, K / 16})
         refuse(dir_, base + ".weight_scale must be F8_E4M3 [" + std::to_string(N) + ", " + std::to_string(K / 16) + "]");
@@ -220,7 +220,7 @@ void LiliCheckpoint::open_and_check() {
         refuse(dir_, base + ".weight has shape " + shape_str(w.shape) + ", not [" + std::to_string(N) + ", " +
                          std::to_string(K) + "]");
       for (const char* sfx : {".weight_scale", ".weight_scale_2", ".input_scale"})
-        if (canon.count(base + sfx)) refuse(dir_, base + sfx + " beside a BF16 weight");
+        if (canon.contains(base + sfx)) refuse(dir_, base + sfx + " beside a BF16 weight");
     }
   }
   std::sort(nvfp4_.begin(), nvfp4_.end());

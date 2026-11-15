@@ -216,10 +216,10 @@ LinearSrc classify_ct(const SafetensorsSet& set, const std::string& prefix,
                       const TensorInfo& wp) {
   const auto& ts = set.tensors();
   const std::string pn = prefix + ".weight_packed";
-  if (ts.count(prefix + ".qweight"))
+  if (ts.contains(prefix + ".qweight"))
     throw std::runtime_error(prefix + ": ships both .qweight (GPTQ) and .weight_packed "
                              "(compressed-tensors) - one packing per linear");
-  if (ts.count(prefix + ".weight_zero_point"))
+  if (ts.contains(prefix + ".weight_zero_point"))
     throw std::runtime_error(prefix + ".weight_zero_point: an asymmetric compressed-tensors "
                              "linear - refused (spec 20 §9: no zero-point kernels, no exact "
                              "conversion to symmetric int4)");
@@ -502,8 +502,8 @@ LinearSrc LinearSrc::classify(const SafetensorsSet& set, const std::string& pref
 
 WKind LinearSrc::kind_of(const SafetensorsSet& set, const std::string& prefix) {
   const auto& ts = set.tensors();
-  if (ts.count(prefix + ".qweight") || ts.count(prefix + ".weight_packed")) return WKind::Int4;
-  if (ts.count(prefix + ".weight")) return WKind::Bf16;
+  if (ts.contains(prefix + ".qweight") || ts.contains(prefix + ".weight_packed")) return WKind::Int4;
+  if (ts.contains(prefix + ".weight")) return WKind::Bf16;
   throw std::runtime_error("no qweight, weight_packed or weight for linear '" + prefix + "'");
 }
 

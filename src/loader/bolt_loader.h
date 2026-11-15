@@ -120,8 +120,8 @@ class BoltCheckpoint {
     size_t n_bad = 0;
     for (const auto& [name, info] : set_.tensors()) {
       (void)info;
-      if (all.count(name) || bolt_is_vision(name)) continue;
-      if (bolt_ends_with(name, ".g_idx") && all.count(name.substr(0, name.size() - 6) + ".qweight")) continue;
+      if (all.contains(name) || bolt_is_vision(name)) continue;
+      if (bolt_ends_with(name, ".g_idx") && all.contains(name.substr(0, name.size() - 6) + ".qweight")) continue;
       if (n_bad++ < 5) bad += (bad.empty() ? "" : ", ") + name;
     }
     if (n_bad != 0)
@@ -130,7 +130,7 @@ class BoltCheckpoint {
                                " - refusing to guess what they are");
     for (const std::string& name : exp) {
       if (bolt_ends_with(name, ".qzeros")) continue;
-      if (!set_.tensors().count(name))
+      if (!set_.tensors().contains(name))
         throw std::runtime_error("load_bolt: the checkpoint has no tensor '" + name + "', which " + d_.name + " needs");
     }
   }
@@ -227,7 +227,7 @@ class BoltCheckpoint {
     size_t n = 0;
     for (const auto& [name, info] : set_.tensors()) {
       (void)info;
-      if (consumed_.count(name) || bolt_ends_with(name, ".qzeros") || bolt_ends_with(name, ".g_idx")) continue;
+      if (consumed_.contains(name) || bolt_ends_with(name, ".qzeros") || bolt_ends_with(name, ".g_idx")) continue;
       if (names && n < 5) *names += (names->empty() ? "" : ", ") + name;
       ++n;
     }
