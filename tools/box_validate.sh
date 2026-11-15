@@ -42,9 +42,8 @@
 #   G0's checks on both cards; the reused baseline and the one-card G0 stages take part of that off - not yet
 #   measured); the full run on demand, hours.
 # Run control:
-#   --baseline REF   G0's reference build (default 0f449db6: main on 2026-11-12, after the MoE prefill phases;
-#                    the first baseline ce36d2d differed from it in report text and buffer sizes only, no token
-#                    or logit; `--baseline main` when validating a branch before merging)
+#   --baseline REF   G0's reference build (default f179f143: main on 2026-11-15, accepted by the operator;
+#                    `--baseline main` when validating a branch before merging)
 #                    A complete build of the baseline, with its recorded gate outputs, is kept in
 #                    ~/b70-inference-server-g0-<sha> and reused while the commit, build settings, compiler, ocloc
 #                    and kernel series are the same (tools/box_validate/baseline.py); g0.build's log says which
@@ -129,7 +128,7 @@ while [ $# -gt 0 ]; do
 done
 DEVICE="${DEVICE:-0}"
 export DEVICE
-BASELINE_REF="${BASELINE_REF:-0f449db6}"
+BASELINE_REF="${BASELINE_REF:-f179f143}"
 [ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
 [ "$NIGHTLY" = 0 ] || [ "$QUICK" = 0 ] || die "--nightly is a full run: drop --quick"
 [ "$MERGE" = 0 ] || [ "$QUICK" = 0 ] || die "--merge-check and --quick are two tiers: pick one"
