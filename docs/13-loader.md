@@ -20,7 +20,6 @@ quant-config and `LinearSrc::classify` code described here:
 | Loader | Models | Files |
 |---|---|---|
 | `load` (and `load_tp`, which slices every layer for tensor parallel: each card takes half) | Qwen3.8-27B (dense) and Ornith 1.5 35B-A3B (mixture of experts, MoE: many small expert MLPs, a few used per token) - the two models that share one loader | `loader.cc`, `moe.*` |
-| `load_k2` | K2-Horizon | `k2_*` |
 | `load_kolibri1` | Kolibri-1 | `kolibri1_*` |
 | `load_qwen4exp` | Qwen3.8-Flash-Next (below) | `qwen4exp_*` |
 | `load_bolt` | Nemotron 3.5 Bolt (below; parked until Flash-Next is done) | `bolt_*` |
@@ -678,7 +677,7 @@ The model is picked from `config.json`'s `architectures[0]` - no flag
 layer counts, widths, the MLP intermediate, `W`, the tokenizer's id count); an unknown
 architecture throws, naming it and the supported ones. Agnes 3.0 Flash, which the
 descriptor once ran, was dropped on 2026-11-07 and its config.json is refused by name.
-K2, Kolibri, Flash-Next and Bolt have their own loaders and descriptors, chosen by the
+Kolibri, Flash-Next and Bolt have their own loaders and descriptors, chosen by the
 entry point that serves them.
 
 ## g128 checkpoints
@@ -737,10 +736,8 @@ tensor and the index, because rounding a scale changes every weight in its group
 buffers belong to the `LinearSrc` (`owned_qweight`, `expanded_scales`, shared pointers),
 one linear at a time. `LinearSrc::suffixes()` names the tensors read (`weight_packed`,
 `weight_scale`, `weight_shape`, and `weight_g_idx` if shipped), and every loader marks
-those consumed. So **dense linears, the MoE experts (main layers and the
-MTP head's MoE layer) and K2** all take compressed-tensors through the same function.
-K2's name check expects one packing per checkpoint: if any `.weight_packed` exists, every
-int4 linear must be in that form. The dense MTP head stays the published 15 bf16 tensors
+those consumed. So **dense linears and the MoE experts (main layers and the
+MTP head's MoE layer)** all take compressed-tensors through the same function. The dense MTP head stays the published 15 bf16 tensors
 (RedHatAI's checkpoint `ignore`s `mtp.*`); a quantised dense head is refused by count, as
 before.
 
@@ -751,8 +748,7 @@ and through the layout-1 tiles, equals the format's own dequant (u − 8) × s, 
 q × s of the quantisation. The converted qweight and scales are byte-equal to the GPTQ
 checkpoint of the same q and s. One group's scale is subnormal in f16. `ornith_repack_test`
 repacks a compressed-tensors MoE layer (separate and fused experts, g128 on one) to the GPTQ
-layer's device bytes. `k2_repack_test` does the same for a whole compressed-tensors K2
-checkpoint, layer by layer, with nothing unconsumed.
+layer's device bytes.
 
 **Refused, by field or by tensor.** `symmetric: false` and any `.weight_zero_point`
 (asymmetric, spec 20 §9: no zero-point kernels, and no exact conversion to symmetric int4);
@@ -771,7 +767,7 @@ dropped by name and counted in the report line, because this engine's KV cache i
 its own int8.
 
 **The startup note.** A compressed-tensors load prints one line to stderr (and keeps it in
-`LoadReport::quant_note` / `K2LoadReport::quant_note`; `ct_conversion_note` is the
+`LoadReport::quant_note`; `ct_conversion_note` is the
 host-testable source):
 
 ```

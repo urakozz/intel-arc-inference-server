@@ -17,7 +17,7 @@
 //   - raw newlines / tabs / control bytes inside string arguments (multi-line file contents, patches; HF
 //     Kolibri-1 discussions #8 / #9) are repaired into the call, also inside a string-held arguments
 //     object; still-broken bodies stay content verbatim; the fuzz writes half its calls in that raw form;
-//   - the shared parse_json_call (also K2's json format - toolcall_k2_test keeps K2's cases);
+//   - the shared parse_json_call;
 //   - a fuzz: 2000 generated outputs (reasoning or not, content with tag fragments, 0-3 valid calls
 //     with random arguments) parse to the generated structure, and the same outputs cut at a random
 //     byte, with broken calls spliced in, parse identically under every split.
@@ -292,7 +292,7 @@ void case_calls() {
   expect("<tool_call>{\"name\": \"read\", \"arguments\": {\"filePath\": \"</tool_call>\"}}</tool_call>", kTools, "",
          "<tool_call>{\"name\": \"read\", \"arguments\": {\"filePath\": \"</tool_call>\"}}</tool_call>", none);
   // Schema typing: a schema string written as a number is its JSON text; integers stay integers;
-  // a string | null schema written as null becomes "null" (the rule K2's json format has).
+  // a string | null schema written as null becomes "null".
   expect("<tool_call>{\"name\": \"read\", \"arguments\": {\"filePath\": 123, \"limit\": 5}}</tool_call>", kTools, "",
          "", json::array({json::array({"read", {{"filePath", "123"}, {"limit", 5}}})}));
   expect("<tool_call>{\"name\": \"grep\", \"arguments\": {\"pattern\": \"x\", \"include\": null}}</tool_call>", kTools,
@@ -368,7 +368,7 @@ void case_german() {
   std::printf("german: umlauts, ß, „…“ and a 42-letter compound keep their bytes in reasoning, content and arguments\n");
 }
 
-// --- parse_json_call, shared with K2 ----------------------------------------------------------------
+// --- parse_json_call -------------------------------------------------------------------------------
 void case_parse_json_call() {
   server::ToolCall c;
   CHECK(server::parse_json_call("  {\"name\": \"f\", \"arguments\": {\"a\": 1}}\n", kTools, c));
@@ -390,7 +390,6 @@ void case_format() {
   CHECK(f.string_content());
   CHECK_EQ(std::string(f.name()), std::string("kolibri1"));
   CHECK(server::ChatFormat::for_model_type("qwen3_5").kind == server::ChatFormat::Kind::Qwen);
-  CHECK(!server::ChatFormat::for_model_type("k2_horizon").string_content());
   // The parser ignores the prompt's ending (the model opens reasoning itself).
   auto parser = server::make_output_parser(f, "<|im_start|>assistant\n", json::object(), nullptr);
   std::vector<Delta> d = parser->push("<think>\nr\n</think>\n\nc");

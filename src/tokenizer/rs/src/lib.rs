@@ -25,7 +25,7 @@ pub extern "C" fn b70_tok_new(path: *const c_char, out: *mut *mut b70_tok) -> i3
     match Tokenizer::from_file(&path) {
         Ok(mut tokenizer) => {
             // The engine tokenises whole prompts: a file's `truncation` / `padding` blocks
-            // never apply. K2-Horizon's int4 repo ships truncation at 2048 ids (a calibration
+            // never apply. A quantised repo has shipped truncation at 2048 ids (a calibration
             // setting), which silently cut every longer prompt's tail (no_truncation_test).
             if let Err(error) = tokenizer.with_truncation(None) {
                 return set_err(format!("{path}: {error}"));

@@ -32,7 +32,7 @@
 //
 // Every sigmoid / SiLU in the q4_ kernels (and in prep_gated_head _SIG) is 1 / (1 + exp_torch(-x)) /
 // x / (1 + exp_torch(-x)): exp_torch is Sleef's expf u10 step for step (torch's Vectorized<float>::exp,
-// k2_attn_eager.cl's), so a kernel and its host twin (tests/kernels/qwen4exp_ref.h) agree bit for bit and
+// tests/kernels/eager_attn_ref.h's), so a kernel and its host twin (tests/kernels/qwen4exp_ref.h) agree bit for bit and
 // both sit on torch's own value.
 namespace kernels::qwen4exp {
 
@@ -243,15 +243,15 @@ inline std::string pf_sparse_attn_variant(bool eager) {   // "q4_pf_sparse_attn_
          (eager ? "_EAGER" : "");
 }
 inline std::string pf_ple_variant() { return "q4_pf_ple_C" + std::to_string(kPfC); }   // "q4_pf_ple_C2048"
-// kolibri/kol_pf_linear.cl's bf16 slab at this family's shapes (the source's own name carries Kolibri's prefix).
+// prefill/slab_bf16.cl's bf16 slab at this family's shapes (its entry point keeps the name kol_pf_bf16_slab).
 inline std::string pf_bf16_slab_variant(unsigned K, unsigned N) {
   return "q4_pf_bf16_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
 }
 // The int4 (layout 0) slabs: whole 1024-column slabs through prefill/pf_dequant_slab.cl (qkv||z, q||gate||k||v), a
-// zero-padded tail through k2/k2_pf_linear.cl (out_proj / o_proj: 2560 = 1024 + 1024 + 512).
+// zero-padded tail through prefill/slab_dequant_int4.cl (out_proj / o_proj: 2560 = 1024 + 1024 + 512).
 inline bool pf_int4_slab_tail(unsigned N) { return N % kPfSlab != 0; }
 inline std::string pf_int4_slab_variant(unsigned K, unsigned N) {
-  return pf_int4_slab_tail(N) ? "k2_pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N)
+  return pf_int4_slab_tail(N) ? "pf_int4_slab_K" + std::to_string(K) + "_N" + std::to_string(N)
                               : pf_dequant_slab_variant(K, N, 0);
 }
 // 21c's sources at M = kPfC.

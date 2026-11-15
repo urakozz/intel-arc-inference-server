@@ -26,7 +26,7 @@ class Template {
   std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                      bool enable_thinking) const;
   // Spec 18d: `kwargs` (an object, or null) are the request's chat_template_kwargs - template
-  // variables beside enable_thinking, e.g. K2-Horizon's tool_call_format / reasoning_effort.
+  // variables beside enable_thinking, e.g. Kolibri-1's reasoning_effort.
   std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                      bool enable_thinking, const nlohmann::json& kwargs) const;
   const std::string& bos_token() const;

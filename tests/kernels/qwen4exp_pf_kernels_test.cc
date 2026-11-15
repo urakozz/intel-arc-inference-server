@@ -4,7 +4,7 @@
 // binds (kernels::qwen4exp names), plus pf_gemm_T0_SILU for the dense comparison. Written blind on the Mac (box
 // queue row 33).
 //
-//   1. the slabs: pf_dequant_slab at qkv||z 2560 x 16384 (whole slabs), k2_pf_dequant_slab at out / o 6144 x 2560
+//   1. the slabs: pf_dequant_slab at qkv||z 2560 x 16384 (whole slabs), pf_int4_slab at out / o 6144 x 2560
 //      (the 512-column tail), q4_pf_bf16_slab at the HC down||inject 10240 x 336 (one 512-column slab, 176 zero
 //      columns) exact; the HC down through pf_gemm_T0 at pitch 512 within cosine 0.99999 of fp64;
 //   2. 21c's HC at M = 2048: combine _E / _S1 / _Y / _X / _Y_NN and the up-mix at pitch 512 bitwise q4ref's;
@@ -23,7 +23,7 @@
 //   7. the attention (Review Focus 1): pf_flash_attn_Q24KV2 against fp64 causal on the dense rows of chunks (0,
 //      2048) and (2000, 2048) (its 51 dense rows); q4_pf_sparse_attn against sparse_attn_fp64 (cosine >= 0.99999,
 //      spec 6 K1) at chunk starts 2048 (rows 3..), 4096, 30000, 131072 and a 300-row tail; the EAGER build against
-//      sparse_row_eager (0.9999: the rounding points, not the sum order - spec 18 §11) and fp64 (0.999); replay
+//      sparse_row_eager (0.9999: the rounding points, not the sum order) and fp64 (0.999); replay
 //      bitwise; pf_attn_gate over the sparse O within 1 bf16 ulp of rne(rne(o) x sigmoid(gate)).
 // (gdn_chunk_q4 against decode's gdn_step + prep_gated_head_M1_SIG lives in tests/runtime/qwen4exp_prefill_test.cc's
 // `gdn` mode: it needs the runtime's gdn_chunk_q4.)
@@ -40,13 +40,12 @@
 #include "check.h"
 #include "common/bf16.h"
 #include "common/repack.h"
-#include "kernels/k2_pf_ref.h"
 #include "kernels/kernels.h"
-#include "kernels/kolibri_pf_ref.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/qwen4exp_kernels.h"
 #include "kernels/qwen4exp_pf_ref.h"
 #include "kernels/qwen4exp_ref.h"
+#include "kernels/slab_ref.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -192,13 +191,13 @@ void slabs(Dev& dv) {
     for (uint32_t n0 = 0; n0 < N;) {
       const uint32_t ns = slab_width(N, n0);
       if (tail)
-        dv.go(kq::pf_int4_slab_variant(K, N), "k2_pf_dequant_slab", ns / 16, K / 64, 1,
+        dv.go(kq::pf_int4_slab_variant(K, N), "pf_int4_slab_dequant", ns / 16, K / 64, 1,
               {PtrArg(dw.ptr()), PtrArg(ds.ptr()), PtrArg(slab.ptr()), arg_val(n0), arg_val(ns)});
       else
         dv.go(kq::pf_int4_slab_variant(K, N), "pf_dequant_slab", ns / 16, K / 64, 1,
               {PtrArg(dw.ptr()), PtrArg(ds.ptr()), PtrArg(slab.ptr()), arg_val(n0)});
       if (tail || n0 == 0 || n0 + ns == N)
-        CHECK(dv.rd<uint16_t>(slab, size_t(K) * ns) == k2_pf_ref::dequant_slab(words.data(), sc.data(), K, N, n0, ns));
+        CHECK(dv.rd<uint16_t>(slab, size_t(K) * ns) == slab_ref::dequant_slab(words.data(), sc.data(), K, N, n0, ns));
       n0 += ns;
     }
   }
@@ -211,7 +210,7 @@ void slabs(Dev& dv) {
   l0::Mem dw = dv.up(wt), dx = dv.up(x), slab = dv.zeros(size_t(K) * LD * 2), part = dv.up(std::vector<float>(size_t(kC) * LD, 7.0f));
   dv.go(kq::pf_bf16_slab_variant(K, N), "kol_pf_bf16_slab", LD / 16, K / 8, 1,
         {PtrArg(dw.ptr()), PtrArg(slab.ptr()), arg_val(0u), arg_val(LD)});
-  CHECK(dv.rd<uint16_t>(slab, size_t(K) * LD) == kolibri_pf_ref::bf16_slab(wt.data(), K, N, 0, LD));
+  CHECK(dv.rd<uint16_t>(slab, size_t(K) * LD) == slab_ref::bf16_slab(wt.data(), K, N, 0, LD));
   const runtime::prefill::GemmBatch gb{C, K, LD, 1, K, LD, LD, 0, 0, 0};
   runtime::prefill::gemm_l0(dv.cx, dv.kc, gb, dx.as<uint16_t>(), slab.as<uint16_t>(), part.as<float>(), false);
   dv.cx.wait();

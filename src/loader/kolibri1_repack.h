@@ -36,7 +36,7 @@ model::KolAttnForm kol_attn_form(const SafetensorsSet& st, const model::Kolibri1
 std::vector<std::string> kol_expected_names(const model::Kolibri1Desc& d, model::KolAttnForm a);
 
 // RoPE table fp32 [max_len][2][head_dim / 2], cos at [p][0][i], sin at [p][1][i], each a bf16
-// value - kolibri_ref.rope_cos_sin's fp32 steps (k2_rope_table's construction, theta 1e4):
+// value - kolibri_ref.rope_cos_sin's fp32 steps (theta 1e4):
 //   inv[i] = 1 / powf(theta, float(2i) / 128); ang = float(p) x inv[i]; bf16(cos / sin(ang))
 std::vector<float> kol_rope_table(const model::Kolibri1Desc& d, uint32_t max_len);
 

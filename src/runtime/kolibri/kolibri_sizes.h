@@ -11,7 +11,7 @@
 
 // Spec 20c: Kolibri-1's runtime allocations as device-free arithmetic, the planner over them
 // (`--max-len auto`, spec 6 §10) and the split by bytes (`--pipeline-split auto`, spec 16b's
-// runtime::pp_balance - not a second rule) - runtime/k2/k2_sizes.h's arrangement for Kolibri: the
+// runtime::pp_balance - not a second rule) - the
 // KolibriBuffers constructor allocates exactly what these return, per device, and the plan adds the
 // same numbers up before anything is allocated. Host only (tests/runtime/kolibri_plan_test.cc).
 namespace runtime::kolibri {
@@ -20,9 +20,9 @@ inline constexpr uint32_t kM = 1;   // Kolibri builds M = 1 only (no MTP head, s
 
 // Which decode attention every capture binds - kol_attn.cl's flash form or kol_attn_eager.cl's
 // eager form (the reference's bf16 chain). `B70_KOLIBRI_ATTN=flash|eager`, read at each call;
-// unset or empty is the default; anything else throws (spec 18 §10.1's switch).
+// unset or empty is the default; anything else throws.
 enum class KolAttn { Flash, Eager };
-inline constexpr KolAttn kDefaultKolAttn = KolAttn::Flash;   // until the box A/B (spec 18 §10.1's rule)
+inline constexpr KolAttn kDefaultKolAttn = KolAttn::Flash;   // until the box A/B
 KolAttn kolibri_attn();
 const char* kol_attn_name(KolAttn a);
 
@@ -122,7 +122,7 @@ inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab o
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks
 inline uint32_t pad256(uint32_t n) { return (n + 255) / 256 * 256; }
 // The attention linears' slab walk over N columns: slabs of kPfSlab and one tail of pad256(N - n0)
-// (k2_pf_dequant_slab / kol_pf_bf16_slab zero-fill its padding); the partials row pitch pad256(N).
+// (pf_int4_slab_dequant / kol_pf_bf16_slab zero-fill its padding); the partials row pitch pad256(N).
 inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }
 inline uint32_t pf_slab_width(uint32_t N, uint32_t n0) { return N - n0 >= kPfSlab ? kPfSlab : pad256(N - n0); }
 inline uint32_t pf_ld(uint32_t N) { return pad256(N); }
@@ -235,7 +235,7 @@ std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement
 // The HOST layouts (spec 16b's rule: --parallel pp's is --parallel 1's byte for byte, so an entry moves between one
 // card and two unchanged - every layer is addressed through the placement, never by device order):
 //   state  [K | V][sliding layer, in layer order][state_positions(d)][kv_n] bf16, positions ascending
-//   kv     [K | V][full layer, in layer order][end - begin][kv_n] bf16 (runtime::Engine's / K2's order)
+//   kv     [K | V][full layer, in layer order][end - begin][kv_n] bf16 (runtime::Engine's order)
 // A run is one contiguous range of one device allocation (`tensor`: the device's full_k, full_v,
 // ring_k, ring_v), in host order. `zero` runs cover positions before 0: save_state writes zeros to the
 // host for them (the device slots are not read), load_state copies the host's zeros into their slots.

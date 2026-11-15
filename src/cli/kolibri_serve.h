@@ -1,6 +1,6 @@
 #pragma once
 // Spec 20e: Kolibri-1 behind b70-serve - runtime::kolibri::KolibriEngine as a server::EngineIface, the
-// Kolibri counterpart of cli::k2::K2EngineAdapterT (src/cli/k2_serve_adapter.h). b70-serve instantiates it
+// adapter of a family with its own engine. b70-serve instantiates it
 // over KolibriEngine (one card or two: the engine holds the placement); the template exists so the host
 // test (tests/runtime/kolibri_snapshot_test.cc) runs the same adapter over a device-free engine with
 // Kolibri's real ring and KV layouts. This header names no Level Zero type.
@@ -38,7 +38,7 @@
 namespace cli::kolibri {
 
 // The prefix cache's root for Kolibri (PrefixCache's kv_form): "KOLIBRI\0". Qwen3.8 / Ornith keep
-// 0 / 1 and K2 its "K2HORIZ" key, so no chain crosses models; the entries' bytes are Kolibri's ring and
+// 0 / 1, so no chain crosses models; the entries' bytes are Kolibri's ring and
 // full-layer layouts (bf16 only), meaningless to any other engine.
 inline constexpr uint64_t kKolibriStoreKey = 0x4B4F4C4942524900ull;
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # tools/toolcall/a4_ref.sh - the A4 tool-call set and its CPU reference run for a MoE model
-# (spec 15e Task 3: Ornith; spec 18d K4: K2-Horizon; spec 20e KL4: Kolibri-1; spec 21e Task 5:
+# (spec 15e Task 3: Ornith; spec 20e KL4: Kolibri-1; spec 21e Task 5:
 # Qwen3.8-Flash-Next) - and for Qwen3.8 itself (operator, 2026-11-07) - from the repo (or worktree) root.
 #
 #   tools/toolcall/a4_ref.sh qwen set|ref|status    Qwen3.8's own A4 reference (the one r11.a4 / r75.gates score
@@ -14,7 +14,7 @@
 #                                                   GEMMs rounded to bf16 (cpu_bf16.py), HF generate, 384 new ids,
 #                                                   one scenario at a time -> $OUT/<name>.bf16.{ids,txt}
 #                                                   (resumable; no .gap). OUT default oracle-out-qwen-a4.
-#   tools/toolcall/a4_ref.sh <ornith|k2|kolibri|qwen4exp> set   the model's set: make_set.py --from
+#   tools/toolcall/a4_ref.sh <ornith|kolibri|qwen4exp> set   the model's set: make_set.py --from
 #                                                   tests/golden/toolcall (the 36 conversations of
 #                                                   Qwen3.8's set, re-rendered and re-tokenised by
 #                                                   the checkpoint's own template) -> $OUT/set;
@@ -32,9 +32,9 @@
 #                                                   to Qwen3.8's, so a scenario's ids differ only where
 #                                                   the split does - the log (and $OUT/set/SAME) says
 #                                                   how many of the 36 are Qwen3.8's ids exactly
-#   tools/toolcall/a4_ref.sh <ornith|k2|qwen4exp> ref  the reference: oracle_generate.py over $OUT/set
+#   tools/toolcall/a4_ref.sh <ornith|qwen4exp> ref     the reference: oracle_generate.py over $OUT/set
 #                                                   -> $OUT/<name>.bf16.{ids,txt} (resumable)
-#   tools/toolcall/a4_ref.sh <ornith|k2|qwen> status  what is done
+#   tools/toolcall/a4_ref.sh <ornith|qwen> status     what is done
 #   tools/toolcall/a4_ref.sh bolt set|ref|status    spec 25a: `set` copies the committed set
 #                                                   tests/golden/toolcall-bolt (make_set.py --from
 #                                                   tests/golden/toolcall --model bolt: the checkpoint's template,
@@ -52,9 +52,6 @@
 # The references (tools/toolcall/oracle_generate.py, by config.json's model_type):
 #   ornith  tools/oracle/ornith_ref.py's layer-streamed Qwen3_5MoeForCausalLM on the INT4
 #           checkpoint dequantised (15a: the engine's own weights), 384 new ids;
-#   k2      tools/oracle/k2_ref.py's port in bf16 mode on the int4 checkpoint dequantised (18a's
-#           reference; MODEL_DIR=<the bf16 original's snapshot> for the true bf16 model), 512 new
-#           ids (its replies open with reasoning; the set renders reasoning_effort low);
 #   kolibri tools/oracle/kolibri_ref.py's KolibriRef in bf16 mode (`--model kolibri`) on the 156 GB
 #           bf16 SOURCE (Aleph-Alpha/Kolibri-1-BF16 - KL4's reference; it runs wherever 20b runs,
 #           decision 1: MODEL_DIR, DEVICE=cuda|xpu where there is one), 384 new ids (the set renders
@@ -79,15 +76,14 @@
 #            while another container of that image runs (the Mac holds one 28 GB oracle at a
 #            time) unless FORCE=1. The checkpoint must be complete in the HF cache:
 #              uvx --from huggingface_hub hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
-#              uvx --from huggingface_hub hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
 #   the box  tools/oracle/run_in_container.sh (ORACLE_IMAGE), in the foreground (the runbook's
-#            stages run detached already): r16.a4_ref / r25.a4_ref.
+#            stages run detached already): r16.a4_ref.
 # Batched (BATCH, default auto; BATCH=1 is the old one-scenario-at-a-time run): oracle_generate.py
 # --batch runs up to BATCH scenarios through each layer together (layer-major), each layer's
 # weights dequantised once per pass for all of them, a finished scenario's slot refilled at once;
 # every sequence's arithmetic stays its own (no op sees two sequences), so the ids are bitwise the
 # sequential run's (tools/toolcall/test_oracle_batched.py: ids and every logits row, tiny Ornith /
-# K2 / Kolibri, ragged prompts, different EOS points). RESIDENT (default auto; none = off) keeps
+# Kolibri, ragged prompts, different EOS points). RESIDENT (default auto; none = off) keeps
 # dequantised weights resident once read - every layer's dense part, then whole layers of
 # experts - in what the cap leaves (also bitwise: the same values, read from RAM instead of
 # re-dequantised). The memory plan (estimates, from config.json and the container's cap - MEM)
@@ -103,9 +99,7 @@
 # rows), 23% the GDN's bf16 depthwise conv1d (76 ms a call, per sequence), 13% grouped_mm, 9%
 # linears, 6% attention, 5% GDN - per sequence - and 1% the dense layers' (prefetched) dequant.
 # So for Ornith (ESTIMATED): batching alone ~5%; with RESIDENT=auto at MEM=60g (26 of 40 expert
-# layers resident) ~1.25x - ~14 h for 36, ~11.5 h for the 29 left. K2 (512 ids; its int4 step
-# ~7 s, ~70% of it dequant - tools/oracle/README.md's estimate, not measured): ~1-1.5 days
-# sequential, ~0.6-1 day batched (8) + RESIDENT at 54-60g (ESTIMATED). Each scenario's seconds,
+# layers resident) ~1.25x - ~14 h for 36, ~11.5 h for the 29 left. Each scenario's seconds,
 # and every prompt pass's (and every 25th pass's) seconds, are in $OUT/ref.log. Ornith batched
 # needs transformers 5.15 (agnes-ref-img; ornith_ref.layer_major refuses another version).
 # Qwen3.8 (qwen, ESTIMATED from the box's fp32 rate and memory bandwidth, not measured): a prompt pass
@@ -115,8 +109,8 @@
 #
 # Env: OUT (oracle-out-<model>-a4; git-ignored like every oracle-out*), DEVICE (kolibri's
 # reference: cpu, cuda or xpu), MODEL_DIR (a snapshot
-# directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
-# default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
+# directory instead of the HF cache's), NEW_TOKENS, KWARGS (the template variables, JSON;
+# default make_set.py's), IMAGE, MEM,
 # ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto; qwen: ignored), RESIDENT (auto), ONLY, NAME, FOREGROUND; qwen4exp only:
 # TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE;
 # bolt: FORM, SITE, BOLT_LAYERS, BOLT_EXPERT_CACHE_GB (an LRU of dequantised experts across decode steps).
@@ -127,7 +121,6 @@ step=${2:-}
 case "$m" in
   qwen) repo=Qwen/Qwen3.8-27B; new=${NEW_TOKENS:-384} ;;   # the bf16 original (MODEL_DIR for another snapshot)
   ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-384} ;;
-  k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-384} ;;
   qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-384} ;;
   bolt)   # spec 25a: FORM int4 (our g64 export, the served checkpoint) | bf16 (the original) | both (the box)

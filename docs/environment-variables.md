@@ -49,25 +49,23 @@ Any value not listed is refused.
 | `BUILD_DIR`, `CMAKE_ARGS` | `box.sh` | `build`, empty | build directory on the box and extra `-D` flags for the configure step |
 | `MODEL`, `DEPTH`, `TG`, `RUNS`, `PP`, `PP_CHUNK`, `PP_BACKEND`, `MAX_LEN` | `bench_decode.sh` | Qwen3.8's repo id, `4096`, `256`, `3`, the rest unset | the same as its flags (`--model`, `--depth`, ...). Unset adds nothing to the command, so it stays the one every earlier row used. It also forwards `ZE_AFFINITY_MASK`. |
 | `MODEL`, `PORT`, `SERVED_NAME`, `RUNS` | `serve_bench.sh` | Qwen3.8's snapshot in the box's HF cache, `8000`, `b70`, `3` | the served checkpoint (plain: `--spec off`), its port, the model name the requests carry, and the number of llama-benchy invocations |
-| `SNAP_QWEN`, `SNAP_ORNITH`, `SNAP_K2`, `SNAP_KOLIBRI`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the four checkpoints, `0`, `8013 + 100 x DEVICE` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
+| `SNAP_QWEN`, `SNAP_ORNITH`, `SNAP_KOLIBRI`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the three checkpoints, `0`, `8013 + 100 x DEVICE` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
 | `ORACLE_MODEL` / `ORACLE_SNAP`, `ORACLE_THREADS`, `ORACLE_IMAGE`, `HF_CACHE`, `REPO_DIR` | `tools/oracle/run_in_container.sh` and the scripts that call it (`golden.sh`, `check.sh`) | Qwen3.8 in the HF cache, all threads, the script's reference image, `~/.cache/huggingface`, this tree | the CPU reference's checkpoint (a repo directory in the cache, or an absolute snapshot path, which wins), its CPU threads, the container, and the two mounts. `golden.sh` adds `OUT_DIR` (`oracle-out`), `IDS_DIR` (`tests/golden/prompts`) and `PROMPTS` (`prose code cjk`). |
 
 | `B70_BOLT_A_EXP` | `tools/oracle/bolt_ref.py`, `bolt_mamba_ops.py`, `bolt_fixture.py` | `torch` | `engine`: Bolt's CPU reference computes `A = -exp(A_log)` with a float32 port of the engine's own `exp` instead of `torch.exp`, so that the kernels can be checked against it bit for bit; `bolt_ref.py run --a-exp` sets it. |
 
 ## Test-only
 
-The checkpoint paths the tests load are CMake options (`-DB70_TEST_SNAPSHOT`, `-DB70_ORNITH_SNAPSHOT`,
-`-DB70_K2_SNAPSHOT`), not environment variables. A *near-tie tolerance* below is how close two candidates'
+The checkpoint paths the tests load are CMake options (`-DB70_TEST_SNAPSHOT`, `-DB70_ORNITH_SNAPSHOT`),
+not environment variables. A *near-tie tolerance* below is how close two candidates'
 scores may be before a test calls the choice between them undetermined.
 
 | variable | read by | default | what it does |
 |---|---|---|---|
 | `B70_LONGCTX_TESTS` | the `longctx` tests | unset: SKIP | `1` runs the long-context MTP variants (`mtp_verify_{32k,128k}_test`, `mtp_gpu_{32k,128k}_test`) |
-| `B70_K2_TIE_TOL` | `k2_golden_test` | `1e-3` | the near-tie tolerance of K2-Horizon's expert routing check |
-| `B70_KOL_TIE_TOL` | `kolibri_golden_test`, `kolibri_partial_test` | `1e-2` | the same for Kolibri-1 |
+| `B70_KOL_TIE_TOL` | `kolibri_golden_test`, `kolibri_partial_test` | `1e-2` | the near-tie tolerance of Kolibri-1's expert routing check |
 | `B70_BOLT_TIE_TOL` | `bolt_golden_test`, `bolt_prefill_test` | `1e-3` | the same for Bolt's expert routing (the 9th against the 10th expert); a gap of exactly 0 is undetermined |
 | `B70_BOLT_SNAPSHOT` | `template_bolt_test`, `bolt_tokenizer_test`, `bolt_request_test` | our Bolt export in the HF cache | the snapshot whose chat template and tokenizer files the tests use; without it the tests SKIP |
 | `B70_Q4_TIE_TOL`, `B70_Q4_SEL_TOL` | `qwen4exp_golden_test`, `qwen4exp_partial_test` | `1e-3` | the same for Qwen3.8-Flash-Next: expert routing (the 10th against the 11th expert) and the sparse attention's position selection (the 512th against the 513th); a gap of exactly 0 is undetermined |
 | `B70_SNAPSHOT_DIR` | `template_test`, `prompt_order_test` | Qwen3.8's snapshot under `$HF_HOME` | the snapshot whose chat template it renders |
-| `B70_K2_TOKENIZER_JSON` | `k2_tokenizer_test` | the CMake option of that name | K2's `tokenizer.json`; absent, the test is skipped |
 | `B70_SPLIT_VERBOSE` | `prefill_split_test` | unset | set: also print the worst KV row per attention layer of each non-bitwise split |

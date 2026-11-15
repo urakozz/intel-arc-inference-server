@@ -278,13 +278,13 @@ std::vector<uint32_t> read_ids(const std::string& path) {
 }
 bool exists(const std::string& p) { return std::ifstream(p).good(); }
 
-// ---- the f32 judge (operator ruling 2026-10-23, Ornith and K2 only) ---------------------
-// The bf16 golden rounds where HF's bf16 model rounds; on Ornith and K2 its own determined rows
+// ---- the f32 judge (operator ruling 2026-10-23, Ornith) -----------------------------------
+// The bf16 golden rounds where HF's bf16 model rounds; on Ornith its own determined rows
 // disagree with exact arithmetic on the same weights (box 2026-10-23: Ornith prose 18, cjk 14,
-// code 3; K2 prose 9), and the engine took exact arithmetic's token at the rows it "failed". So
-// those models' token gates JUDGE against the f32 teacher-forced reference - the same weights in
+// code 3), and the engine took exact arithmetic's token at the rows it "failed". So
+// its token gates JUDGE against the f32 teacher-forced reference - the same weights in
 // float32, every generated step forced to the bf16 golden's token (ornith_ref.py --dtype f32
-// --force, k2_ref.py --mode f32 --force; tools/box_validate/f32_oracle.sh), so its logits rows
+// --force; tools/box_validate/f32_oracle.sh), so its logits rows
 // are the bf16 golden's contexts row for row - with the tie rule applied to ITS logits, widened
 // by the operator's second ruling of the day to a top-2 gap within one bf16 ulp (judge_row
 // below). The bf16 golden stays a printed diagnostic beside it. Qwen3.8's
@@ -322,9 +322,6 @@ std::string take_judge(int& argc, char** argv) { return take_flag(argc, argv, "-
 //   prefill_gate_ornith_l0_c16 (bf16) prose 18 (0.447), cjk 15: chunk widths 2048 / 64 / 32 / 16 / 8
 //     leave the state's distance to f32 flat (0.996 prose) and flip the rows non-monotonically
 //     (prose 18 wrong at 32 and 16, right at 8 and 2048) - chunk-boundary rounding of the GDN scan.
-//   k2_golden_i8head prose 1 (0.136): gemv_i8w recomputed on the host from the device's own hidden
-//     and int8 rows agrees to 4e-6 - the divergence is the hidden state; the bf16 head on it picks
-//     the judge's 1961.
 //   cjk 15 is a 3-4-way f32 near tie (four ids within 0.31) that different variants resolve differently.
 constexpr const char* kAcceptNote = "ACCEPTED (known divergence, 2026-10-23, debug 2026-10-26)";
 struct AcceptList {

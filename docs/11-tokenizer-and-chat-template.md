@@ -121,22 +121,13 @@ hash-gated fallback for exactly that source and no other; it changes that one
 construct to minja's equivalent `is not defined` without editing the
 checkpoint's template file.
 
-**K2-Horizon (spec 18d).** K2's 51 KB template (the int4 repo's, the one served) renders
-byte for byte as `apply_chat_template` does on 18 message lists
-(`tests/tokenizer/k2_template_cases.json`: every `tool_call_format` and
-`tool_presentation_format`, `reasoning_effort`, history with and without thinking,
-list content, tool results, `null` defaults, `$ref` schemas; `template_k2_test`). That
-took renderer changes, not a K2 fallback: minja is patched where it was not Jinja
-(Undefined apart from None, `is sameas`, `str.split()`, the `replace` filter, `dict`,
-index attribute getters, empty mappings falsy, `none`; the tool-call capability probe),
-each listed in `third_party/VERSIONS` and tested against Jinja2 by `minja_ext_test`.
-The request's `chat_template_kwargs` reach the template through
-`chat::Template::render(..., kwargs)` for models whose `server::ChatFormat` reads them (K2, Kolibri
+The renderer is patched where minja was not Jinja (Undefined apart from None, `is sameas`, `str.split()`, the
+`replace` filter, `dict`, index attribute getters, empty mappings falsy, `none`; the tool-call capability probe),
+each listed in `third_party/VERSIONS` and tested against Jinja2 by `minja_ext_test` (the patches came with
+a model's template since removed). The request's `chat_template_kwargs` reach
+the template through `chat::Template::render(..., kwargs)` for models whose `server::ChatFormat` reads them (Kolibri
 and Bolt; Qwen only gets `enable_thinking`). Ornith, Kolibri and Bolt have their own template tests
-(`template_ornith_test`, `template_kolibri_test`, `template_bolt_test`). K2's tokenizer (`tokenizer.json`, BPE + NFC + a BOS post-processor) passes
-`k2_tokenizer_test`: a varied text set with every chat / tool tag, corpus.txt's digests,
-and three chat renders whose ids equal HF's - the template writes the BOS, so the prompt is
-encoded without special tokens (one BOS, id 0).
+(`template_ornith_test`, `template_kolibri_test`, `template_bolt_test`).
 
 `tok::Streamer` is the hold-and-flush incremental detokeniser described under
 "Streaming detokenisation" below.
@@ -173,7 +164,7 @@ fallback above is.
 
 Template *rendering* of tool definitions in the prompt has parity vectors. Tool-call
 *parsing* of the model's output is in the server, one parser per family (`src/server/toolcall*.cc`:
-Qwen's XML, K2's three formats, Kolibri's and Bolt's own).
+Qwen's XML, Kolibri's and Bolt's own).
 
 **Key order is part of the prompt.** A chat request is parsed with `nlohmann::ordered_json`, not
 `nlohmann::json` (whose object is a sorted map), so the template sees the client's `messages`,

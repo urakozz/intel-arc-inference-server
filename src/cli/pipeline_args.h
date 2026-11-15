@@ -82,7 +82,7 @@ struct TpContext {
   // --parallel tp serves the split drafter, with prompt lookup inside it too).
   bool dflash = false;
   bool profile = false;        // --profile
-  bool other_family = false;   // Bolt / Kolibri-1 / Qwen3.8-Flash-Next / K2-Horizon
+  bool other_family = false;   // Bolt / Kolibri-1 / Qwen3.8-Flash-Next
   bool draft_vocab = false;    // --draft-vocab / --draft-vocab-ids (spec 17d: the draft head is the card's half)
 };
 inline void check_tp(const PipelineArgs& a, const TpContext& c) {

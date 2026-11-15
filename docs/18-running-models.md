@@ -74,30 +74,30 @@ is not finished is listed in [open-work.md](open-work.md).
 - **Ornith 1.5** is supported and its box tests pass; its speed rows (decode, prefill, MTP cost table) are in BENCHMARKS.
 - **Qwen3.8-Flash-Next** is next. It runs only truncated (`--layers N`) because the whole model does not
   fit two cards; open-work.md has the plan for the full size.
-- **K2-Horizon and Kolibri-1** are supported by the code and parked (out of focus); no speed rows.
+- **Kolibri-1** is supported by the code and parked (out of focus); no speed rows.
 - **Nemotron 3.5 Bolt** is parked until Flash-Next is done. Its section stays
   because the code still serves it.
 - Dropped and no longer supported: LFM2.5, Muse-Glimmer and Agnes 3.0 Flash (a `config.json` naming
   `AgnesForConditionalGeneration` is refused by name). Flint and Nanbeige are parked and not built.
   LiLiCorr is Bolt's draft model (`--spec dflash`, Bolt's section).
 
-| | Qwen3.8-27B | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 | Qwen3.8-Flash-Next |
-|---|---|---|---|---|---|
-| checkpoint | published (ours, int4 g64) | published (ours) | published (ours) | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); our own is not made |
-| `b70-serve` | yes | yes | yes | yes, **two cards** by default | `--layers N` only (the whole model is refused until the expert tier is built) |
-| `--parallel tp` | yes | refused | refused | refused | refused |
-| `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request a card); more refused | refused | refused | refused |
-| `--parallel pp` (two cards) | yes | yes | **refused** (one card) | its default (its own engine) | yes, `--layers N` |
-| `b70-decode` | yes | yes | yes | decode and prefill, **two cards** (the default) | decode and prefill, **`--layers N` required** |
-| speed rows in BENCHMARKS | yes | yes | no | no | no |
-| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed number of guesses = `--spec-max` 1..3 (`auto` = off until the whole model is measured); `b70-decode` refuses it |
-| `--spec lookup` (developer value) | yes | yes (needs the head) | no | no | yes (needs the head) |
-| `--spec dflash` | yes, when asked: one card (with prompt lookup inside), `replica`, `tp` or `pp`, bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
-| `--kv-cache int8` | yes | not built | yes | refused (bf16 only) | refused (bf16 only) |
-| prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only | `l0` only |
-| KV per position (bf16) | 64 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
-| `--max-len auto`, one card, int8 head (derived) | 171008 with MTP (the default); ~201k with `--spec off` | 262144, with or without MTP (measured by the operator, bf16 KV, 27.3 GB planned of 32.5) | ~46k served; `b70-decode` ~50k decode-only | 262144 on two cards (split 25) | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
-| with `--kv-cache int8` (derived) | 262144, with or without MTP | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
+| | Qwen3.8-27B | Ornith 1.5 35B-A3B | Kolibri-1 | Qwen3.8-Flash-Next |
+|---|---|---|---|---|
+| checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); our own is not made |
+| `b70-serve` | yes | yes | yes, **two cards** by default | `--layers N` only (the whole model is refused until the expert tier is built) |
+| `--parallel tp` | yes | refused | refused | refused |
+| `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request a card); more refused | refused | refused |
+| `--parallel pp` (two cards) | yes | yes | its default (its own engine) | yes, `--layers N` |
+| `b70-decode` | yes | yes | decode and prefill, **two cards** (the default) | decode and prefill, **`--layers N` required** |
+| speed rows in BENCHMARKS | yes | yes | no | no |
+| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed number of guesses = `--spec-max` 1..3 (`auto` = off until the whole model is measured); `b70-decode` refuses it |
+| `--spec lookup` (developer value) | yes | yes (needs the head) | no | yes (needs the head) |
+| `--spec dflash` | yes, when asked: one card (with prompt lookup inside), `replica`, `tp` or `pp`, bf16 or int8 KV | no | refused | refused |
+| `--kv-cache int8` | yes | not built | refused (bf16 only) | refused (bf16 only) |
+| prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only |
+| KV per position (bf16) | 64 KiB | 20 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
+| `--max-len auto`, one card, int8 head (derived) | 171008 with MTP (the default); ~201k with `--spec off` | 262144, with or without MTP (measured by the operator, bf16 KV, 27.3 GB planned of 32.5) | 262144 on two cards (split 25) | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
+| with `--kv-cache int8` (derived) | 262144, with or without MTP | - | - | - |
 
 The `--max-len auto` lengths are the planner's at the default 1.5 GB reserve on the 32.53 GB card.
 
@@ -154,7 +154,7 @@ picks pp by itself when the model and the asked `--max-len` do not fit one card 
 The hidden state crosses from the first card to the second by a device-to-device copy (there is no
 option for it). One answer is not faster than on one card; each card holds about half the model, so `--max-len auto`
 reaches the trained 262144 tokens, with MTP too (derived, int8 head). The MTP head runs on the second
-card with its own copy of the embedding (2.54 GB). K2-Horizon is one card only; Kolibri-1 runs on two
+card with its own copy of the embedding (2.54 GB). Kolibri-1 runs on two
 cards by default in `b70-decode` (spec 20c / 20d) and `b70-serve` (spec 20e, its own engine).
 
 ```sh
@@ -313,63 +313,6 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
   text with combining marks sees.
 
 **Relevant variables:** `B70_KV_CACHE` must stay `bf16`; `B70_PREFILL_PROFILE` applies.
-
-## K2-Horizon MoVA-36B-A4B
-
-`urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ` (spec 18; 22.22 GB): a second
-engine beside the Qwen one. 48 layers, every one full attention (32 q-heads, 8 kv-heads,
-head dim 128); layers 3-47 route values through 64 value experts (MoVA, top-4) and the FFN
-through 100 experts (top-8) plus a shared one. Its own tokenizer (250,624 ids, BOS 0) and
-chat template. No MTP head. Trained context 524288.
-
-**Status: built, parked; no speed row yet.** Decode (18b) and prefill (18c)
-run through `b70-decode`; `b70-serve` serves it (18d: its chat template, tool calls and
-reasoning, K2's own engine behind the server, KV-only prefix-cache snapshots - host-tested only).
-Expected
-(derived): 717 launches per token, 3.15 GB read per token with the int8 head (roofline
-~190 t/s from bytes alone), prefill ~3,400 t/s at 4096. For reference, vLLM on **two**
-cards (pipeline parallel, fp8 KV) measured 44.43 t/s decode.
-
-```sh
-uvx --from huggingface_hub hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
-K=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
-
-# every command below: no speed row yet
-# K2 ids start with BOS 0: encode with --bos
-python3 tools/oracle/tokenize.py <k2-snapshot> encode --bos prompt.txt > k2.ids
-
-./build/src/cli/b70-decode $K --ids k2.ids --n 32                    # decode only, one replay per id
-./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill          # prefill on l0
-./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
-./build/src/cli/b70-decode $K --bench --prefill-length 4096 --tg 256
-./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill --max-len auto   # ~46k, derived
-
-# serving (spec 18d): int8 head, prefix cache on, --max-len auto (~46k bf16 KV, ~90k int8 KV)
-./build/src/cli/b70-serve $K --kv-cache int8 --port 8000
-# K2's template variables per request: "chat_template_kwargs": {"tool_call_format": "xml" |
-# "xml_typed" | "json", "reasoning_effort": "high" | "medium" | "low"}
-```
-
-**Limits.**
-
-- Served on one card only (`--parallel pp` refused; `--parallel auto` is one card), no llama-benchy
-  row yet. `b70-serve` refuses `--spec mtp` / `lookup` / `dflash` and a non-`l0`
-  `--prefill-backend` by name; its `--spec auto` is off.
-- Context: the bf16 KV cache costs 192 KiB per position, so `--max-len auto` gives ~49.9k
-  decode-only, ~45.8k when the run prefills (the int8 head) - derived. `b70-decode`'s default is
-  16384. Long context needs the int8 KV cache (spec 18e); two cards are not built for K2.
-- Prefill runs on `l0` only: `--prefill-backend l0-int8` is refused by name.
-  Omitting `--prefill-backend` is fine.
-- Refused: `--spec mtp` (no head), `--profile` (not built). `--kv-cache int8` is built (spec 18e).
-  `--spec lookup` has nothing to run on: it needs verify lists, which only an MTP head
-  provides today.
-- Which attention matches the reference better is decided by the f32 judge (the MoE gates
-  are graded against an f32 reference, with a one-bf16-ulp near-tie rule, since routing
-  flips on near-ties): `flash` is the attention (the eager diagnostic arm, `B70_K2_ATTN=eager`, went with the
-  zero-config cleanup; the f32 judge had decided).
-
-**Relevant variables:** `B70_PREFILL_PROFILE` times K2's prefill phases but `b70-decode` does not
-print the table for K2 yet. `B70_KV_CACHE` does not apply to K2 (`--kv-cache`).
 
 ## Kolibri-1 (spec 20)
 

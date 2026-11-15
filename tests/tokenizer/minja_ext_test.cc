@@ -3,7 +3,7 @@
 //   minja_ext_test <tests/tokenizer>
 // minja_ext_cases.json is written by tools/tokenizer/dump_minja_ext.py (Jinja2 configured as
 // transformers' chat-template renderer). The last case is the chat_template capability probe:
-// a template that writes argument names between tags (K2-Horizon's <ifm|arg_key>) supports
+// a template that writes argument names between tags (<arg_key>NAME</arg_key>) supports
 // tool calls, so its tool-call history is rendered by the template, not polyfilled as JSON.
 #include <unistd.h>
 
@@ -58,7 +58,7 @@ int run_jinja_cases(const std::string& dir) {
 }
 
 // The probe in minja::chat_template's constructor decides supports_tool_calls; when it says
-// no, apply() rewrites every tool call into a JSON content blob. A template in K2's shape
+// no, apply() rewrites every tool call into a JSON content blob. A template in that shape
 // (arguments as an object, names between tags, a string `arguments` refused) must probe as
 // supporting them.
 void case_tool_call_probe() {

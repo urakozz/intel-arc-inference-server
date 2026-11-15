@@ -1,7 +1,6 @@
 #!/bin/bash
 # Spec 20e Task 4 (KL4): passkey retrieval for Kolibri-1 at its trained 262144 on TWO cards, ON THE BOX from
-# the repo root (opt-in; box queue row 28's r28.passkey) - tools/probe/k2_passkey.sh's shape carried to
-# Kolibri.
+# the repo root (opt-in; box queue row 28's r28.passkey).
 #   tools/probe/kolibri_passkey.sh [int8]      the int8 head (spec 9; b70-decode runs no other since the zero-config cleanup)
 # For each placement (0.05, 0.5, 0.95): tools/probe/passkey.py builds the prompt with Kolibri's tokenizer in
 # the oracle container (no BOS: Kolibri has none, spec 20 §1), b70-decode prefills it (20d's l0 prefill,

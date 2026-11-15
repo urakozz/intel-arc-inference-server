@@ -15,8 +15,8 @@
 
 // kolibri_prefill.cc - Kolibri-1's prefill chunk on one device (kolibri_prefill.h has the walk in one
 // table). Every binding site names the kernel it honours; argument orders are each __kernel's, in
-// src/kernels/kolibri/{kol_pf_moe,kol_pf_attn,kol_pf_linear,kol_prep,kol_moe}.cl and the reused sources
-// (prefill/pf_embed.cl, pf_prep.cl, pf_gemv_bf16.cl, pf_gemm.cl, pf_moe_gemm.cl, k2/k2_pf_linear.cl).
+// src/kernels/kolibri/{kol_pf_moe,kol_pf_attn,kol_prep,kol_moe}.cl and the reused sources
+// (prefill/pf_embed.cl, pf_prep.cl, pf_gemv_bf16.cl, pf_gemm.cl, pf_moe_gemm.cl, slab_dequant_int4.cl, slab_bf16.cl).
 namespace runtime::kolibri {
 namespace {
 
@@ -112,7 +112,7 @@ class Walk {
 
   // One attention linear: per slab the slab kernel then pf_gemm_T0 x [C][K] x slab [K][ns] into partials +
   // n0 at pitch pf_ld(N) - slabs of 1024 and one zero-padded tail.
-  //   int4 (layout 0): k2_pf_dequant_slab(w, scales, slab, n0, ns)   grid (ns / 16, K / 64)
+  //   int4 (layout 0): pf_int4_slab_dequant(w, scales, slab, n0, ns)   grid (ns / 16, K / 64)
   //   bf16 (tiled):    kol_pf_bf16_slab(w, slab, n0, ns)             grid (ns / 16, K / 8)
   void linear(const loader::DeviceWeight& w, const void* x) {
     const model::GemvShape& sh = w.shape;
@@ -125,7 +125,7 @@ class Walk {
     require(s_.slab.size() >= size_t(sh.K) * kPfSlab * 2, "the slab buffer is smaller than [K][1024]");
     const uint32_t ld = pf_ld(sh.N);
     require(s_.partials.size() >= size_t(kPfC) * ld * 4, "partials is smaller than [kPfC][pf_ld(N)]");
-    l0::Kernel& sk = i4 ? kc_(kk::pf_int4_slab_variant(sh.K, sh.N), "k2_pf_dequant_slab")
+    l0::Kernel& sk = i4 ? kc_(kk::pf_int4_slab_variant(sh.K, sh.N), "pf_int4_slab_dequant")
                         : kc_(kk::pf_bf16_slab_variant(sh.K, sh.N), "kol_pf_bf16_slab");
     for (uint32_t n0 = 0; n0 < sh.N;) {
       const uint32_t ns = pf_slab_width(sh.N, n0);

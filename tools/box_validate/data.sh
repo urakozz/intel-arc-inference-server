@@ -10,7 +10,7 @@
 #       The stages' NEEDS name these keys (tools/box_validate/stages.sh).
 #   tools/box_validate/data.sh resolve <repo id | snapshot dir>
 #       the snapshot directory the CLIs would load (refs/main for a repo id).
-# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, SNAP_DFLASH, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
+# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_ORNITH, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, SNAP_DFLASH, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
 #      A4_REF_DIR, ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
 set -u
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -82,30 +82,14 @@ case "${1:-}" in
     have oracle_ornith "oracle-out-ornith/ with router_logits.L* (spec 15a)" test -d oracle-out-ornith
     have oracle_ornith_mtp "oracle-out-ornith-mtp/ (spec 15a's MTP head dump: mtp_head_ornith_test, M1)" \
       test -d oracle-out-ornith-mtp
+    # Operator ruling 2026-10-23: the Ornith token gates' JUDGE - the f32 reference teacher-forced on
+    # the bf16 golden's tokens (tools/box_validate/f32_oracle.sh <data tree> ornith; tests/golden/golden_common.h).
     have oracle_ornith_f32 "oracle-out-ornith-f32/{prose,code,cjk}.golden.safetensors (the f32 judge, operator ruling 2026-10-23: --with r10.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32/$p.golden.safetensors || exit 1; done'
     have oracle_ornith_f32_i8head "oracle-out-ornith-f32-i8head/{prose,code,cjk}.golden.safetensors (the int8 head's quantisation-aware f32 judge: --with r10.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32-i8head/$p.golden.safetensors || exit 1; done'
     have oracle_ornith_f32_pfi8 "oracle-out-ornith-f32-pfi8/{prose,code,cjk}.golden.safetensors (the l0-int8 prefill's quantisation-aware f32 judge: --with r10.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32-pfi8/$p.golden.safetensors || exit 1; done'
-    have k2 "K2-Horizon int4 checkpoint ${SNAP_K2:-?} (spec 18b; hf download, 21.8 GB)" \
-      complete "${SNAP_K2:-/nonexistent}"
-    have oracle_k2 "oracle-out-k2/{prose,code,cjk}.{ids,golden.safetensors} (spec 18a's real-weight run: --with r14.oracle)" \
-      bash -c 'for p in prose code cjk; do test -s oracle-out-k2/$p.ids && test -s oracle-out-k2/$p.golden.safetensors || exit 1; done'
-    # Operator ruling 2026-10-23: the Ornith / K2 token gates' JUDGE - the f32 reference teacher-forced on
-    # the bf16 golden's tokens (tools/box_validate/f32_oracle.sh <data tree> ornith|k2; tests/golden/golden_common.h).
-    have oracle_k2_f32 "oracle-out-k2-f32/{prose,code,cjk}.golden.safetensors (the f32 judge: --with r14.oracle_f32)" \
-      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32/$p.golden.safetensors || exit 1; done'
-    have oracle_k2_f32_i8head "oracle-out-k2-f32-i8head/{prose,code,cjk}.golden.safetensors (the int8 head's quantisation-aware f32 judge: --with r14.oracle_f32)" \
-      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-i8head/$p.golden.safetensors || exit 1; done'
-    # Operator ruling 2026-10-29: the kv8 gates' judges (f32_oracle.sh k2-kv8 / k2-i8head-kv8).
-    have oracle_k2_f32_kv8 "oracle-out-k2-f32-kv8/{prose,code,cjk}.golden.safetensors (the int8 KV cache's quantisation-aware f32 judge: --with r14.oracle_f32)" \
-      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-kv8/$p.golden.safetensors || exit 1; done'
-    have oracle_k2_f32_i8head_kv8 "oracle-out-k2-f32-i8head-kv8/{prose,code,cjk}.golden.safetensors (int8 head and KV cache: --with r14.oracle_f32)" \
-      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-i8head-kv8/$p.golden.safetensors || exit 1; done'
-    # Operator ruling 2026-10-31 (round 2): the kv8 judge's bf16 twin, r21.golden's token-gate bar (f32_oracle.sh k2-kv8-twin).
-    have oracle_k2_bf16_kv8 "oracle-out-k2-bf16-kv8/{prose,code,cjk}.golden.safetensors (the kv8 judge's bf16 twin: --with r14.oracle_f32)" \
-      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-bf16-kv8/$p.golden.safetensors || exit 1; done'
     have kolibri "Kolibri-1 int4 checkpoint ${SNAP_KOLIBRI:-?} (spec 20b, decision 1 open; ~42.5 GB)" \
       complete "${SNAP_KOLIBRI:-/nonexistent}"
     # Spec 20c: Kolibri-1's golden sets (tools/box_validate/kolibri_oracle.sh <data tree> synth|real).
@@ -148,10 +132,6 @@ case "${1:-}" in
     # a key of its own, so r31's stages (the checkpoints alone) do not wait for them.
     have oracle_q4exp_synth_golden "oracle-out-q4exp-synth/{ours,intel}/q4exp_{short,4k,agentic}.{ids,golden.safetensors} (spec 21c: r32.oracle_synth - qwen4exp_oracle.sh synth)" \
       bash -c 'for f in ours intel; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-synth/$f/$p.ids && test -s oracle-out-q4exp-synth/$f/$p.golden.safetensors || exit 1; done; done'
-    have k2_a4_set "oracle-out-k2-a4/set/manifest.json (K2's tool-call set, spec 18d: --with r25.a4_ref, or tools/toolcall/a4_ref.sh k2 set)" \
-      test -s oracle-out-k2-a4/set/manifest.json
-    have oracle_k2_a4 "oracle-out-k2-a4/ with K2's set and 36 <name>.bf16.txt (18a's reference on it: --with r25.a4_ref)" \
-      bash -c 'test -s oracle-out-k2-a4/set/manifest.json && test "$(ls oracle-out-k2-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_kolibri_a4 "oracle-out-kolibri-a4/ with 36 <name>.bf16.txt (spec 20e KL4: the bf16 source's reference on tests/golden/toolcall-kolibri-de, made wherever 20b runs - tools/toolcall/a4_ref.sh kolibri ref - then --push-data)" \
       bash -c 'test "$(ls oracle-out-kolibri-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_ornith_a4 "oracle-out-ornith-a4/ with Ornith's set and 36 <name>.bf16.txt (spec 15e Task 3: tools/toolcall/a4_ref.sh ornith set / ref on the Mac, then --push-data)" \

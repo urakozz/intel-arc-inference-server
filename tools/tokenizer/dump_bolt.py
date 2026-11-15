@@ -32,8 +32,8 @@ snapshot at run time.
              (spec 25e: streaming reasoning is verbatim and held while force_nonempty_content is set; a call cut by the end of
              generation is dropped) the case says so.
 
-Every request object is KEY-SORTED before rendering (the server holds requests in nlohmann::json, whose objects are sorted -
-dump_k2.py's rule), so the comparison never grades key order.
+Every request object is KEY-SORTED before rendering (the server holds requests in nlohmann::json, whose objects are sorted),
+so the comparison never grades key order.
 
 Run in the oracle image with the 5.19.0 site first on PYTHONPATH (small files only; the Mac holds /tmp/b70-cpu-model.lock):
   docker run --rm --memory 8g --cpus 4 -v "$PWD:/ws" -v <oracle-out-q4exp/site>:/site:ro \\

@@ -2,7 +2,7 @@
 // names runtime/qwen4exp/qwen4exp_prefill.cc forms) for both dense arms (ours int4 / Intel's bf16), both attention
 // forms and both PLE scale forms, against the ones the build makes for it (passed as arguments: tests/CMakeLists.txt's
 // B70_Q4EXP_PREFILL_KERNELS, `kernel_<name>` - src/kernels/CMakeLists.txt's spec 21d block, plus the reused names other
-// blocks build: pf_gemm_T0, Qwen3.8's pf_gdn_*, 21c's q4_route_M1, K2's / Kolibri's 6144 x 2560 slab). Host only: a
+// blocks build: pf_gemm_T0, Qwen3.8's pf_gdn_*, 21c's q4_route_M1, Kolibri's 6144 x 2560 slab). Host only: a
 // name the walk would ask for that no CMake line builds fails here on the Mac, not at prepare_prefill on the box; and
 // nothing listed is dead. Also pins the prefill constants the walk and the planner share with the kernels' names.
 #include <cstdio>
@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(kq::pf_ple_variant(), std::string("q4_pf_ple_C2048"));
   CHECK_EQ(kq::pf_bf16_slab_variant(10240, 336), std::string("q4_pf_bf16_slab_K10240_N336"));
   CHECK_EQ(kq::pf_int4_slab_variant(2560, 16384), std::string("pf_dequant_slab_K2560_N16384_L0"));
-  CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560), std::string("k2_pf_dequant_slab_K6144_N2560"));
+  CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560), std::string("pf_int4_slab_K6144_N2560"));
   CHECK_EQ(kq::pf_qsa_variant(), std::string("q4_qsa_M2048_T512_W1024_PF"));
   CHECK_EQ(kq::pf_ple_gather_variant(true), std::string("q4_ple_gather_M2048_BF16_PF"));
   CHECK_EQ(kq::pf_hc_up_mix_variant(), std::string("q4_hc_up_mix_M2048_I_D512"));

@@ -35,7 +35,6 @@
 
 #include "cli/dflash_args.h"   // spec 19c: --spec dflash
 #include "cli/hardware_gate.h"
-#include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
 #include "cli/bolt_decode.h"   // spec 25c: Nemotron 3.5 Bolt (nemotron_h_omni over nemotron_h_puzzle)
 #include "cli/qwen4exp_decode.h"
@@ -884,13 +883,12 @@ int run(int argc, char** argv) {
                              "b70-decode --ids runs --spec mtp or --spec dflash");
   const bool fam_bolt = cli::bolt::is_bolt(path), fam_kol = !fam_bolt && cli::kolibri::is_kolibri(path);
   const bool fam_q4 = !fam_bolt && !fam_kol && cli::qwen4exp::is_qwen4exp(path);
-  const bool fam_k2 = !fam_bolt && !fam_kol && !fam_q4 && cli::k2::is_k2(path);
   const std::string model_name = fam_bolt ? "Nemotron 3.5 Bolt" : fam_kol ? "Kolibri-1" : fam_q4 ? "Qwen3.8-Flash-Next"
-                                 : fam_k2 ? "K2-Horizon" : "this model";
+                                 : "this model";
   const cli::Spec spec =
       fam_bolt ? cli::Spec{}
                : cli::resolve_spec(spec_arg, fam_q4 ? cli::SpecFamily::Qwen4Exp
-                                             : fam_kol || fam_k2 ? cli::SpecFamily::None : cli::SpecFamily::Qwen,
+                                             : fam_kol ? cli::SpecFamily::None : cli::SpecFamily::Qwen,
                                    model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
   const bool mtp_auto = mtp_on && spec.adaptive;
@@ -899,7 +897,7 @@ int run(int argc, char** argv) {
   // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash only in b70-serve
   // (spec 19 v3c).
   cli::check_tp(pipe, {spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
-                       fam_bolt || fam_kol || fam_q4 || fam_k2});
+                       fam_bolt || fam_kol || fam_q4});
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
   // rejection, so `b70_cli_reject` can grade them without a device - and so a
@@ -1065,52 +1063,6 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --parallel's refusals are argument-only, so they come before the device too.
   cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile});
-
-  // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
-  // own loader, list and planner); every flag validated above means the same there, and what
-  // K2 does not have yet is refused here by the stage that builds it. A path that does not
-  // resolve is not K2 - the Qwen flow below reports it, so every rejection keeps its order.
-  if (cli::k2::is_k2(path)) {
-    if (dflash.on)
-      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); K2-Horizon has none");
-    // Spec 18c: K2 prefills (--prefill / --prefill-length) on the l0 backend only - the h8 path (l0-int8)
-    // rotates in 1024-k Hadamard blocks and K2's hidden is 2560.
-    if ((have_prefill_len || prefill) && have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
-      throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), not ") +
-                               runtime::prefill_backend_name(pp_backend) +
-                               ": l0-int8's h8 linears need K in whole 1024-k Hadamard blocks and K2's "
-                               "hidden is 2560 - --prefill-backend l0, or "
-                               "omit it");
-    if (profile)
-      throw std::runtime_error("--profile is not built for K2-Horizon yet (spec 18b Task 4, the box's "
-                               "speed work); --bench times it");
-    if (mtp_on)
-      throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9); drop --spec mtp");
-    if (pipe.on())
-      throw std::runtime_error("K2-Horizon runs its own engine (runtime/k2); --parallel pp is built "
-                               "for the Qwen3.5 family's (spec 16b) - K2 across two cards is "
-                               "future work");
-    cli::k2::DecodeArgs ka;
-    ka.path = path;
-    ka.ids_path = ids_path;
-    ka.n = n;
-    ka.bench = bench;
-    ka.depth = depth;
-    ka.tg = tg;
-    ka.max_len = max_len_arg;
-    ka.reserve = mem_reserve;
-    ka.lm_head = lm_head;
-    ka.bench_prompt = kBenchPrompt;   // legal K2 ids too (all < 250624)
-    ka.bench_prompt_len = kBenchPromptLen;
-    ka.prefill = prefill;   // spec 18c
-    ka.pp = have_prefill_len;   // --prefill-length N already set depth = N above
-    ka.pp_chunk = pp_chunk;
-    ka.kv = kv_cache;       // spec 18e: rotkv at head_dim 128, planned and built in that form
-    if (pp_chunk > runtime::k2::kPfC)
-      throw std::runtime_error("--prefill-chunk " + std::to_string(pp_chunk) +
-                               " exceeds K2's prefill chunk " + std::to_string(runtime::k2::kPfC));
-    return cli::k2::run_decode<StdoutToStderr>(ka);
-  }
 
   // Everything that can be judged without the device or the 19 GB checkpoint is
   // judged first: failing on a typo'd --ids path after a 13-second load is a

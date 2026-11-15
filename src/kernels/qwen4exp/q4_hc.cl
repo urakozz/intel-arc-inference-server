@@ -29,7 +29,7 @@
 //   UP_INJECT 1 (_I): work-group 0 writes inj[m][s] = rne(2 x rne(sigmoid(rne(rne(d_{320+s}) / 4)))), the 4
 //             block_inject rows; the final mixer (_I absent) has none
 // Every sigmoid / SiLU is 1 / (1 + exp_torch(-x)) / x / (1 + exp_torch(-x)): exp_torch is Sleef's expf u10 step
-// for step (torch's Vectorized<float>::exp; k2_attn_eager.cl's), so this file and tests/kernels/qwen4exp_ref.h
+// for step (torch's Vectorized<float>::exp; tests/kernels/eager_attn_ref.h's), so this file and tests/kernels/qwen4exp_ref.h
 // (hc_combine_norm, hc_up_mix) agree bit for bit.
 //
 // Plain OpenCL C (no sub-group functions).

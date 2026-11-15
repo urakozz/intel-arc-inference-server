@@ -1,5 +1,5 @@
 // KolibriEngine::prefill and its accessors - the only KolibriEngine members not compiled into
-// b70_kolibri_runtime (kolibri_engine.h says why: K2Engine's arrangement, k2_prefill_engine.cc).
+// b70_kolibri_runtime (kolibri_engine.h says why).
 //
 // **One card:** each chunk is device 0's walk (kolibri_prefill.cc) on its immediate list, then a wait.
 // **Two cards** (spec 16b's pieces, as 20c Task 6 did for decode): device 0's list runs the embedding

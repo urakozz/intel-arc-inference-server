@@ -2,8 +2,7 @@
 // runtime/kolibri/kolibri_prefill.cc forms) for both attention arms and both attention forms, against
 // the ones the build makes for it (passed as arguments: tests/CMakeLists.txt's
 // B70_KOLIBRI_PREFILL_KERNELS, `kernel_<name>` - src/kernels/CMakeLists.txt's spec 20d block, plus the
-// reused names other blocks build: pf_gemm_T0, 20c's kol_route, K2's pf_res_fold SP0 and 6144 x 2560
-// slab). Host only: a name the walk would ask for that no CMake line builds fails here on the Mac, not at
+// reused names other blocks build: pf_gemm_T0, 20c's kol_route). Host only: a name the walk would ask for that no CMake line builds fails here on the Mac, not at
 // prepare_prefill on the box; and nothing listed is dead. Also pins the prefill constants the walk and
 // the planner share with the kernels' names.
 #include <cstdio>

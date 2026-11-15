@@ -56,7 +56,7 @@ struct TemplateAdapter : server::TemplateIface {
                      bool enable_thinking) override {
     return tmpl.render(messages, tools, enable_thinking);
   }
-  // Spec 18d: the request's chat_template_kwargs as template variables (K2-Horizon).
+  // Spec 18d: the request's chat_template_kwargs as template variables (Kolibri-1, Bolt).
   std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                                  bool enable_thinking, const nlohmann::json& kwargs) override {
     return tmpl.render(messages, tools, enable_thinking, kwargs);
@@ -111,8 +111,8 @@ struct EngineAdapter : server::EngineIface {
     }
     if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--spec mtp needs the model's MTP head loaded");
     if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --spec mtp: pick one proposer");
-    // TODO(spec 19e Task 2, engine part, box): a model without an MTP head (K2-Horizon, spec
-    // 18) has no verify lists today; it needs the M = 2..8 verify lists captured on their own.
+    // TODO(spec 19e Task 2, engine part, box): a model without an MTP head has no verify lists
+    // today; it needs the M = 2..8 verify lists captured on their own.
     if (lookup_ && !eng.mtp())
       throw std::runtime_error("--spec lookup needs the verify lists, which runtime::Engine "
                                "captures with the MTP head loaded (Qwen3.8); this model has none");

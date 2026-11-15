@@ -1261,7 +1261,6 @@ live in a directory of `src/kernels/` and are described in their source headers 
 | where | what |
 |---|---|
 | `moe.cl`, `prefill/pf_moe*.cl` | mixture-of-experts block of one decode step (route, gate‖up, down) and its prefill GEMMs: Ornith 1.5 (spec 15) |
-| `k2/` | K2-Horizon: spec 10's attention carried to head_dim 128, routed experts, value-expert attention (spec 18) |
 | `kolibri/` | Kolibri-1: sliding-window and full attention, experts (spec 20) |
 | `qwen4exp/` | Qwen3.8-Flash-Next: the block-selection attention, experts, per-layer embeddings, multi-token head (spec 21) |
 | `bolt/`, `bolt_kernels.h` | Nemotron 3.5 Bolt: the Mamba-2 mixer, MoE, and the full no-position-embedding attention `mg_attn*` (spec 25); also LFM2-family prep kernels |

@@ -274,7 +274,7 @@ std::string Server::render_prompt(const Request& r) {
   try {
     if (!r.chat) {
       prompt = r.prompt;
-    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon), 20e (Kolibri-1), 25e (Bolt)
+    } else if (opts_.chat_format.template_kwargs()) {   // spec 20e (Kolibri-1), 25e (Bolt)
       // Spec 25e: Bolt maps the top-level reasoning_effort onto its template switches (decision 13).
       const nlohmann::json kwargs = request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort);
       check_template_kwargs(opts_.chat_format, kwargs);
@@ -370,8 +370,8 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     emit(d);
   };
   // Chat: the text goes through the tool-call parser (spec 7 §3.5) of the model's format
-  // (spec 18d, server/chat_format.h). Qwen: with thinking on, the prompt ends in "<think>\n"
-  // and the output opens with reasoning; K2-Horizon: <ifm|think>\n and its own call syntax.
+  // (server/chat_format.h). Qwen: with thinking on, the prompt ends in "<think>\n"
+  // and the output opens with reasoning.
   std::unique_ptr<OutputParser> parser;
   if (r.chat) parser = make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools);
   const auto route = [&](const std::vector<Delta>& deltas) {

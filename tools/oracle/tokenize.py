@@ -33,7 +33,7 @@ def main() -> None:
     enc = sub.add_parser("encode")
     enc.add_argument("text_file")
     enc.add_argument("--bos", action="store_true",
-                     help="the tokenizer prepends its BOS (K2-Horizon, spec 18a: id 0); print the ids "
+                     help="the tokenizer prepends its BOS (a tokenizer whose post-processor adds one); print the ids "
                           "with it, after checking that BOS is the ONLY special token added")
     dec = sub.add_parser("decode")
     dec.add_argument("ids", nargs="+", type=int)

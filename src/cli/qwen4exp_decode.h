@@ -324,7 +324,7 @@ int run_decode(const DecodeArgs& a) {
               runtime::qwen4exp::q4_attn_name(eng.attention()),
               devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
-  // Spec 21d: the pp row, a second line as the Kolibri / K2 / Qwen paths print it (depth, chunk, ms, t/s).
+  // Spec 21d: the pp row, a second line as the Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)
     std::printf("| b70-decode %s qwen4exp L%u%s%s %s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha, eng.model().desc.layers,
                 a.int8_head() ? " int8-head" : "", eng.model().desc.forms.dense == model::Q4Form::Bf16 ? " bf16-dense" : "",

@@ -113,7 +113,6 @@ cite them where they matter. By topic:
 - [probe-small-m-gemm-2026-11-01](probes/probe-small-m-gemm-2026-11-01.md),
   [probe-verify-attn-2026-11-03](probes/probe-verify-attn-2026-11-03.md) - the verify step's GEMM and attention
 - [probe-dflash-kv8-verify-m8-2026-11-13](probes/probe-dflash-kv8-verify-m8-2026-11-13.md) - the 8-row verify on the int8 cache: no defect
-- [probe-eagle3-k2-2026-10-08](probes/probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon: no-go
 
 **Caching and two cards**
 
@@ -138,7 +137,7 @@ cite them where they matter. By topic:
 
 **Parked and dropped models**
 
-- [probe-k2-2026-10-05](probes/probe-k2-2026-10-05.md), [probe-kolibri-2026-10-05](probes/probe-kolibri-2026-10-05.md),
+- [probe-kolibri-2026-10-05](probes/probe-kolibri-2026-10-05.md),
   [probe-bolt-2026-10-21](probes/probe-bolt-2026-10-21.md), [probe-lilicorr-2026-10-23](probes/probe-lilicorr-2026-10-23.md),
   [lilicorr-exact-divergence-2026-11-07](probes/lilicorr-exact-divergence-2026-11-07.md) - parked
 - [probe-agnes-2026-10-03](probes/probe-agnes-2026-10-03.md) - dropped; kept as the record

@@ -150,8 +150,8 @@ Template::Template(const std::string& dir, const std::string& template_file) : i
   // Spec 15e: Ornith 1.5's chat_template.jinja (ornith-ai/Ornith-1.5-35B-A3B, Qwen3.5's
   // template: no reasoning-effort block, every assistant turn keeps its <think> block) has
   // one `is undefined` test, in render_content's null branch. minja knows `defined` but not
-  // `undefined`, so that test is spelled `is not defined` - the same predicate (since spec
-  // 18d's minja patch keeps Undefined apart from None, exactly Jinja's) - for this source
+  // `undefined`, so that test is spelled `is not defined` - the same predicate (since the b70
+  // minja patch keeps Undefined apart from None, exactly Jinja's) - for this source
   // only, keyed like the fallback above.
   static constexpr const char* kOrnithTemplateSha256 =
       "182e77dd83bd8e9ca818b240b82e28f243762cd5dda32e6eef327df7b1cd107e";

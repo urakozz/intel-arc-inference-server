@@ -1,7 +1,6 @@
 // Spec 16b: the pipeline-parallel planner on the host - the stages, the weights by device,
 // the per-device memory plan, the auto split and the auto length - for Qwen3.8 and
-// Ornith, and K2-Horizon's bytes per card through the descriptor-free balance (K2 has its
-// own engine; PP for it is future work). No device, no checkpoint.
+// Ornith, and the descriptor-free balance. No device, no checkpoint.
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -11,11 +10,8 @@
 #include <vector>
 
 #include "check.h"
-#include "loader/k2_layout.h"
-#include "model/k2_horizon.h"
 #include "model/model_desc.h"
 #include "runtime/buffer_sizes.h"
-#include "runtime/k2/k2_sizes.h"
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_plan.h"
 
@@ -236,34 +232,8 @@ void check_landing() {
   CHECK_EQ(q.total, size_t{82560});
 }
 
-// K2-Horizon: no ModelDesc and its own engine (runtime/k2), so PP does not apply to it in
-// 16b. Its bytes per card through the descriptor-free balance, for the record: every layer
-// full attention (KV per layer at the length), embed on device 0, lm_head + norm on device 1.
-void check_k2_balance() {
-  const model::K2Desc& d = model::k2();
-  const loader::K2ExpertBytes e = loader::k2_expert_bytes(d);
-  for (uint32_t len : {32768u, 131072u}) {
-    std::vector<size_t> layer(d.layers, 0);
-    for (uint32_t l = 0; l < d.layers; ++l) {
-      for (model::K2LinearId id : d.layer_linears(l)) layer[l] += loader::k2_linear_bytes(d, id);
-      layer[l] += d.norms_bytes();
-      if (!d.is_dense(l)) layer[l] += e.router + e.experts() + d.route_bytes();
-      layer[l] += 2 * runtime::k2::kv_layer_bytes(d, len);   // K and V
-    }
-    const loader::K2WeightBytes wb = loader::k2_weight_bytes(d, /*int8_head=*/true);
-    size_t sum = 0;
-    for (size_t b : layer) sum += b;
-    CHECK_EQ(sum - 2 * runtime::k2::kv_layer_bytes(d, len) * d.layers + wb.embed + wb.lm_head +
-                 size_t(d.hidden) * 4,
-             wb.total());
-    const runtime::PpBalance b =
-        runtime::pp_balance(layer, wb.embed, wb.lm_head + size_t(d.hidden) * 4);
-    CHECK_EQ(b.split, 24u);   // derived: 24 + 24 at both lengths (every layer holds KV)
-    std::printf("k2-horizon int8 head len %6u: split %2u (%u + %u layers), device 0 %.3f GB,"
-                " device 1 %.3f GB (weights + KV)\n",
-                len, b.split, b.split, d.layers - b.split, b.dev0 / 1e9, b.dev1 / 1e9);
-  }
-  // The balance itself: three equal layers and a heavy device 1 put two layers on device 0.
+// The descriptor-free balance: three equal layers and a heavy device 1 put two layers on device 0.
+void check_balance() {
   const runtime::PpBalance t = runtime::pp_balance({10, 10, 10}, 0, 15);
   CHECK_EQ(t.split, 2u);
   CHECK_EQ(t.dev0, size_t{20});
@@ -278,7 +248,7 @@ int main() {
   check_auto_splits();
   check_auto_len();
   check_landing();
-  check_k2_balance();
+  check_balance();
   std::printf("pipeline_plan_test: OK\n");
   return 0;
 }

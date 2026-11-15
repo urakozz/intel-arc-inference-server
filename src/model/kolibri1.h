@@ -8,8 +8,8 @@
 #include "model/qwen35.h"   // GemvShape, WeightKind, Fuse - the shared vocabulary, nothing else
 
 // Spec 20c: Aleph Alpha's Kolibri-1 (`Kolibri1ForCausalLM`, config.json model_type `kolibri1`)
-// as data - a third model BESIDE qwen3_5 and K2-Horizon (spec 20 §4: its own table, loader,
-// kernels and engine, K2's pattern). Every number of `kolibri1()` is the checkpoint's
+// as data - a third model BESIDE qwen3_5 (spec 20 §4: its own table, loader,
+// kernels and engine). Every number of `kolibri1()` is the checkpoint's
 // (Aleph-Alpha/Kolibri-1-BF16 config.json, index and shard headers; docs/probes/probe-kolibri-2026-10-05.md):
 //
 //   layers 50, every one MoE; `layer_types` full attention at 4, 9, ..., 49 (every 5th), the other
@@ -80,7 +80,7 @@ struct Kolibri1Desc {
   float rms_eps = 0;
   KolAttnForm attn = KolAttnForm::Int4;
   // The int4 arm's split-K (gemv.cl S; layout 0). PROVISIONAL - q||k||v S2 and o_proj S4 are
-  // copied from K2's measured-nearest cells (spec 18b) until Task 8's sweep.
+  // copied from the measured-nearest cells of a model of the same shapes until Task 8's sweep.
   uint32_t qkv_s = 0, oproj_s = 0;
 
   bool is_sliding(uint32_t l) const { return l % full_every != full_every - 1; }

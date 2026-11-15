@@ -34,11 +34,6 @@ The model follows config.json's model_type:
                     Qwen3_5MoeForCausalLM on its INT4 checkpoint dequantised by the repo's one
                     rule (15a: the engine's own weights, so a mismatch is the engine's, not the
                     quantisation's), greedy through its KV cache;
-  k2_horizon        K2-Horizon (spec 18d, K4): tools/oracle/k2_ref.py's port of
-                    modeling_k2_horizon.py, layer at a time, mode bf16 (bitwise the vendored
-                    model in bf16, eager attention), on the checkpoint given - the int4 one
-                    (dequantised, 18a's reference) or the bf16 original - greedy through its
-                    own cache;
   kolibri1          Kolibri-1 (spec 20e, KL4; `--model kolibri` says so and checks it):
                     tools/oracle/kolibri_ref.py's KolibriRef, layer at a time, mode bf16, on the
                     checkpoint given - the 156 GB bf16 source (the KL4 reference, wherever 20b
@@ -61,7 +56,7 @@ The model follows config.json's model_type:
                     renders reasoning on: 2048 new ids (a4_ref.sh). BOLT_LAYERS=N truncates as --layers N does;
                     BOLT_EXPERT_CACHE_GB=G keeps dequantised experts in an LRU across steps.
 The MoE paths stop after an EOS id of generation_config.json (kept, as HF generate keeps it)
-or --new-tokens ids (default 192; K2's A4 run uses 512: its replies open with reasoning), and
+or --new-tokens ids (default 192), and
 also write <out>/<name>.bf16.gap: each greedy step's top-1 minus top-2 logit (compare_ref.py).
 
 The MoE paths' batched mode (--batch N, or auto from the memory plan; default 1 = one scenario
@@ -183,7 +178,7 @@ GiB = 2 ** 30
 def mem_model(mtype: str, cfg: dict) -> dict:
     """The batched run's memory from config.json, in bytes - ESTIMATES, the dominant terms only:
       base           what stays whatever the batch: embed and head, the streamed layer and its
-                     prefetch, Ornith's shared expert buffers / K2's one layer of experts;
+                     prefetch, Ornith's shared expert buffers;
       transient(T)   the largest single-sequence forward's working set (a T-id prompt: the head's
                      [T, V] logits, eager attention's [heads, T, T] scores); sequences run one at
                      a time inside a pass, so one is live at a time;
@@ -272,20 +267,6 @@ def mem_model(mtype: str, cfg: dict) -> dict:
     heads, kvh = cfg["num_attention_heads"], cfg["num_key_value_heads"]
     hd = cfg.get("head_dim") or H // heads
     E, I = cfg["num_experts"], cfg["moe_intermediate_size"]
-    if mtype == "k2_horizon":           # k2_ref keeps K / V in fp32 tensors (bf16 values)
-        mlp_only = set(cfg.get("mlp_only_layers") or [])
-        step = cfg.get("decoder_sparse_step", 1) or 1
-        sparse = [i not in mlp_only and E > 0 and (i + 1) % step == 0 for i in range(L)]
-        mE = cfg.get("mova_num_experts", 0)
-        attn = 2 * heads * hd * H + kvh * hd * H + (heads * hd * H if cfg.get("attention_gate_func") else 0)
-        dense = [2 * (attn + (mE * H if mE else kvh * hd * H) + E * H + 3 * H * I * cfg.get("num_shared_experts", 0))
-                 if s else 2 * (attn + kvh * hd * H + 3 * H * cfg.get("intermediate_size", 0)) for s in sparse]
-        ex = 2 * (E * 3 * I * H + mE * kvh * hd * H)
-        return {"base": 2 * V * H * 2 + 2 * max(dense) + ex,
-                "transient": lambda T: T * V * 6 + heads * T * T * 4 * 4,
-                "per_seq": lambda T: T * L * (2 * kvh * hd * 4 + 8) + T * H * 4,
-                "dense": dense, "experts": [ex if s else 0 for s in sparse],
-                "what": f"KV fp32 in {L} layers"}
     types = cfg.get("layer_types") or []
     ns = types.count("sliding_attention")
     W = (cfg.get("sliding_window") or 0) if cfg.get("use_sliding_window", True) else 0
@@ -322,9 +303,8 @@ def mem_limit() -> int | None:
 
 
 # auto's most sequences in flight. Ornith's time is mostly per-sequence compute (a prompt forward
-# is minutes, and a pass of B prompts holds every other sequence for all B), so a few; K2's is
-# mostly the per-step dequant a pass shares, so more.
-MAX_AUTO_BATCH = {"qwen3_5_moe": 4, "k2_horizon": 8, "kolibri1": 4, "qwen4_exp": 4, "qwen4_exp_text": 4,
+# is minutes, and a pass of B prompts holds every other sequence for all B), so a few.
+MAX_AUTO_BATCH = {"qwen3_5_moe": 4, "kolibri1": 4, "qwen4_exp": 4, "qwen4_exp_text": 4,
                   "nemotron_h_omni": 4}  # Bolt: 74 B of weights, a pass mostly expert dequant; 4 keeps the state small
 
 
@@ -379,12 +359,12 @@ def batch_plan(mtype: str, cfg: dict, lens: list[int], n: int, cap: int | None, 
 
 
 def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int] = (0, 0), weights: str | None = None):
-    """-> a namespace for Ornith (qwen3_5_moe), K2-Horizon (k2_horizon) or Kolibri-1 (kolibri1;
+    """-> a namespace for Ornith (qwen3_5_moe) or Kolibri-1 (kolibri1;
     `device` is its reference's): generate(ids, n, eos[, on_row]) - the sequential path, one
     scenario at a time - and new_state() / step_many(items) - the layer-major batched path
-    (greedy_batched); `ref` is the reference object (K2Ref / KolibriRef / the streamed model).
+    (greedy_batched); `ref` is the reference object (KolibriRef / the streamed model).
     keep = (dense layers, expert layers) resident once dequantised (batch_plan's counts: the
-    first that many layers; expert layers among those with experts); Ornith and K2 only."""
+    first that many layers; expert layers among those with experts); Ornith only."""
     import torch
     from types import SimpleNamespace
 
@@ -478,23 +458,6 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
             return [lg[-1].float() for lg in major(items)]
         return SimpleNamespace(generate=generate, new_state=lambda: {"cache": None}, argmax=argmax,
                                step_many=step_many, lazy=model.bolt_lazy, ref=model, pf=model.bolt_pf)
-
-    if mtype == "k2_horizon":
-        K2 = load("k2_ref")
-        src = K2.Checkpoint(snap)
-        c = src.cfg
-        kd = range(min(keep[0], c.num_hidden_layers))
-        ke = [i for i in range(c.num_hidden_layers) if c.is_sparse(i)][:keep[1]]
-        ref = K2.K2Ref(c, src, mode="bf16", keep_dense=kd, keep_experts=ke)
-        print(f"K2-Horizon reference: k2_ref.py, {c.num_hidden_layers} layers, mode bf16, "
-              f"{'int4 g%d dequantised' % c.group_size if c.group_size else 'bf16'}; resident once read: "
-              f"dense {len(kd)} layers, experts {len(ke)} layers", flush=True)
-
-        def generate(ids, n, eos, on_row=None):
-            cache = ref.new_cache()
-            return greedy(lambda chunk, pos: ref.forward(chunk, pos, cache)[-1], ids, n, eos, watch(argmax, on_row))
-        return SimpleNamespace(generate=generate, new_state=ref.new_cache, argmax=argmax,
-                               step_many=ref.forward_many, ref=ref)
 
     OR = load("ornith_ref")
     tc = OR.text_config(snap)
@@ -602,7 +565,7 @@ def dense_build(snap: str, keep: str = "auto"):
     return model, tc, pf, plan
 
 
-MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "nemotron_h_omni")
+MOE_TYPES = ("qwen3_5_moe", "kolibri1", "qwen4_exp", "qwen4_exp_text", "nemotron_h_omni")
 # --model NAME -> the model_type(s) it must be (spec 21e: qwen4exp - the checkpoints say qwen4_exp, a text-only
 # export qwen4_exp_text; spec 25a: bolt; qwen: Qwen3.8, the dense path)
 MODELS = {"qwen": ("qwen3_5",), "kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "bolt": BOLT_TYPES}
@@ -708,7 +671,7 @@ def main() -> None:
     from transformers import GenerationConfig
 
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
-    # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+    # A tokenizer.json may carry truncation / padding (a quantised repo has shipped truncation at 2048 ids);
     # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
     tok.no_truncation()
     tok.no_padding()
@@ -743,7 +706,7 @@ def save(out: str, name: str, new: list[int], text: str, i: int, n: int, n_promp
     if gaps is not None:      # the MoE paths: each greedy step's top-1 minus top-2 logit (fp32, exact)
         write_atomic(os.path.join(out, f"{name}.{RUN}.gap"), " ".join("%.9g" % g for g in gaps) + "\n")
     write_atomic(os.path.join(out, f"{name}.{RUN}.txt"), text)
-    call = "<tool_call>" in text or "<ifm|tool_call>" in text or "<|tool_call_start|>" in text
+    call = "<tool_call>" in text or "<|tool_call_start|>" in text
     low = f", min gap {min(gaps):.3g}" if gaps else ""
     print(f"[{i}/{n}] {name}: {n_prompt} prompt ids, {len(new)} new, {time.time() - t:.0f}s, call={call}{low}",
           flush=True)
@@ -767,7 +730,7 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
     if mtype in BOLT_TYPES:     # spec 25 Decision 12: EOS {2, 11} for every form (an export's file may list 11 only)
         eos = set(BOLT_EOS)
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
-    # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+    # A tokenizer.json may carry truncation / padding (a quantised repo has shipped truncation at 2048 ids);
     # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
     tok.no_truncation()
     tok.no_padding()

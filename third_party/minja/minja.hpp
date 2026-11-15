@@ -70,7 +70,7 @@ private:
   std::shared_ptr<ObjectType> object_;
   std::shared_ptr<CallableType> callable_;
   json primitive_;
-  // b70 patch (spec 18d): Jinja's Undefined - a missing variable, key or index - is not None.
+  // b70 patch: Jinja's Undefined - a missing variable, key or index - is not None.
   // An undefined Value is null in every other respect (is_null() holds), so only the
   // `defined` test tells the two apart, as Jinja's does: `{"default": null}` is defined.
   bool undefined_ = false;
@@ -199,7 +199,7 @@ private:
 
 public:
   Value() {}
-  // b70 patch (spec 18d): see undefined_.
+  // b70 patch: see undefined_.
   static Value undefined() {
     Value v;
     v.undefined_ = true;
@@ -306,17 +306,17 @@ public:
   Value get(const Value& key) {
     if (array_) {
       if (!key.is_number_integer()) {
-        return Value::undefined();   // b70 patch (spec 18d): Undefined, as in Jinja
+        return Value::undefined();   // b70 patch: Undefined, as in Jinja
       }
       auto index = key.get<int>();
       return array_->at(index < 0 ? array_->size() + index : index);
     } else if (object_) {
       if (!key.is_hashable()) throw std::runtime_error("Unhashable type: " + dump());
       auto it = object_->find(key.primitive_);
-      if (it == object_->end()) return Value::undefined();   // b70 patch (spec 18d)
+      if (it == object_->end()) return Value::undefined();   // b70 patch
       return it->second;
     }
-    return Value::undefined();   // b70 patch (spec 18d)
+    return Value::undefined();   // b70 patch
   }
   void set(const Value& key, const Value& value) {
     if (!object_) throw std::runtime_error("Value is not an object: " + dump());
@@ -379,7 +379,7 @@ public:
     if (is_number()) return get<double>() != 0;
     if (is_string()) return !get<std::string>().empty();
     if (is_array()) return !empty();
-    // b70 patch (spec 18d): an empty mapping is falsy, as in Python (a callable is not a mapping).
+    // b70 patch: an empty mapping is falsy, as in Python (a callable is not a mapping).
     if (is_object() && !is_callable()) return !empty();
     return true;
   }
@@ -694,7 +694,7 @@ class Context : public std::enable_shared_from_this<Context> {
     virtual Value get(const Value & key) {
         if (values_.contains(key)) return values_.at(key);
         if (parent_) return parent_->get(key);
-        return Value::undefined();   // b70 patch (spec 18d)
+        return Value::undefined();   // b70 patch
     }
     virtual Value & at(const Value & key) {
         if (values_.contains(key)) return values_.at(key);
@@ -747,7 +747,7 @@ public:
     std::string get_name() const { return name; }
     Value do_evaluate(const std::shared_ptr<Context> & context) const override {
         if (!context->contains(name)) {
-            return Value::undefined();   // b70 patch (spec 18d)
+            return Value::undefined();   // b70 patch
         }
         return context->at(name);
     }
@@ -1411,7 +1411,7 @@ public:
               if (name == "mapping") return l.is_object();
               if (name == "iterable") return l.is_iterable();
               if (name == "sequence") return l.is_array();
-              if (name == "defined") return !l.is_undefined();   // b70 patch (spec 18d): None is defined
+              if (name == "defined") return !l.is_undefined();   // b70 patch: None is defined
               if (name == "true") return l.to_bool();
               if (name == "false") return !l.to_bool();
               throw std::runtime_error("Unknown type for 'is' operator: " + name);
@@ -1462,7 +1462,7 @@ public:
     }
 };
 
-// b70 patch (spec 18d): Jinja's `x is sameas y` / `x is not sameas y` (Python's identity).
+// b70 patch: Jinja's `x is sameas y` / `x is not sameas y` (Python's identity).
 // The values a template holds are JSON-shaped, so identity is decided where Python's is
 // well defined: True, False and None are singletons; nothing else is the same object here.
 class SameAsExpr : public Expression {
@@ -1647,7 +1647,7 @@ public:
             return Value(strip(str, chars, /* left= */ false, /* right= */ true));
           } else if (method->get_name() == "split" &&
                      (vargs.args.empty() || vargs.args[0].is_null())) {
-            // b70 patch (spec 18d): Python's str.split() / split(None): runs of whitespace
+            // b70 patch: Python's str.split() / split(None): runs of whitespace
             // (str.isspace: ASCII \t\n\v\f\r, \x1c-\x1f, space and the Unicode spaces)
             // separate, leading / trailing whitespace yields no empty parts.
             vargs.expectArgs("split method", {0, 1}, {0, 0});
@@ -1930,7 +1930,7 @@ private:
         auto str = parseString();
         if (str) return std::make_shared<Value>(*str);
       }
-      // b70 patch (spec 18d): `none` too - Jinja's lower-case literal (K2's template writes it).
+      // b70 patch: `none` too - Jinja's lower-case literal.
       static std::regex prim_tok(R"(true\b|True\b|false\b|False\b|None\b|none\b)");
       auto token = consumeToken(prim_tok);
       if (!token.empty()) {
@@ -2092,7 +2092,7 @@ private:
               auto identifier = parseIdentifier();
               if (!identifier) throw std::runtime_error("Expected identifier after 'is' keyword");
 
-              // b70 patch (spec 18d): `is sameas <value>`, the one test with an argument here.
+              // b70 patch: `is sameas <value>`, the one test with an argument here.
               if (identifier->get_name() == "sameas") {
                 auto arg = parseStringConcat();
                 if (!arg) throw std::runtime_error("Expected a value after 'is sameas'");
@@ -2971,7 +2971,7 @@ inline std::shared_ptr<Context> Context::builtins() {
     }
     return ns;
   }));
-  // b70 patch (spec 18d): Jinja's `replace` filter, `s | replace(old, new[, count])` (minja has
+  // b70 patch: Jinja's `replace` filter, `s | replace(old, new[, count])` (minja has
   // only the string method). Every occurrence, left to right, unless count is given.
   globals.set("replace", simple_function("replace", { "s", "old", "new", "count" }, [](const std::shared_ptr<Context> &, Value & args) -> Value {
     auto str = args.at("s").to_str();
@@ -2989,7 +2989,7 @@ inline std::shared_ptr<Context> Context::builtins() {
     out.append(str, pos, std::string::npos);
     return Value(out);
   }));
-  // b70 patch (spec 18d): Jinja's `dict` global (Python's dict): dict(), dict(mapping),
+  // b70 patch: Jinja's `dict` global (Python's dict): dict(), dict(mapping),
   // dict(iterable of [key, value] pairs), each with keyword items after. A later duplicate
   // key replaces the value and keeps the first position, as in Python.
   globals.set("dict", Value::callable([=](const std::shared_ptr<Context> &, ArgumentsValue & args) {
@@ -3169,7 +3169,7 @@ inline std::shared_ptr<Context> Context::builtins() {
         test_args.kwargs = args.kwargs;
       }
 
-      // b70 patch (spec 18d): Jinja's attribute getter - a dotted path whose all-digit parts
+      // b70 patch: Jinja's attribute getter - a dotted path whose all-digit parts
       // index (so rejectattr('0', ...) reads a pair's first element, as `| items` yields).
       const auto get_attr = [&attr_name](Value item) {
         size_t begin = 0;

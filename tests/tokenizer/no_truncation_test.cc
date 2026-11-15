@@ -1,10 +1,9 @@
 // tok::Tokenizer ignores a tokenizer.json's `truncation` and `padding` blocks: the engine
 // tokenises a whole prompt, always. The Rust `tokenizers` crate applies both on every encode
-// when the file sets them - and urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ's
-// tokenizer.json ships `"truncation": {"max_length": 2048, "direction": "Right", ...}` (a
-// calibration-time setting saved with the quantised repo), so before this every K2 prompt
-// past 2048 ids lost its tail - the question - with no error (the 2026-11-01 "K2 fails past
-// 2048 positions" passkey report; the engine itself was never at fault).
+// when the file sets them - and a quantised repo's tokenizer.json has shipped
+// `"truncation": {"max_length": 2048, "direction": "Right", ...}` (a calibration-time setting
+// saved with the export), so before this every prompt past 2048 ids lost its tail - the
+// question - with no error (a 2026-11-01 passkey report; the engine itself was never at fault).
 //
 // Device-free and data-free: a five-word WordLevel tokenizer.json written to a temp file,
 // with truncation at 4 ids and fixed padding to 16. Six words must come back as six ids.

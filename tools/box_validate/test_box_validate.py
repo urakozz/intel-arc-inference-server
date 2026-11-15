@@ -5,7 +5,7 @@ The JUnit / test-list logic, reuse.py's record / claim (a PASS kept while every 
 interleaved medians, the summary, the orchestrator's resume / redo / stop-the-line / needs /
 after rules and need_ok (remote.sh over a stub stage file, with a stand-in flock), the server
 rows' client (serve_run.sh + serve_client.py against a stand-in b70-serve: run, table,
-compare), long_ids.py, k2_oracle.sh's RAM guard, tok_diff.py, the driver's --list, --dry-run
+compare), long_ids.py, tok_diff.py, the driver's --list, --dry-run
 and selection (never printing the box address), and the registry's consistency. Runs on the
 Mac and on the box.
 """
@@ -298,7 +298,7 @@ class ReuseTest(Tmp):
         os.environ["ZE_AFFINITY_MASK"] = "0,1"
         self.assertEqual(self.claim(self.tree), {}, "two cards visible, recorded with whatever the box showed")
         del os.environ["ZE_AFFINITY_MASK"]
-        write(os.path.join(self.tree, "build/kernels/k.bin"), "K2")
+        write(os.path.join(self.tree, "build/kernels/k.bin"), "changed")
         self.assertEqual(self.claim(self.tree), {}, "a kernel binary")
 
     def test_same_binary_after_an_unrelated_change(self):
@@ -556,20 +556,13 @@ class DataTest(Tmp):
             for f in files:
                 write(os.path.join(snap, f), "")
         env = dict(os.environ, HF_HOME=self.p("hf"), SNAP_QWEN="o/full",
-                   SNAP_ORNITH="o/part", SNAP_K2="o/absent")
+                   SNAP_ORNITH="o/part")
         r = subprocess.run([sh, "resolve", "o/full"], capture_output=True, text=True, env=env)
         self.assertEqual(r.stdout.strip(), os.path.join(hub, "models--o--full", "snapshots", "abc"))
         r = subprocess.run([sh, "have"], capture_output=True, text=True, env=env, cwd=self.p("tree"))
         self.assertIn("HAVE_qwen=1", r.stdout)
         self.assertIn("HAVE_ornith=0", r.stdout)
-        self.assertIn("HAVE_k2=0", r.stdout)
-        self.assertIn("HAVE_oracle_k2=0", r.stdout)
         self.assertIn("HAVE_oracle_ornith_mtp=0", r.stdout)
-        for p in ("prose", "code", "cjk"):                  # oracle_k2: all three prompts complete
-            write(self.p("tree", "oracle-out-k2", p + ".ids"), "0 1\n")
-            write(self.p("tree", "oracle-out-k2", p + ".golden.safetensors"), "x")
-        r = subprocess.run([sh, "have"], capture_output=True, text=True, env=env, cwd=self.p("tree"))
-        self.assertIn("HAVE_oracle_k2=1", r.stdout)
         self.assertIn("HAVE_oracle_qwen=1", r.stdout)      # the link made above
 
 
@@ -1316,15 +1309,6 @@ class LongIdsAndOracleTest(Tmp):
         self.assertEqual(ids[:len(filler)], filler)                  # the file, then the file again
         self.assertEqual(ids[len(filler):2 * len(filler)][:100], filler[:100])
 
-    def test_k2_oracle_ram_guard(self):
-        if os.path.exists("/proc/meminfo"):
-            self.skipTest("a Linux box: the guard reads the real MemAvailable")
-        r = subprocess.run([os.path.join(HERE, "k2_oracle.sh"), self.p("data")], capture_output=True, text=True,
-                           env=dict(os.environ, K2_REF_MIN_GB="1"))
-        self.assertEqual(r.returncode, 77, r.stdout + r.stderr)
-        self.assertIn("SKIP_REASON k2_oracle: MemAvailable", r.stdout)
-        self.assertFalse(os.path.exists(self.p("data", "oracle-out-k2")))
-
 
 class TokDiffTest(Tmp):
     """tok_diff.py: two tokenizer.json files beyond their added tokens (row 16, r16.tokdiff)."""
@@ -1550,11 +1534,9 @@ class DriverTest(unittest.TestCase):
         self.assertIn("g0_compare.sh", out)
         self.assertIn("-j44", out)
         self.assertNotIn("--- r11.passkey262k", out)     # opt-in: not by default
-        self.assertNotIn("--- r14.oracle", out)
         self.assertNotIn("--- r6.passkey120k", out)
-        # rows 13 and 14 (spec 15d, 18b): R0 / K0 first, the no-checkpoint kernels before the gates
+        # row 13 (spec 15d): R0 / K0 first, the no-checkpoint kernels before the gates
         self.assertIn("--- r13.kernels", out)
-        self.assertIn("--- r14.k1", out)
         self.assertRegex(out, r"env B70_LONGCTX_TESTS=1 B70_TRACE_DIR=\S+ ctest")             # r6.mtp_long's variants
         self.assertIn("--spec mtp --spec-max 3 > ", out)                 # r6.greedy_long: b70-decode with MTP
         self.assertIn("probe_mtp_steps", out)
@@ -1572,27 +1554,11 @@ class DriverTest(unittest.TestCase):
         self.assertLess(order.index("r11.kernels"), order.index("r11.q2"))
         self.assertEqual(order[-1], "x.rest")
         for first, later in (("r13.host", "r13.kernels"), ("r13.kernels", "r13.prefill"), ("r13.kernels", "r13.gates"),
-                             ("r14.host", "r14.k1"), ("r14.k1", "r14.load"), ("r14.load", "r14.k3"),
-                             ("r14.k3", "r14.golden"), ("r12.d2", "r12.a4"),
-                             ("r14.cli", "r15.host"), ("r15.host", "r15.k1"), ("r15.k1", "r15.prefill"),
-                             ("r15.prefill", "r15.golden"), ("r15.golden", "r15.cli"), ("r15.cli", "r16.host"),
+                             ("r12.d2", "r12.a4"), ("r13.kernels", "r16.host"),
                              ("r16.host", "r16.kernels"), ("r16.kernels", "r16.mtp"), ("r16.mtp", "r16.m1"),
-                             ("r16.tokdiff", "r17.host"), ("r17.host", "x.rest")):
+                             ("r16.tokdiff", "x.rest")):
             self.assertLess(order.index(first), order.index(later), (first, later))
-        # row 21 (spec 18e): after rows 14 / 15, K0 first, K1 before the checkpoint twins
-        for first, later in (("r15.cli", "r21.host"), ("r21.host", "r21.k1"), ("r21.k1", "r21.k3"),
-                             ("r21.k3", "r21.golden"), ("r21.k1", "r21.prefill"), ("r21.prefill", "r21.golden_prefill"),
-                             ("r21.cli", "r22.host")):
-            self.assertLess(order.index(first), order.index(later), (first, later))
-        # row 25 (spec 18d's engine side): after rows 21 / 23, K0 first, the host and the refusals
-        # before the card, the snapshots and the server before the chat and K4
-        for first, later in (("r23.ornith", "r25.host"), ("r25.host", "r25.reject"),
-                             ("r25.reject", "r25.snapshot"), ("r25.snapshot", "r25.snapshot_kv8"),
-                             ("r25.serve", "r25.chat"), ("r25.chat", "r25.passkey"), ("r25.passkey", "r25.toolcall"),
-                             ("r25.toolcall", "x.rest")):
-            self.assertLess(order.index(first), order.index(later), (first, later))
-        for optin in ("r15.p0", "r15.speed", "r16.mtp_rows", "r16.passkey", "r16.benchy",
-                      "r16.a4", "r21.passkey", "r21.speed", "r25.a4_ref", "r25.a4", "r25.benchy",
+        for optin in ("r16.mtp_rows", "r16.passkey", "r16.benchy", "r16.a4",
                       # timed, opt-in since 2026-11-07 (the operator's ruling: the quiet-box session runs them)
                       "r2.cost", "r3.readme", "r8.cost", "r8.rows", "r11.speed", "r16.cost", "r22.s1", "r76.speed",
                       "r36.copy", "r36.zc", "r36.hostbw"):
@@ -1606,13 +1572,6 @@ class DriverTest(unittest.TestCase):
         # Ornith prefills since 15d and is served since 15e: nothing expects those refusals
         self.assertNotIn("printing /prefill of a mixture-of-experts model/", out)
         self.assertNotIn("spec 15e/", out)
-        # K2: b70-serve serves it since 18d (row 25) and refuses --spec mtp before the device; 18c's CLI
-        # rejects in row 15, 18b's in row 14
-        self.assertIn("--spec mtp --spec-max 1\n      (must exit non-zero without a crash, printing /K2-Horizon has no MTP head/)", out)
-        self.assertNotIn("is not served yet", out)
-        self.assertIn("--re '^cli_reject_mtp_k2$'", out)
-        self.assertIn("--re '^cli_reject_k2_prefill_length_int8$'", out)
-        self.assertNotIn("cli_reject_k2_prefill,", out)
         # row 16: the startup note that compared tokenizer and descriptor must stay silent for Ornith
         self.assertIn("note: tokenizer[.]json defines", out)
 
@@ -1621,21 +1580,10 @@ class DriverTest(unittest.TestCase):
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r11.kernels", "r11.q2", "r11.q5", "r11.memory",
                                  "r11.passkey120k"])
-        out = self.run_driver("--dry-run", "--only", "r14", "--with", "r14.oracle").stdout
-        order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r14.host", "r14.k1", "r14.load", "r14.k3", "r14.oracle",
-                                 "r14.golden", "r14.cli"])
-        self.assertIn("tools/box_validate/k2_oracle.sh $HOME/b70-inference-server", out)
         out = self.run_driver("--dry-run", "--only", "r13").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r13.host", "r13.kernels", "r13.prefill", "r13.gates", "r13.split",
                                  "r13.cli"])
-        out = self.run_driver("--dry-run", "--only", "r15", "--with", "r15.speed").stdout
-        order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r15.host", "r15.k1", "r15.prefill", "r15.split", "r15.golden",
-                                 "r15.cli", "r15.speed"])
-        self.assertIn("pp4096 'B70_GIT_SHA=", out)
-        self.assertNotIn("B70_K2_ATTN=eager", out)   # the eager arm went in the zero-config cleanup
         out = self.run_driver("--dry-run", "--only", "r16").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r16.host", "r16.kernels", "r16.mtp", "r16.m1", "r16.serve",
@@ -1643,42 +1591,6 @@ class DriverTest(unittest.TestCase):
         self.assertIn("build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode "
                       "tests/golden/prompts urakozz/Ornith-", out)
         self.assertIn("tools/box_validate/tok_diff.py", out)
-        out = self.run_driver("--dry-run", "--only", "r21", "--with", "r21.passkey").stdout
-        order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r21.host", "r21.k1", "r21.k3", "r21.golden",
-                                 "r21.prefill", "r21.split", "r21.golden_prefill", "r21.cli", "r21.passkey"])
-        # the registered names (tests/CMakeLists.txt's 18e block), each with the k2 and kv8 labels
-        for name in ("k2_kv8_kernels_test", "k2_decode_kv8_test", "k2_golden(_i8head)?_kv8_test",
-                     "k2_prefill_kv8_test", "prefill_split_k2_kv8_test",
-                     "k2_golden_prefill(_c16)?_kv8_test"):
-            self.assertIn("--re '^%s$' --label k2 --label kv8" % name, out)
-        self.assertIn("--depth 16 --tg 1 --kv-cache int8) && echo \"K2 max_len auto, int8 KV, int8 head: $n (derived 98304", out)
-        self.assertIn("tools/probe/k2_passkey.sh int8", out)
-        out = self.run_driver("--dry-run", "--only", "r21.speed").stdout
-        self.assertIn("--ratio int8-kv@32768/bf16-kv@32768", out)
-        self.assertIn("--depth 65536 --tg 256 --max-len 69632 --kv-cache int8'", out)
-        out = self.run_driver("--dry-run", "--only", "r17").stdout
-        order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r17.host"])
-        # row 25 (spec 18d's engine side): the default stages, then K4's A4 and the comparison rows
-        out = self.run_driver("--dry-run", "--only", "r25", "--with", "r25.a4_ref,r25.a4,r25.benchy").stdout
-        order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r25.host", "r25.reject", "r25.snapshot", "r25.snapshot_kv8",
-                                 "r25.serve", "r25.chat", "r25.passkey", "r25.toolcall", "r25.a4_ref", "r25.a4",
-                                 "r25.benchy"])
-        self.assertIn("--re '^(k2_serve_test|k2_server_test|toolcall_k2_test)$'", out)
-        self.assertIn("--re '^cli_reject_serve_(k2_spec_mtp|k2_lookup|k2_prefill_int8|pp)$'", out)
-        self.assertIn("--re '^k2_prefix_gpu(_split)?_test$' --label k2", out)
-        self.assertIn("--re '^k2_prefix_gpu_kv8_test$' --label k2", out)
-        self.assertIn("build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode "
-                      "tests/golden/prompts urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ --chat", out)
-        self.assertIn("MAX_LEN=32768 N_TARGET=31000 tools/probe/k2_passkey.sh bf16", out)
-        self.assertIn("SEEDED=1 tools/box_validate/serve_probe.sh urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ "
-                      "--kv-cache int8", out)
-        self.assertIn("tools/toolcall/a4_ref.sh k2 ref", out)
-        self.assertIn("N_NEW=512 tools/toolcall/engine_generate.sh", out)
-        self.assertNotIn("LM_HEAD=", out)
-        self.assertIn("score.py $HOME/", out)
         # row 26 (spec 20d, Kolibri-1 prefill): K0 and the host first, K1 before the synthetic gates, two
         # cards after one, the real checkpoint last; the speed rows opt-in
         out = self.run_driver("--dry-run", "--only", "r26", "--with", "r26.speed").stdout
@@ -2001,7 +1913,7 @@ class DriverTest(unittest.TestCase):
         with open(os.path.join(HERE, "stages.sh")) as f:
             gates = re.compile(re.search(r'^: "\$\{G0_BITWISE_RE:=(.*)\}"$', f.read(), re.M).group(1))
         self.assertEqual([t for t in pp_labelled_tests() if gates.search(t)], [], "a G0 bitwise gate that needs two cards")
-        labels = ["", "checkpoint", "pp", "checkpoint;pp", "tp", "checkpoint;tp", "ornith", "checkpoint;k2", "pp;kv8",
+        labels = ["", "checkpoint", "pp", "checkpoint;pp", "tp", "checkpoint;tp", "ornith", "checkpoint;kolibri", "pp;kv8",
                   "bolt", "pp;bolt", "checkpoint;golden;pp", "kv8;tp", "pp;ornith"]
         tests = [(f"t{i}_test", l.split(";") if l else []) for i, l in enumerate(labels)]
         lab = {n: set(l) for n, l in tests}
@@ -2009,7 +1921,7 @@ class DriverTest(unittest.TestCase):
         def old(excluded):
             return {n for n in lab if not lab[n] & excluded}
         for flags, suite_ex, rest_ex in (
-                ((), {"ornith", "kv8"}, set("ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp".split())),
+                ((), {"ornith", "kv8"}, set("ornith kv8 longctx kolibri qwen4exp dflash bolt lilicorr tp".split())),
                 (("--quick",), {"ornith", "kv8", "checkpoint"}, set("checkpoint bolt lilicorr tp".split()))):
             out = self.run_driver("--dry-run", "--only", "g0.suite,g0.suite_2card,x.rest,x.rest_2card", *flags).stdout
             one, two = (self.selection_of(out, s, tests) for s in ("g0.suite", "g0.suite_2card"))

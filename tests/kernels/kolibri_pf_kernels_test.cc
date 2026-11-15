@@ -4,7 +4,7 @@
 // runtime/kolibri/kolibri_prefill.cc binds (kernels::kolibri names), plus pf_gemm_T0_SILU for the dense
 // comparison. Written blind on the Mac (box queue row 26).
 //
-//   1. the slabs: k2_pf_dequant_slab at q||k||v 2560 x 7168 (the int4 arm) and kol_pf_bf16_slab at o_proj
+//   1. the slabs: pf_int4_slab_dequant at q||k||v 2560 x 7168 (the int4 arm) and kol_pf_bf16_slab at o_proj
 //      6144 x 2560 (1024 + 1024 + 512) exact; the bf16 o_proj through pf_gemm_T0 rows within cosine
 //      0.99999 of fp64 host sums;
 //   2. the grouped norm: pf_res_fold SP0 (m_count kPfC) + kol_norm_finish (M kPfC), and the sandwich:
@@ -26,7 +26,7 @@
 //      full at (pos, C) = (0, 2048), (2048, 2048), (30000, 2048), (60000, 2048); sliding at c0 = 0, 1000,
 //      4396 (wrapped), a tail chunk (1001, 300) and single rows (5000, 1), rows 0, 1, 7, 23, 511, 512, 513
 //      and C - 1; the EAGER build against eager_window (0.9999; the rounding points, not the sum order:
-//      spec 18 §11) and fp64 (0.999); a chunk split at a multiple of 64 bitwise (rows of (1000, 2048) ==
+//      the rounding-point rule) and fp64 (0.999); a chunk split at a multiple of 64 bitwise (rows of (1000, 2048) ==
 //      rows of (1064, 1984)), and replay bitwise.
 #include <algorithm>
 #include <cmath>
@@ -46,6 +46,7 @@
 #include "kernels/kolibri_ref.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/prep_ref.h"
+#include "kernels/slab_ref.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -169,10 +170,10 @@ void slabs(Dev& dv) {
     for (uint16_t& s : sc) s = common::f32_to_f16(r.uni(0.01f, 0.05f));
     l0::Mem dw = dv.up(words), ds = dv.up(sc), slab = dv.zeros(size_t(K) * kk::kPfSlab * 2);
     for (uint32_t n0 : {0u, 6144u}) {
-      dv.go(kk::pf_int4_slab_variant(K, N), "k2_pf_dequant_slab", kk::kPfSlab / 16, K / 64, 1,
+      dv.go(kk::pf_int4_slab_variant(K, N), "pf_int4_slab_dequant", kk::kPfSlab / 16, K / 64, 1,
             {PtrArg(dw.ptr()), PtrArg(ds.ptr()), PtrArg(slab.ptr()), arg_val(n0), arg_val(kk::kPfSlab)});
       CHECK(dv.rd<uint16_t>(slab, size_t(K) * kk::kPfSlab) ==
-            k2_pf_ref::dequant_slab(words.data(), sc.data(), K, N, n0, kk::kPfSlab));
+            slab_ref::dequant_slab(words.data(), sc.data(), K, N, n0, kk::kPfSlab));
     }
   }
   // bf16 o_proj: the slabs, then the linear through pf_gemm_T0 into partials [kC][2560]

@@ -20,7 +20,7 @@
 //                  {10240, 336} (one 512-column slab) + pf_gemm · q4_hc_up_mix _D512 (M = C)
 //   GDN layer      HC · qkv||z: 16 slabs (pf_dequant_slab int4 layout 0 | q4_pf_bf16_slab) + pf_gemm · a||b
 //                  pf_ab_proj (hidden 2560) · gdn_chunk_q4 (Qwen3.8's ten binaries, the tenth pf_gated_head_SIG) ·
-//                  out_proj 3 slabs (k2_pf_dequant_slab | q4_pf_bf16_slab) + pf_gemm · HC · the MoE
+//                  out_proj 3 slabs (pf_int4_slab_dequant | q4_pf_bf16_slab) + pf_gemm · HC · the MoE
 //   QSA layer      HC · q||gate||k||v 13 slabs + pf_gemm · the indexer bf16 slab {2560, 640} + pf_gemm (pitch 768) ·
 //                  pf_attn_prep_q16 _Q24KV2 (q / k (1 + w) norms, partial RoPE, every row's K / V at its position) ·
 //                  q4_qsa_prep _PF (M = C: the query heads, every block the chunk completes - its older raw keys from

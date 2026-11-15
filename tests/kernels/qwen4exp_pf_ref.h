@@ -44,7 +44,7 @@
 #include <vector>
 
 #include "common/bf16.h"
-#include "kernels/k2_ref.h"        // eager_softmax (torch's fp32 softmax)
+#include "kernels/eager_attn_ref.h"   // eager_softmax (torch's fp32 softmax)
 #include "kernels/pf_moe_ref.h"    // dequant_block (layout 1)
 #include "kernels/qwen4exp_ref.h"
 
@@ -250,7 +250,7 @@ inline void sparse_attn_fp64(const float* q, const uint16_t* kc, const uint16_t*
     }
 }
 // The reference's rounding points for one (row, head) over the list: s_i = rne(rne(q_b . k_i) x 1/16) (q_b the
-// bf16 q, one fma chain), p = torch's fp32 softmax rounded once (k2_ref::eager_softmax), o_d = rne(sum_i p_i v_i)
+// bf16 q, one fma chain), p = torch's fp32 softmax rounded once (eager_attn_ref::eager_softmax), o_d = rne(sum_i p_i v_i)
 // (one fma chain, i ascending) - q4ref::qsa_attn_eager's chain before the gate.
 inline std::vector<uint16_t> sparse_row_eager(const float* q, const uint16_t* kc, const uint16_t* vc,
                                               const uint32_t* list, uint32_t count, uint32_t h) {
@@ -262,7 +262,7 @@ inline std::vector<uint16_t> sparse_row_eager(const float* q, const uint16_t* kc
     for (uint32_t d = 0; d < HD; ++d) a = std::fma(rf(q[size_t(h) * HD + d]), f32(k[d]), a);
     s[i] = rf(rf(a) * q4ref::kAttnScale);
   }
-  k2_ref::eager_softmax(s.data(), count, p.data());
+  eager_attn_ref::eager_softmax(s.data(), count, p.data());
   std::vector<uint16_t> o(HD);
   for (uint32_t d = 0; d < HD; ++d) {
     float acc = 0.0f;

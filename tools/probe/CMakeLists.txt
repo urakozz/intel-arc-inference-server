@@ -273,28 +273,6 @@ foreach(row IN LISTS PGL_SHAPES)
 endforeach()
 add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
 
-# --- S1: the fused int4 dequant probe (2026-09-22) --------------------------
-# Pre-registration: docs/superpowers/specs/2026-09-22-fused-dequant-gemm-probe-design.md.
-# `probe_fused_dequant_gemm.cl` is a PROBE kernel: no runtime path binds
-# `pfd_gemm`, and neither `src/kernels/prefill/pf_gemm.cl` nor
-# `pf_dequant_slab.cl` is touched -- the probe's CONTROL runs those two
-# production binaries themselves, which is what makes the memcmp a gate rather
-# than a paraphrase. 256 GRF is mandatory for anything sharing pf_gemm's tile
-# (P2 measured a 33x loss without it) and is carried on the compile line, the
-# only place an AOT build honours it.
-set(PROBE_FUSED_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_fused_dequant_gemm.cl)
-add_ocloc_kernel(pfd_gemm_v1 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=1
-                 OPTIONS -cl-intel-256-GRF-per-thread)
-add_ocloc_kernel(pfd_gemm_v2 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=2
-                 OPTIONS -cl-intel-256-GRF-per-thread)
-
-add_executable(probe_fused_dequant_gemm probe_fused_dequant_gemm.cc)
-target_include_directories(probe_fused_dequant_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(probe_fused_dequant_gemm PRIVATE b70_prefill_host b70_l0)
-b70_target_kernel_dir(probe_fused_dequant_gemm)
-add_dependencies(probe_fused_dequant_gemm kernel_pfd_gemm_v1 kernel_pfd_gemm_v2
-                 kernel_pf_gemm_T0 kernel_pf_dequant_slab_K5120_N34816_L0)
-
 # --- probe_dpas_rate: the per-type DPAS issue rate (2026-09-22) -------------
 # Record: docs/probes/probe-dpas-rates-2026-09-22.md. `probe_dpas_rate.cl` is a PROBE
 # kernel -- no runtime path binds `dpas_rate`, no production file is touched,
@@ -368,39 +346,6 @@ get_property(W4A8_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
 get_property(W4A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
              PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_w4a8 kernel_pw4a8 ${W4A8_KERNELS} ${W4A8_PF_KERNELS})
-
-# --- probe_w4a8_gsweep: the W4A8 group-size sweep (2026-09-23) ---------------
-# Record: docs/probes/probe-w4a8-2026-09-23.md, the appended sweep section.
-#
-# `probe_w4a8_gsweep.cl` is a PROBE kernel file with four entry points --
-# `pw4a8s_g64`, `pw4a8s_g128`, `pw4a8s_g256`, `pw4a8s_gpc` -- one per scale
-# stride. They differ ONLY in how many 64-k chunks accumulate in int32 before
-# the fp32 rescale; the messages, the tile and the dpas are identical, and
-# `pw4a8s_g64` is bit-identical in output to `probe_w4a8.cl`'s `pw4a8_gemm`
-# (the harness checks all 71,303,168 words).
-#
-# No runtime path binds any of them, no production file is touched, and the
-# production `GROUP 64` in the dequant kernels stays where it is: the sweep is
-# a SPEED measurement made by synthesising coarser scale arrays on the host, not
-# a re-quantisation of anything.
-#
-# 256 GRF for the same reason `pw4a8` needs it: eight int32 accumulators and
-# eight fp32 accumulators live at once is 128 GRF of accumulator before a single
-# operand register, and the per-channel arm keeps both live over all 80 chunks.
-add_ocloc_kernel(pw4a8s SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w4a8_gsweep.cl
-                 OPTIONS -cl-intel-256-GRF-per-thread)
-
-add_executable(probe_w4a8_gsweep probe_w4a8_gsweep.cc)
-target_include_directories(probe_w4a8_gsweep PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(probe_w4a8_gsweep PRIVATE b70_prefill_host b70_runtime b70_loader
-                      b70_l0 b70_model)
-b70_target_kernel_dir(probe_w4a8_gsweep)
-get_property(W4A8S_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
-             PROPERTY BUILDSYSTEM_TARGETS)
-get_property(W4A8S_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
-             PROPERTY BUILDSYSTEM_TARGETS)
-add_dependencies(probe_w4a8_gsweep kernel_pw4a8 kernel_pw4a8s ${W4A8S_KERNELS}
-                 ${W4A8S_PF_KERNELS})
 
 # --- probe_w8a8: i8 x i8 k32 DPAS, per-channel int8 weights (2026-09-23) -----
 # Record: docs/probes/probe-w4a8-2026-09-23.md, the appended i8 x i8 section.

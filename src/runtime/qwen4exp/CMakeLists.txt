@@ -1,4 +1,4 @@
-# Spec 21b: Qwen3.8-Flash-Next's runtime, beside runtime::Engine, runtime/k2 and runtime/kolibri (spec 21 §6).
+# Spec 21b: Qwen3.8-Flash-Next's runtime, beside runtime::Engine and runtime/kolibri (spec 21 §6).
 #
 # b70_qwen4exp_plan: the weights' and the persistent state's sizes, the planner (--layers auto, --max-len auto)
 # and the split by bytes as device-free arithmetic (qwen4exp_sizes.cc) - host only, so

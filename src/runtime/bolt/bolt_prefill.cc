@@ -16,7 +16,7 @@
 
 // bolt_prefill.cc - Nemotron 3.5 Bolt's prefill chunk on one device (bolt_prefill.h has the walk in one table). Every binding
 // site names the kernel it honours; argument orders are each __kernel's, in src/kernels/bolt/{nb_pf_mamba,nb_pf_moe,
-// nb_pf_moe_gemm,nb_pf_prep,nb_prep,nb_moe}.cl and the reused sources (prefill/pf_dequant_slab.cl, k2/k2_pf_linear.cl,
+// nb_pf_moe_gemm,nb_pf_prep,nb_prep,nb_moe}.cl and the reused sources (prefill/pf_dequant_slab.cl, prefill/slab_dequant_int4.cl,
 // prefill/pf_gemm.cl, bolt/mg_pf_attn.cl).
 namespace runtime::bolt {
 namespace {
@@ -144,7 +144,7 @@ class Walk {
 
   // One int4 linear at ITS layout (the descriptor's {K, N, layout}) into `out` at pitch pad256(N): per 1024-column slab
   //   pf_dequant_slab(w, scales, slab, n0)                 grid (1024 / 16, K / 64)      whole slabs, either layout
-  //   k2_pf_dequant_slab(w, scales, slab, n0, ns)          grid (ns / 16, K / 64)        layout 0 with a tail: the last
+  //   pf_int4_slab_dequant(w, scales, slab, n0, ns)          grid (ns / 16, K / 64)        layout 0 with a tail: the last
   //                                                                                       slab pad256(N - n0) wide, zeros past N
   // then pf_gemm_T0: A [C][K] (pitch K) x slab [K][ns] into out + n0.
   void linear(const loader::DeviceWeight& w, const void* A, const l0::Mem& out) {

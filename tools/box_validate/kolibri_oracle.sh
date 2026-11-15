@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Spec 20c's Kolibri-1 golden sets, ON THE BOX CPU (k2_oracle.sh's shape): what kolibri_golden_test,
+# Spec 20c's Kolibri-1 golden sets, ON THE BOX CPU: what kolibri_golden_test,
 # kolibri_decode_test and kolibri_partial_test read.
 #   tools/box_validate/kolibri_oracle.sh <data tree> synth|real|synth-f32|real-f32
 #

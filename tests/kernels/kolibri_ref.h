@@ -17,7 +17,7 @@
 //   combine()       kol_moe_down's epilogue: Σ_j fp32(rne(down_j)) × w_j in ascending id (mul rounded,
 //                   then add), + fp32(rne(shared down)), one rounding; NOT folded into the residual
 //   gate_up() / down()   the whole MoE block over layout-1 blocks, the shared slot's own block included
-//   attention_eager()    kol_attn_eager.cl: k2_attn_eager's chain without the gate, over the row's
+//   attention_eager()    kol_attn_eager.cl: eager_attn_ref's chain without a gate, over the row's
 //                   keys [lo, hi] indexed from lo (the cached decode pass's row)
 //   attention()     decode attention in fp64 over [lo, hi] (a tolerance reference for flash)
 //   ring_row()      the sliding ring's key -> row map
@@ -33,7 +33,7 @@
 #include <vector>
 
 #include "common/bf16.h"
-#include "kernels/k2_ref.h"     // exp_torch, eager_softmax (torch's fp32 softmax), the eager block
+#include "kernels/eager_attn_ref.h"   // exp_torch, eager_softmax (torch's fp32 softmax), the eager block
 #include "kernels/moe_ref.h"    // f32 / rne / rf, silu, the layout-1 tile_dot / split_dot
 #include "kernels/prep_ref.h"   // res_fold (stage A, unchanged)
 
@@ -50,13 +50,13 @@ constexpr uint32_t kHidden = 2560, kHd = 128, kQHeads = 48, kKvHeads = 4, kExper
                    kRouterN = 512, kInter = 512, kWindow = 513, kRing = 4096, kG = 20;
 // The route row (kol_moe.cl R_*, kernels::kolibri::route).
 constexpr uint32_t kWords = 32, kIds = 0, kWeights = 8, kSel = 16, kNext = 24, kLogitMin = 25;
-constexpr float kAttnScale = k2_ref::kAttnScale;   // float(128 ** -0.5)
+constexpr float kAttnScale = eager_attn_ref::kAttnScale;   // float(128 ** -0.5)
 
 // --- the fixture's inputs and its hex arrays ------------------------------------------------
 // tools/oracle/kolibri_fixture.py val(): element i of input tensor t. coarse: (h % 17 - 8) x step;
 // fine: ((h >> 8) x 2^-23 - 1) x amp, rounded to bf16.
 inline float fixture_val(bool coarse, uint32_t t, uint32_t i, uint32_t seed, float step = 0.125f, float amp = 1.0f) {
-  const uint32_t h = k2_ref::lowbias32(k2_ref::lowbias32(seed * 3 + t) ^ i);
+  const uint32_t h = eager_attn_ref::lowbias32(eager_attn_ref::lowbias32(seed * 3 + t) ^ i);
   if (coarse) return float(int(h % 17) - 8) * step;
   const float f = (float(h >> 8) * 0x1p-23f - 1.0f) * amp;
   return rf(f);
@@ -295,7 +295,7 @@ inline std::vector<uint16_t> down(const uint32_t* ids, const float* w, const std
 // --- eager decode attention (kol_attn_eager.cl) ---------------------------------------------------
 // One q head over the keys [lo, hi] of kv head j in a [rows][kv_heads][128] cache read through
 // ring_row: s_i = rne(f32(rne(q·k)) · scale) for i = p - lo; torch's fp32 softmax over the row in
-// k2_ref::eager_softmax's order (8 lanes over i); P·V in `blk`-key blocks from i = 0.
+// eager_attn_ref::eager_softmax's order (8 lanes over i); P·V in `blk`-key blocks from i = 0.
 struct EagerHead {
   std::vector<float> s, p, o;
 };
@@ -307,8 +307,8 @@ inline EagerHead attention_eager(const float* q, const uint16_t* kv_k, const uin
   r.p.resize(L);
   r.o.assign(kHd, 0.0f);
   for (uint32_t i = 0; i < L; ++i)
-    r.s[i] = k2_ref::eager_score(q, kv_k + (size_t(ring_row(lo + i, sliding)) * kKvHeads + j) * kHd, kHd);
-  k2_ref::eager_softmax(r.s.data(), L, r.p.data());
+    r.s[i] = eager_attn_ref::eager_score(q, kv_k + (size_t(ring_row(lo + i, sliding)) * kKvHeads + j) * kHd, kHd);
+  eager_attn_ref::eager_softmax(r.s.data(), L, r.p.data());
   for (uint32_t d = 0; d < kHd; ++d) {
     float o = 0.0f;
     for (uint32_t b0 = 0; b0 < L; b0 += blk) {

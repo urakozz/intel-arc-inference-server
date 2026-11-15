@@ -1,9 +1,9 @@
 #pragma once
 // CPU references for spec 20d's Kolibri-1 prefill kernels (src/kernels/kolibri/kol_pf_moe.cl,
-// kol_pf_attn.cl, kol_pf_linear.cl) - each function with a twin on the device; edit the two together.
+// kol_pf_attn.cl, prefill/slab_bf16.cl) - each function with a twin on the device; edit the two together.
 // Built on 20c's tests/kernels/kolibri_ref.h (the decode chains: route, combine, eager attention,
-// ring_row), spec 15d's pf_moe_ref.h (the grouped layout, dequant_block) and 18c's k2_pf_ref.h (the
-// layout-0 slab), which it includes and does not change - so "prefill combines by decode's rule" is a
+// ring_row), spec 15d's pf_moe_ref.h (the grouped layout, dequant_block) and slab_ref.h (the
+// layout-0 and bf16 slabs), which it includes and does not change - so "prefill combines by decode's rule" is a
 // comparison between two functions of this directory (kolibri_pf_ref_test.cc), not a claim.
 //
 //   tmax()          the padded tile count of a C-row chunk: floor((C x 6 + 384 x 31) / 32) + ceil(C / 32)
@@ -23,7 +23,7 @@
 //                   keys read through the ring (row k & 4095) or the linear cache, the online softmax with
 //                   the -INF guard (a wholly masked tile adds exact zeros, even as a row's first tile)
 //   eager_window()  the reference's rounding points over the same keys: s = rne(f32(rne(q.k)) x 128^-0.5),
-//                   p = torch's fp32 softmax rounded once (k2_ref::eager_softmax), o = rne(Σ p v)
+//                   p = torch's fp32 softmax rounded once (eager_attn_ref::eager_softmax), o = rne(Σ p v)
 //
 // What is NOT bit-exact between these and the device: the grouped GEMMs' sums (DPAS order), the flash
 // softmax's exp / sum order (a cosine bar), and `exp` itself. The sort, gather, dequants, slab copy and
@@ -36,10 +36,10 @@
 #include <vector>
 
 #include "common/bf16.h"
-#include "kernels/k2_pf_ref.h"   // dequant_slab (layout 0, the int4 attention arm's slabs)
-#include "kernels/k2_ref.h"      // eager_score / eager_softmax (torch's), the fp64 attention
+#include "kernels/eager_attn_ref.h"   // eager_score / eager_softmax (torch's)
 #include "kernels/kolibri_ref.h"
 #include "kernels/pf_moe_ref.h"  // dequant_block (layout 1)
+#include "kernels/slab_ref.h"    // dequant_slab (layout 0, the int4 attention arm's slabs), bf16_slab
 
 namespace kolibri_pf_ref {
 
@@ -133,18 +133,7 @@ inline std::vector<uint16_t> dequant_dn(const uint32_t* dn, const uint32_t* sh_d
   return pf_moe_ref::dequant_block(e < kE ? dn + size_t(e) * kolibri_ref::down_block_words() : sh_dn, kI, kH);
 }
 
-// kol_pf_bf16_slab: columns [n0, n0 + ns) of a gemv_bf16-tiled K x N linear as bf16 [K][ns]; c with
-// n0 + c >= N exact zeros (the slab / tail contract of k2_pf_dequant_slab).
-inline std::vector<uint16_t> bf16_slab(const uint16_t* tiles, uint32_t K, uint32_t N, uint32_t n0, uint32_t ns) {
-  std::vector<uint16_t> out(size_t(K) * ns, 0);
-  const uint32_t K8 = K / 8;
-  for (uint32_t c = 0; c < ns; ++c) {
-    const uint32_t n = n0 + c;
-    if (n >= N) continue;
-    for (uint32_t k = 0; k < K; ++k) out[size_t(k) * ns + c] = tiles[((size_t(n / 16) * K8 + k / 8) * 8 + k % 8) * 16 + n % 16];
-  }
-  return out;
-}
+using slab_ref::bf16_slab;   // tests/kernels/slab_ref.h
 
 // kol_pf_moe_combine for every token of the chunk into mo [C][hidden]: `y` the down GEMM's sorted rows
 // (rne(Σ), pitch hidden), the route rows [C][32].

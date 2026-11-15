@@ -16,7 +16,7 @@
 // reason, spec 23 §5.2). Full layers: causal over the cache from 0, no window, no rotary (NoPE).
 //
 // **EAGER 0, the flash build** (the default; grid (ceil(C / RPW), KV_HEADS, GQA / HPW), 256 GRF): Kolibri's
-// kol_pf_attn.cl default path (spec 20d; 18c's k2_pf_attn walk) at Muse's heads and window, unchanged in structure:
+// kol_pf_attn.cl default path (spec 20d) at Muse's heads and window, unchanged in structure:
 // a sub-group owns 8 query rows of one head; its key tiles run from KT x floor(lo(p0) / KT) - an ABSOLUTE multiple of
 // KT, the window's first tile for the group's first row p0 (0 for a full layer) - up to its last row; RING % KT == 0,
 // so a tile is KT contiguous ring rows and no 2D block read crosses the ring's end. The fp32 online softmax runs with

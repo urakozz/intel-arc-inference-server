@@ -5,7 +5,7 @@
 // binaries); this is the full-layer half of that spec's twin (tests/kernels/muse_ref.h), line for line - no window, no
 // ring, no gate (Bolt's ones gate is exact).
 //
-//   attention_eager()  the reference's bf16 eager chain (k2_ref's score / softmax) over keys [0, pos]; P·V in
+//   attention_eager()  the reference's bf16 eager chain (eager_attn_ref's score / softmax) over keys [0, pos]; P·V in
 //                      eager_block-key blocks (the device's)
 //   attention_fp64()   the same in fp64 (flash's tolerance reference)
 #include <algorithm>
@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "common/bf16.h"
-#include "kernels/k2_ref.h"   // eager_score, eager_softmax (torch's fp32 softmax)
+#include "kernels/eager_attn_ref.h"   // eager_score, eager_softmax (torch's fp32 softmax)
 
 namespace mg_attn_ref {
 
@@ -44,8 +44,8 @@ inline EagerHead attention_eager_head(const uint16_t* q, const uint16_t* kc, con
   r.s.resize(L);
   r.p.resize(L);
   r.o.assign(kHd, 0.0f);
-  for (uint32_t i = 0; i < L; ++i) r.s[i] = k2_ref::eager_score(qf, kc + (size_t(i) * kKvHeads + j) * kHd, kHd);
-  k2_ref::eager_softmax(r.s.data(), L, r.p.data());
+  for (uint32_t i = 0; i < L; ++i) r.s[i] = eager_attn_ref::eager_score(qf, kc + (size_t(i) * kKvHeads + j) * kHd, kHd);
+  eager_attn_ref::eager_softmax(r.s.data(), L, r.p.data());
   for (uint32_t d = 0; d < kHd; ++d) {
     float o = 0.0f;
     for (uint32_t b0 = 0; b0 < L; b0 += blk) {

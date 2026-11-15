@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
   CHECK(has(base, "nb_pf_embed_gather_K4096_V131072"));
   CHECK(has(base, "nb_res_norm_M2048_K4096_W8_NF") && has(base, "nb_res_norm_M2048_K4096_W8_S1") &&
         has(base, "nb_res_norm_M2048_K4096_W8_S1_T1"));
-  CHECK(has(base, "k2_pf_dequant_slab_K4096_N18560") && has(base, "pf_dequant_slab_K8192_N4096_L1"));
+  CHECK(has(base, "pf_int4_slab_K4096_N18560") && has(base, "pf_dequant_slab_K8192_N4096_L1"));
   CHECK(has(base, "nb_pf_mamba_L64_W16_R16") && has(base, "nb_pf_cb_L64_DPAS"));
   CHECK(has(base, "nb_pf_moe_I2560_L1024_T9_TM32") && has(base, "nb_pf_moe_gemm_K1024_N2560_RELU2") &&
         has(base, "nb_pf_moe_gemm_K2560_N1024"));

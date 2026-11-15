@@ -129,7 +129,7 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
 Speculative decoding (the model's MTP head) and the prefix cache are on by default; the DFlash draft model is
 `--spec dflash --draft-model ...`. Ready-made recipes with their context sizes:
 [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
-Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
+Kolibri-1, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
 
 ## Flags
 

@@ -697,151 +697,6 @@ st_r13_speed() {
 }
 
 # ======================================================================================
-row 14 "spec 18b - K2-Horizon decode on one card (spec 18 §10, plan 18b)"
-rownote 14 "Load, K3, CLI and speed need the int4 checkpoint (SNAP_K2: hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ, 21.8 GB); K2 also needs oracle-out-k2, which the opt-in r14.oracle makes on the box CPU (--with r14.oracle, ~20 min). Without them those stages SKIP with 'missing data'."
-rownote 14 "Setting the near-tie tolerance from the gap distribution r14.oracle prints (k2_golden_test.cc proposes 1e-3) is an edit after it; r14.golden runs at the proposal, or at B70_K2_TIE_TOL when the driver's environment sets it."
-rownote 14 "K2's eager decode attention (B70_K2_ATTN=eager, spec 18 §10.1) and its stages (r14.golden_eager, r15.golden_eager, r21.golden_eager, the eager arm of r15.speed) went in the zero-config cleanup (operator 2026-11-06): flash is K2's attention."
-
-stage r14.host 14 default cpu - - "host: k2_horizon, k2_rope, k2_repack, k2_ref, k2_attn_eager_ref (the eager chain bitwise against torch), k2_plan, k2_variant_names, model_desc (the power-of-two expert-count refusal)"
-st_r14_host() {
-  run_tests '^(k2_horizon_test|k2_rope_test|k2_repack_test|k2_ref_test|k2_attn_eager_ref_test|k2_plan_test|k2_variant_names_test|model_desc_test)$'
-  finish
-}
-stage r14.k1 14 default card - - "K1, no checkpoint: k2_kernels_test (norm / prep bit-exact, routers incl. ties and the padded lanes, MoE and MoVA within 2 ulps, attention at 6 / 300 / 3000 keys with softplus gates on both sides of 28.85, replay; §9 the eager attention bitwise against k2_ref at 6 / 300 / 3000 / 4096 keys); cli_reject_mtp_k2 (18c retired _prefill / _pp: r15.k1 runs their successors; 18e retired cli_reject_k2_kv8 - K2 takes --kv-cache int8)"
-st_r14_k1() {
-  run_tests '^k2_kernels_test$' k2
-  run_tests '^cli_reject_mtp_k2$'
-  jgrab k1 '^k2_kernels_test$' 'ulp|bit-exact|bitwise|OK|PASS|FAIL'
-  finish
-}
-stage r14.load 14 default card k2 r14.k1 "k2_load_checkpoint_test and _i8head: every bucket = loader::k2_weight_bytes (21,801,501,440 / 21,160,906,496 B), read/token 3.786 / 3.145 GB, 0 unconsumed, readbacks (~5 min each)"
-st_r14_load() {
-  run_tests '^k2_load_checkpoint(_i8head)?_test$' k2
-  jgrab load 'k2_load_checkpoint' 'bytes|read/token|per token|unconsumed|OK|FAIL'
-  finish
-}
-stage r14.k3 14 default card k2 r14.load "K3: k2_decode_test and _i8head - 717 launches, plan == allocation, replay bitwise incl. route rows and KV"
-st_r14_k3() {
-  run_tests '^k2_decode(_i8head)?_test$' k2
-  jgrab k3 'k2_decode' '717|launch|plan|allocation|bitwise|OK|FAIL'
-  finish
-}
-stage r14.oracle 14 optin cpu k2,oracle_image - "18a's real-weight reference on the box CPU: tools/oracle/k2_ref.py run on the int4 checkpoint, 3 prompts x 32 ids + the routing dumps -> \$DATA/oracle-out-k2 (resumable per prompt, ~20 min; needs MemAvailable >= K2_REF_MIN_GB = 32), the gap distribution; then re-links oracle-out* and refreshes the data list for r14.golden"
-st_r14_oracle() {
-  chk "tools/box_validate/k2_oracle.sh $DATA" "the K2-Horizon reference run"
-  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(k2|oracle_k2)=' $STATE/have.env"
-  grab_all gap 'selection gap' 12
-  finish
-}
-stage r14.oracle_f32 14 optin cpu k2,oracle_k2,oracle_image - "the K2 token gates' judge (operator ruling 2026-10-23): tools/box_validate/f32_oracle.sh k2 - k2_ref.py --mode f32 --force <oracle-out-k2's tokens> per prompt -> \$DATA/oracle-out-k2-f32 and oracle-out-k2-f32-i8head (--lm-head int8, the *_i8head gates' judge), and the kv8 gates' -f32-kv8 / -f32-i8head-kv8 (--sim-kv8, operator ruling 2026-10-29) and the kv8 judge's bf16 twin oracle-out-k2-bf16-kv8 (--mode bf16 --gemm f32 --sim-kv8, r21.golden's bar: operator ruling 2026-10-31) (~2.5 min a prompt each, peak RSS ~17 GiB, 22 threads under /tmp/b70-cpu-model.lock; needs MemAvailable >= F32_REF_MIN_GB = 95); then re-links oracle-out* and refreshes the data list"
-st_r14_oracle_f32() {
-  chk "tools/box_validate/f32_oracle.sh $DATA k2" "the K2 f32 teacher-forced reference"
-  chk "tools/box_validate/f32_oracle.sh $DATA k2-i8head" "the K2 f32 reference through the int8 head"
-  # operator ruling 2026-10-29: the kv8 gates' judges, K / V through the int8 rotkv cache
-  chk "tools/box_validate/f32_oracle.sh $DATA k2-kv8" "the K2 f32 reference through the int8 KV cache"
-  chk "tools/box_validate/f32_oracle.sh $DATA k2-i8head-kv8" "the K2 f32 reference through the int8 head and KV cache"
-  # operator ruling 2026-10-31 (round 2): the kv8 judge's bf16 twin, the bar of r21.golden's token gates
-  chk "tools/box_validate/f32_oracle.sh $DATA k2-kv8-twin" "the K2 bf16 reference through the int8 KV cache (the twin)"
-  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_k2' $STATE/have.env"
-  finish
-}
-stage r14.golden 14 default card k2,oracle_k2,oracle_k2_f32,oracle_k2_f32_i8head r14.k3 "K2: k2_golden_test and _i8head - the tie-aware token gate JUDGED by the f32 teacher-forced reference oracle-out-k2-f32 (oracle-out-k2's bf16 golden printed beside it, operator ruling 2026-10-23); the routing gate a rate: differing sets no more often than the bf16 reference differs from f32 (MoE 0.2010, MoVA 0.1096; B70_K2_ROUTE_RATE overrides)"
-st_r14_golden() {
-  x "grep -h -E 'selection gap' oracle-out-k2/*.log 2>/dev/null || echo 'no gap lines in oracle-out-k2/*.log'"
-  run_tests '^k2_golden(_i8head)?_test$' k2 '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
-  jgrab k2-golden 'k2_golden' 'tie|routing|determined|differ|OK|PASS|FAIL'
-  finish
-}
-stage r14.cli 14 default card k2 r14.k1 "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32; --max-len auto -> ~49920 (the int8 head), derived; b70-serve <k2> --spec mtp --spec-max 1 refuses before the device (K2 has no MTP head; serving K2 is row 25's)"
-st_r14_cli() {
-  chk "ids=oracle-out-k2/prose.ids; [ -s \$ids ] || ids=tests/golden/prompts/prose.ids; echo \"ids: \$ids\"; timeout 1800 build/src/cli/b70-decode $SNAP_K2 --ids \$ids --n 32 | tr '\\n' ' '; echo" "b70-decode --ids --n 32"
-  chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2 --depth 16 --tg 1) && echo \"K2 max_len auto, int8 head: \$n\"" "--max-len auto, int8 head"
-  xfail "timeout 900 build/src/cli/b70-serve $SNAP_K2 --port $PORT --max-len 16384 --spec mtp --spec-max 1" 'K2-Horizon has no MTP head' "b70-serve --spec mtp --spec-max 1"
-  grab_all generate '^generate:|^ids: ' 4
-  grab_all auto '^K2 max_len auto' 2
-  finish
-}
-stage r14.speed 14 optin gpu k2 r14.k3 "Task 4: decode at depth 4096 / 16384 / 32768, tg 256, the int8 head (max_len 40960), interleaved, median of 3, against the derived roofline (~190 t/s weights-only, int8 head); BENCHMARKS 'K2-Horizon (spec 18)'"
-st_r14_speed() {
-  idle before
-  local d arms="" ratios=""
-  for d in 4096 16384 32768; do
-    arms="$arms d$d-int8 '$(bench_cmd "$SNAP_K2" --depth $d --tg 256 --max-len 40960)'"
-  done
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the K2 decode arms"
-  idle after
-  grab_all memory '^memory:' 6
-  grab_all ratio '^RATIO '
-  grab_all idle '^IDLE '
-  finish
-}
-
-# ======================================================================================
-row 15 "spec 18c - K2-Horizon prefill: grouped MoVA and MoE, flash attention at head_dim 128 (spec 18 §11, plan 18c)"
-rownote 15 "K1 (r15.k1) needs no checkpoint; K3, split and the CLI need SNAP_K2, the golden prefill tests oracle-out-k2 as well (--with r14.oracle makes it on the box CPU). Without them those stages SKIP with 'missing data'."
-rownote 15 "The PROPOSED bars (prefill KV against decode's fill: dense rows >= 0.999, median >= 0.9998, p01 >= 0.99; routing near-tie margin 2e-2, weights 1/32) are set from the distributions r15.prefill prints - an edit on a branch after the run."
-
-stage r15.host 15 default cpu - - "host: k2_pf_ref_test (the routing scatter with exact ties, tile bound, row independence, combines == decode's chains, slab tail, eager reference), k2_pf_variant_names_test, k2_plan_test (2392 launches, 0.797 GB scratch, auto 42752 with prefill)"
-st_r15_host() {
-  run_tests '^(k2_pf_ref_test|k2_pf_variant_names_test|k2_plan_test)$'
-  finish
-}
-stage r15.k1 15 default card - - "K1, no checkpoint: k2_pf_kernels_test (slab exact, linear cos 0.99999; norm / prep bit-exact; routers; MoE and MoVA grouped == dense bitwise - a 1-ulp difference is a finding; reversed chunk and replay bitwise; MoVA V rows cos 0.9999; flash attention against fp64 at 8 (pos, C) cases: >= 0.99999, gated within 1 ulp); cli_reject_k2_prefill_length_int8"
-st_r15_k1() {
-  run_tests '^k2_pf_kernels_test$' k2
-  run_tests '^cli_reject_k2_prefill_length_int8$'
-  jgrab k1-prefill '^k2_pf_kernels_test$' 'cos|ulp|bit-exact|bitwise|grouped|dense|OK|PASS|FAIL'
-  finish
-}
-stage r15.prefill 15 default card k2 r15.k1 "K3: k2_prefill_test and _i8head (2392 / chunk + 5 launches, plan == allocation, two immediate prefills bitwise, chunks of 64 bitwise; prefill KV and routes against decode's fill - the PROPOSED bars' distributions printed; tokens by A26's rule)"
-st_r15_prefill() {
-  run_tests '^k2_prefill(_i8head)?_test$' k2
-  jgrab k3-prefill '^k2_prefill(_i8head)?_test$' '2392|launch|plan|allocation|bitwise|cos|median|p01|tie|token|OK|FAIL'
-  finish
-}
-stage r15.split 15 default card k2 r15.k1 "prefill_split_k2_test: splits at multiples of 64 bitwise; the argument predicts every split bitwise - read a non-bitwise one before accepting the bars"
-st_r15_split() {
-  run_tests '^prefill_split_k2_test$' k2
-  jgrab split '^prefill_split_k2_test$' 'bitwise|cos|split|PASS|FAIL'
-  finish
-}
-stage r15.golden 15 default card k2,oracle_k2,oracle_k2_f32,oracle_k2_f32_i8head r15.prefill "K2 on prefill: k2_golden_prefill_test, _c16 (chunks of 16), _i8head - the tie rule judged by oracle-out-k2-f32 (the bf16 golden printed beside it, operator ruling 2026-10-23) and the routing rate as r14.golden"
-st_r15_golden() {
-  run_tests '^k2_golden_prefill(_c16|_i8head)?_test$' k2 '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
-  jgrab k2-golden-prefill 'k2_golden_prefill' 'tie|routing|determined|differ|OK|PASS|FAIL'
-  finish
-}
-stage r15.cli 15 default card k2 r15.prefill "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32 with and without --prefill - compared (a difference is judged by the tie rule, not failed here); --max-len auto with a prefill planned -> ~42752 (bf16 head, derived)"
-st_r15_cli() {
-  local p flag
-  for p in decode prefill; do
-    flag=""; [ "$p" = prefill ] && flag=" --prefill"
-    chk "ids=oracle-out-k2/prose.ids; [ -s \$ids ] || ids=tests/golden/prompts/prose.ids; echo \"ids: \$ids\"; timeout 1800 build/src/cli/b70-decode $SNAP_K2 --ids \$ids --n 32$flag > $STATE/$STAGE.$p.out" "b70-decode --ids --n 32$flag"
-  done
-  x "for f in decode prefill; do printf '%s: ' \$f; tr '\\n' ' ' < $STATE/$STAGE.\$f.out; echo; done; if cmp -s $STATE/$STAGE.decode.out $STATE/$STAGE.prefill.out; then echo 'PREFILL ids identical to the decode-only run'; else echo 'PREFILL ids differ from the decode-only run: judge the first difference by the tie rule'; fi"
-  chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2 --prefill-length 256 --tg 1) && echo \"K2 max_len auto, prefill planned, int8 head: \$n\"" "--max-len auto with a prefill planned"
-  grab_all prefill-ids '^PREFILL ids' 2
-  grab_all auto '^K2 max_len auto' 2
-  finish
-}
-stage r15.speed 15 optin gpu k2 r15.prefill "Task 3: pp4096 / pp16384 / pp32768 then tg256 (max_len 40960), interleaved, median of 3 - BENCHMARKS 'K2-Horizon (spec 18)' prefill rows (derived pp4096 ~3,400 t/s)"
-st_r15_speed() {
-  idle before
-  local n arms="" ratios=""
-  for n in 4096 16384 32768; do
-    arms="$arms pp$n '$(bench_cmd "$SNAP_K2" --prefill-length $n --tg 256 --max-len 40960)'"
-  done
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the K2 prefill arms"
-  idle after
-  grab_all memory '^memory:' 6
-  grab_all ratio '^RATIO '
-  grab_all idle '^IDLE '
-  finish
-}
-
-# ======================================================================================
 row 16 "spec 15e - Ornith 1.5 served: template, tool calls, the MoE MTP head (spec 15 §12, plan 15e)"
 rownote 16 "Everything after r16.kernels needs the int4 checkpoint (SNAP_ORNITH, 15a) and should follow rows 10 and 13; mtp_head_ornith_test (M1) also needs 15a's oracle-out-ornith-mtp/. Without them those stages SKIP with 'missing data'."
 rownote 16 "Since spec 15 §13 Ornith's greedy argmax masks from 248077, the int4 checkpoint's tokenizer.json count (Qwen3.8's argmax_stage1_M{1..4}; the _V248070 binaries stay built, unbound), so b70-serve's startup note comparing the two does not fire for Ornith: r16.serve checks it is absent. Its a||b is int4 (gemv_M{1..4}_K2048_N128_S1_L1: the tests that bind them fail when one is not built)."
@@ -903,40 +758,25 @@ st_r16_prefix() {
 # Operator ruling 2026-10-29: the f32 references of the gates f32_oracle.sh's golden prompts do not cover. The
 # forced contexts are the engine's own (tests/golden/forced_judge.h): r16.forced_dumps runs the tests with
 # B70_DUMP_FORCED, r16.forced_refs runs the f32 reference on each context (tools/box_validate/f32_refs.sh) and the
-# MTP head's and the 2600-id split prompt's references; the gates (r13.split, r16.m1, r16.prefix, r15.prefill,
-# g0.suite's k2_prefix_gpu) then judge against them, each falling back to its old rule while a file is missing.
-stage r16.forced_dumps 16 optin card ornith,k2 r16.kernels "the forced contexts of the f32-judged gates (operator ruling 2026-10-29): prefix_gpu_test <ornith> x 3, k2_prefix_gpu_test x 2, k2_prefill_test (both heads, and over the int8 cache) with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/"
+# MTP head's and the 2600-id split prompt's references; the gates (r13.split, r16.m1, r16.prefix) then judge against them, each falling back to its old rule while a file is missing.
+stage r16.forced_dumps 16 optin card ornith r16.kernels "the forced contexts of the f32-judged gates (operator ruling 2026-10-29): prefix_gpu_test <ornith> x 3 with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/"
 st_r16_forced_dumps() {
   local D="$DATA/oracle-forced-dumps"
-  x "mkdir -p $D/ornith-prefix $D/k2-prefix $D/k2-prefill $D/k2-prefill-i8head $D/k2-prefill-kv8"
+  x "mkdir -p $D/ornith-prefix"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1 0 3"
-  x "B70_DUMP_FORCED=$D/k2-prefix timeout 1800 build/tests/k2_prefix_gpu_test $SNAP_K2 tests/golden/prompts"
-  x "B70_DUMP_FORCED=$D/k2-prefix timeout 1800 build/tests/k2_prefix_gpu_test $SNAP_K2 tests/golden/prompts 0 1"
-  x "B70_DUMP_FORCED=$D/k2-prefill timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all"
-  x "B70_DUMP_FORCED=$D/k2-prefill-i8head timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all int8"
-  # operator rulings 2026-10-29 / 2026-10-31: k2_prefill_kv8_test's section 6 over the int8 cache (r21.prefill)
-  x "B70_KV_CACHE=int8 B70_DUMP_FORCED=$D/k2-prefill-kv8 timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all"
   chk "ls $D/*/*.prompt.ids | wc -l" "the dumped contexts"
   finish
 }
-stage r16.forced_refs 16 optin cpu ornith,k2,oracle_image r16.forced_dumps "the f32 references of the forced contexts, the Ornith MTP head (M1) and long32k[0, 2600) for prefill_split (f32 and bf16) - tools/box_validate/f32_refs.sh under /tmp/b70-cpu-model.lock, ~3-15 min a context (operator ruling 2026-10-29)"
+stage r16.forced_refs 16 optin cpu ornith,oracle_image r16.forced_dumps "the f32 references of the forced contexts, the Ornith MTP head (M1) and long32k[0, 2600) for prefill_split (f32 and bf16) - tools/box_validate/f32_refs.sh under /tmp/b70-cpu-model.lock, ~3-15 min a context (operator ruling 2026-10-29)"
 st_r16_forced_refs() {
   local D="$DATA/oracle-forced-dumps"
   chk "tools/box_validate/f32_refs.sh $DATA ornith-mtp" "the Ornith MTP head's f32 M1 rows"
   chk "tools/box_validate/f32_refs.sh $DATA split ornith tests/golden/prompts/long32k.ids 2600 $DATA/oracle-out-ornith-split/long32k-2600" "long32k[0, 2600) in f32 and bf16"
   chk "tools/box_validate/f32_refs.sh $DATA forced ornith $D/ornith-prefix" "the Ornith prefix contexts"
-  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefix" "the K2 prefix contexts"
-  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill" "the K2 prefill context"
-  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill-i8head -i8head --lm-head int8" "the K2 prefill context, int8 head"
   # Operator ruling 2026-10-31: each judge's bf16 twin (the bar of the near-miss gates), --gemm f32 on this CPU.
   chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced ornith $D/ornith-prefix '' --gemm f32" "the Ornith prefix contexts' bf16 twins"
-  chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefix '' --gemm f32" "the K2 prefix contexts' bf16 twins"
-  chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill '' --gemm f32" "the K2 prefill context's bf16 twin"
-  # the int8 cache's prefill context: its kv8-aware judge and bf16+kv8 twin (k2_ref.py --sim-kv8)
-  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill-kv8 -kv8 --sim-kv8" "the K2 kv8 prefill context"
-  chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill-kv8 -kv8 --gemm f32 --sim-kv8" "the K2 kv8 prefill context's bf16 twin"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   finish
 }
@@ -1007,21 +847,10 @@ st_r16_a4() {
 }
 
 # ======================================================================================
-row 17 "spec 18d host side - K2-Horizon's template, tokenizer, tool calls and server dispatch (spec 18 §12, plan 18d)"
-rownote 17 "No device code: G0's g0.sha is the 'no kernel touched' check. Since 18d's engine side (row 25) b70-serve serves K2; r14.cli checks its --spec mtp refusal instead of the old one."
-rownote 17 "The engine half of 18d (K2Engine behind b70-serve, KV-only prefix snapshots, the greedy chat through the server = b70-decode, K4, the comparison rows) is row 25; it follows rows 14, 15 and 21 on the card."
-stage r17.host 17 default cpu - - "the 18d host tests: template_k2_test (18 lists byte-identical, the vendored tests/tokenizer/k2/), toolcall_k2_test, k2_server_test, minja_ext_test (the minja patches against Jinja2), k2_tokenizer_test (K2's tokenizer.json from the int4 snapshot in the HF cache, or B70_K2_TOKENIZER_JSON; SKIP without)"
-st_r17_host() {
-  run_tests '^(template_k2_test|k2_tokenizer_test|toolcall_k2_test|k2_server_test|minja_ext_test)$'
-  jgrab k2-tokenizer '^k2_tokenizer_test$' 'SKIP|vocab|corpus|digest|OK|FAIL'
-  finish
-}
-
-# ======================================================================================
 row 18 "compressed-tensors symmetric pack-quantized loader (branch ct-sym-loader; spec 20 §9 as built, docs/13)"
-stage r18.host 18 default cpu - - "host: ct_loader_test (exact repack g64 / g128 x f16 / bf16, the note, the refusals, the real configs), quant_test, ornith_repack_test and k2_repack_test (compressed-tensors MoE layer and K2 checkpoint == the GPTQ bytes)"
+stage r18.host 18 default cpu - - "host: ct_loader_test (exact repack g64 / g128 x f16 / bf16, the note, the refusals, the real configs), quant_test, ornith_repack_test (compressed-tensors MoE layer == the GPTQ bytes)"
 st_r18_host() {
-  run_tests '^(ct_loader_test|quant_test|ornith_repack_test|k2_repack_test)$'
+  run_tests '^(ct_loader_test|quant_test|ornith_repack_test)$'
   finish
 }
 stage r18.g64 18 default card qwen,oracle_qwen - "the g64 checkpoint unchanged through the reworked classify / consumed sets: load_checkpoint_test (0 unconsumed, no compressed-tensors note) and golden_gate_test"
@@ -1048,97 +877,14 @@ st_r19_load() {
 }
 
 # ======================================================================================
-row 21 "spec 18e Task 1 - K2-Horizon's int8 KV cache, rotkv at head_dim 128 (--kv-cache int8; spec 18 §13, plan 18e)"
-rownote 21 "After rows 14 and 15: each GPU stage waits for its bf16 sibling's PASS in this state (r14.k1 / r15.k1, r14.k3, r14.golden, r15.prefill, r15.split, r15.golden). The twins need SNAP_K2, the golden ones oracle-out-k2 as well (--with r14.oracle makes it on the box CPU); without them those stages SKIP with 'missing data'."
-rownote 21 "K0's binary half is G0's g0.sha: a pre-existing binary that differs fails G0 and stops the line. k2_moe.cl's pre-18e binaries are compared only against a baseline that builds them: --baseline 0f13512 (main just before 18e)."
-rownote 21 "Review Focus 1 (tools/oracle/kv8_k2_repeat.sh: 12a's probe on K2's real weights, Mac or box CPU, ~4-8 h) is not a stage; the K2 int8 tolerances (PROPOSED in k2_kv8_kernels_test) are re-derived from it, so r21.k1 runs at the proposals. A4 with int8 KV needs 18d's K2 A4 tooling (plan 18e): not built."
-rownote 21 "Passkey (r21.passkey) and speed (r21.speed) are opt-in; speed is a record with no bar - int8 against bf16 KV at depth 4096 / 32768 (both fit at max_len 40960), int8 alone at 65536 (max_len 69632: bf16 KV holds 46592)."
-stage r21.host 21 default cpu - - "host: kv8_test (hd128: torch's hadamard(128, 0) signs, the rotations against fp64), k2_kv8_ref_test (the flash epilogue's FWHT decomposition == unrotate bitwise, the writer, MoVA's mix quantised after the combine), k2_plan_test (the int8 auto lengths), k2_kv8_variant_names_test (every int8 binary the walks bind is built, nothing dead)"
-st_r21_host() {
-  run_tests '^(kv8_test|k2_kv8_ref_test|k2_plan_test|k2_kv8_variant_names_test)$'
-  finish
-}
-stage r21.k1 21 default card - r14.k1,r15.k1 "K1, no checkpoint: k2_kv8_kernels_test - the writers (decode, prefill, dense and MoVA-staged) bitwise k2_kv8_ref, the staged MoVA row bitwise the bf16 build's V row, decode flash within 2 bf16 ulps of the fp64 int8 attention (6 / 300 / 3000 keys) + replay, eager bitwise past softplus's threshold (6 / 300 / 3000 / 4096), prefill flash default >= 0.9999 / eager >= 0.999 against fp64 at depths 1 .. 32048, gated within 1 ulp (PROPOSED bars)"
-st_r21_k1() {
-  run_tests '^k2_kv8_kernels_test$' 'k2 kv8'
-  jgrab k1-kv8 '^k2_kv8_kernels_test$' 'bitwise|ulps|worst|bar|differ|OK|FAIL'
-  finish
-}
-stage r21.k3 21 default card k2 r21.k1,r14.k3 "K3 on the int8 cache: k2_decode_kv8_test (B70_KV_CACHE=int8) - 717 launches, plan == allocation with the int8 KV term, replay bitwise incl. route rows, int8 KV rows and scales"
-st_r21_k3() {
-  run_tests '^k2_decode_kv8_test$' 'k2 kv8'
-  jgrab k3-kv8 '^k2_decode_kv8_test$' '717|KV \(B70_KV_CACHE\)|plan|allocation|bitwise|OK|FAIL'
-  finish
-}
-stage r21.golden 21 default card k2,oracle_k2,oracle_k2_f32_kv8,oracle_k2_f32_i8head_kv8,oracle_k2_bf16_kv8 r21.k3,r14.golden "K2 on the int8 cache: k2_golden_kv8_test and k2_golden_i8head_kv8_test judged by the kv8-aware f32 references oracle-out-k2-f32-kv8 / -f32-i8head-kv8 (operator ruling 2026-10-29; the bf16 golden oracle-out-k2 printed beside it) - k2_golden_kv8_test's token gate the near-miss rule against the bf16+kv8 twin oracle-out-k2-bf16-kv8 (operator ruling 2026-10-31, round 2), the i8head one the tie-aware gate; the routing rate as r14.golden (B70_K2_TIE_TOL as r14.golden); the non-tie / near-tie counts recorded beside r14.golden's bf16 runs"
-st_r21_golden() {
-  run_tests '^k2_golden(_i8head)?_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
-  jgrab k2-golden-vs-bf16 '^k2_golden(_i8head)?(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|tie|routing|determined|differ|OK|PASS|FAIL'
-  finish
-}
-stage r21.prefill 21 default card k2 r21.k1,r15.prefill "K3 on prefill over the int8 cache: k2_prefill_kv8_test (2392 / chunk + 5 launches, plan == allocation, two immediate prefills bitwise, chunks of 64 bitwise; prefill KV and routes against decode's int8 fill)"
-st_r21_prefill() {
-  run_tests '^k2_prefill_kv8_test$' 'k2 kv8'
-  jgrab k3-prefill-kv8 '^k2_prefill_kv8_test$' '2392|KV \(B70_KV_CACHE\)|launch|plan|allocation|bitwise|cos|median|p01|tie|agree|OK|FAIL'
-  finish
-}
-stage r21.split 21 default card k2 r21.k1,r15.split "prefill_split_k2_kv8_test: splits at multiples of 64 bitwise over the int8 cache (as r15.split's bf16 run)"
-st_r21_split() {
-  run_tests '^prefill_split_k2_kv8_test$' 'k2 kv8'
-  jgrab split-kv8 '^prefill_split_k2_kv8_test$' 'KV \(B70_KV_CACHE\)|bitwise|cos|split|PASS|FAIL'
-  finish
-}
-stage r21.golden_prefill 21 default card k2,oracle_k2,oracle_k2_f32_kv8,oracle_k2_bf16_kv8 r21.prefill,r15.golden "K2 on prefill over the int8 cache: k2_golden_prefill_kv8_test and _c16_kv8 (chunks of 16; the token gate the near-miss rule against the bf16+kv8 twin, operator 2026-10-31) judged by oracle-out-k2-f32-kv8 (operator ruling 2026-10-29) (oracle-out-k2 printed beside it) - the tie rule and the routing diagnostic on the prompt rows, the counts beside r15.golden's bf16 runs"
-st_r21_golden_prefill() {
-  run_tests '^k2_golden_prefill(_c16)?_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
-  jgrab k2-golden-prefill-vs-bf16 '^k2_golden_prefill(_c16)?(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|tie|routing|determined|differ|OK|PASS|FAIL'
-  finish
-}
-stage r21.cli 21 default card k2 r21.k1 "CLI: b70-decode <k2> --kv-cache int8 --max-len auto -> 98304 (the int8 head); with a prefill planned 90368 (spec 18 §13, derived; recorded against the derived numbers)"
-r21_auto() {   # r21_auto WHAT DERIVED FLAGS... - the int8-KV auto length, recorded against the derived one
-  local what="$1" d="$2"; shift 2
-  chk "n=\$(tools/box_validate/auto_len.sh $SNAP_K2 $* --kv-cache int8) && echo \"K2 max_len auto, int8 KV, $what: \$n (derived $d\$([ \"\$n\" = $d ] || echo ', DIFFERS'))\"" \
-    "--kv-cache int8 --max-len auto, $what"
-}
-st_r21_cli() {
-  r21_auto "int8 head" 98304 --depth 16 --tg 1
-  r21_auto "prefill planned, int8 head" 90368 --prefill-length 256 --tg 1
-  grab_all auto '^K2 max_len auto, int8 KV' 2
-  finish
-}
-stage r21.passkey 21 optin gpu k2,oracle_image r21.prefill "passkey near the one-card int8 ceiling: tools/probe/k2_passkey.sh int8 (--max-len auto -> 90368 with the prefill planned (the int8 head), N_TARGET 79000; 3/3 at placements 0.05 / 0.5 / 0.95)"
-st_r21_passkey() {
-  chk "MODEL=$SNAP_K2 tools/probe/k2_passkey.sh int8" "passkey near the int8 ceiling"
-  grab_all passkey '^passkey k2 [^ ]+( placement [0-9.]+)?: ' 4
-  finish
-}
-stage r21.speed 21 optin gpu k2 r21.k3 "speed, a record (no bar): decode at depth 4096 / 32768 with int8 against bf16 KV (max_len 40960), int8 alone at 65536 (max_len 69632), tg 256, the int8 head, interleaved, median of 3"
-st_r21_speed() {
-  idle before
-  local d arms="" ratios=""
-  for d in 4096 32768; do
-    arms="$arms bf16-kv@$d '$(bench_cmd "$SNAP_K2" --depth $d --tg 256 --max-len 40960)'"
-    arms="$arms int8-kv@$d '$(bench_cmd "$SNAP_K2" --depth $d --tg 256 --max-len 40960 --kv-cache int8)'"
-    ratios="$ratios --ratio int8-kv@$d/bf16-kv@$d"
-  done
-  arms="$arms int8-kv@65536 '$(bench_cmd "$SNAP_K2" --depth 65536 --tg 256 --max-len 69632 --kv-cache int8)'"
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the K2 KV-form arms"
-  idle after
-  grab_all memory '^memory:' 6
-  grab_all ratio '^RATIO '
-  grab_all idle '^IDLE '
-  finish
-}
-
-# ======================================================================================
 row 22 "spec 16b - pipeline parallel decode across two B70s (--parallel pp; spec 16 §8, plan 16b)"
 rownote 22 "Every GPU stage of this row needs BOTH cards: its commands set ZE_AFFINITY_MASK=0,1 themselves (the run exports DEVICE's one card); the GPU lock is the one lock for both. Both cards must be free of other DRM holders for r22.s1."
 rownote 22 "16a's probe (P0: peer bandwidth both ways, the three hand-offs at 10 KB / 20 MB, the TP remote-partial arm) has not run - it is plan 16a's own probe, not a stage. 16b shipped both hand-offs and the split by bytes; the peer hand-off measured no gain (0.9963x, 2026-11-13) and was removed - the copy hand-off is the only one."
 rownote 22 "S1 at 32k depth is opt-in (r22.s1_32k): --parallel pp ingests through the decode lists (prefill across two cards is 16c), ~20 min per arm at depth 32768."
-stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by device = the measured Qwen3.8 load; the per-device plan; auto split and auto length for Qwen3.8 / Ornith; K2's bytes per card), pipeline_args_test"
+stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by device = the measured Qwen3.8 load; the per-device plan; auto split and auto length for Qwen3.8 / Ornith; the balance), pipeline_args_test"
 st_r22_host() {
   run_tests '^(pipeline_plan_test|pipeline_args_test)$'
-  jgrab splits '^pipeline_plan_test$' 'split|auto|k2-horizon'
+  jgrab splits '^pipeline_plan_test$' 'split|auto'
   finish
 }
 stage r22.devices 22 default gpu - - "P4's preflight: both cards in one process and peer access 0 -> 1 (b70-decode --parallel pp prints the 'devices:' line before it fails on a missing model); the refusals before the device (cli_reject_pipeline_*), the one-GPU one under ZE_AFFINITY_MASK=0"
@@ -1317,7 +1063,7 @@ rownote 24 "Written blind: no Kolibri binary was ever compiled by ocloc, nothing
 rownote 24 "Everything on the REAL checkpoint (r24.oracle_real, r24.partial, r24.pp_real, r24.speed) needs spec 20b's urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ (SNAP_KOLIBRI) and oracle-out-kolibri (--with r24.oracle_real, ~48 GB RAM): SKIP 'missing data' until spec 20 decision 1 is made and 20b has run."
 rownote 24 "Set B70_KOL_TIE_TOL from the gap distribution r24.oracle_synth / r24.oracle_real print (kolibri_golden_test.cc proposes 1e-2); the partial-forward bars (median cosine 0.9998, min 0.99) are proposals too - r24.partial prints them per layer."
 rownote 24 "tests/golden/prompts/kolibri_bench.ids (and cli/kolibri_decode.h's kKolibriBenchPrompt) are the first 42 ids of de_prose through Kolibri's tokenizer since spec 20e (20c's placeholders re-baked on the Mac from the BF16 release's tokenizer.json): r24.oracle_synth writes the same 42 (kolibri_bench.ids in oracle-out-kolibri-synth) and says NOTE if they differ."
-rownote 24 "If determined rows fail under flash, the first suspect is flash's fp32 probabilities against the reference's eager bf16 chain: r24.golden_eager runs the eager variant (B70_KOLIBRI_ATTN=eager, 856 launches at 50 layers); spec 18 §10.1's rule decides the default. Two cards (r24.pp) need row 22's hand-off proven first."
+rownote 24 "If determined rows fail under flash, the first suspect is flash's fp32 probabilities against the reference's eager bf16 chain: r24.golden_eager runs the eager variant (B70_KOLIBRI_ATTN=eager, 856 launches at 50 layers); the f32 judge decides the default. Two cards (r24.pp) need row 22's hand-off proven first."
 stage r24.host 24 default cpu - - "host: kolibri1_test, kolibri1_repack_test, kolibri1_rope_test (bitwise torch's cos / sin), kolibri_ref_test (the kernels' twin bitwise against kolibri_ref.py's fixture), kolibri_variant_names_test, kolibri_plan_test (756 / 856 launches, the split 25 by pp_balance), pipeline_plan_test (the overload == the ModelDesc form)"
 st_r24_host() {
   run_tests '^(kolibri1_test|kolibri1_repack_test|kolibri1_rope_test|kolibri_ref_test|kolibri_variant_names_test|kolibri_plan_test|pipeline_plan_test)$'
@@ -1436,98 +1182,10 @@ st_r24_speed() {
 }
 
 # ======================================================================================
-row 25 "spec 18d engine side - K2-Horizon served: K2Engine behind b70-serve, KV-only prefix snapshots, K4 (A4, passkey), the comparison rows (spec 18 §14, plan 18d)"
-rownote 25 "After rows 14 / 15 (K2's decode and prefill on the card) and 21 (its int8 KV); 17 is the host half. 18d adds no kernel: G0's g0.sha is the 'nothing moved' check. Everything after r25.reject needs SNAP_K2; the A4 stages need oracle-out-k2-a4 (r25.a4_ref makes it on the box CPU: hours)."
-rownote 25 "A4 has no bar (spec 18 K4): the engine against 18a's reference (k2_ref.py, bf16 mode, on the int4 checkpoint dequantised) on K2's own set (xml calls, reasoning_effort low, 512 ids) is recorded; 'reasoning' cells (the budget ran out inside the reasoning) are read, not failed."
-rownote 25 "Review Focus 4 (the comparison rows) is r25.benchy, opt-in: b70-serve on ONE card at decision 2's 32k (bf16 KV) and at the int8-KV auto length, every row saying which configuration. The record (BENCHMARKS 'K2-Horizon (spec 18)', spec 18 §10's amendment, README, docs/03, docs/13) is plan 18d Task 3, an edit on a branch after the run."
-stage r25.host 25 default cpu - - "host: k2_serve_test (the snapshot runs on K2's shapes, save / load on host buffers, C2's sequences through PrefixSession bitwise a cold run's in both KV forms, the server's greedy chat = the decode run, a cached second turn, seeded sampling), k2_server_test, toolcall_k2_test"
-st_r25_host() {
-  run_tests '^(k2_serve_test|k2_server_test|toolcall_k2_test)$'
-  jgrab host '^k2_serve_test$' 'layout|round trip|restore|continue|server|OK|FAIL'
-  finish
-}
-stage r25.reject 25 default cpu - - "b70-serve's refusals before the device (tests/model/k2: config.json only): --spec mtp, --spec lookup, --prefill-backend l0-int8 for K2 by name; --parallel pp for K2 (its own engine; spec 16d serves the Qwen family on two cards)"
-st_r25_reject() {
-  run_tests '^cli_reject_serve_(k2_spec_mtp|k2_lookup|k2_prefill_int8|pp)$'
-  finish
-}
-stage r25.snapshot 25 default card k2 r15.prefill "Review Focus 3 on the card: k2_prefix_gpu_test and _split - K2Engine's save_kv / load_kv byte-exact over 4100 positions, C1 bitwise (a prefix cache hit at the block end 4096 + prefill [4096, 4100) = the cold run's 32 ids and logits rows), C2's sequences a-g through PrefixSession over b70-serve's adapter under the tie-aware rule (the bitwise rows counted; c / d / f restore at block ends and should be bitwise)"
-st_r25_snapshot() {
-  run_tests '^k2_prefix_gpu(_split)?_test$' k2
-  jgrab c1-c2 '^k2_prefix_gpu' 'byte-identical|C1|bitwise|restore|continue|near-tie|bad|OK|FAIL'
-  finish
-}
-stage r25.snapshot_kv8 25 default card k2 r25.snapshot,r21.k3 "Review Focus 3 over the int8 cache: k2_prefix_gpu_kv8_test (B70_KV_CACHE=int8: the rows and their fp16 scales in the snapshots, the store keyed by K2's int8 root)"
-st_r25_snapshot_kv8() {
-  run_tests '^k2_prefix_gpu_kv8_test$' k2
-  jgrab c1-c2-kv8 '^k2_prefix_gpu_kv8_test$' 'byte-identical|C1|bitwise|restore|near-tie|bad|OK|FAIL'
-  finish
-}
-stage r25.serve 25 default card k2 r15.prefill "b70-serve <k2> startup and one request: --max-len auto -> 45824 (bf16 KV, the int8 head b70-serve defaults to, the prefill scratch planned; derived) and with --kv-cache int8 -> 90368 (derived); the startup line names K2's chat format, prefill l0, mtp none, the KV-only snapshots; a seeded sampled request twice, identical"
-st_r25_serve() {
-  serve "$SNAP_K2"
-  x "PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_K2 --kv-cache int8"
-  step_rc $? "b70-serve <k2> --kv-cache int8, seeded sampling"
-  grab_all auto 'max_len: auto ->' 4
-  grab_all memory '^memory:' 4
-  grab_all startup '^b70-serve: .*K2-Horizon' 4
-  grab_all seeded '^SEEDED ' 2
-  finish
-}
-stage r25.chat 25 default card k2 r25.serve "plan 18d Task 1: a short greedy chat through the server equal to b70-decode on the same ids - golden_server_test --chat (prose / code / cjk as one user message each, 32 ids, temperature 0; b70-decode --ids <the response's prompt_token_ids> --n 32 --prefill), run directly (not registered for K2: without a checkpoint it would fail, not SKIP)"
-st_r25_chat() {
-  chk "timeout 1800 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_K2 --chat" "golden_server_test --chat against K2-Horizon"
-  grab_all chat 'chat of [0-9]+ prompt ids' 3
-  finish
-}
-stage r25.passkey 25 default gpu k2,oracle_image r15.prefill "K4: passkey 3/3 at 5 / 50 / 95 % of the chosen context (tools/probe/k2_passkey.sh's placements) - decision 2's one-card 32k with bf16 KV (MAX_LEN 32768, 31000 ids) and the bf16-KV auto length (~42752, 40000 ids); the int8-KV ceiling is r21.passkey's (opt-in)"
-st_r25_passkey() {
-  chk "MODEL=$SNAP_K2 MAX_LEN=32768 N_TARGET=31000 tools/probe/k2_passkey.sh bf16" "passkey at 32768, bf16 KV"
-  chk "MODEL=$SNAP_K2 N_TARGET=40000 tools/probe/k2_passkey.sh bf16" "passkey near the bf16-KV auto length"
-  grab_all passkey '^passkey k2 [^ ]+( placement [0-9.]+)?: ' 8
-  finish
-}
-stage r25.toolcall 25 default card k2,k2_a4_set r25.serve "K2's own A4 set (oracle-out-k2-a4/set: xml calls, reasoning_effort low) as chat requests through b70-serve with their tools and template kwargs, greedy, 512 ids: the prompt ids = the set's (the server's render = HF's, key-sorted), finish reasons (tool_calls expected), the reasoning / calls parsed"
-st_r25_toolcall() {
-  chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE.serve k2-set 1 $SNAP_K2 --max-len 16384 -- --set oracle-out-k2-a4/set --max-tokens 512 --stop-at-eos" "the K2 set through b70-serve"
-  x "grep -o '\"finish_reason\": \"[a-z_]*\"' $STATE/$STAGE.serve/requests.jsonl | sort | uniq -c; echo \"prompt ids = the set's: \$(grep -c '\"prompt_ids_match\": true' $STATE/$STAGE.serve/requests.jsonl)/36\""
-  grab_all finish '^ *[0-9]+ "finish_reason"' 4
-  grab_all prompt-ids "^prompt ids = the set" 1
-  finish
-}
-stage r25.a4_ref 25 optin cpu k2,oracle_image - "K4's data on the box CPU: K2's tool-call set (make_set.py --from with K2's template: xml, reasoning_effort low, key-sorted) and 18a's reference on it (oracle_generate.py -> k2_ref.py, bf16 mode, the int4 checkpoint dequantised, 512 ids, resumable) into \$DATA/oracle-out-k2-a4 - HOURS; then re-links oracle-out*"
-st_r25_a4_ref() {
-  chk "OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 set" "the K2 tool-call set"
-  chk "OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 ref" "the K2 reference run (k2_ref.py)"
-  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  x "OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 status"
-  grab_all ref '^k2: set' 2
-  finish
-}
-stage r25.a4 25 optin card k2,oracle_k2_a4 r25.chat "K4: A4 on K2 against 18a's reference (oracle-out-k2-a4) - engine_generate.sh on K2's set, l0, 512 ids, the int8 head; score.py (K2's xml calls behind its reasoning) - recorded, no bar"
-st_r25_a4() {
-  local d=$STATE/a4-k2
-  x "mkdir -p $d && cp oracle-out-k2-a4/*.bf16.txt $d/"
-  chk "N_NEW=512 tools/toolcall/engine_generate.sh \$(tools/box_validate/data.sh resolve $SNAP_K2) oracle-out-k2-a4/set $d l0" "A4 engine runs, int8 head (the served default)"
-  chk "python3 tools/toolcall/score.py $d bf16 l0-i8head | tee $d/score.md" "scoring against the reference"
-  grab_all a4 'match|/ 36' 6
-  finish
-}
-stage r25.benchy 25 optin gpu-self k2,uvx - "Review Focus 4: llama-benchy through b70-serve <k2> on one card - pp4096 tg256 depth 1 (--no-cache --exact-tg --latency-mode generation) at 32768 (bf16 KV) and at the int8-KV auto length, then prefix caching at depth 4k / 16k / 32k cache on vs off"
-st_r25_benchy() {
-  chk "MODEL=$SNAP_K2 MAX_LEN=32768 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation" "llama-benchy pp4096 tg256, 32k bf16 KV"
-  chk "MODEL=$SNAP_K2 MAX_LEN=auto SERVE_ARGS='--kv-cache int8' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation" "llama-benchy pp4096 tg256, int8 KV at auto"
-  chk "MODEL=$SNAP_K2 MAX_LEN=40960 tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "llama-benchy, prefix cache on"
-  chk "MODEL=$SNAP_K2 MAX_LEN=40960 SERVE_ARGS='--prefix-cache-gb 0' tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "llama-benchy, prefix cache off"
-  grab_all benchy '^\| ' 80
-  finish
-}
-
-# ======================================================================================
 row 26 "spec 20d - Kolibri-1 prefill: grouped MoE over 384 experts, windowed flash over the ring, one hand-off per chunk (spec 20 §12, plan 20d)"
 rownote 26 "Written blind on the Mac, after row 24 (20c's decode on the card) and rows 22 / 23 (16b's / 16c's hand-off): none of the 17 new binaries of the 20d block was ever compiled by ocloc - the DPAS flash at GQA 12 with the 513-key window over the 4096-slot ring (kol_pf_flash_attn_Q48KV4_{W513_R4096,F}[_EAGER]), the 384-expert sort on 256 lanes (kol_pf_moe_E384_T6_D2560_I512_L256), the grouped GEMMs at Kolibri's shapes (pf_moe_gemm_K2560_N1024_SILU, _K512_N2560), kol_prep.cl at M 2048. The 2252-launch walk and the sequential two-card chunk hand-off never ran."
 rownote 26 "The synthetic checkpoints (oracle-out-kolibri-synth, row 24's r24.oracle_synth) carry KL2 / K3 before spec 20b; everything on the real checkpoint (r26.real, r26.speed) SKIPs 'missing data' until 20b. The near-tie tolerance and the prefill-vs-decode KV bars (row >= 0.999 on layer 0, median >= 0.9998, p01 >= 0.99) are PROPOSED: the tests print the distributions."
-rownote 26 "If KL2 on prefill fails determined rows under flash, compare r26.golden_eager (B70_KOLIBRI_ATTN=eager: the eager prefill flash and decode's eager attention) before reading the kernels (spec 18 §10.1's rule)."
+rownote 26 "If KL2 on prefill fails determined rows under flash, compare r26.golden_eager (B70_KOLIBRI_ATTN=eager: the eager prefill flash and decode's eager attention) before reading the kernels."
 stage r26.host 26 default cpu - - "host: kolibri_pf_ref_test (the 384-expert sort and its adversaries, == pf_moe_ref::sort; the combine == decode's chain and torch's row; the windowed flash walk == the direct softmax through the ring; eager_window == torch's eager rows bitwise; the bf16 slab tail), kolibri_pf_variant_names_test, kolibri_plan_test (2252 launches one card and two, 4 + 2 weight batches, 0.905 GB scratch, 262144 on two cards with prefill planned)"
 st_r26_host() {
   run_tests '^(kolibri_pf_ref_test|kolibri_pf_variant_names_test|kolibri_plan_test)$'
@@ -1536,7 +1194,7 @@ st_r26_host() {
 }
 stage r26.k1 26 default card - r26.host "K1 for the prefill, no checkpoint: the 17 binaries built (kbins) and kolibri_pf_kernels_test - slabs exact, norm / sandwich / prep at M 2048 bit-exact (the ring wrapping at 4090), the router rows bitwise decode's, sort / gather / dequant exact (block 384 the bf16 shared tiles), GROUPED == DENSE bitwise (a 1-ulp difference is a finding), reversed chunk and replay bitwise, the shared expert alone; the flash against fp64 (>= 0.99999) sliding at 0 / 1000 / 4396 / a 300-row tail / single rows and full to 62048, EAGER (0.9999 / 0.999), a split at 64 bitwise"
 st_r26_k1() {
-  kbins kol_pf_embed_gather_D2560_V128000 pf_res_fold_K2560_SP1_G20_Z k2_pf_dequant_slab_K2560_N7168 \
+  kbins kol_pf_embed_gather_D2560_V128000 pf_res_fold_K2560_SP1_G20_Z pf_int4_slab_K2560_N7168 \
     kol_pf_bf16_slab_K2560_N7168 kol_pf_bf16_slab_K6144_N2560 kol_norm_M2048_K2560_G20_W20 kol_post_add_M2048_K2560_G20 \
     kol_attn_prep_M2048_N7168_S1_Q48KV4_R4096 kol_attn_prep_M2048_N7168_S1_Q48KV4_F kol_pf_flash_attn_Q48KV4_W513_R4096 \
     kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER kol_pf_flash_attn_Q48KV4_F kol_pf_flash_attn_Q48KV4_F_EAGER \
@@ -1631,7 +1289,7 @@ st_r27_host() {
   jgrab serve '^pp_serve_test$' 'one device|snapshots move|M2|restore|server|OK'
   finish
 }
-stage r27.reject 27 default cpu - - "b70-serve's --parallel refusals before the device: a bad --parallel value (4096), --pipeline-split alone, the removed --pipeline-handoff (K2-Horizon's --parallel pp is r25.reject's)"
+stage r27.reject 27 default cpu - - "b70-serve's --parallel refusals before the device: a bad --parallel value (4096), --pipeline-split alone, the removed --pipeline-handoff"
 st_r27_reject() {
   run_tests '^cli_reject_serve_pp_(value|split_alone|handoff_removed)$'
   finish
@@ -2050,7 +1708,7 @@ st_r32_speed() {
 row 33 "spec 21d - Qwen3.8-Flash-Next (qwen4_exp) prefill: dense flash to 2050, the indexer and the sparse flash past it, the 512-expert grouped MoE, the PLE over a chunk, one hand-off per chunk (plan 21d)"
 rownote 33 "Written blind on the Mac, after row 32 (21c's decode on the card): none of the 30 new binaries of the 21d block was ever compiled by ocloc - the DPAS sparse flash over row lists (q4_pf_sparse_attn_Q24KV2[_EAGER]), spec 6's flash at 24 / 2 heads (pf_flash_attn_Q24KV2), the 512-expert ushort sort / dequant / combine (q4_pf_moe_E512_T10_D2560_I640_L256), the grouped GEMMs at this family's shapes (pf_moe_gemm_K2560_N1280_SILU, _K640_N2560), 21c's HC / indexer / PLE gather at M 2048 (_PF), the PLE block over a chunk (q4_pf_ple_C2048). The walk (358 / 361 / 360 launches a chunk at --layers 4) and the sequential two-card chunk hand-off never ran."
 rownote 33 "THREE existing sources changed, each by a define every existing binary leaves unset: prefill/pf_gated_head.cl (GDN_GATE_SIGMOID: pf_gated_head_SIG), qwen4exp/q4_qsa.cl (QSA_PF: the prep without its in-launch ring write + q4_qsa_ring; the indexer pitch 768), qwen4exp/q4_ple.cl (PLE_PF: the gather's tokens from the chunk's ids, no ring write). Their existing binaries' preprocessed sources were checked on the Mac (pf_gated_head x 2, q4_qsa_M1: byte for byte; q4_ple_gather_M1_* token for token) - G0's g0.sha must show every pf_gated_head*, q4_qsa_M1* and q4_ple_* binary unchanged; if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and the source is restored (plan 21d F0)."
-rownote 33 "Bars PROPOSED (spec 18c's family; the tests print the distributions): prefill vs decode's fill - every row of the first QSA layer >= 0.999, all rows' median >= 0.9998, p01 >= 0.99; the sparse flash against fp64 >= 0.99999 (spec 6 K1), eager >= 0.9999 / 0.999; routing / selection near-ties 1e-3 (B70_Q4_TIE_TOL / B70_Q4_SEL_TOL, row 30 decides), a 0 gap undetermined. Chunks of 16 are printed, not gated bitwise: the GDN's 64-row WY sub-chunks move with the chunk start (chunks of 64 ARE gated bitwise)."
+rownote 33 "Bars PROPOSED (the tests print the distributions): prefill vs decode's fill - every row of the first QSA layer >= 0.999, all rows' median >= 0.9998, p01 >= 0.99; the sparse flash against fp64 >= 0.99999 (spec 6 K1), eager >= 0.9999 / 0.999; routing / selection near-ties 1e-3 (B70_Q4_TIE_TOL / B70_Q4_SEL_TOL, row 30 decides), a 0 gap undetermined. Chunks of 16 are printed, not gated bitwise: the GDN's 64-row WY sub-chunks move with the chunk start (chunks of 64 ARE gated bitwise)."
 rownote 33 "Data: r33.prefill / r33.golden need the synthetic checkpoints and their golden sets (r31.synth, r32.oracle_synth); r33.golden_real needs 21a's --layers 18 set (r30.golden_layers) and the PLE int8 file (r31.ple_convert); r33.pp needs two GPUs (after r22.p1). With prefill planned Intel's forms fit 18 layers on one card (max_len auto 70144) and 37 on two at 32768 (derived) - 38 does not fit beside the 1.49 GB prefill scratch a device: the real two-card runs use --layers 37."
 stage r33.host 33 default cpu - - "host: qwen4exp_pf_ref_test (the 512-expert sort and its adversaries == pf_moe_ref::sort, row independence, the combine == 21c's down chain, dense_rows, the sparse attention's tiled fp64 walk == the direct softmax and the eager chain == q4ref's, the indexer and the PLE over chunks == decode's M = 1 chains with their rings), qwen4exp_pf_variant_names_test, qwen4exp_plan_test (358 / 361 / 360 launches at --layers 4, 3944 / 3968 at 48, the 1.49 GB prefill scratch, N with prefill 18 / 37)"
 st_r33_host() {
@@ -2258,7 +1916,7 @@ st_r34_a4_ref() {
   chk "python3 tools/toolcall/score.py $DATA/oracle-out-q4exp-a4 bf16 bf16" "every reference call parses (Qwen XML; the reference scored against itself)"
   finish
 }
-stage r34.a4 34 optin gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_a4 r34.serve "A4 on Flash-Next against r34.a4_ref's reference (oracle-out-q4exp-a4, Intel's checkpoint, all 48 layers) - engine_generate.sh on its set, two cards (--parallel auto), l0, 192 ids, the int8 head; score.py (Qwen XML) - recorded beside Qwen3.8's 25 / 36, no bar, as r11.a4 / r25.a4. The engine refuses the whole model without --layers until the expert tier exists (open-work Now 4: 512 experts x 48 layers do not fit two cards); a truncated --layers run is not the reference's model, so until then the stage SKIPs, never scores a truncated run"
+stage r34.a4 34 optin gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_a4 r34.serve "A4 on Flash-Next against r34.a4_ref's reference (oracle-out-q4exp-a4, Intel's checkpoint, all 48 layers) - engine_generate.sh on its set, two cards (--parallel auto), l0, 192 ids, the int8 head; score.py (Qwen XML) - recorded beside Qwen3.8's 25 / 36, no bar, as r11.a4. The engine refuses the whole model without --layers until the expert tier exists (open-work Now 4: 512 experts x 48 layers do not fit two cards); a truncated --layers run is not the reference's model, so until then the stage SKIPs, never scores a truncated run"
 st_r34_a4() {
   local d=$STATE/a4-q4exp s="\$(tools/box_validate/data.sh resolve ${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound})"
   # the whole model, no --layers: the engine's own refusal (qwen4exp_decode.h, "expert-offload tier") is the only SKIP
@@ -2828,7 +2486,7 @@ st_r60_speed() {
 
 # ======================================================================================
 row 61 "spec 25d - Nemotron 3.5 Bolt prefill on l0: absolute SSD sub-chunks with the fp32 state, the conv seed / writeback, the grouped latent MoE over real rows, NoPE flash (plan 25d)"
-rownote 61 "Written blind on the Mac (spec 25 §16) after row 60 (25c's decode: nothing of it has run on a card either): NO nb_pf_* binary has been compiled by ocloc (kernel_cmdlines +35 / -0 / ~0: nb_pf_mamba in two tilings and the bf16-state build, nb_pf_cb by DPAS, nb_pf_moe / nb_pf_moe_gemm up relu2 / down at I 1536 / 2048 / 2304 / 2560, nb_pf_embed_gather, 25c's nb_prep / nb_moe at M 2048, the N 4096 slabs in both layouts, the three k2 tail slabs; spec 23d's mg_pf_flash_attn pair is bound by name). No existing .cl edited: G0's sha is K0. On the Mac's GPU (tools/mac/clrun/bolt_pf_run, indicative) every portable prefill kernel agrees with tests/kernels/bolt_pf_ref.h - the seed, C B^T (plain), the scan in fp32 and bf16 state, the sort / gather / dequant / combine, the gather, 25c's kernels at M 2048 exact; the conv, dt, gnorm and the norm within 1-2 ulp (Apple's division); both tilings x10 equal; the prefill eager attention bitwise decode's mg_attn_eager on the same device. The DPAS kernels (nb_pf_cb_L64_DPAS, nb_pf_moe_gemm) and the whole walk have never run anywhere."
+rownote 61 "Written blind on the Mac (spec 25 §16) after row 60 (25c's decode: nothing of it has run on a card either): NO nb_pf_* binary has been compiled by ocloc (kernel_cmdlines +35 / -0 / ~0: nb_pf_mamba in two tilings and the bf16-state build, nb_pf_cb by DPAS, nb_pf_moe / nb_pf_moe_gemm up relu2 / down at I 1536 / 2048 / 2304 / 2560, nb_pf_embed_gather, 25c's nb_prep / nb_moe at M 2048, the N 4096 slabs in both layouts, the three int4 tail slabs (pf_int4_slab); spec 23d's mg_pf_flash_attn pair is bound by name). No existing .cl edited: G0's sha is K0. On the Mac's GPU (tools/mac/clrun/bolt_pf_run, indicative) every portable prefill kernel agrees with tests/kernels/bolt_pf_ref.h - the seed, C B^T (plain), the scan in fp32 and bf16 state, the sort / gather / dequant / combine, the gather, 25c's kernels at M 2048 exact; the conv, dt, gnorm and the norm within 1-2 ulp (Apple's division); both tilings x10 equal; the prefill eager attention bitwise decode's mg_attn_eager on the same device. The DPAS kernels (nb_pf_cb_L64_DPAS, nb_pf_moe_gemm) and the whole walk have never run anywhere."
 rownote 61 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. The synthetics' golden sets are row 60's r60.synth_golden (oracle_bolt_synth); our export's row 57's r57.golden (oracle_bolt). Run row 60 first: the prefill's head, its KV / ring / state hand-over and every comparison against decode's fill use 25c's list."
 rownote 61 "Bars (all PROPOSED, spec 25 §16): bolt_pf_kernels_test - every portable kernel bitwise the twin, C B^T by DPAS within 2^-16 of sum |C B| of the plain build, the grouped GEMMs bitwise pf_gemm_T0 on an expert's rows and the up rows' cosine >= 0.9999 against the twin's decode order, flash >= 0.99999 against fp64 at 3000 / 65536 / 200000, the eager build bitwise decode's eager rows. bolt_prefill_test - prefill vs decode's fill: logits >= 0.9995, h taps median >= 0.9998 / min >= 0.99, SSM states and conv columns >= 0.999 a block, K / V rows median >= 0.9998 / p01 >= 0.99; chunked / split at multiples of 64 bitwise. B3 on prefill: 25c's decode bars."
 rownote 61 "Hand back: bolt_pf_kernels_test's lines (the DPAS C B^T error, the grouped == dense lines, flash cosines); every launches / plan line (4333 a chunk on the real model: 2317 + 2016 on two cards; 573 on the N 12; + 4 for the head; 1,251,240,256 B of scratch a device); bolt_prefill_test's lines 1-7 per checkpoint; the B3 prefill gate / routing / SSM / h lines per prompt; the pp rows at depth 886 / 8192 / 32000 / 65536 / 131072 and the phase tables. The SSD's sub-chunk length (64 as built), the scan's tiling (W16_R16) and the expert batch (512 MiB) change only by a commit naming these rows."
@@ -2844,7 +2502,7 @@ st_r61_k1() {
     nb_pf_moe_I1536_L1024_T9_TM32 nb_pf_moe_I2560_L1024_T9_TM32 nb_pf_moe_gemm_K1024_N1536_RELU2 \
     nb_pf_moe_gemm_K1536_N1024 nb_pf_moe_gemm_K1024_N2560_RELU2 nb_pf_moe_gemm_K2560_N1024 \
     nb_pf_embed_gather_K4096_V131072 nb_res_norm_M2048_K4096_W8_S1_T1 nb_router_M2048_K4096 nb_route_M2048_T9 \
-    k2_pf_dequant_slab_K4096_N18560 pf_dequant_slab_K8192_N4096_L1 mg_pf_flash_attn_Q32KV2_F mg_pf_flash_attn_Q32KV2_F_EAGER
+    pf_int4_slab_K4096_N18560 pf_dequant_slab_K8192_N4096_L1 mg_pf_flash_attn_Q32KV2_F mg_pf_flash_attn_Q32KV2_F_EAGER
   run_tests '^bolt_pf_kernels_test$'
   jgrab k1 '^bolt_pf_kernels_test$' 'bitwise|cosine|DPAS|grouped|slab|OK'
   finish
@@ -3396,7 +3054,7 @@ st_r77_host() {
   run_tests '^(scheduler_test|dflash_scheduler_test|replica_engine_test|replica_server_test|pipeline_args_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|dflash_lookup_server_test)$'
   finish
 }
-stage r77.reject  77 default gpu  qwen r77.host                   "the refusals: another model by name (K2, Kolibri test configs), more than one Ornith request a card (its test config), no config, the pp flags, b70-decode; one visible card (ZE_AFFINITY_MASK=0) refused before any context"
+stage r77.reject  77 default gpu  qwen r77.host                   "the refusals: another model by name (the Kolibri test config), more than one Ornith request a card (its test config), no config, the pp flags, b70-decode; one visible card (ZE_AFFINITY_MASK=0) refused before any context"
 st_r77_reject() {
   run_tests '^(cli_reject_serve_replica_.*|cli_reject_pipeline_replica_decode)$'
   chk "out=\$(ZE_AFFINITY_MASK=0 timeout 120 build/src/cli/b70-serve $SNAP_QWEN --parallel replica 2>&1); rc=\$?; echo \"\$out\" | tail -3; [ \$rc -eq 1 ] && echo \"\$out\" | grep -q 'parallel replica needs two GPUs' && ! echo \"\$out\" | grep -q '^device'" "one visible card: refused"
@@ -3975,12 +3633,12 @@ st_r88_cost() {
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest_2card x default gpu qwen,oracle_qwen - "x.rest's two-card part: the pp-labelled tests among them (the rest is x.rest, on one card)"
 st_x_rest_2card() {
-  run_tests '.' pp "$(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
+  run_tests '.' pp "$(quick_or 'ornith kv8 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
   finish
 }
-stage x.rest x default card qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows; the pp-labelled ones are x.rest_2card's)"
+stage x.rest x default card qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows; the pp-labelled ones are x.rest_2card's)"
 st_x_rest() {
-  run_tests '.' '' "pp $(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
+  run_tests '.' '' "pp $(quick_or 'ornith kv8 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
   finish
 }
 
@@ -4019,7 +3677,6 @@ quick r6.memory
 quick_form r6.mtp_long "32k only: mtp_verify_32k_test"
 quick r7.serve r9.auto r69.kernels r76.tests
 quick r10.nockpt r10.load r10.gates r13.kernels r13.prefill
-quick r14.k1 r15.k1
 quick r24.k1 r24.load r24.k3 r24.golden r26.host r26.k1
 quick r31.host r31.load r32.k1 r32.k3 r33.host r33.k1
 quick r54.kernels r54.load r55.kernels
@@ -4035,6 +3692,6 @@ quick_form x.rest_2card "the model-free pp-labelled tests without a result (no c
 # model sample outside that budget). G0's bitwise gates and the
 # suite are the quick run's: a gate whose inputs changed shows up in merge.changed.
 merge pre g0.build g0.sha merge.changed merge.dflash
-merge r5.host r13.host r14.host r15.host r16.host r17.host r18.host r19.host r21.host r22.host r23.host r24.host
-merge r25.host r25.reject r26.host r27.host r27.reject r28.host r28.reject r31.host r31.plan r32.host r33.host r34.host
+merge r5.host r13.host r16.host r18.host r19.host r22.host r23.host r24.host
+merge r26.host r27.host r27.reject r28.host r28.reject r31.host r31.plan r32.host r33.host r34.host
 merge r54.host r55.host r56.host r69.host r70.host r71.host r75.host r77.host r78.host r79.host r80.host r81.host

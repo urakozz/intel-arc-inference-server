@@ -32,28 +32,18 @@ if(B70_TOKENIZER_ENABLED)
   add_dependencies(b70-serve ${ALL_KERNELS} ${PF_KERNELS})
 endif()
 
-# Spec 18b: b70-decode dispatches on config.json's model_type; K2-Horizon runs its own engine
-# (runtime/k2, src/cli/k2_decode.h). Appended, so the lines above are unchanged.
-target_link_libraries(b70-decode PRIVATE b70_k2_runtime)
 # Spec 19c: --spec dflash (runtime::dflash::DFlashDrafter beside runtime::Engine).
 target_link_libraries(b70-decode PRIVATE b70_dflash_runtime)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_dflash_runtime)
 endif()
 # Spec 8: b70-decode --spec mtp runs b70-serve's per-request policy (server::AdaptiveK, host
-# code in b70_server); appended, as the K2 line above.
+# code in b70_server).
 target_link_libraries(b70-decode PRIVATE b70_server)
-# Spec 18c: and K2's prefill (b70_k2_prefill: K2Engine::prefill, its walk and scratch).
-target_link_libraries(b70-decode PRIVATE b70_k2_prefill)
-# Spec 20c: and Kolibri-1's engine (runtime/kolibri, src/cli/kolibri_decode.h), dispatched on model_type.
+# Spec 20c: Kolibri-1's engine (runtime/kolibri, src/cli/kolibri_decode.h), dispatched on model_type.
 target_link_libraries(b70-decode PRIVATE b70_kolibri_runtime)
 # Spec 20d: and Kolibri-1's prefill (b70_kolibri_prefill: KolibriEngine::prefill, its walk and scratch).
 target_link_libraries(b70-decode PRIVATE b70_kolibri_prefill)
-# Spec 18d: b70-serve serves K2-Horizon through its own engine (cli/k2_serve_adapter.h over
-# runtime::k2::K2Engine, whose prefill every request runs). Appended, as b70-decode's K2 lines.
-if(TARGET b70-serve)
-  target_link_libraries(b70-serve PRIVATE b70_k2_runtime b70_k2_prefill)
-endif()
 # Spec 20e: b70-serve serves Kolibri-1 through its own engine (cli/kolibri_serve.h over
 # runtime::kolibri::KolibriEngine, whose prefill every request runs). Appended, as the lines above.
 if(TARGET b70-serve)

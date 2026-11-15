@@ -215,8 +215,7 @@ std::vector<PpKvRun> pp_kv_runs(const std::array<KvLayout, kPpDevices>& stage, c
 // what each device holds whatever the split (the embedding, the head, the scratch). The
 // split in [1, n - 1] whose heavier side is smallest, ties to the more even, then the
 // smaller s. pp_auto_split adds the Qwen-family constraint (a GDN and an FA layer per
-// device); K2-Horizon, which has no ModelDesc and its own engine, is planned with this
-// alone (tests/runtime/pipeline_plan_test.cc - PP for K2 is future work).
+// device).
 struct PpBalance {
   uint32_t split = 0;
   size_t dev0 = 0, dev1 = 0;

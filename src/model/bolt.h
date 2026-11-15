@@ -8,7 +8,7 @@
 #include "model/qwen35.h"   // GemvShape, WeightKind, Fuse - the shared vocabulary, nothing else
 
 // Spec 25b Task 2: NVIDIA Nemotron 3.5 Bolt 74B-A9B (text only; `NemotronH_Omni_Reasoning_V3`, config.json model_type
-// `nemotron_h_omni` wrapping `llm_config.model_type` `nemotron_h_puzzle`) as data - a model BESIDE qwen3_5, K2-Horizon,
+// `nemotron_h_omni` wrapping `llm_config.model_type` `nemotron_h_puzzle`) as data - a model BESIDE qwen3_5,
 // Kolibri-1 and qwen4_exp: its own descriptor, loader, kernels and engine (spec 25 §8), the 24b
 // family pattern. Every number of `bolt()` is the checkpoint's own (the published config, tests/model/bolt/config.json;
 // spec 25 §1.1, §13):

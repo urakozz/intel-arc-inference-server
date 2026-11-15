@@ -57,8 +57,7 @@
 #   --push-data      first rsync (spec 15a, made on the Mac from the int4 checkpoint)
 #                    oracle-out-ornith* from this Mac - with
 #                    the A4 sets and references tools/toolcall/a4_ref.sh made here
-#                    (oracle-out-ornith-a4, oracle-out-k2-a4, oracle-out-kolibri-a4; spec 15e / 18d /
-#                    20e)
+#                    (oracle-out-ornith-a4, oracle-out-kolibri-a4; spec 15e / 20e)
 #   --out FILE       summary path (default box-validation-<date>.md in the repo root)
 #   --poll SECONDS   poll interval (default 120)
 #   --device N       the card this orchestrator runs on (default 0; ZE_AFFINITY_MASK=N, PORT
@@ -79,10 +78,10 @@
 # Env: BOX (tools/box.env), REMOTE_DIR / BOX_SUFFIX (default suffix `validate`: the tree
 # ~/b70-inference-server-validate), BASE_DIR (~/b70-inference-server-g0-<sha>), DATA_DIR
 # (the tree holding oracle-out*, default b70-inference-server), JOBS, DEVICE (0, as --device), PORT,
-# CMAKE_ARGS, SNAP_QWEN / SNAP_ORNITH / SNAP_K2 / SNAP_KOLIBRI, TOK_PYTHON, OPENCODE_LOG,
+# CMAKE_ARGS, SNAP_QWEN / SNAP_ORNITH / SNAP_KOLIBRI, TOK_PYTHON, OPENCODE_LOG,
 # A4_REF_DIR, ORACLE_IMAGE, G0_BITWISE_RE, G0_ALLOW_REMOVED, R10_RUNS, R2_ROUNDS (the server
-# rows' rounds, 3), R8_DRAFT_VOCAB (r8.auto_rows' size, 128k), K2_ORACLE_MODEL /
-# K2_REF_MIN_GB / K2_HFCHECK (r14.oracle), B70_K2_TIE_TOL (r14.golden, r15.golden), B70_KOL_TIE_TOL (r24 / r26 golden), LOCAL_DATA
+# rows' rounds, 3), R8_DRAFT_VOCAB (r8.auto_rows' size, 128k),
+# B70_KOL_TIE_TOL (r24 / r26 golden), LOCAL_DATA
 # (for --push-data).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.."
@@ -242,9 +241,9 @@ remote_env() {
   s="B70_GIT_SHA=$(q "$SHA") BV_BASE_SHA=$BASE_SHA BV_BASE_REF=$(q "$BASELINE_REF")"
   s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_NO_REUSE=$NO_REUSE BV_QUICK=$QUICK BV_MERGE=$MERGE BV_REDO=$(q "$REDO_IDS")"
   local v
-  for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \
+  for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_ORNITH SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \
            A4_REF_DIR ORACLE_IMAGE G0_BITWISE_RE G0_ALLOW_REMOVED R10_RUNS R2_ROUNDS R8_DRAFT_VOCAB \
-           K2_ORACLE_MODEL K2_REF_MIN_GB K2_HFCHECK B70_K2_TIE_TOL B70_KOL_TIE_TOL; do
+           B70_KOL_TIE_TOL; do
     if [ -n "${!v:-}" ]; then s="$s $v=$(q "${!v}")"; fi
   done
   printf '%s' "$s"
@@ -416,7 +415,7 @@ if [ "$MODE" = dry ]; then
   echo "  ssh \$BOX '$STATE_BASE_CMD'"
   if [ "$PUSH" = 1 ]; then
     echo "== 1b. --push-data"
-    echo "  rsync -a $LOCAL_DATA/oracle-out-ornith $LOCAL_DATA/oracle-out-ornith-mtp $LOCAL_DATA/oracle-out-ornith-a4 $LOCAL_DATA/oracle-out-k2-a4 $LOCAL_DATA/oracle-out-kolibri-a4 \$BOX:$DATA_DIR/   (each that exists)"
+    echo "  rsync -a $LOCAL_DATA/oracle-out-ornith $LOCAL_DATA/oracle-out-ornith-mtp $LOCAL_DATA/oracle-out-ornith-a4 $LOCAL_DATA/oracle-out-kolibri-a4 \$BOX:$DATA_DIR/   (each that exists)"
   fi
   echo "== 2. sync the tree under test"
   [ "$SYNC" = 1 ] && echo "  REMOTE_DIR=$REMOTE_DIR tools/box.sh sync   (not while another device's orchestrator runs from the tree)" || echo "  (--no-sync)"
@@ -535,7 +534,7 @@ fi
 
 if [ "$PUSH" = 1 ]; then
   # the golden sets and A4 references made on the Mac
-  for d in oracle-out-ornith oracle-out-ornith-mtp oracle-out-ornith-a4 oracle-out-k2-a4 oracle-out-kolibri-a4; do
+  for d in oracle-out-ornith oracle-out-ornith-mtp oracle-out-ornith-a4 oracle-out-kolibri-a4; do
     if [ -d "$LOCAL_DATA/$d" ]; then rsync -a "$LOCAL_DATA/$d" "$BOX:$DATA_DIR/"; else echo "push-data: no $LOCAL_DATA/$d"; fi
   done
 fi
