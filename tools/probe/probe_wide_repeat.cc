@@ -90,6 +90,20 @@ int main(int argc, char** argv) {
       e.commit(0, id);
     }
     im.copy(pk.data(), static_cast<const uint8_t*>(mb.kv_k.ptr()) + size_t(pos - 1) * rb1, pk.size());
+    // The main cache's K and V rows of the 16 R positions, every FA layer.
+    runtime::DecodeBuffers& db = e.buffers();
+    const runtime::KvLayout& kl = db.kv_lay;
+    const uint32_t fl = kl.layers;
+    auto main_kv = [&](std::vector<uint8_t>& out) {
+      out.resize(size_t(fl) * 2 * 16 * R * kl.row_bytes());
+      for (uint32_t L = 0; L < fl; ++L)
+        for (uint32_t kv = 0; kv < 2; ++kv)
+          im.copy(out.data() + (size_t(L) * 2 + kv) * 16 * R * kl.row_bytes(),
+                  static_cast<const uint8_t*>((kv ? db.kv_v : db.kv_k).ptr()) + kl.rows_offset(L) + size_t(pos) * kl.row_bytes(),
+                  16 * R * kl.row_bytes());
+    };
+    std::vector<uint8_t> pkv, wkv;
+    main_kv(pkv);
     e.load_state(saved.ptr(), pos);
     e.control()->cur_token[0] = pending;
     uint32_t kept_all = 0;
@@ -105,6 +119,7 @@ int main(int argc, char** argv) {
       e.commit(15, pids[16 * v + 15]);
     }
     im.copy(wk.data(), static_cast<const uint8_t*>(mb.kv_k.ptr()) + size_t(pos - 1) * rb1, wk.size());
+    main_kv(wkv);
     auto cosine = [](const uint8_t* x, const uint8_t* y, size_t bytes) {
       double dot = 0, na = 0, nb = 0;
       for (size_t i = 0; i < bytes; i += 2) {
@@ -123,6 +138,19 @@ int main(int argc, char** argv) {
     };
     std::printf("WIDE_VS_PLAIN %u wide verifies%s keep %u of %u plain ids\n", R, flush ? " (GDN flushed between)" : "",
                 kept_all, 15 * R);
+    for (uint32_t m = 0; m < 16 * R; ++m) {
+      double worst = 1;
+      uint32_t wl = 0, wkvi = 0;
+      for (uint32_t L = 0; L < fl; ++L)
+        for (uint32_t kv = 0; kv < 2; ++kv) {
+          const size_t o = ((size_t(L) * 2 + kv) * 16 * R + m) * kl.row_bytes();
+          const double cs = cosine(wkv.data() + o, pkv.data() + o, kl.row_bytes());
+          if (cs < worst) { worst = cs; wl = L; wkvi = kv; }
+        }
+      if (worst < 0.999)
+        std::printf("WIDE_VS_PLAIN verify %u row %2u: main %s row (position %u) worst FA layer %u cos %.6f  <<<\n", m / 16,
+                    m % 16, wkvi ? "V" : "K", pos + m, wl, worst);
+    }
     for (uint32_t m = 0; m < 16 * R; ++m) {
       const double ch = cosine(wh.data() + m * hid1, ph.data() + m * hid1, hid1);
       const double ck = cosine(wk.data() + m * rb1, pk.data() + m * rb1, rb1);
