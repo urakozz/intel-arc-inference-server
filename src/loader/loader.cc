@@ -23,6 +23,36 @@
 #include "loader/trained_context.h"
 
 namespace loader {
+
+l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
+  l0::Mem mem(ctx, l0::MemKind::Device, bytes);
+  imm.copy(mem.ptr(), src, bytes);
+  return mem;
+}
+std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
+  return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
+}
+
+std::unique_ptr<DeviceWeight> upload_lm_head(l0::Context& ctx, l0::CmdList& imm, const uint16_t* w, uint32_t hidden,
+                                             uint32_t vocab, bool int8, double& quant_seconds, size_t& bytes) {
+  const model::GemvShape sh{hidden, vocab, 1, 0};
+  if (int8) {
+    const auto q0 = std::chrono::steady_clock::now();
+    std::vector<int8_t> q(size_t(vocab) * hidden);
+    std::vector<float> s(vocab);
+    quantise_int8_tiled(w, hidden, vocab, q.data(), s.data());
+    quant_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - q0).count();
+    bytes += q.size() + s.size() * 4;
+    return std::make_unique<DeviceWeight>(DeviceWeight{
+        upload(ctx, imm, q.data(), q.size()), upload_u(ctx, imm, s.data(), s.size() * 4), sh, model::WeightKind::Int8});
+  }
+  std::vector<uint16_t> t(size_t(vocab) * hidden);
+  common::repack_bf16_tiled(w, hidden, vocab, t.data());
+  bytes += t.size() * 2;
+  return std::make_unique<DeviceWeight>(
+      DeviceWeight{upload(ctx, imm, t.data(), t.size() * 2), nullptr, sh, model::WeightKind::Bf16});
+}
+
 namespace {
 
 using model::Qwen35;
@@ -218,12 +248,6 @@ void bake_small(const model::SmallTensor& t, const uint8_t* src, uint8_t* dst, W
       return;
   }
   std::memcpy(dst, f.data(), n * 4);
-}
-
-l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  l0::Mem mem(ctx, l0::MemKind::Device, bytes);
-  imm.copy(mem.ptr(), src, bytes);
-  return mem;
 }
 
 const char* id_name(model::LinearId id) {

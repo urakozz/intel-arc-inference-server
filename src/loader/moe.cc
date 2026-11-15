@@ -78,9 +78,6 @@ LinearSrc expert_linear(const MoeSource& src, const std::string& part, uint32_t 
   return q;
 }
 
-size_t int4_src_bytes(const LinearSrc& s) {
-  return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2;
-}
 // The int4 checkpoint bytes of an expert linear: 0 when it was quantised here from bf16
 // (expert_linear counted its bf16 bytes).
 size_t int4_src_bytes(const LinearSrc& s, const RtnLinear* rtn) {

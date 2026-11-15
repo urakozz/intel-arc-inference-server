@@ -18,23 +18,6 @@
 namespace loader {
 namespace {
 
-common::json::Value read_json(const std::string& path) {
-  std::ifstream f(path);
-  if (!f) throw std::runtime_error("cannot read " + path);
-  std::stringstream s;
-  s << f.rdbuf();
-  return common::json::parse(s.str());
-}
-
-l0::Mem upload(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  l0::Mem m(ctx, l0::MemKind::Device, bytes);
-  imm.copy(m.ptr(), src, bytes);
-  return m;
-}
-std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void* src, size_t bytes) {
-  return std::make_unique<l0::Mem>(upload(ctx, imm, src, bytes));
-}
-
 void check_len(const model::Kolibri1Desc& d, uint32_t max_len, uint32_t trained) {
   if (max_len == 0) throw std::runtime_error(d.name + ": max_len 0 is not a model length");
   const uint32_t cap = trained ? trained : d.trained_max_len;
@@ -56,12 +39,6 @@ model::Kolibri1Desc desc_of(const common::json::Value& cfg, model::KolAttnForm a
     d.layers = layers_limit;
   }
   return d;
-}
-
-std::string model_type_of(const common::json::Value& cfg) {
-  if (!cfg.is_object()) return "";
-  const common::json::Value* v = cfg.find("model_type");
-  return v && v->is_string() ? v->str() : "";
 }
 
 }  // namespace
@@ -198,24 +175,7 @@ KolLoadedModel load_kolibri1(const std::vector<l0::Context*>& devices, const std
       P.final_norm = upload_u(ctx, imm, fn.data(), fn.size() * 4);
       P.bytes += fn.size() * 4;
       // lm_head: bf16 tiled for gemv_bf16, or int8 rows + fp32 scales for gemv_i8w (spec 9).
-      const uint16_t* w = ck.lm_head();
-      const model::GemvShape sh{d.hidden, d.vocab, 1, 0};
-      if (int8) {
-        const auto q0 = std::chrono::steady_clock::now();
-        std::vector<int8_t> q(size_t(d.vocab) * d.hidden);
-        std::vector<float> s(d.vocab);
-        quantise_int8_tiled(w, d.hidden, d.vocab, q.data(), s.data());
-        m.lm_head_quant_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - q0).count();
-        P.lm_head = std::make_unique<DeviceWeight>(DeviceWeight{
-            upload(ctx, imm, q.data(), q.size()), upload_u(ctx, imm, s.data(), s.size() * 4), sh, model::WeightKind::Int8});
-        P.bytes += q.size() + s.size() * 4;
-      } else {
-        std::vector<uint16_t> t(size_t(d.vocab) * d.hidden);
-        common::repack_bf16_tiled(w, d.hidden, d.vocab, t.data());
-        P.lm_head = std::make_unique<DeviceWeight>(
-            DeviceWeight{upload(ctx, imm, t.data(), t.size() * 2), nullptr, sh, model::WeightKind::Bf16});
-        P.bytes += t.size() * 2;
-      }
+      P.lm_head = upload_lm_head(ctx, imm, ck.lm_head(), d.hidden, d.vocab, int8, m.lm_head_quant_seconds, P.bytes);
     }
     const size_t want = kol_device_weight_bytes(d, placement, dev, int8);
     if (P.bytes != want)

@@ -6,6 +6,7 @@
 
 #include "common/bf16.h"
 #include "common/repack.h"
+#include "loader/rope_table.h"
 #include "loader/rtn.h"
 
 namespace loader {
@@ -55,8 +56,6 @@ void qsa_names(std::vector<std::string>& v, const std::string& b, bool dense_int
     v.push_back(b + n);
   for (const char* n : kQsaDense) lin(v, b + n, dense_int4);
 }
-
-size_t int4_src_bytes(const LinearSrc& s) { return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2; }
 
 // gate||up interleaved in 16-row blocks of an [N][K] row-major pair (cols_interleave16's column order, as
 // rows), then gemv_bf16's tiles (kolibri1_repack.cc's helper).
@@ -189,18 +188,7 @@ std::vector<std::string> q4_expected_names(const Qwen4ExpDesc& d, const model::Q
 }
 
 std::vector<float> q4_rope_table(const Qwen4ExpDesc& d, uint32_t max_len) {
-  const uint32_t half = d.rope_dims / 2;
-  const float base = float(d.rope_theta);   // 1e7 is exact in fp32
-  std::vector<float> inv(half);
-  for (uint32_t i = 0; i < half; ++i) inv[i] = 1.0f / std::pow(base, float(2 * i) / float(d.rope_dims));
-  std::vector<float> t(size_t(max_len) * 2 * half);
-  for (uint32_t p = 0; p < max_len; ++p)
-    for (uint32_t i = 0; i < half; ++i) {
-      const float ang = float(p) * inv[i];
-      t[(size_t(p) * 2 + 0) * half + i] = common::bf16_to_f32(common::f32_to_bf16(float(std::cos(double(ang)))));
-      t[(size_t(p) * 2 + 1) * half + i] = common::bf16_to_f32(common::f32_to_bf16(float(std::sin(double(ang)))));
-    }
-  return t;
+  return bf16_rope_table(d.rope_dims, float(d.rope_theta), max_len);   // 1e7 is exact in fp32
 }
 
 Q4LayerBytes Q4HostLayer::bytes() const {
