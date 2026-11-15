@@ -335,7 +335,7 @@ int main(int argc, char** argv) {
       std::printf("B5 slot %u: batched drafts %u %u %u, alone %u %u %u; candidates matched by id: max |score diff| "
                   "%.2e, %u not among the lone ones\n",
                   q, bat_d[q][0], bat_d[q][1], bat_d[q][2], lone_d[q][0], lone_d[q][1], lone_d[q][2], worst, unmatched);
-      b5 &= worst < 1e-2f && unmatched <= 2;
+      b5 &= bat_d[q] == lone_d[q] && worst < 0.1f && unmatched <= 2;   // KS 1 against KS 4: the judged form
     }
     std::printf("B5: %s\n", b5 ? "ok" : "WRONG");
     ok &= b5;

@@ -55,7 +55,9 @@ class SlotsEngine : public server::BatchEngineIface {
     if (dflash && !df_) throw std::invalid_argument("SlotsEngine: --spec dflash without the engine's drafter");
     for (uint32_t s = 0; s < e_.slots(); ++s) {
       e_.select(s);
-      adapters_.push_back(std::make_unique<EngineAdapter>(e_, vocab_used, mtp_k, lookup, dflash));
+      // beside a drafter a further slot verifies K <= 3 (its 4 GDN states): its adapter's deepest K is its own
+      const uint32_t k = dflash ? std::min(mtp_k, e_.max_draft()) : mtp_k;
+      adapters_.push_back(std::make_unique<EngineAdapter>(e_, vocab_used, k, lookup, dflash));
     }
     e_.select(0);
     pending_.resize(e_.slots());
