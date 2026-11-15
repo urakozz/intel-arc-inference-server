@@ -2312,6 +2312,9 @@ for f in "$@"; do printf '%s\n' "$out" | grep -qF -- "$f" || { echo "cli_serve_h
 ]==] cli_serve_help $<TARGET_FILE:b70-serve> --spec --spec-max --draft-model --max-num-seqs --max-len --parallel
     --pipeline-split --host --port --log-requests --prefix-cache-gb --prefix-split-last --layers --kv-cache
     --prefill-backend --draft-vocab --draft-vocab-ids)
+  # README.md's flag tables against both binaries' generated --help: the same flags, the same defaults.
+  add_test(NAME cli_readme_flags COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/cli/readme_flags_test.py
+    ${CMAKE_SOURCE_DIR}/README.md $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode>)
 endif()
 
 

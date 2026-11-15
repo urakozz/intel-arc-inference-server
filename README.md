@@ -140,7 +140,7 @@ Developer flags (`b70-decode`):
 | `--prefill-chunk C` | `2048` | positions per prefill chunk, at most 4096 |
 | `--profile`, `--steps N`, `--repeats R` | -, `32`, `1` | per-launch timing of the decode step |
 | `--pipeline-split auto\|N` | `auto` | with `pp`: where the layers are cut |
-| `--draft-vocab off\|32k\|64k\|128k`, `--draft-vocab-ids FILE` | `off` | MTP guesses from a smaller vocabulary (also on `b70-serve`) |
+| `--draft-vocab off\|32k\|64k\|128k`, `--draft-vocab-ids FILE` | `off` | MTP guesses from a smaller vocabulary (`b70-serve`) |
 | `--spec lookup\|dflash-lookup` (`b70-serve`) | - | prompt lookup alone (verified through the MTP lists), or inside DFlash (what `dflash` already does) |
 
 Environment variables (test switches, tool settings, the Hugging Face cache): [docs/environment-variables.md](docs/environment-variables.md).

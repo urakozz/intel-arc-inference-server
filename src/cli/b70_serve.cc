@@ -27,6 +27,7 @@
 #include "cli/bolt_serve.h"     // spec 25e: BoltEngineAdapterT, the generation defaults, the refusals
 #include "cli/bolt_spec.h"      // spec 26c: --spec dflash / lookup for Bolt (LiLiCorr)
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
+#include "cli/flags.h"
 #include "cli/hardware_gate.h"
 #include "cli/stdout_to_stderr.h"
 #include "cli/kolibri_decode.h"
@@ -75,6 +76,75 @@ void stop_server(int) {
   if (g_server != nullptr) g_server->stop();
 }
 
+// The flags (cli/flags.h: each member is its flag, its default and its --help text).
+using cli::flags::Arg;
+using cli::flags::Help;
+using cli::flags::Section;
+struct Flags {
+  [[=Help("S", "speculative decoding: auto, off, mtp, dflash. auto: Qwen3.8's DFlash\n"
+               "drafter on one card (and replica) when it is in the HF cache, else the model's\n"
+               "MTP head (Qwen3.8 under --parallel tp or pp or with slots; Ornith), off\n"
+               "elsewhere; the startup log says which and why. dflash on one card\n"
+               "also copies earlier repeats (prompt lookup). Greedy output unchanged.\n"
+               "Nemotron 3.5 Bolt (opt-in): lookup and dflash (its LiLiCorr\n"
+               "drafter on the last card), both over its own verify lists.")]]
+  std::string spec = "auto";   // + the developer values lookup, dflash-lookup (cli/spec_args.h)
+  [[=Help("K", "the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash; Bolt's lookup\ntoo).", "the most")]]
+  Arg<uint32_t> spec_max;   // its range is the proposer's: checked below
+  [[=Help("P", "--spec dflash's drafter. Qwen3.8: required, urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound\n"
+               "(packed int4) or z-lab/Qwen3.8-27B-DFlash2 (int8 at load). Bolt's default:\n"
+               "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.")]]
+  Arg<std::string> draft_model;
+  [[=Help("N", "how many requests run at once (vLLM's flag); the context follows. 1:\n"
+               "one request at the largest context that fits. N > 1 (Qwen3.8): a\n"
+               "card holds up to 4 slots - slot 0 the largest context that fits beside N - 1\n"
+               "slots of 32768 positions (e.g. 131072 + 3 x 32768); one card up to 4, two cards\n"
+               "(replica, the slots split between the cards) up to 8. A request that reaches its\n"
+               "slot's end finishes with \"length\" and is logged. Ornith: 2 on two cards\n"
+               "(replica, one request a card).")]]
+  Arg<uint32_t> max_num_seqs{1};   // operator 2026-11-11 (cli/pipeline_args.h)
+  [[=Help("auto|L", "auto: the largest context that fits beside the weights (beside the\n"
+                    "other slots with --max-num-seqs), at most the trained one; L: slot 0 exactly L,\n"
+                    "any multiple of 256 up to the trained context, refused if it does not fit.")]]
+  std::string max_len = "auto";   // spec 6 §10
+  [[=Help("P", "auto: Qwen3.8 on two cards runs tp at --max-num-seqs 1 with --max-len\n"
+               "auto and replica at --max-num-seqs above 1; otherwise one card when the model\n"
+               "and the asked context fit it, else pp; 1: one card; pp: the\n"
+               "layers split over two cards. Kolibri-1 and\n"
+               "Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
+               "replica (Qwen3.8, Ornith): the model on both cards, one engine each -\n"
+               "--max-num-seqs 2 to 8 (Ornith: 2; 2 when not given: one request a card), each\n"
+               "exactly what it is alone; Qwen3.8's --spec dflash: a drafter on each card,\n"
+               "--max-num-seqs 2.\n"
+               "tp (Qwen3.8): every layer split over both cards (needs peer\n"
+               "access) - one request at a time, faster; --spec auto / mtp / lookup.")]]
+  std::string parallel = "auto";
+  [[=Help("auto|N", "pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
+                    "holds the fewest bytes). An override, for experiments; it implies pp.")]]
+  Arg<std::string> pipeline_split{"auto"};
+  [[=Help("H", "the address to listen on.")]] std::string host = "0.0.0.0";
+  [[=Help("P", "the port to listen on.")]] uint32_t port = 8000;
+  [[=Help("DIR", "write DIR/NNNNNN.json per request (timings, ids, text).")]] std::string log_requests;
+  [[=Help("auto|N", "the prefix cache in SYSTEM RAM (pinned host memory), GiB. auto:\n"
+                    "min(32, half the RAM, available - 8), off below 4; 0 = off.")]]
+  std::string prefix_cache_gb = "auto";   // spec 7 (cli/prefix_cache_size.h)
+  [[=Help("", "chat requests: prefill to len - 1 and run the last id as one decode\n"
+              "step, so a thinking model's next turn is a prefix cache hit right there (agentic sessions;\n"
+              "off for benchmarks and the golden gates).")]]
+  bool prefix_split_last = false;
+  [[=Help("N|auto", "Qwen3.8-Flash-Next only, REQUIRED (the whole model needs the expert tier, not\n"
+                    "built yet): load its first N layers (development mode); its PLE int8 file is\n"
+                    "<snapshot>-ple-int8/.")]]
+  Arg<std::string> layers;   // spec 21e (until spec 22)
+  [[=Section("\n  Still being measured (they go when their numbers decide, docs/open-work.md):\n"),
+    =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
+  std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
+  [[=Help("l0|l0-int8", "the prompt pass: bf16, or int8 on the matrix engines.", "l0")]] Arg<std::string> prefill_backend;
+  [[=Help("off|32k|64k|128k", "the MTP head's (or DFlash drafter's) draft vocabulary.")]]
+  std::string draft_vocab = "off";   // spec 8 §11: off until the box rows decide
+  [[=Help("FILE", "the draft vocabulary's ids (with --draft-vocab).")]] std::string draft_vocab_ids;
+};
+
 void usage() {
   std::print(stderr,
              "usage: b70-serve <snapshot-or-repo> [--spec auto|off|mtp|lookup|dflash] [--max-num-seqs N]\n"
@@ -88,67 +158,8 @@ void usage() {
              "  is refused at startup, naming why. Cards: Intel Arc Pro B70, one or two (peer access between\n"
              "  them); ZE_AFFINITY_MASK picks which the driver shows.\n"
              "\n"
-             "  --spec S        speculative decoding: auto (default), off, mtp, dflash. auto: Qwen3.8's DFlash\n"
-             "                  drafter on one card (and replica) when it is in the HF cache, else the model's\n"
-             "                  MTP head (Qwen3.8 under --parallel tp or pp or with slots; Ornith), off\n"
-             "                  elsewhere; the startup log says which and why. dflash on one card\n"
-             "                  also copies earlier repeats (prompt lookup). Greedy output unchanged.\n"
-             "                  Nemotron 3.5 Bolt (opt-in): lookup and dflash (its LiLiCorr\n"
-             "                  drafter on the last card), both over its own verify lists.\n"
-             "  --spec-max K    the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash; Bolt's lookup\n"
-             "                  too). Default the most.\n"
-             "  --draft-model P --spec dflash's drafter. Qwen3.8: required, urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound\n"
-             "                  (packed int4) or z-lab/Qwen3.8-27B-DFlash2 (int8 at load). Bolt's default:\n"
-             "                  nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.\n"
-             "  --max-num-seqs N   how many requests run at once (vLLM's flag); the context follows. 1\n"
-             "                  (default): one request at the largest context that fits. N > 1 (Qwen3.8): a\n"
-             "                  card holds up to 4 slots - slot 0 the largest context that fits beside N - 1\n"
-             "                  slots of 32768 positions (e.g. 131072 + 3 x 32768); one card up to 4, two cards\n"
-             "                  (replica, the slots split between the cards) up to 8. A request that reaches its\n"
-             "                  slot's end finishes with \"length\" and is logged. Ornith: 2 on two cards\n"
-             "                  (replica, one request a card).\n"
-             "  --max-len L     auto (default): the largest context that fits beside the weights (beside the\n"
-             "                  other slots with --max-num-seqs), at most the trained one; L: slot 0 exactly L,\n"
-             "                  any multiple of 256 up to the trained context, refused if it does not fit.\n"
-             "  --parallel P    auto (default): Qwen3.8 on two cards runs tp at --max-num-seqs 1 with --max-len\n"
-             "                  auto and replica at --max-num-seqs above 1; otherwise one card when the model\n"
-             "                  and the asked context fit it, else pp; 1: one card; pp: the\n"
-             "                  layers split over two cards. Kolibri-1 and\n"
-             "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
-             "                  replica (Qwen3.8, Ornith): the model on both cards, one engine each -\n"
-             "                  --max-num-seqs 2 to 8 (Ornith: 2; 2 when not given: one request a card), each\n"
-             "                  exactly what it is alone; Qwen3.8's --spec dflash: a drafter on each card,\n"
-             "                  --max-num-seqs 2.\n"
-             "                  tp (Qwen3.8): every layer split over both cards (needs peer\n"
-             "                  access) - one request at a time, faster; --spec auto / mtp / lookup.\n"
-             "  --pipeline-split auto|N   pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
-             "                  holds the fewest bytes). An override, for experiments; it implies pp.\n"
-             "  --host H, --port P   where to listen (0.0.0.0:8000).\n"
-             "  --log-requests DIR   write DIR/NNNNNN.json per request (timings, ids, text).\n"
-             "  --prefix-cache-gb auto|N   the prefix cache in SYSTEM RAM (pinned host memory), GiB. auto\n"
-             "                  (default): min(32, half the RAM, available - 8), off below 4; 0 = off.\n"
-             "  --prefix-split-last   chat requests: prefill to len - 1 and run the last id as one decode\n"
-             "                  step, so a thinking model's next turn is a prefix cache hit right there (agentic sessions;\n"
-             "                  off for benchmarks and the golden gates).\n"
-             "  --layers N|auto Qwen3.8-Flash-Next only, REQUIRED (the whole model needs the expert tier, not\n"
-             "                  built yet): load its first N layers (development mode); its PLE int8 file is\n"
-             "                  <snapshot>-ple-int8/.\n"
-             "\n"
-             "  Still being measured (they go when their numbers decide, docs/open-work.md):\n"
-             "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8,\n"
-             "  --draft-vocab off|32k|64k|128k [--draft-vocab-ids FILE].\n");
-}
-
-uint32_t parse_u32(const char* what, const std::string& value) {
-  if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos ||
-      value.size() > 10) {
-    throw std::runtime_error(std::string(what) + " expects a non-negative integer, got '" +
-                             value + "'");
-  }
-  const unsigned long long parsed = std::stoull(value);
-  if (parsed > 0xFFFFFFFFull)
-    throw std::runtime_error(std::string(what) + " is out of range: " + value);
-  return static_cast<uint32_t>(parsed);
+             "{}",
+             cli::flags::help<Flags>(18));
 }
 
 std::vector<uint32_t> eos_ids(const std::string& snapshot_dir) {
@@ -1026,110 +1037,49 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
 
 int run(int argc, char** argv) {
   std::string path;
+  Flags f;
+  if (!cli::flags::parse(argc, argv, f, path, usage)) {
+    usage();
+    return 0;
+  }
   server::Options options;
-  cli::MaxLenArg max_len_arg;   // spec 6 §10: auto unless --max-len N
-  runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
+  options.host = f.host;
+  if (f.port > 65535) throw std::runtime_error("--port is out of range");
+  options.port = static_cast<int>(f.port);
+  options.log_requests_dir = f.log_requests;
+  options.prefix_split_last = f.prefix_split_last;
+  cli::MaxLenArg max_len_arg = cli::parse_max_len(f.max_len);
+  runtime::KvCache kv_cache = f.kv_cache.empty() ? runtime::default_kv_cache() : cli::parse_kv_cache_arg(f.kv_cache);
   // The zero-config cleanup (operator 2026-11-06): the engine decides these - the device memory the plan
   // leaves free (runtime::kDefaultReserveGb), the int8 lm_head (spec 9, every served model), the request
   // queue (server::Options::queue_depth) and the served name (cli::served_name, from the model).
   const size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   const loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
-  std::string pp_backend_arg;
-  bool have_pp_backend = false;
+  const std::string pp_backend_arg = f.prefill_backend.value;
+  const bool have_pp_backend = f.prefill_backend.given;
   // Spec 7: system RAM, not VRAM; auto by default (cli/prefix_cache_size.h).
-  bool prefix_auto = true;
-  uint32_t prefix_cache_gb = 0;
-  // --spec auto|off|mtp|dflash (+ the developer values lookup, dflash-lookup; cli/spec_args.h); --spec-max K its one cap.
-  std::string spec_arg = "auto";
-  uint32_t spec_max = 0;
-  bool have_spec_max = false;
+  const bool prefix_auto = f.prefix_cache_gb == "auto";
+  const uint32_t prefix_cache_gb = prefix_auto ? 0 : cli::flags::parse_u32("--prefix-cache-gb", f.prefix_cache_gb);
+  std::string spec_arg = cli::parse_spec(f.spec);
+  uint32_t spec_max = f.spec_max.value;
+  const bool have_spec_max = f.spec_max.given;
   cli::dflash::Args dflash;   // spec 19c: --spec dflash's drafter (--draft-model)
-  // Spec 8 §11: off until the box rows decide (§11 "Gates").
+  dflash.model = f.draft_model.value;
+  dflash.have_model = f.draft_model.given;
   uint32_t draft_vocab = 0;
-  std::string draft_vocab_ids;
-  cli::PipelineArgs pipe;   // --parallel, --pipeline-split
-  // --max-num-seqs (operator 2026-11-11): requests at once, the user's choice; 1 by default (cli/pipeline_args.h).
-  uint32_t max_num_seqs = 1;
-  bool have_max_num_seqs = false;
+  if (!loader::parse_draft_vocab(f.draft_vocab, draft_vocab))
+    throw std::runtime_error("--draft-vocab expects off, 32k, 64k or 128k, got '" + f.draft_vocab + "'");
+  const std::string draft_vocab_ids = f.draft_vocab_ids;
+  cli::PipelineArgs pipe;
+  cli::parse_parallel(f.parallel, pipe);
+  if (f.pipeline_split.given) cli::parse_pipeline_split(f.pipeline_split.value, pipe);
+  if (f.max_num_seqs.value == 0) throw std::runtime_error("--max-num-seqs 0 would serve no request");
+  uint32_t max_num_seqs = f.max_num_seqs.value;
+  const bool have_max_num_seqs = f.max_num_seqs.given;
   // Spec 21e: Qwen3.8-Flash-Next only - its development mode (--layers N|auto until spec 22).
-  uint32_t q4_layers = 0;
-  bool q4_layers_auto = false, have_q4_layers = false;
-
-  auto value = [&](int& i, const char* flag) -> std::string {
-    if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
-    return argv[i];
-  };
-  for (int i = 1; i < argc; ++i) {
-    const std::string arg = argv[i];
-    if (arg == "-h" || arg == "--help") {
-      usage();
-      return 0;
-    } else if (arg == "--host") {
-      options.host = value(i, "--host");
-    } else if (arg == "--port") {
-      const uint32_t port = parse_u32("--port", value(i, "--port"));
-      if (port > 65535) throw std::runtime_error("--port is out of range");
-      options.port = static_cast<int>(port);
-    } else if (arg == "--max-len") {
-      max_len_arg = cli::parse_max_len(value(i, "--max-len"));
-    } else if (arg == "--max-num-seqs") {
-      max_num_seqs = parse_u32("--max-num-seqs", value(i, "--max-num-seqs"));
-      if (max_num_seqs == 0) throw std::runtime_error("--max-num-seqs 0 would serve no request");
-      have_max_num_seqs = true;
-    } else if (arg == "--log-requests") {
-      options.log_requests_dir = value(i, "--log-requests");
-    } else if (arg == "--prefix-cache-gb") {
-      const std::string v = value(i, "--prefix-cache-gb");
-      prefix_auto = v == "auto";
-      if (!prefix_auto) prefix_cache_gb = parse_u32("--prefix-cache-gb", v);
-    } else if (arg == "--prefix-split-last") {
-      options.prefix_split_last = true;
-    } else if (arg == "--spec") {
-      spec_arg = cli::parse_spec(value(i, "--spec"));
-    } else if (arg == "--spec-max") {
-      spec_max = parse_u32("--spec-max", value(i, "--spec-max"));
-      have_spec_max = true;   // its range is the proposer's: checked below
-    } else if (arg == "--draft-model") {   // spec 19c
-      dflash.model = value(i, "--draft-model");
-      dflash.have_model = true;
-    } else if (arg == "--prefill-backend") {
-      pp_backend_arg = value(i, "--prefill-backend");
-      have_pp_backend = true;
-    } else if (arg == "--draft-vocab") {
-      const std::string v = value(i, "--draft-vocab");
-      if (!loader::parse_draft_vocab(v, draft_vocab))
-        throw std::runtime_error("--draft-vocab expects off, 32k, 64k or 128k, got '" + v + "'");
-    } else if (arg == "--draft-vocab-ids") {
-      draft_vocab_ids = value(i, "--draft-vocab-ids");
-    } else if (arg == "--kv-cache") {   // spec 12b
-      kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
-    } else if (arg == "--parallel") {
-      cli::parse_parallel(value(i, "--parallel"), pipe);
-    } else if (arg == "--pipeline-split") {
-      cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
-    } else if (arg == "--layers") {   // spec 21e: Qwen3.8-Flash-Next only (also `auto`)
-      const std::string v = value(i, "--layers");
-      have_q4_layers = true;
-      if (v == "auto") {
-        q4_layers_auto = true;
-      } else {
-        q4_layers = parse_u32("--layers", v);
-        if (q4_layers == 0) throw std::runtime_error("--layers 0 would load no layer");
-      }
-    } else if (!arg.empty() && arg[0] == '-') {
-      usage();
-      throw std::runtime_error("unknown option '" + arg + "'");
-    } else if (path.empty()) {
-      path = arg;
-    } else {
-      usage();
-      throw std::runtime_error("unexpected extra argument '" + arg + "'");
-    }
-  }
-  if (path.empty()) {
-    usage();
-    throw std::runtime_error("a snapshot directory or HF repo id is required");
-  }
+  const bool have_q4_layers = f.layers.given, q4_layers_auto = have_q4_layers && f.layers.value == "auto";
+  const uint32_t q4_layers = have_q4_layers && !q4_layers_auto ? cli::flags::parse_u32("--layers", f.layers.value) : 0;
+  if (have_q4_layers && !q4_layers_auto && q4_layers == 0) throw std::runtime_error("--layers 0 would load no layer");
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   options.served_model = cli::served_name(path);
   cli::resolve_overrides(pipe);   // --pipeline-split under --parallel auto: pp

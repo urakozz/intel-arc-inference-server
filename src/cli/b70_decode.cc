@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "cli/dflash_args.h"   // spec 19c: --spec dflash
+#include "cli/flags.h"
 #include "cli/hardware_gate.h"
 #include "cli/stdout_to_stderr.h"
 #include "cli/kolibri_decode.h"
@@ -96,6 +97,60 @@ constexpr size_t kBenchPromptLen = sizeof(kBenchPrompt) / sizeof(kBenchPrompt[0]
 //        device constant.
 constexpr double kDeviceGBs = 590.0;              // GB/s, measured
 
+// The flags (cli/flags.h: each member is its flag, its default and its --help text).
+using cli::flags::Arg;
+using cli::flags::Help;
+using cli::flags::Section;
+struct Flags {
+  [[=Help("<file>", "whitespace-separated token ids")]] std::string ids;
+  [[=Help("<N>", "ids to generate, greedily; t/s on stderr")]] Arg<uint32_t> n;
+  [[=Help("", "run the prompt through the engine's prefill instead of one decode replay per id")]] bool prefill = false;
+  [[=Help("S", "--ids only: off, mtp (the MTP head, adaptive K <= --spec-max 1..3;\n"
+               "Qwen3.8, Ornith) or dflash (Qwen3.8's DFlash drafter, K <= --spec-max\n"
+               "1..7, one card; --draft-model PATH, required). Greedy: the ids equal the plain run's.")]]
+  Arg<std::string> spec{"off"};   // a developer tool: the plain list unless asked (cli/spec_args.h)
+  [[=Help("K", "the proposer's cap (see --spec).", "the most")]] Arg<uint32_t> spec_max;
+  [[=Help("PATH", "--spec dflash's drafter.")]] Arg<std::string> draft_model;   // spec 19c
+  // Spec 6 §10: 16384 stays the default here, so bench rows stay comparable; `auto` plans the largest max_len that
+  // fits, as b70-serve's default does.
+  [[=Help("L", "KV cache and RoPE capacity (16384 keeps bench rows comparable); any\n"
+               "multiple of 256 up to the trained context, refused if it does not fit; auto =\n"
+               "the largest that fits.")]]
+  std::string max_len = "16384";
+  [[=Help("P", "auto: one card when the model and the context fit it, else pp; 1;\n"
+               "pp: the layers over two cards (--prefill runs the two-card chunk\n"
+               "pipeline). Kolibri-1 and Nemotron 3.5 Bolt default to two cards.\n"
+               "tp (Qwen3.8): tensor parallel, every layer split over two cards\n"
+               "(--prefill and --spec mtp / auto run on both cards).")]]
+  std::string parallel = "auto";
+  [[=Help("auto|N", "pp: device 0 runs layers [0, N); an override, it implies pp.")]] Arg<std::string> pipeline_split{"auto"};
+  [[=Help("N|auto", "Kolibri-1 / Nemotron 3.5 Bolt / Qwen3.8-Flash-Next: load only the first N layers\n"
+                    "(development mode; Flash-Next REQUIRES it - the whole model needs the expert tier, not\n"
+                    "built yet - and also takes auto).")]]
+  Arg<std::string> layers;   // spec 20c, Kolibri-1; spec 21c, Qwen3.8-Flash-Next
+  [[=Section("\ndeveloper (benchmarks and profiles):\n"),
+    =Help("", "ingest --depth synthetic ids, then time --tg generated ones; a markdown row\non stdout.")]]
+  bool bench = false;
+  [[=Help("D", "--bench / --profile: synthetic ids of context before decoding.")]] Arg<uint32_t> depth{4096};
+  [[=Help("N", "--bench: ids to generate and time.")]] Arg<uint32_t> tg{256};
+  [[=Help("N", "--bench only, exclusive with --depth: prefill N synthetic ids and print\n"
+               "a SECOND row with the device-side prefill time.")]]
+  Arg<uint32_t> prefill_length;
+  [[=Help("C", "--prefill-length / --prefill: positions per chunk, at most 4096 (the\n"
+               "session's chunk cap; above 2048 the buffers hold 4096-row chunks, planned).", "2048")]]
+  Arg<uint32_t> prefill_chunk;
+  [[=Help("", "ingest --depth synthetic ids, then replay --steps INSTRUMENTED steps and print\n"
+              "the per-launch anatomy (never a bench row).")]]
+  bool profile = false;
+  [[=Help("N", "--profile: instrumented steps.")]] Arg<uint32_t> steps{32};
+  [[=Help("R", "--profile: R sessions over one ingest, a per-family mean +/- spread table.")]] Arg<uint32_t> repeats{1};
+  [[=Section("\nstill being measured (they go when their numbers decide, docs/open-work.md):\n"),
+    =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
+  std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
+  [[=Help("l0|l0-int8", "--prefill-length / --prefill: bf16, or int8 on the matrix engines.", "l0")]]
+  Arg<std::string> prefill_backend;
+};
+
 void usage() {
   std::print(
       stderr,
@@ -110,52 +165,12 @@ void usage() {
       "\n"
       "  <snapshot-or-repo>  a snapshot directory, or an HF repo id resolved against the local\n"
       "                 cache ($HF_HOME or ~/.cache/huggingface). Never downloads.\n"
-      "  --ids <file>   whitespace-separated token ids\n"
-      "  --n <N>        ids to generate, greedily; t/s on stderr\n"
-      "  --prefill      run the prompt through the engine's prefill instead of one decode replay per id\n"
-      "  --spec S       --ids only: off (default), mtp (the MTP head, adaptive K <= --spec-max 1..3;\n"
-      "                 Qwen3.8, Ornith) or dflash (Qwen3.8's DFlash drafter, K <= --spec-max\n"
-      "                 1..7, one card; --draft-model PATH, required). Greedy: the ids equal the plain run's.\n"
-      "  --max-len L    KV cache and RoPE capacity: default 16384 (bench rows stay comparable); any\n"
-      "                 multiple of 256 up to the trained context, refused if it does not fit; auto =\n"
-      "                 the largest that fits\n"
-      "  --parallel P   auto (default): one card when the model and the context fit it, else pp; 1;\n"
-      "                 pp: the layers over two cards (--prefill runs the two-card chunk\n"
-      "                 pipeline). Kolibri-1 and Nemotron 3.5 Bolt default to two cards.\n"
-      "                 tp (Qwen3.8): tensor parallel, every layer split over two cards\n"
-      "                 (--prefill and --spec mtp / auto run on both cards).\n"
-      "  --pipeline-split auto|N   pp: device 0 runs layers [0, N); an override, it implies pp.\n"
-      "  Kolibri-1 / Nemotron 3.5 Bolt / Qwen3.8-Flash-Next: --layers N (and Flash-Next's REQUIRED\n"
-      "                 --layers N|auto: the whole model needs the expert tier, not built yet) loads only\n"
-      "                 the first N layers (development mode).\n"
-      "\n"
-      "developer (benchmarks and profiles):\n"
-      "  --bench        ingest --depth synthetic ids, then time --tg generated ones; a markdown row\n"
-      "                 on stdout. [--depth 4096] [--tg 256]\n"
-      "  --prefill-length N  --bench only, exclusive with --depth: prefill N synthetic ids and print\n"
-      "                 a SECOND row with the device-side prefill time\n"
-      "  --prefill-chunk C  --prefill-length / --prefill: positions per chunk, at most 4096 (default the\n"
-      "                 session's chunk cap, 2048; above 2048 the buffers hold 4096-row chunks, planned)\n"
-      "  --profile      ingest --depth synthetic ids, then replay --steps INSTRUMENTED steps and print\n"
-      "                 the per-launch anatomy (never a bench row). [--steps 32] [--repeats R: R\n"
-      "                 sessions over one ingest, a per-family mean +/- spread table]\n"
-      "  --layers N     load only the first N layers (numeric: every model with a development mode)\n"
-      "  B70_PREFILL_PROFILE=1   per-phase prefill timings on stderr (diagnostic)\n"
-      "\n"
-      "still being measured (they go when their numbers decide, docs/open-work.md):\n"
-      "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8\n");
+      "{}"
+      "  B70_PREFILL_PROFILE=1   per-phase prefill timings on stderr (diagnostic)\n",
+      cli::flags::help<Flags>(17));
 }
 
 using cli::StdoutToStderr;
-
-uint32_t parse_u32(const char* what, const std::string& s) {
-  if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos || s.size() > 10)
-    throw std::runtime_error(std::string(what) + " expects a non-negative integer, got '" + s + "'");
-  const unsigned long long v = std::stoull(s);
-  if (v > 0xFFFFFFFFull)
-    throw std::runtime_error(std::string(what) + " is out of range: " + s);
-  return uint32_t(v);
-}
 
 std::vector<uint32_t> read_ids(const std::string& path) {
   std::ifstream f(path);
@@ -163,7 +178,7 @@ std::vector<uint32_t> read_ids(const std::string& path) {
   std::vector<uint32_t> ids;
   std::string w;
   while (f >> w) {
-    const uint32_t id = parse_u32(("--ids file '" + path + "'").c_str(), w);
+    const uint32_t id = cli::flags::parse_u32("--ids file '" + path + "'", w);
     // Not kVocabUsed: rows [kVocabUsed, kVocab) exist in the embedding table
     // and a checkpoint may legitimately spell one. Beyond kVocab the gather
     // would read past the allocation, so that is the hard bound.
@@ -708,117 +723,45 @@ int generate_dflash(runtime::Engine& eng, uint32_t n, uint32_t max_k) {
 }
 
 int run(int argc, char** argv) {
-  std::string path, ids_path;
-  uint32_t n = 0, depth = 4096, tg = 256, steps = 32, repeats = 1, max_len = 16384;
-  // Spec 6 §10: 16384 stays the default here, so bench rows stay comparable; `auto`
-  // plans the largest max_len that fits, as b70-serve's default does.
-  cli::MaxLenArg max_len_arg{false, max_len};
+  std::string path;
+  Flags f;
+  if (!cli::flags::parse(argc, argv, f, path, usage)) {
+    usage();
+    return 0;
+  }
+  const std::string ids_path = f.ids;
+  uint32_t n = f.n.value, depth = f.depth.value, tg = f.tg.value, steps = f.steps.value,
+           repeats = f.repeats.value;
+  cli::MaxLenArg max_len_arg = cli::parse_max_len(f.max_len);
+  uint32_t max_len = max_len_arg.value;   // 0 for auto until cli::settle
   // The zero-config cleanup (operator 2026-11-06): the engine decides the device memory the plan leaves free
   // (runtime::kDefaultReserveGb), the lm_head (int8, as b70-serve: spec 9 - loader::LmHeadForm stays the tests'
   // seam for the checkpoint's bf16 head) and the card (card 0 of what Level Zero shows; two cards: 0 and 1).
   const size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   const loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
-  uint32_t prefill_len = 0, pp_chunk = 0;
-  bool bench = false, profile = false, have_n = false, prefill = false;
-  bool have_depth = false, have_tg = false, have_steps = false, have_repeats = false;
-  bool have_prefill_len = false, have_pp_chunk = false;
-  std::string pp_backend_arg;
-  bool have_pp_backend = false;
-  // --spec (cli/spec_args.h): b70-decode's default is off (a developer tool: the plain list unless asked); --ids only.
-  std::string spec_arg = "off";
-  bool have_spec = false;
-  uint32_t spec_max = 0;
-  bool have_spec_max = false;
+  const uint32_t prefill_len = f.prefill_length.value, pp_chunk = f.prefill_chunk.value;
+  const bool bench = f.bench, profile = f.profile, have_n = f.n.given, prefill = f.prefill;
+  const bool have_depth = f.depth.given, have_tg = f.tg.given, have_steps = f.steps.given,
+             have_repeats = f.repeats.given;
+  const bool have_prefill_len = f.prefill_length.given, have_pp_chunk = f.prefill_chunk.given;
+  const std::string pp_backend_arg = f.prefill_backend.value;
+  const bool have_pp_backend = f.prefill_backend.given;
+  const std::string spec_arg = cli::parse_spec(f.spec.value);
+  const bool have_spec = f.spec.given;
+  const uint32_t spec_max = f.spec_max.value;
+  const bool have_spec_max = f.spec_max.given;
   cli::dflash::Args dflash;
-  runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
-  cli::PipelineArgs pipe;   // --parallel, --pipeline-split
-  uint32_t layers = 0;      // spec 20c: --layers N (Kolibri-1's development mode)
-  bool have_layers = false;
-  bool layers_auto = false; // spec 21c: --layers auto (Qwen3.8-Flash-Next's planner N)
+  dflash.model = f.draft_model.value;
+  dflash.have_model = f.draft_model.given;
+  runtime::KvCache kv_cache = f.kv_cache.empty() ? runtime::default_kv_cache() : cli::parse_kv_cache_arg(f.kv_cache);
+  cli::PipelineArgs pipe;
+  cli::parse_parallel(f.parallel, pipe);
+  if (f.pipeline_split.given) cli::parse_pipeline_split(f.pipeline_split.value, pipe);
+  const bool have_layers = f.layers.given;
+  const bool layers_auto = have_layers && f.layers.value == "auto";   // spec 21c: Qwen3.8-Flash-Next's planner N
+  const uint32_t layers = have_layers && !layers_auto ? cli::flags::parse_u32("--layers", f.layers.value) : 0;
+  if (have_layers && !layers_auto && layers == 0) throw std::runtime_error("--layers 0 would load no layer");
 
-  auto value = [&](int& i, const char* flag) -> std::string {
-    if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
-    return argv[i];
-  };
-  for (int i = 1; i < argc; ++i) {
-    const std::string a = argv[i];
-    if (a == "-h" || a == "--help") {
-      usage();
-      return 0;
-    } else if (a == "--ids") {
-      ids_path = value(i, "--ids");
-    } else if (a == "--n") {
-      n = parse_u32("--n", value(i, "--n"));
-      have_n = true;
-    } else if (a == "--prefill") {
-      prefill = true;
-    } else if (a == "--max-len") {
-      max_len_arg = cli::parse_max_len(value(i, "--max-len"));
-      max_len = max_len_arg.value;   // 0 for auto until cli::settle
-    } else if (a == "--bench") {
-      bench = true;
-    } else if (a == "--profile") {
-      profile = true;
-    } else if (a == "--depth") {
-      depth = parse_u32("--depth", value(i, "--depth"));
-      have_depth = true;
-    } else if (a == "--prefill-length") {
-      prefill_len = parse_u32("--prefill-length", value(i, "--prefill-length"));
-      have_prefill_len = true;
-    } else if (a == "--prefill-chunk") {
-      pp_chunk = parse_u32("--prefill-chunk", value(i, "--prefill-chunk"));
-      have_pp_chunk = true;
-    } else if (a == "--prefill-backend") {
-      pp_backend_arg = value(i, "--prefill-backend");
-      have_pp_backend = true;
-    } else if (a == "--tg") {
-      tg = parse_u32("--tg", value(i, "--tg"));
-      have_tg = true;
-    } else if (a == "--steps") {
-      steps = parse_u32("--steps", value(i, "--steps"));
-      have_steps = true;
-    } else if (a == "--repeats") {
-      repeats = parse_u32("--repeats", value(i, "--repeats"));
-      have_repeats = true;
-    } else if (a == "--kv-cache") {   // spec 12b
-      kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
-    } else if (a == "--parallel") {
-      cli::parse_parallel(value(i, "--parallel"), pipe);
-    } else if (a == "--layers") {   // spec 20c, Kolibri-1; spec 21c, Qwen3.8-Flash-Next (also `auto`)
-      const std::string v = value(i, "--layers");
-      have_layers = true;
-      if (v == "auto") {
-        layers_auto = true;
-      } else {
-        layers = parse_u32("--layers", v);
-        if (layers == 0) throw std::runtime_error("--layers 0 would load no layer");
-      }
-    } else if (a == "--pipeline-split") {
-      cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
-    } else if (a == "--spec") {   // --ids only: mtp or dflash (cli/spec_args.h); Bolt refuses it by name
-      spec_arg = cli::parse_spec(value(i, "--spec"));
-      have_spec = true;
-    } else if (a == "--spec-max") {
-      spec_max = parse_u32("--spec-max", value(i, "--spec-max"));
-      have_spec_max = true;
-    } else if (a == "--draft-model") {   // spec 19c
-      dflash.model = value(i, "--draft-model");
-      dflash.have_model = true;
-    } else if (!a.empty() && a[0] == '-') {
-      usage();
-      throw std::runtime_error("unknown option '" + a + "'");
-    } else if (path.empty()) {
-      path = a;
-    } else {
-      usage();
-      throw std::runtime_error("unexpected extra argument '" + a + "'");
-    }
-  }
-
-  if (path.empty()) {
-    usage();
-    throw std::runtime_error("a snapshot directory or HF repo id is required");
-  }
   if (prefill && ids_path.empty())
     throw std::runtime_error(
         "--prefill belongs to --ids; --bench uses --prefill-length and --profile has no prompt");
