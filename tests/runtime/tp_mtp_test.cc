@@ -62,7 +62,7 @@
 namespace {
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 64;
-constexpr uint32_t kSnap = 4096;   // the block hook's stride at the default 2048-row cap (tp_hook_stride)
+constexpr uint32_t kSnap = 4096;   // a block hook's snapshot point (a block end)
 constexpr loader::LmHeadForm kHead = loader::LmHeadForm::Int8;
 constexpr uint32_t kV = model::Qwen35::kVocab, kUsed = model::Qwen35::kVocabUsed;
 
@@ -465,7 +465,7 @@ int main(int argc, char** argv) {
     });
     e.prefill(six);
     e.set_block_hook({});
-    CHECK(hook_ends == (std::vector<uint32_t>{kSnap, 6000u}));
+    CHECK(hook_ends == (std::vector<uint32_t>{2048u, kSnap, 6000u}));   // all tail (open-work 29): every block end
     CHECK_EQ(tp_state.size(), one_state.size());   // the one-card host layouts
     CHECK_EQ(tp_kv.size(), one_kv.size());
     const std::vector<uint8_t> cold_state = bytes_of(e.state_bytes(), [&](void* h) { e.save_state(h); });
@@ -479,8 +479,8 @@ int main(int argc, char** argv) {
     const std::vector<uint8_t> kvr = bytes_of(e.kv_bytes(e.pos()), [&](void* h) { e.save_kv(0, e.pos(), h); });
     const Run warm = speculative(e, 3, false, pinned, true);
     const bool s1 = st == cold_state && kvr == cold_kv && warm.ids == tp_cold.ids;
-    std::printf("S1: the hook at %u and %u; restored at %u and the rest prefilled: state %s, KV %s, 64 ids at K = 3 "
-                "%s\n", hook_ends[0], hook_ends[1], kSnap, st == cold_state ? "bitwise" : "DIFFERS",
+    std::printf("S1: the hook at %u, %u and %u; restored at %u and the rest prefilled: state %s, KV %s, 64 ids at "
+                "K = 3 %s\n", hook_ends[0], hook_ends[1], hook_ends[2], kSnap, st == cold_state ? "bitwise" : "DIFFERS",
                 kvr == cold_kv ? "bitwise" : "DIFFERS", warm.ids == tp_cold.ids ? "identical" : "DIFFER");
     ok &= s1;
 

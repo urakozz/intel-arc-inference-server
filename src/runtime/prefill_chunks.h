@@ -10,36 +10,46 @@
 // chunk's first id - so a pipeline that cut elsewhere could not be bitwise one card (P1).
 namespace runtime {
 
-// The rows of the chunk that starts at absolute position `pos` with `remaining` ids left:
-// at most `chunk`, and with a block hook (spec 7 §3.2) never past the next multiple of the
-// hook's stride, so every chunk ends at a stride end (a block end) or at the prompt end. The
-// stride is the block - the rule of every engine - unless `wide_stride`: then `chunk` rounded
-// up to whole blocks when it is wider than one. Only Qwen3.8's prefill (Engine::prefill
-// and the two-card pp_prefill_chunks) pass it - plan 5d, operator ruling (A): a 4096-row chunk
-// over 2048-position blocks hooks every 4096, the blocks between stored as KV by the hook's
-// store call without a state snapshot of their own; up to 2048 rows the stride is the block,
-// exactly the old rule. The other engines (Kolibri, Flash-Next) and their mocks, whose
-// chunks may span several small blocks, keep a hook at every block end.
-//
-// `tail` (open-work 18): under a wide stride, the positions from (end - tail) rounded down to a
-// block, end = pos + remaining (the prompt's end), go back to the block stride - the hook then
-// fires at every block end there, so a follow-up turn that leaves the prompt within its last
-// `tail` positions restarts at most a block back (30,720 after a 32k turn, not 28,672). A wide
-// chunk before that point stops at it. The caller must pass the prompt's whole rest as
-// `remaining`: a call that holds one chunk of a longer prompt passes tail 0 (its cut is made).
+// The hook's stride for a prefill unit of `rows` (one chunk, or a TP pair of two): the block - the rule of every
+// engine - unless `wide_stride`: then `rows` rounded up to whole blocks when it is wider than one. Only Qwen3.8's
+// prefills (Engine::prefill, the two-card pp_prefill_chunks and tp_prefill_chunks) pass it - plan 5d, operator ruling
+// (A): a 4096-row unit over 2048-position blocks hooks every 4096, the blocks between stored as KV by the hook's store
+// call without a state snapshot of their own; up to 2048 rows the stride is the block, exactly the old rule. The other
+// engines (Kolibri, Flash-Next) and their mocks, whose chunks may span several small blocks, keep a hook at every
+// block end.
+inline uint32_t prefill_hook_stride(uint32_t rows, uint32_t block, bool wide_stride) {
+  return wide_stride && rows > block ? (rows + block - 1) / block * block : block;
+}
+
+// Open-work 29: the one rule for where a hooked prefill stores a snapshot - the next snapshot point after `pos` of a
+// prompt that ends at `end`: the next multiple of `stride` (prefill_hook_stride), or `end`. Every cutter (one card,
+// replica and slots through prefill_chunk_rows, the pipeline's pp_prefill_chunks, TP's tp_prefill_chunks) fills the
+// space between two points with its own unit (a chunk, a pipeline pass, a pair) and never crosses one.
+// `tail` (open-work 18): under a wide stride, the positions from (end - tail) rounded down to a block go back to the
+// block stride - the hook then fires at every block end there, so a follow-up turn that leaves the prompt within its
+// last `tail` positions restarts at most a block back (30,720 after a 32k turn, not 28,672); that point itself is a
+// snapshot point. `end` must be the prompt's end: a call that holds one unit of a longer prompt passes tail 0.
+inline uint64_t prefill_snapshot_point(uint32_t pos, uint64_t end, uint32_t stride, uint32_t block, uint32_t tail) {
+  uint64_t next = std::min<uint64_t>(end, (uint64_t(pos) / stride + 1) * stride);
+  if (stride > block && tail != 0) {
+    const uint64_t from = end > tail ? (end - tail) / block * block : 0;
+    if (pos >= from) next = std::min<uint64_t>(end, (uint64_t(pos) / block + 1) * block);
+    else next = std::min(next, from);
+  }
+  return next;
+}
+
+// The rows of the chunk that starts at absolute position `pos` with `remaining` ids left: at most `chunk`, and with a
+// block hook (spec 7 §3.2) never past the next snapshot point (prefill_snapshot_point at the chunk's
+// prefill_hook_stride), so every chunk ends at a snapshot point, a block end, or at the prompt end. The caller must
+// pass the prompt's whole rest as `remaining` when it passes a `tail`.
 inline uint32_t prefill_chunk_rows(uint32_t pos, size_t remaining, uint32_t chunk, bool hooked,
                                    uint32_t block, bool wide_stride = false, uint32_t tail = 0) {
   uint32_t c = uint32_t(std::min<size_t>(chunk, remaining));
   if (hooked) {
-    uint32_t stride =
-        wide_stride && chunk > block ? (chunk + block - 1) / block * block : block;
-    if (stride > block && tail != 0) {
-      const uint64_t end = uint64_t(pos) + remaining;
-      const uint64_t from = end > tail ? (end - tail) / block * block : 0;
-      if (pos >= from) stride = block;
-      else c = uint32_t(std::min<uint64_t>(c, from - pos));
-    }
-    c = std::min(c, stride - pos % stride);
+    const uint64_t at = prefill_snapshot_point(pos, uint64_t(pos) + remaining,
+                                               prefill_hook_stride(chunk, block, wide_stride), block, tail);
+    c = uint32_t(std::min<uint64_t>(c, at - pos));
   }
   return c;
 }

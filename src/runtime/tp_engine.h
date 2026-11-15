@@ -172,7 +172,8 @@ class TpEngine {
   // Spec 7 §3.2 under TP (runtime/prefill/tp_prefill.cc): called after a pair of chunks that ends on a block end of
   // the hook's stride (both cards finished it), and after the prompt's end - Engine's contract. The stride is a
   // pair's rows rounded up to whole blocks (2 x the chunk cap: 4096 at cap 2048 - plan 5d's rule (A) for a chunk
-  // wider than a block); a pair never straddles one.
+  // wider than a block), one block over the prompt's last prefill_tail() positions (open-work 29); a pair never
+  // straddles one.
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
