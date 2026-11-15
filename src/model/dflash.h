@@ -34,7 +34,21 @@ namespace model {
 // full-vocabulary log-probs feed the LiLiCorr head (the `lil_*` fields), which scores a lattice [block - 1 slots][k][k]
 // the walk reads. Its config carries ModelOpt's NVFP4 quantization_config (decoded by our loader, spec 26 §3); the block
 // is always the whole `block` rows (the head scores every slot; K drafts are the walk's first K - spec 26 §12 ruling 1).
-enum class DFlashForm : uint32_t { Vllm = 0, LiLiCorr = 2 };
+//
+// Kolibri DSpark: DSpark (`DSparkDraftModel`, a vllm-project/speculators 0.8 checkpoint - intuit/Kolibri-1-dspark beside
+// Kolibri-1; vLLM's qwen3_dspark.py + spec_decode/dspark/speculator.py, its config through transformers_utils/configs/
+// speculators/algos.py update_dspark): the DFlash v1 backbone (no convolutions) with three differences -
+//   * anchor-as-first-prediction (`sample_from_anchor`): block row r at p + r predicts position p + r + 1, so K drafts are
+//     rows 0 .. K - 1 (DFlash's mask rows sit AT the position they predict, rows 1 .. K);
+//   * causal attention inside the block (its sliding layers, vLLM's _dflash_layer_causal with no dflash_config.causal);
+//   * the Markov head: row r's logits + markov_w2[c] . markov_w1[prev] (prev the anchor, then row r - 1's pick), drafted
+//     left to right - DFlash 2's selector with the hidden projection taken as ones (pred = markov_w1, succ = markov_w2,
+//     sel_rank = markov_rank), over the head's top 16 per row (vLLM's dspark_draft_topk form at 16).
+// The config is the speculators form: the layer config under `transformer_layer_config`, the taps as
+// aux_hidden_state_layer_ids (each the INPUT of that target layer: taps = ids - 1, update_dspark's rule), block_size,
+// mask_token_id and the DSpark keys at the top level. Its confidence head (a per-position acceptance estimate) is read
+// for its shape only: the engine's AdaptiveK picks K from the observed acceptance.
+enum class DFlashForm : uint32_t { Vllm = 0, LiLiCorr = 2, DSpark = 3 };
 
 struct DFlashDesc {
   DFlashForm form = DFlashForm::Vllm;
@@ -62,6 +76,9 @@ struct DFlashDesc {
   bool sinks = false;
   uint32_t cand_topk = 0, lil_hidden = 0, lil_layers = 0, lil_heads = 0, lil_mlp = 0, factor_dim = 0;
   float vector_eps = 0.0f, lil_logit_scale = 1.0f;
+  // Kolibri DSpark only: the confidence head's input width (hidden, + markov_rank with confidence_head_with_markov); 0 =
+  // none shipped. The Markov head's rank is sel_rank (the codebooks pred / succ are markov_w1 / markov_w2).
+  uint32_t conf_in = 0;
 
   uint32_t q_n() const { return q_heads * head_dim; }
   uint32_t kv_n() const { return kv_heads * head_dim; }
@@ -76,6 +93,7 @@ struct DFlashDesc {
   bool all_sliding() const;             // every layer has a window (a ring suffices)
   uint32_t max_window() const;          // the largest window (0 when none is sliding)
   bool lilicorr() const { return form == DFlashForm::LiLiCorr; }
+  bool dspark() const { return form == DFlashForm::DSpark; }
   // Spec 26b: the lattice's slots (the block's mask rows: 7) and its tokens (slots x candidates: 56).
   uint32_t lil_slots() const { return block - 1; }
   uint32_t lil_rows() const { return lil_slots() * cand_topk; }
@@ -99,10 +117,16 @@ struct DFlashTargetShape {
 // lilicorr_candidate_topk not a power of two <= 16, no DFlash 2 convolutions, a causal layer, an output_multiplier or
 // softcap (the candidates are the RAW logits, spec 26 §2.2), and any quantization_config but ModelOpt's NVFP4 form
 // (quant_method modelopt_fp4, quant_algo W4A16_NVFP4, group_size 16 - decoded exactly at load, spec 26 §3).
+// Kolibri DSpark: DSparkDraftModel (the speculators form above), refused by name besides 19b's rules: no
+// transformer_layer_config, sample_from_anchor not true (absent is refused too: speculators' default is true, vLLM's
+// update_dspark reads false), a markov_head_type other than vanilla, markov_rank 0, a quantization_config (bf16 first),
+// sliding_window_non_causal true, tie_word_embeddings, aux_hidden_state_layer_ids holding 0, and a target_hidden_size that
+// is not the drafter's hidden size.
 DFlashDesc dflash_desc_from_config(const common::json::Value& config_json);
-// True for those three architectures (a CLI's dispatch reads only this).
+// True for those four architectures (a CLI's dispatch reads only this).
 bool is_dflash_architecture(const std::string& architecture);
 inline constexpr const char* kLiLiCorrArchitecture = "LiLiCorrDraftModel";
+inline constexpr const char* kDSparkArchitecture = "DSparkDraftModel";
 
 // The drafter held to its target (spec 19 §2, plan 19b Task 1): it shares the target's embedding and lm_head, so
 // its hidden size must be the target's and its vocab_size the target's head rows (`target_vocab_rows`); every tap
@@ -118,6 +142,10 @@ void check_dflash_target(const DFlashDesc& d, const DFlashTargetShape& target);
 // convolutions 2 taps x groups of 16, rms_norm_eps 1e-6, the head's 1024 hidden / 2 layers / 8 heads / MLP 2048 / factor
 // 1024, top-8 candidates.
 void check_lilicorr(const DFlashDesc& d);
+// Kolibri DSpark: the drafter is the one the DSpark kernels are built for (kernels::dflash::kDSpark) - before the device,
+// each refusal naming the key: the DSpark form, hidden 2560, 20 / 4 heads x 128, intermediate 6144, every layer sliding
+// at 2048 (|q - k| <= 2047) and causal, block 8, 5 taps, Markov rank 256, rms_norm_eps 1e-6, vocabulary 128000.
+void check_dspark(const DFlashDesc& d);
 // Spec 19 v3c: one `--parallel tp` card's half of a drafter (runtime::dflash::TpDFlashDrafter) - half the q and kv heads
 // and half the MLP; every other field the whole drafter's (its hidden, layers, taps, window, convolutions, selector,
 // vocabulary). Throws unless the heads and the MLP halve into whole 16-row tiles.

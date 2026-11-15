@@ -4551,6 +4551,17 @@ if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
   endif()
 endif()
 # ==== Spec 26c: LiLiCorr in Bolt's loop and server ==== (end) ====
+
+# ==== Kolibri DSpark: speculative decoding for Kolibri-1 (label kolibri) ==== (begin) ====
+# intuit/Kolibri-1-dspark beside Kolibri-1 (docs/18-running-models.md "Kolibri-1 with DSpark"). Host tests run on the Mac's
+# build tree and the box's; the card tests wait for the operator's first run (after Flash-Next).
+# The descriptor: the speculators config -> the DSpark form, held to its kernels and to Kolibri-1. Host only.
+add_executable(dspark_desc_test model/dspark_desc_test.cc)
+target_include_directories(dspark_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dspark_desc_test PRIVATE b70_dflash_model b70_kolibri_model)
+add_test(NAME dspark_desc_test COMMAND dspark_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark/config.json)
+set_tests_properties(dspark_desc_test PROPERTIES LABELS "kolibri;dflash")
+# ==== Kolibri DSpark ==== (end) ====
 # Fix round A: every test executable declared above gets a line-buffered stdout
 # (common/line_buffered_stdout.cc - a static initializer, so no main changes): crash logs
 # keep the phase line printed just before the crash, under any launcher. Keep this last.
