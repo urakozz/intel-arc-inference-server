@@ -185,13 +185,7 @@
 #define A2HL_LO (A2_BLKS * SG * DM)       /* 1,280: the lo words' offset */
 #define A2HL_WORDS (2 * A2HL_LO)          /* 2,560 uints = 10,240 B */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // ---------------------------------------------------------------------------
 // (3) `pf_gdn_scan_dpas_split` - D3's opt-in split-BF16 probe.

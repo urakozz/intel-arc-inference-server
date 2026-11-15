@@ -14,13 +14,7 @@
 #define G (K / GROUP)
 #define TILE_U32 136  // 128 u32 nibbles + 8 u32 packed f16 scales
 
-// Literal transcription of common::f32_to_bf16. The host and device therefore
-// calculate and round one identical fp32 expression for every weight.
-inline ushort rne_bf16(float f) {
-  const uint u = as_uint(f);
-  const uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 __attribute__((intel_reqd_sub_group_size(SG)))
 __attribute__((reqd_work_group_size(SG, 1, 1)))

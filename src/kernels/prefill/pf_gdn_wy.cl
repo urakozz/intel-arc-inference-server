@@ -105,13 +105,7 @@
 #define PB 4              /* positions per block; each subgroup owns two blocks */
 #define VPW 2             /* output columns per lane */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // gdn_step.cl:52-65's band tree, over two SLM-staged bf16 rows. `ascale` is
 // 1.0f for `k` (exact) and Q_SCALE for `q`.

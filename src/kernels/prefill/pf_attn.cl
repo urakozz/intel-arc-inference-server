@@ -94,13 +94,7 @@
 // constant `SCALE` and tests/kernels/attn_ref.h `kScale`.
 #define ATTN_SCALE (1.0f / 16.0f)
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // attn_ref::sigmoid_f32 -- plain `exp`, never `native_exp`, and the reciprocal
 // spelled as a divide so -cl-fp32-correctly-rounded-divide-sqrt binds it.

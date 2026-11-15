@@ -82,14 +82,7 @@
 #define GU_BLK_U32 ((size_t)(GU_N / 16) * (GU_K / 64) * TILE_U32)
 #define DN_BLK_U32 ((size_t)(DN_N / 16) * (DN_K / 64) * TILE_U32)
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-
-// f32 -> bf16, round-to-nearest-even (moe.cl's; NaN is not expected and not handled).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 
 // ---------------------------------------------------------------------------
 // pf_moe_sort - one work-group of EXPERTS lanes; lane e owns expert e.

@@ -12,12 +12,7 @@
 #ifndef NB_COMMON_H
 #define NB_COMMON_H
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 
 // Sleef_expf8_u10 (sleefsimdsp.c xexpf, AVX2 + FMA): mg_attn_eager.cl's exp_torch, the same lines.

@@ -20,7 +20,7 @@
 #pragma OPENCL EXTENSION cl_intel_split_work_group_barrier : enable
 
 #define SG 16
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
+#include "bf16.h"
 
 #ifdef PF_QUANT_HAD
 #ifndef NBLK
@@ -279,11 +279,6 @@ __kernel void pf_colmax_rot(__global const uint* restrict qw, __global const hal
 #define NB 2
 #if SILU_EPI
 // pf_gemm.cl's chain, verbatim (the numerics contract with pf_prep.cl).
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 #endif
 

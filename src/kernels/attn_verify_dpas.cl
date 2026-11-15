@@ -235,12 +235,7 @@
 #define KV_KEY(k) k
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 #if KV8
 // kv8.cl's binary16 -> fp32, op for op (src/common/kv8.h f16f).
 inline float kv8_f16f(ushort h) {

@@ -41,12 +41,7 @@
 #error "nb_pf_moe_gemm: K must be whole k-steps"
 #endif
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 #if RELU2_EPI
 inline ushort relu2(float acc) {
   float u = bf16f(rne_bf16(acc));

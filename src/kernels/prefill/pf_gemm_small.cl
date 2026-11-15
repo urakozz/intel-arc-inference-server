@@ -51,12 +51,7 @@
 #if SILU_EPI
 // **Copied verbatim from pf_prep.cl** (pf_gemm.cl carries the same copy): both bf16 RNE
 // steps, plain `exp` (never `native_exp`), silu the LAST factor.
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 #endif
 

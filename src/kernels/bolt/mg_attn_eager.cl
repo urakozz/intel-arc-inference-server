@@ -54,12 +54,7 @@
 #define SSCALE 0.08838834764831845f   /* float(128 ** -0.5): torch casts the scalar to fp32 */
 #define LANES 8                       /* reduce_all's Vectorized<float> width at AVX2 */
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 
 // Sleef_expf8_u10 (sleefsimdsp.c xexpf, AVX2 + FMA) - eager_attn_ref::exp_torch's, the same lines.
