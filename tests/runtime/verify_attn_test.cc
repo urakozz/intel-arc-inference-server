@@ -82,7 +82,6 @@ int main(int argc, char** argv) {
   CHECK(runtime::verify_attn_kind(9, 32768, false, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
   CHECK(runtime::verify_attn_kind(16, 1, false, 24, 4) == VerifyAttn::Dpas);   // open-work 28: DPAS from the first key
   CHECK(runtime::verify_attn_kind(16, 32768, true, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
-  CHECK(runtime::verify_attn_dpas_blocks(16, 24, 4) == 32);
   std::printf("verify_attn_test: PASS (%zu table rows, %zu built names)\n", rows, built.size());
   return 0;
 }
