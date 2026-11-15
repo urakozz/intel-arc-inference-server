@@ -14,10 +14,19 @@
 //   B3  a further slot drafts at most 3: max_verify_k() <= 3 there and verify(4) is refused.
 //   B4  reset, snapshot and restore of slot 1 leave slot 2's bytes alone, and the restore brings slot 1's ring back
 //       bitwise.
+//   B5  the batched draft (DFlashDrafter::draft_rows): slots 1 and 2 at K = 3 in one pass against each slot's own draft
+//       from the same state - the drafts printed, equal unless a near-tie (the batched attention sums at KS 1, the lone
+//       one at KS 4: within the drafter's f32-judge form), the candidates' scores within 1e-3.
+//   B6  a row step beside the drafter: verify_rows of B5's runs, the greedy commits, ONE rows projection - the ring
+//       rows it stored for each slot against the same verify done alone (verify(3) + commit) from the same state:
+//       worst row cosine >= 0.999 (the row kernels round as the small-batch GEMMs do).
+//   B7  the batched session: slots 1 and 2, 24 iterations of batched draft + row step + commit each, against A's ids -
+//       the first difference printed (the row kernels' rounding; judged at the server, Task 7).
 //
 // usage: dflash_slots_test <target snapshot> <drafter>   (cwd = the source tree)
 // SKIP (77) when either checkpoint is missing.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -232,6 +241,163 @@ int main(int argc, char** argv) {
                 back ? "brought the ring back bitwise" : "DIFFERS", r.slot_hash(2) == s2 ? "unchanged" : "MOVED",
                 b4 ? "ok" : "WRONG");
     ok &= b4;
+  }
+
+  // --- B5 / B6: the batched draft and a row step, against each slot alone from the same state ------------------
+  {
+    start(r, 1, prompt);
+    start(r, 2, prompt);
+    std::vector<uint32_t> scratch;
+    r.e->select(1);
+    iterate(r, scratch);   // the two slots at different positions
+    const auto snap = [&](uint32_t q, l0::Mem& st, l0::Mem& kv, uint32_t& pos, uint32_t& pend) {
+      r.e->select(q);
+      r.e->flush_projection();
+      pos = r.e->pos();
+      pend = r.e->control()->cur_token[0];
+      r.e->save_state(st.ptr());
+      r.e->save_kv(0, pos, kv.ptr());
+    };
+    const auto back = [&](uint32_t q, l0::Mem& st, l0::Mem& kv, uint32_t pos, uint32_t pend) {
+      r.e->select(q);
+      r.e->load_state(st.ptr(), pos);
+      r.e->load_kv(0, pos, kv.ptr());
+      r.e->control()->cur_token[0] = pend;
+      r.e->control()->n_active = 1;
+    };
+    l0::Mem st1(ctx, l0::MemKind::Host, r.e->state_bytes()), st2(ctx, l0::MemKind::Host, r.e->state_bytes());
+    l0::Mem kv1(ctx, l0::MemKind::Host, r.e->kv_bytes(4096)), kv2(ctx, l0::MemKind::Host, r.e->kv_bytes(4096));
+    uint32_t p1, p2, x1, x2;
+    snap(1, st1, kv1, p1, x1);
+    snap(2, st2, kv2, p2, x2);
+    // the ring rows a commit of n rows at pos stored: every layer's K and V rows
+    const auto ring_rows = [&](uint32_t q, uint32_t pos, uint32_t n) {
+      const runtime::dflash::DFlashBuffers::Session s = r.d->buffers().session(q);
+      const model::DFlashDesc& dd = r.d->desc();
+      const size_t kvn = dd.kv_n(), slots = dd.window[0];
+      std::vector<uint16_t> k(s.ring_k->size() / 2), v(s.ring_v->size() / 2), out;
+      r.imm.copy(k.data(), s.ring_k->ptr(), s.ring_k->size());
+      r.imm.copy(v.data(), s.ring_v->ptr(), s.ring_v->size());
+      for (uint32_t i = 0; i < n; ++i)
+        for (uint32_t l = 0; l < dd.layers; ++l)
+          for (const auto* x : {&k, &v}) {
+            const size_t b = (size_t(l) * slots + (pos + i) % slots) * kvn;
+            out.insert(out.end(), x->begin() + b, x->begin() + b + kvn);
+          }
+      return out;
+    };
+    // alone: each slot's own draft, verify(3), greedy commit
+    std::vector<uint32_t> lone_d[3], lone_j(3);
+    std::vector<float> lone_s[3];
+    std::vector<uint16_t> lone_ring[3];
+    for (uint32_t q : {1u, 2u}) {
+      r.e->select(q);
+      const runtime::dflash::DFlashDraftOut& o = r.d->draft(*r.e, kK, 0.0f, 0);
+      lone_d[q].assign(o.ids, o.ids + kK);
+      lone_s[q].assign(reinterpret_cast<const float*>(o.scores), reinterpret_cast<const float*>(o.scores) + kK * 16);
+      r.e->verify(kK);
+      uint32_t j = 0;
+      while (j < kK && lone_d[q][j] == r.e->verify_ids()[j]) ++j;
+      const uint32_t pos = r.e->pos();
+      r.e->commit(j, r.e->verify_ids()[j]);
+      lone_j[q] = j;
+      lone_ring[q] = ring_rows(q, pos, j + 1);
+    }
+    back(1, st1, kv1, p1, x1);
+    back(2, st2, kv2, p2, x2);
+    r.d->draft_rows(*r.e, {{1, kK, 0.0f, 0}, {2, kK, 0.0f, 0}});
+    bool b5 = true;
+    std::vector<uint32_t> bat_d[3];
+    for (uint32_t q : {1u, 2u}) {
+      const runtime::dflash::DFlashDraftOut& o = r.d->readback(q);
+      bat_d[q].assign(o.ids, o.ids + kK);
+      const float* sc = reinterpret_cast<const float*>(o.scores);
+      float worst = 0;
+      for (uint32_t i = 0; i < kK * 16; ++i) worst = std::max(worst, std::fabs(sc[i] - lone_s[q][i]));
+      std::printf("B5 slot %u: batched drafts %u %u %u, alone %u %u %u; scores max |diff| %.2e\n", q, bat_d[q][0],
+                  bat_d[q][1], bat_d[q][2], lone_d[q][0], lone_d[q][1], lone_d[q][2], worst);
+      b5 &= worst < 1e-3f;
+    }
+    std::printf("B5: %s\n", b5 ? "ok" : "WRONG");
+    ok &= b5;
+    r.e->verify_rows({{1, kK}, {2, kK}});
+    const uint32_t* ids = r.e->rows_ids();
+    bool b6 = true;
+    for (uint32_t q : {1u, 2u}) {
+      const uint32_t* row = ids + (q == 1 ? 0 : kK + 1);
+      uint32_t j = 0;
+      while (j < kK && bat_d[q][j] == row[j]) ++j;
+      r.e->select(q);
+      const uint32_t pos = r.e->pos();
+      r.e->commit(j, row[j], /*defer_projection=*/true);
+      r.e->flush_projection();
+      if (j != lone_j[q] || bat_d[q] != lone_d[q]) {
+        std::printf("B6 slot %u: a different acceptance (%u against %u alone) - ring rows not compared\n", q, j,
+                    lone_j[q]);
+        continue;
+      }
+      const std::vector<uint16_t> got = ring_rows(q, pos, j + 1);
+      const size_t row_n = got.size() / (j + 1);
+      double worst = 1;
+      for (uint32_t i = 0; i <= j; ++i) {
+        double ab = 0, aa = 0, bb = 0;
+        for (size_t x = 0; x < row_n; ++x) {
+          uint32_t ua = uint32_t(got[i * row_n + x]) << 16, ub = uint32_t(lone_ring[q][i * row_n + x]) << 16;
+          float fa, fb;
+          std::memcpy(&fa, &ua, 4);
+          std::memcpy(&fb, &ub, 4);
+          ab += double(fa) * fb, aa += double(fa) * fa, bb += double(fb) * fb;
+        }
+        worst = std::min(worst, ab / std::sqrt(aa * bb));
+      }
+      std::printf("B6 slot %u: %u rows committed, the rows projection's ring rows against alone: worst cos %.6f\n", q,
+                  j + 1, worst);
+      b6 &= worst >= 0.999;
+    }
+    std::printf("B6: %s\n", b6 ? "ok" : "WRONG");
+    ok &= b6;
+  }
+
+  {   // B7: the batched session of slots 1 and 2 against A
+    start(r, 1, prompt);
+    start(r, 2, prompt);
+    std::vector<uint32_t> a, b;
+    for (uint32_t it = 0; it < kIters; ++it) {
+      std::vector<runtime::dflash::DFlashDrafter::Run> runs;
+      std::vector<runtime::Engine::Run> vr;
+      for (uint32_t q : {1u, 2u}) {
+        r.e->select(q);
+        const uint32_t k = std::min(kK, r.e->max_verify_k());
+        runs.push_back({q, k, 0.0f, 0});
+        vr.push_back({q, k});
+        (q == 1 ? a : b).push_back(r.e->control()->cur_token[0]);
+      }
+      r.d->draft_rows(*r.e, runs);
+      std::vector<std::vector<uint32_t>> drafts;
+      for (uint32_t q : {1u, 2u}) {
+        const runtime::dflash::DFlashDraftOut& o = r.d->readback(q);
+        drafts.emplace_back(o.ids, o.ids + o.k);
+      }
+      r.e->verify_rows(vr);
+      const uint32_t* ids = r.e->rows_ids();
+      uint32_t r0 = 0;
+      for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t q = i + 1, k = vr[i].k;
+        uint32_t j = 0;
+        while (j < k && drafts[i][j] == ids[r0 + j]) ++j;
+        for (uint32_t t = 0; t < j; ++t) (q == 1 ? a : b).push_back(drafts[i][t]);
+        r.e->select(q);
+        r.e->commit(j, ids[r0 + j], /*defer_projection=*/true);
+        r0 += k + 1;
+      }
+    }
+    r.e->flush_projection();
+    for (const auto* x : {&a, &b}) {
+      size_t n = std::min(x->size(), ref.ids.size()), same = 0;
+      while (same < n && (*x)[same] == ref.ids[same]) ++same;
+      std::printf("B7 slot %u: %zu ids, the first %zu equal A's%s\n", x == &a ? 1u : 2u, x->size(), same,
+                  same == n ? " (all)" : "");
+    }
   }
 
   std::printf("dflash_slots_test: %s\n", ok ? "PASS" : "FAIL");
