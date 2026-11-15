@@ -3136,8 +3136,9 @@ st_r77_dflash() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   run_tests '^cli_reject_serve_dflash_replica_.*$'
   chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/replica 0,1 $SNAP_QWEN --parallel replica --max-num-seqs 2 --spec dflash $dm --max-len 65536 -- --mode pairs" "--spec dflash: pairs on the replica server"
-  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/card0 0 $SNAP_QWEN --parallel 1 --spec dflash $dm --max-len 65536 -- --mode alone" "--spec dflash: alone on card 0"
-  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/card1 1 $SNAP_QWEN --parallel 1 --spec dflash $dm --max-len 65536 -- --mode alone" "--spec dflash: alone on card 1"
+  # B70_SPEC_LOOKUP=0 on the one-card arms: replica builds no prompt lookup inside DFlash (st_r77_r1).
+  chk "B70_SPEC_LOOKUP=0 PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/card0 0 $SNAP_QWEN --parallel 1 --spec dflash $dm --max-len 65536 -- --mode alone" "--spec dflash: alone on card 0"
+  chk "B70_SPEC_LOOKUP=0 PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/card1 1 $SNAP_QWEN --parallel 1 --spec dflash $dm --max-len 65536 -- --mode alone" "--spec dflash: alone on card 1"
   chk "python3 tools/box_validate/replica_check.py compare --replica $STATE/$STAGE/replica/requests.jsonl --server-log $STATE/$STAGE/replica/server-log --card0 $STATE/$STAGE/card0/requests.jsonl --card1 $STATE/$STAGE/card1/requests.jsonl" "--spec dflash: R1"
   grab_all r1 '^R1 |card [01]: max_len|card [01]: spec dflash|^devices:' 40
   finish
