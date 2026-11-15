@@ -32,6 +32,10 @@
 //   V2           spec 32e (plan 32e Task 1): build `psm_v2` alone (no psm / psm_quant), M 16..64 - 1: the
 //                row-chunk arm (RC rows a sub-group, 16 or 32), 2: the swap arm (one sub-group, every row);
 //                see the kernel
+//   A2D          spec 34 (plan 34a Task 1), V2 only: 1 - the A operands by 2D block reads of the rows (8 rows x
+//                16 k x 2 blocks, the DPAS reads them in place) instead of row loads and moves
+//   NODQ         plan 34a Task 1, V2 2 only: a timing-only ablation - the B operands dequantised for the first
+//                group and reused for every group (the weight loads kept); WRONG output, never checked bitwise
 //
 // Order of operations (property R: a row's output depends only on its own row, and the
 // per-row arithmetic is the same at every M): per 64-k group, the group's DPAS chain from a
@@ -72,6 +76,12 @@
 #endif
 #ifndef V2
 #define V2 0
+#endif
+#ifndef A2D
+#define A2D 0
+#endif
+#ifndef NODQ
+#define NODQ 0
 #endif
 #if SPLITK == 0
 #undef NSGN
@@ -574,6 +584,13 @@ __kernel void psm_v2(__global const uchar* restrict w,       // int4 words / til
 
   float8 acc[RBC];
   for (int rb = 0; rb < RBC; ++rb) acc[rb] = (float8)0.0f;
+#if NODQ
+#if V2 != 2
+#error "psm_v2: NODQ is a swap-arm ablation"
+#endif
+  int8 b[4];
+  uint sink = 0;
+#endif
   for (uint i = 0; i < G_PER_SG; ++i) {
     const uint g = gbase + i * KSL;
 #if PF_G
@@ -597,11 +614,23 @@ __kernel void psm_v2(__global const uchar* restrict w,       // int4 words / til
     scale = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(tile + 128)));
 #endif
 #if V2 == 1
+#if A2D
+    // [row block][8 d + r]: row rb * 8 + r of k16 step d, this lane's k - two 2D reads a block (steps 0, 1 and 2, 3)
+    // on the chunk's rows (base xr, height RC)
+    ushort xa[RBC][32];
+    for (int rb = 0; rb < RBC; ++rb) {
+      intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                (int2)((int)(g * GROUP), rb * 8), &xa[rb][0]);
+      intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                (int2)((int)(g * GROUP + 32u), rb * 8), &xa[rb][16]);
+    }
+#else
     ushort xa[RC][4];   // [row][k16 step]: element lane of the step
     for (int r = 0; r < RC; ++r) {
       const ushort4 v = intel_sub_group_block_read_us4(xr + (size_t)r * K + g * GROUP);
       xa[r][0] = v.s0; xa[r][1] = v.s1; xa[r][2] = v.s2; xa[r][3] = v.s3;
     }
+#endif
     float8 gacc[RBC];
     for (int rb = 0; rb < RBC; ++rb) gacc[rb] = (float8)0.0f;
     for (int d = 0; d < 4; ++d) {
@@ -610,21 +639,49 @@ __kernel void psm_v2(__global const uchar* restrict w,       // int4 words / til
       b.s0 = pair_bf16(w0, 0); b.s1 = pair_bf16(w0, 1); b.s2 = pair_bf16(w0, 2); b.s3 = pair_bf16(w0, 3);
       b.s4 = pair_bf16(w1, 0); b.s5 = pair_bf16(w1, 1); b.s6 = pair_bf16(w1, 2); b.s7 = pair_bf16(w1, 3);
       for (int rb = 0; rb < RBC; ++rb) {
+#if A2D
+        const short8 a = as_short8(vload8(d, xa[rb]));
+#else
         short8 a;
         a.s0 = xa[rb * 8 + 0][d]; a.s1 = xa[rb * 8 + 1][d]; a.s2 = xa[rb * 8 + 2][d]; a.s3 = xa[rb * 8 + 3][d];
         a.s4 = xa[rb * 8 + 4][d]; a.s5 = xa[rb * 8 + 5][d]; a.s6 = xa[rb * 8 + 6][d]; a.s7 = xa[rb * 8 + 7][d];
+#endif
         gacc[rb] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b, gacc[rb]);
       }
     }
     for (int rb = 0; rb < RBC; ++rb) acc[rb] += gacc[rb] * scale;
 #else
+#if NODQ
+    sink ^= wv[0] ^ wv[1] ^ wv[2] ^ wv[3] ^ wv[4] ^ wv[5] ^ wv[6] ^ wv[7];   // keeps the weight loads
+    if (i == 0)
+#else
     int8 b[4];
+#endif
     for (int d = 0; d < 4; ++d) {
       const uint w0 = wv[2 * d], w1 = wv[2 * d + 1];
       b[d].s0 = pair_bf16(w0, 0); b[d].s1 = pair_bf16(w0, 1); b[d].s2 = pair_bf16(w0, 2); b[d].s3 = pair_bf16(w0, 3);
       b[d].s4 = pair_bf16(w1, 0); b[d].s5 = pair_bf16(w1, 1); b[d].s6 = pair_bf16(w1, 2); b[d].s7 = pair_bf16(w1, 3);
     }
     for (int rb = 0; rb < RBC; ++rb) {
+#if A2D
+      // the row block's A operands of k16 steps 0, 1 and 2, 3 by two 2D block reads (8 rows x 16 k x 2 blocks), read
+      // - two DPAS - read - two DPAS (both reads first overflows 128 GRF); the DPAS read them in place
+      float8 gacc = (float8)0.0f;
+      {
+        ushort a01[16];
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                  (int2)((int)(g * GROUP), rb * 8), a01);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(0, a01)), b[0], gacc);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(1, a01)), b[1], gacc);
+      }
+      {
+        ushort a23[16];
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                  (int2)((int)(g * GROUP + 32u), rb * 8), a23);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(0, a23)), b[2], gacc);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(1, a23)), b[3], gacc);
+      }
+#else
       ushort4 v[8];
       for (int r = 0; r < 8; ++r) v[r] = intel_sub_group_block_read_us4(xr + (size_t)(rb * 8 + r) * K + g * GROUP);
       float8 gacc = (float8)0.0f;
@@ -634,10 +691,14 @@ __kernel void psm_v2(__global const uchar* restrict w,       // int4 words / til
         a.s4 = u4c(v[4], d); a.s5 = u4c(v[5], d); a.s6 = u4c(v[6], d); a.s7 = u4c(v[7], d);
         gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b[d], gacc);
       }
+#endif
       acc[rb] += gacc * scale;
     }
 #endif
   }
+#if NODQ
+  if (sink == 0x9e3779b9u) out[n] = 0.0f;   // the weight loads stay live
+#endif
   // ---- the end of the K walk: acc[rb].s(r) = row r0 + rb*8 + r, column n --------------
 #if SPLITK == 1
   __local float red[KSL][NSGN][M][SG];

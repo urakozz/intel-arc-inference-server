@@ -12,7 +12,9 @@
 //                          Qwen3.8's shapes, the token sum over them; --m 32,64: spec 32a's probe builds, 128 and
 //                          256 GRF, property R against M = 16 and N2 on random rows; spec 32e: the psm_v2 arms
 //                          at 32 / 64 rows - property R against gemm_sm at 16 rows over --trials trials, N2 on
-//                          the first, the device's work-group / SLM limits and each arm's spill, the int4 token sum)
+//                          the first, the device's work-group / SLM limits and each arm's spill, the int4 token sum;
+//                          [--v2 label,...]: only those psm_v2 arms, plan 34a's A2D arms among them - swap_a2d,
+//                          swap_a2d_pf1, swap_a2d_pf2, rc32_a2d_pf1_g256 and the 64-row ablation swap_a2d_nodq)
 //   (every mode: [--device 0]; the card is whatever ZE_AFFINITY_MASK leaves at index 0)
 //
 // check:    every built variant of the selected shapes and M against the fp64 reference
@@ -389,6 +391,7 @@ struct Opts {
   std::vector<char> types = {'b', 'i'}, orients = {'B', 'A'};
   std::string splitk = "grid", wgshape = "2x8", deq = "shift";
   uint32_t prefetch = 0, grf = 128, s = 0, rounds = 5, launches = 40, device = 0, trials = 1000;
+  std::vector<std::string> v2;   // prod: the psm_v2 arms by label (empty: plan 32e's twelve)
 };
 std::vector<std::string> split(const std::string& s) {
   std::vector<std::string> v;
@@ -909,12 +912,16 @@ struct V2Arm {
   std::string base;   // rc16 | rc32 | swap
   uint32_t pf = 0;    // weight prefetch, groups ahead
   bool g256 = false;
+  bool a2d = false;   // spec 34: the A operands by 2D block reads
+  bool nodq = false;  // plan 34a: the dequant ablation (wrong output: timed only, never checked or ranked)
   uint32_t rc(uint32_t M) const { return base == "rc16" ? 16 : base == "rc32" ? 32 : M; }
   std::string label() const {
-    return base + (pf ? "_pf" + std::to_string(pf) : "") + (g256 ? "_g256" : "");
+    return base + (a2d ? "_a2d" : "") + (nodq ? "_nodq" : "") + (pf ? "_pf" + std::to_string(pf) : "") +
+           (g256 ? "_g256" : "");
   }
 };
-std::vector<V2Arm> v2_arms() {
+// The 32e arms when `pick` is empty; else the arms named in it (32e's and plan 34a's A2D arms).
+std::vector<V2Arm> v2_arms(const std::vector<std::string>& pick) {
   std::vector<V2Arm> v;
   for (const char* b : {"rc16", "rc32", "swap", "swap256"})
     for (uint32_t pf : {0u, 1u, 2u}) {
@@ -924,7 +931,14 @@ std::vector<V2Arm> v2_arms() {
       a.pf = pf;
       v.push_back(a);
     }
-  return v;
+  if (pick.empty()) return v;
+  for (uint32_t pf : {0u, 1u, 2u}) v.push_back({"swap", pf, false, true, false});
+  v.push_back({"rc32", 1, true, true, false});
+  v.push_back({"swap", 0, false, true, true});
+  std::vector<V2Arm> out;
+  for (const V2Arm& a : v)
+    if (std::find(pick.begin(), pick.end(), a.label()) != pick.end()) out.push_back(a);
+  return out;
 }
 std::string v2_name(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
   return "psm_v2_" + a.label() + "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N) +
@@ -952,16 +966,19 @@ void print_device_limits(l0::Context& ctx) {
               "maxSharedLocalMemory %u B, sub-group sizes %u\n", c.maxTotalGroupSize, c.maxGroupSizeX,
               c.maxSharedLocalMemory, c.numSubGroupSizes);
 }
-// A v2 arm's kernel properties; false (printed) when the work-group or its SLM is over the device's limit.
-bool v2_fits(l0::Context& ctx, const Launch& L, uint32_t wg) {
+// A v2 arm's kernel properties; false (printed) when the work-group or its SLM is over the device's limit, or (an
+// A2D arm, plan 34a) when the binary spills or keeps private memory.
+bool v2_fits(l0::Context& ctx, const Launch& L, uint32_t wg, bool no_spill) {
   ze_kernel_properties_t p{};
   p.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
   ZE_CHECK(zeKernelGetProperties(L.k->handle(), &p));
   const ze_device_compute_properties_t& c = ctx.compute();
   const bool ok = wg <= c.maxTotalGroupSize && wg <= c.maxGroupSizeX && p.localMemSize <= c.maxSharedLocalMemory;
+  const bool clean = !no_spill || (p.spillMemSize == 0 && p.privateMemSize == 0);
   std::printf("| %s | wg %u | SLM %u B | spill %u B | private %u B | %s |\n", L.name.c_str(), wg, p.localMemSize,
-              p.spillMemSize, p.privateMemSize, ok ? "fits" : "**OVER THE DEVICE LIMIT**");
-  return ok;
+              p.spillMemSize, p.privateMemSize,
+              !ok ? "**OVER THE DEVICE LIMIT**" : !clean ? "**REFUSED: spill or private memory**" : "fits");
+  return ok && clean;
 }
 // Random bf16 rows, cheap enough for 1000 trials (sign, exponent 2^-6 .. 2^1, mantissa random).
 std::vector<uint16_t> trial_rows(uint32_t M, uint32_t K, uint32_t seed) {
@@ -1116,16 +1133,17 @@ int run_prod(l0::Context& ctx, const Opts& o) {
       // Spec 32e: the psm_v2 arms (int4 rows): limits and spill, property R / N2, then timed with the rest.
       std::vector<std::string> al_v2(al.size());
       if (M > 16 && s.kind == 0) {
-        std::vector<std::unique_ptr<Launch>> v2;
-        std::vector<std::string> labels;
-        for (const V2Arm& a : v2_arms()) {
+        std::vector<std::unique_ptr<Launch>> v2, nodq;
+        std::vector<std::string> labels, nodq_labels;
+        for (const V2Arm& a : v2_arms(o.v2)) {
+          if (a.nodq && M != 64) continue;   // the ablation is built at 64 rows only
           const std::string n = v2_name(a, *t, M);
           if (!file_exists(kernels::path(n))) { std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M); continue; }
           if (!grf_ok(n, a.g256)) continue;
           auto L = make_v2(ctx, a, *t, M);
-          if (!v2_fits(ctx, *L, v2_wg(a, *t, M))) continue;
-          v2.push_back(std::move(L));
-          labels.push_back(a.label());
+          if (!v2_fits(ctx, *L, v2_wg(a, *t, M), a.a2d)) continue;
+          (a.nodq ? nodq : v2).push_back(std::move(L));
+          (a.nodq ? nodq_labels : labels).push_back(a.label());
         }
         // out_proj and o_proj are one shape: its numerics once
         if (v2_checked.insert({s.K, s.N, M}).second && !v2_numerics(ctx, q, f, in, *t, M, v2, o.trials))
@@ -1134,6 +1152,10 @@ int run_prod(l0::Context& ctx, const Opts& o) {
         for (size_t i = 0; i < v2.size(); ++i) {
           al.push_back(make_timed(ctx, std::move(v2[i]), in, nl));
           al_v2.push_back(labels[i]);
+        }
+        for (size_t i = 0; i < nodq.size(); ++i) {
+          al.push_back(make_timed(ctx, std::move(nodq[i]), in, nl));
+          al_v2.push_back(nodq_labels[i]);
         }
       }
       std::vector<Timed*> ts = {ctl1.get(), pr.get()};
@@ -1153,7 +1175,7 @@ int run_prod(l0::Context& ctx, const Opts& o) {
       for (size_t ai = 0; ai < al.size(); ++ai) {
         auto& a = al[ai];
         const double u = median(a->us);
-        best = std::min(best, u);
+        if (al_v2[ai].find("_nodq") == std::string::npos) best = std::min(best, u);
         if (!al_v2[ai].empty()) v2_us[al_v2[ai]][s.key][M] = u;
         std::printf("| %s | %u | %.1f | %.4f (%s) | %.4f | %.4f (%s) |\n", a->L->name.c_str(), M, u,
                     median(ratios(*a, *ctl1)), range_str(ratios(*a, *ctl1)).c_str(), vs_m(*a),
@@ -1217,6 +1239,7 @@ int run_prod(l0::Context& ctx, const Opts& o) {
       for (auto& [label, byS] : v2_us) {
         const double v = int4_sum(byS, M, nullptr);
         if (v > 0) std::printf("| %s | %u | %.2f |\n", label.c_str(), M, v / 1e3);
+        if (label.find("_nodq") != std::string::npos) continue;   // wrong output: not ranked
         for (auto& [key, byM] : byS)
           if (byM.count(M) && (!best_v2[key].count(M) || byM.at(M) < best_v2[key][M])) {
             best_v2[key][M] = byM.at(M);
@@ -1461,6 +1484,7 @@ int main(int argc, char** argv) {
     else if (a == "--launches") o.launches = uint32_t(std::stoul(v));
     else if (a == "--device") o.device = uint32_t(std::stoul(v));
     else if (a == "--trials") o.trials = uint32_t(std::stoul(v));
+    else if (a == "--v2") o.v2 = split(v);
     else { std::fprintf(stderr, "unknown flag %s\n", a.c_str()); return 2; }
   }
   for (uint32_t M : o.ms)
