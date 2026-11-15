@@ -341,6 +341,27 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
                                  "addresses than were written");
       for (uint32_t l = P.first; l < P.end; ++l)
         P.layers[l - P.first].expert_row = P.expert_table->as<uint8_t>() + size_t(l - P.first) * 2 * d.experts * 8;
+      // The prefill's staging range and each mirrored layer's row into it: the mirror's addresses moved by
+      // (staging - mirror), the mirror's layout kept, so one copy of the whole mirror stages the layer.
+      const size_t staging = T.staging_bytes(d, P.first, P.end);
+      if (staging != 0) {
+        P.expert_stage = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, staging);
+        P.bytes += staging;
+        std::vector<uint64_t> srows = rows;
+        for (uint32_t l = P.first; l < P.end; ++l) {
+          const Q4Layer& L = P.layers[l - P.first];
+          if (!L.mirror) continue;
+          const uint64_t m0 = uint64_t(uintptr_t(L.mirror->ptr())), m1 = m0 + L.mirror->size();
+          const uint64_t s0 = uint64_t(uintptr_t(P.expert_stage->ptr()));
+          uint64_t* r = srows.data() + size_t(l - P.first) * 2 * d.experts;
+          for (uint32_t i = 0; i < 2 * d.experts; ++i)
+            if (r[i] >= m0 && r[i] < m1) r[i] = r[i] - m0 + s0;
+        }
+        P.stage_table = upload_u(ctx, imm, srows.data(), srows.size() * 8);
+        for (uint32_t l = P.first; l < P.end; ++l)
+          if (P.layers[l - P.first].mirror)
+            P.layers[l - P.first].stage_row = P.stage_table->as<uint8_t>() + size_t(l - P.first) * 2 * d.experts * 8;
+      }
     }
     if (dev + 1 == placement.devices) {
       const std::vector<uint8_t> fm = ck.final_mixer();
@@ -360,7 +381,8 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
     size_t host_experts = 0;
     for (uint32_t l = P.first; l < P.end; ++l)
       host_experts += size_t(d.experts - T.n_vram(l)) * (q4_gate_up_block_bytes(d) + q4_down_block_bytes(d));
-    const size_t want = q4_device_weight_bytes(d, placement, dev, int8, mtp) - host_experts;
+    const size_t want = q4_device_weight_bytes(d, placement, dev, int8, mtp) - host_experts +
+                        (m.expert_table ? T.staging_bytes(d, P.first, P.end) : 0);
     if (P.bytes != want)
       throw std::logic_error("load_qwen4exp: device " + std::to_string(dev) + " allocated " + std::to_string(P.bytes) +
                              " B of weights, loader::q4_device_weight_bytes less the experts in host memory says " +

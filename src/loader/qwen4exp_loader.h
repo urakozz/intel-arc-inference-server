@@ -48,6 +48,8 @@ struct Q4Layer {                                   // one decoder layer on its d
   void* expert_row = nullptr;                      // the table form (_TBL): the layer's u64 row on its device - block
                                                    // addresses, gate||up at [0, 512), down at [512, 1024); null: the
                                                    // direct form (the MTP head, B70_Q4_EXPERTS=direct)
+  void* stage_row = nullptr;                       // with a mirror: the row with the mirror's addresses moved to the
+                                                   // device's staging range (the prefill copies the mirror there)
   std::unique_ptr<l0::Mem> shared;                 // gate||up then down: int4 layout-1 blocks or bf16 tiles
   size_t shared_down_offset = 0;                   // = q4_shared_gate_up_bytes
   std::unique_ptr<l0::Mem> ple;                    // the PLE layer only: key||value tiles, norms, conv (q4_ple_offsets)
@@ -64,6 +66,9 @@ struct Q4DevicePart {
   std::unique_ptr<l0::Mem> mtp_fc;                 // q4_mtp_fc_offsets
   std::unique_ptr<l0::Mem> mtp_mixer;              // the head's own final mixer
   std::unique_ptr<l0::Mem> expert_table;           // the table form: u64 [its layers][1024] (Q4Layer::expert_row)
+  std::unique_ptr<l0::Mem> expert_stage;           // the prefill's staging range (ExpertTier::staging_bytes; counted
+                                                   // in `bytes`), null when every expert here is resident
+  std::unique_ptr<l0::Mem> stage_table;            // u64 [its layers][1024] (Q4Layer::stage_row)
   size_t bytes = 0;                                // weights, == q4_device_weight_bytes less the experts in host
                                                    // memory (RoPE and the expert table apart)
   size_t rope_bytes = 0;

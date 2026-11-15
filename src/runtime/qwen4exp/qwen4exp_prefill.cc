@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -40,6 +41,21 @@ static_assert(kPfDenseLast + 1 == kq::kTopBlocks * kq::kBlock + 3, "the dense ra
 static_assert(offsetof(Control, pos) == kernels::ctrl_index::kPos * 4 &&
                   offsetof(Control, n_active) == kernels::ctrl_index::kNActive * 4,
               "runtime::Control and CTRL_DEFINES disagree");
+
+// The expert tier's prefill (plan 21v2a Task 9): a chunk of at least this many rows stages its layer's mirror in VRAM
+// (it touches most experts: one copy reads each miss once), a shorter one reads its few misses in place (the GEMM
+// reads a host block once per work item). B70_Q4_PF_STAGE=on|off pins the choice for tests and timing.
+constexpr uint32_t kPfStageRows = 512;
+bool stage_rows(uint32_t rows) {
+  static const std::string e = [] {
+    const char* v = std::getenv("B70_Q4_PF_STAGE");
+    return std::string(v ? v : "");
+  }();
+  if (e == "on") return true;
+  if (e == "off") return false;
+  if (!e.empty()) throw std::runtime_error("B70_Q4_PF_STAGE=" + e + ": on or off (unset: by the chunk's rows)");
+  return rows >= kPfStageRows;
+}
 
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::qwen4exp::prefill_chunk: " + what);
@@ -398,11 +414,16 @@ class Walk {
       // walk); Intel's bf16 shared expert (no int4 form) keeps its one-block dequant + GEMM after
       const uint32_t ib = pf_items(d_, C_);
       const uint32_t NG = 2 * d_.moe_inter;
-      // The expert tier (plan 21v2a Task 8): with a table row the _TBL GEMMs read each block from its address - the
-      // misses straight from pinned host memory (a staging ring for them is the next step)
+      // The expert tier (plan 21v2a Tasks 8-9): with a table row the _TBL GEMMs read each block from its address. A
+      // chunk of at least kPfStageRows rows first copies the layer's whole mirror into the device's staging range
+      // (one read of every miss over the bus, in order before the GEMMs) and reads the staged row; a shorter one
+      // reads its misses in place from pinned host memory.
       const bool tbl = L.expert_row != nullptr;
-      const void* w_gu = tbl ? L.expert_row : L.gate_up->ptr();
-      const void* w_dn = tbl ? static_cast<const uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr();
+      const bool stage = L.stage_row && stage_rows(C_);
+      if (stage) cx_.copy(part_.expert_stage->ptr(), L.mirror->ptr(), L.mirror->size());
+      const void* row = stage ? L.stage_row : L.expert_row;
+      const void* w_gu = tbl ? row : L.gate_up->ptr();
+      const void* w_dn = tbl ? static_cast<const uint8_t*>(row) + size_t(d_.experts) * 8 : L.down->ptr();
       launch(kc_(kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true, tbl), "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN,
              ib, 1,
              {PtrArg(s_.items.ptr()), PtrArg(s_.xg.ptr()), PtrArg(w_gu),

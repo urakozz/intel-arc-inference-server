@@ -162,14 +162,16 @@ int main(int argc, char** argv) {
     CHECK(rq::fits(pl, caps, kReserve) && !t.all());
     for (uint32_t dev = 0; dev < 2; ++dev) {
       const uint32_t n = t.n_vram(b.first[dev]);
-      CHECK_EQ(size_t(n), b.cache[dev] / (size_t(b.end[dev] - b.first[dev]) * eb));
+      const size_t L = b.end[dev] - b.first[dev], slots = b.cache[dev] / eb;   // L n + the staging's E - n experts
+      CHECK_EQ(size_t(n), (slots - ours.experts) / (L - 1));
+      CHECK_EQ(t.staging_bytes(ours, b.first[dev], b.end[dev]), size_t(ours.experts - n) * eb);
       for (uint32_t l = b.first[dev]; l < b.end[dev]; ++l) {
         CHECK_EQ(t.n_vram(l), n);
         CHECK(t.resident(l, 500) && t.resident(l, 0) && t.resident(l, n - 2) && !t.resident(l, n - 1));
       }
       CHECK_EQ(pl[dev].host_experts, size_t(pl[dev].routed_experts - pl[dev].vram_experts) * eb);
     }
-    CHECK_EQ(w0 - pl[0].weights, pl[0].host_experts);
+    CHECK_EQ(w0 + t.staging_bytes(ours, b.first[0], b.end[0]) - pl[0].weights, pl[0].host_experts);
     CHECK_EQ(pl[0].host_experts + pl[1].host_experts, t.host_bytes(ours));
     const rq::ExpertTier byid = rq::fill_tier(ours, b, nullptr);
     CHECK(byid.resident(3, 0) && !byid.resident(3, ours.experts - 1) && byid.n_vram(3) == t.n_vram(3));
