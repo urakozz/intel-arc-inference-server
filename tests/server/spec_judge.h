@@ -162,6 +162,10 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"mtp_gpu_bf16_t2_explain-openai_201e835f5ad80f51", 0, 248068, 846, 11.10, "2026-11-14", kNearTieNoiseReason},
     // tp_prefill_kv8_test long: TP's plain decode after its int8-KV prefill takes the same flip at output 62
     {"tp_prefill_kv8_long_fa12c9167b2eaa28", 62, 198, 271, 24.80, "2026-11-14", kTpPrefillNarrowReason},
+    // mtp_lookup_gpu_test, output 45: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
+    {"mtp_lookup_gpu_int8_t4_comment-openai_54315f9e12fec99e", 0, 248068, 1005, 21.64, "2026-11-15", kNearTieNoiseReason},
+    // the same row of t5_test-openai: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
+    {"mtp_lookup_gpu_int8_t5_test-openai_ff1eedc7423171f6", 0, 846, 248046, 21.05, "2026-11-15", kNearTieNoiseReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
 // tags streams() saw - an entry whose tag ran and never matched is stale.
