@@ -18,7 +18,7 @@
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_engine.h"   // PipelineOptions, PipelineLink (spec 16b's, unchanged)
 
-// Spec 20c: Kolibri-1's decode loop - runtime::Engine's contract (K2Engine's arrangement) on one card
+// Spec 20c: Kolibri-1's decode loop - runtime::Engine's contract on one card
 // or, spec 16b's pieces, two: it owns the weights (each layer on its device: loader::load_kolibri1's
 // parts), one KolibriBuffers and one captured list per device, and a token is a replay of the lists.
 // A prompt is fed one id per replay (`ingest`) or, spec 20d, in chunks (`prefill`, below). No MTP
