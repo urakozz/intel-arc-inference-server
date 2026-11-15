@@ -90,11 +90,10 @@ struct Rig {
     return dev(s.taps->ptr(), s.taps->size(),
                dev(s.ring_v->ptr(), s.ring_v->size(), dev(s.ring_k->ptr(), s.ring_k->size(), 1469598103934665603ull)));
   }
+  // The selected slot's committed GDN state (a one-slot engine's deferred rows applied first: verify-cost-m8).
   uint64_t live_state_hash(uint32_t q) {
-    const runtime::Engine::SlotView v = e->slot_view(q);
-    const size_t st = e->buffers().gdn_state.size();
-    const uint32_t live = v.control->gdn_live;
-    return dev(live == 0 ? v.state0 : v.spec + size_t(live - 1) * st, st, 1469598103934665603ull);
+    e->select(q);
+    return dev(e->gdn_state_now(), e->buffers().gdn_state.size(), 1469598103934665603ull);
   }
   uint64_t slot_hash(uint32_t q) {
     const runtime::Engine::SlotView v = e->slot_view(q);
