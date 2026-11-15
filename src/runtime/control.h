@@ -29,7 +29,9 @@ struct Control {
   // verify-cost-m8: the one-card verify lists' committed rows (gdn_step.cl, DEFERRED): bits 0..7 the rows the next
   // launch replays, bit 8 the parity they sit in. Engine::commit sets it, Engine::verify clears the count. 0 elsewhere.
   uint32_t gdn_pend;
-  uint32_t pad[1];
+  // Spec 32: after a 32- / 64-row verify, j + 1 when its accepted rows 16.. must reach the conv ring (gdn_ring_commit.cl
+  // copies rows max(16, j - 2) .. j from the conv scratch); 0 otherwise. Engine::commit sets it and runs the copy.
+  uint32_t ring_commit;
   // Open-work 28: the one-card 16-row verify list's ids (its builds read CTRL_CUR 32 and write CTRL_OUT 48, so the
   // 8-id fields above keep their offsets for every other list): wide_cur[0..15] in, wide_out[0..15] out.
   uint32_t wide_cur[16];

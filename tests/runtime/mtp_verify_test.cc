@@ -30,6 +30,11 @@
 //        to pos 16384 without a throw and produce the plain run's ids; then verify and
 //        draft refuse.
 //
+//   W32 / W64 (spec 32, `... 16384 rule deep`): the deep lists against the 16-row list from the same state - (a) every
+//        row bitwise the 16-row list's row (rows past 15: after 16-row verifies committing 15 of the same inputs);
+//        (b) for j in 0, 7, 15, 16, 31, 32, 47, 62 a wrong draft at j + 1 and junk after leave rows 0..j bitwise and the
+//        next 64 plain ids bitwise the clean run's; (c) greedy lookup iterations with commits in between emit the
+//        same ids through the deep list as through the 16-row one (the captured lists replayed across commits).
 //   W16  (open-work 28, `mtp_verify_test <snapshot> 16384 rule wide`: the int8 head, whose engine builds the 16-row
 //        list) at the M2 positions: (a) for j in 0, 1, 4, 7, 11, 14 the 16-row verify with drafts g[1..j] true, a WRONG
 //        id at j + 1 and junk after - its rows 0..j bitwise the all-true verify's (no later row leaks into an
@@ -37,7 +42,7 @@
 //        verify against the plain step's row by the f32 judge (spec_judge::row: cosine >= 0.99999 against plain, or a
 //        distance to f32 at most kCosSlack (2) x the plain row's).
 //
-// usage: mtp_verify_test <snapshot> [max_len = 16384] [vattn = rule] [wide]   (cwd = the source tree)
+// usage: mtp_verify_test <snapshot> [max_len = 16384] [vattn = rule] [wide | deep]   (cwd = the source tree)
 //
 // Spec 28c: `vattn` v2 | dpas | rule (test-only) - the verify lists' attention forced (Engine::recapture_verify) or
 // the capture's measured rule. Where DPAS is bound the verify rows are no longer bitwise their M = 1 steps: M2a's
@@ -299,6 +304,83 @@ bool w16(Ctx& c, const Snap& s0, const std::vector<uint32_t>& prompt, const std:
   return ok;
 }
 
+// W32 / W64 (header): the deep list of W rows against the 16-row list from the same state.
+bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
+  constexpr uint32_t K16 = runtime::Engine::kWideK;
+  const uint32_t K = W - 1;
+  bool ok = true;
+  s0.restore(c);
+  std::vector<uint32_t> g{c.ctl->cur_token[0]};   // the plain run: g[0] pending, g[i + 1] step i's id
+  for (uint32_t i = 0; i < 4 * W; ++i) {
+    c.e.verify(0);
+    c.e.commit(0, c.e.verify_ids()[0]);
+    g.push_back(c.ctl->cur_token[0]);
+  }
+  const auto deep = [&](uint32_t j) {   // drafts g[1..j] true, then a wrong id and junk (j = K: every draft true)
+    s0.restore(c);
+    for (uint32_t i = 1; i <= K; ++i)
+      c.ctl->deep_cur[i] = i <= j ? g[i] : i == j + 1 ? (g[i] + 7919) % uint32_t(VU) : (g[i] + 104729 * i) % uint32_t(VU);
+    c.e.verify(K);
+  };
+  deep(K);
+  const std::vector<float> all = logits_rows(c, c.e.verify_logits_device(), W);
+  // (a) rows 16 q .. 16 q + 15 against the 16-row list after q 16-row verifies of the same inputs, each committing 15
+  // rows with the next chunk's first input as the pending id (whatever the rows chose: the inputs are what match).
+  size_t diff_rows = 0;
+  s0.restore(c);
+  for (uint32_t q = 0; q < W / 16; ++q) {
+    for (uint32_t i = 1; i <= K16; ++i) c.ctl->wide_cur[i] = g[16 * q + i];
+    c.e.verify(K16);
+    const std::vector<float> lg = logits_rows(c, c.e.verify_logits_device(), 16);
+    for (uint32_t r = 0; r < 16; ++r)
+      diff_rows += std::memcmp(lg.data() + size_t(r) * V, all.data() + size_t(16 * q + r) * V, V * 4) != 0;
+    c.e.commit(K16, g[16 * q + 16]);
+  }
+  std::printf("  W%u (a): %zu of %u rows differ from the 16-row list's (bitwise)\n", W, diff_rows, W);
+  ok &= diff_rows == 0;
+  // (b) a wrong draft at j + 1 and junk after: rows 0..j bitwise the all-true verify's, the next 64 plain ids too
+  for (uint32_t j : {0u, 7u, 15u, 16u, 31u, 32u, 47u, 62u}) {
+    if (j >= K) continue;
+    deep(K);
+    c.e.commit(j, c.e.verify_ids()[j]);
+    const std::vector<uint32_t> clean = c.e.generate(64);
+    deep(j);
+    const std::vector<float> lg = logits_rows(c, c.e.verify_logits_device(), j + 1);
+    const bool rows_ok = std::memcmp(lg.data(), all.data(), size_t(j + 1) * V * 4) == 0;
+    c.e.commit(j, c.e.verify_ids()[j]);
+    const std::vector<uint32_t> ids = c.e.generate(64);
+    std::printf("  W%u j=%2u: rows 0..%u %s the all-true verify's, 64 further ids %s\n", W, j, j,
+                rows_ok ? "bitwise" : "DIFFER from", ids == clean ? "bitwise the clean run's" : "DIFFER");
+    ok &= rows_ok && ids == clean;
+  }
+  // (c) the lists replayed across commits: greedy lookup iterations from S0 with the plain run's ids as drafts (one in
+  // three corrupted at a moving row), at W rows and at 16 rows - the same ids emitted, then the same 64 plain ids.
+  const auto run = [&](uint32_t k) {
+    s0.restore(c);
+    std::vector<uint32_t> out;
+    for (uint32_t it = 0; out.size() < 2 * W; ++it) {
+      const size_t t0 = out.size();   // g[t0] is the pending id when the run so far matched the plain run
+      uint32_t* cur = k == K16 ? c.ctl->wide_cur : c.ctl->deep_cur;
+      for (uint32_t i = 1; i <= k; ++i) cur[i] = t0 + i < g.size() ? g[t0 + i] : 0;
+      if (it % 3 == 2) cur[1 + (it * 13) % k] = (cur[1 + (it * 13) % k] + 7919) % uint32_t(VU);
+      out.push_back(c.ctl->cur_token[0]);
+      c.e.verify(k);
+      uint32_t j = 0;
+      while (j < k && cur[j + 1] == c.e.verify_ids()[j]) ++j;
+      for (uint32_t i = 0; i < j; ++i) out.push_back(cur[i + 1]);
+      c.e.commit(j, c.e.verify_ids()[j]);
+    }
+    return out;
+  };
+  const std::vector<uint32_t> a = run(K), b = run(K16);
+  const size_t n = std::min(a.size(), b.size());
+  const bool same = std::equal(a.begin(), a.begin() + n, b.begin());
+  std::printf("  W%u (c): %zu ids emitted through %u-row verifies and commits %s the 16-row lists'\n", W, n, W,
+              same ? "equal" : "DIFFER from");
+  ok &= same;
+  return ok;
+}
+
 // One greedy speculative iteration at depth k (0 = plain step): returns ids emitted.
 std::vector<uint32_t> iterate(Ctx& c, uint32_t k) {
   std::vector<uint32_t> out{c.ctl->cur_token[0]};   // the pending id, emitted by this step
@@ -380,7 +462,8 @@ int main(int argc, char** argv) {
   if (deep) std::printf("max_len %u: M2 also at n = %u, RF4 also at %u\n", kMaxLen, kMaxLen - 1026,
                         kMaxLen / 2 + 4395);
   l0::Context ctx(0);
-  const bool wide_mode = argc > 4 && std::string(argv[4]) == "wide";   // open-work 28: W16 alone, the int8 head
+  // open-work 28: W16 alone, the int8 head; spec 32: W32 / W64 alone (deep), the same
+  const bool wide_mode = argc > 4 && (std::string(argv[4]) == "wide" || std::string(argv[4]) == "deep");
   runtime::Engine e(ctx,
                     loader::load(ctx, snap, kMaxLen, /*mtp=*/true,
                                  wide_mode ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint),
@@ -410,6 +493,19 @@ int main(int argc, char** argv) {
   CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *
                                  (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));
 
+  if (argc > 4 && std::string(argv[4]) == "deep") {   // W32 / W64 (header)
+    CHECK(e.deep_built(runtime::Engine::kDeepK32) && e.deep_built(runtime::Engine::kDeepK64));
+    for (uint32_t n : {1998u, 2053u})
+      for (uint32_t W : {32u, 64u}) {
+        e.reset();
+        e.prefill(head(ids, n));
+        std::printf("W%u at n = %u\n", W, n);
+        const Snap s0(c);
+        ok &= w_deep(c, s0, W);
+      }
+    std::printf("W32 / W64: %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+  }
   if (wide_mode) {   // W16 (header)
     CHECK(e.wide_built());
     for (uint32_t n : {1998u, 2053u}) {

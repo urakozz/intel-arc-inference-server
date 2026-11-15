@@ -440,10 +440,15 @@ inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, un
 // binds the 8-slot build, `_N8` (runtime::MtpBuffers::slots).
 // verify-cost-m8: gdn_step.cl's DEFERRED build at M rows (M = 1..8), Qwen3.8's 48 GDN layers and heads only - the
 // pending rows' parity stride is baked: kGdnPendParityBytes = 48 layers x kGdnPendLayerBytes.
-inline constexpr size_t kGdnPendLayerBytes = 16 * (16 + 48) * 128 * 2 + 16 * 48 * 2 * 4;   // PR = 16 rows (open-work 28)
+inline constexpr size_t kGdnPendLayerBytes = 64 * (16 + 48) * 128 * 2 + 64 * 48 * 2 * 4;   // PR = 64 rows (spec 32)
 inline constexpr size_t kGdnPendParityBytes = 48 * kGdnPendLayerBytes;
-static_assert(kGdnPendParityBytes == 12877824, "src/kernels/CMakeLists.txt's PEND_PAR");
+static_assert(kGdnPendParityBytes == 51511296, "src/kernels/CMakeLists.txt's PEND_PAR");
 inline std::string gdn_step_defer_variant(unsigned M) { return "gdn_step_defer_M" + std::to_string(M); }
+// Spec 32: a link of the 32- / 64-row lists' chain (gdn_step.cl, ROW0) and its scratch: the conv rows 16.. of a list,
+// [48 GDN layers][48 rows][10240] bf16; the ring copy (gdn_ring_commit.cl) moves the committed ones into the ring.
+inline std::string gdn_step_chain_variant(unsigned row0) { return "gdn_step_defer_M16_R" + std::to_string(row0); }
+inline constexpr size_t kGdnConvXRows = 48;
+inline constexpr size_t kGdnConvXLayerBytes = kGdnConvXRows * 10240 * 2;
 inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers,
                                           unsigned gdn_k = kRefGdnKHeads,
                                           unsigned gdn_v = kRefGdnVHeads, unsigned slots = 4) {
@@ -472,6 +477,7 @@ inline constexpr unsigned kWideCur = 32;    // Control::wide_cur[16] (open-work 
 inline constexpr unsigned kWideOut = 48;    // Control::wide_out[16] (their CTRL_OUT)
 inline constexpr unsigned kDeepCur = 64;    // Control::deep_cur[64] (spec 32: the 32- / 64-row builds' CTRL_CUR)
 inline constexpr unsigned kDeepOut = 128;   // Control::deep_out[64] (their CTRL_OUT)
+inline constexpr unsigned kRingCommit = 31; // Control::ring_commit (spec 32: gdn_ring_commit.cl's CTRL_RC)
 }  // namespace ctrl_index
 
 // The token-boundary kernels (src/kernels/embed_gather.cl, argmax.cl). `M` is

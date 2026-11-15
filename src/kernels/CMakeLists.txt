@@ -592,11 +592,11 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   endforeach()
   # verify-cost-m8: the one-card verify lists' DEFERRED build (gdn_step.cl): no per-row state, the committed rows
   # replayed by the next launch. CTRL_PEND = Control::gdn_pend; PEND_PAR = one parity of the pending rows, 48 layers x
-  # (16 rows x (16 + 48) x 128 bf16 + 16 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes; 16 rows since open-work
+  # (64 rows x (16 + 48) x 128 bf16 + 64 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes; 64 rows since spec 32, 16 since open-work
   # 28). Qwen3.8's shapes only. M = 16: open-work 28's wide verify list.
   foreach(MM 1 2 3 4 5 6 7 8 16)
     add_ocloc_kernel(gdn_step_defer_M${MM} SOURCE ${GDN_CL}
-                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=12877824 M=${MM})
+                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=51511296 M=${MM})
   endforeach()
   # verify-cost-m8 probe: a||b at M = 2..8 with a wider in-work-group K split (CaptureOptions::probe_ab_ksplit)
   foreach(MM 2 3 4 5 6 7 8)
@@ -946,6 +946,15 @@ if(B70_MTP AND B70_VERIFY_M8)
                      DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
     add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
   endforeach()
+  # The delta-net step at W rows: W / 16 links of the 16-row deferred build (gdn_step.cl, ROW0), and the ring copy a
+  # commit of rows 16.. runs (gdn_ring_commit.cl; CTRL_RC = Control::ring_commit).
+  if(B70_DFLASH)
+    foreach(R0 0 16 32 48)
+      add_ocloc_kernel(gdn_step_defer_M16_R${R0} SOURCE ${GDN_CL}
+                       DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=51511296 M=16 ROW0=${R0})
+    endforeach()
+  endif()
+  add_ocloc_kernel(gdn_ring_commit SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gdn_ring_commit.cl DEFINES CTRL_POS=0 CTRL_RC=31)
 endif()
 # ==== Spec 32 ================================================================== (end) ====
 

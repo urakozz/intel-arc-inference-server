@@ -58,7 +58,7 @@ void check_one_slot() {
       }
   // SlotDims and MtpDims at one sequence: nothing more than today.
   CHECK_EQ(runtime::SlotDims::sizes(q, 1, true).total(), size_t{0});
-  CHECK_EQ(runtime::MtpDims::hh_rows(1), runtime::DecodeScratchDims::kWideM + 1);   // open-work 28
+  CHECK_EQ(runtime::MtpDims::hh_rows(1), runtime::DecodeScratchDims::kDeepM + 1);   // spec 32
   CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Bf16, 4, 1).total(),
            runtime::MtpDims::sizes(16384, q).total());
 }
@@ -74,21 +74,25 @@ void check_decided_layout() {
                                                        KvCache::Int8, kQwenInt8Weights, kMtpWeights);
   // The engine sizes RoPE at the summed positions; its raw-widening buffer at the longest slot, as batch_memory (3j).
   const size_t rope = model::Qwen35::rope_table_bytes(229376) - model::Qwen35::rope_table_bytes(131072);
-  const size_t hh = size_t(runtime::MtpDims::hh_rows(4) - runtime::MtpDims::hh_rows(1)) * q.hidden * 2;
+  // spec 32: one sequence's hh rows (65) now outnumber four slots' (60)
+  const int64_t hh = (int64_t(runtime::MtpDims::hh_rows(4)) - runtime::MtpDims::hh_rows(1)) * q.hidden * 2;
   const size_t ctl = runtime::SlotDims::sizes(q, 4, true).controls;
-  CHECK_EQ(ctl, size_t{10} * 256 + 3 * 256);   // Control 256 B (open-work 28)
+  CHECK_EQ(ctl, size_t{10} * 768 + 3 * 256);   // Control 768 B (spec 32)
   const size_t pages = size_t(229376 / runtime::kKvPage) * 4;   // plan 19v3b Task 0: the page table, 112 pages
   CHECK_EQ(runtime::SlotDims::sizes(q, 4, true, 112).pages, pages);
-  CHECK_EQ(p.total(), b.total() + rope + hh + ctl + pages);
+  // spec 32: one sequence carries the deferred GDN rows (MtpSizes::deep), several do not
+  const size_t deep = runtime::MtpDims::sizes(131072, q, 0, KvCache::Int8).deep;
+  CHECK_EQ(p.total(), size_t(int64_t(b.total() + rope + ctl + pages - deep) + hh));
   // 3e sized the widening scratch at the sum: 384 MiB (98304 positions x 4 KiB) more than the longest slot needs.
   CHECK_EQ(runtime::plan(q, 229376, true, kQwenInt8Weights + kMtpWeights, {}, {}, KvCache::Int8).prefill_lazy -
                p.prefill_lazy,
            size_t{402653184});
   CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
-  CHECK_EQ(p.slot_state, size_t{3} * (4 * size_t{150994944} + 31457280) + hh + ctl + pages);
+  CHECK_EQ(p.slot_state, size_t(int64_t(size_t{3} * (4 * size_t{150994944} + 31457280) + ctl + pages - deep) + hh));
   // §9.1: "total 29.10 GB, 1.93 GB spare" (l0-int8); on the l0 default 0.087 GB less (batch_rows_test's 29.01).
-  CHECK_NEAR(p.total() / kGB, 29.119 + double(size_t{131072} * 4 * 256 * 2 * 2) / kGB, 0.01);
+  // spec 32: + 0.146 GB, the 64-row decode scratch
+  CHECK_NEAR(p.total() / kGB, 29.265 + double(size_t{131072} * 4 * 256 * 2 * 2) / kGB, 0.01);
   std::printf("plan_slots 131072 + 3 x 32768, int8 KV, MTP: %.3f GB (batch_memory %.3f + RoPE %.3f + hh %.6f + "
               "controls %zu B + page table %zu B), spare %.3f GB\n",
               p.total() / kGB, b.total() / kGB, rope / kGB, hh / kGB, ctl, pages,

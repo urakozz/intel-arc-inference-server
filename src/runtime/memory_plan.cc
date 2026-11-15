@@ -159,10 +159,11 @@ MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>&
   p.slot_state = SlotDims::sizes(desc, seqs, mtp, total / kKvPage, drafter.on()).total();
   for (uint32_t q = 1; q < seqs; ++q) p.slot_state += drafter.session(lens[q]);   // plan 19v3b: their sessions
   if (mtp) {   // the further slots' GDN states and hh rows: MtpBuffers at `seqs`
-    const size_t more = MtpDims::sizes(p.max_len, desc, 0, kv, MtpDims::kSlots, seqs).total() -
-                        MtpDims::sizes(p.max_len, desc, 0, kv).total();
-    p.slot_state += more;
-    p.mtp_buffers += more;
+    // Spec 32: may be negative - one sequence's hh rows (the deep lists' 65) and deferred GDN rows outweigh the slots'.
+    const int64_t more = int64_t(MtpDims::sizes(p.max_len, desc, 0, kv, MtpDims::kSlots, seqs).total()) -
+                         int64_t(MtpDims::sizes(p.max_len, desc, 0, kv).total());
+    p.slot_state = size_t(int64_t(p.slot_state) + more);
+    p.mtp_buffers = size_t(int64_t(p.mtp_buffers) + more);
   }
   p.decode_state += p.slot_state;   // plan() counted MtpBuffers at one sequence
   return p;

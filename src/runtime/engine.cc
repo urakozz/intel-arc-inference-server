@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -536,6 +537,9 @@ void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
 // Open-work 28: the wide list where it is built - one slot with the deferred GDN rows, the bf16 KV cache, the int8 head
 // (gemm_sm_i8w's 16-row build; the bf16 head has none) and Qwen3.8's attention heads. One list for every depth: the
 // 16-row attention is DPAS from the first key (runtime/verify_attn.h).
+static_assert(MtpDims::kGdnPendParity == kernels::kGdnPendParityBytes &&
+                  MtpDims::kGdnConvXLayer == kernels::kGdnConvXLayerBytes,
+              "MtpDims' deep terms are the kernels' pending rows and conv scratch");
 void Engine::capture_wide(const CaptureOptions& opt) {
   const model::ModelDesc& d = *model_.desc;
   if (!mtp_ || !gdn_pend_ || slots() != 1 || kv_cache() != KvCache::Bf16 || model_.draft_vocab ||
@@ -544,12 +548,39 @@ void Engine::capture_wide(const CaptureOptions& opt) {
     return;
   seqs_[0].wide = std::make_unique<CapturedStep>(
       build_verify(ctx_, model_, buffers_, *mtp_, DecodeScratchDims::kWideM, nullptr, opt, seqs_[0].bind));
+  // Spec 32: the 32- and 64-row lists, their chain scratch and the ring copy (allocated once; a recapture reuses them).
+  if (!gdn_x_) {
+    gdn_x_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device, persist_.gdn_state.size());
+    conv_x_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device, size_t(d.gdn_layers) * kernels::kGdnConvXLayerBytes);
+    ring_mod_ = std::make_unique<l0::Module>(ctx_, kernels::path("gdn_ring_commit"));
+    ring_k_ = std::make_unique<l0::Kernel>(*ring_mod_, "gdn_ring_commit");
+    ring_k_->group_size(256);
+    ring_k_->arg_ptr(0, control_);
+    ring_k_->arg_ptr(1, seqs_[0].ring);
+    ring_k_->arg_ptr(2, conv_x_->ptr());
+    ring_list_ = std::make_unique<l0::CmdList>(l0::CmdList::regular(ctx_));
+    ring_list_->launch(*ring_k_, 10240 / 256, 3, d.gdn_layers);
+    ring_list_->close();
+    if (const char* v = std::getenv("B70_SPEC_LOOKUP_ROWS")) {
+      const std::string r = v;
+      if (r != "16" && r != "32" && r != "64")
+        throw std::runtime_error("B70_SPEC_LOOKUP_ROWS=" + r + ": 16, 32 or 64 (the widest lookup verify)");
+      deep_rows_ = uint32_t(std::stoul(r));
+    }
+  }
+  SlotBind b = seqs_[0].bind;
+  b.gdn_x = gdn_x_->ptr();
+  b.conv_x = conv_x_->ptr();
+  seqs_[0].deep32 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 32, nullptr, opt, b));
+  seqs_[0].deep64 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 64, nullptr, opt, b));
 }
 
 uint32_t Engine::max_wide_k() const {
   const uint32_t pos = control_->pos;
-  if (!seq().wide || pos == 0 || size_t(pos) + kWideK + 1 > max_len()) return 0;
-  return kWideK;
+  if (!seq().wide || pos == 0) return 0;
+  for (const uint32_t k : {kDeepK64, kDeepK32, kWideK})
+    if ((k == kWideK || deep_built(k)) && k + 1 <= deep_rows_ && size_t(pos) + k + 1 <= max_len()) return k;
+  return 0;
 }
 
 void Engine::recapture_verify(const CaptureOptions& opt) {
@@ -775,7 +806,13 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
   if (!draft || !rows_commits_.empty()) flush_projection();
   Seq& s = seq();
   const uint32_t pos = control_->pos;
-  const bool wide = k == kWideK && s.wide && !draft;   // open-work 28
+  // Open-work 28: the 16-row list; spec 32: the 32- and 64-row lists.
+  CapturedStep* const wl = draft ? nullptr
+                           : k == kWideK  ? s.wide.get()
+                           : k == kDeepK32 ? s.deep32.get()
+                           : k == kDeepK64 ? s.deep64.get()
+                                           : nullptr;
+  const bool wide = wl != nullptr;
   if ((k > max_draft() && !wide) || (mtp_ && pos == 0) || size_t(pos) + k + 1 > max_len())
     throw std::runtime_error("runtime::Engine::verify: k " + std::to_string(k) + " at pos " +
                              std::to_string(pos) + " (max_verify_k() = " +
@@ -784,7 +821,7 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
                              std::to_string(max_len()) + ")");
   // df_select writes the other rows on the device in the batched path.
   // Open-work 28: the wide list's rows are Control::wide_cur (its embed_gather's CTRL_CUR 32), row 0 the pending id.
-  uint32_t* const ids = wide ? control_->wide_cur : control_->cur_token;
+  uint32_t* const ids = !wide ? control_->cur_token : k == kWideK ? control_->wide_cur : control_->deep_cur;
   if (wide) ids[0] = control_->cur_token[0];
   for (uint32_t r = 0; r <= (draft ? 0 : k); ++r)
     if (ids[r] >= Qwen35::kVocab)
@@ -796,7 +833,7 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
     // (hh[r], cur_token[r]) = (h_{pos-1+r}, x[pos+r]) - capture.h, build_verify.
     hctl_->pos = pos - 1;
     hctl_->n_active = k + 1;
-    uint32_t* const hids = wide ? hctl_->wide_cur : hctl_->cur_token;
+    uint32_t* const hids = !wide ? hctl_->cur_token : k == kWideK ? hctl_->wide_cur : hctl_->deep_cur;
     for (uint32_t r = 0; r <= k; ++r) hids[r] = ids[r];
   }
   s.verify_pos = pos;
@@ -804,7 +841,7 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
   s.from_rows = false;
   s.verify_hidden = mtp_ ? s.hh + hid_bytes(*model_.desc) : nullptr;   // hh row 1 + j: row j's hidden
   // Spec 28c: the deep list (DPAS bound) once row 0's keys reach the table's threshold.
-  CapturedStep& list = wide ? *s.wide
+  CapturedStep& list = wide ? *wl
                        : s.verify_deep[k] && pos + 1 >= s.verify_deep_from[k] ? *s.verify_deep[k]
                                                                               : s.verify_steps[k];
   if (draft) {
@@ -847,6 +884,14 @@ void Engine::commit(uint32_t j, uint32_t next_token, bool defer_projection) {
   control_->pos = s.verify_pos + j + 1;
   control_->n_active = 1;
   control_->cur_token[0] = next_token;
+  // Spec 32: a deep verify's accepted rows 16.. sit in the conv scratch - the ones the next window reads go to the
+  // ring now (gdn_ring_commit.cl), before anything reads it.
+  if ((s.verify_k == kDeepK32 || s.verify_k == kDeepK64) && j >= 16) {
+    control_->ring_commit = j + 1;
+    queue_.execute(*ring_list_, &fence_);
+    fence_.wait();
+    control_->ring_commit = 0;
+  }
   s.verify_k = kNoVerify;
   // Spec 19c: the committed rows' taps (rows 0..j: positions verify_pos .. + j) into the drafter's ring. The
   // projection list reads only the taps and its own control block, so Control's new pos / cur_token above do not

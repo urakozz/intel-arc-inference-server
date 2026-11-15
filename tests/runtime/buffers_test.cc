@@ -7,7 +7,7 @@
 // arithmetic explanation rather than as a wrong logit somewhere.
 //
 // Persistent state @ max_len = 16384 (48 GDN layers, 16 FA layers):
-//   control      256 B (four cache lines; open-work 28)             =           256
+//   control      768 B (twelve cache lines; spec 32)                =           768
 //   gdn_state    48 x 48 v-heads x 128 k x 128 v x 4 B (fp32)     =   150,994,944
 //   conv_ring    48 x 32 slots x 10240 channels x 2 B (bf16)      =    31,457,280
 //   kv_k         16 x 16384 pos x 4 kv-heads x 256 x 2 B (bf16)   =   536,870,912
@@ -192,8 +192,8 @@ int main() {
   {
     runtime::PersistentBuffers p(ctx, 16384, model::qwen38());
     runtime::DecodeScratch s(ctx, 16384, model::qwen38());
-    CHECK_EQ(p.bytes(), size_t{1240465536 + 128 + 15728640});   // open-work 28: Control 256 B, the ring 32 deep
-    CHECK_EQ(s.bytes(), size_t{2} * (68652864 - 50724864 + 6340608));   // open-work 28: 16 rows
+    CHECK_EQ(p.bytes(), size_t{1240465536 + 640 + 15728640});   // open-work 28: the ring 32 deep; spec 32: Control 768 B
+    CHECK_EQ(s.bytes(), size_t{8} * (68652864 - 50724864 + 6340608));   // spec 32: 64 rows
     runtime::DecodeBuffers view(p, s);
     CHECK_EQ(view.persistent_bytes(), p.bytes());
     CHECK_EQ(view.scratch_bytes(), s.bytes());
@@ -219,8 +219,8 @@ int main() {
     // attn_part is decode attention v2's fixed [24][kAttnV2Blocks = 32][M = 16][258] fp32 =
     // 12,681,216 B at any max_len (16 rows since open-work 28).
     CHECK_EQ(runtime::DecodeScratch::kAttnV2Blocks, 32u);
-    CHECK_EQ(s.attn_part.size(), size_t{24} * 32 * 16 * 258 * 4);
-    CHECK_EQ(s.attn_part.size(), size_t{2} * 6340608);
+    CHECK_EQ(s.attn_part.size(), size_t{24} * 32 * 64 * 258 * 4);
+    CHECK_EQ(s.attn_part.size(), size_t{8} * 6340608);
     runtime::DecodeBuffers view(p, s);
     CHECK_EQ(view.max_len, 131072u);
   }
@@ -231,9 +231,9 @@ int main() {
   CHECK_EQ(b.max_len, 16384u);
   CHECK(size_t{24} * runtime::DecodeScratch::kAttnV2Blocks * runtime::DecodeScratch::kM * 258 * 4 <=
         b.attn_part.size());
-  CHECK_EQ(b.persistent_bytes(), size_t{1240465536 + 128 + 15728640});
+  CHECK_EQ(b.persistent_bytes(), size_t{1240465536 + 640 + 15728640});
   // 68,652,864 B with the removed v1's attn_part (50,724,864 B at 16384); v2's is 6,340,608 B.
-  CHECK_EQ(b.scratch_bytes(), size_t{2} * (68652864 - 50724864 + 6340608));
+  CHECK_EQ(b.scratch_bytes(), size_t{8} * (68652864 - 50724864 + 6340608));
 
   // The control block is shared memory: the host reads and writes it directly,
   // and the constructor left it zeroed - including the padding, which the
@@ -315,7 +315,7 @@ int main() {
     CHECK_EQ(p.kv_k.size(), size_t{16} * 16384 * 4 * (256 + 2));
     CHECK_EQ(p.kv_k.size(), size_t{270532608});
     CHECK_EQ(p.kv_v.size(), p.kv_k.size());
-    CHECK_EQ(p.bytes() - p.kv_k.size() - p.kv_v.size(), size_t{1240465536 + 128 + 15728640} - 2 * size_t{536870912});
+    CHECK_EQ(p.bytes() - p.kv_k.size() - p.kv_v.size(), size_t{1240465536 + 640 + 15728640} - 2 * size_t{536870912});
     CHECK_EQ(p.kv_lay.scales_offset(0), size_t{16} * 16384 * 1024);
     for (const l0::Mem* m : {&p.kv_k, &p.kv_v}) {
       const size_t off = m->size() - probe;
