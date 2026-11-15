@@ -175,11 +175,13 @@ struct EngineAdapter : server::EngineIface {
         std::fprintf(stderr, "; lookup: %llu iterations, %llu/%llu drafts accepted, %llu of %u ids",
                      (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
                      (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
-      if (lk_wide_ > 0) std::fprintf(stderr, ", %llu of them 16 rows wide", (unsigned long long)lk_wide_);
+      if (lk_wide_ > 0)
+        std::fprintf(stderr, ", %llu of them 16 rows wide, %llu entered on the head's confirmation",
+                     (unsigned long long)lk_wide_, (unsigned long long)lk_confirmed_);
       std::fprintf(stderr, "\n");
     }
     mtp_iters = mtp_drafted = mtp_accepted = 0;
-    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = lk_wide_ = 0;
+    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = lk_wide_ = lk_confirmed_ = 0;
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
@@ -465,6 +467,7 @@ struct EngineAdapter : server::EngineIface {
       return v < 0 && i + 1 < kd;
     });
     if (agree) {
+      ++lk_confirmed_;
       confirm.confirmed();
       return lookup_run(sampling, x, cand);
     }
@@ -630,7 +633,7 @@ struct EngineAdapter : server::EngineIface {
   bool dflash_lookup_ = false;          // spec 19f: step_drafts_or_many() on
   bool pending_lookup_ = false;         // spec 19f: the pending run was a lookup verify
   uint64_t lk_iters_ = 0, lk_drafted_ = 0, lk_accepted_ = 0, lk_ids_ = 0;   // spec 19f, since the last prefill
-  uint64_t lk_wide_ = 0;   // open-work 28: the lookup iterations on the wide list
+  uint64_t lk_wide_ = 0, lk_confirmed_ = 0;   // open-work 28: lookup iterations on the wide list, entered confirmed
   std::unique_ptr<l0::Mem> spec_logits_;   // pinned q rows then p rows, MTP and lookup
   bool pending_ = false;
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
