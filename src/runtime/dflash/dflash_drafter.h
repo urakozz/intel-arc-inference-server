@@ -58,19 +58,11 @@ class DFlashDrafter final : public TapDrafter {
   void select(uint32_t slot) override;
   uint32_t sessions() const { return uint32_t(b_.sessions.size()) + 1; }
 
-  // Plan 19v3b, the batched draft (an engine of several slots): ONE pass of the block's 8 rows shared by the runs -
-  // each run a slot's block of k + 1 rows (its anchor cur_token[0] at its pos, k drafts, 1 <= k <= its
-  // max_verify_k()), in run order, at most 8 rows. Each slot's k drafts land in its Control's cur_token[1..k] (what
-  // Engine::verify_rows reads) and its session's readback (readback(slot)). Any deferred projection runs first.
-  struct Run {
-    uint32_t slot = 0, k = 0;
-    float temperature = 0.0f;
-    uint64_t seed = 0;
-  };
-  void draft_rows(Engine& e, const std::vector<Run>& runs);
+  // Plan 19v3b, the batched draft and the row steps (runtime/tap_drafter.h): the lists over DFlashBuffers' tables.
+  void draft_rows(Engine& e, const std::vector<DraftRun>& runs) override;
+  const DFlashDraftOut& readback(uint32_t slot) override { return *b_.session(slot).readback(); }
   l0::Mem& rows_taps() override { return *b_.rows_taps; }
   l0::CmdList& rows_projection(const std::vector<RowsCommit>& commits) override;
-  const DFlashDraftOut& readback(uint32_t slot) { return *b_.session(slot).readback(); }
   const CapturedStep* draft_rows_step() const { return seqs_draft_.get(); }
 
   const model::DFlashDesc& desc() const { return w_.desc; }

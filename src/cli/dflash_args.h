@@ -45,6 +45,10 @@ namespace cli::dflash {
 
 // Our packed int4 drafter (the probes name it; check_flags' message offers it).
 inline constexpr const char* kPackedDrafter = "urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound";
+// Plan 19v3b: the requests at once a card serves with --spec dflash (its sequence slots, one batched draft for the
+// active ones). BENCHMARKS "Slots (spec 19 v3b)": four derive to 0.925 of MTP on the attention alone - the record
+// (Task 7) decides between 4 and 2.
+inline constexpr uint32_t kDflashSlots = 4;
 
 struct Args {
   bool on = false;

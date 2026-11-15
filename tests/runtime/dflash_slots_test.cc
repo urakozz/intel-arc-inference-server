@@ -363,7 +363,7 @@ int main(int argc, char** argv) {
     start(r, 2, prompt);
     std::vector<uint32_t> a, b;
     for (uint32_t it = 0; it < kIters; ++it) {
-      std::vector<runtime::dflash::DFlashDrafter::Run> runs;
+      std::vector<runtime::TapDrafter::DraftRun> runs;
       std::vector<runtime::Engine::Run> vr;
       for (uint32_t q : {1u, 2u}) {
         r.e->select(q);

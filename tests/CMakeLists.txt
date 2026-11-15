@@ -3778,12 +3778,14 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
     cli_reject_serve_spec_value cli_reject_serve_dflash_no_draft_model cli_reject_serve_dflash_lookup_no_draft_model
     PROPERTIES LABELS dflash)
-  # --parallel replica serves --spec dflash (a drafter on each card, bf16 or int8 KV); what it does not: lookup inside
-  # DFlash, several slots a card beside the drafter (Qwen3.8's config.json: the snapshot, read before the device).
+  # --parallel replica serves --spec dflash (a drafter on each card, bf16 or int8 KV; plan 19v3b: several slots a card
+  # too); what it does not: lookup inside DFlash, on two cards or beside slots (Qwen3.8's config.json: the snapshot,
+  # read before the device).
   b70_serve_reject(cli_reject_serve_dflash_replica_lookup ${B70_TEST_SNAPSHOT} --parallel replica
     --spec dflash-lookup --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup is built for one card")
-  b70_serve_reject(cli_reject_serve_dflash_replica_slots ${B70_TEST_SNAPSHOT} --parallel replica --spec dflash
-    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound --max-num-seqs 4 EXPECT "--spec dflash / --draft-vocab beside slots are not built")
+  b70_serve_reject(cli_reject_serve_dflash_replica_slots ${B70_TEST_SNAPSHOT} --parallel 1 --spec dflash-lookup
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound --max-num-seqs 2
+    EXPECT "--spec dflash-lookup / --draft-vocab beside slots are not built")
   set_tests_properties(cli_reject_serve_dflash_replica_lookup cli_reject_serve_dflash_replica_slots
     PROPERTIES LABELS "dflash;checkpoint")
 endif()

@@ -107,14 +107,14 @@ void DFlashDrafter::attach(Engine& e, bool draft_vocab) {
   engine_ = &e;
 }
 
-void DFlashDrafter::draft_rows(Engine& e, const std::vector<Run>& runs) {
+void DFlashDrafter::draft_rows(Engine& e, const std::vector<DraftRun>& runs) {
   require(engine_ == &e && seqs_draft_, "draft_rows() before attach() to an engine of several slots");
   namespace kd = kernels::dflash;
   uint32_t* t = b_.seqs->as<uint32_t>();
   std::fill(t, t + kd::kM + 8 * kd::kSeqs, 0u);
   std::fill(t, t + kd::kM, 0xFFFFFFFFu);
   uint32_t row = 0;
-  for (const Run& r : runs) {
+  for (const DraftRun& r : runs) {
     require(r.slot < sessions() && t[kd::kM + 8 * r.slot + 1] == 0, "a run's slot is outside the engine or twice");
     const Engine::SlotView v = e.slot_view(r.slot);
     require(r.k >= 1 && r.k <= max_k_ && r.k + 1 <= v.states && v.control->pos + r.k + 1 <= v.len &&
@@ -136,7 +136,7 @@ void DFlashDrafter::draft_rows(Engine& e, const std::vector<Run>& runs) {
     row += r.k + 1;
   }
   e.replay_aux(seqs_draft_->list);
-  for (const Run& r : runs)
+  for (const DraftRun& r : runs)
     require(b_.session(r.slot).readback()->k == r.k, "slot " + std::to_string(r.slot) + "'s batched draft drafted " +
                                                          std::to_string(b_.session(r.slot).readback()->k) + " ids");
 }
