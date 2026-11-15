@@ -182,7 +182,7 @@ static void check_prefill_scratch(l0::Context& ctx) {
 }
 
 int main() {
-  CHECK_EQ(sizeof(runtime::Control), size_t{128});
+  CHECK_EQ(sizeof(runtime::Control), size_t{256});
 
   l0::Context ctx(0);
   std::printf("device: %s\n", ctx.name().c_str());
