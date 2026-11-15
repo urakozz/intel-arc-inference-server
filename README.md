@@ -32,7 +32,9 @@ Decode with MTP, t/s - one session, or several at once (the total, per request i
 | setup | 1 request | 2 requests | 4 requests | 8 requests |
 |---|---:|---:|---:|---:|
 | two cards, tensor parallel | **123.1** | - | - | - |
-| one card, DFlash2 | **141.7** (tg128) | n/d | n/d | n/d |
+| one card, DFlash2 | **141.7** (tg128) | - | - | - |
+| one card, DFlash2, `--max-num-seqs 4 --kv-cache int8` | 85.9 | **140.3** | 125.8 | |
+| one card, MTP, `--max-num-seqs 4 --kv-cache int8` | 75.0 | 125.4 | 129.6 | |
 | one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
 | two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
