@@ -3652,7 +3652,7 @@ st_r89_serve() {
   judged_finish
 }
 
-row x"the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
+row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest_2card x default gpu qwen,oracle_qwen - "x.rest's two-card part: the pp-labelled tests among them (the rest is x.rest, on one card)"
 st_x_rest_2card() {
   run_tests '.' pp "$(quick_or 'ornith kv8 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"

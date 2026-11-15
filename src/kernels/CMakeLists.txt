@@ -860,6 +860,14 @@ if(B70_VERIFY_DPAS AND B70_MTP)
                                KV8=1 KV_PAGED=${KV_PAGE}
                        OPTIONS ${VDPAS_OPTIONS})
     endforeach()
+    foreach(MM 5 6 7 8)   # plan 19v3b Tasks 3-7: slot 0's DFlash verify lists
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_PG${KV_PAGE} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=0 KV_PAGED=${KV_PAGE}
+                       OPTIONS ${VDPAS_OPTIONS})
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8_PG${KV_PAGE} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=1 KV_PAGED=${KV_PAGE}
+                       OPTIONS ${VDPAS_OPTIONS})
+    endforeach()
   endif()
   if(B70_VERIFY_M8)
     # verify-cost-m8 probe: the DPAS verify attention (and its v2 reduce) at 8 / 16 key blocks a row
@@ -2062,6 +2070,20 @@ endif()
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set(PG _PG${KV_PAGE})
   foreach(MM 1 2 3 4)
+    add_ocloc_kernel(attn_prep_M${MM}${PG} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8${PG} SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} KV_PAGED=${KV_PAGE})
+  endforeach()
+  # Plan 19v3b Tasks 3-7: slot 0 beside the DFlash drafter verifies at M = 5..8 too (its tap verify lists).
+  foreach(MM 5 6 7 8)
     add_ocloc_kernel(attn_prep_M${MM}${PG} SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
     add_ocloc_kernel(attn_prep_M${MM}_S1${PG} SOURCE ${ATTN_CL}
                      DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
