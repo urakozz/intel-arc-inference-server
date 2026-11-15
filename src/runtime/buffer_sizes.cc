@@ -428,15 +428,11 @@ size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t l
       if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(desc, fl.id) && !l0_int8_bf16_linear(desc, fl.id))
         b += 2 * size_t{fl.shape.N} * kFp32;   // ws, 1/ws
   }
-  // Spec 15d: a MoE layer's expert gate||up array (every block, the shared expert's too)
-  // is one h8 weight of blocks x 2 I columns (Int8State::scales_raw); its down is bf16.
-  if (desc.is_moe())
-    b += size_t{last - first} * 2 * size_t{desc.moe.blocks()} * 2 * desc.moe.expert_intermediate * kFp32;
-  return b;
+  return b;   // a MoE model: none (open-work 16; the W4A8 experts carry their own group scales)
 }
 
 uint32_t prefill_int8_max_k(const model::ModelDesc& desc) {
-  return int8_padded_k(desc.is_moe() ? slab_k(desc) : desc.intermediate);
+  return int8_padded_k(desc.is_moe() ? desc.hidden : desc.intermediate);
 }
 
 // --- spec 15d: the MoE prefill scratch ------------------------------------------------

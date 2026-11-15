@@ -445,8 +445,8 @@ size_t int8_scale_bytes(const model::ModelDesc& desc);
 size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last);
 // The `max_k` Engine::prepare_prefill builds Int8State with: the widest int4 K the h8
 // walk runs - the MLP intermediate (down's K) on a dense model, as since spec 14; on a
-// MoE model (spec 15d) the widest dense linear's K, out_proj / o_proj's 4096 on Ornith
-// (the experts' gate||up K is the hidden size; their down is not an h8 linear).
+// MoE model the hidden size, the routed experts' W4A8 quantiser's K (open-work 16: no
+// dense linear runs h8 there).
 uint32_t prefill_int8_max_k(const model::ModelDesc& desc);
 inline uint32_t int8_padded_k(uint32_t K) { return (K + 1023) / 1024 * 1024; }
 
