@@ -137,7 +137,8 @@ Gen generate_plain(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32
   return g;
 }
 
-// Server::generate's loop with lookup inside MTP, minus the text: greedy requests' MTP iterations by the per-step
+// Server::generate's loop with lookup inside MTP, minus the text (open-work 28: with the engine's wide list, the long
+// runs' 16-row verifies and the head-confirmed entries, through step_drafts_or_confirmed as the server): greedy requests' MTP iterations by the per-step
 // choice, sampled ones by AdaptiveK. `cut`: the first lookup burst of >= 3 ids is truncated to 2.
 Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, const server::Sampling& s,
                     bool cut = false, bool* did_cut = nullptr) {
@@ -152,6 +153,7 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
   server::LookupInDFlashOptions lo;
   lo.window = 0;
   lo.max_k = kK;
+  lo.wide_k = a.lookup_wide_k();
   server::LookupInDFlash lid(lo);
   const auto t0 = std::chrono::steady_clock::now();
   while (g.ids.size() < n) {
@@ -159,7 +161,17 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
     uint32_t proposed = 0;
     server::EngineIface::DraftChoice choose;
     if (s.greedy) choose = [&](uint32_t j, float p) { return sk.choose(j, p); };
-    std::vector<uint32_t> burst = a.step_drafts_or_chosen(
+    std::vector<uint32_t> cand;
+    server::EngineIface::LookupConfirm confirm;
+    confirm.candidate = [&]() {
+      cand = lid.candidate(m);
+      return cand;
+    };
+    confirm.confirmed = [&]() {
+      lid.confirmed();
+      proposed = uint32_t(cand.size());
+    };
+    std::vector<uint32_t> burst = a.step_drafts_or_confirmed(
         s, k,
         [&](uint32_t x) {
           m.append(x);
@@ -167,7 +179,7 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
           proposed = uint32_t(d.size());
           return d;
         },
-        choose);
+        choose, confirm);
     ++g.iters;
     const uint32_t kept = uint32_t(burst.size() - 1);
     if (proposed > 0) {
