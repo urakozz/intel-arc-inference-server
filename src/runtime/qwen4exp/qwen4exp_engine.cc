@@ -62,7 +62,7 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
   if (p.devices == 2) {
     if (devices[1]->handle() != devices[0]->handle())
       throw std::invalid_argument("runtime::qwen4exp::Qwen4ExpEngine: device 1 is not a view of device 0's Level Zero "
-                                  "context (spec 16 decision 1)");
+                                  "context");
     if (!devices[0]->can_access_peer(*devices[1]))
       throw std::runtime_error("--parallel pp: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
                                "(zeDeviceCanAccessPeer is false), and the hand-off writes it. Peer access needs the "
@@ -187,7 +187,7 @@ void Qwen4ExpEngine::ple_init() {
       throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine: the device reads PLE host range " + std::to_string(r) +
                                " (" + (r < t.q.size() ? "q" : "s") + "[" + std::to_string(r % t.q.size()) + "]) page " +
                                std::to_string(g - first[r]) + " as a different word than the loader wrote - an aliased "
-                               "or unmapped pinned page (the xe hazard, spec 22 §1)");
+                               "or unmapped pinned page (the xe hazard)");
     }
   ple_pages_checked_ = pages;
 }

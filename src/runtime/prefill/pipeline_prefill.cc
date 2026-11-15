@@ -559,11 +559,11 @@ void PipelineEngine::prepare_prefill() {
   const PrefillBackend b = prefill_backend();
   if (prefill::attn_mode() != prefill::AttnMode::Flash)
     throw std::runtime_error("--parallel pp prefills with the flash attention only: "
-                             "the composed reference has no two-card walk (spec 16c)");
+                             "the composed reference has no two-card walk");
   if (prefill::profile_enabled())
     throw std::runtime_error("--parallel pp prefill is not profiled (B70_PREFILL_PROFILE=1): the "
                              "phase waits would serialise the pipeline; each device's busy time "
-                             "is reported instead (spec 16c)");
+                             "is reported instead");
   if (kv_ == KvCache::Int8) prefill::require_kv8_path(b);
   // Spec 16d: the head's prefill runs on the L0 backends only (pf_gemm) - already required.
   if (!pf_) {

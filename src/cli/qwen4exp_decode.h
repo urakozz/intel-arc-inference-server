@@ -114,30 +114,30 @@ inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.dev
     rq::require_fits(rq::plan(d, p, len, a.int8_head(), a.load_mtp), caps, a.reserve);
   } catch (const std::exception& e) {
     throw std::runtime_error(std::string(e.what()) + ". Without --layers " + tool + " would load all 48 layers: pass "
-                             "--layers N or --layers auto (development mode, spec 21c)");
+                             "--layers N or --layers auto (development mode)");
   }
-  throw std::runtime_error("Qwen3.8-Flash-Next's whole model runs only with spec 22's expert-offload tier: pass "
-                           "--layers N or --layers auto (development mode, spec 21c)");
+  throw std::runtime_error("Qwen3.8-Flash-Next's whole model runs only with the expert-offload tier, not built yet: pass "
+                           "--layers N or --layers auto (development mode)");
 }
 
 // Every refusal that needs no device and no tensor - in this order, each by name (tests/CMakeLists.txt's
 // cli_reject_qwen4exp_*): the stages that build what was asked for first, then the whole model.
 inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
   if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
-    throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only (spec 21d), not l0-int8: its h8 linears "
+    throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only, not l0-int8: its h8 linears "
                              "rotate in whole 1024-k Hadamard blocks and this model's hidden is 2560 - "
                              "--prefill-backend l0, or omit it");
   if (a.pp_chunk > runtime::qwen4exp::kPfC)
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Qwen3.8-Flash-Next's prefill chunk " +
                              std::to_string(runtime::qwen4exp::kPfC) + " (the prefill scratch is sized for it)");
   if (a.mtp)
-    throw std::runtime_error("b70-decode runs Qwen3.8-Flash-Next plain: its MTP head (spec 21e) is served by b70-serve "
+    throw std::runtime_error("b70-decode runs Qwen3.8-Flash-Next plain: its MTP head is served by b70-serve "
                              "--spec mtp and measured by qwen4exp_mtp_test - drop --spec mtp");
   if (a.kv8)
-    throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (spec 21 decision 8: int8 later - kv8.cl "
+    throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (int8 later - kv8.cl "
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
   if (a.profile)
-    throw std::runtime_error("--profile is not built for Qwen3.8-Flash-Next (spec 21c Task 7 times it with --bench)");
+    throw std::runtime_error("--profile is not built for Qwen3.8-Flash-Next (--bench times it)");
   if (devices_of(a) == 1 && a.pipe.have_split)
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   if (a.layers == 0 && !a.layers_auto) refuse_whole(a, tool);
@@ -285,7 +285,7 @@ int run_decode(const DecodeArgs& a) {
                runtime::qwen4exp::q4_attn_name(eng.attention()),
                runtime::qwen4exp::prefill_chunk_launches(eng.model().desc, eng.model().placement, 0, chunk), chunk,
                devs == 2 ? "both cards" : "one card", runtime::qwen4exp::kPrefillHeadLaunches,
-               devs == 2 ? "; the chunk crosses by copy, sequentially (spec 16c's overlap is a later lever)" : "");
+               devs == 2 ? "; the chunk crosses by copy, sequentially (an overlapped hand-off is not built yet)" : "");
   }
   std::print(stderr, "{}\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();

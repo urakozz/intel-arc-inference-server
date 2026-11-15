@@ -94,7 +94,7 @@ int main() {
   {
     DecodeArgs a = served();
     a.kv8 = true;
-    CHECK(refuses([&] { check_args(a, d); }, "Decision 17"));
+    CHECK(refuses([&] { check_args(a, d); }, "Nemotron 3.5 Bolt's KV is bf16"));
   }
   {
     DecodeArgs a = served();

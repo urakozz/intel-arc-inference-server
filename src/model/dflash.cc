@@ -219,7 +219,7 @@ DFlashDesc lilicorr_desc_from_config(const Value& c) {
   if (!bool_or(dc, "lilicorr_enabled", true))
     refuse("dflash_config.lilicorr_enabled=false: LiLiCorrDraftModel requires the LiLiCorr head (V/models/lilicorr.py:436)");
   if (bool_or(c, "has_own_lm_head", false) || bool_or(dc, "has_own_lm_head", false))
-    refuse("has_own_lm_head: LiLiCorr drafts with the target's lm_head (spec 26 §1)");
+    refuse("has_own_lm_head: LiLiCorr drafts with the target's lm_head");
   if (opt(c, "draft_vocab_size") && u32(c, "draft_vocab_size") != u32(c, "vocab_size"))
     refuse("draft_vocab_size != vocab_size: the LiLiCorr candidates need the target's whole vocabulary "
            "(V/models/lilicorr.py:472)");
@@ -230,19 +230,19 @@ DFlashDesc lilicorr_desc_from_config(const Value& c) {
       u32(dc, "conv_group_size") == 0)
     refuse("conv_kernel_size / conv_group_size: LiLiCorr's backbone is DFlash 2's (its two grouped convolutions)");
   if (opt(dc, "output_multiplier") && num_or(dc, "output_multiplier", 1.0) != 1.0)
-    refuse("dflash_config.output_multiplier: the LiLiCorr candidates are the target head's RAW logits (spec 26 §2.2)");
+    refuse("dflash_config.output_multiplier: the LiLiCorr candidates are the target head's RAW logits");
   if (opt(dc, "final_logit_softcapping") && num_or(dc, "final_logit_softcapping", 0.0) != 0.0)
-    refuse("dflash_config.final_logit_softcapping: the LiLiCorr candidates are the target head's RAW logits (spec 26 §2.2)");
+    refuse("dflash_config.final_logit_softcapping: the LiLiCorr candidates are the target head's RAW logits");
   if (const Value* qc = opt(c, "quantization_config")) {
     if (!qc->is_object()) refuse("quantization_config is not an object");
     const Value* m = opt(*qc, "quant_method");
     const Value* a = opt(*qc, "quant_algo");
     if (!m || !m->is_string() || m->str() != "modelopt_fp4")
       refuse("quantization_config.quant_method " + (m && m->is_string() ? m->str() : std::string("(none)")) +
-             ": only ModelOpt's NVFP4 (modelopt_fp4) is read - decoded exactly at load into our formats (spec 26 §3)");
+             ": only ModelOpt's NVFP4 (modelopt_fp4) is read - decoded exactly at load into our formats");
     if (!a || !a->is_string() || a->str() != "W4A16_NVFP4")
       refuse("quantization_config.quant_algo " + (a && a->is_string() ? a->str() : std::string("(none)")) +
-             ": only W4A16_NVFP4 is read (spec 26 §3)");
+             ": only W4A16_NVFP4 is read");
     if (u32(*qc, "group_size") != 16)
       refuse("quantization_config.group_size " + std::to_string(u32(*qc, "group_size")) + ": NVFP4's group is 16");
   }

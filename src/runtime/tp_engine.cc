@@ -53,7 +53,7 @@ TpEngine::TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedMo
     if (m.max_len != max_len)
       throw std::runtime_error("runtime::TpEngine: a card's model was loaded with max_len " + std::to_string(m.max_len) +
                                " but the engine was asked for " + std::to_string(max_len));
-    if (m.draft_vocab) throw std::invalid_argument("runtime::TpEngine: no draft vocabulary under TP (spec 17d)");
+    if (m.draft_vocab) throw std::invalid_argument("runtime::TpEngine: no draft vocabulary under TP");
   }
   // Spec 17d: the MTP head on both cards or on neither; the folded crossing (the verify lists' binaries).
   if (bool(cards[0].mtp) != bool(cards[1].mtp))
@@ -66,7 +66,7 @@ TpEngine::TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedMo
   if (drafter) {
     if (mtp_)
       throw std::invalid_argument("runtime::TpEngine: a tap drafter and the MTP head are two proposers - load the "
-                                  "cards without the head (one proposer per server, spec 19 decision 3)");
+                                  "cards without the head (one proposer per server)");
     if (crossing_ != model::TpCrossing::Folded)
       throw std::invalid_argument("runtime::TpEngine: DFlash under tensor parallel is built for the folded crossing");
     const uint32_t mk = drafter->card(0).max_k();

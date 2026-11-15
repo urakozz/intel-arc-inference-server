@@ -270,7 +270,7 @@ ModelDesc make_ornith() {
 // under Slices, S too, so a card's slices ARE one-card slices (K / S unchanged).
 ModelDesc make_tp_card(const ModelDesc& one, TpCrossing c) {
   if (one.architecture != "Qwen3_5ForConditionalGeneration" || one.is_moe())
-    throw std::runtime_error(one.name + ": tensor parallel is built for Qwen3.8 only (spec 17b)");
+    throw std::runtime_error(one.name + ": tensor parallel is built for Qwen3.8 only");
   ModelDesc d;
   d.name = one.name + "-tp2" + (c == TpCrossing::Folded ? "-folded" : "");
   d.architecture = one.architecture;
@@ -390,12 +390,12 @@ const ModelDesc& desc_for_architecture(const std::string& architecture) {
   // Dropped models are refused by name (spec 14: Agnes 3.0 Flash, dropped 2026-11-07).
   if (architecture == "AgnesForConditionalGeneration")
     throw std::runtime_error("config.json architectures[0] is 'AgnesForConditionalGeneration': Agnes 3.0 Flash "
-                             "was dropped (2026-11-07, spec 14) and is not supported; this engine runs "
+                             "was dropped (2026-11-07) and is not supported; this engine runs "
                              "Qwen3_5ForConditionalGeneration (Qwen3.8) and Qwen3_5MoeForConditionalGeneration "
                              "(Ornith)");
   throw std::runtime_error("config.json architectures[0] is '" + architecture +
                            "'; this engine runs Qwen3_5ForConditionalGeneration (Qwen3.8) and "
-                           "Qwen3_5MoeForConditionalGeneration (Ornith, from spec 15c)");
+                           "Qwen3_5MoeForConditionalGeneration (Ornith)");
 }
 
 uint32_t ModelDesc::ffn_fold_s() const { return is_moe() ? 0u : shape(LinearId::Down).S; }
@@ -420,7 +420,7 @@ void require_loadable(const ModelDesc& d) {
                                std::to_string(m.expert_intermediate) + ", shared " +
                                std::to_string(m.shared_intermediate) +
                                (m.has_shared_gate ? " gated" : " ungated") +
-                               ") is not implemented: the decode kernels (spec 15c) take a gated "
+                               ") is not implemented: the decode kernels take a gated "
                                "shared expert of the routed width, top-k <= 8, experts a "
                                "power of two in [16, 256] (moe.cl's route work-group)");
   }
@@ -440,7 +440,7 @@ void require_prefill(const ModelDesc& d) {
     throw std::runtime_error(d.name + " (" + d.architecture + "): this MoE shape (hidden " +
                              std::to_string(d.hidden) + ", expert " +
                              std::to_string(m.expert_intermediate) +
-                             ") is not implemented on the prefill path: spec 15d's grouped "
+                             ") is not implemented on the prefill path: the grouped "
                              "GEMMs take a hidden size of whole 1024-k blocks and an expert "
                              "width of whole 128-column pairs; decode it instead (Engine::ingest)");
 }

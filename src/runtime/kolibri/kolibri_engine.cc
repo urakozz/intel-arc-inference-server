@@ -63,7 +63,7 @@ KolibriEngine::KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoade
   if (p.devices == 2) {
     if (devices[1]->handle() != devices[0]->handle())
       throw std::invalid_argument("runtime::kolibri::KolibriEngine: device 1 is not a view of device 0's Level Zero "
-                                  "context (spec 16 decision 1)");
+                                  "context");
     if (!devices[0]->can_access_peer(*devices[1]))
       throw std::runtime_error("--parallel pp: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
                                "(zeDeviceCanAccessPeer is false), and the hand-off writes it. Peer access needs the "

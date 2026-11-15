@@ -110,19 +110,19 @@ int main() {
              x.decode_scratch + x.prefill_scratch + x.drafter + x.drafter_embed_replica + 7 * bl::ssm_state_bytes(d, 18));
   }
 
-  // --- one 32 GiB card: refused naming the bytes and Decision 4 -----------------------------------------------------------
+  // --- one 32 GiB card: refused naming the bytes and the two-card default -----------------------------------------------------------
   {
     bool threw = false;
     try {
       plan(d, 0, {card32});
     } catch (const std::runtime_error& e) {
       const std::string m = e.what();
-      threw = m.find("Decision 4") != std::string::npos && m.find("device 0") != std::string::npos &&
+      threw = m.find("two cards by default") != std::string::npos && m.find("device 0") != std::string::npos &&
               m.find(std::to_string(bl::weight_bytes(d, true))) != std::string::npos;
       std::printf("  one card: %s\n", e.what());
     }
     CHECK(threw);
-    refused("Decision 4", [&] { plan(d, 8192, {card32}); });
+    refused("two cards by default", [&] { plan(d, 8192, {card32}); });
   }
 
   // --- a smaller pair reaches a smaller auto length (printed); it is the LARGEST multiple of 256 that fits --------------------
@@ -219,7 +219,7 @@ int main() {
     CHECK(bolt_fuse_name(parse_fuse("conv,router")) == "router,conv");
     refused("B70_BOLT_ATTN", [] { parse_attn("flashy"); });
     refused("B70_BOLT_FUSE", [] { parse_fuse("router,gate"); });
-    refused("Decision 2", [] { parse_state("fp16"); });
+    refused("expected fp32 or bf16", [] { parse_state("fp16"); });
     // the decode scratch: each term from its formula; eager's score row the term that scales with max_len
     const ScratchSizes f = scratch_sizes(d, 262144, BoltAttn::Flash), e = scratch_sizes(d, 262144, BoltAttn::Eager);
     CHECK_EQ(f.slices, size_t(18560) * 4);                    // in_proj at S 1 the widest

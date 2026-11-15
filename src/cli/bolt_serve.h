@@ -154,7 +154,7 @@ struct ServeFlags {
 inline void check_serve_flags(const ServeFlags& f) {
   if (f.draft_vocab)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a DFlash drafter's vocabulary; Nemotron "
-                             "3.5 Bolt has neither (LiLiCorr reads its whole lm_head, spec 26)");
+                             "3.5 Bolt has neither (LiLiCorr reads its whole lm_head)");
 }
 
 // The served context is capped at the trained 262144 (Decision 14) - refused before the device (the planner refuses it too, after
@@ -162,7 +162,7 @@ inline void check_serve_flags(const ServeFlags& f) {
 inline void check_serve_max_len(bool is_auto, uint32_t value, uint32_t trained_max_len) {
   if (!is_auto && value > trained_max_len)
     throw std::runtime_error("--max-len " + std::to_string(value) + " exceeds Nemotron 3.5 Bolt's trained context " +
-                             std::to_string(trained_max_len) + " (max_position_embeddings; spec 25 Decision 14)");
+                             std::to_string(trained_max_len) + " (max_position_embeddings)");
 }
 
 // ---- the top-p filter without a top-k (review I1) -------------------------------------------------------------------------------

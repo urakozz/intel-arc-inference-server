@@ -114,7 +114,7 @@ void usage() {
              "                  MTP head (Qwen3.8 under --parallel tp or pp or with slots; Ornith), off\n"
              "                  elsewhere; the startup log says which and why. dflash on one card\n"
              "                  also copies earlier repeats (prompt lookup). Greedy output unchanged.\n"
-             "                  Nemotron 3.5 Bolt (spec 26c, opt-in): lookup and dflash (its LiLiCorr\n"
+             "                  Nemotron 3.5 Bolt (opt-in): lookup and dflash (its LiLiCorr\n"
              "                  drafter on the last card), both over its own verify lists.\n"
              "  --spec-max K    the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash; Bolt's lookup\n"
              "                  too). Default the most.\n"
@@ -134,13 +134,13 @@ void usage() {
              "  --parallel P    auto (default): Qwen3.8 on two cards runs tp at --max-num-seqs 1 with --max-len\n"
              "                  auto and replica at --max-num-seqs above 1; otherwise one card when the model\n"
              "                  and the asked context fit it, else pp; 1: one card; pp: the\n"
-             "                  layers split over two cards (spec 16). Kolibri-1 and\n"
+             "                  layers split over two cards. Kolibri-1 and\n"
              "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
              "                  replica (Qwen3.8, Ornith): the model on both cards, one engine each -\n"
              "                  --max-num-seqs 2 to 8 (Ornith: 2; 2 when not given: one request a card), each\n"
              "                  exactly what it is alone; Qwen3.8's --spec dflash: a drafter on each card,\n"
              "                  --max-num-seqs 2.\n"
-             "                  tp (Qwen3.8, spec 17): every layer split over both cards (needs peer\n"
+             "                  tp (Qwen3.8): every layer split over both cards (needs peer\n"
              "                  access) - one request at a time, faster; --spec auto / mtp / lookup.\n"
              "  --pipeline-split auto|N   pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
              "                  holds the fewest bytes). An override, for experiments; it implies pp.\n"
@@ -151,8 +151,9 @@ void usage() {
              "  --prefix-split-last   chat requests: prefill to len - 1 and run the last id as one decode\n"
              "                  step, so a thinking model's next turn is a prefix cache hit right there (agentic sessions;\n"
              "                  off for benchmarks and the golden gates).\n"
-             "  --layers N|auto Qwen3.8-Flash-Next only, REQUIRED until spec 22: load its first N layers\n"
-             "                  (development mode); its PLE int8 file is <snapshot>-ple-int8/.\n"
+             "  --layers N|auto Qwen3.8-Flash-Next only, REQUIRED (the whole model needs the expert tier, not\n"
+             "                  built yet): load its first N layers (development mode); its PLE int8 file is\n"
+             "                  <snapshot>-ple-int8/.\n"
              "\n"
              "  Still being measured (they go when their numbers decide, docs/open-work.md):\n"
              "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8,\n"
@@ -264,7 +265,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   // (settle() refuses it too, after the cards are open).
   if (!da.max_len.is_auto && da.max_len.value > pre.trained_max_len)
     throw std::runtime_error("--max-len " + std::to_string(da.max_len.value) + " exceeds Kolibri-1's trained context " +
-                             std::to_string(pre.trained_max_len) + " - a longer context is spec 20 decision 3");
+                             std::to_string(pre.trained_max_len) + " - a longer context is not supported");
   const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
   server::Sampling defaults;
   {
@@ -464,8 +465,8 @@ int serve_bolt(const BoltServe& a, server::Options options) {
     options.mtp_adaptive.max_k = sa.max_k;
     options.mtp_adaptive.cost = cli::bolt::spec_cost(sa, da.int8_head, vmoe);
     std::print(stderr, "spec dflash: LiLiCorr {}, drafter {} (+ the head exact), q {}, --spec-max {:d}, the verify's MoE {}, "
-               "drafter key {:016x}, {:d} B ({}) + the embedding replica {:d} B on device {:d} - NOT Bolt's auto (spec 26 D5: box "
-               "row 65)\n", sa.draft_model.c_str(), loader::draft_format_name(sa.format), cli::bolt::bolt_draft_q_name(sa.q),
+               "drafter key {:016x}, {:d} B ({}) + the embedding replica {:d} B on device {:d} - NOT Bolt's auto (until it is "
+               "measured on the cards)\n", sa.draft_model.c_str(), loader::draft_format_name(sa.format), cli::bolt::bolt_draft_q_name(sa.q),
                sa.max_k, rb::verify_moe_name(vmoe), (unsigned long long)engine.drafter_key(), drafter.drafter->bytes(),
                drafter.drafter->weights().line.c_str(), drafter.replica->size(), engine.devices() - 1);
   } else if (sa.lookup()) {
@@ -553,7 +554,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     StdoutToStderr redirect;
     return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head());
   }();
-  std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode until spec 22)\n",
+  std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode until the expert tier is built)\n",
              model.desc.layers, model.checkpoint_layers);
   runtime::PipelineOptions opt;
   runtime::qwen4exp::Qwen4ExpEngine engine(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
@@ -580,7 +581,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   std::print(stderr,
              ", Qwen3.8-Flash-Next --layers {:d} ({} chat format), {}, prefill backend l0 (chunk {:d}), attention {} "
              "(B70_Q4_ATTN), mtp {:d}{}, lm_head {}, kv cache bf16, sampling defaults: greedy unless the request "
-             "samples (decision 11 open), prefix snapshots: state {:d} B (GDN, PLE, indexer tails{}), blocks {:d} B a "
+             "samples, prefix snapshots: state {:d} B (GDN, PLE, indexer tails{}), blocks {:d} B a "
              "position\n",
              engine.model().desc.layers, options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
              runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
@@ -943,7 +944,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     }();
     model::require_prefill(*model.desc);
     if (!cli::replica_architecture(model.desc->architecture))   // run() read config.json; the loader is the truth
-      throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (spec 13b); this checkpoint loads as " +
+      throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only; this checkpoint loads as " +
                                model.desc->name);
     // Spec 19c on this card: the drafter beside the target, before the card's plan.
     std::unique_ptr<cli::dflash::Loaded> drafter_load;
@@ -1194,7 +1195,7 @@ int run(int argc, char** argv) {
     else if (pipe.tp())
       cli::check_tp_model(architecture, name);
     else if (!cli::replica_architecture(architecture))
-      throw std::runtime_error("--max-num-seqs above 1 is built for Qwen3.8 (its sequence slots, plan 13c) and "
+      throw std::runtime_error("--max-num-seqs above 1 is built for Qwen3.8 (its sequence slots) and "
                                "Ornith (2: one request a card, replica); " +
                                (name.empty() ? std::string("this checkpoint (no readable config.json)") : name) +
                                " serves one request at a time - drop --max-num-seqs");
@@ -1202,7 +1203,7 @@ int run(int argc, char** argv) {
   }
   const bool pp_given = pipe.given();
   if (have_q4_layers && !cli::qwen4exp::is_qwen4exp(path))
-    throw std::runtime_error("--layers belongs to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); this checkpoint "
+    throw std::runtime_error("--layers belongs to Qwen3.8-Flash-Next (model_type qwen4_exp); this checkpoint "
                              "is not one");
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
@@ -1326,7 +1327,7 @@ int run(int argc, char** argv) {
                              " a card (more are faster with MTP) - use --spec mtp, or --max-num-seqs " +
                              std::to_string(pipe.replica() ? 2 * cli::dflash::kDflashSlots : cli::dflash::kDflashSlots));
   if (dflash_lookup && pipe.on())   // spec 19f: EngineAdapter's step_drafts_or_many; the pipeline adapter has none
-    throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f); --parallel pp serves --spec dflash");
+    throw std::runtime_error("--spec dflash-lookup runs on one card; with --parallel pp use --spec dflash");
   if (spec_lookup) {
     options.spec_lookup = true;
     options.lookup_min_match = server::Options{}.lookup_min_match;   // 3 (spec 19e)
@@ -1521,7 +1522,7 @@ int run(int argc, char** argv) {
                                  "shows one - a shorter --max-len, or both cards visible (ZE_AFFINITY_MASK=0,1)");
       cli::dflash::check_engine(dflash, true, kv_cache, /*pipeline_served=*/true);
       if (dflash_lookup)
-        throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f), and this model and context "
+        throw std::runtime_error("--spec dflash-lookup runs on one card, and this model and context "
                                  "need two: --spec dflash, or a shorter --max-len");
     }
   }

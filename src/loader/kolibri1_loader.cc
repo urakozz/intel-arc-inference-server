@@ -25,7 +25,7 @@ void check_len(const model::Kolibri1Desc& d, uint32_t max_len, uint32_t trained)
   if (max_len > cap)
     throw std::runtime_error(d.name + ": max_len " + std::to_string(max_len) + " exceeds the trained context " +
                              std::to_string(cap) +
-                             " - a longer context is spec 20 decision 3 (open: 262144, or more on the NoPE "
+                             " - a longer context is not supported yet (undecided: 262144, or more on the NoPE "
                              "full layers' published 1M validation)");
 }
 
@@ -94,8 +94,8 @@ KolLoadedModel load_kolibri1(const std::vector<l0::Context*>& devices, const std
                              std::to_string(scan.g_idx_tensors) + " g_idx tensors");
   check_quant_scan(qc, scan);
   if (scan.ct_linears != 0)
-    throw std::runtime_error("load_kolibri1: compressed-tensors linears in a Kolibri-1 checkpoint - spec 20 "
-                             "serves its own AutoRound auto_round:auto_gptq export only (§3.1)");
+    throw std::runtime_error("load_kolibri1: compressed-tensors linears in a Kolibri-1 checkpoint - this engine "
+                             "serves its own AutoRound auto_round:auto_gptq export only");
   KolCheckpoint ck(full, set);
   ck.check_names();   // by name, both ways, before a byte is repacked
 

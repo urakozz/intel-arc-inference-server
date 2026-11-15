@@ -42,7 +42,7 @@ inline void check_serve_pipeline(const PipelineArgs& a, const ServePipelineConte
   check_pipeline(a, pc);
   if (c.prefill_profile)
     throw std::runtime_error("--parallel pp prefill is not profiled (B70_PREFILL_PROFILE=1): the phase "
-                             "waits would serialise the pipeline (spec 16c) - unset it");
+                             "waits would serialise the pipeline - unset it");
 }
 
 }  // namespace cli

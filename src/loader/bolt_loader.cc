@@ -68,8 +68,8 @@ BoltLoaded load_bolt(const std::vector<l0::Context*>& devices, const std::string
                              std::to_string(scan.g_idx_tensors) + " g_idx tensors");
   check_quant_scan(qc, scan);
   if (scan.ct_linears != 0)
-    throw std::runtime_error("load_bolt: compressed-tensors linears in a Bolt checkpoint - spec 25 serves AutoRound GPTQ "
-                             "(g128 expanded, or our g64) only (§5)");
+    throw std::runtime_error("load_bolt: compressed-tensors linears in a Bolt checkpoint - this engine serves AutoRound GPTQ "
+                             "(g128 expanded, or our g64) only");
   const std::string trunk = bolt_trunk_prefix(set);
   BoltCheckpoint ck(full, set, trunk);
   ck.check_names();

@@ -111,7 +111,7 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
     throw std::invalid_argument("runtime::place_stages: the MTP head and a drafter are two proposers");
   if (d1.handle() != d0.handle())
     throw std::invalid_argument("runtime::place_stages: device 1 is not a view of device 0's "
-                                "Level Zero context (spec 16 decision 1: one context)");
+                                "Level Zero context (one context)");
   require_split(d, split);
   if (full.layer_small.size() != d.layers || (d.is_moe() && full.moe.size() != d.layers))
     throw std::invalid_argument("runtime::place_stages: the model does not hold all " +

@@ -91,12 +91,12 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at); --parallel tp "
                              "splits every layer");
   if (c.other_family)
-    throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b); this model runs --parallel auto, 1 or pp");
+    throw std::runtime_error("--parallel tp supports Qwen3.8-27B only; this model runs --parallel auto, 1 or pp");
   if (c.dflash)
     throw std::runtime_error("b70-decode --parallel tp drafts with the MTP head only - b70-serve --parallel tp --spec "
                              "dflash / dflash-lookup serves the drafter split over both cards");
   if (c.draft_vocab)
-    throw std::runtime_error("--parallel tp's draft head is each card's vocabulary half of lm_head (spec 17d); "
+    throw std::runtime_error("--parallel tp's draft head is each card's vocabulary half of lm_head; "
                              "--draft-vocab is not built under tensor parallel - drop it");
   if (c.profile) throw std::runtime_error("--profile instruments one device's list; it has no --parallel tp");
 }
@@ -109,7 +109,7 @@ inline void check_tp_model(const std::string& architecture, const std::string& m
                              ": its active weights are too small to split - two cards would synchronise every layer "
                              "over PCIe and decode slower than one. Use --parallel replica (a copy per card) to speed "
                              "up parallel requests");
-  throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b-d); " +
+  throw std::runtime_error("--parallel tp supports Qwen3.8-27B only; " +
                            (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
                            " runs --parallel auto, 1 or pp");
 }
@@ -183,7 +183,7 @@ inline bool replica_architecture(const std::string& architecture) {
 // `model` names the checkpoint in the refusal ("" when its config.json could not be read).
 inline void check_replica_model(const std::string& architecture, const std::string& model) {
   if (replica_architecture(architecture)) return;
-  throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (spec 13b: one engine per card, two "
+  throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (one engine per card, two "
                            "requests at once); " +
                            (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
                            " has no replica engine - --parallel auto, 1 or pp");
@@ -206,7 +206,7 @@ inline void check_replica_flags(const PipelineArgs& a, bool dflash_lookup) {
                              "replica loads the whole model on each card");
   if (dflash_lookup)
     throw std::runtime_error("--parallel replica serves --spec off, mtp, lookup or dflash; --spec dflash-lookup is "
-                             "built for one card (spec 19f) - --spec dflash, or --parallel 1");
+                             "built for one card - --spec dflash, or --parallel 1");
 }
 // b70-decode runs one sequence: two requests at once is the server's.
 inline void refuse_replica_in_decode(const PipelineArgs& a) {

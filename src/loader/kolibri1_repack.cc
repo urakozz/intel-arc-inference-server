@@ -49,7 +49,7 @@ KolAttnForm kol_attn_form(const SafetensorsSet& st, const Kolibri1Desc& d) {
       if (ts.contains(other))
         throw std::runtime_error("load_kolibri1: '" + other + "' mixes the attention arms - layer 0's q_proj is " +
                                  model::kol_attn_form_name(a) +
-                                 ", and every attention projection of every layer must agree (spec 20 decision 2)");
+                                 ", and every attention projection of every layer must agree");
     }
   return a;
 }
@@ -96,7 +96,7 @@ void KolCheckpoint::check_names() const {
                              " (model/kolibri1.h, " + model::kol_attn_form_name(d_.attn) +
                              " attention) does not describe: " + bad + (n_bad > 5 ? ", ..." : "") +
                              " - refusing to guess what they are (a quantised lm_head or shared expert, an "
-                             "extra expert or layer, another packing are all outside spec 20's one format)");
+                             "extra expert or layer, another packing are all outside the one supported format)");
   for (const std::string& name : exp) {
     if (ends_with(name, ".qzeros")) continue;   // never read; assert_quant_invariants checks it when shipped
     if (!set_.tensors().contains(name))
@@ -122,7 +122,7 @@ LinearSrc KolCheckpoint::bf16(const std::string& prefix, uint32_t K, uint32_t N)
   LinearSrc s = LinearSrc::classify(set_, prefix);
   if (s.kind != WKind::Bf16)
     throw std::runtime_error("load_kolibri1: '" + prefix + "' is int4; " + d_.name +
-                             " keeps it bf16 (spec 20 §3.1)");
+                             " keeps it bf16");
   if (s.K != K || s.N != N)
     throw std::runtime_error("load_kolibri1: '" + prefix + ".weight' is [" + std::to_string(s.N) + "][" +
                              std::to_string(s.K) + "], the descriptor says [" + std::to_string(N) + "][" +
@@ -136,7 +136,7 @@ TensorInfo KolCheckpoint::take(const std::string& name, uint64_t elems) {
   if (it == set_.tensors().end()) throw std::runtime_error("load_kolibri1: no tensor '" + name + "'");
   const TensorInfo t = it->second;   // a copy (loader.cc's -Wdangling-reference note)
   if (t.dtype != "BF16")
-    throw std::runtime_error("load_kolibri1: '" + name + "' is " + t.dtype + ", expected BF16 (spec 20 §3.1)");
+    throw std::runtime_error("load_kolibri1: '" + name + "' is " + t.dtype + ", expected BF16");
   uint64_t n = 1;
   for (uint64_t x : t.shape) n *= x;
   if (n != elems)

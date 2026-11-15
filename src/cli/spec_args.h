@@ -75,11 +75,11 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
   if (family == SpecFamily::Bolt) {   // spec 26c: Bolt's verify lists take M = K + 1 <= 8 for both proposers
     if (v == "mtp") throw std::runtime_error(model + " has no MTP head: drop --spec mtp (its --spec auto is off)");
     if (v == "dflash-lookup")
-      throw std::runtime_error("--spec dflash-lookup is built for Qwen3.8 beside its drafter (spec 19f); " + model +
+      throw std::runtime_error("--spec dflash-lookup is built for Qwen3.8 beside its drafter; " + model +
                                " serves --spec dflash (the LiLiCorr drafter) or --spec lookup");
     if (have_max && (max == 0 || max > 7))
-      throw std::runtime_error("--spec-max with " + model + " expects 1..7 (LiLiCorr's block of 8 - 1, spec 26 "
-                               "Decision 5; the verify lists' M <= 8)");
+      throw std::runtime_error("--spec-max with " + model + " expects 1..7 (LiLiCorr's block of 8 - 1; the verify "
+                               "lists' M <= 8)");
     s.kind = v == "dflash" ? SpecKind::DFlash : SpecKind::Lookup;
     s.max_k = have_max ? max : 7;
     s.adaptive = true;
@@ -108,7 +108,7 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
   }
   if (dflash) {
     if (family != SpecFamily::Qwen)
-      throw std::runtime_error("--spec " + v + " is built for Qwen3.8 beside its drafter (spec 19c); " + model +
+      throw std::runtime_error("--spec " + v + " is built for Qwen3.8 beside its drafter; " + model +
                                " has none");
     if (have_max && (max == 0 || max > 7))
       throw std::runtime_error("--spec-max with --spec " + v + " expects 1..7 (the drafter's block of 8)");

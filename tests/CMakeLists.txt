@@ -3003,7 +3003,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_kolibri_prefill_int8 ${_kol_cfg} --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
   b70_serve_reject(cli_reject_serve_kolibri_one_card ${_kol_cfg} --parallel 1 EXPECT "run it with --parallel pp")
-  b70_serve_reject(cli_reject_serve_kolibri_max_len ${_kol_cfg} --max-len 524288 EXPECT "decision 3")
+  b70_serve_reject(cli_reject_serve_kolibri_max_len ${_kol_cfg} --max-len 524288 EXPECT "a longer context is not supported")
   set_tests_properties(cli_reject_serve_kolibri_spec_mtp cli_reject_serve_kolibri_lookup
     cli_reject_serve_kolibri_kv8 cli_reject_serve_kolibri_prefill_int8 cli_reject_serve_kolibri_one_card
     cli_reject_serve_kolibri_max_len PROPERTIES LABELS kolibri)
@@ -3168,9 +3168,9 @@ endif()
 # model_type stub config.json (spec 21 §13 departure 1: the checkpoint's own config is not vendored), which is all the
 # dispatch and the refusals read.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "spec 22")
-b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "spec 21e")
-b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 8")
+b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "expert-offload tier")
+b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "its MTP head is served by b70-serve")
+b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
 # (spec 21e removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21e's block's)
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
 
@@ -3463,10 +3463,10 @@ if(B70_Q4EXP)
 endif()
 if(TARGET b70-serve)
   set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-  b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "spec 22")
+  b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "expert-offload tier")
   b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --spec mtp --draft-vocab 32k
     EXPECT "--draft-vocab is not built for Qwen3.8-Flash-Next")
-  b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "decision 8")
+  b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
   b70_serve_reject(cli_reject_serve_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
   b70_serve_reject(cli_reject_serve_qwen4exp_split_alone ${_q4_cfg} --layers 4 --parallel 1 --pipeline-split 2
@@ -3494,7 +3494,7 @@ set_tests_properties(probe_offload_kernel_drift_test PROPERTIES LABELS host)
 # (spec 25e) and --spec dflash Qwen3.8's (spec 19c). (Written for spec 23e; Muse-Glimmer-30B was dropped 2026-10-27.)
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_spec_dflash_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --spec dflash
-    EXPECT "built for Qwen3.8 beside its drafter")   # spec 19c: dflash is Qwen3.8's
+    EXPECT "--spec dflash on Kolibri-1 needs --draft-model")   # Kolibri DSpark: its drafter by name
 endif()
 
 # ==== Spec 19b: the DFlash drafter (label dflash) ==== (begin) ====
@@ -3778,13 +3778,13 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     PROPERTIES LABELS dflash)
   # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
   b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
-    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup is built for one card")
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup runs on one card")
   b70_serve_reject(cli_reject_serve_dflash_no_draft_model ${B70_NO_MODEL} --spec dflash
     EXPECT "needs --draft-model")
   b70_serve_reject(cli_reject_serve_dflash_lookup_no_draft_model ${B70_NO_MODEL} --spec dflash-lookup
     EXPECT "--draft-model z-lab/Qwen3.8-27B-DFlash2")
   b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
-    --spec dflash-lookup EXPECT "built for Qwen3.8 beside its drafter")
+    --spec dflash-lookup EXPECT "its verify lists serve the DSpark drafter")
   b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
     EXPECT "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup")
   set_tests_properties(cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
@@ -4098,7 +4098,7 @@ set(_bolt_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
 # are the spec 25d block's cli_reject_bolt_prefill_*.)
 b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "no MTP head")
 b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "b70-decode decodes plainly")
-b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Decision 17")
+b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Nemotron 3.5 Bolt's KV is bf16")
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====
 
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill (label bolt) ==== (begin) ====
@@ -4286,7 +4286,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--draft-model needs --spec dflash")
   set_tests_properties(cli_reject_serve_bolt_draft_model PROPERTIES LABELS "bolt;lilicorr")
   b70_serve_reject(cli_reject_serve_bolt_draft_vocab ${_bolt_serve_cfg} --draft-vocab 32k EXPECT "has neither")
-  b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
+  b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Nemotron 3.5 Bolt's KV is bf16")
   b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
     EXPECT "int8 prefill for this family is out of scope")
   b70_serve_reject(cli_reject_serve_bolt_layers ${_bolt_serve_cfg} --layers 3 EXPECT "belongs to Qwen3.8-Flash-Next")

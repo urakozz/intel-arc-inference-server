@@ -126,7 +126,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   if (prefill) {
     eng.set_prefill_backend(a.pf.backend);
     eng.set_prefill_chunk_cap(pf.chunk_cap);   // plan 5d: the cap the plan counted
-    std::print(stderr, "prefill backend: {}, both devices (spec 16c: the chunk pipeline)\n",
+    std::print(stderr, "prefill backend: {}, both devices (the chunk pipeline)\n",
                runtime::prefill_backend_name(eng.prefill_backend()));
     eng.prepare_prefill();
   }
@@ -198,7 +198,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
                ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::print(stderr,
              "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
-             " spec 16b S1 compares it with the one-card row, interleaved.)\n");
+             " compare it with the one-card row, run interleaved.)\n");
   return 0;
 }
 

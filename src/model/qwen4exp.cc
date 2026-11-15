@@ -176,7 +176,7 @@ void validate(const Q4Placement& p, const Qwen4ExpDesc& d) {
     return;
   }
   if (p.devices != 2)
-    throw std::invalid_argument("Q4Placement: " + std::to_string(p.devices) + " devices (spec 16 builds and gates two)");
+    throw std::invalid_argument("Q4Placement: " + std::to_string(p.devices) + " devices (two are supported)");
   if (p.split < 1 || p.split + 1 > d.layers)
     throw std::invalid_argument("Q4Placement: split " + std::to_string(p.split) + " is outside [1, " +
                                 std::to_string(d.layers > 0 ? d.layers - 1 : 0) +

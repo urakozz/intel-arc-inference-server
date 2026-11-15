@@ -28,8 +28,8 @@ uint32_t device_blocks(const model::BoltDesc& d, const model::BoltPlacement& p, 
     one_card ? " - " : "");
   std::string msg = buf;
   if (one_card)
-    msg += d.name + " does not fit one 32 GB card (Decision 4: two cards by default, --parallel pp; one card only through "
-                    "spec 22's expert-offload tier, not built - spec 25 §4.2)";
+    msg += d.name + " does not fit one 32 GB card (two cards by default, --parallel pp; one card only through "
+                    "an expert-offload tier, not built yet)";
   throw std::runtime_error(msg);
 }
 
@@ -85,7 +85,7 @@ BoltPlan plan(const model::BoltDesc& d, uint32_t max_len, const std::vector<size
               std::optional<uint32_t> split, size_t reserve_bytes, bool int8_head) {
   if (device_free.size() != 1 && device_free.size() != 2)
     throw std::invalid_argument("runtime::bolt::plan: " + std::to_string(device_free.size()) +
-                                " devices (spec 25 §4.1 builds and gates two; one for synthetic / --layers checkpoints)");
+                                " devices (two are supported; one for synthetic / --layers checkpoints)");
   BoltPlan out;
   if (device_free.size() == 1) {
     if (split) throw std::invalid_argument("runtime::bolt::plan: a split on one device");
@@ -214,7 +214,7 @@ std::string bolt_fuse_name(BoltFuse f) {
 BoltState parse_state(const std::string& v) {
   if (v.empty() || v == "fp32") return BoltState::Fp32;
   if (v == "bf16") return BoltState::Bf16;
-  throw std::runtime_error("B70_BOLT_SSM=" + v + ": expected fp32 or bf16 (Decision 2)");
+  throw std::runtime_error("B70_BOLT_SSM=" + v + ": expected fp32 or bf16");
 }
 BoltState bolt_state() {
   const char* v = std::getenv("B70_BOLT_SSM");

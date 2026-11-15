@@ -63,7 +63,7 @@ std::vector<uint32_t> checked_slots(const loader::LoadedModel& m, uint32_t max_l
     // BR_GDN_QWEN), and the batched lists are the dense model's.
     const model::ModelDesc& d = *m.desc;
     if (d.is_moe() || d.gdn_layers != 48 || d.gdn_v_heads != 48)
-      throw std::runtime_error("runtime::Engine: sequence slots are built for Qwen3.8 (spec 13c); " + d.name +
+      throw std::runtime_error("runtime::Engine: sequence slots are built for Qwen3.8; " + d.name +
                                " serves one sequence");
     if (m.draft_vocab)
       throw std::runtime_error("runtime::Engine: a draft vocabulary beside sequence slots is not built");
@@ -98,7 +98,7 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
     // Spec 19c: one proposer per engine, and the drafter's verify lists at M = 1 .. max_k + 1 over its 8 slots.
     if (mtp_)
       throw std::runtime_error("runtime::Engine: a tap drafter and the MTP head are two proposers - load the "
-                               "model without its head (one proposer per server, spec 19 decision 3)");
+                               "model without its head (one proposer per server)");
     if (drafter->max_k() == 0 || drafter->max_k() + 1 > TapVerifyDims::kSlots)
       throw std::runtime_error("runtime::Engine: the drafter drafts " + std::to_string(drafter->max_k()) +
                                " ids a block; the verify lists take 1.." +

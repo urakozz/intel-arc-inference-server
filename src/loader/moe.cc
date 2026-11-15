@@ -18,7 +18,7 @@ LinearSrc check_int4(LinearSrc s, const std::string& part, uint32_t K, uint32_t 
                      const std::string& what) {
   if (s.kind != WKind::Int4)
     throw std::runtime_error(what + ": '" + part + "' is " + kind_name(s.kind) +
-                             "; the MoE decode kernels read int4 g64 experts (spec 15 decision 1)");
+                             "; the MoE decode kernels read int4 g64 experts");
   if (s.K != K || s.N != N)
     throw std::runtime_error(what + ": '" + part + "' is K=" + std::to_string(s.K) + " N=" +
                              std::to_string(s.N) + ", the descriptor says K=" + std::to_string(K) +
