@@ -22,7 +22,13 @@
 // (q hi / lo against K, P hi / lo against V) over its rows' keys.
 //
 // Depth is Control::pos (row 0 reads pos + 1 keys).
+// Plan 33b (why this probe's DPAS times ran 1.4-2x the records), environment, bf16 only:
+//   PKD_KV_DUMP=<dir>  every layer's K / V rows (and q, its 8 rows repeated) from probe_decode_attn capture's dump
+//                      (kv_k.bin / kv_v.bin, q_<depth>.bin of the first depth) instead of the random fill
+//   PKD_ONE_CACHE=1    all 16 layers read layer 0's cache
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -164,6 +170,19 @@ int main(int argc, char** argv) {
                    std::min(words * 2, kv16_bytes - off));
     }
   }
+  const char* dump = std::getenv("PKD_KV_DUMP");
+  const bool one_cache = std::getenv("PKD_ONE_CACHE") != nullptr;
+  auto slurp = [](const std::string& path, size_t bytes) {
+    std::vector<char> b(bytes);
+    std::ifstream f(path, std::ios::binary);
+    if (!f.read(b.data(), std::streamsize(bytes))) fail("cannot read " + std::to_string(bytes) + " bytes of " + path);
+    return b;
+  };
+  if (dump && any16)
+    for (const char* name : {"kv_k.bin", "kv_v.bin"}) {
+      const std::vector<char> b = slurp(std::string(dump) + "/" + name, kv16_bytes);
+      for (uint32_t l = 0; l < kLayers; ++l) imm.copy((name[3] == 'k' ? k16 : v16)[l]->ptr(), b.data(), kv16_bytes);
+    }
   l0::Mem control(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
   l0::Mem attn_q(ctx, l0::MemKind::Device, size_t(M) * kRow * 4), gate(ctx, l0::MemKind::Device, attn_q.size());
   l0::Mem part(ctx, l0::MemKind::Device, size_t(kHeads) * kBlocks * M * 258 * 4);
@@ -173,6 +192,10 @@ int main(int argc, char** argv) {
     std::normal_distribution<float> nd(0.0f, 0.03f);
     std::vector<float> h(size_t(M) * kRow);
     for (auto& x : h) x = nd(rng);
+    if (dump) {
+      const std::vector<char> b = slurp(std::string(dump) + "/q_" + std::to_string(depths[0] + 1) + ".bin", size_t(8) * kRow * 4);
+      for (uint32_t m = 0; m < M; ++m) std::memcpy(&h[size_t(m) * kRow], b.data() + size_t(m % 8) * kRow * 4, kRow * 4);
+    }
     imm.copy(attn_q.ptr(), h.data(), attn_q.size());
     for (auto& x : h) x = nd(rng) * 30.0f;
     imm.copy(gate.ptr(), h.data(), gate.size());
@@ -183,7 +206,8 @@ int main(int argc, char** argv) {
     const std::string dn = arm.dpas ? (arm.kv8 ? "attn_verify_dpas_kv8" : "attn_verify_dpas")
                                     : (arm.kv8 ? "attn_decode_v2_kv8" : "attn_decode_v2");
     const std::string rn = arm.kv8 ? "attn_reduce_v2_kv8" : "attn_reduce_v2";
-    for (uint32_t l = 0; l < kLayers; ++l) {
+    for (uint32_t l0i = 0; l0i < kLayers; ++l0i) {
+      const uint32_t l = one_cache ? 0u : l0i;
       for (uint32_t r = 0; arm.dec && r < arm.reps; ++r) {
         arm.kernels.push_back((r > 0 && arm.rep_module ? arm.rep_module : arm.module)->kernel(dn.c_str()));
         l0::Kernel& k = arm.kernels.back();

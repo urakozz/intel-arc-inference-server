@@ -6,6 +6,7 @@
 #   tools/probe/verify_attn_wide.sh absolute CARD OUT today's 16-row line, absolute times: probe_kv8_decode (random
 #                                                     data, 16 caches) beside probe_verify_attn (real q / KV, one
 #                                                     layer, L0 timestamps), the cards' clocks sampled throughout
+#   tools/probe/verify_attn_wide.sh decompose CARD OUT  today's 16-row line: random / real KV x 16 caches / one
 #   tools/probe/verify_attn_wide.sh kernel CARD OUT   today's 16-row line against the candidates, 4k / 32k / 98k keys
 set -u
 mode="$1"
@@ -56,6 +57,17 @@ case "$mode" in
       --depths 32768 --arms K32_Pg_S1_D128_Q1_G256_P1 --time --rounds 5 --reps 10
     kill $cpid
     echo ABSOLUTE_DONE
+    ;;
+  decompose)   # the absolute gap split: random / real KV and q, 16 caches / one (probe_kv8_decode's PKD_* switches)
+    card="$1" out="$2"
+    mkdir -p "$out"
+    r="attn_verify_dpas_M16_T32+attn_v2_M16_T32"
+    dump="$HOME/b70/logs/spec28c/vattn-dump"
+    run random16 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
+    run random1 env PKD_ONE_CACHE=1 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
+    run real16 env PKD_KV_DUMP="$dump" build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
+    run real1 env PKD_KV_DUMP="$dump" PKD_ONE_CACHE=1 build/tools/probe/probe_kv8_decode 16 32767,98303 "$r"
+    echo DECOMPOSE_DONE
     ;;
   kernel)
     card="$1" out="$2"

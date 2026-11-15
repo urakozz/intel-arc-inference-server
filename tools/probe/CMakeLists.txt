@@ -899,6 +899,15 @@ foreach(MM 5 6 7 8)
                            BROW_DST=3 BROW_SLOT=4 KV8_DEC=1 M=${MM} TGT=32)
   list(APPEND PVD_TARGETS kernel_pvd_v2kv8_M${MM})
 endforeach()
+# Plan 33b: the 16-row line's PAIR split at KS 1 (spec 33 §6) before CMake's production line takes it, at PVR 1 / 2
+# (`vdpas_wide_pvr<N>_M16`: attn_verify_bitwise_test --cand vdpas_wide_pvr<N>_, probe_kv8_decode arms).
+foreach(_pvr 1 2)
+  add_ocloc_kernel(vdpas_wide_pvr${_pvr}_M16 SOURCE ${PVD_CL}
+                   DEFINES CTRL_POS=0 CTRL_NACT=1 M=16 TGT=32 KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1
+                           PVX=8 PVR=${_pvr} KV8=0
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND PVD_TARGETS kernel_vdpas_wide_pvr${_pvr}_M16)
+endforeach()
 add_custom_target(pvd_kernels DEPENDS ${PVD_TARGETS})
 add_executable(probe_verify_attn probe_verify_attn.cc)
 target_include_directories(probe_verify_attn PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
