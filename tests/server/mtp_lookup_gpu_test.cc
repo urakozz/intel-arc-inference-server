@@ -141,7 +141,7 @@ Gen generate_plain(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32
 // runs' 16-row verifies and the head-confirmed entries, through step_drafts_or_confirmed as the server): greedy requests' MTP iterations by the per-step
 // choice, sampled ones by AdaptiveK. `cut`: the first lookup burst of >= 3 ids is truncated to 2.
 Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, const server::Sampling& s,
-                    bool cut = false, bool* did_cut = nullptr) {
+                    bool cut = false, bool* did_cut = nullptr, std::vector<std::string>* log = nullptr) {
   a.reset();
   a.prefill(prompt);
   Gen g;
@@ -158,6 +158,7 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
   const auto t0 = std::chrono::steady_clock::now();
   while (g.ids.size() < n) {
     const uint32_t k = s.greedy ? sk.begin() : ak.next();
+    const size_t at = prompt.size() + g.ids.size();   // the pending id's position
     uint32_t proposed = 0;
     server::EngineIface::DraftChoice choose;
     if (s.greedy) choose = [&](uint32_t j, float p) { return sk.choose(j, p); };
@@ -182,6 +183,9 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
         choose, confirm);
     ++g.iters;
     const uint32_t kept = uint32_t(burst.size() - 1);
+    if (log)
+      log->push_back("pos " + std::to_string(at) + (proposed ? " lookup " + std::to_string(proposed) : " mtp k " + std::to_string(k)) +
+                     (cand.size() && proposed == cand.size() ? " (confirmed)" : "") + " kept " + std::to_string(kept));
     if (proposed > 0) {
       lid.observe(proposed, kept);
       ++g.lookup_iters;
@@ -241,11 +245,13 @@ int main(int argc, char** argv) {
   bool ok = true;
   server::Sampling greedy;
 
+  // `H` as the second argument: part H alone (open-work 28's head-row diagnosis).
+  const bool only_h = argc > 2 && std::string(argv[2]) == "H";
   // --- D2 -------------------------------------------------------------------------------------------------
   uint64_t fails = 0, far_lookup_iters = 0, tot_iters = 0, tot_lookup_ids = 0, tot_ids = 0, ties = 0, beyond = 0,
            judged = 0;
   const golden::ForcedJudge fj;
-  for (const Prompt& p : prompts()) {
+  for (const Prompt& p : only_h ? std::vector<Prompt>{} : prompts()) {
     std::vector<greedy_tie::RefStep> steps;
     const Gen plain = generate_plain(mtp, p.ids, kGen, greedy, false, &steps, &e);
     const Gen g = generate_lookup(mtp, p.ids, kGen, greedy);
@@ -289,12 +295,14 @@ int main(int argc, char** argv) {
     const uint32_t b = uint32_t(prompt.size()), end = b + kGen - 1;   // the generated positions, the last one aside
     const Gen pm = generate_plain(mtp, prompt, kGen, greedy, true);
     const std::vector<uint8_t> kv_mtp = head_k_rows(mtp, e, b, end);
-    const Gen g = generate_lookup(mtp, prompt, kGen, greedy);
+    std::vector<std::string> iters;
+    const Gen g = generate_lookup(mtp, prompt, kGen, greedy, false, nullptr, &iters);
     const std::vector<uint8_t> kv_lk = head_k_rows(mtp, e, b, end);
     const bool same_ids = g.ids == pm.ids;
     const size_t rb = e.mtp_buffers()->kv_lay.row_bytes();
     double min_cos = 1;
     uint32_t bitwise_rows = 0;
+    bool bad = false;
     for (uint32_t r = 0; r < end - b; ++r) {
       const uint8_t* x = kv_lk.data() + size_t(r) * rb;
       const uint8_t* y = kv_mtp.data() + size_t(r) * rb;
@@ -311,8 +319,11 @@ int main(int argc, char** argv) {
       }
       const double cs = dot / std::sqrt(std::max(na * nb, 1e-300));
       if (cs < 0.99) std::printf("H: row %u (position %u): cosine %.6f\n", r, b + r, cs);
+      if (cs < 0.99) bad = true;
       min_cos = std::min(min_cos, cs);
     }
+    if (bad)
+      for (const std::string& it : iters) std::printf("H: iteration %s\n", it.c_str());
     std::printf("H: after %llu lookup iterations (%llu ids) the head's K rows of the %u generated positions against "
                 "plain --spec mtp's (ids %s): min cosine %.6f, %u rows bitwise\n",
                 (unsigned long long)g.lookup_iters, (unsigned long long)g.lookup_ids, end - b,
