@@ -8,6 +8,11 @@
 // force_attn; no environment variable) - timed as interleaved chunks -
 // the in-list check of the verify-attention table (S1) and verify(8)'s attention saving (S2); nothing else runs.
 //
+// `mode` wide16 (spec 32, plan 32a Task 1; max_m 4, int8 head): the engine's built 16-row list in place -
+// Engine::verify(kWideK) with 15 file ids in Control::wide_cur, then commit(0) or commit(15) (the next launch replays
+// 1 or 16 rows, as in a run) - as interleaved pairs against verify(0) + commit(0), pos rewound to `depth` before every
+// chunk, the pair's order alternating by round, after a warm-up; median over rounds with the range.
+//
 // `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
 // `draft_vocab` (spec 8 §11): off, 32k, 64k or 128k (either head form) - the draft list reads
 // the compact head instead; V' = tokenizer.json's added tokens (the EOS ids among them on
@@ -81,7 +86,7 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr,
                  "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8] [off|32k|64k|128k]"
-                 " [max_len] [max_m 4..8] [default|vattn]\n",
+                 " [max_len] [max_m 4..8] [default|vattn|wide16]\n",
                  argv[0]);
     return 2;
   }
@@ -97,8 +102,8 @@ int main(int argc, char** argv) {
   const bool wide = max_m > 4;   // spec 19a: the M = 5..8 arms
   // Spec 28c (plan 28c Task 7): a 9th positional `mode` - default | vattn.
   const std::string mode = argc > 9 ? argv[9] : "default";
-  if (mode != "default" && mode != "vattn") {
-    std::fprintf(stderr, "mode %s: default or vattn\n", mode.c_str());
+  if (mode != "default" && mode != "vattn" && mode != "wide16") {
+    std::fprintf(stderr, "mode %s: default, vattn or wide16\n", mode.c_str());
     return 2;
   }
   const bool vattn = mode == "vattn";
@@ -259,6 +264,59 @@ int main(int argc, char** argv) {
                   "r_dpas_lo=%.4f\n",
                   depth, x.M, median_of(t2), median_of(tr), median_of(td), median_of(rr), sr.front(), median_of(rd),
                   sd.front());
+      std::fflush(stdout);
+    }
+    return 0;
+  }
+
+  if (mode == "wide16") {
+    // Spec 32 (plan 32a Task 1): the built 16-row list against the plain step, interleaved pairs.
+    if (!e.wide_built()) {
+      std::fprintf(stderr, "wide16: the engine built no 16-row list (int8 head, bf16 KV, one slot)\n");
+      return 1;
+    }
+    auto chunk = [&](uint32_t j, bool wide16, uint32_t n) {
+      ctl->pos = depth;
+      const auto t0 = Clock::now();
+      for (uint32_t i = 0; i < n; ++i) {
+        if (wide16) {
+          for (uint32_t r = 1; r <= runtime::Engine::kWideK; ++r) ctl->wide_cur[r] = file[(depth + r) % file.size()];
+          e.verify(runtime::Engine::kWideK);
+          e.commit(j, e.verify_ids()[j]);
+        } else {
+          e.verify(0);
+          e.commit(0, e.verify_ids()[0]);
+        }
+      }
+      return std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / n;
+    };
+    chunk(0, false, 8);
+    chunk(0, true, 8);
+    chunk(runtime::Engine::kWideK, true, 8);
+    std::printf("wide16: depth %u (rewound before every chunk), %u calls x %u rounds, interleaved pairs\n", depth,
+                calls, rounds);
+    std::printf("| arm | ms | plain ms | x plain [range] |\n|---|---|---|---|\n");
+    for (uint32_t j : {0u, runtime::Engine::kWideK}) {
+      std::vector<double> t1, tw, ratio;
+      for (uint32_t r = 0; r < rounds; ++r) {
+        double a, b;
+        if (r % 2 == 0) {
+          a = chunk(0, false, calls);
+          b = chunk(j, true, calls);
+        } else {
+          b = chunk(j, true, calls);
+          a = chunk(0, false, calls);
+        }
+        t1.push_back(a);
+        tw.push_back(b);
+        ratio.push_back(b / a);
+      }
+      std::vector<double> rs = ratio;
+      std::sort(rs.begin(), rs.end());
+      std::printf("| verify 16 rows, commit(%u) | %.3f | %.3f | %.4f [%.4f-%.4f] |\n", j, median_of(tw), median_of(t1),
+                  median_of(ratio), rs.front(), rs.back());
+      std::printf("WIDE16 depth=%u commit=%u wide=%.3f plain=%.3f ratio=%.4f lo=%.4f hi=%.4f\n", depth, j,
+                  median_of(tw), median_of(t1), median_of(ratio), rs.front(), rs.back());
       std::fflush(stdout);
     }
     return 0;

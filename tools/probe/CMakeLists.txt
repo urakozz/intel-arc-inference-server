@@ -808,6 +808,14 @@ set(GEMM_SM_LEVERS "5120 16384 1 1" "5120 16384 1 1 MG G256" "6144 5120 4 0 B2D"
                    "6144 5120 4 0 MG G256 B2D" "6144 5120 4 0 MG" "5120 34816 1 0 WG MG G256" "5120 34816 1 0 WG MG")
 set(_psm_lever_m 2 3 4 5 6 7 8 16)
 gemm_sm_rows(GEMM_SM_LEVERS _psm_lever_m)
+# Spec 32: Qwen3.8's production rows (src/kernels/CMakeLists.txt's GEMM_SM_QWEN38) at 32 and 64 rows at both GRF
+# modes - probe_small_m prod --m 16,32,64 picks each shape's mode (kernels::SmallMTuning::g256_from).
+set(_psm_deep_rows "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG B2D"
+                   "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG" "5120 16384 1 1 MG G256" "6144 5120 4 0 MG G256 B2D"
+                   "5120 14336 2 0 MG G256 B2D" "5120 34816 1 0 WG MG G256 B2D" "17408 5120 4 0 MG G256 B2D"
+                   "5120 248320 1 2 WG G256")
+set(_psm_deep_m 32 64)
+gemm_sm_rows(_psm_deep_rows _psm_deep_m)
 list(APPEND PSM_TARGETS ${GEMM_SM_TARGETS})
 add_custom_target(psm_kernels DEPENDS ${PSM_TARGETS})
 

@@ -9,7 +9,8 @@
 //   probe_small_m levers   [--shape all] [--orient wB,wA] [--rounds 5]
 //   probe_small_m numerics <snapshot> [--shape all] [--trials 1000]
 //   probe_small_m prod     [--shape all] [--m 2,4,8,16] [--rounds 5]   (plan 28b: production gemm_sm + levers;
-//                          Qwen3.8's shapes, the token sum over them)
+//                          Qwen3.8's shapes, the token sum over them; --m 32,64: spec 32a's probe builds, 128 and
+//                          256 GRF, property R against M = 16 and N2 on random rows)
 //   (every mode: [--device 0]; the card is whatever ZE_AFFINITY_MASK leaves at index 0)
 //
 // check:    every built variant of the selected shapes and M against the fp64 reference
@@ -73,7 +74,7 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-constexpr uint32_t kMaxM = 16;
+constexpr uint32_t kMaxM = 64;   // spec 32a: prod at 32 / 64 rows (the other modes stop at 16)
 
 // --- shapes ---------------------------------------------------------------------------
 // kind: 0 int4 (layout L), 2 int8 head, 3 bf16 a||b (control only)
@@ -228,7 +229,7 @@ void upload(l0::Context& ctx, Inputs& in, bool timing) {
   in.x = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(kMaxM) * s.K * 2);
   in.xq = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(kMaxM) * s.K);
   in.xs = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, 4096);
-  in.out = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(16) * kMaxM * s.N * 4);
+  in.out = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(16) * 16 * s.N * 4);   // S x M <= 256
 }
 
 // --- kernels ------------------------------------------------------------------------------
@@ -848,6 +849,56 @@ std::unique_ptr<Launch> make_prod(l0::Context& ctx, const kernels::SmallMTuning&
   L->S = kernels::gemm_sm_out_s(t);
   return L;
 }
+// Spec 32a: the production row at M (both GRF modes) on M random rows: rows 0..15 bitwise the M = 16 build's from
+// the same first 16 rows (property R across M and the GRF boundary; the other rows are absent there), and N2
+// against fp64 on the first 512 columns of every row. Uses copy 0 of the timing inputs.
+bool deep_numerics(l0::Context& ctx, l0::Queue& q, l0::Fence& f, const Inputs& in, const kernels::SmallMTuning& t,
+                   uint32_t M) {
+  const Shape& s = *in.sh;
+  const std::vector<uint16_t> x = random_rows(M, s.K, 991 + M + s.N);
+  set_rows(ctx, in, x);
+  std::vector<float> p16;
+  {
+    auto L16 = make_prod(ctx, t, 16);
+    run_once(ctx, q, f, *L16, in, &p16);
+  }
+  const uint32_t nc = std::min(512u, s.N), nt = 8;
+  const std::vector<float> xf = gemm_sm::bf16_rows(x);
+  std::vector<double> R(size_t(M) * s.N, 0.0), B(size_t(M) * s.N, 0.0);
+  {
+    std::vector<std::vector<double>> rr(nt), bb(nt);
+    std::vector<std::thread> th;
+    for (uint32_t i = 0; i < nt; ++i)
+      th.emplace_back([&, i] { gemm_sm::ref(in.view(), xf, M, rr[i], bb[i], nc / nt * i, nc / nt * (i + 1)); });
+    for (auto& h : th) h.join();
+    for (uint32_t i = 0; i < nt; ++i)
+      for (uint32_t m = 0; m < M; ++m)
+        for (uint32_t n = nc / nt * i; n < nc / nt * (i + 1); ++n) {
+          R[size_t(m) * s.N + n] = rr[i][size_t(m) * s.N + n];
+          B[size_t(m) * s.N + n] = bb[i][size_t(m) * s.N + n];
+        }
+  }
+  bool ok = true;
+  for (bool g256 : {false, true}) {
+    kernels::SmallMTuning g = t;
+    g.grf256 = g256;
+    const std::string n = kernels::gemm_sm_variant(M, g);
+    if (!file_exists(kernels::path(n))) continue;
+    auto L = make_prod(ctx, g, M);
+    std::vector<float> pm;
+    const std::vector<float> got = run_once(ctx, q, f, *L, in, &pm);
+    size_t diff = 0;
+    for (uint32_t sl = 0; sl < L->S; ++sl)
+      for (uint32_t m = 0; m < 16; ++m)
+        diff += std::memcmp(&pm[(size_t(sl) * M + m) * s.N], &p16[(size_t(sl) * 16 + m) * s.N], s.N * 4) != 0;
+    const gemm_sm::N2 e = gemm_sm::n2(got, R, B, M, s.N, 0, nc);
+    const bool pass = diff == 0 && e.pass();
+    ok = ok && pass;
+    std::printf("| %s numerics | %u | R: %zu of %u row-slices differ from M = 16 | N2 max ratio %.3g, min cos %.9f | %s |\n",
+                n.c_str(), M, diff, 16 * L->S, e.max_ratio, e.min_cos, pass ? "pass" : "**FAIL**");
+  }
+  return ok;
+}
 int run_prod(l0::Context& ctx, const Opts& o) {
   l0::Queue q(ctx);
   l0::Fence f(q);
@@ -857,6 +908,7 @@ int run_prod(l0::Context& ctx, const Opts& o) {
               "executions per list, with gemv at M = 1 and at M\n", o.rounds);
   std::map<std::string, std::map<uint32_t, double>> ctl, prod_us, best_us;
   std::vector<const Shape*> done;
+  bool deep_fail = false;
   for (const Shape* sp : shapes) {
     const Shape& s = *sp;
     const unsigned lay = s.kind == 2 ? 2 : s.L;
@@ -882,7 +934,18 @@ int run_prod(l0::Context& ctx, const Opts& o) {
       if (!grf_ok(kernels::gemm_sm_variant(M, *t), t->grf256)) continue;
       auto pr = make_timed(ctx, make_prod(ctx, *t, M), in, nl);
       std::vector<std::unique_ptr<Timed>> al;
-      for (const auto& a : alts) {
+      // Spec 32a: at 32 / 64 rows the production row's knobs at the other GRF mode is the one alternate (the lever
+      // rows are not built there), and property R / N2 are checked before the timing.
+      if (M > 16) {
+        if (!deep_numerics(ctx, q, f, in, *t, M)) deep_fail = true;
+        set_rows(ctx, in, random_rows(kMaxM, s.K, 5 + s.K));
+        kernels::SmallMTuning g = *t;
+        g.grf256 = !g.grf256;
+        const std::string n = kernels::gemm_sm_variant(M, g);
+        if (!file_exists(kernels::path(n))) std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M);
+        else if (grf_ok(n, g.grf256)) al.push_back(make_timed(ctx, make_prod(ctx, g, M), in, nl));
+      }
+      for (const auto& a : M > 16 ? std::vector<kernels::SmallMTuning>{} : alts) {
         const std::string n = kernels::gemm_sm_variant(M, a);
         if (!file_exists(kernels::path(n))) { std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M); continue; }
         if (!grf_ok(n, a.grf256)) continue;
@@ -927,7 +990,21 @@ int run_prod(l0::Context& ctx, const Opts& o) {
     }
     std::printf("| %u | %.1f | %.1f | %.4f | %.4f |\n", M, base, p, p / base, b / base);
   }
-  return 0;
+  // Spec 32a: the added rows' marginal rate over 16 rows (the faster GRF mode per shape), TFLOP/s.
+  double flop_row = 0, b16 = 0;
+  for (const Shape* s : done) {
+    flop_row += 2.0 * s->K * s->N * s->layers;
+    b16 += s->layers * best_us[s->key][16];
+  }
+  for (uint32_t M : o.ms) {
+    if (M <= 16 || b16 == 0) continue;
+    double b = 0;
+    for (const Shape* s : done) b += s->layers * best_us[s->key][M];
+    std::printf("DEEP_SUM M=%u best_us=%.1f m16_us=%.1f added_ms=%.3f marginal_tflops=%.1f\n", M, b, b16,
+                (b - b16) / 1e3, flop_row * (M - 16) / ((b - b16) * 1e-6) / 1e12);
+  }
+  if (deep_fail) std::printf("\nprod at 32 / 64 rows: **numerics FAIL**\n");
+  return deep_fail ? 1 : 0;
 }
 
 // ================================ numerics ==================================================
@@ -1160,7 +1237,10 @@ int main(int argc, char** argv) {
     else { std::fprintf(stderr, "unknown flag %s\n", a.c_str()); return 2; }
   }
   for (uint32_t M : o.ms)
-    if (M < 1 || M > 16) { std::fprintf(stderr, "M %u outside [1, 16]\n", M); return 2; }
+    if (M < 1 || (M > 16 && !(o.mode == "prod" && (M == 32 || M == 64)))) {
+      std::fprintf(stderr, "M %u outside [1, 16] (prod also takes 32 and 64)\n", M);
+      return 2;
+    }
   l0::Context ctx(o.device);
   std::printf("device: %s; probe_small_m %s\n", ctx.name().c_str(), o.mode.c_str());
   if (o.mode == "check") return run_check(ctx, o);
