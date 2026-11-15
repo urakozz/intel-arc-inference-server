@@ -109,6 +109,9 @@ inline constexpr const char* kTpPrefillNarrowReason =
 inline constexpr const char* kNearTieNoiseReason =
     "after a near-tie first difference, an 11-12 ulp miss on main as well; bf16 format noise by the per-layer "
     "diagnostic (operator 2026-11-13), reviewed row operator 2026-11-14";
+inline constexpr const char* kWideLookupTieReason =
+    "a three-way near tie the 16-row lookup verify flips (row 0 too: the kernels' rounding, no defect; "
+    "docs/probes/probe-lookup-wide-verify-2026-11-14.md), reviewed row operator 2026-11-15";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
 inline constexpr double kReviewedGapUlp = 0.01;
 // The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
@@ -163,9 +166,9 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     // tp_prefill_kv8_test long: TP's plain decode after its int8-KV prefill takes the same flip at output 62
     {"tp_prefill_kv8_long_fa12c9167b2eaa28", 62, 198, 271, 24.80, "2026-11-14", kTpPrefillNarrowReason},
     // mtp_lookup_gpu_test, output 45: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
-    {"mtp_lookup_gpu_int8_t4_comment-openai_54315f9e12fec99e", 0, 248068, 1005, 21.64, "2026-11-15", kNearTieNoiseReason},
+    {"mtp_lookup_gpu_int8_t4_comment-openai_54315f9e12fec99e", 0, 248068, 1005, 21.64, "2026-11-15", kWideLookupTieReason},
     // the same row of t5_test-openai: three-way near tie 248068 / 1005 / 846, flips at row 0 too; bf16 rounding, operator 2026-11-15
-    {"mtp_lookup_gpu_int8_t5_test-openai_ff1eedc7423171f6", 0, 846, 248046, 21.05, "2026-11-15", kNearTieNoiseReason},
+    {"mtp_lookup_gpu_int8_t5_test-openai_ff1eedc7423171f6", 0, 846, 248046, 21.05, "2026-11-15", kWideLookupTieReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
 // tags streams() saw - an entry whose tag ran and never matched is stale.
