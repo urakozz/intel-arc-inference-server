@@ -164,7 +164,8 @@ def run(a):
         A = chat("b3.A", conv, 64)
         recs.append(one(base, *A, a.timeout, a.mode))
         x_msgs = [{"role": "user", "content": first[: len(first) // 2]}]
-        X = chat("b3.X", x_msgs, 400)
+        # X must still hold A's card when A' arrives --hold s later: 400 ids took Ornith 2.8 s (144 t/s)
+        X = chat("b3.X", x_msgs, 1600)
         conv2 = conv + [{"role": "assistant", "content": recs[0].get("text", "")},
                         {"role": "user", "content": "Now summarise that in one sentence."}]
         A2 = chat("b3.A2", conv2, 64)

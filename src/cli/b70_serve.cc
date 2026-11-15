@@ -1131,7 +1131,7 @@ int run(int argc, char** argv) {
   // weight file.
   std::string architecture, name;
   if (pipe.replica() || pipe.tp() || max_num_seqs > 1) {
-    if (pipe.replica()) cli::check_replica_flags(pipe, /*dflash_lookup=*/false);
+    if (pipe.replica()) cli::check_replica_flags(pipe, /*dflash_lookup=*/spec_arg == "dflash-lookup");
     try {
       const std::string snap = loader::resolve_snapshot(path);
       if (std::ifstream cf(snap + "config.json"); cf) {
