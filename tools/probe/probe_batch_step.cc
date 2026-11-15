@@ -281,7 +281,7 @@ struct Probe {
 
   // The arm's table (and the head's), every slot's rows from its depth.
   std::vector<runtime::BatchRow> table(const Arm& a, int only = -1) {
-    std::vector<runtime::RowRun> runs;
+    runtime::RowRuns runs;
     uint32_t m = 0;
     for (size_t i = 0; i < a.slots.size(); ++i) {
       const uint32_t s = a.slots[i];
@@ -294,7 +294,8 @@ struct Probe {
       m += r.rows;
       if (only < 0 || int(s) == only) runs.push_back(r);
     }
-    return runtime::make_rows(lay, runs);
+    const runtime::RowTable t = runtime::make_rows(lay, runs);
+    return {t.begin(), t.end()};
   }
   // The row ids: the slot's pending id, then the continuation of its sequence (arbitrary drafts).
   // A run's first row sits at its slot's depth (deep or shallow); later rows at depth + j (j < 8 < deep - shallow).
