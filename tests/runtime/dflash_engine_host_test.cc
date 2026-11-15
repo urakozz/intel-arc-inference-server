@@ -14,6 +14,7 @@
 //      share of the draft row only.
 #include <cmath>
 #include <cstdio>
+#include <print>
 #include <stdexcept>
 #include <vector>
 
@@ -55,7 +56,7 @@ void tap_sites_case() {
     }
   }
   CHECK(refused == 5);
-  std::printf("tap_sites: Qwen3.8's taps 5/19/33/47/61 at the input folds of 6/20/34/48/62, 5 bad lists refused\n");
+  std::print("tap_sites: Qwen3.8's taps 5/19/33/47/61 at the input folds of 6/20/34/48/62, 5 bad lists refused\n");
 }
 
 void dims_case() {
@@ -66,8 +67,8 @@ void dims_case() {
   CHECK(runtime::TapVerifyDims::gdn_spec_bytes(d) ==
         runtime::MtpDims::sizes(16384, d, 0, runtime::KvCache::Bf16, 8).gdn_spec);
   CHECK(runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault) == size_t(2048) * 5 * 5120 * 2);
-  std::printf("TapVerifyDims: 7 slots %zu B, prefill taps %zu B\n", runtime::TapVerifyDims::gdn_spec_bytes(d),
-              runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
+  std::print("TapVerifyDims: 7 slots {:d} B, prefill taps {:d} B\n", runtime::TapVerifyDims::gdn_spec_bytes(d),
+             runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
 }
 
 void plan_case() {
@@ -94,7 +95,7 @@ void plan_case() {
   const runtime::MemoryPlan decode_only = runtime::plan(d, 32768, false, 17'000'000'000ull,
                                                         runtime::PrefillPath{false}, {}, runtime::KvCache::Bf16, dr);
   CHECK(decode_only.drafter_taps == 0 && without.drafter_taps == runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
-  std::printf("plan with a drafter at 32768: %s\n", runtime::describe(with, 32'530'000'000ull, 1'500'000'000ull).c_str());
+  std::print("plan with a drafter at 32768: {}\n", runtime::describe(with, 32'530'000'000ull, 1'500'000'000ull).c_str());
 }
 
 void head_policy_case() {
@@ -139,9 +140,6 @@ void cost_case() {
   CHECK(std::fabs(c.draft[0] - (MtpCost::kDFlashDrafterInt8 + MtpCost::kDFlashHeadInt8)) < 1e-12);
   const MtpCost b = MtpCost::dflash(false, false);
   CHECK(b.draft[0] > c.draft[0] && b.verify[7] < c.verify[7] + 0.2);
-  // --spec-cost's syntax round-trips, a flat row written out in full
-  const MtpCost p = MtpCost::parse("verify=1,1.2,1.5,1.8,2,2.2,2.4,2.6;draft=0.2,0.2,0.2,0.2,0.2,0.2,0.2", c);
-  CHECK(p.max_k() == 7 && p.cost(7) == 2.6 + 0.2);
   // a draft vocabulary scales the head's share of the draft row only
   const MtpCost v = c.with_draft_vocab(MtpCost::dflash_head_share(true, true), 32768.0 / 248320.0);
   CHECK(v.verify == c.verify && v.draft[0] < c.draft[0] && v.draft[0] > MtpCost::kDFlashDrafterInt8);
@@ -165,8 +163,8 @@ void cost_case() {
     return k.current();
   };
   const uint32_t hi = run(0.95), mid = run(0.5), lo = run(0.1);
-  std::printf("adaptive K over MtpCost::dflash (int8 head, int8 drafter): alpha 0.95 -> K %u, 0.5 -> K %u, "
-              "0.1 -> K %u; draft row %.3f (32k V': %.3f)\n", hi, mid, lo, c.draft[0], v.draft[0]);
+  std::print("adaptive K over MtpCost::dflash (int8 head, int8 drafter): alpha 0.95 -> K {:d}, 0.5 -> K {:d}, "
+             "0.1 -> K {:d}; draft row {:.3f} (32k V': {:.3f})\n", hi, mid, lo, c.draft[0], v.draft[0]);
   // Spec 19 v2's measured rows keep the widest block worthwhile at high acceptance.
   CHECK(hi == 6 || hi == 7);
   CHECK(c.verify[7] == 1.246703 && c.verify[4] == 1.170806);
@@ -183,6 +181,6 @@ int main() {
   cost_case();
   head_policy_case();
   engine_flags_case();
-  std::printf("dflash_engine_host_test OK\n");
+  std::print("dflash_engine_host_test OK\n");
   return 0;
 }

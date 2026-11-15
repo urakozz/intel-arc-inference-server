@@ -39,16 +39,6 @@ bool starts_at(const std::string& s, size_t at, const char* tag) {
   return s.compare(at, std::char_traits<char>::length(tag), tag) == 0;
 }
 
-// Length of the longest suffix of s that is a proper prefix of tag: text that may
-// still become the tag once more pieces arrive.
-size_t tag_prefix_suffix(const std::string& s, const std::string& tag) {
-  const size_t max = std::min(s.size(), tag.size() - 1);
-  for (size_t n = max; n > 0; --n) {
-    if (s.compare(s.size() - n, n, tag, 0, n) == 0) return n;
-  }
-  return 0;
-}
-
 uint64_t splitmix64(uint64_t x) {
   x += 0x9E3779B97F4A7C15ull;
   x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
@@ -412,8 +402,15 @@ std::vector<Delta> OutputStream::finish() {
   return out;
 }
 
-ParsedOutput parse_output(const std::string& text, bool thinking, const json& tools) {
-  OutputStream stream(thinking, tools);
+size_t tag_prefix_suffix(const std::string& s, const std::string& tag) {
+  const size_t max = std::min(s.size(), tag.size() - 1);
+  for (size_t n = max; n > 0; --n) {
+    if (s.compare(s.size() - n, n, tag, 0, n) == 0) return n;
+  }
+  return 0;
+}
+
+ParsedOutput fold_output(OutputParser& stream, const std::string& text) {
   std::vector<Delta> deltas = stream.push(text);
   std::vector<Delta> tail = stream.finish();
   deltas.insert(deltas.end(), std::make_move_iterator(tail.begin()),
@@ -425,6 +422,11 @@ ParsedOutput parse_output(const std::string& text, bool thinking, const json& to
     else out.tool_calls.push_back(std::move(d.call));
   }
   return out;
+}
+
+ParsedOutput parse_output(const std::string& text, bool thinking, const json& tools) {
+  OutputStream stream(thinking, tools);
+  return fold_output(stream, text);
 }
 
 }  // namespace server

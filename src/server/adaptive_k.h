@@ -39,9 +39,6 @@ struct MtpCost {
   // head_share * fraction), `fraction` = |V'| / 248320 (the rows a draft's head reads);
   // verify is unchanged (it always reads the full head). fraction 1 returns the table.
   MtpCost with_draft_vocab(double head_share, double fraction) const;
-  // "verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55"; either part may be left out (it then
-  // keeps `base`'s). Throws std::invalid_argument on anything else.
-  static MtpCost parse(const std::string& text, const MtpCost& base);
 
   // Spec 19e: the same verify rows with a free draft - prompt lookup proposes on the host in
   // microseconds (prompt_lookup.h), ~0 of a 32 ms plain step. draft[k - 1] = 0 for every K

@@ -36,6 +36,7 @@
 
 #include "cli/dflash_args.h"   // spec 19c: --spec dflash
 #include "cli/hardware_gate.h"
+#include "cli/stdout_to_stderr.h"
 #include "cli/kolibri_decode.h"
 #include "cli/bolt_decode.h"   // spec 25c: Nemotron 3.5 Bolt (nemotron_h_omni over nemotron_h_puzzle)
 #include "cli/qwen4exp_decode.h"
@@ -145,33 +146,7 @@ void usage() {
       "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8\n");
 }
 
-// The loader reports itself with std::printf - to stdout, which is this CLI's
-// machine-readable channel. Rather than change plan 2's file (the report is
-// wanted, just not there), point fd 1 at fd 2 for the duration of the load so
-// the banner joins the other diagnostics on stderr.
-class StdoutToStderr {
- public:
-  StdoutToStderr() {
-    std::fflush(stdout);
-    saved_ = ::dup(1);
-    if (saved_ >= 0 && ::dup2(2, 1) < 0) {
-      ::close(saved_);
-      saved_ = -1;
-    }
-  }
-  ~StdoutToStderr() {
-    std::fflush(stdout);
-    if (saved_ >= 0) {
-      ::dup2(saved_, 1);
-      ::close(saved_);
-    }
-  }
-  StdoutToStderr(const StdoutToStderr&) = delete;
-  StdoutToStderr& operator=(const StdoutToStderr&) = delete;
-
- private:
-  int saved_ = -1;
-};
+using cli::StdoutToStderr;
 
 uint32_t parse_u32(const char* what, const std::string& s) {
   if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos || s.size() > 10)

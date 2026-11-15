@@ -147,8 +147,6 @@ class Server {
   void handle(const httplib::Request& request, httplib::Response& response, bool chat);
   void log_request(bool chat, const std::string& body, double t_start, const Outcome& outcome);
   void finish_request();   // the request-end snapshot, after the last frame
-  void lookup_begin(const std::vector<uint32_t>& prompt_ids);   // spec 19e
-  void lookup_end(const std::vector<uint32_t>& out_ids);
 
   Deps deps_;
   Options opts_;

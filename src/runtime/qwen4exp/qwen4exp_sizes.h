@@ -72,7 +72,6 @@ const char* q4_attn_name(Q4Attn a);
 // The QSA selection row (kernels::qwen4exp: kListMax / kListRow / kCountWord), the route row, the slices.
 inline constexpr uint32_t kListMax = 2052, kListRow = 2064, kCountWord = 2052;
 inline constexpr uint32_t kRouteWords = 32, kAttnTgt = 32, kAttnPart = 258, kPleConsts = 35;
-inline constexpr uint32_t kMaxS = 4;   // the widest split-K a mixer GEMV writes (out / o_proj S 4)
 // One device's decode scratch, sized for kM rows and the whole descriptor (every device holds the whole set:
 // the lists are per device and scratch is per list; the per-layer rows - routes, selections, diagnostics - are
 // indexed by absolute layer / QSA index):
@@ -112,7 +111,6 @@ ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Att
 size_t partials_floats(const model::Qwen4ExpDesc& d, uint32_t rows = kM);
 inline size_t route_at(uint32_t layer) { return size_t(layer) * kM * kRouteWords * 4; }
 inline size_t list_at(uint32_t qsa_index) { return size_t(qsa_index) * kM * kListRow * 4; }
-inline size_t diag_at(uint32_t qsa_index) { return size_t(qsa_index) * kM * 2 * 4; }
 // The residual tap (debug): bf16 [layers][M][10240] on every device (its layers' rows written).
 inline size_t tap_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.layers) * kM * d.hc_n() * 2; }
 // The injected selection (spec 21 F3's debug input): host USM [qsa layers][M][kListRow] u32 per device.

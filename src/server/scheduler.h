@@ -268,8 +268,6 @@ class Scheduler {
   bool overlapped_prefills(bool after_step);   // plan 13b: join the finished chunks, start the next ones
   bool card_busy(uint32_t card) const;         // replica x slots: a chunk still runs on the card
   std::vector<bool> chunk_on_card() const;     // replica x slots: a chunk not yet joined on the card
-  void lookup_begin(uint32_t slot, const std::vector<uint32_t>& prompt);   // plan 13b
-  void lookup_end(uint32_t slot, const std::vector<uint32_t>& out);
   bool decode_round();
   bool spec_round();   // spec 19d
   void finish(const std::shared_ptr<Job>& job, Finish::Reason reason, std::string error = {});

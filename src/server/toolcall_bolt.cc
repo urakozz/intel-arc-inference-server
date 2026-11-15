@@ -9,15 +9,6 @@ namespace {
 
 constexpr const char* kThinkEnd = "</think>";
 
-// Length of the longest suffix of s that is a proper prefix of tag (text that may still become the tag).
-size_t tag_prefix_suffix(const std::string& s, const std::string& tag) {
-  const size_t max = std::min(s.size(), tag.size() - 1);
-  for (size_t n = max; n > 0; --n) {
-    if (s.compare(s.size() - n, n, tag, 0, n) == 0) return n;
-  }
-  return 0;
-}
-
 void append(std::vector<Delta>& out, std::vector<Delta>&& more) {
   out.insert(out.end(), std::make_move_iterator(more.begin()), std::make_move_iterator(more.end()));
 }
@@ -118,16 +109,7 @@ std::vector<Delta> BoltOutputStream::finish() {
 ParsedOutput parse_bolt_output(const std::string& text, bool thinking, bool force_nonempty_content,
                                const nlohmann::json& tools) {
   BoltOutputStream stream(thinking, force_nonempty_content, tools);
-  std::vector<Delta> deltas = stream.push(text);
-  std::vector<Delta> tail = stream.finish();
-  deltas.insert(deltas.end(), std::make_move_iterator(tail.begin()), std::make_move_iterator(tail.end()));
-  ParsedOutput out;
-  for (Delta& d : deltas) {
-    if (d.kind == Delta::Reasoning) out.reasoning += d.text;
-    else if (d.kind == Delta::Content) out.content += d.text;
-    else out.tool_calls.push_back(std::move(d.call));
-  }
-  return out;
+  return fold_output(stream, text);
 }
 
 }  // namespace server

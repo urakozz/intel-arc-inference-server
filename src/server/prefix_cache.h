@@ -156,8 +156,6 @@ class PrefixSession {
   void fail() { valid_ = false; }        // the request failed after begin()
 
   PrefixCache* cache() { return cache_.get(); }
-  const std::vector<uint32_t>& resident() const { return resident_; }
-  bool resident_valid() const { return valid_; }
 
  private:
   void store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end);

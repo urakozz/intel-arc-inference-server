@@ -84,17 +84,13 @@
 #endif
 // Spec 14: the MLP intermediate is a per-model define. Unset (every Qwen3.8
 // binary's command line, unchanged) it is 17408, and the two #defines below are
-// token for token what they always were; Agnes's variant passes
-// -DINTERMEDIATE=19456 (gate||up 2 x 19456 = 38912 wide; 5 work-groups of 4096,
-// the last does 3072). Any other value is refused rather than guessed.
+// token for token what they always were. Any other value is refused rather than
+// guessed.
 #if !defined(INTERMEDIATE) || INTERMEDIATE == 17408
 #define SILU_N 17408
 #define SILU_FUSED_N 34816
-#elif INTERMEDIATE == 19456
-#define SILU_N 19456
-#define SILU_FUSED_N 38912
 #else
-#error "INTERMEDIATE: only 17408 (Qwen3.8) and 19456 (Agnes 3.0 Flash) are built"
+#error "INTERMEDIATE: only 17408 (Qwen3.8) is built"
 #endif
 #define SILU_CHUNK 4096   /* 5 work-groups cover 17408; the last does 1024 */
 

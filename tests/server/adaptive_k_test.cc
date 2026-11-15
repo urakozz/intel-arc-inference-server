@@ -3,6 +3,7 @@
 // 0 / 1 on low, the K = 0 probe, hysteresis against flapping, determinism; and the cost
 // table under a draft vocabulary (spec 8 §11, MtpCost::with_draft_vocab).
 #include <cstdio>
+#include <print>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -95,7 +96,7 @@ void test_model() {
   CHECK_EQ(i8.best(0.60), 2U);
   CHECK_EQ(i8.best(0.62), 3U);
   CHECK_EQ(i8.best(0.97), 3U);
-  std::printf("model: E(K), rates and the K boundaries per table\n");
+  std::print("model: E(K), rates and the K boundaries per table\n");
 }
 
 void test_dflash_measured_cost() {
@@ -119,19 +120,18 @@ void test_dflash_measured_cost() {
   CHECK(p.best(0.5) == 3);
   CHECK(p.best(0.8) == 7);
   CHECK(p.best(0.95) == 7);
-  std::printf("DFlash measured costs: K 3 / 7 / 7 at alpha 0.5 / 0.8 / 0.95\n");
+  std::print("DFlash measured costs: K 3 / 7 / 7 at alpha 0.5 / 0.8 / 0.95\n");
 }
 
-void test_cost_parse() {
-  const MtpCost base = MtpCost::bf16_head();
-  const MtpCost c = MtpCost::parse("verify=1,1.2,1.5,1.8;draft=0.1,0.2,0.3", base);
-  CHECK_EQ(c.verify.size(), size_t(4));
-  CHECK_NEAR(c.verify[3], 1.8, 1e-12);
-  CHECK_NEAR(c.draft[1], 0.2, 1e-12);
+void test_cost_table() {
+  MtpCost c;
+  c.verify = {1, 1.2, 1.5, 1.8};
+  c.draft = {0.1, 0.2, 0.3};
   CHECK_NEAR(c.cost(0), 1.0, 1e-12);
   CHECK_NEAR(c.cost(2), 1.5 + 0.2, 1e-12);
   CHECK_EQ(c.max_k(), 3U);
-  const MtpCost d = MtpCost::parse("draft=0.12,0.25", base);   // verify kept from base
+  MtpCost d = MtpCost::bf16_head();
+  d.draft = {0.12, 0.25};   // a shorter draft row bounds K
   CHECK_NEAR(d.verify[1], 1.04, 1e-12);
   CHECK_EQ(d.max_k(), 2U);
   AdaptiveKOptions o;
@@ -139,19 +139,6 @@ void test_cost_parse() {
   CHECK_EQ(AdaptiveK(o).max_k(), 2U);   // bounded by the table
   o.max_k = 1;
   CHECK_EQ(AdaptiveK(o).max_k(), 1U);
-  for (const char* bad : {"", "verify=", "foo=1", "verify=1,x", "draft=0.1,-0.2", "verify=1;",
-                          "draft=0.1;draft=0.2", "verify=0,1.2"}) {
-    bool threw = false;
-    try {
-      MtpCost::parse(bad, base);
-    } catch (const std::invalid_argument&) {
-      threw = true;
-    }
-    if (!threw) {
-      std::fprintf(stderr, "MtpCost::parse accepted '%s'\n", bad);
-      std::exit(1);
-    }
-  }
   bool threw = false;
   try {
     AdaptiveK p{AdaptiveKOptions{}};
@@ -160,7 +147,7 @@ void test_cost_parse() {
     threw = true;
   }
   CHECK(threw);
-  std::printf("cost table: parse, partial override, max K bounded by the table\n");
+  std::print("cost table: parse, partial override, max K bounded by the table\n");
 }
 
 void test_up_on_high_acceptance() {
@@ -175,7 +162,7 @@ void test_up_on_high_acceptance() {
   size_t at3 = 0;
   for (uint32_t k : kq) at3 += k == 3;
   CHECK(at3 >= 295);
-  std::printf("high acceptance: K = 3 throughout (alpha 0.97: %zu/300 at K = 3)\n", at3);
+  std::print("high acceptance: K = 3 throughout (alpha 0.97: {:d}/300 at K = 3)\n", at3);
 }
 
 void test_down_on_low_acceptance() {
@@ -207,8 +194,8 @@ void test_down_on_low_acceptance() {
     for (size_t i = 20; i < t.ks.size(); ++i) CHECK(t.ks[i] <= 2);
     CHECK(t.efficiency() >= 0.95 * q.rate(0.44, 1));
   }
-  std::printf("low acceptance: K = 0 by iteration %zu with a K = 1 probe every 5th; "
-              "alpha 0.44: K in {0, 1, 2}, within 5 %% of the best rate\n", first0);
+  std::print("low acceptance: K = 0 by iteration {:d} with a K = 1 probe every 5th; "
+             "alpha 0.44: K in {{0, 1, 2}}, within 5 % of the best rate\n", first0);
 }
 
 void test_recovers() {
@@ -225,7 +212,7 @@ void test_recovers() {
   }
   CHECK(back < 40);
   for (size_t i = back; i < ks.size(); ++i) CHECK_EQ(ks[i], 3U);
-  std::printf("recovery: from K = 0 back to K = 3 in %zu iterations once drafts are kept\n", back);
+  std::print("recovery: from K = 0 back to K = 3 in {:d} iterations once drafts are kept\n", back);
 }
 
 void test_hysteresis() {
@@ -245,8 +232,8 @@ void test_hysteresis() {
     CHECK(switches(a.policy, 2) <= 40);   // at most one switch per 10 iterations
     CHECK(a.efficiency() >= 0.97 * calm.rate(0.689, calm.best(0.689)));
   }
-  std::printf("hysteresis at alpha 0.689: %zu switches in 5 x 400 iterations "
-              "(no hysteresis, short window: %zu)\n", calm_total, jumpy_total);
+  std::print("hysteresis at alpha 0.689: {:d} switches in 5 x 400 iterations "
+             "(no hysteresis, short window: {:d})\n", calm_total, jumpy_total);
   CHECK(calm_total * 3 <= jumpy_total);
 }
 
@@ -254,7 +241,7 @@ void test_deterministic() {
   AdaptiveK a{AdaptiveKOptions{}}, b{AdaptiveKOptions{}};
   Geometric g1(9, 0.7), g2(9, 0.7);
   CHECK(drive(a, 500, g1) == drive(b, 500, g2));
-  std::printf("determinism: the same history gives the same K sequence\n");
+  std::print("determinism: the same history gives the same K sequence\n");
 }
 
 // Spec 8 §11: the cost table under a draft vocabulary - each draft's lm_head share scales
@@ -275,17 +262,12 @@ void test_draft_vocab_cost() {
       CHECK(c.draft[k] < i8.draft[k] && b.draft[k] < bf.draft[k]);
     }
     CHECK(c.verify == i8.verify && b.verify == bf.verify);   // verify reads the full head
-    std::printf("draft vocab %6u: int8 drafts %.4f %.4f %.4f, bf16 drafts %.4f %.4f %.4f\n",
-                sizes[s], c.draft[0], c.draft[1], c.draft[2], b.draft[0], b.draft[1], b.draft[2]);
+    std::print("draft vocab {:6d}: int8 drafts {:.4f} {:.4f} {:.4f}, bf16 drafts {:.4f} {:.4f} {:.4f}\n",
+               sizes[s], c.draft[0], c.draft[1], c.draft[2], b.draft[0], b.draft[1], b.draft[2]);
   }
   // Off (fraction 1) is the table itself; a share of 0 changes nothing either.
   CHECK(i8.with_draft_vocab(h8, 1.0).draft == i8.draft);
   CHECK(bf.with_draft_vocab(0.0, 0.5).draft == bf.draft);
-  // b70-serve's order: the scaled table is the base --mtp-cost parses over, so an explicit
-  // draft= wins and a verify= alone keeps the scaled drafts.
-  const MtpCost dv = i8.with_draft_vocab(h8, 131072 / 248320.0);
-  CHECK(MtpCost::parse("draft=0.2,0.4,0.6", dv).draft == (std::vector<double>{0.2, 0.4, 0.6}));
-  CHECK(MtpCost::parse("verify=1,1.2,1.5,1.8", dv).draft == dv.draft);
   for (double bad_f : {0.0, -0.1, 1.5}) {
     bool threw = false;
     try {
@@ -302,13 +284,13 @@ void test_draft_vocab_cost() {
 int main() {
   test_model();
   test_dflash_measured_cost();
-  test_cost_parse();
+  test_cost_table();
   test_draft_vocab_cost();
   test_up_on_high_acceptance();
   test_down_on_low_acceptance();
   test_recovers();
   test_hysteresis();
   test_deterministic();
-  std::printf("adaptive_k_test: all cases passed\n");
+  std::print("adaptive_k_test: all cases passed\n");
   return 0;
 }

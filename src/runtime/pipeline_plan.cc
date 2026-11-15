@@ -163,11 +163,6 @@ size_t PpPlan::max_total() const {
   return m;
 }
 
-PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
-               KvCache kv, const PrefillPath& pf) {
-  return pp_plan(d, split, max_len, w, kv, pf, PpExtras{});
-}
-
 size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t slots) {
   if (slots < 2) throw std::invalid_argument("runtime::pp_gdn_spec_bytes: a verify list needs >= 2 slots");
   const size_t layer = size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
@@ -264,16 +259,17 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     }
     // Spec 16d (PpExtras, pipeline_plan.h).
     const bool last = st[i].has_head(d);
+    const size_t draft_vocab = x.draft_vocab == 0 ? 0
+                               : w.draft_vocab != 0
+                                   ? w.draft_vocab
+                                   : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
     if (x.mtp) {
       if (last) {
         dp.embed_replica = w.embed;
         dp.mtp_weights = w.mtp;
         dp.model += dp.embed_replica + dp.mtp_weights;
         dp.mtp_buffers = MtpDims::sizes(max_len, d, x.draft_vocab, kv).total();
-        if (x.draft_vocab != 0)
-          dp.draft_vocab = w.draft_vocab != 0
-                               ? w.draft_vocab
-                               : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
+        dp.draft_vocab = draft_vocab;
         if (pf.prefill) {
           dp.mtp_prefill = pp_mtp_prefill_bytes(d, pf.chunk_cap);   // step_mtp_kv's bf16 linears: the slab above
         }
@@ -287,10 +283,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
         dp.embed_replica = w.embed;
         dp.model += dp.embed_replica;
         dp.drafter = x.drafter.bytes(max_len);
-        if (x.draft_vocab != 0)
-          dp.draft_vocab = w.draft_vocab != 0
-                               ? w.draft_vocab
-                               : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
+        dp.draft_vocab = draft_vocab;
         if (pf.prefill) {
           dp.drafter_taps = kPpPfDepth * TapVerifyDims::prefill_taps_bytes(d, x.drafter.n_taps, pf.chunk_cap);
           dp.prefill_scratch += dp.drafter_taps;
@@ -366,11 +359,6 @@ PpBalance pp_balance(const std::vector<size_t>& layer_bytes, size_t dev0_fixed, 
 }
 
 uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
-                       const PrefillPath& pf) {
-  return pp_auto_split(d, w, max_len, kv, pf, PpExtras{});
-}
-
-uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t max_len, KvCache kv,
                        const PrefillPath& pf, const PpExtras& x) {
   if (d.layers < 2)
     throw std::invalid_argument(d.name + " has fewer than two layers: nothing to split");
@@ -378,12 +366,6 @@ uint32_t pp_auto_split(const model::ModelDesc& d, const PpWeights& w, uint32_t m
   if (s == 0)
     throw std::invalid_argument(d.name + ": no split leaves each device a GDN and an FA layer");
   return s;
-}
-
-uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
-                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
-                              uint32_t cap, KvCache kv, const PrefillPath& pf) {
-  return pp_max_len_that_fits(d, split, w, device_bytes, reserve, cap, kv, pf, PpExtras{});
 }
 
 uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const PpWeights& w,
@@ -413,12 +395,6 @@ uint32_t pp_max_len_that_fits(const model::ModelDesc& d, uint32_t split, const P
       hi = mid - 1;
   }
   return lo * kMaxLenQuantum;
-}
-
-PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
-                               const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
-                               uint32_t cap, KvCache kv, const PrefillPath& pf) {
-  return pp_auto_split_and_len(d, w, device_bytes, reserve, cap, kv, pf, PpExtras{});
 }
 
 PpChoice pp_auto_split_and_len(const model::ModelDesc& d, const PpWeights& w,
