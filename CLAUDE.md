@@ -3,6 +3,13 @@
 An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and built and run on the box.
 `docs/open-work.md` is the one list of what is not finished.
 
+## Specs and plans
+
+- Every new design gets the next spec number: `docs/superpowers/specs/<date>-spec<N>-<name>-design.md` (its review
+  `-review.md`). A new version of an existing design keeps its number: `spec<N>v2`, `spec<N>v3`.
+- Its plans carry the number plus a letter in order: `docs/superpowers/plans/<date>-spec<N><letter>-<name>.md`.
+- The next free number is the highest under `docs/superpowers/specs/` plus one (`ls docs/superpowers/specs`).
+
 ## Code changes
 
 - Every changed line should trace to the task. Match the surrounding code's style, naming and comment density.
