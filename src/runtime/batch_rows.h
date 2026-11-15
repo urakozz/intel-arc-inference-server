@@ -19,8 +19,11 @@
 //            pool's slot i - 1); later rows of the slot carry the state in registers
 //   dst      the GDN state index the state after THIS row is written to
 //   slot     the slot (its conv ring; rows of one slot are contiguous - a run)
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <inplace_vector>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,6 +45,8 @@ struct BatchRowTable {
   BatchRow row[DecodeScratchDims::kM];
 };
 static_assert(sizeof(BatchRowTable) == 256, "the table is 8 rows of 32 B");
+// A step's rows on the host (make_rows): at most the table's.
+using RowTable = std::inplace_vector<BatchRow, DecodeScratchDims::kM>;
 
 // One slot of a layout: its positions and whether it carries the MTP head's state (spec 13 §9.2: the engine's MTP
 // setting holds for every slot of a served layout; the planner's arithmetic below takes it per slot so the
@@ -76,20 +81,20 @@ struct BatchLayout {
 // the state after row j written to dst[j].
 struct RowRun {
   uint32_t slot = 0, pos = 0, rows = 1, src = 0;
-  std::vector<uint32_t> dst;
+  std::inplace_vector<uint32_t, DecodeScratchDims::kM> dst;
 };
+using RowRuns = std::inplace_vector<RowRun, DecodeScratchDims::kM>;   // a step's runs: one row each at least
 
 // The rules a table keeps - the kernels assume them and check none:
 //   1..kM rows; a slot < the layout's, a row's position < its slot's max_len, kv_base the slot's;
 //   a slot's rows contiguous (one run per slot), at consecutive positions, with one src;
 //   every dst distinct, and no dst another run's src (every work-group walks the runs in order, so a later run would
 //   read a state an earlier run of the same step had overwritten; its OWN src it may write - the tile is read first).
-inline void check_rows(const std::vector<BatchRow>& rows, const BatchLayout& lay) {
+inline void check_rows(std::span<const BatchRow> rows, const BatchLayout& lay) {
   auto fail = [](const std::string& w) { throw std::invalid_argument("runtime::check_rows: " + w); };
   if (rows.empty() || rows.size() > DecodeScratchDims::kM)
     fail(std::to_string(rows.size()) + " rows; a step carries 1.." + std::to_string(DecodeScratchDims::kM));
-  std::vector<bool> seen(lay.slots.size(), false);
-  std::vector<uint32_t> srcs;
+  std::inplace_vector<uint32_t, DecodeScratchDims::kM> seen, srcs;   // per run: its slot, its src
   for (size_t m = 0; m < rows.size(); ++m) {
     const BatchRow& r = rows[m];
     if (r.slot >= lay.slots.size()) fail("row " + std::to_string(m) + " names slot " + std::to_string(r.slot));
@@ -99,8 +104,9 @@ inline void check_rows(const std::vector<BatchRow>& rows, const BatchLayout& lay
     if (r.kv_base != lay.kv_base(r.slot)) fail("row " + std::to_string(m) + "'s kv_base is not its slot's");
     const bool first = m == 0 || rows[m - 1].slot != r.slot;
     if (first) {
-      if (seen[r.slot]) fail("slot " + std::to_string(r.slot) + "'s rows are split (a slot is one run)");
-      seen[r.slot] = true;
+      if (std::ranges::contains(seen, r.slot))
+        fail("slot " + std::to_string(r.slot) + "'s rows are split (a slot is one run)");
+      seen.push_back(r.slot);
       srcs.push_back(r.src);
     } else {
       if (r.pos != rows[m - 1].pos + 1) fail("row " + std::to_string(m) + " does not follow its run's position");
@@ -120,13 +126,16 @@ inline void check_rows(const std::vector<BatchRow>& rows, const BatchLayout& lay
 }
 
 // The runs as a table, checked.
-inline std::vector<BatchRow> make_rows(const BatchLayout& lay, const std::vector<RowRun>& runs) {
-  std::vector<BatchRow> t;
+inline RowTable make_rows(const BatchLayout& lay, const RowRuns& runs) {
+  RowTable t;
   for (const RowRun& run : runs) {
     if (run.rows == 0 || run.dst.size() != run.rows)
       throw std::invalid_argument("runtime::make_rows: slot " + std::to_string(run.slot) + "'s run has " +
                                   std::to_string(run.rows) + " rows and " + std::to_string(run.dst.size()) + " dsts");
     for (uint32_t j = 0; j < run.rows; ++j) {
+      if (t.size() == t.capacity())
+        throw std::invalid_argument("runtime::make_rows: more than " + std::to_string(t.capacity()) +
+                                    " rows; a step carries 1.." + std::to_string(t.capacity()));
       BatchRow r;
       r.pos = run.pos + j;
       r.kv_base = run.slot < lay.slots.size() ? lay.kv_base(run.slot) : 0;
@@ -141,7 +150,7 @@ inline std::vector<BatchRow> make_rows(const BatchLayout& lay, const std::vector
 }
 
 // The table's shape: the run lengths in row order (what a captured list's per-run copies depend on).
-inline std::vector<uint32_t> run_lengths(const std::vector<BatchRow>& rows) {
+inline std::vector<uint32_t> run_lengths(std::span<const BatchRow> rows) {
   std::vector<uint32_t> n;
   for (size_t m = 0; m < rows.size(); ++m)
     if (m == 0 || rows[m - 1].slot != rows[m].slot)
