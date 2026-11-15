@@ -195,6 +195,29 @@ class HfTierTest(unittest.TestCase):
         self.assertEqual(read(self.snap(self.hot, "models--o--B", "w.bin")), b"B" * 1000)
         self.assertIn("archive", self.run_tool("status"))
 
+    def escaping_links(self, top):
+        """Links under top whose target resolves outside top (a copy must not depend on another folder)."""
+        top = os.path.realpath(top)
+        out = []
+        for root, dirs, files in os.walk(top):
+            for f in files + dirs:
+                p = os.path.join(root, f)
+                if os.path.islink(p) and not (os.path.realpath(p) + os.sep).startswith(top + os.sep):
+                    out.append(p)
+        return out
+
+    def test_shared_store_model_copies_are_self_contained(self):
+        # A's blob is a link into the hub-level shared store: sync and archive copy it as a real file
+        self.run_tool("sync", "o/A")
+        c = os.path.join(self.cold, "models--o--A")
+        self.assertFalse(os.path.islink(os.path.join(c, "blobs", sha(self.big))))
+        self.assertEqual(self.escaping_links(c), [])
+        self.run_tool("archive", "o/A")
+        a = os.path.join(self.arch, "models--o--A")
+        self.assertFalse(os.path.islink(os.path.join(a, "blobs", sha(self.big))))
+        self.assertEqual(self.escaping_links(a), [])
+        self.assertEqual(read(self.snap(a, "", "model.safetensors")), self.big)
+
     def test_corrupt_blob_refused(self):
         b = os.path.join(self.hot, "models--o--B", "blobs", sha(b"B" * 1000))
         write(b, b"X" * 1000)  # same size, wrong content: its name no longer matches
