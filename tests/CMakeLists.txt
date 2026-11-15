@@ -3494,7 +3494,7 @@ set_tests_properties(probe_offload_kernel_drift_test PROPERTIES LABELS host)
 # (spec 25e) and --spec dflash Qwen3.8's (spec 19c). (Written for spec 23e; Muse-Glimmer-30B was dropped 2026-10-27.)
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_spec_dflash_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --spec dflash
-    EXPECT "built for Qwen3.8 beside its drafter")   # spec 19c: dflash is Qwen3.8's
+    EXPECT "--spec dflash on Kolibri-1 needs --draft-model")   # Kolibri DSpark: its drafter by name
 endif()
 
 # ==== Spec 19b: the DFlash drafter (label dflash) ==== (begin) ====
@@ -3784,7 +3784,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_lookup_no_draft_model ${B70_NO_MODEL} --spec dflash-lookup
     EXPECT "--draft-model z-lab/Qwen3.8-27B-DFlash2")
   b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
-    --spec dflash-lookup EXPECT "built for Qwen3.8 beside its drafter")
+    --spec dflash-lookup EXPECT "its verify lists serve the DSpark drafter")
   b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
     EXPECT "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup")
   set_tests_properties(cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
