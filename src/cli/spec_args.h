@@ -103,8 +103,8 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
     if (v == "lookup")
       throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which " + model +
                                "'s engine does not capture (no MTP head): drop --spec lookup");
-    throw std::runtime_error("--spec " + v + " is built for Qwen3.8 beside its drafter (spec 19c): no DFlash drafter "
-                             "exists for " + model + " (spec 19 §1)");
+    throw std::runtime_error("b70-decode runs " + model + " plainly: drop --spec " + v +
+                             " (b70-serve serves --spec dflash for Kolibri-1 with its DSpark drafter)");
   }
   if (dflash) {
     if (family != SpecFamily::Qwen)

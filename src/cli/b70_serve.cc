@@ -1287,6 +1287,13 @@ int run(int argc, char** argv) {
   // dispatch, so another model under --parallel tp is refused by name.
   cli::check_tp(pipe, {false, false, is_q4 || is_kol,   // spec 19 v3c: dflash and dflash-lookup are served
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
+  // Kolibri DSpark: Kolibri-1's drafter by name, and no draft vocabulary (DSpark reads the whole lm_head).
+  if (is_kol && dflash.on && !dflash.have_model)
+    throw std::runtime_error("--spec dflash on Kolibri-1 needs --draft-model: --draft-model intuit/Kolibri-1-dspark (the "
+                             "DSpark drafter, bf16, from the HF cache)");
+  if (is_kol && dflash.on && (draft_vocab != 0 || !draft_vocab_ids.empty()))
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a DFlash drafter's vocabulary; "
+                             "Kolibri-1's DSpark drafter reads the whole lm_head");
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true);
@@ -1332,8 +1339,9 @@ int run(int argc, char** argv) {
   if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && !mtp_on && !dflash.on)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --spec mtp (the default where the model has "
                              "an MTP head) or --spec dflash");
-  // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table).
-  if (dflash.on) {
+  // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table). Kolibri DSpark sets
+  // its own (serve_kolibri).
+  if (dflash.on && !is_kol) {
     cli::dflash::resolve_format(dflash);
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;

@@ -179,15 +179,14 @@ class KolibriEngine {
   // verify(nullptr, 0) + commit(0, verify_ids()[0]) is one plain token; with the verify lists on, ingest() and generate()
   // run exactly that (a drafter's ring stays filled). Positions: verify(k) needs pos + k + 1 <= max_len (max_verify_k()).
   // attach_drafter: the drafter (runtime::dflash::DSparkDrafter behind TapSink) on the LAST device, borrowed - it must
-  // outlive the engine; after enable_spec, before the first verify; its max_k() <= 7, its tap layers < the target's.
+  // outlive the engine; after enable_spec, before the first verify; its max_k() <= 7, its tap layers < the target's. It
+  // captures every verify list (M = 1..8) with the taps, so a missing binary fails there, at startup.
   // reset() resets it; state_bytes / save_state / load_state carry its ring after the target's state (19d's rule);
   // drafter_key() names it; prefill() stages each chunk's tap rows inside its window (drafter_prefill_r0) and projects them
   // 8 a replay.
   void enable_spec();
   bool spec_on() const { return !vb_.empty(); }
   void attach_drafter(TapSink& d);
-  bool has_drafter() const { return drafter_ != nullptr; }
-  TapSink* drafter() const { return drafter_; }
   uint64_t drafter_key() const { return drafter_ ? drafter_->key() : 0; }
   uint32_t max_verify_k() const;
   void verify(const uint32_t* drafts, uint32_t k);
@@ -218,6 +217,7 @@ class KolibriEngine {
   l0::Mem& snap_mem(uint32_t dev, SnapTensor t) const;   // spec 20e: a snapshot run's allocation
   void settle_all(const char* what);
   void run_verify(uint32_t M);                           // Kolibri DSpark: one verify replay on every device
+  void capture_verify(uint32_t M);                       // Kolibri DSpark: device lists at M not captured yet
   void drafter_project_staged(uint32_t pos, uint32_t n);   // Kolibri DSpark: the prefill tail's staged rows, 8 a replay
 
   loader::KolLoadedModel model_;

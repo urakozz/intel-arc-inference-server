@@ -247,7 +247,7 @@ inline std::string dspark_topk_variant() { return topk_variant(kDSpark.vocab, kD
 inline std::vector<std::string> dspark_draft_variants(bool int8_head) {
   const Shape& s = kDSpark;
   std::vector<std::string> v = {prep_variant(s), dspark_attn_variant(), dspark_topk_variant(), select_variant(true, s)};
-  for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
+  for (const auto& [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
                       {s.I, s.H},                                                            // down

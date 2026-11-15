@@ -3754,7 +3754,7 @@ b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXP
 b70_cli_reject(cli_reject_dflash_spec_max ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --spec-max 9
   EXPECT "expects 1..7")
 b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
-  --spec dflash EXPECT "no DFlash drafter exists for Kolibri-1")
+  --spec dflash EXPECT "b70-decode runs Kolibri-1 plainly")
 # spec 19d: b70-decode stays one card (b70-serve --parallel pp serves the drafter).
 b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --parallel pp
   --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "b70-decode --spec dflash runs on one card")
@@ -4625,12 +4625,15 @@ endif()
 # read tests/model/dspark: config.json only, so a drafter refusal is the safetensors' absence or the config's own).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_kds_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
-  b70_serve_reject(cli_reject_serve_kolibri_dspark_no_model ${_kds_cfg} --spec dflash EXPECT "needs --draft-model")
+  b70_serve_reject(cli_reject_serve_kolibri_dspark_no_model ${_kds_cfg} --spec dflash EXPECT "intuit/Kolibri-1-dspark")
+  b70_serve_reject(cli_reject_serve_kolibri_dspark_draft_vocab ${_kds_cfg} --spec dflash --draft-vocab 32k
+    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "reads the whole lm_head")
   b70_serve_reject(cli_reject_serve_kolibri_dspark_spec_max ${_kds_cfg} --spec dflash --spec-max 8
     --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "expects 1..7")
   b70_serve_reject(cli_reject_serve_kolibri_dflash_lookup ${_kds_cfg} --spec dflash-lookup
     --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "is not built for Kolibri-1")
-  set_tests_properties(cli_reject_serve_kolibri_dspark_no_model cli_reject_serve_kolibri_dspark_spec_max
+  set_tests_properties(cli_reject_serve_kolibri_dspark_no_model cli_reject_serve_kolibri_dspark_draft_vocab
+    cli_reject_serve_kolibri_dspark_spec_max
     cli_reject_serve_kolibri_dflash_lookup PROPERTIES LABELS kolibri)
 endif()
 # Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark

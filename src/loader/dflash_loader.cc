@@ -126,11 +126,8 @@ DFlashWeights load_checked(l0::Context& ctx, const DFlashCheckpoint& ck, uint32_
   if (d.v2()) {
     w.conv_base = std::make_unique<l0::Mem>(upload_f32(ctx, imm, ck.conv_bases(), bytes));
     w.sel_proj = upload_linear_u(ctx, imm, timed([&] { return ck.selector_projection(format, threads); }), bytes);
-    const size_t cb = size_t(d.vocab) * d.sel_rank * 2;
-    w.pred = upload_u(ctx, imm, ck.codebook(false), cb);
-    w.succ = upload_u(ctx, imm, ck.codebook(true), cb);
-    bytes += 2 * cb;
-  } else if (d.dspark()) {   // Kolibri DSpark: the Markov head's w1 / w2 as the selector's codebooks (df_select V2)
+  }
+  if (d.v2() || d.dspark()) {   // Kolibri DSpark: the Markov head's w1 / w2 as the selector's codebooks (df_select V2)
     const size_t cb = size_t(d.vocab) * d.sel_rank * 2;
     w.pred = upload_u(ctx, imm, ck.codebook(false), cb);
     w.succ = upload_u(ctx, imm, ck.codebook(true), cb);

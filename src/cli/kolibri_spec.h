@@ -95,7 +95,7 @@ inline KolibriDrafter attach_drafter(runtime::kolibri::KolibriEngine& e, const S
   KolibriDrafter out;
   const size_t embed_bytes = size_t(d.vocab) * d.hidden * 2;
   out.replica = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, embed_bytes);
-  {
+  {   // TODO(card): 655 MB peer-to-peer at load - if the first run stalls here, upload the replica from the host instead
     l0::CmdList imm = l0::CmdList::immediate(e.context(0));
     imm.copy(out.replica->ptr(), e.embedding().ptr(), embed_bytes);
   }

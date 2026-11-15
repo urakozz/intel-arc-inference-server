@@ -421,6 +421,25 @@ void KolibriEngine::attach_drafter(TapSink& dr) {
     for (auto& s : dev) s.reset();   // lists captured before bound no taps: recaptured with them
   drafter_ = &dr;
   drafter_->reset(st(uint32_t(st_.size()) - 1).imm);
+  // Every verify list (M = 1..8, every device) captured now, with the taps: a missing binary fails at startup, never inside
+  // a request (prepare_prefill's rule).
+  for (uint32_t M = 1; M <= kVerifyRows; ++M) capture_verify(M);
+}
+
+void KolibriEngine::capture_verify(uint32_t M) {
+  const StageLink binding = vlink_ ? vlink_->binding() : StageLink{};
+  for (uint32_t i = 0; i < st_.size(); ++i) {
+    std::optional<CapturedStep>& s = vsteps_[i].at(M - 1);
+    if (s) continue;
+    VerifyBind v;
+    v.vb = vb_[i].get();
+    v.M = M;
+    if (drafter_) {
+      v.taps = &drafter_->taps();
+      v.tap_layers = &drafter_->tap_layers();
+    }
+    s.emplace(build_verify(st(i).ctx, model_.parts[i], model_.desc, st(i).buffers, vlink_ ? &binding : nullptr, v));
+  }
 }
 
 uint32_t KolibriEngine::max_verify_k() const {
@@ -432,22 +451,8 @@ uint32_t KolibriEngine::max_verify_k() const {
 }
 
 void KolibriEngine::run_verify(uint32_t M) {
-  const model::Kolibri1Desc& d = model_.desc;
   const uint32_t nd = uint32_t(st_.size());
-  StageLink binding;
-  if (vlink_) binding = vlink_->binding();
-  for (uint32_t i = 0; i < nd; ++i) {
-    std::optional<CapturedStep>& s = vsteps_[i].at(M - 1);
-    if (s) continue;
-    VerifyBind v;
-    v.vb = vb_[i].get();
-    v.M = M;
-    if (drafter_) {
-      v.taps = &drafter_->taps();
-      v.tap_layers = &drafter_->tap_layers();
-    }
-    s.emplace(build_verify(st(i).ctx, model_.parts[i], d, st(i).buffers, vlink_ ? &binding : nullptr, v));
-  }
+  capture_verify(M);   // captured by attach_drafter; only a drafter-less engine (the tests') captures here
   if (nd == 1) {
     st(0).queue.execute(vsteps_[0][M - 1]->list, &st(0).fence);
     st(0).fence.wait();

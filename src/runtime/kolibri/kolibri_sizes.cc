@@ -245,9 +245,9 @@ std::vector<DevicePlan> plan(const model::Kolibri1Desc& d, const model::KolPlace
     dp.decode_state = ps.control + scratch_sizes(d).total() + attn_scores_bytes(d, max_len, a) +
                       (debug_tap ? tap_bytes(d) : 0) + dp.link;
     dp.prefill_scratch = prefill_state(d, p.devices, dev, prefill);
-    if (spec.verify)   // Kolibri DSpark: the verify scratch, control_hi and (device 1) the verify link
-      dp.decode_state += verify_sizes(d).total() + (p.devices > 1 ? verify_link_bytes(d, dev) : 0);
+    // Kolibri DSpark: the drafter and its replica as `drafter`, the verify terms in decode_state.
     if (dev + 1 == p.devices) dp.drafter = spec.drafter + spec.replica;
+    dp.decode_state += spec_device_bytes(d, p, dev, spec) - dp.drafter;
   }
   return out;
 }

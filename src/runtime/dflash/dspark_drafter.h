@@ -40,13 +40,9 @@
 //   per iteration: d.draft(replay, k, T, seed) -> engine.verify(drafts, k) -> acceptance -> engine.commit(j, t).
 namespace runtime::dflash {
 
-struct DSparkTarget {
-  const l0::Mem* embed = nullptr;               // bf16 ROW-MAJOR [vocab][hidden] (the replica)
-  const loader::DeviceWeight* head = nullptr;   // the lm_head, int8 or bf16 tiles, [vocab][hidden]
-};
-
-CapturedStep build_dspark_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DSparkTarget& t, DFlashBuffers& b,
-                                const l0::Mem& control);
+// `embed`: the target's embedding replica, bf16 ROW-MAJOR [vocab][hidden]; `head`: its lm_head, int8 or bf16 tiles.
+CapturedStep build_dspark_draft(l0::Context& ctx, const loader::DFlashWeights& w, const l0::Mem& embed,
+                                const loader::DeviceWeight& head, DFlashBuffers& b, const l0::Mem& control);
 CapturedStep build_dspark_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b);
 
 class DSparkDrafter final : public TapSink {
@@ -57,7 +53,6 @@ class DSparkDrafter final : public TapSink {
   // The draft list over the target's embedding replica, its lm_head and the Control block whose pos / cur_token[0] are the
   // anchor (cur_token[1..7] get the drafts). Once.
   void attach(l0::Context& ctx, const l0::Mem& embed, const loader::DeviceWeight& head, const l0::Mem& control);
-  bool attached() const { return draft_ != nullptr; }
 
   // One block at the Control block's pos for a caller that keeps k drafts (1..max_k()): `replay` runs the draft list on the
   // drafter's queue and waits. The list always walks all 7 rows at `temperature` / `seed`; the readback's first k ids are
@@ -67,10 +62,6 @@ class DSparkDrafter final : public TapSink {
   const DFlashDraftOut& readback() const { return *b_.readback(); }
 
   const model::DFlashDesc& desc() const { return w_.desc; }
-  const loader::DFlashWeights& weights() const { return w_; }
-  DFlashBuffers& buffers() { return b_; }
-  const CapturedStep& project_step() const { return project_; }
-  const CapturedStep* draft_step() const { return draft_.get(); }
 
   // --- TapSink ---
   uint32_t max_k() const override { return max_k_; }

@@ -30,16 +30,15 @@ class Walk {
   Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b)
       : ctx_(ctx), w_(w), d_(w.desc), b_(b), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
-  CapturedStep draft(const DSparkTarget& t, const l0::Mem& control) {
+  CapturedStep draft(const l0::Mem& embed, const loader::DeviceWeight& hw, const l0::Mem& control) {
     check();
-    require(t.embed && t.head, "the target's embedding replica and head are not given");
-    require(t.head->kind == model::WeightKind::Int8 || t.head->kind == model::WeightKind::Bf16,
+    require(hw.kind == model::WeightKind::Int8 || hw.kind == model::WeightKind::Bf16,
             "the target's head is int4: no draft binaries for it - load the head int8 or bf16");
-    require(t.head->shape.K == d_.hidden && t.head->shape.N == d_.vocab && b_.head_rows == d_.vocab,
+    require(hw.shape.K == d_.hidden && hw.shape.N == d_.vocab && b_.head_rows == d_.vocab,
             "the target's head is not [" + std::to_string(d_.vocab) + "][" + std::to_string(d_.hidden) + "]");
-    require(t.embed->size() >= size_t(d_.vocab) * d_.hidden * 2, "the embedding replica is not [vocab][hidden] bf16");
+    require(embed.size() >= size_t(d_.vocab) * d_.hidden * 2, "the embedding replica is not [vocab][hidden] bf16");
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
-    for (const std::string& v : kd::dspark_draft_variants(t.head->kind == model::WeightKind::Int8))
+    for (const std::string& v : kd::dspark_draft_variants(hw.kind == model::WeightKind::Int8))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_KOLIBRI and B70_DFLASH on");
     const void* ctrl = control.ptr();
@@ -49,7 +48,7 @@ class Walk {
     {   // df_embed(ctrl, embed, mask_row, in_scale, resid), grid (1, M)
       l0::Kernel& k = kernel(kd::prep_variant(s), "df_embed", kd::kWg);
       k.arg_ptr(0, ctrl);
-      k.arg_ptr(1, t.embed->ptr());
+      k.arg_ptr(1, embed.ptr());
       k.arg_ptr(2, w_.mask_row->ptr());
       k.arg(3, d_.in_scale);
       k.arg_ptr(4, b_.resid.ptr());
@@ -112,7 +111,6 @@ class Walk {
     layer_ = -1;
     norm(b_.resid.ptr(), w_.final_norm->as<float>());
     {   // the target's head over rows 0..6 (anchor-first: row r predicts p + r + 1), gemv_i8w / gemv_bf16 at M 7
-      const loader::DeviceWeight& hw = *t.head;
       if (hw.kind == model::WeightKind::Int8) {
         l0::Kernel& k = kernel(kernels::gemv_i8w_variant(R, H, V), "gemv_i8w", kernels::kGemvI8wCols);
         k.arg_ptr(0, hw.mem.ptr());
@@ -278,9 +276,9 @@ class Walk {
 
 }  // namespace
 
-CapturedStep build_dspark_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DSparkTarget& t, DFlashBuffers& b,
-                                const l0::Mem& control) {
-  return Walk(ctx, w, b).draft(t, control);
+CapturedStep build_dspark_draft(l0::Context& ctx, const loader::DFlashWeights& w, const l0::Mem& embed,
+                                const loader::DeviceWeight& head, DFlashBuffers& b, const l0::Mem& control) {
+  return Walk(ctx, w, b).draft(embed, head, control);
 }
 CapturedStep build_dspark_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b) {
   return Walk(ctx, w, b).project();
@@ -303,10 +301,7 @@ DSparkDrafter::DSparkDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t
 
 void DSparkDrafter::attach(l0::Context& ctx, const l0::Mem& embed, const loader::DeviceWeight& head, const l0::Mem& control) {
   require(draft_ == nullptr, "attach() twice");
-  DSparkTarget t;
-  t.embed = &embed;
-  t.head = &head;
-  draft_ = std::make_unique<CapturedStep>(build_dspark_draft(ctx, w_, t, b_, control));
+  draft_ = std::make_unique<CapturedStep>(build_dspark_draft(ctx, w_, embed, head, b_, control));
 }
 
 const DFlashDraftOut& DSparkDrafter::draft(const std::function<void(l0::CmdList&)>& replay, uint32_t k, float temperature,

@@ -423,6 +423,20 @@ and each verified row reads its own six experts a layer, so deep blocks cost mor
 decode list (synthetic set and the real model), and the real model with the drafter (greedy equals plain, tokens a verify,
 a seeded sampled request).
 
+**To check on the first card run** (each marked `TODO(card)` in the code):
+1. The load copies Kolibri's 655 MB embedding from card 0 to card 1 for the drafter (`cli/kolibri_spec.h`). If the first run
+   stalls at load, look there first, and upload the replica from the host instead.
+2. The cost table that picks K (`MtpCost::kolibri_dspark`) is derived from bytes: measure the verify at M = 1..8 and the
+   draft pass.
+3. `kol_attn_decode` spills a few registers at M 3 / 4 (ocloc's warning): time the attention's two halves of a deep verify.
+4. Each verify row reads its own six experts a layer: price it, then decide on reading each distinct expert once (Bolt's
+   union form).
+5. The taps are the outputs of layers 3 / 13 / 23 / 33 / 43 (the drafter's ids minus one, vLLM's rule): a low acceptance
+   points here first.
+6. The Markov walk looks at the head's top 16 a row, not the whole vocabulary: measure the acceptance gap.
+7. The prompt's last 2048 positions reach the drafter 8 rows a replay (256 replays): time it.
+8. `kolibri_dspark_test`'s bar (1.2 tokens a verify) is a placeholder: set it from the run.
+
 ## Qwen3.8-Flash-Next (spec 21)
 
 Qwen's `Qwen3.8-Flash-Next` (`model_type qwen4_exp`): 48 layers (36 GatedDeltaNet with a sigmoid output gate, 12 QSA
