@@ -72,8 +72,8 @@ is not finished is listed in [open-work.md](open-work.md).
 - **Qwen3.8-27B** is the model in focus, with the full set of measured rows (prefill, decode, depth,
   prefix cache, MTP, DFlash, tensor parallel).
 - **Ornith 1.5** is supported and its box tests pass; its speed rows (decode, prefill, MTP cost table) are in BENCHMARKS.
-- **Qwen3.8-Flash-Next** is next. It runs only truncated (`--layers N`) because the whole model does not
-  fit two cards; open-work.md has the plan for the full size.
+- **Qwen3.8-Flash-Next** is next. The whole model loads with its routed experts partly in host memory (the
+  expert tier); its speed rows and quality checks on our own export are still to run (open-work.md).
 - **Kolibri-1** is supported by the code and parked (out of focus); no speed rows.
 - **Nemotron 3.5 Bolt** is parked until Flash-Next is done. Its section stays
   because the code still serves it.
@@ -448,12 +448,16 @@ MoE in every layer, 4-stream hyper-connections instead of a residual, and a per-
 g64 expansion; its PLE table must be converted once (`tools/box_validate/qwen4exp_oracle.sh <data> ple-int8`, ~51.8 GB
 beside the snapshot). Our own AutoRound g64 export is not made yet.
 
-**Status: built; runs truncated only; no speed row yet.** Decode (spec 21c), prefill (spec 21d) and serving
-(spec 21e): **the whole
-model does not fit two B70s** (its routed experts alone are 64.17 GB at int4 g64) and is refused, naming spec 22
-(the expert-offload tier); `--layers N` (development mode: the first N layers, then the final mixer and the head) or
-`--layers auto` (the planner's N, derived: 18-19 of Intel's layers on one card, 38-39 on two, by `--max-len`) is
-required. Expected (derived): 779 launches per token at 48 layers, 75 at `--layers 4`; `B70_Q4_ATTN=eager` binds the
+**Status: built; the whole model loads with the expert tier; no speed row yet.** Decode (spec 21c), prefill (spec 21d)
+and serving (spec 21e). **The whole model does not fit two B70s** (its routed experts alone are 64.17 GB at int4 g64),
+so without `--layers` each card keeps the most-routed experts its VRAM has room for after the rest of the plan (the
+same count in every layer, chosen by the routing profile `<snapshot>-expert-profile.safetensors` from
+`tools/oracle/offload_curve.py profile`, else by id; derived f = 0.807 on two cards at 32768) and the kernels read the
+rest in place from pinned host memory (one range a layer, ~12.4 GB beside the 51.8 GB PLE table). A miss costs its
+bytes at ~11.2 GB/s on top of the VRAM time (measured). `--max-len auto` for the whole model takes the longest of
+32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's. `--layers N` (development mode:
+the first N layers, then the final mixer and the head) or `--layers auto` (the planner's N, derived: 18-19 of Intel's
+layers on one card, 38-39 on two, by `--max-len`) still load a truncated model. Expected (derived): 779 launches per token at 48 layers, 75 at `--layers 4`; `B70_Q4_ATTN=eager` binds the
 reference's attention chain (one launch for flash's two in each QSA layer) in decode and the eager sparse attention
 in prefill. `--prefill` / `--prefill-length N` run the prompt in chunks of up to 2048 (`--prefill-chunk C`) on the
 `l0` backend: spec 6's flash for the positions that see at most 2051 others, the indexer's own selection and a sparse
@@ -482,6 +486,9 @@ reads the first card's embedding over peer.
 I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 
 # every command below: no speed row yet; needs the PLE int8 file beside the snapshot (<snapshot>-ple-int8/)
+O=<our export>   # the whole model, the experts that do not fit in pinned host memory (~65 GB pinned with the PLE)
+./build/src/cli/b70-decode $O --parallel pp --bench --depth 4096 --tg 256
+./build/src/cli/b70-serve $O --parallel pp
 ./build/src/cli/b70-decode $I --layers 18 --ids tests/golden/prompts/q4exp_short.ids --n 32
 ./build/src/cli/b70-decode $I --layers 38 --parallel pp --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $I --layers auto --max-len auto --ids tests/golden/prompts/q4exp_short.ids --n 8
@@ -497,14 +504,17 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
 **Limits.** Prefill on `l0` only (`--prefill-backend l0-int8`: spec 5's h8 linears rotate in whole 1024-k Hadamard
 blocks and the hidden is 2560), `--prefill-chunk` at most 2048; the two cards
 cross each chunk by copy, sequentially (spec 16c's overlapped chunk pipeline is not used here); MTP in `b70-serve`
-only, at a fixed K (`b70-decode --spec mtp` and `--draft-vocab` refused), the whole model refused in both CLIs
-(spec 22), bf16 KV only (`--kv-cache int8` refused, decision 8), `reasoning_effort` not forwarded to the template (as
+only, at a fixed K (`b70-decode --spec mtp` and `--draft-vocab` refused), the expert placement static (no swaps while
+serving), the prefill reading its misses from host memory inside the GEMMs, bf16 KV only (`--kv-cache int8` refused, decision 8), `reasoning_effort` not forwarded to the template (as
 for Qwen3.8),
 no `--profile`, context capped at the trained 262144.
 
 **Relevant variables:** `B70_Q4_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_Q4_MTP_NORM` (`single` |
 `per_stream`),
-`B70_Q4_TIE_TOL` / `B70_Q4_SEL_TOL` (the golden test's routing and selection near-tie tolerances, 1e-3 proposed).
+`B70_Q4_TIE_TOL` / `B70_Q4_SEL_TOL` (the golden test's routing and selection near-tie tolerances, 1e-3 proposed),
+`B70_Q4_RESIDENT` (`all` | `none` | `random:<f>:<seed>` | `adversarial`: a test placement of the routed experts, any
+layer count) and `B70_Q4_EXPERTS` (`table`, the default | `direct`: the kernels without the address table, only when
+every expert is resident) - tests and timing only.
 
 ## Nemotron 3.5 Bolt 74B-A9B (spec 25)
 
