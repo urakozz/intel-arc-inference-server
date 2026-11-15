@@ -487,9 +487,6 @@ struct ExpertTier {
   uint32_t n_vram(uint32_t l) const;
   bool all() const;                          // every expert resident: today's layout
   size_t host_bytes(const model::Qwen4ExpDesc& d) const;   // the pinned mirror: the non-resident experts' blocks
-  // The prefill's staging range on the device holding layers [first, end): the largest of their mirrors (a chunk's
-  // MoE copies its layer's mirror there once and reads it from VRAM), 0 when every expert there is resident.
-  size_t staging_bytes(const model::Qwen4ExpDesc& d, uint32_t first, uint32_t end) const;
 };
 ExpertTier all_resident(const model::Qwen4ExpDesc& d);
 // The static fill. Each device's cache bytes (b.cache) over its layers, the same count a layer: uniform, since the
@@ -500,8 +497,7 @@ ExpertTier all_resident(const model::Qwen4ExpDesc& d);
 // profile's LEAST routed resident: its most routed read from the host) - throws on anything else.
 ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const std::vector<uint32_t>* counts,
                      const std::string& forced = "");
-// The plan with a tier: each device's weights (and model) less its layers' non-resident experts' blocks, plus the
-// prefill's staging range (ExpertTier::staging_bytes).
+// The plan with a tier: each device's weights (and model) less its layers' non-resident experts' blocks.
 void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t);
 
 }  // namespace runtime::qwen4exp

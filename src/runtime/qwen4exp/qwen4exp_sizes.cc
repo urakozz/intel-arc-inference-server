@@ -553,12 +553,6 @@ size_t ExpertTier::host_bytes(const model::Qwen4ExpDesc& d) const {
   return n * (loader::q4_gate_up_block_bytes(d) + loader::q4_down_block_bytes(d));
 }
 
-size_t ExpertTier::staging_bytes(const model::Qwen4ExpDesc& d, uint32_t first, uint32_t end) const {
-  uint32_t most = 0;
-  for (uint32_t l = first; l < end; ++l) most = std::max(most, experts - n_vram(l));
-  return size_t(most) * (loader::q4_gate_up_block_bytes(d) + loader::q4_down_block_bytes(d));
-}
-
 ExpertTier all_resident(const model::Qwen4ExpDesc& d) {
   ExpertTier t;
   t.layers = d.layers;
@@ -587,16 +581,11 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
     }
     return o;
   };
-  // The budget's count a layer: each device's cache over its layers, at most every expert. When some experts stay on
-  // the host the cache also holds the prefill's staging range, one layer's misses: L n + (E - n) experts <= the cache.
+  // The budget's count a layer: each device's cache over its layers, at most every expert.
   const auto budget_n = [&](uint32_t l) {
     for (uint32_t dev = 0; dev < b.devices; ++dev)
-      if (l >= b.first[dev] && l < b.end[dev]) {
-        const size_t L = b.end[dev] - b.first[dev], slots = b.cache[dev] / b.expert_bytes;
-        if (slots >= L * d.experts) return d.experts;
-        if (L == 1 || slots < d.experts) return uint32_t(0);
-        return uint32_t(std::min<size_t>(d.experts - 1, (slots - d.experts) / (L - 1)));
-      }
+      if (l >= b.first[dev] && l < b.end[dev])
+        return uint32_t(std::min<size_t>(d.experts, b.cache[dev] / (size_t(b.end[dev] - b.first[dev]) * b.expert_bytes)));
     throw std::logic_error("qwen4exp::fill_tier: layer " + std::to_string(l) + " is on no device of the budget");
   };
   const auto take = [&](uint32_t l, const std::vector<uint32_t>& order, uint32_t n) {
@@ -650,9 +639,8 @@ void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const 
       dp.routed_experts += d.experts;
     }
     dp.host_experts = size_t(dp.routed_experts - dp.vram_experts) * eb;
-    const size_t staging = t.staging_bytes(d, dp.first, dp.end);
-    dp.weights = dp.weights - dp.host_experts + staging;
-    dp.model = dp.model - dp.host_experts + staging;
+    dp.weights -= dp.host_experts;
+    dp.model -= dp.host_experts;
   }
 }
 
