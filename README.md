@@ -3,9 +3,9 @@
 **A fast LLM server for one or two Intel Arc Pro B70 cards, written from scratch.** Hand-crafted GPU kernels,
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
-- **Qwen3.8-27B:** 164 t/s writing code for one session on one card (DFlash); 342 t/s in total with 8 requests on two cards.
+- **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
 - **Prompts read at 1,788 t/s on one card, 2,931 t/s on two** (Qwen3.8-27B, 4,096 tokens).
-- **Ornith 1.5 35B-A3B:** prompts read at 9,026 t/s, answers written at 312 t/s on one card, 581 t/s for two requests on two cards.
+- **Ornith 1.5 35B-A3B:** prompts read at **9,026 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 
 One choice to make - how many requests run at once. The engine sizes everything else.
@@ -23,18 +23,18 @@ Prefill, t/s:
 | setup | 4k prompt | 16k prompt |
 |---|---:|---:|
 | one card | 1,788 | 1,624 |
-| two cards, `tp` | 2,931 | 2,683 |
+| two cards, `tp` | **2,931** | **2,683** |
 
 Generation, t/s (several requests: the total; llama-benchy tg128 at 0 / 32k tokens of context):
 
 | setup | code | prose | tool calls | llama-benchy |
 |---|---:|---:|---:|---:|
 | MTP, 1 request, one card | 138 | 57 | 100 | 121 / 61 |
-| MTP, 1 request, two cards `tp` | 123 | 74 | 115 | 112 / 88 |
+| MTP, 1 request, two cards `tp` | 123 | 74 | 115 | 112 / **88** |
 | MTP, 2 requests, two cards `replica` | 164 | 108 | 144 | |
 | MTP, 4 requests, two cards `replica` | 282 | 189 | 206 | |
-| MTP, 8 requests, two cards `replica` | 342 | 300 | 233 | |
-| DFlash, 1 request, one card | 164 | 65 | 111 | 139 / 83 |
+| MTP, 8 requests, two cards `replica` | **342** | **300** | **233** | |
+| DFlash, 1 request, one card | **164** | 65 | 111 | **139** / 83 |
 | DFlash, 2 requests, two cards `replica` | 317 | 127 | 191 | |
 
 DFlash is `--spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`.
@@ -46,14 +46,14 @@ Prefill, t/s:
 | setup | 4k prompt | 16k prompt |
 |---|---:|---:|
 | one card | 9,026 | 7,494 |
-| two cards `replica`, 2 requests (total) | 15,874 | 11,880 |
+| two cards `replica`, 2 requests (total) | **15,874** | **11,880** |
 
 Generation with MTP, t/s:
 
 | setup | code | prose | tool calls | llama-benchy |
 |---|---:|---:|---:|---:|
-| 1 request, one card | 312 | 326 | 264 | 210 / 131 |
-| 2 requests, two cards `replica` (total) | 581 | 605 | 453 | |
+| 1 request, one card | 312 | 326 | 264 | **210** / 131 |
+| 2 requests, two cards `replica` (total) | **581** | **605** | **453** | |
 
 How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
