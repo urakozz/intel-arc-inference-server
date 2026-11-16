@@ -647,8 +647,12 @@ void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const 
 
 // --- plan 21v2b: tensor parallel ---------------------------------------------------------------------------------
 size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one) {
-  const tp::Layout L{one.hidden, 1, tp::kFoldG};
-  return L.total_bytes() + 2 * L.counter_bytes() + tp::kStateWords * 4 + size_t(tp::kMRows) * one.hidden * 4;
+  size_t b = tp::kStateWords * 4 + size_t(one.top_k + 1) * one.hidden * 4;   // the state words, the MoE's slots
+  for (uint32_t s : {kTpOutSlices, one.top_k + 1}) {
+    const tp::Layout L{one.hidden, s, tp::kFoldG};
+    b += L.total_bytes() + 2 * L.counter_bytes();
+  }
+  return b;
 }
 
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
@@ -740,7 +744,7 @@ ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, u
 }
 
 size_t tp_device_launches(const model::Qwen4ExpDesc& one) {
-  return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(4) * one.layers;
+  return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(5) * one.layers;
 }
 
 double tp_card_f(const ExpertBudget& b, uint32_t rank) {

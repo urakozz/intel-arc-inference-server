@@ -84,17 +84,22 @@ struct MtpBinding {
 // Plan 21v2b: a tensor-parallel card's decode list (`tp` non-null; Decode, M = 1, flash attention). The buffers are
 // the card's (Qwen4ExpBuffers over `card` = model::q4_tp_card at one card's placement, device 0); the walk is one
 // card's over every layer, at the card's widths, with Qwen3.8's crossing (runtime::TpLink, src/kernels/tp.cl) after
-// each row-parallel linear - out_proj / o_proj (its 4 split-K slices) and the MoE's down (q4_moe's fp32 partial,
-// MOE_TP_PART): tp_send pushes the card's folded row into the peer's landing buffer, tp_sum waits for the peer's and
-// writes card 0's part + card 1's into partials, which the next combine folds as one slice (_S1). Everything
+// each row-parallel linear, in the slices form (tp_send pushes the card's raw slices into the peer's landing buffer,
+// tp_sum waits for the peer's): out_proj / o_proj run at split-K 2 over the card's K half - one card's slices 2r,
+// 2r + 1 - and tp_sum adds card 0's two then card 1's into one row (one card's S4 chain), which the next combine folds
+// as one slice (_S1); the MoE's down writes each slot's dot over the card's K half (MOE_TP_PART: one card's two DN_KS
+// partials) into `slots`, tp_sum adds them slot by slot and q4_moe_finish runs the down's epilogue into y. So every
+// value is one card's, bit for bit. Everything
 // replicated (the hyper-connections, router and route, the indexer and selection, the PLE) runs on both cards on the
 // same bits, so both cards hold the same H. `embed`: the table card 1 gathers from (card 0's, over peer access) or
 // card 0's own. The head: the card's vocabulary half and tp_argmax's two stages (Control::out_token / out_value; the
 // host merges). Launches: tp_device_launches.
 struct Q4TpBinding {
-  const runtime::TpLink* link = nullptr;
+  const runtime::TpLink* link = nullptr;   // out_proj / o_proj's crossing (and the head's rank, vocabulary half)
+  const runtime::TpLink* moe = nullptr;    // the MoE's crossing (its own landing buffer and counters)
   const model::Qwen4ExpDesc* card = nullptr;
   const void* embed = nullptr;
+  void* slots = nullptr;                   // fp32 [11][2560]: the MoE's slots
 };
 
 CapturedStep build(l0::Context& ctx, const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part,

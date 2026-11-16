@@ -106,7 +106,8 @@ void validate(const Q4Placement& p, const Qwen4ExpDesc& d);
 
 // Plan 21v2b: card `rank`'s descriptor under tp (Qwen3.8's model::tp_card_desc rule): half the QSA q / kv heads (12 /
 // 1), half the GDN k / v heads (8 / 24), half of every expert's and the shared expert's width (320), half the
-// vocabulary (124160 rows; vocab_used the rank's real ids). Every width derived from these is the card's (qkv||z 8192,
+// vocabulary (124160 rows; vocab_used the rank's real ids), half out_proj's and o_proj's split-K (2: its slices are
+// one card's slices 2r, 2r + 1). Every width derived from these is the card's (qkv||z 8192,
 // q||gate||k||v 6656, out_proj / o_proj K 3072, the conv 5120, the KV and GDN state halves); the hyper-connections,
 // the router, the indexer, the PLE and the RoPE table keep one card's. The kernels bake one card's shapes; their
 // card builds name these.

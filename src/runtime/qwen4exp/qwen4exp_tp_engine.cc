@@ -27,11 +27,15 @@ struct Qwen4ExpTpEngine::Card {
         fence(queue),
         imm(l0::CmdList::immediate(c)),
         ctl(buffers.control.as<Control>()),
-        layout{one.hidden, 1, tp::kFoldG},
-        land(c, l0::MemKind::Device, layout.total_bytes(), 4096),
-        send_ctr(c, l0::MemKind::Device, layout.counter_bytes()),
-        sum_ctr(c, l0::MemKind::Device, layout.counter_bytes()),
-        own(c, l0::MemKind::Device, size_t(tp::kMRows) * one.hidden * 4),
+        lo{one.hidden, kTpOutSlices, tp::kFoldG},
+        lm{one.hidden, one.top_k + 1, tp::kFoldG},
+        land_o(c, l0::MemKind::Device, lo.total_bytes(), 4096),
+        land_m(c, l0::MemKind::Device, lm.total_bytes(), 4096),
+        ctr_so(c, l0::MemKind::Device, lo.counter_bytes()),
+        ctr_fo(c, l0::MemKind::Device, lo.counter_bytes()),
+        ctr_sm(c, l0::MemKind::Device, lm.counter_bytes()),
+        ctr_fm(c, l0::MemKind::Device, lm.counter_bytes()),
+        slots(c, l0::MemKind::Device, size_t(one.top_k + 1) * one.hidden * 4),
         state(c, l0::MemKind::Shared, tp::kStateWords * 4) {}
   l0::Context& ctx;
   const model::Qwen4ExpDesc desc;
@@ -40,9 +44,9 @@ struct Qwen4ExpTpEngine::Card {
   l0::Fence fence;
   mutable l0::CmdList imm;
   Control* ctl;
-  tp::Layout layout;
-  l0::Mem land, send_ctr, sum_ctr, own, state;
-  TpLink link;
+  tp::Layout lo, lm;   // out_proj / o_proj's crossing, the MoE's
+  l0::Mem land_o, land_m, ctr_so, ctr_fo, ctr_sm, ctr_fm, slots, state;
+  TpLink link, moe;
   Q4TpBinding binding;
   std::optional<CapturedStep> step;
   bool pending = false;
@@ -71,17 +75,21 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
   for (uint32_t r = 0; r < 2; ++r) {
     Card& c = *cards_[r];
     Card& peer = *cards_[1 - r];
-    c.link.rank = r;
-    c.link.folded = true;
-    c.link.peer_land = peer.land.ptr();
-    c.link.land = c.land.ptr();
-    c.link.send_ctr = c.send_ctr.ptr();
-    c.link.fold_ctr = c.sum_ctr.ptr();
-    c.link.own = c.own.ptr();
-    c.link.state = c.state.ptr();
-    c.link.spin_limit = opt_.spin_limit;
-    c.link.vocab_used = c.desc.vocab_used;
+    for (TpLink* t : {&c.link, &c.moe}) {
+      const bool m = t == &c.moe;
+      t->rank = r;
+      t->folded = false;
+      t->peer_land = (m ? peer.land_m : peer.land_o).ptr();
+      t->land = (m ? c.land_m : c.land_o).ptr();
+      t->send_ctr = (m ? c.ctr_sm : c.ctr_so).ptr();
+      t->fold_ctr = (m ? c.ctr_fm : c.ctr_fo).ptr();
+      t->state = c.state.ptr();   // one record of the first failure
+      t->spin_limit = opt_.spin_limit;
+      t->vocab_used = c.desc.vocab_used;
+    }
     c.binding.link = &c.link;
+    c.binding.moe = &c.moe;
+    c.binding.slots = c.slots.ptr();
     c.binding.card = &c.desc;
     // card 1 gathers its embedding row from card 0's table (peer access), unless it holds its own
     c.binding.embed = (model_.parts[r].embed ? model_.parts[r].embed : model_.parts[0].embed)->ptr();
@@ -130,7 +138,8 @@ void Qwen4ExpTpEngine::reset() {
   }
   for (auto& c : cards_) {
     c->buffers.zero(c->imm);
-    for (l0::Mem* m : {&c->land, &c->send_ctr, &c->sum_ctr, &c->own}) c->imm.fill(m->ptr(), 0u, m->size());
+    for (l0::Mem* m : {&c->land_o, &c->land_m, &c->ctr_so, &c->ctr_fo, &c->ctr_sm, &c->ctr_fm})
+      c->imm.fill(m->ptr(), 0u, m->size());
     std::memset(c->state.ptr(), 0, c->state.size());
   }
   broken_ = false;

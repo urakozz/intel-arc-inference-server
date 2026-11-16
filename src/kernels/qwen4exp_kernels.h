@@ -131,16 +131,23 @@ inline constexpr unsigned kTpInter = kInter / 2;
 inline std::string tp_moe_variant(bool table) {
   return std::string("q4_moe_M1_E512_T10_D2560_I320_SH4") + (table ? "_TBL" : "") + "_TP";
 }
+// MOE_TP_PART: q4_moe_down writes each slot's partial, fp32 [11][M][2560]; q4_moe_finish the epilogue.
 inline constexpr unsigned tp_moe_gate_up_groups() { return kSlots * (2 * kTpInter / 16 / 4); }   // 110
 inline constexpr unsigned tp_moe_down_wg() { return 16 * kSlots * 1; }                          // 176: DN_KS 1
 inline std::string tp_gated_head_sig_variant() { return "prep_gated_head_M1_GK8V24_SIG"; }
 inline std::string tp_gdn_variant() { return "gdn_step_M1_GK8V24"; }
 inline std::string tp_attn_prep_variant() { return "attn_prep_M1_Q12KV1"; }
 inline std::string tp_qsa_attn_variant() { return "q4_qsa_attn_M1_T32_Q12KV1"; }
-inline constexpr unsigned kTpFoldG = 20, kTpWg = 256;
-inline std::string tp_sum_variant(unsigned s_loc, unsigned rank) {
-  return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(s_loc) +
-         "_F_R" + std::to_string(rank) + "_sum";
+inline constexpr unsigned kTpFoldG = 20, kTpWg = 256, kTpOutS = 2, kTpFinishWg = 256;
+// out_proj / o_proj's crossing: the card's 2 slices summed in one card's order into one row
+inline std::string tp_sum_variant(unsigned rank) {
+  return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
+         "_X_R" + std::to_string(rank) + "_sum";
+}
+// the MoE's crossing: the 11 slots' K halves summed slot by slot
+inline std::string tp_slices_variant(unsigned rank) {
+  return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kSlots) +
+         "_X_R" + std::to_string(rank) + "_slices";
 }
 
 // The reused kernels at this family's shapes.

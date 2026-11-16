@@ -504,8 +504,10 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
 void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t);
 
 // --- plan 21v2b: tensor parallel (`--parallel tp`) -----------------------------------------------------------------
-// The crossing's device bytes on a card (Qwen3.8's runtime::tp::Layout at hidden 2560, the folded row): its landing
-// buffer (the peer writes it), the send's and the sum's counters, the state words and the card's own folded row.
+// The crossings' device bytes on a card (Qwen3.8's runtime::tp::Layout at hidden 2560, the slices form): for each of
+// the two crossings - out_proj / o_proj's kTpOutSlices slices, the MoE's 11 slots - its landing buffer (the peer
+// writes it) and its send's and sum's counters; the state words; the MoE's slots fp32 [11][2560].
+inline constexpr uint32_t kTpOutSlices = 2;
 size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
 // A card's plan under `p.tp` (one DevicePlan per card): plan() over model::q4_tp_card(one, rank) at one card's
 // placement - its halves of every layer, its halves of the KV (1 kv head) and of the GDN state (24 heads), the indexer
@@ -526,8 +528,8 @@ ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Pla
 ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, uint32_t rank,
                         const std::vector<uint32_t>* counts, const std::string& forced = "");
 // A card's tp decode list (flash attention): one card's list (device_launches at Q4Placement::one) with tp_send +
-// tp_sum after each of a layer's two row-parallel linears (out_proj / o_proj, the MoE's down): + 4 a layer. 971 at 48
-// layers (779 + 192).
+// tp_sum after each of a layer's two row-parallel linears (out_proj / o_proj, the MoE's down) and q4_moe_finish: + 5 a
+// layer. 1019 at 48 layers (779 + 240).
 size_t tp_device_launches(const model::Qwen4ExpDesc& one);
 // Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
 double tp_card_f(const ExpertBudget& b, uint32_t rank);

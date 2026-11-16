@@ -30,9 +30,8 @@
 // spin_limit loads, a failure recorded in the card's state words). After both fences (bounded) the host reads the
 // state words - any failure throws naming the card and the chunk, and the engine stays failed until reset() - then
 // merges the two heads: the larger value, ties to card 0 (its ids are the lower half), written into both Controls'
-// out_token and cur_token. Both cards hold the same residual (bitwise: every replicated kernel runs on the same bits and
-// each all-reduce adds card 0's part first on both); the one-card arithmetic differs only in the all-reduces' order
-// and the MoE's partial sums (each card's experts' fp32 partial, rounded once after the sum).
+// out_token and cur_token. Both cards hold the same residual, and it is one card's bit for bit: the crossings are the
+// slices form in one card's summation order (runtime/qwen4exp/qwen4exp_capture.h, tp).
 //
 // Not here yet: prefill (ingest feeds one id a replay), the MTP head, snapshots, the expert-table check on the device.
 namespace runtime::qwen4exp {

@@ -1375,22 +1375,22 @@ endif()
 # ==== Plan 21v2b: Qwen3.8-Flash-Next tensor parallel decode (`--parallel tp`) ==== (begin) ====
 # Additive only: new names; q4_qsa_attn.cl's Q4_Q_HEADS / Q4_KV_HEADS and q4_moe.cl's MOE_TP_PART are unset in every
 # existing binary. A card's M = 1 decode list at model::q4_tp_card's shapes (runtime/qwen4exp/qwen4exp_capture.cc, tp):
-#   linears  qkv||z 2560 x 8192 S1, q||gate||k||v 2560 x 6656 S2, out_proj / o_proj 3072 x 2560 S4 (the card's K rows),
+#   linears  qkv||z 2560 x 8192 S1, q||gate||k||v 2560 x 6656 S2, out_proj / o_proj 3072 x 2560 S2 (the card's K rows),
 #            all int4 L0; the int8 head's vocabulary half 2560 x 124160; a||b, the HCs, router, indexer, PLE one card's
 #   GDN      gdn_step_M1_GK8V24 (Qwen3.8's card: the same 8 / 24 heads and conv 5120) and prep_gated_head _SIG at 8 / 24
 #   QSA      attn_prep at 12 q / 1 kv heads (S2), q4_qsa_attn + _reduce at 12 / 1
-#   MoE      q4_moe at the half width 320 (DN_KS 1: 5 groups), y the card's fp32 partial (MOE_TP_PART), direct and _TBL
-#   tp.cl    tp_send + tp_sum at hidden 2560 per rank: S4 (out_proj / o_proj's split-K) and S1 (the MoE's partial), the
-#            sum one fp32 row the next combine (_S1) folds; tp_argmax per vocabulary half is Qwen3.8's (the same halves)
+#   MoE      q4_moe at the half width 320 (DN_KS 1: 5 groups), each slot's fp32 partial (MOE_TP_PART), direct and _TBL,
+#            and q4_moe_finish (the down's epilogue after the all-reduce)
+#   tp.cl    tp_send + tp_sum at hidden 2560 per rank, the slices form: out_proj / o_proj's 2 local slices summed in one
+#            card's S4 order into one row (the combine's _S1); the MoE's 11 slots summed slot by slot (TP_SUM_SLICES).
+#            With these every value is one card's, bit for bit. tp_argmax per vocabulary half is Qwen3.8's
 if(B70_Q4EXP AND B70_TP)
   add_gemv_variant(1 2560 8192 1 0)
   add_gemv_variant(1 2560 6656 2 0)
-  add_gemv_variant(1 3072 2560 4 0)
+  add_gemv_variant(1 3072 2560 2 0)   # one card's S4 slices 2r, 2r + 1: the slices crossing is one card's chain
   add_gemv_i8w_variant(1 2560 124160)
   add_ocloc_kernel(prep_gated_head_M1_GK8V24_SIG SOURCE ${PREP_CL}
                    DEFINES M=1 GDN_GATE_SIGMOID=1 GDN_K_HEADS=8 GDN_V_HEADS=24)
-  add_ocloc_kernel(q4_hc_combine_norm_M1_S1_NN SOURCE ${Q4_CL}/q4_hc.cl
-                   DEFINES ${CTRL_DEFINES} M=1 HC_SRC=1 SRC_S=1 HC_NORM=0)   # the PLE prologue after a crossing
   add_ocloc_kernel(attn_prep_M1_Q12KV1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 FA_Q_HEADS=12 FA_KV_HEADS=1)
   add_ocloc_kernel(q4_qsa_attn_M1_T32_Q12KV1 SOURCE ${Q4_CL}/q4_qsa_attn.cl
                    DEFINES ${CTRL_DEFINES} M=1 TGT=32 ${Q4_LIST_DEFINES} Q4_Q_HEADS=12 Q4_KV_HEADS=1)
@@ -1400,10 +1400,10 @@ if(B70_Q4EXP AND B70_TP)
                    DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1
                            Q4_EXPERT_TABLE=1)
   foreach(R 0 1)
-    foreach(S 1 4)
-      add_ocloc_kernel(tp_cross_M1_K2560_G20_S${S}_F_R${R}_sum SOURCE ${TP_CL}
-                       DEFINES TP_CROSS=1 M=1 K=2560 FOLD_G=20 S_LOC=${S} FOLDED=1 RANK=${R} TP_SUM=1)
-    endforeach()
+    add_ocloc_kernel(tp_cross_M1_K2560_G20_S2_X_R${R}_sum SOURCE ${TP_CL}
+                     DEFINES TP_CROSS=1 M=1 K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1)
+    add_ocloc_kernel(tp_cross_M1_K2560_G20_S11_X_R${R}_slices SOURCE ${TP_CL}
+                     DEFINES TP_CROSS=1 M=1 K=2560 FOLD_G=20 S_LOC=11 FOLDED=0 RANK=${R} TP_SUM=1 TP_SUM_SLICES=1)
   endforeach()
 endif()
 # ==== Plan 21v2b: Qwen3.8-Flash-Next tensor parallel decode ==== (end) ====

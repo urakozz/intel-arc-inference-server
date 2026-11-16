@@ -1,20 +1,23 @@
 // Plan 21v2b Task 2: Qwen3.8-Flash-Next on `--parallel tp` against `--parallel pp` (box only; label
-// checkpoint;qwen4exp;tp). Both engines are loaded side by side at --layers N, every expert resident (pp's halves of
-// the layers and tp's halves of every layer fit two cards at N = 18):
-//   qwen4exp_tp_test <checkpoint> <ids> [layers 18] [steps 10000] [bench_pairs 4]
-//   (a) the first 32 ids forced one a replay through both: each row's argmax equal to pp's, or different only inside
-//       the near-tie window (pp's logit of tp's id within 2 bf16 ulps of pp's top); after every row both cards' H and
-//       route rows bitwise equal
-//   (b) `steps` greedy steps from position 0 with no crossing failure (submit throws on a timeout or stale word)
-//   (c) decode at the ids' length (4096 for q4exp_4k.ids): both engines fed the prompt, then after a warm-up
-//       `bench_pairs` interleaved pairs of 64 generated tokens each; the median t/s of each and tp / pp, and one card's
-//       launch count against the tp list's
+// checkpoint;qwen4exp;tp), at --layers N with every expert resident. One engine a process (each pins the 51.8 GB PLE
+// table; two do not fit beside a CPU job), so a comparison is two runs and a ratio is interleaved runs:
+//   qwen4exp_tp_test <checkpoint> <ids> pp|tp <rows file> [layers 18] [steps 10000] [bench 4] [profile replays]
+//   (a) the first 32 ids forced one a replay: pp writes each row's logits to <rows file>; tp reads them and holds each
+//       row's argmax equal to pp's, or different only inside the near-tie window (pp's logit of tp's id within 2 bf16
+//       ulps of pp's top), printing each row's logits cosine and max difference and counting the rows whose logits are pp's
+//       bitwise (the crossings keep one card's summation order); after every row both cards' H and route
+//       rows bitwise equal (tp)
+//   (b) tp: `steps` greedy steps from position 0 with no crossing failure (submit throws on a timeout or stale word)
+//   (c) decode at the ids' length (4096 for q4exp_4k.ids): the prompt fed, a warm-up of 64, then `bench` runs of 64
+//       generated tokens; each run's t/s and the median
+//   (d) tp, with [profile replays]: card 0's list's device time a launch, summed by kernel
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -44,8 +47,8 @@ double median(std::vector<double> v) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3) {
-    std::fprintf(stderr, "usage: qwen4exp_tp_test <checkpoint> <ids> [layers] [steps] [bench_pairs]\n");
+  if (argc < 5) {
+    std::fprintf(stderr, "usage: qwen4exp_tp_test <checkpoint> <ids> pp|tp <rows file> [layers] [steps] [bench]\n");
     return 2;
   }
   std::string why;
@@ -54,9 +57,9 @@ int main(int argc, char** argv) {
     std::printf("SKIP: %s\n", why.c_str());
     return 77;
   }
-  const uint32_t layers = argc > 3 ? uint32_t(std::atoi(argv[3])) : 18;
-  const uint32_t steps = argc > 4 ? uint32_t(std::atoi(argv[4])) : 10000;
-  const uint32_t pairs = argc > 5 ? uint32_t(std::atoi(argv[5])) : 4;
+  const uint32_t layers = argc > 5 ? uint32_t(std::atoi(argv[5])) : 18;
+  const uint32_t steps = argc > 6 ? uint32_t(std::atoi(argv[6])) : 10000;
+  const uint32_t pairs = argc > 7 ? uint32_t(std::atoi(argv[7])) : 4;
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::open(rig, 1);
   if (l0::Context::gpu_count() < 2) {
@@ -68,30 +71,57 @@ int main(int argc, char** argv) {
   const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, layers);
   const std::vector<uint32_t> ids = qwen4exp_rig::read_ids(argv[2], d.vocab);
   CHECK(ids.size() >= 32 && ids.size() + 64 * (pairs + 1) < max_len);
-  // pp: the planner's split for N layers
-  rq::Qwen4ExpEngine pp(rig.ctx,
-                        loader::load_qwen4exp(rig.ctx, snap, max_len,
-                                              model::Q4Placement::two(d, rq::pp_split(d, max_len, true, false).split),
-                                              loader::LmHeadForm::Int8, layers),
-                        max_len);
-  rq::Qwen4ExpTpEngine tp(*rig.c0, *rig.c1,
-                          loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::tp2(d, model::Q4TpEnds::Split),
-                                                loader::LmHeadForm::Int8, layers),
-                          max_len);
-  std::printf("tp: %u layers, launches pp %zu (both devices), tp %zu a card (tp_device_launches %zu)\n", layers,
-              pp.launches(), tp.launches(0), rq::tp_device_launches(d));
-  CHECK_EQ(tp.launches(0), rq::tp_device_launches(d));
-  CHECK_EQ(tp.launches(1), rq::tp_device_launches(d));
+  const std::string mode = argv[3], rows_path = argv[4];
+  CHECK(mode == "pp" || mode == "tp");
+  const size_t V = d.vocab;
+  std::unique_ptr<rq::Qwen4ExpEngine> pp;
+  std::unique_ptr<rq::Qwen4ExpTpEngine> tp;
+  if (mode == "pp")
+    pp = std::make_unique<rq::Qwen4ExpEngine>(
+        rig.ctx,
+        loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::two(d, rq::pp_split(d, max_len, true, false).split),
+                              loader::LmHeadForm::Int8, layers),
+        max_len);
+  else
+    tp = std::make_unique<rq::Qwen4ExpTpEngine>(
+        *rig.c0, *rig.c1,
+        loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::tp2(d, model::Q4TpEnds::Split),
+                              loader::LmHeadForm::Int8, layers),
+        max_len);
+  const auto ingest = [&](uint32_t id) { pp ? pp->ingest({id}) : tp->ingest({id}); };
+  const auto pending = [&] { return pp ? pp->pending() : tp->pending(); };
+  const auto set_token = [&](uint32_t id) { pp ? pp->set_token(id) : tp->set_token(id); };
+  const auto logits = [&] { return pp ? pp->read_logits() : tp->read_logits(); };
+  if (tp) {
+    std::printf("tp: %u layers, %zu launches a card (tp_device_launches %zu)\n", layers, tp->launches(0),
+                rq::tp_device_launches(d));
+    CHECK_EQ(tp->launches(0), rq::tp_device_launches(d));
+    CHECK_EQ(tp->launches(1), rq::tp_device_launches(d));
+  } else {
+    std::printf("tp: pp at %u layers, %zu launches (both devices)\n", layers, pp->launches());
+  }
 
-  // (a) the forced rows
-  uint32_t same = 0, ties = 0, outside = 0;
+  // (a) the forced rows; every row continues on pp's id (tp reads it from the rows file's argmax)
+  std::vector<float> ref;
+  if (tp) {
+    ref.resize(32 * V);
+    FILE* f = std::fopen(rows_path.c_str(), "rb");
+    CHECK(f && std::fread(ref.data(), 4, ref.size(), f) == ref.size());
+    std::fclose(f);
+  }
+  std::vector<float> mine;
+  uint32_t same = 0, ties = 0, outside = 0, bitwise = 0;
   double worst_cos = 1.0;
   for (uint32_t i = 0; i < 32; ++i) {
-    pp.ingest({ids[i]});
-    tp.ingest({ids[i]});
-    const std::vector<float> lp = pp.read_logits(), lt = tp.read_logits();
-    const uint32_t a = pp.pending(), b = tp.pending();
-    CHECK_EQ(a, top(lp, d.vocab_used));
+    ingest(ids[i]);
+    const std::vector<float> lt = logits();
+    if (pp) {
+      CHECK_EQ(pending(), top(lt, d.vocab_used));
+      mine.insert(mine.end(), lt.begin(), lt.end());
+      continue;
+    }
+    const std::vector<float> lp(ref.begin() + i * V, ref.begin() + (i + 1) * V);
+    const uint32_t a = top(lp, d.vocab_used), b = pending();
     double dot = 0, na = 0, nb = 0, mx = 0;
     for (uint32_t v = 0; v < d.vocab_used; ++v) {
       dot += double(lp[v]) * lt[v];
@@ -100,6 +130,7 @@ int main(int argc, char** argv) {
       mx = std::max(mx, double(std::fabs(lp[v] - lt[v])));
     }
     const double cs = dot / std::sqrt(na * nb);
+    bitwise += std::memcmp(lp.data(), lt.data(), V * 4) == 0;
     worst_cos = std::min(worst_cos, cs);
     const float gap = lp[a] - lp[b];
     std::printf("tp: row %2u: pp %6u tp %6u, logits cos %.6f, max |diff| %.4f%s\n", i, a, b, cs, mx,
@@ -111,42 +142,70 @@ int main(int argc, char** argv) {
       ++ties;
     else
       ++outside;
-    CHECK(tp.read_H(0) == tp.read_H(1));
-    CHECK(tp.read_routes(0) == tp.read_routes(1));
-    // keep both on pp's id so the rows stay comparable
-    pp.set_token(a);
-    tp.set_token(a);
+    CHECK(tp->read_H(0) == tp->read_H(1));
+    CHECK(tp->read_routes(0) == tp->read_routes(1));
+    set_token(a);
   }
-  std::printf("tp: (a) 32 forced rows: %u argmax equal to pp's, %u inside the near-tie window, %u outside; logits "
-              "cos >= %.6f; both cards' H and routes bitwise every row\n", same, ties, outside, worst_cos);
+  if (pp) {
+    FILE* f = std::fopen(rows_path.c_str(), "wb");
+    CHECK(f && std::fwrite(mine.data(), 4, mine.size(), f) == mine.size());
+    std::fclose(f);
+    std::printf("tp: (a) pp's 32 forced rows -> %s\n", rows_path.c_str());
+  } else {
+    std::printf("tp: (a) 32 forced rows: %u argmax equal to pp's, %u inside the near-tie window, %u outside; %u rows' "
+                "logits bitwise pp's, cos >= %.6f; both cards' H and routes bitwise every row\n", same, ties, outside,
+                bitwise, worst_cos);
+    // (b) the long run
+    tp->reset();
+    tp->set_token(ids[0]);
+    tp->generate(steps);
+    for (uint32_t r = 0; r < 2; ++r) CHECK_EQ(tp->state_words(r)[runtime::tp::kStatus], 0u);
+    std::printf("tp: (b) %u greedy steps from position 0: 0 timeout / stale words (%.2f t/s, the context growing)\n",
+                steps, tp->last_tok_per_s());
+  }
 
-  // (b) the long run
-  tp.reset();
-  tp.set_token(ids[0]);
-  tp.generate(steps);
-  for (uint32_t r = 0; r < 2; ++r) CHECK_EQ(tp.state_words(r)[runtime::tp::kStatus], 0u);
-  std::printf("tp: (b) %u greedy steps from position 0: 0 timeout / stale words (%.2f t/s, the context growing)\n",
-              steps, tp.last_tok_per_s());
-
-  // (c) decode at the prompt's length, interleaved pairs after a warm-up
-  pp.reset();
-  tp.reset();
-  pp.ingest(ids);
-  tp.ingest(ids);
-  pp.generate(64);
-  tp.generate(64);
-  std::vector<double> tpp, ttp;
+  // (c) decode at the prompt's length
+  pp ? pp->reset() : tp->reset();
+  for (uint32_t id : ids) ingest(id);
+  const auto gen = [&] {
+    if (pp) {
+      pp->generate(64);
+      return pp->last_tok_per_s();
+    }
+    tp->generate(64);
+    return tp->last_tok_per_s();
+  };
+  gen();
+  std::vector<double> ts;
   for (uint32_t p = 0; p < pairs; ++p) {
-    pp.generate(64);
-    tpp.push_back(pp.last_tok_per_s());
-    tp.generate(64);
-    ttp.push_back(tp.last_tok_per_s());
-    std::printf("tp: (c) pair %u at pos ~%u: pp %.2f t/s, tp %.2f t/s (%.3fx)\n", p, tp.pos(), tpp.back(), ttp.back(),
-                ttp.back() / tpp.back());
+    ts.push_back(gen());
+    std::printf("tp: (c) %s run %u at pos ~%u: %.2f t/s\n", mode.c_str(), p, pp ? pp->pos() : tp->pos(), ts.back());
   }
-  const double mp = median(tpp), mt = median(ttp);
-  std::printf("tp: (c) decode at %zu ids, %u layers, every expert resident: pp %.2f t/s (%.3f ms), tp %.2f t/s "
-              "(%.3f ms): %.3fx (the stop rule: 1.15x)\n", ids.size(), layers, mp, 1000 / mp, mt, 1000 / mt, mt / mp);
+  const double m = median(ts);
+  std::printf("tp: (c) %s decode at %zu ids, %u layers, every expert resident: %.2f t/s (%.3f ms a token)\n",
+              mode.c_str(), ids.size(), layers, m, 1000 / m);
+  // (d) optional: card 0's list profiled over `prof` replays (a timestamp event a launch), summed by kernel entry
+  if (tp && argc > 8) {
+    const uint32_t R = uint32_t(std::atoi(argv[8]));
+    const std::vector<double> us = tp->profile_decode(0, R);
+    const std::vector<std::string>& lab = tp->step(0).labels;
+    std::vector<std::pair<std::string, std::pair<double, uint32_t>>> by;
+    double total = 0;
+    for (size_t i = 0; i < us.size(); ++i) {
+      const std::string& l = lab[i];
+      const size_t a = l.find(' '), b = l.find(' ', a + 1);
+      const std::string key = l.substr(a + 1, b - a - 1) + " " + l.substr(b + 1);
+      auto it = std::find_if(by.begin(), by.end(), [&](const auto& e) { return e.first == key; });
+      if (it == by.end()) by.push_back({key, {0.0, 0u}}), it = by.end() - 1;
+      it->second.first += us[i];
+      ++it->second.second;
+      total += us[i];
+    }
+    std::sort(by.begin(), by.end(), [](const auto& x, const auto& y) { return x.second.first > y.second.first; });
+    std::printf("tp: (d) card 0's list, %zu launches, sum of device times %.1f us (%u replays):\n", us.size(), total, R);
+    for (const auto& e : by)
+      std::printf("tp: (d)   %8.1f us  %4u x  %s\n", e.second.first, e.second.second, e.first.c_str());
+  }
   CHECK_EQ(outside, 0u);   // (a)'s gate, after (b) and (c) have run
   std::printf("qwen4exp_tp_test OK\n");
   return 0;

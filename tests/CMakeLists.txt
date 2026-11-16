@@ -3247,16 +3247,20 @@ if(B70_Q4EXP)
       ${CMAKE_SOURCE_DIR}/tests/runtime)
     target_link_libraries(qwen4exp_tp_test PRIVATE b70_qwen4exp_runtime b70_l0)
     add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_gemv_M1_K2560_N8192_S1_L0
-      kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S4_L0 kernel_gemv_i8w_M1_K2560_N124160
+      kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S2_L0 kernel_gemv_i8w_M1_K2560_N124160
       kernel_prep_gated_head_M1_GK8V24_SIG kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1
       kernel_q4_qsa_attn_M1_T32_Q12KV1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP
-      kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP kernel_q4_hc_combine_norm_M1_S1_NN
-      kernel_tp_cross_M1_K2560_G20_S1_F_R0_sum kernel_tp_cross_M1_K2560_G20_S1_F_R1_sum
-      kernel_tp_cross_M1_K2560_G20_S4_F_R0_sum kernel_tp_cross_M1_K2560_G20_S4_F_R1_sum
+      kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP 
+      kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum
+      kernel_tp_cross_M1_K2560_G20_S11_X_R0_slices kernel_tp_cross_M1_K2560_G20_S11_X_R1_slices
       kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
-    add_test(NAME qwen4exp_tp_test COMMAND qwen4exp_tp_test ${B70_Q4EXP_RTN_SNAPSHOT}
-      ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
-    set_tests_properties(qwen4exp_tp_test PROPERTIES LABELS "checkpoint;qwen4exp;tp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+    foreach(mode pp tp)   # pp writes the reference rows tp reads: run in this order (ctest -R qwen4exp_tp_)
+      add_test(NAME qwen4exp_tp_${mode}_test COMMAND qwen4exp_tp_test ${B70_Q4EXP_RTN_SNAPSHOT}
+        ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids ${mode} ${CMAKE_BINARY_DIR}/qwen4exp_tp_rows.f32)
+      set_tests_properties(qwen4exp_tp_${mode}_test PROPERTIES LABELS "checkpoint;qwen4exp;tp" SKIP_RETURN_CODE 77
+        TIMEOUT 3600)
+    endforeach()
+    set_tests_properties(qwen4exp_tp_tp_test PROPERTIES DEPENDS qwen4exp_tp_pp_test)
   endif()
 endif()
 # b70-decode's model_type dispatch and this family's refusals, before the device: tests/model/qwen4exp/ holds only a

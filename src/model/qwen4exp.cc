@@ -182,6 +182,9 @@ Qwen4ExpDesc q4_tp_card(const Qwen4ExpDesc& one, uint32_t rank) {
   c.shared_inter = half(one.shared_inter, "shared expert width");
   if (c.moe_inter % 64 != 0 || c.shared_inter % 64 != 0)
     throw std::invalid_argument("model::q4_tp_card: a half expert is not whole groups of 64");
+  // out_proj / o_proj at half the split-K over half the K: each slice is one card's slice (2r, 2r + 1)
+  c.gdn_out_s = half(one.gdn_out_s, "out_proj split-K");
+  c.o_s = half(one.o_s, "o_proj split-K");
   c.vocab = half(one.vocab, "vocabulary");
   const uint32_t lo = rank * c.vocab;
   c.vocab_used = one.vocab_used > lo ? std::min(c.vocab, one.vocab_used - lo) : 0;

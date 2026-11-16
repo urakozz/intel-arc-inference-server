@@ -195,7 +195,8 @@ class Walk {
 
   // Plan 21v2b: a tensor-parallel card's list - the card's buffers, the decode kind only, every binary present.
   void check_tp() {
-    require(tp_->link && tp_->card && tp_->embed, "a tensor-parallel list without its crossing, card or embedding");
+    require(tp_->link && tp_->moe && tp_->card && tp_->embed && tp_->slots,
+            "a tensor-parallel list without its crossings, card, embedding or slots");
     const model::Qwen4ExpDesc& c = *tp_->card;
     require(d_.hidden == kq::kHidden && d_.experts == kq::kExperts && d_.top_k == kq::kTopK &&
                 d_.moe_inter == kq::kInter && d_.forms.dense == model::Q4Form::Int4 &&
@@ -214,42 +215,41 @@ class Walk {
     const unsigned rank = tp_->link->rank;
     const std::vector<std::string> need = {
         kq::embed_variant(1), kq::tp_moe_variant(tbl), kq::tp_gdn_variant(), kq::tp_gated_head_sig_variant(),
-        kq::tp_attn_prep_variant(), kq::tp_qsa_attn_variant(), kq::tp_sum_variant(1, rank), kq::tp_sum_variant(4, rank),
-        kq::hc_combine_norm_variant(1, HcSrc::Slices, 1, false), kq::route_variant(1), kq::qsa_variant(1),
+        kq::tp_attn_prep_variant(), kq::tp_qsa_attn_variant(), kq::tp_sum_variant(rank), kq::tp_slices_variant(rank),
+        kq::hc_combine_norm_variant(1, HcSrc::Slices, 1, true), kq::route_variant(1), kq::qsa_variant(1),
         kernels::gemv_variant(1, d_.hidden, c.qkvz_n(), 1, 0), kernels::gemv_variant(1, d_.hidden, c.qkvg_n(), 2, 0),
-        kernels::gemv_variant(1, c.q_n(), d_.hidden, 4, 0), kernels::gemv_i8w_variant(1, d_.hidden, c.vocab),
+        kernels::gemv_variant(1, c.q_n(), d_.hidden, kq::kTpOutS, 0), kernels::gemv_i8w_variant(1, d_.hidden, c.vocab),
         kernels::tp_argmax_variant(1, c.vocab, c.vocab_used, rank * c.vocab)};
     for (const std::string& v : need)
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
   }
 
-  // Plan 21v2b: the all-reduce after a row-parallel linear of `s` split-K slices in partials - tp_send(partials,
-  // peer_land, send_ctr, own), then tp_sum(own, land, partials, sum_ctr, state, spin_limit): one fp32 row, card 0's
-  // part + card 1's, which the next combine folds as one slice.
-  void cross(uint32_t s) {
-    const TpLink& t = *tp_->link;
-    const std::string v = kq::tp_sum_variant(s, t.rank);
+  // Plan 21v2b: an all-reduce in the slices form over `buf` (in place) - tp_send(buf, peer_land, send_ctr, buf), then
+  // tp_sum(buf, land, buf, sum_ctr, state, spin_limit). `moe`: the slot-by-slot sums (the MoE's crossing), else one
+  // row (out_proj / o_proj's: the next combine folds it as one slice).
+  void cross(bool moe, void* buf) {
+    const TpLink& t = moe ? *tp_->moe : *tp_->link;
+    const std::string v = moe ? kq::tp_slices_variant(t.rank) : kq::tp_sum_variant(t.rank);
     {
       l0::Kernel& k = kernel(v, "tp_send", kq::kTpWg);
-      k.arg_ptr(0, b_.partials.ptr());
+      k.arg_ptr(0, buf);
       k.arg_ptr(1, t.peer_land);
       k.arg_ptr(2, t.send_ctr);
-      k.arg_ptr(3, t.own);
+      k.arg_ptr(3, buf);   // unused in the slices form
       launch(k, kq::kTpFoldG, M_);
     }
     {
       l0::Kernel& k = kernel(v, "tp_sum", kq::kTpWg);
-      k.arg_ptr(0, t.own);
+      k.arg_ptr(0, buf);
       k.arg_ptr(1, t.land);
-      k.arg_ptr(2, b_.partials.ptr());
+      k.arg_ptr(2, buf);
       k.arg_ptr(3, t.fold_ctr);
       k.arg_ptr(4, t.state);
       k.arg<uint32_t>(5, t.spin_limit);
       launch(k, kq::kTpFoldG, M_);
     }
-    slices_ = 1;
-    src_ = HcSrc::Slices;
+    if (!moe) slices_ = 1;
   }
 
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
@@ -302,7 +302,7 @@ class Walk {
     k.arg_ptr(4, w ? static_cast<const void*>(w) : b_.partials.ptr());   // _NN reads no weight
     k.arg_ptr(5, b_.xn.ptr());
     launch(k, d_.hc, M_);
-    if ((src == HcSrc::Y || src == HcSrc::Slices) && pending_layer_ >= 0) {   // layer pending_layer_'s output is H now
+    if (src == HcSrc::Y && pending_layer_ >= 0) {   // layer pending_layer_'s output is H now
       if (tap_)
         step_.list.copy(at(*tap_, size_t(pending_layer_) * kM * d_.hc_n() * 2), b_.H.ptr(), size_t(kM) * d_.hc_n() * 2);
       pending_layer_ = -1;
@@ -393,8 +393,8 @@ class Walk {
   void ple(const loader::Q4Layer& L) {
     require(bool(L.ple), "the PLE layer holds no PLE block");
     if (src_ != HcSrc::None) {
-      require(src_ == (tp_ ? HcSrc::Slices : HcSrc::Y), "the PLE prologue follows a MoE block");
-      combine(src_, false, nullptr);   // _Y_NN (tp: _S1_NN, the crossing's row)
+      require(src_ == HcSrc::Y, "the PLE prologue follows a MoE block");
+      combine(HcSrc::Y, false, nullptr);   // _Y_NN
     }
     const bool bf16s = m_.ple.scale == loader::Q4PleScale::Bf16;
     {
@@ -497,7 +497,7 @@ class Walk {
     }
     slices_ = linear(*L.gdn_out, b_.attn_out.ptr(), b_.partials);
     src_ = HcSrc::Slices;
-    if (tp_) cross(slices_);
+    if (tp_) cross(false, b_.partials.ptr());
   }
 
   // --- a QSA layer's pieces (the main layers' and the MTP head's) --------------------------------------------------
@@ -620,7 +620,7 @@ class Walk {
     qsa_attend(t, listp);
     slices_ = linear(*L.qsa_o, b_.attn_out.ptr(), b_.partials);
     src_ = HcSrc::Slices;
-    if (tp_) cross(slices_);
+    if (tp_) cross(false, b_.partials.ptr());
   }
 
   // The 11-slot MoE over route row `rt`: the router GEMV (+ the shared gate), q4_route, gate||up, down -> y.
@@ -657,19 +657,27 @@ class Walk {
       k.arg_ptr(1, b_.moe_h.ptr());
       k.arg_ptr(2, tbl ? static_cast<uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr());
       k.arg_ptr(3, at(*L.shared, L.shared_down_offset));
-      k.arg_ptr(4, tp_ ? b_.partials.ptr() : b_.y.ptr());   // tp: the card's fp32 partial [M][2560]
+      k.arg_ptr(4, tp_ ? tp_->slots : b_.y.ptr());   // tp: each slot's partial, fp32 [11][M][2560]
       launch(k, d_.hidden / 16, M_);
     }
+    if (tp_) {
+      cross(true, tp_->slots);
+      // q4_moe_finish(route, slots, y), grid (2560 / 256, M): the down's epilogue over the summed slots
+      l0::Kernel& k = kernel(mv, "q4_moe_finish", kq::kTpFinishWg);
+      k.arg_ptr(0, rt);
+      k.arg_ptr(1, tp_->slots);
+      k.arg_ptr(2, b_.y.ptr());
+      launch(k, d_.hidden / kq::kTpFinishWg, M_);
+    }
     src_ = HcSrc::Y;
-    if (tp_) cross(1);
   }
 
   // A final mixer (the main model's or the head's: no inject) over what is pending (_Y), then the head GEMV into
   // `logits` and the two argmax stages (into ctrl_).
   void mixer_and_head(const l0::Mem& mixer, void* logits) {
     const loader::Q4HcOffsets o = loader::q4_hc_offsets(d_, false);
-    require(src_ == (tp_ ? HcSrc::Slices : HcSrc::Y), "the final mixer follows a MoE block");
-    combine(src_, true, reinterpret_cast<const float*>(at(mixer, o.norm)));
+    require(src_ == HcSrc::Y, "the final mixer follows a MoE block");
+    combine(HcSrc::Y, true, reinterpret_cast<const float*>(at(mixer, o.norm)));
     bf16_linear(at(mixer, o.down), d_.hc_n(), o.down_n, b_.xn.ptr(), b_.down_f32.ptr(), b_.down_f32.size());
     {
       l0::Kernel& k = kernel(kq::hc_up_mix_variant(M_, false), "q4_hc_up_mix", kq::kUpMixWg);
