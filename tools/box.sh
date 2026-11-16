@@ -39,6 +39,22 @@ sync_tree() {
   # skips (exit 77) rather than runs. Link the main tree's sets into any tree that lacks them.
   ssh "$BOX" "cd '$REMOTE_DIR' && [ -d ~/b70-inference-server ] && \
     tools/box_validate/data.sh link ~/b70-inference-server . | grep -c '^linked' | sed 's/^/box: golden-set links added: /' | grep -v ': 0$' >&2 || true"
+  backup_private_docs
+}
+# docs/probes and docs/superpowers are git-ignored and live only in the main checkout, so every sync
+# (from any worktree) mirrors them to ~/b70/private-docs on the box. A file changed or deleted since
+# the last sync keeps its old copy under ~/b70/private-docs-history/<time>/.
+backup_private_docs() {
+  local main stamp d
+  main="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
+  stamp="$(date +%Y-%m-%d_%H%M%S)"
+  # One rsync a folder: the Mac's openrsync drops --delete under --relative. --backup-dir is
+  # relative to the destination, ~/b70/private-docs/docs/<folder>.
+  for d in probes superpowers; do
+    rsync -a --delete --backup --backup-dir="../../../private-docs-history/$stamp/docs/$d" \
+      "$main/docs/$d/" "$BOX:b70/private-docs/docs/$d/" ||
+      echo "box: WARNING the private docs backup of docs/$d failed; it is not on the box" >&2
+  done
 }
 configure_and_build() {
   ssh "$BOX" "cd '$REMOTE_DIR' && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS"
