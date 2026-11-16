@@ -4,7 +4,7 @@
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
 - **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
-- **Prompts read at 1,788 t/s on one card, 2,931 t/s on two** (Qwen3.8-27B, 4,096 tokens).
+- **Prompts read at 2,083 t/s on one card, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
 - **Ornith 1.5 35B-A3B:** prompts read at **9,026 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 
