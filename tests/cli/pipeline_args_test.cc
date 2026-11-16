@@ -123,9 +123,10 @@ void check_names_and_spec() {
   const cli::Spec q = cli::resolve_spec("auto", SpecFamily::Qwen, "Qwen3.8", false, 0, false);
   CHECK(q.kind == SpecKind::Mtp && q.adaptive && q.max_k == 3u);
   CHECK(cli::resolve_spec("auto", SpecFamily::None, "Kolibri-1", false, 0, false).kind == SpecKind::Off);
-  CHECK(cli::resolve_spec("auto", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", false, 0, false).kind == SpecKind::Off);
+  const cli::Spec fa = cli::resolve_spec("auto", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", false, 0, false);
+  CHECK(fa.kind == SpecKind::Mtp && fa.adaptive && fa.max_k == 3u);
   const cli::Spec f = cli::resolve_spec("mtp", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", true, 2, false);
-  CHECK(f.kind == SpecKind::Mtp && !f.adaptive && f.max_k == 2u);
+  CHECK(f.kind == SpecKind::Mtp && f.adaptive && f.max_k == 2u);
   const cli::Spec d = cli::resolve_spec("dflash", SpecFamily::Qwen, "Qwen3.8", false, 0, true);
   CHECK(d.kind == SpecKind::DFlash && d.max_k == 7u);
   CHECK(cli::resolve_spec("lookup", SpecFamily::Qwen, "Qwen3.8", true, 1, false).max_k == 1u);

@@ -5,13 +5,14 @@
 // --spec-cost, --spec-min-match, --spec-history, --draft-format): the engine uses the measured defaults.
 //
 //   auto           MTP with an adaptive K (spec 8 §10) on the Qwen family (Qwen3.8, Ornith - an MTP head and its
-//                  cost table; operator 2026-11-14: no extra VRAM by default, DFlash only when asked); none elsewhere (Kolibri-1, Nemotron 3.5 Bolt have no head;
-//                  Qwen3.8-Flash-Next's MTP is not validated; Bolt's drafter becomes its auto only on spec 26 §7's
-//                  D5 rule, box row 65). b70-serve's default; b70-decode's is off (its auto is the MTP rule).
+//                  cost table; operator 2026-11-14: no extra VRAM by default, DFlash only when asked) and on
+//                  Qwen3.8-Flash-Next (operator 2026-11-16: the head beat plain on real text, its own cost table);
+//                  none elsewhere (Kolibri-1, Nemotron 3.5 Bolt have no head; Bolt's drafter becomes its auto
+//                  only on spec 26 §7's D5 rule, box row 65). b70-serve's default; b70-decode's is off (its auto
+//                  is the MTP rule; Qwen3.8-Flash-Next decodes plain there).
 //   off            no proposer.
 //   mtp            the checkpoint's MTP head: K <= --spec-max (1..3, default 3) per iteration, chosen per request
-//                  from its own acceptance (the Qwen family); Qwen3.8-Flash-Next drafts a fixed K = --spec-max
-//                  (its adaptive policy waits for spec 22's full-model cost numbers).
+//                  from its own acceptance (the Qwen family and Qwen3.8-Flash-Next).
 //   lookup         prompt lookup (spec 19e): the continuation of the longest earlier match (>= 3 ids) of the
 //                  request's own ids, verified through the MTP verify lists (the head is loaded for them); K <=
 //                  --spec-max (1..3, default 3) per iteration.
@@ -48,7 +49,7 @@ inline std::string parse_spec(const std::string& v) {
 }
 
 // Which proposers a model family has: Qwen (Qwen3.8, Ornith: the MTP head and its cost table; the
-// drafter for Qwen3.8), Qwen4Exp (Qwen3.8-Flash-Next: the head, fixed K), Bolt (Nemotron 3.5 Bolt: no head, its
+// drafter for Qwen3.8), Qwen4Exp (Qwen3.8-Flash-Next: the head and its own cost table), Bolt (Nemotron 3.5 Bolt: no head, its
 // own verify lists to M = 8 - prompt lookup and the LiLiCorr drafter, spec 26c), Kolibri (Kolibri-1: no head, its own
 // verify lists to M = 8 - the DSpark drafter), None (no head, no drafter).
 enum class SpecFamily { Qwen, Qwen4Exp, Bolt, Kolibri, None };
@@ -64,7 +65,7 @@ struct Spec {
 inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::string& model, bool have_max,
                          uint32_t max, bool have_draft_model) {
   std::string v = arg;
-  if (v == "auto") v = family == SpecFamily::Qwen ? "mtp" : "off";
+  if (v == "auto") v = family == SpecFamily::Qwen || family == SpecFamily::Qwen4Exp ? "mtp" : "off";
   const bool dflash = v == "dflash" || v == "dflash-lookup";
   if (have_draft_model && !dflash) throw std::runtime_error("--draft-model needs --spec dflash");
   Spec s;
@@ -126,7 +127,7 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
     return s;
   }
   s.kind = SpecKind::Mtp;
-  s.adaptive = family == SpecFamily::Qwen;
+  s.adaptive = true;   // the Qwen family and Qwen3.8-Flash-Next: the families above returned
   return s;
 }
 

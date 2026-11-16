@@ -32,6 +32,14 @@ MtpCost MtpCost::tp_int8_head() {
   return c;
 }
 
+// PROVISIONAL (replaced by the measured table below this task's sessions).
+MtpCost MtpCost::flash_next() {
+  MtpCost c;
+  c.verify = {1.00, 1.45, 1.90, 2.35};
+  c.draft = {0.12, 0.24, 0.36};
+  return c;
+}
+
 MtpCost MtpCost::tp_dflash() {
   MtpCost c;
   // tp_dflash_test cost 4096, 2026-11-14 (both cards held, the CPU reference job running; medians of 5 interleaved
