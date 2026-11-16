@@ -2,7 +2,7 @@
 // checks the committed copy). Spec 22a (P0.3): src/kernels/qwen4exp/q4_moe.cl with exactly its two expert-address lines
 // (Q4_EXPERT_GU / Q4_EXPERT_DN) replaced by a u64 pointer-table read - `w` is the layer's table: gate||up
 // pointers [0, 512), down pointers [512, 1024); the down launch is bound at table + 512 entries.
-// source sha256 492b0681a65980aa8b55a1054194b03758fb9915baeff4965bdf94cb9b6ce125
+// source sha256 f00183237791e04886cfdff84cf0b146716d4efba904512a249d935c97806506
 // q4_moe.cl - spec 21c: Qwen3.8-Flash-Next's MoE block at 512 experts / top-10 / 640 (spec 21 §2.1, §4.4) - the
 // router's softmax route and the 11-slot block (10 routed + the shared expert). Two families, each compiled only
 // when its defines are given (kol_moe.cl's arrangement; moe.cl's semantics - Qwen3.5-MoE's softmax router - at
@@ -57,12 +57,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #define Q4_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
 
-inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
-inline ushort rne_bf16(float f) {
-  uint u = as_uint(f);
-  uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
-  return (ushort)((u + rounding) >> 16);
-}
+#include "bf16.h"
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 inline float exp_torch(float d) {
   const int q = convert_int_rte(d * 1.442695040888963407359924681001892137426645954152985934135449406931f);
