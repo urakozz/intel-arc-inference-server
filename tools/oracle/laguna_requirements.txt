@@ -1,0 +1,11 @@
+# Plan 30a: the Laguna S 2.1 reference's transformers (laguna_ref.py refuses any other version). The vendor's own
+# modeling_laguna.py (trust_remote_code) needs transformers >= 5.12: it registers the native per-expert -> fused
+# checkpoint conversion for remote code, which older versions skip (its own comment), and imports
+# transformers.integrations.use_experts_implementation / transformers.utils.output_capturing.
+# The same pins as qwen4exp_requirements.txt, so the site qwen4exp_env.sh installs serves both references: on the
+# box `tools/oracle/qwen4exp_env.sh $DATA/q4exp-site` inside the container, then PYTHONPATH=$DATA/q4exp-site.
+# Checked on the Mac with torch 2.15.0 (CPU) beside these pins: test_laguna_ref.py, test_laguna_routes.py.
+transformers==5.19.0
+tokenizers==0.23.2
+huggingface_hub==1.33.0
+safetensors==0.8.0
