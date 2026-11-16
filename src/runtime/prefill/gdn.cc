@@ -159,7 +159,7 @@ static bool intra_one_launch(const model::ModelDesc& d, PrefillBackend b) {
 size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   return kGdnChunkLaunches - (d.is_moe() ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
 }
-bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b) { return d.is_moe() && b == PrefillBackend::L0; }
+bool ab_on_gemm(const model::ModelDesc& d) { return d.is_moe(); }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
@@ -228,7 +228,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
     profile_wait(cx, Phase::kGdnL2);
   }
   //  4 - head scalars and the intra-chunk cumulative gate.
-  const std::string gate = ab_on_gemm(d, backend)
+  const std::string gate = ab_on_gemm(d)
                                ? kernels::pf_gdn_gate_gemm_variant(k_heads, heads, kernels::pf_route_slab_pitch(
                                                                                        d.shape(model::LinearId::AB).N))
                                : conv;

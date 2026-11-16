@@ -22,10 +22,8 @@ class Int8State;
 // output is FOLDED into PrefillScratch::resid (pf_moe_combine, as decode's moe_down), so
 // the next norm folds nothing (S_PREV 0). Launches, in order:
 //
-//   l0-int8: router GEMV (pf_route_router, entry pf_gemv_rows)   logits [C][router_n]
-//            moe_route (decode's moe.cl binary, grid (1, C))      route rows, this layer's slice
-//   l0:      pf_gemm on the router's B slab (tiled_gemm, phase 3 Task 2)  logits [C][512] in xg's region
-//            moe_route (moe.cl at ROUTER_N 512, grid (1, C))       route rows, this layer's slice
+//   pf_gemm on the router's B slab (tiled_gemm, phase 3 Task 2)  logits [C][512] in xg's region
+//   moe_route (moe.cl at ROUTER_N 512, grid (1, C))              route rows, this layer's slice
 //   pf_moe_hist, pf_moe_scan, pf_moe_scatter         header, tile table, sorted rows, work items
 //   l0-int8: pf_quant_g64 (the chunk's x, once), pf_moe_gather_i8g, pf_moe_w4a8 (SiLU) -> h
 //   l0:      pf_moe_gather, pf_moe_q4gemm (SiLU)                               -> h
@@ -42,7 +40,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
 // What one moe_chunk appends (a function of the backend, never of C): 10 on l0-int8, 9 on l0.
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 
-// Phase 3 Task 2 (l0): the pf_gemm B slabs of layers [first, last) - each router || shared gate and each GDN layer's
+// Phase 3 Task 2 (both backends since open-work 35): the pf_gemm B slabs of layers [first, last) - each router || shared gate and each GDN layer's
 // a||b (tiled_slab) - made on cx's list before the first chunk, so no chunk makes one. `m` is the walk's model (the
 // stage's: its expert blocks indexed by layer - first). Nothing on a dense model.
 void make_route_slabs(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m, uint32_t first,

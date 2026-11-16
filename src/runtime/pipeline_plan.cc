@@ -248,8 +248,8 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
       const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, d, pf.chunk_cap);
       // l0-int8: the mixer linears walk the slab too (open-work 16 / 17).
       dp.prefill_scratch = s.eager() + s.slab;
-      // Phase 3 Task 2: the stage's router / a||b B slabs (a MoE model on l0).
-      if (pf.backend == PrefillBackend::L0) dp.prefill_scratch += route_slab_bytes(d, st[i].first, st[i].last);
+      // Phase 3 Task 2: the stage's router / a||b B slabs (a MoE model, both backends).
+      dp.prefill_scratch += route_slab_bytes(d, st[i].first, st[i].last);
       if (kv == KvCache::Int8) dp.prefill_scratch += s.kv8_raw;
       if (pf.backend == PrefillBackend::L0Int8)
         dp.int8 = int8_scratch_sizes(prefill_int8_max_k(d), pf.chunk_cap).total() +
