@@ -3455,6 +3455,23 @@ if(B70_Q4EXP AND B70_MTP)
   set_tests_properties(qwen4exp_mtp_synth_test qwen4exp_mtp_synth_intel_test qwen4exp_mtp_synth_eager_test
     qwen4exp_mtp_synth_pp_test qwen4exp_mtp_intel_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Plan 21v2a Task 8, the expert tier on the ours synthetic (tests/runtime/qwen4exp_tier_test.cc): O0 / O1 - the
+  # direct form against the table at all / none / random:0.5:7 / adversarial, prefill, decode and verify at M = 2..4,
+  # one card and two (device 1's experts in host memory); O3 - the load check refuses a corrupted mirror, arena or
+  # table entry.
+  add_executable(qwen4exp_tier_test runtime/qwen4exp_tier_test.cc)
+  b70_target_kernel_dir(qwen4exp_tier_test)
+  target_include_directories(qwen4exp_tier_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(qwen4exp_tier_test PRIVATE b70_qwen4exp_prefill b70_l0)
+  add_dependencies(qwen4exp_tier_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
+  add_test(NAME qwen4exp_tier_synth_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} 1)
+  add_test(NAME qwen4exp_tier_synth_pp_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} pp2)
+  add_test(NAME qwen4exp_tier_check_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} check)
+  set_tests_properties(qwen4exp_tier_synth_test qwen4exp_tier_check_test
+    PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set_tests_properties(qwen4exp_tier_synth_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
+    TIMEOUT 3600)
 endif()
 # Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21c's cli_reject_qwen4exp_serve is gone). The
 # adapter: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over Qwen4ExpEngine (an object library - the Mac's

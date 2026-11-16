@@ -2045,9 +2045,21 @@ st_r36_project() {
   grab verdict '^(STOP|GO-CANDIDATE):'
   finish
 }
+stage r36.tier 36 default card oracle_q4exp_synth r32.k3,r33.prefill "the expert tier on the ours synthetic, one card (plan 21v2a Task 8): qwen4exp_tier_synth_test - O0 / O1, the direct binaries against the table with every expert in VRAM, none, random:0.5:7 and an adversarial placement (each layer's most-routed half in host memory): prefill, decode and verify at M = 2..4 bitwise (ids, logits, routes, selections, every layer's state); qwen4exp_tier_check_test - O3, the load check refuses a corrupted host mirror word, VRAM arena word or swapped table entries, naming the layer and expert"
+st_r36_tier() {
+  run_tests '^qwen4exp_tier_(synth|check)_test$'
+  jgrab tier '^qwen4exp_tier_(synth|check)_test$' 'O0 |O1 |O3 |refused|OK'
+  finish
+}
+stage r36.tier_pp 36 default gpu oracle_q4exp_synth r36.tier,r22.p1 "the expert tier on two cards: qwen4exp_tier_synth_pp_test - O0 / O1 as r36.tier's on --parallel pp split 2, device 1's layers reading their host experts through device 1's table"
+st_r36_tier_pp() {
+  run_tests '^qwen4exp_tier_synth_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab tier-pp '^qwen4exp_tier_synth_pp_test$' 'O0 |O1 |OK'
+  finish
+}
 
 # ======================================================================================
-row 41 "the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve through llama-benchy, one set of flags, one card - Qwen3.8 int4 g64"
+row 41"the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve through llama-benchy, one set of flags, one card - Qwen3.8 int4 g64"
 rownote 41 "One matrix, every arm: llama-benchy pinned (BENCHY_VERSION, default 0.4.0), A = --pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md verbatim (the flags such tables are usually published with - no --no-cache, so a repeated prompt can hit b70-serve's prefix cache, on by default), B = A with --no-cache, D = --pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache (agentic depth). HTTP-inclusive: these rows sit beside, never replace, the engine-internal records (docs/BENCHMARKS.md 'llama-benchy comparisons')."
 rownote 41 "Opt-in and timed: run on an idle box (the quiet-box session, docs/open-work.md), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so."
 stage r41.ours 41 optin gpu-self qwen,uvx - "b70-serve <qwen> --max-len 40960 on device 0, --spec off and --spec auto: matrices A, B and D (int8 head, bf16 KV, defaults otherwise)"
