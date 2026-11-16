@@ -72,8 +72,9 @@ is not finished is listed in [open-work.md](open-work.md).
 - **Qwen3.8-27B** is the model in focus, with the full set of measured rows (prefill, decode, depth,
   prefix cache, MTP, DFlash, tensor parallel).
 - **Ornith 1.5** is supported and its box tests pass; its speed rows (decode, prefill, MTP cost table) are in BENCHMARKS.
-- **Qwen3.8-Flash-Next** is next. The whole model loads with its routed experts partly in host memory (the
-  expert tier); its speed rows and quality checks on our own export are still to run (open-work.md).
+- **Qwen3.8-Flash-Next** is served whole on two cards from our own export, its routed experts partly in host memory
+  (the expert tier); speed rows in BENCHMARKS. The f32 judge of its tool calls on our export is still to run
+  (open-work.md).
 - **Kolibri-1** is supported by the code and parked (out of focus); no speed rows.
 - **Nemotron 3.5 Bolt** is parked until Flash-Next is done. Its section stays
   because the code still serves it.
@@ -83,14 +84,14 @@ is not finished is listed in [open-work.md](open-work.md).
 
 | | Qwen3.8-27B | Ornith 1.5 35B-A3B | Kolibri-1 | Qwen3.8-Flash-Next |
 |---|---|---|---|---|
-| checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); our own is not made |
-| `b70-serve` | yes | yes | yes, **two cards** by default | `--layers N` only (the whole model is refused until the expert tier is built) |
+| checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | ours (int4 g64, on the box; not published) or Intel's interim W4A16 |
+| `b70-serve` | yes | yes | yes, **two cards** by default | the whole model on two cards (`--parallel pp`), experts partly in pinned host memory |
 | `--parallel tp` | yes | refused | refused | refused |
 | `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request a card); more refused | refused | refused |
-| `--parallel pp` (two cards) | yes | yes | its default (its own engine) | yes, `--layers N` |
-| `b70-decode` | yes | yes | decode and prefill, **two cards** (the default) | decode and prefill, **`--layers N` required** |
-| speed rows in BENCHMARKS | yes | yes | no | no |
-| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed number of guesses = `--spec-max` 1..3 (`auto` = off until the whole model is measured); `b70-decode` refuses it |
+| `--parallel pp` (two cards) | yes | yes | its default (its own engine) | yes (the whole model needs it) |
+| `b70-decode` | yes | yes | decode and prefill, **two cards** (the default) | decode and prefill, the whole model or `--layers N` |
+| speed rows in BENCHMARKS | yes | yes | no | yes (the whole model, our export) |
+| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed number of guesses = `--spec-max` 1..3 (`auto` = off); `b70-decode` refuses it |
 | `--spec lookup` (developer value) | yes | yes (needs the head) | no | yes (needs the head) |
 | `--spec dflash` | yes, when asked: one card (with prompt lookup inside), up to 4 requests a card (`--max-num-seqs`), `replica`, `tp` or `pp`, bf16 or int8 KV | no | refused | refused |
 | `--kv-cache int8` | yes | not built | refused (bf16 only) | refused (bf16 only) |
@@ -446,9 +447,13 @@ MoE in every layer, 4-stream hyper-connections instead of a residual, and a per-
 51.8 GB int8 table lives in host memory and is read by the card directly. Intel's interim checkpoint
 `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (int4 g128 experts, bf16 dense layers) loads through spec 21b's exact
 g64 expansion; its PLE table must be converted once (`tools/box_validate/qwen4exp_oracle.sh <data> ple-int8`, ~51.8 GB
-beside the snapshot). Our own AutoRound g64 export is not made yet.
+beside the snapshot). Our own g64 export (`tools/quantize/quantize_qwen4exp.sh`, on the box, not published) is the one
+served whole.
 
-**Status: built; the whole model loads with the expert tier; no speed row yet.** Decode (spec 21c), prefill (spec 21d)
+**Status: the whole model served on two cards; speed rows in BENCHMARKS.** On our export: decode 38.6-45.4 t/s
+served on real text at ~4k context (48.2 t/s median over the tool-call set), prefill ~1300 t/s at 4k and ~940 t/s at
+62k, `--max-len auto` 65536, passkey 3 / 3 at 61955 ids, a prefix cache hit's output identical to the cold run; ~10 min
+to load, 63.2 GB of host memory pinned (measured). Decode (spec 21c), prefill (spec 21d)
 and serving (spec 21e). **The whole model does not fit two B70s** (its routed experts alone are 64.17 GB at int4 g64),
 so without `--layers` each card keeps the most-routed experts its VRAM has room for after the rest of the plan (the
 same count in every layer, chosen by the routing profile `<snapshot>-expert-profile.safetensors` from
@@ -466,12 +471,14 @@ at 48 layers (derived). The prefill scratch is ~1.5 GB a card (the 512 MiB exper
 grow with `--max-len`), planned into `--layers auto` / `--max-len auto` when a run prefills: with it Intel's forms fit
 18 layers on one card and 37 on two at 32768 (derived).
 
-**Serving (spec 21e).** `b70-serve <checkpoint> --layers N` serves OpenAI chat on one card or two (`--parallel pp`) through
-the Qwen chat path: the template is Qwen3.8's byte for byte, XML tool calls and `<think>` reasoning as for Qwen3.8,
+**Serving (spec 21e).** `b70-serve <checkpoint> --parallel pp` serves the whole model (or `--layers N` a truncated one, on
+one card or two) as OpenAI chat through the Qwen chat path: the template is Qwen3.8's (the original's newer revision
+adds `{% generation %}` markers, which render nothing), XML tool calls and `<think>` reasoning as for Qwen3.8,
 greedy unless the request asks (decision 11 open). **The tokenizer must be the original's** (`Qwen/Qwen3.8-Flash-Next`'s
 `tokenizer.json`, whose split adds `\p{M}`), and it is the snapshot's: Intel's checkpoint ships Qwen3.8's file, which
-`b70-serve` refuses - serve a snapshot directory that ships the original's (our own export, not made yet; the zero-config
-cleanup removed `--tokenizer`). On the box that directory is `~/b70/models/qwen3.8-flash-next/`: links to every file
+`b70-serve` refuses - serve a snapshot directory that ships the original's (our own export does; the zero-config
+cleanup removed `--tokenizer`). The stop ids come from the snapshot's `generation_config.json` (`<|im_end|>` and
+`<|endoftext|>`, the original's file). On the box that directory is `~/b70/models/qwen3.8-flash-next/`: links to every file
 of Intel's snapshot except `tokenizer.json`, which links to the original's; `qwen3.8-flash-next-ple-int8/` beside it
 links the PLE int8 file.
 The prefix cache keeps this family's state with each snapshot (115.7 MB: the 36 GDN states and conv rows, the PLE
@@ -479,14 +486,16 @@ history, the QSA open block's raw keys; + 21 KB with the head) and 25,344 B a po
 head), one layout on one card or two. `--spec mtp --spec-max K` (K 1-3, a fixed K) drafts with the MTP head (vLLM's form;
 `pre_fc_norm_hidden` as one RMS over the 4 streams, `B70_Q4_MTP_NORM=per_stream` for the other form; draft steps after
 the first reuse step 0's selection) and verifies K + 1 rows in one list (790-795 launches at 48 layers, 86-91 at
-`--layers 4`, derived); its `--spec auto` is off until spec 22 measures the acceptance on the whole model. The head's bf16 experts are RTN-quantised to int4 g64 at load; on two cards it runs on the second and
-reads the first card's embedding over peer.
+`--layers 4`, derived). The head's bf16 experts are RTN-quantised to int4 g64 at load; on two cards it runs on the second and
+reads the first card's embedding over peer. On the whole model `--spec auto` is off. Measured with `--spec-max 2`: 0.97-1.00 of
+the drafts accepted on tool calls (62-94 t/s), 0.70-0.83 on code (56.6-66.5 t/s), 0.63 on docs prose (42.5 t/s, plain 41.8)
+and 0.455 on a short prose prompt (15.5 t/s).
 
 ```sh
 I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 
-# every command below: no speed row yet; needs the PLE int8 file beside the snapshot (<snapshot>-ple-int8/)
-O=<our export>   # the whole model, the experts that do not fit in pinned host memory (~65 GB pinned with the PLE)
+# every command below needs the PLE int8 file beside the snapshot (<snapshot>-ple-int8/)
+O=<our export>   # the whole model, the experts that do not fit in pinned host memory (63.2 GB pinned with the PLE)
 ./build/src/cli/b70-decode $O --parallel pp --bench --depth 4096 --tg 256
 ./build/src/cli/b70-serve $O --parallel pp
 ./build/src/cli/b70-decode $I --layers 18 --ids tests/golden/prompts/q4exp_short.ids --n 32
