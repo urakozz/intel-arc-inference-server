@@ -518,8 +518,8 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
 ```
 
 **Limits.** Prefill on `l0` only (`--prefill-backend l0-int8`: spec 5's h8 linears rotate in whole 1024-k Hadamard
-blocks and the hidden is 2560), `--prefill-chunk` at most 2048; the two cards
-cross each chunk by copy, sequentially (spec 16c's overlapped chunk pipeline is not used here); MTP in `b70-serve`
+blocks and the hidden is 2560), `--prefill-chunk` at most 2048; each chunk
+crosses the two cards by copy, card 0 running the next chunk while card 1 finishes this one; MTP in `b70-serve`
 only (`b70-decode --spec mtp` and `--draft-vocab` refused), the expert placement static (no swaps while
 serving), the prefill reading its misses from host memory inside the GEMMs, bf16 KV only (`--kv-cache int8` refused, decision 8), `reasoning_effort` not forwarded to the template (as
 for Qwen3.8),

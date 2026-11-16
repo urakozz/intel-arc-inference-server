@@ -142,6 +142,9 @@ size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p
 // One chunk of at most kPfC positions (= kernels::qwen4exp::kPfC, checked in qwen4exp_prefill.cc): every allocation
 // Qwen4ExpPrefillScratch makes on a device, as device-free arithmetic.
 inline constexpr uint32_t kPfC = 2048;
+// Two cards overlap consecutive chunks (qwen4exp_prefill_engine.cc): every per-chunk input the host writes (the ids,
+// the Controls, the injected rows) and the hand-off's landing buffer are doubled, chunk j's at slot j % kPfDepth.
+inline constexpr uint32_t kPfDepth = 2;
 inline constexpr uint32_t kPfTm = 32;                          // the grouped GEMM's tile rows (pf_moe_gemm TM)
 inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab of a dense linear
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks
@@ -184,7 +187,7 @@ uint32_t pf_batches_gu(const model::Qwen4ExpDesc& d);
 uint32_t pf_batches_dn(const model::Qwen4ExpDesc& d);
 // Qwen4ExpPrefillScratch's allocations on one device (kPfC rows each; every device holds the whole set - the walk is
 // per device, the per-layer rows are indexed by absolute layer / QSA index):
-//   ids        u32  [kPfC]                       host memory: the chunk's ids (the embedding, the PLE gather and ring)
+//   ids        u32  [kPfDepth][kPfC]             host memory: two chunks' ids (the embedding, the PLE gather and ring)
 //   H, xn      bf16 [kPfC][10240]                the 4-stream residual (materialised by the combines), the HC norm
 //   x          bf16 [kPfC][2560]                 a block's input (up_mix's), the embedding rows, the PLE's e rows
 //   down_f32   fp32 [kPfC][512]                  the HC down||inject GEMM (pitch pf_ld(336))
@@ -230,8 +233,8 @@ inline size_t pf_diag_at(uint32_t qsa_index) { return size_t(qsa_index) * kPfC *
 // The injected selection on prefill (spec 21 F3's debug input): host USM [qsa layers][kPfC][kListRow] u32 per device,
 // filled by the caller's injector before each chunk (Qwen4ExpEngine::set_prefill_injector).
 inline size_t pf_injected_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.qsa_before(d.layers)) * kPfC * kListRow * 4; }
-// The two-card prefill hand-off: a second runtime::PipelineLink over spec 16b's layout at chunk size -
-// kPfC rows of the materialised H (42 MB) and no norm sums.
+// The two-card prefill hand-off: kPfDepth runtime::PipelineLinks over spec 16b's layout at chunk size - each kPfC
+// rows of the materialised H (42 MB) and no norm sums; pf_link_bytes counts them all.
 PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d);
 size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 // The prefill walk's launches on one device for the chunk at `pos` of C rows (the hand-off's copies and barriers

@@ -370,7 +370,7 @@ int run_decode(const DecodeArgs& a) {
                runtime::qwen4exp::q4_attn_name(eng.attention()),
                runtime::qwen4exp::prefill_chunk_launches(eng.model().desc, eng.model().placement, 0, chunk), chunk,
                devs == 2 ? "both cards" : "one card", runtime::qwen4exp::kPrefillHeadLaunches,
-               devs == 2 ? "; the chunk crosses by copy, sequentially (an overlapped hand-off is not built yet)" : "");
+               devs == 2 ? "; each chunk crosses by copy, card 0 running the next chunk while card 1 finishes this one" : "");
   }
   std::print(stderr, "{}\n", eng.memory_line().c_str());
   const auto t0 = std::chrono::steady_clock::now();
