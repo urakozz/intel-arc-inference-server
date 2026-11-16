@@ -407,8 +407,8 @@ class Capture {
                 std::to_string(decode_launches(d_)) + " decode_launches() gives " + d_.name);
     // Spec 15e: the verify list is the decode list at M rows plus the head's KV fill
     // (verify_launches): Qwen3.8 784, Ornith 536, at every M.
-    // Spec 32: a deep list's delta-net step is kCapM / 16 links a layer.
-    const size_t links = deep() ? (kCapM / 16 - 1) * size_t(d_.gdn_layers) : 0;
+    // Spec 32: a deep list's delta-net step is kCapM / 16 links a layer; spec 32e: its bf16 GEMVs run in row chunks.
+    const size_t links = (deep() ? (kCapM / 16 - 1) * size_t(d_.gdn_layers) : 0) + split_launches_;
     require(mode_ != Mode::Verify || step_.kernel_count == verify_launches(d_) + links,
             "the verify list has " + std::to_string(step_.kernel_count) + " launches, not the " +
                 std::to_string(verify_launches(d_) + links) + " verify_launches() gives " + d_.name);
@@ -643,7 +643,10 @@ class Capture {
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
       if (sb_.pages) k.arg_ptr(5, sb_.pages);   // plan 19v3b Task 0
-      launch(k, ad.fa_kv_heads, T, deep() ? kCapM / 16 : 1);   // spec 32: the deep lists' row chunks of 16
+      if (deep())   // spec 32: the deep lists' row chunks of 16, a block's chunks side by side (grid dimension 0)
+        launch(k, kCapM / 16, ad.fa_kv_heads, T);
+      else
+        launch(k, ad.fa_kv_heads, T, 1);
     }
     // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
     {
@@ -1182,12 +1185,17 @@ class Capture {
             "the bf16 GEMV's output allocation is smaller than its [M][N] fp32 result");
     // The work-group is one lane per column per K slice - the kernel's
     // reqd_work_group_size(COLS_PER_WG / 16 * KSPLIT subgroups of 16).
-    l0::Kernel& k =
-        kernel(kernels::gemv_bf16_variant(kCapM, s.K, s.N, t), "gemv_bf16", t.cols * t.ksplit);
-    k.arg_ptr(0, w.mem.ptr());
-    k.arg_ptr(1, x);
-    k.arg_ptr(2, out.ptr());
-    launch(k, s.N / t.cols);
+    // Spec 32e: a||b at 64 rows runs as two 32-row launches - the 64-row build ran 6x the 32-row one (14.8 against
+    // 2.4 ms a token, measured); a row's arithmetic does not depend on M, so every row keeps its bits.
+    const uint32_t mr = kCapM == 64 && id == LinearId::AB ? 32 : kCapM;
+    for (uint32_t r0 = 0; r0 < kCapM; r0 += mr) {
+      split_launches_ += r0 > 0;
+      l0::Kernel& k = kernel(kernels::gemv_bf16_variant(mr, s.K, s.N, t), "gemv_bf16", t.cols * t.ksplit);
+      k.arg_ptr(0, w.mem.ptr());
+      k.arg_ptr(1, static_cast<const uint8_t*>(x) + size_t(r0) * s.K * 2);
+      k.arg_ptr(2, static_cast<uint8_t*>(out.ptr()) + size_t(r0) * s.N * sizeof(float));
+      launch(k, s.N / t.cols);
+    }
   }
 
   // gemv_i8w(w, scales, x, out) - src/kernels/gemv_i8w.cl (spec 9 §3), grid N/64, WG 64.
@@ -1715,12 +1723,17 @@ class Capture {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Bf16, "the MTP head's linears are bf16");
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
-    l0::Kernel& k =
-        kernel(kernels::gemv_bf16_variant(kCapM, s.K, s.N, t), "gemv_bf16", t.cols * t.ksplit);
-    k.arg_ptr(0, w.mem.ptr());
-    k.arg_ptr(1, x);
-    k.arg_ptr(2, out);
-    launch(k, s.N / t.cols);
+    // Spec 32e: in a deep list, 16-row launches - the 32- and 64-row builds ran 4.2 / 8.9x the 16-row one (5.2 / 11.0
+    // against 1.24 ms a token, measured); a row's arithmetic does not depend on M, so every row keeps its bits.
+    const uint32_t mr = deep() ? DecodeScratchDims::kWideM : kCapM;
+    for (uint32_t r0 = 0; r0 < kCapM; r0 += mr) {
+      split_launches_ += r0 > 0;
+      l0::Kernel& k = kernel(kernels::gemv_bf16_variant(mr, s.K, s.N, t), "gemv_bf16", t.cols * t.ksplit);
+      k.arg_ptr(0, w.mem.ptr());
+      k.arg_ptr(1, static_cast<const uint8_t*>(x) + size_t(r0) * s.K * 2);
+      k.arg_ptr(2, static_cast<uint8_t*>(out) + size_t(r0) * s.N * sizeof(float));
+      launch(k, s.N / t.cols);
+    }
   }
 
   // The head from its input to its K/V at M rows: embed(hctl.cur_token[m]) and hidden
@@ -2003,6 +2016,7 @@ class Capture {
   // The list's M (rows in flight). Named like the constant it replaced so the
   // binding sites read unchanged; set once, before the walk.
   const uint32_t kCapM;
+  size_t split_launches_ = 0;   // spec 32e: the further launches of a deep list's row-chunked bf16 GEMVs
   const MtpBuffers* mtp_;
   const Mode mode_;
   const uint32_t draft_i_;

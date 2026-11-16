@@ -919,7 +919,8 @@ endif()
 
 # ==== Spec 32: the one-card 32- and 64-row verify lists (deep prompt-lookup runs), bf16 KV ==== (begin) ====
 # Additive only: new names. Ids through Control::deep_cur / deep_out (CTRL_CUR 64 / CTRL_OUT 128). The attention is
-# the 16-row line (KS 1, DSPLIT 128) in row chunks of 16 (RCHUNK: grid dimension 2) with attn_v2's reduce alone at the
+# the 16-row line (spec 33's PAIR PVX 8 PVR 2 since spec 32e) in row chunks of 16 (RCHUNK: grid dimension 0, a block's
+# chunks side by side) with attn_v2's reduce alone at the
 # list's rows; the linears are gemm_sm_v2's rows at 32 / 64; the rest the 16-row list's per-row builds at W.
 set(DEEP_W 32 64)
 if(B70_MTP AND B70_VERIFY_M8)
@@ -931,19 +932,19 @@ if(B70_MTP AND B70_VERIFY_M8)
     add_ocloc_kernel(argmax_stage2_W${MM} SOURCE ${ARGMAX_CL} DEFINES ${DEEP_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=${MM})
     add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
                      DEFINES ${CTRL_DEFINES} M=16 RCHUNK=${MM} TGT=${ATTN_V2_TGT} KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1
-                             PSPLIT=1 KV8=0
+                             PSPLIT=1 PAIR=1 PVX=8 PVR=2 KV8=0
                      OPTIONS -cl-intel-256-GRF-per-thread)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                      DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} REDUCE_ONLY=1)
-    add_gemv_bf16_variant(${MM} 5120 128 16 16)    # a||b
+    if(MM EQUAL 32)
+      add_gemv_bf16_variant(${MM} 5120 128 16 16)  # a||b (at 64 rows: two 32-row launches)
+    endif()
     add_prep_res_fold(${MM} 5120 0 20)
     add_prep_res_fold(${MM} 5120 4 20)
     add_prep_norm_finish(${MM} 5120 20 20)
     add_ocloc_kernel(prep_gated_head_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
     add_attn_prep(${MM})
-    # the MTP head's KV fill of W rows
-    add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
-    add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
+    # the MTP head's KV fill of W rows (its fc and q||k||v: the 16-row builds, in 16-row launches)
     add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
     add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}

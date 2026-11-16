@@ -161,10 +161,12 @@
 #error "attn_verify_dpas: M is 2..8 (16 for the probe's record)"
 #endif
 // RCHUNK (spec 32 §5.3; undefined on every other command line): the 32- or 64-row verify list's attention as row
-// chunks of 16. The build is M 16 (the 16-row line's levers); grid dimension 2 is the chunk c, and work-group
-// (j, blk, c) is exactly the 16-row kernel's work-group launched at pos + 16 c with rows 16 c .. 16 c + 15 - the
-// same walk, operands and order (property R), so each row is bitwise the 16-row list's row at the same key count.
-// It reads q rows 16 c .. and writes the partials of a list of RCHUNK rows ([24][TGT][RCHUNK][258]).
+// chunks of 16. The build is M 16 (the 16-row line's levers); work-group (c, j, blk) - the chunk c on grid dimension
+// 0, so a block's chunks are dispatched side by side and its K / V tiles come from memory once and from the cache
+// for the other chunks (spec 32e) - is exactly the 16-row kernel's work-group (j, blk) launched at pos + 16 c with
+// rows 16 c .. 16 c + 15 - the same walk, operands and order (property R), so each row is bitwise the 16-row list's
+// row at the same key count. It reads q rows 16 c .. and writes the partials of a list of RCHUNK rows
+// ([24][TGT][RCHUNK][258]).
 #ifdef RCHUNK
 #if M != 16 || (RCHUNK != 32 && RCHUNK != 64) || EAGER
 #error "attn_verify_dpas RCHUNK: an M 16 DPAS build, 32 or 64 rows"
@@ -531,7 +533,11 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
                     , __global const uint* restrict pages
 #endif
                     ) {
+#ifdef RCHUNK
+  const uint j = get_group_id(1), blk = get_group_id(2);
+#else
   const uint j = get_group_id(0), blk = get_group_id(1);
+#endif
   const uint lid = get_local_id(0);
   const uint sgid = get_sub_group_id(), l = get_sub_group_local_id();
   const uint k = sgid / SPS;                    // key slice
@@ -541,7 +547,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   const uint ds = qi % DS;                      // dim half (PAIR: key atom)
 
 #ifdef RCHUNK
-  const uint c0 = 16u * get_group_id(2);        // the chunk's first row
+  const uint c0 = 16u * get_group_id(0);        // the chunk's first row
   const uint pos = ctrl[CTRL_POS] + c0;
   uint n_act = ctrl[CTRL_NACT];
   n_act = n_act > c0 ? n_act - c0 : 0u;
@@ -947,7 +953,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
     bool oo;                                                                            \
     row_of(rb0 + r3, r, &qq, &mm, &oo);                                                 \
     if (oo && mm < n_act && (mm < msplit ? live0 : live1)) {                            \
-      __global float* restrict out = attn_part + (((size_t)(j * GQA + qq) * TGT + blk) * M + mm) * PART; \
+      __global float* restrict out = attn_part + (((size_t)(j * GQA + qq) * TGT + blk) * PROWS + mm) * PART; \
       _Pragma("unroll") for (uint a = 0; a < NAM; ++a)                                  \
         if (a < na) out[2 + 16u * (a0 + a) + l] = o[r3][a].s##r;                        \
     }                                                                                   \
@@ -959,7 +965,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #define OUTS(r)                                                                         \
   if (okv.s##r && ((mv.s##r < msplit) ? live0 : live1)) {                               \
     __global float* restrict out =                                                      \
-        attn_part + (((size_t)(j * GQA + qhv.s##r) * TGT + blk) * M + mv.s##r) * PART;  \
+        attn_part + (((size_t)(j * GQA + qhv.s##r) * TGT + blk) * PROWS + mv.s##r) * PART; \
     out[0] = mrow.s##r;                                                                 \
     out[1] = lsum.s##r;                                                                 \
   }

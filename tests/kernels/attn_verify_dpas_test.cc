@@ -168,7 +168,10 @@ struct Rig {
     // A partial the decode kernel does not write must not be read: the buffer starts as NaN for every run.
     imm.fill(part.ptr(), 0xFFFFFFFFu, part.size());
     l0::CmdList l = l0::CmdList::regular(ctx);
-    l.launch(dec, kKvH, kTgt, M > 16 ? M / 16 : 1);   // spec 32: the row chunks of 16 (RCHUNK)
+    if (M > 16)
+      l.launch(dec, M / 16, kKvH, kTgt);   // spec 32: the row chunks of 16 (RCHUNK, grid dimension 0)
+    else
+      l.launch(dec, kKvH, kTgt, 1);
     l.launch(red, kQH, M);
     l.close();
     imm.fill(out.ptr(), 0u, size_t(M) * kRow * 2);
