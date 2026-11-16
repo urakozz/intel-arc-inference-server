@@ -376,6 +376,103 @@ def swap_sim(trace, res0: np.ndarray, S: int, B: float, W: int, copy_ms: float, 
     return hits, T * L * k
 
 
+# --- swap policies (spec 21 v2 §6) --------------------------------------------------------------------------------------
+def _land(pending: list, t: int, res: np.ndarray) -> list:
+    """Admit the copies whose event has fired by step t (pending: [(ready step, layer, expert)])."""
+    keep = []
+    for r, l, e in pending:
+        if t >= r:
+            res[l, e] = True
+        else:
+            keep.append((r, l, e))
+    return keep
+
+
+def policy_basalt(trace, res0: np.ndarray, window: int, copy_ms: float, step_ms: float, decay: float = 0.85,
+                  margin: float = 1.5, cap: int = 96) -> tuple:
+    """basalt's adaptive placement: per (layer, expert) routing counts, decayed by `decay` at the end of every round of
+    `window` steps; then over all layers the non-resident experts with the highest counts replace the residents with the
+    lowest, where the incoming count is at least the victim's + `margin`, at most `cap` a round (largest gain first). A
+    victim reads from the host at once; the copies land ceil(n copy_ms / step_ms) steps after the round (between steps,
+    after their event); no round starts while one is in flight. Returns (hits, total, experts copied)."""
+    ids = trace.ids
+    T, L, k = ids.shape
+    res = res0.copy()
+    c = np.zeros(res.shape, np.float64)
+    lar = np.arange(L)[:, None]
+    pending, hits, copied = [], 0, 0
+    for t in range(T):
+        pending = _land(pending, t, res)
+        row = ids[t]
+        hits += int(res[lar, row].sum())
+        np.add.at(c, (np.repeat(np.arange(L), k), row.reshape(-1)), 1.0)
+        if (t + 1) % window or pending or not math.isfinite(copy_ms):
+            continue
+        cand = []
+        for l in range(L):
+            out_c = np.where(res[l], -np.inf, c[l])
+            in_c = np.where(res[l], c[l], np.inf)
+            for e_in, e_v in zip(_rank_desc(out_c), np.argsort(in_c, kind="stable")):
+                if not np.isfinite(out_c[e_in]) or not res[l, e_v] or out_c[e_in] < in_c[e_v] + margin:
+                    break
+                cand.append((out_c[e_in] - in_c[e_v], l, int(e_in), int(e_v)))
+        cand.sort(key=lambda x: (-x[0], x[1], x[2]))
+        moves = cand[:cap]
+        if moves:
+            ready = t + 1 + math.ceil(len(moves) * copy_ms / step_ms)
+            for _, l, e_in, e_v in moves:
+                res[l, e_v] = False
+                pending.append((ready, l, e_in))
+            copied += len(moves)
+        c *= decay
+    return hits, T * L * k, copied
+
+
+def policy_saber(trace, res0: np.ndarray, prof: np.ndarray, copy_ms: float, step_ms: float, inserts: int = 2,
+                 chance: int = 8, through: float = 0.5) -> tuple:
+    """saber's online placement: an expert is promoted on its second host miss within `chance` steps (second chance),
+    at most `inserts` a layer a step; a layer whose misses are more than `through` of its routed slots that step reads
+    through (no promotion); the victim is the layer's least recently used resident (the profile's order before first
+    use: the least routed goes first). Copies land as in policy_basalt. Returns (hits, total, experts copied)."""
+    ids = trace.ids
+    T, L, k = ids.shape
+    E = res0.shape[1]
+    res = res0.copy()
+    last_use = np.zeros((L, E), np.int64)
+    for l in range(L):                        # before any use: the most routed is the most recent
+        last_use[l, _rank_desc(prof[l])] = -np.arange(1, E + 1)
+    last_miss = np.full((L, E), -(1 << 40), np.int64)
+    incoming = np.zeros((L, E), bool)
+    lar = np.arange(L)[:, None]
+    pending, hits, copied = [], 0, 0
+    for t in range(T):
+        for r, l, e in pending:
+            if t >= r:
+                incoming[l, e] = False
+        pending = _land(pending, t, res)
+        row = ids[t]
+        hit = res[lar, row]
+        hits += int(hit.sum())
+        last_use[lar, row] = np.where(hit, t, last_use[lar, row])
+        miss = ~hit
+        second = miss & (last_miss[lar, row] >= t - chance) & ~incoming[lar, row]
+        second &= (miss.sum(1) <= through * k)[:, None]
+        last_miss[lar, row] = np.where(miss, t, last_miss[lar, row])
+        if not second.any() or not math.isfinite(copy_ms):
+            continue
+        moves = []
+        for l in np.nonzero(second.any(1))[0]:
+            for e in row[l][second[l]][:inserts]:
+                v = int(np.argmin(np.where(res[l], last_use[l], np.iinfo(np.int64).max)))
+                res[l, v] = False
+                incoming[l, e] = True
+                moves.append((int(l), int(e)))
+        ready = t + 1 + math.ceil(len(moves) * copy_ms / step_ms)
+        pending += [(ready, l, e) for l, e in moves]
+        copied += len(moves)
+    return hits, T * L * k, copied
+
+
 # --- MTP verify unions --------------------------------------------------------------------------------------------------
 POPCOUNT = np.array([bin(i).count("1") for i in range(256)], np.uint8)
 
@@ -480,7 +577,10 @@ def read_profile(path: str) -> dict:
 
 
 # --- P0.7: the projection and the stopping rule ------------------------------------------------------------------------------
-STOP_TPS = 40.0                   # spec 22 §3: two cards, 32k, our int4 g64 dense layers, the best fill
+STOP_PP_TPS = 30.0                # spec 21 v2 §11: STOP when (a) pp + tier < 30 t/s and (b) tp + tier < 50 t/s
+STOP_TP_TPS = 50.0
+HC_BYTES = 1.29e9                 # spec 21 v2 §3: the hyper-connections a token, bf16, replicated on both cards under tp
+TP_ALLREDUCE_MS = 0.34            # spec 21 v2 §5 (b): two all-reduces a layer over P2P, ~98 a token x 3.5 us
 ROOFLINE_GBPS = 590.0             # the B70's roofline (spec 22 §2)
 ROOFLINE_SHARE = 0.776            # the share Qwen3.8 reaches (spec 21 §3, docs/05)
 KV_ROW_BYTES = 24576              # spec 21 §3: a selected position's KV over the 12 QSA layers
@@ -498,6 +598,17 @@ def decode_ms(D: float, R: float, BW: float, P: float, h: float, law: str = "ser
     if law == "overlapped":
         return ovl
     return ovl + alpha * (ser - ovl)
+
+
+def tp_card_bytes(D: float, R: float) -> tuple:
+    """Spec 21 v2 §5 (b): a card's bytes a token under tp with the expert split - the hyper-connections replicated, the
+    rest of D and every routed expert halved."""
+    return HC_BYTES + (D - HC_BYTES) / 2, R / 2
+
+
+def tp_ms(Dc: float, Rc: float, BW: float, P: float, h: float, law: str = "serial", alpha: float = 1.0) -> float:
+    """(b): both cards read their halves at once, each over its own link; plus the all-reduces."""
+    return decode_ms(Dc, Rc, BW, P, h, law, alpha) + TP_ALLREDUCE_MS
 
 
 def attn_bytes(ctx: int) -> float:
@@ -688,8 +799,15 @@ def cmd_project(a) -> None:
           f"GB/s ({p_src}); h = each card's best held-out fill on its own layers ({key})" +
           (f"; swaps (+{swap_gain:.4f} at f {swap['f']:g}, uniform) only where a card's f is within {SWAP_F_TOL} of it, "
            f"their copies on the link" if swap else ""))
-    print("| form | cards | max_len | f per card | h per card | policy | ms a token | t/s |")
-    print("|---|---:|---:|---|---|---|---:|---:|")
+    print("| form | cards | max_len | f per card | h per card | policy | ms a token | pp t/s | tp t/s (h, expert split) |")
+    print("|---|---:|---:|---|---|---|---:|---:|---|")
+
+    def tp_line(b, ctx):
+        """(b) tp + tier on the same budget: each card holds half of every expert at the two-card f, h from the pooled
+        curve (the best static fill), each card on its own link at the slower card's P."""
+        Dc, Rc = tp_card_bytes(float(b["read_non_routed"]) + attn_bytes(ctx), float(b["read_routed"]))
+        h = max(interp(rows, float(b["f"]), f"uniform_{key}"), interp(rows, float(b["f"]), f"perlayer_{key}"))
+        return tp_ms(Dc, Rc, BW, min(P_of.values()), h, law, alpha), h
 
     def project_line(b, ctx):
         devs = int(b["devices"])
@@ -725,10 +843,15 @@ def cmd_project(a) -> None:
         t, fs, hs, pol = project_line(b, b["max_len"])
         r = {"dense": b["dense"], "devices": b["devices"], "max_len": b["max_len"], "f": fs, "h": hs, "policy": pol,
              "ms": t, "tps": 1e3 / t}
+        tp_txt = "-"
+        if b["devices"] == 2:
+            tt, th = tp_line(b, b["max_len"])
+            r.update(tp_ms=tt, tp_tps=1e3 / tt, tp_h=th)
+            tp_txt = f"{1e3 / tt:.1f} ({th:.3f})"
         out["rows"].append(r)
         form = "ours (int4 dense)" if b["dense"] == "int4" else "Intel's (bf16 dense, informational)"
         print(f"| {form} | {b['devices']} | {b['max_len']} | {' / '.join(f'{x:.3f}' for x in fs)} | "
-              f"{' / '.join(f'{x:.3f}' for x in hs)} | {pol} | {t:.2f} | {1e3 / t:.1f} |")
+              f"{' / '.join(f'{x:.3f}' for x in hs)} | {pol} | {t:.2f} | {1e3 / t:.1f} | {tp_txt} |")
         if b["devices"] == 2 and b["max_len"] == 32768 and b["dense"] == "int4":
             stop_row = r
         # MTP: a verify at M = K + 1 reads the non-routed bytes once, M rows' attention and the union of the M rows'
@@ -780,14 +903,15 @@ def cmd_project(a) -> None:
                       f"{'%.0f' % cm if cm else 'not measured (bus cap only)'} | {tps:.0f} |")
     if stop_row is None:
         raise SystemExit("offload_curve project: no two-card 32768 int4 budget line (with the head and the prefill)")
-    verdict = "STOP" if stop_row["tps"] < STOP_TPS else "GO-CANDIDATE"
+    verdict = "STOP" if stop_row["tps"] < STOP_PP_TPS and stop_row["tp_tps"] < STOP_TP_TPS else "GO-CANDIDATE"
     out["verdict"] = verdict
-    out["stop_inputs"] = {"devices": 2, "max_len": 32768, "dense": "int4", "tps": stop_row["tps"], "law": law,
-                          "policy": stop_row["policy"], "bar_tps": STOP_TPS}
+    out["stop_inputs"] = {"devices": 2, "max_len": 32768, "dense": "int4", "tps": stop_row["tps"],
+                          "tp_tps": stop_row["tp_tps"], "law": law, "policy": stop_row["policy"],
+                          "bar_pp_tps": STOP_PP_TPS, "bar_tp_tps": STOP_TP_TPS}
     _dump(a, out)
-    print(f"{verdict}: two-card decode at 32k projects {stop_row['tps']:.1f} t/s (ours, int4 g64 dense, {stop_row['policy']} "
-          f"fill, {law} law, P measured per card) against the {STOP_TPS:g} t/s rule (spec 22 §3); the operator's go is "
-          f"separate")
+    print(f"{verdict}: two-card decode at 32k projects {stop_row['tps']:.1f} t/s with the layer split and "
+          f"{stop_row['tp_tps']:.1f} with tensor parallel (ours, int4 g64 dense, {stop_row['policy']} fill, {law} law); "
+          f"STOP only when both miss ({STOP_PP_TPS:g} / {STOP_TP_TPS:g} t/s); the operator's go is separate")
 
 
 def project_args(sub) -> None:
@@ -924,8 +1048,29 @@ def cmd_swap(a) -> None:
                 rows.append({"S": S, "B_mb": Bmb, "W": W, "h": hs, "gain": hs - static,
                              "moved_per_step": st.get("moved", 0) / max(1, steps)})
                 print(f"| {S} | {Bmb:g} | {W} | {hs:.4f} | {hs - static:+.4f} |")
+    # The policies of spec 21 v2 §6 from the same held-out start, by h and the link bytes a token (misses + copies).
+    eb = EXPERT_BYTES
+    steps = sum(t.T for t in tr)
+    pols = [{"policy": "static", "h": static, "copied": 0, "link_mb_per_token": (static_t - static_h) * eb / steps / 1e6}]
+    runs = [(f"basalt (window {w})", lambda t, w=w: policy_basalt(t, res_of[t.name], w, copy_ms, a.step_ms))
+            for w in ilist(a.policy_window)]
+    allc = counts_of(tr, L, E)
+    runs.append(("saber", lambda t: policy_saber(t, res_of[t.name], allc if one_half else cnt[1 - half[t.name]],
+                                                 copy_ms, a.step_ms)))
+    for name, run in runs:
+        hh = tt = cp = 0
+        for t in tr:
+            h, n, c = run(t)
+            hh, tt, cp = hh + h, tt + n, cp + c
+        pols.append({"policy": name, "h": _ratio(hh, tt), "copied": cp,
+                     "link_mb_per_token": ((tt - hh) + cp) * eb / steps / 1e6})
+    print("| policy | h | gain | experts copied | link MB a token (misses + copies) | against static |")
+    print("|---|---:|---:|---:|---:|---:|")
+    for p in pols:
+        print(f"| {p['policy']} | {p['h']:.4f} | {p['h'] - static:+.4f} | {p['copied']} | {p['link_mb_per_token']:.2f} | "
+              f"{p['link_mb_per_token'] / pols[0]['link_mb_per_token']:.3f}x |")
     _dump(a, {"f": a.f, "fill": a.fill, "copy_ms": None if math.isinf(copy_ms) else copy_ms, "step_ms": a.step_ms,
-              "static": static, "rows": rows})
+              "static": static, "rows": rows, "policies": pols})
 
 
 def cmd_mtp(a) -> None:
@@ -1019,6 +1164,7 @@ def main(argv=None) -> None:
     p.add_argument("--W", default="64,256,1024")
     p.add_argument("--copy-ms", required=True, help="P0.2's measured copy time of one expert (ms), or inf")
     p.add_argument("--step-ms", type=float, required=True, help="decode's step time (P0.7's model)")
+    p.add_argument("--policy-window", default="1,8", help="basalt's rounds: steps a round, a comma list")
     p = sub.add_parser("mtp")
     common(p)
     p.add_argument("--K", default="1,2,3,4")

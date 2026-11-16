@@ -124,8 +124,8 @@ struct Flags {
   std::string parallel = "auto";
   [[=Help("auto|N", "pp: device 0 runs layers [0, N); an override, it implies pp.")]] Arg<std::string> pipeline_split{"auto"};
   [[=Help("N|auto", "Kolibri-1 / Qwen3.8-Flash-Next: load only the first N layers\n"
-                    "(development mode; Flash-Next REQUIRES it - the whole model needs the expert tier, not\n"
-                    "built yet - and also takes auto).")]]
+                    "(development mode; Flash-Next also takes auto). Flash-Next without it loads whole: the\n"
+                    "experts that do not fit the cards are read from pinned host memory.")]]
   Arg<std::string> layers;   // spec 20c, Kolibri-1; spec 21c, Qwen3.8-Flash-Next
   [[=Section("\ndeveloper (benchmarks and profiles):\n"),
     =Help("", "ingest --depth synthetic ids, then time --tg generated ones; a markdown row\non stdout.")]]

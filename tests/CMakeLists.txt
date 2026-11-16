@@ -3169,7 +3169,9 @@ if(B70_Q4EXP)
     kernel_gemv_M1_K2560_N13312_S2_L0 kernel_gemv_bf16_M1_K2560_N13312 kernel_gemv_bf16_M1_K2560_N640_C16_S16
     kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_S1 kernel_q4_qsa_M1_T512_W1024 kernel_q4_qsa_attn_M1_T32
     kernel_q4_qsa_attn_eager_M1 kernel_gemv_bf16_M1_K2560_N528_C16_S16 kernel_q4_route_M1_E512_T10_N528_L256
-    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4 kernel_q4_moe_M1_E512_T10_D2560_I640_SHB kernel_q4_ple_gather_M1_BF16
+    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4 kernel_q4_moe_M1_E512_T10_D2560_I640_SHB
+    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M1_E512_T10_D2560_I640_SHB_TBL kernel_q4_expert_check
+    kernel_q4_ple_gather_M1_BF16
     kernel_q4_ple_gather_M1_F32 kernel_q4_ple_block_M1 kernel_gemv_bf16_M1_K2560_N12800
     kernel_gemv_bf16_M1_K2560_N248320 kernel_gemv_i8w_M1_K2560_N248320 kernel_argmax_stage1_M1 kernel_argmax_stage2)
   # Host: the names the capture binds (kernels::qwen4exp::decode_variants) are exactly this list.
@@ -3242,7 +3244,6 @@ endif()
 # model_type stub config.json (spec 21 §13 departure 1: the checkpoint's own config is not vendored), which is all the
 # dispatch and the refusals read.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "expert-offload tier")
 b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "its MTP head is served by b70-serve")
 b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
 # (spec 21e removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21e's block's)
@@ -3272,6 +3273,7 @@ if(B70_Q4EXP)
     kernel_pf_route_slab_K2560_N528_P768 kernel_pf_route_slab_K2560_N128_P256
     kernel_q4_route_M1_E512_T10_N528_L256_P768 kernel_pf_gdn_conv_AB256
     kernel_pf_moe_sort_mw_E512_T10 kernel_pf_moe_q4gemm_K2560_N1280_SILU kernel_pf_moe_q4gemm_K640_N2560
+    kernel_pf_moe_q4gemm_K2560_N1280_SILU_TBL kernel_pf_moe_q4gemm_K640_N2560_TBL
     kernel_pf_gated_head_SIG kernel_q4_pf_bf16_slab_K2560_N640
     kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF kernel_pf_flash_attn_Q24KV2
     kernel_q4_pf_sparse_attn_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_EAGER kernel_pf_attn_Q24KV2
@@ -3475,7 +3477,8 @@ if(B70_Q4EXP AND B70_MTP)
         kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I kernel_q4_hc_up_mix_M${MM}
         kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024
         kernel_q4_qsa_attn_M${MM}_T32 kernel_q4_qsa_attn_eager_M${MM} kernel_q4_route_M${MM}_E512_T10_N528_L256
-        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB)
+        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB
+        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_TBL)
     endif()
   endforeach()
   # Spec 28d: the verify lists' dense int4 projections and int8 head at M 2..4 on gemm_sm (spec 28b's block builds
@@ -3525,6 +3528,23 @@ if(B70_Q4EXP AND B70_MTP)
   set_tests_properties(qwen4exp_mtp_synth_test qwen4exp_mtp_synth_intel_test qwen4exp_mtp_synth_eager_test
     qwen4exp_mtp_synth_pp_test qwen4exp_mtp_intel_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Plan 21v2a Task 8, the expert tier on the ours synthetic (tests/runtime/qwen4exp_tier_test.cc): O0 / O1 - the
+  # direct form against the table at all / none / random:0.5:7 / adversarial, prefill, decode and verify at M = 2..4,
+  # one card and two (device 1's experts in host memory); O3 - the load check refuses a corrupted mirror, arena or
+  # table entry.
+  add_executable(qwen4exp_tier_test runtime/qwen4exp_tier_test.cc)
+  b70_target_kernel_dir(qwen4exp_tier_test)
+  target_include_directories(qwen4exp_tier_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(qwen4exp_tier_test PRIVATE b70_qwen4exp_prefill b70_l0)
+  add_dependencies(qwen4exp_tier_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
+  add_test(NAME qwen4exp_tier_synth_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} 1)
+  add_test(NAME qwen4exp_tier_synth_pp_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} pp2)
+  add_test(NAME qwen4exp_tier_check_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} check)
+  set_tests_properties(qwen4exp_tier_synth_test qwen4exp_tier_check_test
+    PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set_tests_properties(qwen4exp_tier_synth_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
+    TIMEOUT 3600)
 endif()
 # Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21c's cli_reject_qwen4exp_serve is gone). The
 # adapter: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over Qwen4ExpEngine (an object library - the Mac's
@@ -3537,7 +3557,6 @@ if(B70_Q4EXP)
 endif()
 if(TARGET b70-serve)
   set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-  b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "expert-offload tier")
   b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --spec mtp --draft-vocab 32k
     EXPECT "--draft-vocab is not built for Qwen3.8-Flash-Next")
   b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
@@ -3549,7 +3568,7 @@ if(TARGET b70-serve)
     EXPECT "Serve a snapshot that ships")
   b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --layers 4
     EXPECT "belongs to Qwen3.8-Flash-Next")
-  set_tests_properties(cli_reject_serve_qwen4exp_full
+  set_tests_properties(
     cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
     cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
     cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)

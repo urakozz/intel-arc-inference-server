@@ -105,6 +105,9 @@ inline std::string ple_gather_variant(unsigned M, bool bf16_scale) {
 inline std::string ple_block_variant(unsigned M) { return "q4_ple_block" + m_(M); }
 // q4_ple_check lives in every q4_ple binary; the engine binds the gather's.
 inline std::string ple_check_variant(bool bf16_scale) { return ple_gather_variant(1, bf16_scale); }
+// q4_expert_check.cl: the expert tier's load check (plan 21v2a Task 8), one binary; WG 64.
+inline std::string expert_check_variant() { return "q4_expert_check"; }
+inline constexpr uint32_t kExpertCheckWg = 64;
 // q4_qsa.cl's three kernels are one binary per M (prep, score, select: attn.cl's arrangement).
 inline std::string qsa_variant(unsigned M) {
   return "q4_qsa" + m_(M) + "_T" + std::to_string(kTopBlocks) + "_W" + std::to_string(kSelectWg);
@@ -115,8 +118,9 @@ inline std::string qsa_attn_variant(unsigned M, bool eager) {
 }
 inline std::string route_variant(unsigned M) { return "q4_route" + m_(M) + "_E512_T10_N528_L256"; }
 // The shared expert's form: int4 layout-1 blocks (ours: _SH4) or bf16 gemv_bf16 tiles (Intel's: _SHB).
-inline std::string moe_variant(unsigned M, bool shared_bf16) {
-  return "q4_moe" + m_(M) + "_E512_T10_D2560_I640" + (shared_bf16 ? "_SHB" : "_SH4");
+// `table` (the expert tier, plan 21v2a Task 8): w is the layer's u64 table row (_TBL).
+inline std::string moe_variant(unsigned M, bool shared_bf16, bool table = false) {
+  return "q4_moe" + m_(M) + "_E512_T10_D2560_I640" + (shared_bf16 ? "_SHB" : "_SH4") + (table ? "_TBL" : "");
 }
 inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head" + m_(M) + "_SIG"; }
 
@@ -182,6 +186,8 @@ inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf1
       router_variant(),
       route_variant(1),
       moe_variant(1, shared_bf16),
+      moe_variant(1, shared_bf16, true),   // the expert tier's table form (plan 21v2a Task 8)
+      expert_check_variant(),              // its load check (engine construction, not the list)
       ple_gather_variant(1, ple_bf16_scale),
       ple_block_variant(1),
       ple_kv_variant(),
@@ -316,6 +322,8 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_moe_sort_mw_variant(kExperts, kTopK),            // plan 2026-11-12 Task 7: the sort and the fused GEMMs
       pf_moe_q4gemm_variant(kHidden, 2 * kInter, true),
       pf_moe_q4gemm_variant(kInter, kHidden, false),
+      pf_moe_q4gemm_variant(kHidden, 2 * kInter, true, true),   // the expert tier's table form
+      pf_moe_q4gemm_variant(kInter, kHidden, false, true),
       pf_ple_gather_variant(ple_bf16_scale),
       pf_bf16_slab_variant(kHidden, kPleKvN),
       pf_ple_variant(),
@@ -410,6 +418,7 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
       bf16_m_variant(M, kHidden, kRouterN),
       route_variant(M),
       moe_variant(M, shared_bf16),
+      moe_variant(M, shared_bf16, true),
       ple_gather_variant(M, ple_bf16_scale),
       bf16_m_variant(M, kHidden, kPleKvN),
       M == 1 ? ple_block_variant(1) : pf_ple_verify_variant(),

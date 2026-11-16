@@ -301,7 +301,7 @@ class Walk {
 
   void layer(uint32_t l) {
     const loader::Q4Layer& L = part_.layer(l);
-    require(L.hc_attn && L.hc_mlp && L.router && L.gate_up && L.down && L.shared,
+    require(L.hc_attn && L.hc_mlp && L.router && ((L.gate_up && L.down) || L.expert_row) && L.shared,
             "layer " + std::to_string(l) + " is not fully loaded");
     if (l == d_.ple_layer) ple(L);
     hc(*L.hc_attn, true);
@@ -555,13 +555,18 @@ class Walk {
       k.arg_ptr(1, rt);
       launch(k, 1, M_);
     }
-    const std::string mv = kq::moe_variant(M_, shb);
+    // The expert tier (plan 21v2a Task 8): with a table row the _TBL binaries read each routed expert's blocks from
+    // its address (VRAM or pinned host memory) - gate||up the row, down the row + 512 entries; the arithmetic is the
+    // direct form's.
+    const bool tbl = L.expert_row != nullptr;
+    const std::string mv = kq::moe_variant(M_, shb, tbl);
     {
       // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M)
       l0::Kernel& k = kernel(mv, "q4_moe_gate_up", kq::moe_gate_up_wg());
+      if (tbl) k.indirect_host();   // the host-memory experts are reached through the table row
       k.arg_ptr(0, rt);
       k.arg_ptr(1, b_.x.ptr());
-      k.arg_ptr(2, L.gate_up->ptr());
+      k.arg_ptr(2, tbl ? L.expert_row : L.gate_up->ptr());
       k.arg_ptr(3, L.shared->ptr());
       k.arg_ptr(4, b_.moe_h.ptr());
       launch(k, kq::moe_gate_up_groups(), M_);
@@ -569,9 +574,10 @@ class Walk {
     {
       // q4_moe_down(route, h, w_dn, w_sh_dn, y), grid (2560 / 16, M) - y is NOT folded: the next combine does
       l0::Kernel& k = kernel(mv, "q4_moe_down", kq::moe_down_wg());
+      if (tbl) k.indirect_host();
       k.arg_ptr(0, rt);
       k.arg_ptr(1, b_.moe_h.ptr());
-      k.arg_ptr(2, L.down->ptr());
+      k.arg_ptr(2, tbl ? static_cast<uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr());
       k.arg_ptr(3, at(*L.shared, L.shared_down_offset));
       k.arg_ptr(4, b_.y.ptr());
       launch(k, d_.hidden / 16, M_);

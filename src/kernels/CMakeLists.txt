@@ -1352,6 +1352,10 @@ function(add_q4_decode_rows MM)
     endif()
     add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I640_${_sh} SOURCE ${Q4_CL}/q4_moe.cl
                      DEFINES M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=${SHB})
+    # plan 21v2a Task 8: the expert tier's form - a routed expert's blocks through the layer's u64 table row
+    add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I640_${_sh}_TBL SOURCE ${Q4_CL}/q4_moe.cl
+                     DEFINES M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=${SHB}
+                             Q4_EXPERT_TABLE=1)
   endforeach()
 endfunction()
 if(B70_Q4EXP)
@@ -1363,6 +1367,8 @@ if(B70_Q4EXP)
   add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                    DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${Q4_FA_HEADS})
   add_ocloc_kernel(q4_ple_block_M1 SOURCE ${Q4_CL}/q4_ple.cl DEFINES ${CTRL_DEFINES} M=1 PLE_BLOCK=1)   # the PLE block
+  # plan 21v2a Task 8: the expert tier's load check (sampled block words through the table, once at construction)
+  add_ocloc_kernel(q4_expert_check SOURCE ${Q4_CL}/q4_expert_check.cl)
 endif()
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
 
@@ -1470,6 +1476,11 @@ if(B70_Q4EXP)
                    DEFINES K=2560 N=1280 EXPERTS=512 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_q4gemm_K640_N2560 SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
                    DEFINES K=640 N=2560 EXPERTS=512 OPTIONS -cl-intel-256-GRF-per-thread)
+  # plan 21v2a Task 8: the same through the expert tier's table rows (Q4_EXPERT_TABLE, _TBL)
+  add_ocloc_kernel(pf_moe_q4gemm_K2560_N1280_SILU_TBL SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                   DEFINES K=2560 N=1280 EXPERTS=512 SILU_EPI=1 Q4_EXPERT_TABLE=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_q4gemm_K640_N2560_TBL SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                   DEFINES K=640 N=2560 EXPERTS=512 Q4_EXPERT_TABLE=1 OPTIONS -cl-intel-256-GRF-per-thread)
   # the PLE block over a chunk
   add_ocloc_kernel(q4_pf_ple_C2048 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=2048)
 endif()

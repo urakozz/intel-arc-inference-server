@@ -32,6 +32,8 @@ Any value not listed is refused.
 | variable | model | default | what it does |
 |---|---|---|---|
 | `B70_KOLIBRI_ATTN` | Kolibri-1 (`b70-decode`) | `flash` | `eager` runs the attention the way the reference implementation does, as a chain of bf16 steps: 856 kernel launches a token instead of 756, and a score row of 4 B x 48 heads x context length. |
+| `B70_Q4_RESIDENT` | Qwen3.8-Flash-Next (any load) | unset | A test placement of the routed experts: `all`, `none`, `random:<f>:<seed>` or `adversarial` (the profile's most-routed experts in host memory); unset, the planner fills VRAM from the routing profile. Placement never changes the output (tested byte for byte). |
+| `B70_Q4_EXPERTS` | Qwen3.8-Flash-Next (any load) | `table` | `direct` binds the expert kernels without the address table - only when every expert is in VRAM. For A/B timing. |
 | `B70_Q4_ATTN` | Qwen3.8-Flash-Next (`b70-decode`) | `flash` | `eager` is the reference's bf16 chain for its sparse attention layers: 767 launches a token at 48 layers instead of 779. Not yet run on a card. |
 | `B70_Q4_MTP_NORM` | Qwen3.8-Flash-Next (`b70-serve --spec mtp`) | `single` | how the MTP head normalises its input: `single` is one RMS norm over the 4 streams together (what vLLM does), `per_stream` is one per stream. |
 
@@ -61,5 +63,6 @@ scores may be before a test calls the choice between them undetermined.
 | `B70_LONGCTX_TESTS` | the `longctx` tests | unset: SKIP | `1` runs the long-context MTP variants (`mtp_verify_{32k,128k}_test`, `mtp_gpu_{32k,128k}_test`) |
 | `B70_KOL_TIE_TOL` | `kolibri_golden_test`, `kolibri_partial_test` | `1e-2` | the near-tie tolerance of Kolibri-1's expert routing check |
 | `B70_Q4_TIE_TOL`, `B70_Q4_SEL_TOL` | `qwen4exp_golden_test`, `qwen4exp_partial_test` | `1e-3` | the same for Qwen3.8-Flash-Next: expert routing (the 10th against the 11th expert) and the sparse attention's position selection (the 512th against the 513th); a gap of exactly 0 is undetermined |
+| `B70_Q4_EXPERT_CHECK` | the Qwen3.8-Flash-Next engine (`qwen4exp_tier_synth_test`, `qwen4exp_tier_synth_pp_test` set it) | on | `off` skips the load-time check that reads every expert block back through the address tables. Only for the residency tests, which must run nothing on the card before the decode lists. |
 | `B70_SNAPSHOT_DIR` | `template_test`, `prompt_order_test` | Qwen3.8's snapshot under `$HF_HOME` | the snapshot whose chat template it renders |
 | `B70_SPLIT_VERBOSE` | `prefill_split_test` | unset | set: also print the worst KV row per attention layer of each non-bitwise split |

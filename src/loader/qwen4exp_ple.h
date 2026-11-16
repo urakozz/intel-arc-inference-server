@@ -66,6 +66,11 @@ void check_q4_ple(const model::Qwen4ExpDesc& d, const Q4PleHost& h);
 // margin. Throws naming both numbers; `mem_available` 0 = unknown (no /proc/meminfo): passes.
 inline constexpr size_t kQ4PleHostMargin = size_t(16) << 30;
 void check_q4_ple_host_fit(size_t table_bytes, size_t mem_available);
+// Everything pinned beside the cards (plan 21v2a Task 8): the PLE table, the experts' host mirrors and an explicit
+// prefix cache, together within MemAvailable less the same 16 GiB margin. q4_host_fits is the rule (`mem_available`
+// 0 = unknown: fits); check_q4_host_fit throws naming each part, the sum and MemAvailable.
+bool q4_host_fits(size_t pinned_bytes, size_t mem_available);
+void check_q4_host_fit(size_t ple_bytes, size_t mirror_bytes, size_t prefix_bytes, size_t mem_available);
 // MemAvailable from /proc/meminfo in bytes; 0 when unreadable (not Linux).
 size_t q4_mem_available();
 

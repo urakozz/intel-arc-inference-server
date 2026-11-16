@@ -2014,10 +2014,10 @@ st_r36_hostbw() {
   grab_all hostbw '^po hostbw ' 8
   finish
 }
-stage r36.pin 36 default gpu - r36.build,r36.links "P0.5: probe_offload pin --dev both - the largest single pinned range (doubling from 1 GiB, then bisection to 1 GiB) and 48 per-layer ranges + the PLE's 16 + 16 shards: where it fails, MemAvailable before / after, s per GB, every page's tag read back on both cards (SKIP 'host RAM' below 110 GB available or with a container up)"
+stage r36.pin 36 default gpu - r36.build,r36.links "P0.5: probe_offload pin --dev 0, then --dev both - the largest single pinned range (doubling from 1 GiB, then bisection to 1 GiB; one card only: a range above 4 GiB both cards map hangs the driver) and the whole model's host side in pieces of at most 2 GiB (the PLE's 16 + 16 shards, 48 mirrors of the experts not in VRAM at f 0.80): where it fails, MemAvailable before / after, s per GB, every page's tag read back on each card (SKIP 'host RAM' below 110 GB available or with a container up)"
 st_r36_pin() {
   local off="$DATA/oracle-out-q4exp-offload"
-  chk "a=\$(awk '/^MemAvailable:/ { print int(\$2 / 1048576) }' /proc/meminfo); c=\$(docker ps -q 2>/dev/null | wc -l); if [ \"\$a\" -lt 110 ] || [ \"\$c\" -gt 0 ]; then echo \"SKIP_REASON host RAM: MemAvailable \$a GB (< 110) or \$c container(s) up - the pinned arms never run beside a CPU oracle\"; exit 77; fi; ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_offload pin --dev both | tee $off/po-pin.txt" \
+  chk "a=\$(awk '/^MemAvailable:/ { print int(\$2 / 1048576) }' /proc/meminfo); c=\$(docker ps -q 2>/dev/null | wc -l); if [ \"\$a\" -lt 110 ] || [ \"\$c\" -gt 0 ]; then echo \"SKIP_REASON host RAM: MemAvailable \$a GB (< 110) or \$c container(s) up - the pinned arms never run beside a CPU oracle\"; exit 77; fi; ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_offload pin --dev 0 | tee $off/po-pin.txt && ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_offload pin --dev both | tee -a $off/po-pin.txt" \
     "pinned capacity and the page tags"
   grab_all pin '^po pin .*(cap_gib|single_largest|ranges|FAIL|SKIP)' 8
   finish
@@ -2043,6 +2043,18 @@ st_r36_project() {
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA project" "the projection and the stopping rule"
   grab_all project '^(project:|\| ours|decision 9|STOP:|GO-CANDIDATE:)' 24
   grab verdict '^(STOP|GO-CANDIDATE):'
+  finish
+}
+stage r36.tier 36 default card oracle_q4exp_synth r32.k3,r33.prefill "the expert tier on the ours synthetic, one card (plan 21v2a Task 8): qwen4exp_tier_synth_test - O0 / O1, the direct binaries against the table with every expert in VRAM, none, random:0.5:7 and an adversarial placement (each layer's most-routed half in host memory): prefill, decode and verify at M = 2..4 bitwise (ids, logits, routes, selections, every layer's state); qwen4exp_tier_check_test - O3, the load check refuses a corrupted host mirror word, VRAM arena word or swapped table entries, naming the layer and expert"
+st_r36_tier() {
+  run_tests '^qwen4exp_tier_(synth|check)_test$'
+  jgrab tier '^qwen4exp_tier_(synth|check)_test$' 'O0 |O1 |O3 |refused|OK'
+  finish
+}
+stage r36.tier_pp 36 default gpu oracle_q4exp_synth r36.tier,r22.p1 "the expert tier on two cards: qwen4exp_tier_synth_pp_test - O0 / O1 as r36.tier's on --parallel pp split 2, device 1's layers reading their host experts through device 1's table"
+st_r36_tier_pp() {
+  run_tests '^qwen4exp_tier_synth_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  jgrab tier-pp '^qwen4exp_tier_synth_pp_test$' 'O0 |O1 |OK'
   finish
 }
 

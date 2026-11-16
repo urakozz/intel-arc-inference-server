@@ -12,6 +12,7 @@
 #include "loader/qwen4exp_layout.h"
 #include "loader/qwen4exp_ple.h"
 #include "model/qwen4exp.h"
+#include "runtime/qwen4exp/qwen4exp_sizes.h"   // ExpertTier
 
 // Spec 21b Task 6: Qwen3.8-Flash-Next on one or two B70s - the checkpoint's tensors in the layouts
 // loader/qwen4exp_layout.h sizes (loader/qwen4exp_repack.h is the host half), the PLE table pinned in host USM
@@ -39,7 +40,14 @@ struct Q4Layer {                                   // one decoder layer on its d
   std::unique_ptr<l0::Mem> qsa_small;              // q4_qsa_small
   std::unique_ptr<DeviceWeight> router;            // {2560, 528}: rows 0..511 the router, 512 the shared gate
   std::unique_ptr<l0::Mem> gate_up, down;          // 512 layout-1 blocks each, block e at q4_gate_up_offset /
-                                                   // q4_down_offset (spec 22's ranges)
+                                                   // q4_down_offset (spec 22's ranges); with the expert tier the
+                                                   // layer's VRAM arena: its resident experts' blocks in id order
+                                                   // (null when none is resident)
+  std::unique_ptr<l0::Mem> mirror;                 // the tier: the non-resident experts' gate||up blocks then their
+                                                   // down blocks, in id order, pinned host memory (null: all resident)
+  void* expert_row = nullptr;                      // the table form (_TBL): the layer's u64 row on its device - block
+                                                   // addresses, gate||up at [0, 512), down at [512, 1024); null: the
+                                                   // direct form (the MTP head, B70_Q4_EXPERTS=direct)
   std::unique_ptr<l0::Mem> shared;                 // gate||up then down: int4 layout-1 blocks or bf16 tiles
   size_t shared_down_offset = 0;                   // = q4_shared_gate_up_bytes
   std::unique_ptr<l0::Mem> ple;                    // the PLE layer only: key||value tiles, norms, conv (q4_ple_offsets)
@@ -55,7 +63,14 @@ struct Q4DevicePart {
   std::unique_ptr<Q4Layer> mtp;                    // last device, when loaded: the head's QSA layer + MoE
   std::unique_ptr<l0::Mem> mtp_fc;                 // q4_mtp_fc_offsets
   std::unique_ptr<l0::Mem> mtp_mixer;              // the head's own final mixer
-  size_t bytes = 0;                                // weights, == q4_device_weight_bytes (RoPE apart)
+  std::unique_ptr<l0::Mem> expert_table;           // the table form: u64 [its layers][1024] (Q4Layer::expert_row)
+  // The table form's load check (the engine runs q4_expert_check at construction): sample g reads the u64 at table
+  // entry check_idx[g] ((layer - first) x 1024 + slot) + check_off[g] bytes; check_words[g] is the checkpoint's word
+  // there. Each block's first and last word and one every 1 MiB: every 2 MiB page of every arena and mirror.
+  std::vector<uint32_t> check_idx, check_off;
+  std::vector<uint64_t> check_words;
+  size_t bytes = 0;                               // weights, == q4_device_weight_bytes less the experts in host
+                                                   // memory (RoPE and the expert table apart)
   size_t rope_bytes = 0;
   const Q4Layer& layer(uint32_t l) const { return layers.at(l - first); }
 };
@@ -68,9 +83,13 @@ struct Q4LoadedModel {
   uint32_t ple_device = 0;                         // whose context allocated it and holds its pointer table
   uint32_t max_len = 0, checkpoint_layers = 0;
   bool int8_head = false, mtp = false;
+  runtime::qwen4exp::ExpertTier tier;              // where each routed expert lives (all resident without a tier)
+  bool expert_table = false;                       // the layers bind the table form (B70_Q4_EXPERTS, default table)
+  size_t mirror_bytes = 0;                         // the tier's pinned host bytes
   size_t unconsumed = 0, read_per_token = 0, subnormal_scales = 0, skipped = 0;
   double seconds = 0, lm_head_quant_seconds = 0;
-  size_t total_bytes() const;                      // every part's weights + RoPE (the PLE table apart)
+  double expert_check_ms = 0;                      // the table check's cost: the loader's sampling + the device pass
+  size_t total_bytes() const;                     // every part's weights + RoPE (the PLE table apart)
 };
 
 // True when `snapshot_dir`'s config.json says model_type "qwen4_exp" (or "qwen4_exp_text") - the CLIs' dispatch.
@@ -90,8 +109,21 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 // loads the MTP head (its bf16 experts RTN-quantised to int4 g64). The PLE table: q4_ple_dir(snapshot).
 // After: zero unconsumed tensors and each part's bytes equal to q4_device_weight_bytes. One report line per
 // device plus one for the host table.
+// Plan 21v2a Task 8, `tier` (null: every expert resident): the plan less the experts in host memory, each layer's
+// VRAM arena of its resident experts, its pinned host mirror of the rest (refused before the PLE table's pin when the
+// table, the mirrors and a 16 GiB margin exceed MemAvailable, naming the bytes: check_q4_host_fit), each device's
+// table of block addresses read back equal, and the load check's samples (Q4DevicePart::check_*; the engine reads
+// them through the table). The layers bind the table form unless B70_Q4_EXPERTS=direct (refused with any expert in
+// host memory).
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement,
-                            LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false);
+                            LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false,
+                            const runtime::qwen4exp::ExpertTier* tier = nullptr);
+
+// The routing profile beside the checkpoint (`<snapshot>-expert-profile.safetensors`: offload_curve.py profile's
+// u32 counts [layers][experts], format "spec22-profile-1"): its counts, or empty when there is no such file; a file
+// of another shape or format is refused by name.
+std::vector<uint32_t> load_q4_profile(const std::string& snapshot_or_repo, const model::Qwen4ExpDesc& full,
+                                      std::string* path = nullptr);
 
 }  // namespace loader

@@ -5,10 +5,11 @@
 // stdout, one per line; the bench row on stdout); the prompt goes through the decode list one replay per id, or
 // (spec 21d, --prefill / --prefill-length) through Qwen4ExpEngine::prefill in chunks.
 //
-//   --layers N|auto    REQUIRED until spec 22: the development mode (spec 21 §6) - load only layers [0, N) of the
-//                      checkpoint, then the final mixer and the head; `auto` is the planner's largest N that fits
-//                      (runtime::qwen4exp::layers_that_fit). Without it the whole model is refused naming its
-//                      bytes and spec 22 (the expert-offload tier): 512 experts x 48 layers do not fit two B70s
+//   --layers N|auto    the development mode (spec 21 §6) - load only layers [0, N) of the checkpoint, then the final
+//                      mixer and the head; `auto` is the planner's largest N that fits
+//                      (runtime::qwen4exp::layers_that_fit). Without it the whole model loads with the expert tier
+//                      (plan 21v2a Task 8: settle) - 512 experts x 48 layers do not fit two B70s, so each card keeps
+//                      the most-routed experts its VRAM holds and the kernels read the rest from pinned host memory
 //   the PLE int8 file  <snapshot>-ple-int8/, beside the checkpoint (loader::q4_ple_dir; no flag)
 //   --parallel auto|1|pp   1 (the default) or 2 (spec 16b's pieces: the materialised H crosses);
 //   --pipeline-split auto|N   16b's switch and parser; auto is
@@ -25,16 +26,17 @@
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 5's h8 linears rotate in whole 1024-k
 // Hadamard blocks; the hidden is 2560), --prefill-chunk above 2048, --spec mtp
 // (b70-decode runs plain; the head - spec 21e - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
-// bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it with --bench), and the
-// whole model without --layers (spec 22).
+// bf16 first; kv8.cl hard-codes 24 q / 4 kv heads) and --profile (Task 7 times it with --bench).
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <format>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -81,6 +83,8 @@ struct DecodeArgs {
   MaxLenArg max_len{false, 16384};
   size_t reserve = 0;
   size_t card_bytes = 0;        // the smallest visible card's memory (cli::hardware_gate): the fit checks before a device opens
+  size_t prefix_bytes = 0;      // b70-serve's explicit --prefix-cache-gb: pinned host memory settle keeps for it (auto
+                                // sizes itself after the load from what is left)
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   uint32_t layers = 0;          // --layers N (0: not given)
   bool layers_auto = false;     // --layers auto
@@ -102,27 +106,9 @@ struct DecodeArgs {
 
 inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.devices : 1u; }
 
-// The whole published model's refusal (no --layers): the planner's own message (require_fits names the bytes,
-// each card's capacity and spec 22) on its best two-card split.
-[[noreturn]] inline void refuse_whole(const DecodeArgs& a, const char* tool = "b70-decode") {
-  namespace rq = runtime::qwen4exp;
-  const model::Qwen4ExpDesc& d = model::qwen4exp();
-  const uint32_t len = a.max_len.is_auto ? runtime::kMinAutoMaxLen : a.max_len.value;
-  const model::Q4Placement p = model::Q4Placement::two(d, rq::pp_split(d, len, a.int8_head(), a.load_mtp).split);
-  const std::array<size_t, runtime::kPpDevices> caps = {a.card_bytes, a.card_bytes};
-  try {
-    rq::require_fits(rq::plan(d, p, len, a.int8_head(), a.load_mtp), caps, a.reserve);
-  } catch (const std::exception& e) {
-    throw std::runtime_error(std::string(e.what()) + ". Without --layers " + tool + " would load all 48 layers: pass "
-                             "--layers N or --layers auto (development mode)");
-  }
-  throw std::runtime_error("Qwen3.8-Flash-Next's whole model runs only with the expert-offload tier, not built yet: pass "
-                           "--layers N or --layers auto (development mode)");
-}
-
 // Every refusal that needs no device and no tensor - in this order, each by name (tests/CMakeLists.txt's
-// cli_reject_qwen4exp_*): the stages that build what was asked for first, then the whole model.
-inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
+// cli_reject_qwen4exp_*).
+inline void check_args(const DecodeArgs& a) {
   if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
     throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only, not l0-int8: its h8 linears "
                              "rotate in whole 1024-k Hadamard blocks and this model's hidden is 2560 - "
@@ -140,7 +126,6 @@ inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
     throw std::runtime_error("--profile is not built for Qwen3.8-Flash-Next (--bench times it)");
   if (devices_of(a) == 1 && a.pipe.have_split)
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
-  if (a.layers == 0 && !a.layers_auto) refuse_whole(a, tool);
 }
 
 inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {
@@ -165,17 +150,110 @@ struct Settled {
   model::Qwen4ExpDesc desc;   // the truncated descriptor
   model::Q4Placement placement;
   uint32_t max_len = 0;
+  std::optional<runtime::qwen4exp::ExpertTier> tier;   // the whole model's (load_qwen4exp's tier); with --layers N
+                                                       // none: every expert resident (or B70_Q4_RESIDENT's, the loader)
 };
+
+// The whole model's --max-len auto (spec 21 v2 §9): each GB of context is a GB of experts out of VRAM, so the largest
+// of 32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's. The projection (derived): a
+// token reads the non-routed bytes and h of the routed ones from VRAM at kTierVramGbps and the rest from host memory at
+// kTierHostGbps, one after the other (measured on the card: a kernel's host reads add to its VRAM time); h is the
+// share of the profile's routes the fill keeps resident (without a profile: the resident fraction).
+inline constexpr uint32_t kWholeMinLen = 32768;
+inline constexpr double kTierVramGbps = 457.8;   // 77.6 % of the B70's 590 GB/s (Qwen3.8's decode)
+inline constexpr double kTierHostGbps = 11.2;    // one expert read in place from pinned host memory (PCIe 3.0 x16)
+inline double tier_decode_ms(const runtime::qwen4exp::ExpertBudget& b, const runtime::qwen4exp::ExpertTier& t,
+                             const std::vector<uint32_t>& prof) {
+  double hit = 0, all = 0;
+  for (uint32_t l = 0; l < t.layers; ++l)
+    for (uint32_t e = 0; e < t.experts; ++e) {
+      const double c = prof.empty() ? 1.0 : prof[size_t(l) * t.experts + e];
+      all += c;
+      hit += t.resident(l, e) ? c : 0.0;
+    }
+  const double h = all > 0 ? hit / all : 1.0, R = double(b.read_routed);
+  return ((double(b.read_non_routed) + h * R) / kTierVramGbps + (1.0 - h) * R / kTierHostGbps) / 1e6;
+}
 
 // The layer count, placement and max_len for this run, from the planner (before the load: each layer goes straight
 // onto its device). `full` is the checkpoint's descriptor (all its layers). Prints the choice and the plan.
+// Without --layers the whole model loads with the expert tier: each card's VRAM left after the rest of the plan holds
+// the most-routed experts (the routing profile beside the checkpoint, else id order), the rest pinned host memory.
+// B70_Q4_RESIDENT (a test placement, runtime::qwen4exp::fill_tier) forces the residents at any layer count.
+// Host memory (plan 21v2a Task 8): the PLE table, the experts' host mirrors and an explicit prefix cache are pinned
+// beside the cards - they must fit MemAvailable less 16 GiB (loader::check_q4_host_fit) before anything is pinned;
+// the whole model's --max-len auto stops at the first length whose mirrors would not.
 inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
-                      const std::array<size_t, runtime::kPpDevices>& dev) {
+                      const std::array<size_t, runtime::kPpDevices>& dev, const std::string& snapshot) {
   namespace rq = runtime::qwen4exp;
   const bool int8 = a.int8_head(), pf = a.prefills();   // spec 21d: the prefill scratch planned
   const bool hd = a.load_mtp;                            // spec 21e: the MTP head planned
   const uint32_t devs = devices_of(a), cap = full.trained_max_len;
+  const size_t ple = loader::Q4PleHost(loader::q4_ple_dir(loader::resolve_snapshot(snapshot))).bytes();
+  const size_t avail = loader::q4_mem_available();
+  // `note`: what the experts' figure leaves out (the --layers path: a B70_Q4_RESIDENT tier is the loader's).
+  const auto host_line = [&](size_t mirror, const char* note = "") {
+    loader::check_q4_host_fit(ple, mirror, a.prefix_bytes, avail);
+    std::print(stderr, "host: pinned {:.3f} GB (the PLE table {:.3f} + experts {:.3f}{} + the prefix cache {:.3f}) of "
+               "MemAvailable {:.3f} GB, 16 GiB kept\n", (ple + mirror + a.prefix_bytes) / 1e9, ple / 1e9, mirror / 1e9,
+               note, a.prefix_bytes / 1e9, avail / 1e9);
+  };
   Settled s;
+  if (a.layers == 0 && !a.layers_auto) {   // the whole model
+    const char* forced = std::getenv("B70_Q4_RESIDENT");
+    s.desc = full;
+    const model::Qwen4ExpDesc& d = s.desc;
+    std::string prof_path;
+    const std::vector<uint32_t> prof = loader::load_q4_profile(snapshot, full, &prof_path);
+    const auto place = [&](uint32_t len) {
+      return devs == 1 ? model::Q4Placement::one(d)
+                       : model::Q4Placement::two(d, a.pipe.split_auto ? rq::pp_split(d, len, int8, hd, pf).split : a.pipe.split);
+    };
+    const auto tier_at = [&](uint32_t len, rq::ExpertBudget* out = nullptr) {
+      const rq::ExpertBudget b = rq::expert_budget(d, place(len), len, int8, hd, pf, dev, a.reserve);
+      if (out) *out = b;
+      return rq::fill_tier(d, b, prof.empty() ? nullptr : &prof, forced ? forced : "");
+    };
+    if (a.max_len.is_auto) {
+      rq::ExpertBudget b;
+      const double t0 = tier_decode_ms(b, tier_at(kWholeMinLen, &b), prof);
+      s.max_len = kWholeMinLen;
+      std::string tried;
+      for (uint32_t len = kWholeMinLen; len <= cap; len *= 2) {
+        const rq::ExpertTier t = tier_at(len, &b);
+        std::vector<rq::DevicePlan> pl = rq::plan(d, place(len), len, int8, hd, false, pf);
+        rq::apply_tier(pl, d, t);
+        if (!rq::fits(pl, dev, a.reserve)) break;
+        if (!loader::q4_host_fits(ple + t.host_bytes(d) + a.prefix_bytes, avail)) {
+          tried += std::format("{}{:d}: host memory", tried.empty() ? "" : ", ", len);
+          break;
+        }
+        const double ms = tier_decode_ms(b, t, prof);
+        tried += std::format("{}{:d}: {:.2f} ms", tried.empty() ? "" : ", ", len, ms);
+        if (ms > 1.05 * t0) break;
+        s.max_len = len;
+      }
+      std::print(stderr, "max_len: auto -> {:d} (the longest whose projected decode stays within 5% of {:d}'s; derived "
+                 "ms a token: {})\n", s.max_len, kWholeMinLen, tried.c_str());
+    } else {
+      s.max_len = a.max_len.value;
+      if (s.max_len > cap)
+        throw std::runtime_error("--max-len " + std::to_string(s.max_len) + " exceeds Qwen3.8-Flash-Next's trained "
+                                 "context " + std::to_string(cap));
+    }
+    s.placement = place(s.max_len);
+    std::print(stderr, "layers: all {:d} (the routed experts that do not fit the card{} in pinned host memory); max_len {:d}\n",
+               d.layers, devs == 2 ? "s" : "", s.max_len);
+    s.tier = tier_at(s.max_len);
+    std::print(stderr, "experts: {}{}\n", s.tier->source.c_str(),
+               prof.empty() ? "" : (" (" + prof_path + ")").c_str());
+    std::vector<rq::DevicePlan> pl = rq::plan(d, s.placement, s.max_len, int8, hd, false, pf);
+    rq::apply_tier(pl, d, *s.tier);
+    rq::require_fits(pl, dev, a.reserve);
+    host_line(s.tier->host_bytes(d));
+    std::print(stderr, "{}\n", rq::describe(pl, s.placement, s.max_len, dev, a.reserve).c_str());
+    return s;
+  }
   uint32_t layers = a.layers;
   if (a.layers_auto) {
     const uint32_t len = a.max_len.is_auto ? runtime::kMinAutoMaxLen : a.max_len.value;
@@ -214,11 +292,14 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     if (devs == 2 && a.pipe.split_auto) p = model::Q4Placement::two(d, rq::pp_split(d, len, int8, hd, pf).split);
     std::print(stderr, "max_len: {:d} (--max-len)\n", len);
   }
-  rq::require_fits(rq::plan(d, p, len, int8, hd, false, pf), dev, a.reserve);
+  const std::vector<rq::DevicePlan> pl = rq::plan(d, p, len, int8, hd, false, pf);
+  rq::require_fits(pl, dev, a.reserve);
+  const char* forced_l = std::getenv("B70_Q4_RESIDENT");
+  host_line(0, forced_l && *forced_l ? " (B70_Q4_RESIDENT's mirrors are checked at load)" : "");
   if (devs == 2)
     std::print(stderr, "split: {}{:d} (layers [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
                a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
-  std::print(stderr, "{}\n", rq::describe(rq::plan(d, p, len, int8, hd, false, pf), p, len, dev, a.reserve).c_str());
+  std::print(stderr, "{}\n", rq::describe(pl, p, len, dev, a.reserve).c_str());
   s.placement = p;
   s.max_len = len;
   return s;
@@ -256,22 +337,26 @@ int run_decode(const DecodeArgs& a) {
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
                              "the hand-off writes it (docs/10-the-box.md)");
-  const Settled s = settle(full, a, dev);
+  const Settled s = settle(full, a, dev, a.path);
   if (need > s.max_len)
     throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) + " generated ids exceeds max_len " +
                              std::to_string(s.max_len));
   loader::Q4LoadedModel model = [&] {
     Redirect redirect;
-    return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head, s.desc.layers, false);
+    return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head,
+                                 s.desc.layers == full.layers ? 0 : s.desc.layers, false, s.tier ? &*s.tier : nullptr);
   }();
-  std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the final mixer reads layer {:d}'s "
-             "H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
+  if (model.desc.layers < model.checkpoint_layers)
+    std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the final mixer reads layer "
+               "{:d}'s H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
   runtime::PipelineOptions opt;
   runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
   std::print(stderr, "engine: Qwen3.8-Flash-Next, {:d} device(s){}, {:d} launches a token ({} attention, B70_Q4_ATTN), "
-             "max_len {:d}; the PLE table's {:d} host pages read back by the device\n", eng.devices(),
+             "max_len {:d}; the PLE table's {:d} host pages read back by the device; {:d} expert block words read "
+             "back through the tables ({:.1f} ms)\n", eng.devices(),
              devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
-             eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked());
+             eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked(),
+             eng.expert_words_checked(), eng.model().expert_check_ms);
   // Spec 21d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
   // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
   // cur_token (argmax_stage2 is its last launch).

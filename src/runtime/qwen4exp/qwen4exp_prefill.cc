@@ -193,7 +193,7 @@ class Walk {
 
   void layer(uint32_t l) {
     const loader::Q4Layer& L = part_.layer(l);
-    require(L.hc_attn && L.hc_mlp && L.router && L.gate_up && L.down && L.shared,
+    require(L.hc_attn && L.hc_mlp && L.router && ((L.gate_up && L.down) || L.expert_row) && L.shared,
             "layer " + std::to_string(l) + " is not fully loaded");
     if (l == d_.ple_layer) ple(L);
     hc(*L.hc_attn);
@@ -398,19 +398,32 @@ class Walk {
       // walk); Intel's bf16 shared expert (no int4 form) keeps its one-block dequant + GEMM after
       const uint32_t ib = pf_items(d_, C_);
       const uint32_t NG = 2 * d_.moe_inter;
-      launch(kc_(kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true), "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN,
-             ib, 1,
-             {PtrArg(s_.items.ptr()), PtrArg(s_.xg.ptr()), PtrArg(L.gate_up->ptr()),
+      // The expert tier (plan 21v2a Task 8): with a table row the _TBL GEMMs read each block from its address - the
+      // misses straight from pinned host memory, each block once a chunk at the bus rate (2026-11-15, 4 real-width
+      // layers all on host: 4096 rows in 978 ms; copying each layer's misses to VRAM first, in order, took 1052 ms - a
+      // copy-engine ring overlapped with the previous layer's work is the lever, not built)
+      const bool tbl = L.expert_row != nullptr;
+      const void* w_gu = tbl ? L.expert_row : L.gate_up->ptr();
+      const void* w_dn = tbl ? static_cast<const uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr();
+      l0::Kernel& gu = kc_(kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true, tbl), "pf_moe_q4gemm");
+      l0::Kernel& dn = kc_(kernels::pf_moe_q4gemm_variant(d_.moe_inter, d_.hidden, false, tbl), "pf_moe_q4gemm");
+      if (tbl) {   // the host-memory experts are reached through the table row
+        gu.indirect_host();
+        dn.indirect_host();
+      }
+      launch(gu, NG / kernels::pf_moe::kQ4WgN, ib, 1,
+             {PtrArg(s_.items.ptr()), PtrArg(s_.xg.ptr()), PtrArg(w_gu),
               PtrArg(shb ? nullptr : L.shared->ptr()), PtrArg(s_.h.ptr())});
       prefill::profile_wait(cx_, Phase::kMoeGemm);
-      if (shb) grouped("q4_pf_dequant_gu_shb", L.gate_up->ptr(), L.shared->ptr(), 1, d_.hidden, NG, true, s_.xg.ptr(),
+      // (the shared block alone: the walk starts at block d_.experts, whose dequant returns before `w` is read - so
+      // `blocks` is null, never the table row, which this binary would read without the indirect-access flag)
+      if (shb) grouped("q4_pf_dequant_gu_shb", nullptr, L.shared->ptr(), 1, d_.hidden, NG, true, s_.xg.ptr(),
                        s_.h.ptr(), tmax, d_.experts);
-      launch(kc_(kernels::pf_moe_q4gemm_variant(d_.moe_inter, d_.hidden, false), "pf_moe_q4gemm"),
-             d_.hidden / kernels::pf_moe::kQ4WgN, ib, 1,
-             {PtrArg(s_.items.ptr()), PtrArg(s_.h.ptr()), PtrArg(L.down->ptr()),
+      launch(dn, d_.hidden / kernels::pf_moe::kQ4WgN, ib, 1,
+             {PtrArg(s_.items.ptr()), PtrArg(s_.h.ptr()), PtrArg(w_dn),
               PtrArg(shb ? nullptr : at(*L.shared, L.shared_down_offset)), PtrArg(s_.xg.ptr())});
       prefill::profile_wait(cx_, Phase::kMoeGemm);
-      if (shb) grouped("q4_pf_dequant_dn_shb", L.down->ptr(), at(*L.shared, L.shared_down_offset), 1, d_.moe_inter,
+      if (shb) grouped("q4_pf_dequant_dn_shb", nullptr, at(*L.shared, L.shared_down_offset), 1, d_.moe_inter,
                        d_.hidden, false, s_.h.ptr(), s_.xg.ptr(), tmax, d_.experts);
     }
     // q4_pf_moe_combine(route, hdr, pair_row, y, out, C) - grid (2560 / 256, C): the block's y (NOT folded into H)

@@ -128,9 +128,9 @@ struct Flags {
               "step, so a thinking model's next turn is a prefix cache hit right there (agentic sessions;\n"
               "off for benchmarks and the golden gates).")]]
   bool prefix_split_last = false;
-  [[=Help("N|auto", "Qwen3.8-Flash-Next only, REQUIRED (the whole model needs the expert tier, not\n"
-                    "built yet): load its first N layers (development mode); its PLE int8 file is\n"
-                    "<snapshot>-ple-int8/.")]]
+  [[=Help("N|auto", "Qwen3.8-Flash-Next only: load its first N layers (development mode); without it\n"
+                    "the whole model is served, the experts that do not fit the cards read from pinned\n"
+                    "host memory. Its PLE int8 file is <snapshot>-ple-int8/.")]]
   Arg<std::string> layers;   // spec 21e (until spec 22)
   [[=Section("\n  Still being measured (they go when their numbers decide, docs/open-work.md):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
@@ -379,13 +379,16 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
                              "and the hand-off writes it (docs/10-the-box.md)");
-  const cq::Settled s = cq::settle(full, da, dev);
+  const cq::Settled s = cq::settle(full, da, dev, a.snapshot_dir);
   loader::Q4LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head());
+    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head,
+                                 s.desc.layers == full.layers ? 0 : s.desc.layers, a.loads_head(),
+                                 s.tier ? &*s.tier : nullptr);
   }();
-  std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode until the expert tier is built)\n",
-             model.desc.layers, model.checkpoint_layers);
+  if (model.desc.layers < model.checkpoint_layers)
+    std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode)\n", model.desc.layers,
+               model.checkpoint_layers);
   runtime::PipelineOptions opt;
   runtime::qwen4exp::Qwen4ExpEngine engine(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
@@ -409,11 +412,14 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
              options.host.c_str(), options.port, s.max_len);
   print_eos(eos);
   std::print(stderr,
-             ", Qwen3.8-Flash-Next --layers {:d} ({} chat format), {}, prefill backend l0 (chunk {:d}), attention {} "
+             ", Qwen3.8-Flash-Next {} ({} chat format), {}, prefill backend l0 (chunk {:d}), attention {} "
              "(B70_Q4_ATTN), mtp {:d}{}, lm_head {}, kv cache bf16, sampling defaults: greedy unless the request "
              "samples, prefix snapshots: state {:d} B (GDN, PLE, indexer tails{}), blocks {:d} B a "
              "position\n",
-             engine.model().desc.layers, options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
+             engine.model().desc.layers < engine.model().checkpoint_layers
+                 ? "--layers " + std::to_string(engine.model().desc.layers)
+                 : std::string("whole"),
+             options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
              runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
              engine.mtp() ? (std::string(" (the head, fixed K: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
                              " norm, reuse selection" +
@@ -1115,6 +1121,7 @@ int run(int argc, char** argv) {
     qa.load_mtp = qs.loads_head();
     qs.prefix_auto = prefix_auto;
     qs.prefix_cache_gb = prefix_cache_gb;
+    qa.prefix_bytes = prefix_auto ? 0 : size_t(prefix_cache_gb) << 30;   // settle counts an explicit cache
     return serve_qwen4exp(qs, options);
   }
   // Spec 20e: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on two cards by default -

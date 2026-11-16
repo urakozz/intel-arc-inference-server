@@ -6,8 +6,8 @@
 // runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's cli::pp::PipelineEngineAdapterT (src/cli/pipeline_serve_adapter.h:
 // EngineAdapter's logic over the engine's host calls - no third copy of the speculative loop), on one card or two.
 //
-//   --layers N|auto        REQUIRED until spec 22 (b70-decode's development mode): without it the whole model is
-//                          refused naming its bytes and spec 22 (the expert-offload tier)
+//   --layers N|auto        b70-decode's development mode; without it the whole model is served with the expert tier
+//                          (cli/qwen4exp_decode.h settle: the experts that do not fit the cards in pinned host memory)
 //   the PLE int8 file      <snapshot>-ple-int8/, beside the checkpoint (no flag)
 //   the tokenizer          the snapshot's tokenizer.json, held to the original's (Qwen/Qwen3.8-Flash-Next): 21a found the
 //                          original's split regex adds \p{M}, and Intel's checkpoint ships Qwen3.8's file - a snapshot
@@ -22,8 +22,7 @@
 //                          compressed-key blocks; with the head its tail, R, KV and keys)
 // Refused before the device, each by name (the adaptive K waits for spec 22's full-model cost numbers: cli::resolve_spec
 // gives this family a fixed K), --draft-vocab (spec 8 §11's compact head is not built for this head), --kv-cache int8 (decision 8),
-// --prefill-backend l0-int8 (b70-decode's message), --pipeline-split on one card, the whole
-// model without --layers.
+// --prefill-backend l0-int8 (b70-decode's message), --pipeline-split on one card.
 #include <cstdint>
 #include <fstream>
 #include <functional>
@@ -57,11 +56,11 @@ inline void check_serve(const ServeArgs& s) {
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
   if (s.mtp_k > runtime::qwen4exp::kMaxDraft)
     throw std::runtime_error("--spec-max " + std::to_string(s.mtp_k) + ": Qwen3.8-Flash-Next verifies at M <= 4 (K 1..3)");
-  DecodeArgs a = s.args;   // b70-decode's refusals: the prefill backends, the --parallel sub-flags, --layers
+  DecodeArgs a = s.args;   // b70-decode's refusals: the prefill backends, the --parallel sub-flags
   a.mtp = false;
   a.kv8 = false;
   a.profile = false;
-  check_args(a, "b70-serve");
+  check_args(a);
 }
 
 // True when a JSON value (recursively) holds a string containing \p{M} - the original's split regex (21a's finding 3).

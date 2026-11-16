@@ -407,6 +407,10 @@ struct DevicePlan : MemoryComponents {
   size_t weights = 0, rope = 0, state = 0, scratch = 0, link = 0;
   bool mtp = false;                          // the MTP head's weights are in `weights` (the last device)
   bool whole = false;                        // the descriptor is the published 48 layers (not --layers N)
+  // plan 21v2a Task 8 (apply_tier): its layers' routed experts in VRAM / all of them, and the non-resident ones'
+  // bytes (in pinned host memory, not in `weights`)
+  uint32_t vram_experts = 0, routed_experts = 0;
+  size_t host_experts = 0;
 };
 // `prefill` (spec 21d): each device's prefill scratch and prefill link (prefill_state) in prefill_scratch.
 std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
@@ -470,5 +474,30 @@ ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placemen
 // One line: {"max_len":..,"devices":..,"mtp":..,"prefill":..,"int8_head":..,"dense":"int4"|"bf16",..,"cache":[..],
 // "f":..}.
 std::string budget_json(const ExpertBudget& b);
+
+// --- plan 21v2a Task 8: the expert tier ---------------------------------------------------------------------------
+// Which routed experts of each layer live in VRAM (the layer's arena of whole experts, slots in id order) and which in
+// pinned host memory (the layer's mirror, read in place by the expert kernels through the layer's table row). The MTP
+// head's experts are always resident (they are not in the map).
+struct ExpertTier {
+  uint32_t layers = 0, experts = 0;
+  std::vector<uint8_t> vram;                 // [layer][expert]: 1 = in the layer's VRAM arena
+  std::string source;                        // how the residents were chosen (printed at startup)
+  bool resident(uint32_t l, uint32_t e) const { return vram[size_t(l) * experts + e] != 0; }
+  uint32_t n_vram(uint32_t l) const;
+  bool all() const;                          // every expert resident: today's layout
+  size_t host_bytes(const model::Qwen4ExpDesc& d) const;   // the pinned mirror: the non-resident experts' blocks
+};
+ExpertTier all_resident(const model::Qwen4ExpDesc& d);
+// The static fill. Each device's cache bytes (b.cache) over its layers, the same count a layer: uniform, since the
+// 2026-11-12 traces gave the per-layer fill +0.3 point of h at f = 0.80, under the 0.5-point bar for the profile's
+// curve. In each layer the top n by `counts` ([>= d.layers][d.experts], the routing profile; ties to the lower id),
+// by id when `counts` is null. `forced` (the test hook B70_Q4_RESIDENT; empty = the fill): "all", "none",
+// "random:<f>:<seed>" (round(f x experts) a layer, seeded per layer), "adversarial" (the budget's count a layer, the
+// profile's LEAST routed resident: its most routed read from the host) - throws on anything else.
+ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const std::vector<uint32_t>* counts,
+                     const std::string& forced = "");
+// The plan with a tier: each device's weights (and model) less its layers' non-resident experts' blocks.
+void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t);
 
 }  // namespace runtime::qwen4exp

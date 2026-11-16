@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 #include <utility>
 
@@ -88,6 +90,7 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
     binding_ = link_->binding();
   }
   ple_init();
+  expert_check();
   for (uint32_t i = 0; i < p.devices; ++i)
     st(i).step.emplace(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
                              taps_[i].get(), nullptr));
@@ -190,6 +193,61 @@ void Qwen4ExpEngine::ple_init() {
                                "or unmapped pinned page (the xe hazard)");
     }
   ple_pages_checked_ = pages;
+}
+
+// The expert tier's table form: on each device, the loader's sampled block words read through the table the MoE
+// launches bind (q4_expert_check, with their host indirect-access flag), held to the checkpoint's.
+// B70_Q4_EXPERT_CHECK=off skips it (tests only: the two-card O1 must not have the check's flagged kernel make device
+// 1's mirrors resident before its lists run, or it could not catch a _TBL launch without the flag).
+void Qwen4ExpEngine::expert_check() {
+  if (!model_.expert_table) return;
+  if (const char* v = std::getenv("B70_Q4_EXPERT_CHECK"); v && std::string(v) == "off") return;
+  const auto t0 = std::chrono::steady_clock::now();
+  const model::Qwen4ExpDesc& d = model_.desc;
+  for (uint32_t i = 0; i < st_.size(); ++i) {
+    const loader::Q4DevicePart& P = model_.parts[i];
+    Stage& s = st(i);
+    const uint32_t n = uint32_t(P.check_words.size());
+    if (n == 0 || P.check_idx.size() != n || P.check_off.size() != n || !P.expert_table)
+      throw std::logic_error("runtime::qwen4exp::Qwen4ExpEngine: device " + std::to_string(i) + " has the table form "
+                             "but no load-check samples");
+    l0::Mem idx(s.ctx, l0::MemKind::Device, size_t(n) * 4), off(s.ctx, l0::MemKind::Device, size_t(n) * 4),
+        out(s.ctx, l0::MemKind::Device, size_t(n) * 8);
+    s.imm.copy(idx.ptr(), P.check_idx.data(), size_t(n) * 4);
+    s.imm.copy(off.ptr(), P.check_off.data(), size_t(n) * 4);
+    {
+      l0::Module mod(s.ctx, kernels::path(kernels::qwen4exp::expert_check_variant()));
+      l0::Kernel k = mod.kernel("q4_expert_check");
+      k.group_size(kernels::qwen4exp::kExpertCheckWg);
+      k.indirect_host();   // the mirrors are reached through the table, as the MoE launches reach them
+      k.arg_ptr(0, P.expert_table->ptr());
+      k.arg_ptr(1, idx.ptr());
+      k.arg_ptr(2, off.ptr());
+      k.arg_ptr(3, out.ptr());
+      k.arg<uint32_t>(4, n);
+      l0::CmdList list = l0::CmdList::regular(s.ctx);
+      list.launch(k, (n + kernels::qwen4exp::kExpertCheckWg - 1) / kernels::qwen4exp::kExpertCheckWg);
+      list.close();
+      s.queue.execute(list, &s.fence);
+      s.fence.wait();
+    }
+    std::vector<uint64_t> got(n);
+    s.imm.copy(got.data(), out.ptr(), size_t(n) * 8);
+    for (uint32_t g = 0; g < n; ++g)
+      if (got[g] != P.check_words[g]) {
+        const uint32_t slot = P.check_idx[g] % (2 * d.experts), l = P.first + P.check_idx[g] / (2 * d.experts);
+        const uint32_t e = slot % d.experts;
+        throw std::runtime_error(
+            "runtime::qwen4exp::Qwen4ExpEngine: device " + std::to_string(i) + " reads layer " + std::to_string(l) +
+            "'s expert " + std::to_string(e) + " (" + (slot < d.experts ? "gate||up" : "down") + " block, " +
+            (model_.tier.resident(l, e) ? "in VRAM" : "in pinned host memory") + ") at byte " +
+            std::to_string(P.check_off[g]) + " as a different word than the checkpoint's - the expert upload or its "
+            "table address is wrong (or a pinned page is aliased or unmapped). Load again; if it repeats, report it "
+            "with this line");
+      }
+    expert_words_checked_ += n;
+  }
+  model_.expert_check_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 bool Qwen4ExpEngine::settle(uint32_t dev) {
@@ -622,6 +680,18 @@ std::string Qwen4ExpEngine::memory_line() const {
   for (uint32_t i = 0; i < st_.size(); ++i) {
     const std::string label = st_.size() > 1 ? "memory, device " + std::to_string(i) : std::string("memory");
     s += (i ? "\n" : "") + format_memory(label.c_str(), memory_use(i), st(i).ctx.memory_bytes());
+  }
+  // The expert tier (plan 21v2a Task 8): the routed experts in VRAM per device and the pinned host bytes.
+  const loader::Q4LoadedModel& m = model();
+  if (!m.tier.all()) {
+    s += "\nexperts:";
+    for (const loader::Q4DevicePart& P : m.parts) {
+      uint32_t nv = 0;
+      for (uint32_t l = P.first; l < P.end; ++l) nv += m.tier.n_vram(l);
+      s += std::format(" device {:d} {:d} of {:d} resident (f {:.3f});", P.device, nv, (P.end - P.first) * m.desc.experts,
+                       double(nv) / ((P.end - P.first) * m.desc.experts));
+    }
+    s += std::format(" {:.3f} GB pinned in host memory, read in place", m.mirror_bytes / 1e9);
   }
   return s;
 }

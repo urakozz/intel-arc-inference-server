@@ -330,11 +330,58 @@ def _project_inputs(d, h):
                         for f in OC.frange("0.60:0.90:0.05")]}, open(os.path.join(d, "prefill.json"), "w"))
 
 
+def test_tp_spec_table():
+    """Spec 21 v2 §5's table (BW 457.8, P 12): (b) tp at D 2.38 / R 0.627 a card + 0.34 ms, and (a) pp at the D the
+    table was built with (3.46 GB: non-routed 3.04 + the 0.42 fixed; the text's 3.76 gives ~4 t/s less), to 1 t/s;
+    tp_card_bytes halves all but the hyper-connections."""
+    table = {1.00: (97, 145), 0.97: (75, 118), 0.95: (65, 106), 0.90: (49, 83), 0.85: (39, 69)}
+    for h, (pp, tp) in table.items():
+        assert abs(1e3 / OC.decode_ms(3.46e9, 1.253e9, 457.8, 12.0, h) - pp) <= 1.0, (h, pp)
+        assert abs(1e3 / OC.tp_ms(2.38e9, 0.627e9, 457.8, 12.0, h) - tp) <= 1.0, (h, tp)
+    Dc, Rc = OC.tp_card_bytes(3.47e9, 1.254e9)
+    assert abs(Dc - 2.38e9) < 1e6 and Rc == 0.627e9, (Dc, Rc)
+    print("  spec 21 v2 §5's (a) and (b) columns reproduced to 1 t/s (h 1.00 .. 0.85)")
+
+
+def test_swap_policies():
+    """basalt's and saber's placements: a copy that never lands is the static fill (h and 0 copies); saber promotes an
+    expert on its second miss within 8 steps (a layer alternating between two cold experts gains), and reads through
+    when a layer misses on more than half its slots."""
+    L, k, E, T = 2, 2, 16, 200
+    ids = np.zeros((T, L, k), np.int64)
+    ids[:, :, 0] = 0
+    ids[:, :, 1] = 8 + (np.arange(T) % 2)[:, None]       # 8, 9, 8, 9 ...: both cold under the fill below
+    d = os.path.join(TMP, "policies")
+    write_trace(d, "q4exp_agentic", ids, experts=E, mtp=False)
+    t = OC.load_traces(d)[0]
+    prof = np.tile(np.arange(E)[::-1], (L, 1))            # expert 0 the most routed
+    res = OC.resident_uniform(prof, 0.25)                # experts 0-3 resident
+    static, total = OC.hit_rate([t], res)
+    assert static == T * L
+    for w in (1, 8):
+        h, n, c = OC.policy_basalt(t, res, w, math.inf, 25.0)
+        assert (h, n, c) == (static, total, 0), (w, h, c)
+    h, n, c = OC.policy_saber(t, res, prof, math.inf, 25.0)
+    assert (h, n, c) == (static, total, 0)
+    h, n, c = OC.policy_saber(t, res, prof, 0.2, 25.0)
+    assert c == 2 * L and h == total - 4 * L, (h, c, total)   # misses at steps 0-3; 8 and 9 land for steps 4 and 5
+    # reads through: both slots miss (more than half) -> nothing promoted
+    ids2 = np.stack([8 + (np.arange(T) % 2), 10 + (np.arange(T) % 2)], -1)[:, None, :].repeat(L, 1)
+    write_trace(os.path.join(TMP, "policies2"), "q4exp_agentic", ids2, experts=E, mtp=False)
+    t2 = OC.load_traces(os.path.join(TMP, "policies2"))[0]
+    h, n, c = OC.policy_saber(t2, res, prof, 0.2, 25.0)
+    assert (h, c) == (0, 0), (h, c)
+    h, n, c = OC.policy_basalt(t, res, 1, 0.2, 25.0)
+    assert h > static and c > 0, (h, c)
+    print(f"  never landing = static; saber: second chance on 8 / 9, read-through; basalt gains ({h}/{n}, {c} copies)")
+
+
 def test_project_stop_flips():
-    """The last line is STOP below 40 t/s and GO-CANDIDATE above (two cards, 32k, ours, the best fill, the measured law
-    - the largest P's - and P per card): h 0.83 projects ~38.6 t/s, h 0.85 ~41.9 (serial, P 12, BW 590)."""
+    """The last line is STOP only when (a) pp < 30 and (b) tp < 50 t/s (two cards, 32k, ours, the best fill, the
+    measured law - the largest P's - and P per card): h 0.60 projects pp ~20 / tp ~38 (STOP), h 0.75 pp ~29 / tp ~54
+    (GO: tp passes) (serial, P 12, BW 590)."""
     py = [sys.executable, os.path.join(_HERE, "offload_curve.py"), "project"]
-    for h, want in ((0.83, "STOP"), (0.85, "GO-CANDIDATE")):
+    for h, want in ((0.60, "STOP"), (0.75, "GO-CANDIDATE")):
         d = os.path.join(TMP, f"project-{h}")
         _project_inputs(d, h)
         js = os.path.join(d, "project.json")
@@ -350,6 +397,9 @@ def test_project_stop_flips():
         D = 3.712e9 + OC.attn_bytes(32768)
         tps = 1e3 / OC.decode_ms(D, 48 * 10 * 2611200, 590.0, 12.0, h, "serial")
         assert abs(j["stop_inputs"]["tps"] - tps) < 1e-9, (j["stop_inputs"], tps)
+        Dc, Rc = OC.tp_card_bytes(D, 48 * 10 * 2611200)
+        assert abs(j["stop_inputs"]["tp_tps"] - 1e3 / OC.tp_ms(Dc, Rc, 590.0, 12.0, h)) < 1e-9, j["stop_inputs"]
+        assert ((tps < 30) and (j["stop_inputs"]["tp_tps"] < 50)) == (want == "STOP"), j["stop_inputs"]
         assert j["stop_inputs"]["policy"] == "uniform (pooled curve)"      # the better fill; no per-device curve here
         assert {m["K"] for m in j["mtp"]} == {1, 2, 3} and all("PROPOSED" in m["accept_source"] for m in j["mtp"])
         assert [p["C"] for p in j["prefill"]] == [2048, 4096] and j["prefill"][1]["derived"]
@@ -527,8 +577,9 @@ def test_project_laguna_cli():
 
 TESTS = [test_curve_analytic, test_holdout_disjoint, test_swap_never_lands_is_static, test_mtp_unions,
          test_prefill_repeated_row, test_counts_and_profile_roundtrip, test_cli_synthetic, test_tiny_model_traces,
-         test_project_spec_table, test_project_stop_flips, test_project_per_device_and_swaps, test_laguna_decode_table,
-         test_laguna_drafter_table, test_answer_split, test_mtp_unions_to_8, test_project_laguna_cli]
+         test_project_spec_table, test_tp_spec_table, test_swap_policies, test_project_stop_flips,
+         test_project_per_device_and_swaps, test_laguna_decode_table, test_laguna_drafter_table, test_answer_split,
+         test_mtp_unions_to_8, test_project_laguna_cli]
 
 
 def main() -> None:

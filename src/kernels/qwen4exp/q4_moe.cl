@@ -183,8 +183,16 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
 #endif
 
 // ---- the expert address: spec 22 replaces exactly these two lines (its indirection table) -----------------------
+// Q4_EXPERT_TABLE (the _TBL binaries, plan 21v2a Task 8): `base` is the layer's table row - u64 addresses, gate||up
+// blocks at row[0..511], down blocks at row[512..1023] (the down launch binds row + 512) - each in VRAM or in pinned
+// host memory; every existing binary leaves it unset.
+#if Q4_EXPERT_TABLE
+#define Q4_EXPERT_GU(base, id) ((__global const uint*)(intptr_t)((__global const ulong*)(base))[(id)])
+#define Q4_EXPERT_DN(base, id) ((__global const uint*)(intptr_t)((__global const ulong*)(base))[(id)])
+#else
 #define Q4_EXPERT_GU(base, id) ((base) + (size_t)(id) * UP_BLK_U32)
 #define Q4_EXPERT_DN(base, id) ((base) + (size_t)(id) * DN_BLK_U32)
+#endif
 // --------------------------------------------------------------------------------------------------------------
 
 // moe.cl's dot8 / tile_dot, verbatim.

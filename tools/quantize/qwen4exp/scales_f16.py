@@ -6,9 +6,10 @@
 
 At ITERS=0 AutoRound's RTN path writes the scales of the non-expert linears in bf16 whatever `scale_dtype` says
 (the fused experts' come out f16). bf16 has fewer mantissa bits than f16, so a bf16 scale in f16's normal range
-(6.1e-5 .. 65504) or zero converts exactly; a scale outside it is refused (exit 1) - nothing is rounded. Only the
-shards holding a bf16 `.scales` tensor are rewritten (tmp file, then rename). A tuned export (all f16) is left as
-it is.
+(6.1e-5 .. 65504) or zero converts exactly, and so does a smaller one down to 2^-17 (an f16 subnormal holds it: the
+engine reads subnormal f16 scales and counts them at load); every scale is converted and compared back, and any that
+does not survive the round trip is refused (exit 1) - nothing is rounded. Only the shards holding a bf16 `.scales`
+tensor are rewritten (tmp file, then rename). A tuned export (all f16) is left as it is.
 """
 import argparse
 import json
@@ -19,9 +20,6 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-F16_MIN_NORMAL = 2.0 ** -14
-F16_MAX = 65504.0
-
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -29,7 +27,7 @@ def main() -> None:
     a = ap.parse_args()
     with open(os.path.join(a.export, "model.safetensors.index.json"), encoding="utf-8") as f:
         shards = sorted(set(json.load(f)["weight_map"].values()))
-    converted = 0
+    converted = subnormal = 0
     errs = []
     for fn in shards:
         path = os.path.join(a.export, fn)
@@ -43,12 +41,13 @@ def main() -> None:
             for n in f.keys():
                 t = f.get_tensor(n)
                 if n in bf:
-                    m = t.float().abs()
-                    bad = ~torch.isfinite(m) | ((m != 0) & ((m < F16_MIN_NORMAL) | (m > F16_MAX)))
+                    h = t.to(torch.float16)
+                    bad = ~torch.isfinite(h.float()) | (h.float() != t.float())
                     if bool(bad.any()):
-                        errs.append(f"{fn}: {n} has {int(bad.sum())} scale(s) outside f16's normal range")
+                        errs.append(f"{fn}: {n} has {int(bad.sum())} scale(s) with no exact f16 value")
                         continue
-                    t = t.to(torch.float16)
+                    subnormal += int(((h != 0) & (h.float().abs() < 2.0 ** -14)).sum())
+                    t = h
                     converted += 1
                 out[n] = t
         if errs:
@@ -59,7 +58,7 @@ def main() -> None:
         for e in errs[:20]:
             print("REFUSED:", e)
         sys.exit("scales_f16: a bf16 scale has no exact f16 value")
-    print(f"scales_f16: {converted} bf16 scale tensor(s) converted to f16 exactly")
+    print(f"scales_f16: {converted} bf16 scale tensor(s) converted to f16 exactly ({subnormal} subnormal f16 scales)")
 
 
 if __name__ == "__main__":
