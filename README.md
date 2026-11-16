@@ -5,7 +5,7 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 
 - **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
 - **Prompts read at 2,083 t/s on one card, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
-- **Ornith 1.5 35B-A3B:** prompts read at **9,026 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
+- **Ornith 1.5 35B-A3B:** prompts read at **9,362 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 
 One choice to make - how many requests run at once. The engine sizes everything else.
@@ -47,7 +47,7 @@ Prefill, t/s:
 
 | setup | 4k prompt | 16k prompt |
 |---|---:|---:|
-| one card | 9,026 | 7,494 |
+| one card | 9,362 | 7,494 |
 | two cards `replica`, 2 requests (total) | **15,874** | **11,880** |
 
 Generation with MTP, t/s:
