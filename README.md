@@ -23,7 +23,7 @@ Prefill, t/s:
 | setup | 4k prompt | 16k prompt |
 |---|---:|---:|
 | one card | 1,788 | 1,624 |
-| one card, `--prefill-backend l0-int8` (opt-in) | 2,470 | |
+| one card, `--prefill-backend l0-int8` (opt-in) | **2,470** | |
 | two cards, `tp` | **2,931** | **2,683** |
 
 Generation, t/s (several requests: the total; llama-benchy tg128 at 0 / 32k tokens of context):
