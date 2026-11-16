@@ -503,4 +503,29 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
 // The plan with a tier: each device's weights (and model) less its layers' non-resident experts' blocks.
 void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t);
 
+// --- plan 21v2b: tensor parallel (`--parallel tp`) -----------------------------------------------------------------
+// The crossing's device bytes on a card (Qwen3.8's runtime::tp::Layout at hidden 2560, the folded row): its landing
+// buffer (the peer writes it), the send's and the sum's counters, the state words and the card's own folded row.
+size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
+// A card's plan under `p.tp` (one DevicePlan per card): plan() over model::q4_tp_card(one, rank) at one card's
+// placement - its halves of every layer, its halves of the KV (1 kv head) and of the GDN state (24 heads), the indexer
+// keys and the PLE state whole, the decode (and prefill) scratch at the card's shapes - with the embedding whole where
+// p.holds_embed, the final mixer and lm_head's vocabulary half on both, and with `mtp` the verify rows and GDN slots on
+// both and the head whole where p.holds_mtp (its buffers, and the decode scratch at one card's widths there: the
+// head's layer runs at one card's shapes); `link` the crossing.
+std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
+                                bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false);
+// The routed-expert budget under tp: expert_budget's fields with each card's cache over every layer, expert_bytes a
+// half expert (1,305,600 B), routed_total both cards' halves of every expert (f() their mean), and the reads a card's
+// (read_routed R / 2, read_non_routed its D: the hyper-connections, router, indexer and PLE whole, the rest halved).
+ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
+                              bool int8_head, bool mtp, bool prefill,
+                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
+// Card `rank`'s resident experts: fill_tier over that card's cache alone - the same profile and rank order on both
+// cards, so the smaller card's set is a prefix of the other's in every layer.
+ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, uint32_t rank,
+                        const std::vector<uint32_t>* counts, const std::string& forced = "");
+// Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
+double tp_card_f(const ExpertBudget& b, uint32_t rank);
+
 }  // namespace runtime::qwen4exp

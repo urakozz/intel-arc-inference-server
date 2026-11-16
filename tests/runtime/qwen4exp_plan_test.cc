@@ -19,6 +19,11 @@
 //      total byte for byte, cache = capacity - reserve - non_routed (0 below), f = min(1, sum(cache) / routed_total).
 //      Every case prints `budget-json {...}`; `--budget-json FILE` also writes them to FILE, one a line (the
 //      projection's input, tools/oracle/offload_curve.py project).
+//   8. plan 21v2b Task 1: the tensor-parallel form (q4_tp_card, tp_plan, tp_expert_budget) - each card's layer bytes
+//      the one-card layer's with every split part halved (the hyper-connections, router, indexer, small blocks and PLE
+//      whole), a token's reads a card (D, R) against the derivation (2.53 / 0.627 GB), and for both replication forms
+//      (the embedding and the MTP head on both cards; the embedding on card 0, the head on card 1) at the bench's and
+//      the server's configurations: each card's plan, cache, resident count a layer and f, the pinned total.
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -449,6 +454,67 @@ int main(int argc, char** argv) {
     std::printf("spec 22a: f (ours, two cards, 32768, int8 head + MTP head + prefill scratch) = %.4f against spec 22 "
                 "section 2's ~0.83 (%+.4f)%s%s\n", f_ours_32k, f_ours_32k - 0.83, budget_path ? "; budget lines -> " : "",
                 budget_path ? budget_path : "");
+  }
+  // --- 8. plan 21v2b Task 1: tensor parallel ---------------------------------------------------------------
+  {
+    const Qwen4ExpDesc c0 = model::q4_tp_card(ours, 0), c1 = model::q4_tp_card(ours, 1);
+    CHECK_EQ(c0.qkvz_n(), 8192u);
+    CHECK_EQ(c0.qkvg_n(), 6656u);
+    CHECK_EQ(c0.conv_rows(), 5120u);
+    CHECK_EQ(c0.gdn_z_n(), 3072u);
+    CHECK_EQ(c0.q_n(), 3072u);
+    CHECK_EQ(c0.vocab, 124160u);
+    CHECK_EQ(c0.vocab_used + c1.vocab_used, ours.vocab_used);
+    CHECK_EQ(loader::q4_gate_up_block_bytes(c0) + loader::q4_down_block_bytes(c0), size_t(1305600));
+    for (uint32_t l : {0u, 1u, 3u}) {   // a GDN layer, the PLE layer, a QSA layer
+      const loader::Q4LayerBytes o = loader::q4_layer_bytes(ours, l), h = loader::q4_layer_bytes(c0, l);
+      CHECK_EQ(h.hc_attn + h.hc_mlp + h.router + h.qsa_idx + h.qsa_small + h.ple,
+               o.hc_attn + o.hc_mlp + o.router + o.qsa_idx + o.qsa_small + o.ple);
+      CHECK_EQ(2 * h.experts(), o.experts());
+      CHECK_EQ(2 * h.shared(), o.shared());
+      CHECK_EQ(2 * (h.gdn_qkvz + h.gdn_out + h.qsa_qkvg + h.qsa_o), o.gdn_qkvz + o.gdn_out + o.qsa_qkvg + o.qsa_o);
+      CHECK_EQ(h.gdn_ab, o.gdn_ab);   // a||b: the card's 48 real columns of 128, as one card's 96
+    }
+    throws_naming("not the tensor-parallel form", [&] { rq::tp_plan(ours, Q4Placement::two(ours, 24), 16384, true, false); });
+    const rq::ExpertBudget pp = rq::expert_budget(ours, Q4Placement::two(ours, rq::pp_split(ours, 16384, true, false, true).split),
+                                                  16384, true, false, true, caps, kReserve);
+    const rq::ExpertBudget t0 = rq::tp_expert_budget(ours, Q4Placement::tp2(ours, model::Q4TpEnds::Split), 16384, true,
+                                                     false, true, caps, kReserve);
+    CHECK_EQ(2 * t0.read_routed, pp.read_routed);
+    std::printf("plan 21v2b: a card's reads a token: D %.3f GB (derivation 2.53: the hyper-connections 1.29 whole + "
+                "half of the rest - it halved the router, indexer and PLE projections, which stay whole), R %.3f GB "
+                "(0.627); one card's D %.3f, R %.3f\n", t0.read_non_routed / 1e9, t0.read_routed / 1e9,
+                pp.read_non_routed / 1e9, pp.read_routed / 1e9);
+    struct Cfg {
+      const char* what;
+      uint32_t max_len;
+      bool mtp, prefill;
+    };
+    const double ple = rq::host_ple_bytes(ours, loader::Q4PleScale::Bf16);
+    for (const Cfg& g : {Cfg{"b70-decode (16384, plain, prefill)", 16384, false, true},
+                         Cfg{"b70-serve (65536, the MTP head, prefill)", 65536, true, true}}) {
+      const rq::ExpertBudget p2 = rq::expert_budget(ours, Q4Placement::two(ours, rq::pp_split(ours, g.max_len, true, g.mtp, true).split),
+                                                    g.max_len, true, g.mtp, g.prefill, caps, kReserve);
+      std::printf("plan 21v2b: %s: pp f %.4f (cache %.3f / %.3f GB)\n", g.what, p2.f(), p2.cache[0] / 1e9, p2.cache[1] / 1e9);
+      for (model::Q4TpEnds e : {model::Q4TpEnds::Both, model::Q4TpEnds::Split}) {
+        const Q4Placement tp = Q4Placement::tp2(ours, e);
+        const std::vector<rq::DevicePlan> pl = rq::tp_plan(ours, tp, g.max_len, true, g.mtp, false, g.prefill);
+        const rq::ExpertBudget b = rq::tp_expert_budget(ours, tp, g.max_len, true, g.mtp, g.prefill, caps, kReserve);
+        size_t host = 0;
+        for (uint32_t r = 0; r < 2; ++r) {
+          const size_t routed = size_t(48) * 512 * b.expert_bytes;
+          CHECK_EQ(b.non_routed[r] + routed, pl[r].total());
+          const uint32_t n = uint32_t(rq::tp_card_f(b, r) * 512 + 0.5);
+          host += size_t(48) * (512 - n) * b.expert_bytes;
+          std::printf("plan 21v2b:   tp ends %s card %u: weights %.3f GB (non-routed %.3f), kv %.3f, state+scratch+link "
+                      "%.3f, prefill %.3f; cache %.3f GB -> %u experts a layer, f %.4f\n", model::q4_tp_ends_name(e), r,
+                      pl[r].weights / 1e9, (pl[r].weights - routed) / 1e9, pl[r].kv / 1e9, pl[r].decode_state / 1e9,
+                      pl[r].prefill_scratch / 1e9, b.cache[r] / 1e9, n, rq::tp_card_f(b, r));
+        }
+        std::printf("plan 21v2b:   tp ends %s: pinned %.2f GB (the PLE table %.2f + both cards' host halves %.2f)\n",
+                    model::q4_tp_ends_name(e), (ple + host) / 1e9, ple / 1e9, host / 1e9);
+      }
+    }
   }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
               "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused without the expert tier\n",
