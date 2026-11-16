@@ -415,14 +415,15 @@ class Walk {
              {PtrArg(s_.items.ptr()), PtrArg(s_.xg.ptr()), PtrArg(w_gu),
               PtrArg(shb ? nullptr : L.shared->ptr()), PtrArg(s_.h.ptr())});
       prefill::profile_wait(cx_, Phase::kMoeGemm);
-      // (the shared block alone: `blocks` is never read - the walk starts at block d_.experts)
-      if (shb) grouped("q4_pf_dequant_gu_shb", w_gu, L.shared->ptr(), 1, d_.hidden, NG, true, s_.xg.ptr(),
+      // (the shared block alone: the walk starts at block d_.experts, whose dequant returns before `w` is read - so
+      // `blocks` is null, never the table row, which this binary would read without the indirect-access flag)
+      if (shb) grouped("q4_pf_dequant_gu_shb", nullptr, L.shared->ptr(), 1, d_.hidden, NG, true, s_.xg.ptr(),
                        s_.h.ptr(), tmax, d_.experts);
       launch(dn, d_.hidden / kernels::pf_moe::kQ4WgN, ib, 1,
              {PtrArg(s_.items.ptr()), PtrArg(s_.h.ptr()), PtrArg(w_dn),
               PtrArg(shb ? nullptr : at(*L.shared, L.shared_down_offset)), PtrArg(s_.xg.ptr())});
       prefill::profile_wait(cx_, Phase::kMoeGemm);
-      if (shb) grouped("q4_pf_dequant_dn_shb", w_dn, at(*L.shared, L.shared_down_offset), 1, d_.moe_inter,
+      if (shb) grouped("q4_pf_dequant_dn_shb", nullptr, at(*L.shared, L.shared_down_offset), 1, d_.moe_inter,
                        d_.hidden, false, s_.h.ptr(), s_.xg.ptr(), tmax, d_.experts);
     }
     // q4_pf_moe_combine(route, hdr, pair_row, y, out, C) - grid (2560 / 256, C): the block's y (NOT folded into H)
