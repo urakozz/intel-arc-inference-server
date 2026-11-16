@@ -47,7 +47,7 @@ Prefill, t/s:
 
 | setup | 4k prompt | 16k prompt |
 |---|---:|---:|
-| one card | 9,362 | 7,494 |
+| one card | 9,362 | 7,682 |
 | two cards `replica`, 2 requests (total) | **15,874** | **11,880** |
 
 Generation with MTP, t/s:
