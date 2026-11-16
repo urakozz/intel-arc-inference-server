@@ -103,8 +103,8 @@ int main(int argc, char** argv) {
   const bool wide = max_m > 4;   // spec 19a: the M = 5..8 arms
   // Spec 28c (plan 28c Task 7): a 9th positional `mode` - default | vattn.
   const std::string mode = argc > 9 ? argv[9] : "default";
-  if (mode != "default" && mode != "vattn" && mode != "wide16") {
-    std::fprintf(stderr, "mode %s: default, vattn or wide16\n", mode.c_str());
+  if (mode != "default" && mode != "vattn" && mode != "wide16" && mode != "wideprof") {
+    std::fprintf(stderr, "mode %s: default, vattn, wide16 or wideprof\n", mode.c_str());
     return 2;
   }
   const bool vattn = mode == "vattn";
