@@ -237,6 +237,44 @@ void deep_runs() {
   std::printf("deep: a wide verify kept whole earns 31 drafts, a partial keep or an exit goes back to 15\n");
 }
 
+// Spec 32e: deep_k 63 - a 15-draft verify kept whole asks for 63 next; a keep of at least half drops a width, less
+// goes back to 15; two wide misses in a row keep the request at 15 until reset().
+void deep64_runs() {
+  LookupInDFlashOptions o = opts(0, 3);
+  o.wide_k = 15;
+  o.deep_k = 63;
+  LookupInDFlash p(o);
+  const PromptLookup m = context(400, 64, 8);
+  const auto hot = [&] {
+    CHECK_EQ(p.propose(m).size(), size_t(3));
+    p.observe(3, 3);
+  };
+  hot();
+  CHECK_EQ(p.propose(m).size(), size_t(15));
+  p.observe(15, 15);
+  CHECK_EQ(p.propose(m).size(), size_t(63));
+  p.observe(63, 63);
+  CHECK_EQ(p.propose(m).size(), size_t(63));   // stays at the top
+  p.observe(63, 40);                           // at least half: down a width
+  CHECK_EQ(p.propose(m).size(), size_t(31));
+  p.observe(31, 31);                           // whole: the miss count starts again
+  CHECK_EQ(p.propose(m).size(), size_t(63));
+  p.observe(63, 20);                           // under half (>= 8: still hot): back to 15
+  CHECK_EQ(p.propose(m).size(), size_t(15));
+  p.observe(15, 10);                           // the second wide miss in a row: the request stays at 15
+  CHECK_EQ(p.narrowed, uint64_t(1));
+  CHECK_EQ(p.propose(m).size(), size_t(15));
+  p.observe(15, 15);
+  CHECK_EQ(p.propose(m).size(), size_t(15));   // kept whole, still 15
+  p.observe(15, 15);
+  p.reset();                                   // the next request earns again
+  hot();
+  CHECK_EQ(p.propose(m).size(), size_t(15));
+  p.observe(15, 15);
+  CHECK_EQ(p.propose(m).size(), size_t(63));
+  std::printf("deep64: 15 -> 63 on a whole keep, down a width at >= half, two wide misses keep the request at 15\n");
+}
+
 }  // namespace
 
 int main() {
@@ -245,6 +283,7 @@ int main() {
   k_caps();
   wide_runs();
   deep_runs();
+  deep64_runs();
   std::printf("lookup_in_dflash_test: ok\n");
   return 0;
 }

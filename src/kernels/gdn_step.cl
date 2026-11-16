@@ -310,22 +310,22 @@ inline bool run_start(__global const uint* rows, uint m) {
 #if !defined(CTRL_PEND) || !defined(PEND_PAR)
 #error "gdn_step DEFERRED: CTRL_PEND and PEND_PAR (bytes a parity) must be defined"
 #endif
-#define PR 32                                      /* rows a step can leave: the verify lists' up to 32 (spec 32) */
+#define PR 64                                      /* rows a step can leave: the verify lists' up to 64 (spec 32) */
 #if M > PR
 #error "gdn_step DEFERRED: at most PR rows a step"
 #endif
-// ROW0 (spec 32 §5.4; undefined on every other command line): a link of the 32-row list's chain of 16-row launches.
-// The build is M 16; launch ROW0 runs the list's rows ROW0 .. ROW0 + 15 (the host binds the partials, a||b and gdn_o
-// at that row) at position pos + ROW0, and takes two more arguments: `state_x`, the scratch state, and `conv_x`, the
-// conv scratch [16 rows][CONV_ROWS] of rows 16..31 (the 32-deep ring keeps rows 0..15 only, so a rejected row never
-// overwrites the window the next step reads). ROW0 0 is today's launch (the replay, then its rows) and
+// ROW0 (spec 32 §5.4; undefined on every other command line): a link of the 32- / 64-row lists' chain of 16-row
+// launches. The build is M 16; launch ROW0 runs the list's rows ROW0 .. ROW0 + 15 (the host binds the partials, a||b
+// and gdn_o at that row) at position pos + ROW0, and takes two more arguments: `state_x`, the scratch state, and
+// `conv_x`, the conv scratch [48 rows][CONV_ROWS] of rows 16.. (the 32-deep ring keeps rows 0..15 only, so a rejected
+// row never overwrites the window the next step reads). ROW0 0 is today's launch (the replay, then its rows) and
 // stores the state after its rows to state_x; ROW0 > 0 starts from state_x, replays nothing, reads its window from
 // the ring (rows < 16) or conv_x, writes its rows' conv inputs to conv_x and stores its state back to state_x. Every
 // row's recurrence inputs go to the pending rows at ROW0 + m. The recurrence, the norms and their order are the
 // 16-row build's, so every row is bitwise the 16-row list's row at the same state and position.
 #ifdef ROW0
-#if M != 16 || (ROW0 != 0 && ROW0 != 16)
-#error "gdn_step DEFERRED ROW0: an M 16 link at row 0 or 16"
+#if M != 16 || (ROW0 != 0 && ROW0 != 16 && ROW0 != 32 && ROW0 != 48)
+#error "gdn_step DEFERRED ROW0: an M 16 link at row 0, 16, 32 or 48"
 #endif
 #define PROW(m) (ROW0 + (m))
 #else
@@ -429,7 +429,11 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   __local float o_red[SG][CHUNK_V];        // o  band partials
 #endif
 #ifdef DEFERRED
-  __local float rep_k[PR][DIM];            // the replayed rows' kf
+  // Spec 32e: the replayed rows' kf, REP_ROWS at a time (a replay of up to PR = 64 rows reloads it every REP_ROWS rows;
+  // the rows run in the same order, so nothing but the SLM size changes - [PR] rows took the 16-row and first-link
+  // builds from 4.9 to 9.8 ms a token, measured).
+#define REP_ROWS 16
+  __local float rep_k[REP_ROWS][DIM];
   __local float rep_red[2][SG][CHUNK_V];   // their kv band partials, by row parity
 #endif
 
@@ -466,7 +470,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 #else
   const uint n_rep = min(pend_word & 0xFFu, (uint)PR);
 #endif
-  for (uint i = lid; i < n_rep * DIM; i += WG_GDN)
+  for (uint i = lid; i < min(n_rep, (uint)REP_ROWS) * DIM; i += WG_GDN)
     rep_k[i / DIM][i % DIM] = bf16f(pend_at(pend, par)[((i / DIM) * KHEADS + kh) * DIM + i % DIM]);
 #endif
   for (uint cid = lid; cid < CH_PER_WG; cid += WG_GDN) {
@@ -580,6 +584,12 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     const __global ushort* restrict pr = pend_at(pend, par);
     const __global float* restrict ps = (const __global float*)pr + PEND_S_OFF;
     for (uint r = 0; r < n_rep; ++r) {
+      if (r > 0 && r % REP_ROWS == 0) {   // the next REP_ROWS rows' kf (n_rep is uniform: so are the barriers)
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (uint i = lid; i < min(n_rep - r, (uint)REP_ROWS) * DIM; i += WG_GDN)
+          rep_k[i / DIM][i % DIM] = bf16f(pr[((r + i / DIM) * KHEADS + kh) * DIM + i % DIM]);
+        barrier(CLK_LOCAL_MEM_FENCE);
+      }
       const float decay = ps[(r * HEADS + h) * 2], beta = ps[(r * HEADS + h) * 2 + 1];
       for (uint kk = 0; kk < BAND_K; ++kk) {
         S[kk][0] *= decay;
@@ -587,7 +597,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
       }
       float p0 = 0.0f, p1 = 0.0f;
       for (uint kk = 0; kk < BAND_K; ++kk) {
-        const float kfv = rep_k[r][sgid * BAND_K + kk];
+        const float kfv = rep_k[r % REP_ROWS][sgid * BAND_K + kk];
         p0 = fma(S[kk][0], kfv, p0);
         p1 = fma(S[kk][1], kfv, p1);
       }
@@ -600,7 +610,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
       const float d0 = (bf16f(pv[lane]) - kv0) * beta;
       const float d1 = (bf16f(pv[lane + SG]) - kv1) * beta;
       for (uint kk = 0; kk < BAND_K; ++kk) {
-        const float kfv = rep_k[r][sgid * BAND_K + kk];
+        const float kfv = rep_k[r % REP_ROWS][sgid * BAND_K + kk];
         S[kk][0] = fma(kfv, d0, S[kk][0]);
         S[kk][1] = fma(kfv, d1, S[kk][1]);
       }

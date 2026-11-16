@@ -78,7 +78,7 @@ struct PersistentBuffers : PersistentDims {
 struct DecodeScratch : DecodeScratchDims {
   // kM, kAttnBlock, kAttnV2Blocks and kNormGroups - each with the measurement that
   // chose it - are DecodeScratchDims's (runtime/buffer_sizes.h).
-  DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
+  DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t rows = kWideM);
 
   // Spec 15b: hidden, head counts and widths are the descriptor's (Qwen3.8 in brackets).
   l0::Mem resid;          // bf16 [M][hidden 5120]

@@ -30,11 +30,14 @@
 //        to pos 16384 without a throw and produce the plain run's ids; then verify and
 //        draft refuse.
 //
-//   W32  (spec 32, `... 16384 rule deep`): the 32-row list against the 16-row list from the same state - (a) every
+//   W32 / W64 (spec 32, `... 16384 rule deep`): the deep lists against the 16-row list from the same state - (a) every
 //        row bitwise the 16-row list's row (rows past 15: after 16-row verifies committing 15 of the same inputs);
-//        (b) for j in 0, 7, 15, 16, 17, 29 a wrong draft at j + 1 and junk after leave rows 0..j bitwise and the
+//        (b) for j in 0, 7, 15, 16, 31, 32, 47, 62 a wrong draft at j + 1 and junk after leave rows 0..j bitwise and the
 //        next 64 plain ids bitwise the clean run's; (c) greedy lookup iterations with commits in between emit the
-//        same ids through the 32-row list as through the 16-row one (the captured lists replayed across commits).
+//        same ids through the deep list as through the 16-row one (the captured lists replayed across commits);
+//        (d) after a deep verify committing 5 W / 8 rows, a snapshot's state, conv-ring window and hidden row bitwise
+//        the 16-row lists' at the same position (a verify row is not bitwise a plain step's) and, after its load and
+//        after a 64-id prefill, the next 64 plain ids bitwise that session's.
 //   W16  (open-work 28, `mtp_verify_test <snapshot> 16384 rule wide`: the int8 head, whose engine builds the 16-row
 //        list) at the M2 positions: (a) for j in 0, 1, 4, 7, 11, 14 the 16-row verify with drafts g[1..j] true, a WRONG
 //        id at j + 1 and junk after - its rows 0..j bitwise the all-true verify's (no later row leaks into an
@@ -304,7 +307,7 @@ bool w16(Ctx& c, const Snap& s0, const std::vector<uint32_t>& prompt, const std:
   return ok;
 }
 
-// W32 (header): the deep list of W rows against the 16-row list from the same state.
+// W32 / W64 (header): the deep list of W rows against the 16-row list from the same state.
 bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
   constexpr uint32_t K16 = runtime::Engine::kWideK;
   const uint32_t K = W - 1;
@@ -339,7 +342,7 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
   std::printf("  W%u (a): %zu of %u rows differ from the 16-row list's (bitwise)\n", W, diff_rows, W);
   ok &= diff_rows == 0;
   // (b) a wrong draft at j + 1 and junk after: rows 0..j bitwise the all-true verify's, the next 64 plain ids too
-  for (uint32_t j : {0u, 7u, 15u, 16u, 17u, 29u}) {
+  for (uint32_t j : {0u, 7u, 15u, 16u, 31u, 32u, 47u, 62u}) {
     if (j >= K) continue;
     deep(K);
     c.e.commit(j, c.e.verify_ids()[j]);
@@ -378,6 +381,60 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
   std::printf("  W%u (c): %zu ids emitted through %u-row verifies and commits %s the 16-row lists'\n", W, n, W,
               same ? "equal" : "DIFFER from");
   ok &= same;
+  // (d) the state paths after a deep verify: an all-true verify of W rows committing j = 5 W / 8 (20 at 32 rows, 40 at
+  // 64: past the first chain link, so the state comes from the replay and the ring rows from the conv scratch), then
+  // (i) a snapshot saved - bitwise the one the 16-row lists leave at the same position - loaded after 8 more steps,
+  // and (ii) 64 ids prefilled straight after the commit; each time the next 64 plain ids bitwise that session's.
+  {
+    const uint32_t j = 5 * W / 8;
+    const std::vector<uint32_t> fill(g.begin() + 1, g.begin() + 65);   // any 64 ids, the same in both arms
+    const auto to_j = [&](bool deep_arm) {   // pos = S0 + j + 1, the pending id g[j + 1]
+      if (deep_arm) {
+        deep(K);
+        c.e.commit(j, c.e.verify_ids()[j]);
+        return;
+      }
+      s0.restore(c);   // the 16-row lists over the same inputs, as (a): 15 rows a verify committed, the last j % 16
+      for (uint32_t q = 0; 16 * q <= j; ++q) {
+        for (uint32_t i = 1; i <= K16; ++i) c.ctl->wide_cur[i] = g[16 * q + i];
+        c.e.verify(K16);
+        const uint32_t jj = 16 * (q + 1) <= j ? K16 : j - 16 * q;
+        c.e.commit(jj, g[16 * q + jj + 1]);
+      }
+    };
+    // What a snapshot carries that the session reads again: the GDN state, the conv ring's window (the 3 positions
+    // before pos; a deep commit copies only those of its rows 16.. into the ring, so older slots may hold other
+    // rows than plain steps leave - never read) and the head's hidden row.
+    const size_t ring_row = size_t(10240) * 2, layers = kGdnBytes / (size_t(48) * 128 * 128 * 4);
+    const auto paths = [&](bool deep_arm, std::vector<uint8_t>& state) {
+      to_j(deep_arm);
+      const Snap s(c);
+      const uint8_t* h = s.st.as<uint8_t>();
+      state.assign(h, h + kGdnBytes);
+      for (size_t l = 0; l < layers; ++l)
+        for (uint32_t t = 1; t <= 3; ++t) {
+          const uint8_t* r = h + kGdnBytes + (l * 32 + (s.pos - t) % 32) * ring_row;
+          state.insert(state.end(), r, r + ring_row);
+        }
+      state.insert(state.end(), h + kGdnBytes + layers * 32 * ring_row, h + c.e.state_bytes());
+      c.e.generate(8);
+      s.restore(c);
+      std::vector<uint32_t> ids = c.e.generate(64);
+      to_j(deep_arm);   // and straight on into a prefill (the deferred rows flushed by it, not by a snapshot)
+      std::vector<uint32_t> f{c.ctl->cur_token[0]};
+      f.insert(f.end(), fill.begin(), fill.end() - 1);
+      c.e.prefill(f);
+      const std::vector<uint32_t> after = c.e.generate(64);
+      ids.insert(ids.end(), after.begin(), after.end());
+      return ids;
+    };
+    std::vector<uint8_t> st_deep, st_plain;
+    const std::vector<uint32_t> d_ids = paths(true, st_deep), p_ids = paths(false, st_plain);
+    const bool st_ok = st_deep == st_plain, ids_ok = d_ids == p_ids;
+    std::printf("  W%u (d) j=%u: snapshot (state, ring window, hidden row) %s the 16-row lists'; after load and after a 64-id prefill, 2 x 64 ids %s\n", W,
+                j, st_ok ? "bitwise" : "DIFFERS from", ids_ok ? "bitwise the 16-row lists'" : "DIFFER");
+    ok &= st_ok && ids_ok;
+  }
   return ok;
 }
 
@@ -462,7 +519,7 @@ int main(int argc, char** argv) {
   if (deep) std::printf("max_len %u: M2 also at n = %u, RF4 also at %u\n", kMaxLen, kMaxLen - 1026,
                         kMaxLen / 2 + 4395);
   l0::Context ctx(0);
-  // open-work 28: W16 alone, the int8 head; spec 32: W32 alone (deep), the same
+  // open-work 28: W16 alone, the int8 head; spec 32: W32 / W64 alone (deep), the same
   const bool wide_mode = argc > 4 && (std::string(argv[4]) == "wide" || std::string(argv[4]) == "deep");
   runtime::Engine e(ctx,
                     loader::load(ctx, snap, kMaxLen, /*mtp=*/true,
@@ -493,16 +550,17 @@ int main(int argc, char** argv) {
   CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *
                                  (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));
 
-  if (argc > 4 && std::string(argv[4]) == "deep") {   // W32 (header)
-    CHECK(e.deep_built());
-    for (uint32_t n : {1998u, 2053u}) {
-      e.reset();
-      e.prefill(head(ids, n));
-      std::printf("W32 at n = %u\n", n);
-      const Snap s0(c);
-      ok &= w_deep(c, s0, runtime::Engine::kDeepK + 1);
-    }
-    std::printf("W32: %s\n", ok ? "PASS" : "FAIL");
+  if (argc > 4 && std::string(argv[4]) == "deep") {   // W32 / W64 (header)
+    CHECK(e.deep_built(runtime::Engine::kDeepK32) && e.deep_built(runtime::Engine::kDeepK64));
+    for (uint32_t n : {1998u, 2053u})
+      for (uint32_t W : {32u, 64u}) {
+        e.reset();
+        e.prefill(head(ids, n));
+        std::printf("W%u at n = %u\n", W, n);
+        const Snap s0(c);
+        ok &= w_deep(c, s0, W);
+      }
+    std::printf("W32 / W64: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
   }
   if (wide_mode) {   // W16 (header)

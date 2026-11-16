@@ -90,14 +90,14 @@ size_t max_int4_n(const model::ModelDesc& desc) {
   return max_n;
 }
 
-size_t partials_bytes(const model::ModelDesc& desc) {
+size_t partials_bytes(const model::ModelDesc& desc, uint32_t rows) {
   uint32_t max_s = 1;
   for (uint32_t i = 0; i < static_cast<uint32_t>(model::LinearId::kCount); ++i) {
     const model::FusedLinear& fl = desc.linear(static_cast<model::LinearId>(i));
     if (fl.kind != model::WeightKind::Int4) continue;
     if (fl.shape.S > max_s) max_s = fl.shape.S;
   }
-  return size_t{max_s} * DecodeScratchDims::kDeepM * max_int4_n(desc) * kFp32;
+  return size_t{max_s} * rows * max_int4_n(desc) * kFp32;
 }
 
 // One GDN state slot: fp32 [gdn_layers][v-heads][128 k][128 v] (150.99 MB on Qwen3.8).
@@ -179,27 +179,35 @@ PersistentSizes PersistentDims::stage_sizes(uint32_t max_len, const model::Model
   return s;
 }
 
-DecodeScratchSizes DecodeScratchDims::sizes(uint32_t /*max_len*/, const model::ModelDesc& desc) {
+uint32_t DecodeScratchDims::rows(const model::ModelDesc& desc, bool mtp, KvCache kv, uint32_t seqs, bool draft_vocab) {
+  return mtp && seqs == 1 && kv == KvCache::Bf16 && !draft_vocab && desc.fa_q_heads == 24 && desc.fa_kv_heads == 4 &&
+                 desc.gdn_layers == 48 && desc.gdn_k_heads == kernels::kRefGdnKHeads &&
+                 desc.gdn_v_heads == kernels::kRefGdnVHeads
+             ? kDeepM
+             : kWideM;
+}
+
+DecodeScratchSizes DecodeScratchDims::sizes(uint32_t /*max_len*/, const model::ModelDesc& desc, uint32_t rows) {
   DecodeScratchSizes s{};
-  s.resid = size_t{kDeepM} * desc.hidden * kBf16;
-  s.x = size_t{kDeepM} * x_width(desc) * kBf16;
-  s.partials = partials_bytes(desc);
-  s.ab_out = size_t{kDeepM} * desc.shape(model::LinearId::AB).N * kFp32;
+  s.resid = size_t{rows} * desc.hidden * kBf16;
+  s.x = size_t{rows} * x_width(desc) * kBf16;
+  s.partials = partials_bytes(desc, rows);
+  s.ab_out = size_t{rows} * desc.shape(model::LinearId::AB).N * kFp32;
   // prep_res_fold's chunk sums-of-squares, one fp32 per (work-group,
   // token): 20 x 16 x 4 = 1280 B, one allocation reused by all 129 sites
   // because the list is in-order and each site's stage B consumes what its
   // own stage A wrote before the next site's stage A overwrites it.
-  s.norm_sumsq = size_t{kNormGroups} * kDeepM * kFp32;
-  s.gdn_o = size_t{kDeepM} * desc.gdn_value_dim() * kFp32;
-  s.attn_q = size_t{kDeepM} * desc.fa_value_dim() * kFp32;
-  s.attn_gate = size_t{kDeepM} * desc.fa_value_dim() * kFp32;
+  s.norm_sumsq = size_t{kNormGroups} * rows * kFp32;
+  s.gdn_o = size_t{rows} * desc.gdn_value_dim() * kFp32;
+  s.attn_q = size_t{rows} * desc.fa_value_dim() * kFp32;
+  s.attn_gate = size_t{rows} * desc.fa_value_dim() * kFp32;
   // v2 never has more than kAttnV2Blocks per row, [q-heads][32][M][258], whatever max_len
   // is - 6.34 MB on Qwen3.8 (the removed v1 strided every block of the cache: 405.8 MB at
   // 131072).
-  s.attn_part = size_t{desc.fa_q_heads} * kAttnV2Blocks * kDeepM * kAttnPartStride * kFp32;
-  s.attn_out = size_t{kDeepM} * desc.fa_value_dim() * kBf16;
-  s.logits = size_t{kDeepM} * Q::kVocab * kFp32;
-  s.argmax_part = size_t{kDeepM} * kArgmaxGroups * 2 * kFp32;
+  s.attn_part = size_t{desc.fa_q_heads} * kAttnV2Blocks * rows * kAttnPartStride * kFp32;
+  s.attn_out = size_t{rows} * desc.fa_value_dim() * kBf16;
+  s.logits = size_t{rows} * Q::kVocab * kFp32;
+  s.argmax_part = size_t{rows} * kArgmaxGroups * 2 * kFp32;
   s.moe = moe_scratch_layout(desc).total;
   return s;
 }
@@ -299,7 +307,7 @@ MtpSizes MtpDims::tp_sizes(uint32_t max_len, const model::ModelDesc& card, const
 
 uint32_t MtpDims::hh_rows(uint32_t seqs) {
   const uint32_t one = DecodeScratchDims::kM + 1;
-  // Open-work 28 / spec 32: one sequence's rows reach the deep verify list's 32 (the slots' layout keeps kM).
+  // Open-work 28 / spec 32: one sequence's rows reach the deep verify lists' 64 (the slots' layout keeps kM).
   return seqs <= 1 ? DecodeScratchDims::kDeepM + 1 : seqs * one + 3 * DecodeScratchDims::kM;
 }
 

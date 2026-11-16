@@ -9,7 +9,7 @@
 // the in-list check of the verify-attention table (S1) and verify(8)'s attention saving (S2); nothing else runs.
 //
 // `mode` wide16 (spec 32, plan 32a Task 1; max_m 4, int8 head): the engine's built 16-row list in place (and the
-// 32-row one, where built) - Engine::verify(k) with k file ids in Control::wide_cur / deep_cur, then commit(0) or
+// 32- and 64-row ones, where built) - Engine::verify(k) with k file ids in Control::wide_cur / deep_cur, then commit(0) or
 // commit(k) (the next launch replays 1 or k + 1 rows, as in a run) - as interleaved pairs against verify(0) + commit(0), pos rewound to `depth` before every
 // chunk, the pair's order alternating by round, after a warm-up; median over rounds with the range.
 //
@@ -50,6 +50,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -102,8 +103,8 @@ int main(int argc, char** argv) {
   const bool wide = max_m > 4;   // spec 19a: the M = 5..8 arms
   // Spec 28c (plan 28c Task 7): a 9th positional `mode` - default | vattn.
   const std::string mode = argc > 9 ? argv[9] : "default";
-  if (mode != "default" && mode != "vattn" && mode != "wide16") {
-    std::fprintf(stderr, "mode %s: default, vattn or wide16\n", mode.c_str());
+  if (mode != "default" && mode != "vattn" && mode != "wide16" && mode != "wideprof") {
+    std::fprintf(stderr, "mode %s: default, vattn, wide16 or wideprof\n", mode.c_str());
     return 2;
   }
   const bool vattn = mode == "vattn";
@@ -270,7 +271,7 @@ int main(int argc, char** argv) {
   }
 
   if (mode == "wide16") {
-    // Spec 32 (plan 32a Task 1): the built 16-row list (and the 32-row one where built) against the plain step,
+    // Spec 32 (plan 32a Task 1): the built 16-row list (and the 32- / 64-row ones where built) against the plain step,
     // interleaved pairs; commit(0) and the full commit (the next launch replays every row).
     if (!e.wide_built()) {
       std::fprintf(stderr, "wide16: the engine built no 16-row list (int8 head, bf16 KV, one slot)\n");
@@ -288,7 +289,8 @@ int main(int argc, char** argv) {
       return std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / n;
     };
     std::vector<uint32_t> ks{runtime::Engine::kWideK};
-    if (e.deep_built()) ks.push_back(runtime::Engine::kDeepK);
+    for (const uint32_t k : {runtime::Engine::kDeepK32, runtime::Engine::kDeepK64})
+      if (e.deep_built(k)) ks.push_back(k);
     chunk(0, 0, 8);
     for (uint32_t K : ks) {
       chunk(K, 0, 8);
@@ -321,6 +323,86 @@ int main(int argc, char** argv) {
                     median_of(tw), median_of(t1), median_of(ratio), rs.front(), rs.back());
         std::fflush(stdout);
       }
+    return 0;
+  }
+
+  if (mode == "wideprof") {
+    // Spec 32e: the 16-, 32- and 64-row lists with per-launch events (CaptureOptions::profile at profile_m rows,
+    // recaptured per width), summed by kernel family; every round runs the three widths in turn after a warm-up, pos
+    // rewound to `depth`, verify(k) + commit(0); median over rounds. Instrumented lists price shares, not the step.
+    if (!e.deep_built(runtime::Engine::kDeepK64)) {
+      std::fprintf(stderr, "wideprof: the engine built no 64-row list\n");
+      return 1;
+    }
+    const std::string head_layer = "L" + std::to_string(e.model().desc->layers) + " ";   // the MTP head's KV fill
+    const auto family = [&](const std::string& label) {
+      const auto a = label.find(' ') + 1, b = label.find(' ', a);
+      const std::string entry = label.substr(a, b - a), variant = label.substr(b + 1);
+      const bool top = label.rfind("-- ", 0) == 0, mtp = label.rfind(head_layer, 0) == 0;
+      if (mtp && entry.rfind("gemm_sm", 0) != 0 && entry.rfind("gemv", 0) != 0) return "mtp head " + entry;
+      if (entry.rfind("gemm_sm", 0) == 0 || entry.rfind("gemv", 0) == 0) {
+        if (top) return std::string("head (lm_head)");
+        if (variant.rfind("gemv_bf16", 0) == 0) return std::string(mtp ? "mtp head bf16 linears" : "a||b (gemv_bf16)");
+        return std::string(mtp ? "mtp head linears" : "int4 linears (gemm_sm / gemm_sm_v2)");
+      }
+      if (entry == "gdn_step") return std::string("delta-net link ") + (variant.find("_R") != std::string::npos
+                                                                            ? variant.substr(variant.find("_R") + 1) : "R0");
+      if (entry.rfind("attn_verify", 0) == 0 || entry == "attn_decode_v2") return std::string("attention");
+      return entry;
+    };
+    std::map<uint32_t, std::map<std::string, std::vector<double>>> fam;
+    std::map<uint32_t, std::vector<double>> device, wall;
+    const std::vector<uint32_t> ks{runtime::Engine::kWideK, runtime::Engine::kDeepK32, runtime::Engine::kDeepK64};
+    for (uint32_t r = 0; r <= rounds; ++r)
+      for (uint32_t K : ks) {
+        runtime::ProfileEvents vp(ctx);
+        runtime::CaptureOptions opt;
+        opt.profile = &vp;
+        opt.profile_m = K + 1;
+        e.recapture_verify(opt);
+        const runtime::CapturedStep& step = *e.wide_step(K);
+        if (vp.events.size() != step.kernel_count) throw std::runtime_error("wideprof: the profiled list is not verify's");
+        std::map<std::string, double> sums;
+        double dev = 0, w = 0;
+        for (uint32_t c = 0; c < 4 + calls; ++c) {
+          ctl->pos = depth;
+          uint32_t* cur = K == runtime::Engine::kWideK ? ctl->wide_cur : ctl->deep_cur;
+          for (uint32_t i = 1; i <= K; ++i) cur[i] = file[(depth + i) % file.size()];
+          for (auto& ev : vp.events) ev.reset();
+          const auto t0 = Clock::now();
+          e.verify(K);
+          const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+          if (c >= 4) {
+            w += ms;
+            for (size_t i = 0; i < vp.events.size(); ++i) {
+              const double d = vp.events[i].duration_us() / 1000.0;
+              sums[family(step.labels[i])] += d;
+              dev += d;
+            }
+          }
+          e.commit(0, e.verify_ids()[0]);
+        }
+        e.recapture_verify({});   // release vp's events before it dies
+        if (r == 0) continue;     // round 0 is the warm-up
+        for (const auto& [f, ms] : sums) fam[K + 1][f].push_back(ms / calls);
+        device[K + 1].push_back(dev / calls);
+        wall[K + 1].push_back(w / calls);
+      }
+    std::printf("wideprof: depth %u, %u calls x %u rounds (+1 warm-up round), ms a verify, median over rounds\n", depth,
+                calls, rounds);
+    std::printf("| family | 16 rows | 32 rows | 64 rows |\n|---|---:|---:|---:|\n");
+    std::map<std::string, int> names;
+    for (const uint32_t w : {16u, 32u, 64u})
+      for (const auto& [f, v] : fam[w]) names[f] = 1;
+    for (const auto& [f, one] : names) {
+      std::printf("| %s |", f.c_str());
+      for (const uint32_t w : {16u, 32u, 64u}) std::printf(" %.3f |", fam[w].count(f) ? median_of(fam[w][f]) : 0.0);
+      std::printf("\n");
+    }
+    std::printf("| kernels, summed | %.3f | %.3f | %.3f |\n", median_of(device[16]), median_of(device[32]),
+                median_of(device[64]));
+    std::printf("| wall (instrumented) | %.3f | %.3f | %.3f |\n", median_of(wall[16]), median_of(wall[32]),
+                median_of(wall[64]));
     return 0;
   }
 

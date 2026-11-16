@@ -52,8 +52,8 @@ size_t PersistentBuffers::bytes() const {
 
 // --- DecodeScratch -----------------------------------------------------------
 
-DecodeScratch::DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
-    : DecodeScratch(ctx, sizes(max_len, desc)) {}
+DecodeScratch::DecodeScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t rows)
+    : DecodeScratch(ctx, sizes(max_len, desc, rows)) {}
 
 DecodeScratch::DecodeScratch(l0::Context& ctx, const DecodeScratchSizes& s)
     : resid(ctx, l0::MemKind::Device, s.resid),

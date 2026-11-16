@@ -49,7 +49,8 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {7, false, 0},      // 2.22 | 1.70 | 2.90 | 4.71 | 6.34 | 7.06
     {8, false, 0},      // 2.89 | 3.43 | 6.10 | 5.77 | 8.22 | 8.91
     {16, false, 0},     // open-work 28: the wide list's 16 rows - no v2 there (DPAS KS 1 at 32 key blocks)
-    {32, false, 0},     // spec 32: the deep list - the 16-row line in row chunks of 16 (RCHUNK)
+    {32, false, 0},     // spec 32: the deep lists - the 16-row line in row chunks of 16 (RCHUNK)
+    {64, false, 0},
     // int8: N1 now holds at every depth (worst 0.9999984 at 130816; the 4096 row that needed the operator ruling of
     // 2026-11-03 - P in bf16 - is 0.9999999). M = 2 at 4096 is 1.01 with its low end 0.999: v2 there.
     {2, true, 11585},   // 0.57 | 0.59 | 1.01 | 1.75 | 2.05 | 2.36
@@ -60,6 +61,12 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {7, true, 0},
     {8, true, 0},
 };
+
+// Spec 32e: the per-depth cap of the deep lookup verify lists, from one in-place timing (card 0, 2026-11-16, commit(0)
+// medians, docs/probes/probe-gemm-sm-v2-2026-11-15.md): a width is used at a key count only while it emits at least
+// 1.10x the next narrower width's ids a plain step when fully accepted. 32 rows against 16: 1.50x / 1.39x / 1.26x at
+// 4,096 / 32,768 / 98,304 keys - no cap. 64 against 32: 1.21x / 1.17x / 1.10x - 1.10x near 93,700 keys.
+inline constexpr uint32_t kDeep64MaxKeys = 90112;
 
 inline const VerifyAttnRow* verify_attn_row(uint32_t M, bool kv8) {
   for (const VerifyAttnRow& r : kVerifyAttnTable)

@@ -202,8 +202,14 @@ struct EngineIface {
     std::function<void()> confirmed;
   };
   virtual uint32_t lookup_wide_k() { return 0; }
-  // Spec 32: the deeper lookup verify beside it (runtime::Engine::kDeepK, 31; 0: none).
+  // Spec 32: the deepest lookup verify beside it (runtime::Engine::widest_k: 31 or 63; 0: none).
   virtual uint32_t lookup_deep_k() { return 0; }
+  // Spec 32e: the most lookup drafts this iteration's verify checks (the engine's deepest list at this position, 16
+  // rows for a sampled request); the server cuts a proposal to it, so the policy observes what was verified.
+  virtual uint32_t lookup_cap(const Sampling& s) {
+    (void)s;
+    return UINT32_MAX;
+  }
   virtual std::vector<uint32_t> step_drafts_or_confirmed(const Sampling& s, uint32_t k, const Proposer& propose,
                                                          const DraftChoice& choose, const LookupConfirm& confirm) {
     (void)confirm;

@@ -15,7 +15,9 @@ Spec 32e Task 0: --price walks each request with the server's policy (server::Lo
 max_k 3; EngineAdapter::step_drafts_or_confirmed) and prices every iteration from a cost table, for the ladders
   16 only;  earn (a wide verify kept whole asks for the next width, any other goes back to 15 drafts - the server's
   observe());  jump (a wide verify kept whole asks for the narrowest list that holds the source's remaining
-  continuation, the ids after the source's end in the context; the same fall-back).
+  continuation, the ids after the source's end in the context; the same fall-back);  served (spec 32e, the shipped
+  policy: jump on a whole keep, down a width on a keep of at least half, back to 15 drafts below half, and a request
+  whose last two wide verifies both missed stays at 15 drafts).
 Earn and jump are walked with lists up to 32 and up to 64 rows. Assumed (no record of it): the MTP head drafts the
 true ids (a confirmation is cand[:2] == the next two ids; an MTP iteration is K = 3, kept whole).
 Costs: the table's ms a step by rows (1 = plain, 16 / 32 / 64) at its key counts, linear between and beyond them;
@@ -186,7 +188,7 @@ PRICE_TABLE = {'keys': [8192, 32768, 65536, 99000], '1': [31.4, 34.9, 39.1, 43.3
 VERIFY = (1.000, 1.040, 1.070, 1.100)   # b70-serve's mtp auto table: a verify of M = 1..4 rows, plain steps
 DRAFT = (0.0, 0.130, 0.260, 0.380)      # the head drafting k = 0..3, plain steps
 LADDERS = (('16 only', 16, 'earn'), ('earn 32', 32, 'earn'), ('jump 32', 32, 'jump'),
-           ('earn 64', 64, 'earn'), ('jump 64', 64, 'jump'))
+           ('earn 64', 64, 'earn'), ('jump 64', 64, 'jump'), ('served 64', 64, 'served'))
 
 
 def cost_at(table, rows, keys):
@@ -211,6 +213,7 @@ def price(prompt, out, table, maxw, ladder):
     for x in prompt + out[:1]:
         ix.append(x)
     i, ms, lookup, hot, width = 1, 0.0, False, False, 15
+    misses, narrow = 0, False   # 'served': wide verifies in a row that missed; two of them keep the request at 15
     n = Counter()
 
     def emit(c):
@@ -230,7 +233,7 @@ def price(prompt, out, table, maxw, ladder):
                 src = mt[0]
                 if hot:
                     w = width
-                    if ladder == 'jump' and w > 15:   # the narrowest list holding the source's remaining ids
+                    if ladder in ('jump', 'served') and w > 15:   # the narrowest list holding the source's remaining ids
                         w = next((l for l in lists if l >= t - 1 - src), lists[-1])
                     d = drafts(ix.s, src, w)
                 else:
@@ -266,8 +269,15 @@ def price(prompt, out, table, maxw, ladder):
         emit(r + 1)
         wide = len(d) > 3   # observe(): proposed = len(d), kept = r
         hot = r >= 8 if wide else r == len(d)
-        width = (lists[min(lists.index(len(d)) + 1, len(lists) - 1)] if ladder == 'earn' else lists[-1]) \
-            if wide and r == len(d) else 15
+        if ladder == 'served':   # server::LookupInDFlash::observe (spec 32e)
+            misses = misses + 1 if wide and r < len(d) else 0 if wide else misses
+            narrow = narrow or misses >= 2
+            at = lists.index(len(d)) if wide else 0
+            width = 15 if narrow or not wide else lists[-1] if r == len(d) \
+                else lists[max(at - 1, 0)] if 2 * r >= len(d) else 15
+        else:
+            width = (lists[min(lists.index(len(d)) + 1, len(lists) - 1)] if ladder == 'earn' else lists[-1]) \
+                if wide and r == len(d) else 15
         if r < min(3, len(d)):
             lookup = hot = False
             width = 15

@@ -42,7 +42,9 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
 
   const PersistentSizes ps = PersistentDims::sizes(max_len, desc, kv);
   p.kv = ps.kv_k + ps.kv_v;
-  p.decode_state = ps.total() - p.kv + DecodeScratchDims::sizes(max_len, desc).total();
+  // Spec 32e: the decode scratch at the deep verify lists' 64 rows only where they can be built.
+  p.decode_state = ps.total() - p.kv +
+                   DecodeScratchDims::sizes(max_len, desc, DecodeScratchDims::rows(desc, mtp, kv, 1, dv.rows != 0)).total();
   // Spec 15c: the MoE split (both already counted above - model_bytes is the loaded total,
   // DecodeScratchSizes::moe is in decode_state).
   p.moe_weights = loader::moe_bytes(desc);
@@ -146,6 +148,9 @@ MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>&
   const uint32_t total = slots_kv_len(lens);
   const uint32_t seqs = static_cast<uint32_t>(lens.size());
   MemoryPlan p = plan(desc, total, mtp, model_bytes, path, dv, kv, drafter);
+  // Spec 32e: several slots build no deep verify list - their decode scratch keeps kWideM rows, not plan()'s.
+  p.decode_state -= DecodeScratchDims::sizes(total, desc, DecodeScratchDims::rows(desc, mtp, kv, 1, false)).total() -
+                    DecodeScratchDims::sizes(total, desc).total();
   // 3j: int8 prefill's widening scratch holds one sequence's rows (one prefills at a time, slot-relative), so the
   // engine sizes it at the longest slot (PrefillScratch::kv8_len), not at the sum plan() counted.
   if (path.prefill && kv == KvCache::Int8) {
@@ -159,7 +164,7 @@ MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>&
   p.slot_state = SlotDims::sizes(desc, seqs, mtp, total / kKvPage, drafter.on()).total();
   for (uint32_t q = 1; q < seqs; ++q) p.slot_state += drafter.session(lens[q]);   // plan 19v3b: their sessions
   if (mtp) {   // the further slots' GDN states and hh rows: MtpBuffers at `seqs`
-    // Spec 32: may be negative - one sequence's deferred GDN rows and deep-list scratch outweigh the slots' extra.
+    // Spec 32: may be negative - one sequence's hh rows (the deep lists' 65) and deferred GDN rows outweigh the slots'.
     const int64_t more = int64_t(MtpDims::sizes(p.max_len, desc, 0, kv, MtpDims::kSlots, seqs).total()) -
                          int64_t(MtpDims::sizes(p.max_len, desc, 0, kv).total());
     p.slot_state = size_t(int64_t(p.slot_state) + more);

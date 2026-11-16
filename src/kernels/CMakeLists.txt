@@ -592,11 +592,11 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   endforeach()
   # verify-cost-m8: the one-card verify lists' DEFERRED build (gdn_step.cl): no per-row state, the committed rows
   # replayed by the next launch. CTRL_PEND = Control::gdn_pend; PEND_PAR = one parity of the pending rows, 48 layers x
-  # (32 rows x (16 + 48) x 128 bf16 + 32 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes; 32 rows since spec 32, 16 since open-work
+  # (64 rows x (16 + 48) x 128 bf16 + 64 x 48 x 2 fp32) bytes (kernels::kGdnPendParityBytes; 64 rows since spec 32, 16 since open-work
   # 28). Qwen3.8's shapes only. M = 16: open-work 28's wide verify list.
   foreach(MM 1 2 3 4 5 6 7 8 16)
     add_ocloc_kernel(gdn_step_defer_M${MM} SOURCE ${GDN_CL}
-                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=25755648 M=${MM})
+                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=51511296 M=${MM})
   endforeach()
   # verify-cost-m8 probe: a||b at M = 2..8 with a wider in-work-group K split (CaptureOptions::probe_ab_ksplit)
   foreach(MM 2 3 4 5 6 7 8)
@@ -917,14 +917,14 @@ if(B70_MTP AND B70_VERIFY_M8)
 endif()
 # ==== Open-work 28 ============================================================ (end) ====
 
-# ==== Spec 32: the one-card 32-row verify list (deep prompt-lookup runs), bf16 KV ==== (begin) ====
-# Additive only: new names. Ids through Control::deep_cur / deep_out (CTRL_CUR 64 / CTRL_OUT 96). The attention is
-# the 16-row line (KS 1, DSPLIT 128) in row chunks of 16 (RCHUNK: grid dimension 2) with attn_v2's reduce alone at the
-# list's rows; the linears are gemm_sm's rows at 32 (below); the rest the 16-row list's per-row builds at 32. Not 64:
-# gemm_sm spills at 64 rows in either GRF mode (spec 32's probe record).
-set(DEEP_W 32)
+# ==== Spec 32: the one-card 32- and 64-row verify lists (deep prompt-lookup runs), bf16 KV ==== (begin) ====
+# Additive only: new names. Ids through Control::deep_cur / deep_out (CTRL_CUR 64 / CTRL_OUT 128). The attention is
+# the 16-row line (spec 33's PAIR PVX 8 PVR 2 since spec 32e) in row chunks of 16 (RCHUNK: grid dimension 0, a block's
+# chunks side by side) with attn_v2's reduce alone at the
+# list's rows; the linears are gemm_sm_v2's rows at 32 / 64; the rest the 16-row list's per-row builds at W.
+set(DEEP_W 32 64)
 if(B70_MTP AND B70_VERIFY_M8)
-  set(DEEP_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=64 CTRL_OUT=96 CTRL_DEBUG=18)
+  set(DEEP_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=64 CTRL_OUT=128 CTRL_DEBUG=18)
   foreach(MM ${DEEP_W})
     add_ocloc_kernel(embed_gather_M${MM} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
                      DEFINES ${DEEP_CTRL_DEFINES} M=${MM} HIDDEN=5120 VOCAB=248320)
@@ -932,31 +932,31 @@ if(B70_MTP AND B70_VERIFY_M8)
     add_ocloc_kernel(argmax_stage2_W${MM} SOURCE ${ARGMAX_CL} DEFINES ${DEEP_CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248077 M=${MM})
     add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
                      DEFINES ${CTRL_DEFINES} M=16 RCHUNK=${MM} TGT=${ATTN_V2_TGT} KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1
-                             PSPLIT=1 KV8=0
+                             PSPLIT=1 PAIR=1 PVX=8 PVR=2 KV8=0
                      OPTIONS -cl-intel-256-GRF-per-thread)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                      DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} REDUCE_ONLY=1)
-    add_gemv_bf16_variant(${MM} 5120 128 16 16)    # a||b
+    if(MM EQUAL 32)
+      add_gemv_bf16_variant(${MM} 5120 128 16 16)  # a||b (at 64 rows: two 32-row launches)
+    endif()
     add_prep_res_fold(${MM} 5120 0 20)
     add_prep_res_fold(${MM} 5120 4 20)
     add_prep_norm_finish(${MM} 5120 20 20)
     add_ocloc_kernel(prep_gated_head_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
     add_attn_prep(${MM})
-    # the MTP head's KV fill of W rows
-    add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
-    add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
+    # the MTP head's KV fill of W rows (its fc and q||k||v: the 16-row builds, in 16-row launches)
     add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
     add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
     add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
   endforeach()
-  # The delta-net step at 32 rows: two links of the 16-row deferred build (gdn_step.cl, ROW0), and the ring copy a
+  # The delta-net step at W rows: W / 16 links of the 16-row deferred build (gdn_step.cl, ROW0), and the ring copy a
   # commit of rows 16.. runs (gdn_ring_commit.cl; CTRL_RC = Control::ring_commit).
   if(B70_DFLASH)
-    foreach(R0 0 16)
+    foreach(R0 0 16 32 48)
       add_ocloc_kernel(gdn_step_defer_M16_R${R0} SOURCE ${GDN_CL}
-                       DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=25755648 M=16 ROW0=${R0})
+                       DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=51511296 M=16 ROW0=${R0})
     endforeach()
   endif()
   add_ocloc_kernel(gdn_ring_commit SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gdn_ring_commit.cl DEFINES CTRL_POS=0 CTRL_RC=31)

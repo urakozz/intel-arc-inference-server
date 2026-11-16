@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <memory>
 #include <print>
 #include <unistd.h>
@@ -61,6 +62,7 @@
 #include "runtime/prefill/backend.h"
 #include "runtime/tp_engine.h"   // spec 17d: --parallel tp
 #include "runtime/tp_plan.h"
+#include "runtime/verify_attn.h"   // spec 32e: the 64-row list's per-depth cap (the startup line)
 #include "cli/tp_dflash.h"
 #include "runtime/dflash/tp_dflash_drafter.h"
 #include "server/lookup_in_dflash.h"   // spec 19f: --spec dflash-lookup's constants (the startup line)
@@ -1584,9 +1586,13 @@ int run(int argc, char** argv) {
   if (options.spec_mtp_lookup && engine.wide_built()) {   // open-work 28; spec 32: the 32-row list where it is built
     const uint32_t wk = engine.widest_k();
     std::print(stderr,
-               "spec mtp: long lookup runs - up to {:d} drafts in one {:d}-row verify while a run keeps them; a match of "
-               ">= {:d} ids enters when the head's first two drafts agree with it\n",
-               wk, wk + 1, server::LookupInDFlash::kConfirmMatch);
+               "spec mtp: long lookup runs - up to {:d} drafts in one {:d}-row verify while a run keeps them{}; a match "
+               "of >= {:d} ids enters when the head's first two drafts agree with it; the 32- and 64-row lists captured in {:.0f} ms\n",
+               wk, wk + 1,
+               wk == runtime::Engine::kDeepK64
+                   ? std::format(" (64 rows up to {:d} keys, 32 rows beyond)", runtime::kDeep64MaxKeys)
+                   : std::string(),
+               server::LookupInDFlash::kConfirmMatch, engine.deep_capture_ms()[0] + engine.deep_capture_ms()[1]);
   }
   else if (mtp_on && engine.slots() == 1 && !options.spec_mtp_lookup)
     std::print(stderr, "spec mtp: prompt lookup inside MTP off (B70_SPEC_LOOKUP=0)\n");
