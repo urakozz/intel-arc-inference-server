@@ -297,6 +297,10 @@ class Engine {
   uint32_t max_wide_k() const;
   bool wide_built() const { return seq().wide != nullptr; }
   bool deep_built(uint32_t k) const { return (k == kDeepK32 ? seq().deep32 : seq().deep64) != nullptr; }
+  // The list verify(k) replays for k = kWideK / kDeepK32 / kDeepK64 (probes read its launch labels).
+  const CapturedStep* wide_step(uint32_t k) const {
+    return k == kWideK ? seq().wide.get() : k == kDeepK32 ? seq().deep32.get() : seq().deep64.get();
+  }
   // The deepest k max_wide_k() can return at any position (0 without the 16-row list).
   uint32_t widest_k() const {
     if (!wide_built()) return 0;

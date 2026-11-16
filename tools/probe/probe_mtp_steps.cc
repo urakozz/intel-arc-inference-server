@@ -50,6 +50,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -322,6 +323,81 @@ int main(int argc, char** argv) {
                     median_of(tw), median_of(t1), median_of(ratio), rs.front(), rs.back());
         std::fflush(stdout);
       }
+    return 0;
+  }
+
+  if (mode == "wideprof") {
+    // Spec 32e: the 16-, 32- and 64-row lists with per-launch events (CaptureOptions::profile at profile_m rows,
+    // recaptured per width), summed by kernel family; every round runs the three widths in turn after a warm-up, pos
+    // rewound to `depth`, verify(k) + commit(0); median over rounds. Instrumented lists price shares, not the step.
+    if (!e.deep_built(runtime::Engine::kDeepK64)) {
+      std::fprintf(stderr, "wideprof: the engine built no 64-row list\n");
+      return 1;
+    }
+    const std::string head_layer = "L" + std::to_string(e.model().desc->layers) + " ";   // the MTP head's KV fill
+    const auto family = [&](const std::string& label) {
+      const auto a = label.find(' ') + 1, b = label.find(' ', a);
+      const std::string entry = label.substr(a, b - a), variant = label.substr(b + 1);
+      const bool top = label.rfind("-- ", 0) == 0, mtp = label.rfind(head_layer, 0) == 0;
+      if (mtp && entry.rfind("gemm_sm", 0) != 0 && entry.rfind("gemv", 0) != 0) return "mtp head " + entry;
+      if (entry.rfind("gemm_sm", 0) == 0 || entry.rfind("gemv", 0) == 0) {
+        if (top) return std::string("head (lm_head)");
+        if (variant.rfind("gemv_bf16", 0) == 0) return std::string(mtp ? "mtp head bf16 linears" : "a||b (gemv_bf16)");
+        return std::string(mtp ? "mtp head linears" : "int4 linears (") + variant.substr(0, variant.find("_M")) + ")";
+      }
+      if (entry == "gdn_step") return std::string("delta-net link ") + (variant.find("_R") != std::string::npos
+                                                                            ? variant.substr(variant.find("_R") + 1) : "");
+      if (entry.rfind("attn_verify", 0) == 0 || entry == "attn_decode_v2") return std::string("attention");
+      return entry;
+    };
+    std::map<uint32_t, std::map<std::string, std::vector<double>>> fam;
+    std::map<uint32_t, std::vector<double>> device, wall;
+    const std::vector<uint32_t> ks{runtime::Engine::kWideK, runtime::Engine::kDeepK32, runtime::Engine::kDeepK64};
+    for (uint32_t r = 0; r <= rounds; ++r)
+      for (uint32_t K : ks) {
+        runtime::ProfileEvents vp(ctx);
+        runtime::CaptureOptions opt;
+        opt.profile = &vp;
+        opt.profile_m = K + 1;
+        e.recapture_verify(opt);
+        const runtime::CapturedStep& step = *e.wide_step(K);
+        if (vp.events.size() != step.kernel_count) throw std::runtime_error("wideprof: the profiled list is not verify's");
+        std::map<std::string, double> sums;
+        double dev = 0, w = 0;
+        for (uint32_t c = 0; c < 4 + calls; ++c) {
+          ctl->pos = depth;
+          uint32_t* cur = K == runtime::Engine::kWideK ? ctl->wide_cur : ctl->deep_cur;
+          for (uint32_t i = 1; i <= K; ++i) cur[i] = file[(depth + i) % file.size()];
+          for (auto& ev : vp.events) ev.reset();
+          const auto t0 = Clock::now();
+          e.verify(K);
+          const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+          if (c >= 4) {
+            w += ms;
+            for (size_t i = 0; i < vp.events.size(); ++i) {
+              const double d = vp.events[i].duration_us() / 1000.0;
+              sums[family(step.labels[i])] += d;
+              dev += d;
+            }
+          }
+          e.commit(0, e.verify_ids()[0]);
+        }
+        e.recapture_verify({});   // release vp's events before it dies
+        if (r == 0) continue;     // round 0 is the warm-up
+        for (const auto& [f, ms] : sums) fam[K + 1][f].push_back(ms / calls);
+        device[K + 1].push_back(dev / calls);
+        wall[K + 1].push_back(w / calls);
+      }
+    std::printf("wideprof: depth %u, %u calls x %u rounds (+1 warm-up round), ms a verify, median over rounds\n", depth,
+                calls, rounds);
+    std::printf("| family | 16 rows | 32 rows | 64 rows |\n|---|---:|---:|---:|\n");
+    for (const auto& [f, v] : fam[64])
+      std::printf("| %s | %.3f | %.3f | %.3f |\n", f.c_str(), fam[16].count(f) ? median_of(fam[16][f]) : 0.0,
+                  fam[32].count(f) ? median_of(fam[32][f]) : 0.0, median_of(v));
+    std::printf("| kernels, summed | %.3f | %.3f | %.3f |\n", median_of(device[16]), median_of(device[32]),
+                median_of(device[64]));
+    std::printf("| wall (instrumented) | %.3f | %.3f | %.3f |\n", median_of(wall[16]), median_of(wall[32]),
+                median_of(wall[64]));
     return 0;
   }
 

@@ -553,8 +553,10 @@ static_assert(MtpDims::kGdnPendParity == kernels::kGdnPendParityBytes &&
 void Engine::capture_wide(const CaptureOptions& opt) {
   const model::ModelDesc& d = *model_.desc;
   if (!gdn_pend_ || !wide_lists(model_, kv_cache(), slots())) return;
+  // A probe's per-launch events (CaptureOptions::profile) go to the list at profile_m rows.
+  const auto prof = [&](uint32_t M) { return opt.profile_m == M ? opt.profile : nullptr; };
   seqs_[0].wide = std::make_unique<CapturedStep>(
-      build_verify(ctx_, model_, buffers_, *mtp_, DecodeScratchDims::kWideM, nullptr, opt, seqs_[0].bind));
+      build_verify(ctx_, model_, buffers_, *mtp_, DecodeScratchDims::kWideM, prof(16), opt, seqs_[0].bind));
   // Spec 32: the 32- and 64-row lists, their chain scratch and the ring copy (allocated once; a recapture reuses them).
   if (!gdn_x_) {
     gdn_x_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device, persist_.gdn_state.size());
@@ -579,9 +581,9 @@ void Engine::capture_wide(const CaptureOptions& opt) {
   b.gdn_x = gdn_x_->ptr();
   b.conv_x = conv_x_->ptr();
   const auto t0 = std::chrono::steady_clock::now();
-  seqs_[0].deep32 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 32, nullptr, opt, b));
+  seqs_[0].deep32 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 32, prof(32), opt, b));
   const auto t1 = std::chrono::steady_clock::now();
-  seqs_[0].deep64 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 64, nullptr, opt, b));
+  seqs_[0].deep64 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 64, prof(64), opt, b));
   deep_capture_ms_[0] = std::chrono::duration<double, std::milli>(t1 - t0).count();
   deep_capture_ms_[1] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
 }
