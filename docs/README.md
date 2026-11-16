@@ -19,7 +19,7 @@ There are three kinds of document here:
    and replayed, the prompt pass, the two-card modes, speculative decoding, the server and the prefix cache.
 3. [01-hardware.md](01-hardware.md) - what the card actually does, measured: memory bandwidth, the rate of its
    matrix instruction by data type, and what is not available on it.
-4. [18-running-models.md](18-running-models.md) - the commands to download, serve and benchmark each model, and
+4. [17-running-models.md](17-running-models.md) - the commands to download, serve and benchmark each model, and
    what each model supports.
 
 ## The guides
@@ -40,7 +40,7 @@ There are three kinds of document here:
 |---|---|
 | [12-kernels.md](12-kernels.md) | every GPU kernel, its layout decisions and its measured rate |
 | [15-step-anatomy.md](15-step-anatomy.md) | one decode step and one prompt chunk, launch by launch |
-| [17-int8-prefill.md](17-int8-prefill.md) | the optional int8 prompt pass: what runs in int8, what it gains, where it fails |
+| [16-int8-prefill.md](16-int8-prefill.md) | the optional int8 prompt pass: what runs in int8, what it gains, where it fails |
 
 **Correctness**
 
@@ -52,7 +52,7 @@ There are three kinds of document here:
 
 | | |
 |---|---|
-| [18-running-models.md](18-running-models.md) | recipes per model and per number of cards |
+| [17-running-models.md](17-running-models.md) | recipes per model and per number of cards |
 | [environment-variables.md](environment-variables.md) | what the programs and scripts read from the environment (none of it needed to run the engine) |
 | [10-the-box.md](10-the-box.md) | the build and test machine: how to build and test on it, the GPU lock, validation runs, why an idle box matters for a benchmark |
 | [BENCHMARKS.md](BENCHMARKS.md) | every measured row, how it was taken and what grade it earned |
@@ -62,7 +62,6 @@ There are three kinds of document here:
 
 | | |
 |---|---|
-| [16-know-how.md](16-know-how.md) | the transferable lessons, condensed |
 | [06-prior-art.md](06-prior-art.md) | what to borrow from sycl-tla, oneDNN, another stack and vLLM, and what not to |
 | [09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md) | the work that preceded this project: months of patching vLLM's kernels, and the result |
 | [07-open-questions.md](07-open-questions.md) | what is not known about the hardware |

@@ -303,7 +303,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
     options.mtp_adaptive.max_k = a.spec.max_k;
     options.mtp_adaptive.cost = server::MtpCost::kolibri_dspark(da.lm_head == loader::LmHeadForm::Int8);
     std::print(stderr, "spec dflash: DSpark {} (bf16), --spec-max {:d}, drafter key {:016x}, {:d} B + the embedding replica "
-               "{:d} B on device {:d} - NOT YET RUN ON THE CARDS (docs/18-running-models.md)\n", a.spec.draft_model.c_str(),
+               "{:d} B on device {:d} - NOT YET RUN ON THE CARDS (docs/17-running-models.md)\n", a.spec.draft_model.c_str(),
                a.spec.max_k, (unsigned long long)engine.drafter_key(), drafter.drafter->bytes(), drafter.replica->size(),
                engine.devices() - 1);
   }

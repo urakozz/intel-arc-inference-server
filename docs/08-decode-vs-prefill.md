@@ -148,7 +148,7 @@ so a prefill chunk makes no SYCL call and never waits on the host. That was wort
 6.76% over calling sycl-tla's GEMM from a SYCL queue (that backend was removed on 2026-10-27), and it
 is what puts prefill ahead of vLLM. The bf16 walk is the default. A second, opt-in prefill
 (`--prefill-backend l0-int8`) computes the linears in int8 after a Hadamard rotation of the
-activations and weights and is faster still ([17-int8-prefill.md](17-int8-prefill.md)); it is not the
+activations and weights and is faster still ([16-int8-prefill.md](16-int8-prefill.md)); it is not the
 rejected W4A8 mixed instruction above.
 
 ### How prefill got here

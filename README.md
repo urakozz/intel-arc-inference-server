@@ -132,7 +132,7 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
 
 Speculative decoding (the model's MTP head) and the prefix cache are on by default; the DFlash draft model is
 `--spec dflash --draft-model ...`. Ready-made recipes with their context sizes:
-[docs/18-running-models.md](docs/18-running-models.md).
+[docs/17-running-models.md](docs/17-running-models.md).
 
 ```sh
 # Qwen3.8-Flash-Next on two cards: our int4 g64 export, a local snapshot directory
@@ -193,7 +193,7 @@ Environment variables (test switches, tool settings, the Hugging Face cache): [d
 ## Docs
 
 [docs/README.md](docs/README.md) is the index. Start with [docs/04-architecture.md](docs/04-architecture.md) for the
-engine, [docs/18-running-models.md](docs/18-running-models.md) for running it, [docs/12-kernels.md](docs/12-kernels.md)
+engine, [docs/17-running-models.md](docs/17-running-models.md) for running it, [docs/12-kernels.md](docs/12-kernels.md)
 for the kernels and [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for every number.
 
 ## Licence

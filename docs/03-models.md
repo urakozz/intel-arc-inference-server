@@ -15,7 +15,7 @@ matches an f32 reference. It is served truncated (`--layers N`), because the who
 cards; the expert-tiering probe that decides how to run it whole is open-work item 4. Its chat template is
 Qwen3.8's byte for byte; its tokenizer is not (the original's split adds `\p{M}`, and Intel's interim
 checkpoint ships Qwen3.8's file). What each model runs, and with which flags:
-[18-running-models.md](18-running-models.md).
+[17-running-models.md](17-running-models.md).
 
 ## The checkpoint
 

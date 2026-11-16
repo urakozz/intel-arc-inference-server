@@ -326,7 +326,7 @@ Per-phase shares and the ladder of records are in [BENCHMARKS.md](BENCHMARKS.md)
 
 - **The linears are the walk.** `linear_l0` is over 60% of a chunk. With one wait per slab, a 4096-token prompt measures
   `slab_dequant` 274.5 ms and `slab_gemm` 1344.3 ms over 7616 launches each (an attribution, not a throughput figure:
-  15,232 extra waits). The int8 prefill ([17-int8-prefill.md](17-int8-prefill.md)) attacks the GEMM half.
+  15,232 extra waits). The int8 prefill ([16-int8-prefill.md](16-int8-prefill.md)) attacks the GEMM half.
 - **The delta-net scan was the biggest miss in this project's estimating record.** A projection that widened decode's
   `gdn_step` to M = 2048 said 15.4 ms per chunk; the first working version measured 984.1 ms, a 64x miss. Rewrites
   and then the split-bf16 DPAS scan took it down (BENCHMARKS.md). **A projection that widens a kernel written for one

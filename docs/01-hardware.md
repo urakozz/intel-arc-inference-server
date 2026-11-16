@@ -138,7 +138,7 @@ activation outliers cost 2.79% relative L2 error against the bf16 result. See
 [probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md). (The one place
 W4A8 runs today is the expert layers of MoE models under the optional int8
 prompt pass, `--prefill-backend l0-int8`; see
-[17-int8-prefill.md](17-int8-prefill.md).)
+[16-int8-prefill.md](16-int8-prefill.md).)
 
 The one DPAS lever on this device worth more than 2x is **4-bit by 4-bit**, at
 4.000x. W4A4 is not reachable at acceptable accuracy: int4 activations at group 256, even after the

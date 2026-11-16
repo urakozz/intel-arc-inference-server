@@ -165,7 +165,7 @@ also reads the g128 spelling (Intel's interim Flash-Next checkpoint) through an
 exact expansion to g64. On top of that format three choices are made per run, not per file: the output head
 is quantised to int8 per row at load (spec 9); the KV cache is bf16 or, with `--kv-cache int8`, a rotated
 int8 form (spec 12); and prefill linears are bf16 or, with `--prefill-backend l0-int8`, the
-Hadamard-rotated int8 path of [17-int8-prefill.md](17-int8-prefill.md), computed from the same int4 file.
+Hadamard-rotated int8 path of [16-int8-prefill.md](16-int8-prefill.md), computed from the same int4 file.
 The int8 prefill together with the int8 KV cache is a known fail (startup warning; about 3% of tool calls
 that copy exact text from a long prompt come out wrong, see [low-priority-work.md](low-priority-work.md)).
 MXFP4 and FP8 stay rejected for the reasons above, and no other third-party quantisation format is supported.

@@ -17,7 +17,7 @@ the scripts' settings, and test-only variables. Leave the experiment switches un
 
 | variable | read by | default | what it does |
 |---|---|---|---|
-| `B70_SPEC_LOOKUP` | `b70-serve` with `--spec auto`, `mtp` or `dflash` | on | `0` turns prompt lookup off, so the server runs plain MTP or plain DFlash. Prompt lookup is the copying of earlier text as a guess (see [18-running-models.md](18-running-models.md)); this switch is the comparison arm against it. Only the exact value `0` counts. `--spec dflash-lookup` ignores it. |
+| `B70_SPEC_LOOKUP` | `b70-serve` with `--spec auto`, `mtp` or `dflash` | on | `0` turns prompt lookup off, so the server runs plain MTP or plain DFlash. Prompt lookup is the copying of earlier text as a guess (see [17-running-models.md](17-running-models.md)); this switch is the comparison arm against it. Only the exact value `0` counts. `--spec dflash-lookup` ignores it. |
 | `B70_MTP_STEP_K` | `b70-serve` with the MTP head | on | `0` goes back to choosing the number of MTP guesses once per request. By default the server decides at every step, from the head's own confidence, whether to guess again. |
 | `B70_KV_CACHE` | both CLIs | `bf16` | the default of `--kv-cache` (`bf16` or `int8`); any other value is refused. The tests use it to run the same binaries over the int8 cache. |
 | `B70_PREFILL_PROFILE` | the prompt pass | off | `1` times every phase of the prompt pass, and `b70-decode --bench --prefill-length` prints the table on stderr; `2` also names the kernel of every launch. It adds a host wait per phase, so never use it for a recorded speed. |

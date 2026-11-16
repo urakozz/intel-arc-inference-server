@@ -812,7 +812,7 @@ reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant
 - **The PLE table** (a large per-token embedding table, 51.8 GB) is not in device memory.
   The checkpoint's 128 bf16 shards are skipped by design; the engine reads
   `<snapshot>-ple-int8/`, made once by `tools/quantize/qwen4exp/ple_int8.py` (per n-gram
-  head an int8 row table with per-row scales, plus three I64 constants; [18-running-models.md](18-running-models.md) has the
+  head an int8 row table with per-row scales, plus three I64 constants; [17-running-models.md](17-running-models.md) has the
   command). A checkpoint without the file is refused naming the converter's command. The
   I64 tensors are held to the hash formula (`qwen4exp_ple_hash.h`). `load_q4_ple` refuses a
   table larger than MemAvailable - 16 GiB, then pins it as **16 + 16 host-USM ranges** (one
@@ -829,7 +829,7 @@ reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant
   `b70-decode` does (`mtp = true` with `--spec mtp` or `--spec lookup`). The one file it
   checks besides the weights is `tokenizer.json`: the served file must be the original's
   (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and
-  the original's file is linked beside the snapshot ([18-running-models.md](18-running-models.md)).
+  the original's file is linked beside the snapshot ([17-running-models.md](17-running-models.md)).
 
 ## Deliberately not loaded
 

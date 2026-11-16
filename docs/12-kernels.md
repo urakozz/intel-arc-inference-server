@@ -1142,7 +1142,7 @@ and a short chunk's linears are fewer launches with the second (records:
 `pf_quant_had`, `pf_requant_rot`, `pf_colmax_rot` and `pf_gemm_i8` (`src/kernels/prefill/pf_int8.cl`) are the
 opt-in `--prefill-backend l0-int8` path: activations and weights are rotated by a Hadamard transform, quantised
 to int8, multiplied on the int8 matrix engine (twice the bf16 rate) and rescaled in the epilogue. The design,
-the rejected alternatives and the accuracy evidence are in [17-int8-prefill.md](17-int8-prefill.md).
+the rejected alternatives and the accuracy evidence are in [16-int8-prefill.md](16-int8-prefill.md).
 
 ### `pf_attn_prep` and `pf_flash_attn` - prefill attention
 

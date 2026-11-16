@@ -51,7 +51,7 @@ The model is chosen from the checkpoint's `config.json`.
 | Qwen3.8-Flash-Next | a larger MoE; today it loads its first layers only, until the whole model is split over two cards ([open-work.md](open-work.md), item 4) |
 | Kolibri-1 | MoE with sliding-window attention layers; parked |
 
-Per-model status and commands: [18-running-models.md](18-running-models.md).
+Per-model status and commands: [17-running-models.md](17-running-models.md).
 
 ### Run modes
 
@@ -163,12 +163,12 @@ DFlash on one card for one session, and the server says so at startup, recommend
 
 Speculative output is checked against a float32 CPU reference where it differs from the plain run
 ([14-golden-gate.md](14-golden-gate.md), the f32 judge). Commands and measured speeds:
-[18-running-models.md](18-running-models.md) and [BENCHMARKS.md](BENCHMARKS.md).
+[17-running-models.md](17-running-models.md) and [BENCHMARKS.md](BENCHMARKS.md).
 
 ## The prompt pass backends
 
 The prompt pass (prefill) runs in bf16 by default. `--prefill-backend l0-int8` is an opt-in alternative that
-runs the MLP's linears with int8 activations ([17-int8-prefill.md](17-int8-prefill.md)).
+runs the MLP's linears with int8 activations ([16-int8-prefill.md](16-int8-prefill.md)).
 
 ## Component layout
 

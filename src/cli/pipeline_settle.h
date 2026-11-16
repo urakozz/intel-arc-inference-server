@@ -54,7 +54,7 @@ inline runtime::PpExtras pp_extras(const loader::LoadedModel& full, bool hook) {
 
 // The zero-config cleanup's `--parallel auto` for the Qwen family (Qwen3.8, Ornith): one card
 // when the model and the asked context fit it - the faster choice (one answer is not faster on two
-// cards, docs/18-running-models.md) - else pipeline parallel. Decided before the load, from the
+// cards, docs/17-running-models.md) - else pipeline parallel. Decided before the load, from the
 // checkpoint's descriptor (config.json architectures[0]) and the planner's weight model
 // (runtime::pp_weights at the int8 head, plus the MTP head when it loads); `--max-len auto` asks for
 // runtime::kMinAutoMaxLen, the smallest context auto plans (it then gives the card's largest). The

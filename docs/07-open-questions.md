@@ -13,7 +13,7 @@ model in [04-architecture.md](04-architecture.md). Recently answered, in one lin
 - **Is W4A4 (int4 weights times int4 activations) reachable?** No: the DPAS rate is real (4.000x bf16) but the
   activations roughly double the output error ([probe](probes/probe-w4a4-2026-10-28.md), [05-perf-model.md](05-perf-model.md)).
 - **Is W8A8 worth anything for prefill?** Yes: the int8 prefill path (int4 weights turned into rotated int8, int8
-  matrix math) is the `l0-int8` backend, about 30% faster than the bf16 walk ([17-int8-prefill.md](17-int8-prefill.md), BENCHMARKS.md).
+  matrix math) is the `l0-int8` backend, about 30% faster than the bf16 walk ([16-int8-prefill.md](16-int8-prefill.md), BENCHMARKS.md).
 - **Does quantising `lm_head` to int8 cost accuracy?** Not measurably against the gates; it is the serving default
   (spec 9, BENCHMARKS.md "int8 lm_head"). The int4 head is the open part, below.
 - **Why did the DPAS verify-attention kernel pick the wrong token at 8 rows?** It rounded the softmax weights to
