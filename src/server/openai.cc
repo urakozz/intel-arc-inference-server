@@ -7,6 +7,8 @@
 #include <limits>
 #include <utility>
 
+#include "server/json_struct.h"
+
 namespace server {
 namespace {
 
@@ -23,62 +25,121 @@ bool is_uint(const json& value) {
          static_cast<uint64_t>(value.get<int64_t>()) <= UINT32_MAX;
 }
 
-uint32_t uint_field(const json& object, const char* name, bool allow_zero) {
-  const json& value = object.at(name);
-  if (!is_uint(value) || (!allow_zero && value.get<uint64_t>() == 0)) {
-    invalid(std::string(name) + (allow_zero ? " must be a non-negative integer"
-                                             : " must be a positive integer"));
-  }
-  return value.get<uint32_t>();
+// The request's fields as OpenAI clients send them, read by server/json_struct.h - Head, then (chat) the messages
+// and ChatFields, then Tail, each in member order: the first fault is the one refused.
+bool is_one(const uint32_t& n) { return n == 1; }
+bool positive(const uint32_t& n) { return n > 0; }
+bool at_most_4(const std::vector<std::string>& stop) { return stop.size() <= 4; }
+bool non_negative(const double& t) { return std::isfinite(t) && t >= 0.0; }
+bool in_unit(const double& p) { return std::isfinite(p) && p > 0.0 && p <= 1.0; }
+// vLLM's rule for repetition_penalty: finite and > 0, no upper bound (a float).
+bool penalty(const double& r) { return std::isfinite(r) && r > 0.0 && r <= FLT_MAX; }
+
+using json_struct::Holds;
+using json_struct::Says;
+
+struct Head {
+  std::optional<std::string> model;
+  [[=Says("must be 1"), =Holds<uint32_t>(is_one)]] std::optional<uint32_t> n;
+};
+struct ChatTemplateKwargs {
+  std::optional<bool> enable_thinking;
+};
+struct ChatFields {
+  std::optional<ChatTemplateKwargs> chat_template_kwargs;
+  json reasoning_effort;
+};
+struct StreamOptions {
+  std::optional<bool> include_usage;
+};
+struct Tail {
+  [[=Says("must be a positive integer"), =Holds<uint32_t>(positive)]] std::optional<uint32_t> max_tokens;
+  std::optional<uint32_t> min_tokens;
+  std::optional<bool> ignore_eos, stream, return_token_ids;
+  std::optional<StreamOptions> stream_options;
+  [[=Holds<std::vector<std::string>>(at_most_4, "must contain at most 4 strings")]]
+  std::optional<std::vector<std::string>> stop;
+  [[=Holds<double>(non_negative, "must be non-negative")]] std::optional<double> temperature;
+  std::optional<uint32_t> top_k;
+  [[=Holds<double>(in_unit, "must be in (0, 1]")]] std::optional<double> top_p;
+  // vLLM's extension field (spec 24e): Hugging Face's multiplicative penalty over the prompt and the output; 1.0 is none.
+  // Null is the same as absent. The check applies to every model's request (an engine that does not apply the penalty
+  // still refuses a malformed value).
+  [[=json_struct::null_is_absent, =Says("must be a finite number > 0"), =Holds<double>(penalty)]]
+  std::optional<double> repetition_penalty;
+  std::optional<uint64_t> seed;
+};
+
+// The response bodies and stream chunks (written with their keys sorted, json_struct::write).
+struct Function {
+  std::string name, arguments;
+};
+struct ToolCallOut {
+  std::string id, type = "function";
+  Function function{};
+  std::optional<uint32_t> index{};   // stream chunks
+};
+struct Message {
+  std::string role = "assistant";
+  [[=json_struct::nullable]] std::optional<std::string> content{};   // null beside tool calls
+  std::optional<std::string> reasoning_content{};
+  std::optional<std::vector<ToolCallOut>> tool_calls{};
+};
+struct ChunkDelta {
+  std::optional<std::string> role{}, content{}, reasoning_content{};
+  std::optional<std::vector<ToolCallOut>> tool_calls{};
+};
+struct Choice {
+  uint32_t index = 0;
+  [[=json_struct::nullable]] std::optional<std::string> finish_reason{};   // null until the last chunk
+  std::optional<Message> message{};          // chat completion
+  std::optional<ChunkDelta> delta{};         // chat chunk
+  std::optional<std::string> text{};         // completions
+  std::optional<std::nullptr_t> logprobs{};  // completions: null
+  std::optional<std::vector<uint32_t>> token_ids{};
+};
+struct CachedTokens {
+  uint32_t cached_tokens;
+};
+struct UsageOut {
+  uint32_t prompt_tokens, completion_tokens, total_tokens;
+  std::optional<CachedTokens> prompt_tokens_details{};   // chat (plan 7c)
+};
+struct Body {
+  std::string id, object;
+  uint64_t created;
+  std::string model;
+  std::vector<Choice> choices{};
+  std::optional<UsageOut> usage{};
+  std::optional<std::vector<uint32_t>> prompt_token_ids{};
+};
+
+Body base(const Request& r, const std::string& id, uint64_t created, const char* object) {
+  return {.id = id, .object = object, .created = created, .model = r.model};
 }
 
-bool bool_field(const json& object, const char* name) {
-  const json& value = object.at(name);
-  if (!value.is_boolean()) invalid(std::string(name) + " must be a boolean");
-  return value.get<bool>();
-}
-
-float probability_field(const json& object, const char* name, bool allow_zero) {
-  const json& value = object.at(name);
-  if (!value.is_number()) invalid(std::string(name) + " must be a number");
-  const double number = value.get<double>();
-  if (!std::isfinite(number) || (allow_zero ? number < 0.0 : number <= 0.0) || number > 1.0) {
-    invalid(std::string(name) + " must be in (0, 1]");
-  }
-  return static_cast<float>(number);
-}
-
-float temperature_field(const json& object) {
-  const json& value = object.at("temperature");
-  if (!value.is_number()) invalid("temperature must be a number");
-  const double number = value.get<double>();
-  if (!std::isfinite(number) || number < 0.0) invalid("temperature must be non-negative");
-  return static_cast<float>(number);
-}
-
-json base(const Request& r, const std::string& id, uint64_t created, const char* object) {
-  return {
-      {"id", id},
-      {"object", object},
-      {"created", created},
-      {"model", r.model},
-  };
-}
-
-json usage_json(const Request& r, Usage u) {
-  json usage = {{"prompt_tokens", u.prompt_tokens},
-                {"completion_tokens", u.completion_tokens},
-                {"total_tokens", u.prompt_tokens + u.completion_tokens}};
-  if (r.chat) usage["prompt_tokens_details"] = {{"cached_tokens", u.cached_tokens}};
+UsageOut usage_out(const Request& r, Usage u) {
+  UsageOut usage{u.prompt_tokens, u.completion_tokens, u.prompt_tokens + u.completion_tokens};
+  if (r.chat) usage.prompt_tokens_details = CachedTokens{u.cached_tokens};
   return usage;
 }
 
-json tool_call_json(const ToolCall& call) {
+// The chunk's one choice: chat's delta, or the completion's text.
+Choice chunk_choice(const Request& r, ChunkDelta delta, const std::string& text) {
+  Choice c;
+  if (r.chat) {
+    c.delta = std::move(delta);
+  } else {
+    c.text = text;
+    c.logprobs = nullptr;
+  }
+  return c;
+}
+
+ToolCallOut tool_call_out(const ToolCall& call) {
   // (A string argument cut inside a character by the model's output must not throw out of the response body: replace.)
-  return {{"id", call.id},
-          {"type", "function"},
-          {"function", {{"name", call.name},
-                        {"arguments", call.arguments.dump(-1, ' ', false, json::error_handler_t::replace)}}}};
+  return {.id = call.id,
+          .function = {call.name, call.arguments.dump(-1, ' ', false, json::error_handler_t::replace)}};
 }
 
 // Messages as OpenAI clients send them: content may be null (an assistant turn
@@ -130,8 +191,8 @@ ojson normalize_message(const ojson& message) {
   return out;
 }
 
-std::string frame(json body) {
-  return "data: " + body.dump() + "\n\n";
+std::string frame(const Body& body) {
+  return "data: " + json_struct::write(body).dump() + "\n\n";
 }
 
 }  // namespace
@@ -222,44 +283,27 @@ std::vector<std::string> generation_stop_strings(const json& g) {
 }
 
 Request parse_request(const std::string& body, bool chat, const Sampling& defaults) {
-  // Parsed in the body's key order; messages and tools are taken out as they are (the template prints that order), the
-  // rest - scalar fields whose order nothing reads - is read from a nlohmann::json copy.
-  ojson ordered;
+  // Parsed in the body's key order; messages and tools are taken out as they are (the template prints that order).
+  ojson request;
   try {
-    ordered = ojson::parse(body);
+    request = ojson::parse(body);
   } catch (const json::parse_error&) {
     invalid("invalid JSON body");
   }
-  if (!ordered.is_object()) invalid("request body must be an object");
-  ojson messages_in, tools_in;
-  const bool has_messages = ordered.contains("messages"), has_tools = ordered.contains("tools");
-  if (chat) {
-    if (has_messages) messages_in = std::move(ordered.at("messages"));
-    if (has_tools) tools_in = std::move(ordered.at("tools"));
-    ordered.erase("messages");
-    ordered.erase("tools");
-  }
-  const json request = ordered;
+  if (!request.is_object()) invalid("request body must be an object");
 
   Request out;
   out.chat = chat;
   out.sampling = defaults;
   out.sampling.has_seed = false;
   out.sampling.seed = 0;
-  if (request.contains("model")) {
-    if (!request.at("model").is_string()) invalid("model must be a string");
-    out.model = request.at("model").get<std::string>();
-  }
-
-  if (request.contains("n")) {
-    if (!is_uint(request.at("n")) || request.at("n").get<uint32_t>() != 1) {
-      invalid("n must be 1");
-    }
-  }
+  Head head;
+  json_struct::read(request, head, invalid);
+  out.model = head.model.value_or("");
 
   if (chat) {
-    if (!has_messages) invalid("missing messages");
-    const ojson& messages = messages_in;
+    if (!request.contains("messages")) invalid("missing messages");
+    const ojson& messages = request.at("messages");
     if (!messages.is_array()) invalid("messages must be an array");
     if (messages.empty()) invalid("messages must not be empty");
     for (const ojson& message : messages) {
@@ -271,82 +315,52 @@ Request parse_request(const std::string& body, bool chat, const Sampling& defaul
     }
     out.messages = ojson::array();
     for (const ojson& message : messages) out.messages.push_back(normalize_message(message));
-    out.tools = has_tools ? std::move(tools_in) : ojson(nullptr);
-    if (request.contains("chat_template_kwargs")) {
-      const json& kwargs = request.at("chat_template_kwargs");
-      if (!kwargs.is_object()) invalid("chat_template_kwargs must be an object");
-      if (kwargs.contains("enable_thinking")) {
-        out.enable_thinking = bool_field(kwargs, "enable_thinking");
-      }
-      out.template_kwargs = kwargs;
+    out.tools = request.contains("tools") ? std::move(request.at("tools")) : ojson(nullptr);
+    ChatFields fields;
+    json_struct::read(request, fields, invalid);
+    if (fields.chat_template_kwargs) {
+      out.enable_thinking = fields.chat_template_kwargs->enable_thinking.value_or(out.enable_thinking);
+      out.template_kwargs = request.at("chat_template_kwargs");
     }
-    if (request.contains("reasoning_effort")) out.reasoning_effort = request.at("reasoning_effort");
+    out.reasoning_effort = std::move(fields.reasoning_effort);
   } else {
     if (!request.contains("prompt")) invalid("missing prompt");
     if (!request.at("prompt").is_string()) invalid("prompt must be a string");
     out.prompt = request.at("prompt").get<std::string>();
   }
 
-  if (request.contains("max_tokens")) out.max_tokens = uint_field(request, "max_tokens", false);
-  if (request.contains("min_tokens")) out.min_tokens = uint_field(request, "min_tokens", true);
-  if (request.contains("ignore_eos")) out.ignore_eos = bool_field(request, "ignore_eos");
-  if (request.contains("stream")) out.stream = bool_field(request, "stream");
-  if (request.contains("return_token_ids")) {
-    out.return_token_ids = bool_field(request, "return_token_ids");
-  }
-
-  if (request.contains("stream_options")) {
-    const json& stream_options = request.at("stream_options");
-    if (!stream_options.is_object()) invalid("stream_options must be an object");
-    if (stream_options.contains("include_usage")) {
-      out.include_usage = bool_field(stream_options, "include_usage");
-    }
-  }
-
-  if (request.contains("stop")) {
-    const json& stop = request.at("stop");
-    if (stop.is_string()) {
-      out.stop.push_back(stop.get<std::string>());
-    } else if (stop.is_array()) {
-      if (stop.size() > 4) invalid("stop must contain at most 4 strings");
-      for (const json& value : stop) {
-        if (!value.is_string()) invalid("stop entries must be strings");
-        out.stop.push_back(value.get<std::string>());
-      }
-    } else {
-      invalid("stop must be a string or array of strings");
-    }
-  }
-
-  if (request.contains("temperature")) {
-    out.sampling.temperature = temperature_field(request);
+  Tail tail;
+  json_struct::read(request, tail, invalid);
+  out.max_tokens = tail.max_tokens;
+  out.min_tokens = tail.min_tokens.value_or(out.min_tokens);
+  out.ignore_eos = tail.ignore_eos.value_or(out.ignore_eos);
+  out.stream = tail.stream.value_or(out.stream);
+  out.return_token_ids = tail.return_token_ids.value_or(out.return_token_ids);
+  if (tail.stream_options) out.include_usage = tail.stream_options->include_usage.value_or(out.include_usage);
+  out.stop = tail.stop.value_or(out.stop);
+  if (tail.temperature) {
+    out.sampling.temperature = static_cast<float>(*tail.temperature);
     out.sampling.greedy = out.sampling.temperature == 0.0f;
   }
-  if (request.contains("top_k")) out.sampling.top_k = uint_field(request, "top_k", true);
-  if (request.contains("top_p")) out.sampling.top_p = probability_field(request, "top_p", false);
-  if (request.contains("repetition_penalty") && !request.at("repetition_penalty").is_null()) {
-    // vLLM's extension field (spec 24e): Hugging Face's multiplicative penalty over the prompt and the output; 1.0 is none.
-    // vLLM's rule: finite and > 0, no upper bound; null is the same as absent. The check applies to every model's request
-    // (an engine that does not apply the penalty still refuses a malformed value).
-    const json& v = request.at("repetition_penalty");
-    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() <= 0.0 || v.get<double>() > FLT_MAX)
-      invalid("repetition_penalty must be a finite number > 0");
-    out.sampling.repetition_penalty = static_cast<float>(v.get<double>());
-  }
-  if (request.contains("seed")) {
-    const json& seed = request.at("seed");
-    if (!seed.is_number_unsigned() && !(seed.is_number_integer() && seed.get<int64_t>() >= 0)) {
-      invalid("seed must be a non-negative integer");
-    }
-    out.sampling.seed = seed.get<uint64_t>();
+  out.sampling.top_k = tail.top_k.value_or(out.sampling.top_k);
+  if (tail.top_p) out.sampling.top_p = static_cast<float>(*tail.top_p);
+  if (tail.repetition_penalty) out.sampling.repetition_penalty = static_cast<float>(*tail.repetition_penalty);
+  if (tail.seed) {
+    out.sampling.seed = *tail.seed;
     out.sampling.has_seed = true;
   }
   return out;
 }
 
 std::string error_body(const std::string& message, const std::string& type) {
-  return json{{"error", {{"message", message}, {"type", type}, {"param", nullptr}, {"code", nullptr}}}}
-      .dump();
+  struct Error {
+    std::string message, type;
+    std::nullptr_t param, code;
+  };
+  struct ErrorBody {
+    Error error;
+  };
+  return json_struct::write(ErrorBody{{message, type, nullptr, nullptr}}).dump();
 }
 
 std::string completion_body(const Request& r, const std::string& id, uint64_t created,
@@ -354,98 +368,85 @@ std::string completion_body(const Request& r, const std::string& id, uint64_t cr
                             const std::vector<uint32_t>* prompt_ids,
                             const std::vector<uint32_t>* out_ids,
                             const ParsedOutput* parsed) {
-  json body = base(r, id, created, r.chat ? "chat.completion" : "text_completion");
-  json choice = {{"index", 0}, {"finish_reason", finish_reason}};
+  Body body = base(r, id, created, r.chat ? "chat.completion" : "text_completion");
+  Choice choice{.finish_reason = finish_reason};
   if (r.chat && parsed != nullptr) {
-    json message = {{"role", "assistant"}, {"content", parsed->content}};
-    if (parsed->content.empty() && !parsed->tool_calls.empty()) message["content"] = nullptr;
-    if (!parsed->reasoning.empty()) message["reasoning_content"] = parsed->reasoning;
+    Message message{.content = parsed->content};
+    if (parsed->content.empty() && !parsed->tool_calls.empty()) message.content.reset();
+    if (!parsed->reasoning.empty()) message.reasoning_content = parsed->reasoning;
     if (!parsed->tool_calls.empty()) {
-      json calls = json::array();
-      for (const ToolCall& call : parsed->tool_calls) calls.push_back(tool_call_json(call));
-      message["tool_calls"] = std::move(calls);
+      message.tool_calls.emplace();
+      for (const ToolCall& call : parsed->tool_calls) message.tool_calls->push_back(tool_call_out(call));
     }
-    choice["message"] = std::move(message);
+    choice.message = std::move(message);
   } else if (r.chat) {
-    choice["message"] = {{"role", "assistant"}, {"content", text}};
+    choice.message = Message{.content = text};
   } else {
-    choice["text"] = text;
-    choice["logprobs"] = nullptr;
+    choice.text = text;
+    choice.logprobs = nullptr;
   }
-  if (r.return_token_ids && out_ids != nullptr) choice["token_ids"] = *out_ids;
-  body["choices"] = json::array({std::move(choice)});
-  body["usage"] = usage_json(r, u);
-  if (r.return_token_ids && prompt_ids != nullptr) body["prompt_token_ids"] = *prompt_ids;
-  return body.dump();
+  if (r.return_token_ids && out_ids != nullptr) choice.token_ids = *out_ids;
+  body.choices.push_back(std::move(choice));
+  body.usage = usage_out(r, u);
+  if (r.return_token_ids && prompt_ids != nullptr) body.prompt_token_ids = *prompt_ids;
+  return json_struct::write(body).dump();
 }
 
 std::string stream_frame_role(const Request& r, const std::string& id, uint64_t created) {
   if (!r.chat) return "";
-  json body = base(r, id, created, "chat.completion.chunk");
-  body["choices"] = json::array({{{"index", 0}, {"delta", {{"role", "assistant"}}},
-                                   {"finish_reason", nullptr}}});
-  return frame(std::move(body));
+  Body body = base(r, id, created, "chat.completion.chunk");
+  body.choices.push_back(chunk_choice(r, ChunkDelta{.role = "assistant"}, ""));
+  return frame(body);
 }
 
 std::string stream_frame_text(const Request& r, const std::string& id, uint64_t created,
                               const std::string& text) {
-  json body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
-  if (r.chat) {
-    body["choices"] = json::array(
-        {{{"index", 0}, {"delta", {{"content", text}}}, {"finish_reason", nullptr}}});
-  } else {
-    body["choices"] = json::array(
-        {{{"index", 0}, {"text", text}, {"logprobs", nullptr}, {"finish_reason", nullptr}}});
-  }
-  return frame(std::move(body));
+  Body body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
+  body.choices.push_back(chunk_choice(r, ChunkDelta{.content = text}, text));
+  return frame(body);
 }
 
 std::string stream_frame_reasoning(const Request& r, const std::string& id, uint64_t created,
                                    const std::string& text) {
-  json body = base(r, id, created, "chat.completion.chunk");
-  body["choices"] = json::array(
-      {{{"index", 0}, {"delta", {{"reasoning_content", text}}}, {"finish_reason", nullptr}}});
-  return frame(std::move(body));
+  Body body = base(r, id, created, "chat.completion.chunk");
+  body.choices.push_back(Choice{.delta = ChunkDelta{.reasoning_content = text}});
+  return frame(body);
 }
 
 std::string stream_frame_tool_call(const Request& r, const std::string& id, uint64_t created,
                                    const ToolCall& call, uint32_t index) {
-  json body = base(r, id, created, "chat.completion.chunk");
-  json entry = tool_call_json(call);
-  entry["index"] = index;
-  body["choices"] = json::array(
-      {{{"index", 0}, {"delta", {{"tool_calls", json::array({std::move(entry)})}}},
-        {"finish_reason", nullptr}}});
-  return frame(std::move(body));
+  Body body = base(r, id, created, "chat.completion.chunk");
+  ToolCallOut entry = tool_call_out(call);
+  entry.index = index;
+  body.choices.push_back(Choice{.delta = ChunkDelta{.tool_calls = std::vector<ToolCallOut>{std::move(entry)}}});
+  return frame(body);
 }
 
 std::string stream_frame_finish(const Request& r, const std::string& id, uint64_t created,
                                 const std::string& finish_reason) {
-  json body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
-  if (r.chat) {
-    body["choices"] = json::array(
-        {{{"index", 0}, {"delta", json::object()}, {"finish_reason", finish_reason}}});
-  } else {
-    body["choices"] = json::array(
-        {{{"index", 0}, {"text", ""}, {"logprobs", nullptr}, {"finish_reason", finish_reason}}});
-  }
-  return frame(std::move(body));
+  Body body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
+  body.choices.push_back(chunk_choice(r, ChunkDelta{}, ""));
+  body.choices[0].finish_reason = finish_reason;
+  return frame(body);
 }
 
 std::string stream_frame_usage(const Request& r, const std::string& id, uint64_t created, Usage u) {
-  json body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
-  body["choices"] = json::array();
-  body["usage"] = usage_json(r, u);
-  return frame(std::move(body));
+  Body body = base(r, id, created, r.chat ? "chat.completion.chunk" : "text_completion");
+  body.usage = usage_out(r, u);
+  return frame(body);
 }
 
 std::string models_body(const std::string& served_name, uint64_t created) {
-  return json{{"object", "list"},
-              {"data", json::array({{{"id", served_name},
-                                      {"object", "model"},
-                                      {"created", created},
-                                      {"owned_by", "b70"}}})}}
-      .dump();
+  struct Model {
+    std::string id, object;
+    uint64_t created;
+    std::string owned_by;
+  };
+  struct Models {
+    std::string object;
+    std::vector<Model> data;
+  };
+  return json_struct::write(Models{"list", {{served_name, "model", created, "b70"}}}).dump();
 }
 
 }  // namespace server

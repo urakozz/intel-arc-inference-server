@@ -39,7 +39,7 @@ The box is a Linux workstation (a Dell T5810-class Broadwell-EP host) with **two
 | GPU | **2 x Intel Arc Pro B70** (Battlemage / Xe2), 32 GB each. One card is enough for everything except the two-card modes (tensor parallel, replica, pipeline parallel, [BENCHMARKS.md](BENCHMARKS.md)); the second is also useful as an idle control |
 | Driver | `libze_intel_gpu`, IGC and `intel-ocloc`. The B70 is `bmg-g31`, so kernels build with `ocloc -device bmg-g31` |
 | Level Zero | headers and loader from the distribution packages |
-| Host compilers | `g++` 15.2 and CMake 4.2 or later, plus `ccache` |
+| Host compilers | GCC 16 (`/usr/local/bin/g++-16.2`, the default the build picks; C++26 with static reflection, `-freflection`) and CMake 4.2 or later, plus `ccache`. GCC 16's `libstdc++` is newer than the system's: the binaries find it through their rpath (`/usr/local/lib64`), so no `LD_LIBRARY_PATH` is needed. The system `g++` 15.2 stays for other projects |
 | Rust | needed for the pinned `tokenizers` crate ([11-tokenizer-and-chat-template.md](11-tokenizer-and-chat-template.md)). A user-local `rustup` with `--profile minimal` is enough; the build looks in `~/.cargo/bin` first and never changes `PATH`. The crate builds `oniguruma` from source through `cc`, so a working `/usr/bin/cc` is required |
 | oneAPI | not used by the engine build. Only the stand-alone oneDNN reference probe (`tools/probe/onednn/CMakeLists.txt`) needs `icpx`, which is usually **not** on `PATH` in a non-interactive shell, so pass its full path |
 

@@ -363,9 +363,12 @@ void Engine::set_kv_page_table(const std::vector<uint32_t>& table) {
 void Engine::verify_rows(const std::vector<Run>& runs) {
   if (slots() < 2) throw std::runtime_error("runtime::Engine::verify_rows: the engine has one sequence slot");
   flush_projection();   // plan 19v3b: the rows' tap buffer is rewritten below
-  std::vector<RowRun> rr;
+  RowRuns rr;
   uint32_t M = 0;
   for (const Run& r : runs) {
+    if (rr.size() == rr.capacity())
+      throw std::runtime_error("runtime::Engine::verify_rows: more than " + std::to_string(kMaxRows) +
+                               " rows; a row step takes 2.." + std::to_string(kMaxRows));
     const Seq& s = seqs_.at(r.slot);
     const uint32_t pos = s.control->pos;
     if (r.k > max_draft_of(s) || (mtp_ && pos == 0) || size_t(pos) + r.k + 1 > s.len)
@@ -391,7 +394,7 @@ void Engine::verify_rows(const std::vector<Run>& runs) {
   if (M < 2 || M > kMaxRows)
     throw std::runtime_error("runtime::Engine::verify_rows: " + std::to_string(M) + " rows; a row step takes 2.." +
                              std::to_string(kMaxRows) + " (one slot's lone step is its own verify / generate)");
-  const std::vector<BatchRow> t = make_rows(layout_, rr);   // check_rows: one run a slot, every rule
+  const RowTable t = make_rows(layout_, rr);   // check_rows: one run a slot, every rule
   // The host's writes: the tables, the rows' ids, the head's pairs (h_{p-1}, x_p) at p - 1, the gather's table rows.
   auto* table = static_cast<BatchRowTable*>(rows_bind_.rows);
   auto* rc = static_cast<Control*>(rows_bind_.control);

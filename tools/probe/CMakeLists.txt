@@ -899,6 +899,15 @@ foreach(MM 5 6 7 8)
                            BROW_DST=3 BROW_SLOT=4 KV8_DEC=1 M=${MM} TGT=32)
   list(APPEND PVD_TARGETS kernel_pvd_v2kv8_M${MM})
 endforeach()
+# Plan 33b: the 16-row line's PAIR split at KS 1 (spec 33 §6) before CMake's production line takes it, at PVR 1 / 2
+# (`vdpas_wide_pvr<N>_M16`: attn_verify_bitwise_test --cand vdpas_wide_pvr<N>_, probe_kv8_decode arms).
+foreach(_pvr 1 2)
+  add_ocloc_kernel(vdpas_wide_pvr${_pvr}_M16 SOURCE ${PVD_CL}
+                   DEFINES CTRL_POS=0 CTRL_NACT=1 M=16 TGT=32 KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1
+                           PVX=8 PVR=${_pvr} KV8=0
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND PVD_TARGETS kernel_vdpas_wide_pvr${_pvr}_M16)
+endforeach()
 add_custom_target(pvd_kernels DEPENDS ${PVD_TARGETS})
 add_executable(probe_verify_attn probe_verify_attn.cc)
 target_include_directories(probe_verify_attn PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -1104,13 +1113,56 @@ if(B70_VERIFY_DPAS AND B70_MTP)
     endforeach()
   endforeach()
 endif()
+# Plan 33a (spec 33 §7): vdpas_vad_<tag>_M<M>[_KV8], tools/probe/verify_dpas_ablate.cl (today's attn_verify_dpas) at
+# the production lever line of each row count - 4 rows the PAIR line (PVX 2), 8 rows the plain KS 4 line, 16 rows the
+# KS 1 line - unablated (`full`, bitwise production) and with one part removed; the bound arms (16 rows: ABL_SDUP +
+# ABL_VONE; 8 rows: ABL_VONE), the 16-row `sdup` / `vone` halves and `noloads` (the repeats of a 32 / 64-row chunk
+# with no reads), `shalf` / `bhalf16` (each sub-group computes only its own key atom of S: option B's halved score
+# chain, alone and with ABL_VONE); int8 at 4 and 8 rows with the two widening removals. Timed by probe_kv8_decode.
+if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
+  set(_vad_lv_4 KT=32 PACK_H=0 KS=4 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1 PVX=2)
+  set(_vad_lv_8 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
+  set(_vad_lv_16 KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1)
+  foreach(_abl "full;" "nok;ABL_K=1" "nov;ABL_V=1" "noqk;ABL_QK=1" "nosoft;ABL_SOFT=1" "nopv;ABL_PV=1"
+               "noout;ABL_OUT=1" "nokcvt;ABL_KCVT=1" "novcvt;ABL_VCVT=1" "bound8;ABL_VONE=1"
+               "bound16;ABL_SDUP=1;ABL_VONE=1" "sdup;ABL_SDUP=1" "vone;ABL_VONE=1" "noloads;ABL_K=1;ABL_V=1"
+               "shalf;ABL_SHALF=1" "bhalf16;ABL_SHALF=1;ABL_VONE=1")
+    list(GET _abl 0 _tag)
+    list(REMOVE_AT _abl 0)
+    foreach(MM 4 8 16)
+      foreach(_kv 0 1)
+        set(_sfx "")
+        if(_kv)
+          set(_sfx _KV8)
+        endif()
+        # which (tag, rows, KV form) the session times
+        if(_tag MATCHES "^(nokcvt|novcvt)$" AND (NOT _kv OR MM EQUAL 16))
+          continue()
+        endif()
+        if(_kv AND (MM EQUAL 16 OR _tag MATCHES "^(bound8|bound16|sdup|vone|noloads|shalf|bhalf16)$"))
+          continue()
+        endif()
+        if((_tag STREQUAL "bound8" AND NOT MM EQUAL 8) OR
+           (_tag MATCHES "^(bound16|sdup|vone|noloads|shalf|bhalf16)$" AND NOT MM EQUAL 16))
+          continue()
+        endif()
+        add_ocloc_kernel(vdpas_vad_${_tag}_M${MM}${_sfx} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/verify_dpas_ablate.cl
+                         DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 ${_vad_lv_${MM}} KV8=${_kv} ${_abl}
+                         OPTIONS -cl-intel-256-GRF-per-thread)
+        list(APPEND PKD_TARGETS kernel_vdpas_vad_${_tag}_M${MM}${_sfx})
+      endforeach()
+    endforeach()
+  endforeach()
+endif()
 add_executable(probe_kv8_decode probe_kv8_decode.cc)
 target_include_directories(probe_kv8_decode PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_kv8_decode PRIVATE b70_l0)
 b70_target_kernel_dir(probe_kv8_decode)
 foreach(v attn_v2_M1_T32 attn_v2_M4_T32 attn_v2_M1_T32_KV8 attn_v2_M4_T32_KV8 attn_v2_M2_T32 attn_v2_M2_T32_KV8
           attn_v2_M3_T32 attn_v2_M3_T32_KV8 attn_verify_dpas_M2_T32 attn_verify_dpas_M3_T32 attn_verify_dpas_M4_T32
-          attn_verify_dpas_M2_T32_KV8 attn_verify_dpas_M3_T32_KV8 attn_verify_dpas_M4_T32_KV8)
+          attn_verify_dpas_M2_T32_KV8 attn_verify_dpas_M3_T32_KV8 attn_verify_dpas_M4_T32_KV8
+          attn_v2_M8_T32 attn_v2_M8_T32_KV8 attn_v2_M16_T32 attn_verify_dpas_M8_T32 attn_verify_dpas_M8_T32_KV8
+          attn_verify_dpas_M16_T32)
   if(TARGET kernel_${v})
     list(APPEND PKD_TARGETS kernel_${v})
   endif()

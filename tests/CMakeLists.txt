@@ -477,6 +477,12 @@ if(B70_VERIFY_DPAS AND B70_MTP AND B70_KV8)
                              kernel_attn_v2_M${MM}_T32${_sfx})
     endforeach()
   endforeach()
+  if(B70_VERIFY_M8)   # spec 33: the 16-row line (open-work 28's levers, KS 1 DSPLIT 128) against the same frozen copy
+    add_ocloc_kernel(attn_verify_control_M16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/attn_verify_control.cl
+      DEFINES CTRL_POS=0 CTRL_NACT=1 M=16 TGT=32 KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 KV8=0
+      OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND _vctl_deps kernel_attn_verify_control_M16 kernel_attn_verify_dpas_M16_T32 kernel_attn_v2_M16_T32)
+  endif()
   add_executable(attn_verify_bitwise_test kernels/attn_verify_bitwise_test.cc)
   target_include_directories(attn_verify_bitwise_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(attn_verify_bitwise_test PRIVATE b70_l0)
@@ -1315,6 +1321,38 @@ set(B70_OK_IDS ${CMAKE_CURRENT_SOURCE_DIR}/cli/ok.ids)
 # exactly, the first row `read_ids` rejects (rows [kVocabUsed, kVocab) are
 # legitimate; beyond kVocab embed_gather would read past the allocation).
 set(B70_OOV_IDS ${CMAKE_CURRENT_SOURCE_DIR}/cli/oov.ids)
+
+# The flag parser's own refusals, and every flag accepted (the run gets past the parser to the model, which does not
+# exist) - pinned before the flags became one struct (src/cli/flags.h).
+b70_cli_reject(cli_reject_flag_needs_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n EXPECT "--n needs a value")
+b70_cli_reject(cli_reject_flag_u32_text ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n x
+  EXPECT "--n expects a non-negative integer, got 'x'")
+b70_cli_reject(cli_reject_flag_u32_range ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4294967296
+  EXPECT "--n is out of range: 4294967296")
+b70_cli_reject(cli_reject_flag_unknown ${B70_NO_MODEL} --bogus EXPECT "unknown option '--bogus'")
+b70_cli_reject(cli_reject_flag_extra ${B70_NO_MODEL} extra EXPECT "unexpected extra argument 'extra'")
+b70_cli_reject(cli_reject_flag_no_model --ids ${B70_OK_IDS} --n 4 EXPECT "a snapshot directory or HF repo id is required")
+b70_cli_reject(cli_reject_flag_layers_zero ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --layers 0
+  EXPECT "--layers 0 would load no layer")
+b70_cli_reject(cli_reject_flag_kv_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --kv-cache fp8
+  EXPECT "--kv-cache / B70_KV_CACHE fp8: expected bf16 or int8")
+b70_cli_reject(cli_reject_flag_parallel_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel 3
+  EXPECT "--parallel expects auto, 1, pp, replica or tp, got '3'")
+b70_cli_reject(cli_accept_flags_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --prefill --max-len auto --kv-cache bf16
+  --parallel 1 --spec off --prefill-chunk 256 --prefill-backend l0 EXPECT "not a directory and not an <org>/<name> repo id")
+b70_cli_reject(cli_accept_flags_bench ${B70_NO_MODEL} --bench --tg 8 --prefill-length 64 --prefill-chunk 64
+  --prefill-backend l0-int8 --max-len 4096 --layers 4 EXPECT "--layers belongs to Kolibri-1's and Qwen3.8-Flash-Next's")
+b70_cli_reject(cli_accept_flags_profile ${B70_NO_MODEL} --profile --depth 64 --steps 2 --repeats 1 --pipeline-split auto
+  EXPECT "it has no --parallel pp")
+# --help: exit 0, every flag named.
+add_test(NAME cli_decode_help COMMAND sh -c [==[
+bin=$1
+shift
+out=$("$bin" --help 2>&1) || { echo "cli_decode_help: --help did not exit 0" >&2; exit 1; }
+for f in "$@"; do printf '%s\n' "$out" | grep -qF -- "$f" || { echo "cli_decode_help: --help does not name $f" >&2; exit 1; }; done
+]==] cli_decode_help $<TARGET_FILE:b70-decode> --ids --n --prefill --spec --spec-max --draft-model --max-len --parallel
+  --pipeline-split --layers --bench --depth --tg --prefill-length --prefill-chunk --profile --steps --repeats --kv-cache
+  --prefill-backend)
 
 # "exactly one of --ids and --bench" - the two modes are exclusive.
 b70_cli_reject(cli_reject_ids_and_bench ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --bench)
@@ -2252,6 +2290,37 @@ fi
 ]==] b70_serve_reject "${R_EXPECT}" $<TARGET_FILE:b70-serve> ${R_UNPARSED_ARGUMENTS})
     set_tests_properties(${name} PROPERTIES TIMEOUT 60)
   endfunction()
+  # The flag parser's own refusals, and every flag accepted (pinned before the flags became one struct, src/cli/flags.h).
+  b70_serve_reject(cli_reject_serve_flag_needs_value ${B70_NO_MODEL} --port EXPECT "--port needs a value")
+  b70_serve_reject(cli_reject_serve_flag_u32 ${B70_NO_MODEL} --port x EXPECT "--port expects a non-negative integer, got 'x'")
+  b70_serve_reject(cli_reject_serve_flag_port ${B70_NO_MODEL} --port 65536 EXPECT "--port is out of range")
+  b70_serve_reject(cli_reject_serve_flag_seqs_zero ${B70_NO_MODEL} --max-num-seqs 0
+    EXPECT "--max-num-seqs 0 would serve no request")
+  b70_serve_reject(cli_reject_serve_flag_layers_zero ${B70_NO_MODEL} --layers 0 EXPECT "--layers 0 would load no layer")
+  b70_serve_reject(cli_reject_serve_flag_draft_vocab ${B70_NO_MODEL} --draft-vocab 7k
+    EXPECT "--draft-vocab expects off, 32k, 64k or 128k, got '7k'")
+  b70_serve_reject(cli_reject_serve_flag_cache_gb ${B70_NO_MODEL} --prefix-cache-gb x
+    EXPECT "--prefix-cache-gb expects a non-negative integer, got 'x'")
+  b70_serve_reject(cli_reject_serve_flag_unknown ${B70_NO_MODEL} --bogus EXPECT "unknown option '--bogus'")
+  b70_serve_reject(cli_reject_serve_flag_extra ${B70_NO_MODEL} extra EXPECT "unexpected extra argument 'extra'")
+  b70_serve_reject(cli_reject_serve_flag_no_model --port 1 EXPECT "a snapshot directory or HF repo id is required")
+  b70_serve_reject(cli_accept_serve_flags ${B70_NO_MODEL} --host 127.0.0.1 --port 8001 --max-len 8192 --max-num-seqs 1
+    --log-requests /nonexistent/log --prefix-cache-gb 0 --prefix-split-last --spec mtp --spec-max 2 --prefill-backend l0
+    --kv-cache bf16 --parallel 1 EXPECT "cannot create directories: Permission denied [/nonexistent/log]")
+  b70_serve_reject(cli_accept_serve_flags_draft ${B70_NO_MODEL} --spec dflash --draft-model /nonexistent/drafter
+    --draft-vocab off --prefix-cache-gb auto --parallel auto --max-len auto
+    EXPECT "not a directory and not an <org>/<name> repo id: /nonexistent/drafter")
+  add_test(NAME cli_serve_help COMMAND sh -c [==[
+bin=$1
+shift
+out=$("$bin" --help 2>&1) || { echo "cli_serve_help: --help did not exit 0" >&2; exit 1; }
+for f in "$@"; do printf '%s\n' "$out" | grep -qF -- "$f" || { echo "cli_serve_help: --help does not name $f" >&2; exit 1; }; done
+]==] cli_serve_help $<TARGET_FILE:b70-serve> --spec --spec-max --draft-model --max-num-seqs --max-len --parallel
+    --pipeline-split --host --port --log-requests --prefix-cache-gb --prefix-split-last --layers --kv-cache
+    --prefill-backend --draft-vocab --draft-vocab-ids)
+  # README.md's flag tables against both binaries' generated --help: the same flags, the same defaults.
+  add_test(NAME cli_readme_flags COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/cli/readme_flags_test.py
+    ${CMAKE_SOURCE_DIR}/README.md $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode>)
 endif()
 
 

@@ -216,7 +216,7 @@ void TpEngine::step_once() {
 }
 
 void TpEngine::run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, bool crossings, const char* what,
-                         bool heads, const std::array<std::vector<l0::CmdList*>, model::kTpSize>& front) {
+                         bool heads, const Front& front) {
   if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
   const int drop = drop_;
   drop_ = -1;
@@ -225,7 +225,7 @@ void TpEngine::run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, 
     if (front[r].empty()) {
       cd(r).queue.execute(*lists[r], &cd(r).fence);
     } else {   // spec 19 v3c: the deferred projection / the drafter's tails first, one submit
-      std::vector<ze_command_list_handle_t> h;
+      std::inplace_vector<ze_command_list_handle_t, Front::value_type::capacity() + 1> h;
       for (l0::CmdList* l : front[r]) h.push_back(l->handle());
       h.push_back(lists[r]->handle());
       cd(r).queue.execute(uint32_t(h.size()), h.data(), &cd(r).fence);
@@ -260,8 +260,8 @@ void TpEngine::run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, 
 
 // Spec 19 v3c: what rides at the front of the next submit - each card's deferred projection, and (`tails`) the
 // drafter's pending tails - taken, so a failed submit does not replay them.
-std::array<std::vector<l0::CmdList*>, model::kTpSize> TpEngine::take_front(bool tails) {
-  std::array<std::vector<l0::CmdList*>, model::kTpSize> f;
+TpEngine::Front TpEngine::take_front(bool tails) {
+  Front f;
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     if (pending_projection_[r]) f[r].push_back(pending_projection_[r]);
     if (tails && pending_tail_[r]) f[r].push_back(pending_tail_[r]);

@@ -897,7 +897,10 @@ endif()
 # argmax_stage2_W16 only - no other kernel reads the ids). The linears are gemm_sm's M = 16 rows (built below),
 # the GDN step gdn_step_defer_M16 (above), the attention attn_verify_dpas at 16 rows with the key split
 # across work-groups (KS 1, DSPLIT 128: the production KS 4 needs 768 lanes at 16 rows; docs/probes/
-# probe-lookup-wide-verify-2026-11-14.md) and attn_v2_M16's reduce.
+# probe-lookup-wide-verify-2026-11-14.md) and attn_v2_M16's reduce. Spec 33 (plan 33b): the same values split as the
+# 2-4-row lines split them - PAIR (each row block's scores once, by key atom) at KS 1, PVX 8 (32 sub-groups) and
+# PVR 2 (P V by dim atom over half the row blocks: V read twice a work-group, not twelve times); bitwise the KS 1
+# DSPLIT 128 line (attn_verify_bitwise_test), 1.43 / 1.63x at 32k / 98k keys (docs/probes/probe-verify-attn-depth-2026-11-15.md).
 if(B70_MTP AND B70_VERIFY_M8)
   set(WIDE_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=32 CTRL_OUT=48 CTRL_DEBUG=18)
   add_ocloc_kernel(embed_gather_M16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
@@ -907,7 +910,8 @@ if(B70_MTP AND B70_VERIFY_M8)
   # the rest of the list's per-row binaries (the norms, the MLP's, attn_prep / attn_v2, the head's KV fill) come
   # from the M = 5..8 loop above, at M = 16
   add_ocloc_kernel(attn_verify_dpas_M16_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl
-                   DEFINES ${CTRL_DEFINES} M=16 TGT=${ATTN_V2_TGT} KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 KV8=0
+                   DEFINES ${CTRL_DEFINES} M=16 TGT=${ATTN_V2_TGT} KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1
+                           PVX=8 PVR=2 KV8=0
                    OPTIONS -cl-intel-256-GRF-per-thread)
   add_gemv_bf16_variant(16 5120 128 16 64)       # a||b, the K split of the lists at M >= 5
 endif()
