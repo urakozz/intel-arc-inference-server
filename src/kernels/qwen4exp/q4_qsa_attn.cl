@@ -45,8 +45,14 @@
 #if M < 1 || M > 4
 #error "q4_qsa_attn: M is 1..4"
 #endif
+// Plan 21v2b: a tensor-parallel card's heads (12 q / 1 kv) come in as -DQ4_Q_HEADS / -DQ4_KV_HEADS; unset, one card's.
+#ifdef Q4_Q_HEADS
+#define Q_HEADS Q4_Q_HEADS
+#define KV_HEADS Q4_KV_HEADS
+#else
 #define Q_HEADS 24
 #define KV_HEADS 2
+#endif
 #define GQA 12
 #define HD 256
 #define OUT_N (Q_HEADS * HD)

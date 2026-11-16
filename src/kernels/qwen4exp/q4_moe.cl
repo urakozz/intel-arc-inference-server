@@ -298,8 +298,16 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
 // down + the combine, one 16-column n-tile of the hidden row per work-group; sub-group (slot, q).
 __attribute__((reqd_work_group_size(WG_DN, 1, 1)))
 Q4_SG16
+// MOE_TP_PART (plan 21v2b, a tensor-parallel card's half of every expert): y is fp32 [M][HIDDEN], the card's partial
+// sum_k f32(red_k) x w_k + f32(red_sh) x sg in fp32 with no rounding - the all-reduce adds the two cards' parts and
+// the next combine (_S1) rounds the sum once. Every existing binary leaves it unset.
+#if MOE_TP_PART
+#define Y_T __global float* restrict
+#else
+#define Y_T __global ushort* restrict
+#endif
 __kernel void q4_moe_down(__global const uint* restrict route, __global const ushort* restrict h,
-                          __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict y) {
+                          __global const uint* restrict w, SH_T restrict w_sh, Y_T y) {
   __local float red[SLOTS * DN_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -332,6 +340,13 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     if (q < stride) red[sg][lane] += red[sg + stride][lane];
     barrier(CLK_LOCAL_MEM_FENCE);
   }
+#if MOE_TP_PART
+  if (sg == 0) {
+    float sum = 0.0f;
+    for (uint k = 0; k < MOE_K; ++k) sum = sum + red[k * DN_KS][lane] * as_float(rr[R_W + k]);
+    y[(size_t)m * HIDDEN + n_tile * SG + lane] = sum + red[SHARED_SLOT * DN_KS][lane] * as_float(rr[R_SG]);
+  }
+#else
   if (sg == 0) {
     float sum = 0.0f;
     for (uint k = 0; k < MOE_K; ++k) {
@@ -342,5 +357,6 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     const ushort sh_b = rne_bf16(rf(red[SHARED_SLOT * DN_KS][lane]) * as_float(rr[R_SG]));
     y[(size_t)m * HIDDEN + n_tile * SG + lane] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
   }
+#endif
 }
 #endif  // MOE_E
