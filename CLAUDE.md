@@ -5,8 +5,10 @@ An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and b
 
 ## Specs and plans
 
-- Every new design gets the next spec number: `docs/superpowers/specs/<date>-spec<N>-<name>-design.md` (its review
-  `-review.md`). A new version of an existing design keeps its number: `spec<N>v2`, `spec<N>v3`.
+- Every new design gets the next spec number: `docs/superpowers/specs/<date>-spec<N>-<name>-design.md`. A new
+  version of an existing design keeps its number: `spec<N>v2`, `spec<N>v3`.
+- A design or plan is reviewed skeptically and the review's findings are folded into the document itself - no separate
+  review file or section.
 - Its plans carry the number plus a letter in order: `docs/superpowers/plans/<date>-spec<N><letter>-<name>.md`.
 - The next free number is the highest under `docs/superpowers/specs/` plus one (`ls docs/superpowers/specs`).
 
