@@ -52,14 +52,18 @@ std::string first_difference(const Rec& a, const Rec& b) {
   return a.parts.size() == b.parts.size() ? "" : "the number of parts";
 }
 
-void add_state(Rec& r, rq::Qwen4ExpEngine& e, const std::string& at) {
+// `step`: the last replay was a decode step, so its route rows, selections, diagnostics and PLE ids are written (a prefill
+// writes its own buffers - the chunk's, recorded per chunk - and leaves decode's as allocated).
+void add_state(Rec& r, rq::Qwen4ExpEngine& e, const std::string& at, bool step = true) {
   const qwen4exp_rig::State s = qwen4exp_rig::read_state(e);
   r.add(at + ": logits", s.logits);
-  r.add(at + ": route rows", s.routes);
-  for (size_t i = 0; i < s.selections.size(); ++i) r.add(at + ": QSA selection #" + std::to_string(i), s.selections[i]);
-  r.add(at + ": selection diagnostics", s.diag);
+  if (step) {
+    r.add(at + ": route rows", s.routes);
+    for (size_t i = 0; i < s.selections.size(); ++i) r.add(at + ": QSA selection #" + std::to_string(i), s.selections[i]);
+    r.add(at + ": selection diagnostics", s.diag);
+    r.add(at + ": PLE ids", s.ple_ids);
+  }
   for (size_t l = 0; l < s.layers.size(); ++l) r.add(at + ": layer " + std::to_string(l) + "'s state", s.layers[l]);
-  r.add(at + ": PLE ids", s.ple_ids);
 }
 
 // The run (the header); `counts` (the direct run's): every layer's prefill routes counted per expert.
@@ -81,7 +85,7 @@ Rec run(rq::Qwen4ExpEngine& e, const Ids& prompt, const Ids& force, std::vector<
             ++(*counts)[size_t(l) * d.experts + rt[rq::pf_route_at(l) / 4 + size_t(row) * rq::kRouteWords + k]];
     }
   }
-  add_state(r, e, "after the prefill");
+  add_state(r, e, "after the prefill", false);
   if (!e.mtp()) {
     for (uint32_t j = 0; j < force.size(); ++j) {
       e.ingest({force[j]});
