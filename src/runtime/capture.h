@@ -145,6 +145,10 @@ struct SlotBind {
   // binds gdn_step's DEFERRED build over them instead of the slot build (no per-row state; the next launch replays the
   // committed rows). Null: the slot build, as always.
   void* gdn_pend = nullptr;
+  // Spec 32: with gdn_pend, the 32-row verify list's chain scratch - the state between its two 16-row links (one
+  // whole-model GDN state) and the conv rows 16..31 ([48 layers][kernels::kGdnConvXRows][10240] bf16; gdn_step.cl ROW0).
+  void* gdn_x = nullptr;
+  void* conv_x = nullptr;
 };
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,

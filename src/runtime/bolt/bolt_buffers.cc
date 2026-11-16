@@ -8,7 +8,7 @@
 
 namespace runtime::bolt {
 
-static_assert(sizeof(Control) == 256, "persistent_sizes' control term is runtime::Control's size");
+static_assert(sizeof(Control) == 512, "persistent_sizes' control term is runtime::Control's size");
 
 namespace {
 l0::Mem dev_mem(l0::Context& ctx, size_t bytes) { return l0::Mem(ctx, l0::MemKind::Device, bytes); }

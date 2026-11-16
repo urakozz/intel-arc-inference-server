@@ -808,7 +808,83 @@ set(GEMM_SM_LEVERS "5120 16384 1 1" "5120 16384 1 1 MG G256" "6144 5120 4 0 B2D"
                    "6144 5120 4 0 MG G256 B2D" "6144 5120 4 0 MG" "5120 34816 1 0 WG MG G256" "5120 34816 1 0 WG MG")
 set(_psm_lever_m 2 3 4 5 6 7 8 16)
 gemm_sm_rows(GEMM_SM_LEVERS _psm_lever_m)
+# Spec 32: Qwen3.8's production rows (src/kernels/CMakeLists.txt's GEMM_SM_QWEN38) at 32 and 64 rows at both GRF
+# modes - probe_small_m prod --m 16,32,64 picks each shape's mode (kernels::SmallMTuning::g256_from).
+set(_psm_deep_rows "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG B2D"
+                   "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG" "5120 16384 1 1 MG G256" "6144 5120 4 0 MG G256 B2D"
+                   "5120 14336 2 0 MG G256 B2D" "5120 34816 1 0 WG MG G256 B2D" "17408 5120 4 0 MG G256 B2D"
+                   "5120 248320 1 2 WG G256")
+set(_psm_deep_m 32 64)
+gemm_sm_rows(_psm_deep_rows _psm_deep_m)
 list(APPEND PSM_TARGETS ${GEMM_SM_TARGETS})
+# Spec 32e (plan 32e Task 1): psm_v2, gemm_sm_v2's stand-ins at 32 and 64 rows, from probe_small_m.cl with V2 set -
+# each Qwen3.8 int4 row's production knobs (magic dequant, the 2D read, gate||up's 2x8 in-work-group split-K):
+#   psm_v2_<arm>[_pf<G>][_g256]_M<M>_K<K>_N<N>_S<S out>_L<L>
+# arm rc16 (16 rows a sub-group, 128 GRF), rc32 (32 rows, 256 GRF), swap (every row in one sub-group, both GRF modes);
+# each without and with a weight prefetch one / two groups ahead.
+set(_psm_v2_rows "5120 16384 1 1 0 0" "6144 5120 4 0 1 0" "5120 14336 2 0 1 0" "5120 34816 1 0 1 1"
+                 "17408 5120 4 0 1 0")   # K N S(out) L BLK2D WG
+foreach(row IN LISTS _psm_v2_rows)
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 S)
+  list(GET f 3 L)
+  list(GET f 4 B2D)
+  list(GET f 5 WGK)
+  set(defs K=${K} N=${N} S=${S} LAYOUT=${L} TYPE=1 ORIENT=0 DEQ=1 BLK2D=${B2D})
+  if(WGK)
+    list(APPEND defs SPLITK=1 NSGN=2 KSL=8)
+  endif()
+  foreach(MM 32 64)
+    foreach(arm rc16 rc32 swap swap_g256)
+      foreach(PG 0 1 2)
+        set(adefs ${defs} M=${MM} PF_G=${PG})
+        set(opts "")
+        if(arm STREQUAL "rc16")
+          list(APPEND adefs V2=1 RC=16)
+        elseif(arm STREQUAL "rc32")
+          list(APPEND adefs V2=1 RC=32)
+          set(opts OPTIONS -cl-intel-256-GRF-per-thread)
+        else()
+          list(APPEND adefs V2=2)
+          if(arm STREQUAL "swap_g256")
+            set(opts OPTIONS -cl-intel-256-GRF-per-thread)
+          endif()
+        endif()
+        string(REPLACE "_g256" "" aname ${arm})
+        set(tag ${aname})
+        if(PG)
+          string(APPEND tag _pf${PG})
+        endif()
+        if(arm STREQUAL "rc32" OR arm STREQUAL "swap_g256")
+          string(APPEND tag _g256)
+        endif()
+        set(name psm_v2_${tag}_M${MM}_K${K}_N${N}_S${S}_L${L})
+        add_ocloc_kernel(${name} SOURCE ${PSM_CL} DEFINES ${adefs} ${opts})
+        list(APPEND PSM_TARGETS kernel_${name})
+      endforeach()
+    endforeach()
+    # Spec 34 (plan 34a Task 1): the A operands by 2D block reads (A2D=1) - swap_a2d (128 GRF) without and with the
+    # weight prefetch, rc32_a2d_pf1 (256 GRF); at 64 rows the timing-only ablation swap_a2d_nodq (NODQ=1)
+    set(a2d_arms "swap_a2d V2=2 PF_G=0" "swap_a2d_pf1 V2=2 PF_G=1" "swap_a2d_pf2 V2=2 PF_G=2"
+                 "rc32_a2d_pf1_g256 V2=1 RC=32 PF_G=1")
+    if(MM EQUAL 64)
+      list(APPEND a2d_arms "swap_a2d_nodq V2=2 PF_G=0 NODQ=1")
+    endif()
+    foreach(arm IN LISTS a2d_arms)
+      separate_arguments(af UNIX_COMMAND "${arm}")
+      list(POP_FRONT af tag)
+      set(opts "")
+      if(tag MATCHES "_g256$")
+        set(opts OPTIONS -cl-intel-256-GRF-per-thread)
+      endif()
+      set(name psm_v2_${tag}_M${MM}_K${K}_N${N}_S${S}_L${L})
+      add_ocloc_kernel(${name} SOURCE ${PSM_CL} DEFINES ${defs} M=${MM} A2D=1 ${af} ${opts})
+      list(APPEND PSM_TARGETS kernel_${name})
+    endforeach()
+  endforeach()
+endforeach()
 add_custom_target(psm_kernels DEPENDS ${PSM_TARGETS})
 
 add_executable(probe_small_m probe_small_m.cc)

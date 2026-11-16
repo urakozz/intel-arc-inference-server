@@ -176,13 +176,13 @@ struct EngineAdapter : server::EngineIface {
         std::print(stderr, "; lookup: {:d} iterations, {:d}/{:d} drafts accepted, {:d} of {:d} ids",
                    (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
                    (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
-      if (lk_wide_ > 0)
-        std::print(stderr, ", {:d} of them 16 rows wide, {:d} entered on the head's confirmation",
-                   (unsigned long long)lk_wide_, (unsigned long long)lk_confirmed_);
+      if (lk_wide_ + lk_deep_ > 0)
+        std::print(stderr, ", {:d} of them 16 rows wide, {:d} of them 32, {:d} entered on the head's confirmation",
+                   (unsigned long long)lk_wide_, (unsigned long long)lk_deep_, (unsigned long long)lk_confirmed_);
       std::print(stderr, "\n");
     }
     mtp_iters = mtp_drafted = mtp_accepted = 0;
-    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = lk_wide_ = lk_confirmed_ = 0;
+    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = lk_wide_ = lk_deep_ = lk_confirmed_ = 0;
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
@@ -421,6 +421,10 @@ struct EngineAdapter : server::EngineIface {
   // head drafts as step_chosen does but its first two drafts are compared with the candidate before `choose` answers
   // (the answers are then given in order, only when the drafts disagree); agreement verifies the candidate.
   uint32_t lookup_wide_k() override { return mtp_lookup() && eng.wide_built() ? runtime::Engine::kWideK : 0; }
+  // Spec 32: the 32-row list, unless B70_SPEC_LOOKUP_ROWS keeps the runs at 16 rows (Engine::max_wide_k).
+  uint32_t lookup_deep_k() override {
+    return mtp_lookup() && eng.widest_k() == runtime::Engine::kDeepK ? runtime::Engine::kDeepK : 0;
+  }
 
   std::vector<uint32_t> step_drafts_or_confirmed(const server::Sampling& sampling, uint32_t k_mtp,
                                                  const Proposer& propose, const DraftChoice& choose,
@@ -475,9 +479,13 @@ struct EngineAdapter : server::EngineIface {
     auto* control = eng.control();
     // Open-work 28: more drafts than the head's lists take go to the wide list (15 rows of drafts; a shorter run is
     // padded with its last draft - the padding sits past the drafts the acceptance reads, so it never changes a kept
-    // id or the row after them).
+    // id or the row after them). Spec 32: more than 15 go to the 32-row list where it fits (greedy requests: a
+    // sampled one reads every row's logits back, and its readback holds 16 rows).
     const bool wide = d.size() > k_ && eng.max_wide_k() > 0;
-    const uint32_t k = wide ? std::min<uint32_t>(static_cast<uint32_t>(d.size()), runtime::Engine::kWideK)
+    const uint32_t kl = d.size() > runtime::Engine::kWideK && sampling.greedy && eng.max_wide_k() == runtime::Engine::kDeepK
+                            ? runtime::Engine::kDeepK
+                            : runtime::Engine::kWideK;   // the list's drafts
+    const uint32_t k = wide ? std::min<uint32_t>(static_cast<uint32_t>(d.size()), kl)
                             : std::min<uint32_t>({static_cast<uint32_t>(d.size()), k_, eng.max_verify_k()});
     ++lk_iters_;
     if (k == 0) {   // the last positions of max_len: one plain step
@@ -486,9 +494,10 @@ struct EngineAdapter : server::EngineIface {
     }
     const uint32_t n = eng.pos();
     if (wide) {
-      for (uint32_t i = 0; i < runtime::Engine::kWideK; ++i) control->wide_cur[1 + i] = d[std::min(i, k - 1)];
-      eng.verify(runtime::Engine::kWideK);
-      ++lk_wide_;
+      uint32_t* const cur = kl == runtime::Engine::kWideK ? control->wide_cur : control->deep_cur;
+      for (uint32_t i = 0; i < kl; ++i) cur[1 + i] = d[std::min(i, k - 1)];
+      eng.verify(kl);
+      ++(kl == runtime::Engine::kWideK ? lk_wide_ : lk_deep_);
     } else {
       for (uint32_t i = 0; i < k; ++i) control->cur_token[1 + i] = d[i];
       eng.verify(k);
@@ -612,6 +621,7 @@ struct EngineAdapter : server::EngineIface {
   bool pending_lookup_ = false;         // spec 19f: the pending run was a lookup verify
   uint64_t lk_iters_ = 0, lk_drafted_ = 0, lk_accepted_ = 0, lk_ids_ = 0;   // spec 19f, since the last prefill
   uint64_t lk_wide_ = 0, lk_confirmed_ = 0;   // open-work 28: lookup iterations on the wide list, entered confirmed
+  uint64_t lk_deep_ = 0;                      // spec 32: lookup iterations on the 32-row list
   std::unique_ptr<l0::Mem> spec_logits_;   // pinned q rows then p rows, MTP and lookup
   bool pending_ = false;
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;

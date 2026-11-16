@@ -14,6 +14,8 @@
 // Open-work 28 adds the same pair at 16 rows (probe builds over a 32-deep conv ring; every arm's ring slice is 32 deep):
 //   plain_M16  probe_gdn_plain_M16      the chain over 16 rows, the state written once
 //   slots_M16  probe_gdn_slots_M16_N16  16 snapshot slots
+// Spec 32e (plan 32e Task 3): plain_M16_n1, the 16-row chain at n_active 1 - with plain_M16 (n_active 16) the link's
+// fixed part, the intercept of the per-row line (GDN_LINK_SPLIT).
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -100,7 +102,8 @@ int main(int argc, char** argv) {
                                    {"plain_M8", "probe_gdn_plain_M8", 8, false},
                                    {"slots_M8", kernels::gdn_step_slots_variant(8, 48, 16, 48, 8), 8, true},
                                    {"plain_M16", "probe_gdn_plain_M16", 16, false},
-                                   {"slots_M16", "probe_gdn_slots_M16_N16", 16, true}};
+                                   {"slots_M16", "probe_gdn_slots_M16_N16", 16, true},
+                                   {"plain_M16_n1", "probe_gdn_plain_M16", 1, false}};
     if (!ref_dir.empty()) arms.push_back({"ref_M8", ref_dir + "/gdn_step_slots_M8_N8.bin", 8, true});
     for (const auto& v : variants) arms.push_back({v, v, 8, true});
     std::vector<std::unique_ptr<l0::Module>> mods;
@@ -147,7 +150,9 @@ int main(int argc, char** argv) {
                 median(ms[1]) - median(ms[0]), median(ms[2]) - median(ms[1]));
     std::printf("GDN_SLOTS_SPLIT16 excess16=%.4f chain=%.4f snapshots=%.4f\n", median(ms[4]) - median(ms[0]),
                 median(ms[3]) - median(ms[0]), median(ms[4]) - median(ms[3]));
-    for (size_t a = 5; a < arms.size(); ++a)
+    const double t1 = median(ms[5]), t16 = median(ms[3]), per_row = (t16 - t1) / 15;
+    std::printf("GDN_LINK_SPLIT n1=%.4f n16=%.4f per_row=%.4f fixed=%.4f\n", t1, t16, per_row, t1 - per_row);
+    for (size_t a = 6; a < arms.size(); ++a)
       std::printf("GDN_SLOTS_AB slots_M8 - %s = %.4f ms\n", arms[a].name.c_str(), median(ms[2]) - median(ms[a]));
   } catch (const std::exception& e) {
     std::fprintf(stderr, "probe_gdn_slots: %s\n", e.what());

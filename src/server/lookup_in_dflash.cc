@@ -6,8 +6,10 @@
 
 namespace server {
 
-LookupInDFlash::LookupInDFlash(const LookupInDFlashOptions& o) : o_(o) {
+LookupInDFlash::LookupInDFlash(const LookupInDFlashOptions& o) : o_(o), width_(o.wide_k) {
   if (o_.max_k == 0) throw std::invalid_argument("LookupInDFlash: max_k must be >= 1");
+  if (o_.deep_k != 0 && o_.deep_k <= o_.wide_k)
+    throw std::invalid_argument("LookupInDFlash: deep_k must exceed wide_k");
 }
 
 std::vector<uint32_t> LookupInDFlash::propose(const PromptLookup& m, uint32_t cap_k) {
@@ -19,7 +21,7 @@ std::vector<uint32_t> LookupInDFlash::propose(const PromptLookup& m, uint32_t ca
   const uint32_t min_n = std::min(lookup_ ? kStayMatch : kEnterMatch, m.options().max_match);
   std::vector<uint32_t> d;
   if (lookup_ && hot_ && o_.wide_k > k && source_before > 0) {   // open-work 28: a hot run goes wide where it can
-    d = m.propose(o_.wide_k, min_n, nullptr, source_before);
+    d = m.propose(width_, min_n, nullptr, source_before);   // spec 32: the width the run has earned
     if (d.size() < kWideMin && d.size() > k) d.resize(k);
   } else if (source_before > 0) {
     d = m.propose(k, min_n, nullptr, source_before);
@@ -43,9 +45,13 @@ void LookupInDFlash::observe(uint32_t proposed, uint32_t kept) {
   accepted += kept;
   const bool was_wide = proposed > o_.max_k;
   wide += was_wide;
+  deep += o_.deep_k != 0 && proposed > o_.wide_k;
   hot_ = was_wide ? kept >= kWideMin : kept == proposed;
+  // Spec 32: a wide verify kept whole earns the deep width; any other verify (or a cold run) goes back to wide_k.
+  width_ = was_wide && kept == proposed && o_.deep_k != 0 ? o_.deep_k : o_.wide_k;
   if (kept < std::min(kStayAccepted, proposed)) {
     lookup_ = hot_ = false;
+    width_ = o_.wide_k;
     ++exits;
   }
 }
@@ -62,6 +68,7 @@ std::vector<uint32_t> LookupInDFlash::candidate(const PromptLookup& m) const {
 void LookupInDFlash::confirmed() {
   if (lookup_) throw std::logic_error("LookupInDFlash::confirmed: already in lookup");
   lookup_ = hot_ = true;
+  width_ = o_.wide_k;
   ++enters;
   ++confirms;
 }

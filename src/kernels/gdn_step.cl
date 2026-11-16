@@ -310,9 +310,26 @@ inline bool run_start(__global const uint* rows, uint m) {
 #if !defined(CTRL_PEND) || !defined(PEND_PAR)
 #error "gdn_step DEFERRED: CTRL_PEND and PEND_PAR (bytes a parity) must be defined"
 #endif
-#define PR 16                                      /* rows a step can leave: the verify lists' M <= 16 (open-work 28) */
+#define PR 32                                      /* rows a step can leave: the verify lists' up to 32 (spec 32) */
 #if M > PR
 #error "gdn_step DEFERRED: at most PR rows a step"
+#endif
+// ROW0 (spec 32 §5.4; undefined on every other command line): a link of the 32-row list's chain of 16-row launches.
+// The build is M 16; launch ROW0 runs the list's rows ROW0 .. ROW0 + 15 (the host binds the partials, a||b and gdn_o
+// at that row) at position pos + ROW0, and takes two more arguments: `state_x`, the scratch state, and `conv_x`, the
+// conv scratch [16 rows][CONV_ROWS] of rows 16..31 (the 32-deep ring keeps rows 0..15 only, so a rejected row never
+// overwrites the window the next step reads). ROW0 0 is today's launch (the replay, then its rows) and
+// stores the state after its rows to state_x; ROW0 > 0 starts from state_x, replays nothing, reads its window from
+// the ring (rows < 16) or conv_x, writes its rows' conv inputs to conv_x and stores its state back to state_x. Every
+// row's recurrence inputs go to the pending rows at ROW0 + m. The recurrence, the norms and their order are the
+// 16-row build's, so every row is bitwise the 16-row list's row at the same state and position.
+#ifdef ROW0
+#if M != 16 || (ROW0 != 0 && ROW0 != 16)
+#error "gdn_step DEFERRED ROW0: an M 16 link at row 0 or 16"
+#endif
+#define PROW(m) (ROW0 + (m))
+#else
+#define PROW(m) (m)
 #endif
 #define KHEADS (HEADS / V_PER_K)
 #define PEND_V_OFF (PR * KHEADS * DIM)             /* ushorts: kf [PR][KHEADS][DIM], then v [PR][HEADS][DIM] */
@@ -389,6 +406,9 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 #ifdef DEFERRED
                        , __global uchar* restrict pend
 #endif
+#ifdef ROW0
+                       , __global float* restrict state_x, __global ushort* restrict conv_x
+#endif
                        ) {
   const uint h = get_group_id(0);          // v-head
   const uint c = get_group_id(1);          // state-column chunk
@@ -413,10 +433,19 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   __local float rep_red[2][SG][CHUNK_V];   // their kv band partials, by row parity
 #endif
 
-#ifndef BATCH_ROWS
-  const uint pos = ctrl[CTRL_POS];
-#endif
+#if defined(ROW0)
+  const uint pos = ctrl[CTRL_POS] + ROW0;   // the link's rows (header, ROW0)
   uint n_act = ctrl[CTRL_NACT];
+  n_act = n_act > ROW0 ? n_act - ROW0 : 0u;
+#if ROW0 > 0
+  if (n_act == 0) return;                  // uniform: no rows of this link (nothing to replay here)
+#endif
+#elif !defined(BATCH_ROWS)
+  const uint pos = ctrl[CTRL_POS];
+  uint n_act = ctrl[CTRL_NACT];
+#else
+  uint n_act = ctrl[CTRL_NACT];
+#endif
   if (n_act > M) n_act = M;                // the compiled variant is the ceiling
 #ifndef DEFERRED
   if (n_act == 0) return;                  // uniform across the work-group
@@ -432,7 +461,11 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // The previous step's committed rows (header, DEFERRED): their kf into SLM now, read after section 1's barrier.
   const uint pend_word = ctrl[CTRL_PEND];
   const uint par = (pend_word >> 8) & 1u;
+#if defined(ROW0) && ROW0 > 0
+  const uint n_rep = 0u;                   // a later link starts from state_x (header, ROW0)
+#else
   const uint n_rep = min(pend_word & 0xFFu, (uint)PR);
+#endif
   for (uint i = lid; i < n_rep * DIM; i += WG_GDN)
     rep_k[i / DIM][i % DIM] = bf16f(pend_at(pend, par)[((i / DIM) * KHEADS + kh) * DIM + i % DIM]);
 #endif
@@ -452,9 +485,17 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
     // A position below zero contributes 0 - the reference's conv state is
     // zero-initialised, so a sequence's first tokens convolve against zeros.
     const int p3 = (int)pos - 3, p2 = (int)pos - 2, p1 = (int)pos - 1;
+#if defined(ROW0) && ROW0 > 0
+    // The window's list rows ROW0 - 3 .. ROW0 - 1: from the ring below row 16, from conv_x after (header, ROW0).
+#define CONV_WIN(p, r) ((r) >= 16 ? bf16f(conv_x[(size_t)((r) - 16) * CONV_ROWS + ch]) \
+                                  : bf16f(conv_ring[((size_t)((uint)(p) % RING)) * CONV_ROWS + ch]))
+    float win0 = CONV_WIN(p3, ROW0 - 3), win1 = CONV_WIN(p2, ROW0 - 2), win2 = CONV_WIN(p1, ROW0 - 1);
+#undef CONV_WIN
+#else
     float win0 = p3 < 0 ? 0.0f : bf16f(conv_ring[((size_t)((uint)p3 % RING)) * CONV_ROWS + ch]);
     float win1 = p2 < 0 ? 0.0f : bf16f(conv_ring[((size_t)((uint)p2 % RING)) * CONV_ROWS + ch]);
     float win2 = p1 < 0 ? 0.0f : bf16f(conv_ring[((size_t)((uint)p1 % RING)) * CONV_ROWS + ch]);
+#endif
 
     for (uint m = 0; m < n_act; ++m) {
       // The qkv linear's bf16 output (gdn_ref.h: `raw_b`). The slice index is
@@ -462,7 +503,11 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
       // `#if QKVZ_S != 1` above is what keeps true.
       const ushort raw_b =
           rne_bf16(qkvz_partials[((size_t)(QKVZ_S - 1) * M + m) * QKVZ_N + ch]);
+#if defined(ROW0) && ROW0 > 0
+      if (own_ring) conv_x[(size_t)(ROW0 - 16 + m) * CONV_ROWS + ch] = raw_b;
+#else
       if (own_ring) conv_ring[((size_t)((pos + m) % RING)) * CONV_ROWS + ch] = raw_b;
+#endif
       const float win3 = bf16f(raw_b);            // tap 3 is the current token
       float acc = 0.0f;                           // taps ascending, explicit fma
       acc = fma(w0, win0, acc);
@@ -514,6 +559,8 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 #ifdef SPEC_SLOTS
   const uint live = ctrl[CTRL_LIVE] % N_SLOTS;
   const __global float* restrict src = slot_base(state, state_spec, live);
+#elif defined(ROW0) && ROW0 > 0
+  const __global float* restrict src = state_x;   // the previous link's state (header, ROW0)
 #elif !defined(BATCH_ROWS)
   const __global float* restrict src = state;
 #endif
@@ -621,10 +668,10 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   }
   if (c == 0)   // every row's recurrence inputs (header, DEFERRED): v by every head, kf by the k-head's first
     for (uint m = 0; m < n_act; ++m) {
-      if (lid < DIM) pw[PEND_V_OFF + (m * HEADS + h) * DIM + lid] = xs[2][m][lid];
-      else if (h % V_PER_K == 0) pw[(m * KHEADS + kh) * DIM + lid - DIM] = (ushort)(as_uint(rk[m][lid - DIM]) >> 16);
+      if (lid < DIM) pw[PEND_V_OFF + (PROW(m) * HEADS + h) * DIM + lid] = xs[2][m][lid];
+      else if (h % V_PER_K == 0) pw[(PROW(m) * KHEADS + kh) * DIM + lid - DIM] = (ushort)(as_uint(rk[m][lid - DIM]) >> 16);
       if (lid == 0) {
-        __global float* restrict psw = (__global float*)pw + PEND_S_OFF + (m * HEADS + h) * 2;
+        __global float* restrict psw = (__global float*)pw + PEND_S_OFF + (PROW(m) * HEADS + h) * 2;
         psw[0] = dec[m];
         psw[1] = bet[m];
       }
@@ -843,6 +890,13 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   for (uint kk = 0; kk < BAND_K; ++kk) {
     state[sbase + (size_t)kk * DIM] = S[kk][0];
     state[sbase + (size_t)kk * DIM + SG] = S[kk][1];
+  }
+#endif
+#ifdef ROW0
+  // A link's state after its rows, for the next link (header, ROW0); each work-item its own cells, as `state`.
+  for (uint kk = 0; kk < BAND_K; ++kk) {
+    state_x[sbase + (size_t)kk * DIM] = S[kk][0];
+    state_x[sbase + (size_t)kk * DIM + SG] = S[kk][1];
   }
 #endif
 }

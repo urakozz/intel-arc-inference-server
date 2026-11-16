@@ -416,7 +416,7 @@ add_test(NAME attn_verify_ref_test COMMAND attn_verify_ref_test)
 # Spec 28c (plan 28c Task 5): the capture's verify-attention rule (runtime/verify_attn.h), host only; the built
 # attn_verify_dpas names are its arguments (every (M, KV form) the rule can bind must be on a CMake line).
 set(_vattn_built)
-foreach(MM 2 3 4 5 6 7 8 16)   # 16: open-work 28's wide list
+foreach(MM 2 3 4 5 6 7 8 16 32)   # 16: open-work 28's wide list; 32: spec 32's deep list
   foreach(SFX "" _KV8 _Q12KV2 _Q12KV2_KV8)   # spec 17d: the per-card 12 / 2 builds
     if(TARGET kernel_attn_verify_dpas_M${MM}_T32${SFX})
       list(APPEND _vattn_built attn_verify_dpas_M${MM}_T32${SFX})
@@ -1588,6 +1588,10 @@ if(B70_MTP)
   add_test(NAME mtp_verify_wide_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT} 16384 rule wide)
   set_tests_properties(mtp_verify_wide_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
+  # Spec 32: the 32-row list bitwise the 16-row list's rows (no judge: the 16-row list's record carries over).
+  add_test(NAME mtp_verify_deep_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT} 16384 rule deep)
+  set_tests_properties(mtp_verify_deep_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
   # Spec 13c (plan 13c Tasks 2-3): runtime::Engine's sequence slots - S1 a slot alone is today's engine, S2 the slots'
   # isolation (prefill, decode, reset, snapshots), S3 B1 / B3 for the row kernels (bitwise, mixed K and depth), S4 B1

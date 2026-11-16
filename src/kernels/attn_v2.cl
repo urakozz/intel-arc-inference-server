@@ -102,8 +102,9 @@
 // the 128 KB a work-group may hold) and mx / sm / acc hold 6 x M floats per lane; the rows
 // of one launch still span at most two strides (ppw moves every 2048 keys).
 // M = 16 (open-work 28): built only for its attn_reduce_v2 - the 16-row verify list's attention is attn_verify_dpas.
-#if M < 1 || (M > 8 && M != 16)
-#error "attn_v2: M is 1..8 (16 for the wide verify list's reduce)"
+// M = 32 (spec 32): REDUCE_ONLY - attn_reduce_v2 alone for the deep verify list.
+#if M < 1 || (M > 8 && M != 16 && !(defined(REDUCE_ONLY) && M == 32))
+#error "attn_v2: M is 1..8 (16 for the wide verify list's reduce; 32 REDUCE_ONLY)"
 #endif
 
 // BATCH_ROWS (spec 13 §9, plan 13a; undefined on every existing command line): rows of DIFFERENT sequences. Both
@@ -166,6 +167,7 @@ inline void load_v(__global const ushort* restrict kv_v, uint p0, uint j, uint s
   for (uint s = 0; s < WAVE_P; ++s) vreg[s] = p0 + s <= last ? vb[s] : (ushort)0;
 }
 
+#ifndef REDUCE_ONLY   // spec 32: the 32-row list builds the reduce alone (its attention is attn_verify_dpas)
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void attn_decode_v2(__global const uint* restrict ctrl,
@@ -373,6 +375,7 @@ __kernel void attn_decode_v2(__global const uint* restrict ctrl,
     }
   }
 }
+#endif
 
 // attn_reduce_v2 - grid (24 q heads, M), work-group 256, work-item d = dim d: attn.cl's
 // attn_reduce over row m's nb = (pos + m) / ppw(pos + m + 1) + 1 <= TGT partials,

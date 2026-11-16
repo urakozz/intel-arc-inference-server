@@ -10,8 +10,22 @@ For each request (prompt_ids, out_ids) the context at output position i is promp
 Prints the run-length histogram, the share of output ids in runs >= 8 / >= 16, and how many verifies a
 lookup-covered run takes at K = 3 (M = 4), 7 (M = 8) and 15 (M = 16).
   lookup_runs.py DIR [DIR...]   (b70-serve --log-requests directories or recordings: NNNNNN.json with prompt_ids, out_ids)
+
+Spec 32e Task 0: --price walks each request with the server's policy (server::LookupInDFlash inside MTP, window 0,
+max_k 3; EngineAdapter::step_drafts_or_confirmed) and prices every iteration from a cost table, for the ladders
+  16 only;  earn (a wide verify kept whole asks for the next width, any other goes back to 15 drafts - the server's
+  observe());  jump (a wide verify kept whole asks for the narrowest list that holds the source's remaining
+  continuation, the ids after the source's end in the context; the same fall-back).
+Earn and jump are walked with lists up to 32 and up to 64 rows. Assumed (no record of it): the MTP head drafts the
+true ids (a confirmation is cand[:2] == the next two ids; an MTP iteration is K = 3, kept whole).
+Costs: the table's ms a step by rows (1 = plain, 16 / 32 / 64) at its key counts, linear between and beyond them;
+a K-draft lookup verify on the head's lists is plain x VERIFY[K]; an MTP iteration plain x (DRAFT[3] + VERIFY[3]);
+a confirmed entry adds plain x DRAFT[2]; a wide verify adds the replay's ms for each committed row.
+  lookup_runs.py --price [TABLE.json] DIR   (TABLE: {"keys": [...], "1": [...], "16": [...], "32": [...],
+                                             "64": [...], "replay": ms}; default PRICE_TABLE)
 """
 import json
+import math
 import sys
 from collections import Counter
 from pathlib import Path
@@ -32,8 +46,9 @@ class Index:
             if p + 1 >= k:
                 self.tab[k].setdefault(hash(tuple(self.s[p - k + 1:p + 1])), []).append(p)
 
-    def match(self, min_n):
-        """(end, m) of the longest suffix match (most recent on ties) with m >= min_n, or None."""
+    def match(self, min_n, before=None):
+        """(end, m) of the longest suffix match (most recent on ties) with m >= min_n, or None; `before`: only ends
+        whose continuation starts before it (PromptLookup's source_before)."""
         s, t = self.s, len(self.s)
         for k in LEVELS:
             if k > 64 or t < k + 1:
@@ -47,7 +62,7 @@ class Index:
             best = None
             seen = 0
             for e in reversed(chain):
-                if e >= t - 1 or s[e - k + 1:e + 1] != key:
+                if e >= t - 1 or (before is not None and e + 1 >= before) or s[e - k + 1:e + 1] != key:
                     continue
                 m = k
                 while m < 64 and e - m >= 0 and s[e - m] == s[t - 1 - m]:
@@ -164,7 +179,133 @@ def report(name, reqs, kind):
     print('   most copy (file, out, ids in runs >= 8):', top)
 
 
+# Plan 32e Task 0's table (derived): ms a step at the edit / copy set's 8k / 32k / 64k / 99k keys. 16 / 32 / 64 rows
+# from the plan; 1 row (plain) interpolated from the measured 30.83 ms at 4,096, 34.92 at 32,768 and 49.78 at 150,000.
+PRICE_TABLE = {'keys': [8192, 32768, 65536, 99000], '1': [31.4, 34.9, 39.1, 43.3],
+               '16': [46, 59, 74, 92], '32': [70, 93, 123, 156], '64': [97, 144, 203, 270], 'replay': 0.086}
+VERIFY = (1.000, 1.040, 1.070, 1.100)   # b70-serve's mtp auto table: a verify of M = 1..4 rows, plain steps
+DRAFT = (0.0, 0.130, 0.260, 0.380)      # the head drafting k = 0..3, plain steps
+LADDERS = (('16 only', 16, 'earn'), ('earn 32', 32, 'earn'), ('jump 32', 32, 'jump'),
+           ('earn 64', 64, 'earn'), ('jump 64', 64, 'jump'))
+
+
+def cost_at(table, rows, keys):
+    xs, ys = table['keys'], table[str(rows)]
+    j = max(1, min(len(xs) - 1, sum(1 for x in xs if x <= keys)))
+    return ys[j - 1] + (ys[j] - ys[j - 1]) * (keys - xs[j - 1]) / (xs[j] - xs[j - 1])
+
+
+def drafts(s, e, k):
+    """k drafts continuing the source ending at e (an overlapping copy past the end of s, as PromptLookup)."""
+    d = []
+    for j in range(k):
+        p = e + 1 + j
+        d.append(s[p] if p < len(s) else d[p - len(s)])
+    return d
+
+
+def price(prompt, out, table, maxw, ladder):
+    """(ms, emitted ids after the first, {rows: verifies}) of one request under the ladder, lists up to maxw rows."""
+    lists = [w for w in (15, 31, 63) if w < maxw]
+    ix = Index()
+    for x in prompt + out[:1]:
+        ix.append(x)
+    i, ms, lookup, hot, width = 1, 0.0, False, False, 15
+    n = Counter()
+
+    def emit(c):
+        nonlocal i
+        for x in out[i:i + c]:
+            ix.append(x)
+        i += c
+
+    while i < len(out):
+        t = len(ix.s)
+        plain = cost_at(table, 1, t)
+        before = t - 1   # window 0: a source before the pending id
+        d, src = [], None
+        if lookup:
+            mt = ix.match(3, before)
+            if mt is not None:
+                src = mt[0]
+                if hot:
+                    w = width
+                    if ladder == 'jump' and w > 15:   # the narrowest list holding the source's remaining ids
+                        w = next((l for l in lists if l >= t - 1 - src), lists[-1])
+                    d = drafts(ix.s, src, w)
+                else:
+                    d = drafts(ix.s, src, 3)
+            else:
+                lookup = hot = False
+                width = 15
+        else:
+            mt = ix.match(8, before)
+            if mt is not None:
+                d, lookup = drafts(ix.s, mt[0], 3), True
+        if not d:
+            mt = ix.match(2, before)
+            cand = drafts(ix.s, mt[0], 15) if mt is not None else []
+            if cand and cand[:2] == out[i:i + 2]:   # the head's first two drafts agree: entered hot
+                ms += plain * DRAFT[2]
+                d, lookup, hot, width = cand, True, True, 15
+                n['confirmed'] += 1
+            else:   # an MTP iteration, K = 3 kept whole
+                ms += plain * (DRAFT[3] + VERIFY[3])
+                n['mtp'] += 1
+                emit(4)
+                continue
+        r = 0
+        while r < len(d) and i + r < len(out) and d[r] == out[i + r]:
+            r += 1
+        rows = len(d) + 1
+        if len(d) > 3:
+            ms += cost_at(table, rows, t) + table['replay'] * (r + 1)
+        else:
+            ms += plain * VERIFY[len(d)]
+        n[rows] += 1
+        emit(r + 1)
+        wide = len(d) > 3   # observe(): proposed = len(d), kept = r
+        hot = r >= 8 if wide else r == len(d)
+        width = (lists[min(lists.index(len(d)) + 1, len(lists) - 1)] if ladder == 'earn' else lists[-1]) \
+            if wide and r == len(d) else 15
+        if r < min(3, len(d)):
+            lookup = hot = False
+            width = 15
+    return ms, len(out) - 1, n
+
+
+def price_report(table, d):
+    reqs = list(load(d))
+    rows = []
+    for fn, p, o in reqs:
+        tps = []
+        for _, maxw, ladder in LADDERS:
+            ms, ids, n = price(p, o, table, maxw, ladder)
+            tps.append((1000 * ids / ms, n))
+        rows.append((fn, len(p), tps))
+    print('| request | keys | ' + ' | '.join(name for name, _, _ in LADDERS) + ' |')
+    print('|---|---:|' + '---:|' * len(LADDERS))
+    for fn, k, tps in rows:
+        print(f'| {fn} | {k} | ' + ' | '.join(f'{v:.1f}' for v, _ in tps) + ' |')
+    for c, (name, _, _) in enumerate(LADDERS):
+        mean = sum(t[c][0] for _, _, t in rows) / len(rows)
+        geo = math.exp(sum(math.log(t[c][0] / t[0][0]) for _, _, t in rows) / len(rows))
+        print(f'{name}: mean {mean:.1f} t/s, geomean {geo:.3f}x 16 only')
+    for fn, _, tps in rows:
+        print(f'   verifies {fn}: ' + '; '.join(
+            f'{name} ' + ' '.join(f'{k}:{v}' for k, v in sorted(n.items(), key=str))
+            for (name, _, _), (_, n) in zip(LADDERS, tps)))
+
+
 def main():
+    if sys.argv[1:2] == ['--price']:
+        args = sys.argv[2:]
+        table = PRICE_TABLE
+        if args[0].endswith('.json'):
+            table = json.loads(Path(args.pop(0)).read_text())
+        for d in args:
+            price_report(table, d)
+        return
     for d in sys.argv[1:]:
         reqs = list(load(d))
         for kind in ('policy', 'oracle'):

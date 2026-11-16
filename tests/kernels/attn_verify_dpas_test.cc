@@ -17,6 +17,9 @@
 // Part D (real, when <dump dir> is plan 28c Task 4's capture, probe_decode_attn capture --rows 8): FA layer 15's KV and
 //   the q / gate of 8 plain steps from each depth in {512, 4096, 32768, 130816}, KV at 131072 rows: N1, N2b and rep at
 //   every M, N2a with 100 trials a depth. Without a dump part D is skipped (printed) and part S decides.
+// Part W (spec 32, bf16 KV): the 32-row build (the 16-row line in row chunks of 16) - every row bitwise the
+//   16-row build's row launched at its chunk's position (16 c rows on), and N1 against fp64; synthetic KV at the
+//   positions below 4,096 keys, and the dump's KV at 32,768 (its 8 q / gate rows repeated) when given.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -56,7 +59,7 @@ namespace avr = attn_verify_ref;
 // bar sits between the two kernels: a return to P in bf16 fails it. That also retires the int8 4096 exception.
 constexpr double kN1 = 0.999997;
 constexpr uint32_t kQH = 24, kKvH = 4, kHD = 256, kRow = kQH * kHD;
-constexpr uint32_t kTgt = runtime::DecodeScratch::kAttnV2Blocks, kPart = 258, kMaxM = 8;
+constexpr uint32_t kTgt = runtime::DecodeScratch::kAttnV2Blocks, kPart = 258, kMaxM = 32;   // 32: spec 32's part W
 
 // The production lever line's work-group (attn_verify_dpas.cl: 16 RB DS KS). The test reads the levers from the
 // binary's own reqd_work_group_size through the kernel properties instead of repeating CMake's line.
@@ -165,7 +168,7 @@ struct Rig {
     // A partial the decode kernel does not write must not be read: the buffer starts as NaN for every run.
     imm.fill(part.ptr(), 0xFFFFFFFFu, part.size());
     l0::CmdList l = l0::CmdList::regular(ctx);
-    l.launch(dec, kKvH, kTgt);
+    l.launch(dec, kKvH, kTgt, M > 16 ? M / 16 : 1);   // spec 32: the row chunks of 16 (RCHUNK)
     l.launch(red, kQH, M);
     l.close();
     imm.fill(out.ptr(), 0u, size_t(M) * kRow * 2);
@@ -330,6 +333,63 @@ int main(int argc, char** argv) {
                     kv8 ? "int8" : "bf16", pos, w.n1, w.n1_v2, w.n2b, w.abs_n2b, w.rep ? "yes" : "NO", same, done,
                     pass ? "" : "  <-- FAIL");
       }
+    }
+  }
+  // ---- part W ----
+  auto part_w = [&](Rig& r, uint32_t pos, const std::vector<float>& q, const std::vector<float>& g, const char* tag) {
+    for (uint32_t W : {32u}) {
+      r.put(r.aq.ptr(), q.data(), size_t(W) * kRow * 4);
+      r.put(r.ag.ptr(), g.data(), size_t(W) * kRow * 4);
+      const std::vector<uint16_t> ow = r.run(pos, W, true);
+      uint32_t diff = 0;
+      for (uint32_t c = 0; c < W / 16; ++c) {
+        r.put(r.aq.ptr(), &q[size_t(16) * c * kRow], size_t(16) * kRow * 4);
+        r.put(r.ag.ptr(), &g[size_t(16) * c * kRow], size_t(16) * kRow * 4);
+        const std::vector<uint16_t> o16 = r.run(pos + 16 * c, 16, true);
+        for (uint32_t m = 0; m < 16; ++m)
+          diff += std::memcmp(&ow[size_t(16 * c + m) * kRow], &o16[size_t(m) * kRow], kRow * 2) != 0;
+      }
+      const avr::Result ref = avr::run(pos, W, q.data(), g.data(), r.hkv());
+      double n1 = 2, ab = 0;
+      for (uint32_t i = 0; i < W * kQH; ++i) n1 = std::min(n1, cos_rows(&ow[size_t(i) * kHD], &ref.out[size_t(i) * kHD], &ab));
+      const bool pass = diff == 0 && n1 >= kN1;
+      ok = ok && pass;
+      std::printf("W %s pos %6u rows %u: %u rows differ from the 16-row build at their chunk's position; N1 worst %.8f%s\n",
+                  tag, pos, W, diff, n1, pass ? "" : "  <-- FAIL");
+    }
+  };
+  {
+    constexpr uint32_t L = 4096 + 64;
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<uint16_t> hk(size_t(L) * kKvH * kHD), hv(hk.size());
+    for (auto& x : hk) x = common::f32_to_bf16(nd(rng));
+    for (auto& x : hv) x = common::f32_to_bf16(nd(rng));
+    Rig r(ctx, L, false, hk, hv);
+    for (uint32_t pos : {1u, 5u, 2000u, 2040u, 4031u}) {
+      std::vector<float> q(size_t(32) * kRow), g(q.size());
+      for (auto& x : q) x = nd(rng);
+      for (auto& x : g) x = nd(rng);
+      part_w(r, pos, q, g, "synthetic");
+    }
+  }
+  if (argc > 1 && std::string(argv[1]) != "--sweep") {
+    const std::string dir = argv[1];
+    std::ifstream kf(dir + "/kv_k.bin", std::ios::binary | std::ios::ate);
+    const size_t rows = kf ? size_t(kf.tellg()) / (kKvH * kHD * 2) : 0;
+    const std::vector<float> q8 = read_file<float>(dir + "/q_32768.bin", size_t(8) * kRow);
+    const std::vector<float> g8 = read_file<float>(dir + "/g_32768.bin", size_t(8) * kRow);
+    if (rows < 32768 + 32 || q8.empty() || g8.empty()) {
+      std::printf("W real: no dump at 32768 keys, skipped\n");
+    } else {
+      const std::vector<uint16_t> hk = read_file<uint16_t>(dir + "/kv_k.bin", (32768 + 32) * kKvH * kHD);
+      const std::vector<uint16_t> hv = read_file<uint16_t>(dir + "/kv_v.bin", (32768 + 32) * kKvH * kHD);
+      Rig r(ctx, 32768 + 32, false, hk, hv);
+      std::vector<float> q(size_t(32) * kRow), g(q.size());
+      for (uint32_t m = 0; m < 32; ++m) {
+        std::memcpy(&q[size_t(m) * kRow], &q8[size_t(m % 8) * kRow], kRow * 4);
+        std::memcpy(&g[size_t(m) * kRow], &g8[size_t(m % 8) * kRow], kRow * 4);
+      }
+      part_w(r, 32768 - 1, q, g, "real");
     }
   }
   // ---- sweep (spec 28c diagnostic, `--sweep` as the only argument): every position 0 .. 4088 at M = 2, 3, 4, 8 -

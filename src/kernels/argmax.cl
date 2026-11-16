@@ -42,8 +42,9 @@
 #endif
 // out_token[] holds 8 ids (runtime::Control); a larger M writes Control::wide_out[16] (open-work 28: CTRL_OUT 48,
 // CTRL_CUR 32 - argmax_stage2's wide build, argmax_stage2_W16).
-#if M > 16 || (M > 8 && CTRL_OUT != 48)
-#error "argmax: M > 8 needs Control::wide_out (CTRL_OUT 48), M <= 16"
+// M = 32 (spec 32) writes Control::deep_out[32] (CTRL_OUT 96, CTRL_CUR 64: argmax_stage2_W32).
+#if (M > 16 && !(M == 32 && CTRL_OUT == 96)) || (M > 8 && M <= 16 && CTRL_OUT != 48)
+#error "argmax: M 9..16 needs Control::wide_out (CTRL_OUT 48), M 32 Control::deep_out (CTRL_OUT 96)"
 #endif
 #ifndef VOCAB
 #define VOCAB 248320       /* model::Qwen35::kVocab - the logits row length */

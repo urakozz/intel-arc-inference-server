@@ -56,6 +56,8 @@ static_assert(offsetof(runtime::Control, out_token) == 4 * kernels::ctrl_index::
               "CTRL_OUT disagrees with runtime::Control");
 static_assert(offsetof(runtime::Control, wide_cur) == 4 * kernels::ctrl_index::kWideCur, "wide_cur offset");
 static_assert(offsetof(runtime::Control, wide_out) == 4 * kernels::ctrl_index::kWideOut, "wide_out offset");
+static_assert(offsetof(runtime::Control, deep_cur) == 4 * kernels::ctrl_index::kDeepCur, "deep_cur offset");
+static_assert(offsetof(runtime::Control, deep_out) == 4 * kernels::ctrl_index::kDeepOut, "deep_out offset");
 static_assert(offsetof(runtime::Control, debug_flag) == 4 * kernels::ctrl_index::kDebugFlag,
               "CTRL_DEBUG disagrees with runtime::Control");
 
@@ -204,6 +206,47 @@ int main() {
     CHECK_EQ(ctrl->debug_flag, 0u);
     pos = ctrl->pos;
   }
+
+  // Spec 32: the 32-row builds - every row's winner in Control::deep_out, the last one in deep_cur[0], pos advanced
+  // by the rows; the 8- and 16-id words untouched.
+  for (const uint32_t W : {32u}) {
+    l0::Mem wl(d.ctx, l0::MemKind::Device, size_t{W} * Q::kVocab * 4);
+    l0::Mem wp(d.ctx, l0::MemKind::Device, size_t{W} * kGroups * 2 * 4);
+    l0::Module m1(d.ctx, kernels::path(kernels::argmax_stage1_variant(W, Q::kVocabUsed)));
+    l0::Kernel w1 = m1.kernel("argmax_stage1");
+    w1.group_size(kWG);
+    w1.arg_ptr(0, wl.ptr());
+    w1.arg_ptr(1, wp.ptr());
+    l0::Module m2(d.ctx, kernels::path(kernels::argmax_stage2_variant(W)));
+    l0::Kernel w2 = m2.kernel("argmax_stage2");
+    w2.group_size(kWG);
+    w2.arg_ptr(0, ctrl_mem.ptr());
+    w2.arg_ptr(1, wp.ptr());
+    l0::CmdList wlist = l0::CmdList::regular(d.ctx);
+    wlist.launch(w1, kGroups, W);
+    wlist.launch(w2, 1, 1);
+    wlist.close();
+    std::vector<uint32_t> expect(W);
+    for (uint32_t m = 0; m < W; ++m) {
+      auto v = background(100 + m);
+      v[(m * 7919u) % Q::kVocabUsed] = 9.0f + m;
+      expect[m] = ref_argmax(v);
+      d.imm.copy(static_cast<float*>(wl.ptr()) + size_t(m) * Q::kVocab, v.data(), v.size() * 4);
+    }
+    *ctrl = runtime::Control{};
+    ctrl->pos = 100;
+    ctrl->n_active = W;
+    d.q.execute(wlist, &d.fence);
+    d.fence.wait();
+    for (uint32_t m = 0; m < W; ++m) CHECK_EQ(ctrl->deep_out[m], expect[m]);
+    CHECK_EQ(ctrl->deep_cur[0], expect[W - 1]);
+    CHECK_EQ(ctrl->pos, 100u + W);
+    CHECK_EQ(ctrl->out_token[0], 0u);
+    CHECK_EQ(ctrl->wide_out[0], 0u);
+    std::printf("argmax %u rows: every row's winner in deep_out, pos 100 -> %u\n", W, ctrl->pos);
+  }
+  *ctrl = runtime::Control{};   // the timing below runs the 1-row pair: n_active back to 1
+  ctrl->n_active = 1;
 
   // Cost of the pair, per token. The logits sit in one 993 KB buffer that is
   // re-read every iteration, so this is an L2-resident number - which is the

@@ -277,7 +277,7 @@ ScratchSizes scratch_sizes(const model::BoltDesc& d, uint32_t max_len, BoltAttn 
 PersistentSizes persistent_sizes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len,
                                  BoltState st) {
   PersistentSizes s;
-  s.control = 256;   // sizeof(runtime::Control), checked in bolt_buffers.cc
+  s.control = 512;   // sizeof(runtime::Control), checked in bolt_buffers.cc
   const uint32_t attn = device_blocks(d, p, dev, model::BoltBlock::Attention);
   const uint32_t mamba = device_blocks(d, p, dev, model::BoltBlock::Mamba);
   s.kv_k = s.kv_v = line(size_t(attn) * kv_layer_bytes(d, max_len));

@@ -38,10 +38,14 @@ namespace server {
 //     entered hot. (Step 1's recordings: after the head's two drafts agree, the source continues 4-9 ids on average;
 //     a suffix match alone, below 8 ids, does not pay against MTP.)
 // wide_k 0 (the default, every engine without the wide list) is the policy above unchanged.
+// Spec 32 (deep_k, the engine's 32-row list): a run earns its width - a hot run's first wide verify asks for wide_k
+// drafts; a wide verify that keeps every draft it checked lets the next one ask for deep_k, one that keeps fewer drops
+// the next one back to wide_k (below kWideMin kept the run is no longer hot, as above).
 struct LookupInDFlashOptions {
   uint32_t window = 2048;   // the drafter's window: a source must lie before pos - window
   uint32_t max_k = 7;       // the lookup verify's depth (--spec-max)
   uint32_t wide_k = 0;      // open-work 28: the engine's wide verify depth (runtime::Engine::kWideK), 0 = none
+  uint32_t deep_k = 0;      // spec 32: the engine's deep verify depth (runtime::Engine::kDeepK), 0 = none
 };
 
 class LookupInDFlash {
@@ -55,7 +59,10 @@ class LookupInDFlash {
   explicit LookupInDFlash(const LookupInDFlashOptions& o = {});
 
   // A request starts in DFlash (the counters are kept: they are the server's whole run).
-  void reset() { lookup_ = hot_ = false; }
+  void reset() {
+    lookup_ = hot_ = false;
+    width_ = o_.wide_k;
+  }
 
   // This iteration's lookup drafts, or none (a DFlash iteration). `m` holds every id consumed so far and the pending
   // one; its size() is the pending id's position + 1. Entering or leaving lookup happens here; `cap_k` is the engine's
@@ -75,11 +82,13 @@ class LookupInDFlash {
   // Counters since construction.
   uint64_t enters = 0, exits = 0, iterations = 0, drafted = 0, accepted = 0;
   uint64_t wide = 0, confirms = 0;   // open-work 28: wide verifies, confirmed entries
+  uint64_t deep = 0;                 // spec 32: the wide verifies past wide_k drafts
 
  private:
   LookupInDFlashOptions o_;
   bool lookup_ = false;
   bool hot_ = false;   // open-work 28
+  uint32_t width_ = 0;   // spec 32: the drafts a hot run's next wide verify may ask for (wide_k or deep_k)
 };
 
 }  // namespace server

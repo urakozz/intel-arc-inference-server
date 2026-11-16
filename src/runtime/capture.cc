@@ -407,9 +407,11 @@ class Capture {
                 std::to_string(decode_launches(d_)) + " decode_launches() gives " + d_.name);
     // Spec 15e: the verify list is the decode list at M rows plus the head's KV fill
     // (verify_launches): Qwen3.8 784, Ornith 536, at every M.
-    require(mode_ != Mode::Verify || step_.kernel_count == verify_launches(d_),
+    // Spec 32: the deep list's delta-net step is kCapM / 16 links a layer.
+    const size_t links = deep() ? (kCapM / 16 - 1) * size_t(d_.gdn_layers) : 0;
+    require(mode_ != Mode::Verify || step_.kernel_count == verify_launches(d_) + links,
             "the verify list has " + std::to_string(step_.kernel_count) + " launches, not the " +
-                std::to_string(verify_launches(d_)) + " verify_launches() gives " + d_.name);
+                std::to_string(verify_launches(d_) + links) + " verify_launches() gives " + d_.name);
     // Spec 19c: a tap drafter's verify list launches exactly the decode list's kernels at M rows
     // (the taps are copies, which no count includes).
     require(mode_ != Mode::VerifyTaps || step_.kernel_count == decode_launches(d_),
@@ -543,8 +545,11 @@ class Capture {
     // `slots` rows; every engine's buffers have kSlots.
     // Open-work 28: the one-card wide list (DecodeScratchDims::kWideM rows) needs no slot a row - it binds the
     // DEFERRED GDN build, which keeps the state once whatever M.
-    require(kCapM <= mtp_->slots || (kCapM == DecodeScratchDims::kWideM && mode_ == Mode::Verify && sb_.gdn_pend),
-            "an MTP verify list has at most MtpBuffers::slots rows (the wide list: the deferred GDN build)");
+    // Spec 32: the deep list (32 rows) too, with the chain's scratch.
+    require(kCapM <= mtp_->slots ||
+                ((kCapM == DecodeScratchDims::kWideM || (deep() && sb_.gdn_x && sb_.conv_x)) && mode_ == Mode::Verify &&
+                 sb_.gdn_pend),
+            "an MTP verify list has at most MtpBuffers::slots rows (the wide and deep lists: the deferred GDN build)");
     require(kCapM <= DecodeScratchDims::kM || !kv8_, "the wide verify list is built for the bf16 KV cache");
     require(mtp_->slots == MtpBuffers::kSlots || mode_ == Mode::Verify,
             "only a single-card verify list binds a GDN slot count other than kSlots");
@@ -637,7 +642,7 @@ class Capture {
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
       if (sb_.pages) k.arg_ptr(5, sb_.pages);   // plan 19v3b Task 0
-      launch(k, ad.fa_kv_heads, T);
+      launch(k, ad.fa_kv_heads, T, deep() ? kCapM / 16 : 1);   // spec 32: the deep list's row chunks of 16
     }
     // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
     {
@@ -697,6 +702,25 @@ class Capture {
       require(d_.gdn_layers == 48 && d_.gdn_k_heads == kernels::kRefGdnKHeads &&
                   d_.gdn_v_heads == kernels::kRefGdnVHeads,
               "gdn_step_defer_M<M> is built at Qwen3.8's GDN shapes only");
+      if (deep()) {
+        // Spec 32 (gdn_step.cl, ROW0): kCapM / 16 links of the 16-row build, link r0 bound at the list's row r0 of the
+        // partials, a||b and gdn_o; the chain's scratch state and conv rows are this layer's slices.
+        for (uint32_t r0 = 0; r0 < kCapM; r0 += 16) {
+          l0::Kernel& k = kernel(kernels::gdn_step_chain_variant(r0), "gdn_step", kWgGdn);
+          k.arg_ptr(0, ctrl());
+          k.arg_ptr(1, static_cast<uint8_t*>(b_.partials.ptr()) + size_t(r0) * d_.shape(LinearId::QkvZ).N * kFp32);
+          k.arg_ptr(2, static_cast<uint8_t*>(b_.ab_out.ptr()) + size_t(r0) * d_.shape(LinearId::AB).N * kFp32);
+          k.arg_ptr(3, small_of(layer).gdn.ptr());
+          k.arg_ptr(4, ring0() + size_t(g) * conv_ring_stride());
+          k.arg_ptr(5, state0() + size_t(g) * gdn_state_stride());
+          k.arg_ptr(6, static_cast<uint8_t*>(b_.gdn_o.ptr()) + size_t(r0) * d_.gdn_value_dim() * kFp32);
+          k.arg_ptr(7, static_cast<uint8_t*>(pend) + size_t(g) * kernels::kGdnPendLayerBytes);
+          k.arg_ptr(8, static_cast<uint8_t*>(sb_.gdn_x) + size_t(g) * gdn_state_stride());
+          k.arg_ptr(9, static_cast<uint8_t*>(sb_.conv_x) + size_t(g) * kernels::kGdnConvXLayerBytes);
+          launch(k, d_.gdn_v_heads, kGdnStateChunks);
+        }
+        return;
+      }
       l0::Kernel& k = kernel(kernels::gdn_step_defer_variant(kCapM), "gdn_step", kWgGdn);
       k.arg_ptr(0, ctrl());
       k.arg_ptr(1, b_.partials.ptr());
@@ -816,6 +840,8 @@ class Capture {
   // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt; 16 at M = 8:
   // -0.5 ms, not merged - it moves pp_dflash_test's two-card rows off the one card's). v2, the paged lists and every
   // production list keep kAttnV2Blocks.
+  // Spec 32: the one-card deep verify list (32 rows: the attention in row chunks, the delta-net step a chain).
+  bool deep() const { return mode_ == Mode::Verify && kCapM > DecodeScratchDims::kWideM; }
   uint32_t attn_tgt() const {
     return vattn_ == VerifyAttn::Dpas && !sb_.pages && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
                                                                           : DecodeBuffers::kAttnV2Blocks;
@@ -860,7 +886,7 @@ class Capture {
   // profiling) `events` - are appended together or not at all. Tap copies do
   // not come through here: they are commands, not kernels, and get neither a
   // label nor an event, exactly as they are excluded from `kernel_count`.
-  void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1) {
+  void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1) {
     require(!pending_entry_.empty(), "launch() without a preceding kernel()");
     l0::Event* signal = nullptr;
     if (prof_) {
@@ -876,7 +902,7 @@ class Capture {
       // the command list here and never looks at the Event object again.
       signal = &prof_->events.back();
     }
-    step_.list.launch(k, gx, gy, 1, signal);
+    step_.list.launch(k, gx, gy, gz, signal);
     step_.labels.push_back((layer_ == kBoundary ? std::string("--")
                                                 : "L" + std::to_string(layer_)) +
                            " " + pending_entry_ + " " + pending_variant_);
@@ -1019,13 +1045,14 @@ class Capture {
     // Spec 28b: at M >= 2 (runtime::gemv_kind) a tuned shape binds gemm_sm (gemm_sm.cl) - gemv's four
     // arguments in gemv's order, gemv's [S][M][N] output at the shape's S (the consumer's fold unchanged),
     // except gate||up under the 2x8 work-group: one slice, and mlp() binds the SiLU's _S1 build. Only the
-    // variant, the entry, the work-group and the grid differ.
+    // variant, the entry, the work-group and the grid differ. Spec 32e: past 16 rows the int4 rows bind gemm_sm_v2 (the
+    // same arguments, output and grid; its own work-group).
     const kernels::SmallMTuning* t = small_m(s.K, s.N, s.S, s.layout);
     if (t)
       require(kernels::gemm_sm_out_s(*t) == s.S || id == LinearId::GateUp,
               "gemm_sm writes another split-K S than the consumer folds (only gate||up's SiLU has an S 1 build)");
-    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(*t),
-                               kernels::gemm_sm_wg_size(*t))
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(kCapM, *t),
+                               kernels::gemm_sm_wg_size(kCapM, *t))
                       : kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, s.layout == 0 ? w.scales->ptr() : w.mem.ptr());
@@ -1172,8 +1199,8 @@ class Capture {
     require(s.N % kernels::kGemvI8wCols == 0, "gemv_i8w N is not a multiple of 64");
     // Spec 28b: at M >= 2 a tuned shape binds gemm_sm_i8w - gemv_i8w's arguments and [M][N] output.
     const kernels::SmallMTuning* t = small_m(s.K, s.N, 1, 2);
-    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(*t),
-                               kernels::gemm_sm_wg_size(*t))
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(kCapM, *t),
+                               kernels::gemm_sm_wg_size(kCapM, *t))
                       : kernel(kernels::gemv_i8w_variant(kCapM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, w.scales->ptr());
@@ -2078,7 +2105,9 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
   // probe_mtp_steps' M = 5..8 lists), never past DecodeBuffers::kM.
   // Open-work 28: or the one-card wide list at DecodeScratchDims::kWideM rows (the deferred GDN build: SlotBind's
   // gdn_pend).
-  const bool wide = M == DecodeScratchDims::kWideM && slot.gdn_pend != nullptr;
+  // Spec 32: or the deep list at kDeepM rows (the chain's scratch too).
+  const bool wide = slot.gdn_pend != nullptr &&
+                    (M == DecodeScratchDims::kWideM || (M == DecodeScratchDims::kDeepM && slot.gdn_x && slot.conv_x));
   if (M == 0 || (!wide && (M > mtp.slots || M > DecodeBuffers::kM)))
     throw std::runtime_error("runtime::build_verify: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(mtp.slots) +

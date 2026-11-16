@@ -202,6 +202,8 @@ struct EngineIface {
     std::function<void()> confirmed;
   };
   virtual uint32_t lookup_wide_k() { return 0; }
+  // Spec 32: the deeper lookup verify beside it (runtime::Engine::kDeepK, 31; 0: none).
+  virtual uint32_t lookup_deep_k() { return 0; }
   virtual std::vector<uint32_t> step_drafts_or_confirmed(const Sampling& s, uint32_t k, const Proposer& propose,
                                                          const DraftChoice& choose, const LookupConfirm& confirm) {
     (void)confirm;

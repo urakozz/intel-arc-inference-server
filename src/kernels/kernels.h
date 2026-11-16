@@ -118,22 +118,36 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
 enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4 };
+// Spec 32e: an int4 row's gemm_sm_v2 shape past 16 rows (src/kernels/gemm_sm_v2.cl; plan 34a Task 1 measured both):
+// kV2Rc32 - row chunks of 32 a sub-group, a weight prefetch one group ahead, 256 GRF; kV2Swap - one sub-group for
+// every row, the prefetch two groups ahead, 128 GRF.
+enum : unsigned char { kV2None = 0, kV2Rc32 = 1, kV2Swap = 2 };
 struct SmallMTuning {
   unsigned K, N, S, layout;
   bool wg, magic, grf256, blk2d;
   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head);
-  // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter)
+  // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter). kSmAll also 32 and 64 (spec 32).
   unsigned char mset = kSmAll;
+  // Spec 32: from this M on the variant carries 256 GRF (0: never; grf256 already means every M). GRF changes who
+  // holds a value, not the value, so it is the one knob that may vary with M (property R).
+  unsigned g256_from = 0;
+  // Spec 32e: the gemm_sm_v2 shape at 32 and at 64 rows (kV2None: gemm_sm, which spills there). Same arguments,
+  // output, grid and per-row arithmetic as gemm_sm, so every row is bitwise gemm_sm's at 16 rows (property R).
+  unsigned char v2_32 = kV2None, v2_64 = kV2None;
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
     // Qwen3.8
-    {5120, 16384, 1, 1, false, true, false, false},   // qkv||z      48 layers
-    {6144, 5120, 4, 0, false, true, false, true},     // out_proj, o_proj
-    {5120, 14336, 2, 0, false, true, false, true},    // q||k||v
-    {5120, 34816, 8, 0, true, true, false, true},     // gate||up (2x8 work-group: one slice, SiLU at S 1; the 2D read:
-                                                      // spec 19 v3d Task 4)
-    {17408, 5120, 4, 0, false, true, false, true},    // down
-    {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head
+    // (g256_from 32, spec 32: at 32 rows gemm_sm spills at 128 GRF - qkv||z 1285 us against 99 at 256; the int4
+    // rows take gemm_sm_v2 at 32 and 64 rows instead, spec 32e: the per-shape best of plan 34a Task 1's arms, a
+    // token's int4 linears 29.85 ms at 32 rows and 44.13 ms at 64)
+    {5120, 16384, 1, 1, false, true, false, false, kSmAll, 0, kV2Rc32, kV2Rc32},   // qkv||z      48 layers
+    {6144, 5120, 4, 0, false, true, false, true, kSmAll, 0, kV2Swap, kV2Rc32},     // out_proj, o_proj
+    {5120, 14336, 2, 0, false, true, false, true, kSmAll, 0, kV2Rc32, kV2Rc32},    // q||k||v
+    {5120, 34816, 8, 0, true, true, false, true, kSmAll, 0, kV2Rc32, kV2Rc32},     // gate||up (2x8 work-group: one
+                                                                                   // slice, SiLU at S 1; the 2D read:
+                                                                                   // spec 19 v3d Task 4)
+    {17408, 5120, 4, 0, false, true, false, true, kSmAll, 0, kV2Rc32, kV2Rc32},    // down
+    {5120, 248320, 1, 2, true, false, false, false, kSmAll, 32},  // the int8 lm_head (gemm_sm_i8w at 32 and 64 too)
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the operator's 28b addition, 2026-11-01) at its verify
     // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
     // and the bf16 router stay as they are (spec 28m)
@@ -235,6 +249,7 @@ inline constexpr bool small_m_table_ok() {
     if (t.blk2d && t.layout != 0) return false;
     if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % 8 != 0)) return false;
     if (t.N % gemm_sm_cols(t) != 0) return false;
+    if ((t.v2_32 || t.v2_64) && t.layout > 1) return false;   // gemm_sm_v2 is int4 layouts 0 / 1
   }
   return true;
 }
@@ -242,9 +257,17 @@ static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #err
 // gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256][_b2d] (int4; S the OUTPUT's slices, the binary's S define) /
 // gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8): every knob is in the name, so a table row CMake does not build is a
 // missing file at capture.
+// Spec 32e: gemm_sm_v2_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_b2d]_rc32_pf1_g256 | _sw_pf2 where a row binds v2 at M.
+inline constexpr unsigned char gemm_sm_v2_arm(unsigned M, const SmallMTuning& t) {
+  return M == 64 ? t.v2_64 : M == 32 ? t.v2_32 : (unsigned char)kV2None;
+}
 inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   const std::string mk = "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N);
-  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 ? "_g256" : "") +
+  if (const unsigned char a = gemm_sm_v2_arm(M, t))
+    return "gemm_sm_v2" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) +
+           (t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.blk2d ? "_b2d" : "") +
+           (a == kV2Rc32 ? "_rc32_pf1_g256" : "_sw_pf2");
+  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 || (t.g256_from && M >= t.g256_from) ? "_g256" : "") +
                             (t.blk2d ? "_b2d" : "");
   if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
@@ -258,10 +281,18 @@ inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
     case kSmVerify8: return {2, 3, 4, 5, 6, 7, 8};
     case kSmDraft8: return {8};
     case kSmDraft7: return {7};
-    default: return {2, 3, 4, 5, 6, 7, 8, 16};
+    default: return {2, 3, 4, 5, 6, 7, 8, 16, 32, 64};   // 32 / 64: spec 32's deep verify lists
   }
 }
 inline constexpr const char* gemm_sm_entry(const SmallMTuning& t) { return t.layout == 2 ? "gemm_sm_i8w" : "gemm_sm"; }
+// The entry and work-group size of the variant at M rows: gemm_sm's, or gemm_sm_v2's (the row-chunk shape's work-group
+// holds M / 32 chunks of gemm_sm's); the grid is gemm_sm's at every M (gemm_sm_cols, gemm_sm_grid_y).
+inline constexpr const char* gemm_sm_entry(unsigned M, const SmallMTuning& t) {
+  return gemm_sm_v2_arm(M, t) ? "gemm_sm_v2" : gemm_sm_entry(t);
+}
+inline constexpr unsigned gemm_sm_wg_size(unsigned M, const SmallMTuning& t) {
+  return gemm_sm_wg_size(t) * (gemm_sm_v2_arm(M, t) == kV2Rc32 ? M / 32 : 1);
+}
 // The int4 / int8 linear a capture binds at M rows of kind `k` - the one naming rule the captures and
 // the names tests share.
 inline std::string int4_linear_variant(LinearKind k, unsigned M, unsigned K, unsigned N, unsigned S, unsigned L) {
@@ -437,10 +468,15 @@ inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, un
 // binds the 8-slot build, `_N8` (runtime::MtpBuffers::slots).
 // verify-cost-m8: gdn_step.cl's DEFERRED build at M rows (M = 1..8), Qwen3.8's 48 GDN layers and heads only - the
 // pending rows' parity stride is baked: kGdnPendParityBytes = 48 layers x kGdnPendLayerBytes.
-inline constexpr size_t kGdnPendLayerBytes = 16 * (16 + 48) * 128 * 2 + 16 * 48 * 2 * 4;   // PR = 16 rows (open-work 28)
+inline constexpr size_t kGdnPendLayerBytes = 32 * (16 + 48) * 128 * 2 + 32 * 48 * 2 * 4;   // PR = 32 rows (spec 32)
 inline constexpr size_t kGdnPendParityBytes = 48 * kGdnPendLayerBytes;
-static_assert(kGdnPendParityBytes == 12877824, "src/kernels/CMakeLists.txt's PEND_PAR");
+static_assert(kGdnPendParityBytes == 25755648, "src/kernels/CMakeLists.txt's PEND_PAR");
 inline std::string gdn_step_defer_variant(unsigned M) { return "gdn_step_defer_M" + std::to_string(M); }
+// Spec 32: a link of the 32-row list's chain (gdn_step.cl, ROW0) and its scratch: the conv rows 16..31 of the list,
+// [48 GDN layers][16 rows][10240] bf16; the ring copy (gdn_ring_commit.cl) moves the committed ones into the ring.
+inline std::string gdn_step_chain_variant(unsigned row0) { return "gdn_step_defer_M16_R" + std::to_string(row0); }
+inline constexpr size_t kGdnConvXRows = 16;
+inline constexpr size_t kGdnConvXLayerBytes = kGdnConvXRows * 10240 * 2;
 inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers,
                                           unsigned gdn_k = kRefGdnKHeads,
                                           unsigned gdn_v = kRefGdnVHeads, unsigned slots = 4) {
@@ -467,6 +503,9 @@ inline constexpr unsigned kGdnPend = 30;    // Control::gdn_pend (gdn_step.cl's 
 inline constexpr unsigned kDraftStat = 28;  // Control::draft_stat[2] (open-work 13, draft_prob.cl's CTRL_DSTAT)
 inline constexpr unsigned kWideCur = 32;    // Control::wide_cur[16] (open-work 28: the 16-row builds' CTRL_CUR)
 inline constexpr unsigned kWideOut = 48;    // Control::wide_out[16] (their CTRL_OUT)
+inline constexpr unsigned kDeepCur = 64;    // Control::deep_cur[32] (spec 32: the 32-row builds' CTRL_CUR)
+inline constexpr unsigned kDeepOut = 96;    // Control::deep_out[32] (their CTRL_OUT)
+inline constexpr unsigned kRingCommit = 31; // Control::ring_commit (spec 32: gdn_ring_commit.cl's CTRL_RC)
 }  // namespace ctrl_index
 
 // The token-boundary kernels (src/kernels/embed_gather.cl, argmax.cl). `M` is
@@ -485,7 +524,9 @@ inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
 // Stage 2 is a single work-group that loops m < ctrl.n_active internally: no
 // variants at all, so the binary is named after the entry point.
 // Open-work 28: the 16-row list's stage 2 writes Control::wide_out and wide_cur[0] (CTRL_OUT 48, CTRL_CUR 32).
-inline std::string argmax_stage2_variant(unsigned M = 1) { return M > 8 ? "argmax_stage2_W16" : "argmax_stage2"; }
+inline std::string argmax_stage2_variant(unsigned M = 1) {
+  return M > 16 ? "argmax_stage2_W" + std::to_string(M) : M > 8 ? "argmax_stage2_W16" : "argmax_stage2";   // W32: spec 32
+}
 // Open-work 13: the draft's probability over a logits row of `rows` entries, `used` of them real ids
 // (src/kernels/draft_prob.cl: draft_prob_stage1 / _stage2 in one binary, WG 256, 1024 logits per stage-1 group).
 inline std::string draft_prob_variant(unsigned rows, unsigned used) {

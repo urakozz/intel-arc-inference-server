@@ -135,6 +135,9 @@ struct DecodeScratchDims {
   // Open-work 28: the one-card wide verify list's rows (long prompt-lookup runs) - the row dimension the decode
   // scratch and one sequence's hh rows are sized for. Every other list (rows, TP, taps, drafts) stays at kM.
   static constexpr uint32_t kWideM = 16;
+  // Spec 32: the one-card deep verify list's rows: what the decode scratch and one sequence's hh rows are sized for
+  // since then (kDeepM), kWideM stays the 16-row list's.
+  static constexpr uint32_t kDeepM = 32;
   // KV positions per `attn_decode` work-group - spec 1.5's lever L5 took it
   // from 256 to 64. Since the zero-config cleanup (2026-11-06) decode attention v1
   // (attn.cl's attn_decode / attn_reduce) is no engine's: it survives only as the
@@ -312,12 +315,18 @@ void set_default_prefill_chunk_cap(uint32_t cap);
 struct MtpSizes {
   size_t hctl, gdn_spec, kv_k, kv_v, hh, dh, logits;
   size_t dv_logits;   // spec 8 §11: fp32 [|V'|], 0 without a draft vocabulary
-  size_t total() const { return hctl + gdn_spec + kv_k + kv_v + hh + dh + logits + dv_logits; }
+  // Spec 32: one sequence on Qwen3.8's GDN shapes - the deferred GDN rows (two parities, 32 rows each) and, over the
+  // bf16 KV cache, the deep verify list's chain scratch (a GDN state and the conv rows 16..31).
+  size_t deep;
+  size_t total() const { return hctl + gdn_spec + kv_k + kv_v + hh + dh + logits + dv_logits + deep; }
 };
 
 struct MtpDims {
   static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
   static constexpr uint32_t kMaxK = kSlots - 1;
+  // Spec 32: kernels::kGdnPendParityBytes and kGdnConvXLayerBytes (kernels/kernels.h; engine.cc holds them equal).
+  static constexpr size_t kGdnPendParity = size_t{48} * (32 * (16 + 48) * 128 * 2 + 32 * 48 * 2 * 4);
+  static constexpr size_t kGdnConvXLayer = size_t{16} * 10240 * 2;
   // Spec 19a (plan 19a Task 4): the most GDN state slots a buffer may carry - a verify
   // list at M rows needs M slots, and DecodeScratchDims::kM = 8 bounds M.
   static constexpr uint32_t kMaxSlots = 8;

@@ -1,4 +1,4 @@
-// gemm_sm.cl - the small-M decode / verify GEMM (spec 28 §2, plan 28b): M = 2..16 activation rows
+// gemm_sm.cl - the small-M decode / verify GEMM (spec 28 §2, plan 28b): M = 2..16 activation rows (32 and 64: spec 32)
 // against the decode weights through bf16 DPAS, one dequant per weight tile for every row.
 //
 // The production form of plan 28a's stand-in (tools/probe/probe_small_m.cl, arm `bf16 wB`): the
@@ -77,8 +77,8 @@
 #define RB ((M + 7) / 8)          /* row blocks of 8 */
 #define ROWS (RB * 8)
 
-#if M < 1 || M > 16
-#error "gemm_sm: M in [1, 16]"
+#if M < 1 || M > 64
+#error "gemm_sm: M in [1, 64]"
 #endif
 #if (K % GROUP) != 0 || (G % S) != 0 || (G_PER_S % KSL) != 0
 #error "gemm_sm: S | K/64 and KSL | K/64/S"

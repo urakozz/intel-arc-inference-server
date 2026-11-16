@@ -29,6 +29,13 @@
 //                prefetch for layout 0, prefetch() for the tiled layouts)
 //   BLK2D        layout 0, wB: the weights by one 2D block read (gemv's GEMV_BLOCK2D)
 //   I4A_SWAP     wA i8 x i4: nibble order inside an A byte (0: low nibble = even k)
+//   V2           spec 32e (plan 32e Task 1): build `psm_v2` alone (no psm / psm_quant), M 16..64 - 1: the
+//                row-chunk arm (RC rows a sub-group, 16 or 32), 2: the swap arm (one sub-group, every row);
+//                see the kernel
+//   A2D          spec 34 (plan 34a Task 1), V2 only: 1 - the A operands by 2D block reads of the rows (8 rows x
+//                16 k x 2 blocks, the DPAS reads them in place) instead of row loads and moves
+//   NODQ         plan 34a Task 1, V2 2 only: a timing-only ablation - the B operands dequantised for the first
+//                group and reused for every group (the weight loads kept); WRONG output, never checked bitwise
 //
 // Order of operations (property R: a row's output depends only on its own row, and the
 // per-row arithmetic is the same at every M): per 64-k group, the group's DPAS chain from a
@@ -67,6 +74,15 @@
 #ifndef I4A_SWAP
 #define I4A_SWAP 0
 #endif
+#ifndef V2
+#define V2 0
+#endif
+#ifndef A2D
+#define A2D 0
+#endif
+#ifndef NODQ
+#define NODQ 0
+#endif
 #if SPLITK == 0
 #undef NSGN
 #undef KSL
@@ -90,8 +106,8 @@
 #define RB ((M + 7) / 8)          /* wB: row blocks of 8 */
 #define ROWS (RB * 8)
 
-#if M < 1 || M > 16
-#error "probe_small_m: M in [1, 16]"
+#if M < 1 || M > (V2 ? 64 : 16)
+#error "probe_small_m: M in [1, 16] (psm_v2: [1, 64])"
 #endif
 #if (K % GROUP) != 0 || (G % S) != 0 || (G_PER_S % KSL) != 0
 #error "probe_small_m: S | K/64 and KSL | K/64/S"
@@ -142,6 +158,7 @@ inline int pair_bf16(uint word, uint p) {
 #define ACC_T int8
 #endif
 
+#if !V2
 // ---------------------------------------------------------------------------------------
 // The activation quantiser for TYPE 2 (pw4a8_quant's rule, tools/probe/probe_w4a8.cl): one
 // work-group per row, scale = max|x| / 127, q = RNE(x / scale) saturated. In every binary
@@ -166,6 +183,7 @@ __kernel void psm_quant(__global const ushort* restrict x, __global char* restri
   for (uint k = lid; k < K; k += QWG)
     xq[(size_t)m * K + k] = scale == 0.0f ? (char)0 : convert_char_sat_rte(bf16f(row[k]) / scale);
 }
+#endif
 
 // ---------------------------------------------------------------------------------------
 // Prefetch of group gp's weights for this sub-group's 16 columns.
@@ -190,6 +208,7 @@ inline void prefetch_group(__global const uchar* w, uint n_tile, uint gp) {
 #define SCALE_AT(sc, g, n) ((float)((__global const half*)(sc))[(size_t)(g) * N + (n)])
 #endif
 
+#if !V2
 __attribute__((intel_reqd_sub_group_size(SG)))
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void psm(__global const uchar* restrict w,       // int4 words / tiles, or int8 head bytes
@@ -509,3 +528,192 @@ __kernel void psm(__global const uchar* restrict w,       // int4 words / tiles,
 #endif
 #endif
 }
+#endif
+
+#if V2
+// ---------------------------------------------------------------------------------------
+// Spec 32e (plan 32e Task 1): gemm_sm_v2's stand-ins for 17..64 rows. gemm_sm's per-row arithmetic unchanged
+// (src/kernels/gemm_sm.cl: bf16 DPAS, weights on B, int4 layout 0 / 1, the group's four k16 DPAS from a zero
+// accumulator in k order, acc += group x scale in fp32, the shape's grid S or the 2 x 8 in-work-group split-K reduced
+// through SLM in slice order) under another thread shape:
+//   V2 1 (rc)    the work-group gains a row-chunk dimension: sub-group (column c, K-slice ks, chunk rc) runs rows
+//                RC rc .. RC rc + RC - 1 against the same 16 columns as its siblings - each chunk is gemm_sm at RC
+//                rows; the siblings' weight reads hit the same lines
+//   V2 2 (swap)  one sub-group for all M rows: the group's four B operands dequantised first and kept, then row
+//                block by row block - its A operand, four DPAS into ONE group accumulator, the scale step (no xa)
+// So row m's DPAS chain, scale step, S and reduce order are gemm_sm's at 16 rows (property R across the two).
+#if TYPE != 1 || ORIENT != 0 || LAYOUT > 1
+#error "psm_v2: bf16 DPAS, weights on B, int4"
+#endif
+#if V2 == 2
+#undef RC
+#define RC M
+#endif
+#ifndef RC
+#define RC 16
+#endif
+#if (M % RC) != 0 || (RC % 8) != 0
+#error "psm_v2: RC | M and 8 | RC"
+#endif
+#define RCN (M / RC)          /* row chunks (sub-groups per column sub-group and K-slice) */
+#define RBC (RC / 8)          /* row blocks of 8 a sub-group holds */
+
+// Component d of a ushort4 (d is a compile-time constant once the loops unroll).
+inline ushort u4c(ushort4 v, int d) { return d == 0 ? v.s0 : d == 1 ? v.s1 : d == 2 ? v.s2 : v.s3; }
+
+__attribute__((intel_reqd_sub_group_size(SG)))
+__attribute__((reqd_work_group_size(WG * RCN, 1, 1)))
+__kernel void psm_v2(__global const uchar* restrict w,       // int4 words / tiles
+                     __global const uchar* restrict sc,      // L0: f16 [K/64][N]; L1: unused
+                     __global const uchar* restrict x,       // bf16 [M][K]
+                     __global const float* restrict xs,      // unused (psm's argument list)
+                     __global float* restrict out) {
+  const uint lane = get_sub_group_local_id();
+  const uint sg = get_sub_group_id();
+  const uint col_sg = sg % NSGN;
+  const uint ks = (sg / NSGN) % KSL;
+  const uint rc = sg / (NSGN * KSL);
+  const uint n_tile = get_group_id(0) * NSGN + col_sg;
+  const uint n0 = n_tile * SG;
+  const uint n = n0 + lane;
+  const uint s = get_group_id(1);
+  const uint gbase = s * G_PER_S + ks;
+  const uint r0 = rc * RC;
+  __global const uint* w32 = (__global const uint*)w;
+  __global const ushort* xr = (__global const ushort*)x + (size_t)r0 * K;
+
+  float8 acc[RBC];
+  for (int rb = 0; rb < RBC; ++rb) acc[rb] = (float8)0.0f;
+#if NODQ
+#if V2 != 2
+#error "psm_v2: NODQ is a swap-arm ablation"
+#endif
+  int8 b[4];
+  uint sink = 0;
+#endif
+  for (uint i = 0; i < G_PER_SG; ++i) {
+    const uint g = gbase + i * KSL;
+#if PF_G
+    if (rc == 0) prefetch_group(w, n_tile, g + PF_G * KSL);
+#endif
+    uint wv[8];
+    float scale;
+#if LAYOUT == 0
+#if BLK2D
+    intel_sub_group_2d_block_read_32b_8r16x1c((__global void*)w32, (int)(N * 4u), (int)(K / 8u),
+                                              (int)(N * 4u), (int2)((int)n0, (int)(g * 8u)), wv);
+#else
+    for (int j = 0; j < 8; ++j) wv[j] = w32[(size_t)(g * 8 + j) * N + n];
+#endif
+    scale = SCALE_AT(sc, g, n);
+#else
+    __global const uint* tile = w32 + ((size_t)n_tile * G + g) * TILE_U32;
+    const uint8 blk = intel_sub_group_block_read8(tile);
+    wv[0] = blk.s0; wv[1] = blk.s1; wv[2] = blk.s2; wv[3] = blk.s3;
+    wv[4] = blk.s4; wv[5] = blk.s5; wv[6] = blk.s6; wv[7] = blk.s7;
+    scale = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(tile + 128)));
+#endif
+#if V2 == 1
+#if A2D
+    // [row block][8 d + r]: row rb * 8 + r of k16 step d, this lane's k - two 2D reads a block (steps 0, 1 and 2, 3)
+    // on the chunk's rows (base xr, height RC)
+    ushort xa[RBC][32];
+    for (int rb = 0; rb < RBC; ++rb) {
+      intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                (int2)((int)(g * GROUP), rb * 8), &xa[rb][0]);
+      intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                (int2)((int)(g * GROUP + 32u), rb * 8), &xa[rb][16]);
+    }
+#else
+    ushort xa[RC][4];   // [row][k16 step]: element lane of the step
+    for (int r = 0; r < RC; ++r) {
+      const ushort4 v = intel_sub_group_block_read_us4(xr + (size_t)r * K + g * GROUP);
+      xa[r][0] = v.s0; xa[r][1] = v.s1; xa[r][2] = v.s2; xa[r][3] = v.s3;
+    }
+#endif
+    float8 gacc[RBC];
+    for (int rb = 0; rb < RBC; ++rb) gacc[rb] = (float8)0.0f;
+    for (int d = 0; d < 4; ++d) {
+      const uint w0 = wv[2 * d], w1 = wv[2 * d + 1];
+      int8 b;
+      b.s0 = pair_bf16(w0, 0); b.s1 = pair_bf16(w0, 1); b.s2 = pair_bf16(w0, 2); b.s3 = pair_bf16(w0, 3);
+      b.s4 = pair_bf16(w1, 0); b.s5 = pair_bf16(w1, 1); b.s6 = pair_bf16(w1, 2); b.s7 = pair_bf16(w1, 3);
+      for (int rb = 0; rb < RBC; ++rb) {
+#if A2D
+        const short8 a = as_short8(vload8(d, xa[rb]));
+#else
+        short8 a;
+        a.s0 = xa[rb * 8 + 0][d]; a.s1 = xa[rb * 8 + 1][d]; a.s2 = xa[rb * 8 + 2][d]; a.s3 = xa[rb * 8 + 3][d];
+        a.s4 = xa[rb * 8 + 4][d]; a.s5 = xa[rb * 8 + 5][d]; a.s6 = xa[rb * 8 + 6][d]; a.s7 = xa[rb * 8 + 7][d];
+#endif
+        gacc[rb] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b, gacc[rb]);
+      }
+    }
+    for (int rb = 0; rb < RBC; ++rb) acc[rb] += gacc[rb] * scale;
+#else
+#if NODQ
+    sink ^= wv[0] ^ wv[1] ^ wv[2] ^ wv[3] ^ wv[4] ^ wv[5] ^ wv[6] ^ wv[7];   // keeps the weight loads
+    if (i == 0)
+#else
+    int8 b[4];
+#endif
+    for (int d = 0; d < 4; ++d) {
+      const uint w0 = wv[2 * d], w1 = wv[2 * d + 1];
+      b[d].s0 = pair_bf16(w0, 0); b[d].s1 = pair_bf16(w0, 1); b[d].s2 = pair_bf16(w0, 2); b[d].s3 = pair_bf16(w0, 3);
+      b[d].s4 = pair_bf16(w1, 0); b[d].s5 = pair_bf16(w1, 1); b[d].s6 = pair_bf16(w1, 2); b[d].s7 = pair_bf16(w1, 3);
+    }
+    for (int rb = 0; rb < RBC; ++rb) {
+#if A2D
+      // the row block's A operands of k16 steps 0, 1 and 2, 3 by two 2D block reads (8 rows x 16 k x 2 blocks), read
+      // - two DPAS - read - two DPAS (both reads first overflows 128 GRF); the DPAS read them in place
+      float8 gacc = (float8)0.0f;
+      {
+        ushort a01[16];
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                  (int2)((int)(g * GROUP), rb * 8), a01);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(0, a01)), b[0], gacc);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(1, a01)), b[1], gacc);
+      }
+      {
+        ushort a23[16];
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                  (int2)((int)(g * GROUP + 32u), rb * 8), a23);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(0, a23)), b[2], gacc);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(1, a23)), b[3], gacc);
+      }
+#else
+      ushort4 v[8];
+      for (int r = 0; r < 8; ++r) v[r] = intel_sub_group_block_read_us4(xr + (size_t)(rb * 8 + r) * K + g * GROUP);
+      float8 gacc = (float8)0.0f;
+      for (int d = 0; d < 4; ++d) {
+        short8 a;
+        a.s0 = u4c(v[0], d); a.s1 = u4c(v[1], d); a.s2 = u4c(v[2], d); a.s3 = u4c(v[3], d);
+        a.s4 = u4c(v[4], d); a.s5 = u4c(v[5], d); a.s6 = u4c(v[6], d); a.s7 = u4c(v[7], d);
+        gacc = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b[d], gacc);
+      }
+#endif
+      acc[rb] += gacc * scale;
+    }
+#endif
+  }
+#if NODQ
+  if (sink == 0x9e3779b9u) out[n] = 0.0f;   // the weight loads stay live
+#endif
+  // ---- the end of the K walk: acc[rb].s(r) = row r0 + rb*8 + r, column n --------------
+#if SPLITK == 1
+  __local float red[KSL][NSGN][M][SG];
+  for (int rb = 0; rb < RBC; ++rb)
+    for (int r = 0; r < 8; ++r) red[ks][col_sg][r0 + rb * 8 + r][lane] = f8(acc[rb], r);
+  barrier(CLK_LOCAL_MEM_FENCE);
+  // gemm_sm's reduce (slice 0 + 1 + ... in order); the KSL x RCN sub-groups of a column share the rows
+  for (uint e = rc * KSL + ks; e < M; e += KSL * RCN) {
+    float v = red[0][col_sg][e][lane];
+    for (uint j = 1; j < KSL; ++j) v += red[j][col_sg][e][lane];
+    out[(size_t)e * N + n] = v;
+  }
+#else
+  for (int rb = 0; rb < RBC; ++rb)
+    for (int r = 0; r < 8; ++r) out[((size_t)s * M + r0 + rb * 8 + r) * N + n] = f8(acc[rb], r);
+#endif
+}
+#endif

@@ -1,6 +1,7 @@
 // Spec 19f (spec 19 §13.1): server::LookupInDFlash - the ENTER / STAY / EXIT transitions on scripted acceptances,
 // the window filter (a match whose source is inside the drafter's window never enters), the full-depth K and its caps
-// (max_k, the engine's cap, a boundary); open-work 28's wide runs (HOT) and confirmed candidates. Host only.
+// (max_k, the engine's cap, a boundary); open-work 28's wide runs (HOT) and confirmed candidates; spec 32's earned
+// width. Host only.
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -207,6 +208,35 @@ void wide_runs() {
   std::printf("wide: hot after a full keep, wide while >= 8 kept and the source holds >= 8; confirmed enters hot\n");
 }
 
+// Spec 32: deep_k 31 beside wide_k 15 - a run earns its width.
+void deep_runs() {
+  LookupInDFlashOptions o = opts(0, 3);
+  o.wide_k = 15;
+  o.deep_k = 31;
+  LookupInDFlash p(o);
+  const PromptLookup m = context(200, 64, 8);
+  CHECK_EQ(p.propose(m).size(), size_t(3));
+  p.observe(3, 3);                             // hot
+  CHECK_EQ(p.propose(m).size(), size_t(15));   // the first wide verify: wide_k
+  p.observe(15, 15);                           // kept whole: the next asks for deep_k
+  const std::vector<uint32_t> d = p.propose(m);
+  CHECK_EQ(d.size(), size_t(31));
+  CHECK_EQ(d[30], 1008u + 30);
+  p.observe(31, 20);                           // a partial keep (>= 8: still hot) drops back to wide_k
+  CHECK_EQ(p.propose(m).size(), size_t(15));
+  p.observe(15, 15);
+  CHECK_EQ(p.propose(m).size(), size_t(31));
+  p.observe(31, 31);                           // whole again: stays deep
+  CHECK_EQ(p.propose(m).size(), size_t(31));
+  p.observe(31, 2);                            // exit: the next run starts again at wide_k
+  CHECK(!p.in_lookup());
+  CHECK_EQ(p.propose(m).size(), size_t(3));
+  p.observe(3, 3);
+  CHECK_EQ(p.propose(m).size(), size_t(15));
+  CHECK_EQ(p.deep, uint64_t(3));
+  std::printf("deep: a wide verify kept whole earns 31 drafts, a partial keep or an exit goes back to 15\n");
+}
+
 }  // namespace
 
 int main() {
@@ -214,6 +244,7 @@ int main() {
   stay_and_exit();
   k_caps();
   wide_runs();
+  deep_runs();
   std::printf("lookup_in_dflash_test: ok\n");
   return 0;
 }
