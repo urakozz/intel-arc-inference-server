@@ -2059,7 +2059,7 @@ st_r36_tier_pp() {
 }
 
 # ======================================================================================
-row 41"the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve through llama-benchy, one set of flags, one card - Qwen3.8 int4 g64"
+row 41 "the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve through llama-benchy, one set of flags, one card - Qwen3.8 int4 g64"
 rownote 41 "One matrix, every arm: llama-benchy pinned (BENCHY_VERSION, default 0.4.0), A = --pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md verbatim (the flags such tables are usually published with - no --no-cache, so a repeated prompt can hit b70-serve's prefix cache, on by default), B = A with --no-cache, D = --pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache (agentic depth). HTTP-inclusive: these rows sit beside, never replace, the engine-internal records (docs/BENCHMARKS.md 'llama-benchy comparisons')."
 rownote 41 "Opt-in and timed: run on an idle box (the quiet-box session, docs/open-work.md), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so."
 stage r41.ours 41 optin gpu-self qwen,uvx - "b70-serve <qwen> --max-len 40960 on device 0, --spec off and --spec auto: matrices A, B and D (int8 head, bf16 KV, defaults otherwise)"

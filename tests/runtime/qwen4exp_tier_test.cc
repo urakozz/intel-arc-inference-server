@@ -5,14 +5,17 @@
 //       direct binaries (B70_Q4_EXPERTS=direct), then the table with every expert in VRAM ("all"), none (every expert
 //       read from pinned host memory), random:0.5:7 and an adversarial one (each layer's most-routed half of the
 //       experts - by the direct run's prefill routes - in host memory, the rest in VRAM, so an arena slot is never
-//       the expert id). Each placement runs twice, compared bitwise with the direct run's, the first difference named:
+//       the expert id). Each placement runs plain and with the MTP head, each compared bitwise with the direct run of
+//       the same kind, the first difference named:
 //         plain (no head): a 2200-id prompt by prefill in chunks (every chunk's routes and selections), 8 decode
 //           steps (logits, routes, selections and diagnostics, every layer's state, the PLE ids after each),
 //           8 generated ids;
 //         with the MTP head: the same prefill, then verify at M = 2, 3, 4 from one position (every row's logits,
 //           routes, selections and id, every layer's state), commit(1), 4 generated ids and the state.
 //       pp2: --parallel pp, split 2 - device 1's layers [2, 4) read their host experts through device 1's table (the
-//       regression test of the table launches' host indirect-access flag).
+//       regression test of the table launches' host indirect-access flag). These runs set B70_Q4_EXPERT_CHECK=off:
+//       the load check's own flagged kernel could make device 1's mirrors resident before the lists run and hide a
+//       launch without the flag (the check mode covers the check).
 //   qwen4exp_tier_test <checkpoint> <ids> check    O3 - the load check (q4_expert_check at engine construction)
 //       refuses a wrong upload: under random:0.5:7, after the load, one word of a host mirror, one word of a VRAM
 //       arena, or two table entries swapped - the construction throws naming that layer and expert; the untouched
@@ -145,6 +148,7 @@ int residency(const std::string& snap, const Ids& prompt, const Ids& force, uint
   o.split = devices == 2 ? 2 : 0;
   const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, 0);
   std::vector<uint32_t> counts(size_t(d.layers) * d.experts, 0);
+  ::setenv("B70_Q4_EXPERT_CHECK", "off", 1);   // the header: nothing flagged runs before the lists
   Rec ref[2];
   for (const bool mtp : {false, true}) {
     o.mtp = mtp;
@@ -175,7 +179,7 @@ int residency(const std::string& snap, const Ids& prompt, const Ids& force, uint
       build(rig, snap, o, &tier);
       const Rec got = run(*rig.eng, prompt, force, nullptr);
       const std::string diff = first_difference(got, ref[mtp]);
-      std::printf("O1 %s %s, %u card(s): %zu experts in host memory (%zu B), %zu words checked at load - %s%s\n",
+      std::printf("O1 %s %s, %u card(s): %zu experts in host memory (%zu B), %zu words checked at load (B70_Q4_EXPERT_CHECK=off) - %s%s\n",
                   name.c_str(), mtp ? "with the MTP head" : "plain", devices,
                   size_t(d.layers) * d.experts - std::count(tier.vram.begin(), tier.vram.end(), uint8_t(1)),
                   rig.eng->model().mirror_bytes, rig.eng->expert_words_checked(),
@@ -188,6 +192,7 @@ int residency(const std::string& snap, const Ids& prompt, const Ids& force, uint
 int check(const std::string& snap) {
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::open(rig, 1);
+  ::unsetenv("B70_Q4_EXPERT_CHECK");
   const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, 0);
   const rq::ExpertTier tier = forced(d, "random:0.5:7");
   const uint32_t L = kCheckLayer;

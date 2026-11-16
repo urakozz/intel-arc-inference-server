@@ -289,6 +289,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   const size_t visual = ck.skip_prefix("model.visual."), shards = ck.skip_ple_shards();
   const size_t mtp_skipped = mtp ? 0 : ck.skip_prefix("mtp.");
   // Everything this load pins - the PLE table and the experts' mirrors - against host memory before the first pin.
+  // The prefix cache is 0 here: settle counted an explicit --prefix-cache-gb, and auto sizes itself after the load.
   check_q4_host_fit(Q4PleHost(ple_dir).bytes(), T.host_bytes(d), 0, q4_mem_available());
   // The PLE table, once, through the context of the device holding the PLE layer.
   m.ple_device = placement.device_of(d.ple_layer);

@@ -191,11 +191,12 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
   const uint32_t devs = devices_of(a), cap = full.trained_max_len;
   const size_t ple = loader::Q4PleHost(loader::q4_ple_dir(loader::resolve_snapshot(snapshot))).bytes();
   const size_t avail = loader::q4_mem_available();
-  const auto host_line = [&](size_t mirror) {
+  // `note`: what the experts' figure leaves out (the --layers path: a B70_Q4_RESIDENT tier is the loader's).
+  const auto host_line = [&](size_t mirror, const char* note = "") {
     loader::check_q4_host_fit(ple, mirror, a.prefix_bytes, avail);
-    std::print(stderr, "host: pinned {:.3f} GB (the PLE table {:.3f} + experts {:.3f} + the prefix cache {:.3f}) of "
+    std::print(stderr, "host: pinned {:.3f} GB (the PLE table {:.3f} + experts {:.3f}{} + the prefix cache {:.3f}) of "
                "MemAvailable {:.3f} GB, 16 GiB kept\n", (ple + mirror + a.prefix_bytes) / 1e9, ple / 1e9, mirror / 1e9,
-               a.prefix_bytes / 1e9, avail / 1e9);
+               note, a.prefix_bytes / 1e9, avail / 1e9);
   };
   Settled s;
   if (a.layers == 0 && !a.layers_auto) {   // the whole model
@@ -293,7 +294,8 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
   }
   const std::vector<rq::DevicePlan> pl = rq::plan(d, p, len, int8, hd, false, pf);
   rq::require_fits(pl, dev, a.reserve);
-  host_line(0);
+  const char* forced_l = std::getenv("B70_Q4_RESIDENT");
+  host_line(0, forced_l && *forced_l ? " (B70_Q4_RESIDENT's mirrors are checked at load)" : "");
   if (devs == 2)
     std::print(stderr, "split: {}{:d} (layers [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
                a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);

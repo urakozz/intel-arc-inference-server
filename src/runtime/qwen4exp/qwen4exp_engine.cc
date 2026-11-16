@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <stdexcept>
@@ -196,8 +197,11 @@ void Qwen4ExpEngine::ple_init() {
 
 // The expert tier's table form: on each device, the loader's sampled block words read through the table the MoE
 // launches bind (q4_expert_check, with their host indirect-access flag), held to the checkpoint's.
+// B70_Q4_EXPERT_CHECK=off skips it (tests only: the two-card O1 must not have the check's flagged kernel make device
+// 1's mirrors resident before its lists run, or it could not catch a _TBL launch without the flag).
 void Qwen4ExpEngine::expert_check() {
   if (!model_.expert_table) return;
+  if (const char* v = std::getenv("B70_Q4_EXPERT_CHECK"); v && std::string(v) == "off") return;
   const auto t0 = std::chrono::steady_clock::now();
   const model::Qwen4ExpDesc& d = model_.desc;
   for (uint32_t i = 0; i < st_.size(); ++i) {
