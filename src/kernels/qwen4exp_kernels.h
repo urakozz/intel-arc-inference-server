@@ -124,6 +124,25 @@ inline std::string moe_variant(unsigned M, bool shared_bf16, bool table = false)
 }
 inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head" + m_(M) + "_SIG"; }
 
+// Plan 21v2b: a tensor-parallel card's decode binaries (model::q4_tp_card's shapes; src/kernels/CMakeLists.txt's
+// "Plan 21v2b" block): the MoE at the half width 320 with the card's fp32 partial (MOE_TP_PART, DN_KS 1), the GDN at
+// Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_send + tp_sum at hidden 2560 (FOLD_G 20; S the local slices).
+inline constexpr unsigned kTpInter = kInter / 2;
+inline std::string tp_moe_variant(bool table) {
+  return std::string("q4_moe_M1_E512_T10_D2560_I320_SH4") + (table ? "_TBL" : "") + "_TP";
+}
+inline constexpr unsigned tp_moe_gate_up_groups() { return kSlots * (2 * kTpInter / 16 / 4); }   // 110
+inline constexpr unsigned tp_moe_down_wg() { return 16 * kSlots * 1; }                          // 176: DN_KS 1
+inline std::string tp_gated_head_sig_variant() { return "prep_gated_head_M1_GK8V24_SIG"; }
+inline std::string tp_gdn_variant() { return "gdn_step_M1_GK8V24"; }
+inline std::string tp_attn_prep_variant() { return "attn_prep_M1_Q12KV1"; }
+inline std::string tp_qsa_attn_variant() { return "q4_qsa_attn_M1_T32_Q12KV1"; }
+inline constexpr unsigned kTpFoldG = 20, kTpWg = 256;
+inline std::string tp_sum_variant(unsigned s_loc, unsigned rank) {
+  return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(s_loc) +
+         "_F_R" + std::to_string(rank) + "_sum";
+}
+
 // The reused kernels at this family's shapes.
 inline std::string embed_variant(unsigned M) { return embed_gather_variant(M, kHidden); }   // embed_gather_M1_D2560
 inline std::string argmax1_variant(unsigned M) { return argmax_stage1_variant(M, kVocabUsed); }   // argmax_stage1_M1

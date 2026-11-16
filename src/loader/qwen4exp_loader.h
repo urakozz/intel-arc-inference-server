@@ -83,7 +83,10 @@ struct Q4LoadedModel {
   uint32_t ple_device = 0;                         // whose context allocated it and holds its pointer table
   uint32_t max_len = 0, checkpoint_layers = 0;
   bool int8_head = false, mtp = false;
-  runtime::qwen4exp::ExpertTier tier;              // where each routed expert lives (all resident without a tier)
+  runtime::qwen4exp::ExpertTier tier;              // where each routed expert lives (all resident without a tier);
+                                                   // under tp card 0's halves
+  runtime::qwen4exp::ExpertTier tier1;             // plan 21v2b, tp: card 1's resident halves
+  std::unique_ptr<l0::Mem> ple_ptrs1;              // tp: the PLE pointer table on card 1 (card 0's is ple.ptrs)
   bool expert_table = false;                       // the layers bind the table form (B70_Q4_EXPERTS, default table)
   size_t mirror_bytes = 0;                         // the tier's pinned host bytes
   size_t unconsumed = 0, read_per_token = 0, subnormal_scales = 0, skipped = 0;
@@ -115,10 +118,17 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 // table of block addresses read back equal, and the load check's samples (Q4DevicePart::check_*; the engine reads
 // them through the table). The layers bind the table form unless B70_Q4_EXPERTS=direct (refused with any expert in
 // host memory).
+// Plan 21v2b, `placement.tp`: each layer repacked once and cut into its two halves (loader::q4_tp_layer), each half
+// uploaded onto its card with that card's tier (`tier` card 0's, `tier1` card 1's; null: B70_Q4_RESIDENT's placement
+// through tp_fill_tier, else every expert resident); the final mixer and lm_head's vocabulary half (rows [124160 r,
+// + 124160), quantised per row: one card's rows' bytes) on both cards, the embedding where placement.holds_embed, the
+// PLE table pinned once with a pointer table on each card. Each part's bytes are the card plan's (runtime::qwen4exp::
+// tp_plan). The MTP head under tp is not built yet (refused by name).
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement,
                             LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false,
-                            const runtime::qwen4exp::ExpertTier* tier = nullptr);
+                            const runtime::qwen4exp::ExpertTier* tier = nullptr,
+                            const runtime::qwen4exp::ExpertTier* tier1 = nullptr);
 
 // The routing profile beside the checkpoint (`<snapshot>-expert-profile.safetensors`: offload_curve.py profile's
 // u32 counts [layers][experts], format "spec22-profile-1"): its counts, or empty when there is no such file; a file

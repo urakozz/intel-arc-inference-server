@@ -81,8 +81,25 @@ struct MtpBinding {
   bool single = true;            // decision 4: q4_mtp's _SINGLE (one RMS over 10240) or _STREAM
 };
 
+// Plan 21v2b: a tensor-parallel card's decode list (`tp` non-null; Decode, M = 1, flash attention). The buffers are
+// the card's (Qwen4ExpBuffers over `card` = model::q4_tp_card at one card's placement, device 0); the walk is one
+// card's over every layer, at the card's widths, with Qwen3.8's crossing (runtime::TpLink, src/kernels/tp.cl) after
+// each row-parallel linear - out_proj / o_proj (its 4 split-K slices) and the MoE's down (q4_moe's fp32 partial,
+// MOE_TP_PART): tp_send pushes the card's folded row into the peer's landing buffer, tp_sum waits for the peer's and
+// writes card 0's part + card 1's into partials, which the next combine folds as one slice (_S1). Everything
+// replicated (the hyper-connections, router and route, the indexer and selection, the PLE) runs on both cards on the
+// same bits, so both cards hold the same H. `embed`: the table card 1 gathers from (card 0's, over peer access) or
+// card 0's own. The head: the card's vocabulary half and tp_argmax's two stages (Control::out_token / out_value; the
+// host merges). Launches: tp_device_launches.
+struct Q4TpBinding {
+  const runtime::TpLink* link = nullptr;
+  const model::Qwen4ExpDesc* card = nullptr;
+  const void* embed = nullptr;
+};
+
 CapturedStep build(l0::Context& ctx, const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part,
                    Qwen4ExpBuffers& b, const runtime::StageLink* link, l0::Mem* tap = nullptr,
-                   const l0::Mem* injected = nullptr, const ListSpec& spec = {}, const MtpBinding* mtp = nullptr);
+                   const l0::Mem* injected = nullptr, const ListSpec& spec = {}, const MtpBinding* mtp = nullptr,
+                   const Q4TpBinding* tp = nullptr);
 
 }  // namespace runtime::qwen4exp

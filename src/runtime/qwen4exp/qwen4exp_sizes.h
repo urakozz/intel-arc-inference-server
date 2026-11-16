@@ -287,7 +287,7 @@ MtpNorm mtp_norm();
 const char* mtp_norm_name(MtpNorm n);
 // Decision 5 (draft attention): draft steps 1.. REUSE draft step 0's selection (vLLM's opt-in
 // index_share_for_mtp_iteration - 21a found it is not vLLM's default). The `fresh` arm (vLLM's default: select on
-// every step) and its B70_Q4_MTP_SELECT went in the zero-config cleanup (operator 2026-11-06).
+// every step) and its B70_Q4_MTP_SELECT went in the zero-config cleanup (2026-11-06).
 
 struct MtpSizes {
   size_t ctl = 0, kv = 0, idx_keys = 0, idx_tail = 0, list = 0, diag = 0, hh = 0, xe = 0, xh = 0, fe = 0, fh = 0,
@@ -525,6 +525,10 @@ ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Pla
 // cards, so the smaller card's set is a prefix of the other's in every layer.
 ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, uint32_t rank,
                         const std::vector<uint32_t>* counts, const std::string& forced = "");
+// A card's tp decode list (flash attention): one card's list (device_launches at Q4Placement::one) with tp_send +
+// tp_sum after each of a layer's two row-parallel linears (out_proj / o_proj, the MoE's down): + 4 a layer. 971 at 48
+// layers (779 + 192).
+size_t tp_device_launches(const model::Qwen4ExpDesc& one);
 // Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
 double tp_card_f(const ExpertBudget& b, uint32_t rank);
 

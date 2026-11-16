@@ -1389,6 +1389,8 @@ if(B70_Q4EXP AND B70_TP)
   add_gemv_i8w_variant(1 2560 124160)
   add_ocloc_kernel(prep_gated_head_M1_GK8V24_SIG SOURCE ${PREP_CL}
                    DEFINES M=1 GDN_GATE_SIGMOID=1 GDN_K_HEADS=8 GDN_V_HEADS=24)
+  add_ocloc_kernel(q4_hc_combine_norm_M1_S1_NN SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=1 HC_SRC=1 SRC_S=1 HC_NORM=0)   # the PLE prologue after a crossing
   add_ocloc_kernel(attn_prep_M1_Q12KV1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 FA_Q_HEADS=12 FA_KV_HEADS=1)
   add_ocloc_kernel(q4_qsa_attn_M1_T32_Q12KV1 SOURCE ${Q4_CL}/q4_qsa_attn.cl
                    DEFINES ${CTRL_DEFINES} M=1 TGT=32 ${Q4_LIST_DEFINES} Q4_Q_HEADS=12 Q4_KV_HEADS=1)
