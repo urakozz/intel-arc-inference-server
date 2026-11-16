@@ -35,7 +35,8 @@
 //        (b) for j in 0, 7, 15, 16, 31, 32, 47, 62 a wrong draft at j + 1 and junk after leave rows 0..j bitwise and the
 //        next 64 plain ids bitwise the clean run's; (c) greedy lookup iterations with commits in between emit the
 //        same ids through the deep list as through the 16-row one (the captured lists replayed across commits);
-//        (d) after a deep verify committing 5 W / 8 rows, a snapshot bitwise the plain steps' and, after its load and
+//        (d) after a deep verify committing 5 W / 8 rows, a snapshot's state, conv-ring window and hidden row bitwise
+//        the plain steps' and, after its load and
 //        after a 64-id prefill, the next 64 plain ids bitwise the session driven by one-row steps.
 //   W16  (open-work 28, `mtp_verify_test <snapshot> 16384 rule wide`: the int8 head, whose engine builds the 16-row
 //        list) at the M2 positions: (a) for j in 0, 1, 4, 7, 11, 14 the 16-row verify with drafts g[1..j] true, a WRONG
@@ -399,10 +400,21 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
         c.e.commit(0, c.e.verify_ids()[0]);
       }
     };
+    // What a snapshot carries that the session reads again: the GDN state, the conv ring's window (the 3 positions
+    // before pos; a deep commit copies only those of its rows 16.. into the ring, so older slots may hold other
+    // rows than plain steps leave - never read) and the head's hidden row.
+    const size_t ring_row = size_t(10240) * 2, layers = kGdnBytes / (size_t(48) * 128 * 128 * 4);
     const auto paths = [&](bool deep_arm, std::vector<uint8_t>& state) {
       to_j(deep_arm);
       const Snap s(c);
-      state.assign(s.st.as<uint8_t>(), s.st.as<uint8_t>() + c.e.state_bytes());
+      const uint8_t* h = s.st.as<uint8_t>();
+      state.assign(h, h + kGdnBytes);
+      for (size_t l = 0; l < layers; ++l)
+        for (uint32_t t = 1; t <= 3; ++t) {
+          const uint8_t* r = h + kGdnBytes + (l * 32 + (s.pos - t) % 32) * ring_row;
+          state.insert(state.end(), r, r + ring_row);
+        }
+      state.insert(state.end(), h + kGdnBytes + layers * 32 * ring_row, h + c.e.state_bytes());
       c.e.generate(8);
       s.restore(c);
       std::vector<uint32_t> ids = c.e.generate(64);
@@ -417,7 +429,7 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
     std::vector<uint8_t> st_deep, st_plain;
     const std::vector<uint32_t> d_ids = paths(true, st_deep), p_ids = paths(false, st_plain);
     const bool st_ok = st_deep == st_plain, ids_ok = d_ids == p_ids;
-    std::printf("  W%u (d) j=%u: snapshot %s the plain steps'; after load and after a 64-id prefill, 2 x 64 ids %s\n", W,
+    std::printf("  W%u (d) j=%u: snapshot (state, ring window, hidden row) %s the plain steps'; after load and after a 64-id prefill, 2 x 64 ids %s\n", W,
                 j, st_ok ? "bitwise" : "DIFFERS from", ids_ok ? "bitwise the plain steps'" : "DIFFER");
     ok &= st_ok && ids_ok;
   }
