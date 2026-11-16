@@ -155,7 +155,7 @@ class AgenticLoop(unittest.TestCase):
                       "the previous request's text has id 1003", text)
 
     def test_extra_body_fields(self):
-        # spec 25e: --extra merges into every request body (Bolt's chat_template_kwargs arms)
+        # spec 25e: --extra merges into every request body (chat_template_kwargs arms)
         usage = {"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 0}}
         Scripted.script = [([{"content": "a"}], "stop", usage), ([{"content": "b"}], "stop", usage)]
         agentic_loop.main(["run", self.transcript, self.url, self.out, "--turns", "2", "--extra",

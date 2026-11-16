@@ -1,6 +1,6 @@
 """Score tool calls: the first tool call of each output against a reference run.
 
-    score.py [--format qwen|qwen-think|hermes] [--min N] <out dir> <reference run> <candidate run>...
+    score.py [--format qwen|hermes] [--min N] <out dir> <reference run> <candidate run>...
 
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
@@ -8,7 +8,7 @@ each candidate's first call - its name and raw argument strings - with the refer
 Validity (open-work 3o, operator 2026-11-10): every first call is also checked against the scenario's
 files - tests/golden/toolcall/tree.json, the repository the 36 conversations were made from (its file
 list and the full text of the six files they read; revision in the file, the one whose lines every
-prompt's read results show; Ornith's, Bolt's, Agnes's and Flash-Next's sets re-render the same
+prompt's read results show; Ornith's, Agnes's and Flash-Next's sets re-render the same
 conversations). Not for `--format hermes`: Kolibri-1's German set was made from a later tree. A call is
 'invalid' when it does not parse ('incomplete') or when its
 arguments would not work there:
@@ -33,17 +33,8 @@ Call syntaxes:
       (optional whitespace, then <think> ... </think>) is skipped first, and an output that ends
       inside it is 'reasoning'. Arguments are kept as JSON values and compared as such.
 
-  qwen-think (Nemotron 3.5 Bolt, spec 25a; `--format qwen-think`): Qwen XML behind the reasoning the prompt
-      opens - Bolt's prompt ends in `<think>\n`, so the output OPENS inside reasoning, closed by </think> (the
-      ultra_v3 / deepseek_r1 reasoning parser's rule: everything up to and including a first <think>, if the
-      model writes one, is dropped first; an output with no </think> is 'reasoning' - force_nonempty_content is a server option, not
-      the reference's). A <tool_call> inside the reasoning is reasoning text. After </think> the Qwen XML rule
-      above: the first complete <tool_call> block wins, one leading / trailing newline of a value trimmed, a
-      multi-line value kept whole. A value holding the literal text </parameter> is cut there - by vLLM's
-      qwen3_coder parser too (the template writes values raw); </parameterized or </parameters> do not cut.
-
 Kinds: 'call', 'no call', 'incomplete' (a call opened and not closed, or one that does not
-parse), 'reasoning' (hermes / qwen-think: generation ended inside the reasoning).
+parse), 'reasoning' (hermes: generation ended inside the reasoning).
 """
 import json
 import os
@@ -108,25 +99,9 @@ def parse_first_call_hermes(text: str):
     return ("call", got[0], got[1], len(calls))
 
 
-THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
-
-
-def parse_first_call_qwen_think(text: str):
-    """-> (kind, name, params, n_calls) for Bolt's output: reasoning first (the prompt opened it), then Qwen XML."""
-    head, opened, after = text.partition(THINK_OPEN)
-    t = after if opened else text
-    end = t.find(THINK_CLOSE)
-    if end < 0:
-        return ("reasoning", None, {}, 0)
-    return parse_first_call(t[end + len(THINK_CLOSE):], "qwen")
-
-
 def parse_first_call(text: str, fmt: str = "auto"):
-    """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (hermes,
-    qwen-think) 'reasoning'. fmt 'hermes' reads Kolibri-1's calls, 'qwen-think' Bolt's; 'auto' (and
-    'qwen') Qwen XML."""
-    if fmt == "qwen-think":
-        return parse_first_call_qwen_think(text)
+    """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (hermes)
+    'reasoning'. fmt 'hermes' reads Kolibri-1's calls; 'auto' (and 'qwen') Qwen XML."""
     if fmt == "hermes":
         return parse_first_call_hermes(text)
     calls = CALL.findall(text)
@@ -215,8 +190,8 @@ def main() -> None:
     args = sys.argv[1:]
     fmt = "auto"
     if args[:1] == ["--format"]:
-        if len(args) < 2 or args[1] not in ("qwen", "qwen-think", "hermes"):
-            sys.exit("--format expects qwen, qwen-think or hermes")
+        if len(args) < 2 or args[1] not in ("qwen", "hermes"):
+            sys.exit("--format expects qwen or hermes")
         fmt, args = args[1], args[2:]
     need = None
     if args[:1] == ["--min"]:
@@ -257,7 +232,7 @@ def main() -> None:
         print(f"{c}: {matches[c]} / {len(names)} match {ref}")
     for c in cands:
         print(f"{c}: {len(invalid[c])} invalid call(s)" + (": " + "; ".join(invalid[c]) if invalid[c] else ""))
-    if fmt in ("hermes", "qwen-think"):   # KL4's / 25 B5's bar: every reference call parses
+    if fmt == "hermes":   # KL4's bar: every reference call parses
         bad = [n for n in names if parse_first_call(
             open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)[0] == "incomplete"]
         print(f"{ref}: {len(bad)} parse failure(s)" + (f": {', '.join(bad)}" if bad else ""))

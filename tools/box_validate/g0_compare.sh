@@ -41,7 +41,7 @@ for f in differ added removed; do
   [ -f "$out/$f.txt" ] || : > "$out/$f.txt"
   LC_ALL=C sort -o "$out/$f.txt" "$out/$f.txt"
 done
-# A binary whose command line names an absolute path (Bolt's -I<tree>/src/kernels/bolt) carries the tree's
+# A binary whose command line names an absolute path (an -I<tree>/src/kernels/...) carries the tree's
 # root in its build options: compared again section by section with each root replaced (zebin_same.py).
 # Those equal then are listed in path_only.txt and do not fail G0.
 base_root=$(cd "$base/.." && pwd) head_root=$(cd "$head/.." && pwd)

@@ -17,23 +17,13 @@ The repository is read from this script's tree (/ws in the reference
 container); the prompts call it /work. Run inside the reference container
 (tools/oracle/run_in_container.sh) so the tokenizer is the pinned one.
 
---from with another model's checkpoint (Ornith, Bolt) renders the SAME
+--from with another model's checkpoint (Ornith) renders the SAME
 conversations with that checkpoint's template and tokenizer. `--kwargs JSON` passes
 template variables (chat_template_kwargs) to every render and records them in each
 <name>.json as "chat_template_kwargs" (serve_client.py sends them with the request).
 Models whose server render is of KEY-SORTED messages and tools (b70-serve holds a request in
 nlohmann::json, whose objects are sorted) render from key-sorted objects, so the server's
 render of the same request is these ids.
-
-Nemotron 3.5 Bolt (config.json model_type nemotron_h_omni, spec 25a Task 6) renders --from the same 36 conversations
-with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like Kolibri
-(b70-serve's nlohmann::json), with enable_thinking TRUE (the template's default and the agentic mode: the prompt ends
-in `<|im_start|>assistant\n<think>\n`, every reply reasons first) and the default kwargs {"medium_effort": true}
-(the effort that keeps a reasoning-first model's reasoning inside the 2048-id budget;
-Decision 13 maps reasoning_effort low / medium to it); each <name>.json records "enable_thinking": true and the kwargs.
-The history calls come out as Qwen3-Coder XML through the template. The plan's spelling
-    make_set.py --from <set dir> --model bolt --tokenizer <Bolt snapshot> <out dir> [--kwargs JSON]
-is the same call; tools/toolcall/a4_ref.sh bolt set copies the committed tests/golden/toolcall-bolt.
 
 --lang de (spec 20e, KL4: Kolibri-1's German A4-style set): the same six templates over the same
 six files with the system prompt and the user turns in German (the DE table below); the tool
@@ -54,9 +44,7 @@ WORK = "/work"
 MIN_IDS, MAX_IDS = 800, 3000
 # --from re-renders the SAME conversations: another tokenizer may need more or fewer ids for them; the conversations
 # are unchanged.
-# Spec 25a: Bolt's template writes every tool as an XML block with the Qwen3-Coder calling instructions: the same 36
-# conversations render to 1085..3098 ids (72,519 in all), so its ceiling is higher; the conversations are unchanged.
-MAX_IDS_FROM = {"nemotron_h_omni": 4096}
+MAX_IDS_FROM: dict = {}
 MIN_IDS_FROM: dict = {}
 
 FILES = [
@@ -333,29 +321,13 @@ def load_tokenizer(snap: str):
     from transformers import AutoTokenizer
     with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
         cfg = json.load(f)
-    # Bolt (nemotron_h_omni): its tokenizer is tokenizer.json; the remote code is the omni / vision processor's
-    remote = "auto_map" in cfg and cfg.get("model_type") not in BOLT_TYPES
+    remote = "auto_map" in cfg
     return AutoTokenizer.from_pretrained(snap, trust_remote_code=True) if remote \
         else AutoTokenizer.from_pretrained(snap)
 
 
 # Models whose server render is of key-sorted objects (their template tests are recorded that way).
-SORTED_MODELS = ("kolibri1", "nemotron_h_omni")
-# Spec 25a: Nemotron 3.5 Bolt - reasoning on (the template's default), medium effort (module docstring).
-BOLT_TYPES = ("nemotron_h_omni",)
-BOLT_KWARGS = {"medium_effort": True}
-BOLT_TEMPLATE_SHA = "6521afc7"
-
-
-def check_bolt_template(snap: str) -> None:
-    """Refuse a Bolt snapshot whose chat_template.jinja is not the pinned one (spec 25 §7; identical in all three
-    repos, docs/probes/probe-bolt-2026-10-21.md §4)."""
-    p = os.path.join(snap, "chat_template.jinja")
-    sha = hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "absent"
-    if not sha.startswith(BOLT_TEMPLATE_SHA):
-        sys.exit(f"FATAL: {p} is sha256 {sha[:8]}..., not the pinned {BOLT_TEMPLATE_SHA}...")
-
-
+SORTED_MODELS = ("kolibri1",)
 def model_type(snap: str) -> str:
     with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
         return json.load(f).get("model_type", "")
@@ -366,12 +338,11 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
     """--from: the SAME conversations as an existing set (its <name>.json: messages and
     tools as rendered then), re-rendered with another checkpoint's template and tokenizer.
     Rescanning the repository would change the conversations with the tree. `kwargs`: the
-    template variables (Bolt's default BOLT_KWARGS); `tok` / `mtype` for the tests."""
+    template variables; `tok` / `mtype` for the tests."""
     mtype = model_type(snap) if mtype is None else mtype
-    bolt = mtype in BOLT_TYPES
     sort = mtype in SORTED_MODELS
     if kwargs is None:
-        kwargs = dict(BOLT_KWARGS) if bolt else {}
+        kwargs = {}
     tok = load_tokenizer(snap) if tok is None else tok
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
@@ -383,8 +354,6 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
         msgs, tools = sc["messages"], sc["tools"]
         if sort:   # the server's (nlohmann::json) key order
             msgs, tools = json.loads(json.dumps([msgs, tools], sort_keys=True))
-        if bolt:   # Bolt's agentic mode: reasoning on (the set's scenarios say False: Qwen3.8's render)
-            sc = dict(sc, enable_thinking=True)
         r = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True,
                                     enable_thinking=sc.get("enable_thinking", False), tokenize=True,
                                     **kwargs)
@@ -466,16 +435,6 @@ def build_set(snap: str, out: str, lang: str = "en", tok=None, mtype: str | None
 
 
 def main() -> None:
-    if len(sys.argv) in (8, 10) and sys.argv[1] == "--from" and sys.argv[3:7:2] == ["--model", "--tokenizer"]:
-        # the plan's spelling (spec 25a: --model bolt) --tokenizer SNAP
-        want = {"bolt": BOLT_TYPES}.get(sys.argv[4])
-        if want is None:
-            sys.exit("--model expects bolt (other models: --from <set> <snapshot> <out>)")
-        if model_type(sys.argv[6]) not in want:
-            sys.exit(f"FATAL: {sys.argv[6]} is not a {' / '.join(want)} snapshot")
-        if sys.argv[4] == "bolt":
-            check_bolt_template(sys.argv[6])
-        sys.argv = sys.argv[:3] + [sys.argv[6]] + sys.argv[7:]
     if len(sys.argv) in (5, 7) and sys.argv[1] == "--from":
         kwargs = None
         if len(sys.argv) == 7:
