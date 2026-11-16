@@ -310,22 +310,22 @@ inline bool run_start(__global const uint* rows, uint m) {
 #if !defined(CTRL_PEND) || !defined(PEND_PAR)
 #error "gdn_step DEFERRED: CTRL_PEND and PEND_PAR (bytes a parity) must be defined"
 #endif
-#define PR 32                                      /* rows a step can leave: the verify lists' up to 32 (spec 32) */
+#define PR 64                                      /* rows a step can leave: the verify lists' up to 64 (spec 32) */
 #if M > PR
 #error "gdn_step DEFERRED: at most PR rows a step"
 #endif
-// ROW0 (spec 32 §5.4; undefined on every other command line): a link of the 32-row list's chain of 16-row launches.
-// The build is M 16; launch ROW0 runs the list's rows ROW0 .. ROW0 + 15 (the host binds the partials, a||b and gdn_o
-// at that row) at position pos + ROW0, and takes two more arguments: `state_x`, the scratch state, and `conv_x`, the
-// conv scratch [16 rows][CONV_ROWS] of rows 16..31 (the 32-deep ring keeps rows 0..15 only, so a rejected row never
-// overwrites the window the next step reads). ROW0 0 is today's launch (the replay, then its rows) and
+// ROW0 (spec 32 §5.4; undefined on every other command line): a link of the 32- / 64-row lists' chain of 16-row
+// launches. The build is M 16; launch ROW0 runs the list's rows ROW0 .. ROW0 + 15 (the host binds the partials, a||b
+// and gdn_o at that row) at position pos + ROW0, and takes two more arguments: `state_x`, the scratch state, and
+// `conv_x`, the conv scratch [48 rows][CONV_ROWS] of rows 16.. (the 32-deep ring keeps rows 0..15 only, so a rejected
+// row never overwrites the window the next step reads). ROW0 0 is today's launch (the replay, then its rows) and
 // stores the state after its rows to state_x; ROW0 > 0 starts from state_x, replays nothing, reads its window from
 // the ring (rows < 16) or conv_x, writes its rows' conv inputs to conv_x and stores its state back to state_x. Every
 // row's recurrence inputs go to the pending rows at ROW0 + m. The recurrence, the norms and their order are the
 // 16-row build's, so every row is bitwise the 16-row list's row at the same state and position.
 #ifdef ROW0
-#if M != 16 || (ROW0 != 0 && ROW0 != 16)
-#error "gdn_step DEFERRED ROW0: an M 16 link at row 0 or 16"
+#if M != 16 || (ROW0 != 0 && ROW0 != 16 && ROW0 != 32 && ROW0 != 48)
+#error "gdn_step DEFERRED ROW0: an M 16 link at row 0, 16, 32 or 48"
 #endif
 #define PROW(m) (ROW0 + (m))
 #else

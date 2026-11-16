@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
   size_t rows = 0;
   for (const runtime::VerifyAttnRow& r : runtime::kVerifyAttnTable) {
     ++rows;
-    CHECK(r.m >= 2 && (r.m <= 8 || ((r.m == 16 || r.m == 32) && !r.kv8)));   // the one-card wide / deep lists, bf16
+    CHECK(r.m >= 2 && (r.m <= 8 || ((r.m == 16 || r.m == 32 || r.m == 64) && !r.kv8)));   // the one-card wide / deep lists, bf16
     const std::string name = kernels::attn_verify_dpas_variant(r.m, 32, r.kv8);
     CHECK(built.count(name) == 1);
     CHECK(runtime::verify_attn_kind(r.m, 4096, r.kv8, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::Dpas);
@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
     std::printf("row M=%u %s: dpas_from %s\n", r.m, r.kv8 ? "int8" : "bf16",
                 r.dpas_from == runtime::kDpasNever ? "never" : std::to_string(r.dpas_from).c_str());
   }
-  CHECK(rows == 16);   // bf16 and int8 at M = 2..8, bf16 at 16 and 32 (spec 32)
+  CHECK(rows == 17);   // bf16 and int8 at M = 2..8, bf16 at 16, 32 and 64 (spec 32)
   for (uint32_t M : {5u, 6u, 7u, 8u}) {
     CHECK(runtime::verify_attn_row(M, true)->dpas_from == 0);
     CHECK(runtime::verify_attn_depth_free(M, true));
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
   }
   CHECK(runtime::verify_attn_kind(9, 32768, false, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
   CHECK(runtime::verify_attn_kind(16, 1, false, 24, 4) == VerifyAttn::Dpas);   // open-work 28: DPAS from the first key
-  CHECK(runtime::verify_attn_kind(32, 1, false, 24, 4) == VerifyAttn::Dpas);   // spec 32: the deep list, the same
+  CHECK(runtime::verify_attn_kind(64, 1, false, 24, 4) == VerifyAttn::Dpas);   // spec 32: the deep lists, the same
   CHECK(runtime::verify_attn_kind(16, 32768, true, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
   std::printf("verify_attn_test: PASS (%zu table rows, %zu built names)\n", rows, built.size());
   return 0;

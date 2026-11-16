@@ -71,6 +71,14 @@ std::vector<uint32_t> checked_slots(const loader::LoadedModel& m, uint32_t max_l
   }
   return slots;
 }
+
+// Spec 32e: where capture_wide builds the 16-, 32- and 64-row lists - DecodeScratchDims::rows' conditions and the
+// int8 head (gemm_sm_i8w's wide builds; the bf16 head has none). Only there is the decode scratch sized for 64 rows.
+bool wide_lists(const loader::LoadedModel& m, KvCache kv, size_t seqs) {
+  return DecodeScratchDims::rows(*m.desc, m.mtp != nullptr, kv, uint32_t(seqs), m.draft_vocab != nullptr) ==
+             DecodeScratchDims::kDeepM &&
+         m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind == model::WeightKind::Int8;
+}
 }  // namespace
 
 Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bool debug_resid,
@@ -78,7 +86,9 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
     : ctx_(ctx),
       model_(std::move(model)),
       persist_(ctx, checked_max_len(model_, max_len), *model_.desc, kv),
-      decode_scratch_(ctx, persist_.max_len, *model_.desc),
+      decode_scratch_(ctx, persist_.max_len, *model_.desc,
+                      wide_lists(model_, kv, checked_slots(model_, max_len, slot_lens).size()) ? DecodeScratchDims::kDeepM
+                                                                                               : DecodeScratchDims::kWideM),
       buffers_(persist_, decode_scratch_),
       tap_(debug_resid ? std::unique_ptr<l0::Mem>(
                              new l0::Mem(ctx, l0::MemKind::Device, tap_elems(*model_.desc) * 2))
@@ -542,13 +552,10 @@ static_assert(MtpDims::kGdnPendParity == kernels::kGdnPendParityBytes &&
               "MtpDims' deep terms are the kernels' pending rows and conv scratch");
 void Engine::capture_wide(const CaptureOptions& opt) {
   const model::ModelDesc& d = *model_.desc;
-  if (!mtp_ || !gdn_pend_ || slots() != 1 || kv_cache() != KvCache::Bf16 || model_.draft_vocab ||
-      d.fa_q_heads != 24 || d.fa_kv_heads != 4 ||
-      model_.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind != model::WeightKind::Int8)
-    return;
+  if (!gdn_pend_ || !wide_lists(model_, kv_cache(), slots())) return;
   seqs_[0].wide = std::make_unique<CapturedStep>(
       build_verify(ctx_, model_, buffers_, *mtp_, DecodeScratchDims::kWideM, nullptr, opt, seqs_[0].bind));
-  // Spec 32: the 32-row list, its chain scratch and the ring copy (allocated once; a recapture reuses them).
+  // Spec 32: the 32- and 64-row lists, their chain scratch and the ring copy (allocated once; a recapture reuses them).
   if (!gdn_x_) {
     gdn_x_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device, persist_.gdn_state.size());
     conv_x_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device, size_t(d.gdn_layers) * kernels::kGdnConvXLayerBytes);
@@ -563,23 +570,23 @@ void Engine::capture_wide(const CaptureOptions& opt) {
     ring_list_->close();
     if (const char* v = std::getenv("B70_SPEC_LOOKUP_ROWS")) {
       const std::string r = v;
-      if (r != "16" && r != "32")
-        throw std::runtime_error("B70_SPEC_LOOKUP_ROWS=" + r + ": 16 or 32 (the widest lookup verify)");
+      if (r != "16" && r != "32" && r != "64")
+        throw std::runtime_error("B70_SPEC_LOOKUP_ROWS=" + r + ": 16, 32 or 64 (the widest lookup verify)");
       deep_rows_ = uint32_t(std::stoul(r));
     }
   }
   SlotBind b = seqs_[0].bind;
   b.gdn_x = gdn_x_->ptr();
   b.conv_x = conv_x_->ptr();
-  seqs_[0].deep = std::make_unique<CapturedStep>(
-      build_verify(ctx_, model_, buffers_, *mtp_, DecodeScratchDims::kDeepM, nullptr, opt, b));
+  seqs_[0].deep32 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 32, nullptr, opt, b));
+  seqs_[0].deep64 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 64, nullptr, opt, b));
 }
 
 uint32_t Engine::max_wide_k() const {
   const uint32_t pos = control_->pos;
   if (!seq().wide || pos == 0) return 0;
-  for (const uint32_t k : {kDeepK, kWideK})
-    if ((k == kWideK || deep_built()) && k + 1 <= deep_rows_ && size_t(pos) + k + 1 <= max_len()) return k;
+  for (const uint32_t k : {kDeepK64, kDeepK32, kWideK})
+    if ((k == kWideK || deep_built(k)) && k + 1 <= deep_rows_ && size_t(pos) + k + 1 <= max_len()) return k;
   return 0;
 }
 
@@ -806,8 +813,12 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
   if (!draft || !rows_commits_.empty()) flush_projection();
   Seq& s = seq();
   const uint32_t pos = control_->pos;
-  // Open-work 28: the 16-row list; spec 32: the 32-row list.
-  CapturedStep* const wl = draft ? nullptr : k == kWideK ? s.wide.get() : k == kDeepK ? s.deep.get() : nullptr;
+  // Open-work 28: the 16-row list; spec 32: the 32- and 64-row lists.
+  CapturedStep* const wl = draft ? nullptr
+                           : k == kWideK  ? s.wide.get()
+                           : k == kDeepK32 ? s.deep32.get()
+                           : k == kDeepK64 ? s.deep64.get()
+                                           : nullptr;
   const bool wide = wl != nullptr;
   if ((k > max_draft() && !wide) || (mtp_ && pos == 0) || size_t(pos) + k + 1 > max_len())
     throw std::runtime_error("runtime::Engine::verify: k " + std::to_string(k) + " at pos " +
@@ -882,7 +893,7 @@ void Engine::commit(uint32_t j, uint32_t next_token, bool defer_projection) {
   control_->cur_token[0] = next_token;
   // Spec 32: a deep verify's accepted rows 16.. sit in the conv scratch - the ones the next window reads go to the
   // ring now (gdn_ring_commit.cl), before anything reads it.
-  if (s.verify_k == kDeepK && j >= 16) {
+  if ((s.verify_k == kDeepK32 || s.verify_k == kDeepK64) && j >= 16) {
     control_->ring_commit = j + 1;
     queue_.execute(*ring_list_, &fence_);
     fence_.wait();

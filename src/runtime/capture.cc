@@ -407,7 +407,7 @@ class Capture {
                 std::to_string(decode_launches(d_)) + " decode_launches() gives " + d_.name);
     // Spec 15e: the verify list is the decode list at M rows plus the head's KV fill
     // (verify_launches): Qwen3.8 784, Ornith 536, at every M.
-    // Spec 32: the deep list's delta-net step is kCapM / 16 links a layer.
+    // Spec 32: a deep list's delta-net step is kCapM / 16 links a layer.
     const size_t links = deep() ? (kCapM / 16 - 1) * size_t(d_.gdn_layers) : 0;
     require(mode_ != Mode::Verify || step_.kernel_count == verify_launches(d_) + links,
             "the verify list has " + std::to_string(step_.kernel_count) + " launches, not the " +
@@ -446,8 +446,9 @@ class Capture {
     // int8 KV nothing builds (B70_KV8's decode block stops at M = 4).
     if (mode_ == Mode::Rows)
       attn_bins = {pg(kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads))};
-    // attn_part is sized by DecodeScratchDims::sizes: v2's fixed 32 blocks per row.
-    require(b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_).attn_part,
+    // attn_part is sized by DecodeScratchDims::sizes: v2's fixed 32 blocks per row (spec 32e: 64 rows only on an engine
+    // that builds the deep lists).
+    require(b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_, std::max(kCapM, DecodeScratchDims::kWideM)).attn_part,
             std::string("attn_part (") + std::to_string(b_.attn_part.size()) + " B) is smaller than decode attention "
                 "v2's partials");
     // Spec 28c: an M >= 2 list of v2 binds attn_verify_dpas + the v2 binary's reduce where the measured rule
@@ -545,7 +546,7 @@ class Capture {
     // `slots` rows; every engine's buffers have kSlots.
     // Open-work 28: the one-card wide list (DecodeScratchDims::kWideM rows) needs no slot a row - it binds the
     // DEFERRED GDN build, which keeps the state once whatever M.
-    // Spec 32: the deep list (32 rows) too, with the chain's scratch.
+    // Spec 32: the deep lists (32 / 64 rows) too, with the chain's scratch.
     require(kCapM <= mtp_->slots ||
                 ((kCapM == DecodeScratchDims::kWideM || (deep() && sb_.gdn_x && sb_.conv_x)) && mode_ == Mode::Verify &&
                  sb_.gdn_pend),
@@ -642,7 +643,7 @@ class Capture {
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
       if (sb_.pages) k.arg_ptr(5, sb_.pages);   // plan 19v3b Task 0
-      launch(k, ad.fa_kv_heads, T, deep() ? kCapM / 16 : 1);   // spec 32: the deep list's row chunks of 16
+      launch(k, ad.fa_kv_heads, T, deep() ? kCapM / 16 : 1);   // spec 32: the deep lists' row chunks of 16
     }
     // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
     {
@@ -840,7 +841,7 @@ class Capture {
   // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt; 16 at M = 8:
   // -0.5 ms, not merged - it moves pp_dflash_test's two-card rows off the one card's). v2, the paged lists and every
   // production list keep kAttnV2Blocks.
-  // Spec 32: the one-card deep verify list (32 rows: the attention in row chunks, the delta-net step a chain).
+  // Spec 32: a one-card deep verify list (32 or 64 rows: the attention in row chunks, the delta-net step a chain).
   bool deep() const { return mode_ == Mode::Verify && kCapM > DecodeScratchDims::kWideM; }
   uint32_t attn_tgt() const {
     return vattn_ == VerifyAttn::Dpas && !sb_.pages && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
@@ -2105,9 +2106,9 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
   // probe_mtp_steps' M = 5..8 lists), never past DecodeBuffers::kM.
   // Open-work 28: or the one-card wide list at DecodeScratchDims::kWideM rows (the deferred GDN build: SlotBind's
   // gdn_pend).
-  // Spec 32: or the deep list at kDeepM rows (the chain's scratch too).
+  // Spec 32: or a deep list at 32 / 64 rows (the chain's scratch too).
   const bool wide = slot.gdn_pend != nullptr &&
-                    (M == DecodeScratchDims::kWideM || (M == DecodeScratchDims::kDeepM && slot.gdn_x && slot.conv_x));
+                    (M == DecodeScratchDims::kWideM || ((M == 32 || M == 64) && slot.gdn_x && slot.conv_x));
   if (M == 0 || (!wide && (M > mtp.slots || M > DecodeBuffers::kM)))
     throw std::runtime_error("runtime::build_verify: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(mtp.slots) +

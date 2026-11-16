@@ -160,14 +160,14 @@
 #if !((M >= 2 && M <= 8) || M == 16)
 #error "attn_verify_dpas: M is 2..8 (16 for the probe's record)"
 #endif
-// RCHUNK (spec 32 §5.3; undefined on every other command line): the 32-row verify list's attention as row
+// RCHUNK (spec 32 §5.3; undefined on every other command line): the 32- or 64-row verify list's attention as row
 // chunks of 16. The build is M 16 (the 16-row line's levers); grid dimension 2 is the chunk c, and work-group
 // (j, blk, c) is exactly the 16-row kernel's work-group launched at pos + 16 c with rows 16 c .. 16 c + 15 - the
 // same walk, operands and order (property R), so each row is bitwise the 16-row list's row at the same key count.
 // It reads q rows 16 c .. and writes the partials of a list of RCHUNK rows ([24][TGT][RCHUNK][258]).
 #ifdef RCHUNK
-#if M != 16 || RCHUNK != 32 || EAGER
-#error "attn_verify_dpas RCHUNK: an M 16 DPAS build, 32 rows"
+#if M != 16 || (RCHUNK != 32 && RCHUNK != 64) || EAGER
+#error "attn_verify_dpas RCHUNK: an M 16 DPAS build, 32 or 64 rows"
 #endif
 #define PROWS RCHUNK
 #else

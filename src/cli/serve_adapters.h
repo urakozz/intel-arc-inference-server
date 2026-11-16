@@ -423,7 +423,7 @@ struct EngineAdapter : server::EngineIface {
   uint32_t lookup_wide_k() override { return mtp_lookup() && eng.wide_built() ? runtime::Engine::kWideK : 0; }
   // Spec 32: the 32-row list, unless B70_SPEC_LOOKUP_ROWS keeps the runs at 16 rows (Engine::max_wide_k).
   uint32_t lookup_deep_k() override {
-    return mtp_lookup() && eng.widest_k() == runtime::Engine::kDeepK ? runtime::Engine::kDeepK : 0;
+    return mtp_lookup() && eng.widest_k() == runtime::Engine::kDeepK32 ? runtime::Engine::kDeepK32 : 0;
   }
 
   std::vector<uint32_t> step_drafts_or_confirmed(const server::Sampling& sampling, uint32_t k_mtp,
@@ -482,8 +482,8 @@ struct EngineAdapter : server::EngineIface {
     // id or the row after them). Spec 32: more than 15 go to the 32-row list where it fits (greedy requests: a
     // sampled one reads every row's logits back, and its readback holds 16 rows).
     const bool wide = d.size() > k_ && eng.max_wide_k() > 0;
-    const uint32_t kl = d.size() > runtime::Engine::kWideK && sampling.greedy && eng.max_wide_k() == runtime::Engine::kDeepK
-                            ? runtime::Engine::kDeepK
+    const uint32_t kl = d.size() > runtime::Engine::kWideK && sampling.greedy && eng.max_wide_k() == runtime::Engine::kDeepK32
+                            ? runtime::Engine::kDeepK32
                             : runtime::Engine::kWideK;   // the list's drafts
     const uint32_t k = wide ? std::min<uint32_t>(static_cast<uint32_t>(d.size()), kl)
                             : std::min<uint32_t>({static_cast<uint32_t>(d.size()), k_, eng.max_verify_k()});

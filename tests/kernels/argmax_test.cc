@@ -207,9 +207,9 @@ int main() {
     pos = ctrl->pos;
   }
 
-  // Spec 32: the 32-row builds - every row's winner in Control::deep_out, the last one in deep_cur[0], pos advanced
-  // by the rows; the 8- and 16-id words untouched.
-  for (const uint32_t W : {32u}) {
+  // Spec 32: the 32- and 64-row builds - every row's winner in Control::deep_out, the last one in deep_cur[0], pos
+  // advanced by the rows; the 8- and 16-id words untouched.
+  for (const uint32_t W : {32u, 64u}) {
     l0::Mem wl(d.ctx, l0::MemKind::Device, size_t{W} * Q::kVocab * 4);
     l0::Mem wp(d.ctx, l0::MemKind::Device, size_t{W} * kGroups * 2 * 4);
     l0::Module m1(d.ctx, kernels::path(kernels::argmax_stage1_variant(W, Q::kVocabUsed)));

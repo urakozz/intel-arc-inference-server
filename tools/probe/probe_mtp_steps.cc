@@ -9,7 +9,7 @@
 // the in-list check of the verify-attention table (S1) and verify(8)'s attention saving (S2); nothing else runs.
 //
 // `mode` wide16 (spec 32, plan 32a Task 1; max_m 4, int8 head): the engine's built 16-row list in place (and the
-// 32-row one, where built) - Engine::verify(k) with k file ids in Control::wide_cur / deep_cur, then commit(0) or
+// 32- and 64-row ones, where built) - Engine::verify(k) with k file ids in Control::wide_cur / deep_cur, then commit(0) or
 // commit(k) (the next launch replays 1 or k + 1 rows, as in a run) - as interleaved pairs against verify(0) + commit(0), pos rewound to `depth` before every
 // chunk, the pair's order alternating by round, after a warm-up; median over rounds with the range.
 //
@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
   }
 
   if (mode == "wide16") {
-    // Spec 32 (plan 32a Task 1): the built 16-row list (and the 32-row one where built) against the plain step,
+    // Spec 32 (plan 32a Task 1): the built 16-row list (and the 32- / 64-row ones where built) against the plain step,
     // interleaved pairs; commit(0) and the full commit (the next launch replays every row).
     if (!e.wide_built()) {
       std::fprintf(stderr, "wide16: the engine built no 16-row list (int8 head, bf16 KV, one slot)\n");
@@ -288,7 +288,8 @@ int main(int argc, char** argv) {
       return std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / n;
     };
     std::vector<uint32_t> ks{runtime::Engine::kWideK};
-    if (e.deep_built()) ks.push_back(runtime::Engine::kDeepK);
+    for (const uint32_t k : {runtime::Engine::kDeepK32, runtime::Engine::kDeepK64})
+      if (e.deep_built(k)) ks.push_back(k);
     chunk(0, 0, 8);
     for (uint32_t K : ks) {
       chunk(K, 0, 8);
