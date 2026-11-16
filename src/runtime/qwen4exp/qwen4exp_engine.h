@@ -128,6 +128,9 @@ class Qwen4ExpEngine {
   Q4Attn attention() const { return attn_; }
   const loader::Q4LoadedModel& model() const { return model_; }
   const CapturedStep& step(uint32_t dev) const;
+  // Probes only, one card: the decode list rebuilt with a timestamp event a launch, replayed `replays` times (each
+  // replay decodes one id, pos advances); returns each launch's mean device time in us, walk order (step(0).labels).
+  std::vector<double> profile_decode(uint32_t replays);
   // P4's test hook (PipelineEngine's): the next step submits device 1's list only - a hand-off that never
   // arrives. The step must throw within the bounds, never hang.
   void drop_next_handoff() { drop_next_ = true; }

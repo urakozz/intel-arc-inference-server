@@ -397,6 +397,16 @@ int run_decode(const DecodeArgs& a) {
              eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
              eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   if (!a.bench) return 0;
+  // Probes only: B70_Q4_PROFILE=R prints each launch's mean device time over R profiled replays after the bench.
+  if (const char* pr = std::getenv("B70_Q4_PROFILE"); pr != nullptr && *pr != '\0') {
+    const std::vector<double> us = eng.profile_decode(uint32_t(std::stoul(pr)));
+    double sum = 0.0;
+    for (size_t i = 0; i < us.size(); ++i) {
+      std::print(stderr, "prof {:d} {} {:.3f}\n", i, eng.step(0).labels[i], us[i]);
+      sum += us[i];
+    }
+    std::print(stderr, "prof sum {:.3f} us over {:d} launches\n", sum, us.size());
+  }
   const double ms_per_token = eng.last_gen_ms() / double(a.tg);
   const double gb = double(eng.model().read_per_token) / 1e9;
   std::print(stderr, "  MBU: {:.2f} t/s x {:.3f} GB = {:.0f} GB/s (W = this load's derived read/token: both HCs, the "

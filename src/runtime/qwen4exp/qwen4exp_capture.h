@@ -71,6 +71,8 @@ struct ListSpec {
   // capture; kSmallMTuning's Flash-Next rows), gemv / gemv_i8w at M = 1. `opt.force_linear` is the tests' / probes'
   // override only (Gemv: the verify rows bitwise the plain steps, the pre-28d binding).
   CaptureOptions opt;
+  // Probes only: launch i signals prof->events[i] (runtime/capture.h's ProfileEvents; observes only).
+  ProfileEvents* prof = nullptr;
 };
 // The head's pieces the Verify / Draft lists bind (the last device).
 struct MtpBinding {
