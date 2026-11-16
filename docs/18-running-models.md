@@ -1,8 +1,10 @@
 # Running the models
 
 Recipes first for Qwen3.8-27B, the model everything is tuned for; the other models follow. Every flag is explained
-in the [README](../README.md#flags). Speeds are MTP speculative decoding with a 2,820-token prompt and 512 generated
-tokens per request; context lengths are the memory planner's, per card, with the MTP head loaded.
+in the [README](../README.md#flags). Generation speeds are MTP speculative decoding (prompt lookup on) on the golden
+code / prose / tool-call prompts, 256 generated tokens, several requests as the total; prefill speeds are the prompt pass
+alone, a 4,096-token prompt (BENCHMARKS, "The quiet-box session"). Context lengths are the memory planner's, per card,
+with the MTP head loaded.
 
 ```sh
 uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
@@ -16,15 +18,15 @@ each next turn a prefix cache hit exactly where it diverges. Leave it off for be
 
 | recipe | context | speed |
 |---|---:|---|
-| default, bf16 KV cache | 171,008 | 73 t/s |
-| full context: int8 KV cache | **262,144** | 73 t/s |
-| fastest prefill: int8 prompt pass, bf16 cache | 171,008 | prefill 2,205 t/s instead of 1,709 (4k prompt) |
-| several requests: `--max-num-seqs 4` | 46,080 + 3 x 32,768 (bf16), 167,936 + 3 x 32,768 (int8) | 73 / 108 / 127 t/s at 1 / 2 / 4 requests |
+| default, bf16 KV cache | 171,008 | 138 / 57 / 100 t/s (code / prose / tool calls), prefill 1,788 t/s |
+| full context: int8 KV cache | **262,144** | no current row |
+| faster prefill, opt-in: int8 prompt pass, bf16 cache | 171,008 | prefill 2,083 t/s instead of 1,788 (4k prompt) |
+| several requests: `--max-num-seqs 4` | 46,080 + 3 x 32,768 (bf16), 167,936 + 3 x 32,768 (int8) | no current row |
 
 ```sh
 ./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last                                 # default
 ./build/src/cli/b70-serve $Q --parallel 1 --kv-cache int8 --prefix-split-last                 # full context
-./build/src/cli/b70-serve $Q --parallel 1 --prefill-backend l0-int8 --prefix-split-last       # fastest prefill
+./build/src/cli/b70-serve $Q --parallel 1 --prefill-backend l0-int8 --prefix-split-last       # faster prefill (opt-in)
 ./build/src/cli/b70-serve $Q --parallel 1 --max-num-seqs 4 --kv-cache int8 --prefix-split-last # 4 requests
 ```
 
@@ -35,9 +37,9 @@ together they round too much (about 3 % of tool calls that copy exact text from 
 
 | recipe | mode | context | speed |
 |---|---|---:|---|
-| one session, fastest (the default) | `tp`: every layer split over both cards; needs peer-to-peer between them | **262,144** (bf16) | **123 t/s**, prefill 2,939 t/s, 3,323 with `--prefill-backend l0-int8` (4k prompt) |
-| two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 171,008 (bf16) or **262,144** (int8) each | 140 / 164 t/s total |
-| most requests at once: `--max-num-seqs 8` | `replica`, 4 slots per card | 46,080 + 3 x 32,768 (bf16) or 167,936 + 3 x 32,768 (int8) per card | **250 / 258 t/s** total at 8 requests, 36 t/s each |
+| one session, fastest (the default) | `tp`: every layer split over both cards; needs peer-to-peer between them | **262,144** (bf16) | **123 / 74 / 115 t/s** (code / prose / tool calls), prefill 2,931 t/s, 3,217 with `--prefill-backend l0-int8` (4k prompt) |
+| two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 171,008 (bf16) or **262,144** (int8) each | 164 / 108 / 144 t/s total |
+| most requests at once: `--max-num-seqs 8` | `replica`, 4 slots per card | 46,080 + 3 x 32,768 (bf16) or 167,936 + 3 x 32,768 (int8) per card | **342 / 300 / 233 t/s** total at 8 requests (282 / 189 / 206 at 4) |
 
 ```sh
 ./build/src/cli/b70-serve $Q --prefix-split-last                                    # one session, tp
@@ -47,7 +49,7 @@ together they round too much (about 3 % of tool calls that copy exact text from 
 
 With `--max-num-seqs N`, slot 0 is the largest context that fits beside N - 1 slots of 32,768; on two cards the
 slots are split between the cards (card 0 takes the odd one). An explicit `--max-len` that does not fit beside the
-other slots is refused at startup with the numbers. `tp` runs one request at a time; add `--prefill-backend l0-int8` for the faster prompt pass (3,323 instead of 2,939 t/s at 4k).
+other slots is refused at startup with the numbers. `tp` runs one request at a time; add `--prefill-backend l0-int8` for the faster prompt pass (3,217 instead of 2,931 t/s at 4k).
 Pipeline parallel (`--parallel pp`, the layers split between the cards) is for models that do not fit one card -
 Qwen3.8 fits one card even at full context, so it gains nothing there.
 
@@ -91,7 +93,7 @@ is not finished is listed in [open-work.md](open-work.md).
 | `--spec lookup` (developer value) | yes | yes (needs the head) | no | yes (needs the head) |
 | `--spec dflash` | yes, when asked: one card (with prompt lookup inside), up to 4 requests a card (`--max-num-seqs`), `replica`, `tp` or `pp`, bf16 or int8 KV | no | refused | refused |
 | `--kv-cache int8` | yes | not built | refused (bf16 only) | refused (bf16 only) |
-| prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only |
+| prefill backends | `l0` (default), `l0-int8` | `l0` (default, use it); `l0-int8` opt-in and slower here, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only |
 | KV per position (bf16) | 64 KiB | 20 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
 | `--max-len auto`, one card, int8 head (derived) | 171008 with MTP (the default); ~201k with `--spec off` | 262144, with or without MTP (measured by the operator, bf16 KV, 27.3 GB planned of 32.5) | 262144 on two cards (split 25) | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
 | with `--kv-cache int8` (derived) | 262144, with or without MTP | - | - | - |
@@ -185,7 +187,9 @@ missing drafter is an error.
 of `--parallel replica` with one request a card. Where the answer repeats 8
 or more tokens of earlier text, the tokens that followed that text last time are checked instead of the
 proposer's guesses: up to 3 tokens inside MTP, up to 7 inside DFlash (there the repeat must lie outside the
-drafter's own 2,048-token window). Elsewhere the proposer drafts as usual. It is on by default;
+drafter's own 2,048-token window). Elsewhere the proposer drafts as usual. On one card inside MTP a long
+copied run is checked in lists of up to 64 rows (16, 32 or 64, chosen as the copy goes): pure copy 636-650 t/s
+against 356-364 at 16 rows, edit/copy prompts 1.173x the 16-row form, output ids identical. It is on by default;
 `B70_SPEC_LOOKUP=0` serves plain MTP or plain DFlash for comparisons. (`--spec lookup` and
 `--spec dflash-lookup` remain as developer values.)
 
@@ -232,6 +236,8 @@ D=urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
     --spec dflash --spec-max 7 --draft-model $D
 ```
 
+- **Speed** (code / prose / tool calls, t/s): one card, one request 164 / 65 / 111; two requests on two cards
+  (`replica`) 317 / 127 / 191 in total.
 - **Which mode.** DFlash is fastest on one card. Under `--parallel tp` it works but is not faster than on one
   card for one session, and the server prints a note at startup recommending one card, `replica` or MTP on two
   cards.
@@ -267,8 +273,8 @@ hidden 2048, 256 experts with top-8 plus a shared expert, ~3 B parameters active
 Decode (15c), prefill (15d) and serving with its own chat template (Qwen3.5's), Qwen XML
 tool calls and the MoE MTP head (15e) are built.
 
-**Status: built and measured on one card** (README, BENCHMARKS): decode 142.8 t/s, 234.9 t/s with MTP at the
-full 262,144 context; prefill 8,080 t/s (bf16 prompt pass) and 8,518 t/s (`l0-int8`) at 4k. ~1.86 GB
+**Status: built and measured on one card** (README, BENCHMARKS): answers 312 / 326 / 264 t/s (code / prose /
+tool calls) with MTP; prompts read at 9,362 t/s at 4k and 7,682 at 16k (the default bf16 prompt pass). ~1.86 GB
 read per token (derived), so the bandwidth ceiling is far above Qwen3.8's (~270 t/s), and launches,
 not bytes, set the decode rate; 526 launches per token.
 Weights 19.45 GB with the int8 head (derived), +0.50 GB for the MTP head. For comparison,
@@ -297,14 +303,15 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
   runs its own engine with the full context, MTP and the prefix cache, and a prompt cached by one card is a
   prefix cache hit on the other. Several requests on one card (sequence slots) are built for Qwen3.8 only, so
   `--max-num-seqs` above 2, or 2 on one card, is refused. `--parallel tp` is Qwen3.8's. Each request is
-  bitwise what it is alone on its card. Rough speed (2026-11-12, golden prompts, 128-id replies, not a record):
-  two at a time 238 t/s in total with MTP (225 without) against 153 (127) one at a time on one card.
+  bitwise what it is alone on its card. Speed (code / prose / tool calls, t/s): two at a time 581 / 605 / 453 in total
+  against 312 / 326 / 264 one at a time on one card.
 - `--kv-cache int8` is not built at Ornith's attention shape (capture names the missing
   binary); it is not needed for context, since 262144 fits in bf16.
-- Prefill runs on `l0` (the default) and `l0-int8` (opt-in). On this MoE model `l0-int8` loses routing
+- Prefill runs on `l0` (the default) and `l0-int8` (opt-in). **Use the default on Ornith:** `l0-int8` is now
+  slower than the bf16 prompt pass (0.92x at 4k, 0.95x at 16k, measured 2026-11-16). It also loses routing
   accuracy against f32 (the box, 2026-10-30: 1314 differing expert sets on the prefill path against the
   bf16 reference's 1140), and no 8-bit activation scheme studied won it back, so its accuracy gates are
-  diagnostic - printed, not gated (operator ruling 2026-10-31); use it for speed only. Its kernels'
+  diagnostic - printed, not gated (operator ruling 2026-10-31). Its kernels'
   own gate (`prefill_gate_ornith_l0-int8`, judged by the quantisation-aware f32 reference) still binds.
 - The adaptive MTP (`--spec auto`) decides with Qwen3.8's cost table, K up to 3. Ornith's own measured table (a
   verify of 2 / 3 / 4 rows costs 1.15 / 1.34 / 1.52 plain steps, a draft 0.19 each) decoded 6-10 % slower in the
