@@ -421,7 +421,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                  : std::string("whole"),
              options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
              runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
-             engine.mtp() ? (std::string(" (the head, fixed K: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
+             engine.mtp() ? (std::string(" (the head: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
                              " norm, reuse selection" +
                              (a.spec_lookup ? ", --spec lookup" : "") + ")").c_str()
                           : "",
@@ -1069,11 +1069,16 @@ int run(int argc, char** argv) {
     options.lookup_adaptive.cost = server::MtpCost::int8_head().with_free_drafts();
   }
   // Spec 8 §10: MTP chooses K per iteration from each request's own acceptance, over the int8 head's measured
-  // cost table (the Qwen family; Flash-Next drafts a fixed K - its adaptive policy waits for spec 22's numbers).
-  if (mtp_on && spec.adaptive) {
+  // cost table (the Qwen family) or Qwen3.8-Flash-Next's own (its verify rows read their own experts).
+  // B70_MTP_ADAPTIVE=0 drafts a fixed K = --spec-max instead (A/B runs, the cost table's measurement).
+  const bool adaptive_env = [] {
+    const char* env = std::getenv("B70_MTP_ADAPTIVE");
+    return !(env != nullptr && std::string(env) == "0");
+  }();
+  if (mtp_on && spec.adaptive && adaptive_env) {
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = spec.max_k;
-    options.mtp_adaptive.cost = server::MtpCost::int8_head();
+    options.mtp_adaptive.cost = is_q4 ? server::MtpCost::flash_next() : server::MtpCost::int8_head();
     // Spec 17d: tensor parallel's own table (its verify rows cross at M rows, its drafts read half the head).
     if (pipe.tp()) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
     // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head share scales with it
@@ -1115,7 +1120,7 @@ int run(int argc, char** argv) {
     qa.pp_backend_given = have_pp_backend;
     qa.pp_backend = pp_backend;
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
-    qs.mtp_k = mtp_k;       // a fixed K (cli::resolve_spec: Flash-Next's MTP is not adaptive yet)
+    qs.mtp_k = mtp_k;       // the deepest K; the server picks each iteration's (options.mtp_adaptive)
     qs.spec_lookup = spec_lookup;
     qs.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     qa.load_mtp = qs.loads_head();

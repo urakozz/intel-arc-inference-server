@@ -929,7 +929,7 @@ int run(int argc, char** argv) {
     qa.pp_chunk = pp_chunk;
     qa.pp_backend_given = have_pp_backend;
     qa.pp_backend = pp_backend;
-    qa.mtp = mtp_on;
+    qa.mtp = spec_arg == "mtp";     // b70-decode decodes it plain: --spec auto (b70-serve's MTP) stays plain here
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
     qa.profile = profile;
     return cli::qwen4exp::run_decode<StdoutToStderr>(qa);

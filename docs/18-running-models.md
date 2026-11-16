@@ -91,7 +91,7 @@ is not finished is listed in [open-work.md](open-work.md).
 | `--parallel pp` (two cards) | yes | yes | its default (its own engine) | yes (the whole model needs it) |
 | `b70-decode` | yes | yes | decode and prefill, **two cards** (the default) | decode and prefill, the whole model or `--layers N` |
 | speed rows in BENCHMARKS | yes | yes | no | yes (the whole model, our export) |
-| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed number of guesses = `--spec-max` 1..3 (`auto` = off); `b70-decode` refuses it |
+| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | `b70-serve`: adaptive MTP by default (its own cost table, `--spec-max` 1..3 caps it); `b70-decode` decodes plain |
 | `--spec lookup` (developer value) | yes | yes (needs the head) | no | yes (needs the head) |
 | `--spec dflash` | yes, when asked: one card (with prompt lookup inside), up to 4 requests a card (`--max-num-seqs`), `replica`, `tp` or `pp`, bf16 or int8 KV | no | refused | refused |
 | `--kv-cache int8` | yes | not built | refused (bf16 only) | refused (bf16 only) |
@@ -454,14 +454,15 @@ g64 expansion; its PLE table must be converted once (`tools/box_validate/qwen4ex
 beside the snapshot). Our own g64 export (`tools/quantize/quantize_qwen4exp.sh`, on the box, not published) is the one
 served whole.
 
-**Status: the whole model served on two cards; speed rows in BENCHMARKS.** On our export: decode 38.6-45.4 t/s
-served on real text at ~4k context (48.2 t/s median over the tool-call set), prefill ~1300 t/s at 4k and ~940 t/s at
-62k, `--max-len auto` 65536, passkey 3 / 3 at 61955 ids, a prefix cache hit's output identical to the cold run; ~10 min
+**Status: the whole model served on two cards; speed rows in BENCHMARKS.** On our export, served with MTP (the
+default): 58-70 t/s on code, 48 on a spec, 40 on docs prose, 67-99 on tool calls at ~1-4k context (plain: 37-49 and
+42-53); prefill ~1350 t/s at 4k, ~1200 at 17k and ~940 at 62k, `--max-len auto` 65536, passkey 3 / 3 at 61955 ids, a prefix cache hit's output identical to the cold run; ~10 min
 to load, 63.2 GB of host memory pinned (measured). Decode (spec 21c), prefill (spec 21d)
 and serving (spec 21e). **The whole model does not fit two B70s** (its routed experts alone are 64.17 GB at int4 g64),
 so without `--layers` each card keeps the most-routed experts its VRAM has room for after the rest of the plan (the
 same count in every layer, chosen by the routing profile `<snapshot>-expert-profile.safetensors` from
-`tools/oracle/offload_curve.py profile`, else by id; derived f = 0.807 on two cards at 32768) and the kernels read the
+`tools/oracle/offload_curve.py profile`, else by id; the box's profile counts 42 routing traces: the 36 tool-call
+conversations, an agentic transcript and 7.5 % prose - repo docs, a novel, the golden prose prompts; derived f = 0.807 on two cards at 32768) and the kernels read the
 rest in place from pinned host memory (one range a layer, ~12.4 GB beside the 51.8 GB PLE table). A miss costs its
 bytes at ~11.2 GB/s on top of the VRAM time (measured). `--max-len auto` for the whole model takes the longest of
 32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's. `--layers N` (development mode:
@@ -487,13 +488,15 @@ of Intel's snapshot except `tokenizer.json`, which links to the original's; `qwe
 links the PLE int8 file.
 The prefix cache keeps this family's state with each snapshot (115.7 MB: the 36 GDN states and conv rows, the PLE
 history, the QSA open block's raw keys; + 21 KB with the head) and 25,344 B a position in its blocks (+ 2,112 with the
-head), one layout on one card or two. `--spec mtp --spec-max K` (K 1-3, a fixed K) drafts with the MTP head (vLLM's form;
+head), one layout on one card or two. `--spec auto` (the default) and `--spec mtp --spec-max K` (K 1-3) draft with the MTP head (vLLM's form;
 `pre_fc_norm_hidden` as one RMS over the 4 streams, `B70_Q4_MTP_NORM=per_stream` for the other form; draft steps after
 the first reuse step 0's selection) and verifies K + 1 rows in one list (790-795 launches at 48 layers, 86-91 at
 `--layers 4`, derived). The head's bf16 experts are RTN-quantised to int4 g64 at load; on two cards it runs on the second and
-reads the first card's embedding over peer. On the whole model `--spec auto` is off. Measured with `--spec-max 2`: 0.97-1.00 of
-the drafts accepted on tool calls (62-94 t/s), 0.70-0.83 on code (56.6-66.5 t/s), 0.63 on docs prose (42.5 t/s, plain 41.8)
-and 0.455 on a short prose prompt (15.5 t/s).
+reads the first card's embedding over peer. Each request picks its number of drafts (0-3) from its own acceptance
+over the model's cost table: a verify row here reads its own 10 experts a layer, some from host memory, so an iteration
+of K = 3 costs 2.0-2.8 plain steps on real text (measured). Code and tool calls run K = 3 (acceptance 0.88-1.00); a
+request accepted below ~0.7 (prose) runs plain steps with a K = 1 probe every 4. `B70_MTP_ADAPTIVE=0` keeps K =
+`--spec-max` (A/B runs).
 
 ```sh
 I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
@@ -517,7 +520,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
 **Limits.** Prefill on `l0` only (`--prefill-backend l0-int8`: spec 5's h8 linears rotate in whole 1024-k Hadamard
 blocks and the hidden is 2560), `--prefill-chunk` at most 2048; the two cards
 cross each chunk by copy, sequentially (spec 16c's overlapped chunk pipeline is not used here); MTP in `b70-serve`
-only, at a fixed K (`b70-decode --spec mtp` and `--draft-vocab` refused), the expert placement static (no swaps while
+only (`b70-decode --spec mtp` and `--draft-vocab` refused), the expert placement static (no swaps while
 serving), the prefill reading its misses from host memory inside the GEMMs, bf16 KV only (`--kv-cache int8` refused, decision 8), `reasoning_effort` not forwarded to the template (as
 for Qwen3.8),
 no `--profile`, context capped at the trained 262144.
@@ -525,6 +528,6 @@ no `--profile`, context capped at the trained 262144.
 **Relevant variables:** `B70_Q4_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_Q4_MTP_NORM` (`single` |
 `per_stream`),
 `B70_Q4_TIE_TOL` / `B70_Q4_SEL_TOL` (the golden test's routing and selection near-tie tolerances, 1e-3 proposed),
-`B70_Q4_RESIDENT` (`all` | `none` | `random:<f>:<seed>` | `adversarial`: a test placement of the routed experts, any
+`B70_MTP_ADAPTIVE` (`0`: a fixed K, above), `B70_Q4_RESIDENT` (`all` | `none` | `random:<f>:<seed>` | `adversarial`: a test placement of the routed experts, any
 layer count) and `B70_Q4_EXPERTS` (`table`, the default | `direct`: the kernels without the address table, only when
 every expert is resident) - tests and timing only.

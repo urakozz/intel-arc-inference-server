@@ -32,6 +32,19 @@ MtpCost MtpCost::tp_int8_head() {
   return c;
 }
 
+// Qwen3.8-Flash-Next, --parallel pp with the expert tier: served 2026-11-16 at a fixed K (B70_MTP_ADAPTIVE=0), medians
+// of 3 rounds on 6 real-text prompts and 5 tool calls, one iteration against a plain step of the same prompt: K = 1
+// 1.4-2.1, K = 3 2.0-2.8 (median 2.4) on real text, 3.6 on a short story (h 0.75: each verify row reads its own missed
+// experts from host memory). The table sits in the upper part of the real-text range, so a request whose drafts are
+// accepted below ~0.7 runs plain steps (on that story K = 3 was 13.4 t/s against 23.7 plain), while code (~0.88) and
+// tool calls (~0.97) keep K = 3.
+MtpCost MtpCost::flash_next() {
+  MtpCost c;
+  c.verify = {1.00, 1.80, 2.10, 2.30};
+  c.draft = {0.10, 0.20, 0.30};
+  return c;
+}
+
 MtpCost MtpCost::tp_dflash() {
   MtpCost c;
   // tp_dflash_test cost 4096, 2026-11-14 (both cards held, the CPU reference job running; medians of 5 interleaved

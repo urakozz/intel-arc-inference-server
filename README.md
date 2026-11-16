@@ -6,6 +6,8 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 - **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
 - **Prompts read at 2,083 t/s on one card, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
 - **Ornith 1.5 35B-A3B:** prompts read at **9,362 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
+- **Qwen3.8-Flash-Next:** the whole model on two cards, the experts that do not fit read from host memory - **70 t/s**
+  writing code, **91 t/s** on tool calls, 65,536 tokens of context.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 
 One choice to make - how many requests run at once. The engine sizes everything else.
@@ -56,6 +58,21 @@ Generation with MTP, t/s:
 |---|---:|---:|---:|---:|
 | 1 request, one card | 312 | 326 | 264 | **210** / 131 |
 | 2 requests, two cards `replica` (total) | **581** | **605** | **453** | |
+
+### Qwen3.8-Flash-Next
+
+Prefill, t/s:
+
+| setup | 4k prompt | 17k prompt |
+|---|---:|---:|
+| two cards `pp` | 1,358 | 1,204 |
+
+Generation, t/s:
+
+| setup | code | prose | tool calls |
+|---|---:|---:|---:|
+| plain, two cards `pp` | 49 | 41 | 50 |
+| MTP, two cards `pp` | **70** | 40 | **91** |
 
 How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
@@ -115,7 +132,14 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
 
 Speculative decoding (the model's MTP head) and the prefix cache are on by default; the DFlash draft model is
 `--spec dflash --draft-model ...`. Ready-made recipes with their context sizes:
-[docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
+[docs/18-running-models.md](docs/18-running-models.md).
+
+```sh
+# Qwen3.8-Flash-Next on two cards: our int4 g64 export, a local snapshot directory
+./build/src/cli/b70-serve <snapshot> --parallel pp
+```
+
+Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
 Kolibri-1); Qwen3.8 is the one everything is tuned for.
 
 ## Flags

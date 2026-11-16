@@ -123,6 +123,17 @@ void test_dflash_measured_cost() {
   std::print("DFlash measured costs: K 3 / 7 / 7 at alpha 0.5 / 0.8 / 0.95\n");
 }
 
+void test_flash_next_cost() {
+  AdaptiveKOptions o;
+  o.cost = MtpCost::flash_next();
+  const AdaptiveK p(o);
+  CHECK_EQ(p.max_k(), 3U);
+  CHECK_EQ(p.best(0.66), 0U);   // a short story's acceptance: plain steps
+  CHECK_EQ(p.best(0.88), 3U);   // code
+  CHECK_EQ(p.best(0.97), 3U);   // tool calls
+  std::print("Flash-Next costs: K 0 / 3 / 3 at alpha 0.66 / 0.88 / 0.97\n");
+}
+
 void test_cost_table() {
   MtpCost c;
   c.verify = {1, 1.2, 1.5, 1.8};
@@ -284,6 +295,7 @@ void test_draft_vocab_cost() {
 int main() {
   test_model();
   test_dflash_measured_cost();
+  test_flash_next_cost();
   test_cost_table();
   test_draft_vocab_cost();
   test_up_on_high_acceptance();
