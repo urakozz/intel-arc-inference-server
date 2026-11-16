@@ -3853,7 +3853,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_no_draft_model ${B70_NO_MODEL} --spec dflash
     EXPECT "needs --draft-model")
   b70_serve_reject(cli_reject_serve_dflash_lookup_no_draft_model ${B70_NO_MODEL} --spec dflash-lookup
-    EXPECT "--draft-model z-lab/Qwen3.8-27B-DFlash2")
+    EXPECT "--draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound (our packed int4 drafter")
   b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
     --spec dflash-lookup EXPECT "its verify lists serve the DSpark drafter")
   b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups

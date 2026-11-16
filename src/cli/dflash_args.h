@@ -65,8 +65,7 @@ inline void check_flags(const Args& a) {
   if (a.on && !a.have_model)
     throw std::runtime_error(std::string("--spec dflash / dflash-lookup needs --draft-model (the drafter's weights take "
                                          "memory from the context, so the model is your choice): --draft-model ") +
-                             kPackedDrafter + " (our packed int4 drafter, 1.21 GB) or --draft-model "
-                             "z-lab/Qwen3.8-27B-DFlash2 (bf16, int8 at load, 2.05 GB)");
+                             kPackedDrafter + " (our packed int4 drafter, 1.21 GB)");
   if (a.on && (a.max_k == 0 || a.max_k > 7))
     throw std::runtime_error("--spec-max with --spec dflash expects 1..7 (the drafter's block of 8)");
 }

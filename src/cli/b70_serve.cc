@@ -92,7 +92,7 @@ struct Flags {
   [[=Help("K", "the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash; Bolt's lookup\ntoo).", "the most")]]
   Arg<uint32_t> spec_max;   // its range is the proposer's: checked below
   [[=Help("P", "--spec dflash's drafter. Qwen3.8: required, urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound\n"
-               "(packed int4) or z-lab/Qwen3.8-27B-DFlash2 (int8 at load). Bolt's default:\n"
+               "(packed int4). Bolt's default:\n"
                "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.")]]
   Arg<std::string> draft_model;
   [[=Help("N", "how many requests run at once (vLLM's flag); the context follows. 1:\n"
