@@ -330,7 +330,7 @@ int main() {
     runtime::MtpBuffers mb(ctx, 16384, model::qwen38(), 0, i8);
     CHECK_EQ(mb.kv_k.size(), size_t{16384} * 1032);
     CHECK_EQ(mb.kv_lay.layers, 1u);
-    CHECK_EQ(mb.bytes(), size_t{523176064 + 81920 + 128} - 2 * size_t{16384} * (2048 - 1032));
+    CHECK_EQ(mb.bytes(), size_t{523176064 + 573440 + 640} - 2 * size_t{16384} * (2048 - 1032));
   }
 
   std::puts("buffers_test OK");
