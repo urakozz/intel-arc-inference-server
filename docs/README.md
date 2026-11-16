@@ -56,7 +56,6 @@ There are three kinds of document here:
 | [environment-variables.md](environment-variables.md) | what the programs and scripts read from the environment (none of it needed to run the engine) |
 | [10-the-box.md](10-the-box.md) | the build and test machine: how to build and test on it, the GPU lock, validation runs, why an idle box matters for a benchmark |
 | [BENCHMARKS.md](BENCHMARKS.md) | every measured row, how it was taken and what grade it earned |
-| [coding-benchmarks.md](coding-benchmarks.md) | published coding-agent scores of the models the engine supports or considered |
 
 **Background**
 
