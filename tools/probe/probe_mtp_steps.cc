@@ -343,10 +343,10 @@ int main(int argc, char** argv) {
       if (entry.rfind("gemm_sm", 0) == 0 || entry.rfind("gemv", 0) == 0) {
         if (top) return std::string("head (lm_head)");
         if (variant.rfind("gemv_bf16", 0) == 0) return std::string(mtp ? "mtp head bf16 linears" : "a||b (gemv_bf16)");
-        return std::string(mtp ? "mtp head linears" : "int4 linears (") + variant.substr(0, variant.find("_M")) + ")";
+        return std::string(mtp ? "mtp head linears" : "int4 linears (gemm_sm / gemm_sm_v2)");
       }
       if (entry == "gdn_step") return std::string("delta-net link ") + (variant.find("_R") != std::string::npos
-                                                                            ? variant.substr(variant.find("_R") + 1) : "");
+                                                                            ? variant.substr(variant.find("_R") + 1) : "R0");
       if (entry.rfind("attn_verify", 0) == 0 || entry == "attn_decode_v2") return std::string("attention");
       return entry;
     };
@@ -391,9 +391,14 @@ int main(int argc, char** argv) {
     std::printf("wideprof: depth %u, %u calls x %u rounds (+1 warm-up round), ms a verify, median over rounds\n", depth,
                 calls, rounds);
     std::printf("| family | 16 rows | 32 rows | 64 rows |\n|---|---:|---:|---:|\n");
-    for (const auto& [f, v] : fam[64])
-      std::printf("| %s | %.3f | %.3f | %.3f |\n", f.c_str(), fam[16].count(f) ? median_of(fam[16][f]) : 0.0,
-                  fam[32].count(f) ? median_of(fam[32][f]) : 0.0, median_of(v));
+    std::map<std::string, int> names;
+    for (const uint32_t w : {16u, 32u, 64u})
+      for (const auto& [f, v] : fam[w]) names[f] = 1;
+    for (const auto& [f, one] : names) {
+      std::printf("| %s |", f.c_str());
+      for (const uint32_t w : {16u, 32u, 64u}) std::printf(" %.3f |", fam[w].count(f) ? median_of(fam[w][f]) : 0.0);
+      std::printf("\n");
+    }
     std::printf("| kernels, summed | %.3f | %.3f | %.3f |\n", median_of(device[16]), median_of(device[32]),
                 median_of(device[64]));
     std::printf("| wall (instrumented) | %.3f | %.3f | %.3f |\n", median_of(wall[16]), median_of(wall[32]),
