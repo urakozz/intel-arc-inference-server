@@ -198,7 +198,13 @@ class Walk {
   }
   void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1) {
     require(!pending_entry_.empty(), "launch() without a preceding kernel()");
-    step_.list.launch(k, gx, gy, gz, nullptr);
+    l0::Event* signal = nullptr;
+    if (spec_.prof) {
+      require(step_.kernel_count < ProfileEvents::kProfileCapacity, "more launches than ProfileEvents::kProfileCapacity");
+      spec_.prof->events.emplace_back(spec_.prof->pool, static_cast<uint32_t>(step_.kernel_count));
+      signal = &spec_.prof->events.back();
+    }
+    step_.list.launch(k, gx, gy, gz, signal);
     const std::string where = layer_ == -2 ? std::string("MTP") : layer_ < 0 ? std::string("--") : "L" + std::to_string(layer_);
     step_.labels.push_back(where + " " + pending_entry_ + " " + pending_variant_);
     pending_entry_.clear();

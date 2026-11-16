@@ -420,6 +420,21 @@ size_t Qwen4ExpEngine::launches() const {
 }
 const CapturedStep& Qwen4ExpEngine::step(uint32_t dev) const { return *st(dev).step; }
 
+std::vector<double> Qwen4ExpEngine::profile_decode(uint32_t replays) {
+  if (st_.size() != 1 || mtp_) throw std::runtime_error("profile_decode: one card, no MTP head");
+  ProfileEvents prof(st(0).ctx);
+  ListSpec spec;
+  spec.prof = &prof;
+  CapturedStep p = build(st(0).ctx, model_, model_.parts[0], st(0).buffers, nullptr, taps_[0].get(), nullptr, spec);
+  std::vector<double> us(p.kernel_count, 0.0);
+  for (uint32_t r = 0; r < replays; ++r) {
+    for (l0::Event& e : prof.events) e.reset();
+    submit({&p});
+    for (size_t i = 0; i < us.size(); ++i) us[i] += prof.events[i].duration_us() / replays;
+  }
+  return us;
+}
+
 // --- read-backs ----------------------------------------------------------------------------------------------------
 std::vector<uint16_t> Qwen4ExpEngine::read_debug_H() {
   const model::Qwen4ExpDesc& d = model_.desc;
