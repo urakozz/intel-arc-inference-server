@@ -167,13 +167,7 @@ inline std::string pf_gdn_scan_variant(unsigned gdn_k = kRefGdnKHeads,
                                        unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_scan" + gdn_suffix(gdn_k, gdn_v);
 }
-// Phase 2 Task 6: pf_route.cl's pf_gemv_rows at a||b's shape (MT 16, TC 2), bitwise pf_ab_proj.
-inline std::string pf_route_ab_variant(unsigned hidden = kRefHidden) { return "pf_route_ab" + hidden_suffix(hidden); }
-inline constexpr unsigned kPfRouteMt = 16, kPfRouteTc = 2;
-inline std::string pf_route_router_variant(unsigned K, unsigned N) {
-  return "pf_route_router_K" + std::to_string(K) + "_N" + std::to_string(N);
-}
-// Phase 3 Task 2 (Ornith l0): the router || shared gate and the a||b by the dense GEMM. pf_route.cl's pf_route_slab
+// Phase 3 Task 2 (Ornith, both backends since open-work 35): the router || shared gate and the a||b by the dense GEMM. pf_route.cl's pf_route_slab
 // re-lays the tiled bf16 [N][K] weight as pf_gemm's B [K][P], P = N padded to whole 256-column tiles; the two
 // consumers read the GEMM's rows at pitch P: moe.cl's moe_route built at ROUTER_N = P (decode's binary keeps 272)
 // and pf_gdn_conv.cl's pf_gdn_gate at AB_STRIDE = P.

@@ -482,7 +482,6 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk
     at = align256(at + bytes);
     return off;
   };
-  l.logits_off = region(kC * m.router_n() * kFp32);
   l.route_layer = kC * kMoeRouteWords * sizeof(uint32_t);
   l.route_off = region(size_t{desc.layers} * l.route_layer);
   l.hdr_off = region(size_t{kernels::pf_moe::hdr_words(m.experts)} * sizeof(uint32_t));

@@ -416,11 +416,7 @@ if(B70_ORNITH)
     add_ocloc_kernel(pf_res_norm_K2048_SP${SP}_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
                      DEFINES K=2048 S_PREV=${SP} FOLD_G=20)
   endforeach()
-  # Phase 2 Task 6: the a||b GEMV over a chunk at 16 rows x 2 column tiles a work-group, bitwise pf_ab_proj_D2048.
-  add_ocloc_kernel(pf_route_ab_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl DEFINES K=2048 N=128 MT=16 TC=2)
-  add_ocloc_kernel(pf_route_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
-                   DEFINES K=2048 N=272 MT=16 TC=2)
-  # Phase 3 Task 2 (l0): the router and a||b by pf_gemm_T0 - their weights re-laid as zero-padded [K][P] slabs, and
+  # Phase 3 Task 2 (both backends since open-work 35): the router and a||b by pf_gemm_T0 - their weights re-laid as zero-padded [K][P] slabs, and
   # the two consumers at the GEMM's row pitch P (decode's moe_M1 binary and pf_gdn_conv_GK16V32 keep theirs).
   add_ocloc_kernel(pf_route_slab_K2048_N272_P512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
                    DEFINES K=2048 N=272 ROUTE_SLAB=512)

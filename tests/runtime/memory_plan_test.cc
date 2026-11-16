@@ -162,12 +162,12 @@ void check_sizes_ornith() {
   CHECK_EQ(runtime::moe_prefill_tiles(o, 1), uint32_t(248 + 1));   // (8 + 7936) / 32 + 1
   CHECK_EQ(ml2.rows, uint32_t(26368));
   CHECK_EQ(ml2.route_layer, size_t{2048} * 32 * 4);
-  CHECK_EQ(ml2.route_off, size_t{2048} * 272 * 4);                // after the logits
+  CHECK_EQ(ml2.route_off, size_t{0});                             // first (no GEMV logits since open-work 35)
   // Plan 2026-11-12: no weight batch (the GEMMs read the int4 blocks in place); + the mw sort's counts (32 blocks
   // x 256 experts), its work items (540 x 4 u32) and W4A8's group scales (2048 tokens and 26368 rows x 32 groups)
   CHECK_EQ(runtime::moe_prefill_items(o, 2048), uint32_t(540));     // (16384 + 256 x 63) / 64 + 32
-  CHECK_EQ(ml2.total, size_t{2228224} + 10485760 + 1280 + 6656 + 105472 + 65536 + 27000832 + 108003328 + 32768 +
-                          8704 + 262144 + 3375104);   // 151,575,808
+  CHECK_EQ(ml2.total, size_t{10485760} + 1280 + 6656 + 105472 + 65536 + 27000832 + 108003328 + 32768 + 8704 + 262144 +
+                          3375104);   // 149,347,584
   const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(16384, o, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(ps.moe, ml2.total);
   CHECK_EQ(ps.slab, size_t{4096} * 1024 * 2);                       // out_proj / o_proj's K

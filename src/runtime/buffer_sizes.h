@@ -228,7 +228,6 @@ struct PrefillScratchSizes {
 //
 // (kC here is the session's chunk cap, 2048 or 4096.)
 //
-//   logits   fp32 [kC][router_n]            the router || shared-gate GEMV over the chunk
 //   route    u32  [layers][kC][32]          moe_route's rows, PER LAYER: after a prefill every
 //                                           layer's routing is still there for R2 and the
 //                                           prefill-vs-decode routing check to read back
@@ -248,7 +247,7 @@ struct PrefillScratchSizes {
 // (moe_prefill_tiles). Ornith at kC 2048: 824 tiles, 26,368 rows; ~0.15 GB in all.
 struct MoePrefillLayout {
   uint32_t tmax = 0, rows = 0;   // at the chunk cap
-  size_t logits_off = 0, route_off = 0, route_layer = 0, hdr_off = 0, tiles_off = 0,
+  size_t route_off = 0, route_layer = 0, hdr_off = 0, tiles_off = 0,
          row_tok_off = 0, pair_row_off = 0, h_off = 0, xg_off = 0,
          cnt_off = 0,            // pf_moe_sort_mw's per-block counts, u32 [ceil(C / 64)][experts]
          items_off = 0,          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
