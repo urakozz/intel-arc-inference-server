@@ -73,8 +73,9 @@ is not finished is listed in [open-work.md](open-work.md).
   prefix cache, MTP, DFlash, tensor parallel).
 - **Ornith 1.5** is supported and its box tests pass; its speed rows (decode, prefill, MTP cost table) are in BENCHMARKS.
 - **Qwen3.8-Flash-Next** is served whole on two cards from our own export, its routed experts partly in host memory
-  (the expert tier); speed rows in BENCHMARKS. The f32 judge of its tool calls on our export is still to run
-  (open-work.md).
+  (the expert tier); speed rows in BENCHMARKS. Its served tool calls on our export, judged against f32 references of
+  our weights: 33 of 36 pass, 3 fail (being diagnosed); the per-token quality checks against the bf16 original are
+  still to run (open-work.md).
 - **Kolibri-1** is supported by the code and parked (out of focus); no speed rows.
 - **Nemotron 3.5 Bolt** is parked until Flash-Next is done. Its section stays
   because the code still serves it.
