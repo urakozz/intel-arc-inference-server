@@ -132,9 +132,9 @@ struct Flags {
               "step, so a thinking model's next turn is a prefix cache hit right there (agentic sessions;\n"
               "off for benchmarks and the golden gates).")]]
   bool prefix_split_last = false;
-  [[=Help("N|auto", "Qwen3.8-Flash-Next only, REQUIRED (the whole model needs the expert tier, not\n"
-                    "built yet): load its first N layers (development mode); its PLE int8 file is\n"
-                    "<snapshot>-ple-int8/.")]]
+  [[=Help("N|auto", "Qwen3.8-Flash-Next only: load its first N layers (development mode); without it\n"
+                    "the whole model is served, the experts that do not fit the cards read from pinned\n"
+                    "host memory. Its PLE int8 file is <snapshot>-ple-int8/.")]]
   Arg<std::string> layers;   // spec 21e (until spec 22)
   [[=Section("\n  Still being measured (they go when their numbers decide, docs/open-work.md):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
