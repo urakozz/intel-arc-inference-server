@@ -340,6 +340,30 @@ same at every M >= 2 and whatever the other rows hold**. That is why the tuning 
 [probe-small-m-gemm-2026-11-01.md](probes/probe-small-m-gemm-2026-11-01.md)). The numbers were taken on a
 busy box and are to be re-measured on a quiet one (open-work.md, the quiet-box session).
 
+### `gemm_sm_v2` - the same rows past 16 (spec 32e)
+
+`gemm_sm` holds every row's activations of a group in one sub-group's registers: at 32 rows it needs the 256-GRF
+mode, at 64 it spills in either mode (a token's int4 linears 42.1 ms at 32 rows, ~1.65 s at 64, against 27.2 ms at
+16). `gemm_sm_v2` (`src/kernels/gemm_sm_v2.cl`, used by the 32- and 64-row verify lists only) keeps `gemm_sm`'s
+per-row arithmetic and changes the thread shape:
+
+- **Row chunks in the work-group** (`RC 32`, 256 GRF): sub-group (column, K-slice, row chunk) runs 32 rows against
+  the same 16 weight columns as its siblings, so the weights come from memory once and from cache for the other
+  chunk. Every int4 shape at 64 rows and four at 32 take it. **One sub-group for every row** (`SWAP 1`, 128 GRF:
+  the group's dequantised weights kept, then row block by row block) is faster for `out_proj` / `o_proj` at 32.
+- **The rows by 2D block reads** (`intel_sub_group_2d_block_read_16b_8r16x2c`, two k16 steps of an 8-row block a
+  read, straight into the DPAS operand): this removed the row loads and moves that were the cost - 53.6 -> 44.1 ms
+  at 64 rows (probe level).
+- The output, the arguments and the per-row chain are `gemm_sm`'s: four k16 DPAS from a zero group accumulator in
+  k order, `acc += group x scale` in fp32, the same split-K and SLM reduce order. So **row m at 32 or 64 rows is
+  bitwise row m of `gemm_sm` at 16** (`gemm_sm_test`: rows 16..63 against the same inputs in `gemm_sm`'s rows
+  0..15, 1,000 trials a shape; every binary 0 spill, 0 private memory).
+- Measured, a token's int4 linears in production binaries: **30.40 ms at 32 rows, 45.00 ms at 64**. Putting the
+  row chunks on the grid instead (more work-groups) was slower on every shape: the sibling sub-groups sharing one
+  work-group's weight reads is what pays. The oneDNN library's matmul is close on time but changes its tile with
+  the row count (its rows are not independent of M), so it cannot be a verify kernel here. Record:
+  [probe-gemm-sm-v2-2026-11-15.md](probes/probe-gemm-sm-v2-2026-11-15.md).
+
 ---
 
 ## `prep` - the between-GEMV kernels
@@ -981,6 +1005,16 @@ bitwise the previous 16-row line (`attn_verify_bitwise_test`) and 1.43x / 1.63x 
 where a launch's rows cross a block-size change (pos 32,767: row 0 at 1,024 keys a block, the rest at 1,088) every
 work-group walks its block once per row group, twice the work - time at a position whose rows share one block
 size. Record: [probe-verify-attn-depth-2026-11-15.md](probes/probe-verify-attn-depth-2026-11-15.md).
+
+**The 32- and 64-row lists** (spec 32) run that same 16-row line in row chunks of 16 (`RCHUNK`, grid dimension 2):
+work-group (head, block, chunk c) is exactly the 16-row kernel's work-group launched at pos + 16 c, so every row is
+bitwise the 16-row list's row at the same key count (`attn_verify_dpas_test` part W), and `attn_reduce_v2` is built
+alone at the list's rows (`REDUCE_ONLY`). Each chunk re-reads K and V, so at depth the attention is the largest
+part of a deep verify. Their delta-net step is a chain of the 16-row deferred launch (`gdn_step.cl` `ROW0` 0 / 16 /
+32 / 48): link b starts from the scratch state link b - 1 stored, and links past the first write their rows' conv
+inputs to a conv scratch (the session's ring stays 32 deep, so the snapshot format did not change);
+`gdn_ring_commit` copies a commit's newest rows from it into the ring. The next launch replays the accepted rows
+from the committed state as for every deferred list.
 
 ---
 

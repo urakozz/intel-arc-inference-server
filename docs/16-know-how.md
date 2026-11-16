@@ -271,7 +271,17 @@ weights, prompt lookup), not from faster single kernels.
   same verify lists. Inside MTP it gives +22 % on edit/copy prompts and +2.4 % on a
   recorded coding session, where about 28 % of tokens came from lookup at 89 %
   acceptance. The longer the copied run the engine may propose, the larger the
-  gain.
+  gain - but only on real copies: a wider verify that misses halfway costs more
+  than it returns, so a run earns the wider list (16 rows, then 32) and a miss
+  drops it back. Renames, whose copied runs break every few dozen tokens, are
+  where a wider list loses.
+- **Change the thread shape, not the row's arithmetic.** To verify 32 or 64 rows
+  without spilling, the small-batch GEMM gave the extra rows to sibling
+  sub-groups of the same work-group (they share the weight reads through the
+  cache) and kept each output's chain of DPAS steps, scale step and reduce order.
+  Every row stays bitwise the 16-row build's, so a wider list needs no new
+  quality judgement. Library GEMMs re-tile with the row count and lose that
+  property.
 - **Grade every speculative token against float32.** Verify rows differ from
   plain rows at the last bf16 rounding, so greedy output can flip on near-ties.
   The f32 judge accepts a choice within a few bf16 ulps of the float32 top and

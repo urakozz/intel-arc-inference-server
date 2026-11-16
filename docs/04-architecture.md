@@ -140,6 +140,14 @@ inside `mtp` under `replica` with one request a card, inside `dflash` under `tp`
 step and the proposer's own draft is skipped; otherwise the step is an ordinary MTP or DFlash one. It is on by
 default; `B70_SPEC_LOOKUP=0` turns it off for comparisons.
 
+Inside MTP on one card with one request (bf16 KV, the int8 output head), a long copied run is checked in a **wide
+verify**: one batched step of 16 or 32 rows, i.e. 15 or 31 copied tokens at once, instead of the head's 3. A run
+earns the wider list step by step: its first wide check is 16 rows; a check that keeps every token lets the next
+one take 32; a miss drops back to 16. Every row of the 32-row list is bitwise the 16-row list's row at the same
+position (the GEMM, the attention and the delta-net step are built so that a row's arithmetic does not depend on
+how many rows run beside it), so the wider list changes speed, never output. Sampled requests and `replica` keep
+the 16-row list.
+
 **Where each proposer runs.**
 
 | | one card | `replica` | `tp` | `pp` | several requests on a card |
