@@ -9,7 +9,7 @@
 // the MTP draft list, the prefill tail's head) is bit for bit what it was (the enum and the rule itself live in
 // kernels/linear_kind.h so the kernels-side name lists apply the same rule). `SmallM` binds gemm_sm / gemm_sm_i8w
 // for the shapes of kernels::kSmallMTuning and gemv / gemv_i8w for the rest (kernels::int4_linear_variant /
-// int8_linear_variant, src/kernels/kernels.h). Not a user flag and not an environment variable (the operator,
+// int8_linear_variant, src/kernels/kernels.h). Not a user flag and not an environment variable (decided
 // 2026-10-27): the only override is `CaptureOptions::force_linear`, for tests and probes that compare the two
 // kernels inside one list.
 //
@@ -57,7 +57,7 @@ struct CaptureOptions {
   // and probes clear it for the scalar part (the A/B, the grid forms above).
   bool dflash_attn_dpas = true;
   // The DPAS part's key split a head (df_attn_dpas.cl's KS: 1, 2 or 4). 4: the five attention parts 1.55 -> 0.50 ms;
-  // acceptance judged pooled (operator ruling 2026-11-14; spec 19 v3d Task 6, occupancy).
+  // acceptance judged pooled (spec 19 v3d Task 6, occupancy).
   uint32_t dflash_attn_ks = 4;
   // verify-cost-m8 probe only: a tap verify list binds gdn_step_slots_M<M>_N8_P1 (row 0's state stored alone - wrong
   // states, timing only).

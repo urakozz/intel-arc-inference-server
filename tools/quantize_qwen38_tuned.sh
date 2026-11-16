@@ -4,7 +4,7 @@
 #
 # Recipe:
 #   - auto-round = intel/auto-round main at AR_COMMIT (0.17.0), the version
-#     tools/quantize_kolibri1.sh uses (operator's ruling 2026-10-05). Until
+#     tools/quantize_kolibri1.sh uses. Until
 #     2026-10-06 this script pinned v0.14.2, because a later main's shard writer
 #     silently dropped the lm_head packing under --quant_lm_head. Re-checked on
 #     0.17.0 (tools/quantize/README.md, "AutoRound version"): THIS path - the

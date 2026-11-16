@@ -1,4 +1,4 @@
-// pf_gdn_intra.cl - phase 2 Task 3 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md):
+// pf_gdn_intra.cl - phase 2 Task 3:
 // `gdn_chunk`'s intra-chunk WY stages in ONE launch - A, T = (I + A)^-1, W / U and A2 - one
 // work-group per (v-head, 64-position sub-chunk), every sub-chunk in parallel. It replaces
 // pf_gdn_A, pf_gdn_solve, pf_gdn_wu and pf_gdn_A2_hilo (pf_gdn_wy.cl) and writes the scan's

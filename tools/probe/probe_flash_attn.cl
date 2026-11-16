@@ -1,6 +1,4 @@
 // probe_flash_attn - spec 6 P1: fused bf16 flash attention, one arm per -D set.
-// Contract and layouts: docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md.
-// Record: docs/probes/probe-flash-attn-2026-09-25.md.
 //
 //   Q   bf16 [C][24][256]    pf_q; q-head h = 6 j + l for kv head j
 //   Kc  bf16 [depth][4][256] one layer's K cache, depth = pos + C
@@ -18,7 +16,7 @@
 // with `exp`, never `native_exp`; P = exp(s - m) rounded to bf16 as the PV operand;
 // O / l at the end.
 //
-// Phase 3 Task 1 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase3.md): FA_Q_HEADS / FA_KV_HEADS (Ornith
+// Phase 3 Task 1: FA_Q_HEADS / FA_KV_HEADS (Ornith
 // 16 / 2, GQA 8, HPW 8) and EXP2 as src/kernels/prefill/pf_flash_attn.cl has them - at KT 64 RPW 8 QREG 0 EXP2 1
 // this is today's kernel text, so an arm that differs from it only in RPW / QREG can be compared bitwise. Unset
 // (every spec-6 arm): Qwen3.8's 24 / 4, `exp`. NOTE: RPW is the query rows a WORK-GROUP covers a head; a sub-group

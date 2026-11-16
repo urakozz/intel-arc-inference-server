@@ -27,9 +27,9 @@
 //     (last_logits.py, chunk 1000) moves those rows as far. They are printed as the worst.
 // The same bars hold against M = 1 decode (a different chain: recurrent GDN, fp32 q).
 //
-// **The f32 judge (operator ruling 2026-10-29).** With B70_SPLIT_REFS=<f32 dump>,<bf16 dump> (tools/box_validate/
+// **The f32 judge.** With B70_SPLIT_REFS=<f32 dump>,<bf16 dump> (tools/box_validate/
 // f32_refs.sh split: ornith_ref.py run --lean --dump-kv of ids[0, N), in f32 and in bf16) every engine run - the one
-// call, each split, decode - is held to "no further from f32 than the bf16 reference". Round 2 of the operator's
+// call, each split, decode - is held to "no further from f32 than the bf16 reference". Round 2 of the
 // 2026-10-31 rulings: by the near-miss gates' rule (forced_judge.h), not five strict metrics against one bf16 sample
 // - the last-row logits and the all-(layer, row) median, each a cosine distance to f32 at most kCosSlack (2) times
 // the bf16 reference's; fa0-3's worst row, p01 and GDN layer 0's state are one row's (or one state's) numbers,
@@ -217,7 +217,7 @@ Snap ref_snap(const std::string& path, uint32_t n) {
                 kGdnLayer * 4);
   return s;
 }
-// The judge's rule (header; operator 2026-10-31, round 2): the last-row logits' and the all-rows median's cosine
+// The judge's rule (header, round 2): the last-row logits' and the all-rows median's cosine
 // distance to f32 each at most kCosSlack times the bf16 reference's; the one-row metrics printed with their ratios.
 bool g_diagnostic = false;   // l0-int8 on a MoE model: printed, not gated
 bool no_further(const Result& r, const Result& b) {
@@ -337,8 +337,7 @@ int main(int argc, char** argv) {
   std::printf("prefill_split_test: backend %s, attention %s, N %u%s\n",
               runtime::prefill_backend_name(backend),
               runtime::prefill::attn_mode_name(runtime::prefill::attn_mode()), N,
-              g_diagnostic ? " - DIAGNOSTIC: l0-int8 on a MoE model, the f32 judge's verdicts not gated (operator "
-                             "2026-10-31)" : "");
+              g_diagnostic ? " - DIAGNOSTIC: l0-int8 on a MoE model, the f32 judge's verdicts not gated (2026-10-31)" : "");
 
   // Measured worst over splits 1..2049 (and, second, decode), long32k[0, 2600):
   //   l0       logits 0.999882 / 0.999911, fa0-3 0.999764 / 0.999810, median 0.99994 /

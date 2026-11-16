@@ -252,7 +252,7 @@ void check_hardware_rule() {
 }
 }  // namespace
 
-// --max-num-seqs (operator 2026-11-11): tp keeps one slot, pp one request, replica 2..8 (2 unasked); auto with N > 1
+// --max-num-seqs: tp keeps one slot, pp one request, replica 2..8 (2 unasked); auto with N > 1
 // is replica on two cards and one card's slots on one; 4 slots a card.
 void check_max_num_seqs() {
   cli::PipelineArgs a;

@@ -4,7 +4,7 @@
 // For each prompt of n ids and the engine's own greedy continuation cont[] (plan 8a's
 // dumps), the reference holds, for rows i < R, the head's depth-1 logits on
 // (h[n-1+i], ids[n+i] = cont[i]) at position n-1+i, attending over depth-1 keys of every
-// earlier row - with h the main model's post-final-norm hidden (docs/probes/probe-mtp §1).
+// earlier row - with h the main model's post-final-norm hidden.
 // The engine reaches the same state by prefilling the prompt and then teacher-forcing
 // cont[] one plain MTP step at a time (verify(0) + commit(0, cont[i+1])); draft(1) at
 // each i is the head on exactly that pair. Bar (spec §4 M1): per-row cosine >= 0.999
@@ -13,7 +13,7 @@
 // Also here: an engine loaded WITHOUT the head allocates no MtpBuffers and throws on
 // every MTP call (the "MTP off is today's engine" half of Task 1's contract).
 //
-// The f32 judge (operator ruling 2026-10-29): with B70_MTP_JUDGE=<dir> (tools/box_validate/f32_refs.sh ornith-mtp:
+// The f32 judge: with B70_MTP_JUDGE=<dir> (tools/box_validate/f32_refs.sh ornith-mtp:
 // <dir>/<name>.mtp.safetensors, the same rows from the f32 reference teacher-forced on the same continuation) a
 // row's verdict is taken against the f32 rows by the same rule - cosine >= 0.999 and the f32 argmax (its one-bf16-ulp
 // tie set, golden_common.h judge_row) among the top 2 - for the engine and for the bf16 reference alike, and the
@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
   }
   if (judge_dir) {
     ok = ok && judge_engine <= judge_bf16;
-    std::printf("M1 judged by the f32 reference %s (operator, 2026-10-29): the engine misses %zu rows, the bf16 "
+    std::printf("M1 judged by the f32 reference %s: the engine misses %zu rows, the bf16 "
                 "reference %zu\n", judge_dir, judge_engine, judge_bf16);
   }
   std::printf("M1: %zu rows, worst cosine %.6f, mean %.6f, top-1 agreement %zu/%zu -> %s\n",

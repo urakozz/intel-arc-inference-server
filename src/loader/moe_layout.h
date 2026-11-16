@@ -30,7 +30,7 @@
 // 557,056 = 143,163,392 B; 430,604,288 B per layer, 17.224 GB over 40 layers (derived).
 //
 // **The checkpoint naming this loader reads (the assumption 15a confirms).** No int4
-// Ornith exists yet (spec 15 decision 1). The proposed source is the operator's
+// Ornith exists yet (spec 15 decision 1). The proposed source is our
 // AutoRound W4A16 g64 sym export with GPTQ packing. AutoRound quantises nn.Linear
 // modules, so it UNFUSES transformers 5's 3D `mlp.experts.gate_up_proj [E][2I][H]` /
 // `mlp.experts.down_proj [E][H][I]` into one Qwen3_5MoeMLP per expert before

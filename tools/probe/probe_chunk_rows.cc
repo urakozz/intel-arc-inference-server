@@ -1,5 +1,4 @@
-// probe_chunk_rows - plan 5d P0 (docs/superpowers/plans/2026-10-27-spec5d-prefill-chunk-4096.md
-// Task 1): is the PRODUCTION prefill linear path cheaper per row at a 4096-row chunk than at two
+// probe_chunk_rows - plan 5d P0 Task 1: is the PRODUCTION prefill linear path cheaper per row at a 4096-row chunk than at two
 // 2048-row chunks? Qwen3.8's five int4 linear shapes, each through
 //   h8    pf_quant_had_K<K> once, then per 1024-column slab pf_requant_rot_L<l> + pf_gemm_i8
 //         (gate||up: pf_gemm_i8_SILU into the bf16 x row) - runtime/prefill/int8.cc's walk

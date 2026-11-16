@@ -1,4 +1,4 @@
-// pf_route.cl - phase 2 Task 6 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): the prefill's
+// pf_route.cl - phase 2 Task 6: the prefill's
 // bf16 GEMVs over a chunk (the MoE router || shared gate, the GDN a||b) with MORE ROWS and COLUMNS a work-group,
 // BITWISE pf_gemv_bf16.cl's pf_ab_proj (and so decode's gemv_bf16 row for row, spec 15c).
 //

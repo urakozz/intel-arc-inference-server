@@ -111,7 +111,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
               ibound, 1,
               {PtrArg(items), PtrArg(xg), PtrArg(nullptr), PtrArg(w.gate_up.as<uint32_t>() + size_t(E) * gu_words),
                PtrArg(h)});
-    // W4A8 (operator 2026-11-12, D1 revised) for the routed experts: the chunk's rows to int8 per token and 64-k
+    // W4A8 (D1 revised) for the routed experts: the chunk's rows to int8 per token and 64-k
     // group (pf_quant_g64, no rotation), gathered with their group scales, x the int4 blocks as the s4 DPAS
     // operand, int32 a group, fp32 rescaled by the block's group scale x the row's. A null W_sh skips the shared
     // expert's items.

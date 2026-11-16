@@ -22,12 +22,12 @@
 //      logits (moe_ref's formula), near-ties (kR2TieRel) excepted, weights within
 //      kR2WeightRel - ornith_decode_test's R2, on the rows a prefill routed.
 //
-//   With `--judge=<f32 dir>` (operator, 2026-10-23 and 2026-10-28): 6 takes the f32 dump's router
+//   With `--judge=<f32 dir>` (2026-10-23 and 2026-10-28): 6 takes the f32 dump's router
 //   logits, a one-bf16-ulp logit near-tie, and passes when the prefill is no further from f32 than
 //   the bf16 golden (its own routes judged beside); 4 is printed, not gated; a determined row of 5
 //   where prefill and decode disagree goes to the judge when decode's ids so far are the golden's.
 //
-//   l0-int8 on this MoE model (operator ruling 2026-10-31, round 2): the backend stays opt-in and 4-6 - its accuracy
+//   l0-int8 on this MoE model (round 2): the backend stays opt-in and 4-6 - its accuracy
 //   against decode and f32 - are DIAGNOSTIC (printed with their bars, not gated): 8-bit activations cost routing
 //   accuracy (R2 1314 differing sets vs the bf16 golden's 1140) that no int8 scheme measured won back. 1-3 (the
 //   walk, determinism, chunking: mechanics) still gate. Ornith's default prefill is l0.
@@ -210,12 +210,11 @@ int main(int argc, char** argv) {
   eng.prepare_prefill();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   const runtime::MoeScratchLayout dml = runtime::moe_scratch_layout(d);
-  // Operator ruling 2026-10-31 (round 2, the header): l0-int8 on a MoE model - 4-6 printed, not gated.
+  // Ruling 2026-10-31 (round 2, the header): l0-int8 on a MoE model - 4-6 printed, not gated.
   const bool diagnostic = backend == runtime::PrefillBackend::L0Int8 && d.is_moe();
   std::printf("ornith_prefill_test: backend %s, %s%s\n", runtime::prefill_backend_name(backend),
               eng.memory_line().c_str(),
-              diagnostic ? "\n  DIAGNOSTIC: l0-int8 on a MoE model - sections 4-6 printed, not gated (operator "
-                           "2026-10-31)" : "");
+              diagnostic ? "\n  DIAGNOSTIC: l0-int8 on a MoE model - sections 4-6 printed, not gated (2026-10-31)" : "");
   // Plan 2026-11-12 Task 1: every layer's route rows after a real prefill of the first two chunks of --dump-ids
   // (chunks of 2048, the second continuing the first), for probe_moe_prefill: "B70ROUTE", u32 version 1, layers,
   // tokens, words (32), then [layers][tokens][32] u32. No gate runs in this mode.
@@ -336,7 +335,7 @@ int main(int argc, char** argv) {
       dec_tie.push_back(decode_tie(lg));
       dec_ids.push_back(eng.generate(1)[0]);
     }
-    // With a judge (operator, 2026-10-23 / 2026-10-28): a determined row where prefill and decode disagree is
+    // With a judge (2026-10-23 / 2026-10-28): a determined row where prefill and decode disagree is
     // decided by the f32 reference when decode's ids so far are the golden's - the judge's context - and passes
     // when the judge (its one-ulp rule, golden_common.h judge_row) accepts the prefill's id.
     std::unique_ptr<golden::Golden> gg;
@@ -396,9 +395,9 @@ int main(int argc, char** argv) {
   } else if (judge_dir.empty()) {
     std::printf("   (DIAGNOSTIC: l0-int8 on a MoE model - recorded, not gated)\n");
   } else {
-    // Operator, 2026-10-28: the routes are judged against the f32 reference (section 6); prefill against decode
+    // the routes are judged against the f32 reference (section 6); prefill against decode
     // - two bf16 paths, each as far from f32 as the bf16 golden - is printed, not gated.
-    std::printf("   (printed, not gated: with the f32 judge section 6 gates the prefill's routes, operator 2026-10-28)\n");
+    std::printf("   (printed, not gated: with the f32 judge section 6 gates the prefill's routes)\n");
   }
 
   // ---- 6. R2 on the prefill path ------------------------------------------------------------
@@ -490,7 +489,7 @@ int main(int argc, char** argv) {
     } else if (judge_dir.empty()) {
       std::printf("   (DIAGNOSTIC: l0-int8 on a MoE model - recorded, not gated)\n");
     } else {
-      // Operator, 2026-10-28: judged by the f32 reference, the prefill passes when its distance to f32 is no larger
+      // judged by the f32 reference, the prefill passes when its distance to f32 is no larger
       // than the bf16 golden's own: the differing sets (the matched weights' worst error is printed beside, not gated -
       // one row's number, where the sets are the measure the ruling names).
       const bool ok = r2.bad <= r2_ref.bad;
@@ -499,11 +498,11 @@ int main(int argc, char** argv) {
       for (uint32_t l = 0; l < d.layers; ++l)
         std::printf(" L%u %llu/%llu", l, (unsigned long long)bad_l[l], (unsigned long long)bad_ref_l[l]);
       std::printf("\n");
-      std::printf("6. R2 gate, judged by the f32 reference %s (operator, 2026-10-28): prefill %llu differing sets vs "
+      std::printf("6. R2 gate, judged by the f32 reference %s: prefill %llu differing sets vs "
                   "the bf16 golden's %llu, weights worst %.3e vs %.3e%s\n", judge_dir.c_str(),
                   (unsigned long long)r2.bad, (unsigned long long)r2_ref.bad, double(r2.worst_w),
                   double(r2_ref.worst_w), ok ? "" : diagnostic ? "  (DIAGNOSTIC: l0-int8 on a MoE model - recorded, "
-                                                                "not gated, operator 2026-10-31)" : "  ** FAIL **");
+                                                                "not gated)" : "  ** FAIL **");
       if (!diagnostic) CHECK(ok);
     }
   }

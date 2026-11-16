@@ -1,6 +1,6 @@
 // attn_verify_dpas.cl - spec 28c: the verify step's attention on DPAS, in v2's blocking and partials.
-// Spec: docs/superpowers/specs/2026-10-31-spec28c-verify-attention-by-shape-design.md (§2, §8).
-// Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md (Task 2).
+// (§2, §8).
+// (Task 2).
 //
 // `attn_verify_dpas` (bf16 KV) / `attn_verify_dpas_kv8` (int8 KV, KV8 = 1) replace attn_v2.cl's
 // `attn_decode_v2` / kv8.cl's `attn_decode_v2_kv8` in an M >= 2 verify list when the capture's rule
@@ -62,7 +62,7 @@
 // PAIR = 1 (3l: who computes what - every value, operand and order above is unchanged)
 // ---------------------------------------------------------------------------------------------
 // KT 32, DSPLIT 128 (two key atoms a tile, two sub-groups a row block). The profile at 150k, M = 4
-// (docs/probes/probe-longctx-decode-2026-11-09.md, 3l) found the walk latency-bound: one 12- or 24-
+// (3l) found the walk latency-bound: one 12- or 24-
 // sub-group work-group a core, every row block's sub-groups reading (and, KV8, widening) the whole
 // V tile, the int8 K by one gather a key and atom, and ~100 registers spilled. Per tile step:
 //   S: sub-group ds of row block rb computes key atom ds only (its DPAS chain as before), scales and

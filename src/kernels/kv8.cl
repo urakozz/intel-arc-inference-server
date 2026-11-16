@@ -1,4 +1,4 @@
-// kv8.cl - spec 12b: the int8 KV cache, the operator's `rotkv` scheme (spec 12 §8), every
+// kv8.cl - spec 12b: the int8 KV cache, the `rotkv` scheme (spec 12 §8), every
 // kernel that writes or reads it. ONE source, built per family by a define (pf_int8.cl's
 // arrangement), so the rotation, the quantiser and the scale format are one piece of text:
 //

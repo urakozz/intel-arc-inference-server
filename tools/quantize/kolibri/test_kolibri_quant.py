@@ -168,7 +168,7 @@ def test_restore_and_check():
             new[f][k] = new[f][k].clone() + 0.125
         assert any("differs from the bf16 source" in e for e in mutate(bias_changed))
 
-        def shared_bf16(new, _):   # the operator's export quantises the shared experts (ruling 2026-10-31)
+        def shared_bf16(new, _):   # our export quantises the shared experts (ruling 2026-10-31)
             f, k = find(new, "layers.0.mlp.shared_experts.up_proj.qweight")
             base = k[:-len(".qweight")]
             for suf in (".qweight", ".scales", ".qzeros"):

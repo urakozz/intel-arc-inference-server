@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # On the box, from the branch tree's root: a short turn deep in a served session (3l's short-chunk path, a
-# prefix cache hit) on main's b70-serve against this tree's, one card, the server's own chunk cap
-# (record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md, section 6). llama-benchy at --depth D with the
+# prefix cache hit) on main's b70-serve against this tree's, one card, the server's own chunk cap.
+# llama-benchy at --depth D with the
 # prefix cache: the timed pp is the short turn after the cached context.
 # Usage: qwen_chunk4096_turn.sh CARD MAIN_TREE ROUNDS [DEPTH] [PP] ["SERVER ARGS"]
 # Takes `tools/gpu_lock.sh card CARD` itself, once for the whole series.

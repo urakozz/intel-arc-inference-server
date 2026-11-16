@@ -15,7 +15,7 @@
 //   3. EVERY expert block (gate||up interleave16 and down), word by word and scale by scale
 //      against ITS expert's tensors, block e at e x kol_layer_bytes(d).gate_up / experts
 //      (plan 15c's Review Focus 2: test expert slices individually);
-//   4. the shared expert's int4 blocks (operator ruling 2026-10-31: the operator's export quantises it), word
+//   4. the shared expert's int4 blocks (our export quantises it), word
 //      by word and scale by scale as a routed expert's;
 //   5. the router: rows 0..7 the checkpoint's, rows 8..15 (of router_n 16) zero;
 //   6. expert_bias widened exactly, zero past the experts; the norms widened verbatim (plain w);

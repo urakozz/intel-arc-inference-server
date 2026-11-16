@@ -28,9 +28,9 @@ shared expert bf16 (spec 21 v2 §2, `loader::q4_mtp_desc`), so those two are in 
 experts come out int4 g64 per expert, the rest bf16, declared in `extra_config`.
 
 Low CPU memory: the fused-MoE original is built as a meta skeleton and each block materialised from the
-checkpoint, tuned, written to the export and freed - except the PLE table, see ple_table_from_file. Calibration (operator, 2026-11-12): nvidia/OpenCodeInstruct through the checkpoint's chat template (each row a
+checkpoint, tuned, written to the export and freed - except the PLE table, see ple_table_from_file. Calibration: nvidia/OpenCodeInstruct through the checkpoint's chat template (each row a
 user turn and the assistant's answer, ending in <|im_end|>; the per-sample BOS/EOS reset is upstream, #2591) -
-the model is for agentic coding. The pinned commit is the operator's fork commit whose `calib_dataset.py` reads the
+the model is for agentic coding. The pinned commit is our fork commit whose `calib_dataset.py` reads the
 dataset's cached parquet shards (`_load_cached_parquet_dataset`); its fallback is a hub download, which the offline
 environment turns into an error. Before AutoRound starts, the cache must hold all of the dataset's
 `data/train-*.parquet` shards (OPENCODE_SHARDS), or this refuses - the run can never fall back to pile-10k.

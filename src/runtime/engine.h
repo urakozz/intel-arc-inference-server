@@ -538,7 +538,7 @@ class Engine {
     std::vector<CapturedStep> draft_steps;    // [kMaxDraft], MTP on only
     std::vector<CapturedStep> draft_prob_steps;   // open-work 13: the same ending in draft_prob, slot 0 of one slot
     std::vector<CapturedStep> verify_steps;   // [M - 1] for M = 1..kSlots
-    // Spec 28c (§3, the operator's decision 3 of 2026-10-31: two lists per M are acceptable): where the measured
+    // Spec 28c (§3, decided 2026-10-31: two lists per M are acceptable): where the measured
     // verify-attention table switches an M to DPAS at a depth (runtime/verify_attn.h, a finite dpas_from > 1), the
     // list at M is captured twice - verify_steps by the rule at row 0's key count 1 (v2) and verify_deep with DPAS
     // bound - and verify() submits the deep one when row 0's keys (pos + 1) reach verify_deep_from. Null / never

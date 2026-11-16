@@ -38,9 +38,9 @@ them.
 |---|---|---|
 | `quantize_qwen38_tuned.sh` | **0.17.0, intel/auto-round main `6afaecdbe4092dc803f3e91026fe81a65b64b372`** (`AR_COMMIT`) + `auto-round-local.patch` | the calibrated path packs `lm_head` on 0.17.0 (checked below) |
 | `quantize_qwen38_rtn.sh` | **0.17.0 @ `6afaecdb` + `auto-round-local.patch`, with `--disable_low_cpu_mem_usage`** (since 2026-10-06; 0.14.2 before) | that flag takes the path that packs `lm_head`; the default low-CPU-memory RTN path still drops it on 0.17.0 (below). Holds the whole bf16 model in RAM: refuses below `RTN_MIN_RAM_GB` (64) available |
-| `quantize_kolibri1.sh` | 0.17.0 @ `6afaecdb` | the operator's ruling of 2026-10-05; Kolibri keeps lm_head bf16, so the bug is not exercised |
+| `quantize_kolibri1.sh` | 0.17.0 @ `6afaecdb` | the ruling of 2026-10-05; Kolibri keeps lm_head bf16, so the bug is not exercised |
 | `quantize_qwen38_mxfp4.sh` | none - llm-compressor `model_free_ptq` | only borrows the auto-round venv's python |
-| `quantize/quantize_qwen4exp.sh` (Flash-Next) | **the LATEST of the operator's fork: the hash branch `local-patches-v2` of `~/auto-round` (`AR_REPO`, `AR_REF`) has when the run starts** (2026-11-13: `8186d8b66af4bd56c9c352951786216bff7281f5` = intel/auto-round main `42db5d3a` + the cached-OpenCodeInstruct commit; version string 0.17.0), **no patch file** (`AR_PATCH=0`); the resolved hash and its upstream base go into the export's README and `qwen4exp_recipe.json`; `tools/quantize/ar_latest.sh` | per-block resume, the vectorised QSA indexer, its own MTP export, OpenCodeInstruct from the cache; the old pin `a6cf7487` (= `b58069ea` + the same commit) is the branch `pin-a6cf7487-2026-11-13`; see "Qwen3.8-Flash-Next: our AutoRound export" below |
+| `quantize/quantize_qwen4exp.sh` (Flash-Next) | **the LATEST of our fork: the hash branch `local-patches-v2` of `~/auto-round` (`AR_REPO`, `AR_REF`) has when the run starts** (2026-11-13: `8186d8b66af4bd56c9c352951786216bff7281f5` = intel/auto-round main `42db5d3a` + the cached-OpenCodeInstruct commit; version string 0.17.0), **no patch file** (`AR_PATCH=0`); the resolved hash and its upstream base go into the export's README and `qwen4exp_recipe.json`; `tools/quantize/ar_latest.sh` | per-block resume, the vectorised QSA indexer, its own MTP export, OpenCodeInstruct from the cache; the old pin `a6cf7487` (= `b58069ea` + the same commit) is the branch `pin-a6cf7487-2026-11-13`; see "Qwen3.8-Flash-Next: our AutoRound export" below |
 | `quantize/quantize_dflash.sh` (the DFlash 2 drafter) | the same: the latest `local-patches-v2` head, hash and upstream base recorded in `dflash_recipe.json` and the README, `AR_PATCH=0` | the calibration rows are our own tensors, so neither fix of the patch is on its path; see "The DFlash 2 drafter" below |
 
 **Latest, not a pin (Flash-Next and DFlash scripts).** `ar_latest.sh` runs `git rev-parse` on `AR_REF` in `AR_REPO` once when `start` / `run` begins and exports the 40-hex hash as `AR_COMMIT` (the detached run builds that same hash even if the branch moves); it never fetches, pulls or rebases `~/auto-round`. `ar_pin.sh` keys the package cache on the hash (`~/.cache/auto-round-<hash8>-plain-pkg`), so a moved branch rebuilds. A run records its hash in `ar_commit` (Flash-Next: `<OUT>/ar_commit`; DFlash: `<OUT>.work/ar_commit`) and never switches: `start` or `run` on a run whose branch has moved refuses and names the recorded hash; `AR_COMMIT=<recorded hash>` resumes on the old build (an old run with progress but no record needs the same).
@@ -116,7 +116,7 @@ immediately; it quantises `lm_head` as a "remaining layer" (`compressors/orchest
 so `ShardWriter.finalize` writes the plain `lm_head.weight` from the state dict. The calibrated
 path turns immediate packing off when a quantised layer lives outside the blocks and packs every
 layer at export. Hence: the tuned script moved to 0.17.0, and the RTN script moved with `--disable_low_cpu_mem_usage`
-(operator, 2026-10-06), which packs at export like the calibrated path. It holds the whole model in
+, which packs at export like the calibrated path. It holds the whole model in
 RAM (~54 GB bf16 for the 27B; the box has ~128 GB) and has not run on the 27B yet - the checker
 refuses the export if `lm_head` comes out unpacked. Not exercised on CPU: XPU; the 27B's GDN layers and MTP head (the
 scripts' checker guards the real run). On a CPU without bf16, both versions write unpacked tensors
@@ -158,15 +158,15 @@ needs an `auto_round*` format):
 The loader asserts sym / g64 / gptq, so those are not optional. A fresh
 checkpoint needs its own `oracle-out-*` golden set before it can gate anything.
 
-Also present in 0.16.0 and relevant to the W4A8 probe
-(`docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md`): `--act_bits`,
+Also present in 0.16.0 and relevant to the W4A8 probe:
+`--act_bits`,
 `--act_group_size`, `--act_data_type`, `--disable_act_dynamic`.
 
 ## Kolibri-1 (spec 20 §3.1): `tools/quantize_kolibri1.sh`
 
 One command for `Aleph-Alpha/Kolibri-1-BF16` -> `urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ`, with
 the recipe of spec 20 §3.1 encoded stage by stage (helpers in `kolibri/`, facts and checks in
-`docs/probes/probe-kolibri-2026-10-05.md`):
+the stage list below):
 
 | stage | what | helper |
 |---|---|---|
@@ -195,7 +195,7 @@ MODEL=Aleph-Alpha/Kolibri-1-BF16 OUT=/data/kolibri1-w4g64 DEVICE=cuda NSAMPLES=1
 tools/quantize_kolibri1.sh --dry-run          # the exact commands, nothing run
 ```
 
-**AutoRound for Kolibri is NOT the Qwen3.8 pin.** The operator's ruling (2026-10-05): intel/auto-round
+**AutoRound for Kolibri is NOT the Qwen3.8 pin.** The ruling (2026-10-05): intel/auto-round
 main at `6afaecdbe4092dc803f3e91026fe81a65b64b372` (0.17.0), the `AR_COMMIT` in the script, installed
 into `VENVPY` on first use from `AR_SRC` (a clean checkout at that commit - verified - or the pip
 git URL); `kolibri_recipe.json` and the card record it. Both Qwen3.8 scripts use the same commit
@@ -237,12 +237,12 @@ asymmetric config, the KL arithmetic, the card's choice, the prompt lists).
 
 ## Qwen3.8-Flash-Next: our AutoRound export (`tools/quantize/quantize_qwen4exp.sh`, spec 21 v2 §2)
 
-The operator's rulings (2026-11-12): our own export of the bf16 original `Qwen/Qwen3.8-Flash-Next` (360 GB), int4 g64
+The rulings (2026-11-12): our own export of the bf16 original `Qwen/Qwen3.8-Flash-Next` (360 GB), int4 g64
 symmetric everywhere it quantises (the routed and shared experts, QSA q/k/v/o, GDN qkv / z / out, `lm_head`, the MTP
 head's routed experts), **tuned** (sign-SGD, 200 iterations, 128 x 2048 rows, batch 8 - the Qwen3.8 tuned recipe's
 sizes - of **nvidia/OpenCodeInstruct** through the checkpoint's chat template: the model is for agentic coding,
-operator 2026-11-12), **no comparison with Intel's checkpoint** - quality is ours against the bf16
-original and the f32 judge. The operator runs it on the box; the commands are in docs/open-work.md's "Quantise
+), **no comparison with Intel's checkpoint** - quality is ours against the bf16
+original and the f32 judge. The owner runs it on the box; the commands are in docs/open-work.md's "Quantise
 Flash-Next" row.
 
 ### The commands (on the box, in the repo tree)
@@ -286,7 +286,7 @@ tools/quantize/quantize_qwen4exp.sh selftest         # the whole pipeline on the
 
 ### What the AutoRound of `~/auto-round` needed (each found on the tiny model or the real-width probe)
 
-The operator's clone `~/auto-round` (branch `local-patches-v2`; rebased 2026-11-13 to upstream main `42db5d3a` + one
+Our clone `~/auto-round` (branch `local-patches-v2`; rebased 2026-11-13 to upstream main `42db5d3a` + one
 local commit, head `8186d8b6`; before that `b58069ea` + `a6cf7487`, now the branch `pin-a6cf7487-2026-11-13`): the local commit's
 `calib_dataset.py` reads OpenCodeInstruct's cached parquet shards (`_load_cached_parquet_dataset`, before
 its hub fallback) and the model loaders try the local snapshot first. The script builds the branch head through
@@ -394,7 +394,7 @@ stages ~1.5 h (estimated): **~48 h on card 1**, e.g. Friday evening to Sunday ev
 ~10 GB + ~10 GB of runtime, ~55 GB, plus the PLE table's touched pages (page cache, reclaimable) - under the 115 GB
 cap.
 
-**Re-measure on the real model (the operator):** `start`, then `status` after the first block (~1 h): AutoRound's bar
+**Re-measure on the real model:** `start`, then `status` after the first block (~1 h): AutoRound's bar
 prints the seconds per block and its own time left; the `-- seconds per finished block` line lists each one. A
 block far above ~60 min, or RAM in `status` near 115 GB, is the moment to `stop` (the run resumes later).
 

@@ -1,5 +1,5 @@
-# Sourced by quantize_qwen4exp.sh and quantize_dflash.sh before ar_pin.sh: the LATEST AutoRound of the operator's
-# clone instead of a fixed pin (operator 2026-11-13). The Qwen3.8 scripts do not use this; they keep ar_pin.sh's pin.
+# Sourced by quantize_qwen4exp.sh and quantize_dflash.sh before ar_pin.sh: the LATEST AutoRound of our
+# clone instead of a fixed pin. The Qwen3.8 scripts do not use this; they keep ar_pin.sh's pin.
 #
 # In:  AR_REPO the clone (default ~/auto-round); AR_REF the branch to build (default local-patches-v2 = upstream
 #      intel/auto-round main + our one local commit: cached OpenCodeInstruct parquet, local-only snapshot load);

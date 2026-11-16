@@ -431,7 +431,7 @@ void test_slabs() {
           CHECK_EQ(s[size_t(k) * ns + c], n0 + c < N ? wr[size_t(n0 + c) * K + k] : uint16_t(0));
     }
   }
-  // the shared expert's block 384 (operator ruling 2026-10-31: int4, its own layout-1 block): dequantised exactly
+  // the shared expert's block 384 (int4, its own layout-1 block): dequantised exactly
   // as a routed expert's block holding the same words
   std::mt19937 rng(7);
   std::vector<uint32_t> gb(kr::gate_up_block_words()), db(kr::down_block_words());

@@ -88,7 +88,7 @@ _int8 = _load("int8_sim")   # the quantisation-aware f32 judges (run --lm-head i
 
 
 def sim_int8_prefill(model, tc, lazy):
-    """spec 5's l0-int8 prefill on the prompt forward (operator ruling 2026-10-23, the judge of
+    """spec 5's l0-int8 prefill on the prompt forward (the judge of
     prefill_gate_ornith_l0-int8*): every linear the engine's h8 path takes - GDN in_proj_qkv and
     in_proj_z (the engine's fused qkv||z), out_proj; FA q / k / v (its fused qkv), o_proj; the
     routed experts' gate||up and the shared expert's gate / up (one int8 gate||up array, block 256
@@ -460,7 +460,7 @@ def mtp_head(snapshot: str, tc, model, experts: str):
     L = "mtp.layers.0."
     sd: dict[str, torch.Tensor] = {}
     # The model's dtype: bf16, or float32 under `run --dtype f32` (the same bf16 values widened exactly - the M1 f32
-    # judge, operator ruling 2026-10-29).
+    # judge, ruling 2026-10-29).
     gate_up = torch.empty(E, 2 * I, tc.hidden_size, dtype=tc.dtype)
     down = torch.empty(E, tc.hidden_size, I, dtype=tc.dtype)
     conv = rtn_dequant if experts == "rtn" else (lambda w: w)
@@ -543,7 +543,7 @@ def mtp_head(snapshot: str, tc, model, experts: str):
 def f32_gemms() -> None:
     """--gemm f32: every bf16 F.linear / torch._grouped_mm / matmul / bmm runs as an fp32 matmul of the bf16 values, rounded to bf16
     once - torch's bf16 GEMM up to the accumulation order (an ulp in places). For CPUs without bf16 units, where
-    torch emulates the bf16 GEMM and a long prompt's bf16 twin takes hours (operator ruling 2026-10-31: the near-miss
+    torch emulates the bf16 GEMM and a long prompt's bf16 twin takes hours (the near-miss
     gates count the bf16 reference's own misses against the f32 judge)."""
     lin, gmm = torch.nn.functional.linear, getattr(torch, "_grouped_mm", None)
     mm, bmm, tmm = torch.matmul, torch.bmm, torch.Tensor.__matmul__
@@ -656,7 +656,7 @@ def cmd_run(a) -> None:
             print(f"  first decode step {time.time() - t2:.1f}s", flush=True)
     print(f"greedy {a.gen}: {time.time() - t2:.1f}s -> {tokens}")
     if a.lean:
-        # Operator ruling 2026-10-29's long-prompt judges: logits [1 + gen][V] (row 0 = the prompt's last, row j + 1
+        # Ruling 2026-10-29's long-prompt judges: logits [1 + gen][V] (row 0 = the prompt's last, row j + 1
         # the forward that consumed tokens[j]), the tokens, and with --dump-kv the end state - every GDN layer's
         # recurrent state and every FA layer's cached K / V rows (kv.k.L<i> / kv.v.L<i> [T][kv heads x head dim],
         # post-norm and post-RoPE, the engine's cache rows).
@@ -793,12 +793,12 @@ def main() -> None:
     r.add_argument("--gemm", default="bf16", choices=["bf16", "f32"], help="f32: the bf16 run's GEMMs as fp32 matmuls "
                    "of the bf16 values, rounded once (f32_gemms) - a bf16 twin on a CPU without bf16 units")
     r.add_argument("--lean", action="store_true", help="logits of the prompt's last row and the generated rows, the "
-                   "tokens - nothing per layer (a long prompt's judge, operator ruling 2026-10-29)")
+                   "tokens - nothing per layer (a long prompt's judge, ruling 2026-10-29)")
     r.add_argument("--dump-kv", action="store_true", help="with --lean: the GDN states and the FA layers' K / V rows")
     # The generated steps consume these ids instead of the argmax (`tokens` then records them):
     # the control's rows line up with another golden file's rows, decision row for decision row.
     r.add_argument("--force", help="file of whitespace-separated ids to teacher-force (>= --gen)")
-    # Quantisation-aware f32 judges (operator ruling 2026-10-23, tools/oracle/int8_sim.py), --dtype f32 only:
+    # Quantisation-aware f32 judges (tools/oracle/int8_sim.py), --dtype f32 only:
     # the logits through the engine's per-row int8 head; the prompt forward through spec 5's int8 linears.
     r.add_argument("--lm-head", choices=["bf16", "int8"], default="bf16")
     r.add_argument("--sim-int8-prefill", action="store_true")

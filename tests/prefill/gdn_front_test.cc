@@ -1,4 +1,4 @@
-// Phase 2 Task 2 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): pf_gdn_front.cl - the GDN
+// Phase 2 Task 2: pf_gdn_front.cl - the GDN
 // front's conv1d + SiLU and q / k l2norm in one launch - against the two-launch walk it replaces in Ornith's
 // gdn_chunk (pf_gdn_seed, pf_gdn_conv, pf_gdn_l2norm vs pf_gdn_seed, pf_gdn_front), every byte of xb and of the
 // conv ring, at Ornith's heads (16 k / 32 v), C = 2048 / 37 / 1 at pos 0 and a pos past the ring's wrap.

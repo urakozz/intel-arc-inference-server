@@ -80,7 +80,7 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 // buffer (PrefillScratch, Int8State's xq / xs, MTP's prefill hidden rows, a drafter's tap
 // staging) has that many rows. 4096 costs ~0.70 GB more scratch on Qwen3.8 (~0.76 GB with
 // MTP on l0-int8), which comes out of what auto can give the KV cache; the CLIs choose it
-// by prefill_chunk_cap_that_fits (operator ruling (i): context first).
+// by prefill_chunk_cap_that_fits (context first).
 struct PrefillPath {
   bool prefill = true;
   PrefillBackend backend = PrefillBackend::L0;
@@ -153,7 +153,7 @@ constexpr uint32_t kMinAutoMaxLen = 4096;
 // own allocations, the kernel modules and command lists (decode, MTP draft / verify,
 // prefill), the int8 sign tables, Int8State's per-weight colmax temporaries, the
 // allocator's slack. An estimate, NOT a measurement: the box has to confirm or tune
-// it (docs/superpowers/plans/box-validation-queue.md).
+// it.
 constexpr double kDefaultReserveGb = 1.5;
 
 // The largest multiple of kMaxLenQuantum, at most `cap` (the trained context),
@@ -165,7 +165,7 @@ uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_
                            const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
                            KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
-// Plan 5d, operator ruling (i) of 2026-10-27 (context first): the chunk cap a session at
+// Plan 5d, ruling (i) of 2026-10-27 (context first): the chunk cap a session at
 // `max_len` runs - PrefillScratchDims::kCMax when the model allows it
 // (check_prefill_chunk_cap) and the plan at max_len with that cap still fits with the
 // reserve, else kCDefault. `path.chunk_cap` is ignored (both are tried). Under
@@ -197,7 +197,7 @@ MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>&
                       const PrefillPath& path = {}, const DraftVocabPlan& dv = {}, KvCache kv = default_kv_cache(),
                       const DrafterPlan& drafter = {});
 
-// --max-num-seqs N's layout on a card (operator 2026-11-11; spec 13 §11.2's shape): slot 0 at `slot0`, then
+// --max-num-seqs N's layout on a card (spec 13 §11.2's shape): slot 0 at `slot0`, then
 // seqs - 1 slots of SlotDims::kShortLen positions.
 std::vector<uint32_t> slot_layout(uint32_t slot0, uint32_t seqs);
 // The largest slot 0 - a multiple of kMaxLenQuantum, at most `cap` (the trained context) - whose

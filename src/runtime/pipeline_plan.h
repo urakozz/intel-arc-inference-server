@@ -129,7 +129,7 @@ inline PrefillPath pp_no_prefill() {
 // Spec 16d (`PpExtras`, b70-serve --parallel pp and MTP across the split; the overloads below take
 // it, the ones without are PpExtras{} and unchanged):
 //   mtp   the MTP head on the last device (spec 16 §3.1): its weights (PpWeights::mtp) and
-//         a REPLICA of the embedding (the operator's choice, as 16b's placement anticipated:
+//         a REPLICA of the embedding (as 16b's placement anticipated:
 //         the drafts and the head's KV fill gather embed rows of ids produced on device 1) in
 //         `model`; MtpBuffers (its control, the verify slots of ITS GDN layers, the head's KV
 //         layer, hh / dh, the draft logits) in decode_state; the draft vocabulary's head in

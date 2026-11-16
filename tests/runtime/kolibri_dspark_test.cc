@@ -1,14 +1,14 @@
-// Kolibri DSpark on the cards (NOT YET RUN - waits for the operator's first card run, after Flash-Next): the real Kolibri-1 on two
+// Kolibri DSpark on the cards (NOT YET RUN - waits for the first card run, after Flash-Next): the real Kolibri-1 on two
 // cards (int8 head, as b70-serve runs it) with the DSpark drafter (intuit/Kolibri-1-dspark, bf16) on device 1, through
 // b70-serve's own glue (cli/kolibri_spec.h attach_drafter, cli::kolibri::KolibriEngineAdapterT's step_many).
 //
 //   1. The drafter beside the engine: its bytes, its key, the snapshot's share (the target's state + the 20,971,520 B ring).
 //   2. Greedy is lossless (D2): per prompt, 256 ids by step_many at --spec-max 7 against 256 plain ids of a plain engine -
 //      token for token. A divergence prints its position and the plain row's top-2 margin (the golden tie rule's input,
-//      docs/14-golden-gate.md: the operator judges a near-tie) and FAILS.
+//      docs/14-golden-gate.md: a near-tie is judged by hand) and FAILS.
 //   3. The drafter works: the accepted drafts per verify, printed per prompt (the model card's MT-Bench-like mean is 2.98 tokens
 //      a verify at K 7 on vLLM); a mean below 1.2 tokens a verify FAILS - the taps, the anchor-first rows or the Markov walk
-//      are wrong then (TODO(card): the operator sets the real bar from this run).
+//      are wrong then (TODO(card): set the real bar from this run).
 //   4. A sampled request (T 0.7, seeded) runs and is reproducible; every id a defined token.
 // Arguments: <Kolibri-1 snapshot> <DSpark snapshot> [prompt .ids files...]. SKIP 77 without either checkpoint or two cards.
 #include <algorithm>

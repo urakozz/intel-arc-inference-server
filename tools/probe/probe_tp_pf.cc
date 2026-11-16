@@ -1,4 +1,4 @@
-// probe_tp_pf - spec 17c step 1 (plan 17c, Review 2026-11-10 point 3; operator decision D8): the rate of tensor-
+// probe_tp_pf - spec 17c step 1 (plan 17c, Review 2026-11-10 point 3; decision D8): the rate of tensor-
 // parallel prefill's crossing on two B70s. A TP prefill chunk of C rows adds the two cards' halves after every
 // out_proj / o_proj / down: 128 crossings a Qwen3.8 chunk, each C x 5120 fp32 (40 MiB at C = 2048) each way, or half
 // that in bf16. The decode probe (17a) measured M <= 8 only; this measures the chunk-sized crossing.

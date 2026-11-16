@@ -112,8 +112,7 @@ weights with AutoRound, in groups of 64 rather than the usual 128 - better accur
 # Full context (262,144) on one 32 GB card: the MTP head (the default) + the int8 KV cache
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
     --prefix-split-last \
-    --kv-cache int8 \
-    --prefill-backend l0-int8
+    --kv-cache int8
 
 
 # Ornith 1.5 35B-A3B: its own MTP head, the default prompt pass

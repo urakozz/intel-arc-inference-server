@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One command: Kolibri-1 (Aleph-Alpha/Kolibri-1-BF16) -> int4 g64 symmetric AutoRound, GPTQ export,
-# German-first calibration - spec 20 §3.1, the operator's ruling, encoded stage by stage.
+# German-first calibration - spec 20 §3.1, the ruling, encoded stage by stage.
 #
 #   tools/quantize_kolibri1.sh [--only STAGE | --from STAGE] [--dry-run] [--list]
 #
@@ -39,7 +39,7 @@
 #
 # The AutoRound version is NOT the Qwen3.8 scripts' pinned v0.14.2: Kolibri uses auto-round main at
 # AR_COMMIT (0.17.0), checked on a tiny Kolibri: per-expert qweight/qzeros/scales complete, GPTQ v1
-# layout, accepted by the check stage (docs/probes/probe-kolibri-2026-10-05.md, tools/quantize/README.md).
+# layout, accepted by the check stage.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

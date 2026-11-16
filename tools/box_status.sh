@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# What the box is doing, read-only, for the operator's own terminal (no model, no tokens):
+# What the box is doing, read-only, for your own terminal (no model, no tokens):
 #   tools/box_status.sh            one snapshot, from the Mac (ssh through tools/box.env) or on the box
 #   tools/box_status.sh --watch N  a fresh snapshot every N seconds (macOS has no `watch`)
 # Shows: the GPU locks, the jobs holding a card or the box (and since when), the jobs waiting for one,

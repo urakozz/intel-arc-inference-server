@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Open-work 28 step 2: what a 16-row verify would cost on one card, from its parts (docs/probes/
-# probe-lookup-wide-verify-2026-11-14.md). From the tree root, after the build; each GPU command takes its own card
+# Open-work 28 step 2: what a 16-row verify would cost on one card, from its parts. From the tree root, after the build; each GPU command takes its own card
 # lock (nothing here builds or polls under one). Run detached; one log per command under OUT.
 #   tools/probe/verify16_probe.sh CARD OUT
 set -u

@@ -1,5 +1,5 @@
 #pragma once
-// The f32 judges of the gates f32_oracle.sh's three golden prompts do not cover (operator ruling 2026-10-29): a
+// The f32 judges of the gates f32_oracle.sh's three golden prompts do not cover: a
 // test's engine run is the reference context - a prompt and the ids every compared row is teacher-forced on - and
 // the f32 reference is run on exactly that context afterwards, on the box CPU (tools/box_validate/f32_refs.sh
 // forced <model> <dir>: ornith_ref.py run --lean --force).
@@ -9,7 +9,7 @@
 //   B70_FORCED_JUDGE=<dir>   the test reads <dir>/<key>.golden.safetensors (--lean: `logits` [1 + gen][V], row j
 //                            the decision of forced id j) and judges with golden_common.h's judge_row
 //   B70_FORCED_BF16=<dir>    the bf16 twin of each judge (f32_refs.sh forced ... with DTYPE=bf16 --gemm f32): the
-//                            plain bf16 reference on the same context. Operator ruling 2026-10-31: with it, an engine
+//                            plain bf16 reference on the same context.  with it, an engine
 //                            path passes when the judge rejects no more of its ids than of the twin's argmax (the
 //                            Ornith R2 principle, 2026-10-28) - rank-1/2 misses a few ulp below the f32 top are what
 //                            bf16 arithmetic does, and the twin measures how many of them this context has.
@@ -20,7 +20,7 @@
 // share one reference, and a judge can never be applied to another context than its own.
 //
 // Every judged stream is graded only up to and including its first end-of-turn id (golden_common.h turn_end,
-// operator 2026-11-15): the rows after it are text a server never sends. The dumps and keys keep the whole stream.
+//): the rows after it are text a server never sends. The dumps and keys keep the whole stream.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -187,7 +187,7 @@ struct CosRows {
   }
 };
 
-// ---- the near-miss rule (operator ruling 2026-10-31, round 2) --------------------------------------------------
+// ---- the near-miss rule (round 2) --------------------------------------------------
 // An engine path the f32 judge rejects at MORE rows than its bf16 twin (the plain bf16 reference on the same
 // context: B70_FORCED_BF16, a gate's bf16 golden) still passes when both hold:
 //   1. every EXTRA miss - a row where the judge rejects the path's id but accepts the twin's - is a near-tie: the
@@ -197,7 +197,7 @@ struct CosRows {
 //      bf16 twins' OWN misses on the same contexts 3.1 - 8.6 ulp - what bf16 arithmetic alone does there.
 //   2. the path's logits rows are no further from the judge's than the twin's are: the cosine distance (1 - cos)
 //      of its min row and of its median row each at most kCosSlack times the twin's. kCosSlack is the "tiny
-//      tolerance" (operator): the engine's UNCACHED paths measured up to 1.53x the twin's distance on the same
+//      tolerance": the engine's UNCACHED paths measured up to 1.53x the twin's distance on the same
 //      contexts (Ornith prefix l0 e: cold median 0.999249 vs the twin's 0.999545) - two bf16 implementations of
 //      one model whose rounding points differ - so 2 is that spread, not room for a defect (a wrong row or a lost
 //      state moves the distance by orders of magnitude).
@@ -267,7 +267,7 @@ struct NearMiss {
     const bool cos_ok = rmin <= kCosSlack && rmed <= kCosSlack;
     const bool by_count = engine <= twin;
     const bool pass = by_count || (near && cos_ok);
-    std::printf("  %s near-miss rule (operator 2026-10-31, round 2): the judge rejects %u of the %s ids, %u of the "
+    std::printf("  %s near-miss rule (round 2): the judge rejects %u of the %s ids, %u of the "
                 "bf16 twin's; cosine min / median %s vs the twin's %s (distance x%.2f / x%.2f, slack %.1f)%s%s\n",
                 name.c_str(), engine, who, twin, cos_engine.str().c_str(), cos_twin.str().c_str(), rmin, rmed,
                 kCosSlack, by_count ? " - no more misses than the twin" : "",

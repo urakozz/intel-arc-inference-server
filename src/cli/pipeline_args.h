@@ -25,7 +25,7 @@
 //                               [N, layers); auto (default) balances the bytes each card holds
 //                               (runtime::pp_auto_split). Given under --parallel auto, it means pp.
 //
-// (The zero-config cleanup, operator 2026-11-06, replaced `--pp N` / `--pipeline-parallel-size N`
+// (The zero-config cleanup, replaced `--pp N` / `--pipeline-parallel-size N`
 // with --parallel and dropped the refusals of the 2026-10-06 rename's old spellings. --pipeline-handoff
 // copy|peer went on 2026-11-13: the peer hand-off measured no gain, the host copy is the only one.)
 #include <cstdint>
@@ -222,7 +222,7 @@ inline void require_two_devices_for_replica(uint32_t gpus) {
                              " - is ZE_AFFINITY_MASK hiding the second card (docs/10-the-box.md)?");
 }
 
-// --max-num-seqs N (operator 2026-11-11; vLLM's flag, the same meaning): how many requests run at once - the user's
+// --max-num-seqs N (vLLM's flag, the same meaning): how many requests run at once - the user's
 // choice, and the context follows (slot 0 the largest that fits beside N - 1 slots of 32768 on its card,
 // cli::settle_slots). N = 1 (the default): one slot. N > 1: two cards run replica, each card its slots (card 0 the
 // odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Several slots a card are Qwen3.8's

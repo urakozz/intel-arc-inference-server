@@ -36,7 +36,7 @@ l0::Kernel& dequant_kernel(KernelCache& kc, PrefillScratch& s, const loader::Dev
 
 // Open-work 18: Qwen3.8's chunk wider than 2048 rows walks with the block-store conversion and
 // the N-fastest GEMM order - both bit-identical to the plain pair, which a 2048-row chunk and
-// the MoE models' dense linears keep (docs/probes/probe-qwen-pf-gemm-2026-11-13.md: past one
+// the MoE models' dense linears keep (past one
 // wave of work-groups a slab, the plain order reads each row block of x once a wave instead of
 // once a slab).
 bool wide_chunk(const PrefillScratch& s, uint32_t M) {

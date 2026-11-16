@@ -1,4 +1,4 @@
-// Kolibri DSpark on the card (NOT YET RUN - waits for the operator's first card run): KolibriEngine's verify lists against its
+// Kolibri DSpark on the card (NOT YET RUN - waits for the first card run): KolibriEngine's verify lists against its
 // plain decode list, on a synthetic checkpoint or the real one, one card or two (pp2[:split]). No drafter: the drafts are the
 // plain run's own ids (every one accepted) or, every other iteration, with the last one wrong (a partial commit).
 //

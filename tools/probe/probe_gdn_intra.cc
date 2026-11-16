@@ -1,7 +1,6 @@
-// probe_gdn_intra - phase 2 Task 1 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): the
+// probe_gdn_intra - phase 2 Task 1: the
 // GDN intra-chunk stages on REAL inputs, today's four kernels (control: pf_gdn_A, pf_gdn_solve,
-// pf_gdn_wu, pf_gdn_A2_hilo) against the one-launch DPAS arm D-a (pf_gdn_intra.cl). Record:
-// docs/probes/probe-prefill-phase2-2026-11-12.md.
+// pf_gdn_wu, pf_gdn_A2_hilo) against the one-launch DPAS arm D-a (pf_gdn_intra.cl).
 //
 // Inputs: a B70_PF_GDN_DUMP directory (runtime/prefill/gdn.cc: gdn<call>_{xb,g,beta}.bin + .txt, the
 // l2normed xb, g_cum and beta of one GDN layer's chunk). Per dump and arm:

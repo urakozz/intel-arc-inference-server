@@ -132,7 +132,7 @@ static const char* gdn_scan_entry() {
     // (2026-09-19), both under the vector default, and attention runs no GDN
     // kernel. `gdn_chunk_test` prints no rel L2 at all.
     //
-    // **The selector is gone since the zero-config cleanup (operator 2026-11-06)**: the
+    // **The selector is gone since the zero-config cleanup**: the
     // split scan is the only one the walk binds. The vector entry stays compiled in the
     // same binary (removing it would change the binary's bytes, which G0 compares).
     return "pf_gdn_scan_dpas_split";

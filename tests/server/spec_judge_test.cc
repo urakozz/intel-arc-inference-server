@@ -1,5 +1,5 @@
 // spec_judge_test - tests/server/spec_judge.h's grading without and with an f32 judge (spec 28 N4 / N6; the
-// operator's 2026-11-04 rule: a divergence whose context has no f32 reference AWAITS it - the test SKIPs (77), it
+// the 2026-11-04 rule: a divergence whose context has no f32 reference AWAITS it - the test SKIPs (77), it
 // does not FAIL; a judged divergence and every other check still fail). Host only: the judges are written here.
 #include <cmath>
 #include <cstdint>
@@ -142,7 +142,7 @@ int main() {
   }
   CHECK_EQ(spec_judge::awaiting().divergences, uint64_t(2));   // unchanged by the judged ones
 
-  // 3. the bf16-unstable rule (operator 2026-11-04). The speculative pick 9 sits 12 ulp below the f32 top 4 at the
+  // 3. the bf16-unstable rule. The speculative pick 9 sits 12 ulp below the f32 top 4 at the
   //    speculative judge's row 0 (ulp of 10.0 = 1/16): beyond the near-miss bar, more misses than plain.
   {
     const double u = 1.0 / 16;
@@ -201,7 +201,7 @@ int main() {
     // (e) bf16-unstable but no plain row: the strict bar
     sv = run("unstable, no plain row", spec_judge::PlainRow{});
     CHECK(!sv.pass && sv.beyond[0].unstable && !sv.beyond[0].have_plain);
-    // one-sided (item 30 (4), operator 2026-11-15): only a move TOWARD the speculative pick counts.
+    // one-sided (item 30 (4)): only a move TOWARD the speculative pick counts.
     // (e2) plain more confident in the f32 top than f32 (gap 25): |plain - f32| = 13 would have allowed the flip;
     //      f32 - plain = -13 allows the bar alone - FAIL
     sv = run("unstable, plain more confident than f32", plain_gap(25));
@@ -215,7 +215,7 @@ int main() {
     CHECK(!sv.pass && sv.beyond[0].have_bf16 && !sv.beyond[0].unstable);
     CHECK_EQ(asked.size(), asked_before);
     bf16(-5);
-    // (g) the reviewed rows (operator 2026-11-05): case (c)'s miss (row 0, f32 top 4, speculative 9) fails the rules.
+    // (g) the reviewed rows: case (c)'s miss (row 0, f32 top 4, speculative 9) fails the rules.
     //     An entry with another id, or at another row, does not pass it; the exact entry does, printed as REVIEWED.
     static const std::string kks = ks;   // the entries keep the key's char*
     const size_t base = spec_judge::reviewed().rows.size();
@@ -223,7 +223,7 @@ int main() {
     spec_judge::add_reviewed({kks.c_str(), 1, 4, 9, 12.0, "test", "another row"});
     sv = run("reviewed: other id / other row only", plain_gap(1));
     CHECK(!sv.pass && sv.beyond[0].reviewed < 0);
-    CHECK(sv.line().find("REVIEWED (operator") == std::string::npos);
+    CHECK(sv.line().find("REVIEWED (2") == std::string::npos);
     spec_judge::add_reviewed({kks.c_str(), 0, 4, 9, 12.0, "test", "the exact entry"});
     sv = run("reviewed: exact entry", plain_gap(1));
     CHECK(sv.pass && sv.beyond[0].pass && sv.beyond[0].reviewed == int(base + 2));
@@ -237,7 +237,7 @@ int main() {
     spec_judge::report_reviewed("spec_judge_test (reviewed rows)");
     // a different context with the same row and ids (another tag): no entry matches it
     CHECK_EQ(spec_judge::match_reviewed("t_other_" + kks.substr(kks.size() - 16), 0, 4, 9), -1);
-    // (h) a variant of the test (operator 2026-11-07: mtp_gpu_32k_test / _128k_test): the same tag, row and ids under
+    // (h) a variant of the test (mtp_gpu_32k_test / _128k_test): the same tag, row and ids under
     //     another hash (its stream differs after the row) match by the f32 gap, within kReviewedGapUlp only
     const std::string variant = spec_judge::key_tag(kks) + "_fedcba9876543210";
     bool by_gap = false;
@@ -259,7 +259,7 @@ int main() {
     unsetenv("B70_FORCED_BF16");
   }
 
-  // 4. the end of turn (item 30 (3), operator 2026-11-15): each stream graded up to and including its first end-of-turn
+  // 4. the end of turn (item 30 (3)): each stream graded up to and including its first end-of-turn
   //    id, read from the snapshot's generation_config.json; the rows after it are printed, not graded.
   {
     std::ofstream(dir + "/config.json") << "{}\n";
@@ -315,7 +315,7 @@ int main() {
     golden::end_of_turn_ids().clear();
   }
 
-  // 5. the gates' accept lists (golden_common.h AcceptList; item 30 (4), operator 2026-11-15): `prompt:step` accepts
+  // 5. the gates' accept lists (golden_common.h AcceptList; item 30 (4)): `prompt:step` accepts
   //    any id at that row, `prompt:step=id` that id only.
   {
     char a0[] = "gate", a1[] = "--accept=cjk:15=99737,prose:18", a2[] = "x";

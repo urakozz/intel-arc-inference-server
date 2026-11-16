@@ -11,7 +11,7 @@
 //      ulp; crafted rows: a tie at the cut to the lower id, every real logit -1e30 (ids 0..5), the
 //      padded slots' logits +80 never selected (Review Focus 3)
 //   4. kol_moe_gate_up / kol_moe_down with a forced route row (ids 0 .. 383 spread, the shared slot's
-//      own int4 block - operator ruling 2026-10-31), within 2 bf16 ulps; then the shared slot alone (routed weights zero) and the routed
+//      own int4 block - ruling 2026-10-31), within 2 bf16 ulps; then the shared slot alone (routed weights zero) and the routed
 //      slots alone (shared weights zero); bitwise replay
 //   5. eager attention (kol_attn_eager.cl, both builds) bitwise against attention_eager: sliding at
 //      5, 512, 513, 4103 (a wrapped ring), 9000; full at 30000

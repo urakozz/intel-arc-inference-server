@@ -2,7 +2,7 @@
 // b70_prefill_host for Engine::prefill's reason (engine_prefill.cc): a decode-only binary links b70_runtime and must
 // not acquire the prefill library. TpEngine reaches this half through TpPrefill, an incomplete type to it.
 //
-// **The wavefront (operator decision D8, plan 17c's probe record).** A TP card's prefill chunk is one card's chunk at
+// **The wavefront (plan 17c's probe record).** A TP card's prefill chunk is one card's chunk at
 // the card's shapes, except that after each row-parallel linear (out_proj, o_proj, down: 127 a chunk that matter,
 // the last layer's down only for the head's row) the two cards add their halves. At 2048 rows that is 40 MiB of fp32
 // each way a crossing, 4.35 ms with both directions at once (probe_tp_pf: ~9.6 GB/s a direction on the copy engines,

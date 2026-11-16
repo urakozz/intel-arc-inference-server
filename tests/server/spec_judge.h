@@ -1,5 +1,5 @@
 #pragma once
-// spec_judge.h - spec 28 N4 / N6 under the operator's ruling of 2026-11-03 (option B): since spec 28b the verify rows
+// spec_judge.h - spec 28 N4 / N6 under the ruling of 2026-11-03 (option B): since spec 28b the verify rows
 // run gemm_sm and are not bitwise the M = 1 rows, so speculative output is graded by the f32 JUDGE - it passes when it
 // is no further from f32 than plain decode on the same context. The judges are tests/golden/forced_judge.h's: the
 // test writes each context it would judge (B70_DUMP_FORCED=<dir>), the f32 reference is run on exactly that context
@@ -12,14 +12,14 @@
 //                 streams' logits rows are not read back, so its cosine half does not apply). Without a judge for a
 //                 context a near-tie passes by the golden tie rule (greedy_tie.h), and anything beyond it AWAITS its
 //                 reference (below). Each stream is graded up to and including its own first end-of-turn id
-//                 (golden_common.h turn_end, operator 2026-11-15); a first difference after the shared end of turn
+//                 (golden_common.h turn_end); a first difference after the shared end of turn
 //                 is not graded at all (nothing dumped, nothing awaited).
 //   N4 (rows)     a verify row against the plain row of the same context and the judge's row there: the verify row's
 //                 cosine distance to f32 at most golden::kCosSlack x the plain row's (forced_judge.h's "tiny
 //                 tolerance": two bf16 paths whose rounding points differ), or the old bar (cosine >= 0.99999
 //                 against the plain row). Without a judge the old bar, and a row below it AWAITS its reference.
 //
-// THE bf16-UNSTABLE RULE (operator 2026-11-04): at a row where standard bf16 itself lands far from f32, a speculative
+// THE bf16-UNSTABLE RULE: at a row where standard bf16 itself lands far from f32, a speculative
 // miss is graded against how far plain decoding already is from f32 there, not against the fixed 8 ulp; everywhere
 // else the strict rule stays. Per speculative miss at row r of its judge (the f32 top a, the speculative pick b):
 //   g32 = f32[a] - f32[b], in bf16 ulps of the f32 top (golden::bf16_ulp_at) - the miss
@@ -27,7 +27,7 @@
 //         (<B70_FORCED_BF16>/<key>.bf16top.safetensors, tools/oracle/qwen_bf16_top.py: top-k ids and logits per row
 //         plus the f32 top and the forced id), in the same unit
 //   the row is bf16-UNSTABLE when g32 - g16 > golden::kNearMissUlp - the bf16 reference moved TOWARD the speculative
-//   pick by more than the bar (one-sided, item 30 (4), operator 2026-11-15: a bf16 reference more confident in the
+//   pick by more than the bar (one-sided, item 30 (4),  a bf16 reference more confident in the
 //   f32 top than f32 is says nothing for the flip); then
 //   gp  = the pair's gap in the ENGINE's plain (M = 1) row on the same context (the test's PlainRow: a plain replay
 //         of prompt + plain[0, d) + spec[d, d + r))
@@ -39,13 +39,13 @@
 // A judge must be the one for the test's head form (the tag carries it: the int8 head's references are the
 // --lm-head int8 runs, f32_refs.sh's -i8head suffix).
 //
-// REVIEWED ROWS (operator 2026-11-05, spec 28 sec 10): a few chaotic turn-boundary rows of the Qwen3.8 speculative
+// REVIEWED ROWS (spec 28 sec 10): a few chaotic turn-boundary rows of the Qwen3.8 speculative
 // tests fail every rule above although nothing is wrong (rounding amplified over 64 layers at a turn boundary; the
 // evidence is in spec 28 sec 10). Each is an explicit entry in kReviewedRows, keyed by the judge's context key, the
 // row and the two ids (the f32 top, the speculative pick). A miss that fails the rules and matches an entry EXACTLY
 // passes as REVIEWED and is printed loudly with its numbers; any other miss - another row, other ids, another
 // context - is graded as before. The bars do not change.
-// The same row in a variant of the test (operator 2026-11-07: mtp_gpu_32k_test / mtp_gpu_128k_test, the same prompts
+// The same row in a variant of the test (mtp_gpu_32k_test / mtp_gpu_128k_test, the same prompts
 // and positions at a longer max_len): the key's hash covers the WHOLE forced stream, so a variant whose ids differ
 // only AFTER the reviewed row has another key. Such a miss matches an entry when the test tag (the key without its
 // hash), the row and both ids are the entry's and its f32 gap is the entry's to kReviewedGapUlp - the f32 row is a
@@ -53,7 +53,7 @@
 // context's fingerprint. It is printed as a REVIEWED match "by tag / row / ids / f32 gap", with both keys. An entry of a test this process ran that no miss matched is
 // printed as a "stale reviewed entry" (it can go; it does not fail the run).
 //
-// AWAITING (operator 2026-11-04): a divergence the old rule fails (beyond the 1-ulp tie rule; a row below 0.99999)
+// AWAITING: a divergence the old rule fails (beyond the 1-ulp tie rule; a row below 0.99999)
 // whose context has NO f32 reference yet - B70_FORCED_JUDGE unset, or its <key>.golden.safetensors not made yet - is
 // not judged, so it is not failed either: it is reported as "awaiting f32 reference" and the test SKIPS (exit_code:
 // 77, ctest's SKIP_RETURN_CODE) when nothing else failed. Every divergence a judge grades, and every structural /
@@ -90,7 +90,7 @@ inline void await_reference(const std::string& key) {
   awaiting().contexts.insert(key);
 }
 
-// One reviewed row (operator 2026-11-05). `key` is the speculative stream's judge key (golden::ForcedJudge::key:
+// One reviewed row. `key` is the speculative stream's judge key (golden::ForcedJudge::key:
 // <test tag>_<FNV-1a 64 of the context and the forced ids>), `row` the row in that judge (0 = the first divergence).
 struct ReviewedRow {
   const char* key;
@@ -101,10 +101,9 @@ struct ReviewedRow {
   const char* reason;
 };
 inline constexpr const char* kTpVerifyNarrowReason =
-    "TP verify rows on a bf16-narrow row, the small-M GEMM's rounding, no defect; operator 2026-11-14 (item 24, "
-    "docs/probes/probe-tp-verify-m24-2026-11-14.md)";
+    "TP verify rows on a bf16-narrow row, the small-M GEMM's rounding, no defect; (item 24)";
 inline constexpr const char* kTpPrefillNarrowReason =
-    "unexplained, accepted (operator 2026-11-15): TP plain decode on int8 KV is further from f32 than one card on "
+    "unexplained, accepted: TP plain decode on int8 KV is further from f32 than one card on "
     "int8 KV over long's outputs 1-62 (mean |logit - f32| 0.496 vs 0.410, beyond item 24's one-card band), and output "
     "62 moves 4.26 logits toward 271 against one card's 2.50 (f32 lead 3.10)";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
@@ -112,7 +111,7 @@ inline constexpr double kReviewedGapUlp = 0.01;
 // The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
 // registrations that share a head form (mtp_gpu_test and mtp_gpu_dv128k_bf16_test: the bf16 head;
 // mtp_gpu_dv128k_test: the int8 head). mtp_gpu_32k_test / mtp_gpu_128k_test (bf16 head) reach the bf16-head rows
-// with other keys (their streams differ after the row) and match by tag / row / ids / f32 gap (operator 2026-11-07).
+// with other keys (their streams differ after the row) and match by tag / row / ids / f32 gap.
 inline constexpr ReviewedRow kReviewedRows[] = {
     // tp_mtp_test / tp_dflash_test long, output 62: the TP verify rows (M = 2..4) pick 271 where f32 leads with 198
     // by 2.87 logits; identical to plain TP through layer 20, rounding-size drift after, no closer one-card verify
@@ -214,12 +213,12 @@ struct UnstableRow {
     if (reviewed >= 0) {
       const ReviewedRow& e = spec_judge::reviewed().rows[size_t(reviewed)];
       char buf[640];
-      std::snprintf(buf, sizeof buf, "\n      *** REVIEWED (operator %s): %s row %zu, ids %u / %u, f32 gap %.2f ulp "
+      std::snprintf(buf, sizeof buf, "\n      *** REVIEWED (%s): %s row %zu, ids %u / %u, f32 gap %.2f ulp "
                     "(%.2f when reviewed) - %s: PASS as REVIEWED ***", e.date, e.key, e.row, e.f32_top, e.accepted, g32,
                     e.gap, e.reason);
       s += buf;
       if (reviewed_by_gap) {
-        std::snprintf(buf, sizeof buf, "\n      *** matched by tag / row / ids / f32 gap (within %.2f ulp; operator "
+        std::snprintf(buf, sizeof buf, "\n      *** matched by tag / row / ids / f32 gap (within %.2f ulp; "
                       "2026-11-07: the test's variants), this stream's key %s - its ids differ after the row ***",
                       kReviewedGapUlp, key.c_str());
         s += buf;
@@ -254,7 +253,7 @@ struct StreamVerdict {
   uint32_t miss_spec = 0, miss_plain = 0;
   double worst_spec_ulp = 0;         // the speculative stream's furthest miss below the f32 top
   std::vector<UnstableRow> beyond;   // the speculative misses beyond the near-miss bar, each by the bf16-unstable rule
-  // The end of turn (golden_common.h turn_end, operator 2026-11-15): each stream graded up to and including its first
+  // The end of turn (golden_common.h turn_end): each stream graded up to and including its first
   // end-of-turn id. `turn` is the plain stream's turn_end (at or before the first difference: both streams ended their
   // turn there, nothing is graded); `graded_*` the judge rows graded in each suffix, of `rows`; `past` the rows past
   // either end the judge rejects (printed, not graded).
@@ -286,7 +285,7 @@ struct StreamVerdict {
                     graded_spec, graded_plain, rows);
       out += b;
     }
-    for (const UnstableRow& u : beyond) out += "\n      ** the bf16-unstable rule (operator 2026-11-04): " + u.line();
+    for (const UnstableRow& u : beyond) out += "\n      ** the bf16-unstable rule: " + u.line();
     for (const std::string& p : past) out += "\n      " + p;
     return out;
   }
@@ -429,12 +428,12 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
       };
     v.beyond.push_back(unstable_rule(jrow, V, VU, r, fs[r], bt, pr));
     UnstableRow& u = v.beyond.back();
-    if (!u.pass) {   // the rules fail it: an exact kReviewedRows entry passes it as REVIEWED (operator 2026-11-05)
+    if (!u.pass) {   // the rules fail it: an exact kReviewedRows entry passes it as REVIEWED
       u.reviewed = match_reviewed(ks, r, u.a, u.b, u.g32, &u.reviewed_by_gap);
       u.key = ks;
       if (u.reviewed >= 0) {
         u.pass = true;
-        std::printf("    *** REVIEWED row (operator 2026-11-05%s): %s row %zu, ids %u / %u, f32 gap %.2f ulp - passes as "
+        std::printf("    *** REVIEWED row (2026-11-05%s): %s row %zu, ids %u / %u, f32 gap %.2f ulp - passes as "
                     "REVIEWED%s%s ***\n", u.reviewed_by_gap ? "; its variants 2026-11-07" : "", ks.c_str(), r, u.a, u.b,
                     u.g32, u.reviewed_by_gap ? " by tag / row / ids / f32 gap: entry " : "",
                     u.reviewed_by_gap ? reviewed().rows[size_t(u.reviewed)].key : "");

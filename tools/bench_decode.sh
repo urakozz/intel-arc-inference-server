@@ -81,7 +81,7 @@ BUILD=1
 
 # `set -u` is on, so a bare `--depth` at the end of the line would abort with
 # `$2: unbound variable` -- bash's message about this script's internals, not
-# this script's message about the operator's command. Every value-taking flag
+# this script's message about the user's command. Every value-taking flag
 # goes through this first, so a missing (or empty) value takes the same exit-2
 # path as an unknown argument. `need_value "$@"` sees the flag as $1 and its
 # value, if there is one, as $2; the `||` short-circuits so `-z "$2"` is never

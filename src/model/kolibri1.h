@@ -10,7 +10,7 @@
 // Spec 20c: Aleph Alpha's Kolibri-1 (`Kolibri1ForCausalLM`, config.json model_type `kolibri1`)
 // as data - a third model BESIDE qwen3_5 (spec 20 §4: its own table, loader,
 // kernels and engine). Every number of `kolibri1()` is the checkpoint's
-// (Aleph-Alpha/Kolibri-1-BF16 config.json, index and shard headers; docs/probes/probe-kolibri-2026-10-05.md):
+// (Aleph-Alpha/Kolibri-1-BF16 config.json, index and shard headers):
 //
 //   layers 50, every one MoE; `layer_types` full attention at 4, 9, ..., 49 (every 5th), the other
 //          40 sliding with a 513-key window INCLUDING the query (key j visible to query i iff
@@ -20,7 +20,7 @@
 //   attention 48 q / 4 kv heads x 128 (GQA 12), q/k RMSNorm per head; RoPE (neox rotate_half,
 //          theta 1e4, all 128 dims) in the sliding layers only, the full layers NoPE; no bias, no gate
 //   MoE    384 routed experts top 6 (intermediate 512, SiLU) + one UNGATED shared expert (512, int4 as the
-//          routed ones in the operator's export - operator ruling 2026-10-31);
+//          routed ones in our export - ruling 2026-10-31);
 //          router mlp.gate bf16 [384][2560] with fp32 logits, selection on logit + expert_bias,
 //          weights sigmoid(logit) NOT renormalised, ties to the lower id; the combine in ascending
 //          id in fp32, + the shared expert, one rounding

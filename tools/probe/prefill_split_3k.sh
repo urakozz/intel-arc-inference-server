@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # On the box, under tools/gpu_lock.sh box: open-work 3k's whole measurement, one lock.
-# Record: docs/probes/probe-prefill-chunk-split-2026-11-10.md.
 #   1. probe_dpas_rate --sweep (the card's DPAS peaks)
 #   2. probe_prefill_split at 2048 and 921 rows (the 15,257-id prompt's last chunk): the int4
 #      linears of one chunk on l0 and l0-int8, itemised, over 3i's distinct-layer walk

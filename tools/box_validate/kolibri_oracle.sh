@@ -17,7 +17,7 @@
 #        (default models--urakozz--Kolibri-1-W4A16-g64-AutoRound-GPTQ), each -> <p>.ids,
 #        <p>.golden.safetensors, <p>.log; SKIP 77 when the checkpoint is not in the HF cache.
 #
-# synth-f32 / real-f32 (operator ruling 2026-10-31: Kolibri's gates judge the engine against f32, no further
+# synth-f32 / real-f32 (Kolibri's gates judge the engine against f32, no further
 #        from it than the bf16 golden): each golden above re-run by kolibri_ref.py run --mode f32 --force <its
 #        `tokens`> --gen 32 - the same weights in float32, teacher-forced so its rows are the golden's contexts
 #        row for row -> <data>/oracle-out-kolibri-synth-f32/{int4attn,bf16attn}/ and <data>/oracle-out-kolibri-f32/

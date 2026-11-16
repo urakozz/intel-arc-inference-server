@@ -108,7 +108,7 @@ double cos_f32(const float* a, const float* b, size_t n) {
   return ab / std::sqrt(aa * bb);
 }
 
-// The score judge (qwen4exp_prefill_test's rule, the operator's of 2026-11-04): a differing selection / expert set is
+// The score judge (qwen4exp_prefill_test's rule of 2026-11-04): a differing selection / expert set is
 // a ROUNDING SWAP when the row's scores agree (cosine >= kScoreCos) and every item the engine took instead lies within
 // twice the row's score difference ("noise") below the reference's cut - both sides run one top-k rule over their own
 // scores, so rounding moves the cut's neighbours and nothing else; a larger deficit is a wrong row, not rounding.

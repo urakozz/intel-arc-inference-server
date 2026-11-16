@@ -4,7 +4,7 @@
 # A CPU reference of the DFlash and DFlash 2 drafters (spec 19 §2, plan 19a Task 1).
 #
 # The semantics are ported from vLLM (Apache-2.0, SPDX-FileCopyrightText: Copyright
-# contributors to the vLLM project), the operator's checkout at
+# contributors to the vLLM project), our checkout at
 # /Users/urakozz/PycharmProjects/vllm (96b0efe6b0):
 #   vllm/model_executor/models/qwen3_dflash.py      context K/V, decoder layer, attention modes,
 #                                                   mask embedding, d2t, head

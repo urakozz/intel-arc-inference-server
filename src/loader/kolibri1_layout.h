@@ -21,7 +21,7 @@
 //   gate_up      int4 layout-1 blocks [experts][hidden x 2I] (gate||up interleave16):
 //                  384 x 1,392,640 = 534,773,760 B
 //   down         int4 layout-1 blocks [experts][I x hidden]: 384 x 696,320 = 267,386,880 B
-//   shared       int4 layout-1 blocks, one of each kind (operator ruling 2026-10-31: the operator's export
+//   shared       int4 layout-1 blocks, one of each kind (our export
 //                  quantises the shared expert): 1,392,640 + 696,320 = 2,088,960 B
 //   total        825,019,392 B (int4 attention), 875,072,512 B (bf16 attention)
 //

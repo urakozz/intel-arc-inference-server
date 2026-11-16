@@ -4,7 +4,7 @@
 //
 // Pinned: §9.1's per-slot rows (KV a position with the head's layer, the state a slot) exactly, and every layout
 // total §9.1 / §9.2 quote to their printed precision (0.01 GB; "~" ones to 0.1 GB); the largest batch that
-// fits Qwen3.8 with MTP. It prints the table docs/probes/probe-batching-2026-10-23.md §5 quotes.
+// fits Qwen3.8 with MTP.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>

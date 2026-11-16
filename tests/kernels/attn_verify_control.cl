@@ -1,8 +1,8 @@
 // attn_verify_control.cl (3l): src/kernels/attn_verify_dpas.cl frozen at main 865da900, byte for byte below this
 // comment, for tests/kernels/attn_verify_bitwise_test.cc's comparisons. Never edit; never bound by the engine.
 // attn_verify_dpas.cl - spec 28c: the verify step's attention on DPAS, in v2's blocking and partials.
-// Spec: docs/superpowers/specs/2026-10-31-spec28c-verify-attention-by-shape-design.md (§2, §8).
-// Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md (Task 2).
+// (§2, §8).
+// (Task 2).
 //
 // `attn_verify_dpas` (bf16 KV) / `attn_verify_dpas_kv8` (int8 KV, KV8 = 1) replace attn_v2.cl's
 // `attn_decode_v2` / kv8.cl's `attn_decode_v2_kv8` in an M >= 2 verify list when the capture's rule

@@ -25,7 +25,7 @@ inline constexpr uint32_t kPfQ4MaxRows = 384, kPfQ4SiluMaxRows = 320;
 // work-groups up to 1024 rows, each walking a whole tile, so a short chunk paid a full chunk's
 // GEMM time; the small tiles spread the rows that exist over every core. Bit-identical output
 // (the same DPAS chain per accumulator), so the choice is speed only - tools/probe/
-// probe_small_chunk.cc's measurement on Qwen3.8's linears (docs/probes/probe-small-chunk-2026-11-08.md).
+// probe_small_chunk.cc's measurement on Qwen3.8's linears.
 struct PfSmallTile {
   uint32_t na, nb, sn;
   uint32_t rows() const { return 8 * na; }         // the rows a sub-group (and a work-group) owns
@@ -40,8 +40,7 @@ const PfSmallTile* pf_small_tile(uint32_t M);
 // sub-groups exchanging gate bf16 through SLM at 193-320 rows). The slab's dequant is ~110 ms
 // a Qwen3.8 chunk whatever the rows; the fused kernel converts each weight once per row tile,
 // so it wins for few rows only. Bit-identical to the slab walk (the same conversion, the same
-// DPAS chain per accumulator), so the choice is speed only - tools/probe/probe_fused_small.cc
-// (docs/probes/probe-fused-small-chunk-2026-11-08.md).
+// DPAS chain per accumulator), so the choice is speed only - tools/probe/probe_fused_small.cc.
 const PfSmallTile* pf_q4_tile(uint32_t M, bool silu);
 
 // One int4 linear through pf_gemm_q4 at tile `t`: C [pad(M, 8 NA)][N] (fp32 at pitch ldc, or

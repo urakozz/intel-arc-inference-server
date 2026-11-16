@@ -79,8 +79,8 @@ inline runtime::PrefillPath prefill_path(bool prefill, runtime::PrefillBackend b
   return {prefill, backend};
 }
 
-// 3o (operator 2026-11-10, accepted as a known FAIL): the l0-int8 prefill with int8 KV compounds two roundings
-// (docs/probes/a4-int8-prefill-int8-kv-2026-11-10.md) - one of the 36 tool-call scenarios writes an invalid edit.
+// 3o (accepted as a known FAIL): the l0-int8 prefill with int8 KV compounds two roundings
+// - one of the 36 tool-call scenarios writes an invalid edit.
 inline void warn_int8_prefill_kv8(runtime::PrefillBackend backend, runtime::KvCache kv) {
   if (backend == runtime::PrefillBackend::L0Int8 && kv == runtime::KvCache::Int8)
     std::print(stderr, "warning: --prefill-backend l0-int8 with --kv-cache int8 is a known fail: ~3% of tool calls "
@@ -158,7 +158,7 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
   return len;
 }
 
-// Step 4 under --max-num-seqs (operator 2026-11-11): a card's `seqs` > 1 sequence slots (plan 13c), slot 0 the
+// Step 4 under --max-num-seqs: a card's `seqs` > 1 sequence slots (plan 13c), slot 0 the
 // largest context that fits beside seqs - 1 slots of SlotDims::kShortLen (auto) or exactly the asked N, refused with
 // the plan's numbers when it does not fit beside them. `m` is re-tabled at runtime::slots_kv_len (one RoPE table, one
 // KV allocation of the slots' pages). Returns the layout; prints the choice and the plan's breakdown like settle().
@@ -216,15 +216,15 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
 //   cap = settle_chunk_cap(..., slot lengths, path, ..., asked)   what the engine is given
 //
 // An asked cap (b70-decode's --prefill-chunk) is planned and kept as it is: an explicit 4096
-// shortens what auto gives the context. With nothing asked, every model takes operator ruling (i) of
+// shortens what auto gives the context. With nothing asked, every model takes ruling (i) of
 // 2026-10-27 (context first; a MoE model: plan 2026-11-12 D2, the expert GEMMs and l0-int8's quantiser
 // amortise over twice the rows; Qwen3.8: open-work 18, ~5.6 % faster cold,
-// docs/probes/probe-qwen-pf-gemm-2026-11-13.md section 6) - max_len (and every request slot) is planned
+// - max_len (and every request slot) is planned
 // at 2048 and 4096 is taken only when the plan at those lengths has room for it
 // (runtime::prefill_chunk_cap_that_fits, or runtime::plan_slots beside --max-num-seqs). Qwen3.8's
 // hooked prefill keeps 2048-row chunks over a prompt's last 6144+ positions (runtime::kPrefillTail),
 // so a prefix-cache hit after a turn still restarts at most 2047 rows back. There is no
-// environment variable or server flag for it (operator, 2026-11-03): the engine side chooses.
+// environment variable or server flag for it: the engine side chooses.
 inline uint32_t planned_chunk_cap(uint32_t asked) {
   return asked != 0 ? asked : runtime::PrefillScratchDims::kCDefault;
 }

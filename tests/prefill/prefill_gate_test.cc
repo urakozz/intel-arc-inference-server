@@ -99,7 +99,7 @@ struct Verdict {
   uint32_t n_prompt = 0, exact = 0;
   uint32_t n_determined = 0, det_exact = 0;
   uint32_t near_tie = 0;   // determined rows accepted under argv[7]'s near-tie rule
-  uint32_t near_miss = 0;  // determined rows accepted under the l0-int8 MoE near-miss rule (operator 2026-11-12)
+  uint32_t near_miss = 0;  // determined rows accepted under the l0-int8 MoE near-miss rule
   uint32_t acc_det = 0, acc_tie = 0;   // failing rows on the --accept list (known)
   uint32_t n_tie = 0, tie_agree = 0, tie_member = 0;
   int first_bad = -1, first_diverge = -1;
@@ -126,7 +126,7 @@ bool bf16_near_tie(const float* row, uint32_t used, uint32_t top1, uint32_t* sec
 
 int main(int argc, char** argv) {
   b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
-  // Ornith (operator ruling 2026-10-23, golden_common.h): `--judge=<f32 dir>` - the gate judges
+  // Ornith (golden_common.h): `--judge=<f32 dir>` - the gate judges
   // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
   const std::string judge_dir = golden::take_judge(argc, argv);
   const golden::AcceptList accept = golden::take_accept(argc, argv);   // known rows (2026-10-23)
@@ -141,10 +141,10 @@ int main(int argc, char** argv) {
   // argv[7]: near-tie flips allowed per prompt (default 0: the gate as it always
   // was). A DETERMINED row the engine gets wrong is accepted instead of failing
   // only if the engine picked the oracle's runner-up AND the oracle's own top-2
-  // margin is at most one bf16 ulp of its top logit. Operator ruling 2026-09-24
+  // margin is at most one bf16 ulp of its top logit. Ruling 2026-09-24
   // (spec 5 amendment): the l0-int8 path's one such flip, cjk row 9, margin
   // 0.0625 at 13.94, is accepted. Absent argv[7], the allowance is 1 on l0-int8
-  // (the operator's ruling travels with the backend, so a registration that runs
+  // (the ruling travels with the backend, so a registration that runs
   // the build's default gets it) and 0 on every other backend, l0 included.
   const uint32_t near_tie_allowed =
       argc > 7 ? uint32_t(std::atoi(argv[7]))
@@ -178,11 +178,11 @@ int main(int argc, char** argv) {
   kHid = model.desc->hidden;
   kGdnElems = size_t(model.desc->gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
   const bool kMoe = model.desc->is_moe();
-  // Operator ruling 2026-11-12 (plan 2026-11-12, W4A8 on l0-int8): on a MoE model's l0-int8 gate, judged by the f32
+  // Ruling 2026-11-12 (plan 2026-11-12, W4A8 on l0-int8): on a MoE model's l0-int8 gate, judged by the f32
   // reference, a determined row the engine misses passes when the judge's margin of its token over the engine's is
   // under 8 bf16 ulps AND either the bf16 twin (the golden) misses the row too (not an extra miss) or the engine's
   // logits row is no further from f32 (cosine) than the twin's, less 1e-5 - 2026-10-31's near-miss rule, as the
-  // gate's rule rather than per-row --accept lists (both relaxations: operator, 2026-11-12). Every row that passes
+  // gate's rule rather than per-row --accept lists (both relaxations:). Every row that passes
   // only by it is printed.
   const bool near_miss_rule = kMoe && backend == runtime::PrefillBackend::L0Int8 && !judge_dir.empty();
   if (near_miss_rule) std::printf("near-miss rule (l0-int8 on a MoE model): f32 margin < 8 bf16 ulps and (the bf16 "
@@ -327,7 +327,7 @@ int main(int argc, char** argv) {
       etok.push_back(id);
 
       // `ok` (the bf16 golden's token) drives the teacher-forcing; the verdict is the f32
-      // judge's when one is given (golden_common.h, operator ruling 2026-10-23), else the bf16
+      // judge's when one is given (golden_common.h, ruling 2026-10-23), else the bf16
       // golden's as always.
       const bool ok = id == uint32_t(gtok[p]);
       const uint32_t jrow_i = p == 0 ? T - 1 : T + p - 1;

@@ -27,7 +27,7 @@ The model follows config.json's model_type:
                     layers kept once read, K from the memory plan under the container's cap -
                     --resident none keeps none; the rest re-read every forward), its bf16 GEMMs
                     as fp32 GEMMs of the bf16 values rounded once to bf16 (tools/oracle/cpu_bf16.py,
-                    the operator's 2026-11-03 ruling for new references: the box CPU has no bf16
+                    the 2026-11-03 ruling for new references: the box CPU has no bf16
                     units), HF generate, one scenario at a time (--batch is ignored). NOT bitwise
                     the pre-2026-11 torch-bf16 references (summation order); writes no .gap;
   qwen3_5_moe       Ornith 1.5 (spec 15e Task 3): tools/oracle/ornith_ref.py's layer-streamed

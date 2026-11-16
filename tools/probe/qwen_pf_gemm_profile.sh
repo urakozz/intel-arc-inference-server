@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# On the box, from a tree's root: Qwen3.8 `l0` prefill phase profile at pp4096 and pp16384, one card
-# (record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md, Task 1). B70_PREFILL_PROFILE=2 (the phase
+# On the box, from a tree's root: Qwen3.8 `l0` prefill phase profile at pp4096 and pp16384, one card.
+# B70_PREFILL_PROFILE=2 (the phase
 # table plus the per-launch trace by kernel name), then one plain run of each for the wall.
 # Usage: qwen_pf_gemm_profile.sh CARD [BUILD]   (takes `tools/gpu_lock.sh card CARD` itself)
 set -u

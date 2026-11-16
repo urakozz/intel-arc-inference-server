@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # On the box, from the branch tree's root: b70-serve's start-up plan on one card (context, slots, prefill chunk
 # cap) for main's build and this tree's, per recipe of docs/17-running-models.md - the server is stopped once it
-# listens (record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md, section 6).
+# listens.
 # Usage: qwen_chunk4096_plans.sh CARD MAIN_TREE    (takes `tools/gpu_lock.sh card CARD` itself)
 set -u
 card=${1:?card}

@@ -63,7 +63,7 @@ using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
 bool g_split = false;   // argv[5]
-// Operator ruling 2026-10-31 (round 2): l0-int8 on a MoE model is opt-in and its accuracy gate DIAGNOSTIC - 8-bit
+// l0-int8 on a MoE model is opt-in and its accuracy gate DIAGNOSTIC - 8-bit
 // activations cost routing accuracy against f32 that no int8 scheme measured won back. The judge's verdict is then
 // printed, not gated (the plan kinds and f's bitwise rows still are: mechanics, not accuracy).
 bool g_diagnostic = false;
@@ -215,7 +215,7 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
   if (cand_rows.empty()) return false;
 
   // The cold reference, teacher-forced to the cached run's tokens.
-  // Operator ruling 2026-10-29 (tests/golden/forced_judge.h): with B70_FORCED_JUDGE the rows are judged by the f32
+  // Ruling 2026-10-29 (tests/golden/forced_judge.h): with B70_FORCED_JUDGE the rows are judged by the f32
   // reference of this very context (final prompt, the cached run's ids), and the cached run passes when the judge
   // rejects no more of its ids than of the cold run's own argmax - no further from f32 than the reference.
   const golden::ForcedJudge fj;
@@ -281,7 +281,7 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     }
     rig.eng.ingest({id});
   }
-  // Operator ruling 2026-10-31: with the judge's bf16 twin the bar is the twin's own count of rejected ids, not
+  // with the judge's bf16 twin the bar is the twin's own count of rejected ids, not
   // the cold run's (an engine path like the cached one, with its own bf16-sized misses).
   const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, Qwen35::kVocab) : nullptr;
   const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, turn, Qwen35::kVocab, Qwen35::kVocabUsed) : 0;
@@ -307,7 +307,7 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
               near, allowed, bad, first_diff == kGen ? "none" : std::to_string(first_diff).c_str(),
               min_cos, worst, (judge ? judge_ok : bad == 0) && ok ? "" : "  ** FAIL **");
   if (judge) {
-    std::printf("  %s judged by the f32 reference (operator, 2026-10-29): it rejects %u of the cached run's ids, %u of"
+    std::printf("  %s judged by the f32 reference: it rejects %u of the cached run's ids, %u of"
                 " the cold run's%s%s\n", want.name.c_str(), judge_cached, judge_cold,
                 twin ? (", " + std::to_string(judge_twin) + " of the bf16 reference's (the bar, 2026-10-31)").c_str()
                      : "",
@@ -343,8 +343,7 @@ int main(int argc, char** argv) {
   g_diagnostic = backend == runtime::PrefillBackend::L0Int8 && eng.model().desc->is_moe();
   std::printf("prefix_gpu_test: backend %s, near-tie allowance %u, split_last %d, mtp K %u%s\n",
               runtime::prefill_backend_name(eng.prefill_backend()), allowed, int(g_split), mtp_k,
-              g_diagnostic ? " - DIAGNOSTIC: l0-int8 on a MoE model, the judge's verdicts not gated (operator "
-                             "2026-10-31)" : "");
+              g_diagnostic ? " - DIAGNOSTIC: l0-int8 on a MoE model, the judge's verdicts not gated (2026-10-31)" : "");
   EngineAdapter ad(eng, Qwen35::kVocabUsed, mtp_k);
   PinnedAlloc alloc(ctx, size_t(6) << 30);
   Rig rig{eng, ad, alloc, l0::CmdList::immediate(ctx)};

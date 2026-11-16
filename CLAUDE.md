@@ -33,7 +33,7 @@ An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and b
 - Commits are signed and carry no trailers (no Signed-off-by, Co-authored-by or similar):
   `git -c gpg.program=$(brew --prefix)/bin/gpg commit -S -m "..."`.
 - Never push. Never `git branch -D`, `git checkout --`, `git restore`, `git reset --hard` or a bare `git stash`;
-  the operator deletes branches.
+  the owner deletes branches.
 - Agents work in their own worktree under `.claude/worktrees/<branch>` (`tools/box.sh` gives each branch its own
   tree on the box), never in the main checkout.
 
@@ -50,5 +50,5 @@ An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and b
   (`ctest -R`), not a whole suite. Two-card (`box`) jobs freeze both cards' queues, so batch them. `tools/gpu_lock.sh
   status` lists each holder and flags one with NO GPU OPEN.
 - Everything on the box lives under `~/b70`. Nothing is deleted with `rm -rf`: move it to `~/b70/trash/<date>` and
-  the operator removes it. Stop jobs only with `tools/box_stop.sh`.
+  the owner removes it. Stop jobs only with `tools/box_stop.sh`.
 - Long jobs run detached (`nohup setsid`, logs under `~/b70/logs/<topic>/`).

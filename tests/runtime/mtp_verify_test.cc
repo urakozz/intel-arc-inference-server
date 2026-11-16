@@ -15,7 +15,7 @@
 //        verify(k) with the TRUE drafts g[1..k], commit(j), 64 plain ids - bitwise (spec 28
 //        N3 + N4: rows 0..j do not depend on rows past j). Since spec 28b the verify rows run
 //        gemm_sm and are no longer bitwise M = 1, so the 64 ids against the plain run's
-//        g[j+1 .. j+64] are graded by spec 28 N6 (the operator's ruling 2026-11-03): identical, or
+//        g[j+1 .. j+64] are graded by spec 28 N6: identical, or
 //        from the first difference the f32 judge rejects no more of the ids than of the plain run's
 //        (tests/server/spec_judge.h), the golden tie rule without a judge - before 28b the two
 //        references were the same run. M2a's logits rows likewise: cosine >= 0.99999 against the
@@ -214,7 +214,7 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& pro
                   "abs %.3e%s  id %s%s\n",
                   k, r, cl, lma, lma / std::ldexp(1.0, le - 8), lbits ? " (bitwise)" : "", cs, ma,
                   sbits ? " (bitwise)" : "", id_ok ? "ok" : "DIFFERS", spec_judge::row_line(rv).c_str());
-      // spec 28 N4 (the operator's ruling 2026-11-03): the logits row by the f32 judge where one exists
+      // spec 28 N4: the logits row by the f32 judge where one exists
       ok &= rv.pass && cs >= 0.99999 && id_ok;
     }
     c.e.commit(k, c.e.verify_ids()[k]);

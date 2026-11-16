@@ -78,13 +78,13 @@ inline uint32_t parallel_auto(const std::string& snapshot_dir, const MaxLenArg& 
   return p.total() + reserve <= card_bytes ? 1u : 2u;
 }
 
-// Spec 17d (operator decision D3, applied after 17d's bars): --parallel auto's tensor-parallel choice for b70-serve -
+// Spec 17d (applied after 17d's bars): --parallel auto's tensor-parallel choice for b70-serve -
 // Qwen3.8 (config.json's architectures[0]) on two visible B70s (the hardware gate holds two cards to peer access both
 // ways), when the context is auto and nothing asked is something TP does not run (`blocked`: DFlash, a draft
 // vocabulary, the l0-int8 prefill). An asked --max-len keeps auto's one-card / pp rule; --max-num-seqs above 1 never
 // comes here (replica or one card's slots: cli::resolve_max_num_seqs).
-// ON since the operator's ruling of 2026-11-10 (D3, option b): the speed bar holds (1.46x / 1.47x) and the f32-judged
-// twin count (docs/probes/tp-twin-count-2026-11-10.md) finds TP no worse than one card's own paths per divergence
+// ON since the ruling of 2026-11-10 (D3, option b): the speed bar holds (1.46x / 1.47x) and the f32-judged
+// twin count finds TP no worse than one card's own paths per divergence
 // (0.30 against 0.55 rejected) and on every path; D10 / D18 are rounding one card shows too.
 inline constexpr bool kTpAuto = true;
 inline bool tp_auto(const std::string& snapshot_dir, const MaxLenArg& max_len, uint32_t cards, bool blocked) {

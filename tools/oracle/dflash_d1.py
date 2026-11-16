@@ -16,7 +16,7 @@ D1's bars, per draft row:
   sets    the engine's 16 candidates equal the reference's, tie-aware and noise-aware: an id only one side has must
           sit within max(1e-3, 1e-4 x |v|, d_row) of the reference's 16th logit, where d_row is that row's own
           engine-vs-reference logit difference (the largest |engine unary - reference unary| over the row's common
-          candidates). The noise term is the operator's ruling (2026-10-27, the spirit of the MoE gates' f32-judge
+          candidates). The noise term is the ruling (2026-10-27, the spirit of the MoE gates' f32-judge
           near-tie): measured on the card (plan 19f) every set miss was a swap at the 16th place, the swapped id a
           median 0.012 (max 0.09) logits from the reference's 16th logit, while the engine's logits (bf16 GEMV inputs,
           spec 19 §10) differ from the fp32 reference's by a median 0.078 a row - against a fixed window of ~1.4e-3.
@@ -24,11 +24,11 @@ D1's bars, per draft row:
   scores  per draft the realized scores' cosine (aligned by candidate id) >= 0.9999 (bf16 drafter) / 0.999 (int8)
   walk    the K draft ids equal (T = 0); a split whose selector-score margin is within max(the row's own
           engine-vs-reference score noise, 1 bf16 ulp of the top score) is a near-tie, the cosine then over the
-          rows before the split only (operator, 2026-10-29: the 6 splits measured were 0.005-0.09 at noise
+          rows before the split only (the 6 splits measured were 0.005-0.09 at noise
           0.03-0.12, scores 12-36). WALK_TIE_NOISE_X scales the row's noise in that window: 1 (as ruled 2026-10-29)
           until the measurement of the 2026-11-07 ruling confirms the 2x widening (the constant's comment)
 A draft passes on walk and scores; a top-16 set miss beyond the tie window is reported but passes when the walk
-is equal and the scores' cosine meets its bar (operator, 2026-10-28: the misses measured were 16th-place swaps
+is equal and the scores' cosine meets its bar (the misses measured were 16th-place swaps
 0.007-0.01 logits past d_row, cosine 0.999996). Exit 0 when every draft passes. Prints a table (and writes it to --md).
 """
 from __future__ import annotations
@@ -66,7 +66,7 @@ def cosine(a, b) -> float:
 
 # The walk near-tie's noise factor: a split is a near-tie when its margin is within max(WALK_TIE_NOISE_X x the row's
 # own engine-vs-reference score noise, 1 bf16 ulp of the top score).
-# Operator ruling 2026-11-07 (r54.d1_ref: one int8 draft, a4/t2_explain-step p 1042, splits at a 0.004 dead heat after
+# Ruling 2026-11-07 (r54.d1_ref: one int8 draft, a4/t2_explain-step p 1042, splits at a 0.004 dead heat after
 # spec 28d's GEMM change, cosine 0.9999979): measure that draft first (the command in docs/open-work.md, Waiting, row
 # 19), then widen the window to twice the row's noise if the measurement confirms it is a rounding split.
 # ENABLED 2026-11-08 on the measurement (box CPU, both int8 arms): the split at row 4 has the reference's margin
@@ -94,7 +94,7 @@ def compare(rec: dict, out, logits_row) -> dict:
         if only_e or only_r:
             lr = logits_row(j)
             gap = max([abs(float(lr[i]) - edge) for i in only_e] + [abs(ru[r.index(i)] - edge) for i in only_r])
-            # d_row: this row's measured engine-vs-reference logit difference (operator, 2026-10-27; the docstring)
+            # d_row: this row's measured engine-vs-reference logit difference (the docstring)
             d_row = 0.0
             if eng_u is not None:
                 d_row = max([abs(v - ru[r.index(c)]) for c, v in zip(e, eng_u[j]) if c in r], default=0.0)
@@ -109,7 +109,7 @@ def compare(rec: dict, out, logits_row) -> dict:
             split = j
     res["walk"] = split is None
     if split is not None:
-        # Operator ruling 2026-10-29: a walk split whose selector-score margin is within max(the row's own
+        # a walk split whose selector-score margin is within max(the row's own
         # engine-vs-reference score noise, one bf16 ulp of the top score) is a near-tie. Up to the split both walks
         # stand on the same predecessor, so row `split`'s scores are comparable: the reference's margin of its pick
         # over the engine's under its own scores (the engine's margin when its pick is outside the reference's
@@ -237,9 +237,9 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
         with open(md, "a") as f:
             f.write(table)
     ok = n > 0 and n_walk == n and n_cos == n
-    log(f"D1 ties used: {ties} ({noise_ties} by the row's logit difference, operator 2026-10-27)")
-    log(f"D1 set misses passed on walk + cosine: {set_excused} (operator 2026-10-28)")
-    log(f"D1 walk splits passed as near-ties: {walk_ties} (operator 2026-10-29)")
+    log(f"D1 ties used: {ties} ({noise_ties} by the row's logit difference)")
+    log(f"D1 set misses passed on walk + cosine: {set_excused}")
+    log(f"D1 walk splits passed as near-ties: {walk_ties}")
     log("D1 " + ("PASS" if ok else "FAIL") + f" ({run.get('load', '')})")
     return ok, {"n": n, "sets": n_sets, "walk": n_walk, "cos": n_cos, "worst": worst, "ties": ties,
                 "noise_ties": noise_ties, "set_excused": set_excused,

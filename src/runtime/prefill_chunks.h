@@ -12,7 +12,7 @@ namespace runtime {
 
 // The hook's stride for a prefill unit of `rows` (one chunk, or a TP pair of two): the block - the rule of every
 // engine - unless `wide_stride`: then `rows` rounded up to whole blocks when it is wider than one. Only Qwen3.8's
-// prefills (Engine::prefill, the two-card pp_prefill_chunks and tp_prefill_chunks) pass it - plan 5d, operator ruling
+// prefills (Engine::prefill, the two-card pp_prefill_chunks and tp_prefill_chunks) pass it - plan 5d, ruling
 // (A): a 4096-row unit over 2048-position blocks hooks every 4096, the blocks between stored as KV by the hook's store
 // call without a state snapshot of their own; up to 2048 rows the stride is the block, exactly the old rule. The other
 // engines (Kolibri, Flash-Next) and their mocks, whose chunks may span several small blocks, keep a hook at every
@@ -54,7 +54,7 @@ inline uint32_t prefill_chunk_rows(uint32_t pos, size_t remaining, uint32_t chun
   return c;
 }
 
-// Open-work 18 (operator 2026-11-14): Qwen3.8's tail - the last 6144 positions of a hooked prefill
+// Open-work 18: Qwen3.8's tail - the last 6144 positions of a hooked prefill
 // (6144 to 8191 after the round-down) in block-wide chunks. A follow-up turn usually leaves the
 // previous prompt a few ids before its end (the template's "<think>\n" becomes "<think>\n\n</think>");
 // 6144 also keeps the 2048 restart when a client rewrites up to ~6k ids at the end (the last tool

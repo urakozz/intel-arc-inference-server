@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 # The stand-alone icpx build of P-C, oneDNN's bf16_int4 W4A16 matmul (probe_gemm_onednn_int4.cc,
 # docs/08-decode-vs-prefill.md ("How prefill got here")) - a REFERENCE TARGET, not part of the engine.
-# The engine build has no SYCL / icpx (operator, 2026-10-27); this project is configured by hand,
+# The engine build has no SYCL / icpx; this project is configured by hand,
 # after an engine build, and is in neither tools/box_check.sh nor the box rows:
 #
 #   cmake -S tools/probe/onednn -B build-onednn \

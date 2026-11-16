@@ -20,7 +20,7 @@ namespace runtime {
 
 // --- the KV cache's form (spec 12b) --------------------------------------------------
 
-// `--kv-cache bf16|int8`. bf16 is today's cache, bit for bit. int8 is the operator's
+// `--kv-cache bf16|int8`. bf16 is today's cache, bit for bit. int8 is the
 // `rotkv` scheme (spec 12 §8; src/common/kv8.h, src/kernels/kv8.cl): every K and V row
 // rotated by the same 256-point Hadamard and stored as int8 with one fp16 scale per
 // (position, kv head). `B70_KV_CACHE=bf16|int8` sets the default (read at each call,
@@ -305,7 +305,7 @@ uint32_t prefill_chunk_cap_for(uint32_t chunk, const model::ModelDesc& desc);
 // The cap an engine uses when nobody set one (Engine / PipelineEngine::set_prefill_chunk_cap):
 // kCDefault. Only a test moves it, for its whole process (testing:: below, through the
 // `--chunk-cap N` argument of tests/chunk_cap_arg.h) - how the gate tests run the same
-// binaries at 4096. No CLI flag, server option or environment variable reaches it (operator,
+// binaries at 4096. No CLI flag, server option or environment variable reaches it
 // 2026-11-03: no new engine env vars): the CLIs choose the cap themselves (cli/max_len.h).
 uint32_t default_prefill_chunk_cap();
 namespace testing {

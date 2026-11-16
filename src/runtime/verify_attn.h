@@ -9,14 +9,14 @@
 // measured table: Dpas from `dpas_from` keys of row 0 (pos + 1) on. Ties and noise keep v2 (plan 28c Task 4's
 // verdict rule: paired v2 / dpas >= 1.03 with the range's low end > 1.00).
 //
-// Not a user flag and not an environment variable (the operator, 2026-11-03: no new env vars in the engine): the
+// Not a user flag and not an environment variable (no new env vars in the engine): the
 // only override is `CaptureOptions::force_attn` (runtime/gemv_kind.h, beside 28b's force_linear), for tests and probes that compare the two kernels inside one list
 // (V2 / Dpas at every M >= 2 the table has a row for; M = 1 and other heads stay V2 whatever it says).
 //
 // Depth is not known at capture: a captured list replays at every position. Where every row's dpas_from is 0 or
 // never (verify_attn_depth_free), the capture decides by M alone (keys = 1 decides like any other depth there).
 //
-// This sits beside spec 28b's gemv_kind(M) (the capture's GEMM choice by M); built before 28b merged (operator
+// This sits beside spec 28b's gemv_kind(M) (the capture's GEMM choice by M); built before 28b merged (
 // ruling 2026-11-01), so it does not depend on it - one more capture-time rule by M, rebased onto 28b's capture.
 #include <cstdint>
 
@@ -33,7 +33,7 @@ struct VerifyAttnRow {
   uint32_t dpas_from;   // row 0's key count (pos + 1) from which DPAS is bound; kDpasNever: never
 };
 
-// docs/probes/probe-verify-attn-2026-11-03.md §2 / §5 (busy-box timing, card 1; to be re-checked on a quiet box): v2 /
+// A probe (busy-box timing, card 1; to be re-checked on a quiet box): v2 /
 // dpas paired at 512 | 1448 | 4096 | 11585 | 32768 | 130816 keys (the verdict: >= 1.03 with the range's low end > 1.00,
 // and N1); dpas_from = the smallest measured depth from which every verdict is dpas.
 // One row per built (M, KV form): bf16 and int8 at M = 2..8 (spec 19v3a adds the int8 DFlash rows).
@@ -51,7 +51,7 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {16, false, 0},     // open-work 28: the wide list's 16 rows - no v2 there (DPAS KS 1 at 32 key blocks)
     {32, false, 0},     // spec 32: the deep lists - the 16-row line in row chunks of 16 (RCHUNK)
     {64, false, 0},
-    // int8: N1 now holds at every depth (worst 0.9999984 at 130816; the 4096 row that needed the operator ruling of
+    // int8: N1 now holds at every depth (worst 0.9999984 at 130816; the 4096 row that needed the ruling of
     // 2026-11-03 - P in bf16 - is 0.9999999). M = 2 at 4096 is 1.01 with its low end 0.999: v2 there.
     {2, true, 11585},   // 0.57 | 0.59 | 1.01 | 1.75 | 2.05 | 2.36
     {3, true, 4096},    // 0.74 | 0.69 | 1.32 | 1.50 | 1.83 | 2.02
@@ -63,7 +63,7 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
 };
 
 // Spec 32e: the per-depth cap of the deep lookup verify lists, from one in-place timing (card 0, 2026-11-16, commit(0)
-// medians, docs/probes/probe-gemm-sm-v2-2026-11-15.md): a width is used at a key count only while it emits at least
+// medians): a width is used at a key count only while it emits at least
 // 1.10x the next narrower width's ids a plain step when fully accepted. 32 rows against 16: 1.50x / 1.39x / 1.26x at
 // 4,096 / 32,768 / 98,304 keys - no cap. 64 against 32: 1.21x / 1.17x / 1.10x - 1.10x near 93,700 keys.
 inline constexpr uint32_t kDeep64MaxKeys = 90112;
@@ -80,7 +80,7 @@ inline const char* verify_attn_force_name(VerifyAttnForce f) {
 
 // The heads attn_verify_dpas is built at: Qwen3.8's 24 / 4, and (spec 17d) a tensor-parallel card's 12 / 2 - the same
 // groups of 6, the same walk per work-group, half the work-groups; the table's crossovers are the one-card build's
-// (measured at 24 / 4; the per-card lists bind at the same depths, operator decision recorded in plan 17d).
+// (measured at 24 / 4; the per-card lists bind at the same depths, decision recorded in plan 17d).
 inline bool verify_attn_heads(uint32_t q_heads, uint32_t kv_heads) {
   return (q_heads == 24 && kv_heads == 4) || (q_heads == 12 && kv_heads == 2);
 }
@@ -101,7 +101,7 @@ inline bool verify_attn_depth_free(uint32_t M, bool kv8) {
   return r == nullptr || r->dpas_from <= 1 || r->dpas_from == kDpasNever;   // keys >= 1 always
 }
 
-// The engines' second list (spec 28c §3; the operator's decision 3 of 2026-10-31): the key count from which the
+// The engines' second list (spec 28c §3; decided 2026-10-31): the key count from which the
 // list at M must bind DPAS while the list captured by the rule (at keys 1) binds v2 - a finite dpas_from > 1 at
 // Qwen3.8's heads - or kDpasNever when one list serves every depth.
 inline uint32_t verify_attn_deep_from(uint32_t M, bool kv8, uint32_t q_heads, uint32_t kv_heads) {

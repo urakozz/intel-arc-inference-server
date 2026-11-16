@@ -13,9 +13,9 @@ and only the first N layers (1..50; the default 5 holds both kinds: 4 sliding + 
                 layer_types = the real pattern[:N], every other key unchanged; plus
                 quantization_config as AutoRound writes it (quant_method auto-round, packing_format
                 auto_round:auto_gptq, bits 4, group_size 64, sym, extra_config bits 16 for the
-                router mlp.gate (the operator's export's rules) and - the bf16 arm - attention)
+                router mlp.gate (our export's rules) and - the bf16 arm - attention)
   int4          every routed and shared expert's gate/up/down_proj (the shared experts as the
-                operator's export ships them, operator ruling 2026-10-31) (and q/k/v/o_proj in the int4 arm), packed
+                our export ships them, ruling 2026-10-31) (and q/k/v/o_proj in the int4 arm), packed
                 by RTN (pack_rtn_g64): per 64-row group of K, scale = max|w| / 8 rounded to f16,
                 q = clamp(round(w / scale) + 8, 0, 15), nibbles low-first along K; qweight I32
                 [K/8, N], scales F16 [K/64, N], qzeros I32 [K/64, N/8] all 0x77777777 - the bytes of

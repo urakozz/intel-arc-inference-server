@@ -12,7 +12,7 @@ assert_quant_invariants), plus what spec 20 §3.1 fixes for Kolibri:
                        `dynamic` rules only "-:" exclusions; every `extra_config` entry bits 16, or
                        bits 4 at g64 / g128 symmetric
   int4 linears         every routed and shared expert's gate/up/down_proj (the shared experts int4 as the
-                       operator's export ships them, operator ruling 2026-10-31) (and q/k/v/o_proj with
+                       our export ships them, ruling 2026-10-31) (and q/k/v/o_proj with
                        --attn int4):
                        qweight I32 [K/8, N], scales F16 [K/64, N] (g64 exactly), finite (subnormals
                        counted), qzeros I32 all 0x77777777 when shipped, g_idx (if any) the identity

@@ -266,7 +266,7 @@ void print_rollup(const char* title, const char* what, std::vector<Agg> rows, ui
 // then missed their in-situ→bench prediction in OPPOSITE directions (L1 by
 // +0.087 ms, L5 by −0.319), which is a resolution limit rather than a missing
 // constant, and every remaining candidate on the menu is smaller than it
-// (docs/superpowers/specs/2026-08-25-spec1.5-reassessment.md §5.4).
+// (spec 1.5's reassessment, its section 5.4).
 //
 // A "session" here is `--steps` instrumented replays run after rewinding
 // `Control::pos` to the post-ingest value, so **every session profiles the
@@ -733,7 +733,7 @@ int run(int argc, char** argv) {
            repeats = f.repeats.value;
   cli::MaxLenArg max_len_arg = cli::parse_max_len(f.max_len);
   uint32_t max_len = max_len_arg.value;   // 0 for auto until cli::settle
-  // The zero-config cleanup (operator 2026-11-06): the engine decides the device memory the plan leaves free
+  // The zero-config cleanup: the engine decides the device memory the plan leaves free
   // (runtime::kDefaultReserveGb), the lm_head (int8, as b70-serve: spec 9 - loader::LmHeadForm stays the tests'
   // seam for the checkpoint's bf16 head) and the card (card 0 of what Level Zero shows; two cards: 0 and 1).
   const size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);

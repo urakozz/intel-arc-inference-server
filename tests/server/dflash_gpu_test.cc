@@ -3,7 +3,7 @@
 //
 //   D2   greedy, 256 ids, K = 7, 3 and the AdaptiveK policy over MtpCost::dflash (the server's --spec dflash
 //        default), against the plain step() loop of the same engine, on the three golden prompts and the 36 A4
-//        tool-call prompts. Spec 28 N6 (plan 28b; the operator's ruling 2026-11-03): the M = k + 1 rows run gemm_sm
+//        tool-call prompts. Spec 28 N6 (plan 28b; the ruling 2026-11-03): the M = k + 1 rows run gemm_sm
 //        and are no longer bitwise M = 1, so a run passes when it is identical or the f32 judge rejects no more of
 //        its ids than of the plain run's from their first divergence (tests/server/spec_judge.h; B70_DUMP_FORCED /
 //        B70_FORCED_JUDGE); without a judge the golden tie rule decides. The tie census stays printed (before

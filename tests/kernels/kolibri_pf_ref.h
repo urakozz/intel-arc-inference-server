@@ -124,7 +124,7 @@ inline std::vector<uint16_t> gather(const Sorted& st, const uint16_t* x, uint32_
 }
 
 // kol_pf_dequant_gu: block e of the gate||up batch as bf16 [hidden][2I] (interleave16 kept); block 384 the
-// shared expert's own int4 block (operator ruling 2026-10-31), dequantised as a routed one.
+// shared expert's own int4 block, dequantised as a routed one.
 inline std::vector<uint16_t> dequant_gu(const uint32_t* gu, const uint32_t* sh_gu, uint32_t e) {
   return pf_moe_ref::dequant_block(e < kE ? gu + size_t(e) * kolibri_ref::gate_up_block_words() : sh_gu, kH, 2 * kI);
 }

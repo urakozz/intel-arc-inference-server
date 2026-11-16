@@ -378,7 +378,7 @@ void test_kv_bytes_fn() {
   std::printf("  kv_bytes(n): entries sized by the engine's own function (blocks %zu B, not %zu)\n", kv(8), 8 * kv(1));
 }
 
-// Plan 5d, operator ruling (A): under 4096-row chunks the blocks stay 2048 for hashing and
+// Plan 5d, ruling (A): under 4096-row chunks the blocks stay 2048 for hashing and
 // the KV ranges, and the engine's hook fires only at chunk ends that are block ends - every
 // second block (runtime/prefill_chunks.h). Here: block 4, the hook every 8 positions. A
 // block end without a state is a stored KV block and no snapshot; a hit there resumes from

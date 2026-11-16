@@ -90,7 +90,7 @@ def compare_baseline(engine_dir, baseline_path, out_path):
         row['baseline_E'] = expected(row['baseline_counted'], row['baseline_accepted'])
         if abs(row['baseline_E'] - baseline['corpora'][corpus][str(k)]['engine_E']) > 1e-9:
             raise ValueError(f'{corpus} K={k}: original acceptance does not calibrate on these taps/greedy ids')
-        # Signed (engine - baseline). Operator ruling 2026-11-14: the 16-anchor corpora cannot resolve a row below one
+        # Signed (engine - baseline).  the 16-anchor corpora cannot resolve a row below one
         # anchor (0.0625), so a row is recorded and the gate is pooled - one-sided, as spec 19 v3 §3.2 words it.
         row['gap'] = row['engine_E'] - row['baseline_E']
         weighted += row['gap'] * row['anchors']
@@ -105,7 +105,7 @@ def compare_baseline(engine_dir, baseline_path, out_path):
     passed = report['pooled_gap'] >= -0.05
     print(f"G_DRAFTER_POOLED anchors={anchors} gap={report['pooled_gap']:+.5f} {'PASS' if passed else 'FAIL'}",
           flush=True)
-    # Each corpus pooled over its K rows at the same bar (operator 2026-11-14): one corpus (a4) holds most anchors,
+    # Each corpus pooled over its K rows at the same bar: one corpus (a4) holds most anchors,
     # so the all-corpus pool alone would hide a small corpus losing a whole token.
     report['corpus_gap'] = {}
     for corpus, (w, n) in sorted(per_corpus.items()):

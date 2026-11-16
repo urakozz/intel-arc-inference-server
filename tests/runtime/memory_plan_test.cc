@@ -590,7 +590,7 @@ void check_chunk_cap() {
   CHECK_EQ(runtime::prefill_chunk_cap_for(2048, o), 2048u);
   CHECK(throws([&] { runtime::prefill_chunk_cap_for(4097, q); }, "4096"));
   CHECK_EQ(runtime::prefill_chunk_cap_for(4096, o), 4096u);
-  // The engines' default cap: 2048, read from no environment variable (operator, 2026-11-03);
+  // The engines' default cap: 2048, read from no environment variable;
   // only the test seam moves it (tests/chunk_cap_arg.h), and only to a cap.
   CHECK_EQ(runtime::default_prefill_chunk_cap(), 2048u);
   runtime::testing::set_default_prefill_chunk_cap(4096);
@@ -619,7 +619,7 @@ void check_chunk_cap() {
                runtime::plan(q, 65536, false, kQwenInt8Weights, i8c2, {}, runtime::KvCache::Bf16, dr).drafter_taps,
            size_t{104857600});
 
-  // Operator ruling (i), context first: --max-len auto plans at 2048, and 4096 is taken only
+  // Ruling (i), context first: --max-len auto plans at 2048, and 4096 is taken only
   // when the plan at the session's max_len has room for it anyway.
   struct Row {
     const model::ModelDesc* d;

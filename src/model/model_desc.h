@@ -195,7 +195,7 @@ struct ModelDesc {
 
 const ModelDesc& qwen38();
 // Spec 17b: tensor parallel over two cards (`--parallel tp`). How the two cards add their halves of a row-parallel
-// linear (out_proj, o_proj, down) into the residual - plan 17b's review, operator decision D1:
+// linear (out_proj, o_proj, down) into the residual - plan 17b's review, decision D1:
 //   Slices  each card runs the linear at the one-card S / 2 over the one-card slice boundaries (card 0 slices
 //           0 .. S/2 - 1, card 1 the rest) and sends its raw slices; both cards fold all S in one-card order, so
 //           every output is BITWISE one card's;

@@ -579,7 +579,7 @@ class KolibriRef:
     def generate(self, ids, n: int, rec: Recorder | None = None, log=None, force=None):
         """Prompt forward, then n greedy steps through the cache. Returns (logits [T + n, V], tokens [n]),
         dump.py's convention: tokens[0] = argmax(logits[T - 1]); logits[T + j] consumed tokens[j]. `force`:
-        ids teacher-forced instead of the argmax (the f32 judge on the bf16 golden's tokens, operator 2026-10-31)."""
+        ids teacher-forced instead of the argmax (the f32 judge on the bf16 golden's tokens)."""
         cache = self.new_cache()
         ids = list(ids)
         t = time.time()

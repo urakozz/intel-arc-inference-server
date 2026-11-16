@@ -9,7 +9,7 @@ weights), a tiny target (embedding / head) and a dump in dump_taps.py's format, 
 2. A changed draft id fails the walk; a far candidate swapped into a row fails the sets; scaled scores fail the
    cosine bar.
 3. A near tie at the 16th slot is excused (sets pass, counted as a tie); with the engine's unary on the record, a
-   swap within the row's own logit difference is excused too (operator, 2026-10-27), one beyond it is not.
+   swap within the row's own logit difference is excused too, one beyond it is not.
 4. The int8 arm builds the reference with the int8-simulated drafter and head (records from it pass).
 """
 import copy
@@ -104,7 +104,7 @@ def test_self_passes_and_failures():
         far = next(i for i in range(500) if i not in bad[0]["cand"][2])
         bad[0]["cand"][2][15] = far
         ok, st = _eval(tmp, run, bad, dumps, drafter, target)
-        # A set miss alone passes when the walk is equal and the cosine meets the bar (operator, 2026-10-28).
+        # A set miss alone passes when the walk is equal and the cosine meets the bar.
         assert st["sets"] == 2 and st["walk"] == 3 and ok == (st["cos"] == 3), st
         assert st["set_excused"] == int(ok), st
         bad = copy.deepcopy(recs)
@@ -127,7 +127,7 @@ def test_near_tie_excused():
         lg[99] = logit_99
         c = d1.compare(rec, out, lambda j: lg)
         assert c["sets"] == excused and c["ties"] == int(excused) and c["walk"], (logit_99, c)
-    # The noise-aware tie (operator, 2026-10-27): with the engine's unary on the record, the window widens to the
+    # The noise-aware tie: with the engine's unary on the record, the window widens to the
     # row's own logit difference over the common candidates - here 0.05 (slot 3) - so 99 at 0.04 from the 16th logit
     # is excused (a noise tie), at 0.1 it is not.
     eng_u = unary[0].tolist()[:15] + [15.0]
@@ -142,7 +142,7 @@ def test_near_tie_excused():
 
 def test_walk_near_tie():
     # compare() on a planted 2-row draft: the reference's walk picks candidate 0 at row 0 (score 20.0), the engine
-    # candidate 1. A near-tie (operator, 2026-10-29) when the reference's margin is within max(the row's own score
+    # candidate 1. A near-tie when the reference's margin is within max(the row's own score
     # noise, 1 bf16 ulp of 20.0 = 0.125); the cosine then covers the rows before the split (none: 1.0).
     from types import SimpleNamespace
     cand = torch.arange(32).view(2, 16)
@@ -155,7 +155,7 @@ def test_walk_near_tie():
 
 
 def test_walk_near_tie_noise_factor():
-    # The prepared widening (operator, 2026-11-07; dflash_d1.WALK_TIE_NOISE_X): row 0's engine scores sit 0.2 off the
+    # The prepared widening (dflash_d1.WALK_TIE_NOISE_X): row 0's engine scores sit 0.2 off the
     # reference's (the row noise), the reference's margin is 0.3 (> 1 bf16 ulp of 20.0 = 0.125): beyond the 1x window,
     # within the 2x one. The shipped factor is 1 (the 2026-10-29 rule) until the measurement confirms the widening.
     from types import SimpleNamespace

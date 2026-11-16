@@ -861,7 +861,7 @@ add_test(NAME slot_plan_test COMMAND slot_plan_test)
 # default with no argument to the HF repo id
 # "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ", which loader::resolve_snapshot
 # (src/loader/snapshot.cc) follows through the cache's refs/main pointer -
-# whatever revision the operator downloaded last, not necessarily one this
+# whatever revision was downloaded last, not necessarily one this
 # loader accepts: refs/main has pointed at a snapshot whose config.json carries
 # a broken non-exclusion dynamic-quant rule that src/loader/quant.cc correctly
 # refuses (see BENCHMARKS.md). A bare `ctest` must not depend on that pointer,
@@ -871,7 +871,7 @@ add_test(NAME slot_plan_test COMMAND slot_plan_test)
 # CMake cache variable (B70_TEST_SNAPSHOT), defaulted to the gate checkpoint's
 # known-good snapshot, resolved against $HF_HOME (or ~/.cache/huggingface) the
 # same way the loader itself does. Override with -DB70_TEST_SNAPSHOT=<dir> at
-# configure time if the operator's cache moves the working snapshot; this never
+# configure time if our cache moves the working snapshot; this never
 # mutates the HF cache itself.
 #
 # 2026-09-09 (ruling A31): the gate checkpoint is
@@ -880,7 +880,7 @@ add_test(NAME slot_plan_test COMMAND slot_plan_test)
 # Vishva007's 2a90776, was deleted from the box on 2026-09-09; its golden set in
 # `oracle-out/` belongs to THAT checkpoint's weights and is not reused - the
 # golden registrations below take B70_TEST_ORACLE_DIR, one golden set per
-# checkpoint (tools/oracle/README.md), and SKIP (77) until the operator has
+# checkpoint (tools/oracle/README.md), and SKIP (77) until it has
 # dumped it.
 if(DEFINED ENV{HF_HOME})
   set(_b70_hf_home "$ENV{HF_HOME}")
@@ -1494,7 +1494,7 @@ if(B70_TOKENIZER_ENABLED)
   target_link_libraries(prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
     b70_model b70_l0 b70_prefill_host)
   add_dependencies(prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
-  # l0 takes the near-tie allowance of 1 too (operator ruling, spec 7 §8): sequence e's
+  # l0 takes the near-tie allowance of 1 too (spec 7 §8): sequence e's
   # row 30 flip (0.108 bf16 ulp) is the GDN chunk-boundary rounding class of
   # docs/08-decode-vs-prefill.md ("How prefill got here"), not a cache fault.
   add_test(NAME prefix_gpu_l0_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
@@ -1557,12 +1557,12 @@ if(B70_MTP)
   # contexts - tools/box_validate/f32_refs.sh forced-qwen makes them on the box CPU into the data tree's
   # oracle-out-qwen-f32{,-i8head}-forced (data.sh links them here); the bf16 head's for the checkpoint-head tests, the
   # int8 head's for the tests that load LmHeadForm::Int8. A divergence whose judge is not there yet AWAITS it: the
-  # test exits 77 (SKIP) when nothing else failed (operator 2026-11-04).
+  # test exits 77 (SKIP) when nothing else failed.
   set(B70_QWEN_FORCED_JUDGE "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts, bf16 head (spec_judge.h's B70_FORCED_JUDGE)")
   set(B70_QWEN_FORCED_JUDGE_I8HEAD "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts, the engine's int8 head")
-  # The judge by prefill form (operator ruling 2026-10-23): the tests that prefill with l0-int8 (every mtp_gpu_test
+  # The judge by prefill form: the tests that prefill with l0-int8 (every mtp_gpu_test
   # registration) are judged by references whose prompt pass applies the same int8 rounding - f32_refs.sh
   # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form). Open-work 17:
   # int8 on the MLP's linears only (the mixer linears bf16), so a new dir and variable name - the old ones hold the
@@ -1576,7 +1576,7 @@ if(B70_MTP)
     "Qwen3.8's f32 judges with the l0-int8 prompt pass and the int8 KV cache (mtp_gpu_kv8_test)")
   set(B70_QWEN_FORCED_JUDGE_I8HEAD_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-kv8-forced" CACHE PATH
     "Qwen3.8's f32 judges with the int8 head and the int8 KV cache (the DFlash *_kv8_test)")
-  # The operator's bf16-unstable rule (2026-11-04, spec_judge.h): standard transformers bf16 references, top-k only
+  # The bf16-unstable rule (2026-11-04, spec_judge.h): standard transformers bf16 references, top-k only
   # (tools/oracle/qwen_bf16_top.py: <key>.bf16top.safetensors, both head forms in one dir), read as B70_FORCED_BF16.
   set(B70_QWEN_FORCED_BF16TOP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-bf16top-forced" CACHE PATH
     "Qwen3.8's standard-bf16 top-k references of the forced contexts (spec_judge.h's bf16-unstable rule)")
@@ -1681,7 +1681,7 @@ exec "$@"
     if(TARGET mtp_gpu_test)
       add_test(NAME mtp_gpu_${_tag}_test COMMAND sh -c "${_b70_longctx_gate}" b70_longctx
         $<TARGET_FILE:mtp_gpu_test> ${B70_TEST_SNAPSHOT} l0-int8 --max-len ${_len})
-      # The bf16-unstable rule's references as for mtp_gpu_test (operator 2026-11-07: the same prompts and positions;
+      # The bf16-unstable rule's references as for mtp_gpu_test (the same prompts and positions;
       # their own contexts' bf16 top-k files come from f32_refs.sh bf16top-qwen over r69.forced_dumps' longctx dumps).
       set_tests_properties(mtp_gpu_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
         SKIP_RETURN_CODE 77
@@ -1720,7 +1720,7 @@ endif()
 set_tests_properties(${_b70_plan_box_tests} PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
 # --- Spec 15c: Ornith 1.5 35B-A3B decode on the card (label `ornith`) ----------------
-# The int4 checkpoint is the operator's AutoRound W4A16 g64 export,
+# The int4 checkpoint is our AutoRound W4A16 g64 export,
 # urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ (spec 15 decision 1, settled in §13);
 # B70_ORNITH_SNAPSHOT names it (resolved in the HF cache). Until it is on the machine
 # ornith_decode_test SKIPs (77), and the golden registrations SKIP on the absent
@@ -1735,7 +1735,7 @@ if(B70_ORNITH)
     CACHE STRING "Ornith int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
   set(B70_ORNITH_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith"
     CACHE PATH "The CPU-oracle golden set of Ornith (spec 15a), with router_logits.L* for R2")
-  # Operator ruling 2026-10-23: the token gates' judge (tests/golden/golden_common.h, `--judge=`) -
+  # the token gates' judge (tests/golden/golden_common.h, `--judge=`) -
   # the f32 teacher-forced reference, tools/box_validate/f32_oracle.sh <data tree> ornith.
   set(B70_ORNITH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32"
     CACHE PATH "Ornith's f32 teacher-forced reference (the golden gates' judge)")
@@ -1786,7 +1786,7 @@ if(B70_ORNITH)
 endif()
 
 # --- Spec 12b: the int8 KV cache (`--kv-cache int8`, src/kernels/kv8.cl) ----------------
-# Written blind on the Mac; docs/superpowers/plans/box-validation-queue.md row 11 is the order
+# Written blind on the Mac; the box validation queue row 11 is the order
 # to run these in. `kv8` labels all of them: `ctest -L kv8`.
 if(B70_KV8)
   set(B70_KV8_KERNELS
@@ -2004,7 +2004,7 @@ if(B70_KV8)
 endif()
 
 # --- Spec 15d: Ornith 1.5 35B-A3B prefill (label `ornith`) ---------------------------------
-# Written blind on the Mac (docs/superpowers/plans/box-validation-queue.md row 13 is the
+# Written blind on the Mac (the box validation queue row 13 is the
 # order to run these in). The host reference test runs everywhere; the rest need a B70, and
 # the checkpoint ones SKIP (77) until the Ornith int4 checkpoint (15a) and its golden set
 # `oracle-out-ornith` are on the machine, as 15c's do.
@@ -2080,15 +2080,15 @@ if(B70_ORNITH)
   foreach(b l0 l0-int8)
     set(_near 0)
     set(_judge ${B70_ORNITH_F32_DIR})
-    # Known divergences (operator ruling 2026-10-23, debug 2026-10-26; golden_common.h): exactly
+    # Known divergences (debug 2026-10-26; golden_common.h): exactly
     # the rows that failed that day - golden_common.h AcceptList. cjk 15's engine id at c16 is 99737 (the l0 c16 runs of
     # 2026-11-12 / 13), so the entry names it (item 30 (4)).
     set(_acc_one "")
     set(_acc_c16 "cjk:15=99737")
     if(b STREQUAL "l0-int8")
-      # Plan 2026-11-12 (operator): l0-int8's experts are W4A8, judged by the PLAIN f32 reference (the pfi8 judge
+      # Plan 2026-11-12: l0-int8's experts are W4A8, judged by the PLAIN f32 reference (the pfi8 judge
       # simulates the rotated int8 form it replaced) under the gate's near-miss rule (prefill_gate_test.cc), no
-      # per-row accept lists - except cjk row 15 (f32 margin 3.02 ulp; l0 misses it at c16 too), operator
+      # per-row accept lists - except cjk row 15 (f32 margin 3.02 ulp; l0 misses it at c16 too), accepted
       # 2026-11-15, for the engine's id 99737 there only (item 30 (4): golden_common.h AcceptList's `=id`).
       set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
       set(_acc_one "cjk:15=99737")
@@ -2102,7 +2102,7 @@ if(B70_ORNITH)
       --accept=${_acc_c16} prose,code,cjk 16 ${b} ${_near})
     add_test(NAME prefill_split_ornith_${b}_test COMMAND prefill_split_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR}/long32k.ids ${b})
-    # Its routes and token rows go to the PLAIN f32 judge on both backends (operator, 2026-10-29: l0-int8 too,
+    # Its routes and token rows go to the PLAIN f32 judge on both backends (l0-int8 too,
     # under the same no-further-from-f32-than-the-bf16-golden rule); the l0-int8 token gate keeps pfi8 above.
     add_test(NAME ornith_prefill_${b}_test COMMAND ornith_prefill_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR} ${b} ${B70_ORNITH_ORACLE_DIR} --judge=${B70_ORNITH_F32_DIR})
@@ -2111,11 +2111,11 @@ if(B70_ORNITH)
     set_tests_properties(prefill_split_ornith_${b}_test ornith_prefill_${b}_test PROPERTIES
       LABELS "checkpoint;prefill;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
-    # Operator ruling 2026-10-29: the split runs judged by the f32 reference of long32k[0, 2600), no further from it
+    # the split runs judged by the f32 reference of long32k[0, 2600), no further from it
     # than the bf16 reference (tools/box_validate/f32_refs.sh split; absent: the fixed bars).
     set_tests_properties(prefill_split_ornith_${b}_test PROPERTIES ENVIRONMENT
       "B70_SPLIT_REFS=${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-f32.golden.safetensors,${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-bf16.golden.safetensors")
-    # Operator ruling 2026-10-31 (round 2): l0-int8 on a MoE model is opt-in and its accuracy gates are diagnostic
+    # l0-int8 on a MoE model is opt-in and its accuracy gates are diagnostic
     # (the tests print their verdicts and do not fail on them); prefill_gate's quantisation-aware judge (pfi8: a miss
     # there is a kernel error, not an accuracy loss) still gates.
     if(b STREQUAL "l0-int8")
@@ -2246,7 +2246,7 @@ if(B70_ORNITH AND B70_MTP)
     set_tests_properties(ornith_mtp_test ornith_mtp_bf16head_test mtp_head_ornith_test PROPERTIES
       LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
-    # Operator ruling 2026-10-29: M1 judged by the f32 reference of the same rows (tools/box_validate/f32_refs.sh
+    # M1 judged by the f32 reference of the same rows (tools/box_validate/f32_refs.sh
     # ornith-mtp), the engine missing no more rows than the bf16 reference.
     set_tests_properties(mtp_head_ornith_test PROPERTIES
       ENVIRONMENT "B70_MTP_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp-f32/m1")
@@ -2330,7 +2330,7 @@ endif()
 
 # ==== Spec 16b: pipeline parallel decode across two B70s ================================
 # Written blind on the Mac (no box, and no multi-device Level Zero on a Mac at all);
-# docs/superpowers/plans/box-validation-queue.md row 22 is the order to run these in.
+# the box validation queue row 22 is the order to run these in.
 # `pp` labels the device ones: `ctest -L pp`.
 #
 # Host, no device: the planner (stages, weights by device, the per-device plan, auto split
@@ -2796,7 +2796,7 @@ set_tests_properties(kolibri_plan_test PROPERTIES LABELS kolibri)
 if(B70_KOLIBRI)
   set(B70_KOLIBRI_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri"
     CACHE PATH "The real checkpoint's golden set (kolibri_oracle.sh real): <prompt>.ids + .golden.safetensors")
-  # Operator ruling 2026-10-31 (round 2): Kolibri's golden gates judged by the f32 reference teacher-forced on each
+  # Kolibri's golden gates judged by the f32 reference teacher-forced on each
   # golden's tokens (kolibri_oracle.sh real-f32 / synth-f32; kolibri_golden_test.cc / kolibri_partial_test.cc
   # `--judge=`): the engine no further from f32 than the bf16 golden.
   set(B70_KOLIBRI_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-f32"
@@ -2833,7 +2833,7 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_partial_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} 30)
   add_test(NAME kolibri_partial_eager_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} 30)
   set_tests_properties(kolibri_partial_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
-  # Operator ruling 2026-10-29: eager is diagnostic - under the f32 judge these print their verdicts, never fail.
+  # eager is diagnostic - under the f32 judge these print their verdicts, never fail.
   set_property(TEST kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test
     kolibri_partial_eager_test APPEND PROPERTY LABELS diagnostic)
   set_tests_properties(kolibri_decode_synth_test kolibri_golden_synth_int4attn_test kolibri_golden_synth_bf16attn_test
@@ -2858,7 +2858,7 @@ if(B70_KOLIBRI)
     int8 pp2)
   add_test(NAME kolibri_golden_eager_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} pp2)
   set_tests_properties(kolibri_golden_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
-  set_property(TEST kolibri_golden_eager_test APPEND PROPERTY LABELS diagnostic)   # operator ruling 2026-10-29
+  set_property(TEST kolibri_golden_eager_test APPEND PROPERTY LABELS diagnostic)   # ruling 2026-10-29
   add_test(NAME kolibri_decode_test COMMAND kolibri_decode_test ${B70_KOLIBRI_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids pp2)
   set_tests_properties(kolibri_golden_test kolibri_golden_i8head_test kolibri_golden_eager_test
@@ -3769,7 +3769,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     endif()
   endforeach()
 endif()
-# Plan: docs/superpowers/plans/2026-10-05-spec19c-dflash-engine-loop.md. Host: the arithmetic the loop rests on
+# Host: the arithmetic the loop rests on
 # (the tap sites, the verify slots, the planner's terms, the cost table, the sparse-q acceptance). Box: the engine
 # with the real drafter beside the gate checkpoint (dflash_engine_test).
 # Task 3 / D4: lossless sampling with the drafter's sparse q (server::accept_sparse), 10^6 seeded draws. Host only.
@@ -3855,7 +3855,7 @@ b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolib
 # spec 19d: b70-decode stays one card (b70-serve --parallel pp serves the drafter).
 b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --parallel pp
   --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "b70-decode --spec dflash runs on one card")
-# Qwen3.8's --spec dflash has no default drafter (operator 2026-11-14): the refusal names the two choices.
+# Qwen3.8's --spec dflash has no default drafter: the refusal names the two choices.
 b70_cli_reject(cli_reject_dflash_no_draft_model ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash
   EXPECT "needs --draft-model")
 set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_spec_max
@@ -3893,7 +3893,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
 endif()
 # ==== Spec 19c ==== (end) ====
 # ==== Spec 19d: DFlash in the server ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-05-spec19d-dflash-serving.md. Host: the drafter's ring across a prefix-cache
+# Host: the drafter's ring across a prefix-cache
 # restore through PrefixSession (decision 5), the store keyed by the drafter. Box: the same on the card.
 add_executable(dflash_prefix_test server/dflash_prefix_test.cc)
 target_include_directories(dflash_prefix_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3977,7 +3977,7 @@ add_test(NAME tp_shapes_test COMMAND tp_shapes_test)
 
 # ==== Kolibri DSpark: speculative decoding for Kolibri-1 (label kolibri) ==== (begin) ====
 # intuit/Kolibri-1-dspark beside Kolibri-1 (docs/17-running-models.md "Kolibri-1 with DSpark"). Host tests run on the Mac's
-# build tree and the box's; the card tests wait for the operator's first run (after Flash-Next).
+# build tree and the box's; the card tests wait for the first run (after Flash-Next).
 # The descriptor: the speculators config -> the DSpark form, held to its kernels and to Kolibri-1. Host only.
 add_executable(dspark_desc_test model/dspark_desc_test.cc)
 target_include_directories(dspark_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -4012,7 +4012,7 @@ target_include_directories(kolibri_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(kolibri_spec_test PRIVATE b70_server)
 add_test(NAME kolibri_spec_test COMMAND kolibri_spec_test)
 set_tests_properties(kolibri_spec_test PROPERTIES LABELS kolibri)
-# On the cards (box only, NOT YET RUN: the operator's first card run after Flash-Next; SKIP 77 without the data):
+# On the cards (box only, NOT YET RUN: the first card run after Flash-Next; SKIP 77 without the data):
 #   kolibri_verify_test   the verify lists against the plain decode list - every row's argmax the plain run's, its logits row
 #                         cosine >= 0.99999 (bitwise expected, counted), partial commits, greedy lossless with the plain
 #                         run's own ids as drafts, the launches at M 2..8 - on the synthetic set (one card, two) and the real

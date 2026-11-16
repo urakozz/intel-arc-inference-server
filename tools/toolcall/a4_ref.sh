@@ -1,7 +1,7 @@
 #!/bin/bash
 # tools/toolcall/a4_ref.sh - the A4 tool-call set and its CPU reference run for a MoE model
 # (spec 15e Task 3: Ornith; spec 20e KL4: Kolibri-1; spec 21e Task 5:
-# Qwen3.8-Flash-Next) - and for Qwen3.8 itself (operator, 2026-11-07) - from the repo (or worktree) root.
+# Qwen3.8-Flash-Next) - and for Qwen3.8 itself - from the repo (or worktree) root.
 #
 #   tools/toolcall/a4_ref.sh qwen set|ref|status    Qwen3.8's own A4 reference (the one r11.a4 / r75.gates score
 #                                                   against, A4_REF_DIR; the earlier one was lost): `set` copies

@@ -3,7 +3,7 @@
 // (runtime::testing::set_default_prefill_chunk_cap) and is removed from argv, so the test's own
 // positional arguments are unchanged. tests/CMakeLists.txt registers the `_cap4096` runs with it.
 //
-// It replaces the B70_PREFILL_CHUNK_CAP environment variable of the first build (operator,
+// It replaces the B70_PREFILL_CHUNK_CAP environment variable of the first build
 // 2026-11-03: no new engine env vars): only a test binary can move the default; the CLIs and the
 // server choose the cap themselves (cli/max_len.h).
 #pragma once

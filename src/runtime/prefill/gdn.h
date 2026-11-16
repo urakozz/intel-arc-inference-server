@@ -58,7 +58,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
 // arithmetic reads it.
 inline constexpr size_t kGdnChunkLaunches = 10;
 
-// MoE-model prefill phase 2 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): a MoE model's
+// MoE-model prefill phase 2: a MoE model's
 // gdn_chunk (Ornith) runs the conv + l2norm as one launch (pf_gdn_front, bitwise) and, on the l0 backend, A / T /
 // w, u / A2 as one launch (pf_gdn_intra, judged). Dense models (Qwen3.8, its TP card) keep the ten launches.
 // The launches one gdn_chunk call appends for `d` on backend `b`.
@@ -72,7 +72,7 @@ size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 bool ab_on_gemm(const model::ModelDesc& d);
 
 // --- the scan's DISPATCH PROOF ----------------------------------------------
-// `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
+// Rule: a
 // gate run was not admissible evidence unless the run itself said which scan
 // entry it launched (the B70_PREFILL_GDN_SCAN selector is gone since the
 // zero-config cleanup; the proof stays). The 2026-09-21

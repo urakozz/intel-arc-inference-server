@@ -1,6 +1,6 @@
 // probe_gdn_scan_occ - open-work 3m: is the GDN prefill scan (`pf_gdn_scan_dpas_split`, the walk's
-// production entry) bound by how many of its work-groups the card holds at once? Record:
-// docs/probes/probe-gdn-prefill-2026-11-10.md. The production kernel only - nothing here is a candidate.
+// production entry) bound by how many of its work-groups the card holds at once?
+// The production kernel only - nothing here is a candidate.
 //
 // The scan's grid is (48 v-heads, 4 state-column chunks) = 192 work-groups of 256 lanes (16 SIMD16
 // threads), each walking the chunk's 64-position sub-chunks in sequence with 40,448 B of SLM. One

@@ -22,7 +22,7 @@ Tests: `python3 tools/prefix/test_analyze_log.py`.
 
 ## DFlash's final speculation replay (spec 19 v2 Task 7b)
 
-Run after the final cost and combined acceptance gates. One idle GPU is sufficient. The operator permits the
+Run after the final cost and combined acceptance gates. One idle GPU is sufficient. The owner permits the
 other card to be busy when more than 16 of 44 CPU threads are available; check that before a card-only run:
 
 ```bash
@@ -46,7 +46,7 @@ filenames reflect a different completion order. `run.json` records the binary ha
 judge result, selected card and resource grade. Missing f32 references leave forced contexts and return **77**, not PASS. This replay alone does
 not establish Task 8's other-corpus or prefill regression bars.
 
-After an operator pause, rerun the same command with `--resume`. The saved `config.json` must match the binary,
+After a pause, rerun the same command with `--resume`. The saved `config.json` must match the binary,
 recording hash, models, serving settings and the complete content manifest of compiled `.bin` kernels.
 The kernel directory defaults to the server build's `kernels/`; `--kernel-dir` names it for a custom layout. Each complete arm is rebuilt from its reply/server logs and checked
 against the saved requests before reuse; an incomplete arm must be moved outside the arm directories first.

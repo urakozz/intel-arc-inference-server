@@ -24,7 +24,7 @@ BV_ROW_IDS=(); BV_ROW_TITLES=(); BV_NOTES=()
 #         g0      - the neutrality gate; a non-PASS here blocks every later stage
 #         default - runs unless deselected
 #         optin   - runs only when named (--with / --only)
-#         manual  - never runs: its body prints the commands for the operator
+#         manual  - never runs: its body prints the commands for the owner
 #   KIND  cpu      - no device; runs without a GPU lock (one cpu stage at a time per tree when
 #                    two orchestrators run: <state root>/.cpu.lock)
 #         gpu      - the WHOLE BOX for the whole stage (tools/gpu_lock.sh box: ~/b70-gpu.lock
@@ -144,7 +144,7 @@ need_ok() {
 BV_BAD=0; BV_OK=0; BV_SKIPS=0
 _bv_ts() { date '+%F %T'; }
 
-# say "<line>" - a command for the operator (manual stages): printed, never run
+# say "<line>" - a command for the owner (manual stages): printed, never run
 say() { printf '    $ %s\n' "$*"; }
 
 # x "<command line>" - run one shell command line in the tree under test (bash -o pipefail),
@@ -315,7 +315,7 @@ serve_arms() {
 }
 
 # serve_judge DIR REF WHAT - a server row's speculative arms against its plain arm REF by the f32 judge (spec 28
-# N6, tests/server/spec_judge.h; operator 2026-11-07): tools/box_validate/serve_judge.py dumps each first
+# N6, tests/server/spec_judge.h;): tools/box_validate/serve_judge.py dumps each first
 # difference's forced contexts to $DATA/oracle-forced-dumps/qwen-serve and judges them with the int8-head f32
 # references (b70-serve loads the int8 head, prefills with l0). A difference without its reference is a SKIP, never a
 # pass: the step is accounted, and BV_JUDGE_RC (77) makes judged_finish return SKIP when nothing failed.

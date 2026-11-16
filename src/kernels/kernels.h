@@ -113,8 +113,7 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 //   magic   the magic-exponent dequant (bit-identical output to the shift form; speed only).
 //   grf256  the variant's ocloc line carries -cl-intel-256-GRF-per-thread.
 //   blk2d   layout 0: the 2D block weight read, copied from gemv's production cell of the shape.
-// The choices are plan 28b's lever measurement (docs/superpowers/specs/2026-10-27-spec28-small-m-
-// verify-gemm-design.md, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
+// The choices are plan 28b's lever measurement (spec 28, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
 enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4 };
@@ -148,7 +147,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
                                                                                    // spec 19 v3d Task 4)
     {17408, 5120, 4, 0, false, true, false, true, kSmAll, 0, kV2Rc32, kV2Rc32},    // down
     {5120, 248320, 1, 2, true, false, false, false, kSmAll, 32},  // the int8 lm_head (gemm_sm_i8w at 32 and 64 too)
-    // Ornith 1.5 35B-A3B's dense projections (spec 15; the operator's 28b addition, 2026-11-01) at its verify
+    // Ornith 1.5 35B-A3B's dense projections (spec 15; the 28b addition, 2026-11-01) at its verify
     // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
     // and the bf16 router stay as they are (spec 28m)
     {2048, 12288, 1, 1, false, true, false, false, kSmVerify4},      // qkv||z

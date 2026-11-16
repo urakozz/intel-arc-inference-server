@@ -76,9 +76,9 @@ case "${1:-}" in
     have oracle_ornith "oracle-out-ornith/ with router_logits.L* (spec 15a)" test -d oracle-out-ornith
     have oracle_ornith_mtp "oracle-out-ornith-mtp/ (spec 15a's MTP head dump: mtp_head_ornith_test, M1)" \
       test -d oracle-out-ornith-mtp
-    # Operator ruling 2026-10-23: the Ornith token gates' JUDGE - the f32 reference teacher-forced on
+    # the Ornith token gates' JUDGE - the f32 reference teacher-forced on
     # the bf16 golden's tokens (tools/box_validate/f32_oracle.sh <data tree> ornith; tests/golden/golden_common.h).
-    have oracle_ornith_f32 "oracle-out-ornith-f32/{prose,code,cjk}.golden.safetensors (the f32 judge, operator ruling 2026-10-23: --with r10.oracle_f32)" \
+    have oracle_ornith_f32 "oracle-out-ornith-f32/{prose,code,cjk}.golden.safetensors (the f32 judge, ruling 2026-10-23: --with r10.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32/$p.golden.safetensors || exit 1; done'
     have oracle_ornith_f32_i8head "oracle-out-ornith-f32-i8head/{prose,code,cjk}.golden.safetensors (the int8 head's quantisation-aware f32 judge: --with r10.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32-i8head/$p.golden.safetensors || exit 1; done'
@@ -91,7 +91,7 @@ case "${1:-}" in
       bash -c 'for p in prose code de_prose de_chat; do test -s oracle-out-kolibri/$p.ids && test -s oracle-out-kolibri/$p.golden.safetensors || exit 1; done'
     have oracle_kolibri_synth "oracle-out-kolibri-synth/{int4attn,bf16attn}/{ckpt/,prose,de_prose} (spec 20c: kolibri_oracle.sh synth)" \
       bash -c 'for a in int4attn bf16attn; do test -s oracle-out-kolibri-synth/$a/ckpt/model.safetensors.index.json || exit 1; for p in prose de_prose; do test -s oracle-out-kolibri-synth/$a/$p.golden.safetensors || exit 1; done; done'
-    # Operator ruling 2026-10-31 (round 2): their f32 judges (kolibri_oracle.sh real-f32 / synth-f32).
+    # their f32 judges (kolibri_oracle.sh real-f32 / synth-f32).
     have oracle_kolibri_f32 "oracle-out-kolibri-f32/{prose,code,de_prose,de_chat}.golden.safetensors (the f32 judge: kolibri_oracle.sh real-f32, --with r24.oracle_real)" \
       bash -c 'for p in prose code de_prose de_chat; do test -s oracle-out-kolibri-f32/$p.golden.safetensors || exit 1; done'
     have oracle_kolibri_synth_f32 "oracle-out-kolibri-synth-f32/{int4attn,bf16attn}/{prose,de_prose}.golden.safetensors (kolibri_oracle.sh synth-f32, --with r24.oracle_synth)" \
@@ -152,7 +152,7 @@ case "${1:-}" in
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
     have xpu_smi "xpu-smi (device memory while serving)" bash -c 'command -v xpu-smi'
     have opencode_log "OPENCODE_LOG=${OPENCODE_LOG:-<unset>} (a request log dir)" test -d "${OPENCODE_LOG:-/nonexistent}"
-    # Qwen3.8's A4 reference (operator, 2026-11-07: tools/toolcall/a4_ref.sh qwen set / ref on the bf16 original, the box
+    # Qwen3.8's A4 reference (tools/toolcall/a4_ref.sh qwen set / ref on the bf16 original, the box
     # CPU) - complete: the set and 36 <name>.bf16.txt. a4_ref (r11.a4 / r75.gates): A4_REF_DIR when set (as before), else
     # this directory once complete (the stages read ${A4_REF_DIR:-oracle-out-qwen-a4}).
     have oracle_qwen_a4 "oracle-out-qwen-a4/ with Qwen3.8's set (tests/golden/toolcall) and 36 <name>.bf16.txt (tools/toolcall/a4_ref.sh qwen set / ref on Qwen/Qwen3.8-27B, the box CPU)" \

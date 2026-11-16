@@ -1,6 +1,6 @@
 // probe_prefill_split - open-work 3k: what a full Qwen3.8 prefill chunk's int4 linears cost on the
-// two prefill backends, split into their kernels, and the multiply's achieved TFLOP/s. Record:
-// docs/probes/probe-prefill-chunk-split-2026-11-10.md. Production kernels only - nothing here is a
+// two prefill backends, split into their kernels, and the multiply's achieved TFLOP/s.
+// Production kernels only - nothing here is a
 // candidate; the probe changes no runtime path.
 //
 // 3i's distinct-layer walk (probe_fused_small --weights layers): each of Qwen3.8's five int4 linear

@@ -14,7 +14,7 @@ activation, GEMM, attention, GDN recurrence and norm in f32; the head is the che
 for the keys --i8head-re matches (the tests that load LmHeadForm::Int8) - the engine's per-row int8 head
 (int8_sim.int8_head_weight, as ornith_ref.py --lm-head int8), written to --out-i8head.
 
---pfi8-re (the l0-int8 tests' judges, operator ruling 2026-10-23 - ornith_ref.py --sim-int8-prefill's rule on
+--pfi8-re (the l0-int8 tests' judges, ruling 2026-10-23 - ornith_ref.py --sim-int8-prefill's rule on
 Qwen3.8): for the keys it matches (PFI8_RE: every mtp_gpu_ key - mtp_gpu_test and its twins run `l0-int8`) the
 positions of the TEST'S OWN prompt (tests/golden/prompts or tests/golden/toolcall <name>.ids, checked to be the key's
 prefix - the dumped context's prompt also holds the ids decoded before the divergence) take spec 5's int8 prefill

@@ -121,7 +121,7 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
   // Device 1: the final norm and the RoPE table now, a placeholder for the embedding (no
   // stage-1 decode list binds it) - or, with the MTP head (spec 16d), a REPLICA of it: the
   // head's drafts and its KV fill gather the embedding rows of ids device 1 itself produced
-  // (the operator's choice in spec 16 §3.1 is open; 16b's placement anticipated the replica,
+  // (the choice in spec 16 §3.1 is open; 16b's placement anticipated the replica,
   // the simplest of the two, 2.54 GB on Qwen3.8 - the memory lines show it). Device 0 keeps
   // its own. Braced initialisers run left to right.
   loader::LoadedModel s1{{},

@@ -33,7 +33,7 @@
 # model.safetensors, dflash_recipe.json, README.md); the work beside it in $OUT.work/ (sources.json, taps/, raw/,
 # .done-*, RESULT, run.pid, run.log -> LOGDIR/run-<time>.log); QUANT_ROOT/dflash-current points at OUT.
 #
-# AutoRound: the LATEST of the operator's fork ~/auto-round (AR_REPO), not a fixed pin (operator 2026-11-13): the
+# AutoRound: the LATEST of our fork ~/auto-round (AR_REPO), not a fixed pin: the
 # hash branch AR_REF (local-patches-v2 = upstream main + the cached-OpenCodeInstruct commit) has when `start` or
 # `run` begins, resolved by tools/quantize/ar_latest.sh and recorded (hash + upstream base) in the recipe and the
 # README. No patch file (AR_PATCH=0: auto-round-local.patch's BOS/EOS fix is upstream, #2591, and the calibration

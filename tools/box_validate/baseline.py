@@ -10,7 +10,7 @@
   baseline.py gates-check --base DIR --re ERE --snap DIR --out FILE [--cmake-args S]
         exit 0 and the baseline's recorded gate output (g0.bitwise's JUnit) copied to FILE when the build
         identity, the gate regex and the data the gates read (the golden sets, the snapshot; not the card - the
-        cards are equal, operator 2026-11-13) are
+        cards are equal) are
         what they were when it was recorded; exit 1 and "BASELINE gates rerun: <why>" otherwise
   baseline.py gates-stamp --base DIR --re ERE --snap DIR --xml FILE [--cmake-args S]
 
@@ -182,7 +182,7 @@ def cmd_gates_check(a):
         return 1
     shutil.copyfile(xml, a.out)
     print(f"BASELINE gates reused: the baseline's own gate output recorded {rec['recorded']} "
-          "(same build, gate list and data; the cards are equal, operator 2026-11-13)")
+          "(same build, gate list and data; the cards are equal)")
     return 0
 
 

@@ -15,7 +15,7 @@
 //
 // The cost moves, it does not vanish: the conversion runs once per ROW TILE (every sub-group
 // converts its own columns), so it grows with the rows while the slab's is fixed - a win for few
-// rows only (docs/probes/probe-fused-small-chunk-2026-11-08.md).
+// rows only.
 //
 // Weights (LAYOUT, loader/small_layout.h's int4 forms):
 //   0  GPTQ-native: QW u32 [K/8][N] (nibble i of word (r, n) is k = 8 r + i), SC f16 [K/64][N]

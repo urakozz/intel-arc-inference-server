@@ -12,7 +12,7 @@
 //      (bitwise bf16 within an ulp: the GEMVs' contraction is the box compiler's).
 //   2. A draft at p 2053 (rows reach the window's edge past the wrap), anchor 1234, K 7, T 0: the final-norm rows
 //      (cosine >= 0.99999) and the scores (cosine >= 0.99999) against the twin - the top-16 sets and the walk
-//      recorded, since the twin follows the DPAS attention part's order without being bitwise (spec 19 v3d, operator
+//      recorded, since the twin follows the DPAS attention part's order without being bitwise (spec 19 v3d,
 //      ruling 2026-11-14); ctrl.cur_token[1..7] = the drafts; the readback's k / anchor / pos.
 //   3. Determinism: a second replay's readback is bitwise the first's.
 //   4. K 3 by the control block alone (no recapture): rows past K masked, the twin at K 3 agrees.
@@ -272,7 +272,7 @@ int compare_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::
               "recorded)\n", what, p, K, double(T), m.hc, m.sc, m.sets_bad ? "DIFF" : "=", m.walk_bad ? "DIFF" : "=",
               m.near ? " (a near tie)" : "");
   // The twin follows the DPAS attention part's order but cannot be bitwise (its in-step rounding is the hardware's):
-  // the cosines gate, the top-16 sets and the walk are recorded (operator ruling 2026-11-14).
+  // the cosines gate, the top-16 sets and the walk are recorded.
   int bad = 0;
   bad += m.hc < 0.99999;
   bad += m.sc < 0.99999;
@@ -311,7 +311,7 @@ int g_sets_sm = 0, g_sets_gv = 0;   // judge_draft's top-16 candidates off the j
 // control block, both graded against the f32 judge. gemm_sm passes when it is no further from f32 than gemv_i8w:
 // rows / scores - cosine >= 0.99999 against the judge or a cosine distance at most golden::kCosSlack (2) x gemv's;
 // top-16 sets - no more candidates off the judge's set (the boundary excused as above) than gemv's, SUMMED over every
-// judged case (operator 2026-11-04: the drafter only proposes, and a set counts one boundary candidate either way -
+// judged case (the drafter only proposes, and a set counts one boundary candidate either way -
 // per case it was 3 against 2 once, 4 against 8 summed; checked at the end of main); the walk -
 // identical to the judge's, or diverging no earlier than gemv's, or at a near tie of the judge's scores (1e-4). The
 // readback / control checks as before. Leaves the default list's readback. Returns failures.
@@ -725,7 +725,7 @@ int main(int argc, char** argv) {
                   "(%.3f ms saved); projection gemm_sm %.3f ms / gemv_i8w %.3f ms (%.3f ms saved)\n",
                   med(td), med(tg), med(tg) - med(td), med(tp), med(tq), med(tq) - med(tp));
     }
-    // Recorded, not gated (operator go 2026-11-13 night): the count swings by 3-6 under attention changes at the
+    // Recorded, not gated (go 2026-11-13 night): the count swings by 3-6 under attention changes at the
     // 1e-7 cosine level; the rows' cosine against the f32 judge gates.
     if (g_sets_sm + g_sets_gv > 0)
       std::printf("top-16 candidates off the f32 judge's sets, summed for %s: gemm_sm %d / gemv %d (recorded)\n",

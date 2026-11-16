@@ -1,12 +1,16 @@
 # The Arc Pro B70, measured
 
-Everything here was measured on the card or read out of the driver, not looked
-up. Reproduce with the probes in `tools/probe/` before trusting any of it after
-a driver bump.
+This document is for anyone who wants to know what the card underneath the engine can actually do: how fast it
+reads memory, how fast its matrix engine multiplies each data type, and which formats it cannot run at all. These
+facts constrain every other decision in the project, from the weight format ([02-formats.md](02-formats.md)) to the
+shape of each kernel ([12-kernels.md](12-kernels.md)).
+
+Everything here was measured on the card or read out of the driver, not looked up in a datasheet. The probes that
+produced it are in `tools/probe/`; rerun them before trusting a figure after a driver update.
 
 ## Device properties
 
-Read from `torch.xpu.get_device_properties(0)`:
+Read once from `torch.xpu.get_device_properties(0)` while the box still had PyTorch; the properties are the card's and do not change with the driver. The driver versions in use are under the software stack below.
 
 ```
 name                   Intel(R) Arc(TM) Pro B70 Graphics
@@ -20,95 +24,89 @@ gpu_subslice_count     32
 max_work_group_size    1024
 max_num_sub_groups     64
 sub_group_sizes        [16, 32]
-driver_version         1.17.39395+13
-platform               oneAPI Unified Runtime over Level-Zero V2
 ```
 
-`memory_bus_width` reports **64-bit**, which is wrong: it contradicts the
-measured bandwidth by 4x. Do not use that field.
+SLM (shared local memory) is the fast on-chip scratch a work-group shares. An EU (execution unit) is the smallest
+compute block; 8 of them make one Xe-core, which the driver calls a subslice.
 
-Max core clock is **2.8 GHz** over 32 Xe-cores. That pair is what the DPAS
-section below derives its peak from.
+The `memory_bus_width` field reports 64-bit, which is wrong: it contradicts the measured bandwidth by 4x. Do not
+use it.
+
+The maximum core clock is 2.8 GHz over 32 Xe-cores. The matrix-engine section below derives its peak from that pair.
 
 ## Memory bandwidth
 
-Device-to-device, three buffer sizes, 20 iterations after 5 warm-ups:
+Bandwidth matters more than anything else here, because generating one token means reading every weight once
+(see [05-perf-model.md](05-perf-model.md)). The first measurement copied device memory to device memory at three
+buffer sizes, 20 iterations after 5 warm-ups:
 
 | Buffer | Read-only (`sum`) | Copy (r+w) |
 |--------|------------------|------------|
 | 0.5 GB | 578 GB/s | 538 GB/s |
-| 2.0 GB | **601 GB/s** | 529 GB/s |
-| 8.0 GB | **601 GB/s** | 529 GB/s |
+| 2.0 GB | 601 GB/s | 529 GB/s |
+| 8.0 GB | 601 GB/s | 529 GB/s |
 
-The rate does not fall as the buffer grows far past the 24 MB cache, so this is
-DRAM bandwidth, not cache.
+The rate does not fall as the buffer grows far past the 24 MB cache, so this is DRAM bandwidth, not cache.
 
-The card's peak is **638 GB/s**, as the vendor's monitoring tool (`hw-smi`)
-reads it under load (615 GB/s current, 638 GB/s peak). The 601 GB/s above is
-94 % of that peak (derived: 601 / 638).
+The card's peak is 638 GB/s, as the vendor's monitoring tool (`hw-smi`) reads it under load (615 GB/s current,
+638 GB/s peak). The 601 GB/s above is 94 % of that peak.
 
-Re-measured with a plain Level Zero launch (`tools/probe/probe_bw`, `bw_sum.cl`):
-**590 GB/s** median at 2 GB (min 585, max 592) and 584 GB/s median at 8 GB
-(min 580, max 588), 20 timed iterations after 5 warm-ups. Agrees with the torch
-probe within 3%, and is 92 % of the peak (derived: 590 / 638).
+The same read was then measured with a plain Level Zero launch (`tools/probe/probe_bw`, `bw_sum.cl`), the way the
+engine itself submits work: 590 GB/s median at 2 GB (min 585, max 592) and 584 GB/s median at 8 GB (min 580,
+max 588), 20 timed iterations after 5 warm-ups. That agrees with the torch probe within 3 % and is 92 % of the
+peak.
 
-**Use 590 GB/s as the roofline denominator.** It is the rate through the launch
-path this engine actually submits on, and it is the one every roofline figure in
-`docs/BENCHMARKS.md` and `05-perf-model.md` divides by. So there are two bases
-in these documents, and each figure should say which it uses: "of the measured
-590" (what a kernel can reach) and "of the 638 peak" (what the memory could
-carry). Older records took the peak as 608 GB/s, a 19 Gbps figure; their
-percentages of peak are about 5 % too high.
+**590 GB/s is the roofline denominator.** It is the rate through the launch path this engine actually uses, and
+every roofline figure in [BENCHMARKS.md](BENCHMARKS.md) and [05-perf-model.md](05-perf-model.md) divides by it. So
+these documents use two bases, and each figure should say which: "of the measured 590" is what a kernel can reach,
+"of the 638 peak" is what the memory could carry. Older records took the peak as 608 GB/s, a 19 Gbps figure;
+their percentages of peak are about 5 % too high.
 
-Seed the buffer with incompressible data. The B70 compresses device-local
-memory losslessly, so a `zeCommandListAppendMemoryFill` of one repeated 32-bit
-word reads back at 1022 GB/s, above the 638 GB/s peak, because most
-of those loads never reach DRAM. Timing is not the culprit: at 1, 2 and 4
-launches per submission the elapsed time was 2.102 / 4.203 / 8.402 ms, exactly
-linear. Any probe reporting bandwidth above the theoretical peak is measuring
-compression.
+Seed a bandwidth probe's buffer with incompressible data. The B70 compresses device-local memory losslessly, so a
+buffer filled by `zeCommandListAppendMemoryFill` with one repeated 32-bit word reads back at 1022 GB/s, above the
+638 GB/s peak, because most of those loads never reach DRAM. Timing is not the culprit: at 1, 2 and 4 launches per
+submission the elapsed time was 2.102, 4.203 and 8.402 ms, exactly linear. Any probe that reports bandwidth above
+the theoretical peak is measuring compression.
 
 ## What the matrix engine actually does
 
-This is the single most consequential set of facts about the B70, and it
-constrains every format decision. All of it is measured by
-`tools/probe/probe_dpas_rates`, whose loops the Xe2 assembly confirms are DPAS
-bound: exactly 64 `dpas.8x8` in the loop body for every type, no spill, no
-conversion, no repack.
+The matrix engine is driven by one instruction, DPAS (dot-product accumulate systolic): it multiplies a small tile
+of one matrix by a tile of another and adds the result into an accumulator. Its rate per data type is the most
+consequential set of facts about the B70, and it constrains every format decision.
 
-| builtin family | K | rate (measured) | vs bf16 |
+All of it was measured with `tools/probe/probe_dpas_rates`. The Xe2 assembly confirms the probe loops are bound by
+DPAS alone: exactly 64 `dpas.8x8` in the loop body for every type, with no register spill, no conversion and no
+repacking. In the table, K is the depth of one multiply, the number of elements summed per output.
+
+| builtin family | K | rate | vs bf16 |
 |---|---:|---:|---:|
-| `bf16_bf16_matrix_mad_k16` | 16 | **183.45 TFLOP/s** | **1.000x** |
+| `bf16_bf16_matrix_mad_k16` | 16 | 183.45 TFLOP/s | 1.000x |
 | `f16_f16_matrix_mad_k16` | 16 | 183.45 TFLOP/s | 1.000x |
-| `i8_i8_matrix_mad_k32` | 32 | **366.90 TIOP/s** | **2.000x** |
+| `i8_i8_matrix_mad_k32` | 32 | 366.90 TIOP/s | 2.000x |
 | `i4_i8_matrix_mad_k32` | 32 | 366.89 TIOP/s | 2.000x |
 | `i8_i4_matrix_mad_k32` | 32 | 366.90 TIOP/s | 2.000x |
-| `i4_i4_matrix_mad_k64` | 64 | **733.80 TIOP/s** | **4.000x** |
+| `i4_i4_matrix_mad_k64` | 64 | 733.80 TIOP/s | 4.000x |
 | `u4_u4_matrix_mad_k64` | 64 | 733.80 TIOP/s | 4.000x |
 | `i2_i2_matrix_mad_k64` | 64 | 733.79 TIOP/s | 4.000x |
 
-**One model explains the whole table.** Divide each rate by its ops per mad and
-every type lands on the same issue rate, 4.479e10 `dpas.8x8` per second, within
-0.01%. That is **16.0 EU-cycles per `dpas.8x8`** regardless of data type, or
-2048 bf16 FLOP per Xe-core per cycle. The array's depth scaling from K=16 to
-K=64 is free; its width is not. Nothing in the table is a rate difference
-between types, only one constant issue rate seen through three values of K.
+One model explains the whole table. Divide each rate by its operations per multiply and every type lands on the
+same issue rate, 4.479e10 `dpas.8x8` per second, within 0.01 %. That is 16.0 EU-cycles per `dpas.8x8` whatever the
+data type, or 2048 bf16 FLOP per Xe-core per cycle. Deepening the multiply from K=16 to K=64 is free; widening it
+is not. So the table shows no difference in rate between types, only one constant issue rate seen through three
+values of K.
 
-The clock-derived bf16 peak is 32 Xe-cores x 2048 FLOP/clk x 2.8 GHz =
-**183.50 TFLOP/s**. Measured 183.45 is **99.97%** of it, so the ratios are
-ratios of the pipe and not of some other bottleneck.
+The bf16 peak derived from the clock is 32 Xe-cores x 2048 FLOP/clk x 2.8 GHz = 183.50 TFLOP/s. The measured
+183.45 is 99.97 % of it, so the ratios in the table are ratios of the matrix pipe itself and not of some other
+bottleneck.
 
-**Our production GEMM measures 161.7 TFLOP/s** on the gate‖up shape at M=2048,
-**88.1%** of the micro-benchmark. The micro-benchmark sits above the production
-kernel, as it must; the gap is the GEMM's memory, barrier and epilogue cost.
+The engine's own prefill GEMM measures 161.7 TFLOP/s on the gate‖up shape at M=2048 (2048 prompt rows), 88.1 % of
+the micro-benchmark. A real kernel must sit below the micro-benchmark; the gap is the GEMM's memory, barrier and
+epilogue cost.
 
-Details, including the assembly, in
-[probe-dpas-rates-2026-09-22.md](probes/probe-dpas-rates-2026-09-22.md).
+### The mixed int8 x int4 DPAS is real, and it is worth nothing extra
 
-### The mixed s8 x s4 DPAS is real, and it is worth nothing extra
-
-oneDNN's JIT GEMM generator documents a native mixed int8 x int4 DPAS on this
-hardware, in `src/gpu/intel/gemm/jit/pd.cpp`:
+oneDNN's JIT GEMM generator documents a native mixed int8 x int4 DPAS on this hardware, in
+`src/gpu/intel/gemm/jit/pd.cpp`:
 
 ```c
 // Mixed s8/s4 DPAS support:
@@ -121,103 +119,94 @@ if (problem.Tb_ext.isInt4() && problem.Ta_ext.isInt8()) {
 }
 ```
 
-Battlemage is pre-Xe3p, so it has the path, and our own probe confirms the
-instruction issues natively: the assembly carries `:s4` on one operand of a
-single `dpas.8x8`, with no widening to bytes.
+Battlemage, the B70's architecture, is pre-Xe3p, so it has the path, and our own probe confirms the instruction
+issues natively: the assembly carries `:s4` on one operand of a single `dpas.8x8`, with no widening to bytes.
 
-**But the mixed builtin's K is 32, the same as int8's.** The 4-bit operand
-shortens no part of the pipe. `i8_i4_k32` measures 366.90 TIOP/s against
-`i8_i8_k32`'s 366.90 - identical to within 0.01%. So the DPAS ceiling of a W4A8
-linear path is 2.000x bf16, exactly the same as a W8A8 one, and none of a W4A8
-win could come from the math pipe.
+But the mixed builtin's K is 32, the same as int8's, so the 4-bit operand shortens no part of the pipe.
+`i8_i4_k32` measures 366.90 TIOP/s against `i8_i8_k32`'s 366.90, identical within 0.01 %. The matrix-engine
+ceiling of a W4A8 linear (4-bit weights, 8-bit activations) is therefore 2.000x bf16, exactly that of W8A8, and
+no W4A8 win could come from the math pipe.
 
-That prediction was tested with a real kernel on real weights and real
-activations, and **W4A8 was rejected for Qwen3.8's dense layers**: the
-per-group rescale costs more than the 2x instruction rate buys, and the
-activation outliers cost 2.79% relative L2 error against the bf16 result. See
-[probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md). (The one place
-W4A8 runs today is the expert layers of MoE models under the optional int8
-prompt pass, `--prefill-backend l0-int8`; see
-[16-int8-prefill.md](16-int8-prefill.md).)
+That prediction was tested with a real kernel on real weights and activations, and W4A8 was rejected for
+Qwen3.8's dense layers. The per-group rescale costs more than the 2x instruction rate buys, and the activation
+outliers cost 2.79 % relative L2 error against the bf16 result ([02-formats.md](02-formats.md) has the numbers).
+The one place W4A8 runs today is the expert layers of MoE (mixture-of-experts) models under the optional int8
+prompt pass, `--prefill-backend l0-int8` ([16-int8-prefill.md](16-int8-prefill.md)).
 
-The one DPAS lever on this device worth more than 2x is **4-bit by 4-bit**, at
-4.000x. W4A4 is not reachable at acceptable accuracy: int4 activations at group 256, even after the
-Hadamard rotation, double Qwen3.8's output error against int8's
-([probe-w4a4-2026-10-28.md](probes/probe-w4a4-2026-10-28.md)).
+The one DPAS lever on this device worth more than 2x is 4-bit by 4-bit, at 4.000x. W4A4 does not reach acceptable
+accuracy: int4 activations at group 256, even after a Hadamard rotation (a fixed orthogonal transform that spreads
+outliers across a vector before quantising it), double Qwen3.8's output error against int8's
+([05-perf-model.md](05-perf-model.md#what-was-measured-and-rejected)).
 
 ### FP4 and FP8 are not available
 
-- **FP4 is refused by the backend.** `e2m1_e2m1_matrix_mad_k64` type-checks and
-  then the backend rejects it by name: `FP4 Dpas instruction is not supported on
-  this device!` So MXFP4 buys nothing on this card today; an FP4 path would have
-  to decode `e2m1` in the ALU and issue the int4 or bf16 form anyway, which
-  makes it int4 with extra work.
-- **Every `scaled_matrix_mad` form crashes the compiler** - the bf16, fp16,
-  hf8, bf8 and e2m1 variants alike. That is how hardware microscaling would be
-  reached, so there is no microscaling path.
-- **No unscaled FP8 entry point is declared.** The compiler's header declares
-  only the *scaled* FP8 forms, and those are the ones that crash. There is no
-  reachable FP8 matmul.
+- **FP4 is refused by the backend.** `e2m1_e2m1_matrix_mad_k64` type-checks, then the backend rejects it by name:
+  `FP4 Dpas instruction is not supported on this device!` So MXFP4 buys nothing on this card today. An FP4 path
+  would have to decode `e2m1` in the ALU and issue the int4 or bf16 form anyway, which makes it int4 with extra
+  work.
+- **Every `scaled_matrix_mad` form crashes the compiler**: the bf16, fp16, hf8, bf8 and e2m1 variants alike. That
+  is how hardware microscaling (a shared scale per small block of values) would be reached, so there is no
+  microscaling path.
+- **No unscaled FP8 entry point is declared.** The compiler's header declares only the scaled FP8 forms, and those
+  are the ones that crash. There is no reachable FP8 matrix multiply.
 
-Block-scaled MX examples in `sycl-tla` are `xe35`-prefixed (`50_xe35_*`,
-`51_xe35_*`), targeted at Xe3.5 rather than Battlemage. MXFP4 on the B70 is not
-a first-class path in Intel's own kernel library either.
+The block-scaled MX examples in `sycl-tla` are `xe35`-prefixed (`50_xe35_*`, `51_xe35_*`), targeting Xe3.5 rather
+than Battlemage. MXFP4 on the B70 is not a first-class path in Intel's own kernel library either.
 
-### Three consequences, each load-bearing
+### Three consequences
 
-1. **int4-AutoRound, int4-GPTQ and MXFP4 are the same hardware path** once the
-   weights reach the array. They differ only in packing and scale layout.
-   Choosing between them is a bytes-per-weight and accuracy decision, never a
-   kernel-architecture one.
-2. **FP8 has no hardware advantage here.** On Hopper and Blackwell FP8 wins
-   because there are native FP8 tensor cores. This card has no reachable FP8
-   matmul at all, and FP8 costs 2x the memory traffic of int4. It is the worst
-   choice for a bandwidth-bound decode, not the safe one.
-3. **Halving the operand width only helps when it halves K.** int8 buys 2x over
-   bf16 because K doubles. int4 against int8 buys nothing, because K does not.
+1. **int4 AutoRound, int4 GPTQ and MXFP4 are the same hardware path** once the weights reach the matrix engine.
+   They differ only in packing and scale layout, so choosing between them is a bytes-per-weight and accuracy
+   decision, never a kernel-architecture one.
+2. **FP8 has no hardware advantage here.** On Hopper and Blackwell FP8 wins because those GPUs have native FP8
+   tensor cores. This card has no reachable FP8 multiply at all, and FP8 costs twice the memory traffic of int4.
+   For a bandwidth-bound decode it is the worst choice, not the safe one.
+3. **Halving the operand width only helps when it doubles K.** int8 buys 2x over bf16 because K doubles. int4
+   against int8 buys nothing, because K does not change.
 
 ## Implications for kernel design
 
-- **24 MB of L2 is a lot.** A 4096x4096 int4 weight tile is 8 MB. Multi-layer
-  weight residency is plausible in a way it is not on most GPUs, and worth
-  measuring before assuming every weight read hits DRAM.
-- **Subgroup sizes are 16 and 32.** XMX tile shapes and the GDN kernel's lane
-  assignment must be built around these, not the 32 assumed by CUDA-derived
-  code. For reference, another stack's GEMV is SIMD16 and `vllm-xpu-kernels`' GDN
-  decode kernel is SIMD32 with 256-thread groups.
-- **256 EUs over 32 subslices.** The persistent-kernel grid used by the grouped
-  GEMM in `vllm-xpu-kernels` is `sm_count * 8`; the equivalent constant here has
-  to be derived from `gpu_subslice_count`, not copied.
-- **The subgroup is the occupancy unit, not the work-group.** A bit-identical
-  rewrite that gave a kernel 4x the work-groups at an unchanged subgroup count
-  bought exactly zero; splitting the same work across 16x the subgroups took the
-  launch from 48.8 to 5.3 us.
-- **`ocloc` has no 16-bit block write wider than 8 rows.** A bf16 epilogue is
-  therefore bound by store message count rather than by bytes, which is why
-  halving intermediate buffer widths changed nothing.
+The 24 MB L2 is large for this class of card. A 4096x4096 int4 weight tile is 8 MB, so keeping several layers'
+weights in cache is plausible in a way it is not on most GPUs. It is worth measuring before assuming every weight
+read hits DRAM.
 
-## Two cards, and which software stack these numbers come from
+The subgroup sizes are 16 and 32. A subgroup is the set of lanes that execute one instruction together, the
+counterpart of a CUDA warp. Matrix tile shapes and the GDN kernel's lane assignment must be built around these
+sizes, not the 32 assumed by code derived from CUDA. For reference, another stack's GEMV is SIMD16, and
+`vllm-xpu-kernels`' GDN decode kernel is SIMD32 with 256-thread groups.
 
-**The host.** The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM.
+There are 256 EUs over 32 subslices. The persistent-kernel grid of the grouped GEMM in `vllm-xpu-kernels` is
+`sm_count * 8`; the equivalent constant here has to be derived from `gpu_subslice_count`, not copied.
 
-**Peer-to-peer access** (P2P: one card writing straight into the other's memory over PCIe, without bouncing
-through host RAM) works natively on the mainline Linux 7.4.0-rc2 kernel. The engine uses it in both two-card
-modes: the layer split hands the hidden state to the second card with a device-to-device copy, and tensor
-parallel exchanges partial results every layer.
+The subgroup, not the work-group, is the unit of occupancy. A bit-identical rewrite that gave a kernel 4x the
+work-groups at an unchanged subgroup count bought exactly nothing; splitting the same work across 16x the
+subgroups took the launch from 48.8 to 5.3 us.
 
-**The second card.** An early measurement had prefill 3.2-3.4 % slower on the second card
-([10-the-box.md](10-the-box.md)). The cause was never pinned down.
+`ocloc`, the offline compiler for the kernels, has no 16-bit block write wider than 8 rows. A bf16 epilogue is
+therefore bound by the number of store messages rather than by bytes, which is why halving the width of
+intermediate buffers changed nothing.
 
-**The memory window (BAR).** The BAR is the window through which the CPU sees a card's memory. The firmware caps
-it at 16 GB per card (ReBarState 14; 15 does not boot); the xe kernel driver resizes both cards to the full 32 GB
-when it loads.
+## Two cards, and the software stack behind these numbers
 
-**A lasting "busy" is a hang.** The Level Zero runtime retries an ioctl that returns EBUSY forever, so a lasting
-EBUSY never surfaces as an error. This is why any host allocation that both cards map stays at or below 4 GiB:
-the prefix cache, for one, is pinned in 2 GiB pieces.
+The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM.
 
-**The software stack.** Compute runtime 26.40.40196.8 (held at that version), IGC (the Intel Graphics Compiler)
-2.42.6 and Level Zero loader 1.34. The `driver_version` line at the top and the rates measured in this document
-come from earlier stacks. The hardware rates (DPAS, bandwidth) are properties of the silicon and are not
-expected to move. The kernel timings in the other documents will be re-measured in the quiet-box measurement
-session ([open-work.md](open-work.md), item 5).
+Peer-to-peer access (P2P: one card writing straight into the other's memory over PCIe, without bouncing through
+host RAM) works natively on the mainline Linux 7.4.0-rc2 kernel. Tensor parallel (every layer split across both
+cards) needs it: each card writes its partial results straight into the other card's memory every layer. The layer
+split (pipeline parallel) does not: it hands the hidden state over through host memory, because a peer copy measured
+no faster there.
+
+An early measurement had prefill 3.2-3.4 % slower on the second card ([10-the-box.md](10-the-box.md)). The cause
+was never pinned down.
+
+The BAR is the window through which the CPU sees a card's memory. The firmware caps it at 16 GB per card
+(ReBarState 14; 15 does not boot), and the `xe` kernel driver resizes both cards to the full 32 GB when it loads.
+
+A lasting "busy" is a hang. The Level Zero runtime retries an ioctl that returns EBUSY forever, so a lasting EBUSY
+never surfaces as an error. This is why any host allocation that both cards map stays at or below 4 GiB; the
+prefix cache, for one, is pinned in 2 GiB pieces.
+
+The current stack is compute runtime 26.40.40196.15, IGC (the Intel Graphics Compiler) 2.42.6 and Level Zero
+loader 1.34. The `driver_version` line at the top and the rates in this document come from earlier stacks. The
+hardware rates (DPAS, bandwidth) are properties of the silicon and are not expected to move. Kernel timings
+can move with the compiler, and the current speed rows are the quiet-box session of 2026-11-15 in [BENCHMARKS.md](BENCHMARKS.md).

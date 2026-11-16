@@ -1,4 +1,4 @@
-// pf_gdn_front.cl - phase 2 Task 2 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): the GDN
+// pf_gdn_front.cl - phase 2 Task 2: the GDN
 // front's conv1d + SiLU and the q / k l2norm in ONE launch, BITWISE pf_gdn_conv.cl's pf_gdn_conv followed by
 // pf_gdn_l2norm (the seed and the gate stay their own launches: the seed's ring read must precede the
 // ring writeback by a launch whatever C is - pf_gdn_conv.cl's header - and the gate is 0.5 ms of 60 calls).

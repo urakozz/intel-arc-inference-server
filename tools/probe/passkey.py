@@ -11,8 +11,7 @@ special tokens and no chat template (a base continuation), to about n_target ids
 (default 120000). Written one id per line. Prints the id count and the needle's
 position in ids.
 
-Run in the oracle container (tools/probe/passkey.sh does). Plan:
-docs/superpowers/plans/2026-09-25-spec6b-flash-attn-integration-and-128k.md, Task 5.
+Run in the oracle container (tools/probe/passkey.sh does). 
 """
 import os
 import sys

@@ -109,7 +109,7 @@ struct DecodeScratch : DecodeScratchDims {
 //
 // **Plan 5d: the chunk cap (`kC` below, `chunk_cap()`) is a session value, 2048 or 4096**
 // (PrefillScratchDims::kCDefault / kCMax), chosen by the memory planner
-// (runtime::prefill_chunk_cap_that_fits, operator ruling (i): context first). Ruling A13's
+// (runtime::prefill_chunk_cap_that_fits, context first). Ruling A13's
 // paragraph stands for the 2048 default. The int8 path at 4096 rows (2026-11-01 / 11-06, plan
 // 5d "As built"): the linears alone gain nothing (h8 -1.1 %), the whole prefill +4.2 % at
 // pp4096, +5.3 % at 32k, +1.5 % at 128k (the other per-chunk fixed costs halve) - below the
@@ -132,7 +132,7 @@ struct DecodeScratch : DecodeScratchDims {
 // In their place are plan 6d-composed's six fields - `pf_q`, `pf_attn`,
 // `pf_s`, `pf_p`, `pf_o`, `pf_rowsum` - sized here **now**, at that plan's own
 // figures, so L3 lands without resizing this struct. `pf_kt` is deliberately
-// absent: the batched-GEMM probe (`docs/probes/probe-gemm-batched-2026-09-05.md`)
+// absent: the batched-GEMM probe
 // measured `transB` native and bitwise identical to a packed operand, so the
 // transpose fallback is not built.
 struct PrefillScratch : PrefillScratchDims {

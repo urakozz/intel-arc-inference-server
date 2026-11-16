@@ -4,7 +4,7 @@
 # Recipe (ruling A20, 2026-09-05):
 #   - scheme MXFP4A16 = fp4 (e2m1) WEIGHTS, block 32, shared e8m0 scale per
 #     block; activations stay bf16. NOT "MXFP4": that preset also quantizes
-#     activations to fp4 (W4A4) - the trade the operator declined. The
+#     activations to fp4 (W4A4) - the trade that was declined. The
 #     verification below REFUSES a checkpoint whose config carries
 #     input_activations, so a wrong scheme cannot slip through.
 #   - llm-compressor's model_free_ptq: operates on the safetensors shards

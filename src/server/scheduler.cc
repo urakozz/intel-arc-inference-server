@@ -376,7 +376,7 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
   job->fin.error = std::move(error);
   if (job->slot >= 0) {
     const uint32_t slot = static_cast<uint32_t>(job->slot);
-    // --max-num-seqs (operator 2026-11-11): a request cut by its slot's end, not its max_tokens, is said.
+    // --max-num-seqs: a request cut by its slot's end, not its max_tokens, is said.
     if (reason == Finish::Length && job->req.prompt.size() + job->steps >= impl_->slot_len[slot])
       std::print(stderr, "scheduler: a request reached the end of slot {:d} ({:d} positions{}): finished with length\n",
                  slot, impl_->slot_len[slot],
@@ -516,7 +516,7 @@ bool Scheduler::spec_round() {
   }
   // Spec 13c: the engine's row budget for this many rows (0: none) - every row keeps its pending id, and the drafts
   // left are dealt one at a time round the rows, the longest-running request first, each up to its own K (measured,
-  // docs/probes/probe-batching-2026-10-23.md section 8: K 1 each at four requests beats K 3 for the oldest by 15 %,
+  // a probe: K 1 each at four requests beats K 3 for the oldest by 15 %,
   // K 2 / 2 / 1 at three beats 3 / 2 / 0 by 15 %).
   // Replica x slots (overlaps_prefill()): each card's rows against that card's own budget.
   const auto deal = [&](std::vector<size_t> by_age, uint32_t budget) {

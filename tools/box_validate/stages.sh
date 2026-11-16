@@ -35,7 +35,7 @@ QUICK_PROMPTS=prose,code,t1_define-linear_l0,t2_explain-linear_l0,t3_rename-line
 : "${G0_BITWISE_RE:=^(golden_gate_test|golden_gate_i8head_test|prefill_gate_l0_test|prefill_gate_int8_test|prefill_gate_l0_i8head_test|prefill_gate_int8_i8head_test|replay_determinism_test|replay_determinism_i8head_test|buffers_test|prefill_smoke_test|load_checkpoint_test)$}"
 ORNITH_ORACLE_MODEL=models--urakozz--Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 # decode_record DIR LABEL NAME PROMPT OUT - one b70-decode run (its --ids PROMPT, its stdout OUT) as a record under
-# DIR/LABEL.r1, so a b70-decode row's arms go through serve_client.py compare and serve_judge (operator 2026-11-07)
+# DIR/LABEL.r1, so a b70-decode row's arms go through serve_client.py compare and serve_judge
 decode_record() {
   chk "python3 tools/box_validate/serve_client.py record --out $1/$2.r1/requests.jsonl --label $2 --set decode --name $3 --prompt $4 --ids $5" "the $2 / $3 record"
 }
@@ -159,7 +159,7 @@ st_r2_cost() {
   finish
 }
 
-stage r2.auto_rows 2 default gpu qwen - "D1-style rows through b70-serve: --spec auto against --spec mtp --spec-max 1 / 3 and off on the golden and A4 prompts, 256 ids, greedy (decode t/s per request from the server's records, R2_ROUNDS = 3 rounds rotated); each request's first difference from --spec off judged by the f32 judge (spec 28 N6, spec_judge.h's rule: serve_judge.py on the int8-head forced references; a difference without its reference SKIPs, never passes) - identity to --spec off a recorded number, not the bar (operator 2026-11-07)"
+stage r2.auto_rows 2 default gpu qwen - "D1-style rows through b70-serve: --spec auto against --spec mtp --spec-max 1 / 3 and off on the golden and A4 prompts, 256 ids, greedy (decode t/s per request from the server's records, R2_ROUNDS = 3 rounds rotated); each request's first difference from --spec off judged by the f32 judge (spec 28 N6, spec_judge.h's rule: serve_judge.py on the int8-head forced references; a difference without its reference SKIPs, never passes) - identity to --spec off a recorded number, not the bar"
 st_r2_auto_rows() {
   idle before
   if [ "$BV_QUICK" = 1 ]; then
@@ -240,7 +240,7 @@ st_r6_mtp_long() {
   jgrab m3 'mtp_gpu_(32k|128k)' 'M3:|M3 pooled|mtp_gpu_test .*(PASS|FAIL)|max_len'
   finish
 }
-stage r6.greedy_long 6 default card qwen r6.memory "long-context MTP greedy equality without the server: b70-decode --ids (120000 ids) --prefill --max-len 131072, 256 ids plain / --spec mtp --spec-max 3 / --spec auto; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07)"
+stage r6.greedy_long 6 default card qwen r6.memory "long-context MTP greedy equality without the server: b70-decode --ids (120000 ids) --prefill --max-len 131072, 256 ids plain / --spec mtp --spec-max 3 / --spec auto; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -)"
 st_r6_greedy_long() {
   local arm f="$STATE/$STAGE.120k.ids"
   chk "python3 tools/box_validate/long_ids.py 120000 $f" "the 120000-id prompt"
@@ -290,7 +290,7 @@ st_r6_d1() {
 
 # ======================================================================================
 row 7 "spec 6 §10 - --max-len auto (b70-serve's default), the memory planner"
-rownote 7 "P5's 'after a long session at auto' is an operator session: r7.serve records the device memory while a fresh server is up (xpu-smi, when installed); confirm or tune the reserve (src/cli/max_len.h kDefaultReserveGb, 1.5 GB) from a long one."
+rownote 7 "P5's 'after a long session at auto' is a user session: r7.serve records the device memory while a fresh server is up (xpu-smi, when installed); confirm or tune the reserve (src/cli/max_len.h kDefaultReserveGb, 1.5 GB) from a long one."
 stage r7.plan 7 default card qwen - "memory_plan_test, buffers_test (table unchanged), load_checkpoint_test (set_max_len), trained_context_test, memory_plan_box_test (+mtp) at 16384 and auto"
 st_r7_plan() {
   run_tests '^(memory_plan_test|buffers_test|load_checkpoint_test|trained_context_test|memory_plan_box_test|memory_plan_box_mtp_test)$'
@@ -335,7 +335,7 @@ st_r7_depth() {
 
 # ======================================================================================
 row 8 "spec 8 §11 - --draft-vocab (int8 and bf16 heads), --spec auto draft costs scaled by |V'|"
-rownote 8 "The default moves off 'off' only if a size beats it by >= 2 % on A4 and loses nowhere: read r8.rows's medians (the operator's ruling, then MtpCost's draft shares from r8.cost)."
+rownote 8 "The default moves off 'off' only if a size beats it by >= 2 % on A4 and loses nowhere: read r8.rows's medians (then MtpCost's draft shares from r8.cost)."
 stage r8.kernels 8 default card - - "draft_vocab_kernels_test: compact GEMV bitwise = full columns (both forms), mapped argmax, scatter; ties / -inf / NaN"
 st_r8_kernels() {
   run_tests '^draft_vocab_kernels_test$'
@@ -425,7 +425,7 @@ st_r8_m3_small() {
   grab_all m3 'mtp_gpu_test .*(PASS|FAIL)'
   finish
 }
-stage r8.auto_rows 8 optin gpu qwen - "--spec auto rows at the chosen size (R8_DRAFT_VOCAB, default 128k) against fixed K = 1 / 3 and against --spec auto without it, through b70-serve as r2.auto_rows, with --spec off beside them: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); identity to --spec auto without the draft vocabulary recorded too"
+stage r8.auto_rows 8 optin gpu qwen - "--spec auto rows at the chosen size (R8_DRAFT_VOCAB, default 128k) against fixed K = 1 / 3 and against --spec auto without it, through b70-serve as r2.auto_rows, with --spec off beside them: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -); identity to --spec auto without the draft vocabulary recorded too"
 st_r8_auto_rows() {
   local dv="${R8_DRAFT_VOCAB:-128k}"
   idle before
@@ -471,7 +471,7 @@ st_r10_load() {
   grab_all loader 'MoE|moe|unconsumed|W check|per token|expert|a‖b' 20
   finish
 }
-stage r10.oracle_f32 10 optin cpu ornith,oracle_ornith,oracle_image - "the Ornith token gates' judge (operator ruling 2026-10-23): tools/box_validate/f32_oracle.sh ornith - ornith_ref.py --dtype f32 --force <oracle-out-ornith's tokens> per prompt -> \$DATA/oracle-out-ornith-f32, and the quantisation-aware twins oracle-out-ornith-f32-i8head (--lm-head int8) and -f32-pfi8 (--sim-int8-prefill), the int8 variants' judges (~1.5 min a prompt each, peak RSS ~21 GiB, 22 threads under /tmp/b70-cpu-model.lock; needs MemAvailable >= F32_REF_MIN_GB = 95); then re-links oracle-out* and refreshes the data list"
+stage r10.oracle_f32 10 optin cpu ornith,oracle_ornith,oracle_image - "the Ornith token gates' judge: tools/box_validate/f32_oracle.sh ornith - ornith_ref.py --dtype f32 --force <oracle-out-ornith's tokens> per prompt -> \$DATA/oracle-out-ornith-f32, and the quantisation-aware twins oracle-out-ornith-f32-i8head (--lm-head int8) and -f32-pfi8 (--sim-int8-prefill), the int8 variants' judges (~1.5 min a prompt each, peak RSS ~21 GiB, 22 threads under /tmp/b70-cpu-model.lock; needs MemAvailable >= F32_REF_MIN_GB = 95); then re-links oracle-out* and refreshes the data list"
 st_r10_oracle_f32() {
   chk "tools/box_validate/f32_oracle.sh $DATA ornith" "the Ornith f32 teacher-forced reference"
   chk "tools/box_validate/f32_oracle.sh $DATA ornith-i8head" "the Ornith f32 reference through the int8 head"
@@ -480,7 +480,7 @@ st_r10_oracle_f32() {
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_ornith' $STATE/have.env"
   finish
 }
-stage r10.gates 10 default card ornith,oracle_ornith,oracle_ornith_f32,oracle_ornith_f32_i8head - "ornith_decode_test (+_i8head: 526 launches, plan == allocations, replay bitwise, R2) and golden_gate_ornith (+_i8head: R3, the token gate JUDGED by the f32 teacher-forced reference oracle-out-ornith-f32 - the bf16 golden printed beside it, its disagreements with f32 marked; operator ruling 2026-10-23)"
+stage r10.gates 10 default card ornith,oracle_ornith,oracle_ornith_f32,oracle_ornith_f32_i8head - "ornith_decode_test (+_i8head: 526 launches, plan == allocations, replay bitwise, R2) and golden_gate_ornith (+_i8head: R3, the token gate JUDGED by the f32 teacher-forced reference oracle-out-ornith-f32 - the bf16 golden printed beside it, its disagreements with f32 marked; ruling 2026-10-23)"
 st_r10_gates() {
   run_tests 'ornith_decode|golden_gate_ornith' ornith
   jgrab ornith 'ornith' 'launch|526|R2|R3|OK|PASS|FAIL'
@@ -608,7 +608,7 @@ st_r12_d2() {
   grab_all lookup 'spec lookup:|lookup:|SEEDED' 12
   finish
 }
-stage r12.a4 12 default gpu qwen - "D2 on A4: the 36 tool-call scenarios (chat, with their tools) and the golden prompts through b70-serve --spec off / --spec lookup, greedy, max_tokens 192 - each request's first difference from --spec off judged by the f32 judge (spec 28 N6, spec_judge.h's rule: serve_judge.py on the int8-head forced references; a difference without its reference SKIPs, never passes); identity to --spec off a recorded number, not the bar (operator 2026-11-07)"
+stage r12.a4 12 default gpu qwen - "D2 on A4: the 36 tool-call scenarios (chat, with their tools) and the golden prompts through b70-serve --spec off / --spec lookup, greedy, max_tokens 192 - each request's first difference from --spec off judged by the f32 judge (spec 28 N6, spec_judge.h's rule: serve_judge.py on the int8-head forced references; a difference without its reference SKIPs, never passes); identity to --spec off a recorded number, not the bar"
 st_r12_a4() {
   serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 192 --stop-at-eos" \
     "off|--max-len 16384 --spec off" "lookup|--max-len 16384 --spec lookup"
@@ -653,19 +653,19 @@ st_r13_kernels() {
   jgrab pf-moe '^pf_moe_test$' 'bitwise|exact|grouped|dense|ulp|C = 37|OK|PASS|FAIL'
   finish
 }
-stage r13.prefill 13 default card ornith r13.kernels "ornith_prefill_{l0,l0-int8}_test: 2061 / 2021 launches per chunk, replay and chunking bitwise, prefill-vs-decode routes and tokens (the kConsist* distribution printed), R2 on the prefill path - on l0 (Ornith's default) gated; on l0-int8 (opt-in) sections 4-6 DIAGNOSTIC, printed with their bars (ctest label diagnostic; operator ruling 2026-10-31, round 2: 8-bit activations cost MoE routing accuracy against f32)"
+stage r13.prefill 13 default card ornith r13.kernels "ornith_prefill_{l0,l0-int8}_test: 2061 / 2021 launches per chunk, replay and chunking bitwise, prefill-vs-decode routes and tokens (the kConsist* distribution printed), R2 on the prefill path - on l0 (Ornith's default) gated; on l0-int8 (opt-in) sections 4-6 DIAGNOSTIC, printed with their bars (ctest label diagnostic; ruling 2026-10-31, round 2: 8-bit activations cost MoE routing accuracy against f32)"
 st_r13_prefill() {
   run_tests '^ornith_prefill_(l0|l0-int8)_test$' ornith
   jgrab ornith-prefill 'ornith_prefill_' 'launch|2061|2021|bitwise|kConsist|tie|R2|SKIPPED|OK|FAIL'
   finish
 }
-stage r13.gates 13 default card ornith,oracle_ornith,oracle_ornith_f32,oracle_ornith_f32_pfi8 r13.kernels "R3: prefill_gate_ornith_{l0,l0-int8}_test and _c16 (one chunk and chunks of 16), the tie rule on the f32 teacher-forced reference oracle-out-ornith-f32 (the judge; oracle-out-ornith's bf16 golden printed beside it - operator ruling 2026-10-23)"
+stage r13.gates 13 default card ornith,oracle_ornith,oracle_ornith_f32,oracle_ornith_f32_pfi8 r13.kernels "R3: prefill_gate_ornith_{l0,l0-int8}_test and _c16 (one chunk and chunks of 16), the tie rule on the f32 teacher-forced reference oracle-out-ornith-f32 (the judge; oracle-out-ornith's bf16 golden printed beside it - ruling 2026-10-23)"
 st_r13_gates() {
   run_tests '^prefill_gate_ornith_' ornith
   jgrab r3 'prefill_gate_ornith' 'golden_gate_test OK|TOTAL:|determined|near-tie|PASS|FAIL'
   finish
 }
-stage r13.split 13 default card ornith r13.kernels "prefill_split_ornith_{l0,l0-int8}_test: splits at multiples of 64 bitwise; every run judged by the f32 reference of long32k[0, 2600) against the bf16 reference's own distance - the last-row logits and the all-rows median within 2x its cosine distance, the one-row metrics printed (operator ruling 2026-10-31, round 2: the near-miss gates' rule); l0-int8 DIAGNOSTIC (ruling 4)"
+stage r13.split 13 default card ornith r13.kernels "prefill_split_ornith_{l0,l0-int8}_test: splits at multiples of 64 bitwise; every run judged by the f32 reference of long32k[0, 2600) against the bf16 reference's own distance - the last-row logits and the all-rows median within 2x its cosine distance, the one-row metrics printed (round 2: the near-miss gates' rule); l0-int8 DIAGNOSTIC (ruling 4)"
 st_r13_split() {
   run_tests '^prefill_split_ornith_' ornith
   jgrab split 'prefill_split_ornith' 'bitwise|cos|split|PASS|FAIL'
@@ -748,18 +748,18 @@ st_r16_golden_server() {
   chk "timeout 1800 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_ORNITH" "golden_server_test against Ornith"
   finish
 }
-stage r16.prefix 16 default card ornith r16.kernels "spec 7 C2 on Ornith: prefix_gpu_test <ornith> on l0 (the default; near-tie allowance 1), on l0 with --spec mtp --spec-max 3 and on l0-int8 (opt-in: its judge's verdicts DIAGNOSTIC, operator ruling 2026-10-31 round 2) - run directly, as golden_server_test; each sequence judged by the f32 reference of its forced context where \$DATA/oracle-out-ornith-f32-forced has it (operator ruling 2026-10-29, r16.forced_refs makes them), more misses than the bf16 twin by the near-miss rule (2026-10-31, round 2)"
+stage r16.prefix 16 default card ornith r16.kernels "spec 7 C2 on Ornith: prefix_gpu_test <ornith> on l0 (the default; near-tie allowance 1), on l0 with --spec mtp --spec-max 3 and on l0-int8 (opt-in: its judge's verdicts DIAGNOSTIC, ruling 2026-10-31 round 2) - run directly, as golden_server_test; each sequence judged by the f32 reference of its forced context where \$DATA/oracle-out-ornith-f32-forced has it (r16.forced_refs makes them), more misses than the bf16 twin by the near-miss rule (2026-10-31, round 2)"
 st_r16_prefix() {
   chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1" "prefix_gpu_test <ornith> l0"
   chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1 0 3" "prefix_gpu_test <ornith> l0 --spec mtp --spec-max 3"
   chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8" "prefix_gpu_test <ornith> l0-int8 (diagnostic)"
   finish
 }
-# Operator ruling 2026-10-29: the f32 references of the gates f32_oracle.sh's golden prompts do not cover. The
+# the f32 references of the gates f32_oracle.sh's golden prompts do not cover. The
 # forced contexts are the engine's own (tests/golden/forced_judge.h): r16.forced_dumps runs the tests with
 # B70_DUMP_FORCED, r16.forced_refs runs the f32 reference on each context (tools/box_validate/f32_refs.sh) and the
 # MTP head's and the 2600-id split prompt's references; the gates (r13.split, r16.m1, r16.prefix) then judge against them, each falling back to its old rule while a file is missing.
-stage r16.forced_dumps 16 optin card ornith r16.kernels "the forced contexts of the f32-judged gates (operator ruling 2026-10-29): prefix_gpu_test <ornith> x 3 with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/"
+stage r16.forced_dumps 16 optin card ornith r16.kernels "the forced contexts of the f32-judged gates: prefix_gpu_test <ornith> x 3 with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/"
 st_r16_forced_dumps() {
   local D="$DATA/oracle-forced-dumps"
   x "mkdir -p $D/ornith-prefix"
@@ -769,13 +769,13 @@ st_r16_forced_dumps() {
   chk "ls $D/*/*.prompt.ids | wc -l" "the dumped contexts"
   finish
 }
-stage r16.forced_refs 16 optin cpu ornith,oracle_image r16.forced_dumps "the f32 references of the forced contexts, the Ornith MTP head (M1) and long32k[0, 2600) for prefill_split (f32 and bf16) - tools/box_validate/f32_refs.sh under /tmp/b70-cpu-model.lock, ~3-15 min a context (operator ruling 2026-10-29)"
+stage r16.forced_refs 16 optin cpu ornith,oracle_image r16.forced_dumps "the f32 references of the forced contexts, the Ornith MTP head (M1) and long32k[0, 2600) for prefill_split (f32 and bf16) - tools/box_validate/f32_refs.sh under /tmp/b70-cpu-model.lock, ~3-15 min a context"
 st_r16_forced_refs() {
   local D="$DATA/oracle-forced-dumps"
   chk "tools/box_validate/f32_refs.sh $DATA ornith-mtp" "the Ornith MTP head's f32 M1 rows"
   chk "tools/box_validate/f32_refs.sh $DATA split ornith tests/golden/prompts/long32k.ids 2600 $DATA/oracle-out-ornith-split/long32k-2600" "long32k[0, 2600) in f32 and bf16"
   chk "tools/box_validate/f32_refs.sh $DATA forced ornith $D/ornith-prefix" "the Ornith prefix contexts"
-  # Operator ruling 2026-10-31: each judge's bf16 twin (the bar of the near-miss gates), --gemm f32 on this CPU.
+  # each judge's bf16 twin (the bar of the near-miss gates), --gemm f32 on this CPU.
   chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced ornith $D/ornith-prefix '' --gemm f32" "the Ornith prefix contexts' bf16 twins"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   finish
@@ -796,7 +796,7 @@ st_r16_tokdiff() {
   grab_all tokdiff '^TOKDIFF ' 20
   finish
 }
-stage r16.mtp_rows 16 optin gpu ornith r16.mtp "D1-style rows on Ornith through b70-serve: --spec off / 1 / 3 / auto on the golden and A4 prompts, 256 ids, greedy, R2_ROUNDS rotated; decode t/s per request from the server's records; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07) - Ornith's int8-head f32 references, made from the dumped contexts by f32_refs.sh forced ornith <dump> -i8head --lm-head int8"
+stage r16.mtp_rows 16 optin gpu ornith r16.mtp "D1-style rows on Ornith through b70-serve: --spec off / 1 / 3 / auto on the golden and A4 prompts, 256 ids, greedy, R2_ROUNDS rotated; decode t/s per request from the server's records; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -) - Ornith's int8-head f32 references, made from the dumped contexts by f32_refs.sh forced ornith <dump> -i8head --lm-head int8"
 st_r16_mtp_rows() {
   idle before
   serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_ORNITH" "--set golden --set toolcall --max-tokens 256" \
@@ -1088,10 +1088,10 @@ st_r24_reject() {
   run_tests '^cli_reject_kolibri_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r24.oracle_synth 24 optin cpu oracle_image - "the synthetic golden sets on the box CPU: kolibri_oracle.sh synth - make_synth.py --layers 5 (int4 and bf16 attention) + check.py, kolibri_ref.py run on prose and de_prose -> \$DATA/oracle-out-kolibri-synth (resumable; MemAvailable >= 24 GB), then each golden's f32 judge (kolibri_oracle.sh synth-f32, teacher-forced on its tokens -> oracle-out-kolibri-synth-f32, operator ruling 2026-10-31); the gap distribution and kolibri_bench.ids; then re-links oracle-out*"
+stage r24.oracle_synth 24 optin cpu oracle_image - "the synthetic golden sets on the box CPU: kolibri_oracle.sh synth - make_synth.py --layers 5 (int4 and bf16 attention) + check.py, kolibri_ref.py run on prose and de_prose -> \$DATA/oracle-out-kolibri-synth (resumable; MemAvailable >= 24 GB), then each golden's f32 judge (kolibri_oracle.sh synth-f32, teacher-forced on its tokens -> oracle-out-kolibri-synth-f32, ruling 2026-10-31); the gap distribution and kolibri_bench.ids; then re-links oracle-out*"
 st_r24_oracle_synth() {
   chk "tools/box_validate/kolibri_oracle.sh $DATA synth" "the Kolibri-1 synthetic reference runs"
-  # operator ruling 2026-10-31 (round 2): each golden's f32 judge, teacher-forced on its tokens
+  # each golden's f32 judge, teacher-forced on its tokens
   chk "tools/box_validate/kolibri_oracle.sh $DATA synth-f32" "the Kolibri-1 synthetic f32 judges"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
@@ -1111,7 +1111,7 @@ st_r24_k3() {
   jgrab k3 '^kolibri_decode_synth_test$' 'plan ==|K3|ring|OK'
   finish
 }
-stage r24.golden 24 default card oracle_kolibri_synth,oracle_kolibri_synth_f32 r24.k3 "KL2 on the synthetic checkpoints: kolibri_golden_synth_int4attn_test, _bf16attn_test, _i8head_test - judged by the f32 reference (oracle-out-kolibri-synth-f32), no further from it than the bf16 golden over prose / de_prose x 32: the tokens by the near-miss rule, the routing sets differing no more often, each layer's tap median within 2x the golden's distance (operator ruling 2026-10-31, round 2); the bf16 golden's tie rule and near-tie routing diagnostic printed"
+stage r24.golden 24 default card oracle_kolibri_synth,oracle_kolibri_synth_f32 r24.k3 "KL2 on the synthetic checkpoints: kolibri_golden_synth_int4attn_test, _bf16attn_test, _i8head_test - judged by the f32 reference (oracle-out-kolibri-synth-f32), no further from it than the bf16 golden over prose / de_prose x 32: the tokens by the near-miss rule, the routing sets differing no more often, each layer's tap median within 2x the golden's distance (round 2); the bf16 golden's tie rule and near-tie routing diagnostic printed"
 st_r24_golden() {
   run_tests '^kolibri_golden_synth_(int4attn|bf16attn|i8head)_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
   jgrab golden '^kolibri_golden_synth' 'gate:|routing:|tap|OK'
@@ -1142,7 +1142,7 @@ st_r24_cli() {
   grab_all memory '^memory' 6
   finish
 }
-stage r24.oracle_real 24 optin cpu kolibri,oracle_image - "the real golden set on the box CPU (needs spec 20b): kolibri_oracle.sh real - prose, code, de_prose, de_chat (the chat template's ids) x 32 -> \$DATA/oracle-out-kolibri (MemAvailable >= 48 GB); the gap distribution; then each golden's f32 judge (kolibri_oracle.sh real-f32 -> oracle-out-kolibri-f32, operator ruling 2026-10-31)"
+stage r24.oracle_real 24 optin cpu kolibri,oracle_image - "the real golden set on the box CPU (needs spec 20b): kolibri_oracle.sh real - prose, code, de_prose, de_chat (the chat template's ids) x 32 -> \$DATA/oracle-out-kolibri (MemAvailable >= 48 GB); the gap distribution; then each golden's f32 judge (kolibri_oracle.sh real-f32 -> oracle-out-kolibri-f32, ruling 2026-10-31)"
 st_r24_oracle_real() {
   chk "tools/box_validate/kolibri_oracle.sh $DATA real" "the Kolibri-1 reference runs on the real checkpoint"
   chk "tools/box_validate/kolibri_oracle.sh $DATA real-f32" "the Kolibri-1 f32 judges on the real checkpoint"
@@ -1151,7 +1151,7 @@ st_r24_oracle_real() {
   grab_all gap 'selection gap' 8
   finish
 }
-stage r24.partial 24 default gpu kolibri,oracle_kolibri,oracle_kolibri_f32 r24.k3 "development mode on the real checkpoint, one card (needs spec 20b): kolibri1_load_partial_test (30 layers, bf16 head) and kolibri_partial_test / _eager - the residual tap of layers 0..29 judged by the f32 reference oracle-out-kolibri-f32: each layer's median cosine within 2x the bf16 golden's distance, the routing sets differing no more often than the golden's (operator ruling 2026-10-31, round 2); the old bars (median >= 0.9998, min >= 0.99) printed"
+stage r24.partial 24 default gpu kolibri,oracle_kolibri,oracle_kolibri_f32 r24.k3 "development mode on the real checkpoint, one card (needs spec 20b): kolibri1_load_partial_test (30 layers, bf16 head) and kolibri_partial_test / _eager - the residual tap of layers 0..29 judged by the f32 reference oracle-out-kolibri-f32: each layer's median cosine within 2x the bf16 golden's distance, the routing sets differing no more often than the golden's (round 2); the old bars (median >= 0.9998, min >= 0.99) printed"
 st_r24_partial() {
   run_tests '^(kolibri1_load_partial_test|kolibri_partial_test|kolibri_partial_eager_test)$'
   jgrab partial 'kolibri_partial' 'layer|BELOW|routing:|OK'
@@ -1208,7 +1208,7 @@ st_r26_reject() {
   run_tests '^cli_reject_kolibri_prefill_(int8|chunk)$'
   finish
 }
-stage r26.prefill 26 default card oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, two immediate prefills bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer); section 4 gated on each layer's median, 5 / 6 printed - the prefill's routes and tokens are r26.golden's, judged by f32 (operator ruling 2026-10-31, round 2)"
+stage r26.prefill 26 default card oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, two immediate prefills bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer); section 4 gated on each layer's median, 5 / 6 printed - the prefill's routes and tokens are r26.golden's, judged by f32 (round 2)"
 st_r26_prefill() {
   run_tests '^kolibri_prefill_synth_(int4attn|bf16attn|eager)_test$' kolibri
   jgrab k3-prefill '^kolibri_prefill_synth' 'walk|K3|chunks|median|p01|routing|tokens|OK|FAIL'
@@ -1220,7 +1220,7 @@ st_r26_split() {
   jgrab split '^prefill_split_kolibri_test$' 'split at|bitwise|OK|FAIL'
   finish
 }
-stage r26.golden 26 default card oracle_kolibri_synth,oracle_kolibri_synth_f32 r26.prefill "KL2 on prefill, synthetic arms: kolibri_golden_prefill_synth_int4attn_test, _bf16attn_test, _c16_test (chunks of 16), _i8head_test - the tie-aware token gate and the routing diagnostic on the prompt rows (B70_KOL_TIE_TOL as r24.golden) - judged by the f32 reference as r24.golden (operator ruling 2026-10-31, round 2)"
+stage r26.golden 26 default card oracle_kolibri_synth,oracle_kolibri_synth_f32 r26.prefill "KL2 on prefill, synthetic arms: kolibri_golden_prefill_synth_int4attn_test, _bf16attn_test, _c16_test (chunks of 16), _i8head_test - the tie-aware token gate and the routing diagnostic on the prompt rows (B70_KOL_TIE_TOL as r24.golden) - judged by the f32 reference as r24.golden (round 2)"
 st_r26_golden() {
   run_tests '^kolibri_golden_prefill_synth_(int4attn|bf16attn|c16|i8head)_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
   jgrab golden-prefill '^kolibri_golden_prefill_synth' 'gate:|routing:|prefill:|OK|FAIL'
@@ -1316,7 +1316,7 @@ st_r27_prefix_kv8() {
   run_tests '^pp_prefix_gpu_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r27.cli_mtp 27 default gpu qwen r27.mtp "b70-decode --parallel pp with MTP (16b's refusal lifted): --ids prose.ids --n 64 --prefill with --spec mtp --spec-max 3 and --spec auto, against the one-card plain ids: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the mtp line and both memory lines"
+stage r27.cli_mtp 27 default gpu qwen r27.mtp "b70-decode --parallel pp with MTP (16b's refusal lifted): --ids prose.ids --n 64 --prefill with --spec mtp --spec-max 3 and --spec auto, against the one-card plain ids: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -); the mtp line and both memory lines"
 st_r27_cli_mtp() {
   local args="--ids tests/golden/prompts/prose.ids --n 64 --prefill"
   chk "build/src/cli/b70-decode $SNAP_QWEN $args > $STATE/r27-one.ids" "one card, plain"
@@ -1395,7 +1395,7 @@ st_r27_p3_mtp() {
   grab_all passkey '^passkey [^ ]+( placement [0-9.]+)?: ' 8
   finish
 }
-stage r27.benchy 27 optin gpu-self qwen,uvx - "plan 16d Task 2's llama-benchy rows through b70-serve: one card vs --parallel pp (the operator's flags: --no-cache --exact-tg --latency-mode generation) at pp4096 tg256, and decode at depth 32k / 128k (--parallel pp at 262144, one card at its auto length)"
+stage r27.benchy 27 optin gpu-self qwen,uvx - "plan 16d Task 2's llama-benchy rows through b70-serve: one card vs --parallel pp (the flags: --no-cache --exact-tg --latency-mode generation) at pp4096 tg256, and decode at depth 32k / 128k (--parallel pp at 262144, one card at its auto length)"
 st_r27_benchy() {
   local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation"
   chk "MODEL=$SNAP_QWEN MAX_LEN=40960 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "one card, pp4096 tg256"
@@ -1486,7 +1486,7 @@ st_r28_a4() {
   grab_all a4 'match|/ 36|parse failure' 6
   finish
 }
-stage r28.benchy 28 optin gpu-self kolibri,uvx - "plan 20e Task 5's speed rows through b70-serve <kolibri> on two cards (SERVE_AFFINITY=0,1; b70-serve's --parallel auto picks two cards for Kolibri-1 - llama-benchy's --pp is its prompt length): pp4096 tg256 depth 1 at 262144 (the operator's flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 128k - every row with the cards, the attention arm (decision 2), the int8 head and bf16 KV"
+stage r28.benchy 28 optin gpu-self kolibri,uvx - "plan 20e Task 5's speed rows through b70-serve <kolibri> on two cards (SERVE_AFFINITY=0,1; b70-serve's --parallel auto picks two cards for Kolibri-1 - llama-benchy's --pp is its prompt length): pp4096 tg256 depth 1 at 262144 (the flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 128k - every row with the cards, the attention arm (decision 2), the int8 head and bf16 KV"
 st_r28_benchy() {
   local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation"
   chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "two cards, pp4096 tg256"
@@ -1943,7 +1943,7 @@ rownote 36 "Nothing in src/kernels changes (kernel_cmdlines +0 / -0 / ~0: G0's g
 rownote 36 "Data: r36.curve needs row 30's traces (r30.traces: oracle-out-q4exp-traces, 39+ files). The arms need r32.k1 and two cards in one context (r22.p1). Predecessors to hand in beside: r32.ple_rate (the first host-USM number), r31.load_real's pin line (P0.5's start), r34.accept (the projection's MTP acceptance; else the 0.5-0.8 range, PROPOSED), row 32's per-layer rate (PROJECT_BW) and row 33's compute a chunk (PROJECT_PF_MS). Outputs: \$DATA/oracle-out-q4exp-offload (budget.json, links*.txt, po-*.txt, the curves, project), oracle-out-q4exp-traces/profile.safetensors (decision 8)."
 rownote 36 "Both cards: the run exports DEVICE's one card (ZE_AFFINITY_MASK); every probe_offload command sets ZE_AFFINITY_MASK=0,1 itself, as row 22's do, and a two-card arm that still sees one card FAILS (not a SKIP). The GPU lock is the one lock for both."
 rownote 36 "RAM rule: the pinned arms never beside a CPU oracle - r36.pin SKIPs 'host RAM' below 110 GB available or with any container up (probe_offload itself refuses above MemAvailable - 16 GiB, printing the cap: spec 7's rule); r36.hostbw pins 1.34 GB and allocates a 6 GiB triad."
-rownote 36 "Session: an idle box (the idle protocol, docs/10-the-box.md), both cards free of other DRM holders, RECORD grade for the timed stages (r36.copy, r36.zc, r36.hostbw - opt-in since 2026-11-07, the operator's ruling: they run in the quiet-box session with --with; r36.project waits on r36.zc's PASS, so it SKIPs until then; r36.replay checks visibility only and runs after r36.build / r36.links / r22.p1): probe_offload warms up ~0.5 s, then times control and candidate as interleaved pairs, median of 5 with the range. A mismatch in r36.replay or r36.alias is reported first, with its replay / page. A STOP from r36.links (a card below Gen3 x8; an UNKNOWN line means lspci -vv needed root - sudo lspci -vv -s 04:00.0 by hand) stops the row: spec 22 §3, stop and report. The record is docs/probes/probe-offload-<date>.md (plan 22a Task 5 Steps 6-7); the operator's go / no-go follows r36.project's STOP / GO-CANDIDATE line."
+rownote 36 "Session: an idle box (the idle protocol, docs/10-the-box.md), both cards free of other DRM holders, RECORD grade for the timed stages (r36.copy, r36.zc, r36.hostbw - opt-in since 2026-11-07,  they run in the quiet-box session with --with; r36.project waits on r36.zc's PASS, so it SKIPs until then; r36.replay checks visibility only and runs after r36.build / r36.links / r22.p1): probe_offload warms up ~0.5 s, then times control and candidate as interleaved pairs, median of 5 with the range. A mismatch in r36.replay or r36.alias is reported first, with its replay / page. A STOP from r36.links (a card below Gen3 x8; an UNKNOWN line means lspci -vv needed root - sudo lspci -vv -s 04:00.0 by hand) stops the row: spec 22 §3, stop and report. The record is written by the probe (plan 22a Task 5 Steps 6-7); the go / no-go decision follows r36.project's STOP / GO-CANDIDATE line."
 stage r36.host 36 default cpu oracle_image - "host: qwen4exp_plan_test (the routed-expert budget = plan() byte for byte; its budget-json lines -> \$DATA/oracle-out-q4exp-offload/budget.json), probe_offload_kernel_drift_test, offload_links.sh --self-test, test_offload_curve.py in the oracle image (the 5.19.0 site for its tiny-model test)"
 st_r36_host() {
   local off="$DATA/oracle-out-q4exp-offload"
@@ -2059,7 +2059,7 @@ st_r36_tier_pp() {
 }
 
 # ======================================================================================
-row 41 "the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve through llama-benchy, one set of flags, one card - Qwen3.8 int4 g64"
+row 41 "the llama-benchy comparison matrix: b70-serve through llama-benchy, one set of flags, one card - Qwen3.8 int4 g64"
 rownote 41 "One matrix, every arm: llama-benchy pinned (BENCHY_VERSION, default 0.4.0), A = --pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md verbatim (the flags such tables are usually published with - no --no-cache, so a repeated prompt can hit b70-serve's prefix cache, on by default), B = A with --no-cache, D = --pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache (agentic depth). HTTP-inclusive: these rows sit beside, never replace, the engine-internal records (docs/BENCHMARKS.md 'llama-benchy comparisons')."
 rownote 41 "Opt-in and timed: run on an idle box (the quiet-box session, docs/open-work.md), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so."
 stage r41.ours 41 optin gpu-self qwen,uvx - "b70-serve <qwen> --max-len 40960 on device 0, --spec off and --spec auto: matrices A, B and D (int8 head, bf16 KV, defaults otherwise)"
@@ -2118,7 +2118,7 @@ st_r54_d1() {
   grab_all d1 '^dflash_d1:|^DFlash drafter:|^=== ' 20
   finish
 }
-stage r54.d1_ref 54 default cpu qwen,dflash,oracle_dflash_dumps,oracle_image r54.d1 "D1, the reference's half (box CPU, the oracle image): tools/oracle/dflash_d1.py per arm - dflash_ref.py on the same taps, anchors and head form (int8 RTN simulated where the engine quantised), the vocab mask, V' masked; the bars: top-16 sets tie-aware and noise-aware (a swap within the row's own engine-vs-reference logit difference is a tie: operator, 2026-10-27), scores cosine >= 0.9999 (bf16) / 0.999 (int8), the walk equal. The table -> \$STATE/d1/d1.md"
+stage r54.d1_ref 54 default cpu qwen,dflash,oracle_dflash_dumps,oracle_image r54.d1 "D1, the reference's half (box CPU, the oracle image): tools/oracle/dflash_d1.py per arm - dflash_ref.py on the same taps, anchors and head form (int8 RTN simulated where the engine quantised), the vocab mask, V' masked; the bars: top-16 sets tie-aware and noise-aware (a swap within the row's own engine-vs-reference logit difference is a tie:), scores cosine >= 0.9999 (bf16) / 0.999 (int8), the walk equal. The table -> \$STATE/d1/d1.md"
 st_r54_d1_ref() {
   chk "SNAP_QWEN=$SNAP_QWEN tools/box_validate/dflash_d1.sh ref $STATE/d1" "dflash_d1.py x 3 arms: D1"
   grab_all d1-ref '^\| |^D1 |^  FAIL' 40
@@ -2128,7 +2128,7 @@ st_r54_d1_ref() {
 # ======================================================================================
 row 55 "spec 19c - DFlash in the decode loop: the taps in the verify lists (runtime::build_verify_taps, M = 1..8 over 8 GDN slots), the commit-side projection of the accepted rows, the prefill tail (the window's taps through Context::copy_2d, projected 8 rows a replay), runtime::dflash::DFlashDrafter behind runtime::TapDrafter, host acceptance with the drafter's sparse q (server::accept_sparse), --spec dflash in b70-serve (AdaptiveK over MtpCost::dflash) and b70-decode --ids; D0, D2, D3, D4 (plan 19c)"
 rownote 55 "Written blind on the Mac after row 54 (19b's drafter, itself unvalidated): nothing of 19c has run on a card. 7 new binaries (kernel_cmdlines +7 / -0 / ~0): gdn_step_slots_M1..4_N8 (the 8-slot verify build at the rows spec 8's lists ran at 4 slots) and the bf16 lm_head at M = 5 / 6 / 8. Nothing binds them without --spec dflash: D0 is G0. On the Mac (indicative): tools/mac/clrun/gdn_slots_run - gdn_step's 8-slot build at M = 8 and 5 bitwise to the plain kernel stepping the same rows, and a partial acceptance (j = 0 / 3 / 6 / 7 of 7, 2 of 4) leaves the live slot exactly the state after row j, with 3 new rows from it equal to the plain run (a mutant committing j + 1 is caught)."
-rownote 55 "How the GDN state ends at the last accepted token (the operator's upstream question, vllm-xpu-kernels 78799fe's per-token replay state): the verify list writes the state after EVERY row into its own slot ((live + m) % 8) and commit(j) only moves Control::gdn_live to row j's slot - no copy, no replay; the rejected rows' slots and conv-ring positions are never read before a later list rewrites them. The cost is M x 151 MB of state writes per verify (1.2 GB at M = 8, ~2 ms at 600 GB/s, derived) and 1.06 GB of slots; a replay-entry scheme (per row: corr, normalised k, decay - ~2.4 MB at M = 8 - then one rank-1 replay pass at commit, ~0.5 ms) is recorded as a lever in spec 19 §11, not built."
+rownote 55 "How the GDN state ends at the last accepted token (the upstream question, vllm-xpu-kernels 78799fe's per-token replay state): the verify list writes the state after EVERY row into its own slot ((live + m) % 8) and commit(j) only moves Control::gdn_live to row j's slot - no copy, no replay; the rejected rows' slots and conv-ring positions are never read before a later list rewrites them. The cost is M x 151 MB of state writes per verify (1.2 GB at M = 8, ~2 ms at 600 GB/s, derived) and 1.06 GB of slots; a replay-entry scheme (per row: corr, normalised k, decay - ~2.4 MB at M = 8 - then one rank-1 replay pass at commit, ~0.5 ms) is recorded as a lever in spec 19 §11, not built."
 rownote 55 "Data: the gate checkpoint (qwen) and the drafter (dflash: hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB - row 54's). r55.engine and r55.gpu load both (~19 GB + 2.1 GB int8 drafter + 1.06 GB slots at max_len 16384). Hand back: every stage's lines - L (launch counts, the memory line), T1 / D3 per row (cosines and the bitwise marks), P per j (the live slot, the ring rows, the 64 ids), D2 per K (acceptance, ids an iteration), RF3, PF (split / chunked / decode cosines), dflash_gpu_test's per-prompt D2 lines and its S line, r55.serve's IDENTICAL / RATIO lines and the 'spec dflash:' / 'dflash:' server lines, r55.tps's generate lines."
 stage r55.host 55 default cpu - - "host: dflash_engine_host_test (the tap sites, the 8 slots, the planner with a drafter, MtpCost::dflash and AdaptiveK at K <= 7), dflash_accept_test (D4: sparse-q acceptance, 10^6 seeded draws per case, chi-square >= 0.01, no draft outside the candidates, the residual finite), dflash_plan_test (19b's, now with the engine's slots and prefill taps), spec_accept_test / adaptive_k_test unchanged; b70-serve / b70-decode --spec dflash's refusals before the device"
 st_r55_host() {
@@ -2154,7 +2154,7 @@ st_r55_gpu() {
   jgrab gpu '^dflash_gpu_test$' '^D2|^RF1|^S:|^dflash_gpu_test' 140
   finish
 }
-stage r55.serve 55 default gpu qwen,dflash r55.gpu "D2 by b70-serve: the 36 A4 tool-call scenarios and the golden prompts through --spec off / --spec dflash (auto K) / --spec dflash --spec-max 3, greedy, max_tokens 192 - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); a seeded sampled request twice; the 'spec dflash:' startup line and the per-request 'dflash:' lines"
+stage r55.serve 55 default gpu qwen,dflash r55.gpu "D2 by b70-serve: the 36 A4 tool-call scenarios and the golden prompts through --spec off / --spec dflash (auto K) / --spec dflash --spec-max 3, greedy, max_tokens 192 - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -); a seeded sampled request twice; the 'spec dflash:' startup line and the per-request 'dflash:' lines"
 st_r55_serve() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 192 --stop-at-eos" \
@@ -2171,7 +2171,7 @@ st_r55_serve() {
   grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
   judged_finish
 }
-stage r55.decode 55 default card qwen,dflash r55.engine "D2 without the server: b70-decode --ids (code, prose, the 4395-id long prompt) --prefill --n 256, plain / --spec dflash (K 7) / --spec dflash --spec-max 3 - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the 'dflash:' acceptance lines"
+stage r55.decode 55 default card qwen,dflash r55.engine "D2 without the server: b70-decode --ids (code, prose, the 4395-id long prompt) --prefill --n 256, plain / --spec dflash (K 7) / --spec dflash --spec-max 3 - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -); the 'dflash:' acceptance lines"
 st_r55_decode() {
   local p arm f a dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   chk "python3 tools/box_validate/long_ids.py 4395 $STATE/$STAGE.long.ids" "the 4395-id prompt"
@@ -2240,7 +2240,7 @@ st_r56_pp() {
   jgrab pp '^pp_dflash_test$' '^reference|^--pp 2|  ids|bitwise|DIFFERS|continued|PASS|FAIL' 60
   finish
 }
-stage r56.pp_serve 56 default gpu qwen,dflash r56.pp "D2 by b70-serve --parallel pp --spec dflash (both cards): the A4 + golden sets greedy, max_tokens 192, against one card's --spec off - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the plan line (the drafter on device 1, the embedding replica), both memory lines, the 'spec dflash (--parallel pp' line"
+stage r56.pp_serve 56 default gpu qwen,dflash r56.pp "D2 by b70-serve --parallel pp --spec dflash (both cards): the A4 + golden sets greedy, max_tokens 192, against one card's --spec off - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -); the plan line (the drafter on device 1, the embedding replica), both memory lines, the 'spec dflash (--parallel pp' line"
 st_r56_pp_serve() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" c="--set toolcall --set golden --max-tokens 192 --stop-at-eos"
   chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/off.r1 off 1 $SNAP_QWEN --max-len 16384 --spec off -- $c" "one card, --spec off"
@@ -2255,9 +2255,9 @@ st_r56_pp_serve() {
 
 # ======================================================================================
 row 66 "spec 13a - the batching probe: rows of different sequences in one decode step (the BATCH_ROWS row builds, runtime::build_rows, probe_batch_step under B70_BATCH_PROBE); the check, the step and chunk tables (plan 13a)"
-rownote 66 "Written blind on the Mac (docs/probes/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
+rownote 66 "Written blind on the Mac: B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
 rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (the quiet-box session; the idle protocol, docs/10-the-box.md), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison."
-rownote 66 "Hand back: every 'CHECK' line and the 'check:' verdict of r66.check (a FAIL stops 13c); r66.cost's tables ('| arm |' rows, the production verify(0) pair) per model and KV form; r66.chunk's chunk tables; the 'memory:' lines. They fill docs/probes/probe-batching-2026-10-23.md sections 2-4 and the operator's section 7 decisions (the slots per model, the row budget's allocation, the interleave chunk)."
+rownote 66 "Hand back: every 'CHECK' line and the 'check:' verdict of r66.check (a FAIL stops 13c); r66.cost's tables ('| arm |' rows, the production verify(0) pair) per model and KV form; r66.chunk's chunk tables; the 'memory:' lines. They fill the probe's tables and the section 7 decisions (the slots per model, the row budget's allocation, the interleave chunk)."
 stage r66.build 66 default cpu -           g0.build "the row builds and probe_batch_step in the default build since plan 13c (the 56 row builds, build_rows, probe_batch_step): present in build/"
 st_r66_build() {
   chk "miss=0; for b in gdn_step_rows_M8 attn_prep_M8_ROWS attn_prep_M8_S1_KV8_ROWS attn_v2_M8_T32_ROWS attn_v2_M8_T32_KV8_ROWS; do if [ -s build/kernels/\$b.bin ]; then echo \"built \$b\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ] && [ -x build/tools/probe/probe_batch_step ]" \
@@ -2294,7 +2294,7 @@ st_r66_chunk() {
 
 # ======================================================================================
 row 68 "spec 28a - the small-M GEMM P0: Qwen3.8's decode linears at M = 1 / 2 / 4 / 8 / 16 (gemv vs bf16 / i8xi4 DPAS stand-ins), the verify step's GEMV / non-GEMV split at M = 1..8, numerics and row independence, the go / no-go line (plan 28a)"
-rownote 68 "The probe is closed: GO, built and merged as 28b (docs/probes/probe-small-m-gemm-2026-11-01.md); its check / shape / attribution / numerics stages are gone. r68.build stays: it builds the stand-in kernels r69.speed's lever table times."
+rownote 68 "The probe is closed: GO, built and merged as 28b; its check / shape / attribution / numerics stages are gone. r68.build stays: it builds the stand-in kernels r69.speed's lever table times."
 stage r68.build    68 default cpu  -           g0.build              "probe_small_m and its 347 psm_* binaries, probe_mtp_steps and probe_verify_m (build), -j\$JOBS"
 st_r68_build() {
   chk "cmake --build build -j$JOBS --target probe_small_m probe_mtp_steps probe_verify_m" "probe_small_m and its psm_* binaries, probe_mtp_steps, probe_verify_m"
@@ -2304,7 +2304,7 @@ st_r68_build() {
 # ======================================================================================
 row 69 "spec 28b - gemm_sm in production: every M >= 2 decode list (MTP / lookup verify, DFlash tap verify - the drafter stays on gemv_i8w -, --parallel pp stage verify, 13a rows; Qwen3.8, Ornith's dense projections) on the small-M DPAS GEMM, M = 1 bitwise; N1-N8, S2-S3, the measured cost table (plan 28b)"
 rownote 69 "N1 is the gate that is never traded: M = 1 lists bind the old binaries. Hand back: the N2 / N3 lines, the M2 cosines per M, the tie census, the verify(M) table and the D1 table."
-rownote 69 "First run 2026-11-01 as busy-box timing on one card per job (operator ruling, as 28a): r69.speed is the quiet-box re-check of those numbers (docs/superpowers/specs/2026-10-27-spec28-small-m-verify-gemm-design.md, '28b as built')."
+rownote 69 "First run 2026-11-01 as busy-box timing on one card per job (as 28a): r69.speed is the quiet-box re-check of those numbers (spec 28, '28b as built')."
 stage r69.host    69 default cpu  -           -                     "gemv_kind_test, gemm_sm_names_test, gemm_sm_ref_test, greedy_tie_test, the AdaptiveK cost-table tests"
 st_r69_host() {
   run_tests '^(gemv_kind_test|gemm_sm_names_test|gemm_sm_ref_test|greedy_tie_test|adaptive_k_test|verify_m8_names_test|dflash_variant_names_test|ornith_mtp_names_test)$'
@@ -2323,7 +2323,7 @@ st_r69_gates() {
   grab_all gates '^M2|^M3|^D2|^D3|^RF[0-9]|near-tie|NOT A TIE|first difference|AWAIT' 400
   finish
 }
-# Spec 28 N4 / N6's f32 judges for Qwen3.8 (operator 2026-11-04): the spec tests' forced contexts (B70_DUMP_FORCED,
+# Spec 28 N4 / N6's f32 judges for Qwen3.8: the spec tests' forced contexts (B70_DUMP_FORCED,
 # tests/golden/forced_judge.h) -> tools/box_validate/f32_refs.sh forced-qwen (one f32 trie forward on the box CPU)
 # -> $DATA/oracle-out-qwen-f32{,-i8head,-pfi8mlp}-forced, which the tests' registrations read (B70_FORCED_JUDGE, tests/
 # CMakeLists.txt). Until a context's judge is there its divergences AWAIT it: the test SKIPs (77), not FAILs.
@@ -2384,7 +2384,7 @@ st_r70_host() {
   chk "python3 tools/spec/test_edit_copy_set.py" "test_edit_copy_set.py (the committed set's --check included)"
   finish
 }
-stage r70.d2     70 default card qwen,dflash r55.gpu,g0.sha        "D2 / D4 on --spec dflash-lookup: golden + A4 + the edit / copy set vs --spec off: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the warm-ring engine test"
+stage r70.d2     70 default card qwen,dflash r55.gpu,g0.sha        "D2 / D4 on --spec dflash-lookup: golden + A4 + the edit / copy set vs --spec off: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -); the warm-ring engine test"
 st_r70_d2() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   run_tests '^dflash_lookup_gpu_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
@@ -2400,7 +2400,7 @@ st_r70_d2() {
   grab_all dflash 'spec dflash|^dflash:|SEEDED|memory:' 60
   judged_finish
 }
-stage r70.speed  70 optin   gpu  qwen,dflash r70.d2                "b70-serve: off / --spec auto / dflash / dflash-lookup on the edit / copy set per depth and on A4 / golden; rotated rounds, median of 3, idle; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07)"
+stage r70.speed  70 optin   gpu  qwen,dflash r70.d2                "b70-serve: off / --spec auto / dflash / dflash-lookup on the edit / copy set per depth and on A4 / golden; rotated rounds, median of 3, idle; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes -)"
 st_r70_speed() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   idle before
@@ -2419,11 +2419,11 @@ st_r70_speed() {
 }
 stage r70.verdict 70 manual -    -           r70.speed             "spec 19 §13.1's bar: replaces / opt-in / dropped"
 st_r70_verdict() {
-  say "# the bar (spec 19 §13.1): dlk/dflash >= 1.20 on the edit / copy set (median over its prompts) and >= 0.97 on A4 (toolcall) and golden -> replaces plain dflash; 1.05 .. 1.20 -> opt-in, the operator's call; < 1.05 -> dropped"
+  say "# the bar (spec 19 §13.1): dlk/dflash >= 1.20 on the edit / copy set (median over its prompts) and >= 0.97 on A4 (toolcall) and golden -> replaces plain dflash; 1.05 .. 1.20 -> opt-in, the owner's call; < 1.05 -> dropped"
   say "# read r70.speed's per-prompt table (the edit / copy rows per depth) and its RATIO lines; the 'dflash: ... lookup:' server lines give the time in lookup"
 }
 row 75 "plan 5d - prefill chunk 4096: the int8 linears at 4096 rows (P0), the chunk cap through the planner, the gates at 4096 (golden tie rule, consistency, determinism, A4 >= 25 / 36, MTP / DFlash prefill, --parallel pp), speed against 2048"
-rownote 75 "Run 2026-11-01 (P0) and 2026-11-06 (gates, speed) as busy-box timing - the plan's 'As built' holds the provisional lines (+4.2 % pp4096); r75.speed (opt-in) is the quiet-box re-check; the P0 is decided (5d built and merged). The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable (operator, 2026-11-03)."
+rownote 75 "Run 2026-11-01 (P0) and 2026-11-06 (gates, speed) as busy-box timing - the plan's 'As built' holds the provisional lines (+4.2 % pp4096); r75.speed (opt-in) is the quiet-box re-check; the P0 is decided (5d built and merged). The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable."
 stage r75.host  75 default cpu  -     -                     "buffers_test, the planner's prefill term, the CLI refusals, the prefix-cache hook tests"
 st_r75_host() {
   run_tests '^(memory_plan_test|pipeline_prefill_plan_test|prefix_cache_test|pp_serve_plan_test|dflash_engine_host_test)$'
@@ -2470,7 +2470,7 @@ st_r75_speed() {
 
 # ======================================================================================
 row 71 "spec 17a - the TP P0, Qwen3.8 first: links / BARs / peer access, CPU stores into VRAM through the BAR, the all-reduce on every route (P2P push / pull, host-staged + own BAR, host read, host mailbox) at 1 / 8 rows and 128 calls, the per-card step at TP shapes, the go / no-go line (plan 17a)"
-rownote 71 "DONE 2026-11-06: re-checked on a quiet box, GO (docs/probes/probe-tp-2026-11-01.md §8, spec 17 §9); the probe's stages are gone (probe_tp stays for 17b and builds in g0.build); r71.host stays. Run first on 2026-11-01 as busy-box timing (the operator's parallel-development go: every two-card stage held the whole box, the CPU carried other agents' work) - docs/probes/probe-tp-2026-11-01.md and spec 17 §9 hold the PROVISIONAL GO; the quiet-box re-check is the record's §7. r22.devices / r22.p1 are no longer a precondition (17a owns its context code); run them in the same session when they are pending and record them beside this row."
+rownote 71 "DONE 2026-11-06: re-checked on a quiet box, GO; the probe's stages are gone (probe_tp stays for 17b and builds in g0.build); r71.host stays. Run first on 2026-11-01 as busy-box timing (the parallel-development go: every two-card stage held the whole box, the CPU carried other agents' work) - spec 17 §9 holds the PROVISIONAL GO; the quiet-box re-check is the record's §7. r22.devices / r22.p1 are no longer a precondition (17a owns its context code); run them in the same session when they are pending and record them beside this row."
 stage r71.host    71 default cpu  -     -                     "tp_shapes_test, tp_crossing_protocol_test"
 st_r71_host() {
   run_tests '^(tp_shapes_test|tp_crossing_protocol_test)$'
@@ -2478,8 +2478,8 @@ st_r71_host() {
 }
 
 # ======================================================================================
-row 76 "the sycl-tla prefill backend removed (operator, 2026-10-27; plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
-rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
+row 76 "the sycl-tla prefill backend removed (plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
+rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Ornith run that names no backend now prefills on l0 - the diff is reported, it is not accepted here."
 stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"
 st_r76_tests() {
   run_tests '^(pf_gemm_test|attn_chunk_test|context_test|prefill_smoke_test|prefill_int8_test|gdn_conv_test|gdn_wy_test|pf_int8_test|pf_flash_attn_test|linear_i8_test|buffers_test|cli_reject_prefill_backend_value|golden_server_test)$'
@@ -2858,9 +2858,9 @@ st_r81_speed() {
   finish
 }
 
-# Spec 19 v2: the measured baseline, live acceptance, and the operator's slim serving screen.
+# Spec 19 v2: the measured baseline, live acceptance, and the slim serving screen.
 row 82 "spec 19 v2 - DFlash costs and engine-tap acceptance, then one-card DFlash against recorded main baselines"
-rownote 82 "Operator 2026-11-12 Task 2: no plain/MTP serving performance reruns; MTP 73.2 t/s at the slots shape and plain 33.5 t/s at 4096 are recorded baselines. Pause above 80.5 t/s. Full three-arm replay belongs to Task 8. Held-out recording: opencode-session-2, excluded entirely from Task 6 training."
+rownote 82 "2026-11-12 Task 2: no plain/MTP serving performance reruns; MTP 73.2 t/s at the slots shape and plain 33.5 t/s at 4096 are recorded baselines. Pause above 80.5 t/s. Full three-arm replay belongs to Task 8. Held-out recording: opencode-session-2, excluded entirely from Task 6 training."
 stage r82.host 82 default cpu - g0.sha "DFlash host checks and unchanged non-DFlash binaries (G0)"
 st_r82_host() {
   run_tests '^(adaptive_k_test|dflash_engine_host_test|dflash_plan_test|dflash_prefix_test)$'
@@ -2914,7 +2914,7 @@ st_r83_routes() {
   chk "build/tests/qwen4exp_prefill_test ${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound} tests/golden/prompts/q4exp_4k.ids layers:18 int8 dump-routes:$STATE/flashnext.routes" "the Flash-Next route dump (Intel's checkpoint, --layers 18)"
   finish
 }
-stage r83.probe 83 optin card ornith r83.routes "probe_moe_prefill on Ornith's dump at C = 2048 and 4096: the bitwise / integer-oracle checks, then every arm's ms a layer and chunk, interleaved (card 0; the record: docs/probes/probe-moe-prefill-2026-11-12.md)"
+stage r83.probe 83 optin card ornith r83.routes "probe_moe_prefill on Ornith's dump at C = 2048 and 4096: the bitwise / integer-oracle checks, then every arm's ms a layer and chunk, interleaved (card 0)"
 st_r83_probe() {
   chk "build/tools/probe/probe_moe_prefill --routes $STATE/ornith.routes --model ornith --C 2048,4096 --rounds 5" "probe_moe_prefill ornith"
   chk "build/tools/probe/probe_moe_prefill --routes $STATE/flashnext.routes --model flashnext --C 2048,4096 --rounds 5" "probe_moe_prefill flashnext"
@@ -2924,7 +2924,7 @@ st_r83_probe() {
 
 # ======================================================================================
 row 84 "phase 2 of the MoE-model prefill - Ornith's GDN prompt pass, the small kernels (plan 2026-11-12-moe-model-prefill-phase2 Task 1)"
-rownote 84 "Opt-in probes. r84.trace: B70_PREFILL_PROFILE=2's (phase, entry) trace at pp4096, l0 and l0-int8. r84.dump + r84.probe: the GDN intra-chunk inputs of layers 0 / 12 / 28 (B70_PF_GDN_DUMP) and probe_gdn_intra on them - each stage's error against fp64 for today's four kernels and the one-launch DPAS kernel, then their times. Record: docs/probes/probe-prefill-phase2-2026-11-12.md."
+rownote 84 "Opt-in probes. r84.trace: B70_PREFILL_PROFILE=2's (phase, entry) trace at pp4096, l0 and l0-int8. r84.dump + r84.probe: the GDN intra-chunk inputs of layers 0 / 12 / 28 (B70_PF_GDN_DUMP) and probe_gdn_intra on them - each stage's error against fp64 for today's four kernels and the one-launch DPAS kernel, then their times. "
 stage r84.trace 84 optin card ornith - "B70_PREFILL_PROFILE=2 b70-decode <ornith> --prefill-length 4096 on l0 and l0-int8, two rounds: every launch named in its phase bucket"
 st_r84_trace() {
   chk "tools/probe/pf_phase2_trace.sh 4096 $SNAP_ORNITH" "the per-launch prefill trace"
@@ -2947,7 +2947,7 @@ st_r84_probe() {
 
 # ======================================================================================
 row 85 "phase 3 of the MoE-model prefill - the router on the dense GEMM, exact-integer expert weights, the shared expert as dense, the indexed A, the attention tile (plan 2026-11-12-moe-model-prefill-phase3 Task 1)"
-rownote 85 "Opt-in probes. r85.probe: probe_route (router N 272 and a||b N 128 on pf_gemm against the bound GEMV, M 2048 / 4096), probe_moe_prefill on Ornith's route dump (the c4 exact-integer arms, shd = the shared expert as dense, o9 = the indexed A, each after its check; the GATE lines), probe_flash_attn --heads 16x2 (RPW 8 / 16 / 32 x QREG against today's pf_flash_attn at pos 0 and 12288, C 4096). r85.span: gdn_gate_span.py over r84.dump's gate sums. Record: docs/probes/probe-prefill-phase3-2026-11-13.md."
+rownote 85 "Opt-in probes. r85.probe: probe_route (router N 272 and a||b N 128 on pf_gemm against the bound GEMV, M 2048 / 4096), probe_moe_prefill on Ornith's route dump (the c4 exact-integer arms, shd = the shared expert as dense, o9 = the indexed A, each after its check; the GATE lines), probe_flash_attn --heads 16x2 (RPW 8 / 16 / 32 x QREG against today's pf_flash_attn at pos 0 and 12288, C 4096). r85.span: gdn_gate_span.py over r84.dump's gate sums. "
 stage r85.probe 85 optin card ornith r83.routes "the phase 3 Task 1 probes on card 0: probe_route, probe_moe_prefill (Ornith, C = 2048 and 4096), probe_flash_attn (Ornith heads, pos 0 and 12288)"
 st_r85_probe() {
   chk "build/tools/probe/probe_route --rounds 9 --rows 2048,4096" "probe_route (the router and a||b on pf_gemm)"
@@ -2957,7 +2957,7 @@ st_r85_probe() {
   grab_all result '^(RESULT|GATE|GEMMCHECK|TIME|BITWISE|# checks|# FAILED|\| check|\| pfao_|\| today|pfao_|today)' 400
   finish
 }
-stage r85.span 85 optin card ornith r84.dump "gdn_gate_span.py over r84.dump: the largest gate span inside one 64-row sub-chunk (nats) for Ornith's layers 0 / 12 / 28; above 80 is reported to the operator"
+stage r85.span 85 optin card ornith r84.dump "gdn_gate_span.py over r84.dump: the largest gate span inside one 64-row sub-chunk (nats) for Ornith's layers 0 / 12 / 28; above 80 is reported"
 st_r85_span() {
   chk "python3 tools/probe/gdn_gate_span.py $STATE/r84.gdn" "the gate span check"
   grab_all span '^SPAN' 8
@@ -2966,7 +2966,7 @@ st_r85_span() {
 
 # ======================================================================================
 row 86 "spec 19v3a - DFlash with int8 KV: new M5..8 binaries, one-card and PP serving, acceptance and replay"
-rownote 86 "Implementation checked with a focused smoke run only (operator 2026-11-13). Full checkpoint twins, two-card PP, f32 identity, acceptance and paired costs/replay remain pending. Card 0 is the plan's card. r86.cost records warm-up + three interleaved pairs at each depth; derive 1.19 * (bf16 round / int8 round) * (72.3 / 71.7), stop for the operator below 1.05 at 4096. CPU acceptance comparison: dflash_v2.sh ref on r86.accept; new f32 references use the CPU model mutex and at most eight threads. No default change."
+rownote 86 "Implementation checked with a focused smoke run only. Full checkpoint twins, two-card PP, f32 identity, acceptance and paired costs/replay remain pending. Card 0 is the plan's card. r86.cost records warm-up + three interleaved pairs at each depth; derive 1.19 * (bf16 round / int8 round) * (72.3 / 71.7), stop and report below 1.05 at 4096. CPU acceptance comparison: dflash_v2.sh ref on r86.accept; new f32 references use the CPU model mutex and at most eight threads. No default change."
 stage r86.host 86 default cpu - g0.sha "host acceptance, int8 planner >=200k, verify dispatch; G0 compares unchanged binaries"
 st_r86_host() {
   run_tests '^(pipeline_args_test|dflash_plan_test|memory_plan_test|verify_attn_test|dflash_engine_host_test)$'
@@ -3143,7 +3143,7 @@ st_merge_changed() {
   finish
 }
 
-stage merge.dflash x optin card qwen,dflash g0.sha "the merge check's DFlash sample, outside merge.changed's time budget (operator 2026-11-13): dflash_engine_test (the engine with the real drafter, ~6 min) and dflash_prefix_gpu_test in both KV forms (the snapshot with the ring, ~1.5 min each); a test whose inputs are unchanged keeps its recorded PASS"
+stage merge.dflash x optin card qwen,dflash g0.sha "the merge check's DFlash sample, outside merge.changed's time budget: dflash_engine_test (the engine with the real drafter, ~6 min) and dflash_prefix_gpu_test in both KV forms (the snapshot with the ring, ~1.5 min each); a test whose inputs are unchanged keeps its recorded PASS"
 st_merge_dflash() {
   run_tests '^(dflash_engine_test|dflash_prefix_gpu_test|dflash_prefix_gpu_kv8_test)$' '' '' \
     "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"

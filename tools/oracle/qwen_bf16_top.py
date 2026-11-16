@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3.8's standard-bf16 references of the forced contexts, top-k only (spec 28, the operator's rule of 2026-11-04:
+"""Qwen3.8's standard-bf16 references of the forced contexts, top-k only (spec 28, the rule of 2026-11-04:
 tests/server/spec_judge.h's "bf16-unstable" rows), on the CPU.
 
     qwen_bf16_top.py plan --ctx DIR [--ctx DIR ...] --judge DIR [--judge DIR ...] --out DIR --plan FILE [--bar ULP]
@@ -18,7 +18,7 @@ rounded once (cpu_bf16.py: the box CPU has no bf16 units). The logits: the final
 head in f32 - the checkpoint's bf16 head, or for the keys qwen_forced.I8HEAD_RE matches the engine's per-row int8
 head (int8_sim.int8_head_weight), like the key's judge.
 
-The tests that prefill with l0-int8 (operator 2026-11-04, decision b: every mtp_gpu_ key - mtp_gpu_test and its
+The tests that prefill with l0-int8 (decision b: every mtp_gpu_ key - mtp_gpu_test and its
 128k twins run `l0-int8`): the reference's PROMPT pass applies the same int8 rounding - every int4 linear the h8 walk
 takes on Qwen3.8 (runtime/prefill/step.cc's pf_linear / linear_i8_silu: GDN in_proj_qkv || in_proj_z and out_proj, FA
 q || k || v and o_proj, the MLP's gate || up and down) computes its prompt rows as int8_sim.fq_x(x) . fq_w(w) (the

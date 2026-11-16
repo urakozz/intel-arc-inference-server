@@ -93,7 +93,7 @@ void check_chunks() {
   CHECK(throws([] { runtime::pp_prefill_chunks(0, 0, 2048, false); }));
   CHECK(throws([] { runtime::pp_prefill_chunks(0, 10, 0, false); }));
   std::printf("chunks: %zu (base, n, chunk, hooked) cases equal Engine::prefill's loop\n", cases);
-  // Plan 5d, operator ruling (A): under a 4096-row chunk with the hook, the blocks stay 2048
+  // Plan 5d, ruling (A): under a 4096-row chunk with the hook, the blocks stay 2048
   // (hashing, KV ranges) and hooked chunks end at multiples of 4096 - the chunk rounded up
   // to whole blocks - so every hook still lands on a block end; a resume at an odd block
   // (6144) first runs to the next 4096 multiple. Unhooked, 4096 rows a chunk.

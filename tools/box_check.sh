@@ -1,7 +1,7 @@
 #!/bin/bash
 # tools/box_check.sh - the merge check, run from a checkout on the Mac against the box: the
 # real build, the kernel command lines against a base, and the suite that needs no model files.
-# It replaces tools/mac_check.sh (retired 2026-11-03 by the operator: the box is the check).
+# It replaces tools/mac_check.sh (retired 2026-11-03 by  the box is the check).
 #
 #   tools/box_check.sh [--base REF] [--allow-kernel-changes] [--card N] [--no-tests]
 #

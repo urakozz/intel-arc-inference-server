@@ -2,7 +2,7 @@
 
 The box's Xeon E5-2696 v4 has AVX2 only: no AVX-512, no bf16. In the reference image (torch 2.16.0.dev+xpu) a bf16
 CPU matmul of 2048 x 2560 x 2560 takes 44.6 s on ONE core (the emulated path) against 38 ms in fp32 on 19 cores;
-torch._grouped_mm in bf16 takes 32 s on one core against 40 ms in fp32 (operator, 2026-11-02). A 32k-id golden that
+torch._grouped_mm in bf16 takes 32 s on one core against 40 ms in fp32. A 32k-id golden that
 should take two hours took more than eight.
 
 torch's CPU bf16 GEMM accumulates in fp32 and rounds the result once to bf16. So does `fp32 GEMM of the bf16 values,
@@ -13,7 +13,7 @@ order of the fp32 accumulation (an ulp of bf16 in a few elements; the verificati
         ...                              # F.linear / torch.matmul / @ / bmm / addmm / grouped_mm on bf16 CPU tensors
 
 NOT bitwise torch's emulated GEMM: the summation order differs, and on a random synthetic model one ulp at layer 0 flips
-routes and tokens within a few steps (Kolibri synth, 4 sets: tokens differ at step 0 / 1 / 5 / 12). Operator ruling
+routes and tokens within a few steps (Kolibri synth, 4 sets: tokens differ at step 0 / 1 / 5 / 12). Ruling
 2026-11-03: the shim is for NEW references judged against f32. Existing goldens (made with torch's own bf16 GEMM) stay as
 they are - they are reproducible with --no-exact-bf16-gemm. Check (teacher-forced on the stored ids, vs the f32 judge,
 median cosine distance of the logits rows, shim / torch-bf16): 0.915, 0.974, 0.904, 1.145 (means 0.91, 0.98, 0.96, 1.07) -
