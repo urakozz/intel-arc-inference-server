@@ -578,8 +578,12 @@ void Engine::capture_wide(const CaptureOptions& opt) {
   SlotBind b = seqs_[0].bind;
   b.gdn_x = gdn_x_->ptr();
   b.conv_x = conv_x_->ptr();
+  const auto t0 = std::chrono::steady_clock::now();
   seqs_[0].deep32 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 32, nullptr, opt, b));
+  const auto t1 = std::chrono::steady_clock::now();
   seqs_[0].deep64 = std::make_unique<CapturedStep>(build_verify(ctx_, model_, buffers_, *mtp_, 64, nullptr, opt, b));
+  deep_capture_ms_[0] = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  deep_capture_ms_[1] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
 }
 
 uint32_t Engine::max_wide_k() const {

@@ -328,6 +328,8 @@ class Engine {
   // Spec 28c: the verify lists captured twice (by depth) and their capture time - printed at engine start.
   uint32_t verify_deep_lists() const;
   double verify_deep_capture_ms() const { return verify_deep_ms_; }
+  // Spec 32e: the 32- and 64-row lookup verify lists' capture time (their binaries loaded and the lists recorded).
+  const double* deep_capture_ms() const { return deep_capture_ms_; }
   // The list verify(k) submits at row 0's key count `keys` (pos + 1): tests and probes.
   const CapturedStep& verify_step_at(uint32_t M, uint32_t keys) const;
 
@@ -570,6 +572,7 @@ class Engine {
   std::vector<std::pair<uint32_t, uint32_t>> kv_rows(const Seq& s, uint32_t begin, uint32_t end) const;
 
   double verify_deep_ms_ = 0;   // the deep lists' capture time
+  double deep_capture_ms_[2] = {0, 0};   // spec 32e: the 32- and 64-row lists'
   void capture_verify(uint32_t M, const CaptureOptions& opt);
   void capture_wide(const CaptureOptions& opt);   // open-work 28: the 16-row list where it is built
   std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [chunk_cap + 1][hidden], lazy
