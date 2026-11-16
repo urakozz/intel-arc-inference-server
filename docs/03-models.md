@@ -6,8 +6,7 @@ for agentic coding first, then Qwen3.8-Flash-Next; the order is kept in [open-wo
 
 The other models each have their own engine, specialised the same way, and their own spec: Ornith (spec 15),
 Kolibri-1 (20) and Qwen3.8-Flash-Next (`qwen4_exp`, spec 21). Muse-Glimmer was
-dropped on 2026-10-27, and Agnes 3.0 Flash on 2026-11-07; Flint (spec 27) and Nanbeige (spec 29) are
-parked and not built.
+dropped on 2026-10-27, and Agnes 3.0 Flash on 2026-11-07.
 
 Qwen3.8-Flash-Next is 12 QSA sparse-attention layers and 36 GDN layers, a 512-expert MoE (mixture of experts: a
 router picks a few expert networks per token), 4-stream hyper-connections and a 51.8 GB host-resident n-gram

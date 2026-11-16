@@ -390,7 +390,7 @@ Three disks hold the Hugging Face cache, in tiers (since 2026-11-06; the USB dis
 |---|---|---|
 | hot | NVMe, `~/.cache/huggingface/hub` | the working set: the models the next runs read, as real folders |
 | cold | 8 TB WD Red, `~/b70/hdd/hf-hub` | every model, always (the bf16 originals, our int4 exports, everything hot) |
-| archive | 3 TB, `~/b70/hdd3/hf-hub` | parked models (Nanbeige, Flint), instead of cold |
+| archive | 3 TB, `~/b70/hdd3/hf-hub` | parked models, instead of cold |
 
 Every `~/.cache/huggingface/hub/models--X` is either a real folder (hot) or a symlink to `models--X` on the 8 TB or
 3 TB disk, so every tool keeps finding every model at its usual path - only the read speed differs (the 8 TB disk
