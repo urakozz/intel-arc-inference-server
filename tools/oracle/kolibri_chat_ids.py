@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The ids of a chat-formatted Kolibri-1 golden prompt (spec 20c Task 1 Step 6).
 
     kolibri_chat_ids.py <snapshot> <prompt.json>    -> ids, whitespace-separated, on stdout

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Checks for spec 21b's Qwen3.8-Flash-Next tools (tools/quantize/qwen4exp/). CPU, no model download.
 
     test_qwen4exp_quant.py [test_name ...]

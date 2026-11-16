@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Checks for dflash_d1.py (spec 19b Task 3): the D1 comparator on a tiny random drafter (dflash_fixture.py's
 weights), a tiny target (embedding / head) and a dump in dump_taps.py's format, all written to a temp dir.
 

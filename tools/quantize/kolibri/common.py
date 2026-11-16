@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Shared pieces of the Kolibri-1 quantisation stages (tools/quantize_kolibri1.sh, spec 20 §3.1).
 
 Paths, the model shim (the bf16 snapshot plus our transformers port, wired through `auto_map`), the

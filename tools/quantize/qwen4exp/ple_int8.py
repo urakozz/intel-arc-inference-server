@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Qwen3.8-Flash-Next's PLE n-gram table as int8 rows, the file the engine pins in host USM (spec 21b
 Task 1; spec 21 §5 and decision 7's proposal: a one-time file beside the checkpoint).
 

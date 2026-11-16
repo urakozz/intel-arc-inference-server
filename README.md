@@ -197,6 +197,7 @@ for the kernels and [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for every number.
 
 ## Licence
 
-Apache 2.0. See [LICENSE](LICENSE).
+AGPL-3.0-only (see [LICENSE](LICENSE)), with a commercial licence for companies that cannot work under the AGPL.
+[LICENSING.md](LICENSING.md) explains which one applies to you.
 
 Written by Jürgen Kozyrev.

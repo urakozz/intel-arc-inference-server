@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The DFlash 2 drafter as torch modules AutoRound can tune: tools/oracle/dflash_ref.py's forward, batched.
 
     m = load(drafter_dir, dtype=torch.bfloat16)        # z-lab/Qwen3.8-27B-DFlash2's tensors, names kept

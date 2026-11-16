@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `card` of tools/quantize_kolibri1.sh: the model card for
 urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ (spec 20 §3.1 "output").
 

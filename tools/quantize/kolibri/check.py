@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `check` of tools/quantize_kolibri1.sh: would the engine accept this export?
 
     check.py <export-dir> --source <bf16 snapshot> [--attn int4|bf16] [--sample 64]

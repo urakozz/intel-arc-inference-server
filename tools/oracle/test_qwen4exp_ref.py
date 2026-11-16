@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """F1 for qwen4exp_ref.py (spec 21a Task 3): the streamed port against transformers 5.19.0 un-streamed.
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/test_qwen4exp_ref.py [test_name ...]   (pytest collects it too)

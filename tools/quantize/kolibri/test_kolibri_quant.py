@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Checks for the Kolibri-1 quantisation helpers (tools/quantize/kolibri/). CPU, seconds, no model.
 
     test_kolibri_quant.py [test_name ...]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `quant` of tools/quantize/quantize_dflash.sh: AutoRound on the real non-causal DFlash 2 drafter.
 
     autoround_run.py --drafter <snapshot> --target <quantised target snapshot> --taps <dir> --out <dir>

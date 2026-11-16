@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `eval` of tools/quantize_kolibri1.sh: KL and top-1 against bf16, German and English apart.
 
     evaluate.py --model <bf16 snapshot> --sets <dir with eval_*.safetensors> --arm <name>=<export-dir> ...

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `export` of tools/quantize/quantize_dflash.sh: AutoRound's raw export -> the drafter checkpoint.
 
     finalize.py <raw export dir> <source drafter snapshot> <checkpoint dir>

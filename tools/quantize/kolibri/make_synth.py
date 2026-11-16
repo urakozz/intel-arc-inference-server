@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """A synthetic Kolibri-1 checkpoint at the REAL widths, in the int4 export's form (spec 20c Task 1).
 
     make_synth.py <out-dir> --layers N --attn int4|bf16 --tokenizer <dir> [--seed 0]

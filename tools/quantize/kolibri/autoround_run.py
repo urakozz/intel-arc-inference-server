@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stages `rtn` and `tune` of tools/quantize_kolibri1.sh: AutoRound with spec 20 §3.1's settings.
 
     autoround_run.py --shim <dir> --calib <calib_final.safetensors> --out <dir> --iters 0|200

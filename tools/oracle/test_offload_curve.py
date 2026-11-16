@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Checks for offload_curve.py (spec 22 P0.6 / P0.7, plan 22a Tasks 3-4). CPU, seconds (the tiny-model test:
 a minute).
 

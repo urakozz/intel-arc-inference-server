@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The `taps` stage's input: tools/probe/probe_dflash_iter --engine-taps SOURCES.json from the training recordings.
 
     sources.py --generation-config <target>/generation_config.json --out SOURCES.json [--done TAPS_DIR]

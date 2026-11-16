@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `coverage` of tools/quantize_kolibri1.sh (spec 20 §3.1 "expert coverage").
 
     coverage.py --model <snapshot> --calib <dir>/calib.safetensors --out <dir> [--floor 2048] [--device cpu]

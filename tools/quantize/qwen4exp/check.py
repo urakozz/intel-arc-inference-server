@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Would the engine accept this Qwen3.8-Flash-Next export? (spec 21b Task 1; 21q's `check` stage.)
 
     check.py <checkpoint> [--ple <int8 dir>] [--sample 64]

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `calib` of tools/quantize_kolibri1.sh: the calibration set and the held-out evaluation sets
 exactly per spec 20 §3.1.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The DFlash host twin's fixture (spec 19b Task 2): a tiny random DFlash 2 drafter, a target embedding / head and
 taps, and what tools/oracle/dflash_ref.py drafts from them - so tests/kernels/dflash_ref_test.cc can hold the C++
 host twin (tests/kernels/dflash_ref.h) to the reference the engine's D1 gate is measured against.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Spec 19 §6 D1 (plan 19b Task 3), the reference's half: every draft tools/probe/dflash_d1 wrote (the engine's
 DFlash drafter on the card) against tools/oracle/dflash_ref.py drafting from the SAME taps, anchors and head.
 

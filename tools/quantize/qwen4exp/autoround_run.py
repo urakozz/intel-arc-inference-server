@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `quant` of tools/quantize/quantize_qwen4exp.sh: AutoRound with spec 21 v2 §2's settings.
 
     autoround_run.py --model <bf16 snapshot> --out <dir> [--device xpu|cpu] [--iters 200]
