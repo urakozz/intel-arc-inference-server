@@ -972,6 +972,16 @@ step at 150k keys 11.4% faster in bf16 and 20.5% faster in int8, bitwise the pre
 there and four rows would move; they wait for the f32 judge because each changes rounding (open-work.md). The
 record of the kernel is [probe-verify-attn-2026-11-03.md](probes/probe-verify-attn-2026-11-03.md).
 
+**The 16-row line** (prompt lookup's wide verify, spec 33) takes the same split at one key slice: each row block's
+two sub-groups compute one key atom of the scores each and swap them through SLM (`PAIR`), 8 more sub-groups make
+32 (`PVX`), and P·V is owned by dimension atom over half the row blocks (`PVR 2`), so V is read twice a work-group
+instead of twelve times and the register file holds no P staging. SLM is 129,024 of 131,072 bytes, no spill. It is
+bitwise the previous 16-row line (`attn_verify_bitwise_test`) and 1.43x / 1.63x faster at 32,768 / 98,304 keys
+(kernel level, 16 layers: 16.5 -> 11.5 ms, 50.0 -> 29.4 ms). A timing pitfall found on the way: at a position
+where a launch's rows cross a block-size change (pos 32,767: row 0 at 1,024 keys a block, the rest at 1,088) every
+work-group walks its block once per row group, twice the work - time at a position whose rows share one block
+size. Record: [probe-verify-attn-depth-2026-11-15.md](probes/probe-verify-attn-depth-2026-11-15.md).
+
 ---
 
 ## Prefill kernels
