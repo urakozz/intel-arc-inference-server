@@ -920,7 +920,7 @@ endif()
 # ==== Spec 32: the one-card 32- and 64-row verify lists (deep prompt-lookup runs), bf16 KV ==== (begin) ====
 # Additive only: new names. Ids through Control::deep_cur / deep_out (CTRL_CUR 64 / CTRL_OUT 128). The attention is
 # the 16-row line (KS 1, DSPLIT 128) in row chunks of 16 (RCHUNK: grid dimension 2) with attn_v2's reduce alone at the
-# list's rows; the linears are gemm_sm's rows at 32 / 64 (below); the rest the 16-row list's per-row builds at W.
+# list's rows; the linears are gemm_sm_v2's rows at 32 / 64; the rest the 16-row list's per-row builds at W.
 set(DEEP_W 32 64)
 if(B70_MTP AND B70_VERIFY_M8)
   set(DEEP_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=64 CTRL_OUT=128 CTRL_DEBUG=18)
@@ -935,7 +935,7 @@ if(B70_MTP AND B70_VERIFY_M8)
                      OPTIONS -cl-intel-256-GRF-per-thread)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                      DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} REDUCE_ONLY=1)
-    add_gemv_bf16_variant(${MM} 5120 128 16 64)    # a||b, the K split of the lists at M >= 5
+    add_gemv_bf16_variant(${MM} 5120 128 16 16)    # a||b
     add_prep_res_fold(${MM} 5120 0 20)
     add_prep_res_fold(${MM} 5120 4 20)
     add_prep_norm_finish(${MM} 5120 20 20)
