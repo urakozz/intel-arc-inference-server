@@ -29,7 +29,8 @@
 //   - <tool_call> ... </tool_call> (the first close): the trimmed body through parse_json_call, the
 //     call emitted at its close tag (raw newlines / tabs inside its string arguments repaired -
 //     parse_json_call's escape_raw_controls); a body that does not parse becomes content verbatim, with its
-//     tags and the whitespace before it; a call cut by the end of generation becomes content.
+//     tags and the whitespace before it; a call cut by the end of generation (no </tool_call>) is
+//     dropped - neither a call nor content, the text before it kept - so a truncated call is never executed.
 // So a turn rendered by the template parses back to its message (content, reasoning, tool calls),
 // and a client that sends a parsed turn back re-renders exactly the generated text - the prefix
 // cache's best case. Holds back only what may still be a tag (and trailing whitespace).

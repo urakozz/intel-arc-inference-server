@@ -169,8 +169,7 @@ void KolibriOutputStream::run(std::vector<Delta>& out, bool final) {
           state_ = State::Body;
           continue;
         }
-        if (final) {   // cut by the end of generation: content
-          content(out, kCall + buf_);
+        if (final) {   // cut by the end of generation: dropped - neither a call nor content (the Qwen stream's rule)
           buf_.clear();
           state_ = State::Body;
           continue;

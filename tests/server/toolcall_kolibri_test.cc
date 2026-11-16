@@ -10,8 +10,8 @@
 //     reasoning cut by the end of generation, a lone </think>, <think> later in the text;
 //   - Review Focus 2: a call that is not valid JSON (a missing brace) or not a call (no name, a name
 //     with whitespace, array arguments) becomes content verbatim with its tags; a call cut by
-//     max_tokens becomes content; "arguments" as a JSON string holding an object; two calls separated
-//     by "\n"; content around calls; schema typing; whitespace-only content dropped;
+//     max_tokens is dropped (neither a call nor content); "arguments" as a JSON string holding an
+//     object; two calls separated by "\n"; content around calls; schema typing; whitespace-only content dropped;
 //   - Review Focus 5: German argument strings keep their bytes (also from \u escapes), and the
 //     server's arguments text (nlohmann's dump) writes them as UTF-8, not re-escaped;
 //   - raw newlines / tabs / control bytes inside string arguments (multi-line file contents, patches; HF
@@ -259,10 +259,9 @@ void case_calls() {
   const std::string broken = "<tool_call>\n{\"name\": \"f\", \"arguments\": {\"a\": 1}\n</tool_call>";
   expect("Calling.\n" + broken, kTools, "", "Calling.\n" + broken, none);
   expect(broken, kTools, "", broken, none);
-  // Cut by max_tokens inside the call: content.
-  expect("Ok.\n<tool_call>\n{\"name\": \"read\", \"argu", kTools, "", "Ok.\n<tool_call>\n{\"name\": \"read\", \"argu",
-         none);
-  expect("<tool_call>", kTools, "", "<tool_call>", none);
+  // Cut by max_tokens inside the call: dropped - neither a call nor content; the text before it stays.
+  expect("Ok.\n<tool_call>\n{\"name\": \"read\", \"argu", kTools, "", "Ok.\n", none);
+  expect("<tool_call>", kTools, "", "", none);
   expect("x <tool_ca", kTools, "", "x <tool_ca", none);
   // "arguments" as a JSON string holding an object; absent; null.
   expect("<tool_call>\n{\"name\": \"f\", \"arguments\": \"{\\\"a\\\": 1}\"}\n</tool_call>", kTools, "", "",
