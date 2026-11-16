@@ -41,7 +41,7 @@ sync_tree() {
     tools/box_validate/data.sh link ~/b70-inference-server . | grep -c '^linked' | sed 's/^/box: golden-set links added: /' | grep -v ': 0$' >&2 || true"
   backup_private_docs
 }
-# docs/probes and docs/superpowers are git-ignored and live only in the main checkout, so every sync
+# docs/probes, docs/superpowers and docs/private are git-ignored and live only in the main checkout, so every sync
 # (from any worktree) mirrors them to ~/b70/private-docs on the box. A file changed or deleted since
 # the last sync keeps its old copy under ~/b70/private-docs-history/<time>/.
 backup_private_docs() {
@@ -50,7 +50,7 @@ backup_private_docs() {
   stamp="$(date +%Y-%m-%d_%H%M%S)"
   # One rsync a folder: the Mac's openrsync drops --delete under --relative. --backup-dir is
   # relative to the destination, ~/b70/private-docs/docs/<folder>.
-  for d in probes superpowers; do
+  for d in probes superpowers private; do
     rsync -a --delete --backup --backup-dir="../../../private-docs-history/$stamp/docs/$d" \
       "$main/docs/$d/" "$BOX:b70/private-docs/docs/$d/" ||
       echo "box: WARNING the private docs backup of docs/$d failed; it is not on the box" >&2
