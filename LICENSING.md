@@ -47,8 +47,9 @@ Open an issue in this repository or contact the author through the GitHub profil
 
 ## Earlier versions
 
-Versions published before 2026-11-17 were released under the Apache License 2.0. Those copies stay under Apache-2.0
-for everyone who has them. The dual license applies to that date's version and everything after it.
+Versions published before 2026-11-17, 00:00 CET (Berlin time), up to commit `b420997d`, were released under the
+Apache License 2.0 and stay under it for everyone who has a copy. The dual license applies from commit `da4b5664`
+onwards.
 
 ## Third-party code
 
