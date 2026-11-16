@@ -82,7 +82,7 @@ private:
   // b70 patch (spec 24e): str(float) as Python writes it (repr: the shortest digits that read back as the same
   // double; scientific with a signed, at least two digit exponent when the decimal exponent is below -4 or above 15,
   // else positional with ".0" for a whole number): 1.0, 2.5, 1e-07, 1e+20, 0.0001. Upstream used std::to_string
-  // ("1.000000", "0.000000"), which Jinja never prints. LFM2.5's format_arg_value writes a float argument with it.
+  // ("1.000000", "0.000000"), which Jinja never prints. A template formatting a float argument writes it with it.
   static std::string python_float_repr(double v) {
     if (std::isnan(v)) return "nan";
     if (std::isinf(v)) return v < 0 ? "-inf" : "inf";
@@ -458,7 +458,7 @@ public:
       throw std::runtime_error("Undefined value or reference");
     if (array_) {
       // b70 patch (spec 24e): upstream skipped falsy items (`item.to_bool() && ...`), so `'' in ['']`, `0 in [0]`
-      // and `false in [false]` were false; Jinja's `in` is plain equality (LFM2.5's `(args | trim) not in ["", "{}"]`).
+      // and `false in [false]` were false; Jinja's `in` is plain equality (e.g. `(args | trim) not in ["", "{}"]`).
       for (const auto& item : *array_) {
         if (item == value) return true;
       }

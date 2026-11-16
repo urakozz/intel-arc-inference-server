@@ -200,7 +200,7 @@ class chat_template {
         // b70 patch (spec 23e): `name="argument_needle"` too - an argument name as a double-quoted attribute, as
         // Muse-Glimmer's ATEM <atem:parameter name="NAME"> writes it.
         // b70 patch (spec 24e): `(argument_needle=` too - a pythonic keyword argument opening the call's
-        // parentheses, as LFM2.5's `name(k='v', ...)` writes it.
+        // parentheses, as a pythonic template's `name(k='v', ...)` writes it.
         const auto renders_argument = [&](const std::string & s) {
             return contains(s, "<parameter=argument_needle>") || contains(s, "\"argument_needle\":") ||
                    contains(s, "'argument_needle':") || contains(s, ">argument_needle<") ||

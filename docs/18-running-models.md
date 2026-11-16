@@ -77,7 +77,7 @@ is not finished is listed in [open-work.md](open-work.md).
 - **Qwen3.8-Flash-Next** is next. It runs only truncated (`--layers N`) because the whole model does not
   fit two cards; open-work.md has the plan for the full size.
 - **Kolibri-1** is supported by the code and parked (out of focus); no speed rows.
-- Dropped and no longer supported: LFM2.5, Muse-Glimmer and Agnes 3.0 Flash (a `config.json` naming
+- Dropped and no longer supported: Muse-Glimmer and Agnes 3.0 Flash (a `config.json` naming
   `AgnesForConditionalGeneration` is refused by name). Flint and Nanbeige are parked and not built.
 
 | | Qwen3.8-27B | Ornith 1.5 35B-A3B | Kolibri-1 | Qwen3.8-Flash-Next |

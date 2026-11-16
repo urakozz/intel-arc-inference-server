@@ -120,8 +120,8 @@ void case_tool_call_probe_attribute() {
   std::printf("tool_call_probe_attribute: %s\n", got.c_str());
 }
 
-// Spec 24e: the same probe for a template that writes a call as a PYTHONIC keyword argument - LFM2.5's
-// `<|tool_call_start|>[fn(k='v', ...)]<|tool_call_end|>` (its chat_template.jinja's render_tool_calls: a mapping
+// Spec 24e: the same probe for a template that writes a call as a PYTHONIC keyword argument - e.g.
+// `<|tool_call_start|>[fn(k='v', ...)]<|tool_call_end|>` (a chat_template.jinja's render_tool_calls: a mapping
 // `arguments` becomes `name=value` pairs, a non-empty string raises). Without the patch the probe finds no argument
 // name it knows (`argument_needle=` is none of the shapes above), and apply() rewrites the call history into JSON
 // content. The second half: the rewrite that stays on when `arguments` must be an object (a string one is parsed

@@ -23,13 +23,13 @@ httplib       https://github.com/yhirose/cpp-httplib v0.54.1                    
 #                      for the same reason (tests/tokenizer/minja_ext_test.cc's
 #                      tool_call_probe_attribute case).
 #                      b70 patch (spec 24e): and `(argument_needle=` (a pythonic keyword argument opening the call's
-#                      parentheses - LFM2.5's `name(k='v')`), for the same reason; and the arguments rewrite that stays
+#                      parentheses - `name(k='v')`), for the same reason; and the arguments rewrite that stays
 #                      on when arguments must be an object leaves a call without a "function" object or without
-#                      "arguments" alone (upstream threw; the LFM2.5 template reads them with .get() and renders `name()`).
+#                      "arguments" alone (upstream threw; a template that reads them with .get() renders `name()`).
 #                      Tested by minja_ext_test's tool_call_probe_pythonic case.
 #   minja.hpp          b70 patches (spec 24e), each against Jinja2 3.1.6 in minja_ext_cases.json (in_falsy, float_str,
 #                      float_tojson): `x in [..]` is plain equality (upstream skipped falsy items: `'' in ['']` was false,
-#                      which made LFM2.5's `(args | trim) not in ["", "{}", "null"]` raise on an empty arguments string);
+#                      which made a template's `(args | trim) not in ["", "{}", "null"]` raise on an empty arguments string);
 #                      str(float) / `{{ float }}` / a float inside tojson print as Python's repr (1.0, 1e-07, 1e+20; upstream
 #                      std::to_string wrote 1.000000, 0.000000, and nlohmann wrote 1e+15 for Python's 1000000000000000.0).
 #                      `==` on a primitive (None included) is false against an array / object / callable (upstream: `[1] in [none]`

@@ -13,7 +13,6 @@ benchmark versions are not strictly comparable. `A` = parameters active per toke
 | Recursive Flint | 39.8B-A2.5B MoE (sliding-window + NoPE attention, 256 experts top-6 + shared) | 74.2% (mini-swe-agent) | — | 54.9% (Terminus 2) | watched; design written, parked ([spec 27](superpowers/specs/2026-11-01-spec27-flint-design.md)) |
 | [Xing4.0](https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B) | 29B-A4B MoE (MLA + Sinkhorn residual mixing + MTP) | 75.0% (SWE-agent) | — | 57.5% (Terminus-2) | not supported: below Ornith with more active parameters, needs three new families |
 | [Muse-Glimmer-30B](https://huggingface.co/meta-models/Muse-Glimmer-30B) | 30B dense | 76.0% | 51.2% | 51.7% | dropped 2026-10-27: below Ornith / Qwen3.8 |
-| [LFM2.5-24B-A2B](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B) | 24B-A2.45B MoE | 51.0% (OpenCode) | — | — | dropped 2026-10-27: below Ornith / Qwen3.8 |
 
 This engine has not run these coding benchmarks itself; [BENCHMARKS.md](BENCHMARKS.md) measures speed, not task
 success. An engine-side score would need a fixed harness, the exact quantized checkpoint, the inference settings
