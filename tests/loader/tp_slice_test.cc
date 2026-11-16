@@ -24,6 +24,7 @@
 #include "common/repack.h"
 #include "loader/loader.h"
 #include "model/model_desc.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/tp_gather.h"
 
 namespace {
@@ -132,7 +133,7 @@ int main() {
     const size_t head = size_t(kG) * kG * 4;
     std::vector<uint8_t> gdn(size_t(one.gdn_layers) * one.gdn_v_heads * head);
     for (size_t i = 0; i < gdn.size(); ++i) gdn[i] = uint8_t(i * 131 + (i >> 9));
-    const size_t ring_row = size_t(one.gdn_conv_dim()) * 2, rows = size_t(one.gdn_layers) * 16;
+    const size_t ring_row = size_t(one.gdn_conv_dim()) * 2, rows = size_t(one.gdn_layers) * runtime::PersistentDims::kConvRing;
     std::vector<uint8_t> conv(rows * ring_row);
     for (size_t i = 0; i < conv.size(); ++i) conv[i] = uint8_t(i * 37 + (i >> 11));
     std::vector<uint8_t> cg[2], cc[2];
