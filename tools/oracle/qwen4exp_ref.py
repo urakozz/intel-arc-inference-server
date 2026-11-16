@@ -27,6 +27,7 @@ not part of the text model (the MTP head is qwen4exp_mtp.py).
 
     qwen4exp_ref.py run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--layers N]
                         [--ple bf16|bf16:<snapshot>|int8:<dir>] [--chunk C] [--logits-tail L] [--act-tail A]
+                        [--force <ids>]   (the continuation teacher-forced on these ids; `tokens` = them)
     qwen4exp_ref.py ppl <snapshot> [--text NAME=FILE ...] [--ids NAME=FILE ...] [--layers N] [--max-tokens T]
     qwen4exp_ref.py trace <snapshot> --source NAME:IDS [...] [--opencode DIR] --out <dir> [--layers N]
     qwen4exp_ref.py hfcheck <snapshot> --layers N [--prompt <ids>] [--n 2100] [--gen 4]
@@ -1113,6 +1114,13 @@ def cmd_run(a) -> None:
         die(f"{a.prompt}: {T} ids (1..{a.max_prompt})")
     ple = PleTable(ple_source(a.snapshot, a.ple), tc)
     replay, force = None, None
+    if getattr(a, "force", None):
+        if getattr(a, "engine_routes", None):
+            die("--force and --engine-routes both force the continuation: give one")
+        force = read_ids(a.force)
+        if len(force) < a.gen:
+            die(f"--force {a.force}: {len(force)} ids, --gen {a.gen}")
+        force = force[: a.gen]
     if getattr(a, "engine_routes", None):
         from safetensors.torch import load_file
         if dtype != torch.float32 or not a.state_dump:
@@ -1224,6 +1232,7 @@ def cmd_run(a) -> None:
         log_from = T - 1
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt": os.path.abspath(a.prompt), "n_prompt": str(T),
             "gen": str(a.gen), "layers": str(tc.num_hidden_layers), "chunk": str(chunk), "ple": ple.kind,
+            "force": os.path.abspath(a.force) if getattr(a, "force", None) else "",
             "dtype": a.dtype, "state_format": ("qwen4exp-prefill-aligned-staging-v3" if replay else
                                                 "qwen4exp-prefill-v1") if a.state_dump else "",
             "lm_head": a.lm_head, "vocab_used": str(used),
@@ -1552,6 +1561,7 @@ def main() -> None:
     r.add_argument("--cycle", type=int, default=0, help="cycle prompt ids to this many positions (prefill gate: 4500)")
     r.add_argument("--state-dump", action="store_true", help="save prompt-boundary state and last-chunk decisions")
     r.add_argument("--engine-routes", help="engine route trace: replay only f32-judged bf16-ulp boundary ties")
+    r.add_argument("--force", help="teacher-force the continuation on these ids instead of greedy (the bf16 twin)")
     p = sub.add_parser("ppl")
     common(p)
     p.add_argument("--text", action="append", default=[], help="NAME=FILE (tokenized by the snapshot's tokenizer.json)")

@@ -36,7 +36,9 @@
 # default is "all of them". Leave it unset for the default.
 # ORACLE_PLE optionally mounts the engine's int8 PLE directory at /ple (read-only): a snapshot's PLE sibling
 # can be an absolute symlink outside the HF cache, so the /hf mount alone cannot expose it.
-# Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_PLE, ORACLE_THREADS, ORACLE_MEMORY,
+# ORACLE_REF optionally mounts a second model directory at /ref (read-only) - a comparison against another checkpoint
+# (tools/oracle/qwen4exp_quality.py kl); a cache entry (models--X) keeps its snapshots' relative blob links inside it.
+# Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_PLE, ORACLE_REF, ORACLE_THREADS, ORACLE_MEMORY,
 #      B70_LOCK_DIR (tools/gpu_lock.sh's lock directory, default $HOME).
 set -euo pipefail
 # t214 was the reference until 2026-09-09 and is no longer on the box; every
@@ -65,6 +67,10 @@ if [ -n "${ORACLE_PLE:-}" ]; then
   [ -f "$ORACLE_PLE/model.safetensors.index.json" ] || {
     echo "ORACLE_PLE=$ORACLE_PLE has no model.safetensors.index.json" >&2; exit 2; }
   mounts+=(-v "$ORACLE_PLE:/ple:ro")
+fi
+if [ -n "${ORACLE_REF:-}" ]; then
+  [ -d "$ORACLE_REF" ] || { echo "ORACLE_REF=$ORACLE_REF is not a directory" >&2; exit 2; }
+  mounts+=(-v "$ORACLE_REF:/ref:ro")
 fi
 
 env_flags=(-e HF_HUB_OFFLINE=1 -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1)
