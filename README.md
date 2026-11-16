@@ -84,9 +84,20 @@ weights with AutoRound, in groups of 64 rather than the usual 128 - better accur
 ```sh
 # an OpenAI-compatible server on port 8000
 
-# Qwen3.8-27B: the DFlash drafter and the int8 prompt pass (opt-in)
-./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --prefix-split-last \
-    --spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound --prefill-backend l0-int8
+# Qwen3.8-27B
+# Fastest: the DFlash drafter + the int8 prompt pass (opt-in)
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+    --prefix-split-last \
+    --spec dflash \
+    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound \
+    --prefill-backend l0-int8
+
+# Full context (262,144) on one 32 GB card: the MTP head (the default) + the int8 KV cache
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+    --prefix-split-last \
+    --kv-cache int8 \
+    --prefill-backend l0-int8
+
 
 # Ornith 1.5 35B-A3B: its own MTP head, the default prompt pass
 ./build/src/cli/b70-serve urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ --prefix-split-last
