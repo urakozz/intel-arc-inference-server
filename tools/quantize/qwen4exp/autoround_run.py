@@ -43,6 +43,7 @@ import glob
 import json
 import os
 import resource
+import shutil
 import time
 
 OPENCODE = "nvidia/OpenCodeInstruct"
@@ -163,6 +164,9 @@ def main() -> None:
     ar = AutoRound(a.model, **kw)
     ar.quantize_and_save(a.out, format="auto_round:auto_gptq")
     export = os.path.dirname(min(glob.glob(os.path.join(a.out, "**", "config.json"), recursive=True), key=len))
+    # AutoRound writes a generation_config.json made from config.json (eos 248044 only, no sampling defaults): the
+    # served model then never stops at <|im_end|>. The original's file replaces it.
+    shutil.copyfile(os.path.join(a.model, "generation_config.json"), os.path.join(export, "generation_config.json"))
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20
     recipe = {"autoround": autoround_info(), "call": call, "settings": kw, "ignore_layers_ours": IGNORE,
               "source": os.path.abspath(a.model), "torch": torch.__version__, "seconds": round(time.time() - t0),
