@@ -75,11 +75,8 @@ is not finished is listed in [open-work.md](open-work.md).
 - **Qwen3.8-Flash-Next** is next. It runs only truncated (`--layers N`) because the whole model does not
   fit two cards; open-work.md has the plan for the full size.
 - **Kolibri-1** is supported by the code and parked (out of focus); no speed rows.
-- **Nemotron 3.5 Bolt** is parked until Flash-Next is done. Its section stays
-  because the code still serves it.
 - Dropped and no longer supported: LFM2.5, Muse-Glimmer and Agnes 3.0 Flash (a `config.json` naming
   `AgnesForConditionalGeneration` is refused by name). Flint and Nanbeige are parked and not built.
-  LiLiCorr is Bolt's draft model (`--spec dflash`, Bolt's section).
 
 | | Qwen3.8-27B | Ornith 1.5 35B-A3B | Kolibri-1 | Qwen3.8-Flash-Next |
 |---|---|---|---|---|
@@ -430,8 +427,7 @@ a seeded sampled request).
 2. The cost table that picks K (`MtpCost::kolibri_dspark`) is derived from bytes: measure the verify at M = 1..8 and the
    draft pass.
 3. `kol_attn_decode` spills a few registers at M 3 / 4 (ocloc's warning): time the attention's two halves of a deep verify.
-4. Each verify row reads its own six experts a layer: price it, then decide on reading each distinct expert once (Bolt's
-   union form).
+4. Each verify row reads its own six experts a layer: price it, then decide on reading each distinct expert once.
 5. The taps are the outputs of layers 3 / 13 / 23 / 33 / 43 (the drafter's ids minus one, vLLM's rule): a low acceptance
    points here first.
 6. The Markov walk looks at the head's top 16 a row, not the whole vocabulary: measure the acceptance gap.
@@ -505,98 +501,3 @@ no `--profile`, context capped at the trained 262144.
 **Relevant variables:** `B70_Q4_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_Q4_MTP_NORM` (`single` |
 `per_stream`),
 `B70_Q4_TIE_TOL` / `B70_Q4_SEL_TOL` (the golden test's routing and selection near-tie tolerances, 1e-3 proposed).
-
-## Nemotron 3.5 Bolt 74B-A9B (spec 25)
-
-NVIDIA's hybrid of 40 Mamba-2 blocks, 8 NoPE attention blocks (GQA 32 / 2, head_dim 128) and 40 latent MoE blocks (top-9
-of 240..496 relu² experts in a 1024 latent, a shared expert), 88 blocks, vocabulary 131072; served from our own int4 g64 export
-`urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ` @ `8932aa8d` (AutoRound, GPTQ packing; 41 GB on disk). The
-loader also reads the GPTQ g128 spelling through its exact g64 expansion (the synthetic checkpoints test it).
-
-**Status: decode, prefill and serving built, parked until Flash-Next is done; no speed row yet** (spec 25c / 25d / 25e, as built in
-spec 25 §15 / §16 / §17). The real model runs on **two cards** (two cards are its `--parallel auto`, split 48
-by bytes; `--parallel 1` is refused naming the bytes); the N 12 synthetic checkpoints and `--layers N` fit one card. Without `--prefill`
-a prompt goes through the decode list one replay per id; `--prefill` / `--bench --prefill-length N` run the `l0` prefill
-(spec 25d). Expected (derived): 653 launches a token (645 with `B70_BOLT_ATTN=eager`, 533 with `B70_BOLT_FUSE=all`). P0 (`probe_bolt_step`) runs first on the box and decides the GEMV `{S, layout}` picks and which
-arms are worth keeping.
-
-```sh
-S=oracle-out-bolt-synth/n12-g128                   # a synthetic checkpoint (25b's make_synth.py, 12 blocks)
-P=tests/golden/prompts/bolt_short.ids
-
-# every command below: no speed row yet
-./build/tools/probe/probe_bolt_step --depth 4096 --rounds 9 --sweep-s --pair      # P0: the skeleton lists (no model)
-./build/src/cli/b70-decode $S --ids $P --n 32                                     # one card, int8 head
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --ids $P --n 32          # two cards (the default for 88 blocks)
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256 --max-len 8192
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --profile --depth 4096 --steps 32 --repeats 5
-B70_BOLT_FUSE=all ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256   # 533 launches
-B70_BOLT_SSM=bf16 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256   # the bf16 state arm
-```
-
-**Serving (spec 25e).** `b70-serve <snapshot>` runs the engine on **two cards by default** (`--parallel 1` only for a synthetic /
-small checkpoint; `--pipeline-split` as `b70-decode` takes it), `--max-len auto` up to 262144 with
-the prefill scratch planned in, the int8 head by default, prefill on `l0` only:
-
-```sh
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-cache-gb auto --log-requests ~/bolt-log
-```
-
-- **Chat template.** The snapshot's `chat_template.jinja` (sha256 `6521afc7...`, NVIDIA's, byte-identical in our
-  export; its sha256 is printed and compared in the startup line). ChatML, no BOS, and the system block is ALWAYS
-  rendered (`<|im_start|>system\n<|im_end|>\n` with no system message). `chat_template_kwargs`: `enable_thinking` (default
-  true: the prompt ends `<think>\n`; false: `<think></think>`), `medium_effort` (appends `{reasoning effort: efficient}` to
-  the last user message), `truncate_history_thinking` (default true: the reasoning of turns before the last user message is
-  dropped), each a boolean (a 400 otherwise); the OpenAI `reasoning_effort` maps onto them - `none` / `minimal` ->
-  `enable_thinking` false, `low` / `medium` -> `medium_effort` true, `high` / `xhigh` -> the default, anything else a 400 -,
-  and an explicit kwarg wins. Tool schemas and call arguments render with sorted keys (the server's JSON objects are
-  sorted: the prefix cache misses at a call whose arguments the model wrote in another order). Python's spelling for a
-  history argument (`True`, `None`) is the template's own.
-- **Output.** The output opens inside reasoning when the prompt ends `<think>\n` (`reasoning_content` in the response,
-  VERBATIM - the template re-adds `<think>\n` + reasoning + `</think>`, so a stripped reasoning would drift every later
-  prompt), up to the first `</think>`; then content and Qwen3-Coder XML tool calls (`<tool_call>\n<function=NAME>\n<parameter=
-  KEY>\nVALUE\n</parameter>...`, values typed by the tool's schema first). With thinking off everything is content, a stray
-  `</think>` included. `chat_template_kwargs.force_nonempty_content: true` turns reasoning that never closed (or ended with
-  no content) into content - held back from the stream until decided. A call cut by `max_tokens` or EOS is dropped, never
-  leaked as content; a call inside reasoning is reasoning (the `ultra_v3` reasoning parser's rules; spec 25 §7 and §17).
-- **Sampling.** A request that names no `temperature` / `top_p` / `top_k` samples with NVIDIA's published T 1.0, top-p 0.95,
-  no top-k, and generation ends on EOS **2 or 11** - from the snapshot's `generation_config.json` when it carries sampling
-  keys (ours does: NVIDIA's file), else the published values. A seeded
-  sampled request is reproducible request by request; `temperature: 0` is the device argmax.
-- **Prefix cache.** A snapshot at an aligned 2048-position block end (and at a request's end) carries, per Mamba block, the
-  SSM state (fp32: 4 MiB; 2 MiB with `B70_BOLT_SSM=bf16`, which is another store key) and the three raw conv columns
-  before the position - 170,229,760 B in all (derived) - and the 8 attention blocks' KV, 8,192 B a position (one state per
-  block end: a 64k-token prompt writes 32 of them, ~6.0 GB with the KV, derived - size `--prefix-cache-gb` for it). A hit copies back
-  the largest block end <= the common prefix and prefills the rest. A new user message re-renders every earlier assistant
-  turn without its reasoning (`truncate_history_thinking`), so the cache diverges at the first assistant turn before the
-  last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.
-- **Request.** Image / video / audio content parts are refused (text only).
-
-**Speculative decoding (spec 26c; not yet run on a card).** Bolt has no MTP head, but
-its decode list also runs as a *verify* pass of M = K + 1 <= 8 rows (each row bitwise a plain decode step, so greedy output
-is the plain run's), and two proposers feed it on `b70-serve`:
-
-- `--spec lookup` - prompt lookup (the continuation of the longest earlier repeat in the request, no extra model);
-- `--spec dflash` - NVIDIA's LiLiCorr draft model (`nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr`, 918 MiB, from
-  the HF cache; `--draft-model PATH` points elsewhere) on the last card beside the main model's head: it reads six of Bolt's
-  hidden-state rows ("taps") and drafts a block of up to 7 ids in one pass.
-
-`--spec-max 1..7` caps the guesses (default 7); K is picked per request from how often its guesses were right. Everything
-else is the engine's: the draft model's linears int8 per row (exact bf16 and int4 g64 are test arms), its draft distribution
-vLLM's (the candidate lattice), the verify's experts read once per block for all rows (the union form; the plain M-row form
-is its bitwise test reference). Bolt's `--spec auto` stays **off** until row 65's D5 measures `dflash` >= 10 % faster than
-both `off` and `lookup` on the agentic set (and nowhere > 3 % slower). `b70-decode` decodes Bolt plainly (`--spec` there is refused).
-
-```sh
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec dflash      # the LiLiCorr drafter, K <= 7 adaptive
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec lookup --spec-max 4
-```
-
-**Limits.** No `--spec mtp` (no MTP head) and no `--spec dflash-lookup` (Qwen3.8's), no `--draft-vocab`, bf16 KV only
-(`--kv-cache int8` refused), prefill on `l0` only (`--prefill-backend l0-int8` refused), context at most
-262144, `--layers` is `b70-decode`'s development mode only.
-
-**Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
-`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
-`B70_BOLT_A_EXP` (the reference's `A`: `torch` | `engine`), `B70_BOLT_SNAPSHOT` (`template_bolt_test`'s,
-`bolt_tokenizer_test`'s and `bolt_request_test`'s snapshot).

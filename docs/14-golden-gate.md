@@ -33,8 +33,8 @@ oracle stays bf16) and with the int8 KV cache (`golden_gate_kv8_test`).
 
 The other models have their own gates built on the same ideas, each against its own
 reference: `golden_gate_ornith_test`, `kolibri_golden_test`,
-`qwen4exp_golden_test` (Flash-Next), `bolt_golden_test`. The mixture-of-experts gates
-(Ornith, Flash-Next, Bolt) also compare which experts the router picks per token; a
+`qwen4exp_golden_test` (Flash-Next). The mixture-of-experts gates
+(Ornith, Flash-Next) also compare which experts the router picks per token; a
 routing decision can flip on a near-tie (the 8th and 9th scores a hair apart), so a
 different expert set passes only when the reference's gap at the cut is a near-tie.
 

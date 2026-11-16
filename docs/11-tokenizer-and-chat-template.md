@@ -125,9 +125,9 @@ The renderer is patched where minja was not Jinja (Undefined apart from None, `i
 `replace` filter, `dict`, index attribute getters, empty mappings falsy, `none`; the tool-call capability probe),
 each listed in `third_party/VERSIONS` and tested against Jinja2 by `minja_ext_test` (the patches came with
 a model's template since removed). The request's `chat_template_kwargs` reach
-the template through `chat::Template::render(..., kwargs)` for models whose `server::ChatFormat` reads them (Kolibri
-and Bolt; Qwen only gets `enable_thinking`). Ornith, Kolibri and Bolt have their own template tests
-(`template_ornith_test`, `template_kolibri_test`, `template_bolt_test`).
+the template through `chat::Template::render(..., kwargs)` for models whose `server::ChatFormat` reads them (Kolibri;
+Qwen only gets `enable_thinking`). Ornith and Kolibri have their own template tests
+(`template_ornith_test`, `template_kolibri_test`).
 
 `tok::Streamer` is the hold-and-flush incremental detokeniser described under
 "Streaming detokenisation" below.
@@ -164,7 +164,7 @@ fallback above is.
 
 Template *rendering* of tool definitions in the prompt has parity vectors. Tool-call
 *parsing* of the model's output is in the server, one parser per family (`src/server/toolcall*.cc`:
-Qwen's XML, Kolibri's and Bolt's own).
+Qwen's XML, Kolibri's own).
 
 **Key order is part of the prompt.** A chat request is parsed with `nlohmann::ordered_json`, not
 `nlohmann::json` (whose object is a sorted map), so the template sees the client's `messages`,

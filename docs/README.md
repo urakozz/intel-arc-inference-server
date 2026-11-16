@@ -137,9 +137,7 @@ cite them where they matter. By topic:
 
 **Parked and dropped models**
 
-- [probe-kolibri-2026-10-05](probes/probe-kolibri-2026-10-05.md),
-  [probe-bolt-2026-10-21](probes/probe-bolt-2026-10-21.md), [probe-lilicorr-2026-10-23](probes/probe-lilicorr-2026-10-23.md),
-  [lilicorr-exact-divergence-2026-11-07](probes/lilicorr-exact-divergence-2026-11-07.md) - parked
+- [probe-kolibri-2026-10-05](probes/probe-kolibri-2026-10-05.md) - parked
 - [probe-agnes-2026-10-03](probes/probe-agnes-2026-10-03.md) - dropped; kept as the record
 
 The prefill investigations of September 2026 are folded into

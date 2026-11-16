@@ -160,8 +160,8 @@ scales. Pick the group size your kernels' tile geometry wants.
 ## What the engine serves today
 
 Every supported model runs from an int4 checkpoint in this one format family: AutoRound, GPTQ
-packing, symmetric, group 64, re-quantised by us (Qwen3.8, Ornith, Kolibri-1, Bolt). The loader
-also reads the g128 spelling (Intel's interim Flash-Next checkpoint, a third-party Bolt export) through an
+packing, symmetric, group 64, re-quantised by us (Qwen3.8, Ornith, Kolibri-1). The loader
+also reads the g128 spelling (Intel's interim Flash-Next checkpoint) through an
 exact expansion to g64. On top of that format three choices are made per run, not per file: the output head
 is quantised to int8 per row at load (spec 9); the KV cache is bf16 or, with `--kv-cache int8`, a rotated
 int8 form (spec 12); and prefill linears are bf16 or, with `--prefill-backend l0-int8`, the

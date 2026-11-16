@@ -95,7 +95,7 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
 Speculative decoding (the model's MTP head) and the prefix cache are on by default; the DFlash draft model is
 `--spec dflash --draft-model ...`. Ready-made recipes with their context sizes:
 [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
-Kolibri-1, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
+Kolibri-1); Qwen3.8 is the one everything is tuned for.
 
 ## Flags
 
@@ -109,7 +109,7 @@ Kolibri-1, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
 | `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
 | `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; it also copies repeats of earlier text |
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
-| `--draft-model PATH` | none; required with `--spec dflash` | the draft model: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB of the context's memory). Nemotron 3.5 Bolt keeps its own default |
+| `--draft-model PATH` | none; required with `--spec dflash` | the draft model: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB of the context's memory). |
 | `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
 | `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; Qwen3.8 and Ornith) |
 | `--prefix-cache-gb auto\|N` | `auto` | the prefix cache in pinned system RAM; `auto` = up to 32 GiB from what is free, `0` = off |
@@ -127,7 +127,7 @@ Kolibri-1, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
 | `--prefill` | off | run the prompt through the chunked prefill |
 | `--spec off\|mtp\|dflash`, `--spec-max K` | `off` | as for `b70-serve` |
 | `--max-len L\|auto`, `--parallel auto\|1\|pp\|tp`, `--kv-cache`, `--prefill-backend` | `16384`, ... | as for `b70-serve` |
-| `--layers N\|auto` | - | load only the first N layers (Kolibri-1, Nemotron 3.5 Bolt, Qwen3.8-Flash-Next) |
+| `--layers N\|auto` | - | load only the first N layers (Kolibri-1, Qwen3.8-Flash-Next) |
 
 Developer flags (`b70-decode`):
 

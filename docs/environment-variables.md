@@ -34,9 +34,6 @@ Any value not listed is refused.
 | `B70_KOLIBRI_ATTN` | Kolibri-1 (`b70-decode`) | `flash` | `eager` runs the attention the way the reference implementation does, as a chain of bf16 steps: 856 kernel launches a token instead of 756, and a score row of 4 B x 48 heads x context length. |
 | `B70_Q4_ATTN` | Qwen3.8-Flash-Next (`b70-decode`) | `flash` | `eager` is the reference's bf16 chain for its sparse attention layers: 767 launches a token at 48 layers instead of 779. Not yet run on a card. |
 | `B70_Q4_MTP_NORM` | Qwen3.8-Flash-Next (`b70-serve --spec mtp`) | `single` | how the MTP head normalises its input: `single` is one RMS norm over the 4 streams together (what vLLM does), `per_stream` is one per stream. |
-| `B70_BOLT_ATTN` | Nemotron 3.5 Bolt | `flash` | `eager` is the reference's bf16 attention chain in one launch: 645 launches a token instead of 653. Not yet run on a card. |
-| `B70_BOLT_FUSE` | Nemotron 3.5 Bolt | `none` | fused variants of Bolt's decode step, each bitwise the same as the default and each saving 40 launches a token: `router` (the router inside the MoE block's norm launch), `route` (the expert ranking recomputed in every expert kernel), `conv` (the convolution inside the state-space kernel), `all` (533 launches), or a comma list. Not yet run on a card. |
-| `B70_BOLT_SSM` | Nemotron 3.5 Bolt | `fp32` | the precision of the Mamba state: `bf16` halves its bytes and rounds after every update. |
 
 ## The scripts in `tools/`
 
@@ -52,7 +49,6 @@ Any value not listed is refused.
 | `SNAP_QWEN`, `SNAP_ORNITH`, `SNAP_KOLIBRI`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the three checkpoints, `0`, `8013 + 100 x DEVICE` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
 | `ORACLE_MODEL` / `ORACLE_SNAP`, `ORACLE_THREADS`, `ORACLE_IMAGE`, `HF_CACHE`, `REPO_DIR` | `tools/oracle/run_in_container.sh` and the scripts that call it (`golden.sh`, `check.sh`) | Qwen3.8 in the HF cache, all threads, the script's reference image, `~/.cache/huggingface`, this tree | the CPU reference's checkpoint (a repo directory in the cache, or an absolute snapshot path, which wins), its CPU threads, the container, and the two mounts. `golden.sh` adds `OUT_DIR` (`oracle-out`), `IDS_DIR` (`tests/golden/prompts`) and `PROMPTS` (`prose code cjk`). |
 
-| `B70_BOLT_A_EXP` | `tools/oracle/bolt_ref.py`, `bolt_mamba_ops.py`, `bolt_fixture.py` | `torch` | `engine`: Bolt's CPU reference computes `A = -exp(A_log)` with a float32 port of the engine's own `exp` instead of `torch.exp`, so that the kernels can be checked against it bit for bit; `bolt_ref.py run --a-exp` sets it. |
 
 ## Test-only
 
@@ -64,8 +60,6 @@ scores may be before a test calls the choice between them undetermined.
 |---|---|---|---|
 | `B70_LONGCTX_TESTS` | the `longctx` tests | unset: SKIP | `1` runs the long-context MTP variants (`mtp_verify_{32k,128k}_test`, `mtp_gpu_{32k,128k}_test`) |
 | `B70_KOL_TIE_TOL` | `kolibri_golden_test`, `kolibri_partial_test` | `1e-2` | the near-tie tolerance of Kolibri-1's expert routing check |
-| `B70_BOLT_TIE_TOL` | `bolt_golden_test`, `bolt_prefill_test` | `1e-3` | the same for Bolt's expert routing (the 9th against the 10th expert); a gap of exactly 0 is undetermined |
-| `B70_BOLT_SNAPSHOT` | `template_bolt_test`, `bolt_tokenizer_test`, `bolt_request_test` | our Bolt export in the HF cache | the snapshot whose chat template and tokenizer files the tests use; without it the tests SKIP |
 | `B70_Q4_TIE_TOL`, `B70_Q4_SEL_TOL` | `qwen4exp_golden_test`, `qwen4exp_partial_test` | `1e-3` | the same for Qwen3.8-Flash-Next: expert routing (the 10th against the 11th expert) and the sparse attention's position selection (the 512th against the 513th); a gap of exactly 0 is undetermined |
 | `B70_SNAPSHOT_DIR` | `template_test`, `prompt_order_test` | Qwen3.8's snapshot under `$HF_HOME` | the snapshot whose chat template it renders |
 | `B70_SPLIT_VERBOSE` | `prefill_split_test` | unset | set: also print the worst KV row per attention layer of each non-bitwise split |

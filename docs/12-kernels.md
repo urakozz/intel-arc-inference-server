@@ -1273,12 +1273,7 @@ live in a directory of `src/kernels/` and are described in their source headers 
 | `moe.cl`, `prefill/pf_moe*.cl` | mixture-of-experts block of one decode step (route, gate‖up, down) and its prefill GEMMs: Ornith 1.5 (spec 15) |
 | `kolibri/` | Kolibri-1: sliding-window and full attention, experts (spec 20) |
 | `qwen4exp/` | Qwen3.8-Flash-Next: the block-selection attention, experts, per-layer embeddings, multi-token head (spec 21) |
-| `bolt/`, `bolt_kernels.h` | Nemotron 3.5 Bolt: the Mamba-2 mixer, MoE, and the full no-position-embedding attention `mg_attn*` (spec 25); also LFM2-family prep kernels |
-| `dflash/` | the DFlash draft model (spec 19) and LiLiCorr (`ll_*`, spec 26) |
+| `dflash/` | the DFlash draft model (spec 19) |
 | `draft_vocab.cl` | the MTP draft's argmax over a reduced vocabulary (spec 8) |
 | `tp.cl`, `prefill/pf_tp.cl` | tensor parallel: the all-reduce after each row-parallel linear by P2P writes, and one card's half of the argmax (spec 17) |
 | `noop.cl`, `ctrl_read.cl`, `bw_sum.cl` | measurement helpers: per-launch fixed cost, a control-block read, a read-only bandwidth probe |
-
-Bolt's attention (`mg_attn_decode` + `mg_attn_reduce`, `mg_attn_eager`, `mg_pf_flash_attn`) is `kol_attn.cl`'s
-v2 structure at GQA 16 over the position-embedding-free cache, with the gate fused into the reduce; its host
-twin is `tests/kernels/mg_attn_ref.h`. Bolt is parked until Flash-Next is done (open-work.md).

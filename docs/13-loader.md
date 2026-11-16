@@ -22,8 +22,7 @@ quant-config and `LinearSrc::classify` code described here:
 | `load` (and `load_tp`, which slices every layer for tensor parallel: each card takes half) | Qwen3.8-27B (dense) and Ornith 1.5 35B-A3B (mixture of experts, MoE: many small expert MLPs, a few used per token) - the two models that share one loader | `loader.cc`, `moe.*` |
 | `load_kolibri1` | Kolibri-1 | `kolibri1_*` |
 | `load_qwen4exp` | Qwen3.8-Flash-Next (below) | `qwen4exp_*` |
-| `load_bolt` | Nemotron 3.5 Bolt (below; parked until Flash-Next is done) | `bolt_*` |
-| `load_drafter`, `load_lilicorr` | the draft models: DFlash (the bf16 original, quantised to int8 at load, or our packed int4 export loaded as shipped) and LiLiCorr | `dflash_*`, `lilicorr_*`, `nvfp4.h` |
+| `load_drafter` | the DFlash draft model (the bf16 original, quantised to int8 at load, or our packed int4 export loaded as shipped) | `dflash_*`, `nvfp4.h` |
 
 **Two Qwen3.8 checkpoint shapes are supported and the loader takes both without a
 conditional anywhere in the walk**: the published one with a bf16 `lm_head`, and a
@@ -116,7 +115,7 @@ dequantised once with the prefill dequant's arithmetic (`LoadedModel::ab_prefill
 128, see "g128 checkpoints"), `sym == true`, and `desc_act` is false **or absent** (see "The
 packed-head checkpoint" - absence is auto-round's spelling of false and is proven from the
 shipped `g_idx` count, not taken on trust). It throws on any `+:` dynamic rule that is not
-an exact restatement of the top level (see the Bolt section) - the pattern that made a
+an exact restatement of the top level - the pattern that made a
 published MTP head unusable (BENCHMARKS.md). It also throws on an unrecognised
 `quant_method` or `packing_format`, and on an `extra_config` module that claims to be
 packed at anything but g64 symmetric int4.
@@ -677,7 +676,7 @@ The model is picked from `config.json`'s `architectures[0]` - no flag
 layer counts, widths, the MLP intermediate, `W`, the tokenizer's id count); an unknown
 architecture throws, naming it and the supported ones. Agnes 3.0 Flash, which the
 descriptor once ran, was dropped on 2026-11-07 and its config.json is refused by name.
-Kolibri, Flash-Next and Bolt have their own loaders and descriptors, chosen by the
+Kolibri and Flash-Next have their own loaders and descriptors, chosen by the
 entry point that serves them.
 
 ## g128 checkpoints
@@ -831,49 +830,6 @@ reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant
   checks besides the weights is `tokenizer.json`: the served file must be the original's
   (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and
   the original's file is linked beside the snapshot ([18-running-models.md](18-running-models.md)).
-
-## Nemotron 3.5 Bolt: the exact relaxations, signed scales, one layout from two sources
-
-Bolt is parked until Flash-Next is done; its loader stays built and tested. The served
-checkpoint is our own g64 export
-(`urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ`); the third-party g128
-spelling is kept tested by synthetics. Reading it needed two relaxations in the shared
-`src/loader/quant.{h,cc}`, each the narrowest change (`tests/loader/quant_test.cc` holds both
-directions):
-
-- **A restating `+:` dynamic rule is accepted, nothing else.** `QuantConfig::parse` refuses
-  a `+:` rule that changes a module's quantisation (the broken-MTP-config guard). The g128
-  spelling carries one `"+:.*mixer\\.out_proj$": {"bits": 4, "group_size": 128, "sym": true}`,
-  exactly the top level restated: a `+:` rule whose value is an object of exactly the keys
-  `bits`, `group_size`, `sym`, each equal to the top level's, is a no-op, counted in
-  `QuantConfig::dynamic_restating`. Any rule that changes a value, carries another key, omits
-  one, is `{}` or is not an object still throws, naming the rule. `classify` still checks
-  every module against its shipped tensors.
-- **BF16 GPTQ `.scales` are exact-or-refused.** Our export ships the 40 Mamba `out_proj`
-  linears' `.scales` as BF16 (every other linear's F16). `classify` and
-  `assert_quant_invariants` convert them with `bf16_to_f16_exact` (the compressed-tensors
-  converter): a value f16 cannot hold exactly throws naming `<linear>.scales[<element>]`; any
-  dtype other than F16 / BF16 is refused.
-- **Signed scales: audited, nothing to change.** AutoRound's symmetric scale is signed (about
-  half of Bolt's scales are negative); the dequant is `(q - 8) x scale` everywhere. The sign is
-  the f16 word's top bit and every path moves f16 words verbatim (the g128 -> g64 expansion,
-  the BF16 conversion, the repacks); the finite check never looks at a sign. `quant_test` holds
-  each path with negative scales.
-
-`loader::load_bolt` reads **either** spelling into one device layout. A linear's group is
-decided by its scale rows, never by a label, and the repack only ever sees g64 words and
-scales, so the same weights packed g64 or g128 give byte-identical device buffers
-(`bolt_repack_test`). Heterogeneous MoE: the expert count and width come from each block's
-own `block_configs` entry (`model::BoltDesc`), never the top level's maximum; a block's routed
-experts are one allocation of `E` blocks (up then down, both layout 1). Per-linear
-`{S, layout}` comes from `BoltDesc::linears(l)`. The conv taps, norms, `D`, `dt_bias` and
-`A = -exp(A_log)` are baked fp32 at load; the exp is `common::exp_torch`, the same on every
-host (it differs from torch's `exp` by at most 1 ulp on 0.59 % of the bf16 values in range,
-far below the kernels' own tolerance). The vision tensors are skipped by prefix and counted;
-everything else is consumed. The untied `lm_head` is quantised to the int8 head on the last
-device. `runtime::bolt::plan` fixes the layer split between the cards and `--max-len auto`
-before the first allocation; its figures are printed by `bolt_repack_test` /
-`bolt_plan_test`, not typed here.
 
 ## Deliberately not loaded
 

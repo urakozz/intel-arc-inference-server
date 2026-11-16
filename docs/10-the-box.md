@@ -58,7 +58,7 @@ host memory filled RAM and swap; the kernel killed the reference, and the next j
 beside a GPU job's weight reads took the NVMe off the bus.
 
 **One CPU model job at a time.** Every CPU reference script (the f32 judges `tools/box_validate/f32_oracle.sh`
-and `f32_refs.sh`, the Kolibri / Bolt oracles) holds `/tmp/b70-cpu-model.lock` for its whole run and first
+and `f32_refs.sh`, the Kolibri oracles) holds `/tmp/b70-cpu-model.lock` for its whole run and first
 checks MemAvailable (the kernel's estimate of RAM free for a new job) against its own floor (`F32_REF_MIN_GB`,
 `KOL_REF_MIN_GB`, ...): below it the script exits 77, which a stage records as SKIP, not FAIL. They
 run beside non-timed GPU work with `ORACLE_THREADS=22` (half the cores, so the GPU tests keep their host threads),
@@ -191,7 +191,7 @@ saving is not measured yet. The run is G0
 as in the full run, except that the suite runs only the tests that load no model (no `checkpoint` label), then a
 fixed sample of each model's kernel, decode, prefill and serving stages - a few with a smaller input (the 32k MTP
 test, not 128k; one server round over 2 golden and 3 tool-call prompts). Every other stage is recorded SKIP
-"full only": the speed rows, the CPU reference builds, the long-context and many-prompt runs, Bolt and LiLiCorr.
+"full only": the speed rows, the CPU reference builds, the long-context and many-prompt runs.
 The gates and bars are the full run's; only the input is smaller. `--list` shows each stage's quick form (the
 QUICK column), `--dry-run --quick` what it runs; the block at the end of `tools/box_validate/stages.sh` is the
 list. A quick run keeps its own state (`<sha>-quick-vs-<baseline>`), so its PASSes never stand for a full run's
@@ -414,7 +414,7 @@ cold or archive copy is self-contained, and moves the shared payloads nothing on
 trash with their folder. Copies take hours: run them detached (`setsid nohup ... > ~/b70/logs/hf-tier/<name>.log`).
 Logic and rules: `tools/hf_tier.py`; tests on a fake hub: `python3 tools/test_hf_tier.py` (Mac or box).
 
-A model too big for RAM whose CPU reference streams its weights (Bolt's bf16 original, 150 GB) stays cold and goes
+A model too big for RAM whose CPU reference streams its weights stays cold and goes
 hot only for that job: `hf_tier.sh hot` before it, `hf_tier.sh cold` after (the 8 TB copy stays, so `cold` only
 re-verifies it and moves the NVMe folder to the trash).
 
