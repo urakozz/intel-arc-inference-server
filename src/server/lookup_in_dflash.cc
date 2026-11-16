@@ -47,8 +47,22 @@ void LookupInDFlash::observe(uint32_t proposed, uint32_t kept) {
   wide += was_wide;
   deep += o_.deep_k != 0 && proposed > o_.wide_k;
   hot_ = was_wide ? kept >= kWideMin : kept == proposed;
-  // Spec 32: a wide verify kept whole earns the deep width; any other verify (or a cold run) goes back to wide_k.
-  width_ = was_wide && kept == proposed && o_.deep_k != 0 ? o_.deep_k : o_.wide_k;
+  // Spec 32: a wide verify kept whole earns the next width (2 w + 1: 15, 31, 63), one kept at least half drops a
+  // width, any other verify (or a cold run) goes back to wide_k. Spec 32e: two wide misses in a row keep the request
+  // at wide_k.
+  if (was_wide) {
+    misses_ = kept < proposed ? misses_ + 1 : 0;
+    if (misses_ >= 2 && !narrow_ && o_.deep_k != 0) {
+      narrow_ = true;
+      ++narrowed;
+    }
+  }
+  uint32_t w = o_.wide_k;   // the list this verify ran on: the narrowest width holding its drafts
+  while (w < proposed && w < o_.deep_k) w = 2 * w + 1;
+  width_ = !was_wide || narrow_ || o_.deep_k == 0 ? o_.wide_k
+           : kept == proposed                     ? std::min(2 * w + 1, o_.deep_k)
+           : 2 * kept >= proposed                 ? std::max((w - 1) / 2, o_.wide_k)
+                                                  : o_.wide_k;
   if (kept < std::min(kStayAccepted, proposed)) {
     lookup_ = hot_ = false;
     width_ = o_.wide_k;

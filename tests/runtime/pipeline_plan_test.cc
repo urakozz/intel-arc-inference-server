@@ -227,9 +227,9 @@ void check_landing() {
     CHECK_EQ(k.total, size_t{8272});   // rows 5120 B -> sums at 8192
   }
   const runtime::PpLandingLayout q = runtime::pp_landing_layout(model::qwen38());
-  CHECK_EQ(q.resid_bytes, size_t{64} * 5120 * 2);   // kDeepM rows (the decode scratch's; spec 32)
-  CHECK_EQ(q.sumsq_bytes, size_t{5120});
-  CHECK_EQ(q.total, size_t{660480});
+  CHECK_EQ(q.resid_bytes, size_t{16} * 5120 * 2);   // kWideM rows (the decode scratch's; open-work 28)
+  CHECK_EQ(q.sumsq_bytes, size_t{1280});
+  CHECK_EQ(q.total, size_t{165120});
 }
 
 // The descriptor-free balance: three equal layers and a heavy device 1 put two layers on device 0.

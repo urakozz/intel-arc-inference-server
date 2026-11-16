@@ -91,8 +91,7 @@ void check_decided_layout() {
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
   CHECK_EQ(p.slot_state, size_t(int64_t(size_t{3} * (4 * size_t{150994944} + 31457280) + ctl + pages - deep) + hh));
   // §9.1: "total 29.10 GB, 1.93 GB spare" (l0-int8); on the l0 default 0.087 GB less (batch_rows_test's 29.01).
-  // spec 32: + 0.146 GB, the 64-row decode scratch
-  CHECK_NEAR(p.total() / kGB, 29.265 + double(size_t{131072} * 4 * 256 * 2 * 2) / kGB, 0.01);
+  CHECK_NEAR(p.total() / kGB, 29.119 + double(size_t{131072} * 4 * 256 * 2 * 2) / kGB, 0.01);
   std::printf("plan_slots 131072 + 3 x 32768, int8 KV, MTP: %.3f GB (batch_memory %.3f + RoPE %.3f + hh %.6f + "
               "controls %zu B + page table %zu B), spare %.3f GB\n",
               p.total() / kGB, b.total() / kGB, rope / kGB, hh / kGB, ctl, pages,

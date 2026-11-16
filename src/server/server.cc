@@ -128,7 +128,7 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     o.window = 0;
     o.max_k = deps_.engine.mtp_k();
     o.wide_k = deps_.engine.lookup_wide_k();   // open-work 28: long runs in the engine's wide verify list
-    o.deep_k = deps_.engine.lookup_deep_k();   // spec 32: and in its 32-row list
+    o.deep_k = deps_.engine.lookup_deep_k();   // spec 32: and in its 32- and 64-row lists
     impl_->lookup_in_dflash.emplace(o);
   }
   {
@@ -519,7 +519,8 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
         if (burst_head_indexed) throw std::logic_error(std::string(lookup_call) + ": propose twice");
         matcher.append(pending);
         burst_head_indexed = true;
-        const std::vector<uint32_t> d = lid.propose(matcher);
+        std::vector<uint32_t> d = lid.propose(matcher);
+        if (d.size() > deps_.engine.lookup_cap(sampling)) d.resize(deps_.engine.lookup_cap(sampling));   // spec 32e
         proposed = static_cast<uint32_t>(d.size());
         return d;
       };

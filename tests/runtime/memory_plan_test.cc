@@ -53,16 +53,22 @@ void check_sizes_qwen38() {
   CHECK_EQ(p.kv_k, size_t{536870912});
   CHECK_EQ(p.kv_v, size_t{536870912});
   CHECK_EQ(p.total(), size_t{1240465536 + 640 + 15728640});
-  // Decode attention v2's attn_part: [24][32][64][258] fp32 whatever max_len is, 50,724,864 B (spec 32: 64 rows)
+  // Decode attention v2's attn_part: [24][32][16][258] fp32 whatever max_len is, 12,681,216 B (16 rows; spec 32e:
+  // 64 only on an engine that builds the deep verify lists, DecodeScratchDims::rows)
   // (the removed v1 strided every 64-position block: 50,724,864 B at 16384, at 8 rows).
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, q);
-  CHECK_EQ(d.partials, size_t{8} * 8912896);   // spec 32: 64 rows
-  CHECK_EQ(d.logits, size_t{8} * 7946240);
-  CHECK_EQ(d.total(), size_t{8} * (68652864 - 50724864 + 6340608));
+  CHECK_EQ(d.partials, size_t{2} * 8912896);
+  CHECK_EQ(d.logits, size_t{2} * 7946240);
+  CHECK_EQ(d.total(), size_t{2} * (68652864 - 50724864 + 6340608));
+  CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, q, 64).total(), size_t{8} * (68652864 - 50724864 + 6340608));
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 1, false), 64u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Int8, 1, false), 16u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 2, false), 16u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, false, runtime::KvCache::Bf16, 1, false), 16u);
   // 128k (spec 6): KV 8,589,934,592.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
   for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
-    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 64 * 258 * 4);
+    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 16 * 258 * 4);
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(s.eager(), size_t{699514776});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q, runtime::PrefillScratchDims::kCDefault).eager(), size_t{699514776});
@@ -133,8 +139,8 @@ void check_sizes_ornith() {
   CHECK_EQ(ml.route_at(40), ml.route_off + 40 * size_t{1024});
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, o);
   CHECK_EQ(d.moe, size_t{472576});
-  CHECK_EQ(d.x, size_t{64} * 4096 * 2);                             // 2 x hidden > 512, 64 rows (spec 32)
-  CHECK_EQ(d.attn_part, size_t{16} * 32 * 64 * 258 * 4);            // v2 at 16 q-heads, 64 rows
+  CHECK_EQ(d.x, size_t{16} * 4096 * 2);                             // 2 x hidden > 512, 16 rows
+  CHECK_EQ(d.attn_part, size_t{16} * 32 * 16 * 258 * 4);            // v2 at 16 q-heads, 16 rows
   // Dense models carry no MoE scratch: their sizes are what they were.
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
   // The plan (decode only: Ornith's prefill is spec 15d) carries both MoE terms, and the
@@ -212,14 +218,14 @@ void check_spec6_line() {
   const runtime::PrefillPath i8{true, PrefillBackend::L0Int8};   // measured on l0-int8, then the default
   const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights, i8);
   CHECK_EQ(runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights).decode_state,
-           size_t{590450624} - 405798912 + 6340608 + 39997376 + 145611648 + 512);   // + the ring and 16-row scratch
-                                                                                    // (open-work 28), 64 rows (spec 32)
+           size_t{590450624} - 405798912 + 6340608 + 39997376 + 512);   // + the ring and 16-row scratch (open-work
+                                                                        // 28), Control 768 B (spec 32)
   CHECK_EQ(p.rope, size_t{131072} * 256);
   CHECK_EQ(p.model, size_t{18116331520ull});   // the 16384 load re-tabled to 131072
   CHECK_EQ(p.kv, size_t{8589934592ull});
   // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
-  CHECK_EQ(p.decode_state, size_t{150994944 + 31457280 + 768} + 8 * (68652864 - 50724864 + 6340608));
-  CHECK_EQ(p.decode_state, size_t{376601856});
+  CHECK_EQ(p.decode_state, size_t{150994944 + 31457280 + 768} + 2 * (68652864 - 50724864 + 6340608));
+  CHECK_EQ(p.decode_state, size_t{230990208});
   // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
   // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.
   CHECK_EQ(p.prefill_scratch, size_t{699514776} + 35651584);
@@ -228,8 +234,8 @@ void check_spec6_line() {
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.377 GB, prefill scratch 0.735 GB,"
-        " int8 0.074 GB, total 27.892 GB of 32.530 GB");   // spec 32: the 64-row scratch
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.231 GB, prefill scratch 0.735 GB,"
+        " int8 0.074 GB, total 27.746 GB of 32.530 GB");   // no MTP: no deep verify list, a 16-row scratch
 }
 
 void check_paths() {
@@ -241,7 +247,10 @@ void check_paths() {
   const runtime::MemoryPlan mtp = runtime::plan(q, 65536, true, kQwenInt8Weights + kMtpWeights);
   CHECK_EQ(mtp.mtp_buffers, runtime::MtpDims::sizes(65536, q).total());
   CHECK_EQ(mtp.mtp_hidden, runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault));
-  CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden);
+  // Spec 32e: with the head on bf16 KV the decode scratch holds the deep verify lists' 64 rows, not 16.
+  CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden +
+                                 runtime::DecodeScratchDims::sizes(65536, q, 64).total() -
+                                 runtime::DecodeScratchDims::sizes(65536, q).total());
   CHECK_EQ(mtp.prefill_lazy, s.slab);
   CHECK_EQ(mtp.model, base.model + kMtpWeights);
   // l0: the slab always, no Int8State.
@@ -324,7 +333,9 @@ void check_draft_vocab() {
       CHECK_EQ(p.draft_vocab, want);
       CHECK_EQ(p.mtp_buffers, off.mtp_buffers + size_t(rows) * 4);   // dv_logits fp32 [|V'|]
       CHECK_EQ(runtime::MtpDims::sizes(65536, q, rows).dv_logits, size_t(rows) * 4);
-      CHECK_EQ(p.total(), off.total() + want + size_t(rows) * 4);
+      // Spec 32e: a draft vocabulary builds no deep verify list - its decode scratch keeps 16 rows, not 64.
+      CHECK_EQ(p.total(), off.total() + want + size_t(rows) * 4 - runtime::DecodeScratchDims::sizes(65536, q, 64).total() +
+                              runtime::DecodeScratchDims::sizes(65536, q).total());
       CHECK_EQ(p.model, off.model);   // not in the weights
     }
   }
