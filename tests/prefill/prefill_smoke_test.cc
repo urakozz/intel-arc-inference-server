@@ -120,8 +120,9 @@ int main(int argc, char** argv) {
   // ---- 1. ruling R7: nothing prefill-shaped is allocated yet ---------------
   CHECK(eng.prefill_scratch() == nullptr);
   CHECK_EQ(eng.prefill_launches(), size_t(0));
-  // int8 KV: 32 KiB of rows + 256 B of scales a position instead of 64 KiB (PersistentDims::sizes).
-  CHECK_EQ(eng.buffers().persistent_bytes(), size_t(kv == runtime::KvCache::Int8 ? 707788928 : 1240465536));
+  // int8 KV: 32 KiB of rows + 256 B of scales a position instead of 64 KiB (PersistentDims::sizes). The layout's own
+  // sum; buffers_test pins its bytes.
+  CHECK_EQ(eng.buffers().persistent_bytes(), runtime::PersistentDims::sizes(kMaxLen, model::qwen38(), kv).total());
   CHECK_EQ(eng.step().kernel_count, size_t(774));
   std::printf("R7: persistent %zu B, decode list %zu launches / %zu modules, PrefillScratch"
               " not allocated\n",
