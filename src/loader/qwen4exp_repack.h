@@ -16,7 +16,7 @@
 // on any host over a synthetic checkpoint. loader::load_qwen4exp (qwen4exp_loader.h) uploads what this
 // produces, one layer at a time, straight onto the layer's device.
 //
-// **Two checkpoint forms, one weight format** (spec 21 §5, the operator's rule): AutoRound W4A16 int4 g64
+// **Two checkpoint forms, one weight format** (spec 21 §5, the rule): AutoRound W4A16 int4 g64
 // symmetric in the auto_round:auto_gptq packing (`.qweight` I32 [K/8, N], `.scales` F16 [K/64, N],
 // `.qzeros` 0x77777777 - proved by assert_quant_invariants, never read - no g_idx), with ONE exact
 // conversion: Intel's export ships its routed experts at g128, which LinearSrc::classify expands to g64
