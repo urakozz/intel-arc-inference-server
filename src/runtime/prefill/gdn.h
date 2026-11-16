@@ -70,6 +70,10 @@ size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 // pf_ab_proj launch into ab_out.
 bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b);
 
+// Test switch (open-work 35): true on l0, and on l0-int8 when B70_PF_L0_FORM (a comma list of router, ab, intra,
+// experts) names `group` - that MoE-model prefill group then runs its l0 form on l0-int8.
+bool l0_form(PrefillBackend b, const char* group);
+
 // --- the scan's DISPATCH PROOF ----------------------------------------------
 // `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
 // gate run was not admissible evidence unless the run itself said which scan

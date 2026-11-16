@@ -153,13 +153,21 @@ static const char* gdn_a2_entry() { return "pf_gdn_A2_hilo"; }
 static std::atomic<const char*> g_scan_launched{nullptr};
 
 // Phase 2: a MoE model's launches 2-3 are one (Task 2) and, on l0, 5-8 one (Task 3).
+bool l0_form(PrefillBackend b, const char* group) {
+  if (b == PrefillBackend::L0) return true;
+  static const std::string list = [] {
+    const char* v = std::getenv("B70_PF_L0_FORM");
+    return "," + std::string(v ? v : "") + ",";
+  }();
+  return list.find("," + std::string(group) + ",") != std::string::npos;
+}
 static bool intra_one_launch(const model::ModelDesc& d, PrefillBackend b) {
-  return d.is_moe() && b == PrefillBackend::L0;
+  return d.is_moe() && l0_form(b, "intra");
 }
 size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   return kGdnChunkLaunches - (d.is_moe() ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
 }
-bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b) { return d.is_moe() && b == PrefillBackend::L0; }
+bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b) { return d.is_moe() && l0_form(b, "ab"); }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }

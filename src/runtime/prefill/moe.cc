@@ -9,6 +9,7 @@
 #include "loader/loader.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/gemm_l0.h"
+#include "runtime/prefill/gdn.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/profile.h"
 
@@ -31,7 +32,7 @@ size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   // router GEMV + moe_route + combine, the sort's three launches, the down GEMM; gate||up: the gather and one GEMM
   // (l0), or l0's two for the shared expert and the W4A8 quantiser, gather and GEMM for the routed ones (l0-int8).
   // Phase 3 Task 2: on l0 the router GEMV is the dense GEMM (its B slab made once, by prepare_prefill).
-  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 5 : 2);
+  return 3 + 3 + 1 + (l0_form(b, "experts") ? 2 : 5);
 }
 
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
@@ -74,7 +75,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   const loader::DeviceWeight& rw = w.router;
   require(rw.kind == model::WeightKind::Bf16 && rw.shape.N == m.router_n() && rw.shape.K == H,
           "the router is not bf16 [router_n][hidden]");
-  if (backend == PrefillBackend::L0) {
+  if (l0_form(backend, "router")) {
     // Phase 3 Task 2: the router by the dense GEMM (judged by the f32 judge; its last bits are not decode's), rows
     // at pitch gemm_pitch, and moe_route built at that pitch.
     float* glog = at<float>(*s.moe, L.gemm_out_off);
@@ -110,7 +111,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
 
   // 3. gate||up, SiLU fused -> h [rows][I], one launch over the work items, B read from the int4 blocks (plan
   //    2026-11-12 Tasks 3 and 5).
-  if (backend == PrefillBackend::L0Int8) {
+  if (!l0_form(backend, "experts")) {
     // Open-work 16: the shared expert is a dense linear and stays bf16 - l0's gather and GEMM over its items only
     // (a null W skips the routed ones), bitwise l0's shared rows of h; the int8 gather below then overwrites xg.
     cx.launch(kc(pv, "pf_moe_gather"), rows, 1, 1,

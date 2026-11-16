@@ -1321,3 +1321,9 @@ target_link_libraries(probe_gdn_slots PRIVATE b70_l0)
 b70_target_kernel_dir(probe_gdn_slots)
 add_dependencies(probe_gdn_slots kernel_probe_gdn_plain_M8 kernel_gdn_step_slots_M1_N8 kernel_gdn_step_slots_M8_N8
                  kernel_probe_gdn_plain_M16 kernel_probe_gdn_slots_M16_N16)
+
+# Open-work 35: one served context's row on a MoE model, per prefill backend and B70_PF_L0_FORM group.
+add_executable(probe_moe_int8_replay probe_moe_int8_replay.cc)
+target_include_directories(probe_moe_int8_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_moe_int8_replay PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0)
+b70_target_kernel_dir(probe_moe_int8_replay)
