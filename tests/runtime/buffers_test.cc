@@ -292,9 +292,9 @@ int main() {
     CHECK_EQ(mb.gdn_spec.size(), size_t{3} * 150994944);
     CHECK_EQ(mb.kv_k.size(), size_t{33554432});
     CHECK_EQ(mb.kv_v.size(), size_t{33554432});
-    CHECK_EQ(mb.hh.size(), size_t{174080});   // (16 + 1) rows since open-work 28
+    CHECK_EQ(mb.hh.size(), size_t{665600});   // (64 + 1) rows since spec 32 (the deep verify lists)
     CHECK_EQ(mb.logits.size(), size_t{2979840});
-    CHECK_EQ(mb.bytes(), size_t{523176064 + 81920 + 128});
+    CHECK_EQ(mb.bytes(), size_t{523176064 + 573440 + 640});   // the 65 hh rows, Control 768 B
     const uint32_t* hw = mb.hctl.as<uint32_t>();
     for (size_t i = 0; i < sizeof(runtime::Control) / sizeof(uint32_t); ++i) CHECK_EQ(hw[i], 0u);
     CHECK_EQ(runtime::MtpBuffers::kSlots, 4u);

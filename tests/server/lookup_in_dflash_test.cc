@@ -237,8 +237,8 @@ void deep_runs() {
   std::printf("deep: a wide verify kept whole earns 31 drafts, a partial keep or an exit goes back to 15\n");
 }
 
-// Spec 32e: deep_k 63 - the ladder 15, 31, 63; a keep of at least half drops a width, less goes back to 15; two wide
-// misses in a row keep the request at 15 until reset().
+// Spec 32e: deep_k 63 - a 15-draft verify kept whole asks for 63 next; a keep of at least half drops a width, less
+// goes back to 15; two wide misses in a row keep the request at 15 until reset().
 void deep64_runs() {
   LookupInDFlashOptions o = opts(0, 3);
   o.wide_k = 15;
@@ -252,8 +252,6 @@ void deep64_runs() {
   hot();
   CHECK_EQ(p.propose(m).size(), size_t(15));
   p.observe(15, 15);
-  CHECK_EQ(p.propose(m).size(), size_t(31));
-  p.observe(31, 31);
   CHECK_EQ(p.propose(m).size(), size_t(63));
   p.observe(63, 63);
   CHECK_EQ(p.propose(m).size(), size_t(63));   // stays at the top
@@ -273,8 +271,8 @@ void deep64_runs() {
   hot();
   CHECK_EQ(p.propose(m).size(), size_t(15));
   p.observe(15, 15);
-  CHECK_EQ(p.propose(m).size(), size_t(31));
-  std::printf("deep64: 15 -> 31 -> 63 on whole keeps, down a width at >= half, two wide misses keep the request at 15\n");
+  CHECK_EQ(p.propose(m).size(), size_t(63));
+  std::printf("deep64: 15 -> 63 on a whole keep, down a width at >= half, two wide misses keep the request at 15\n");
 }
 
 }  // namespace

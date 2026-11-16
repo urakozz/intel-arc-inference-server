@@ -39,8 +39,9 @@ namespace server {
 //     a suffix match alone, below 8 ids, does not pay against MTP.)
 // wide_k 0 (the default, every engine without the wide list) is the policy above unchanged.
 // Spec 32 (deep_k, the engine's widest list: 31 or 63 drafts): a run earns its width - a hot run's first wide verify
-// asks for wide_k drafts; one that keeps every draft it checked lets the next one ask for the next width (15, 31, 63,
-// up to deep_k), one that keeps at least half drops the next one a width, one that keeps fewer goes back to wide_k
+// asks for wide_k drafts; one that keeps every draft it checked lets the next one ask for deep_k (checked in the
+// narrowest list that holds what the source still has: spec 32e priced this jump 1.18x against 1.14x for a width at a
+// time), one that keeps at least half drops the next one a width, one that keeps fewer goes back to wide_k
 // (below kWideMin kept the run is no longer hot, as above). Spec 32e: a request whose last two wide verifies both
 // missed (kept fewer than they checked) stays at wide_k to its end - renames, whose copied runs break every few dozen
 // ids, lost 1-7 % at 32 rows without it.

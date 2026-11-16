@@ -62,6 +62,12 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {8, true, 0},
 };
 
+// Spec 32e: the per-depth cap of the deep lookup verify lists, from one in-place timing (card 0, 2026-11-16, commit(0)
+// medians, docs/probes/probe-gemm-sm-v2-2026-11-15.md): a width is used at a key count only while it emits at least
+// 1.10x the next narrower width's ids a plain step when fully accepted. 32 rows against 16: 1.55x / 1.41x / 1.29x at
+// 4,096 / 32,768 / 98,304 keys - no cap. 64 against 32: 1.24x / 1.18x / 1.09x - 1.10x near 93,000 keys.
+inline constexpr uint32_t kDeep64MaxKeys = 90112;
+
 inline const VerifyAttnRow* verify_attn_row(uint32_t M, bool kv8) {
   for (const VerifyAttnRow& r : kVerifyAttnTable)
     if (r.m == M && r.kv8 == kv8) return &r;

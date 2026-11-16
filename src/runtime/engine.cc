@@ -591,8 +591,10 @@ void Engine::capture_wide(const CaptureOptions& opt) {
 uint32_t Engine::max_wide_k() const {
   const uint32_t pos = control_->pos;
   if (!seq().wide || pos == 0) return 0;
-  for (const uint32_t k : {kDeepK64, kDeepK32, kWideK})
-    if ((k == kWideK || deep_built(k)) && k + 1 <= deep_rows_ && size_t(pos) + k + 1 <= max_len()) return k;
+  for (const uint32_t k : {kDeepK64, kDeepK32, kWideK})   // spec 32e: 64 rows up to kDeep64MaxKeys (verify_attn.h)
+    if ((k == kWideK || deep_built(k)) && k + 1 <= deep_rows_ && size_t(pos) + k + 1 <= max_len() &&
+        (k != kDeepK64 || pos + 1 <= kDeep64MaxKeys))
+      return k;
   return 0;
 }
 

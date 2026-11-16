@@ -36,8 +36,8 @@
 //        next 64 plain ids bitwise the clean run's; (c) greedy lookup iterations with commits in between emit the
 //        same ids through the deep list as through the 16-row one (the captured lists replayed across commits);
 //        (d) after a deep verify committing 5 W / 8 rows, a snapshot's state, conv-ring window and hidden row bitwise
-//        the plain steps' and, after its load and
-//        after a 64-id prefill, the next 64 plain ids bitwise the session driven by one-row steps.
+//        the 16-row lists' at the same position (a verify row is not bitwise a plain step's) and, after its load and
+//        after a 64-id prefill, the next 64 plain ids bitwise that session's.
 //   W16  (open-work 28, `mtp_verify_test <snapshot> 16384 rule wide`: the int8 head, whose engine builds the 16-row
 //        list) at the M2 positions: (a) for j in 0, 1, 4, 7, 11, 14 the 16-row verify with drafts g[1..j] true, a WRONG
 //        id at j + 1 and junk after - its rows 0..j bitwise the all-true verify's (no later row leaks into an
@@ -383,8 +383,8 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
   ok &= same;
   // (d) the state paths after a deep verify: an all-true verify of W rows committing j = 5 W / 8 (20 at 32 rows, 40 at
   // 64: past the first chain link, so the state comes from the replay and the ring rows from the conv scratch), then
-  // (i) a snapshot saved - bitwise the one taken after j + 1 plain steps - loaded after 8 more steps, and (ii) 64 ids
-  // prefilled straight after the commit; each time the next 64 plain ids bitwise the session driven by one-row steps.
+  // (i) a snapshot saved - bitwise the one the 16-row lists leave at the same position - loaded after 8 more steps,
+  // and (ii) 64 ids prefilled straight after the commit; each time the next 64 plain ids bitwise that session's.
   {
     const uint32_t j = 5 * W / 8;
     const std::vector<uint32_t> fill(g.begin() + 1, g.begin() + 65);   // any 64 ids, the same in both arms
@@ -394,10 +394,12 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
         c.e.commit(j, c.e.verify_ids()[j]);
         return;
       }
-      s0.restore(c);
-      for (uint32_t i = 0; i <= j; ++i) {
-        c.e.verify(0);
-        c.e.commit(0, c.e.verify_ids()[0]);
+      s0.restore(c);   // the 16-row lists over the same inputs, as (a): 15 rows a verify committed, the last j % 16
+      for (uint32_t q = 0; 16 * q <= j; ++q) {
+        for (uint32_t i = 1; i <= K16; ++i) c.ctl->wide_cur[i] = g[16 * q + i];
+        c.e.verify(K16);
+        const uint32_t jj = 16 * (q + 1) <= j ? K16 : j - 16 * q;
+        c.e.commit(jj, g[16 * q + jj + 1]);
       }
     };
     // What a snapshot carries that the session reads again: the GDN state, the conv ring's window (the 3 positions
@@ -429,8 +431,8 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
     std::vector<uint8_t> st_deep, st_plain;
     const std::vector<uint32_t> d_ids = paths(true, st_deep), p_ids = paths(false, st_plain);
     const bool st_ok = st_deep == st_plain, ids_ok = d_ids == p_ids;
-    std::printf("  W%u (d) j=%u: snapshot (state, ring window, hidden row) %s the plain steps'; after load and after a 64-id prefill, 2 x 64 ids %s\n", W,
-                j, st_ok ? "bitwise" : "DIFFERS from", ids_ok ? "bitwise the plain steps'" : "DIFFER");
+    std::printf("  W%u (d) j=%u: snapshot (state, ring window, hidden row) %s the 16-row lists'; after load and after a 64-id prefill, 2 x 64 ids %s\n", W,
+                j, st_ok ? "bitwise" : "DIFFERS from", ids_ok ? "bitwise the 16-row lists'" : "DIFFER");
     ok &= st_ok && ids_ok;
   }
   return ok;

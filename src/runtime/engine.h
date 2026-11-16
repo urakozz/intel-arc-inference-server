@@ -292,7 +292,8 @@ class Engine {
   static constexpr uint32_t kWideK = DecodeScratchDims::kWideM - 1;   // 15
   // Spec 32: the deep lists beside it - 32 and 64 rows (31 / 63 drafts in control()->deep_cur[1..], ids in
   // Control::deep_out), built where the 16-row list is. max_wide_k() is then the deepest k (63, 31, 15) whose list
-  // is built, whose rows fit before max_len and that B70_SPEC_LOOKUP_ROWS (a test handle: 16, 32 or 64) allows.
+  // is built, whose rows fit before max_len and that B70_SPEC_LOOKUP_ROWS (a test handle: 16, 32 or 64) allows - the
+  // 64-row list up to kDeep64MaxKeys keys (runtime/verify_attn.h, spec 32e's per-depth cap).
   static constexpr uint32_t kDeepK32 = 31, kDeepK64 = 63;
   uint32_t max_wide_k() const;
   bool wide_built() const { return seq().wide != nullptr; }
