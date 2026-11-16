@@ -72,6 +72,8 @@ ctest --test-dir build
 
 # the engine never downloads; fetch the model into the Hugging Face cache once
 uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
+uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound   # the DFlash drafter
+uvx --from huggingface_hub hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 ```
 
 [The model](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ) is Qwen3.8-27B compressed to 4-bit
@@ -81,7 +83,13 @@ weights with AutoRound, in groups of 64 rather than the usual 128 - better accur
 
 ```sh
 # an OpenAI-compatible server on port 8000
-./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --prefix-split-last
+
+# Qwen3.8-27B: the DFlash drafter and the int8 prompt pass (opt-in)
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --prefix-split-last \
+    --spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound --prefill-backend l0-int8
+
+# Ornith 1.5 35B-A3B: its own MTP head, the default prompt pass
+./build/src/cli/b70-serve urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ --prefix-split-last
 ```
 
 You choose one thing: **how many requests run at once**, `--max-num-seqs N`. The engine sizes everything else
