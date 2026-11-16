@@ -272,9 +272,13 @@ weights, prompt lookup), not from faster single kernels.
   recorded coding session, where about 28 % of tokens came from lookup at 89 %
   acceptance. The longer the copied run the engine may propose, the larger the
   gain - but only on real copies: a wider verify that misses halfway costs more
-  than it returns, so a run earns the wider list (16 rows, then 32) and a miss
-  drops it back. Renames, whose copied runs break every few dozen tokens, are
-  where a wider list loses.
+  than it returns, so a run earns the wider lists (16 rows, then up to 64) and
+  a miss drops it back; a request whose first wide checks miss (a rename, whose
+  copied runs break every few dozen tokens) stays at 16 rows.
+- **Profile a wider batch by kernel family before trusting a derived cost.**
+  The 64-row verify was derived at 88-95 ms and measured at 117: two small bf16
+  GEMVs whose 32- and 64-row builds ran 4-9x their 16-row cost and one SLM array
+  sized for 64 rows took most of the gap, not the GEMM or the attention.
 - **Change the thread shape, not the row's arithmetic.** To verify 32 or 64 rows
   without spilling, the small-batch GEMM gave the extra rows to sibling
   sub-groups of the same work-group (they share the weight reads through the

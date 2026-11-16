@@ -1006,15 +1006,18 @@ where a launch's rows cross a block-size change (pos 32,767: row 0 at 1,024 keys
 work-group walks its block once per row group, twice the work - time at a position whose rows share one block
 size. Record: [probe-verify-attn-depth-2026-11-15.md](probes/probe-verify-attn-depth-2026-11-15.md).
 
-**The 32- and 64-row lists** (spec 32) run that same 16-row line in row chunks of 16 (`RCHUNK`, grid dimension 2):
-work-group (head, block, chunk c) is exactly the 16-row kernel's work-group launched at pos + 16 c, so every row is
+**The 32- and 64-row lists** (spec 32) run that same 16-row line in row chunks of 16 (`RCHUNK`, grid dimension 0, so
+a block's chunks run side by side and share its K / V tiles through the cache):
+work-group (chunk c, head, block) is exactly the 16-row kernel's work-group launched at pos + 16 c, so every row is
 bitwise the 16-row list's row at the same key count (`attn_verify_dpas_test` part W), and `attn_reduce_v2` is built
-alone at the list's rows (`REDUCE_ONLY`). Each chunk re-reads K and V, so at depth the attention is the largest
-part of a deep verify. Their delta-net step is a chain of the 16-row deferred launch (`gdn_step.cl` `ROW0` 0 / 16 /
+alone at the list's rows (`REDUCE_ONLY`). Measured, the four chunks of a 64-row verify cost four 16-row launches
+(8.7 / 45.7 ms against 2.3 / 11.6 at 4,096 / 32,768 keys): the cache already serves the K / V re-reads, and what
+remains is each row's own scores and P V - a third of the 64-row step at 32k. Their delta-net step is a chain of the 16-row deferred launch (`gdn_step.cl` `ROW0` 0 / 16 /
 32 / 48): link b starts from the scratch state link b - 1 stored, and links past the first write their rows' conv
 inputs to a conv scratch (the session's ring stays 32 deep, so the snapshot format did not change);
 `gdn_ring_commit` copies a commit's newest rows from it into the ring. The next launch replays the accepted rows
-from the committed state as for every deferred list.
+from the committed state as for every deferred list; it loads the replayed rows' keys 16 at a time (a window sized
+for all 64 pending rows doubled the 16-row link's cost through its SLM).
 
 ---
 
