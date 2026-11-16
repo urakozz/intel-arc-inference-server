@@ -119,11 +119,10 @@ void case_golden(const std::string& expected_path, const std::string& set_dir) {
       }
       ++calls;
     } else {
-      // Cut by the 192-id budget inside a call: its function tag is complete, so the
-      // call is still emitted, with the parameters that were complete.
+      // Cut by the 192-id budget inside a call: a call whose </function> never closed is dropped, so a truncated
+      // call is never executed with only the parameters that were complete.
       CHECK_EQ(kind, std::string("incomplete"));
-      CHECK_EQ(p.tool_calls.size(), 1U);
-      CHECK(!p.tool_calls[0].name.empty());
+      CHECK_EQ(p.tool_calls.size(), 0U);
     }
   }
   CHECK(calls >= 36U);
@@ -161,19 +160,19 @@ void case_reasoning_mentions_tags() {
 }
 
 void case_truncated() {
-  // Review Focus 3: cut before the function tag is complete -> content, not dropped.
+  // Review Focus 3: a call cut by the end of generation is dropped - neither a call nor content - unless its
+  // </function> closed; the text before it stays.
   const ParsedOutput a = parse_checked("Let me look.\n<tool_call>\n<function=re", false, kTools);
   CHECK(a.tool_calls.empty());
-  CHECK_EQ(a.content, std::string("Let me look.\n<tool_call>\n<function=re"));
+  CHECK_EQ(a.content, std::string("Let me look.\n"));
   const ParsedOutput b = parse_checked("<tool_c", false, kTools);
   CHECK(b.tool_calls.empty());
   CHECK_EQ(b.content, std::string("<tool_c"));
-  // Function tag complete: emitted with the complete parameters only.
+  // Function tag complete but </function> missing: still dropped, never emitted with only the closed parameters.
   const ParsedOutput c = parse_checked(
       "<tool_call>\n<function=edit>\n<parameter=filePath>\n/w/y\n</parameter>\n<parameter=oldString>\nha",
       false, kTools);
-  CHECK_EQ(c.tool_calls.size(), 1U);
-  CHECK_EQ(nlohmann::json(c.tool_calls[0].arguments), json({{"filePath", "/w/y"}}));
+  CHECK(c.tool_calls.empty());
   CHECK(c.content.empty());
 }
 
