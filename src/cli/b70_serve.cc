@@ -1365,6 +1365,7 @@ int run(int argc, char** argv) {
     qa.load_mtp = qs.loads_head();
     qs.prefix_auto = prefix_auto;
     qs.prefix_cache_gb = prefix_cache_gb;
+    qa.prefix_bytes = prefix_auto ? 0 : size_t(prefix_cache_gb) << 30;   // settle counts an explicit cache
     return serve_qwen4exp(qs, options);
   }
   // Spec 20e: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on two cards by default -

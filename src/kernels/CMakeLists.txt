@@ -1317,6 +1317,8 @@ if(B70_Q4EXP)
   add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                    DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${Q4_FA_HEADS})
   add_ocloc_kernel(q4_ple_block_M1 SOURCE ${Q4_CL}/q4_ple.cl DEFINES ${CTRL_DEFINES} M=1 PLE_BLOCK=1)   # the PLE block
+  # plan 21v2a Task 8: the expert tier's load check (sampled block words through the table, once at construction)
+  add_ocloc_kernel(q4_expert_check SOURCE ${Q4_CL}/q4_expert_check.cl)
 endif()
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
 

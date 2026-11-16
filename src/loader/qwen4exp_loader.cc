@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <string_view>
 #include <print>
 #include <stdexcept>
@@ -182,8 +183,8 @@ std::vector<uint32_t> load_q4_profile(const std::string& snapshot_or_repo, const
   if (f.size() < 8 || hlen > f.size() - 8 ||
       std::string_view(reinterpret_cast<const char*>(f.data()) + 8, hlen).find("\"spec22-profile-1\"") ==
           std::string_view::npos)
-    throw std::runtime_error(path + " is not a routing profile (format spec22-profile-1, written by "
-                             "tools/oracle/offload_curve.py profile) - move it away or remake it");
+    throw std::runtime_error(path + " is not a routing profile written by tools/oracle/offload_curve.py profile - "
+                             "move it away, or remake it with that command");
   for (const auto& [name, t] : SafetensorsSet::parse_header(f.data(), f.size())) {
     if (name != "counts") continue;
     const uint64_t n = uint64_t(full.layers) * full.experts;
@@ -287,19 +288,13 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   if (d.layers < full.layers) m.skipped += ck.skip_layers_from(d.layers);
   const size_t visual = ck.skip_prefix("model.visual."), shards = ck.skip_ple_shards();
   const size_t mtp_skipped = mtp ? 0 : ck.skip_prefix("mtp.");
+  // Everything this load pins - the PLE table and the experts' mirrors - against host memory before the first pin.
+  check_q4_host_fit(Q4PleHost(ple_dir).bytes(), T.host_bytes(d), 0, q4_mem_available());
   // The PLE table, once, through the context of the device holding the PLE layer.
   m.ple_device = placement.device_of(d.ple_layer);
   m.ple = load_q4_ple(*devices[m.ple_device], d, ple_dir);
   m.tier = T;
   m.expert_table = form == "table";
-  // The mirror's pinned bytes beside the PLE table's, before the first pin (check_q4_ple_host_fit's rule).
-  const size_t mirror = T.host_bytes(d), avail = q4_mem_available();
-  if (mirror != 0 && avail != 0 && mirror + kQ4PleHostMargin > avail)
-    throw std::runtime_error("the experts that do not fit the cards need " + std::to_string(mirror) + " B (" +
-                             std::to_string(mirror / 1e9).substr(0, 6) + " GB) of pinned host memory beside the PLE "
-                             "table, but MemAvailable is " + std::to_string(avail) + " B (" +
-                             std::to_string(avail / 1e9).substr(0, 6) + " GB) with a 16 GiB margin kept - free host "
-                             "memory first");
 
   const std::vector<float> rope = q4_rope_table(d, max_len);
   Q4HostLayer host;
@@ -330,6 +325,26 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
       else
         P.layers.push_back(upload_layer(ctx, imm, host, P.bytes, T.vram.data() + size_t(l) * d.experts, d.experts,
                                         &m.mirror_bytes, row));
+      if (!row) continue;
+      // The load check's samples of this layer's 1024 blocks, from the checkpoint's bytes (Q4DevicePart::check_*).
+      const auto s0 = std::chrono::steady_clock::now();
+      const uint32_t base = uint32_t(row - rows.data());
+      for (uint32_t i = 0; i < 2 * d.experts; ++i) {
+        const bool up = i < d.experts;
+        const size_t B = (up ? host.gate_up.size() : host.down.size()) * 4 / d.experts;
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(up ? host.gate_up.data() : host.down.data()) +
+                             size_t(up ? i : i - d.experts) * B;
+        const auto take = [&](size_t o) {
+          uint64_t w = 0;
+          std::memcpy(&w, src + o, 8);
+          P.check_idx.push_back(base + i);
+          P.check_off.push_back(uint32_t(o));
+          P.check_words.push_back(w);
+        };
+        for (size_t o = 0; o + 8 < B; o += size_t(1) << 20) take(o);
+        take(B - 8);
+      }
+      m.expert_check_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s0).count();
     }
     if (!rows.empty()) {
       // The table, then read back: the rows the kernels will read are the rows the map says.
@@ -400,12 +415,16 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
              m.ple.seconds, m.ple.page_words.size(), m.ple.rows_checked, m.ple.mem_before / gb, m.ple.mem_after / gb);
   {
     uint32_t nv = 0;
+    size_t samples = 0;
     for (uint32_t l = 0; l < d.layers; ++l) nv += T.n_vram(l);
+    for (const Q4DevicePart& P : m.parts) samples += P.check_words.size();
     std::print("  experts     {:d} of {:d} routed experts in VRAM (f {:.3f}; {}), {:d} B {:.3f} GB in pinned host memory "
                "(one range a layer); the kernels read them through {}\n",
                nv, d.layers * d.experts, double(nv) / (d.layers * d.experts), T.source.c_str(), m.mirror_bytes,
                m.mirror_bytes / gb,
-               m.expert_table ? "each layer's table of block addresses (read back equal)" : "the layer's range (direct)");
+               m.expert_table ? std::format("each layer's table of block addresses (read back equal; {:d} block words "
+                                            "sampled for the device's check)", samples).c_str()
+                              : "the layer's range (direct)");
   }
   std::print("  read/token  {:13d} B {:7.3f} GB   (top-{:d} + shared experts, HC, mixers, routers, head; derived)\n"
              "  load        {:.1f} s\n",

@@ -3097,7 +3097,8 @@ if(B70_Q4EXP)
     kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_S1 kernel_q4_qsa_M1_T512_W1024 kernel_q4_qsa_attn_M1_T32
     kernel_q4_qsa_attn_eager_M1 kernel_gemv_bf16_M1_K2560_N528_C16_S16 kernel_q4_route_M1_E512_T10_N528_L256
     kernel_q4_moe_M1_E512_T10_D2560_I640_SH4 kernel_q4_moe_M1_E512_T10_D2560_I640_SHB
-    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M1_E512_T10_D2560_I640_SHB_TBL kernel_q4_ple_gather_M1_BF16
+    kernel_q4_moe_M1_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M1_E512_T10_D2560_I640_SHB_TBL kernel_q4_expert_check
+    kernel_q4_ple_gather_M1_BF16
     kernel_q4_ple_gather_M1_F32 kernel_q4_ple_block_M1 kernel_gemv_bf16_M1_K2560_N12800
     kernel_gemv_bf16_M1_K2560_N248320 kernel_gemv_i8w_M1_K2560_N248320 kernel_argmax_stage1_M1 kernel_argmax_stage2)
   # Host: the names the capture binds (kernels::qwen4exp::decode_variants) are exactly this list.

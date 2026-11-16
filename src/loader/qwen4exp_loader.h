@@ -64,7 +64,12 @@ struct Q4DevicePart {
   std::unique_ptr<l0::Mem> mtp_fc;                 // q4_mtp_fc_offsets
   std::unique_ptr<l0::Mem> mtp_mixer;              // the head's own final mixer
   std::unique_ptr<l0::Mem> expert_table;           // the table form: u64 [its layers][1024] (Q4Layer::expert_row)
-  size_t bytes = 0;                                // weights, == q4_device_weight_bytes less the experts in host
+  // The table form's load check (the engine runs q4_expert_check at construction): sample g reads the u64 at table
+  // entry check_idx[g] ((layer - first) x 1024 + slot) + check_off[g] bytes; check_words[g] is the checkpoint's word
+  // there. Each block's first and last word and one every 1 MiB: every 2 MiB page of every arena and mirror.
+  std::vector<uint32_t> check_idx, check_off;
+  std::vector<uint64_t> check_words;
+  size_t bytes = 0;                               // weights, == q4_device_weight_bytes less the experts in host
                                                    // memory (RoPE and the expert table apart)
   size_t rope_bytes = 0;
   const Q4Layer& layer(uint32_t l) const { return layers.at(l - first); }
@@ -83,7 +88,8 @@ struct Q4LoadedModel {
   size_t mirror_bytes = 0;                         // the tier's pinned host bytes
   size_t unconsumed = 0, read_per_token = 0, subnormal_scales = 0, skipped = 0;
   double seconds = 0, lm_head_quant_seconds = 0;
-  size_t total_bytes() const;                      // every part's weights + RoPE (the PLE table apart)
+  double expert_check_ms = 0;                      // the table check's cost: the loader's sampling + the device pass
+  size_t total_bytes() const;                     // every part's weights + RoPE (the PLE table apart)
 };
 
 // True when `snapshot_dir`'s config.json says model_type "qwen4_exp" (or "qwen4_exp_text") - the CLIs' dispatch.
@@ -104,9 +110,11 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 // After: zero unconsumed tensors and each part's bytes equal to q4_device_weight_bytes. One report line per
 // device plus one for the host table.
 // Plan 21v2a Task 8, `tier` (null: every expert resident): the plan less the experts in host memory, each layer's
-// VRAM arena of its resident experts, its pinned host mirror of the rest (refused before any pin when the mirror and
-// a 16 GiB margin exceed MemAvailable, naming the bytes), and each device's table of block addresses read back
-// equal. The layers bind the table form unless B70_Q4_EXPERTS=direct (refused with any expert in host memory).
+// VRAM arena of its resident experts, its pinned host mirror of the rest (refused before the PLE table's pin when the
+// table, the mirrors and a 16 GiB margin exceed MemAvailable, naming the bytes: check_q4_host_fit), each device's
+// table of block addresses read back equal, and the load check's samples (Q4DevicePart::check_*; the engine reads
+// them through the table). The layers bind the table form unless B70_Q4_EXPERTS=direct (refused with any expert in
+// host memory).
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement,
                             LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false,

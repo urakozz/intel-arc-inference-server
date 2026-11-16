@@ -146,6 +146,21 @@ void check_q4_ple_host_fit(size_t table_bytes, size_t mem_available) {
                              "cache-2026-09-27.md) - free host memory first");
 }
 
+bool q4_host_fits(size_t pinned_bytes, size_t mem_available) {
+  return mem_available == 0 || pinned_bytes + kQ4PleHostMargin <= mem_available;
+}
+
+void check_q4_host_fit(size_t ple_bytes, size_t mirror_bytes, size_t prefix_bytes, size_t mem_available) {
+  const size_t sum = ple_bytes + mirror_bytes + prefix_bytes;
+  if (q4_host_fits(sum, mem_available)) return;
+  const auto gb = [](size_t b) { return std::to_string(b) + " B (" + std::to_string(b / 1000000000.0).substr(0, 6) + " GB)"; };
+  throw std::runtime_error("pinned host memory does not fit: the PLE table " + gb(ple_bytes) +
+                           " + the experts that do not fit the cards " + gb(mirror_bytes) + " + the prefix cache " +
+                           gb(prefix_bytes) + " = " + gb(sum) + ", but MemAvailable is " + gb(mem_available) +
+                           " and a 16 GiB margin is kept - free host memory first (other jobs), or ask for a smaller "
+                           "--prefix-cache-gb or a shorter --max-len (a shorter context leaves more VRAM for experts)");
+}
+
 size_t q4_mem_available() {
   std::ifstream f("/proc/meminfo");
   std::string key;

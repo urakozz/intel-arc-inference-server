@@ -83,6 +83,8 @@ struct DecodeArgs {
   MaxLenArg max_len{false, 16384};
   size_t reserve = 0;
   size_t card_bytes = 0;        // the smallest visible card's memory (cli::hardware_gate): the fit checks before a device opens
+  size_t prefix_bytes = 0;      // b70-serve's explicit --prefix-cache-gb: pinned host memory settle keeps for it (auto
+                                // sizes itself after the load from what is left)
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   uint32_t layers = 0;          // --layers N (0: not given)
   bool layers_auto = false;     // --layers auto
@@ -178,12 +180,23 @@ inline double tier_decode_ms(const runtime::qwen4exp::ExpertBudget& b, const run
 // Without --layers the whole model loads with the expert tier: each card's VRAM left after the rest of the plan holds
 // the most-routed experts (the routing profile beside the checkpoint, else id order), the rest pinned host memory.
 // B70_Q4_RESIDENT (a test placement, runtime::qwen4exp::fill_tier) forces the residents at any layer count.
+// Host memory (plan 21v2a Task 8): the PLE table, the experts' host mirrors and an explicit prefix cache are pinned
+// beside the cards - they must fit MemAvailable less 16 GiB (loader::check_q4_host_fit) before anything is pinned;
+// the whole model's --max-len auto stops at the first length whose mirrors would not.
 inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
                       const std::array<size_t, runtime::kPpDevices>& dev, const std::string& snapshot) {
   namespace rq = runtime::qwen4exp;
   const bool int8 = a.int8_head(), pf = a.prefills();   // spec 21d: the prefill scratch planned
   const bool hd = a.load_mtp;                            // spec 21e: the MTP head planned
   const uint32_t devs = devices_of(a), cap = full.trained_max_len;
+  const size_t ple = loader::Q4PleHost(loader::q4_ple_dir(loader::resolve_snapshot(snapshot))).bytes();
+  const size_t avail = loader::q4_mem_available();
+  const auto host_line = [&](size_t mirror) {
+    loader::check_q4_host_fit(ple, mirror, a.prefix_bytes, avail);
+    std::print(stderr, "host: pinned {:.3f} GB (the PLE table {:.3f} + experts {:.3f} + the prefix cache {:.3f}) of "
+               "MemAvailable {:.3f} GB, 16 GiB kept\n", (ple + mirror + a.prefix_bytes) / 1e9, ple / 1e9, mirror / 1e9,
+               a.prefix_bytes / 1e9, avail / 1e9);
+  };
   Settled s;
   if (a.layers == 0 && !a.layers_auto) {   // the whole model
     const char* forced = std::getenv("B70_Q4_RESIDENT");
@@ -210,6 +223,10 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
         std::vector<rq::DevicePlan> pl = rq::plan(d, place(len), len, int8, hd, false, pf);
         rq::apply_tier(pl, d, t);
         if (!rq::fits(pl, dev, a.reserve)) break;
+        if (!loader::q4_host_fits(ple + t.host_bytes(d) + a.prefix_bytes, avail)) {
+          tried += std::format("{}{:d}: host memory", tried.empty() ? "" : ", ", len);
+          break;
+        }
         const double ms = tier_decode_ms(b, t, prof);
         tried += std::format("{}{:d}: {:.2f} ms", tried.empty() ? "" : ", ", len, ms);
         if (ms > 1.05 * t0) break;
@@ -232,6 +249,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     std::vector<rq::DevicePlan> pl = rq::plan(d, s.placement, s.max_len, int8, hd, false, pf);
     rq::apply_tier(pl, d, *s.tier);
     rq::require_fits(pl, dev, a.reserve);
+    host_line(s.tier->host_bytes(d));
     std::print(stderr, "{}\n", rq::describe(pl, s.placement, s.max_len, dev, a.reserve).c_str());
     return s;
   }
@@ -275,6 +293,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
   }
   const std::vector<rq::DevicePlan> pl = rq::plan(d, p, len, int8, hd, false, pf);
   rq::require_fits(pl, dev, a.reserve);
+  host_line(0);
   if (devs == 2)
     std::print(stderr, "split: {}{:d} (layers [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
                a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
@@ -331,9 +350,11 @@ int run_decode(const DecodeArgs& a) {
   runtime::PipelineOptions opt;
   runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
   std::print(stderr, "engine: Qwen3.8-Flash-Next, {:d} device(s){}, {:d} launches a token ({} attention, B70_Q4_ATTN), "
-             "max_len {:d}; the PLE table's {:d} host pages read back by the device\n", eng.devices(),
+             "max_len {:d}; the PLE table's {:d} host pages read back by the device; {:d} expert block words read "
+             "back through the tables ({:.1f} ms)\n", eng.devices(),
              devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
-             eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked());
+             eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked(),
+             eng.expert_words_checked(), eng.model().expert_check_ms);
   // Spec 21d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
   // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
   // cur_token (argmax_stage2 is its last launch).

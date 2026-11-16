@@ -105,6 +105,9 @@ inline std::string ple_gather_variant(unsigned M, bool bf16_scale) {
 inline std::string ple_block_variant(unsigned M) { return "q4_ple_block" + m_(M); }
 // q4_ple_check lives in every q4_ple binary; the engine binds the gather's.
 inline std::string ple_check_variant(bool bf16_scale) { return ple_gather_variant(1, bf16_scale); }
+// q4_expert_check.cl: the expert tier's load check (plan 21v2a Task 8), one binary; WG 64.
+inline std::string expert_check_variant() { return "q4_expert_check"; }
+inline constexpr uint32_t kExpertCheckWg = 64;
 // q4_qsa.cl's three kernels are one binary per M (prep, score, select: attn.cl's arrangement).
 inline std::string qsa_variant(unsigned M) {
   return "q4_qsa" + m_(M) + "_T" + std::to_string(kTopBlocks) + "_W" + std::to_string(kSelectWg);
@@ -184,6 +187,7 @@ inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf1
       route_variant(1),
       moe_variant(1, shared_bf16),
       moe_variant(1, shared_bf16, true),   // the expert tier's table form (plan 21v2a Task 8)
+      expert_check_variant(),              // its load check (engine construction, not the list)
       ple_gather_variant(1, ple_bf16_scale),
       ple_block_variant(1),
       ple_kv_variant(),

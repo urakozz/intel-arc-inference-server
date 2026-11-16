@@ -29,7 +29,9 @@
 // loader held equal to the checkpoint's I64 tensors) are written to the PLE device, and the PLE table's host
 // ranges are read back BY THE DEVICE (q4_ple_check: the first u64 of every 2 MiB page through the pointer table)
 // against the page words the loader recorded - a mismatch throws naming the range and the page (an aliased or
-// unmapped host page: the xe hazard, spec 22 §1).
+// unmapped host page: the xe hazard, spec 22 §1). With the expert tier's table (plan 21v2a Task 8), each device
+// reads sampled words of every routed block through its table (q4_expert_check: every 2 MiB page of every VRAM arena
+// and host mirror) against the checkpoint's - a mismatch throws naming the device, layer, expert and block.
 //
 // **Two cards** (spec 16 §8's rules, KolibriEngine's): layers [0, s) on device 0 with the embedding, [s, L) plus
 // the head on device 1. The host submits list 0 then list 1 and waits on device 1's fence (bounded); the lists
@@ -131,6 +133,9 @@ class Qwen4ExpEngine {
   void drop_next_handoff() { drop_next_ = true; }
   // The PLE table's device read-back at construction: pages checked (q4_ple_check).
   size_t ple_pages_checked() const { return ple_pages_checked_; }
+  // The expert tier's device read-back at construction (the table form): block words read through each device's
+  // table and held to the checkpoint's (q4_expert_check over loader::Q4DevicePart::check_*); 0 in the direct form.
+  size_t expert_words_checked() const { return expert_words_checked_; }
 
   // --- spec 21d: prefill (defined in b70_qwen4exp_prefill) --------------------------------------------------------
   // Runs `ids` from the current pos in chunks of `chunk` (0 = kPfC 2048) through runtime/qwen4exp/qwen4exp_prefill.h's
@@ -270,6 +275,7 @@ class Qwen4ExpEngine {
   Stage& st(uint32_t dev) const;
   void build_injected();
   void ple_init();
+  void expert_check();
   CapturedStep& active(uint32_t dev) const;
   // One step over every device's list `lists[dev]` (the hand-off, the bounds, the Control mirror) - step_once's
   // body; the plain step, the verify lists.
@@ -296,7 +302,7 @@ class Qwen4ExpEngine {
   std::vector<std::unique_ptr<l0::Mem>> taps_, inj_rows_;
   bool broken_ = false, drop_next_ = false, injected_ = false;
   std::vector<bool> pending_;
-  size_t ple_pages_checked_ = 0;
+  size_t ple_pages_checked_ = 0, expert_words_checked_ = 0;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
   BlockHook block_hook_;           // spec 21d: empty = no hook (uniform chunks)
   PrefillInjector pf_inject_;      // spec 21d: the injected run's lists on prefill
