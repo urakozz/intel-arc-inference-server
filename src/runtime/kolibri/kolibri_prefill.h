@@ -65,7 +65,7 @@ bool prefill_attn_eager();
 // (l - part.first) of [layers][kPfC][hidden] bf16 - copies, no launch. Leaves: the K / V rows [pos, pos + C) of
 // the device's layers (the ring slots (pos + t) & 4095 of a sliding one), the residual rows and their sums
 // after its last layer, and its layers' route rows of this chunk in s.routes.
-// Kolibri DSpark (`taps`, a drafter's prefill tail - Bolt's spec 26 Decision 7): after layer l's last kol_post_add (l one of
+// Kolibri DSpark (`taps`, a drafter's prefill tail): after layer l's last kol_post_add (l one of
 // `layers`), rows r0 .. C - 1 are copied into `dst` [row - r0][layers.size()][hidden] bf16 (one 2D copy a tap layer);
 // r0 >= C copies nothing.
 struct PrefillTaps {

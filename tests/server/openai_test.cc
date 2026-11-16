@@ -423,18 +423,7 @@ int main() {
       }
       return std::string("(accepted)");
     };
-    const server::ChatFormat bolt = server::ChatFormat::bolt(), kol = server::ChatFormat::kolibri(), qwen{};
-    CHECK_EQ(refusal(bolt, {{"medium_effort", 1}}, nullptr),
-             std::string("chat_template_kwargs.medium_effort must be a boolean"));
-    CHECK_EQ(refusal(bolt, {{"enable_thinking", "no"}, {"force_nonempty_content", 0}}, nullptr),
-             std::string("chat_template_kwargs.enable_thinking must be a boolean"));
-    CHECK_EQ(refusal(bolt, {{"truncate_history_thinking", true}, {"x", 1}}, nullptr), std::string("(accepted)"));
-    CHECK_EQ(refusal(bolt, {{"force_nonempty_content", nullptr}}, nullptr),
-             std::string("chat_template_kwargs.force_nonempty_content must be a boolean"));
-    CHECK_EQ(refusal(bolt, nlohmann::json::object(), "huge"),
-             std::string("reasoning_effort must be one of none, minimal, low, medium, high, xhigh (Nemotron 3.5 Bolt: "
-                         "none / minimal -> enable_thinking false, low / medium -> medium_effort true, high -> the "
-                         "default)"));
+    const server::ChatFormat kol = server::ChatFormat::kolibri(), qwen{};
     CHECK_EQ(refusal(kol, {{"reasoning_effort", "huge"}}, nullptr),
              std::string("chat_template_kwargs.reasoning_effort must be one of none, minimal, low, medium, high, xhigh, "
                          "max"));
@@ -448,10 +437,6 @@ int main() {
     CHECK_EQ(refusal(kol, nlohmann::json::object(), "max!"),
              std::string("reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max (Kolibri-1)"));
     CHECK_EQ(refusal(qwen, {{"enable_thinking", 5}}, "anything"), std::string("(accepted)"));
-    CHECK_EQ(server::request_template_kwargs(bolt, {{"medium_effort", false}}, "low").dump(),
-             std::string(R"({"medium_effort":false})"));
-    CHECK_EQ(server::request_template_kwargs(bolt, nlohmann::json::object(), "none").dump(),
-             std::string(R"({"enable_thinking":false})"));
     CHECK_EQ(server::request_template_kwargs(kol, nlohmann::json::object(), "low").dump(),
              std::string(R"({"reasoning_effort":"low"})"));
   }

@@ -41,12 +41,6 @@ sys.exit(1 if missing else 0)
 EOF
 }
 
-# bolt_snap <override> <cache dir name> <pinned revision>: the snapshot directory a Bolt key checks - with SNAP_BOLT /
-# SNAP_BOLT_BF16 set (bolt_oracle.sh's spelling: an HF cache directory name) its first snapshot, else the pinned one.
-bolt_snap() {
-  if [ -n "$1" ]; then ls -d "$hf/hub/$1/snapshots/"*/ 2>/dev/null | head -1; else printf '%s\n' "$hf/hub/$2/snapshots/$3"; fi
-}
-
 have() {   # have KEY WHAT CMD...
   local key="$1" what="$2"; shift 2
   if "$@" > /dev/null 2>&1; then echo "HAVE_$key=1  # $what"; else echo "HAVE_$key=0  # missing: $what"; fi
@@ -153,40 +147,6 @@ case "${1:-}" in
       bash -c 'ls oracle-out-19a/dumps/*.taps.safetensors'
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest}"
-    # Queue row 57 (spec 25a, plan 25a): Nemotron 3.5 Bolt - our int4 g64 export (the served checkpoint, the only one),
-    # the BF16 original (gate Q's reference), the pinned small files (the tiny tests' remote code) and the CPU reference's
-    # outputs (tools/box_validate/bolt_oracle.sh). Download pinned: --revision 8932aa8d... / 56702103... (df -h ~ first);
-    # a revision-pinned download writes no refs/main, so the keys name the snapshot directories themselves. The int4
-    # references are ours only when their directory's SNAPSHOT file (bolt_oracle.sh writes it) names this snapshot: the
-    # 2026-10-22/23 ones were made from a third-party g128 export and read as missing.
-    bolt_ours="models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156"
-    have bolt_small "Bolt's pinned small files (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 --exclude '*.safetensors')" \
-      test -s "$hf/hub/$bolt_ours/modeling_nemotron_h.py"
-    have bolt_int4 "our Bolt int4 g64 export ${SNAP_BOLT:-models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ} @ 8932aa8d (41 GB; df -h ~ first)" \
-      complete "$(bolt_snap "${SNAP_BOLT:-}" models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ 8932aa8d1844f91056c5b9433448075a842b9156)"
-    have bolt_bf16 "NVIDIA's Bolt BF16 original ${SNAP_BOLT_BF16:-models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16} @ 56702103 (149.8 GB; gate Q's reference)" \
-      complete "$(bolt_snap "${SNAP_BOLT_BF16:-}" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 567021037ff88364143e24ea05e6abd0f72086ff)"
-    have oracle_bolt "oracle-out-bolt/bolt_{short,4k,agentic,32k}.{ids,golden.safetensors} + SNAPSHOT = our export's (spec 25a: bolt_oracle.sh golden - the engine-format reference)" \
-      bash -c 'test "$(cat oracle-out-bolt/SNAPSHOT 2>/dev/null)" = "$1" || exit 1; for p in bolt_short bolt_4k bolt_agentic bolt_32k; do test -s oracle-out-bolt/$p.ids && test -s oracle-out-bolt/$p.golden.safetensors || exit 1; done' _ "$bolt_ours"
-    have oracle_bolt_f32 "oracle-out-bolt-f32/bolt_{short,4k,agentic}.golden.safetensors and SNAPSHOT = our export's (bolt_oracle.sh golden-f32)" \
-      bash -c 'test "$(cat oracle-out-bolt-f32/SNAPSHOT 2>/dev/null)" = "$1" && for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-f32/$p.golden.safetensors || exit 1; done' _ "$bolt_ours"
-    have oracle_bolt_bf16 "oracle-out-bolt-bf16/bolt_{short,agentic}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden-bf16)" \
-      bash -c 'for p in bolt_short bolt_agentic; do test -s oracle-out-bolt-bf16/$p.ids && test -s oracle-out-bolt-bf16/$p.golden.safetensors || exit 1; done'
-    have bolt_a4_int4 "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt and SNAPSHOT = our export's (spec 25a: bolt_oracle.sh a4 - the int4 reference alone, no BF16 needed)" \
-      bash -c 'test "$(cat oracle-out-bolt-a4/SNAPSHOT 2>/dev/null)" = "$1" && test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36' _ "$bolt_ours"
-    have bolt_a4_ref "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt, 36 <name>.bf16.txt and SNAPSHOT = our export's (spec 25a: bolt_oracle.sh a4 + a4-bf16)" \
-      bash -c 'test "$(cat oracle-out-bolt-a4/SNAPSHOT 2>/dev/null)" = "$1" && test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36' _ "$bolt_ours"
-    # Queue rows 64 / 65 (spec 26b / 26c): the LiLiCorr drafter, pinned (962 MB; a revision-pinned download writes no refs/main).
-    have lilicorr "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr @ 449d2414 (962 MB: hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1)" \
-      complete "$(bolt_snap "" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr 449d24140160b8e51871bfc0f0a7338abf640aa1)"
-    # Spec 25b (queue row 59): the synthetic real-width checkpoints (bolt_synth.sh synth-ckpt: N 8 for the host tests, N 12
-    # for the card tests - each in the GPTQ g128 spelling, its exact g64 expansion and a native g64; our export's small
-    # files).
-    have bolt_synth "oracle-out-bolt-synth/n{8,12}-{g128,g64x,g64}/ + .ACCEPTED (spec 25b: r59.synth - make_synth.py)" \
-      bash -c 'for n in 8 12; do for f in g128 g64x g64; do test -s oracle-out-bolt-synth/n$n-$f/model.safetensors.index.json && test -f oracle-out-bolt-synth/n$n-$f.ACCEPTED || exit 1; done; done'
-    # Spec 25c (queue row 60): the N 12 synthetics' golden sets (r60.synth_golden: bolt_oracle.sh export on each).
-    have oracle_bolt_synth "oracle-out-bolt-n12-{g128,g64x}/bolt_{short,4k,agentic}.golden.safetensors (spec 25c: r60.synth_golden)" \
-      bash -c 'for s in n12-g128 n12-g64x; do for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-$s/$p.golden.safetensors || exit 1; done; done'
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'

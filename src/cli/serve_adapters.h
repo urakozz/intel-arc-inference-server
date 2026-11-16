@@ -50,14 +50,14 @@ struct TokAdapter : server::TokIface {
 
 struct TemplateAdapter : server::TemplateIface {
   explicit TemplateAdapter(const std::string& dir) : tmpl(dir) {}
-  // Spec 23e: b70-serve --chat-template FILE (Bolt, spec 25e) - the template from `file` ("" = the snapshot's own).
+  // Spec 23e: a --chat-template FILE - the template from `file` ("" = the snapshot's own).
   TemplateAdapter(const std::string& dir, const std::string& file) : tmpl(dir, file) {}
 
   std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                      bool enable_thinking) override {
     return tmpl.render(messages, tools, enable_thinking);
   }
-  // Spec 18d: the request's chat_template_kwargs as template variables (Kolibri-1, Bolt).
+  // Spec 18d: the request's chat_template_kwargs as template variables (Kolibri-1).
   std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                                  bool enable_thinking, const nlohmann::json& kwargs) override {
     return tmpl.render(messages, tools, enable_thinking, kwargs);

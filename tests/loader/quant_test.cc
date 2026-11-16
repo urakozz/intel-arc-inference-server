@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <iterator>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -44,7 +43,7 @@ static std::vector<uint8_t> qz_gidx_bytes(uint32_t qzeros_word5, int bad_gidx = 
   return bytes;
 }
 
-int main(int argc, char** argv) {
+int main() {
   using common::json::parse;
   // QuantConfig: accepts the checkpoint's spelling, rejects "+:" rules.
   auto ok = parse(R"({"quantization_config":{"bits":4,"group_size":64,"sym":true,
@@ -400,7 +399,7 @@ int main(int argc, char** argv) {
     CHECK(threw);
   }
 
-  // ===== Spec 25b Task 3: the exact relaxations Nemotron 3.5 Bolt's checkpoint needs (spec 25 §5.2) =====
+  // ===== Spec 25b Task 3: the exact relaxations a GPTQ g128 checkpoint with restating '+:' rules needs =====
   // (a) the GPTQ g128 spelling (AutoRound's GPTQ writer at g128, typed here with a subset of its 44 '-:' rules): GPTQ
   // packing, g128, and ONE '+:' rule that RESTATES the top level. Parsed; the restatement is counted.
   const std::string sb_head =
@@ -431,18 +430,6 @@ int main(int argc, char** argv) {
         R"({"quantization_config":{"bits":4,"group_size":128,"sym":true,"desc_act":false,"dynamic":{
            "+:.*a$":{"bits":4,"group_size":128,"sym":true},"+:.*b$":{"sym":true,"bits":4,"group_size":128}}}})")
         ).dynamic_restating, size_t(2));
-    if (argc > 1) {   // the served export's file itself (tests/model/bolt/config.json): g64, 40 router exclusions, no dynamic
-      std::ifstream f(argv[1]);
-      CHECK(f.good());
-      std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-      const loader::QuantConfig pub = loader::QuantConfig::parse(parse(text));
-      CHECK_EQ(pub.group_size, uint32_t(64));
-      CHECK_EQ(pub.quant_method, std::string("auto-round"));
-      CHECK_EQ(pub.extra_excluded, size_t(40));
-      CHECK_EQ(pub.extra_quantised, size_t(0));
-      CHECK_EQ(pub.dynamic_rule_count, size_t(0));
-      CHECK_EQ(pub.dynamic_restating, size_t(0));
-    }
   }
   // (b) the broken-MTP guard is intact: a '+:' rule that changes bits / group / sym, carries any other key, omits one of
   // the three, or is empty is still refused, naming the rule; a '-:' rule behaves as before.

@@ -39,7 +39,6 @@
 #include "cli/hardware_gate.h"
 #include "cli/stdout_to_stderr.h"
 #include "cli/kolibri_decode.h"
-#include "cli/bolt_decode.h"   // spec 25c: Nemotron 3.5 Bolt (nemotron_h_omni over nemotron_h_puzzle)
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
@@ -119,12 +118,12 @@ struct Flags {
   std::string max_len = "16384";
   [[=Help("P", "auto: one card when the model and the context fit it, else pp; 1;\n"
                "pp: the layers over two cards (--prefill runs the two-card chunk\n"
-               "pipeline). Kolibri-1 and Nemotron 3.5 Bolt default to two cards.\n"
+               "pipeline). Kolibri-1 defaults to two cards.\n"
                "tp (Qwen3.8): tensor parallel, every layer split over two cards\n"
                "(--prefill and --spec mtp / auto run on both cards).")]]
   std::string parallel = "auto";
   [[=Help("auto|N", "pp: device 0 runs layers [0, N); an override, it implies pp.")]] Arg<std::string> pipeline_split{"auto"};
-  [[=Help("N|auto", "Kolibri-1 / Nemotron 3.5 Bolt / Qwen3.8-Flash-Next: load only the first N layers\n"
+  [[=Help("N|auto", "Kolibri-1 / Qwen3.8-Flash-Next: load only the first N layers\n"
                     "(development mode; Flash-Next REQUIRES it - the whole model needs the expert tier, not\n"
                     "built yet - and also takes auto).")]]
   Arg<std::string> layers;   // spec 20c, Kolibri-1; spec 21c, Qwen3.8-Flash-Next
@@ -801,15 +800,12 @@ int run(int argc, char** argv) {
   if (spec_arg == "lookup" || spec_arg == "dflash-lookup")
     throw std::runtime_error("--spec " + spec_arg + " is b70-serve's (prompt lookup over a request's own ids); "
                              "b70-decode --ids runs --spec mtp or --spec dflash");
-  const bool fam_bolt = cli::bolt::is_bolt(path), fam_kol = !fam_bolt && cli::kolibri::is_kolibri(path);
-  const bool fam_q4 = !fam_bolt && !fam_kol && cli::qwen4exp::is_qwen4exp(path);
-  const std::string model_name = fam_bolt ? "Nemotron 3.5 Bolt" : fam_kol ? "Kolibri-1" : fam_q4 ? "Qwen3.8-Flash-Next"
-                                 : "this model";
+  const bool fam_kol = cli::kolibri::is_kolibri(path);
+  const bool fam_q4 = !fam_kol && cli::qwen4exp::is_qwen4exp(path);
+  const std::string model_name = fam_kol ? "Kolibri-1" : fam_q4 ? "Qwen3.8-Flash-Next" : "this model";
   const cli::Spec spec =
-      fam_bolt ? cli::Spec{}
-               : cli::resolve_spec(spec_arg, fam_q4 ? cli::SpecFamily::Qwen4Exp
-                                             : fam_kol ? cli::SpecFamily::None : cli::SpecFamily::Qwen,
-                                   model_name, have_spec_max, spec_max, dflash.have_model);
+      cli::resolve_spec(spec_arg, fam_q4 ? cli::SpecFamily::Qwen4Exp : fam_kol ? cli::SpecFamily::None : cli::SpecFamily::Qwen,
+                        model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
   const bool mtp_auto = mtp_on && spec.adaptive;
   const uint32_t mtp_k = mtp_on ? spec.max_k : 0;
@@ -817,7 +813,7 @@ int run(int argc, char** argv) {
   // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash only in b70-serve
   // (spec 19 v3c).
   cli::check_tp(pipe, {spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
-                       fam_bolt || fam_kol || fam_q4});
+                       fam_kol || fam_q4});
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
   // rejection, so `b70_cli_reject` can grade them without a device - and so a
@@ -869,39 +865,6 @@ int run(int argc, char** argv) {
   // The hardware gate (cli/hardware_gate.h): one or two Intel Arc Pro B70s, peer access between two - before
   // any model file is read. Its card memory is what the fit checks before a device opens plan against.
   const cli::Hardware hw = cli::hardware_gate();
-  // Spec 25c: Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle) runs
-  // runtime::bolt::BoltEngine on two cards (the whole model's default, Decision 4) or one (a truncated / synthetic
-  // checkpoint) - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/bolt_decode.h: the prefill's backend and chunk (spec 25d: l0 only, chunk a multiple of 64 <= 2048), --spec mtp (no MTP
-  // head), --spec (spec 26: lookup / dflash), int8 KV (Decision 17)). A path that does not resolve is not Bolt - the flows below report it.
-  if (cli::bolt::is_bolt(path)) {
-    if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's; Nemotron 3.5 Bolt takes --layers N");
-    cli::bolt::DecodeArgs ba;
-    ba.path = path;
-    ba.ids_path = ids_path;
-    ba.n = n;
-    ba.bench = bench;
-    ba.profile = profile;
-    ba.depth = depth;
-    ba.tg = tg;
-    ba.steps = steps;
-    ba.repeats = repeats;
-    ba.max_len = max_len_arg;
-    ba.reserve = mem_reserve;
-    ba.int8_head = true;   // int8 (Decision 18), as every model
-    ba.pipe = pipe;
-    ba.pp_given = pp_given;
-    ba.layers = layers;
-    ba.prefill = prefill;           // spec 25d: --ids through BoltEngine::prefill
-    ba.pp = have_prefill_len;       // --prefill-length N already set depth = N above
-    ba.pp_chunk = pp_chunk;
-    ba.pp_backend_given = have_pp_backend;
-    ba.pp_backend = pp_backend;
-    ba.mtp = spec_arg == "mtp";
-    ba.spec = spec_arg != "off" && spec_arg != "auto" && spec_arg != "mtp";
-    ba.kv8 = kv_cache == runtime::KvCache::Int8;
-    return cli::bolt::run_decode<StdoutToStderr>(ba);
-  }
   // Spec 19c: --spec dflash is the Qwen engine's (--ids, one card).
   dflash.on = spec.kind == cli::SpecKind::DFlash;
   if (dflash.on) dflash.max_k = spec.max_k;

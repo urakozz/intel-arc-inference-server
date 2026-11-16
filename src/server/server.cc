@@ -283,12 +283,12 @@ std::string Server::render_prompt(const Request& r) {
   try {
     if (!r.chat) {
       prompt = r.prompt;
-    } else if (opts_.chat_format.template_kwargs()) {   // spec 20e (Kolibri-1), 25e (Bolt)
-      // Spec 25e: Bolt maps the top-level reasoning_effort onto its template switches (decision 13).
+    } else if (opts_.chat_format.template_kwargs()) {   // spec 20e (Kolibri-1)
+      // The top-level reasoning_effort becomes a template kwarg where the format reads one.
       const nlohmann::json kwargs = request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort);
       check_template_kwargs(opts_.chat_format, kwargs);
-      // Spec 25e: the kwargs after the reasoning_effort mapping may carry the enable_thinking the request did not (Bolt: none /
-      // minimal); the template variable is that one (for every other format the kwargs' value IS r.enable_thinking).
+      // Spec 25e: the kwargs after the reasoning_effort mapping may carry the enable_thinking the request did not; the
+      // template variable is that one (otherwise the kwargs' value IS r.enable_thinking).
       const bool thinking = kwargs.is_object() && kwargs.contains("enable_thinking") && kwargs.at("enable_thinking").is_boolean()
                                 ? kwargs.at("enable_thinking").get<bool>()
                                 : r.enable_thinking;

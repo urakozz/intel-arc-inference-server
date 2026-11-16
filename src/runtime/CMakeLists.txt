@@ -41,7 +41,3 @@ add_subdirectory(qwen4exp)
 # Spec 19b: the DFlash drafter's buffers, planner term and its two captured lists (draft, projection) - its own
 # directory, beside the engines it serves (19c wires it into runtime::Engine).
 add_subdirectory(dflash)
-
-
-# Spec 25b Task 5: Nemotron 3.5 Bolt's memory plan (25c adds its engine) - its own directory.
-add_subdirectory(bolt)

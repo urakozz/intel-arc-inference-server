@@ -31,8 +31,7 @@ class Template {
                      bool enable_thinking, const nlohmann::json& kwargs) const;
   const std::string& bos_token() const;
   const std::string& eos_token() const;
-  // Spec 23e: the sha256 (hex) of the template source as read (before any fallback / patch keyed on it) -
-  // Bolt's serving prints it beside the published one (spec 25e).
+  // Spec 23e: the sha256 (hex) of the template source as read (before any fallback / patch keyed on it).
   const std::string& source_sha256() const;
   // Spec 23e: the clock strftime_now reads (transformers' strftime_now: the host's local time at the render).
   // Default: the system clock at each render; a test fixes it.

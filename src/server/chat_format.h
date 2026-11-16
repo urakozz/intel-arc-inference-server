@@ -16,17 +16,6 @@
 //               message's list of text parts is joined with "\n" first (vLLM's "string" content
 //               format). EOS [127906, 127901] and the sampling defaults (generation_config.json:
 //               T 1.0, top-p 0.97, top-k 128 - Options::sampling_defaults) are b70-serve's.
-//   Bolt        Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle, spec 25e): ChatML,
-//               the checkpoint's chat_template.jinja (no BOS; the system block is always rendered); the template reads the
-//               request's chat_template_kwargs (enable_thinking - default true -, medium_effort, truncate_history_thinking -
-//               default true -; force_nonempty_content is the OUTPUT parser's; anything else passes through unchecked); the
-//               OpenAI top-level reasoning_effort is mapped (spec 25 decision 13): none / minimal -> enable_thinking false,
-//               low / medium -> medium_effort true, high (and xhigh) -> the default, an explicit kwarg always wins. The
-//               generation prompt ends in "<think>\n" (thinking on: the output OPENS inside reasoning, the `ultra_v3` rules
-//               of server/toolcall_bolt.h) or "<think></think>" (thinking off: everything is content); tool calls are Qwen3-Coder
-//               XML (the Qwen parser, server/toolcall.h). A message's list of parts goes to the template as it is (its
-//               render_content concatenates the text parts). EOS [2, 11] and the sampling defaults (T 1.0, top-p 0.95 -
-//               Options::sampling_defaults) are b70-serve's (src/cli/bolt_serve.h).
 
 #include <memory>
 #include <string>
@@ -38,18 +27,15 @@
 namespace server {
 
 struct ChatFormat {
-  enum class Kind { Qwen, Kolibri, Bolt };
+  enum class Kind { Qwen, Kolibri };
   Kind kind = Kind::Qwen;
 
-  // config.json's model_type -> the format; anything but "kolibri1" and "nemotron_h_omni" reads as Qwen.
+  // config.json's model_type -> the format; anything but "kolibri1" reads as Qwen.
   static ChatFormat for_model_type(const std::string& model_type);
   static ChatFormat kolibri() { return ChatFormat{Kind::Kolibri}; }
-  static ChatFormat bolt() { return ChatFormat{Kind::Bolt}; }
   const char* name() const;
   // The request's chat_template_kwargs reach the template beside enable_thinking.
-  bool template_kwargs() const {
-    return kind == Kind::Kolibri || kind == Kind::Bolt;
-  }
+  bool template_kwargs() const { return kind == Kind::Kolibri; }
   // The template reads every message's content as a string (spec 20e: Kolibri-1).
   bool string_content() const { return kind == Kind::Kolibri; }
 };
@@ -60,15 +46,12 @@ struct ChatFormat {
 nlohmann::ordered_json template_messages(const ChatFormat& format, const nlohmann::ordered_json& messages);
 
 // The request's chat_template_kwargs that this format reads, checked before anything runs
-// (a bad value is the client's error, a 400): Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool);
-// Bolt's enable_thinking, medium_effort, truncate_history_thinking and
-// force_nonempty_content (booleans). Throws std::invalid_argument naming the field.
+// (a bad value is the client's error, a 400): Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool).
+// Throws std::invalid_argument naming the field.
 void check_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs);
 
 // The kwargs this format's template gets for a request - its chat_template_kwargs, and the OpenAI top-level
-// `reasoning_effort` (null: absent) mapped where a format has one. Spec 25e: for Bolt (decision 13) none | minimal -> enable_thinking false, low | medium -> medium_effort true, high | xhigh -> nothing,
-// each unless the kwargs name that key already (an explicit kwarg wins); anything else std::invalid_argument naming
-// reasoning_effort. Kolibri-1: the template's own `reasoning_effort` variable (one of its seven efforts, else
+// `reasoning_effort` (null: absent) mapped where a format has one. Kolibri-1: the template's own `reasoning_effort` variable (one of its seven efforts, else
 // std::invalid_argument), unless the kwargs name it. Every other format: the kwargs unchanged (reasoning_effort
 // ignored, as before).
 nlohmann::json request_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs,

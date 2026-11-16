@@ -35,19 +35,6 @@
 #   tools/toolcall/a4_ref.sh <ornith|qwen4exp> ref     the reference: oracle_generate.py over $OUT/set
 #                                                   -> $OUT/<name>.bf16.{ids,txt} (resumable)
 #   tools/toolcall/a4_ref.sh <ornith|qwen> status     what is done
-#   tools/toolcall/a4_ref.sh bolt set|ref|status    spec 25a: `set` copies the committed set
-#                                                   tests/golden/toolcall-bolt (make_set.py --from
-#                                                   tests/golden/toolcall --model bolt: the checkpoint's template,
-#                                                   key-sorted, reasoning on, medium_effort) to $OUT/set; `ref`
-#                                                   runs FORM=int4 (our g64 export, the served checkpoint,
-#                                                   dequantised - the engine-format reference) and
-#                                                   FORM=bf16 (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16) - FORM=both
-#                                                   (default) one after the other on the box - with bolt_ref.py
-#                                                   (the remote code, the Mamba kernel path, an fp32 cache), 2048 new
-#                                                   ids (reasoning first), EOS {2, 11} -> $OUT/<name>.{int4,bf16}.
-#                                                   {ids,txt,gap}, DONE.<form>; score with
-#                                                   `score.py --format qwen-think $OUT bf16 int4`; gate Q:
-#                                                   tools/oracle/bolt_gateq.py
 #
 # The references (tools/toolcall/oracle_generate.py, by config.json's model_type):
 #   ornith  tools/oracle/ornith_ref.py's layer-streamed Qwen3_5MoeForCausalLM on the INT4
@@ -112,8 +99,7 @@
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (the template variables, JSON;
 # default make_set.py's), IMAGE, MEM,
 # ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto; qwen: ignored), RESIDENT (auto), ONLY, NAME, FOREGROUND; qwen4exp only:
-# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE;
-# bolt: FORM, SITE, BOLT_LAYERS, BOLT_EXPERT_CACHE_GB (an LRU of dequantised experts across decode steps).
+# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE.
 set -eu
 cd "$(dirname "$0")/../.."
 m=${1:-}
@@ -123,39 +109,15 @@ case "$m" in
   ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-384} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-384} ;;
   qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-384} ;;
-  bolt)   # spec 25a: FORM int4 (our g64 export, the served checkpoint) | bf16 (the original) | both (the box)
-    FORM=${FORM:-both}
-    case "$FORM" in
-      int4) repo=urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ ;;
-      bf16) repo=nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 ;;
-      both) repo=- ;;
-      *) echo "a4_ref: FORM is int4, bf16 or both (got $FORM)" >&2; exit 2 ;;
-    esac
-    new=${NEW_TOKENS:-2048} ;;
   *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;;
 esac
 case "$step" in set | ref | status) ;; *) sed -n '2,/^set -eu/p' "$0" | sed '$d' >&2; exit 2 ;; esac
-if [ "$m" = bolt ] && [ "$step" = set ]; then   # the committed set (spec 25a Task 6: the checkpoint's template)
-  OUT=${OUT:-oracle-out-bolt-a4}
-  mkdir -p "$OUT/set"
-  cp tests/golden/toolcall-bolt/* "$OUT/set/"
-  echo "a4_ref: bolt set: tests/golden/toolcall-bolt -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
-  exit 0
-fi
 if [ "$m" = qwen ] && [ "$step" = set ]; then   # Qwen3.8's own committed set: the one r11.a4's engine run reads
   OUT=${OUT:-oracle-out-qwen-a4}
   mkdir -p "$OUT/set"
   cp tests/golden/toolcall/* "$OUT/set/"
   echo "a4_ref: qwen set: tests/golden/toolcall -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
   exit 0
-fi
-if [ "$m" = bolt ] && [ "$FORM" = both ]; then   # both references, one after the other
-  [ "$step" = status ] && { FORM=int4 "$0" bolt status; exec env FORM=bf16 "$0" bolt status; }
-  [ "$(uname -s)" = Darwin ] && {
-    echo "a4_ref: on the Mac the references run detached, one container at a time: FORM=int4 $0 bolt ref, then FORM=bf16" >&2
-    exit 2; }
-  FORM=int4 "$0" bolt "$step" || exit $?
-  exec env FORM=bf16 "$0" bolt "$step"
 fi
 # Qwen3.8-Flash-Next's set is the ORIGINAL's tokenizer and template (its small files), not Intel's.
 if [ "$m" = qwen4exp ] && [ "$step" = set ]; then
@@ -164,10 +126,8 @@ if [ "$m" = qwen4exp ] && [ "$step" = set ]; then
 fi
 cache_name="models--$(printf '%s' "$repo" | sed 's|/|--|g')"
 OUT=${OUT:-oracle-out-$m-a4}
-name_given=${NAME:+1}
 NAME=${NAME:-a4-ref-$m}
-run_tag=bf16      # the outputs' tag: <name>.<run_tag>.{ids,txt,gap} (Bolt: the checkpoint's form)
-if [ "$m" = bolt ]; then run_tag=$FORM; [ -n "$name_given" ] || NAME=a4-ref-$m-$FORM; fi
+run_tag=bf16      # the outputs' tag: <name>.<run_tag>.{ids,txt,gap}
 HF=${HF_CACHE:-$HOME/.cache/huggingface}
 THREADS=${ORACLE_THREADS:-12}
 mac=0
@@ -180,7 +140,6 @@ if [ "$step" = status ]; then
   n_set=$(ls "$OUT"/set/*.ids 2> /dev/null | wc -l | tr -d ' ')
   n_ref=$(ls "$OUT"/*."$run_tag".txt 2> /dev/null | wc -l | tr -d ' ')
   dn=DONE
-  [ "$m" = bolt ] && dn=DONE.$run_tag
   [ -f "$OUT/set/SAME" ] && echo "$m: $(cat "$OUT/set/SAME")"
   echo "$m: set $n_set/36 scenarios ($OUT/set), reference $n_ref/36 ($OUT/*.$run_tag.txt)$([ -f "$OUT/$dn" ] && echo ', DONE')"
   tail -3 "$OUT/ref.log" 2> /dev/null || true
@@ -226,7 +185,6 @@ else
   [ "$m" = qwen ] && cmd_ref="$cmd_ref --model qwen"
   [ "$m" = kolibri ] && cmd_ref="$cmd_ref --model kolibri --device ${DEVICE:-cpu}"
   [ "$m" = qwen4exp ] && cmd_ref="$cmd_ref --model qwen4exp"
-  [ "$m" = bolt ] && cmd_ref="$cmd_ref --model bolt --weights $FORM"
   BATCH=${BATCH:-auto}
   RESIDENT=${RESIDENT:-auto}
   [[ "$BATCH" =~ ^(auto|[1-9][0-9]*)$ ]] || { echo "a4_ref: BATCH is auto or a count >= 1 (got $BATCH)" >&2; exit 2; }
@@ -238,19 +196,18 @@ else
   fi
 fi
 done_file=DONE
-[ "$m" = bolt ] && done_file=DONE.$run_tag
 
 # qwen4exp: transformers 5.19.0 from the site directory first on PYTHONPATH (made in the container
 # once by tools/oracle/qwen4exp_env.sh - pip --no-deps --target, the image never changed), the
 # reference's knobs passed through.
 pre=""
 q4env=()
-if [ "$m" = qwen4exp ] || [ "$m" = bolt ]; then
+if [ "$m" = qwen4exp ]; then
   if [ $mac = 1 ]; then SITE=${SITE:-oracle-out-q4exp/site}; else SITE=${SITE:-oracle-out-q4exp-site}; fi
   [[ "$SITE" =~ ^[A-Za-z0-9_./-]+$ ]] && [ "${SITE#/}" = "$SITE" ] || {
     echo "a4_ref: SITE is a directory inside this tree (got $SITE)" >&2; exit 2; }
   pre="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && "
-  for v in Q4_LAYERS Q4_PLE BOLT_LAYERS BOLT_EXPERT_CACHE_GB; do
+  for v in Q4_LAYERS Q4_PLE; do
     x=${!v:-}
     [ -n "$x" ] || continue
     [[ "$x" =~ ^[A-Za-z0-9_.:/-]+$ ]] || { echo "a4_ref: $v=$x" >&2; exit 2; }
@@ -309,7 +266,7 @@ fi
 [ $inside = 1 ] || { echo "a4_ref: on the Mac OUT must be a directory inside this tree (got $OUT)" >&2; exit 2; }
 mkdir -p "$OUT/set"
 IMAGE=${IMAGE:-agnes-ref-img:latest}
-if [ "$m" = bolt ]; then MEM=${MEM:-40g}; else MEM=${MEM:-28g}; fi   # Bolt: the Mac cap (spec 25a)
+MEM=${MEM:-28g}
 others=$(docker ps --filter "ancestor=$IMAGE" --format '{{.Names}}' | grep -vx "$NAME" || true)
 if [ -n "$others" ] && [ "${FORCE:-0}" != 1 ]; then
   echo "a4_ref: another $IMAGE container is running ($others): wait for it, or FORCE=1" >&2; exit 2

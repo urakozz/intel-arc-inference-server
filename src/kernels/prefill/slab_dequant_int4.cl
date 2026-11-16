@@ -1,6 +1,6 @@
 // slab_dequant_int4.cl - one bf16 slab of an int4 GPTQ layout-0 linear for the prefill GEMM
 // (pf_gemm.cl, unchanged), for widths that are not whole 1024-column slabs (Flash-Next's and
-// Kolibri-1's o_proj at N 2560, Bolt's in_proj 18560, q||k||v 4608, fc1||shared_up 6400), which
+// Kolibri-1's o_proj at N 2560), which
 // prefill/pf_dequant_slab.cl's NS 1024 refuses (`N % NS`). This is that kernel's layout-0
 // branch with two changes and its arithmetic untouched (the same xor, sign-extension shift
 // and single RNE of (q - 8) x scale):

@@ -2,13 +2,10 @@
 // Sleef_expf8_u10 (sleefsimdsp.c xexpf at AVX2 + FMA) in plain C++: torch's `Vectorized<float>::exp`, step for step,
 // the fma as the AVX2 build has it (std::fma is exact, so the result does not depend on the host's libm or its FMA
 // contraction). The same function as tests/kernels/eager_attn_ref.h's `exp_torch` and the kernels' `exp_torch`
-// (the families' eager attention copies), here for host code that needs a deterministic fp32 exp:
-// spec 25b's load-time `A = -exp(A_log)`.
+// (the families' eager attention copies), here for host code that needs a deterministic fp32 exp.
 //
 // What it is NOT: `torch.exp` on a contiguous fp32 CPU tensor of an x86 Linux wheel goes to MKL's vsExp, which has no
-// host reproduction (tests/kernels/eager_attn_ref.h measured the softmax's Sleef path, not torch.exp). docs/13-loader.md,
-// "Nemotron 3.5 Bolt", records how far this function is from the reference's `torch.exp(A_log.float())` over every
-// bf16 value of A_log's range.
+// host reproduction (tests/kernels/eager_attn_ref.h measured the softmax's Sleef path, not torch.exp).
 #include <cmath>
 #include <cstdint>
 #include <cstring>

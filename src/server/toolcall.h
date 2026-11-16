@@ -40,7 +40,7 @@ struct Delta {
 };
 
 // Spec 18d: what the server reads a chat request's generated text with - this file's Qwen
-// XML OutputStream, or another family's (server/toolcall_kolibri.h, toolcall_bolt.h); server/chat_format.h
+// XML OutputStream, or another family's (server/toolcall_kolibri.h); server/chat_format.h
 // picks one per model and request.
 struct OutputParser {
   virtual ~OutputParser() = default;

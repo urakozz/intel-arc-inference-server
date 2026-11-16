@@ -4,8 +4,8 @@ the same contents once each tree's root path is replaced by one token?
 
     zebin_same.py <baseline .bin> <under-test .bin> <baseline tree root> <tree root under test>
 
-ocloc keeps the build options in the zebin, so a command line naming an absolute include directory (Bolt's
-`-I<tree>/src/kernels/bolt`) differs between two checkouts by the path alone - and with it every offset in the ELF
+ocloc keeps the build options in the zebin, so a command line naming an absolute include directory (an
+`-I<tree>/src/kernels/...`) differs between two checkouts by the path alone - and with it every offset in the ELF
 headers. Compared here: the section names in order and each section's bytes with the root replaced; the headers are
 not compared (their offsets follow from the sections). Exit 0 same, 1 different, 2 not ELF64.
 """

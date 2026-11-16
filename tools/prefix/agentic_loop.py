@@ -5,7 +5,7 @@
     agentic_loop.py report <out.json> [<server --log-requests dir>]
 
 <transcript.json> is a chat session ({"messages": [...], "tools": [...]}: system, user, then assistant / tool turns -
-tests/golden/prompts/bolt_agentic.json, 25a's). `run` plays the client's side of it: it sends [system, first user]
+tests/golden/prompts/q4exp_agentic.json, say). `run` plays the client's side of it: it sends [system, first user]
 and, after every response, appends the MODEL's own turn as an OpenAI client does - content, reasoning_content and
 tool_calls exactly as the server returned them - and then the next recorded tool result (in order, one per call
 the model made, whatever the model called; a turn with more calls than recorded results left wraps to the first of them, and
@@ -15,8 +15,8 @@ when the transcript has nothing left to say, the model answered without a call a
 real session: a turn the template re-renders in another order than the model generated it (content then calls; the
 model may write a call before its text) is a miss at that point.
 
---extra JSON (spec 25e): a JSON object merged into every request body - Bolt's {"chat_template_kwargs":
-{"truncate_history_thinking": false}} arm, say; the default sends none, so a model's own template defaults apply.
+--extra JSON (spec 25e): a JSON object merged into every request body - a {"chat_template_kwargs":
+{...}} arm, say; the default sends none, so a model's own template defaults apply.
 
 Per request it records (stream, temperature 0, a fixed seed): prompt tokens, usage.prompt_tokens_details.cached_tokens,
 the time to the first streamed chunk with choices, the total, the completion tokens, the decode rate

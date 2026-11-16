@@ -15,7 +15,7 @@
 #include "runtime/tap_drafter.h"
 
 // Kolibri DSpark: the DSpark drafter (intuit/Kolibri-1-dspark, model::DFlashForm::DSpark) on Kolibri-1's last card, beside
-// the target's lm_head, reading an embedding replica there (Bolt's arrangement for LiLiCorr, spec 26 Decision 8) - its bf16
+// the target's lm_head, reading an embedding replica there - its bf16
 // weights (loader::load_drafter's target-shape overload: the DFlash v1 body plus the Markov head as pred / succ), 19b's
 // buffers (runtime::dflash::DFlashBuffers at sizes(): `hid` holds ones) and its two lists, each captured once:
 //

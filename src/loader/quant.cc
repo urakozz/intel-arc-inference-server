@@ -371,8 +371,8 @@ QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
         ++q.dynamic_rule_count;
         continue;
       }
-      // Spec 25b: a "+:" rule that is exactly a restatement of the top level changes nothing (Bolt's GPTQ g128 spelling
-      // writes one for `mixer.out_proj`). Exactly {bits, group_size, sym}, each equal - anything else is the
+      // Spec 25b: a "+:" rule that is exactly a restatement of the top level changes nothing (AutoRound's GPTQ g128 writer
+      // can emit one). Exactly {bits, group_size, sym}, each equal - anything else is the
       // broken-MTP-config pattern (a "+:" rule that CHANGES a module's quantisation) and stays refused.
       if (rule.rfind("+:", 0) == 0 && restates_top_level(val, q)) {
         ++q.dynamic_restating;

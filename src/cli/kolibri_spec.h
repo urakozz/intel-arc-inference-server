@@ -4,8 +4,8 @@
 //
 //   --spec dflash --draft-model PATH   the proposer is the DSpark drafter (intuit/Kolibri-1-dspark: a snapshot directory or
 //                          a repo id in the HF cache, never downloaded here) - its config.json's DSparkDraftModel picks the
-//                          DSpark form; on the LAST card beside the target's lm_head, with a 655 MB embedding replica there
-//                          (Bolt's arrangement for LiLiCorr): one 8-row block drafts up to 7 ids, verified at M = K + 1 by
+//                          DSpark form; on the LAST card beside the target's lm_head, with a 655 MB embedding replica there:
+//                          one 8-row block drafts up to 7 ids, verified at M = K + 1 by
 //                          Kolibri's verify lists (runtime::kolibri::KolibriEngine)
 //   --spec-max K           the deepest block, 1..7 (default 7); AdaptiveK picks K per iteration
 //

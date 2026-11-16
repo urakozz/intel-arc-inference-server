@@ -513,11 +513,11 @@ class G0CompareTest(Tmp):
         return eh + body + b"".join(hdrs)
 
     def test_differ_only_by_the_tree_path(self):
-        # Bolt's -I<tree>/... in the build options: the same sections once each tree's root is replaced.
+        # An -I<tree>/... in the build options: the same sections once each tree's root is replaced.
         def mk_bin(tree, text):
             path = self.p(tree, "build", "kernels", "nb.bin")
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            opts = b"-I" + self.p(tree).encode() + b"/src/kernels/bolt"
+            opts = b"-I" + self.p(tree).encode() + b"/src/kernels/prefill"
             with open(path, "wb") as f:
                 f.write(self.elf([(b".text.k", text), (b".note.opts", opts)]))
         for tree in ("ta", "tree-b"):
@@ -1542,7 +1542,6 @@ class DriverTest(unittest.TestCase):
         self.assertIn("probe_mtp_steps", out)
         self.assertNotIn(" 120000 32 3 int8 off 131072", out)   # r6.cost: a speed stage, opt-in (quiet-box session)
         self.assertNotIn("--- r23.s2_4k", out)
-        self.assertNotIn("--- r63.cost", out)
         self.assertNotRegex(out, r"(?m)^--- r\d+\.(k0|r0) ")             # no per-row G0 recaps
         addr = self.box_address()
         if addr:
@@ -1732,16 +1731,6 @@ class DriverTest(unittest.TestCase):
                 b = self.run_driver("--dry-run").stdout
                 self.assertEqual(a, b)
 
-    def test_row65_dflash_sees_both_cards(self):
-        for stage in ("r65.d2", "r65.prefill", "r65.prefix"):
-            with self.subTest(stage=stage):
-                out = self.run_driver("--dry-run", "--only", stage, "--device", "1").stdout
-                self.assertRegex(out, r"env ZE_AFFINITY_MASK=0,1 B70_TRACE_DIR=\S+ ctest")
-                self.assertRegex(out, r"env ZE_AFFINITY_MASK=0,1 python3 tools/box_validate/reuse.py claim")
-                self.assertIn("lock: holds the whole box", out)
-        out = self.run_driver("--dry-run", "--only", "r65.serve", "--device", "1").stdout
-        self.assertIn("WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=", out)
-
     def test_row86_dependencies_and_pp_visibility(self):
         with tempfile.TemporaryDirectory() as tmp:
             registry = os.path.join(tmp, "registry.tsv")
@@ -1914,15 +1903,15 @@ class DriverTest(unittest.TestCase):
             gates = re.compile(re.search(r'^: "\$\{G0_BITWISE_RE:=(.*)\}"$', f.read(), re.M).group(1))
         self.assertEqual([t for t in pp_labelled_tests() if gates.search(t)], [], "a G0 bitwise gate that needs two cards")
         labels = ["", "checkpoint", "pp", "checkpoint;pp", "tp", "checkpoint;tp", "ornith", "checkpoint;kolibri", "pp;kv8",
-                  "bolt", "pp;bolt", "checkpoint;golden;pp", "kv8;tp", "pp;ornith"]
+                  "dflash", "pp;dflash", "checkpoint;golden;pp", "kv8;tp", "pp;ornith"]
         tests = [(f"t{i}_test", l.split(";") if l else []) for i, l in enumerate(labels)]
         lab = {n: set(l) for n, l in tests}
 
         def old(excluded):
             return {n for n in lab if not lab[n] & excluded}
         for flags, suite_ex, rest_ex in (
-                ((), {"ornith", "kv8"}, set("ornith kv8 longctx kolibri qwen4exp dflash bolt lilicorr tp".split())),
-                (("--quick",), {"ornith", "kv8", "checkpoint"}, set("checkpoint bolt lilicorr tp".split()))):
+                ((), {"ornith", "kv8"}, set("ornith kv8 longctx kolibri qwen4exp dflash tp".split())),
+                (("--quick",), {"ornith", "kv8", "checkpoint"}, set("checkpoint tp".split()))):
             out = self.run_driver("--dry-run", "--only", "g0.suite,g0.suite_2card,x.rest,x.rest_2card", *flags).stdout
             one, two = (self.selection_of(out, s, tests) for s in ("g0.suite", "g0.suite_2card"))
             self.assertEqual((one & two, one | two), (set(), old(suite_ex)), flags)

@@ -96,7 +96,7 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // Which kernel a linear at M rows binds is `runtime::gemv_kind(M)` (runtime/gemv_kind.h): `Gemv`
 // at M = 1 - today's gemv / gemv_i8w binaries, untouched -, `SmallM` at M >= 2. `SmallM` binds
 // gemm_sm / gemm_sm_i8w when the shape has a row in `kSmallMTuning` and gemv / gemv_i8w otherwise
-// (the models 28b does not tune keep their M-row GEMVs; Bolt and Kolibri have no M >= 2 list). Spec 28d: the
+// (the models 28b does not tune keep their M-row GEMVs; Kolibri has no M >= 2 list). Spec 28d: the
 // DFlash drafter's int8 linears (block of 8) and its draft heads (7 rows), and Qwen3.8-Flash-Next's own capture
 // (its verify lists' M = 2..4) bind gemm_sm too.
 // LinearKind and the rule kernels::gemv_kind(M) are in kernels/linear_kind.h (no kernel-directory dependency).

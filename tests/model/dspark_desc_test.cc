@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
   // --- 1. the published config ------------------------------------------------------------------------------------------
   const model::DFlashDesc d = parse(real);
   {
-    CHECK(d.dspark() && !d.v2() && !d.lilicorr());
+    CHECK(d.dspark() && !d.v2());
     CHECK(d.architecture == "DSparkDraftModel" && model::is_dflash_architecture(d.architecture));
     CHECK(d.layers == 5 && d.hidden == 2560 && d.q_heads == 20 && d.kv_heads == 4 && d.head_dim == 128);
     CHECK(d.inter == 6144 && d.vocab == 128000 && d.block == 8 && d.max_k() == 7 && d.mask_id == 127998);
@@ -74,7 +74,7 @@ int main(int argc, char** argv) {
     CHECK(d.window == std::vector<uint32_t>(5, 2048) && d.causal == std::vector<bool>(5, true));
     CHECK(d.context_reach(0) == 2047);
     CHECK(d.sel_rank == 256 && d.sel_top_k == 16 && d.conf_in == 2560 + 256);
-    CHECK(d.conv_taps == 0 && d.conv_group == 0 && !d.sinks);
+    CHECK(d.conv_taps == 0 && d.conv_group == 0);
     CHECK(d.eps == 1e-6f && d.theta == 10000.0 && d.neox && d.out_mult == 1.0f && d.softcap == 0.0f);
     CHECK(d.fc_k(kol.hidden) == 12800 && d.qkv_n() == 2560 + 1024 && d.gate_up_n() == 12288);
     model::check_dspark(d);

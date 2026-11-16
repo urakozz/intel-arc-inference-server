@@ -126,7 +126,7 @@ void stop(pid_t pid) {
 
 void wait_ready(uint16_t port) {
   httplib::Client client("127.0.0.1", port);
-  // Spec 25e: B70_SERVE_WAIT_S (seconds, default 300) - Nemotron 3.5 Bolt's 41.9 GB on two cards takes longer to load,
+  // Spec 25e: B70_SERVE_WAIT_S (seconds, default 300) - a two-card model takes longer to load,
   // and a busy box stretches Qwen3.8's (a 61.6 s load with builds beside it, 2026-11-06, missed the old 120 s).
   uint32_t seconds = 300;
   if (const char* wait = std::getenv("B70_SERVE_WAIT_S")) seconds = static_cast<uint32_t>(std::strtoul(wait, nullptr, 10));
@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
       while (words >> w) serve_args.push_back(w);
     }
     // Spec 25e: B70_SERVE_DECODE_AFTER=1 (chat mode): collect every chat response first, stop b70-serve, THEN run b70-decode on
-    // each saved prompt - Nemotron 3.5 Bolt's 41.9 GB on two cards cannot be resident twice. Unset: as before.
+    // each saved prompt - a model filling both cards cannot be resident twice. Unset: as before.
     const char* after = std::getenv("B70_SERVE_DECODE_AFTER");
     const bool decode_after = chat && after != nullptr && std::string(after) == "1";
     struct Saved {
