@@ -50,9 +50,9 @@ class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
        const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager, const l0::Mem* injected,
-       bool two_cards, const Qwen4ExpMtpPrefill* mtp)
+       bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl, const uint32_t* ids)
       : cx_(cx), kc_(kc), s_(s), m_(m), part_(part), d_(m.desc), b_(b), pos_(pos), C_(C), eager_(eager),
-        injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)), mtp_(mtp), ctrl_(b.control.ptr()),
+        injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)), mtp_(mtp), ctl_(ctl), ids_(ids), ctrl_(ctl),
         rows_(C) {}
 
   void run() {
@@ -60,7 +60,7 @@ class Walk {
     if (part_.device == 0) {
       // pf_embed_gather(ids, embed, resid, m_count) - grid (1, C): the rows into x; layer 0's combine _E repeats them
       launch(kc_(kq::pf_embed_variant(), "pf_embed_gather"), 1, C_, 1,
-             {PtrArg(s_.ids.ptr()), PtrArg(part_.embed->ptr()), PtrArg(s_.x.ptr()), arg_val(C_)});
+             {PtrArg(ids_), PtrArg(part_.embed->ptr()), PtrArg(s_.x.ptr()), arg_val(C_)});
       src_ = HcSrc::Embed;
     } else {
       src_ = HcSrc::None;   // device 1: H landed materialised
@@ -101,7 +101,7 @@ class Walk {
     if (injected_) require(injected_->size() >= pf_injected_bytes(d_), "the injected selection rows are short");
     if (mtp_) {   // spec 21e: the head's pass (the last device)
       require(part_.device + 1 == b_.placement.devices, "the MTP head's prefill pass off the last device");
-      require(part_.mtp && part_.mtp_fc && part_.rope && mtp_->bufs && mtp_->R && mtp_->embed,
+      require(part_.mtp && part_.mtp_fc && part_.rope && mtp_->bufs && mtp_->R && mtp_->embed && mtp_->hctl,
               "the MTP head's prefill pass without the head, its fc block, the RoPE table or its buffers");
       require(mtp_->R->size() >= mtp_prefill_R_bytes(d_), "the head's R rows are shorter than [kPfC + 1][10240]");
       require(s_.xg.size() >= size_t(kPfC) * (d_.hc_n() + d_.hidden) * 2 &&
@@ -220,7 +220,7 @@ class Walk {
     pg.indirect_host();   // the PLE table's host-USM ranges are reached through m_.ple.ptrs
     launch(pg, d_.ple_heads, C_, 1,
            {PtrArg(ctrl()), PtrArg(b_.ple_ids_ring()), PtrArg(m_.ple.ptrs->ptr()), PtrArg(b_.ple_consts.ptr()),
-            PtrArg(s_.x.ptr()), PtrArg(s_.ple_ids.ptr()), PtrArg(s_.ids.ptr())});
+            PtrArg(s_.x.ptr()), PtrArg(s_.ple_ids.ptr()), PtrArg(ids_)});
     const loader::Q4PleOffsets o = loader::q4_ple_offsets(d_);
     require(o.norm_query == o.norm_key + size_t(d_.hc_n()) * 4 && o.norm_conv == o.norm_query + size_t(d_.hc_n()) * 4 &&
                 o.conv == o.norm_conv + size_t(d_.hc_n()) * 4,
@@ -238,7 +238,7 @@ class Walk {
            {PtrArg(ctrl()), PtrArg(gated), PtrArg(gn), PtrArg(b_.ple_conv_ring()), PtrArg(pw), PtrArg(s_.H.ptr())});
     // q4_pf_ple_ring(ctrl, gn, ids, ring, id_ring), grid (10240 / 256, 16)
     launch(kc_(v, "q4_pf_ple_ring"), d_.hc_n() / kq::kPfPleWg, kPleRing, 1,
-           {PtrArg(ctrl()), PtrArg(gn), PtrArg(s_.ids.ptr()), PtrArg(b_.ple_conv_ring()), PtrArg(b_.ple_ids_ring())});
+           {PtrArg(ctrl()), PtrArg(gn), PtrArg(ids_), PtrArg(b_.ple_conv_ring()), PtrArg(b_.ple_ids_ring())});
     prefill::profile_wait(cx_, Phase::kNorm);
     src_ = HcSrc::None;
   }
@@ -463,7 +463,7 @@ class Walk {
     cx_.copy(at(*mtp_->R, row), s_.H.ptr(), size_t(C_) * row);          // rows 1..C
     const uint32_t rows = mtp_prefill_rows(pos_, C_), r0 = C_ - rows;   // pos 0: no R_{-1}, the head starts at row 1
     if (rows > 0) {
-      ctrl_ = mb.hctl.ptr();
+      ctrl_ = mtp_->hctl;
       const loader::Q4MtpFcOffsets fo = loader::q4_mtp_fc_offsets(d_);
       const l0::Mem& fc = *part_.mtp_fc;
       const loader::Q4Layer& L = *part_.mtp;
@@ -474,7 +474,7 @@ class Walk {
       // rows q = pos - 1 + r0 .. (the chunk's ids from r0)
       launch(kc_(v, "q4_mtp_norm"), 1 + d_.hc, rows, 1,
              {PtrArg(ctrl()), PtrArg(at(*mtp_->R, size_t(r0) * row)), PtrArg(mtp_->embed), PtrArg(at(fc, fo.norm_embedding)),
-              PtrArg(at(fc, fo.norm_hidden)), PtrArg(xe), PtrArg(xh), PtrArg(s_.ids.as<uint32_t>() + r0)});
+              PtrArg(at(fc, fo.norm_hidden)), PtrArg(xe), PtrArg(xh), PtrArg(ids_ + r0)});
       prefill::profile_wait(cx_, Phase::kNorm);
       bf16_cols(at(fc, fo.fc_embedding), d_.hidden, d_.hidden, 0, d_.hidden, rows, xe, s_.o.ptr(), d_.hidden);
       bf16_cols(at(fc, fo.fc_hidden), d_.hidden, d_.hidden, 0, d_.hidden, rows * d_.hc, xh, s_.partials.ptr(), d_.hidden);
@@ -503,7 +503,7 @@ class Walk {
               PtrArg(s_.idx_q.ptr()), PtrArg(mb.idx_tail.ptr()), PtrArg(mb.idx_keys.ptr())});
       launch(kc_(qv, "q4_qsa_ring"), 1, kIdxTail, 1, {PtrArg(ctrl()), PtrArg(s_.idx_f32.ptr()), PtrArg(mb.idx_tail.ptr())});
       prefill::profile_wait(cx_, Phase::kAttnPrep);
-      ctrl_ = b_.control.ptr();
+      ctrl_ = ctl_;
     }
     cx_.copy(mb.hh_row(0), at(*mtp_->R, size_t(C_) * row), row);       // R_{pos+C-1}: the next chunk's row 0
   }
@@ -521,7 +521,9 @@ class Walk {
   const bool two_;
   const uint32_t dense_;
   const Qwen4ExpMtpPrefill* mtp_;   // spec 21e: the head's pass (the last device), or null
-  const void* ctrl_;                // the device's Control, or the head's for its pass
+  const Control* ctl_;              // this chunk's Control (its slot; qwen4exp_prefill.h)
+  const uint32_t* ids_;             // this chunk's ids (its slot of s.ids)
+  const void* ctrl_;                // ctl_, or the head's chunk Control for its pass
   uint32_t rows_;                   // the rows a combine / up_mix / linear covers: C, or the head's rows
   HcSrc src_ = HcSrc::None;
   size_t n_ = 0;
@@ -574,8 +576,9 @@ size_t Qwen4ExpPrefillScratch::bytes() const {
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
-                   const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp) {
-  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp).run();
+                   const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
+                   const uint32_t* ids) {
+  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp, ctl, ids).run();
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,

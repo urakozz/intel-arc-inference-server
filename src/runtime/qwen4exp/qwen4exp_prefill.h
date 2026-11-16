@@ -6,6 +6,7 @@
 #include "l0/memory.h"
 #include "loader/qwen4exp_loader.h"
 #include "model/qwen4exp.h"
+#include "runtime/control.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
@@ -70,11 +71,13 @@ struct Qwen4ExpMtpPrefill {
   l0::Mem* R = nullptr;            // bf16 [kPfC + 1][10240] (mtp_prefill_R_bytes)
   const void* embed = nullptr;     // device 0's embedding table (peer-read on two cards)
   bool single = true;              // decision 4's norm form
+  const Control* hctl = nullptr;   // the head's Control for this chunk (its slot: the next chunk's may be written)
 };
 
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has written the ids
-// into every device's s.ids, set every device's Control::{pos = pos, n_active = C} (the HC, the prep, the indexer,
-// the PLE kernels read both), and - device 1 of two - landed device 0's H rows in s.H. `injected` (spec 21 F3's
+// into `ids` (the chunk's slot of s.ids), set `ctl` - this chunk's Control for this device, host memory, a copy of the
+// device's with pos = pos, n_active = C (the HC, the prep, the indexer, the PLE kernels read both) - and - device 1 of
+// two - landed device 0's H rows in s.H. The slots let the host write chunk j + 1's while chunk j runs. `injected` (spec 21 F3's
 // debug input): host-USM rows [qsa layers][kPfC][kListRow] the caller filled for this chunk - the sparse rows read
 // their lists there and q4_qsa_score / _select are not launched. `two_cards`: device 0 ends with the materialising
 // _Y_NN. Appends exactly prefill_device_launches(...) launches; waits only when B70_PREFILL_PROFILE=1. Leaves: the
@@ -82,7 +85,8 @@ struct Qwen4ExpMtpPrefill {
 // H (pending the last MoE's y) and its layers' route rows / selections of this chunk.
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
-                   const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp = nullptr);
+                   const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
+                   const uint32_t* ids);
 
 // The tail only the LAST chunk runs, on the last device: decode's final mixer over row `last_row` (its H, the pending
 // y and inject weights), lm_head and the two argmax stages - decode's binaries, so the first generated id is chosen

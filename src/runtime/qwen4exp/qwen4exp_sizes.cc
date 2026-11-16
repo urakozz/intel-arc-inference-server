@@ -206,7 +206,7 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   kslab = std::max<size_t>(kslab, size_t(d.hidden) * kPfSlab);                   // the indexer / PLE kv slabs
   kslab = std::max<size_t>(kslab, size_t(d.hc_n()) * pf_ld(d.hc_down_rows()));   // the HC down's one slab
   PrefillSizes s;
-  s.ids = C * 4;
+  s.ids = kPfDepth * C * 4;
   s.H = C * d.hc_n() * 2;
   s.xn = C * d.hc_n() * 2;
   s.x = C * d.hidden * 2;
@@ -242,7 +242,7 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
 
 PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d) { return pp_landing_layout(size_t(kPfC) * d.hc_n() * 2, 0); }
 size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev) {
-  return dev == 0 ? 0 : pf_landing_layout(d).total;
+  return dev == 0 ? 0 : kPfDepth * pf_landing_layout(d).total;
 }
 
 size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t pos,

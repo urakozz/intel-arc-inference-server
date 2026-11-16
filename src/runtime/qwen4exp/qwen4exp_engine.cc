@@ -567,7 +567,7 @@ MemoryComponents Qwen4ExpEngine::memory_use(uint32_t dev) const {
 
 // --- spec 21e: prefix-cache snapshots ------------------------------------------------------------------------------
 void Qwen4ExpEngine::settle_all(const char* what) {
-  if (pf_settle_ && !pf_settle_())
+  if (pf_settle_ && !pf_shadow_ && !pf_settle_())
     throw std::runtime_error(std::string("runtime::qwen4exp::Qwen4ExpEngine::") + what + ": a prefill list is still "
                              "running after " + std::to_string(opt_.prefill_timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i)
@@ -626,10 +626,14 @@ void Qwen4ExpEngine::save_state(void* host) {
     throw std::logic_error("runtime::qwen4exp::Qwen4ExpEngine::save_state: a verify is pending its commit");
   auto* h = static_cast<uint8_t*>(host);
   const uint32_t eos = model_.desc.ple_eos;
+  const uint8_t* shadow = pf_shadow_;   // inside a two-card block hook: device 0's runs, in this order
   for (const SnapRun& r : state_runs(model_.desc, model_.placement, pos(), mtp())) {
     if (r.pad || r.zero) {
       std::memset(h, 0, r.bytes);   // positions before 0 / filler: a cold run's history
       if (r.zero && r.tensor == SnapTensor::PleIds) std::memcpy(h, &eos, 4);   // q4_ple_gather reads EOS there
+    } else if (shadow && r.device == 0) {
+      std::memcpy(h, shadow, r.bytes);
+      shadow += r.bytes;
     } else {
       st(r.device).imm.copy(h, snap_ptr(r), r.bytes);
     }

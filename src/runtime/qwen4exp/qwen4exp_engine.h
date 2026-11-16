@@ -144,8 +144,8 @@ class Qwen4ExpEngine {
   // rings, GDN state and conv rings, the PLE rings) is decode's to a cosine bar (the GEMMs' sum orders, the chunked GDN,
   // the flash walks), not bitwise (plan 21d Review Focus 5). A prompt may be continued by another prefill. Two
   // devices: each chunk runs layers [0, s) on device 0, crosses by spec 16b's hand-off at chunk size (a second
-  // PipelineLink), then layers [s, L) on device 1 - sequentially (spec 16c's
-  // overlapped chunk pipeline is a later lever). A lost hand-off host-signals the event, throws naming it and marks
+  // PipelineLink a slot), then layers [s, L) on device 1, device 0 running chunk j + 1 while device 1 runs chunk j
+  // (qwen4exp_prefill_engine.cc: the overlap; bitwise the sequential order's). A lost hand-off host-signals the event, throws naming it and marks
   // the engine until reset(). B70_Q4_ATTN=eager runs the eager sparse attention in prefill too (one switch, read at
   // construction). With injected() on, the sparse rows read the lists set_prefill_injector's callback writes before
   // each chunk (q4_qsa_score / _select not launched).
@@ -174,8 +174,9 @@ class Qwen4ExpEngine {
   void set_prefill_injector(PrefillInjector f) { pf_inject_ = std::move(f); }
   // Spec 7's block (runtime::Engine::kBlock); spec 21e's prefix cache hooks into the chunk walk: with a hook set every
   // chunk ends at a block end or at the prompt end (runtime::prefill_chunk_rows), and the hook is called on the host
-  // after each chunk whose end is a multiple of kBlock (devices idle, pos == end_pos, n_active 0 on every device) and
-  // once at the prompt end (the first generated id in cur_token).
+  // after each chunk whose end is a multiple of kBlock (pos == end_pos, n_active 0 on every device; on two cards device
+  // 0 may already run the next chunk - save_state / save_kv read the block end's state all the same) and once at the
+  // prompt end (the first generated id in cur_token).
   static constexpr uint32_t kBlock = 2048;
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
@@ -317,6 +318,9 @@ class Qwen4ExpEngine {
   // Spec 21d: set by prepare_prefill (b70_qwen4exp_prefill) - releases a prefill list waiting on a hand-off that will
   // not come and waits (bounded) for every prefill list to go idle; reset() calls it.
   std::function<bool()> pf_settle_;
+  // Inside a mid-prompt block hook on two cards: device 0's state runs at the block end (host; save_state reads them
+  // there, and nothing settles the prefill lists - device 0 may run the next chunk). Null otherwise.
+  const uint8_t* pf_shadow_ = nullptr;
   // Spec 21d: the prefill state, lazy; declared LAST so it (its Contexts, kernels, recordings and link) is destroyed
   // before the buffers it points into. The deleter is set where the state is made (b70_qwen4exp_prefill), so this
   // header names no prefill symbol. pf_dev_bytes_: each device's prefill scratch + prefill link, for memory_use().
