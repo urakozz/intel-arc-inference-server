@@ -21,9 +21,6 @@
 //   SPLITK, DEQ, BLK2D   gemm_sm's (the row's knobs, unchanged)
 //   RC           the row-chunk shape's rows a sub-group (8 | RC, RC | M); SWAP 1: the swap shape (RC = M)
 //   PF_G         0 or a weight prefetch distance in this sub-group's own 64-k groups (chunk 0 issues it)
-//   RCZ          1: the row chunks on grid dimension 2 (M / RC work-groups of gemm_sm's size per column tile and
-//                slice) instead of inside the work-group - more work-groups for the narrow-output shapes, the same
-//                per-row arithmetic (grid split-K only)
 //
 // **Property R (spec 32e; held by tests/kernels/gemm_sm_test.cc):** a DPAS output element is one chain of bf16 x bf16
 // products added in k order; which 8-row block or sub-group a row sits in does not enter it. What does - the k
@@ -54,9 +51,7 @@
 #ifndef PF_G
 #define PF_G 0
 #endif
-#ifndef RCZ
-#define RCZ 0
-#endif
+
 #if SWAP
 #define RC M
 #endif
@@ -95,14 +90,6 @@
 #endif
 #if SPLITK && S != 1
 #error "gemm_sm_v2: the in-work-group split-K writes one slice (S 1)"
-#endif
-#if RCZ && (SPLITK || SWAP)
-#error "gemm_sm_v2: RCZ is the row-chunk shape under grid split-K"
-#endif
-#if RCZ
-#define WG_RCN 1
-#else
-#define WG_RCN RCN
 #endif
 #if LAYOUT > 1
 #error "gemm_sm_v2: int4 layouts 0 and 1"
@@ -151,7 +138,7 @@ inline void prefetch_group(__global const uint* w, uint n_tile, uint gp) {
 }
 
 __attribute__((intel_reqd_sub_group_size(SG)))
-__attribute__((reqd_work_group_size(WG * WG_RCN, 1, 1)))
+__attribute__((reqd_work_group_size(WG * RCN, 1, 1)))
 __kernel void gemm_sm_v2(__global const uint* restrict w,
                          __global const half* restrict scales,
                          __global const ushort* restrict x,
@@ -160,11 +147,7 @@ __kernel void gemm_sm_v2(__global const uint* restrict w,
   const uint sg = get_sub_group_id();
   const uint col_sg = sg % NSGN;
   const uint ks = (sg / NSGN) % KSL;
-#if RCZ
-  const uint rc = get_group_id(2);
-#else
   const uint rc = sg / (NSGN * KSL);
-#endif
   const uint n_tile = get_group_id(0) * NSGN + col_sg;
   const uint n0 = n_tile * SG;
   const uint n = n0 + lane;
@@ -178,7 +161,7 @@ __kernel void gemm_sm_v2(__global const uint* restrict w,
   for (uint i = 0; i < G_PER_SG; ++i) {
     const uint g = gbase + i * KSL;
 #if PF_G
-    if (RCZ || rc == 0) prefetch_group(w, n_tile, g + PF_G * KSL);
+    if (rc == 0) prefetch_group(w, n_tile, g + PF_G * KSL);
 #endif
     // ---- the group's eight u32 rows of this lane's column and its scale (gemm_sm's reads) ----------
     uint wv[8];

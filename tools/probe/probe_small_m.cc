@@ -14,9 +14,7 @@
 //                          at 32 / 64 rows - property R against gemm_sm at 16 rows over --trials trials, N2 on
 //                          the first, the device's work-group / SLM limits and each arm's spill, the int4 token sum;
 //                          [--v2 label,...]: only those psm_v2 arms, plan 34a's A2D arms among them - swap_a2d,
-//                          swap_a2d_pf1, swap_a2d_pf2, rc32_a2d_pf1_g256 and the 64-row ablation swap_a2d_nodq;
-//                          plan 32e Task 2: rc32z_a2d_pf1_g256 / rc16z_a2d_pf1 - gemm_sm_v2.cl with the row chunks on
-//                          grid dimension 2, the grid split-K shapes only)
+//                          swap_a2d_pf1, swap_a2d_pf2, rc32_a2d_pf1_g256 and the 64-row ablation swap_a2d_nodq)
 //   (every mode: [--device 0]; the card is whatever ZE_AFFINITY_MASK leaves at index 0)
 //
 // check:    every built variant of the selected shapes and M against the fp64 reference
@@ -245,7 +243,7 @@ void upload(l0::Context& ctx, Inputs& in, bool timing) {
 struct Launch {
   std::unique_ptr<l0::Module> mod, qmod;
   std::unique_ptr<l0::Kernel> k, q;   // q: psm_quant (int arms)
-  uint32_t gx = 1, gy = 1, gz = 1, M = 1, S = 1;
+  uint32_t gx = 1, gy = 1, M = 1, S = 1;
   bool is_int = false;
   std::string name;
 };
@@ -313,7 +311,7 @@ void bind(Launch& L, const Inputs& in, int copy) {
 }
 void append(l0::CmdList& list, Launch& L) {
   if (L.q) list.launch(*L.q, L.M);
-  list.launch(*L.k, L.gx, L.gy, L.gz);
+  list.launch(*L.k, L.gx, L.gy);
 }
 
 // Run once on copy 0 and read back the output summed over slices (S, M, N) -> [M][N], plus the
@@ -917,10 +915,9 @@ struct V2Arm {
   bool g256 = false;
   bool a2d = false;   // spec 34: the A operands by 2D block reads
   bool nodq = false;  // plan 34a: the dequant ablation (wrong output: timed only, never checked or ranked)
-  bool z = false;     // plan 32e Task 2: gemm_sm_v2.cl with the row chunks on grid dimension 2 (RCZ), A2D always
   uint32_t rc(uint32_t M) const { return base == "rc16" ? 16 : base == "rc32" ? 32 : M; }
   std::string label() const {
-    return base + (z ? "z" : "") + (a2d ? "_a2d" : "") + (nodq ? "_nodq" : "") + (pf ? "_pf" + std::to_string(pf) : "") +
+    return base + (a2d ? "_a2d" : "") + (nodq ? "_nodq" : "") + (pf ? "_pf" + std::to_string(pf) : "") +
            (g256 ? "_g256" : "");
   }
 };
@@ -939,8 +936,6 @@ std::vector<V2Arm> v2_arms(const std::vector<std::string>& pick) {
   for (uint32_t pf : {0u, 1u, 2u}) v.push_back({"swap", pf, false, true, false});
   v.push_back({"rc32", 1, true, true, false});
   v.push_back({"swap", 0, false, true, true});
-  v.push_back({"rc32", 1, true, true, false, true});
-  v.push_back({"rc16", 1, false, true, false, true});
   std::vector<V2Arm> out;
   for (const V2Arm& a : v)
     if (std::find(pick.begin(), pick.end(), a.label()) != pick.end()) out.push_back(a);
@@ -951,18 +946,17 @@ std::string v2_name(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) 
          "_S" + std::to_string(kernels::gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout);
 }
 uint32_t v2_wg(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
-  return kernels::gemm_sm_wg_size(t) * (a.z ? 1 : M / a.rc(M));
+  return kernels::gemm_sm_wg_size(t) * (M / a.rc(M));
 }
 std::unique_ptr<Launch> make_v2(l0::Context& ctx, const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
   auto L = std::make_unique<Launch>();
   L->name = v2_name(a, t, M);
   L->M = M;
   L->mod = std::make_unique<l0::Module>(ctx, kernels::path(L->name));
-  L->k = std::make_unique<l0::Kernel>(*L->mod, a.z ? "gemm_sm_v2" : "psm_v2");
+  L->k = std::make_unique<l0::Kernel>(*L->mod, "psm_v2");
   L->k->group_size(v2_wg(a, t, M));
   L->gx = t.N / kernels::gemm_sm_cols(t);
   L->gy = kernels::gemm_sm_grid_y(t);
-  L->gz = a.z ? M / a.rc(M) : 1;
   L->S = kernels::gemm_sm_out_s(t);
   return L;
 }
