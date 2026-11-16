@@ -9,7 +9,6 @@
 #include "loader/loader.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/gemm_l0.h"
-#include "runtime/prefill/gdn.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/profile.h"
 
@@ -29,10 +28,10 @@ T* at(l0::Mem& m, size_t off) {
 
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   (void)d;
-  // router GEMV + moe_route + combine, the sort's three launches, the down GEMM; gate||up: the gather and one GEMM
+  // router GEMM + moe_route + combine, the sort's three launches, the down GEMM; gate||up: the gather and one GEMM
   // (l0), or l0's two for the shared expert and the W4A8 quantiser, gather and GEMM for the routed ones (l0-int8).
-  // Phase 3 Task 2: on l0 the router GEMV is the dense GEMM (its B slab made once, by prepare_prefill).
-  return 3 + 3 + 1 + (l0_form(b, "experts") ? 2 : 5);
+  // Phase 3 Task 2: the router is the dense GEMM (its B slab made once, by prepare_prefill), on both backends.
+  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 5 : 2);
 }
 
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
@@ -59,7 +58,6 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   require(NG % kernels::pf_moe::kQ4WgN == 0 && H % kernels::pf_moe::kQ4WgN == 0, "the expert shape is not whole fused-GEMM work-groups");
   require(H % kernels::pf_moe::kCombineWg == 0, "the hidden size is not whole 256-column combine groups");
 
-  float* logits = at<float>(*s.moe, L.logits_off);
   uint32_t* route = at<uint32_t>(*s.moe, L.route_at(layer));
   uint32_t* hdr = at<uint32_t>(*s.moe, L.hdr_off);
   uint32_t* tiles = at<uint32_t>(*s.moe, L.tiles_off);
@@ -75,23 +73,16 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   const loader::DeviceWeight& rw = w.router;
   require(rw.kind == model::WeightKind::Bf16 && rw.shape.N == m.router_n() && rw.shape.K == H,
           "the router is not bf16 [router_n][hidden]");
-  if (l0_form(backend, "router")) {
+  {
     // Phase 3 Task 2: the router by the dense GEMM (judged by the f32 judge; its last bits are not decode's), rows
-    // at pitch gemm_pitch, and moe_route built at that pitch.
+    // at pitch gemm_pitch, and moe_route built at that pitch. Open-work 35: on l0-int8 too - its GEMV form
+    // (pf_route.cl) left Ornith's served tool-call row on a 0.05-ulp tie the f32 judge rejects.
     float* glog = at<float>(*s.moe, L.gemm_out_off);
     tiled_gemm(cx, kc, tiled_slab(cx, kc, s, rw.mem.ptr(), m.router_n(), H), m.router_n(), H, s.x.as<uint16_t>(), C,
                glog);
     cx.launch(kc(kernels::pf_moe_route_gemm_variant(E, m.top_k, H, I, kernels::pf_route_slab_pitch(m.router_n())),
                  "moe_route"),
               1, C, 1, {PtrArg(glog), PtrArg(route)});
-  } else {
-    // Phase 2 Task 6: pf_route.cl's tiling (16 rows x 2 column tiles a work-group), bitwise pf_ab_proj.
-    cx.launch(kc(kernels::pf_route_router_variant(H, m.router_n()), "pf_gemv_rows"),
-              (m.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
-              (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
-              {PtrArg(rw.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(logits), arg_val(C)});
-    cx.launch(kc(kernels::moe_variant(1, E, m.top_k, H, I), "moe_route"), 1, C, 1,
-              {PtrArg(logits), PtrArg(route)});
   }
   profile_wait(cx, Phase::kMoeRoute);
   // 2. The sort: the header, the tile table padded to tmax, the rows and the work items - pf_moe_sort_mw's
@@ -111,7 +102,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
 
   // 3. gate||up, SiLU fused -> h [rows][I], one launch over the work items, B read from the int4 blocks (plan
   //    2026-11-12 Tasks 3 and 5).
-  if (!l0_form(backend, "experts")) {
+  if (backend == PrefillBackend::L0Int8) {
     // Open-work 16: the shared expert is a dense linear and stays bf16 - l0's gather and GEMM over its items only
     // (a null W skips the routed ones), bitwise l0's shared rows of h; the int8 gather below then overwrites xg.
     cx.launch(kc(pv, "pf_moe_gather"), rows, 1, 1,

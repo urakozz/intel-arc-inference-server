@@ -115,17 +115,12 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
         // weight: the checkpoint's own, or (spec 15 §13) an int4 a||b's copy the loader
         // dequantised with the prefill dequant's arithmetic (loader::prefill_ab).
       const DeviceWeight& w = loader::prefill_ab(m, l);
-      if (ab_on_gemm(d, backend)) {   // phase 3 Task 2: the dense GEMM, rows at pitch 256 in the MoE scratch
+      if (ab_on_gemm(d)) {   // phase 3 Task 2: the dense GEMM, rows at pitch 256 in the MoE scratch
         ab = reinterpret_cast<float*>(static_cast<uint8_t*>(s.moe->ptr()) +
                                       moe_prefill_layout(d, s.chunk_cap()).gemm_out_off);
         tiled_gemm(cx, kc, tiled_slab(cx, kc, s, w.mem.ptr(), w.shape.N, d.hidden), w.shape.N, d.hidden,
                    s.x.as<uint16_t>(), C, ab);
-      } else if (d.is_moe())   // phase 2 Task 6: more rows and columns a work-group, bitwise pf_ab_proj (pf_route.cl)
-        cx.launch(kc(kernels::pf_route_ab_variant(d.hidden), "pf_gemv_rows"),
-                  (w.shape.N / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
-                  (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
-                  {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
-      else
+      } else
         cx.launch(kc(kernels::pf_ab_proj_variant(d.hidden), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
                   {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
       profile_wait(cx, Phase::kAbGdn);

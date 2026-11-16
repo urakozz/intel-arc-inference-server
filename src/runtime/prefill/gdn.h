@@ -64,15 +64,12 @@ inline constexpr size_t kGdnChunkLaunches = 10;
 // The launches one gdn_chunk call appends for `d` on backend `b`.
 size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 
-// Phase 3 Task 2: on a MoE model's l0 backend the a||b runs as the dense GEMM (tiled_gemm on its B slab, made once
-// by make_route_slabs - still one launch) into rows at pitch pf_route_slab_pitch(128) = 256 in the MoE scratch's
-// GEMM region, and gdn_chunk's pf_gdn_gate reads that pitch (pf_gdn_conv _AB256). Elsewhere one pf_gemv_rows /
-// pf_ab_proj launch into ab_out.
-bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b);
-
-// Test switch (open-work 35): true on l0, and on l0-int8 when B70_PF_L0_FORM (a comma list of router, ab, intra,
-// experts) names `group` - that MoE-model prefill group then runs its l0 form on l0-int8.
-bool l0_form(PrefillBackend b, const char* group);
+// Phase 3 Task 2: on a MoE model the a||b runs as the dense GEMM (tiled_gemm on its B slab, made once by
+// make_route_slabs - still one launch) into rows at pitch pf_route_slab_pitch(128) = 256 in the MoE scratch's
+// GEMM region, and gdn_chunk's pf_gdn_gate reads that pitch (pf_gdn_conv _AB256). On both backends since open-work
+// 35 (l0-int8's GEMV form left Ornith's served tool-call row on a 0.05-ulp tie the f32 judge rejects). A dense
+// model: one pf_ab_proj launch into ab_out.
+bool ab_on_gemm(const model::ModelDesc& d);
 
 // --- the scan's DISPATCH PROOF ----------------------------------------------
 // `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
