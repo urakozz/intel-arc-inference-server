@@ -131,7 +131,6 @@ void check_tp1_and_refusals() {
   // by name, as the probe's --model takes it
   CHECK_EQ(&tp::model_by_name("qwen38"), &model::qwen38());
   CHECK(throws([] { tp::model_by_name("agnes"); }));   // dropped 2026-11-07
-  CHECK(throws([] { tp::model_by_name("bolt"); }));
 }
 
 }  // namespace

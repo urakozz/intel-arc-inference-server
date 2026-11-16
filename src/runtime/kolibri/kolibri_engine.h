@@ -160,7 +160,7 @@ class KolibriEngine {
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
-  // --- Kolibri DSpark: speculative decoding (--spec dflash with the DSpark drafter; Bolt's spec 26c contract) -----------
+  // --- Kolibri DSpark: speculative decoding (--spec dflash with the DSpark drafter) -----------
   // enable_spec allocates every device's KolibriVerifyBuffers (the verify scratch at 8 rows, control_hi) and, two cards,
   // the verify link (a copy hand-off sized for 8 rows); the verify lists are captured on first use per M
   // (runtime/kolibri/kolibri_capture.h build_verify). Before it nothing of this exists: a plain run allocates, captures and

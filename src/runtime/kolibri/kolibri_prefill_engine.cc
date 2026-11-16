@@ -280,7 +280,7 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
 }
 
 // Kolibri DSpark: the staged rows [n][taps][hidden] (pf_taps_, the last device) at positions pos .. pos + n - 1 through the
-// drafter's projection, 8 a replay (Bolt's replay fallback, plan 26c Task 5: no projection at prefill width is built).
+// drafter's projection, 8 a replay (no projection at prefill width is built).
 // TODO(card): 256 replays for a 2048-row window - measure; a prefill-width projection (DFlash's project_wide) is the lever.
 void KolibriEngine::drafter_project_staged(uint32_t pos, uint32_t n) {
   const uint32_t last = devices() - 1;

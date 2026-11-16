@@ -59,7 +59,6 @@ struct Args {
 };
 
 // --draft-model belongs to --spec dflash, and Qwen3.8's --spec dflash / dflash-lookup needs it (no default drafter).
-// Nemotron 3.5 Bolt's drafter keeps its default (cli/bolt_spec.h, LiLiCorr): Bolt is served before this check.
 inline void check_flags(const Args& a) {
   if (!a.on && a.have_model) throw std::runtime_error("--draft-model needs --spec dflash");
   if (a.on && !a.have_model)

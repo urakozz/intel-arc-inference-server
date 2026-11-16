@@ -24,9 +24,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include "cli/bolt_decode.h"    // spec 25c: is_bolt, check_args, settle
-#include "cli/bolt_serve.h"     // spec 25e: BoltEngineAdapterT, the generation defaults, the refusals
-#include "cli/bolt_spec.h"      // spec 26c: --spec dflash / lookup for Bolt (LiLiCorr)
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
 #include "cli/flags.h"
 #include "cli/hardware_gate.h"
@@ -87,15 +84,12 @@ struct Flags {
                "drafter on one card (and replica) when it is in the HF cache, else the model's\n"
                "MTP head (Qwen3.8 under --parallel tp or pp or with slots; Ornith), off\n"
                "elsewhere; the startup log says which and why. dflash on one card\n"
-               "also copies earlier repeats (prompt lookup). Greedy output unchanged.\n"
-               "Nemotron 3.5 Bolt (opt-in): lookup and dflash (its LiLiCorr\n"
-               "drafter on the last card), both over its own verify lists.")]]
+               "also copies earlier repeats (prompt lookup). Greedy output unchanged.")]]
   std::string spec = "auto";   // + the developer values lookup, dflash-lookup (cli/spec_args.h)
-  [[=Help("K", "the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash; Bolt's lookup\ntoo).", "the most")]]
+  [[=Help("K", "the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash).", "the most")]]
   Arg<uint32_t> spec_max;   // its range is the proposer's: checked below
   [[=Help("P", "--spec dflash's drafter. Qwen3.8: required, urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound\n"
-               "(packed int4). Bolt's default:\n"
-               "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.")]]
+               "(packed int4).")]]
   Arg<std::string> draft_model;
   [[=Help("N", "how many requests run at once (vLLM's flag); the context follows. 1:\n"
                "one request at the largest context that fits. N > 1 (Qwen3.8): a\n"
@@ -112,8 +106,8 @@ struct Flags {
   [[=Help("P", "auto: Qwen3.8 on two cards runs tp at --max-num-seqs 1 with --max-len\n"
                "auto and replica at --max-num-seqs above 1; otherwise one card when the model\n"
                "and the asked context fit it, else pp; 1: one card; pp: the\n"
-               "layers split over two cards. Kolibri-1 and\n"
-               "Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
+               "layers split over two cards. Kolibri-1 runs on two cards by default\n"
+               "(the model needs both).\n"
                "replica (Qwen3.8, Ornith): the model on both cards, one engine each -\n"
                "--max-num-seqs 2 to 8 (Ornith: 2; 2 when not given: one request a card), each\n"
                "exactly what it is alone; Qwen3.8's --spec dflash: a drafter on each card,\n"
@@ -153,7 +147,7 @@ void usage() {
              "                 [--max-len auto|L] [--parallel auto|1|pp|replica|tp] [--host 0.0.0.0] [--port 8000]\n"
              "\n"
              "  The model is chosen from the checkpoint's config.json (Qwen3.8, Ornith 1.5,\n"
-             "  Kolibri-1, Qwen3.8-Flash-Next, Nemotron 3.5 Bolt) and served under its name\n"
+             "  Kolibri-1, Qwen3.8-Flash-Next) and served under its name\n"
              "  (the repo id, or the directory's). Everything else - the device memory the plan leaves free,\n"
              "  the int8 lm_head, the drafter's form, the speculative cost tables, the tokenizer, the chat\n"
              "  template and the generation defaults (the snapshot's) - the engine decides; what does not fit\n"
@@ -347,162 +341,6 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
              loader::lm_head_form_name(da.lm_head),
              defaults.greedy ? "greedy" : "sampled", defaults.temperature, defaults.top_p, defaults.top_k,
              runtime::kolibri::state_positions(engine.model().desc));
-  return listen_until_stopped(server, options);
-}
-
-// Spec 25e: Nemotron 3.5 Bolt 74B-A9B served - runtime::bolt::BoltEngine (two cards by default, spec 25 Decision 4: the whole
-// model is 40.46 GB of weights; or one for a synthetic / small checkpoint) behind cli::bolt::BoltEngineAdapterT (the hybrid
-// prefix snapshots: per Mamba block the SSM state and three conv columns, the attention blocks' KV; host sampling), Bolt's chat
-// format (server::ChatFormat::bolt(): the template's kwargs, the ultra_v3 reasoning rules, Qwen3-Coder XML calls), the snapshot's
-// chat_template.jinja (or --chat-template FILE), NVIDIA's sampling defaults and EOS [2, 11] unless the snapshot's
-// generation_config.json carries sampling keys or --generation-config FILE says otherwise (cli::bolt::resolve_generation).
-// b70-decode's flow (cli/bolt_decode.h run_decode): the refusals before the device (cli::bolt::check_args and check_serve_flags,
-// the trained-context cap), both cards in one Level Zero context with peer access when --parallel pp, the placement and max_len
-// planned before the load with the prefill scratch (every request prefills), each block loaded straight onto its device.
-struct BoltServe {
-  std::string snapshot_dir;
-  cli::bolt::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
-  bool prefix_auto = true;
-  uint32_t prefix_cache_gb = 0;
-  cli::bolt::SpecArgs spec_args;   // spec 26c: --spec dflash / lookup (cli/bolt_spec.h)
-};
-
-int serve_bolt(const BoltServe& a, server::Options options) {
-  namespace rb = runtime::bolt;
-  const cli::bolt::DecodeArgs& da = a.args;
-  const model::BoltDesc pre = loader::bolt_checkpoint_desc(a.snapshot_dir, 0);
-  cli::bolt::check_args(da, pre);
-  cli::bolt::check_serve_max_len(da.max_len.is_auto, da.max_len.value, pre.max_pos);   // the trained 262144, before the device
-  // The switches, read once (a bad value throws before the device).
-  const rb::BoltAttn attn = rb::bolt_attn();
-  const rb::BoltFuse fuse = rb::bolt_fuse();
-  const rb::BoltState state = rb::bolt_state();
-  // Spec 26c: --spec dflash / lookup - the refusals that need the placement, the drafter's plan terms (its config.json and
-  // safetensors header), all before the device. The verify's routed experts are the union-aware form (Decision 10).
-  const cli::bolt::SpecArgs& sa = a.spec_args;
-  cli::bolt::check_spec(sa);
-  const rb::VerifyMoe vmoe = rb::VerifyMoe::Union;
-  cli::bolt::DecodeArgs dplan = da;
-  if (sa.on()) cli::bolt::plan_terms(sa, pre, da.max_len.is_auto ? pre.max_pos : da.max_len.value, dplan);
-  // The generation defaults (Decision 12): the snapshot's generation_config.json when it carries sampling keys, else NVIDIA's
-  // published values.
-  cli::bolt::Generation gen;
-  {
-    const auto read = [](const std::string& path, nlohmann::json& out) {
-      std::ifstream g(path);
-      if (!g) return false;
-      try {
-        g >> out;
-      } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error("'" + path + "' is not JSON: " + error.what());
-      }
-      return true;
-    };
-    nlohmann::json snap;
-    const std::string snap_path = a.snapshot_dir + "generation_config.json";
-    const bool have_snap = read(snap_path, snap);
-    try {
-      gen = cli::bolt::resolve_generation(have_snap ? &snap : nullptr, nullptr, "", snap_path);
-    } catch (const std::invalid_argument& error) {
-      throw std::runtime_error(error.what());
-    }
-  }
-  TemplateAdapter chat_template(a.snapshot_dir);
-  const std::string template_sha = chat_template.tmpl.source_sha256();
-  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
-  if (tokenizer.vocab_used() != pre.vocab_used)
-    std::print(stderr, "note: {}tokenizer.json defines {:d} ids, Nemotron 3.5 Bolt's published tokenizer {:d} (the head has {:d} "
-                       "rows); sampling masks from {:d}, and a greedy argmax on a row without a token takes the masked row's "
-                       "argmax\n", a.snapshot_dir.c_str(), tokenizer.vocab_used(), pre.vocab_used, pre.vocab,
-               tokenizer.vocab_used());
-  const uint32_t devs = cli::bolt::devices_of(da, pre);
-  if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(0u);
-  std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
-  std::vector<l0::Context*> ctx = {c0.get()};
-  if (c1) ctx.push_back(c1.get());
-  std::vector<size_t> dev = {c0->memory_bytes()};
-  if (c1) dev.push_back(c1->memory_bytes());
-  if (devs == 1)
-    std::print(stderr, "device: {} ({:d} EUs)\n", c0->name().c_str(), c0->eu_count());
-  else
-    std::print(stderr, "devices: 0 {} ({:d} EUs), 1 {} ({:d} EUs) [--parallel pp: one context]\n", c0->name().c_str(), c0->eu_count(),
-               c1->name().c_str(), c1->eu_count());
-  if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and the "
-                             "hand-off writes it (docs/10-the-box.md)");
-  const rb::BoltPlan pl = cli::bolt::settle(pre, dplan, dev);
-  loader::BoltLoadOptions lo;
-  lo.int8_head = da.int8_head;
-  lo.max_len = pl.max_len;
-  lo.layers = da.layers;
-  loader::BoltLoaded model = [&] {
-    StdoutToStderr redirect;
-    return loader::load_bolt(ctx, a.snapshot_dir, lo, pl.place);
-  }();
-  runtime::PipelineOptions opt;
-  rb::BoltEngine engine(ctx, std::move(model), pl.max_len, /*debug_tap=*/false, opt, /*profile=*/false, attn, fuse, state);
-  // Spec 26c: the verify lists (their buffers; the lists on first use) and the drafter, before the adapter: snapshots carry
-  // its ring and anchor.
-  cli::bolt::BoltDrafter drafter;
-  if (sa.on()) engine.enable_spec(vmoe);
-  if (sa.dflash()) {
-    StdoutToStderr redirect;
-    drafter = cli::bolt::attach_drafter(engine, sa, a.snapshot_dir);
-  }
-  engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
-  std::print(stderr, "{}\n", engine.memory_line().c_str());
-  if (sa.dflash()) {   // the server's adaptive loop over the drafter's cost table (AdaptiveK, K to --spec-max)
-    options.mtp_auto = true;
-    options.mtp_adaptive.max_k = sa.max_k;
-    options.mtp_adaptive.cost = cli::bolt::spec_cost(sa, da.int8_head, vmoe);
-    std::print(stderr, "spec dflash: LiLiCorr {}, drafter {} (+ the head exact), q {}, --spec-max {:d}, the verify's MoE {}, "
-               "drafter key {:016x}, {:d} B ({}) + the embedding replica {:d} B on device {:d} - NOT Bolt's auto (until it is "
-               "measured on the cards)\n", sa.draft_model.c_str(), loader::draft_format_name(sa.format), cli::bolt::bolt_draft_q_name(sa.q),
-               sa.max_k, rb::verify_moe_name(vmoe), (unsigned long long)engine.drafter_key(), drafter.drafter->bytes(),
-               drafter.drafter->weights().line.c_str(), drafter.replica->size(), engine.devices() - 1);
-  } else if (sa.lookup()) {
-    options.spec_lookup = true;
-    options.lookup_min_match = server::Options{}.lookup_min_match;   // 3 (spec 19e)
-    options.lookup_history = 0;
-    options.lookup_adaptive.max_k = sa.max_k;
-    options.lookup_adaptive.cost = cli::bolt::spec_cost(sa, da.int8_head, vmoe);
-    std::print(stderr, "spec lookup: --spec-max {:d}, the verify's MoE {}\n", sa.max_k, rb::verify_moe_name(vmoe));
-  }
-  cli::bolt::BoltEngineAdapterT<rb::BoltEngine> engine_adapter(
-      engine, tokenizer.vocab_used(), sa.on() ? sa.max_k : 0, sa.lookup(),
-      drafter.drafter ? cli::bolt::draft_hooks(engine, *drafter.drafter) : cli::bolt::BoltDraftHooks{}, sa.q);
-  options.chat_format = server::ChatFormat::bolt();
-  options.eos_ids = gen.eos;
-  options.sampling_defaults = gen.sampling;
-  options.stop_strings = gen.stops;
-  // Pinned host memory of the one context both cards share: either device's copies reach it.
-  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
-  options.parallel_desc = "pp - the layers split over 2 cards (Nemotron 3.5 Bolt needs both)";
-  server::Server server({tokenizer, chat_template, engine_adapter}, options);
-  const std::string placement =
-      devs == 2 ? std::string("--parallel pp (split ") +
-                      std::to_string(engine.split()) + ": device 0 blocks [0, " + std::to_string(engine.split()) +
-                      "), device 1 [" + std::to_string(engine.split()) + ", " + std::to_string(engine.model().desc.layers) +
-                      "))"
-                : std::string("--parallel 1");
-  std::print(stderr, "b70-serve: {} on http://{}:{:d}, max_len {:d}, eos ", options.served_model.c_str(), options.host.c_str(),
-             options.port, pl.max_len);
-  print_eos(gen.eos);
-  const server::Sampling& s = gen.sampling;
-  std::print(stderr,
-             ", Nemotron 3.5 Bolt ({} chat format, template sha256 {:.8}{}), {}, prefill backend l0 (chunk {:d}), attention {} "
-             "(B70_BOLT_ATTN), fuse {} (B70_BOLT_FUSE), SSM state {} (B70_BOLT_SSM), mtp none, lm_head {}, kv cache bf16, "
-             "sampling defaults {}: {} T {:.2f} top-p {:.2f} top-k {}, prefix snapshots at aligned {:d}-position block ends: {:d} "
-             "SSM states + conv columns {:.1f} MB, attention KV {:d} B a position\n",
-             options.chat_format.name(), template_sha.c_str(),
-             template_sha == cli::bolt::kTemplateSha256 ? " = Bolt's" : " (NOT Bolt's 6521afc7: another snapshot's)",
-             placement.c_str(), rb::kPfC, rb::bolt_attn_name(engine.attention()), rb::bolt_fuse_name(engine.fuse()).c_str(),
-             rb::bolt_state_name(engine.state()),
-             loader::lm_head_form_name(da.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint),
-             gen.source.c_str(), s.greedy ? "greedy" : "sampled", s.temperature, s.top_p,
-             s.top_k == 0 ? "none" : std::to_string(s.top_k).c_str(), rb::BoltEngine::kBlock,
-             engine.model().desc.mamba_layers(), double(engine.state_bytes()) / 1e6, engine.kv_bytes(1));
   return listen_until_stopped(server, options);
 }
 
@@ -1143,40 +981,6 @@ int run(int argc, char** argv) {
   cli::resolve_max_num_seqs(pipe, max_num_seqs, hw.cards);
   cli::check_one_request_a_card(pipe, max_num_seqs, architecture, name);   // Ornith's 2 on one card: auto -> 1
   if (pipe.replica()) cli::require_two_devices_for_replica(hw.cards);   // plan 13b: one engine per card
-
-  // Spec 25e: Nemotron 3.5 Bolt (model_type nemotron_h_omni over nemotron_h_puzzle) runs runtime::bolt::BoltEngine behind
-  // cli::bolt::BoltEngineAdapterT (two cards by default) - dispatched here, before every other family's rules (its own:
-  // cli::bolt::check_args and check_serve_flags replace them), as b70-decode dispatches it. A path that does not resolve is not
-  // Bolt: the flow below reports it.
-  if (cli::bolt::is_bolt(path)) {
-    cli::check_tp(pipe, {false, false, /*other_family=*/true});   // spec 17d: --parallel tp is Qwen3.8's
-    cli::bolt::ServeFlags flags;
-    flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
-    // Spec 26c: --spec / --spec-max / --draft-model through cli::resolve_spec (SpecFamily::Bolt), refused by name before the
-    // device; then the compact-head flags.
-    BoltServe bs;
-    bs.spec_args = cli::bolt::spec_args(spec_arg, have_spec_max, spec_max, dflash.have_model, dflash.model);
-    cli::bolt::check_serve_flags(flags);
-    options.chat_format = server::ChatFormat::bolt();
-    bs.snapshot_dir = loader::resolve_snapshot(path);
-    cli::bolt::DecodeArgs& ba = bs.args;
-    ba.path = bs.snapshot_dir;
-    ba.max_len = max_len_arg;   // auto by default: the largest that fits, at most 262144 (Decision 14)
-    ba.reserve = mem_reserve;
-    ba.int8_head = true;        // int8 (Decision 18), as every served model
-    ba.pipe = pipe;
-    ba.pp_given = pp_given;
-    ba.prefill = true;          // every request prefills: the plan carries the prefill scratch
-    ba.pp_backend_given = have_pp_backend;
-    ba.pp_backend = pp_backend;
-    ba.mtp = false;             // refused above
-    ba.spec = false;            // the plan's proposer terms come from bs.spec_args (plan_terms)
-    ba.kv8 = kv_cache == runtime::KvCache::Int8;
-    ba.layers = 0;              // --layers is Flash-Next's (refused above)
-    bs.prefix_auto = prefix_auto;
-    bs.prefix_cache_gb = prefix_cache_gb;
-    return serve_bolt(bs, options);
-  }
 
   // The model family decides what `--spec auto` is and which proposers exist (cli/spec_args.h).
   const bool is_q4 = cli::qwen4exp::is_qwen4exp(path);

@@ -5,8 +5,8 @@
 //
 //   --parallel auto|1|pp        auto (default): the faster choice by fit - one card when the model
 //                               and the asked context fit it, else pipeline parallel (each model
-//                               family's rule: cli/pipeline_settle.h parallel_auto, Kolibri-1's and
-//                               Nemotron 3.5 Bolt's two cards for the whole model); 1: one card;
+//                               family's rule: cli/pipeline_settle.h parallel_auto, Kolibri-1's two
+//                               cards for the whole model); 1: one card;
 //                               pp: the model's layers split over GPUs 0 and 1 of what Level Zero
 //                               shows (spec 16).
 //                               tp (Qwen3.8 - spec 17b-d): tensor parallel, every layer's linears
@@ -82,7 +82,7 @@ struct TpContext {
   // --parallel tp serves the split drafter, with prompt lookup inside it too).
   bool dflash = false;
   bool profile = false;        // --profile
-  bool other_family = false;   // Bolt / Kolibri-1 / Qwen3.8-Flash-Next
+  bool other_family = false;   // Kolibri-1 / Qwen3.8-Flash-Next
   bool draft_vocab = false;    // --draft-vocab / --draft-vocab-ids (spec 17d: the draft head is the card's half)
 };
 inline void check_tp(const PipelineArgs& a, const TpContext& c) {

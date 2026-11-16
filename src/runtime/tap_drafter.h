@@ -41,9 +41,8 @@ class KernelCache;
 }
 
 // Spec 23f / 26c: the target engine's side of a drafter, apart from the proposer's - what an engine's verify lists,
-// commit, prefill, reset and snapshots need (the methods below up to key()). runtime::bolt::BoltEngine holds a TapSink
-// (its drafter is runtime::dflash::LiliDrafter, whose proposer side is its own: the lattice walk); runtime::Engine and
-// runtime::PipelineEngine hold the TapDrafter below, which adds the Qwen3.8 proposer's calls.
+// commit, prefill, reset and snapshots need (the methods below up to key()). runtime::kolibri::KolibriEngine holds a
+// TapSink (its drafter is runtime::dflash::DSparkDrafter); runtime::Engine and runtime::PipelineEngine hold the TapDrafter below, which adds the Qwen3.8 proposer's calls.
 class TapSink {
  public:
   virtual ~TapSink() = default;

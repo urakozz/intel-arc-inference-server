@@ -35,7 +35,7 @@ struct TemplateIface {
   virtual std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                              bool enable_thinking) = 0;
   // Spec 18d: with the request's chat_template_kwargs as template variables beside
-  // enable_thinking (Kolibri-1's reasoning_effort, Bolt's medium_effort; server/chat_format.h says
+  // enable_thinking (Kolibri-1's reasoning_effort; server/chat_format.h says
   // which models get them). The default ignores them.
   virtual std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                                          bool enable_thinking, const nlohmann::json& kwargs) {
@@ -75,8 +75,7 @@ struct Sampling {
   // Spec 23e (spec 23 §6.4): a model's logit transform before temperature / top-k / top-p, applied on the host
   // inside server::filter_probs (so sampling and every acceptance path see the same p): z' = logit_mult x z, then
   // with softcap > 0, softcap x tanh(z' / softcap) - fp32, monotone (greedy, the device argmax over the raw row, is
-  // unchanged). No served model sets it today (1 and 0: filter_probs untransformed); bolt_sampling_test holds the
-  // shared path to it.
+  // unchanged). No served model sets it today (1 and 0: filter_probs untransformed).
   // Model properties, set with the server's sampling defaults - never request fields.
   float logit_mult = 1.0f;
   float softcap = 0.0f;

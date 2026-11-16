@@ -267,8 +267,8 @@ class Walk {
       k.arg_ptr(2, rt);
       launch(k, 1, M_);
     }
-    // TODO(card): the M-row MoE reads each row's 6 experts (the bitwise reference); a union-aware form (Bolt's Decision 10:
-    // each distinct expert once a verify) is the lever once the card run prices the rows.
+    // TODO(card): the M-row MoE reads each row's 6 experts (the bitwise reference); a union-aware form (each
+    // distinct expert read once a verify) is the lever once the card run prices the rows.
     const std::string mv = kk::moe_variant(M_);
     {
       l0::Kernel& k = kernel(mv, "kol_moe_gate_up", kk::moe_gate_up_wg());

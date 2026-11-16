@@ -1,6 +1,6 @@
 #pragma once
 // The bf16 eager decode attention chain on the host: transformers' eager path, torch's CPU fp32 softmax
-// bit for bit. Shared by the eager references of Kolibri-1 (kolibri_ref.h), Bolt (mg_attn_ref.h),
+// bit for bit. Shared by the eager references of Kolibri-1 (kolibri_ref.h) and
 // Qwen3.8-Flash-Next (qwen4exp_ref.h, qwen4exp_pf_ref.h).
 #include <algorithm>
 #include <cmath>

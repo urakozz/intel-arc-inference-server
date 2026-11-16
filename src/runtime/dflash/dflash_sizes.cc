@@ -56,7 +56,7 @@ DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t h
   s.tpart = R * ((head_rows + kd::kTopkChunk - 1) / kd::kTopkChunk) * kd::kTopK * 2 * 4;
   s.cand = s.unary = R * kd::kTopK * 4;
   s.hid = (d.v2() || d.dspark()) ? M * d.sel_rank * 4 : 0;   // Kolibri DSpark: ones (the Markov walk, df_select V2)
-  if (format == loader::DraftFormat::Int4G64 && !d.lilicorr()) {
+  if (format == loader::DraftFormat::Int4G64) {
     s.gout = M * std::max({size_t(d.qkv_n()) * kd::int4_slices(d.hidden, d.qkv_n()),
                            H * kd::int4_slices(d.q_n(), d.hidden),
                            H * kd::int4_slices(d.inter, d.hidden),
@@ -153,7 +153,5 @@ void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, floa
   c.seed_lo = uint32_t(seed);
   c.seed_hi = uint32_t(seed >> 32);
 }
-
-uint32_t draft_list_k(const model::DFlashDesc& d, uint32_t k) { return d.lilicorr() ? kd::kR : k; }
 
 }  // namespace runtime::dflash

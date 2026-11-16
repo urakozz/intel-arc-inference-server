@@ -35,17 +35,12 @@ bool exists(const std::string& p) { return bool(std::ifstream(p)); }
 }  // namespace
 
 const char* draft_format_name(DraftFormat f) {
-  return f == DraftFormat::Int8 ? "int8" : f == DraftFormat::Int4G64 ? "int4" : f == DraftFormat::Exact ? "exact" : "bf16";
+  return f == DraftFormat::Int8 ? "int8" : f == DraftFormat::Int4G64 ? "int4" : "bf16";
 }
 bool parse_draft_format(const std::string& s, DraftFormat& out) {
   if (s == "bf16") return out = DraftFormat::Bf16, true;
   if (s == "int8") return out = DraftFormat::Int8, true;
   return false;
-}
-bool parse_lilicorr_draft_format(const std::string& s, DraftFormat& out) {
-  if (s == "exact") return out = DraftFormat::Exact, true;
-  if (s == "int4" || s == "int4g64") return out = DraftFormat::Int4G64, true;
-  return s == "int8" && parse_draft_format(s, out);
 }
 
 std::string dflash_canon(const std::string& name) {
@@ -322,9 +317,6 @@ DFlashHostLinear dflash_candidate_head2(const int8_t* tiled, const float* row_sc
 
 DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& parts, uint32_t K, DraftFormat f,
                                                unsigned threads) const {
-  if (f == DraftFormat::Exact)
-    refuse(dir_, std::string("--draft-format ") + draft_format_name(f) +
-                     " is the LiLiCorr drafter's: load bf16, int8 or int4 g64");
   if (packed_ && f != DraftFormat::Int4G64)
     refuse(dir_, std::string("an AutoRound int4 drafter loads as int4 (its own packed linears), not ") +
                      draft_format_name(f));

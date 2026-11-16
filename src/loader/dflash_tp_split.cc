@@ -33,7 +33,6 @@ const uint8_t* data_of(const DFlashHostLinear& h) {
                                              : reinterpret_cast<const uint8_t*>(h.int4.data());
 }
 DFlashHostLinear empty_like(const DFlashHostLinear& h, uint32_t K, uint32_t N) {
-  require(h.gs.empty(), "an NVFP4 output scale (the LiLiCorr drafter's) has no TP form");
   DFlashHostLinear o;
   o.kind = h.kind;
   o.K = K;

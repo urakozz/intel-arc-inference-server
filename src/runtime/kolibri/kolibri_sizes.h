@@ -210,7 +210,7 @@ size_t verify_link_bytes(const model::Kolibri1Desc& d, uint32_t dev);
 size_t verify_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, uint32_t M);
 // Layer l's route rows in a scratch of M rows (route_at at M = 1).
 inline size_t route_at_rows(uint32_t layer, uint32_t M) { return size_t(layer) * M * kRouteWords * 4; }
-// The drafter's prefill tail (Bolt's rule, spec 26 Decision 7): the first row of chunk [pos, pos + C) whose taps the drafter
+// The drafter's prefill tail: the first row of chunk [pos, pos + C) whose taps the drafter
 // projects - the rows inside its window of the call's end, and with a block hook the last min(C, window) rows of a chunk
 // ending at a mid-prompt block end. C when none.
 uint32_t drafter_prefill_r0(uint32_t pos, uint32_t C, uint32_t end, uint32_t window, bool hooked, uint32_t block);

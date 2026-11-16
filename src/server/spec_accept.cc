@@ -171,53 +171,6 @@ AcceptResult accept_sparse(const float* p_rows, const SparseQ* q, const uint32_t
   return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
 }
 
-// Spec 26c: accept_sparse / accept_point_mass with the caller's filter (spec_accept.h) - the same bodies, filter(row) for
-// filter_probs(row, vocab_used, s).
-AcceptResult accept_sparse_rows(const float* p_rows, const SparseQ* q, const uint32_t* drafts, uint32_t k, size_t row_stride,
-                                const RowFilter& filter, std::mt19937_64& rng) {
-  std::uniform_real_distribution<double> uniform(0.0, 1.0);
-  for (uint32_t i = 0; i < k; ++i) {
-    const double qd = q[i].prob(drafts[i]);
-    if (!(qd > 0.0))
-      throw std::logic_error("server::accept_sparse_rows: draft " + std::to_string(i) + " (id " +
-                             std::to_string(drafts[i]) +
-                             ") has q = 0 - it is not one of the row's candidates the walk could draw");
-    const FilteredProbs p = filter(p_rows + i * row_stride);
-    const double pd = p.prob(drafts[i]);
-    if (uniform(rng) < std::min(1.0, pd / qd)) continue;   // accepted with probability min(1, p/q)
-    std::vector<double> residual(p.ids.size());
-    double total = 0.0;
-    for (size_t r = 0; r < p.ids.size(); ++r) {
-      residual[r] = std::max(0.0, p.probs[r] / p.mass - q[i].prob(p.ids[r]));
-      total += residual[r];
-    }
-    if (!(total > 0.0)) return {i, draw(p, rng)};
-    std::discrete_distribution<uint32_t> d(residual.begin(), residual.end());
-    return {i, p.ids[d(rng)]};
-  }
-  return {k, draw(filter(p_rows + k * row_stride), rng)};
-}
-
-AcceptResult accept_point_mass_rows(const float* p_rows, const uint32_t* drafts, uint32_t k, size_t row_stride,
-                                    const RowFilter& filter, std::mt19937_64& rng) {
-  std::uniform_real_distribution<double> uniform(0.0, 1.0);
-  for (uint32_t i = 0; i < k; ++i) {
-    const FilteredProbs p = filter(p_rows + i * row_stride);
-    const double pd = p.prob(drafts[i]);
-    if (uniform(rng) < pd) continue;   // accepted with probability p(d_i)
-    std::vector<double> residual(p.ids.size());
-    double total = 0.0;
-    for (size_t r = 0; r < p.ids.size(); ++r) {
-      residual[r] = p.ids[r] == drafts[i] ? 0.0 : p.probs[r];
-      total += residual[r];
-    }
-    if (!(total > 0.0)) return {i, draw(p, rng)};
-    std::discrete_distribution<uint32_t> d(residual.begin(), residual.end());
-    return {i, p.ids[d(rng)]};
-  }
-  return {k, draw(filter(p_rows + k * row_stride), rng)};
-}
-
 AcceptResult accept_point_mass(const float* p_rows, const uint32_t* drafts, uint32_t k,
                                uint32_t vocab_used, size_t row_stride, const Sampling& s,
                                std::mt19937_64& rng) {

@@ -30,21 +30,8 @@ target_link_libraries(b70_qwen4exp_loader PUBLIC b70_loader b70_qwen4exp_model b
 # Beside the target's loader (not touched): the host half (dflash_repack.cc - the checkpoint held to its config and
 # names, every piece in its device form, no Level Zero: tests/loader/dflash_loader_test.cc runs it on any host) and
 # the upload beside a loaded target (dflash_loader.cc: loader::load_drafter).
-# Spec 26b: + the LiLiCorr drafter's host half beside it (nvfp4.cc - NVFP4 decoded exactly and the formats from (W', g);
-# lilicorr_repack.cc - its checkpoint held to its config and names, every piece in its device form; lilicorr_loader.cc -
-# the upload: loader::load_lilicorr).
 # Spec 19 v3c: + dflash_tp_split.cc - a TP card's half of every drafter linear, on the host.
-add_library(b70_dflash_loader STATIC dflash_repack.cc dflash_loader.cc dflash_tp_split.cc nvfp4.cc lilicorr_repack.cc
-                                     lilicorr_loader.cc)
+add_library(b70_dflash_loader STATIC dflash_repack.cc dflash_loader.cc dflash_tp_split.cc)
 target_include_directories(b70_dflash_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_dflash_loader PUBLIC b70_loader b70_dflash_model b70_l0)
 
-# --- Spec 25b: Nemotron 3.5 Bolt 74B-A9B ---------------------------------------------------------------------------
-# The Bolt loader, beside the others (none touched): the host half (bolt_repack.cc - no Level Zero, run on any host by
-# tests/loader/bolt_repack_test.cc and bolt_synth_host_test.cc; the checkpoint driver BoltCheckpoint is header-only in
-# bolt_loader.h) and the upload onto one or two devices (bolt_loader.cc, Task 5).
-# b70_bolt_plan (src/runtime/bolt): the memory plan - linked so load_bolt can call runtime::bolt::require_fits before its
-# first allocation.
-add_library(b70_bolt_loader STATIC bolt_repack.cc bolt_loader.cc)
-target_include_directories(b70_bolt_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_bolt_loader PUBLIC b70_loader b70_bolt_model b70_l0 b70_bolt_plan)
