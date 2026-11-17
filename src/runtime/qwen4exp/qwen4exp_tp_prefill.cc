@@ -59,7 +59,6 @@ struct Q4TpPrefillState {
           yf(c, l0::MemKind::Device, size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4, 4096),
           H1(c, l0::MemKind::Device, size_t(kPfC) * one.hc_n() * 2),
           inj1(c, l0::MemKind::Device, size_t(kPfC) * one.hc * 4),
-          cand(c, l0::MemKind::Device, size_t(kTpPfChunks) * 2 * kPfC * kTpCandW * 4),
           ctl(c, l0::MemKind::Host, kTpPfChunks * sizeof(Control)) {
       std::memset(ctl.ptr(), 0, ctl.size());
       const uint32_t ord = copy_ordinal(c.device());
@@ -89,7 +88,6 @@ struct Q4TpPrefillState {
     l0::Mem fold;       // fp32 [chunk][2 slots][2 slices][kPfC][hidden]
     l0::Mem yf;         // fp32 [tmax x 32][hidden]
     l0::Mem H1, inj1;   // the pair's second chunk's residual rows and inject weights (the first's are s.H / s.inj)
-    l0::Mem cand;       // u32 [chunk][2 planes][kPfC][kTpCandW]: the split selection's candidates
     l0::Mem ctl;        // host: each chunk's Control
     size_t hidden = 0;
     std::array<Q4TpPrefill, kTpPfChunks> tp;
@@ -98,9 +96,9 @@ struct Q4TpPrefillState {
     // card's widths (Qwen4ExpMtpPrefill::partials / q16)
     std::unique_ptr<l0::Mem> mtp_R, hctl, mtp_part, mtp_q16;
   };
-  // [chunk][sent card 0 | sent card 1 | ready card 0 | ready card 1 | the split selection's: the same four][unit]
+  // [chunk][sent card 0 | sent card 1 | ready card 0 | ready card 1][unit]
   Q4TpPrefillState(l0::Context& d0, l0::Context& d1, uint32_t units)
-      : ev(d0, {&d0, &d1}, kTpPfChunks * 8 * units), units(units) {}
+      : ev(d0, {&d0, &d1}, kTpPfChunks * 4 * units), units(units) {}
   ~Q4TpPrefillState() {   // never free a scratch under a running list
     release();
     for (auto& d : dev)
@@ -153,7 +151,7 @@ void Qwen4ExpTpEngine::prepare_prefill() {
     ps->dev[r] = std::make_unique<Q4TpPrefillState::Dev>(cards_[r]->ctx, cards_[r]->desc, d, max_len_);
     ps->dev[r]->hidden = d.hidden;
     require(ps->dev[r]->s.bytes() + ps->dev[r]->fold.size() + ps->dev[r]->yf.size() + ps->dev[r]->H1.size() +
-                    ps->dev[r]->inj1.size() + ps->dev[r]->cand.size() ==
+                    ps->dev[r]->inj1.size() ==
                 prefill_sizes(cards_[r]->desc, max_len_).total() + tp_prefill_bytes(d),
             "card " + std::to_string(r) + "'s prefill allocation is not the plan's (prefill_sizes + tp_prefill_bytes)");
   }
@@ -184,12 +182,10 @@ void Qwen4ExpTpEngine::prepare_prefill() {
       t.yf = D.yf.as<float>();
       t.ev = &ps->ev;
       t.units = ps->units;
-      t.ev_off = h * 8 * ps->units;
+      t.ev_off = h * 4 * ps->units;
       t.H = h ? D.H1.ptr() : nullptr;
       t.inj = h ? D.inj1.ptr() : nullptr;
       t.bcs = overlap ? D.bcs : nullptr;
-      t.cand = D.cand.as<uint32_t>() + size_t(h) * 2 * kPfC * kTpCandW;
-      t.peer_cand = P.cand.as<uint32_t>() + size_t(h) * 2 * kPfC * kTpCandW;
     }
   }
   pf_settle_ = [ps] { return ps->settle(); };

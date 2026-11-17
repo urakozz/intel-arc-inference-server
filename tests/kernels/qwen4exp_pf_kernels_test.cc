@@ -9,10 +9,7 @@
 //      columns) exact; the HC down through pf_gemm_T0 at pitch 512 within cosine 0.99999 of fp64;
 //   2. 21-QFN-v1c's HC at M = 2048: combine _E / _S1 / _Y / _X / _Y_NN and the up-mix at pitch 512 bitwise q4ref's;
 //   3. the indexer over chunks (q4_qsa_prep _PF + q4_qsa_ring: q, the compressed keys, the tail ring == decode's) and
-//      score + select at M = 2048 over a sparse chunk - bitwise; with the tensor-parallel binaries, the split selection
-//      (q4_qsa_score_tp / _select_tp on both halves + q4_qsa_merge) == score + select, lists and diagnostics bitwise,
-//      over that chunk and over chunks at 4096 (the split's first) and 30000 with all-zero scores, three-value ties,
-//      a tied window across n / 2 and distinct scores;
+//      score + select at M = 2048 over a sparse chunk - bitwise;
 //   4. the PLE over a chunk: q4_ple_gather _PF (the tables in device memory behind the pointer table) ids / rows,
 //      and gate / conv / ring == q4pf::ple_chunk bitwise, through chunks 5, 16, 17, 40;
 //   5. the router over the chunk (pf_ab_proj rows bitwise decode's gemv_bf16) and decode's q4_route on grid (1, C):
@@ -36,7 +33,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -322,69 +318,6 @@ void indexer(Dev& dv) {
   }
   std::printf("3. the indexer over chunks 9, 2048, 1, 2, 300, 2048 (q, keys, the tail ring == decode's) and score + "
               "select at M = %u over 2360..4407: bitwise\n", kC);
-  if (!std::ifstream(kernels::path(kq::tp_pf_qsa_variant())).good()) {
-    std::printf("3. the split selection: SKIP (%s is not built: B70_TP=OFF)\n", kq::tp_pf_qsa_variant().c_str());
-    return;
-  }
-  // the split selection against score + select: the scores of each half bitwise, then the lists and diagnostics
-  const auto split = [&](const l0::Mem& sx, uint32_t px, uint32_t sw, const char* what) {
-    const std::string tv = kq::tp_pf_qsa_variant();
-    l0::Mem l1 = dv.zeros(size_t(C) * kListRow * 4), l2 = dv.zeros(size_t(C) * kListRow * 4), d1 = dv.zeros(size_t(C) * 8),
-            d2 = dv.zeros(size_t(C) * 8), cand = dv.zeros(size_t(2) * kC * kq::kCandW * 4);
-    dv.set_ctl(px, C);
-    dv.go(kq::pf_qsa_variant(), "q4_qsa_select", 1, C, 1,
-          {PtrArg(dv.ctrl.ptr()), PtrArg(sx.ptr()), arg_val(sw), PtrArg(l1.ptr()), PtrArg(d1.ptr())});
-    for (uint32_t part = 0; part < 2; ++part)
-      dv.go(tv, "q4_qsa_select_tp", 1, C, 1,
-            {PtrArg(dv.ctrl.ptr()), PtrArg(sx.ptr()), arg_val(sw),
-             PtrArg(static_cast<uint32_t*>(cand.ptr()) + size_t(part) * kC * kq::kCandW), arg_val(part)});
-    dv.go(tv, "q4_qsa_merge", 1, C, 1, {PtrArg(dv.ctrl.ptr()), PtrArg(cand.ptr()), PtrArg(l2.ptr()), PtrArg(d2.ptr())});
-    const std::vector<uint32_t> a = dv.rd<uint32_t>(l1, size_t(C) * kListRow), b = dv.rd<uint32_t>(l2, size_t(C) * kListRow),
-                                da = dv.rd<uint32_t>(d1, size_t(C) * 2), db = dv.rd<uint32_t>(d2, size_t(C) * 2);
-    uint32_t ties = 0;
-    for (uint32_t m = 0; m < C; ++m) {
-      const uint32_t* x = a.data() + size_t(m) * kListRow;
-      const uint32_t* y = b.data() + size_t(m) * kListRow;
-      CHECK_EQ(x[kCountW], y[kCountW]);
-      CHECK(std::equal(x, x + x[kCountW], y));
-      CHECK_EQ(da[m * 2], db[m * 2]);
-      CHECK_EQ(da[m * 2 + 1], db[m * 2 + 1]);
-      ties += da[m * 2] == da[m * 2 + 1];
-    }
-    std::printf("3. the split selection at %u..%u, %s: lists and diagnostics == score + select (%u rows cut inside a "
-                "tie)\n", px, px + C - 1, what, ties);
-  };
-  {   // the chunk above: q4_qsa_score_tp's halves == q4_qsa_score's scores, then the selection
-    l0::Mem s2 = dv.zeros(size_t(C) * stride * 4);
-    dv.set_ctl(p0, C);
-    for (uint32_t part = 0; part < 2; ++part)
-      dv.go(kq::tp_pf_qsa_variant(), "q4_qsa_score_tp", kq::pf_score_tp_x(p0, C), kq::pf_score_groups(C), 1,
-            {PtrArg(dv.ctrl.ptr()), PtrArg(q.ptr()), PtrArg(keys.ptr()), PtrArg(s2.ptr()), arg_val(stride), arg_val(part)});
-    const std::vector<float> s2d = dv.rd<float>(s2, size_t(C) * stride);
-    for (uint32_t m = 0; m < C; ++m)
-      for (uint32_t b = 0; b < (p0 + m + 1) / 4; ++b)
-        CHECK_EQ(qr::as_u32(s2d[size_t(m) * stride + b]), qr::as_u32(sd[size_t(m) * stride + b]));
-    split(sc, p0, stride, "the indexer's scores (both halves of q4_qsa_score_tp bitwise q4_qsa_score's)");
-  }
-  const uint32_t st = 8192;   // max_len 32768
-  for (uint32_t pz : {4096u, 30000u}) {
-    const char* names[] = {"all-zero scores", "scores in {0, 1, 2}", "a tied window across n / 2", "distinct scores"};
-    for (uint32_t kind = 0; kind < 4; ++kind) {
-      Rng r(70 + kind + pz);
-      std::vector<float> h(size_t(C) * st, 0.0f);
-      for (uint32_t m = 0; m < C; ++m) {
-        const uint32_t n = (pz + m + 1) / 4;
-        for (uint32_t b = 0; b < n; ++b) {
-          float v = 0.0f;
-          if (kind == 1) v = float(r.u32() % 3);
-          if (kind == 2) v = (b + 300 >= n / 2 && b < n / 2 + 300) ? 4.0f : float(r.u32() % 4);
-          if (kind == 3) v = r.uni(0.f, 10.f);
-          h[size_t(m) * st + b] = v;
-        }
-      }
-      split(dv.up(h), pz, st, names[kind]);
-    }
-  }
 }
 
 // ---- 4. the PLE over a chunk -----------------------------------------------------------------------------------------

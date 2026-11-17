@@ -41,8 +41,6 @@ static_assert(kq::kPfSlab == kernels::kPfSlabWidth, "a whole slab is pf_gemm's 1
 static_assert(kRouteWords == kq::route::kWords && kListRow == kq::kListRow && kCountWord == kq::kCountWord,
               "the route / selection rows moved");
 static_assert(kPfDenseLast + 1 == kq::kTopBlocks * kq::kBlock + 3, "the dense range is the rows seeing <= 2051 positions");
-static_assert(kTpCandW == kq::kCandW && kTpSplitFrom > kPfDenseLast,
-              "the split selection's candidate row moved, or it starts where a row can be dense");
 static_assert(offsetof(Control, pos) == kernels::ctrl_index::kPos * 4 &&
                   offsetof(Control, n_active) == kernels::ctrl_index::kNActive * 4,
               "runtime::Control and CTRL_DEFINES disagree");
@@ -59,7 +57,7 @@ class Walk {
        bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl, const uint32_t* ids, const Q4TpPrefill* tp)
       : cx_(cx), kc_(kc), s_(s), m_(m), part_(part), d_(m.desc), c_(tp ? *tp->card : m.desc), b_(b), pos_(pos), C_(C),
         eager_(eager), injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)), mtp_(mtp), ctl_(ctl),
-        ids_(ids), tp_(tp), split_(tp && tp_split_select(pos)), ctrl_(ctl), rows_(C) {}
+        ids_(ids), tp_(tp), ctrl_(ctl), rows_(C) {}
 
   void run() {
     check();
@@ -84,9 +82,8 @@ class Walk {
   }
 
   // Plan 21v2b Task 4: a tensor-parallel card's chunk a unit at a time (prefill_pair_tp): tp_begin, then for each
-  // unit u < 2 x layers tp_unit(u) - its body, ending in this card's copy and sent(rank, u) (a QSA mixer under the
-  // split selection stops after its candidate copy: tp_rest, once the peer's copy is appended, runs the rest) - and,
-  // once the peer's unit u is appended too, tp_wait() (the wait for sent(1 - rank, u)); tp_end checks the launch count.
+  // unit u < 2 x layers tp_unit(u) - its body, ending in this card's copy and sent(rank, u) - and, once the peer's
+  // unit u is appended too, tp_wait() (the wait for sent(1 - rank, u)); tp_end checks the launch count.
   void tp_begin() {
     check();
     launch(kc_(kq::pf_embed_variant(), "pf_embed_gather"), 1, C_, 1,
@@ -110,20 +107,6 @@ class Walk {
       moe(l, L);
     }
   }
-  // The split selection's second part (prefill_pair_tp, after both cards' tp_unit(u)): the wait for the peer's
-  // candidates, q4_qsa_merge, then the unit's attention and o_proj. Nothing when the unit was not a QSA mixer.
-  void tp_rest() {
-    if (!merge_) return;
-    merge_ = false;
-    const uint32_t l = unit_ / 2, qi = d_.qsa_before(l);
-    cx_.wait_event(cand_ev(4 + 1 - tp_->rank));
-    // q4_qsa_merge(ctrl, cand, list, diag) - grid (1, C): both planes into the rows' lists
-    launch(kc_(kq::tp_pf_qsa_variant(), "q4_qsa_merge"), 1, C_, 1,
-           {PtrArg(ctrl()), PtrArg(tp_->cand), PtrArg(at(s_.lists, pf_list_at(qi))),
-            PtrArg(at(s_.diag, pf_diag_at(qi)))});
-    prefill::profile_wait(cx_, Phase::kAttnPrep);
-    attend(l);
-  }
   void tp_wait() {
     const uint32_t u = unit_ - 1, r = tp_->rank;
     cx_.wait_event(sent(1 - r, u));
@@ -131,8 +114,8 @@ class Walk {
   }
   void tp_end() {
     if (mtp_) mtp_pass();   // Task 5: the head's pass on its card, after the last unit's crossing landed
-    const size_t want = prefill_device_launches(c_, model::Q4Placement::one(c_), 0, pos_, C_) +
-                        tp_split_launches(c_, pos_) + (mtp_ ? mtp_prefill_launches(pos_, C_) : 0);
+    const size_t want =
+        prefill_device_launches(c_, model::Q4Placement::one(c_), 0, pos_, C_) + (mtp_ ? mtp_prefill_launches(pos_, C_) : 0);
     require(unit_ == tp_->units && n_ == want, "card " + std::to_string(tp_->rank) + "'s chunk at " +
                                                    std::to_string(pos_) + " appended " + std::to_string(n_) +
                                                    " launches, not the " + std::to_string(want) + " it plans");
@@ -158,10 +141,6 @@ class Walk {
               "a tensor-parallel chunk without its embedding, PLE table, fold slots, down rows or events");
       require(!injected_ && !two_ && !eager_ && d_.forms.shared == model::Q4Form::Int4,
               "a tensor-parallel chunk runs the flash attention, the int4 shared expert and no injected selection");
-      if (split_)
-        require(tp_->cand && tp_->peer_cand && tp_->ev->size() >= tp_->ev_off + 8 * tp_->units,
-                "a tensor-parallel chunk from position " + std::to_string(kTpSplitFrom) +
-                    " on without the split selection's candidate rows or events");
     } else {
       require(part_.device == b_.device && part_.first == b_.placement.first(b_.device) &&
                   part_.end == b_.placement.end(b_.device),
@@ -397,11 +376,6 @@ class Walk {
     launch(kc_(qv, "q4_qsa_ring"), 1, kIdxTail, 1, {PtrArg(ctrl()), PtrArg(s_.idx_f32.ptr()), PtrArg(b_.tail_layer(l))});
     const uint32_t sparse = C_ - dense_;
     const uint32_t stride = b_.max_len / d_.idx_compress;
-    if (split_) {   // tp: this card's half and the candidate swap; tp_rest merges and attends
-      select_half(l, stride);
-      merge_ = true;
-      return;
-    }
     void* lists = injected_ ? at(*injected_, pf_list_at(qi)) : at(s_.lists, pf_list_at(qi));
     if (sparse > 0 && !injected_) {
       // q4_qsa_score(ctrl, idx_q, idx_keys, scores, stride) _PF - grid (ceil(n / 256), ceil(C / 4)), n the chunk's last
@@ -415,17 +389,6 @@ class Walk {
              {PtrArg(ctrl()), PtrArg(s_.scores.ptr()), arg_val(stride), PtrArg(lists), PtrArg(at(s_.diag, pf_diag_at(qi)))});
     }
     prefill::profile_wait(cx_, Phase::kAttnPrep);
-    attend(l);
-  }
-
-  // A QSA layer after its selection: the dense rows' flash, the sparse rows' attention over their lists, the gate,
-  // o_proj (and tp's crossing).
-  void attend(uint32_t l) {
-    const loader::Q4Layer& L = part_.layer(l);
-    const uint32_t sparse = C_ - dense_, qi = d_.qsa_before(l);
-    void* lists = injected_ ? at(*injected_, pf_list_at(qi)) : at(s_.lists, pf_list_at(qi));
-    void* kv_k = b_.k_layer(l);
-    void* kv_v = b_.v_layer(l);
     if (dense_ > 0) {
       // pf_flash_attn(Q, Kc, Vc, O, pos, C, rows) _Q24KV2 - grid (ceil(dense / 8), 2 kv heads, GQA 12 / HPW 6): the
       // dense rows [0, dense) - causal over depth pos + dense
@@ -559,33 +522,6 @@ class Walk {
     src_ = HcSrc::Y;
   }
 
-  // The split selection's first part (Q4TpPrefill::cand): this card's half of every row's blocks scored and ranked into
-  // its plane, the plane's rows copied into the peer's same plane.
-  void select_half(uint32_t l, uint32_t stride) {
-    const uint32_t r = tp_->rank;
-    const std::string tv = kq::tp_pf_qsa_variant();
-    // q4_qsa_score_tp(ctrl, idx_q, idx_keys, scores, stride, part) - grid (pf_score_tp_x, ceil(C / 4))
-    launch(kc_(tv, "q4_qsa_score_tp"), kq::pf_score_tp_x(pos_, C_), kq::pf_score_groups(C_), 1,
-           {PtrArg(ctrl()), PtrArg(s_.idx_q.ptr()), PtrArg(b_.idx_keys_layer(l)), PtrArg(s_.scores.ptr()),
-            arg_val(stride), arg_val(r)});
-    const size_t off = size_t(r) * kPfC * kTpCandW;
-    // q4_qsa_select_tp(ctrl, scores, stride, cand, part) - grid (1, C): into this card's plane
-    launch(kc_(tv, "q4_qsa_select_tp"), 1, C_, 1,
-           {PtrArg(ctrl()), PtrArg(s_.scores.ptr()), arg_val(stride), PtrArg(tp_->cand + off), arg_val(r)});
-    const size_t bytes = size_t(C_) * kTpCandW * 4;   // every row of the chunk is sparse (kTpSplitFrom)
-    if (tp_->bcs) {
-      ze_event_handle_t ready = cand_ev(6 + r);
-      cx_.signal(ready);
-      ZE_CHECK(zeCommandListAppendMemoryCopy(tp_->bcs, tp_->peer_cand + off, tp_->cand + off, bytes, cand_ev(4 + r), 1,
-                                             &ready));
-    } else {
-      cx_.copy(tp_->peer_cand + off, tp_->cand + off, bytes);
-      cx_.signal(cand_ev(4 + r));
-    }
-  }
-  // Row `row` of the chunk's event block at this unit (Q4TpPrefill::cand: 4 + card sent, 6 + card ready).
-  ze_event_handle_t cand_ev(uint32_t row) const { return tp_->ev->handle(tp_->ev_off + row * tp_->units + unit_); }
-
   // --- plan 21-QFN-v2b Task 4: the crossing (qwen4exp_prefill.h, Q4TpPrefill) --------------------------------------------
   HcSrc moe_src() const { return tp_ ? HcSrc::Slices : HcSrc::Y; }
   // Where a row-parallel unit's output goes: the partials (one card), or this card's slice of the unit's fold slot.
@@ -711,8 +647,6 @@ class Walk {
   const Control* ctl_;              // this chunk's Control (its slot; qwen4exp_prefill.h)
   const uint32_t* ids_;             // this chunk's ids (its slot of s.ids)
   const Q4TpPrefill* tp_;           // plan 21v2b Task 4: a tensor-parallel card's chunk, or null
-  const bool split_;                // tp: the split selection runs on this chunk (tp_split_select)
-  bool merge_ = false;              // tp: the unit's QSA layer waits in tp_rest for the peer's candidates
   uint32_t unit_ = 0;               // tp: the row-parallel units crossed so far this chunk
   const float* fold_ = nullptr;     // tp: the fold slot the pending combine reads
   const void* ctrl_;                // ctl_, or the head's chunk Control for its pass
@@ -789,7 +723,7 @@ void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array
   // each preceded by its wait for the chunk's crossing of unit u - 1 (appended after the peer's copy that signals it).
   const uint32_t units = chunks[0][0].tp->units;
   for (uint32_t u = 0; u < units; ++u)
-    for (uint32_t h = 0; h < n; ++h) {
+    for (uint32_t h = 0; h < n; ++h)
       for (uint32_t r = 0; r < 2; ++r) {
         if (u == 0)
           w[h][r]->tp_begin();   // the embedding rows into the scratch's x, read by this chunk's unit 0 alone
@@ -797,8 +731,6 @@ void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array
           w[h][r]->tp_wait();
         w[h][r]->tp_unit(u);
       }
-      for (uint32_t r = 0; r < 2; ++r) w[h][r]->tp_rest();   // the split selection's waits, after both copies
-    }
   for (uint32_t h = 0; h < n; ++h)
     for (uint32_t r = 0; r < 2; ++r) {
       w[h][r]->tp_wait();

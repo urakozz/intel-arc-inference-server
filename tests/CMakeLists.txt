@@ -3431,9 +3431,7 @@ if(B70_Q4EXP AND B70_TP)
     kernel_pf_attn_prep_q16_Q12KV1 kernel_pf_attn_Q12KV1 kernel_pf_flash_attn_Q12KV1 kernel_q4_pf_sparse_attn_Q12KV1
     kernel_pf_moe_q4gemm_K2560_N640_SILU kernel_pf_moe_q4gemm_K2560_N640_SILU_TBL kernel_pf_moe_q4gemm_K320_N2560_F32
     kernel_pf_moe_q4gemm_K320_N2560_F32_TBL kernel_q4_pf_moe_combine_f32_E512_T10_D2560
-    kernel_q4_hc_combine_norm_M2048_S2 kernel_q4_hc_combine_norm_M2048_S2_NN kernel_q4_hc_combine_norm_M1_S2
-    kernel_q4_qsa_M2048_T512_W1024_PF_TP)
-  add_dependencies(qwen4exp_pf_kernels_test kernel_q4_qsa_M2048_T512_W1024_PF_TP)   # its split-selection check
+    kernel_q4_hc_combine_norm_M2048_S2 kernel_q4_hc_combine_norm_M2048_S2_NN kernel_q4_hc_combine_norm_M1_S2)
   add_executable(qwen4exp_tp_prefill_test runtime/qwen4exp_tp_prefill_test.cc)
   b70_target_kernel_dir(qwen4exp_tp_prefill_test)
   target_include_directories(qwen4exp_tp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests

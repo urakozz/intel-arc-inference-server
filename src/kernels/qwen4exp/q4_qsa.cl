@@ -168,32 +168,25 @@ __kernel void q4_qsa_ring(__global const uint* restrict ctrl, __global const flo
 // ---------------------------------------------------------------------------------------------------------------
 #define WG_SCORE 256
 #ifdef QSA_PF
-// Rows m0 .. m0 + SCORE_R - 1 (the chunk's rows past n_rows: none), each over its block range [lo_j, hi_j) - the whole
-// row's [0, n_j) (part 2), or the split selection's half (part 0: [0, n_j / 2), part 1: [n_j / 2, n_j); QSA_TP). Both
-// ends grow with j, so the group covers blocks lo_0 + [256 g, 256 g + 256), exits whole past the last row's hi, and
-// row j writes the blocks inside its own range.
-inline void score_rows(__global const uint* restrict ctrl, __global const float* restrict idx_q,
-                       __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride, uint part,
-                       __local float* q) {
+// Rows m0 .. m0 + SCORE_R - 1 (the chunk's rows past n_rows: none) over blocks [256 g, 256 g + 256): the group exits
+// whole past its last row's complete blocks; row j writes block b < its own n.
+__attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))
+__kernel void q4_qsa_score(__global const uint* restrict ctrl, __global const float* restrict idx_q,
+                           __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride) {
   const uint g = get_group_id(0);
   const uint m0 = get_group_id(1) * SCORE_R;
   const uint lid = get_local_id(0);
   const uint C = n_rows(ctrl);
   if (m0 >= C) return;   // uniform
   const uint rows = min((uint)SCORE_R, C - m0), p0 = ctrl[CTRL_POS] + m0;
-  uint lo[SCORE_R], hi[SCORE_R];
-  for (uint j = 0; j < SCORE_R; ++j) {
-    const uint n = (p0 + min(j, rows - 1) + 1) / BLK;
-    lo[j] = part == 1 ? n / 2 : 0;
-    hi[j] = part == 0 ? n / 2 : n;
-  }
-  const uint b0 = lo[0] + g * WG_SCORE, bend = hi[rows - 1];
-  if (b0 >= bend) return;   // uniform
+  const uint nl = (p0 + rows) / BLK;   // the last row's complete blocks
+  if (g * WG_SCORE >= nl) return;      // uniform
+  __local float q[SCORE_R * IDX_HEADS * IDX_DIM];
   for (uint t = lid; t < SCORE_R * IDX_HEADS * IDX_DIM; t += WG_SCORE)
     q[t] = t < rows * IDX_HEADS * IDX_DIM ? idx_q[(size_t)m0 * IDX_HEADS * IDX_DIM + t] : 0.0f;
   barrier(CLK_LOCAL_MEM_FENCE);
-  const uint b = b0 + lid;
-  if (b >= bend) return;
+  const uint b = g * WG_SCORE + lid;
+  if (b >= nl) return;
   __global const ushort* restrict key = idx_keys + (size_t)b * IDX_DIM;
   float a[SCORE_R][IDX_HEADS];
   for (uint j = 0; j < SCORE_R; ++j)
@@ -208,17 +201,11 @@ inline void score_rows(__global const uint* restrict ctrl, __global const float*
           a[j][hh] = fma(q[(j * IDX_HEADS + hh) * IDX_DIM + t + e], k[e], a[j][hh]);
   }
   for (uint j = 0; j < rows; ++j) {
-    if (b < lo[j] || b >= hi[j]) continue;   // outside row j's range
+    if (b >= (p0 + j + 1) / BLK) continue;   // past row j's complete blocks
     float r[IDX_HEADS];
     for (uint hh = 0; hh < IDX_HEADS; ++hh) r[hh] = a[j][hh] > 0.0f ? a[j][hh] : 0.0f;
     scores[(size_t)(m0 + j) * stride + b] = (((r[0] + r[1]) + r[2]) + r[3]) / SQRT_IDX;
   }
-}
-__attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))
-__kernel void q4_qsa_score(__global const uint* restrict ctrl, __global const float* restrict idx_q,
-                           __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride) {
-  __local float q[SCORE_R * IDX_HEADS * IDX_DIM];
-  score_rows(ctrl, idx_q, idx_keys, scores, stride, 2, q);
 }
 #else
 __attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))
@@ -369,266 +356,3 @@ __kernel void q4_qsa_select(__global const uint* restrict ctrl, __global const f
     diag[m * 2 + 1] = all_ties > need ? as_float(T) : as_float(cnt[0]);
   }
 }
-
-#ifdef QSA_TP
-// ---------------------------------------------------------------------------------------------------------------
-// Plan 21-QFN-v2b Task 4, the split selection (tensor parallel, `-DQSA_TP` on the prefill form only): row m's n
-// complete blocks are cut at n / 2 - card 0 scores and ranks [0, n / 2), card 1 [n / 2, n) - and each card keeps its
-// half's first CAND = TOPB + 1 blocks in q4_qsa_select's order (score desc, block asc). The order is total, so the
-// row's top TOPB blocks and its 513th are inside the two lists; the cards swap their lists and q4_qsa_merge selects
-// over the union in the same order: the row's list and diagnostic are q4_qsa_select's, bit for bit. A candidate row (u32
-// [CAND_W]): keys [0, CAND), block ids [CAND, 2 CAND), the count at 2 CAND - block-ascending, card 0's below card 1's.
-// The scoring is the prefill form's groups of SCORE_R rows (score_rows) over each row's half.
-#ifndef QSA_PF
-#error "q4_qsa: QSA_TP is the prefill form's (QSA_PF)"
-#endif
-#define CAND (TOPB + 1)
-#define CAND_W (2 * CAND + 2)   /* kernels::qwen4exp::kCandW */
-
-// q4_qsa_score_tp(ctrl, idx_q, idx_keys, scores, stride, part)   grid (pf_score_tp_x, ceil(M / SCORE_R)), WG 256 -
-// q4_qsa_score's groups over each row's half `part` (the card's rank): every score its arithmetic at its block's index.
-__attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))
-__kernel void q4_qsa_score_tp(__global const uint* restrict ctrl, __global const float* restrict idx_q,
-                              __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride,
-                              uint part) {
-  __local float q[SCORE_R * IDX_HEADS * IDX_DIM];
-  score_rows(ctrl, idx_q, idx_keys, scores, stride, part, q);
-}
-
-// q4_qsa_select_tp(ctrl, scores, stride, cand, part)   grid (1, M), WG SEL_WG - the half's first min(CAND, its blocks)
-// in (score desc, block asc) into cand[m] (this card's plane), block-ascending: q4_qsa_select's radix select and
-// lowest-index tie rule over the half with CAND in place of TOPB. Rows with n <= TOPB write nothing (the merge writes
-// the identity list).
-__attribute__((reqd_work_group_size(SEL_WG, 1, 1)))
-__kernel void q4_qsa_select_tp(__global const uint* restrict ctrl, __global const float* restrict scores, uint stride,
-                               __global uint* restrict cand, uint part) {
-  const uint m = get_group_id(1);
-  const uint lid = get_local_id(0);
-  if (m >= n_rows(ctrl)) return;   // uniform
-  const uint n = (ctrl[CTRL_POS] + m + 1) / BLK;
-  if (n <= TOPB) return;   // uniform
-  const uint lo = part ? n / 2 : 0, cn = (part ? n : n / 2) - lo;
-  __global const uint* restrict key = (__global const uint*)(scores + (size_t)m * stride) + lo;
-  __global uint* restrict row = cand + (size_t)m * CAND_W;
-  if (cn <= CAND) {   // uniform: every block of the half
-    for (uint b = lid; b < cn; b += SEL_WG) {
-      row[b] = key[b];
-      row[CAND + b] = lo + b;
-    }
-    if (lid == 0) row[2 * CAND] = cn;
-    return;
-  }
-  __local uint hist[256];
-  __local uint sh[2];   // [0] prefix, [1] need
-  __local uint cnt[SEL_WG];
-  // 1. the CAND-th largest key T and `need` (q4_qsa_select's step 1 over the half)
-  uint prefix = 0u, mask = 0u, need = CAND;
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    for (uint d = lid; d < 256; d += SEL_WG) hist[d] = 0u;
-    barrier(CLK_LOCAL_MEM_FENCE);
-    for (uint b = lid; b < cn; b += SEL_WG) {
-      const uint k = key[b];
-      if ((k & mask) == prefix) atomic_inc(&hist[(k >> shift) & 255u]);
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (lid == 0) {
-      uint cum = 0u, dg = 255u;
-      for (int d = 255; d >= 0; --d) {
-        if (cum + hist[d] >= need) {
-          dg = (uint)d;
-          break;
-        }
-        cum += hist[d];
-      }
-      sh[0] = prefix | (dg << shift);
-      sh[1] = need - cum;
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    prefix = sh[0];
-    need = sh[1];
-    mask |= 255u << shift;
-    barrier(CLK_LOCAL_MEM_FENCE);
-  }
-  const uint T = prefix;
-  // 2. contiguous chunks per lane: the ties before each lane (exclusive scan, lane 0, ascending lanes)
-  const uint chunk = (cn + SEL_WG - 1) / SEL_WG;
-  const uint b0 = min(lid * chunk, cn), b1 = min(b0 + chunk, cn);
-  uint ties = 0u;
-  for (uint b = b0; b < b1; ++b) ties += key[b] == T ? 1u : 0u;
-  cnt[lid] = ties;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (lid == 0) {
-    uint run = 0u;
-    for (uint l = 0; l < SEL_WG; ++l) {
-      const uint t = cnt[l];
-      cnt[l] = run;
-      run += t;
-    }
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  const uint tie_before = cnt[lid];
-  // 3. the lane's kept blocks: key > T, or a tie among the `need` lowest-index ones - written in block order
-  uint sel = 0u, t_seen = tie_before;
-  for (uint b = b0; b < b1; ++b) {
-    const uint k = key[b];
-    if (k > T) ++sel;
-    else if (k == T && t_seen++ < need) ++sel;
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  cnt[lid] = sel;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (lid == 0) {
-    uint run = 0u;
-    for (uint l = 0; l < SEL_WG; ++l) {
-      const uint t = cnt[l];
-      cnt[l] = run;
-      run += t;
-    }
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  uint at = cnt[lid];
-  t_seen = tie_before;
-  for (uint b = b0; b < b1; ++b) {
-    const uint k = key[b];
-    if (k > T || (k == T && t_seen++ < need)) {
-      row[at] = k;
-      row[CAND + at] = lo + b;
-      ++at;
-    }
-  }
-  if (lid == 0) row[2 * CAND] = CAND;
-}
-
-// q4_qsa_merge(ctrl, cand, list, diag)   grid (1, M), WG SEL_WG - cand: both cards' planes [2][M][CAND_W], card 0's
-// first (each card's own plane and the peer's copy). n <= TOPB: q4_qsa_select's identity list. Else q4_qsa_select over
-// the union - card 0's candidates then card 1's, block-ascending, so index order is block order: the radix select of
-// the TOPB-th key T, the ties taken lowest index first, the kept blocks written ascending and expanded to their 4
-// positions, the open block's tail, the count and diag {T, the 513th} - the row's list and diagnostic, bit for bit.
-__attribute__((reqd_work_group_size(SEL_WG, 1, 1)))
-__kernel void q4_qsa_merge(__global const uint* restrict ctrl, __global const uint* restrict cand,
-                           __global uint* restrict list, __global float* restrict diag) {
-  const uint m = get_group_id(1);
-  const uint lid = get_local_id(0);
-  if (m >= n_rows(ctrl)) return;   // uniform
-  const uint p = ctrl[CTRL_POS] + m;
-  const uint n = (p + 1) / BLK;
-  __global uint* restrict row = list + (size_t)m * LIST_ROW;
-  if (n <= TOPB) {   // every visible position: the identity list
-    for (uint q = lid; q <= p; q += SEL_WG) row[q] = q;
-    if (lid == 0) {
-      row[COUNT_W] = p + 1;
-      diag[m * 2] = INFINITY;
-      diag[m * 2 + 1] = -INFINITY;
-    }
-    return;
-  }
-  __global const uint* restrict c0 = cand + (size_t)m * CAND_W;
-  __global const uint* restrict c1 = c0 + (size_t)M * CAND_W;
-  const uint n0 = c0[2 * CAND], u = n0 + c1[2 * CAND];
-  __local uint key[2 * CAND], bid[2 * CAND];
-  for (uint i = lid; i < u; i += SEL_WG) {
-    key[i] = i < n0 ? c0[i] : c1[i - n0];
-    bid[i] = i < n0 ? c0[CAND + i] : c1[CAND + i - n0];
-  }
-  __local uint hist[256];
-  __local uint sh[3];   // [0] prefix, [1] need, [2] every key equal to T
-  __local uint cnt[SEL_WG];
-  barrier(CLK_LOCAL_MEM_FENCE);
-  // 1. the TOPB-th largest key T and `need` (q4_qsa_select's step 1 over the union)
-  uint prefix = 0u, mask = 0u, need = TOPB;
-  for (int shift = 24; shift >= 0; shift -= 8) {
-    for (uint d = lid; d < 256; d += SEL_WG) hist[d] = 0u;
-    barrier(CLK_LOCAL_MEM_FENCE);
-    for (uint i = lid; i < u; i += SEL_WG) {
-      const uint k = key[i];
-      if ((k & mask) == prefix) atomic_inc(&hist[(k >> shift) & 255u]);
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    if (lid == 0) {
-      uint cum = 0u, dg = 255u;
-      for (int d = 255; d >= 0; --d) {
-        if (cum + hist[d] >= need) {
-          dg = (uint)d;
-          break;
-        }
-        cum += hist[d];
-      }
-      sh[0] = prefix | (dg << shift);
-      sh[1] = need - cum;
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    prefix = sh[0];
-    need = sh[1];
-    mask |= 255u << shift;
-    barrier(CLK_LOCAL_MEM_FENCE);
-  }
-  const uint T = prefix;
-  // 2. contiguous chunks per lane: the ties before each lane (exclusive scan, lane 0, ascending lanes)
-  const uint chunk = (u + SEL_WG - 1) / SEL_WG;
-  const uint i0 = min(lid * chunk, u), i1 = min(i0 + chunk, u);
-  uint ties = 0u;
-  for (uint i = i0; i < i1; ++i) ties += key[i] == T ? 1u : 0u;
-  cnt[lid] = ties;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (lid == 0) {
-    uint run = 0u;
-    for (uint l = 0; l < SEL_WG; ++l) {
-      const uint t = cnt[l];
-      cnt[l] = run;
-      run += t;
-    }
-    sh[2] = run;
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  const uint tie_before = cnt[lid], all_ties = sh[2];
-  // 3. the lane's kept candidates: key > T, or a tie among the `need` lowest-index ones - ascending
-  uint sel = 0u, t_seen = tie_before;
-  for (uint i = i0; i < i1; ++i) {
-    const uint k = key[i];
-    if (k > T) ++sel;
-    else if (k == T && t_seen++ < need) ++sel;
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  cnt[lid] = sel;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (lid == 0) {
-    uint run = 0u;
-    for (uint l = 0; l < SEL_WG; ++l) {
-      const uint t = cnt[l];
-      cnt[l] = run;
-      run += t;
-    }
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  uint at = cnt[lid] * BLK;
-  t_seen = tie_before;
-  for (uint i = i0; i < i1; ++i) {
-    const uint k = key[i];
-    if (k > T || (k == T && t_seen++ < need)) {
-      for (uint j = 0; j < BLK; ++j) row[at + j] = bid[i] * BLK + j;
-      at += BLK;
-    }
-  }
-  // 4. the open block's tail, the count, the diagnostic (the 513th: T again when a tie was left, else the largest
-  //    key below T - inside the union, which holds the row's first 513)
-  const uint tail0 = n * BLK, ntail = p + 1 - tail0;
-  if (lid < ntail) row[TOPB * BLK + lid] = tail0 + lid;
-  uint below = 0u;
-  for (uint i = lid; i < u; i += SEL_WG) {
-    const uint k = key[i];
-    if (k < T) below = max(below, k);
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  cnt[lid] = below;
-  barrier(CLK_LOCAL_MEM_FENCE);
-  for (uint st = SEL_WG / 2; st > 0; st >>= 1) {
-    if (lid < st) cnt[lid] = max(cnt[lid], cnt[lid + st]);
-    barrier(CLK_LOCAL_MEM_FENCE);
-  }
-  if (lid == 0) {
-    row[COUNT_W] = TOPB * BLK + ntail;
-    diag[m * 2] = as_float(T);
-    diag[m * 2 + 1] = all_ties > need ? as_float(T) : as_float(cnt[0]);
-  }
-}
-#endif

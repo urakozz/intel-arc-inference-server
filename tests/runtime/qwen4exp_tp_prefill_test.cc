@@ -200,8 +200,7 @@ int main(int argc, char** argv) {
   size_t want = 2 * rq::kPrefillHeadLaunches;
   const model::Qwen4ExpDesc c0 = model::q4_tp_card(d, 0);
   for (uint32_t p = 0; p < n; p += rq::kPfC)
-    want += 2 * (rq::prefill_device_launches(c0, model::Q4Placement::one(c0), 0, p, std::min(rq::kPfC, n - p)) +
-                 rq::tp_split_launches(c0, p));
+    want += 2 * rq::prefill_device_launches(c0, model::Q4Placement::one(c0), 0, p, std::min(rq::kPfC, n - p));
   CHECK_EQ(tp->prefill_launches() - l0, want);
   CHECK_EQ(tp->pos(), n);
   const std::vector<float> a = logits();
