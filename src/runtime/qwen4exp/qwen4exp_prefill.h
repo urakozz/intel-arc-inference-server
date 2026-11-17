@@ -167,9 +167,12 @@ void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefil
 // fp32 [2][kPfC][hidden]) copied side by side into b.partials and folded by combine _S2 at M = 1 with the final mixer's
 // norm, the mixer, the card's vocabulary half of lm_head and tp_argmax's two stages (the card's best id and its value
 // into b.control's out_token / out_value; the host merges the two cards'). kPrefillHeadLaunches launches.
-// `H` / `inj`: the last chunk's rows when not the chunk scratch's (Q4TpPrefill::H / inj).
+// `H` / `inj`: the last chunk's rows when not the chunk scratch's (Q4TpPrefill::H / inj). `R_last` (the MTP head's
+// card): the head's pass materialised the rows and then wrote the head's input over H, so the final mixer reads that
+// row of R with nothing pending (combine _X), as prefill_head's R_last.
 void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                      const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const float* fold,
-                     uint32_t rank, const model::Qwen4ExpDesc& card, const void* H = nullptr, const void* inj = nullptr);
+                     uint32_t rank, const model::Qwen4ExpDesc& card, const void* H = nullptr, const void* inj = nullptr,
+                     const void* R_last = nullptr);
 
 }  // namespace runtime::qwen4exp

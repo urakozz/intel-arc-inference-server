@@ -9,6 +9,8 @@
 //          (2) spec 8's greedy loop at K = 1..3 (draft k, verify, accept the drafts equal to the verify's argmax,
 //              commit): the n ids equal the plain run's; acceptance printed
 //          (3) a snapshot at the prompt's end restored into a reset engine, then the loop at K 3: the same ids
+//          (4) the prompt PREFILLED (the head's pass on card 1), then the loop at K 3: the plain run's prefilled ids
+//   plain also writes each prompt's n greedy ids after a prefill (after the ingest ones)
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
 #include <cstdio>
@@ -40,9 +42,6 @@ Ids speculative(rq::Qwen4ExpTpEngine& e, uint32_t K, uint32_t n, uint64_t& draft
     const uint32_t* v = e.verify_ids();
     uint32_t j = 0;
     while (j < k && e.draft_ids()[j] == v[j]) ++j;
-    if (drafted < 3 * k)   // the first iterations' drafts against the verify's ids, printed
-      std::printf("tp-mtp:   pos %u: drafts %u %u %u, verify %u %u %u %u\n", e.pos(), e.draft_ids()[0],
-                  k > 1 ? e.draft_ids()[1] : 0, k > 2 ? e.draft_ids()[2] : 0, v[0], v[1], v[2], v[3]);
     out.push_back(x);
     for (uint32_t i = 0; i < j; ++i) out.push_back(e.draft_ids()[i]);
     drafted += k;
@@ -108,15 +107,22 @@ int main(int argc, char** argv) {
       CHECK(std::fwrite(g.data(), 4, g.size(), f) == g.size());
       std::printf("tp-mtp: plain, prompt %zu: %u greedy ids, %.1f t/s\n", len, n, e.last_tok_per_s());
     }
+    for (size_t len : lens) {
+      e.reset();
+      e.prefill(prompt(len));
+      const Ids g = e.generate(n);
+      CHECK(std::fwrite(g.data(), 4, g.size(), f) == g.size());
+    }
     std::fclose(f);
     std::printf("qwen4exp_tp_mtp_test OK\n");
     return 0;
   }
-  std::vector<Ids> plain(lens.size(), Ids(n));
+  std::vector<Ids> plain(lens.size(), Ids(n)), plain_pf(lens.size(), Ids(n));
   {
     FILE* f = std::fopen(path.c_str(), "rb");
     CHECK(f != nullptr);
     for (Ids& g : plain) CHECK(std::fread(g.data(), 4, n, f) == n);
+    for (Ids& g : plain_pf) CHECK(std::fread(g.data(), 4, n, f) == n);
     std::fclose(f);
   }
   int bad = 0;
@@ -157,6 +163,15 @@ int main(int argc, char** argv) {
     std::printf("tp-mtp: (3) prompt %zu, restored snapshot, K 3: %s (first difference at %zu), acceptance %.3f\n",
                 lens[i], f3 == n ? "the plain run's ids" : "DIFFER", f3, drafted ? double(accepted) / drafted : 0.0);
     bad += f3 != n;
+    // (4) prefilled
+    e.reset();
+    e.prefill(p);
+    drafted = accepted = 0;
+    const Ids s4 = speculative(e, rq::kMaxDraft, n, drafted, accepted);
+    const size_t f4 = first_diff(s4, plain_pf[i]);
+    std::printf("tp-mtp: (4) prompt %zu, prefilled, K 3: %s (first difference at %zu), acceptance %.3f\n", lens[i],
+                f4 == n ? "the plain run's prefilled ids" : "DIFFER", f4, drafted ? double(accepted) / drafted : 0.0);
+    bad += f4 != n;
   }
   CHECK_EQ(bad, 0);
   std::printf("qwen4exp_tp_mtp_test OK\n");

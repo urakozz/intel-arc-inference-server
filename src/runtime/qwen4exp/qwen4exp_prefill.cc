@@ -781,7 +781,8 @@ void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefil
 
 void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                      const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const float* fold,
-                     uint32_t rank, const model::Qwen4ExpDesc& card, const void* H, const void* inj) {
+                     uint32_t rank, const model::Qwen4ExpDesc& card, const void* H, const void* inj,
+                     const void* R_last) {
   const model::Qwen4ExpDesc& d = m.desc;
   if (last_row >= kPfC) throw std::runtime_error("runtime::qwen4exp::prefill_head_tp: last_row past kPfC");
   if (!part.final_mixer || !part.lm_head || part.lm_head->kind != model::WeightKind::Int8 ||
@@ -793,6 +794,11 @@ void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPre
   const loader::Q4HcOffsets o = loader::q4_hc_offsets(d, false);
   // the last row of both slices side by side: combine _S2 at M = 1 reads [2][1][2560]
   const size_t row = size_t(d.hidden) * 4;
+  if (R_last) {   // the head's card: the materialised row, nothing pending
+    cx.launch(kc(kq::hc_combine_norm_variant(1, HcSrc::None, 0, true), "q4_hc_combine_norm"), d.hc, 1, 1,
+              {PtrArg(b.control.ptr()), PtrArg(R_last), PtrArg(R_last), PtrArg(b.inj.ptr()),
+               PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
+  } else {
   for (uint32_t q = 0; q < 2; ++q)
     cx.copy(static_cast<uint8_t*>(b.partials.ptr()) + q * row, fold + (size_t(q) * kPfC + last_row) * d.hidden, row);
   cx.launch(kc(kq::tp_head_fold_variant(), "q4_hc_combine_norm"), d.hc, 1, 1,
@@ -800,6 +806,7 @@ void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPre
              PtrArg(b.partials.ptr()),
              PtrArg(static_cast<const uint8_t*>(inj ? inj : s.inj.ptr()) + size_t(last_row) * d.hc * 4),
              PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
+  }
   {
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(o.down_n);
     cx.launch(kc(kernels::gemv_bf16_variant(1, d.hc_n(), o.down_n, t), "gemv_bf16"), o.down_n / t.cols, 1, 1,

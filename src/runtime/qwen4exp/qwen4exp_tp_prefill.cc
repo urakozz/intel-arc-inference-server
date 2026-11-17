@@ -325,8 +325,10 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   for (uint32_t r = 0; r < 2; ++r) {
     Q4TpPrefillState::Dev& D = *P.dev[r];
     const Q4TpPrefill& t = D.tp[last_h];
+    const void* R_last = mtp_ && r == 1 ? static_cast<const uint8_t*>(D.mtp_R->ptr()) + size_t(last_C) * d.hc_n() * 2
+                                        : nullptr;   // the head's pass left the last row in R row C
     prefill_head_tp(D.cx, D.kc, D.s, model_, model_.parts[r], cards_[r]->buffers, last_C - 1, t.fold[last_slot], r,
-                    cards_[r]->desc, t.H, t.inj);
+                    cards_[r]->desc, t.H, t.inj, R_last);
   }
   drain(base + uint32_t(ids.size()) - 1, "head");
   merge_heads();
