@@ -1632,7 +1632,7 @@ if(B70_Q4EXP AND B70_TP)
   # the split selection: q4_qsa.cl's prefill form with QSA_TP (unset in every other binary) - q4_qsa_score_tp /
   # _select_tp over a card's half of each row's blocks, q4_qsa_merge over both cards' candidates
   add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF_TP SOURCE ${Q4_CL}/q4_qsa.cl
-                   DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 QSA_TP=1)
+                   DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4 QSA_TP=1)
 endif()
 # ==== Plan 21-QFN-v2b Task 4: Qwen3.8-Flash-Next tensor parallel prefill ==== (end) ====
 

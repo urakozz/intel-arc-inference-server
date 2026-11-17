@@ -293,6 +293,11 @@ inline std::string pf_qsa_variant() { return qsa_variant(kPfC) + "_PF"; }   // "
 // Its q4_qsa_score: SCORE_R rows a work-group (src/kernels/CMakeLists.txt), grid (ceil(n / kScoreWg), pf_score_groups).
 inline constexpr unsigned kPfScoreRows = 4;
 inline unsigned pf_score_groups(unsigned C) { return (C + kPfScoreRows - 1) / kPfScoreRows; }
+// q4_qsa_score_tp's first grid dimension at a chunk (pos, C): a group's rows start their half at most
+// kPfScoreRows / 8 + 1 blocks apart, so ceil(n / 2) + kPfScoreRows blocks cover every group (n the last row's).
+inline unsigned pf_score_tp_x(unsigned pos, unsigned C) {
+  return (((pos + C) / kBlock + 1) / 2 + kPfScoreRows + kScoreWg - 1) / kScoreWg;
+}
 inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_variant(kPfC, bf16_scale) + "_PF"; }
 // The reused prefill binaries at this family's shapes.
 inline std::string pf_embed_variant() { return pf_embed_gather_variant(kHidden); }          // pf_embed_gather_D2560

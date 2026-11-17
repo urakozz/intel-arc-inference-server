@@ -564,8 +564,8 @@ class Walk {
   void select_half(uint32_t l, uint32_t stride) {
     const uint32_t r = tp_->rank;
     const std::string tv = kq::tp_pf_qsa_variant();
-    // q4_qsa_score_tp(ctrl, idx_q, idx_keys, scores, stride, part) - grid (ceil(ceil(stride / 2) / 256), C)
-    launch(kc_(tv, "q4_qsa_score_tp"), ((stride + 1) / 2 + kq::kScoreWg - 1) / kq::kScoreWg, C_, 1,
+    // q4_qsa_score_tp(ctrl, idx_q, idx_keys, scores, stride, part) - grid (pf_score_tp_x, ceil(C / 4))
+    launch(kc_(tv, "q4_qsa_score_tp"), kq::pf_score_tp_x(pos_, C_), kq::pf_score_groups(C_), 1,
            {PtrArg(ctrl()), PtrArg(s_.idx_q.ptr()), PtrArg(b_.idx_keys_layer(l)), PtrArg(s_.scores.ptr()),
             arg_val(stride), arg_val(r)});
     const size_t off = size_t(r) * kPfC * kTpCandW;

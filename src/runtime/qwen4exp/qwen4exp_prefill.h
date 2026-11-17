@@ -120,7 +120,7 @@ struct Q4TpPrefill {
   // plane's rows into plane r of the peer's `cand` (on `bcs` after cand_ready(r, u), signalling cand_sent(r, u);
   // cand_sent(card, u) = ev[ev_off + (4 + card) x units + u], cand_ready(card, u) = ev[ev_off + (6 + card) x units
   // + u]),
-  // and - once the peer's copy landed - q4_qsa_merge ranks both planes in the same order into the row's list:
+  // and - once the peer's copy landed - q4_qsa_merge selects over both planes by the same rule into the row's list:
   // q4_qsa_select's, bit for bit.
   // The chunk's next QSA layer reuses the planes: the peer copies into them only after its wait for this card's
   // crossing of a unit between, which follows this card's merge on its in-order list.
