@@ -157,7 +157,8 @@ class Walk {
     require(ps.hdr == size_t(kq::pf_hdr::words()) * 4, "the sort's header width moved");
     if (injected_) require(injected_->size() >= pf_injected_bytes(d_), "the injected selection rows are short");
     if (mtp_) {   // spec 21-QFN-v1e: the head's pass (the last device)
-      require(part_.device + 1 == b_.placement.devices, "the MTP head's prefill pass off the last device");
+      require(tp_ ? part_.mtp != nullptr : part_.device + 1 == b_.placement.devices,
+              "the MTP head's prefill pass off the last device (tp: off the head's card)");
       require(part_.mtp && part_.mtp_fc && part_.rope && mtp_->bufs && mtp_->R && mtp_->embed && mtp_->hctl,
               "the MTP head's prefill pass without the head, its fc block, the RoPE table or its buffers");
       require(mtp_->R->size() >= mtp_prefill_R_bytes(d_), "the head's R rows are shorter than [kPfC + 1][10240]");
