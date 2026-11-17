@@ -93,7 +93,11 @@ struct AdaptiveKOptions {
   double decay = 0.9;          // per-iteration weight of the history (EMA, ~10 iterations)
   uint32_t warmup = 2;         // iterations at K = max before the policy chooses
   double hysteresis = 0.03;    // a new K must beat the current K's rate by this fraction
-  uint32_t probe_every = 4;    // at K = 0: one K = 1 iteration after this many plain ones
+  uint32_t probe_every = 4;    // at K = 0: one K = 1 iteration after this many plain ones ...
+  uint32_t probe_max = 32;     // ... doubling after each probe that leaves K at 0 at measured costs, up to this many
+  // The server times each iteration for observe(): only for an engine whose output does not depend on K (Flash-Next's
+  // verify rows are its plain step's arithmetic) - elsewhere a timed K would make a request's output irreproducible.
+  bool measure = false;
   MtpCost cost;
 };
 
@@ -102,7 +106,10 @@ class AdaptiveK {
   explicit AdaptiveK(const AdaptiveKOptions& opts);
 
   uint32_t next();                                // K for the coming iteration
-  void observe(uint32_t k, uint32_t accepted);    // what that iteration did (j of k kept)
+  // What that iteration did (j of k kept) and, when the caller timed it, its seconds: the request's own iterations then
+  // replace the table's cost of K (its seconds at K over its plain steps', once it has run both) - an iteration's cost
+  // depends on the text (a verify row reads its own experts, some from host memory).
+  void observe(uint32_t k, uint32_t accepted, double seconds = 0);
 
   double alpha() const { return s_ / t_; }
   uint32_t current() const { return cur_; }
@@ -110,6 +117,7 @@ class AdaptiveK {
 
   // E[ids](K) = (1 - alpha^(K+1)) / (1 - alpha); ids per plain-step cost.
   static double expected_ids(double alpha, uint32_t k);
+  double cost(uint32_t k) const;                  // the measured cost of K in plain steps, else the table's
   double rate(double alpha, uint32_t k) const;
   uint32_t best(double alpha) const;
 
@@ -120,6 +128,9 @@ class AdaptiveK {
   uint32_t iters_ = 0;         // iterations observed
   uint32_t cur_;               // the policy's K
   uint32_t plain_run_ = 0;     // plain iterations since the last draft at K = 0
+  uint32_t probe_gap_;         // the plain iterations before the next K = 1 probe
+  std::vector<double> sec_;    // [k]: this request's seconds an iteration at K (an EMA, decay); 0 = not run
+  bool timed_ = false;         // an iteration came with its seconds
 };
 
 }  // namespace server

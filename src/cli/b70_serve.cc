@@ -1116,6 +1116,7 @@ int run(int argc, char** argv) {
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = spec.max_k;
     options.mtp_adaptive.cost = is_q4 ? server::MtpCost::flash_next() : server::MtpCost::int8_head();
+    options.mtp_adaptive.measure = is_q4;   // its ids do not depend on K: the request's own costs replace the table's
     // Spec 17d: tensor parallel's own table (its verify rows cross at M rows, its drafts read half the head);
     // Qwen3.8-Flash-Next's under tp (plan 21-QFN-v2b Task 7).
     if (pipe.tp())

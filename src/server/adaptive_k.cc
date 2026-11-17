@@ -134,7 +134,9 @@ AdaptiveK::AdaptiveK(const AdaptiveKOptions& opts)
       max_k_(std::min(opts.max_k, opts.cost.max_k())),
       s_(opts.prior * opts.prior_weight),
       t_(opts.prior_weight),
-      cur_(max_k_) {
+      cur_(max_k_),
+      probe_gap_(opts.probe_every),
+      sec_(max_k_ + 1, 0.0) {
   if (!(opts.prior_weight > 0) || !(opts.prior > 0 && opts.prior <= 1))
     throw std::invalid_argument("AdaptiveK: the prior needs 0 < prior <= 1 and a weight > 0");
 }
@@ -144,8 +146,12 @@ double AdaptiveK::expected_ids(double alpha, uint32_t k) {
   return (1.0 - std::pow(alpha, static_cast<double>(k + 1))) / (1.0 - alpha);
 }
 
+double AdaptiveK::cost(uint32_t k) const {
+  return k > 0 && sec_[k] > 0 && sec_[0] > 0 ? sec_[k] / sec_[0] : o_.cost.cost(k);
+}
+
 double AdaptiveK::rate(double alpha, uint32_t k) const {
-  return expected_ids(alpha, k) / o_.cost.cost(k);
+  return expected_ids(alpha, k) / cost(k);
 }
 
 uint32_t AdaptiveK::best(double alpha) const {
@@ -163,15 +169,22 @@ uint32_t AdaptiveK::best(double alpha) const {
 
 uint32_t AdaptiveK::next() {
   if (iters_ < o_.warmup) return max_k_;
-  if (cur_ == 0 && max_k_ > 0 && o_.probe_every > 0 && plain_run_ >= o_.probe_every) return 1;
+  // Timed but no plain step yet: one, so the costs the request measures have their unit (it never runs one at K > 0).
+  if (timed_ && sec_[0] == 0 && cur_ > 0) return 0;
+  if (cur_ == 0 && max_k_ > 0 && o_.probe_every > 0 && plain_run_ >= probe_gap_) return 1;
   return cur_;
 }
 
-void AdaptiveK::observe(uint32_t k, uint32_t accepted) {
+void AdaptiveK::observe(uint32_t k, uint32_t accepted, double seconds) {
   if (accepted > k)
     throw std::invalid_argument("AdaptiveK::observe: " + std::to_string(accepted) +
                                 " drafts kept of " + std::to_string(k));
   ++iters_;
+  if (seconds > 0 && k <= max_k_) {
+    sec_[k] = sec_[k] > 0 ? o_.decay * sec_[k] + (1 - o_.decay) * seconds : seconds;
+    timed_ = true;
+  }
+  const bool probe = k > 0 && cur_ == 0 && iters_ > o_.warmup;
   if (k == 0) {
     ++plain_run_;   // no drafts, nothing learned
   } else {
@@ -185,6 +198,10 @@ void AdaptiveK::observe(uint32_t k, uint32_t accepted) {
   const double a = alpha();
   const uint32_t b = best(a);
   if (b != cur_ && rate(a, b) > rate(a, cur_) * (1.0 + o_.hysteresis)) cur_ = b;
+  if (cur_ > 0)
+    probe_gap_ = o_.probe_every;
+  else if (probe && sec_[1] > 0 && sec_[0] > 0)   // the probe did not pay at this request's own cost: wait longer
+    probe_gap_ = std::min(probe_gap_ * 2, std::max(o_.probe_max, o_.probe_every));
 }
 
 }  // namespace server
