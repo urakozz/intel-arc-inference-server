@@ -2,6 +2,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -128,6 +130,44 @@ struct Q4TpPrefill {
   void* peer_lists = nullptr;   // the peer's selection rows of this chunk (its scratch's lists, or its `lists`)
 };
 
+// The host-memory experts read ahead (plan 21-QFN-v2b Task 4, item 6). With the expert tier a layer's missed experts
+// live in its pinned host mirror (Q4Layer::mirror) and the grouped GEMMs read them in place through the layer's table
+// row, so every chunk waits on the bus inside its MoE GEMMs. The ring instead copies a layer's mirror - its first
+// kPfRingBytes - into one of two device buffers on a copy-engine list while the previous layers compute: layer l (the
+// part's l - first) uses buffer (l - first) & 1, its copy waits for the MoE of layer l - 2 to release that buffer, and
+// the layer's MoE waits for its copy and reads through a staged row (the table row with every block wholly inside the
+// copied prefix pointing into the buffer instead). The same bytes are read from VRAM instead of host memory: bitwise.
+// Under tp the pair's two chunks share each layer's copy (the second chunk releases the buffer).
+struct Q4PfRing {
+  void* stage[2] = {nullptr, nullptr};
+  const uint8_t* rows = nullptr;          // device u64 [the part's layers][1024]: the staged rows
+  const size_t* bytes = nullptr;          // host [the part's layers]: the prefix copied (0: the layer reads in place)
+  const void* const* mirror = nullptr;    // host [the part's layers]: each layer's mirror
+  ze_command_list_handle_t list = nullptr;   // the copy-engine list the copies run on
+  const l0::SyncEventPool* ev = nullptr;  // staged(l) = ev[2 (l - first)], released(l) = ev[2 (l - first) + 1]
+  bool issue_first = true;                // this walk copies the first two layers (tp: the pair's first chunk)
+  bool issue_rest = true;                 // this walk releases each buffer and copies the layers after (tp: the last)
+};
+// The ring's buffers, rows, events and list on one device for its part's layers; null without the expert table (the
+// direct form). The events are reset by reset() while every list that signals or waits on them is idle.
+struct Q4PfRingState {
+  Q4PfRingState(l0::Context& ctx, const loader::Q4DevicePart& part, const model::Qwen4ExpDesc& card);
+  ~Q4PfRingState();
+  Q4PfRingState(const Q4PfRingState&) = delete;
+  Q4PfRingState& operator=(const Q4PfRingState&) = delete;
+  Q4PfRing view(bool issue_first, bool issue_rest) const;
+  void reset();
+  std::unique_ptr<l0::Mem> stage[2], rows;
+  std::vector<size_t> bytes;
+  std::vector<const void*> mirror;
+  std::unique_ptr<l0::SyncEventPool> ev;
+  ze_command_list_handle_t list = nullptr;
+};
+std::unique_ptr<Q4PfRingState> make_pf_ring(l0::Context& ctx, const loader::Q4DevicePart& part,
+                                            const model::Qwen4ExpDesc& card);
+// The copy-only queue group's ordinal (COPY without COMPUTE), or UINT32_MAX.
+uint32_t copy_ordinal(ze_device_handle_t dev);
+
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has written the ids
 // into `ids` (the chunk's slot of s.ids), set `ctl` - this chunk's Control for this device, host memory, a copy of the
 // device's with pos = pos, n_active = C (the HC, the prep, the indexer, the PLE kernels read both) - and - device 1 of
@@ -140,7 +180,7 @@ struct Q4TpPrefill {
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
                    const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
-                   const uint32_t* ids);
+                   const uint32_t* ids, const Q4PfRing* ring = nullptr);
 
 // Plan 21v2b Task 4: a chunk on both tensor-parallel cards (Q4TpPrefill), prefill_chunk's contract per card at the
 // card's shapes (each appends prefill_device_launches at its descriptor and one placement). From one host thread, a
@@ -158,6 +198,7 @@ struct Q4TpChunk {
   const uint32_t* ids = nullptr;
   const Q4TpPrefill* tp = nullptr;
   const Qwen4ExpMtpPrefill* mtp = nullptr;   // Task 5: the MTP head's pass after the card's layers (card 1)
+  const Q4PfRing* ring = nullptr;            // the host-memory experts read ahead, or null (read in place)
 };
 // Plan 21-QFN-v2b Task 4 Step 2: `n` (1 or 2) consecutive chunks in flight on both cards - Qwen3.8's TP prefill
 // wavefront (plan 17c): each card appends, for unit u, chunk A's unit then chunk B's, each preceded by the wait for that

@@ -281,8 +281,9 @@ size_t prefill_chunk_launches(const model::Qwen4ExpDesc& d, const model::Q4Place
   return n;
 }
 size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len) {
-  return prefill_sizes(d, max_len).total() + (devices > 1 ? pf_link_bytes(d, dev) : 0);
+  return prefill_sizes(d, max_len).total() + (devices > 1 ? pf_link_bytes(d, dev) : 0) + pf_ring_bytes(d);
 }
+size_t pf_ring_bytes(const model::Qwen4ExpDesc& d) { return 2 * kPfRingBytes + size_t(d.layers) * 2 * d.experts * 8; }
 
 std::vector<size_t> pp_layer_bytes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   std::vector<size_t> v(d.layers);
@@ -659,7 +660,8 @@ size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one) {
   // Task 4 Step 2: two chunks in flight - each its fold slots, the second its residual rows, inject weights and
   // selection rows of one QSA layer (the indexer split by rows)
   return size_t(kTpPfChunks) * 2 * 2 * kPfC * one.hidden * 4 + size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4 +
-         size_t(kTpPfChunks - 1) * kPfC * (size_t(one.hc_n()) * 2 + size_t(one.hc) * 4 + size_t(kListRow) * 4);
+         size_t(kTpPfChunks - 1) * kPfC * (size_t(one.hc_n()) * 2 + size_t(one.hc) * 4 + size_t(kListRow) * 4) +
+         pf_ring_bytes(one);
 }
 
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
