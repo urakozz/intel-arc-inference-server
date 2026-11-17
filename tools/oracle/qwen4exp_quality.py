@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan 21v2a Task 7: the quality of our Qwen3.8-Flash-Next export, on the box CPU with qwen4exp_ref.py's layer-streamed
+"""Plan 21-QFN-v2a Task 7: the quality of our Qwen3.8-Flash-Next export, on the box CPU with qwen4exp_ref.py's layer-streamed
 model in f32 (the box Xeon has no bf16 units: f32 is its fast path).
 
   qwen4exp_quality.py forced <snapshot> --ctx DIR --out DIR [--ple int8:/ple] [--batch 8] [--chunk 2048] [--match RE]
@@ -21,7 +21,7 @@ model in f32 (the box Xeon has no bf16 units: f32 is its fast path).
       the bf16 reference's routes (qwen4exp_ref.py run --force, every row) in qwen4exp_route_capture's form, so an f32
       companion (run --engine-routes) judges them exactly as it judges the engine's
   qwen4exp_quality.py twin-count <bf16 golden> <f32 companion> [--json FILE]
-      spec 21 v2 §10's twin count, the reference's side: the companion's rejected routes over every prompt and
+      spec 21-QFN-v2 §10's twin count, the reference's side: the companion's rejected routes over every prompt and
       continuation row, and the bf16 reference's own greedy id on each continuation row judged by the companion's
       logits (golden_common.h judge_row's one-bf16-ulp rule) - the lines qwen4exp_prefill_test prints for the engine.
 """

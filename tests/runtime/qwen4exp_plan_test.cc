@@ -1,6 +1,6 @@
-// Spec 21b Task 5: Qwen3.8-Flash-Next's memory plan as device-free arithmetic (runtime/qwen4exp/
+// Spec 21-QFNb Task 5: Qwen3.8-Flash-Next's memory plan as device-free arithmetic (runtime/qwen4exp/
 // qwen4exp_sizes.h). Host only. Every number is DERIVED from the descriptor and the loader's formulas
-// (loader/qwen4exp_layout.h); the test asserts the formulas and prints the values (plan 21b Task 5 Step 1):
+// (loader/qwen4exp_layout.h); the test asserts the formulas and prints the values (plan 21-QFNb Task 5 Step 1):
 //
 //   1. the persistent sizes: KV + indexer keys a position, the GDN state of 36 layers, a 262144-position plan,
 //      the PLE state on the PLE layer's device only, empty groups one line;
@@ -10,7 +10,7 @@
 //      one card naming its bytes, the synthetic's N = 4 planned on one card;
 //   4. pp_split is runtime::pp_balance over pp_layer_bytes (16b's rule, no second one);
 //   5. max_len_that_fits, describe's text, the host PLE table's bytes;
-//   6. spec 21c: the decode list's launch counts (779 at 48 layers on one card, eager, two cards, the
+//   6. spec 21-QFNc: the decode list's launch counts (779 at 48 layers on one card, eager, two cards, the
 //      injected run, the synthetic's 75), the decode scratch at 262144 (the score row is the term that scales),
 //      the plan with the scratch at --layers 18 (one card) and 38 (two) at 32768, the full model refused;
 //   7. spec 22a Task 1: the routed-expert budget (expert_budget) - for the published 48 layers, ours and Intel's
@@ -19,7 +19,7 @@
 //      total byte for byte, cache = capacity - reserve - non_routed (0 below), f = min(1, sum(cache) / routed_total).
 //      Every case prints `budget-json {...}`; `--budget-json FILE` also writes them to FILE, one a line (the
 //      projection's input, tools/oracle/offload_curve.py project).
-//   8. plan 21v2b Task 1: the tensor-parallel form (q4_tp_card, tp_plan, tp_expert_budget) - each card's layer bytes
+//   8. plan 21-QFN-v2b Task 1: the tensor-parallel form (q4_tp_card, tp_plan, tp_expert_budget) - each card's layer bytes
 //      the one-card layer's with every split part halved (the hyper-connections, router, indexer, small blocks and PLE
 //      whole), a token's reads a card (D, R) against the derivation (2.53 / 0.627 GB), and for both replication forms
 //      (the embedding and the MTP head on both cards; the embedding on card 0, the head on card 1) at the bench's and
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(25344));
   CHECK_EQ(rq::gdn_state_bytes_per_layer(ours), size_t(48) * 128 * 128 * 4);
   CHECK_EQ(rq::conv_ring_bytes_per_layer(ours), size_t(32) * 10240 * 2);   // open-work 28: 32 deep
-  CHECK_EQ(rq::ple_state_bytes(ours), size_t(64) + size_t(16) * 10240 * 2);   // 21c: the 16-slot id and conv rings
+  CHECK_EQ(rq::ple_state_bytes(ours), size_t(64) + size_t(16) * 10240 * 2);   // 21-QFNc: the 16-slot id and conv rings
   {
     const uint32_t L = 262144;
     const rq::PersistentSizes ps = rq::persistent_sizes(ours, Q4Placement::one(ours), 0, L);
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
     throws_naming("its routed experts partly in host memory", [&] { rq::require_fits(full, caps, kReserve); });
     throws_naming(std::to_string(kCard) + " B", [&] { rq::require_fits(full, caps, kReserve); });
   }
-  // plan 21v2a Task 8: the expert tier - the whole model on two cards with the budget's fill fits (each device's
+  // plan 21-QFN-v2a Task 8: the expert tier - the whole model on two cards with the budget's fill fits (each device's
   // arenas within its cache: the same count a layer), the planned weights less the host experts; the fill takes the
   // top n by the profile (ties to the lower id) or by id; the forced placements; a model that does not fit even with
   // every expert on host is refused naming the host bytes.
@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
     rq::apply_tier(tiny, ours, rq::fill_tier(ours, b, nullptr, "none"));
     const std::array<size_t, runtime::kPpDevices> small = {size_t(4e9), size_t(4e9)};
     throws_naming("routed experts in pinned host memory", [&] { rq::require_fits(tiny, small, kReserve); });
-    std::printf("21v2a: the whole model with the tier at 32768 on two cards: %u / %u experts a layer resident (f %.3f), "
+    std::printf("21-QFN-v2a: the whole model with the tier at 32768 on two cards: %u / %u experts a layer resident (f %.3f), "
                 "%.2f GB pinned\n", t.n_vram(0), t.n_vram(47), 1.0 - double(t.host_bytes(ours)) / (48.0 * 512 * eb),
                 t.host_bytes(ours) / 1e9);
   }
@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(lb[0], loader::q4_layer_bytes(t, 0).total() + rq::gdn_state_bytes_per_layer(t) + rq::conv_ring_bytes_per_layer(t));
     CHECK_EQ(lb[1], loader::q4_layer_bytes(t, 1).total() + rq::gdn_state_bytes_per_layer(t) + rq::conv_ring_bytes_per_layer(t) +
                         rq::ple_state_bytes(t));
-    CHECK_EQ(lb[3], loader::q4_layer_bytes(t, 3).total() + size_t(L) * 2048 + size_t(L / 4) * 256 + 8 * 256);   // 21c: 8 tail slots
+    CHECK_EQ(lb[3], loader::q4_layer_bytes(t, 3).total() + size_t(L) * 2048 + size_t(L / 4) * 256 + 8 * 256);   // 21-QFNc: 8 tail slots
     const size_t ctl = sizeof(runtime::Control), rope = t.rope_table_bytes(L);
     const runtime::PpBalance direct = runtime::pp_balance(
         lb, loader::q4_embed_bytes(t) + rope + ctl, loader::q4_final_mixer_bytes(t) + loader::q4_lm_head_bytes(t, true) + rope + ctl);
@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
   const size_t b16 = rq::host_ple_bytes(ours, loader::Q4PleScale::Bf16), f32 = rq::host_ple_bytes(ours, loader::Q4PleScale::F32);
   CHECK_EQ(b16, size_t(320001446) * (160 + 2));
   CHECK_EQ(f32, size_t(320001446) * (160 + 4));
-  // --- 6. spec 21c: the decode list --------------------------------------------------------------------------
+  // --- 6. spec 21-QFNc: the decode list --------------------------------------------------------------------------
   {
     const rq::Q4Attn F = rq::Q4Attn::Flash, E = rq::Q4Attn::Eager;
     const Q4Placement one = Q4Placement::one(ours);
@@ -284,13 +284,13 @@ int main(int argc, char** argv) {
     throws_naming("its routed experts partly in host memory", [&] { rq::require_fits(rq::plan(intel, p48, 32768, true, false), caps, kReserve); });
     const std::vector<rq::DevicePlan> pd = rq::plan(i18, Q4Placement::one(i18), 32768, true, false, true);
     CHECK_EQ(pd[0].scratch, rq::scratch_sizes(i18, 32768, F).total() + rq::tap_bytes(i18));
-    std::printf("21c: %zu launches a token at 48 layers on one card (flash), %zu eager, %zu injected, 75 at --layers 4, "
+    std::printf("21-QFNc: %zu launches a token at 48 layers on one card (flash), %zu eager, %zu injected, 75 at --layers 4, "
                 "+1 on two cards; decode scratch %zu B at 32768, %zu B at 262144; --layers 18 / 38 at 32768 "
                 "fit one / two cards (split %u)\n", rq::decode_launches(ours, one, F),
                 rq::decode_launches(ours, one, E), rq::decode_launches(ours, one, F, true),
                 s32.total(), s256.total(), p38.split);
   }
-  // --- 7. spec 21d: the prefill chunk --------------------------------------------------------------------------
+  // --- 7. spec 21-QFNd: the prefill chunk --------------------------------------------------------------------------
   {
     // the launches per chunk (the formula, asserted; printed): a gated residual 4, a GDN layer 84, a QSA layer 73 +
     // score / select (sparse rows) + flash (dense rows) + sparse (sparse rows), the PLE layer + 31, device 0 + 1
@@ -322,7 +322,7 @@ int main(int argc, char** argv) {
                          Case{2000, 300, 1 + 3 * gdn + qsa + 4 + ple, "pos 2000 (51 dense of 300)"}}) {
       const size_t n = rq::prefill_chunk_launches(t4, one4, c.pos, c.C);
       CHECK_EQ(n, c.want);
-      std::printf("21d: --layers 4 chunk at %s: %zu launches\n", c.what, n);
+      std::printf("21-QFNd: --layers 4 chunk at %s: %zu launches\n", c.what, n);
     }
     CHECK_EQ(rq::prefill_chunk_launches(t4, one4, 4096, 2048, true), 1 + 3 * gdn + qsa + 1 + ple);   // injected
     const Q4Placement one48 = Q4Placement::one(ours);
@@ -367,10 +367,10 @@ int main(int argc, char** argv) {
     const Q4Placement p38 = rq::placement_for(i38, 2, runtime::kMinAutoMaxLen, true, false, kCard, kReserve, true);
     const uint32_t len_2p = rq::max_len_that_fits(i38, p38, true, false, caps, kReserve, 0, true);
     CHECK(len_p <= len_d);
-    std::printf("21d: 48 layers one card %zu launches a chunk at pos 0, %zu all sparse (+1 on two cards); prefill scratch "
+    std::printf("21-QFNd: 48 layers one card %zu launches a chunk at pos 0, %zu all sparse (+1 on two cards); prefill scratch "
                 "--layers 18: %zu B at 32768 (scores %zu, weight batch %zu, xg %zu, GDN %zu, lists %zu), %zu B at 131072\n",
                 n48_0, n48_s, p32.total(), p32.scores, p32.w, p32.xg, p32.gdn, p32.lists, p128.total());
-    std::printf("21d: Intel's forms at 32768 with the int8 head: layers_that_fit one card %u decode-only / %u with "
+    std::printf("21-QFNd: Intel's forms at 32768 with the int8 head: layers_that_fit one card %u decode-only / %u with "
                 "prefill, two cards %u / %u; max_len auto --layers 18 one card %u decode-only / %u with prefill; --layers "
                 "38 two cards (split %u) %u with prefill\n", n1d, n1p, n2d, n2p, len_d, len_p, p38.split, len_2p);
   }
@@ -426,8 +426,8 @@ int main(int argc, char** argv) {
               if (d == &ours && devices == 2 && L == 32768 && mtp && prefill) f_ours_32k = b.f();
             }
     CHECK_EQ(lines, size_t(64));
-    // The per-token byte model the projection reads (spec 22 §2's D and R; spec 21 §3's table): R = 48 x 10 experts,
-    // R + D = every layer's read per token + the final mixer + the int8 lm_head; ours ~3.712 GB of D (spec 21 §3).
+    // The per-token byte model the projection reads (spec 22 §2's D and R; spec 21-QFN §3's table): R = 48 x 10 experts,
+    // R + D = every layer's read per token + the final mixer + the int8 lm_head; ours ~3.712 GB of D (spec 21-QFN §3).
     for (const Qwen4ExpDesc* d : {&ours, &intel}) {
       const rq::ExpertBudget b = rq::expert_budget(*d, Q4Placement::one(*d), 32768, true, true, true, caps, kReserve);
       size_t reads = 0;
@@ -437,7 +437,7 @@ int main(int argc, char** argv) {
                reads + loader::q4_final_mixer_bytes(*d) + loader::q4_lm_head_bytes(*d, true));
       CHECK(b.read_mtp_step > loader::q4_lm_head_bytes(*d, true) && b.read_mtp_step < loader::q4_mtp_bytes(*d) +
                                                                                        loader::q4_lm_head_bytes(*d, true));
-      std::printf("spec 22a: per decode token (%s forms): R %.3f GB, D %.3f GB (spec 21 section 3: 1.253 / 3.712 for "
+      std::printf("spec 22a: per decode token (%s forms): R %.3f GB, D %.3f GB (spec 21-QFN section 3: 1.253 / 3.712 for "
                   "ours), an MTP draft step %.3f GB\n", d == &ours ? "ours" : "Intel's", b.read_routed / 1e9,
                   b.read_non_routed / 1e9, b.read_mtp_step / 1e9);
     }
@@ -455,7 +455,7 @@ int main(int argc, char** argv) {
                 "section 2's ~0.83 (%+.4f)%s%s\n", f_ours_32k, f_ours_32k - 0.83, budget_path ? "; budget lines -> " : "",
                 budget_path ? budget_path : "");
   }
-  // --- 8. plan 21v2b Task 1: tensor parallel ---------------------------------------------------------------
+  // --- 8. plan 21-QFN-v2b Task 1: tensor parallel ---------------------------------------------------------------
   {
     const Qwen4ExpDesc c0 = model::q4_tp_card(ours, 0), c1 = model::q4_tp_card(ours, 1);
     CHECK_EQ(c0.qkvz_n(), 8192u);
@@ -481,7 +481,7 @@ int main(int argc, char** argv) {
     const rq::ExpertBudget t0 = rq::tp_expert_budget(ours, Q4Placement::tp2(ours, model::Q4TpEnds::Split), 16384, true,
                                                      false, true, caps, kReserve);
     CHECK_EQ(2 * t0.read_routed, pp.read_routed);
-    std::printf("plan 21v2b: a card's reads a token: D %.3f GB (derivation 2.53: the hyper-connections 1.29 whole + "
+    std::printf("plan 21-QFN-v2b: a card's reads a token: D %.3f GB (derivation 2.53: the hyper-connections 1.29 whole + "
                 "half of the rest - it halved the router, indexer and PLE projections, which stay whole), R %.3f GB "
                 "(0.627); one card's D %.3f, R %.3f\n", t0.read_non_routed / 1e9, t0.read_routed / 1e9,
                 pp.read_non_routed / 1e9, pp.read_routed / 1e9);
@@ -495,7 +495,7 @@ int main(int argc, char** argv) {
                          Cfg{"b70-serve (65536, the MTP head, prefill)", 65536, true, true}}) {
       const rq::ExpertBudget p2 = rq::expert_budget(ours, Q4Placement::two(ours, rq::pp_split(ours, g.max_len, true, g.mtp, true).split),
                                                     g.max_len, true, g.mtp, g.prefill, caps, kReserve);
-      std::printf("plan 21v2b: %s: pp f %.4f (cache %.3f / %.3f GB)\n", g.what, p2.f(), p2.cache[0] / 1e9, p2.cache[1] / 1e9);
+      std::printf("plan 21-QFN-v2b: %s: pp f %.4f (cache %.3f / %.3f GB)\n", g.what, p2.f(), p2.cache[0] / 1e9, p2.cache[1] / 1e9);
       for (model::Q4TpEnds e : {model::Q4TpEnds::Both, model::Q4TpEnds::Split}) {
         const Q4Placement tp = Q4Placement::tp2(ours, e);
         const std::vector<rq::DevicePlan> pl = rq::tp_plan(ours, tp, g.max_len, true, g.mtp, false, g.prefill);
@@ -506,12 +506,12 @@ int main(int argc, char** argv) {
           CHECK_EQ(b.non_routed[r] + routed, pl[r].total());
           const uint32_t n = uint32_t(rq::tp_card_f(b, r) * 512 + 0.5);
           host += size_t(48) * (512 - n) * b.expert_bytes;
-          std::printf("plan 21v2b:   tp ends %s card %u: weights %.3f GB (non-routed %.3f), kv %.3f, state+scratch+link "
+          std::printf("plan 21-QFN-v2b:   tp ends %s card %u: weights %.3f GB (non-routed %.3f), kv %.3f, state+scratch+link "
                       "%.3f, prefill %.3f; cache %.3f GB -> %u experts a layer, f %.4f\n", model::q4_tp_ends_name(e), r,
                       pl[r].weights / 1e9, (pl[r].weights - routed) / 1e9, pl[r].kv / 1e9, pl[r].decode_state / 1e9,
                       pl[r].prefill_scratch / 1e9, b.cache[r] / 1e9, n, rq::tp_card_f(b, r));
         }
-        std::printf("plan 21v2b:   tp ends %s: pinned %.2f GB (the PLE table %.2f + both cards' host halves %.2f)\n",
+        std::printf("plan 21-QFN-v2b:   tp ends %s: pinned %.2f GB (the PLE table %.2f + both cards' host halves %.2f)\n",
                     model::q4_tp_ends_name(e), (ple + host) / 1e9, ple / 1e9, host / 1e9);
       }
     }

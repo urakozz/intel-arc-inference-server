@@ -110,7 +110,7 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
   const uint nb = get_group_id(0) * WG_N + CN * s;    // this sub-group's first column
   const uint mb = row0;                               // its first row (one sub-group a column block)
 #if Q4_EXPERT_TABLE
-  // the _TBL binaries (Flash-Next's expert tier, plan 21v2a Task 8): W is the layer's table row, block e's address
+  // the _TBL binaries (Flash-Next's expert tier, plan 21-QFN-v2a Task 8): W is the layer's table row, block e's address
   // at W[e] (u64; VRAM or pinned host memory)
   __global const uint* restrict Wb =
       e == EXPERTS ? W_sh : (__global const uint*)(intptr_t)((__global const ulong*)W)[e];

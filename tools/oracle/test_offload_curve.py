@@ -5,7 +5,7 @@ a minute).
 
     test_offload_curve.py [test_name ...]          in agnes-ref-img; PYTHONPATH=<the 5.19.0 site> for the tiny test
 
-Synthetic traces built here with known answers (21a's TRACE_FORMAT, written with safetensors):
+Synthetic traces built here with known answers (21-QFNa's TRACE_FORMAT, written with safetensors):
 - h(f) analytic: layer l routes only experts [0, 10 + l), every one equally often -> the uniform fill holds [0, n)
   (ties to the lower id), h = mean_l min(n, 10 + l) / (10 + l);
 - a hold-out split whose halves see disjoint experts scores h = 0 held out and 1 in sample;
@@ -331,7 +331,7 @@ def _project_inputs(d, h):
 
 
 def test_tp_spec_table():
-    """Spec 21 v2 §5's table (BW 457.8, P 12): (b) tp at D 2.38 / R 0.627 a card + 0.34 ms, and (a) pp at the D the
+    """Spec 21-QFN-v2 §5's table (BW 457.8, P 12): (b) tp at D 2.38 / R 0.627 a card + 0.34 ms, and (a) pp at the D the
     table was built with (3.46 GB: non-routed 3.04 + the 0.42 fixed; the text's 3.76 gives ~4 t/s less), to 1 t/s;
     tp_card_bytes halves all but the hyper-connections."""
     table = {1.00: (97, 145), 0.97: (75, 118), 0.95: (65, 106), 0.90: (49, 83), 0.85: (39, 69)}
@@ -340,7 +340,7 @@ def test_tp_spec_table():
         assert abs(1e3 / OC.tp_ms(2.38e9, 0.627e9, 457.8, 12.0, h) - tp) <= 1.0, (h, tp)
     Dc, Rc = OC.tp_card_bytes(3.47e9, 1.254e9)
     assert abs(Dc - 2.38e9) < 1e6 and Rc == 0.627e9, (Dc, Rc)
-    print("  spec 21 v2 §5's (a) and (b) columns reproduced to 1 t/s (h 1.00 .. 0.85)")
+    print("  spec 21-QFN-v2 §5's (a) and (b) columns reproduced to 1 t/s (h 1.00 .. 0.85)")
 
 
 def test_swap_policies():
@@ -472,7 +472,7 @@ def test_project_per_device_and_swaps():
     print(f"  per card h {rows[32768]['h']} on its own layers; swaps applied at f 0.5 only, their copies charged")
 
 
-SPEC30_DECODE = {   # spec 30 §7.1: h -> layer split, tensor parallel, the same with spec 21 v2's constants (t/s)
+SPEC30_DECODE = {   # spec 30 §7.1: h -> layer split, tensor parallel, the same with spec 21-QFN-v2's constants (t/s)
     1.00: (85, 128, 101, 185), 0.99: (73, 113, 84, 156), 0.976: (60, 98, 67, 127), 0.95: (45, 77, 50, 95),
     0.92: (36, 62, 38, 74), 0.90: (31, 55, 33, 64), 0.88: (27, 50, 29, 57), 0.85: (24, 43, 25, 48),
     0.80: (19, 35, 20, 39)}

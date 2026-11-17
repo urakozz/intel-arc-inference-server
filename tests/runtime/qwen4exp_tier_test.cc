@@ -1,4 +1,4 @@
-// Plan 21v2a Task 8: the expert tier on the card (box only; labels checkpoint;qwen4exp, + pp for two cards), on the
+// Plan 21-QFN-v2a Task 8: the expert tier on the card (box only; labels checkpoint;qwen4exp, + pp for two cards), on the
 // synthetic real-width checkpoint (ours: 4 layers, 512 experts, the MTP head).
 //
 //   qwen4exp_tier_test <checkpoint> <ids> 1|pp2   O0 / O1 - residency never changes arithmetic. Placements: the

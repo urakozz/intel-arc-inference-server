@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Spec 21a: the Qwen3.8-Flash-Next (qwen4_exp) CPU reference runs, ON THE BOX CPU (kolibri_oracle.sh's shape).
+# Spec 21-QFNa: the Qwen3.8-Flash-Next (qwen4_exp) CPU reference runs, ON THE BOX CPU (kolibri_oracle.sh's shape).
 #   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|intel-f32 N|intel-f32-aligned N|bf16-twin N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project
 #
 # Every mode runs tools/oracle/qwen4exp_ref.py in the oracle image (tools/oracle/run_in_container.sh) with
@@ -9,13 +9,13 @@
 #   tiny           golden runs on the tiny model -> <data>/oracle-out-q4exp-tiny/ (q4exp_short, q4exp_4k)
 #   intel          Intel's 181 GB checkpoint, every golden prompt (q4exp_short / 4k / 8k / 32k / agentic, --gen 32)
 #                  -> <data>/oracle-out-q4exp/<p>.{ids,golden.safetensors,log}
-#   intel-layers N the reference truncated to N layers (what 21c's --layers N gate reads) on short / 4k / agentic
+#   intel-layers N the reference truncated to N layers (what 21-QFNc's --layers N gate reads) on short / 4k / agentic
 #                  -> <data>/oracle-out-q4exp-L<N>/
 #   intel-f32 N    fp32 prefill judge, 4500 cycled ids + 32 greedy, 64g cap -> oracle-out-q4exp-f32-L<N>/
 #   intel-f32-aligned N  paired fp32 companions replaying f32-judged engine routes from
 #                  oracle-out-q4exp-align-L<N>.partial/engine.safetensors, same fixed 32-token continuation
 #                  -> oracle-out-q4exp-f32-aligned-L<N>/ (64g cap; rejects remain gate failures)
-#   bf16-twin N    spec 21 v2 §10's twin count, the reference's side: the bf16 CPU reference on the same prompt
+#   bf16-twin N    spec 21-QFN-v2 §10's twin count, the reference's side: the bf16 CPU reference on the same prompt
 #                  (q4exp_4k cycled to 4500, chunk 2048, the checkpoint's bf16 head) teacher-forced on intel-f32 N's
 #                  continuation, its routes replayed by an f32 companion as the engine's are (qwen4exp_quality.py
 #                  twin-trace), its rejected routes and tokens counted (twin-count)
@@ -25,14 +25,14 @@
 #                  below a sanity ceiling of 30 on prose, ESTIMATED) -> <data>/oracle-out-q4exp/ppl.log
 #   hfcheck        transformers' own per-query indexer against the port's cache on real weights, --layers 4,
 #                  2100 ids + 4 steps: BITWISE or exit 1 -> <data>/oracle-out-q4exp/hfcheck.log
-#   synth-ckpt     spec 21b: the two synthetic real-width checkpoints (tools/quantize/qwen4exp/make_synth.py --layers 4
+#   synth-ckpt     spec 21-QFNb: the two synthetic real-width checkpoints (tools/quantize/qwen4exp/make_synth.py --layers 4
 #                  --mtp, ours and Intel's form, from the ORIGINAL's small files - config.json and the tokenizer
 #                  files of Qwen/Qwen3.8-Flash-Next, a few MB, not its weights), their PLE int8 files (ple_int8.py)
 #                  and check.py -> <data>/oracle-out-q4exp-synth/{ours,intel}/{ckpt,ckpt-ple-int8} (r31.synth)
-#   ple-int8       spec 21b: Intel's checkpoint's 128 bf16 PLE shards -> the int8 file the engine pins,
+#   ple-int8       spec 21-QFNb: Intel's checkpoint's 128 bf16 PLE shards -> the int8 file the engine pins,
 #                  <Intel snapshot>-ple-int8/ (ple_int8.py --scale ${Q4_PLE_SCALE:-bf16}; ~51.8 GB written; df -h first;
 #                  written in the tree, then moved beside the snapshot) and check.py --ple (r31.ple_convert)
-#   synth          spec 21c: the golden sets of the two synthetic checkpoints (synth-ckpt's steps first when they
+#   synth          spec 21-QFNc: the golden sets of the two synthetic checkpoints (synth-ckpt's steps first when they
 #                  are absent): qwen4exp_ref.py run on each for q4exp_short / 4k / agentic (--gen 32) with the
 #                  engine-format PLE (their own ckpt-ple-int8, copied into the tree: the container mounts only it and
 #                  the snapshot) -> <data>/oracle-out-q4exp-synth/{ours,intel}/<p>.{ids,golden.safetensors,log}
@@ -42,13 +42,13 @@
 #   trace          teacher-forced routing traces for spec 22 P0.6 / P0.8: the 36 A4 scenarios
 #                  (tests/golden/toolcall/*.ids), q4exp_agentic, code, prose, and the opencode recording when
 #                  OPENCODE_LOG is set -> <data>/oracle-out-q4exp-traces/<name>.routes.safetensors
-#   mtp-fixture    spec 21e Task 3 (M1's data): tools/oracle/qwen4exp_mtp_fixture.py - 21a's MTP port on the engine-
+#   mtp-fixture    spec 21-QFNe Task 3 (M1's data): tools/oracle/qwen4exp_mtp_fixture.py - 21-QFNa's MTP port on the engine-
 #                  format head (bf16 experts RTN int4 g64), both norm forms, 8 samples of q4exp_short - on each synthetic
 #                  checkpoint (their own ckpt-ple-int8) -> <data>/oracle-out-q4exp-mtp/{ours,intel}/mtp_{single,
 #                  per_stream}.safetensors, and on Intel's at --layers 18 when it is there (and MemAvailable >= 64 GB)
 #                  -> <data>/oracle-out-q4exp-mtp/intel-L18/ (r34.fixture; what qwen4exp_mtp_test's M1 reads)
-#   mtp-accept     spec 21e Task 3 step 4 (decision 4): qwen4exp_mtp.py accept on Intel's checkpoint - teacher-forced
-#                  greedy acceptance by depth, K <= 3, the selection reused and fresh, over 21a's golden continuations
+#   mtp-accept     spec 21-QFNe Task 3 step 4 (decision 4): qwen4exp_mtp.py accept on Intel's checkpoint - teacher-forced
+#                  greedy acceptance by depth, K <= 3, the selection reused and fresh, over 21-QFNa's golden continuations
 #                  of q4exp_short and q4exp_agentic (<data>/oracle-out-q4exp, `intel` first) and the A4 set's first
 #                  four scenarios (their own 64-id continuations), per norm form ->
 #                  <data>/oracle-out-q4exp-mtp/accept_{single,per_stream}.json (r34.accept; hours)
@@ -64,8 +64,8 @@
 # Env: SNAP_Q4EXP_INTEL (default models--Intel--Qwen3.8-Flash-Next-W4A16-AutoRound), SNAP_Q4EXP_OURS,
 #      SNAP_Q4EXP_DIR (intel-f32 / intel-f32-aligned / bf16-twin: a checkpoint directory instead of Intel's cache
 #      entry - our export, its int8 PLE file the sibling <dir>-ple-int8),
-#      Q4_PLE (bf16 = the snapshot's own 128 shards, or int8:<dir>; default int8:<snapshot>-ple-int8 when 21b's
-#      file exists - the engine-format reference, spec 21 F3 - else bf16), Q4_REF_MIN_GB, Q4_GEN (32),
+#      Q4_PLE (bf16 = the snapshot's own 128 shards, or int8:<dir>; default int8:<snapshot>-ple-int8 when 21-QFNb's
+#      file exists - the engine-format reference, spec 21-QFN F3 - else bf16), Q4_REF_MIN_GB, Q4_GEN (32),
 #      OPENCODE_LOG, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
@@ -81,7 +81,7 @@ gen="${Q4_GEN:-32}"
 TINY=models--qikp--tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next
 INTEL="${SNAP_Q4EXP_INTEL:-models--Intel--Qwen3.8-Flash-Next-W4A16-AutoRound}"
 OURS="${SNAP_Q4EXP_OURS:-models--urakozz--Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ}"
-ORIG="${SNAP_Q4EXP_ORIG:-models--Qwen--Qwen3.8-Flash-Next}"   # spec 21b: its small files only (synth-ckpt)
+ORIG="${SNAP_Q4EXP_ORIG:-models--Qwen--Qwen3.8-Flash-Next}"   # spec 21-QFNb: its small files only (synth-ckpt)
 SITE=oracle-out-q4exp-site
 case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; curve|project) need="${Q4_REF_MIN_GB:-8}" ;; synth|mtp-fixture) need="${Q4_REF_MIN_GB:-32}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
 case "$mode" in tests|tiny) model="$TINY" ;; ours) model="$OURS" ;; synth-ckpt|synth) model="$ORIG" ;; *) model="$INTEL" ;; esac
@@ -104,7 +104,7 @@ fi
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
 echo "qwen4exp_oracle: $mode${nl:+ $nl} -> $data; checkpoint $model (${snapdir:-absent}); MemAvailable ${avail} GB (need $need)"
 
-# The PLE source (spec 21 F3: the engine-format reference reads 21b's int8 file).
+# The PLE source (spec 21-QFN F3: the engine-format reference reads 21-QFNb's int8 file).
 ple="${Q4_PLE:-}"
 if [ -z "$ple" ]; then
   if [ -n "$snapdir" ] && [ -f "${snapdir%/}-ple-int8/model.safetensors.index.json" ]; then
@@ -313,7 +313,7 @@ case "$mode" in
     in_box "python3 tools/oracle/test_qwen4exp_routes.py && python3 tools/oracle/test_qwen4exp_ref.py && python3 tools/oracle/test_qwen4exp_mtp.py" || rc=1
     ;;
   synth-ckpt)
-    # spec 21b Task 1: written in the tree (the container mounts only it), moved under <data> when checked; an
+    # spec 21-QFNb Task 1: written in the tree (the container mounts only it), moved under <data> when checked; an
     # older incomplete set is moved aside (<f>.old-<epoch>), never deleted.
     for f in ours intel; do
       if [ -s "$data/oracle-out-q4exp-synth/$f/ckpt-ple-int8/model.safetensors.index.json" ]; then
@@ -337,7 +337,7 @@ case "$mode" in
     done
     ;;
   ple-int8)
-    # spec 21b Task 1 on the real table: Intel's shards (the original's bf16 rows as shipped) -> <snapshot>-ple-int8/.
+    # spec 21-QFNb Task 1 on the real table: Intel's shards (the original's bf16 rows as shipped) -> <snapshot>-ple-int8/.
     dest="${snapdir%/}-ple-int8"
     if [ -s "$dest/model.safetensors.index.json" ]; then
       echo "qwen4exp_oracle: the PLE int8 file is there ($dest)"
@@ -382,7 +382,7 @@ case "$mode" in
     fi
     ;;
   synth)
-    # spec 21c Task 1: the checkpoints first (synth-ckpt's steps, a process of their own) when absent, then per form
+    # spec 21-QFNc Task 1: the checkpoints first (synth-ckpt's steps, a process of their own) when absent, then per form
     # the golden prompts against its own snapshot (ORACLE_SNAP, mounted at /snap) and its own PLE file (copied into
     # the tree: ~3 MB at the synthetic table's base 1000; the container mounts only the tree and the snapshot).
     if ! synth_have; then
@@ -409,7 +409,7 @@ case "$mode" in
     gaps "$data/oracle-out-q4exp-synth/*/*.log"
     ;;
   mtp-fixture)
-    # spec 21e: per synthetic form against its own snapshot (ORACLE_SNAP) and PLE file (copied into the tree, as
+    # spec 21-QFNe: per synthetic form against its own snapshot (ORACLE_SNAP) and PLE file (copied into the tree, as
     # synth does); then Intel's at --layers 18. Written into the tree, the files moved when both are there.
     fixture() {   # fixture <out dir> <partial dir> <extra args>
       local out="$1" part="$2" extra="$3"
@@ -449,7 +449,7 @@ case "$mode" in
     fi
     ;;
   mtp-accept)
-    # spec 21e decision 4: both norm forms; the golden continuations copied into the tree (the container mounts only it).
+    # spec 21-QFNe decision 4: both norm forms; the golden continuations copied into the tree (the container mounts only it).
     part=oracle-out-q4exp-mtp.partial/accept
     [ "$dry" = 1 ] || mkdir -p "$part/golden" "$data/oracle-out-q4exp-mtp"
     for p in q4exp_short q4exp_agentic; do

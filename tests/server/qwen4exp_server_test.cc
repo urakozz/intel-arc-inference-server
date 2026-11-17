@@ -1,6 +1,6 @@
-// Spec 21e Task 1, host only: the server over Qwen3.8-Flash-Next's chat template - the real renderer
+// Spec 21-QFNe Task 1, host only: the server over Qwen3.8-Flash-Next's chat template - the real renderer
 // (chat::Template on the checkpoint's own chat_template.jinja + tokenizer_config.json: the original's small files,
-// which 21b's synthetic checkpoints carry; not vendored) behind the OpenAI endpoint, a scripted engine and the mock
+// which 21-QFNb's synthetic checkpoints carry; not vendored) behind the OpenAI endpoint, a scripted engine and the mock
 // tokenizer, with the server::Options b70-serve's qwen4_exp dispatch sets (cli::qwen4exp::chat_options). Pinned:
 //
 //   1. ChatFormat::for_model_type("qwen4_exp") is Kind::Qwen, and the request's chat_template_kwargs do not reach
@@ -14,7 +14,7 @@
 //      splits at </think> into reasoning_content and content; enable_thinking off - no split;
 //   5. both EOS ids (248046 <|im_end|>, 248044 <|endoftext|>) stop with finish_reason "stop", nothing after them
 //      streamed;
-//   6. a request without sampling fields reaches the engine greedy (spec 21 decision 11's interim); one with a
+//   6. a request without sampling fields reaches the engine greedy (spec 21-QFN decision 11's interim); one with a
 //      temperature samples.
 //
 // usage: qwen4exp_server_test <tests/tokenizer> <snapshot dir>   (exit 77 without the snapshot's template files)

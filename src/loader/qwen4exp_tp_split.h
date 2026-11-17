@@ -5,7 +5,7 @@
 #include "loader/qwen4exp_repack.h"
 #include "model/qwen4exp.h"
 
-// Plan 21v2b Task 1: one tensor-parallel card's half of a Qwen3.8-Flash-Next layer, cut from the one-card repack
+// Plan 21-QFN-v2b Task 1: one tensor-parallel card's half of a Qwen3.8-Flash-Next layer, cut from the one-card repack
 // (loader::Q4Checkpoint::repack_layer's device layouts) - host only, so every device byte of a card is a byte of the
 // one-card block (tests/loader/qwen4exp_synth_host_test.cc joins the halves back, bitwise). Qwen3.8's TP rules
 // (loader::tp_columns) at this family's widths; the card's shapes are model::q4_tp_card's:

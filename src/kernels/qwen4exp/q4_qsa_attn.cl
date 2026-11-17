@@ -1,4 +1,4 @@
-// q4_qsa_attn.cl - spec 21c: Qwen3.8-Flash-Next's QSA decode attention over a SELECTED position list (spec 21
+// q4_qsa_attn.cl - spec 21-QFNc: Qwen3.8-Flash-Next's QSA decode attention over a SELECTED position list (spec 21-QFN
 // §4.2, decision 10: one kernel at every depth - below 2052 visible positions the list is the identity), spec 10
 // v2's structure (attn_v2.cl / kol_attn.cl: waves of 16 positions, sub-group block reads of K, a fixed-order
 // online softmax in fp32, the slices merged ascending) carried to a gathered list. attn_v2.cl and kol_attn.cl are
@@ -45,7 +45,7 @@
 #if M < 1 || M > 4
 #error "q4_qsa_attn: M is 1..4"
 #endif
-// Plan 21v2b: a tensor-parallel card's heads (12 q / 1 kv) come in as -DQ4_Q_HEADS / -DQ4_KV_HEADS; unset, one card's.
+// Plan 21-QFN-v2b: a tensor-parallel card's heads (12 q / 1 kv) come in as -DQ4_Q_HEADS / -DQ4_KV_HEADS; unset, one card's.
 #ifdef Q4_Q_HEADS
 #define Q_HEADS Q4_Q_HEADS
 #define KV_HEADS Q4_KV_HEADS

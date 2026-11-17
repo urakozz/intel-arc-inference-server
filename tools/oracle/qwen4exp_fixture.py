@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""The Qwen3.8-Flash-Next kernel-chain fixture (spec 21c Task 1 Step 3): tools/oracle/qwen4exp_ref.py's OWN
+"""The Qwen3.8-Flash-Next kernel-chain fixture (spec 21-QFNc Task 1 Step 3): tools/oracle/qwen4exp_ref.py's OWN
 restated ops (and transformers 5.19.0's qwen4_exp modules where the restated set has no twin) run in bf16 on
 deterministic inputs at the real widths, their outputs written as a C++ header that
 tests/kernels/qwen4exp_ref_test.cc holds tests/kernels/qwen4exp_ref.h to.
 
     tools/oracle/qwen4exp_fixture.py > tests/kernels/qwen4exp_fixture.h
 
-Run it in the oracle container with 21a's 5.19.0 site first on PYTHONPATH (seconds, < 2 GB, no checkpoint):
+Run it in the oracle container with 21-QFNa's 5.19.0 site first on PYTHONPATH (seconds, < 2 GB, no checkpoint):
 
     docker run --rm --memory 8g --cpus 4 -v "$PWD:/ws" -w /ws -e PYTHONPATH=/ws/oracle-out-q4exp/site \\
       --entrypoint python3 agnes-ref-img:latest tools/oracle/qwen4exp_fixture.py > tests/kernels/qwen4exp_fixture.h

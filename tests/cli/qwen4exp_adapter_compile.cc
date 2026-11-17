@@ -1,4 +1,4 @@
-// Spec 21e Task 4: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over runtime::qwen4exp::Qwen4ExpEngine - every
+// Spec 21-QFNe Task 4: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over runtime::qwen4exp::Qwen4ExpEngine - every
 // member (prefill, the greedy and sampled steps, step_many's draft / verify / accept / deferred commit, step_drafts's
 // lookup path, truncate_to, the prefix cache's snapshot forwards, the block hook, ingest) compiled against the engine's
 // host calls: the interface the adapter's header names is the engine's, exactly (no third copy of the speculative loop).

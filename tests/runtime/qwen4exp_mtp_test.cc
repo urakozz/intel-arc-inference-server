@@ -1,5 +1,5 @@
-// Spec 21e Task 3 Step 3 (spec 21 F5; plan 21e Review Focus 2, 3, 4): Qwen3.8-Flash-Next's MTP head and spec 8's draft /
-// verify / commit on the card - box only (labels checkpoint;qwen4exp). The synthetic checkpoints (21b's make_synth.py
+// Spec 21-QFNe Task 3 Step 3 (spec 21-QFN F5; plan 21-QFNe Review Focus 2, 3, 4): Qwen3.8-Flash-Next's MTP head and spec 8's draft /
+// verify / commit on the card - box only (labels checkpoint;qwen4exp). The synthetic checkpoints (21-QFNb's make_synth.py
 // --mtp: 4 real-width layers and the head, its bf16 experts RTN int4 g64 at load) carry it; Intel's --layers 18 when
 // present.
 //
@@ -7,7 +7,7 @@
 //
 // (no mode: all four). <fixture dir> holds tools/oracle/qwen4exp_mtp_fixture.py's mtp_{single,per_stream}.safetensors
 // for this checkpoint (box: r34.fixture); without them M1 SKIPs and the rest runs.
-//   M1  the head against 21a's port (tools/oracle/qwen4exp_mtp.py MtpHead, vLLM's form, the engine-format experts:
+//   M1  the head against 21-QFNa's port (tools/oracle/qwen4exp_mtp.py MtpHead, vLLM's form, the engine-format experts:
 //       RTN int4 g64 dequantised), both pre_fc_norm_hidden forms (B70_Q4_MTP_NORM): per fixture sample i the engine
 //       at pos 1 (one id prefilled), R_0 replaced by the fixture's R_i (write_mtp_R), the pending id t_i, draft(3) -
 //       steps at positions 0, 1, 2, steps 1 and 2 on step 0's list (decision 5) - against chain(R_i, [t_i], 3):
@@ -55,7 +55,7 @@ namespace {
 namespace rq = runtime::qwen4exp;
 using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 8192;
-constexpr double kCos = 0.9999;   // PROPOSED (plan 21e Task 3 Step 3)
+constexpr double kCos = 0.9999;   // PROPOSED (plan 21-QFNe Task 3 Step 3)
 
 double cosine(const float* a, const float* b, size_t n) {
   double ab = 0, aa = 0, bb = 0;

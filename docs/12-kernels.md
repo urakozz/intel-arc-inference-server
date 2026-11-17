@@ -14,7 +14,7 @@ listed at the end.
 
 - [The decode step these kernels add up to](#the-decode-step-these-kernels-add-up-to)
 - Decode linears: [`gemv`](#gemv---int4-g64--bf16-m--1), [`gemv_i8w`](#gemv_i8w---the-int8-lm_head),
-  [`gemv_bf16`](#gemv_bf16---bf16--bf16), [`gemm_sm` and `gemm_sm_v2`](#gemm_sm-and-gemm_sm_i8w---the-small-batch-gemms)
+  [`gemv_bf16`](#gemv_bf16---bf16--bf16), [`gemm_sm` and `gemm_sm_wide`](#gemm_sm-and-gemm_sm_i8w---the-small-batch-gemms)
 - [`prep`, the between-GEMV kernels](#prep---the-between-gemv-kernels)
 - Token boundary: [`embed_gather`](#embed_gather---the-token-id-to-the-residual-stream),
   [`argmax`](#argmax---deterministic-greedy-sampling-in-two-fixed-stages)
@@ -400,11 +400,11 @@ On one card with the int8 head at depth 4096, on a busy box, 2026-11-01: the ver
 1.18 / 1.30 / 1.36 / 1.57 plain steps at M = 2..8, against `gemv`'s 1.16 up to 3.17
 ([BENCHMARKS.md](BENCHMARKS.md), "The verify step on gemm_sm").
 
-### `gemm_sm_v2` - the same rows past 16
+### `gemm_sm_wide` - the same rows past 16
 
 `gemm_sm` holds every row's activations of a group in one sub-group's registers. At 32 rows that needs the 256-GRF
 mode, and at 64 it spills in either mode: a token's int4 linears took 42.1 ms at 32 rows and about 1.65 s at 64,
-against 27.2 ms at 16. `gemm_sm_v2` (`src/kernels/gemm_sm_v2.cl`, used only by the 32- and 64-row verify lists of
+against 27.2 ms at 16. `gemm_sm_wide` (`src/kernels/gemm_sm_wide.cl`, used only by the 32- and 64-row verify lists of
 prompt lookup, which guesses by copying text the prompt already contains) keeps `gemm_sm`'s per-row arithmetic and
 changes the thread shape:
 

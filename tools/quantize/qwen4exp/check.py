@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""Would the engine accept this Qwen3.8-Flash-Next export? (spec 21b Task 1; 21q's `check` stage.)
+"""Would the engine accept this Qwen3.8-Flash-Next export? (spec 21-QFNb Task 1; 21q's `check` stage.)
 
     check.py <checkpoint> [--ple <int8 dir>] [--sample 64]
 
 src/loader/quant.cc's rules in Python (loader::QuantConfig::parse, LinearSrc::classify,
-assert_quant_invariants) plus what spec 21 §5 / plan 21b fix for this family:
+assert_quant_invariants) plus what spec 21-QFN §5 / plan 21-QFNb fix for this family:
 
   quantization_config  bits 4, group_size 64 (ours) or 128 (Intel's), sym, desc_act false or absent,
                        quant_method auto-round | gptq, packing_format auto_round:auto_gptq; every

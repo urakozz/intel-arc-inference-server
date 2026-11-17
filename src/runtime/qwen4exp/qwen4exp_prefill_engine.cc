@@ -2,7 +2,7 @@
 // (qwen4exp_engine.h says why: KolibriEngine's arrangement, kolibri_prefill_engine.cc).
 //
 // **One card:** each chunk is device 0's walk (qwen4exp_prefill.cc) on its immediate list, then a wait.
-// **Two cards** (spec 16b's pieces, as 21c Task 4 did for decode): device 0's list runs the embedding and layers
+// **Two cards** (spec 16b's pieces, as 21-QFNc Task 4 did for decode): device 0's list runs the embedding and layers
 // [0, s) and ends with combine _Y_NN (the chunk's materialised H), then a device-to-device copy of H [C][10240] into
 // the prefill link's landing buffer on device 1 and a barrier signalling the link's cross-device event; device 1's
 // list waits on the event, copies H into its own scratch and runs layers [s, L) (nothing pending: _X). The host resets
@@ -11,7 +11,7 @@
 // naming it and marks the engine until reset() (PipelineEngine's rule). The last chunk's head runs on device 1, then
 // the Control mirror (device 1's block into device 0's).
 //
-// **The overlap (plan 21v2b Task 0, spec 16c's pipeline in this engine's terms).** Device 0 runs chunk j + 1 while
+// **The overlap (plan 21-QFN-v2b Task 0, spec 16c's pipeline in this engine's terms).** Device 0 runs chunk j + 1 while
 // device 1 runs chunk j. Every per-chunk input the host writes is doubled and chunk j's sits at slot j % kPfDepth: the
 // ids (s.ids), each device's chunk Control (the walk's kernels read pos / n_active there, never the device's own
 // block), the head's chunk Control, the injected rows, and the link (its landing buffer and its event). The host's
@@ -52,7 +52,7 @@ struct Qwen4ExpPrefillState {
     prefill::KernelCache kc;
     Qwen4ExpPrefillScratch s;
     std::unique_ptr<l0::Mem> inj[kPfDepth];   // host USM [qsa layers][kPfC][kListRow] a slot: the injected rows (lazy)
-    std::unique_ptr<l0::Mem> mtp_R;   // spec 21e, the last device with the MTP head: the head pass's R rows
+    std::unique_ptr<l0::Mem> mtp_R;   // spec 21-QFNe, the last device with the MTP head: the head pass's R rows
     l0::Mem ctl;                      // host [kPfDepth] Control: the chunks' Controls
     std::unique_ptr<l0::Mem> hctl;    // the last device with the MTP head: host [kPfDepth] Control, the head's
     Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len)
@@ -105,7 +105,7 @@ void Qwen4ExpEngine::prepare_prefill() {
   for (const std::string& v : kernels::qwen4exp::prefill_variants(d, eager, model_.ple.scale == loader::Q4PleScale::Bf16))
     require(std::ifstream(kernels::path(v)).good(),
             v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON");
-  if (mtp_)   // spec 21e: the head's pass per chunk
+  if (mtp_)   // spec 21-QFNe: the head's pass per chunk
     for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_norm_ == MtpNorm::Single))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_MTP=ON");
@@ -205,7 +205,7 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   for (uint32_t i = 0; i < devices(); ++i)   // no decode step in flight writes the state or the Control
     require(settle(i), "device " + std::to_string(i) + "'s last decode step is still running");
   if (injected_) require(bool(pf_inject_), "the injected run on prefill needs set_prefill_injector's lists");
-  // Spec 21e: the prefill's GDN path reads slot 0 directly, so a live slot a commit left is copied there first; a
+  // Spec 21-QFNe: the prefill's GDN path reads slot 0 directly, so a live slot a commit left is copied there first; a
   // verify waiting for its commit is dropped (the prompt continues from pos).
   if (mtp_) {
     mtp_normalise_live();
@@ -239,7 +239,7 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     }
   };
 
-  // Spec 21e's prefix cache: with a block hook every chunk ends at a block end or at the prompt end - Engine::prefill's
+  // Spec 21-QFNe's prefix cache: with a block hook every chunk ends at a block end or at the prompt end - Engine::prefill's
   // rule, one shared function - so each completed block is a storable one.
   const bool hooked = static_cast<bool>(block_hook_);
   struct Chunk {
@@ -272,7 +272,7 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       D.ctl_at(k)->pos = c.pos;
       D.ctl_at(k)->n_active = c.C;
     }
-    if (mtp_) {   // spec 21e: the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
+    if (mtp_) {   // spec 21-QFNe: the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
       Control* h = P.dev[ndev - 1]->hctl->as<Control>() + k;
       *h = *hctl();
       h->pos = c.pos == 0 ? 0 : c.pos - 1;

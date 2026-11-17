@@ -1,5 +1,5 @@
-// Spec 21e Task 2 (plan 21e Review Focus 1 and 5, spec 21 F4's restores): Qwen4ExpEngine's prefix-cache snapshot
-// calls on the card with a checkpoint - box only (labels checkpoint;qwen4exp). The synthetic checkpoints (21b's
+// Spec 21-QFNe Task 2 (plan 21-QFNe Review Focus 1 and 5, spec 21-QFN F4's restores): Qwen4ExpEngine's prefix-cache snapshot
+// calls on the card with a checkpoint - box only (labels checkpoint;qwen4exp). The synthetic checkpoints (21-QFNb's
 // make_synth.py: 4 real-width layers - three GDN, the PLE layer among them, one QSA) carry it; Intel's truncated
 // model at --layers 18 when present. The host side (the layouts, round trips across placements) is
 // qwen4exp_snapshot_test's.
@@ -20,8 +20,8 @@
 //        PLE ids BITWISE the cold run's (qwen4exp_rig::read_state);
 //     b. restores at the REQUEST ENDS 2049, 2050, 2051 (the QSA cut), 2052 and 5000: a session that prefilled [0, at),
 //        saved there and prefilled the rest, against a reset + restore + the same tail prefill - bitwise (against ONE
-//        cold prefill of the whole prompt a split off the 64-row grid differs where 21d's GDN WY sub-chunks move, plan
-//        21d departure 5);
+//        cold prefill of the whole prompt a split off the 64-row grid differs where 21-QFNd's GDN WY sub-chunks move, plan
+//        21-QFNd departure 5);
 //     c. the history before 0: a restore at 1 (one id prefilled) continues bitwise (the PLE ids before 0 are EOS on
 //        the host, the conv rows zeros).
 //   cross (two GPUs; spec 16b's rule): a snapshot taken under --pp 2 (pp2:<s>, default 2) restores under --pp 1 and

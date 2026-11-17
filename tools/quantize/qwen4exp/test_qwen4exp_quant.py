@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""Checks for spec 21b's Qwen3.8-Flash-Next tools (tools/quantize/qwen4exp/). CPU, no model download.
+"""Checks for spec 21-QFNb's Qwen3.8-Flash-Next tools (tools/quantize/qwen4exp/). CPU, no model download.
 
     test_qwen4exp_quant.py [test_name ...]
 
-Run in agnes-ref-img with 21a's transformers 5.19.0 site first on PYTHONPATH (qwen4exp_ref.text_config
+Run in agnes-ref-img with 21-QFNa's transformers 5.19.0 site first on PYTHONPATH (qwen4exp_ref.text_config
 needs it); the original's small files (config.json, tokenizer files) at Q4EXP_ORIG (default
 oracle-out-q4exp/orig-small). The synthetic checkpoints here are the REAL widths with 16 experts and a
 1024-row vocabulary (make_synth's test-only knobs) so a test writes ~0.4 GB, not 6:
@@ -21,7 +21,7 @@ oracle-out-q4exp/orig-small). The synthetic checkpoints here are the REAL widths
                         rounds the scale once; the file equals qwen4exp_make_tiny.write_ple_int8's; the
                         reference's int8 reader dequantises it; check.py --ple ACCEPTS it
   test_hash_tensors     the I64 tensors equal the formula (qwen4exp_facts) for the reduced base and for
-                        20,000,000 (21a's facts-sheet values), and transformers 5.19.0's own builders
+                        20,000,000 (21-QFNa's facts-sheet values), and transformers 5.19.0's own builders
 """
 import json
 import os
@@ -222,7 +222,7 @@ def test_ple_int8_rows():
                 assert float(s) == 0.0 and bool((q == 0).all())
             else:
                 assert torch.equal(q, torch.round(w[gr] / s_want).clamp(-127, 127)), gr
-        # The same bytes as 21a's writer (qwen4exp_make_tiny.write_ple_int8, the reference's int8 input).
+        # The same bytes as 21-QFNa's writer (qwen4exp_make_tiny.write_ple_int8, the reference's int8 input).
         cfg = json.load(open(os.path.join(src, "config.json")))
         tc = MS.ref().text_config(src, raw=cfg)
         other = tempfile.mkdtemp(prefix="q4ple-tiny-")
@@ -288,7 +288,7 @@ def test_hash_tensors():
     tt = json.load(open(os.path.join(d, "config.json")))["text_config"]
     PI.check_constants(tt, "model.language_model.layers.1.ple.ple_embedding.", tm)
     print(f"  base 20,000,000: multipliers {mult}, 16 primes 20000003..20000171, 320001446 rows (padded 320001536) "
-          f"= 21a's facts and transformers' builders; base 1000 likewise; the synthetic's I64 tensors = the formula")
+          f"= 21-QFNa's facts and transformers' builders; base 1000 likewise; the synthetic's I64 tensors = the formula")
 
 
 def test_scales_f16():

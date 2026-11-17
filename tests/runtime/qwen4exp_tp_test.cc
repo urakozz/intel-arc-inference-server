@@ -1,4 +1,4 @@
-// Plan 21v2b Task 2: Qwen3.8-Flash-Next on `--parallel tp` against `--parallel pp` (box only; label
+// Plan 21-QFN-v2b Task 2: Qwen3.8-Flash-Next on `--parallel tp` against `--parallel pp` (box only; label
 // checkpoint;qwen4exp;tp), at --layers N with every expert resident, or the whole model with each engine's tier. One engine a process (each pins the 51.8 GB PLE
 // table; two do not fit beside a CPU job), so a comparison is two runs and a ratio is interleaved runs:
 //   qwen4exp_tp_test <checkpoint> <ids> pp|tp <rows file> [layers 18] [steps 10000] [bench 4] [profile replays]

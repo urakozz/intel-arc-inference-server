@@ -15,7 +15,7 @@ add_library(b70_kolibri_loader STATIC kolibri1_repack.cc kolibri1_rope.cc kolibr
 target_include_directories(b70_kolibri_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_kolibri_loader PUBLIC b70_loader b70_kolibri_model b70_l0)
 
-# --- Spec 21b: Qwen3.8-Flash-Next (qwen4_exp) -----------------------------------------------------
+# --- Spec 21-QFNb: Qwen3.8-Flash-Next (qwen4_exp) -----------------------------------------------------
 # The qwen4_exp loader, beside loader.cc and the Kolibri loader (neither touched): the host half
 # (qwen4exp_repack.cc, qwen4exp_ple.cc - no Level Zero, run on any host by tests/loader/qwen4exp_repack_test.cc
 # and qwen4exp_ple_test.cc), the PLE table's pinning into host USM (qwen4exp_ple_usm.cc, Level Zero: its own

@@ -35,7 +35,7 @@ std::unique_ptr<DeviceWeight> upload_w(l0::Context& ctx, l0::CmdList& imm, const
       DeviceWeight{upload(ctx, imm, w.tiles.data(), w.tiles.size() * 2), nullptr, w.shape, model::WeightKind::Bf16});
 }
 
-// Plan 21v2a Task 8: a layer's routed experts by the tier's row `res` ([experts], 1 = VRAM): the resident experts'
+// Plan 21-QFN-v2a Task 8: a layer's routed experts by the tier's row `res` ([experts], 1 = VRAM): the resident experts'
 // blocks into the layer's VRAM arena (id order), the rest into its pinned host mirror (gate||up blocks, then down
 // blocks, id order); `row` gets the 1024 block addresses (gate||up of expert e at [e], down at [512 + e]).
 void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, uint32_t experts, const uint8_t* res,
@@ -158,7 +158,7 @@ model::Qwen4ExpDesc limited(const model::Qwen4ExpDesc& full, uint32_t layers_lim
   return runtime::qwen4exp::truncated(full, layers_limit);
 }
 
-// Plan 21v2b: load_qwen4exp under the tensor-parallel placement (qwen4exp_loader.h). Each layer is repacked once and
+// Plan 21-QFN-v2b: load_qwen4exp under the tensor-parallel placement (qwen4exp_loader.h). Each layer is repacked once and
 // cut into both cards' halves; everything else as the one-card load, per card.
 Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o, Q4Checkpoint& ck,
                       const SafetensorsSet& set, const model::Qwen4ExpDesc& full, const model::Qwen4ExpDesc& d,
@@ -435,7 +435,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
     throw std::invalid_argument("load_qwen4exp: " + std::to_string(devices.size()) + " device(s) for a " +
                                 std::to_string(placement.devices) + "-device placement");
   const bool int8 = lm_form == LmHeadForm::Int8;
-  // The expert tier (plan 21v2a Task 8): where each routed expert lives, and which form the layers bind. Without
+  // The expert tier (plan 21-QFN-v2a Task 8): where each routed expert lives, and which form the layers bind. Without
   // one, every expert is resident - or B70_Q4_RESIDENT's test placement (any caller: the golden tests and tools run
   // under it unchanged).
   std::array<size_t, runtime::kPpDevices> caps{};

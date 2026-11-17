@@ -1,6 +1,6 @@
-// Spec 21c Task 2: the binaries a Qwen3.8-Flash-Next decode list binds (kernels::qwen4exp::decode_variants - the
+// Spec 21-QFNc Task 2: the binaries a Qwen3.8-Flash-Next decode list binds (kernels::qwen4exp::decode_variants - the
 // names runtime/qwen4exp/qwen4exp_capture.cc forms) for every dense arm (ours int4 / Intel's bf16), head form,
-// attention form, PLE scale form and card count, against the ones src/kernels/CMakeLists.txt's spec 21c block
+// attention form, PLE scale form and card count, against the ones src/kernels/CMakeLists.txt's spec 21-QFNc block
 // builds (passed as arguments: tests/CMakeLists.txt's B70_Q4EXP_DECODE_KERNELS, `kernel_<name>`; the reused
 // binaries other blocks build - Qwen3.8's gdn_step_M1 / argmax, Kolibri's shared shapes - are in the list
 // too). Host only: a name the capture would ask for that no CMake line builds fails here on the Mac, not at capture

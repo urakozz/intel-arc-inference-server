@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Spec 21b Task 4: the PLE hash's fixture for tests/loader/qwen4exp_ple_test.cc, from transformers 5.19.0.
+"""Spec 21-QFNb Task 4: the PLE hash's fixture for tests/loader/qwen4exp_ple_test.cc, from transformers 5.19.0.
 
     qwen4exp_ple_fixture.py <the original's config.json> [tests/loader/qwen4exp_ple_fixture.h]
 
-Run once in agnes-ref-img with 21a's 5.19.0 site first on PYTHONPATH; the output is committed. Every number
+Run once in agnes-ref-img with 21-QFNa's 5.19.0 site first on PYTHONPATH; the output is committed. Every number
 is transformers' own:
 
   tables   for ngram_vocab_size_base 20,000,000 (the real checkpoint) and 1000 (make_synth.py's reduced base):

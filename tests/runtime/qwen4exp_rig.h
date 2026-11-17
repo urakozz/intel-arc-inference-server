@@ -1,5 +1,5 @@
 #pragma once
-// Spec 21c: a Qwen3.8-Flash-Next engine on one or two cards for the card tests (qwen4exp_decode_test,
+// Spec 21-QFNc: a Qwen3.8-Flash-Next engine on one or two cards for the card tests (qwen4exp_decode_test,
 // qwen4exp_golden_test, qwen4exp_partial_test, qwen4exp_pp_test) - the CLI's flow (cli/qwen4exp_decode.h) without
 // its argument parsing: the descriptor from the checkpoint, the placement, the load straight onto the devices
 // (the PLE table pinned in host USM), the engine. kolibri_rig.h's arrangement.
@@ -26,8 +26,8 @@ struct Options {
   uint32_t layers = 0;  // development mode (0: the checkpoint's)
   bool debug_tap = false;
   uint32_t timeout_ms = 60000;
-  uint32_t prefill_timeout_ms = 120000;   // spec 21d: a prefill chunk's bound (PipelineOptions::prefill_timeout_ms)
-  bool mtp = false;     // spec 21e: load the MTP head (its bf16 experts RTN int4 g64 at load) - the verify / draft lists
+  uint32_t prefill_timeout_ms = 120000;   // spec 21-QFNd: a prefill chunk's bound (PipelineOptions::prefill_timeout_ms)
+  bool mtp = false;     // spec 21-QFNe: load the MTP head (its bf16 experts RTN int4 g64 at load) - the verify / draft lists
   // spec 28d: the verify lists' linear override (Auto: gemm_sm at M >= 2; Gemv: the pre-28d gemv / gemv_i8w)
   runtime::LinearForce force_linear = runtime::LinearForce::Auto;
 };

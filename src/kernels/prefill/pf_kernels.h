@@ -268,7 +268,7 @@ inline std::string pf_moe_sort_mw_variant(unsigned experts, unsigned top_k) {
 }
 // pf_moe_q4gemm.cl (plan 2026-11-12 Task 3): the grouped GEMM read straight from the int4 blocks, at one expert
 // block's K x N; SiLU epilogue (gate||up) or the plain bf16 one (down). Entry `pf_moe_q4gemm`.
-// `table` (Flash-Next's expert tier, plan 21v2a Task 8): W is the layer's u64 table row (_TBL).
+// `table` (Flash-Next's expert tier, plan 21-QFN-v2a Task 8): W is the layer's u64 table row (_TBL).
 inline std::string pf_moe_q4gemm_variant(unsigned K, unsigned N, bool silu, bool table = false) {
   return "pf_moe_q4gemm_K" + std::to_string(K) + "_N" + std::to_string(N) + (silu ? "_SILU" : "") +
          (table ? "_TBL" : "");

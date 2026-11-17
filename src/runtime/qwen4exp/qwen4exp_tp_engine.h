@@ -22,7 +22,7 @@
 #include "runtime/qwen4exp/qwen4exp_sizes.h"   // SnapRun, kMaxDraft
 #include "runtime/tp_protocol.h"
 
-// Plan 21v2b Task 2: Qwen3.8-Flash-Next decode with tensor parallelism over two B70s (`--parallel tp`) - Qwen3.8's
+// Plan 21-QFN-v2b Task 2: Qwen3.8-Flash-Next decode with tensor parallelism over two B70s (`--parallel tp`) - Qwen3.8's
 // TpEngine arrangement (runtime/tp_engine.h) over this family's lists (runtime/qwen4exp/qwen4exp_capture.h, tp).
 //
 //   card r   its half of every layer (loader::load_qwen4exp at the tp placement: model::q4_tp_card's shapes), the final

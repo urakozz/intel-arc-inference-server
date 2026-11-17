@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spec 21e Task 3: the M1 data for qwen4exp_mtp_test - 21a's MTP port (qwen4exp_mtp.py MtpHead, vLLM's form) on the
+"""Spec 21-QFNe Task 3: the M1 data for qwen4exp_mtp_test - 21-QFNa's MTP port (qwen4exp_mtp.py MtpHead, vLLM's form) on the
 engine-format head, both pre_fc_norm_hidden forms.
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/qwen4exp_mtp_fixture.py <checkpoint> <out dir>

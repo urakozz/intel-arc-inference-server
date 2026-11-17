@@ -1,4 +1,4 @@
-// Spec 21b Task 3: the Qwen3.8-Flash-Next loader's host half (loader/qwen4exp_repack.h) on synthetic
+// Spec 21-QFNb Task 3: the Qwen3.8-Flash-Next loader's host half (loader/qwen4exp_repack.h) on synthetic
 // checkpoints in both forms, host only.
 //
 // The test WRITES its fixtures: 4-layer checkpoints (layers 0..2 GDN - layer 1 the PLE layer - and the QSA

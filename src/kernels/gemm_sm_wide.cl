@@ -1,8 +1,8 @@
-// gemm_sm_v2.cl - the small-M GEMM past 16 rows (spec 32e, plan 32e Task 2): M = 32 / 64 activation rows against
+// gemm_sm_wide.cl - the small-M GEMM past 16 rows (spec 32e, plan 32e Task 2): M = 32 / 64 activation rows against
 // the int4 decode weights through bf16 DPAS, with gemm_sm's per-row arithmetic under another thread shape.
 //
 // gemm_sm (gemm_sm.cl) holds every row's activations of a group beside two accumulator sets in one sub-group, which
-// spills past 16 rows. v2 keeps gemm_sm's arguments in gemm_sm's order (w, scales, x, out), its output layout
+// spills past 16 rows. The wide form keeps gemm_sm's arguments in gemm_sm's order (w, scales, x, out), its output layout
 // out[(s M + m) N + n] (one slice under SPLITK 1) and its grid, so a capture site swaps the variant name, the entry
 // point and the work-group size only. Two thread shapes (plan 34a Task 1 measured them; kernels::SmallMTuning names
 // which a shape binds at which M):
@@ -31,7 +31,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 
 #ifndef M
-#error "gemm_sm_v2: M"
+#error "gemm_sm_wide: M"
 #endif
 #ifndef LAYOUT
 #define LAYOUT 0
@@ -56,7 +56,7 @@
 #define RC M
 #endif
 #ifndef RC
-#error "gemm_sm_v2: RC or SWAP"
+#error "gemm_sm_wide: RC or SWAP"
 #endif
 #if SPLITK == 0
 #define NSGN 4
@@ -77,25 +77,25 @@
 #define RBC (RC / 8)          /* row blocks of 8 a sub-group holds */
 
 #if M < 17 || M > 64
-#error "gemm_sm_v2: M in [17, 64] (gemm_sm takes M <= 16)"
+#error "gemm_sm_wide: M in [17, 64] (gemm_sm takes M <= 16)"
 #endif
 #if (M % RC) != 0 || (RC % 8) != 0
-#error "gemm_sm_v2: RC | M and 8 | RC"
+#error "gemm_sm_wide: RC | M and 8 | RC"
 #endif
 #if (K % GROUP) != 0 || (G % S) != 0 || (G_PER_S % KSL) != 0
-#error "gemm_sm_v2: S | K/64 and KSL | K/64/S"
+#error "gemm_sm_wide: S | K/64 and KSL | K/64/S"
 #endif
 #if (N % (SG * NSGN)) != 0
-#error "gemm_sm_v2: N must be a multiple of 16 x NSGN"
+#error "gemm_sm_wide: N must be a multiple of 16 x NSGN"
 #endif
 #if SPLITK && S != 1
-#error "gemm_sm_v2: the in-work-group split-K writes one slice (S 1)"
+#error "gemm_sm_wide: the in-work-group split-K writes one slice (S 1)"
 #endif
 #if LAYOUT > 1
-#error "gemm_sm_v2: int4 layouts 0 and 1"
+#error "gemm_sm_wide: int4 layouts 0 and 1"
 #endif
 #if BLK2D && LAYOUT != 0
-#error "gemm_sm_v2: BLK2D is layout 0 only"
+#error "gemm_sm_wide: BLK2D is layout 0 only"
 #endif
 
 // Component r of a float8 (r is a compile-time constant once the loops unroll).
@@ -139,7 +139,7 @@ inline void prefetch_group(__global const uint* w, uint n_tile, uint gp) {
 
 __attribute__((intel_reqd_sub_group_size(SG)))
 __attribute__((reqd_work_group_size(WG * RCN, 1, 1)))
-__kernel void gemm_sm_v2(__global const uint* restrict w,
+__kernel void gemm_sm_wide(__global const uint* restrict w,
                          __global const half* restrict scales,
                          __global const ushort* restrict x,
                          __global float* restrict out) {

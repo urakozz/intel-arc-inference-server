@@ -1,5 +1,5 @@
-// q4_mtp.cl - spec 21e: the Qwen3.8-Flash-Next MTP head's fusion (spec 21 §2.5, §4.5): vLLM's form
-// (V/nvidia/mtp.py:293-317; tools/oracle/qwen4exp_mtp.py MtpHead.fuse, 21a's port):
+// q4_mtp.cl - spec 21-QFNe: the Qwen3.8-Flash-Next MTP head's fusion (spec 21-QFN §2.5, §4.5): vLLM's form
+// (V/nvidia/mtp.py:293-317; tools/oracle/qwen4exp_mtp.py MtpHead.fuse, 21-QFNa's port):
 //
 //   e  = fc_embedding(pre_fc_norm_embedding(embed(t)))                       one 2560-row
 //   h  = fc_hidden(pre_fc_norm_hidden(R) viewed [4][2560]) per stream        R: the main model's (or the previous

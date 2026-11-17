@@ -155,7 +155,7 @@ Template::Template(const std::string& dir, const std::string& template_file) : i
   // only, keyed like the fallback above.
   static constexpr const char* kOrnithTemplateSha256 =
       "182e77dd83bd8e9ca818b240b82e28f243762cd5dda32e6eef327df7b1cd107e";
-  // Plan 21v2a Task 10: Qwen3.8-Flash-Next's newer template (Qwen/Qwen3.8-Flash-Next revision 812d96e1, which our
+  // Plan 21-QFN-v2a Task 10: Qwen3.8-Flash-Next's newer template (Qwen/Qwen3.8-Flash-Next revision 812d96e1, which our
   // export copies): Qwen3.8's (the fallback's source) plus {% generation %} blocks, with the same three
   // `is undefined` tests; spelled `is not defined` the same way.
   static constexpr const char* kFlashNextTemplateSha256 =

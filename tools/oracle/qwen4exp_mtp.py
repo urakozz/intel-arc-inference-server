@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spec 21a Task 4: the Qwen3.8-Flash-Next MTP head, vLLM's semantics on transformers 5.19.0's modules.
+"""Spec 21-QFNa Task 4: the Qwen3.8-Flash-Next MTP head, vLLM's semantics on transformers 5.19.0's modules.
 
 transformers drops `mtp.*` (`_keys_to_ignore_on_load_unexpected`, M:1314/1590), so vLLM v0.31.1rc0-138
 (`b52ae2aa7f`, vllm/models/qwen4_exp/nvidia/mtp.py) is the reference for the head's wiring (decision 1):
@@ -302,7 +302,7 @@ def trace_routes(head: MtpHead, R: torch.Tensor, ids, chunk: int = 2048) -> dict
 
 
 # ------------------------------------------------------------------------------------------------
-# Spec 21e: the engine-format head and the acceptance run (F5's numbers until spec 22)
+# Spec 21-QFNe: the engine-format head and the acceptance run (F5's numbers until spec 22)
 
 def rtn_dequant(w: torch.Tensor) -> torch.Tensor:
     """loader::rtn_int4_g64 then its dequantisation: bf16 [N][K] -> bf16 [N][K]. Per output row and group of 64:
@@ -320,7 +320,7 @@ def rtn_dequant(w: torch.Tensor) -> torch.Tensor:
 
 
 def engine_format(head: MtpHead) -> MtpHead:
-    """The head's routed experts as the engine loads them (21b: the checkpoints ship the head's experts bf16, the
+    """The head's routed experts as the engine loads them (21-QFNb: the checkpoints ship the head's experts bf16, the
     loader RTN-quantises them to int4 g64 - spec 15e's rule): every expert quantised and dequantised. Gate and up
     rows quantise independently (the RTN is per output row), so the fused [2I][H] form is quantised as one."""
     lazy = head.lazy

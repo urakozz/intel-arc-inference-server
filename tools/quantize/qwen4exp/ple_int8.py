@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""Qwen3.8-Flash-Next's PLE n-gram table as int8 rows, the file the engine pins in host USM (spec 21b
-Task 1; spec 21 §5 and decision 7's proposal: a one-time file beside the checkpoint).
+"""Qwen3.8-Flash-Next's PLE n-gram table as int8 rows, the file the engine pins in host USM (spec 21-QFNb
+Task 1; spec 21-QFN §5 and decision 7's proposal: a one-time file beside the checkpoint).
 
     ple_int8.py <snapshot> <out dir> [--scale bf16|f32]
 
 The source is the checkpoint's own table - 128 shards `...layers.<l>.ple.ple_embedding.ngram_embedding.
 shard_K.weight` [rows_per][160] (bf16 in the original and Intel's export, fp32 in the tiny model), which
 concatenate to the padded [320,001,536][160] table (102.4 GB bf16). Each of the 16 n-gram heads owns the
-global rows [offset_h, offset_h + prime_h) (21a's facts sheet: no shard boundary is a head boundary), so
+global rows [offset_h, offset_h + prime_h) (21-QFNa's facts sheet: no shard boundary is a head boundary), so
 the file stores the table PER HEAD, head-local row r = global row offset_h + r:
 
   ple.h<h>.q   I8   [prime_h][160]   q = clamp(rne(w / s), -127, 127)
@@ -18,7 +18,7 @@ the file stores the table PER HEAD, head-local row r = global row offset_h + r:
   ple.layer_multipliers, ple.ngram_heads_vocab_sizes, ple.ngram_heads_offsets   I64, copied from the
                                      checkpoint after checking them against the formula (qwen4exp_facts)
 
-A row dequantises to bf16(float(q) x float(s)) (qwen4exp_ref.PleTable's int8 reader, 21c's gather).
+A row dequantises to bf16(float(q) x float(s)) (qwen4exp_ref.PleTable's int8 reader, 21-QFNc's gather).
 Written as `<out>/ple_int8-000NN-of-00017.safetensors` (one file per head, then the I64 constants) and a
 `model.safetensors.index.json` (loader::SafetensorsSet refuses an index-less directory); every file's
 metadata says {source: <repo>@<revision>, rule: "row-int8-spec9", scale}. The source is read by mmap in

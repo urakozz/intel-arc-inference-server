@@ -1,4 +1,4 @@
-// q4_expert_check.cl - plan 21v2a Task 8: the expert tier's load check, the device half (q4_ple_check's
+// q4_expert_check.cl - plan 21-QFN-v2a Task 8: the expert tier's load check, the device half (q4_ple_check's
 // arrangement). Every routed expert block is reached the way the _TBL MoE kernels reach it - through its device's
 // table of block addresses (u64 [layers][1024]: gate||up of expert e at [e], down at [512 + e]), each address in the
 // layer's VRAM arena or its pinned host mirror - and sampled words of it are read back:

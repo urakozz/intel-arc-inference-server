@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""Stage `quant` of tools/quantize/quantize_qwen4exp.sh: AutoRound with spec 21 v2 §2's settings.
+"""Stage `quant` of tools/quantize/quantize_qwen4exp.sh: AutoRound with spec 21-QFN-v2 §2's settings.
 
     autoround_run.py --model <bf16 snapshot> --out <dir> [--device xpu|cpu] [--iters 200]
                      [--nsamples 128] [--seqlen 2048] [--batch-size 8]
@@ -13,7 +13,7 @@ the shared experts, QSA `q/k/v/o_proj`, GDN `in_proj_qkv` / `in_proj_z` / `out_p
 (`mlp.gate`) and the hyper-connections (AutoRound's own Qwen4 rule), `shared_expert_gate`, GDN `in_proj_a` /
 `in_proj_b`, the QSA indexer, the PLE layer (`.ple.`: its table and projections; the table is converted to int8
 by ple_int8.py), every norm, the embedding, the vision tower. AutoRound's Qwen4 rule also keeps `shared_expert`
-in bf16 (Intel's form); ours quantises the shared experts (spec 21 §5 "Ours"), so that one entry is dropped from
+in bf16 (Intel's form); ours quantises the shared experts (spec 21-QFN §5 "Ours"), so that one entry is dropped from
 its predefined list here.
 
 `lm_head` is NOT AutoRound's (no `quant_lm_head`): a quantised layer outside the blocks makes it switch low CPU
@@ -24,7 +24,7 @@ would only RTN the head anyway; head_rtn.py packs it afterwards by the engine's 
 The MTP head (`mtp.*`) is not a transformers module, so it is never tuned: at export AutoRound
 (`missing_tensors.py` of the pinned commit) copies the source's `mtp.*` tensors, splits the fused experts per
 expert and quantises every linear not in the ignore list by RTN int4 g64. Ours keeps the head's attention and
-shared expert bf16 (spec 21 v2 §2, `loader::q4_mtp_desc`), so those two are in the ignore list; its 512 routed
+shared expert bf16 (spec 21-QFN-v2 §2, `loader::q4_mtp_desc`), so those two are in the ignore list; its 512 routed
 experts come out int4 g64 per expert, the rest bf16, declared in `extra_config`.
 
 Low CPU memory: the fused-MoE original is built as a meta skeleton and each block materialised from the

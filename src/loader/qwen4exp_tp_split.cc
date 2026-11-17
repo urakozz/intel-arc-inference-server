@@ -6,7 +6,7 @@
 
 #include "loader/qwen4exp_layout.h"
 
-// qwen4exp_tp_split.cc - plan 21v2b Task 1: the header has the cuts in one table.
+// qwen4exp_tp_split.cc - plan 21-QFN-v2b Task 1: the header has the cuts in one table.
 namespace loader {
 namespace {
 
