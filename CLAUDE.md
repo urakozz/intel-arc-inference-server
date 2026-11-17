@@ -11,6 +11,10 @@ An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and b
   review file or section.
 - Its plans carry the number plus a letter in order: `docs/superpowers/plans/<date>-spec<N><letter>-<name>.md`.
 - The next free number is the highest under `docs/superpowers/specs/` plus one (`ls docs/superpowers/specs`).
+- Every design that brings up a model or a mode (one card, `pp`, `tp`, `replica`, slots) carries two things from its
+  first plan, never as a later task: **MTP** (or the model's speculative path) working in that mode, and on two cards
+  the **prefill overlap** (two chunks in flight, the card-to-card copies on the copy engine). Modes are compared served,
+  MTP on both sides; a plain number is labelled "MTP off".
 
 ## Code changes
 
