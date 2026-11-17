@@ -10,6 +10,8 @@
 // chunk, and stays failed until reset(). After the last chunk both cards run prefill_head_tp on its last row and the
 // host merges the heads (the larger value, ties to card 0) as a decode step does.
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -186,10 +188,34 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       k->pos = pos;
       k->n_active = C;
     }
-    for (uint32_t r = 0; r < 2; ++r) {
-      Q4TpPrefillState::Dev& D = *P.dev[r];
-      prefill_chunk(D.cx, D.kc, D.s, model_, model_.parts[r], cards_[r]->buffers, pos, C, false, nullptr, false, nullptr,
-                    D.ctl.as<Control>(), D.s.ids.as<uint32_t>(), &D.tp);
+    // Each card's walk is appended by its own host thread: a card's list stops at its first wait for the peer's copy,
+    // and once its command buffer is full the append blocks - one thread appending card 0's whole walk before card 1's
+    // first command would never return. A bound on the appends: past it every event is host-signalled (the lists
+    // drain on whatever they hold) and the chunk fails by name.
+    std::future<void> walk[2];
+    for (uint32_t r = 0; r < 2; ++r)
+      walk[r] = std::async(std::launch::async, [&, r] {
+        Q4TpPrefillState::Dev& D = *P.dev[r];
+        prefill_chunk(D.cx, D.kc, D.s, model_, model_.parts[r], cards_[r]->buffers, pos, C, false, nullptr, false,
+                      nullptr, D.ctl.as<Control>(), D.s.ids.as<uint32_t>(), &D.tp);
+      });
+    for (uint32_t r = 0; r < 2; ++r)
+      if (walk[r].wait_for(std::chrono::milliseconds(opt_.timeout_ms)) != std::future_status::ready) {
+        P.release();
+        for (auto& w : walk) w.wait();
+        drain(pos, "chunk");   // the lists drain on the released events
+        fail("card " + std::to_string(r) + "'s prefill chunk at position " + std::to_string(pos) +
+             " was still being appended after " + std::to_string(opt_.timeout_ms) + " ms (a crossing never arrived)");
+      }
+    for (auto& w : walk) {   // a walk's own error (a missing binary, a shape check): release the peer, then throw
+      try {
+        w.get();
+      } catch (...) {
+        P.release();
+        for (auto& d : P.dev) d->cx.wait_for(tmo);
+        broken_ = true;
+        throw;
+      }
     }
     drain(pos, "chunk");
     off += C;
