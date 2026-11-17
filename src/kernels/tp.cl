@@ -44,16 +44,6 @@
 // state: [0] first failure's status, [1] flag read, [2] trailer read, [3] call expected, [4] chunk, [5] failed chunks,
 // [6] a stale trailer's late arrival: 1 + the loads until it read the call after all, ~0u if never (tp_late).
 #define WG 256
-#define TP_SLOTS 2u
-#define TP_FLAG_STRIDE 16u
-#define TP_PAGE 1024u
-#ifndef TP_TRAILER_STRIDE
-#define TP_TRAILER_STRIDE 16u
-#endif
-
-#define SYS_LOAD(p, order) \
-  atomic_load_explicit((volatile __global atomic_uint*)(p), order, memory_scope_all_svm_devices)
-
 #ifndef TP_CROSS
 #define TP_CROSS 0
 #endif
@@ -82,41 +72,12 @@
 #define CHUNK ((K + FOLD_G - 1) / FOLD_G)
 #define DATA_WORDS (S_MSG * TP_MROWS * K)
 #define J_CHUNKS (FOLD_G * TP_MROWS)
-#define TRAILER(slot, j) (TP_SLOTS * DATA_WORDS + ((slot) * J_CHUNKS + (j)) * TP_TRAILER_STRIDE)
-#define FLAG_BASE (((TP_SLOTS * DATA_WORDS + TP_SLOTS * J_CHUNKS * TP_TRAILER_STRIDE) + TP_PAGE - 1) / TP_PAGE * TP_PAGE)
-#define FLAG(slot, j) (FLAG_BASE + ((slot) * J_CHUNKS + (j)) * TP_FLAG_STRIDE)
+// The wire: the landing layout, the waits' failure record and the per-chunk call numbers (q4_moe.cl's wired MoE
+// shares them).
+#include "tp_wire.h"
 
 // prep.cl's two roundings, token for token (the fold's arithmetic is prep_res_fold's).
 #include "bf16.h"
-
-inline void tp_record(__global uint* state, uint status, uint got, uint stamp, uint want, uint j) {
-  atomic_inc((volatile __global uint*)(state + 5));
-  if (atomic_cmpxchg((volatile __global uint*)state, 0u, status) == 0u) {
-    state[1] = got;
-    state[2] = stamp;
-    state[3] = want;
-    state[4] = j;
-  }
-}
-
-// After a stale trailer: the loads until it reads `want` after all (a late stamp), ~0u if never within the bound (a
-// lost one), in state[6] for the first stale chunk.
-inline void tp_late(__global uint* state, __global const uint* trailer, uint want, uint spin_limit) {
-  uint i = 0u;
-  while (SYS_LOAD(trailer, memory_order_acquire) != want && ++i < spin_limit) {
-  }
-  atomic_cmpxchg((volatile __global uint*)(state + 6), 0u, i < spin_limit ? i + 1u : ~0u);
-}
-
-// This chunk's next call number, and the counters of the rows this list does not run kept level with it.
-inline uint tp_next(__global uint* ctr, uint g, uint m) {
-  const uint j = g * TP_MROWS + m;
-  const uint n = ctr[j] + 1u;
-  ctr[j] = n;
-  if (m == 0u)
-    for (uint r = M; r < TP_MROWS; ++r) ctr[g * TP_MROWS + r] = n;
-  return n;
-}
 
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void tp_send(__global const float* restrict partials, __global uint* land, __global uint* ctr,
@@ -249,24 +210,6 @@ __kernel void tp_sum(__global const float* restrict mine, __global const uint* l
   uint k1 = k0 + CHUNK;
   if (k1 > K) k1 = K;
   for (uint k = k0 + lid; k < k1; k += WG) {
-#if TP_SUM_SLICES
-    // Plan 21v2b: slice by slice (the slices form, FOLDED 0) - out[s] = card 0's slice s + card 1's, from 0 in that
-    // order: a consumer that sums the two cards' halves of one dot (the MoE's per-expert K halves) gets one card's
-    // reduction. `out` may be `mine` (each element read before it is written, by the same work-item).
-    for (uint s = 0; s < S_MSG; ++s) {
-      const size_t e = ((size_t)s * M + m) * K + k;
-      const float a = mine[e], b = as_float(SYS_LOAD(src + e, memory_order_relaxed));
-      float acc = 0.f;
-#if RANK == 0
-      acc += a;
-      acc += b;
-#else
-      acc += b;
-      acc += a;
-#endif
-      out[e] = acc;
-    }
-#else
     float acc = 0.f;
 #if RANK == 0
     LOCAL_PART(acc)
@@ -277,7 +220,6 @@ __kernel void tp_sum(__global const float* restrict mine, __global const uint* l
 #endif
     out[(size_t)m * K + k] = acc;
     for (uint s = 1; s < TP_SUM; ++s) out[((size_t)s * M + m) * K + k] = 0.f;
-#endif
   }
 }
 #endif  // TP_SUM

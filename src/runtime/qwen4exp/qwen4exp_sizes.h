@@ -528,8 +528,8 @@ ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Pla
 ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, uint32_t rank,
                         const std::vector<uint32_t>* counts, const std::string& forced = "");
 // A card's tp decode list (flash attention): one card's list (device_launches at Q4Placement::one) with tp_send +
-// tp_sum after each of a layer's two row-parallel linears (out_proj / o_proj, the MoE's down) and q4_moe_finish: + 5 a
-// layer. 1019 at 48 layers (779 + 240).
+// tp_sum after out_proj / o_proj and q4_moe_finish after the down (the MoE's crossing is wired into the two): + 3 a
+// layer. 923 at 48 layers (779 + 144).
 size_t tp_device_launches(const model::Qwen4ExpDesc& one);
 // Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
 double tp_card_f(const ExpertBudget& b, uint32_t rank);

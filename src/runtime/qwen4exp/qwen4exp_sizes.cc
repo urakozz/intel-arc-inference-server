@@ -744,7 +744,7 @@ ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, u
 }
 
 size_t tp_device_launches(const model::Qwen4ExpDesc& one) {
-  return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(5) * one.layers;
+  return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(3) * one.layers;
 }
 
 double tp_card_f(const ExpertBudget& b, uint32_t rank) {

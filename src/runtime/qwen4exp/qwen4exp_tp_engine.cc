@@ -33,7 +33,7 @@ struct Qwen4ExpTpEngine::Card {
         imm(l0::CmdList::immediate(c)),
         ctl(buffers.control.as<Control>()),
         lo{one.hidden, kTpOutSlices, tp::kFoldG},
-        lm{one.hidden, one.top_k + 1, tp::kFoldG},
+        lm{one.hidden, one.top_k + 1, kernels::qwen4exp::kTpMoeFoldG},
         land_o(c, l0::MemKind::Device, lo.total_bytes(), 4096),
         land_m(c, l0::MemKind::Device, lm.total_bytes(), 4096),
         ctr_so(c, l0::MemKind::Device, lo.counter_bytes()),

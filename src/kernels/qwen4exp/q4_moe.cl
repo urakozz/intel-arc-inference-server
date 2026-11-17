@@ -295,20 +295,34 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   }
 }
 
-// down + the combine, one 16-column n-tile of the hidden row per work-group; sub-group (slot, q).
-__attribute__((reqd_work_group_size(WG_DN, 1, 1)))
-Q4_SG16
 // MOE_TP_PART (plan 21v2b, a tensor-parallel card's half of every expert, DN_KS 1): y is fp32 [SLOTS][M][HIDDEN],
 // each slot's dot over the card's K half (card 0 groups 0..4, card 1 groups 5..9: one card's two DN_KS 2 partials,
 // bit for bit); the all-reduce adds them slot by slot (card 0's first: one card's reduction) and q4_moe_finish
 // applies this kernel's epilogue. Every existing binary leaves it unset.
+// The all-reduce is wired into the two kernels (tp.cl's protocol, tp_wire.h; RANK the card): each down work-group is
+// one chunk of the MoE's landing (its 16 columns, every slot: FOLD_G = HIDDEN / 16) and sends it to the peer as
+// tp_send does; q4_moe_finish waits for its 16 chunks as tp_sum does and adds the two cards' slots in tp_sum's order.
 #if MOE_TP_PART
+#ifndef RANK
+#error "q4_moe MOE_TP_PART: RANK (the card: the order of the slot sums)"
+#endif
+#define TP_MROWS 8
+#define DATA_WORDS (SLOTS * TP_MROWS * HIDDEN)
+#define J_CHUNKS (NT_DN * TP_MROWS)
+#include "tp_wire.h"
 #define Y_T __global float* restrict
 #else
 #define Y_T __global ushort* restrict
 #endif
+// down + the combine, one 16-column n-tile of the hidden row per work-group; sub-group (slot, q).
+__attribute__((reqd_work_group_size(WG_DN, 1, 1)))
+Q4_SG16
 __kernel void q4_moe_down(__global const uint* restrict route, __global const ushort* restrict h,
-                          __global const uint* restrict w, SH_T restrict w_sh, Y_T y) {
+                          __global const uint* restrict w, SH_T restrict w_sh, Y_T y
+#if MOE_TP_PART
+                          , __global uint* land, __global uint* ctr
+#endif
+                          ) {
   __local float red[SLOTS * DN_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -345,7 +359,22 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
 #if DN_KS != 1
 #error "q4_moe MOE_TP_PART: DN_KS 1 (a card's 5 groups in one partial)"
 #endif
-  y[((size_t)slot * M + m) * HIDDEN + n_tile * SG + lane] = red[sg][lane];
+  // tp_send for chunk n_tile: the slot's 16 words here and in the peer's landing, the stamp line, the flag.
+  __local uint s_n;
+  if (lid == 0) s_n = tp_next(ctr, n_tile, m);
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint n = s_n;
+  const size_t e = ((size_t)slot * M + m) * HIDDEN + n_tile * SG + lane;
+  y[e] = red[sg][lane];
+  land[(n & 1u) * DATA_WORDS + e] = as_uint(red[sg][lane]);
+  const uint j = n_tile * TP_MROWS + m;
+  if (lid < TP_TRAILER_STRIDE) land[TRAILER(n & 1u, j) + lid] = n;
+  atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
+  barrier(CLK_GLOBAL_MEM_FENCE);
+  if (lid == 0) {
+    *(volatile __global uint*)(land + FLAG(n & 1u, j)) = n;
+    atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
+  }
 #else
   if (sg == 0) {
     float sum = 0.0f;
@@ -360,21 +389,59 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
 #endif
 }
 #if MOE_TP_PART
-// q4_moe_finish(route, slots, y) - grid (HIDDEN / 256, M), WG 256: q4_moe_down's epilogue over the all-reduced slots
-// (fp32 [SLOTS][M][HIDDEN]), token for token: y bf16 [M][HIDDEN].
+// q4_moe_finish(route, slots, land, ctr, state, spin_limit, y) - grid (HIDDEN / 256, M), WG 256: tp_sum's wait for
+// the peer's 16 chunks under this work-group (lane c < 16 waits for chunk 16 g + c), each slot the two cards' values
+// summed from 0 (card 0's first), then q4_moe_down's epilogue, token for token: y bf16 [M][HIDDEN].
 __attribute__((reqd_work_group_size(256, 1, 1)))
 __kernel void q4_moe_finish(__global const uint* restrict route, __global const float* restrict slots,
+                            __global const uint* land, __global uint* ctr, __global uint* state, uint spin_limit,
                             __global ushort* restrict y) {
   const uint n = get_global_id(0);
   const uint m = get_group_id(1);
+  const uint lid = get_local_id(0);
+  __local uint s_want[256 / SG];
+  if (lid < 256 / SG) {
+    const uint c = get_group_id(0) * (256 / SG) + lid;
+    const uint j = c * TP_MROWS + m;
+    const uint want = tp_next(ctr, c, m);
+    s_want[lid] = want;
+    const uint slot = want & 1u;
+    if (SYS_LOAD(state, memory_order_relaxed) == 0u) {   // after a failure: no spin, the host throws anyway
+      uint got = 0u, i = 0u;
+      do {
+        got = SYS_LOAD(land + FLAG(slot, j), memory_order_acquire);
+      } while (got != want && ++i < spin_limit);
+      const uint stamp = SYS_LOAD(land + TRAILER(slot, j), memory_order_acquire);
+      const uint status = got != want ? 1u : (stamp != want ? 2u : 0u);
+      if (status != 0u) tp_record(state, status, got, stamp, want, j);
+      if (status == 2u) tp_late(state, land + TRAILER(slot, j), want, spin_limit);
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+  atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_acquire, memory_scope_all_svm_devices);
+  __global const uint* src = land + (s_want[lid / SG] & 1u) * DATA_WORDS;
   const __global uint* restrict rr = route + (size_t)m * RW;
+  float v[SLOTS];
+  for (uint k = 0; k < SLOTS; ++k) {
+    const size_t e = ((size_t)k * M + m) * HIDDEN + n;
+    const float a = slots[e], b = as_float(SYS_LOAD(src + e, memory_order_relaxed));
+    float acc = 0.f;
+#if RANK == 0
+    acc += a;
+    acc += b;
+#else
+    acc += b;
+    acc += a;
+#endif
+    v[k] = acc;
+  }
   float sum = 0.0f;
   for (uint k = 0; k < MOE_K; ++k) {
-    const float t = rf(rf(slots[((size_t)k * M + m) * HIDDEN + n]) * as_float(rr[R_W + k]));
+    const float t = rf(rf(v[k]) * as_float(rr[R_W + k]));
     sum = sum + t;
   }
   const ushort r_b = rne_bf16(sum);
-  const ushort sh_b = rne_bf16(rf(slots[((size_t)SHARED_SLOT * M + m) * HIDDEN + n]) * as_float(rr[R_SG]));
+  const ushort sh_b = rne_bf16(rf(v[SHARED_SLOT]) * as_float(rr[R_SG]));
   y[(size_t)m * HIDDEN + n] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
 }
 #endif

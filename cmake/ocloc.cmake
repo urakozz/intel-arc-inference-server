@@ -44,7 +44,7 @@ function(add_ocloc_kernel NAME)
   endif()
   # The project-wide options: the language version, the correctly rounded
   # divide/sqrt every host-comparable kernel needs (see above) and src/kernels
-  # on the include path (bf16.h).
+  # on the include path (bf16.h, tp_wire.h).
   set(opts "-cl-std=CL3.0 -cl-fp32-correctly-rounded-divide-sqrt -I${B70_KERNEL_SRC_DIR}")
   foreach(d IN LISTS K_DEFINES)
     string(APPEND opts " -D${d}")
@@ -62,7 +62,8 @@ function(add_ocloc_kernel NAME)
             -file "${K_SOURCE}" -device "${B70_OCLOC_DEVICE}"
             -output "${NAME}" -output_no_suffix -out_dir "${B70_KERNEL_DIR}"
             -options "${opts}"
-    DEPENDS "${K_SOURCE}" ${K_DEPENDS} "${B70_KERNEL_SRC_DIR}/bf16.h" "${B70_OCLOC_STAMP}"
+    DEPENDS "${K_SOURCE}" ${K_DEPENDS} "${B70_KERNEL_SRC_DIR}/bf16.h" "${B70_KERNEL_SRC_DIR}/tp_wire.h"
+            "${B70_OCLOC_STAMP}"
     COMMENT "ocloc ${NAME}"
     VERBATIM)
   add_custom_target("kernel_${NAME}" ALL DEPENDS "${out}")

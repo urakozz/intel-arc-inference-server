@@ -3254,10 +3254,10 @@ if(B70_Q4EXP)
     add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_gemv_M1_K2560_N8192_S1_L0
       kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S2_L0 kernel_gemv_i8w_M1_K2560_N124160
       kernel_prep_gated_head_M1_GK8V24_SIG kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1
-      kernel_q4_qsa_attn_M1_T32_Q12KV1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP
-      kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP 
+      kernel_q4_qsa_attn_M1_T32_Q12KV1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0
+      kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R0
+      kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R1
       kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum
-      kernel_tp_cross_M1_K2560_G20_S11_X_R0_slices kernel_tp_cross_M1_K2560_G20_S11_X_R1_slices
       kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
     foreach(mode pp tp)   # pp writes the reference rows tp reads: run in this order (ctest -R qwen4exp_tp_)
       add_test(NAME qwen4exp_tp_${mode}_test COMMAND qwen4exp_tp_test ${B70_Q4EXP_RTN_SNAPSHOT}

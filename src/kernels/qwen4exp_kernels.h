@@ -128,10 +128,12 @@ inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head"
 // "Plan 21v2b" block): the MoE at the half width 320 with the card's fp32 partial (MOE_TP_PART, DN_KS 1), the GDN at
 // Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_send + tp_sum at hidden 2560 (FOLD_G 20; S the local slices).
 inline constexpr unsigned kTpInter = kInter / 2;
-inline std::string tp_moe_variant(bool table) {
-  return std::string("q4_moe_M1_E512_T10_D2560_I320_SH4") + (table ? "_TBL" : "") + "_TP";
+inline std::string tp_moe_variant(bool table, unsigned rank) {
+  return std::string("q4_moe_M1_E512_T10_D2560_I320_SH4") + (table ? "_TBL" : "") + "_TP_R" + std::to_string(rank);
 }
-// MOE_TP_PART: q4_moe_down writes each slot's partial, fp32 [11][M][2560]; q4_moe_finish the epilogue.
+// MOE_TP_PART: q4_moe_down writes each slot's partial, fp32 [11][M][2560], and sends it to the peer's landing (one
+// chunk a down work-group: kTpMoeFoldG); q4_moe_finish waits for the peer's, sums the two and runs the epilogue.
+inline constexpr unsigned kTpMoeFoldG = kHidden / 16;   // 160
 inline constexpr unsigned tp_moe_gate_up_groups() { return kSlots * (2 * kTpInter / 16 / 4); }   // 110
 inline constexpr unsigned tp_moe_down_wg() { return 16 * kSlots * 1; }                          // 176: DN_KS 1
 inline std::string tp_gated_head_sig_variant() { return "prep_gated_head_M1_GK8V24_SIG"; }
@@ -143,11 +145,6 @@ inline constexpr unsigned kTpFoldG = 20, kTpWg = 256, kTpOutS = 2, kTpFinishWg =
 inline std::string tp_sum_variant(unsigned rank) {
   return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
          "_X_R" + std::to_string(rank) + "_sum";
-}
-// the MoE's crossing: the 11 slots' K halves summed slot by slot
-inline std::string tp_slices_variant(unsigned rank) {
-  return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kSlots) +
-         "_X_R" + std::to_string(rank) + "_slices";
 }
 
 // The reused kernels at this family's shapes.
