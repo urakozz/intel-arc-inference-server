@@ -848,7 +848,7 @@ std::unique_ptr<Launch> make_prod(l0::Context& ctx, const kernels::SmallMTuning&
   L->name = kernels::gemm_sm_variant(M, t);
   L->M = M;
   L->mod = std::make_unique<l0::Module>(ctx, kernels::path(L->name));
-  L->k = std::make_unique<l0::Kernel>(*L->mod, kernels::gemm_sm_entry(M, t));   // spec 32e: gemm_sm_v2 past 16
+  L->k = std::make_unique<l0::Kernel>(*L->mod, kernels::gemm_sm_entry(M, t));   // spec 32e: gemm_sm_wide past 16
   L->k->group_size(kernels::gemm_sm_wg_size(M, t));
   L->gx = t.N / kernels::gemm_sm_cols(t);
   L->gy = kernels::gemm_sm_grid_y(t);
@@ -889,7 +889,7 @@ bool deep_numerics(l0::Context& ctx, l0::Queue& q, l0::Fence& f, const Inputs& i
     kernels::SmallMTuning g = t;
     g.grf256 = g256;
     g.g256_from = 0;
-    g.v2_32 = g.v2_64 = kernels::kV2None;   // gemm_sm's row (spec 32e: production binds gemm_sm_v2 past 16)
+    g.wide_32 = g.wide_64 = kernels::kWideNone;   // gemm_sm's row (spec 32e: production binds gemm_sm_wide past 16)
     const std::string n = kernels::gemm_sm_variant(M, g);
     if (!file_exists(kernels::path(n))) continue;
     auto L = make_prod(ctx, g, M);
@@ -1119,11 +1119,11 @@ int run_prod(l0::Context& ctx, const Opts& o) {
         set_rows(ctx, in, random_rows(kMaxM, s.K, 5 + s.K));
         kernels::SmallMTuning g = *t;
         g.g256_from = 0;
-        g.v2_32 = g.v2_64 = kernels::kV2None;   // gemm_sm's row
+        g.wide_32 = g.wide_64 = kernels::kWideNone;   // gemm_sm's row
         g.grf256 = !prod256;
         const std::string n = kernels::gemm_sm_variant(M, g);
-        // spec 32e: a row on gemm_sm_v2 has no gemm_sm alternate (it spills there; the psm_v2 arms are its controls)
-        if (kernels::gemm_sm_v2_arm(M, *t)) std::printf("| %s | %u | not timed (gemm_sm_v2 row) |\n", n.c_str(), M);
+        // spec 32e: a row on gemm_sm_wide has no gemm_sm alternate (it spills there; the psm_v2 arms are its controls)
+        if (kernels::gemm_sm_wide_arm(M, *t)) std::printf("| %s | %u | not timed (gemm_sm_wide row) |\n", n.c_str(), M);
         else if (!file_exists(kernels::path(n))) std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M);
         else if (grf_ok(n, g.grf256)) al.push_back(make_timed(ctx, make_prod(ctx, g, M), in, nl));
       }

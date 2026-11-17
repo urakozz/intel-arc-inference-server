@@ -928,7 +928,7 @@ endif()
 # Additive only: new names. Ids through Control::deep_cur / deep_out (CTRL_CUR 64 / CTRL_OUT 128). The attention is
 # the 16-row line (spec 33's PAIR PVX 8 PVR 2 since spec 32e) in row chunks of 16 (RCHUNK: grid dimension 0, a block's
 # chunks side by side) with attn_v2's reduce alone at the
-# list's rows; the linears are gemm_sm_v2's rows at 32 / 64; the rest the 16-row list's per-row builds at W.
+# list's rows; the linears are gemm_sm_wide's rows at 32 / 64; the rest the 16-row list's per-row builds at W.
 set(DEEP_W 32 64)
 if(B70_MTP AND B70_VERIFY_M8)
   set(DEEP_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=64 CTRL_OUT=128 CTRL_DEBUG=18)
@@ -1786,9 +1786,9 @@ function(add_gemm_sm_variant M K N S L)
     set(GEMM_SM_TARGETS ${GEMM_SM_TARGETS} kernel_${name} PARENT_SCOPE)
   endif()
 endfunction()
-# Spec 32e: add_gemm_sm_v2_variant(M K N S L ARM [WG] [MG] [B2D]) - gemm_sm_v2.cl past 16 rows; ARM rc32 (row chunks
+# Spec 32e: add_gemm_sm_wide_variant(M K N S L ARM [WG] [MG] [B2D]) - gemm_sm_wide.cl past 16 rows; ARM rc32 (row chunks
 # of 32, prefetch 1, 256 GRF) or sw (one sub-group for every row, prefetch 2, 128 GRF): kernels::gemm_sm_variant's name.
-function(add_gemm_sm_v2_variant M K N S L ARM)
+function(add_gemm_sm_wide_variant M K N S L ARM)
   cmake_parse_arguments(G "WG;MG;B2D" "" "" ${ARGN})
   set(defs M=${M} K=${K} N=${N} S=${S} LAYOUT=${L})
   set(tag "")
@@ -1813,9 +1813,9 @@ function(add_gemm_sm_v2_variant M K N S L ARM)
     list(APPEND defs SWAP=1 PF_G=2)
     string(APPEND tag _sw_pf2)
   endif()
-  set(name gemm_sm_v2_M${M}_K${K}_N${N}_S${S}_L${L}${tag})
+  set(name gemm_sm_wide_M${M}_K${K}_N${N}_S${S}_L${L}${tag})
   if(NOT TARGET kernel_${name})
-    add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm_v2.cl DEFINES ${defs} ${opts})
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm_wide.cl DEFINES ${defs} ${opts})
     set(GEMM_SM_TARGETS ${GEMM_SM_TARGETS} kernel_${name} PARENT_SCOPE)
   endif()
 endfunction()
@@ -1840,18 +1840,18 @@ if(B70_MTP)
     add_ocloc_kernel(prep_silu_mul_M${MM}_S1 SOURCE ${PREP_CL} DEFINES M=${MM} SILU_S=1)
     list(APPEND GEMM_SM_CONSUMERS kernel_prep_silu_mul_M${MM}_S1)
   endforeach()
-  # Spec 32 / 32e: the deep lists' 32 and 64 rows. The int4 rows by gemm_sm_v2 (gemm_sm spills there), the shape
-  # kernels::SmallMTuning's v2_32 / v2_64 names (GEMM_SM_V2_32 / _64: "K N S L arm flags..."); the int8 head by
+  # Spec 32 / 32e: the deep lists' 32 and 64 rows. The int4 rows by gemm_sm_wide (gemm_sm spills there), the shape
+  # kernels::SmallMTuning's wide_32 / wide_64 names (GEMM_SM_WIDE_32 / _64: "K N S L arm flags..."); the int8 head by
   # gemm_sm_i8w at 256 GRF (its g256_from 32); gate||up's SiLU at S 1.
   if(B70_VERIFY_M8)
-    set(GEMM_SM_V2_32 "5120 16384 1 1 rc32 MG" "6144 5120 4 0 sw MG B2D" "5120 14336 2 0 rc32 MG B2D"
+    set(GEMM_SM_WIDE_32 "5120 16384 1 1 rc32 MG" "6144 5120 4 0 sw MG B2D" "5120 14336 2 0 rc32 MG B2D"
                       "5120 34816 1 0 rc32 WG MG B2D" "17408 5120 4 0 rc32 MG B2D")
-    set(GEMM_SM_V2_64 "5120 16384 1 1 rc32 MG" "6144 5120 4 0 rc32 MG B2D" "5120 14336 2 0 rc32 MG B2D"
+    set(GEMM_SM_WIDE_64 "5120 16384 1 1 rc32 MG" "6144 5120 4 0 rc32 MG B2D" "5120 14336 2 0 rc32 MG B2D"
                       "5120 34816 1 0 rc32 WG MG B2D" "17408 5120 4 0 rc32 MG B2D")
     foreach(MM 32 64)
-      foreach(row IN LISTS GEMM_SM_V2_${MM})
+      foreach(row IN LISTS GEMM_SM_WIDE_${MM})
         separate_arguments(f UNIX_COMMAND "${row}")
-        add_gemm_sm_v2_variant(${MM} ${f})
+        add_gemm_sm_wide_variant(${MM} ${f})
       endforeach()
       add_gemm_sm_variant(${MM} 5120 248320 1 2 WG G256)
       add_ocloc_kernel(prep_silu_mul_M${MM}_S1 SOURCE ${PREP_CL} DEFINES M=${MM} SILU_S=1)
