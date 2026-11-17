@@ -31,6 +31,7 @@
 #include "loader/moe_layout.h"
 #include "model/model_desc.h"
 #include "runtime/memory_plan.h"
+#include "runtime/vram_bars.h"
 #include "runtime/pipeline_plan.h"
 
 namespace cli {
@@ -151,8 +152,14 @@ inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& 
                " at max_len {:d})\n", split, len);
   else
     std::print(stderr, "split: {:d} (--pipeline-split)\n", split);
-  std::print(stderr, "{}\n",
-             runtime::pp_describe(runtime::pp_plan(d, split, len, w, kv, pf, x), dev, reserve).c_str());
+  const runtime::PpPlan p = runtime::pp_plan(d, split, len, w, kv, pf, x);
+  std::print(stderr, "{}\n", runtime::pp_describe(p, dev, reserve).c_str());
+  for (uint32_t i = 0; i < runtime::kPpDevices; ++i)   // the MTP head sits on the last device
+    std::print(stderr, "{}",
+               runtime::vram_block({runtime::vram_parts(p.dev[i], p.extras.mtp && i == runtime::kPpDevices - 1 ? "MTP head" : "decode state",
+                                                        "DFlash drafter"),
+                                    reserve, dev[i]},
+                                   i, runtime::kPpDevices, runtime::vram_utf8()));
   return {split, len};
 }
 

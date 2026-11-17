@@ -60,6 +60,7 @@
 #include "runtime/tp_engine.h"   // spec 17d: --parallel tp
 #include "runtime/tp_plan.h"
 #include "runtime/verify_attn.h"   // spec 32e: the 64-row list's per-depth cap (the startup line)
+#include "runtime/vram_bars.h"
 #include "cli/tp_dflash.h"
 #include "runtime/dflash/tp_dflash_drafter.h"
 #include "server/lookup_in_dflash.h"   // spec 19f: --spec dflash-lookup's constants (the startup line)
@@ -205,6 +206,7 @@ std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix
                prefix_cache_gb, prefix_why.c_str(),
                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
                    .count());
+    std::print(stderr, "{}", runtime::vram_host_line({{"prefix cache", prefix_alloc->size()}}));
   } else {
     std::print(stderr, "prefix cache: off ({})\n", prefix_why.c_str());
   }
@@ -674,6 +676,13 @@ int serve_tp(const TpServe& a, server::Options options) {
                                  " - --max-len auto gives the largest that fits");
     }
   }
+  for (uint32_t r = 0; r < 2; ++r) {
+    const runtime::MemoryPlan p =
+        runtime::tp_card_plan(card, crossing, len, weights[r], a.kv_cache, path, head, drafter_plan);
+    std::print(stderr, "{}", runtime::vram_block({runtime::vram_parts(p, runtime::vram_state_name(p), "DFlash drafter"),
+                                                  a.mem_reserve, dev[r]},
+                                                 r, 2, runtime::vram_utf8()));
+  }
   std::unique_ptr<runtime::dflash::TpDFlashDrafter> drafter;
   if (halves)
     drafter = std::make_unique<runtime::dflash::TpDFlashDrafter>(
@@ -795,7 +804,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
       slot_lens = {max_len};
     }
     const uint32_t chunk_cap =
-        cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, drafter_plan, 0);
+        cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, drafter_plan, 0, i, 2);
     std::print(stderr, "card {:d}: slots: {:d} ({})\n", i, slot_lens.size(),
                runtime::slot_layout_name(slot_lens).c_str());
     std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;

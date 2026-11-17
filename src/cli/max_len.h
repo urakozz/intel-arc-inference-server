@@ -29,6 +29,7 @@
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/memory_plan.h"
+#include "runtime/vram_bars.h"
 
 namespace cli {
 
@@ -236,14 +237,16 @@ inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d) {
   return cap;
 }
 // `lens`: the request slots' lengths (one entry without --max-num-seqs), as settle() / settle_slots() gave them.
+// Prints the card's VRAM chart (runtime/vram_bars.h) at the cap chosen; `card` of `cards` names it (--parallel replica
+// settles each card on its own).
 inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m, const std::vector<uint32_t>& lens,
                                  size_t reserve_bytes, const runtime::PrefillPath& path,
-                                 runtime::KvCache kv, const runtime::DrafterPlan& drafter, uint32_t asked) {
-  if (!path.prefill) return path.chunk_cap;
+                                 runtime::KvCache kv, const runtime::DrafterPlan& drafter, uint32_t asked,
+                                 uint32_t card = 0, uint32_t cards = 1) {
+  const size_t weights = m.report.total() - m.report.rope_bytes;
   const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
-  if (why == nullptr) {
-    const size_t weights = m.report.total() - m.report.rope_bytes;
+  if (path.prefill && why == nullptr) {
     if (lens.size() == 1) {
       cap = runtime::prefill_chunk_cap_that_fits(*m.desc, m.mtp != nullptr, weights, ctx.memory_bytes(),
                                                  reserve_bytes, lens[0], path, draft_vocab_plan(m), kv, drafter);
@@ -259,7 +262,15 @@ inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
     why = cap == runtime::PrefillScratchDims::kCMax ? "the plan at this max_len has room for it"
                                                    : "4096 would not fit beside this max_len";
   }
-  if (why) std::print(stderr, "prefill chunk cap: {:d} ({})\n", cap, why);   // the default says nothing
+  if (path.prefill && why) std::print(stderr, "prefill chunk cap: {:d} ({})\n", cap, why);   // the default says nothing
+  runtime::PrefillPath at = path;
+  at.chunk_cap = cap;
+  const runtime::MemoryPlan p =
+      runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, at, draft_vocab_plan(m), kv, drafter);
+  std::print(stderr, "{}",
+             runtime::vram_block({runtime::vram_parts(p, runtime::vram_state_name(p), "DFlash drafter"),
+                                  reserve_bytes, ctx.memory_bytes()},
+                                 card, cards, runtime::vram_utf8()));
   return cap;
 }
 
