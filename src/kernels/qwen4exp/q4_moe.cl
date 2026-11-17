@@ -83,7 +83,14 @@ inline float silu_t(float x) { return x / (1.0f + exp_torch(-x)); }
 #if ROUTE_K < 1 || ROUTE_K > 15 || ROUTE_E != 2 * ROUTE_WG || ROUTE_LN < ROUTE_E + 1
 #error "q4_route: 1 <= TOP_K <= 15 (the route row's ids), two experts a lane, the row holds the shared gate"
 #endif
-__attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
+#define ROUTE_NG (ROUTE_WG / SG)   // sub-groups, each the max of its 32 experts
+#if ROUTE_NG < ROUTE_K + 1
+#error "q4_route: the threshold needs at least TOP_K + 1 sub-group maxima"
+#endif
+// The ranking runs over the candidates only: T = the (TOP_K + 1)-th largest of the sub-groups' maxima, so at least
+// TOP_K + 1 experts have p >= T and every expert of rank <= TOP_K is among those with p >= T; the rest have p < T,
+// below every candidate, so a candidate's RANK over the candidates is its RANK over all 512 (the ids and p unchanged).
+__attribute__((reqd_work_group_size(ROUTE_WG, 1, 1))) Q4_SG16
 __kernel void q4_route(__global const float* restrict logits, __global uint* restrict route) {
   const uint m = get_group_id(1);
   const uint lane = get_local_id(0);
@@ -91,6 +98,10 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
   __local float red[ROUTE_E];    // the max, then the softmax sum tree
   __local uint top_id[ROUTE_K + 1];
   __local float top_p[ROUTE_K + 1];
+  __local float gmax[ROUTE_NG];  // each sub-group's largest p
+  __local float thr;             // T (INFINITY: no candidate, NaN rows)
+  __local uint n_cand;
+  __local uint cand[ROUTE_E];    // the experts with p >= T, in any order
   const __global float* restrict lr = logits + (size_t)m * ROUTE_LN;
   for (uint q = 0; q < 2; ++q) {
     const uint e = lane + q * ROUTE_WG;
@@ -100,6 +111,10 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
   if (lane <= ROUTE_K) {   // a defined row even if NaNs break the ranking
     top_id[lane] = lane;
     top_p[lane] = 0.0f;
+  }
+  if (lane == 0) {
+    thr = INFINITY;
+    n_cand = 0u;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = ROUTE_E / 2; stride > 0; stride >>= 1) {   // the max: exact in any order
@@ -120,15 +135,34 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   const float sum = red[0];
-  for (uint q = 0; q < 2; ++q) sl[lane + q * ROUTE_WG] = ex[q] / sum;
-  barrier(CLK_LOCAL_MEM_FENCE);
+  float p[2];
   for (uint q = 0; q < 2; ++q) {
-    const uint e = lane + q * ROUTE_WG;
+    p[q] = ex[q] / sum;
+    sl[lane + q * ROUTE_WG] = p[q];
+  }
+  const float gm = sub_group_reduce_max(fmax(p[0], p[1]));   // exact in any order
+  if (lane % SG == 0) gmax[lane / SG] = gm;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lane < ROUTE_NG) {   // T: the maximum of RANK TOP_K among the ROUTE_NG maxima
+    const float g = gmax[lane];
+    uint rank = 0;
+    for (uint j = 0; j < ROUTE_NG; ++j) rank += (gmax[j] > g || (gmax[j] == g && j < lane)) ? 1u : 0u;
+    if (rank == ROUTE_K) thr = g;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const float t = thr;
+  for (uint q = 0; q < 2; ++q)
+    if (p[q] >= t) cand[atomic_inc(&n_cand)] = lane + q * ROUTE_WG;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint nc = n_cand;
+  for (uint i = lane; i < nc; i += ROUTE_WG) {
+    const uint e = cand[i];
     const float pe = sl[e];
     uint rank = 0;
-    for (uint jj = 0; jj < ROUTE_E; ++jj) {
-      const float pj = sl[jj];
-      rank += (pj > pe || (pj == pe && jj < e)) ? 1u : 0u;
+    for (uint jj = 0; jj < nc; ++jj) {
+      const uint j = cand[jj];
+      const float pj = sl[j];
+      rank += (pj > pe || (pj == pe && j < e)) ? 1u : 0u;
     }
     if (rank <= ROUTE_K) {
       top_id[rank] = e;
