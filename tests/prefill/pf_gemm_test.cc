@@ -448,6 +448,7 @@ int main() {
   for (uint32_t M : {1u, 16u, 54u, 256u, 772u, 896u, 897u, 1024u, 1025u})
     for (bool silu : {false, true}) small_case(d, M, 5120, silu);
   for (uint32_t M : {9u, 200u, 1000u}) small_case(d, M, 17408, false);
+  small_case(d, 1024, 10240, false);   // Flash-Next's HC down||inject at half a chunk (its rows split over two cards)
   std::puts("pf_gemm_q4 (linear_l0 at M <= kPfQ4MaxRows) vs the slab walk, bitwise over the M rows:");
   for (uint32_t M : {1u, 8u, 9u, 32u, 33u, 54u, 128u, 192u, 384u}) {
     q4_case(d, M, 5120, 34816, 0, false);

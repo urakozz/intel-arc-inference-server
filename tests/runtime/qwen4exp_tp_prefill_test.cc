@@ -7,7 +7,8 @@
 //       last logits' cosine against its decode fill) to <rows file>
 //   tp  (1) the walk: each chunk's launches are 2 x prefill_device_launches at the card's shapes, the head's 2 x
 //           kPrefillHeadLaunches; both cards' Controls agree after the merge
-//       (2) determinism: two prefills (reset between) leave the same last logits, first id and both cards' H, bitwise
+//       (2) determinism: two prefills (reset between) leave the same last logits, first id and both cards' H, bitwise;
+//           those logits, the first id, the last chunk's routes and H -> <rows file>.tp
 //       (3) against pp's prefill: the last logits' cosine, the first id equal or inside pp's two-bf16-ulp window
 //           (gated); the last chunk's routes - (row, layer) pairs with pp's expert set, the rest split by pp's p10 - p11
 //           gap (near-ties within kTieTol) - printed
@@ -16,8 +17,7 @@
 //           model), the first id; 32 greedy ids from each - printed
 //   ppdump  pp's prefill, then its last logits, first id, the last chunk's route rows and its last QSA layer's
 //       block scores to <rows file> (no decode fill)
-//   tpdump  tp's (1) and (2), then its last logits, first id, H (card 0's) and the last chunk's route rows to <rows
-//       file> - two builds' files `cmp` equal when a change keeps tp's prefill bitwise
+//   tpdump  tp's (1) and (2) and its <rows file>.tp, then stops (no pp rows, no decode fill)
 //   bench > 0: only the timing - a 2048-id warm-up prefill, then `bench` prefills of each length in n (a comma list,
 //   one load), each one's t/s; under B70_PREFILL_PROFILE=1 each one's phases (runtime/prefill/profile.h)
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
@@ -216,12 +216,14 @@ int main(int argc, char** argv) {
   std::printf("tp-prefill: (2) two prefills: last logits, first id, H %s\n", same ? "bitwise" : "DIFFER");
   CHECK(same);
   const std::vector<uint32_t> tr = tp->read_prefill_routes();
-  if (dump) {
-    FILE* f = std::fopen(rows_path.c_str(), "wb");
+  {   // tp's own rows beside pp's file (<rows file>.tp), for a bitwise before / after of a prefill change
+    FILE* f = std::fopen((rows_path + ".tp").c_str(), "wb");
     CHECK(f && std::fwrite(a.data(), 4, a.size(), f) == a.size() && std::fwrite(&a_first, 4, 1, f) == 1 &&
-          std::fwrite(h0.data(), 2, h0.size(), f) == h0.size() && std::fwrite(tr.data(), 4, tr.size(), f) == tr.size());
+          std::fwrite(tr.data(), 4, tr.size(), f) == tr.size() && std::fwrite(h0.data(), 2, h0.size(), f) == h0.size());
     std::fclose(f);
-    std::printf("tp-prefill: tp's last logits, first id, H and the last chunk's routes -> %s\n", rows_path.c_str());
+  }
+  if (dump) {
+    std::printf("tp-prefill: tp's last logits, first id, routes and H -> %s.tp\n", rows_path.c_str());
     std::printf("qwen4exp_tp_prefill_test OK\n");
     return 0;
   }

@@ -3296,7 +3296,7 @@ if(B70_Q4EXP)
   set(B70_Q4EXP_PREFILL_KERNELS
     kernel_pf_embed_gather_D2560 kernel_q4_hc_combine_norm_M2048_E kernel_q4_hc_combine_norm_M2048_S1
     kernel_q4_hc_combine_norm_M2048_Y kernel_q4_hc_combine_norm_M2048_X kernel_q4_hc_combine_norm_M2048_Y_NN
-    kernel_q4_pf_bf16_slab_K10240_N336 kernel_pf_gemm_T0 kernel_q4_hc_up_mix_M2048_I_D512 kernel_pf_ab_proj_D2560
+    kernel_q4_pf_bf16_slab_K10240_N336 kernel_pf_gemm_T0 kernel_q4_hc_up_mix_M2048_I_D512_R4C64 kernel_pf_ab_proj_D2560
     kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gdn_front
     kernel_pf_route_slab_K2560_N528_P768 kernel_pf_route_slab_K2560_N128_P256
     kernel_q4_route_M1_E512_T10_N528_L256_P768 kernel_pf_gdn_conv_AB256

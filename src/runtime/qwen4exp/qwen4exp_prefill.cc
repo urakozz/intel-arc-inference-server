@@ -251,14 +251,15 @@ class Walk {
     prefill::profile_wait(cx_, Phase::kNorm);
   }
   // A gated residual: combine_norm -> xn; the down||inject slab + pf_gemm -> down_f32 (pitch 512); q4_hc_up_mix _D512
-  // (ctrl, down_f32, up, xn, x, inj), grid (2560 / 16, C) -> x and inj.
+  // _R (ctrl, down_f32, up, xn, x, inj), grid (2560 / kPfHcUpCols, C / kPfHcUpRows) -> x and inj.
   void hc(const l0::Mem& block) {
     const loader::Q4HcOffsets o = loader::q4_hc_offsets(d_, true);
     require(o.down_n == kq::kHcDownN, "the HC down||inject tiles are not {10240, 336}");
     combine(src_, true, reinterpret_cast<const float*>(at(block, o.norm)));
     src_ = HcSrc::None;
     slabs(false, at(block, o.down), nullptr, d_.hc_n(), o.down_n, s_.xn.ptr(), s_.down_f32.ptr(), kq::kPfHcDownLd);
-    launch(kc_(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix"), d_.hidden / 16, rows_, 1,
+    launch(kc_(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix"), d_.hidden / kq::kPfHcUpCols,
+           (rows_ + kq::kPfHcUpRows - 1) / kq::kPfHcUpRows, 1,
            {PtrArg(ctrl()), PtrArg(s_.down_f32.ptr()), PtrArg(at(block, o.up)), PtrArg(s_.xn.ptr()), PtrArg(s_.x.ptr()),
             PtrArg(inj_())});
     prefill::profile_wait(cx_, Phase::kNorm);
