@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(rq::pf_landing_layout(ours).sumsq_bytes, size_t(0));
     // the plan with prefill (Intel's forms, 32768): the prefill scratch is planned; the N that fit
     const std::vector<rq::DevicePlan> pp = rq::plan(i18, Q4Placement::one(i18), 32768, true, false, false, true);
-    CHECK_EQ(pp[0].prefill_scratch, p32.total());
+    CHECK_EQ(pp[0].prefill_scratch, p32.total() + rq::pf_ring_bytes(i18));   // + the read ahead's buffers and rows
     const uint32_t n1d = rq::layers_that_fit(intel, 1, 32768, true, false, kCard, kReserve, false);
     const uint32_t n1p = rq::layers_that_fit(intel, 1, 32768, true, false, kCard, kReserve, true);
     const uint32_t n2d = rq::layers_that_fit(intel, 2, 32768, true, false, kCard, kReserve, false);

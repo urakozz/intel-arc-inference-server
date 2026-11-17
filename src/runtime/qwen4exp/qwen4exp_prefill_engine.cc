@@ -55,6 +55,7 @@ struct Qwen4ExpPrefillState {
     std::unique_ptr<l0::Mem> mtp_R;   // spec 21-QFN-v1e, the last device with the MTP head: the head pass's R rows
     l0::Mem ctl;                      // host [kPfDepth] Control: the chunks' Controls
     std::unique_ptr<l0::Mem> hctl;    // the last device with the MTP head: host [kPfDepth] Control, the head's
+    std::unique_ptr<Q4PfRingState> ring;   // the host-memory experts read ahead (null: no expert table)
     Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len)
         : cx(c), kc(c), s(c, d, max_len), ctl(c, l0::MemKind::Host, kPfDepth * sizeof(Control)) {}
     Control* ctl_at(uint32_t k) { return ctl.as<Control>() + k; }
@@ -122,12 +123,14 @@ void Qwen4ExpEngine::prepare_prefill() {
     ps->dev[devices() - 1]->hctl =
         std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Host, kPfDepth * sizeof(Control));
   }
+  for (uint32_t i = 0; i < devices(); ++i) ps->dev[i]->ring = make_pf_ring(stage_ctx(i), model_.parts[i], d);
   pf_dev_bytes_.assign(devices(), 0);
   pf_bytes_ = 0;
   for (uint32_t i = 0; i < devices(); ++i) {
     size_t link = 0;
     for (auto& l : ps->link) link += l ? l->bytes(i) : 0;
-    pf_dev_bytes_[i] = ps->dev[i]->s.bytes() + link + (ps->dev[i]->mtp_R ? ps->dev[i]->mtp_R->size() : 0);
+    pf_dev_bytes_[i] = ps->dev[i]->s.bytes() + link + (ps->dev[i]->mtp_R ? ps->dev[i]->mtp_R->size() : 0) +
+                       (ps->dev[i]->ring ? pf_ring_bytes(d) : 0);
     pf_bytes_ += pf_dev_bytes_[i];
     require(ps->dev[i]->s.bytes() == prefill_sizes(d, max_len_).total(), "the prefill scratch is not prefill_sizes()'s");
     require(!ps->link[0] || link == pf_link_bytes(d, i), "the prefill link is not pf_link_bytes()'s");
@@ -293,8 +296,11 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     const uint32_t k = j % kPfDepth;
     const bool head = mtp_ && i + 1 == ndev;
     if (head) mp.hctl = D.hctl->as<Control>() + k;
+    if (D.ring) D.ring->reset();   // the device's lists are idle: its previous chunk has finished
+    const Q4PfRing ring = D.ring ? D.ring->view(true, true) : Q4PfRing{};
     prefill_chunk(D.cx, D.kc, D.s, model_, model_.parts[i], stage_buffers(i), chunks[j].pos, chunks[j].C, eager,
-                  inj ? D.inj[k].get() : nullptr, two, head ? &mp : nullptr, D.ctl_at(k), D.ids_at(k));
+                  inj ? D.inj[k].get() : nullptr, two, head ? &mp : nullptr, D.ctl_at(k), D.ids_at(k),
+                  D.ring ? &ring : nullptr);
   };
   const size_t rows_max = size_t(kPfC) * d.hc_n() * 2;
   if (two)

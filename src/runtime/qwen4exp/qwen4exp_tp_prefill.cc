@@ -33,21 +33,6 @@
 #include "runtime/qwen4exp/qwen4exp_tp_engine.h"
 
 namespace runtime::qwen4exp {
-namespace {
-// The copy-only queue group's ordinal (COPY without COMPUTE), or UINT32_MAX (runtime/prefill/tp_prefill.cc's).
-uint32_t copy_ordinal(ze_device_handle_t dev) {
-  uint32_t n = 0;
-  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, nullptr));
-  std::vector<ze_command_queue_group_properties_t> p(n);
-  for (auto& q : p) q.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
-  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, p.data()));
-  for (uint32_t i = 0; i < n; ++i)
-    if ((p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
-        !(p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE))
-      return i;
-  return UINT32_MAX;
-}
-}  // namespace
 
 struct Q4TpPrefillState {
   struct Dev {
@@ -101,6 +86,7 @@ struct Q4TpPrefillState {
     // Task 5, the MTP head's card: the head pass's R rows, its Control for the chunk (host), its own rows at one
     // card's widths (Qwen4ExpMtpPrefill::partials / q16)
     std::unique_ptr<l0::Mem> mtp_R, hctl, mtp_part, mtp_q16;
+    std::unique_ptr<Q4PfRingState> ring;   // the host-memory experts read ahead (null: no expert table)
   };
   // [chunk][sent card 0 | sent card 1 | ready card 0 | ready card 1 | the same four of the row split's lists][unit]
   Q4TpPrefillState(l0::Context& d0, l0::Context& d1, uint32_t units)
@@ -120,6 +106,8 @@ struct Q4TpPrefillState {
   }
   void reset_events() {
     for (uint32_t i = 0; i < ev.size(); ++i) ev.host_reset(i);
+    for (auto& d : dev)
+      if (d && d->ring) d->ring->reset();
   }
   // reset()'s hook: release a list waiting on a crossing that will not come; true when both lists are idle.
   bool settle() {
@@ -156,8 +144,9 @@ void Qwen4ExpTpEngine::prepare_prefill() {
   for (uint32_t r = 0; r < 2; ++r) {
     ps->dev[r] = std::make_unique<Q4TpPrefillState::Dev>(cards_[r]->ctx, cards_[r]->desc, d, max_len_);
     ps->dev[r]->hidden = d.hidden;
+    ps->dev[r]->ring = make_pf_ring(cards_[r]->ctx, model_.parts[r], cards_[r]->desc);
     require(ps->dev[r]->s.bytes() + ps->dev[r]->fold.size() + ps->dev[r]->yf.size() + ps->dev[r]->H1.size() +
-                    ps->dev[r]->inj1.size() + ps->dev[r]->lists1.size() ==
+                    ps->dev[r]->inj1.size() + ps->dev[r]->lists1.size() + (ps->dev[r]->ring ? pf_ring_bytes(d) : 0) ==
                 prefill_sizes(cards_[r]->desc, max_len_).total() + tp_prefill_bytes(d),
             "card " + std::to_string(r) + "'s prefill allocation is not the plan's (prefill_sizes + tp_prefill_bytes)");
   }
@@ -281,6 +270,10 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
     }
     P.reset_events();
     std::array<std::array<Q4TpChunk, 2>, 2> k{};
+    std::array<std::array<Q4PfRing, 2>, 2> rv{};   // the read ahead: chunk A copies the first layers, the last releases
+    for (uint32_t h = 0; h < n; ++h)
+      for (uint32_t r = 0; r < 2; ++r)
+        if (P.dev[r]->ring) rv[h][r] = P.dev[r]->ring->view(h == 0, h + 1 == n);
     for (uint32_t h = 0; h < n; ++h) {
       for (uint32_t r = 0; r < 2; ++r) {
         Q4TpPrefillState::Dev& D = *P.dev[r];
@@ -294,7 +287,7 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
         rc->pos = pos[h] + (r == 1 ? tp_rows_cut(C[h]) : 0);
         rc->n_active = r == 1 ? C[h] - tp_rows_cut(C[h]) : tp_rows_cut(C[h]);
         k[h][r] = {&D.cx, &D.kc, &D.s, &model_.parts[r], &cards_[r]->buffers, c, D.ids_at(h), &D.tp[h],
-                   mtp_ && r == 1 ? &mp[h] : nullptr};
+                   mtp_ && r == 1 ? &mp[h] : nullptr, D.ring ? &rv[h][r] : nullptr};
       }
       if (mtp_) {   // the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
         Control* hc = P.dev[1]->hctl->as<Control>() + h;

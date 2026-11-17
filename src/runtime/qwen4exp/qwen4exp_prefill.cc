@@ -6,11 +6,13 @@
 #include <cstddef>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "kernels/kernels.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/qwen4exp_kernels.h"
 #include "kernels/tp_kernels.h"
+#include "l0/cmdlist.h"
 #include "l0/error.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
@@ -54,13 +56,15 @@ class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
        const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager, const l0::Mem* injected,
-       bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl, const uint32_t* ids, const Q4TpPrefill* tp)
+       bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl, const uint32_t* ids, const Q4TpPrefill* tp,
+       const Q4PfRing* ring)
       : cx_(cx), kc_(kc), s_(s), m_(m), part_(part), d_(m.desc), c_(tp ? *tp->card : m.desc), b_(b), pos_(pos), C_(C),
         eager_(eager), injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)), mtp_(mtp), ctl_(ctl),
-        ids_(ids), tp_(tp), split_(tp && tp_split_rows(pos, C)), ctrl_(ctl), rows_(C) {}
+        ids_(ids), tp_(tp), ring_(ring), split_(tp && tp_split_rows(pos, C)), ctrl_(ctl), rows_(C) {}
 
   void run() {
     check();
+    ring_begin();
     if (part_.device == 0 || tp_) {
       // pf_embed_gather(ids, embed, resid, m_count) - grid (1, C): the rows into x; layer 0's combine _E repeats them
       // (tp: each card from the table it reads, card 1 card 0's over peer access)
@@ -88,6 +92,7 @@ class Walk {
   // checks the launch count.
   void tp_begin() {
     check();
+    ring_begin();
     launch(kc_(kq::pf_embed_variant(), "pf_embed_gather"), 1, C_, 1,
            {PtrArg(ids_), PtrArg(tp_->embed), PtrArg(s_.x.ptr()), arg_val(C_)});
     src_ = HcSrc::Embed;
@@ -532,8 +537,13 @@ class Walk {
       // layers all on host: 4096 rows in 978 ms; copying each layer's misses to VRAM first, in order, took 1052 ms - a
       // copy-engine ring overlapped with the previous layer's work is the lever, not built)
       const bool tbl = L.expert_row != nullptr;
-      const void* w_gu = tbl ? L.expert_row : L.gate_up->ptr();
-      const void* w_dn = tbl ? static_cast<const uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr();
+      const void* row = L.expert_row;
+      if (staged(l)) {   // the read ahead: wait for the layer's copy, read through its staged row
+        cx_.wait_event(ring_->ev->handle(2 * (l - part_.first)));
+        row = ring_->rows + size_t(l - part_.first) * 2 * d_.experts * 8;
+      }
+      const void* w_gu = tbl ? row : L.gate_up->ptr();
+      const void* w_dn = tbl ? static_cast<const uint8_t*>(row) + size_t(d_.experts) * 8 : L.down->ptr();
       // tp (plan 21v2b Task 4): the card's half of every expert - gate||up 2560 x 640 (128 columns a work-group), the
       // down over its K half into fp32 rows (yf), then the card's fp32 partial of the block's output
       l0::Kernel& gu = kc_(tp_ ? kq::tp_pf_moe_gu_variant(tbl) : kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true, tbl),
@@ -561,6 +571,11 @@ class Walk {
       prefill::profile_wait(cx_, Phase::kMoeGemm);
       if (shb) grouped("q4_pf_dequant_dn_shb", nullptr, at(*L.shared, L.shared_down_offset), 1, d_.moe_inter,
                        d_.hidden, false, s_.h.ptr(), s_.xg.ptr(), tmax, d_.experts);
+      if (ring_ && ring_->issue_rest) {   // the layer's buffer is free: the layer two on copies into it
+        ze_event_handle_t released = ring_->ev->handle(2 * (l - part_.first) + 1);
+        cx_.signal(released);
+        if (l + 2 < part_.end) ring_copy(l + 2, released);
+      }
     }
     if (tp_) {
       // q4_pf_moe_combine_f32(route, hdr, pair_row, yf, out, C) - grid (2560 / 256, C): the card's fp32 partial into its
@@ -606,6 +621,19 @@ class Walk {
     }
   }
   ze_event_handle_t sent(uint32_t card, uint32_t u) const { return tp_->ev->handle(tp_->ev_off + card * tp_->units + u); }
+  // --- the host-memory experts read ahead (qwen4exp_prefill.h, Q4PfRing) -------------------------------------------------
+  bool staged(uint32_t l) const { return ring_ && ring_->bytes[l - part_.first] > 0; }
+  // Layer l's mirror prefix into its buffer on the ring's copy-engine list after `wait` (null: none), signalling staged(l).
+  void ring_copy(uint32_t l, ze_event_handle_t wait) {
+    if (!staged(l)) return;
+    const uint32_t i = l - part_.first;
+    ZE_CHECK(zeCommandListAppendMemoryCopy(ring_->list, ring_->stage[i & 1u], ring_->mirror[i], ring_->bytes[i],
+                                           ring_->ev->handle(2 * i), wait ? 1 : 0, wait ? &wait : nullptr));
+  }
+  void ring_begin() {
+    if (!ring_ || !ring_->issue_first) return;
+    for (uint32_t l = part_.first; l < std::min(part_.end, part_.first + 2); ++l) ring_copy(l, nullptr);
+  }
   // The chunk's residual rows and inject weights (the pair's second chunk has its own: Q4TpPrefill::H / inj).
   void* H_() const { return tp_ && tp_->H ? tp_->H : s_.H.ptr(); }
   void* inj_() const { return tp_ && tp_->inj ? tp_->inj : s_.inj.ptr(); }
@@ -711,6 +739,7 @@ class Walk {
   const Control* ctl_;              // this chunk's Control (its slot; qwen4exp_prefill.h)
   const uint32_t* ids_;             // this chunk's ids (its slot of s.ids)
   const Q4TpPrefill* tp_;           // plan 21v2b Task 4: a tensor-parallel card's chunk, or null
+  const Q4PfRing* ring_;            // the host-memory experts read ahead, or null (read in place)
   const bool split_;                // tp: the indexer split by rows on this chunk (tp_split_rows)
   bool attend_ = false;             // tp: the unit's QSA layer attends in tp_rest, after the peer's selection rows
   uint32_t unit_ = 0;               // tp: the row-parallel units crossed so far this chunk
@@ -769,8 +798,8 @@ size_t Qwen4ExpPrefillScratch::bytes() const {
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
                    const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
-                   const uint32_t* ids) {
-  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp, ctl, ids, nullptr).run();
+                   const uint32_t* ids, const Q4PfRing* ring) {
+  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp, ctl, ids, nullptr, ring).run();
 }
 
 void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array<Q4TpChunk, 2>, 2>& chunks,
@@ -783,7 +812,8 @@ void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array
       if (!k.tp || k.tp->rank != r)
         throw std::runtime_error("runtime::qwen4exp::prefill_pair_tp: chunk " + std::to_string(h) + ", card " +
                                  std::to_string(r));
-      w[h][r].emplace(*k.cx, *k.kc, *k.s, m, *k.part, *k.b, pos[h], C[h], false, nullptr, false, k.mtp, k.ctl, k.ids, k.tp);
+      w[h][r].emplace(*k.cx, *k.kc, *k.s, m, *k.part, *k.b, pos[h], C[h], false, nullptr, false, k.mtp, k.ctl, k.ids, k.tp,
+                      k.ring);
     }
   // From one host thread, a unit at a time (Q4TpChunk's rule): for unit u, chunk A then chunk B on each card,
   // each preceded by its wait for the chunk's crossing of unit u - 1 (appended after the peer's copy that signals it).
@@ -893,6 +923,84 @@ void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPre
             {PtrArg(b.logits.ptr()), PtrArg(b.argmax_part.ptr())});
   cx.launch(kc(v, "tp_argmax_stage2"), 1, 1, 1, {PtrArg(b.control.ptr()), PtrArg(b.argmax_part.ptr())});
   prefill::profile_wait(cx, Phase::kHead);
+}
+
+uint32_t copy_ordinal(ze_device_handle_t dev) {
+  uint32_t n = 0;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, nullptr));
+  std::vector<ze_command_queue_group_properties_t> p(n);
+  for (auto& q : p) q.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, p.data()));
+  for (uint32_t i = 0; i < n; ++i)
+    if ((p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
+        !(p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE))
+      return i;
+  return UINT32_MAX;
+}
+
+Q4PfRingState::Q4PfRingState(l0::Context& ctx, const loader::Q4DevicePart& part, const model::Qwen4ExpDesc& card) {
+  const uint32_t n = part.end - part.first, E = card.experts;
+  const size_t gu = loader::q4_gate_up_block_bytes(card), dn = loader::q4_down_block_bytes(card);
+  for (auto& b : stage) b = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, kPfRingBytes);
+  // The staged rows: the device's table read back, every block wholly inside its layer's copied prefix moved into the
+  // layer's buffer.
+  std::vector<uint64_t> t(size_t(n) * 2 * E);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  imm.copy(t.data(), part.layers[0].expert_row, t.size() * 8);   // the table is one allocation, layer-major
+  bytes.assign(n, 0);
+  mirror.assign(n, nullptr);
+  for (uint32_t i = 0; i < n; ++i) {
+    const loader::Q4Layer& L = part.layers[i];
+    require(L.expert_row == static_cast<const uint8_t*>(part.layers[0].expert_row) + size_t(i) * 2 * E * 8,
+            "the expert table's rows are not one layer-major allocation");
+    if (!L.mirror) continue;
+    mirror[i] = L.mirror->ptr();
+    bytes[i] = std::min(L.mirror->size(), kPfRingBytes);
+    const uint64_t base = reinterpret_cast<uint64_t>(L.mirror->ptr()), to = reinterpret_cast<uint64_t>(stage[i & 1]->ptr());
+    for (uint32_t e = 0; e < 2 * E; ++e) {
+      uint64_t& a = t[size_t(i) * 2 * E + e];
+      if (a >= base && a + (e < E ? gu : dn) <= base + bytes[i]) a = to + (a - base);
+    }
+  }
+  rows = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, t.size() * 8);
+  imm.copy(rows->ptr(), t.data(), t.size() * 8);
+  ev = std::make_unique<l0::SyncEventPool>(ctx, std::vector<const l0::Context*>{&ctx}, 2 * n);
+  const uint32_t ord = copy_ordinal(ctx.device());
+  ze_command_queue_desc_t qd{};
+  qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+  qd.ordinal = ord == UINT32_MAX ? 0 : ord;   // no copy-only engine: the compute group (correct, no overlap)
+  qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
+  qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+  qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
+  ZE_CHECK(zeCommandListCreateImmediate(ctx.handle(), ctx.device(), &qd, &list));
+}
+Q4PfRingState::~Q4PfRingState() {
+  if (list) {
+    zeCommandListHostSynchronize(list, UINT64_MAX);
+    zeCommandListDestroy(list);
+  }
+}
+Q4PfRing Q4PfRingState::view(bool issue_first, bool issue_rest) const {
+  Q4PfRing r;
+  r.stage[0] = stage[0]->ptr();
+  r.stage[1] = stage[1]->ptr();
+  r.rows = rows->as<uint8_t>();
+  r.bytes = bytes.data();
+  r.mirror = mirror.data();
+  r.list = list;
+  r.ev = ev.get();
+  r.issue_first = issue_first;
+  r.issue_rest = issue_rest;
+  return r;
+}
+void Q4PfRingState::reset() {
+  for (uint32_t i = 0; i < ev->size(); ++i) ev->host_reset(i);
+}
+std::unique_ptr<Q4PfRingState> make_pf_ring(l0::Context& ctx, const loader::Q4DevicePart& part,
+                                            const model::Qwen4ExpDesc& card) {
+  for (const loader::Q4Layer& L : part.layers)   // the table form (planned with the ring's bytes), any tier
+    if (L.expert_row) return std::make_unique<Q4PfRingState>(ctx, part, card);
+  return nullptr;
 }
 
 }  // namespace runtime::qwen4exp

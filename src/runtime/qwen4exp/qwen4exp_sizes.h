@@ -145,6 +145,9 @@ inline constexpr uint32_t kPfC = 2048;
 // Two cards overlap consecutive chunks (qwen4exp_prefill_engine.cc): every per-chunk input the host writes (the ids,
 // the Controls, the injected rows) and the hand-off's landing buffer are doubled, chunk j's at slot j % kPfDepth.
 inline constexpr uint32_t kPfDepth = 2;
+// The host-memory experts read ahead (qwen4exp_prefill.h, Q4PfRing): each of its two device buffers holds this much
+// of a layer's host mirror (a layer's misses are ~0.14-0.28 GB at the served fills).
+inline constexpr size_t kPfRingBytes = size_t(256) << 20;
 inline constexpr uint32_t kPfTm = 32;                          // the grouped GEMM's tile rows (pf_moe_gemm TM)
 inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab of a dense linear
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks
@@ -258,6 +261,8 @@ size_t prefill_chunk_launches(const model::Qwen4ExpDesc& d, const model::Q4Place
 inline constexpr size_t kPrefillHeadLaunches = 6;
 // A device's prefill scratch + its prefill link (two devices): what `prefill` plans into DevicePlan::prefill_scratch.
 size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len);
+// The read ahead's two buffers and its staged rows (every layer's at most) on a prefilling device (Q4PfRingState).
+size_t pf_ring_bytes(const model::Qwen4ExpDesc& d);
 
 // --- spec 21-QFN-v1e: the MTP head, the verify and draft lists ------------------------------------------------------
 // Spec 8's machinery (runtime/engine.h's draft / verify / commit contracts) on this family. With the head loaded:
