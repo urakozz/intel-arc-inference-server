@@ -95,12 +95,23 @@ struct MtpBinding {
 // same bits, so both cards hold the same H. `embed`: the table card 1 gathers from (card 0's, over peer access) or
 // card 0's own. The head: the card's vocabulary half and tp_argmax's two stages (Control::out_token / out_value; the
 // host merges). Launches: tp_device_launches.
+// Task 5 Step 0, MTP under tp (`spec.kind` Verify / Draft with `mtp`): the verify list at M rows is the decode list's
+// walk at M (the GDN slots build, the PLE layer's q4_pf_ple at M > 1, the crossings at M rows, the gemv linears: every
+// row the M = 1 step's arithmetic), the head's vocabulary half and tp_argmax at M (the host merges each row); the head's
+// card (part.mtp: card 1) adds the head's KV pass. A draft step on the head's card is spec 21-QFNe's at one card's shapes
+// (its buffers' scratch is one card's: Qwen4ExpBuffers' `scratch`) up to the head's final mixer, then `draft_ready`
+// signalled (its x is the step's normed row), the card's vocabulary half and tp_argmax into the head's Control. On
+// the other card a draft step is the head's other half only: wait for `draft_ready`, the peer's x copied in, gemv_i8w
+// and tp_argmax into `draft_ctl` (kTpDraftHeadLaunches).
 struct Q4TpBinding {
   const runtime::TpLink* link = nullptr;   // out_proj / o_proj's crossing (and the head's rank, vocabulary half)
   const runtime::TpLink* moe = nullptr;    // the MoE's crossing (its own landing buffer and counters)
   const model::Qwen4ExpDesc* card = nullptr;
   const void* embed = nullptr;
-  void* slots = nullptr;                   // fp32 [11][2560]: the MoE's slots
+  void* slots = nullptr;                   // fp32 [11][rows][2560]: the MoE's slots
+  ze_event_handle_t draft_ready = nullptr; // the head's card signals, the other card waits (draft steps)
+  const void* peer_x = nullptr;            // the head card's x (the other card's draft step reads it over peer access)
+  void* draft_ctl = nullptr;               // the other card's draft Control (its half's winner)
 };
 
 CapturedStep build(l0::Context& ctx, const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part,

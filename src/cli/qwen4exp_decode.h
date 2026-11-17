@@ -132,9 +132,6 @@ inline void check_args(const DecodeArgs& a) {
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   if (a.pipe.tp() && !a.int8_head())
     throw std::runtime_error("--parallel tp splits the int8 lm_head by vocabulary between the cards: add --lm-head int8");
-  if (a.pipe.tp() && a.load_mtp)
-    throw std::runtime_error("--parallel tp serves Qwen3.8-Flash-Next without its MTP head for now: --spec none, or "
-                             "--parallel pp for the head");
 }
 
 inline std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab) {

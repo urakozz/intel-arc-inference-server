@@ -1414,6 +1414,43 @@ if(B70_Q4EXP AND B70_TP)
 endif()
 # ==== Plan 21v2b: Qwen3.8-Flash-Next tensor parallel decode ==== (end) ====
 
+# ==== Plan 21-QFN-v2b Task 5: Qwen3.8-Flash-Next MTP under tensor parallel ==== (begin) ====
+# Additive only: new names. A card's verify list at M = 1..4 (runtime/qwen4exp/qwen4exp_capture.cc, tp + Verify) at
+# model::q4_tp_card's shapes beyond the M = 1 decode list's: the GDN slots at 8 / 24 heads (SPEC_SLOT_STRIDE one
+# layer's state at 24 heads, layer-major as gdn_step_slots_M<M>_G1), and at M = 2..4 the card's linears (gemv, every
+# row the M = 1 step's arithmetic), prep_gated_head _SIG, attn_prep and q4_qsa_attn at 12 / 1 heads, the MoE's halves
+# and the slices crossing. tp_argmax at M = 2..4 is Qwen3.8's (spec 17d, the same vocabulary halves); the MTP head
+# runs whole on card 1 with spec 21-QFNe's binaries.
+if(B70_Q4EXP AND B70_TP AND B70_MTP)
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(gdn_step_slots_M${MM}_GK8V24_G1 SOURCE ${GDN_CL}
+                     DEFINES ${CTRL_DEFINES} NEGA_OFF=20480 DTBIAS_OFF=20504 GDN_K_HEADS=8 GDN_V_HEADS=24 SPEC_SLOTS=1
+                             CTRL_LIVE=19 SPEC_SLOT_STRIDE=393216 M=${MM})
+    if(MM GREATER 1)
+      add_gemv_variant(${MM} 2560 8192 1 0)
+      add_gemv_variant(${MM} 2560 6656 2 0)
+      add_gemv_variant(${MM} 3072 2560 2 0)
+      add_gemv_i8w_variant(${MM} 2560 124160)
+      add_ocloc_kernel(prep_gated_head_M${MM}_GK8V24_SIG SOURCE ${PREP_CL}
+                       DEFINES M=${MM} GDN_GATE_SIGMOID=1 GDN_K_HEADS=8 GDN_V_HEADS=24)
+      add_ocloc_kernel(attn_prep_M${MM}_Q12KV1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} FA_Q_HEADS=12 FA_KV_HEADS=1)
+      add_ocloc_kernel(q4_qsa_attn_M${MM}_T32_Q12KV1 SOURCE ${Q4_CL}/q4_qsa_attn.cl
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=32 ${Q4_LIST_DEFINES} Q4_Q_HEADS=12 Q4_KV_HEADS=1)
+      foreach(R 0 1)
+        add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R${R} SOURCE ${Q4_CL}/q4_moe.cl
+                         DEFINES M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0
+                                 MOE_TP_PART=1 RANK=${R})
+        add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R${R} SOURCE ${Q4_CL}/q4_moe.cl
+                         DEFINES M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0
+                                 MOE_TP_PART=1 Q4_EXPERT_TABLE=1 RANK=${R})
+        add_ocloc_kernel(tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum SOURCE ${TP_CL}
+                         DEFINES TP_CROSS=1 M=${MM} K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1)
+      endforeach()
+    endif()
+  endforeach()
+endif()
+# ==== Plan 21-QFN-v2b Task 5: Qwen3.8-Flash-Next MTP under tensor parallel ==== (end) ====
+
 
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (begin) ====
 # Additive but for three sources, each gaining one define that every existing binary leaves unset - their

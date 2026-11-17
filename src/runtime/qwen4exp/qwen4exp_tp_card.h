@@ -21,11 +21,14 @@
 namespace runtime::qwen4exp {
 
 // One card: its descriptor (the buffers keep a reference to it, so it is declared first), buffers, queue, crossing.
+// With the MTP head (`mtp`): the verify rows and GDN slots, the MoE's slots at kVerifyRows rows; the head's card
+// (`head`) sizes its decode scratch at one card's widths (the head's layer runs whole there).
 struct Qwen4ExpTpEngine::Card {
-  Card(l0::Context& c, const model::Qwen4ExpDesc& one, uint32_t rank, uint32_t max_len)
+  Card(l0::Context& c, const model::Qwen4ExpDesc& one, uint32_t rank, uint32_t max_len, bool mtp = false,
+       bool head = false)
       : ctx(c),
         desc(model::q4_tp_card(one, rank)),
-        buffers(c, desc, model::Q4Placement::one(desc), 0, max_len, Q4Attn::Flash, false),
+        buffers(c, desc, model::Q4Placement::one(desc), 0, max_len, Q4Attn::Flash, mtp, head ? &one : nullptr),
         queue(c),
         fence(queue),
         imm(l0::CmdList::immediate(c)),
@@ -38,7 +41,7 @@ struct Qwen4ExpTpEngine::Card {
         ctr_fo(c, l0::MemKind::Device, lo.counter_bytes()),
         ctr_sm(c, l0::MemKind::Device, lm.counter_bytes()),
         ctr_fm(c, l0::MemKind::Device, lm.counter_bytes()),
-        slots(c, l0::MemKind::Device, size_t(one.top_k + 1) * one.hidden * 4),
+        slots(c, l0::MemKind::Device, size_t(one.top_k + 1) * (mtp ? kVerifyRows : 1) * one.hidden * 4),
         state(c, l0::MemKind::Shared, tp::kStateWords * 4) {}
   l0::Context& ctx;
   const model::Qwen4ExpDesc desc;
@@ -53,6 +56,10 @@ struct Qwen4ExpTpEngine::Card {
   Q4TpBinding binding;
   std::optional<CapturedStep> step;
   bool pending = false;
+  // Task 5 Step 0 (the MTP head): the verify lists at M = 1..kVerifyRows and the draft steps (the head's card: spec
+  // 21e's step on its half of the head; the other card: its half of the head over the peer's row, into dctl)
+  std::vector<CapturedStep> verify, drafts;
+  std::unique_ptr<l0::Mem> dctl;   // runtime::Control, shared: the card without the head's draft winner
 };
 
 }  // namespace runtime::qwen4exp

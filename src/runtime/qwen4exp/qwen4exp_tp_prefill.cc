@@ -52,6 +52,9 @@ struct Q4TpPrefillState {
     l0::Mem ctl;    // host: the chunk's Control
     size_t hidden = 0;
     Q4TpPrefill tp;
+    // Task 5, the MTP head's card: the head pass's R rows, its Control for the chunk (host), its own rows at one
+    // card's widths (Qwen4ExpMtpPrefill::partials / q16)
+    std::unique_ptr<l0::Mem> mtp_R, hctl, mtp_part, mtp_q16;
   };
   Q4TpPrefillState(l0::Context& d0, l0::Context& d1, uint32_t units) : ev(d0, {&d0, &d1}, 2 * units), units(units) {}
   ~Q4TpPrefillState() {   // never free a scratch under a running list
@@ -109,6 +112,16 @@ void Qwen4ExpTpEngine::prepare_prefill() {
                 prefill_sizes(cards_[r]->desc, max_len_).total() + tp_prefill_bytes(d),
             "card " + std::to_string(r) + "'s prefill allocation is not the plan's (prefill_sizes + tp_prefill_bytes)");
   }
+  if (mtp_) {   // Task 5: the head's pass on card 1
+    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_bind_.single))
+      require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with B70_MTP=ON");
+    Q4TpPrefillState::Dev& D = *ps->dev[1];
+    l0::Context& c1 = cards_[1]->ctx;
+    D.mtp_R = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, mtp_prefill_R_bytes(d));
+    D.hctl = std::make_unique<l0::Mem>(c1, l0::MemKind::Host, sizeof(Control));
+    D.mtp_part = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(kPfC) * pf_ld(d.qkvg_n()) * 4);
+    D.mtp_q16 = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(kPfC) * d.q_n() * 2);
+  }
   for (uint32_t r = 0; r < 2; ++r) {
     Q4TpPrefillState::Dev& D = *ps->dev[r];
     Q4TpPrefillState::Dev& P = *ps->dev[1 - r];
@@ -158,8 +171,25 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       fail("card " + std::to_string(r) + "'s last decode step is still running");
     c.pending = false;
   }
+  // Task 5: the prefill's GDN path reads slot 0 directly, so a live slot a commit left is copied there first; a verify
+  // waiting for its commit is dropped (the prompt continues from pos).
+  if (mtp_) {
+    mtp_normalise_live();
+    verify_k_ = kNoVerify;
+  }
   prepare_prefill();
   Q4TpPrefillState& P = *pf_;
+  Qwen4ExpMtpPrefill mp;   // the head's pass on card 1 (qwen4exp_prefill.h)
+  if (mtp_) {
+    Q4TpPrefillState::Dev& D = *P.dev[1];
+    mp.bufs = mtp_.get();
+    mp.R = D.mtp_R.get();
+    mp.embed = mtp_bind_.embed;
+    mp.single = mtp_bind_.single;
+    mp.hctl = D.hctl->as<Control>();
+    mp.partials = D.mtp_part.get();
+    mp.q16 = D.mtp_q16.get();
+  }
   const uint64_t tmo = P.timeout_ns;
   const auto drain = [&](uint32_t pos, const char* what) {
     for (uint32_t r = 0; r < 2; ++r)
@@ -193,11 +223,17 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       k->pos = pos;
       k->n_active = C;
     }
+    if (mtp_) {   // the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
+      Control* h = P.dev[1]->hctl->as<Control>();
+      *h = *mtp_->hctl.as<Control>();
+      h->pos = pos == 0 ? 0 : pos - 1;
+      h->n_active = mtp_prefill_rows(pos, C);
+    }
     std::array<Q4TpChunk, 2> k;
     for (uint32_t r = 0; r < 2; ++r) {
       Q4TpPrefillState::Dev& D = *P.dev[r];
       k[r] = {&D.cx, &D.kc, &D.s, &model_.parts[r], &cards_[r]->buffers, D.ctl.as<Control>(), D.s.ids.as<uint32_t>(),
-              &D.tp};
+              &D.tp, mtp_ && r == 1 ? &mp : nullptr};
     }
     try {
       prefill_chunk_tp(model_, k, pos, C);
@@ -217,6 +253,11 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       }
       block_hook_(pos + C, true);
     }
+  }
+  if (mtp_) {   // the head's Control as the last chunk left it
+    const Control& h = *P.dev[1]->hctl->as<Control>();
+    mtp_->hctl.as<Control>()->pos = h.pos;
+    mtp_->hctl.as<Control>()->n_active = h.n_active;
   }
   // The head on both cards: the last unit's fold slot holds the last row's two partials.
   for (uint32_t r = 0; r < 2; ++r) {

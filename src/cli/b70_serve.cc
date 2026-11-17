@@ -402,13 +402,14 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     print_eos(eos);
     std::print(stderr,
                ", Qwen3.8-Flash-Next {} ({} chat format), --parallel tp ({:d} launches a token a card), prefill "
-               "backend l0 (chunk {:d}), attention flash, mtp 0, lm_head {}, kv cache bf16, sampling defaults: greedy "
-               "unless the request samples, prefix snapshots: state {:d} B, blocks {:d} B a position\n",
+               "backend l0 (chunk {:d}), attention flash, mtp {:d}{}, lm_head {}, kv cache bf16, sampling defaults: "
+               "greedy unless the request samples, prefix snapshots: state {:d} B, blocks {:d} B a position\n",
                engine.model().desc.layers < engine.model().checkpoint_layers
                    ? "--layers " + std::to_string(engine.model().desc.layers)
                    : std::string("whole"),
-               options.chat_format.name(), engine.launches(0), runtime::qwen4exp::kPfC,
-               loader::lm_head_form_name(da.lm_head), engine.state_bytes(), engine.kv_bytes(4) / 4);
+               options.chat_format.name(), engine.launches(0), runtime::qwen4exp::kPfC, engine.mtp() ? a.mtp_k : 0,
+               engine.mtp() ? " (the head whole on card 1)" : "", loader::lm_head_form_name(da.lm_head),
+               engine.state_bytes(), engine.kv_bytes(4) / 4);
     return listen_until_stopped(server, options);
   }
   if (model.desc.layers < model.checkpoint_layers)
@@ -1112,7 +1113,8 @@ int run(int argc, char** argv) {
     options.mtp_adaptive.max_k = spec.max_k;
     options.mtp_adaptive.cost = is_q4 ? server::MtpCost::flash_next() : server::MtpCost::int8_head();
     // Spec 17d: tensor parallel's own table (its verify rows cross at M rows, its drafts read half the head).
-    if (pipe.tp()) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
+    // Qwen3.8-Flash-Next keeps its own table under tp (plan 21-QFN-v2b: pp's until tp's is measured).
+    if (pipe.tp() && !is_q4) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
     // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head share scales with it
     // (derived; MtpCost::kInt8DraftHeadShare).
     if (draft_vocab != 0)
@@ -1154,11 +1156,6 @@ int run(int argc, char** argv) {
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
     qs.mtp_k = mtp_k;       // the deepest K; the server picks each iteration's (options.mtp_adaptive)
     qs.spec_lookup = spec_lookup;
-    if (pipe.tp() && spec_arg == "auto") {   // plan 21v2b: no MTP head under tensor parallel yet - auto is plain
-      qs.mtp_k = 0;
-      qs.spec_lookup = false;
-      options.mtp_auto = false;
-    }
     qs.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     qa.load_mtp = qs.loads_head();
     qs.prefix_auto = prefix_auto;

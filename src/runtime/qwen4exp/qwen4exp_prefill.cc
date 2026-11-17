@@ -112,7 +112,9 @@ class Walk {
     fold_ = tp_->fold[u & 1u];
   }
   void tp_end() {
-    const size_t want = prefill_device_launches(c_, model::Q4Placement::one(c_), 0, pos_, C_);
+    if (mtp_) mtp_pass();   // Task 5: the head's pass on its card, after the last unit's crossing landed
+    const size_t want =
+        prefill_device_launches(c_, model::Q4Placement::one(c_), 0, pos_, C_) + (mtp_ ? mtp_prefill_launches(pos_, C_) : 0);
     require(unit_ == tp_->units && n_ == want, "card " + std::to_string(tp_->rank) + "'s chunk at " +
                                                    std::to_string(pos_) + " appended " + std::to_string(n_) +
                                                    " launches, not the " + std::to_string(want) + " it plans");
@@ -577,10 +579,12 @@ class Walk {
               PtrArg(at(fc, fo.norm_hidden)), PtrArg(xe), PtrArg(xh), PtrArg(ids_ + r0)});
       prefill::profile_wait(cx_, Phase::kNorm);
       bf16_cols(at(fc, fo.fc_embedding), d_.hidden, d_.hidden, 0, d_.hidden, rows, xe, s_.o.ptr(), d_.hidden);
-      bf16_cols(at(fc, fo.fc_hidden), d_.hidden, d_.hidden, 0, d_.hidden, rows * d_.hc, xh, s_.partials.ptr(), d_.hidden);
+      void* part = mtp_->partials ? mtp_->partials->ptr() : s_.partials.ptr();   // tp: the head's own rows
+      void* q16 = mtp_->q16 ? mtp_->q16->ptr() : s_.q16.ptr();
+      bf16_cols(at(fc, fo.fc_hidden), d_.hidden, d_.hidden, 0, d_.hidden, rows * d_.hc, xh, part, d_.hidden);
       // q4_mtp_fuse(ctrl, fe, fh, H) - grid (10240 / 256, rows): the head layer's input, materialised
       launch(kc_(v, "q4_mtp_fuse"), d_.hc_n() / kq::kMtpWg, rows, 1,
-             {PtrArg(ctrl()), PtrArg(s_.o.ptr()), PtrArg(s_.partials.ptr()), PtrArg(s_.H.ptr())});
+             {PtrArg(ctrl()), PtrArg(s_.o.ptr()), PtrArg(part), PtrArg(s_.H.ptr())});
       prefill::profile_wait(cx_, Phase::kNorm);
       src_ = HcSrc::None;
       rows_ = rows;
@@ -588,14 +592,14 @@ class Walk {
       rows_ = C_;
       // the k||v columns of q||gate||k||v only (the K / V the head attends later), the indexer
       require(d_.q_n() * 2 % kPfSlab == 0, "q||gate is not whole slabs");
-      bf16_cols(L.qsa_qkvg->mem.ptr(), d_.hidden, d_.qkvg_n(), 2 * d_.q_n(), d_.qkvg_n(), rows, s_.x.ptr(),
-                s_.partials.ptr(), pf_ld(d_.qkvg_n()));
+      bf16_cols(L.qsa_qkvg->mem.ptr(), d_.hidden, d_.qkvg_n(), 2 * d_.q_n(), d_.qkvg_n(), rows, s_.x.ptr(), part,
+                pf_ld(d_.qkvg_n()));
       bf16_cols(L.qsa_idx->mem.ptr(), d_.hidden, d_.idx_n(), 0, d_.idx_n(), rows, s_.x.ptr(), s_.idx_f32.ptr(), kq::kPfIdxLd);
       // pf_attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v) q16 - grid (24 + 2, rows): the
       // head's K / V at its positions (q16 is written and never read)
       launch(kc_(kq::pf_attn_prep_q4_variant(), "pf_attn_prep"), d_.q_heads + d_.kv_heads, rows, 1,
-             {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
-              PtrArg(s_.q16.ptr()), PtrArg(nullptr), PtrArg(mb.k()), PtrArg(mb.v())});
+             {PtrArg(ctrl()), PtrArg(part), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()), PtrArg(q16),
+              PtrArg(nullptr), PtrArg(mb.k()), PtrArg(mb.v())});
       const std::string qv = kq::pf_qsa_variant();
       // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys) _PF - grid (5, rows); q4_qsa_ring - grid (1, 8)
       launch(kc_(qv, "q4_qsa_prep"), d_.idx_heads + 1, rows, 1,
@@ -690,7 +694,7 @@ void prefill_chunk_tp(const loader::Q4LoadedModel& m, const std::array<Q4TpChunk
   for (uint32_t r = 0; r < 2; ++r) {
     const Q4TpChunk& k = cards[r];
     if (!k.tp || k.tp->rank != r) throw std::runtime_error("runtime::qwen4exp::prefill_chunk_tp: card " + std::to_string(r));
-    w[r].emplace(*k.cx, *k.kc, *k.s, m, *k.part, *k.b, pos, C, false, nullptr, false, nullptr, k.ctl, k.ids, k.tp);
+    w[r].emplace(*k.cx, *k.kc, *k.s, m, *k.part, *k.b, pos, C, false, nullptr, false, k.mtp, k.ctl, k.ids, k.tp);
   }
   for (auto& x : w) x->tp_begin();
   for (uint32_t u = 0; u < cards[0].tp->units; ++u) {

@@ -3607,6 +3607,37 @@ if(B70_Q4EXP AND B70_MTP)
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   set_tests_properties(qwen4exp_tier_synth_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
     TIMEOUT 3600)
+  # Plan 21-QFN-v2b Task 5 Step 0: the MTP head under --parallel tp (box only; our RTN export, 18 layers): the plain run's
+  # greedy ids, then the head's plain steps, spec 8's loop at K 1..3 and a restored snapshot against them.
+  if(B70_TP AND TARGET qwen4exp_tp_prefill_test)
+    set(B70_Q4EXP_TP_MTP_KERNELS "")
+    foreach(MM 1 2 3 4)
+      list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gdn_step_slots_M${MM}_GK8V24_G1)
+      if(NOT MM EQUAL 1)
+        list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N8192_S1_L0 kernel_gemv_M${MM}_K2560_N6656_S2_L0
+          kernel_gemv_M${MM}_K3072_N2560_S2_L0 kernel_gemv_i8w_M${MM}_K2560_N124160 kernel_prep_gated_head_M${MM}_GK8V24_SIG
+          kernel_attn_prep_M${MM}_Q12KV1 kernel_q4_qsa_attn_M${MM}_T32_Q12KV1
+          kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1
+          kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1
+          kernel_tp_cross_M${MM}_K2560_G20_S2_X_R0_sum kernel_tp_cross_M${MM}_K2560_G20_S2_X_R1_sum
+          kernel_tp_argmax_M${MM}_N124160_U124160_B0 kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
+      endif()
+    endforeach()
+    add_executable(qwen4exp_tp_mtp_test runtime/qwen4exp_tp_mtp_test.cc)
+    b70_target_kernel_dir(qwen4exp_tp_mtp_test)
+    target_include_directories(qwen4exp_tp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+      ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_link_libraries(qwen4exp_tp_mtp_test PRIVATE b70_qwen4exp_prefill b70_l0)
+    add_dependencies(qwen4exp_tp_mtp_test ${B70_Q4EXP_TP_MTP_KERNELS} ${B70_Q4EXP_MTP_KERNELS} ${_q4mtp_reused}
+      ${B70_Q4EXP_TP_KERNELS})
+    foreach(mode plain mtp)
+      add_test(NAME qwen4exp_tp_mtp_${mode}_test COMMAND qwen4exp_tp_mtp_test ${B70_Q4EXP_RTN_SNAPSHOT}
+        ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids ${mode} ${CMAKE_BINARY_DIR}/qwen4exp_tp_mtp_ids.u32)
+      set_tests_properties(qwen4exp_tp_mtp_${mode}_test PROPERTIES LABELS "checkpoint;qwen4exp;tp" SKIP_RETURN_CODE 77
+        TIMEOUT 3600)
+    endforeach()
+    set_tests_properties(qwen4exp_tp_mtp_mtp_test PROPERTIES DEPENDS qwen4exp_tp_mtp_plain_test)
+  endif()
 endif()
 # Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21c's cli_reject_qwen4exp_serve is gone). The
 # adapter: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over Qwen4ExpEngine (an object library - the Mac's

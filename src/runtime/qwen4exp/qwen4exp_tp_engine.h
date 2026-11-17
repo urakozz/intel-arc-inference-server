@@ -12,11 +12,13 @@
 #include "l0/fence.h"
 #include "l0/memory.h"
 #include "l0/queue.h"
+#include "l0/sync_event.h"
 #include "loader/qwen4exp_loader.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
 #include "runtime/buffer_sizes.h"   // KvCache
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
+#include "runtime/qwen4exp/qwen4exp_capture.h"   // MtpBinding
 #include "runtime/qwen4exp/qwen4exp_sizes.h"   // SnapRun, kMaxDraft
 #include "runtime/tp_protocol.h"
 
@@ -36,7 +38,14 @@
 // slices form in one card's summation order (runtime/qwen4exp/qwen4exp_capture.h, tp).
 //
 // At construction: the PLE hash constants on both cards, the expert tier's table check on each card, one discarded
-// warm-up step. Not here yet: the MTP head, snapshots.
+// warm-up step.
+//
+// Plan 21-QFN-v2b Task 5 Step 0, the MTP head (the model loaded with it: whole on card 1, the Split placement): spec 8's
+// draft / verify / commit as Qwen4ExpEngine's. A verify at k is both cards' verify lists at M = k + 1 (the crossings at
+// M rows; card 1 adds the head's KV pass), the host merging each row's two halves as a decode step's. A draft step runs
+// the head on card 1 up to its normed row, which card 0 reads over peer access for its half of the head (a
+// cross-device event between the two lists); the host merges the two winners. A plain step is verify(0) + commit (the
+// GDN slots), as on one card.
 //
 // Plan 21v2b Task 4, prefill (defined in b70_qwen4exp_prefill: qwen4exp_tp_prefill.cc, the one-card engine's
 // arrangement): each chunk of at most kPfC positions is the tensor-parallel walk (qwen4exp_prefill.h, Q4TpPrefill) on
@@ -121,10 +130,10 @@ class Qwen4ExpTpEngine {
   // The last step's logits, both halves (rows 1); pinned host rows for the sampled path.
   void read_logits_into(float* host, uint32_t rows);
   float* host_rows(size_t floats);
-  // Spec 8's MTP is not built under tensor parallel: mtp() is false and the speculative calls throw.
+  // Spec 8's MTP (Task 5 Step 0): on iff the model was loaded with its head.
   static constexpr uint32_t kMaxDraft = runtime::qwen4exp::kMaxDraft;
-  bool mtp() const { return false; }
-  uint32_t max_verify_k() const { return 0; }
+  bool mtp() const { return mtp_ != nullptr; }
+  uint32_t max_verify_k() const;
   void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   void verify(uint32_t k);
@@ -136,7 +145,11 @@ class Qwen4ExpTpEngine {
  private:
   struct Card;
   void submit(CapturedStep* l0, CapturedStep* l1);
-  void merge_heads();   // the two cards' head halves into both Controls (the larger value, ties to card 0)
+  void merge_heads();   // the two cards' head halves into both Controls, each row (the larger value, ties to card 0)
+  void require_mtp(const char* what) const;
+  void step_plain();    // one decode step: both cards' M = 1 lists
+  void mtp_step1();     // the head's plain token: verify(0) + commit(0), or at pos 0 the plain list and R_0
+  void mtp_normalise_live();
   [[noreturn]] void fail(const std::string& what);
   void ple_init();
   void expert_check();
@@ -151,6 +164,12 @@ class Qwen4ExpTpEngine {
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0;
   BlockHook block_hook_;
   std::vector<uint32_t> draft_ids_;
+  // Task 5 Step 0: the head's buffers on card 1, its binding, the draft steps' event, the iteration's bookkeeping.
+  std::unique_ptr<Qwen4ExpMtpBuffers> mtp_;
+  MtpBinding mtp_bind_;
+  std::unique_ptr<l0::SyncEvent> draft_ev_;
+  static constexpr uint32_t kNoVerify = ~0u;
+  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   std::unique_ptr<l0::Mem> host_rows_;
   // One one-card snapshot run's pieces on the cards: (card, device pointer, host offset within the run, bytes).
   struct Piece {

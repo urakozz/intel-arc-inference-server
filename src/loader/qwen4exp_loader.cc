@@ -164,7 +164,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
                       const SafetensorsSet& set, const model::Qwen4ExpDesc& full, const model::Qwen4ExpDesc& d,
                       const QuantScan& scan, uint32_t max_len, const model::Q4Placement& placement, LmHeadForm lm_form,
                       const std::array<size_t, runtime::kPpDevices>& caps, size_t reserve, const char* forced,
-                      const runtime::qwen4exp::ExpertTier* tier, const runtime::qwen4exp::ExpertTier* tier1,
+                      const runtime::qwen4exp::ExpertTier* tier, const runtime::qwen4exp::ExpertTier* tier1, bool mtp,
                       std::chrono::steady_clock::time_point t0) {
   namespace rq = runtime::qwen4exp;
   const bool int8 = lm_form == LmHeadForm::Int8;
@@ -174,7 +174,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
     const rq::ExpertTier* given = r == 0 ? tier : tier1;
     T[r] = given ? *given
            : forced && *forced
-               ? rq::tp_fill_tier(d, rq::tp_expert_budget(d, placement, max_len, int8, false, true, caps, reserve), r,
+               ? rq::tp_fill_tier(d, rq::tp_expert_budget(d, placement, max_len, int8, mtp, true, caps, reserve), r,
                                   nullptr, forced)
                : rq::all_resident(d);
     if (T[r].layers != d.layers || T[r].experts != d.experts)
@@ -189,7 +189,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
     throw std::runtime_error("B70_Q4_EXPERTS=direct reads every expert from the layer's VRAM range, but experts are in "
                              "host memory: unset it");
   {
-    const std::vector<rq::DevicePlan> pl = rq::tp_plan(d, placement, max_len, int8, false);
+    const std::vector<rq::DevicePlan> pl = rq::tp_plan(d, placement, max_len, int8, mtp);
     std::vector<rq::DevicePlan> fit;
     for (uint32_t r = 0; r < 2; ++r) {
       std::vector<rq::DevicePlan> one{pl[r]};
@@ -207,11 +207,12 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
   m.placement = placement;
   m.max_len = max_len;
   m.int8_head = int8;
+  m.mtp = mtp;
   m.checkpoint_layers = full.layers;
   m.subnormal_scales = scan.subnormal_scales;
   if (d.layers < full.layers) m.skipped += ck.skip_layers_from(d.layers);
   const size_t visual = ck.skip_prefix("model.visual."), shards = ck.skip_ple_shards();
-  const size_t mtp_skipped = ck.skip_prefix("mtp.");
+  const size_t mtp_skipped = mtp ? 0 : ck.skip_prefix("mtp.");
   check_q4_host_fit(Q4PleHost(ple_dir).bytes(), T[0].host_bytes(card[0]) + T[1].host_bytes(card[1]), 0,
                     q4_mem_available());
   m.ple_device = 0;
@@ -297,11 +298,21 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
     P.bytes += fm.size();
     P.lm_head = upload_lm_head(ctx, imm[r], lm + size_t(r) * card[r].vocab * d.hidden, d.hidden, card[r].vocab, int8,
                                m.lm_head_quant_seconds, P.bytes);
+    const bool head = mtp && placement.holds_mtp(r);   // the MTP head whole, one card's layer (Task 5 Step 0)
+    if (head) {
+      ck.repack_mtp(host);
+      P.mtp = std::make_unique<Q4Layer>(upload_layer(ctx, imm[r], host, P.bytes));
+      const std::vector<uint8_t> fc = ck.mtp_fc(), mx = ck.mtp_mixer();
+      P.mtp_fc = upload_u(ctx, imm[r], fc.data(), fc.size());
+      P.mtp_mixer = upload_u(ctx, imm[r], mx.data(), mx.size());
+      P.bytes += fc.size() + mx.size();
+    }
     size_t host_experts = 0;
     for (uint32_t l = 0; l < d.layers; ++l)
       host_experts += size_t(d.experts - T[r].n_vram(l)) * (q4_gate_up_block_bytes(card[r]) + q4_down_block_bytes(card[r]));
     const size_t want = q4_device_weight_bytes(card[r], model::Q4Placement::one(card[r]), 0, int8, false) -
-                        q4_embed_bytes(card[r]) + (placement.holds_embed(r) ? q4_embed_bytes(d) : 0) - host_experts;
+                        q4_embed_bytes(card[r]) + (placement.holds_embed(r) ? q4_embed_bytes(d) : 0) - host_experts +
+                        (head ? q4_mtp_bytes(d) : 0);
     if (P.bytes != want)
       throw std::logic_error("load_qwen4exp: card " + std::to_string(r) + " allocated " + std::to_string(P.bytes) +
                              " B of weights, the card plan says " + std::to_string(want));
@@ -320,14 +331,15 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
              o.snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.layers, full.layers,
              placement.ends == model::Q4TpEnds::Both ? "on both cards" : "on card 0",
              model::q4_form_name(d.forms.dense), d.forms.expert_group, set.tensors().size());
-  std::print("  skipped     by design: {:d} visual tensors, {:d} bf16 PLE shards, {:d} mtp.* (the head not loaded)\n",
-             visual, shards, mtp_skipped);
+  std::print("  skipped     by design: {:d} visual tensors, {:d} bf16 PLE shards{}\n", visual, shards,
+             mtp ? "" : (", " + std::to_string(mtp_skipped) + " mtp.* (the head not loaded)").c_str());
   for (const Q4DevicePart& P : m.parts) {
     uint32_t nv = 0;
     for (uint32_t l = 0; l < d.layers; ++l) nv += (P.device == 0 ? T[0] : T[1]).n_vram(l);
-    std::print("  card {:d}      its half of every layer: weights {:13d} B {:7.3f} GB{} + the {} head's half, {:d} of {:d} "
-               "experts' halves in VRAM (f {:.3f})\n", P.device, P.bytes, P.bytes / gb, P.embed ? " + embed" : "",
-               int8 ? "int8" : "bf16", nv, d.layers * d.experts, double(nv) / (d.layers * d.experts));
+    std::print("  card {:d}      its half of every layer: weights {:13d} B {:7.3f} GB{} + the {} head's half{}, {:d} of "
+               "{:d} experts' halves in VRAM (f {:.3f})\n", P.device, P.bytes, P.bytes / gb, P.embed ? " + embed" : "",
+               int8 ? "int8" : "bf16", P.mtp ? " + the MTP head whole (RTN int4 g64 experts)" : "", nv,
+               d.layers * d.experts, double(nv) / (d.layers * d.experts));
   }
   std::print("  host        the PLE table {:.3f} GB (pointer tables on both cards), the experts' halves {:.3f} GB pinned; "
              "read/token a card {:.3f} GB (derived); load {:.1f} s\n", m.ple.bytes / gb, m.mirror_bytes / gb,
@@ -431,9 +443,8 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   const char* forced = std::getenv("B70_Q4_RESIDENT");
   if (placement.tp) {
-    if (mtp)
-      throw std::runtime_error("load_qwen4exp: the MTP head under --parallel tp is not built yet; run without it");
-    return load_tp(devices, o, ck, set, full, d, scan, max_len, placement, lm_form, caps, reserve, forced, tier, tier1, t0);
+    return load_tp(devices, o, ck, set, full, d, scan, max_len, placement, lm_form, caps, reserve, forced, tier, tier1, mtp,
+                   t0);
   }
   const runtime::qwen4exp::ExpertTier T =
       tier ? *tier

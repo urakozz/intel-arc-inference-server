@@ -74,6 +74,11 @@ struct Qwen4ExpMtpPrefill {
   const void* embed = nullptr;     // device 0's embedding table (peer-read on two cards)
   bool single = true;              // decision 4's norm form
   const Control* hctl = nullptr;   // the head's Control for this chunk (its slot: the next chunk's may be written)
+  // Plan 21-QFN-v2b Task 5 (a tensor-parallel card's pass: its scratch is at the card's widths, the head's layer one card's):
+  // the head's own rows for q||gate||k||v's k||v columns (fp32 [kPfC][pf_ld(13312)], also fh) and the attn prep's
+  // q16 (bf16 [kPfC][24 x 256]); null: the chunk scratch's
+  l0::Mem* partials = nullptr;
+  l0::Mem* q16 = nullptr;
 };
 
 // Plan 21v2b Task 4: a tensor-parallel card's chunk (`--parallel tp`). The walk is one card's over every layer at the
@@ -131,6 +136,7 @@ struct Q4TpChunk {
   const Control* ctl = nullptr;
   const uint32_t* ids = nullptr;
   const Q4TpPrefill* tp = nullptr;
+  const Qwen4ExpMtpPrefill* mtp = nullptr;   // Task 5: the MTP head's pass after the card's layers (card 1)
 };
 void prefill_chunk_tp(const loader::Q4LoadedModel& m, const std::array<Q4TpChunk, 2>& cards, uint32_t pos, uint32_t C);
 

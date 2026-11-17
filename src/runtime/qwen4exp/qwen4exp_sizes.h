@@ -535,6 +535,11 @@ ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, u
 // tp_sum after out_proj / o_proj and q4_moe_finish after the down (the MoE's crossing is wired into the two): + 3 a
 // layer. 923 at 48 layers (779 + 144).
 size_t tp_device_launches(const model::Qwen4ExpDesc& one);
+// Task 5 Step 0: a card's verify list at M rows - the decode list's with the PLE layer's q4_pf_ple at M > 1 (+2) and,
+// on the head's card, the head's KV pass (10 + M), as one card's verify_device_launches adds them.
+size_t tp_verify_launches(const model::Qwen4ExpDesc& one, uint32_t M, bool head);
+// The card without the head's half of a draft step's lm_head: the wait, the peer's x copied in, gemv_i8w, tp_argmax x 2.
+inline constexpr size_t kTpDraftHeadLaunches = 3;
 // Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
 double tp_card_f(const ExpertBudget& b, uint32_t rank);
 

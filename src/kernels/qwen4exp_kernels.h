@@ -128,22 +128,26 @@ inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head"
 // "Plan 21v2b" block): the MoE at the half width 320 with the card's fp32 partial (MOE_TP_PART, DN_KS 1), the GDN at
 // Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_send + tp_sum at hidden 2560 (FOLD_G 20; S the local slices).
 inline constexpr unsigned kTpInter = kInter / 2;
-inline std::string tp_moe_variant(bool table, unsigned rank) {
-  return std::string("q4_moe_M1_E512_T10_D2560_I320_SH4") + (table ? "_TBL" : "") + "_TP_R" + std::to_string(rank);
+inline std::string tp_moe_variant(bool table, unsigned rank, unsigned M = 1) {
+  return "q4_moe_M" + std::to_string(M) + "_E512_T10_D2560_I320_SH4" + (table ? "_TBL" : "") + "_TP_R" +
+         std::to_string(rank);
 }
 // MOE_TP_PART: q4_moe_down writes each slot's partial, fp32 [11][M][2560], and sends it to the peer's landing (one
 // chunk a down work-group: kTpMoeFoldG); q4_moe_finish waits for the peer's, sums the two and runs the epilogue.
 inline constexpr unsigned kTpMoeFoldG = kHidden / 16;   // 160
 inline constexpr unsigned tp_moe_gate_up_groups() { return kSlots * (2 * kTpInter / 16 / 4); }   // 110
 inline constexpr unsigned tp_moe_down_wg() { return 16 * kSlots * 1; }                          // 176: DN_KS 1
-inline std::string tp_gated_head_sig_variant() { return "prep_gated_head_M1_GK8V24_SIG"; }
+inline std::string tp_gated_head_sig_variant(unsigned M = 1) { return "prep_gated_head_M" + std::to_string(M) + "_GK8V24_SIG"; }
 inline std::string tp_gdn_variant() { return "gdn_step_M1_GK8V24"; }
-inline std::string tp_attn_prep_variant() { return "attn_prep_M1_Q12KV1"; }
-inline std::string tp_qsa_attn_variant() { return "q4_qsa_attn_M1_T32_Q12KV1"; }
+// Task 5 Step 0 (MTP under tp): the verify's GDN slots at the card's heads, layer-major as gdn_slots_variant (one
+// layer's state at 24 heads a slot): gdn_step_slots_M<M>_GK8V24_G1
+inline std::string tp_gdn_slots_variant(unsigned M) { return "gdn_step_slots_M" + std::to_string(M) + "_GK8V24_G1"; }
+inline std::string tp_attn_prep_variant(unsigned M = 1) { return "attn_prep_M" + std::to_string(M) + "_Q12KV1"; }
+inline std::string tp_qsa_attn_variant(unsigned M = 1) { return "q4_qsa_attn_M" + std::to_string(M) + "_T32_Q12KV1"; }
 inline constexpr unsigned kTpFoldG = 20, kTpWg = 256, kTpOutS = 2, kTpFinishWg = 256;
 // out_proj / o_proj's crossing: the card's 2 slices summed in one card's order into one row
-inline std::string tp_sum_variant(unsigned rank) {
-  return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
+inline std::string tp_sum_variant(unsigned rank, unsigned M = 1) {
+  return "tp_cross_M" + std::to_string(M) + "_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
          "_X_R" + std::to_string(rank) + "_sum";
 }
 
