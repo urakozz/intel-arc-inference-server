@@ -15,6 +15,7 @@
 // that output is a committed record and the battery must not perturb it.
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <string>
@@ -211,6 +212,25 @@ int main(int argc, char** argv) {
   l0::Queue q(ctx);
   l0::Fence f(q);
   if (argc > 1 && std::string(argv[1]) == "--loads") return run_loads(ctx, q, f);
+  // --variants K N S <kernel>...: each named gemv.cl binary at one shape; the first is the control, every other one
+  // must be its output byte for byte (the load knobs keep the arithmetic). Run twice in order, the first pass a warm-up.
+  if (argc > 5 && std::string(argv[1]) == "--variants") {
+    const uint32_t K = uint32_t(std::atoi(argv[2])), N = uint32_t(std::atoi(argv[3])), S = uint32_t(std::atoi(argv[4]));
+    common::Int4Gptq w = common::Int4Gptq::random(K, N, 42);
+    std::vector<uint16_t> x = random_bf16(K, 5);
+    std::vector<float> base;
+    bool ok = true;
+    for (int pass = 0; pass < 2; ++pass)
+      for (int a = 5; a < argc; ++a) {
+        GemvResult r = run_gemv(ctx, q, f, w, x, {1, K, N, S, 0, argv[a]}, 40);
+        if (base.empty()) base = r.out;
+        const bool same = std::memcmp(base.data(), r.out.data(), base.size() * 4) == 0;
+        ok = ok && same;
+        if (pass) std::printf("%-34s %7.1f us %5.0f GB/s %s\n", argv[a], r.us_per_launch,
+                              double(r.weight_bytes) / (r.us_per_launch * 1e3), same ? "identical" : "**DIFFER**");
+      }
+    return ok ? 0 : 1;
+  }
   const double peak = kPeak;
   struct Shape { uint32_t K, N; const char* name; };
   // Names use U+2016 (‖), not '|': this table is pasted into docs/ as markdown.

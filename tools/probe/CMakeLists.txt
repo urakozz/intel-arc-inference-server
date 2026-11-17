@@ -273,6 +273,34 @@ foreach(row IN LISTS PGL_SHAPES)
 endforeach()
 add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
 
+# `probe_gemv --variants K N S <kernel>...` (plan 21v2b Task 6): a Flash-Next tp card's half-width GEMVs and their
+# one-card shapes, built from src/kernels/gemv.cl with the load knobs that keep the arithmetic: `pgv_base` is the
+# production define set, `d` the 2D block read + xor/shift dequant, `aA` GEMV_AHEAD=A k-groups in flight.
+set(PGV_GEMV_CL ${CMAKE_SOURCE_DIR}/src/kernels/gemv.cl)
+set(PGV_TARGETS "")
+foreach(row IN ITEMS "2560 8192 1" "2560 16384 1" "2560 6656 2" "2560 13312 2" "3072 2560 2" "6144 2560 4")
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 S)
+  math(EXPR GPS "${K} / 64 / ${S}")
+  set(_n M1_K${K}_N${N}_S${S})
+  add_ocloc_kernel(pgv_base_${_n} SOURCE ${PGV_GEMV_CL} DEFINES M=1 K=${K} N=${N} S=${S} LAYOUT=0)
+  add_ocloc_kernel(pgv_d_${_n} SOURCE ${PGV_GEMV_CL} DEFINES M=1 K=${K} N=${N} S=${S} LAYOUT=0 GEMV_BLOCK2D=8
+                   GEMV_DEQ_SHIFT=1)
+  list(APPEND PGV_TARGETS kernel_pgv_base_${_n} kernel_pgv_d_${_n})
+  foreach(A 2 4 8)
+    math(EXPR R "${GPS} % ${A}")
+    if(R EQUAL 0)
+      add_ocloc_kernel(pgv_a${A}_${_n} SOURCE ${PGV_GEMV_CL} DEFINES M=1 K=${K} N=${N} S=${S} LAYOUT=0 GEMV_AHEAD=${A})
+      add_ocloc_kernel(pgv_da${A}_${_n} SOURCE ${PGV_GEMV_CL} DEFINES M=1 K=${K} N=${N} S=${S} LAYOUT=0 GEMV_BLOCK2D=8
+                       GEMV_DEQ_SHIFT=1 GEMV_AHEAD=${A})
+      list(APPEND PGV_TARGETS kernel_pgv_a${A}_${_n} kernel_pgv_da${A}_${_n})
+    endif()
+  endforeach()
+endforeach()
+add_dependencies(probe_gemv ${PGV_TARGETS})
+
 # --- probe_dpas_rate: the per-type DPAS issue rate (2026-09-22) -------------
 # `probe_dpas_rate.cl` is a PROBE
 # kernel -- no runtime path binds `dpas_rate`, no production file is touched,

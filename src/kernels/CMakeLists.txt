@@ -28,6 +28,14 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
   elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 17408 AND S EQUAL 8 AND M EQUAL 1)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
+  # Plan 21v2b Task 6: Qwen3.8-Flash-Next's M = 1 linears, one card's (pp) and a tp card's halves - few work-groups
+  # with long K chains, latency bound; two k-groups in flight (probe_gemv --variants' pgv_da2 cells, byte-identical:
+  # qkv||z 75.1 -> 29.8 us at the tp half, 83.1 -> 41.1 at one card's width).
+  elseif(L EQUAL 0 AND M EQUAL 1 AND ((K EQUAL 2560 AND (N EQUAL 8192 OR N EQUAL 16384) AND S EQUAL 1) OR
+                                      (K EQUAL 2560 AND (N EQUAL 6656 OR N EQUAL 13312) AND S EQUAL 2) OR
+                                      (K EQUAL 3072 AND N EQUAL 2560 AND S EQUAL 2) OR
+                                      (K EQUAL 6144 AND N EQUAL 2560 AND S EQUAL 4)))
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1 GEMV_AHEAD=2)
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})

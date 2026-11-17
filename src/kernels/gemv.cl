@@ -24,6 +24,12 @@
 #ifndef GEMV_DEQ_SHIFT
 #define GEMV_DEQ_SHIFT 0
 #endif
+// GEMV_AHEAD A: a subgroup issues A k-groups' weight and scale loads before it computes the first of them, so A
+// round trips are in flight instead of one. The arithmetic and its order are unchanged (bitwise the A = 1 form).
+// For the narrow shapes whose few work-groups leave the device latency bound (a tensor parallel card's halves).
+#ifndef GEMV_AHEAD
+#define GEMV_AHEAD 1
+#endif
 #if GEMV_BLOCK2D
 #if LAYOUT != 0
 #error "gemv: GEMV_BLOCK2D is layout 0 only"
@@ -39,6 +45,9 @@
 #define G (K / GROUP)
 #define G_PER_S (G / S)
 #define TILE_U32 136   /* 128 u32 of nibbles + 8 u32 of scales = 544 B */
+#if G_PER_S % GEMV_AHEAD != 0
+#error "gemv: GEMV_AHEAD must divide the k-groups of a slice"
+#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
@@ -91,39 +100,48 @@ __kernel void gemv(__global const uint* restrict w,
   float acc[M];
   for (int m = 0; m < M; ++m) acc[m] = 0.f;
 
-  for (uint g = g0; g < g1; ++g) {
-    uint wv[8];
-    float scale;
+  for (uint ga = g0; ga < g1; ga += GEMV_AHEAD) {
+    uint wva[GEMV_AHEAD][8];
+    float scalea[GEMV_AHEAD];
+    __attribute__((opencl_unroll_hint)) for (uint a = 0; a < GEMV_AHEAD; ++a) {
+      const uint g = ga + a;
+      __private uint* wv = wva[a];
 #if LAYOUT == 0
 #if GEMV_BLOCK2D
-    // One message reads this subgroup's 16 columns across the eight u32 rows
-    // of a 64-K group from the GPTQ-native [K/8][N] surface. This is the exact
-    // geometry measured by probe_gemv_loads.cl's l0b2ddeq cells.
-    intel_sub_group_2d_block_read_32b_8r16x1c(
-        (__global void*)(__global uint*)w, (int)(N * 4u), (int)(K / 8u), (int)(N * 4u),
-        (int2)((int)(n_tile * SG), (int)(g * 8u)), wv);
+      // One message reads this subgroup's 16 columns across the eight u32 rows
+      // of a 64-K group from the GPTQ-native [K/8][N] surface. This is the exact
+      // geometry measured by probe_gemv_loads.cl's l0b2ddeq cells.
+      intel_sub_group_2d_block_read_32b_8r16x1c(
+          (__global void*)(__global uint*)w, (int)(N * 4u), (int)(K / 8u), (int)(N * 4u),
+          (int2)((int)(n_tile * SG), (int)(g * 8u)), wv);
 #else
-    __global const uint* wp = w + (size_t)(g * 8) * N + n;
-    for (int j = 0; j < 8; ++j) wv[j] = wp[(size_t)j * N];
+      __global const uint* wp = w + (size_t)(g * 8) * N + n;
+      for (int j = 0; j < 8; ++j) wv[j] = wp[(size_t)j * N];
 #endif
-    scale = (float)scales[(size_t)g * N + n];
+      scalea[a] = (float)scales[(size_t)g * N + n];
 #else
-    __global const uint* tile = w + ((size_t)n_tile * G + g) * TILE_U32;
-    uint8 blk = intel_sub_group_block_read8(tile);
-    wv[0] = blk.s0; wv[1] = blk.s1; wv[2] = blk.s2; wv[3] = blk.s3;
-    wv[4] = blk.s4; wv[5] = blk.s5; wv[6] = blk.s6; wv[7] = blk.s7;
-    ushort sh = intel_sub_group_block_read_us((__global const ushort*)(tile + 128));
-    scale = (float)as_half(sh);
+      __global const uint* tile = w + ((size_t)n_tile * G + g) * TILE_U32;
+      uint8 blk = intel_sub_group_block_read8(tile);
+      wv[0] = blk.s0; wv[1] = blk.s1; wv[2] = blk.s2; wv[3] = blk.s3;
+      wv[4] = blk.s4; wv[5] = blk.s5; wv[6] = blk.s6; wv[7] = blk.s7;
+      ushort sh = intel_sub_group_block_read_us((__global const ushort*)(tile + 128));
+      scalea[a] = (float)as_half(sh);
 #endif
-    float gacc[M];
-    for (int m = 0; m < M; ++m) gacc[m] = 0.f;
-    for (int j = 0; j < 8; ++j) {
-      for (int m = 0; m < M; ++m) {
-        ushort8 xv = vload8(0, x + (size_t)m * K + g * GROUP + j * 8);
-        gacc[m] += dot8(wv[j], xv);
-      }
     }
-    for (int m = 0; m < M; ++m) acc[m] += gacc[m] * scale;
+    __attribute__((opencl_unroll_hint)) for (uint a = 0; a < GEMV_AHEAD; ++a) {
+      const uint g = ga + a;
+      const __private uint* wv = wva[a];
+      const float scale = scalea[a];
+      float gacc[M];
+      for (int m = 0; m < M; ++m) gacc[m] = 0.f;
+      for (int j = 0; j < 8; ++j) {
+        for (int m = 0; m < M; ++m) {
+          ushort8 xv = vload8(0, x + (size_t)m * K + g * GROUP + j * 8);
+          gacc[m] += dot8(wv[j], xv);
+        }
+      }
+      for (int m = 0; m < M; ++m) acc[m] += gacc[m] * scale;
+    }
   }
 
   for (int m = 0; m < M; ++m) out[((size_t)s * M + m) * N + n] = acc[m];
