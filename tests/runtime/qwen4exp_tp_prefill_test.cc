@@ -14,7 +14,8 @@
 //       (4) against tp's own decode fill (ingest, one id a replay): the last logits' cosine within 2x the distance of
 //           pp's own prefill from its decode fill (the control pp writes; qwen4exp_prefill_test's rule for a truncated
 //           model), the first id; 32 greedy ids from each - printed
-//   bench > 0: only the timing - a 2048-id warm-up prefill, then `bench` prefills of the n ids, each one's t/s
+//   bench > 0: only the timing - a 2048-id warm-up prefill, then `bench` prefills of each length in n (a comma list,
+//   one load), each one's t/s
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
 #include <chrono>
@@ -72,7 +73,13 @@ int main(int argc, char** argv) {
     return 77;
   }
   const uint32_t layers = argc > 5 ? uint32_t(std::atoi(argv[5])) : 18;
-  const uint32_t n = argc > 6 ? uint32_t(std::atoi(argv[6])) : 4500;
+  // n, or (bench) a comma list of lengths timed in one load - the prompt is the longest
+  std::vector<uint32_t> lens;
+  for (const char* p = argc > 6 ? argv[6] : "4500"; *p;) {
+    lens.push_back(uint32_t(std::strtoul(p, const_cast<char**>(&p), 10)));
+    if (*p == ',') ++p;
+  }
+  const uint32_t n = *std::max_element(lens.begin(), lens.end());
   const uint32_t bench = argc > 7 ? uint32_t(std::atoi(argv[7])) : 0;
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::open(rig, 1);
@@ -130,13 +137,15 @@ int main(int argc, char** argv) {
   if (bench > 0) {
     reset();
     prefill(std::vector<uint32_t>(prompt.begin(), prompt.begin() + std::min<uint32_t>(n, rq::kPfC)));   // warm-up
-    for (uint32_t i = 0; i < bench; ++i) {
-      reset();
-      const Clock::time_point t0 = Clock::now();
-      prefill(prompt);
-      const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
-      std::printf("tp-prefill: %s bench %u: %u ids in %.1f ms = %.1f t/s\n", mode.c_str(), i, n, ms, n * 1000.0 / ms);
-    }
+    for (uint32_t len : lens)
+      for (uint32_t i = 0; i < bench; ++i) {
+        reset();
+        const Clock::time_point t0 = Clock::now();
+        prefill(std::vector<uint32_t>(prompt.begin(), prompt.begin() + len));
+        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        std::printf("tp-prefill: %s bench %u: %u ids in %.1f ms = %.1f t/s\n", mode.c_str(), i, len, ms,
+                    len * 1000.0 / ms);
+      }
     std::printf("qwen4exp_tp_prefill_test OK\n");
     return 0;
   }
