@@ -57,7 +57,7 @@
 #                    oracle-out-ornith* from this Mac - with
 #                    the A4 sets and references tools/toolcall/a4_ref.sh made here
 #                    (oracle-out-ornith-a4, oracle-out-kolibri-a4; spec 15e / 20e)
-#   --out FILE       summary path (default box-validation-<date>.md in the repo root)
+#   --out FILE       summary path (default build/box-validation/box-validation-<date>.md, beside the run logs)
 #   --poll SECONDS   poll interval (default 120)
 #   --device N       the card this orchestrator runs on (default 0; ZE_AFFINITY_MASK=N, PORT
 #                    8013 + 100 x N). One orchestrator per device and tree: a `--device 1
@@ -231,7 +231,8 @@ esac
 STATE_REL="b70-validate/$REMOTE_DIR/$STATE_NAME"
 LOCAL_STATE="build/box-validation/$STATE_NAME"
 DATE="$(date +%F)"
-OUT="${OUT:-box-validation-$DATE$(quick_or '' -quick)$([ "$MERGE" = 0 ] || printf %s -merge).md}"
+OUT="${OUT:-build/box-validation/box-validation-$DATE$(quick_or '' -quick)$([ "$MERGE" = 0 ] || printf %s -merge).md}"
+mkdir -p "$(dirname "$OUT")"
 
 # ---- the commands the driver itself sends ------------------------------------------------
 q() { printf '%q' "$1"; }
