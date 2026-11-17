@@ -201,11 +201,18 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       });
     for (uint32_t r = 0; r < 2; ++r)
       if (walk[r].wait_for(std::chrono::milliseconds(opt_.timeout_ms)) != std::future_status::ready) {
+        std::string got;   // each card's crossings signalled so far
+        for (uint32_t c = 0; c < 2; ++c) {
+          uint32_t n = 0;
+          while (n < P.units && P.ev.signalled(c * P.units + n)) ++n;
+          got += (c ? ", card 1 " : "; crossings sent: card 0 ") + std::to_string(n) + " of " + std::to_string(P.units);
+        }
         P.release();
         for (auto& w : walk) w.wait();
         drain(pos, "chunk");   // the lists drain on the released events
         fail("card " + std::to_string(r) + "'s prefill chunk at position " + std::to_string(pos) +
-             " was still being appended after " + std::to_string(opt_.timeout_ms) + " ms (a crossing never arrived)");
+             " was still being appended after " + std::to_string(opt_.timeout_ms) + " ms (a crossing never arrived" + got +
+             ")");
       }
     for (auto& w : walk) {   // a walk's own error (a missing binary, a shape check): release the peer, then throw
       try {
