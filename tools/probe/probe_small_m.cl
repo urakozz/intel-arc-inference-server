@@ -532,7 +532,7 @@ __kernel void psm(__global const uchar* restrict w,       // int4 words / tiles,
 
 #if V2
 // ---------------------------------------------------------------------------------------
-// Spec 32e (plan 32e Task 1): gemm_sm_wide's stand-ins for 17..64 rows. gemm_sm's per-row arithmetic unchanged
+// Spec 32e (plan 32e Task 1): gemm_sm_v2's stand-ins for 17..64 rows. gemm_sm's per-row arithmetic unchanged
 // (src/kernels/gemm_sm.cl: bf16 DPAS, weights on B, int4 layout 0 / 1, the group's four k16 DPAS from a zero
 // accumulator in k order, acc += group x scale in fp32, the shape's grid S or the 2 x 8 in-work-group split-K reduced
 // through SLM in slice order) under another thread shape:

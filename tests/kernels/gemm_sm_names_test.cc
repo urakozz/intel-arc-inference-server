@@ -5,7 +5,7 @@
 // Every (row, M) of the table at kernels::gemm_sm_built_m must be built, and the block builds nothing else -
 // a row whose knobs the block spells differently is a failure here on the Mac, not a missing file at
 // capture on the box. The consumers: gate||up's one-slice row needs prep_silu_mul's _S1 build at M 2..8
-// (kernels::gemm_sm_silu_variant), and nothing else. Spec 32e: gemm_sm_wide's rows at 32 / 64 are in the same list.
+// (kernels::gemm_sm_silu_variant), and nothing else. Spec 32e: gemm_sm_v2's rows at 32 / 64 are in the same list.
 #include <cstdio>
 #include <set>
 #include <string>
@@ -76,16 +76,16 @@ int main(int argc, char** argv) {
   CHECK_EQ(kernels::gemm_sm_out_s(*dn), 4u);
   CHECK_EQ(kernels::gemm_sm_variant(8, *dn), std::string("gemm_sm_M8_K17408_N5120_S4_L0_mg_b2d"));   // every knob named
   CHECK_EQ(kernels::gemm_sm_grid_y(*dn), 4u);
-  // Spec 32e: past 16 rows the int4 rows are gemm_sm_wide (its shape named, its work-group), the int8 head gemm_sm_i8w.
-  CHECK_EQ(kernels::gemm_sm_variant(64, *gu), std::string("gemm_sm_wide_M64_K5120_N34816_S1_L0_wg_mg_b2d_rc32_pf1_g256"));
-  CHECK_EQ(std::string(kernels::gemm_sm_entry(64, *gu)), std::string("gemm_sm_wide"));
+  // Spec 32e: past 16 rows the int4 rows are gemm_sm_v2 (its shape named, its work-group), the int8 head gemm_sm_i8w.
+  CHECK_EQ(kernels::gemm_sm_variant(64, *gu), std::string("gemm_sm_v2_M64_K5120_N34816_S1_L0_wg_mg_b2d_rc32_pf1_g256"));
+  CHECK_EQ(std::string(kernels::gemm_sm_entry(64, *gu)), std::string("gemm_sm_v2"));
   CHECK_EQ(kernels::gemm_sm_wg_size(64, *gu), 512u);
   CHECK_EQ(kernels::gemm_sm_wg_size(32, *gu), 256u);
   CHECK_EQ(kernels::gemm_sm_wg_size(16, *gu), 256u);
   CHECK_EQ(std::string(kernels::gemm_sm_entry(16, *gu)), std::string("gemm_sm"));
   const kernels::SmallMTuning* op = kernels::small_m_tuning(6144, 5120, 4, 0);
   CHECK(op != nullptr);
-  CHECK_EQ(kernels::gemm_sm_variant(32, *op), std::string("gemm_sm_wide_M32_K6144_N5120_S4_L0_mg_b2d_sw_pf2"));
+  CHECK_EQ(kernels::gemm_sm_variant(32, *op), std::string("gemm_sm_v2_M32_K6144_N5120_S4_L0_mg_b2d_sw_pf2"));
   CHECK_EQ(kernels::gemm_sm_wg_size(32, *op), 64u);
   CHECK_EQ(kernels::gemm_sm_wg_size(64, *op), 128u);
   CHECK_EQ(kernels::gemm_sm_variant(64, *hd), std::string("gemm_sm_i8w_M64_K5120_N248320_wg_g256"));

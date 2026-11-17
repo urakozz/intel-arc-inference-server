@@ -803,7 +803,7 @@ set(_psm_deep_rows "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG
 set(_psm_deep_m 32 64)
 gemm_sm_rows(_psm_deep_rows _psm_deep_m)
 list(APPEND PSM_TARGETS ${GEMM_SM_TARGETS})
-# Spec 32e (plan 32e Task 1): psm_v2, gemm_sm_wide's stand-ins at 32 and 64 rows, from probe_small_m.cl with V2 set -
+# Spec 32e (plan 32e Task 1): psm_v2, gemm_sm_v2's stand-ins at 32 and 64 rows, from probe_small_m.cl with V2 set -
 # each Qwen3.8 int4 row's production knobs (magic dequant, the 2D read, gate||up's 2x8 in-work-group split-K):
 #   psm_v2_<arm>[_pf<G>][_g256]_M<M>_K<K>_N<N>_S<S out>_L<L>
 # arm rc16 (16 rows a sub-group, 128 GRF), rc32 (32 rows, 256 GRF), swap (every row in one sub-group, both GRF modes);

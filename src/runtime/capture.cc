@@ -1049,7 +1049,7 @@ class Capture {
     // Spec 28b: at M >= 2 (runtime::gemv_kind) a tuned shape binds gemm_sm (gemm_sm.cl) - gemv's four
     // arguments in gemv's order, gemv's [S][M][N] output at the shape's S (the consumer's fold unchanged),
     // except gate||up under the 2x8 work-group: one slice, and mlp() binds the SiLU's _S1 build. Only the
-    // variant, the entry, the work-group and the grid differ. Spec 32e: past 16 rows the int4 rows bind gemm_sm_wide (the
+    // variant, the entry, the work-group and the grid differ. Spec 32e: past 16 rows the int4 rows bind gemm_sm_v2 (the
     // same arguments, output and grid; its own work-group).
     const kernels::SmallMTuning* t = small_m(s.K, s.N, s.S, s.layout);
     if (t)

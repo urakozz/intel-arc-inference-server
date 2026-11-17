@@ -343,7 +343,7 @@ int main(int argc, char** argv) {
       if (entry.rfind("gemm_sm", 0) == 0 || entry.rfind("gemv", 0) == 0) {
         if (top) return std::string("head (lm_head)");
         if (variant.rfind("gemv_bf16", 0) == 0) return std::string(mtp ? "mtp head bf16 linears" : "a||b (gemv_bf16)");
-        return std::string(mtp ? "mtp head linears" : "int4 linears (gemm_sm / gemm_sm_wide)");
+        return std::string(mtp ? "mtp head linears" : "int4 linears (gemm_sm / gemm_sm_v2)");
       }
       if (entry == "gdn_step") return std::string("delta-net link ") + (variant.find("_R") != std::string::npos
                                                                             ? variant.substr(variant.find("_R") + 1) : "R0");
