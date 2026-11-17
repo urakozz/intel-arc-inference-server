@@ -509,6 +509,13 @@ void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const 
 // writes it) and its send's and sum's counters; the state words; the MoE's slots fp32 [11][2560].
 inline constexpr uint32_t kTpOutSlices = 2;
 size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
+// Plan 21v2b Task 4: a card's prefill beyond its scratch (prefill_sizes at the card's shapes): the two fold slots, fp32
+// [2][2][kPfC][hidden] (a slot's slice r is card r's partial of a row-parallel unit), and the down GEMM's fp32 rows
+// [tmax x 32][hidden] (qwen4exp_prefill.h, Q4TpPrefill). Plan 21-QFN-v2b Task 4 Step 2: kTpPfChunks chunks in flight
+// (prefill_pair_tp), each its fold slots, every chunk past the first its residual rows bf16 [kPfC][10240] and inject
+// weights fp32 [kPfC][4] - 603 MB at hidden 2560 (derived).
+inline constexpr uint32_t kTpPfChunks = 2;
+size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one);
 // A card's plan under `p.tp` (one DevicePlan per card): plan() over model::q4_tp_card(one, rank) at one card's
 // placement - its halves of every layer, its halves of the KV (1 kv head) and of the GDN state (24 heads), the indexer
 // keys and the PLE state whole, the decode (and prefill) scratch at the card's shapes - with the embedding whole where
@@ -531,6 +538,11 @@ ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, u
 // tp_sum after out_proj / o_proj and q4_moe_finish after the down (the MoE's crossing is wired into the two): + 3 a
 // layer. 923 at 48 layers (779 + 144).
 size_t tp_device_launches(const model::Qwen4ExpDesc& one);
+// Task 5 Step 0: a card's verify list at M rows - the decode list's with the PLE layer's q4_pf_ple at M > 1 (+2) and,
+// on the head's card, the head's KV pass (10 + M), as one card's verify_device_launches adds them.
+size_t tp_verify_launches(const model::Qwen4ExpDesc& one, uint32_t M, bool head);
+// The card without the head's half of a draft step's lm_head: the wait, the peer's x copied in, gemv_i8w, tp_argmax x 2.
+inline constexpr size_t kTpDraftHeadLaunches = 3;
 // Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
 double tp_card_f(const ExpertBudget& b, uint32_t rank);
 

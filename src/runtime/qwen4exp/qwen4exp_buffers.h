@@ -21,11 +21,15 @@ class CmdList;
 // GDN layer of the device (LAYER-major: layer i's slot s at gdn_spec + (3 i + s - 1) x one state - the stride
 // gdn_step_slots_M<M>_G1 bakes), and the PLE layer's device holds the verify's PLE rows (q4_pf_ple at C = 4). The
 // head's own buffers are Qwen4ExpMtpBuffers (the last device).
+//
+// Plan 21-QFN-v2b Task 5 (`scratch`, a tensor-parallel card that holds the MTP head): the decode scratch sized for that
+// descriptor (one card's widths: the head's layer runs whole), the persistent groups for `d` (the card's halves).
 namespace runtime::qwen4exp {
 
 struct Qwen4ExpBuffers {
   Qwen4ExpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t device,
-                  uint32_t max_len, Q4Attn attn = q4_attn(), bool mtp = false);
+                  uint32_t max_len, Q4Attn attn = q4_attn(), bool mtp = false,
+                  const model::Qwen4ExpDesc* scratch = nullptr);
 
   // --- persistent: zeroed by zero() (Qwen4ExpEngine::reset) -------------------------------------------------
   l0::Mem control;      // runtime::Control, shared memory

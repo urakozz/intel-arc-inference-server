@@ -201,6 +201,21 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
       intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, x_w, x_h, x_p, (int2)((int)(ng >> 1), 8 * a), xv);
     }
 #undef PF_SILU_ROW
+#elif defined(OUT_F32)
+  // Plan 21v2b Task 4 (a tensor-parallel card's down over its K half): the fp32 sums unrounded, [rows][N] float - the
+  // two cards' partials are added before any rounding. Lane l owns column nb + 16 b + l; v.s<r> is row 8 a + r.
+  __global float* restrict Y = (__global float*)out + (size_t)mb * N;
+  const uint lane = get_sub_group_local_id();
+#define PF_F32_ROW(r)                                                                  \
+  if (8 * a + r < live_rows) Y[(size_t)(8 * a + r) * N + nb + 16u * (uint)b + lane] = v.s##r;
+#pragma unroll
+  for (int a = 0; a < NA; ++a)
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+      const float8 v = acc[a][b];
+      PF_F32_ROW(0) PF_F32_ROW(1) PF_F32_ROW(2) PF_F32_ROW(3) PF_F32_ROW(4) PF_F32_ROW(5) PF_F32_ROW(6) PF_F32_ROW(7)
+    }
+#undef PF_F32_ROW
 #else
   __global ushort* restrict Y = out + (size_t)mb * N;
   const int y_w = N * 2, y_h = live_rows, y_p = N * 2;

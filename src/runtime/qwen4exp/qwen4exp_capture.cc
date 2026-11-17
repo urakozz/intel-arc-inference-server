@@ -60,7 +60,10 @@ class Walk {
     const uint32_t dev = part_.device;
     const bool last = tp_ || dev + 1 == b_.placement.devices;
     if (spec_.kind == ListKind::Draft) {
-      draft_step();
+      if (tp_ && !part_.mtp)
+        draft_head_half();
+      else
+        draft_step();
     } else {
       if (dev == 0 || tp_) {
         embed();
@@ -80,15 +83,20 @@ class Walk {
         handoff_out();
       }
       if (last) head();
-      if (last && spec_.kind == ListKind::Verify) head_kv_pass();
+      if (last && spec_.kind == ListKind::Verify && (!tp_ || part_.mtp)) head_kv_pass();
     }
     size_t want = 0;
     switch (spec_.kind) {
       case ListKind::Decode:
         want = tp_ ? tp_device_launches(d_) : device_launches(d_, b_.placement, dev, b_.attn, injected_ != nullptr);
         break;
-      case ListKind::Verify: want = verify_device_launches(d_, b_.placement, dev, M_, b_.attn); break;
-      case ListKind::Draft: want = draft_launches(b_.attn, spec_.select); break;
+      case ListKind::Verify:
+        want = tp_ ? tp_verify_launches(d_, M_, part_.mtp != nullptr)
+                   : verify_device_launches(d_, b_.placement, dev, M_, b_.attn);
+        break;
+      case ListKind::Draft:
+        want = tp_ && !part_.mtp ? kTpDraftHeadLaunches : draft_launches(b_.attn, spec_.select);
+        break;
     }
     require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s " + kind_name() + " list has " +
                                             std::to_string(step_.kernel_count) + " launches, not the " +
@@ -204,8 +212,21 @@ class Walk {
             "tensor parallel is built for Qwen3.8-Flash-Next's int4 export (" + d_.name + ")");
     require(c.moe_inter == kq::kTpInter && c.q_heads * 2 == d_.q_heads && c.gdn_v_heads * 2 == d_.gdn_v_heads,
             "the card descriptor is not model::q4_tp_card's");
-    require(spec_.kind == ListKind::Decode && M_ == 1 && !link_ && !injected_ && !tap_ && b_.attn == Q4Attn::Flash,
-            "a tensor-parallel list is the M = 1 decode list with flash attention (no hand-off, injection or tap)");
+    require(!link_ && !injected_ && !tap_ && b_.attn == Q4Attn::Flash,
+            "a tensor-parallel list runs flash attention (no hand-off, injection or tap)");
+    require(spec_.kind == ListKind::Verify ? M_ >= 1 && M_ <= b_.rows : M_ == 1,
+            "a tensor-parallel " + kind_name() + " list over buffers of " + std::to_string(b_.rows) + " rows");
+    if (spec_.kind != ListKind::Decode) {
+      require(mtp_ && b_.rows == kVerifyRows && b_.gdn_spec && (!b_.holds_ple() || (b_.ple_gated && b_.ple_gn)),
+              "a tensor-parallel " + kind_name() + " list needs the head's binding, the verify rows and GDN slots");
+      if (part_.mtp)
+        require(part_.mtp_fc && part_.mtp_mixer && mtp_->bufs && mtp_->embed &&
+                    b_.partials.size() >= scratch_sizes(d_, b_.max_len, b_.attn, kVerifyRows).partials,
+                "the head's card holds the head, its buffers and one card's scratch");
+      if (spec_.kind == ListKind::Draft)
+        require(tp_->draft_ready && (part_.mtp || (tp_->peer_x && tp_->draft_ctl)),
+                "a tensor-parallel draft step without its event, the peer's row or the draft Control");
+    }
     require(&b_.desc == &c && b_.placement.devices == 1 && b_.device == 0, "the buffers are not the card's");
     require(part_.first == 0 && part_.end == d_.layers && part_.layers.size() == d_.layers && part_.final_mixer &&
                 part_.lm_head && part_.lm_head->kind == model::WeightKind::Int8 && part_.rope,
@@ -213,13 +234,19 @@ class Walk {
     require(part_.lm_head->shape.N == c.vocab, "lm_head is not the card's vocabulary half");
     const bool tbl = part_.layers[0].expert_row != nullptr;
     const unsigned rank = tp_->link->rank;
-    const std::vector<std::string> need = {
-        kq::embed_variant(1), kq::tp_moe_variant(tbl, rank), kq::tp_gdn_variant(), kq::tp_gated_head_sig_variant(),
-        kq::tp_attn_prep_variant(), kq::tp_qsa_attn_variant(), kq::tp_sum_variant(rank),
-        kq::hc_combine_norm_variant(1, HcSrc::Slices, 1, true), kq::route_variant(1), kq::qsa_variant(1),
-        kernels::gemv_variant(1, d_.hidden, c.qkvz_n(), 1, 0), kernels::gemv_variant(1, d_.hidden, c.qkvg_n(), 2, 0),
-        kernels::gemv_variant(1, c.q_n(), d_.hidden, kq::kTpOutS, 0), kernels::gemv_i8w_variant(1, d_.hidden, c.vocab),
-        kernels::tp_argmax_variant(1, c.vocab, c.vocab_used, rank * c.vocab)};
+    std::vector<std::string> need = {
+        kq::embed_variant(M_), kq::tp_moe_variant(tbl, rank, M_),
+        spec_.kind == ListKind::Verify ? kq::tp_gdn_slots_variant(M_) : kq::tp_gdn_variant(),
+        kq::tp_gated_head_sig_variant(M_), kq::tp_attn_prep_variant(M_), kq::tp_qsa_attn_variant(M_),
+        kq::tp_sum_variant(rank, M_), kq::hc_combine_norm_variant(M_, HcSrc::Slices, 1, true), kq::route_variant(M_),
+        kq::qsa_variant(M_), kernels::gemv_variant(M_, d_.hidden, c.qkvz_n(), 1, 0),
+        kernels::gemv_variant(M_, d_.hidden, c.qkvg_n(), 2, 0), kernels::gemv_variant(M_, c.q_n(), d_.hidden, kq::kTpOutS, 0),
+        kernels::gemv_i8w_variant(M_, d_.hidden, c.vocab), kernels::tp_argmax_variant(M_, c.vocab, c.vocab_used, rank * c.vocab)};
+    if (spec_.kind == ListKind::Verify && M_ > 1) need.push_back(kq::pf_ple_verify_variant());
+    if (spec_.kind != ListKind::Decode && part_.mtp)
+      for (const std::string& v : spec_.kind == ListKind::Draft ? kq::draft_variants(true, false, mtp_->single)
+                                                                : std::vector<std::string>{kq::mtp_variant(M_, mtp_->single)})
+        need.push_back(v);
     for (const std::string& v : need)
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
@@ -230,7 +257,7 @@ class Walk {
   // one slice). The MoE's is wired into its down and finish (moe()).
   void cross(void* buf) {
     const TpLink& t = *tp_->link;
-    const std::string v = kq::tp_sum_variant(t.rank);
+    const std::string v = kq::tp_sum_variant(t.rank, M_);
     {
       l0::Kernel& k = kernel(v, "tp_send", kq::kTpWg);
       k.arg_ptr(0, buf);
@@ -337,7 +364,10 @@ class Walk {
     launch(k, N / t.cols);
   }
   // Spec 28d: which kernel the int4 / int8 linears bind (runtime/gemv_kind.h): gemm_sm at M >= 2 unless forced.
-  kernels::LinearKind lkind() const { return linear_kind(M_, spec_.opt); }
+  // Tensor parallel binds gemv at every M (the card's shapes have no gemm_sm rows; a verify row is the M = 1 step's).
+  kernels::LinearKind lkind() const { return tp_ ? kernels::LinearKind::Gemv : linear_kind(M_, spec_.opt); }
+  // The card's shapes (c_) for a main layer under tp; the MTP head's layer (layer_ -2) runs at one card's (d_).
+  bool card() const { return tp_ && layer_ != -2; }
   // The gemm_sm row of a shape this list binds, or null (gemv / gemv_i8w).
   const kernels::SmallMTuning* small_m(uint32_t K, uint32_t N, uint32_t S, uint32_t layout) const {
     return lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, S, layout) : nullptr;
@@ -473,7 +503,8 @@ class Walk {
     {
       // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o [, state_spec]), grid (48 heads, 4
       // chunks); the verify's slots build reads the live slot and writes row r's state into slot (live + r) % 4
-      l0::Kernel& k = kernel(tp_ ? kq::tp_gdn_variant() : slots ? kq::gdn_slots_variant(M_) : kq::gdn_variant(M_),
+      l0::Kernel& k = kernel(tp_ ? (slots ? kq::tp_gdn_slots_variant(M_) : kq::tp_gdn_variant())
+                                 : slots ? kq::gdn_slots_variant(M_) : kq::gdn_variant(M_),
                              "gdn_step", kWgGdn);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.partials.ptr());
@@ -487,7 +518,7 @@ class Walk {
     }
     {
       // prep_gated_head(qkvz_partials, gdn_o, gated_w, x_out) - the sigmoid gate (_SIG), grid (48, M)
-      l0::Kernel& k = kernel(tp_ ? kq::tp_gated_head_sig_variant() : kq::gated_head_sig_variant(M_), "prep_gated_head",
+      l0::Kernel& k = kernel(tp_ ? kq::tp_gated_head_sig_variant(M_) : kq::gated_head_sig_variant(M_), "prep_gated_head",
                              kWgGated);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.gdn_o.ptr());
@@ -520,7 +551,7 @@ class Walk {
   void qsa_prep(const loader::Q4Layer& L, uint32_t S, const QsaTarget& t) {
     {
       // attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v), grid (24 + 2, M)
-      l0::Kernel& k = kernel(tp_ ? kq::tp_attn_prep_variant() : kq::attn_prep_q4_variant(M_, S), "attn_prep", kWgAttnPrep);
+      l0::Kernel& k = kernel(card() ? kq::tp_attn_prep_variant(M_) : kq::attn_prep_q4_variant(M_, S), "attn_prep", kWgAttnPrep);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, L.qsa_small->ptr());
@@ -529,7 +560,7 @@ class Walk {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, t.k);
       k.arg_ptr(7, t.v);
-      launch(k, c_.q_heads + c_.kv_heads, M_);
+      launch(k, card() ? c_.q_heads + c_.kv_heads : d_.q_heads + d_.kv_heads, M_);
     }
     {
       // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys), grid (5, M)
@@ -585,7 +616,7 @@ class Walk {
       launch(k, d_.q_heads, M_);
       return;
     }
-    const std::string av = tp_ ? kq::tp_qsa_attn_variant() : kq::qsa_attn_variant(M_, false);
+    const std::string av = card() ? kq::tp_qsa_attn_variant(M_) : kq::qsa_attn_variant(M_, false);
     {
       // q4_qsa_attn(ctrl, attn_q, kv_k, kv_v, list, part), grid (2 kv heads, TGT, M)
       l0::Kernel& k = kernel(av, "q4_qsa_attn", kq::kAttnWg);
@@ -595,7 +626,7 @@ class Walk {
       k.arg_ptr(3, t.v);
       k.arg_ptr(4, listp);
       k.arg_ptr(5, b_.attn_part.ptr());
-      launch(k, c_.kv_heads, kq::kAttnTgt, M_);
+      launch(k, card() ? c_.kv_heads : d_.kv_heads, kq::kAttnTgt, M_);
     }
     {
       // q4_qsa_reduce(ctrl, part, attn_gate, list, attn_out), grid (24, M)
@@ -605,7 +636,7 @@ class Walk {
       k.arg_ptr(2, b_.attn_gate.ptr());
       k.arg_ptr(3, listp);
       k.arg_ptr(4, b_.attn_out.ptr());
-      launch(k, c_.q_heads, M_);
+      launch(k, card() ? c_.q_heads : d_.q_heads, M_);
     }
   }
 
@@ -637,7 +668,8 @@ class Walk {
     // its address (VRAM or pinned host memory) - gate||up the row, down the row + 512 entries; the arithmetic is the
     // direct form's.
     const bool tbl = L.expert_row != nullptr;
-    const std::string mv = tp_ ? kq::tp_moe_variant(tbl, tp_->moe->rank) : kq::moe_variant(M_, shb, tbl);
+    const bool tpm = card();   // the head's MoE (draft steps) is one card's, whole
+    const std::string mv = tpm ? kq::tp_moe_variant(tbl, tp_->moe->rank, M_) : kq::moe_variant(M_, shb, tbl);
     {
       // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M) - tp: the card's half, 11 x 10
       l0::Kernel& k = kernel(mv, "q4_moe_gate_up", kq::moe_gate_up_wg());
@@ -647,24 +679,24 @@ class Walk {
       k.arg_ptr(2, tbl ? L.expert_row : L.gate_up->ptr());
       k.arg_ptr(3, L.shared->ptr());
       k.arg_ptr(4, b_.moe_h.ptr());
-      launch(k, tp_ ? kq::tp_moe_gate_up_groups() : kq::moe_gate_up_groups(), M_);
+      launch(k, tpm ? kq::tp_moe_gate_up_groups() : kq::moe_gate_up_groups(), M_);
     }
     {
       // q4_moe_down(route, h, w_dn, w_sh_dn, y), grid (2560 / 16, M) - y is NOT folded: the next combine does
-      l0::Kernel& k = kernel(mv, "q4_moe_down", tp_ ? kq::tp_moe_down_wg() : kq::moe_down_wg());
+      l0::Kernel& k = kernel(mv, "q4_moe_down", tpm ? kq::tp_moe_down_wg() : kq::moe_down_wg());
       if (tbl) k.indirect_host();
       k.arg_ptr(0, rt);
       k.arg_ptr(1, b_.moe_h.ptr());
       k.arg_ptr(2, tbl ? static_cast<uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr());
       k.arg_ptr(3, at(*L.shared, L.shared_down_offset));
-      k.arg_ptr(4, tp_ ? tp_->slots : b_.y.ptr());   // tp: each slot's partial, fp32 [11][M][2560]
-      if (tp_) {   // and its chunk into the peer's landing
+      k.arg_ptr(4, tpm ? tp_->slots : b_.y.ptr());   // tp: each slot's partial, fp32 [11][M][2560]
+      if (tpm) {   // and its chunk into the peer's landing
         k.arg_ptr(5, tp_->moe->peer_land);
         k.arg_ptr(6, tp_->moe->send_ctr);
       }
       launch(k, d_.hidden / 16, M_);
     }
-    if (tp_) {
+    if (tpm) {
       // q4_moe_finish(route, slots, land, ctr, state, spin_limit, y), grid (2560 / 256, M): waits for the peer's
       // slots, sums the two cards' and runs the down's epilogue
       const TpLink& t = *tp_->moe;
@@ -698,6 +730,13 @@ class Walk {
       k.arg_ptr(5, b_.inj.ptr());
       launch(k, d_.hidden / 16, M_);
     }
+    // tp's draft step: x is the step's normed row - the other card's half of the head reads it from here
+    if (tp_ && spec_.kind == ListKind::Draft) step_.list.barrier_signal(tp_->draft_ready);
+    head_half(logits);
+  }
+
+  // The head GEMV over x into `logits` and the two argmax stages (into ctrl_): under tp the card's vocabulary half.
+  void head_half(void* logits) {
     const loader::DeviceWeight& lm = *part_.lm_head;
     require(lm.shape.N == c_.vocab && lm.shape.K == d_.hidden, "lm_head is not [vocab][hidden]");
     if (lm.kind == model::WeightKind::Int8) {
@@ -722,7 +761,7 @@ class Walk {
     require(kq::argmax_groups() <= kq::kArgmaxWg, "argmax_stage2 folds at most 256 groups");
     if (tp_) {   // the card's vocabulary half: the global id and its value into Control (the host merges)
       const unsigned rank = tp_->link->rank;
-      const std::string v = kernels::tp_argmax_variant(1, c_.vocab, c_.vocab_used, rank * c_.vocab);
+      const std::string v = kernels::tp_argmax_variant(M_, c_.vocab, c_.vocab_used, rank * c_.vocab);
       {
         l0::Kernel& k = kernel(v, "tp_argmax_stage1", kq::kArgmaxWg);
         k.arg_ptr(0, logits);
@@ -826,6 +865,18 @@ class Walk {
     hc(*L.hc_mlp, true);
     moe(L, at(mb.routes, size_t(spec_.draft) * kRouteWords * 4), true);   // bf16 shared (q4_mtp_desc)
     mixer_and_head(*part_.mtp_mixer, at(mb.logits, size_t(spec_.draft) * d_.vocab * 4));
+    ctrl_ = b_.control.ptr();
+    layer_ = -1;
+  }
+
+  // Task 5 Step 0: a draft step on the card without the head - its vocabulary half of the head over the head card's x.
+  void draft_head_half() {
+    require(M_ == 1 && spec_.draft < kMaxDraft, "a draft step is M = 1, index < kMaxDraft");
+    step_.list.wait_event(tp_->draft_ready);
+    step_.list.copy(b_.x.ptr(), tp_->peer_x, size_t(d_.hidden) * 2);
+    layer_ = -2;
+    ctrl_ = tp_->draft_ctl;
+    head_half(at(b_.logits, size_t(spec_.draft) * c_.vocab * 4));
     ctrl_ = b_.control.ptr();
     layer_ = -1;
   }

@@ -3414,6 +3414,40 @@ b70_cli_reject(cli_reject_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --bench --
 b70_cli_reject(cli_reject_qwen4exp_prefill_chunk ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
   --prefill-chunk 4096 EXPECT "exceeds Qwen3.8-Flash-Next's prefill chunk 2048")
 # ==== Spec 21-QFN-v1d: Qwen3.8-Flash-Next prefill ==== (end) ====
+# Plan 21-QFN-v2b Task 4: the tensor-parallel prefill against pp's at --layers 18 on our RTN export, every expert resident
+# (B70_Q4EXP_RTN_SNAPSHOT): pp writes its prefill's rows, tp reads them (ctest -R qwen4exp_tp_prefill_, in this order).
+if(B70_Q4EXP AND B70_TP)
+  set(B70_Q4EXP_TP_KERNELS kernel_gemv_M1_K2560_N8192_S1_L0 kernel_gemv_M1_K2560_N6656_S2_L0
+    kernel_gemv_M1_K3072_N2560_S2_L0 kernel_gemv_i8w_M1_K2560_N124160 kernel_prep_gated_head_M1_GK8V24_SIG
+    kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1 kernel_q4_qsa_attn_M1_T32_Q12KV1
+    kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R1
+    kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R1
+    kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum
+    kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
+  set(B70_Q4EXP_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K2560_N8192_L0 kernel_pf_int4_slab_K2560_N6656
+    kernel_pf_int4_slab_K3072_N2560 kernel_q4_pf_bf16_slab_K2560_N8192 kernel_q4_pf_bf16_slab_K2560_N6656
+    kernel_q4_pf_bf16_slab_K3072_N2560 kernel_pf_gdn_front_GK8V24 kernel_pf_gdn_conv_GK8V24_AB256
+    kernel_pf_gated_head_GK8V24_SIG kernel_pf_gdn_conv_GK8V24 kernel_pf_gdn_wy_GK8V24 kernel_pf_gdn_scan_GK8V24
+    kernel_pf_attn_prep_q16_Q12KV1 kernel_pf_attn_Q12KV1 kernel_pf_flash_attn_Q12KV1 kernel_q4_pf_sparse_attn_Q12KV1
+    kernel_pf_moe_q4gemm_K2560_N640_SILU kernel_pf_moe_q4gemm_K2560_N640_SILU_TBL kernel_pf_moe_q4gemm_K320_N2560_F32
+    kernel_pf_moe_q4gemm_K320_N2560_F32_TBL kernel_q4_pf_moe_combine_f32_E512_T10_D2560
+    kernel_q4_hc_combine_norm_M2048_S2 kernel_q4_hc_combine_norm_M2048_S2_NN kernel_q4_hc_combine_norm_M1_S2)
+  add_executable(qwen4exp_tp_prefill_test runtime/qwen4exp_tp_prefill_test.cc)
+  b70_target_kernel_dir(qwen4exp_tp_prefill_test)
+  target_include_directories(qwen4exp_tp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/runtime)
+  target_link_libraries(qwen4exp_tp_prefill_test PRIVATE b70_qwen4exp_prefill b70_l0)
+  add_dependencies(qwen4exp_tp_prefill_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS}
+    ${B70_Q4EXP_TP_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS})
+  foreach(mode pp tp)
+    add_test(NAME qwen4exp_tp_prefill_${mode}_test COMMAND qwen4exp_tp_prefill_test ${B70_Q4EXP_RTN_SNAPSHOT}
+      ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids ${mode} ${CMAKE_BINARY_DIR}/qwen4exp_tp_pf_rows.f32)
+    set_tests_properties(qwen4exp_tp_prefill_${mode}_test PROPERTIES LABELS "checkpoint;qwen4exp;tp" SKIP_RETURN_CODE 77
+      TIMEOUT 3600)
+  endforeach()
+  set_tests_properties(qwen4exp_tp_prefill_tp_test PROPERTIES DEPENDS qwen4exp_tp_prefill_pp_test)
+  add_dependencies(qwen4exp_route_capture ${B70_Q4EXP_TP_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS})   # its tp mode
+endif()
 # ==== Spec 21-QFN-v1e: Qwen3.8-Flash-Next served (label qwen4exp) ==== (begin) ====
 # Task 1 (host): the tokens and the template. 21-QFN-v1a found the original's tokenizer.json NOT Qwen3.8's (the split regex
 # adds \p{M}; Intel's checkpoint ships Qwen3.8's file), so qwen4exp_tokenizer_test holds the engine's tokenizer to
@@ -3573,6 +3607,37 @@ if(B70_Q4EXP AND B70_MTP)
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   set_tests_properties(qwen4exp_tier_synth_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
     TIMEOUT 3600)
+  # Plan 21-QFN-v2b Task 5 Step 0: the MTP head under --parallel tp (box only; our RTN export, 18 layers): the plain run's
+  # greedy ids, then the head's plain steps, spec 8's loop at K 1..3 and a restored snapshot against them.
+  if(B70_TP AND TARGET qwen4exp_tp_prefill_test)
+    set(B70_Q4EXP_TP_MTP_KERNELS "")
+    foreach(MM 1 2 3 4)
+      list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gdn_step_slots_M${MM}_GK8V24_G1)
+      if(NOT MM EQUAL 1)
+        list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N8192_S1_L0 kernel_gemv_M${MM}_K2560_N6656_S2_L0
+          kernel_gemv_M${MM}_K3072_N2560_S2_L0 kernel_gemv_i8w_M${MM}_K2560_N124160 kernel_prep_gated_head_M${MM}_GK8V24_SIG
+          kernel_attn_prep_M${MM}_Q12KV1 kernel_q4_qsa_attn_M${MM}_T32_Q12KV1
+          kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1
+          kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1
+          kernel_tp_cross_M${MM}_K2560_G20_S2_X_R0_sum kernel_tp_cross_M${MM}_K2560_G20_S2_X_R1_sum
+          kernel_tp_argmax_M${MM}_N124160_U124160_B0 kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
+      endif()
+    endforeach()
+    add_executable(qwen4exp_tp_mtp_test runtime/qwen4exp_tp_mtp_test.cc)
+    b70_target_kernel_dir(qwen4exp_tp_mtp_test)
+    target_include_directories(qwen4exp_tp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+      ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_link_libraries(qwen4exp_tp_mtp_test PRIVATE b70_qwen4exp_prefill b70_l0)
+    add_dependencies(qwen4exp_tp_mtp_test ${B70_Q4EXP_TP_MTP_KERNELS} ${B70_Q4EXP_MTP_KERNELS} ${_q4mtp_reused}
+      ${B70_Q4EXP_TP_KERNELS})
+    foreach(mode plain mtp)
+      add_test(NAME qwen4exp_tp_mtp_${mode}_test COMMAND qwen4exp_tp_mtp_test ${B70_Q4EXP_RTN_SNAPSHOT}
+        ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids ${mode} ${CMAKE_BINARY_DIR}/qwen4exp_tp_mtp_ids.u32)
+      set_tests_properties(qwen4exp_tp_mtp_${mode}_test PROPERTIES LABELS "checkpoint;qwen4exp;tp" SKIP_RETURN_CODE 77
+        TIMEOUT 3600)
+    endforeach()
+    set_tests_properties(qwen4exp_tp_mtp_mtp_test PROPERTIES DEPENDS qwen4exp_tp_mtp_plain_test)
+  endif()
 endif()
 # Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21-QFN-v1c's cli_reject_qwen4exp_serve is gone). The
 # adapter: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over Qwen4ExpEngine (an object library - the Mac's

@@ -655,6 +655,12 @@ size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one) {
   return b;
 }
 
+size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one) {
+  // Task 4 Step 2: two chunks in flight - each its fold slots, the second its residual rows and inject weights
+  return size_t(kTpPfChunks) * 2 * 2 * kPfC * one.hidden * 4 + size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4 +
+         size_t(kTpPfChunks - 1) * kPfC * (size_t(one.hc_n()) * 2 + size_t(one.hc) * 4);
+}
+
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
                                 bool int8_head, bool mtp, bool debug_tap, bool prefill) {
   model::validate(p, one);
@@ -665,6 +671,7 @@ std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4P
     const model::Q4Placement pc = model::Q4Placement::one(c);
     DevicePlan dp = plan(c, pc, max_len, int8_head, false, debug_tap, prefill)[0];
     dp.device = r;
+    if (prefill) dp.prefill_scratch += tp_prefill_bytes(one);
     // plan() put the card's half-vocabulary embedding on it: the embedding is one card's table, whole, or absent.
     dp.weights -= loader::q4_embed_bytes(c);
     if (p.holds_embed(r)) dp.weights += loader::q4_embed_bytes(one);
@@ -681,7 +688,10 @@ std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4P
         dp.kv += ms.kv + ms.idx_keys + ms.idx_tail;
         dp.state += ms.ctl + ms.hh;
         dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits + ms.routes;
-        if (prefill) dp.prefill_scratch += mtp_prefill_R_bytes(one);
+        // the head pass's R rows, and (Task 5) its own rows at one card's widths: k||v columns / fh, q16
+        if (prefill)
+          dp.prefill_scratch += mtp_prefill_R_bytes(one) + size_t(kPfC) * pf_ld(one.qkvg_n()) * 4 +
+                                size_t(kPfC) * one.q_n() * 2;
       }
     }
     dp.model = dp.weights + dp.rope;
@@ -745,6 +755,11 @@ ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, u
 
 size_t tp_device_launches(const model::Qwen4ExpDesc& one) {
   return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(3) * one.layers;
+}
+
+size_t tp_verify_launches(const model::Qwen4ExpDesc& one, uint32_t M, bool head) {
+  if (M == 0 || M > kVerifyRows) throw std::invalid_argument("qwen4exp::tp_verify_launches: M = " + std::to_string(M));
+  return tp_device_launches(one) + (M > 1 ? 2 : 0) + (head ? 10 + M : 0);
 }
 
 double tp_card_f(const ExpertBudget& b, uint32_t rank) {

@@ -279,3 +279,23 @@ __kernel void q4_pf_moe_combine(__global const uint* restrict route, __global co
   const ushort sh_b = rne_bf16(bf16f(y[(size_t)(hdr[H_SHARED_ROW] + t) * PF_D + n]) * as_float(rr[R_SG]));
   out[(size_t)t * PF_D + n] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
 }
+
+#ifdef PF_COMBINE_F32
+// Plan 21v2b Task 4: q4_pf_moe_combine_f32(route, hdr, pair_row, y, out, C) - a tensor-parallel card's partial of the
+// block's output over its K half of every down: y holds the down GEMM's fp32 sums (pf_moe_q4gemm OUT_F32), and
+//   out[t][n] = (sum_k f32(y[pair_row[t][k]][n]) x w_k, k in the route row's RANK order) + f32(y[shared row + t][n]) x sg
+// in fp32, nothing rounded - the two cards' rows are added (card 0's first) and rounded once by the next combine (_S2).
+__attribute__((reqd_work_group_size(WG_COMBINE, 1, 1)))
+__kernel void q4_pf_moe_combine_f32(__global const uint* restrict route, __global const uint* restrict hdr,
+                                    __global const uint* restrict pair_row, __global const float* restrict y,
+                                    __global float* restrict out, uint C) {
+#pragma OPENCL FP_CONTRACT OFF
+  const uint n = get_group_id(0) * WG_COMBINE + get_local_id(0);
+  const uint t = get_group_id(1);
+  if (t >= C) return;
+  __global const uint* restrict rr = route + (size_t)t * RW;
+  float sum = 0.0f;
+  for (uint k = 0; k < PF_K; ++k) sum = sum + y[(size_t)pair_row[t * PF_K + k] * PF_D + n] * as_float(rr[R_W + k]);
+  out[(size_t)t * PF_D + n] = sum + y[(size_t)(hdr[H_SHARED_ROW] + t) * PF_D + n] * as_float(rr[R_SG]);
+}
+#endif

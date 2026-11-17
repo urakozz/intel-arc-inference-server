@@ -128,22 +128,26 @@ inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head"
 // "Plan 21-QFN-v2b" block): the MoE at the half width 320 with the card's fp32 partial (MOE_TP_PART, DN_KS 1), the GDN at
 // Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_send + tp_sum at hidden 2560 (FOLD_G 20; S the local slices).
 inline constexpr unsigned kTpInter = kInter / 2;
-inline std::string tp_moe_variant(bool table, unsigned rank) {
-  return std::string("q4_moe_M1_E512_T10_D2560_I320_SH4") + (table ? "_TBL" : "") + "_TP_R" + std::to_string(rank);
+inline std::string tp_moe_variant(bool table, unsigned rank, unsigned M = 1) {
+  return "q4_moe_M" + std::to_string(M) + "_E512_T10_D2560_I320_SH4" + (table ? "_TBL" : "") + "_TP_R" +
+         std::to_string(rank);
 }
 // MOE_TP_PART: q4_moe_down writes each slot's partial, fp32 [11][M][2560], and sends it to the peer's landing (one
 // chunk a down work-group: kTpMoeFoldG); q4_moe_finish waits for the peer's, sums the two and runs the epilogue.
 inline constexpr unsigned kTpMoeFoldG = kHidden / 16;   // 160
 inline constexpr unsigned tp_moe_gate_up_groups() { return kSlots * (2 * kTpInter / 16 / 4); }   // 110
 inline constexpr unsigned tp_moe_down_wg() { return 16 * kSlots * 1; }                          // 176: DN_KS 1
-inline std::string tp_gated_head_sig_variant() { return "prep_gated_head_M1_GK8V24_SIG"; }
+inline std::string tp_gated_head_sig_variant(unsigned M = 1) { return "prep_gated_head_M" + std::to_string(M) + "_GK8V24_SIG"; }
 inline std::string tp_gdn_variant() { return "gdn_step_M1_GK8V24"; }
-inline std::string tp_attn_prep_variant() { return "attn_prep_M1_Q12KV1"; }
-inline std::string tp_qsa_attn_variant() { return "q4_qsa_attn_M1_T32_Q12KV1"; }
+// Task 5 Step 0 (MTP under tp): the verify's GDN slots at the card's heads, layer-major as gdn_slots_variant (one
+// layer's state at 24 heads a slot): gdn_step_slots_M<M>_GK8V24_G1
+inline std::string tp_gdn_slots_variant(unsigned M) { return "gdn_step_slots_M" + std::to_string(M) + "_GK8V24_G1"; }
+inline std::string tp_attn_prep_variant(unsigned M = 1) { return "attn_prep_M" + std::to_string(M) + "_Q12KV1"; }
+inline std::string tp_qsa_attn_variant(unsigned M = 1) { return "q4_qsa_attn_M" + std::to_string(M) + "_T32_Q12KV1"; }
 inline constexpr unsigned kTpFoldG = 20, kTpWg = 256, kTpOutS = 2, kTpFinishWg = 256;
 // out_proj / o_proj's crossing: the card's 2 slices summed in one card's order into one row
-inline std::string tp_sum_variant(unsigned rank) {
-  return "tp_cross_M1_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
+inline std::string tp_sum_variant(unsigned rank, unsigned M = 1) {
+  return "tp_cross_M" + std::to_string(M) + "_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
          "_X_R" + std::to_string(rank) + "_sum";
 }
 
@@ -364,6 +368,43 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
 }
 inline std::vector<std::string> prefill_variants(const model::Qwen4ExpDesc& d, bool eager, bool ple_bf16_scale = true) {
   return prefill_variants(d.forms.dense == model::Q4Form::Int4, eager, ple_bf16_scale);
+}
+
+// Plan 21v2b Task 4: a tensor-parallel card's prefill binaries (src/kernels/CMakeLists.txt's "Plan 21v2b Task 4" block;
+// the walk: runtime/qwen4exp/qwen4exp_prefill.cc, tp). The card's linears, GDN at 8 / 24 heads, the attention at 12 q /
+// 1 kv heads, the MoE at the half width 320 with the down's fp32 rows and the fp32 combine, the fold of the two cards'
+// partials (_S2). Flash attention only (the eager form is one card's).
+inline constexpr unsigned kTpGdnK = 8, kTpGdnV = 24, kTpQHeads = 12, kTpKvHeads = 1;
+inline constexpr unsigned kTpPfGuWgN = 128;   // pf_moe_q4gemm_K2560_N640_SILU's columns a work-group (WGN 4)
+inline std::string tp_pf_moe_gu_variant(bool table) { return pf_moe_q4gemm_variant(kHidden, 2 * kTpInter, true, table); }
+inline std::string tp_pf_moe_dn_variant(bool table) {   // "pf_moe_q4gemm_K320_N2560_F32[_TBL]"
+  return "pf_moe_q4gemm_K" + std::to_string(kTpInter) + "_N" + std::to_string(kHidden) + "_F32" + (table ? "_TBL" : "");
+}
+inline std::string tp_pf_combine_variant() { return "q4_pf_moe_combine_f32_E512_T10_D2560"; }
+inline std::string tp_pf_fold_variant(bool norm) { return hc_combine_norm_variant(kPfC, HcSrc::Slices, 2, norm); }
+inline std::string tp_head_fold_variant() { return hc_combine_norm_variant(1, HcSrc::Slices, 2, true); }
+inline std::string tp_pf_sparse_attn_variant() { return "q4_pf_sparse_attn_Q12KV1"; }
+inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& one, bool ple_bf16_scale = true) {
+  const model::Qwen4ExpDesc c = model::q4_tp_card(one, 0);
+  const bool i4 = one.forms.dense == model::Q4Form::Int4;
+  std::vector<std::string> v = {
+      pf_embed_variant(), pf_hc_combine_norm_variant(HcSrc::Embed, true), pf_hc_combine_norm_variant(HcSrc::None, true),
+      tp_pf_fold_variant(true), tp_pf_fold_variant(false), tp_head_fold_variant(), pf_bf16_slab_variant(kHcN, kHcDownN),
+      pf_gemm_variant(false), pf_hc_up_mix_variant(), pf_gdn_conv_variant(kTpGdnK, kTpGdnV),
+      pf_gdn_wy_variant(kTpGdnK, kTpGdnV), pf_gdn_scan_variant(kTpGdnK, kTpGdnV), pf_gdn_front_variant(kTpGdnK, kTpGdnV),
+      pf_router_slab_variant(), pf_ab_slab_variant(), pf_route_gemm_variant(),
+      kernels::pf_gdn_gate_gemm_variant(kTpGdnK, kTpGdnV, kPfAbPitch), pf_gated_head_variant(kTpGdnK, kTpGdnV) + "_SIG",
+      pf_bf16_slab_variant(kHidden, kIdxN), pf_attn_prep_q16_variant(kTpQHeads, kTpKvHeads), pf_qsa_variant(),
+      pf_flash_attn_variant(kTpQHeads, kTpKvHeads), tp_pf_sparse_attn_variant(), pf_attn_variant(kTpQHeads, kTpKvHeads),
+      pf_moe_variant(), pf_moe_sort_mw_variant(kExperts, kTopK), tp_pf_moe_gu_variant(false), tp_pf_moe_dn_variant(false),
+      tp_pf_moe_gu_variant(true), tp_pf_moe_dn_variant(true), tp_pf_combine_variant(),
+      pf_ple_gather_variant(ple_bf16_scale), pf_bf16_slab_variant(kHidden, kPleKvN), pf_ple_variant()};
+  for (const model::Q4LinearId id :
+       {model::Q4LinearId::GdnQkvz, model::Q4LinearId::QsaQkvg, model::Q4LinearId::GdnOut}) {
+    const model::Q4Linear l = c.linear(id);
+    v.push_back(i4 ? pf_int4_slab_variant(l.shape.K, l.shape.N) : pf_bf16_slab_variant(l.shape.K, l.shape.N));
+  }
+  return v;
 }
 
 // =================================================================================================================

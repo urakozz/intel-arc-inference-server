@@ -1,6 +1,9 @@
 // Engine routes for f32-judged replay. Tool arguments only; no injected engine routing.
-// checkpoint ids original-f32-dump output layers [pp2] [prompt-length=4500] [gen=32]
+// checkpoint ids original-f32-dump output layers [pp2|tp] [prompt-length=4500] [gen=32]
+// tp (plan 21v2b Task 4): Qwen4ExpTpEngine with each card's tier as the CLI plans it; its decode is pp's bit for bit,
+// its prefill its own - the prefill path's routes are what the f32 companion replays. No layer states for tp.
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <filesystem>
 
@@ -8,6 +11,7 @@
 #include "loader/dflash_fixture.h"
 #include "runtime/qwen4exp_rig.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
+#include "runtime/qwen4exp/qwen4exp_tp_engine.h"
 
 namespace {
 namespace rq = runtime::qwen4exp;
@@ -25,6 +29,7 @@ int main(int argc, char** argv) {
   qwen4exp_rig::Options o;
   o.layers = uint32_t(std::stoul(argv[5]));
   o.devices = argc > 6 && std::string(argv[6]) == "pp2" ? 2 : 1;
+  const bool tp_mode = argc > 6 && std::string(argv[6]) == "tp";
   o.max_len = 8192;
   o.int8_head = true;
   const uint32_t n = argc > 7 ? uint32_t(std::stoul(argv[7])) : 4500;
@@ -41,9 +46,30 @@ int main(int argc, char** argv) {
   const std::string snap = qwen4exp_rig::qwen4exp_snapshot(argv[1]);
   if (snap.empty()) return 77;
   qwen4exp_rig::Rig rig;
-  qwen4exp_rig::build(rig, snap, o);
-  auto& e = *rig.eng;
-  const auto& d = e.model().desc;
+  std::unique_ptr<rq::Qwen4ExpTpEngine> tp;
+  if (tp_mode) {
+    qwen4exp_rig::open(rig, 2);
+    const model::Qwen4ExpDesc dd = loader::qwen4exp_checkpoint_desc(snap, o.layers);
+    const model::Q4Placement pl = model::Q4Placement::tp2(dd, model::Q4TpEnds::Split);
+    const std::array<size_t, runtime::kPpDevices> caps = {rig.c0->memory_bytes(), rig.c1->memory_bytes()};
+    const rq::ExpertBudget b = rq::tp_expert_budget(dd, pl, o.max_len, true, false, true, caps,
+                                                    size_t(runtime::kDefaultReserveGb * 1e9));
+    const std::vector<uint32_t> prof = loader::load_q4_profile(snap, dd);
+    const rq::ExpertTier t0 = rq::tp_fill_tier(dd, b, 0, prof.empty() ? nullptr : &prof);
+    const rq::ExpertTier t1 = rq::tp_fill_tier(dd, b, 1, prof.empty() ? nullptr : &prof);
+    tp = std::make_unique<rq::Qwen4ExpTpEngine>(
+        *rig.c0, *rig.c1, loader::load_qwen4exp(rig.ctx, snap, o.max_len, pl, loader::LmHeadForm::Int8, o.layers, false,
+                                                &t0, &t1),
+        o.max_len);
+  } else {
+    qwen4exp_rig::build(rig, snap, o);
+  }
+  const auto& d = tp ? tp->model().desc : rig.eng->model().desc;
+  const auto reset = [&] { tp ? tp->reset() : rig.eng->reset(); };
+  const auto prefill = [&](const std::vector<uint32_t>& ids) { tp ? tp->prefill(ids) : rig.eng->prefill(ids); };
+  const auto ingest = [&](uint32_t id) { tp ? tp->ingest({id}) : rig.eng->ingest({id}); };
+  const auto read_routes = [&] { return tp ? tp->read_routes(0) : rig.eng->read_routes(); };
+  const auto read_logits = [&] { return tp ? tp->read_logits() : rig.eng->read_logits(); };
   Tensors out;
   put(out, "trace.spec", "I32", {10}, std::vector<int32_t>{1, int32_t(d.layers), int32_t(n), int32_t(gen),
       int32_t(rq::kPfC), int32_t(o.max_len), 1, 1, int32_t(d.vocab_used), int32_t(d.vocab)});
@@ -59,26 +85,26 @@ int main(int argc, char** argv) {
           for (uint32_t k = 0; k < d.top_k; ++k) routes[l][size_t(pos + r) * d.top_k + k] = int32_t(ids[k]);
         }
     };
-    e.reset();
+    reset();
     if (mode == "prefill") {
       for (uint32_t p = 0; p < n; p += rq::kPfC) {
         const uint32_t count = std::min(rq::kPfC, n - p);
-        e.prefill(std::vector<uint32_t>(prompt.begin() + p, prompt.begin() + p + count));
-        add(e.read_prefill_routes(), p, count, true);
+        prefill(std::vector<uint32_t>(prompt.begin() + p, prompt.begin() + p + count));
+        add(tp ? tp->read_prefill_routes() : rig.eng->read_prefill_routes(), p, count, true);
       }
     } else {
-      for (uint32_t p = 0; p < n; ++p) { e.ingest({prompt[p]}); add(e.read_routes(), p, 1, false); }
+      for (uint32_t p = 0; p < n; ++p) { ingest(prompt[p]); add(read_routes(), p, 1, false); }
     }
-    for (uint32_t l = 0; l < d.layers; ++l) {
-      const auto bytes = e.read_layer_state(l);
+    for (uint32_t l = 0; l < d.layers && !tp; ++l) {
+      const auto bytes = rig.eng->read_layer_state(l);
       put(out, mode + ".state.L" + std::to_string(l), "U8", {bytes.size()}, bytes);
     }
-    std::vector<float> logits = e.read_logits();
+    std::vector<float> logits = read_logits();
     for (uint32_t j = 0; j < gen; ++j) {
       CHECK(force[j] < d.vocab_used);
-      e.ingest({force[j]});
-      add(e.read_routes(), n + j, 1, false);
-      const auto row = e.read_logits();
+      ingest(force[j]);
+      add(read_routes(), n + j, 1, false);
+      const auto row = read_logits();
       logits.insert(logits.end(), row.begin(), row.end());
     }
     put(out, mode + ".logits", "F32", {gen + 1, d.vocab}, logits);

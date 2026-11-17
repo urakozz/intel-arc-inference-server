@@ -21,7 +21,8 @@ b70_target_kernel_dir(b70_qwen4exp_runtime)
 # definitions) - its own archive, as b70_kolibri_prefill is beside b70_kolibri_runtime: a target that never prefills
 # this family links what it always linked. It runs the prefill path's Level Zero half (runtime::prefill::Context,
 # KernelCache, gemm_l0, gdn.cc's scan selector).
-add_library(b70_qwen4exp_prefill STATIC qwen4exp_prefill.cc qwen4exp_prefill_gdn.cc qwen4exp_prefill_engine.cc)
+add_library(b70_qwen4exp_prefill STATIC qwen4exp_prefill.cc qwen4exp_prefill_gdn.cc qwen4exp_prefill_engine.cc
+            qwen4exp_tp_prefill.cc)
 target_include_directories(b70_qwen4exp_prefill PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_qwen4exp_prefill PUBLIC b70_qwen4exp_runtime b70_prefill_host)
 b70_target_kernel_dir(b70_qwen4exp_prefill)

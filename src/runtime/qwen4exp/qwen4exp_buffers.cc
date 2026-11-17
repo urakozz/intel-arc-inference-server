@@ -19,9 +19,9 @@ size_t kv_rows_bytes(const model::Qwen4ExpDesc& d, uint32_t max_len) { return si
 }  // namespace
 
 #define Q4_PS persistent_sizes(d, p, dev, len)
-#define Q4_SS scratch_sizes(d, len, at, mtp ? kVerifyRows : kM)
+#define Q4_SS scratch_sizes(scratch ? *scratch : d, len, at, mtp ? kVerifyRows : kM)
 Qwen4ExpBuffers::Qwen4ExpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d, const model::Q4Placement& p,
-                                 uint32_t dev, uint32_t len, Q4Attn at, bool mtp)
+                                 uint32_t dev, uint32_t len, Q4Attn at, bool mtp, const model::Qwen4ExpDesc* scratch)
     : control(ctx, l0::MemKind::Shared, Q4_PS.control),
       kv(ctx, l0::MemKind::Device, Q4_PS.kv),
       idx_keys(ctx, l0::MemKind::Device, Q4_PS.idx_keys),

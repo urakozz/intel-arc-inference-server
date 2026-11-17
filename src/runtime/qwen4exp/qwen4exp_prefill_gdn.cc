@@ -22,11 +22,9 @@ using prefill::PtrArg;
 namespace kq = kernels::qwen4exp;
 
 // gdn.cc's constants (Qwen3.8's GDN shape, which this family shares: kq::kGdnHeads 48 v-heads, 16 k-heads, 10240
-// conv channels).
-constexpr uint32_t kKHeads = 16, kVHeads = kq::kGdnHeads, kHd = kq::kGdnHd, kConvDim = 10240;
+// conv channels; a tensor-parallel card's 8 / 24 heads, 5120 channels, come in through GdnChunkBuffers).
+constexpr uint32_t kHd = kq::kGdnHd;
 constexpr uint32_t kConvWg = 256, kStateColChunks = 4, kConvBlock = 128;
-static_assert((2 * kKHeads + kVHeads) * kHd == kConvDim, "the conv channels are q, k and v heads x 128");
-static_assert(kConvDim % kConvWg == 0, "the conv channels are whole work-groups");
 
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::qwen4exp::gdn_chunk_q4: " + what);
@@ -44,6 +42,10 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
           "a buffer is missing");
   const char* const scan_entry = prefill::gdn_scan_entry_name();   // gdn.cc's (gdn.h)
   const char* const solve = solve_entry();
+  const uint32_t kKHeads = b.k_heads, kVHeads = b.v_heads, kConvDim = (2 * kKHeads + kVHeads) * kHd;
+  require((kKHeads == 16 && kVHeads == kq::kGdnHeads) || (kKHeads == kq::kTpGdnK && kVHeads == kq::kTpGdnV),
+          "the GDN heads are one card's (16 / 48) or a tensor-parallel card's (8 / 24)");
+  require(kConvDim % kConvWg == 0, "the conv channels are whole work-groups");
   const uint32_t nch = (C + kGdnChunk - 1) / kGdnChunk;
   const uint32_t conv_groups = kConvDim / kConvWg;
   const void* gated_w = static_cast<const uint8_t*>(b.small) + b.gated_norm_off;
@@ -59,7 +61,8 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   prefill::profile_wait(cx, Phase::kGdnConv);
   //  4 - head scalars and the intra-chunk cumulative gate.
   require(b.ab_pitch == 128 || b.ab_pitch == kq::kPfAbPitch, "a||b's row pitch is neither 128 nor the GEMM's");
-  cx.launch(kc(b.ab_pitch == 128 ? conv : kq::pf_gdn_gate_gemm_variant(), "pf_gdn_gate"), kVHeads, nch, 1,
+  const std::string gate = b.ab_pitch == 128 ? conv : kernels::pf_gdn_gate_gemm_variant(kKHeads, kVHeads, kq::kPfAbPitch);
+  cx.launch(kc(gate, "pf_gdn_gate"), kVHeads, nch, 1,
             {PtrArg(b.ab), PtrArg(b.small), PtrArg(b.g), PtrArg(b.beta), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnGate);
   //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. (gdn.cc's one-launch pf_gdn_intra for 5-8 is not bound here
@@ -82,7 +85,7 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
             {PtrArg(b.xb), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), PtrArg(b.g), PtrArg(b.state), PtrArg(b.o), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnScan);
   // 10 - the gated head with the SIGMOID gate (pf_gated_head_SIG): the mixer's last launch, y post-gate.
-  cx.launch(kc(kq::pf_gated_head_sig_variant(), "pf_gated_head"), kVHeads, C, 1,
+  cx.launch(kc(kernels::pf_gated_head_variant(kKHeads, kVHeads) + "_SIG", "pf_gated_head"), kVHeads, C, 1,
             {PtrArg(b.qkvz), PtrArg(b.o), PtrArg(gated_w), PtrArg(b.y), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnHead);
 }
