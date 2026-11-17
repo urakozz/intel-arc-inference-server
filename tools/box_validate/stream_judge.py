@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The f32 judge on whole served streams (plan 21v2a Task 7: the tool-call test on Qwen3.8-Flash-Next, whose bf16 CPU
+"""The f32 judge on whole served streams (plan 21-QFN-v2a Task 7: the tool-call test on Qwen3.8-Flash-Next, whose bf16 CPU
 reference of the set takes days on the box CPU): every graded row of each request, teacher-forced on the stream itself.
 
   stream_judge.py --dir D --label L --dump DIR --judge DIR [--tag a4_q4exp_int8] [--snapshot DIR] [--vocab-used 248077]

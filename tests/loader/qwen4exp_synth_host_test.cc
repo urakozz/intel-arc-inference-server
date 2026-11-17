@@ -1,4 +1,4 @@
-// Spec 21b: the loader's host half over make_synth.py's synthetic checkpoints - the Python writer and the C++
+// Spec 21-QFNb: the loader's host half over make_synth.py's synthetic checkpoints - the Python writer and the C++
 // reader held to each other on real files, no device (host only; SKIP 77 without the data).
 //   qwen4exp_synth_host_test <oracle-out-q4exp-synth>      (<dir>/{ours,intel}/ckpt and ckpt-ple-int8)
 // For each form: config.json -> QuantConfig::parse and model::qwen4exp_desc at the checkpoint's 4 layers; the
@@ -6,7 +6,7 @@
 // assert_quant_invariants; every name both ways with the MTP head; every layer and the head repacked, each
 // layer's bytes = loader::q4_layer_bytes; the PLE I64 tensors = the formula for the synthetic base; the PLE
 // int8 file read per head and held to the descriptor (check_q4_ple); nothing unconsumed; the plan of the
-// 4-layer model with the head fits one 32.53 GB card. Plan 21v2b: every layer's two tensor-parallel halves
+// 4-layer model with the head fits one 32.53 GB card. Plan 21-QFN-v2b: every layer's two tensor-parallel halves
 // (loader::q4_tp_layer) joined back equal the one-card repack bitwise - the column cuts' columns each placed once, the
 // K cuts and the experts' halves concatenated - and each half's bytes = q4_layer_bytes(q4_tp_card).
 #include <array>

@@ -1,4 +1,4 @@
-// q4_qsa_attn_eager.cl - spec 21c: Qwen3.8-Flash-Next's QSA decode attention as the reference computes it
+// q4_qsa_attn_eager.cl - spec 21-QFNc: Qwen3.8-Flash-Next's QSA decode attention as the reference computes it
 // (eager_attention_forward + the gate, M:786-808 / M:889-892), over q4_qsa_select's list - the engine binds it
 // for q4_qsa_attn + q4_qsa_reduce under B70_Q4_ATTN=eager (the eager / flash switch). One launch:
 //

@@ -1,10 +1,10 @@
-// Spec 21e Task 3 Step 1 (host): the binaries Qwen3.8-Flash-Next's MTP lists bind - kernels::qwen4exp's spec 21e
+// Spec 21-QFNe Task 3 Step 1 (host): the binaries Qwen3.8-Flash-Next's MTP lists bind - kernels::qwen4exp's spec 21-QFNe
 // block (verify_variants at M = 1..4, draft_variants, mtp_prefill_variants: the names runtime/qwen4exp/
 // qwen4exp_capture.cc and qwen4exp_prefill.cc form) for both dense arms (ours int4 / Intel's bf16), both attention
 // forms, both PLE scale forms, both head forms and both pre_fc_norm_hidden forms (decision 4) - against what the build
-// makes: tests/CMakeLists.txt's B70_Q4EXP_MTP_KERNELS (src/kernels/CMakeLists.txt's spec 21e block, `kernel_<name>`)
-// then, after `--reused`, the names other blocks build that the lists bind by name (21c's decode list, 21d's prefill
-// binaries, Qwen3.8's argmax_stage1_M<2..4>). Every bound name is built; every 21e-block binary is bound (nothing
+// makes: tests/CMakeLists.txt's B70_Q4EXP_MTP_KERNELS (src/kernels/CMakeLists.txt's spec 21-QFNe block, `kernel_<name>`)
+// then, after `--reused`, the names other blocks build that the lists bind by name (21-QFNc's decode list, 21-QFNd's prefill
+// binaries, Qwen3.8's argmax_stage1_M<2..4>). Every bound name is built; every 21-QFNe-block binary is bound (nothing
 // dead). Then the launch counts the capture asserts (runtime::qwen4exp::verify_device_launches / draft_launches /
 // mtp_prefill_launches) at 48 layers and the synthetic's 4, one card and two:
 //   verify at M: the decode list at M (779 at 48 layers) + 2 on the PLE layer at M > 1 (q4_pf_ple's three for
@@ -80,10 +80,10 @@ int main(int argc, char** argv) {
     }
   for (const std::string& b : block)
     if (!bound.count(b)) {
-      std::fprintf(stderr, "%s is built by the spec 21e block but no MTP list binds it\n", b.c_str());
+      std::fprintf(stderr, "%s is built by the spec 21-QFNe block but no MTP list binds it\n", b.c_str());
       return 1;
     }
-  std::printf("names: %zu bound, %zu built by the spec 21e block, %zu reused by name\n", bound.size(), block.size(),
+  std::printf("names: %zu bound, %zu built by the spec 21-QFNe block, %zu reused by name\n", bound.size(), block.size(),
               reused.size());
 
   // The launch counts (derived).

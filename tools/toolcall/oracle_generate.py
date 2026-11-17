@@ -39,7 +39,7 @@ The model follows config.json's model_type:
                     checkpoint given - the 156 GB bf16 source (the KL4 reference, wherever 20b
                     runs: `--device` cuda / xpu where there is one) or the int4 export
                     (dequantised) - greedy through its own cache, the head's 128000 rows.
-  qwen4_exp         Qwen3.8-Flash-Next (spec 21e; `--model qwen4exp` says so and checks it):
+  qwen4_exp         Qwen3.8-Flash-Next (spec 21-QFNe; `--model qwen4exp` says so and checks it):
                     tools/oracle/qwen4exp_ref.py's layer-streamed model (transformers 5.19.0: the
                     qwen4exp site first on PYTHONPATH) on the checkpoint given - Intel's int4 g128
                     experts dequantised, its bf16 dense layers, the PLE rows from <snapshot>-ple-int8
@@ -70,7 +70,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUN = "bf16"
 NEW_TOKENS = 192
-Q4_TYPES = ("qwen4_exp", "qwen4_exp_text")   # spec 21e: Qwen3.8-Flash-Next (a checkpoint, a text-only export)
+Q4_TYPES = ("qwen4_exp", "qwen4_exp_text")   # spec 21-QFNe: Qwen3.8-Flash-Next (a checkpoint, a text-only export)
 
 
 def load_manifest(set_dir: str) -> list[dict]:
@@ -197,7 +197,7 @@ def mem_model(mtype: str, cfg: dict) -> dict:
                 "per_seq": lambda T: state + T * nf * 2 * kvh * hd * 2 + T * H * 2,
                 "dense": dense, "experts": [ex] * L,
                 "what": f"KV bf16 in {nf} full-attention layers + GDN state fp32 in {nl} ({state / 2**20:.0f} MiB)"}
-    if mtype in Q4_TYPES:               # spec 21e: Qwen3.8-Flash-Next (qwen4exp_ref.py, bf16 dense, eager attention)
+    if mtype in Q4_TYPES:               # spec 21-QFNe: Qwen3.8-Flash-Next (qwen4exp_ref.py, bf16 dense, eager attention)
         c = cfg.get("text_config", cfg)
         L, H, V = c["num_hidden_layers"], c["hidden_size"], c["vocab_size"]
         hc = c.get("hc_count", 4)
@@ -351,10 +351,10 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
                                step_many=ref.forward_many, ref=ref)
 
     if mtype in Q4_TYPES:
-        # Spec 21e: Qwen3.8-Flash-Next - tools/oracle/qwen4exp_ref.py's layer-streamed model (transformers 5.19.0 from
+        # Spec 21-QFNe: Qwen3.8-Flash-Next - tools/oracle/qwen4exp_ref.py's layer-streamed model (transformers 5.19.0 from
         # the qwen4exp site first on PYTHONPATH), the checkpoint's experts as stored (Intel's int4 g128 dequantised), the
-        # PLE rows from the engine's int8 file when it sits beside the snapshot (21b's <snapshot>-ple-int8: the engine-
-        # format reference, spec 21 F3) - Q4_PLE overrides (bf16 | int8:<dir>) - greedy through its own cache. The
+        # PLE rows from the engine's int8 file when it sits beside the snapshot (21-QFNb's <snapshot>-ple-int8: the engine-
+        # format reference, spec 21-QFN F3) - Q4_PLE overrides (bf16 | int8:<dir>) - greedy through its own cache. The
         # batched path: layer_major's pre-mixer rows -> final_logits of each sequence's LAST row (the sequential step
         # asks for the last row's logits only: logits_to_keep=1, the same one-row head).
         Q4 = load("qwen4exp_ref")
@@ -492,7 +492,7 @@ def dense_build(snap: str, keep: str = "auto"):
 
 
 MOE_TYPES = ("qwen3_5_moe", "kolibri1", "qwen4_exp", "qwen4_exp_text")
-# --model NAME -> the model_type(s) it must be (spec 21e: qwen4exp - the checkpoints say qwen4_exp, a text-only
+# --model NAME -> the model_type(s) it must be (spec 21-QFNe: qwen4exp - the checkpoints say qwen4_exp, a text-only
 # export qwen4_exp_text; qwen: Qwen3.8, the dense path)
 MODELS = {"qwen": ("qwen3_5",), "kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text")}
 

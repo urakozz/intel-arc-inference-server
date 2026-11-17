@@ -1,6 +1,6 @@
-// Spec 21c Task 1: tests/kernels/qwen4exp_ref.h (the Qwen3.8-Flash-Next kernels' host twin) against
+// Spec 21-QFNc Task 1: tests/kernels/qwen4exp_ref.h (the Qwen3.8-Flash-Next kernels' host twin) against
 // tools/oracle/qwen4exp_fixture.py's outputs (tests/kernels/qwen4exp_fixture.h: qwen4exp_ref.py's restated ops and
-// transformers 5.19.0's qwen4_exp modules) and against the semantics' properties (plan 21c Review Focus 1-5).
+// transformers 5.19.0's qwen4_exp modules) and against the semantics' properties (plan 21-QFNc Review Focus 1-5).
 // Host only. The fixture's inputs come from the hash both sides share (q4ref::fixture_val).
 //
 //   (a) HC: the grouped norm of a coarse H bitwise; every elementwise step bitwise from torch's own previous

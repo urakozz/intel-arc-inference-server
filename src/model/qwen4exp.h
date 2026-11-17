@@ -7,8 +7,8 @@
 #include "common/json.h"
 #include "model/qwen35.h"   // GemvShape, WeightKind, Fuse - the shared vocabulary, nothing else
 
-// Spec 21b: Qwen3.8-Flash-Next (`Qwen4ExpForConditionalGeneration`, config.json model_type `qwen4_exp`)
-// as data - a fourth model BESIDE qwen3_5 and Kolibri-1 (spec 21 §6: its own table, loader,
+// Spec 21-QFNb: Qwen3.8-Flash-Next (`Qwen4ExpForConditionalGeneration`, config.json model_type `qwen4_exp`)
+// as data - a fourth model BESIDE qwen3_5 and Kolibri-1 (spec 21-QFN §6: its own table, loader,
 // kernels and engine; their files untouched). Every number of `qwen4exp()` is the checkpoint's
 // (config.json text_config, the index and every shard header):
 //
@@ -35,7 +35,7 @@
 //          generation EOS {248046, 248044}; the PLE's EOS 248044; trained context 262144
 //
 // A plain struct so a test can build a small one (8 experts, tests/loader/qwen4exp_repack_test.cc); every
-// width the loader, the planner and (21c) the kernels use is DERIVED here. A synthetic checkpoint
+// width the loader, the planner and (21-QFNc) the kernels use is DERIVED here. A synthetic checkpoint
 // (tools/quantize/qwen4exp/make_synth.py) or `--layers N` holds the first N layers of the real pattern
 // (N >= 2: the PLE layer is layer 1).
 namespace model {
@@ -75,7 +75,7 @@ struct Q4Linear {
 
 struct Qwen4ExpDesc;
 
-// Plan 21v2b: where the tensor-parallel form keeps the two parts read once a token, not a layer - the embedding (one
+// Plan 21-QFN-v2b: where the tensor-parallel form keeps the two parts read once a token, not a layer - the embedding (one
 // row) and the MTP head (a draft step). Both: whole on each card (Qwen3.8's TP). Split: the embedding on card 0 (card
 // 1 gathers its row from card 0's table over peer access, as pp's head already reads device 0's), the head on card 1
 // (it drafts there; both cards hold the same residual) - ~1.3 GB more experts resident a card.
@@ -83,7 +83,7 @@ enum class Q4TpEnds { Split, Both };
 const char* q4_tp_ends_name(Q4TpEnds e);
 
 // Layers [0, split) on device 0, [split, layers) on device 1 (spec 16b's cut). One device: devices == 1
-// and split == layers (Kolibri's KolPlacement, the same rules). Plan 21v2b's tensor-parallel form (`tp`): two
+// and split == layers (Kolibri's KolPlacement, the same rules). Plan 21-QFN-v2b's tensor-parallel form (`tp`): two
 // devices, each holding its half of EVERY layer (q4_tp_card's shapes; split == layers), the final mixer and its
 // vocabulary half of lm_head on both, the embedding and the head as `ends` places them.
 struct Q4Placement {
@@ -104,7 +104,7 @@ struct Q4Placement {
 // layers).
 void validate(const Q4Placement& p, const Qwen4ExpDesc& d);
 
-// Plan 21v2b: card `rank`'s descriptor under tp (Qwen3.8's model::tp_card_desc rule): half the QSA q / kv heads (12 /
+// Plan 21-QFN-v2b: card `rank`'s descriptor under tp (Qwen3.8's model::tp_card_desc rule): half the QSA q / kv heads (12 /
 // 1), half the GDN k / v heads (8 / 24), half of every expert's and the shared expert's width (320), half the
 // vocabulary (124160 rows; vocab_used the rank's real ids), half out_proj's and o_proj's split-K (2: its slices are
 // one card's slices 2r, 2r + 1). Every width derived from these is the card's (qkv||z 8192,
@@ -132,7 +132,7 @@ struct Qwen4ExpDesc {
   std::vector<uint32_t> eos;                            // {248046, 248044} (generation_config.json)
   float rms_eps = 0;
   Q4Forms forms;
-  // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21c's sweep - copied from Qwen3.8's measured map
+  // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21-QFNc's sweep - copied from Qwen3.8's measured map
   // at the nearest shapes (out_proj / o_proj S4, q||k||v S2). qkv||z is S 1,
   // fixed: gdn_step and prep_gated_head read S 1 (prep.cl:118-123).
   uint32_t gdn_out_s = 0, qkvg_s = 0, o_s = 0;

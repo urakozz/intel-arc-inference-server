@@ -126,7 +126,7 @@ struct Flags {
   [[=Help("N|auto", "Kolibri-1 / Qwen3.8-Flash-Next: load only the first N layers\n"
                     "(development mode; Flash-Next also takes auto). Flash-Next without it loads whole: the\n"
                     "experts that do not fit the cards are read from pinned host memory.")]]
-  Arg<std::string> layers;   // spec 20c, Kolibri-1; spec 21c, Qwen3.8-Flash-Next
+  Arg<std::string> layers;   // spec 20c, Kolibri-1; spec 21-QFNc, Qwen3.8-Flash-Next
   [[=Section("\ndeveloper (benchmarks and profiles):\n"),
     =Help("", "ingest --depth synthetic ids, then time --tg generated ones; a markdown row\non stdout.")]]
   bool bench = false;
@@ -757,7 +757,7 @@ int run(int argc, char** argv) {
   cli::parse_parallel(f.parallel, pipe);
   if (f.pipeline_split.given) cli::parse_pipeline_split(f.pipeline_split.value, pipe);
   const bool have_layers = f.layers.given;
-  const bool layers_auto = have_layers && f.layers.value == "auto";   // spec 21c: Qwen3.8-Flash-Next's planner N
+  const bool layers_auto = have_layers && f.layers.value == "auto";   // spec 21-QFNc: Qwen3.8-Flash-Next's planner N
   const uint32_t layers = have_layers && !layers_auto ? cli::flags::parse_u32("--layers", f.layers.value) : 0;
   if (have_layers && !layers_auto && layers == 0) throw std::runtime_error("--layers 0 would load no layer");
 
@@ -902,9 +902,9 @@ int run(int argc, char** argv) {
     ka.profile = profile;
     return cli::kolibri::run_decode<StdoutToStderr>(ka);
   }
-  // Spec 21c: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine on one or two cards -
+  // Spec 21-QFNc: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine on one or two cards -
   // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/qwen4exp_decode.h: the prefill's other backends (21d: l0 only), --spec mtp (21e), int8 KV (decision 8), the whole
+  // cli/qwen4exp_decode.h: the prefill's other backends (21-QFNd: l0 only), --spec mtp (21-QFNe), int8 KV (decision 8), the whole
   // model without --layers (spec 22)). A path that does not resolve is not this family - the flows below report it.
   if (cli::qwen4exp::is_qwen4exp(path)) {
     if (dflash.on)
@@ -924,7 +924,7 @@ int run(int argc, char** argv) {
     qa.layers_auto = layers_auto;
     qa.pipe = pipe;
     qa.pp_given = pp_given;
-    qa.prefill = prefill;           // spec 21d: --ids through Qwen4ExpEngine::prefill
+    qa.prefill = prefill;           // spec 21-QFNd: --ids through Qwen4ExpEngine::prefill
     qa.pp = have_prefill_len;       // --prefill-length N already set depth = N above
     qa.pp_chunk = pp_chunk;
     qa.pp_backend_given = have_pp_backend;

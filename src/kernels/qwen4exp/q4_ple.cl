@@ -1,5 +1,5 @@
-// q4_ple.cl - spec 21c: Qwen3.8-Flash-Next's per-layer n-gram embedding (PLE, spec 21 §2.4, §4.3) on its one
-// layer (layer_idx 1). The table lives in HOST memory (21b's 16 + 16 host-USM ranges, int8 rows + one scale a
+// q4_ple.cl - spec 21-QFNc: Qwen3.8-Flash-Next's per-layer n-gram embedding (PLE, spec 21-QFN §2.4, §4.3) on its one
+// layer (layer_idx 1). The table lives in HOST memory (21-QFNb's 16 + 16 host-USM ranges, int8 rows + one scale a
 // row); the device reads it zero-copy by an index it computes itself - no host doorbell, no per-token copy: the
 // list stays fixed under replay. Two families, each compiled only when its define is given:
 //
@@ -8,7 +8,7 @@
 //   PLE_BLOCK   q4_ple_block(ctrl, H, kv, pw, conv_ring)                   grid (4 streams, M), WG 256
 //
 // **q4_ple_gather** (M:1107-1166; tests/kernels/qwen4exp_ref.h ple_history + loader::q4_ple_ids): row m's position
-// p = pos + m and token t0 = Control's cur_token[m]; its predecessors by the id-ring rule (21a's reading of
+// p = pos + m and token t0 = Control's cur_token[m]; its predecessors by the id-ring rule (21-QFNa's reading of
 // M:1107-1121): t1 = id(p - 1) (EOS if p < 1); t2 = t1 == EOS ? EOS : id(p - 2) (EOS if p < 2), where id(q) is
 // cur_token[q - pos] for a row of this launch and ids_ring[q % 16] for an earlier one. Then in exact uint64:
 // mixed2 = (t0 m0) ^ (t1 m1), mixed3 = mixed2 ^ (t2 m2); head h < 8 reads mixed2, h >= 8 mixed3; its local row
@@ -17,7 +17,7 @@
 // _BF16) - qwen4exp_ref.PleTable's int8 reader. Work-group (0, m)'s lane 0 then writes ids_ring[p % 16] = t0:
 // rows of one launch write slots pos .. pos + M - 1 and read pos - 2 .. pos - 1 - disjoint at 16 slots.
 // consts u64 [35]: the multipliers [3], the 16 head sizes, the 16 offsets (the engine copies them from the
-// checkpoint's I64 tensors, checked by 21b against the formula). ptrs u64 [32]: 21b's Q4PleTable::ptrs (q[0..15],
+// checkpoint's I64 tensors, checked by 21-QFNb against the formula). ptrs u64 [32]: 21-QFNb's Q4PleTable::ptrs (q[0..15],
 // s[0..15]): a device-side table of host-USM addresses.
 //
 // **q4_ple_block** (M:1227-1247, the decoder layer's `H = H + ple(H)`; qwen4exp_ref.h ple_block), one work-group
@@ -32,9 +32,9 @@
 //          before position 0) and gn - one fma chain, t ascending (dilation 3, kernel 4: M:1208-1225)
 //   H[c] = rne(H[c] + rne(gated + conv));  conv_ring[p % 16][c] = gn
 // Every norm is q4_hc's (256 lanes, fma, the tree, 1 / sqrt). M = 1 only: a row's p - 3 must be a ring row of an
-// earlier launch (a 4-row build needs the rows of its own launch - 21e's).
+// earlier launch (a 4-row build needs the rows of its own launch - 21-QFNe's).
 //
-// **q4_ple_check** (21b's alias check, the device half; spec 22 §1's xe hazard): one lane per 2 MiB page of every
+// **q4_ple_check** (21-QFNb's alias check, the device half; spec 22 §1's xe hazard): one lane per 2 MiB page of every
 // range: out[g] = the first u64 of page g - first_page[r] of range r (first_page [33], the ranges' page prefix
 // sums); the host compares with Q4PleTable::page_words. Runs once, at engine construction.
 //
@@ -96,10 +96,10 @@ inline uint n_rows(__global const uint* restrict ctrl) {
 #error "q4_ple_gather: PLE_SCALE_BF16 (0: fp32 row scales, 1: bf16) must be defined"
 #endif
 #define WG_GATHER DIM
-// Spec 21d: -DPLE_PF builds the PREFILL form at M = C: the rows' tokens come from the chunk's id buffer `ids` (u32
+// Spec 21-QFNd: -DPLE_PF builds the PREFILL form at M = C: the rows' tokens come from the chunk's id buffer `ids` (u32
 // [C], the last argument) instead of Control's cur_token (8 slots), and the gather writes NO id-ring slot - a 2048-row
 // launch's rows would overwrite slots its first rows read for p - 1, p - 2 - so q4_pf_ple_ring (q4_pf_ple.cl) writes
-// the ring after the chunk's PLE block. Unset (every 21c binary), PLE_TOK(r) is Control's cur_token[r] and the ring
+// the ring after the chunk's PLE block. Unset (every 21-QFNc binary), PLE_TOK(r) is Control's cur_token[r] and the ring
 // write is the gather's, token for token (commit 6499948's rule).
 #ifdef PLE_PF
 #define PLE_TOK(r) ids[r]

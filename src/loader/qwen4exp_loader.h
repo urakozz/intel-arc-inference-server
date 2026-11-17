@@ -14,15 +14,15 @@
 #include "model/qwen4exp.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"   // ExpertTier
 
-// Spec 21b Task 6: Qwen3.8-Flash-Next on one or two B70s - the checkpoint's tensors in the layouts
+// Spec 21-QFNb Task 6: Qwen3.8-Flash-Next on one or two B70s - the checkpoint's tensors in the layouts
 // loader/qwen4exp_layout.h sizes (loader/qwen4exp_repack.h is the host half), the PLE table pinned in host USM
-// (loader/qwen4exp_ple.h). A loader BESIDE loader::load and load_kolibri1 (spec 21 §6): their files
+// (loader/qwen4exp_ple.h). A loader BESIDE loader::load and load_kolibri1 (spec 21-QFN §6): their files
 // are untouched; the public pieces are reused - resolve_snapshot, QuantConfig::parse, SafetensorsSet,
 // assert_quant_invariants, check_quant_scan, LinearSrc::classify (its exact g128 -> g64 expansion), the int8
 // lm_head quantiser, rtn_int4_g64.
 //
 // **Both checkpoints the engine accepts:** Intel/Qwen3.8-Flash-Next-W4A16-AutoRound (int4 g128 routed experts
-// through the expansion, its bf16 dense / shared / MTP as shipped - the interim, spec 21 §5) and ours (21q:
+// through the expansion, its bf16 dense / shared / MTP as shipped - the interim, spec 21-QFN §5) and ours (21q:
 // AutoRound int4 g64 sym). The forms are read from the names (loader::q4_forms).
 //
 // **Placement at load.** Each layer is repacked from the shards and uploaded straight onto the device the
@@ -85,7 +85,7 @@ struct Q4LoadedModel {
   bool int8_head = false, mtp = false;
   runtime::qwen4exp::ExpertTier tier;              // where each routed expert lives (all resident without a tier);
                                                    // under tp card 0's halves
-  runtime::qwen4exp::ExpertTier tier1;             // plan 21v2b, tp: card 1's resident halves
+  runtime::qwen4exp::ExpertTier tier1;             // plan 21-QFN-v2b, tp: card 1's resident halves
   std::unique_ptr<l0::Mem> ple_ptrs1;              // tp: the PLE pointer table on card 1 (card 0's is ple.ptrs)
   bool expert_table = false;                       // the layers bind the table form (B70_Q4_EXPERTS, default table)
   size_t mirror_bytes = 0;                         // the tier's pinned host bytes
@@ -112,13 +112,13 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 // loads the MTP head (its bf16 experts RTN-quantised to int4 g64). The PLE table: q4_ple_dir(snapshot).
 // After: zero unconsumed tensors and each part's bytes equal to q4_device_weight_bytes. One report line per
 // device plus one for the host table.
-// Plan 21v2a Task 8, `tier` (null: every expert resident): the plan less the experts in host memory, each layer's
+// Plan 21-QFN-v2a Task 8, `tier` (null: every expert resident): the plan less the experts in host memory, each layer's
 // VRAM arena of its resident experts, its pinned host mirror of the rest (refused before the PLE table's pin when the
 // table, the mirrors and a 16 GiB margin exceed MemAvailable, naming the bytes: check_q4_host_fit), each device's
 // table of block addresses read back equal, and the load check's samples (Q4DevicePart::check_*; the engine reads
 // them through the table). The layers bind the table form unless B70_Q4_EXPERTS=direct (refused with any expert in
 // host memory).
-// Plan 21v2b, `placement.tp`: each layer repacked once and cut into its two halves (loader::q4_tp_layer), each half
+// Plan 21-QFN-v2b, `placement.tp`: each layer repacked once and cut into its two halves (loader::q4_tp_layer), each half
 // uploaded onto its card with that card's tier (`tier` card 0's, `tier1` card 1's; null: B70_Q4_RESIDENT's placement
 // through tp_fill_tier, else every expert resident); the final mixer and lm_head's vocabulary half (rows [124160 r,
 // + 124160), quantised per row: one card's rows' bytes) on both cards, the embedding where placement.holds_embed, the

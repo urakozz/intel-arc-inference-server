@@ -235,7 +235,7 @@ greedy top-up, restore + check accepting the right export and rejecting a bad qz
 permuting g_idx, a changed expert_bias, a quantised shared expert, a column-permuted qweight and an
 asymmetric config, the KL arithmetic, the card's choice, the prompt lists).
 
-## Qwen3.8-Flash-Next: our AutoRound export (`tools/quantize/quantize_qwen4exp.sh`, spec 21 v2 §2)
+## Qwen3.8-Flash-Next: our AutoRound export (`tools/quantize/quantize_qwen4exp.sh`, spec 21-QFN-v2 §2)
 
 The rulings (2026-11-12): our own export of the bf16 original `Qwen/Qwen3.8-Flash-Next` (360 GB), int4 g64
 symmetric everywhere it quantises (the routed and shared experts, QSA q/k/v/o, GDN qkv / z / out, `lm_head`, the MTP
@@ -300,8 +300,8 @@ scripts' 0.17.0 `6afaecdb`:
 | resume after a stop | none | `AR_RESUME_DIR` per block (`utils/resume.py`) |
 | the 12 QSA layers | transformers' per-token indexer loop | vectorised indexer (#2579) |
 | fused experts (`mlp.experts.gate_up_proj [512, 1280, 2560]`) | the same `modeling/fused_moe` code (not run here) | "Fused-MoE checkpoint detected: building a meta skeleton and materializing weights per block"; exported per expert |
-| the MTP head (`mtp.*`, not a transformers module) | has `AR_DISABLE_COPY_MTP_WEIGHTS` (not run here) | `missing_tensors.py`: copied, fused experts split per expert, every linear not ignored RTN int4 g64, the rest declared bits 16 in `extra_config` - no pass of our own; ours ignores the head's attention and shared expert (spec 21 v2 §2) |
-| Qwen4's predefined ignore list | `hyper_connection`, `mlp.gate`, `shared_expert` | same - ours drops `shared_expert` (our shared experts are int4, spec 21 §5 "Ours"; `autoround_run.py`) |
+| the MTP head (`mtp.*`, not a transformers module) | has `AR_DISABLE_COPY_MTP_WEIGHTS` (not run here) | `missing_tensors.py`: copied, fused experts split per expert, every linear not ignored RTN int4 g64, the rest declared bits 16 in `extra_config` - no pass of our own; ours ignores the head's attention and shared expert (spec 21-QFN-v2 §2) |
+| Qwen4's predefined ignore list | `hyper_connection`, `mlp.gate`, `shared_expert` | same - ours drops `shared_expert` (our shared experts are int4, spec 21-QFN §5 "Ours"; `autoround_run.py`) |
 
 What the script does about the rest (`autoround_run.py`, `head_rtn.py`):
 
@@ -380,7 +380,7 @@ each of its 2.52 G expert weights (the rounding value 4 + its gradient 4 + a bf1
 snapshot 4; AutoRound printed `state 14.5` = 6/14 of it = 33.8 GiB in all) plus the bf16 weights - ~39 GiB, more
 than one card has, whatever the batch: `batch_size`, `nsamples` and `low_gpu_mem_usage` (on: the calibration
 activations live on the CPU) only move the activations, not the state. On Xe the kernel driver lets the allocation
-exceed VRAM and evicts the overflow to host RAM (the Xe hazard of spec 21 v2 §8), so the run works and is slowed by
+exceed VRAM and evicts the overflow to host RAM (the Xe hazard of spec 21-QFN-v2 §8), so the run works and is slowed by
 it by an amount not measured; it is in the 57 min. **Two cards do not help:** `--device 0,1` (tried 2026-11-11 on
 the stand-in) ran AutoRound's data-parallel path with the whole block on xpu:1 (32 GB resident, all the compute,
 "Major device (xpu:1) has reached memory threshold") and xpu:0 at 7.6 GB idle; block 0 had not finished after 64 min (one card: 57); and
@@ -398,10 +398,10 @@ cap.
 prints the seconds per block and its own time left; the `-- seconds per finished block` line lists each one. A
 block far above ~60 min, or RAM in `status` near 115 GB, is the moment to `stop` (the run resumes later).
 
-## Qwen3.8-Flash-Next (spec 21b): synthetic checkpoints, the PLE int8 file, the export check
+## Qwen3.8-Flash-Next (spec 21-QFNb): synthetic checkpoints, the PLE int8 file, the export check
 
-`tools/quantize/qwen4exp/` holds what spec 21's engine needs before (and beside) 21q's own AutoRound run.
-Every script runs in `agnes-ref-img` with 21a's transformers 5.19.0 site first on `PYTHONPATH`
+`tools/quantize/qwen4exp/` holds what spec 21-QFN's engine needs before (and beside) 21q's own AutoRound run.
+Every script runs in `agnes-ref-img` with 21-QFNa's transformers 5.19.0 site first on `PYTHONPATH`
 (`tools/oracle/qwen4exp_env.sh`; on the Mac `oracle-out-q4exp/site`):
 
 - `make_synth.py <out> --form ours|intel --tokenizer <the original's small files> [--layers 4]
@@ -430,7 +430,7 @@ Every script runs in `agnes-ref-img` with 21a's transformers 5.19.0 site first o
 - `test_qwen4exp_quant.py` - the names both ways for both forms (and `--mtp`), check.py's refusals (a
   missing tensor, a wrong qzeros word, a g64 expert in Intel's form), the packer at g64 / g128 against
   dequant.py, gate rows first as the reference reads them, the PLE file's marker rows (each head's first /
-  last row, a shard boundary inside a head, a zero row, both scale dtypes, byte-equal to 21a's
+  last row, a shard boundary inside a head, a zero row, both scale dtypes, byte-equal to 21-QFNa's
   `write_ple_int8`), and the hash constants for the reduced base and 20,000,000 against transformers'
   builders. Small fixtures (16 experts, a 1024-row vocabulary): ~3-4 min in an 8 GB / 4-CPU container.
 

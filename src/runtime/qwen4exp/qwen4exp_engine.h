@@ -18,18 +18,18 @@
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_engine.h"   // PipelineOptions, PipelineLink (spec 16b's, unchanged)
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
-#include "runtime/qwen4exp/qwen4exp_capture.h"   // ListSpec, MtpBinding (spec 21e)
+#include "runtime/qwen4exp/qwen4exp_capture.h"   // ListSpec, MtpBinding (spec 21-QFNe)
 
-// Spec 21c: Qwen3.8-Flash-Next's decode loop - runtime::Engine's contract (KolibriEngine's arrangement) on one
+// Spec 21-QFNc: Qwen3.8-Flash-Next's decode loop - runtime::Engine's contract (KolibriEngine's arrangement) on one
 // card or, spec 16b's pieces, two: it owns the weights (each layer on its device: loader::load_qwen4exp's parts,
 // the PLE table in host USM), one Qwen4ExpBuffers and one captured list per device, and a token is a replay of
-// the lists. A prompt is fed one id per replay (`ingest`); 21d adds the prefill, 21e the snapshots and MTP.
+// the lists. A prompt is fed one id per replay (`ingest`); 21-QFNd adds the prefill, 21-QFNe the snapshots and MTP.
 //
-// **At construction:** the PLE hash constants (multipliers, head sizes, offsets - the descriptor's, which 21b's
+// **At construction:** the PLE hash constants (multipliers, head sizes, offsets - the descriptor's, which 21-QFNb's
 // loader held equal to the checkpoint's I64 tensors) are written to the PLE device, and the PLE table's host
 // ranges are read back BY THE DEVICE (q4_ple_check: the first u64 of every 2 MiB page through the pointer table)
 // against the page words the loader recorded - a mismatch throws naming the range and the page (an aliased or
-// unmapped host page: the xe hazard, spec 22 §1). With the expert tier's table (plan 21v2a Task 8), each device
+// unmapped host page: the xe hazard, spec 22 §1). With the expert tier's table (plan 21-QFN-v2a Task 8), each device
 // reads sampled words of every routed block through its table (q4_expert_check: every 2 MiB page of every VRAM arena
 // and host mirror) against the checkpoint's - a mismatch throws naming the device, layer, expert and block.
 //
@@ -40,12 +40,12 @@
 // device 0's. set_token writes both. A lost hand-off host-signals the event (so the queue drains), throws naming
 // it, and marks the engine until reset().
 //
-// **The injected run** (spec 21 F3's debug input): set_injected_selection(true) switches every replay to a
+// **The injected run** (spec 21-QFN F3's debug input): set_injected_selection(true) switches every replay to a
 // second capture per device whose QSA layers read their lists from host-USM rows the caller writes before each
 // replay (injected_list), without q4_qsa_score / _select; its launch count is injected_launches().
 namespace runtime::qwen4exp {
 
-// Spec 21d: prefill() and its accessors are DEFINED in b70_qwen4exp_prefill (runtime/qwen4exp/
+// Spec 21-QFNd: prefill() and its accessors are DEFINED in b70_qwen4exp_prefill (runtime/qwen4exp/
 // qwen4exp_prefill_engine.cc), not in b70_qwen4exp_runtime - KolibriEngine's arrangement (runtime/kolibri/
 // kolibri_engine.h): a target that never prefills links what it always linked; one that does links
 // b70_qwen4exp_prefill. The prefill state is lazy (allocated by the first prefill or prepare_prefill), so a
@@ -77,7 +77,7 @@ class Qwen4ExpEngine {
   uint32_t pending() const;
   uint32_t vocab() const { return model_.desc.vocab; }
 
-  // --- the injected run (spec 21 F3, debug) -----------------------------------------------------------------
+  // --- the injected run (spec 21-QFN F3, debug) -----------------------------------------------------------------
   // On: every following replay runs the injected capture (built on first use); off: the normal one.
   void set_injected_selection(bool on);
   bool injected() const { return injected_; }
@@ -140,12 +140,12 @@ class Qwen4ExpEngine {
   // table and held to the checkpoint's (q4_expert_check over loader::Q4DevicePart::check_*); 0 in the direct form.
   size_t expert_words_checked() const { return expert_words_checked_; }
 
-  // --- spec 21d: prefill (defined in b70_qwen4exp_prefill) --------------------------------------------------------
+  // --- spec 21-QFNd: prefill (defined in b70_qwen4exp_prefill) --------------------------------------------------------
   // Runs `ids` from the current pos in chunks of `chunk` (0 = kPfC 2048) through runtime/qwen4exp/qwen4exp_prefill.h's
   // walk on every device, then decode's head on the last row: leaves pos += ids.size() on every device and the first
   // generated id pending in cur_token (Engine::prefill's contract). The state it writes (KV, compressed keys and tail
   // rings, GDN state and conv rings, the PLE rings) is decode's to a cosine bar (the GEMMs' sum orders, the chunked GDN,
-  // the flash walks), not bitwise (plan 21d Review Focus 5). A prompt may be continued by another prefill. Two
+  // the flash walks), not bitwise (plan 21-QFNd Review Focus 5). A prompt may be continued by another prefill. Two
   // devices: each chunk runs layers [0, s) on device 0, crosses by spec 16b's hand-off at chunk size (a second
   // PipelineLink a slot), then layers [s, L) on device 1, device 0 running chunk j + 1 while device 1 runs chunk j
   // (qwen4exp_prefill_engine.cc: the overlap; bitwise the sequential order's). A lost hand-off host-signals the event, throws naming it and marks
@@ -170,12 +170,12 @@ class Qwen4ExpEngine {
   // fp32 [kPfC][max_len / 4]: the last chunk's rows' block scores in the LAST QSA layer (read_last_qsa_scores' rule;
   // rows [0, C) written when the chunk had sparse rows).
   std::vector<float> read_prefill_last_qsa_scores();
-  // The injected run on prefill (spec 21 F3's debug input): with injected() on, before each chunk the engine calls
+  // The injected run on prefill (spec 21-QFN F3's debug input): with injected() on, before each chunk the engine calls
   // `f(qsa_index, pos, rows, lists)` for every QSA layer, `lists` the host-USM rows [rows][kListRow] the chunk's sparse
   // rows read (positions [0, count), count at kCountWord).
   using PrefillInjector = std::function<void(uint32_t qsa_index, uint32_t pos, uint32_t rows, uint32_t* lists)>;
   void set_prefill_injector(PrefillInjector f) { pf_inject_ = std::move(f); }
-  // Spec 7's block (runtime::Engine::kBlock); spec 21e's prefix cache hooks into the chunk walk: with a hook set every
+  // Spec 7's block (runtime::Engine::kBlock); spec 21-QFNe's prefix cache hooks into the chunk walk: with a hook set every
   // chunk ends at a block end or at the prompt end (runtime::prefill_chunk_rows), and the hook is called on the host
   // after each chunk whose end is a multiple of kBlock (pos == end_pos, n_active 0 on every device; on two cards device
   // 0 may already run the next chunk - save_state / save_kv read the block end's state all the same) and once at the
@@ -184,7 +184,7 @@ class Qwen4ExpEngine {
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
-  // --- spec 21e: spec 7's prefix-cache snapshots ---------------------------------------------------------------
+  // --- spec 21-QFNe: spec 7's prefix-cache snapshots ---------------------------------------------------------------
   // The state at pos (the GDN states and conv rows, the PLE history, the QSA layers' open-block raw keys; with the MTP
   // head its tail and R_{pos-1}) and the blocks (K / V rows and the complete blocks' compressed keys; the head's last):
   // runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs give both HOST layouts, the same under --parallel 1 and --parallel pp
@@ -194,7 +194,7 @@ class Qwen4ExpEngine {
   // slot 0, made live; the prefill that follows every restore, spec 7 §3.3 step 4, sets the pending id). save_kv /
   // load_kv copy [begin, end), begin a multiple of 4 (the cache's is of kBlock); begin == end copies nothing. Every
   // call runs on the devices' immediate lists with no step in flight (a failed hand-off is reset by load_state,
-  // which overwrites everything a session reads). KV bf16 (spec 21 decision 8): kv_cache() is KvCache::Bf16, the
+  // which overwrites everything a session reads). KV bf16 (spec 21-QFN decision 8): kv_cache() is KvCache::Bf16, the
   // prefix cache's kv_form 0.
   size_t state_bytes() const;
   size_t kv_bytes(uint32_t n_pos) const;
@@ -204,7 +204,7 @@ class Qwen4ExpEngine {
   void save_kv(uint32_t begin, uint32_t end, void* host);
   void load_kv(uint32_t begin, uint32_t end, const void* host);
 
-  // --- spec 21e: the MTP head - spec 8's draft / verify / commit (runtime/engine.h's contracts) -----------------
+  // --- spec 21-QFNe: the MTP head - spec 8's draft / verify / commit (runtime/engine.h's contracts) -----------------
   //
   // On iff the model was loaded with its head (loader::load_qwen4exp(..., mtp = true)); off, none of this allocates
   // or captures anything and every call below throws. On, every device's scratch holds kVerifyRows rows and its GDN
@@ -222,7 +222,7 @@ class Qwen4ExpEngine {
   //                  (live + r) % 4, every row its own selection and top-10; then the head's KV pass over the rows
   //                  (positions n - 1 .. n + k - 1 from (R_{n-1+r}, x_{n+r})).
   //   commit(j, t)   j accepted drafts (0 <= j <= k): pos = n + j + 1 on every device, row j's GDN slot live, R_{n+j}
-  //                  the next draft's R, t the pending id. Rows past j are stale and never read (plan 21e Review Focus 2).
+  //                  the next draft's R, t the pending id. Rows past j are stale and never read (plan 21-QFNe Review Focus 2).
   // verify(0) + commit(0, verify_ids()[0]) is one plain token; with the head on, ingest() and generate() run exactly
   // that (pos 0: the plain list, then its pre-mixer H into the head's R row), so the head's KV stays filled whatever
   // mix of plain and speculative steps runs; prefill() runs the head's pass per chunk (Review Focus 4).
@@ -268,7 +268,7 @@ class Qwen4ExpEngine {
 
  private:
   struct Stage;
-  // Spec 21d: a device's pieces for the prefill half (b70_qwen4exp_prefill), which cannot see Stage.
+  // Spec 21-QFNd: a device's pieces for the prefill half (b70_qwen4exp_prefill), which cannot see Stage.
   l0::Context& stage_ctx(uint32_t dev) const;
   Qwen4ExpBuffers& stage_buffers(uint32_t dev) const;
   Control* stage_control(uint32_t dev) const;
@@ -284,10 +284,10 @@ class Qwen4ExpEngine {
   // One step over every device's list `lists[dev]` (the hand-off, the bounds, the Control mirror) - step_once's
   // body; the plain step, the verify lists.
   void submit(const std::vector<CapturedStep*>& lists);
-  // Spec 21e: a snapshot run's device bytes (the GDN state's live slot with the MTP head).
+  // Spec 21-QFNe: a snapshot run's device bytes (the GDN state's live slot with the MTP head).
   uint8_t* snap_ptr(const SnapRun& r) const;
   void settle_all(const char* what);
-  // Spec 21e: the MTP head's plain token (verify(0) + commit(0), or at pos 0 the plain list and R_0 into hh row 0),
+  // Spec 21-QFNe: the MTP head's plain token (verify(0) + commit(0), or at pos 0 the plain list and R_0 into hh row 0),
   // what ingest() and generate() run with the head on; the live GDN slot copied into slot 0 (before anything that
   // reads gdn_state directly: prefill); the check every MTP call starts with.
   void mtp_step1();
@@ -308,9 +308,9 @@ class Qwen4ExpEngine {
   std::vector<bool> pending_;
   size_t ple_pages_checked_ = 0, expert_words_checked_ = 0;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
-  BlockHook block_hook_;           // spec 21d: empty = no hook (uniform chunks)
-  PrefillInjector pf_inject_;      // spec 21d: the injected run's lists on prefill
-  // Spec 21e: the MTP head (null without it), its binding into the lists, the iteration's bookkeeping.
+  BlockHook block_hook_;           // spec 21-QFNd: empty = no hook (uniform chunks)
+  PrefillInjector pf_inject_;      // spec 21-QFNd: the injected run's lists on prefill
+  // Spec 21-QFNe: the MTP head (null without it), its binding into the lists, the iteration's bookkeeping.
   std::unique_ptr<Qwen4ExpMtpBuffers> mtp_;
   MtpBinding mtp_bind_;
   MtpNorm mtp_norm_ = MtpNorm::Single;
@@ -318,13 +318,13 @@ class Qwen4ExpEngine {
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0, last_verify_m_ = 0;
   std::vector<uint32_t> draft_ids_;
   std::unique_ptr<l0::Mem> host_rows_;
-  // Spec 21d: set by prepare_prefill (b70_qwen4exp_prefill) - releases a prefill list waiting on a hand-off that will
+  // Spec 21-QFNd: set by prepare_prefill (b70_qwen4exp_prefill) - releases a prefill list waiting on a hand-off that will
   // not come and waits (bounded) for every prefill list to go idle; reset() calls it.
   std::function<bool()> pf_settle_;
   // Inside a mid-prompt block hook on two cards: device 0's state runs at the block end (host; save_state reads them
   // there, and nothing settles the prefill lists - device 0 may run the next chunk). Null otherwise.
   const uint8_t* pf_shadow_ = nullptr;
-  // Spec 21d: the prefill state, lazy; declared LAST so it (its Contexts, kernels, recordings and link) is destroyed
+  // Spec 21-QFNd: the prefill state, lazy; declared LAST so it (its Contexts, kernels, recordings and link) is destroyed
   // before the buffers it points into. The deleter is set where the state is made (b70_qwen4exp_prefill), so this
   // header names no prefill symbol. pf_dev_bytes_: each device's prefill scratch + prefill link, for memory_use().
   std::vector<size_t> pf_dev_bytes_;

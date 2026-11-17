@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""A synthetic Qwen3.8-Flash-Next (`qwen4_exp`) checkpoint at the REAL widths (spec 21b Task 1).
+"""A synthetic Qwen3.8-Flash-Next (`qwen4_exp`) checkpoint at the REAL widths (spec 21-QFNb Task 1).
 
     make_synth.py <out-dir> --form ours|intel --tokenizer <dir> [--config <config.json>] [--layers 4]
                   [--ple-base 1000] [--mtp] [--seed 0]
 
-Spec 21b's loader, planner and (21c) engine are built before any real checkpoint is on the box, and
-21c's golden gates need a checkpoint the engine and the reference both read. This writes one: every
+Spec 21-QFNb's loader, planner and (21-QFNc) engine are built before any real checkpoint is on the box, and
+21-QFNc's golden gates need a checkpoint the engine and the reference both read. This writes one: every
 tensor named, typed and shaped as the export of `form` names it (`tools/oracle/qwen4exp_ref.py`
 `expected_names`), random weights, and only the first N layers:
 
@@ -16,7 +16,7 @@ tensor named, typed and shaped as the export of `form` names it (`tools/oracle/q
                 QSA layer 3), ngram_vocab_size_base = --ple-base (the reduced-prime PLE table: the same
                 hash and gather, small primes; every other width real), and quantization_config as the
                 form's export writes it
-  --form ours   spec 21 §5 (21q): routed experts, shared experts, QSA q/k/v/o and GDN in_proj_qkv /
+  --form ours   spec 21-QFN §5 (21q): routed experts, shared experts, QSA q/k/v/o and GDN in_proj_qkv /
                 in_proj_z / out_proj int4 g64 in the auto_round:auto_gptq packing; everything else bf16
   --form intel  Intel/Qwen3.8-Flash-Next-W4A16-AutoRound's form: routed experts int4 **g128** (F16
                 scales, per-expert names), dense / shared / MTP bf16 (its extra_config's bits-16 rules)
@@ -29,7 +29,7 @@ The packer is tools/quantize/kolibri/make_synth.py's pack_rtn_g64 at group g: pe
 of K) scale = f16(max|w| / 8), q = clamp(round(w / f32(scale)) + 8, 0, 15) (round half to even), element
 k of column n is nibble k % 8 of word [k // 8][n], low nibble first; qweight I32 [K/8, N], scales F16
 [K/g, N], qzeros I32 [K/g, N/8] all 0x77777777 - dequant.py's rule w = (q - 8) x scale. The draws are
-21a's tools/oracle/qwen4exp_make_tiny.py's at the real widths: (1 + w) norms 0.1 N(0,1), the GDN gated
+21-QFNa's tools/oracle/qwen4exp_make_tiny.py's at the real widths: (1 + w) norms 0.1 N(0,1), the GDN gated
 norm and dt_bias 1 + 0.1 N(0,1), A_log = log U(1, 16), conv taps 0.5 N(0,1), routers 3 N(0,1) / sqrt(K),
 the embedding and the PLE rows N(0,1), every other linear N(0,1) / sqrt(K).
 
@@ -123,7 +123,7 @@ def text_of(cfg: dict) -> dict:
 
 
 def extra_bf16(form: str) -> dict:
-    """The extra_config bits-16 rules of each export (Intel's patterns, 21a's facts; ours adds the dense
+    """The extra_config bits-16 rules of each export (Intel's patterns, 21-QFNa's facts; ours adds the dense
     rows it keeps bf16 and drops the ones it quantises)."""
     keep = [".*embed_tokens.*", ".*hyper_connection.*", ".*in_proj_a.*", ".*in_proj_b.*", ".*indexer.*",
             ".*mlp\\.gate.*", ".*shared_expert_gate.*", ".*ple.*", ".*mtp.*", ".*visual.*", ".*lm_head.*"]
@@ -234,7 +234,7 @@ def quantised(name: str, form: str) -> bool:
 # the weights
 
 def draw(name: str, shape, g: torch.Generator) -> torch.Tensor:
-    """21a's qwen4exp_make_tiny.random_state rules, fp32."""
+    """21-QFNa's qwen4exp_make_tiny.random_state rules, fp32."""
     if name.endswith("A_log"):
         return torch.empty(shape).uniform_(1.0, 16.0, generator=g).log()
     if name.endswith("dt_bias") or name.endswith("linear_attn.norm.weight"):

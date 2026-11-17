@@ -1,7 +1,7 @@
-// Spec 21b Task 2: model::Qwen4ExpDesc against the checkpoint's own facts (spec 21 §1).
+// Spec 21-QFNb Task 2: model::Qwen4ExpDesc against the checkpoint's own facts (spec 21-QFN §1).
 // Host only, no argument.
 //
-// The original's config.json is NOT vendored (plan 21b Task 2's fallback): the checkpoint's licence is
+// The original's config.json is NOT vendored (plan 21-QFNb Task 2's fallback): the checkpoint's licence is
 // `qwen-community-1.0` (its card's front matter), whose text this repository has not read, so the test
 // builds the same JSON in code - every structural key of Qwen/Qwen3.8-Flash-Next's config.json with its
 // value, and make_synth.py's 4-layer synthetic (layers 4, ngram_vocab_size_base 1000, a

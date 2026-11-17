@@ -4,7 +4,7 @@
 //   po_page_check(ptrs, first_page, out, pages, ranges)   grid (ceil(pages / 64)), WG 64
 //       one lane per 2 MiB page of every range: out[g] = the first u64 of page g - first_page[r] of range r, read
 //       through the u64 pointer table `ptrs` [ranges] (first_page [ranges + 1]: the ranges' page prefix sums) -
-//       q4_ple_check's form for any number of ranges (21c's is fixed at 32). The host compares with its own view.
+//       q4_ple_check's form for any number of ranges (21-QFNc's is fixed at 32). The host compares with its own view.
 //   po_page_tag(ptr, pages, salt)                         grid (ceil(pages / 64)), WG 64
 //       the device writes po_tag(page, salt) at the first u64 of every 2 MiB page of one device arena (the alias
 //       check: a page another page aliases reads back the later page's tag).

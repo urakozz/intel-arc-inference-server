@@ -65,7 +65,7 @@ Qwen4ExpBuffers::Qwen4ExpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d,
   model::validate(p, d);
   if (len % d.idx_compress != 0)
     throw std::invalid_argument("Qwen4ExpBuffers: max_len " + std::to_string(len) + " is not whole indexer blocks");
-  if (mtp) {   // spec 21e: the verify's GDN slots and (the PLE layer's device) its PLE rows
+  if (mtp) {   // spec 21-QFNe: the verify's GDN slots and (the PLE layer's device) its PLE rows
     gdn_spec = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, gdn_spec_bytes(d, p, dev));
     if (holds_ple()) {
       const size_t half = ple_verify_bytes(d, p, dev) / 2;
@@ -147,7 +147,7 @@ void Qwen4ExpBuffers::zero(l0::CmdList& imm) {
   for (l0::Mem* m : {&control, &kv, &idx_keys, &idx_tail, &gdn_state, &conv_ring, &ple}) imm.fill(m->ptr(), 0u, m->size());
 }
 
-// --- spec 21e: the MTP head's buffers ------------------------------------------------------------------------------
+// --- spec 21-QFNe: the MTP head's buffers ------------------------------------------------------------------------------
 #define Q4_MS mtp_sizes(d, len)
 Qwen4ExpMtpBuffers::Qwen4ExpMtpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t len)
     : hctl(ctx, l0::MemKind::Shared, Q4_MS.ctl),

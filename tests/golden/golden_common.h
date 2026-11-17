@@ -133,7 +133,7 @@ class Golden {
   const int32_t* i32(const std::string& n, size_t e) const {
     return static_cast<const int32_t*>(raw(n, "I32", e));
   }
-  // Spec 21c: the qwen4_exp golden sets' ple.ids (I64 [T + gen][16]).
+  // Spec 21-QFNc: the qwen4_exp golden sets' ple.ids (I64 [T + gen][16]).
   const int64_t* i64(const std::string& n, size_t e) const {
     return static_cast<const int64_t*>(raw(n, "I64", e));
   }

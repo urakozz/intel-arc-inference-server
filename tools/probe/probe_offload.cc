@@ -10,7 +10,7 @@
 //                 `copy_ordinal=none` when absent); the first-byte latency of one 2.6 MB and of one 4-byte copy
 //                 (submit to fence). `--dev both`: one thread per card behind a start barrier, each and the aggregate.
 //   zc      P0.3  M = 1, a regular list of P launch pairs (gate||up then down, pair j routed to 10 distinct experts of
-//                 the card's 512-expert layer image, the pairs' experts disjoint); arms: A 21c's binary over the VRAM
+//                 the card's 512-expert layer image, the pairs' experts disjoint); arms: A 21-QFNc's binary over the VRAM
 //                 image (control); B the table kernel (probe_offload_moe.cl) with an identity table over the same
 //                 VRAM; C every routed slot's entry a host-USM pointer (a byte copy of the image, pinned); D1-D3 1 / 2
 //                 / 3 of a pair's 10 slots on host; S the misses of D1-D3 / C staged by the copy queue into a VRAM
@@ -33,7 +33,7 @@
 //                 0.80: 102 experts a layer, 266,342,400 B): where it fails, MemAvailable before / after, seconds per
 //                 GB; every piece tagged per 2 MiB page by the host and read back by po_page_check on each card.
 //                 Never above MemAvailable - 16 GiB (spec 7's rule).
-//   alias   P0.5  a model-sized allocation history on the card (18 layers' allocations at 21b's sizes, the int8 head,
+//   alias   P0.5  a model-sized allocation history on the card (18 layers' allocations at 21-QFNb's sizes, the int8 head,
 //                 the PLE pointer table; then freed), then one device arena of --arena-gb (22): po_page_tag writes a
 //                 salted tag at every 2 MiB page, po_page_check gathers them, the host compares; a second salt
 //                 confirms. A page holding another page's tag is an alias, printed with both addresses.
@@ -1341,7 +1341,7 @@ int alias_mode() {
   const model::Qwen4ExpDesc& md = model::qwen4exp();
   Devices dv = open_devices(g_opt.dev);
   for (auto& c : dv.cards) {
-    {   // the allocation history: 18 layers at 21b's per-tensor sizes, the int8 head, the PLE pointer table; freed
+    {   // the allocation history: 18 layers at 21-QFNb's per-tensor sizes, the int8 head, the PLE pointer table; freed
       std::vector<std::unique_ptr<l0::Mem>> hist;
       size_t total = 0;
       for (uint32_t l = 0; l < 18; ++l) {
@@ -1419,7 +1419,7 @@ int alias_mode() {
   return g_fail ? 1 : 0;
 }
 
-// --- peer (plan 21v2a Task 5 Step 2) ---------------------------------------------------------------------------------
+// --- peer (plan 21-QFN-v2a Task 5 Step 2) ---------------------------------------------------------------------------------
 // What a card can pull per expert-sized read from: its own VRAM, pinned host USM and the other card's VRAM over P2P -
 // by a kernel (po_read_sum, in place) and by the copy engine. Interleaved over the arms, median of --reps.
 struct PeerRead {   // one card's kernel reading `ptr`

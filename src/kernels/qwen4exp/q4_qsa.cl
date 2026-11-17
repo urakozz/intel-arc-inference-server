@@ -1,4 +1,4 @@
-// q4_qsa.cl - spec 21c: Qwen3.8-Flash-Next's QSA indexer and block selection (spec 21 §2.3, §4.2; M:665-771),
+// q4_qsa.cl - spec 21-QFNc: Qwen3.8-Flash-Next's QSA indexer and block selection (spec 21-QFN §2.3, §4.2; M:665-771),
 // per QSA layer and row p = pos + m. Three kernels in one binary per M (attn.cl's arrangement):
 //
 //   q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys)         grid (5, M),                 WG 128
@@ -16,7 +16,7 @@
 //     the ring): the fp32 mean (((k0 + k1) + k2) + k3) / 4 -> bf16 -> k_layernorm (the 128-lane norm, (1 + w_k)) ->
 //     RoPE at 4b (bf16 as above) -> idx_keys[b] (M:733-742). EIGHT tail slots (Review Focus 3): rows of one launch
 //     write pos .. pos + 3 while a completing row reads pos - 3 .. pos - 1 - seven consecutive positions, distinct
-//     mod 8; four slots (spec 21 §4.2) would collide at a 4-row launch.
+//     mod 8; four slots (spec 21-QFN §4.2) would collide at a 4-row launch.
 // **q4_qsa_score**: row m's n = (p + 1) / 4 complete blocks; work-group g owns blocks [256 g, 256 g + 256) and
 //   exits whole past n (the grid spans max_len / 4 blocks under replay). score_b = (((r0 + r1) + r2) + r3) / sqrt(128),
 //   r_h = max(sum_i q[h][i] k_b[i], +0) (one fma chain, i ascending: bf16 x bf16 products are exact, so the chain
@@ -43,11 +43,11 @@
 #if !defined(TOPB) || !defined(SEL_WG) || !defined(LIST_ROW) || !defined(COUNT_W)
 #error "q4_qsa: TOPB, SEL_WG, LIST_ROW and COUNT_W must be defined (kernels::qwen4exp)"
 #endif
-// Spec 21d: -DQSA_PF builds the PREFILL form at M = C (kernels::qwen4exp::kPfC): the indexer GEMM's rows arrive at
+// Spec 21-QFNd: -DQSA_PF builds the PREFILL form at M = C (kernels::qwen4exp::kPfC): the indexer GEMM's rows arrive at
 // the prefill GEMM's pitch IDX_LD = pf_ld(640) = 768, and q4_qsa_prep writes NO tail-ring slot - a 2048-row launch's
 // rows would overwrite slots (p % 8) its first rows still read for the block that straddles pos - so the ring is
 // updated by its own launch, q4_qsa_ring, after the prep: the last min(8, C) raw keys, what decode's ring holds
-// after the same ids. Unset (every 21c binary), IDX_LD is IDX_N and the tail write is the prep's, token for token
+// after the same ids. Unset (every 21-QFNc binary), IDX_LD is IDX_N and the tail write is the prep's, token for token
 // (commit 6499948's rule: the preprocessed source of every existing binary is unchanged).
 #ifdef QSA_PF
 #if M < 1 || M > 2048

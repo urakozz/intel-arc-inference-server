@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""Spec 22 P0.6 (plan 22a Task 3): the expert-offload tier's hit-rate curves from spec 21a's routing traces, and
+"""Spec 22 P0.6 (plan 22a Task 3): the expert-offload tier's hit-rate curves from spec 21-QFNa's routing traces, and
 the routing profile plan 22b's loader reads (decision 8).
 
     offload_curve.py counts  --traces DIR [--json FILE]
@@ -15,7 +15,7 @@ Every command takes --shape flash-next|laguna (default flash-next): the model th
 top-k, the decoder layers the traces' L axis holds, an expert's record bytes; Laguna's bytes a token too). A shape
 that names its layers is checked against the traces.
 
-The traces are `<DIR>/<name>.routes.safetensors` (21a's TRACE_FORMAT, qwen4exp_ref.py trace): ids i32 [T][L][k]
+The traces are `<DIR>/<name>.routes.safetensors` (21-QFNa's TRACE_FORMAT, qwen4exp_ref.py trace): ids i32 [T][L][k]
 ascending, p f32, onorm f32, mtp_ids / mtp_p / mtp_onorm [T][k] (row T-1 of the head -1 / 0); metadata layers,
 experts, top_k, source. A source's class is A4 (`t<N>_<task>-<file>`, the 36 tool-call scenarios), agentic
 (q4exp_agentic), code, prose, or opencode (anything else: the recorded sessions).
@@ -376,7 +376,7 @@ def swap_sim(trace, res0: np.ndarray, S: int, B: float, W: int, copy_ms: float, 
     return hits, T * L * k
 
 
-# --- swap policies (spec 21 v2 §6) --------------------------------------------------------------------------------------
+# --- swap policies (spec 21-QFN-v2 §6) --------------------------------------------------------------------------------------
 def _land(pending: list, t: int, res: np.ndarray) -> list:
     """Admit the copies whose event has fired by step t (pending: [(ready step, layer, expert)])."""
     keep = []
@@ -577,15 +577,15 @@ def read_profile(path: str) -> dict:
 
 
 # --- P0.7: the projection and the stopping rule ------------------------------------------------------------------------------
-STOP_PP_TPS = 30.0                # spec 21 v2 §11: STOP when (a) pp + tier < 30 t/s and (b) tp + tier < 50 t/s
+STOP_PP_TPS = 30.0                # spec 21-QFN-v2 §11: STOP when (a) pp + tier < 30 t/s and (b) tp + tier < 50 t/s
 STOP_TP_TPS = 50.0
-HC_BYTES = 1.29e9                 # spec 21 v2 §3: the hyper-connections a token, bf16, replicated on both cards under tp
-TP_ALLREDUCE_MS = 0.34            # spec 21 v2 §5 (b): two all-reduces a layer over P2P, ~98 a token x 3.5 us
+HC_BYTES = 1.29e9                 # spec 21-QFN-v2 §3: the hyper-connections a token, bf16, replicated on both cards under tp
+TP_ALLREDUCE_MS = 0.34            # spec 21-QFN-v2 §5 (b): two all-reduces a layer over P2P, ~98 a token x 3.5 us
 ROOFLINE_GBPS = 590.0             # the B70's roofline (spec 22 §2)
-ROOFLINE_SHARE = 0.776            # the share Qwen3.8 reaches (spec 21 §3, docs/05)
-KV_ROW_BYTES = 24576              # spec 21 §3: a selected position's KV over the 12 QSA layers
-INDEXER_BYTES = 768               # spec 21 §3: the indexer scan a position
-QSA_SELECTED = 2051               # spec 21 §2.3: at most 2051 positions attended
+ROOFLINE_SHARE = 0.776            # the share Qwen3.8 reaches (spec 21-QFN §3, docs/05)
+KV_ROW_BYTES = 24576              # spec 21-QFN §3: a selected position's KV over the 12 QSA layers
+INDEXER_BYTES = 768               # spec 21-QFN §3: the indexer scan a position
+QSA_SELECTED = 2051               # spec 21-QFN §2.3: at most 2051 positions attended
 
 
 def decode_ms(D: float, R: float, BW: float, P: float, h: float, law: str = "serial", alpha: float = 1.0) -> float:
@@ -601,7 +601,7 @@ def decode_ms(D: float, R: float, BW: float, P: float, h: float, law: str = "ser
 
 
 def tp_card_bytes(D: float, R: float) -> tuple:
-    """Spec 21 v2 §5 (b): a card's bytes a token under tp with the expert split - the hyper-connections replicated, the
+    """Spec 21-QFN-v2 §5 (b): a card's bytes a token under tp with the expert split - the hyper-connections replicated, the
     rest of D and every routed expert halved."""
     return HC_BYTES + (D - HC_BYTES) / 2, R / 2
 
@@ -664,7 +664,7 @@ def card_options(dev: dict | None, curve_rows, f: float, key: str, swap):
 # --- spec 30 (Laguna): the two-constant decode model (§7.1), the drafter (§8), the stop rule (§13) ------------------------
 B_FIT_GBPS = 518.0        # §7.1: B and c fitted to Qwen3.8 (15.54 GB, 64 layers, 29.45 t/s) and Ornith (2.345 GB, 40, 142.8)
 C_LAYER_MS = 0.062
-B_21V2_GBPS = 457.8       # spec 21 v2's single ratio (Qwen3.8's), no per-layer term: the upper bound
+B_21V2_GBPS = 457.8       # spec 21-QFN-v2's single ratio (Qwen3.8's), no per-layer term: the upper bound
 P_LINK_GBPS = 11.2        # host RAM to a card, pinned, in place (measured on Flash-Next's 2.6 MB records)
 ALLREDUCE_MS = 0.0035     # one P2P all-reduce (Qwen3.8 tensor parallel); two a layer
 KV_MS_PER_GB = 2.19       # Qwen3.8's measured decode slope with context (31.41 t/s at 4k -> 20.13 at 128k)
@@ -681,7 +681,7 @@ def decode2_ms(D: float, R: float, h: float, L: int, B: float = B_FIT_GBPS, c: f
 
 def two_constant_tps(sh: dict, h: float, tp: bool = False, upper: bool = False, ctx: int = 0) -> float:
     """t/s of one request: the layer split (D, R over one link at a time) or tensor parallel (each card half of D and R
-    on its own link, two all-reduces a layer); `upper` = spec 21 v2's constants; ctx adds the full layers' KV reads at
+    on its own link, two all-reduces a layer); `upper` = spec 21-QFN-v2's constants; ctx adds the full layers' KV reads at
     Qwen3.8's measured slope (half a card in tensor parallel)."""
     L = sh["decoder_layers"]
     D, R = sh["tp"] if tp else (sh["D"], sh["R"])
@@ -778,7 +778,7 @@ def cmd_project(a) -> None:
         aj = json.load(open(a.accept))
         acc = aj["pooled"].get("reuse") or next(iter(aj["pooled"].values()))
     BW = a.bw if a.bw else ROOFLINE_GBPS * ROOFLINE_SHARE
-    bw_src = "row 32's measured rate" if a.bw else f"the {ROOFLINE_GBPS:g} GB/s roofline at {ROOFLINE_SHARE:.1%} (spec 21 §3)"
+    bw_src = "row 32's measured rate" if a.bw else f"the {ROOFLINE_GBPS:g} GB/s roofline at {ROOFLINE_SHARE:.1%} (spec 21-QFN §3)"
     if p0["law"]:
         alphas = [p0["alpha"][c] for c in sorted(p0["alpha"])]
         alpha = float(np.mean(alphas))
@@ -1048,7 +1048,7 @@ def cmd_swap(a) -> None:
                 rows.append({"S": S, "B_mb": Bmb, "W": W, "h": hs, "gain": hs - static,
                              "moved_per_step": st.get("moved", 0) / max(1, steps)})
                 print(f"| {S} | {Bmb:g} | {W} | {hs:.4f} | {hs - static:+.4f} |")
-    # The policies of spec 21 v2 §6 from the same held-out start, by h and the link bytes a token (misses + copies).
+    # The policies of spec 21-QFN-v2 §6 from the same held-out start, by h and the link bytes a token (misses + copies).
     eb = EXPERT_BYTES
     steps = sum(t.T for t in tr)
     pols = [{"policy": "static", "h": static, "copied": 0, "link_mb_per_token": (static_t - static_h) * eb / steps / 1e6}]

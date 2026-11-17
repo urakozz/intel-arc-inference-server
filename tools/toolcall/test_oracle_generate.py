@@ -162,7 +162,7 @@ def _fake_set(d, ids):
 
 
 def test_args_qwen4exp():
-    """Spec 21e: --model qwen4exp; qwen4_exp (and a text-only export's qwen4_exp_text) take the MoE loop; the memory
+    """Spec 21-QFNe: --model qwen4exp; qwen4_exp (and a text-only export's qwen4_exp_text) take the MoE loop; the memory
     plan reads its config (layer types, the 4 streams, 512 experts)."""
     import oracle_generate as og
     a = parse_args(["--model", "qwen4exp", "/snap", "set", "out", "--new-tokens", "192"])
@@ -182,7 +182,7 @@ def test_args_qwen4exp():
 
 
 def test_model_check_qwen4exp():
-    """Spec 21e: `--model qwen4exp` refuses a snapshot of another model_type before anything loads."""
+    """Spec 21-QFNe: `--model qwen4exp` refuses a snapshot of another model_type before anything loads."""
     import json
     import tempfile
     import oracle_generate as og
@@ -204,7 +204,7 @@ def test_model_check_qwen4exp():
 
 
 def test_qwen4exp_tiny_one_scenario():
-    """Spec 21e: the tiny model (Q4EXP_TINY_SNAP: a snapshot directory with a tokenizer.json - the original's - beside
+    """Spec 21-QFNe: the tiny model (Q4EXP_TINY_SNAP: a snapshot directory with a tokenizer.json - the original's - beside
     the tiny's weights; transformers 5.19.0 first on PYTHONPATH) runs one scenario to its .bf16.{ids,txt,gap}.
     Skipped (printed) without the environment: run it in agnes-ref-img with the qwen4exp site."""
     snap = os.environ.get("Q4EXP_TINY_SNAP")

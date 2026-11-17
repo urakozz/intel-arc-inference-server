@@ -1,6 +1,6 @@
 #!/bin/bash
 # tools/toolcall/a4_ref.sh - the A4 tool-call set and its CPU reference run for a MoE model
-# (spec 15e Task 3: Ornith; spec 20e KL4: Kolibri-1; spec 21e Task 5:
+# (spec 15e Task 3: Ornith; spec 20e KL4: Kolibri-1; spec 21-QFNe Task 5:
 # Qwen3.8-Flash-Next) - and for Qwen3.8 itself - from the repo (or worktree) root.
 #
 #   tools/toolcall/a4_ref.sh qwen set|ref|status    Qwen3.8's own A4 reference (the one r11.a4 / r75.gates score
@@ -27,7 +27,7 @@
 #                                                   the HF cache's Qwen/Qwen3.8-Flash-Next: config,
 #                                                   tokenizer.json, chat_template.jinja - Intel's
 #                                                   checkpoint ships Qwen3.8's tokenizer.json, without
-#                                                   the original's \p{M} split, spec 21e) with
+#                                                   the original's \p{M} split, spec 21-QFNe) with
 #                                                   transformers 5.19.0; the template is byte-identical
 #                                                   to Qwen3.8's, so a scenario's ids differ only where
 #                                                   the split does - the log (and $OUT/set/SAME) says
@@ -44,7 +44,7 @@
 #           decision 1: MODEL_DIR, DEVICE=cuda|xpu where there is one), 384 new ids (the set renders
 #           thinking off). Score with `score.py --format hermes` (0 parse failures of the reference:
 #           the hard bar).
-#   qwen4exp tools/oracle/qwen4exp_ref.py's layer-streamed model (spec 21a) on Intel's W4A16
+#   qwen4exp tools/oracle/qwen4exp_ref.py's layer-streamed model (spec 21-QFNa) on Intel's W4A16
 #           AutoRound checkpoint (Intel/Qwen3.8-Flash-Next-W4A16-AutoRound: int4 g128 experts
 #           dequantised, the PLE table from <snapshot>-ple-int8/ when present - the engine's format),
 #           384 new ids, transformers 5.19.0 from the qwen4exp site first on PYTHONPATH (SITE: the Mac

@@ -1,4 +1,4 @@
-// Spec 21d (F4 on prefill, Review Focus 1, 2, 4, 5): Qwen4ExpEngine::prefill on the card with a checkpoint - box only
+// Spec 21-QFNd (F4 on prefill, Review Focus 1, 2, 4, 5): Qwen4ExpEngine::prefill on the card with a checkpoint - box only
 // (labels checkpoint;qwen4exp;prefill). The synthetic real-width checkpoints (tools/box_validate/qwen4exp_oracle.sh
 // synth-ckpt: 4 layers - 3 GDN incl. the PLE layer, 1 QSA) carry it before Intel's; the golden gate itself is
 // qwen4exp_golden_test's `prefill` mode.
@@ -19,7 +19,7 @@
 //     3. chunking: chunks of 64 against the default chunk - every layer's state, logits, the first token BITWISE (the
 //        linears and the MoE are row-local, the flash tiles and the GDN's 64-row WY sub-chunks sit at absolute
 //        multiples of 64, the indexer's blocks and rings are keyed to absolute positions); chunks of 16 printed (the
-//        GDN's sub-chunks move: not asserted bitwise - plan 21d's "chunk 16 bitwise" assumed no GDN, recorded);
+//        GDN's sub-chunks move: not asserted bitwise - plan 21-QFNd's "chunk 16 bitwise" assumed no GDN, recorded);
 //     4. Review Focus 5, prefill against decode's M = 1 fill (ingest, one id per replay) of the same prompt, per
 //        layer: K and V cosine per position (QSA), the compressed keys per block, the GDN state and conv ring, the PLE
 //        conv ring - gated (PROPOSED): every row of the first QSA layer >= 0.999, all rows' median

@@ -11,12 +11,12 @@ namespace l0 {
 class CmdList;
 }
 
-// Spec 21c: one device's Qwen3.8-Flash-Next decode allocations (runtime/qwen4exp/qwen4exp_sizes.h sizes every
+// Spec 21-QFNc: one device's Qwen3.8-Flash-Next decode allocations (runtime/qwen4exp/qwen4exp_sizes.h sizes every
 // one; the constructor allocates exactly those): the persistent group of the device's layers - the QSA layers'
 // KV, compressed indexer keys and tail rings, the GDN layers' state and conv rings, the PLE layer's rings - and
 // the whole decode scratch. Kolibri's KolibriBuffers arrangement.
 //
-// Spec 21e (`mtp`): the scratch holds kVerifyRows rows (the verify lists run at M = k + 1 <= 4; the per-layer rows
+// Spec 21-QFNe (`mtp`): the scratch holds kVerifyRows rows (the verify lists run at M = k + 1 <= 4; the per-layer rows
 // - routes, selections, diagnostics - are strided by `rows`), gdn_spec holds the verify's state slots 1..3 of every
 // GDN layer of the device (LAYER-major: layer i's slot s at gdn_spec + (3 i + s - 1) x one state - the stride
 // gdn_step_slots_M<M>_G1 bakes), and the PLE layer's device holds the verify's PLE rows (q4_pf_ple at C = 4). The
@@ -39,7 +39,7 @@ struct Qwen4ExpBuffers {
   //     written once at construction) -------------------------------------------------------------------------
   l0::Mem H, xn, x, partials, down_f32, inj, ab, gdn_o, idx_f32, idx_q, scores, list, diag, attn_q, attn_gate,
       attn_part, attn_out, logits_r, routes, moe_h, y, ple_e, ple_kv, ple_ids, ple_consts, logits, argmax_part;
-  // --- spec 21e, with the MTP head (null without): the verify's GDN state slots 1..3 (never zeroed: a slot is read
+  // --- spec 21-QFNe, with the MTP head (null without): the verify's GDN state slots 1..3 (never zeroed: a slot is read
   //     only after a verify wrote it - Control::gdn_live is 0 after reset / load_state) and the PLE rows ----------
   std::unique_ptr<l0::Mem> gdn_spec;        // fp32 [its GDN layers][3][48][128][128]
   std::unique_ptr<l0::Mem> ple_gated, ple_gn;   // bf16 [kVerifyRows][10240] each (the PLE layer's device)
@@ -59,7 +59,7 @@ struct Qwen4ExpBuffers {
   void* tail_layer(uint32_t layer) const;      // [8][128]
   void* gdn_state_layer(uint32_t layer) const;
   void* conv_ring_layer(uint32_t layer) const;
-  // Spec 21e: GDN layer `layer`'s state slot s (0: gdn_state_layer; 1..3: gdn_spec's) and its gdn_spec base (the
+  // Spec 21-QFNe: GDN layer `layer`'s state slot s (0: gdn_state_layer; 1..3: gdn_spec's) and its gdn_spec base (the
   // slots 1..3 gdn_step_slots_M<M>_G1 addresses from).
   void* gdn_slot(uint32_t layer, uint32_t s) const;
   void* gdn_spec_layer(uint32_t layer) const;
@@ -76,7 +76,7 @@ struct Qwen4ExpBuffers {
   void zero(l0::CmdList& imm);
 };
 
-// Spec 21e: the MTP head's buffers on the last device (runtime/qwen4exp/qwen4exp_sizes.h MtpSizes).
+// Spec 21-QFNe: the MTP head's buffers on the last device (runtime/qwen4exp/qwen4exp_sizes.h MtpSizes).
 struct Qwen4ExpMtpBuffers {
   Qwen4ExpMtpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t max_len);
   // persistent (zeroed by zero()): the head's Control, its KV, compressed keys, tail ring, the R rows

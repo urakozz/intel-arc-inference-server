@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One command: Qwen/Qwen3.8-Flash-Next (bf16, 360 GB) -> our AutoRound int4 g64 symmetric export, tuned,
-# the output head and the MTP head's experts included - spec 21 v2 §2, plan 21v2a Tasks 1-3, run on the box.
+# the output head and the MTP head's experts included - spec 21-QFN-v2 §2, plan 21-QFN-v2a Tasks 1-3, run on the box.
 #
 #   tools/quantize/quantize_qwen4exp.sh check-download [--sha]   the original complete? (144 files, sizes / sha256)
 #   tools/quantize/quantize_qwen4exp.sh start                    start (or resume) the run, detached

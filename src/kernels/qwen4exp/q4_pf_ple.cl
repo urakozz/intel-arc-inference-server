@@ -1,6 +1,6 @@
-// q4_pf_ple.cl - spec 21d: Qwen3.8-Flash-Next's per-layer n-gram embedding block (spec 21 §2.4) over a PREFILL chunk
-// - 21c's q4_ple_block (q4_ple.cl, M = 1 only: a row's conv reads the ring rows its earlier launches wrote) cut into
-// three launches, so a row's conv never reads a ring slot this chunk overwrites (plan 21d Review Focus 4). One binary
+// q4_pf_ple.cl - spec 21-QFNd: Qwen3.8-Flash-Next's per-layer n-gram embedding block (spec 21-QFN §2.4) over a PREFILL chunk
+// - 21-QFNc's q4_ple_block (q4_ple.cl, M = 1 only: a row's conv reads the ring rows its earlier launches wrote) cut into
+// three launches, so a row's conv never reads a ring slot this chunk overwrites (plan 21-QFNd Review Focus 4). One binary
 // (kernels::qwen4exp::pf_ple_variant), three entry points:
 //
 //   q4_pf_ple_gate(ctrl, kv, H, pw, gated, gn)            grid (4 streams, C),       WG 256
@@ -21,7 +21,7 @@
 // gather at M = C (q4_ple.cl -DPLE_PF) writes no ring: its rows read p - 1, p - 2 from the chunk or the ring.
 //
 // tests/kernels/qwen4exp_pf_ref.h ple_gate_row / ple_conv_row / ple_chunk are this file; qwen4exp_pf_ref_test holds
-// them to 21c's q4ref::ple_block applied row by row, bitwise. Every norm is q4_hc's (256 lanes, fma, the tree,
+// them to 21-QFNc's q4ref::ple_block applied row by row, bitwise. Every norm is q4_hc's (256 lanes, fma, the tree,
 // 1 / sqrt); every sigmoid / SiLU is 1 / (1 + exp_torch(-x)) / x / (1 + exp_torch(-x)).
 //
 // Plain OpenCL C (no sub-group functions).

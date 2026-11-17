@@ -1,4 +1,4 @@
-// q4_pf_attn.cl - spec 21d: Qwen3.8-Flash-Next's prefill QSA attention for the rows past the dense range - every row
+// q4_pf_attn.cl - spec 21-QFNd: Qwen3.8-Flash-Next's prefill QSA attention for the rows past the dense range - every row
 // at a position p >= 2051 of a chunk attends its OWN selection (q4_qsa_select's list: the top 512 blocks expanded and
 // the open block's tail, ascending, 2048..2051 positions), so the dense flash (prefill/pf_flash_attn.cl, which the
 // walk binds for the rows p <= 2050) does not apply. Spec 6's flash idioms (DPAS bf16 x bf16 -> fp32, the score

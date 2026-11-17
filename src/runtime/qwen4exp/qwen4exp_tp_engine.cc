@@ -15,7 +15,7 @@
 #include "runtime/qwen4exp/qwen4exp_capture.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
-// qwen4exp_tp_engine.cc - plan 21v2b Task 2: the header has the contract.
+// qwen4exp_tp_engine.cc - plan 21-QFN-v2b Task 2: the header has the contract.
 namespace runtime::qwen4exp {
 namespace {
 using Clock = std::chrono::steady_clock;

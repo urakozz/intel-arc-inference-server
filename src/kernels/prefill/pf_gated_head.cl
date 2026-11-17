@@ -50,9 +50,9 @@
 
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 
-// Spec 21d: Qwen3.8-Flash-Next's gated norm multiplies by sigmoid(z) (`output_gate_type: sigmoid`) where Qwen3.5 /
+// Spec 21-QFNd: Qwen3.8-Flash-Next's gated norm multiplies by sigmoid(z) (`output_gate_type: sigmoid`) where Qwen3.5 /
 // Ornith multiply by silu(z): -DGDN_GATE_SIGMOID=1 builds pf_gated_head_SIG with the sigmoid as
-// 1 / (1 + exp_torch(-z)) (Sleef's expf u10 step for step - prep.cl's _SIG twin, 21c; the host twin is
+// 1 / (1 + exp_torch(-z)) (Sleef's expf u10 step for step - prep.cl's _SIG twin, 21-QFNc; the host twin is
 // tests/kernels/qwen4exp_ref.h gated_head_sig) and FP_CONTRACT off from here on in that binary only. Unset (every
 // other binary), GATED_ACT(z) is `silu_f32(z)`: the preprocessed source of every existing binary is token for token
 // what it was (commit 6499948's rule).

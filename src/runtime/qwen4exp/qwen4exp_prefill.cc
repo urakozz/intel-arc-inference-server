@@ -99,7 +99,7 @@ class Walk {
             "the prefill scratch is not runtime::qwen4exp::prefill_sizes'");
     require(ps.hdr == size_t(kq::pf_hdr::words()) * 4, "the sort's header width moved");
     if (injected_) require(injected_->size() >= pf_injected_bytes(d_), "the injected selection rows are short");
-    if (mtp_) {   // spec 21e: the head's pass (the last device)
+    if (mtp_) {   // spec 21-QFNe: the head's pass (the last device)
       require(part_.device + 1 == b_.placement.devices, "the MTP head's prefill pass off the last device");
       require(part_.mtp && part_.mtp_fc && part_.rope && mtp_->bufs && mtp_->R && mtp_->embed && mtp_->hctl,
               "the MTP head's prefill pass without the head, its fc block, the RoPE table or its buffers");
@@ -114,7 +114,7 @@ class Walk {
     cx_.launch(k, gx, gy, gz, args);
     ++n_;
   }
-  const void* ctrl() const { return ctrl_; }   // the device's Control, or the head's for its pass (spec 21e)
+  const void* ctrl() const { return ctrl_; }   // the device's Control, or the head's for its pass (spec 21-QFNe)
 
   // One linear over the chunk: per slab the slab kernel then pf_gemm_T0 [C][K] x slab [K][ns] into out + n0 at pitch
   // ld - slabs of 1024 and one zero-padded tail (pf_slab_width).
@@ -398,7 +398,7 @@ class Walk {
       // walk); Intel's bf16 shared expert (no int4 form) keeps its one-block dequant + GEMM after
       const uint32_t ib = pf_items(d_, C_);
       const uint32_t NG = 2 * d_.moe_inter;
-      // The expert tier (plan 21v2a Task 8): with a table row the _TBL GEMMs read each block from its address - the
+      // The expert tier (plan 21-QFN-v2a Task 8): with a table row the _TBL GEMMs read each block from its address - the
       // misses straight from pinned host memory, each block once a chunk at the bus rate (2026-11-15, 4 real-width
       // layers all on host: 4096 rows in 978 ms; copying each layer's misses to VRAM first, in order, took 1052 ms - a
       // copy-engine ring overlapped with the previous layer's work is the lever, not built)
@@ -433,7 +433,7 @@ class Walk {
     src_ = HcSrc::Y;
   }
 
-  // --- spec 21e: the MTP head's pass -------------------------------------------------------------------------------
+  // --- spec 21-QFNe: the MTP head's pass -------------------------------------------------------------------------------
   // A bf16 linear's columns [n_from, n_to) over `rows` rows of x (pitch K): per slab kol_pf_bf16_slab then pf_gemm_T0
   // into out + n0 at pitch ld.
   void bf16_cols(const void* w, uint32_t K, uint32_t N, uint32_t n_from, uint32_t n_to, uint32_t rows, const void* x,
@@ -520,7 +520,7 @@ class Walk {
   const l0::Mem* injected_;
   const bool two_;
   const uint32_t dense_;
-  const Qwen4ExpMtpPrefill* mtp_;   // spec 21e: the head's pass (the last device), or null
+  const Qwen4ExpMtpPrefill* mtp_;   // spec 21-QFNe: the head's pass (the last device), or null
   const Control* ctl_;              // this chunk's Control (its slot; qwen4exp_prefill.h)
   const uint32_t* ids_;             // this chunk's ids (its slot of s.ids)
   const void* ctrl_;                // ctl_, or the head's chunk Control for its pass
@@ -589,7 +589,7 @@ void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefil
     throw std::runtime_error("runtime::qwen4exp::prefill_head: device " + std::to_string(part.device) + " holds no head");
   const loader::Q4HcOffsets o = loader::q4_hc_offsets(d, false);
   // decode's final mixer over the last row: combine _Y (M 1: the row's H, its pending y and inject weights) -> b.xn;
-  // gemv_bf16 {10240, 320} -> b.down_f32; q4_hc_up_mix (M 1, no inject) -> b.x. Spec 21e: with the MTP head's pass
+  // gemv_bf16 {10240, 320} -> b.down_f32; q4_hc_up_mix (M 1, no inject) -> b.x. Spec 21-QFNe: with the MTP head's pass
   // the rows were materialised (R_last: nothing pending, combine _X - the same norm over the same H).
   if (R_last)
     cx.launch(kc(kq::hc_combine_norm_variant(1, HcSrc::None, 0, true), "q4_hc_combine_norm"), d.hc, 1, 1,

@@ -1,14 +1,14 @@
 #pragma once
-// Spec 21c: b70-decode's Qwen3.8-Flash-Next path - the CLI dispatches on config.json's model_type
+// Spec 21-QFNc: b70-decode's Qwen3.8-Flash-Next path - the CLI dispatches on config.json's model_type
 // (loader::is_qwen4exp_checkpoint: qwen4_exp / qwen4_exp_text) and runs runtime::qwen4exp::Qwen4ExpEngine on one or
 // two cards (cli/kolibri_decode.h's shape). `--ids` and `--bench` exactly as the other paths print them (ids on
 // stdout, one per line; the bench row on stdout); the prompt goes through the decode list one replay per id, or
-// (spec 21d, --prefill / --prefill-length) through Qwen4ExpEngine::prefill in chunks.
+// (spec 21-QFNd, --prefill / --prefill-length) through Qwen4ExpEngine::prefill in chunks.
 //
-//   --layers N|auto    the development mode (spec 21 §6) - load only layers [0, N) of the checkpoint, then the final
+//   --layers N|auto    the development mode (spec 21-QFN §6) - load only layers [0, N) of the checkpoint, then the final
 //                      mixer and the head; `auto` is the planner's largest N that fits
 //                      (runtime::qwen4exp::layers_that_fit). Without it the whole model loads with the expert tier
-//                      (plan 21v2a Task 8: settle) - 512 experts x 48 layers do not fit two B70s, so each card keeps
+//                      (plan 21-QFN-v2a Task 8: settle) - 512 experts x 48 layers do not fit two B70s, so each card keeps
 //                      the most-routed experts its VRAM holds and the kernels read the rest from pinned host memory
 //   the PLE int8 file  <snapshot>-ple-int8/, beside the checkpoint (loader::q4_ple_dir; no flag)
 //   --parallel auto|1|pp   1 (the default) or 2 (spec 16b's pieces: the materialised H crosses);
@@ -16,7 +16,7 @@
 //                      runtime::qwen4exp::pp_split (pp_balance over the per-layer bytes at the session's max_len)
 //   --lm-head bf16|int8 (bf16 by default, as b70-decode's other paths), --max-len N|auto (<= the trained 262144)
 //   --bench [--depth N] [--tg N]; B70_Q4_ATTN=flash|eager picks the decode attention (and the prefill's)
-// Spec 21d: the prompt through Qwen4ExpEngine::prefill in chunks:
+// Spec 21-QFNd: the prompt through Qwen4ExpEngine::prefill in chunks:
 //   --prefill          (--ids) the prompt prefilled, then --n greedy ids
 //   --prefill-length N (--bench) depth N prefilled and timed (the pp row), then --tg decoded
 //   --prefill-chunk C  the chunk width, <= 2048 (kernels::qwen4exp::kPfC; the default)
@@ -25,7 +25,7 @@
 // auto and the fit.
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 5's h8 linears rotate in whole 1024-k
 // Hadamard blocks; the hidden is 2560), --prefill-chunk above 2048, --spec mtp
-// (b70-decode runs plain; the head - spec 21e - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
+// (b70-decode runs plain; the head - spec 21-QFNe - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
 // bf16 first; kv8.cl hard-codes 24 q / 4 kv heads) and --profile (Task 7 times it with --bench).
 #include <algorithm>
 #include <array>
@@ -59,7 +59,7 @@
 namespace cli::qwen4exp {
 
 // The bench prompt, cycled to --depth: the first 42 ids of tests/golden/prompts/q4exp_short.ids (prose.txt through
-// the original's tokenizer - 21a: Qwen3.8's committed ids re-encode identically).
+// the original's tokenizer - 21-QFNa: Qwen3.8's committed ids re-encode identically).
 inline constexpr uint32_t kQwen4ExpBenchPrompt[] = {
     760,   72103, 506,   37119, 557,  11012, 3213, 310,   6512, 279,   61789, 272,  1072, 2272,
     279,   197616, 2271, 13,    469,  68042, 29123, 7247, 383,  279,   1387,  12615, 1345, 279,
@@ -91,14 +91,14 @@ struct DecodeArgs {
   bool layers_auto = false;     // --layers auto
   PipelineArgs pipe;            // devices as parsed (1 when --parallel was not given)
   bool pp_given = false;
-  // Spec 21d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
+  // Spec 21-QFNd: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
   // --prefill-backend as parsed (l0 only).
   bool prefill = false, pp = false, pp_backend_given = false;
   uint32_t pp_chunk = 0;
   runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   // What else was asked for, for the refusals.
   bool mtp = false, kv8 = false, profile = false;
-  // Spec 21e: b70-serve's --spec mtp / --spec loads the MTP head - the planner (settle) then carries its weights, its
+  // Spec 21-QFNe: b70-serve's --spec mtp / --spec loads the MTP head - the planner (settle) then carries its weights, its
   // buffers and the verify rows (runtime::qwen4exp::plan(..., mtp)). b70-decode never sets it.
   bool load_mtp = false;
   bool int8_head() const { return lm_head == loader::LmHeadForm::Int8; }
@@ -155,7 +155,7 @@ struct Settled {
                                                        // none: every expert resident (or B70_Q4_RESIDENT's, the loader)
 };
 
-// The whole model's --max-len auto (spec 21 v2 §9): each GB of context is a GB of experts out of VRAM, so the largest
+// The whole model's --max-len auto (spec 21-QFN-v2 §9): each GB of context is a GB of experts out of VRAM, so the largest
 // of 32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's. The projection (derived): a
 // token reads the non-routed bytes and h of the routed ones from VRAM at kTierVramGbps and the rest from host memory at
 // kTierHostGbps, one after the other (measured on the card: a kernel's host reads add to its VRAM time); h is the
@@ -181,14 +181,14 @@ inline double tier_decode_ms(const runtime::qwen4exp::ExpertBudget& b, const run
 // Without --layers the whole model loads with the expert tier: each card's VRAM left after the rest of the plan holds
 // the most-routed experts (the routing profile beside the checkpoint, else id order), the rest pinned host memory.
 // B70_Q4_RESIDENT (a test placement, runtime::qwen4exp::fill_tier) forces the residents at any layer count.
-// Host memory (plan 21v2a Task 8): the PLE table, the experts' host mirrors and an explicit prefix cache are pinned
+// Host memory (plan 21-QFN-v2a Task 8): the PLE table, the experts' host mirrors and an explicit prefix cache are pinned
 // beside the cards - they must fit MemAvailable less 16 GiB (loader::check_q4_host_fit) before anything is pinned;
 // the whole model's --max-len auto stops at the first length whose mirrors would not.
 inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
                       const std::array<size_t, runtime::kPpDevices>& dev, const std::string& snapshot) {
   namespace rq = runtime::qwen4exp;
-  const bool int8 = a.int8_head(), pf = a.prefills();   // spec 21d: the prefill scratch planned
-  const bool hd = a.load_mtp;                            // spec 21e: the MTP head planned
+  const bool int8 = a.int8_head(), pf = a.prefills();   // spec 21-QFNd: the prefill scratch planned
+  const bool hd = a.load_mtp;                            // spec 21-QFNe: the MTP head planned
   const uint32_t devs = devices_of(a), cap = full.trained_max_len;
   const size_t ple = loader::Q4PleHost(loader::q4_ple_dir(loader::resolve_snapshot(snapshot))).bytes();
   const size_t avail = loader::q4_mem_available();
@@ -369,7 +369,7 @@ int run_decode(const DecodeArgs& a) {
              devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
              eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked(),
              eng.expert_words_checked(), eng.model().expert_check_ms);
-  // Spec 21d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
+  // Spec 21-QFNd: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
   // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
   // cur_token (argmax_stage2 is its last launch).
   const uint32_t chunk = a.pp_chunk ? a.pp_chunk : runtime::qwen4exp::kPfC;
@@ -432,7 +432,7 @@ int run_decode(const DecodeArgs& a) {
              runtime::qwen4exp::q4_attn_name(eng.attention()),
              devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
              a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
-  // Spec 21d: the pp row, a second line as the Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
+  // Spec 21-QFNd: the pp row, a second line as the Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)
     std::print("| b70-decode {} qwen4exp L{:d}{}{} {}{} l0 pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, eng.model().desc.layers,
                a.int8_head() ? " int8-head" : "", eng.model().desc.forms.dense == model::Q4Form::Bf16 ? " bf16-dense" : "",

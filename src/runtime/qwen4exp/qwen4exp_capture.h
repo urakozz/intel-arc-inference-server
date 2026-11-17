@@ -5,7 +5,7 @@
 #include "runtime/capture.h"   // CapturedStep, StageLink - the same records
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
 
-// Spec 21c: one device's Qwen3.8-Flash-Next decode step, captured once and replayed per token - Kolibri's
+// Spec 21-QFNc: one device's Qwen3.8-Flash-Next decode step, captured once and replayed per token - Kolibri's
 // arrangement (runtime/kolibri/kolibri_capture.h: a straight walk, every per-token value read from
 // runtime::Control at execution, the expert ids and the QSA selections produced and consumed on the device,
 // the PLE rows read from host USM by an index the device computes) over the device's layers [first, end).
@@ -27,7 +27,7 @@
 //   last device  the final mixer (combine_norm _Y, gemv_bf16 {10240, 320}, up_mix), lm_head, argmax x 2       6
 // 779 launches at 48 layers on one card (runtime::qwen4exp::decode_launches), asserted per device at capture.
 //
-// **Injected selections** (`injected` non-null; spec 21 F3's debug run): every QSA layer reads its list from the
+// **Injected selections** (`injected` non-null; spec 21-QFN F3's debug run): every QSA layer reads its list from the
 // host-USM rows [qsa layers][M][kListRow] the caller writes before each replay, and q4_qsa_score / _select are not
 // in the list (2 launches fewer a QSA layer).
 //
@@ -40,9 +40,9 @@
 // tap (debug): H copied to tap row l right after the combine that materialises layer l's output (the next
 // layer's first combine, the PLE prologue's, device 0's last, or the final mixer's) - the reference's H.L<l>.
 //
-// **Spec 21e: spec 8's lists** (`spec.kind`; runtime/engine.h's draft / verify / commit contracts):
+// **Spec 21-QFNe: spec 8's lists** (`spec.kind`; runtime/engine.h's draft / verify / commit contracts):
 //   Verify at M = k + 1 rows, every device: the decode list at M rows (Control::cur_token[0..M) the ids, positions
-//     pos .. pos + M - 1; every kernel row-independent - the verify row r IS the M = 1 step at its position, plan 21e
+//     pos .. pos + M - 1; every kernel row-independent - the verify row r IS the M = 1 step at its position, plan 21-QFNe
 //     Review Focus 2) with gdn_step_slots_M<M>_G1 (row r's GDN state into slot (gdn_live + r) % 4) and, on the PLE
 //     layer at M > 1, q4_pf_ple's gate / conv / ring at C = 4 for q4_ple_block; the hand-off carries M rows; on the
 //     last device the final mixer, lm_head and argmax at M (out_token[0..M), pos += M), then a copy of the M
@@ -81,7 +81,7 @@ struct MtpBinding {
   bool single = true;            // decision 4: q4_mtp's _SINGLE (one RMS over 10240) or _STREAM
 };
 
-// Plan 21v2b: a tensor-parallel card's decode list (`tp` non-null; Decode, M = 1, flash attention). The buffers are
+// Plan 21-QFN-v2b: a tensor-parallel card's decode list (`tp` non-null; Decode, M = 1, flash attention). The buffers are
 // the card's (Qwen4ExpBuffers over `card` = model::q4_tp_card at one card's placement, device 0); the walk is one
 // card's over every layer, at the card's widths, with Qwen3.8's crossing (runtime::TpLink, src/kernels/tp.cl) after
 // each row-parallel linear, in the slices form (tp_send pushes the card's raw slices into the peer's landing buffer,

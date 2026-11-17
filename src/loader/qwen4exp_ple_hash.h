@@ -7,10 +7,10 @@
 #include <string>
 #include <vector>
 
-// Spec 21b Task 4: the PLE n-gram hash of Qwen3.8-Flash-Next in EXACT integers - header-only arithmetic, so
+// Spec 21-QFNb Task 4: the PLE n-gram hash of Qwen3.8-Flash-Next in EXACT integers - header-only arithmetic, so
 // the planner (runtime/qwen4exp/qwen4exp_sizes.h: the host table's bytes) and the loader (loader/
-// qwen4exp_ple.h: the file's I64 tensors held to it) share one copy, and 21c's q4_ple_gather has its host
-// twin. Restated from transformers 5.19.0 modeling_qwen4_exp.py (M:1026-1166; 21a's facts sheet, "PLE ids"):
+// qwen4exp_ple.h: the file's I64 tensors held to it) share one copy, and 21-QFNc's q4_ple_gather has its host
+// twin. Restated from transformers 5.19.0 modeling_qwen4_exp.py (M:1026-1166; 21-QFNa's facts sheet, "PLE ids"):
 //
 //   multipliers  m_i = 2 x (splitmix64((seed + 10007 x ple_index + 0x9E3779B97F4A7C15 x (i + 1)) mod 2^64)
 //                mod half) + 1, half = max(1, ((2^63 - 1) / vocab) / 2): odd, and t x m < 2^63 for t < vocab

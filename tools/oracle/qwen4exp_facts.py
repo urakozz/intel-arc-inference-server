@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spec 21a Task 2: the Qwen3.8-Flash-Next (qwen4_exp) checkpoint facts, from SMALL FILES ONLY.
+"""Spec 21-QFNa Task 2: the Qwen3.8-Flash-Next (qwen4_exp) checkpoint facts, from SMALL FILES ONLY.
 
     qwen4exp_facts.py <snapshot dir | hf:REPO[@REV]> [--qwen38-tokenizer FILE] [--cache DIR]
                       [--section config,ple,tensors,quant,tokens,bytes]
@@ -22,7 +22,7 @@ Sections:
           expert's qzeros words (sym = 0x77777777 under auto_gptq's zero - 1 convention)
   tokens  tokenizer.json against Qwen3.8's (byte sha256, then vocab / merges / added tokens /
           normalizer / pre_tokenizer / decoder), the chat template's sha256, generation_config
-  bytes   spec 21 §3's per-token decode bytes and the planner's per-layer bytes, derived
+  bytes   spec 21-QFN §3's per-token decode bytes and the planner's per-layer bytes, derived
 """
 import os
 import sys
@@ -409,14 +409,14 @@ def sec_bytes(info: dict, cfg: dict) -> None:
         ("PLE projections key 10240 x 2560 + value 2560 x 2560", "bf16", bf(HC, tc["ple_embed_dim"]) + bf(H, tc["ple_embed_dim"])),
         ("lm_head (spec 9: int8 + an f32 scale a row)", "int8", tc["vocab_size"] * H + tc["vocab_size"] * 4),
     ]
-    print("## derived bytes (spec 21 §3), per decoded token")
+    print("## derived bytes (spec 21-QFN §3), per decoded token")
     print("| part | format | GB |")
     print("|---|---|---:|")
     for n, f, b in rows:
         print(f"| {n} | {f} | {b / 1e9:.3f} |")
     print(f"| **total** | | **{sum(b for _, _, b in rows) / 1e9:.3f}** |")
     print(f"decode roofline at 590 GB/s: {590 / (sum(b for _, _, b in rows) / 1e9):.1f} t/s (derived)")
-    # the planner's per-layer bytes with Intel's interim forms (21b Task 2): experts at int4 g64 after the exact
+    # the planner's per-layer bytes with Intel's interim forms (21-QFNb Task 2): experts at int4 g64 after the exact
     # g128 -> g64 scale expansion, everything else bf16 as shipped
     ex_layer = E * expert
     gdn_bf = sum(bf(o, i) for o, i in gdn.values()) + 2 * bf(tc["linear_num_value_heads"], H) \

@@ -1,4 +1,4 @@
-// qwen4exp_decode_test - spec 21c Task 3, F4 on decode: Qwen3.8-Flash-Next's engine (runtime::qwen4exp) on a
+// qwen4exp_decode_test - spec 21-QFNc Task 3, F4 on decode: Qwen3.8-Flash-Next's engine (runtime::qwen4exp) on a
 // checkpoint (the synthetic real-width ones: tools/box_validate/qwen4exp_oracle.sh synth-ckpt; Intel's at
 // --layers N), no golden set needed.
 //
@@ -9,7 +9,7 @@
 //      row, every QSA layer's selection and its 512th / 513th diagnostic, every layer's persistent bytes (KV, the
 //      compressed indexer keys, the 8-slot tail rings, the GDN state and conv rings, the PLE id and conv rings) and
 //      the PLE ids, compared after the prompt and after the generation
-//   3. the injected capture (spec 21 F3's debug input): its launch count printed (2 fewer a QSA layer); fed the
+//   3. the injected capture (spec 21-QFN F3's debug input): its launch count printed (2 fewer a QSA layer); fed the
 //      free run's own selections step by step, it reproduces the free run bitwise (logits and every state) - the
 //      injection path changes where the lists come from, nothing else
 //

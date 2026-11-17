@@ -12,7 +12,7 @@
 #include "runtime/control.h"
 
 // qwen4exp_capture.cc - one device's Qwen3.8-Flash-Next decode list (qwen4exp_capture.h has the walk in one
-// table) and, spec 21e, spec 8's verify and draft lists. Every binding site names the kernel it honours; argument
+// table) and, spec 21-QFNe, spec 8's verify and draft lists. Every binding site names the kernel it honours; argument
 // orders are each __kernel's, in src/kernels/qwen4exp/*.cl and the reused sources.
 namespace runtime::qwen4exp {
 namespace {
@@ -193,7 +193,7 @@ class Walk {
     if (spec_.kind == ListKind::Draft) require(last, "a draft list off the last device");
   }
 
-  // Plan 21v2b: a tensor-parallel card's list - the card's buffers, the decode kind only, every binary present.
+  // Plan 21-QFN-v2b: a tensor-parallel card's list - the card's buffers, the decode kind only, every binary present.
   void check_tp() {
     require(tp_->link && tp_->moe && tp_->card && tp_->embed && tp_->slots,
             "a tensor-parallel list without its crossings, card, embedding or slots");
@@ -225,7 +225,7 @@ class Walk {
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
   }
 
-  // Plan 21v2b: out_proj / o_proj's all-reduce in the slices form over `buf` (in place) - tp_send(buf, peer_land,
+  // Plan 21-QFN-v2b: out_proj / o_proj's all-reduce in the slices form over `buf` (in place) - tp_send(buf, peer_land,
   // send_ctr, buf), then tp_sum(buf, land, buf, sum_ctr, state, spin_limit) into one row (the next combine folds it as
   // one slice). The MoE's is wired into its down and finish (moe()).
   void cross(void* buf) {
@@ -387,7 +387,7 @@ class Walk {
     pending_layer_ = int(l);
   }
 
-  // The PLE layer's prologue (spec 21 §2.4: `H = H + ple(H)` before the attn side): materialise H (unless it
+  // The PLE layer's prologue (spec 21-QFN §2.4: `H = H + ple(H)` before the attn side): materialise H (unless it
   // landed materialised), the gather from host USM, the key||value projections, the block (M = 1) or - a verify at
   // M > 1 - q4_pf_ple's gate / conv / ring at C = 4 (q4_ple_block is M = 1 only: a row's p - 3 may be this launch's).
   void ple(const loader::Q4Layer& L) {
@@ -633,7 +633,7 @@ class Walk {
       k.arg_ptr(1, rt);
       launch(k, 1, M_);
     }
-    // The expert tier (plan 21v2a Task 8): with a table row the _TBL binaries read each routed expert's blocks from
+    // The expert tier (plan 21-QFN-v2a Task 8): with a table row the _TBL binaries read each routed expert's blocks from
     // its address (VRAM or pinned host memory) - gate||up the row, down the row + 512 entries; the arithmetic is the
     // direct form's.
     const bool tbl = L.expert_row != nullptr;
@@ -753,7 +753,7 @@ class Walk {
 
   void head() { mixer_and_head(*part_.final_mixer, b_.logits.ptr()); }
 
-  // --- spec 21e: the MTP head ------------------------------------------------------------------------------------
+  // --- spec 21-QFNe: the MTP head ------------------------------------------------------------------------------------
   // The fusion over M_ rows of R (`R`: [M][10240] bf16) and the head Control's tokens: q4_mtp_norm, fc_embedding at
   // M, fc_hidden at M = 4 a row, q4_mtp_fuse -> b.H (the head layer's input, materialised).
   void mtp_fuse(const void* R) {
