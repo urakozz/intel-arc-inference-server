@@ -1,19 +1,23 @@
 // Plan 21v2b Task 4: Qwen3.8-Flash-Next's prefill on `--parallel tp` against `--parallel pp` (box only; label
 // checkpoint;qwen4exp;tp). One engine a process (each pins the 51.8 GB PLE table), so a comparison is two runs:
-//   qwen4exp_tp_prefill_test <checkpoint> <ids> pp|tp <rows file> [layers 18] [n 4500] [bench 0]
+//   qwen4exp_tp_prefill_test <checkpoint> <ids> pp|tp|ppdump|tpdump <rows file> [layers 18] [n 4500] [bench 0]
 // The prompt is <ids> cycled to n positions (4500: three chunks - all dense, straddling the dense range, a 404-row
 // tail); --layers N with every expert resident, the whole model with each engine's tier as the CLI plans it.
 //   pp  one prefill; writes the last logits, the first id, the last chunk's route rows and the control (its prefill's
 //       last logits' cosine against its decode fill) to <rows file>
 //   tp  (1) the walk: each chunk's launches are 2 x prefill_device_launches at the card's shapes, the head's 2 x
 //           kPrefillHeadLaunches; both cards' Controls agree after the merge
-//       (2) determinism: two prefills (reset between) leave the same last logits, first id and both cards' H, bitwise
+//       (2) determinism: two prefills (reset between) leave the same last logits, first id and both cards' H, bitwise;
+//           those logits, the first id, the last chunk's routes and H -> <rows file>.tp
 //       (3) against pp's prefill: the last logits' cosine, the first id equal or inside pp's two-bf16-ulp window
 //           (gated); the last chunk's routes - (row, layer) pairs with pp's expert set, the rest split by pp's p10 - p11
 //           gap (near-ties within kTieTol) - printed
 //       (4) against tp's own decode fill (ingest, one id a replay): the last logits' cosine within 2x the distance of
 //           pp's own prefill from its decode fill (the control pp writes; qwen4exp_prefill_test's rule for a truncated
 //           model), the first id; 32 greedy ids from each - printed
+//   ppdump  pp's prefill, then its last logits, first id, the last chunk's route rows and its last QSA layer's
+//       block scores to <rows file> (no decode fill)
+//   tpdump  tp's (1) and (2) and its <rows file>.tp, then stops (no pp rows, no decode fill)
 //   bench > 0: only the timing - a 2048-id warm-up prefill, then `bench` prefills of each length in n (a comma list,
 //   one load), each one's t/s; under B70_PREFILL_PROFILE=1 each one's phases (runtime/prefill/profile.h)
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
@@ -64,7 +68,7 @@ float bits(uint32_t w) {
 
 int main(int argc, char** argv) {
   if (argc < 5) {
-    std::fprintf(stderr, "usage: qwen4exp_tp_prefill_test <checkpoint> <ids> pp|tp <rows file> [layers] [n] [bench]\n");
+    std::fprintf(stderr, "usage: qwen4exp_tp_prefill_test <checkpoint> <ids> pp|tp|ppdump|tpdump <rows file> [layers] [n] [bench]\n");
     return 2;
   }
   std::string why;
@@ -95,7 +99,8 @@ int main(int argc, char** argv) {
   CHECK(!src.empty() && n >= 1);
   std::vector<uint32_t> prompt(n);
   for (uint32_t i = 0; i < n; ++i) prompt[i] = src[i % src.size()];
-  const std::string mode = argv[3], rows_path = argv[4];
+  const bool dump = std::string(argv[3]) == "tpdump" || std::string(argv[3]) == "ppdump";
+  const std::string mode = dump ? std::string(argv[3]).substr(0, 2) : argv[3], rows_path = argv[4];
   CHECK(mode == "pp" || mode == "tp");
   const uint32_t V = d.vocab;
   const bool whole = layers == loader::qwen4exp_checkpoint_desc(snap).layers;
@@ -161,6 +166,20 @@ int main(int argc, char** argv) {
     const std::vector<float> lg = logits();
     const std::vector<uint32_t> rt = pp->read_prefill_routes();
     const uint32_t first = pending();
+    if (dump) {
+      std::vector<float> sc = pp->read_prefill_last_qsa_scores();
+      const uint32_t stride = max_len / 4, p0 = n - lastC;
+      for (uint32_t m = 0; m < rq::kPfC; ++m)   // only the rows' complete blocks are scores (the rest is stale)
+        std::fill(sc.begin() + size_t(m) * stride + (m < lastC ? (p0 + m + 1) / 4 : 0),
+                  sc.begin() + size_t(m + 1) * stride, 0.0f);
+      FILE* f = std::fopen(rows_path.c_str(), "wb");
+      CHECK(f && std::fwrite(lg.data(), 4, lg.size(), f) == lg.size() && std::fwrite(&first, 4, 1, f) == 1 &&
+            std::fwrite(rt.data(), 4, rt.size(), f) == rt.size() && std::fwrite(sc.data(), 4, sc.size(), f) == sc.size());
+      std::fclose(f);
+      std::printf("tp-prefill: pp's last logits, first id, routes and last QSA layer's scores -> %s\n", rows_path.c_str());
+      std::printf("qwen4exp_tp_prefill_test OK\n");
+      return 0;
+    }
     reset();   // the control: pp's own prefill against its decode fill
     pp->ingest(prompt);
     const float ctl = float(cosine(lg, logits(), d.vocab_used));
@@ -197,6 +216,17 @@ int main(int argc, char** argv) {
   std::printf("tp-prefill: (2) two prefills: last logits, first id, H %s\n", same ? "bitwise" : "DIFFER");
   CHECK(same);
   const std::vector<uint32_t> tr = tp->read_prefill_routes();
+  {   // tp's own rows beside pp's file (<rows file>.tp), for a bitwise before / after of a prefill change
+    FILE* f = std::fopen((rows_path + ".tp").c_str(), "wb");
+    CHECK(f && std::fwrite(a.data(), 4, a.size(), f) == a.size() && std::fwrite(&a_first, 4, 1, f) == 1 &&
+          std::fwrite(tr.data(), 4, tr.size(), f) == tr.size() && std::fwrite(h0.data(), 2, h0.size(), f) == h0.size());
+    std::fclose(f);
+  }
+  if (dump) {
+    std::printf("tp-prefill: tp's last logits, first id, routes and H -> %s.tp\n", rows_path.c_str());
+    std::printf("qwen4exp_tp_prefill_test OK\n");
+    return 0;
+  }
   // (3) against pp's prefill
   std::vector<float> pl(V);
   uint32_t p_first = 0;

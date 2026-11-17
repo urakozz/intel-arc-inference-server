@@ -84,7 +84,8 @@ struct Qwen4ExpMtpPrefill {
 // Plan 21v2b Task 4: a tensor-parallel card's chunk (`--parallel tp`). The walk is one card's over every layer at the
 // card's shapes (model::q4_tp_card: its halves of the GDN and QSA heads, of every expert, its K half of out_proj /
 // o_proj), with the replicated parts (the hyper-connections, the router and route, the indexer and selection, the PLE)
-// run on both cards on the same bits. After each row-parallel unit - out_proj / o_proj (the GEMM over the card's K
+// run on both cards on the same bits - the selection split by rows between them (`rctl` below). After each
+// row-parallel unit - out_proj / o_proj (the GEMM over the card's K
 // half), and the MoE (the down over the card's K half of every expert, fp32 rows: pf_moe_q4gemm OUT_F32, then
 // q4_pf_moe_combine_f32 - the card's fp32 partial of the block's output) - the card's fp32 partial [C][2560] goes into
 // slice `rank` of the unit's fold slot (slot u & 1, u counting the units from 0 each chunk), the card copies it into the
@@ -113,6 +114,18 @@ struct Q4TpPrefill {
   void* H = nullptr;
   void* inj = nullptr;
   ze_command_list_handle_t bcs = nullptr;
+  // The indexer split by rows (tp_split_rows(pos, C)). Both cards ran the scoring and selection of every row; here
+  // each runs it for its rows - card 0 [0, tp_rows_cut(C)), card 1 the rest - under `rctl` (host: the chunk's Control
+  // with pos = its first row's, n_active = its rows), after the indexer's keys and queries of every row. Then it
+  // copies its selection rows into the same rows of the peer's (on `bcs` after lists_ready(rank, u), signalling
+  // lists_sent(rank, u): ev[ev_off + (6 + card) x units + u] and ev[ev_off + (4 + card) x units + u]), runs
+  // q||gate||k||v and the attention prep beside the copy, and - in a second part, once the peer's copy is appended
+  // (prefill_pair_tp) - waits for the peer's rows before the attention. Selection rows: the scratch's per-layer rows,
+  // or (`lists`, the pair's second chunk) one layer's [kPfC][kListRow] that every QSA layer reuses: the peer copies
+  // into them only after its wait for this card's crossing of a unit between, which follows this card's attention.
+  Control* rctl = nullptr;
+  void* lists = nullptr;
+  void* peer_lists = nullptr;   // the peer's selection rows of this chunk (its scratch's lists, or its `lists`)
 };
 
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has written the ids
@@ -149,7 +162,9 @@ struct Q4TpChunk {
 // Plan 21-QFN-v2b Task 4 Step 2: `n` (1 or 2) consecutive chunks in flight on both cards - Qwen3.8's TP prefill
 // wavefront (plan 17c): each card appends, for unit u, chunk A's unit then chunk B's, each preceded by the wait for that
 // chunk's crossing of unit u - 1; a crossing runs on the card's copy-engine list (Q4TpPrefill::bcs) after the unit's
-// ready, so A's crossing of unit u rides beside B's compute of unit u and the reverse. Unit u of B follows unit u of A
+// ready, so A's crossing of unit u rides beside B's compute of unit u and the reverse. A QSA unit under the indexer's
+// row split is appended in two parts: both cards up to their selection rows' copy, then both from the wait for the
+// peer's (each wait after the signal it waits for). Unit u of B follows unit u of A
 // on the in-order compute list, so the state (KV, GDN, rings) of a layer is A's when B reads it, as two consecutive
 // chunks on one card. Leaves each chunk as Q4TpChunk says (and the head's pass on its card, per chunk in order).
 void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array<Q4TpChunk, 2>, 2>& chunks,

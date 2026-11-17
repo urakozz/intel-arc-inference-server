@@ -156,6 +156,67 @@ __kernel void q4_hc_combine_norm(__global const uint* restrict ctrl, __global us
 //   down_f32  fp32 [M][UP_DOWN]   gemv_bf16's output (320 down rows, then the 4 inject rows under _I)
 //   up        bf16 gemv_bf16 tiles {K 320, N 10240}: [n_tile][k_octet][8 k][16 n]
 //   xn        bf16 [M][4][2560]   x bf16 [M][2560]   inj fp32 [M][4]
+#ifdef UP_ROWS
+// _R<UP_ROWS>[C<UP_COLS>] (the prefill's, M = 2048): one work-group owns UP_ROWS rows of UP_COLS columns (4 x UP_COLS
+// lanes, a lane a (stream, column)), so each up weight is read once for UP_ROWS rows and each row's 320 activations are
+// computed once for UP_COLS columns; every row's arithmetic is the one-row form's, in its order. Grid
+// (2560 / UP_COLS, M / UP_ROWS).
+#ifndef UP_COLS
+#define UP_COLS 16
+#endif
+#define WG_UR (HC * UP_COLS)
+#if UP_ROWS * HC > WG_UR
+#error "q4_hc_up_mix _R: the inject rows (UP_ROWS x 4) must fit one work-group"
+#endif
+__attribute__((reqd_work_group_size(WG_UR, 1, 1)))
+__kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const float* restrict down_f32,
+                           __global const ushort* restrict up, __global const ushort* restrict xn,
+                           __global ushort* restrict x, __global float* restrict inj) {
+  const uint g = get_group_id(0);
+  const uint m0 = get_group_id(1) * UP_ROWS;
+  const uint lid = get_local_id(0);
+  const uint nact = n_rows(ctrl);
+  if (m0 >= nact) return;   // uniform
+  const uint nr = min((uint)UP_ROWS, nact - m0);
+  __local float a[UP_ROWS * LOW];
+  __local float p[UP_ROWS * WG_UR];
+  for (uint i = lid; i < UP_ROWS * LOW; i += WG_UR) {
+    const uint r = i / LOW, jj = i % LOW;
+    a[i] = r < nr ? rf(silu_t(rf(rf(down_f32[(size_t)(m0 + r) * UP_DOWN + jj]) / 4.0f))) : 0.0f;
+  }
+#if UP_INJECT
+  if (g == 0 && lid < nr * HC) {
+    const uint r = lid / HC, s = lid % HC;
+    inj[(m0 + r) * HC + s] = rf(2.0f * rf(sigmoid_t(rf(rf(down_f32[(size_t)(m0 + r) * UP_DOWN + LOW + s]) / 4.0f))));
+  }
+#else
+  (void)inj;
+#endif
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint s = lid / UP_COLS, ci = lid % UP_COLS;
+  const uint c = g * UP_COLS + ci, n = s * HIDDEN + c;
+  __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128 + n % 16;
+  float acc[UP_ROWS];
+  for (uint r = 0; r < UP_ROWS; ++r) acc[r] = 0.0f;
+  for (uint k8 = 0; k8 < K8; ++k8)
+    for (uint i = 0; i < 8; ++i) {
+      const float wv = bf16f(tile[(size_t)k8 * 128 + i * 16]);
+      for (uint r = 0; r < UP_ROWS; ++r) acc[r] = fma(a[r * LOW + k8 * 8 + i], wv, acc[r]);
+    }
+  for (uint r = 0; r < UP_ROWS; ++r)
+    if (r < nr) {
+      const float gv = rf(sigmoid_t(rf(acc[r])));
+      p[r * WG_UR + lid] = rf(gv * bf16f(xn[(size_t)(m0 + r) * HCN + n]));
+    }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint i = lid; i < nr * UP_COLS; i += WG_UR) {
+    const uint r = i / UP_COLS, l = i % UP_COLS;
+    __local const float* restrict pr = p + r * WG_UR;
+    x[(size_t)(m0 + r) * HIDDEN + g * UP_COLS + l] =
+        rne_bf16((((pr[l] + pr[UP_COLS + l]) + pr[2 * UP_COLS + l]) + pr[3 * UP_COLS + l]) / 4.0f);
+  }
+}
+#else
 __attribute__((reqd_work_group_size(WG_UP, 1, 1)))
 __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const float* restrict down_f32,
                            __global const ushort* restrict up, __global const ushort* restrict xn,
@@ -185,4 +246,5 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
   barrier(CLK_LOCAL_MEM_FENCE);
   if (lid < 16) x[(size_t)m * HIDDEN + c] = rne_bf16((((p[lid] + p[16 + lid]) + p[32 + lid]) + p[48 + lid]) / 4.0f);
 }
+#endif  // UP_ROWS
 #endif  // UP_DOWN

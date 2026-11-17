@@ -256,7 +256,7 @@ void hc(Dev& dv) {
   const std::vector<float> down = rf32(size_t(kC) * kq::kPfHcDownLd, -6.f, 6.f, 14);
   const std::vector<uint16_t> upw = rbf16(size_t(kq::kHcLow) * HCN, -0.15f, 0.15f, 15), xn = rbf16(size_t(kC) * HCN, -2.f, 2.f, 16);
   l0::Mem dd = dv.up(down), du = dv.up(upw), dxn = dv.up(xn), dx = dv.zeros(size_t(kC) * H * 2), dinj = dv.zeros(size_t(kC) * 16);
-  dv.go(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix", H / 16, C, 1,
+  dv.go(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix", H / kq::kPfHcUpCols, (C + kq::kPfHcUpRows - 1) / kq::kPfHcUpRows, 1,
         {PtrArg(dv.ctrl.ptr()), PtrArg(dd.ptr()), PtrArg(du.ptr()), PtrArg(dxn.ptr()), PtrArg(dx.ptr()), PtrArg(dinj.ptr())});
   const std::vector<uint16_t> xd = dv.rd<uint16_t>(dx, size_t(C) * H);
   const std::vector<float> id = dv.rd<float>(dinj, size_t(C) * 4);
@@ -302,7 +302,7 @@ void indexer(Dev& dv) {
   const uint32_t C = 2048, p0 = pos - C;
   l0::Mem sc = dv.zeros(size_t(C) * stride * 4), lists = dv.zeros(size_t(C) * kListRow * 4), diag = dv.zeros(size_t(C) * 8);
   dv.set_ctl(p0, C);
-  dv.go(kq::pf_qsa_variant(), "q4_qsa_score", (stride + 255) / 256, C, 1,
+  dv.go(kq::pf_qsa_variant(), "q4_qsa_score", (stride + 255) / 256, kq::pf_score_groups(C), 1,
         {PtrArg(dv.ctrl.ptr()), PtrArg(q.ptr()), PtrArg(keys.ptr()), PtrArg(sc.ptr()), arg_val(stride)});
   dv.go(kq::pf_qsa_variant(), "q4_qsa_select", 1, C, 1,
         {PtrArg(dv.ctrl.ptr()), PtrArg(sc.ptr()), arg_val(stride), PtrArg(lists.ptr()), PtrArg(diag.ptr())});

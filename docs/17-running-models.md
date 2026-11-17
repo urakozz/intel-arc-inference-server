@@ -232,7 +232,8 @@ bf16 ulps of the reference's top choice. Plain code paths are still checked bitw
 - Ornith 1.5 is supported and its box tests pass; its speed rows (decode, prefill, the MTP cost table) are in
   BENCHMARKS.
 - Qwen3.8-Flash-Next is served whole on two cards from our own export, with its routed experts partly in host memory
-  (the expert tier); speed rows are in BENCHMARKS. On our export, its served tool calls, judged against f32
+  (the expert tier): pipeline parallel by default, tensor parallel when asked (`--parallel tp`: faster decode, slower
+  prefill); speed rows are in BENCHMARKS. On our export, its served tool calls, judged against f32
   references of our weights, pass 33 of 36; the 3 failures are being diagnosed. The per-token quality checks against
   the bf16 original have not been run yet ([open-work.md](open-work.md)).
 - Kolibri-1 is supported by the code but not actively tuned, and has no speed rows.
@@ -246,10 +247,10 @@ decoding) runs on `main` on demand.
 | | Qwen3.8-27B | Ornith 1.5 35B-A3B | Kolibri-1 | Qwen3.8-Flash-Next |
 |---|---|---|---|---|
 | checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | ours (int4 g64, not published) or Intel's interim W4A16 |
-| `b70-serve` | yes | yes | yes, two cards by default | the whole model on two cards (`--parallel pp`), experts partly in pinned host memory |
-| `--parallel tp` | yes | refused | refused | refused |
+| `b70-serve` | yes | yes | yes, two cards by default | the whole model on two cards (`--parallel auto` = pp), experts partly in pinned host memory |
+| `--parallel tp` | yes | refused | refused | yes, when asked: served decode with MTP 1.06-1.36x pp's on text, 1.08x on tool calls; prefill 0.56-0.81x pp's |
 | `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request per card); more is refused | refused | refused |
-| `--parallel pp` (two cards) | yes | yes | its default (its own engine) | yes (the whole model needs it) |
+| `--parallel pp` (two cards) | yes | yes | its default (its own engine) | its default for the whole model (`--parallel auto`) |
 | `b70-decode` | yes | yes | decode and prefill, two cards by default | decode and prefill, the whole model or `--layers N` |
 | speed rows in BENCHMARKS | yes | yes | no | yes (the whole model, our export) |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (an MoE head) | none (`auto` = off) | `b70-serve`: adaptive MTP by default, with its own cost table, `--spec-max` 1 to 3; `b70-decode` decodes plain |
@@ -395,7 +396,7 @@ indexer's own block selection and a sparse flash attention past them. That is 35
 
 ### Serving
 
-`b70-serve <checkpoint> --parallel pp` serves the whole model, or `--layers N` a truncated one on one card or two, as
+`b70-serve <checkpoint>` serves the whole model on two cards, or `--layers N` a truncated one on one card or two, as
 OpenAI chat through the Qwen chat path. The template is Qwen3.8's (the original's newer revision adds
 `{% generation %}` markers, which render nothing); tool calls are XML and reasoning is `<think>`, as for Qwen3.8.
 Requests are greedy unless they ask for sampling.
@@ -414,11 +415,23 @@ experts per layer, some from host memory, so an iteration of K = 3 costs 2.0-2.8
 Code and tool calls run K = 3 (acceptance 0.88-1.00); a request accepted below about 0.7 (prose) runs plain steps with
 a K = 1 probe every 4. `B70_MTP_ADAPTIVE=0` keeps K at `--spec-max`, for A/B runs.
 
+Two cards split the model one of two ways. `--parallel pp` (what `--parallel auto` picks for the whole model on two
+cards; one card when only one is visible) gives each card half of the layers: 24 each, the MTP head and the lm_head on
+the second. `--parallel tp` gives each card half of every layer: half the attention and gated delta-net heads, half of
+every expert (each card keeps its own experts' halves resident and reads the rest from host memory), half the
+lm_head's vocabulary, with the MTP head whole on the second card. The two halves are summed after each mixer and each
+MoE block by peer writes. Served decode with MTP is faster under tp (1.06-1.36x pp's on text, 0.95-1.22x and 1.08x on average on five tool
+calls) and prefill is slower: 0.81x pp's at 4k ids, 0.61x at 32k and 0.56x at 128k, because both cards repeat the
+hyper-connections and the indexer's block selection. tp needs `--lm-head int8` in `b70-decode` (`b70-serve` always uses
+it), `--layers N` rather than `--layers auto`, and has no `--pipeline-split`.
+
 ```sh
 # every command below needs the PLE int8 file beside the snapshot (<snapshot>-ple-int8/)
 O=<our export>   # the whole model; experts that do not fit VRAM in pinned host memory (63.2 GB pinned with the PLE)
-./build/src/cli/b70-serve $O --parallel pp
+./build/src/cli/b70-serve $O                     # two cards: pp
+./build/src/cli/b70-serve $O --parallel tp        # faster decode, slower prefill
 ./build/src/cli/b70-decode $O --parallel pp --bench --depth 4096 --tg 256
+./build/src/cli/b70-decode $O --parallel tp --lm-head int8 --bench --prefill-length 4096 --tg 32
 
 I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 ./build/src/cli/b70-decode $I --layers 18 --ids tests/golden/prompts/q4exp_short.ids --n 32
@@ -437,8 +450,9 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
 ### Limits
 
 - Prefill runs on `l0` only: `--prefill-backend l0-int8` is refused, because its int8 linears rotate activations in
-  whole 1024-wide Hadamard blocks and this model's hidden size is 2560. `--prefill-chunk` is at most 2048. Each chunk
-  crosses between the cards by copy, with card 0 running the next chunk while card 1 finishes this one, and the
+  whole 1024-wide Hadamard blocks and this model's hidden size is 2560. `--prefill-chunk` is at most 2048. Under pp
+  each chunk crosses between the cards by copy, with card 0 running the next chunk while card 1 finishes this one;
+  under tp two chunks are in flight, each one's sums crossing on the copy engine beside the other's compute. The
   prefill reads its expert misses from host memory inside the GEMMs.
 - MTP in `b70-serve` only: `b70-decode --spec mtp` and `--draft-vocab` are refused.
 - The expert placement is static; experts are not swapped while serving.
