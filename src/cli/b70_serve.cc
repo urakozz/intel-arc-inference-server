@@ -965,6 +965,10 @@ int run(int argc, char** argv) {
   if (pipe.mode == cli::Parallel::One && pipe.have_split)   // before the model is even resolved
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   max_num_seqs = cli::check_max_num_seqs(pipe, max_num_seqs, have_max_num_seqs);
+  // Flash-Next has no sequence slots yet (spec 21-QFN-v3f): one request at a time in every mode.
+  if (max_num_seqs > 1 && cli::qwen4exp::is_qwen4exp(path))
+    throw std::runtime_error("Qwen3.8-Flash-Next serves one request at a time for now (further requests wait their "
+                             "turn) - drop --max-num-seqs");
   // Plan 13b / spec 17d / --max-num-seqs above 1: Qwen3.8 (replica: and Ornith) only, by name, before any device or
   // weight file.
   std::string architecture, name;
