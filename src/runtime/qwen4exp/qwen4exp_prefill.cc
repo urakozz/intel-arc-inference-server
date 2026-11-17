@@ -1,6 +1,8 @@
 #include "runtime/qwen4exp/qwen4exp_prefill.h"
 
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -76,6 +78,44 @@ class Walk {
     require(n_ == want, "device " + std::to_string(part_.device) + "'s chunk at " + std::to_string(pos_) + " (" +
                             std::to_string(C_) + " rows) appended " + std::to_string(n_) + " launches, not the " +
                             std::to_string(want) + " runtime::qwen4exp::prefill_device_launches gives");
+  }
+
+  // Plan 21v2b Task 4: a tensor-parallel card's chunk a unit at a time (prefill_chunk_tp): tp_begin, then for each
+  // unit u < 2 x layers tp_unit(u) - its body, ending in this card's copy and sent(rank, u) - and, once the peer's
+  // unit u is appended too, tp_wait() (the wait for sent(1 - rank, u)); tp_end checks the launch count.
+  void tp_begin() {
+    check();
+    launch(kc_(kq::pf_embed_variant(), "pf_embed_gather"), 1, C_, 1,
+           {PtrArg(ids_), PtrArg(tp_->embed), PtrArg(s_.x.ptr()), arg_val(C_)});
+    src_ = HcSrc::Embed;
+  }
+  void tp_unit(uint32_t u) {
+    const uint32_t l = u / 2;
+    const loader::Q4Layer& L = part_.layer(l);
+    if (u % 2 == 0) {   // the mixer: [the PLE prologue], the attn side's gated residual, GDN or QSA, out / o_proj
+      require(L.hc_attn && L.hc_mlp && L.router && ((L.gate_up && L.down) || L.expert_row) && L.shared,
+              "layer " + std::to_string(l) + " is not fully loaded");
+      if (l == d_.ple_layer) ple(L);
+      hc(*L.hc_attn);
+      if (d_.is_qsa(l))
+        qsa(l, L);
+      else
+        gdn(l, L);
+    } else {   // the MLP side's gated residual and the MoE
+      hc(*L.hc_mlp);
+      moe(l, L);
+    }
+  }
+  void tp_wait() {
+    const uint32_t u = unit_ - 1, r = tp_->rank;
+    cx_.wait_event(tp_->ev->handle((1 - r) * tp_->units + u));
+    fold_ = tp_->fold[u & 1u];
+  }
+  void tp_end() {
+    const size_t want = prefill_device_launches(c_, model::Q4Placement::one(c_), 0, pos_, C_);
+    require(unit_ == tp_->units && n_ == want, "card " + std::to_string(tp_->rank) + "'s chunk at " +
+                                                   std::to_string(pos_) + " appended " + std::to_string(n_) +
+                                                   " launches, not the " + std::to_string(want) + " it plans");
   }
 
  private:
@@ -483,15 +523,14 @@ class Walk {
   void* row_out() const {
     return tp_ ? tp_->fold[unit_ & 1u] + size_t(tp_->rank) * kPfC * d_.hidden : s_.partials.ptr();
   }
-  // This card's slice into the peer's slot, sent(rank, u); wait sent(1 - rank, u); the next combine folds the slot.
+  // This card's slice into the peer's slot and sent(rank, u); tp_wait appends the wait for the peer's, after the
+  // peer's unit u has been appended (prefill_chunk_tp), and points the next combine at the slot.
   void cross() {
     const uint32_t u = unit_++, r = tp_->rank;
     require(u < tp_->units, "more row-parallel units than 2 x layers");
     const size_t off = size_t(r) * kPfC * d_.hidden;
     cx_.copy(tp_->peer_fold[u & 1u] + off, tp_->fold[u & 1u] + off, size_t(C_) * d_.hidden * 4);
     cx_.signal(tp_->ev->handle(r * tp_->units + u));
-    cx_.wait_event(tp_->ev->handle((1 - r) * tp_->units + u));
-    fold_ = tp_->fold[u & 1u];
   }
 
   // --- spec 21e: the MTP head's pass -------------------------------------------------------------------------------
@@ -642,8 +681,23 @@ size_t Qwen4ExpPrefillScratch::bytes() const {
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
                    const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
-                   const uint32_t* ids, const Q4TpPrefill* tp) {
-  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp, ctl, ids, tp).run();
+                   const uint32_t* ids) {
+  Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp, ctl, ids, nullptr).run();
+}
+
+void prefill_chunk_tp(const loader::Q4LoadedModel& m, const std::array<Q4TpChunk, 2>& cards, uint32_t pos, uint32_t C) {
+  std::array<std::optional<Walk>, 2> w;
+  for (uint32_t r = 0; r < 2; ++r) {
+    const Q4TpChunk& k = cards[r];
+    if (!k.tp || k.tp->rank != r) throw std::runtime_error("runtime::qwen4exp::prefill_chunk_tp: card " + std::to_string(r));
+    w[r].emplace(*k.cx, *k.kc, *k.s, m, *k.part, *k.b, pos, C, false, nullptr, false, nullptr, k.ctl, k.ids, k.tp);
+  }
+  for (auto& x : w) x->tp_begin();
+  for (uint32_t u = 0; u < cards[0].tp->units; ++u) {
+    for (auto& x : w) x->tp_unit(u);
+    for (auto& x : w) x->tp_wait();
+  }
+  for (auto& x : w) x->tp_end();
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,

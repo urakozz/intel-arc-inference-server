@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -109,14 +110,29 @@ struct Q4TpPrefill {
 // their lists there and q4_qsa_score / _select are not launched. `two_cards`: device 0 ends with the materialising
 // _Y_NN. Appends exactly prefill_device_launches(...) launches; waits only when B70_PREFILL_PROFILE=1. Leaves: the
 // device's layers' KV rows [pos, pos + C), compressed keys and tail rings, GDN state and conv rings, the PLE rings,
-// H (pending the last MoE's y) and its layers' route rows / selections of this chunk. `tp` (plan 21v2b Task 4): a
-// tensor-parallel card's chunk (Q4TpPrefill) - `part` the card's, `b` and `s` at the card's shapes; it appends
-// prefill_device_launches at the card's descriptor and one placement, and leaves the last MoE's partials in the last
-// unit's fold slot (crossed).
+// H (pending the last MoE's y) and its layers' route rows / selections of this chunk.
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
                    const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
-                   const uint32_t* ids, const Q4TpPrefill* tp = nullptr);
+                   const uint32_t* ids);
+
+// Plan 21v2b Task 4: ONE chunk on both tensor-parallel cards (Q4TpPrefill), prefill_chunk's contract per card at the
+// card's shapes (each appends prefill_device_launches at its descriptor and one placement). From one host thread, a
+// unit at a time: card 0's unit u, card 1's, then each card's wait for the other's sent(u) - so a wait is appended only
+// after the signal it waits for, and neither list runs more than a unit ahead of its appends (a list blocked on a wait
+// with thousands of commands behind it stalls the appends: the driver's command buffer fills). Leaves the last MoE's
+// partials in the last unit's fold slot (crossed) on both cards.
+struct Q4TpChunk {
+  prefill::Context* cx = nullptr;
+  prefill::KernelCache* kc = nullptr;
+  Qwen4ExpPrefillScratch* s = nullptr;
+  const loader::Q4DevicePart* part = nullptr;
+  Qwen4ExpBuffers* b = nullptr;
+  const Control* ctl = nullptr;
+  const uint32_t* ids = nullptr;
+  const Q4TpPrefill* tp = nullptr;
+};
+void prefill_chunk_tp(const loader::Q4LoadedModel& m, const std::array<Q4TpChunk, 2>& cards, uint32_t pos, uint32_t C);
 
 // The tail only the LAST chunk runs, on the last device: decode's final mixer over row `last_row` (its H, the pending
 // y and inject weights), lm_head and the two argmax stages - decode's binaries, so the first generated id is chosen
