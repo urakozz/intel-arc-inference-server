@@ -453,7 +453,10 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
   whole 1024-wide Hadamard blocks and this model's hidden size is 2560. `--prefill-chunk` is at most 2048. Under pp
   each chunk crosses between the cards by copy, with card 0 running the next chunk while card 1 finishes this one;
   under tp two chunks are in flight, each one's sums crossing on the copy engine beside the other's compute. The
-  prefill reads its expert misses from host memory inside the GEMMs.
+  prefill copies each layer's experts that live in host memory onto the card on the copy engine while the layers
+  before it compute.
+- One request at a time, in every mode: `--max-num-seqs` above 1 is refused at startup; further requests wait their
+  turn.
 - MTP in `b70-serve` only: `b70-decode --spec mtp` and `--draft-vocab` are refused.
 - The expert placement is static; experts are not swapped while serving.
 - bf16 KV cache only (`--kv-cache int8` is refused). `reasoning_effort` is not forwarded to the template, as for
