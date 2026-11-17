@@ -513,9 +513,16 @@ size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
 // [2][2][kPfC][hidden] (a slot's slice r is card r's partial of a row-parallel unit), and the down GEMM's fp32 rows
 // [tmax x 32][hidden] (qwen4exp_prefill.h, Q4TpPrefill). Plan 21-QFN-v2b Task 4 Step 2: kTpPfChunks chunks in flight
 // (prefill_pair_tp), each its fold slots, every chunk past the first its residual rows bf16 [kPfC][10240] and inject
-// weights fp32 [kPfC][4] - 603 MB at hidden 2560 (derived).
+// weights fp32 [kPfC][4] - 603 MB at hidden 2560 (derived); and its selection rows of one QSA layer, u32
+// [kPfC][kListRow] (the indexer split by rows, below).
 inline constexpr uint32_t kTpPfChunks = 2;
 size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one);
+// The indexer split by rows (qwen4exp_prefill.h, Q4TpPrefill::rctl): on a chunk with sparse rows and at least
+// kTpSplitMin rows, card 0 scores and selects rows [0, tp_rows_cut(C)), card 1 the rest, and each copies its
+// selection rows to the peer - the same kernels on fewer rows, so the lists are bitwise the replicated walk's.
+inline constexpr uint32_t kTpSplitMin = 64;
+inline bool tp_split_rows(uint32_t pos, uint32_t C) { return C >= kTpSplitMin && pf_dense_rows(pos, C) < C; }
+inline uint32_t tp_rows_cut(uint32_t C) { return C / 2; }
 // A card's plan under `p.tp` (one DevicePlan per card): plan() over model::q4_tp_card(one, rank) at one card's
 // placement - its halves of every layer, its halves of the KV (1 kv head) and of the GDN state (24 heads), the indexer
 // keys and the PLE state whole, the decode (and prefill) scratch at the card's shapes - with the embedding whole where

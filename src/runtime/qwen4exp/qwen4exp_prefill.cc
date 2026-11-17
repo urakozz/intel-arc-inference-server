@@ -57,7 +57,7 @@ class Walk {
        bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl, const uint32_t* ids, const Q4TpPrefill* tp)
       : cx_(cx), kc_(kc), s_(s), m_(m), part_(part), d_(m.desc), c_(tp ? *tp->card : m.desc), b_(b), pos_(pos), C_(C),
         eager_(eager), injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)), mtp_(mtp), ctl_(ctl),
-        ids_(ids), tp_(tp), ctrl_(ctl), rows_(C) {}
+        ids_(ids), tp_(tp), split_(tp && tp_split_rows(pos, C)), ctrl_(ctl), rows_(C) {}
 
   void run() {
     check();
@@ -82,8 +82,10 @@ class Walk {
   }
 
   // Plan 21v2b Task 4: a tensor-parallel card's chunk a unit at a time (prefill_pair_tp): tp_begin, then for each
-  // unit u < 2 x layers tp_unit(u) - its body, ending in this card's copy and sent(rank, u) - and, once the peer's
-  // unit u is appended too, tp_wait() (the wait for sent(1 - rank, u)); tp_end checks the launch count.
+  // unit u < 2 x layers tp_unit(u) - its body, ending in this card's copy and sent(rank, u) (a QSA mixer under the
+  // indexer's row split stops after the attention prep: tp_rest, once the peer's selection rows' copy is appended,
+  // runs the rest) - and, once the peer's unit u is appended too, tp_wait() (the wait for sent(1 - rank, u)); tp_end
+  // checks the launch count.
   void tp_begin() {
     check();
     launch(kc_(kq::pf_embed_variant(), "pf_embed_gather"), 1, C_, 1,
@@ -106,6 +108,14 @@ class Walk {
       hc(*L.hc_mlp);
       moe(l, L);
     }
+  }
+  // The row split's second part (prefill_pair_tp, after both cards' tp_unit(u)): the wait for the peer's selection
+  // rows, then the unit's attention and o_proj. Nothing when the unit was not a split QSA mixer.
+  void tp_rest() {
+    if (!attend_) return;
+    attend_ = false;
+    cx_.wait_event(lists_ev(4 + 1 - tp_->rank));
+    attend(unit_ / 2);
   }
   void tp_wait() {
     const uint32_t u = unit_ - 1, r = tp_->rank;
@@ -141,6 +151,9 @@ class Walk {
               "a tensor-parallel chunk without its embedding, PLE table, fold slots, down rows or events");
       require(!injected_ && !two_ && !eager_ && d_.forms.shared == model::Q4Form::Int4,
               "a tensor-parallel chunk runs the flash attention, the int4 shared expert and no injected selection");
+      if (split_)
+        require(tp_->rctl && tp_->peer_lists && tp_->ev->size() >= tp_->ev_off + 8 * tp_->units,
+                "a tensor-parallel chunk without its row Control, the peer's selection rows or their events");
     } else {
       require(part_.device == b_.device && part_.first == b_.placement.first(b_.device) &&
                   part_.end == b_.placement.end(b_.device),
@@ -354,19 +367,33 @@ class Walk {
                 L.qsa_idx->kind == model::WeightKind::Bf16,
             "QSA layer " + std::to_string(l) + "'s projections");
     require(bool(part_.rope), "a QSA layer on a device without the RoPE table");
-    const uint32_t qi = d_.qsa_before(l);
+    if (split_) {   // tp, the indexer split by rows: its copy rides beside q||gate||k||v; tp_rest attends
+      indexer(l, L);
+      qkv(l, L);
+      attend_ = true;
+      return;
+    }
+    qkv(l, L);
+    indexer(l, L);
+    attend(l);
+  }
+  // q||gate||k||v and the attention prep (q16, every row's K / V at its position).
+  void qkv(uint32_t l, const loader::Q4Layer& L) {
     linear(*L.qsa_qkvg, s_.x.ptr(), s_.partials.ptr(), pf_ld(c_.qkvg_n()));
-    slabs(false, L.qsa_idx->mem.ptr(), nullptr, d_.hidden, d_.idx_n(), s_.x.ptr(), s_.idx_f32.ptr(), kq::kPfIdxLd);
-    void* kv_k = b_.k_layer(l);
-    void* kv_v = b_.v_layer(l);
     // pf_attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v) q16 - grid (24 + 2, C); the gate
     // is read by pf_attn_gate straight from the partials (no attn_gate write)
     const std::string prep_v =
         tp_ ? kernels::pf_attn_prep_q16_variant(kq::kTpQHeads, kq::kTpKvHeads) : kq::pf_attn_prep_q4_variant();
     launch(kc_(prep_v, "pf_attn_prep"), c_.q_heads + c_.kv_heads, C_, 1,
            {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
-            PtrArg(s_.q16.ptr()), PtrArg(nullptr), PtrArg(kv_k), PtrArg(kv_v)});
+            PtrArg(s_.q16.ptr()), PtrArg(nullptr), PtrArg(b_.k_layer(l)), PtrArg(b_.v_layer(l))});
     prefill::profile_wait(cx_, Phase::kAttnPrep);
+  }
+  // The indexer: its keys and queries of every row, then the scoring and the selection of the sparse rows - every row,
+  // or (the row split) this card's under its row Control, whose selection rows then go to the peer.
+  void indexer(uint32_t l, const loader::Q4Layer& L) {
+    const uint32_t qi = d_.qsa_before(l);
+    slabs(false, L.qsa_idx->mem.ptr(), nullptr, d_.hidden, d_.idx_n(), s_.x.ptr(), s_.idx_f32.ptr(), kq::kPfIdxLd);
     const std::string qv = kq::pf_qsa_variant();
     // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys) _PF - grid (5, C)
     launch(kc_(qv, "q4_qsa_prep"), d_.idx_heads + 1, C_, 1,
@@ -376,19 +403,48 @@ class Walk {
     launch(kc_(qv, "q4_qsa_ring"), 1, kIdxTail, 1, {PtrArg(ctrl()), PtrArg(s_.idx_f32.ptr()), PtrArg(b_.tail_layer(l))});
     const uint32_t sparse = C_ - dense_;
     const uint32_t stride = b_.max_len / d_.idx_compress;
-    void* lists = injected_ ? at(*injected_, pf_list_at(qi)) : at(s_.lists, pf_list_at(qi));
+    // the rows scored and selected here: every row, or (the row split) this card's
+    const uint32_t cut = tp_rows_cut(C_), r0 = split_ && tp_->rank == 1 ? cut : 0,
+                   n = !split_ ? C_ : tp_->rank == 1 ? C_ - cut : cut;
+    const size_t lrow = size_t(kListRow) * 4;
+    uint8_t* lists = static_cast<uint8_t*>(lists_(qi)) + r0 * lrow;
     if (sparse > 0 && !injected_) {
-      // q4_qsa_score(ctrl, idx_q, idx_keys, scores, stride) _PF - grid (ceil(n / 256), ceil(C / 4)), n the chunk's last
-      // row's complete blocks; work-groups past their rows' blocks exit on their first instruction
-      launch(kc_(qv, "q4_qsa_score"), ((pos_ + C_) / kq::kBlock + kq::kScoreWg - 1) / kq::kScoreWg,
-             kq::pf_score_groups(C_), 1,
-             {PtrArg(ctrl()), PtrArg(s_.idx_q.ptr()), PtrArg(b_.idx_keys_layer(l)), PtrArg(s_.scores.ptr()),
-              arg_val(stride)});
-      // q4_qsa_select(ctrl, scores, stride, list, diag) - grid (1, C): decode's rule per row
-      launch(kc_(qv, "q4_qsa_select"), 1, C_, 1,
-             {PtrArg(ctrl()), PtrArg(s_.scores.ptr()), arg_val(stride), PtrArg(lists), PtrArg(at(s_.diag, pf_diag_at(qi)))});
+      if (split_) ctrl_ = tp_->rctl;   // pos = row r0's, n_active = n
+      // q4_qsa_score(ctrl, idx_q, idx_keys, scores, stride) _PF - grid (ceil(nb / 256), ceil(n / 4)), nb the last row's
+      // complete blocks; work-groups past their rows' blocks exit on their first instruction
+      launch(kc_(qv, "q4_qsa_score"), ((pos_ + r0 + n) / kq::kBlock + kq::kScoreWg - 1) / kq::kScoreWg,
+             kq::pf_score_groups(n), 1,
+             {PtrArg(ctrl()), PtrArg(s_.idx_q.as<float>() + size_t(r0) * d_.idx_heads * d_.idx_dim),
+              PtrArg(b_.idx_keys_layer(l)), PtrArg(s_.scores.ptr()), arg_val(stride)});
+      // q4_qsa_select(ctrl, scores, stride, list, diag) - grid (1, n): decode's rule per row
+      launch(kc_(qv, "q4_qsa_select"), 1, n, 1,
+             {PtrArg(ctrl()), PtrArg(s_.scores.ptr()), arg_val(stride), PtrArg(lists),
+              PtrArg(at(s_.diag, pf_diag_at(qi) + size_t(r0) * 8))});
+      ctrl_ = ctl_;
     }
     prefill::profile_wait(cx_, Phase::kAttnPrep);
+    if (!split_) return;
+    // this card's selection rows into the same rows of the peer's
+    uint8_t* dst = static_cast<uint8_t*>(tp_->peer_lists) + (tp_->lists ? 0 : pf_list_at(qi)) + r0 * lrow;
+    const size_t bytes = size_t(n) * lrow;
+    const uint32_t r = tp_->rank;
+    if (tp_->bcs) {
+      ze_event_handle_t ready = lists_ev(6 + r);
+      cx_.signal(ready);
+      ZE_CHECK(zeCommandListAppendMemoryCopy(tp_->bcs, dst, lists, bytes, lists_ev(4 + r), 1, &ready));
+    } else {
+      cx_.copy(dst, lists, bytes);
+      cx_.signal(lists_ev(4 + r));
+    }
+  }
+  // A QSA layer after its selection: the dense rows' flash, the sparse rows' attention over their lists, the gate,
+  // o_proj (and tp's crossing).
+  void attend(uint32_t l) {
+    const loader::Q4Layer& L = part_.layer(l);
+    const uint32_t sparse = C_ - dense_;
+    void* lists = lists_(d_.qsa_before(l));
+    void* kv_k = b_.k_layer(l);
+    void* kv_v = b_.v_layer(l);
     if (dense_ > 0) {
       // pf_flash_attn(Q, Kc, Vc, O, pos, C, rows) _Q24KV2 - grid (ceil(dense / 8), 2 kv heads, GQA 12 / HPW 6): the
       // dense rows [0, dense) - causal over depth pos + dense
@@ -552,6 +608,13 @@ class Walk {
   // The chunk's residual rows and inject weights (the pair's second chunk has its own: Q4TpPrefill::H / inj).
   void* H_() const { return tp_ && tp_->H ? tp_->H : s_.H.ptr(); }
   void* inj_() const { return tp_ && tp_->inj ? tp_->inj : s_.inj.ptr(); }
+  // QSA layer qi's selection rows: the injected ones, the pair's second chunk's one layer (tp), or the scratch's.
+  void* lists_(uint32_t qi) const {
+    if (injected_) return at(*injected_, pf_list_at(qi));
+    return tp_ && tp_->lists ? tp_->lists : at(s_.lists, pf_list_at(qi));
+  }
+  // Row `row` of the chunk's event block at this unit (Q4TpPrefill::rctl: 4 + card sent, 6 + card ready).
+  ze_event_handle_t lists_ev(uint32_t row) const { return tp_->ev->handle(tp_->ev_off + row * tp_->units + unit_); }
 
   // --- spec 21-QFN-v1e: the MTP head's pass -------------------------------------------------------------------------------
   // A bf16 linear's columns [n_from, n_to) over `rows` rows of x (pitch K): per slab kol_pf_bf16_slab then pf_gemm_T0
@@ -647,6 +710,8 @@ class Walk {
   const Control* ctl_;              // this chunk's Control (its slot; qwen4exp_prefill.h)
   const uint32_t* ids_;             // this chunk's ids (its slot of s.ids)
   const Q4TpPrefill* tp_;           // plan 21v2b Task 4: a tensor-parallel card's chunk, or null
+  const bool split_;                // tp: the indexer split by rows on this chunk (tp_split_rows)
+  bool attend_ = false;             // tp: the unit's QSA layer attends in tp_rest, after the peer's selection rows
   uint32_t unit_ = 0;               // tp: the row-parallel units crossed so far this chunk
   const float* fold_ = nullptr;     // tp: the fold slot the pending combine reads
   const void* ctrl_;                // ctl_, or the head's chunk Control for its pass
@@ -723,7 +788,7 @@ void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array
   // each preceded by its wait for the chunk's crossing of unit u - 1 (appended after the peer's copy that signals it).
   const uint32_t units = chunks[0][0].tp->units;
   for (uint32_t u = 0; u < units; ++u)
-    for (uint32_t h = 0; h < n; ++h)
+    for (uint32_t h = 0; h < n; ++h) {
       for (uint32_t r = 0; r < 2; ++r) {
         if (u == 0)
           w[h][r]->tp_begin();   // the embedding rows into the scratch's x, read by this chunk's unit 0 alone
@@ -731,6 +796,8 @@ void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array
           w[h][r]->tp_wait();
         w[h][r]->tp_unit(u);
       }
+      for (uint32_t r = 0; r < 2; ++r) w[h][r]->tp_rest();   // the row split's waits, after both copies
+    }
   for (uint32_t h = 0; h < n; ++h)
     for (uint32_t r = 0; r < 2; ++r) {
       w[h][r]->tp_wait();
