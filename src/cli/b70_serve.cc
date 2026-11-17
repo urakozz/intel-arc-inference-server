@@ -1116,9 +1116,11 @@ int run(int argc, char** argv) {
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = spec.max_k;
     options.mtp_adaptive.cost = is_q4 ? server::MtpCost::flash_next() : server::MtpCost::int8_head();
-    // Spec 17d: tensor parallel's own table (its verify rows cross at M rows, its drafts read half the head).
-    // Qwen3.8-Flash-Next keeps its own table under tp (plan 21-QFN-v2b: pp's until tp's is measured).
-    if (pipe.tp() && !is_q4) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
+    options.mtp_adaptive.measure = is_q4;   // its ids do not depend on K: the request's own costs replace the table's
+    // Spec 17d: tensor parallel's own table (its verify rows cross at M rows, its drafts read half the head);
+    // Qwen3.8-Flash-Next's under tp (plan 21-QFN-v2b Task 7).
+    if (pipe.tp())
+      options.mtp_adaptive.cost = is_q4 ? server::MtpCost::tp_flash_next() : server::MtpCost::tp_int8_head();
     // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head share scales with it
     // (derived; MtpCost::kInt8DraftHeadShare).
     if (draft_vocab != 0)

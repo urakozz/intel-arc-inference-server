@@ -165,6 +165,43 @@ struct Q4PfRingState {
 };
 std::unique_ptr<Q4PfRingState> make_pf_ring(l0::Context& ctx, const loader::Q4DevicePart& part,
                                             const model::Qwen4ExpDesc& card);
+// Plan 21-QFN-v2b Task 7 Step 2: the prefill scratch lent to the expert tier between prefills. The scratch (and the
+// read ahead's buffers) sits idle while a request decodes, so after each prefill the next-ranked missed experts of every
+// layer (the tier's rank: its order past the residents, layers in turn so the count stays even) are copied from their
+// host mirrors into it on a copy-engine list, and once that copy is done - checked before each decode step, never
+// waited for - the table rows point at the copies (lend). Before the next prefill the rows are put back (reclaim,
+// after any copy still running): the prefill overwrites the scratch and reads those experts from host memory again.
+// The same bytes either way: bitwise.
+struct Q4LendState {
+  struct Region {
+    void* ptr;
+    size_t bytes;
+  };
+  // `regions`: the idle buffers; `tier`: the device's (rank empty: nothing lent); `list`: the copy-engine list.
+  Q4LendState(l0::Context& ctx, const loader::Q4DevicePart& part, const model::Qwen4ExpDesc& card,
+              const ExpertTier& tier, const std::vector<Region>& regions, ze_command_list_handle_t list);
+  void fill();      // after a prefill
+  void lend();      // before a decode step: the copied rows in, once the copy has finished
+  void reclaim();   // before a prefill
+  uint32_t experts() const { return n_; }   // the experts lent (both blocks each)
+  struct Copy {
+    void* dst;
+    const void* src;
+    size_t bytes;
+  };
+  l0::Context& ctx;
+  void* table = nullptr;
+  std::vector<uint64_t> orig, lent;
+  std::vector<Copy> copies;
+  std::unique_ptr<l0::SyncEventPool> ev;   // [0]: the copy finished
+  ze_command_list_handle_t list = nullptr;
+  enum class State { Idle, Filling, Lent } state = State::Idle;
+  uint32_t n_ = 0;
+};
+// The buffers of a device's prefill that hold nothing between prefills: the scratch's working rows (not its routes,
+// selections, scores or H, which the accessors read after a prefill) and the read ahead's two buffers.
+std::vector<Q4LendState::Region> lend_regions(const Qwen4ExpPrefillScratch& s, const Q4PfRingState* ring);
+
 // The copy-only queue group's ordinal (COPY without COMPUTE), or UINT32_MAX.
 uint32_t copy_ordinal(ze_device_handle_t dev);
 

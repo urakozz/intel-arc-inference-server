@@ -12,6 +12,7 @@
 // on its last row and the host merges the heads (the larger value, ties to card 0) as a decode step does.
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -87,6 +88,7 @@ struct Q4TpPrefillState {
     // card's widths (Qwen4ExpMtpPrefill::partials / q16)
     std::unique_ptr<l0::Mem> mtp_R, hctl, mtp_part, mtp_q16;
     std::unique_ptr<Q4PfRingState> ring;   // the host-memory experts read ahead (null: no expert table)
+    std::unique_ptr<Q4LendState> lend;     // the scratch lent to the tier between prefills (with the ring)
   };
   // [chunk][sent card 0 | sent card 1 | ready card 0 | ready card 1 | the same four of the row split's lists][unit]
   Q4TpPrefillState(l0::Context& d0, l0::Context& d1, uint32_t units)
@@ -186,6 +188,27 @@ void Qwen4ExpTpEngine::prepare_prefill() {
       t.peer_lists = h ? P.lists1.ptr() : P.s.lists.ptr();
     }
   }
+  for (uint32_t r = 0; r < 2; ++r) {   // the lent experts: the scratch, the pair's own rows and the ring's buffers
+    Q4TpPrefillState::Dev& D = *ps->dev[r];
+    if (!D.ring) continue;
+    std::vector<Q4LendState::Region> rg = lend_regions(D.s, D.ring.get());
+    for (const l0::Mem* m : {&D.fold, &D.yf}) rg.push_back({m->ptr(), m->size()});
+    D.lend = std::make_unique<Q4LendState>(cards_[r]->ctx, model_.parts[r], cards_[r]->desc, r ? model_.tier1 : model_.tier,
+                                           rg, D.ring->list);
+    if (D.lend->experts() > 0) {
+      const ExpertTier& t = r ? model_.tier1 : model_.tier;
+      size_t res = 0;
+      for (uint32_t l = 0; l < d.layers; ++l) res += t.n_vram(l);
+      const double all = double(d.layers) * d.experts;
+      std::fprintf(stderr, "experts: card %u lends its idle prefill scratch to %u more experts' halves between prefills "
+                   "(resident f %.3f -> %.3f while decoding)\n", r, D.lend->experts(), res / all,
+                   (res + D.lend->experts()) / all);
+    }
+  }
+  pf_lend_ = [ps] {
+    for (auto& D : ps->dev)
+      if (D->lend) D->lend->lend();
+  };
   pf_settle_ = [ps] { return ps->settle(); };
 }
 
@@ -227,6 +250,8 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   }
   prepare_prefill();
   Q4TpPrefillState& P = *pf_;
+  for (auto& D : P.dev)   // the lent experts' rows back: this prefill overwrites the scratch
+    if (D->lend) D->lend->reclaim();
   std::array<Qwen4ExpMtpPrefill, kTpPfChunks> mp;   // the head's pass on card 1, a chunk each (qwen4exp_prefill.h)
   if (mtp_)
     for (uint32_t h = 0; h < kTpPfChunks; ++h) {
@@ -342,6 +367,8 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
     const uint32_t end = base + uint32_t(ids.size());
     block_hook_(end, end % kBlock == 0);
   }
+  for (auto& D : P.dev)   // the scratch is idle until the next prefill: lend it to the tier
+    if (D->lend) D->lend->fill();
 }
 
 }  // namespace runtime::qwen4exp

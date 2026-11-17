@@ -321,6 +321,9 @@ class Qwen4ExpEngine {
   // Spec 21-QFN-v1d: set by prepare_prefill (b70_qwen4exp_prefill) - releases a prefill list waiting on a hand-off that will
   // not come and waits (bounded) for every prefill list to go idle; reset() calls it.
   std::function<bool()> pf_settle_;
+  // Plan 21-QFN-v2b Task 7 Step 2: set by prepare_prefill - points the table rows at the experts copied into the idle
+  // prefill scratch once that copy has finished (Q4LendState::lend); submit() calls it before each step.
+  std::function<void()> pf_lend_;
   // Inside a mid-prompt block hook on two cards: device 0's state runs at the block end (host; save_state reads them
   // there, and nothing settles the prefill lists - device 0 may run the next chunk). Null otherwise.
   const uint8_t* pf_shadow_ = nullptr;

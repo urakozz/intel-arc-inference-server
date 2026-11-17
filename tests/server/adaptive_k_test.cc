@@ -132,6 +132,36 @@ void test_flash_next_cost() {
   CHECK_EQ(p.best(0.88), 3U);   // code
   CHECK_EQ(p.best(0.97), 3U);   // tool calls
   std::print("Flash-Next costs: K 0 / 3 / 3 at alpha 0.66 / 0.88 / 0.97\n");
+  o.cost = MtpCost::tp_flash_next();   // tp: cheaper verify rows - MTP pays from lower acceptance
+  const AdaptiveK t(o);
+  std::print("Flash-Next tp costs: K {} / {} / {} at alpha 0.5 / 0.66 / 0.88\n", t.best(0.5), t.best(0.66), t.best(0.88));
+  CHECK(t.best(0.66) >= p.best(0.66));
+  CHECK_EQ(t.best(0.88), 3U);
+}
+
+// The request's own costs replace the table's once it has run both K and plain steps, and a probe that leaves K at 0
+// waits twice as long for the next: prose whose K = 1 costs 1.9 plain steps at acceptance 0.62 stays plain, its probes
+// spreading out (the table said 1.58 - K 1 would pay).
+void test_measured_cost() {
+  AdaptiveKOptions o;
+  o.cost = MtpCost::tp_flash_next();
+  o.max_k = 1;
+  AdaptiveK p(o);
+  CHECK_EQ(p.best(0.62), 1U);   // the table's choice
+  Geometric g(7, 0.62);
+  std::vector<uint32_t> ks;
+  for (int i = 0; i < 400; ++i) {
+    const uint32_t k = p.next();
+    p.observe(k, g(k), k ? 0.019 * 1.9 : 0.019);   // K 1 measured at 1.9 plain steps
+    ks.push_back(k);
+  }
+  CHECK_NEAR(p.cost(1), 1.9, 1e-9);
+  CHECK_EQ(p.best(0.62), 0U);
+  size_t probes = 0;
+  for (size_t i = 200; i < ks.size(); ++i) probes += ks[i];
+  CHECK(probes <= 200 / 32 + 2);   // the gap at its cap
+  std::print("measured costs: K 1 at 1.9 plain steps, acceptance 0.62: plain, {} probes in the last 200 iterations\n",
+             probes);
 }
 
 void test_cost_table() {
@@ -297,6 +327,7 @@ int main() {
   test_dflash_measured_cost();
   test_flash_next_cost();
   test_cost_table();
+  test_measured_cost();
   test_draft_vocab_cost();
   test_up_on_high_acceptance();
   test_down_on_low_acceptance();

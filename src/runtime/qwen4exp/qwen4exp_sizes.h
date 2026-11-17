@@ -491,6 +491,8 @@ struct ExpertTier {
   uint32_t layers = 0, experts = 0;
   std::vector<uint8_t> vram;                 // [layer][expert]: 1 = in the layer's VRAM arena
   std::string source;                        // how the residents were chosen (printed at startup)
+  std::vector<uint16_t> rank;                // [layer][i]: the fill's order (the profile's, ties to the lower id); empty
+                                             // for a test placement (B70_Q4_RESIDENT)
   bool resident(uint32_t l, uint32_t e) const { return vram[size_t(l) * experts + e] != 0; }
   uint32_t n_vram(uint32_t l) const;
   bool all() const;                          // every expert resident: today's layout

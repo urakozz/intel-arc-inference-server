@@ -571,10 +571,17 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       step_k->observe(uint32_t(burst.size() - 1));
     } else if (burst_at == burst.size()) {
       const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
+      const double t0 = steady_seconds();
       burst = deps_.engine.step_many(sampling, k);
       burst_at = 0;
       if (burst.empty()) throw std::runtime_error("EngineIface::step_many returned no ids");
-      if (policy) policy->observe(k, std::min<uint32_t>(k, uint32_t(burst.size() - 1)));
+      // The iteration's seconds, so the policy learns this request's own cost of K - not in the decode's first
+      // kSettleSeconds, while the engine may still be refilling its expert cache over the host link after the prefill.
+      constexpr double kSettleSeconds = 0.3;
+      const double t1 = steady_seconds();
+      const bool settled =
+          opts_.mtp_adaptive.measure && outcome.t_first_token > 0 && t0 - outcome.t_first_token > kSettleSeconds;
+      if (policy) policy->observe(k, std::min<uint32_t>(k, uint32_t(burst.size() - 1)), settled ? t1 - t0 : 0);
     }
     return burst[burst_at++];
   };

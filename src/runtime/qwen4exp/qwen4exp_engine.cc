@@ -297,6 +297,7 @@ void Qwen4ExpEngine::step_once() {
 
 void Qwen4ExpEngine::submit(const std::vector<CapturedStep*>& lists) {
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
+  if (pf_lend_) pf_lend_();   // no step runs here: the table rows may change
   Stage& last = st(uint32_t(st_.size()) - 1);
   const size_t pos = last.ctl->pos, n = last.ctl->n_active;
   if (pos + n > size_t(max_len_))

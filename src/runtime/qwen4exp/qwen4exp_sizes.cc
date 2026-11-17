@@ -594,7 +594,12 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
     for (uint32_t i = 0; i < n; ++i) t.vram[size_t(l) * d.experts + order[i]] = 1;
   };
   if (forced.empty()) {
-    for (uint32_t l = 0; l < d.layers; ++l) take(l, ranked(l), budget_n(l));
+    t.rank.reserve(size_t(d.layers) * d.experts);
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      const std::vector<uint32_t> o = ranked(l);
+      take(l, o, budget_n(l));
+      t.rank.insert(t.rank.end(), o.begin(), o.end());
+    }
     t.source = counts ? "the routing profile's most-routed experts, the same count a layer"
                       : "id order (no routing profile beside the checkpoint)";
   } else if (forced == "all" || forced == "none") {
