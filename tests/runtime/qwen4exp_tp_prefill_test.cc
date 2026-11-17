@@ -37,12 +37,6 @@ namespace kq = kernels::qwen4exp;
 using Clock = std::chrono::steady_clock;
 constexpr float kTieTol = 1e-3f;   // qwen4exp_prefill_test's near-tie window on the router's p10 - p11
 
-uint32_t top(const std::vector<float>& l, uint32_t used) {
-  uint32_t b = 0;
-  for (uint32_t i = 1; i < used; ++i)
-    if (l[i] > l[b]) b = i;
-  return b;
-}
 float bf16_ulp(float v) {
   int e = 0;
   std::frexp(std::fabs(v), &e);
