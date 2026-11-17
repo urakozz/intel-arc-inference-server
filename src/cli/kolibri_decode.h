@@ -46,6 +46,7 @@
 #include "runtime/kolibri/kolibri_engine.h"
 #include "runtime/kolibri/kolibri_sizes.h"
 #include "runtime/prefill_backend.h"
+#include "runtime/vram_bars.h"
 
 namespace cli::kolibri {
 
@@ -209,7 +210,12 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
   if (devs == 2)
     std::print(stderr, "split: {}{:d} (layers [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
                a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
-  std::print(stderr, "{}\n", rk::describe(rk::plan(d, p, len, int8, false, at, pf, a.spec), p, len, dev, a.reserve).c_str());
+  const std::vector<rk::DevicePlan> pl = rk::plan(d, p, len, int8, false, at, pf, a.spec);
+  std::print(stderr, "{}\n", rk::describe(pl, p, len, dev, a.reserve).c_str());
+  for (const rk::DevicePlan& dp : pl)
+    std::print(stderr, "{}", runtime::vram_block({runtime::vram_parts(dp, "decode state", "DSpark drafter"), a.reserve,
+                                                  dev[dp.device]},
+                                                 dp.device, p.devices, runtime::vram_utf8()));
   return {p, len};
 }
 

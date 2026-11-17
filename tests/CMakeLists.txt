@@ -845,6 +845,11 @@ add_executable(memory_plan_test runtime/memory_plan_test.cc)
 target_include_directories(memory_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(memory_plan_test PRIVATE b70_plan)
 add_test(NAME memory_plan_test COMMAND memory_plan_test)
+# The startup log's VRAM chart (runtime/vram_bars.h), host only: 64 cells, free stretches, shades, wrap, ASCII.
+add_executable(vram_bars_test runtime/vram_bars_test.cc)
+target_include_directories(vram_bars_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(vram_bars_test PRIVATE b70_plan)
+add_test(NAME vram_bars_test COMMAND vram_bars_test)
 # Spec 13a: the batching probe's row table, its rules and the layouts' memory (runtime/batch_rows.h), host only.
 add_executable(batch_rows_test runtime/batch_rows_test.cc)
 target_include_directories(batch_rows_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)

@@ -32,6 +32,7 @@
 #include "loader/loader.h"
 #include "loader/trained_context.h"
 #include "runtime/memory_plan.h"
+#include "runtime/vram_bars.h"
 #include "runtime/tp_engine.h"
 #include "runtime/tp_plan.h"
 
@@ -103,6 +104,12 @@ int run_tp_decode(const TpDecodeArgs& a) {
                                  std::to_string(r) + ": " + runtime::describe(p, dev[r], a.reserve) +
                                  " - --max-len auto gives the largest that fits");
     }
+  }
+  for (uint32_t r = 0; r < 2; ++r) {
+    const runtime::MemoryPlan p = runtime::tp_card_plan(card, a.crossing, len, weights[r], a.kv, path, a.mtp);
+    std::print(stderr, "{}", runtime::vram_block({runtime::vram_parts(p, runtime::vram_state_name(p), "DFlash drafter"),
+                                                  a.reserve, dev[r]},
+                                                 r, 2, runtime::vram_utf8()));
   }
   a.check_len(len);
 
