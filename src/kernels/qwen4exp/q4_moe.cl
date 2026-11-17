@@ -298,8 +298,17 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
 // down + the combine, one 16-column n-tile of the hidden row per work-group; sub-group (slot, q).
 __attribute__((reqd_work_group_size(WG_DN, 1, 1)))
 Q4_SG16
+// MOE_TP_PART (plan 21v2b, a tensor-parallel card's half of every expert, DN_KS 1): y is fp32 [SLOTS][M][HIDDEN],
+// each slot's dot over the card's K half (card 0 groups 0..4, card 1 groups 5..9: one card's two DN_KS 2 partials,
+// bit for bit); the all-reduce adds them slot by slot (card 0's first: one card's reduction) and q4_moe_finish
+// applies this kernel's epilogue. Every existing binary leaves it unset.
+#if MOE_TP_PART
+#define Y_T __global float* restrict
+#else
+#define Y_T __global ushort* restrict
+#endif
 __kernel void q4_moe_down(__global const uint* restrict route, __global const ushort* restrict h,
-                          __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict y) {
+                          __global const uint* restrict w, SH_T restrict w_sh, Y_T y) {
   __local float red[SLOTS * DN_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -332,6 +341,12 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     if (q < stride) red[sg][lane] += red[sg + stride][lane];
     barrier(CLK_LOCAL_MEM_FENCE);
   }
+#if MOE_TP_PART
+#if DN_KS != 1
+#error "q4_moe MOE_TP_PART: DN_KS 1 (a card's 5 groups in one partial)"
+#endif
+  y[((size_t)slot * M + m) * HIDDEN + n_tile * SG + lane] = red[sg][lane];
+#else
   if (sg == 0) {
     float sum = 0.0f;
     for (uint k = 0; k < MOE_K; ++k) {
@@ -342,5 +357,25 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     const ushort sh_b = rne_bf16(rf(red[SHARED_SLOT * DN_KS][lane]) * as_float(rr[R_SG]));
     y[(size_t)m * HIDDEN + n_tile * SG + lane] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
   }
+#endif
 }
+#if MOE_TP_PART
+// q4_moe_finish(route, slots, y) - grid (HIDDEN / 256, M), WG 256: q4_moe_down's epilogue over the all-reduced slots
+// (fp32 [SLOTS][M][HIDDEN]), token for token: y bf16 [M][HIDDEN].
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void q4_moe_finish(__global const uint* restrict route, __global const float* restrict slots,
+                            __global ushort* restrict y) {
+  const uint n = get_global_id(0);
+  const uint m = get_group_id(1);
+  const __global uint* restrict rr = route + (size_t)m * RW;
+  float sum = 0.0f;
+  for (uint k = 0; k < MOE_K; ++k) {
+    const float t = rf(rf(slots[((size_t)k * M + m) * HIDDEN + n]) * as_float(rr[R_W + k]));
+    sum = sum + t;
+  }
+  const ushort r_b = rne_bf16(sum);
+  const ushort sh_b = rne_bf16(rf(slots[((size_t)SHARED_SLOT * M + m) * HIDDEN + n]) * as_float(rr[R_SG]));
+  y[(size_t)m * HIDDEN + n] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
+}
+#endif
 #endif  // MOE_E

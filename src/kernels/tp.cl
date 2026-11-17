@@ -249,6 +249,24 @@ __kernel void tp_sum(__global const float* restrict mine, __global const uint* l
   uint k1 = k0 + CHUNK;
   if (k1 > K) k1 = K;
   for (uint k = k0 + lid; k < k1; k += WG) {
+#if TP_SUM_SLICES
+    // Plan 21v2b: slice by slice (the slices form, FOLDED 0) - out[s] = card 0's slice s + card 1's, from 0 in that
+    // order: a consumer that sums the two cards' halves of one dot (the MoE's per-expert K halves) gets one card's
+    // reduction. `out` may be `mine` (each element read before it is written, by the same work-item).
+    for (uint s = 0; s < S_MSG; ++s) {
+      const size_t e = ((size_t)s * M + m) * K + k;
+      const float a = mine[e], b = as_float(SYS_LOAD(src + e, memory_order_relaxed));
+      float acc = 0.f;
+#if RANK == 0
+      acc += a;
+      acc += b;
+#else
+      acc += b;
+      acc += a;
+#endif
+      out[e] = acc;
+    }
+#else
     float acc = 0.f;
 #if RANK == 0
     LOCAL_PART(acc)
@@ -259,6 +277,7 @@ __kernel void tp_sum(__global const float* restrict mine, __global const uint* l
 #endif
     out[(size_t)m * K + k] = acc;
     for (uint s = 1; s < TP_SUM; ++s) out[((size_t)s * M + m) * K + k] = 0.f;
+#endif
   }
 }
 #endif  // TP_SUM

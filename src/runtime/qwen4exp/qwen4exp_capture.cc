@@ -6,6 +6,7 @@
 #include <string>
 
 #include "kernels/kernels.h"
+#include "kernels/tp_kernels.h"
 #include "kernels/qwen4exp_kernels.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
@@ -45,18 +46,23 @@ void require(bool ok, const std::string& what) {
 class Walk {
  public:
   Walk(l0::Context& ctx, const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part, Qwen4ExpBuffers& b,
-       const StageLink* link, l0::Mem* tap, const l0::Mem* injected, const ListSpec& spec, const MtpBinding* mtp)
-      : ctx_(ctx), m_(m), part_(part), d_(m.desc), b_(b), link_(link), tap_(tap), injected_(injected), spec_(spec),
-        mtp_(mtp), M_(spec.M), ctrl_(b.control.ptr()), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+       const StageLink* link, l0::Mem* tap, const l0::Mem* injected, const ListSpec& spec, const MtpBinding* mtp,
+       const Q4TpBinding* tp)
+      : ctx_(ctx), m_(m), part_(part), d_(m.desc), c_(tp ? *tp->card : m.desc), b_(b), link_(link), tap_(tap),
+        injected_(injected), spec_(spec), mtp_(mtp), tp_(tp), M_(spec.M), ctrl_(b.control.ptr()),
+        step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
-    check();
+    if (tp_)
+      check_tp();
+    else
+      check();
     const uint32_t dev = part_.device;
-    const bool last = dev + 1 == b_.placement.devices;
+    const bool last = tp_ || dev + 1 == b_.placement.devices;
     if (spec_.kind == ListKind::Draft) {
       draft_step();
     } else {
-      if (dev == 0) {
+      if (dev == 0 || tp_) {
         embed();
         src_ = HcSrc::Embed;
       }
@@ -78,7 +84,9 @@ class Walk {
     }
     size_t want = 0;
     switch (spec_.kind) {
-      case ListKind::Decode: want = device_launches(d_, b_.placement, dev, b_.attn, injected_ != nullptr); break;
+      case ListKind::Decode:
+        want = tp_ ? tp_device_launches(d_) : device_launches(d_, b_.placement, dev, b_.attn, injected_ != nullptr);
+        break;
       case ListKind::Verify: want = verify_device_launches(d_, b_.placement, dev, M_, b_.attn); break;
       case ListKind::Draft: want = draft_launches(b_.attn, spec_.select); break;
     }
@@ -185,6 +193,65 @@ class Walk {
     if (spec_.kind == ListKind::Draft) require(last, "a draft list off the last device");
   }
 
+  // Plan 21v2b: a tensor-parallel card's list - the card's buffers, the decode kind only, every binary present.
+  void check_tp() {
+    require(tp_->link && tp_->moe && tp_->card && tp_->embed && tp_->slots,
+            "a tensor-parallel list without its crossings, card, embedding or slots");
+    const model::Qwen4ExpDesc& c = *tp_->card;
+    require(d_.hidden == kq::kHidden && d_.experts == kq::kExperts && d_.top_k == kq::kTopK &&
+                d_.moe_inter == kq::kInter && d_.forms.dense == model::Q4Form::Int4 &&
+                d_.forms.shared == model::Q4Form::Int4,
+            "tensor parallel is built for Qwen3.8-Flash-Next's int4 export (" + d_.name + ")");
+    require(c.moe_inter == kq::kTpInter && c.q_heads * 2 == d_.q_heads && c.gdn_v_heads * 2 == d_.gdn_v_heads,
+            "the card descriptor is not model::q4_tp_card's");
+    require(spec_.kind == ListKind::Decode && M_ == 1 && !link_ && !injected_ && !tap_ && b_.attn == Q4Attn::Flash,
+            "a tensor-parallel list is the M = 1 decode list with flash attention (no hand-off, injection or tap)");
+    require(&b_.desc == &c && b_.placement.devices == 1 && b_.device == 0, "the buffers are not the card's");
+    require(part_.first == 0 && part_.end == d_.layers && part_.layers.size() == d_.layers && part_.final_mixer &&
+                part_.lm_head && part_.lm_head->kind == model::WeightKind::Int8 && part_.rope,
+            "the card's part is not every layer's half with the final mixer and the int8 head");
+    require(part_.lm_head->shape.N == c.vocab, "lm_head is not the card's vocabulary half");
+    const bool tbl = part_.layers[0].expert_row != nullptr;
+    const unsigned rank = tp_->link->rank;
+    const std::vector<std::string> need = {
+        kq::embed_variant(1), kq::tp_moe_variant(tbl), kq::tp_gdn_variant(), kq::tp_gated_head_sig_variant(),
+        kq::tp_attn_prep_variant(), kq::tp_qsa_attn_variant(), kq::tp_sum_variant(rank), kq::tp_slices_variant(rank),
+        kq::hc_combine_norm_variant(1, HcSrc::Slices, 1, true), kq::route_variant(1), kq::qsa_variant(1),
+        kernels::gemv_variant(1, d_.hidden, c.qkvz_n(), 1, 0), kernels::gemv_variant(1, d_.hidden, c.qkvg_n(), 2, 0),
+        kernels::gemv_variant(1, c.q_n(), d_.hidden, kq::kTpOutS, 0), kernels::gemv_i8w_variant(1, d_.hidden, c.vocab),
+        kernels::tp_argmax_variant(1, c.vocab, c.vocab_used, rank * c.vocab)};
+    for (const std::string& v : need)
+      require(std::ifstream(kernels::path(v)).good(),
+              v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
+  }
+
+  // Plan 21v2b: an all-reduce in the slices form over `buf` (in place) - tp_send(buf, peer_land, send_ctr, buf), then
+  // tp_sum(buf, land, buf, sum_ctr, state, spin_limit). `moe`: the slot-by-slot sums (the MoE's crossing), else one
+  // row (out_proj / o_proj's: the next combine folds it as one slice).
+  void cross(bool moe, void* buf) {
+    const TpLink& t = moe ? *tp_->moe : *tp_->link;
+    const std::string v = moe ? kq::tp_slices_variant(t.rank) : kq::tp_sum_variant(t.rank);
+    {
+      l0::Kernel& k = kernel(v, "tp_send", kq::kTpWg);
+      k.arg_ptr(0, buf);
+      k.arg_ptr(1, t.peer_land);
+      k.arg_ptr(2, t.send_ctr);
+      k.arg_ptr(3, buf);   // unused in the slices form
+      launch(k, kq::kTpFoldG, M_);
+    }
+    {
+      l0::Kernel& k = kernel(v, "tp_sum", kq::kTpWg);
+      k.arg_ptr(0, buf);
+      k.arg_ptr(1, t.land);
+      k.arg_ptr(2, buf);
+      k.arg_ptr(3, t.fold_ctr);
+      k.arg_ptr(4, t.state);
+      k.arg<uint32_t>(5, t.spin_limit);
+      launch(k, kq::kTpFoldG, M_);
+    }
+    if (!moe) slices_ = 1;
+  }
+
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
     auto it = step_.modules.find(variant);
     if (it == step_.modules.end())
@@ -215,7 +282,7 @@ class Walk {
   void embed() {
     l0::Kernel& k = kernel(kq::embed_variant(M_), "embed_gather", kq::kEmbedWg);
     k.arg_ptr(0, ctrl_);
-    k.arg_ptr(1, part_.embed->ptr());
+    k.arg_ptr(1, tp_ ? tp_->embed : part_.embed->ptr());
     k.arg_ptr(2, b_.x.ptr());
     launch(k, 1, M_);
   }
@@ -336,7 +403,7 @@ class Walk {
       k.indirect_host();   // the PLE table's host-USM ranges are reached through m_.ple.ptrs
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.ple_ids_ring());
-      k.arg_ptr(2, m_.ple.ptrs->ptr());
+      k.arg_ptr(2, tp_ && tp_->link->rank == 1 ? m_.ple_ptrs1->ptr() : m_.ple.ptrs->ptr());
       k.arg_ptr(3, b_.ple_consts.ptr());
       k.arg_ptr(4, b_.ple_e.ptr());
       k.arg_ptr(5, b_.ple_ids.ptr());
@@ -399,14 +466,15 @@ class Walk {
 
   void gdn(uint32_t l, const loader::Q4Layer& L) {
     require(L.gdn_qkvz && L.gdn_ab && L.gdn_out && L.gdn_small, "GDN layer " + std::to_string(l) + " is not loaded");
-    require(L.gdn_qkvz->shape.N == d_.qkvz_n() && L.gdn_qkvz->shape.S == 1, "qkv||z is not [16384] at S 1");
+    require(L.gdn_qkvz->shape.N == c_.qkvz_n() && L.gdn_qkvz->shape.S == 1, "qkv||z is not the card's at S 1");
     linear(*L.gdn_qkvz, b_.x.ptr(), b_.partials);
     linear(*L.gdn_ab, b_.x.ptr(), b_.ab);
     const bool slots = spec_.kind == ListKind::Verify;
     {
       // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o [, state_spec]), grid (48 heads, 4
       // chunks); the verify's slots build reads the live slot and writes row r's state into slot (live + r) % 4
-      l0::Kernel& k = kernel(slots ? kq::gdn_slots_variant(M_) : kq::gdn_variant(M_), "gdn_step", kWgGdn);
+      l0::Kernel& k = kernel(tp_ ? kq::tp_gdn_variant() : slots ? kq::gdn_slots_variant(M_) : kq::gdn_variant(M_),
+                             "gdn_step", kWgGdn);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, b_.ab.ptr());
@@ -415,19 +483,21 @@ class Walk {
       k.arg_ptr(5, b_.gdn_state_layer(l));
       k.arg_ptr(6, b_.gdn_o.ptr());
       if (slots) k.arg_ptr(7, b_.gdn_spec_layer(l));
-      launch(k, d_.gdn_v_heads, kGdnChunks);
+      launch(k, c_.gdn_v_heads, kGdnChunks);
     }
     {
       // prep_gated_head(qkvz_partials, gdn_o, gated_w, x_out) - the sigmoid gate (_SIG), grid (48, M)
-      l0::Kernel& k = kernel(kq::gated_head_sig_variant(M_), "prep_gated_head", kWgGated);
+      l0::Kernel& k = kernel(tp_ ? kq::tp_gated_head_sig_variant() : kq::gated_head_sig_variant(M_), "prep_gated_head",
+                             kWgGated);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.gdn_o.ptr());
-      k.arg_ptr(2, at(*L.gdn_small, loader::q4_gdn_small(d_).gdn_off_gated_norm));
+      k.arg_ptr(2, at(*L.gdn_small, loader::q4_gdn_small(c_).gdn_off_gated_norm));
       k.arg_ptr(3, b_.attn_out.ptr());
-      launch(k, d_.gdn_v_heads, M_);
+      launch(k, c_.gdn_v_heads, M_);
     }
     slices_ = linear(*L.gdn_out, b_.attn_out.ptr(), b_.partials);
     src_ = HcSrc::Slices;
+    if (tp_) cross(false, b_.partials.ptr());
   }
 
   // --- a QSA layer's pieces (the main layers' and the MTP head's) --------------------------------------------------
@@ -439,7 +509,8 @@ class Walk {
   };
   // q||gate||k||v and the indexer GEMVs; returns q||gate||k||v's split-K.
   uint32_t qsa_proj(const loader::Q4Layer& L) {
-    require(L.qsa_qkvg->shape.N == d_.qkvg_n() && L.qsa_idx->shape.N == d_.idx_n(), "a QSA layer's projections");
+    require(L.qsa_qkvg->shape.N == (layer_ == -2 ? d_ : c_).qkvg_n() && L.qsa_idx->shape.N == d_.idx_n(),
+            "a QSA layer's projections");
     const uint32_t S = linear(*L.qsa_qkvg, b_.x.ptr(), b_.partials);
     linear(*L.qsa_idx, b_.x.ptr(), b_.idx_f32);
     return S;
@@ -449,7 +520,7 @@ class Walk {
   void qsa_prep(const loader::Q4Layer& L, uint32_t S, const QsaTarget& t) {
     {
       // attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v), grid (24 + 2, M)
-      l0::Kernel& k = kernel(kq::attn_prep_q4_variant(M_, S), "attn_prep", kWgAttnPrep);
+      l0::Kernel& k = kernel(tp_ ? kq::tp_attn_prep_variant() : kq::attn_prep_q4_variant(M_, S), "attn_prep", kWgAttnPrep);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, L.qsa_small->ptr());
@@ -458,7 +529,7 @@ class Walk {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, t.k);
       k.arg_ptr(7, t.v);
-      launch(k, d_.q_heads + d_.kv_heads, M_);
+      launch(k, c_.q_heads + c_.kv_heads, M_);
     }
     {
       // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys), grid (5, M)
@@ -514,7 +585,7 @@ class Walk {
       launch(k, d_.q_heads, M_);
       return;
     }
-    const std::string av = kq::qsa_attn_variant(M_, false);
+    const std::string av = tp_ ? kq::tp_qsa_attn_variant() : kq::qsa_attn_variant(M_, false);
     {
       // q4_qsa_attn(ctrl, attn_q, kv_k, kv_v, list, part), grid (2 kv heads, TGT, M)
       l0::Kernel& k = kernel(av, "q4_qsa_attn", kq::kAttnWg);
@@ -524,7 +595,7 @@ class Walk {
       k.arg_ptr(3, t.v);
       k.arg_ptr(4, listp);
       k.arg_ptr(5, b_.attn_part.ptr());
-      launch(k, d_.kv_heads, kq::kAttnTgt, M_);
+      launch(k, c_.kv_heads, kq::kAttnTgt, M_);
     }
     {
       // q4_qsa_reduce(ctrl, part, attn_gate, list, attn_out), grid (24, M)
@@ -534,7 +605,7 @@ class Walk {
       k.arg_ptr(2, b_.attn_gate.ptr());
       k.arg_ptr(3, listp);
       k.arg_ptr(4, b_.attn_out.ptr());
-      launch(k, d_.q_heads, M_);
+      launch(k, c_.q_heads, M_);
     }
   }
 
@@ -549,6 +620,7 @@ class Walk {
     qsa_attend(t, listp);
     slices_ = linear(*L.qsa_o, b_.attn_out.ptr(), b_.partials);
     src_ = HcSrc::Slices;
+    if (tp_) cross(false, b_.partials.ptr());
   }
 
   // The 11-slot MoE over route row `rt`: the router GEMV (+ the shared gate), q4_route, gate||up, down -> y.
@@ -565,9 +637,9 @@ class Walk {
     // its address (VRAM or pinned host memory) - gate||up the row, down the row + 512 entries; the arithmetic is the
     // direct form's.
     const bool tbl = L.expert_row != nullptr;
-    const std::string mv = kq::moe_variant(M_, shb, tbl);
+    const std::string mv = tp_ ? kq::tp_moe_variant(tbl) : kq::moe_variant(M_, shb, tbl);
     {
-      // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M)
+      // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M) - tp: the card's half, 11 x 10
       l0::Kernel& k = kernel(mv, "q4_moe_gate_up", kq::moe_gate_up_wg());
       if (tbl) k.indirect_host();   // the host-memory experts are reached through the table row
       k.arg_ptr(0, rt);
@@ -575,18 +647,27 @@ class Walk {
       k.arg_ptr(2, tbl ? L.expert_row : L.gate_up->ptr());
       k.arg_ptr(3, L.shared->ptr());
       k.arg_ptr(4, b_.moe_h.ptr());
-      launch(k, kq::moe_gate_up_groups(), M_);
+      launch(k, tp_ ? kq::tp_moe_gate_up_groups() : kq::moe_gate_up_groups(), M_);
     }
     {
       // q4_moe_down(route, h, w_dn, w_sh_dn, y), grid (2560 / 16, M) - y is NOT folded: the next combine does
-      l0::Kernel& k = kernel(mv, "q4_moe_down", kq::moe_down_wg());
+      l0::Kernel& k = kernel(mv, "q4_moe_down", tp_ ? kq::tp_moe_down_wg() : kq::moe_down_wg());
       if (tbl) k.indirect_host();
       k.arg_ptr(0, rt);
       k.arg_ptr(1, b_.moe_h.ptr());
       k.arg_ptr(2, tbl ? static_cast<uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr());
       k.arg_ptr(3, at(*L.shared, L.shared_down_offset));
-      k.arg_ptr(4, b_.y.ptr());
+      k.arg_ptr(4, tp_ ? tp_->slots : b_.y.ptr());   // tp: each slot's partial, fp32 [11][M][2560]
       launch(k, d_.hidden / 16, M_);
+    }
+    if (tp_) {
+      cross(true, tp_->slots);
+      // q4_moe_finish(route, slots, y), grid (2560 / 256, M): the down's epilogue over the summed slots
+      l0::Kernel& k = kernel(mv, "q4_moe_finish", kq::kTpFinishWg);
+      k.arg_ptr(0, rt);
+      k.arg_ptr(1, tp_->slots);
+      k.arg_ptr(2, b_.y.ptr());
+      launch(k, d_.hidden / kq::kTpFinishWg, M_);
     }
     src_ = HcSrc::Y;
   }
@@ -609,7 +690,7 @@ class Walk {
       launch(k, d_.hidden / 16, M_);
     }
     const loader::DeviceWeight& lm = *part_.lm_head;
-    require(lm.shape.N == d_.vocab && lm.shape.K == d_.hidden, "lm_head is not [vocab][hidden]");
+    require(lm.shape.N == c_.vocab && lm.shape.K == d_.hidden, "lm_head is not [vocab][hidden]");
     if (lm.kind == model::WeightKind::Int8) {
       require(bool(lm.scales), "the int8 lm_head has no row scales");
       // spec 28d: gemm_sm_i8w at M >= 2 (gemv_i8w's arguments and [M][N] output)
@@ -630,6 +711,23 @@ class Walk {
       bf16_linear(lm.mem.ptr(), lm.shape.K, lm.shape.N, b_.x.ptr(), logits, size_t(M_) * lm.shape.N * 4);
     }
     require(kq::argmax_groups() <= kq::kArgmaxWg, "argmax_stage2 folds at most 256 groups");
+    if (tp_) {   // the card's vocabulary half: the global id and its value into Control (the host merges)
+      const unsigned rank = tp_->link->rank;
+      const std::string v = kernels::tp_argmax_variant(1, c_.vocab, c_.vocab_used, rank * c_.vocab);
+      {
+        l0::Kernel& k = kernel(v, "tp_argmax_stage1", kq::kArgmaxWg);
+        k.arg_ptr(0, logits);
+        k.arg_ptr(1, b_.argmax_part.ptr());
+        launch(k, (c_.vocab + kq::kArgmaxChunk - 1) / kq::kArgmaxChunk, M_);
+      }
+      {
+        l0::Kernel& k = kernel(v, "tp_argmax_stage2", kq::kArgmaxWg);
+        k.arg_ptr(0, ctrl_);
+        k.arg_ptr(1, b_.argmax_part.ptr());
+        launch(k, 1, 1);
+      }
+      return;
+    }
     {
       l0::Kernel& k = kernel(kq::argmax1_variant(M_), "argmax_stage1", kq::kArgmaxWg);
       k.arg_ptr(0, logits);
@@ -745,12 +843,14 @@ class Walk {
   const loader::Q4LoadedModel& m_;
   const loader::Q4DevicePart& part_;
   const model::Qwen4ExpDesc& d_;
+  const model::Qwen4ExpDesc& c_;   // the card's descriptor under tp (q4_tp_card), else d_
   Qwen4ExpBuffers& b_;
   const StageLink* link_;
   l0::Mem* tap_;
   const l0::Mem* injected_;
   const ListSpec spec_;
   const MtpBinding* mtp_;
+  const Q4TpBinding* tp_;
   const uint32_t M_;
   void* ctrl_;                 // the Control the kernels read: the device's, or the head's for its launches
   CapturedStep step_;
@@ -764,8 +864,8 @@ class Walk {
 
 CapturedStep build(l0::Context& ctx, const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part,
                    Qwen4ExpBuffers& b, const StageLink* link, l0::Mem* tap, const l0::Mem* injected, const ListSpec& spec,
-                   const MtpBinding* mtp) {
-  return Walk(ctx, m, part, b, link, tap, injected, spec, mtp).run();
+                   const MtpBinding* mtp, const Q4TpBinding* tp) {
+  return Walk(ctx, m, part, b, link, tap, injected, spec, mtp, tp).run();
 }
 
 }  // namespace runtime::qwen4exp

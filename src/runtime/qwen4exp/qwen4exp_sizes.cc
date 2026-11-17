@@ -12,6 +12,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
+#include "runtime/tp_protocol.h"   // tp::Layout (header-only)
 
 namespace runtime::qwen4exp {
 namespace {
@@ -642,6 +643,114 @@ void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const 
     dp.weights -= dp.host_experts;
     dp.model -= dp.host_experts;
   }
+}
+
+// --- plan 21v2b: tensor parallel ---------------------------------------------------------------------------------
+size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one) {
+  size_t b = tp::kStateWords * 4 + size_t(one.top_k + 1) * one.hidden * 4;   // the state words, the MoE's slots
+  for (uint32_t s : {kTpOutSlices, one.top_k + 1}) {
+    const tp::Layout L{one.hidden, s, tp::kFoldG};
+    b += L.total_bytes() + 2 * L.counter_bytes();
+  }
+  return b;
+}
+
+std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
+                                bool int8_head, bool mtp, bool debug_tap, bool prefill) {
+  model::validate(p, one);
+  if (!p.tp) throw std::invalid_argument("qwen4exp::tp_plan: the placement is not the tensor-parallel form");
+  std::vector<DevicePlan> out;
+  for (uint32_t r = 0; r < model::kQ4TpCards; ++r) {
+    const model::Qwen4ExpDesc c = model::q4_tp_card(one, r);
+    const model::Q4Placement pc = model::Q4Placement::one(c);
+    DevicePlan dp = plan(c, pc, max_len, int8_head, false, debug_tap, prefill)[0];
+    dp.device = r;
+    // plan() put the card's half-vocabulary embedding on it: the embedding is one card's table, whole, or absent.
+    dp.weights -= loader::q4_embed_bytes(c);
+    if (p.holds_embed(r)) dp.weights += loader::q4_embed_bytes(one);
+    if (mtp) {
+      // Both cards verify (their halves at M rows, GDN slots, the PLE rows); the head's card adds the head whole.
+      const bool head = p.holds_mtp(r);
+      dp.mtp = head;
+      dp.state += gdn_spec_bytes(c, pc, 0) + ple_verify_bytes(c, pc, 0);
+      dp.scratch = scratch_sizes(head ? one : c, max_len, kDefaultQ4Attn, kVerifyRows).total() +
+                   (debug_tap ? tap_bytes(c) : 0);
+      if (head) {
+        dp.weights += loader::q4_mtp_bytes(one);
+        const MtpSizes ms = mtp_sizes(one, max_len);
+        dp.kv += ms.kv + ms.idx_keys + ms.idx_tail;
+        dp.state += ms.ctl + ms.hh;
+        dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits + ms.routes;
+        if (prefill) dp.prefill_scratch += mtp_prefill_R_bytes(one);
+      }
+    }
+    dp.model = dp.weights + dp.rope;
+    dp.link = tp_crossing_bytes(one);
+    dp.decode_state = dp.state + dp.scratch + dp.link;
+    out.push_back(dp);
+  }
+  return out;
+}
+
+ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
+                              bool int8_head, bool mtp, bool prefill,
+                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve) {
+  const std::vector<DevicePlan> dp = tp_plan(one, p, max_len, int8_head, mtp, false, prefill);
+  const model::Qwen4ExpDesc c = model::q4_tp_card(one, 0);
+  ExpertBudget b;
+  b.max_len = max_len;
+  b.devices = model::kQ4TpCards;
+  b.mtp = mtp;
+  b.prefill = prefill;
+  b.int8_head = int8_head;
+  b.forms = one.forms;
+  b.reserve = reserve;
+  b.layers = one.layers;
+  b.experts = one.experts;
+  b.top_k = one.top_k;
+  b.expert_bytes = loader::q4_gate_up_block_bytes(c) + loader::q4_down_block_bytes(c);
+  b.routed_total = size_t(model::kQ4TpCards) * one.layers * one.experts * b.expert_bytes;
+  b.read_routed = size_t(one.layers) * one.top_k * b.expert_bytes;
+  size_t layer_reads = 0;
+  for (uint32_t l = 0; l < one.layers; ++l) layer_reads += loader::q4_layer_read_per_token(c, l);
+  b.read_non_routed = layer_reads - b.read_routed + loader::q4_final_mixer_bytes(c) + loader::q4_lm_head_bytes(c, int8_head);
+  const loader::Q4LayerBytes mb = loader::q4_mtp_layer_bytes(one);
+  b.read_mtp_step = mb.total() - mb.experts() + mb.experts() / one.experts * one.top_k +
+                    loader::q4_mtp_fc_offsets(one).total + loader::q4_final_mixer_bytes(one) +
+                    loader::q4_lm_head_bytes(one, int8_head);
+  size_t routed = 0;
+  for (uint32_t l = 0; l < one.layers; ++l) routed += loader::q4_layer_bytes(c, l).experts();
+  for (uint32_t r = 0; r < model::kQ4TpCards; ++r) {
+    b.capacity[r] = device_bytes[r];
+    b.first[r] = 0;
+    b.end[r] = one.layers;
+    b.non_routed[r] = dp[r].total() - routed;
+    const size_t used = b.non_routed[r] + reserve;
+    b.cache[r] = used >= device_bytes[r] ? 0 : device_bytes[r] - used;
+  }
+  return b;
+}
+
+ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, uint32_t rank,
+                        const std::vector<uint32_t>* counts, const std::string& forced) {
+  if (b.devices != model::kQ4TpCards || rank >= b.devices)
+    throw std::invalid_argument("qwen4exp::tp_fill_tier: not a tensor-parallel budget's card");
+  ExpertBudget card = b;
+  card.devices = 1;
+  card.cache[0] = b.cache[rank];
+  card.first[0] = 0;
+  card.end[0] = one.layers;
+  return fill_tier(one, card, counts, forced);
+}
+
+size_t tp_device_launches(const model::Qwen4ExpDesc& one) {
+  return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(5) * one.layers;
+}
+
+double tp_card_f(const ExpertBudget& b, uint32_t rank) {
+  if (b.layers == 0 || b.experts == 0) return 0.0;
+  const size_t n = std::min<size_t>(b.experts, b.cache[rank] / (size_t(b.layers) * b.expert_bytes));
+  return double(n) / b.experts;
 }
 
 // --- spec 21e: the MTP head, the verify and draft lists ---------------------------------------------------------

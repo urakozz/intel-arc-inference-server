@@ -287,7 +287,7 @@ MtpNorm mtp_norm();
 const char* mtp_norm_name(MtpNorm n);
 // Decision 5 (draft attention): draft steps 1.. REUSE draft step 0's selection (vLLM's opt-in
 // index_share_for_mtp_iteration - 21a found it is not vLLM's default). The `fresh` arm (vLLM's default: select on
-// every step) and its B70_Q4_MTP_SELECT went in the zero-config cleanup (operator 2026-11-06).
+// every step) and its B70_Q4_MTP_SELECT went in the zero-config cleanup (2026-11-06).
 
 struct MtpSizes {
   size_t ctl = 0, kv = 0, idx_keys = 0, idx_tail = 0, list = 0, diag = 0, hh = 0, xe = 0, xh = 0, fe = 0, fh = 0,
@@ -502,5 +502,36 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
                      const std::string& forced = "");
 // The plan with a tier: each device's weights (and model) less its layers' non-resident experts' blocks.
 void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t);
+
+// --- plan 21v2b: tensor parallel (`--parallel tp`) -----------------------------------------------------------------
+// The crossings' device bytes on a card (Qwen3.8's runtime::tp::Layout at hidden 2560, the slices form): for each of
+// the two crossings - out_proj / o_proj's kTpOutSlices slices, the MoE's 11 slots - its landing buffer (the peer
+// writes it) and its send's and sum's counters; the state words; the MoE's slots fp32 [11][2560].
+inline constexpr uint32_t kTpOutSlices = 2;
+size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
+// A card's plan under `p.tp` (one DevicePlan per card): plan() over model::q4_tp_card(one, rank) at one card's
+// placement - its halves of every layer, its halves of the KV (1 kv head) and of the GDN state (24 heads), the indexer
+// keys and the PLE state whole, the decode (and prefill) scratch at the card's shapes - with the embedding whole where
+// p.holds_embed, the final mixer and lm_head's vocabulary half on both, and with `mtp` the verify rows and GDN slots on
+// both and the head whole where p.holds_mtp (its buffers, and the decode scratch at one card's widths there: the
+// head's layer runs at one card's shapes); `link` the crossing.
+std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
+                                bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false);
+// The routed-expert budget under tp: expert_budget's fields with each card's cache over every layer, expert_bytes a
+// half expert (1,305,600 B), routed_total both cards' halves of every expert (f() their mean), and the reads a card's
+// (read_routed R / 2, read_non_routed its D: the hyper-connections, router, indexer and PLE whole, the rest halved).
+ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
+                              bool int8_head, bool mtp, bool prefill,
+                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
+// Card `rank`'s resident experts: fill_tier over that card's cache alone - the same profile and rank order on both
+// cards, so the smaller card's set is a prefix of the other's in every layer.
+ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, uint32_t rank,
+                        const std::vector<uint32_t>* counts, const std::string& forced = "");
+// A card's tp decode list (flash attention): one card's list (device_launches at Q4Placement::one) with tp_send +
+// tp_sum after each of a layer's two row-parallel linears (out_proj / o_proj, the MoE's down) and q4_moe_finish: + 5 a
+// layer. 1019 at 48 layers (779 + 240).
+size_t tp_device_launches(const model::Qwen4ExpDesc& one);
+// Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
+double tp_card_f(const ExpertBudget& b, uint32_t rank);
 
 }  // namespace runtime::qwen4exp

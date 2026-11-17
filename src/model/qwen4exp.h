@@ -75,19 +75,44 @@ struct Q4Linear {
 
 struct Qwen4ExpDesc;
 
+// Plan 21v2b: where the tensor-parallel form keeps the two parts read once a token, not a layer - the embedding (one
+// row) and the MTP head (a draft step). Both: whole on each card (Qwen3.8's TP). Split: the embedding on card 0 (card
+// 1 gathers its row from card 0's table over peer access, as pp's head already reads device 0's), the head on card 1
+// (it drafts there; both cards hold the same residual) - ~1.3 GB more experts resident a card.
+enum class Q4TpEnds { Split, Both };
+const char* q4_tp_ends_name(Q4TpEnds e);
+
 // Layers [0, split) on device 0, [split, layers) on device 1 (spec 16b's cut). One device: devices == 1
-// and split == layers (Kolibri's KolPlacement, the same rules).
+// and split == layers (Kolibri's KolPlacement, the same rules). Plan 21v2b's tensor-parallel form (`tp`): two
+// devices, each holding its half of EVERY layer (q4_tp_card's shapes; split == layers), the final mixer and its
+// vocabulary half of lm_head on both, the embedding and the head as `ends` places them.
 struct Q4Placement {
   uint32_t devices = 1, split = 0, layers = 0;
-  uint32_t first(uint32_t dev) const { return dev == 0 ? 0 : split; }
-  uint32_t end(uint32_t dev) const { return dev == 0 ? split : layers; }
-  uint32_t device_of(uint32_t layer) const { return devices > 1 && layer >= split ? 1 : 0; }
+  bool tp = false;
+  Q4TpEnds ends = Q4TpEnds::Split;
+  uint32_t first(uint32_t dev) const { return tp || dev == 0 ? 0 : split; }
+  uint32_t end(uint32_t dev) const { return tp || dev != 0 ? layers : split; }
+  uint32_t device_of(uint32_t layer) const { return !tp && devices > 1 && layer >= split ? 1 : 0; }
   uint32_t count(uint32_t dev) const { return end(dev) - first(dev); }
+  bool holds_embed(uint32_t dev) const { return dev == 0 || (tp && ends == Q4TpEnds::Both); }
+  bool holds_mtp(uint32_t dev) const { return dev + 1 == devices || (tp && ends == Q4TpEnds::Both); }
   static Q4Placement one(const Qwen4ExpDesc& d);
   static Q4Placement two(const Qwen4ExpDesc& d, uint32_t split);
+  static Q4Placement tp2(const Qwen4ExpDesc& d, Q4TpEnds ends);
 };
-// Throws std::invalid_argument unless devices is 1 (split == layers) or 2 (1 <= split <= layers - 1).
+// Throws std::invalid_argument unless devices is 1 (split == layers) or 2 (1 <= split <= layers - 1; tp: split ==
+// layers).
 void validate(const Q4Placement& p, const Qwen4ExpDesc& d);
+
+// Plan 21v2b: card `rank`'s descriptor under tp (Qwen3.8's model::tp_card_desc rule): half the QSA q / kv heads (12 /
+// 1), half the GDN k / v heads (8 / 24), half of every expert's and the shared expert's width (320), half the
+// vocabulary (124160 rows; vocab_used the rank's real ids), half out_proj's and o_proj's split-K (2: its slices are
+// one card's slices 2r, 2r + 1). Every width derived from these is the card's (qkv||z 8192,
+// q||gate||k||v 6656, out_proj / o_proj K 3072, the conv 5120, the KV and GDN state halves); the hyper-connections,
+// the router, the indexer, the PLE and the RoPE table keep one card's. The kernels bake one card's shapes; their
+// card builds name these.
+inline constexpr uint32_t kQ4TpCards = 2;
+Qwen4ExpDesc q4_tp_card(const Qwen4ExpDesc& one, uint32_t rank);
 
 struct Qwen4ExpDesc {
   std::string name, architecture, model_type, prefix;   // "qwen3.8-flash-next", "Qwen4ExpForConditionalGeneration",

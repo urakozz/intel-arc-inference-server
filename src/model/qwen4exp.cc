@@ -161,11 +161,45 @@ const char* q4_form_name(Q4Form f) { return f == Q4Form::Bf16 ? "bf16" : "int4";
 
 Q4Placement Q4Placement::one(const Qwen4ExpDesc& d) { return {1, d.layers, d.layers}; }
 Q4Placement Q4Placement::two(const Qwen4ExpDesc& d, uint32_t split) { return {2, split, d.layers}; }
+Q4Placement Q4Placement::tp2(const Qwen4ExpDesc& d, Q4TpEnds ends) { return {2, d.layers, d.layers, true, ends}; }
+
+const char* q4_tp_ends_name(Q4TpEnds e) { return e == Q4TpEnds::Both ? "both" : "split"; }
+
+Qwen4ExpDesc q4_tp_card(const Qwen4ExpDesc& one, uint32_t rank) {
+  if (rank >= kQ4TpCards) throw std::invalid_argument("model::q4_tp_card: rank " + std::to_string(rank));
+  const auto half = [&](uint32_t v, const char* what) {
+    if (v % kQ4TpCards != 0)
+      throw std::invalid_argument("model::q4_tp_card: " + one.name + "'s " + what + " " + std::to_string(v) +
+                                  " does not halve");
+    return v / kQ4TpCards;
+  };
+  Qwen4ExpDesc c = one;
+  c.q_heads = half(one.q_heads, "q heads");
+  c.kv_heads = half(one.kv_heads, "kv heads");
+  c.gdn_k_heads = half(one.gdn_k_heads, "GDN k heads");
+  c.gdn_v_heads = half(one.gdn_v_heads, "GDN v heads");
+  c.moe_inter = half(one.moe_inter, "expert width");
+  c.shared_inter = half(one.shared_inter, "shared expert width");
+  if (c.moe_inter % 64 != 0 || c.shared_inter % 64 != 0)
+    throw std::invalid_argument("model::q4_tp_card: a half expert is not whole groups of 64");
+  // out_proj / o_proj at half the split-K over half the K: each slice is one card's slice (2r, 2r + 1)
+  c.gdn_out_s = half(one.gdn_out_s, "out_proj split-K");
+  c.o_s = half(one.o_s, "o_proj split-K");
+  c.vocab = half(one.vocab, "vocabulary");
+  const uint32_t lo = rank * c.vocab;
+  c.vocab_used = one.vocab_used > lo ? std::min(c.vocab, one.vocab_used - lo) : 0;
+  return c;
+}
 
 void validate(const Q4Placement& p, const Qwen4ExpDesc& d) {
   if (p.layers != d.layers)
     throw std::invalid_argument("Q4Placement: placed " + std::to_string(p.layers) + " layers, " + d.name + " has " +
                                 std::to_string(d.layers));
+  if (p.tp) {
+    if (p.devices != kQ4TpCards || p.split != d.layers)
+      throw std::invalid_argument("Q4Placement: tensor parallel is two devices, each holding every layer");
+    return;
+  }
   if (p.devices == 1) {
     if (p.split != d.layers)
       throw std::invalid_argument("Q4Placement: one device holds every layer (split " + std::to_string(p.split) +
