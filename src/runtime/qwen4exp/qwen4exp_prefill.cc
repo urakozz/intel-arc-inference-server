@@ -11,6 +11,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/qwen4exp_kernels.h"
 #include "kernels/tp_kernels.h"
+#include "l0/error.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
 #include "runtime/prefill/gemm.h"
@@ -80,7 +81,7 @@ class Walk {
                             std::to_string(want) + " runtime::qwen4exp::prefill_device_launches gives");
   }
 
-  // Plan 21v2b Task 4: a tensor-parallel card's chunk a unit at a time (prefill_chunk_tp): tp_begin, then for each
+  // Plan 21v2b Task 4: a tensor-parallel card's chunk a unit at a time (prefill_pair_tp): tp_begin, then for each
   // unit u < 2 x layers tp_unit(u) - its body, ending in this card's copy and sent(rank, u) - and, once the peer's
   // unit u is appended too, tp_wait() (the wait for sent(1 - rank, u)); tp_end checks the launch count.
   void tp_begin() {
@@ -108,7 +109,7 @@ class Walk {
   }
   void tp_wait() {
     const uint32_t u = unit_ - 1, r = tp_->rank;
-    cx_.wait_event(tp_->ev->handle((1 - r) * tp_->units + u));
+    cx_.wait_event(sent(1 - r, u));
     fold_ = tp_->fold[u & 1u];
   }
   void tp_end() {
@@ -224,14 +225,14 @@ class Walk {
   // q4_hc_combine_norm(ctrl, H, src, inj, norm_w, xn) at M = kPfC, grid (4, C): folds what is pending, then (norm)
   // the grouped norm with `w`.
   void combine(HcSrc src, bool norm, const float* w) {
-    const void* sp = s_.H.ptr();   // _X reads nothing
+    const void* sp = H_();   // _X reads nothing
     if (src == HcSrc::Embed) sp = s_.x.ptr();
     if (src == HcSrc::Slices) sp = tp_ ? static_cast<const void*>(fold_) : s_.partials.ptr();   // S 1, or tp's two
     if (src == HcSrc::Y) sp = s_.y.ptr();
     const std::string v =
         tp_ && src == HcSrc::Slices ? kq::tp_pf_fold_variant(norm) : kq::pf_hc_combine_norm_variant(src, norm);
     launch(kc_(v, "q4_hc_combine_norm"), d_.hc, rows_, 1,
-           {PtrArg(ctrl()), PtrArg(s_.H.ptr()), PtrArg(sp), PtrArg(s_.inj.ptr()),
+           {PtrArg(ctrl()), PtrArg(H_()), PtrArg(sp), PtrArg(inj_()),
             PtrArg(w ? static_cast<const void*>(w) : s_.partials.ptr()), PtrArg(s_.xn.ptr())});
     prefill::profile_wait(cx_, Phase::kNorm);
   }
@@ -245,7 +246,7 @@ class Walk {
     slabs(false, at(block, o.down), nullptr, d_.hc_n(), o.down_n, s_.xn.ptr(), s_.down_f32.ptr(), kq::kPfHcDownLd);
     launch(kc_(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix"), d_.hidden / 16, rows_, 1,
            {PtrArg(ctrl()), PtrArg(s_.down_f32.ptr()), PtrArg(at(block, o.up)), PtrArg(s_.xn.ptr()), PtrArg(s_.x.ptr()),
-            PtrArg(s_.inj.ptr())});
+            PtrArg(inj_())});
     prefill::profile_wait(cx_, Phase::kNorm);
   }
 
@@ -291,10 +292,10 @@ class Walk {
     const std::string v = kq::pf_ple_variant();
     // q4_pf_ple_gate(ctrl, kv, H, pw, gated, gn), grid (4 streams, C)
     launch(kc_(v, "q4_pf_ple_gate"), d_.hc, C_, 1,
-           {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(s_.H.ptr()), PtrArg(pw), PtrArg(gated), PtrArg(gn)});
+           {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(H_()), PtrArg(pw), PtrArg(gated), PtrArg(gn)});
     // q4_pf_ple_conv(ctrl, gated, gn, ring, pw, H), grid (10240 / 256, C)
     launch(kc_(v, "q4_pf_ple_conv"), d_.hc_n() / kq::kPfPleWg, C_, 1,
-           {PtrArg(ctrl()), PtrArg(gated), PtrArg(gn), PtrArg(b_.ple_conv_ring()), PtrArg(pw), PtrArg(s_.H.ptr())});
+           {PtrArg(ctrl()), PtrArg(gated), PtrArg(gn), PtrArg(b_.ple_conv_ring()), PtrArg(pw), PtrArg(H_())});
     // q4_pf_ple_ring(ctrl, gn, ids, ring, id_ring), grid (10240 / 256, 16)
     launch(kc_(v, "q4_pf_ple_ring"), d_.hc_n() / kq::kPfPleWg, kPleRing, 1,
            {PtrArg(ctrl()), PtrArg(gn), PtrArg(ids_), PtrArg(b_.ple_conv_ring()), PtrArg(b_.ple_ids_ring())});
@@ -526,14 +527,29 @@ class Walk {
     return tp_ ? tp_->fold[unit_ & 1u] + size_t(tp_->rank) * kPfC * d_.hidden : s_.partials.ptr();
   }
   // This card's slice into the peer's slot and sent(rank, u); tp_wait appends the wait for the peer's, after the
-  // peer's unit u has been appended (prefill_chunk_tp), and points the next combine at the slot.
+  // peer's unit u has been appended (prefill_pair_tp), and points the next combine at the slot.
+  // Task 4 Step 2: with the card's copy-engine list the compute list signals ready(rank, u) and the copy runs there
+  // after it, beside the next unit's compute (the pair's other chunk), signalling sent(rank, u).
   void cross() {
     const uint32_t u = unit_++, r = tp_->rank;
     require(u < tp_->units, "more row-parallel units than 2 x layers");
     const size_t off = size_t(r) * kPfC * d_.hidden;
-    cx_.copy(tp_->peer_fold[u & 1u] + off, tp_->fold[u & 1u] + off, size_t(C_) * d_.hidden * 4);
-    cx_.signal(tp_->ev->handle(r * tp_->units + u));
+    float* dst = tp_->peer_fold[u & 1u] + off;
+    const float* src = tp_->fold[u & 1u] + off;
+    const size_t bytes = size_t(C_) * d_.hidden * 4;
+    if (tp_->bcs) {
+      ze_event_handle_t ready = tp_->ev->handle(tp_->ev_off + (2 + r) * tp_->units + u);
+      cx_.signal(ready);
+      ZE_CHECK(zeCommandListAppendMemoryCopy(tp_->bcs, dst, src, bytes, sent(r, u), 1, &ready));
+    } else {
+      cx_.copy(dst, src, bytes);
+      cx_.signal(sent(r, u));
+    }
   }
+  ze_event_handle_t sent(uint32_t card, uint32_t u) const { return tp_->ev->handle(tp_->ev_off + card * tp_->units + u); }
+  // The chunk's residual rows and inject weights (the pair's second chunk has its own: Q4TpPrefill::H / inj).
+  void* H_() const { return tp_ && tp_->H ? tp_->H : s_.H.ptr(); }
+  void* inj_() const { return tp_ && tp_->inj ? tp_->inj : s_.inj.ptr(); }
 
   // --- spec 21-QFN-v1e: the MTP head's pass -------------------------------------------------------------------------------
   // A bf16 linear's columns [n_from, n_to) over `rows` rows of x (pitch K): per slab kol_pf_bf16_slab then pf_gemm_T0
@@ -562,7 +578,7 @@ class Walk {
     const size_t row = size_t(d_.hc_n()) * 2;
     combine(moe_src(), false, nullptr);   // _Y_NN (tp: _S2_NN): the chunk's pre-mixer H (R_{pos} .. R_{pos+C-1})
     cx_.copy(at(*mtp_->R, 0), mb.hh_row(0), row);                       // R_{pos-1}
-    cx_.copy(at(*mtp_->R, row), s_.H.ptr(), size_t(C_) * row);          // rows 1..C
+    cx_.copy(at(*mtp_->R, row), H_(), size_t(C_) * row);          // rows 1..C
     const uint32_t rows = mtp_prefill_rows(pos_, C_), r0 = C_ - rows;   // pos 0: no R_{-1}, the head starts at row 1
     if (rows > 0) {
       ctrl_ = mtp_->hctl;
@@ -584,7 +600,7 @@ class Walk {
       bf16_cols(at(fc, fo.fc_hidden), d_.hidden, d_.hidden, 0, d_.hidden, rows * d_.hc, xh, part, d_.hidden);
       // q4_mtp_fuse(ctrl, fe, fh, H) - grid (10240 / 256, rows): the head layer's input, materialised
       launch(kc_(v, "q4_mtp_fuse"), d_.hc_n() / kq::kMtpWg, rows, 1,
-             {PtrArg(ctrl()), PtrArg(s_.o.ptr()), PtrArg(part), PtrArg(s_.H.ptr())});
+             {PtrArg(ctrl()), PtrArg(s_.o.ptr()), PtrArg(part), PtrArg(H_())});
       prefill::profile_wait(cx_, Phase::kNorm);
       src_ = HcSrc::None;
       rows_ = rows;
@@ -689,19 +705,35 @@ void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefi
   Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp, ctl, ids, nullptr).run();
 }
 
-void prefill_chunk_tp(const loader::Q4LoadedModel& m, const std::array<Q4TpChunk, 2>& cards, uint32_t pos, uint32_t C) {
-  std::array<std::optional<Walk>, 2> w;
-  for (uint32_t r = 0; r < 2; ++r) {
-    const Q4TpChunk& k = cards[r];
-    if (!k.tp || k.tp->rank != r) throw std::runtime_error("runtime::qwen4exp::prefill_chunk_tp: card " + std::to_string(r));
-    w[r].emplace(*k.cx, *k.kc, *k.s, m, *k.part, *k.b, pos, C, false, nullptr, false, k.mtp, k.ctl, k.ids, k.tp);
-  }
-  for (auto& x : w) x->tp_begin();
-  for (uint32_t u = 0; u < cards[0].tp->units; ++u) {
-    for (auto& x : w) x->tp_unit(u);
-    for (auto& x : w) x->tp_wait();
-  }
-  for (auto& x : w) x->tp_end();
+void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array<Q4TpChunk, 2>, 2>& chunks,
+                     const uint32_t* pos, const uint32_t* C, uint32_t n) {
+  if (n == 0 || n > 2) throw std::runtime_error("runtime::qwen4exp::prefill_pair_tp: " + std::to_string(n) + " chunks");
+  std::array<std::array<std::optional<Walk>, 2>, 2> w;
+  for (uint32_t h = 0; h < n; ++h)
+    for (uint32_t r = 0; r < 2; ++r) {
+      const Q4TpChunk& k = chunks[h][r];
+      if (!k.tp || k.tp->rank != r)
+        throw std::runtime_error("runtime::qwen4exp::prefill_pair_tp: chunk " + std::to_string(h) + ", card " +
+                                 std::to_string(r));
+      w[h][r].emplace(*k.cx, *k.kc, *k.s, m, *k.part, *k.b, pos[h], C[h], false, nullptr, false, k.mtp, k.ctl, k.ids, k.tp);
+    }
+  // From one host thread, a unit at a time (Q4TpChunk's rule): for unit u, chunk A then chunk B on each card,
+  // each preceded by its wait for the chunk's crossing of unit u - 1 (appended after the peer's copy that signals it).
+  const uint32_t units = chunks[0][0].tp->units;
+  for (uint32_t u = 0; u < units; ++u)
+    for (uint32_t h = 0; h < n; ++h)
+      for (uint32_t r = 0; r < 2; ++r) {
+        if (u == 0)
+          w[h][r]->tp_begin();   // the embedding rows into the scratch's x, read by this chunk's unit 0 alone
+        else
+          w[h][r]->tp_wait();
+        w[h][r]->tp_unit(u);
+      }
+  for (uint32_t h = 0; h < n; ++h)
+    for (uint32_t r = 0; r < 2; ++r) {
+      w[h][r]->tp_wait();
+      w[h][r]->tp_end();
+    }
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
@@ -748,7 +780,7 @@ void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefil
 
 void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                      const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const float* fold,
-                     uint32_t rank, const model::Qwen4ExpDesc& card) {
+                     uint32_t rank, const model::Qwen4ExpDesc& card, const void* H, const void* inj) {
   const model::Qwen4ExpDesc& d = m.desc;
   if (last_row >= kPfC) throw std::runtime_error("runtime::qwen4exp::prefill_head_tp: last_row past kPfC");
   if (!part.final_mixer || !part.lm_head || part.lm_head->kind != model::WeightKind::Int8 ||
@@ -763,8 +795,10 @@ void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPre
   for (uint32_t q = 0; q < 2; ++q)
     cx.copy(static_cast<uint8_t*>(b.partials.ptr()) + q * row, fold + (size_t(q) * kPfC + last_row) * d.hidden, row);
   cx.launch(kc(kq::tp_head_fold_variant(), "q4_hc_combine_norm"), d.hc, 1, 1,
-            {PtrArg(b.control.ptr()), PtrArg(at(s.H, size_t(last_row) * d.hc_n() * 2)), PtrArg(b.partials.ptr()),
-             PtrArg(at(s.inj, size_t(last_row) * d.hc * 4)), PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
+            {PtrArg(b.control.ptr()), PtrArg(static_cast<const uint8_t*>(H ? H : s.H.ptr()) + size_t(last_row) * d.hc_n() * 2),
+             PtrArg(b.partials.ptr()),
+             PtrArg(static_cast<const uint8_t*>(inj ? inj : s.inj.ptr()) + size_t(last_row) * d.hc * 4),
+             PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
   {
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(o.down_n);
     cx.launch(kc(kernels::gemv_bf16_variant(1, d.hc_n(), o.down_n, t), "gemv_bf16"), o.down_n / t.cols, 1, 1,

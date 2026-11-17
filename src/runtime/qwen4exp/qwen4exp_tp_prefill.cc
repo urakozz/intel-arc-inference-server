@@ -1,11 +1,12 @@
 // Qwen4ExpTpEngine::prefill and its accessors - plan 21v2b Task 4, compiled into b70_qwen4exp_prefill (the one-card
 // engine's arrangement: qwen4exp_prefill_engine.cc), so a decode-only target links what it always linked.
 //
-// Each chunk: the host (both cards' prefill lists idle) resets the chunk's crossing events, writes the ids and a chunk
-// Control (the card's, at pos / C) on each card, appends both cards' walks a unit at a time (prefill_chunk_tp: each
-// card's wait for the peer's copy appended after the peer's signal), and waits on both with a bound. One chunk is in
-// flight at a time: the cards compute each unit side by side and cross after it (20 MiB of fp32 each way at 2048
-// rows), so a chunk's events and fold slots are free once both lists are idle. A card that does not finish in time:
+// Each pair of chunks (plan 21-QFN-v2b Task 4 Step 2; the prompt's last may be one): the host (both cards' prefill
+// lists idle) resets the pair's crossing events, writes each chunk's ids and Control (the card's, at pos / C) on each
+// card, appends both cards' walks a unit at a time (prefill_pair_tp: Qwen3.8's wavefront - a chunk's crossing after
+// unit u on the card's copy-engine list beside the other chunk's unit u; each wait appended after the signal it waits
+// for), and waits on both with a bound. A pair's events and fold slots are free once both lists are idle. Without a
+// copy-only queue group the crossings go on the compute lists (correct, no overlap). A card that does not finish in time:
 // every event is host-signalled so both lists drain on whatever they hold, the engine throws naming the card, the chunk
 // and each card's crossings sent, and stays failed until reset(). After the last chunk both cards run prefill_head_tp
 // on its last row and the host merges the heads (the larger value, ties to card 0) as a decode step does.
@@ -20,6 +21,7 @@
 
 #include "kernels/kernels.h"
 #include "kernels/qwen4exp_kernels.h"
+#include "l0/error.h"
 #include "l0/sync_event.h"
 #include "runtime/control.h"
 #include "runtime/prefill/context.h"
@@ -31,6 +33,21 @@
 #include "runtime/qwen4exp/qwen4exp_tp_engine.h"
 
 namespace runtime::qwen4exp {
+namespace {
+// The copy-only queue group's ordinal (COPY without COMPUTE), or UINT32_MAX (runtime/prefill/tp_prefill.cc's).
+uint32_t copy_ordinal(ze_device_handle_t dev) {
+  uint32_t n = 0;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, nullptr));
+  std::vector<ze_command_queue_group_properties_t> p(n);
+  for (auto& q : p) q.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, p.data()));
+  for (uint32_t i = 0; i < n; ++i)
+    if ((p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
+        !(p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE))
+      return i;
+  return UINT32_MAX;
+}
+}  // namespace
 
 struct Q4TpPrefillState {
   struct Dev {
@@ -38,25 +55,50 @@ struct Q4TpPrefillState {
         : cx(c),
           kc(c),
           s(c, card, max_len),
-          fold(c, l0::MemKind::Device, size_t(2) * 2 * kPfC * one.hidden * 4, 4096),
+          fold(c, l0::MemKind::Device, size_t(kTpPfChunks) * 2 * 2 * kPfC * one.hidden * 4, 4096),
           yf(c, l0::MemKind::Device, size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4, 4096),
-          ctl(c, l0::MemKind::Host, sizeof(Control)) {
+          H1(c, l0::MemKind::Device, size_t(kPfC) * one.hc_n() * 2),
+          inj1(c, l0::MemKind::Device, size_t(kPfC) * one.hc * 4),
+          ctl(c, l0::MemKind::Host, kTpPfChunks * sizeof(Control)) {
       std::memset(ctl.ptr(), 0, ctl.size());
+      const uint32_t ord = copy_ordinal(c.device());
+      if (ord != UINT32_MAX) {
+        ze_command_queue_desc_t qd{};
+        qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+        qd.ordinal = ord;
+        qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
+        qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
+        qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
+        ZE_CHECK(zeCommandListCreateImmediate(c.handle(), c.device(), &qd, &bcs));
+      }
     }
-    size_t slot_off(uint32_t k) const { return size_t(k) * 2 * kPfC * hidden; }
+    ~Dev() {
+      if (bcs) {
+        zeCommandListHostSynchronize(bcs, UINT64_MAX);
+        zeCommandListDestroy(bcs);
+      }
+    }
+    // chunk h's slot k: fp32 [2 slices][kPfC][hidden]
+    size_t slot_off(uint32_t h, uint32_t k) const { return (size_t(h) * 2 + k) * 2 * kPfC * hidden; }
+    Control* ctl_at(uint32_t h) { return ctl.as<Control>() + h; }
+    uint32_t* ids_at(uint32_t h) { return s.ids.as<uint32_t>() + size_t(h) * kPfC; }   // s.ids holds kPfDepth chunks
     prefill::Context cx;
     prefill::KernelCache kc;
     Qwen4ExpPrefillScratch s;
-    l0::Mem fold;   // fp32 [2 slots][2 slices][kPfC][hidden]
-    l0::Mem yf;     // fp32 [tmax x 32][hidden]
-    l0::Mem ctl;    // host: the chunk's Control
+    l0::Mem fold;       // fp32 [chunk][2 slots][2 slices][kPfC][hidden]
+    l0::Mem yf;         // fp32 [tmax x 32][hidden]
+    l0::Mem H1, inj1;   // the pair's second chunk's residual rows and inject weights (the first's are s.H / s.inj)
+    l0::Mem ctl;        // host: each chunk's Control
     size_t hidden = 0;
-    Q4TpPrefill tp;
+    std::array<Q4TpPrefill, kTpPfChunks> tp;
+    ze_command_list_handle_t bcs = nullptr;   // the copy engine's list (null: crossings on the compute list)
     // Task 5, the MTP head's card: the head pass's R rows, its Control for the chunk (host), its own rows at one
     // card's widths (Qwen4ExpMtpPrefill::partials / q16)
     std::unique_ptr<l0::Mem> mtp_R, hctl, mtp_part, mtp_q16;
   };
-  Q4TpPrefillState(l0::Context& d0, l0::Context& d1, uint32_t units) : ev(d0, {&d0, &d1}, 2 * units), units(units) {}
+  // [chunk][sent card 0 | sent card 1 | ready card 0 | ready card 1][unit]
+  Q4TpPrefillState(l0::Context& d0, l0::Context& d1, uint32_t units)
+      : ev(d0, {&d0, &d1}, kTpPfChunks * 4 * units), units(units) {}
   ~Q4TpPrefillState() {   // never free a scratch under a running list
     release();
     for (auto& d : dev)
@@ -108,7 +150,8 @@ void Qwen4ExpTpEngine::prepare_prefill() {
   for (uint32_t r = 0; r < 2; ++r) {
     ps->dev[r] = std::make_unique<Q4TpPrefillState::Dev>(cards_[r]->ctx, cards_[r]->desc, d, max_len_);
     ps->dev[r]->hidden = d.hidden;
-    require(ps->dev[r]->s.bytes() + ps->dev[r]->fold.size() + ps->dev[r]->yf.size() ==
+    require(ps->dev[r]->s.bytes() + ps->dev[r]->fold.size() + ps->dev[r]->yf.size() + ps->dev[r]->H1.size() +
+                    ps->dev[r]->inj1.size() ==
                 prefill_sizes(cards_[r]->desc, max_len_).total() + tp_prefill_bytes(d),
             "card " + std::to_string(r) + "'s prefill allocation is not the plan's (prefill_sizes + tp_prefill_bytes)");
   }
@@ -118,25 +161,32 @@ void Qwen4ExpTpEngine::prepare_prefill() {
     Q4TpPrefillState::Dev& D = *ps->dev[1];
     l0::Context& c1 = cards_[1]->ctx;
     D.mtp_R = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, mtp_prefill_R_bytes(d));
-    D.hctl = std::make_unique<l0::Mem>(c1, l0::MemKind::Host, sizeof(Control));
+    D.hctl = std::make_unique<l0::Mem>(c1, l0::MemKind::Host, kTpPfChunks * sizeof(Control));
     D.mtp_part = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(kPfC) * pf_ld(d.qkvg_n()) * 4);
     D.mtp_q16 = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(kPfC) * d.q_n() * 2);
   }
+  const bool overlap = ps->dev[0]->bcs && ps->dev[1]->bcs;   // both cards' copy engines, or neither crosses there
   for (uint32_t r = 0; r < 2; ++r) {
     Q4TpPrefillState::Dev& D = *ps->dev[r];
     Q4TpPrefillState::Dev& P = *ps->dev[1 - r];
-    Q4TpPrefill& t = D.tp;
-    t.rank = r;
-    t.card = &cards_[r]->desc;
-    t.embed = cards_[r]->binding.embed;
-    t.ple_ptrs = r == 1 ? model_.ple_ptrs1->ptr() : model_.ple.ptrs->ptr();
-    for (uint32_t k = 0; k < 2; ++k) {
-      t.fold[k] = D.fold.as<float>() + D.slot_off(k);
-      t.peer_fold[k] = P.fold.as<float>() + P.slot_off(k);
+    for (uint32_t h = 0; h < kTpPfChunks; ++h) {
+      Q4TpPrefill& t = D.tp[h];
+      t.rank = r;
+      t.card = &cards_[r]->desc;
+      t.embed = cards_[r]->binding.embed;
+      t.ple_ptrs = r == 1 ? model_.ple_ptrs1->ptr() : model_.ple.ptrs->ptr();
+      for (uint32_t k = 0; k < 2; ++k) {
+        t.fold[k] = D.fold.as<float>() + D.slot_off(h, k);
+        t.peer_fold[k] = P.fold.as<float>() + P.slot_off(h, k);
+      }
+      t.yf = D.yf.as<float>();
+      t.ev = &ps->ev;
+      t.units = ps->units;
+      t.ev_off = h * 4 * ps->units;
+      t.H = h ? D.H1.ptr() : nullptr;
+      t.inj = h ? D.inj1.ptr() : nullptr;
+      t.bcs = overlap ? D.bcs : nullptr;
     }
-    t.yf = D.yf.as<float>();
-    t.ev = &ps->ev;
-    t.units = ps->units;
   }
   pf_settle_ = [ps] { return ps->settle(); };
 }
@@ -179,17 +229,18 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   }
   prepare_prefill();
   Q4TpPrefillState& P = *pf_;
-  Qwen4ExpMtpPrefill mp;   // the head's pass on card 1 (qwen4exp_prefill.h)
-  if (mtp_) {
-    Q4TpPrefillState::Dev& D = *P.dev[1];
-    mp.bufs = mtp_.get();
-    mp.R = D.mtp_R.get();
-    mp.embed = mtp_bind_.embed;
-    mp.single = mtp_bind_.single;
-    mp.hctl = D.hctl->as<Control>();
-    mp.partials = D.mtp_part.get();
-    mp.q16 = D.mtp_q16.get();
-  }
+  std::array<Qwen4ExpMtpPrefill, kTpPfChunks> mp;   // the head's pass on card 1, a chunk each (qwen4exp_prefill.h)
+  if (mtp_)
+    for (uint32_t h = 0; h < kTpPfChunks; ++h) {
+      Q4TpPrefillState::Dev& D = *P.dev[1];
+      mp[h].bufs = mtp_.get();
+      mp[h].R = D.mtp_R.get();   // one: the pair's passes run in order on card 1's list
+      mp[h].embed = mtp_bind_.embed;
+      mp[h].single = mtp_bind_.single;
+      mp[h].hctl = D.hctl->as<Control>() + h;
+      mp[h].partials = D.mtp_part.get();
+      mp[h].q16 = D.mtp_q16.get();
+    }
   const uint64_t tmo = P.timeout_ns;
   const auto drain = [&](uint32_t pos, const char* what) {
     for (uint32_t r = 0; r < 2; ++r)
@@ -208,54 +259,60 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       }
   };
   // Spec 7's prefix cache: with a block hook every chunk ends at a block end or at the prompt end (the one-card
-  // engine's rule, one shared function), and the hook runs after each mid-prompt block end with both cards idle.
+  // engine's rule, one shared function); the hook runs after each pair that ends mid-prompt on a block end, with both
+  // cards idle (Qwen3.8's tp rule: the block ends inside a pair are not hooked), and at the prompt's end.
   const bool hooked = static_cast<bool>(block_hook_);
-  uint32_t last_C = 0;
+  uint32_t last_C = 0, last_h = 0;
   for (size_t off = 0; off < ids.size();) {
-    const uint32_t pos = base + uint32_t(off);
-    const uint32_t C = prefill_chunk_rows(pos, ids.size() - off, chunk, hooked, kBlock);
+    uint32_t pos[kTpPfChunks], C[kTpPfChunks], n = 0;
+    for (size_t o = off; n < kTpPfChunks && o < ids.size(); ++n) {
+      pos[n] = base + uint32_t(o);
+      C[n] = prefill_chunk_rows(pos[n], ids.size() - o, chunk, hooked, kBlock);
+      o += C[n];
+    }
     P.reset_events();
-    for (uint32_t r = 0; r < 2; ++r) {
-      Q4TpPrefillState::Dev& D = *P.dev[r];
-      std::memcpy(D.s.ids.ptr(), ids.data() + off, size_t(C) * 4);
-      Control* k = D.ctl.as<Control>();
-      *k = *cards_[r]->ctl;
-      k->pos = pos;
-      k->n_active = C;
-    }
-    if (mtp_) {   // the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
-      Control* h = P.dev[1]->hctl->as<Control>();
-      *h = *mtp_->hctl.as<Control>();
-      h->pos = pos == 0 ? 0 : pos - 1;
-      h->n_active = mtp_prefill_rows(pos, C);
-    }
-    std::array<Q4TpChunk, 2> k;
-    for (uint32_t r = 0; r < 2; ++r) {
-      Q4TpPrefillState::Dev& D = *P.dev[r];
-      k[r] = {&D.cx, &D.kc, &D.s, &model_.parts[r], &cards_[r]->buffers, D.ctl.as<Control>(), D.s.ids.as<uint32_t>(),
-              &D.tp, mtp_ && r == 1 ? &mp : nullptr};
+    std::array<std::array<Q4TpChunk, 2>, 2> k{};
+    for (uint32_t h = 0; h < n; ++h) {
+      for (uint32_t r = 0; r < 2; ++r) {
+        Q4TpPrefillState::Dev& D = *P.dev[r];
+        std::memcpy(D.ids_at(h), ids.data() + (pos[h] - base), size_t(C[h]) * 4);
+        Control* c = D.ctl_at(h);
+        *c = *cards_[r]->ctl;
+        c->pos = pos[h];
+        c->n_active = C[h];
+        k[h][r] = {&D.cx, &D.kc, &D.s, &model_.parts[r], &cards_[r]->buffers, c, D.ids_at(h), &D.tp[h],
+                   mtp_ && r == 1 ? &mp[h] : nullptr};
+      }
+      if (mtp_) {   // the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
+        Control* hc = P.dev[1]->hctl->as<Control>() + h;
+        *hc = *mtp_->hctl.as<Control>();
+        hc->pos = pos[h] == 0 ? 0 : pos[h] - 1;
+        hc->n_active = mtp_prefill_rows(pos[h], C[h]);
+      }
     }
     try {
-      prefill_chunk_tp(model_, k, pos, C);
+      prefill_pair_tp(model_, k, pos, C, n);
     } catch (...) {   // a walk's own error (a missing binary, a shape check): release what waits, then throw
       P.release();
       for (auto& d : P.dev) d->cx.wait_for(tmo);
       broken_ = true;
       throw;
     }
-    drain(pos, "chunk");
-    off += C;
-    last_C = C;
-    if (hooked && off < ids.size() && (pos + C) % kBlock == 0) {
+    drain(pos[0], n == 2 ? "pair" : "chunk");
+    const uint32_t end = pos[n - 1] + C[n - 1];
+    off = end - base;
+    last_C = C[n - 1];
+    last_h = n - 1;
+    if (hooked && off < ids.size() && end % kBlock == 0) {
       for (auto& c : cards_) {
-        c->ctl->pos = pos + C;
+        c->ctl->pos = end;
         c->ctl->n_active = 0;
       }
-      block_hook_(pos + C, true);
+      block_hook_(end, true);
     }
   }
   if (mtp_) {   // the head's Control as the last chunk left it
-    const Control& h = *P.dev[1]->hctl->as<Control>();
+    const Control& h = *(P.dev[1]->hctl->as<Control>() + last_h);
     mtp_->hctl.as<Control>()->pos = h.pos;
     mtp_->hctl.as<Control>()->n_active = h.n_active;
   }
@@ -267,8 +324,9 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   const uint32_t last_slot = (P.units - 1) & 1u;
   for (uint32_t r = 0; r < 2; ++r) {
     Q4TpPrefillState::Dev& D = *P.dev[r];
-    prefill_head_tp(D.cx, D.kc, D.s, model_, model_.parts[r], cards_[r]->buffers, last_C - 1, D.tp.fold[last_slot], r,
-                    cards_[r]->desc);
+    const Q4TpPrefill& t = D.tp[last_h];
+    prefill_head_tp(D.cx, D.kc, D.s, model_, model_.parts[r], cards_[r]->buffers, last_C - 1, t.fold[last_slot], r,
+                    cards_[r]->desc, t.H, t.inj);
   }
   drain(base + uint32_t(ids.size()) - 1, "head");
   merge_heads();

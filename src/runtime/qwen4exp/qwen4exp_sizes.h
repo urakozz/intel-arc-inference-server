@@ -511,7 +511,10 @@ inline constexpr uint32_t kTpOutSlices = 2;
 size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
 // Plan 21v2b Task 4: a card's prefill beyond its scratch (prefill_sizes at the card's shapes): the two fold slots, fp32
 // [2][2][kPfC][hidden] (a slot's slice r is card r's partial of a row-parallel unit), and the down GEMM's fp32 rows
-// [tmax x 32][hidden] (qwen4exp_prefill.h, Q4TpPrefill) - 477 MB at hidden 2560 (derived).
+// [tmax x 32][hidden] (qwen4exp_prefill.h, Q4TpPrefill). Plan 21-QFN-v2b Task 4 Step 2: kTpPfChunks chunks in flight
+// (prefill_pair_tp), each its fold slots, every chunk past the first its residual rows bf16 [kPfC][10240] and inject
+// weights fp32 [kPfC][4] - 603 MB at hidden 2560 (derived).
+inline constexpr uint32_t kTpPfChunks = 2;
 size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one);
 // A card's plan under `p.tp` (one DevicePlan per card): plan() over model::q4_tp_card(one, rank) at one card's
 // placement - its halves of every layer, its halves of the KV (1 kv head) and of the GDN state (24 heads), the indexer

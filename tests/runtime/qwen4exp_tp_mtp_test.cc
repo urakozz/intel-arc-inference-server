@@ -40,6 +40,9 @@ Ids speculative(rq::Qwen4ExpTpEngine& e, uint32_t K, uint32_t n, uint64_t& draft
     const uint32_t* v = e.verify_ids();
     uint32_t j = 0;
     while (j < k && e.draft_ids()[j] == v[j]) ++j;
+    if (drafted < 3 * k)   // the first iterations' drafts against the verify's ids, printed
+      std::printf("tp-mtp:   pos %u: drafts %u %u %u, verify %u %u %u %u\n", e.pos(), e.draft_ids()[0],
+                  k > 1 ? e.draft_ids()[1] : 0, k > 2 ? e.draft_ids()[2] : 0, v[0], v[1], v[2], v[3]);
     out.push_back(x);
     for (uint32_t i = 0; i < j; ++i) out.push_back(e.draft_ids()[i]);
     drafted += k;

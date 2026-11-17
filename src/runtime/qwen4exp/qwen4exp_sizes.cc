@@ -656,7 +656,9 @@ size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one) {
 }
 
 size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one) {
-  return size_t(2) * 2 * kPfC * one.hidden * 4 + size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4;
+  // Task 4 Step 2: two chunks in flight - each its fold slots, the second its residual rows and inject weights
+  return size_t(kTpPfChunks) * 2 * 2 * kPfC * one.hidden * 4 + size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4 +
+         size_t(kTpPfChunks - 1) * kPfC * (size_t(one.hc_n()) * 2 + size_t(one.hc) * 4);
 }
 
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
