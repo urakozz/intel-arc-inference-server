@@ -302,7 +302,7 @@ void indexer(Dev& dv) {
   const uint32_t C = 2048, p0 = pos - C;
   l0::Mem sc = dv.zeros(size_t(C) * stride * 4), lists = dv.zeros(size_t(C) * kListRow * 4), diag = dv.zeros(size_t(C) * 8);
   dv.set_ctl(p0, C);
-  dv.go(kq::pf_qsa_variant(), "q4_qsa_score", (stride + 255) / 256, C, 1,
+  dv.go(kq::pf_qsa_variant(), "q4_qsa_score", (stride + 255) / 256, kq::pf_score_groups(C), 1,
         {PtrArg(dv.ctrl.ptr()), PtrArg(q.ptr()), PtrArg(keys.ptr()), PtrArg(sc.ptr()), arg_val(stride)});
   dv.go(kq::pf_qsa_variant(), "q4_qsa_select", 1, C, 1,
         {PtrArg(dv.ctrl.ptr()), PtrArg(sc.ptr()), arg_val(stride), PtrArg(lists.ptr()), PtrArg(diag.ptr())});

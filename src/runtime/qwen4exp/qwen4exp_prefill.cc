@@ -404,9 +404,10 @@ class Walk {
     }
     void* lists = injected_ ? at(*injected_, pf_list_at(qi)) : at(s_.lists, pf_list_at(qi));
     if (sparse > 0 && !injected_) {
-      // q4_qsa_score(ctrl, idx_q, idx_keys, scores, stride) - grid (ceil(stride / 256), C); work-groups past a row's
-      // complete blocks exit on their first instruction
-      launch(kc_(qv, "q4_qsa_score"), (stride + kq::kScoreWg - 1) / kq::kScoreWg, C_, 1,
+      // q4_qsa_score(ctrl, idx_q, idx_keys, scores, stride) _PF - grid (ceil(n / 256), ceil(C / 4)), n the chunk's last
+      // row's complete blocks; work-groups past their rows' blocks exit on their first instruction
+      launch(kc_(qv, "q4_qsa_score"), ((pos_ + C_) / kq::kBlock + kq::kScoreWg - 1) / kq::kScoreWg,
+             kq::pf_score_groups(C_), 1,
              {PtrArg(ctrl()), PtrArg(s_.idx_q.ptr()), PtrArg(b_.idx_keys_layer(l)), PtrArg(s_.scores.ptr()),
               arg_val(stride)});
       // q4_qsa_select(ctrl, scores, stride, list, diag) - grid (1, C): decode's rule per row
