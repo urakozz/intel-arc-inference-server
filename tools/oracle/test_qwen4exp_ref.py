@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""F1 for qwen4exp_ref.py (spec 21-QFNa Task 3): the streamed port against transformers 5.19.0 un-streamed.
+"""F1 for qwen4exp_ref.py (spec 21-QFN-v1a Task 3): the streamed port against transformers 5.19.0 un-streamed.
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/test_qwen4exp_ref.py [test_name ...]   (pytest collects it too)
 
 The tiny model is qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next: $Q4EXP_TINY, else oracle-out-q4exp/tiny,
 else the HF cache (`$HF_HOME/hub/models--qikp--...`); every test that needs it SKIPs when it is absent.
 Everything is BITWISE (Review Focus 2): logits and every layer's 4-stream residual, prompt and cached
-decode, bf16 and fp32, at prompt lengths that cross the QSA cut (2051). One test per trap of spec 21-QFN §2:
+decode, bf16 and fp32, at prompt lengths that cross the QSA cut (2051). One test per trap of spec 21-QFN-v1 §2:
 the HC rounding chain, the PLE ids (EOS history, padding, a decode boundary, the I64 constants), the
 indexer cache at 2047..2060 and every (p + 1) % 4 == 0 there, the sigmoid gate, the v-head map h // 3,
 router ties, --layers N, int4 experts at g64 / g128, the int8 PLE table, the original's fused experts,
@@ -478,7 +478,7 @@ def test_indexer_gaps_small_budget():
 
 
 def test_layers_truncation():
-    """--layers N (spec 21-QFN's development mode): on an 8-layer tiny (lllqlllq), text_config(layers=4) equals
+    """--layers N (spec 21-QFN-v1's development mode): on an 8-layer tiny (lllqlllq), text_config(layers=4) equals
     transformers built with num_hidden_layers=4 bitwise (prompt + cached decode); layers=2 equals it on an
     uncached forward (transformers 5.19.0's DynamicCache needs an indexed_attention layer for the sequence
     length - cache_utils.py:1566 - so a cached run needs N >= 4, which run / hfcheck / trace require); layers=1
@@ -551,7 +551,7 @@ def test_fused_experts():
 
 
 def test_ple_int8():
-    """21-QFNb's int8 file: the rows equal clamp(rne(w / s), -127, 127) with s = max|w| / 127 and dequantise to
+    """21-QFN-v1b's int8 file: the rows equal clamp(rne(w / s), -127, 127) with s = max|w| / 127 and dequantise to
     bf16(q x s); the forward on it equals transformers with the dequantised table, bitwise."""
     snap = tiny_snapshot()
     hf = ref.hf_reference(snap, BF)

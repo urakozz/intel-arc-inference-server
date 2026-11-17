@@ -36,7 +36,7 @@ struct Qwen4ExpEngine::Stage {
   mutable l0::CmdList imm;
   Control* ctl;
   std::optional<CapturedStep> step, inj_step;
-  // Spec 21-QFNe, with the MTP head: the verify lists at M = 1..4 and (the last device) the draft steps.
+  // Spec 21-QFN-v1e, with the MTP head: the verify lists at M = 1..4 and (the last device) the draft steps.
   std::vector<CapturedStep> verify, drafts;
 };
 
@@ -72,7 +72,7 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
     if (opt.timeout_ms == 0)
       throw std::invalid_argument("runtime::qwen4exp::Qwen4ExpEngine: a hand-off needs a non-zero bound");
   }
-  // Spec 21-QFNe: the MTP head (the loader's, on the last device) - read the switches before anything is allocated.
+  // Spec 21-QFN-v1e: the MTP head (the loader's, on the last device) - read the switches before anything is allocated.
   const bool mtp = model_.mtp;
   if (mtp) {
     if (!model_.parts.back().mtp || !model_.parts.back().mtp_fc || !model_.parts.back().mtp_mixer)
@@ -262,7 +262,7 @@ Control* Qwen4ExpEngine::stage_control(uint32_t dev) const { return st(dev).ctl;
 l0::CmdList& Qwen4ExpEngine::stage_imm(uint32_t dev) const { return st(dev).imm; }
 
 void Qwen4ExpEngine::reset() {
-  // Spec 21-QFNd: a prefill list waiting on a hand-off that will not come is released first (pf_settle_ is set by
+  // Spec 21-QFN-v1d: a prefill list waiting on a hand-off that will not come is released first (pf_settle_ is set by
   // prepare_prefill; b70_qwen4exp_prefill's) - the buffers below are not touched under a running list.
   if (pf_settle_ && !pf_settle_())
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::reset: a prefill list is still running after " +
@@ -273,7 +273,7 @@ void Qwen4ExpEngine::reset() {
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
   if (link_) link_->zero(st(1).imm);
-  if (mtp_) mtp_->zero(st(uint32_t(st_.size()) - 1).imm);   // spec 21-QFNe: the head's Control, KV, keys, tail, R rows
+  if (mtp_) mtp_->zero(st(uint32_t(st_.size()) - 1).imm);   // spec 21-QFN-v1e: the head's Control, KV, keys, tail, R rows
   verify_k_ = kNoVerify;
   draft_ids_.clear();
   broken_ = false;
@@ -571,16 +571,16 @@ MemoryComponents Qwen4ExpEngine::memory_use(uint32_t dev) const {
   c.kv = b.kv.size() + b.idx_keys.size() + b.idx_tail.size();
   c.decode_state = b.control.size() + b.gdn_state.size() + b.conv_ring.size() + b.ple.size() + b.scratch_bytes() +
                    (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0) + b.mtp_bytes();
-  if (mtp_ && dev + 1 == st_.size()) {   // spec 21-QFNe: the head's KV and keys in kv, the rest in decode state (plan())
+  if (mtp_ && dev + 1 == st_.size()) {   // spec 21-QFN-v1e: the head's KV and keys in kv, the rest in decode state (plan())
     const size_t kv = mtp_->kv.size() + mtp_->idx_keys.size() + mtp_->idx_tail.size();
     c.kv += kv;
     c.decode_state += mtp_->bytes() - kv;
   }
-  c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 21-QFNd: after prepare_prefill
+  c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 21-QFN-v1d: after prepare_prefill
   return c;
 }
 
-// --- spec 21-QFNe: prefix-cache snapshots ------------------------------------------------------------------------------
+// --- spec 21-QFN-v1e: prefix-cache snapshots ------------------------------------------------------------------------------
 void Qwen4ExpEngine::settle_all(const char* what) {
   if (pf_settle_ && !pf_shadow_ && !pf_settle_())
     throw std::runtime_error(std::string("runtime::qwen4exp::Qwen4ExpEngine::") + what + ": a prefill list is still "
@@ -715,7 +715,7 @@ std::string Qwen4ExpEngine::memory_line() const {
   return s;
 }
 
-// --- spec 21-QFNe: the MTP head - spec 8's draft / verify / commit -----------------------------------------------------
+// --- spec 21-QFN-v1e: the MTP head - spec 8's draft / verify / commit -----------------------------------------------------
 void Qwen4ExpEngine::require_mtp(const char* what) const {
   if (!mtp_)
     throw std::runtime_error(std::string("runtime::qwen4exp::Qwen4ExpEngine::") + what +

@@ -6,12 +6,12 @@
 #include "runtime/prefill/kernels.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"   // kGdnChunkLaunches, kGdnChunk, gdn_scratch_sizes
 
-// Spec 21-QFNd: gdn_chunk_q4 - the WY-chunked gated delta rule for ONE Qwen3.8-Flash-Next GDN layer over `C` new
+// Spec 21-QFN-v1d: gdn_chunk_q4 - the WY-chunked gated delta rule for ONE Qwen3.8-Flash-Next GDN layer over `C` new
 // positions: runtime::prefill::gdn_chunk's ten launches (src/runtime/prefill/gdn.cc), in its order and with its
 // binaries, over this family's own buffers - the tenth launch is pf_gated_head_SIG (the sigmoid output gate,
 // `output_gate_type: sigmoid`) where gdn_chunk binds pf_gated_head's silu form by name.
 //
-// Why a sibling and not gdn_chunk itself (plan 21-QFNd "Dependencies"): gdn_chunk takes a runtime::PrefillScratch sized by
+// Why a sibling and not gdn_chunk itself (plan 21-QFN-v1d "Dependencies"): gdn_chunk takes a runtime::PrefillScratch sized by
 // a model::ModelDesc (Qwen3.8's ~GB of scratch, its descriptor's GDN shape) and binds pf_gated_head by name.
 // gdn.cc is not edited. The GDN shape is Qwen3.8's (16 k / 48 v heads x 128, 10240 conv channels; the small block's
 // conv / negA / dt_bias at Qwen3.8's offsets: loader::make_small_layout(2560, 10240, 48) == kQwen38Small's GDN part),

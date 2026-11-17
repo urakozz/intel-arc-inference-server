@@ -1,4 +1,4 @@
-// q4_qsa_attn.cl - spec 21-QFNc: Qwen3.8-Flash-Next's QSA decode attention over a SELECTED position list (spec 21-QFN
+// q4_qsa_attn.cl - spec 21-QFN-v1c: Qwen3.8-Flash-Next's QSA decode attention over a SELECTED position list (spec 21-QFN-v1
 // §4.2, decision 10: one kernel at every depth - below 2052 visible positions the list is the identity), spec 10
 // v2's structure (attn_v2.cl / kol_attn.cl: waves of 16 positions, sub-group block reads of K, a fixed-order
 // online softmax in fp32, the slices merged ascending) carried to a gathered list. attn_v2.cl and kol_attn.cl are

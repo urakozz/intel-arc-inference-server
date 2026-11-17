@@ -11,12 +11,12 @@
 #include "loader/safetensors.h"
 #include "model/qwen4exp.h"
 
-// Spec 21-QFNb: the host half of the Qwen3.8-Flash-Next loader - a checkpoint's tensors repacked into the device
+// Spec 21-QFN-v1b: the host half of the Qwen3.8-Flash-Next loader - a checkpoint's tensors repacked into the device
 // layouts loader/qwen4exp_layout.h sizes, with NO Level Zero, so tests/loader/qwen4exp_repack_test.cc runs it
 // on any host over a synthetic checkpoint. loader::load_qwen4exp (qwen4exp_loader.h) uploads what this
 // produces, one layer at a time, straight onto the layer's device.
 //
-// **Two checkpoint forms, one weight format** (spec 21-QFN §5, the rule): AutoRound W4A16 int4 g64
+// **Two checkpoint forms, one weight format** (spec 21-QFN-v1 §5, the rule): AutoRound W4A16 int4 g64
 // symmetric in the auto_round:auto_gptq packing (`.qweight` I32 [K/8, N], `.scales` F16 [K/64, N],
 // `.qzeros` 0x77777777 - proved by assert_quant_invariants, never read - no g_idx), with ONE exact
 // conversion: Intel's export ships its routed experts at g128, which LinearSrc::classify expands to g64
@@ -42,7 +42,7 @@ namespace loader {
 // never the engine's).
 model::Q4Forms q4_forms(const SafetensorsSet& st, const model::Qwen4ExpDesc& d);
 
-// Every text-model tensor the checkpoint of `d` in forms `f` ships, by name (21-QFNa's qwen4exp_ref.expected_names
+// Every text-model tensor the checkpoint of `d` in forms `f` ships, by name (21-QFN-v1a's qwen4exp_ref.expected_names
 // with the int4 linears' `.weight` replaced by `.qweight` / `.scales` / `.qzeros`), WITHOUT the PLE table's
 // shards (skipped by design: their count is the export's split, not the model's). `mtp` adds the head.
 std::vector<std::string> q4_expected_names(const model::Qwen4ExpDesc& d, const model::Q4Forms& f, bool mtp);

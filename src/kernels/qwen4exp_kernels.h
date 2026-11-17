@@ -6,7 +6,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "model/qwen4exp.h"
 
-// Spec 21-QFNc: Qwen3.8-Flash-Next's decode binaries by name - the host half of the spec 21-QFNc block in
+// Spec 21-QFN-v1c: Qwen3.8-Flash-Next's decode binaries by name - the host half of the spec 21-QFN-v1c block in
 // src/kernels/CMakeLists.txt, in its own header so kernels.h (shared with every branch in flight) is not
 // edited. Every family-only binary is prefixed `q4_` and carries in its name every define its code depends
 // on, so a host / device disagreement names a binary that does not exist and throws at capture. The reused
@@ -47,7 +47,7 @@ inline constexpr unsigned kGdnHeads = 48, kGdnHd = 128, kQkvzN = 16384, kGdnZN =
 
 // --- the device-side constants -----------------------------------------------------------------------------
 inline constexpr unsigned kTailSlots = 8;     // the open block's raw keys, slot p % 8 (Review Focus 3: 4 would let
-                                              // a 4-row launch overwrite a completing row's keys; spec 21-QFN §4.2 said 4)
+                                              // a 4-row launch overwrite a completing row's keys; spec 21-QFN-v1 §4.2 said 4)
 inline constexpr unsigned kListMax = 2052;    // 2048 + 3 tail + 1: the positions a row may attend (<= 2051)
 inline constexpr unsigned kListRow = 2064;    // u32 words of one row's list: positions [0, count), the count at
                                               // word kCountWord, padding to 64 B (8256 B)
@@ -71,13 +71,13 @@ inline constexpr unsigned argmax_groups() { return (kVocab + kArgmaxChunk - 1) /
 namespace route {
 inline constexpr unsigned kWords = 32;
 inline constexpr unsigned kIds = 0;         // 10 ids in RANK order (descending p, ties to the lower id): the
-                                            // combine's order (grouped_mm's topk slot order, spec 21-QFN §12)
+                                            // combine's order (grouped_mm's topk slot order, spec 21-QFN-v1 §12)
 inline constexpr unsigned kWeights = 16;    // fp32 bits of the bf16 renormalised weight, slot order
 inline constexpr unsigned kSharedGate = 26; // fp32 bits of rne(sigmoid(rne(shared gate logit)))
 inline constexpr unsigned kP10 = 27, kP11 = 28;   // diagnostics: p of rank 9 and of rank 10 (the first not taken)
 }  // namespace route
 
-// What a q4_hc_combine_norm folds into H before the norm (spec 21-QFN §4.1: the pending H = H0 + y (x) inj of
+// What a q4_hc_combine_norm folds into H before the norm (spec 21-QFN-v1 §4.1: the pending H = H0 + y (x) inj of
 // the block before, vLLM's fusion).
 //   Embed   layer 0: H = the embedding row repeated into the 4 streams (nothing pending)
 //   Slices  the mixer's GEMV split-K slices: y = rne(sum_s slices[s]) (S 4 int4, S 1 bf16)
@@ -224,7 +224,7 @@ inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf1
   };
   return v;
 }
-// The descriptor's form (ours: int4 dense and shared; Intel's: bf16 both - 21-QFNb's q4_forms reads them all-or-
+// The descriptor's form (ours: int4 dense and shared; Intel's: bf16 both - 21-QFN-v1b's q4_forms reads them all-or-
 // nothing). `two_cards` binds nothing new (the materialising _Y_NN is every list's: the PLE prologue).
 inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bool int8_head, bool eager, bool two_cards,
                                                 bool ple_bf16_scale = true) {
@@ -234,9 +234,9 @@ inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bo
 }
 
 // =================================================================================================================
-// Spec 21-QFNd: Qwen3.8-Flash-Next's PREFILL binaries by name - the host half of src/kernels/CMakeLists.txt's spec 21-QFNd
+// Spec 21-QFN-v1d: Qwen3.8-Flash-Next's PREFILL binaries by name - the host half of src/kernels/CMakeLists.txt's spec 21-QFN-v1d
 // block. A chunk of at most kPfC positions on the `l0` backend (runtime/qwen4exp/qwen4exp_prefill.h has the walk):
-// the linears as slab GEMMs (prefill/pf_gemm.cl's pf_gemm_T0 over int4 dequant slabs or bf16 slabs), 21-QFNc's HC /
+// the linears as slab GEMMs (prefill/pf_gemm.cl's pf_gemm_T0 over int4 dequant slabs or bf16 slabs), 21-QFN-v1c's HC /
 // indexer / PLE-gather sources rebuilt at M = kPfC, Qwen3.8's GDN chain (gdn_chunk_q4) with the sigmoid gated head,
 // spec 6's flash at 24 / 2 heads for the rows with <= 2051 visible positions and q4_pf_sparse_attn over each row's
 // own list past them, the MoE through a 512-expert ushort sort and spec 15d's grouped GEMMs. New sources
@@ -284,7 +284,7 @@ inline std::string pf_int4_slab_variant(unsigned K, unsigned N) {
   return pf_int4_slab_tail(N) ? "pf_int4_slab_K" + std::to_string(K) + "_N" + std::to_string(N)
                               : pf_dequant_slab_variant(K, N, 0);
 }
-// 21-QFNc's sources at M = kPfC.
+// 21-QFN-v1c's sources at M = kPfC.
 inline std::string pf_hc_combine_norm_variant(HcSrc src, bool norm) { return hc_combine_norm_variant(kPfC, src, 1, norm); }
 inline std::string pf_hc_up_mix_variant() {   // "q4_hc_up_mix_M2048_I_D512": UP_DOWN = the GEMM's pitch
   return hc_up_mix_variant(kPfC, true) + "_D" + std::to_string(kPfHcDownLd);
@@ -408,20 +408,20 @@ inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& o
 }
 
 // =================================================================================================================
-// Spec 21-QFNe: Qwen3.8-Flash-Next's MTP head and spec 8's verify lists by name - the host half of src/kernels/
-// CMakeLists.txt's spec 21-QFNe block (B70_Q4EXP and B70_MTP). What the lists bind (runtime/qwen4exp/qwen4exp_capture.cc):
-//   verify at M = k + 1 (1..4), every device: 21-QFNc's decode list at M rows - every 21-QFNc kernel rebuilt at M = 2..4 (the
+// Spec 21-QFN-v1e: Qwen3.8-Flash-Next's MTP head and spec 8's verify lists by name - the host half of src/kernels/
+// CMakeLists.txt's spec 21-QFN-v1e block (B70_Q4EXP and B70_MTP). What the lists bind (runtime/qwen4exp/qwen4exp_capture.cc):
+//   verify at M = k + 1 (1..4), every device: 21-QFN-v1c's decode list at M rows - every 21-QFN-v1c kernel rebuilt at M = 2..4 (the
 //     q4_ sources, attn_prep _Q24KV2 / _S1, prep_gated_head _SIG, embed_gather D2560, the GEMVs at this family's
 //     shapes) - with the GDN step `gdn_step_slots_M<M>_G1` (spec 8's state slots, SPEC_SLOT_STRIDE = ONE layer's
 //     state: the engine lays gdn_spec out layer-major, so the stride does not bake a layer count - Qwen3.8's
-//     `gdn_step_slots_M<M>` bakes its 48-layer slot) and, on the PLE layer at M > 1, q4_pf_ple (21-QFNd's three-launch
+//     `gdn_step_slots_M<M>` bakes its 48-layer slot) and, on the PLE layer at M > 1, q4_pf_ple (21-QFN-v1d's three-launch
 //     cut of q4_ple_block, which is M = 1 only) at C = 4; argmax_stage1_M<M> is Qwen3.8's (vocab 248077 used);
 //   the head's KV pass in every verify list (last device): q4_mtp (norm, fuse) at M, fc_embedding gemv_bf16 {2560,
 //     2560} at M and fc_hidden at M = 4 a row, the attn side's gated residual (_X: H materialised by the fuse), the
 //     head's bf16 q||gate||k||v and indexer at M, attn_prep _Q24KV2_S1 and q4_qsa at M;
 //   a draft step (M = 1): q4_mtp_M1, the fc's, the head's QSA layer (bf16 dense, int4 experts, bf16 shared: _SHB) and
-//     its final mixer, lm_head, argmax - every 21-QFNc M = 1 binary but q4_mtp and the fc's;
-//   the prefill's head pass (M = kPfC): q4_mtp _PF (the chunk's ids), the fc's as bf16 slabs {2560, 2560}, then 21-QFNd's
+//     its final mixer, lm_head, argmax - every 21-QFN-v1c M = 1 binary but q4_mtp and the fc's;
+//   the prefill's head pass (M = kPfC): q4_mtp _PF (the chunk's ids), the fc's as bf16 slabs {2560, 2560}, then 21-QFN-v1d's
 //     binaries (combine _X / _Y_NN, the HC down slab, up_mix, the k||v slab of q||gate||k||v, the indexer slab,
 //     pf_attn_prep_q16, q4_qsa _PF).
 // The norm form of pre_fc_norm_hidden (decision 4) is a binary: `_SINGLE` (one RMS over the row's 10240, vLLM's) or
@@ -436,7 +436,7 @@ inline std::string gdn_slots_variant(unsigned M) { return gdn_step_slots_variant
 inline std::string pf_ple_verify_variant() { return "q4_pf_ple_C" + std::to_string(kMtpVerifyRows); }   // q4_pf_ple_C4
 inline std::string bf16_m_variant(unsigned M, unsigned K, unsigned N) { return gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N)); }
 inline std::string fc_variant(unsigned M) { return bf16_m_variant(M, kHidden, kHidden); }   // gemv_bf16_M<M>_K2560_N2560
-// The dense / head linears at M rows (21-QFNc's M = 1 helpers above are these at M = 1). Spec 28d: the int4 / int8 forms
+// The dense / head linears at M rows (21-QFN-v1c's M = 1 helpers above are these at M = 1). Spec 28d: the int4 / int8 forms
 // by `k` - gemv_kind(M) in the lists (gemv / gemv_i8w at M = 1, gemm_sm at M >= 2, kSmallMTuning's Flash-Next rows),
 // Gemv under the tests' override (runtime::CaptureOptions::force_linear) and by default here.
 inline std::string qkvz_m_variant(unsigned M, bool int4, LinearKind k = LinearKind::Gemv) {

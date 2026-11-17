@@ -128,7 +128,7 @@ static const char* gdn_scan_entry() {
     // max rel 2.9650e-02". Those two numbers are `attn_chunk_test`'s standing
     // band MISS against the L1-engine pre-registration, not `gdn_chunk_test`'s
     // and not the scan's: the identical pair is printed by
-    // `$HOME/spec21-QFN-suite.log` (2026-09-18) and `$HOME/suite-igc2415.log`
+    // `$HOME/spec21-QFN-v1-suite.log` (2026-09-18) and `$HOME/suite-igc2415.log`
     // (2026-09-19), both under the vector default, and attention runs no GDN
     // kernel. `gdn_chunk_test` prints no rel L2 at all.
     //

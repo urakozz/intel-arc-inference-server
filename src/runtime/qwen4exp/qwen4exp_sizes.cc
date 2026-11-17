@@ -68,7 +68,7 @@ size_t host_ple_bytes(const model::Qwen4ExpDesc& d, loader::Q4PleScale s) {
   return loader::q4_ple_table_bytes(loader::q4_ple_primes(d.ple_base, d.ple_heads, 0), d.ple_dim, s);
 }
 
-// --- spec 21-QFNc: the decode list ----------------------------------------------------------------------------------
+// --- spec 21-QFN-v1c: the decode list ----------------------------------------------------------------------------------
 Q4Attn q4_attn() {
   const char* e = std::getenv("B70_Q4_ATTN");
   if (e == nullptr || *e == '\0') return kDefaultQ4Attn;
@@ -149,7 +149,7 @@ size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p
   return n;
 }
 
-// --- spec 21-QFNd: the prefill chunk -----------------------------------------------------------------------------------
+// --- spec 21-QFN-v1d: the prefill chunk -----------------------------------------------------------------------------------
 namespace {
 constexpr uint32_t kPfHdrWords = (4 + 512 + 1 + 15) / 16 * 16;   // kernels::qwen4exp::pf_hdr::words()
 constexpr uint32_t kPfIdxLd = 768, kPfHcDownLd = 512;            // kernels::qwen4exp::kPfIdxLd / kPfHcDownLd
@@ -271,7 +271,7 @@ size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Plac
     if (l == d.ple_layer) n += ((two && dev == 1 && l == p.first(1)) ? 0 : 1) + 1 + lin(d.ple_kv_n()) + 3;
   }
   if (two && dev == 0) n += 1;                    // combine_norm _Y_NN: the materialised H crosses
-  if (mtp && dev + 1 == p.devices) n += mtp_prefill_launches(pos, C);   // spec 21-QFNe: the head's pass
+  if (mtp && dev + 1 == p.devices) n += mtp_prefill_launches(pos, C);   // spec 21-QFN-v1e: the head's pass
   return n;
 }
 size_t prefill_chunk_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, uint32_t C,
@@ -320,7 +320,7 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     const PersistentSizes ps = persistent_sizes(d, p, dev, max_len);
     dp.kv = ps.kv_total();
     dp.state = ps.state();
-    // Spec 21-QFNe: with the head, the scratch's verify rows, gdn_spec, the verify's PLE rows, the head's buffers (the
+    // Spec 21-QFN-v1e: with the head, the scratch's verify rows, gdn_spec, the verify's PLE rows, the head's buffers (the
     // last device: its KV and keys go to `kv`), a link of kVerifyRows rows, and the prefill's R rows.
     const uint32_t rows = mtp ? kVerifyRows : kM;
     dp.scratch = scratch_sizes(d, max_len, kDefaultQ4Attn, rows).total() + (debug_tap ? tap_bytes(d) : 0);
@@ -766,7 +766,7 @@ double tp_card_f(const ExpertBudget& b, uint32_t rank) {
   return double(n) / b.experts;
 }
 
-// --- spec 21-QFNe: the MTP head, the verify and draft lists ---------------------------------------------------------
+// --- spec 21-QFN-v1e: the MTP head, the verify and draft lists ---------------------------------------------------------
 MtpNorm mtp_norm() {
   const char* e = std::getenv("B70_Q4_MTP_NORM");
   if (e == nullptr || *e == '\0') return MtpNorm::Single;
@@ -837,7 +837,7 @@ size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p
 size_t draft_launches(Q4Attn a, bool select) { return (a == Q4Attn::Eager ? 26 : 27) + (select ? 2 : 0); }
 size_t mtp_prefill_launches(uint32_t pos, uint32_t C) { return 1 + (mtp_prefill_rows(pos, C) > 0 ? 25 : 0); }
 
-// --- spec 21-QFNe: prefix-cache snapshots ---------------------------------------------------------------------------
+// --- spec 21-QFN-v1e: prefix-cache snapshots ---------------------------------------------------------------------------
 const char* snap_tensor_name(SnapTensor t) {
   switch (t) {
     case SnapTensor::Kv: return "kv";

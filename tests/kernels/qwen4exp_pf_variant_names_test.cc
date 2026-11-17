@@ -1,8 +1,8 @@
-// Spec 21-QFNd Task 2: the binaries a Qwen3.8-Flash-Next prefill chunk binds (kernels::qwen4exp::prefill_variants - the
+// Spec 21-QFN-v1d Task 2: the binaries a Qwen3.8-Flash-Next prefill chunk binds (kernels::qwen4exp::prefill_variants - the
 // names runtime/qwen4exp/qwen4exp_prefill.cc forms) for both dense arms (ours int4 / Intel's bf16), both attention
 // forms and both PLE scale forms, against the ones the build makes for it (passed as arguments: tests/CMakeLists.txt's
-// B70_Q4EXP_PREFILL_KERNELS, `kernel_<name>` - src/kernels/CMakeLists.txt's spec 21-QFNd block, plus the reused names other
-// blocks build: pf_gemm_T0, Qwen3.8's pf_gdn_*, 21-QFNc's q4_route_M1, Kolibri's 6144 x 2560 slab). Host only: a
+// B70_Q4EXP_PREFILL_KERNELS, `kernel_<name>` - src/kernels/CMakeLists.txt's spec 21-QFN-v1d block, plus the reused names other
+// blocks build: pf_gemm_T0, Qwen3.8's pf_gdn_*, 21-QFN-v1c's q4_route_M1, Kolibri's 6144 x 2560 slab). Host only: a
 // name the walk would ask for that no CMake line builds fails here on the Mac, not at prepare_prefill on the box; and
 // nothing listed is dead. Also pins the prefill constants the walk and the planner share with the kernels' names.
 #include <cstdio>

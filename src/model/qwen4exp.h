@@ -7,8 +7,8 @@
 #include "common/json.h"
 #include "model/qwen35.h"   // GemvShape, WeightKind, Fuse - the shared vocabulary, nothing else
 
-// Spec 21-QFNb: Qwen3.8-Flash-Next (`Qwen4ExpForConditionalGeneration`, config.json model_type `qwen4_exp`)
-// as data - a fourth model BESIDE qwen3_5 and Kolibri-1 (spec 21-QFN §6: its own table, loader,
+// Spec 21-QFN-v1b: Qwen3.8-Flash-Next (`Qwen4ExpForConditionalGeneration`, config.json model_type `qwen4_exp`)
+// as data - a fourth model BESIDE qwen3_5 and Kolibri-1 (spec 21-QFN-v1 §6: its own table, loader,
 // kernels and engine; their files untouched). Every number of `qwen4exp()` is the checkpoint's
 // (config.json text_config, the index and every shard header):
 //
@@ -35,7 +35,7 @@
 //          generation EOS {248046, 248044}; the PLE's EOS 248044; trained context 262144
 //
 // A plain struct so a test can build a small one (8 experts, tests/loader/qwen4exp_repack_test.cc); every
-// width the loader, the planner and (21-QFNc) the kernels use is DERIVED here. A synthetic checkpoint
+// width the loader, the planner and (21-QFN-v1c) the kernels use is DERIVED here. A synthetic checkpoint
 // (tools/quantize/qwen4exp/make_synth.py) or `--layers N` holds the first N layers of the real pattern
 // (N >= 2: the PLE layer is layer 1).
 namespace model {
@@ -132,7 +132,7 @@ struct Qwen4ExpDesc {
   std::vector<uint32_t> eos;                            // {248046, 248044} (generation_config.json)
   float rms_eps = 0;
   Q4Forms forms;
-  // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21-QFNc's sweep - copied from Qwen3.8's measured map
+  // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21-QFN-v1c's sweep - copied from Qwen3.8's measured map
   // at the nearest shapes (out_proj / o_proj S4, q||k||v S2). qkv||z is S 1,
   // fixed: gdn_step and prep_gated_head read S 1 (prep.cl:118-123).
   uint32_t gdn_out_s = 0, qkvg_s = 0, o_s = 0;

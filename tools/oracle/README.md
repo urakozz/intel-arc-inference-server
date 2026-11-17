@@ -32,17 +32,17 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
 | `ornith_ref.py` | Spec 15a: Ornith 1.5 35B-A3B from its **int4** checkpoint - transformers' `Qwen3_5MoeForCausalLM`, layer-streamed, the routed experts dequantised on demand; `run` (golden file + every layer's router / shared-gate logits and routes, and with `--mtp-out` the MoE MTP head's M1 reference), `facts` (the checkpoint facts spec 15 §13 rests on). `test_ornith_ref.py` checks it on tiny random weights; `ornith_golden.sh` is the Mac run. "The Ornith reference" below. |
 | `kolibri_ref.py` | Spec 20a: the Kolibri-1 reference - layer at a time, bf16 or int4 GPTQ by name (sandwich norms, RoPE sliding / NoPE full layers, window 513 incl. the query, fp32 router on logit + expert_bias with sigmoid weights, ungated shared expert, fp32 head); `run`, `ppl`, `hfcheck`, `facts`, layer-major `run_batch` (the quantisation script's coverage and eval). `test_kolibri_ref.py` (KL0, 21 tests): the transformers port == it bitwise. |
-| `qwen4exp_ref.py` | Spec 21-QFNa: the Qwen3.8-Flash-Next (`qwen4_exp`) CPU reference - transformers **5.19.0**'s own `Qwen4ExpForCausalLM` (refused on another version), layer-streamed, the QSA indexer's block keys cached (bitwise transformers' per-query recomputation), the PLE table by mmap (bf16 shards or 21-QFNb's int8 file), routed experts lazy in every form (fused bf16, int4 g128 / g64, per-expert); `run` (golden layout), `ppl`, `hfcheck`, `trace` (spec 22's routing traces), `facts`; `expected_names`, `PleTable`, the restated ops 21-QFNb / 21-QFNc import. `test_qwen4exp_ref.py` (F1, bitwise on the tiny model). "The Qwen3.8-Flash-Next reference" below. |
-| `qwen4exp_mtp.py` | Spec 21-QFNa Task 4: the MTP head from vLLM's semantics on transformers' modules (`MtpHead.step`, `chain`, `accept`, `trace_routes`); `test_qwen4exp_mtp.py` holds it to an independent build. |
+| `qwen4exp_ref.py` | Spec 21-QFN-v1a: the Qwen3.8-Flash-Next (`qwen4_exp`) CPU reference - transformers **5.19.0**'s own `Qwen4ExpForCausalLM` (refused on another version), layer-streamed, the QSA indexer's block keys cached (bitwise transformers' per-query recomputation), the PLE table by mmap (bf16 shards or 21-QFN-v1b's int8 file), routed experts lazy in every form (fused bf16, int4 g128 / g64, per-expert); `run` (golden layout), `ppl`, `hfcheck`, `trace` (spec 22's routing traces), `facts`; `expected_names`, `PleTable`, the restated ops 21-QFN-v1b / 21-QFN-v1c import. `test_qwen4exp_ref.py` (F1, bitwise on the tiny model). "The Qwen3.8-Flash-Next reference" below. |
+| `qwen4exp_mtp.py` | Spec 21-QFN-v1a Task 4: the MTP head from vLLM's semantics on transformers' modules (`MtpHead.step`, `chain`, `accept`, `trace_routes`); `test_qwen4exp_mtp.py` holds it to an independent build. |
 | `qwen4exp_env.sh`, `qwen4exp_requirements.txt` | transformers 5.19.0 + tokenizers 0.23.2 `pip --no-deps --target <dir>` beside the oracle image (the image is never changed); `PYTHONPATH=<dir>` first. |
-| `qwen4exp_tiny_check.py` | Spec 21-QFNa Task 1: the tiny model end to end in 5.19.0 (the layer-type remap, the experts implementation, cached vs uncached, the selection past 2051). |
-| `qwen4exp_facts.py` | Spec 21-QFNa Task 2: the checkpoint facts from small files and headers (local or `hf:REPO` by range requests, no torch): config, the PLE head table and I64 constants against the formula, tensor groups, Intel's quantization_config and qzeros, tokenizer / template, derived bytes. |
-| `qwen4exp_make_tiny.py` | Tiny `qwen4_exp` variants for the tests (hidden 128, any layer pattern, the four checkpoint forms, tied router rows, `mtp.*`, a dequantised twin) and 21-QFNb's int8 PLE file writer. |
-| `offload_curve.py` | Spec 22 P0.6 / P0.7 (plan 22a): from 21-QFNa's routing traces - `counts`, `curve` (h(f) for the uniform and per-layer fills, held out by sha256 halves with the A4 scenarios balanced, and in sample), `swap` (spec 22 §4's adaptive swaps simulated), `mtp` (verify unions over K + 1 rows), `prefill` (streamed bytes a chunk), `profile` (the routing profile 22b loads, `spec22-profile-1`); `project` (decode / MTP / prefill t/s from Task 1's budget, probe_offload's `po` lines and the curves; the last line `STOP` or `GO-CANDIDATE`). `--shape laguna` (spec 30): 256 experts top-10 on layers 1..47, prompt and answer rows scored apart, u(M) to 8 rows, and `project` as spec 30 §7.1's two-constant decode model, §8's drafter and §13's stop rule (last line `STOP` / `NEEDS A DECISION` / `GO` and `DRAFTER: KEEP` / `STRUCK`). numpy + safetensors only. `test_offload_curve.py`. |
+| `qwen4exp_tiny_check.py` | Spec 21-QFN-v1a Task 1: the tiny model end to end in 5.19.0 (the layer-type remap, the experts implementation, cached vs uncached, the selection past 2051). |
+| `qwen4exp_facts.py` | Spec 21-QFN-v1a Task 2: the checkpoint facts from small files and headers (local or `hf:REPO` by range requests, no torch): config, the PLE head table and I64 constants against the formula, tensor groups, Intel's quantization_config and qzeros, tokenizer / template, derived bytes. |
+| `qwen4exp_make_tiny.py` | Tiny `qwen4_exp` variants for the tests (hidden 128, any layer pattern, the four checkpoint forms, tied router rows, `mtp.*`, a dequantised twin) and 21-QFN-v1b's int8 PLE file writer. |
+| `offload_curve.py` | Spec 22 P0.6 / P0.7 (plan 22a): from 21-QFN-v1a's routing traces - `counts`, `curve` (h(f) for the uniform and per-layer fills, held out by sha256 halves with the A4 scenarios balanced, and in sample), `swap` (spec 22 §4's adaptive swaps simulated), `mtp` (verify unions over K + 1 rows), `prefill` (streamed bytes a chunk), `profile` (the routing profile 22b loads, `spec22-profile-1`); `project` (decode / MTP / prefill t/s from Task 1's budget, probe_offload's `po` lines and the curves; the last line `STOP` or `GO-CANDIDATE`). `--shape laguna` (spec 30): 256 experts top-10 on layers 1..47, prompt and answer rows scored apart, u(M) to 8 rows, and `project` as spec 30 §7.1's two-constant decode model, §8's drafter and §13's stop rule (last line `STOP` / `NEEDS A DECISION` / `GO` and `DRAFTER: KEEP` / `STRUCK`). numpy + safetensors only. `test_offload_curve.py`. |
 | `laguna_ref.py` | Plan 30a: the Laguna S 2.1 CPU reference - the snapshot's OWN `modeling_laguna.py` (trust_remote_code) under transformers **5.19.0** (`laguna_requirements.txt`: the qwen4exp site), f32, layer-streamed, sdpa attention; `run` (ids, logits, every layer's output, routes) and `trace` (all sources' hidden states held, each layer read once: `<name>.routes.safetensors` with `answer_from` and the 47 MoE layers, the form `offload_curve.py --shape laguna` reads). `test_laguna_ref.py` / `test_laguna_routes.py`: bitwise against the plainly loaded vendor model on the tiny model. |
 | `laguna_prompts.py` | Plan 30a Task 4: the 39 trace sources (the 36 tool-call scenarios with the recorded answer's first call, the agentic transcript to its last assistant turn, code, prose) through Laguna's own template and tokenizer.json; `<name>.ids` and `sources.tsv` with each answer's first row (`laguna_ref.py trace --list`). |
 | `laguna_make_tiny.py`, `laguna_facts.py` | Plan 30a: the tiny Laguna (8 layers FsssFsss, layer 0 dense, heads 4 / 6 over 2, 16 experts top-4, the original's file names, the vendor's code and tokenizer copied from `--vendor`); the facts asserted on it (the 512-key window, the yarn / plain rotary tables, the softplus gate's order, the sigmoid router with the bias only ranking and the 2.5 routed scale). |
-| `qwen4exp_prompts.py` | Spec 21-QFNa Task 5: `tests/golden/prompts/q4exp_*.ids` from the original's tokenizer (re-checks Qwen3.8's ids; renders `q4exp_agentic.json` through the checkpoint's template). |
+| `qwen4exp_prompts.py` | Spec 21-QFN-v1a Task 5: `tests/golden/prompts/q4exp_*.ids` from the original's tokenizer (re-checks Qwen3.8's ids; renders `q4exp_agentic.json` through the checkpoint's template). |
 | `third_party/kolibri1/` | Our transformers 5.x port `Kolibri1ForCausalLM` (from Aleph Alpha's vLLM plugin `aleph-alpha-inference` @ `049a6a7b`, Apache-2.0) - what AutoRound loads (`tools/quantize_kolibri1.sh`) - with the checkpoint's `config.json`, `generation_config.json`, `tokenizer_config.json` and the chat template, unmodified. |
 | `kolibri_fixture.py` | Spec 20c Task 1: `kolibri_ref.py`'s own functions (rms_norm, q/k norm + RoPE, route, the combine, eager attention) on hash inputs at the real widths, written as `tests/kernels/kolibri_fixture.h` for `kolibri_ref_test` / `kolibri1_rope_test`; no checkpoint, seconds - the docker line is in its docstring. |
 | `kolibri_chat_ids.py` | Spec 20c Task 1: a chat-formatted golden prompt's ids through the checkpoint's own template (`apply_chat_template(messages, tools, add_generation_prompt, reasoning_effort)`) - `de_chat`'s, for `tools/box_validate/kolibri_oracle.sh real`. |
@@ -485,7 +485,7 @@ The real run - download first (plan 15a has the disk / RAM / time figures), then
 `tools/oracle/ornith_golden.sh` (detached, resumable, 28 GB cap, `facts` first) and
 `tools/oracle/ornith_golden.sh --status`.
 
-### The Qwen3.8-Flash-Next reference (spec 21-QFNa, 2026-10-09)
+### The Qwen3.8-Flash-Next reference (spec 21-QFN-v1a, 2026-10-09)
 
 `qwen4exp_ref.py` runs **transformers 5.19.0**'s own `Qwen4ExpForCausalLM` (decision 1; it refuses any
 other version) - eager attention, the `grouped_mm` experts implementation (5.19.0's default), bf16 -
@@ -496,7 +496,7 @@ qzeros checked to be 0x77777777), the tiny model's per-expert fp32. Both name fo
 Three pieces Ornith did not need:
 
 - **the PLE table is never materialised** (102.4 GB): `ngram_embedding` is replaced by `PleLookup`, 16 rows
-  a token by numpy memmap from the shards, or from 21-QFNb's int8 file (`--ple int8:<dir>`: per head
+  a token by numpy memmap from the shards, or from 21-QFN-v1b's int8 file (`--ple int8:<dir>`: per head
   `ple.h<h>.q` I8 / `ple.h<h>.s`, a row is `bf16(float(q) x float(s))` - the engine-format reference).
   transformers' own hash makes the ids from the checkpoint's I64 buffers; a gather has no rounding.
 - **the QSA indexer caches each complete block's key** (fp32 mean of 4 raw keys -> bf16 -> `k_layernorm`
@@ -561,7 +561,7 @@ per-query indexer) wired as `V/nvidia/mtp.py` reads, bitwise for step 1 over eve
 rows, both norm forms; unit injection, fc_hidden per stream, skip_topk, the pre-mixer hand-off, the norm
 forms differ, acceptance and the head's trace routes. `qwen4exp_make_tiny.py` writes the variants (hidden
 128, any layer pattern, experts / top-k, forms tiny / bf16 / intel / ours, tied router rows, `mtp.*`, a
-smaller indexer budget, a dequantised twin, 21-QFNb's int8 PLE file).
+smaller indexer budget, a dequantised twin, 21-QFN-v1b's int8 PLE file).
 
 **The real runs (box CPU, queue row 30)**: `tools/box_validate/qwen4exp_oracle.sh <data tree> tests | tiny |
 intel | intel-layers N | ours | ppl | hfcheck | trace` (kolibri_oracle.sh's shape: per prompt resumable,
@@ -590,7 +590,7 @@ the format line. REAP's score for (layer, expert) is the mean over the rows that
 (spec 22 P0.8); the hit-rate curves (P0.6) need only `ids`. `test_trace_equals_run`: the trace's routes are
 the sequential run's, and three sources batched equal each alone.
 
-#### The PLE hash fixture (spec 21-QFNb)
+#### The PLE hash fixture (spec 21-QFN-v1b)
 
 `qwen4exp_ple_fixture.py <the original's config.json> tests/loader/qwen4exp_ple_fixture.h` writes the C++
 fixture `qwen4exp_ple_test` holds `loader/qwen4exp_ple_hash.h` to: for bases 20,000,000 and 1000,

@@ -1,7 +1,7 @@
 #pragma once
-// CPU references for spec 21-QFNd's Qwen3.8-Flash-Next prefill kernels (src/kernels/qwen4exp/q4_pf_moe.cl,
+// CPU references for spec 21-QFN-v1d's Qwen3.8-Flash-Next prefill kernels (src/kernels/qwen4exp/q4_pf_moe.cl,
 // q4_pf_attn.cl, q4_pf_ple.cl and q4_qsa.cl / q4_ple.cl's prefill forms) - each function with a twin on the
-// device; edit the two together. Built on 21-QFNc's tests/kernels/qwen4exp_ref.h (the decode chains: route, combine,
+// device; edit the two together. Built on 21-QFN-v1c's tests/kernels/qwen4exp_ref.h (the decode chains: route, combine,
 // the PLE block, the indexer keys and the selection, the attentions) and spec 15d's pf_moe_ref.h (the grouped
 // layout, dequant_block), which it includes and does not change - so "prefill combines by decode's rule" is a
 // comparison between two functions of this directory (qwen4exp_pf_ref_test.cc), not a claim.
@@ -18,7 +18,7 @@
 //                      order (the route row's slot order: grouped_mm's), each rf(rf(y) x w) then added (no fma),
 //                      r_b = rne, + rne(rf(y_shared) x sg), one rounding; NOT folded into H (the next combine does)
 //   dense_rows()       the rows of a chunk at `pos` whose position p <= 2050 (<= 2051 visible positions: QSA is
-//                      exactly causal attention there - spec 21-QFN §2.3) - pf_flash_attn's rows; the rest sparse
+//                      exactly causal attention there - spec 21-QFN-v1 §2.3) - pf_flash_attn's rows; the rest sparse
 //   qsa_prep_chunk()   q4_qsa_prep at M = C (-DQSA_PF) + q4_qsa_ring: the chunk's query heads, every block the
 //                      chunk completes (its raw keys from the chunk, positions before pos from the tail ring),
 //                      then the ring's update - the last min(8, C) raw keys (decode's ring after the same ids)
@@ -272,7 +272,7 @@ inline std::vector<uint16_t> sparse_row_eager(const float* q, const uint16_t* kc
   return o;
 }
 
-// --- PLE over a chunk (spec 21-QFN §2.4; Review Focus 4) ----------------------------------------------------------------
+// --- PLE over a chunk (spec 21-QFN-v1 §2.4; Review Focus 4) ----------------------------------------------------------------
 // The history of every row of a chunk at `pos` (ids [C] the chunk's tokens): positions >= pos from the chunk,
 // positions before pos from the id ring (slot q % 16, written by earlier chunks / decode steps).
 inline std::vector<loader::Q4PleHistory> ple_ids_chunk(const uint32_t* ids, uint32_t pos, uint32_t C,

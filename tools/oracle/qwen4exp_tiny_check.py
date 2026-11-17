@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spec 21-QFNa Task 1: the tiny qwen4_exp model end to end in the pinned transformers (5.19.0).
+"""Spec 21-QFN-v1a Task 1: the tiny qwen4_exp model end to end in the pinned transformers (5.19.0).
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/qwen4exp_tiny_check.py <tiny snapshot>
 

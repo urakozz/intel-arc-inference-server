@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spec 21-QFNa Task 5: the Qwen3.8-Flash-Next golden prompts - short (QSA dense) and four past the QSA cut.
+"""Spec 21-QFN-v1a Task 5: the Qwen3.8-Flash-Next golden prompts - short (QSA dense) and four past the QSA cut.
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/qwen4exp_prompts.py <tokenizer dir> [--out tests/golden/prompts]
                                                                        [--check]
@@ -14,7 +14,7 @@ and long32k.ids (no .txt) is decoded (the vocabularies are the same) and re-enco
     q4exp_4k/8k/32k.ids the first 4096 / 8192 / 32768 ids of long32k.ids
     q4exp_agentic.ids  q4exp_agentic.json through the checkpoint's own template (apply_chat_template,
                        add_generation_prompt, enable_thinking=True, its tools) - an original session on this repo
-Refuses a set where 4k / 8k / 32k / agentic are not all past position 2051 (spec 21-QFNa's Global Constraints).
+Refuses a set where 4k / 8k / 32k / agentic are not all past position 2051 (spec 21-QFN-v1a's Global Constraints).
 --check: compare with the committed files instead of writing (exit 1 on a difference).
 """
 import os

@@ -131,7 +131,7 @@ struct Flags {
   [[=Help("N|auto", "Qwen3.8-Flash-Next only: load its first N layers (development mode); without it\n"
                     "the whole model is served, the experts that do not fit the cards read from pinned\n"
                     "host memory. Its PLE int8 file is <snapshot>-ple-int8/.")]]
-  Arg<std::string> layers;   // spec 21-QFNe (until spec 22)
+  Arg<std::string> layers;   // spec 21-QFN-v1e (until spec 22)
   [[=Section("\n  Still being measured (they go when their numbers decide, docs/open-work.md):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
   std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
@@ -345,8 +345,8 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
-// Spec 21-QFNe: Qwen3.8-Flash-Next served (--layers N until spec 22) - runtime::qwen4exp::Qwen4ExpEngine (one card or two:
-// spec 16b's pieces as 21-QFNc / 21-QFNd built them) behind spec 16d's cli::pp::PipelineEngineAdapterT (EngineAdapter's logic
+// Spec 21-QFN-v1e: Qwen3.8-Flash-Next served (--layers N until spec 22) - runtime::qwen4exp::Qwen4ExpEngine (one card or two:
+// spec 16b's pieces as 21-QFN-v1c / 21-QFN-v1d built them) behind spec 16d's cli::pp::PipelineEngineAdapterT (EngineAdapter's logic
 // over the engine's host calls: greedy and sampled steps, spec 7's prefix cache over the engine's snapshots, spec 8's
 // MTP - draft / verify / commit - and spec 19e's lookup through the same verify lists), the Qwen family's request path
 // (cli::qwen4exp::chat_options: ChatFormat Qwen, EOS [248046, 248044], decision 11's greedy-unless-asked). b70-decode's
@@ -955,7 +955,7 @@ int run(int argc, char** argv) {
   if (f.max_num_seqs.value == 0) throw std::runtime_error("--max-num-seqs 0 would serve no request");
   uint32_t max_num_seqs = f.max_num_seqs.value;
   const bool have_max_num_seqs = f.max_num_seqs.given;
-  // Spec 21-QFNe: Qwen3.8-Flash-Next only - its development mode (--layers N|auto until spec 22).
+  // Spec 21-QFN-v1e: Qwen3.8-Flash-Next only - its development mode (--layers N|auto until spec 22).
   const bool have_q4_layers = f.layers.given, q4_layers_auto = have_q4_layers && f.layers.value == "auto";
   const uint32_t q4_layers = have_q4_layers && !q4_layers_auto ? cli::flags::parse_u32("--layers", f.layers.value) : 0;
   if (have_q4_layers && !q4_layers_auto && q4_layers == 0) throw std::runtime_error("--layers 0 would load no layer");
@@ -1134,7 +1134,7 @@ int run(int argc, char** argv) {
     options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab);
   }
 
-  // Spec 21-QFNe: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's
+  // Spec 21-QFN-v1e: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's
   // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and parallel rules
   // (its own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it.
   if (is_q4) {

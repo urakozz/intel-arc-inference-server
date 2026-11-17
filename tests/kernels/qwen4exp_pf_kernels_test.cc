@@ -1,4 +1,4 @@
-// Spec 21-QFNd (F2 for the prefill): Qwen3.8-Flash-Next's prefill kernels on the card, at the real shapes, against
+// Spec 21-QFN-v1d (F2 for the prefill): Qwen3.8-Flash-Next's prefill kernels on the card, at the real shapes, against
 // tests/kernels/qwen4exp_pf_ref.h / qwen4exp_ref.h and against the dense prefill GEMMs the grouped ones are built
 // from. Needs a B70, no checkpoint (synthetic weights). Every binary is one runtime/qwen4exp/qwen4exp_prefill.cc
 // binds (kernels::qwen4exp names), plus pf_gemm_T0_SILU for the dense comparison. Written blind on the Mac (box
@@ -7,7 +7,7 @@
 //   1. the slabs: pf_dequant_slab at qkv||z 2560 x 16384 (whole slabs), pf_int4_slab at out / o 6144 x 2560
 //      (the 512-column tail), q4_pf_bf16_slab at the HC down||inject 10240 x 336 (one 512-column slab, 176 zero
 //      columns) exact; the HC down through pf_gemm_T0 at pitch 512 within cosine 0.99999 of fp64;
-//   2. 21-QFNc's HC at M = 2048: combine _E / _S1 / _Y / _X / _Y_NN and the up-mix at pitch 512 bitwise q4ref's;
+//   2. 21-QFN-v1c's HC at M = 2048: combine _E / _S1 / _Y / _X / _Y_NN and the up-mix at pitch 512 bitwise q4ref's;
 //   3. the indexer over chunks (q4_qsa_prep _PF + q4_qsa_ring: q, the compressed keys, the tail ring == decode's) and
 //      score + select at M = 2048 over a sparse chunk - bitwise;
 //   4. the PLE over a chunk: q4_ple_gather _PF (the tables in device memory behind the pointer table) ids / rows,

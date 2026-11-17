@@ -49,15 +49,15 @@ target_link_libraries(b70-decode PRIVATE b70_kolibri_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_kolibri_runtime b70_kolibri_prefill)
 endif()
-# Spec 21-QFNc: and Qwen3.8-Flash-Next's engine (runtime/qwen4exp, src/cli/qwen4exp_decode.h), dispatched on model_type;
-# b70-serve refuses it before the device (spec 21-QFNe serves it): the loader's model_type check only.
+# Spec 21-QFN-v1c: and Qwen3.8-Flash-Next's engine (runtime/qwen4exp, src/cli/qwen4exp_decode.h), dispatched on model_type;
+# b70-serve refuses it before the device (spec 21-QFN-v1e serves it): the loader's model_type check only.
 target_link_libraries(b70-decode PRIVATE b70_qwen4exp_runtime)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_qwen4exp_loader)
 endif()
-# Spec 21-QFNd: and Qwen3.8-Flash-Next's prefill (b70_qwen4exp_prefill: Qwen4ExpEngine::prefill, its walk and scratch).
+# Spec 21-QFN-v1d: and Qwen3.8-Flash-Next's prefill (b70_qwen4exp_prefill: Qwen4ExpEngine::prefill, its walk and scratch).
 target_link_libraries(b70-decode PRIVATE b70_qwen4exp_prefill)
-# Spec 21-QFNe: b70-serve serves Qwen3.8-Flash-Next (src/cli/qwen4exp_serve.h; runtime::qwen4exp::Qwen4ExpEngine behind spec
+# Spec 21-QFN-v1e: b70-serve serves Qwen3.8-Flash-Next (src/cli/qwen4exp_serve.h; runtime::qwen4exp::Qwen4ExpEngine behind spec
 # 16d's cli::pp::PipelineEngineAdapterT, whose prefill every request runs). Appended, as the lines above.
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_qwen4exp_runtime b70_qwen4exp_prefill)

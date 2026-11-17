@@ -1,13 +1,13 @@
-// Spec 21-QFNe Task 1: Qwen3.8-Flash-Next's tokenizer and chat template through the engine's (the Rust `tokenizers`
+// Spec 21-QFN-v1e Task 1: Qwen3.8-Flash-Next's tokenizer and chat template through the engine's (the Rust `tokenizers`
 // crate behind tok::Tokenizer, minja behind chat::Template) against Hugging Face's, from
 // tools/tokenizer/dump_qwen4exp.py's facts:
 //   qwen4exp_tokenizer_test <tests/tokenizer> <tokenizer.json>
 // The tokenizer.json's directory is the checkpoint's (the original's small files: tokenizer_config.json,
-// chat_template.jinja, generation_config.json - 21-QFNb's synthetic checkpoints copy them unchanged; nothing of the
+// chat_template.jinja, generation_config.json - 21-QFN-v1b's synthetic checkpoints copy them unchanged; nothing of the
 // release is vendored, its licence text unread). The environment's B70_Q4EXP_TOKENIZER_JSON replaces the second
 // argument. No tokenizer.json: SKIP (77).
 //
-// 21-QFNa found the original's tokenizer.json NOT Qwen3.8's (same vocabulary, merges and added tokens; the
+// 21-QFN-v1a found the original's tokenizer.json NOT Qwen3.8's (same vocabulary, merges and added tokens; the
 // pre-tokenizer's split regex adds \p{M}, so combining marks stay with their letters): the server serves the
 // original's file (Intel's checkpoint ships Qwen3.8's), and this holds the engine's encode / decode to it:
 //   - the file's sha256 (the original's 0997f410..., not Qwen3.8's 06b95093...), the id count 248077, every added
@@ -265,7 +265,7 @@ int main(int argc, char** argv) {
       return 77;
     }
   const json facts = json::parse(slurp(dir + "/qwen4exp_tokenizer.json"));
-  // The original's file, not Qwen3.8's (21-QFNa: the \p{M} split).
+  // The original's file, not Qwen3.8's (21-QFN-v1a: the \p{M} split).
   const std::string file_sha = sha256(slurp(path));
   if (file_sha != facts.at("tokenizer_json_sha256").get<std::string>()) {
     std::fprintf(stderr, "%s has sha256 %s, not the original's %s%s\n", path.c_str(), file_sha.c_str(),

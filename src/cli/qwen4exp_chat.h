@@ -1,5 +1,5 @@
 #pragma once
-// Spec 21-QFNe: what b70-serve sets in server::Options for Qwen3.8-Flash-Next (model_type qwen4_exp) - the request
+// Spec 21-QFN-v1e: what b70-serve sets in server::Options for Qwen3.8-Flash-Next (model_type qwen4_exp) - the request
 // path is the Qwen family's, unchanged. Host-only (no Level Zero type): b70-serve's dispatch (cli/qwen4exp_serve.h)
 // and tests/server/qwen4exp_server_test.cc call the same function, so the test pins what the server runs.
 //
@@ -8,9 +8,9 @@
 //     fallback), the output opens with reasoning when the prompt ends in "<think>\n", tool calls are Qwen XML
 //     (server::OutputStream). The template also reads `reasoning_effort`, which the Qwen kind does not forward
 //     (ChatFormat::template_kwargs() is false) - exactly as for Qwen3.8 today; forwarding chat_template_kwargs for
-//     the Qwen kind is a server-wide follow-up for both models, not spec 21-QFNe's;
+//     the Qwen kind is a server-wide follow-up for both models, not spec 21-QFN-v1e's;
 //   - EOS: generation_config.json's [248046 <|im_end|>, 248044 <|endoftext|>] (b70-serve reads it for every model);
-//   - the sampling defaults: spec 21-QFN decision 11 is OPEN. Until it is ruled the Qwen family's greedy-unless-asked
+//   - the sampling defaults: spec 21-QFN-v1 decision 11 is OPEN. Until it is ruled the Qwen family's greedy-unless-asked
 //     holds (Options::sampling_defaults unset, server/deps.h's Sampling{}); the ruling flips the one line below to
 //     generation_config.json's T 1.0 / top-p 0.95 / top-k 20 (Kolibri's dispatch has the same line), and
 //     qwen4exp_server_test pins whichever is ruled.

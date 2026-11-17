@@ -1498,10 +1498,10 @@ st_r28_benchy() {
 
 
 # ======================================================================================
-row 30 "spec 21-QFNa - Qwen3.8-Flash-Next (qwen4_exp): the facts, the CPU reference (F1), golden sets, routing traces (plan 21-QFNa)"
+row 30 "spec 21-QFN-v1a - Qwen3.8-Flash-Next (qwen4_exp): the facts, the CPU reference (F1), golden sets, routing traces (plan 21-QFN-v1a)"
 rownote 30 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/qwen4exp_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh: pip --no-deps --target, made once; the image is never changed). r30.host needs the tiny model (hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next, 124 MB)."
 rownote 30 "Everything on real weights (r30.ppl, r30.hfcheck, r30.golden, r30.golden_layers, r30.traces) needs Intel's checkpoint: hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound - 181.17 GB including the 128 PLE shards (102.4 GB): df -h ~ first. The bf16 original (Qwen/Qwen3.8-Flash-Next, 360 GB) is needed only for 21q's bf16-PLE KL (its 128 PLE shards), not here. Without the snapshot every real stage SKIPs 77 'missing data'."
-rownote 30 "RAM: the real-weight stages SKIP 77 when MemAvailable < Q4_REF_MIN_GB (64; the 32k prompt's chunked eager attention peaks near 20 GB, ESTIMATED). The reference is layer-streamed - Intel's bf16 dense arms read from the page cache, the routed experts dequantised per forward - so times are hours (DRY_RUN=1 qwen4exp_oracle.sh <data> intel prints the ESTIMATED table). The PLE source is Intel's own bf16 shards until 21-QFNb's int8 file (<snapshot>-ple-int8/) exists; then the engine-format reference reads it (spec 21-QFN F3) - Q4_PLE overrides."
+rownote 30 "RAM: the real-weight stages SKIP 77 when MemAvailable < Q4_REF_MIN_GB (64; the 32k prompt's chunked eager attention peaks near 20 GB, ESTIMATED). The reference is layer-streamed - Intel's bf16 dense arms read from the page cache, the routed experts dequantised per forward - so times are hours (DRY_RUN=1 qwen4exp_oracle.sh <data> intel prints the ESTIMATED table). The PLE source is Intel's own bf16 shards until 21-QFN-v1b's int8 file (<snapshot>-ple-int8/) exists; then the engine-format reference reads it (spec 21-QFN-v1 F3) - Q4_PLE overrides."
 rownote 30 "Decision 3's tau and R2's MoE tolerance are read from the gap distributions r30.golden / r30.golden_layers print ('QSA 512th/513th gap' per QSA layer, 'MoE 10th/11th gap'); the plan's 'hand back' asks for those lines and each prompt's wall / RSS line. r30.traces' files are spec 22 P0.6 / P0.8's input (tools/oracle/README.md 'The routing traces')."
 stage r30.host 30 default cpu q4exp_tiny,oracle_image - "F1 on the tiny model in the oracle image: test_qwen4exp_ref.py (the streamed port = transformers 5.19.0 bitwise, bf16 / fp32, 40 / 2100 ids + cached decode, chunks; the indexer cache at 2047..2060; one test per trap) and test_qwen4exp_mtp.py (the MTP head = an independent build bitwise, both pre_fc_norm_hidden forms) - qwen4exp_oracle.sh tests"
 st_r30_host() {
@@ -1528,7 +1528,7 @@ st_r30_golden() {
   grab_all gap 'gap|wall' 120
   finish
 }
-stage r30.golden_layers 30 optin cpu q4exp_intel,oracle_image - "the --layers N golden sets 21-QFNc's truncated gate reads: intel-layers 4 and 18 (one card's fit with Intel's bf16 dense layers) on q4exp_short / 4k / agentic -> \$DATA/oracle-out-q4exp-L4, -L18"
+stage r30.golden_layers 30 optin cpu q4exp_intel,oracle_image - "the --layers N golden sets 21-QFN-v1c's truncated gate reads: intel-layers 4 and 18 (one card's fit with Intel's bf16 dense layers) on q4exp_short / 4k / agentic -> \$DATA/oracle-out-q4exp-L4, -L18"
 st_r30_golden_layers() {
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA intel-layers 4" "the reference at --layers 4"
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA intel-layers 18" "the reference at --layers 18"
@@ -1545,7 +1545,7 @@ st_r30_traces() {
 }
 
 # ======================================================================================
-row 31 "spec 21-QFNb - Qwen3.8-Flash-Next (qwen4_exp): the descriptor, the loader (both checkpoint forms), the PLE int8 table pinned per head in host USM, the memory plan (plan 21-QFNb)"
+row 31 "spec 21-QFN-v1b - Qwen3.8-Flash-Next (qwen4_exp): the descriptor, the loader (both checkpoint forms), the PLE int8 table pinned per head in host USM, the memory plan (plan 21-QFN-v1b)"
 rownote 31 "No kernel and no existing file's behaviour moved (kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. Written on the Mac: the host stages ran there (r31.host); nothing of load_qwen4exp has touched a card or a real shard."
 rownote 31 "Downloads: r31.synth needs only the ORIGINAL's small files (hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja - a few MB, not its 360 GB); r31.ple_convert and r31.load_real need Intel's checkpoint (hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound, 181.17 GB incl. its 102.4 GB of PLE shards - row 30's download)."
 rownote 31 "Disk: r31.synth writes two ~13.5 / ~13.7 GB synthetic checkpoints (+ tiny PLE files) under \$DATA/oracle-out-q4exp-synth (via the tree's oracle-out-q4exp-synth.partial: same filesystem); r31.ple_convert writes ~51.8 GB (bf16 scales; Q4_PLE_SCALE=f32: ~52.5 GB) beside Intel's snapshot - df -h ~ first."
@@ -1556,7 +1556,7 @@ st_r31_host() {
   jgrab host '^qwen4exp_(test|repack_test|ple_test|plan_test)$' 'OK'
   finish
 }
-stage r31.plan 31 default cpu - r31.host "the planner's N for one and two cards at 32k / 128k (Intel's forms and ours, int8 head, 32.53 GB cards, 1.5 GB reserve; weights + persistent state - 21-QFNc adds the decode scratch), the split by bytes, the persistent sizes"
+stage r31.plan 31 default cpu - r31.host "the planner's N for one and two cards at 32k / 128k (Intel's forms and ours, int8 head, 32.53 GB cards, 1.5 GB reserve; weights + persistent state - 21-QFN-v1c adds the decode scratch), the split by bytes, the persistent sizes"
 st_r31_plan() {
   jgrab plan '^qwen4exp_plan_test$' 'layers_that_fit|plan at|pipeline plan|device [01]:|pp_split|persistent|max_len_that_fits|OK'
   finish
@@ -1595,15 +1595,15 @@ st_r31_load_real() {
 }
 
 # ======================================================================================
-row 32 "spec 21-QFNc - Qwen3.8-Flash-Next (qwen4_exp) decode: hyper-connections, QSA, the PLE gather from host USM, the 512-expert MoE, one card then two (plan 21-QFNc)"
-rownote 32 "Written on the Mac: every 21-QFNc binary's first ocloc compile is here (r32.k1's kbins), and nothing of Qwen4ExpEngine has touched a card. One EXISTING source changed: prep.cl gains -DGDN_GATE_SIGMOID (prep_gated_head_M1_SIG); every other prep.cl variant's command line and preprocessed source are token for token main's (checked on the Mac for all 98) - G0's g0.sha must show prep_gated_head_M1 and every prep_* binary unchanged; if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and prep.cl is restored (plan 21-QFNc F0)."
-rownote 32 "Data: r32.oracle_synth needs the synthetic checkpoints (r31.synth) and writes their golden sets (~0.5-1 h each on the box CPU, ESTIMATED); r32.golden / r32.k3 need them; r32.partial needs 21-QFNa's real sets on Intel's checkpoint (row 30: qwen4exp_oracle.sh intel and intel-layers 18) and the PLE int8 file (r31.ple_convert); r32.pp and the two-card CLI need two GPUs (after r22.p1)."
-rownote 32 "Tolerances PROPOSED until row 30 prints the gap distributions: B70_Q4_TIE_TOL 1e-3 (the router's 10th / 11th p) and B70_Q4_SEL_TOL 1e-3 (the 512th / 513th block score); a gap of exactly 0 is undetermined whatever the tolerance (torch's topk does not prefer the lower index: spec 21-QFN §12 finding 2). The partial forward's bars (tap median cosine >= 0.9998, min >= 0.99) are PROPOSED too."
+row 32 "spec 21-QFN-v1c - Qwen3.8-Flash-Next (qwen4_exp) decode: hyper-connections, QSA, the PLE gather from host USM, the 512-expert MoE, one card then two (plan 21-QFN-v1c)"
+rownote 32 "Written on the Mac: every 21-QFN-v1c binary's first ocloc compile is here (r32.k1's kbins), and nothing of Qwen4ExpEngine has touched a card. One EXISTING source changed: prep.cl gains -DGDN_GATE_SIGMOID (prep_gated_head_M1_SIG); every other prep.cl variant's command line and preprocessed source are token for token main's (checked on the Mac for all 98) - G0's g0.sha must show prep_gated_head_M1 and every prep_* binary unchanged; if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and prep.cl is restored (plan 21-QFN-v1c F0)."
+rownote 32 "Data: r32.oracle_synth needs the synthetic checkpoints (r31.synth) and writes their golden sets (~0.5-1 h each on the box CPU, ESTIMATED); r32.golden / r32.k3 need them; r32.partial needs 21-QFN-v1a's real sets on Intel's checkpoint (row 30: qwen4exp_oracle.sh intel and intel-layers 18) and the PLE int8 file (r31.ple_convert); r32.pp and the two-card CLI need two GPUs (after r22.p1)."
+rownote 32 "Tolerances PROPOSED until row 30 prints the gap distributions: B70_Q4_TIE_TOL 1e-3 (the router's 10th / 11th p) and B70_Q4_SEL_TOL 1e-3 (the 512th / 513th block score); a gap of exactly 0 is undetermined whatever the tolerance (torch's topk does not prefer the lower index: spec 21-QFN-v1 §12 finding 2). The partial forward's bars (tap median cosine >= 0.9998, min >= 0.99) are PROPOSED too."
 rownote 32 "r32.ple_rate's numbers (us per token, the implied bus rate, one card / the other / both) are spec 22 P0's first host-USM measurement: hand them back with the row (spec 22 §1 records where)."
 stage r32.host 32 default cpu - - "host: qwen4exp_ref_test (the kernels' twin against qwen4exp_ref.py / transformers 5.19.0's fixture: HC, PLE ids and block, indexer, scores, selection, route, combine, the sigmoid gated norm; Review Focus 1-3), qwen4exp_variant_names_test (the bound names = the CMake block), qwen4exp_plan_test (779 / 767 / 755 launches, 75 at --layers 4, +1 two cards; the scratch; --layers 18 / 38 fit at 32k)"
 st_r32_host() {
   run_tests '^(qwen4exp_ref_test|qwen4exp_variant_names_test|qwen4exp_plan_test)$'
-  jgrab host '^qwen4exp_(ref|variant_names|plan)_test$' 'HC:|PLE:|indexer:|select:|route:|21-QFNc:|OK'
+  jgrab host '^qwen4exp_(ref|variant_names|plan)_test$' 'HC:|PLE:|indexer:|select:|route:|21-QFN-v1c:|OK'
   finish
 }
 stage r32.k1 32 default card - - "F2, no checkpoint: the 33 new binaries built (kbins - their first ocloc compile) and qwen4exp_kernels_test - every q4_* kernel bitwise against qwen4exp_ref.h (HC, the PLE gather from real host-USM ranges through the pointer table and q4_ple_check, the block, the indexer prep / scores, the selection at Review Focus 2's rows incl. exact ties and n 65536, the route, the MoE with each slot alone and both shared forms, eager attention, prep_gated_head_M1_SIG); flash within cosine 0.99999 of fp64 at 1 / 2050 / 2051 / 9000 / 131072 and of attn_v2 below 2052"
@@ -1620,7 +1620,7 @@ st_r32_k1() {
   jgrab k1 '^qwen4exp_kernels_test$' 'exact|bitwise|ulp|cosine|differ|PASS|FAIL|OK'
   finish
 }
-stage r32.reject 32 default card - - "the refusals before the device (tests/model/qwen4exp: a model_type stub): cli_reject_qwen4exp_full (no --layers: spec 22, the bytes), _prefill (spec 21-QFNd), _mtp (spec 21-QFNe), _kv8 (decision 8), _serve (b70-serve: spec 21-QFNe); and cli_reject_kolibri_layers_qwen still names Kolibri-1"
+stage r32.reject 32 default card - - "the refusals before the device (tests/model/qwen4exp: a model_type stub): cli_reject_qwen4exp_full (no --layers: spec 22, the bytes), _prefill (spec 21-QFN-v1d), _mtp (spec 21-QFN-v1e), _kv8 (decision 8), _serve (b70-serve: spec 21-QFN-v1e); and cli_reject_kolibri_layers_qwen still names Kolibri-1"
 st_r32_reject() {
   run_tests '^(cli_reject_qwen4exp_|cli_reject_kolibri_layers_qwen$)'
   finish
@@ -1686,7 +1686,7 @@ st_r32_bench_attn() {
   grab_all bench 'depth|us|median' 12
   finish
 }
-stage r32.speed 32 optin gpu q4exp_intel,q4exp_intel_ple r32.partial "Task 7: decode on what fits - Intel's checkpoint --layers 18 on one card and 38 on two, --bench --depth 1024 / 4096 / 32768 --tg 256, the int8 head, flash and eager - interleaved, median of 3; launches per token, each card's step time, against the derived roofline per layer (spec 21-QFN §3)"
+stage r32.speed 32 optin gpu q4exp_intel,q4exp_intel_ple r32.partial "Task 7: decode on what fits - Intel's checkpoint --layers 18 on one card and 38 on two, --bench --depth 1024 / 4096 / 32768 --tg 256, the int8 head, flash and eager - interleaved, median of 3; launches per token, each card's step time, against the derived roofline per layer (spec 21-QFN-v1 §3)"
 st_r32_speed() {
   idle before
   local d arms="" ratios="" k="ZE_AFFINITY_MASK=0,1" s="${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}"
@@ -1705,15 +1705,15 @@ st_r32_speed() {
 }
 
 # ======================================================================================
-row 33 "spec 21-QFNd - Qwen3.8-Flash-Next (qwen4_exp) prefill: dense flash to 2050, the indexer and the sparse flash past it, the 512-expert grouped MoE, the PLE over a chunk, one hand-off per chunk (plan 21-QFNd)"
-rownote 33 "Written blind on the Mac, after row 32 (21-QFNc's decode on the card): none of the 30 new binaries of the 21-QFNd block was ever compiled by ocloc - the DPAS sparse flash over row lists (q4_pf_sparse_attn_Q24KV2[_EAGER]), spec 6's flash at 24 / 2 heads (pf_flash_attn_Q24KV2), the 512-expert ushort sort / dequant / combine (q4_pf_moe_E512_T10_D2560_I640_L256), the grouped GEMMs at this family's shapes (pf_moe_gemm_K2560_N1280_SILU, _K640_N2560), 21-QFNc's HC / indexer / PLE gather at M 2048 (_PF), the PLE block over a chunk (q4_pf_ple_C2048). The walk (358 / 361 / 360 launches a chunk at --layers 4) and the sequential two-card chunk hand-off never ran."
-rownote 33 "THREE existing sources changed, each by a define every existing binary leaves unset: prefill/pf_gated_head.cl (GDN_GATE_SIGMOID: pf_gated_head_SIG), qwen4exp/q4_qsa.cl (QSA_PF: the prep without its in-launch ring write + q4_qsa_ring; the indexer pitch 768), qwen4exp/q4_ple.cl (PLE_PF: the gather's tokens from the chunk's ids, no ring write). Their existing binaries' preprocessed sources were checked on the Mac (pf_gated_head x 2, q4_qsa_M1: byte for byte; q4_ple_gather_M1_* token for token) - G0's g0.sha must show every pf_gated_head*, q4_qsa_M1* and q4_ple_* binary unchanged; if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and the source is restored (plan 21-QFNd F0)."
+row 33 "spec 21-QFN-v1d - Qwen3.8-Flash-Next (qwen4_exp) prefill: dense flash to 2050, the indexer and the sparse flash past it, the 512-expert grouped MoE, the PLE over a chunk, one hand-off per chunk (plan 21-QFN-v1d)"
+rownote 33 "Written blind on the Mac, after row 32 (21-QFN-v1c's decode on the card): none of the 30 new binaries of the 21-QFN-v1d block was ever compiled by ocloc - the DPAS sparse flash over row lists (q4_pf_sparse_attn_Q24KV2[_EAGER]), spec 6's flash at 24 / 2 heads (pf_flash_attn_Q24KV2), the 512-expert ushort sort / dequant / combine (q4_pf_moe_E512_T10_D2560_I640_L256), the grouped GEMMs at this family's shapes (pf_moe_gemm_K2560_N1280_SILU, _K640_N2560), 21-QFN-v1c's HC / indexer / PLE gather at M 2048 (_PF), the PLE block over a chunk (q4_pf_ple_C2048). The walk (358 / 361 / 360 launches a chunk at --layers 4) and the sequential two-card chunk hand-off never ran."
+rownote 33 "THREE existing sources changed, each by a define every existing binary leaves unset: prefill/pf_gated_head.cl (GDN_GATE_SIGMOID: pf_gated_head_SIG), qwen4exp/q4_qsa.cl (QSA_PF: the prep without its in-launch ring write + q4_qsa_ring; the indexer pitch 768), qwen4exp/q4_ple.cl (PLE_PF: the gather's tokens from the chunk's ids, no ring write). Their existing binaries' preprocessed sources were checked on the Mac (pf_gated_head x 2, q4_qsa_M1: byte for byte; q4_ple_gather_M1_* token for token) - G0's g0.sha must show every pf_gated_head*, q4_qsa_M1* and q4_ple_* binary unchanged; if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and the source is restored (plan 21-QFN-v1d F0)."
 rownote 33 "Bars PROPOSED (the tests print the distributions): prefill vs decode's fill - every row of the first QSA layer >= 0.999, all rows' median >= 0.9998, p01 >= 0.99; the sparse flash against fp64 >= 0.99999 (spec 6 K1), eager >= 0.9999 / 0.999; routing / selection near-ties 1e-3 (B70_Q4_TIE_TOL / B70_Q4_SEL_TOL, row 30 decides), a 0 gap undetermined. Chunks of 16 are printed, not gated bitwise: the GDN's 64-row WY sub-chunks move with the chunk start (chunks of 64 ARE gated bitwise)."
-rownote 33 "Data: r33.prefill / r33.golden need the synthetic checkpoints and their golden sets (r31.synth, r32.oracle_synth); r33.golden_real needs 21-QFNa's --layers 18 set (r30.golden_layers) and the PLE int8 file (r31.ple_convert); r33.pp needs two GPUs (after r22.p1). With prefill planned Intel's forms fit 18 layers on one card (max_len auto 70144) and 37 on two at 32768 (derived) - 38 does not fit beside the 1.49 GB prefill scratch a device: the real two-card runs use --layers 37."
-stage r33.host 33 default cpu - - "host: qwen4exp_pf_ref_test (the 512-expert sort and its adversaries == pf_moe_ref::sort, row independence, the combine == 21-QFNc's down chain, dense_rows, the sparse attention's tiled fp64 walk == the direct softmax and the eager chain == q4ref's, the indexer and the PLE over chunks == decode's M = 1 chains with their rings), qwen4exp_pf_variant_names_test, qwen4exp_plan_test (358 / 361 / 360 launches at --layers 4, 3944 / 3968 at 48, the 1.49 GB prefill scratch, N with prefill 18 / 37)"
+rownote 33 "Data: r33.prefill / r33.golden need the synthetic checkpoints and their golden sets (r31.synth, r32.oracle_synth); r33.golden_real needs 21-QFN-v1a's --layers 18 set (r30.golden_layers) and the PLE int8 file (r31.ple_convert); r33.pp needs two GPUs (after r22.p1). With prefill planned Intel's forms fit 18 layers on one card (max_len auto 70144) and 37 on two at 32768 (derived) - 38 does not fit beside the 1.49 GB prefill scratch a device: the real two-card runs use --layers 37."
+stage r33.host 33 default cpu - - "host: qwen4exp_pf_ref_test (the 512-expert sort and its adversaries == pf_moe_ref::sort, row independence, the combine == 21-QFN-v1c's down chain, dense_rows, the sparse attention's tiled fp64 walk == the direct softmax and the eager chain == q4ref's, the indexer and the PLE over chunks == decode's M = 1 chains with their rings), qwen4exp_pf_variant_names_test, qwen4exp_plan_test (358 / 361 / 360 launches at --layers 4, 3944 / 3968 at 48, the 1.49 GB prefill scratch, N with prefill 18 / 37)"
 st_r33_host() {
   run_tests '^(qwen4exp_pf_ref_test|qwen4exp_pf_variant_names_test|qwen4exp_plan_test|qwen4exp_f32_judge_test)$'
-  jgrab host '^qwen4exp_(pf_ref|pf_variant_names|plan)_test$' 'sort:|combine:|dense_rows:|sparse|indexer|PLE|21-QFNd:|OK'
+  jgrab host '^qwen4exp_(pf_ref|pf_variant_names|plan)_test$' 'sort:|combine:|dense_rows:|sparse|indexer|PLE|21-QFN-v1d:|OK'
   finish
 }
 stage r33.k1 33 default card - r33.host "F2 for the prefill, no checkpoint: the 30 binaries built (kbins - their first ocloc compile) and qwen4exp_pf_kernels_test - the slabs exact, the HC / indexer / PLE at M 2048 bitwise q4ref's, the router rows bitwise decode's and q4_route on grid (1, C), the MoE (sort / gather / dequant exact, block 512 in both shared forms, GROUPED == DENSE bitwise, reversed and replayed bitwise), the sort adversaries, the dense flash and the sparse flash against fp64 (>= 0.99999) at chunk starts 2048 / 4096 / 30000 / 131072 / a 300-row tail, EAGER (0.9999 / 0.999), pf_attn_gate; and qwen4exp_prefill_gdn_test (gdn_chunk_q4 against decode's gdn_step + _SIG: 64-chunks bitwise, the band printed)"
@@ -1729,7 +1729,7 @@ st_r33_k1() {
   jgrab k1-prefill '^(qwen4exp_pf_kernels_test|qwen4exp_prefill_gdn_test)$' 'cos|ulp|bitwise|grouped|dense|gdn:|OK|FAIL'
   finish
 }
-stage r33.reject 33 default card - - "the refusals before the device (tests/model/qwen4exp: the model_type stub): cli_reject_qwen4exp_prefill_int8 (naming the 1024-k Hadamard blocks), _chunk (above 2048); 21-QFNc's cli_reject_qwen4exp_prefill is gone"
+stage r33.reject 33 default card - - "the refusals before the device (tests/model/qwen4exp: the model_type stub): cli_reject_qwen4exp_prefill_int8 (naming the 1024-k Hadamard blocks), _chunk (above 2048); 21-QFN-v1c's cli_reject_qwen4exp_prefill is gone"
 st_r33_reject() {
   run_tests '^cli_reject_qwen4exp_prefill_(int8|chunk)$'
   finish
@@ -1748,7 +1748,7 @@ st_r33_golden() {
   jgrab golden-prefill '^qwen4exp_golden_prefill_synth' 'gate:|routing:|gate S:|prefill:|OK|FAIL'
   finish
 }
-stage r33.golden_real 33 default gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_layers r33.golden "F3 on prefill on Intel's checkpoint at --layers 18 (int8 head, one card): qwen4exp_golden_prefill_intel_test against 21-QFNa's truncated set oracle-out-q4exp-L18"
+stage r33.golden_real 33 default gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_layers r33.golden "F3 on prefill on Intel's checkpoint at --layers 18 (int8 head, one card): qwen4exp_golden_prefill_intel_test against 21-QFN-v1a's truncated set oracle-out-q4exp-L18"
 st_r33_golden_real() {
   x "free -g | head -2"
   run_tests '^qwen4exp_golden_prefill_intel_test$' qwen4exp '' \
@@ -1779,7 +1779,7 @@ st_r33_cli() {
   grab_all memory '^memory' 6
   finish
 }
-stage r33.speed 33 optin gpu q4exp_intel,q4exp_intel_ple r33.golden_real "plan 21-QFNd Task 5: Intel's checkpoint, l0 - pp4096 / pp32768 at --layers 18 (one card) and 37 (two, --parallel pp), pp131072 at the planner's N (--layers auto: 18 layers fit only to 70144 with prefill) - tg16 after; flash vs B70_Q4_ATTN=eager at 32768; interleaved pairs, median of 3, uptime - BENCHMARKS 'Qwen3.8-Flash-Next (spec 21-QFN)' prefill rows"
+stage r33.speed 33 optin gpu q4exp_intel,q4exp_intel_ple r33.golden_real "plan 21-QFN-v1d Task 5: Intel's checkpoint, l0 - pp4096 / pp32768 at --layers 18 (one card) and 37 (two, --parallel pp), pp131072 at the planner's N (--layers auto: 18 layers fit only to 70144 with prefill) - tg16 after; flash vs B70_Q4_ATTN=eager at 32768; interleaved pairs, median of 3, uptime - BENCHMARKS 'Qwen3.8-Flash-Next (spec 21-QFN-v1)' prefill rows"
 st_r33_speed() {
   idle before
   local n k="ZE_AFFINITY_MASK=0,1" s="${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}" arms=""
@@ -1801,18 +1801,18 @@ st_r33_speed() {
 }
 
 # ======================================================================================
-row 34 "spec 21-QFNe - Qwen3.8-Flash-Next (qwen4_exp) served truncated: b70-serve over Qwen4ExpEngine, prefix-cache snapshots, the MTP head (draft / verify / commit), the A4 set and its CPU reference for spec 22 (plan 21-QFNe)"
-rownote 34 "Written blind on the Mac, after rows 32 / 33 (21-QFNc's decode and 21-QFNd's prefill on the card): none of the 122 binaries of the 21-QFNe block was ever compiled by ocloc - the head's norm / fuse (q4_mtp_M<1..4>_{SINGLE,STREAM}, the prefill head pass q4_mtp_M2048_*_PF), the verify list at M = 2..4 (21-QFNc's decode kernels at M rows: the int4 / bf16 / i8w GEMVs, HC, QSA, route / MoE, PLE gather), the per-layer GDN slots (gdn_step_slots_M<1..4>_G1), the PLE block at M > 1 (q4_pf_ple_C4). The verify list (779 + 2 + 10 + M launches at 48 layers), the draft step (27 / 26, + 2 when it selects), the snapshot runs and the server never ran. No existing kernel source changed (kernel_cmdlines +122 / -0 / ~0): G0's g0.sha is the 'nothing moved' check."
+row 34 "spec 21-QFN-v1e - Qwen3.8-Flash-Next (qwen4_exp) served truncated: b70-serve over Qwen4ExpEngine, prefix-cache snapshots, the MTP head (draft / verify / commit), the A4 set and its CPU reference for spec 22 (plan 21-QFN-v1e)"
+rownote 34 "Written blind on the Mac, after rows 32 / 33 (21-QFN-v1c's decode and 21-QFN-v1d's prefill on the card): none of the 122 binaries of the 21-QFN-v1e block was ever compiled by ocloc - the head's norm / fuse (q4_mtp_M<1..4>_{SINGLE,STREAM}, the prefill head pass q4_mtp_M2048_*_PF), the verify list at M = 2..4 (21-QFN-v1c's decode kernels at M rows: the int4 / bf16 / i8w GEMVs, HC, QSA, route / MoE, PLE gather), the per-layer GDN slots (gdn_step_slots_M<1..4>_G1), the PLE block at M > 1 (q4_pf_ple_C4). The verify list (779 + 2 + 10 + M launches at 48 layers), the draft step (27 / 26, + 2 when it selects), the snapshot runs and the server never ran. No existing kernel source changed (kernel_cmdlines +122 / -0 / ~0): G0's g0.sha is the 'nothing moved' check."
 rownote 34 "Data: every card stage runs on the synthetic checkpoints (r31.synth; 4 real-width layers + the MTP layer) - r34.fixture writes M1's data (oracle-out-q4exp-mtp, box CPU ~0.5 h, ESTIMATED); Intel's --layers 18 rows (qwen4exp_snapshot_gpu_intel_test, qwen4exp_mtp_intel_test) need Intel's checkpoint and its PLE int8 file (rows 30 / 31). The served tokenizer is the ORIGINAL's (its split has \\p{M}); Intel's checkpoint ships Qwen3.8's tokenizer.json - b70-serve refuses it (cli_reject_serve_qwen4exp_tokenizer): serve a snapshot that ships the original's."
 rownote 34 "MTP acceptance has no engine bar here: on the synthetic checkpoints the drafts are random (M3 is greedy LOSSLESS at K = 1..3, not a rate). Decision 4's numbers are r34.accept's (the reference's teacher-forced acceptance on Intel's checkpoint, both pre_fc_norm_hidden forms, the selection reused and fresh) until spec 22 runs the whole model on the card. The verify cost (M = 2..4 against M = 1) and the per-layer expert union are r34.mtp's cost lines: hand them back."
 rownote 34 "Spec 22's, not this row's: A4 on the engine (the reference is r34.a4_ref's), passkey at the context spec 22 chooses, the llama-benchy rows, the full-model acceptance and speed. b70-serve refuses the whole model (no --layers N) naming spec 22, and --spec auto naming spec 22's numbers."
-stage r34.host 34 default cpu - - "host: qwen4exp_tokenizer_test (the original's tokenizer.json bitwise transformers 5.19.0 over 24 cases + a 10240-line corpus, Qwen3.8's file refused by its SHA-256, the three chat renders), qwen4exp_server_test (ChatFormat, EOS, decision 11's sampling defaults, the serve refusals), qwen4exp_snapshot_test (the snapshot runs on simulated devices: one host layout for --parallel 1 / 2, block and request ends, sizes), qwen4exp_mtp_names_test (every bound name built, every 21-QFNe binary bound; the verify / draft / head-pass launch counts), qwen4exp_plan_test"
+stage r34.host 34 default cpu - - "host: qwen4exp_tokenizer_test (the original's tokenizer.json bitwise transformers 5.19.0 over 24 cases + a 10240-line corpus, Qwen3.8's file refused by its SHA-256, the three chat renders), qwen4exp_server_test (ChatFormat, EOS, decision 11's sampling defaults, the serve refusals), qwen4exp_snapshot_test (the snapshot runs on simulated devices: one host layout for --parallel 1 / 2, block and request ends, sizes), qwen4exp_mtp_names_test (every bound name built, every 21-QFN-v1e binary bound; the verify / draft / head-pass launch counts), qwen4exp_plan_test"
 st_r34_host() {
   run_tests '^(qwen4exp_tokenizer_test|qwen4exp_server_test|qwen4exp_snapshot_test|qwen4exp_mtp_names_test|qwen4exp_plan_test)$'
   jgrab host '^qwen4exp_(tokenizer|server|snapshot|mtp_names|plan)_test$' 'tokenizer|render|snapshot|bytes|verify|draft|launch|OK'
   finish
 }
-stage r34.k1 34 default card - r34.host "the 21-QFNe block's 122 binaries built (kbins - their first ocloc compile) and qwen4exp_mtp_names_test against them"
+stage r34.k1 34 default card - r34.host "the 21-QFN-v1e block's 122 binaries built (kbins - their first ocloc compile) and qwen4exp_mtp_names_test against them"
 st_r34_k1() {
   kbins \
     attn_prep_M2_Q24KV2 attn_prep_M2_Q24KV2_S1 attn_prep_M3_Q24KV2 attn_prep_M3_Q24KV2_S1 attn_prep_M4_Q24KV2 \
@@ -1849,7 +1849,7 @@ st_r34_k1() {
   run_tests '^qwen4exp_mtp_names_test$'
   finish
 }
-stage r34.reject 34 default card - - "the refusals before the device: cli_reject_serve_qwen4exp_{full (spec 22), draft_vocab, kv8, prefill_int8, split_alone, tokenizer (Qwen3.8's split)} and cli_reject_serve_layers_other (--layers for another model); 21-QFNc's cli_reject_qwen4exp_serve is gone"
+stage r34.reject 34 default card - - "the refusals before the device: cli_reject_serve_qwen4exp_{full (spec 22), draft_vocab, kv8, prefill_int8, split_alone, tokenizer (Qwen3.8's split)} and cli_reject_serve_layers_other (--layers for another model); 21-QFN-v1c's cli_reject_qwen4exp_serve is gone"
 st_r34_reject() {
   run_tests '^cli_reject_serve_(qwen4exp_(full|draft_vocab|kv8|prefill_int8|split_alone|tokenizer)|layers_other)$'
   finish
@@ -1860,7 +1860,7 @@ st_r34_snapshot() {
   jgrab snapshot '^qwen4exp_snapshot_gpu' 'snapshot|bytes|bitwise|restore|cross|OK|FAIL|SKIP'
   finish
 }
-stage r34.mtp 34 default gpu oracle_q4exp_synth r34.k1,r33.prefill "F5 on one card: qwen4exp_mtp_synth_{,intel_,eager_}test - M1 the head against 21-QFNa's port (r34.fixture's data, both norm forms; SKIP without it), M2 the verify rows (M = 2..4) BITWISE the plain steps, M3 greedy lossless at K = 1..3 and the head off, the selection reused; the verify's cost (M = 2..4 against M = 1, us) and the per-layer expert union; Intel's --layers 18 (qwen4exp_mtp_intel_test) when present"
+stage r34.mtp 34 default gpu oracle_q4exp_synth r34.k1,r33.prefill "F5 on one card: qwen4exp_mtp_synth_{,intel_,eager_}test - M1 the head against 21-QFN-v1a's port (r34.fixture's data, both norm forms; SKIP without it), M2 the verify rows (M = 2..4) BITWISE the plain steps, M3 greedy lossless at K = 1..3 and the head off, the selection reused; the verify's cost (M = 2..4 against M = 1, us) and the per-layer expert union; Intel's --layers 18 (qwen4exp_mtp_intel_test) when present"
 st_r34_mtp() {
   run_tests '^qwen4exp_mtp_(synth|synth_intel|synth_eager|intel)_test$' qwen4exp
   jgrab mtp '^qwen4exp_mtp_' 'M1|M2|M3|cost|union|accept|launch|OK|FAIL|SKIP'
@@ -1894,7 +1894,7 @@ st_r34_pp() {
     "golden_server_test --chat: --parallel pp --spec mtp --spec-max 2 = one card's b70-decode"
   finish
 }
-stage r34.fixture 34 optin cpu oracle_q4exp_synth,oracle_image - "M1's data on the box CPU: qwen4exp_oracle.sh mtp-fixture - 21-QFNa's MTP port on the engine-format head (bf16 experts RTN int4 g64), both norm forms, on each synthetic checkpoint (+ Intel's at --layers 18 when present) -> \$DATA/oracle-out-q4exp-mtp/{ours,intel,intel-L18}/mtp_{single,per_stream}.safetensors; then re-links oracle-out*"
+stage r34.fixture 34 optin cpu oracle_q4exp_synth,oracle_image - "M1's data on the box CPU: qwen4exp_oracle.sh mtp-fixture - 21-QFN-v1a's MTP port on the engine-format head (bf16 experts RTN int4 g64), both norm forms, on each synthetic checkpoint (+ Intel's at --layers 18 when present) -> \$DATA/oracle-out-q4exp-mtp/{ours,intel,intel-L18}/mtp_{single,per_stream}.safetensors; then re-links oracle-out*"
 st_r34_fixture() {
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA mtp-fixture" "the MTP fixtures"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
@@ -1907,7 +1907,7 @@ st_r34_accept() {
   grab_all accept '^pooled' 8
   finish
 }
-stage r34.a4_ref 34 optin cpu q4exp_intel,q4exp_orig_small,oracle_image - "plan 21-QFNe Task 5 Step 2 on the box CPU: the Qwen3.8-Flash-Next tool-call set (make_set.py --from tests/golden/toolcall on the ORIGINAL's tokenizer and template, transformers 5.19.0: the log says how many of the 36 are Qwen3.8's ids exactly) and qwen4exp_ref.py's reference on Intel's checkpoint (192 ids, resumable) into \$DATA/oracle-out-q4exp-a4 - HOURS; score.py's parse of every reference call (0 failures: the hard bar); then re-links oracle-out*. The engine's A4 run is r34.a4"
+stage r34.a4_ref 34 optin cpu q4exp_intel,q4exp_orig_small,oracle_image - "plan 21-QFN-v1e Task 5 Step 2 on the box CPU: the Qwen3.8-Flash-Next tool-call set (make_set.py --from tests/golden/toolcall on the ORIGINAL's tokenizer and template, transformers 5.19.0: the log says how many of the 36 are Qwen3.8's ids exactly) and qwen4exp_ref.py's reference on Intel's checkpoint (192 ids, resumable) into \$DATA/oracle-out-q4exp-a4 - HOURS; score.py's parse of every reference call (0 failures: the hard bar); then re-links oracle-out*. The engine's A4 run is r34.a4"
 st_r34_a4_ref() {
   chk "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp set" "the Qwen3.8-Flash-Next tool-call set"
   chk "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp ref" "the reference run (qwen4exp_ref.py)"
@@ -1987,7 +1987,7 @@ st_r36_copy() {
   grab_all copy '^po copy .*(shape=(expert|1gib|256_experts_one|latency_[a-z0-9]+) |card=all|SKIP)' 80
   finish
 }
-stage r36.zc 36 optin gpu - r36.copy "P0.3: probe_offload zc --dev 0, 1, both - M = 1, P = 1 / 2 / 7 / 26 launch pairs; arms A (21-QFNc's binary over VRAM), B (the table, identity), C (every routed slot on host USM), D1-D3 (1-3 slots on host), S (copy-queue staging: an upper bound), K (in-list staging), the streaming ceilings; interleaved pairs, y bitwise A's every run; the mixed-launch law (sum / max / mix) and P per card"
+stage r36.zc 36 optin gpu - r36.copy "P0.3: probe_offload zc --dev 0, 1, both - M = 1, P = 1 / 2 / 7 / 26 launch pairs; arms A (21-QFN-v1c's binary over VRAM), B (the table, identity), C (every routed slot on host USM), D1-D3 (1-3 slots on host), S (copy-queue staging: an upper bound), K (in-list staging), the streaming ceilings; interleaved pairs, y bitwise A's every run; the mixed-launch law (sum / max / mix) and P per card"
 st_r36_zc() {
   local off="$DATA/oracle-out-q4exp-offload" d
   idle r36.zc
@@ -2022,7 +2022,7 @@ st_r36_pin() {
   grab_all pin '^po pin .*(cap_gib|single_largest|ranges|FAIL|SKIP)' 8
   finish
 }
-stage r36.alias 36 default gpu - r36.build,r36.links "P0.5: probe_offload alias --arena-gb 22 --dev 0, then 1 - a model-sized allocation history (18 layers at 21-QFNb's sizes, the int8 head, the PLE pointer table; freed), then one 22 GiB device arena: a salted tag a 2 MiB page written and read back by the device, a second salt; an alias printed with both addresses"
+stage r36.alias 36 default gpu - r36.build,r36.links "P0.5: probe_offload alias --arena-gb 22 --dev 0, then 1 - a model-sized allocation history (18 layers at 21-QFN-v1b's sizes, the int8 head, the PLE pointer table; freed), then one 22 GiB device arena: a salted tag a 2 MiB page written and read back by the device, a second salt; an alias printed with both addresses"
 st_r36_alias() {
   local off="$DATA/oracle-out-q4exp-offload" d
   x ": > $off/po-alias.txt"

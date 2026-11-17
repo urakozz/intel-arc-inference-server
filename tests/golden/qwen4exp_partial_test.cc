@@ -1,4 +1,4 @@
-// qwen4exp_partial_test - spec 21-QFNc Task 3: the development mode on the REAL checkpoint, one card (Intel's
+// qwen4exp_partial_test - spec 21-QFN-v1c Task 3: the development mode on the REAL checkpoint, one card (Intel's
 // checkpoint at --layers N - 18 by default: what fits one B70 with its bf16 dense layers). kolibri_partial_test's
 // arrangement:
 //
@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
         golden::exists(cut_dir + "/" + p + ".ids"))
       prompts.push_back(p);
   if (prompts.empty()) {
-    std::printf("SKIP: no prompt has both %s/<p>.golden.safetensors and %s/<p>.{ids,golden.safetensors} (21-QFNa's real "
+    std::printf("SKIP: no prompt has both %s/<p>.golden.safetensors and %s/<p>.{ids,golden.safetensors} (21-QFN-v1a's real "
                 "sets: qwen4exp_oracle.sh intel and intel-layers %u)\n", full_dir.c_str(), cut_dir.c_str(), o.layers);
     return 77;
   }

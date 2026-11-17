@@ -1,5 +1,5 @@
 #!/bin/sh
-# Spec 21-QFNa: transformers 5.19.0 for the qwen4_exp reference, in a separate site directory BESIDE the
+# Spec 21-QFN-v1a: transformers 5.19.0 for the qwen4_exp reference, in a separate site directory BESIDE the
 # oracle image (agnes-ref-img's 5.15.0 stays what every other oracle uses - the image is never changed).
 #   tools/oracle/qwen4exp_env.sh <dir>
 # Run INSIDE the container (the wheels must match its Python): pip install --no-deps --target <dir>

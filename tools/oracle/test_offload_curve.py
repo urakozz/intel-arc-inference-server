@@ -5,7 +5,7 @@ a minute).
 
     test_offload_curve.py [test_name ...]          in agnes-ref-img; PYTHONPATH=<the 5.19.0 site> for the tiny test
 
-Synthetic traces built here with known answers (21-QFNa's TRACE_FORMAT, written with safetensors):
+Synthetic traces built here with known answers (21-QFN-v1a's TRACE_FORMAT, written with safetensors):
 - h(f) analytic: layer l routes only experts [0, 10 + l), every one equally often -> the uniform fill holds [0, n)
   (ties to the lower id), h = mean_l min(n, 10 + l) / (10 + l);
 - a hold-out split whose halves see disjoint experts scores h = 0 held out and 1 in sample;

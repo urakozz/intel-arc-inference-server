@@ -1,5 +1,5 @@
-// qwen4exp_golden_test - spec 21-QFN F3 (decode): Qwen3.8-Flash-Next's engine against tools/oracle/qwen4exp_ref.py
-// (spec 21-QFNa: transformers 5.19.0, the engine-format reference - int4 experts and the int8 PLE rows dequantised) -
+// qwen4exp_golden_test - spec 21-QFN-v1 F3 (decode): Qwen3.8-Flash-Next's engine against tools/oracle/qwen4exp_ref.py
+// (spec 21-QFN-v1a: transformers 5.19.0, the engine-format reference - int4 experts and the int8 PLE rows dequantised) -
 // each golden prompt x 32 greedy tokens - with the per-layer ROUTING diagnostic, the selection gate S per QSA layer
 // and the PLE ids. kolibri_golden_test's copy (tests/golden/kolibri_golden_test.cc), this family's semantics.
 //
@@ -19,12 +19,12 @@
 //     H.L{l}         BF16 [A][10240]       the 4-stream H after layer l, rows T + gen - A .. (the tap diagnostic)
 // The prompts read: q4exp_short (must exist), q4exp_4k, q4exp_agentic - each whose files exist.
 //
-// **The gates** (golden_common.h's tie-aware rule; spec 21-QFN §7 F3):
+// **The gates** (golden_common.h's tie-aware rule; spec 21-QFN-v1 §7 F3):
 //   tokens   ingest the ids one replay at a time; for j = 0..31 the engine's id against the golden decision row
 //            T - 1 + j (determined rows exact; a row whose top-1 is not unique accepts any member of the argmax
 //            set), then feed the GOLDEN token
 //   routing  at every (row, layer) the engine's top-10 SET against route.ids. A reference gap of exactly 0 is an
-//            exact tie, which torch's topk breaks its own way - undetermined (spec 21-QFN §12 finding 2). Otherwise, with
+//            exact tie, which torch's topk breaks its own way - undetermined (spec 21-QFN-v1 §12 finding 2). Otherwise, with
 //            the reference's router scores (route.top.*), a difference is a ROUNDING SWAP when the weights of the
 //            experts both took agree (cosine >= 0.999) and every expert the engine took instead is in the
 //            reference's top 16 with its p within 2 x the row's score difference (the engine's p of rank 9 / 10 and
@@ -49,7 +49,7 @@
 // The free run passes S and the token gate on rows with no near-tie in any layer, and reports the others (a near
 // tie upstream can move a determined row's logits: counted, not failed).
 //
-// **F3 on prefill (spec 21-QFNd)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through Qwen4ExpEngine::prefill
+// **F3 on prefill (spec 21-QFN-v1d)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through Qwen4ExpEngine::prefill
 // instead of one replay per id; the token gate is the same rule from row T - 1 on (the prefill's head chooses the
 // first token), the routing diagnostic and gate S read the prefill's rows of the LAST chunk (its route rows and
 // selection rows), with `inject` the reference's selections reach the prefill through set_prefill_injector; no tap
@@ -272,7 +272,7 @@ int main(int argc, char** argv) {
   o.max_len = 16384;
   o.debug_tap = true;
   bool inject = false, prefill = false;
-  uint32_t chunk = 0;   // spec 21-QFNd: 0 = kPfC
+  uint32_t chunk = 0;   // spec 21-QFN-v1d: 0 = kPfC
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "int8") o.int8_head = true;
@@ -486,7 +486,7 @@ int main(int argc, char** argv) {
     };
     eng.reset();
     if (prefill) {
-      // Spec 21-QFNd: the prompt in one Qwen4ExpEngine::prefill; with `inject` the reference's lists per chunk
+      // Spec 21-QFN-v1d: the prompt in one Qwen4ExpEngine::prefill; with `inject` the reference's lists per chunk
       if (inject)
         eng.set_prefill_injector([&](uint32_t q, uint32_t pos, uint32_t n_rows, uint32_t* lists) {
           for (uint32_t m = 0; m < n_rows; ++m) {

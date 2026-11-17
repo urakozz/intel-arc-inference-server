@@ -1,10 +1,10 @@
 #pragma once
-// CPU references for spec 21-QFNc's Qwen3.8-Flash-Next kernels (src/kernels/qwen4exp/*.cl, prep.cl's
+// CPU references for spec 21-QFN-v1c's Qwen3.8-Flash-Next kernels (src/kernels/qwen4exp/*.cl, prep.cl's
 // prep_gated_head _SIG) - the same op chains in the same orders, every line with a twin in a kernel; edit
-// the two together. The chains are tools/oracle/qwen4exp_ref.py's restated ops (spec 21-QFNa, transformers
+// the two together. The chains are tools/oracle/qwen4exp_ref.py's restated ops (spec 21-QFN-v1a, transformers
 // 5.19.0's qwen4_exp), op for op, at every rounding
 // point; tests/kernels/qwen4exp_ref_test.cc holds them to that reference's own outputs
-// (tests/kernels/qwen4exp_fixture.h) and to the semantics' properties (plan 21-QFNc Review Focus 1-6).
+// (tests/kernels/qwen4exp_fixture.h) and to the semantics' properties (plan 21-QFN-v1c Review Focus 1-6).
 //
 //   hc_combine_norm()  q4_hc_combine_norm: the pending H = H0 + rne(y x inj) of the block before (product
 //                      rounded, then the add), or the embedding repeated (layer 0), then the grouped (1 + w)
@@ -13,7 +13,7 @@
 //   hc_up_mix()        q4_hc_up_mix: down's bf16 rows, / 4, silu -> a [320]; the up linear (fma chain over k
 //                      ascending), sigmoid -> g; mean over the 4 streams of rne(g x xn) ((s0 + s1) + s2) + s3,
 //                      / 4, one rounding -> the block input x; inj = 2 rne(sigmoid(rne(inject / 4)))
-//   ple_ids() / ple_row() / ple_block()   q4_ple_gather / q4_ple_block (spec 21-QFN §2.4)
+//   ple_ids() / ple_row() / ple_block()   q4_ple_gather / q4_ple_block (spec 21-QFN-v1 §2.4)
 //   qsa_q() / qsa_block_key() / qsa_score() / qsa_select()   q4_qsa_prep / _score / _select (§2.3)
 //   qsa_attn_eager()   q4_qsa_attn_eager: the reference's bf16 chain over the list
 //   qsa_attn_fp64()    decode attention over the list in fp64 (flash's tolerance reference)
@@ -134,7 +134,7 @@ inline void grouped_norm(const uint16_t* in, const float* w, uint16_t* out) {
   }
 }
 
-// --- hyper-connections (spec 21-QFN §2.2, §4.1) -------------------------------------------------------------------
+// --- hyper-connections (spec 21-QFN-v1 §2.2, §4.1) -------------------------------------------------------------------
 enum class HcSrc { Embed, Y, None };   // kernels::qwen4exp::HcSrc (Slices: the caller forms y, y_of_slices)
 // y = rne(sum_s slices[s][m][k]) ascending s: a GEMV's split-K slices -> its bf16 output.
 inline uint16_t y_of_slices(const float* slices, uint32_t S, uint32_t M, uint32_t m, uint32_t N, uint32_t k) {
@@ -181,8 +181,8 @@ inline void hc_up_mix(const float* down_f32, bool inject, const uint16_t* up, co
   }
 }
 
-// --- PLE (spec 21-QFN §2.4) -------------------------------------------------------------------------------------------
-// The id-ring rule (21-QFNa's reading of M:1107-1121): t1 = id[p - 1] (EOS if p < 1); t2 = t1 == EOS ? EOS :
+// --- PLE (spec 21-QFN-v1 §2.4) -------------------------------------------------------------------------------------------
+// The id-ring rule (21-QFN-v1a's reading of M:1107-1121): t1 = id[p - 1] (EOS if p < 1); t2 = t1 == EOS ? EOS :
 // id[p - 2] (EOS if p < 2). `id(q)` is the token at position q <= p.
 template <class Id>
 inline loader::Q4PleHistory ple_history(uint32_t p, Id id, uint32_t eos = kPleEos) {
@@ -246,7 +246,7 @@ inline PleTrace ple_block(uint16_t* H, const float* kv, const float* wk, const f
   return t;
 }
 
-// --- QSA (spec 21-QFN §2.3) -------------------------------------------------------------------------------------------
+// --- QSA (spec 21-QFN-v1 §2.3) -------------------------------------------------------------------------------------------
 // The bf16 RoPE torch applies on the first 64 dims (cos / sin cast to bf16 first; q·cos and rot(q)·sin each
 // rounded, their sum rounded): `cs` = the loader's fp32 table row [2][32] (cos then sin) at the position.
 inline void rope64_bf16(const uint16_t* n, const float* cs, uint32_t dim, uint16_t* out) {
@@ -308,7 +308,7 @@ inline float qsa_score(const float* q, const uint16_t* key) {
   }
   return (((r[0] + r[1]) + r[2]) + r[3]) / kSqrtIdx;
 }
-// The selection of row p over its n = (p + 1) / 4 complete blocks' scores (spec 21-QFN §2.3, decision 3): n <= 512
+// The selection of row p over its n = (p + 1) / 4 complete blocks' scores (spec 21-QFN-v1 §2.3, decision 3): n <= 512
 // selects everything - the list 0 .. p; else the top 512 by (score desc, block asc) - EXACT ties to the lower
 // block - written ascending, each block expanded to its 4 positions, then the open block's tail 4n .. p.
 // s512 / s513: the 512th / 513th scores in that order (+INF / -INF when n <= 512: no cut).
@@ -397,7 +397,7 @@ inline std::vector<double> qsa_attn_fp64(const float* attn_q, const uint16_t* kv
   return o;
 }
 
-// --- the MoE (spec 21-QFN §2.1, §4.4; 21-QFNa: grouped_mm) -----------------------------------------------------------------
+// --- the MoE (spec 21-QFN-v1 §2.1, §4.4; 21-QFN-v1a: grouped_mm) -----------------------------------------------------------------
 struct Route {
   uint32_t ids[kTopK] = {};   // rank order: descending p, exact ties to the lower id
   float w[kTopK] = {};        // rne(p_k / sum_k p_k), bf16 values
@@ -562,7 +562,7 @@ inline std::vector<uint16_t> down(const uint32_t* ids, const float* w, float sg,
   return out;
 }
 
-// --- the GDN gated head with the sigmoid gate (prep_gated_head _SIG; spec 21-QFN §4.4) ----------------------------------
+// --- the GDN gated head with the sigmoid gate (prep_gated_head _SIG; spec 21-QFN-v1 §4.4) ----------------------------------
 // prep_ref::gated_head's chain with the last factor sigmoid(z) = 1 / (1 + exp_torch(-z)):
 //   o_b = rne(gdn_o); z_b = rne(qkvz[Z_OFF + h·128 + i]) (S 1); var: 128 lanes o_f^2 (plain), the tree;
 //   n_b = rne(o_f · (1 / sqrt(var + eps))); t_b = rne(f32(w) · f32(n_b)); out = rne(f32(t_b) · sigmoid(f32(z_b)))

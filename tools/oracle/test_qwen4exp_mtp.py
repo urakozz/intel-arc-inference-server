@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""Spec 21-QFNa Task 4: the MTP head port (qwen4exp_mtp.py) held to an independent build and to vLLM's points.
+"""Spec 21-QFN-v1a Task 4: the MTP head port (qwen4exp_mtp.py) held to an independent build and to vLLM's points.
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/test_qwen4exp_mtp.py [test_name ...]
 
@@ -314,7 +314,7 @@ TESTS = [test_against_independent, test_unit_injection, test_fc_hidden_per_strea
 
 
 def test_rtn_engine_format():
-    """Spec 21-QFNe: rtn_dequant is loader::rtn_int4_g64's formula element by element (per row and 64-group, s16 =
+    """Spec 21-QFN-v1e: rtn_dequant is loader::rtn_int4_g64's formula element by element (per row and 64-group, s16 =
     f16(2 amax / 15), q = clamp(rint(w / s16) + 8, 0, 15), an all-zero group q = 8), and engine_format swaps every
     routed expert the head reads for its RTN form (the shared expert stays bf16)."""
     g = torch.Generator().manual_seed(5)
@@ -338,7 +338,7 @@ def test_rtn_engine_format():
 
 
 def test_accept_cli():
-    """Spec 21-QFNe: `qwen4exp_mtp.py accept` on the tiny with a head - per source and pooled acceptance by depth in
+    """Spec 21-QFN-v1e: `qwen4exp_mtp.py accept` on the tiny with a head - per source and pooled acceptance by depth in
     [0, 1], E_K non-decreasing in K, both selection forms, written as JSON."""
     import json
     s = setup()

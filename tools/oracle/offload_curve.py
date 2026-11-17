@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
-"""Spec 22 P0.6 (plan 22a Task 3): the expert-offload tier's hit-rate curves from spec 21-QFNa's routing traces, and
+"""Spec 22 P0.6 (plan 22a Task 3): the expert-offload tier's hit-rate curves from spec 21-QFN-v1a's routing traces, and
 the routing profile plan 22b's loader reads (decision 8).
 
     offload_curve.py counts  --traces DIR [--json FILE]
@@ -15,7 +15,7 @@ Every command takes --shape flash-next|laguna (default flash-next): the model th
 top-k, the decoder layers the traces' L axis holds, an expert's record bytes; Laguna's bytes a token too). A shape
 that names its layers is checked against the traces.
 
-The traces are `<DIR>/<name>.routes.safetensors` (21-QFNa's TRACE_FORMAT, qwen4exp_ref.py trace): ids i32 [T][L][k]
+The traces are `<DIR>/<name>.routes.safetensors` (21-QFN-v1a's TRACE_FORMAT, qwen4exp_ref.py trace): ids i32 [T][L][k]
 ascending, p f32, onorm f32, mtp_ids / mtp_p / mtp_onorm [T][k] (row T-1 of the head -1 / 0); metadata layers,
 experts, top_k, source. A source's class is A4 (`t<N>_<task>-<file>`, the 36 tool-call scenarios), agentic
 (q4exp_agentic), code, prose, or opencode (anything else: the recorded sessions).
@@ -582,10 +582,10 @@ STOP_TP_TPS = 50.0
 HC_BYTES = 1.29e9                 # spec 21-QFN-v2 §3: the hyper-connections a token, bf16, replicated on both cards under tp
 TP_ALLREDUCE_MS = 0.34            # spec 21-QFN-v2 §5 (b): two all-reduces a layer over P2P, ~98 a token x 3.5 us
 ROOFLINE_GBPS = 590.0             # the B70's roofline (spec 22 §2)
-ROOFLINE_SHARE = 0.776            # the share Qwen3.8 reaches (spec 21-QFN §3, docs/05)
-KV_ROW_BYTES = 24576              # spec 21-QFN §3: a selected position's KV over the 12 QSA layers
-INDEXER_BYTES = 768               # spec 21-QFN §3: the indexer scan a position
-QSA_SELECTED = 2051               # spec 21-QFN §2.3: at most 2051 positions attended
+ROOFLINE_SHARE = 0.776            # the share Qwen3.8 reaches (spec 21-QFN-v1 §3, docs/05)
+KV_ROW_BYTES = 24576              # spec 21-QFN-v1 §3: a selected position's KV over the 12 QSA layers
+INDEXER_BYTES = 768               # spec 21-QFN-v1 §3: the indexer scan a position
+QSA_SELECTED = 2051               # spec 21-QFN-v1 §2.3: at most 2051 positions attended
 
 
 def decode_ms(D: float, R: float, BW: float, P: float, h: float, law: str = "serial", alpha: float = 1.0) -> float:
@@ -778,7 +778,7 @@ def cmd_project(a) -> None:
         aj = json.load(open(a.accept))
         acc = aj["pooled"].get("reuse") or next(iter(aj["pooled"].values()))
     BW = a.bw if a.bw else ROOFLINE_GBPS * ROOFLINE_SHARE
-    bw_src = "row 32's measured rate" if a.bw else f"the {ROOFLINE_GBPS:g} GB/s roofline at {ROOFLINE_SHARE:.1%} (spec 21-QFN §3)"
+    bw_src = "row 32's measured rate" if a.bw else f"the {ROOFLINE_GBPS:g} GB/s roofline at {ROOFLINE_SHARE:.1%} (spec 21-QFN-v1 §3)"
     if p0["law"]:
         alphas = [p0["alpha"][c] for c in sorted(p0["alpha"])]
         alpha = float(np.mean(alphas))

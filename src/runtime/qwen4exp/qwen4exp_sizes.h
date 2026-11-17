@@ -10,15 +10,15 @@
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_plan.h"     // PpBalance, pp_balance, kPpDevices
 
-// Spec 21-QFNb Task 5: Qwen3.8-Flash-Next's device memory as device-free arithmetic - the weights (the loader's
+// Spec 21-QFN-v1b Task 5: Qwen3.8-Flash-Next's device memory as device-free arithmetic - the weights (the loader's
 // one formula, loader/qwen4exp_layout.h) and the persistent state, the planner over them (`--layers auto`,
 // `--max-len auto`) and the split by bytes (spec 16b's runtime::pp_balance - not a second rule). Host only
-// (tests/runtime/qwen4exp_plan_test.cc). 21-QFNc adds the decode scratch, the hand-off and the launch counts to
-// this file, 21-QFNd the prefill scratch behind a `prefill` flag, 21-QFNe the MTP buffers (Kolibri's arrangement).
-// Spec 21-QFNc (built): the decode scratch, the debug tap, the two-card hand-off and the launch counts below; a plan
+// (tests/runtime/qwen4exp_plan_test.cc). 21-QFN-v1c adds the decode scratch, the hand-off and the launch counts to
+// this file, 21-QFN-v1d the prefill scratch behind a `prefill` flag, 21-QFN-v1e the MTP buffers (Kolibri's arrangement).
+// Spec 21-QFN-v1c (built): the decode scratch, the debug tap, the two-card hand-off and the launch counts below; a plan
 // is the weights, the persistent state and the decode scratch (+ the link on two cards).
 //
-// **The full model does not fit two B70s** (spec 21-QFN §3): its routed experts alone are 64.17 GB at int4 g64
+// **The full model does not fit two B70s** (spec 21-QFN-v1 §3): its routed experts alone are 64.17 GB at int4 g64
 // against ~62 GB usable, so `require_fits` refuses it by bytes, naming spec 22 (the expert-offload tier);
 // the development mode `--layers N` (the first N layers, then the final mixer and the head) is planned per
 // card by `layers_that_fit`.
@@ -29,14 +29,14 @@ namespace runtime::qwen4exp {
 //   idx_keys    bf16 [its QSA layers][max_len / 4][128]                    the compressed indexer keys, 64 B a
 //                                                                          position a layer
 //   idx_tail    bf16 [its QSA layers][8][128]                              the raw keys of the open block, slot
-//                                                                          p % 8 (21-QFNc: 8, not spec 21-QFN §4.2's 4 -
-//                                                                          plan 21-QFNc Review Focus 3)
+//                                                                          p % 8 (21-QFN-v1c: 8, not spec 21-QFN-v1 §4.2's 4 -
+//                                                                          plan 21-QFN-v1c Review Focus 3)
 //   gdn_state   fp32 [its GDN layers][48][128][128]                        3,145,728 B a layer
 //   conv_ring   bf16 [its GDN layers][16][10240]                           Qwen3.8's ring (gdn_step reads it)
 //   ple         u32 [16] id ring + bf16 [16][10240] conv ring              the device holding the PLE layer: slot
-//                                                                          p % 16 (21-QFNc: the history is 2 ids and 9
+//                                                                          p % 16 (21-QFN-v1c: the history is 2 ids and 9
 //                                                                          rows; 16-slot rings are q4_ple.cl's
-//                                                                          addressing, 21-QFNb planned [2] + [9])
+//                                                                          addressing, 21-QFN-v1b planned [2] + [9])
 // An empty group (a device with no QSA / no GDN layer, the PLE state off the PLE layer's device) still
 // allocates one 64-byte line.
 inline constexpr uint32_t kConvRing = 32;   // = PersistentDims::kConvRing (Qwen3.8's gdn_step ring)
@@ -57,11 +57,11 @@ size_t conv_ring_bytes_per_layer(const model::Qwen4ExpDesc& d);   // 327,680
 size_t ple_state_bytes(const model::Qwen4ExpDesc& d);             // 16 x 4 + 16 x 10240 x 2
 // The PLE state's layout inside its allocation: the id ring at 0, the conv ring at ple_conv_off (64-aligned).
 inline constexpr size_t kPleConvOff = 64;
-// The host table spec 21-QFN §4.3 pins (16 ranges of int8 rows + scales): 51.84 GB with bf16 scales (derived).
+// The host table spec 21-QFN-v1 §4.3 pins (16 ranges of int8 rows + scales): 51.84 GB with bf16 scales (derived).
 size_t host_ple_bytes(const model::Qwen4ExpDesc& d, loader::Q4PleScale s);
 
-// --- spec 21-QFNc: the decode list ----------------------------------------------------------------------------
-inline constexpr uint32_t kM = 1;   // decode builds M = 1 (21-QFNe's verify adds M = 2..4)
+// --- spec 21-QFN-v1c: the decode list ----------------------------------------------------------------------------
+inline constexpr uint32_t kM = 1;   // decode builds M = 1 (21-QFN-v1e's verify adds M = 2..4)
 // Which decode attention every capture binds: q4_qsa_attn.cl's flash form or q4_qsa_attn_eager.cl's (the
 // reference's bf16 chain). `B70_Q4_ATTN=flash|eager`, read at each call; unset or empty is the default;
 // anything else throws.
@@ -106,14 +106,14 @@ struct ScratchSizes {
            logits + argmax_part;
   }
 };
-// `rows`: kM (1) without the MTP head, kVerifyRows (4) with it - every M-strided term x rows (spec 21-QFNe).
+// `rows`: kM (1) without the MTP head, kVerifyRows (4) with it - every M-strided term x rows (spec 21-QFN-v1e).
 ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Attn a = q4_attn(), uint32_t rows = kM);
 size_t partials_floats(const model::Qwen4ExpDesc& d, uint32_t rows = kM);
 inline size_t route_at(uint32_t layer) { return size_t(layer) * kM * kRouteWords * 4; }
 inline size_t list_at(uint32_t qsa_index) { return size_t(qsa_index) * kM * kListRow * 4; }
 // The residual tap (debug): bf16 [layers][M][10240] on every device (its layers' rows written).
 inline size_t tap_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.layers) * kM * d.hc_n() * 2; }
-// The injected selection (spec 21-QFN F3's debug input): host USM [qsa layers][M][kListRow] u32 per device.
+// The injected selection (spec 21-QFN-v1 F3's debug input): host USM [qsa layers][M][kListRow] u32 per device.
 inline size_t injected_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.qsa_before(d.layers)) * kM * kListRow * 4; }
 
 // The hand-off (spec 16b's buffers through the descriptor-free layout): the MATERIALISED 4-stream H crosses -
@@ -132,13 +132,13 @@ size_t link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 //                is device 1's first layer: the landed H is already materialised)
 //   last device  the final mixer's combine_norm, its down GEMV, up_mix, lm_head, argmax x 2
 // 779 at 48 layers on one card (1 + 36 x 15 + 12 x 19 + 4 + 6), 767 under eager; two cards +1 (device 0 ends with
-// combine_norm _Y_NN: the materialised H crosses; device 1 starts at its first layer's norm-only _X). `injected` (spec 21-QFN F3's run with the reference's selections fed in): every QSA layer
+// combine_norm _Y_NN: the materialised H crosses; device 1 starts at its first layer's norm-only _X). `injected` (spec 21-QFN-v1 F3's run with the reference's selections fed in): every QSA layer
 // without q4_qsa_score / _select, 2 fewer.
 size_t device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, Q4Attn a,
                        bool injected = false);
 size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, Q4Attn a, bool injected = false);
 
-// --- spec 21-QFNd: the prefill chunk ------------------------------------------------------------------------------
+// --- spec 21-QFN-v1d: the prefill chunk ------------------------------------------------------------------------------
 // One chunk of at most kPfC positions (= kernels::qwen4exp::kPfC, checked in qwen4exp_prefill.cc): every allocation
 // Qwen4ExpPrefillScratch makes on a device, as device-free arithmetic.
 inline constexpr uint32_t kPfC = 2048;
@@ -156,7 +156,7 @@ inline uint32_t pf_slabs(uint32_t N) { return (N + kPfSlab - 1) / kPfSlab; }
 inline uint32_t pf_slab_width(uint32_t N, uint32_t n0) { return N - n0 >= kPfSlab ? kPfSlab : pf_pad256(N - n0); }
 inline uint32_t pf_ld(uint32_t N) { return pf_pad256(N); }
 // The rows of a chunk at `pos` with at most 2051 visible positions (p <= 2050): QSA is exactly causal attention there
-// (spec 21-QFN §2.3), so rows [0, dense) run spec 6's flash and rows [dense, C) the sparse flash over their own lists.
+// (spec 21-QFN-v1 §2.3), so rows [0, dense) run spec 6's flash and rows [dense, C) the sparse flash over their own lists.
 inline uint32_t pf_dense_rows(uint32_t pos, uint32_t C) {
   return pos > kPfDenseLast ? 0u : (C < kPfDenseLast + 1 - pos ? C : kPfDenseLast + 1 - pos);
 }
@@ -230,7 +230,7 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);
 inline size_t pf_route_at(uint32_t layer) { return size_t(layer) * kPfC * kRouteWords * 4; }
 inline size_t pf_list_at(uint32_t qsa_index) { return size_t(qsa_index) * kPfC * kListRow * 4; }
 inline size_t pf_diag_at(uint32_t qsa_index) { return size_t(qsa_index) * kPfC * 2 * 4; }
-// The injected selection on prefill (spec 21-QFN F3's debug input): host USM [qsa layers][kPfC][kListRow] u32 per device,
+// The injected selection on prefill (spec 21-QFN-v1 F3's debug input): host USM [qsa layers][kPfC][kListRow] u32 per device,
 // filled by the caller's injector before each chunk (Qwen4ExpEngine::set_prefill_injector).
 inline size_t pf_injected_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.qsa_before(d.layers)) * kPfC * kListRow * 4; }
 // The two-card prefill hand-off: kPfDepth runtime::PipelineLinks over spec 16b's layout at chunk size - each kPfC
@@ -259,7 +259,7 @@ inline constexpr size_t kPrefillHeadLaunches = 6;
 // A device's prefill scratch + its prefill link (two devices): what `prefill` plans into DevicePlan::prefill_scratch.
 size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len);
 
-// --- spec 21-QFNe: the MTP head, the verify and draft lists ------------------------------------------------------
+// --- spec 21-QFN-v1e: the MTP head, the verify and draft lists ------------------------------------------------------
 // Spec 8's machinery (runtime/engine.h's draft / verify / commit contracts) on this family. With the head loaded:
 //   - every device's decode scratch holds kVerifyRows rows (the verify lists run at M = k + 1 <= 4): the M-strided
 //     terms of scratch_sizes x 4, the per-layer rows (routes, selections, diagnostics) strided by 4 rows;
@@ -269,7 +269,7 @@ size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t de
 //     48-layer slot; spec 8 §3.4's rule otherwise unchanged: verify row r writes slot (live + r) % 4, commit(j) makes
 //     slot (live + j) % 4 live);
 //   - the PLE layer's device holds the verify's PLE rows (gated, gn bf16 [4][10240]: q4_ple_block is M = 1 only, so
-//     a verify at M > 1 runs q4_pf_ple's gate / conv / ring at C = 4 - 21-QFNd's cut of the same chain);
+//     a verify at M > 1 runs q4_pf_ple's gate / conv / ring at C = 4 - 21-QFN-v1d's cut of the same chain);
 //   - the last device holds the head's buffers (MtpSizes): its Control (the head runs one position behind the main
 //     model: draft step i at pos - 1 + i), its KV [K | V][max_len][512] bf16, compressed keys, 8-slot tail ring, its
 //     selection row (draft step 0's, which later steps reuse - decision 5), the R rows hh [1 + 4][10240] bf16 (row 0
@@ -286,7 +286,7 @@ enum class MtpNorm { Single, PerStream };
 MtpNorm mtp_norm();
 const char* mtp_norm_name(MtpNorm n);
 // Decision 5 (draft attention): draft steps 1.. REUSE draft step 0's selection (vLLM's opt-in
-// index_share_for_mtp_iteration - 21-QFNa found it is not vLLM's default). The `fresh` arm (vLLM's default: select on
+// index_share_for_mtp_iteration - 21-QFN-v1a found it is not vLLM's default). The `fresh` arm (vLLM's default: select on
 // every step) and its B70_Q4_MTP_SELECT went in the zero-config cleanup (2026-11-06).
 
 struct MtpSizes {
@@ -333,13 +333,13 @@ size_t mtp_prefill_launches(uint32_t pos, uint32_t C);
 // The prefill's R rows for the head pass on the last device: bf16 [kPfC + 1][10240] (row 0 R_{pos-1}).
 inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d) { return size_t(kPfC + 1) * d.hc_n() * 2; }
 
-// --- spec 21-QFNe: spec 7's prefix-cache snapshots --------------------------------------------------------------
-// The STATE at position p is everything the next token reads that is not a per-position block (plan 21-QFNe Review
+// --- spec 21-QFN-v1e: spec 7's prefix-cache snapshots --------------------------------------------------------------
+// The STATE at position p is everything the next token reads that is not a per-position block (plan 21-QFN-v1e Review
 // Focus 1): every GDN layer's recurrent state and its conv ring's rows of p - 3 .. p - 1 (gdn_step's window), the
 // PLE layer's id history p - 1, p - 2 (q4_ple_gather's) and its conv rows p - 9 .. p - 1 (q4_ple_block's dilated
 // taps read p - 9, p - 6, p - 3), and per QSA layer the open block's raw keys (positions 4 floor(p / 4) .. p - 1,
 // at most 3: the tail ring's slots p % 8). The BLOCKS are per position: the QSA layers' K / V rows and the
-// compressed keys of the complete blocks [begin / 4, floor(end / 4)). With the MTP head (spec 21-QFNe Task 3) the state
+// compressed keys of the complete blocks [begin / 4, floor(end / 4)). With the MTP head (spec 21-QFN-v1e Task 3) the state
 // adds the head's open-block raw keys - the head runs one position behind (its KV at position q is the head on
 // (R_q, t_{q+1}), so at main position p it holds positions [0, p - 1): its tail is 4 floor((p - 1) / 4) .. p - 2 -
 // and R_{p-1}, the main model's pre-mixer 4-stream H of position p - 1 (the next draft step's and the next head
@@ -389,7 +389,7 @@ std::vector<SnapRun> state_runs(const model::Qwen4ExpDesc& d, const model::Q4Pla
 std::vector<SnapRun> kv_runs(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
                              uint32_t begin, uint32_t end, bool mtp);
 // The bytes of one device allocation a run addresses (the host test's simulated devices; the engine checks its
-// own buffers against it): persistent_sizes' groups, the PLE state, and the head's (spec 21-QFNe Task 3: mtp_sizes).
+// own buffers against it): persistent_sizes' groups, the PLE state, and the head's (spec 21-QFN-v1e Task 3: mtp_sizes).
 size_t snap_tensor_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len,
                          SnapTensor t);
 
@@ -403,7 +403,7 @@ PpBalance pp_split(const model::Qwen4ExpDesc& d, uint32_t max_len, bool int8_hea
 
 // --- the planner ---------------------------------------------------------------------------------------
 // One device's plan in memory_line()'s components: model = weights + RoPE; kv = KV + indexer keys + tails;
-// decode_state = control + GDN state + conv ring + PLE state + (21-QFNc) the decode scratch (+ the tap with
+// decode_state = control + GDN state + conv ring + PLE state + (21-QFN-v1c) the decode scratch (+ the tap with
 // debug_tap) + the hand-off on two cards.
 struct DevicePlan : MemoryComponents {
   uint32_t device = 0, first = 0, end = 0;   // its layers [first, end)
@@ -415,7 +415,7 @@ struct DevicePlan : MemoryComponents {
   uint32_t vram_experts = 0, routed_experts = 0;
   size_t host_experts = 0;
 };
-// `prefill` (spec 21-QFNd): each device's prefill scratch and prefill link (prefill_state) in prefill_scratch.
+// `prefill` (spec 21-QFN-v1d): each device's prefill scratch and prefill link (prefill_state) in prefill_scratch.
 std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
                              bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false);
 // Whether every device's plan + reserve fits its capacity.

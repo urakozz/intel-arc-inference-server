@@ -1,5 +1,5 @@
 #pragma once
-// Spec 21-QFNe Task 4: b70-serve's Qwen3.8-Flash-Next path (model_type qwen4_exp) - what the dispatch reads and refuses
+// Spec 21-QFN-v1e Task 4: b70-serve's Qwen3.8-Flash-Next path (model_type qwen4_exp) - what the dispatch reads and refuses
 // before the device; the body (settle, load, engine, adapter, options, listen) is b70_serve.cc's serve_qwen4exp, beside
 // serve_kolibri, over these. The request path is the Qwen family's (cli/qwen4exp_chat.h: ChatFormat Qwen, XML tool
 // calls, reasoning on "<think>\n", EOS from generation_config.json, decision 11's greedy-unless-asked); the engine is
@@ -9,12 +9,12 @@
 //   --layers N|auto        b70-decode's development mode; without it the whole model is served with the expert tier
 //                          (cli/qwen4exp_decode.h settle: the experts that do not fit the cards in pinned host memory)
 //   the PLE int8 file      <snapshot>-ple-int8/, beside the checkpoint (no flag)
-//   the tokenizer          the snapshot's tokenizer.json, held to the original's (Qwen/Qwen3.8-Flash-Next): 21-QFNa found the
+//   the tokenizer          the snapshot's tokenizer.json, held to the original's (Qwen/Qwen3.8-Flash-Next): 21-QFN-v1a found the
 //                          original's split regex adds \p{M}, and Intel's checkpoint ships Qwen3.8's file - a snapshot
 //                          tokenizer.json without \p{M} in its pre-tokenizer is refused (check_tokenizer)
 //   --parallel auto|1|pp, --pipeline-split auto|N, --max-len N|auto   as b70-decode
 //   the lm_head            int8 (spec 9), as every served model
-//   --spec mtp|lookup      the MTP head (spec 21-QFNe: draft / verify / commit through the adapter, a fixed K = --spec-max
+//   --spec mtp|lookup      the MTP head (spec 21-QFN-v1e: draft / verify / commit through the adapter, a fixed K = --spec-max
 //                          (1..3, default 3); lookup's drafts through the same verify lists); the planner carries the
 //                          head's weights and buffers; --spec auto is off for this model
 //   the prefix cache       the existing flags (--prefix-cache-gb, --prefix-split-last): kv_form 0 (bf16); the
@@ -63,7 +63,7 @@ inline void check_serve(const ServeArgs& s) {
   check_args(a);
 }
 
-// True when a JSON value (recursively) holds a string containing \p{M} - the original's split regex (21-QFNa's finding 3).
+// True when a JSON value (recursively) holds a string containing \p{M} - the original's split regex (21-QFN-v1a's finding 3).
 inline bool holds_mark_class(const nlohmann::json& v) {
   if (v.is_string()) return v.get<std::string>().find("\\p{M}") != std::string::npos;
   if (v.is_object() || v.is_array())

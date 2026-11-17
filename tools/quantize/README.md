@@ -301,7 +301,7 @@ scripts' 0.17.0 `6afaecdb`:
 | the 12 QSA layers | transformers' per-token indexer loop | vectorised indexer (#2579) |
 | fused experts (`mlp.experts.gate_up_proj [512, 1280, 2560]`) | the same `modeling/fused_moe` code (not run here) | "Fused-MoE checkpoint detected: building a meta skeleton and materializing weights per block"; exported per expert |
 | the MTP head (`mtp.*`, not a transformers module) | has `AR_DISABLE_COPY_MTP_WEIGHTS` (not run here) | `missing_tensors.py`: copied, fused experts split per expert, every linear not ignored RTN int4 g64, the rest declared bits 16 in `extra_config` - no pass of our own; ours ignores the head's attention and shared expert (spec 21-QFN-v2 §2) |
-| Qwen4's predefined ignore list | `hyper_connection`, `mlp.gate`, `shared_expert` | same - ours drops `shared_expert` (our shared experts are int4, spec 21-QFN §5 "Ours"; `autoround_run.py`) |
+| Qwen4's predefined ignore list | `hyper_connection`, `mlp.gate`, `shared_expert` | same - ours drops `shared_expert` (our shared experts are int4, spec 21-QFN-v1 §5 "Ours"; `autoround_run.py`) |
 
 What the script does about the rest (`autoround_run.py`, `head_rtn.py`):
 
@@ -398,10 +398,10 @@ cap.
 prints the seconds per block and its own time left; the `-- seconds per finished block` line lists each one. A
 block far above ~60 min, or RAM in `status` near 115 GB, is the moment to `stop` (the run resumes later).
 
-## Qwen3.8-Flash-Next (spec 21-QFNb): synthetic checkpoints, the PLE int8 file, the export check
+## Qwen3.8-Flash-Next (spec 21-QFN-v1b): synthetic checkpoints, the PLE int8 file, the export check
 
-`tools/quantize/qwen4exp/` holds what spec 21-QFN's engine needs before (and beside) 21q's own AutoRound run.
-Every script runs in `agnes-ref-img` with 21-QFNa's transformers 5.19.0 site first on `PYTHONPATH`
+`tools/quantize/qwen4exp/` holds what spec 21-QFN-v1's engine needs before (and beside) 21q's own AutoRound run.
+Every script runs in `agnes-ref-img` with 21-QFN-v1a's transformers 5.19.0 site first on `PYTHONPATH`
 (`tools/oracle/qwen4exp_env.sh`; on the Mac `oracle-out-q4exp/site`):
 
 - `make_synth.py <out> --form ours|intel --tokenizer <the original's small files> [--layers 4]
@@ -430,7 +430,7 @@ Every script runs in `agnes-ref-img` with 21-QFNa's transformers 5.19.0 site fir
 - `test_qwen4exp_quant.py` - the names both ways for both forms (and `--mtp`), check.py's refusals (a
   missing tensor, a wrong qzeros word, a g64 expert in Intel's form), the packer at g64 / g128 against
   dequant.py, gate rows first as the reference reads them, the PLE file's marker rows (each head's first /
-  last row, a shard boundary inside a head, a zero row, both scale dtypes, byte-equal to 21-QFNa's
+  last row, a shard boundary inside a head, a zero row, both scale dtypes, byte-equal to 21-QFN-v1a's
   `write_ple_int8`), and the hash constants for the reduced base and 20,000,000 against transformers'
   builders. Small fixtures (16 experts, a 1024-row vocabulary): ~3-4 min in an 8 GB / 4-CPU container.
 

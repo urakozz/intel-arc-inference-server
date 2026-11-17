@@ -15,7 +15,7 @@ prompt sharing a pass with decode steps), 3 in reverse order, and all at once mu
 ids AND every logits row the greedy loop read, torch.equal. The streamed weight reads per
 generated id are counted both ways (what batching saves).
 
-test_qwen4exp (spec 21-QFNe) does the same on a tiny Qwen3.8-Flash-Next in Intel's form (int4 g128 experts, 3 GDN
+test_qwen4exp (spec 21-QFN-v1e) does the same on a tiny Qwen3.8-Flash-Next in Intel's form (int4 g128 experts, 3 GDN
 layers and a QSA layer, the PLE in bf16): qwen4exp_ref.py needs transformers 5.19.0 - run it alone with the qwen4exp
 site first on PYTHONPATH (`PYTHONPATH=<site> python3 tools/toolcall/test_oracle_batched.py test_qwen4exp`); it says
 SKIP under another version, and the others need 5.15 (Ornith's layer_major refuses another).
@@ -72,7 +72,7 @@ def kolibri_snapshot(tmp: str):
 
 
 def qwen4exp_snapshot(tmp: str):
-    """Spec 21-QFNe: qwen4exp_make_tiny's Intel form (what the A4 reference loads: qwen4_exp, int4 g128 experts)."""
+    """Spec 21-QFN-v1e: qwen4exp_make_tiny's Intel form (what the A4 reference loads: qwen4_exp, int4 g128 experts)."""
     mk = _load(os.path.join(ORACLE, "qwen4exp_make_tiny.py"), "tb_qwen4exp_make_tiny")
     mk.make(tmp, hidden=128, layer_types="lllq", experts=8, topk=2, form="intel", seed=23)
     with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
