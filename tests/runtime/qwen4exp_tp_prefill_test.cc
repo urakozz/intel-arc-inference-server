@@ -3,15 +3,17 @@
 //   qwen4exp_tp_prefill_test <checkpoint> <ids> pp|tp <rows file> [layers 18] [n 4500] [bench 0]
 // The prompt is <ids> cycled to n positions (4500: three chunks - all dense, straddling the dense range, a 404-row
 // tail); --layers N with every expert resident, the whole model with each engine's tier as the CLI plans it.
-//   pp  one prefill; writes the last logits, the first id and the last chunk's route rows to <rows file>
+//   pp  one prefill; writes the last logits, the first id, the last chunk's route rows and the control (its prefill's
+//       last logits' cosine against its decode fill) to <rows file>
 //   tp  (1) the walk: each chunk's launches are 2 x prefill_device_launches at the card's shapes, the head's 2 x
 //           kPrefillHeadLaunches; both cards' Controls agree after the merge
 //       (2) determinism: two prefills (reset between) leave the same last logits, first id and both cards' H, bitwise
-//       (3) against pp's prefill: the last logits' cosine, the first id equal or inside pp's two-bf16-ulp window; the
-//           last chunk's routes - (row, layer) pairs with pp's expert set, the rest split by pp's p10 - p11 gap
-//           (near-ties within kTieTol) - printed
-//       (4) against tp's own decode fill (ingest, one id a replay): the last logits' cosine, the first id; then 32 greedy
-//           ids from each - printed (prefill's state is decode's to a cosine bar, not bitwise)
+//       (3) against pp's prefill: the last logits' cosine, the first id equal or inside pp's two-bf16-ulp window
+//           (gated); the last chunk's routes - (row, layer) pairs with pp's expert set, the rest split by pp's p10 - p11
+//           gap (near-ties within kTieTol) - printed
+//       (4) against tp's own decode fill (ingest, one id a replay): the last logits' cosine within 2x the distance of
+//           pp's own prefill from its decode fill (the control pp writes; qwen4exp_prefill_test's rule for a truncated
+//           model), the first id; 32 greedy ids from each - printed
 //   bench > 0: only the timing - a 2048-id warm-up prefill, then `bench` prefills of the n ids, each one's t/s
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
@@ -146,12 +148,15 @@ int main(int argc, char** argv) {
     const std::vector<float> lg = logits();
     const std::vector<uint32_t> rt = pp->read_prefill_routes();
     const uint32_t first = pending();
+    reset();   // the control: pp's own prefill against its decode fill
+    pp->ingest(prompt);
+    const float ctl = float(cosine(lg, logits(), d.vocab_used));
     FILE* f = std::fopen(rows_path.c_str(), "wb");
     CHECK(f && std::fwrite(lg.data(), 4, lg.size(), f) == lg.size() && std::fwrite(&first, 4, 1, f) == 1 &&
-          std::fwrite(rt.data(), 4, rt.size(), f) == rt.size());
+          std::fwrite(rt.data(), 4, rt.size(), f) == rt.size() && std::fwrite(&ctl, 4, 1, f) == 1);
     std::fclose(f);
-    std::printf("tp-prefill: pp's prefill: first id %u, the last logits and the last chunk's routes -> %s\n", first,
-                rows_path.c_str());
+    std::printf("tp-prefill: pp's prefill: first id %u, last logits cosine against pp's decode fill %.7f (the control); "
+                "the last logits and the last chunk's routes -> %s\n", first, double(ctl), rows_path.c_str());
     std::printf("qwen4exp_tp_prefill_test OK\n");
     return 0;
   }
@@ -182,11 +187,12 @@ int main(int argc, char** argv) {
   // (3) against pp's prefill
   std::vector<float> pl(V);
   uint32_t p_first = 0;
+  float ctl = 0;
   std::vector<uint32_t> prt(size_t(d.layers) * rq::kPfC * rq::kRouteWords);
   {
     FILE* f = std::fopen(rows_path.c_str(), "rb");
     CHECK(f && std::fread(pl.data(), 4, V, f) == V && std::fread(&p_first, 4, 1, f) == 1 &&
-          std::fread(prt.data(), 4, prt.size(), f) == prt.size());
+          std::fread(prt.data(), 4, prt.size(), f) == prt.size() && std::fread(&ctl, 4, 1, f) == 1);
     std::fclose(f);
   }
   const double cs = cosine(pl, a, d.vocab_used);
@@ -225,10 +231,12 @@ int main(int argc, char** argv) {
   tp->generate(32, [&](uint32_t id) { g_dec.push_back(id); });
   uint32_t agree = 0;
   while (agree < 32 && g_pf[agree] == g_dec[agree]) ++agree;
-  std::printf("tp-prefill: (4) against tp's decode fill: last logits cosine %.7f, first id prefill %u / decode %u; 32 "
-              "greedy ids agree for the first %u\n", cosine(dl, a, d.vocab_used), a_first, d_first, agree);
+  const double cd = cosine(dl, a, d.vocab_used);
+  std::printf("tp-prefill: (4) against tp's decode fill: last logits cosine %.7f (pp's control %.7f; bar: within 2x its "
+              "distance), first id prefill %u / decode %u; 32 greedy ids agree for the first %u\n", cd, double(ctl),
+              a_first, d_first, agree);
   CHECK(tok_ok);
-  CHECK(cs >= 0.999);
+  CHECK(1 - cd <= 2 * (1 - double(ctl)) + 1e-9);
   std::printf("qwen4exp_tp_prefill_test OK\n");
   return 0;
 }
