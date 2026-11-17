@@ -34,8 +34,17 @@
 // slices form in one card's summation order (runtime/qwen4exp/qwen4exp_capture.h, tp).
 //
 // At construction: the PLE hash constants on both cards, the expert tier's table check on each card, one discarded
-// warm-up step. Not here yet: prefill (ingest feeds one id a replay), the MTP head, snapshots.
+// warm-up step. Not here yet: the MTP head, snapshots.
+//
+// Plan 21v2b Task 4, prefill (defined in b70_qwen4exp_prefill: qwen4exp_tp_prefill.cc, the one-card engine's
+// arrangement): each chunk of at most kPfC positions is the tensor-parallel walk (qwen4exp_prefill.h, Q4TpPrefill) on
+// both cards' immediate prefill lists - two crossings a layer, card to card copies and cross-device events - then a
+// bounded wait on both; the prompt's last row runs prefill_head_tp on both cards and the host merges the two heads as a
+// decode step's. Leaves pos += ids.size() and the first generated id pending, the state decode continues from (to the
+// prefill's cosine bar against decode's fill, not bitwise: plan 21d Review Focus 5, and the K halves summed apart).
 namespace runtime::qwen4exp {
+
+struct Q4TpPrefillState;   // runtime/qwen4exp/qwen4exp_tp_prefill.cc
 
 struct Q4TpOptions {
   uint32_t timeout_ms = 30000;                  // one step's fence wait
@@ -76,9 +85,22 @@ class Qwen4ExpTpEngine {
   // The expert tier's device read-back at construction: block words read through each card's table.
   size_t expert_words_checked() const { return words_checked_; }
 
+  // --- plan 21v2b Task 4: prefill (b70_qwen4exp_prefill) ---------------------------------------------------------------
+  // Runs `ids` from pos in chunks of `chunk` (0 = kPfC) on both cards, then the head on the last row: pos +=
+  // ids.size() on both, the first generated id pending in cur_token. A crossing or a card that does not finish within
+  // the bound releases both lists, throws naming the card and the chunk, and the engine stays failed until reset().
+  void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
+  // Allocates both cards' prefill scratch, fold slots, down rows and the crossing events, and checks every binary the
+  // walk binds exists; prefill() calls it. A CLI calls it before timing the first prefill.
+  void prepare_prefill();
+  size_t prefill_launches() const;   // both cards' prefill lists, since prepare_prefill
+  // u32 [layers][kPfC][32]: every layer's route rows of the last chunk (card 0's; both cards route on the same bits).
+  std::vector<uint32_t> read_prefill_routes();
+
  private:
   struct Card;
   void submit(CapturedStep* l0, CapturedStep* l1);
+  void merge_heads();   // the two cards' head halves into both Controls (the larger value, ties to card 0)
   [[noreturn]] void fail(const std::string& what);
   void ple_init();
   void expert_check();
@@ -91,6 +113,11 @@ class Qwen4ExpTpEngine {
   bool broken_ = false;
   size_t words_checked_ = 0;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0;
+  // Plan 21v2b Task 4: releases a prefill list waiting on a crossing that will not come and waits (bounded) for both
+  // prefill lists to go idle; reset() calls it. The prefill state is lazy and declared LAST, destroyed before the
+  // cards whose buffers it points into; its deleter is set where it is made (b70_qwen4exp_prefill).
+  std::function<bool()> pf_settle_;
+  std::unique_ptr<Q4TpPrefillState, void (*)(Q4TpPrefillState*)> pf_{nullptr, nullptr};
 };
 
 }  // namespace runtime::qwen4exp

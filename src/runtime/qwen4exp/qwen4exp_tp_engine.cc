@@ -14,6 +14,7 @@
 #include "model/qwen4exp.h"
 #include "runtime/qwen4exp/qwen4exp_capture.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
+#include "runtime/qwen4exp/qwen4exp_tp_card.h"
 
 // qwen4exp_tp_engine.cc - plan 21v2b Task 2: the header has the contract.
 namespace runtime::qwen4exp {
@@ -21,41 +22,6 @@ namespace {
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
 }  // namespace
-
-// One card: its descriptor (the buffers keep a reference to it, so it is declared first), buffers, queue, crossing.
-struct Qwen4ExpTpEngine::Card {
-  Card(l0::Context& c, const model::Qwen4ExpDesc& one, uint32_t rank, uint32_t max_len)
-      : ctx(c),
-        desc(model::q4_tp_card(one, rank)),
-        buffers(c, desc, model::Q4Placement::one(desc), 0, max_len, Q4Attn::Flash, false),
-        queue(c),
-        fence(queue),
-        imm(l0::CmdList::immediate(c)),
-        ctl(buffers.control.as<Control>()),
-        lo{one.hidden, kTpOutSlices, tp::kFoldG},
-        lm{one.hidden, one.top_k + 1, kernels::qwen4exp::kTpMoeFoldG},
-        land_o(c, l0::MemKind::Device, lo.total_bytes(), 4096),
-        land_m(c, l0::MemKind::Device, lm.total_bytes(), 4096),
-        ctr_so(c, l0::MemKind::Device, lo.counter_bytes()),
-        ctr_fo(c, l0::MemKind::Device, lo.counter_bytes()),
-        ctr_sm(c, l0::MemKind::Device, lm.counter_bytes()),
-        ctr_fm(c, l0::MemKind::Device, lm.counter_bytes()),
-        slots(c, l0::MemKind::Device, size_t(one.top_k + 1) * one.hidden * 4),
-        state(c, l0::MemKind::Shared, tp::kStateWords * 4) {}
-  l0::Context& ctx;
-  const model::Qwen4ExpDesc desc;
-  Qwen4ExpBuffers buffers;
-  l0::Queue queue;
-  l0::Fence fence;
-  mutable l0::CmdList imm;
-  Control* ctl;
-  tp::Layout lo, lm;   // out_proj / o_proj's crossing, the MoE's
-  l0::Mem land_o, land_m, ctr_so, ctr_fo, ctr_sm, ctr_fm, slots, state;
-  TpLink link, moe;
-  Q4TpBinding binding;
-  std::optional<CapturedStep> step;
-  bool pending = false;
-};
 
 Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4LoadedModel model, uint32_t max_len,
                                    const Q4TpOptions& opt)
@@ -191,6 +157,9 @@ void Qwen4ExpTpEngine::ple_init() {
 }
 
 void Qwen4ExpTpEngine::reset() {
+  if (pf_settle_ && !pf_settle_())
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::reset: a prefill list is still running after " +
+                             std::to_string(opt_.timeout_ms) + " ms");
   for (uint32_t r = 0; r < 2; ++r) {
     Card& c = *cards_[r];
     if (c.pending && !c.fence.wait_for(uint64_t(opt_.timeout_ms) * 1000000ull))
@@ -237,6 +206,10 @@ void Qwen4ExpTpEngine::submit(CapturedStep* l0p, CapturedStep* l1p) {
            std::to_string(s[tp::kFlag]) + ", stamp " + std::to_string(s[tp::kStamp]) + ", " +
            std::to_string(s[tp::kFailed]) + " chunks failed)");
   }
+  merge_heads();
+}
+
+void Qwen4ExpTpEngine::merge_heads() {
   // The head's merge: the larger value, ties to card 0 (the lower ids).
   Control& a = *cards_[0]->ctl;
   Control& b = *cards_[1]->ctl;

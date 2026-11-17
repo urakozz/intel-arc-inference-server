@@ -1529,6 +1529,72 @@ if(B70_Q4EXP)
 endif()
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
 
+# ==== Plan 21v2b Task 4: Qwen3.8-Flash-Next tensor parallel prefill ==== (begin) ====
+# Additive only; three sources gain a define every existing binary leaves unset (q4_pf_attn.cl Q4_Q_HEADS /
+# Q4_KV_HEADS, pf_moe_q4gemm.cl OUT_F32, q4_pf_moe.cl PF_COMBINE_F32). A card's prefill chunk at model::q4_tp_card's
+# shapes (runtime/qwen4exp/qwen4exp_prefill.cc, tp):
+#   linears  qkv||z 2560 x 8192 (whole slabs), q||gate||k||v 2560 x 6656 and out_proj / o_proj 3072 x 2560 (a tail):
+#            int4 layout 0 and Intel's bf16 tiles
+#   GDN      pf_gdn_front, the gate at the GEMM's pitch 256 (the card's small block: negA / dt_bias at 20480 / 20504,
+#            as Qwen3.8's card) and pf_gated_head _SIG at 8 / 24 heads; pf_gdn_conv / _wy / _scan _GK8V24 are Qwen3.8's
+#   QSA      pf_attn_prep_q16, pf_attn (the gate), pf_flash_attn and q4_pf_sparse_attn at 12 q / 1 kv heads
+#   MoE      pf_moe_q4gemm gate||up 2560 x 640 (WGN 4: 128 columns a work-group) and down 320 x 2560 with fp32 rows
+#            (OUT_F32), direct and _TBL; q4_pf_moe_combine_f32: the card's fp32 partial of the block's output
+#   the fold q4_hc_combine_norm _S2 at M = 2048 (and _NN) and M = 1 (the head's row): the two cards' fp32 partials,
+#            card 0's first, one rounding - both cards fold the same two rows, so both hold the same H
+if(B70_Q4EXP AND B70_TP)
+  add_ocloc_kernel(pf_dequant_slab_K2560_N8192_L0 SOURCE ${Q4_PF_REUSE}/pf_dequant_slab.cl DEFINES K=2560 N=8192 LAYOUT=0)
+  foreach(row "2560 6656" "3072 2560")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    add_ocloc_kernel(pf_int4_slab_K${K}_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_dequant_int4.cl
+                     DEFINES K=${K} N=${N})
+  endforeach()
+  foreach(row "2560 8192" "2560 6656" "3072 2560")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    add_ocloc_kernel(q4_pf_bf16_slab_K${K}_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_bf16.cl
+                     DEFINES K=${K} N=${N})
+  endforeach()
+  set(Q4_TP_GDN GDN_K_HEADS=8 GDN_V_HEADS=24)
+  add_ocloc_kernel(pf_gdn_front_GK8V24 SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl DEFINES ${Q4_TP_GDN})
+  add_ocloc_kernel(pf_gdn_conv_GK8V24_AB256 SOURCE ${Q4_PF_REUSE}/pf_gdn_conv.cl
+                   DEFINES NEGA_OFF=20480 DTBIAS_OFF=20504 AB_STRIDE=256 ${Q4_TP_GDN})
+  add_ocloc_kernel(pf_gated_head_GK8V24_SIG SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl
+                   DEFINES GDN_GATE_SIGMOID=1 ${Q4_TP_GDN})
+  set(Q4_TP_PF_FA FA_Q_HEADS=12 FA_KV_HEADS=1)
+  add_ocloc_kernel(pf_attn_prep_q16_Q12KV1 SOURCE ${Q4_PF_REUSE}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${Q4_TP_PF_FA})
+  add_ocloc_kernel(pf_attn_Q12KV1 SOURCE ${Q4_PF_REUSE}/pf_attn.cl DEFINES ${Q4_TP_PF_FA})
+  add_ocloc_kernel(pf_flash_attn_Q12KV1 SOURCE ${Q4_PF_REUSE}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${Q4_TP_PF_FA} OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(q4_pf_sparse_attn_Q12KV1 SOURCE ${Q4_CL}/q4_pf_attn.cl
+                   DEFINES KT=32 EAGER=0 ${Q4_LIST_DEFINES} Q4_Q_HEADS=12 Q4_KV_HEADS=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  foreach(TB 0 1)
+    set(_t "")
+    if(TB)
+      set(_t _TBL)
+    endif()
+    add_ocloc_kernel(pf_moe_q4gemm_K2560_N640_SILU${_t} SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                     DEFINES K=2560 N=640 EXPERTS=512 SILU_EPI=1 WGN=4 Q4_EXPERT_TABLE=${TB}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_moe_q4gemm_K320_N2560_F32${_t} SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                     DEFINES K=320 N=2560 EXPERTS=512 OUT_F32=1 Q4_EXPERT_TABLE=${TB}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+  endforeach()
+  add_ocloc_kernel(q4_pf_moe_combine_f32_E512_T10_D2560 SOURCE ${Q4_CL}/q4_pf_moe.cl
+                   DEFINES PF_E=512 PF_K=10 PF_WG=256 PF_EPL=2 PF_D=2560 PF_INTER=640 TM=32 KC=2048 PF_COMBINE_F32=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M2048_S2 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=1 SRC_S=2 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M2048_S2_NN SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=1 SRC_S=2 HC_NORM=0)
+  add_ocloc_kernel(q4_hc_combine_norm_M1_S2 SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=1 SRC_S=2 HC_NORM=1)
+endif()
+# ==== Plan 21v2b Task 4: Qwen3.8-Flash-Next tensor parallel prefill ==== (end) ====
+
 # ==== Spec 21e: Qwen3.8-Flash-Next MTP (B70_Q4EXP and B70_MTP) ==== (begin) ====
 # Additions only; no existing source changes. kernels::qwen4exp's spec 21e block is the host half
 # (verify_variants / draft_variants / mtp_prefill_variants). What the lists bind (runtime/qwen4exp/qwen4exp_capture.cc):

@@ -366,6 +366,43 @@ inline std::vector<std::string> prefill_variants(const model::Qwen4ExpDesc& d, b
   return prefill_variants(d.forms.dense == model::Q4Form::Int4, eager, ple_bf16_scale);
 }
 
+// Plan 21v2b Task 4: a tensor-parallel card's prefill binaries (src/kernels/CMakeLists.txt's "Plan 21v2b Task 4" block;
+// the walk: runtime/qwen4exp/qwen4exp_prefill.cc, tp). The card's linears, GDN at 8 / 24 heads, the attention at 12 q /
+// 1 kv heads, the MoE at the half width 320 with the down's fp32 rows and the fp32 combine, the fold of the two cards'
+// partials (_S2). Flash attention only (the eager form is one card's).
+inline constexpr unsigned kTpGdnK = 8, kTpGdnV = 24, kTpQHeads = 12, kTpKvHeads = 1;
+inline constexpr unsigned kTpPfGuWgN = 128;   // pf_moe_q4gemm_K2560_N640_SILU's columns a work-group (WGN 4)
+inline std::string tp_pf_moe_gu_variant(bool table) { return pf_moe_q4gemm_variant(kHidden, 2 * kTpInter, true, table); }
+inline std::string tp_pf_moe_dn_variant(bool table) {   // "pf_moe_q4gemm_K320_N2560_F32[_TBL]"
+  return "pf_moe_q4gemm_K" + std::to_string(kTpInter) + "_N" + std::to_string(kHidden) + "_F32" + (table ? "_TBL" : "");
+}
+inline std::string tp_pf_combine_variant() { return "q4_pf_moe_combine_f32_E512_T10_D2560"; }
+inline std::string tp_pf_fold_variant(bool norm) { return hc_combine_norm_variant(kPfC, HcSrc::Slices, 2, norm); }
+inline std::string tp_head_fold_variant() { return hc_combine_norm_variant(1, HcSrc::Slices, 2, true); }
+inline std::string tp_pf_sparse_attn_variant() { return "q4_pf_sparse_attn_Q12KV1"; }
+inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& one, bool ple_bf16_scale = true) {
+  const model::Qwen4ExpDesc c = model::q4_tp_card(one, 0);
+  const bool i4 = one.forms.dense == model::Q4Form::Int4;
+  std::vector<std::string> v = {
+      pf_embed_variant(), pf_hc_combine_norm_variant(HcSrc::Embed, true), pf_hc_combine_norm_variant(HcSrc::None, true),
+      tp_pf_fold_variant(true), tp_pf_fold_variant(false), tp_head_fold_variant(), pf_bf16_slab_variant(kHcN, kHcDownN),
+      pf_gemm_variant(false), pf_hc_up_mix_variant(), pf_gdn_conv_variant(kTpGdnK, kTpGdnV),
+      pf_gdn_wy_variant(kTpGdnK, kTpGdnV), pf_gdn_scan_variant(kTpGdnK, kTpGdnV), pf_gdn_front_variant(kTpGdnK, kTpGdnV),
+      pf_router_slab_variant(), pf_ab_slab_variant(), pf_route_gemm_variant(),
+      kernels::pf_gdn_gate_gemm_variant(kTpGdnK, kTpGdnV, kPfAbPitch), pf_gated_head_variant(kTpGdnK, kTpGdnV) + "_SIG",
+      pf_bf16_slab_variant(kHidden, kIdxN), pf_attn_prep_q16_variant(kTpQHeads, kTpKvHeads), pf_qsa_variant(),
+      pf_flash_attn_variant(kTpQHeads, kTpKvHeads), tp_pf_sparse_attn_variant(), pf_attn_variant(kTpQHeads, kTpKvHeads),
+      pf_moe_variant(), pf_moe_sort_mw_variant(kExperts, kTopK), tp_pf_moe_gu_variant(false), tp_pf_moe_dn_variant(false),
+      tp_pf_moe_gu_variant(true), tp_pf_moe_dn_variant(true), tp_pf_combine_variant(),
+      pf_ple_gather_variant(ple_bf16_scale), pf_bf16_slab_variant(kHidden, kPleKvN), pf_ple_variant()};
+  for (const model::Q4LinearId id :
+       {model::Q4LinearId::GdnQkvz, model::Q4LinearId::QsaQkvg, model::Q4LinearId::GdnOut}) {
+    const model::Q4Linear l = c.linear(id);
+    v.push_back(i4 ? pf_int4_slab_variant(l.shape.K, l.shape.N) : pf_bf16_slab_variant(l.shape.K, l.shape.N));
+  }
+  return v;
+}
+
 // =================================================================================================================
 // Spec 21e: Qwen3.8-Flash-Next's MTP head and spec 8's verify lists by name - the host half of src/kernels/
 // CMakeLists.txt's spec 21e block (B70_Q4EXP and B70_MTP). What the lists bind (runtime/qwen4exp/qwen4exp_capture.cc):

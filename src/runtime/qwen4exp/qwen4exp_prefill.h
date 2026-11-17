@@ -4,6 +4,7 @@
 
 #include "l0/context.h"
 #include "l0/memory.h"
+#include "l0/sync_event.h"
 #include "loader/qwen4exp_loader.h"
 #include "model/qwen4exp.h"
 #include "runtime/control.h"
@@ -74,6 +75,32 @@ struct Qwen4ExpMtpPrefill {
   const Control* hctl = nullptr;   // the head's Control for this chunk (its slot: the next chunk's may be written)
 };
 
+// Plan 21v2b Task 4: a tensor-parallel card's chunk (`--parallel tp`). The walk is one card's over every layer at the
+// card's shapes (model::q4_tp_card: its halves of the GDN and QSA heads, of every expert, its K half of out_proj /
+// o_proj), with the replicated parts (the hyper-connections, the router and route, the indexer and selection, the PLE)
+// run on both cards on the same bits. After each row-parallel unit - out_proj / o_proj (the GEMM over the card's K
+// half), and the MoE (the down over the card's K half of every expert, fp32 rows: pf_moe_q4gemm OUT_F32, then
+// q4_pf_moe_combine_f32 - the card's fp32 partial of the block's output) - the card's fp32 partial [C][2560] goes into
+// slice `rank` of the unit's fold slot (slot u & 1, u counting the units from 0 each chunk), the card copies it into the
+// same slice of the peer's slot, signals sent(rank, u) and waits sent(1 - rank, u); the next combine folds both slices,
+// card 0's first, with one rounding (q4_hc_combine_norm _S2). Both cards fold the same two rows, so both hold the same
+// H. Two slots: the peer's copy of unit u can land only after its own unit u, which waited for this card's copy of unit
+// u - 1, which follows this card's fold of unit u - 2 (the slot's last read) on its in-order list. Each card gathers
+// the embedding rows itself (card 1 from card 0's table over peer access) and the PLE rows through its own pointer
+// table. Not bitwise pp's prefill: the K halves are summed apart and the MoE's combine runs in fp32 (judged, as
+// prefill against decode is).
+struct Q4TpPrefill {
+  uint32_t rank = 0;
+  const model::Qwen4ExpDesc* card = nullptr;   // model::q4_tp_card(m.desc, rank)
+  const void* embed = nullptr;                 // the embedding table this card gathers from
+  const void* ple_ptrs = nullptr;              // this card's PLE pointer table
+  float* fold[2] = {nullptr, nullptr};         // fp32 [2][kPfC][hidden] a slot (slice r: card r's partial)
+  float* peer_fold[2] = {nullptr, nullptr};    // the peer's slots (this card writes their slice `rank`)
+  float* yf = nullptr;                         // fp32 [tmax x 32][hidden]: the down GEMM's rows
+  const l0::SyncEventPool* ev = nullptr;       // sent(card, u) = ev[card x units + u]
+  uint32_t units = 0;                          // 2 x layers
+};
+
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has written the ids
 // into `ids` (the chunk's slot of s.ids), set `ctl` - this chunk's Control for this device, host memory, a copy of the
 // device's with pos = pos, n_active = C (the HC, the prep, the indexer, the PLE kernels read both) - and - device 1 of
@@ -82,11 +109,14 @@ struct Qwen4ExpMtpPrefill {
 // their lists there and q4_qsa_score / _select are not launched. `two_cards`: device 0 ends with the materialising
 // _Y_NN. Appends exactly prefill_device_launches(...) launches; waits only when B70_PREFILL_PROFILE=1. Leaves: the
 // device's layers' KV rows [pos, pos + C), compressed keys and tail rings, GDN state and conv rings, the PLE rings,
-// H (pending the last MoE's y) and its layers' route rows / selections of this chunk.
+// H (pending the last MoE's y) and its layers' route rows / selections of this chunk. `tp` (plan 21v2b Task 4): a
+// tensor-parallel card's chunk (Q4TpPrefill) - `part` the card's, `b` and `s` at the card's shapes; it appends
+// prefill_device_launches at the card's descriptor and one placement, and leaves the last MoE's partials in the last
+// unit's fold slot (crossed).
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
                    const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
-                   const uint32_t* ids);
+                   const uint32_t* ids, const Q4TpPrefill* tp = nullptr);
 
 // The tail only the LAST chunk runs, on the last device: decode's final mixer over row `last_row` (its H, the pending
 // y and inject weights), lm_head and the two argmax stages - decode's binaries, so the first generated id is chosen
@@ -96,5 +126,12 @@ void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefi
 // nothing pending: combine _X) instead.
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                   const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const void* R_last = nullptr);
+// Plan 21v2b Task 4: a tensor-parallel card's tail - the last row's two partials (`fold`: the last unit's slot,
+// fp32 [2][kPfC][hidden]) copied side by side into b.partials and folded by combine _S2 at M = 1 with the final mixer's
+// norm, the mixer, the card's vocabulary half of lm_head and tp_argmax's two stages (the card's best id and its value
+// into b.control's out_token / out_value; the host merges the two cards'). kPrefillHeadLaunches launches.
+void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
+                     const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const float* fold,
+                     uint32_t rank, const model::Qwen4ExpDesc& card);
 
 }  // namespace runtime::qwen4exp

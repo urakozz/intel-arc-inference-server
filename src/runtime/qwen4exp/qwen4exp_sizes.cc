@@ -655,6 +655,10 @@ size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one) {
   return b;
 }
 
+size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one) {
+  return size_t(2) * 2 * kPfC * one.hidden * 4 + size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4;
+}
+
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
                                 bool int8_head, bool mtp, bool debug_tap, bool prefill) {
   model::validate(p, one);
@@ -665,6 +669,7 @@ std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4P
     const model::Q4Placement pc = model::Q4Placement::one(c);
     DevicePlan dp = plan(c, pc, max_len, int8_head, false, debug_tap, prefill)[0];
     dp.device = r;
+    if (prefill) dp.prefill_scratch += tp_prefill_bytes(one);
     // plan() put the card's half-vocabulary embedding on it: the embedding is one card's table, whole, or absent.
     dp.weights -= loader::q4_embed_bytes(c);
     if (p.holds_embed(r)) dp.weights += loader::q4_embed_bytes(one);

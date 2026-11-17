@@ -31,6 +31,7 @@ namespace runtime::qwen4exp {
 //   y         bf16 [C][6144]    the gated head's output (out_proj's A)
 //   the chain's scratch at gdn_scratch_sizes(C) (qwen4exp_sizes.h)
 struct GdnChunkBuffers {
+  uint32_t k_heads = 16, v_heads = 48;   // plan 21v2b Task 4: a tensor-parallel card's 8 / 24 (its 5120 conv channels)
   const float* qkvz = nullptr;
   const float* ab = nullptr;
   uint32_t ab_pitch = 128;   // a||b's row pitch: 128 (the GEMV's), or 256 (phase 3 Task 8: the dense GEMM's rows)
