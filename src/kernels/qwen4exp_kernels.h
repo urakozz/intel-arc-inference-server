@@ -384,6 +384,10 @@ inline std::string tp_pf_combine_variant() { return "q4_pf_moe_combine_f32_E512_
 inline std::string tp_pf_fold_variant(bool norm) { return hc_combine_norm_variant(kPfC, HcSrc::Slices, 2, norm); }
 inline std::string tp_head_fold_variant() { return hc_combine_norm_variant(1, HcSrc::Slices, 2, true); }
 inline std::string tp_pf_sparse_attn_variant() { return "q4_pf_sparse_attn_Q12KV1"; }
+// The split selection (q4_qsa.cl QSA_TP): q4_qsa_score_tp / _select_tp / q4_qsa_merge; a candidate row is kCandW u32
+// words - kTopBlocks + 1 keys, as many block ids, the count, one pad.
+inline std::string tp_pf_qsa_variant() { return pf_qsa_variant() + "_TP"; }   // "q4_qsa_M2048_T512_W1024_PF_TP"
+inline constexpr unsigned kCandW = 2 * (kTopBlocks + 1) + 2;
 inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& one, bool ple_bf16_scale = true) {
   const model::Qwen4ExpDesc c = model::q4_tp_card(one, 0);
   const bool i4 = one.forms.dense == model::Q4Form::Int4;
@@ -395,6 +399,7 @@ inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& o
       pf_router_slab_variant(), pf_ab_slab_variant(), pf_route_gemm_variant(),
       kernels::pf_gdn_gate_gemm_variant(kTpGdnK, kTpGdnV, kPfAbPitch), pf_gated_head_variant(kTpGdnK, kTpGdnV) + "_SIG",
       pf_bf16_slab_variant(kHidden, kIdxN), pf_attn_prep_q16_variant(kTpQHeads, kTpKvHeads), pf_qsa_variant(),
+      tp_pf_qsa_variant(),
       pf_flash_attn_variant(kTpQHeads, kTpKvHeads), tp_pf_sparse_attn_variant(), pf_attn_variant(kTpQHeads, kTpKvHeads),
       pf_moe_variant(), pf_moe_sort_mw_variant(kExperts, kTopK), tp_pf_moe_gu_variant(false), tp_pf_moe_dn_variant(false),
       tp_pf_moe_gu_variant(true), tp_pf_moe_dn_variant(true), tp_pf_combine_variant(),

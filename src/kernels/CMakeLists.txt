@@ -1567,8 +1567,8 @@ endif()
 # ==== Spec 21-QFN-v1d: Qwen3.8-Flash-Next prefill ==== (end) ====
 
 # ==== Plan 21-QFN-v2b Task 4: Qwen3.8-Flash-Next tensor parallel prefill ==== (begin) ====
-# Additive only; three sources gain a define every existing binary leaves unset (q4_pf_attn.cl Q4_Q_HEADS /
-# Q4_KV_HEADS, pf_moe_q4gemm.cl OUT_F32, q4_pf_moe.cl PF_COMBINE_F32). A card's prefill chunk at model::q4_tp_card's
+# Additive only; four sources gain a define every existing binary leaves unset (q4_pf_attn.cl Q4_Q_HEADS /
+# Q4_KV_HEADS, pf_moe_q4gemm.cl OUT_F32, q4_pf_moe.cl PF_COMBINE_F32, q4_qsa.cl QSA_TP). A card's prefill chunk at model::q4_tp_card's
 # shapes (runtime/qwen4exp/qwen4exp_prefill.cc, tp):
 #   linears  qkv||z 2560 x 8192 (whole slabs), q||gate||k||v 2560 x 6656 and out_proj / o_proj 3072 x 2560 (a tail):
 #            int4 layout 0 and Intel's bf16 tiles
@@ -1629,6 +1629,10 @@ if(B70_Q4EXP AND B70_TP)
   add_ocloc_kernel(q4_hc_combine_norm_M2048_S2_NN SOURCE ${Q4_CL}/q4_hc.cl
                    DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=1 SRC_S=2 HC_NORM=0)
   add_ocloc_kernel(q4_hc_combine_norm_M1_S2 SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=1 SRC_S=2 HC_NORM=1)
+  # the split selection: q4_qsa.cl's prefill form with QSA_TP (unset in every other binary) - q4_qsa_score_tp /
+  # _select_tp over a card's half of each row's blocks, q4_qsa_merge over both cards' candidates
+  add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF_TP SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 QSA_TP=1)
 endif()
 # ==== Plan 21-QFN-v2b Task 4: Qwen3.8-Flash-Next tensor parallel prefill ==== (end) ====
 
