@@ -15,7 +15,7 @@
 //           pp's own prefill from its decode fill (the control pp writes; qwen4exp_prefill_test's rule for a truncated
 //           model), the first id; 32 greedy ids from each - printed
 //   bench > 0: only the timing - a 2048-id warm-up prefill, then `bench` prefills of each length in n (a comma list,
-//   one load), each one's t/s
+//   one load), each one's t/s; under B70_PREFILL_PROFILE=1 each one's phases (runtime/prefill/profile.h)
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
 #include <chrono>
@@ -32,6 +32,7 @@
 #include "kernels/qwen4exp_kernels.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 #include "runtime/qwen4exp/qwen4exp_tp_engine.h"
+#include "runtime/prefill/profile.h"
 #include "runtime/qwen4exp_rig.h"
 
 namespace {
@@ -140,9 +141,12 @@ int main(int argc, char** argv) {
     for (uint32_t len : lens)
       for (uint32_t i = 0; i < bench; ++i) {
         reset();
+        if (runtime::prefill::profile_enabled()) runtime::prefill::profile_reset();
         const Clock::time_point t0 = Clock::now();
         prefill(std::vector<uint32_t>(prompt.begin(), prompt.begin() + len));
         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+        if (runtime::prefill::profile_enabled())   // B70_PREFILL_PROFILE=1: the phases, both cards' lists summed
+          runtime::prefill::profile_report((mode + " " + std::to_string(len)).c_str(), ms);
         std::printf("tp-prefill: %s bench %u: %u ids in %.1f ms = %.1f t/s\n", mode.c_str(), i, len, ms,
                     len * 1000.0 / ms);
       }
