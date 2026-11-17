@@ -11,8 +11,12 @@
 //          (3) a snapshot at the prompt's end restored into a reset engine, then the loop at K 3: the same ids
 //          (4) the prompt PREFILLED (the head's pass on card 1), then the loop at K 3: the plain run's prefilled ids
 //   plain also writes each prompt's n greedy ids after a prefill (after the ingest ones)
+//   cost   (plan 21-QFN-v2b Task 7 Step 1) tp with the head, <ids file> unused: after the 2100-id prompt, a draft step
+//          and a verify at K = 0..3, ms (medians of 16 iterations, interleaved; the head's drafts are the same work at
+//          any layer count, the verify's are not)
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -61,7 +65,7 @@ size_t first_diff(const Ids& a, const Ids& b) {
 
 int main(int argc, char** argv) {
   if (argc < 5) {
-    std::fprintf(stderr, "usage: qwen4exp_tp_mtp_test <checkpoint> <ids> plain|mtp <ids file> [layers] [n]\n");
+    std::fprintf(stderr, "usage: qwen4exp_tp_mtp_test <checkpoint> <ids> plain|mtp|cost <ids file> [layers] [n]\n");
     return 2;
   }
   std::string why;
@@ -73,7 +77,7 @@ int main(int argc, char** argv) {
   const uint32_t layers = argc > 5 ? uint32_t(std::atoi(argv[5])) : 18;
   const uint32_t n = argc > 6 ? uint32_t(std::atoi(argv[6])) : 64;
   const std::string mode = argv[3], path = argv[4];
-  CHECK(mode == "plain" || mode == "mtp");
+  CHECK(mode == "plain" || mode == "mtp" || mode == "cost");
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::open(rig, 1);
   if (l0::Context::gpu_count() < 2) {
@@ -85,7 +89,7 @@ int main(int argc, char** argv) {
   const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, layers);
   const Ids src = qwen4exp_rig::read_ids(argv[2], d.vocab);
   CHECK(!src.empty());
-  const bool head = mode == "mtp";
+  const bool head = mode != "plain";
   rq::Qwen4ExpTpEngine e(*rig.c0, *rig.c1,
                          loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::tp2(d, model::Q4TpEnds::Split),
                                                loader::LmHeadForm::Int8, layers, head),
@@ -114,6 +118,35 @@ int main(int argc, char** argv) {
       CHECK(std::fwrite(g.data(), 4, g.size(), f) == g.size());
     }
     std::fclose(f);
+    std::printf("qwen4exp_tp_mtp_test OK\n");
+    return 0;
+  }
+  if (mode == "cost") {
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::time_point a) { return std::chrono::duration<double, std::milli>(Clock::now() - a).count(); };
+    const auto median = [](std::vector<double> x) {
+      std::sort(x.begin(), x.end());
+      return x[x.size() / 2];
+    };
+    e.reset();
+    e.ingest(prompt(2100));
+    std::vector<std::vector<double>> v(rq::kMaxDraft + 1), dr(rq::kMaxDraft + 1);
+    for (int it = 0; it < 16; ++it)
+      for (uint32_t k = 0; k <= rq::kMaxDraft; ++k) {   // interleaved
+        if (k > 0) {
+          const auto t0 = Clock::now();
+          e.draft(k);
+          dr[k].push_back(ms(t0) / k);
+        }
+        const auto t1 = Clock::now();
+        e.verify(k);
+        v[k].push_back(ms(t1));
+        e.commit(0, e.verify_ids()[0]);
+      }
+    std::printf("tp-mtp cost (%u layers): verify M = 1 %.3f ms", layers, median(v[0]));
+    for (uint32_t k = 1; k <= rq::kMaxDraft; ++k)
+      std::printf(", M = %u %.3f ms (x%.2f)", k + 1, median(v[k]), median(v[k]) / median(v[0]));
+    std::printf("; a draft step %.3f ms\n", median(dr[1]));
     std::printf("qwen4exp_tp_mtp_test OK\n");
     return 0;
   }
