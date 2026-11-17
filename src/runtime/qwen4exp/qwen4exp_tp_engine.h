@@ -15,7 +15,9 @@
 #include "loader/qwen4exp_loader.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
+#include "runtime/buffer_sizes.h"   // KvCache
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
+#include "runtime/qwen4exp/qwen4exp_sizes.h"   // SnapRun, kMaxDraft
 #include "runtime/tp_protocol.h"
 
 // Plan 21v2b Task 2: Qwen3.8-Flash-Next decode with tensor parallelism over two B70s (`--parallel tp`) - Qwen3.8's
@@ -96,6 +98,40 @@ class Qwen4ExpTpEngine {
   size_t prefill_launches() const;   // both cards' prefill lists, since prepare_prefill
   // u32 [layers][kPfC][32]: every layer's route rows of the last chunk (card 0's; both cards route on the same bits).
   std::vector<uint32_t> read_prefill_routes();
+  // Spec 7's block and hook, Qwen4ExpEngine's contract: with a hook every chunk ends at a block end or at the prompt
+  // end; the hook runs after each chunk whose end is a multiple of kBlock (both cards idle, pos == end, n_active 0)
+  // and once at the prompt end (the first generated id pending).
+  static constexpr uint32_t kBlock = 2048;
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
+
+  // --- plan 21v2b Task 5: the server's calls (cli::pp::PipelineEngineAdapterT) --------------------------------------
+  // Spec 7's snapshots in the ONE-CARD host layouts (runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs over
+  // Q4Placement::one: an entry is the same bytes whichever of --parallel 1 / pp / tp wrote it). Each one-card run is
+  // cut into the cards' pieces: a GDN layer's state is card 0's v-heads then card 1's; a conv ring row's channels q |
+  // k | v, each card 0's part then card 1's; a K / V row's two kv heads card 0's then card 1's; the replicated tensors
+  // (the indexer keys and tails, the PLE state) are card 0's on save and both cards' on load.
+  size_t state_bytes() const;
+  size_t kv_bytes(uint32_t n_pos) const;
+  KvCache kv_cache() const { return KvCache::Bf16; }
+  void save_state(void* host);
+  void load_state(const void* host, uint32_t pos);
+  void save_kv(uint32_t begin, uint32_t end, void* host);
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+  // The last step's logits, both halves (rows 1); pinned host rows for the sampled path.
+  void read_logits_into(float* host, uint32_t rows);
+  float* host_rows(size_t floats);
+  // Spec 8's MTP is not built under tensor parallel: mtp() is false and the speculative calls throw.
+  static constexpr uint32_t kMaxDraft = runtime::qwen4exp::kMaxDraft;
+  bool mtp() const { return false; }
+  uint32_t max_verify_k() const { return 0; }
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
+  const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
+  void verify(uint32_t k);
+  const uint32_t* verify_ids() const;
+  void commit(uint32_t j, uint32_t next_token);
+  void set_draft_input(uint32_t i, uint32_t id);
+  void read_draft_logits_into(float* host, uint32_t i);
 
  private:
   struct Card;
@@ -113,6 +149,16 @@ class Qwen4ExpTpEngine {
   bool broken_ = false;
   size_t words_checked_ = 0;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0;
+  BlockHook block_hook_;
+  std::vector<uint32_t> draft_ids_;
+  std::unique_ptr<l0::Mem> host_rows_;
+  // One one-card snapshot run's pieces on the cards: (card, device pointer, host offset within the run, bytes).
+  struct Piece {
+    uint32_t card;
+    uint8_t* dev;
+    size_t at, bytes;
+  };
+  std::vector<Piece> pieces(const SnapRun& r, bool load) const;
   // Plan 21v2b Task 4: releases a prefill list waiting on a crossing that will not come and waits (bounded) for both
   // prefill lists to go idle; reset() calls it. The prefill state is lazy and declared LAST, destroyed before the
   // cards whose buffers it points into; its deleter is set where it is made (b70_qwen4exp_prefill).

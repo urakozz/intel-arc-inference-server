@@ -813,7 +813,7 @@ int run(int argc, char** argv) {
   // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash only in b70-serve
   // (spec 19 v3c).
   cli::check_tp(pipe, {spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
-                       fam_kol || fam_q4});
+                       fam_kol});   // plan 21v2b: Qwen3.8-Flash-Next runs --parallel tp too (cli/qwen4exp_decode.h)
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
   // rejection, so `b70_cli_reject` can grade them without a device - and so a

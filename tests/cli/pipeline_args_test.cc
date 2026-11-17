@@ -52,7 +52,7 @@ void check_parse() {
   cli::check_tp(p, {});   // plain decode: nothing to refuse
   CHECK(says([&] { cli::check_tp(p, {true, false, false}); }, "b70-decode --parallel tp drafts with the MTP head only"));
   CHECK(says([&] { cli::check_tp(p, {false, true, false}); }, "it has no --parallel tp"));
-  CHECK(says([&] { cli::check_tp(p, {false, false, true}); }, "--parallel tp supports Qwen3.8-27B only"));
+  CHECK(says([&] { cli::check_tp(p, {false, false, true}); }, "--parallel tp supports Qwen3.8-27B and Qwen3.8-Flash-Next"));
   CHECK(says([&] { cli::check_tp(p, {false, false, false, true}); }, "--draft-vocab is not built under tensor parallel"));
   CHECK(says([] { cli::require_two_devices_for_tp(1); }, "--parallel tp needs two GPUs and Level Zero shows 1"));
   cli::require_two_devices_for_tp(2);

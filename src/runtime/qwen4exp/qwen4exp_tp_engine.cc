@@ -1,5 +1,6 @@
 #include "runtime/qwen4exp/qwen4exp_tp_engine.h"
 
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -304,5 +305,186 @@ std::vector<double> Qwen4ExpTpEngine::profile_decode(uint32_t card, uint32_t rep
   }
   return us;
 }
+
+}  // namespace runtime::qwen4exp
+
+// --- plan 21v2b Task 5: the snapshots and the server's calls ------------------------------------------------------
+namespace runtime::qwen4exp {
+namespace {
+// A K / V run: each card's rows are one contiguous range, copied through a host stage and interleaved there (a
+// position's row is card 0's kv head then card 1's).
+bool row_split(SnapTensor t) { return t == SnapTensor::Kv; }
+}  // namespace
+
+std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, bool load) const {
+  const model::Qwen4ExpDesc& d = model_.desc;
+  const auto base = [&](uint32_t c) -> uint8_t* {
+    const Qwen4ExpBuffers& b = cards_[c]->buffers;
+    switch (r.tensor) {
+      case SnapTensor::Kv: return static_cast<uint8_t*>(b.kv.ptr());
+      case SnapTensor::IdxKeys: return static_cast<uint8_t*>(b.idx_keys.ptr());
+      case SnapTensor::IdxTail: return static_cast<uint8_t*>(b.idx_tail.ptr());
+      case SnapTensor::GdnState: return static_cast<uint8_t*>(b.gdn_state.ptr());
+      case SnapTensor::ConvRing: return static_cast<uint8_t*>(b.conv_ring.ptr());
+      case SnapTensor::PleIds:
+      case SnapTensor::PleRing: return static_cast<uint8_t*>(b.ple.ptr());
+      default: break;
+    }
+    throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpTpEngine: a ") + snap_tensor_name(r.tensor) +
+                           " snapshot run without the MTP head");
+  };
+  std::vector<Piece> out;
+  switch (r.tensor) {
+    case SnapTensor::IdxKeys:
+    case SnapTensor::IdxTail:
+    case SnapTensor::PleIds:
+    case SnapTensor::PleRing:   // replicated: card 0's on save, both cards' on load
+      for (uint32_t c = 0; c < (load ? 2u : 1u); ++c) out.push_back({c, base(c) + r.offset, 0, r.bytes});
+      return out;
+    case SnapTensor::GdnState: {   // a layer's v-heads: card 0's then card 1's
+      const size_t S = gdn_state_bytes_per_layer(d), H = S / 2;
+      if (r.offset % S != 0 || r.bytes % S != 0)
+        throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: a GDN state run that is not whole layers");
+      for (size_t i = 0; i < r.bytes / S; ++i)
+        for (uint32_t c = 0; c < 2; ++c) out.push_back({c, base(c) + (r.offset / S + i) * H, i * S + c * H, H});
+      return out;
+    }
+    case SnapTensor::ConvRing: {   // a row's channels q | k | v, each card 0's part then card 1's
+      const size_t row = size_t(d.conv_rows()) * 2, crow = row / 2;
+      const size_t qk = size_t(d.gdn_k_heads) * d.gdn_head * 2, v = size_t(d.gdn_v_heads) * d.gdn_head * 2;
+      if (r.offset % row != 0 || r.bytes % row != 0)
+        throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: a conv ring run that is not whole rows");
+      const std::array<std::array<size_t, 3>, 3> seg = {{{0, 0, qk / 2}, {qk, qk / 2, qk / 2}, {2 * qk, qk, v / 2}}};
+      for (size_t i = 0; i < r.bytes / row; ++i)
+        for (const auto& [one, card, bytes] : seg)
+          for (uint32_t c = 0; c < 2; ++c)
+            out.push_back({c, base(c) + (r.offset / row + i) * crow + card, i * row + one + c * bytes, bytes});
+      return out;
+    }
+    case SnapTensor::Kv: {   // a position's kv heads: card 0's row then card 1's (row_split: copied through staging)
+      const size_t row = size_t(d.kv_n()) * 2, crow = row / 2;
+      if (r.offset % row != 0 || r.bytes % row != 0)
+        throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: a K / V run that is not whole rows");
+      for (uint32_t c = 0; c < 2; ++c) out.push_back({c, base(c) + r.offset / 2, c * crow, r.bytes / 2});
+      return out;
+    }
+    default: break;
+  }
+  base(0);   // the head's runs: throws
+  return out;
+}
+
+size_t Qwen4ExpTpEngine::state_bytes() const { return state_snapshot_bytes(model_.desc, false); }
+size_t Qwen4ExpTpEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, 0, n_pos, false); }
+
+namespace {
+// A K / V run's pieces (one contiguous range a card, rows of `crow` bytes) into / out of the one-card rows of 2 x crow.
+void interleave(std::vector<uint8_t> (&stage)[2], uint8_t* host, size_t crow, size_t rows) {
+  for (size_t i = 0; i < rows; ++i)
+    for (uint32_t c = 0; c < 2; ++c) std::memcpy(host + (2 * i + c) * crow, stage[c].data() + i * crow, crow);
+}
+void deinterleave(const uint8_t* host, std::vector<uint8_t> (&stage)[2], size_t crow, size_t rows) {
+  for (size_t i = 0; i < rows; ++i)
+    for (uint32_t c = 0; c < 2; ++c) std::memcpy(stage[c].data() + i * crow, host + (2 * i + c) * crow, crow);
+}
+}  // namespace
+
+void Qwen4ExpTpEngine::save_state(void* host) {
+  if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
+  auto* h = static_cast<uint8_t*>(host);
+  const uint32_t eos = model_.desc.ple_eos;
+  for (const SnapRun& r : state_runs(model_.desc, model::Q4Placement::one(model_.desc), pos(), false)) {
+    if (r.pad || r.zero) {
+      std::memset(h, 0, r.bytes);
+      if (r.zero && r.tensor == SnapTensor::PleIds) std::memcpy(h, &eos, 4);   // q4_ple_gather reads EOS there
+    } else {
+      for (const Piece& p : pieces(r, false)) cards_[p.card]->imm.copy(h + p.at, p.dev, p.bytes);
+    }
+    h += r.bytes;
+  }
+}
+
+void Qwen4ExpTpEngine::load_state(const void* host, uint32_t p) {
+  if (p > max_len_)
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::load_state: pos " + std::to_string(p) +
+                             " exceeds max_len " + std::to_string(max_len_));
+  if (broken_) reset();   // a failed crossing: the restore below rewrites what the session reads
+  const auto* h = static_cast<const uint8_t*>(host);
+  for (const SnapRun& r : state_runs(model_.desc, model::Q4Placement::one(model_.desc), p, false)) {
+    if (!r.pad)
+      for (const Piece& q : pieces(r, true)) cards_[q.card]->imm.copy(q.dev, h + q.at, q.bytes);
+    h += r.bytes;
+  }
+  for (auto& c : cards_) {
+    c->ctl->pos = p;
+    c->ctl->n_active = 0;
+  }
+}
+
+void Qwen4ExpTpEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
+  if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
+  auto* h = static_cast<uint8_t*>(host);
+  std::vector<uint8_t> stage[2];
+  for (const SnapRun& r : kv_runs(model_.desc, model::Q4Placement::one(model_.desc), max_len_, begin, end, false)) {
+    const std::vector<Piece> ps = pieces(r, false);
+    if (row_split(r.tensor)) {
+      for (const Piece& p : ps) {
+        stage[p.card].resize(p.bytes);
+        cards_[p.card]->imm.copy(stage[p.card].data(), p.dev, p.bytes);
+      }
+      const size_t row = size_t(model_.desc.kv_n()) * 2;   // one position's two kv heads, bf16
+      interleave(stage, h, row / 2, r.bytes / row);
+    } else {
+      for (const Piece& p : ps) cards_[p.card]->imm.copy(h + p.at, p.dev, p.bytes);
+    }
+    h += r.bytes;
+  }
+}
+
+void Qwen4ExpTpEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
+  if (broken_) reset();
+  const auto* h = static_cast<const uint8_t*>(host);
+  std::vector<uint8_t> stage[2];
+  for (const SnapRun& r : kv_runs(model_.desc, model::Q4Placement::one(model_.desc), max_len_, begin, end, false)) {
+    const std::vector<Piece> ps = pieces(r, true);
+    if (row_split(r.tensor)) {
+      for (auto& s : stage) s.resize(r.bytes / 2);
+      const size_t row = size_t(model_.desc.kv_n()) * 2;
+      deinterleave(h, stage, row / 2, r.bytes / row);
+      for (const Piece& p : ps) cards_[p.card]->imm.copy(p.dev, stage[p.card].data(), p.bytes);
+    } else {
+      for (const Piece& p : ps) cards_[p.card]->imm.copy(p.dev, h + p.at, p.bytes);
+    }
+    h += r.bytes;
+  }
+}
+
+void Qwen4ExpTpEngine::read_logits_into(float* host, uint32_t rows) {
+  if (rows != 1) throw std::out_of_range("read_logits_into: " + std::to_string(rows) + " rows (tensor parallel: 1)");
+  size_t at = 0;
+  for (auto& c : cards_) {
+    c->imm.copy(host + at, c->buffers.logits.ptr(), size_t(c->desc.vocab) * 4);
+    at += c->desc.vocab;
+  }
+}
+
+float* Qwen4ExpTpEngine::host_rows(size_t floats) {
+  if (!host_rows_ || host_rows_->size() < floats * 4)
+    host_rows_ = std::make_unique<l0::Mem>(cards_[0]->ctx, l0::MemKind::Host, floats * 4);
+  return host_rows_->as<float>();
+}
+
+namespace {
+[[noreturn]] void no_mtp(const char* what) {
+  throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpTpEngine::") + what +
+                         ": the MTP head is not built under tensor parallel");
+}
+}  // namespace
+void Qwen4ExpTpEngine::draft(uint32_t, const std::function<uint32_t(uint32_t)>&) { no_mtp("draft"); }
+void Qwen4ExpTpEngine::verify(uint32_t) { no_mtp("verify"); }
+const uint32_t* Qwen4ExpTpEngine::verify_ids() const { no_mtp("verify_ids"); }
+void Qwen4ExpTpEngine::commit(uint32_t, uint32_t) { no_mtp("commit"); }
+void Qwen4ExpTpEngine::set_draft_input(uint32_t, uint32_t) { no_mtp("set_draft_input"); }
+void Qwen4ExpTpEngine::read_draft_logits_into(float*, uint32_t) { no_mtp("read_draft_logits_into"); }
 
 }  // namespace runtime::qwen4exp

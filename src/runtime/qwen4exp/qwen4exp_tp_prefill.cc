@@ -23,6 +23,7 @@
 #include "runtime/control.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill_chunks.h"
 #include "runtime/qwen4exp/qwen4exp_prefill.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 #include "runtime/qwen4exp/qwen4exp_tp_card.h"
@@ -169,10 +170,13 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
              " did not finish within " + std::to_string(opt_.timeout_ms) + " ms");
       }
   };
+  // Spec 7's prefix cache: with a block hook every chunk ends at a block end or at the prompt end (the one-card
+  // engine's rule, one shared function), and the hook runs after each mid-prompt block end with both cards idle.
+  const bool hooked = static_cast<bool>(block_hook_);
   uint32_t last_C = 0;
   for (size_t off = 0; off < ids.size();) {
     const uint32_t pos = base + uint32_t(off);
-    const uint32_t C = uint32_t(std::min<size_t>(chunk, ids.size() - off));
+    const uint32_t C = prefill_chunk_rows(pos, ids.size() - off, chunk, hooked, kBlock);
     P.reset_events();
     for (uint32_t r = 0; r < 2; ++r) {
       Q4TpPrefillState::Dev& D = *P.dev[r];
@@ -190,6 +194,13 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
     drain(pos, "chunk");
     off += C;
     last_C = C;
+    if (hooked && off < ids.size() && (pos + C) % kBlock == 0) {
+      for (auto& c : cards_) {
+        c->ctl->pos = pos + C;
+        c->ctl->n_active = 0;
+      }
+      block_hook_(pos + C, true);
+    }
   }
   // The head on both cards: the last unit's fold slot holds the last row's two partials.
   for (uint32_t r = 0; r < 2; ++r) {
@@ -204,6 +215,10 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   }
   drain(base + uint32_t(ids.size()) - 1, "head");
   merge_heads();
+  if (hooked) {   // the prompt end, the first generated id pending
+    const uint32_t end = base + uint32_t(ids.size());
+    block_hook_(end, end % kBlock == 0);
+  }
 }
 
 }  // namespace runtime::qwen4exp

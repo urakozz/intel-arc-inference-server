@@ -375,9 +375,9 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   if (devs == 1)
     std::print(stderr, "device: {} ({:d} EUs)\n", c0->name().c_str(), c0->eu_count());
   else
-    std::print(stderr, "devices: 0 {} ({:d} EUs), 1 {} ({:d} EUs) [--parallel pp: one context]\n", c0->name().c_str(),
-               c0->eu_count(), c1->name().c_str(), c1->eu_count());
-  if (devs == 2 && !c0->can_access_peer(*c1))
+    std::print(stderr, "devices: 0 {} ({:d} EUs), 1 {} ({:d} EUs) [--parallel {}: one context]\n", c0->name().c_str(),
+               c0->eu_count(), c1->name().c_str(), c1->eu_count(), da.pipe.tp() ? "tp" : "pp");
+  if (devs == 2 && !da.pipe.tp() && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
                              "and the hand-off writes it (docs/10-the-box.md)");
   const cq::Settled s = cq::settle(full, da, dev, a.snapshot_dir);
@@ -385,8 +385,32 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     StdoutToStderr redirect;
     return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head,
                                  s.desc.layers == full.layers ? 0 : s.desc.layers, a.loads_head(),
-                                 s.tier ? &*s.tier : nullptr);
+                                 s.tier ? &*s.tier : nullptr, s.tier1 ? &*s.tier1 : nullptr);
   }();
+  if (da.pipe.tp()) {   // plan 21v2b: tensor parallel - every layer's half on each card (Qwen4ExpTpEngine)
+    runtime::qwen4exp::Qwen4ExpTpEngine engine(*c0, *c1, std::move(model), s.max_len);
+    engine.prepare_prefill();   // both cards' prefill scratch and the binaries' check at load, not in a request
+    TokAdapter tokenizer(tok_path);
+    TemplateAdapter chat_template(a.snapshot_dir);
+    cli::pp::PipelineEngineAdapterT<runtime::qwen4exp::Qwen4ExpTpEngine> engine_adapter(
+        engine, tokenizer.vocab_used(), engine.vocab(), a.mtp_k, a.spec_lookup);
+    cq::chat_options(options, eos);
+    const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+    server::Server server({tokenizer, chat_template, engine_adapter}, options);
+    std::print(stderr, "b70-serve: {} on http://{}:{:d}, max_len {:d}, eos ", options.served_model.c_str(),
+               options.host.c_str(), options.port, s.max_len);
+    print_eos(eos);
+    std::print(stderr,
+               ", Qwen3.8-Flash-Next {} ({} chat format), --parallel tp ({:d} launches a token a card), prefill "
+               "backend l0 (chunk {:d}), attention flash, mtp 0, lm_head {}, kv cache bf16, sampling defaults: greedy "
+               "unless the request samples, prefix snapshots: state {:d} B, blocks {:d} B a position\n",
+               engine.model().desc.layers < engine.model().checkpoint_layers
+                   ? "--layers " + std::to_string(engine.model().desc.layers)
+                   : std::string("whole"),
+               options.chat_format.name(), engine.launches(0), runtime::qwen4exp::kPfC,
+               loader::lm_head_form_name(da.lm_head), engine.state_bytes(), engine.kv_bytes(4) / 4);
+    return listen_until_stopped(server, options);
+  }
   if (model.desc.layers < model.checkpoint_layers)
     std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode)\n", model.desc.layers,
                model.checkpoint_layers);
@@ -967,7 +991,7 @@ int run(int argc, char** argv) {
     }
     if (pipe.replica())
       cli::check_replica_model(architecture, name);
-    else if (pipe.tp())
+    else if (pipe.tp() && !cli::qwen4exp::is_qwen4exp(path))   // plan 21v2b: Flash-Next's tp is its own flow
       cli::check_tp_model(architecture, name);
     else if (!cli::replica_architecture(architecture))
       throw std::runtime_error("--max-num-seqs above 1 is built for Qwen3.8 (its sequence slots) and "
@@ -1040,7 +1064,7 @@ int run(int argc, char** argv) {
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
-  cli::check_tp(pipe, {false, false, is_q4 || is_kol,   // spec 19 v3c: dflash and dflash-lookup are served
+  cli::check_tp(pipe, {false, false, is_kol,   // spec 19 v3c: dflash and dflash-lookup are served
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
   // Kolibri DSpark: Kolibri-1's drafter by name, and no draft vocabulary (DSpark reads the whole lm_head).
   if (is_kol && dflash.on && !dflash.have_model)
@@ -1130,6 +1154,11 @@ int run(int argc, char** argv) {
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
     qs.mtp_k = mtp_k;       // the deepest K; the server picks each iteration's (options.mtp_adaptive)
     qs.spec_lookup = spec_lookup;
+    if (pipe.tp() && spec_arg == "auto") {   // plan 21v2b: no MTP head under tensor parallel yet - auto is plain
+      qs.mtp_k = 0;
+      qs.spec_lookup = false;
+      options.mtp_auto = false;
+    }
     qs.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     qa.load_mtp = qs.loads_head();
     qs.prefix_auto = prefix_auto;
