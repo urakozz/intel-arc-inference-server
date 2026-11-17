@@ -1465,7 +1465,7 @@ endif()
 #   q4_pf_attn.cl   the sparse flash over each row's own list (rows past 2050; DPAS; flash and eager forms)
 #   q4_pf_ple.cl    the PLE block over a chunk in three launches (gate, conv, the rings)
 # Reused at this family's shapes: 21-QFN-v1c's q4_hc.cl at M = 2048 (combine _E / _S1 / _Y / _X / _Y_NN, up-mix _I at the
-# GEMM's pitch 512), prefill/pf_embed.cl and pf_gemv_bf16.cl (a||b, the router at decode's {16, 16} tiling) at hidden
+# GEMM's pitch 512 in the _R4C64 form), prefill/pf_embed.cl and pf_gemv_bf16.cl (a||b, the router at decode's {16, 16} tiling) at hidden
 # 2560, pf_dequant_slab.cl (qkv||z, q||gate||k||v int4 layout 0), prefill/slab_bf16.cl's bf16 slab (q4_ prefix),
 # pf_attn_prep.cl (q16), pf_attn.cl (the gate) and pf_flash_attn.cl at 24 q / 2 kv heads (HPW 6 of GQA 12, KT 64, RPW
 # 8, EXP2 as the existing binary, 256 GRF), pf_moe_gemm.cl (gate||up 2560 x 1280 SiLU, down 640 x 2560); bound by
@@ -1517,8 +1517,8 @@ if(B70_Q4EXP)
   add_ocloc_kernel(q4_hc_combine_norm_M2048_Y_NN SOURCE ${Q4_CL}/q4_hc.cl
                    DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=2 HC_NORM=0)
   add_ocloc_kernel(q4_hc_combine_norm_M2048_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=3 HC_NORM=1)
-  add_ocloc_kernel(q4_hc_up_mix_M2048_I_D512 SOURCE ${Q4_CL}/q4_hc.cl
-                   DEFINES ${CTRL_DEFINES} M=2048 UP_DOWN=512 UP_INJECT=1)
+  add_ocloc_kernel(q4_hc_up_mix_M2048_I_D512_R4C64 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 UP_DOWN=512 UP_INJECT=1 UP_ROWS=4 UP_COLS=64)
   add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF SOURCE ${Q4_CL}/q4_qsa.cl
                    DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1)
   add_ocloc_kernel(q4_ple_gather_M2048_BF16_PF SOURCE ${Q4_CL}/q4_ple.cl

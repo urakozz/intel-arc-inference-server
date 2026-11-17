@@ -256,6 +256,7 @@ inline constexpr unsigned kPfKt = 32, kPfSparseWg = 32;      // q4_pf_sparse_att
 inline constexpr unsigned kPfPleWg = 256, kPfRingWg = 128;   // q4_pf_ple_*; q4_qsa_ring (= kPrepWg)
 inline constexpr unsigned kPfIdxLd = 768;                    // the indexer GEMM's row pitch: pf_ld(640)
 inline constexpr unsigned kPfHcDownLd = 512;                 // the HC down||inject GEMM's: pf_ld(336)
+inline constexpr unsigned kPfHcUpRows = 4, kPfHcUpCols = 64;  // the up-mix's rows and columns a work-group (q4_hc.cl _R)
 inline constexpr unsigned kPfFlashRpw = 8, kPfFlashHpw = 6;  // pf_flash_attn_Q24KV2: rows a work-group, heads (GQA 12)
 // The sort's header (q4_pf_moe.cl H_*): [0] tiles used, [1] the shared expert's first row, [2] rows used, [3] C,
 // [4 + e] expert e's rows, [4 + 512] C; padded to 16 words.
@@ -284,10 +285,12 @@ inline std::string pf_int4_slab_variant(unsigned K, unsigned N) {
   return pf_int4_slab_tail(N) ? "pf_int4_slab_K" + std::to_string(K) + "_N" + std::to_string(N)
                               : pf_dequant_slab_variant(K, N, 0);
 }
-// 21-QFN-v1c's sources at M = kPfC.
+// 21-QFN-v1c's sources at M = kPfC; the up-mix in the _R form (kPfHcUpRows rows of kPfHcUpCols columns a work-group,
+// grid (2560 / kPfHcUpCols, C / kPfHcUpRows)) - each row bitwise the one-row form's.
 inline std::string pf_hc_combine_norm_variant(HcSrc src, bool norm) { return hc_combine_norm_variant(kPfC, src, 1, norm); }
-inline std::string pf_hc_up_mix_variant() {   // "q4_hc_up_mix_M2048_I_D512": UP_DOWN = the GEMM's pitch
-  return hc_up_mix_variant(kPfC, true) + "_D" + std::to_string(kPfHcDownLd);
+inline std::string pf_hc_up_mix_variant() {   // "q4_hc_up_mix_M2048_I_D512_R4C64": UP_DOWN = the GEMM's pitch
+  return hc_up_mix_variant(kPfC, true) + "_D" + std::to_string(kPfHcDownLd) + "_R" + std::to_string(kPfHcUpRows) + "C" +
+         std::to_string(kPfHcUpCols);
 }
 inline std::string pf_qsa_variant() { return qsa_variant(kPfC) + "_PF"; }   // "q4_qsa_M2048_T512_W1024_PF"
 inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_variant(kPfC, bf16_scale) + "_PF"; }

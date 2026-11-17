@@ -7,7 +7,8 @@
 //       last logits' cosine against its decode fill) to <rows file>
 //   tp  (1) the walk: each chunk's launches are 2 x prefill_device_launches at the card's shapes, the head's 2 x
 //           kPrefillHeadLaunches; both cards' Controls agree after the merge
-//       (2) determinism: two prefills (reset between) leave the same last logits, first id and both cards' H, bitwise
+//       (2) determinism: two prefills (reset between) leave the same last logits, first id and both cards' H, bitwise;
+//           those logits, the first id, the last chunk's routes and H -> <rows file>.tp
 //       (3) against pp's prefill: the last logits' cosine, the first id equal or inside pp's two-bf16-ulp window
 //           (gated); the last chunk's routes - (row, layer) pairs with pp's expert set, the rest split by pp's p10 - p11
 //           gap (near-ties within kTieTol) - printed
@@ -197,6 +198,12 @@ int main(int argc, char** argv) {
   std::printf("tp-prefill: (2) two prefills: last logits, first id, H %s\n", same ? "bitwise" : "DIFFER");
   CHECK(same);
   const std::vector<uint32_t> tr = tp->read_prefill_routes();
+  {   // tp's own rows beside pp's file (<rows file>.tp), for a bitwise before / after of a prefill change
+    FILE* f = std::fopen((rows_path + ".tp").c_str(), "wb");
+    CHECK(f && std::fwrite(a.data(), 4, a.size(), f) == a.size() && std::fwrite(&a_first, 4, 1, f) == 1 &&
+          std::fwrite(tr.data(), 4, tr.size(), f) == tr.size() && std::fwrite(h0.data(), 2, h0.size(), f) == h0.size());
+    std::fclose(f);
+  }
   // (3) against pp's prefill
   std::vector<float> pl(V);
   uint32_t p_first = 0;

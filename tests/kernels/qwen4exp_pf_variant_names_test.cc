@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560), std::string("pf_int4_slab_K6144_N2560"));
   CHECK_EQ(kq::pf_qsa_variant(), std::string("q4_qsa_M2048_T512_W1024_PF"));
   CHECK_EQ(kq::pf_ple_gather_variant(true), std::string("q4_ple_gather_M2048_BF16_PF"));
-  CHECK_EQ(kq::pf_hc_up_mix_variant(), std::string("q4_hc_up_mix_M2048_I_D512"));
+  CHECK_EQ(kq::pf_hc_up_mix_variant(), std::string("q4_hc_up_mix_M2048_I_D512_R4C64"));
   CHECK_EQ(kq::pf_hc_combine_norm_variant(kq::HcSrc::Slices, true), std::string("q4_hc_combine_norm_M2048_S1"));
   CHECK_EQ(kq::pf_embed_variant(), std::string("pf_embed_gather_D2560"));
   CHECK_EQ(kq::pf_ab_variant(), std::string("pf_ab_proj_D2560"));
