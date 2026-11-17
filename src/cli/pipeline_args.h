@@ -6,7 +6,8 @@
 //   --parallel auto|1|pp        auto (default): the faster choice by fit - one card when the model
 //                               and the asked context fit it, else pipeline parallel (each model
 //                               family's rule: cli/pipeline_settle.h parallel_auto, Kolibri-1's two
-//                               cards for the whole model); 1: one card;
+//                               cards for the whole model, Qwen3.8-Flash-Next's pp on two cards
+//                               for the whole model: qwen4exp_auto_devices); 1: one card;
 //                               pp: the model's layers split over GPUs 0 and 1 of what Level Zero
 //                               shows (spec 16).
 //                               tp (Qwen3.8 - spec 17b-d): tensor parallel, every layer's linears
@@ -128,6 +129,11 @@ inline void resolve_overrides(PipelineArgs& a) {
     a.devices = 2;
   }
 }
+
+// Qwen3.8-Flash-Next's --parallel auto (cli/qwen4exp_decode.h devices_of): pipeline parallel on two visible cards for
+// the whole model - it does not fit one card, and one card would read most of its experts from host memory; the
+// --layers development mode (a truncated model) stays on one card.
+inline uint32_t qwen4exp_auto_devices(uint32_t cards, bool whole_model) { return cards >= 2 && whole_model ? 2u : 1u; }
 
 inline void parse_pipeline_split(const std::string& v, PipelineArgs& a) {
   a.have_split = true;

@@ -11,7 +11,9 @@
 //                      (plan 21-QFN-v2a Task 8: settle) - 512 experts x 48 layers do not fit two B70s, so each card keeps
 //                      the most-routed experts its VRAM holds and the kernels read the rest from pinned host memory
 //   the PLE int8 file  <snapshot>-ple-int8/, beside the checkpoint (loader::q4_ple_dir; no flag)
-//   --parallel auto|1|pp|tp   1 (the default) or 2 (spec 16b's pieces: the materialised H crosses); tp (plan 21v2b):
+//   --parallel auto|1|pp|tp   auto (the default): pp on two visible cards for the whole model, else one card (the
+//                      --layers development mode: cli::qwen4exp_auto_devices); 1; pp (spec 16b's pieces: the
+//                      materialised H crosses); tp (plan 21v2b):
 //                      tensor parallel - each card holds half of every layer (runtime::qwen4exp::Qwen4ExpTpEngine), the
 //                      two all-reduces a layer over P2P;
 //   --pipeline-split auto|N   16b's switch and parser; auto is
@@ -87,7 +89,8 @@ struct DecodeArgs {
   MaxLenArg max_len{false, 16384};
   size_t reserve = 0;
   size_t card_bytes = 0;        // the smallest visible card's memory (cli::hardware_gate): the fit checks before a device opens
-  size_t prefix_bytes = 0;      // b70-serve's explicit --prefix-cache-gb: pinned host memory settle keeps for it (auto
+  uint32_t cards = 1;           // the visible cards (cli::hardware_gate): --parallel auto's choice (devices_of)
+  size_t prefix_bytes = 0;     // b70-serve's explicit --prefix-cache-gb: pinned host memory settle keeps for it (auto
                                 // sizes itself after the load from what is left)
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   uint32_t layers = 0;          // --layers N (0: not given)
@@ -108,7 +111,10 @@ struct DecodeArgs {
   bool prefills() const { return prefill || pp; }
 };
 
-inline uint32_t devices_of(const DecodeArgs& a) { return a.pipe.tp() ? 2u : a.pp_given ? a.pipe.devices : 1u; }
+inline uint32_t devices_of(const DecodeArgs& a) {
+  if (a.pipe.tp()) return 2u;
+  return a.pp_given ? a.pipe.devices : qwen4exp_auto_devices(a.cards, a.layers == 0 && !a.layers_auto);
+}
 
 // Every refusal that needs no device and no tensor - in this order, each by name (tests/CMakeLists.txt's
 // cli_reject_qwen4exp_*).
@@ -283,6 +289,8 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     return s;
   }
   if (a.layers == 0 && !a.layers_auto) {   // the whole model
+    if (!a.pp_given && devs == 2)
+      std::print(stderr, "parallel: auto -> pp (the whole model does not fit one card: its layers split over two)\n");
     const char* forced = std::getenv("B70_Q4_RESIDENT");
     s.desc = full;
     const model::Qwen4ExpDesc& d = s.desc;

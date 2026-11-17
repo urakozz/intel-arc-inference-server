@@ -919,6 +919,7 @@ int run(int argc, char** argv) {
     qa.max_len = max_len_arg;
     qa.reserve = mem_reserve;
     qa.card_bytes = hw.card_bytes;
+    qa.cards = hw.cards;
     qa.lm_head = lm_head;
     qa.layers = layers;
     qa.layers_auto = layers_auto;

@@ -295,6 +295,14 @@ void check_max_num_seqs() {
   cli::check_one_request_a_card(one, 1, orn, "Ornith");
 }
 
+// Qwen3.8-Flash-Next's --parallel auto: pp on two visible cards for the whole model (it does not fit one card), one
+// card when one is visible or under the --layers development mode.
+void check_qwen4exp_auto() {
+  CHECK_EQ(cli::qwen4exp_auto_devices(2, true), 2u);
+  CHECK_EQ(cli::qwen4exp_auto_devices(1, true), 1u);
+  CHECK_EQ(cli::qwen4exp_auto_devices(2, false), 1u);
+}
+
 int main() {
   check_parse();
   check_names_and_spec();
@@ -303,6 +311,7 @@ int main() {
   check_serve();
   check_hardware_rule();
   check_max_num_seqs();
+  check_qwen4exp_auto();
   std::printf("pipeline_args_test: OK\n");
   return 0;
 }
