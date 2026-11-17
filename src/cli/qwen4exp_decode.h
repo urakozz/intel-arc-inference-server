@@ -51,6 +51,7 @@
 #include "loader/qwen4exp_loader.h"
 #include "loader/snapshot.h"
 #include "model/qwen4exp.h"
+#include "runtime/vram_bars.h"
 #include "runtime/prefill_backend.h"
 #include "runtime/qwen4exp/qwen4exp_engine.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
@@ -198,6 +199,15 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
                "MemAvailable {:.3f} GB, 16 GiB kept\n", (ple + mirror + a.prefix_bytes) / 1e9, ple / 1e9, mirror / 1e9,
                note, a.prefix_bytes / 1e9, avail / 1e9);
   };
+  // The startup chart: one VRAM block per card from the plan, then the host memory pinned (zero parts left out).
+  const auto bars = [&](const std::vector<rq::DevicePlan>& pl, size_t experts) {
+    for (const rq::DevicePlan& dp : pl) {
+      const runtime::VramCard c{runtime::vram_parts(dp, dp.mtp ? "MTP head" : "decode state", "drafter"), a.reserve,
+                                dev[dp.device]};
+      std::print(stderr, "{}", runtime::vram_block(c, dp.device, uint32_t(pl.size()), runtime::vram_utf8()));
+    }
+    std::print(stderr, "{}", runtime::vram_host_line({{"experts", experts}, {"PLE table", ple}}));
+  };
   Settled s;
   if (a.layers == 0 && !a.layers_auto) {   // the whole model
     const char* forced = std::getenv("B70_Q4_RESIDENT");
@@ -252,6 +262,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     rq::require_fits(pl, dev, a.reserve);
     host_line(s.tier->host_bytes(d));
     std::print(stderr, "{}\n", rq::describe(pl, s.placement, s.max_len, dev, a.reserve).c_str());
+    bars(pl, s.tier->host_bytes(d));
     return s;
   }
   uint32_t layers = a.layers;
@@ -300,6 +311,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     std::print(stderr, "split: {}{:d} (layers [0, {:d}) on device 0, [{:d}, {:d}) and the head on device 1)\n",
                a.pipe.split_auto ? "auto -> " : "", p.split, p.split, p.split, d.layers);
   std::print(stderr, "{}\n", rq::describe(pl, p, len, dev, a.reserve).c_str());
+  bars(pl, 0);
   s.placement = p;
   s.max_len = len;
   return s;

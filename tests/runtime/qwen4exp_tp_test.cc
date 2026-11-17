@@ -1,5 +1,5 @@
 // Plan 21v2b Task 2: Qwen3.8-Flash-Next on `--parallel tp` against `--parallel pp` (box only; label
-// checkpoint;qwen4exp;tp), at --layers N with every expert resident. One engine a process (each pins the 51.8 GB PLE
+// checkpoint;qwen4exp;tp), at --layers N with every expert resident, or the whole model with each engine's tier. One engine a process (each pins the 51.8 GB PLE
 // table; two do not fit beside a CPU job), so a comparison is two runs and a ratio is interleaved runs:
 //   qwen4exp_tp_test <checkpoint> <ids> pp|tp <rows file> [layers 18] [steps 10000] [bench 4] [profile replays]
 //   (a) the first 32 ids forced one a replay: pp writes each row's logits to <rows file>; tp reads them and holds each
@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -76,18 +77,36 @@ int main(int argc, char** argv) {
   const size_t V = d.vocab;
   std::unique_ptr<rq::Qwen4ExpEngine> pp;
   std::unique_ptr<rq::Qwen4ExpTpEngine> tp;
-  if (mode == "pp")
+  // The whole model: each engine's expert tier as the CLI plans it (the routing profile's most-routed experts, the
+  // budget with the prefill scratch planned, 32.53 GB cards less the 1.5 GB reserve); --layers N: every expert resident.
+  const bool whole = layers == loader::qwen4exp_checkpoint_desc(snap).layers;
+  const std::array<size_t, runtime::kPpDevices> caps = {rig.c0->memory_bytes(), rig.c1->memory_bytes()};
+  const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+  const std::vector<uint32_t> prof = whole ? loader::load_q4_profile(snap, d) : std::vector<uint32_t>{};
+  const std::vector<uint32_t>* pc = prof.empty() ? nullptr : &prof;
+  if (mode == "pp") {
+    const model::Q4Placement pl = model::Q4Placement::two(d, rq::pp_split(d, max_len, true, false, true).split);
+    std::optional<rq::ExpertTier> t;
+    if (whole) t = rq::fill_tier(d, rq::expert_budget(d, pl, max_len, true, false, true, caps, reserve), pc);
     pp = std::make_unique<rq::Qwen4ExpEngine>(
-        rig.ctx,
-        loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::two(d, rq::pp_split(d, max_len, true, false).split),
-                              loader::LmHeadForm::Int8, layers),
+        rig.ctx, loader::load_qwen4exp(rig.ctx, snap, max_len, pl, loader::LmHeadForm::Int8, layers, false, t ? &*t : nullptr),
         max_len);
-  else
+  } else {
+    const model::Q4Placement pl = model::Q4Placement::tp2(d, model::Q4TpEnds::Split);
+    std::optional<rq::ExpertTier> t0, t1;
+    if (whole) {
+      const rq::ExpertBudget b = rq::tp_expert_budget(d, pl, max_len, true, false, true, caps, reserve);
+      t0 = rq::tp_fill_tier(d, b, 0, pc);
+      t1 = rq::tp_fill_tier(d, b, 1, pc);
+      std::printf("tp: the whole model: f %.4f / %.4f a card (%s)\n", rq::tp_card_f(b, 0), rq::tp_card_f(b, 1),
+                  t0->source.c_str());
+    }
     tp = std::make_unique<rq::Qwen4ExpTpEngine>(
         *rig.c0, *rig.c1,
-        loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::tp2(d, model::Q4TpEnds::Split),
-                              loader::LmHeadForm::Int8, layers),
+        loader::load_qwen4exp(rig.ctx, snap, max_len, pl, loader::LmHeadForm::Int8, layers, false, t0 ? &*t0 : nullptr,
+                              t1 ? &*t1 : nullptr),
         max_len);
+  }
   const auto ingest = [&](uint32_t id) { pp ? pp->ingest({id}) : tp->ingest({id}); };
   const auto pending = [&] { return pp ? pp->pending() : tp->pending(); };
   const auto set_token = [&](uint32_t id) { pp ? pp->set_token(id) : tp->set_token(id); };

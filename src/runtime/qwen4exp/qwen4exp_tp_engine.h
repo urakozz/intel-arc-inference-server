@@ -33,7 +33,8 @@
 // out_token and cur_token. Both cards hold the same residual, and it is one card's bit for bit: the crossings are the
 // slices form in one card's summation order (runtime/qwen4exp/qwen4exp_capture.h, tp).
 //
-// Not here yet: prefill (ingest feeds one id a replay), the MTP head, snapshots, the expert-table check on the device.
+// At construction: the PLE hash constants on both cards, the expert tier's table check on each card, one discarded
+// warm-up step. Not here yet: prefill (ingest feeds one id a replay), the MTP head, snapshots.
 namespace runtime::qwen4exp {
 
 struct Q4TpOptions {
@@ -72,12 +73,15 @@ class Qwen4ExpTpEngine {
   // Probes only: card `card`'s list rebuilt with a timestamp event a launch, both lists replayed `replays` times;
   // each launch's mean device time in us, walk order (step(card).labels).
   std::vector<double> profile_decode(uint32_t card, uint32_t replays);
+  // The expert tier's device read-back at construction: block words read through each card's table.
+  size_t expert_words_checked() const { return words_checked_; }
 
  private:
   struct Card;
   void submit(CapturedStep* l0, CapturedStep* l1);
   [[noreturn]] void fail(const std::string& what);
   void ple_init();
+  void expert_check();
   CapturedStep build_card(uint32_t r, ProfileEvents* prof);
 
   loader::Q4LoadedModel model_;
@@ -85,6 +89,7 @@ class Qwen4ExpTpEngine {
   Q4TpOptions opt_;
   std::array<std::unique_ptr<Card>, 2> cards_;
   bool broken_ = false;
+  size_t words_checked_ = 0;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0;
 };
 

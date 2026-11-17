@@ -1,10 +1,15 @@
 #include "runtime/qwen4exp/qwen4exp_tp_engine.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
 
+#include "kernels/kernels.h"
+#include "kernels/qwen4exp_kernels.h"
+#include "l0/kernel.h"
+#include "l0/module.h"
 #include "loader/qwen4exp_ple_hash.h"
 #include "model/qwen4exp.h"
 #include "runtime/qwen4exp/qwen4exp_capture.h"
@@ -95,8 +100,65 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
     c.binding.embed = (model_.parts[r].embed ? model_.parts[r].embed : model_.parts[0].embed)->ptr();
   }
   ple_init();
+  expert_check();
   for (uint32_t r = 0; r < 2; ++r) cards_[r]->step.emplace(build_card(r, nullptr));
+  // One warm-up step: a list's first submission makes every host allocation its kernels reach resident (the expert
+  // mirrors, the PLE table), which can hold one card past the other's bounded wait. Its result is discarded; a
+  // second failure is a real one.
   reset();
+  set_token(0);
+  for (auto& c : cards_) c->ctl->n_active = 1;
+  try {
+    submit(&*cards_[0]->step, &*cards_[1]->step);
+  } catch (const std::runtime_error&) {
+  }
+  reset();
+}
+
+// The expert tier's table form on each card: the loader's sampled block words read through the card's table
+// (q4_expert_check with the host indirect-access flag, as the MoE launches reach the mirrors), held to the
+// checkpoint's halves. B70_Q4_EXPERT_CHECK=off skips it (tests only).
+void Qwen4ExpTpEngine::expert_check() {
+  if (!model_.expert_table) return;
+  if (const char* v = std::getenv("B70_Q4_EXPERT_CHECK"); v && std::string(v) == "off") return;
+  for (uint32_t r = 0; r < 2; ++r) {
+    const loader::Q4DevicePart& P = model_.parts[r];
+    Card& c = *cards_[r];
+    const uint32_t n = uint32_t(P.check_words.size());
+    if (n == 0 || P.check_idx.size() != n || P.check_off.size() != n || !P.expert_table)
+      throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: card " + std::to_string(r) +
+                             " has the table form but no load-check samples");
+    l0::Mem idx(c.ctx, l0::MemKind::Device, size_t(n) * 4), off(c.ctx, l0::MemKind::Device, size_t(n) * 4),
+        out(c.ctx, l0::MemKind::Device, size_t(n) * 8);
+    c.imm.copy(idx.ptr(), P.check_idx.data(), size_t(n) * 4);
+    c.imm.copy(off.ptr(), P.check_off.data(), size_t(n) * 4);
+    {
+      l0::Module mod(c.ctx, kernels::path(kernels::qwen4exp::expert_check_variant()));
+      l0::Kernel k = mod.kernel("q4_expert_check");
+      k.group_size(kernels::qwen4exp::kExpertCheckWg);
+      k.indirect_host();
+      k.arg_ptr(0, P.expert_table->ptr());
+      k.arg_ptr(1, idx.ptr());
+      k.arg_ptr(2, off.ptr());
+      k.arg_ptr(3, out.ptr());
+      k.arg<uint32_t>(4, n);
+      l0::CmdList list = l0::CmdList::regular(c.ctx);
+      list.launch(k, (n + kernels::qwen4exp::kExpertCheckWg - 1) / kernels::qwen4exp::kExpertCheckWg);
+      list.close();
+      c.queue.execute(list, &c.fence);
+      c.fence.wait();
+    }
+    std::vector<uint64_t> got(n);
+    c.imm.copy(got.data(), out.ptr(), size_t(n) * 8);
+    for (uint32_t g = 0; g < n; ++g)
+      if (got[g] != P.check_words[g])
+        throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine: card " + std::to_string(r) + " reads table entry " +
+                                 std::to_string(P.check_idx[g]) + " at byte " + std::to_string(P.check_off[g]) +
+                                 " as a different word than the checkpoint's half - the expert upload or its table "
+                                 "address is wrong (or a pinned page is aliased or unmapped). Load again; if it "
+                                 "repeats, report it with this line");
+    words_checked_ += n;
+  }
 }
 
 Qwen4ExpTpEngine::~Qwen4ExpTpEngine() {
