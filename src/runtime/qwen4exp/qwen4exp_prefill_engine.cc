@@ -26,6 +26,7 @@
 // the block end's, as on one card. Each walk runs the same launches in the same order on its own device as before,
 // so the result is the sequential form's, bitwise.
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -56,6 +57,7 @@ struct Qwen4ExpPrefillState {
     l0::Mem ctl;                      // host [kPfDepth] Control: the chunks' Controls
     std::unique_ptr<l0::Mem> hctl;    // the last device with the MTP head: host [kPfDepth] Control, the head's
     std::unique_ptr<Q4PfRingState> ring;   // the host-memory experts read ahead (null: no expert table)
+    std::unique_ptr<Q4LendState> lend;     // the scratch lent to the tier between prefills (with the ring)
     Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len)
         : cx(c), kc(c), s(c, d, max_len), ctl(c, l0::MemKind::Host, kPfDepth * sizeof(Control)) {}
     Control* ctl_at(uint32_t k) { return ctl.as<Control>() + k; }
@@ -123,7 +125,26 @@ void Qwen4ExpEngine::prepare_prefill() {
     ps->dev[devices() - 1]->hctl =
         std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Host, kPfDepth * sizeof(Control));
   }
-  for (uint32_t i = 0; i < devices(); ++i) ps->dev[i]->ring = make_pf_ring(stage_ctx(i), model_.parts[i], d);
+  for (uint32_t i = 0; i < devices(); ++i) {
+    Qwen4ExpPrefillState::Dev& D = *ps->dev[i];
+    D.ring = make_pf_ring(stage_ctx(i), model_.parts[i], d);
+    if (D.ring)
+      D.lend = std::make_unique<Q4LendState>(stage_ctx(i), model_.parts[i], d, model_.tier, lend_regions(D.s, D.ring.get()),
+                                             D.ring->list);
+    if (D.lend && D.lend->experts() > 0) {
+      const loader::Q4DevicePart& p = model_.parts[i];
+      size_t res = 0;
+      for (uint32_t l = p.first; l < p.end; ++l) res += model_.tier.n_vram(l);
+      const double all = double(p.end - p.first) * d.experts;
+      std::fprintf(stderr, "experts: device %u lends its idle prefill scratch to %u more experts between prefills "
+                   "(resident f %.3f -> %.3f while decoding)\n", i, D.lend->experts(), res / all,
+                   (res + D.lend->experts()) / all);
+    }
+  }
+  pf_lend_ = [ps] {
+    for (auto& D : ps->dev)
+      if (D->lend) D->lend->lend();
+  };
   pf_dev_bytes_.assign(devices(), 0);
   pf_bytes_ = 0;
   for (uint32_t i = 0; i < devices(); ++i) {
@@ -217,6 +238,8 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
 
   prepare_prefill();
   Qwen4ExpPrefillState& P = *pf_;
+  for (auto& D : P.dev)   // the lent experts' rows back: this prefill overwrites the scratch
+    if (D->lend) D->lend->reclaim();
   Qwen4ExpMtpPrefill mp;
   if (mtp_) {
     mp.bufs = mtp_.get();
@@ -430,6 +453,8 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     const uint32_t end = base + uint32_t(ids.size());
     block_hook_(end, end % kBlock == 0);
   }
+  for (auto& D : P.dev)   // the scratch is idle until the next prefill: lend it to the tier
+    if (D->lend) D->lend->fill();
 }
 
 }  // namespace runtime::qwen4exp

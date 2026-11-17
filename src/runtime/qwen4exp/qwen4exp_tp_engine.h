@@ -182,6 +182,9 @@ class Qwen4ExpTpEngine {
   // prefill lists to go idle; reset() calls it. The prefill state is lazy and declared LAST, destroyed before the
   // cards whose buffers it points into; its deleter is set where it is made (b70_qwen4exp_prefill).
   std::function<bool()> pf_settle_;
+  // Plan 21-QFN-v2b Task 7 Step 2: set by prepare_prefill - points the table rows at the experts copied into the idle
+  // prefill scratch once that copy has finished (Q4LendState::lend); submit() calls it before each step.
+  std::function<void()> pf_lend_;
   std::unique_ptr<Q4TpPrefillState, void (*)(Q4TpPrefillState*)> pf_{nullptr, nullptr};
 };
 

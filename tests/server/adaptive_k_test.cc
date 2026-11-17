@@ -132,6 +132,11 @@ void test_flash_next_cost() {
   CHECK_EQ(p.best(0.88), 3U);   // code
   CHECK_EQ(p.best(0.97), 3U);   // tool calls
   std::print("Flash-Next costs: K 0 / 3 / 3 at alpha 0.66 / 0.88 / 0.97\n");
+  o.cost = MtpCost::tp_flash_next();   // tp: cheaper verify rows - MTP pays from lower acceptance
+  const AdaptiveK t(o);
+  std::print("Flash-Next tp costs: K {} / {} / {} at alpha 0.5 / 0.66 / 0.88\n", t.best(0.5), t.best(0.66), t.best(0.88));
+  CHECK(t.best(0.66) >= p.best(0.66));
+  CHECK_EQ(t.best(0.88), 3U);
 }
 
 void test_cost_table() {

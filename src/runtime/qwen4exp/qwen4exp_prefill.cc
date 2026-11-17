@@ -1003,4 +1003,76 @@ std::unique_ptr<Q4PfRingState> make_pf_ring(l0::Context& ctx, const loader::Q4De
   return nullptr;
 }
 
+Q4LendState::Q4LendState(l0::Context& c, const loader::Q4DevicePart& part, const model::Qwen4ExpDesc& card,
+                         const ExpertTier& tier, const std::vector<Region>& regions, ze_command_list_handle_t l)
+    : ctx(c), list(l) {
+  const uint32_t n = part.end - part.first, E = card.experts;
+  table = part.layers[0].expert_row;
+  orig.resize(size_t(n) * 2 * E);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  imm.copy(orig.data(), table, orig.size() * 8);
+  lent = orig;
+  ev = std::make_unique<l0::SyncEventPool>(ctx, std::vector<const l0::Context*>{&ctx}, 1);
+  if (tier.rank.empty()) return;
+  const size_t gu = loader::q4_gate_up_block_bytes(card), dn = loader::q4_down_block_bytes(card);
+  size_t r = 0, off = 0;   // the region and the offset in it the next block goes to
+  const auto place = [&](size_t bytes) -> void* {
+    while (r < regions.size() && off + bytes > regions[r].bytes) {
+      ++r;
+      off = 0;
+    }
+    if (r == regions.size()) return nullptr;
+    void* p = static_cast<uint8_t*>(regions[r].ptr) + off;
+    off += (bytes + 255) / 256 * 256;
+    return p;
+  };
+  std::vector<uint32_t> next(n, 0);   // each layer's position in its rank
+  for (bool any = true; any;) {
+    any = false;
+    for (uint32_t i = 0; i < n; ++i) {
+      const uint16_t* rk = tier.rank.data() + size_t(part.first + i) * E;
+      while (next[i] < E && tier.resident(part.first + i, rk[next[i]])) ++next[i];
+      if (next[i] == E) continue;
+      const uint32_t e = rk[next[i]++];
+      const size_t a = size_t(i) * 2 * E + e, b = a + E;   // its gate||up and down rows
+      void* pg = place(gu);
+      void* pd = pg ? place(dn) : nullptr;
+      if (!pd) return;   // the scratch is full
+      copies.push_back({pg, reinterpret_cast<const void*>(orig[a]), gu});
+      copies.push_back({pd, reinterpret_cast<const void*>(orig[b]), dn});
+      lent[a] = reinterpret_cast<uint64_t>(pg);
+      lent[b] = reinterpret_cast<uint64_t>(pd);
+      ++n_;
+      any = true;
+    }
+  }
+}
+void Q4LendState::fill() {
+  if (copies.empty() || state != State::Idle) return;
+  ev->host_reset(0);
+  for (const Copy& c : copies) ZE_CHECK(zeCommandListAppendMemoryCopy(list, c.dst, c.src, c.bytes, nullptr, 0, nullptr));
+  ZE_CHECK(zeCommandListAppendBarrier(list, ev->handle(0), 0, nullptr));
+  state = State::Filling;
+}
+void Q4LendState::lend() {
+  if (state != State::Filling || !ev->signalled(0)) return;
+  l0::CmdList::immediate(ctx).copy(table, lent.data(), lent.size() * 8);
+  state = State::Lent;
+}
+void Q4LendState::reclaim() {
+  if (state == State::Filling) ZE_CHECK(zeCommandListHostSynchronize(list, UINT64_MAX));
+  if (state == State::Lent) l0::CmdList::immediate(ctx).copy(table, orig.data(), orig.size() * 8);
+  state = State::Idle;
+}
+
+std::vector<Q4LendState::Region> lend_regions(const Qwen4ExpPrefillScratch& s, const Q4PfRingState* ring) {
+  std::vector<Q4LendState::Region> r;
+  for (const l0::Mem* m : {&s.xg, &s.w, &s.h, &s.partials, &s.slab, &s.gdn, &s.o, &s.q16, &s.attn_out, &s.idx_f32,
+                           &s.xn, &s.x, &s.down_f32, &s.y})
+    r.push_back({m->ptr(), m->size()});
+  if (ring)
+    for (const auto& b : ring->stage) r.push_back({b->ptr(), b->size()});
+  return r;
+}
+
 }  // namespace runtime::qwen4exp

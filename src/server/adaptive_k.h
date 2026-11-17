@@ -28,6 +28,9 @@ struct MtpCost {
   // experts a layer, some from host memory, so a row costs far more than on the dense models. In units of the plain
   // step with the head loaded.
   static MtpCost flash_next();
+  // Qwen3.8-Flash-Next under --parallel tp: its verify rows read each card's halves of their experts (and cross twice a
+  // layer), the head drafts whole on the second card. In units of tp's plain step with the head loaded.
+  static MtpCost tp_flash_next();
   // Spec 19 v3c: DFlash under tensor parallel (the packed W4A16 drafter split over both cards, the 2-bit candidate
   // head, fp32 crossings) - tp_dflash_test cost at depth 4096.
   static MtpCost tp_dflash();

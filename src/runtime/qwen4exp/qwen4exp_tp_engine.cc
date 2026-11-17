@@ -227,6 +227,7 @@ void Qwen4ExpTpEngine::fail(const std::string& what) {
 
 void Qwen4ExpTpEngine::submit(CapturedStep* l0p, CapturedStep* l1p) {
   if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
+  if (pf_lend_) pf_lend_();   // no step runs here: the table rows may change
   const Control& c0 = *cards_[0]->ctl;
   if (size_t(c0.pos) + c0.n_active > max_len_)
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine: pos " + std::to_string(c0.pos) +

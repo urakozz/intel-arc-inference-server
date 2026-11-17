@@ -45,6 +45,18 @@ MtpCost MtpCost::flash_next() {
   return c;
 }
 
+// Qwen3.8-Flash-Next, --parallel tp with the expert tier and the read ahead: served 2026-11-17 at a fixed K
+// (B70_MTP_ADAPTIVE=0), one session a K on 5 text prompts (C++ source, code-writing, golden code / prose, docs prose),
+// an iteration against a plain step of the same prompt, medians: K = 1 / 2 / 3 1.58 / 2.16 / 2.55 (prose 1.75 / 2.48 /
+// 3.0). A draft step is the head alone on card 1: 1.45 ms (qwen4exp_tp_mtp_test cost) of a ~21 ms plain step = 0.07.
+// The verify rows take the rest.
+MtpCost MtpCost::tp_flash_next() {
+  MtpCost c;
+  c.verify = {1.00, 1.51, 2.02, 2.34};
+  c.draft = {0.07, 0.14, 0.21};
+  return c;
+}
+
 MtpCost MtpCost::tp_dflash() {
   MtpCost c;
   // tp_dflash_test cost 4096, 2026-11-14 (both cards held, the CPU reference job running; medians of 5 interleaved
