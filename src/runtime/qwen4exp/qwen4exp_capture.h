@@ -88,7 +88,8 @@ struct MtpBinding {
 // tp_sum waits for the peer's): out_proj / o_proj run at split-K 2 over the card's K half - one card's slices 2r,
 // 2r + 1 - and tp_sum adds card 0's two then card 1's into one row (one card's S4 chain), which the next combine folds
 // as one slice (_S1); the MoE's down writes each slot's dot over the card's K half (MOE_TP_PART: one card's two DN_KS
-// partials) into `slots`, tp_sum adds them slot by slot and q4_moe_finish runs the down's epilogue into y. So every
+// partials) into `slots` and sends it to the peer's landing (`moe`, tp.cl's protocol inside the down), and
+// q4_moe_finish waits for the peer's, adds them slot by slot and runs the down's epilogue into y. So every
 // value is one card's, bit for bit. Everything
 // replicated (the hyper-connections, router and route, the indexer and selection, the PLE) runs on both cards on the
 // same bits, so both cards hold the same H. `embed`: the table card 1 gathers from (card 0's, over peer access) or

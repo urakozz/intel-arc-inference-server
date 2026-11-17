@@ -28,6 +28,14 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
   elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 17408 AND S EQUAL 8 AND M EQUAL 1)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
+  # Plan 21v2b Task 6: Qwen3.8-Flash-Next's M = 1 linears, one card's (pp) and a tp card's halves - few work-groups
+  # with long K chains, latency bound; two k-groups in flight (probe_gemv --variants' pgv_da2 cells, byte-identical:
+  # qkv||z 75.1 -> 29.8 us at the tp half, 83.1 -> 41.1 at one card's width).
+  elseif(L EQUAL 0 AND M EQUAL 1 AND ((K EQUAL 2560 AND (N EQUAL 8192 OR N EQUAL 16384) AND S EQUAL 1) OR
+                                      (K EQUAL 2560 AND (N EQUAL 6656 OR N EQUAL 13312) AND S EQUAL 2) OR
+                                      (K EQUAL 3072 AND N EQUAL 2560 AND S EQUAL 2) OR
+                                      (K EQUAL 6144 AND N EQUAL 2560 AND S EQUAL 4)))
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1 GEMV_AHEAD=2)
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -1379,10 +1387,10 @@ endif()
 #   GDN      gdn_step_M1_GK8V24 (Qwen3.8's card: the same 8 / 24 heads and conv 5120) and prep_gated_head _SIG at 8 / 24
 #   QSA      attn_prep at 12 q / 1 kv heads (S2), q4_qsa_attn + _reduce at 12 / 1
 #   MoE      q4_moe at the half width 320 (DN_KS 1: 5 groups), each slot's fp32 partial (MOE_TP_PART), direct and _TBL,
-#            and q4_moe_finish (the down's epilogue after the all-reduce)
+#            a card each (RANK): the down sends its slots to the peer, q4_moe_finish waits, sums and runs the epilogue
 #   tp.cl    tp_send + tp_sum at hidden 2560 per rank, the slices form: out_proj / o_proj's 2 local slices summed in one
-#            card's S4 order into one row (the combine's _S1); the MoE's 11 slots summed slot by slot (TP_SUM_SLICES).
-#            With these every value is one card's, bit for bit. tp_argmax per vocabulary half is Qwen3.8's
+#            card's S4 order into one row (the combine's _S1). With these and the MoE's wired sums every value is one
+#            card's, bit for bit. tp_argmax per vocabulary half is Qwen3.8's
 if(B70_Q4EXP AND B70_TP)
   add_gemv_variant(1 2560 8192 1 0)
   add_gemv_variant(1 2560 6656 2 0)
@@ -1393,16 +1401,15 @@ if(B70_Q4EXP AND B70_TP)
   add_ocloc_kernel(attn_prep_M1_Q12KV1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 FA_Q_HEADS=12 FA_KV_HEADS=1)
   add_ocloc_kernel(q4_qsa_attn_M1_T32_Q12KV1 SOURCE ${Q4_CL}/q4_qsa_attn.cl
                    DEFINES ${CTRL_DEFINES} M=1 TGT=32 ${Q4_LIST_DEFINES} Q4_Q_HEADS=12 Q4_KV_HEADS=1)
-  add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I320_SH4_TP SOURCE ${Q4_CL}/q4_moe.cl
-                   DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1)
-  add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP SOURCE ${Q4_CL}/q4_moe.cl
-                   DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1
-                           Q4_EXPERT_TABLE=1)
   foreach(R 0 1)
+    add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R${R} SOURCE ${Q4_CL}/q4_moe.cl
+                     DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1
+                             RANK=${R})
+    add_ocloc_kernel(q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R${R} SOURCE ${Q4_CL}/q4_moe.cl
+                     DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1
+                             Q4_EXPERT_TABLE=1 RANK=${R})
     add_ocloc_kernel(tp_cross_M1_K2560_G20_S2_X_R${R}_sum SOURCE ${TP_CL}
                      DEFINES TP_CROSS=1 M=1 K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1)
-    add_ocloc_kernel(tp_cross_M1_K2560_G20_S11_X_R${R}_slices SOURCE ${TP_CL}
-                     DEFINES TP_CROSS=1 M=1 K=2560 FOLD_G=20 S_LOC=11 FOLDED=0 RANK=${R} TP_SUM=1 TP_SUM_SLICES=1)
   endforeach()
 endif()
 # ==== Plan 21v2b: Qwen3.8-Flash-Next tensor parallel decode ==== (end) ====

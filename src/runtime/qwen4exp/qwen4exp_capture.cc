@@ -214,8 +214,8 @@ class Walk {
     const bool tbl = part_.layers[0].expert_row != nullptr;
     const unsigned rank = tp_->link->rank;
     const std::vector<std::string> need = {
-        kq::embed_variant(1), kq::tp_moe_variant(tbl), kq::tp_gdn_variant(), kq::tp_gated_head_sig_variant(),
-        kq::tp_attn_prep_variant(), kq::tp_qsa_attn_variant(), kq::tp_sum_variant(rank), kq::tp_slices_variant(rank),
+        kq::embed_variant(1), kq::tp_moe_variant(tbl, rank), kq::tp_gdn_variant(), kq::tp_gated_head_sig_variant(),
+        kq::tp_attn_prep_variant(), kq::tp_qsa_attn_variant(), kq::tp_sum_variant(rank),
         kq::hc_combine_norm_variant(1, HcSrc::Slices, 1, true), kq::route_variant(1), kq::qsa_variant(1),
         kernels::gemv_variant(1, d_.hidden, c.qkvz_n(), 1, 0), kernels::gemv_variant(1, d_.hidden, c.qkvg_n(), 2, 0),
         kernels::gemv_variant(1, c.q_n(), d_.hidden, kq::kTpOutS, 0), kernels::gemv_i8w_variant(1, d_.hidden, c.vocab),
@@ -225,12 +225,12 @@ class Walk {
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
   }
 
-  // Plan 21v2b: an all-reduce in the slices form over `buf` (in place) - tp_send(buf, peer_land, send_ctr, buf), then
-  // tp_sum(buf, land, buf, sum_ctr, state, spin_limit). `moe`: the slot-by-slot sums (the MoE's crossing), else one
-  // row (out_proj / o_proj's: the next combine folds it as one slice).
-  void cross(bool moe, void* buf) {
-    const TpLink& t = moe ? *tp_->moe : *tp_->link;
-    const std::string v = moe ? kq::tp_slices_variant(t.rank) : kq::tp_sum_variant(t.rank);
+  // Plan 21v2b: out_proj / o_proj's all-reduce in the slices form over `buf` (in place) - tp_send(buf, peer_land,
+  // send_ctr, buf), then tp_sum(buf, land, buf, sum_ctr, state, spin_limit) into one row (the next combine folds it as
+  // one slice). The MoE's is wired into its down and finish (moe()).
+  void cross(void* buf) {
+    const TpLink& t = *tp_->link;
+    const std::string v = kq::tp_sum_variant(t.rank);
     {
       l0::Kernel& k = kernel(v, "tp_send", kq::kTpWg);
       k.arg_ptr(0, buf);
@@ -249,7 +249,7 @@ class Walk {
       k.arg<uint32_t>(5, t.spin_limit);
       launch(k, kq::kTpFoldG, M_);
     }
-    if (!moe) slices_ = 1;
+    slices_ = 1;
   }
 
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
@@ -497,7 +497,7 @@ class Walk {
     }
     slices_ = linear(*L.gdn_out, b_.attn_out.ptr(), b_.partials);
     src_ = HcSrc::Slices;
-    if (tp_) cross(false, b_.partials.ptr());
+    if (tp_) cross(b_.partials.ptr());
   }
 
   // --- a QSA layer's pieces (the main layers' and the MTP head's) --------------------------------------------------
@@ -620,7 +620,7 @@ class Walk {
     qsa_attend(t, listp);
     slices_ = linear(*L.qsa_o, b_.attn_out.ptr(), b_.partials);
     src_ = HcSrc::Slices;
-    if (tp_) cross(false, b_.partials.ptr());
+    if (tp_) cross(b_.partials.ptr());
   }
 
   // The 11-slot MoE over route row `rt`: the router GEMV (+ the shared gate), q4_route, gate||up, down -> y.
@@ -637,7 +637,7 @@ class Walk {
     // its address (VRAM or pinned host memory) - gate||up the row, down the row + 512 entries; the arithmetic is the
     // direct form's.
     const bool tbl = L.expert_row != nullptr;
-    const std::string mv = tp_ ? kq::tp_moe_variant(tbl) : kq::moe_variant(M_, shb, tbl);
+    const std::string mv = tp_ ? kq::tp_moe_variant(tbl, tp_->moe->rank) : kq::moe_variant(M_, shb, tbl);
     {
       // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M) - tp: the card's half, 11 x 10
       l0::Kernel& k = kernel(mv, "q4_moe_gate_up", kq::moe_gate_up_wg());
@@ -658,15 +658,24 @@ class Walk {
       k.arg_ptr(2, tbl ? static_cast<uint8_t*>(L.expert_row) + size_t(d_.experts) * 8 : L.down->ptr());
       k.arg_ptr(3, at(*L.shared, L.shared_down_offset));
       k.arg_ptr(4, tp_ ? tp_->slots : b_.y.ptr());   // tp: each slot's partial, fp32 [11][M][2560]
+      if (tp_) {   // and its chunk into the peer's landing
+        k.arg_ptr(5, tp_->moe->peer_land);
+        k.arg_ptr(6, tp_->moe->send_ctr);
+      }
       launch(k, d_.hidden / 16, M_);
     }
     if (tp_) {
-      cross(true, tp_->slots);
-      // q4_moe_finish(route, slots, y), grid (2560 / 256, M): the down's epilogue over the summed slots
+      // q4_moe_finish(route, slots, land, ctr, state, spin_limit, y), grid (2560 / 256, M): waits for the peer's
+      // slots, sums the two cards' and runs the down's epilogue
+      const TpLink& t = *tp_->moe;
       l0::Kernel& k = kernel(mv, "q4_moe_finish", kq::kTpFinishWg);
       k.arg_ptr(0, rt);
       k.arg_ptr(1, tp_->slots);
-      k.arg_ptr(2, b_.y.ptr());
+      k.arg_ptr(2, t.land);
+      k.arg_ptr(3, t.fold_ctr);
+      k.arg_ptr(4, t.state);
+      k.arg<uint32_t>(5, t.spin_limit);
+      k.arg_ptr(6, b_.y.ptr());
       launch(k, d_.hidden / kq::kTpFinishWg, M_);
     }
     src_ = HcSrc::Y;
