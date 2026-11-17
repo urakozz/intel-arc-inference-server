@@ -992,9 +992,9 @@ int run(int argc, char** argv) {
     }
     if (pipe.replica())
       cli::check_replica_model(architecture, name);
-    else if (pipe.tp() && !cli::qwen4exp::is_qwen4exp(path))   // plan 21v2b: Flash-Next's tp is its own flow
-      cli::check_tp_model(architecture, name);
-    else if (!cli::replica_architecture(architecture))
+    else if (pipe.tp()) {
+      if (!cli::qwen4exp::is_qwen4exp(path)) cli::check_tp_model(architecture, name);   // Flash-Next's tp: its own flow
+    } else if (!cli::replica_architecture(architecture))
       throw std::runtime_error("--max-num-seqs above 1 is built for Qwen3.8 (its sequence slots) and "
                                "Ornith (2: one request a card, replica); " +
                                (name.empty() ? std::string("this checkpoint (no readable config.json)") : name) +
