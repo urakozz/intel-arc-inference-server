@@ -3446,6 +3446,7 @@ if(B70_Q4EXP AND B70_TP)
       TIMEOUT 3600)
   endforeach()
   set_tests_properties(qwen4exp_tp_prefill_tp_test PROPERTIES DEPENDS qwen4exp_tp_prefill_pp_test)
+  add_dependencies(qwen4exp_route_capture ${B70_Q4EXP_TP_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS})   # its tp mode
 endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next served (label qwen4exp) ==== (begin) ====
 # Task 1 (host): the tokens and the template. 21a found the original's tokenizer.json NOT Qwen3.8's (the split regex
