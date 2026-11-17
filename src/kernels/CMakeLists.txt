@@ -1568,8 +1568,8 @@ endif()
 
 # ==== Plan 21-QFN-v2b Task 4: Qwen3.8-Flash-Next tensor parallel prefill ==== (begin) ====
 # Additive only; four sources gain a define every existing binary leaves unset (q4_pf_attn.cl Q4_Q_HEADS /
-# Q4_KV_HEADS, pf_moe_q4gemm.cl OUT_F32, q4_pf_moe.cl PF_COMBINE_F32, q4_qsa.cl QSA_TP). A card's prefill chunk at model::q4_tp_card's
-# shapes (runtime/qwen4exp/qwen4exp_prefill.cc, tp):
+# Q4_KV_HEADS, pf_moe_q4gemm.cl OUT_F32, q4_pf_moe.cl PF_COMBINE_F32, q4_qsa.cl QSA_TP). A card's prefill chunk at
+# model::q4_tp_card's shapes (runtime/qwen4exp/qwen4exp_prefill.cc, tp):
 #   linears  qkv||z 2560 x 8192 (whole slabs), q||gate||k||v 2560 x 6656 and out_proj / o_proj 3072 x 2560 (a tail):
 #            int4 layout 0 and Intel's bf16 tiles
 #   GDN      pf_gdn_front, the gate at the GEMM's pitch 256 (the card's small block: negA / dt_bias at 20480 / 20504,

@@ -312,10 +312,10 @@ __kernel void q4_qsa_select(__global const uint* restrict ctrl, __global const f
 
 #ifdef QSA_TP
 // ---------------------------------------------------------------------------------------------------------------
-// Plan 21-QFN-v2b Task 4, the split selection (tensor parallel, `-DQSA_TP` on the prefill form only): row m's n complete
-// blocks are cut at n / 2 - card 0 scores and ranks [0, n / 2), card 1 [n / 2, n) - and each card keeps its half's
-// first CAND = TOPB + 1 blocks in q4_qsa_select's order (score desc, block asc). The order is total, so the row's top
-// TOPB blocks are inside the two lists and its 513th is too; the cards swap their lists and q4_qsa_merge ranks the
+// Plan 21-QFN-v2b Task 4, the split selection (tensor parallel, `-DQSA_TP` on the prefill form only): row m's n
+// complete blocks are cut at n / 2 - card 0 scores and ranks [0, n / 2), card 1 [n / 2, n) - and each card keeps its
+// half's first CAND = TOPB + 1 blocks in q4_qsa_select's order (score desc, block asc). The order is total, so the
+// row's top TOPB blocks and its 513th are inside the two lists; the cards swap their lists and q4_qsa_merge ranks the
 // union in the same order: the row's list and diagnostic are q4_qsa_select's, bit for bit. A candidate row (u32
 // [CAND_W]): keys [0, CAND), block ids [CAND, 2 CAND), the count at 2 CAND - block-ascending, card 0's below card 1's.
 #ifndef QSA_PF
@@ -325,8 +325,8 @@ __kernel void q4_qsa_select(__global const uint* restrict ctrl, __global const f
 #define CAND_W (2 * CAND + 2)   /* kernels::qwen4exp::kCandW */
 
 // q4_qsa_score_tp(ctrl, idx_q, idx_keys, scores, stride, part)   grid (ceil(ceil(stride / 2) / 256), M), WG 256 -
-// q4_qsa_score over the row's half `part` (the card's rank), each score its arithmetic at its block's index; rows with n <= TOPB (the
-// identity list) score nothing.
+// q4_qsa_score over the row's half `part` (the card's rank), each score its arithmetic at its block's index; rows
+// with n <= TOPB (the identity list) score nothing.
 __attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))
 __kernel void q4_qsa_score_tp(__global const uint* restrict ctrl, __global const float* restrict idx_q,
                               __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride,
