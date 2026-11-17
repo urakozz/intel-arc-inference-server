@@ -1,7 +1,7 @@
 // P-A: our own OpenCL C bf16 DPAS GEMM (`pf_gemm_bf16.cl`) on the Level Zero
 // list, timed, and checked against the sampled host reference. Until 2026-10-27 it was
 // also timed and checked against `gemm_bf16` (sycl-tla, the C2 control); that arm left with
-// the sycl-tla backend (operator ruling) and the recorded comparison stands.
+// the sycl-tla backend and the recorded comparison stands.
 //
 // Pre-registration: docs/08-decode-vs-prefill.md ("How prefill got here")
 // (folded there), committed before this file was built or run. Protocol: 8

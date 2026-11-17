@@ -252,7 +252,7 @@ inline size_t gate_up_block_words() { return size_t(2 * kInter / 16) * (kHidden 
 inline size_t down_block_words() { return size_t(kHidden / 16) * (kInter / 64) * 136; }
 
 // h [7][512] bf16: slot j < 6 the routed expert ids[j] (layout-1 blocks), slot 6 the shared expert (its own
-// int4 layout-1 block, operator ruling 2026-10-31); h = rne(f32(rne(silu(f32(rne(Σ gate))))) · f32(rne(Σ up))).
+// int4 layout-1 block, ruling 2026-10-31); h = rne(f32(rne(silu(f32(rne(Σ gate))))) · f32(rne(Σ up))).
 inline std::vector<uint16_t> gate_up(const uint32_t* ids, const uint16_t* x, const uint32_t* gu,
                                      const uint32_t* sh_gu, uint32_t up_ks) {
   std::vector<uint16_t> h(size_t(kSlots) * kInter);

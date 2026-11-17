@@ -13,7 +13,7 @@
 #   quant  AutoRound (tools/quantize/qwen4exp/autoround_run.py): W4A16, group 64, symmetric, format
 #          auto_round:auto_gptq, tuned sign-SGD ITERS (200) on NSAMPLES (128) x SEQLEN (2048) rows of DATASET
 #          (nvidia/OpenCodeInstruct through the chat template, from the HF cache; refused if any of its 50
-#          parquet shards is missing - operator 2026-11-12: the model is for agentic coding), low CPU memory (the fused-MoE checkpoint
+#          parquet shards is missing -  the model is for agentic coding), low CPU memory (the fused-MoE checkpoint
 #          is read one block at a time), low GPU memory; on card CARD (1) through tools/gpu_lock.sh, or the box
 #          CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32
 #          files of the calibration activations, 21.5 GB, overwritten each block) - after a stop, `start` again
@@ -39,7 +39,7 @@
 # >= DISK_MIN_GB (300) and PLE_DIR's disk >= 110 GB free (or holds the file already); AutoRound runs in a systemd scope capped at RAM_CAP_GB
 # (115) with no swap, so a memory overrun kills the run (resumable) instead of the box.
 #
-# AutoRound: the LATEST of the operator's fork ~/auto-round (AR_REPO), not a fixed pin (operator 2026-11-13): the hash
+# AutoRound: the LATEST of our fork ~/auto-round (AR_REPO), not a fixed pin: the hash
 # branch AR_REF (local-patches-v2) has when `start` or `run` begins, resolved by tools/quantize/ar_latest.sh: upstream
 # main + one local commit that reads OpenCodeInstruct's cached parquet and loads snapshots local-only (the commit
 # is only in that clone); no patch file (AR_PATCH=0): the BOS/EOS fix of auto-round-local.patch is
@@ -80,7 +80,7 @@ SITE="${SITE:-$HOME/.cache/q4exp-site-py312}"
 DATASET="${DATASET:-nvidia/OpenCodeInstruct:apply_chat_template}"
 . "$HERE/quantize/ar_latest.sh"     # AR_COMMIT = the latest AutoRound (branch AR_REF of AR_REPO), see there
 CURRENT="$QUANT_ROOT/flash-next-current"
-# HEAD=bf16 (default, operator 2026-11-12): lm_head stays bf16 in the export and the engine builds its int8 head at load,
+# HEAD=bf16 (default): lm_head stays bf16 in the export and the engine builds its int8 head at load,
 # as for Qwen3.8 - no RTN int4 head; HEAD=int4 runs the head stage (RTN g64, head_rtn.py) instead.
 HEAD=${HEAD:-bf16}
 STAGES=(quant scales bf16 head ple check)
@@ -158,7 +158,7 @@ stage_check() {
 
 ## Quantisation provenance
 
-- tool: auto-round at \`$AR_COMMIT\` (the operator's fork, branch \`$AR_REF\`: intel/auto-round main \`$AR_BASE\` + the cached-OpenCodeInstruct commit; version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)'))
+- tool: auto-round at \`$AR_COMMIT\` (our fork, branch \`$AR_REF\`: intel/auto-round main \`$AR_BASE\` + the cached-OpenCodeInstruct commit; version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)'))
 - recipe: \`tools/quantize/quantize_qwen4exp.sh\` - W4A16, group 64, symmetric, format
   auto_round:auto_gptq, $( [ "$ITERS" = 0 ] && echo "RTN weighted by the activation importance (imatrix) of" || echo "tuned: $ITERS iterations on") $NSAMPLES x $SEQLEN rows of \`$DATASET\`, batch $BATCH;
   kept bf16: routers, hyper-connections, shared_expert_gate, GDN in_proj_a / in_proj_b, the QSA indexer, the

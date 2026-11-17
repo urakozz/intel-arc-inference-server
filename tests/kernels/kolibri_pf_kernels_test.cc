@@ -378,7 +378,7 @@ Walked moe_walk(Dev& dv, MoeBufs& b, uint32_t C) {
 void moe_block(Dev& dv, const std::vector<uint16_t>& x, const std::vector<uint32_t>& routes, uint32_t C) {
   const std::vector<uint32_t> gu = rblocks(kr::gate_up_block_words() * kk::kExperts, 40),
                               dn = rblocks(kr::down_block_words() * kk::kExperts, 41);
-  // the shared expert: its own int4 blocks (operator ruling 2026-10-31)
+  // the shared expert: its own int4 blocks
   const std::vector<uint32_t> sgu = rblocks(kr::gate_up_block_words(), 42), sdn = rblocks(kr::down_block_words(), 43);
   const uint32_t T = kp::tmax(kC), R = T * kk::kPfTm;
   MoeBufs b{dv.up(x), dv.up(routes), dv.zeros(kp::hdr_words() * 4), dv.zeros(size_t(T) * 8), dv.zeros(size_t(R) * 4),

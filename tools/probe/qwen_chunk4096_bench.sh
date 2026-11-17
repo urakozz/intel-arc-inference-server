@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # On the box, from the branch tree's root: Qwen3.8 `l0` prompt pass, one card - main's build at
 # `--prefill-chunk A` against this tree's build at `--prefill-chunk B`, interleaved pairs after a
-# warm-up (record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md, section 6).
+# warm-up.
 # Usage: qwen_chunk4096_bench.sh CARD MAIN_TREE ROUNDS "LENGTHS" [A B] [BACKEND] [PROFILE]
 #   PROFILE=1 adds one B70_PREFILL_PROFILE=1 run per length and arm after the rounds.
 # Takes `tools/gpu_lock.sh card CARD` itself, once for the whole series.

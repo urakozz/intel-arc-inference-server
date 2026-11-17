@@ -76,7 +76,7 @@ int main() {
       CHECK(v.find("_M" + std::to_string(M) + "_") != std::string::npos);
       CHECK_EQ(kernels::small_m_tuning(t.K, t.N, t.S, t.layout), &t);
     }
-  // Ornith (the operator's 28b addition): its dense int4 projections and int8 head on gemm_sm at its verify
+  // Ornith (the 28b addition): its dense int4 projections and int8 head on gemm_sm at its verify
   // lists' M = 2..4, gemv at M = 1; the consumer's S unchanged.
   const model::ModelDesc& o = model::ornith();
   for (LinearId id : {LinearId::Qkv, LinearId::OProj, LinearId::QkvZ, LinearId::OutProj, LinearId::AB}) {

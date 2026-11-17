@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The ids of a chat-formatted Kolibri-1 golden prompt (spec 20c Task 1 Step 6).
 
     kolibri_chat_ids.py <snapshot> <prompt.json>    -> ids, whitespace-separated, on stdout
@@ -39,7 +39,7 @@ def main() -> None:
                                    tokenize=False, **kw)
     ids = tok(text, add_special_tokens=False)["input_ids"]
     if tok.bos_token_id is not None and ids and ids[0] == tok.bos_token_id:
-        raise SystemExit("the template rendered a BOS; Kolibri-1 has none (docs/probes/probe-kolibri-2026-10-05.md)")
+        raise SystemExit("the template rendered a BOS; Kolibri-1 has none")
     print(f"{a.prompt}: {len(ids)} ids", file=sys.stderr)
     print(" ".join(str(i) for i in ids))
 

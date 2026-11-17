@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """A synthetic Qwen3.8-Flash-Next (`qwen4_exp`) checkpoint at the REAL widths (spec 21b Task 1).
 
     make_synth.py <out-dir> --form ours|intel --tokenizer <dir> [--config <config.json>] [--layers 4]

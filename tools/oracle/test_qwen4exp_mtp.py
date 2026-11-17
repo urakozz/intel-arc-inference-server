@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Spec 21a Task 4: the MTP head port (qwen4exp_mtp.py) held to an independent build and to vLLM's points.
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/test_qwen4exp_mtp.py [test_name ...]

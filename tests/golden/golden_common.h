@@ -279,7 +279,7 @@ std::vector<uint32_t> read_ids(const std::string& path) {
 }
 bool exists(const std::string& p) { return std::ifstream(p).good(); }
 
-// ---- the f32 judge (operator ruling 2026-10-23, Ornith) -----------------------------------
+// ---- the f32 judge (Ornith) -----------------------------------
 // The bf16 golden rounds where HF's bf16 model rounds; on Ornith its own determined rows
 // disagree with exact arithmetic on the same weights (box 2026-10-23: Ornith prose 18, cjk 14,
 // code 3), and the engine took exact arithmetic's token at the rows it "failed". So
@@ -287,7 +287,7 @@ bool exists(const std::string& p) { return std::ifstream(p).good(); }
 // float32, every generated step forced to the bf16 golden's token (ornith_ref.py --dtype f32
 // --force; tools/box_validate/f32_oracle.sh), so its logits rows
 // are the bf16 golden's contexts row for row - with the tie rule applied to ITS logits, widened
-// by the operator's second ruling of the day to a top-2 gap within one bf16 ulp (judge_row
+// by the second ruling of the day to a top-2 gap within one bf16 ulp (judge_row
 // below). The bf16 golden stays a printed diagnostic beside it. Qwen3.8's
 // gates take no judge and are unchanged.
 //
@@ -310,7 +310,7 @@ std::string take_flag(int& argc, char** argv, const std::string& prefix) {
 }
 std::string take_judge(int& argc, char** argv) { return take_flag(argc, argv, "--judge="); }
 
-// ---- accepted rows (operator ruling 2026-10-23, the fourth) -------------------------------
+// ---- accepted rows (the fourth) -------------------------------
 // `--accept=<prompt>:<step>,...`: rows KNOWN to diverge from the judge, to be debugged on
 // 2026-10-26. Such a row, if it fails, prints kAcceptNote with its gap and does not fail the test;
 // any other failing row still does; an accepted row that passes prints "accepted row now passes -
@@ -324,7 +324,7 @@ std::string take_judge(int& argc, char** argv) { return take_flag(argc, argv, "-
 //     leave the state's distance to f32 flat (0.996 prose) and flip the rows non-monotonically
 //     (prose 18 wrong at 32 and 16, right at 8 and 2048) - chunk-boundary rounding of the GDN scan.
 //   cjk 15 is a 3-4-way f32 near tie (four ids within 0.31) that different variants resolve differently.
-// An entry may name the engine's id too, `prompt:step=id` (item 30 (4), operator 2026-11-15: `cjk:15=99737`): it
+// An entry may name the engine's id too, `prompt:step=id` (item 30 (4),  `cjk:15=99737`): it
 // then accepts that id at that row only; without `=id` any id.
 constexpr const char* kAcceptNote = "ACCEPTED (known divergence, 2026-10-23, debug 2026-10-26)";
 struct AcceptList {
@@ -364,7 +364,7 @@ struct Judge {
   explicit operator bool() const { return g != nullptr; }
   const float* row(uint32_t r) const { return logits + size_t(r) * V; }
 };
-// The judge's decision row (operator ruling 2026-10-23, the second): an f32 row whose top-2 gap
+// The judge's decision row (the second): an f32 row whose top-2 gap
 // is within ONE bf16 ulp of its top logit counts as a tie - the set is every id within one ulp
 // of the top, and the engine passes the row if its id is in it. The ulp is
 // prefill_gate_test.cc's bf16_near_tie's: the spacing of bf16 values at |top|, 2^(e - 8) with
@@ -401,7 +401,7 @@ JudgedRow judge_row(const float* row, uint32_t n, uint32_t used) {
   return j;
 }
 
-// ---- the end of turn (item 30 (3), operator 2026-11-15) -----------------------------------
+// ---- the end of turn (item 30 (3)) -----------------------------------
 // A real server stops at the model's end-of-turn id and sends it; the tests force a fixed length (ignore_eos), so a
 // generated stream can run on past it into text no server sends. Every judge grades a generated stream only up to
 // and including its first end-of-turn id: the rows after it are not graded and not counted as misses, and a row the

@@ -7,7 +7,7 @@
 
 The cache entry `<hot>/models--X` is a real folder (hot) or a symlink to `<cold>/models--X` or
 `<archive>/models--X`. Every command copies first, verifies, then swaps the entry; what it
-replaces goes to that disk's trash (`<disk>/trash/<date>/hf-tier/`) for the operator to delete.
+replaces goes to that disk's trash (`<disk>/trash/<date>/hf-tier/`) for the owner to delete.
 Nothing is ever deleted here, except an empty folder (a former bind-mount point) and the entry's
 own symlink when it is replaced.
 
@@ -767,7 +767,7 @@ def cmd_status(st):
             print("%-8s %s: not there (disk not mounted?)" % (t, r))
     for t in ("hot", "cold", "archive"):
         if os.path.isdir(st.trash[t]):
-            print("trash    %s waits for the operator" % st.trash[t])
+            print("trash    %s waits for the owner" % st.trash[t])
 
 
 def main():

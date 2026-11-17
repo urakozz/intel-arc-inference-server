@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
       std::printf("  first difference at id %zu: past end of turn (row %zu): not graded (golden_common.h turn_end)\n",
                   v.at, v.at);
     } else if (v.v == greedy_tie::Verdict::Diverged) {
-      // The f32 judge decides (operator ruling 2026-10-29; tests/golden/forced_judge.h): the context is the prompt
+      // The f32 judge decides (tests/golden/forced_judge.h): the context is the prompt
       // and TP's own ids, the judge's row v.at the decision of TP's id there. Without a judge the case awaits one.
       const golden::ForcedJudge fj;
       std::vector<uint32_t> prompt = c.first;
@@ -296,8 +296,8 @@ int main(int argc, char** argv) {
           golden::judge_explain(*judge, row, r.ids[row], model::Qwen35::kVocab, model::Qwen35::kVocabUsed, "one card's");
         std::printf("  the f32 judge at id %u: tp's %u %s, one card's %u %s\n", row, g.ids[row],
                     tp_ok ? "accepted" : "REJECTED", r.ids[row], ref_ok ? "accepted" : "rejected");
-        // Open-work 30 (2): each engine's distance from the judge over the rows both decide on one context (1..row;
-        // docs/probes/probe-tp-verify-m24-2026-11-14.md's table) - printed, not gated. Row 0 has no recorded row.
+        // Open-work 30 (2): each engine's distance from the judge over the rows both decide on one context (1..row)
+        // - printed, not gated. Row 0 has no recorded row.
         if (row > 0) {
           const uint32_t V = model::Qwen35::kVocab, VU = model::Qwen35::kVocabUsed;
           const float* jl = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * V);

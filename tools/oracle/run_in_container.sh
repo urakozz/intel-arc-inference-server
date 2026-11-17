@@ -16,11 +16,11 @@
 # container gets NO swap (--memory X --memory-swap X), so a CPU job can never
 # push the box into swap - at its cap the kernel kills the job inside its own
 # container (exit 137) and nothing else on the box notices. On the box (Linux)
-# X is ORACLE_MEMORY, default 64g (operator 2026-11-08: 64 GiB beside GPU work): the box has 121 GiB; one GPU job's host side
+# X is ORACLE_MEMORY, default 64g (64 GiB beside GPU work): the box has 121 GiB; one GPU job's host side
 # was measured at ~52 GiB (2026-11-06 19:40-20:30, sar: pinned prefix cache up
 # to 32 GiB + weight staging in the driver), plus ~3 GiB for the OS and ~10 GiB
 # of page cache for the GPU job's weight reads. A run that truly needs more says
-# so (ORACLE_MEMORY=110g, at most MemTotal - 9 GiB: 4 for the OS + 5 buffer, operator 2026-11-08) and gets it only with the
+# so (ORACLE_MEMORY=110g, at most MemTotal - 9 GiB: 4 for the OS + 5 buffer) and gets it only with the
 # cards idle: it takes the whole-box GPU lock (~/b70-gpu.lock, exclusive,
 # non-blocking) for its whole run, so no GPU job starts beside it, and it is
 # REFUSED (exit 75) while any GPU job holds that lock - never queued, so a

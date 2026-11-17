@@ -32,7 +32,7 @@
 // prefill's own per-layer rows of that chunk (KolibriEngine::read_prefill_tap). The 32 teacher-forced steps
 // after it are decode's, as before.
 //
-// **The f32 judge (operator ruling 2026-10-31, round 2; `--judge=<dir>`)**: kolibri_ref.py run --mode f32 --force
+// **The f32 judge (round 2; `--judge=<dir>`)**: kolibri_ref.py run --mode f32 --force
 // <the golden's tokens> (tools/box_validate/kolibri_oracle.sh synth-f32 | real-f32), its rows the golden's contexts.
 // The engine passes when it is no further from f32 than the bf16 golden, over all prompts together (the synthetic
 // checkpoints' 5 random layers are chaotic: the bf16 golden itself misses 15 / 32 of prose's rows against f32 and
@@ -45,7 +45,7 @@
 //            kCosSlack (2) of the golden's cosine distance - the per-layer median, not one worst row (the minima
 //            printed beside).
 // The EAGER attention (B70_KOLIBRI_ATTN=eager; flash is Kolibri's default) is DIAGNOSTIC under the judge
-// (operator ruling 2026-10-29: eager prints, never binds) - the verdicts printed, the test does not fail on them.
+// (eager prints, never binds) - the verdicts printed, the test does not fail on them.
 //
 // argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [prefill | prefill:<chunk>] [--judge=<dir>]
 //       [--tap-at=layer | attn] [--tap-dump=<dir>]
@@ -130,7 +130,7 @@ void compare_route(const uint32_t* row, const int32_t* want_ids, const float* wa
 
 }  // namespace
 
-// The (row, layer) expert sets against the judge's (operator ruling 2026-10-31, round 2): the engine's and the bf16
+// The (row, layer) expert sets against the judge's (round 2): the engine's and the bf16
 // golden's, each a set difference or not.
 struct JudgedRoutes {
   uint64_t rows = 0, engine = 0, golden = 0;
@@ -149,7 +149,7 @@ struct JudgedRoutes {
 };
 
 int main(int argc, char** argv) {
-  const std::string judge_dir = golden::take_judge(argc, argv);   // operator ruling 2026-10-31, round 2 (header)
+  const std::string judge_dir = golden::take_judge(argc, argv);   // ruling 2026-10-31, round 2 (header)
   const std::string tap_dump = golden::take_flag(argc, argv, "--tap-dump=");   // debug (header)
   const std::string tap_at = golden::take_flag(argc, argv, "--tap-at=");
   const std::string arg = argc > 1 ? argv[1] : "";
@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
     std::puts("kolibri_golden_test OK");
     return 0;
   }
-  // Operator ruling 2026-10-31 (round 2; the header): no further from f32 than the bf16 golden.
+  // Ruling 2026-10-31 (round 2; the header): no further from f32 than the bf16 golden.
   const bool tok_ok = nm.verdict("tokens (every prompt)", "engine's");
   const bool route_ok = jroutes.engine <= jroutes.golden;
   std::printf("routing against the f32 judge: %llu (row, layer) sets - the engine's differ at %llu, the bf16 golden's "
@@ -383,7 +383,7 @@ int main(int argc, char** argv) {
   bool tap_ok = true;
   {
     // Prefill: the prompt rows the prefill wrote (KolibriEngine::read_prefill_tap), PRINTED at the same slack - the
-    // operator's prefill gates are tokens and routing (ruling 2026-10-31, round 2); the tap is the diagnostic that
+    // the prefill gates are tokens and routing (ruling 2026-10-31, round 2); the tap is the diagnostic that
     // found the bf16-P attention (2026-11-01).
     std::printf("tap against the f32 judge, per layer: median (min) cosine, the engine's / the bf16 golden's - the "
                 "medians' distance ratio %s at %.1f\n", prefill ? "printed (prefill: not gated)" : "gated",
@@ -398,7 +398,7 @@ int main(int argc, char** argv) {
                   lok ? "" : prefill ? "  (above the slack)" : "  ** FAIL **");
     }
   }
-  if (eng.attention() == runtime::kolibri::KolAttn::Eager) {   // operator ruling 2026-10-29 (the header)
+  if (eng.attention() == runtime::kolibri::KolAttn::Eager) {   // ruling 2026-10-29 (the header)
     std::printf("eager attention: DIAGNOSTIC - tokens %s, routing %s, tap %s; recorded, not gated\n",
                 tok_ok ? "kept" : "missed", route_ok ? "kept" : "above the bar", tap_ok ? "kept" : "above the slack");
     std::puts("kolibri_golden_test OK");

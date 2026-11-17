@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Tests of the DFlash drafter quantisation tooling on a tiny random drafter (no AutoRound, ~1 min):
 
 - the calibration model (model.py) on calib.py's samples = dflash_ref's context plane and

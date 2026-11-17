@@ -57,7 +57,7 @@ _dequant = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_dequant)
 dequant_gptq = _dequant.dequant_gptq
 # tools/oracle/cpu_bf16.py: fp32 GEMMs rounded once to bf16 - the box CPU has no bf16 units, and torch's own bf16
-# GEMM runs single-threaded ~1000x slower. On by default for new references (operator 2026-11-03); the goldens made
+# GEMM runs single-threaded ~1000x slower. On by default for new references; the goldens made
 # before 2026-11-12 used torch's bf16 GEMM and are reproduced with --no-exact-bf16-gemm.
 _spec = importlib.util.spec_from_file_location("cpu_bf16", os.path.join(_HERE, "cpu_bf16.py"))
 cpu_bf16 = importlib.util.module_from_spec(_spec)

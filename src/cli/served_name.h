@@ -1,6 +1,6 @@
 #pragma once
 // The model name b70-serve answers to (/v1/models, the responses' `model` field) - derived from the model the
-// operator named, as vLLM serves its --model argument (the zero-config cleanup, operator 2026-11-06, removed
+// user named, as vLLM serves its --model argument (the zero-config cleanup, removed
 // --served-name):
 //
 //   an HF repo id ("org/name")                          as given

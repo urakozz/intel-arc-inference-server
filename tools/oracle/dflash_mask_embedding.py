@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Convert a DFlash drafter's `mask_embedding.pt` into `mask_embedding.safetensors` (spec 19b).
 
 vLLM's qwen3_dflash.py `_read_mask_embedding` reads an optional `mask_embedding.pt` beside the drafter: a tensor, or

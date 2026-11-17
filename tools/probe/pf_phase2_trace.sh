@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 2 Task 1 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): the per-launch
+# Phase 2 Task 1: the per-launch
 # prefill trace of Ornith at pp4096 on one card, l0 and l0-int8 (B70_PREFILL_PROFILE=2), two
 # rounds each. Run ON THE BOX from the repo root, under the card's lock:
 #   tools/gpu_lock.sh card 0 -- tools/probe/pf_phase2_trace.sh [N] [snapshot]

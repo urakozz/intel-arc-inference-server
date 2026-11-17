@@ -8,12 +8,12 @@
 // first box run, printed per layer); routing: kolibri_golden_test's rule (a set difference beyond a
 // near-tie at B70_KOL_TIE_TOL fails).
 //
-// **The f32 judge (operator ruling 2026-10-31, round 2; `--judge=<dir>`, kolibri_oracle.sh real-f32)**: the engine
+// **The f32 judge (round 2; `--judge=<dir>`, kolibri_oracle.sh real-f32)**: the engine
 // passes when it is no further from f32 than the bf16 golden - per layer, the MEDIAN over every prompt row of the
 // tap's cosine to the judge's residual within kCosSlack (2, forced_judge.h) of the golden's own cosine distance (the
 // minima printed beside: one row's number); routing, the (row, layer) sets differing from the judge's no more often
 // than the golden's do. The proposed bars above are then printed, not gated. Under B70_KOLIBRI_ATTN=eager (flash
-// is the default) the judge's verdicts are DIAGNOSTIC, printed, not gated (operator ruling 2026-10-29).
+// is the default) the judge's verdicts are DIAGNOSTIC, printed, not gated.
 //
 // argv: <real checkpoint> <oracle-out-kolibri> [N] [--judge=<dir>]. Exit 77 (SKIP) without the checkpoint (spec
 // 20b), the golden set (kolibri_oracle.sh real) or, given, the judge.
@@ -53,7 +53,7 @@ std::vector<uint32_t> ids_of(const T* p, uint32_t k, bool sorted = false) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string judge_dir = golden::take_judge(argc, argv);   // operator ruling 2026-10-31, round 2 (header)
+  const std::string judge_dir = golden::take_judge(argc, argv);   // ruling 2026-10-31, round 2 (header)
   const std::string arg = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-kolibri";
   const uint32_t N = argc > 3 ? uint32_t(std::strtoul(argv[3], nullptr, 10)) : 30;
@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
     std::puts("kolibri_partial_test OK");
     return 0;
   }
-  // Operator ruling 2026-10-31 (round 2; the header): no further from f32 than the bf16 golden.
+  // Ruling 2026-10-31 (round 2; the header): no further from f32 than the bf16 golden.
   std::printf("against the f32 judge %s, per layer: median (min) cosine, the engine's / the bf16 golden's - the medians' "
               "distance ratio gated at %.1f\n", judge_dir.c_str(), golden::kCosSlack);
   for (uint32_t l = 0; l < N; ++l) {
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
   std::printf("routing against the f32 judge: %llu (row, layer) sets - the engine's differ at %llu, the bf16 golden's "
               "at %llu (the bar)%s\n", (unsigned long long)rows, (unsigned long long)jdiff_e,
               (unsigned long long)jdiff_g, jdiff_e <= jdiff_g ? "" : "  ** FAIL **");
-  if (eng.attention() == runtime::kolibri::KolAttn::Eager) {   // operator ruling 2026-10-29 (the header)
+  if (eng.attention() == runtime::kolibri::KolAttn::Eager) {   // ruling 2026-10-29 (the header)
     std::printf("eager attention: DIAGNOSTIC - taps %s, routing %s; recorded, not gated\n", ok ? "kept" : "above the slack",
                 jdiff_e <= jdiff_g ? "kept" : "above the bar");
     std::puts("kolibri_partial_test OK");

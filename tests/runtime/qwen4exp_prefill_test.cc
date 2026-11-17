@@ -37,13 +37,13 @@
 //        gap is at least one bf16 ulp of the top logit agrees; teacher-forced on decode's;
 //     7. the injected run chunked == whole, bitwise: a fixed valid selection (the last 512 complete blocks + the tail)
 //        fed by set_prefill_injector, one call against chunks of 64.
-//     **A truncated real checkpoint (`layers:N`; operator ruling 2026-11-08, A', until Flash-Next's f32 reference - B):**
+//     **A truncated real checkpoint (`layers:N`; ruling 2026-11-08, A', until Flash-Next's f32 reference - B):**
 //     the model cut to N layers has near-flat logits and its sparse selections flip with rounding, so the same engine
 //     moves as far between chunks of 16 and 2048 (step 3, rounding only) as between prefill and decode. Step 4's state
 //     bars become that control's: each of the first QSA layer's worst, the median and p01 within 2x the control's
 //     cosine distance (the 2026-11-01 slack); step 6 gates the last logits the same way (prefill vs decode within 2x
 //     the control's distance) and prints the tokens; step 5's routing and selections are printed, not gated.
-//     With judge:<file>, the relative count rule applies (operator 2026-11-10): f32-rejected routes on prefill
+//     With judge:<file>, the relative count rule applies: f32-rejected routes on prefill
 //     <= 1.2x decode's total over all prompt/generated layer-position decisions; prefill's accepted tokens >=
 //     decode's. Both paths use golden's one-bf16-ulp token judge on the same teacher-forced continuation.
 //     State, logits, route-set and selection distances are printed diagnostics, with no distance-ratio gate.

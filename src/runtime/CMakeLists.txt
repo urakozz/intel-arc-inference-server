@@ -18,7 +18,8 @@
 # are the same functions, and the planner's test runs on any host.
 add_library(b70_plan STATIC buffer_sizes.cc memory_plan.cc pipeline_plan.cc
             pipeline_prefill_plan.cc    # spec 16c: the two-card prefill pipeline's order
-            tp_plan.cc)                 # spec 17b: a tensor-parallel card's plan
+            tp_plan.cc                  # spec 17b: a tensor-parallel card's plan
+            vram_bars.cc)               # the startup log's VRAM chart per card
 target_include_directories(b70_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_plan PUBLIC b70_model)
 

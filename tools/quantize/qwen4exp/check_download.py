@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Is the bf16 original completely downloaded? (tools/quantize/quantize_qwen4exp.sh check-download)
 
     check_download.py [--repo Qwen/Qwen3.8-Flash-Next] [--sha] [--jobs 4]

@@ -16,14 +16,14 @@
 //      Needs `router_logits.L{l}` [rows][256] (and `shared_gate_logits.L{l}` [rows][1]
 //      for the shared gate) in the golden dumps - spec 15a's oracle writes them
 //      beside the usual tensors; without them R2 is skipped with a message.
-//      With `--judge=<dir>` (operator ruling 2026-10-23: Ornith's gates are judged by the
+//      With `--judge=<dir>` (Ornith's gates are judged by the
 //      f32 teacher-forced reference, tools/box_validate/f32_oracle.sh) the reference route
 //      is the f32 dump's: its router logits (F32) through the same formula, teacher-forced on
 //      the same tokens, and a near-tie is an 8th / 9th LOGIT gap within one bf16 ulp of the
 //      8th (golden_common.h's bf16_ulp_at: the engine rounds router logits to bf16 before the
 //      softmax, so a smaller gap may round either way). Beside it the bf16 golden's own
 //      routes are judged by the same rule - the reference's distance from exact arithmetic -
-//      and that is the bar (operator, 2026-10-28): the engine's differing sets no more than the
+//      and that is the bar: the engine's differing sets no more than the
 //      bf16 golden's (measured: 1873 vs 1949 of 9480); the matched weights are printed (worst
 //      0.534 both - the 1e-3 weight bar the bf16 golden itself misses 44789 times).
 //
@@ -338,10 +338,10 @@ int main(int argc, char** argv) {
       CHECK_EQ(c.bad_sets, uint64_t(0));
       CHECK_EQ(c.bad_weights, uint64_t(0));
     } else {
-      // Operator, 2026-10-28: against the f32 judge the engine passes when its distance to f32 is no larger than
+      // against the f32 judge the engine passes when its distance to f32 is no larger than
       // the bf16 golden's own - the differing sets (the matched weights' worst error printed beside, not gated).
       const bool ok = c.bad_sets <= c.ref_bad;
-      std::printf("R2 gate (operator, 2026-10-28): engine %llu differing sets vs the bf16 golden's %llu, weights worst "
+      std::printf("R2 gate: engine %llu differing sets vs the bf16 golden's %llu, weights worst "
                   "%.3e vs %.3e%s\n", (unsigned long long)c.bad_sets, (unsigned long long)c.ref_bad,
                   double(c.worst_w), double(c.ref_worst_w), ok ? "" : "  ** FAIL **");
       CHECK(c.bad_sets <= c.ref_bad);

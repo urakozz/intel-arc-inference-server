@@ -49,7 +49,7 @@ inline constexpr uint32_t kHeadDim = model::Qwen35::kFaHeadDim;   // 256
 // backends (the argument is kept for the call sites that name it).
 inline uint32_t attn_rows(uint32_t C, PrefillBackend) { return pad256(C); }
 
-// Spec S3 (`docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §3): each kv
+// Spec S3: each kv
 // group's QK^T is issued in row blocks of `kPfGemmTile`, so block b computes only the columns
 // causality can reach (`pad256(pos + r1)`) instead of the whole padded depth. P·V is NOT
 // blocked -- attn.cc records the occupancy measurement that rejected it.

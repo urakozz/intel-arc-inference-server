@@ -284,7 +284,7 @@ def build_id(tree):
 
 def kernel_series(release):
     """7.4.0-070400rc2-generic -> 7.4: a release candidate or a patch release of one series is the same machine
-    (operator 2026-11-12: a kernel update must not cost a full re-run); a new series (7.5) is not."""
+    (a kernel update must not cost a full re-run); a new series (7.5) is not."""
     m = re.match(r"\d+\.\d+", release or "")
     return m.group(0) if m else release
 

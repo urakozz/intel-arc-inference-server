@@ -1,5 +1,5 @@
 #pragma once
-// The hardware gate (the zero-config cleanup, operator 2026-11-06): b70-serve and b70-decode run on one or two
+// The hardware gate (the zero-config cleanup): b70-serve and b70-decode run on one or two
 // Intel Arc Pro B70 cards, with peer access between them when there are two - checked once at startup, before
 // a model file is read, and refused by name otherwise. What it reads comes from the devices themselves
 // (l0::Context::gpu_infos: PCI ids, Xe-cores, memory), never from a constant. This header is the rule

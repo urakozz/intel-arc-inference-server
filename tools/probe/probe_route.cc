@@ -1,14 +1,14 @@
-// probe_route - phase 2 Task 6 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): pf_route.cl's
+// probe_route - phase 2 Task 6: pf_route.cl's
 // pf_gemv_rows tilings against today's pf_ab_proj binaries at Ornith's two prefill GEMV shapes - the router ||
 // shared gate (K 2048, N 272) and a||b (K 2048, N 128) - at M = 2048 rows of random bf16. Every arm memcmp'd
 // against the control (it must be bitwise), then timed: interleaved rounds after a warm-up, median, L0 global
-// timestamps. Record: docs/probes/probe-prefill-phase2-2026-11-12.md.
+// timestamps. 
 //
-// Phase 3 Task 1 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase3.md): arm `gemm` - the same two linears
+// Phase 3 Task 1: arm `gemm` - the same two linears
 // on the dense DPAS GEMM `pf_gemm` (bf16 weight re-laid [N][K] -> [K][N], zero-padded to N 512 / 256). It is NOT
 // bitwise the GEMVs (a DPAS reduction order); printed instead: max |logit - control| and, for the router, the
 // number of rows whose top-8 expert set (of the 256 routed experts) differs from the control's. Timed beside the
-// bound GEMV (MT16 TC2) at M = 2048 and 4096. Record: docs/probes/probe-prefill-phase3-2026-11-13.md.
+// bound GEMV (MT16 TC2) at M = 2048 and 4096. 
 //
 //   probe_route [--rounds 9] [--rows 2048,4096]
 #include <algorithm>

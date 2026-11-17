@@ -1558,7 +1558,7 @@ class DriverTest(unittest.TestCase):
                              ("r16.tokdiff", "x.rest")):
             self.assertLess(order.index(first), order.index(later), (first, later))
         for optin in ("r16.mtp_rows", "r16.passkey", "r16.benchy", "r16.a4",
-                      # timed, opt-in since 2026-11-07 (the operator's ruling: the quiet-box session runs them)
+                      # timed, opt-in since 2026-11-07 (the quiet-box session runs them)
                       "r2.cost", "r3.readme", "r8.cost", "r8.rows", "r11.speed", "r16.cost", "r22.s1", "r76.speed",
                       "r36.copy", "r36.zc", "r36.hostbw"):
             self.assertNotIn(optin, order)

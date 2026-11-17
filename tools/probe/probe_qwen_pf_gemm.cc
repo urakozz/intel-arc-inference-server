@@ -1,6 +1,6 @@
 // probe_qwen_pf_gemm - Qwen3.8's bf16 prefill linears (the `l0` slab walk: per 1024-column slab
 // pf_dequant_slab, then pf_gemm) at a full chunk, against candidate arms built from the same sources
-// with one define each. Record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md.
+// with one define each. 
 //
 // The walk is probe_prefill_split's (3i's distinct-layer walk: one live allocation of independent
 // synthetic weights per layer of each of the five int4 linear families, visited in ascending order).
@@ -55,7 +55,7 @@ using runtime::prefill::PtrArg;
 
 constexpr uint32_t kNs = kernels::kPfSlabWidth;
 constexpr uint32_t kMaxRows = 4096;
-constexpr double kPeak = 183.45;   // TFLOP/s, bf16 DPAS (probe_dpas_rate, docs/probes/probe-prefill-chunk-split-2026-11-10.md)
+constexpr double kPeak = 183.45;   // TFLOP/s, bf16 DPAS (probe_dpas_rate)
 
 struct Shape {
   const char* tag;

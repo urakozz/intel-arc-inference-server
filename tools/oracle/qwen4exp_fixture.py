@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The Qwen3.8-Flash-Next kernel-chain fixture (spec 21c Task 1 Step 3): tools/oracle/qwen4exp_ref.py's OWN
 restated ops (and transformers 5.19.0's qwen4_exp modules where the restated set has no twin) run in bf16 on
 deterministic inputs at the real widths, their outputs written as a C++ header that

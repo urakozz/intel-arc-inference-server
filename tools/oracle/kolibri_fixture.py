@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The Kolibri-1 kernel-chain fixture (spec 20c Task 1 Step 5): tools/oracle/kolibri_ref.py's OWN
 functions run in bf16 mode on deterministic inputs at the real widths, their outputs written as a C++
 header that tests/kernels/kolibri_ref_test.cc holds tests/kernels/kolibri_ref.h to.

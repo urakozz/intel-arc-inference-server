@@ -42,7 +42,7 @@
 #   G0's checks on both cards; the reused baseline and the one-card G0 stages take part of that off - not yet
 #   measured); the full run on demand, hours.
 # Run control:
-#   --baseline REF   G0's reference build (default a52caa8b: main on 2026-11-16, accepted by the operator;
+#   --baseline REF   G0's reference build (default a52caa8b: main on 2026-11-16, accepted;
 #                    `--baseline main` when validating a branch before merging)
 #                    A complete build of the baseline, with its recorded gate outputs, is kept in
 #                    ~/b70-inference-server-g0-<sha> and reused while the commit, build settings, compiler, ocloc
@@ -563,8 +563,8 @@ if [ "$("${SSH[@]}" "$BOX" "$BASE_CHECK_CMD")" != "$BASE_SHA" ]; then
   echo "baseline: extracting $BASELINE_REF ($BASE_SHORT) into ~/$BASE_DIR"
   git archive --format=tar "$BASE_SHA" | "${SSH[@]}" "$BOX" "$BASE_EXTRACT_CMD"
 fi
-# The box's system disk (operator 2026-11-10): a full launch lists the finished branches' trees and old baselines
-# tools/box_tidy.sh would move; the operator runs it (2026-11-12: a launch's tidy moved another tool's live tree).
+# The box's system disk: a full launch lists the finished branches' trees and old baselines
+# tools/box_tidy.sh would move; the owner runs it (2026-11-12: a launch's tidy moved another tool's live tree).
 if [ "$QUICK" = 0 ] && [ "$MERGE" = 0 ]; then tools/box_tidy.sh --dry-run | grep -E '^(would move|system disk)' || true; fi
 echo "launch: $(echo "$SELECTED" | wc -w | tr -d ' ') stages, state ~/$STATE_REL"
 tools/box.sh run "$LAUNCH_CMD"

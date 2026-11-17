@@ -32,7 +32,7 @@ case "$mode" in
       --out /out/acceptance.json --threads 16
     ;;
   d5)
-    # Operator 2026-11-12: existing MTP 73.2 t/s and plain 33.5 t/s; no baseline serving reruns.
+    # existing MTP 73.2 t/s and plain 33.5 t/s; no baseline serving reruns.
     PORT=${PORT:-8213} tools/box_validate/slots_serve_bench.sh "$out/slots" "$target" dflash \
       --max-len 32768 --kv-cache bf16 --spec dflash --draft-model "$drafter" -- --counts 1
     python3 - "$out/slots/bench.jsonl" <<'PY'

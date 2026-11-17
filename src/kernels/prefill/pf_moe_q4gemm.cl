@@ -2,8 +2,7 @@
 // straight from the int4 layout-1 expert blocks. pf_moe_gemm.cl's bf16 form needed every block of the layer
 // converted to bf16 in a separate pass each chunk (pf_moe_dequant_*: 4.9 ms a layer and chunk, the whole array
 // written and read back); here each sub-group converts its own B columns in registers as the k loop reaches them,
-// so only the int4 bytes cross memory. Probe: tools/probe/probe_moe_prefill (docs/probes/probe-moe-prefill-
-// 2026-11-12.md), arm F1.a8b2m1n8.c2 - the record has the other forms measured and why this one.
+// so only the int4 bytes cross memory. Probe: tools/probe/probe_moe_prefill arm F1.a8b2m1n8.c2 - the probe measured the other forms and why this one.
 //
 // pf_moe_q4gemm(items, A, W, W_sh, out): grid (N / WG_N, ibound) - the n-blocks on dimension 0, so a work item's
 // work-groups are dispatched together and read its A rows into L2 once. Work-group (n-block, item) computes the

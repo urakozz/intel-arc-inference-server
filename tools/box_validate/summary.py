@@ -204,7 +204,7 @@ def cmd_report(a):
     for sid, s in stages.items():
         st = read_status(a.state, sid)
         if s["sel"] == "manual":
-            r = dict(result="MANUAL", reason="operator run - commands below")
+            r = dict(result="MANUAL", reason="manual run - commands below")
         elif st is None:
             r = dict(result="OPT-IN" if s["sel"] == "optin" else "NOT RUN",
                      reason="not selected (opt-in)" if s["sel"] == "optin" else "no status in this run")

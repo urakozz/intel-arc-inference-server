@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Calibration samples for the DFlash 2 drafter: blocks of 8 over the QUANTISED target's taps.
 
     data = CalibData(taps_dir, drafter_cfg, target_dir, drafter_dir, nsamples=128, anchors=32, seed=42)

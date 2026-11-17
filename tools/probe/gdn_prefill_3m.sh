@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # On the box, under tools/gpu_lock.sh box: open-work 3m's whole timed measurement, one lock.
-# Record: docs/probes/probe-gdn-prefill-2026-11-10.md.
 #   1. probe_fma_rate (fp32 vector peak), probe_dpas_rate --sweep (bf16 DPAS peak), probe_gdn_scan_occ
 #      (the production scan over the first h heads: residency)
 #   2. b70-decode --bench, l0, bf16 KV, real weights: one warm-up, then three rounds of four arms

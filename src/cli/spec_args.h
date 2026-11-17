@@ -1,12 +1,12 @@
 #pragma once
 // `--spec auto|off|mtp|lookup|dflash|dflash-lookup` and its one cap, `--spec-max K` - the speculative proposer
-// (spec 19 decision 3: one per server), shared by b70-serve and b70-decode. The zero-config cleanup (operator
+// (spec 19 decision 3: one per server), shared by b70-serve and b70-decode. The zero-config cleanup (
 // 2026-11-06) merged the old `--mtp off|K|auto` into it and dropped the tuning flags (--mtp-max, --mtp-cost,
 // --spec-cost, --spec-min-match, --spec-history, --draft-format): the engine uses the measured defaults.
 //
 //   auto           MTP with an adaptive K (spec 8 §10) on the Qwen family (Qwen3.8, Ornith - an MTP head and its
-//                  cost table; operator 2026-11-14: no extra VRAM by default, DFlash only when asked) and on
-//                  Qwen3.8-Flash-Next (operator 2026-11-16: the head beat plain on real text, its own cost table);
+//                  cost table;  no extra VRAM by default, DFlash only when asked) and on
+//                  Qwen3.8-Flash-Next (the head beat plain on real text, its own cost table);
 //                  none elsewhere (Kolibri-1 has no head). b70-serve's default; b70-decode's is off (its auto
 //                  is the MTP rule; Qwen3.8-Flash-Next decodes plain there).
 //   off            no proposer.
@@ -18,7 +18,7 @@
 //   dflash         the DFlash drafter (spec 19c, Qwen3.8 only; --draft-model PATH, required: no default
 //                  drafter, cli/dflash_args.h check_flags says which two): K <= --spec-max (1..7,
 //                  default 7) drafts a block.
-//                  b70-serve on one card folds prompt lookup into it (spec 19f, operator ruling 2026-11-14):
+//                  b70-serve on one card folds prompt lookup into it (spec 19f, ruling 2026-11-14):
 //                  `dflash` there IS `dflash-lookup`; B70_SPEC_LOOKUP=0 turns the fold off (A/B runs).
 //   dflash-lookup  dflash with prompt lookup inside it (spec 19f); a developer value, `dflash`'s one-card default.
 // `lookup` and `dflash-lookup` stay accepted for b70-decode, tests and A/B runs; the user-facing values are auto, off,

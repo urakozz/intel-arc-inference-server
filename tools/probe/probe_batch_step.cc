@@ -1,5 +1,5 @@
 // probe_batch_step - spec 13a (plan 13a Task 2): a decode step whose rows belong to DIFFERENT sequences, on one card.
-// Built by default since plan 13c (tools/probe/CMakeLists.txt); record: docs/probes/probe-batching-2026-10-23.md.
+// Built by default since plan 13c (tools/probe/CMakeLists.txt)
 //
 //   probe_batch_step <snapshot> [--kv bf16|int8] [--mtp on|off] [--slots L0,L1,..] [--deep 32768] [--shallow 4096]
 //                    [--calls 32] [--rounds 3] [--arms a,b,..] [--no-check] [--no-time] [--no-chunks]

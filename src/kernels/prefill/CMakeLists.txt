@@ -116,8 +116,8 @@ endforeach()
 add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
 # Open-work 18: the slab GEMM of a chunk wider than 2048 rows with the work-groups numbered
-# N-fastest (RASTER=1: the same tiles and DPAS chain, so bit-identical;
-# docs/probes/probe-qwen-pf-gemm-2026-11-13.md). Additive: the binaries above keep their command lines.
+# N-fastest (RASTER=1: the same tiles and DPAS chain, so bit-identical).
+# Additive: the binaries above keep their command lines.
 add_ocloc_kernel(pf_gemm_T0_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 RASTER=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
 add_ocloc_kernel(pf_gemm_T0_SILU_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1 RASTER=1
@@ -284,7 +284,7 @@ add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_
 
 # Spec 6 (plan 6b): the fused flash attention, plan 6a's winner pfa_KT64_R16_H6_Q0;
 # spec 6c: RPW 8 (6 sub-groups per work-group) and EXP2=1 (exp2 with the scale folded):
-# the operator enabled exp2 on 2026-09-27 accepting its 7.6e-6 K3a miss on l0 (spec 6 §9).
+# exp2 enabled on 2026-09-27 accepting its 7.6e-6 K3a miss on l0 (spec 6 §9).
 add_ocloc_kernel(pf_flash_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                  DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 OPTIONS -cl-intel-256-GRF-per-thread)
 # 3l (2): the split-K form for short chunks deep in the cache (SPLIT=1: spans of the key range into
@@ -439,7 +439,7 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_flash_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
-  # MoE prefill phase 3 Task 7 (docs/probes/probe-prefill-phase3-2026-11-13.md, arm pfao_KT64_R32_H8_Q1): 32 query rows
+  # MoE prefill phase 3 Task 7 (arm pfao_KT64_R32_H8_Q1): 32 query rows
   # a work-group (4 sub-groups a head share each K / V tile), Q held in registers across key tiles. A sub-group's
   # arithmetic and key order are the line above's, so the output is bitwise; attn_chunk binds it. Ornith only: at
   # Qwen3.8's HPW 6 the same form was slower (plan Task 7 record).

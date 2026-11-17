@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The tensor-parallel twin count (docs/probes/tp-twin-count-2026-11-10.md): every FIRST divergence of each TP path
+"""The tensor-parallel twin count: every FIRST divergence of each TP path
 from its one-card twin and of each pair of one card's own legitimate paths, judged by the f32 judge.
 
   twin_count.py --dir D --dump DIR --judge DIR [--json FILE] [--vocab-used 248077]
@@ -182,7 +182,7 @@ def report(rows, a):
             agree = (rt <= ro) == ok
             why += (f"; per divergence {rt:.3f} vs {ro:.3f}, per pair {t['counted'] / t['pairs']:.4f} vs "
                     f"{o['counted'] / o['pairs']:.4f}" + ("" if agree else " - the normalised rate DISAGREES with "
-                                                                         "the raw count: to the operator"))
+                                                                         "the raw count: report it"))
     print(f"\nTWIN COUNT {verdict}: {why}")
     if a.json:
         with open(a.json, "w") as f:

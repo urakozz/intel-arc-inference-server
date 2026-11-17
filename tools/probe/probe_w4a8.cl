@@ -1,5 +1,4 @@
-// W4A8 probe kernels (pre-registration:
-// docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md).
+// W4A8 probe kernels.
 //
 // TWO entry points in one binary:
 //   pw4a8_quant  -- dynamic per-token symmetric int8 quantisation of the bf16
@@ -29,7 +28,6 @@
 //
 //   "in a GEMM the weights are the B operand, so the builtin a W4A8 kernel
 //    would actually issue is `i8_i4_k32`, and it measures the same."
-//        -- docs/probes/probe-dpas-rates-2026-09-22.md §7
 //
 // It is not a free choice. The DPAS B (Src1) operand is column-per-lane with K
 // packed into dwords, so for 4-bit B one lane's 32-k fragment is FOUR

@@ -1,6 +1,5 @@
 // probe_fma_rate.cl - open-work 3m: the B70's sustained fp32 VECTOR fma rate, the compute bound
-// of every GDN prefill kernel that runs plain fp32 vector code (record:
-// docs/probes/probe-gdn-prefill-2026-11-10.md). A PROBE kernel: no runtime path binds it, and the
+// of every GDN prefill kernel that runs plain fp32 vector code). A PROBE kernel: no runtime path binds it, and the
 // value it computes is meaningless.
 //
 // Each work-item carries NACC independent fp32 accumulators through `acc = fma(acc, a, b)`,

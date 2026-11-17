@@ -1,6 +1,6 @@
 // dflash_verify_kv8_test - the DFlash verify at M = 2..8 on the int8 KV cache against the plain M = 1 path
 // (2026-11-13: dflash_gpu_kv8_test t1_define-rotation K = 7 picked id 248068 at generated id 200 where the plain
-// int8 row and the int8-simulating f32 judge pick 248046 by 34.6 bf16 ulps; docs/probes/probe-dflash-kv8-verify-m8-2026-11-13.md).
+// int8 row and the int8-simulating f32 judge pick 248046 by 34.6 bf16 ulps).
 //
 // The engine (int8 head, int8 drafter, --kv-cache int8) runs the plain greedy loop (verify(0) + commit) and the
 // DFlash greedy loop (draft(K) -> verify(K) -> the longest agreeing prefix -> commit) from the same prefill, with the

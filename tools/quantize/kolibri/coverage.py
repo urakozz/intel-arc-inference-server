@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `coverage` of tools/quantize_kolibri1.sh (spec 20 §3.1 "expert coverage").
 
     coverage.py --model <snapshot> --calib <dir>/calib.safetensors --out <dir> [--floor 2048] [--device cpu]
@@ -190,7 +190,7 @@ def _fail(starved, floor, rounds, exhausted=False):
     why = " (no unused German documents left for another round)" if exhausted else ""
     print(f"COVERAGE FAILED: {len(starved)} experts stay under {floor} tokens after {rounds} top-up rounds{why}, "
           f"e.g. (layer, expert, tokens) {starved[:10]}.\ncalib_final.safetensors NOT written. More rounds "
-          f"(COVERAGE_ROUNDS) or a lower floor (COVERAGE_FLOOR, recorded in the card) are the operator's call.",
+          f"(COVERAGE_ROUNDS) or a lower floor (COVERAGE_FLOOR, recorded in the card) are the owner's call.",
           file=sys.stderr, flush=True)
     sys.exit(3)
 

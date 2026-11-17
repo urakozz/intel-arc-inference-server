@@ -280,7 +280,7 @@ function(add_attn_reduce MM LL)
   add_ocloc_kernel(attn_reduce_M${MM}_L${LL}_B${ATTN_BLOCK} SOURCE ${ATTN_CL}
                    DEFINES ${ATTN_DEFINES} M=${MM} MAXLEN=${LL})
 endfunction()
-# Zero-config cleanup (operator 2026-11-06): decode attention v1 (attn_decode / attn_reduce)
+# Zero-config cleanup: decode attention v1 (attn_decode / attn_reduce)
 # is no engine's any more - v2 below is the only decode attention. These three lengths stay,
 # test-only: attn_v2_test grades v2 against v1 (L4096 synthetic, L131072 on the real capture)
 # and attn_test grades v1 against its host reference (L4096, M = 1 and 2). attn_prep is shared.
@@ -398,7 +398,7 @@ if(B70_MTP)
 endif()
 
 # ==== Spec 19a Task 4: the verify cost at M = 5..8 and DFlash's draft cost ==== (begin) ==
-# Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Additive only: no
+# Additive only: no
 # existing variant's name or command line moves (tools/kernel_cmdlines' diff: additions only),
 # and no engine binds any of these - only the two probes do:
 #   tools/probe/probe_mtp_steps <snap> ... <max_m = 8>   Qwen3.8's verify list at M = 5..8
@@ -480,7 +480,7 @@ endif()
 # ==== Spec 19a Task 4 ======================================================== (end) ====
 
 # ==== Spec 19b: the DFlash drafter on the card ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-05-spec19b-dflash-drafter.md. Additive only: no existing variant's name or
+# Additive only: no existing variant's name or
 # command line moves, and no engine binds any of these without a drafter (19c's --spec dflash). The draft list and
 # the projection list (runtime/dflash/dflash_capture.cc) bind, at z-lab/Qwen3.8-27B-DFlash2's shapes beside Qwen3.8
 # (kernels::dflash::kQwen38, src/kernels/dflash_kernels.h):
@@ -579,7 +579,7 @@ endif()
 # ==== Spec 19b ==== (end) ====
 
 # ==== Spec 19c: DFlash in the decode loop ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-05-spec19c-dflash-engine-loop.md. Additive only: no existing variant's name or
+# Additive only: no existing variant's name or
 # command line moves, and no engine binds any of these without a drafter (`--spec dflash`). With a drafter the Engine's
 # verify lists (runtime::build_verify_taps) run M = 1..8 rows over 8 GDN state slots, so:
 #   gdn_step_slots_M<M>_N8, M = 1..4   the per-row slot build at the rows spec 8's lists had at 4 slots (B70_VERIFY_M8
@@ -689,7 +689,7 @@ if(B70_ORNITH)
 endif()
 
 # --- Spec 12b: the int8 KV cache (`--kv-cache int8`) -------------------------
-# The operator's rotkv scheme (spec 12 §8): every binary that writes or reads the int8
+# The rotkv scheme (spec 12 §8): every binary that writes or reads the int8
 # cache, from ONE new source (kv8.cl, per-family defines as pf_int8.cl). Additive only:
 # no existing source changes, so every existing binary keeps its name, its command line
 # and its bytes, and a `--kv-cache bf16` engine (the default) binds none of these.
@@ -799,13 +799,13 @@ endif()
 option(B70_VERIFY_DPAS "build the DPAS verify attention (spec 28c)" ON)
 if(B70_VERIFY_DPAS AND B70_MTP)
   set(VDPAS_CL ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl)
-  # Plan 28c Task 4's kept settings (docs/probes/probe-verify-attn-2026-11-03.md §1): KT=32 PACK=g KS=4 DSPLIT=256 QSPLIT=1,
+  # Plan 28c Task 4's kept settings: KT=32 PACK=g KS=4 DSPLIT=256 QSPLIT=1,
   # 256 GRF for both KV forms - the fastest passing N1 / N2 at M = 8, depth 32768 (QSPLIT=0 fails N1 at int8).
   # PSPLIT=1 since 2026-11-04 (P as bf16 hi + lo): P in bf16 alone moved real verify rows off the f32 top
   # (attn_verify_dpas.cl's header, docs/07-open-questions.md, "Recently answered").
   set(VDPAS_LEVERS KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
   set(VDPAS_OPTIONS -cl-intel-256-GRF-per-thread)
-  # 3l (docs/probes/probe-longctx-decode-2026-11-09.md): the MTP verify rows M = 2..4, both KV forms, split the same
+  # 3l: the MTP verify rows M = 2..4, both KV forms, split the same
   # values over the work-group differently - PAIR (S by key atom in each row block's two sub-groups, P V by dim
   # atom over every row block) and, at M = 3 / 4 (three row blocks), PVX = 2 P V-only sub-groups a slice: 32
   # sub-groups, a whole core. Bitwise the frozen kernel (tests/kernels/attn_verify_bitwise_test.cc). M = 5..8
@@ -896,11 +896,10 @@ endif()
 # kWideK). Ids through Control::wide_cur / wide_out (CTRL_CUR 32 / CTRL_OUT 48: embed_gather, argmax and
 # argmax_stage2_W16 only - no other kernel reads the ids). The linears are gemm_sm's M = 16 rows (built below),
 # the GDN step gdn_step_defer_M16 (above), the attention attn_verify_dpas at 16 rows with the key split
-# across work-groups (KS 1, DSPLIT 128: the production KS 4 needs 768 lanes at 16 rows; docs/probes/
-# probe-lookup-wide-verify-2026-11-14.md) and attn_v2_M16's reduce. Spec 33 (plan 33b): the same values split as the
+# across work-groups (KS 1, DSPLIT 128: the production KS 4 needs 768 lanes at 16 rows) and attn_v2_M16's reduce. Spec 33 (plan 33b): the same values split as the
 # 2-4-row lines split them - PAIR (each row block's scores once, by key atom) at KS 1, PVX 8 (32 sub-groups) and
 # PVR 2 (P V by dim atom over half the row blocks: V read twice a work-group, not twelve times); bitwise the KS 1
-# DSPLIT 128 line (attn_verify_bitwise_test), 1.43 / 1.63x at 32k / 98k keys (docs/probes/probe-verify-attn-depth-2026-11-15.md).
+# DSPLIT 128 line (attn_verify_bitwise_test), 1.43 / 1.63x at 32k / 98k keys.
 if(B70_MTP AND B70_VERIFY_M8)
   set(WIDE_CTRL_DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=32 CTRL_OUT=48 CTRL_DEBUG=18)
   add_ocloc_kernel(embed_gather_M16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
@@ -1038,7 +1037,7 @@ endif()
 # ==== Spec 17d ============================================================= (end) ====
 
 # ==== Spec 19 v3c: DFlash under tensor parallel (`--parallel tp --spec dflash`, Qwen3.8) ===== (begin) ====
-# Plan: docs/superpowers/plans/2026-11-13-spec19v3c-dflash-tensor-parallel.md. Additive only: new names; no engine binds
+# Additive only: new names; no engine binds
 # any of these without a drafter. What a card's tap verify list (runtime::build_tp_verify_taps) binds at M = 1..8 beyond
 # spec 17d's M = 1..4 lists, at model::tp_card_desc's shapes (the folded crossing):
 #   GDN      gdn_step_slots_M<M>_N8_GK8V24, M = 1..8 (the drafter's 8 state slots at the card's stride: 48 x 24 x
@@ -1648,10 +1647,8 @@ endif()
 # ==== Spec 15e ================================================================ (end) ====
 
 # ==== Spec 13a / 13c: rows of different sequences (the batched engine) ==== (begin) ====
-# Plans: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md (Task 2, the probe), 2026-09-28-spec13c-batching-
-# engine.md (Task 3: promoted - built by default since 13c; until then behind B70_BATCH_PROBE). runtime::build_rows
+# Plans 13a (Task 2, the probe) and 13c (Task 3: promoted - built by default since 13c; until then behind B70_BATCH_PROBE). runtime::build_rows
 # (capture.cc) binds them for runtime::Engine's sequence slots; tools/probe/probe_batch_step too.
-# Record: docs/probes/probe-batching-2026-10-23.md.
 #   gdn_step_rows_M<M>                  gdn_step.cl BATCH_ROWS: per row its position, slot (conv ring) and GDN state
 #                                       indices (src at a slot's first row, dst after every row); the strides of one
 #                                       whole-model state and one whole-model ring baked (48 GDN layers)
@@ -1693,7 +1690,7 @@ endif()
 # ==== Spec 13a / 13c ==== (end) ====
 
 # ==== Plan 19v3b Task 0: the slots' KV in pages ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-11-13-spec19v3b-dflash-slots.md (Task 0). An engine with sequence slots holds every
+# (Task 0). An engine with sequence slots holds every
 # slot's full-attention KV in pages of KV_PAGE positions behind a page table (runtime/buffer_sizes.h, SlotDims), and its
 # lists - every slot's, slot 0's too, and the row lists - bind these paged twins of the binaries that read or write the
 # KV: the name `_PG<page>` after the unpaged one's (kernels::kv_paged), -DKV_PAGED=<page>, and the table as a last
@@ -1740,7 +1737,7 @@ endif()
 # ==== Plan 19v3b Task 0 ==== (end; the DPAS twins follow spec 28c's block) ====
 
 # ==== Spec 28b: the small-M GEMM (gemm_sm.cl) ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-27-spec28b-small-m-build.md. Additive only: no existing variant's name or
+# Additive only: no existing variant's name or
 # command line moves (tools/kernel_cmdlines: +N / -0 / ~0), every M = 1 list binds what it bound before. Every list
 # a capture builds at M >= 2 binds these in place of gemv / gemv_i8w (runtime::gemv_kind, runtime/gemv_kind.h) for
 # the shapes of kernels::kSmallMTuning (src/kernels/kernels.h) - ONE row per shape, whose knobs are spelled into the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `bf16` of tools/quantize/quantize_qwen4exp.sh: every tensor the export did not quantise is the source's.
 
     bf16_same.py <export dir> <source snapshot>

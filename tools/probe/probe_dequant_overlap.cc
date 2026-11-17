@@ -7,7 +7,7 @@
 // queues on one engine may serialise; this probe measures whether they do.
 // A measured recovery of 0.0 is a finding, not a failure.
 //
-// Pre-registration: docs/probes/probe-dequant-overlap-2026-09-05.md (recovers
+// (recovers
 // 0.6-0.9 of the dequant time; accept at >= 0.3), committed before this file.
 //
 // 2026-09-05 EXTENSION (PROBE B, the same document's second dated section).
@@ -20,7 +20,7 @@
 // `--enumerate-only` prints the queue groups and stops (no timing at all).
 // With no arguments the original single-list path runs unchanged.
 //
-// 2026-10-27: the sycl-tla GEMM is gone from the engine (operator ruling), and with it this
+// 2026-10-27: the sycl-tla GEMM is gone from the engine, and with it this
 // probe's GEMM arm - control B and the three batteries, which overlapped the dequant with
 // that GEMM. What stays is the queue-group enumeration, the binding rule and control A (the
 // dequant alone, on either list); the overlap verdict is the recorded one.

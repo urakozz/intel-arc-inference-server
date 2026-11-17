@@ -31,7 +31,7 @@ struct DFlashWeights {
   bool packed = false;                               // the checkpoint's own packed int4 linears (DFlashCheckpoint)
   uint32_t target_hidden = 0;
   std::unique_ptr<DeviceWeight> candidate_head;      // C3: optional int4 copy; exact int8 head stays in target
-  // Spec 19 v3d Task 7 (operator ruling 2026-11-14): the 2-bit head with 80 candidates by default; 4 (layout 1) / 64
+  // Spec 19 v3d Task 7: the 2-bit head with 80 candidates by default; 4 (layout 1) / 64
   // the earlier form, for A/B.
   unsigned candidate_bits = 2;                       // 4 (layout 1) or 2 (gemm_sm's layout 3)
   unsigned candidates = 80;                          // re-ranked exactly a row: 64 or 80

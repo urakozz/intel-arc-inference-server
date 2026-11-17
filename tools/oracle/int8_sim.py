@@ -1,4 +1,4 @@
-"""Quantisation-aware pieces for the f32 judges (operator ruling 2026-10-23): f32 math that applies
+"""Quantisation-aware pieces for the f32 judges: f32 math that applies
 the int8 roundings an engine variant applies, so a judged miss is a kernel error and not the
 variant's quantisation. Both are the engine's rules, op for op where an op decides a code:
 
@@ -112,7 +112,7 @@ def _sat_rte(v: torch.Tensor) -> torch.Tensor:
     return torch.clamp(torch.round(v), -128.0, 127.0)   # convert_char_sat_rte
 
 
-# Design knobs for the l0-int8 accuracy study (r13.prefill, operator 2026-10-31), the default the engine's scheme:
+# Design knobs for the l0-int8 accuracy study (r13.prefill), the default the engine's scheme:
 #   B70_SIM_I8_X  tok (h8: rotated, one scale per token) | blk (rotated, one scale per token and 1024-k block) |
 #                 g64 (unrotated, one scale per token and 64-k group) | two (rotated, per token, a second int8 limb
 #                 for the residual) | off (exact)

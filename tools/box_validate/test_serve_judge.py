@@ -203,7 +203,7 @@ def write_bf16top(path, rows):
 
 
 def test_bf16_unstable_one_sided():
-    """Item 30 (4), operator 2026-11-15: a miss beyond 8 ulp is bf16-unstable only when the bf16 reference moved TOWARD
+    """Item 30 (4),  a miss beyond 8 ulp is bf16-unstable only when the bf16 reference moved TOWARD
     the speculative pick by more than 8 ulp; it passes (no plain row here) when the bf16 reference picks it."""
     c = Case()
     c.arm("off", 1, OFF)
@@ -249,7 +249,7 @@ def test_structural_failures_and_unknown_prompt():
 
 
 def test_end_of_turn():
-    """Item 30 (3), operator 2026-11-15: each stream graded up to and including its first end-of-turn id (7 here)."""
+    """Item 30 (3),  each stream graded up to and including its first end-of-turn id (7 here)."""
     off = [4, 5, 6, 7, 2, 2]                               # ends its turn at 3
 
     def case(spec, plain_rows, spec_rows, log=True):

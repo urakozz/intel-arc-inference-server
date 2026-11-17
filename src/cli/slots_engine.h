@@ -15,7 +15,7 @@
 //
 // The row budget (row_budget): one row decoding - none (the slot's own verify lists, K <= 3); several - 8 rows a step
 // (runtime::Engine::kMaxRows), and with more than mtp_active_max rows decoding no drafts at all (plain batched decode:
-// the measured costs decide, docs/probes/probe-batching-2026-10-23.md "Engine"). The scheduler clips the rows' K to it.
+// the measured costs decide). The scheduler clips the rows' K to it.
 //
 // Plan 19v3b, `--spec dflash` beside slots: a lone row is its slot's EngineAdapter::step_dflash (bitwise the one-slot
 // server); a step of several rows drafts them in ONE batched draft pass (runtime::TapDrafter::draft_rows: each slot's

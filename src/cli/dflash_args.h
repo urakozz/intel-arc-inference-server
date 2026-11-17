@@ -5,7 +5,7 @@
 //
 //   --spec dflash          the proposer is the drafter (spec 19 decision 3: one per server; the MTP head is not
 //                          loaded)
-//   --draft-model PATH     the drafter, required (operator ruling 2026-11-14: it takes VRAM from the context, so
+//   --draft-model PATH     the drafter, required (it takes VRAM from the context, so
 //                          the model is a deliberate choice, no default): a snapshot directory or a repo id in the
 //                          HF cache - urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound (our AutoRound int4 export of
 //                          z-lab's drafter) or z-lab/Qwen3.8-27B-DFlash2 (loads as int8 at load); never downloaded

@@ -1005,7 +1005,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   // The label against the bytes (GPTQ vs compressed-tensors) and compressed-tensors'
   // `actorder` "group" against its shipped g_idx (quant.h).
   check_quant_scan(qc, scan);
-  // Operator requirement (2026-10-05): one note per load, not per tensor, when the
+  // Requirement (2026-10-05): one note per load, not per tensor, when the
   // checkpoint is compressed-tensors - what is converted, and the recommended format.
   const std::string quant_note = ct_conversion_note(scan);
   if (!quant_note.empty()) std::print(stderr, "loader: {}\n", quant_note.c_str());

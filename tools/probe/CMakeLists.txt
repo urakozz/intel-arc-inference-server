@@ -220,7 +220,7 @@ function(add_probe_gemv_loads TAG K N S L)
 endfunction()
 
 # The six production shapes at the S the engine binds (model/qwen35.cc), plus
-# the S layout 0 picks for itself in docs/probes/probe-gemv-2026-08-24.md -- the
+# the S layout 0 picks for itself -- the
 # layout-0 rows are the battery's only apples-to-apples message-count contrast
 # (17 messages per subgroup-step against layout 1's 10, byte-identical traffic).
 #   K N S_prod S_l0best  blk2d16-able (G/S even)
@@ -274,7 +274,7 @@ endforeach()
 add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
 
 # --- probe_dpas_rate: the per-type DPAS issue rate (2026-09-22) -------------
-# Record: docs/probes/probe-dpas-rates-2026-09-22.md. `probe_dpas_rate.cl` is a PROBE
+# `probe_dpas_rate.cl` is a PROBE
 # kernel -- no runtime path binds `dpas_rate`, no production file is touched,
 # and it computes a deliberately meaningless dot product. One binary per data
 # type; `kVariants` in probe_dpas_rate.cc and the tag list below are two lists
@@ -314,8 +314,6 @@ b70_target_kernel_dir(probe_dpas_rate)
 add_dependencies(probe_dpas_rate ${PROBE_DPAS_TARGETS})
 
 # --- probe_w4a8: W4A8 on the mixed 4-bit x 8-bit k32 DPAS (2026-09-23) -------
-# Pre-registration: docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md.
-# Record: docs/probes/probe-w4a8-2026-09-23.md.
 #
 # `probe_w4a8.cl` is a PROBE kernel file with two entry points -- `pw4a8_gemm`
 # and `pw4a8_quant`. No runtime path binds either, and no production file is
@@ -348,7 +346,6 @@ get_property(W4A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
 add_dependencies(probe_w4a8 kernel_pw4a8 ${W4A8_KERNELS} ${W4A8_PF_KERNELS})
 
 # --- probe_w8a8: i8 x i8 k32 DPAS, per-channel int8 weights (2026-09-23) -----
-# Record: docs/probes/probe-w4a8-2026-09-23.md, the appended i8 x i8 section.
 #
 # The one W4A8-family path the CPU accuracy study left standing: int4 g64
 # weights requantised per 1024-column slab to per-channel int8 (`pw8_requant`),
@@ -374,8 +371,6 @@ get_property(W8A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
 add_dependencies(probe_w8a8 kernel_pw8a8 kernel_pw8a8_g128 ${W8A8_KERNELS} ${W8A8_PF_KERNELS})
 
 # --- probe_flash_attn: spec 6 P1, the flash-attention tile probe (2026-09-25) ---
-# Plan: docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md.
-# Record: docs/probes/probe-flash-attn-2026-09-25.md.
 #
 # The control is the production composed path (`runtime::prefill::attn_chunk`, L0
 # backend) on the same inputs; every arm is checked against an fp64 CPU reference
@@ -424,7 +419,6 @@ get_property(PFA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
 add_dependencies(probe_flash_attn ${PFA_TARGETS} ${PFA_KERNELS} ${PFA_PF_KERNELS})
 
 # --- spec 7 P0 (2026-09-27): pinned host copies and the tail-prefill floor ---
-# Record: docs/probes/probe-prefix-cache-2026-09-27.md.
 add_executable(probe_host_copy probe_host_copy.cc)
 target_include_directories(probe_host_copy PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_host_copy PRIVATE b70_l0)
@@ -436,14 +430,12 @@ get_property(PT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILD
 get_property(PT_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_tail ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- spec 7 S3 (plan 7b Task 3): the write-through cost of block snapshots ---
-# Record: docs/probes/probe-prefix-cache-2026-09-27.md, "Write-through cost, S3".
 add_executable(probe_writethrough probe_writethrough.cc)
 target_include_directories(probe_writethrough PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_writethrough PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
 b70_target_kernel_dir(probe_writethrough)
 add_dependencies(probe_writethrough ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- spec 7 S1/S2 (plan 7c Task 4): time to first token at 60k through PrefixSession ---
-# Record: docs/probes/probe-prefix-cache-2026-09-27.md, "S1 and S2, measured".
 if(TARGET b70_tokenizer)
   add_executable(probe_prefix_s12 probe_prefix_s12.cc)
   target_include_directories(probe_prefix_s12 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
@@ -471,8 +463,7 @@ target_link_libraries(probe_kv_state PRIVATE b70_prefill_host b70_runtime b70_lo
 b70_target_kernel_dir(probe_kv_state)
 add_dependencies(probe_kv_state ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- probe_verify_m: spec 8 P0, the MTP verify step at M = 1..4 (2026-09-27) ---
-# Plan: docs/superpowers/plans/2026-09-27-spec8a-mtp-probe.md, Task 3.
-# Record: docs/probes/probe-mtp-2026-09-27.md. Needs B70_MTP (the default: the M = 2..4
+# Needs B70_MTP (the default: the M = 2..4
 # decode-list variants and the head's bf16 GEMV shapes, src/kernels/CMakeLists.txt).
 if(B70_MTP)
   add_executable(probe_verify_m probe_verify_m.cc)
@@ -484,7 +475,7 @@ if(B70_MTP)
   add_dependencies(probe_verify_m ${VM_KERNELS} ${VM_PF_KERNELS})
 endif()
 # --- probe_mtp_steps: spec 8 plan 8b, the production MTP lists' wall time per call ---
-# Record: docs/probes/probe-mtp-2026-09-27.md, "Engine". Needs B70_MTP (the default).
+# Needs B70_MTP (the default).
 if(B70_MTP)
   add_executable(probe_longctx_decode probe_longctx_decode.cc)
   target_include_directories(probe_longctx_decode PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -508,7 +499,6 @@ if(B70_MTP)
   add_dependencies(probe_turn_chunks ${MS_KERNELS} ${MS_PF_KERNELS})
 endif()
 # --- probe_batch_step: spec 13a, rows of different sequences in one decode step ---
-# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.
 # Spec 13c: built by default (the row builds and runtime::build_rows are the batched engine's since plan 13c).
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   add_executable(probe_batch_step probe_batch_step.cc)
@@ -544,7 +534,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   endforeach()
 endif()
 # --- probe_draft_cost: spec 19a Task 4, one DFlash2 block's GEMVs (int8 / bf16 / int4) ---
-# Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Random weights of
+# Random weights of
 # the drafter's shapes (draft_cost_shapes.h); the binaries are B70_VERIFY_M8's
 # (src/kernels/CMakeLists.txt), which also gives probe_mtp_steps its verify M = 5..8 arms.
 if(B70_VERIFY_M8 AND B70_MTP)
@@ -557,8 +547,7 @@ if(B70_VERIFY_M8 AND B70_MTP)
 endif()
 
 # --- probe_decode_attn: spec 10 P0/P1, decode attention at depth (2026-09-28) ---
-# Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md.
-# Record: docs/probes/probe-decode-attn-2026-09-28.md. Arm 0 (`pda_v1_M<M>`) is
+# Arm 0 (`pda_v1_M<M>`) is
 # src/kernels/attn.cl ITSELF at max_len 131072 and the probe's M (no production build
 # compiles M = 4 at 131072); every other arm is probe_decode_attn.cl at one tag
 # P<ppw>_L<load>_D<dot>_F<prefetch>_R<reduce>. This list and the harness's --arms are two
@@ -629,7 +618,7 @@ add_dependencies(probe_lm_head_l1 ${LH_KERNELS})
 # replayed visibility, host RAM under load, pinned capacity, the alias check. Its expert kernels are 21c's q4_moe.cl
 # token for token with the two address macros as a pointer-table read (probe_offload_moe.cl, generated by
 # mk_offload_kernel.py, drift-checked by probe_offload_kernel_drift_test) at the _SH4 binary's defines; arm A binds
-# 21c's own q4_moe_M1_E512_T10_D2560_I640_SH4. Record: docs/probes/probe-offload-<date>.md.
+# 21c's own q4_moe_M1_E512_T10_D2560_I640_SH4. 
 if(B70_Q4EXP)
   add_ocloc_kernel(po_moe_M1_E512_T10_D2560_I640_SH4 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_offload_moe.cl
                    DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=0)
@@ -670,8 +659,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
 endif()
 
 # --- probe_small_m: spec 28 P0 (plan 28a), small-M DPAS stand-ins against gemv ---------
-# Plan: docs/superpowers/plans/2026-10-27-spec28a-small-m-probe.md. Record:
-# docs/probes/probe-small-m-gemm-<date>.md. `probe_small_m.cl` is a PROBE kernel: no runtime path
+# `probe_small_m.cl` is a PROBE kernel: no runtime path
 # binds `psm` / `psm_quant`, no production file is touched. One binary per knob set, named
 #   psm_<t><o>[_wg<NSGN>x<KSL>][_mg][_pf<G>][_g256]_M<M>_K<K>_N<N>_S<S>_L<L>
 # t = b (bf16 DPAS) | i (int DPAS on int8 rows), o = B (weights on B) | A (weights on A);
@@ -867,7 +855,6 @@ get_property(PSM_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PR
 add_dependencies(probe_small_m psm_kernels ${PSM_SRC_KERNELS} ${PSM_PF_KERNELS})
 
 # --- probe_verify_attn: spec 28c (plan 28c Task 3), the verify attention - v2 against attn_verify_dpas ---------
-# Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md. Record: docs/probes/probe-verify-attn-<date>.md.
 # `pvd_<tag>_M<M>[_KV8]` is src/kernels/attn_verify_dpas.cl itself at one lever tag
 # K<KT>_P<g|h>_S<KS>_D<DSPLIT>_Q<QSPLIT>_G<128|256>[_P<PSPLIT>] (G: the ocloc 256-GRF option or not; PSPLIT 0 when the
 # suffix is absent - the plan 28c sweep's kernel, P in bf16), M = 2..8 and 16, both KV
@@ -1000,8 +987,7 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_VERIFY_DPAS)
 endif()
 
 # --- probe_chunk_rows: plan 5d P0, the prefill linears at a 4096-row chunk ------------------
-# Plan: docs/superpowers/plans/2026-10-27-spec5d-prefill-chunk-4096.md (Task 1). Record:
-# docs/probe-prefill-chunk-4096-<date>.md. Production kernels only (pf_int8 / pf_dequant_slab /
+# (Task 1). Production kernels only (pf_int8 / pf_dequant_slab /
 # pf_gemm), M = 4096 against 2 x 2048; no production file is touched.
 add_executable(probe_chunk_rows probe_chunk_rows.cc)
 target_include_directories(probe_chunk_rows PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -1020,7 +1006,7 @@ b70_target_kernel_dir(probe_small_chunk)
 add_dependencies(probe_small_chunk ${PCR_PF_KERNELS} ${ALL_KERNELS})
 
 # --- probe_fused_small: open-work 3b, short chunks' int4 linears without the bf16 slab ------------
-# Record: docs/probes/probe-fused-small-chunk-2026-11-08.md. pf_gemm_q4 (src/kernels/prefill/
+# pf_gemm_q4 (src/kernels/prefill/
 # pf_gemm_q4.cl) against the slab walk (pf_dequant_slab + gemm_l0), bitwise, then timed interleaved.
 # -DB70_PF_Q4_SWEEP=ON builds every tile it sweeps; a tile the build lacks is skipped with a line.
 add_executable(probe_fused_small probe_fused_small.cc)
@@ -1033,7 +1019,7 @@ add_test(NAME probe_fused_small_cli_test COMMAND python3
 set_tests_properties(probe_fused_small_cli_test PROPERTIES TIMEOUT 30)
 
 # --- probe_prefill_split: open-work 3k, a full chunk's int4 linears on l0 and l0-int8, itemised ------
-# Record: docs/probes/probe-prefill-chunk-split-2026-11-10.md. Production kernels only (pf_dequant_slab +
+# Production kernels only (pf_dequant_slab +
 # gemm_l0; pf_quant_had + pf_requant_rot + pf_gemm_i8) over 3i's distinct-layer walk; no candidate.
 add_executable(probe_prefill_split probe_prefill_split.cc)
 target_include_directories(probe_prefill_split PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -1042,7 +1028,7 @@ b70_target_kernel_dir(probe_prefill_split)
 add_dependencies(probe_prefill_split ${PCR_PF_KERNELS})
 
 # --- probe_fma_rate: open-work 3m, the sustained fp32 vector fma rate (the GDN vector kernels' bound) ---
-# Record: docs/probes/probe-gdn-prefill-2026-11-10.md. `probe_fma_rate.cl` is a PROBE kernel: no runtime
+# `probe_fma_rate.cl` is a PROBE kernel: no runtime
 # path binds `fma_rate`, and it computes a meaningless value.
 add_ocloc_kernel(pfr_f32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_fma_rate.cl)
 add_executable(probe_fma_rate probe_fma_rate.cc)
@@ -1052,7 +1038,7 @@ b70_target_kernel_dir(probe_fma_rate)
 add_dependencies(probe_fma_rate kernel_pfr_f32)
 
 # --- probe_gdn_scan_occ: open-work 3m, the production GDN scan over the first h heads (residency) ---
-# Record: docs/probes/probe-gdn-prefill-2026-11-10.md. Production kernel only; no candidate.
+# Production kernel only; no candidate.
 add_executable(probe_gdn_scan_occ probe_gdn_scan_occ.cc)
 target_include_directories(probe_gdn_scan_occ PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_gdn_scan_occ PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
@@ -1060,7 +1046,6 @@ b70_target_kernel_dir(probe_gdn_scan_occ)
 add_dependencies(probe_gdn_scan_occ kernel_pf_gdn_scan)
 
 # --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
-# Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probes/probe-tp-2026-11-01.md.
 # `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime
 # path binds it. The ptp_gemv_* binaries are today's gemv.cl / gemv_i8w.cl at the PER-CARD TP shapes of
 # spec 17 §R2.5 (tp_shapes.h), each with its one-card production cell's defines (src/kernels/CMakeLists.txt):
@@ -1105,7 +1090,7 @@ foreach(v gemv_M1_K5120_N16384_S1_L1 gemv_M1_K6144_N5120_S4_L0 gemv_M1_K5120_N14
   endif()
 endforeach()
 # --- probe_tp_pf: spec 17c step 1, tensor-parallel prefill's 2048-row crossing (D8) ----------------------------
-# Plan: docs/superpowers/plans/2026-10-05-spec17c-tp-prefill.md. `probe_tp_pf.cl` is a PROBE kernel (ptpf_copy, the
+# `probe_tp_pf.cl` is a PROBE kernel (ptpf_copy, the
 # kernel push / pull arms): no runtime path binds it. The GEMM load is the production pf_gemm_T0.
 add_ocloc_kernel(ptpf_kernels SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_tp_pf.cl)
 add_executable(probe_tp_pf probe_tp_pf.cc)
@@ -1218,7 +1203,7 @@ if(PKD_TARGETS)
 endif()
 
 # --- probe_moe_prefill: plan 2026-11-12 (Ornith MoE prefill) Task 1 - the fused int4 grouped GEMM arms and the ---------
-# multi-work-group sort on real routes. Record: docs/probes/probe-moe-prefill-2026-11-12.md. `probe_moe_prefill.cl`
+# multi-work-group sort on real routes. `probe_moe_prefill.cl`
 # is a PROBE kernel: no runtime path binds `pmp_gemm`; the control runs the production binaries. PMP_ARMS is
 # "FORM NA NB WGM WGN CVT XSG OPT", the same list in the same order as kArms in probe_moe_prefill.cc; each arm is built
 # at Ornith's and Flash-Next's gate||up (SiLU epilogue) and down shapes, FORM 3 also with EPI 2 (the fp32 check).
@@ -1282,7 +1267,7 @@ endif()
 
 # --- probe_gdn_intra: phase 2 Task 1, the GDN intra-chunk stages on real inputs (Ornith) ---------
 # Control: today's pf_gdn_wy entries; D-a: pf_gdn_intra (src/kernels/prefill/pf_gdn_intra.cl), and its
-# INTRA_DBG build (A and T written out for the per-stage error). Record: docs/probes/probe-prefill-phase2-2026-11-12.md.
+# INTRA_DBG build (A and T written out for the per-stage error). 
 if(B70_ORNITH)
   add_ocloc_kernel(pf_gdn_intra_dbg_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
                    DEFINES INTRA_DBG=1 GDN_K_HEADS=16 GDN_V_HEADS=32)
@@ -1316,7 +1301,7 @@ if(B70_ORNITH)
 endif()
 
 # --- probe_qwen_pf_gemm: Qwen3.8's bf16 slab walk at a full chunk, candidate arms -----------------------
-# Record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md. Arms built from the production sources with one extra
+# Arms built from the production sources with one extra
 # define each: pf_gemm.cl RASTER=1 (the work-group order N-fastest) and pf_dequant_slab.cl BLOCK_STORE=1 (2D
 # block stores). Checked bitwise against the production binaries, then timed interleaved.
 set(_qpg_targets)

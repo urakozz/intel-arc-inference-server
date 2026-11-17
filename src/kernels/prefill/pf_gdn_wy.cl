@@ -651,8 +651,7 @@ __kernel void pf_gdn_solve(__global float* restrict A, uint c_count) {
 
 // ---------------------------------------------------------------------------
 // (3b) **T = (I + A)^-1 with A and T in SEPARATE SLM arrays** - stage S4 of the
-//      prefill parity program (`docs/superpowers/specs/2026-09-22-gdn-solve-
-//      register-design.md`, approach B as re-selected by that file's §9).
+//      prefill parity program (approach B as re-selected by the GDN solve register design).
 //      Unbound since the zero-config cleanup removed its selector
 //      (B70_PREFILL_GDN_SOLVE); the walk binds (3). Identical signature, grid and work-group.
 //

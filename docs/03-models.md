@@ -1,30 +1,30 @@
 # The target model
 
-This document is about Qwen3.8-27B (`model_type: qwen3_5`), the engine's first and main model: a general engine
-cannot hardcode the things this one hardcodes, and specialisation is the whole strategy. The focus is Qwen3.8-27B
-for agentic coding first, then Qwen3.8-Flash-Next; the order is kept in [open-work.md](open-work.md).
+This document describes Qwen3.8-27B (`model_type: qwen3_5`), the engine's first and main model, in the detail the
+kernels need: its shapes, the exact math of each layer, and where its bytes are. It is for a reader who wants to
+see what one decode step has to compute and read, and why the engine is built the way it is. A general engine
+cannot hardcode the things this one hardcodes; specialising to the model is the whole strategy.
 
-The other models each have their own engine, specialised the same way, and their own spec: Ornith (spec 15),
-Kolibri-1 (20) and Qwen3.8-Flash-Next (`qwen4_exp`, spec 21). Muse-Glimmer was
-dropped on 2026-10-27, and Agnes 3.0 Flash on 2026-11-07.
+The focus is Qwen3.8-27B for agentic coding first, then Qwen3.8-Flash-Next; the order is kept in
+[open-work.md](open-work.md). The other models, Ornith 1.5, Kolibri-1 and Qwen3.8-Flash-Next (`qwen4_exp`), each
+have their own engine, specialised the same way. Muse-Glimmer and Agnes 3.0 Flash were dropped and are no longer
+supported.
 
 Qwen3.8-Flash-Next is 12 QSA sparse-attention layers and 36 GDN layers, a 512-expert MoE (mixture of experts: a
-router picks a few expert networks per token), 4-stream hyper-connections and a 51.8 GB host-resident n-gram
-embedding. Decode, prefill and `b70-serve` (with the prefix cache and the MTP head) are built, and its prefill
-matches an f32 reference. It is served truncated (`--layers N`), because the whole model does not fit two 32 GB
-cards; the expert-tiering probe that decides how to run it whole is open-work item 4. Its chat template is
-Qwen3.8's byte for byte; its tokenizer is not (the original's split adds `\p{M}`, and Intel's interim
-checkpoint ships Qwen3.8's file). What each model runs, and with which flags:
-[18-running-models.md](18-running-models.md).
+router picks a few expert networks per token), 4-stream hyper-connections and a 51.8 GB n-gram embedding held in
+host memory. Decode, prefill and `b70-serve` (with the prefix cache and the MTP head) are built, and its prefill
+matches an f32 reference. The whole model does not fit two 32 GB cards, so it is served on two cards with part of
+its routed experts read from host memory; `--layers N` still loads a truncated model for development. Its chat
+template is Qwen3.8's byte for byte; its tokenizer is not (the original's split adds `\p{M}`, and Intel's interim
+checkpoint ships Qwen3.8's file). What each model runs, and with which flags, is in
+[17-running-models.md](17-running-models.md).
 
 ## The checkpoint
 
-`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` - GPTQ g64 symmetric, int4
-weights, bf16 `lm_head`. Both this engine and vLLM serve the same files, which
-is what makes the comparison in [BENCHMARKS.md](BENCHMARKS.md) fair.
+`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`: GPTQ g64 symmetric, int4 weights, bf16 `lm_head`. This engine
+and vLLM serve the same files, which is what makes the comparison in [BENCHMARKS.md](BENCHMARKS.md) fair.
 
-Everything below is read from the snapshot's `config.json` and the safetensors
-headers. **Measured, not assumed.**
+Everything below is read from the snapshot's `config.json` and the safetensors headers, not assumed.
 
 ```
 model_type              qwen3_5         architectures  Qwen3_5ForConditionalGeneration
@@ -50,78 +50,78 @@ linear_value_head_dim   128
 linear_conv_kernel_dim  4
 ```
 
-Layer pattern is `[LA, LA, LA, FA] x 16` - full attention at layers 3, 7, 11,
-…, 63:
+The layer pattern is `[LA, LA, LA, FA] x 16`, with full attention at layers 3, 7, 11, …, 63. That makes 48
+linear-attention layers and 16 full-attention layers. The linear-attention layers are GDN (gated delta net): in
+place of a cache that grows with the context, each keeps a fixed-size state matrix that every token updates. The
+full-attention layers are ordinary softmax attention with GQA (grouped-query attention: 24 query heads share 4
+key/value heads, 6 to 1).
 
-**48 linear-attention (GDN) layers, 16 full-attention layers.**
-
-Quantisation: GPTQ packing produced by AutoRound, int4, **symmetric, group_size
-64**, `desc_act: false`. `lm_head` is **not** quantised. 98 `dynamic` exclusion
-rules keep `mtp.*` and every GDN layer's `in_proj_a`/`in_proj_b` in bf16
+Quantisation: GPTQ packing produced by AutoRound, int4, symmetric, `group_size` 64, `desc_act: false`. `lm_head`,
+the output projection from the hidden state to vocabulary scores, is not quantised in the checkpoint. 98
+`dynamic` exclusion rules keep `mtp.*` and every GDN layer's `in_proj_a` and `in_proj_b` in bf16
 ([02-formats.md](02-formats.md)).
 
 ### Per-layer tensors, from the headers
 
-GDN layer (e.g. layer 0), K to N:
+A GDN layer (layer 0, for example), K to N:
 
 | Tensor | Shape / role | Bytes |
 |---|---|---|
 | `linear_attn.in_proj_qkv` | 5120 → 10240 = q 16x128 ‖ k 16x128 ‖ v 48x128, int4 | 26.2 MB + 1.6 MB scales |
 | `linear_attn.in_proj_z` | 5120 → 6144 (output gate), int4 | 15.7 + 1.0 |
-| `linear_attn.in_proj_a`, `in_proj_b` | 5120 → 48 each, **bf16** (decay / beta per value head) | 0.5 + 0.5 |
-| `linear_attn.conv1d.weight` | `[10240, 1, 4]` bf16 - depthwise, 4 taps, over qkv | 0.08 |
+| `linear_attn.in_proj_a`, `in_proj_b` | 5120 → 48 each, bf16 (decay and beta per value head) | 0.5 + 0.5 |
+| `linear_attn.conv1d.weight` | `[10240, 1, 4]` bf16, depthwise, 4 taps, over qkv | 0.08 |
 | `linear_attn.A_log`, `dt_bias` | `[48]` each | - |
-| `linear_attn.norm.weight` | `[128]` - gated RMSNorm per value head | - |
+| `linear_attn.norm.weight` | `[128]`, gated RMSNorm per value head | - |
 | `linear_attn.out_proj` | 6144 → 5120, int4 | 15.7 + 1.0 |
 | `mlp.gate_proj`, `up_proj` | 5120 → 17408 each, int4 | 44.6 + 2.8 each |
 | `mlp.down_proj` | 17408 → 5120, int4 | 44.6 + 2.8 |
 | `input_layernorm`, `post_attention_layernorm` | `[5120]` | - |
 
-About **204 MB per GDN layer**, times 48 = 9.8 GB.
+That is about 204 MB per GDN layer, times 48 = 9.8 GB.
 
-Full-attention layer (e.g. layer 3):
+A full-attention layer (layer 3, for example):
 
 | Tensor | Shape / role | Bytes |
 |---|---|---|
 | `self_attn.q_proj` | 5120 → 12288 = 24 heads x 256 x (q ‖ gate), int4 | 31.5 + 2.0 |
 | `self_attn.k_proj`, `v_proj` | 5120 → 1024 = 4 x 256 each, int4 | 2.6 + 0.2 each |
-| `self_attn.q_norm`, `k_norm` | `[256]` - per-head RMSNorm before RoPE | - |
+| `self_attn.q_norm`, `k_norm` | `[256]`, per-head RMSNorm before RoPE | - |
 | `self_attn.o_proj` | 6144 → 5120, int4 | 15.7 + 1.0 |
 | `mlp.*` | as above | 133.7 + 8.4 |
 
-About **198 MB per FA layer**, times 16 = 3.2 GB.
+That is about 198 MB per full-attention layer, times 16 = 3.2 GB.
 
-Top level: `embed_tokens` BF16 `[248320, 5120]` 2.54 GB (gathered, about zero
-traffic); `lm_head.weight` BF16 `[248320, 5120]` **2.54 GB, read in full every
-token**; `norm.weight`.
+At the top level, `embed_tokens` is BF16 `[248320, 5120]`, 2.54 GB, but only one row is gathered per token, so it
+costs about no traffic. `lm_head.weight` is BF16 `[248320, 5120]`, 2.54 GB, and is read in full on every token.
+Then there is `norm.weight`.
 
-The MTP head, all **bf16**, 0.85 GB: `mtp.fc` `[5120, 10240]` (fusing embedding
-‖ hidden), `pre_fc_norm_embedding`, `pre_fc_norm_hidden`, one full transformer
-layer at the main model's shapes, `mtp.norm`. It shares `embed_tokens` and
-`lm_head` with the main model, so a draft step would read 0.85 + 2.54 GB and
-`lm_head` width would matter twice. The engine loads it behind `--spec mtp`
-(spec 8; `b70-serve`'s default `--spec auto` on this model): it drafts up to K
-tokens and verifies them in one step of K + 1 rows (docs/BENCHMARKS.md, "MTP
-speculative decoding"), K chosen per iteration from each request's own
-acceptance (spec 8 §10) up to `--spec-max`. With `--spec off` it is skipped.
+The MTP head (multi-token prediction: an extra layer trained to guess the next tokens) is all bf16, 0.85 GB:
+`mtp.fc` `[5120, 10240]` (fusing embedding ‖ hidden), `pre_fc_norm_embedding`, `pre_fc_norm_hidden`, one full
+transformer layer at the main model's shapes, and `mtp.norm`. It shares `embed_tokens` and `lm_head` with the main
+model, so a draft step reads 0.85 + 2.54 GB and the width of `lm_head` matters twice.
 
-### Layer math, verified against the modeling file
+The engine loads the MTP head behind `--spec mtp`, which is also what `b70-serve`'s default `--spec auto` picks on
+this model. It drafts up to K tokens and verifies them in one step of K + 1 rows (speculative decoding: the main
+model checks several guessed tokens for about the cost of one, and keeps those it agrees with; BENCHMARKS.md,
+"MTP speculative decoding"). K is chosen per iteration from each request's own acceptance rate, up to
+`--spec-max`. With `--spec off` the head is skipped.
 
-From `transformers` 5.15, `models/qwen3_5/modeling_qwen3_5.py`. This is the
-contract the kernels and the CPU oracle ([14-golden-gate.md](14-golden-gate.md)) must agree on. `x` is one
-token's hidden vector, `⊙` is elementwise, all norms run in fp32.
+### Layer math, checked against the modeling file
 
-**RMSNorm is Gemma-style `(1 + w)`.** `Qwen3_5RMSNorm` (used for
-`input_layernorm`, `post_attention_layernorm`, the final `norm`, `q_norm`,
-`k_norm`) computes `x · rsqrt(mean(x²) + 1e-6) ⊙ (1 + w)`. **The `+1` is not in
-the weights**; the loader bakes it in and stores `1 + w` **as fp32**, because
-the reference does the whole product in fp32 and rounding the multiplier back to
-bf16 would add an error it does not have ([13-loader.md](13-loader.md)). `Qwen3_5RMSNormGated` (the
-GDN output norm) is plain `w` - no `+1` - and multiplies by `silu(z)` *after*
-normalising.
+This is from `transformers` 5.15, `models/qwen3_5/modeling_qwen3_5.py`. It is the contract the kernels and the CPU
+reference ([14-golden-gate.md](14-golden-gate.md)) must both agree on. `x` is one token's hidden vector, `⊙` is
+elementwise multiplication, and all norms run in fp32.
 
-**Decoder layer.** `x += mixer(norm₁(x)); x += mlp(norm₂(x))`, where
-`mlp(h) = W_down · (silu(W_gate h) ⊙ W_up h)`.
+**RMSNorm is Gemma-style `(1 + w)`.** `Qwen3_5RMSNorm` (used for `input_layernorm`, `post_attention_layernorm`,
+the final `norm`, `q_norm` and `k_norm`) computes `x · rsqrt(mean(x²) + 1e-6) ⊙ (1 + w)`. The `+1` is not in the
+weights. The loader bakes it in and stores `1 + w` as fp32, because the reference does the whole product in fp32
+and rounding the multiplier back to bf16 would add an error the reference does not have
+([13-loader.md](13-loader.md)). `Qwen3_5RMSNormGated`, the GDN output norm, is plain `w` with no `+1`, and
+multiplies by `silu(z)` after normalising.
+
+**Decoder layer.** `x += mixer(norm₁(x)); x += mlp(norm₂(x))`, where `mlp(h) = W_down · (silu(W_gate h) ⊙ W_up h)`.
+The mixer is GDN or full attention, depending on the layer.
 
 **GDN layer** (`Qwen3_5GatedDeltaNet.forward`, decode path):
 
@@ -144,9 +144,9 @@ o    = RMSNormGated(o, z)            # per head: w ⊙ (o · rsqrt(mean(o²)+eps
 out  = W_out · o                     # 6144 → 5120
 ```
 
-The whole recurrence is 48 independent 128x128 fp32 state updates per layer,
-about 3 MB read and written. `torch_recurrent_gated_delta_rule` is the 51-line
-reference; the chunked form is what prefill uses.
+The whole recurrence is 48 independent 128x128 fp32 state updates per layer, about 3 MB read and written.
+`torch_recurrent_gated_delta_rule` is the 51-line reference; prefill uses the chunked form, which processes many
+tokens at once with matrix multiplies.
 
 **Full-attention layer** (`Qwen3_5Attention.forward`):
 
@@ -163,107 +163,97 @@ attn = attn ⊙ sigmoid(gate)                            # gate is 6144, head-ma
 out  = W_o · attn                                      # 6144 → 5120
 ```
 
-`rope_parameters` carries interleaved mRoPE (`mrope_section [11, 11, 10]`). For
-text the model expands one position id to every stream, so
-`apply_interleaved_mrope` copies each frequency onto itself: **plain RoPE**. The
-loader precomputes `cos/sin[max_model_len, 64]` once.
+RoPE (rotary position embedding) encodes each token's position by rotating pairs of query and key dimensions.
+`rope_parameters` carries interleaved mRoPE (`mrope_section [11, 11, 10]`), a multi-stream form meant for images
+and video. For text the model expands one position id to every stream, so `apply_interleaved_mrope` copies each
+frequency onto itself, which is plain RoPE. The loader precomputes `cos/sin[max_model_len, 64]` once.
 
-**Head.** `logits = W_lm · RMSNorm_{1+w}(x)`; `lm_head` is a separate tensor
-(`tie_word_embeddings: false`), and only the last token's logits are needed.
+**Head.** `logits = W_lm · RMSNorm_{1+w}(x)`. `lm_head` is a separate tensor (`tie_word_embeddings: false`), and
+only the last token's logits are needed.
 
-**Per-token state the decode list owns:** per GDN layer a conv window
-`[10240 x 3]` bf16 and `S[48 x 128 x 128]` fp32; per FA layer a KV ring
-`[max_model_len x 4 x 256]` x 2 bf16; plus `position`.
+**Per-token state the decode list owns.** Per GDN layer, a conv window `[10240 x 3]` bf16 and
+`S[48 x 128 x 128]` fp32; per full-attention layer, a KV ring `[max_model_len x 4 x 256]` x 2 bf16 (the KV cache:
+the keys and values of every earlier token); plus `position`.
 
-### Byte accounting - `W` is measured
+### Byte accounting
 
-Index manifest, 2399 tensors across 6 files, **no duplicated names**, total
-20.03 GB on disk:
+`W`, the bytes read per decode token, is the number the performance model divides by, so it is measured from the
+files rather than estimated. The index manifest lists 2399 tensors across 6 files, with no duplicated names, 20.03
+GB on disk:
 
 | Group | Tensors | GB |
 |---|---|---|
 | `model.language_model.*.qweight` (int4) | 400 | 12.163 |
 | `model.language_model.*.scales` (f16, g64) | 400 | 0.760 |
-| `model.language_model.*.qzeros` | 400 | 0.190 - dropped at load |
-| `model.language_model.*.g_idx` | 400 | 0.012 - dropped at load |
+| `model.language_model.*.qzeros` | 400 | 0.190, dropped at load |
+| `model.language_model.*.g_idx` | 400 | 0.012, dropped at load |
 | norms, conv1d, A_log, dt_bias, in_proj_a/b (bf16) | 449 | 0.052 |
 | `lm_head.weight` (bf16) | 1 | 2.543 |
 | `embed_tokens` (bf16, gathered) | 1 | 2.543 |
 | `mtp.*` (bf16) | 15 | 0.849 |
-| `model.visual.*` - skipped | 333 | 0.921 |
+| `model.visual.*`, skipped | 333 | 0.921 |
 
-**`W` = 12.163 + 0.760 + 0.052 + 2.543 = 15.519 GB read per decode token.** The
-loader's own report of what it makes resident is **15.540 GB**, the difference
-being tiling pad and fp32-widened norms, itemised in [13-loader.md](13-loader.md). [05-perf-model.md](05-perf-model.md) uses the
-loader's figure throughout.
+`W` = 12.163 + 0.760 + 0.052 + 2.543 = 15.519 GB read per decode token. The loader's own report of what it makes
+resident is 15.540 GB; the difference is tiling pad and norms widened to fp32, itemised in
+[13-loader.md](13-loader.md). [05-perf-model.md](05-perf-model.md) uses the loader's figure throughout.
 
-Reproduce: `python3 tools/probe/checkpoint_bytes.py <snapshot>`. It reads the
-index and the safetensors headers only, no tensor data, and prints this table,
-`W`, the `lm_head` int4/int8 variants and the MTP head.
+To reproduce: `python3 tools/probe/checkpoint_bytes.py <snapshot>`. It reads the index and the safetensors headers
+only, no tensor data, and prints this table, `W`, the `lm_head` int4 and int8 variants and the MTP head.
 
-**`lm_head` forms (spec 9).** The engine reads the head in one of three forms: bf16 as
-shipped (2.543 GB), int4 g64 when a self-quantised checkpoint ships it packed (0.675 GB),
-or **int8 per row with one fp32 scale per row, quantised at load** from the bf16 tensor
-(1,271,398,400 + 993,280 B = 1.272 GB, `W` 14.270 GB). Both CLIs run the int8 head since
-the zero-config cleanup (`b70-decode --lm-head bf16` was the byte-matched arm); the tests keep
-`loader::LmHeadForm` as their seam for the checkpoint's bf16 head.
+The engine can read `lm_head` in three forms: bf16 as shipped (2.543 GB); int4 g64, when a self-quantised
+checkpoint ships it packed (0.675 GB); or int8 with one fp32 scale per row, quantised at load from the bf16 tensor
+(1,271,398,400 + 993,280 B = 1.272 GB, making `W` 14.270 GB). Both CLIs run the int8 head; the tests keep
+`loader::LmHeadForm` as the seam through which they select the checkpoint's bf16 head.
 
 ### Three facts that drive the design
 
-1. **No MoE.** The hardest kernel family in the larger models of this family is
-   simply absent. No grouped GEMM.
-2. **vLLM was already at 81.7% of the roofline on this model** (its early baseline, 31.01 t/s on the first
-   stack): 31.01 t/s times 15.540 GB is 482 GB/s of a measured 590. Decode is not won by one big lever;
-   it is won by several small ones that multiply ([05-perf-model.md](05-perf-model.md)).
-3. **GDN dominates the layer count, not the byte count.** 48 of 64 layers, and
-   `sycl-tla` has no example for them - but the recurrent state is
-   `48 x 128 x 128 x 4 B` = 3 MB per layer, about 150 MB per token read and
-   written across 48 layers, roughly 2% of `W`. Measured in situ, the GDN step
-   kernel is 1.7% of a decode step and runs at 92% of device bandwidth. **GDN is
-   the kernel that must be *correct*; the linears decide the *speed*.**
+1. **No MoE.** The hardest kernel family in the larger models of this family is simply absent, so there is no
+   grouped GEMM.
+2. **vLLM was already at 81.7 % of the roofline on this model** (its early baseline, 31.01 t/s on the first
+   stack): 31.01 t/s times 15.540 GB is 482 GB/s of a measured 590. Decode is not won by one big lever but by
+   several small ones that multiply ([05-perf-model.md](05-perf-model.md)).
+3. **GDN dominates the layer count, not the byte count.** It is 48 of 64 layers, and `sycl-tla` has no example for
+   it. But its recurrent state is `48 x 128 x 128 x 4 B` = 3 MB per layer, about 150 MB per token read and
+   written across 48 layers, roughly 2 % of `W`. Measured in place, the GDN step kernel is 1.7 % of a decode step
+   and runs at 92 % of device bandwidth. GDN is the kernel that must be correct; the linears decide the speed.
 
 ### Kernel count, and why it stopped being a worry
 
-At one kernel per op the unfused decode step is about 700 kernels, which at
-design time looked like the dominant fixed cost. Both halves of that framing
-were measured and both were pessimistic. The captured list is **774** launches
-and **19 modules** per token, and the per-launch cost inside a replayed list is
-**0.73 us in situ** - 0.473 ms, about 1.1% of a decode step. Fusion for launch
-count's sake is therefore not a lever, and the launch count moved *up*
-deliberately when splitting a single-work-group kernel in two bought 2.4 ms.
-What those kernels do while they run is the problem; how many there are is not.
+At one kernel per operation, the unfused decode step is about 700 kernels, which at design time looked like the
+dominant fixed cost. Both halves of that view were measured and both were pessimistic. The decode step is
+recorded once into a Level Zero command list (a recorded sequence of kernel launches the GPU can replay without
+the host's help) and replayed every token. That list holds 774 launches from 19 modules, and each launch inside
+the replayed list costs 0.73 us in place: 0.473 ms, about 1.1 % of a decode step. Fusing kernels just to cut the
+launch count is therefore not a lever, and the count went up on purpose when splitting a single-work-group kernel
+in two bought 2.4 ms. What the kernels do while they run is the problem; how many there are is not.
 
 ### KV and state sizes at the benchmark shape
 
-Per token of context: 16 FA layers x 4 kv heads x 256 x 2 (K, V) x 2 B =
-**64 KB**. At pp4096 + tg256 = 4352 tokens that is 285 MB; at `--max-model-len
-16k` it is 1.07 GB. Attention at depth 4096 reads about 270 MB per token, around
-1.7% of `W`. GDN conv state is 10240 x 3 x 2 B = 61 KB per layer. A ring KV
-buffer sized to `max_model_len` is a rounding error next to the weights; there
-is no memory reason for paged KV with one sequence.
+Per token of context the KV cache holds 16 full-attention layers x 4 KV heads x 256 x 2 (K and V) x 2 B = 64 KB.
+At pp4096 + tg256 (a 4096-token prompt and 256 generated tokens), 4352 tokens, that is 285 MB; at
+`--max-model-len 16k` it is 1.07 GB. Attention at depth 4096 reads about 270 MB per token, around 1.7 % of `W`.
+The GDN conv state is 10240 x 3 x 2 B = 61 KB per layer. A ring KV buffer sized to `max_model_len` is a rounding
+error next to the weights, so there is no memory reason for paged KV with one sequence.
 
 ### Tokenizer
 
-`Qwen2Tokenizer`, byte-level BPE, **248 044 base + 33 added tokens = 248 077**;
-`lm_head` is padded to 248 320, so the sampler must never emit ids >= 248 077.
-The chat template is a separate **`chat_template.jinja`** (8.9 KB, not in
-`tokenizer_config.json`) and uses macros, `namespace`, `raise_exception`, the
-`is string` / `is iterable` / `is mapping` tests, thinking mode
-(`enable_thinking`) and tools. `eos_token_id` is the list `[248046, 248044]` =
-`<|im_end|>`, `<|endoftext|>`. Details and the pre-tokenizer regex in
+`Qwen2Tokenizer`, byte-level BPE, 248 044 base + 33 added tokens = 248 077. `lm_head` is padded to 248 320, so the
+sampler must never emit ids >= 248 077. The chat template is a separate `chat_template.jinja` (8.9 KB, not in
+`tokenizer_config.json`) and uses macros, `namespace`, `raise_exception`, the `is string`, `is iterable` and
+`is mapping` tests, thinking mode (`enable_thinking`) and tools. `eos_token_id` is the list `[248046, 248044]`,
+that is `<|im_end|>` and `<|endoftext|>`. Details and the pre-tokenizer regex are in
 [11-tokenizer-and-chat-template.md](11-tokenizer-and-chat-template.md).
 
 ### One lesson from a checkpoint that did not work
 
-An earlier 9B target (32 layers, 24 GDN + 8 FA, hidden 4096, g128) never loaded
-in vLLM and turned out to be broken beyond that. Its one lasting lesson is in
-the loader: its `model_extra_tensors.safetensors` overlapped the numbered
-shards, so **the loader deduplicates by tensor name and honours the index as the
-manifest**. The 27B happens not to need that rule; the next checkpoint may.
+An earlier 9B target (32 layers, 24 GDN + 8 full attention, hidden 4096, g128) never loaded in vLLM and turned out
+to be broken beyond that. Its one lasting lesson is in the loader: its `model_extra_tensors.safetensors` overlapped
+the numbered shards, so the loader deduplicates by tensor name and treats the index as the manifest. The 27B
+happens not to need that rule; the next checkpoint may.
 
 ## Benchmark command
 
-Every vLLM number in these docs came from this, so new ones must too:
+Every vLLM number in these docs came from this command, so new ones must too:
 
 ```bash
 uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model "$MODEL" \
@@ -271,5 +261,5 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model "$MODEL" \
   --no-cache --exact-tg --latency-mode generation
 ```
 
-Prefill is measured directly rather than through `llama-benchy`'s derived `pp`
-figure; the reason, and every measured row, is in [BENCHMARKS.md](BENCHMARKS.md).
+Prefill is measured directly rather than through `llama-benchy`'s derived `pp` figure; the reason, and every
+measured row, is in [BENCHMARKS.md](BENCHMARKS.md).

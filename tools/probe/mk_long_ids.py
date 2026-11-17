@@ -12,7 +12,7 @@ golden::read_ids read.
 Run it in the oracle container (it has `tokenizers`), from the repo root:
     tools/oracle/run_in_container.sh 'python3 tools/probe/mk_long_ids.py "$SNAP" \
         tests/golden/prompts/long32k.ids 32768'
-Plan: docs/superpowers/plans/2026-09-25-spec6b-flash-attn-integration-and-128k.md, Tasks 4-5.
+
 """
 import glob
 import os

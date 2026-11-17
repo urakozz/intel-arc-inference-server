@@ -10,7 +10,7 @@ namespace l0 {
 // Driver init + one GPU device + one context. `device_index` counts GPU
 // devices of the first driver, in enumeration order (default 0).
 //
-// Device selection (the zero-config cleanup, operator 2026-11-06): the CLIs run on
+// Device selection (the zero-config cleanup): the CLIs run on
 // the supported cards they find - device 0, or devices 0 and 1 under --parallel pp;
 // probes and tests pass their index. `ZE_AFFINITY_MASK` sits underneath: it is a
 // driver-level filter deciding which devices are enumerated at all. We never set

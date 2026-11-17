@@ -1,6 +1,6 @@
 // probe_fma_rate - what fp32 VECTOR fma rate does this B70 sustain? (open-work 3m)
 //
-// Record: docs/probes/probe-gdn-prefill-2026-11-10.md. The GDN prefill kernels other than the
+// The GDN prefill kernels other than the
 // split scan are plain fp32 vector code (fma chains, no DPAS), so their compute bound is this
 // rate, not the 183.45 TFLOP/s bf16 DPAS peak. The clock-derived figure is 256 EUs x 16 lanes x
 // 2 FLOP x 2.8 GHz = 22.94 TFLOP/s; this measures it, as probe_dpas_rate measures the DPAS one.

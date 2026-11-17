@@ -339,7 +339,7 @@ Server::Outcome Server::generate(const Request& r,
     session.fail();
     throw;
   }
-  // --max-num-seqs (operator 2026-11-11): a request cut by the slot's end, not its max_tokens, is said.
+  // --max-num-seqs: a request cut by the slot's end, not its max_tokens, is said.
   if (!outcome.cancelled && outcome.finish_reason == "length" && max_tokens == budget)
     std::print(stderr, "request: reached the end of slot 0 ({:d} positions): finished with length\n", max_len);
   return outcome;

@@ -1,5 +1,5 @@
 // Spec 13c (plan 13c Task 1): the planner's sequence slots on the host - runtime::plan_slots, runtime::slot_layout and
-// runtime::slot0_len_that_fits (spec 13 §11.2's shape; --max-num-seqs N, operator 2026-11-11: slot 0 the largest that
+// runtime::slot0_len_that_fits (spec 13 §11.2's shape; --max-num-seqs N,  slot 0 the largest that
 // fits beside N - 1 slots of 32768). No device: the sizes are
 // runtime/buffer_sizes.h's functions, the weights memory_plan_test's derived byte counts.
 //
@@ -14,7 +14,7 @@
 //      384 MiB more on this layout - 896 MiB vs 512 MiB);
 //   3. --max-num-seqs' rule: slot 0 then N - 1 slots of 32768; under --max-len auto slot 0 is the largest multiple of
 //      256 that fits with the reserve (one slot: max_len_that_fits); the layouts of the bf16 and int8 KV forms at
-//      N = 1..4 (printed: they are the startup lines the operator reads).
+//      N = 1..4 (printed: they are the startup lines a user reads).
 //   4. plan 19v3b Task 0, the slots' KV in pages of runtime::kKvPage: several slots allocate each slot's KV as whole
 //      pages (runtime::slots_kv_len; plan_slots at it, the page table's u32 a page in SlotDims), one slot exactly its
 //      length; the auto layouts at 1 / 2 / 4 slots, bf16 and int8 (printed with their pages), lose less than one page

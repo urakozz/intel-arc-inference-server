@@ -60,6 +60,7 @@
 #include "runtime/tp_engine.h"   // spec 17d: --parallel tp
 #include "runtime/tp_plan.h"
 #include "runtime/verify_attn.h"   // spec 32e: the 64-row list's per-depth cap (the startup line)
+#include "runtime/vram_bars.h"
 #include "cli/tp_dflash.h"
 #include "runtime/dflash/tp_dflash_drafter.h"
 #include "server/lookup_in_dflash.h"   // spec 19f: --spec dflash-lookup's constants (the startup line)
@@ -80,10 +81,9 @@ using cli::flags::Arg;
 using cli::flags::Help;
 using cli::flags::Section;
 struct Flags {
-  [[=Help("S", "speculative decoding: auto, off, mtp, dflash. auto: Qwen3.8's DFlash\n"
-               "drafter on one card (and replica) when it is in the HF cache, else the model's\n"
-               "MTP head (Qwen3.8 under --parallel tp or pp or with slots; Ornith), off\n"
-               "elsewhere; the startup log says which and why. dflash on one card\n"
+  [[=Help("S", "speculative decoding: auto, off, mtp, dflash. auto: the model's MTP head\n"
+               "(Qwen3.8, Qwen3.8-Flash-Next, Ornith), off elsewhere; the startup log says which.\n"
+               "dflash (Qwen3.8, with --draft-model) runs the DFlash drafter and on one card\n"
                "also copies earlier repeats (prompt lookup). Greedy output unchanged.")]]
   std::string spec = "auto";   // + the developer values lookup, dflash-lookup (cli/spec_args.h)
   [[=Help("K", "the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash).", "the most")]]
@@ -98,7 +98,7 @@ struct Flags {
                "(replica, the slots split between the cards) up to 8. A request that reaches its\n"
                "slot's end finishes with \"length\" and is logged. Ornith: 2 on two cards\n"
                "(replica, one request a card).")]]
-  Arg<uint32_t> max_num_seqs{1};   // operator 2026-11-11 (cli/pipeline_args.h)
+  Arg<uint32_t> max_num_seqs{1};   // (cli/pipeline_args.h)
   [[=Help("auto|L", "auto: the largest context that fits beside the weights (beside the\n"
                     "other slots with --max-num-seqs), at most the trained one; L: slot 0 exactly L,\n"
                     "any multiple of 256 up to the trained context, refused if it does not fit.")]]
@@ -206,6 +206,7 @@ std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix
                prefix_cache_gb, prefix_why.c_str(),
                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
                    .count());
+    std::print(stderr, "{}", runtime::vram_host_line({{"prefix cache", prefix_alloc->size()}}));
   } else {
     std::print(stderr, "prefix cache: off ({})\n", prefix_why.c_str());
   }
@@ -303,7 +304,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
     options.mtp_adaptive.max_k = a.spec.max_k;
     options.mtp_adaptive.cost = server::MtpCost::kolibri_dspark(da.lm_head == loader::LmHeadForm::Int8);
     std::print(stderr, "spec dflash: DSpark {} (bf16), --spec-max {:d}, drafter key {:016x}, {:d} B + the embedding replica "
-               "{:d} B on device {:d} - NOT YET RUN ON THE CARDS (docs/18-running-models.md)\n", a.spec.draft_model.c_str(),
+               "{:d} B on device {:d} - NOT YET RUN ON THE CARDS (docs/17-running-models.md)\n", a.spec.draft_model.c_str(),
                a.spec.max_k, (unsigned long long)engine.drafter_key(), drafter.drafter->bytes(), drafter.replica->size(),
                engine.devices() - 1);
   }
@@ -592,7 +593,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
 
 // Spec 17d: b70-serve --parallel tp - Qwen3.8 with every layer split over two B70s (runtime::TpEngine) behind spec 16d's
 // cli::pp::PipelineEngineAdapterT, whose engine interface TpEngine has (MTP, prompt lookup, the host sampler over the
-// gathered logits rows - operator decision D9 - and the snapshots). b70-decode --parallel tp's flow (cli/tp_decode.h):
+// gathered logits rows - decision D9 - and the snapshots). b70-decode --parallel tp's flow (cli/tp_decode.h):
 // both cards in one Level Zero context with peer access both ways, each card's slice loaded straight onto it (with the
 // MTP head whole on each card when a proposer needs it), max_len planned on both cards with the prefill scratch and
 // the head, the two-card prefill prepared before the first request. The prefix cache's entries are the one-card host
@@ -675,6 +676,13 @@ int serve_tp(const TpServe& a, server::Options options) {
                                  " - --max-len auto gives the largest that fits");
     }
   }
+  for (uint32_t r = 0; r < 2; ++r) {
+    const runtime::MemoryPlan p =
+        runtime::tp_card_plan(card, crossing, len, weights[r], a.kv_cache, path, head, drafter_plan);
+    std::print(stderr, "{}", runtime::vram_block({runtime::vram_parts(p, runtime::vram_state_name(p), "DFlash drafter"),
+                                                  a.mem_reserve, dev[r]},
+                                                 r, 2, runtime::vram_utf8()));
+  }
   std::unique_ptr<runtime::dflash::TpDFlashDrafter> drafter;
   if (halves)
     drafter = std::make_unique<runtime::dflash::TpDFlashDrafter>(
@@ -715,7 +723,7 @@ int serve_tp(const TpServe& a, server::Options options) {
              loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  false, card.name);
-  if (engine.has_drafter())   // operator 2026-11-14: kept as an explicit choice, with the advice
+  if (engine.has_drafter())   // kept as an explicit choice, with the advice
     std::print(stderr, "note: DFlash under --parallel tp is not faster than DFlash on one card for one session; for "
                        "speed use --parallel 1 --spec dflash (one card), --parallel replica --spec dflash (a drafter "
                        "per card) or --spec mtp on two cards\n");
@@ -730,7 +738,7 @@ int serve_tp(const TpServe& a, server::Options options) {
 // snapshot saved by card 0 gives a prefix cache hit on card 1; nothing else crosses (no peer access is used). The refusals
 // (another model, one visible card, the pp override flags, lookup inside DFlash) ran in run(), before the device.
 // --spec dflash: each card loads its own drafter beside its engine, as on one card (one slot a card).
-// Replica x slots (2026-11-10; --max-num-seqs, operator 2026-11-11): --max-num-seqs N splits between the cards (card 0
+// Replica x slots (2026-11-10; --max-num-seqs): --max-num-seqs N splits between the cards (card 0
 // the odd one); a card's slots are plan 13c's (cli::settle_slots over that card's own memory), and a card with
 // several is a cli::SlotsEngine behind the replica engine - N requests at once.
 struct ReplicaServe {
@@ -796,7 +804,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
       slot_lens = {max_len};
     }
     const uint32_t chunk_cap =
-        cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, drafter_plan, 0);
+        cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, drafter_plan, 0, i, 2);
     std::print(stderr, "card {:d}: slots: {:d} ({})\n", i, slot_lens.size(),
                runtime::slot_layout_name(slot_lens).c_str());
     std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
@@ -896,7 +904,7 @@ int run(int argc, char** argv) {
   options.prefix_split_last = f.prefix_split_last;
   cli::MaxLenArg max_len_arg = cli::parse_max_len(f.max_len);
   runtime::KvCache kv_cache = f.kv_cache.empty() ? runtime::default_kv_cache() : cli::parse_kv_cache_arg(f.kv_cache);
-  // The zero-config cleanup (operator 2026-11-06): the engine decides these - the device memory the plan
+  // The zero-config cleanup: the engine decides these - the device memory the plan
   // leaves free (runtime::kDefaultReserveGb), the int8 lm_head (spec 9, every served model), the request
   // queue (server::Options::queue_depth) and the served name (cli::served_name, from the model).
   const size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
@@ -1013,14 +1021,14 @@ int run(int argc, char** argv) {
                                  : is_kol ? cli::SpecFamily::Kolibri
                                          : cli::SpecFamily::Qwen;
   const std::string model_name = is_q4 ? "Qwen3.8-Flash-Next" : is_kol ? "Kolibri-1" : "this model";
-  // --spec auto = the MTP head (operator 2026-11-14: no extra VRAM by default; DFlash only on an explicit --spec dflash).
+  // --spec auto = the MTP head (no extra VRAM by default; DFlash only on an explicit --spec dflash).
   const cli::Spec spec = cli::resolve_spec(spec_arg, family, model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
   const bool spec_lookup = spec.kind == cli::SpecKind::Lookup;
   const bool dflash_lookup = spec.kind == cli::SpecKind::DFlashLookup;
   dflash.on = spec.kind == cli::SpecKind::DFlash || dflash_lookup;   // spec 19c / 19f
   dflash.max_k = dflash.on ? spec.max_k : dflash.max_k;
-  // Operator ruling 2026-11-14: prompt lookup is folded into --spec dflash where lookup inside DFlash is built (one card,
+  // prompt lookup is folded into --spec dflash where lookup inside DFlash is built (one card,
   // one slot - the engine below; --parallel tp - serve_tp); B70_SPEC_LOOKUP=0 keeps plain DFlash there (A/B runs).
   // --spec dflash-lookup asks it explicitly and is refused where it is not built. Open-work 27: the same inside MTP
   // (--spec auto / mtp, one card, one slot; --parallel replica, one request a card), B70_SPEC_LOOKUP=0 plain MTP.
@@ -1189,7 +1197,7 @@ int run(int argc, char** argv) {
     dv_spec.eos = eos;
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
   }
-  // Spec 17d (operator decision D3): --parallel auto on two B70s serves Qwen3.8 under tensor parallel (cli::tp_auto,
+  // Spec 17d: --parallel auto on two B70s serves Qwen3.8 under tensor parallel (cli::tp_auto,
   // on since the twin count, cli::kTpAuto) - one request at a time, faster; --max-num-seqs above 1 chose replica
   // (or one card's slots) above, cli::resolve_max_num_seqs.
   std::string tp_why;
@@ -1312,7 +1320,7 @@ int run(int argc, char** argv) {
   // planned with max_len and given to the engine.
   pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
-  // --max-num-seqs (operator 2026-11-11; plan 13c's slots): N > 1 slots on this card - slot 0 the largest context that
+  // --max-num-seqs (plan 13c's slots): N > 1 slots on this card - slot 0 the largest context that
   // fits beside N - 1 slots of 32768 (or the asked --max-len), several requests at once (Qwen3.8; not beside a
   // drafter or a draft vocabulary: refused above). 1: settle()'s one slot.
   std::vector<uint32_t> slot_lens;

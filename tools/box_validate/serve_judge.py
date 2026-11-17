@@ -5,7 +5,7 @@ rows whose bar was "greedy output identical to --spec off" (r2.auto_rows, r12.a4
   serve_judge.py --dir D --ref ARM --dump DIR --judge DIR [--bf16 DIR] [--tag serve_int8] [--header FILE]
                  [--snapshot DIR] [--vocab-used 248077]
 
-THE END OF TURN (item 30 (3), operator 2026-11-15; golden_common.h turn_end): a server stops at the model's end-of-turn
+THE END OF TURN (item 30 (3); golden_common.h turn_end): a server stops at the model's end-of-turn
 id and sends it, the arms run with ignore_eos. Each stream is graded up to and including its first end-of-turn id -
 the model's eos list, from --snapshot's generation_config.json, else the `eos [..]` list b70-serve printed in the arms'
 server.log. The rows after it are not graded and not counted (a rejected one is printed "past end of turn (row R): not
@@ -27,11 +27,11 @@ compare's pairing: the ref arm's lowest round):
                                    in each suffix; the arm PASSES when it rejects no more speculative ids than plain
                                    ids, or when every speculative miss is a near-miss (<= kNearMissUlp = 8 bf16 ulp
                                    of the f32 top below it). Otherwise each miss beyond 8 ulp goes to the
-                                   bf16-unstable rule (operator 2026-11-04): it needs the ENGINE's plain M = 1 logits
+                                   bf16-unstable rule: it needs the ENGINE's plain M = 1 logits
                                    row on that context, which b70-serve does not return - so such a miss stays on
                                    the strict bar and FAILS (spec_judge.h: "a miss with no plain row stays on the
                                    strict bar"), unless the bf16 reference itself picks the speculative id there (bf16-
-                                   unstable, operator 2026-11-08: PASS; unstable is one-sided, item 30 (4), operator
+                                   unstable,  PASS; unstable is one-sided, item 30 (4),
                                    2026-11-15: the bf16 gap more than 8 ulp below the f32 gap, a move toward the
                                    speculative pick) or it matches a kReviewedRows entry of spec_judge.h (read from
                                    --header; exactly, or by tag / row / ids / f32 gap as match_reviewed). The bf16
@@ -217,7 +217,7 @@ def misses(j, force, used, graded):
     return out, past
 
 
-# ---- the end of turn (golden_common.h turn_end, item 30 (3), operator 2026-11-15) -------------------------------
+# ---- the end of turn (golden_common.h turn_end, item 30 (3)) -------------------------------
 def turn_end(ids, stops):
     """The graded rows of a generated stream: [0, turn_end) - up to and including its first end-of-turn id."""
     return next((i + 1 for i, x in enumerate(ids) if x in stops), len(ids))
@@ -267,7 +267,7 @@ def key_tag(key):
 
 
 def match_reviewed(reviewed, key, row, a, b, g32):
-    """spec_judge.h match_reviewed: the entry of exactly (key, row, f32 top, pick); else (operator 2026-11-07) the
+    """spec_judge.h match_reviewed: the entry of exactly (key, row, f32 top, pick); else the
     entry of the same test tag, row and ids whose f32 gap is within REVIEWED_GAP_ULP of g32. (entry, by_gap)."""
     for e in reviewed:
         if e[0] == key and e[1] == row and e[2] == a and e[3] == b:
@@ -370,13 +370,13 @@ def judge_context(a, kp, ks, fp, fs, gp, gs, reviewed):
                        f"the strict bar")
             rv, by_gap = match_reviewed(reviewed, ks, row, top, fid, g32)
             if not math.isnan(g16) and g32 - g16 > NEAR_MISS_ULP and g16 < 0:
-                # operator 2026-11-08 (A): bf16-unstable and the standard bf16 model itself picks the speculative id -
+                # (A): bf16-unstable and the standard bf16 model itself picks the speculative id -
                 # a precision flip, passed without the plain row b70-serve cannot return
                 lines.append(f"row {row}: ids {top} (f32 top) / {fid} (speculative): f32 gap {g32:.2f} ulp; bf16 gap "
                              f"{g16:.2f} ulp - bf16-UNSTABLE, the bf16 reference picks the speculative id: PASS")
             elif rv:
                 lines.append(f"row {row}: ids {top} (f32 top) / {fid} (speculative): f32 gap {g32:.2f} ulp; {why} - "
-                             f"REVIEWED (operator {rv[5]}: {rv[0]}, {rv[4]:.2f} ulp when reviewed"
+                             f"REVIEWED ({rv[5]}: {rv[0]}, {rv[4]:.2f} ulp when reviewed"
                              f"{', matched by tag / row / ids / f32 gap' if by_gap else ''}): PASS as REVIEWED")
             else:
                 ok = False
@@ -388,7 +388,7 @@ def judge_context(a, kp, ks, fp, fs, gp, gs, reviewed):
     if gs < len(fs) or gp < len(fp):
         text += f"; graded to each stream's end of turn: {gs} speculative / {gp} plain of {len(fs)} rows"
     for ln in lines:
-        text += "\n      ** the bf16-unstable rule (operator 2026-11-04): " + ln
+        text += "\n      ** the bf16-unstable rule: " + ln
     for who, past in (("plain", pp), ("speculative", ps)):
         for row, top, fid, g in past:
             text += (f"\n      past end of turn (row {row}): not graded - the judge rejects the {who} id {fid} there, "

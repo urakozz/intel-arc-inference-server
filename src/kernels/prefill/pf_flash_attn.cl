@@ -1,7 +1,5 @@
 // pf_flash_attn - spec 6: the fused bf16 flash attention of prefill.
-// Spec: docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md.
-// Plan: docs/superpowers/plans/2026-09-25-spec6b-flash-attn-integration-and-128k.md.
-// Record: docs/probes/probe-flash-attn-2026-09-25.md. This is plan 6a's winning arm
+// This is plan 6a's winning arm
 // pfa_KT64_R16_H6_Q0 (tools/probe/probe_flash_attn.cl), promoted with its text
 // unchanged except for the entry name, then (spec 6c, docs/12-kernels.md ("How the prefill kernels got here")
 // levers 1-2) moved to 8 rows per work-group, with arm KT64_R8_Q2's `exp2` behind EXP2;
@@ -22,11 +20,11 @@
 // Numerics (not negotiable, the correctness bar depends on them): fp32 scores times
 // ATTN_SCALE; the mask covers key <= pos + row AND key < depth; fp32 online softmax; P =
 // exp(s - m) rounded to bf16 as the PV operand; O / l at the end. EXP2=0 uses `exp`,
-// never `native_exp` (spec 6 §3.1). EXP2=1 is the research form the operator approved on
+// never `native_exp` (spec 6 §3.1). EXP2=1 is the research form approved on
 // 2026-09-27: scores times ATTN_SCALE * log2(e), so s, the running max m and the masked
 // -INF all live in the log2 domain, and `exp2` (one base-2 math.exp in IGC; `exp`'s
 // range-split temporaries are what spill 77 GRF). EXP2=1 moves the rounding point and
-// measured K3a l0 0.999951245 < composed 0.999959889 (spec 6 §9); the operator enabled
+// measured K3a l0 0.999951245 < composed 0.999959889 (spec 6 §9); it was enabled
 // it anyway (default EXP2=1, K3a tol 1e-5 on l0). RPW 8 alone is bitwise neutral (K3a numbers identical to RPW 16).
 // Rows past C in the last 8-row block are computed (finite); rows of blocks wholly past
 // C are not written.

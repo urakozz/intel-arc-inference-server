@@ -1,4 +1,4 @@
-// Phase 2 Task 5 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): pf_norm_fused.cl's
+// Phase 2 Task 5: pf_norm_fused.cl's
 // pf_res_norm - the residual fold and the RMSNorm in one launch - against the two-launch walk it replaces
 // (pf_res_fold + pf_norm_finish), every byte of the residual and of x, at Ornith's hidden 2048, S_PREV 0
 // and 1, M = 2048 (a chunk) and M = 37 (a ragged tail), on random rows of a residual stream's magnitudes.

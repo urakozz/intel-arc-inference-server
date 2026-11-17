@@ -1,4 +1,4 @@
-// pf_norm_fused.cl - phase 2 Task 5 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): the
+// pf_norm_fused.cl - phase 2 Task 5: the
 // residual fold and the RMSNorm of one row in ONE launch, BITWISE pf_prep.cl's pf_res_fold + pf_norm_finish.
 //
 // One work-group of 256 lanes owns a whole row (grid (1, M)), so the norm's sum never leaves the work-group:

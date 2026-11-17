@@ -11,7 +11,7 @@
 //        decision 5: 41,943,040 B).
 //   SR   (spec 19d) save_state / load_state carry the ring: after a reset() (a zero ring) the restore brings the
 //        ring back bitwise, every slot of every layer's K and V.
-//   (Spec 28b, the operator's ruling 2026-11-03: the verify rows run gemm_sm - logits rows by the f32 judge where one
+//   (Spec 28b,  the verify rows run gemm_sm - logits rows by the f32 judge where one
 //   exists, taps and committed ring rows bitwise the M = 8 verify's (N3), their distance to the plain steps recorded;
 //   the ids against the plain run by spec 28 N6 - tests/server/spec_judge.h.)
 //   T1   (Task 1, Review Focus 1-2) for k = 1..7: restore S0, the true greedy drafts g[1..k], verify(k): every row's
@@ -319,7 +319,7 @@ bool same_attn_as_m8(Ctx& c, const Snap& s0, uint32_t k) {
 // The two-kernel judgement: `cos` (this path vs plain) against `cos8` (the M = 8 verify vs plain).
 bool near_m8(double cos, double cos8) { return golden::cos_dist_ratio(cos, cos8) <= golden::kCosSlack; }
 
-// T1 + D3: verify(k) with the true drafts, then commit(k). Since spec 28b (the operator's ruling 2026-11-03): the
+// T1 + D3: verify(k) with the true drafts, then commit(k). Since spec 28b: the
 // logits rows by the f32 judge where one exists (spec_judge.h; else cosine >= 0.99999), the taps and the committed
 // ring rows BITWISE those of the M = 8 verify (N3); their cosines against the plain M = 1 steps are recorded.
 bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& prompt, const std::string& tag) {
@@ -658,7 +658,7 @@ int main(int argc, char** argv) {
       for (int k = 0; k < 6; ++k) std::printf(" %u (%.4f)", cs[k].second, cs[k].first);
       std::printf("\n");
     }
-    // The chunked bar is 0.9998 (operator, 2026-10-27): measured on the card (plan 19f, card 0) the chunks of 1000
+    // The chunked bar is 0.9998: measured on the card (plan 19f, card 0) the chunks of 1000
     // gave median cosine 0.9998879 against the earlier 0.9999, the worst rows at long32k positions 2091, 1564 / 1565,
     // 987, 1051, 1212 - the amplifier positions above, and prefill_split_test's own split bar at l0 is median 0.9998.
     // The split (bitwise), decode (0.999) and every-row-projected bars are unchanged.

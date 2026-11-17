@@ -13,11 +13,11 @@
 // The named risk is that Xe2's L2 need not retain a kernel's writes for the
 // next kernel. Control C6 measures that directly and needs no GEMM to do it.
 //
-// Pre-registration: docs/probes/probe-dequant-slab-2026-09-05.md (dequant overhead
+// (dequant overhead
 // 210 -> <= 70 ms/chunk-equivalent; accept at >= 90 ms saved, priced at 30-90,
 // dead below 30), committed before this file.
 //
-// 2026-10-27: the sycl-tla GEMM is gone from the engine (operator ruling), and with it this
+// 2026-10-27: the sycl-tla GEMM is gone from the engine, and with it this
 // probe's GEMM arm - C2, C3, C4, C5a/b, R1 and the verdict table that priced the lever
 // against it. What stays is the dequant side: C1, C1', the slab kernel's bitwise check and
 // C6 (the L2-retention question, which needs no GEMM). The verdict is the recorded one.

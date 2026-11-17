@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Teacher-forced DFlash acceptance on tap dumps (spec 19a Task 3, Review Focus 2-5).
 
     dflash_accept.py run --dumps DIR --out-dir OUT [--arms bf16,int8,int8h,w4a16]

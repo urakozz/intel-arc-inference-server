@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Spec 22 P0.6 (plan 22a Task 3): the expert-offload tier's hit-rate curves from spec 21a's routing traces, and
 the routing profile plan 22b's loader reads (decision 8).
 
@@ -35,7 +35,7 @@ slots, over every layer and row.
 answer rows [a, T); `curve` then also scores the two apart (decode speed depends on the answer rows). Profiles are
 built from all rows.
 
-Every table is printed and, with --json FILE, written as JSON for the record (docs/probes/probe-offload-<date>.md).
+Every table is printed and, with --json FILE, written as JSON for the record.
 
 `project` (P0.7) is below; with --shape laguna it is spec 30 §7.1's two-constant decode model, §8's drafter formula
 and §13's stop rule instead.
@@ -741,7 +741,7 @@ def project_laguna(a) -> None:
             out["drafter"].append({"tau": tau, "u": u8, "h": h32, "speedup": sp})
             print(f"| {tau:g} | {u8:.3f} | {h32:.4f} | {sp:.2f} |")
         drafter = "KEEP" if drafter_speedup(sh, h32, u8, DRAFT_TAU) >= DRAFT_BAR else "STRUCK"
-    verdict = "STOP" if h32 < STOP_H else "OPERATOR DECIDES" if h32 < GO_H else "GO"
+    verdict = "STOP" if h32 < STOP_H else "NEEDS A DECISION" if h32 < GO_H else "GO"
     out.update(verdict=verdict, drafter_verdict=drafter, h32=h32, u8=u8)
     _dump(a, out)
     print(f"{verdict}: answer-position h {h32:.4f} at f {CONTEXT_F[32768]:.2f} (32,768 tokens, static, {key}); "
@@ -911,7 +911,7 @@ def cmd_project(a) -> None:
     _dump(a, out)
     print(f"{verdict}: two-card decode at 32k projects {stop_row['tps']:.1f} t/s with the layer split and "
           f"{stop_row['tp_tps']:.1f} with tensor parallel (ours, int4 g64 dense, {stop_row['policy']} fill, {law} law); "
-          f"STOP only when both miss ({STOP_PP_TPS:g} / {STOP_TP_TPS:g} t/s); the operator's go is separate")
+          f"STOP only when both miss ({STOP_PP_TPS:g} / {STOP_TP_TPS:g} t/s); a go is a separate decision")
 
 
 def project_args(sub) -> None:

@@ -7,7 +7,7 @@
 //        tool-call prompts and the edit / copy set's 8k / 32k prompts (tests/golden/edit-copy: far copies, where lookup
 //        enters). The bar is dflash_gpu_test's: since spec 28b (the M >= 2 lists on gemm_sm) identity, or - from the
 //        first divergence - the f32 judge rejects no more of its ids than of the plain run's (spec 28 N6, the
-//        operator's ruling 2026-11-03; tests/server/spec_judge.h), the golden tie rule without a judge; the tie
+//        ruling 2026-11-03; tests/server/spec_judge.h), the golden tie rule without a judge; the tie
 //        census printed. Per prompt: lookup iterations / ids in lookup, DFlash iterations, ids an
 //        iteration; per edit / copy prompt also plain --spec dflash's ids an iteration and the host-timed ms an id of
 //        plain / dflash / dflash-lookup (busy-box timing, informational: r70.speed is the measurement).

@@ -1,5 +1,5 @@
 #pragma once
-// Spec 12 (the operator's `rotkv` ruling, spec 12 §8): the int8 KV cache's arithmetic on
+// Spec 12 (the `rotkv` ruling, spec 12 §8): the int8 KV cache's arithmetic on
 // the host - the ONE home of the scheme's definition outside src/kernels/kv8.cl, which
 // repeats every statement below and must be edited together with this file.
 //

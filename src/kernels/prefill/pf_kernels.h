@@ -15,8 +15,7 @@
 // threads at M = 1, and at M = C the M tile axis already saturates the grid.
 // The consequence is that every consumer folds ONE slice, which is the whole
 // reason these variants are cheaper than decode's widened naively (the
-// small-kernel term was measured at decode's S and was 5x overstated;
-// docs/probes/probe-prefill-small-2026-09-05.md).
+// small-kernel term was measured at decode's S and was 5x overstated).
 //
 // Deliberately absent: `pf_gemv_variant` / `pf_gemv_int4_M`. Plan 6b Task 4's
 // temporary int4 GEMV is SKIPPED by ruling -- plan 6c (L2) lands sycl-tla's

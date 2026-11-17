@@ -16,7 +16,7 @@
 //   * 384 experts. A byte-id sort stages the chunk's ids as BYTES (PF_E <= 255) and gives each lane ONE
 //     expert (PF_WG >= PF_E, 256 lanes at most). Here the ids are staged as ushort
 //     and lane l owns experts l and l + 256 (PF_EPL 2; 20c's route has the same 512 slots on 256 lanes).
-//   * The shared expert is int4 (operator ruling 2026-10-31: the operator's export quantises it): block
+//   * The shared expert is int4 (our export quantises it): block
 //     PF_E of a weight batch is dequantised from ITS OWN layout-1 block (w_sh) exactly as a routed one.
 //   * Kolibri's combine (20c's kol_moe_down epilogue): the six routed terms in ascending id, each product
 //     rounded to fp32 THEN added (no fma: FP_CONTRACT OFF - the reference's index_add_ of y.float() * w),

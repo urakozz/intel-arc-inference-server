@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Checks for dflash_accept.py (spec 19a Task 3). CPU, tiny random drafters, seconds.
 
     test_dflash_accept.py [test_name ...]

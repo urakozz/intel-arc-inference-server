@@ -31,6 +31,7 @@
 #include "loader/moe_layout.h"
 #include "model/model_desc.h"
 #include "runtime/memory_plan.h"
+#include "runtime/vram_bars.h"
 #include "runtime/pipeline_plan.h"
 
 namespace cli {
@@ -54,7 +55,7 @@ inline runtime::PpExtras pp_extras(const loader::LoadedModel& full, bool hook) {
 
 // The zero-config cleanup's `--parallel auto` for the Qwen family (Qwen3.8, Ornith): one card
 // when the model and the asked context fit it - the faster choice (one answer is not faster on two
-// cards, docs/18-running-models.md) - else pipeline parallel. Decided before the load, from the
+// cards, docs/17-running-models.md) - else pipeline parallel. Decided before the load, from the
 // checkpoint's descriptor (config.json architectures[0]) and the planner's weight model
 // (runtime::pp_weights at the int8 head, plus the MTP head when it loads); `--max-len auto` asks for
 // runtime::kMinAutoMaxLen, the smallest context auto plans (it then gives the card's largest). The
@@ -78,13 +79,13 @@ inline uint32_t parallel_auto(const std::string& snapshot_dir, const MaxLenArg& 
   return p.total() + reserve <= card_bytes ? 1u : 2u;
 }
 
-// Spec 17d (operator decision D3, applied after 17d's bars): --parallel auto's tensor-parallel choice for b70-serve -
+// Spec 17d (applied after 17d's bars): --parallel auto's tensor-parallel choice for b70-serve -
 // Qwen3.8 (config.json's architectures[0]) on two visible B70s (the hardware gate holds two cards to peer access both
 // ways), when the context is auto and nothing asked is something TP does not run (`blocked`: DFlash, a draft
 // vocabulary, the l0-int8 prefill). An asked --max-len keeps auto's one-card / pp rule; --max-num-seqs above 1 never
 // comes here (replica or one card's slots: cli::resolve_max_num_seqs).
-// ON since the operator's ruling of 2026-11-10 (D3, option b): the speed bar holds (1.46x / 1.47x) and the f32-judged
-// twin count (docs/probes/tp-twin-count-2026-11-10.md) finds TP no worse than one card's own paths per divergence
+// ON since the ruling of 2026-11-10 (D3, option b): the speed bar holds (1.46x / 1.47x) and the f32-judged
+// twin count finds TP no worse than one card's own paths per divergence
 // (0.30 against 0.55 rejected) and on every path; D10 / D18 are rounding one card shows too.
 inline constexpr bool kTpAuto = true;
 inline bool tp_auto(const std::string& snapshot_dir, const MaxLenArg& max_len, uint32_t cards, bool blocked) {
@@ -151,8 +152,14 @@ inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& 
                " at max_len {:d})\n", split, len);
   else
     std::print(stderr, "split: {:d} (--pipeline-split)\n", split);
-  std::print(stderr, "{}\n",
-             runtime::pp_describe(runtime::pp_plan(d, split, len, w, kv, pf, x), dev, reserve).c_str());
+  const runtime::PpPlan p = runtime::pp_plan(d, split, len, w, kv, pf, x);
+  std::print(stderr, "{}\n", runtime::pp_describe(p, dev, reserve).c_str());
+  for (uint32_t i = 0; i < runtime::kPpDevices; ++i)   // the MTP head sits on the last device
+    std::print(stderr, "{}",
+               runtime::vram_block({runtime::vram_parts(p.dev[i], p.extras.mtp && i == runtime::kPpDevices - 1 ? "MTP head" : "decode state",
+                                                        "DFlash drafter"),
+                                    reserve, dev[i]},
+                                   i, runtime::kPpDevices, runtime::vram_utf8()));
   return {split, len};
 }
 

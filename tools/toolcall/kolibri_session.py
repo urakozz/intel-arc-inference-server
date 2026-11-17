@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """A live ~20-turn agentic tool session against b70-serve (Kolibri-1), with real tools on a sandbox project.
 
     kolibri_session.py <base url> <sandbox dir> <out.json> [--turns 20] [--effort medium] [--max-tokens 8192]

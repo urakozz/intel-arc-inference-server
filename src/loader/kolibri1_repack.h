@@ -18,7 +18,7 @@
 // **One weight format** (spec 20 §3.1): AutoRound int4 g64 symmetric in the auto_round:auto_gptq
 // packing - `.qweight` I32 [K/8, N], `.scales` F16 [K/64, N], `.qzeros` (0x77777777, proved by
 // assert_quant_invariants, never read), no `.g_idx` (allowed when the identity) - for every routed
-// expert, the shared expert (operator ruling 2026-10-31: the operator's export) and, in decision 2's
+// expert, the shared expert (our export) and, in decision 2's
 // int4 arm, the attention projections; bf16 `.weight` for everything else. No compressed-tensors names, no asymmetric zero points.
 //
 // **Refusals are by name.** check_names holds the checkpoint's tensor list to kol_expected_names

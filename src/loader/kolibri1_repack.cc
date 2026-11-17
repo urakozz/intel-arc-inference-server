@@ -227,7 +227,7 @@ void KolCheckpoint::repack_layer(uint32_t layer, KolHostLayer& out) {
   widen(take(lp + "moe.router.expert_bias", E), out.bias.data());
   out.src_bf16_bytes += size_t(E) * 2;
 
-  // The shared expert, int4 (operator ruling 2026-10-31: the operator's export quantises it as every routed
+  // The shared expert, int4 (our export quantises it as every routed
   // expert): one layout-1 block of each kind, a routed expert's layout at the same widths (SI == I).
   const size_t gu_words = kol_gate_up_block_bytes(d_) / 4, dn_words = kol_down_block_bytes(d_) / 4;
   {

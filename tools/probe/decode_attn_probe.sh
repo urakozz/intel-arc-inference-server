@@ -3,7 +3,6 @@
 # GPU lock (other plans use the same device):
 #   tools/probe/detach.sh ~/b70/logs/probe/x.log flock ~/b70-gpu.lock tools/probe/decode_attn_probe.sh capture
 #   tools/probe/detach.sh ~/b70/logs/probe/x.log flock ~/b70-gpu.lock tools/probe/decode_attn_probe.sh arms <args...>
-# Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export ZE_AFFINITY_MASK=0

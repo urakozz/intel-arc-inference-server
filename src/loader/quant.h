@@ -193,7 +193,7 @@ QuantScan assert_quant_invariants(const SafetensorsSet& set);
 void check_quant_scan(const QuantConfig& qc, const QuantScan& scan);
 
 // The ONE startup note a compressed-tensors load prints (stderr, once per load) and
-// keeps in its report (operator requirement, 2026-10-05): what was converted, the group
+// keeps in its report: what was converted, the group
 // size found, how many linears - and that the recommended format is our own AutoRound
 // g64. Empty for a checkpoint with no compressed-tensors linear.
 std::string ct_conversion_note(const QuantScan& scan);

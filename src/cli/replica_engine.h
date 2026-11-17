@@ -18,7 +18,7 @@
 // request's seed at its first sampled id exactly as in the serial server (EngineAdapter::seed_rng); the scheduler's
 // per-row generator (Row::rng) is not used.
 //
-// Replica x slots (operator 2026-11-10): a card whose --max-len leaves spare memory serves several requests - its
+// Replica x slots: a card whose --max-len leaves spare memory serves several requests - its
 // Card is then a server::BatchEngineIface (cli::SlotsEngine over the card's runtime::Engine with plan 13c's slots, a
 // mock in the host test) instead of one EngineIface. The scheduler's slots are the cards' slots in card order (card
 // 0's first; card_of says which card): a call over rows of one card is ONE call of that card's batched engine on that

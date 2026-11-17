@@ -34,7 +34,7 @@
 // the other card's part in its own (src/kernels/tp.cl, runtime/tp_protocol.h). Both cards then hold the same residual,
 // bitwise (T1), and with model::TpCrossing::Slices one card's residual, bitwise (T2).
 //
-// **The head's exchange (operator decision D2: a host merge).** Each card's argmax writes the best id of its half and
+// **The head's exchange (a host merge).** Each card's argmax writes the best id of its half and
 // that logit (Control::out_token / out_value) and advances pos. After both fences the host takes the larger value, ties
 // to the lower id (card 0's ids are the lower half), and writes the winner into BOTH Controls' out_token and
 // cur_token - argmax.cl's comparator, so the id is one card's argmax. That is the one host action per token beside
@@ -49,7 +49,7 @@
 // into chunks of at most the chunk cap and the chunks go in PAIRS: each card walks the pair's two chunks layer by
 // layer, half-layer by half-layer (runtime::prefill::step_tp_unit), alternating - chunk A's mixer of layer l, chunk
 // B's, A's MLP, B's - and after each row-parallel linear the card's half crosses to the other card on its COPY ENGINE
-// while its compute engine runs the other chunk's unit (the wavefront: spec 17 §R2.8's option W, operator decision
+// while its compute engine runs the other chunk's unit (the wavefront: spec 17 §R2.8's option W, decision
 // D8). Each unit then folds both halves (pf_tp_res_fold, card 0's first): the cards stay bitwise each other (T1); one
 // card's prefill sums the K halves in one chain, so the result is judged against it, not bitwise (plan 17c).
 //
@@ -68,7 +68,7 @@
 //
 // **The server's calls (spec 17d).** PipelineEngineAdapterT's interface (cli/pipeline_serve_adapter.h), so b70-serve
 // --parallel tp is that adapter over this engine: pending / set_draft_input / host_rows, read_logits_into gathering
-// both cards' halves of each row into one full row (operator decision D9: the gather; the sampler then filters the
+// both cards' halves of each row into one full row (the gather; the sampler then filters the
 // whole row on the host exactly as one card's), read_draft_logits_into likewise, and spec 7's snapshots in the
 // one-card host layouts both ways (runtime/tp_gather.h: save gathers, load scatters; with MTP the head's hidden row
 // and KV layer, card 0's - the cards' are the same bytes), and prefill's block hook (runtime/prefill/tp_prefill.cc).
@@ -92,7 +92,7 @@ namespace runtime {
 
 struct TpPrefill;   // runtime/prefill/tp_prefill.cc
 
-// Operator decision D1 (plan 17b's review): the crossing a `--parallel tp` engine runs. One constant. The rule
+// Decision D1 (plan 17b's review): the crossing a `--parallel tp` engine runs. One constant. The rule
 // recorded with the decision - slices (bitwise one card) unless they cost more than ~5 % against folded - chose folded
 // on row 79's first measurement (2026-11-10, depth 4096, interleaved, median of 3: one card 33.5 t/s, slices 50.0
 // (1.49x), folded 53.9 (1.61x): slices 7.3 % slower). Folded is bitwise between the cards and judged against one card

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """A tiny random Kolibri-1 checkpoint for testing tools/quantize_kolibri1.sh end to end.
 
     make_tiny.py <out-dir> --tokenizer <dir with tokenizer.json + tokenizer_config.json> [--seed 0]

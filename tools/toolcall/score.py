@@ -5,7 +5,7 @@
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
 
-Validity (open-work 3o, operator 2026-11-10): every first call is also checked against the scenario's
+Validity (open-work 3o): every first call is also checked against the scenario's
 files - tests/golden/toolcall/tree.json, the repository the 36 conversations were made from (its file
 list and the full text of the six files they read; revision in the file, the one whose lines every
 prompt's read results show; Ornith's, Agnes's and Flash-Next's sets re-render the same

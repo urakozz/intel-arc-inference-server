@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """The tiny stand-in for Qwen/Qwen3.8-Flash-Next that quantize_qwen4exp.sh's `selftest` quantises.
 
     make_tiny_vl.py <out> --tokenizer <dir with tokenizer.json, tokenizer_config.json, chat_template.jinja>

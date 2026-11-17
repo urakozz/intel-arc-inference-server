@@ -22,7 +22,7 @@
 //       WITHOUT the head (the plain decode list), 128 of them, on prose / code / cjk, after
 //       an l0-int8 prefill (which fills the head's KV through step_mtp_kv) - identical, or from
 //       the first divergence the f32 judge rejects no more of its ids than of the plain run's
-//       (spec 28 N6, the operator's ruling 2026-11-03; tests/server/spec_judge.h), the golden
+//       (spec 28 N6, the ruling 2026-11-03; tests/server/spec_judge.h), the golden
 //       tie rule without a judge; M2's logits rows likewise by the f32 judge where one exists;
 //   H   the head's own MoE layer ran: after a draft, the MoE scratch's head slot (layer 40)
 //       holds a route row of 8 distinct expert ids < 256 whose weights sum to ~1.
@@ -155,7 +155,7 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const char* what, const std::vec
         const std::string& head_form) {
   bool ok = true;
   const uint32_t kK = runtime::Engine::kMaxDraft;
-  // spec 28 N4 by the f32 judge (the operator's ruling 2026-11-03): the context prompt + g[0 .. kK + 1]
+  // spec 28 N4 by the f32 judge: the context prompt + g[0 .. kK + 1]
   const spec_judge::RowJudge rj = spec_judge::open_rows(
       golden::ForcedJudge{}, std::string("ornith_mtp_m2_") + head_form + "_" + what, prompt,
       std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + kK + 2), uint32_t(V));

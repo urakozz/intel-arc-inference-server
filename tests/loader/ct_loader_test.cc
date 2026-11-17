@@ -11,7 +11,7 @@
 //      equals the format definition's dequant (u - 8) x s of the compressed-tensors
 //      tensors, which equals the quantisation q x s of the source floats; and the
 //      converted qweight / scales are BYTE-equal to a GPTQ checkpoint of the same q, s;
-//   2. the startup note (operator requirement 2026-10-05): present for a compressed-
+//   2. the startup note: present for a compressed-
 //      tensors checkpoint with the group found and the linear count, absent for a GPTQ /
 //      AutoRound g64 one;
 //   3. refusals: asymmetric (config and a shipped weight_zero_point), group 32, 8-bit,

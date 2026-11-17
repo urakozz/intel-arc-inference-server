@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The Ornith token gates' JUDGE (operator ruling 2026-10-23), ON THE BOX CPU: the f32
+# The Ornith token gates' JUDGE, ON THE BOX CPU: the f32
 # reference teacher-forced on the bf16 golden's own tokens, so its logits rows are the golden's
 # contexts row for row (tests/golden/golden_common.h, `--judge=`).
 #   tools/box_validate/f32_oracle.sh <data tree> ornith|ornith-i8head|ornith-pfi8
@@ -7,7 +7,7 @@
 # <data tree>/oracle-out-<model>-f32 yet: the forced ids are <data tree>/oracle-out-<model>/<p>.golden
 # .safetensors's `tokens`, then
 #   ornith: tools/oracle/ornith_ref.py run --dtype f32 --force <ids> --gen 32  (tests/golden/prompts/<p>.ids)
-# The quantisation-aware modes (operator ruling 2026-10-23, tools/oracle/int8_sim.py) add to the same run
+# The quantisation-aware modes (tools/oracle/int8_sim.py) add to the same run
 #   *-i8head:     --lm-head int8         the logits through the engine's per-row int8 head (spec 9)
 #   ornith-pfi8:  --sim-int8-prefill     the prompt forward through spec 5's l0-int8 linears
 # and write oracle-out-ornith-f32-i8head / oracle-out-ornith-f32-pfi8, the judges of the *_i8head and

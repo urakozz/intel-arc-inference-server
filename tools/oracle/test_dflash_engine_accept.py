@@ -63,7 +63,7 @@ class AcceptanceTest(unittest.TestCase):
             (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
             with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
                  contextlib.redirect_stdout(io.StringIO()):
-                # pooled (operator ruling 2026-11-14): one row of 35 a token down is -1/35 a round - within 0.05;
+                # pooled: one row of 35 a token down is -1/35 a round - within 0.05;
                 # but code pooled over its 7 K rows is -1/7: the per-corpus gate fails it
                 self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
             report = json.loads((root/'report.json').read_text())

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 """Stage `head` of tools/quantize/quantize_qwen4exp.sh: the output head packed by the engine's int4 g64 rule.
 
     head_rtn.py <export dir>

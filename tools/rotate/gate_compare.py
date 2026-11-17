@@ -89,7 +89,7 @@ def parse(path):
         m = NEAR.match(line)
         if m and m.group(1) in prompts and prompts[m.group(1)].get("verdict"):
             # prefill_gate_test argv[7]: determined rows accepted as bf16 near-ties
-            # (operator ruling 2026-09-24). They count toward A3 as exact.
+            #. They count toward A3 as exact.
             v = prompts[m.group(1)]["verdict"]
             v["near"] = int(m.group(2))
             v["pass"] = (v["det_exact"] + v["near"] == v["n_det"] and v["tie_ok"] == v["n_tie"]

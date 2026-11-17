@@ -4,7 +4,7 @@
 // Gate mode:   mtp_gpu_test <snapshot> <backend>            (cwd = the source tree)
 //   M3  greedy, 256 ids, K = 1, 2, 3 against the plain step() loop of the same engine,
 //       on the three golden prompts and the 36 A4 tool-call prompts. Spec 28 N6 (plan 28b;
-//       the operator's ruling 2026-11-03): the verify rows run gemm_sm and are no longer
+//       the ruling 2026-11-03): the verify rows run gemm_sm and are no longer
 //       bitwise M = 1, so a run passes when it is identical, or - from its first divergence -
 //       the f32 judge rejects no more of its ids than of the plain run's
 //       (tests/server/spec_judge.h; the contexts are dumped under B70_DUMP_FORCED and judged

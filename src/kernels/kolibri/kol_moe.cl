@@ -6,7 +6,7 @@
 //   kol_moe_down(route, h, w_dn, w_sh_dn, mo)         MOE_E     grid (HIDDEN / 16, M), WG 16 x SLOTS x DN_KS
 //
 // spec 15c's moe.cl carried to Kolibri's semantics (tools/oracle/kolibri_ref.py,
-// spec 20a; docs/probes/probe-kolibri-2026-10-05.md "The router, exactly") - the layout-1 GEMV inner loop
+// spec 20a) - the layout-1 GEMV inner loop
 // (tile_dot) and the fixed-order, atomic-free reductions are theirs; what differs is why this is a new
 // source and moe.cl is untouched:
 //
@@ -18,7 +18,7 @@
 //   * the slot order is ASCENDING EXPERT ID, and the combine is fp32: acc = 0; for j ascending:
 //       acc = acc + f32(rne(down_j)) · w_j (the product rounded, THEN the add - no fma: the reference's
 //       index_add_ of y.float() * w), + f32(rne(shared down)), ONE rounding to bf16.
-//   * the shared expert is UNGATED and int4 (operator ruling 2026-10-31: the operator's AutoRound export
+//   * the shared expert is UNGATED and int4 (our AutoRound export
 //       quantises it as every routed expert, g64 sym GPTQ): slot SLOTS - 1 reads ITS OWN layout-1 block
 //       (w_sh, the routed blocks' layout at the same widths - shared_inter == moe_inter) through the same
 //       tile_dot - one launch serves the 6 routed and the shared expert.

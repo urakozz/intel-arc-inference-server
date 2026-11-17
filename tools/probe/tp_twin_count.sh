@@ -1,5 +1,5 @@
 #!/bin/bash
-# The tensor-parallel twin count's arms (docs/probes/tp-twin-count-2026-11-10.md), ON THE BOX, from the tree root,
+# The tensor-parallel twin count's arms, ON THE BOX, from the tree root,
 # under the caller's GPU lock (this script takes none):
 #   tools/gpu_lock.sh card <N> -- tools/probe/tp_twin_count.sh <out dir> one   one card: b70-decode one-pf / one-in /
 #                                                                              one-mtp, b70-serve one / one-auto

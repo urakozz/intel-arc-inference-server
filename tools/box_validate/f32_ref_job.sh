@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One f32 teacher-forced reference run ON THE BOX CPU, for the gates f32_oracle.sh's three golden prompts do not
-# cover (operator ruling 2026-10-29: the MTP head's M1, the cached-vs-cold prefix sequences, the 2600-id prefill
+# cover (the MTP head's M1, the cached-vs-cold prefix sequences, the 2600-id prefill
 # prompts). Like f32_oracle.sh: one CPU model job at a time (/tmp/b70-cpu-model.lock), MemAvailable checked first,
 # the output written in the tree's oracle-out-f32-job.partial/ and moved into place once complete (a killed run
 # starts again).

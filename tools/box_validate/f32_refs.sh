@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The f32 references beyond f32_oracle.sh's golden prompts (operator ruling 2026-10-29), ON THE BOX CPU, each run
+# The f32 references beyond f32_oracle.sh's golden prompts, ON THE BOX CPU, each run
 # through tools/box_validate/f32_ref_job.sh (one CPU model job at a time, RAM checked, resumable):
 #   tools/box_validate/f32_refs.sh <data tree> ornith-mtp
 #       r16.m1's judge: ornith_ref.py --dtype f32 --mtp-out, per golden prompt, teacher-forced on the bf16 M1
@@ -9,7 +9,7 @@
 #       every <dir>/<key>.prompt.ids with its <key>.force.ids (a test's own engine run wrote them:
 #       B70_DUMP_FORCED=<dir>, tests/golden/forced_judge.h) -> <data tree>/oracle-out-<model>-f32<suffix>-forced/
 #       <key>.golden.safetensors, run --lean (e.g. suffix -i8head with --lm-head int8: the int8 head's judges)
-#       DTYPE=bf16 ... '' --gemm f32: each judge's bf16 twin -> oracle-out-<model>-bf16-forced/ (operator ruling
+#       DTYPE=bf16 ... '' --gemm f32: each judge's bf16 twin -> oracle-out-<model>-bf16-forced/ (ruling
 #       2026-10-31: the near-miss gates' bar is the twin's own count of ids the judge rejects)
 #   tools/box_validate/f32_refs.sh <data tree> split ornith <ids> <N> <out stem>
 #       prefill_split_test's references of ids[0, N): f32 and bf16, --lean --dump-kv, no generated rows ->
@@ -24,7 +24,7 @@
 #       /tmp/b70-cpu-model.lock: the contexts QWEN_FIRST_RE names first (mtp_verify_test's and dflash_engine_test's:
 #       ~2.4k positions, minutes), then the rest; a killed pass resumes at its layer (the partial dir's checkpoint).
 #   tools/box_validate/f32_refs.sh <data tree> forced-qwen-pfi8 <dir> [<dir>...]
-#       the l0-int8 tests' judges (mtp_gpu_test and its twins prefill with l0-int8; operator ruling 2026-10-23):
+#       the l0-int8 tests' judges (mtp_gpu_test and its twins prefill with l0-int8; ruling 2026-10-23):
 #       every mtp_gpu_ context of the dirs through qwen_forced.py --pfi8-re (the test's own prompt rows through
 #       int8_sim fq_x / fq_w on the h8 linears - the MLP's since open-work 17, the mixer linears bf16 - decode rows
 #       plain), one pass, both heads into ONE dir (the keys carry the head form) ->
@@ -37,7 +37,7 @@
 #       oracle-out-qwen-f32-pfi8mlp-kv8-forced (mtp_gpu_kv8_test). Dump the kv8 twin's own contexts (B70_DUMP_FORCED):
 #       a key does not carry the KV form, so a bf16-KV run's dumps are not these.
 #   tools/box_validate/f32_refs.sh <data tree> bf16top-qwen <dir> [<dir>...]
-#       the bf16-unstable rule's standard-bf16 top-k references (operator 2026-11-04, tests/server/spec_judge.h;
+#       the bf16-unstable rule's standard-bf16 top-k references (tests/server/spec_judge.h;
 #       B70_FORCED_BF16): tools/oracle/qwen_bf16_top.py plan on the host - the Qwen3.8 contexts of the dirs whose
 #       judge rejects a forced id by more than 8 bf16 ulp, each against the judge its test reads (mtp_gpu_ keys: the
 #       l0-int8 judges of oracle-out-qwen-f32-pfi8mlp-forced; the rest: oracle-out-qwen-f32{,-i8head}-forced) - then

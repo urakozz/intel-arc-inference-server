@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tidy the box (operator 2026-11-10: finished work kept piling up on the 915 GB system disk). From the Mac:
+# Tidy the box (finished work kept piling up on the 915 GB system disk). From the Mac:
 #   tools/box_tidy.sh            move to ~/b70/trash/<date>-tidy:
 #                                  - ~/b70/trees/<branch> whose branch no longer exists in this checkout (merged and
 #                                    deleted), except the long-lived trees below, a live branch's companion trees
@@ -7,7 +7,7 @@
 #                                  - ~/b70-inference-server-g0-<sha> baseline trees except the KEEP_G0 newest (default 2)
 #                                    and any a running box_validate uses (newest by modification time: a baseline build
 #                                    that box_validate reuses is touched, tools/box_validate/baseline.py);
-#                                then print the trash's size (only the operator's rm frees it).
+#                                then print the trash's size (only the owner's rm frees it).
 #   tools/box_tidy.sh --dry-run  print what would move, move nothing.
 # Nothing is deleted. A full tools/box_validate.sh launch runs it with --dry-run (the list only).
 set -euo pipefail
@@ -52,6 +52,6 @@ for g in $(ls -td ~/b70-inference-server-g0-* 2>/dev/null); do
   busy "$(basename "$g")" && { echo "kept $g (in use)"; continue; }
   move "$g"
 done
-[ "$dry" = 1 ] || { [ -d "$T" ] && echo "trash: $(du -sh ~/b70/trash | cut -f1) in ~/b70/trash (the operator's rm frees it)"; }
+[ "$dry" = 1 ] || { [ -d "$T" ] && echo "trash: $(du -sh ~/b70/trash | cut -f1) in ~/b70/trash (the owner's rm frees it)"; }
 df -h / | tail -1 | awk '{print "system disk: " $5 " used, " $4 " free"}'
 REMOTE

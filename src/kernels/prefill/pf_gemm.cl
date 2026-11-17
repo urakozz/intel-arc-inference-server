@@ -73,8 +73,7 @@
 #endif
 //
 // **Storing `rne_bf16(acc)` for the OTHER linears was measured and rejected**
-// (parity program S2(b); docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md
-// §8). Every
+// (parity program S2(b)). Every
 // consumer opens with that same round, so it is bitwise free, but it does not
 // pay: this driver declares no 16-bit block write wider or taller than
 // `..._16b_8r16x1c`, so a bf16 C tile needs exactly as MANY store messages as

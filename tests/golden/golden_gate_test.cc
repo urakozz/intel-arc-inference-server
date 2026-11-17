@@ -141,7 +141,7 @@ struct Verdict {
 }  // namespace
 
 int main(int argc, char** argv) {
-  // Ornith (operator ruling 2026-10-23, golden_common.h): `--judge=<f32 dir>` - the gate judges
+  // Ornith (golden_common.h): `--judge=<f32 dir>` - the gate judges
   // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
   const std::string judge_dir = golden::take_judge(argc, argv);
   const golden::AcceptList accept = golden::take_accept(argc, argv);   // known rows (2026-10-23)

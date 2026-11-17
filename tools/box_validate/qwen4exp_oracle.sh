@@ -190,7 +190,7 @@ sys.exit(0 if any(k.startswith("route.top.p.") for k in h) and (sc or not sel) e
 
 # golden <out dir> <partial dir> <prompt name> <extra run args> [scores]
 # `scores` (the synthetic sets: minutes a prompt): a kept set without the score judge's tensors is moved to
-# ~/b70/trash/<date>/ (the operator removes it) and made again; the real-checkpoint sets (hours) are kept as they are.
+# ~/b70/trash/<date>/ (the owner removes it) and made again; the real-checkpoint sets (hours) are kept as they are.
 golden() {
   local out="$1" part="$2" p="$3" extra="$4" scores="${5:-}"
   if [ -n "$scores" ] && [ "$dry" != 1 ] && [ -s "$out/$p.golden.safetensors" ] && ! has_scores "$out/$p.golden.safetensors"; then
@@ -347,7 +347,7 @@ case "$mode" in
       exit 1
     else
       df -h . "$hf" "$(dirname "$dest")" 2>/dev/null | tail -3
-      # The destination sits beside the snapshot - on the box a bind mount of the operator's USB disk, another
+      # The destination sits beside the snapshot - on the box a bind mount of the USB disk, another
       # filesystem than the tree: the final mv is a copy there. Refuse up front when it cannot hold the file
       # (2026-11-03: the copy filled the USB disk and the stage still reported the file written).
       ple_need_gb=56

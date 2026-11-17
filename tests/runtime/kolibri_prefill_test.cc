@@ -19,7 +19,7 @@
 //        the ring slots), the route rows of the positions both last chunks hold bitwise;
 //     4. Review Focus 4, prefill against decode's M = 1 fill (ingest, one id per replay) of the same
 //        prompt: per layer, per position the ring / cache still holds, K and V cosine - gated on each layer's
-//        MEDIAN (operator ruling 2026-10-31, round 2: the per-layer median, not one worst row; 2026-11-03: the
+//        MEDIAN (round 2: the per-layer median, not one worst row; 2026-11-03: the
 //        real checkpoint's shallow layers only, kShallowLayers / kShallowMedian below); layer 0's worst row, the
 //        all-rows median and the 1st percentile printed (bitwise is not expected: the GEMMs' sum orders and the
 //        bf16 dequant differ from the int4 GEMVs');
@@ -31,7 +31,7 @@
 //        PRINTED, not gated.
 //     5 and 6 compare two bf16 paths, each as far from f32 as the bf16 golden (the Ornith ruling of 2026-10-28):
 //     the prefill's routes and tokens are judged against the f32 reference by kolibri_golden_test's prefill
-//     mode (operator ruling 2026-10-31, round 2) - on the synthetic checkpoints' chaotic 5 random layers the two
+//     mode (round 2) - on the synthetic checkpoints' chaotic 5 random layers the two
 //     paths' last-chunk sets part at 12 - 14 % of the rows beyond a near-tie (2026-10-31), the bf16 golden's and
 //     f32's at 28 - 51 %.
 //   mode `split` (prefill_split_kolibri_test, Review Focus 5): the kN ids in ONE prefill call against TWO
@@ -74,11 +74,11 @@ using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 8192, kN = 4500, kGen = 32;
 constexpr float kTieTol = 2e-2f;          // PROPOSED: decode's selection margin below this: a near-tie
 constexpr float kWeightAbs = 1.0f / 32;   // PROPOSED: |w_prefill - w_decode| on matched experts
-// Section 4's bar on each layer's median K / V cosine (operator ruling 2026-10-31, round 2). The synthetic
+// Section 4's bar on each layer's median K / V cosine (round 2). The synthetic
 // checkpoints measured 0.99975 - 0.999995 (layer 4, eager, the worst; 2026-10-31), a quarter of this bar's distance;
 // a continuation fault (a wrong ring slot or offset, a lost row) moves every row after it and the median with them.
 constexpr double kLayerMedian = 0.999;
-// Operator ruling 2026-11-03, the real checkpoint (more than kShallowLayers layers): layers [0, kShallowLayers) gated
+// Ruling 2026-11-03, the real checkpoint (more than kShallowLayers layers): layers [0, kShallowLayers) gated
 // at median >= kShallowMedian, the deeper layers PRINTED with their numbers, not gated. Why (2026-11-01/02 on the
 // box): a structural fault (a wrong ring slot, offset or lost row) shows from the first layer it touches, and layers
 // 0-5 - four sliding, the first full (NoPE) layer 4, the sliding layer after it - measured medians 0.999983 -

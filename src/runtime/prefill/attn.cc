@@ -26,8 +26,7 @@ std::atomic<int> g_split{int(FlashSplit::Auto)};  // 3l (2): the rule unless a t
 
 constexpr uint32_t kTile = 64;   // pf_flash_attn's KT: spans are whole tiles
 
-// 3l (2): the split-K rule, from flash_split_test --time (docs/probes/probe-longctx-decode-2026-11-09.md,
-// "3l (2)"; 16 FA layers, interleaved, card 1). Today's grid is ceil(C / 8) x kv-heads work-groups, each
+// 3l (2): the split-K rule, from flash_split_test --time ("3l (2)"; 16 FA layers, interleaved, card 1). Today's grid is ceil(C / 8) x kv-heads work-groups, each
 // walking every key; the card keeps ~5 of these 96-lane 256-GRF work-groups per Xe core resident (32 cores).
 // The key range [0, pos) is cut into n = max(64 / row blocks, 16) spans - ~256 work-groups for one or two
 // row blocks, 16 spans for more - never a span under 256 keys (below it the merge and the per-span setup

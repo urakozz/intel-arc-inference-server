@@ -66,7 +66,7 @@ class OutputStream : public OutputParser {
   std::vector<Delta> finish() override;                         // end of generation
 
   // A call still open when generation ends is DROPPED - neither a call nor content - unless its </function> had closed
-  // (only </tool_call> missing: the call is complete). On by default for every model (operator 2026-11-16): a call cut
+  // (only </tool_call> missing: the call is complete). On by default for every model: a call cut
   // by max_tokens is never executed with only the parameters that closed. Off: the call is emitted with those.
   void set_drop_cut_calls(bool on) { drop_cut_calls_ = on; }
 
