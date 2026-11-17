@@ -1,12 +1,12 @@
-// Spec 21-QFNe Task 2 (host): Qwen3.8-Flash-Next's prefix-cache snapshot layouts (runtime/qwen4exp/qwen4exp_sizes.h
+// Spec 21-QFN-v1e Task 2 (host): Qwen3.8-Flash-Next's prefix-cache snapshot layouts (runtime/qwen4exp/qwen4exp_sizes.h
 // state_runs / kv_runs) over SIMULATED devices - one host buffer per device allocation, sized as the engine's
 // (snap_tensor_bytes = persistent_sizes' groups and the head's), every byte a function of (the absolute layer, the
 // offset inside that layer's slice) only, so the same model state looks the same whichever device holds a layer:
 //
 //   1. the bytes: the runs' total is state_snapshot_bytes / kv_snapshot_bytes at pos 0, 1, 3, 4, 2049..2052, 5000
 //      (and every run inside its allocation), with and without the MTP head; the real model's 115,651,592 B of
-//      state and 25,344 B a position (derived, spec 21-QFN §3), + 21,248 / + 2,112 with the head;
-//   2. one host layout for --pp 1 and --pp 2 (plan 21-QFNe Review Focus 5): the host image saved under
+//      state and 25,344 B a position (derived, spec 21-QFN-v1 §3), + 21,248 / + 2,112 with the head;
+//   2. one host layout for --pp 1 and --pp 2 (plan 21-QFN-v1e Review Focus 5): the host image saved under
 //      Q4Placement::one is byte for byte the one saved under two(d, 1), two(d, 2) and two(d, 3) at --layers 4, and
 //      under one / two(d, 24) at 48 layers - the state and the kv of [0, 2051), [2048, 4096), [4096, 5000);
 //   3. round trips: load (into zeroed devices) then save gives the same host bytes, under each placement and across

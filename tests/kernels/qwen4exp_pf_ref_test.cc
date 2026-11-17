@@ -1,5 +1,5 @@
-// Spec 21-QFNd Task 1: the Qwen3.8-Flash-Next prefill references (tests/kernels/qwen4exp_pf_ref.h) against
-// independent formulas and against 21-QFNc's decode references (qwen4exp_ref.h) - host only, so the Mac runs it.
+// Spec 21-QFN-v1d Task 1: the Qwen3.8-Flash-Next prefill references (tests/kernels/qwen4exp_pf_ref.h) against
+// independent formulas and against 21-QFN-v1c's decode references (qwen4exp_ref.h) - host only, so the Mac runs it.
 //
 //   (a) the sort (Review Focus 3): random routes from q4ref::route at C 1 / 37 / 300 / 2048, routes with exact
 //       ties at the 10th (coarse logits), and the adversaries - every token to the same 10 experts (0, 1, 127,
@@ -10,7 +10,7 @@
 //       whole result equal to spec 15d's pf_moe_ref::sort at this family's shape (one layout, two homes);
 //   (b) row independence: the chunk REVERSED, and the rows permuted inside every tile, leave every token's combine
 //       output bitwise unchanged;
-//   (c) the combine == 21-QFNc's decode chain bit for bit: y rows formed as the decode kernel's own down sums
+//   (c) the combine == 21-QFN-v1c's decode chain bit for bit: y rows formed as the decode kernel's own down sums
 //       (q4ref::split_dot over real-width layout-1 blocks, rounded once - what the grouped GEMM's plain epilogue
 //       stores) give exactly q4ref::down's y on every token and column, both shared forms;
 //   (d) dense_rows at Review Focus 1's chunk starts (0, 1000, 2000 straddling, 2048, 4096, a 300-row tail), each

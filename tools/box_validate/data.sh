@@ -96,41 +96,41 @@ case "${1:-}" in
       bash -c 'for p in prose code de_prose de_chat; do test -s oracle-out-kolibri-f32/$p.golden.safetensors || exit 1; done'
     have oracle_kolibri_synth_f32 "oracle-out-kolibri-synth-f32/{int4attn,bf16attn}/{prose,de_prose}.golden.safetensors (kolibri_oracle.sh synth-f32, --with r24.oracle_synth)" \
       bash -c 'for a in int4attn bf16attn; do for p in prose de_prose; do test -s oracle-out-kolibri-synth-f32/$a/$p.golden.safetensors || exit 1; done; done'
-    # Spec 21-QFNa: Qwen3.8-Flash-Next (qwen4_exp) - the checkpoints and the CPU reference's golden sets
+    # Spec 21-QFN-v1a: Qwen3.8-Flash-Next (qwen4_exp) - the checkpoints and the CPU reference's golden sets
     # (tools/box_validate/qwen4exp_oracle.sh <data tree> intel | intel-layers N | trace).
     have q4exp_tiny "the tiny qwen4_exp model (hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next, 124 MB)" \
       complete "${SNAP_Q4EXP_TINY:-qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next}"
     have q4exp_intel "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint ${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound} (181 GB with the 102.4 GB PLE shards; df -h first)" \
       complete "${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}"
-    have oracle_q4exp "oracle-out-q4exp/q4exp_{short,4k,8k,32k,agentic}.{ids,golden.safetensors} (spec 21-QFNa: qwen4exp_oracle.sh intel)" \
+    have oracle_q4exp "oracle-out-q4exp/q4exp_{short,4k,8k,32k,agentic}.{ids,golden.safetensors} (spec 21-QFN-v1a: qwen4exp_oracle.sh intel)" \
       bash -c 'for p in q4exp_short q4exp_4k q4exp_8k q4exp_32k q4exp_agentic; do test -s oracle-out-q4exp/$p.ids && test -s oracle-out-q4exp/$p.golden.safetensors || exit 1; done'
-    have oracle_q4exp_layers "oracle-out-q4exp-L4/ and -L18/ q4exp_{short,4k,agentic} (spec 21-QFNa: qwen4exp_oracle.sh intel-layers 4 / 18 - 21-QFNc's --layers N gate)" \
+    have oracle_q4exp_layers "oracle-out-q4exp-L4/ and -L18/ q4exp_{short,4k,agentic} (spec 21-QFN-v1a: qwen4exp_oracle.sh intel-layers 4 / 18 - 21-QFN-v1c's --layers N gate)" \
       bash -c 'for n in 4 18; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-L$n/$p.golden.safetensors || exit 1; done; done'
     have oracle_q4exp_f32 "oracle-out-q4exp-f32-L{18,37}/q4exp_4k.state.safetensors (qwen4exp_oracle.sh intel-f32 N)" \
       bash -c 'for n in 18 37; do test -s oracle-out-q4exp-f32-L$n/q4exp_4k.state.safetensors || exit 1; done'
     have oracle_q4exp_f32_aligned "oracle-out-q4exp-f32-aligned-L{18,37}/q4exp_4k.state.safetensors (f32-judged engine near-tie routes)" \
       bash -c 'for n in 18 37; do test -s oracle-out-q4exp-f32-aligned-L$n/q4exp_4k.state.safetensors || exit 1; done'
-    have oracle_q4exp_traces "oracle-out-q4exp-traces/*.routes.safetensors (spec 21-QFNa Task 7: qwen4exp_oracle.sh trace - spec 22 P0.6 / P0.8's input)" \
+    have oracle_q4exp_traces "oracle-out-q4exp-traces/*.routes.safetensors (spec 21-QFN-v1a Task 7: qwen4exp_oracle.sh trace - spec 22 P0.6 / P0.8's input)" \
       bash -c 'test "$(ls oracle-out-q4exp-traces/*.routes.safetensors 2>/dev/null | wc -l)" -ge 39'
-    # Spec 21-QFNb: the original's small files (config.json + tokenizer files, a few MB - make_synth.py's input), the
+    # Spec 21-QFN-v1b: the original's small files (config.json + tokenizer files, a few MB - make_synth.py's input), the
     # int8 PLE file beside Intel's snapshot (ple_int8.py - r31.ple_convert writes it).
     have q4exp_orig_small "the original's small files ${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next}/config.json + tokenizer.json (hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja)" \
       bash -c 'd=$(tools/box_validate/data.sh resolve "${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next}") && test -s "$d/config.json" && test -s "$d/tokenizer.json"'
-    have q4exp_intel_ple "the int8 PLE file <Intel snapshot>-ple-int8/ (spec 21-QFNb: r31.ple_convert - ple_int8.py, ~51.8 GB; the engine reads it there only)" \
+    have q4exp_intel_ple "the int8 PLE file <Intel snapshot>-ple-int8/ (spec 21-QFN-v1b: r31.ple_convert - ple_int8.py, ~51.8 GB; the engine reads it there only)" \
       bash -c 'test -n "$(tools/box_validate/data.sh q4ple)"'
-    # Spec 21-QFNb: the synthetic real-width checkpoints (make_synth.py --layers 4 --mtp, both forms) and their PLE
+    # Spec 21-QFN-v1b: the synthetic real-width checkpoints (make_synth.py --layers 4 --mtp, both forms) and their PLE
     # int8 files beside them (ple_int8.py) - r31.synth writes them.
-    have oracle_q4exp_synth "oracle-out-q4exp-synth/{ours,intel}/ckpt/ and ckpt-ple-int8/ (spec 21-QFNb: r31.synth - make_synth.py + ple_int8.py)" \
+    have oracle_q4exp_synth "oracle-out-q4exp-synth/{ours,intel}/ckpt/ and ckpt-ple-int8/ (spec 21-QFN-v1b: r31.synth - make_synth.py + ple_int8.py)" \
       bash -c 'for f in ours intel; do test -s oracle-out-q4exp-synth/$f/ckpt/model.safetensors.index.json && test -s oracle-out-q4exp-synth/$f/ckpt-ple-int8/model.safetensors.index.json || exit 1; done'
-    # Spec 21-QFNc: their golden sets (qwen4exp_oracle.sh synth: qwen4exp_ref.py run on each, the engine-format PLE) -
+    # Spec 21-QFN-v1c: their golden sets (qwen4exp_oracle.sh synth: qwen4exp_ref.py run on each, the engine-format PLE) -
     # a key of its own, so r31's stages (the checkpoints alone) do not wait for them.
-    have oracle_q4exp_synth_golden "oracle-out-q4exp-synth/{ours,intel}/q4exp_{short,4k,agentic}.{ids,golden.safetensors} (spec 21-QFNc: r32.oracle_synth - qwen4exp_oracle.sh synth)" \
+    have oracle_q4exp_synth_golden "oracle-out-q4exp-synth/{ours,intel}/q4exp_{short,4k,agentic}.{ids,golden.safetensors} (spec 21-QFN-v1c: r32.oracle_synth - qwen4exp_oracle.sh synth)" \
       bash -c 'for f in ours intel; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-synth/$f/$p.ids && test -s oracle-out-q4exp-synth/$f/$p.golden.safetensors || exit 1; done; done'
     have oracle_kolibri_a4 "oracle-out-kolibri-a4/ with 36 <name>.bf16.txt (spec 20e KL4: the bf16 source's reference on tests/golden/toolcall-kolibri-de, made wherever 20b runs - tools/toolcall/a4_ref.sh kolibri ref - then --push-data)" \
       bash -c 'test "$(ls oracle-out-kolibri-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_ornith_a4 "oracle-out-ornith-a4/ with Ornith's set and 36 <name>.bf16.txt (spec 15e Task 3: tools/toolcall/a4_ref.sh ornith set / ref on the Mac, then --push-data)" \
       bash -c 'test -s oracle-out-ornith-a4/set/manifest.json && test "$(ls oracle-out-ornith-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
-    have oracle_q4exp_a4 "oracle-out-q4exp-a4/ with Qwen3.8-Flash-Next's set and 36 <name>.bf16.txt (spec 21-QFNe Task 5: tools/toolcall/a4_ref.sh qwen4exp set / ref on Intel's checkpoint - --with r34.a4_ref; r34.a4 scores the engine against it)" \
+    have oracle_q4exp_a4 "oracle-out-q4exp-a4/ with Qwen3.8-Flash-Next's set and 36 <name>.bf16.txt (spec 21-QFN-v1e Task 5: tools/toolcall/a4_ref.sh qwen4exp set / ref on Intel's checkpoint - --with r34.a4_ref; r34.a4 scores the engine against it)" \
       bash -c 'test -s oracle-out-q4exp-a4/set/manifest.json && test "$(ls oracle-out-q4exp-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     # The bf16 original Qwen3.8 (row 11's A4 reference, r11.a4_ref).
     have qwen_bf16 "the bf16 original ${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B} (54 GB; r11.a4_ref's reference)" \

@@ -1,4 +1,4 @@
-# Spec 21-QFNa: the qwen4_exp reference's transformers, installed BESIDE the oracle image (never into it):
+# Spec 21-QFN-v1a: the qwen4_exp reference's transformers, installed BESIDE the oracle image (never into it):
 #   tools/oracle/qwen4exp_env.sh <dir>   ->  pip install --no-deps --target <dir> -r this file
 # Pins read from transformers-5.19.0.dist-info/METADATA (Requires-Dist), not guessed:
 #   huggingface-hub<3.0,>=1.31.0  tokenizers<0.24.0,>=0.23.1  safetensors>=0.8.0

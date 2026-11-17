@@ -1,9 +1,9 @@
-// Spec 21-QFNc Task 4: Qwen3.8-Flash-Next across two cards on spec 16b's pieces (box only; label checkpoint;qwen4exp;pp).
+// Spec 21-QFN-v1c Task 4: Qwen3.8-Flash-Next across two cards on spec 16b's pieces (box only; label checkpoint;qwen4exp;pp).
 //   qwen4exp_pp_test <synthetic checkpoint> <Intel's checkpoint> <ids> [prompt length]
 //
 //   (a) the synthetic checkpoint (4 layers): --pp 1 against --pp 2 --pipeline-split 2: the prompt + 32 greedy tokens - the tokens and, after every phase, the logits, every route row,
 //       every QSA layer's selection and diagnostic, every layer's persistent bytes (KV, the compressed keys and tail
-//       rings, the GDN state and conv rings, the PLE rings) and the PLE ids BITWISE equal (plan 21-QFNc Review Focus 6:
+//       rings, the GDN state and conv rings, the PLE rings) and the PLE ids BITWISE equal (plan 21-QFN-v1c Review Focus 6:
 //       the cut is invisible - the materialised H crosses); both Control blocks equal after every phase; and
 //       --pipeline-split 1 (the cut AT the PLE layer: device 1's PLE prologue folds nothing) likewise
 //   (b) Intel's checkpoint at the planner's N for two cards (runtime::qwen4exp::layers_that_fit; 38 asked for

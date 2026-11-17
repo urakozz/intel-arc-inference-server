@@ -1,4 +1,4 @@
-// Spec 21-QFNb Task 6: load_qwen4exp on the card (box only; label `checkpoint;qwen4exp`), one device.
+// Spec 21-QFN-v1b Task 6: load_qwen4exp on the card (box only; label `checkpoint;qwen4exp`), one device.
 //   qwen4exp_load_checkpoint_test <snapshot> [layers] [mtp]       (the PLE file: <snapshot>-ple-int8/)
 // Loads the checkpoint (a synthetic one from tools/quantize/qwen4exp/make_synth.py + ple_int8.py, or Intel's
 // truncated to its first `layers` - development mode), prints the report (one line per device and one for

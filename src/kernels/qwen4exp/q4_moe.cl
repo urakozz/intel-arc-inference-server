@@ -1,4 +1,4 @@
-// q4_moe.cl - spec 21-QFNc: Qwen3.8-Flash-Next's MoE block at 512 experts / top-10 / 640 (spec 21-QFN §2.1, §4.4) - the
+// q4_moe.cl - spec 21-QFN-v1c: Qwen3.8-Flash-Next's MoE block at 512 experts / top-10 / 640 (spec 21-QFN-v1 §2.1, §4.4) - the
 // router's softmax route and the 11-slot block (10 routed + the shared expert). Two families, each compiled only
 // when its defines are given (kol_moe.cl's arrangement; moe.cl's semantics - Qwen3.5-MoE's softmax router - at
 // widths moe.cl refuses: TOP_K <= 8, EXPERTS <= 256):
@@ -11,11 +11,11 @@
 // 512 the shared expert's gate, 513..527 zero): l = rne(logit) (F.linear's bf16 output); p = softmax(l) in fp32 -
 // mx exact, ex = exp_torch(l - mx), the sum a pairwise tree over the 512 (stride 256 .. 1), p = ex / sum; the top 10
 // by RANK = #{j : p_j > p_e or (p_j == p_e and j < e)} - EXACT ties to the lower id (torch's topk does not
-// prefer the lower index: 21-QFNa's finding; those rows are undetermined for the routing gate); renormalised in fp32
+// prefer the lower index: 21-QFN-v1a's finding; those rows are undetermined for the routing gate); renormalised in fp32
 // (s10 = sum_{k < 10} p_k, rank order) and rounded: w_k = rne(p_k / s10); the shared gate sg = rne(sigmoid(l_512)).
 // The route row (u32 words per (layer, row); host mirror kernels::qwen4exp::route):
 //   [R_IDS + k]  the expert of rank k, k < 10 - RANK order: the combine's order (grouped_mm sums the 10 weighted
-//                rows in the router's topk slot order, 21-QFNa: spec 21-QFN §12)
+//                rows in the router's topk slot order, 21-QFN-v1a: spec 21-QFN-v1 §12)
 //   [R_W + k]    w_k (fp32 bits of a bf16 value)    [R_SG] sg (fp32 bits, bf16 value)
 //   [R_P10] / [R_P11]   p of rank 9 and of rank 10 (the first not taken): the near-tie diagnostic
 // **The block** (integrations/moe.py grouped_mm_experts_forward + M:981-992; tests/kernels/qwen4exp_ref.h):

@@ -14,15 +14,15 @@
 #include "model/qwen4exp.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"   // ExpertTier
 
-// Spec 21-QFNb Task 6: Qwen3.8-Flash-Next on one or two B70s - the checkpoint's tensors in the layouts
+// Spec 21-QFN-v1b Task 6: Qwen3.8-Flash-Next on one or two B70s - the checkpoint's tensors in the layouts
 // loader/qwen4exp_layout.h sizes (loader/qwen4exp_repack.h is the host half), the PLE table pinned in host USM
-// (loader/qwen4exp_ple.h). A loader BESIDE loader::load and load_kolibri1 (spec 21-QFN §6): their files
+// (loader/qwen4exp_ple.h). A loader BESIDE loader::load and load_kolibri1 (spec 21-QFN-v1 §6): their files
 // are untouched; the public pieces are reused - resolve_snapshot, QuantConfig::parse, SafetensorsSet,
 // assert_quant_invariants, check_quant_scan, LinearSrc::classify (its exact g128 -> g64 expansion), the int8
 // lm_head quantiser, rtn_int4_g64.
 //
 // **Both checkpoints the engine accepts:** Intel/Qwen3.8-Flash-Next-W4A16-AutoRound (int4 g128 routed experts
-// through the expansion, its bf16 dense / shared / MTP as shipped - the interim, spec 21-QFN §5) and ours (21q:
+// through the expansion, its bf16 dense / shared / MTP as shipped - the interim, spec 21-QFN-v1 §5) and ours (21q:
 // AutoRound int4 g64 sym). The forms are read from the names (loader::q4_forms).
 //
 // **Placement at load.** Each layer is repacked from the shards and uploaded straight onto the device the

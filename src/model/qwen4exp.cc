@@ -19,7 +19,7 @@ Qwen4ExpDesc make_qwen4exp() {
   d.hc = 4;
   d.hc_low = 320;
   d.vocab = 248320;
-  d.vocab_used = 248077;   // the original's tokenizer.json: 248044 + 33 added ids (21-QFNa's facts sheet)
+  d.vocab_used = 248077;   // the original's tokenizer.json: 248044 + 33 added ids (21-QFN-v1a's facts sheet)
   d.trained_max_len = 262144;
   d.gdn_k_heads = 16;
   d.gdn_v_heads = 48;

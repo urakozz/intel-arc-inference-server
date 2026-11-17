@@ -12,7 +12,7 @@
 #include "runtime/control.h"
 
 // qwen4exp_capture.cc - one device's Qwen3.8-Flash-Next decode list (qwen4exp_capture.h has the walk in one
-// table) and, spec 21-QFNe, spec 8's verify and draft lists. Every binding site names the kernel it honours; argument
+// table) and, spec 21-QFN-v1e, spec 8's verify and draft lists. Every binding site names the kernel it honours; argument
 // orders are each __kernel's, in src/kernels/qwen4exp/*.cl and the reused sources.
 namespace runtime::qwen4exp {
 namespace {
@@ -387,7 +387,7 @@ class Walk {
     pending_layer_ = int(l);
   }
 
-  // The PLE layer's prologue (spec 21-QFN §2.4: `H = H + ple(H)` before the attn side): materialise H (unless it
+  // The PLE layer's prologue (spec 21-QFN-v1 §2.4: `H = H + ple(H)` before the attn side): materialise H (unless it
   // landed materialised), the gather from host USM, the key||value projections, the block (M = 1) or - a verify at
   // M > 1 - q4_pf_ple's gate / conv / ring at C = 4 (q4_ple_block is M = 1 only: a row's p - 3 may be this launch's).
   void ple(const loader::Q4Layer& L) {
@@ -753,7 +753,7 @@ class Walk {
 
   void head() { mixer_and_head(*part_.final_mixer, b_.logits.ptr()); }
 
-  // --- spec 21-QFNe: the MTP head ------------------------------------------------------------------------------------
+  // --- spec 21-QFN-v1e: the MTP head ------------------------------------------------------------------------------------
   // The fusion over M_ rows of R (`R`: [M][10240] bf16) and the head Control's tokens: q4_mtp_norm, fc_embedding at
   // M, fc_hidden at M = 4 a row, q4_mtp_fuse -> b.H (the head layer's input, materialised).
   void mtp_fuse(const void* R) {

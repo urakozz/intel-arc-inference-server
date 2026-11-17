@@ -1,4 +1,4 @@
-// q4_hc.cl - spec 21-QFNc: Qwen3.8-Flash-Next's hyper-connections (spec 21-QFN §2.2, §4.1). The residual is H, 4
+// q4_hc.cl - spec 21-QFN-v1c: Qwen3.8-Flash-Next's hyper-connections (spec 21-QFN-v1 §2.2, §4.1). The residual is H, 4
 // streams x 2560 bf16 per row; a gated residual is THREE launches - q4_hc_combine_norm, gemv_bf16 {10240, 336}
 // (down's 320 rows and block_inject's 4, padded; gemv_bf16.cl unchanged, fp32 out) and q4_hc_up_mix. Two families,
 // each compiled only when its defines are given:

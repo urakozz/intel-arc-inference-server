@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spec 21-QFNa: the CPU reference of Qwen3.8-Flash-Next (`qwen4_exp`), F1.
+"""Spec 21-QFN-v1a: the CPU reference of Qwen3.8-Flash-Next (`qwen4_exp`), F1.
 
 The model is transformers 5.19.0's own `Qwen4ExpForCausalLM` (decision 1; refused on any other
 version) built on `meta` from the checkpoint's text config and LAYER-STREAMED (stream.py: the
@@ -8,7 +8,7 @@ and dropped after). Three pieces Ornith's reference did not need:
 
   1. the PLE n-gram table is never materialised (102.4 GB bf16): `ple.ple_embedding.ngram_embedding`
      is replaced by a lookup that reads the 16 rows a token by mmap - from the checkpoint's shards
-     (`ngram_embedding.shard_K.weight`) or from 21-QFNb's int8 file (`--ple int8:<dir>`, the engine-format
+     (`ngram_embedding.shard_K.weight`) or from 21-QFN-v1b's int8 file (`--ple int8:<dir>`, the engine-format
      reference). transformers' own hash computes the row ids (the buffers come from the checkpoint);
      a gather has no rounding, so the forward is the materialised model's.
   2. the QSA indexer caches each complete block's compressed key (fp32 mean of its 4 raw keys ->
@@ -88,7 +88,7 @@ import torch.nn.functional as F  # noqa: E402
 PINNED_TRANSFORMERS = "5.19.0"
 DEFAULT_EXPERTS = "grouped_mm"       # 5.19.0's default for Qwen4ExpTextExperts (Task 1, qwen4exp_tiny_check.py)
 ROUTE_TOP = 16                       # route.top.*: the fp32 softmax's top 16 a row (the gates' routing judge)
-QSA_DENSE_ROWS = 2051                # rows p <= 2050 see <= 2051 positions: QSA selects all of them (spec 21-QFN §2.3)
+QSA_DENSE_ROWS = 2051                # rows p <= 2050 see <= 2051 positions: QSA selects all of them (spec 21-QFN-v1 §2.3)
 
 
 def _load(name: str):
@@ -139,7 +139,7 @@ def text_config(snapshot: str, layers: int | None = None, experts: str = DEFAULT
                 dtype: torch.dtype = torch.bfloat16, raw: dict | None = None):
     """config.json's text_config (or the tiny's top level) -> the Qwen4ExpTextConfig the reference builds.
 
-    layers=N truncates num_hidden_layers and layer_types[:N] (spec 21-QFN's --layers N: the engine loads
+    layers=N truncates num_hidden_layers and layer_types[:N] (spec 21-QFN-v1's --layers N: the engine loads
     layers [0, N), then the final mixer and the head). ple_layer_ids are ONE-indexed (M:1260), so N must
     keep them inside: N >= max(ple_layer_ids) (C:239-245)."""
     require_version()
@@ -187,7 +187,7 @@ def model_name(ckpt: str) -> str:
 
 
 # ------------------------------------------------------------------------------------------------
-# expected names: what 21-QFNb's synthetic checkpoints write and the loader requires
+# expected names: what 21-QFN-v1b's synthetic checkpoints write and the loader requires
 
 GDN_LINEARS = ("in_proj_qkv", "in_proj_z", "out_proj")
 QSA_LINEARS = ("q_proj", "k_proj", "v_proj", "o_proj")
@@ -200,7 +200,7 @@ def expected_names(tc, form: str, mtp: bool = True, head_q: bool = False, mtp_q:
       "bf16"  the original: fused routed experts `mlp.experts.gate_up_proj` / `down_proj`, all bf16
       "intel" Intel's AutoRound export: per-expert int4 `qweight` / `qzeros` / `scales` (g128), the rest bf16
               as shipped; its MTP head bf16 with per-expert `.weight` experts
-      "ours"  spec 21-QFN §5 (21q): per-expert int4 g64 experts, and int4 for the shared experts, QSA q/k/v/o and
+      "ours"  spec 21-QFN-v1 §5 (21q): per-expert int4 g64 experts, and int4 for the shared experts, QSA q/k/v/o and
               GDN in_proj_qkv / in_proj_z / out_proj; everything else bf16 (ple ignored); MTP as Intel's
               (decision 6 open)
       "tiny"  qikp/tiny-random-...: `model.layers.*` prefix, per-expert `.weight` experts
@@ -472,7 +472,7 @@ def ple_hash_ids(tokens: torch.Tensor, multipliers, sizes, offsets, eos: int, ng
 
 class PleTable:
     """16 rows a token by mmap. `source`: a snapshot directory whose PLE layer stores the table as
-    `ngram_embedding.shard_K.weight` (bf16, or the tiny's fp32), or "int8:<dir>" - 21-QFNb Task 1's file:
+    `ngram_embedding.shard_K.weight` (bf16, or the tiny's fp32), or "int8:<dir>" - 21-QFN-v1b Task 1's file:
     per head h `ple.h<h>.q` I8 [prime_h][160] and `ple.h<h>.s` F32 or BF16 [prime_h], an index json; a row
     dequantises to bf16(float(q) x float(s)) (spec 9's row rule, the engine-format reference)."""
 
@@ -740,7 +740,7 @@ def hf_reference(snapshot: str, dtype: torch.dtype, num_layers: int | None = Non
 
 
 # ------------------------------------------------------------------------------------------------
-# the restated ops (the rounding chain the facts sheet pins; 21-QFNc's fixture imports these)
+# the restated ops (the rounding chain the facts sheet pins; 21-QFN-v1c's fixture imports these)
 
 def rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float, group: int | None = None) -> torch.Tensor:
     """M:144-169: fp32, x * rsqrt(mean(x^2) + eps), times (1 + w) in fp32, ONE cast to x's dtype."""

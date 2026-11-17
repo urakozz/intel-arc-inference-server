@@ -1,6 +1,6 @@
-// Spec 21-QFNc Task 2 Step 4 (F2) and Task 5 Step 1: Qwen3.8-Flash-Next's decode kernels on the card, at the real
+// Spec 21-QFN-v1c Task 2 Step 4 (F2) and Task 5 Step 1: Qwen3.8-Flash-Next's decode kernels on the card, at the real
 // shapes, against tests/kernels/qwen4exp_ref.h. Needs a B70, no checkpoint (synthetic weights); exits 77 (SKIP)
-// without a GPU. Every binary of the CMake block's spec 21-QFNc section (kernels::qwen4exp names) - BITWISE unless said:
+// without a GPU. Every binary of the CMake block's spec 21-QFN-v1c section (kernels::qwen4exp names) - BITWISE unless said:
 //
 //   1. q4_hc_combine_norm _E, _S4, _S1, _Y, _X, _Y_NN (H and xn; _NN leaves xn untouched); q4_hc_up_mix _I and
 //      plain (x and the inject weights)
@@ -33,9 +33,9 @@
 //                      list) against attn_v2 (attn_decode_v2 + attn_reduce_v2) at depths 512 / 1024 / 2048 -
 //                      lists of 100 launch pairs, 3 warm-up replays each, then 3 rounds of 20 replays with A and B
 //                      interleaved replay by replay; the median round, printed in us per launch pair
-//   --ple-rate [GB]    plan Task 5 Step 1: 16 + 16 host-USM ranges per 21-QFNb's rule (head sizes the real primes
+//   --ple-rate [GB]    plan Task 5 Step 1: 16 + 16 host-USM ranges per 21-QFN-v1b's rule (head sizes the real primes
 //                      q4_ple_primes(20000000, 16, 0) scaled so int8 rows + bf16 scales total GB; default 16, 51.8
-//                      the real table), refused by 21-QFNb's host-fit rule (exit 77); q4_ple_gather_M1_BF16 alone in
+//                      the real table), refused by 21-QFN-v1b's host-fit rule (exit 77); q4_ple_gather_M1_BF16 alone in
 //                      a replayed regular list at M = 1, 10^4 replays with a random token written into Control's
 //                      cur_token (and pos advanced) between replays, the readback of ids and e checked after
 //                      every replay; device 0, then device 1 (l0::Context(c0, 1), the same host ranges), then both

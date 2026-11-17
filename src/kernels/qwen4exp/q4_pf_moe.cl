@@ -1,5 +1,5 @@
-// q4_pf_moe.cl - spec 21-QFNd: Qwen3.8-Flash-Next's routed experts over a PREFILL chunk - everything of the MoE block
-// but the router GEMV (prefill/pf_gemv_bf16.cl at {2560, 528}), the route (21-QFNc's q4_moe.cl q4_route, decode's binary
+// q4_pf_moe.cl - spec 21-QFN-v1d: Qwen3.8-Flash-Next's routed experts over a PREFILL chunk - everything of the MoE block
+// but the router GEMV (prefill/pf_gemv_bf16.cl at {2560, 528}), the route (21-QFN-v1c's q4_moe.cl q4_route, decode's binary
 // on grid (1, C)) and the grouped GEMMs (spec 15d's prefill/pf_moe_gemm.cl, unchanged, at this family's shapes). One
 // binary (kernels::qwen4exp::pf_moe_variant), seven entry points:
 //
@@ -13,14 +13,14 @@
 // argument, restated below - with this family's three differences:
 //
 //   * 512 experts, top 10. Ids up to 511 do not fit pf_moe_sort's uchar staging (prefill/pf_moe.cl:61, :117-124):
-//     they are staged as ushort and lane l of 256 owns experts l and l + 256 (PF_EPL 2; 21-QFNc's q4_route has the
-//     same 512 slots on 256 lanes). The route row is 21-QFNc's (ids at R_IDS in RANK order, weights at R_W, the shared
+//     they are staged as ushort and lane l of 256 owns experts l and l + 256 (PF_EPL 2; 21-QFN-v1c's q4_route has the
+//     same 512 slots on 256 lanes). The route row is 21-QFN-v1c's (ids at R_IDS in RANK order, weights at R_W, the shared
 //     gate at R_SG: kernels::qwen4exp::route).
-//   * The shared expert is block 512 of every weight batch in either form 21-QFNb loads: int4 layout-1 blocks (ours:
+//   * The shared expert is block 512 of every weight batch in either form 21-QFN-v1b loads: int4 layout-1 blocks (ours:
 //     q4_pf_dequant_gu / _dn, the routed experts' dequant) or bf16 gemv_bf16 tiles (Intel's: the _shb entries COPY
 //     the tiles into row-major [K][N], kol_pf_moe.cl's copy).
-//   * The combine is 21-QFNc's q4_moe_down epilogue - the 10 routed terms in the route row's RANK order (grouped_mm's
-//     topk slot order, spec 21-QFN §12), each rne(rne(y_k) x w_k) then added (no fma: FP_CONTRACT OFF), r_b = rne(sum),
+//   * The combine is 21-QFN-v1c's q4_moe_down epilogue - the 10 routed terms in the route row's RANK order (grouped_mm's
+//     topk slot order, spec 21-QFN-v1 §12), each rne(rne(y_k) x w_k) then added (no fma: FP_CONTRACT OFF), r_b = rne(sum),
 //     + sh_b = rne(rne(y_shared) x sg), one rounding - into `out` (the block's y), NOT into H: the next
 //     q4_hc_combine_norm folds it, x the block's inject weights.
 //
@@ -38,7 +38,7 @@
 // **Determinism.** No atomic anywhere. The sort is one work-group; each lane counts and then scatters its experts'
 // pairs walking the chunk in ascending (token, slot) order, so every row's place is a function of the route rows
 // alone. Gather, dequant and copy are copies. The combine sums in the route row's slot order exactly as q4_moe_down
-// does (tests/kernels/qwen4exp_pf_ref.h repeats it and checks it against 21-QFNc's q4ref::down).
+// does (tests/kernels/qwen4exp_pf_ref.h repeats it and checks it against 21-QFN-v1c's q4ref::down).
 //
 // **The expert address** (spec 15 decision 3, spec 22's hook): Q4_EXPERT_GU / Q4_EXPERT_DN below are the ONE place
 // a routed expert's block is found from its id - the layer's block base and the id, never a computed layer offset -
@@ -49,7 +49,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 
 #if !defined(PF_E) || !defined(PF_K) || !defined(PF_WG) || !defined(PF_EPL) || !defined(PF_D) || !defined(PF_INTER) || !defined(TM) || !defined(KC)
-#error "q4_pf_moe: PF_E, PF_K, PF_WG, PF_EPL, PF_D, PF_INTER, TM and KC must be defined (src/kernels/CMakeLists.txt, spec 21-QFNd)"
+#error "q4_pf_moe: PF_E, PF_K, PF_WG, PF_EPL, PF_D, PF_INTER, TM and KC must be defined (src/kernels/CMakeLists.txt, spec 21-QFN-v1d)"
 #endif
 #if PF_K < 1 || PF_K > 15 || PF_E <= PF_K || PF_E > PF_WG * PF_EPL || PF_E > 65535
 #error "q4_pf_moe: 1 <= PF_K <= 15 (the route row), PF_K < PF_E <= the lanes' experts (PF_WG x PF_EPL), ids as ushort"

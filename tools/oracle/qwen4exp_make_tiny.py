@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spec 21-QFNa: tiny qwen4_exp checkpoints the downloaded tiny model cannot give (tests only).
+"""Spec 21-QFN-v1a: tiny qwen4_exp checkpoints the downloaded tiny model cannot give (tests only).
 
     qwen4exp_make_tiny.py <out dir> [--hidden 128] [--layer-types lllq] [--experts 16] [--topk 4]
         [--form tiny|bf16|intel|ours] [--group 64] [--tie-router A,B] [--mtp] [--indexer-budget 2048]
@@ -12,12 +12,12 @@ qwen4exp_ref.expected_names knows:
   tiny   `model.layers.*`, per-expert `.weight` experts (the downloaded tiny's naming)
   bf16   the original's: `model.language_model.*`, fused `mlp.experts.gate_up_proj` / `down_proj`
   intel  Intel's: per-expert int4 `qweight` / `qzeros` (0x77777777) / `scales` F16 at --group (128), rest bf16
-  ours   spec 21-QFN §5: int4 at --group (64) for the experts, shared experts, QSA q/k/v/o, GDN qkv / z / out
+  ours   spec 21-QFN-v1 §5: int4 at --group (64) for the experts, shared experts, QSA q/k/v/o, GDN qkv / z / out
 --tie-router A,B makes expert B's router row a copy of expert A's (exact ties: test_route_ties).
 --mtp adds the head's `mtp.*` tensors (the original's names; per-expert `.weight` experts except in bf16's
 fused form). --twin DIR also writes the SAME weights as the dequantised `tiny` form (int4 linears
 dequantised by dequant.py's rule), the checkpoint transformers' from_pretrained reads.
-`write_ple_int8` writes 21-QFNb Task 1's int8 PLE file (per head `ple.h<h>.q` I8 / `ple.h<h>.s`).
+`write_ple_int8` writes 21-QFN-v1b Task 1's int8 PLE file (per head `ple.h<h>.q` I8 / `ple.h<h>.s`).
 """
 import os
 import sys
@@ -264,7 +264,7 @@ def make(out: str, hidden=128, layer_types="lllq", experts=16, topk=4, form="tin
 
 
 def write_ple_int8(table: torch.Tensor, tc, out_dir: str, scale: str = "f32") -> None:
-    """21-QFNb Task 1's file for a table [padded][160] (any float dtype): per head h, `ple.h<h>.q` I8
+    """21-QFN-v1b Task 1's file for a table [padded][160] (any float dtype): per head h, `ple.h<h>.q` I8
     [prime_h][160] = clamp(rne(w / s), -127, 127) with s = max|w| / 127 in fp32 (spec 9's row rule; a zero
     row has s = 0, q = 0) and `ple.h<h>.s` F32 or BF16 [prime_h]; the I64 constants; an index json."""
     sizes, offsets, _, _ = ref.facts.head_table(tc.to_dict(), 0)

@@ -5,10 +5,10 @@
 #include "loader/small_layout.h"
 #include "model/qwen4exp.h"
 
-// Spec 21-QFNb: Qwen3.8-Flash-Next on the card as device-free arithmetic - the ONE home of every weight
+// Spec 21-QFN-v1b: Qwen3.8-Flash-Next on the card as device-free arithmetic - the ONE home of every weight
 // allocation's size and of every offset inside a packed block, header-only so the planner
 // (runtime/qwen4exp/qwen4exp_sizes.h, no loader library), the loader (loader/qwen4exp_loader.cc allocates
-// exactly these) and 21-QFNc's kernels' host half share it.
+// exactly these) and 21-QFN-v1c's kernels' host half share it.
 //
 // Per layer (model::Qwen4ExpDesc's shapes; the forms are the checkpoint's - ours / Intel's):
 //
@@ -55,7 +55,7 @@ inline constexpr size_t q4_layout0_bytes(uint32_t K, uint32_t N) {
 inline constexpr size_t q4_bf16_bytes(uint32_t K, uint32_t N) { return size_t(K) * N * 2; }
 
 // The descriptor of the MTP head's layer: one QSA layer whose dense projections and shared expert are bf16
-// in both checkpoints (21-QFNa's expected_names: `mtp.*` is outside AutoRound's block), its routed experts int4
+// in both checkpoints (21-QFN-v1a's expected_names: `mtp.*` is outside AutoRound's block), its routed experts int4
 // g64 (shipped, or RTN-quantised at load from bf16 - spec 15e's rule, loader/rtn.h).
 inline model::Qwen4ExpDesc q4_mtp_desc(const model::Qwen4ExpDesc& d) {
   model::Qwen4ExpDesc m = d;
@@ -228,7 +228,7 @@ inline bool q4_device_has_qsa(const model::Qwen4ExpDesc& d, const model::Q4Place
   return false;
 }
 
-// What ONE decode token reads of layer `layer` (derived; spec 21-QFN §3's rows): both HCs, the mixer's
+// What ONE decode token reads of layer `layer` (derived; spec 21-QFN-v1 §3's rows): both HCs, the mixer's
 // projections and small block, the router, top_k routed experts' blocks, the shared expert, and on the PLE
 // layer its key||value projection and norms (the 16 table rows are host reads, not counted here).
 inline size_t q4_layer_read_per_token(const model::Qwen4ExpDesc& d, uint32_t layer) {

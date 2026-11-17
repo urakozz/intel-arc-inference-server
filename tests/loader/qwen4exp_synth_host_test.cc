@@ -1,4 +1,4 @@
-// Spec 21-QFNb: the loader's host half over make_synth.py's synthetic checkpoints - the Python writer and the C++
+// Spec 21-QFN-v1b: the loader's host half over make_synth.py's synthetic checkpoints - the Python writer and the C++
 // reader held to each other on real files, no device (host only; SKIP 77 without the data).
 //   qwen4exp_synth_host_test <oracle-out-q4exp-synth>      (<dir>/{ours,intel}/ckpt and ckpt-ple-int8)
 // For each form: config.json -> QuantConfig::parse and model::qwen4exp_desc at the checkpoint's 4 layers; the

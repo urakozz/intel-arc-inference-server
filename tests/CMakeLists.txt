@@ -3089,8 +3089,8 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
 endif()
 # ==== Spec 20e: Kolibri-1 served ==== (end) ====
 
-# ==== Spec 21-QFNb: Qwen3.8-Flash-Next descriptor and loader (label qwen4exp) ==== (begin) ====
-# One delimited block for every 21-QFNb registration. Host tests first (they run on the Mac:
+# ==== Spec 21-QFN-v1b: Qwen3.8-Flash-Next descriptor and loader (label qwen4exp) ==== (begin) ====
+# One delimited block for every 21-QFN-v1b registration. Host tests first (they run on the Mac:
 # tools/box_check.sh), then the card's (box only; box-validation queue row 31): the loads SKIP (77)
 # until the synthetic checkpoints (tools/quantize/qwen4exp/make_synth.py + ple_int8.py, r31.synth) or
 # Intel's checkpoint and its PLE file (r31.ple_convert) are on the box.
@@ -3124,7 +3124,7 @@ set_tests_properties(qwen4exp_plan_test PROPERTIES LABELS qwen4exp)
 # checkpoint at 18 layers (one card's fit with its bf16 dense layers, development mode); each with its PLE int8
 # file beside it (<snapshot>-ple-int8/). SKIP 77 without the data.
 set(B70_Q4EXP_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-synth" CACHE PATH
-  "Spec 21-QFNb's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (box: r31.synth)")
+  "Spec 21-QFN-v1b's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (box: r31.synth)")
 set(B70_Q4EXP_INTEL_SNAPSHOT "Intel/Qwen3.8-Flash-Next-W4A16-AutoRound" CACHE STRING
   "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint (181 GB; its PLE file: r31.ple_convert)")
 # The host half over the synthetic files themselves (make_synth.py's writer against the C++ reader; no device,
@@ -3142,12 +3142,12 @@ add_test(NAME qwen4exp_load_synth_intel_test COMMAND qwen4exp_load_checkpoint_te
 add_test(NAME qwen4exp_load_intel_layers_test COMMAND qwen4exp_load_checkpoint_test ${B70_Q4EXP_INTEL_SNAPSHOT} 18)
 set_tests_properties(qwen4exp_load_synth_ours_test qwen4exp_load_synth_intel_test qwen4exp_load_intel_layers_test
   PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-# ==== Spec 21-QFNb: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
+# ==== Spec 21-QFN-v1b: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
 
-# ==== Spec 21-QFNc: Qwen3.8-Flash-Next decode (label qwen4exp) ==== (begin) ====
-# One delimited block for every 21-QFNc registration, after 21-QFNb's. Written blind on the Mac (box queue row 32): host
+# ==== Spec 21-QFN-v1c: Qwen3.8-Flash-Next decode (label qwen4exp) ==== (begin) ====
+# One delimited block for every 21-QFN-v1c registration, after 21-QFN-v1b's. Written blind on the Mac (box queue row 32): host
 # tests first (tools/box_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
-# synthetic golden sets (tools/box_validate/qwen4exp_oracle.sh synth) or Intel's checkpoint and 21-QFNa's sets exist.
+# synthetic golden sets (tools/box_validate/qwen4exp_oracle.sh synth) or Intel's checkpoint and 21-QFN-v1a's sets exist.
 # Task 1: the kernels' host twin (tests/kernels/qwen4exp_ref.h) against qwen4exp_ref.py's restated ops and
 # transformers' modules (tests/kernels/qwen4exp_fixture.h) and the semantics' properties. Host only; the loader's
 # host half for the RoPE table (q4_rope_table) and the PLE hash.
@@ -3162,7 +3162,7 @@ add_test(NAME qwen4exp_f32_judge_test COMMAND qwen4exp_f32_judge_test)
 set_tests_properties(qwen4exp_f32_judge_test PROPERTIES LABELS qwen4exp)
 if(B70_Q4EXP)
   # Task 2: every binary a Qwen3.8-Flash-Next decode list binds, any dense arm / head / attention / PLE scale form
-  # (src/kernels/CMakeLists.txt's spec 21-QFNc block; the reused binaries other blocks build - Qwen3.8's gdn_step_M1 and
+  # (src/kernels/CMakeLists.txt's spec 21-QFN-v1c block; the reused binaries other blocks build - Qwen3.8's gdn_step_M1 and
   # argmax, Kolibri's 6144 x 2560 int4 and bf16 - are bound by name and listed too).
   set(B70_Q4EXP_DECODE_KERNELS
     kernel_embed_gather_M1_D2560 kernel_q4_hc_combine_norm_M1_E kernel_q4_hc_combine_norm_M1_S1
@@ -3198,10 +3198,10 @@ if(B70_Q4EXP)
   # Task 3: the runtime on the card - F4 on decode (plan == allocation, two runs bitwise, the injected capture fed
   # the free run's lists = the free run) on both synthetic checkpoints past the selection's first cut (2200 ids of
   # q4exp_4k); F3 (tokens tie-aware, routing, gate S, PLE ids; free, int8 head, eager, injected) on both synthetic
-  # golden sets (qwen4exp_oracle.sh synth); the development mode on Intel's checkpoint at --layers 18 against 21-QFNa's
+  # golden sets (qwen4exp_oracle.sh synth); the development mode on Intel's checkpoint at --layers 18 against 21-QFN-v1a's
   # full and truncated sets. SKIP 77 without the data.
   set(B70_Q4EXP_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp"
-    CACHE PATH "21-QFNa's golden sets on Intel's checkpoint (qwen4exp_oracle.sh intel): <prompt>.ids + .golden.safetensors")
+    CACHE PATH "21-QFN-v1a's golden sets on Intel's checkpoint (qwen4exp_oracle.sh intel): <prompt>.ids + .golden.safetensors")
   foreach(t qwen4exp_decode_test qwen4exp_decode_ref_probe qwen4exp_golden_test qwen4exp_partial_test)
     if(t STREQUAL "qwen4exp_decode_ref_probe")
       add_executable(${t} ${CMAKE_SOURCE_DIR}/tools/probe/qwen4exp_decode_ref.cc)
@@ -3269,20 +3269,20 @@ if(B70_Q4EXP)
   endif()
 endif()
 # b70-decode's model_type dispatch and this family's refusals, before the device: tests/model/qwen4exp/ holds only a
-# model_type stub config.json (spec 21-QFN §13 departure 1: the checkpoint's own config is not vendored), which is all the
+# model_type stub config.json (spec 21-QFN-v1 §13 departure 1: the checkpoint's own config is not vendored), which is all the
 # dispatch and the refusals read.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "its MTP head is served by b70-serve")
 b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
-# (spec 21-QFNe removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21-QFNe's block's)
-# ==== Spec 21-QFNc: Qwen3.8-Flash-Next decode ==== (end) ====
+# (spec 21-QFN-v1e removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21-QFN-v1e's block's)
+# ==== Spec 21-QFN-v1c: Qwen3.8-Flash-Next decode ==== (end) ====
 
-# ==== Spec 21-QFNd: Qwen3.8-Flash-Next prefill (labels qwen4exp;prefill) ==== (begin) ====
-# One delimited block for every 21-QFNd registration, after 21-QFNc's. Written blind on the Mac (box queue row 33): host
+# ==== Spec 21-QFN-v1d: Qwen3.8-Flash-Next prefill (labels qwen4exp;prefill) ==== (begin) ====
+# One delimited block for every 21-QFN-v1d registration, after 21-QFN-v1c's. Written blind on the Mac (box queue row 33): host
 # tests first (tools/box_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
-# synthetic golden sets (qwen4exp_oracle.sh synth) or Intel's checkpoint and 21-QFNa's sets exist.
+# synthetic golden sets (qwen4exp_oracle.sh synth) or Intel's checkpoint and 21-QFN-v1a's sets exist.
 # Task 1: the prefill kernels' host twin (tests/kernels/qwen4exp_pf_ref.h) - the 512-expert sort and its adversaries,
-# the combine == 21-QFNc's decode chain, dense / sparse rows, the sparse attention over row lists in fp64 and eager, the
+# the combine == 21-QFN-v1c's decode chain, dense / sparse rows, the sparse attention over row lists in fp64 and eager, the
 # indexer and PLE over a chunk == decode's M = 1 chains with their rings. Headers only (+ the PLE hash header).
 add_executable(qwen4exp_pf_ref_test kernels/qwen4exp_pf_ref_test.cc)
 target_include_directories(qwen4exp_pf_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3291,8 +3291,8 @@ add_test(NAME qwen4exp_pf_ref_test COMMAND qwen4exp_pf_ref_test)
 set_tests_properties(qwen4exp_pf_ref_test PROPERTIES LABELS "qwen4exp;prefill" TIMEOUT 900)
 if(B70_Q4EXP)
   # Task 2: every binary a prefill chunk binds, both dense arms / attention forms / PLE scale forms
-  # (src/kernels/CMakeLists.txt's spec 21-QFNd block; the reused binaries other blocks build - pf_gemm_T0, Qwen3.8's
-  # pf_gdn_*, 21-QFNc's q4_route_M1, Kolibri's 6144 x 2560 int4 slab - are bound by name and listed too).
+  # (src/kernels/CMakeLists.txt's spec 21-QFN-v1d block; the reused binaries other blocks build - pf_gemm_T0, Qwen3.8's
+  # pf_gdn_*, 21-QFN-v1c's q4_route_M1, Kolibri's 6144 x 2560 int4 slab - are bound by name and listed too).
   set(B70_Q4EXP_PREFILL_KERNELS
     kernel_pf_embed_gather_D2560 kernel_q4_hc_combine_norm_M2048_E kernel_q4_hc_combine_norm_M2048_S1
     kernel_q4_hc_combine_norm_M2048_Y kernel_q4_hc_combine_norm_M2048_X kernel_q4_hc_combine_norm_M2048_Y_NN
@@ -3332,7 +3332,7 @@ if(B70_Q4EXP)
   #       the injected run chunked == whole; its `split` mode (multiples of 64 bitwise, the rest within bars), its `pp`
   #       mode (one card against two, bitwise; P4), its `gdn` mode (gdn_chunk_q4 against decode's gdn_step, no
   #       checkpoint);
-  #   qwen4exp_golden_test's `prefill` mode: F3 on prefill (both synthetics; Intel's --layers 18 after 21-QFNa's data).
+  #   qwen4exp_golden_test's `prefill` mode: F3 on prefill (both synthetics; Intel's --layers 18 after 21-QFN-v1a's data).
   add_executable(qwen4exp_prefill_test runtime/qwen4exp_prefill_test.cc)
   b70_target_kernel_dir(qwen4exp_prefill_test)
   target_include_directories(qwen4exp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -3379,8 +3379,8 @@ if(B70_Q4EXP)
     layers:37 int8 ${_q4judge37})
   set_tests_properties(qwen4exp_prefill_pp_test prefill_split_qwen4exp_pp_test qwen4exp_prefill_intel_pp_test
     PROPERTIES LABELS "checkpoint;qwen4exp;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  # F3 on prefill: 21-QFNc's golden test in its prefill mode (one chunk, chunks of 16, the int8 head, injected, eager) on
-  # both synthetic golden sets; Intel's --layers 18 after 21-QFNa's sets exist.
+  # F3 on prefill: 21-QFN-v1c's golden test in its prefill mode (one chunk, chunks of 16, the int8 head, injected, eager) on
+  # both synthetic golden sets; Intel's --layers 18 after 21-QFN-v1a's sets exist.
   target_link_libraries(qwen4exp_golden_test PRIVATE b70_qwen4exp_prefill)
   add_dependencies(qwen4exp_golden_test ${B70_Q4EXP_PREFILL_KERNELS})
   set(_q4g "")
@@ -3407,20 +3407,20 @@ if(B70_Q4EXP)
   set_tests_properties(${_q4g} PROPERTIES LABELS "checkpoint;golden;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # Task 3: b70-decode's Qwen3.8-Flash-Next prefill backends and chunk, before the device (tests/model/qwen4exp: the
-# model_type stub). 21-QFNc's cli_reject_qwen4exp_prefill (--prefill naming spec 21-QFNd) is gone: this family prefills now.
+# model_type stub). 21-QFN-v1c's cli_reject_qwen4exp_prefill (--prefill naming spec 21-QFN-v1d) is gone: this family prefills now.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --bench --prefill-length 64 --prefill-backend l0-int8
   EXPECT "1024-k Hadamard blocks")
 b70_cli_reject(cli_reject_qwen4exp_prefill_chunk ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
   --prefill-chunk 4096 EXPECT "exceeds Qwen3.8-Flash-Next's prefill chunk 2048")
-# ==== Spec 21-QFNd: Qwen3.8-Flash-Next prefill ==== (end) ====
-# ==== Spec 21-QFNe: Qwen3.8-Flash-Next served (label qwen4exp) ==== (begin) ====
-# Task 1 (host): the tokens and the template. 21-QFNa found the original's tokenizer.json NOT Qwen3.8's (the split regex
+# ==== Spec 21-QFN-v1d: Qwen3.8-Flash-Next prefill ==== (end) ====
+# ==== Spec 21-QFN-v1e: Qwen3.8-Flash-Next served (label qwen4exp) ==== (begin) ====
+# Task 1 (host): the tokens and the template. 21-QFN-v1a found the original's tokenizer.json NOT Qwen3.8's (the split regex
 # adds \p{M}; Intel's checkpoint ships Qwen3.8's file), so qwen4exp_tokenizer_test holds the engine's tokenizer to
 # tools/tokenizer/dump_qwen4exp.py's fixture (tests/tokenizer/qwen4exp_tokenizer.json: 24 texts, the added tokens
 # both ways, corpus.txt's digests, three renders' ids) and the template to its hash (c3cf9e34... = Qwen3.8's)
 # and the agnes_template_* renders (Qwen3.8's template, named after the dropped model they were first dumped for). Nothing of the release is vendored (its licence text unread): the original's small
-# files are the synthetic checkpoint's (21-QFNb's make_synth.py copies them; box: r31.synth), or
+# files are the synthetic checkpoint's (21-QFN-v1b's make_synth.py copies them; box: r31.synth), or
 # -DB70_Q4EXP_TOKENIZER_JSON / the environment variable of the same name (a directory holding the original's
 # tokenizer.json, tokenizer_config.json, chat_template.jinja and generation_config.json). Absent: disabled on the
 # Mac (host_only), SKIP (77) elsewhere.
@@ -3473,7 +3473,7 @@ if(B70_Q4EXP)
     ${_q4snap_ids} cross)
   add_test(NAME qwen4exp_snapshot_gpu_intel_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_INTEL_SNAPSHOT}
     ${_q4snap_ids} layers:18 int8)
-  # spec 21-QFNe Task 3: the same with the MTP head (its tail, R, K / V and keys ride the snapshots; continuations at K = 2)
+  # spec 21-QFN-v1e Task 3: the same with the MTP head (its tail, R, K / V and keys ride the snapshots; continuations at K = 2)
   add_test(NAME qwen4exp_snapshot_gpu_synth_mtp_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
     ${_q4snap_ids} mtp)
   add_test(NAME qwen4exp_snapshot_gpu_cross_mtp_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
@@ -3483,9 +3483,9 @@ if(B70_Q4EXP)
     qwen4exp_snapshot_gpu_synth_mtp_test qwen4exp_snapshot_gpu_cross_mtp_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
-# Task 3: the MTP head and spec 8's lists. B70_Q4EXP_MTP_KERNELS is src/kernels/CMakeLists.txt's spec 21-QFNe block (the
+# Task 3: the MTP head and spec 8's lists. B70_Q4EXP_MTP_KERNELS is src/kernels/CMakeLists.txt's spec 21-QFN-v1e block (the
 # verify lists' M = 2..4 binaries, gdn_step_slots_M<1..4>_G1, q4_pf_ple_C4, q4_mtp at M = 1..4 and _PF, the fc's);
-# the lists also bind 21-QFNc's decode binaries, 21-QFNd's prefill binaries and Qwen3.8's argmax_stage1_M<2..4> by name.
+# the lists also bind 21-QFN-v1c's decode binaries, 21-QFN-v1d's prefill binaries and Qwen3.8's argmax_stage1_M<2..4> by name.
 if(B70_Q4EXP AND B70_MTP)
   set(B70_Q4EXP_MTP_KERNELS kernel_q4_pf_ple_C4 kernel_q4_mtp_M2048_SINGLE_PF kernel_q4_mtp_M2048_STREAM_PF
     kernel_q4_pf_bf16_slab_K2560_N2560)
@@ -3530,7 +3530,7 @@ if(B70_Q4EXP AND B70_MTP)
   add_test(NAME qwen4exp_mtp_names_test COMMAND qwen4exp_mtp_names_test ${B70_Q4EXP_MTP_KERNELS} --reused ${_q4mtp_reused})
   set_tests_properties(qwen4exp_mtp_names_test PROPERTIES LABELS qwen4exp)
   # On the card (box only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_mtp_test - M1 the head
-  # against 21-QFNa's port on tools/oracle/qwen4exp_mtp_fixture.py's data (both norm forms; SKIPs without the fixture),
+  # against 21-QFN-v1a's port on tools/oracle/qwen4exp_mtp_fixture.py's data (both norm forms; SKIPs without the fixture),
   # M2 verify rows bitwise the plain steps, M3 greedy lossless at K = 1..3 (and the head off), the verify's cost and
   # per-layer expert union; one card and two (pp2:2); Intel's --layers 18 when present.
   add_executable(qwen4exp_mtp_test runtime/qwen4exp_mtp_test.cc)
@@ -3574,7 +3574,7 @@ if(B70_Q4EXP AND B70_MTP)
   set_tests_properties(qwen4exp_tier_synth_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
     TIMEOUT 3600)
 endif()
-# Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21-QFNc's cli_reject_qwen4exp_serve is gone). The
+# Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21-QFN-v1c's cli_reject_qwen4exp_serve is gone). The
 # adapter: spec 16d's cli::pp::PipelineEngineAdapterT instantiated over Qwen4ExpEngine (an object library - the Mac's
 # Level Zero syntax check compiles it; b70-serve links the same instantiation). The refusals before the device, each by
 # name (tests/model/qwen4exp: the model_type stub; tests/model/qwen4exp-q38tok: the stub with Qwen3.8's split regex).
@@ -3601,7 +3601,7 @@ if(TARGET b70-serve)
     cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
     cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)
 endif()
-# ==== Spec 21-QFNe: Qwen3.8-Flash-Next served ==== (end) ====
+# ==== Spec 21-QFN-v1e: Qwen3.8-Flash-Next served ==== (end) ====
 
 # ==== Spec 22a: the expert-offload probe ==== (begin) ====
 # tools/probe/probe_offload_moe.cl is q4_moe.cl with its two expert-address lines as a pointer-table read

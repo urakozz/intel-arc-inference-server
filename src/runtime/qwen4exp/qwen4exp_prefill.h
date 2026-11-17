@@ -12,8 +12,8 @@
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
-// Spec 21-QFNd: Qwen3.8-Flash-Next's prefill - one chunk of at most kPfC positions through one device's layers on the
-// Level Zero list (spec 21-QFN §4.2 "Prefill"; Kolibri's 20d arrangement, runtime/kolibri/kolibri_prefill.h), no host
+// Spec 21-QFN-v1d: Qwen3.8-Flash-Next's prefill - one chunk of at most kPfC positions through one device's layers on the
+// Level Zero list (spec 21-QFN-v1 §4.2 "Prefill"; Kolibri's 20d arrangement, runtime/kolibri/kolibri_prefill.h), no host
 // wait inside it. The walk, per chunk on a device (qwen4exp_sizes.h counts it):
 //
 //   device 0       pf_embed_gather (the chunk's ids; layer 0's combine _E repeats the rows into the 4 streams)
@@ -43,7 +43,7 @@
 // over sorted rows), the GDN gate (pf_gated_head _SIG = prep_gated_head _SIG). What differs from decode is where the
 // linears' sums are formed (DPAS over bf16 slabs against the GEMVs' split-K orders), the GDN's chunked recurrence
 // against the step, and the attention's walks (flash tiles against decode's waves) - so prefill's state is decode's
-// to a cosine bar, its routes and selections decode's except near-ties (plan 21-QFNd Review Focus 5).
+// to a cosine bar, its routes and selections decode's except near-ties (plan 21-QFN-v1d Review Focus 5).
 namespace runtime::qwen4exp {
 
 // Every allocation runtime::qwen4exp::prefill_sizes names, exactly those (allocated by the first prefill: a
@@ -58,7 +58,7 @@ struct Qwen4ExpPrefillScratch {
   size_t bytes() const;
 };
 
-// Spec 21-QFNe: the MTP head's pass over a chunk (plan 21-QFNe Review Focus 4: the head's KV is filled for every position the
+// Spec 21-QFN-v1e: the MTP head's pass over a chunk (plan 21-QFN-v1e Review Focus 4: the head's KV is filled for every position the
 // main model has), on the last device after its layers: combine _Y_NN over the chunk (its rows of R, the main model's
 // pre-mixer H, materialised), R into `R` rows 1..C (row 0 is R_{pos-1}: the head's hh row 0, copied in first), then
 // the head on (R_q, t_{q+1}) for the head's rows - positions pos - 1 .. pos + C - 2 (pos 0: 0 .. C - 2, C - 1 rows) -
@@ -77,7 +77,7 @@ struct Qwen4ExpMtpPrefill {
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has written the ids
 // into `ids` (the chunk's slot of s.ids), set `ctl` - this chunk's Control for this device, host memory, a copy of the
 // device's with pos = pos, n_active = C (the HC, the prep, the indexer, the PLE kernels read both) - and - device 1 of
-// two - landed device 0's H rows in s.H. The slots let the host write chunk j + 1's while chunk j runs. `injected` (spec 21-QFN F3's
+// two - landed device 0's H rows in s.H. The slots let the host write chunk j + 1's while chunk j runs. `injected` (spec 21-QFN-v1 F3's
 // debug input): host-USM rows [qsa layers][kPfC][kListRow] the caller filled for this chunk - the sparse rows read
 // their lists there and q4_qsa_score / _select are not launched. `two_cards`: device 0 ends with the materialising
 // _Y_NN. Appends exactly prefill_device_launches(...) launches; waits only when B70_PREFILL_PROFILE=1. Leaves: the
@@ -91,7 +91,7 @@ void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefi
 // The tail only the LAST chunk runs, on the last device: decode's final mixer over row `last_row` (its H, the pending
 // y and inject weights), lm_head and the two argmax stages - decode's binaries, so the first generated id is chosen
 // exactly as every later one. The caller sets the device's Control::{pos = base + L - 1, n_active = 1};
-// argmax_stage2 leaves pos = base + L and the id in cur_token[0]. kPrefillHeadLaunches launches. Spec 21-QFNe: with the
+// argmax_stage2 leaves pos = base + L and the id in cur_token[0]. kPrefillHeadLaunches launches. Spec 21-QFN-v1e: with the
 // MTP head the chunk's rows were materialised for the head's pass, so the final mixer reads `R_last` (that row of R,
 // nothing pending: combine _X) instead.
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,

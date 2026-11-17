@@ -13,7 +13,7 @@ the shared experts, QSA `q/k/v/o_proj`, GDN `in_proj_qkv` / `in_proj_z` / `out_p
 (`mlp.gate`) and the hyper-connections (AutoRound's own Qwen4 rule), `shared_expert_gate`, GDN `in_proj_a` /
 `in_proj_b`, the QSA indexer, the PLE layer (`.ple.`: its table and projections; the table is converted to int8
 by ple_int8.py), every norm, the embedding, the vision tower. AutoRound's Qwen4 rule also keeps `shared_expert`
-in bf16 (Intel's form); ours quantises the shared experts (spec 21-QFN §5 "Ours"), so that one entry is dropped from
+in bf16 (Intel's form); ours quantises the shared experts (spec 21-QFN-v1 §5 "Ours"), so that one entry is dropped from
 its predefined list here.
 
 `lm_head` is NOT AutoRound's (no `quant_lm_head`): a quantised layer outside the blocks makes it switch low CPU

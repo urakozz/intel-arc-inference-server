@@ -12,9 +12,9 @@
 #include "loader/safetensors.h"
 #include "model/qwen4exp.h"
 
-// Spec 21-QFNb Task 4: Qwen3.8-Flash-Next's PLE n-gram table on the host - the int8 file (tools/quantize/
+// Spec 21-QFN-v1b Task 4: Qwen3.8-Flash-Next's PLE n-gram table on the host - the int8 file (tools/quantize/
 // qwen4exp/ple_int8.py, decision 7's proposal as built) read by mmap, checked against the descriptor, and
-// copied into 16 + 16 host-USM ranges the device reads zero-copy (spec 21-QFN §4.3: 21-QFNc's q4_ple_gather
+// copied into 16 + 16 host-USM ranges the device reads zero-copy (spec 21-QFN-v1 §4.3: 21-QFN-v1c's q4_ple_gather
 // dereferences them through the device pointer table `ptrs`, by an index it computes itself).
 //
 // **Why per head.** One 51.8 GB allocation would exceed the largest pinned allocation ever measured (48 GiB,
@@ -42,7 +42,7 @@ struct Q4PleHost {
   size_t q_bytes(uint32_t h) const { return size_t(rows(h)) * dim_; }
   size_t s_bytes(uint32_t h) const { return size_t(rows(h)) * q4_ple_scale_bytes(scale_); }
   size_t bytes() const;   // every head's q + s
-  // Row r of head h as bf16(float(q) x float(s)) - the reference's dequant (the test's and 21-QFNc's check).
+  // Row r of head h as bf16(float(q) x float(s)) - the reference's dequant (the test's and 21-QFN-v1c's check).
   void dequant_row(uint32_t h, uint64_t r, uint16_t* out) const;
   std::array<uint64_t, 3> multipliers{};   // the file's I64 tensors
   std::vector<uint64_t> sizes, offsets;
@@ -93,7 +93,7 @@ struct Q4PleTable {                        // 16 host-USM ranges (q) + 16 (scale
   Q4PleScale scale = Q4PleScale::F32;
   uint64_t tag_checksum = 0;               // host-side: the sum of the tags written and read back
   // The data's first u64 of every 2 MiB page of every range, range-major (q[0..15] then s[0..15]): what
-  // 21-QFNc's q4_ple_check reads through `ptrs` on the device (the loader read them back on the host).
+  // 21-QFN-v1c's q4_ple_check reads through `ptrs` on the device (the loader read them back on the host).
   std::vector<uint64_t> page_words;
   size_t rows_checked = 0;                 // sampled rows compared with the file after the copy
   size_t mem_before = 0, mem_after = 0;    // MemAvailable around the pinning (0: unknown)
