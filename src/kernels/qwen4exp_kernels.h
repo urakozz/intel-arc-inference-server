@@ -290,6 +290,9 @@ inline std::string pf_hc_up_mix_variant() {   // "q4_hc_up_mix_M2048_I_D512": UP
   return hc_up_mix_variant(kPfC, true) + "_D" + std::to_string(kPfHcDownLd);
 }
 inline std::string pf_qsa_variant() { return qsa_variant(kPfC) + "_PF"; }   // "q4_qsa_M2048_T512_W1024_PF"
+// Its q4_qsa_score: SCORE_R rows a work-group (src/kernels/CMakeLists.txt), grid (ceil(n / kScoreWg), pf_score_groups).
+inline constexpr unsigned kPfScoreRows = 4;
+inline unsigned pf_score_groups(unsigned C) { return (C + kPfScoreRows - 1) / kPfScoreRows; }
 inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_variant(kPfC, bf16_scale) + "_PF"; }
 // The reused prefill binaries at this family's shapes.
 inline std::string pf_embed_variant() { return pf_embed_gather_variant(kHidden); }          // pf_embed_gather_D2560

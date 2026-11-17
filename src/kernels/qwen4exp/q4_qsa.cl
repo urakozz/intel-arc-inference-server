@@ -20,7 +20,9 @@
 // **q4_qsa_score**: row m's n = (p + 1) / 4 complete blocks; work-group g owns blocks [256 g, 256 g + 256) and
 //   exits whole past n (the grid spans max_len / 4 blocks under replay). score_b = (((r0 + r1) + r2) + r3) / sqrt(128),
 //   r_h = max(sum_i q[h][i] k_b[i], +0) (one fma chain, i ascending: bf16 x bf16 products are exact, so the chain
-//   is contraction-proof) - M:744-747, fp32. scores fp32 [M][stride], stride = max_len / 4.
+//   is contraction-proof) - M:744-747, fp32. scores fp32 [M][stride], stride = max_len / 4. The prefill form
+//   (QSA_PF) holds SCORE_R rows a work-group, grid (ceil(n / 256), ceil(M / SCORE_R)): lane b reads its key once (8
+//   elements a load) for the 4 x SCORE_R chains, each chain the same fma order - bitwise the one-row form.
 // **q4_qsa_select** (decision 3: EXACT ties to the lower block): n <= 512 - every visible position, the list 0 ..
 //   p (QSA is plain causal attention below 2052 visible positions); else the top 512 blocks by (score desc, block
 //   asc), written ASCENDING, each expanded to its 4 positions, then the open block's tail 4n .. p. The order
@@ -52,6 +54,9 @@
 #ifdef QSA_PF
 #if M < 1 || M > 2048
 #error "q4_qsa: the prefill form is M = 1..2048 (kernels::qwen4exp::kPfC)"
+#endif
+#ifndef SCORE_R
+#error "q4_qsa: the prefill form's SCORE_R (kernels::qwen4exp::kPfScoreRows) must be defined"
 #endif
 #elif M < 1 || M > 4
 #error "q4_qsa: M is 1..4 (the 8-slot tail ring holds a 4-row launch)"
@@ -162,6 +167,47 @@ __kernel void q4_qsa_ring(__global const uint* restrict ctrl, __global const flo
 
 // ---------------------------------------------------------------------------------------------------------------
 #define WG_SCORE 256
+#ifdef QSA_PF
+// Rows m0 .. m0 + SCORE_R - 1 (the chunk's rows past n_rows: none) over blocks [256 g, 256 g + 256): the group exits
+// whole past its last row's complete blocks; row j writes block b < its own n.
+__attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))
+__kernel void q4_qsa_score(__global const uint* restrict ctrl, __global const float* restrict idx_q,
+                           __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride) {
+  const uint g = get_group_id(0);
+  const uint m0 = get_group_id(1) * SCORE_R;
+  const uint lid = get_local_id(0);
+  const uint C = n_rows(ctrl);
+  if (m0 >= C) return;   // uniform
+  const uint rows = min((uint)SCORE_R, C - m0), p0 = ctrl[CTRL_POS] + m0;
+  const uint nl = (p0 + rows) / BLK;   // the last row's complete blocks
+  if (g * WG_SCORE >= nl) return;      // uniform
+  __local float q[SCORE_R * IDX_HEADS * IDX_DIM];
+  for (uint t = lid; t < SCORE_R * IDX_HEADS * IDX_DIM; t += WG_SCORE)
+    q[t] = t < rows * IDX_HEADS * IDX_DIM ? idx_q[(size_t)m0 * IDX_HEADS * IDX_DIM + t] : 0.0f;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint b = g * WG_SCORE + lid;
+  if (b >= nl) return;
+  __global const ushort* restrict key = idx_keys + (size_t)b * IDX_DIM;
+  float a[SCORE_R][IDX_HEADS];
+  for (uint j = 0; j < SCORE_R; ++j)
+    for (uint hh = 0; hh < IDX_HEADS; ++hh) a[j][hh] = 0.0f;
+  for (uint t = 0; t < IDX_DIM; t += 8) {
+    const ushort8 k8 = vload8(0, key + t);
+    const float k[8] = {bf16f(k8.s0), bf16f(k8.s1), bf16f(k8.s2), bf16f(k8.s3),
+                        bf16f(k8.s4), bf16f(k8.s5), bf16f(k8.s6), bf16f(k8.s7)};
+    for (uint e = 0; e < 8; ++e)
+      for (uint j = 0; j < SCORE_R; ++j)
+        for (uint hh = 0; hh < IDX_HEADS; ++hh)
+          a[j][hh] = fma(q[(j * IDX_HEADS + hh) * IDX_DIM + t + e], k[e], a[j][hh]);
+  }
+  for (uint j = 0; j < rows; ++j) {
+    if (b >= (p0 + j + 1) / BLK) continue;   // past row j's complete blocks
+    float r[IDX_HEADS];
+    for (uint hh = 0; hh < IDX_HEADS; ++hh) r[hh] = a[j][hh] > 0.0f ? a[j][hh] : 0.0f;
+    scores[(size_t)(m0 + j) * stride + b] = (((r[0] + r[1]) + r[2]) + r[3]) / SQRT_IDX;
+  }
+}
+#else
 __attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))
 __kernel void q4_qsa_score(__global const uint* restrict ctrl, __global const float* restrict idx_q,
                            __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride) {
@@ -185,6 +231,7 @@ __kernel void q4_qsa_score(__global const uint* restrict ctrl, __global const fl
   }
   scores[(size_t)m * stride + b] = (((r[0] + r[1]) + r[2]) + r[3]) / SQRT_IDX;
 }
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------
 #if (SEL_WG & (SEL_WG - 1)) != 0 || SEL_WG < 256

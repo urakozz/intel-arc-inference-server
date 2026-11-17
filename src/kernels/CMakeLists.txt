@@ -1520,7 +1520,7 @@ if(B70_Q4EXP)
   add_ocloc_kernel(q4_hc_up_mix_M2048_I_D512 SOURCE ${Q4_CL}/q4_hc.cl
                    DEFINES ${CTRL_DEFINES} M=2048 UP_DOWN=512 UP_INJECT=1)
   add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF SOURCE ${Q4_CL}/q4_qsa.cl
-                   DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1)
+                   DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4)
   add_ocloc_kernel(q4_ple_gather_M2048_BF16_PF SOURCE ${Q4_CL}/q4_ple.cl
                    DEFINES ${CTRL_DEFINES} M=2048 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1 PLE_PF=1)
   add_ocloc_kernel(q4_ple_gather_M2048_F32_PF SOURCE ${Q4_CL}/q4_ple.cl
