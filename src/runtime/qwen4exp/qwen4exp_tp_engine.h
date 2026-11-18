@@ -109,6 +109,11 @@ class Qwen4ExpTpEngine {
   // Allocates both cards' prefill scratch, fold slots, down rows and the crossing events, and checks every binary the
   // walk binds exists; prefill() calls it. A CLI calls it before timing the first prefill.
   void prepare_prefill();
+  // Every layer's host-memory experts read once on each card's read-ahead copy list, both cards at once, waited for;
+  // the ms it took. Without it the first prefill after a load pays the first reads of the mirrors (a 4,511-id prefill
+  // 6.6 s, later ones ~2 s): b70-serve calls it last at load. (The ~40 MB/s crawl past the 30 s bound was the driver
+  // swapping host memory out under the model's page cache, see loader::MappedFile.)
+  double read_host_experts();
   size_t prefill_launches() const;   // both cards' prefill lists, since prepare_prefill
   // u32 [layers][kPfC][32]: every layer's route rows of the last chunk (card 0's; both cards route on the same bits).
   std::vector<uint32_t> read_prefill_routes();
