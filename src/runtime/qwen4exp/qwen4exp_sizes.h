@@ -148,6 +148,12 @@ inline constexpr uint32_t kPfDepth = 2;
 // The host-memory experts read ahead (qwen4exp_prefill.h, Q4PfRing): each of its two device buffers holds this much
 // of a layer's host mirror (a layer's misses are ~0.14-0.28 GB at the served fills).
 inline constexpr size_t kPfRingBytes = size_t(256) << 20;
+// Under pp a chunk with fewer rows reads its missed experts in place: its rows route to only part of a layer's experts
+// (512 x (1 - (1 - 10/512)^C): 57 % at 43 rows) where the ring copies the whole mirror. Measured 2026-11-18, whole
+// model at the 32k limit, ms ring / in place: 256 rows 982 / 470, 512 996 / 655, 1024 1004 / 900, 1536 1013 / 1135.
+// Under tp only a pair's two chunks use the ring (they share each copy): a chunk alone read in place at every length
+// measured (1536 rows 1423 / 1143 ms).
+inline constexpr uint32_t kPfRingMinRows = 1280;
 inline constexpr uint32_t kPfTm = 32;                          // the grouped GEMM's tile rows (pf_moe_gemm TM)
 inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab of a dense linear
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks

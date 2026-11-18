@@ -321,9 +321,10 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     if (head) mp.hctl = D.hctl->as<Control>() + k;
     if (D.ring) D.ring->reset();   // the device's lists are idle: its previous chunk has finished
     const Q4PfRing ring = D.ring ? D.ring->view(true, true) : Q4PfRing{};
+    const bool staged = D.ring && chunks[j].C >= kPfRingMinRows;   // a short chunk reads its experts in place
     prefill_chunk(D.cx, D.kc, D.s, model_, model_.parts[i], stage_buffers(i), chunks[j].pos, chunks[j].C, eager,
                   inj ? D.inj[k].get() : nullptr, two, head ? &mp : nullptr, D.ctl_at(k), D.ids_at(k),
-                  D.ring ? &ring : nullptr);
+                  staged ? &ring : nullptr);
   };
   const size_t rows_max = size_t(kPfC) * d.hc_n() * 2;
   if (two)
