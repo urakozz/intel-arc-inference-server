@@ -871,6 +871,34 @@ foreach(row IN LISTS _psm_v2_rows)
     endforeach()
   endforeach()
 endforeach()
+# Item 41: src/kernels/gemm_sm_wide.cl itself at 64 rows under other knobs, each Qwen3.8 int4 row's production flags
+# (src/kernels/CMakeLists.txt's GEMM_SM_WIDE_64) plus the arm's: psm_wide_<arm>_M64_K<K>_N<N>_S<S>_L<L>, arm
+# rc<RC>, _ah (AHALF), _u<UNR>, _sb (SCB), _pf<G>, _g256. probe_small_m prod --wide <arm,...> times them beside the production row.
+set(_psm_wide_rows "5120 16384 1 1 0 0" "6144 5120 4 0 1 0" "5120 14336 2 0 1 0" "5120 34816 1 0 1 1"
+                   "17408 5120 4 0 1 0")   # K N S(out) L BLK2D WG
+set(_psm_wide_arms "rc32_pf1_g256 RC=32 PF_G=1" "rc32_u2_sb_pf1_g256 RC=32 PF_G=1 UNR=2 SCB=1"
+                   "rc32_ah_u2_sb_pf1 RC=32 PF_G=1 UNR=2 SCB=1 AHALF=1")
+foreach(row IN LISTS _psm_wide_rows)
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 S)
+  list(GET f 3 L)
+  list(GET f 4 B2D)
+  list(GET f 5 WGK)
+  set(defs M=64 K=${K} N=${N} S=${S} LAYOUT=${L} DEQ=1 BLK2D=${B2D} SPLITK=${WGK})
+  foreach(arm IN LISTS _psm_wide_arms)
+    separate_arguments(af UNIX_COMMAND "${arm}")
+    list(POP_FRONT af tag)
+    set(opts "")
+    if(tag MATCHES "_g256$")
+      set(opts OPTIONS -cl-intel-256-GRF-per-thread)
+    endif()
+    set(name psm_wide_${tag}_M64_K${K}_N${N}_S${S}_L${L})
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm_wide.cl DEFINES ${defs} ${af} ${opts})
+    list(APPEND PSM_TARGETS kernel_${name})
+  endforeach()
+endforeach()
 add_custom_target(psm_kernels DEPENDS ${PSM_TARGETS})
 
 add_executable(probe_small_m probe_small_m.cc)

@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(kernels::gemm_sm_variant(8, *dn), std::string("gemm_sm_M8_K17408_N5120_S4_L0_mg_b2d"));   // every knob named
   CHECK_EQ(kernels::gemm_sm_grid_y(*dn), 4u);
   // Spec 32e: past 16 rows the int4 rows are gemm_sm_wide (its shape named, its work-group), the int8 head gemm_sm_i8w.
-  CHECK_EQ(kernels::gemm_sm_variant(64, *gu), std::string("gemm_sm_wide_M64_K5120_N34816_S1_L0_wg_mg_b2d_rc32_pf1_g256"));
+  CHECK_EQ(kernels::gemm_sm_variant(64, *gu), std::string("gemm_sm_wide_M64_K5120_N34816_S1_L0_wg_mg_b2d_rc32_ah_u2_sb_pf1"));
   CHECK_EQ(std::string(kernels::gemm_sm_entry(64, *gu)), std::string("gemm_sm_wide"));
   CHECK_EQ(kernels::gemm_sm_wg_size(64, *gu), 512u);
   CHECK_EQ(kernels::gemm_sm_wg_size(32, *gu), 256u);
@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(kernels::gemm_sm_variant(32, *op), std::string("gemm_sm_wide_M32_K6144_N5120_S4_L0_mg_b2d_sw_pf2"));
   CHECK_EQ(kernels::gemm_sm_wg_size(32, *op), 64u);
   CHECK_EQ(kernels::gemm_sm_wg_size(64, *op), 128u);
+  CHECK_EQ(kernels::gemm_sm_variant(64, *op), std::string("gemm_sm_wide_M64_K6144_N5120_S4_L0_mg_b2d_rc32_u2_sb_pf1_g256"));
   CHECK_EQ(kernels::gemm_sm_variant(64, *hd), std::string("gemm_sm_i8w_M64_K5120_N248320_wg_g256"));
   CHECK_EQ(std::string(kernels::gemm_sm_entry(64, *hd)), std::string("gemm_sm_i8w"));
   // The routing helpers: Gemv names today's binaries; SmallM a tuned shape's gemm_sm, an untuned one's gemv.

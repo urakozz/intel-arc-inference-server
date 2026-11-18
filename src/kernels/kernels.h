@@ -119,8 +119,10 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4 };
 // Spec 32e: an int4 row's gemm_sm_wide shape past 16 rows (src/kernels/gemm_sm_wide.cl; plan 34a Task 1 measured both):
 // kWideRc32 - row chunks of 32 a sub-group, a weight prefetch one group ahead, 256 GRF; kWideSwap - one sub-group for
-// every row, the prefetch two groups ahead, 128 GRF.
-enum : unsigned char { kWideNone = 0, kWideRc32 = 1, kWideSwap = 2 };
+// every row, the prefetch two groups ahead, 128 GRF. Item 41 (64 rows): kWideRc32U - kWideRc32 with the K walk unrolled
+// by 2 and the scale row by a block read; kWideRc32H - that at 128 GRF with half the A operands held at a time (eight
+// threads a vector engine; it loses on the N = 5120 shapes, whose 2,560 sub-groups then run as 1.25 waves).
+enum : unsigned char { kWideNone = 0, kWideRc32 = 1, kWideSwap = 2, kWideRc32U = 3, kWideRc32H = 4 };
 struct SmallMTuning {
   unsigned K, N, S, layout;
   bool wg, magic, grf256, blk2d;
@@ -138,14 +140,14 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     // Qwen3.8
     // (g256_from 32, spec 32: at 32 rows gemm_sm spills at 128 GRF - qkv||z 1285 us against 99 at 256; the int4
     // rows take gemm_sm_wide at 32 and 64 rows instead, spec 32e: the per-shape best of plan 34a Task 1's arms, a
-    // token's int4 linears 29.85 ms at 32 rows and 44.13 ms at 64)
-    {5120, 16384, 1, 1, false, true, false, false, kSmAll, 0, kWideRc32, kWideRc32},   // qkv||z      48 layers
-    {6144, 5120, 4, 0, false, true, false, true, kSmAll, 0, kWideSwap, kWideRc32},     // out_proj, o_proj
-    {5120, 14336, 2, 0, false, true, false, true, kSmAll, 0, kWideRc32, kWideRc32},    // q||k||v
-    {5120, 34816, 8, 0, true, true, false, true, kSmAll, 0, kWideRc32, kWideRc32},     // gate||up (2x8 work-group: one
+    // token's int4 linears 29.85 ms at 32 rows and 44.13 ms at 64; item 41's arms at 64 rows)
+    {5120, 16384, 1, 1, false, true, false, false, kSmAll, 0, kWideRc32, kWideRc32H},  // qkv||z      48 layers
+    {6144, 5120, 4, 0, false, true, false, true, kSmAll, 0, kWideSwap, kWideRc32U},    // out_proj, o_proj
+    {5120, 14336, 2, 0, false, true, false, true, kSmAll, 0, kWideRc32, kWideRc32H},   // q||k||v
+    {5120, 34816, 8, 0, true, true, false, true, kSmAll, 0, kWideRc32, kWideRc32H},    // gate||up (2x8 work-group: one
                                                                                    // slice, SiLU at S 1; the 2D read:
                                                                                    // spec 19 v3d Task 4)
-    {17408, 5120, 4, 0, false, true, false, true, kSmAll, 0, kWideRc32, kWideRc32},    // down
+    {17408, 5120, 4, 0, false, true, false, true, kSmAll, 0, kWideRc32, kWideRc32U},   // down
     {5120, 248320, 1, 2, true, false, false, false, kSmAll, 32},  // the int8 lm_head (gemm_sm_i8w at 32 and 64 too)
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the 28b addition, 2026-11-01) at its verify
     // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
@@ -256,7 +258,8 @@ static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #err
 // gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256][_b2d] (int4; S the OUTPUT's slices, the binary's S define) /
 // gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8): every knob is in the name, so a table row CMake does not build is a
 // missing file at capture.
-// Spec 32e: gemm_sm_wide_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_b2d]_rc32_pf1_g256 | _sw_pf2 where a row binds the wide form at M.
+// Spec 32e: gemm_sm_wide_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_b2d]_rc32_pf1_g256 | _sw_pf2 | _rc32_u2_sb_pf1_g256 |
+// _rc32_ah_u2_sb_pf1 where a row binds the wide form at M.
 inline constexpr unsigned char gemm_sm_wide_arm(unsigned M, const SmallMTuning& t) {
   return M == 64 ? t.wide_64 : M == 32 ? t.wide_32 : (unsigned char)kWideNone;
 }
@@ -265,7 +268,10 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   if (const unsigned char a = gemm_sm_wide_arm(M, t))
     return "gemm_sm_wide" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) +
            (t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.blk2d ? "_b2d" : "") +
-           (a == kWideRc32 ? "_rc32_pf1_g256" : "_sw_pf2");
+           (a == kWideRc32    ? "_rc32_pf1_g256"
+            : a == kWideRc32U ? "_rc32_u2_sb_pf1_g256"
+            : a == kWideRc32H ? "_rc32_ah_u2_sb_pf1"
+                              : "_sw_pf2");
   const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 || (t.g256_from && M >= t.g256_from) ? "_g256" : "") +
                             (t.blk2d ? "_b2d" : "");
   if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
@@ -290,7 +296,8 @@ inline constexpr const char* gemm_sm_entry(unsigned M, const SmallMTuning& t) {
   return gemm_sm_wide_arm(M, t) ? "gemm_sm_wide" : gemm_sm_entry(t);
 }
 inline constexpr unsigned gemm_sm_wg_size(unsigned M, const SmallMTuning& t) {
-  return gemm_sm_wg_size(t) * (gemm_sm_wide_arm(M, t) == kWideRc32 ? M / 32 : 1);
+  const unsigned char a = gemm_sm_wide_arm(M, t);
+  return gemm_sm_wg_size(t) * (a == kWideRc32 || a == kWideRc32U || a == kWideRc32H ? M / 32 : 1);
 }
 // The int4 / int8 linear a capture binds at M rows of kind `k` - the one naming rule the captures and
 // the names tests share.
