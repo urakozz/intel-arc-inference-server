@@ -296,9 +296,10 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
     P.reset_events();
     std::array<std::array<Q4TpChunk, 2>, 2> k{};
     std::array<std::array<Q4PfRing, 2>, 2> rv{};   // the read ahead: chunk A copies the first layers, the last releases
+    const bool ring = n == 2;   // a chunk alone reads its experts in place (kPfRingMinRows)
     for (uint32_t h = 0; h < n; ++h)
       for (uint32_t r = 0; r < 2; ++r)
-        if (P.dev[r]->ring) rv[h][r] = P.dev[r]->ring->view(h == 0, h + 1 == n);
+        if (P.dev[r]->ring && ring) rv[h][r] = P.dev[r]->ring->view(h == 0, h + 1 == n);
     for (uint32_t h = 0; h < n; ++h) {
       for (uint32_t r = 0; r < 2; ++r) {
         Q4TpPrefillState::Dev& D = *P.dev[r];
@@ -312,7 +313,7 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
         rc->pos = pos[h] + (r == 1 ? tp_rows_cut(C[h]) : 0);
         rc->n_active = r == 1 ? C[h] - tp_rows_cut(C[h]) : tp_rows_cut(C[h]);
         k[h][r] = {&D.cx, &D.kc, &D.s, &model_.parts[r], &cards_[r]->buffers, c, D.ids_at(h), &D.tp[h],
-                   mtp_ && r == 1 ? &mp[h] : nullptr, D.ring ? &rv[h][r] : nullptr};
+                   mtp_ && r == 1 ? &mp[h] : nullptr, D.ring && ring ? &rv[h][r] : nullptr};
       }
       if (mtp_) {   // the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
         Control* hc = P.dev[1]->hctl->as<Control>() + h;
