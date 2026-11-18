@@ -85,8 +85,15 @@ __kernel void pf_gdn_front(__global const QKVZ_T* restrict qkvz_partials,
   // All FB positions' partials are loaded before the first is used, so a lane has FB reads in flight instead of
   // one: the kernel moves bytes, and one read at a time per lane left it at half the card's bandwidth.
   QKVZ_T part[FB];
+#if QKVZ_BF16
+  // One 2D block read a sub-group: its 16 channels (lane = channel) x the FB positions (rows past c_count read 0
+  // and are never used) - one message instead of FB two-byte reads a lane.
+  intel_sub_group_2d_block_read_16b_32r16x1c((__global void*)qkvz_partials, QKVZ_N * 2, (int)c_count, QKVZ_N * 2,
+                                             (int2)((int)(ch - lane), (int)m0), part);
+#else
 #pragma unroll
   for (uint t = 0; t < FB; ++t) part[t] = m0 + t < m1 ? qkvz_partials[(size_t)(m0 + t) * QKVZ_N + ch] : 0;
+#endif
 #pragma unroll
   for (uint t = 0; t < FB; ++t) {
     const uint m = m0 + t;
