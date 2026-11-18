@@ -31,6 +31,10 @@ An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and b
 - Verify a change with ONE targeted check sized to it: the test or run that would fail without the fix. No repeated
   rounds, sweeps or stress series unless that check fails. A one-line change gets one check.
 - Stop when the work is merged or reported: stop your box jobs, leave nothing queued.
+- A performance change that binds on one model is carried to every supported and planned model where it applies:
+  build it as a define in the shared kernel source (not a model-only copy), and in the same step either queue each
+  other model's byte test and one timing, or note it in that model's open-work row or plan with the measured
+  numbers, or say in one line why it does not apply. Closed negatives are carried the same way.
 
 ## Git
 
