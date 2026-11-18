@@ -640,7 +640,7 @@ struct EngineAdapter : server::EngineIface {
   uint64_t mtp_iters_at_k[kMaxIterK + 1] = {};  // step_many calls per K
 };
 
-// Spec 7 §3.1: the prefix cache's pinned host memory. l0::MemKind::Host allocations of the
+// Spec 7 §3.1: the prefix cache's pinned host memory. l0::MemKind::HostLocked allocations of the
 // whole budget at server start (the P0 probe measured ~100 ms per GiB to allocate, too slow
 // per entry), carved first-fit in 64 KiB units with coalescing frees. Host-resident and
 // device-visible, so the engine's snapshot copies run at the probe's 12-14 GB/s.
@@ -663,7 +663,7 @@ struct PinnedAlloc : server::HostAlloc {
     for (size_t left = bytes / kUnit * kUnit; left > 0;) {
       const size_t n = left < kPiece ? left : kPiece;
       free_[pieces.size() * kStride] = n;
-      pieces.emplace_back(ctx, l0::MemKind::Host, n, kUnit);
+      pieces.emplace_back(ctx, l0::MemKind::HostLocked, n, kUnit);
       bytes_ += n;
       left -= n;
     }

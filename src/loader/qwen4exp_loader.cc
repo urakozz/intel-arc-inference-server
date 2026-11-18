@@ -60,7 +60,7 @@ void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, ui
   }
   if (nh != 0) {
     // One pinned range a layer, at most experts x 2.6 MB (1.34 GB): under the 4 GiB a range both cards may map.
-    L.mirror = std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, size_t(nh) * (gu + dn), size_t(2) << 20);
+    L.mirror = std::make_unique<l0::Mem>(ctx, l0::MemKind::HostLocked, size_t(nh) * (gu + dn), size_t(2) << 20);
     uint8_t* m = L.mirror->as<uint8_t>();
     for (uint32_t e = 0, s = 0; e < experts; ++e)
       if (!res[e]) {
