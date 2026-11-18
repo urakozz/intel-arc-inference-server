@@ -21,7 +21,10 @@
 //   SPLITK, DEQ, BLK2D   gemm_sm's (the row's knobs, unchanged)
 //   RC           the row-chunk shape's rows a sub-group (8 | RC, RC | M); SWAP 1: the swap shape (RC = M)
 //   PF_G         0 or a weight prefetch distance in this sub-group's own 64-k groups (chunk 0 issues it)
-//   WPIPE        1: the next group's weights and scale are loaded into registers while this group computes
+//   UNR          the K walk's unroll hint (2: the next group's reads issue beside this group's work)
+//   SCB          1: layout 0's scale row by a sub-group block read (not a per-lane gather)
+//   AHALF        1: the row-chunk shape holds half its A operands at a time (k16 steps 0, 1 for every row block,
+//                then 2, 3) - the 32-row chunk fits 128 GRF, eight threads a vector engine instead of four
 //
 // **Property R (spec 32e; held by tests/kernels/gemm_sm_test.cc):** a DPAS output element is one chain of bf16 x bf16
 // products added in k order; which 8-row block or sub-group a row sits in does not enter it. What does - the k
@@ -52,8 +55,14 @@
 #ifndef PF_G
 #define PF_G 0
 #endif
-#ifndef WPIPE
-#define WPIPE 0
+#ifndef UNR
+#define UNR 1
+#endif
+#ifndef SCB
+#define SCB 0
+#endif
+#ifndef AHALF
+#define AHALF 0
 #endif
 
 #if SWAP
@@ -151,7 +160,11 @@ inline void load_group(__global const uint* w, __global const half* scales, uint
 #else
   for (int j = 0; j < 8; ++j) wv[j] = w[(size_t)(g * 8 + j) * N + n];
 #endif
+#if SCB
+  *sc = as_half(intel_sub_group_block_read_us((__global const ushort*)(scales + (size_t)g * N + n_tile * SG)));
+#else
   *sc = scales[(size_t)g * N + n];
+#endif
 #else
   __global const uint* tile = w + ((size_t)n_tile * G + g) * TILE_U32;
   const uint8 blk = intel_sub_group_block_read8(tile);
@@ -182,10 +195,8 @@ __kernel void gemm_sm_wide(__global const uint* restrict w,
 
   float8 acc[RBC];
   for (int rb = 0; rb < RBC; ++rb) acc[rb] = (float8)0.0f;
-#if WPIPE
-  uint wn[8];
-  half sn;
-  load_group(w, scales, n_tile, n, gbase, wn, &sn);
+#if UNR > 1
+  __attribute__((opencl_unroll_hint(UNR)))
 #endif
   for (uint i = 0; i < G_PER_SG; ++i) {
     const uint g = gbase + i * KSL;
@@ -195,16 +206,30 @@ __kernel void gemm_sm_wide(__global const uint* restrict w,
     // ---- the group's eight u32 rows of this lane's column and its scale (gemm_sm's reads) ----------
     uint wv[8];
     float scale;
-#if WPIPE
-    for (int j = 0; j < 8; ++j) wv[j] = wn[j];
-    scale = (float)sn;
-    if (i + 1 < G_PER_SG) load_group(w, scales, n_tile, n, g + KSL, wn, &sn);
-#else
     half sh;
     load_group(w, scales, n_tile, n, g, wv, &sh);
     scale = (float)sh;
-#endif
-#if !SWAP
+#if !SWAP && AHALF
+    // the rows' k16 steps 0, 1 for every row block, their DPAS, then steps 2, 3 (half the A registers live)
+    float8 gacc[RBC];
+    for (int rb = 0; rb < RBC; ++rb) gacc[rb] = (float8)0.0f;
+    for (int h = 0; h < 2; ++h) {
+      ushort xh[RBC][16];
+      for (int rb = 0; rb < RBC; ++rb)
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)xr, (int)(K * 2u), (int)RC, (int)(K * 2u),
+                                                  (int2)((int)(g * GROUP + 32u * h), rb * 8), &xh[rb][0]);
+      for (int e = 0; e < 2; ++e) {
+        const int d = 2 * h + e;
+        const uint w0 = wv[2 * d], w1 = wv[2 * d + 1];
+        int8 b;
+        b.s0 = pair_bf16(w0, 0); b.s1 = pair_bf16(w0, 1); b.s2 = pair_bf16(w0, 2); b.s3 = pair_bf16(w0, 3);
+        b.s4 = pair_bf16(w1, 0); b.s5 = pair_bf16(w1, 1); b.s6 = pair_bf16(w1, 2); b.s7 = pair_bf16(w1, 3);
+        for (int rb = 0; rb < RBC; ++rb)
+          gacc[rb] = intel_sub_group_bf16_bf16_matrix_mad_k16(as_short8(vload8(e, xh[rb])), b, gacc[rb]);
+      }
+    }
+    for (int rb = 0; rb < RBC; ++rb) acc[rb] += gacc[rb] * scale;
+#elif !SWAP
     // [row block][8 d + r]: row rb * 8 + r of k16 step d, this lane's k - two 2D reads a block (steps 0, 1 and 2, 3)
     // on the chunk's rows (base xr, height RC)
     ushort xa[RBC][32];

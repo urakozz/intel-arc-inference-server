@@ -1915,7 +1915,9 @@ function(add_gemm_sm_variant M K N S L)
   endif()
 endfunction()
 # Spec 32e: add_gemm_sm_wide_variant(M K N S L ARM [WG] [MG] [B2D]) - gemm_sm_wide.cl past 16 rows; ARM rc32 (row chunks
-# of 32, prefetch 1, 256 GRF) or sw (one sub-group for every row, prefetch 2, 128 GRF): kernels::gemm_sm_variant's name.
+# of 32, prefetch 1, 256 GRF), sw (one sub-group for every row, prefetch 2, 128 GRF), rc32u (rc32, the K walk unrolled by
+# 2, the scale row by a block read) or rc32h (rc32u at 128 GRF, half the A operands at a time; item 41):
+# kernels::gemm_sm_variant's name.
 function(add_gemm_sm_wide_variant M K N S L ARM)
   cmake_parse_arguments(G "WG;MG;B2D" "" "" ${ARGN})
   set(defs M=${M} K=${K} N=${N} S=${S} LAYOUT=${L})
@@ -1937,6 +1939,13 @@ function(add_gemm_sm_wide_variant M K N S L ARM)
     list(APPEND defs RC=32 PF_G=1)
     set(opts OPTIONS -cl-intel-256-GRF-per-thread)
     string(APPEND tag _rc32_pf1_g256)
+  elseif(ARM STREQUAL "rc32u")
+    list(APPEND defs RC=32 PF_G=1 UNR=2 SCB=1)
+    set(opts OPTIONS -cl-intel-256-GRF-per-thread)
+    string(APPEND tag _rc32_u2_sb_pf1_g256)
+  elseif(ARM STREQUAL "rc32h")
+    list(APPEND defs RC=32 PF_G=1 UNR=2 SCB=1 AHALF=1)
+    string(APPEND tag _rc32_ah_u2_sb_pf1)
   else()
     list(APPEND defs SWAP=1 PF_G=2)
     string(APPEND tag _sw_pf2)
@@ -1974,8 +1983,8 @@ if(B70_MTP)
   if(B70_VERIFY_M8)
     set(GEMM_SM_WIDE_32 "5120 16384 1 1 rc32 MG" "6144 5120 4 0 sw MG B2D" "5120 14336 2 0 rc32 MG B2D"
                       "5120 34816 1 0 rc32 WG MG B2D" "17408 5120 4 0 rc32 MG B2D")
-    set(GEMM_SM_WIDE_64 "5120 16384 1 1 rc32 MG" "6144 5120 4 0 rc32 MG B2D" "5120 14336 2 0 rc32 MG B2D"
-                      "5120 34816 1 0 rc32 WG MG B2D" "17408 5120 4 0 rc32 MG B2D")
+    set(GEMM_SM_WIDE_64 "5120 16384 1 1 rc32h MG" "6144 5120 4 0 rc32u MG B2D" "5120 14336 2 0 rc32h MG B2D"
+                      "5120 34816 1 0 rc32h WG MG B2D" "17408 5120 4 0 rc32u MG B2D")
     foreach(MM 32 64)
       foreach(row IN LISTS GEMM_SM_WIDE_${MM})
         separate_arguments(f UNIX_COMMAND "${row}")

@@ -286,7 +286,7 @@ std::unique_ptr<Launch> make_arm(l0::Context& ctx, const Shape& s, const Arm& a,
 }
 void bind(Launch& L, const Inputs& in, int copy) {
   const Shape& s = *in.sh;
-  if (L.name.rfind("psm_", 0) == 0 && L.name.rfind("psm_ctl", 0) != 0) {
+  if (L.name.rfind("psm_", 0) == 0 && L.name.rfind("psm_ctl", 0) != 0 && L.name.rfind("psm_wide", 0) != 0) {
     L.k->arg_ptr(0, in.w[copy]->ptr());
     L.k->arg_ptr(1, in.sc[copy]->ptr());
     L.k->arg_ptr(2, L.is_int ? in.xq->ptr() : in.x->ptr());
@@ -950,7 +950,13 @@ std::string v2_name(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) 
   return (a.wide.empty() ? "psm_v2_" + a.label() : "psm_wide_" + a.wide) + "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N) +
          "_S" + std::to_string(kernels::gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout);
 }
+// A wide arm's column sub-groups a work-group: its label's _n<NSGN>, else gemm_sm's (4, or 2 under wg).
+uint32_t wide_nsg(const V2Arm& a, const kernels::SmallMTuning& t) {
+  const size_t p = a.wide.find("_n");
+  return p != std::string::npos ? uint32_t(std::stoul(a.wide.substr(p + 2))) : t.wg ? 2 : 4;
+}
 uint32_t v2_wg(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
+  if (!a.wide.empty()) return 16 * wide_nsg(a, t) * (t.wg ? 8 : 1) * (M / a.rc(M));
   return kernels::gemm_sm_wg_size(t) * (M / a.rc(M));
 }
 std::unique_ptr<Launch> make_v2(l0::Context& ctx, const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
@@ -960,7 +966,7 @@ std::unique_ptr<Launch> make_v2(l0::Context& ctx, const V2Arm& a, const kernels:
   L->mod = std::make_unique<l0::Module>(ctx, kernels::path(L->name));
   L->k = std::make_unique<l0::Kernel>(*L->mod, a.wide.empty() ? "psm_v2" : "gemm_sm_wide");
   L->k->group_size(v2_wg(a, t, M));
-  L->gx = t.N / kernels::gemm_sm_cols(t);
+  L->gx = a.wide.empty() ? t.N / kernels::gemm_sm_cols(t) : t.N / (16 * wide_nsg(a, t));
   L->gy = kernels::gemm_sm_grid_y(t);
   L->S = kernels::gemm_sm_out_s(t);
   return L;
