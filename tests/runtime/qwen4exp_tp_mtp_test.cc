@@ -14,6 +14,7 @@
 //   cost   (plan 21-QFN-v2b Task 7 Step 1) tp with the head, <ids file> unused: after the 2100-id prompt, a draft step
 //          and a verify at K = 0..3, ms (medians of 16 iterations, interleaved; the head's drafts are the same work at
 //          any layer count, the verify's are not)
+//   cost-rows  the same with the verify lists' per-row MoE (open-work item 48's pair against the union-read MoE)
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
 #include <chrono>
@@ -77,7 +78,7 @@ int main(int argc, char** argv) {
   const uint32_t layers = argc > 5 ? uint32_t(std::atoi(argv[5])) : 18;
   const uint32_t n = argc > 6 ? uint32_t(std::atoi(argv[6])) : 64;
   const std::string mode = argv[3], path = argv[4];
-  CHECK(mode == "plain" || mode == "mtp" || mode == "cost");
+  CHECK(mode == "plain" || mode == "mtp" || mode == "cost" || mode == "cost-rows");
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::open(rig, 1);
   if (l0::Context::gpu_count() < 2) {
@@ -90,10 +91,12 @@ int main(int argc, char** argv) {
   const Ids src = qwen4exp_rig::read_ids(argv[2], d.vocab);
   CHECK(!src.empty());
   const bool head = mode != "plain";
+  rq::Q4TpOptions tp_opt;
+  tp_opt.per_row_moe = mode == "cost-rows";
   rq::Qwen4ExpTpEngine e(*rig.c0, *rig.c1,
                          loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::tp2(d, model::Q4TpEnds::Split),
                                                loader::LmHeadForm::Int8, layers, head),
-                         max_len);
+                         max_len, tp_opt);
   CHECK_EQ(e.mtp(), head);
   const std::vector<size_t> lens = {120, 2100};
   const auto prompt = [&](size_t len) {
@@ -121,7 +124,7 @@ int main(int argc, char** argv) {
     std::printf("qwen4exp_tp_mtp_test OK\n");
     return 0;
   }
-  if (mode == "cost") {
+  if (mode == "cost" || mode == "cost-rows") {
     using Clock = std::chrono::steady_clock;
     const auto ms = [](Clock::time_point a) { return std::chrono::duration<double, std::milli>(Clock::now() - a).count(); };
     const auto median = [](std::vector<double> x) {
@@ -143,10 +146,32 @@ int main(int argc, char** argv) {
         v[k].push_back(ms(t1));
         e.commit(0, e.verify_ids()[0]);
       }
-    std::printf("tp-mtp cost (%u layers): verify M = 1 %.3f ms", layers, median(v[0]));
+    std::printf("tp-mtp %s (%u layers): verify M = 1 %.3f ms", mode.c_str(), layers, median(v[0]));
     for (uint32_t k = 1; k <= rq::kMaxDraft; ++k)
       std::printf(", M = %u %.3f ms (x%.2f)", k + 1, median(v[k]), median(v[k]) / median(v[0]));
     std::printf("; a draft step %.3f ms\n", median(dr[1]));
+    // card 0's verify list at 4 rows profiled: the device time by kernel entry (the MoE's and the rest)
+    e.draft(rq::kMaxDraft);
+    e.verify(rq::kMaxDraft);
+    std::vector<std::string> lab;
+    const std::vector<double> us = e.profile_verify(0, rq::kMaxDraft, 8, &lab);
+    double total = 0, moe = 0;
+    std::vector<std::pair<std::string, double>> by;
+    for (size_t i = 0; i < us.size(); ++i) {
+      const size_t a = lab[i].find(' '), b = lab[i].find(' ', a + 1);
+      const std::string key = lab[i].substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1);
+      auto it = std::find_if(by.begin(), by.end(), [&](const auto& x) { return x.first == key; });
+      if (it == by.end()) by.push_back({key, 0.0}), it = by.end() - 1;
+      it->second += us[i];
+      total += us[i];
+      if (lab[i].find("q4_moe") != std::string::npos) moe += us[i];
+    }
+    std::sort(by.begin(), by.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+    std::printf("tp-mtp %s: card 0's verify at M = 4, device time %.1f us, the MoE kernels %.1f us; by entry:", mode.c_str(),
+                total, moe);
+    for (size_t i = 0; i < by.size() && i < 12; ++i) std::printf(" %s %.0f;", by[i].first.c_str(), by[i].second);
+    std::printf("\n");
+    e.commit(0, e.verify_ids()[0]);
     std::printf("qwen4exp_tp_mtp_test OK\n");
     return 0;
   }

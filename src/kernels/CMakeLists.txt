@@ -1445,9 +1445,17 @@ if(B70_Q4EXP AND B70_TP AND B70_MTP)
                                  MOE_TP_PART=1 Q4_EXPERT_TABLE=1 RANK=${R})
         add_ocloc_kernel(tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum SOURCE ${TP_CL}
                          DEFINES TP_CROSS=1 M=${MM} K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1)
+        # open-work item 48: the union-read MoE on the card's halves (q4_moe_finish stays the per-row binary's)
+        set(_ud M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1 RANK=${R})
+        add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R${R}_U SOURCE ${Q4_CL}/q4_moe_union.cl DEFINES ${_ud})
+        add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R${R}_U SOURCE ${Q4_CL}/q4_moe_union.cl
+                         DEFINES ${_ud} Q4_EXPERT_TABLE=1)
       endforeach()
     endif()
   endforeach()
+  add_ocloc_kernel(q4_moe_M4_E512_T10_D2560_I320_SH4_TBL_TP_R0_U_CNT SOURCE ${Q4_CL}/q4_moe_union.cl
+                   DEFINES M=4 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1
+                           RANK=0 Q4_EXPERT_TABLE=1 UNION_COUNT=1)
 endif()
 # ==== Plan 21-QFN-v2b Task 5: Qwen3.8-Flash-Next MTP under tensor parallel ==== (end) ====
 
@@ -1664,8 +1672,25 @@ if(B70_Q4EXP AND B70_MTP)
     endforeach()
     if(MM GREATER 1)
       add_q4_decode_rows(${MM})
+      # open-work item 48: the union-read MoE (q4_moe_union.cl) - each distinct expert read once a verify; the verify
+      # lists bind it at M >= 2 (kernels::qwen4exp::moe_variant's _U), the per-row q4_moe_M<M> stays its reference.
+      foreach(SHB 0 1)
+        if(SHB)
+          set(_sh SHB)
+        else()
+          set(_sh SH4)
+        endif()
+        set(_ud M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=${SHB})
+        add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I640_${_sh}_U SOURCE ${Q4_CL}/q4_moe_union.cl DEFINES ${_ud})
+        add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I640_${_sh}_TBL_U SOURCE ${Q4_CL}/q4_moe_union.cl
+                         DEFINES ${_ud} Q4_EXPERT_TABLE=1)
+      endforeach()
     endif()
   endforeach()
+  # the union's counting build (test-only: tests/kernels/qwen4exp_moe_union_test.cc)
+  add_ocloc_kernel(q4_moe_M4_E512_T10_D2560_I640_SH4_TBL_U_CNT SOURCE ${Q4_CL}/q4_moe_union.cl
+                   DEFINES M=4 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=0 Q4_EXPERT_TABLE=1
+                           UNION_COUNT=1)
   add_ocloc_kernel(q4_pf_ple_C4 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=4)
   # the prefill's head pass (kernels::qwen4exp::mtp_prefill_variants; 21-QFN-v1d's binaries otherwise)
   add_ocloc_kernel(q4_mtp_M2048_SINGLE_PF SOURCE ${Q4_CL}/q4_mtp.cl

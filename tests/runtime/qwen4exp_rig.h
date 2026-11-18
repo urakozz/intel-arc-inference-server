@@ -30,6 +30,7 @@ struct Options {
   bool mtp = false;     // spec 21-QFN-v1e: load the MTP head (its bf16 experts RTN int4 g64 at load) - the verify / draft lists
   // spec 28d: the verify lists' linear override (Auto: gemm_sm at M >= 2; Gemv: the pre-28d gemv / gemv_i8w)
   runtime::LinearForce force_linear = runtime::LinearForce::Auto;
+  bool per_row_moe = false;   // CaptureOptions::force_per_row_moe
 };
 
 struct Rig {
@@ -81,6 +82,7 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   po.prefill_timeout_ms = o.prefill_timeout_ms;
   runtime::CaptureOptions cap;
   cap.force_linear = o.force_linear;
+  cap.force_per_row_moe = o.per_row_moe;
   r.eng = std::make_unique<runtime::qwen4exp::Qwen4ExpEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po, cap);
 }
 

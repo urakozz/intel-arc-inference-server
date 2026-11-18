@@ -64,6 +64,7 @@ inline constexpr unsigned kPleConsts = 3 + 2 * kPleHeads;   // u64: multipliers 
 
 inline constexpr unsigned moe_gate_up_wg() { return 64 * kUpKs; }                         // 256
 inline constexpr unsigned moe_down_wg() { return 16 * kSlots * kDnKs; }                   // 352
+inline constexpr unsigned moe_down_union_wg() { return 16 * kSlots; }                   // 176: q4_moe_union.cl
 inline constexpr unsigned moe_gate_up_groups() { return kSlots * (2 * kInter / 16 / 4); }   // 220
 inline constexpr unsigned argmax_groups() { return (kVocab + kArgmaxChunk - 1) / kArgmaxChunk; }   // 243
 
@@ -118,9 +119,12 @@ inline std::string qsa_attn_variant(unsigned M, bool eager) {
 }
 inline std::string route_variant(unsigned M) { return "q4_route" + m_(M) + "_E512_T10_N528_L256"; }
 // The shared expert's form: int4 layout-1 blocks (ours: _SH4) or bf16 gemv_bf16 tiles (Intel's: _SHB).
-// `table` (the expert tier, plan 21-QFN-v2a Task 8): w is the layer's u64 table row (_TBL).
-inline std::string moe_variant(unsigned M, bool shared_bf16, bool table = false) {
-  return "q4_moe" + m_(M) + "_E512_T10_D2560_I640" + (shared_bf16 ? "_SHB" : "_SH4") + (table ? "_TBL" : "");
+// `table` (the expert tier, plan 21-QFN-v2a Task 8): w is the layer's u64 table row (_TBL). `union_read` (open-work
+// item 48, q4_moe_union.cl: _U): each distinct expert read once for every row that chose it - the same entry points,
+// arguments, grids and bits as the per-row binary at M rows.
+inline std::string moe_variant(unsigned M, bool shared_bf16, bool table = false, bool union_read = false) {
+  return "q4_moe" + m_(M) + "_E512_T10_D2560_I640" + (shared_bf16 ? "_SHB" : "_SH4") + (table ? "_TBL" : "") +
+         (union_read ? "_U" : "");
 }
 inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head" + m_(M) + "_SIG"; }
 
@@ -128,9 +132,9 @@ inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head"
 // "Plan 21-QFN-v2b" block): the MoE at the half width 320 with the card's fp32 partial (MOE_TP_PART, DN_KS 1), the GDN at
 // Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_send + tp_sum at hidden 2560 (FOLD_G 20; S the local slices).
 inline constexpr unsigned kTpInter = kInter / 2;
-inline std::string tp_moe_variant(bool table, unsigned rank, unsigned M = 1) {
+inline std::string tp_moe_variant(bool table, unsigned rank, unsigned M = 1, bool union_read = false) {
   return "q4_moe_M" + std::to_string(M) + "_E512_T10_D2560_I320_SH4" + (table ? "_TBL" : "") + "_TP_R" +
-         std::to_string(rank);
+         std::to_string(rank) + (union_read ? "_U" : "");
 }
 // MOE_TP_PART: q4_moe_down writes each slot's partial, fp32 [11][M][2560], and sends it to the peer's landing (one
 // chunk a down work-group: kTpMoeFoldG); q4_moe_finish waits for the peer's, sums the two and runs the epilogue.
@@ -487,8 +491,8 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
       qsa_attn_variant(M, eager),
       bf16_m_variant(M, kHidden, kRouterN),
       route_variant(M),
-      moe_variant(M, shared_bf16),
-      moe_variant(M, shared_bf16, true),
+      moe_variant(M, shared_bf16, false, M > 1),   // the union-read MoE at M >= 2
+      moe_variant(M, shared_bf16, true, M > 1),
       ple_gather_variant(M, ple_bf16_scale),
       bf16_m_variant(M, kHidden, kPleKvN),
       M == 1 ? ple_block_variant(1) : pf_ple_verify_variant(),

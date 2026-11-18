@@ -37,6 +37,9 @@ enum class LinearForce : uint8_t { Auto, Gemv, SmallM };
 struct CaptureOptions {
   LinearForce force_linear = LinearForce::Auto;
   VerifyAttnForce force_attn = VerifyAttnForce::Auto;
+  // Test / probe only: Qwen3.8-Flash-Next's verify lists bind the per-row MoE (q4_moe) instead of the union-read one
+  // (q4_moe_union, open-work item 48) - the timing pairs against the per-row form.
+  bool force_per_row_moe = false;
   // Test / probe only (tools/probe/probe_vattn_ab.cc): a device buffer of fa_layers x kAttnDumpLayerBytes. Set, every
   // FA layer f of the walk appends three copies after its attention pair into slice f: attn_q (fp32 [8][6144]),
   // attn_gate (fp32 [8][6144]) and attn_out (bf16 [8][6144]); rows past the list's M are left as they were. Null
