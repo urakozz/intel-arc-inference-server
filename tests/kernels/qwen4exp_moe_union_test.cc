@@ -124,8 +124,8 @@ struct Weights {
       const uint8_t* n = host ? at(dn_host, dnb * (e / 5 % kHostPool)) : at(dn_pool, dnb * (e % kPool));
       row[e] = reinterpret_cast<uint64_t>(g);
       row[kE + e] = reinterpret_cast<uint64_t>(n);
-      d.imm.copy(at(gu_all, gub * e), g, gub * 4);
-      d.imm.copy(at(dn_all, dnb * e), n, dnb * 4);
+      d.imm.copy(const_cast<uint8_t*>(at(gu_all, gub * e)), g, gub * 4);
+      d.imm.copy(const_cast<uint8_t*>(at(dn_all, dnb * e)), n, dnb * 4);
     }
     d.imm.copy(table.ptr(), row.data(), row.size() * 8);
   }
@@ -235,8 +235,11 @@ Out run(Dev& d, const std::string& variant, uint32_t M, bool tp, bool tbl, bool 
   return o;
 }
 
+// Equal, and not trivially (the outputs were written: h, and y or the slots, hold nonzero values).
 bool same(const Out& a, const Out& b) {
-  return a.h == b.h && a.y == b.y && a.slots == b.slots && a.land == b.land && a.ctr == b.ctr;
+  const auto written = [](const auto& v) { return std::any_of(v.begin(), v.end(), [](auto x) { return x != 0; }); };
+  return a.h == b.h && a.y == b.y && a.slots == b.slots && a.land == b.land && a.ctr == b.ctr && written(a.h) &&
+         (written(a.y) || written(a.slots));
 }
 
 // Each chosen expert (and the shared one) read once a 4-tile gate||up block and once a down (n-tile, K slice).
