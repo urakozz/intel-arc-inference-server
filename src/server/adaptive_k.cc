@@ -69,7 +69,7 @@ MtpCost MtpCost::tp_dflash() {
 
 MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
   MtpCost c;
-  // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (docs/BENCHMARKS.md); the candidate head's rows re-measured
+  // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (the benchmark record); the candidate head's rows re-measured
   // with spec 19 v3d's final form (2026-11-14, BENCHMARKS "Round cost (spec 19 v3d)").
   // The bf16 and int4 verify rows are derived equal to int8 (the packed drafter's measured 1.224 at 8 rows, 2026-11-14).
   c.verify = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};

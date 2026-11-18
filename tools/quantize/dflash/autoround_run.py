@@ -6,7 +6,7 @@
                      [--device xpu|cpu] [--iters 200] [--nsamples 128] [--anchors 32] [--batch-size 8]
                      [--seed 42] [--context 2304] [--print-only]
 
-Settings (docs/open-work.md, "DFlash drafter quant"): tuned W4A16, group 64, symmetric, export
+Settings (the open-work list, "DFlash drafter quant"): tuned W4A16, group 64, symmetric, export
 `auto_round:auto_gptq`, 200 iterations, 128 samples, seed 42; no `quant_lm_head` (the drafter has no head: the
 embedding and head are the target's). The model is model.py's DFlash2Calib (dflash_ref.py's forward, batched),
 its three block lists (`encoder` = fc + hidden_norm, the five layers, `candidate_selector`) tuned in order on

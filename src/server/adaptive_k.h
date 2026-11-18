@@ -55,7 +55,7 @@ struct MtpCost {
   MtpCost with_free_drafts() const;
 
   // Spec 19v2: one block drafts all K rows. The int8 H1/B4 full/candidate totals and per-mode verify rows are
-  // measured paired medians at depth4096 (2026-11-12, busy box); docs/BENCHMARKS.md. The full-head decomposition
+  // measured paired medians at depth4096 (2026-11-12, busy box); the benchmark record. The full-head decomposition
   // uses that profile's head GEMM, and BF16 doubles its head/body GEMM shares, retaining non-linear/host cost.
   // drafter_format: 0 bf16, 1 int8, 2 int4 g64; candidate_head is C3's top64/exact-rerank path.
   static MtpCost dflash(bool i8_head, unsigned drafter_format, bool candidate_head = false);

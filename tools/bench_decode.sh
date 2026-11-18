@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The recorded decode benchmark - the harness behind every b70-decode row in
-# docs/BENCHMARKS.md.
+# the benchmark record.
 #
 #   tools/bench_decode.sh                        3 runs at depth 4096, tg 256
 #   tools/bench_decode.sh --depth 64             the doc 15 idle-work-group experiment

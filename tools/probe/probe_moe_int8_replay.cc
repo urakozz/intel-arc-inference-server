@@ -2,7 +2,7 @@
 // (chunk cap 4096, the int8 head, max_len 16384, as b70-serve ran it), the generated ids before the row through
 // ingest (decode steps, teacher-forced), then the row's logits: its top two ids and the gap in bf16 ulp of the top.
 // The arms that named the router / a||b group (each prefill group switched to its l0 form in turn) are in
-// docs/open-work.md, item 35.
+// open work item 35.
 //
 //   probe_moe_int8_replay <snapshot> <context.ids> <prompt_len> <l0|l0-int8> [id ...]
 //

@@ -1,7 +1,7 @@
 # Low-priority work
 
 Work that is not on the path: ruled out for now, or a quality improvement with a known workaround. Nothing here is
-scheduled; an item moves back to [open-work.md](open-work.md) when it is picked up.
+scheduled; an item moves back to the list of unfinished work when it is picked up.
 
 | what | why it is here | what it would take |
 |---|---|---|

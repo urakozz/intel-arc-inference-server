@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """gdn_gate_span - phase 3 Task 1: how far the GDN gate's running sum moves inside one 64-row sub-chunk.
 
-The factorised scan applies exp(gl) once and exp(gl - gc_i) to each row (pf_gdn_scan.cl); a sly-radiance / saber
+The factorised scan applies exp(gl) once and exp(gl - gc_i) to each row (pf_gdn_scan.cl); an outside
 measurement found it wrong above a span of ~160 nats. Over a B70_PF_GDN_DUMP directory (runtime/prefill/gdn.cc:
 gdn<call>_g.bin = g_cum fp32 [C][v-heads], gdn<call>.txt = "C k-heads v-heads conv-rows"), per dump: the largest
 |gl - gc_i| inside one 64-row sub-chunk of one head (gc_i = g_cum row i of the sub-chunk, gl = its last row), in nats,

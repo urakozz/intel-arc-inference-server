@@ -57,7 +57,7 @@ max 588), 20 timed iterations after 5 warm-ups. That agrees with the torch probe
 peak.
 
 **590 GB/s is the roofline denominator.** It is the rate through the launch path this engine actually uses, and
-every roofline figure in [BENCHMARKS.md](BENCHMARKS.md) and [05-perf-model.md](05-perf-model.md) divides by it. So
+every roofline figure in the benchmark record and [05-perf-model.md](05-perf-model.md) divides by it. So
 these documents use two bases, and each figure should say which: "of the measured 590" is what a kernel can reach,
 "of the 638 peak" is what the memory could carry. Older records took the peak as 608 GB/s, a 19 Gbps figure;
 their percentages of peak are about 5 % too high.
@@ -172,7 +172,7 @@ read hits DRAM.
 
 The subgroup sizes are 16 and 32. A subgroup is the set of lanes that execute one instruction together, the
 counterpart of a CUDA warp. Matrix tile shapes and the GDN kernel's lane assignment must be built around these
-sizes, not the 32 assumed by code derived from CUDA. For reference, another stack's GEMV is SIMD16, and
+sizes, not the 32 assumed by code derived from CUDA. For reference, an existing SIMD16 GEMV works this way, and
 `vllm-xpu-kernels`' GDN decode kernel is SIMD32 with 256-thread groups.
 
 There are 256 EUs over 32 subslices. The persistent-kernel grid of the grouped GEMM in `vllm-xpu-kernels` is
@@ -209,4 +209,4 @@ prefix cache, for one, is pinned in 2 GiB pieces.
 The current stack is compute runtime 26.40.40196.15, IGC (the Intel Graphics Compiler) 2.42.6 and Level Zero
 loader 1.34. The `driver_version` line at the top and the rates in this document come from earlier stacks. The
 hardware rates (DPAS, bandwidth) are properties of the silicon and are not expected to move. Kernel timings
-can move with the compiler, and the current speed rows are the quiet-box session of 2026-11-15 in [BENCHMARKS.md](BENCHMARKS.md).
+can move with the compiler, and the current speed rows are the quiet-box session of 2026-11-15 in the benchmark record.

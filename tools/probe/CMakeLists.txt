@@ -632,7 +632,7 @@ get_property(PDA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PR
 add_dependencies(probe_decode_attn ${PDA_PF_KERNELS})
 
 # --- probe_lm_head_l1: spec 9 plan 9b, L1/L2 on the card (int8 head vs bf16 head, same
-# hidden, golden prompts teacher-forced). Record: docs/BENCHMARKS.md "int8 lm_head (spec 9)".
+# hidden, golden prompts teacher-forced). Record: the benchmark record "int8 lm_head (spec 9)".
 add_executable(probe_lm_head_l1 probe_lm_head_l1.cc)
 target_include_directories(probe_lm_head_l1 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
   ${CMAKE_SOURCE_DIR}/tests/golden)

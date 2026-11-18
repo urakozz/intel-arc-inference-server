@@ -3,17 +3,17 @@
 This document explains where the time goes in Qwen3.8-27B's decode and prefill, what the hard ceilings are, which
 levers have been pulled, and which were tried and rejected. It is for a reader who wants to reason about the
 engine's speed rather than just read its numbers. Every measured row and its grade lives in
-[BENCHMARKS.md](BENCHMARKS.md); this document is the reasoning over them. Figures are measured unless the text
+the benchmark record; this document is the reasoning over them. Figures are measured unless the text
 says they are derived (arithmetic on measured inputs, with the inputs shown) or estimated.
 
 The profile tables here were taken on older stacks: the decode profile before any lever was pulled, the prefill
 phases on the 2026-09 compute runtime and IGC. The ceilings are properties of the card and still stand. The
-current speed rows are from the quiet-box session of 2026-11-15 in BENCHMARKS.md, on runtime 26.40 with IGC
+current speed rows are from the quiet-box session of 2026-11-15 in the benchmark record, on runtime 26.40 with IGC
 2.42.6 ([10-the-box.md](10-the-box.md)).
 
 Speculative decoding (MTP, DFlash, prompt lookup) changes the decode arithmetic: one step checks M rows for the
 weight traffic of about 1.04 to 1.6 plain steps. So do several requests at once, and tensor parallel (every layer
-split over both cards). Their rows are in BENCHMARKS.md, not here.
+split over both cards). Their rows are in the benchmark record, not here.
 
 ## The two ceilings
 
@@ -121,11 +121,11 @@ retiled launch is the KV load path at 55.4 % (39.2 % the 32-byte load messages t
 which is shaped like throughput rather than like a chain of latencies.
 
 The step has since moved from 36.32 to 33.96 ms a token (derived from the standing 29.45 t/s) through the loader
-and per-shape retuning recorded in BENCHMARKS.md. On the byte-matched bf16 head, decode trails vLLM by about 5 %,
+and per-shape retuning recorded in the benchmark record. On the byte-matched bf16 head, decode trails vLLM by about 5 %,
 and none of the prefill work since moved it, by construction: the prefill backend is selectable, and the replayed
 decode list is byte-identical either way. The serving default reads an int8 `lm_head` (below) and measured 31.21
 t/s in that comparison's own pair run. On 2026-11-10 one card measured 33.49 t/s at depth 4096 (int8 head) and
-tensor parallel 53.95 t/s, 1.61x (BENCHMARKS.md, "Tensor parallel"). Those are not byte-matched with vLLM's 31.01.
+tensor parallel 53.95 t/s, 1.61x (the benchmark record, "Tensor parallel"). Those are not byte-matched with vLLM's 31.01.
 
 ## Where prefill time goes
 
@@ -134,7 +134,7 @@ an earlier backend built on sycl-tla because the linears were the whole of the d
 at 1502.83 t/s had `linear_l0` at 61.2 % of the 2728 ms run, replacing sycl-tla's `dequant` plus `gemm` (1816.5
 ms) with 1668.9 ms, and 512 host waits a run disappeared with it. Every other phase moved by under 2 ms.
 
-Several changes landed after that, each in BENCHMARKS.md with its grade: the causal `QK^T` (the attention kernel
+Several changes landed after that, each in the benchmark record with its grade: the causal `QK^T` (the attention kernel
 stops computing the masked half), SiLU folded into the gate‖up GEMM epilogue, a split-BF16 delta-net scan
 (`gdn_scan` from about 297 ms to about 127) and flash attention. With them the bf16 path stood at 1670.72 t/s
 against vLLM's 1610.04 on matched files. The quiet-box session of 2026-11-15 measured 1,787.7 t/s at 4,096 prompt
@@ -176,7 +176,7 @@ achievable bandwidth. There is nothing to tune, only bytes to remove. The engine
 with one fp32 scale per row, quantised at load. It halves the head's bytes and measured 31.21 t/s against 29.38
 for the bf16 head in interleaved pairs, -2.00 ms a token. It passed its accuracy checks: logits cosine 0.9999147 at
 worst, one near-tie argmax flip in 2790 rows, and the golden and prefill gates exact on the determined rows
-(BENCHMARKS.md, "int8 lm_head"). An int4 head would save more, -3.05 ms a token at record grade, but its accuracy
+(the benchmark record, "int8 lm_head"). An int4 head would save more, -3.05 ms a token at record grade, but its accuracy
 has never been measured and `lm_head` is known to be sensitive to quantisation, so it is not adopted.
 
 The comparison with vLLM stays byte-matched on purpose. vLLM cannot load a quantised `lm_head`, so a margin

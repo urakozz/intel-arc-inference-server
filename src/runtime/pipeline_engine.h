@@ -91,7 +91,7 @@ struct PipelineOptions {
   uint32_t timeout_ms = 30000;      // one step's fence wait; a Qwen3.8 step is ~36 ms
   // Spec 16c: one prefill wait's bound - the host waits for a device to finish a chunk it
   // appended up to two chunks earlier. A one-card 2048-row chunk is ~1 s at 4k and a few s
-  // near 256k (derived from docs/BENCHMARKS.md's pp rows); the bound is for a hang, not a
+  // near 256k (derived from the benchmark record's pp rows); the bound is for a hang, not a
   // slow chunk.
   uint32_t prefill_timeout_ms = 120000;
   // Spec 16c, a TEST hook (pp_prefill_fail_test's back-pressure case): every device-1 chunk

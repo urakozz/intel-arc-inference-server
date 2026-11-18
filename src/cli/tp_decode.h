@@ -173,7 +173,7 @@ int run_tp_decode(const TpDecodeArgs& a) {
                runtime::prefill_backend_name(a.backend), a.depth, a.chunk ? a.chunk : eng.prefill_chunk_cap(), ingest_ms,
                ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::print(stderr,
-             "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box, interleaved with\n"
+             "(measured, one run. The recorded figure is the median of three on an idle box, interleaved with\n"
              " the one-card row.)\n");
   return 0;
 }

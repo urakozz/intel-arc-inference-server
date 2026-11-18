@@ -141,7 +141,7 @@ for i in $(seq 1 "$RUNS"); do
   remote_log="\$HOME/$BENCH_LOGS/serve_bench_$i.log"
   remote_json="\$HOME/$BENCH_LOGS/serve_bench_$i.json"
   # -n so llama-benchy's own --runs 3 is honoured (median-over-3 inside this
-  # one invocation, matching how the vLLM rows in docs/BENCHMARKS.md were
+  # one invocation, matching how the vLLM rows in the benchmark record were
   # taken); the invocation itself runs detached because it can exceed a
   # minute (warmup + coherence + latency probe + 3 timed runs).
   BENCH_PID="$($SSH "$BOX" "cd '$REMOTE_DIR' && setsid nohup ~/.local/bin/uvx llama-benchy --base-url http://127.0.0.1:$PORT/v1 --model '$SERVED_NAME' --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation --format json --save-result $remote_json > $remote_log 2>&1 < /dev/null & echo \$!")"

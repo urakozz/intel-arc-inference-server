@@ -1,7 +1,7 @@
 # Working in this repo
 
 An inference engine for Intel Arc Pro B70 cards. Code is edited on the Mac and built and run on the box.
-`docs/open-work.md` is the one list of what is not finished.
+`docs/private/open-work.md` is the one list of what is not finished.
 
 ## Specs and plans
 

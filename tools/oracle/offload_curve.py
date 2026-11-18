@@ -388,9 +388,9 @@ def _land(pending: list, t: int, res: np.ndarray) -> list:
     return keep
 
 
-def policy_basalt(trace, res0: np.ndarray, window: int, copy_ms: float, step_ms: float, decay: float = 0.85,
+def policy_adaptive(trace, res0: np.ndarray, window: int, copy_ms: float, step_ms: float, decay: float = 0.85,
                   margin: float = 1.5, cap: int = 96) -> tuple:
-    """basalt's adaptive placement: per (layer, expert) routing counts, decayed by `decay` at the end of every round of
+    """the adaptive placement: per (layer, expert) routing counts, decayed by `decay` at the end of every round of
     `window` steps; then over all layers the non-resident experts with the highest counts replace the residents with the
     lowest, where the incoming count is at least the victim's + `margin`, at most `cap` a round (largest gain first). A
     victim reads from the host at once; the copies land ceil(n copy_ms / step_ms) steps after the round (between steps,
@@ -428,12 +428,12 @@ def policy_basalt(trace, res0: np.ndarray, window: int, copy_ms: float, step_ms:
     return hits, T * L * k, copied
 
 
-def policy_saber(trace, res0: np.ndarray, prof: np.ndarray, copy_ms: float, step_ms: float, inserts: int = 2,
+def policy_second_chance(trace, res0: np.ndarray, prof: np.ndarray, copy_ms: float, step_ms: float, inserts: int = 2,
                  chance: int = 8, through: float = 0.5) -> tuple:
-    """saber's online placement: an expert is promoted on its second host miss within `chance` steps (second chance),
+    """the second-chance placement: an expert is promoted on its second host miss within `chance` steps (second chance),
     at most `inserts` a layer a step; a layer whose misses are more than `through` of its routed slots that step reads
     through (no promotion); the victim is the layer's least recently used resident (the profile's order before first
-    use: the least routed goes first). Copies land as in policy_basalt. Returns (hits, total, experts copied)."""
+    use: the least routed goes first). Copies land as in policy_adaptive. Returns (hits, total, experts copied)."""
     ids = trace.ids
     T, L, k = ids.shape
     E = res0.shape[1]
@@ -1052,10 +1052,10 @@ def cmd_swap(a) -> None:
     eb = EXPERT_BYTES
     steps = sum(t.T for t in tr)
     pols = [{"policy": "static", "h": static, "copied": 0, "link_mb_per_token": (static_t - static_h) * eb / steps / 1e6}]
-    runs = [(f"basalt (window {w})", lambda t, w=w: policy_basalt(t, res_of[t.name], w, copy_ms, a.step_ms))
+    runs = [(f"adaptive (window {w})", lambda t, w=w: policy_adaptive(t, res_of[t.name], w, copy_ms, a.step_ms))
             for w in ilist(a.policy_window)]
     allc = counts_of(tr, L, E)
-    runs.append(("saber", lambda t: policy_saber(t, res_of[t.name], allc if one_half else cnt[1 - half[t.name]],
+    runs.append(("second chance", lambda t: policy_second_chance(t, res_of[t.name], allc if one_half else cnt[1 - half[t.name]],
                                                  copy_ms, a.step_ms)))
     for name, run in runs:
         hh = tt = cp = 0
@@ -1164,7 +1164,7 @@ def main(argv=None) -> None:
     p.add_argument("--W", default="64,256,1024")
     p.add_argument("--copy-ms", required=True, help="P0.2's measured copy time of one expert (ms), or inf")
     p.add_argument("--step-ms", type=float, required=True, help="decode's step time (P0.7's model)")
-    p.add_argument("--policy-window", default="1,8", help="basalt's rounds: steps a round, a comma list")
+    p.add_argument("--policy-window", default="1,8", help="the adaptive policy's rounds: steps a round, a comma list")
     p = sub.add_parser("mtp")
     common(p)
     p.add_argument("--K", default="1,2,3,4")

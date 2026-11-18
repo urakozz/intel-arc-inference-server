@@ -197,7 +197,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
                runtime::prefill_backend_name(eng.prefill_backend()), a.depth, chunk, ingest_ms,
                ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::print(stderr,
-             "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
+             "(measured, one run. The recorded figure is the median of three on an idle box;\n"
              " compare it with the one-card row, run interleaved.)\n");
   return 0;
 }

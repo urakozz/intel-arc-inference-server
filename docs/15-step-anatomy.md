@@ -8,7 +8,7 @@ why the kernel work went where it did, and how to measure a step without fooling
 Part 1 is the step as the code runs it today: one card, several requests at once, replica, tensor parallel and
 pipeline parallel. Part 2 is the one-card decode profile of 2026-08-25, kept as the record of the method and its
 lessons. Its absolute numbers come from that day's software stack (a 42.141 ms step, taken to 36.32 ms by the three
-changes it describes), not today's. Current speeds are in [BENCHMARKS.md](BENCHMARKS.md). The last section covers the
+changes it describes), not today's. Current speeds are in the benchmark record. The last section covers the
 prefill walk.
 
 ## Part 1: what a step is today
@@ -132,7 +132,7 @@ carries a flush an unprofiled list never pays. Four consequences follow:
   the flush lands after `kernelEnd`, so being observed inflates nothing about a kernel's own execution.
 - The gap between kernels is an upper bound, since each gap contains one flush.
 - The fence-to-fence wall time is not the time per token. The step time is the `--bench` median in
-  [BENCHMARKS.md](BENCHMARKS.md).
+  the benchmark record.
 - A single run's mean is not an attribution: it carries the instrument's drift. "The attribution floor" below prices
   that drift; read it before believing any difference under about 0.3 ms.
 
@@ -219,7 +219,7 @@ of the device's bandwidth, 1.09 times its own bound. Making it perfect would sav
 
 `lm_head` was 10.4% of the step, and no tuning could help it. It took 4.376 ms in one launch at 581 GB/s, 98.5% of the
 measured 590 GB/s. The bytes are the lever, not the kernel. The published checkpoint ships a bf16 head, so this
-project quotes only comparisons with vLLM that read the same bytes ([BENCHMARKS.md](BENCHMARKS.md) says why); the
+project quotes only comparisons with vLLM that read the same bytes (the benchmark record says why); the
 engine has since moved to an int8 head quantised at load ([13-loader.md](13-loader.md)).
 
 ### The three changes of 2026-08-25
@@ -327,7 +327,7 @@ online-softmax model (it predicted 123 us or less; measured 153.1) and the barri
 
 The 0.31 ms outside the kernels, and `attn_reduce`'s 56.8 us spread across processes, have unknown causes. Everything
 above is the M = 1 decode step on one card. The small kernels are the ones whose costs move most with M; the M = 2 to
-8 row lists and the verify kernels are measured in [BENCHMARKS.md](BENCHMARKS.md), not here.
+8 row lists and the verify kernels are measured in the benchmark record, not here.
 
 ## The prefill walk
 
@@ -354,7 +354,7 @@ time ([04-architecture.md](04-architecture.md)).
 
 ### Where the time goes
 
-Per-phase shares and the history of prefill records are in [BENCHMARKS.md](BENCHMARKS.md). Two structural facts
+Per-phase shares and the history of prefill records are in the benchmark record. Two structural facts
 matter here.
 
 The linears are the walk: `linear_l0` is over 60% of a chunk. With one wait per slab, a 4096-token prompt measures
@@ -364,7 +364,7 @@ GEMM half.
 
 The delta-net scan was the biggest miss in this project's estimates. A projection that widened decode's `gdn_step` to
 M = 2048 said 15.4 ms per chunk; the first working version measured 984.1 ms, 64 times more. Rewrites, and then the
-split-bf16 DPAS scan, brought it down (BENCHMARKS.md). A projection that stretches a kernel written for one shape to a
+split-bf16 DPAS scan, brought it down (the benchmark record). A projection that stretches a kernel written for one shape to a
 shape three orders of magnitude away measures nothing.
 
 ### Chunk width: fixed and per-position cost
@@ -373,4 +373,4 @@ A single-chunk sweep at C = 256, 512, 1024 and 2048 (2026-09-09, an older stack)
 0.852 ms per position (derived from a two-point fit). At C = 256 the fixed part is 70% of the chunk, which is why
 throughput rose with chunk width across the range then available. The widest chunk is now 4096. The scratch memory is
 sized by the chunk cap, so the width is chosen per session, not changed freely; its measured effect is in
-BENCHMARKS.md.
+the benchmark record.

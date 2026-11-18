@@ -4,8 +4,7 @@ Reference material for an LLM inference engine written from scratch for the Inte
 Zero and OpenCL C. The project [README](../README.md) has the short version; this is where the reasoning and the
 evidence live.
 
-The numbered files are guides: they explain how the engine works today and why. [BENCHMARKS.md](BENCHMARKS.md)
-is the record of measured rows, each dated with how it was taken. The work lists say what is not finished.
+The numbered files are guides: they explain how the engine works today and why. Measured rows are recorded with a date and how they were taken.
 
 If you read one file, read [08-decode-vs-prefill.md](08-decode-vs-prefill.md). Then
 [04-architecture.md](04-architecture.md) for the engine as a whole, [01-hardware.md](01-hardware.md) for what the
@@ -45,13 +44,12 @@ card can do, and [17-running-models.md](17-running-models.md) to run a model.
 | [17-running-models.md](17-running-models.md) | the commands to download, serve and benchmark each model, per number of cards, and what each model supports |
 | [environment-variables.md](environment-variables.md) | what the programs and scripts read from the environment (none of it needed to run the engine) |
 | [10-the-box.md](10-the-box.md) | the build and test machine: how to build and test on it, the GPU lock, validation runs, why an idle box matters for a benchmark |
-| [BENCHMARKS.md](BENCHMARKS.md) | every measured row, how it was taken and what grade it earned |
 
 ## Background
 
 | | |
 |---|---|
-| [06-prior-art.md](06-prior-art.md) | what to borrow from sycl-tla, oneDNN, another stack and vLLM, and what not to |
+| [06-prior-art.md](06-prior-art.md) | what to borrow from sycl-tla, oneDNN and vLLM, and what not to |
 | [07-open-questions.md](07-open-questions.md) | what is not known about the hardware |
 | [09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md) | the work that preceded this project: months of patching vLLM's kernels, and the result |
 
@@ -59,5 +57,4 @@ card can do, and [17-running-models.md](17-running-models.md) to run a model.
 
 | | |
 |---|---|
-| [open-work.md](open-work.md) | the one list of what is not finished |
 | [low-priority-work.md](low-priority-work.md) | work that is ruled out for now or not scheduled |

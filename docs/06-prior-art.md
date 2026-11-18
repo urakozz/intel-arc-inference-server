@@ -61,12 +61,10 @@ files, so their failure modes are already known.
 | `level-zero` | The Level Zero spec and loader: the command-list API this design is built on |
 | `compute-runtime` | Intel's GPU runtime (NEO). When Level Zero behaviour surprises you, the answer is here |
 | `intel-graphics-compiler` | IGC, what `ocloc` runs. Relevant the moment you read generated assembly |
-| `another stack` | A working C++ LLM pipeline. Read its scheduling and KV handling and ignore its model format. It is also the reference for the tokenizer layer: `another tokenizer` for BPE, `google/minja` for chat templates, and `text_streamer.cpp` for incremental, UTF-8-safe detokenisation ([11-tokenizer-and-chat-template.md](11-tokenizer-and-chat-template.md)) |
+| `google/minja` | A header-only C++ subset of Jinja, the chat-template renderer ([11-tokenizer-and-chat-template.md](11-tokenizer-and-chat-template.md)) |
 | `auto-round` | The quantiser behind every checkpoint the engine serves (our own AutoRound int4 g64 re-quantisations), and `auto_round_extension/ark`, the runtime the engine replaced |
 | `vllm`, `vllm-xpu-kernels` | The incumbent and the speed baseline. Their XPU kernels are the reference implementation to beat |
-| `oneDNN` | The most valuable checkout after `sycl-tla`: Intel's own JIT GEMM generator (`gemmstone`), where another stack's prefill actually runs, and where hardware capability is written down as explicit gates |
-| `another stack` | The GPU plugin. `fully_connected_gpu_gemv.cl` is the decode kernel that beats vLLM; read it ([08-decode-vs-prefill.md](08-decode-vs-prefill.md)) |
-| `model_server` | another server, OpenAI-compatible serving on top of another stack. A reference for the HTTP and SSE layer, not for the engine |
+| `oneDNN` | The most valuable checkout after `sycl-tla`: Intel's own JIT GEMM generator (`gemmstone`), and where hardware capability is written down as explicit gates |
 | `oneAPI-samples` | SYCL and Level Zero idioms with working build recipes; the fastest way to sanity-check a toolchain |
 
 ### `oneDNN`: read this one properly

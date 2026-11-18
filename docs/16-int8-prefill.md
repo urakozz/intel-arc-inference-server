@@ -8,7 +8,7 @@ to turn the option on, and for anyone curious why a 4-bit model ends up doing 8-
 
 Today it reads a 4,096-token prompt about 1.2x faster than bf16 on one card, and about 1.10x faster under tensor
 parallel. It stays opt-in because its rounding drifts from the reference more than the bf16 path does; the
-"Limits" section lists the known failures. The benchmark rows are in [BENCHMARKS.md](BENCHMARKS.md).
+"Limits" section lists the known failures. The benchmark rows are in the benchmark record.
 
 ## What runs
 
@@ -91,7 +91,6 @@ against a higher-precision reference; "end-to-end" means the model's logits over
 | rotating the weights inside the engine: four variants, including an exact DPAS factorisation | the shared-memory butterfly was fastest; the DPAS form was exact but not faster | butterfly kept |
 | a rotated checkpoint made offline (rotate bf16, then AutoRound) | the rotation is exact (3.9e-7) but makes the int4 weights ~25 % worse | rejected |
 | per-channel int4, AutoRound on the rotated model | 22.9 % logit error against 7.77 % for g64 | rejected |
-| another stack's own int4 IR (asymmetric g128, dynamic int8 activations) | 1298 t/s prefill, 21.6 t/s decode, 26 % logit error | rejected |
 | the unrotated fast path (int8 activations and weights, no Hadamard) | 1.70x / 1.85x on gate‖up / down, but 17.8 % against 12.0 % end-to-end error | rejected |
 | an 8-bit (W8A8 / FP8) checkpoint | would halve decode and take ~27 GB of the 32 (arithmetic, not built) | not pursued |
 | runtime Hadamard + per-channel int8, W4A16 file unchanged (h8) | 12.5 % against 12.0 % end-to-end on four prompts; 1.35x to 1.52x per linear; 1.28x on the whole prefill | accepted |
@@ -193,7 +192,7 @@ between two experts can flip. More generally the int8 path's results drift from 
 which is why it is never the default.
 
 Everything else works on either prefill backend: flash attention and 128k context (the first build measured
-2125.12 t/s at 4,096 tokens with flash attention, [BENCHMARKS.md](BENCHMARKS.md), "Flash attention and 128k"),
+2125.12 t/s at 4,096 tokens with flash attention, the benchmark record, "Flash attention and 128k"),
 prefix caching, MTP and the other proposers (DFlash, prompt lookup), and `--parallel pp`, which splits the prefill
 across both cards. On one card Qwen3.8 prefills in 4096-row chunks where the memory plan has room, with 2048-row
 chunks over a prompt's last 6,144 to 8,191 positions; that applies to both backends.

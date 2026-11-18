@@ -50,7 +50,6 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Takes the bf16 base checkpoint too (no `quantization_config`) and `--cont-ids` (teacher-forced ids from a file). |
 | `kv8_qwen38_repeat.sh` | Spec 12 §8 "Before 12b" on the Mac: the 12a probe on `Qwen/Qwen3.8-27B` (bf16) in a 28 GB container, golden rows, A4, long32k[:4096] + replay, resumable; how to run and what decides the tolerances: plan 12b "Task A". |
-| `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md`, "The third implementation"). |
 
 Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English, **42 ids**),
 `code.txt` (a Python function, **61 ids** - 3 under the ceiling, so do not edit
@@ -809,7 +808,7 @@ also what limits it: the C++ loader and the oracle are pinned to the *same*
 `dequant.py` convention (bit-exactly, by test), so a convention that is wrong
 moves the engine and the oracle **together** and the golden test still passes.
 
-4. **The third implementation.** `vllm_check.py` runs vLLM's own greedy
+4. **The third implementation.** A one-off vLLM run (its script has since been removed) did vLLM's own greedy
    generation on the same checkpoint and the same three prompt id files -
    vLLM's GPTQ unpack (`XPUwNa16LinearKernel`), its Triton GDN kernels, its
    FlashAttention, on the XPU: nothing shared with either of the paths above
@@ -817,7 +816,7 @@ moves the engine and the oracle **together** and the golden test still passes.
    element-exact against the golden `tokens`, on both the compiled and the
    `enforce_eager` path.** The chain is closed for these three prompts, and
    `dequant.py` is cross-checked rather than merely self-consistent. Full
-   record - command, ids, caveats - in `docs/14-golden-gate.md`, "The third implementation".
+   record - command, ids, caveats - in docs/14-golden-gate.md, "The third implementation".
 
 > **The chain has a resolution limit, found 2026-08-26 and recorded in
 > docs/14 ("Undetermined rows: the rule, and why it is not a weakening").** `dump.py` records

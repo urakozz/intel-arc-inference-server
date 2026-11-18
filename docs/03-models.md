@@ -6,7 +6,7 @@ see what one decode step has to compute and read, and why the engine is built th
 cannot hardcode the things this one hardcodes; specialising to the model is the whole strategy.
 
 The focus is Qwen3.8-27B for agentic coding first, then Qwen3.8-Flash-Next; the order is kept in
-[open-work.md](open-work.md). The other models, Ornith 1.5, Kolibri-1 and Qwen3.8-Flash-Next (`qwen4_exp`), each
+the list of unfinished work. The other models, Ornith 1.5, Kolibri-1 and Qwen3.8-Flash-Next (`qwen4_exp`), each
 have their own engine, specialised the same way. Muse-Glimmer and Agnes 3.0 Flash were dropped and are no longer
 supported.
 
@@ -22,7 +22,7 @@ checkpoint ships Qwen3.8's file). What each model runs, and with which flags, is
 ## The checkpoint
 
 `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`: GPTQ g64 symmetric, int4 weights, bf16 `lm_head`. This engine
-and vLLM serve the same files, which is what makes the comparison in [BENCHMARKS.md](BENCHMARKS.md) fair.
+and vLLM serve the same files, which is what makes the comparison in the benchmark record fair.
 
 Everything below is read from the snapshot's `config.json` and the safetensors headers, not assumed.
 
@@ -103,7 +103,7 @@ model, so a draft step reads 0.85 + 2.54 GB and the width of `lm_head` matters t
 
 The engine loads the MTP head behind `--spec mtp`, which is also what `b70-serve`'s default `--spec auto` picks on
 this model. It drafts up to K tokens and verifies them in one step of K + 1 rows (speculative decoding: the main
-model checks several guessed tokens for about the cost of one, and keeps those it agrees with; BENCHMARKS.md,
+model checks several guessed tokens for about the cost of one, and keeps those it agrees with; the benchmark record,
 "MTP speculative decoding"). K is chosen per iteration from each request's own acceptance rate, up to
 `--spec-max`. With `--spec off` the head is skipped.
 
@@ -262,4 +262,4 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model "$MODEL" \
 ```
 
 Prefill is measured directly rather than through `llama-benchy`'s derived `pp` figure; the reason, and every
-measured row, is in [BENCHMARKS.md](BENCHMARKS.md).
+measured row, is in the benchmark record.
