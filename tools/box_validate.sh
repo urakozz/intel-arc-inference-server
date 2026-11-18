@@ -42,7 +42,7 @@
 #   G0's checks on both cards; the reused baseline and the one-card G0 stages take part of that off - not yet
 #   measured); the full run on demand, hours.
 # Run control:
-#   --baseline REF   G0's reference build (default a52caa8b: main on 2026-11-16, accepted;
+#   --baseline REF   G0's reference build (default 3769e2a5: main on 2026-11-18, the four test fixes merged;
 #                    `--baseline main` when validating a branch before merging)
 #                    A complete build of the baseline, with its recorded gate outputs, is kept in
 #                    ~/b70-inference-server-g0-<sha> and reused while the commit, build settings, compiler, ocloc
@@ -128,7 +128,7 @@ while [ $# -gt 0 ]; do
 done
 DEVICE="${DEVICE:-0}"
 export DEVICE
-BASELINE_REF="${BASELINE_REF:-a52caa8b}"
+BASELINE_REF="${BASELINE_REF:-3769e2a5}"
 [ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
 [ "$NIGHTLY" = 0 ] || [ "$QUICK" = 0 ] || die "--nightly is a full run: drop --quick"
 [ "$MERGE" = 0 ] || [ "$QUICK" = 0 ] || die "--merge-check and --quick are two tiers: pick one"

@@ -233,7 +233,7 @@ The orchestrator is the one detached `tools/box_validate/remote.sh` process on t
 These are the rules it enforces, and what follows from them.
 
 A state is a commit paired with a baseline. Results live in `~/b70-validate/<tree>/<HEAD sha12>-vs-<baseline sha12>/`
-(default baseline `a52caa8b`; `--baseline main` when validating a branch before its merge). Every launch that should
+(default baseline `3769e2a5`; `--baseline main` when validating a branch before its merge). Every launch that should
 add to one state must come from the same commit with the same baseline; otherwise G0 is not PASS there and every
 later stage is SKIP "blocked". So when main may move under a long run, launch from a detached worktree
 (`git worktree add --detach ../b70-boxday main`, with the untracked `tools/box.env` copied in, never committed). A
