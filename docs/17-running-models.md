@@ -248,7 +248,7 @@ decoding) runs on `main` on demand.
 |---|---|---|---|---|
 | checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | ours (int4 g64, not published) or Intel's interim W4A16 |
 | `b70-serve` | yes | yes | yes, two cards by default | the whole model on two cards (`--parallel auto` = pp), experts partly in pinned host memory |
-| `--parallel tp` | yes | refused | refused | yes, when asked: served decode with MTP 1.06-1.36x pp's on text, 1.08x on tool calls; prefill 0.56-0.81x pp's |
+| `--parallel tp` | yes | refused | refused | yes, when asked: served decode with MTP 1.01-1.23x pp's on text; prefill 0.69-0.81x pp's (32k / 128k-token prompt) |
 | `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request per card); more is refused | refused | refused |
 | `--parallel pp` (two cards) | yes | yes | its default (its own engine) | its default for the whole model (`--parallel auto`) |
 | `b70-decode` | yes | yes | decode and prefill, two cards by default | decode and prefill, the whole model or `--layers N` |
@@ -368,9 +368,12 @@ The stop ids come from the snapshot's `generation_config.json` (`<|im_end|>` and
 
 ### Speed and memory
 
-On our export, served with MTP (the default): 58-70 t/s on code, 48 on a spec, 40 on documentation prose, and 67-99
-on tool calls at about 1-4k context (plain decoding: 37-49 and 42-53). Prefill runs at about 1,350 t/s at 4k, 1,200 at
-17k and 940 at 62k. `--max-len auto` gives 65,536; passkey retrieval is 3 of 3 at 61,955 ids, and a prefix cache hit's
+On our export, served with MTP (the default, `--spec auto`), at about 1-4k context: under `--parallel tp` 71-81 t/s on
+code, 54 on documentation prose and 82-91 on tool calls; under `pp` 63-67, 46 and 72-96 (the same prompts with
+`--spec off`: tp 57-63, 51, 55-62; pp 51-58, 49, 49-60). On prose an `--spec auto` server can sit slightly below an
+`--spec off` one, because the MTP head's memory leaves fewer experts resident. Prefill, for a 32k-token prompt, runs at
+3,103 t/s under pp and 2,128 under tp, and for a 128k-token prompt at 2,458 and 1,988; a short prompt (43 tokens) gets
+its first token in 0.38 s (pp) / 0.50 s (tp). `--max-len auto` gives 65,536; passkey retrieval is 3 of 3 at 61,955 ids, and a prefix cache hit's
 output is identical to the cold run. Loading takes about 10 minutes and pins 63.2 GB of host memory.
 
 The whole model does not fit two B70s: its routed experts alone are 64.17 GB at int4 g64. So without `--layers`, each
@@ -420,9 +423,10 @@ cards; one card when only one is visible) gives each card half of the layers: 24
 the second. `--parallel tp` gives each card half of every layer: half the attention and gated delta-net heads, half of
 every expert (each card keeps its own experts' halves resident and reads the rest from host memory), half the
 lm_head's vocabulary, with the MTP head whole on the second card. The two halves are summed after each mixer and each
-MoE block by peer writes. Served decode with MTP is faster under tp (1.06-1.36x pp's on text, 0.95-1.22x and 1.08x on average on five tool
-calls) and prefill is slower: 0.81x pp's at 4k ids, 0.61x at 32k and 0.56x at 128k, because both cards repeat the
-hyper-connections and the indexer's block selection. tp needs `--lm-head int8` in `b70-decode` (`b70-serve` always uses
+MoE block by peer writes. Served decode with MTP is faster under tp (1.01-1.23x pp's on text, 82-91 against 72-96 t/s on five tool calls)
+and prefill is slower: 0.69x pp's for a 32k-token prompt and 0.81x for 128k (2,128 against 3,103 and 1,988 against
+2,458 t/s), because both cards still run their own hyper-connections and part of the indexer's block scoring (the
+scoring itself is split across the cards). tp needs `--lm-head int8` in `b70-decode` (`b70-serve` always uses
 it), `--layers N` rather than `--layers auto`, and has no `--pipeline-split`.
 
 ```sh
@@ -454,7 +458,9 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
   each chunk crosses between the cards by copy, with card 0 running the next chunk while card 1 finishes this one;
   under tp two chunks are in flight, each one's sums crossing on the copy engine beside the other's compute. The
   prefill copies each layer's experts that live in host memory onto the card on the copy engine while the layers
-  before it compute.
+  before it compute; a short chunk (under 1,280 rows under pp, any chunk that runs alone under tp) reads them in place
+  instead. Between prefills the idle prefill scratch memory is lent to the expert cache, so decode keeps more experts
+  resident.
 - One request at a time, in every mode: `--max-num-seqs` above 1 is refused at startup; further requests wait their
   turn.
 - MTP in `b70-serve` only: `b70-decode --spec mtp` and `--draft-vocab` are refused.
