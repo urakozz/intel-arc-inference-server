@@ -52,6 +52,14 @@ struct ClientGone : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
+// A request the engine failed: the reply's error body, and the same reason on the server's log (the client may not
+// print the body; the log would otherwise show nothing for it).
+std::string server_error(const std::exception& error) {
+  std::print(stderr, "request: failed: {}\n", error.what());
+  std::fflush(stderr);
+  return error_body(error.what(), "server_error");
+}
+
 // How often a request waiting for its deltas under the scheduler asks whether its client is still there (a hang-up
 // during a long prefill writes nothing that could fail).
 constexpr auto kClientPoll = std::chrono::milliseconds(200);
@@ -725,7 +733,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
       response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");
     } catch (const std::exception& error) {
       response.status = 500;
-      response.set_content(error_body(error.what(), "server_error"), "application/json");
+      response.set_content(server_error(error), "application/json");
     }
     release();
     return;
@@ -775,7 +783,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
           (void)write(std::string("data: ") +
                       error_body(error.what(), "invalid_request_error") + "\n\n");
         } catch (const std::exception& error) {
-          (void)write(std::string("data: ") + error_body(error.what(), "server_error") + "\n\n");
+          (void)write(std::string("data: ") + server_error(error) + "\n\n");
         }
         (void)write(kDone);
         if (ok) finish_request();
@@ -976,7 +984,7 @@ void Server::handle_batched(const httplib::Request& request, httplib::Response& 
                            "application/json");
     } catch (const std::exception& error) {
       response.status = 500;
-      response.set_content(error_body(error.what(), "server_error"), "application/json");
+      response.set_content(server_error(error), "application/json");
     }
     return;
   }
@@ -1017,7 +1025,7 @@ void Server::handle_batched(const httplib::Request& request, httplib::Response& 
             if (parsed.include_usage) (void)write(stream_frame_usage(parsed, id, created, outcome.usage));
             log_request(parsed.chat, body, t_start, outcome);
           } catch (const std::exception& error) {
-            (void)write(std::string("data: ") + error_body(error.what(), "server_error") + "\n\n");
+            (void)write(std::string("data: ") + server_error(error) + "\n\n");
           }
         }
         (void)write(kDone);
