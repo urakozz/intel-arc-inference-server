@@ -2127,6 +2127,19 @@ if(B70_ORNITH)
       set_property(TEST prefill_split_ornith_${b}_test ornith_prefill_${b}_test APPEND PROPERTY LABELS diagnostic)
     endif()
   endforeach()
+  # Open-work 38: the prompt pass with the mixer linears held in bf16 bitwise the pass that unpacks them, at the
+  # chunk caps 2048 and 4096; the scratch grows by the plan's dense_slab_bytes.
+  add_executable(prefill_dense_bf16_test prefill/prefill_dense_bf16_test.cc)
+  target_include_directories(prefill_dense_bf16_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(prefill_dense_bf16_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  add_dependencies(prefill_dense_bf16_test ${B70_ORNITH_PREFILL_KERNELS})
+  add_test(NAME prefill_dense_bf16_ornith_test COMMAND prefill_dense_bf16_test ${B70_ORNITH_SNAPSHOT}
+    ${B70_ORNITH_PROMPTS_DIR})
+  add_test(NAME prefill_dense_bf16_ornith_cap4096_test COMMAND prefill_dense_bf16_test ${B70_ORNITH_SNAPSHOT}
+    ${B70_ORNITH_PROMPTS_DIR} --chunk-cap 4096)
+  set_tests_properties(prefill_dense_bf16_ornith_test prefill_dense_bf16_ornith_cap4096_test PROPERTIES
+    LABELS "checkpoint;prefill;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 
 endif()
 

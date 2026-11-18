@@ -67,6 +67,7 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
     p.prefill_lazy += s.slab;
     // Phase 3 Task 2: a MoE model's router / a||b B slabs, made by Engine::prepare_prefill (both backends).
     p.prefill_lazy += route_slab_bytes(desc, 0, desc.layers);
+    if (path.dense_bf16) p.prefill_lazy += dense_slab_bytes(desc);   // open-work 38, 0 when dense
     if (kv == KvCache::Int8) p.prefill_lazy += s.kv8_raw;
     p.prefill_scratch = s.eager() + p.prefill_lazy;
     // Engine::prepare_prefill: Int8State for the MLP intermediate (down's K), then every

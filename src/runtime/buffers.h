@@ -211,6 +211,11 @@ struct PrefillScratch : PrefillScratchDims {
   // Phase 3 Task 2 (MoE, l0): weight `w`'s pf_gemm B slab, `bytes` long, allocated on the first call (`fresh` true:
   // the caller fills it - prefill::tiled_slab) and kept for the session; runtime::route_slab_bytes counts them.
   l0::Mem& gemm_slab(const void* w, size_t bytes, bool& fresh);
+  // Open-work 38: weight `w`'s slab if gemm_slab made one, else null (linear_l0 reads a resident bf16 linear).
+  const l0::Mem* find_gemm_slab(const void* w) const {
+    const auto it = gemm_slabs_.find(w);
+    return it == gemm_slabs_.end() ? nullptr : &it->second;
+  }
   size_t lazy_bytes() const;
 
  private:

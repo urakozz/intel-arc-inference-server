@@ -274,6 +274,9 @@ uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
 // router || shared gate, bf16 [hidden][pf_route_slab_pitch(router_n)], and every GDN layer's a||b, bf16
 // [hidden][pf_route_slab_pitch(128)] (PrefillScratch::gemm_slab; Ornith 40 x 2 MiB + 30 x 1 MiB). 0 when dense.
 size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last);
+// Open-work 38: a MoE model's mixer linears (qkv||z and out_proj, q||k||v and o_proj) unpacked to bf16 once
+// (prefill::make_dense_slabs, PrefillScratch::gemm_slab), K x N each - Ornith 2.56 GB. 0 when dense.
+size_t dense_slab_bytes(const model::ModelDesc& desc);
 // The work items' bound at C (pf_moe_sort_mw.cl, MI = kernels::pf_moe::kItemM rows an item): the fused grouped
 // GEMMs' grid, a function of C alone.
 uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C);

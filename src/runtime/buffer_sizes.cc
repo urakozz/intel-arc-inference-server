@@ -476,6 +476,13 @@ size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t l
   return b;
 }
 
+size_t dense_slab_bytes(const model::ModelDesc& desc) {
+  if (!desc.is_moe()) return 0;
+  auto bytes = [&](model::LinearId id) { return size_t{desc.shape(id).K} * desc.shape(id).N * kBf16; };
+  return desc.gdn_layers * (bytes(model::LinearId::QkvZ) + bytes(model::LinearId::OutProj)) +
+         desc.fa_layers * (bytes(model::LinearId::Qkv) + bytes(model::LinearId::OProj));
+}
+
 MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk_cap) {
   MoePrefillLayout l;
   if (!desc.is_moe()) return l;
