@@ -12,7 +12,6 @@
 // on its last row and the host merges the heads (the larger value, ties to card 0) as a decode step does.
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -212,16 +211,6 @@ void Qwen4ExpTpEngine::prepare_prefill() {
       if (D->lend) D->lend->lend();
   };
   pf_settle_ = [ps] { return ps->settle(); };
-}
-
-double Qwen4ExpTpEngine::read_host_experts() {
-  prepare_prefill();
-  const auto t0 = std::chrono::steady_clock::now();
-  for (auto& D : pf_->dev)
-    if (D->ring) D->ring->read_all();
-  for (auto& D : pf_->dev)
-    if (D->ring) ZE_CHECK(zeCommandListHostSynchronize(D->ring->list, UINT64_MAX));
-  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 size_t Qwen4ExpTpEngine::prefill_launches() const {

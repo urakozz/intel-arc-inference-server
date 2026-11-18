@@ -14,7 +14,10 @@ struct TensorInfo {
   uint32_t file = 0;             // index into file_names()
 };
 
-// Read-only mmap of one file.
+// Read-only mmap of one file. Its page cache is dropped when it is destroyed: a load reads more of the model than the
+// RAM left beside the host-memory allocations holds, and the cached shards kept free memory at the low watermark, so the
+// kernel's reclaim made the GPU driver swap host-memory allocations out under the first request (they came back at
+// the swap file's ~40 MB/s, a 4,511-id tp prefill took 77 s).
 class MappedFile {
  public:
   explicit MappedFile(const std::string& path);
@@ -28,6 +31,7 @@ class MappedFile {
  private:
   const uint8_t* data_ = nullptr;
   size_t size_ = 0;
+  int fd_ = -1;
 };
 
 // The checkpoint's sharded tensor set, manifest = the index (dedup by name).

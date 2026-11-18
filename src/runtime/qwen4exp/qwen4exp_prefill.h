@@ -157,7 +157,6 @@ struct Q4PfRingState {
   Q4PfRingState& operator=(const Q4PfRingState&) = delete;
   Q4PfRing view(bool issue_first, bool issue_rest) const;
   void reset();
-  void read_all();   // every layer's mirror prefix into its buffer on the list, no events (the caller waits)
   std::unique_ptr<l0::Mem> stage[2], rows;
   std::vector<size_t> bytes;
   std::vector<const void*> mirror;
