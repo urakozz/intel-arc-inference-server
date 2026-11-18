@@ -766,7 +766,7 @@ void check_router_gemm(Dev& d, Kernels& k, const Layer& L, const std::vector<uin
   }
   l0::Module rm(d.ctx, kernels::path(kernels::pf_moe_route_gemm_variant(256, 8, kH, kI, P)));
   l0::Kernel r512(rm, "moe_route");
-  r512.group_size(256);
+  r512.group_size(16);   // ROUTE_SG: one sub-group a token
   l0::Mem lp = d.upload(poisoned), lc = d.upload(compact), ra = d.zeros(size_t(C) * 32 * 4),
           rb = d.zeros(size_t(C) * 32 * 4);
   r512.arg_ptr(0, lp.ptr());
