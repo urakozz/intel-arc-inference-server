@@ -175,13 +175,14 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
 // broadcast reads) and the ranks are a permutation - one barrier, no rounds.
 // tests/kernels/moe_ref.h repeats this chain step for step.
 //
-// ROUTE_SG 1 (prefill's moe_M1_..._R<pitch> binary only): the same values with sub-group traffic in place of most
-// SLM messages - a lane reads the SLM row as 16 lane-wide pieces and takes its 16 values by sub_group_broadcast
-// (the max, any order, is exact; the rank is an integer count), and the Σ tree's strides 8 .. 1 run on shuffles in
-// every sub-group (red[e] + red[e + stride], the same additions in the same order), one barrier fewer a stride.
+// ROUTE_SG 1 (prefill's moe_M1_..._R<pitch> binary only): the same row with ~EXPERTS fewer steps a lane - the max
+// over shuffles and the sub-groups' maxima (any order is exact), the Σ tree's strides 8 .. 1 on shuffles (red[e] +
+// red[e + stride], the same additions in the same order), and the rank counted over the candidates only: the
+// experts at or above the SLOTS-th largest sub-group max of p (the rank is an integer count, so the same).
 #ifndef ROUTE_SG
 #define ROUTE_SG 0
 #endif
+#define NSG (EXPERTS / SG)
 #if ROUTE_SG
 __attribute__((reqd_work_group_size(WG_ROUTE, 1, 1))) MOE_SG16
 #else
@@ -204,14 +205,20 @@ __kernel void moe_route(__global const float* restrict logits, __global uint* re
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 #if ROUTE_SG
-  const uint lane = get_sub_group_local_id();
-  float mx = sl[0];
+  const uint lane = get_sub_group_local_id(), sgi = e / SG;
+  __local float sm[NSG];         // a sub-group's max: of the logits, then of the probabilities
+  __local float cp[EXPERTS];     // the rank's candidates (p, id), in arrival order (only their count matters)
+  __local uint ce[EXPERTS];
+  __local uint nc;
+  if (e == 0) nc = 0u;
+  float v = l;
 #pragma unroll
-  for (uint c = 0; c < EXPERTS / SG; ++c) {
-    const float q16 = sl[c * SG + lane];
+  for (uint st = SG / 2; st > 0; st >>= 1) v = fmax(v, intel_sub_group_shuffle_xor(v, st));
+  if (lane == 0) sm[sgi] = v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  float mx = sm[lane % NSG];
 #pragma unroll
-    for (uint j = 0; j < SG; ++j) mx = fmax(mx, sub_group_broadcast(q16, j));
-  }
+  for (uint st = SG / 2; st > 0; st >>= 1) mx = fmax(mx, intel_sub_group_shuffle_xor(mx, st));
   const float ex = exp(l - mx);
   red[e] = ex;
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -223,16 +230,39 @@ __kernel void moe_route(__global const float* restrict logits, __global uint* re
 #pragma unroll
   for (uint stride = SG / 2; stride > 0; stride >>= 1) s = s + intel_sub_group_shuffle(s, (lane + stride) & (SG - 1));
   const float p = ex / sub_group_broadcast(s, 0);
-  sl[e] = p;                     // every lane finished reading the logits (barriers above)
+  v = p;
+#pragma unroll
+  for (uint st = SG / 2; st > 0; st >>= 1) v = fmax(v, intel_sub_group_shuffle_xor(v, st));
+  if (lane == 0) sm[sgi] = v;    // the logits' maxima were read before the Σ tree's barriers
   barrier(CLK_LOCAL_MEM_FENCE);
-  uint rank = 0;
+  // thr = the SLOTS-th largest sub-group max: a p below it has SLOTS beaters (those maxima, distinct experts), so its
+  // rank is >= SLOTS; the experts at or above it are the only candidates, and every beater of a candidate is one.
+  float thr = -INFINITY;
+  if (NSG >= SLOTS) {
+    const float q = sm[lane % NSG];
+    uint r = 0;
 #pragma unroll
-  for (uint c = 0; c < EXPERTS / SG; ++c) {
-    const float q16 = sl[c * SG + lane];
+    for (uint j = 0; j < NSG; ++j) {
+      const float qj = sub_group_broadcast(q, j);
+      r += (qj > q || (qj == q && j < lane)) ? 1u : 0u;
+    }
+    thr = lane < NSG && r < SLOTS ? q : INFINITY;
 #pragma unroll
-    for (uint j = 0; j < SG; ++j) {
-      const float q = sub_group_broadcast(q16, j);
-      rank += (q > p || (q == p && c * SG + j < e)) ? 1u : 0u;
+    for (uint st = SG / 2; st > 0; st >>= 1) thr = fmin(thr, intel_sub_group_shuffle_xor(thr, st));
+  }
+  if (p >= thr) {
+    const uint i = atomic_inc(&nc);
+    cp[i] = p;
+    ce[i] = e;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  uint rank = SLOTS;
+  if (p >= thr) {
+    rank = 0;
+    const uint n = nc;
+    for (uint i = 0; i < n; ++i) {
+      const float q = cp[i];
+      rank += (q > p || (q == p && ce[i] < e)) ? 1u : 0u;
     }
   }
 #else
