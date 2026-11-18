@@ -18,17 +18,22 @@ MappedFile::MappedFile(const std::string& path) {
   if (::fstat(fd, &st) != 0) { ::close(fd); throw std::runtime_error("fstat failed: " + path); }
   size_ = size_t(st.st_size);
   void* p = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
-  ::close(fd);
-  if (p == MAP_FAILED) throw std::runtime_error("mmap failed: " + path);
+  if (p == MAP_FAILED) { ::close(fd); throw std::runtime_error("mmap failed: " + path); }
+  fd_ = fd;
   ::madvise(p, size_, MADV_SEQUENTIAL);
   data_ = static_cast<const uint8_t*>(p);
 }
 MappedFile::~MappedFile() {
   if (data_) ::munmap(const_cast<uint8_t*>(data_), size_);
+  if (fd_ >= 0) {
+    ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);   // unmapped first: the advice drops only unmapped pages
+    ::close(fd_);
+  }
 }
-MappedFile::MappedFile(MappedFile&& o) noexcept : data_(o.data_), size_(o.size_) {
+MappedFile::MappedFile(MappedFile&& o) noexcept : data_(o.data_), size_(o.size_), fd_(o.fd_) {
   o.data_ = nullptr;
   o.size_ = 0;
+  o.fd_ = -1;
 }
 
 std::vector<std::pair<std::string, TensorInfo>> SafetensorsSet::parse_header(const uint8_t* p,

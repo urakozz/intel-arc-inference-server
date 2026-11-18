@@ -396,7 +396,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
         engine, tokenizer.vocab_used(), engine.vocab(), a.mtp_k, a.spec_lookup);
     cq::chat_options(options, eos);
     const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
-    // After every pinned allocation (the prefix cache's too): the first request's prefill reads at the bus rate.
+    // After every pinned allocation (the prefix cache's too): the first request does not pay the mirrors' first reads.
     std::print(stderr, "experts: the host-memory experts read once on both cards in {:.0f} ms\n",
                engine.read_host_experts());
     server::Server server({tokenizer, chat_template, engine_adapter}, options);
