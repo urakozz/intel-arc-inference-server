@@ -441,3 +441,9 @@ boot; the cold links just dangle until it is back. Check both after a reboot, be
 `findmnt ~/b70/hdd ~/b70/hdd3 && tools/hf_tier.sh status`. A cold model whose disk is missing shows `broken`. A stage
 run checks its data once, at launch (`have.env`), so a run launched before the disk was back needs a fresh launch.
 Device names move between boots, so mount by UUID, never by `/dev/sdX`.
+
+The driver's minimum GPU clock on a B70 is 1200 MHz; `tools/box_setup/gpu-min-freq.service` sets each card's to its
+hardware minimum (400 MHz) at boot, so an awake but quiet card clocks down (install steps in the unit file). An idle
+card should sit in C6 (`tile0/gt0/gtidle/idle_status` = `gt-c6`, about 42 W). A GPU monitor that keeps the cards'
+forcewake held (debugfs `gt0/powergate_info`: `GT.ref_count` above 0) keeps them out of C6 at full clock, about 98 W
+each: close it when it is not needed.

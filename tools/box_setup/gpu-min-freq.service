@@ -1,0 +1,16 @@
+# Lets the xe GPUs clock down to their hardware minimum when idle (tools/box_setup/gpu-min-freq.sh).
+# Install:
+#   sudo install -m 755 tools/box_setup/gpu-min-freq.sh /usr/local/sbin/gpu-min-freq.sh
+#   sudo install -m 644 tools/box_setup/gpu-min-freq.service /etc/systemd/system/gpu-min-freq.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gpu-min-freq.service
+[Unit]
+Description=Let the xe GPUs clock down to their hardware minimum when idle
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gpu-min-freq.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
