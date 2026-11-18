@@ -129,7 +129,7 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
                             __global const uint* restrict W, __global const uint* restrict W_sh,
                             __global ushort* restrict out
 #if SH_X
-                            , __global const ushort* restrict X, __global const uint* restrict hdr
+                            , __global const ushort* restrict XC, __global const uint* restrict hdr
 #endif
                             ) {
   const uint it = get_group_id(1);
@@ -152,7 +152,7 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
 #endif
   __global const ushort* restrict Ab = A + (size_t)mb * K;
 #if SH_X
-  if (e == EXPERTS) Ab = X + (size_t)(mb - hdr[1]) * K;
+  if (e == EXPERTS) Ab = XC + (size_t)(mb - hdr[1]) * K;
 #endif
   const int a_w = K * 2, a_p = K * 2;
   // The A reads are one 32-row block each, the row offset in the BASE and the k offset in the base too (IGC 2.41
