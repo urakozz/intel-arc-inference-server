@@ -435,7 +435,7 @@ if(B70_ORNITH)
   # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.
   # FRONT_PRELOAD (research 2026-11-18): a lane's 32 partials read before the first is used, bitwise.
   add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
-                   DEFINES ${PF_ORNITH_GDN} FRONT_PRELOAD=1 FRONT_BLK2D=1)
+                   DEFINES ${PF_ORNITH_GDN} FRONT_PRELOAD=1)
   # Phase 2 Task 3: the GDN intra-chunk stages in one launch (A, T, W / U, A2), judged.
   add_ocloc_kernel(pf_gdn_intra_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_intra.cl
                    DEFINES ${PF_ORNITH_GDN})

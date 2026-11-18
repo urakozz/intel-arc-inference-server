@@ -41,16 +41,6 @@
 #ifndef FRONT_PRELOAD
 #define FRONT_PRELOAD 0
 #endif
-// FRONT_BLK2D 1 (on FRONT_PRELOAD): the FB partials a lane arrive by 2D block reads, the same words.
-#ifndef FRONT_BLK2D
-#define FRONT_BLK2D 0
-#endif
-#if FRONT_BLK2D
-#if !FRONT_PRELOAD || FB != 32
-#error "pf_gdn_front: FRONT_BLK2D builds on FRONT_PRELOAD's 32 positions"
-#endif
-#pragma OPENCL EXTENSION cl_intel_subgroups : enable
-#endif
 
 #include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
@@ -84,20 +74,8 @@ __kernel void pf_gdn_front(__global const float* restrict qkvz_partials,
   // All FB positions' partials are loaded before the first is used, so a lane has FB reads in flight instead of
   // one: the kernel moves bytes, and one read at a time per lane left it at half the card's bandwidth.
   float part[FB];
-#if FRONT_BLK2D
-  // Two 2D block reads a sub-group: its 16 channels (lane = channel) x 16 positions each (rows past c_count read 0
-  // and are never used) - two messages instead of FB four-byte reads a lane.
-  uint pw[FB];
-  intel_sub_group_2d_block_read_32b_16r16x1c((__global void*)qkvz_partials, QKVZ_N * 4, (int)c_count, QKVZ_N * 4,
-                                             (int2)((int)(ch - lane), (int)m0), pw);
-  intel_sub_group_2d_block_read_32b_16r16x1c((__global void*)qkvz_partials, QKVZ_N * 4, (int)c_count, QKVZ_N * 4,
-                                             (int2)((int)(ch - lane), (int)m0 + 16), pw + 16);
-#pragma unroll
-  for (uint t = 0; t < FB; ++t) part[t] = as_float(pw[t]);
-#else
 #pragma unroll
   for (uint t = 0; t < FB; ++t) part[t] = m0 + t < m1 ? qkvz_partials[(size_t)(m0 + t) * QKVZ_N + ch] : 0.0f;
-#endif
 #pragma unroll
   for (uint t = 0; t < FB; ++t) {
     const uint m = m0 + t;
