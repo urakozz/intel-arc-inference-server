@@ -74,8 +74,16 @@
 #ifndef INTRA_DBG
 #define INTRA_DBG 0
 #endif
+#ifndef INTRA_STOP
+#define INTRA_STOP 0
+#endif
 
 #include "bf16.h"
+#if GDN_CVT
+// The hardware fp32 -> bf16 convert (round to nearest even) in place of bf16.h's add-and-shift: one instruction
+// instead of four; the same bf16 word for every finite value.
+#define rne_bf16(x) intel_convert_bfloat16_as_ushort(x)
+#endif
 
 // Tile ti (0..19) of the 8 x 4 grid of 8-row x 16-column tiles with a row i >= some column j:
 // M-tile mi = rows 8mi.., N-tile nj = columns 16nj.., nj <= (8mi + 7) / 16.
@@ -165,6 +173,9 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE);
+#if INTRA_STOP == 1   /* DIAGNOSTIC (probe only): the stages up to here alone */
+  return;
+#endif
 #if INTRA_DBG
   {
     __global float* restrict Ad = Adbg + ((size_t)(t * HEADS + h) * CT) * CT;
@@ -194,6 +205,9 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
     for (uint r = 0; r < TB; ++r) Ts[(b0 + r) * CT + b0 + c] = tc[r];
   }
   barrier(CLK_LOCAL_MEM_FENCE);
+#if INTRA_STOP == 2   /* DIAGNOSTIC (probe only): the stages up to here alone */
+  return;
+#endif
   // (b) the off-diagonal blocks by their distance d from the diagonal. Lane (r, c) = (sg, lane)
   //     of each block; X = SUM_{16j <= l < 16i} A[R][l] T[l][C] is parked in As's strictly-upper
   //     block (j, i), which nothing else reads, then T_ij = -(T_ii X).
@@ -218,6 +232,9 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
     }
     barrier(CLK_LOCAL_MEM_FENCE);
   }
+#if INTRA_STOP == 3   /* DIAGNOSTIC (probe only): the stages up to here alone */
+  return;
+#endif
 #if INTRA_DBG
   {
     __global float* restrict Td = Tdbg + ((size_t)(t * HEADS + h) * CT) * CT;
@@ -243,6 +260,9 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
     Tl[(p / CT) * TLD + p % CT] = rne_bf16(tv[q] - bf16f(hv));
   }
   barrier(CLK_LOCAL_MEM_FENCE);
+#if INTRA_STOP == 4   /* DIAGNOSTIC (probe only): the stages up to here alone */
+  return;
+#endif
 
   // ---- 4. u^T = vb^T T^T and w^T = kb^T T^T by DPAS (M = 8 channels, K = 16 positions j,
   //         N = 16 positions i); sub-group sg owns channels 8sg..8sg+7 of both ----------------

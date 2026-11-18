@@ -1354,6 +1354,32 @@ if(B70_ORNITH)
                    kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32)
 endif()
 
+# --- probe_gdn_arms: Ornith's GDN scan / intra against candidate builds of the same entries, real inputs, bitwise ---
+if(B70_ORNITH)
+  set(_pga_gdn GDN_K_HEADS=16 GDN_V_HEADS=32)
+  add_ocloc_kernel(pf_gdn_scan_pf1_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
+                   DEFINES ${_pga_gdn} SCAN_PF=1)
+  add_ocloc_kernel(pf_gdn_scan_pf2_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
+                   DEFINES ${_pga_gdn} SCAN_PF=2)
+  add_ocloc_kernel(pf_gdn_scan_cvt_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
+                   DEFINES ${_pga_gdn} GDN_CVT=1)
+  add_ocloc_kernel(pf_gdn_intra_cvt_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
+                   DEFINES ${_pga_gdn} GDN_CVT=1)
+  # DIAGNOSTIC: pf_gdn_intra stopped after stage 1 (A, A2) / 2 (T's diagonal blocks) / 3 (all of T) / 4 (T's hi / lo)
+  foreach(st 1 2 3 4)
+    add_ocloc_kernel(pf_gdn_intra_stop${st}_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
+                     DEFINES ${_pga_gdn} INTRA_STOP=${st})
+    list(APPEND _pga_diag kernel_pf_gdn_intra_stop${st}_GK16V32)
+  endforeach()
+  add_executable(probe_gdn_arms probe_gdn_arms.cc)
+  target_include_directories(probe_gdn_arms PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_gdn_arms PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  b70_target_kernel_dir(probe_gdn_arms)
+  add_dependencies(probe_gdn_arms kernel_pf_gdn_scan_pf1_GK16V32 kernel_pf_gdn_scan_pf2_GK16V32
+                   kernel_pf_gdn_scan_cvt_GK16V32 kernel_pf_gdn_intra_cvt_GK16V32 kernel_pf_gdn_intra_GK16V32
+                   kernel_pf_gdn_scan_GK16V32 ${_pga_diag})
+endif()
+
 # --- probe_route: phase 2 Task 6, pf_route.cl's tilings against pf_ab_proj (bitwise, then time); phase 3 Task 1: + the
 # dense pf_gemm arm ---------------
 if(B70_ORNITH)
