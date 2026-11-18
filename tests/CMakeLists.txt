@@ -3519,7 +3519,8 @@ if(B70_Q4EXP)
 endif()
 # Task 3: the MTP head and spec 8's lists. B70_Q4EXP_MTP_KERNELS is src/kernels/CMakeLists.txt's spec 21-QFN-v1e block (the
 # verify lists' M = 2..4 binaries, gdn_step_slots_M<1..4>_G1, q4_pf_ple_C4, q4_mtp at M = 1..4 and _PF, the fc's);
-# the lists also bind 21-QFN-v1c's decode binaries, 21-QFN-v1d's prefill binaries and Qwen3.8's argmax_stage1_M<2..4> by name.
+# the lists also bind 21-QFN-v1c's decode binaries, 21-QFN-v1d's prefill binaries and Qwen3.8's argmax_stage1_M<2..4> by name,
+# and (open-work 49) the draft steps Qwen3.8's draft_prob over the whole row.
 if(B70_Q4EXP AND B70_MTP)
   set(_q4moe_per_row "")
   set(B70_Q4EXP_MTP_KERNELS kernel_q4_pf_ple_C4 kernel_q4_mtp_M2048_SINGLE_PF kernel_q4_mtp_M2048_STREAM_PF
@@ -3555,7 +3556,7 @@ if(B70_Q4EXP AND B70_MTP)
       kernel_gemm_sm_M${MM}_K6144_N2560_S4_L0_mg kernel_gemm_sm_i8w_M${MM}_K2560_N248320_wg)
   endforeach()
   set(_q4mtp_reused ${B70_Q4EXP_DECODE_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} kernel_argmax_stage1_M2
-    kernel_argmax_stage1_M3 kernel_argmax_stage1_M4 ${_q4moe_per_row})
+    kernel_argmax_stage1_M3 kernel_argmax_stage1_M4 kernel_draft_prob_N248320_U248077 ${_q4moe_per_row})
   if(TARGET qwen4exp_snapshot_gpu_test)   # its `mtp` mode binds the head's lists
     add_dependencies(qwen4exp_snapshot_gpu_test ${B70_Q4EXP_MTP_KERNELS})
   endif()
@@ -3635,7 +3636,7 @@ if(B70_Q4EXP AND B70_MTP)
   # Plan 21-QFN-v2b Task 5 Step 0: the MTP head under --parallel tp (box only; our RTN export, 18 layers): the plain run's
   # greedy ids, then the head's plain steps, spec 8's loop at K 1..3 and a restored snapshot against them.
   if(B70_TP AND TARGET qwen4exp_tp_prefill_test)
-    set(B70_Q4EXP_TP_MTP_KERNELS "")
+    set(B70_Q4EXP_TP_MTP_KERNELS kernel_draft_prob_N124160_U124160 kernel_draft_prob_N124160_U123917)   # open-work 49
     foreach(MM 1 2 3 4)
       list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gdn_step_slots_M${MM}_GK8V24_G1)
       if(NOT MM EQUAL 1)
