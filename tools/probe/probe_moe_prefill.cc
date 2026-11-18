@@ -116,7 +116,8 @@ const Arm kArms[] = {
     {1, 4, 2, 1, 8, 2, 0, 17}, {1, 4, 2, 1, 8, 9, 0, 17}, {1, 4, 2, 1, 8, 2, 0, 21},
 };
 // E1 arms a-c (research 2026-11-18): the production pf_moe_q4gemm.cl built with its register-plan defines
-// (tools/probe/CMakeLists.txt PMQ_ARMS), beside the production binaries themselves ("q4.prod", the gate's control).
+// (tools/probe/CMakeLists.txt PMQ_ARMS), beside the production binaries themselves ("q4.prod", the gate's control;
+// production took arm c's defines after the 2026-11-18 run, so q4.prod and q4.c are now the same build).
 const char* const kQ4Arms[] = {"a", "b", "c"};
 const char* const kChosen = "F1.a8b2m1n8.c2x0o1";
 
