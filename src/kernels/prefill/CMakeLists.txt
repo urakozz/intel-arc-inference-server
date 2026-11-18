@@ -411,10 +411,12 @@ if(B70_ORNITH)
                    DEFINES NEGA_OFF=32768 DTBIAS_OFF=32800 ${PF_ORNITH_GDN})
   add_ocloc_kernel(pf_gdn_wy_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_wy.cl
                    DEFINES ${PF_ORNITH_GDN})
+  # GDN prompt pass (research 2026-11-18, probe_gdn_arms): the scan writes o as the bf16 word the gated head rounds it
+  # to (SCAN_OBF16), and the head runs one sub-group a (position, head) reading it (HEAD_SG, HEAD_OBF16) - bitwise.
   add_ocloc_kernel(pf_gdn_scan_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl
-                   DEFINES ${PF_ORNITH_GDN})
+                   DEFINES ${PF_ORNITH_GDN} SCAN_OBF16=1)
   add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
-                   DEFINES ${PF_ORNITH_GDN})
+                   DEFINES ${PF_ORNITH_GDN} HEAD_SG=1 HEAD_OBF16=1)
   # Phase 2 Task 5: the residual fold + RMSNorm in one launch, bitwise the pair above.
   foreach(SP 0 1)
     add_ocloc_kernel(pf_res_norm_K2048_SP${SP}_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
@@ -431,8 +433,9 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_gdn_conv_GK16V32_AB256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
                    DEFINES NEGA_OFF=32768 DTBIAS_OFF=32800 ${PF_ORNITH_GDN} AB_STRIDE=256)
   # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.
+  # FRONT_PRELOAD (research 2026-11-18): a lane's 32 partials read before the first is used, bitwise.
   add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
-                   DEFINES ${PF_ORNITH_GDN})
+                   DEFINES ${PF_ORNITH_GDN} FRONT_PRELOAD=1)
   # Phase 2 Task 3: the GDN intra-chunk stages in one launch (A, T, W / U, A2), judged.
   add_ocloc_kernel(pf_gdn_intra_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_intra.cl
                    DEFINES ${PF_ORNITH_GDN})

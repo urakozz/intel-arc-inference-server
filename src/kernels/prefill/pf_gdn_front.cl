@@ -38,6 +38,10 @@
 #error "pf_gdn_front: a work-group must be all q / k or all v channels"
 #endif
 
+#ifndef FRONT_PRELOAD
+#define FRONT_PRELOAD 0
+#endif
+
 #include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 
@@ -66,8 +70,21 @@ __kernel void pf_gdn_front(__global const float* restrict qkvz_partials,
                    : bf16f(rne_bf16(qkvz_partials[(size_t)p * QKVZ_N + ch]));
   }
   float win0 = win[0], win1 = win[1], win2 = win[2];
+#if FRONT_PRELOAD
+  // All FB positions' partials are loaded before the first is used, so a lane has FB reads in flight instead of
+  // one: the kernel moves bytes, and one read at a time per lane left it at half the card's bandwidth.
+  float part[FB];
+#pragma unroll
+  for (uint t = 0; t < FB; ++t) part[t] = m0 + t < m1 ? qkvz_partials[(size_t)(m0 + t) * QKVZ_N + ch] : 0.0f;
+#pragma unroll
+  for (uint t = 0; t < FB; ++t) {
+    const uint m = m0 + t;
+    if (m >= m1) break;
+    const ushort raw_b = rne_bf16(part[t]);                                // P1
+#else
   for (uint m = m0; m < m1; ++m) {
     const ushort raw_b = rne_bf16(qkvz_partials[(size_t)m * QKVZ_N + ch]);   // P1
+#endif
     const float win3 = bf16f(raw_b);
     float acc = 0.0f;                                                       // P2
     acc = fma(w0, win0, acc);

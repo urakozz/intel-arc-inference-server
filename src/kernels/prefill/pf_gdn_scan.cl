@@ -184,6 +184,30 @@
 
 #include "bf16.h"
 
+#if GDN_CVT
+// The hardware fp32 -> bf16 convert (round to nearest even) in place of bf16.h's add-and-shift: one instruction
+// instead of four; the same bf16 word for every finite value.
+#define rne_bf16(x) intel_convert_bfloat16_as_ushort(x)
+#endif
+#ifndef SCAN_PF
+#define SCAN_PF 0
+#endif
+#ifndef SCAN_OBF16
+#define SCAN_OBF16 0
+#endif
+#ifndef SCAN_DIAG
+#define SCAN_DIAG 0
+#endif
+#if SCAN_PF
+enum LSC_LDCC { LSC_LDCC_DEFAULT, LSC_LDCC_L1UC_L3UC, LSC_LDCC_L1UC_L3C, LSC_LDCC_L1C_L3UC, LSC_LDCC_L1C_L3C };
+void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, enum LSC_LDCC c);
+#if SCAN_PF == 1
+#define SCAN_PF_CC LSC_LDCC_L1C_L3C
+#else
+#define SCAN_PF_CC LSC_LDCC_L1UC_L3C
+#endif
+#endif
+
 // ---------------------------------------------------------------------------
 // (3) `pf_gdn_scan_dpas_split` - D3's opt-in split-BF16 probe.
 //
@@ -274,6 +298,32 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
   for (uint t = 0; t < nch; ++t) {
     const uint base_m = t * CT, L = min((uint)CT, c_count - base_m), ilast = L - 1;
     const uint posc = min(pos_l, ilast);
+#if SCAN_PF
+    // The next sub-chunk's global operands are fetched into the cache while this one runs: the walk is a chain
+    // of sub-chunks whose loads otherwise each wait the full memory latency. No value read changes.
+    if (t + 1 < nch) {
+      const uint nb = base_m + CT, nl = min((uint)CT, c_count - nb), np = min(pos_l, nl - 1);
+      __global const uint* wq = (__global const uint*)(w + ((size_t)(nb + np) * HEADS + h) * DIM);
+      __global const uint* qq = (__global const uint*)(xb + (size_t)(nb + np) * CONV_ROWS + Q_OFF + kh * DIM);
+#pragma unroll
+      for (uint o = 0; o < DIM / 2; o += 16) {
+        __builtin_IB_lsc_prefetch_global_uint(wq + o, 0, SCAN_PF_CC);
+        __builtin_IB_lsc_prefetch_global_uint(qq + o, 0, SCAN_PF_CC);
+      }
+      __builtin_IB_lsc_prefetch_global_uint((__global const uint*)(
+          u + ((size_t)(nb + np) * HEADS + h) * DIM + c * CHUNK_V + col0), 0, SCAN_PF_CC);
+#pragma unroll
+      for (uint kb = 0; kb < PBLKS; ++kb)
+        __builtin_IB_lsc_prefetch_global_uint((__global const uint*)(
+            xb + K_OFF + kh * DIM + sg * DM + (size_t)(nb + min(kb * DK + lane, nl - 1)) * CONV_ROWS), 0, SCAN_PF_CC);
+      __global const uint* a2n = A2hl + (size_t)((t + 1) * HEADS + h) * A2HL_WORDS +
+                                 (size_t)((nt * (nt + 1)) >> 1) * (SG * DM) + lane * DM;
+      for (uint kb = 0; kb <= nt; ++kb) {
+        __builtin_IB_lsc_prefetch_global_uint(a2n + kb * (SG * DM), 0, SCAN_PF_CC);
+        __builtin_IB_lsc_prefetch_global_uint(a2n + A2HL_LO + kb * (SG * DM), 0, SCAN_PF_CC);
+      }
+    }
+#endif
 
     // S is split only at the DPAS boundary.  S0/S1 remain the fp32 master.
     {
@@ -301,6 +351,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
       float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
       __global const uint* restrict wp =
           (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);
+#if !(SCAN_DIAG & 4)   /* bit 4 drops w.S */
       for (uint kb = 0; kb < KBLKS; ++kb) {
         const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
         hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
@@ -308,6 +359,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
         lo = intel_sub_group_bf16_bf16_matrix_mad_k16(
             as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);
       }
+#endif
       const uint4 uw = vload4(0, (__global const uint*)(
           u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + col0));
       ushort ua[DM], vb[DM];
@@ -332,6 +384,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
+#if !(SCAN_DIAG & 1)   /* DIAGNOSTIC (probe only): bit 1 drops the o stage */
     // 2. Q.S is a split pair, and so is A2 - the operand the 2026-09-23 2x2
     //    above found responsible for the whole gate failure. `vn` stays single
     //    BF16 because moving it to fp32 changed no printed cosine at all.
@@ -361,11 +414,26 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
         olo = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bl, olo);
       }
       o += olo;
+#if SCAN_OBF16
+      // o leaves as the bf16 word pf_gated_head's first step rounds it to (o_b), half the bytes each way.
+      if (pos_l < L) {
+        float of[DM];
+        ushort ob[DM];
+        vstore8(o, 0, of);
+#pragma unroll
+        for (uint m = 0; m < DM; ++m) ob[m] = rne_bf16(of[m]);
+        vstore8(vload8(0, ob), 0, (__global ushort*)gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
+                                      c * CHUNK_V + col0);
+      }
+#else
       if (pos_l < L)
         vstore8(o, 0, gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
                             c * CHUNK_V + col0);
+#endif
     }
 
+#endif
+#if !(SCAN_DIAG & 2)   /* bit 2 drops the state update */
     // 3. The high chain begins with decayed fp32 master state; the low chain
     // begins at zero.  Combine exactly once after all position blocks.
     {
@@ -390,6 +458,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
       S0 += lo0;
       S1 += lo1;
     }
+#endif
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   {

@@ -112,3 +112,57 @@ __kernel void pf_gated_head(__global const float* restrict qkvz_partials,
   x_out[(size_t)m * GATED_OUT_N + h * HEAD_DIM + i] =
       rne_bf16(bf16f(t_b) * GATED_ACT(bf16f(z_b)));
 }
+
+#if HEAD_SG
+// pf_gated_head_sg: the same per-(position, head) arithmetic with one sub-group a (position, head) instead of a
+// 128-lane work-group: lane l holds channels l + 16 u (u 0..7), and the variance tree takes pf_gated_head's pairs
+// in the same order - strides 64, 32, 16 in registers, 8 .. 1 by shuffles (pf_gdn_front.cl's l2norm form) - so
+// no barrier is left. Grid (heads / HEAD_SG_N, M), work-group HEAD_SG_N sub-groups.
+#pragma OPENCL FP_CONTRACT OFF
+#define HEAD_SG_N 8
+#if GATED_HEADS % HEAD_SG_N != 0
+#error "pf_gated_head_sg: whole work-groups of heads"
+#endif
+__attribute__((reqd_work_group_size(16 * HEAD_SG_N, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void pf_gated_head_sg(__global const float* restrict qkvz_partials,
+                               __global const float* restrict gdn_o,
+                               __global const ushort* restrict gated_w,
+                               __global ushort* restrict x_out, uint m_count) {
+  const uint h = get_group_id(0) * HEAD_SG_N + get_sub_group_id();
+  const uint m = get_group_id(1);
+  const uint l = get_sub_group_local_id();
+  const size_t ob = ((size_t)m * GATED_HEADS + h) * HEAD_DIM + l;
+  const size_t zb = (size_t)m * QKVZ_N + Z_OFF + h * HEAD_DIM + l;
+  float of[8], sq[8], zf[8];
+#pragma unroll
+  for (uint u = 0; u < 8; ++u) {
+#if HEAD_OBF16
+    of[u] = bf16f(((__global const ushort*)gdn_o)[ob + 16 * u]);   // the scan wrote o_b itself
+#else
+    of[u] = bf16f(rne_bf16(gdn_o[ob + 16 * u]));
+#endif
+    float za = 0.f;
+    za += qkvz_partials[zb + 16 * u];
+    zf[u] = bf16f(rne_bf16(za));
+    sq[u] = of[u] * of[u];
+  }
+  float a[4];
+#pragma unroll
+  for (uint u = 0; u < 4; ++u) a[u] = sq[u] + sq[u + 4];   // stride 64
+  const float b0 = a[0] + a[2], b1 = a[1] + a[3];          // stride 32
+  float d = b0 + b1;                                       // stride 16
+  d = d + intel_sub_group_shuffle(d, (l + 8) & 15);        // 8
+  d = d + intel_sub_group_shuffle(d, (l + 4) & 15);        // 4
+  d = d + intel_sub_group_shuffle(d, (l + 2) & 15);        // 2
+  d = d + intel_sub_group_shuffle(d, (l + 1) & 15);        // 1
+  const float var = sub_group_broadcast(d, 0) / (float)HEAD_DIM;
+  const float rstd = 1.0f / sqrt(var + 1e-6f);
+#pragma unroll
+  for (uint u = 0; u < 8; ++u) {
+    const ushort n_b = rne_bf16(of[u] * rstd);
+    const ushort t_b = rne_bf16(bf16f(gated_w[l + 16 * u]) * bf16f(n_b));
+    x_out[(size_t)m * GATED_OUT_N + h * HEAD_DIM + l + 16 * u] = rne_bf16(bf16f(t_b) * GATED_ACT(zf[u]));
+  }
+}
+#endif
