@@ -475,10 +475,13 @@ if(B70_ORNITH)
                    DEFINES EXPERTS=256 TOP_K=8 TM=32 TB=64 MI=64)
   # Plan 2026-11-12 Task 3: the grouped GEMMs read straight from the int4 blocks (kernels::pf_moe::kQ4WgN columns a
   # work-group, kItemM rows a work item - the sort's MI).
+  # E1 (research 2026-11-18): the spill-free register plan - no register double buffer, the weights 2 groups and A one
+  # step ahead prefetched into L1, A read per k16 half; probe_moe_prefill q4.c, 0.746x / 0.745x at C 4096 / 2048, bitwise.
+  set(PF_MOE_Q4_E1 NODB=1 PF_W=2 PF_A=1 AK16=1)
   add_ocloc_kernel(pf_moe_q4gemm_K2048_N1024_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
-                   DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+                   DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 ${PF_MOE_Q4_E1} OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_q4gemm_K512_N2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
-                   DEFINES K=512 N=2048 EXPERTS=256 OPTIONS -cl-intel-256-GRF-per-thread)
+                   DEFINES K=512 N=2048 EXPERTS=256 ${PF_MOE_Q4_E1} OPTIONS -cl-intel-256-GRF-per-thread)
   # Plan 2026-11-12 Task 5: l0-int8's W4A8 gate||up (per-token-and-group int8 rows x the s4 blocks).
   add_ocloc_kernel(pf_moe_w4a8_K2048_N1024 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_w4a8.cl
                    DEFINES K=2048 N=1024 EXPERTS=256 OPTIONS -cl-intel-256-GRF-per-thread)
