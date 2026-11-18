@@ -483,6 +483,9 @@ if(B70_ORNITH)
   set(PF_MOE_Q4_E1 NODB=1 PF_W=2 PF_A=1 AK16=1)
   add_ocloc_kernel(pf_moe_q4gemm_K2048_N1024_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
                    DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 ${PF_MOE_Q4_E1} OPTIONS -cl-intel-256-GRF-per-thread)
+  # The production gate||up: the shared expert's rows read from x itself (SH_X), the gather skipping them.
+  add_ocloc_kernel(pf_moe_q4gemm_K2048_N1024_SILU_SHX SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
+                   DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 SH_X=1 ${PF_MOE_Q4_E1} OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_q4gemm_K512_N2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
                    DEFINES K=512 N=2048 EXPERTS=256 ${PF_MOE_Q4_E1} OPTIONS -cl-intel-256-GRF-per-thread)
   # Plan 2026-11-12 Task 5: l0-int8's W4A8 gate||up (per-token-and-group int8 rows x the s4 blocks).

@@ -103,6 +103,19 @@ __kernel void pf_moe_gather(__global const uint4* restrict x, __global const uin
   for (uint i = get_local_id(0); i < W; i += WG_GATHER) xg[(size_t)r * W + i] = x[(size_t)t * W + i];
 }
 
+// pf_moe_gather_routed - pf_moe_gather over the routed experts' rows only (r < hdr[H_SHARED_ROW]): l0's shared
+// expert reads its rows from x itself (pf_moe_q4gemm.cl's SH_X binary).
+__attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
+__kernel void pf_moe_gather_routed(__global const uint4* restrict x, __global const uint* restrict hdr,
+                                   __global const uint* restrict row_tok, __global uint4* restrict xg) {
+  const uint r = get_group_id(0);
+  if (r >= hdr[H_SHARED_ROW]) return;
+  const uint t = row_tok[r];
+  if (t == NONE) return;
+  const uint W = HIDDEN * 2 / 16;
+  for (uint i = get_local_id(0); i < W; i += WG_GATHER) xg[(size_t)r * W + i] = x[(size_t)t * W + i];
+}
+
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
 __kernel void pf_moe_gather_i8(__global const uint4* restrict xq, __global const float* restrict xs,
                                __global const uint* restrict hdr,
