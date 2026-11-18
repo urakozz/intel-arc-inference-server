@@ -100,27 +100,6 @@ uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-Aut
 uvx --from huggingface_hub hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 ```
 
-`b70-serve` keeps its big host-memory buffers (the prefix cache, and for Qwen3.8-Flash-Next the PLE table and the
-experts read from host memory, about 104 GB) locked against swap when the process's memlock limit covers them.
-Ubuntu's default limit, 8 MB, does not: the server then runs as before, but under memory pressure the kernel can move
-those buffers to swap, and the next request waits while they come back from disk (a minute or more). To lock them,
-raise the limit for the user that runs the server and log in again:
-
-```sh
-echo "$USER - memlock unlimited" | sudo tee /etc/security/limits.d/90-b70-memlock.conf   # ssh and console logins
-# a desktop terminal descends from systemd --user, which ignores limits.d: DefaultLimitMEMLOCK=infinity under
-# [Manager] in /etc/systemd/system.conf and /etc/systemd/user.conf (or drop-ins in their .conf.d/), then reboot
-for f in system user; do
-  sudo mkdir -p /etc/systemd/$f.conf.d
-  printf '[Manager]\nDefaultLimitMEMLOCK=infinity\n' | sudo tee /etc/systemd/$f.conf.d/90-b70-memlock.conf
-done
-# b70-serve as a systemd service: LimitMEMLOCK=infinity in its [Service] section
-ulimit -l   # after logging in again (desktop: after the reboot): unlimited
-```
-
-The startup log then says `host memory: <N> GB locked against swap`; with a limit that is too low it says how many
-GB can be swapped out instead.
-
 [The model](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ) is Qwen3.8-27B compressed to 4-bit
 weights with AutoRound, in groups of 64 rather than the usual 128 - better accuracy for about 2 % of prefill speed.
 

@@ -46,8 +46,8 @@ Q4PleTable load_q4_ple(l0::Context& ctx, const model::Qwen4ExpDesc& d, const std
   //    an allocation that aliased another's pages shows the later range's tag (spec 22 P0.5's check).
   const uint32_t H = h.heads();
   for (uint32_t i = 0; i < H; ++i) {
-    t.q.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::HostLocked, h.q_bytes(i), kQ4PlePage));
-    t.s.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::HostLocked, h.s_bytes(i), kQ4PlePage));
+    t.q.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, h.q_bytes(i), kQ4PlePage));
+    t.s.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, h.s_bytes(i), kQ4PlePage));
   }
   const auto range = [&](uint32_t r) -> l0::Mem& { return r < H ? *t.q[r] : *t.s[r - H]; };
   for (uint32_t r = 0; r < 2 * H; ++r) {

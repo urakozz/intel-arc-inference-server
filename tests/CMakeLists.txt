@@ -33,16 +33,6 @@ b70_target_kernel_dir(event_test)
 add_dependencies(event_test kernel_noop)
 add_test(NAME event_test COMMAND event_test)
 
-# l0::MemKind::HostLocked (host memory locked against swap): mlock on a driver allocation locks nothing, a HostLocked
-# allocation under a covering limit is locked and read by a copy and an indirect kernel read on every card, and under a
-# limit that does not cover it is plain Host memory. Two cards when visible (tools/gpu_lock.sh box).
-add_executable(host_lock_test l0/host_lock_test.cc)
-target_include_directories(host_lock_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(host_lock_test PRIVATE b70_l0)
-b70_target_kernel_dir(host_lock_test)
-add_dependencies(host_lock_test kernel_host_read)
-add_test(NAME host_lock_test COMMAND host_lock_test)
-
 # The prefill execution context (spec 2.1 §3.5): the Level Zero list, through
 # b70_prefill_host.
 add_executable(context_test prefill/context_test.cc)

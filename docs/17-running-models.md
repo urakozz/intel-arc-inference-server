@@ -375,21 +375,8 @@ code, 58-65 on documentation prose and 89-99 on tool calls; under `pp` 73-81, 54
 its first token in 0.38 s (pp) / 0.50 s (tp). `--max-len auto` gives 65,536; passkey retrieval is 3 of 3 at 61,955 ids, and a prefix cache hit's
 output is identical to the cold run. Loading takes about 10 minutes and pins 63.2 GB of host memory; with the prefix
 cache the server holds about 104 GB, so the model needs at least 128 GB of system RAM. Run nothing else memory-hungry
-beside it.
-
-That host memory - the PLE table, the experts' host ranges and the prefix cache - is locked against swap when the
-memlock limit (`ulimit -l`, RLIMIT_MEMLOCK) covers it: each range is the process's own memory, `mlock`ed, and mapped
-for both cards through Level Zero's external system memory import. The check runs once before the load for the PLE
-table, the experts and an explicit `--prefix-cache-gb`, and again for the prefix cache when it is allocated after the
-load. The startup log says `host memory: <N> GB locked against swap`. With a limit that does not cover it (Ubuntu's
-default is 8 MB) the ranges are the driver's host allocations, as before, and the log says how many GB can be swapped
-out: when RAM runs short, the kernel's GPU-memory shrinker writes them to swap, and the next request waits while they
-come back from disk (77 s for one first token, measured). `mlock` on the driver's allocations would not help: the
-driver maps them as device memory, which `mlock` skips. To raise the limit, see [Install](../README.md#install):
-`<user> - memlock unlimited` in a file under `/etc/security/limits.d/` for ssh and console logins; a desktop
-terminal descends from `systemd --user`, which ignores that file, so it also needs `DefaultLimitMEMLOCK=infinity`
-under `[Manager]` in `/etc/systemd/system.conf` and `/etc/systemd/user.conf` and a reboot; a systemd unit takes
-`LimitMEMLOCK=infinity`. Then check that `ulimit -l` says `unlimited` in a new session.
+beside it: when RAM runs short the kernel can move the server's host memory to swap, and the experts read from it
+then come back from disk.
 
 The whole model does not fit two B70s: its routed experts alone are 64.17 GB at int4 g64. So without `--layers`, each
 card keeps the most-routed experts its VRAM has room for after the rest of the plan (the same count in every layer),
@@ -480,7 +467,6 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
 - One request at a time, in every mode: `--max-num-seqs` above 1 is refused at startup; further requests wait their
   turn.
 - At least 128 GB of system RAM: the host-memory experts, the n-gram table and the prefix cache take about 104 GB.
-  They are locked against swap only under an unlimited (or large enough) memlock limit (Speed and memory, above).
 - MTP in `b70-serve` only: `b70-decode --spec mtp` and `--draft-vocab` are refused.
 - The expert placement is static; experts are not swapped while serving.
 - bf16 KV cache only (`--kv-cache int8` is refused). `reasoning_effort` is not forwarded to the template, as for
