@@ -6,8 +6,8 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 - **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
 - **Prompts read at 2,083 t/s on one card, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
 - **Ornith 1.5 35B-A3B:** prompts read at **9,362 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
-- **Qwen3.8-Flash-Next:** the whole model on two cards, the experts that do not fit read from host memory - **80 t/s**
-  writing code, **82-91 t/s** on tool calls, a 32k-token prompt read at **3,103 t/s**, 65,536 tokens of context.
+- **Qwen3.8-Flash-Next:** the whole model on two cards, the experts that do not fit read from host memory - **82-92 t/s**
+  writing code, **89-99 t/s** on tool calls, a 32k-token prompt read at **3,103 t/s**, 65,536 tokens of context.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 
 One choice to make - how many requests run at once. The engine sizes everything else.
@@ -76,8 +76,11 @@ Generation, t/s:
 |---|---:|---:|---:|
 | plain, two cards `pp` | 58 | 49 | 49-60 |
 | plain, two cards `tp` | 63 | 51 | 55-62 |
-| MTP, two cards `pp` | 67 | 46 | 72-96 |
-| MTP, two cards `tp` | **80** | **54** | **82-91** |
+| MTP, two cards `pp` | 81 | 56 | 80-105 |
+| MTP, two cards `tp` | **82-92** | **60-65** | **89-99** |
+
+Flash-Next needs at least 128 GB of system RAM: the experts that do not fit VRAM, its n-gram table and the prefix
+cache take about 104 GB of it. Run nothing else memory-hungry beside the server.
 
 How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 

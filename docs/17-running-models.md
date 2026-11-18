@@ -248,7 +248,7 @@ decoding) runs on `main` on demand.
 |---|---|---|---|---|
 | checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | ours (int4 g64, not published) or Intel's interim W4A16 |
 | `b70-serve` | yes | yes | yes, two cards by default | the whole model on two cards (`--parallel auto` = pp), experts partly in pinned host memory |
-| `--parallel tp` | yes | refused | refused | yes, when asked: served decode with MTP 1.01-1.23x pp's on text; prefill 0.69-0.81x pp's (32k / 128k-token prompt) |
+| `--parallel tp` | yes | refused | refused | yes, when asked: served decode with MTP 0.99-1.35x pp's on text; prefill 0.69-0.81x pp's (32k / 128k-token prompt) |
 | `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request per card); more is refused | refused | refused |
 | `--parallel pp` (two cards) | yes | yes | its default (its own engine) | its default for the whole model (`--parallel auto`) |
 | `b70-decode` | yes | yes | decode and prefill, two cards by default | decode and prefill, the whole model or `--layers N` |
@@ -368,13 +368,15 @@ The stop ids come from the snapshot's `generation_config.json` (`<|im_end|>` and
 
 ### Speed and memory
 
-On our export, served with MTP (the default, `--spec auto`), at about 1-4k context: under `--parallel tp` 71-81 t/s on
-code, 54 on documentation prose and 82-91 on tool calls; under `pp` 63-67, 46 and 72-96 (the same prompts with
-`--spec off`: tp 57-63, 51, 55-62; pp 51-58, 49, 49-60). On prose an `--spec auto` server can sit slightly below an
-`--spec off` one, because the MTP head's memory leaves fewer experts resident. Prefill, for a 32k-token prompt, runs at
+On our export, served with MTP (the default, `--spec auto`), at about 1-4k context: under `--parallel tp` 76-92 t/s on
+code, 58-65 on documentation prose and 89-99 on tool calls; under `pp` 73-81, 54-56 and 80-105 (the same prompts with
+`--spec off`: tp 57-63, 51, 55-62; pp 51-58, 49, 49-60). Prefill, for a 32k-token prompt, runs at
 3,103 t/s under pp and 2,128 under tp, and for a 128k-token prompt at 2,458 and 1,988; a short prompt (43 tokens) gets
 its first token in 0.38 s (pp) / 0.50 s (tp). `--max-len auto` gives 65,536; passkey retrieval is 3 of 3 at 61,955 ids, and a prefix cache hit's
-output is identical to the cold run. Loading takes about 10 minutes and pins 63.2 GB of host memory.
+output is identical to the cold run. Loading takes about 10 minutes and pins 63.2 GB of host memory; with the prefix
+cache the server holds about 104 GB, so the model needs at least 128 GB of system RAM. Run nothing else memory-hungry
+beside it: when RAM runs short the kernel can move the server's host memory to swap, and the experts read from it
+then come back from disk.
 
 The whole model does not fit two B70s: its routed experts alone are 64.17 GB at int4 g64. So without `--layers`, each
 card keeps the most-routed experts its VRAM has room for after the rest of the plan (the same count in every layer),
@@ -413,17 +415,18 @@ rows in one list (790-795 launches at 48 layers, 86-91 at `--layers 4`, derived)
 `pre_fc_norm_hidden` as one RMSNorm over the 4 streams (`B70_Q4_MTP_NORM=per_stream` selects the other form), and draft
 steps after the first reuse step 0's sparse-attention selection. Its bf16 experts are quantised to int4 g64 at load.
 On two cards it runs on the second and reads the first card's embedding over peer access. Each request picks its
-number of drafts, 0 to 3, from its own acceptance over the model's cost table. A verify row here reads its own 10
-experts per layer, some from host memory, so an iteration of K = 3 costs 2.0-2.8 plain steps on real text (measured).
-Code and tool calls run K = 3 (acceptance 0.88-1.00); a request accepted below about 0.7 (prose) runs plain steps with
-a K = 1 probe every 4. `B70_MTP_ADAPTIVE=0` keeps K at `--spec-max`, for A/B runs.
+drafts one at a time: every draft step ends with the head's probability for its token, and a greedy request keeps
+drafting, up to 3, only while that probability makes the next draft pay over the model's cost table (under tp each
+card's half of the vocabulary is summed on the host). In a verify of several rows each distinct expert is read once and
+applied to every row that chose it. Sampled requests pick their number of drafts, 0 to 3, from their own acceptance.
+`B70_MTP_ADAPTIVE=0` keeps K at `--spec-max`, for A/B runs.
 
 Two cards split the model one of two ways. `--parallel pp` (what `--parallel auto` picks for the whole model on two
 cards; one card when only one is visible) gives each card half of the layers: 24 each, the MTP head and the lm_head on
 the second. `--parallel tp` gives each card half of every layer: half the attention and gated delta-net heads, half of
 every expert (each card keeps its own experts' halves resident and reads the rest from host memory), half the
 lm_head's vocabulary, with the MTP head whole on the second card. The two halves are summed after each mixer and each
-MoE block by peer writes. Served decode with MTP is faster under tp (1.01-1.23x pp's on text, 82-91 against 72-96 t/s on five tool calls)
+MoE block by peer writes. Served decode with MTP is as fast or faster under tp (0.99-1.35x pp's on text, 89-99 against 80-105 t/s on five tool calls)
 and prefill is slower: 0.69x pp's for a 32k-token prompt and 0.81x for 128k (2,128 against 3,103 and 1,988 against
 2,458 t/s), because both cards still run their own hyper-connections and part of the indexer's block scoring (the
 scoring itself is split across the cards). tp needs `--lm-head int8` in `b70-decode` (`b70-serve` always uses
@@ -463,6 +466,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
   resident.
 - One request at a time, in every mode: `--max-num-seqs` above 1 is refused at startup; further requests wait their
   turn.
+- At least 128 GB of system RAM: the host-memory experts, the n-gram table and the prefix cache take about 104 GB.
 - MTP in `b70-serve` only: `b70-decode --spec mtp` and `--draft-vocab` are refused.
 - The expert placement is static; experts are not swapped while serving.
 - bf16 KV cache only (`--kv-cache int8` is refused). `reasoning_effort` is not forwarded to the template, as for
