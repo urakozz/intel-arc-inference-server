@@ -12,11 +12,10 @@
 // expert's tiles - gate||up cnt[e] once a work-group (the shared expert at cnt[MOE_E]), down cnt[MOE_E + 1 + e] once a
 // (work-group, K slice); tests/kernels/qwen4exp_moe_union_test.cc proves each chosen expert is read once a verify.)
 //
-// **The union schedule** (every work-group derives it alone, in SLM, from the M route rows - no host step, no extra
-// launch): the M x 10 (row, slot) pairs, pair p = row x 10 + slot, their ids clamped as q4_moe.cl does; a pair's owner
-// is the first pair with its id; the distinct experts are ranked in the order of their first pairs; the pairs sorted
-// by (rank, p) - so each expert's pairs are in row order. Set 0 is the shared expert (all M rows), set s >= 1 the
-// expert of rank s - 1.
+// **The union schedule** (every sub-group derives it alone, in registers, from the M route rows - no host step, no
+// extra launch, no SLM): the M x 10 (row, slot) pairs, pair p = row x 10 + slot, their ids clamped as q4_moe.cl does;
+// a pair's owner is the first pair with its id; the distinct experts are ranked in the order of their first pairs; an
+// expert's pairs are taken in row order. Set 0 is the shared expert (all M rows), set s >= 1 the expert of rank s - 1.
 //   gate||up  work-group (set, blk): set = group y x 11 + group x / (NT_UP / 4) (11 M sets >= 10 M + 1), the sets past
 //             the union exit at once; the 4 n-tiles of blk over all of K, each weight tile and scale loaded once a
 //             k-group and each pair's own tile_dot chain against its row; h[row][slot] as q4_moe_gate_up writes it.
@@ -182,45 +181,66 @@ inline void bf16_dot_rows(const __global ushort* restrict tile, const __global u
 #define SH_T __global const uint*
 #endif
 
-// The union schedule: ids[p], the pairs sorted by (rank, p) in pl[], expert rank d's pairs at pl[st[d] .. st[d + 1]),
-// its id in ex[d], the distinct count in *nd. Every lane sees the same values after the last barrier.
-inline void q4_union(__global const uint* restrict route, uint lid, uint wg, __local uint* ids, __local uint* own,
-                     __local uint* pl, __local uint* st, __local uint* ex, __local uint* nd) {
-  for (uint p = lid; p < NPAIR; p += wg)
-    ids[p] = min(route[(size_t)(p / MOE_K) * RW + R_IDS + p % MOE_K], (uint)(MOE_E - 1));
-  barrier(CLK_LOCAL_MEM_FENCE);
-  for (uint p = lid; p < NPAIR; p += wg) {   // the owner: the first pair with p's id
-    uint f = p;
-    for (uint q = 0; q < p; ++q)
-      if (ids[q] == ids[p]) {
-        f = q;
-        break;
-      }
-    own[p] = f;
+// The union schedule in one sub-group's registers (every sub-group derives it alone: no SLM, no barrier): pair
+// p = lane + 16 i is held in register i. q4_union_sg: each pair's id and owner (the first pair with its id), whether it
+// is a first pair and its rank among them (first-occurrence order); returns the distinct count. q4_union_set: expert of
+// rank d - its id, the flag and place of each of its pairs (row order); returns its pair count. q4_pair_at: its k-th pair.
+#define PREG ((NPAIR + SG - 1) / SG)
+inline uint q4_union_sg(__global const uint* restrict route, uint lane, __private uint* id, __private uint* own,
+                        __private uint* fl, __private uint* rk) {
+  #pragma unroll
+  for (uint i = 0; i < PREG; ++i) {
+    const uint p = lane + SG * i;
+    id[i] = p < NPAIR ? min(route[(size_t)(p / MOE_K) * RW + R_IDS + p % MOE_K], (uint)(MOE_E - 1)) : 0xFFFFFFFFu;
+    own[i] = p;
   }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  for (uint p = lid; p < NPAIR; p += wg) {
-    const uint f = own[p];
-    uint rank = 0, before = 0, mine = 0;   // rank: first pairs before the owner; then the place among the sort
-    for (uint q = 0; q < NPAIR; ++q) {
-      const uint fq = own[q];
-      rank += (q < f && fq == q) ? 1u : 0u;
-      before += fq < f ? 1u : 0u;                 // pairs of an expert ranked lower (their owner comes earlier)
-      mine += (fq == f && q < p) ? 1u : 0u;       // the expert's earlier pairs
-    }
-    pl[before + mine] = p;
-    if (p == f) {
-      st[rank] = before;
-      ex[rank] = ids[p];
+  #pragma unroll
+  for (uint q = 0; q < NPAIR; ++q) {
+    const uint idq = sub_group_broadcast(id[q / SG], q % SG);
+    #pragma unroll
+    for (uint i = 0; i < PREG; ++i) {
+      const uint p = lane + SG * i;
+      if (q < p && own[i] == p && id[i] == idq) own[i] = q;
     }
   }
-  if (lid == 0) {
-    uint n = 0;
-    for (uint q = 0; q < NPAIR; ++q) n += own[q] == q ? 1u : 0u;
-    *nd = n;
-    st[n] = NPAIR;
+  uint carry = 0;
+  #pragma unroll
+  for (uint i = 0; i < PREG; ++i) {
+    const uint p = lane + SG * i;
+    fl[i] = (p < NPAIR && own[i] == p) ? 1u : 0u;
+    rk[i] = carry + sub_group_scan_exclusive_add(fl[i]);
+    carry += sub_group_reduce_add(fl[i]);
   }
-  barrier(CLK_LOCAL_MEM_FENCE);
+  return carry;
+}
+inline uint q4_union_set(uint lane, uint d, __private const uint* id, __private const uint* own,
+                         __private const uint* fl, __private const uint* rk, uint* e, __private uint* mf,
+                         __private uint* mpos) {
+  uint f0 = 0, x = 0;
+  #pragma unroll
+  for (uint i = 0; i < PREG; ++i)
+    if (fl[i] && rk[i] == d) {
+      f0 = lane + SG * i;
+      x = id[i];
+    }
+  f0 = sub_group_reduce_max(f0);
+  *e = sub_group_reduce_max(x);
+  uint carry = 0;
+  #pragma unroll
+  for (uint i = 0; i < PREG; ++i) {
+    const uint p = lane + SG * i;
+    mf[i] = (p < NPAIR && own[i] == f0) ? 1u : 0u;
+    mpos[i] = carry + sub_group_scan_exclusive_add(mf[i]);
+    carry += sub_group_reduce_add(mf[i]);
+  }
+  return carry;
+}
+inline uint q4_pair_at(uint lane, uint k, __private const uint* mf, __private const uint* mpos) {
+  uint pk = 0;
+  #pragma unroll
+  for (uint i = 0; i < PREG; ++i)
+    if (mf[i] && mpos[i] == k) pk = lane + SG * i;
+  return sub_group_reduce_max(pk);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -230,7 +250,6 @@ __attribute__((reqd_work_group_size(WG_UP, 1, 1)))
 Q4_SG16
 __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const ushort* restrict x,
                              __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict h CNT_ARG) {
-  __local uint ids[NPAIR], own[NPAIR], pl[NPAIR], st[NPAIR + 1], ex[NPAIR], nd;
   __local float red[M][4 * UP_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -240,12 +259,12 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   const uint set = get_group_id(1) * SLOTS + get_group_id(0) / (NT_UP / 4);
   const uint blk = get_group_id(0) % (NT_UP / 4);
   const uint n_tile = blk * 4 + tile_idx;
-  q4_union(route, lid, WG_UP, ids, own, pl, st, ex, &nd);
+  uint id[PREG], own[PREG], fl[PREG], rk[PREG], mf[PREG], mpos[PREG];
+  const uint nd = q4_union_sg(route, lane, id, own, fl, rk);
   if (set > nd) return;   // uniform: fewer distinct experts than set
   const bool shared = set == 0;
-  const uint d = set - 1;
-  const uint e = shared ? 0u : ex[d];
-  const uint p0 = shared ? 0u : st[d], n_all = shared ? M : st[d + 1] - st[d];
+  uint e = 0;
+  const uint n_all = shared ? M : q4_union_set(lane, set - 1, id, own, fl, rk, &e, mf, mpos);
 #ifdef UNION_COUNT
   if (lid == 0) atomic_inc(cnt + (shared ? MOE_E : e));
 #endif
@@ -253,11 +272,13 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   const __global uint* restrict tile = Q4_EXPERT_GU(w, e) + ((size_t)n_tile * G_UP + g0) * TILE_U32;
   for (uint base = 0; base < n_all; base += M) {   // more than M pairs only on a row that repeats an id
     const uint n = min((uint)M, n_all - base);
-    uint xo[M];
+    uint xo[M], rs[M];   // the pair's x row and its [row][slot] place
     #pragma unroll
     for (uint r = 0; r < M; ++r) {
       const uint i = base + min(r, n - 1);
-      xo[r] = (shared ? i : pl[p0 + i] / MOE_K) * HIDDEN;
+      const uint p = shared ? 0u : q4_pair_at(lane, i, mf, mpos);
+      rs[r] = shared ? i * SLOTS + SHARED_SLOT : (p / MOE_K) * SLOTS + p % MOE_K;
+      xo[r] = (rs[r] / SLOTS) * HIDDEN;
     }
     float acc[M];
     if (!shared) {
@@ -281,13 +302,13 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
     }
     if (q == 0 && (tile_idx & 1u) == 0) {
       const uint i = blk * 32 + (tile_idx / 2) * SG + lane;
-      for (uint r = 0; r < n; ++r) {
-        const uint p = shared ? 0u : pl[p0 + base + r];
-        const uint row = shared ? base + r : p / MOE_K, slot = shared ? SHARED_SLOT : p % MOE_K;
-        const ushort g_b = rne_bf16(red[r][sg][lane]);
-        const ushort u_b = rne_bf16(red[r][sg + UP_KS][lane]);
-        h[((size_t)row * SLOTS + slot) * INTER + i] = rne_bf16(rf(silu_t(bf16f(g_b))) * bf16f(u_b));
-      }
+      #pragma unroll
+      for (uint r = 0; r < M; ++r)
+        if (r < n) {
+          const ushort g_b = rne_bf16(red[r][sg][lane]);
+          const ushort u_b = rne_bf16(red[r][sg + UP_KS][lane]);
+          h[(size_t)rs[r] * INTER + i] = rne_bf16(rf(silu_t(bf16f(g_b))) * bf16f(u_b));
+        }
     }
     barrier(CLK_LOCAL_MEM_FENCE);   // the next pass reuses red
   }
@@ -318,7 +339,6 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
                           , __global uint* land, __global uint* ctr
 #endif
                           CNT_ARG) {
-  __local uint ids[NPAIR], own[NPAIR], pl[NPAIR], st[NPAIR + 1], ex[NPAIR], nd;
   __local float red[M * SLOTS * DN_KS][SG];   // [row][slot][K slice]
   if (get_group_id(1) != 0) return;   // uniform: work-group (n_tile, 0) does every row
   const uint lid = get_local_id(0);
@@ -327,13 +347,13 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
   const uint xs = sg / DN_KS;
   const uint q = sg % DN_KS;
   const uint n_tile = get_group_id(0);
-  q4_union(route, lid, WG_DN, ids, own, pl, st, ex, &nd);
+  uint id[PREG], own[PREG], fl[PREG], rk[PREG], mf[PREG], mpos[PREG];
+  const uint nd = q4_union_sg(route, lane, id, own, fl, rk);
   const uint g0 = q * (G_DN / DN_KS);
   for (uint set = xs; set <= nd; set += SLOTS) {   // uniform across the sub-group
     const bool shared = set == 0;
-    const uint d = set - 1;
-    const uint e = shared ? 0u : ex[d];
-    const uint p0 = shared ? 0u : st[d], n_all = shared ? M : st[d + 1] - st[d];
+    uint e = 0;
+    const uint n_all = shared ? M : q4_union_set(lane, set - 1, id, own, fl, rk, &e, mf, mpos);
 #ifdef UNION_COUNT
     if (lane == 0) atomic_inc(cnt + (MOE_E + 1) + (shared ? MOE_E : e));
 #endif
@@ -344,12 +364,8 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
       #pragma unroll
       for (uint r = 0; r < M; ++r) {
         const uint i = base + min(r, n - 1);
-        if (shared) {
-          rs[r] = i * SLOTS + SHARED_SLOT;
-        } else {
-          const uint p = pl[p0 + i];
-          rs[r] = (p / MOE_K) * SLOTS + p % MOE_K;
-        }
+        const uint p = shared ? 0u : q4_pair_at(lane, i, mf, mpos);
+        rs[r] = shared ? i * SLOTS + SHARED_SLOT : (p / MOE_K) * SLOTS + p % MOE_K;
         xo[r] = rs[r] * INTER;
       }
       float acc[M];
