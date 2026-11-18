@@ -20,8 +20,9 @@ namespace runtime::prefill {
 // words over the whole N in one launch (gemm_l0.h's pf_q4_tile), bit-identical to the walk.
 // `out` (spec 17c): the fp32 [pad256(M)][N] it writes in place of `partials` - tensor parallel's row-parallel
 // linears write each sub-chunk's half into its own buffer, which must outlive the next linear. Null is partials.
+// `bf16_out`: `partials` gets bf16 [pad256(M)][N] instead (gemm_l0's bf16 C) - M above kPfSmallMaxRows only.
 void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w,
-               const uint16_t* x, uint32_t M, float* out = nullptr);
+               const uint16_t* x, uint32_t M, float* out = nullptr, bool bf16_out = false);
 
 // Parity program S2(a): the SAME walk for gate||up, with `pf_silu_mul` fused
 // into each slab GEMM's epilogue. `out` is the bf16 x it writes -- [pad256(M)]

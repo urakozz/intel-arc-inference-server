@@ -95,8 +95,10 @@ void gemm_q4(Context& cx, KernelCache& kc, const PfSmallTile& t, uint32_t layout
 }
 
 void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
-             const uint16_t* B, float* C, bool transB, bool raster) {
+             const uint16_t* B, float* C, bool transB, bool raster, bool bf16_c) {
   require(b.M > 0 && b.N > 0 && b.L > 0, "empty problem");
+  require(!bf16_c || (!transB && b.L == 1 && b.M > kPfSmallMaxRows),
+          "the bf16 C is an untransposed single GEMM of more than " + std::to_string(kPfSmallMaxRows) + " rows");
   require(!(raster && transB), "the N-fastest order is built untransposed only");
   require(b.K >= 32 && b.K % 32 == 0, "K = " + std::to_string(b.K) + " is not a multiple of 32");
   const uint32_t M = pad256(b.M);
@@ -107,18 +109,19 @@ void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A
   require(b.lda >= b.K, "lda < K");
   require(transB ? b.ldb >= b.K : b.ldb >= N, "ldb does not cover B");
   require(b.ldc >= N, "ldc < N");
-  require((b.lda * 2) % 16 == 0 && (b.ldb * 2) % 16 == 0 && (b.ldc * 4) % 16 == 0,
+  require((b.lda * 2) % 16 == 0 && (b.ldb * 2) % 16 == 0 && (b.ldc * (bf16_c ? 2 : 4)) % 16 == 0,
           "a pitch is not a multiple of 16 bytes");
   require(aligned64(A, 2, b.strideA, b.L), "A (or a batch of it) is not 64-byte aligned");
   require(aligned64(B, 2, b.strideB, b.L), "B (or a batch of it) is not 64-byte aligned");
-  require(aligned64(C, 4, b.strideC, b.L), "C (or a batch of it) is not 64-byte aligned");
+  require(aligned64(C, bf16_c ? 2 : 4, b.strideC, b.L), "C (or a batch of it) is not 64-byte aligned");
 
   const uint32_t lda = uint32_t(b.lda), ldb = uint32_t(b.ldb), ldc = uint32_t(b.ldc);
   if (const PfSmallTile* t = !transB && b.L == 1 ? pf_small_tile(b.M) : nullptr) {
     launch_small(cx, kc, *t, /*silu=*/false, b.M, b.K, N, A, B, C, lda, ldb, ldc);
     return;
   }
-  l0::Kernel& k = kc(kernels::pf_gemm_variant(transB, raster), "pf_gemm");
+  l0::Kernel& k = kc(bf16_c ? kernels::pf_gemm_bf16c_variant(raster) : kernels::pf_gemm_variant(transB, raster),
+                     "pf_gemm");
   const uint64_t sA = b.strideA, sB = b.strideB, sC = b.strideC;
   cx.launch(k, M / kPfGemmTile, N / kPfGemmTile, b.L,
             {PtrArg(A), PtrArg(B), PtrArg(C), arg_val(M), arg_val(b.K), arg_val(N),

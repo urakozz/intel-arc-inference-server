@@ -71,6 +71,15 @@
 #if SILU_EPI && TRANSB
 #error "pf_gemm: the SiLU epilogue belongs to the gate||up slab GEMM, whose B is [K][N]"
 #endif
+// C_BF16 1: C is bf16, rne_bf16 of each fp32 sum - Ornith's qkv||z, whose every reader (pf_gdn_front,
+// pf_gated_head) rounds the fp32 partial to that word first; `C_base` carries the bf16 C and `ldc` its pitch in
+// elements. Unlike S2(b) below, the bytes saved are the readers', not this epilogue's.
+#ifndef C_BF16
+#define C_BF16 0
+#endif
+#if C_BF16 && (SILU_EPI || TRANSB)
+#error "pf_gemm: the bf16 C is the untransposed plain GEMM's"
+#endif
 //
 // **Storing `rne_bf16(acc)` for the OTHER linears was measured and rejected**
 // (parity program S2(b)). Every
@@ -95,6 +104,9 @@
 // prep.cl, and this is the same relationship one level out.
 #include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
+#endif
+#if C_BF16
+#include "bf16.h"
 #endif
 
 __attribute__((reqd_work_group_size(512, 1, 1)))
@@ -123,6 +135,8 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
   // `C_base` carries x (bf16) and `ldc` carries `ldx`; nothing writes fp32 here.
   __global ushort* restrict X = (__global ushort*)C_base + l * strideC;
   const uint ldx = ldc;
+#elif C_BF16
+  __global ushort* restrict C = (__global ushort*)C_base + l * strideC;
 #else
   __global float* restrict C = C_base + l * strideC;
 #endif
@@ -146,6 +160,8 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
   // arrangement the fp32 `c_w` below has -- a 1024-column window inside a
   // 34816-wide matrix -- one element size down.
   const int x_w = (int)(N * 2u), x_h = (int)M, x_p = (int)(ldx * 2u);
+#elif C_BF16
+  const int c_w = (int)(N * 2u), c_h = (int)M, c_p = (int)(ldc * 2u);
 #else
   const int c_w = (int)(N * 4u), c_h = (int)M, c_p = (int)(ldc * 4u);
 #endif
@@ -286,6 +302,19 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
     }
   }
 #undef PF_SILU_ROW
+#elif C_BF16
+  // epilogue: the fp32 form's 16 stores per subgroup, 8 rows x 32 B each, of the rounded sums.
+#pragma unroll
+  for (int a = 0; a < 4; ++a)
+#pragma unroll
+    for (int b = 0; b < 4; ++b) {
+      const float8 v = acc[a][b];
+      ushort cv[8] = {rne_bf16(v.s0), rne_bf16(v.s1), rne_bf16(v.s2), rne_bf16(v.s3),
+                      rne_bf16(v.s4), rne_bf16(v.s5), rne_bf16(v.s6), rne_bf16(v.s7)};
+      intel_sub_group_2d_block_write_16b_8r16x1c(
+          (__global void*)C, c_w, c_h, c_p,
+          (int2)((int)(n0 + 64u * sn + 16u * b), (int)(m0 + 32u * sm + 8u * a)), cv);
+    }
 #else
   // epilogue: 16 stores per subgroup, 8 rows x 64 B each, no C read.
 #pragma unroll

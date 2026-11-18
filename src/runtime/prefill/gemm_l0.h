@@ -63,8 +63,10 @@ void gemm_q4(Context& cx, KernelCache& kc, const PfSmallTile& t, uint32_t layout
 // M has a pf_small_tile runs pf_gemm_small instead, over pad(M, 8 NA) rows only.
 // `raster` (open-work 18, untransposed only): pf_gemm_T0_R, the work-groups numbered N-fastest -
 // the same tiles, bit-identical; linear_l0's walk takes it for chunks wider than 2048 rows.
+// `bf16_c`: C holds bf16 (rne of each fp32 sum; `ldc` in bf16 elements) - pf_gemm_T0_B16, an untransposed
+// L = 1 problem of more than kPfSmallMaxRows rows only (Ornith's qkv||z, linear_l0's `bf16_out`).
 void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
-             const uint16_t* B, float* C, bool transB, bool raster = false);
+             const uint16_t* B, float* C, bool transB, bool raster = false, bool bf16_c = false);
 
 // Parity program S2(a): the same GEMM with `pf_silu_mul`'s chain fused into the
 // epilogue. `b` describes ONE 1024-column slab of gate||up (L = 1, B is [K][N]),

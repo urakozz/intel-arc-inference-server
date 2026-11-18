@@ -45,7 +45,7 @@ bool wide_chunk(uint32_t M) { return pad256(M) > PrefillScratchDims::kCDefault; 
 size_t linear_l0_launches(const model::GemvShape& sh) { return 2 * (size_t(sh.N) / kNs); }
 
 void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w,
-               const uint16_t* x, uint32_t M, float* out) {
+               const uint16_t* x, uint32_t M, float* out, bool bf16_out) {
   const model::GemvShape& sh = w.shape;
   check_linear(s, w, M);
   require(out != nullptr || s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
@@ -53,6 +53,12 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
 
   const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
   if (out == nullptr) out = s.partials.as<float>();
+  require(!bf16_out || M > kPfSmallMaxRows, "a bf16 output needs a chunk of more than " +
+                                                std::to_string(kPfSmallMaxRows) + " rows (pf_gemm)");
+  // Slab n0's C: column n0 of the fp32 or the bf16 rows.
+  const auto at_col = [&](uint32_t n0) {
+    return bf16_out ? reinterpret_cast<float*>(reinterpret_cast<uint16_t*>(out) + n0) : out + n0;
+  };
   // Open-work 3b: a short chunk reads the int4 words directly - one launch, no slab, the same bits.
   if (const PfSmallTile* t = pf_q4_tile(M, /*silu=*/false)) {
     gemm_q4(cx, kc, *t, sh.layout, false, M, sh.K, sh.N, x, sh.K, w.mem.ptr(), scales, out, sh.N);
@@ -64,7 +70,7 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
   if (const l0::Mem* r = s.find_gemm_slab(w.mem.ptr())) {
     for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
       const GemmBatch b{M, sh.K, kNs, 1, sh.K, kNs, sh.N, 0, 0, 0};
-      gemm_l0(cx, kc, b, x, r->as<uint16_t>() + size_t(n0) * sh.K, out + n0, /*transB=*/false, wide);
+      gemm_l0(cx, kc, b, x, r->as<uint16_t>() + size_t(n0) * sh.K, at_col(n0), /*transB=*/false, wide, bf16_out);
       profile_wait(cx, Phase::kSlabGemm);
     }
     return;
@@ -77,7 +83,7 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
     profile_wait(cx, Phase::kSlabDequant);   // only when B70_PREFILL_PROFILE=1
     // B = the slab [K][1024] (ldb 1024); C = partials from column n0 (ldc N). gemm_l0 pads M.
     const GemmBatch b{M, sh.K, kNs, 1, sh.K, kNs, sh.N, 0, 0, 0};
-    gemm_l0(cx, kc, b, x, slab.as<uint16_t>(), out + n0, /*transB=*/false, wide);
+    gemm_l0(cx, kc, b, x, slab.as<uint16_t>(), at_col(n0), /*transB=*/false, wide, bf16_out);
     profile_wait(cx, Phase::kSlabGemm);      // splits the old `linear_l0` row in two
   }
 }

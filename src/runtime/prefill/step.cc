@@ -50,13 +50,14 @@ const void* at_const(const l0::Mem& m, size_t off) {
 // `out` (spec 17c): the row-parallel linears' output buffer under tensor parallel (linear_l0's); null is partials.
 // Open-work 16 / 17: the four mixer linears take the l0 side on l0-int8 too (l0_int8_bf16_linear).
 void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, uint32_t l, LinearId id,
-               const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q, float* out = nullptr) {
+               const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q, float* out = nullptr,
+               bool bf16_out = false) {
   const DeviceWeight& w = m.linears.at({l, id});
   if (backend == PrefillBackend::L0Int8 && !l0_int8_bf16_linear(*m.desc, id)) {
     linear_i8(cx, kc, s, *q, w, x, M, out);
     return;
   }
-  linear_l0(cx, kc, s, w, x, M, out);
+  linear_l0(cx, kc, s, w, x, M, out, bf16_out);
 }
 
 // The res_norm pair at `M` rows. `s_prev` is 0 for layer 0's leading norm --
@@ -109,7 +110,8 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
   if (L.kind == model::LayerKind::GDN) {
-    pf_linear(cx, kc, s, m, l, LinearId::QkvZ, s.x.as<uint16_t>(), C, backend, q);
+    const bool zb = qkvz_bf16(d, C);   // the partials as the bf16 words gdn_chunk's readers round them to
+    pf_linear(cx, kc, s, m, l, LinearId::QkvZ, s.x.as<uint16_t>(), C, backend, q, nullptr, zb);
     float* ab = s.ab_out.as<float>();
     {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape. The bf16
         // weight: the checkpoint's own, or (spec 15 §13) an int4 a||b's copy the loader
@@ -125,10 +127,10 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                   {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
       profile_wait(cx, Phase::kAbGdn);
     }
-    gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), ab,
+    gdn_chunk(cx, kc, s, pos, C, s.partials.ptr(), ab,
               reinterpret_cast<float*>(gdn_base + size_t(gdn) * gdn_state_stride),
               reinterpret_cast<uint16_t*>(ring_base + size_t(gdn) * conv_ring_stride),
-              small.gdn.ptr(), s.mixer_out.as<uint16_t>(), backend);   // y stride v-heads x 128
+              small.gdn.ptr(), s.mixer_out.as<uint16_t>(), backend, zb);   // y stride v-heads x 128
     ++gdn;
     pf_linear(cx, kc, s, m, l, LinearId::OutProj, s.mixer_out.as<uint16_t>(), C, backend, q, out);
     return;

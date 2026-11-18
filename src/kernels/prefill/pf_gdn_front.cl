@@ -41,13 +41,24 @@
 #ifndef FRONT_PRELOAD
 #define FRONT_PRELOAD 0
 #endif
+// QKVZ_BF16 1: the partials arrive as the bf16 words P1 rounds them to (pf_gemm's C_BF16), so P1 is the word itself.
+#ifndef QKVZ_BF16
+#define QKVZ_BF16 0
+#endif
+#if QKVZ_BF16
+#define QKVZ_T ushort
+#define QKVZ_B(v) (v)
+#else
+#define QKVZ_T float
+#define QKVZ_B(v) rne_bf16(v)
+#endif
 
 #include "bf16.h"
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 
 __attribute__((reqd_work_group_size(WG_CH, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void pf_gdn_front(__global const float* restrict qkvz_partials,
+__kernel void pf_gdn_front(__global const QKVZ_T* restrict qkvz_partials,
                            __global const ushort* restrict seed,
                            __global const float* restrict conv_w,
                            __global ushort* restrict xb,
@@ -67,20 +78,20 @@ __kernel void pf_gdn_front(__global const float* restrict qkvz_partials,
   for (uint t = 0; t < 3; ++t) {
     const int p = (int)m0 - 3 + (int)t;
     win[t] = p < 0 ? bf16f(seed[(size_t)(p + 3) * CONV_ROWS + ch])
-                   : bf16f(rne_bf16(qkvz_partials[(size_t)p * QKVZ_N + ch]));
+                   : bf16f(QKVZ_B(qkvz_partials[(size_t)p * QKVZ_N + ch]));
   }
   float win0 = win[0], win1 = win[1], win2 = win[2];
 #if FRONT_PRELOAD
   // All FB positions' partials are loaded before the first is used, so a lane has FB reads in flight instead of
   // one: the kernel moves bytes, and one read at a time per lane left it at half the card's bandwidth.
-  float part[FB];
+  QKVZ_T part[FB];
 #pragma unroll
-  for (uint t = 0; t < FB; ++t) part[t] = m0 + t < m1 ? qkvz_partials[(size_t)(m0 + t) * QKVZ_N + ch] : 0.0f;
+  for (uint t = 0; t < FB; ++t) part[t] = m0 + t < m1 ? qkvz_partials[(size_t)(m0 + t) * QKVZ_N + ch] : 0;
 #pragma unroll
   for (uint t = 0; t < FB; ++t) {
     const uint m = m0 + t;
     if (m >= m1) break;
-    const ushort raw_b = rne_bf16(part[t]);                                // P1
+    const ushort raw_b = QKVZ_B(part[t]);                                  // P1
 #else
   for (uint m = m0; m < m1; ++m) {
     const ushort raw_b = rne_bf16(qkvz_partials[(size_t)m * QKVZ_N + ch]);   // P1
@@ -102,7 +113,7 @@ __kernel void pf_gdn_front(__global const float* restrict qkvz_partials,
     const int m = (int)c_count - 3 + (int)t;
     if (m >= (int)m0 && m < (int)m1)
       conv_ring[((size_t)((pos + (uint)m) % RING)) * CONV_ROWS + ch] =
-          rne_bf16(qkvz_partials[(size_t)m * QKVZ_N + ch]);
+          QKVZ_B(qkvz_partials[(size_t)m * QKVZ_N + ch]);
   }
   if (!qk) return;
   barrier(CLK_LOCAL_MEM_FENCE);

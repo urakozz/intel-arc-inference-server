@@ -49,9 +49,9 @@ namespace runtime::prefill {
 // `backend` (phase 2): on a MoE model the l0 backend binds the one-launch intra-chunk kernel; l0-int8 (and every
 // dense model) keeps the four launches.
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
-               const float* qkvz_partials, const float* ab_out, float* gdn_state,
+               const void* qkvz_partials, const float* ab_out, float* gdn_state,
                uint16_t* conv_ring, const void* small, uint16_t* y,
-               PrefillBackend backend = PrefillBackend::L0);
+               PrefillBackend backend = PrefillBackend::L0, bool partials_bf16 = false);
 
 // What one `gdn_chunk` call appends to the L0 list. Asserted through
 // `Context::launches()` rather than restated in prose; Task 14's launch
@@ -70,6 +70,11 @@ size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 // 35 (l0-int8's GEMV form left Ornith's served tool-call row on a 0.05-ulp tie the f32 judge rejects). A dense
 // model: one pf_ab_proj launch into ab_out.
 bool ab_on_gemm(const model::ModelDesc& d);
+
+// A MoE model's (Ornith) qkv||z partials at a chunk of more than kPfSmallMaxRows rows (pf_gemm): stored as the bf16
+// words pf_gdn_front and pf_gated_head round them to (linear_l0's `bf16_out`, gdn_chunk's `partials_bf16`) -
+// bitwise, half the bytes. Shorter chunks keep fp32 (pf_gemm_q4 / pf_gemm_small have no bf16 C).
+bool qkvz_bf16(const model::ModelDesc& d, uint32_t C);
 
 // --- the scan's DISPATCH PROOF ----------------------------------------------
 // Rule: a

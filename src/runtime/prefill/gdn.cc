@@ -13,6 +13,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
+#include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/profile.h"
 
 // The ten launches of one GDN layer's chunk, in order. Every one takes `C` as a
@@ -160,6 +161,7 @@ size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   return kGdnChunkLaunches - (d.is_moe() ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
 }
 bool ab_on_gemm(const model::ModelDesc& d) { return d.is_moe(); }
+bool qkvz_bf16(const model::ModelDesc& d, uint32_t C) { return d.is_moe() && C > kPfSmallMaxRows; }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
@@ -171,8 +173,10 @@ const char* gdn_a2_entry_name() { return gdn_a2_entry(); }
 static const char* gdn_solve_entry() { return "pf_gdn_solve"; }
 
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
-               const float* qkvz_partials, const float* ab_out, float* gdn_state,
-               uint16_t* conv_ring, const void* small, uint16_t* y, PrefillBackend backend) {
+               const void* qkvz_partials, const float* ab_out, float* gdn_state,
+               uint16_t* conv_ring, const void* small, uint16_t* y, PrefillBackend backend,
+               bool partials_bf16) {
+  require(!partials_bf16 || s.desc().is_moe(), "bf16 qkv||z partials are a MoE model's (pf_gdn_front)");
   require(C > 0, "C must be > 0");
   require(C <= s.chunk_cap(),
           "C = " + std::to_string(C) + " exceeds the scratch's chunk cap " +
@@ -210,7 +214,8 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   if (d.is_moe()) {
     //  2-3 (phase 2 Task 2) - the conv1d + SiLU and the q / k l2norm in one launch (pf_gdn_front.cl),
     //      bitwise the pair below; FB = 32 positions a work-group.
-    cx.launch(kc(kernels::pf_gdn_front_variant(k_heads, heads), "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
+    const std::string front = kernels::pf_gdn_front_variant(k_heads, heads) + (partials_bf16 ? "_PB" : "");
+    cx.launch(kc(front, "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
               {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb), PtrArg(conv_ring),
                arg_val(pos), arg_val(C)});
     profile_wait(cx, Phase::kGdnConv);
@@ -282,7 +287,9 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller. A MoE model's (Ornith) runs one
   //      sub-group a (position, head), 8 heads a work-group, on the bf16 o its scan wrote (pf_gated_head.cl).
   if (d.is_moe())
-    cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head_sg"), heads / 8, C, 1,
+    cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads) + (partials_bf16 ? "_PB" : ""),
+                     "pf_gated_head_sg"),
+              heads / 8, C, 1,
               {PtrArg(qkvz_partials), PtrArg(p_o), PtrArg(gated_w), PtrArg(y), arg_val(C)});
   else
     cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head"), heads, C, 1,
