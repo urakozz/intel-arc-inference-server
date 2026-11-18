@@ -391,6 +391,7 @@ struct Opts {
   std::string splitk = "grid", wgshape = "2x8", deq = "shift";
   uint32_t prefetch = 0, grf = 128, s = 0, rounds = 5, launches = 40, device = 0, trials = 1000;
   std::vector<std::string> v2;   // prod: the psm_v2 arms by label (empty: plan 32e's twelve)
+  std::vector<std::string> wide; // prod: item 41's gemm_sm_wide.cl arms by label (64 rows)
 };
 std::vector<std::string> split(const std::string& s) {
   std::vector<std::string> v;
@@ -914,8 +915,13 @@ struct V2Arm {
   bool g256 = false;
   bool a2d = false;   // spec 34: the A operands by 2D block reads
   bool nodq = false;  // plan 34a: the dequant ablation (wrong output: timed only, never checked or ranked)
-  uint32_t rc(uint32_t M) const { return base == "rc16" ? 16 : base == "rc32" ? 32 : M; }
+  std::string wide;   // item 41: a gemm_sm_wide.cl arm by its label (tools/probe/CMakeLists.txt's psm_wide_*)
+  uint32_t rc(uint32_t M) const {
+    if (!wide.empty()) return wide.rfind("rc32", 0) == 0 ? 32 : wide.rfind("rc16", 0) == 0 ? 16 : M;
+    return base == "rc16" ? 16 : base == "rc32" ? 32 : M;
+  }
   std::string label() const {
+    if (!wide.empty()) return "wide_" + wide;
     return base + (a2d ? "_a2d" : "") + (nodq ? "_nodq" : "") + (pf ? "_pf" + std::to_string(pf) : "") +
            (g256 ? "_g256" : "");
   }
@@ -932,16 +938,16 @@ std::vector<V2Arm> v2_arms(const std::vector<std::string>& pick) {
       v.push_back(a);
     }
   if (pick.empty()) return v;
-  for (uint32_t pf : {0u, 1u, 2u}) v.push_back({"swap", pf, false, true, false});
-  v.push_back({"rc32", 1, true, true, false});
-  v.push_back({"swap", 0, false, true, true});
+  for (uint32_t pf : {0u, 1u, 2u}) v.push_back({"swap", pf, false, true, false, ""});
+  v.push_back({"rc32", 1, true, true, false, ""});
+  v.push_back({"swap", 0, false, true, true, ""});
   std::vector<V2Arm> out;
   for (const V2Arm& a : v)
     if (std::find(pick.begin(), pick.end(), a.label()) != pick.end()) out.push_back(a);
   return out;
 }
 std::string v2_name(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
-  return "psm_v2_" + a.label() + "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N) +
+  return (a.wide.empty() ? "psm_v2_" + a.label() : "psm_wide_" + a.wide) + "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N) +
          "_S" + std::to_string(kernels::gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout);
 }
 uint32_t v2_wg(const V2Arm& a, const kernels::SmallMTuning& t, uint32_t M) {
@@ -952,7 +958,7 @@ std::unique_ptr<Launch> make_v2(l0::Context& ctx, const V2Arm& a, const kernels:
   L->name = v2_name(a, t, M);
   L->M = M;
   L->mod = std::make_unique<l0::Module>(ctx, kernels::path(L->name));
-  L->k = std::make_unique<l0::Kernel>(*L->mod, "psm_v2");
+  L->k = std::make_unique<l0::Kernel>(*L->mod, a.wide.empty() ? "psm_v2" : "gemm_sm_wide");
   L->k->group_size(v2_wg(a, t, M));
   L->gx = t.N / kernels::gemm_sm_cols(t);
   L->gy = kernels::gemm_sm_grid_y(t);
@@ -1138,7 +1144,15 @@ int run_prod(l0::Context& ctx, const Opts& o) {
       if (M > 16 && s.kind == 0) {
         std::vector<std::unique_ptr<Launch>> v2, nodq;
         std::vector<std::string> labels, nodq_labels;
-        for (const V2Arm& a : v2_arms(o.v2)) {
+        std::vector<V2Arm> arms = o.v2.empty() && !o.wide.empty() ? std::vector<V2Arm>{} : v2_arms(o.v2);
+        for (const std::string& w : o.wide) {
+          V2Arm a;
+          a.wide = w;
+          a.a2d = true;   // no spill, no private memory
+          a.g256 = w.size() > 5 && w.compare(w.size() - 5, 5, "_g256") == 0;
+          if (M == 64) arms.push_back(a);
+        }
+        for (const V2Arm& a : arms) {
           if (a.nodq && M != 64) continue;   // the ablation is built at 64 rows only
           const std::string n = v2_name(a, *t, M);
           if (!file_exists(kernels::path(n))) { std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M); continue; }
@@ -1488,6 +1502,7 @@ int main(int argc, char** argv) {
     else if (a == "--device") o.device = uint32_t(std::stoul(v));
     else if (a == "--trials") o.trials = uint32_t(std::stoul(v));
     else if (a == "--v2") o.v2 = split(v);
+    else if (a == "--wide") o.wide = split(v);
     else { std::fprintf(stderr, "unknown flag %s\n", a.c_str()); return 2; }
   }
   for (uint32_t M : o.ms)

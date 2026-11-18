@@ -417,18 +417,110 @@ int run_verify_rows(sycl::queue& q, engine& eng, stream& strm) {
   return all_ok ? 0 : 1;
 }
 
+// Item 41: `--time-rows` - the same primitives as --verify-rows timed per shape at 16 / 32 / 64 rows the way
+// probe_small_m prod times ours: NB weight copies so one cycle passes 72 MB (3x L2), a list of 40 executions cycling
+// them, us an execution by wall clock, 3 warm-up lists, the median of `rounds` lists; then a token's int4 linears
+// (layers x us; qkv||z 48, out_proj + o_proj 64, q||k||v 16, gate||up 64, down 64).
+int run_time_rows(sycl::queue& q, engine& eng, stream& strm, int rounds) {
+  using dt = memory::data_type;
+  using tag = memory::format_tag;
+  constexpr uint32_t kMs16[] = {16, 32, 64}, MMAX = 64, kLaunches = 40;
+  constexpr uint32_t kLayers[] = {48, 64, 16, 64, 64};   // kVShapes' order
+  double sum[3] = {0, 0, 0};
+  std::printf("\n| shape | M | us | rounds |\n|---|---|---|---|\n");
+  for (size_t si = 0; si < sizeof(kVShapes) / sizeof(kVShapes[0]); ++si) {
+    const VShape& sh = kVShapes[si];
+    const uint32_t K = sh.K, N = sh.N, KG = K / kGroup;
+    const size_t wb = size_t(N) * K / 2 + size_t(KG) * N * 3;
+    const int NB = std::max(2, int((72u << 20) / wb) + 1);
+    uint32_t seed = 0x5EED0000u ^ K ^ N;
+    std::vector<uint8_t> hp(size_t(N) * K / 2);
+    std::vector<uint16_t> hs(size_t(KG) * N);
+    std::vector<uint8_t> hz(hs.size(), 8);
+    std::vector<uint16_t> hx(size_t(MMAX) * K);
+    for (auto& v : hx) v = random_bf16(seed);
+    std::vector<void*> dp, ds, dz;
+    for (int b = 0; b < NB; ++b) {
+      for (auto& v : hp) v = uint8_t(xorshift(seed));
+      for (auto& v : hs) v = common::f32_to_bf16(0.01f + 0.05f * float(xorshift(seed) & 0xFFFFu) / 65535.0f);
+      dp.push_back(usm_upload(q, hp.data(), hp.size()));
+      ds.push_back(usm_upload(q, hs.data(), hs.size() * 2));
+      dz.push_back(usm_upload(q, hz.data(), hz.size()));
+    }
+    void* d_x = usm_upload(q, hx.data(), hx.size() * 2);
+    float* d_y = sycl::malloc_device<float>(size_t(MMAX) * N, q);
+    for (size_t mi = 0; mi < 3; ++mi) {
+      const uint32_t M = kMs16[mi];
+      memory::desc src({M, K}, dt::bf16, tag::ab), wei({K, N}, dt::u4, tag::ba), dst({M, N}, dt::f32, tag::ab);
+      memory::desc smd({KG, N}, dt::bf16, tag::ab), zmd({KG, N}, dt::u8, tag::ab);
+      primitive_attr attr;
+      attr.set_scratchpad_mode(scratchpad_mode::user);
+      attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {kGroup, 1}, dt::bf16);
+      attr.set_zero_points(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1), {kGroup, 1}, dt::u8);
+      attr.set_fpmath_mode(fpmath_mode::bf16, true);
+      matmul::primitive_desc pd(eng, src, wei, dst, attr);
+      matmul prim(pd);
+      const size_t scr_bytes = pd.scratchpad_desc().get_size();
+      void* scr = scr_bytes ? sycl::malloc_device(scr_bytes, q) : nullptr;
+      std::vector<std::unordered_map<int, memory>> args(NB);
+      for (int b = 0; b < NB; ++b) {
+        auto& a = args[b];
+        a[DNNL_ARG_SRC] = sycl_interop::make_memory(src, eng, sycl_interop::memory_kind::usm, d_x);
+        a[DNNL_ARG_WEIGHTS] = sycl_interop::make_memory(wei, eng, sycl_interop::memory_kind::usm, dp[b]);
+        a[DNNL_ARG_DST] = sycl_interop::make_memory(dst, eng, sycl_interop::memory_kind::usm, d_y);
+        a[DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS] =
+            sycl_interop::make_memory(smd, eng, sycl_interop::memory_kind::usm, ds[b]);
+        a[DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS] =
+            sycl_interop::make_memory(zmd, eng, sycl_interop::memory_kind::usm, dz[b]);
+        if (scr)
+          a[DNNL_ARG_SCRATCHPAD] = sycl_interop::make_memory(pd.scratchpad_desc(), eng, sycl_interop::memory_kind::usm, scr);
+      }
+      auto list_us = [&] {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < kLaunches; ++i) prim.execute(strm, args[i % NB]);
+        q.wait_and_throw();
+        return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / kLaunches;
+      };
+      for (int w = 0; w < 3; ++w) list_us();
+      std::vector<double> us;
+      for (int r = 0; r < rounds; ++r) us.push_back(list_us());
+      std::vector<double> sorted = us;
+      std::sort(sorted.begin(), sorted.end());
+      const double med = sorted[sorted.size() / 2];
+      sum[mi] += kLayers[si] * med;
+      std::printf("| %s | %u | %.1f | %.1f-%.1f |\n", sh.name, M, med, sorted.front(), sorted.back());
+      std::fflush(stdout);
+      if (scr) sycl::free(scr, q);
+    }
+    for (int b = 0; b < NB; ++b) { sycl::free(dp[b], q); sycl::free(ds[b], q); sycl::free(dz[b], q); }
+    sycl::free(d_x, q); sycl::free(d_y, q);
+  }
+  for (size_t mi = 0; mi < 3; ++mi)
+    std::printf("ONEDNN_SUM M=%u int4 linears %.2f ms a token\n", kMs16[mi], sum[mi] / 1e3);
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
     std::string snapshot = "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
     bool verify_rows = false;
+    int time_rounds = 0;
     for (int i = 1; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg.rfind("--ckpt=", 0) == 0) snapshot = arg.substr(7);
       if (arg == "--verify-rows") verify_rows = true;
+      if (arg.rfind("--time-rows=", 0) == 0) time_rounds = std::stoi(arg.substr(12));
     }
     sycl::queue q(sycl::gpu_selector_v, sycl::property::queue::in_order{});
+    if (time_rounds > 0) {
+      std::printf("# item 41: oneDNN int4 matmul timed at a verify's 16 / 32 / 64 rows, %d rounds\n", time_rounds);
+      std::printf("# device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
+      engine teng = sycl_interop::make_engine(q.get_device(), q.get_context());
+      stream tstrm = sycl_interop::make_stream(teng, q);
+      return run_time_rows(q, teng, tstrm, time_rounds);
+    }
     if (verify_rows) {
       std::printf("# spec 32e: oneDNN int4 matmul at a verify's 16 / 32 / 64 rows - fp64, row independence, kernels\n");
       std::printf("# device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
