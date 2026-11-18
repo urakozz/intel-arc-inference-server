@@ -12,8 +12,10 @@
 // on its last row and the host merges the heads (the larger value, ties to card 0) as a decode step does.
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -212,6 +214,16 @@ void Qwen4ExpTpEngine::prepare_prefill() {
   pf_settle_ = [ps] { return ps->settle(); };
 }
 
+double Qwen4ExpTpEngine::read_host_experts() {
+  prepare_prefill();
+  const auto t0 = std::chrono::steady_clock::now();
+  for (auto& D : pf_->dev)
+    if (D->ring) D->ring->read_all();
+  for (auto& D : pf_->dev)
+    if (D->ring) ZE_CHECK(zeCommandListHostSynchronize(D->ring->list, UINT64_MAX));
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
 size_t Qwen4ExpTpEngine::prefill_launches() const {
   return pf_ ? pf_->dev[0]->cx.launches() + pf_->dev[1]->cx.launches() : 0;
 }
@@ -265,9 +277,45 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       mp[h].q16 = D.mtp_q16.get();
     }
   const uint64_t tmo = P.timeout_ns;
+  // A wait past 5 s says, every 5 s, where each card is: each chunk's crossings sent, the read ahead's layers staged
+  // and released, and which of the card's lists are still running.
+  const auto wait_logged = [&](uint32_t r, uint32_t pos, const char* what) {
+    constexpr uint64_t kSlice = 5000000000ull;
+    for (uint64_t waited = 0;;) {
+      const uint64_t s = std::min(kSlice, tmo - waited);
+      if (P.dev[r]->cx.wait_for(s)) {
+        if (waited) std::fprintf(stderr, "prefill: card %u's %s at position %u finished after %.1f s\n", r, what, pos,
+                                 double(waited + s) / 1e9);
+        return true;
+      }
+      waited += s;
+      std::string at;
+      for (uint32_t c = 0; c < 2; ++c) {
+        Q4TpPrefillState::Dev& D = *P.dev[c];
+        uint32_t sent[kTpPfChunks] = {};
+        for (uint32_t h = 0; h < kTpPfChunks; ++h)
+          while (sent[h] < P.units && P.ev.signalled(h * 8 * P.units + c * P.units + sent[h])) ++sent[h];
+        uint32_t staged = 0, released = 0;
+        if (D.ring)
+          for (uint32_t i = 0; 2 * i + 1 < D.ring->ev->size(); ++i) {
+            staged += D.ring->ev->signalled(2 * i);
+            released += D.ring->ev->signalled(2 * i + 1);
+          }
+        const auto idle = [](ze_command_list_handle_t l) {
+          return l == nullptr ? "-" : zeCommandListHostSynchronize(l, 0) == ZE_RESULT_SUCCESS ? "idle" : "running";
+        };
+        at += std::format("; card {}: sent {} / {} of {}, layers staged {} released {}, compute {}, crossing copies {}, "
+                          "read ahead {}", c, sent[0], sent[1], P.units, staged, released,
+                          D.cx.wait_for(0) ? "idle" : "running", idle(D.bcs), idle(D.ring ? D.ring->list : nullptr));
+      }
+      std::fprintf(stderr, "prefill: card %u's %s at position %u still running after %.0f s%s\n", r, what, pos,
+                   double(waited) / 1e9, at.c_str());
+      if (waited >= tmo) return false;
+    }
+  };
   const auto drain = [&](uint32_t pos, const char* what) {
     for (uint32_t r = 0; r < 2; ++r)
-      if (!P.dev[r]->cx.wait_for(tmo)) {
+      if (!wait_logged(r, pos, what)) {
         std::string got;   // each card's crossings signalled so far
         for (uint32_t c = 0; c < 2; ++c) {
           uint32_t n = 0;

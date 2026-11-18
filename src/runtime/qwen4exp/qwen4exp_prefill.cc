@@ -996,6 +996,11 @@ Q4PfRing Q4PfRingState::view(bool issue_first, bool issue_rest) const {
 void Q4PfRingState::reset() {
   for (uint32_t i = 0; i < ev->size(); ++i) ev->host_reset(i);
 }
+void Q4PfRingState::read_all() {
+  for (size_t i = 0; i < bytes.size(); ++i)
+    if (bytes[i] > 0)
+      ZE_CHECK(zeCommandListAppendMemoryCopy(list, stage[i & 1u]->ptr(), mirror[i], bytes[i], nullptr, 0, nullptr));
+}
 std::unique_ptr<Q4PfRingState> make_pf_ring(l0::Context& ctx, const loader::Q4DevicePart& part,
                                             const model::Qwen4ExpDesc& card) {
   for (const loader::Q4Layer& L : part.layers)   // the table form (planned with the ring's bytes), any tier
