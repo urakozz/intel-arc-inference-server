@@ -114,46 +114,61 @@ inline void load_tile8(const __global uint* restrict tile, uint lane, uint* wv) 
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
 }
-// q4_moe.cl's tile_dot over n <= M rows at once: the tile and its scale loaded once a k-group and each word's 8 weights
-// decoded once, then per row r < n exactly tile_dot's chain (per word dot8's sum from 0 over the 8 products in order,
-// gacc from 0 over the 8 words, acc += gacc x scale). Row r's activations start at x + xo[r]. Every loop over the rows
-// runs M times with a predicate, unrolled, so the row arrays stay in registers.
-inline void tile_dot_rows(const __global uint* restrict tile, const __global ushort* restrict x, __private const uint* xo,
-                          uint n, uint g0, uint g1, uint lane, __private float* acc) {
-  #pragma unroll
-  for (uint r = 0; r < M; ++r) acc[r] = 0.f;
+// q4_moe.cl's tile_dot over nr rows at once: the tile and its scale loaded once a k-group and each word's 8 weights
+// decoded once, then per row r < nr exactly tile_dot's chain (per word dot8's sum from 0 over the 8 products in order,
+// gacc from 0 over the 8 words, acc += gacc x scale). Row r's activations start at x + xo[r]. nr is a constant at each
+// call (tile_dot_rows below), so the row loops unroll, the row arrays stay in registers and no row is computed masked.
+inline void tile_dot_nr(const __global uint* restrict tile, const __global ushort* restrict x, __private const uint* xo,
+                        const uint nr, uint g0, uint g1, uint lane, __private float* acc) {
   for (uint g = g0; g < g1; ++g, tile += TILE_U32) {
     uint wv[8];
     load_tile8(tile, lane, wv);
     const float scale = vload_half(lane, (const __global half*)(tile + 128));
     float gacc[M];
     #pragma unroll
-    for (uint r = 0; r < M; ++r) gacc[r] = 0.f;
+    for (uint r = 0; r < nr; ++r) gacc[r] = 0.f;
     #pragma unroll
     for (uint j = 0; j < 8; ++j) {
       float f[8];
       #pragma unroll
       for (uint k = 0; k < 8; ++k) f[k] = (float)((int)((wv[j] >> (4 * k)) & 0xFu) - 8);
       #pragma unroll
-      for (uint r = 0; r < M; ++r)
-        if (r < n) {
-          const ushort8 xv = vload8(0, x + xo[r] + g * GROUP + j * 8);
-          float a = 0.f;
-          a += f[0] * bf16f(xv.s0);
-          a += f[1] * bf16f(xv.s1);
-          a += f[2] * bf16f(xv.s2);
-          a += f[3] * bf16f(xv.s3);
-          a += f[4] * bf16f(xv.s4);
-          a += f[5] * bf16f(xv.s5);
-          a += f[6] * bf16f(xv.s6);
-          a += f[7] * bf16f(xv.s7);
-          gacc[r] += a;
-        }
+      for (uint r = 0; r < nr; ++r) {
+        const ushort8 xv = vload8(0, x + xo[r] + g * GROUP + j * 8);
+        float a = 0.f;
+        a += f[0] * bf16f(xv.s0);
+        a += f[1] * bf16f(xv.s1);
+        a += f[2] * bf16f(xv.s2);
+        a += f[3] * bf16f(xv.s3);
+        a += f[4] * bf16f(xv.s4);
+        a += f[5] * bf16f(xv.s5);
+        a += f[6] * bf16f(xv.s6);
+        a += f[7] * bf16f(xv.s7);
+        gacc[r] += a;
+      }
     }
     #pragma unroll
-    for (uint r = 0; r < M; ++r)
-      if (r < n) acc[r] += gacc[r] * scale;
+    for (uint r = 0; r < nr; ++r) acc[r] += gacc[r] * scale;
   }
+}
+// n <= M rows (rows past n: acc 0).
+inline void tile_dot_rows(const __global uint* restrict tile, const __global ushort* restrict x, __private const uint* xo,
+                          uint n, uint g0, uint g1, uint lane, __private float* acc) {
+  #pragma unroll
+  for (uint r = 0; r < M; ++r) acc[r] = 0.f;
+  if (n >= M) tile_dot_nr(tile, x, xo, M, g0, g1, lane, acc);
+#if M > 1
+  else if (n == 1) tile_dot_nr(tile, x, xo, 1, g0, g1, lane, acc);
+#endif
+#if M > 2
+  else if (n == 2) tile_dot_nr(tile, x, xo, 2, g0, g1, lane, acc);
+#endif
+#if M > 3
+  else if (n == 3) tile_dot_nr(tile, x, xo, 3, g0, g1, lane, acc);
+#endif
+#if M > 4
+  else tile_dot_nr(tile, x, xo, n, g0, g1, lane, acc);   // M 5..8: n 4 .. M - 1 not specialised
+#endif
 }
 #if SHARED_BF16
 // q4_moe.cl's bf16_dot over n <= M rows: each k-octet's weights loaded once, per row the same chain.
@@ -259,12 +274,31 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   const uint set = get_group_id(1) * SLOTS + get_group_id(0) / (NT_UP / 4);
   const uint blk = get_group_id(0) % (NT_UP / 4);
   const uint n_tile = blk * 4 + tile_idx;
-  uint id[PREG], own[PREG], fl[PREG], rk[PREG], mf[PREG], mpos[PREG];
-  const uint nd = q4_union_sg(route, lane, id, own, fl, rk);
-  if (set > nd) return;   // uniform: fewer distinct experts than set
+  __local uint s_nd, s_e, s_n, s_rs[NPAIR > M ? NPAIR : M];   // the set's expert and its pairs' [row][slot] places
+  if (sg == 0) {   // the schedule once a work-group (sub-group 0's registers), shared through SLM
+    uint id[PREG], own[PREG], fl[PREG], rk[PREG], mf[PREG], mpos[PREG];
+    const uint nd = q4_union_sg(route, lane, id, own, fl, rk);
+    uint e = 0, n_all = M;
+    if (set == 0) {
+      if (lane < M) s_rs[lane] = lane * SLOTS + SHARED_SLOT;
+    } else if (set <= nd) {
+      n_all = q4_union_set(lane, set - 1, id, own, fl, rk, &e, mf, mpos);
+      #pragma unroll
+      for (uint i = 0; i < PREG; ++i) {
+        const uint p = lane + SG * i;
+        if (mf[i]) s_rs[mpos[i]] = (p / MOE_K) * SLOTS + p % MOE_K;
+      }
+    }
+    if (lane == 0) {
+      s_nd = nd;
+      s_e = e;
+      s_n = n_all;
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (set > s_nd) return;   // uniform: fewer distinct experts than set
   const bool shared = set == 0;
-  uint e = 0;
-  const uint n_all = shared ? M : q4_union_set(lane, set - 1, id, own, fl, rk, &e, mf, mpos);
+  const uint e = s_e, n_all = s_n;
 #ifdef UNION_COUNT
   if (lid == 0) atomic_inc(cnt + (shared ? MOE_E : e));
 #endif
@@ -275,9 +309,7 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
     uint xo[M], rs[M];   // the pair's x row and its [row][slot] place
     #pragma unroll
     for (uint r = 0; r < M; ++r) {
-      const uint i = base + min(r, n - 1);
-      const uint p = shared ? 0u : q4_pair_at(lane, i, mf, mpos);
-      rs[r] = shared ? i * SLOTS + SHARED_SLOT : (p / MOE_K) * SLOTS + p % MOE_K;
+      rs[r] = s_rs[base + min(r, n - 1)];
       xo[r] = (rs[r] / SLOTS) * HIDDEN;
     }
     float acc[M];
