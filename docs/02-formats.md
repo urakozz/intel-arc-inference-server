@@ -13,7 +13,6 @@ one canonical on-card layout at load time.
 | Candidate | Verdict |
 |-----------|---------|
 | FP8 | Rejected. 8 bits a weight is twice int4's traffic on a decode that is bandwidth-bound, and there is no reachable FP8 matrix multiply on this card at all: the compiler declares only the scaled forms and the backend crashes on them ([01-hardware.md](01-hardware.md)). Its whole advantage elsewhere is hardware this card lacks. |
-| another stack IR | Rejected as a runtime format. It is a graph-and-weights container tied to the another stack runtime; adopting it means adopting another stack's execution model, which is the thing this project exists to replace. `another stack` is worth reading for its scheduling ideas, not for its file format. |
 | MXFP4 | Rejected on this card. The backend refuses FP4 DPAS by name and every microscaling entry point crashes the compiler, so MXFP4 would have to be emulated as int4 plus a decode in the ALU, with block scales applied outside the instruction. At an effective 4.25 bits a weight it is also byte-identical to GPTQ g64, so it buys nothing for a bandwidth-bound decode either. |
 | int4 GPTQ | Supported; the same tensor layout as AutoRound (below). |
 | int4 AutoRound | The primary format: the best accuracy at 4 bits of the options we have checkpoints for. |

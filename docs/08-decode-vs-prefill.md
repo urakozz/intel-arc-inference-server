@@ -2,7 +2,7 @@
 
 This is the central idea of the project, and most of the other design choices follow from it. Read it before
 writing a kernel: if you read only one document here, make it this one. It explains why generating one token
-(decode) and reading a prompt (prefill) need different kernels, what another stack and vLLM do about it, and how this
+(decode) and reading a prompt (prefill) need different kernels, what vLLM does about it, and how this
 engine's prefill path was arrived at.
 
 ## The two regimes
@@ -27,28 +27,23 @@ multiply-accumulate as they arrive.
 That is why "use XMX harder" is the wrong instinct for decode, and why a kernel that ignores XMX can beat one that
 uses it.
 
-## What another stack does
+## What a decode kernel looks like
 
-The following was verified in another stack's source.
+A decode kernel is a dedicated GEMV (matrix times vector), selected only when the batch dimension is exactly 1. The
+design that works:
 
-For decode it has a dedicated GEMV kernel (matrix times vector),
-`src/plugins/intel_gpu/src/kernel_selector/cl_kernels/fully_connected_gpu_gemv.cl`, selected only when the batch
-dimension is exactly 1. It works like this:
-
-- `intel_reqd_sub_group_size(16)`: it runs SIMD16 and `#error`s on anything else.
+- It runs SIMD16 (`intel_reqd_sub_group_size(16)`).
 - `sub_group_block_read` for the weights: coalesced, full-width streaming from memory.
-- int4 is dequantised inline in the accumulation loop, stepping by `DECOMPRESSION_GROUP_SIZE`, with no separate
+- int4 is dequantised inline in the accumulation loop, stepping by the quantisation group size, with no separate
   dequant pass and no temporary buffer.
 - The activations are held in registers and `sub_group_broadcast` to all lanes; the vector is tiny and fully reused.
-- Accumulation is plain scalar FMA on `half`.
+- Accumulation is plain scalar FMA.
 - The outer loop runs a per-work-group K-range, that is split-K: the reduction dimension K is divided among
   work-groups whose partial sums are added at the end. That is what fills 256 EUs when the output has only a few
   thousand elements.
 
-There is not a single `matrix_mad` or DPAS intrinsic in any another stack `.cl` kernel: its own OpenCL kernels never
-touch XMX. For decode that is a correct and deliberate choice.
-
-For prefill, another stack delegates to oneDNN, which supports compressed weights and does use XMX.
+There is no `matrix_mad` or DPAS intrinsic in such a kernel: it never touches XMX. For decode that is a correct and
+deliberate choice. Prefill is the opposite regime and goes through matrix-engine GEMMs.
 
 ## What vLLM does
 
@@ -70,16 +65,16 @@ Two independent observations confirm that this, and not kernel quality, is the l
 The measured memory bandwidth utilisation of 50-63% on those models is the direct consequence. The full story is in
 [09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md).
 
-## The gap neither engine serves: M = 2..8
+## The gap a plain GEMV leaves: M = 2..8
 
-| `M` | another stack | vLLM | What the problem actually is |
-|-----|----------|------|---------|
-| 1 | dedicated GEMV | 8-row tile, 7/8 wasted | bandwidth-bound |
-| 2-8 | falls back to oneDNN | tile partly used | bandwidth-bound, weights can be shared |
-| large | oneDNN | XMX tiles | compute-bound |
+| `M` | vLLM | What the problem actually is |
+|-----|------|---------|
+| 1 | 8-row tile, 7/8 wasted | bandwidth-bound |
+| 2-8 | tile partly used | bandwidth-bound, weights can be shared |
+| large | XMX tiles | compute-bound |
 
-another stack's GEMV is gated strictly at `M == 1`, so the moment speculative decoding produces two or more tokens it
-drops onto a general path. vLLM's tile becomes fully used only at `M = 8`.
+A GEMV gated strictly at `M == 1` drops onto a general path the moment speculative decoding produces two or more
+tokens. vLLM's tile becomes fully used only at `M = 8`.
 
 Weights dominate decode traffic and activations are negligible, so the right kernel for `M` in 2..8 is
 weight-stationary: stream each weight tile once and multiply it into all `M` activation vectors held in registers,
@@ -89,7 +84,7 @@ it, because otherwise speculation costs a full weight read for every row it chec
 The engine has that kernel. Speculative decoding (the model's MTP head, a DFlash draft model, prompt lookup) makes
 `M` 2..8 on every verify step, and those steps run a small-batch DPAS GEMM, `gemm_sm`
 ([12-kernels.md](12-kernels.md)), that reads each weight tile once for all `M` rows. Verifying 8 rows went from the
-cost of 3.17 plain decode steps to 1.57 (measured on a busy box; the table is in [BENCHMARKS.md](BENCHMARKS.md)).
+cost of 3.17 plain decode steps to 1.57 (measured on a busy box; the table is in the benchmark record).
 `M = 1` keeps the GEMV, bit for bit.
 
 ## Design rules that follow
@@ -119,12 +114,12 @@ cost of 3.17 plain decode steps to 1.57 (measured on a busy box; the table is in
 
 ## Prefill: the path we took, and the one that did not work
 
-Both vLLM and another stack run prefill as W4A16: bf16 activations against int4 weights. On Xe2 that means the weights
+vLLM runs prefill as W4A16: bf16 activations against int4 weights. On Xe2 that means the weights
 are upconverted to 16 bits in the GEMM's main loop before the systolic array sees them.
 
 Battlemage also has a native mixed int8 x int4 DPAS that skips the upconversion. Its only condition is that the int4
-matrix has no zero points, which symmetric checkpoints satisfy. That looked like the clearest way to beat both
-engines rather than match one.
+matrix has no zero points, which symmetric checkpoints satisfy. That looked like the clearest way to beat
+vLLM rather than match it.
 
 It was built, and it lost. The mixed instruction's K is 32, the same as int8's, so it runs at 2.000x bf16 and not
 4x. The per-group rescale it needs costs more than the instruction rate buys. And int8 activations cost 2.79%
@@ -225,21 +220,13 @@ from the first full-attention layer on and moves GDN layer 0's state 20x to 60x 
 in the clean band. So the discriminating checks of `prefill_split_l0_test` and `prefill_split_l0-int8_test` are the
 shallow-layer rows and GDN layer 0's state, with splits at multiples of 64 bitwise, and not the last logits.
 
-## Summary: where each engine wins
+## Summary: vLLM and this project
 
-| | vLLM | another stack | This project |
-|---|---|---|---|
-| Decode `M=1` | 8-row tile, no split-K | dedicated GEMV | GEMV with per-shape split-K |
-| Decode `M=2..8` | tile partly used | falls back to oneDNN | small-batch DPAS GEMM `gemm_sm`, weights read once for all rows |
-| Prefill | W4A16 XMX tiles | W4A16 via oneDNN | W4A16, own DPAS GEMM, zero host waits |
+| | vLLM | This project |
+|---|---|---|
+| Decode `M=1` | 8-row tile, no split-K | GEMV with per-shape split-K |
+| Decode `M=2..8` | tile partly used | small-batch DPAS GEMM `gemm_sm`, weights read once for all rows |
+| Prefill | W4A16 XMX tiles | W4A16, own DPAS GEMM, zero host waits |
 
 Prefill is ahead of vLLM. Decode at `M=1` was about 5% behind it in the last matched comparison
-([BENCHMARKS.md](BENCHMARKS.md)). The kernel for `M` in 2..8 that motivated the original idea exists here.
-
-## Still open
-
-Why another stack's prefill is slower than vLLM's is not established ([07-open-questions.md](07-open-questions.md)).
-oneDNN does use XMX and does handle int4, so "it does not use XMX" is not the explanation: both engines upconvert
-int4 in a W4A16 main loop. The remaining plausible causes, untested, are that oneDNN's generic path is less tuned for
-Battlemage than sycl-tla's Battlemage-specific tiles, and that layout reorders cost an extra pass. Profile both
-before assuming a design.
+(the benchmark record). The kernel for `M` in 2..8 that motivated the original idea exists here.

@@ -51,7 +51,7 @@ constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kIters = 64;
 constexpr uint32_t kHooked = 4103;   // 2048 + 2048 + 7: two mid-prompt block ends
 // A device-1 chunk of 2048 rows is well under a second at these lengths (one card's whole chunk
-// is ~1 s at 4k, docs/BENCHMARKS.md); the hook waits longer than that.
+// is ~1 s at 4k, the benchmark record); the hook waits longer than that.
 constexpr uint32_t kHookSleepMs = 1500;
 
 // What a run leaves, compared bitwise across the engines.

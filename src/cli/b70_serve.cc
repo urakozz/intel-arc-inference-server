@@ -132,7 +132,7 @@ struct Flags {
                     "the whole model is served, the experts that do not fit the cards read from pinned\n"
                     "host memory. Its PLE int8 file is <snapshot>-ple-int8/.")]]
   Arg<std::string> layers;   // spec 21-QFN-v1e (until spec 22)
-  [[=Section("\n  Still being measured (they go when their numbers decide, docs/open-work.md):\n"),
+  [[=Section("\n  Still being measured (they go when their numbers decide):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
   std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
   [[=Help("l0|l0-int8", "the prompt pass: bf16, or int8 on the matrix engines.", "l0")]] Arg<std::string> prefill_backend;
@@ -481,10 +481,9 @@ void print_proposer(const server::Options& options, bool spec_lookup, uint32_t s
     std::print(stderr, "mtp auto: ");
     print_cost_table(options.mtp_adaptive.cost);
     // A MoE model's verify at M rows touches up to top_k x M distinct experts, so its costs differ from Qwen3.8's;
-    // Ornith's measured table (docs/BENCHMARKS.md) was 6-10 % slower in the speed A/B than Qwen3.8's, so it keeps these.
+    // Ornith's measured table (the benchmark record) was 6-10 % slower in the speed A/B than Qwen3.8's, so it keeps these.
     if (moe_default_costs)
-      std::print(stderr, "mtp auto: {} runs on Qwen3.8's table (its own measured one decoded slower, "
-                         "docs/BENCHMARKS.md)\n",
+      std::print(stderr, "mtp auto: {} runs on Qwen3.8's table (its own measured one decoded slower)\n",
                  model_name.c_str());
   }
 }

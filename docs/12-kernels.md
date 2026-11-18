@@ -65,7 +65,7 @@ cache line, and so is the probes' data.
 
 Most per-kernel numbers were taken in August and September 2026 on the first driver stack, on one card at a
 context depth of 4096. They are kept as dated evidence for why a kernel is shaped as it is, not as today's speed.
-Today's speeds are in [BENCHMARKS.md](BENCHMARKS.md).
+Today's speeds are in the benchmark record.
 
 ---
 
@@ -91,7 +91,7 @@ bind the same kernels compiled for M rows, with `gemm_sm` in place of `gemv` for
 in place of `attn_decode_v2` where the depth rule says so.
 
 Plain decode on one card runs at about 33.5 tokens/s at depth 4096, with the int8 `lm_head` and a bf16 KV cache
-(the tensor-parallel table in [BENCHMARKS.md](BENCHMARKS.md) has the row; the older decode rows there use the
+(the tensor-parallel table in the benchmark record has the row; the older decode rows there use the
 bf16 head). Decode is a stream of weight reads, and the GEMV family was about 69% of the step in the anatomy
 below, so most of the work in this doc is about reading the weights at the memory system's rate.
 
@@ -273,7 +273,7 @@ The weight is stored `[n_tile][k16][16 k][16 n]`, so one `intel_sub_group_block_
 `k` bytes, and the scale is applied once to the fp32 sum, `(x · q) · s`, rather than per element. It is one
 ascending chain over `k` with no atomic and no data-dependent branch, so replays are bitwise.
 
-Measured in situ on 2026-09-28 ([BENCHMARKS.md](BENCHMARKS.md), "int8 lm_head"): 2205 µs at 577 GB/s, 99.6% of
+Measured in situ on 2026-09-28 (the benchmark record, "int8 lm_head"): 2205 µs at 577 GB/s, 99.6% of
 the bf16 launch's rate, so the halved bytes are the whole 2.0 ms a token saved. The accuracy rules for the head
 are in that section.
 
@@ -398,7 +398,7 @@ the other rows hold, and that is why the tuning table needs no M column.
 
 On one card with the int8 head at depth 4096, on a busy box, 2026-11-01: the verify step costs 1.04 / 1.09 / 1.14 /
 1.18 / 1.30 / 1.36 / 1.57 plain steps at M = 2..8, against `gemv`'s 1.16 up to 3.17
-([BENCHMARKS.md](BENCHMARKS.md), "The verify step on gemm_sm").
+(the benchmark record, "The verify step on gemm_sm").
 
 ### `gemm_sm_wide` - the same rows past 16
 
@@ -693,7 +693,7 @@ reference, through one closed list replayed once per case. After every replay `o
 Rejected: a global atomic max (determinism); one work-group scanning all 248320 logits (993 KB of streaming on one
 Xe-core of 32); `work_group_reduce_max`, which cannot carry the index and whose order cannot be stated; packing
 (value, index) into a `ulong` (not needed). Sampling with temperature, top-p and top-k is not this kernel; it runs
-on the host at about 0.54 ms/token ([BENCHMARKS.md](BENCHMARKS.md), "Host sampling"), and greedy decoding is
+on the host at about 0.54 ms/token (the benchmark record, "Host sampling"), and greedy decoding is
 unaffected by it.
 
 Measured on 2026-08-25: 4.39 µs per token for both stages, with the same method and short-burst caveat as
@@ -913,7 +913,7 @@ ablation that removes all the barriers prices the average barrier, which is the 
 seven.
 
 v1 against v2, measured with `probe_decode_attn ab` (one engine with both lists captured over the same buffers;
-[BENCHMARKS.md](BENCHMARKS.md), "Decode attention at depth", 2026-09-28, bf16 head): the whole decode step took
+the benchmark record, "Decode attention at depth", 2026-09-28, bf16 head): the whole decode step took
 33.72 against 31.84 ms at depth 4096, and 98.36 against 49.68 ms at depth 130816 (10.2 to 20.1 tokens/s). v2
 matches v1 on real data to one bf16 ulp (cosine 0.999999491 at 65536 keys).
 
@@ -1069,7 +1069,7 @@ M = 1 always, and DPAS at M >= 2 from a measured depth. For bf16: M = 2 from 115
 (bf16, M = 2), 1.71 (M = 4) and 8.22 (M = 8), timed on a busy box. A later long-context rework (int8 K by 2D reads,
 S split by key atom, P·V by dimension atom) made the whole verify step at 150k keys 11.4% faster in bf16 and 20.5%
 faster in int8, bitwise the previous kernel. Re-timing on that kernel would move four of the thresholds, but each
-move changes rounding, so they stay until the f32 judge has checked them ([open-work.md](open-work.md)).
+move changes rounding, so they stay until the f32 judge has checked them (tracked as open work).
 
 The 16-row line, for prompt lookup's wide verify, takes the same split at one key slice. Each row block's two
 sub-groups compute one key atom of the scores each and swap them through SLM (`PAIR`); 8 more sub-groups make 32
@@ -1119,7 +1119,7 @@ engine's own OpenCL C kernels on the same in-order command list as everything el
 replaced was removed on 2026-10-27). With the default flash attention a full chunk is `1 + 48 × 135 + 16 × 123 =
 8449` launches (derived from the walk in `src/runtime/prefill/step.cc`, and asserted by `prefill_smoke_test`
 through `Context::launches()`); `step_head` adds 5 once per `prefill()`. Short chunks use fewer launches (below).
-Where the time goes, per phase, is in [BENCHMARKS.md](BENCHMARKS.md).
+Where the time goes, per phase, is in the benchmark record.
 
 ### The small kernels, transcribed from decode
 
@@ -1384,7 +1384,7 @@ The question in September 2026 was how to make `pf_flash_attn` faster. It took 1
 - The structural ceiling is operand bandwidth. With 8 rows per sub-group every K and V B-operand serves one
   `dpas.8x8`: 576 B of operands per DPAS, against the production GEMM's 192 B. Going past vLLM needs 16 or 32 rows
   per sub-group, which at head_dim 256 forces O to be split on the dimension across sub-groups with P exchanged
-  through SLM (what oneDNN and IPEX do); whether that is needed was left to a probe. Estimated remaining levers:
+  through SLM (what oneDNN does); whether that is needed was left to a probe. Estimated remaining levers:
   cooperative 2D prefetch of the next K and current V plus a split barrier per tile (1.1× to 1.3×), the split
   dimension (1.3× to 1.8× beyond that), and larger K messages (1.0× to 1.1×).
 - What shipped: 8 rows per work-group first (attention 101 ms, from 117), then `exp2` as well (81 ms). The `exp2`

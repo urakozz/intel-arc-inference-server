@@ -869,7 +869,7 @@ add_test(NAME slot_plan_test COMMAND slot_plan_test)
 # whatever revision was downloaded last, not necessarily one this
 # loader accepts: refs/main has pointed at a snapshot whose config.json carries
 # a broken non-exclusion dynamic-quant rule that src/loader/quant.cc correctly
-# refuses (see BENCHMARKS.md). A bare `ctest` must not depend on that pointer,
+# refuses (see the benchmark record). A bare `ctest` must not depend on that pointer,
 # so every add_test below for these five passes a snapshot directory
 # explicitly - resolve_snapshot takes a directory verbatim, bypassing
 # refs/main entirely. An overridable default rather than a hardcoded path: a

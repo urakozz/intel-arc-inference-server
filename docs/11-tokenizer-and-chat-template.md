@@ -86,7 +86,6 @@ carries `cur_token` out, and the host detokenises it while the next replay runs.
 |---|---|---|---|---|
 | HF `tokenizers` (Rust) via C FFI | exact: it is the reference | a Rust toolchain in the build; a 16 MB static archive | yes (a Rust static lib links fine) | what is built |
 | `tokenizers-cpp` (MLC) | exact: wraps the same Rust crate, adds SentencePiece | the same Rust dependency plus a C++ shim we would only half use | yes | acceptable, but buys little over the crate directly |
-| `another tokenizer` | exact | pulls in the another stack runtime, which this project exists not to depend on | no | rejected |
 | Hand-written byte-level BPE in C++ | must be proven: the pre-tokenizer regex and Unicode categories are where ports diverge | none, but needs a Unicode-aware regex or a hand-compiled matcher for Qwen's fixed pattern | yes | the end state if owning every dependency matters, not the starting point |
 
 ### What is built
@@ -109,9 +108,8 @@ swap safe, so it was written first and is kept permanently.
 Qwen's templates are real Jinja: loops over messages, `if` on roles, tool-call blocks, a thinking toggle.
 Substituting `{role}\n{content}` by hand breaks on the first multi-turn request.
 
-The renderer is `google/minja`, a header-only C++ subset of Jinja built for exactly this job. `another stack`
-uses it, and therefore another server does; `llama.cpp` uses it too. It is one header with no runtime
-dependency and links statically. `chat::Template` runs over `google/minja` and `nlohmann/json v3.12.0`, both
+The renderer is `google/minja`, a header-only C++ subset of Jinja built for exactly this job. It is one header with no runtime dependency and links
+statically. `chat::Template` runs over `google/minja` and `nlohmann/json v3.12.0`, both
 pinned by source URL and header SHA-256 in `third_party/VERSIONS`. The `transformers` parity vectors for the
 Qwen3.8 checkpoint match byte for byte: thinking on renders 565 bytes, thinking off 367 bytes, and the
 one-function tools case 1547 bytes.
@@ -120,8 +118,8 @@ one-function tools case 1547 bytes.
 
 The checkpoint's `chat_template.jinja` (SHA-256
 `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`) uses Jinja's `is undefined` test, which minja
-does not support. `another stack` handles such cases with a per-model fallback map, and `chat::Template` copies
-the idea, not the file: for exactly that template hash, and no other, it rewrites that one construct to minja's
+does not support. A per-model fallback is the usual way to handle such cases, and `chat::Template` does that:
+for exactly that template hash, and no other, it rewrites that one construct to minja's
 equivalent `is not defined`, without editing the checkpoint's file.
 
 Beyond that, the bundled minja is patched in the places where it behaved differently from Jinja: Undefined kept
@@ -155,7 +153,7 @@ copy prompts against the reference tokenizer's ids (2026-11-03).
 
 Byte-level BPE tokens are byte sequences, not characters. A multi-byte code point (any CJK character, most emoji)
 can straddle two tokens, so decoding one token at a time emits U+FFFD replacement characters in the middle of a
-character. The standard fix, as `another stack`'s text streamer implements it, is:
+character. The standard fix is a hold-and-flush streamer:
 
 1. keep the ids since the last flush;
 2. decode the whole pending run, not just the last token;
@@ -163,7 +161,7 @@ character. The standard fix, as `another stack`'s text streamer implements it, i
 4. otherwise emit the suffix after `m_printed_len` and advance the cursor;
 5. flush on a newline to bound how long a run can be held.
 
-another server subclasses that streamer, and vLLM does the same thing with a prefix diff over
+vLLM does the same thing with a prefix diff over
 `(prefix_offset, read_offset)`. Here it is `tok::Streamer` in `src/tokenizer/streamer.*`: the SSE layer calls
 `push(id)` and gets back zero or more UTF-8-complete strings. On the 10,240-case corpus it has zero concatenation
 mismatches and zero spurious U+FFFD emissions, and the longest run it ever holds is 4 ids.
@@ -195,7 +193,7 @@ tokens against the CLI's 2919.6 ms, a difference of -3.77 ms, indistinguishable 
 framing add nothing on top of the device-side prefill, and detokenisation overlaps the next replay.
 
 Host sampling (temperature, top-k, top-p) measured 0.537 ms/token against a 0.62 ms bar and is on by default.
-Every row is in [BENCHMARKS.md](BENCHMARKS.md).
+Every row is in the benchmark record.
 
 ## What it costs the design
 

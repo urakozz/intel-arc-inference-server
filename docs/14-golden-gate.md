@@ -205,10 +205,10 @@ The trust chain has a ceiling the gate alone cannot lift. The C++ loader and the
 dequantisation convention, bit for bit, by `dequant_fixture_test`. So a convention that is wrong about how the
 checkpoint's author packed the nibbles would move the engine and the oracle together, and the gate would still pass.
 
-Closing that needs a third implementation that shares nothing with either. `tools/oracle/vllm_check.py` is it. It
-hands the three committed `.ids` files to an offline `vllm.LLM` as `prompt_token_ids`, so no tokenizer is involved on
-either side and a tokenizer difference cannot pose as a token difference. It reads the oracle's `tokens` tensor
-straight from the golden `.safetensors`, not from a derived copy, and exits 0 only if every id matches.
+Closing that needs a third implementation that shares nothing with either. A one-off offline vLLM run was it. It
+handed the three committed `.ids` files to an offline `vllm.LLM` as `prompt_token_ids`, so no tokenizer is involved on
+either side and a tokenizer difference cannot pose as a token difference. It read the oracle's `tokens` tensor
+straight from the golden `.safetensors`, not from a derived copy, and passed only if every id matched. The script has since been removed; the result stands as recorded.
 
 The result: 96 of 96 ids equal across the three prompts. All three implementations agree.
 
@@ -339,4 +339,4 @@ this project that really competes for the host.
 the box; it does not gate a merge. It counts passed, failed and skipped tests separately, because a skipped test, such
 as the gate with no golden set present, is not a pass. The tests that need checkpoints and golden sets run as stages
 of the box validation (`tools/box_validate.sh`), on demand, and a test whose inputs are byte-identical to a recorded
-pass keeps that pass. What has not been run yet is listed in [open-work.md](open-work.md).
+pass keeps that pass. What has not been run yet is tracked as open work.

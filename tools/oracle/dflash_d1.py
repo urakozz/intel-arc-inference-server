@@ -67,7 +67,7 @@ def cosine(a, b) -> float:
 # The walk near-tie's noise factor: a split is a near-tie when its margin is within max(WALK_TIE_NOISE_X x the row's
 # own engine-vs-reference score noise, 1 bf16 ulp of the top score).
 # Ruling 2026-11-07 (r54.d1_ref: one int8 draft, a4/t2_explain-step p 1042, splits at a 0.004 dead heat after
-# spec 28d's GEMM change, cosine 0.9999979): measure that draft first (the command in docs/open-work.md, Waiting, row
+# spec 28d's GEMM change, cosine 0.9999979): measure that draft first (the command in the open-work list, Waiting, row
 # 19), then widen the window to twice the row's noise if the measurement confirms it is a rounding split.
 # ENABLED 2026-11-08 on the measurement (box CPU, both int8 arms): the split at row 4 has the reference's margin
 # 0.33336 against a row noise of 0.18675 (1.8 x the noise; 1 bf16 ulp 0.1250) while the engine's own margin is 0.00430 -

@@ -53,7 +53,7 @@ struct QuantConfig {
   // Takes the whole config.json value and reads its quantization_config.
   // Throws unless bits==4, group_size is 64 or 128, sym, and desc_act is false
   // or absent; throws on any "+:" dynamic rule that is not an exact restatement
-  // of the top level (the known-broken checkpoint pattern, BENCHMARKS.md: a
+  // of the top level (the known-broken checkpoint pattern, the benchmark record: a
   // "+:" rule that changes bits / group_size / sym, carries any other key, omits
   // one of the three or is empty); throws on an `extra_config` module that would be
   // quantised at anything but g64 / g128 sym int4, and on an unknown

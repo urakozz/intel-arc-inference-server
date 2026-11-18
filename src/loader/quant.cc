@@ -380,7 +380,7 @@ QuantConfig QuantConfig::parse(const common::json::Value& config_json) {
       }
       throw std::runtime_error(
           "quantization_config.dynamic has a non-exclusion rule '" + rule +
-          "' - this is the broken-MTP-config pattern (BENCHMARKS.md); fix the checkpoint" +
+          "' - this is the broken-MTP-config pattern; fix the checkpoint" +
           (rule.rfind("+:", 0) == 0 ? " (a \"+:\" rule is accepted only as an exact restatement of the top level: "
                                       "exactly bits, group_size and sym, each equal to it)"
                                     : ""));

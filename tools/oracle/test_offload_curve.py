@@ -344,7 +344,7 @@ def test_tp_spec_table():
 
 
 def test_swap_policies():
-    """basalt's and saber's placements: a copy that never lands is the static fill (h and 0 copies); saber promotes an
+    """the adaptive and second-chance placements: a copy that never lands is the static fill (h and 0 copies); second chance promotes an
     expert on its second miss within 8 steps (a layer alternating between two cold experts gains), and reads through
     when a layer misses on more than half its slots."""
     L, k, E, T = 2, 2, 16, 200
@@ -359,21 +359,21 @@ def test_swap_policies():
     static, total = OC.hit_rate([t], res)
     assert static == T * L
     for w in (1, 8):
-        h, n, c = OC.policy_basalt(t, res, w, math.inf, 25.0)
+        h, n, c = OC.policy_adaptive(t, res, w, math.inf, 25.0)
         assert (h, n, c) == (static, total, 0), (w, h, c)
-    h, n, c = OC.policy_saber(t, res, prof, math.inf, 25.0)
+    h, n, c = OC.policy_second_chance(t, res, prof, math.inf, 25.0)
     assert (h, n, c) == (static, total, 0)
-    h, n, c = OC.policy_saber(t, res, prof, 0.2, 25.0)
+    h, n, c = OC.policy_second_chance(t, res, prof, 0.2, 25.0)
     assert c == 2 * L and h == total - 4 * L, (h, c, total)   # misses at steps 0-3; 8 and 9 land for steps 4 and 5
     # reads through: both slots miss (more than half) -> nothing promoted
     ids2 = np.stack([8 + (np.arange(T) % 2), 10 + (np.arange(T) % 2)], -1)[:, None, :].repeat(L, 1)
     write_trace(os.path.join(TMP, "policies2"), "q4exp_agentic", ids2, experts=E, mtp=False)
     t2 = OC.load_traces(os.path.join(TMP, "policies2"))[0]
-    h, n, c = OC.policy_saber(t2, res, prof, 0.2, 25.0)
+    h, n, c = OC.policy_second_chance(t2, res, prof, 0.2, 25.0)
     assert (h, c) == (0, 0), (h, c)
-    h, n, c = OC.policy_basalt(t, res, 1, 0.2, 25.0)
+    h, n, c = OC.policy_adaptive(t, res, 1, 0.2, 25.0)
     assert h > static and c > 0, (h, c)
-    print(f"  never landing = static; saber: second chance on 8 / 9, read-through; basalt gains ({h}/{n}, {c} copies)")
+    print(f"  never landing = static; second chance on 8 / 9, read-through; adaptive gains ({h}/{n}, {c} copies)")
 
 
 def test_project_stop_flips():

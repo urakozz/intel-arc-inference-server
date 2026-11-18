@@ -143,7 +143,7 @@ struct Flags {
   bool profile = false;
   [[=Help("N", "--profile: instrumented steps.")]] Arg<uint32_t> steps{32};
   [[=Help("R", "--profile: R sessions over one ingest, a per-family mean +/- spread table.")]] Arg<uint32_t> repeats{1};
-  [[=Section("\nstill being measured (they go when their numbers decide, docs/open-work.md):\n"),
+  [[=Section("\nstill being measured (they go when their numbers decide):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
   std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
   [[=Help("l0|l0-int8", "--prefill-length / --prefill: bf16, or int8 on the matrix engines.", "l0")]]
@@ -587,7 +587,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
       "  - The gap is NOT a dispatch cost this engine pays: subtract the flush\n"
       "    (probe_replay's 0.52 us/kernel is the unprofiled estimate; docs/15 \"The dispatch gap\").\n"
       "  - The fence wall above is inflated by the same flushes and is NOT ms/token.\n"
-      "    The recorded step time is the --bench median in docs/BENCHMARKS.md.\n"
+      "    The recorded step time is the --bench median.\n"
       "  - A mean without a spread is not an attribution: run --repeats R (R >= 5) before\n"
       "    claiming a delta under ~0.3 ms, and read the floor off the table above.\n");
   return 0;
@@ -1155,7 +1155,7 @@ int run(int argc, char** argv) {
   // --bench. One shape, one row, and the decomposition that makes the row
   // actionable. Nothing here is tuned or retried: the number printed is the
   // number the run produced. tools/bench_decode.sh is what runs it three times
-  // and takes the median; docs/BENCHMARKS.md records that median.
+  // and takes the median; the recorded step time is that median.
   eng.generate(tg);
   report_generate(eng, tg);
 
@@ -1202,7 +1202,7 @@ int run(int argc, char** argv) {
              eng.last_tok_per_s(), ms_per_token);
   // The tg row above is byte-identical to what it always was, and the pp row
   // is a SECOND line rather than extra columns on it, so every existing parser
-  // of docs/BENCHMARKS.md's table keeps working (interfaces.md's CLI contract;
+  // of the benchmark record's table keeps working (interfaces.md's CLI contract;
   // tools/bench_decode.sh --prefill-length reads both).
   if (have_prefill_len)
     std::print("| b70-decode {}{} {} pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, head_tag.c_str(),
@@ -1210,7 +1210,7 @@ int run(int argc, char** argv) {
                pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), ingest_ms,
                ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::print(stderr,
-             "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"
+             "(measured, one run. The recorded figure is the median of three on an idle box;\n"
              " tools/bench_decode.sh is that harness. B70_GIT_SHA unset prints `unknown`.)\n");
   return 0;
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One command: z-lab/Qwen3.8-27B-DFlash2 (bf16) -> our AutoRound W4A16 g64 symmetric drafter, tuned on the
-# QUANTISED target's taps over the training opencode recordings (docs/open-work.md, "DFlash drafter quant").
+# QUANTISED target's taps over the training opencode recordings (the open-work list, "DFlash drafter quant").
 #
 #   tools/quantize/quantize_dflash.sh start              start (or resume) the run, detached; on the box
 #   tools/quantize/quantize_dflash.sh status             stages done, taps dumped, AutoRound's block, the result

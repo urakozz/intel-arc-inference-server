@@ -79,7 +79,7 @@ The four modes:
   speed, but each card holds only half the weights, so it serves models that are too big for one card or have no
   tensor-parallel path. The prefix cache and the MTP head work across the split.
 
-Speed numbers per mode are in [BENCHMARKS.md](BENCHMARKS.md).
+Speed numbers per mode are in the benchmark record.
 
 ### Several requests at once: `--max-num-seqs`
 
@@ -173,7 +173,7 @@ DFlash on one card for one session, and the server says so at startup, recommend
 
 Where speculative output differs from the plain run, it is checked against a float32 CPU reference, the f32 judge
 ([14-golden-gate.md](14-golden-gate.md)). Commands and measured speeds are in
-[17-running-models.md](17-running-models.md) and [BENCHMARKS.md](BENCHMARKS.md).
+[17-running-models.md](17-running-models.md) and the benchmark record.
 
 ## The prompt pass backends
 
@@ -417,7 +417,7 @@ The store is made of 2 GiB pieces for a two-card reason. On two cards the second
 allocation. A mapping larger than 4 GiB can fail in the kernel, which answers "busy", and the GPU driver retries a
 busy answer forever: a hang, not an error. So any host allocation that both cards use stays at or below 4 GiB.
 
-Results are in [BENCHMARKS.md](BENCHMARKS.md), "Prefix caching".
+Results are in the benchmark record, "Prefix caching".
 
 The server also owns the tokenizer and chat template. Both are host code on the request path: encode once per
 request, detokenise once per token, off the card's critical path and overlapping the next replay. Details are in

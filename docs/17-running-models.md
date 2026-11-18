@@ -8,7 +8,7 @@ variables in [environment-variables.md](environment-variables.md).
 How to read the numbers: generation speeds use MTP speculative decoding with prompt lookup on (the defaults), on the
 golden code, prose and tool-call prompts, 256 generated tokens; with several requests the figure is their total.
 Prefill speeds are the prompt pass alone, on a 4,096-token prompt. They come from the quiet-box session in
-[BENCHMARKS.md](BENCHMARKS.md). Context lengths are what the memory planner gives per card with the MTP head loaded.
+the benchmark record. Context lengths are what the memory planner gives per card with the MTP head loaded.
 
 ## Before you start
 
@@ -178,7 +178,7 @@ uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model <repo id> \
 ```
 
 Its `tg` and `pp` figures read the same way as against vLLM, because the server sends the role frame with the first
-token, after prefill, as vLLM does (BENCHMARKS.md explains the details). Its `pp` includes HTTP;
+token, after prefill, as vLLM does (the benchmark record explains the details). Its `pp` includes HTTP;
 `b70-decode --bench --prefill-length` gives the device-side prefill time.
 
 `b70-decode --ids` takes whitespace-separated token ids made with the checkpoint's own tokenizer. To make them, and to
@@ -235,7 +235,7 @@ bf16 ulps of the reference's top choice. Plain code paths are still checked bitw
   (the expert tier): pipeline parallel by default, tensor parallel when asked (`--parallel tp`: faster decode, slower
   prefill); speed rows are in BENCHMARKS. On our export, its served tool calls, judged against f32
   references of our weights, pass 33 of 36; the 3 failures are being diagnosed. The per-token quality checks against
-  the bf16 original have not been run yet ([open-work.md](open-work.md)).
+  the bf16 original have not been run yet (tracked as open work).
 - Kolibri-1 is supported by the code but not actively tuned, and has no speed rows.
 - No longer supported: Muse-Glimmer and Agnes 3.0 Flash. A `config.json` naming `AgnesForConditionalGeneration` is
   refused by name.

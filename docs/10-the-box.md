@@ -17,7 +17,7 @@ The box is a Linux workstation, a Dell T5810-class Broadwell-EP host, with two c
 |---|---|
 | OS | Linux. Ubuntu is what this was developed against; no Windows or macOS runtime exists |
 | CPU / RAM | a many-core CPU and, on this box, 121 GB of RAM: the CPU oracle wants about 70 GB free for a layer-streamed 27B forward. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not ([09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md)) |
-| GPU | 2 x Intel Arc Pro B70 (Battlemage / Xe2), 32 GB each. One card is enough for everything except the two-card modes (tensor parallel, replica, pipeline parallel; [BENCHMARKS.md](BENCHMARKS.md)); the second is also useful as an idle control |
+| GPU | 2 x Intel Arc Pro B70 (Battlemage / Xe2), 32 GB each. One card is enough for everything except the two-card modes (tensor parallel, replica, pipeline parallel; the benchmark record); the second is also useful as an idle control |
 | Driver | `libze_intel_gpu`, IGC and `intel-ocloc`. The B70 is `bmg-g31`, so kernels build with `ocloc -device bmg-g31` |
 | Level Zero | headers and loader from the distribution packages |
 | Host compilers | GCC 16 (`/usr/local/bin/g++-16.2`, the default the build picks; C++26 with static reflection, `-freflection`) and CMake 4.2 or later, plus `ccache`. GCC 16's `libstdc++` is newer than the system's: the binaries find it through their rpath (`/usr/local/lib64`), so no `LD_LIBRARY_PATH` is needed. The system `g++` 15.2 stays for other projects |
@@ -38,7 +38,7 @@ reference vLLM stack.
 
 This stack was installed on 2026-11-04 and changed both the compiler and the runtime, so speed rows in BENCHMARKS
 taken before that date come from the older stack (compute runtime 26.35, IGC 2.41.5) until they are re-measured on a
-quiet box ([open-work.md](open-work.md)).
+quiet box (tracked as open work).
 
 Kernel binaries cannot go stale silently. `cmake/ocloc_stamp.cmake` records `ocloc --version` and the real paths of
 the `libigc` / `libigdfcl` libraries the loader resolves, and rewrites a stamp file only when they change. Every
@@ -325,14 +325,14 @@ The two cards may not be interchangeable. In one session on 2026-09-05, with the
 lost 3.2% to 3.4% on the second card while decode lost only 0.2% to 0.4%: a difference in sustained compute rather
 than bandwidth. The likeliest cause found since is a hardware monitoring tool left open during that measurement, but
 it has not been re-measured ([07-open-questions.md](07-open-questions.md)). So the validation tooling keeps series rows
-on device 0, and every series row in [BENCHMARKS.md](BENCHMARKS.md) names its card.
+on device 0, and every series row in the benchmark record names its card.
 
 ## Why an idle box matters
 
 A benchmark row counts as a record only when the box is provably idle: zero containers and zero processes holding a
 DRM file descriptor on any card, checked before and after the run set. The harness measures that condition itself and
 prints the grade the run earned. A grade is quoted as printed and never upgraded by hand. The grade ladder is in
-[BENCHMARKS.md](BENCHMARKS.md).
+the benchmark record.
 
 Idleness matters unevenly, and both halves are measured:
 
@@ -366,7 +366,7 @@ own `IDLE after` line catches it, and `--redo <id>` in a clean window fixes it.
 ## The reference stack
 
 The vLLM container that produces the baseline numbers, the exact serve command and the exact bench command are all in
-[BENCHMARKS.md](BENCHMARKS.md). Two things about running it are worth knowing first.
+the benchmark record. Two things about running it are worth knowing first.
 
 - Read the vLLM version string the server prints, never the image tag. A tag gets rebuilt: one tag in this project's
   history carried two builds 149 commits apart under the same name, and a number attributed to the wrong one cannot be

@@ -242,7 +242,7 @@ symmetric everywhere it quantises (the routed and shared experts, QSA q/k/v/o, G
 head's routed experts), **tuned** (sign-SGD, 200 iterations, 128 x 2048 rows, batch 8 - the Qwen3.8 tuned recipe's
 sizes - of **nvidia/OpenCodeInstruct** through the checkpoint's chat template: the model is for agentic coding,
 ), **no comparison with Intel's checkpoint** - quality is ours against the bf16
-original and the f32 judge. The owner runs it on the box; the commands are in docs/open-work.md's "Quantise
+original and the f32 judge. The owner runs it on the box; the commands are in the open-work list's "Quantise
 Flash-Next" row.
 
 ### The commands (on the box, in the repo tree)
@@ -446,10 +446,10 @@ python3 tools/quantize/qwen4exp/ple_int8.py oracle-out-q4exp-synth/ours/ckpt ora
 python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple oracle-out-q4exp-synth/ours/ckpt-ple-int8
 ```
 
-## The DFlash 2 drafter (`tools/quantize/quantize_dflash.sh`, docs/open-work.md "DFlash drafter quant")
+## The DFlash 2 drafter (`tools/quantize/quantize_dflash.sh`, the open-work list "DFlash drafter quant")
 
 `z-lab/Qwen3.8-27B-DFlash2` -> W4A16 g64 symmetric `auto_round:auto_gptq`, tuned (200 iterations, 128 samples, seed
-42, batch 8). The commands and stages are in the script's header and in docs/open-work.md. What is particular:
+42, batch 8). The commands and stages are in the script's header and in the open-work list. What is particular:
 
 - **The model AutoRound tunes** is `dflash/model.py`: `tools/oracle/dflash_ref.py`'s non-causal forward as torch
   modules, batched (`test_dflash_quant.py` checks it equal to `dflash_ref` / `dflash_accept.forward_blocks` in

@@ -108,7 +108,7 @@ prefill dequant's arithmetic (`LoadedModel::ab_prefill`, counted in `total()` bu
 checkpoints"), `sym == true`, and `desc_act` is false or absent. Absence is auto-round's way of writing false, and the
 loader proves it from the shipped `g_idx` count instead of taking it on trust (see "The packed-head checkpoint"). It
 throws on any `+:` (include) dynamic rule that is not an exact restatement of the top-level settings; that pattern is
-what made a published MTP head unusable (BENCHMARKS.md). It also throws on an unrecognised `quant_method` or
+what made a published MTP head unusable (the benchmark record). It also throws on an unrecognised `quant_method` or
 `packing_format`, and on an `extra_config` module that claims to be packed at anything but g64 symmetric int4.
 
 ### The three data checks

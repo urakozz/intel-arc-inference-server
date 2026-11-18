@@ -3,7 +3,7 @@
 This page lists what is genuinely not known about the card and the numerics, ranked by how much the answer would
 change the design. It is for anyone about to design around one of these points: nothing here is settled, and
 nothing here should become an assumption in a design without being measured first. These are questions, not work
-items. Scheduled work is in [open-work.md](open-work.md) and ruled-out work in
+items. Scheduled work is tracked separately and ruled-out work in
 [low-priority-work.md](low-priority-work.md).
 
 Questions that have been answered are not kept here; their answers live where they are used. The DPAS rate
@@ -17,9 +17,9 @@ format decisions in [02-formats.md](02-formats.md), the time decomposition and t
   activations roughly double the output error ([05-perf-model.md](05-perf-model.md)).
 - Is W8A8 worth anything for prefill? Yes. The int8 prefill path, which turns the int4 weights into rotated int8 and
   does the matrix math in int8, is the `l0-int8` backend, about 30% faster than the bf16 walk
-  ([16-int8-prefill.md](16-int8-prefill.md), [BENCHMARKS.md](BENCHMARKS.md)).
+  ([16-int8-prefill.md](16-int8-prefill.md), the benchmark record).
 - Does quantising `lm_head` (the output head that turns the last hidden state into vocabulary logits) to int8 cost
-  accuracy? Not measurably against the gates, and it is the serving default (BENCHMARKS.md, "int8 lm_head"). The
+  accuracy? Not measurably against the gates, and it is the serving default (the benchmark record, "int8 lm_head"). The
   int4 head is still open, below.
 - Why did the DPAS verify-attention kernel pick the wrong token at 8 rows? It rounded the softmax weights to bf16
   before the P x V product. Splitting each weight into two bf16 halves fixed it, and the f32 judge
@@ -66,14 +66,14 @@ address a function of the loop variable.
 ## 4. Is the second card really slower at prefill?
 
 On 2026-09-05, with the same binary, the same checkpoint and the same ten minutes, prefill lost 3.2% to 3.4% on
-device 1 and decode 0.2% to 0.4%, reproducing on two checkpoints and far outside the spreads (BENCHMARKS.md, "The two
+device 1 and decode 0.2% to 0.4%, reproducing on two checkpoints and far outside the spreads (the benchmark record, "The two
 cards are not interchangeable"). That pattern points to sustained compute, not bandwidth. Neither card drives a
 display, both report identical unprivileged PCIe link fields, and reading the clock frequencies needs root.
 
 The most likely explanation since found is that a hardware monitoring tool (`hw-smi`) was open during that
 measurement, and the cards are now treated as equal for new runs. The gap has not been re-measured with the tool
 closed, so the validation tooling still keeps timed series rows on device 0, and every series row in
-[BENCHMARKS.md](BENCHMARKS.md) names its card.
+the benchmark record names its card.
 
 ## 5. The split-BF16 delta-net scan's remaining single-precision operand
 
@@ -83,12 +83,3 @@ a 0.999 bar. One limit remains: `vn` inside the A2 term is still a single BF16 o
 prompts of one checkpoint but not proven in general. Whether a longer prompt, a different checkpoint or a different
 numerical regime reaches it is untested. Details are in
 [12-kernels.md, "How the prefill kernels got here"](12-kernels.md#how-the-prefill-kernels-got-here).
-
-## 6. Why is another stack's prefill slower than vLLM's?
-
-Not established. Both engines run prefill as W4A16 and upconvert int4 in the GEMM's main loop, and oneDNN, which
-another stack uses for prefill, does use the XMX matrix engines and does handle int4, so "it does not use XMX" is not
-the explanation. The remaining plausible causes, both untested, are that oneDNN's generic path is less tuned for
-Battlemage than sycl-tla's Battlemage-specific tiles, and that layout reorders cost an extra pass. It matters only
-as a guide to which prefill designs are worth copying; profile both before assuming either
-([08-decode-vs-prefill.md](08-decode-vs-prefill.md)).

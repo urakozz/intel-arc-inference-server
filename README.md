@@ -81,8 +81,6 @@ Generation, t/s:
 Flash-Next needs at least 128 GB of system RAM: the experts that do not fit VRAM, its n-gram table and the prefix
 cache take about 104 GB of it. Run nothing else memory-hungry beside the server.
 
-How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-
 ## Install
 
 You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, GCC 16 (`g++-16.2`), CMake and
@@ -200,7 +198,7 @@ Environment variables (test switches, tool settings, the Hugging Face cache): [d
 
 [docs/README.md](docs/README.md) is the index. Start with [docs/04-architecture.md](docs/04-architecture.md) for the
 engine, [docs/17-running-models.md](docs/17-running-models.md) for running it, [docs/12-kernels.md](docs/12-kernels.md)
-for the kernels and [docs/BENCHMARKS.md](docs/BENCHMARKS.md) for every number.
+for the kernels.
 
 ## Licence
 
