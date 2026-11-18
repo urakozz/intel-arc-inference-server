@@ -198,6 +198,9 @@
 #ifndef SCAN_DIAG
 #define SCAN_DIAG 0
 #endif
+#ifndef SCAN_QS1
+#define SCAN_QS1 0
+#endif
 #if SCAN_PF
 enum LSC_LDCC { LSC_LDCC_DEFAULT, LSC_LDCC_L1UC_L3UC, LSC_LDCC_L1UC_L3C, LSC_LDCC_L1C_L3UC, LSC_LDCC_L1C_L3C };
 void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, enum LSC_LDCC c);
@@ -346,12 +349,31 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
     const float gcp = g_cum[(size_t)(base_m + posc) * HEADS + h];
     const float gl = g_cum[(size_t)(base_m + ilast) * HEADS + h];
 
+#if SCAN_QS1
+    // Stage 2's q.S reads only this sub-chunk's S words, so it runs here beside w.S on the same A fragments: four
+    // independent DPAS chains a thread instead of two, and the o stage after the barrier keeps only A2.vn. The same
+    // products in the same k order, so the same words.
+    float8 qhi = (float8)(0.0f), qlo = (float8)(0.0f);
+#endif
     // 1. Two separate chains preserve S's BF16 residual until the fp32 sum.
     {
       float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
       __global const uint* restrict wp =
           (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);
-#if !(SCAN_DIAG & 4)   /* bit 4 drops w.S */
+#if SCAN_QS1
+      __global const uint* restrict qp1 = (__global const uint*)(
+          xb + (size_t)(base_m + posc) * CONV_ROWS + Q_OFF + kh * DIM);
+      for (uint kb = 0; kb < KBLKS; ++kb) {
+        const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
+        const int8 bq = as_int8(vload8(0, qp1 + kb * (DK / 2)));
+        const short8 ah = as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mt * 4));
+        const short8 al = as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4));
+        hi = intel_sub_group_bf16_bf16_matrix_mad_k16(ah, b, hi);
+        lo = intel_sub_group_bf16_bf16_matrix_mad_k16(al, b, lo);
+        qhi = intel_sub_group_bf16_bf16_matrix_mad_k16(ah, bq, qhi);
+        qlo = intel_sub_group_bf16_bf16_matrix_mad_k16(al, bq, qlo);
+      }
+#elif !(SCAN_DIAG & 4)   /* bit 4 drops w.S */
       for (uint kb = 0; kb < KBLKS; ++kb) {
         const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
         hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
@@ -384,11 +406,64 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
+#if SCAN_QS1 >= 2
+#if !SCAN_OBF16
+#error "pf_gdn_scan: SCAN_QS1=2 writes o as bf16 words (SCAN_OBF16)"
+#endif
+    // 2 + 3 in one loop: A2.vn's two chains step beside the state update's four, each chain in its own k order.
+    {
+      float8 o = (qhi + qlo) * (Q_SCALE * exp(gcp));
+      float8 olo = (float8)(0.0f);
+      const uint blk0 = (nt * (nt + 1)) >> 1;
+      __global const uint* restrict a2t =
+          A2hl + (size_t)(t * HEADS + h) * A2HL_WORDS + (size_t)blk0 * (SG * DM) + lane * DM;
+      const float dl = exp(gl);
+      float8 lo0 = (float8)(0.0f), lo1 = (float8)(0.0f);
+      S0 *= dl;
+      S1 *= dl;
+      __global const ushort* restrict kp = xb + K_OFF + kh * DIM + sg * DM;
+      for (uint kb = 0; kb < PBLKS; ++kb) {
+        const uint p = min(kb * DK + lane, ilast);
+        const short8 a = as_short8(vload4(0, (__global const uint*)(
+            kp + (size_t)(base_m + p) * CONV_ROWS)));
+        const int8 b0h = as_int8(vload8(0, DtHiW + (size_t)lane * DT_LD + kb * (DK / 2)));
+        const int8 b1h = as_int8(vload8(0, DtHiW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));
+        const int8 b0l = as_int8(vload8(0, DtLoW + (size_t)lane * DT_LD + kb * (DK / 2)));
+        const int8 b1l = as_int8(vload8(0, DtLoW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));
+        S0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0h, S0);
+        S1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1h, S1);
+        lo0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0l, lo0);
+        lo1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1l, lo1);
+        if (kb <= nt) {
+          const short8 av = as_short8(vload4(0, VNbW + (kb * DK + lane) * SB_LD + mt * 4));
+          const int8 bh = as_int8(vload8(0, a2t + kb * (SG * DM)));
+          const int8 bl = as_int8(vload8(0, a2t + A2HL_LO + kb * (SG * DM)));
+          o = intel_sub_group_bf16_bf16_matrix_mad_k16(av, bh, o);
+          olo = intel_sub_group_bf16_bf16_matrix_mad_k16(av, bl, olo);
+        }
+      }
+      S0 += lo0;
+      S1 += lo1;
+      o += olo;
+      if (pos_l < L) {
+        float of[DM];
+        ushort ob[DM];
+        vstore8(o, 0, of);
+#pragma unroll
+        for (uint m = 0; m < DM; ++m) ob[m] = rne_bf16(of[m]);
+        vstore8(vload8(0, ob), 0, (__global ushort*)gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
+                                      c * CHUNK_V + col0);
+      }
+    }
+#else
 #if !(SCAN_DIAG & 1)   /* DIAGNOSTIC (probe only): bit 1 drops the o stage */
     // 2. Q.S is a split pair, and so is A2 - the operand the 2026-09-23 2x2
     //    above found responsible for the whole gate failure. `vn` stays single
     //    BF16 because moving it to fp32 changed no printed cosine at all.
     {
+#if SCAN_QS1
+      float8 o = (qhi + qlo) * (Q_SCALE * exp(gcp));
+#else
       float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
       __global const uint* restrict qp = (__global const uint*)(
           xb + (size_t)(base_m + posc) * CONV_ROWS + Q_OFF + kh * DIM);
@@ -400,6 +475,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
             as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);
       }
       float8 o = (hi + lo) * (Q_SCALE * exp(gcp));
+#endif
       // The high chain accumulates on top of the q.S term; the low chain starts
       // at zero so A2's residual is not swamped by it, and they meet once below.
       float8 olo = (float8)(0.0f);
@@ -458,6 +534,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
       S0 += lo0;
       S1 += lo1;
     }
+#endif
 #endif
     barrier(CLK_LOCAL_MEM_FENCE);
   }
