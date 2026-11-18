@@ -92,10 +92,10 @@ int main(int argc, char** argv) {
   ids.resize(kIds);
 
   eng.prepare_prefill();
-  const size_t scratch0 = eng.memory_use().prefill_scratch;
   std::vector<Run> unpacked;
   for (uint32_t chunk : kChunks) unpacked.push_back(run(eng, imm, ids, chunk));
 
+  const size_t scratch0 = eng.memory_use().prefill_scratch;   // after the walk's own lazy buffers
   eng.set_prefill_dense_bf16(true);
   eng.prepare_prefill();
   CHECK_EQ(eng.memory_use().prefill_scratch - scratch0, dense);
