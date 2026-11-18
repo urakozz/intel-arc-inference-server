@@ -217,6 +217,8 @@ class Qwen4ExpEngine {
   //                  attend step 0's list (decision 5). The ids go to
   //                  every device's cur_token[1..k] and draft_ids(); draft i's logits (q_i) are the head's row i
   //                  (read_draft_logits_into). `pick(i)` (the sampled path) replaces the on-card argmax as d_{i+1}.
+  //                  `more(i, p)` (open-work 49, greedy): p the head's softmax probability at draft i's argmax (fp32,
+  //                  max-subtracted, draft_prob.cl); false stops drafting there, so draft_ids() may hold fewer than k.
   //   verify(k)      the main model at M = k + 1 rows (x_n, d_1..d_k at n..n+k) on every device: row r's argmax in
   //                  verify_ids()[r], its logits row r (read_logits_into(host, k + 1)), its GDN state into slot
   //                  (live + r) % 4, every row its own selection and top-10; then the head's KV pass over the rows
@@ -230,7 +232,9 @@ class Qwen4ExpEngine {
   static constexpr uint32_t kMaxDraft = runtime::qwen4exp::kMaxDraft;   // 3: verify at M <= 4
   bool mtp() const { return mtp_ != nullptr; }
   uint32_t max_verify_k() const;
-  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {},
+             const std::function<bool(uint32_t i, float p)>& more = {});
+  bool draft_probs() const { return mtp(); }   // every draft step ends with its probability (cli::pp's step-K choice)
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   void verify(uint32_t k);
   const uint32_t* verify_ids() const;   // the last device's out_token[0..k]

@@ -546,7 +546,8 @@ inline std::vector<std::string> draft_variants(bool int8_head, bool eager, bool 
           moe_variant(1, true),
           lm_head_variant(int8_head),
           argmax1_variant(1),
-          argmax2_variant()};
+          argmax2_variant(),
+          draft_prob_variant(kVocab, kVocabUsed)};   // open-work 49: the head's probability for the step-K choice
 }
 // Every binary the prefill's head pass binds (the last device, a chunk).
 inline std::vector<std::string> mtp_prefill_variants(bool single) {

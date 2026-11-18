@@ -330,7 +330,8 @@ size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows
 //     the indexer, attn_prep (the head's K / V), q4_qsa_prep (its tail ring and compressed keys) - 10 + M
 //   draft step (the last device, M = 1): q4_mtp_norm, fc_embedding, fc_hidden, q4_mtp_fuse, the head's QSA layer
 //     (q4_qsa_score / _select on step 0 and, under `fresh`, on every step) and MoE, its own final mixer, lm_head,
-//     argmax x 2: 27 + (select ? 2 : 0) flash, 26 + (select ? 2 : 0) eager
+//     argmax x 2, the draft's probability x 2 (draft_prob.cl, open-work 49): 29 + (select ? 2 : 0) flash,
+//     28 + (select ? 2 : 0) eager
 //   the prefill's head pass on the last device a chunk (Review Focus 4): combine _Y_NN (the chunk's rows of R), then
 //     over the head's rows (pos - 1 .. pos + C - 2; C - 1 rows from pos 0): q4_mtp_norm _PF, fc_embedding and
 //     fc_hidden as bf16 slabs + pf_gemm (3 slabs each), q4_mtp_fuse, the attn side's gated residual (4), the k||v slab
@@ -561,8 +562,9 @@ size_t tp_device_launches(const model::Qwen4ExpDesc& one);
 // Task 5 Step 0: a card's verify list at M rows - the decode list's with the PLE layer's q4_pf_ple at M > 1 (+2) and,
 // on the head's card, the head's KV pass (10 + M), as one card's verify_device_launches adds them.
 size_t tp_verify_launches(const model::Qwen4ExpDesc& one, uint32_t M, bool head);
-// The card without the head's half of a draft step's lm_head: the wait, the peer's x copied in, gemv_i8w, tp_argmax x 2.
-inline constexpr size_t kTpDraftHeadLaunches = 3;
+// The card without the head's half of a draft step's lm_head: the wait, the peer's x copied in, gemv_i8w, tp_argmax x 2,
+// its half's draft_prob x 2.
+inline constexpr size_t kTpDraftHeadLaunches = 5;
 // Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
 double tp_card_f(const ExpertBudget& b, uint32_t rank);
 

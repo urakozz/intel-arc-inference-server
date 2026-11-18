@@ -57,7 +57,8 @@
 //     list on step 0, steps 1.. attend step 0's list as it is
 //     (decision 5) - and MoE (bf16 dense and shared, int4 experts), its own final mixer (b.H = the head's pre-mixer H:
 //     the next step's R), lm_head into the head's logits row i, argmax into the head's Control (out_token[0],
-//     cur_token[0], pos + 1).
+//     cur_token[0], pos + 1), then the row's softmax max and normaliser into its draft_stat (draft_prob.cl, open-work
+//     49: the head's probability for the per-step K).
 // The launch counts are runtime::qwen4exp's verify_device_launches / draft_launches, asserted at capture.
 namespace runtime::qwen4exp {
 
@@ -102,7 +103,8 @@ struct MtpBinding {
 // (its buffers' scratch is one card's: Qwen4ExpBuffers' `scratch`) up to the head's final mixer, then `draft_ready`
 // signalled (its x is the step's normed row), the card's vocabulary half and tp_argmax into the head's Control. On
 // the other card a draft step is the head's other half only: wait for `draft_ready`, the peer's x copied in, gemv_i8w
-// and tp_argmax into `draft_ctl` (kTpDraftHeadLaunches).
+// and tp_argmax into `draft_ctl` (kTpDraftHeadLaunches). Each card's draft step ends with its half's draft_prob (the
+// softmax max and normaliser into its Control's draft_stat; the host merges the two).
 struct Q4TpBinding {
   const runtime::TpLink* link = nullptr;   // out_proj / o_proj's crossing (and the head's rank, vocabulary half)
   const runtime::TpLink* moe = nullptr;    // the MoE's crossing (its own landing buffer and counters)

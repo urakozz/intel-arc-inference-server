@@ -243,6 +243,7 @@ class Walk {
         kernels::gemv_variant(M_, d_.hidden, c.qkvg_n(), 2, 0), kernels::gemv_variant(M_, c.q_n(), d_.hidden, kq::kTpOutS, 0),
         kernels::gemv_i8w_variant(M_, d_.hidden, c.vocab), kernels::tp_argmax_variant(M_, c.vocab, c.vocab_used, rank * c.vocab)};
     if (spec_.kind == ListKind::Verify && M_ > 1) need.push_back(kq::pf_ple_verify_variant());
+    if (spec_.kind == ListKind::Draft) need.push_back(kernels::draft_prob_variant(c.vocab, c.vocab_used));
     if (spec_.kind != ListKind::Decode && part_.mtp)
       for (const std::string& v : spec_.kind == ListKind::Draft ? kq::draft_variants(true, false, mtp_->single)
                                                                 : std::vector<std::string>{kq::mtp_variant(M_, mtp_->single)})
@@ -778,6 +779,7 @@ class Walk {
         k.arg_ptr(1, b_.argmax_part.ptr());
         launch(k, 1, 1);
       }
+      if (spec_.kind == ListKind::Draft) draft_prob(logits);
       return;
     }
     {
@@ -788,6 +790,26 @@ class Walk {
     }
     {
       l0::Kernel& k = kernel(kq::argmax2_variant(), "argmax_stage2", kq::kArgmaxWg);
+      k.arg_ptr(0, ctrl_);
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, 1, 1);
+    }
+    if (spec_.kind == ListKind::Draft) draft_prob(logits);
+  }
+
+  // Open-work 49: a draft step's probability, after its argmax - draft_prob.cl (Qwen3.8's) over the logits row the step
+  // wrote (under tp the card's vocabulary half), its softmax max and normaliser into ctrl_'s draft_stat; the host
+  // merges tp's two. argmax_part is free again once the argmax's stage 2 has read it.
+  void draft_prob(void* logits) {
+    const std::string v = kernels::draft_prob_variant(c_.vocab, c_.vocab_used);
+    {
+      l0::Kernel& k = kernel(v, "draft_prob_stage1", kq::kArgmaxWg);
+      k.arg_ptr(0, logits);
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, (c_.vocab + kq::kArgmaxChunk - 1) / kq::kArgmaxChunk, 1);
+    }
+    {
+      l0::Kernel& k = kernel(v, "draft_prob_stage2", kq::kArgmaxWg);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.argmax_part.ptr());
       launch(k, 1, 1);
