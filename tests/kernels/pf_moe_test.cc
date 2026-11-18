@@ -435,6 +435,30 @@ void fused_vs_grouped(Dev& d, Layer& L, Bufs& b, const Run& r) {
               nit, bh, h.size(), by, y.size());
   CHECK_EQ(bh, size_t(0));
   CHECK_EQ(by, size_t(0));
+  // the _SHX binary: the shared expert's rows from x itself (token t = row Rs + t), its rows of xg poisoned
+  const uint32_t Rs = r.hdr[kernels::pf_moe::kHdrSharedRow], xrows = (r.C + 31) / 32 * 32;
+  std::vector<uint16_t> xs(size_t(xrows) * kH, 0x7FC0), xgp(r.xg.begin(), r.xg.begin() + size_t(used) * kH);
+  std::copy(r.xg.begin() + size_t(Rs) * kH, r.xg.begin() + size_t(Rs + r.C) * kH, xs.begin());
+  std::fill(xgp.begin() + size_t(Rs) * kH, xgp.end(), uint16_t(0x7FC0));
+  l0::Module msx(d.ctx, kernels::path(kernels::pf_moe_q4gemm_variant(kH, kNG, true) + "_SHX"));
+  l0::Kernel gsx(msx, "pf_moe_q4gemm");
+  gsx.group_size(16 * (kernels::pf_moe::kQ4WgN / 32));
+  l0::Mem xd = d.upload(xs), hdd = d.upload(r.hdr), hs = d.zeros(size_t(used) * kI * 2);
+  d.imm.copy(b.xg.ptr(), xgp.data(), xgp.size() * 2);
+  gsx.arg_ptr(0, itd.ptr());
+  gsx.arg_ptr(1, b.xg.ptr());
+  gsx.arg_ptr(2, L.gu.ptr());
+  gsx.arg_ptr(3, L.gu.as<uint32_t>() + kS.gate_up_words() * kS.experts);
+  gsx.arg_ptr(4, hs.ptr());
+  gsx.arg_ptr(5, xd.ptr());
+  gsx.arg_ptr(6, hdd.ptr());
+  d.run(gsx, kNG / kernels::pf_moe::kQ4WgN, nit);
+  const std::vector<uint16_t> h2 = d.read<uint16_t>(hs, size_t(used) * kI);
+  size_t bs = 0;
+  for (size_t row = 0; row < size_t(Rs) + r.C; ++row)   // the shared tile's pad rows past C read poison
+    bs += std::memcmp(&h2[row * kI], &r.h_bf[row * kI], kI * 2) != 0;
+  std::printf("  4b. the _SHX gate||up (shared rows from x), C %u: %zu of %u rows differ\n", r.C, bs, used);
+  CHECK_EQ(bs, size_t(0));
 }
 
 // 4c. plan 2026-11-12 Task 5: l0-int8's W4A8 gate||up (pf_moe_w4a8.cl). The quantiser's codes and scales exactly
@@ -766,7 +790,7 @@ void check_router_gemm(Dev& d, Kernels& k, const Layer& L, const std::vector<uin
   }
   l0::Module rm(d.ctx, kernels::path(kernels::pf_moe_route_gemm_variant(256, 8, kH, kI, P)));
   l0::Kernel r512(rm, "moe_route");
-  r512.group_size(256);
+  r512.group_size(16);   // ROUTE_SG: one sub-group a token
   l0::Mem lp = d.upload(poisoned), lc = d.upload(compact), ra = d.zeros(size_t(C) * 32 * 4),
           rb = d.zeros(size_t(C) * 32 * 4);
   r512.arg_ptr(0, lp.ptr());

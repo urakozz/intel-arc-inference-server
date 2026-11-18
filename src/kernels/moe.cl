@@ -174,6 +174,91 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
 // The rank is the whole top-k: every lane counts its beaters over the SLM row (EXPERTS
 // broadcast reads) and the ranks are a permutation - one barrier, no rounds.
 // tests/kernels/moe_ref.h repeats this chain step for step.
+//
+// ROUTE_SG 1 (prefill's moe_M1_..._R<pitch> binary only; tests/kernels/pf_moe_test.cc compares its every word with
+// the form below): ONE SUB-GROUP a token, lane l holding experts 16 j + l - no SLM and no barrier. The max is exact
+// in any order; the Σ tree's strides EXPERTS/2 .. 16 are the register pairs j, j + stride/16 and 8 .. 1 are
+// shuffles, the same additions in the same order; the slots are taken one at a time, each the best untaken expert
+// by (p descending, id ascending), which is the rank order above.
+#ifndef ROUTE_SG
+#define ROUTE_SG 0
+#endif
+#if ROUTE_SG
+#if EXPERTS != 256 || TOP_K != 8
+#error "moe: ROUTE_SG is built for 256 experts, top 8 (a lane's 16 experts, the route row's 8 slots)"
+#endif
+#define RPL (EXPERTS / SG)
+__attribute__((reqd_work_group_size(SG, 1, 1))) MOE_SG16
+__kernel void moe_route(__global const float* restrict logits, __global uint* restrict route) {
+  const uint m = get_group_id(1);
+  const uint lane = get_sub_group_local_id();
+  const __global float* restrict lrow = logits + (size_t)m * ROUTER_N;
+  float l[RPL], ex[RPL], red[RPL];
+#pragma unroll
+  for (uint j = 0; j < RPL; ++j) l[j] = bf16f(rne_bf16(lrow[SG * j + lane]));
+  float mx = l[0];
+#pragma unroll
+  for (uint j = 1; j < RPL; ++j) mx = fmax(mx, l[j]);
+#pragma unroll
+  for (uint st = SG / 2; st > 0; st >>= 1) mx = fmax(mx, intel_sub_group_shuffle_xor(mx, st));
+#pragma unroll
+  for (uint j = 0; j < RPL; ++j) red[j] = ex[j] = exp(l[j] - mx);
+#pragma unroll
+  for (uint js = RPL / 2; js > 0; js >>= 1)
+#pragma unroll
+    for (uint j = 0; j < js; ++j) red[j] += red[j + js];
+  float s = red[0];
+#pragma unroll
+  for (uint st = SG / 2; st > 0; st >>= 1) s = s + intel_sub_group_shuffle(s, (lane + st) & (SG - 1));
+  const float S = sub_group_broadcast(s, 0);
+  float p[RPL];
+#pragma unroll
+  for (uint j = 0; j < RPL; ++j) p[j] = ex[j] / S;
+
+  uint taken = 0u;               // bit j: expert SG j + lane is in a slot
+  uint top_id[SLOTS];
+  float top_p[SLOTS];
+#pragma unroll
+  for (uint k = 0; k < SLOTS; ++k) {
+    float bp = -1.0f;            // below every p; a NaN p is never taken (the form below leaves its slot defined)
+    uint be = (uint)k;
+#pragma unroll
+    for (uint j = 0; j < RPL; ++j)
+      if (!((taken >> j) & 1u) && p[j] > bp) {   // strict: the lower j (lower id) keeps a tie
+        bp = p[j];
+        be = SG * j + lane;
+      }
+#pragma unroll
+    for (uint st = SG / 2; st > 0; st >>= 1) {
+      const float op = intel_sub_group_shuffle_xor(bp, st);
+      const uint oe = intel_sub_group_shuffle_xor(be, st);
+      if (op > bp || (op == bp && oe < be)) {
+        bp = op;
+        be = oe;
+      }
+    }
+    top_id[k] = be;
+    top_p[k] = bp < 0.0f ? 0.0f : bp;
+    if (bp >= 0.0f && be % SG == lane) taken |= 1u << (be / SG);
+  }
+  float s8 = 0.0f;
+#pragma unroll
+  for (uint k = 0; k < TOP_K; ++k) s8 += top_p[k];
+  // lane l writes words l and l + 16 of the row
+  uint lo = 0u, hi = 0u;
+#pragma unroll
+  for (uint k = 0; k < TOP_K; ++k) {
+    if (lane == R_IDS + k) lo = top_id[k];
+    if (lane == R_W + k) lo = as_uint(bf16f(rne_bf16(top_p[k] / s8)));
+    if (lane + 16u == R_P + k) hi = as_uint(top_p[k]);
+  }
+  if (lane + 16u == R_SG) hi = as_uint(bf16f(rne_bf16(sigmoid_f32(bf16f(rne_bf16(lrow[EXPERTS]))))));
+  if (lane + 16u == R_P9) hi = as_uint(top_p[TOP_K]);
+  __global uint* restrict r = route + (size_t)m * RW;
+  r[lane] = lo;
+  r[lane + 16u] = hi;
+}
+#else
 __attribute__((reqd_work_group_size(WG_ROUTE, 1, 1)))
 __kernel void moe_route(__global const float* restrict logits, __global uint* restrict route) {
   const uint m = get_group_id(1);
@@ -228,6 +313,7 @@ __kernel void moe_route(__global const float* restrict logits, __global uint* re
     for (uint k = R_P9 + 1; k < RW; ++k) r[k] = 0u;
   }
 }
+#endif
 
 // ---------------------------------------------------------------------------
 // moe_gate_up - gate||up of the TOP_K routed experts and the shared expert (slot

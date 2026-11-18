@@ -60,6 +60,13 @@
 #ifndef AK16
 #define AK16 0
 #endif
+// SH_X 1 (Ornith's _SHX binary): the shared expert's A rows are read from the chunk's x itself - its sorted rows are
+// the tokens in order (row Rs + t is token t, Rs = hdr[1], pf_moe.cl's H_SHARED_ROW), so the gather skips them
+// (pf_moe_gather_routed). The same words. Its reads stay inside x: an item ends at most at Rs + C rounded up to whole
+// 32-row tiles, and x has the chunk cap's rows (a multiple of 256).
+#ifndef SH_X
+#define SH_X 0
+#endif
 #if (PF_W || AK16) && !NODB
 #error "pf_moe_q4gemm: PF_W and AK16 build on NODB"
 #endif
@@ -120,7 +127,11 @@ __attribute__((reqd_work_group_size(SG * WGN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const ushort* restrict A,
                             __global const uint* restrict W, __global const uint* restrict W_sh,
-                            __global ushort* restrict out) {
+                            __global ushort* restrict out
+#if SH_X
+                            , __global const ushort* restrict XC, __global const uint* restrict hdr
+#endif
+                            ) {
   const uint it = get_group_id(1);
   const uint e = items[4 * it];
   if (e == NONE || (e == EXPERTS && W_sh == 0)) return;   // uniform; no barrier below (no W_sh: the shared block's
@@ -140,6 +151,9 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
   __global const uint* restrict Wb = e == EXPERTS ? W_sh : W + (size_t)e * BLK_U32;
 #endif
   __global const ushort* restrict Ab = A + (size_t)mb * K;
+#if SH_X
+  if (e == EXPERTS) Ab = XC + (size_t)(mb - hdr[1]) * K;
+#endif
   const int a_w = K * 2, a_p = K * 2;
   // The A reads are one 32-row block each, the row offset in the BASE and the k offset in the base too (IGC 2.41
   // kept a 2D read's first coordinate across a loop when it moved in the coordinate: pf_gemm_q4.cl, 2026-11-08).

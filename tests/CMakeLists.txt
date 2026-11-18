@@ -2039,7 +2039,7 @@ if(B70_ORNITH)
     kernel_pf_moe_combine_norm_E256_T8_D2048_I512_G20
     kernel_pf_route_slab_K2048_N272_P512 kernel_pf_route_slab_K2048_N128_P256 kernel_moe_M1_E256_T8_D2048_I512_R512
     kernel_pf_gdn_conv_GK16V32_AB256 kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
-    kernel_pf_moe_sort_mw_E256_T8 kernel_pf_moe_q4gemm_K2048_N1024_SILU kernel_pf_moe_q4gemm_K512_N2048
+    kernel_pf_moe_sort_mw_E256_T8 kernel_pf_moe_q4gemm_K2048_N1024_SILU kernel_pf_moe_q4gemm_K2048_N1024_SILU_SHX kernel_pf_moe_q4gemm_K512_N2048
     kernel_pf_moe_w4a8_K2048_N1024
     kernel_pf_moe_gemm_K2048_N1024_SILU kernel_pf_moe_gemm_i8_K2048_N1024_SILU
     kernel_pf_moe_gemm_K512_N2048

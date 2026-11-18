@@ -28,10 +28,11 @@ T* at(l0::Mem& m, size_t off) {
 
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   (void)d;
-  // router GEMM + moe_route + combine, the sort's three launches, the down GEMM; gate||up: the gather and one GEMM
-  // (l0), or l0's two for the shared expert and the W4A8 quantiser, gather and GEMM for the routed ones (l0-int8).
+  // router GEMM + moe_route + combine, the sort's three launches, the down GEMM; gate||up: the routed rows' gather
+  // and one GEMM (l0), or l0's GEMM for the shared expert (its rows read from x) and the W4A8 quantiser, gather and
+  // GEMM for the routed ones (l0-int8).
   // Phase 3 Task 2: the router is the dense GEMM (its B slab made once, by prepare_prefill), on both backends.
-  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 5 : 2);
+  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 4 : 2);
 }
 
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
@@ -101,16 +102,15 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   profile_wait(cx, Phase::kMoeSort);
 
   // 3. gate||up, SiLU fused -> h [rows][I], one launch over the work items, B read from the int4 blocks (plan
-  //    2026-11-12 Tasks 3 and 5).
+  //    2026-11-12 Tasks 3 and 5). The _SHX binary reads the shared expert's rows from x itself (row Rs + t is token
+  //    t), so the gather writes the routed rows only.
+  const std::string guv = kernels::pf_moe_q4gemm_variant(H, NG, true) + "_SHX";
   if (backend == PrefillBackend::L0Int8) {
-    // Open-work 16: the shared expert is a dense linear and stays bf16 - l0's gather and GEMM over its items only
-    // (a null W skips the routed ones), bitwise l0's shared rows of h; the int8 gather below then overwrites xg.
-    cx.launch(kc(pv, "pf_moe_gather"), rows, 1, 1,
-              {PtrArg(s.x.ptr()), PtrArg(hdr), PtrArg(row_tok), PtrArg(xg)});
-    cx.launch(kc(kernels::pf_moe_q4gemm_variant(H, NG, true), "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN,
-              ibound, 1,
+    // Open-work 16: the shared expert is a dense linear and stays bf16 - l0's GEMM over its items only (a null W
+    // skips the routed ones), bitwise l0's shared rows of h.
+    cx.launch(kc(guv, "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN, ibound, 1,
               {PtrArg(items), PtrArg(xg), PtrArg(nullptr), PtrArg(w.gate_up.as<uint32_t>() + size_t(E) * gu_words),
-               PtrArg(h)});
+               PtrArg(h), PtrArg(s.x.ptr()), PtrArg(hdr)});
     // W4A8 (D1 revised) for the routed experts: the chunk's rows to int8 per token and 64-k
     // group (pf_quant_g64, no rotation), gathered with their group scales, x the int4 blocks as the s4 DPAS
     // operand, int32 a group, fp32 rescaled by the block's group scale x the row's. A null W_sh skips the shared
@@ -126,13 +126,12 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
     cx.launch(kc(wv, "pf_moe_w4a8"), NG / kernels::pf_moe::kQ4WgN, ibound, 1,
               {PtrArg(items), PtrArg(xg), PtrArg(xs_row), PtrArg(w.gate_up.ptr()), PtrArg(nullptr), PtrArg(h)});
   } else {
-    cx.launch(kc(pv, "pf_moe_gather"), rows, 1, 1,
+    cx.launch(kc(pv, "pf_moe_gather_routed"), rows, 1, 1,
               {PtrArg(s.x.ptr()), PtrArg(hdr), PtrArg(row_tok), PtrArg(xg)});
     profile_wait(cx, Phase::kMoeGather);
-    cx.launch(kc(kernels::pf_moe_q4gemm_variant(H, NG, true), "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN,
-              ibound, 1,
+    cx.launch(kc(guv, "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN, ibound, 1,
               {PtrArg(items), PtrArg(xg), PtrArg(w.gate_up.ptr()),
-               PtrArg(w.gate_up.as<uint32_t>() + size_t(E) * gu_words), PtrArg(h)});
+               PtrArg(w.gate_up.as<uint32_t>() + size_t(E) * gu_words), PtrArg(h), PtrArg(s.x.ptr()), PtrArg(hdr)});
   }
   profile_wait(cx, Phase::kMoeGemm);
 

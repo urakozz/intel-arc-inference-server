@@ -100,6 +100,20 @@ __kernel void pf_moe_gather(__global const uint4* restrict x, __global const uin
     xg[(size_t)r * W + i] = t == NONE ? (uint4)(0u) : x[(size_t)t * W + i];
 }
 
+// pf_moe_gather_routed - pf_moe_gather over the routed experts' rows only (r < hdr[H_SHARED_ROW]): l0's shared
+// expert reads its rows from x itself (pf_moe_q4gemm.cl's SH_X binary). Padding rows stay zeros: the gate||up GEMM
+// measured ~1.5 % slower over whatever the region held before (2026-11-18, profiled at 4k).
+__attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
+__kernel void pf_moe_gather_routed(__global const uint4* restrict x, __global const uint* restrict hdr,
+                                   __global const uint* restrict row_tok, __global uint4* restrict xg) {
+  const uint r = get_group_id(0);
+  if (r >= hdr[H_SHARED_ROW]) return;
+  const uint t = row_tok[r];
+  const uint W = HIDDEN * 2 / 16;
+  for (uint i = get_local_id(0); i < W; i += WG_GATHER)
+    xg[(size_t)r * W + i] = t == NONE ? (uint4)(0u) : x[(size_t)t * W + i];
+}
+
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
 __kernel void pf_moe_gather_i8(__global const uint4* restrict xq, __global const float* restrict xs,
                                __global const uint* restrict hdr,
@@ -201,6 +215,9 @@ __kernel void pf_moe_combine(__global const uint* restrict route, __global const
 #if CN_CHUNK > WG_COMBINE
 #error "pf_moe_combine_norm: a fold group wider than the work-group (pf_res_fold's lanes would add twice)"
 #endif
+#if CN_PER != 8
+#error "pf_moe_combine_norm: a lane's columns are one ushort8 (HIDDEN = 2048)"
+#endif
 __attribute__((reqd_work_group_size(WG_COMBINE, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(CN_SG)))
 __kernel void pf_moe_combine_norm(__global const uint* restrict route, __global const uint* restrict hdr,
@@ -226,26 +243,35 @@ __kernel void pf_moe_combine_norm(__global const uint* restrict route, __global 
     wk[k] = as_float(rr[R_W + k]);
   }
 
+  // Lane lid owns the CN_PER consecutive columns n0 .. n0 + 7: every row is read as one 16-byte piece a lane (a
+  // 256-byte message a sub-group; one column a lane was a 32-byte message). Each column's chain is unchanged.
+  const uint n0 = lid * CN_PER;
+  float sum[CN_PER];
+#pragma unroll
+  for (uint i = 0; i < CN_PER; ++i) sum[i] = 0.0f;
+#pragma unroll
+  for (uint k = 0; k < TOP_K; ++k) {
+    const ushort8 d8 = *(__global const ushort8*)(y + (size_t)rows[k] * HIDDEN + n0);
+    const ushort d_b[CN_PER] = {d8.s0, d8.s1, d8.s2, d8.s3, d8.s4, d8.s5, d8.s6, d8.s7};
+#pragma unroll
+    for (uint i = 0; i < CN_PER; ++i) sum[i] += bf16f(rne_bf16(bf16f(d_b[i]) * wk[k]));
+  }
+  const ushort8 s8 = *(__global const ushort8*)(y + (size_t)srow * HIDDEN + n0);
+  const ushort ds_b[CN_PER] = {s8.s0, s8.s1, s8.s2, s8.s3, s8.s4, s8.s5, s8.s6, s8.s7};
+  const ushort8 p8 = *(__global const ushort8*)(rp + n0);
+  const ushort rs_b[CN_PER] = {p8.s0, p8.s1, p8.s2, p8.s3, p8.s4, p8.s5, p8.s6, p8.s7};
   ushort rb[CN_PER];
 #pragma unroll
   for (uint i = 0; i < CN_PER; ++i) {
-    const uint n = lid + i * WG_COMBINE;
-    float sum = 0.0f;
-#pragma unroll
-    for (uint k = 0; k < TOP_K; ++k) {
-      const ushort d_b = y[(size_t)rows[k] * HIDDEN + n];
-      sum += bf16f(rne_bf16(bf16f(d_b) * wk[k]));
-    }
-    const ushort r_b = rne_bf16(sum);
-    const ushort ds_b = y[(size_t)srow * HIDDEN + n];
-    const ushort sh_b = rne_bf16(bf16f(ds_b) * sg_w);
+    const ushort r_b = rne_bf16(sum[i]);
+    const ushort sh_b = rne_bf16(bf16f(ds_b[i]) * sg_w);
     const ushort o_b = rne_bf16(bf16f(r_b) + bf16f(sh_b));
-    const ushort res_b = rne_bf16(bf16f(rp[n]) + bf16f(o_b));
-    rp[n] = res_b;
+    const ushort res_b = rne_bf16(bf16f(rs_b[i]) + bf16f(o_b));
     rb[i] = res_b;
     const float v = bf16f(res_b);
-    sq[n] = fma(v, v, 0.f);
+    sq[n0 + i] = fma(v, v, 0.f);
   }
+  *(__global ushort8*)(rp + n0) = (ushort8)(rb[0], rb[1], rb[2], rb[3], rb[4], rb[5], rb[6], rb[7]);
   barrier(CLK_LOCAL_MEM_FENCE);
 
   for (uint g = sg; g < FOLD_G; g += WG_COMBINE / CN_SG) {
@@ -276,10 +302,12 @@ __kernel void pf_moe_combine_norm(__global const uint* restrict route, __global 
   for (uint g = 0; g < FOLD_G; ++g) total += gs[g];
   const float mean = total / (float)HIDDEN;
   const float rstd = 1.0f / sqrt(mean + 1e-6f);
+  const float8 w8 = vload8(0, norm_w + n0);
+  const float wn[CN_PER] = {w8.s0, w8.s1, w8.s2, w8.s3, w8.s4, w8.s5, w8.s6, w8.s7};
+  ushort xo[CN_PER];
 #pragma unroll
-  for (uint i = 0; i < CN_PER; ++i) {
-    const uint n = lid + i * WG_COMBINE;
-    x_out[(size_t)t * HIDDEN + n] = rne_bf16(bf16f(rb[i]) * rstd * norm_w[n]);
-  }
+  for (uint i = 0; i < CN_PER; ++i) xo[i] = rne_bf16(bf16f(rb[i]) * rstd * wn[i]);
+  *(__global ushort8*)(x_out + (size_t)t * HIDDEN + n0) =
+      (ushort8)(xo[0], xo[1], xo[2], xo[3], xo[4], xo[5], xo[6], xo[7]);
 }
 #endif
