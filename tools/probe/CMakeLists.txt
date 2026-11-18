@@ -1271,7 +1271,9 @@ if(B70_ORNITH AND B70_Q4EXP)
                "1 4 4 1 4 9 0 1" "1 4 4 1 4 2 0 5" "2 4 4 4 4 9 0 3" "2 4 4 4 4 2 0 7"
                "1 8 2 1 8 2 0 1" "1 8 2 2 8 2 0 1" "2 8 2 2 8 2 0 3" "1 8 2 1 8 9 0 1"
                "1 4 4 1 4 3 0 1" "1 8 2 1 8 3 0 1" "2 4 4 4 4 3 0 3"
-               "1 4 2 1 8 4 0 1" "1 4 4 1 4 4 0 1" "1 8 2 1 8 2 0 9")
+               "1 4 2 1 8 4 0 1" "1 4 4 1 4 4 0 1" "1 8 2 1 8 2 0 9"
+               "1 4 2 1 8 2 0 49" "1 4 2 1 8 9 0 49" "1 4 2 1 8 2 0 53"
+               "1 4 2 1 8 2 0 17" "1 4 2 1 8 9 0 17" "1 4 2 1 8 2 0 21")
   set(PMP_SHAPES "2048 1024 1" "512 2048 0" "2560 1280 1" "640 2560 0")
   set(PMP_TARGETS "")
   foreach(arm ${PMP_ARMS})
@@ -1293,12 +1295,17 @@ if(B70_ORNITH AND B70_Q4EXP)
       if(F EQUAL 3 OR CV EQUAL 4)
         list(APPEND _epis 2)
       endif()
+      math(EXPR _g128 "${OP} & 32")
+      set(_grf -cl-intel-256-GRF-per-thread)
+      if(_g128)
+        set(_grf "")
+      endif()
       foreach(E ${_epis})
         set(_n pmp_F${F}_A${NA}B${NB}M${WM}N${WN}_C${CV}X${XS}O${OP}_K${K}_N${N}_E${E})
         add_ocloc_kernel(${_n} SOURCE ${PMP_CL}
                          DEFINES K=${K} N=${N} FORM=${F} NA=${NA} NB=${NB} WGM=${WM} WGN=${WN} CVT=${CV}
                                  XSG=${XS} OPT=${OP} EPI=${E}
-                         OPTIONS -cl-intel-256-GRF-per-thread)
+                         OPTIONS ${_grf})
         list(APPEND PMP_TARGETS kernel_${_n})
       endforeach()
     endforeach()
@@ -1312,6 +1319,18 @@ if(B70_ORNITH AND B70_Q4EXP)
     add_ocloc_kernel(pmp_shd_slab_K${K}_N${N}_L1 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_dequant_slab.cl
                      DEFINES K=${K} N=${N} LAYOUT=1)
     list(APPEND PMP_TARGETS kernel_pmp_shd_slab_K${K}_N${N}_L1)
+  endforeach()
+  # E1 (research 2026-11-18): the production pf_moe_q4gemm.cl with its register-plan defines, at Ornith's two shapes;
+  # the probe's q4.<tag> arms, checked against and timed beside the production binaries. PMQ_ARMS is "tag defines".
+  set(PMQ_ARMS "a NODB=1" "b NODB=1 PF_W=2 PF_A=1" "c NODB=1 PF_W=2 PF_A=1 AK16=1")
+  foreach(arm ${PMQ_ARMS})
+    separate_arguments(a UNIX_COMMAND "${arm}")
+    list(POP_FRONT a tag)
+    add_ocloc_kernel(pmq_${tag}_K2048_N1024_SILU SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_moe_q4gemm.cl
+                     DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 ${a} OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pmq_${tag}_K512_N2048 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_moe_q4gemm.cl
+                     DEFINES K=512 N=2048 EXPERTS=256 ${a} OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PMP_TARGETS kernel_pmq_${tag}_K2048_N1024_SILU kernel_pmq_${tag}_K512_N2048)
   endforeach()
   add_executable(probe_moe_prefill probe_moe_prefill.cc)
   target_include_directories(probe_moe_prefill PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests

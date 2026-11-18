@@ -54,7 +54,8 @@
 #endif
 // OPT bits: 1 the grid's n-blocks on dimension 0 (an item's work-groups dispatched together, so its A rows are read
 // once into L2 instead of once per n-block); 2 FORM 2's slab through sub-group block reads / writes of SLM (one
-// message for a lane's 8 dwords instead of 8).
+// message for a lane's 8 dwords instead of 8); 16 FORM 1 without the register double buffer of the next group's
+// weights; 32 built at 128 GRF (8 threads a vector engine; tools/probe/CMakeLists.txt).
 #ifndef OPT
 #define OPT 0
 #endif
@@ -255,11 +256,16 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
     WQ[b][4] = v.s4; WQ[b][5] = v.s5; WQ[b][6] = v.s6; WQ[b][7] = v.s7;               \
     SC[b] = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(tl + 128))); \
   }
+#if OPT & 16   // E1 arm d (research 2026-11-18): the group's weights loaded at its top, no register double buffer
+  for (uint g = 0; g < G; ++g) {
+    LOAD_GROUP(g, wq, sc)
+#else
   LOAD_GROUP(0u, wq, sc)
   for (uint g = 0; g < G; ++g) {
     uint wn[NB][8];
     float sn_[NB];
     if (g + 1 < G) { LOAD_GROUP(g + 1, wn, sn_) }
+#endif
 #if CVT == 4
     ushort afrag[2][NA / 4][64];   // the group's A: 32 rows x 64 k
 #pragma unroll
@@ -329,12 +335,14 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
       }
     }
 #endif
+#if !(OPT & 16)
 #pragma unroll
     for (int b = 0; b < NB; ++b) {
 #pragma unroll
       for (int j = 0; j < 8; ++j) wq[b][j] = wn[b][j];
       sc[b] = sn_[b];
     }
+#endif
   }
 #undef LOAD_GROUP
 #else   // FORM 2
