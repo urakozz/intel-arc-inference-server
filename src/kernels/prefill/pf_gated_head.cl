@@ -123,9 +123,20 @@ __kernel void pf_gated_head(__global const float* restrict qkvz_partials,
 #if GATED_HEADS % HEAD_SG_N != 0
 #error "pf_gated_head_sg: whole work-groups of heads"
 #endif
+// QKVZ_BF16 1: z arrives as the bf16 word z_b rounds it to (pf_gemm's C_BF16); `0.f +` still maps a -0 to +0.
+#ifndef QKVZ_BF16
+#define QKVZ_BF16 0
+#endif
+#if QKVZ_BF16
+#define QKVZ_T ushort
+#define QKVZ_F(v) bf16f(v)
+#else
+#define QKVZ_T float
+#define QKVZ_F(v) v
+#endif
 __attribute__((reqd_work_group_size(16 * HEAD_SG_N, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(16)))
-__kernel void pf_gated_head_sg(__global const float* restrict qkvz_partials,
+__kernel void pf_gated_head_sg(__global const QKVZ_T* restrict qkvz_partials,
                                __global const float* restrict gdn_o,
                                __global const ushort* restrict gated_w,
                                __global ushort* restrict x_out, uint m_count) {
@@ -143,7 +154,7 @@ __kernel void pf_gated_head_sg(__global const float* restrict qkvz_partials,
     of[u] = bf16f(rne_bf16(gdn_o[ob + 16 * u]));
 #endif
     float za = 0.f;
-    za += qkvz_partials[zb + 16 * u];
+    za += QKVZ_F(qkvz_partials[zb + 16 * u]);
     zf[u] = bf16f(rne_bf16(za));
     sq[u] = of[u] * of[u];
   }

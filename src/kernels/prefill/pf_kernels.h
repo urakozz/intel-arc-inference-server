@@ -207,6 +207,10 @@ inline std::string pf_gemm_variant(bool transB, bool raster = false) {
 inline std::string pf_gemm_silu_variant(bool raster = false) {
   return raster ? "pf_gemm_T0_SILU_R" : "pf_gemm_T0_SILU";
 }
+// The same GEMM storing C as bf16 (rne of each sum): Ornith's qkv||z partials (pf_gdn_front / pf_gated_head _PB).
+inline std::string pf_gemm_bf16c_variant(bool raster = false) {
+  return raster ? "pf_gemm_T0_B16_R" : "pf_gemm_T0_B16";
+}
 // Open-work 3a: pf_gemm for a chunk of few rows (pf_gemm_small.cl) - NA 8-row blocks x NB 16-column
 // atoms a sub-group, SN sub-groups a work-group; bit-identical to pf_gemm_T0 / pf_gemm_T0_SILU.
 inline std::string pf_gemm_small_variant(unsigned NA, unsigned NB, unsigned SN, bool silu) {

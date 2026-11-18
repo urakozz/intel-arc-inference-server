@@ -413,10 +413,22 @@ if(B70_ORNITH)
                    DEFINES ${PF_ORNITH_GDN})
   # GDN prompt pass (research 2026-11-18, probe_gdn_arms): the scan writes o as the bf16 word the gated head rounds it
   # to (SCAN_OBF16), and the head runs one sub-group a (position, head) reading it (HEAD_SG, HEAD_OBF16) - bitwise.
+  # q.S beside w.S, A2.vn inside the state update's loop and S's split before the step's closing barrier (two
+  # barriers a step, not three): SCAN_QS1=2 SCAN_FOLD=1 - bitwise (probe_gdn_arms, 2026-11-18).
   add_ocloc_kernel(pf_gdn_scan_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl
-                   DEFINES ${PF_ORNITH_GDN} SCAN_OBF16=1)
+                   DEFINES ${PF_ORNITH_GDN} SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1)
   add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
                    DEFINES ${PF_ORNITH_GDN} HEAD_SG=1 HEAD_OBF16=1)
+  # The qkv||z partials as the bf16 words their readers round them to (a chunk past kPfSmallMaxRows rows, which
+  # runs pf_gemm): the GEMM's bf16-C form and the front / head reading it - bitwise. Additive.
+  add_ocloc_kernel(pf_gemm_T0_B16 SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 C_BF16=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_gemm_T0_B16_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 C_BF16=1 RASTER=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_gated_head_GK16V32_PB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
+                   DEFINES ${PF_ORNITH_GDN} HEAD_SG=1 HEAD_OBF16=1 QKVZ_BF16=1)
+  add_ocloc_kernel(pf_gdn_front_GK16V32_PB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
+                   DEFINES ${PF_ORNITH_GDN} FRONT_PRELOAD=1 QKVZ_BF16=1)
   # Phase 2 Task 5: the residual fold + RMSNorm in one launch, bitwise the pair above.
   foreach(SP 0 1)
     add_ocloc_kernel(pf_res_norm_K2048_SP${SP}_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
@@ -437,8 +449,9 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
                    DEFINES ${PF_ORNITH_GDN} FRONT_PRELOAD=1)
   # Phase 2 Task 3: the GDN intra-chunk stages in one launch (A, T, W / U, A2), judged.
+  # INTRA_WU2: the W / U stage with lanes = channels (VNNI block loads of v / k, block writes of u / w), bitwise.
   add_ocloc_kernel(pf_gdn_intra_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_intra.cl
-                   DEFINES ${PF_ORNITH_GDN})
+                   DEFINES ${PF_ORNITH_GDN} INTRA_WU2=1)
   add_ocloc_kernel(pf_attn_prep_q16_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
                    DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA})
   add_ocloc_kernel(pf_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn.cl

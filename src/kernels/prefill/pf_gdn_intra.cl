@@ -77,8 +77,14 @@
 #ifndef INTRA_STOP
 #define INTRA_STOP 0
 #endif
+#ifndef INTRA_WU2
+#define INTRA_WU2 0
+#endif
 
 #include "bf16.h"
+#if INTRA_WU2
+#pragma OPENCL EXTENSION cl_intel_subgroups : enable
+#endif
 #if GDN_CVT
 // The hardware fp32 -> bf16 convert (round to nearest even) in place of bf16.h's add-and-shift: one instruction
 // instead of four; the same bf16 word for every finite value.
@@ -264,6 +270,77 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
   return;
 #endif
 
+#if INTRA_WU2
+  // ---- 4. u = T vb and w = T kb by DPAS with lanes = channels (M = 8 positions i, K = 16 positions j,
+  //         N = 16 channels): sub-group sg owns channels 16 (sg % 8).. of u (sg < 8) or of w, every
+  //         8-row i-tile. The same products in the same k order as the transposed form below, but
+  //         the rows of v / k are read and the rows of u / w written as 32-byte pieces a sub-group.
+  {
+    const bool isw = sg >= 8;
+    // B operands, one per K-block kb: lane = channel x, VNNI pairs of positions (even j low), read by two
+    // VNNI-transform block loads of 32 rows (rows past the prompt read as 0); lane l scales position 16kb + l.
+    int8 bq[CT / 16];
+#pragma unroll
+    for (uint hb = 0; hb < CT / 32; ++hb) {
+      uint raw[16];
+      intel_sub_group_2d_block_read_transform_16b_32r16x1c(
+          (__global void*)xb, CONV_ROWS * 2, c_count, CONV_ROWS * 2,
+          (int2)((int)((isw ? K_OFF + kh * DIM : V_OFF + h * DIM) + (sg % 8) * 16), (int)(base_m + 32 * hb)), raw);
+#pragma unroll
+      for (uint kq = 0; kq < 2; ++kq) {
+        const uint kb = 2 * hb + kq, jl = kb * 16 + lane, jr = min(jl, L - 1);
+        const size_t gi = (size_t)(base_m + jr) * HEADS + h;
+        const float btl = beta[gi];
+        const float egl = isw ? exp(g_cum[gi]) : 0.0f;
+        uint pk[8];
+#pragma unroll
+        for (uint tp = 0; tp < 8; ++tp) {
+          const uint wv = raw[kq * 8 + tp];
+          ushort two[2];
+#pragma unroll
+          for (uint e = 0; e < 2; ++e) {
+            const uint jj = 2 * tp + e, j = kb * 16 + jj;
+            const float bt = intel_sub_group_shuffle(btl, jj);
+            const ushort xv = (ushort)(e ? wv >> 16 : wv & 0xFFFFu);
+            if (isw) {
+              const float eg = intel_sub_group_shuffle(egl, jj);
+              two[e] = j < L ? rne_bf16(bf16f(xv) * bt * eg) : (ushort)0;   // Q2
+            } else {
+              two[e] = j < L ? rne_bf16(bf16f(xv) * bt) : (ushort)0;        // Q1
+            }
+          }
+          pk[tp] = (uint)two[0] | ((uint)two[1] << 16);
+        }
+        bq[kb] = as_int8(vload8(0, pk));
+      }
+    }
+    __global ushort* restrict out = isw ? w : u;
+#pragma unroll
+    for (uint mi = 0; mi < CT / 8; ++mi) {
+      const uint i0 = mi * 8;
+      float8 ah = (float8)(0.0f), al = (float8)(0.0f);
+#pragma unroll
+      for (uint kb = 0; kb <= mi / 2; ++kb) {
+        short th[8], tl[8];
+#pragma unroll
+        for (uint r = 0; r < 8; ++r) {
+          th[r] = (short)Th[(i0 + r) * TLD + kb * 16 + lane];
+          tl[r] = (short)Tl[(i0 + r) * TLD + kb * 16 + lane];
+        }
+        ah = intel_sub_group_bf16_bf16_matrix_mad_k16(vload8(0, th), bq[kb], ah);
+        al = intel_sub_group_bf16_bf16_matrix_mad_k16(vload8(0, tl), bq[kb], al);
+      }
+      float f[8];
+      ushort ov[8];
+      vstore8(ah + al, 0, f);
+#pragma unroll
+      for (uint r = 0; r < 8; ++r) ov[r] = rne_bf16(f[r]);   // Q3 / Q4
+      // One 8-row block write; rows past the prompt fall outside the surface and are not written.
+      intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)out, HEADS * DIM * 2, c_count, HEADS * DIM * 2,
+                                                 (int2)((int)(h * DIM + (sg % 8) * 16), (int)(base_m + i0)), ov);
+    }
+  }
+#else
   // ---- 4. u^T = vb^T T^T and w^T = kb^T T^T by DPAS (M = 8 channels, K = 16 positions j,
   //         N = 16 positions i); sub-group sg owns channels 8sg..8sg+7 of both ----------------
   {
@@ -322,4 +399,5 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
       }
     }
   }
+#endif
 }

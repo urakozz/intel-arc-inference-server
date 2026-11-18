@@ -67,6 +67,11 @@ const Arm kArms[] = {
     {"scan", "pf_gdn_scan_cvt_GK16V32", "pf_gdn_scan_dpas_split"},
     {"scan_obf", "pf_gdn_scan_obf_GK16V32", "pf_gdn_scan_dpas_split"},   // o as bf16 words: compared to rne(o)
     {"intra", "pf_gdn_intra_cvt_GK16V32", "pf_gdn_intra"},
+    {"scan", "pf_gdn_scan_qs1_GK16V32", "pf_gdn_scan_dpas_split"},   // q.S beside w.S (production o as bf16)
+    {"scan", "pf_gdn_scan_qs2_GK16V32", "pf_gdn_scan_dpas_split"},   // + A2.vn inside the state update's loop
+    {"scan", "pf_gdn_scan_fold1_GK16V32", "pf_gdn_scan_dpas_split"},  // QS1 + S_t+1's split before the closing barrier
+    {"scan", "pf_gdn_scan_fold2_GK16V32", "pf_gdn_scan_dpas_split"},  // QS1=2 + the same
+    {"intra", "pf_gdn_intra_wu2_GK16V32", "pf_gdn_intra"},          // W / U with lanes = channels
     // DIAGNOSTIC (outputs incomplete, never bitwise): the intra kernel's stages priced by stopping early
     {"scan", "pf_gdn_scan_diag1_GK16V32", "pf_gdn_scan_dpas_split"},
     {"scan", "pf_gdn_scan_diag2_GK16V32", "pf_gdn_scan_dpas_split"},

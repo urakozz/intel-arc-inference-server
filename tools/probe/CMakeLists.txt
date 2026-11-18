@@ -1374,6 +1374,17 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_gdn_scan_obf_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
                    DEFINES ${_pga_gdn} SCAN_OBF16=1)
   list(APPEND _pga_diag kernel_pf_gated_head_sgo_GK16V32 kernel_pf_gdn_scan_obf_GK16V32)
+  add_ocloc_kernel(pf_gdn_intra_wu2_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
+                   DEFINES ${_pga_gdn} INTRA_WU2=1)
+  list(APPEND _pga_diag kernel_pf_gdn_intra_wu2_GK16V32)
+  foreach(qs 1 2)
+    add_ocloc_kernel(pf_gdn_scan_qs${qs}_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
+                     DEFINES ${_pga_gdn} SCAN_OBF16=1 SCAN_QS1=${qs})
+    list(APPEND _pga_diag kernel_pf_gdn_scan_qs${qs}_GK16V32)
+    add_ocloc_kernel(pf_gdn_scan_fold${qs}_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
+                     DEFINES ${_pga_gdn} SCAN_OBF16=1 SCAN_QS1=${qs} SCAN_FOLD=1)
+    list(APPEND _pga_diag kernel_pf_gdn_scan_fold${qs}_GK16V32)
+  endforeach()
   list(APPEND _pga_diag kernel_pf_gdn_front_pl_GK16V32 kernel_pf_gated_head_sg_GK16V32 kernel_pf_gdn_front_GK16V32
        kernel_pf_gated_head_GK16V32)
   # DIAGNOSTIC: the scan without its o stage (1), its state update (2), its w.S (4)
