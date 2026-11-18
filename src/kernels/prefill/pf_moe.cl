@@ -87,33 +87,31 @@
 // pf_moe_gather / pf_moe_gather_i8 - the GEMMs' A operand in sorted order: row r of xg is
 // row row_tok[r] of the chunk's normed activations (bf16 [C][HIDDEN]), or of its h8
 // quantisation (int8 [C][HIDDEN] + one fp32 scale per row, pf_int8.cl's pf_quant_had);
-// a padding row (NONE) is skipped by the bf16 gather and written as zeros by the int8 one.
-// Rows past hdr[H_ROWS] belong to no tile and are not touched. Work-group = one row,
-// 16-byte copies.
+// a padding row (NONE) is written as zeros. Rows past hdr[H_ROWS] belong to no tile and
+// are not touched. Work-group = one row, 16-byte copies.
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
 __kernel void pf_moe_gather(__global const uint4* restrict x, __global const uint* restrict hdr,
                             __global const uint* restrict row_tok, __global uint4* restrict xg) {
   const uint r = get_group_id(0);
   if (r >= hdr[H_ROWS]) return;
   const uint t = row_tok[r];
-  // A padding row is not written (bf16 only): its GEMM rows are never stored past the item's end or never read, and
-  // a DPAS row never meets another row's, so whatever it holds reaches no output.
-  if (t == NONE) return;
   const uint W = HIDDEN * 2 / 16;
-  for (uint i = get_local_id(0); i < W; i += WG_GATHER) xg[(size_t)r * W + i] = x[(size_t)t * W + i];
+  for (uint i = get_local_id(0); i < W; i += WG_GATHER)
+    xg[(size_t)r * W + i] = t == NONE ? (uint4)(0u) : x[(size_t)t * W + i];
 }
 
 // pf_moe_gather_routed - pf_moe_gather over the routed experts' rows only (r < hdr[H_SHARED_ROW]): l0's shared
-// expert reads its rows from x itself (pf_moe_q4gemm.cl's SH_X binary).
+// expert reads its rows from x itself (pf_moe_q4gemm.cl's SH_X binary). Padding rows stay zeros: the gate||up GEMM
+// measured ~1.5 % slower over whatever the region held before (2026-11-18, profiled at 4k).
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
 __kernel void pf_moe_gather_routed(__global const uint4* restrict x, __global const uint* restrict hdr,
                                    __global const uint* restrict row_tok, __global uint4* restrict xg) {
   const uint r = get_group_id(0);
   if (r >= hdr[H_SHARED_ROW]) return;
   const uint t = row_tok[r];
-  if (t == NONE) return;
   const uint W = HIDDEN * 2 / 16;
-  for (uint i = get_local_id(0); i < W; i += WG_GATHER) xg[(size_t)r * W + i] = x[(size_t)t * W + i];
+  for (uint i = get_local_id(0); i < W; i += WG_GATHER)
+    xg[(size_t)r * W + i] = t == NONE ? (uint4)(0u) : x[(size_t)t * W + i];
 }
 
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
