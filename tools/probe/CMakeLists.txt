@@ -1369,6 +1369,11 @@ if(B70_ORNITH)
                    DEFINES ${_pga_gdn} FRONT_PRELOAD=1)
   add_ocloc_kernel(pf_gated_head_sg_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gated_head.cl
                    DEFINES ${_pga_gdn} HEAD_SG=1)
+  add_ocloc_kernel(pf_gated_head_sgo_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gated_head.cl
+                   DEFINES ${_pga_gdn} HEAD_SG=1 HEAD_OBF16=1)
+  add_ocloc_kernel(pf_gdn_scan_obf_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
+                   DEFINES ${_pga_gdn} SCAN_OBF16=1)
+  list(APPEND _pga_diag kernel_pf_gated_head_sgo_GK16V32 kernel_pf_gdn_scan_obf_GK16V32)
   list(APPEND _pga_diag kernel_pf_gdn_front_pl_GK16V32 kernel_pf_gated_head_sg_GK16V32 kernel_pf_gdn_front_GK16V32
        kernel_pf_gated_head_GK16V32)
   # DIAGNOSTIC: the scan without its o stage (1), its state update (2), its w.S (4)

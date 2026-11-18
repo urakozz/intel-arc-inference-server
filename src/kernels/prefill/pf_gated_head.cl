@@ -137,7 +137,11 @@ __kernel void pf_gated_head_sg(__global const float* restrict qkvz_partials,
   float of[8], sq[8], zf[8];
 #pragma unroll
   for (uint u = 0; u < 8; ++u) {
+#if HEAD_OBF16
+    of[u] = bf16f(((__global const ushort*)gdn_o)[ob + 16 * u]);   // the scan wrote o_b itself
+#else
     of[u] = bf16f(rne_bf16(gdn_o[ob + 16 * u]));
+#endif
     float za = 0.f;
     za += qkvz_partials[zb + 16 * u];
     zf[u] = bf16f(rne_bf16(za));

@@ -279,9 +279,14 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
              PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
   g_scan_launched.store(scan_entry);     // the dispatch proof, after the append
   profile_wait(cx, Phase::kGdnScan);
-  // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller.
-  cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head"), heads, C, 1,
-            {PtrArg(qkvz_partials), PtrArg(p_o), PtrArg(gated_w), PtrArg(y), arg_val(C)});
+  // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller. A MoE model's (Ornith) runs one
+  //      sub-group a (position, head), 8 heads a work-group, on the bf16 o its scan wrote (pf_gated_head.cl).
+  if (d.is_moe())
+    cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head_sg"), heads / 8, C, 1,
+              {PtrArg(qkvz_partials), PtrArg(p_o), PtrArg(gated_w), PtrArg(y), arg_val(C)});
+  else
+    cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head"), heads, C, 1,
+              {PtrArg(qkvz_partials), PtrArg(p_o), PtrArg(gated_w), PtrArg(y), arg_val(C)});
   profile_wait(cx, Phase::kGdnHead);
 }
 

@@ -192,6 +192,9 @@
 #ifndef SCAN_PF
 #define SCAN_PF 0
 #endif
+#ifndef SCAN_OBF16
+#define SCAN_OBF16 0
+#endif
 #ifndef SCAN_DIAG
 #define SCAN_DIAG 0
 #endif
@@ -411,9 +414,22 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
         olo = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bl, olo);
       }
       o += olo;
+#if SCAN_OBF16
+      // o leaves as the bf16 word pf_gated_head's first step rounds it to (o_b), half the bytes each way.
+      if (pos_l < L) {
+        float of[DM];
+        ushort ob[DM];
+        vstore8(o, 0, of);
+#pragma unroll
+        for (uint m = 0; m < DM; ++m) ob[m] = rne_bf16(of[m]);
+        vstore8(vload8(0, ob), 0, (__global ushort*)gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
+                                      c * CHUNK_V + col0);
+      }
+#else
       if (pos_l < L)
         vstore8(o, 0, gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
                             c * CHUNK_V + col0);
+#endif
     }
 
 #endif

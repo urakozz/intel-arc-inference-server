@@ -65,6 +65,7 @@ const Arm kArms[] = {
     {"scan", "pf_gdn_scan_pf1_GK16V32", "pf_gdn_scan_dpas_split"},
     {"scan", "pf_gdn_scan_pf2_GK16V32", "pf_gdn_scan_dpas_split"},
     {"scan", "pf_gdn_scan_cvt_GK16V32", "pf_gdn_scan_dpas_split"},
+    {"scan_obf", "pf_gdn_scan_obf_GK16V32", "pf_gdn_scan_dpas_split"},   // o as bf16 words: compared to rne(o)
     {"intra", "pf_gdn_intra_cvt_GK16V32", "pf_gdn_intra"},
     // DIAGNOSTIC (outputs incomplete, never bitwise): the intra kernel's stages priced by stopping early
     {"scan", "pf_gdn_scan_diag1_GK16V32", "pf_gdn_scan_dpas_split"},
@@ -194,6 +195,22 @@ int main(int argc, char** argv) {
       auto [hp, ha] = time_pair([&] { head(false); }, [&] { head(true); }, [] {});
       std::printf("ARM {\"C\":%u,\"arm\":\"pf_gated_head_sg_GK16V32\",\"bitwise\":%s,\"prod_ms\":%.4f,\"arm_ms\":%.4f,"
                   "\"ratio\":%.3f}\n", C, hs ? "true" : "false", hp, ha, ha / hp);
+      {   // the sub-group head reading the scan's bf16 o (rne of the same fp32 o)
+        std::vector<uint16_t> ob(o.size());
+        for (size_t e = 0; e < o.size(); ++e) ob[e] = bf(o[e]);
+        l0::Mem d_ob(ctx, l0::MemKind::Device, ob.size() * 2);
+        cx.copy(d_ob.ptr(), ob.data(), ob.size() * 2);
+        cx.wait();
+        l0::Kernel& kH3 = kc("pf_gated_head_sgo_GK16V32", "pf_gated_head_sg");
+        auto h3 = [&] {
+          cx.launch(kH3, H / 8, C, 1, {PtrArg(d_p.ptr()), PtrArg(d_ob.ptr()), PtrArg(d_gw.ptr()), PtrArg(d_y2.ptr()), arg_val(C)});
+        };
+        h3();
+        const bool s3 = same(d_y, d_y2, size_t(C) * H * kDim * 2);
+        auto [p3, a3] = time_pair([&] { head(false); }, h3, [] {});
+        std::printf("ARM {\"C\":%u,\"arm\":\"pf_gated_head_sgo_GK16V32\",\"bitwise\":%s,\"prod_ms\":%.4f,\"arm_ms\":%.4f,"
+                    "\"ratio\":%.3f}\n", C, s3 ? "true" : "false", p3, a3, a3 / p3);
+      }
       return 0;
     }
     for (int call : calls) {
@@ -272,14 +289,23 @@ int main(int argc, char** argv) {
       for (const Arm& arm : kArms) {
         if (!only.empty() && only != arm.bin) continue;
         l0::Kernel& kA = kc(arm.bin, arm.entry);
-        const bool is_scan = std::strcmp(arm.kind, "scan") == 0;
+        const bool is_scan = std::strncmp(arm.kind, "scan", 4) == 0, obf = std::strcmp(arm.kind, "scan_obf") == 0;
         bool same = true;
         if (is_scan) {
           std::vector<float> o, S;
           cx.copy(d_S.ptr(), d_S0.ptr(), nS * 4);
           scan(kA);
           read_scan(o, S);
-          same = std::memcmp(o.data(), o_ref.data(), nwu * 4) == 0 && std::memcmp(S.data(), S_ref.data(), nS * 4) == 0;
+          if (obf) {   // o's words are bf16 at the fp32 element offsets of the first half of the buffer
+            const uint16_t* ob = reinterpret_cast<const uint16_t*>(o.data());
+            for (size_t e = 0; e < nwu && same; ++e) {
+              uint32_t u;
+              std::memcpy(&u, &o_ref[e], 4);
+              same = ob[e] == uint16_t((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+            }
+            same = same && std::memcmp(S.data(), S_ref.data(), nS * 4) == 0;
+          } else
+            same = std::memcmp(o.data(), o_ref.data(), nwu * 4) == 0 && std::memcmp(S.data(), S_ref.data(), nS * 4) == 0;
         } else {
           intra(kA, d_w2.ptr(), d_u2.ptr(), d_A22.ptr());
           std::vector<uint16_t> w(nwu), u(nwu);
