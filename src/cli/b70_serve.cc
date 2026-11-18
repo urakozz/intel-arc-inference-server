@@ -199,6 +199,7 @@ std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix
   }
   if (prefix_cache_gb > 0) {
     const auto t0 = std::chrono::steady_clock::now();
+    l0::lock_host_memory(size_t(prefix_cache_gb) << 30);   // locked against swap when RLIMIT_MEMLOCK covers it
     prefix_alloc = std::make_unique<PinnedAlloc>(context, size_t(prefix_cache_gb) << 30);
     options.prefix_cache_bytes = prefix_alloc->size();
     options.prefix_alloc = prefix_alloc.get();
@@ -209,6 +210,18 @@ std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix
     std::print(stderr, "{}", runtime::vram_host_line({{"prefix cache", prefix_alloc->size()}}));
   } else {
     std::print(stderr, "prefix cache: off ({})\n", prefix_why.c_str());
+  }
+  // The big host allocations (the prefix cache; Flash-Next's PLE table and expert mirrors) are loaded by now.
+  const size_t locked = l0::host_locked_bytes(), swappable = l0::host_unlocked_bytes();
+  if (locked > 0)
+    std::print(stderr, "host memory: {:.1f} GB locked against swap\n", locked / 1e9);
+  if (swappable > 0) {
+    const size_t limit = l0::memlock_limit();
+    std::print(stderr,
+               "host memory: {:.1f} GB can be swapped out under memory pressure, and a request then waits while it "
+               "comes back from disk: the memlock limit (ulimit -l) is {:d} KiB; to lock it, set it to unlimited "
+               "(memlock in /etc/security/limits.d/, LimitMEMLOCK=infinity in a systemd unit) and log in again\n",
+               swappable / 1e9, limit / 1024);
   }
   return prefix_alloc;
 }

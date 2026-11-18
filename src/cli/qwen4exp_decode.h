@@ -50,6 +50,7 @@
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "l0/context.h"
+#include "l0/memory.h"
 #include "loader/lm_head_int8.h"
 #include "loader/qwen4exp_layout.h"
 #include "loader/qwen4exp_loader.h"
@@ -207,6 +208,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
   // `note`: what the experts' figure leaves out (the --layers path: a B70_Q4_RESIDENT tier is the loader's).
   const auto host_line = [&](size_t mirror, const char* note = "") {
     loader::check_q4_host_fit(ple, mirror, a.prefix_bytes, avail);
+    l0::lock_host_memory(ple + mirror + a.prefix_bytes);   // locked against swap when RLIMIT_MEMLOCK covers it
     std::print(stderr, "host: pinned {:.3f} GB (the PLE table {:.3f} + experts {:.3f}{} + the prefix cache {:.3f}) of "
                "MemAvailable {:.3f} GB, 16 GiB kept\n", (ple + mirror + a.prefix_bytes) / 1e9, ple / 1e9, mirror / 1e9,
                note, a.prefix_bytes / 1e9, avail / 1e9);
