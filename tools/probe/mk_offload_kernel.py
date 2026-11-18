@@ -45,10 +45,12 @@ def generate(src_text: str) -> str:
         if n != 1:
             raise SystemExit(f"mk_offload_kernel: {SRC} holds the line\n  {old}\n{n} times (expected exactly once) - "
                              "the expert address moved; update this generator and plan 22a's Review Focus 1")
-    # Any other line defining either macro is a second address path the table would not cover.
+    # Any other line defining either macro is a second address path the table would not cover. The source's own
+    # table form (its `#if Q4_EXPERT_TABLE` branch, the _TBL binaries) is the replacement itself, so it may stay.
     for ln in lines:
         s = ln.lstrip()
-        if (s.startswith("#define Q4_EXPERT_GU") or s.startswith("#define Q4_EXPERT_DN")) and ln not in LINES:
+        if ((s.startswith("#define Q4_EXPERT_GU") or s.startswith("#define Q4_EXPERT_DN")) and ln not in LINES
+                and ln not in LINES.values()):
             raise SystemExit(f"mk_offload_kernel: {SRC} defines an expert address outside the two lines:\n  {ln}")
     out = [LINES.get(ln, ln) for ln in lines]
     sha = hashlib.sha256(src_text.encode("utf-8")).hexdigest()

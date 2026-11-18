@@ -2,7 +2,7 @@
 // checks the committed copy). Spec 22a (P0.3): src/kernels/qwen4exp/q4_moe.cl with exactly its two expert-address lines
 // (Q4_EXPERT_GU / Q4_EXPERT_DN) replaced by a u64 pointer-table read - `w` is the layer's table: gate||up
 // pointers [0, 512), down pointers [512, 1024); the down launch is bound at table + 512 entries.
-// source sha256 f00183237791e04886cfdff84cf0b146716d4efba904512a249d935c97806506
+// source sha256 92bb7fd0739190833c4c5d11355250ca08876d4e0f210675d073ee4b1c27cf43
 // q4_moe.cl - spec 21-QFN-v1c: Qwen3.8-Flash-Next's MoE block at 512 experts / top-10 / 640 (spec 21-QFN-v1 §2.1, §4.4) - the
 // router's softmax route and the 11-slot block (10 routed + the shared expert). Two families, each compiled only
 // when its defines are given (kol_moe.cl's arrangement; moe.cl's semantics - Qwen3.5-MoE's softmax router - at
@@ -88,7 +88,14 @@ inline float silu_t(float x) { return x / (1.0f + exp_torch(-x)); }
 #if ROUTE_K < 1 || ROUTE_K > 15 || ROUTE_E != 2 * ROUTE_WG || ROUTE_LN < ROUTE_E + 1
 #error "q4_route: 1 <= TOP_K <= 15 (the route row's ids), two experts a lane, the row holds the shared gate"
 #endif
-__attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
+#define ROUTE_NG (ROUTE_WG / SG)   // sub-groups, each the max of its 32 experts
+#if ROUTE_NG < ROUTE_K + 1
+#error "q4_route: the threshold needs at least TOP_K + 1 sub-group maxima"
+#endif
+// The ranking runs over the candidates only: T = the (TOP_K + 1)-th largest of the sub-groups' maxima, so at least
+// TOP_K + 1 experts have p >= T and every expert of rank <= TOP_K is among those with p >= T; the rest have p < T,
+// below every candidate, so a candidate's RANK over the candidates is its RANK over all 512 (the ids and p unchanged).
+__attribute__((reqd_work_group_size(ROUTE_WG, 1, 1))) Q4_SG16
 __kernel void q4_route(__global const float* restrict logits, __global uint* restrict route) {
   const uint m = get_group_id(1);
   const uint lane = get_local_id(0);
@@ -96,6 +103,10 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
   __local float red[ROUTE_E];    // the max, then the softmax sum tree
   __local uint top_id[ROUTE_K + 1];
   __local float top_p[ROUTE_K + 1];
+  __local float gmax[ROUTE_NG];  // each sub-group's largest p
+  __local float thr;             // T (INFINITY: no candidate, NaN rows)
+  __local uint n_cand;
+  __local uint cand[ROUTE_E];    // the experts with p >= T, in any order
   const __global float* restrict lr = logits + (size_t)m * ROUTE_LN;
   for (uint q = 0; q < 2; ++q) {
     const uint e = lane + q * ROUTE_WG;
@@ -105,6 +116,10 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
   if (lane <= ROUTE_K) {   // a defined row even if NaNs break the ranking
     top_id[lane] = lane;
     top_p[lane] = 0.0f;
+  }
+  if (lane == 0) {
+    thr = INFINITY;
+    n_cand = 0u;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = ROUTE_E / 2; stride > 0; stride >>= 1) {   // the max: exact in any order
@@ -125,15 +140,34 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   const float sum = red[0];
-  for (uint q = 0; q < 2; ++q) sl[lane + q * ROUTE_WG] = ex[q] / sum;
-  barrier(CLK_LOCAL_MEM_FENCE);
+  float p[2];
   for (uint q = 0; q < 2; ++q) {
-    const uint e = lane + q * ROUTE_WG;
+    p[q] = ex[q] / sum;
+    sl[lane + q * ROUTE_WG] = p[q];
+  }
+  const float gm = sub_group_reduce_max(fmax(p[0], p[1]));   // exact in any order
+  if (lane % SG == 0) gmax[lane / SG] = gm;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lane < ROUTE_NG) {   // T: the maximum of RANK TOP_K among the ROUTE_NG maxima
+    const float g = gmax[lane];
+    uint rank = 0;
+    for (uint j = 0; j < ROUTE_NG; ++j) rank += (gmax[j] > g || (gmax[j] == g && j < lane)) ? 1u : 0u;
+    if (rank == ROUTE_K) thr = g;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const float t = thr;
+  for (uint q = 0; q < 2; ++q)
+    if (p[q] >= t) cand[atomic_inc(&n_cand)] = lane + q * ROUTE_WG;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint nc = n_cand;
+  for (uint i = lane; i < nc; i += ROUTE_WG) {
+    const uint e = cand[i];
     const float pe = sl[e];
     uint rank = 0;
-    for (uint jj = 0; jj < ROUTE_E; ++jj) {
-      const float pj = sl[jj];
-      rank += (pj > pe || (pj == pe && jj < e)) ? 1u : 0u;
+    for (uint jj = 0; jj < nc; ++jj) {
+      const uint j = cand[jj];
+      const float pj = sl[j];
+      rank += (pj > pe || (pj == pe && j < e)) ? 1u : 0u;
     }
     if (rank <= ROUTE_K) {
       top_id[rank] = e;
@@ -188,8 +222,16 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
 #endif
 
 // ---- the expert address: spec 22 replaces exactly these two lines (its indirection table) -----------------------
+// Q4_EXPERT_TABLE (the _TBL binaries, plan 21-QFN-v2a Task 8): `base` is the layer's table row - u64 addresses, gate||up
+// blocks at row[0..511], down blocks at row[512..1023] (the down launch binds row + 512) - each in VRAM or in pinned
+// host memory; every existing binary leaves it unset.
+#if Q4_EXPERT_TABLE
 #define Q4_EXPERT_GU(base, id) ((__global const uint*)(intptr_t)((__global const ulong*)(base))[(id)])
 #define Q4_EXPERT_DN(base, id) ((__global const uint*)(intptr_t)((__global const ulong*)(base))[(id)])
+#else
+#define Q4_EXPERT_GU(base, id) ((__global const uint*)(intptr_t)((__global const ulong*)(base))[(id)])
+#define Q4_EXPERT_DN(base, id) ((__global const uint*)(intptr_t)((__global const ulong*)(base))[(id)])
+#endif
 // --------------------------------------------------------------------------------------------------------------
 
 // moe.cl's dot8 / tile_dot, verbatim.
@@ -292,11 +334,34 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   }
 }
 
+// MOE_TP_PART (plan 21-QFN-v2b, a tensor-parallel card's half of every expert, DN_KS 1): y is fp32 [SLOTS][M][HIDDEN],
+// each slot's dot over the card's K half (card 0 groups 0..4, card 1 groups 5..9: one card's two DN_KS 2 partials,
+// bit for bit); the all-reduce adds them slot by slot (card 0's first: one card's reduction) and q4_moe_finish
+// applies this kernel's epilogue. Every existing binary leaves it unset.
+// The all-reduce is wired into the two kernels (tp.cl's protocol, tp_wire.h; RANK the card): each down work-group is
+// one chunk of the MoE's landing (its 16 columns, every slot: FOLD_G = HIDDEN / 16) and sends it to the peer as
+// tp_send does; q4_moe_finish waits for its 16 chunks as tp_sum does and adds the two cards' slots in tp_sum's order.
+#if MOE_TP_PART
+#ifndef RANK
+#error "q4_moe MOE_TP_PART: RANK (the card: the order of the slot sums)"
+#endif
+#define TP_MROWS 8
+#define DATA_WORDS (SLOTS * TP_MROWS * HIDDEN)
+#define J_CHUNKS (NT_DN * TP_MROWS)
+#include "tp_wire.h"
+#define Y_T __global float* restrict
+#else
+#define Y_T __global ushort* restrict
+#endif
 // down + the combine, one 16-column n-tile of the hidden row per work-group; sub-group (slot, q).
 __attribute__((reqd_work_group_size(WG_DN, 1, 1)))
 Q4_SG16
 __kernel void q4_moe_down(__global const uint* restrict route, __global const ushort* restrict h,
-                          __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict y) {
+                          __global const uint* restrict w, SH_T restrict w_sh, Y_T y
+#if MOE_TP_PART
+                          , __global uint* land, __global uint* ctr
+#endif
+                          ) {
   __local float red[SLOTS * DN_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -329,6 +394,27 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     if (q < stride) red[sg][lane] += red[sg + stride][lane];
     barrier(CLK_LOCAL_MEM_FENCE);
   }
+#if MOE_TP_PART
+#if DN_KS != 1
+#error "q4_moe MOE_TP_PART: DN_KS 1 (a card's 5 groups in one partial)"
+#endif
+  // tp_send for chunk n_tile: the slot's 16 words here and in the peer's landing, the stamp line, the flag.
+  __local uint s_n;
+  if (lid == 0) s_n = tp_next(ctr, n_tile, m);
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint n = s_n;
+  const size_t e = ((size_t)slot * M + m) * HIDDEN + n_tile * SG + lane;
+  y[e] = red[sg][lane];
+  land[(n & 1u) * DATA_WORDS + e] = as_uint(red[sg][lane]);
+  const uint j = n_tile * TP_MROWS + m;
+  if (lid < TP_TRAILER_STRIDE) land[TRAILER(n & 1u, j) + lid] = n;
+  atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
+  barrier(CLK_GLOBAL_MEM_FENCE);
+  if (lid == 0) {
+    *(volatile __global uint*)(land + FLAG(n & 1u, j)) = n;
+    atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
+  }
+#else
   if (sg == 0) {
     float sum = 0.0f;
     for (uint k = 0; k < MOE_K; ++k) {
@@ -339,5 +425,63 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     const ushort sh_b = rne_bf16(rf(red[SHARED_SLOT * DN_KS][lane]) * as_float(rr[R_SG]));
     y[(size_t)m * HIDDEN + n_tile * SG + lane] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
   }
+#endif
 }
+#if MOE_TP_PART
+// q4_moe_finish(route, slots, land, ctr, state, spin_limit, y) - grid (HIDDEN / 256, M), WG 256: tp_sum's wait for
+// the peer's 16 chunks under this work-group (lane c < 16 waits for chunk 16 g + c), each slot the two cards' values
+// summed from 0 (card 0's first), then q4_moe_down's epilogue, token for token: y bf16 [M][HIDDEN].
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void q4_moe_finish(__global const uint* restrict route, __global const float* restrict slots,
+                            __global const uint* land, __global uint* ctr, __global uint* state, uint spin_limit,
+                            __global ushort* restrict y) {
+  const uint n = get_global_id(0);
+  const uint m = get_group_id(1);
+  const uint lid = get_local_id(0);
+  __local uint s_want[256 / SG];
+  if (lid < 256 / SG) {
+    const uint c = get_group_id(0) * (256 / SG) + lid;
+    const uint j = c * TP_MROWS + m;
+    const uint want = tp_next(ctr, c, m);
+    s_want[lid] = want;
+    const uint slot = want & 1u;
+    if (SYS_LOAD(state, memory_order_relaxed) == 0u) {   // after a failure: no spin, the host throws anyway
+      uint got = 0u, i = 0u;
+      do {
+        got = SYS_LOAD(land + FLAG(slot, j), memory_order_acquire);
+      } while (got != want && ++i < spin_limit);
+      const uint stamp = SYS_LOAD(land + TRAILER(slot, j), memory_order_acquire);
+      const uint status = got != want ? 1u : (stamp != want ? 2u : 0u);
+      if (status != 0u) tp_record(state, status, got, stamp, want, j);
+      if (status == 2u) tp_late(state, land + TRAILER(slot, j), want, spin_limit);
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
+  atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_acquire, memory_scope_all_svm_devices);
+  __global const uint* src = land + (s_want[lid / SG] & 1u) * DATA_WORDS;
+  const __global uint* restrict rr = route + (size_t)m * RW;
+  float v[SLOTS];
+  for (uint k = 0; k < SLOTS; ++k) {
+    const size_t e = ((size_t)k * M + m) * HIDDEN + n;
+    const float a = slots[e], b = as_float(SYS_LOAD(src + e, memory_order_relaxed));
+    float acc = 0.f;
+#if RANK == 0
+    acc += a;
+    acc += b;
+#else
+    acc += b;
+    acc += a;
+#endif
+    v[k] = acc;
+  }
+  float sum = 0.0f;
+  for (uint k = 0; k < MOE_K; ++k) {
+    const float t = rf(rf(v[k]) * as_float(rr[R_W + k]));
+    sum = sum + t;
+  }
+  const ushort r_b = rne_bf16(sum);
+  const ushort sh_b = rne_bf16(rf(v[SHARED_SLOT]) * as_float(rr[R_SG]));
+  y[(size_t)m * HIDDEN + n] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
+}
+#endif
 #endif  // MOE_E
