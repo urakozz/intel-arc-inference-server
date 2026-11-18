@@ -201,6 +201,12 @@
 #ifndef SCAN_QS1
 #define SCAN_QS1 0
 #endif
+#ifndef SCAN_FOLD
+#define SCAN_FOLD 0
+#endif
+#if SCAN_FOLD && !SCAN_QS1
+#error "pf_gdn_scan: SCAN_FOLD needs SCAN_QS1 (stage 2 must not read S's words)"
+#endif
 #if SCAN_PF
 enum LSC_LDCC { LSC_LDCC_DEFAULT, LSC_LDCC_L1UC_L3UC, LSC_LDCC_L1UC_L3C, LSC_LDCC_L1C_L3UC, LSC_LDCC_L1C_L3C };
 void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, enum LSC_LDCC c);
@@ -262,6 +268,24 @@ void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, e
 //      with the A2 limbs).  DPAS per work-item per sub-chunk: 53.0 average (16 + 21 +
 //      16; stage 2's A2 chains are 2(nt+1), i.e. 2..8 by subgroup).
 // ---------------------------------------------------------------------------
+// S's hi / lo bf16 words into SLM: lane (sg, lane) writes k-rows 8sg.. of columns lane and lane + 16.
+inline void split_s(const float8 S0, const float8 S1, __local ushort* restrict SbHi, __local ushort* restrict SbLo,
+                    const uint sg, const uint lane) {
+  float f0[DM], f1[DM];
+  vstore8(S0, 0, f0);
+  vstore8(S1, 0, f1);
+  __local ushort* restrict dhi = SbHi + (size_t)(sg * DM) * (2 * SB_LD) + lane;
+  __local ushort* restrict dlo = SbLo + (size_t)(sg * DM) * (2 * SB_LD) + lane;
+#pragma unroll
+  for (uint m = 0; m < DM; ++m) {
+    const ushort h0 = rne_bf16(f0[m]), h1 = rne_bf16(f1[m]);
+    dhi[(size_t)m * (2 * SB_LD)] = h0;
+    dhi[(size_t)m * (2 * SB_LD) + SG] = h1;
+    dlo[(size_t)m * (2 * SB_LD)] = rne_bf16(f0[m] - bf16f(h0));
+    dlo[(size_t)m * (2 * SB_LD) + SG] = rne_bf16(f1[m] - bf16f(h1));
+  }
+}
+
 __attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
@@ -329,22 +353,14 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
 #endif
 
     // S is split only at the DPAS boundary.  S0/S1 remain the fp32 master.
+#if SCAN_FOLD
+    // Under SCAN_FOLD the split of S_t+1 runs at the end of step t (below), so only the first step splits here.
+    if (t == 0)
+#endif
     {
-      float f0[DM], f1[DM];
-      vstore8(S0, 0, f0);
-      vstore8(S1, 0, f1);
-      __local ushort* restrict dhi = SbHi + (size_t)(sg * DM) * (2 * SB_LD) + lane;
-      __local ushort* restrict dlo = SbLo + (size_t)(sg * DM) * (2 * SB_LD) + lane;
-#pragma unroll
-      for (uint m = 0; m < DM; ++m) {
-        const ushort h0 = rne_bf16(f0[m]), h1 = rne_bf16(f1[m]);
-        dhi[(size_t)m * (2 * SB_LD)] = h0;
-        dhi[(size_t)m * (2 * SB_LD) + SG] = h1;
-        dlo[(size_t)m * (2 * SB_LD)] = rne_bf16(f0[m] - bf16f(h0));
-        dlo[(size_t)m * (2 * SB_LD) + SG] = rne_bf16(f1[m] - bf16f(h1));
-      }
+      split_s(S0, S1, SbHi, SbLo, sg, lane);
+      barrier(CLK_LOCAL_MEM_FENCE);
     }
-    barrier(CLK_LOCAL_MEM_FENCE);
 
     const float gcp = g_cum[(size_t)(base_m + posc) * HEADS + h];
     const float gl = g_cum[(size_t)(base_m + ilast) * HEADS + h];
@@ -535,6 +551,11 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
       S1 += lo1;
     }
 #endif
+#endif
+#if SCAN_FOLD
+    // Nothing reads S_t's words after the stage-1 barrier (q.S runs in stage 1), so S_t+1's split is written
+    // now and the step's closing barrier is also the next step's split barrier: two barriers a step, not three.
+    if (t + 1 < nch) split_s(S0, S1, SbHi, SbLo, sg, lane);
 #endif
     barrier(CLK_LOCAL_MEM_FENCE);
   }

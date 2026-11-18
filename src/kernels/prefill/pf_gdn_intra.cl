@@ -276,7 +276,6 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
   //         8-row i-tile. The same products in the same k order as the transposed form below, but
   //         the rows of v / k are read and the rows of u / w written as 32-byte pieces a sub-group.
   {
-    const uint x = (sg % 8) * 16 + lane;
     const bool isw = sg >= 8;
     // B operands, one per K-block kb: lane = channel x, VNNI pairs of positions (even j low), read by two
     // VNNI-transform block loads of 32 rows (rows past the prompt read as 0); lane l scales position 16kb + l.
@@ -332,10 +331,13 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
         al = intel_sub_group_bf16_bf16_matrix_mad_k16(vload8(0, tl), bq[kb], al);
       }
       float f[8];
+      ushort ov[8];
       vstore8(ah + al, 0, f);
 #pragma unroll
-      for (uint r = 0; r < 8; ++r)
-        if (i0 + r < L) out[((size_t)(base_m + i0 + r) * HEADS + h) * DIM + x] = rne_bf16(f[r]);   // Q3 / Q4
+      for (uint r = 0; r < 8; ++r) ov[r] = rne_bf16(f[r]);   // Q3 / Q4
+      // One 8-row block write; rows past the prompt fall outside the surface and are not written.
+      intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)out, HEADS * DIM * 2, c_count, HEADS * DIM * 2,
+                                                 (int2)((int)(h * DIM + (sg % 8) * 16), (int)(base_m + i0)), ov);
     }
   }
 #else
