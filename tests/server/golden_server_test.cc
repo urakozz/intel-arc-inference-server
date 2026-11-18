@@ -221,8 +221,8 @@ int main(int argc, char** argv) {
     const std::string snapshot = argv[4];
     const uint16_t port = free_port();
     // Spec 16d: B70_SERVE_ARGS (whitespace-separated) are appended to b70-serve's command line -
-    // box stage r27.golden runs `--parallel pp` (two cards) against b70-decode on ONE card. Unset: as
-    // before.
+    // box stage r27.golden runs `--parallel pp` (two cards) against b70-decode on ONE card. Unset: `--parallel 1`
+    // (below).
     // `--spec off`: the server's default is the model's MTP head (--spec auto), whose verify rows are not bitwise
     // the plain step's (doc 14's f32 judge grades those); this test is plain greedy against b70-decode's plain list.
     std::vector<std::string> serve_args{serve, snapshot, "--host", "127.0.0.1", "--port", std::to_string(port),
@@ -231,6 +231,10 @@ int main(int argc, char** argv) {
       std::istringstream words(extra);
       std::string w;
       while (words >> w) serve_args.push_back(w);
+    } else {
+      // Unset: one card, as b70-decode. With both cards visible --parallel auto picks tp for Qwen3.8, whose default
+      // (folded) crossing is not bitwise one card - cjk's ids part from b70-decode's at id 10.
+      serve_args.insert(serve_args.end(), {"--parallel", "1"});
     }
     // Spec 25e: B70_SERVE_DECODE_AFTER=1 (chat mode): collect every chat response first, stop b70-serve, THEN run b70-decode on
     // each saved prompt - a model filling both cards cannot be resident twice. Unset: as before.
