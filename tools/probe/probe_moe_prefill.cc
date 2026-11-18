@@ -110,7 +110,15 @@ const Arm kArms[] = {
     // phase 3 Task 1: c4 = exact integer weights, the scale on the group's partial sum (NA 4: a tile per atom);
     // o9 = the chosen arm with A read through row_tok
     {1, 4, 2, 1, 8, 4, 0, 1}, {1, 4, 4, 1, 4, 4, 0, 1}, {1, 8, 2, 1, 8, 2, 0, 9},
+    // E1 arm d (research 2026-11-18), DIAGNOSTIC: a4b2 without the register double buffer (OPT 16) at 128 GRF (OPT
+    // 32, 8 threads) and at 256 GRF - full, c9 (no conversion), o4 (no DPAS): is full ~ max(c9, o4) at 8 threads?
+    {1, 4, 2, 1, 8, 2, 0, 49}, {1, 4, 2, 1, 8, 9, 0, 49}, {1, 4, 2, 1, 8, 2, 0, 53},
+    {1, 4, 2, 1, 8, 2, 0, 17}, {1, 4, 2, 1, 8, 9, 0, 17}, {1, 4, 2, 1, 8, 2, 0, 21},
 };
+// E1 arms a-c (research 2026-11-18): the production pf_moe_q4gemm.cl built with its register-plan defines
+// (tools/probe/CMakeLists.txt PMQ_ARMS), beside the production binaries themselves ("q4.prod", the gate's control;
+// production took arm c's defines after the 2026-11-18 run, so q4.prod and q4.c are now the same build).
+const char* const kQ4Arms[] = {"a", "b", "c"};
 const char* const kChosen = "F1.a8b2m1n8.c2x0o1";
 
 uint16_t f32_to_bf16(float f) {
@@ -420,7 +428,40 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
       std::printf("# %s: not built (%s), skipped\n", a.tag().c_str(), e.what());
     }
   }
+  // E1: the production binaries and the register-plan builds of the same source (Ornith's shapes only)
+  struct Q4 {
+    std::string tag;
+    l0::Kernel *gu, *dn;
+  };
+  std::vector<Q4> q4s;
+  auto wanted = [&](const std::string& t) { return want.empty() || std::find(want.begin(), want.end(), t) != want.end(); };
+  if (!m.q4exp && (wanted("q4.prod") || std::any_of(std::begin(kQ4Arms), std::end(kQ4Arms),
+                                                    [&](const char* t) { return wanted(std::string("q4.") + t); }))) {
+    q4s.push_back({"q4.prod", &kc(kernels::pf_moe_q4gemm_variant(H, NG, true), "pf_moe_q4gemm"),
+                   &kc(kernels::pf_moe_q4gemm_variant(I, H, false), "pf_moe_q4gemm")});
+    for (const char* t : kQ4Arms) {
+      if (!wanted(std::string("q4.") + t)) continue;
+      try {
+        q4s.push_back({std::string("q4.") + t, &kc(std::string("pmq_") + t + "_K2048_N1024_SILU", "pf_moe_q4gemm"),
+                       &kc(std::string("pmq_") + t + "_K512_N2048", "pf_moe_q4gemm")});
+      } catch (const std::exception& e) {
+        std::printf("# q4.%s: not built (%s), skipped\n", t, e.what());
+      }
+    }
+  }
+  const uint32_t mi_q4 = kernels::pf_moe::kItemM;
   std::map<uint32_t, uint32_t> bound;
+  if (!q4s.empty()) bound[mi_q4] = items_bound(m, C, mi_q4);
+  auto q4_gu = [&](const Q4& q, const l0::Mem& items, const void* a, int copy, void* hout) {
+    cx.launch(*q.gu, NG / kernels::pf_moe::kQ4WgN, bound[mi_q4], 1,
+              {PtrArg(items.ptr()), PtrArg(a), PtrArg(dgu[copy]->ptr()),
+               PtrArg(dgu[copy]->as<uint32_t>() + size_t(E) * gu_u32), PtrArg(hout)});
+  };
+  auto q4_dn = [&](const Q4& q, const l0::Mem& items, const void* hin, int copy, void* yout) {
+    cx.launch(*q.dn, H / kernels::pf_moe::kQ4WgN, bound[mi_q4], 1,
+              {PtrArg(items.ptr()), PtrArg(hin), PtrArg(ddn[copy]->ptr()),
+               PtrArg(ddn[copy]->as<uint32_t>() + size_t(E) * dn_u32), PtrArg(yout)});
+  };
   // (items, n-blocks) or, OPT bit 1, (n-blocks, items)
 #define GRID(b, nit, NN) (b).a.nfirst() ? (NN) / (b).a.wg_n() : (nit), (b).a.nfirst() ? (nit) : (NN) / (b).a.wg_n(), 1
   for (const Built& b : arms) bound[b.a.mi()] = items_bound(m, C, b.a.mi());
@@ -546,6 +587,28 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
                   hc.size(), dy, yc.size());
       if (dh || dy) failed.insert(b.a.tag());
     }
+    // E1: the production binaries and their register-plan builds against the control (so each build against
+    // production: q4.prod must hold too)
+    for (const Q4& q : q4s) {
+      if (failed.count(q.tag)) continue;
+      std::vector<uint8_t> poison(yc.size() * 4, 0xA5);
+      upload(ctx, h_f.ptr(), poison.data(), hc.size() * 4);
+      upload(ctx, y_f.ptr(), poison.data(), yc.size() * 4);
+      q4_gu(q, *L.items[mi_q4], A.ptr(), copy, h_f.ptr());
+      q4_dn(q, *L.items[mi_q4], h_c.ptr(), copy, y_f.ptr());
+      cx.wait();
+      download(ctx, hf.data(), h_f.ptr(), hf.size() * 4);
+      download(ctx, yf.data(), y_f.ptr(), yf.size() * 4);
+      size_t dh = 0, dy = 0;
+      for (size_t i = 0; i < hc.size(); ++i) dh += hc[i] != hf[i];
+      for (size_t i = 0; i < yc.size(); ++i) dy += yc[i] != yf[i];
+      ++gemm_checks;
+      std::printf("| check | lc %u | %s | h %zu of %zu words differ, y %zu of %zu |\n", lc, q.tag.c_str(), dh,
+                  hc.size(), dy, yc.size());
+      if (dh || dy) failed.insert(q.tag);
+    }
+    if (failed.count("q4.prod"))
+      for (const Q4& q : q4s) failed.insert(q.tag);   // no production reference: no E1 arm is timed
     if (have_shd) {   // the shared expert as dense: h and y against the control's shared rows (token order)
       shd_dense(copy);
       cx.wait();
@@ -692,6 +755,15 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
       }, 0});
     }
   }
+  for (const Q4& q : q4s) {
+    if (failed.count(q.tag)) continue;
+    tw.push_back({q.tag + ".gu", [&, q] {
+      for (uint32_t lc = 0; lc < nlc; ++lc) q4_gu(q, *lcs[lc].items[mi_q4], A.ptr(), int(lc % 2), h_f.ptr());
+    }, gu_flop});
+    tw.push_back({q.tag + ".dn", [&, q] {
+      for (uint32_t lc = 0; lc < nlc; ++lc) q4_dn(q, *lcs[lc].items[mi_q4], h_c.ptr(), int(lc % 2), y_f.ptr());
+    }, dn_flop});
+  }
   // the gather the indexed arm removes, and the shared-expert split: the chosen arm over the routed items alone,
   // then the dense half; "chosen.total" / "shd.total" are the two walks the gate compares
   tw.push_back({"gather", [&] {
@@ -759,6 +831,18 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
   std::map<std::string, double> per_lc;
   for (size_t i = 0; i < tw.size(); ++i) per_lc[tw[i].name] = median(ms[i]) / nlc;
   auto have = [&](const std::string& k) { return per_lc.count(k) > 0; };
+  if (have("q4.prod.gu") && have("q4.prod.dn")) {   // E1: GO <= 0.93 at C 4096 (and not slower at 2048)
+    const double base = per_lc["q4.prod.gu"] + per_lc["q4.prod.dn"];
+    for (const char* t : kQ4Arms) {
+      const std::string k = std::string("q4.") + t;
+      if (!have(k + ".gu") || !have(k + ".dn")) continue;
+      const double tot = per_lc[k + ".gu"] + per_lc[k + ".dn"];
+      std::printf("GATE {\"C\":%u,\"what\":\"E1\",\"arm\":\"%s\",\"prod_ms\":%.4f,\"ms\":%.4f,\"gu_ratio\":%.3f,"
+                  "\"dn_ratio\":%.3f,\"ratio\":%.3f}\n",
+                  C, k.c_str(), base, tot, per_lc[k + ".gu"] / per_lc["q4.prod.gu"],
+                  per_lc[k + ".dn"] / per_lc["q4.prod.dn"], tot / base);
+    }
+  }
   const std::string ch = kChosen;
   if (have(ch + ".gu") && have(ch + ".dn")) {
     const double base = per_lc[ch + ".gu"] + per_lc[ch + ".dn"];
@@ -813,6 +897,8 @@ int main(int argc, char** argv) {
     }
     if (list) {
       for (const Arm& a : kArms) std::printf("%s\n", a.tag().c_str());
+      std::printf("q4.prod\n");
+      for (const char* t : kQ4Arms) std::printf("q4.%s\n", t);
       return 0;
     }
     const Model* m = nullptr;

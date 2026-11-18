@@ -45,6 +45,28 @@
 #ifndef WGN
 #define WGN 8           /* sub-groups a work-group, along n */
 #endif
+// E1 register plan (research 2026-11-18, probe_moe_prefill's q4.* arms): NODB 1 loads a group's weights at its top
+// instead of holding the next group's in registers; PF_W > 0 then prefetches the weight tiles PF_W groups ahead into
+// L1, PF_A 1 the next 32-k step's A; AK16 1 reads A per k16 half. The same words, the same DPAS chain.
+#ifndef NODB
+#define NODB 0
+#endif
+#ifndef PF_W
+#define PF_W 0
+#endif
+#ifndef PF_A
+#define PF_A 0
+#endif
+#ifndef AK16
+#define AK16 0
+#endif
+#if (PF_W || AK16) && !NODB
+#error "pf_moe_q4gemm: PF_W and AK16 build on NODB"
+#endif
+#if PF_W
+enum LSC_LDCC { LSC_LDCC_DEFAULT, LSC_LDCC_L1UC_L3UC, LSC_LDCC_L1UC_L3C, LSC_LDCC_L1C_L3UC, LSC_LDCC_L1C_L3C };
+void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, enum LSC_LDCC c);
+#endif
 #define SG 16
 #define NONE 0xFFFFFFFFu
 #define GROUP 64
@@ -141,25 +163,64 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
     WQ[b][4] = v.s4; WQ[b][5] = v.s5; WQ[b][6] = v.s6; WQ[b][7] = v.s7;                            \
     SC[b] = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(tl + 128)));     \
   }
+#if PF_W
+  // A lane's 64-byte line of a 544-byte tile (lanes 0-8 cover it at either 32-byte phase), PF_W groups ahead, into L1
+  // (OpenCL's prefetch() lowers to an L3-only message).
+  const uint pf_off = 16u * min(get_sub_group_local_id(), 8u);
+#define PREFETCH_GROUP(gg)                                                                                         \
+  _Pragma("unroll") for (int b = 0; b < NB; ++b) __builtin_IB_lsc_prefetch_global_uint(                            \
+      Wb + ((size_t)((nb + 16u * (uint)b) / 16u) * G + (gg)) * TILE_U32 + pf_off, 0, LSC_LDCC_L1C_L3C);
+  for (uint d = 1; d < PF_W && d < G; ++d) { PREFETCH_GROUP(d) }
+#endif
+#if NODB
+  for (uint g = 0; g < G; ++g) {
+#if PF_W
+    if (g + PF_W < G) { PREFETCH_GROUP(g + PF_W) }
+#endif
+    LOAD_GROUP(g, wq, sc)
+#else
   LOAD_GROUP(0u, wq, sc)
   for (uint g = 0; g < G; ++g) {
     uint wn[NB][8];
     float sn_[NB];
     if (g + 1 < G) { LOAD_GROUP(g + 1, wn, sn_) }
+#endif
 #pragma unroll
     for (int h = 0; h < 2; ++h) {   // the group's two 32-k tiles, in k order
       const uint k0 = g * GROUP + (uint)h * 32u;
+#if !AK16
       ushort afrag[NA / 4][64];
 #pragma unroll
       for (int r = 0; r < NA / 4; ++r)
         if (r == 0 || full)
           intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
                                                      a_w - (int)(2u * k0), 32, a_p, (int2)(0, 0), afrag[r]);
+#endif
+#if PF_A
+      if (k0 + 32u < K) {   // the next 32-k step's A
+#pragma unroll
+        for (int r = 0; r < NA / 4; ++r)
+          if (r == 0 || full)
+            intel_sub_group_2d_block_prefetch_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0 + 32u),
+                                                           a_w - (int)(2u * k0) - 64, 32, a_p, (int2)(0, 0));
+      }
+#endif
 #pragma unroll
       for (int ks = 0; ks < 2; ++ks) {
         short8 af[NA];
+#if AK16
+        ushort afrag[NA / 4][32];   // this k16 half's A: 32 rows x 16 k a block (x 16 ks: the surface stays >= 64 B)
+#pragma unroll
+        for (int r = 0; r < NA / 4; ++r)
+          if (r == 0 || full)
+            intel_sub_group_2d_block_read_16b_32r16x1c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
+                                                       a_w - (int)(2u * k0), 32, a_p, (int2)(16 * ks, 0), afrag[r]);
+#pragma unroll
+        for (int a = 0; a < NA; ++a) af[a] = as_short8(vload8(0, afrag[a / 4] + (uint)(8 * (a % 4))));
+#else
 #pragma unroll
         for (int a = 0; a < NA; ++a) af[a] = as_short8(vload8(0, afrag[a / 4] + (uint)(ks * 32 + 8 * (a % 4))));
+#endif
 #pragma unroll
         for (int b = 0; b < NB; ++b) {
           const int8 bv = q4_half(wq[b][4 * h + 2 * ks], wq[b][4 * h + 2 * ks + 1], sc[b]);
@@ -169,14 +230,17 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
         }
       }
     }
+#if !NODB
 #pragma unroll
     for (int b = 0; b < NB; ++b) {
 #pragma unroll
       for (int j = 0; j < 8; ++j) wq[b][j] = wn[b][j];
       sc[b] = sn_[b];
     }
+#endif
   }
 #undef LOAD_GROUP
+#undef PREFETCH_GROUP
 
   // The surface ends at the item's last row: a 64-row sub-group over a 32-row item writes only its first half.
   const int live_rows = min((int)R, (int)rows);
