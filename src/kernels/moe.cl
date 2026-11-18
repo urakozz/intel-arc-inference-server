@@ -174,7 +174,19 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
 // The rank is the whole top-k: every lane counts its beaters over the SLM row (EXPERTS
 // broadcast reads) and the ranks are a permutation - one barrier, no rounds.
 // tests/kernels/moe_ref.h repeats this chain step for step.
+//
+// ROUTE_SG 1 (prefill's moe_M1_..._R<pitch> binary only): the same values with sub-group traffic in place of most
+// SLM messages - a lane reads the SLM row as 16 lane-wide pieces and takes its 16 values by sub_group_broadcast
+// (the max, any order, is exact; the rank is an integer count), and the Σ tree's strides 8 .. 1 run on shuffles in
+// every sub-group (red[e] + red[e + stride], the same additions in the same order), one barrier fewer a stride.
+#ifndef ROUTE_SG
+#define ROUTE_SG 0
+#endif
+#if ROUTE_SG
+__attribute__((reqd_work_group_size(WG_ROUTE, 1, 1))) MOE_SG16
+#else
 __attribute__((reqd_work_group_size(WG_ROUTE, 1, 1)))
+#endif
 __kernel void moe_route(__global const float* restrict logits, __global uint* restrict route) {
   const uint m = get_group_id(1);
   const uint e = get_local_id(0);
@@ -191,6 +203,39 @@ __kernel void moe_route(__global const float* restrict logits, __global uint* re
     top_p[e] = 0.0f;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
+#if ROUTE_SG
+  const uint lane = get_sub_group_local_id();
+  float mx = sl[0];
+#pragma unroll
+  for (uint c = 0; c < EXPERTS / SG; ++c) {
+    const float q16 = sl[c * SG + lane];
+#pragma unroll
+    for (uint j = 0; j < SG; ++j) mx = fmax(mx, sub_group_broadcast(q16, j));
+  }
+  const float ex = exp(l - mx);
+  red[e] = ex;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = EXPERTS / 2; stride >= SG; stride >>= 1) {
+    if (e < stride) red[e] += red[e + stride];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  float s = red[lane];
+#pragma unroll
+  for (uint stride = SG / 2; stride > 0; stride >>= 1) s = s + intel_sub_group_shuffle(s, (lane + stride) & (SG - 1));
+  const float p = ex / sub_group_broadcast(s, 0);
+  sl[e] = p;                     // every lane finished reading the logits (barriers above)
+  barrier(CLK_LOCAL_MEM_FENCE);
+  uint rank = 0;
+#pragma unroll
+  for (uint c = 0; c < EXPERTS / SG; ++c) {
+    const float q16 = sl[c * SG + lane];
+#pragma unroll
+    for (uint j = 0; j < SG; ++j) {
+      const float q = sub_group_broadcast(q16, j);
+      rank += (q > p || (q == p && c * SG + j < e)) ? 1u : 0u;
+    }
+  }
+#else
   float mx = sl[0];
   for (uint j = 1; j < EXPERTS; ++j) mx = fmax(mx, sl[j]);
   const float ex = exp(l - mx);
@@ -208,6 +253,7 @@ __kernel void moe_route(__global const float* restrict logits, __global uint* re
     const float q = sl[j];
     rank += (q > p || (q == p && j < e)) ? 1u : 0u;
   }
+#endif
   if (rank < SLOTS) {
     top_id[rank] = e;
     top_p[rank] = p;

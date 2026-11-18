@@ -429,7 +429,7 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_route_slab_K2048_N128_P256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
                    DEFINES K=2048 N=128 ROUTE_SLAB=256)
   add_ocloc_kernel(moe_M1_E256_T8_D2048_I512_R512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../moe.cl
-                   DEFINES ${MOE_DEFINES} M=1 EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=512)
+                   DEFINES ${MOE_DEFINES} M=1 EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=512 ROUTE_SG=1)
   add_ocloc_kernel(pf_gdn_conv_GK16V32_AB256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
                    DEFINES NEGA_OFF=32768 DTBIAS_OFF=32800 ${PF_ORNITH_GDN} AB_STRIDE=256)
   # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.

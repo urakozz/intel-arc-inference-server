@@ -944,7 +944,8 @@ int main() {
     CHECK_EQ(want8.size(), used * kH);
     size_t bad = 0, bad8 = 0, bads = 0;
     for (size_t r = 0; r < used; ++r) {
-      bad += std::memcmp(&a.xg[r * kH], &want[r * kH], kH * 2) != 0;
+      // the bf16 gather leaves a padding row as it was (no output reads it)
+      bad += st.row_tok[r] != kNone && std::memcmp(&a.xg[r * kH], &want[r * kH], kH * 2) != 0;
       bad8 += std::memcmp(&a.xg8[r * kH], &want8[r * kH], kH) != 0;
       bads += a.xsg[r] != (st.row_tok[r] == kNone ? 0.0f : a.xs[st.row_tok[r]]);
     }
