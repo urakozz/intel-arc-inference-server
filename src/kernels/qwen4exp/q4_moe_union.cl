@@ -108,51 +108,65 @@ inline float silu_t(float x) { return x / (1.0f + exp_torch(-x)); }
 #define CNT_ARG
 #endif
 
-// q4_moe.cl's dot8 / load_tile8, verbatim.
-inline float dot8(uint word, ushort8 xv) {
-  float a = 0.f;
-  a += (float)((int)((word      ) & 0xFu) - 8) * bf16f(xv.s0);
-  a += (float)((int)((word >>  4) & 0xFu) - 8) * bf16f(xv.s1);
-  a += (float)((int)((word >>  8) & 0xFu) - 8) * bf16f(xv.s2);
-  a += (float)((int)((word >> 12) & 0xFu) - 8) * bf16f(xv.s3);
-  a += (float)((int)((word >> 16) & 0xFu) - 8) * bf16f(xv.s4);
-  a += (float)((int)((word >> 20) & 0xFu) - 8) * bf16f(xv.s5);
-  a += (float)((int)((word >> 24) & 0xFu) - 8) * bf16f(xv.s6);
-  a += (float)((int)((word >> 28) & 0xFu) - 8) * bf16f(xv.s7);
-  return a;
-}
+// q4_moe.cl's load_tile8, verbatim (its dot8 is unrolled into tile_dot_rows below).
 inline void load_tile8(const __global uint* restrict tile, uint lane, uint* wv) {
   (void)lane;
   const uint8 b = intel_sub_group_block_read8(tile);
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
 }
-// q4_moe.cl's tile_dot over n <= M rows at once: the tile and its scale loaded once a k-group, then per row r < n
-// exactly tile_dot's chain (gacc from 0 over the 8 words, acc += gacc x scale). Row r's activations start at x + xo[r].
+// q4_moe.cl's tile_dot over n <= M rows at once: the tile and its scale loaded once a k-group and each word's 8 weights
+// decoded once, then per row r < n exactly tile_dot's chain (per word dot8's sum from 0 over the 8 products in order,
+// gacc from 0 over the 8 words, acc += gacc x scale). Row r's activations start at x + xo[r]. Every loop over the rows
+// runs M times with a predicate, unrolled, so the row arrays stay in registers.
 inline void tile_dot_rows(const __global uint* restrict tile, const __global ushort* restrict x, __private const uint* xo,
                           uint n, uint g0, uint g1, uint lane, __private float* acc) {
+  #pragma unroll
   for (uint r = 0; r < M; ++r) acc[r] = 0.f;
   for (uint g = g0; g < g1; ++g, tile += TILE_U32) {
     uint wv[8];
     load_tile8(tile, lane, wv);
     const float scale = vload_half(lane, (const __global half*)(tile + 128));
-    for (uint r = 0; r < M; ++r) {
-      if (r >= n) break;
-      float gacc = 0.f;
-      for (uint j = 0; j < 8; ++j) gacc += dot8(wv[j], vload8(0, x + xo[r] + g * GROUP + j * 8));
-      acc[r] += gacc * scale;
+    float gacc[M];
+    #pragma unroll
+    for (uint r = 0; r < M; ++r) gacc[r] = 0.f;
+    #pragma unroll
+    for (uint j = 0; j < 8; ++j) {
+      float f[8];
+      #pragma unroll
+      for (uint k = 0; k < 8; ++k) f[k] = (float)((int)((wv[j] >> (4 * k)) & 0xFu) - 8);
+      #pragma unroll
+      for (uint r = 0; r < M; ++r)
+        if (r < n) {
+          const ushort8 xv = vload8(0, x + xo[r] + g * GROUP + j * 8);
+          float a = 0.f;
+          a += f[0] * bf16f(xv.s0);
+          a += f[1] * bf16f(xv.s1);
+          a += f[2] * bf16f(xv.s2);
+          a += f[3] * bf16f(xv.s3);
+          a += f[4] * bf16f(xv.s4);
+          a += f[5] * bf16f(xv.s5);
+          a += f[6] * bf16f(xv.s6);
+          a += f[7] * bf16f(xv.s7);
+          gacc[r] += a;
+        }
     }
+    #pragma unroll
+    for (uint r = 0; r < M; ++r)
+      if (r < n) acc[r] += gacc[r] * scale;
   }
 }
 #if SHARED_BF16
 // q4_moe.cl's bf16_dot over n <= M rows: each k-octet's weights loaded once, per row the same chain.
 inline void bf16_dot_rows(const __global ushort* restrict tile, const __global ushort* restrict x, __private const uint* xo,
                           uint n, uint o0, uint o1, __private float* acc) {
+  #pragma unroll
   for (uint r = 0; r < M; ++r) acc[r] = 0.f;
   for (uint o = o0; o < o1; ++o) {
     const ushort8 wv = intel_sub_group_block_read_us8(tile + (size_t)o * 128);
+    #pragma unroll
     for (uint r = 0; r < M; ++r) {
-      if (r >= n) break;
+      if (r >= n) continue;
       const ushort8 xv = vload8(0, x + xo[r] + o * 8);
       float a = acc[r];
       a += bf16f(wv.s0) * bf16f(xv.s0); a += bf16f(wv.s1) * bf16f(xv.s1);
@@ -240,6 +254,7 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   for (uint base = 0; base < n_all; base += M) {   // more than M pairs only on a row that repeats an id
     const uint n = min((uint)M, n_all - base);
     uint xo[M];
+    #pragma unroll
     for (uint r = 0; r < M; ++r) {
       const uint i = base + min(r, n - 1);
       xo[r] = (shared ? i : pl[p0 + i] / MOE_K) * HIDDEN;
@@ -255,10 +270,12 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
       tile_dot_rows(w_sh + ((size_t)n_tile * G_UP + g0) * TILE_U32, x, xo, n, g0, g0 + G_UP / UP_KS, lane, acc);
 #endif
     }
+    #pragma unroll
     for (uint r = 0; r < M; ++r) red[r][sg][lane] = acc[r];
     barrier(CLK_LOCAL_MEM_FENCE);
     for (uint stride = UP_KS / 2; stride > 0; stride >>= 1) {
       if (q < stride)
+        #pragma unroll
         for (uint r = 0; r < M; ++r) red[r][sg][lane] += red[r][sg + stride][lane];
       barrier(CLK_LOCAL_MEM_FENCE);
     }
@@ -324,6 +341,7 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     for (uint base = 0; base < n_all; base += M) {
       const uint n = min((uint)M, n_all - base);
       uint xo[M], rs[M];   // the pair's h row and its [row][slot] place
+      #pragma unroll
       for (uint r = 0; r < M; ++r) {
         const uint i = base + min(r, n - 1);
         if (shared) {
@@ -345,7 +363,9 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
         tile_dot_rows(w_sh + ((size_t)n_tile * G_DN + g0) * TILE_U32, h, xo, n, g0, g0 + G_DN / DN_KS, lane, acc);
 #endif
       }
-      for (uint r = 0; r < n; ++r) red[rs[r] * DN_KS + q][lane] = acc[r];
+      #pragma unroll
+      for (uint r = 0; r < M; ++r)   // a constant trip count: acc and rs stay in registers
+        if (r < n) red[rs[r] * DN_KS + q][lane] = acc[r];
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE);

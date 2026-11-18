@@ -258,8 +258,9 @@ bool counts_ok(const std::vector<uint32_t>& cnt, const std::vector<uint32_t>& ro
   return ok;
 }
 
+// which: 0 both kernels, 1 gate||up alone, 2 down alone (over whatever h holds).
 double time_pair(Dev& d, const std::string& variant, uint32_t M, bool tp, bool tbl, const Weights& W, const l0::Mem& rb,
-                 const l0::Mem& xb, uint32_t inter, int reps) {
+                 const l0::Mem& xb, uint32_t inter, int reps, int which = 0) {
   l0::Module mod(d.ctx, kernels::path(variant));
   l0::Mem hb = d.zeros(size_t(M) * kS * inter * 2), yb = d.zeros(size_t(kS) * M * kD * 4);
   l0::Mem land = d.zeros(land_words() * 4), ctr = d.zeros(size_t(kD / 16) * 8 * 4);
@@ -276,8 +277,8 @@ double time_pair(Dev& d, const std::string& variant, uint32_t M, bool tp, bool t
   for (uint32_t i = 0; i < (tp ? 7u : 5u); ++i) dn.arg_ptr(i, da[i]);
   l0::CmdList list = l0::CmdList::regular(d.ctx);
   for (int i = 0; i < 50; ++i) {   // 50 MoE blocks back to back (a verify's 48 layers)
-    list.launch(gu, kS * (2 * inter / 16 / 4), M);
-    list.launch(dn, kD / 16, M);
+    if (which != 2) list.launch(gu, kS * (2 * inter / 16 / 4), M);
+    if (which != 1) list.launch(dn, kD / 16, M);
   }
   list.close();
   std::vector<double> t;
@@ -333,11 +334,27 @@ int main(int argc, char** argv) {
     }
   }
   if (timing) {
+    for (const std::string& v : {qk::moe_variant(4, false), qk::moe_variant(4, false, false, true), qk::tp_moe_variant(false, 0, 4),
+                                 qk::tp_moe_variant(false, 0, 4, true)}) {
+      l0::Module mod(d.ctx, kernels::path(v));
+      for (const char* e : {"q4_moe_gate_up", "q4_moe_down"}) {
+        l0::Kernel k(mod, e);
+        ze_kernel_properties_t pr{};
+        pr.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+        zeKernelGetProperties(k.handle(), &pr);
+        std::printf("  %s %s: spill %u B, private %u B, local %u B\n", v.c_str(), e, pr.spillMemSize, pr.privateMemSize,
+                    pr.localMemSize);
+      }
+    }
     // M 4 on the random case (about 0.6 distinct experts a pair), every expert in VRAM and with the host ones
-    const Case c = cases(4, 2004)[4];
-    const l0::Mem rb = d.up(c.route), xb = d.up(random_bf16(size_t(4) * kD, -0.5f, 0.5f, 1004));
+    const std::vector<Case> cs = cases(4, 2004);
+    const l0::Mem xb = d.up(random_bf16(size_t(4) * kD, -0.5f, 0.5f, 1004));
+    for (int ci : {4, 0, 2})
     for (bool tp : {false, true})
       for (bool tbl : {false, true}) {
+        if (ci != 4 && tbl) continue;   // the route shapes beside random: VRAM only
+        const l0::Mem rb = d.up(cs[ci].route);
+        std::printf("  [%s]", cs[ci].name.c_str());
         const Weights& W = tp ? tpw : pp;
         const uint32_t I = tp ? qk::kTpInter : qk::kInter;
         const std::string a = tp ? qk::tp_moe_variant(tbl, 0, 4) : qk::moe_variant(4, false, tbl);
@@ -350,8 +367,12 @@ int main(int argc, char** argv) {
             tb += y / 2;
           }
         }
-        std::printf("  time M 4 %s%s: per-row %.1f us, union %.1f us a MoE block (x%.3f)\n", tp ? "tp card 0" : "one card",
+        std::printf("  time M 4 %s%s: per-row %.1f us, union %.1f us a MoE block (x%.3f)", tp ? "tp card 0" : "one card",
                     tbl ? " table (ids % 5 in host memory)" : " direct", ta, tb, tb / ta);
+        for (int which : {1, 2})
+          std::printf("; %s per-row %.1f / union %.1f us", which == 1 ? "gate||up" : "down",
+                      time_pair(d, a, 4, tp, tbl, W, rb, xb, I, 9, which), time_pair(d, b, 4, tp, tbl, W, rb, xb, I, 9, which));
+        std::printf("\n");
       }
   }
   if (failures) {
