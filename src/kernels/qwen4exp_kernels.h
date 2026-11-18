@@ -64,6 +64,7 @@ inline constexpr unsigned kPleConsts = 3 + 2 * kPleHeads;   // u64: multipliers 
 
 inline constexpr unsigned moe_gate_up_wg() { return 64 * kUpKs; }                         // 256
 inline constexpr unsigned moe_down_wg() { return 16 * kSlots * kDnKs; }                   // 352
+inline constexpr unsigned moe_down_union_wg() { return 16 * kSlots; }                   // 176: q4_moe_union.cl
 inline constexpr unsigned moe_gate_up_groups() { return kSlots * (2 * kInter / 16 / 4); }   // 220
 inline constexpr unsigned argmax_groups() { return (kVocab + kArgmaxChunk - 1) / kArgmaxChunk; }   // 243
 

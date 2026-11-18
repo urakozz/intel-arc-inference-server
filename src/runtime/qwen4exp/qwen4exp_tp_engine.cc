@@ -93,6 +93,7 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
         ListSpec ls;
         ls.kind = ListKind::Verify;
         ls.M = M;
+        ls.opt.force_per_row_moe = opt_.per_row_moe;
         c.verify.push_back(build(c.ctx, model_, model_.parts[r], c.buffers, nullptr, nullptr, nullptr, ls, &mtp_bind_,
                                  &c.binding));
       }
@@ -355,6 +356,31 @@ std::vector<double> Qwen4ExpTpEngine::profile_decode(uint32_t card, uint32_t rep
       submit(&*cards_[0]->step, &p);
     for (size_t j = 0; j < us.size(); ++j) us[j] += prof.events[j].duration_us() / replays;
   }
+  return us;
+}
+
+std::vector<double> Qwen4ExpTpEngine::profile_verify(uint32_t card, uint32_t k, uint32_t replays,
+                                                    std::vector<std::string>* labels) {
+  require_mtp("profile_verify");
+  if (verify_k_ != k) throw std::runtime_error("profile_verify: verify(k) first");
+  Card& c = *cards_.at(card);
+  ProfileEvents prof(c.ctx);
+  ListSpec ls;
+  ls.kind = ListKind::Verify;
+  ls.M = k + 1;
+  ls.prof = &prof;
+  ls.opt.force_per_row_moe = opt_.per_row_moe;
+  CapturedStep p = build(c.ctx, model_, model_.parts[card], c.buffers, nullptr, nullptr, nullptr, ls, &mtp_bind_, &c.binding);
+  std::vector<double> us(p.kernel_count, 0.0);
+  for (uint32_t i = 0; i < replays; ++i) {
+    for (l0::Event& e : prof.events) e.reset();
+    if (card == 0)
+      submit(&p, &cards_[1]->verify[k]);
+    else
+      submit(&cards_[0]->verify[k], &p);
+    for (size_t j = 0; j < us.size(); ++j) us[j] += prof.events[j].duration_us() / replays;
+  }
+  *labels = p.labels;
   return us;
 }
 

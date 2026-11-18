@@ -60,6 +60,7 @@ struct Q4TpPrefillState;   // runtime/qwen4exp/qwen4exp_tp_prefill.cc
 struct Q4TpOptions {
   uint32_t timeout_ms = 30000;                  // one step's fence wait
   uint32_t spin_limit = tp::kDefaultSpinLimit;  // flag loads a wait spins before it gives up
+  bool per_row_moe = false;                     // tests / probes only: CaptureOptions::force_per_row_moe
 };
 
 class Qwen4ExpTpEngine {
@@ -93,6 +94,10 @@ class Qwen4ExpTpEngine {
   // Probes only: card `card`'s list rebuilt with a timestamp event a launch, both lists replayed `replays` times;
   // each launch's mean device time in us, walk order (step(card).labels).
   std::vector<double> profile_decode(uint32_t card, uint32_t replays);
+  // Probes only: after a verify(k), card `card`'s verify list at k drafts rebuilt with a timestamp event a launch and
+  // replayed `replays` times beside the other card's (Control as verify(k) left it); each launch's mean device time in
+  // us, walk order, and its labels into `labels`.
+  std::vector<double> profile_verify(uint32_t card, uint32_t k, uint32_t replays, std::vector<std::string>* labels);
   // The expert tier's device read-back at construction: block words read through each card's table.
   size_t expert_words_checked() const { return words_checked_; }
 

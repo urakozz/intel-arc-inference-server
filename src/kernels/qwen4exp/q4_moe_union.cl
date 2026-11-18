@@ -2,11 +2,11 @@
 // with each distinct expert read ONCE for every row that chose it, and the shared expert once for all M rows - bitwise
 // q4_moe.cl's per-row form at the same M (the same products in the same order per row; only who reads the weights
 // changes). Ported from the cancelled Bolt's nb_moe_union.cl (git e7937cec^) to gated SiLU experts. The two entry
-// points keep q4_moe.cl's names, arguments, grids and work-group sizes, so a list binds this binary in place of the
-// per-row one and launches the same commands:
+// points keep q4_moe.cl's names, arguments and grids (the down's work-group is 16 x 11 at any DN_KS:
+// kernels::qwen4exp::moe_down_union_wg), so a list binds this binary in place of the per-row one:
 //
 //   q4_moe_gate_up(route, x, w_gu, w_sh_gu, h)     grid (11 x NT_UP / 4, M), WG 64 x UP_KS
-//   q4_moe_down(route, h, w_dn, w_sh_dn, y [, land, ctr])   grid (HIDDEN / 16, M), WG 16 x 11 x DN_KS
+//   q4_moe_down(route, h, w_dn, w_sh_dn, y [, land, ctr])   grid (HIDDEN / 16, M), WG 16 x 11 (q4_moe.cl's: x DN_KS)
 // (MOE_TP_PART: q4_moe.cl's q4_moe_finish is bound from the per-row binary; this file has no finish.)
 // (UNION_COUNT, test-only: both entries take a last argument `cnt` u32 [2][MOE_E + 1] and add one per read of an
 // expert's tiles - gate||up cnt[e] once a work-group (the shared expert at cnt[MOE_E]), down cnt[MOE_E + 1 + e] once a
@@ -20,7 +20,7 @@
 //             the union exit at once; the 4 n-tiles of blk over all of K, each weight tile and scale loaded once a
 //             k-group and each pair's own tile_dot chain against its row; h[row][slot] as q4_moe_gate_up writes it.
 //   down      work-group (n_tile, 0) does the whole n-tile for every row (the work-groups of rows 1.. exit at once):
-//             sub-group (xs, q) takes the sets xs, xs + 11, ... at K slice q, each pair's partial into SLM, then each
+//             sub-group s takes the sets s, s + 11, ... over every K slice, each pair's partial into SLM, then each
 //             row's K-slice tree and q4_moe_down's epilogue (the combine; under MOE_TP_PART each slot's fp32 partial
 //             and the send of the M chunks (n_tile, m) of this n-tile to the peer, tp_send's protocol per chunk).
 // The weights are found only through Q4_EXPERT_GU / Q4_EXPERT_DN (q4_moe.cl's pair, the _TBL table row form included),
@@ -82,7 +82,7 @@ inline float silu_t(float x) { return x / (1.0f + exp_torch(-x)); }
 #define NT_DN (HIDDEN / SG)
 #define DN_BLK_U32 ((size_t)NT_DN * G_DN * TILE_U32)
 #define WG_UP (4 * SG * UP_KS)
-#define WG_DN (SG * SLOTS * DN_KS)
+#define WG_DN (SG * SLOTS)        /* the down: a sub-group a set, every K slice (one wave on the card) */
 #define O_UP (HIDDEN / 8)
 #define O_DN (INTER / 8)
 #if HIDDEN % GROUP != 0 || INTER % 32 != 0 || INTER % GROUP != 0 || HIDDEN % SG != 0
@@ -376,20 +376,13 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
   const uint sg = lid / SG;
-  const uint xs = sg / DN_KS;
-  const uint q = sg % DN_KS;
   const uint n_tile = get_group_id(0);
   uint id[PREG], own[PREG], fl[PREG], rk[PREG], mf[PREG], mpos[PREG];
   const uint nd = q4_union_sg(route, lane, id, own, fl, rk);
-  const uint g0 = q * (G_DN / DN_KS);
-  for (uint set = xs; set <= nd; set += SLOTS) {   // uniform across the sub-group
+  for (uint set = sg; set <= nd; set += SLOTS) {   // uniform across the sub-group
     const bool shared = set == 0;
     uint e = 0;
     const uint n_all = shared ? M : q4_union_set(lane, set - 1, id, own, fl, rk, &e, mf, mpos);
-#ifdef UNION_COUNT
-    if (lane == 0) atomic_inc(cnt + (MOE_E + 1) + (shared ? MOE_E : e));
-#endif
-    const __global uint* restrict tile = Q4_EXPERT_DN(w, e) + ((size_t)n_tile * G_DN + g0) * TILE_U32;
     for (uint base = 0; base < n_all; base += M) {
       const uint n = min((uint)M, n_all - base);
       uint xo[M], rs[M];   // the pair's h row and its [row][slot] place
@@ -400,20 +393,27 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
         rs[r] = shared ? i * SLOTS + SHARED_SLOT : (p / MOE_K) * SLOTS + p % MOE_K;
         xo[r] = rs[r] * INTER;
       }
-      float acc[M];
-      if (!shared) {
-        tile_dot_rows(tile, h, xo, n, g0, g0 + G_DN / DN_KS, lane, acc);
-      } else {
-#if SHARED_BF16
-        const uint o0 = q * (O_DN / DN_KS);
-        bf16_dot_rows(w_sh + (size_t)n_tile * O_DN * 128, h, xo, n, o0, o0 + O_DN / DN_KS, acc);
-#else
-        tile_dot_rows(w_sh + ((size_t)n_tile * G_DN + g0) * TILE_U32, h, xo, n, g0, g0 + G_DN / DN_KS, lane, acc);
+      for (uint q = 0; q < DN_KS; ++q) {   // K slice q: q4_moe_down's sub-group (slot, q) chain
+        const uint g0 = q * (G_DN / DN_KS);
+#ifdef UNION_COUNT
+        if (base == 0 && lane == 0) atomic_inc(cnt + (MOE_E + 1) + (shared ? MOE_E : e));
 #endif
+        float acc[M];
+        if (!shared) {
+          tile_dot_rows(Q4_EXPERT_DN(w, e) + ((size_t)n_tile * G_DN + g0) * TILE_U32, h, xo, n, g0, g0 + G_DN / DN_KS,
+                        lane, acc);
+        } else {
+#if SHARED_BF16
+          const uint o0 = q * (O_DN / DN_KS);
+          bf16_dot_rows(w_sh + (size_t)n_tile * O_DN * 128, h, xo, n, o0, o0 + O_DN / DN_KS, acc);
+#else
+          tile_dot_rows(w_sh + ((size_t)n_tile * G_DN + g0) * TILE_U32, h, xo, n, g0, g0 + G_DN / DN_KS, lane, acc);
+#endif
+        }
+        #pragma unroll
+        for (uint r = 0; r < M; ++r)   // a constant trip count: acc and rs stay in registers
+          if (r < n) red[rs[r] * DN_KS + q][lane] = acc[r];
       }
-      #pragma unroll
-      for (uint r = 0; r < M; ++r)   // a constant trip count: acc and rs stay in registers
-        if (r < n) red[rs[r] * DN_KS + q][lane] = acc[r];
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE);

@@ -208,7 +208,8 @@ Out run(Dev& d, const std::string& variant, uint32_t M, bool tp, bool tbl, bool 
     dn.indirect_host();
   }
   gu.group_size(qk::moe_gate_up_wg());
-  dn.group_size(tp ? qk::tp_moe_down_wg() : qk::moe_down_wg());
+  dn.group_size(variant.find("_U") != std::string::npos ? qk::moe_down_union_wg()
+                : tp ? qk::tp_moe_down_wg() : qk::moe_down_wg());
   const void* ga[5] = {rb.ptr(), xb.ptr(), W.gu(tbl), sgu, hb.ptr()};
   for (uint32_t i = 0; i < 5; ++i) gu.arg_ptr(i, ga[i]);
   if (count) gu.arg_ptr(5, cnt.ptr());
@@ -270,7 +271,8 @@ double time_pair(Dev& d, const std::string& variant, uint32_t M, bool tp, bool t
     dn.indirect_host();
   }
   gu.group_size(qk::moe_gate_up_wg());
-  dn.group_size(tp ? qk::tp_moe_down_wg() : qk::moe_down_wg());
+  dn.group_size(variant.find("_U") != std::string::npos ? qk::moe_down_union_wg()
+                : tp ? qk::tp_moe_down_wg() : qk::moe_down_wg());
   const void* ga[5] = {rb.ptr(), xb.ptr(), W.gu(tbl), W.sh_gu.ptr(), hb.ptr()};
   for (uint32_t i = 0; i < 5; ++i) gu.arg_ptr(i, ga[i]);
   const void* da[7] = {rb.ptr(), hb.ptr(), W.dn(tbl), W.sh_dn.ptr(), yb.ptr(), land.ptr(), ctr.ptr()};
