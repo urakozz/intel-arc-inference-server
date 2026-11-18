@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -594,7 +595,8 @@ uint32_t Qwen4ExpTpEngine::max_verify_k() const {
   return std::min<uint32_t>(kMaxDraft, max_len_ - p - 1);
 }
 
-void Qwen4ExpTpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
+void Qwen4ExpTpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick,
+                             const std::function<bool(uint32_t, float)>& more) {
   require_mtp("draft");
   if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
   const uint32_t p = pos();
@@ -641,6 +643,17 @@ void Qwen4ExpTpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>
     h->cur_token[0] = d;   // the next draft step's input
     draft_ids_.push_back(d);
     for (auto& c : cards_) c->ctl->cur_token[1 + i] = d;
+    if (more) {
+      // Open-work 49: the two halves' softmax (max m_c, normaliser s_c) merged - p = exp(m_win - M) / sum s_c exp(m_c - M)
+      // at the merged winner, M the larger max (the winner's own value: m_win = M).
+      float m0, s0, m1, s1;
+      std::memcpy(&m0, &h0->draft_stat[0], 4);
+      std::memcpy(&s0, &h0->draft_stat[1], 4);
+      std::memcpy(&m1, &h->draft_stat[0], 4);
+      std::memcpy(&s1, &h->draft_stat[1], 4);
+      const float m = std::max(m0, m1);
+      if (!more(i, 1.0f / (s0 * std::exp(m0 - m) + s1 * std::exp(m1 - m)))) break;
+    }
   }
 }
 

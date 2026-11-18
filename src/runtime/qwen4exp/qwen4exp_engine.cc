@@ -731,7 +731,8 @@ uint32_t Qwen4ExpEngine::max_verify_k() const {
   return std::min<uint32_t>(kMaxDraft, max_len_ - p - 1);
 }
 
-void Qwen4ExpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
+void Qwen4ExpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick,
+                           const std::function<bool(uint32_t, float)>& more) {
   require_mtp("draft");
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
   const uint32_t p = pos();
@@ -763,6 +764,11 @@ void Qwen4ExpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& 
     }
     draft_ids_.push_back(d);
     for (auto& s : st_) s->ctl->cur_token[1 + i] = d;
+    if (more) {   // open-work 49: the head's probability at its argmax, 1 / sum exp(l - max) (draft_prob.cl)
+      float norm;
+      std::memcpy(&norm, &h->draft_stat[1], 4);
+      if (!more(i, 1.0f / norm)) break;
+    }
   }
 }
 

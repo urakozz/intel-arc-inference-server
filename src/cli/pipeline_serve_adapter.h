@@ -62,8 +62,8 @@ struct HasTapDrafter<E, std::void_t<decltype(std::declval<E&>().draft_tap(1u, 0.
                                     decltype(std::declval<const E&>().tap_samples()),
                                     decltype(std::declval<const E&>().drafter_key())>> : std::true_type {};
 
-// Open-work 13: engines whose draft lists can stop on the head's probability (runtime::TpEngine) - the per-step K is
-// compiled only for those.
+// Open-work 13: engines whose draft lists can stop on the head's probability (runtime::TpEngine; open-work 49: both
+// Qwen3.8-Flash-Next engines) - the per-step K is compiled only for those.
 template <class E, class = void>
 struct HasDraftProbs : std::false_type {};
 template <class E>

@@ -844,7 +844,7 @@ size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p
   for (uint32_t dev = 0; dev < p.devices; ++dev) n += verify_device_launches(d, p, dev, M, a);
   return n;
 }
-size_t draft_launches(Q4Attn a, bool select) { return (a == Q4Attn::Eager ? 26 : 27) + (select ? 2 : 0); }
+size_t draft_launches(Q4Attn a, bool select) { return (a == Q4Attn::Eager ? 28 : 29) + (select ? 2 : 0); }
 size_t mtp_prefill_launches(uint32_t pos, uint32_t C) { return 1 + (mtp_prefill_rows(pos, C) > 0 ? 25 : 0); }
 
 // --- spec 21-QFN-v1e: prefix-cache snapshots ---------------------------------------------------------------------------

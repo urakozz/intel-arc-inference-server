@@ -144,7 +144,11 @@ class Qwen4ExpTpEngine {
   static constexpr uint32_t kMaxDraft = runtime::qwen4exp::kMaxDraft;
   bool mtp() const { return mtp_ != nullptr; }
   uint32_t max_verify_k() const;
-  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
+  // `more(i, p)` (open-work 49, greedy; Qwen4ExpEngine::draft's): p merged from the two halves' softmax max and
+  // normaliser; false stops drafting there.
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {},
+             const std::function<bool(uint32_t i, float p)>& more = {});
+  bool draft_probs() const { return mtp(); }
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   void verify(uint32_t k);
   const uint32_t* verify_ids() const;
