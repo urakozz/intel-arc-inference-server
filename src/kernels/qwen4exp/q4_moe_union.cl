@@ -371,12 +371,23 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
                           , __global uint* land, __global uint* ctr
 #endif
                           CNT_ARG) {
+#if !MOE_TP_PART
   __local float red[M * SLOTS * DN_KS][SG];   // [row][slot][K slice]
+#endif
   if (get_group_id(1) != 0) return;   // uniform: work-group (n_tile, 0) does every row
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
   const uint sg = lid / SG;
   const uint n_tile = get_group_id(0);
+#if MOE_TP_PART
+  // tp_send for the chunks (n_tile, m), m < M (q4_moe_down's per-chunk protocol, the M chunks of this n-tile from one
+  // work-group): the call numbers first, then each (row, slot)'s 16 words here and in the peer's landing as soon as its
+  // set is done (DN_KS 1: no K tree), so the link writes spread over the launch; then the stamp lines and the flags.
+  __local uint s_n[M];
+  if (lid == 0)
+    for (uint m = 0; m < M; ++m) s_n[m] = tp_next(ctr, n_tile, m);
+  barrier(CLK_LOCAL_MEM_FENCE);
+#endif
   uint id[PREG], own[PREG], fl[PREG], rk[PREG], mf[PREG], mpos[PREG];
   const uint nd = q4_union_sg(route, lane, id, own, fl, rk);
   for (uint set = sg; set <= nd; set += SLOTS) {   // uniform across the sub-group
@@ -410,12 +421,24 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
           tile_dot_rows(w_sh + ((size_t)n_tile * G_DN + g0) * TILE_U32, h, xo, n, g0, g0 + G_DN / DN_KS, lane, acc);
 #endif
         }
+#if MOE_TP_PART
+        #pragma unroll
+        for (uint r = 0; r < M; ++r)   // a constant trip count: acc and rs stay in registers
+          if (r < n) {
+            const uint m = rs[r] / SLOTS, slot = rs[r] % SLOTS;
+            const size_t ey = ((size_t)slot * M + m) * HIDDEN + n_tile * SG + lane;
+            y[ey] = acc[r];
+            land[(s_n[m] & 1u) * DATA_WORDS + ey] = as_uint(acc[r]);
+          }
+#else
         #pragma unroll
         for (uint r = 0; r < M; ++r)   // a constant trip count: acc and rs stay in registers
           if (r < n) red[rs[r] * DN_KS + q][lane] = acc[r];
+#endif
       }
     }
   }
+#if !MOE_TP_PART
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint i = lid; i < M * SLOTS * SG; i += WG_DN) {   // each (row, slot)'s K-slice tree, q4_moe_down's order
     const uint rs = i / SG, ln = i % SG;
@@ -423,21 +446,8 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
       for (uint k = 0; k < stride; ++k) red[rs * DN_KS + k][ln] += red[rs * DN_KS + k + stride][ln];
   }
   barrier(CLK_LOCAL_MEM_FENCE);
+#endif
 #if MOE_TP_PART
-  // tp_send for the chunks (n_tile, m), m < M: every slot's 16 words here and in the peer's landing, the stamp lines,
-  // the flags - q4_moe_down's per-chunk protocol, the M chunks of this n-tile from one work-group.
-  __local uint s_n[M];
-  if (lid == 0)
-    for (uint m = 0; m < M; ++m) s_n[m] = tp_next(ctr, n_tile, m);
-  barrier(CLK_LOCAL_MEM_FENCE);
-  for (uint i = lid; i < M * SLOTS * SG; i += WG_DN) {
-    const uint m = i / (SLOTS * SG), slot = (i / SG) % SLOTS, ln = i % SG;
-    const uint n = s_n[m];
-    const float v = red[m * SLOTS + slot][ln];
-    const size_t e = ((size_t)slot * M + m) * HIDDEN + n_tile * SG + ln;
-    y[e] = v;
-    land[(n & 1u) * DATA_WORDS + e] = as_uint(v);
-  }
   for (uint i = lid; i < M * TP_TRAILER_STRIDE; i += WG_DN) {
     const uint m = i / TP_TRAILER_STRIDE;
     const uint n = s_n[m];
