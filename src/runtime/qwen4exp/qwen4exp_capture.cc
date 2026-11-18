@@ -235,7 +235,7 @@ class Walk {
     const bool tbl = part_.layers[0].expert_row != nullptr;
     const unsigned rank = tp_->link->rank;
     std::vector<std::string> need = {
-        kq::embed_variant(M_), kq::tp_moe_variant(tbl, rank, M_),
+        kq::embed_variant(M_), kq::tp_moe_variant(tbl, rank, M_), kq::tp_moe_variant(tbl, rank, M_, M_ > 1),
         spec_.kind == ListKind::Verify ? kq::tp_gdn_slots_variant(M_) : kq::tp_gdn_variant(),
         kq::tp_gated_head_sig_variant(M_), kq::tp_attn_prep_variant(M_), kq::tp_qsa_attn_variant(M_),
         kq::tp_sum_variant(rank, M_), kq::hc_combine_norm_variant(M_, HcSrc::Slices, 1, true), kq::route_variant(M_),
@@ -669,7 +669,10 @@ class Walk {
     // direct form's.
     const bool tbl = L.expert_row != nullptr;
     const bool tpm = card();   // the head's MoE (draft steps) is one card's, whole
-    const std::string mv = tpm ? kq::tp_moe_variant(tbl, tp_->moe->rank, M_) : kq::moe_variant(M_, shb, tbl);
+    // a verify (M >= 2) reads each distinct expert once for every row that chose it (q4_moe_union.cl, bitwise the
+    // per-row form); q4_moe_finish is the per-row binary's
+    const bool un = M_ > 1;
+    const std::string mv = tpm ? kq::tp_moe_variant(tbl, tp_->moe->rank, M_, un) : kq::moe_variant(M_, shb, tbl, un);
     {
       // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M) - tp: the card's half, 11 x 10
       l0::Kernel& k = kernel(mv, "q4_moe_gate_up", kq::moe_gate_up_wg());
@@ -700,7 +703,7 @@ class Walk {
       // q4_moe_finish(route, slots, land, ctr, state, spin_limit, y), grid (2560 / 256, M): waits for the peer's
       // slots, sums the two cards' and runs the down's epilogue
       const TpLink& t = *tp_->moe;
-      l0::Kernel& k = kernel(mv, "q4_moe_finish", kq::kTpFinishWg);
+      l0::Kernel& k = kernel(kq::tp_moe_variant(tbl, tp_->moe->rank, M_), "q4_moe_finish", kq::kTpFinishWg);
       k.arg_ptr(0, rt);
       k.arg_ptr(1, tp_->slots);
       k.arg_ptr(2, t.land);

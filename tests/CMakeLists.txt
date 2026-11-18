@@ -3521,6 +3521,7 @@ endif()
 # verify lists' M = 2..4 binaries, gdn_step_slots_M<1..4>_G1, q4_pf_ple_C4, q4_mtp at M = 1..4 and _PF, the fc's);
 # the lists also bind 21-QFN-v1c's decode binaries, 21-QFN-v1d's prefill binaries and Qwen3.8's argmax_stage1_M<2..4> by name.
 if(B70_Q4EXP AND B70_MTP)
+  set(_q4moe_per_row "")
   set(B70_Q4EXP_MTP_KERNELS kernel_q4_pf_ple_C4 kernel_q4_mtp_M2048_SINGLE_PF kernel_q4_mtp_M2048_STREAM_PF
     kernel_q4_pf_bf16_slab_K2560_N2560)
   foreach(MM 1 2 3 4)
@@ -3539,7 +3540,10 @@ if(B70_Q4EXP AND B70_MTP)
         kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I kernel_q4_hc_up_mix_M${MM}
         kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024
         kernel_q4_qsa_attn_M${MM}_T32 kernel_q4_qsa_attn_eager_M${MM} kernel_q4_route_M${MM}_E512_T10_N528_L256
-        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB
+        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_U kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_U
+        kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_TBL_U kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_TBL_U)
+      # the per-row MoE at M rows: the union's reference (qwen4exp_moe_union_test), no list binds it
+      list(APPEND _q4moe_per_row kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB
         kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_TBL)
     endif()
   endforeach()
@@ -3551,7 +3555,7 @@ if(B70_Q4EXP AND B70_MTP)
       kernel_gemm_sm_M${MM}_K6144_N2560_S4_L0_mg kernel_gemm_sm_i8w_M${MM}_K2560_N248320_wg)
   endforeach()
   set(_q4mtp_reused ${B70_Q4EXP_DECODE_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} kernel_argmax_stage1_M2
-    kernel_argmax_stage1_M3 kernel_argmax_stage1_M4)
+    kernel_argmax_stage1_M3 kernel_argmax_stage1_M4 ${_q4moe_per_row})
   if(TARGET qwen4exp_snapshot_gpu_test)   # its `mtp` mode binds the head's lists
     add_dependencies(qwen4exp_snapshot_gpu_test ${B70_Q4EXP_MTP_KERNELS})
   endif()
@@ -3607,6 +3611,27 @@ if(B70_Q4EXP AND B70_MTP)
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   set_tests_properties(qwen4exp_tier_synth_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
     TIMEOUT 3600)
+  # Open-work item 48: the union-read MoE (q4_moe_union.cl) bitwise the per-row q4_moe at M = 2..4, one card's I 640
+  # (_SH4 / _SHB, direct / table with host-memory experts) and tp's I 320 halves; the counting builds (each chosen
+  # expert read once a verify); --time opt-in. Needs a B70, no checkpoint.
+  if(B70_TP)
+    set(_q4u_kernels kernel_q4_moe_M4_E512_T10_D2560_I640_SH4_TBL_U_CNT kernel_q4_moe_M4_E512_T10_D2560_I320_SH4_TBL_TP_R0_U_CNT)
+    foreach(MM 2 3 4)
+      foreach(F SH4 SHB SH4_TBL SHB_TBL)
+        list(APPEND _q4u_kernels kernel_q4_moe_M${MM}_E512_T10_D2560_I640_${F} kernel_q4_moe_M${MM}_E512_T10_D2560_I640_${F}_U)
+      endforeach()
+      foreach(F TP_R0 TP_R1 TBL_TP_R0 TBL_TP_R1)
+        list(APPEND _q4u_kernels kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_${F} kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_${F}_U)
+      endforeach()
+    endforeach()
+    add_executable(qwen4exp_moe_union_test kernels/qwen4exp_moe_union_test.cc)
+    target_include_directories(qwen4exp_moe_union_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+    target_link_libraries(qwen4exp_moe_union_test PRIVATE b70_l0 b70_qwen4exp_loader)
+    b70_target_kernel_dir(qwen4exp_moe_union_test)
+    add_dependencies(qwen4exp_moe_union_test ${_q4u_kernels})
+    add_test(NAME qwen4exp_moe_union_test COMMAND qwen4exp_moe_union_test)
+    set_tests_properties(qwen4exp_moe_union_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  endif()
   # Plan 21-QFN-v2b Task 5 Step 0: the MTP head under --parallel tp (box only; our RTN export, 18 layers): the plain run's
   # greedy ids, then the head's plain steps, spec 8's loop at K 1..3 and a restored snapshot against them.
   if(B70_TP AND TARGET qwen4exp_tp_prefill_test)
@@ -3619,6 +3644,8 @@ if(B70_Q4EXP AND B70_MTP)
           kernel_attn_prep_M${MM}_Q12KV1 kernel_q4_qsa_attn_M${MM}_T32_Q12KV1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1
+          kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0_U kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1_U
+          kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0_U kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1_U
           kernel_tp_cross_M${MM}_K2560_G20_S2_X_R0_sum kernel_tp_cross_M${MM}_K2560_G20_S2_X_R1_sum
           kernel_tp_argmax_M${MM}_N124160_U124160_B0 kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
       endif()
