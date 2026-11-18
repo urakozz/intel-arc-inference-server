@@ -398,6 +398,10 @@ if(B70_ORNITH)
     list(GET f 2 L)
     add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL}
                      DEFINES K=${K} N=${N} LAYOUT=${L})
+    # Open-work 18's block-store form, for the 4096-row chunk's N-fastest walk (linear_l0) when the linears are
+    # not kept unpacked (open-work 38). Additive: the binary above keeps its command line.
+    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L}_BS SOURCE ${PF_SLAB_CL}
+                     DEFINES K=${K} N=${N} LAYOUT=${L} BLOCK_STORE=1)
   endforeach()
   foreach(K 2048 4096)
     math(EXPR NBLK "${K} / 1024")

@@ -34,14 +34,12 @@ l0::Kernel& dequant_kernel(KernelCache& kc, PrefillScratch& s, const loader::Dev
   return kc(kernels::pf_dequant_slab_variant(sh.K, sh.N, sh.layout, wide), "pf_dequant_slab");
 }
 
-// Open-work 18: Qwen3.8's chunk wider than 2048 rows walks with the block-store conversion and
-// the N-fastest GEMM order - both bit-identical to the plain pair, which a 2048-row chunk and
-// the MoE models' dense linears keep (past one
-// wave of work-groups a slab, the plain order reads each row block of x once a wave instead of
-// once a slab).
-bool wide_chunk(const PrefillScratch& s, uint32_t M) {
-  return !s.desc().is_moe() && pad256(M) > PrefillScratchDims::kCDefault;
-}
+// Open-work 18: a chunk wider than 2048 rows walks with the block-store conversion and the
+// N-fastest GEMM order - both bit-identical to the plain pair, which a 2048-row chunk keeps (past
+// one wave of work-groups a slab, the plain order reads each row block of x once a wave instead
+// of once a slab). Ornith's 4096-row chunk too (research 2026-11-18, D1): its x of 16.8 MB (K 2048)
+// or 33.5 MB (K 4096) does not stay in the L2 across the two waves.
+bool wide_chunk(uint32_t M) { return pad256(M) > PrefillScratchDims::kCDefault; }
 }  // namespace
 
 size_t linear_l0_launches(const model::GemvShape& sh) { return 2 * (size_t(sh.N) / kNs); }
@@ -61,7 +59,7 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
     profile_wait(cx, Phase::kSlabGemm);
     return;
   }
-  const bool wide = wide_chunk(s, M);
+  const bool wide = wide_chunk(M);
   // Open-work 38: a linear make_dense_slabs unpacked at load - the same slabs, one after another, so no dequant.
   if (const l0::Mem* r = s.find_gemm_slab(w.mem.ptr())) {
     for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
@@ -105,7 +103,7 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
     profile_wait(cx, Phase::kSlabGemm);
     return;
   }
-  const bool wide = wide_chunk(s, M);
+  const bool wide = wide_chunk(M);
   l0::Kernel& dq = dequant_kernel(kc, s, w, wide);
   l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
