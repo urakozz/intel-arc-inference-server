@@ -25,6 +25,7 @@
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill/linear_l0.h"
 #include "runtime/prefill/moe.h"
 #include "runtime/prefill/step.h"
 
@@ -111,6 +112,11 @@ void Engine::prepare_prefill() {
                                                                     &destroy_prefill);
   // Phase 3 Task 2: a MoE model's router / a||b B slabs, once, outside any chunk (counted by the memory plan).
   prefill::make_route_slabs(pfx_->cx, pfx_->kc, *pf_, model_, 0, model_.desc->layers);
+  // Open-work 38: the mixer linears' bf16 slabs (counted by the plan too), finished here so no timed prefill pays them.
+  if (pf_dense_bf16_) {
+    prefill::make_dense_slabs(pfx_->cx, pfx_->kc, *pf_, model_);
+    pfx_->cx.wait();
+  }
   if (prefill_backend() != PrefillBackend::L0Int8) return;
   if (!pfx_->int8)   // the largest int4 K the h8 walk runs: down's on a dense model (spec
                      // 14), the hidden size on a MoE model (the W4A8 experts' quantiser, open-work 16)

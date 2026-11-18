@@ -62,6 +62,15 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
     return;
   }
   const bool wide = wide_chunk(s, M);
+  // Open-work 38: a linear make_dense_slabs unpacked at load - the same slabs, one after another, so no dequant.
+  if (const l0::Mem* r = s.find_gemm_slab(w.mem.ptr())) {
+    for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
+      const GemmBatch b{M, sh.K, kNs, 1, sh.K, kNs, sh.N, 0, 0, 0};
+      gemm_l0(cx, kc, b, x, r->as<uint16_t>() + size_t(n0) * sh.K, out + n0, /*transB=*/false, wide);
+      profile_wait(cx, Phase::kSlabGemm);
+    }
+    return;
+  }
   l0::Kernel& dq = dequant_kernel(kc, s, w, wide);
   l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
@@ -109,6 +118,28 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
     gemm_l0_silu(cx, kc, b, x, slab.as<uint16_t>(), out + n0 / 2, ldx, wide);
     profile_wait(cx, Phase::kSlabGemm);
   }
+}
+
+void make_dense_slabs(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m) {
+  const model::ModelDesc& d = *m.desc;
+  if (!d.is_moe()) return;
+  const model::LinearId gdn[] = {model::LinearId::QkvZ, model::LinearId::OutProj},
+                        fa[] = {model::LinearId::Qkv, model::LinearId::OProj};
+  for (const model::LayerDesc& L : d.layer_descs())
+    for (const model::LinearId id : L.kind == model::LayerKind::GDN ? gdn : fa) {
+      const loader::DeviceWeight& w = m.linears.at({L.index, id});
+      const model::GemvShape& sh = w.shape;
+      check_linear(s, w, 1);
+      bool fresh = false;
+      l0::Mem& r = s.gemm_slab(w.mem.ptr(), size_t(sh.K) * sh.N * 2, fresh);
+      if (!fresh) continue;
+      // linear_l0's dequant of each 1024-column slab, written at slab n0 / 1024 of the K x N copy.
+      l0::Kernel& dq = kc(kernels::pf_dequant_slab_variant(sh.K, sh.N, sh.layout, false), "pf_dequant_slab");
+      const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
+      for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs)
+        cx.launch(dq, kNs / 16, sh.K / 64, 1,
+                  {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(r.as<uint16_t>() + size_t(n0) * sh.K), arg_val(n0)});
+    }
 }
 
 }  // namespace runtime::prefill

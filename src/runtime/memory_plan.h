@@ -81,10 +81,15 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 // staging) has that many rows. 4096 costs ~0.70 GB more scratch on Qwen3.8 (~0.76 GB with
 // MTP on l0-int8), which comes out of what auto can give the KV cache; the CLIs choose it
 // by prefill_chunk_cap_that_fits (context first).
+//
+// `dense_bf16` (open-work 38): a MoE model's mixer linears held unpacked in bf16 for the session
+// (runtime::dense_slab_bytes, in prefill_lazy), so no chunk dequantises them; the CLIs take it only when the plan
+// at the settled max_len and chunk cap has room for it (cli/max_len.h settle_chunk_cap).
 struct PrefillPath {
   bool prefill = true;
   PrefillBackend backend = PrefillBackend::L0;
   uint32_t chunk_cap = PrefillScratchDims::kCDefault;
+  bool dense_bf16 = false;
 };
 
 // Spec 8 §11 (`--draft-vocab`): a draft vocabulary of `rows` ids, its compact head in

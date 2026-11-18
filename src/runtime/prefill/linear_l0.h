@@ -36,6 +36,12 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
                     const loader::DeviceWeight& w, const uint16_t* x, uint32_t M, uint16_t* out,
                     uint32_t ldx);
 
+// Open-work 38: a MoE model's mixer linears (qkv||z and out_proj, q||k||v and o_proj) unpacked to bf16 once by the
+// slab walk's own dequant, slab after slab ([N / 1024][K][1024], PrefillScratch::gemm_slab, runtime::dense_slab_bytes),
+// on cx's list before the first chunk. linear_l0 then multiplies by those slabs and launches no dequant: the same
+// values into the same GEMM, so bitwise the walk. Nothing on a dense model.
+void make_dense_slabs(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m);
+
 // Launches one linear appends on the slab walk: a dequant and a GEMM per slab. The same for
 // both forms above -- the fusion removes a CONSUMER launch, not a slab. (A pf_gemm_q4 chunk,
 // open-work 3b, appends one.)

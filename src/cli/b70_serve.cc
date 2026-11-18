@@ -831,8 +831,9 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
       max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache, drafter_plan);
       slot_lens = {max_len};
     }
-    const uint32_t chunk_cap =
+    const runtime::PrefillPath settled =
         cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, drafter_plan, 0, i, 2);
+    const uint32_t chunk_cap = settled.chunk_cap;
     std::print(stderr, "card {:d}: slots: {:d} ({})\n", i, slot_lens.size(),
                runtime::slot_layout_name(slot_lens).c_str());
     std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
@@ -846,6 +847,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     if (drafter) drafter->attach(*engine, draft_vocab_on);
     if (a.have_pp_backend) engine->set_prefill_backend(a.pp_backend);
     engine->set_prefill_chunk_cap(chunk_cap);   // plan 5d
+    engine->set_prefill_dense_bf16(settled.dense_bf16);   // open-work 38
     engine->prepare_prefill();
     std::print(stderr, "card {:d}: max_len {:d}, prefill chunk {:d}, {}\n", i, max_len, chunk_cap,
                engine->memory_line().c_str());
@@ -1369,7 +1371,7 @@ int run(int argc, char** argv) {
     max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
     slot_lens = {max_len};
   }
-  const uint32_t chunk_cap =
+  const runtime::PrefillPath settled =
       cli::settle_chunk_cap(context, model, slot_lens, mem_reserve, pp_path, kv_cache, drafter_plan, 0);
   std::print(stderr, "slots: {:d} ({}) - {}\n", slot_lens.size(), runtime::slot_layout_name(slot_lens).c_str(),
              slot_lens.size() > 1 ? "several requests at once on this card" : "one request at a time");
@@ -1382,7 +1384,8 @@ int run(int argc, char** argv) {
                          slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{});
   if (drafter) drafter->attach(engine, draft_vocab_on);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
-  engine.set_prefill_chunk_cap(chunk_cap);   // plan 5d
+  engine.set_prefill_chunk_cap(settled.chunk_cap);   // plan 5d
+  engine.set_prefill_dense_bf16(settled.dense_bf16);   // open-work 38
   // Prefill setup at load, not in the first request: on l0-int8 this is the
   // one-time rotated column-scale pass (spec 5 T2).
   engine.prepare_prefill();

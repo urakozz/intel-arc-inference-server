@@ -239,10 +239,16 @@ inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d) {
 // `lens`: the request slots' lengths (one entry without --max-num-seqs), as settle() / settle_slots() gave them.
 // Prints the card's VRAM chart (runtime/vram_bars.h) at the cap chosen; `card` of `cards` names it (--parallel replica
 // settles each card on its own).
-inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m, const std::vector<uint32_t>& lens,
-                                 size_t reserve_bytes, const runtime::PrefillPath& path,
-                                 runtime::KvCache kv, const runtime::DrafterPlan& drafter, uint32_t asked,
-                                 uint32_t card = 0, uint32_t cards = 1) {
+//
+// Open-work 38, after the cap and the same way (context first): a MoE model's mixer linears are held in bf16
+// (PrefillPath::dense_bf16, runtime::dense_slab_bytes) when the plan at these lengths and this cap has room for
+// them, else every chunk unpacks them as before - bitwise the same prompt pass. Returns `path` at the cap chosen and
+// with that choice: the engine is given both (set_prefill_chunk_cap, set_prefill_dense_bf16).
+inline runtime::PrefillPath settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
+                                             const std::vector<uint32_t>& lens, size_t reserve_bytes,
+                                             const runtime::PrefillPath& path, runtime::KvCache kv,
+                                             const runtime::DrafterPlan& drafter, uint32_t asked, uint32_t card = 0,
+                                             uint32_t cards = 1) {
   const size_t weights = m.report.total() - m.report.rope_bytes;
   const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
@@ -265,13 +271,22 @@ inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
   if (path.prefill && why) std::print(stderr, "prefill chunk cap: {:d} ({})\n", cap, why);   // the default says nothing
   runtime::PrefillPath at = path;
   at.chunk_cap = cap;
+  if (const size_t dense = runtime::dense_slab_bytes(*m.desc); path.prefill && dense != 0) {
+    runtime::PrefillPath with = at;
+    with.dense_bf16 = true;
+    at.dense_bf16 = runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, with, draft_vocab_plan(m), kv,
+                                        drafter).total() + reserve_bytes <= ctx.memory_bytes();
+    std::print(stderr, "prefill dense weights: {} ({:.3f} GB in bf16 {})\n",
+               at.dense_bf16 ? "kept in bf16" : "unpacked every chunk", dense / 1e9,
+               at.dense_bf16 ? "fit beside this max_len" : "would not fit beside this max_len");
+  }
   const runtime::MemoryPlan p =
       runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, at, draft_vocab_plan(m), kv, drafter);
   std::print(stderr, "{}",
              runtime::vram_block({runtime::vram_parts(p, runtime::vram_state_name(p), "DFlash drafter"),
                                   reserve_bytes, ctx.memory_bytes()},
                                  card, cards, runtime::vram_utf8()));
-  return cap;
+  return at;
 }
 
 }  // namespace cli

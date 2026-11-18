@@ -137,6 +137,11 @@ class Engine {
   // are sized once; set it before prepare_prefill()). Defined in engine_prefill.cc.
   void set_prefill_chunk_cap(uint32_t cap);
   uint32_t prefill_chunk_cap() const;
+  // Open-work 38: hold a MoE model's mixer linears unpacked in bf16 for the session (prefill::make_dense_slabs,
+  // runtime::dense_slab_bytes), made by the next prepare_prefill(); the CLIs set it when their memory plan has room
+  // (PrefillPath::dense_bf16). Off by default: every chunk unpacks them. Bitwise either way; no effect on a dense
+  // model. Once made they stay for the engine's life.
+  void set_prefill_dense_bf16(bool on) { pf_dense_bf16_ = on; }
   // Open-work 18: the positions at a hooked prefill's end cut at kBlock under a 4096-row chunk
   // (runtime::prefill_chunk_rows' `tail`): Qwen3.8 kPrefillTail, a MoE model 0.
   uint32_t prefill_tail() const { return runtime::prefill_tail(model_.desc->is_moe()); }
@@ -505,6 +510,7 @@ class Engine {
   std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)> pfx_{nullptr, nullptr};
   std::optional<PrefillBackend> pf_backend_;   // unset = default_prefill_backend()
   std::optional<uint32_t> pf_chunk_cap_;       // plan 5d; unset = default_prefill_chunk_cap()
+  bool pf_dense_bf16_ = false;                 // open-work 38
   BlockHook block_hook_;
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
   // Spec 8: null unless the model carries the MTP head. Declared before step_ so it
