@@ -4,6 +4,7 @@
 // present.
 //
 //   qwen4exp_mtp_test <checkpoint> <fixture dir> <ids> [m1] [m2] [m3] [cost] [pp2[:split]] [layers:N] [int8] [ingest]
+//                     [rows] (rows: the verify lists' per-row MoE, open-work item 48's pair against the union-read one)
 //
 // (no mode: all four). <fixture dir> holds tools/oracle/qwen4exp_mtp_fixture.py's mtp_{single,per_stream}.safetensors
 // for this checkpoint (box: r34.fixture); without them M1 SKIPs and the rest runs.
@@ -492,8 +493,10 @@ int main(int argc, char** argv) {
       o.int8_head = true;
     } else if (x == "ingest") {
       g_ingest = true;
+    } else if (x == "rows") {
+      o.per_row_moe = true;
     } else {
-      std::fprintf(stderr, "qwen4exp_mtp_test: unknown flag %s (m1 m2 m3 cost pp2[:split] layers:N int8 ingest)\n", x.c_str());
+      std::fprintf(stderr, "qwen4exp_mtp_test: unknown flag %s (m1 m2 m3 cost pp2[:split] layers:N int8 ingest rows)\n", x.c_str());
       return 2;
     }
   }
