@@ -1365,6 +1365,18 @@ if(B70_ORNITH)
                    DEFINES ${_pga_gdn} GDN_CVT=1)
   add_ocloc_kernel(pf_gdn_intra_cvt_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
                    DEFINES ${_pga_gdn} GDN_CVT=1)
+  add_ocloc_kernel(pf_gdn_front_pl_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_front.cl
+                   DEFINES ${_pga_gdn} FRONT_PRELOAD=1)
+  add_ocloc_kernel(pf_gated_head_sg_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gated_head.cl
+                   DEFINES ${_pga_gdn} HEAD_SG=1)
+  list(APPEND _pga_diag kernel_pf_gdn_front_pl_GK16V32 kernel_pf_gated_head_sg_GK16V32 kernel_pf_gdn_front_GK16V32
+       kernel_pf_gated_head_GK16V32)
+  # DIAGNOSTIC: the scan without its o stage (1), its state update (2), its w.S (4)
+  foreach(dg 1 2 4 3)
+    add_ocloc_kernel(pf_gdn_scan_diag${dg}_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_scan.cl
+                     DEFINES ${_pga_gdn} SCAN_DIAG=${dg})
+    list(APPEND _pga_diag kernel_pf_gdn_scan_diag${dg}_GK16V32)
+  endforeach()
   # DIAGNOSTIC: pf_gdn_intra stopped after stage 1 (A, A2) / 2 (T's diagonal blocks) / 3 (all of T) / 4 (T's hi / lo)
   foreach(st 1 2 3 4)
     add_ocloc_kernel(pf_gdn_intra_stop${st}_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl

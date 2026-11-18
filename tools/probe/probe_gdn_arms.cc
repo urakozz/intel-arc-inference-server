@@ -9,7 +9,11 @@
 //   * time: arm and production as interleaved pairs after a warm-up, the order alternating each round, median
 //     of `--rounds`; global timestamps around the one launch (the state reset is outside them).
 //
-//   probe_gdn_arms --dump DIR [--calls 0,9,21] [--rounds 15]
+// --bytes: the two byte-moving kernels instead (no dump needed): pf_gdn_front and pf_gated_head against their
+// candidates on synthetic inputs of Ornith's shapes at C = 4096 (a fixed pseudo-random fill; the arithmetic is per
+// element, so equal words on it are the same check), outputs compared word for word, timed as above.
+//
+//   probe_gdn_arms --dump DIR [--calls 0,9,21] [--rounds 15] [--only BIN] [--tile N] | --bytes [--rounds 15]
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <utility>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -62,6 +67,10 @@ const Arm kArms[] = {
     {"scan", "pf_gdn_scan_cvt_GK16V32", "pf_gdn_scan_dpas_split"},
     {"intra", "pf_gdn_intra_cvt_GK16V32", "pf_gdn_intra"},
     // DIAGNOSTIC (outputs incomplete, never bitwise): the intra kernel's stages priced by stopping early
+    {"scan", "pf_gdn_scan_diag1_GK16V32", "pf_gdn_scan_dpas_split"},
+    {"scan", "pf_gdn_scan_diag2_GK16V32", "pf_gdn_scan_dpas_split"},
+    {"scan", "pf_gdn_scan_diag4_GK16V32", "pf_gdn_scan_dpas_split"},
+    {"scan", "pf_gdn_scan_diag3_GK16V32", "pf_gdn_scan_dpas_split"},
     {"intra", "pf_gdn_intra_stop1_GK16V32", "pf_gdn_intra"},
     {"intra", "pf_gdn_intra_stop2_GK16V32", "pf_gdn_intra"},
     {"intra", "pf_gdn_intra_stop3_GK16V32", "pf_gdn_intra"},
@@ -76,12 +85,14 @@ int main(int argc, char** argv) {
     std::vector<int> calls = {0, 9, 21};
     int rounds = 15;
     std::string only;
+    bool bytes = false;
     uint32_t tile = 1;   // --tile N: the dump's rows repeated N times (C = N x the dump's rows)
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "--dump" && i + 1 < argc) dir = argv[++i];
       else if (a == "--rounds" && i + 1 < argc) rounds = std::max(1, std::atoi(argv[++i]));
       else if (a == "--only" && i + 1 < argc) only = argv[++i];
+      else if (a == "--bytes") bytes = true;
       else if (a == "--tile" && i + 1 < argc) tile = std::max(1, std::atoi(argv[++i]));
       else if (a == "--calls" && i + 1 < argc) {
         calls.clear();
@@ -93,7 +104,7 @@ int main(int argc, char** argv) {
         return 2;
       }
     }
-    if (dir.empty()) throw std::runtime_error("--dump DIR is required");
+    if (dir.empty() && !bytes) throw std::runtime_error("--dump DIR or --bytes is required");
     l0::Context ctx(0);
     const char* mask = std::getenv("ZE_AFFINITY_MASK");
     std::printf("# probe_gdn_arms: ZE_AFFINITY_MASK=%s, device %s, %d rounds\n", mask ? mask : "(unset)",
@@ -103,6 +114,88 @@ int main(int argc, char** argv) {
     l0::Mem d_stamp(ctx, l0::MemKind::Host, 64);
     uint64_t* stamp = d_stamp.as<uint64_t>();
 
+    auto time_pair = [&](auto&& prod, auto&& cand, auto&& reset) {
+      auto timed = [&](bool c) {
+        reset();
+        cx.timestamp(stamp);
+        if (c) cand(); else prod();
+        cx.timestamp(stamp + 1);
+        cx.wait();
+        return cx.timestamp_ms(stamp[0], stamp[1]);
+      };
+      for (int wu = 0; wu < 3; ++wu) { timed(false); timed(true); }
+      std::vector<double> tc, ta;
+      for (int r = 0; r < rounds; ++r) {
+        if (r % 2) { ta.push_back(timed(true)); tc.push_back(timed(false)); }
+        else { tc.push_back(timed(false)); ta.push_back(timed(true)); }
+      }
+      return std::pair<double, double>{median(tc), median(ta)};
+    };
+    if (bytes) {
+      constexpr uint32_t C = 4096, hk = 16, H = 32, conv = (2 * hk + H) * kDim, qkvz = conv + H * kDim, ring = 32;
+      uint64_t st = 0x9E3779B97F4A7C15ull;
+      auto rnd = [&] {   // xorshift, uniform in [-1, 1)
+        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+        return float(int64_t(st >> 11) - (int64_t(1) << 52)) / float(int64_t(1) << 52);
+      };
+      auto bf = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return uint16_t((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16); };
+      std::vector<float> part(size_t(C) * qkvz), convw(size_t(conv) * 4), o(size_t(C) * H * kDim);
+      std::vector<uint16_t> seed(size_t(3) * conv), gw(kDim);
+      for (float& x : part) x = 3.0f * rnd();
+      for (float& x : convw) x = 0.5f * rnd();
+      for (float& x : o) x = 0.2f * rnd();
+      for (uint16_t& x : seed) x = bf(2.0f * rnd());
+      for (uint16_t& x : gw) x = bf(1.0f + 0.3f * rnd());
+      l0::Mem d_p(ctx, l0::MemKind::Device, part.size() * 4), d_cw(ctx, l0::MemKind::Device, convw.size() * 4),
+          d_seed(ctx, l0::MemKind::Device, seed.size() * 2), d_xb(ctx, l0::MemKind::Device, size_t(C) * conv * 2),
+          d_xb2(ctx, l0::MemKind::Device, size_t(C) * conv * 2), d_ring(ctx, l0::MemKind::Device, size_t(ring) * conv * 2),
+          d_ring2(ctx, l0::MemKind::Device, size_t(ring) * conv * 2), d_o(ctx, l0::MemKind::Device, o.size() * 4),
+          d_gw(ctx, l0::MemKind::Device, gw.size() * 2), d_y(ctx, l0::MemKind::Device, size_t(C) * H * kDim * 2),
+          d_y2(ctx, l0::MemKind::Device, size_t(C) * H * kDim * 2);
+      cx.copy(d_p.ptr(), part.data(), part.size() * 4);
+      cx.copy(d_cw.ptr(), convw.data(), convw.size() * 4);
+      cx.copy(d_seed.ptr(), seed.data(), seed.size() * 2);
+      cx.copy(d_o.ptr(), o.data(), o.size() * 4);
+      cx.copy(d_gw.ptr(), gw.data(), gw.size() * 2);
+      std::vector<uint16_t> zring(size_t(ring) * conv, 0);
+      cx.copy(d_ring.ptr(), zring.data(), zring.size() * 2);
+      cx.copy(d_ring2.ptr(), zring.data(), zring.size() * 2);
+      cx.wait();
+      const uint32_t pos = 1000;
+      auto front = [&](l0::Kernel& k, void* xb, void* rg) {
+        cx.launch(k, conv / 256, (C + 31) / 32, 1, {PtrArg(d_p.ptr()), PtrArg(d_seed.ptr()), PtrArg(d_cw.ptr()), PtrArg(xb),
+                                                  PtrArg(rg), arg_val(pos), arg_val(C)});
+      };
+      l0::Kernel& kF = kc(kernels::pf_gdn_front_variant(hk, H), "pf_gdn_front");
+      l0::Kernel& kF2 = kc("pf_gdn_front_pl_GK16V32", "pf_gdn_front");
+      front(kF, d_xb.ptr(), d_ring.ptr());
+      front(kF2, d_xb2.ptr(), d_ring2.ptr());
+      auto same = [&](const l0::Mem& a, const l0::Mem& b, size_t n) {
+        std::vector<uint8_t> x(n), y(n);
+        cx.copy(x.data(), a.ptr(), n);
+        cx.copy(y.data(), b.ptr(), n);
+        cx.wait();
+        return std::memcmp(x.data(), y.data(), n) == 0;
+      };
+      const bool fs = same(d_xb, d_xb2, size_t(C) * conv * 2) && same(d_ring, d_ring2, zring.size() * 2);
+      auto [fp, fa] = time_pair([&] { front(kF, d_xb.ptr(), d_ring.ptr()); }, [&] { front(kF2, d_xb2.ptr(), d_ring2.ptr()); },
+                                [] {});
+      std::printf("ARM {\"C\":%u,\"arm\":\"pf_gdn_front_pl_GK16V32\",\"bitwise\":%s,\"prod_ms\":%.4f,\"arm_ms\":%.4f,"
+                  "\"ratio\":%.3f}\n", C, fs ? "true" : "false", fp, fa, fa / fp);
+      l0::Kernel& kH = kc(kernels::pf_gated_head_variant(hk, H), "pf_gated_head");
+      l0::Kernel& kH2 = kc("pf_gated_head_sg_GK16V32", "pf_gated_head_sg");
+      auto head = [&](bool c) {
+        if (c) cx.launch(kH2, H / 8, C, 1, {PtrArg(d_p.ptr()), PtrArg(d_o.ptr()), PtrArg(d_gw.ptr()), PtrArg(d_y2.ptr()), arg_val(C)});
+        else cx.launch(kH, H, C, 1, {PtrArg(d_p.ptr()), PtrArg(d_o.ptr()), PtrArg(d_gw.ptr()), PtrArg(d_y.ptr()), arg_val(C)});
+      };
+      head(false);
+      head(true);
+      const bool hs = same(d_y, d_y2, size_t(C) * H * kDim * 2);
+      auto [hp, ha] = time_pair([&] { head(false); }, [&] { head(true); }, [] {});
+      std::printf("ARM {\"C\":%u,\"arm\":\"pf_gated_head_sg_GK16V32\",\"bitwise\":%s,\"prod_ms\":%.4f,\"arm_ms\":%.4f,"
+                  "\"ratio\":%.3f}\n", C, hs ? "true" : "false", hp, ha, ha / hp);
+      return 0;
+    }
     for (int call : calls) {
       const std::string base = dir + "/gdn" + std::to_string(call);
       uint32_t C = 0, hk = 0, H = 0, conv = 0;

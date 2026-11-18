@@ -192,6 +192,9 @@
 #ifndef SCAN_PF
 #define SCAN_PF 0
 #endif
+#ifndef SCAN_DIAG
+#define SCAN_DIAG 0
+#endif
 #if SCAN_PF
 enum LSC_LDCC { LSC_LDCC_DEFAULT, LSC_LDCC_L1UC_L3UC, LSC_LDCC_L1UC_L3C, LSC_LDCC_L1C_L3UC, LSC_LDCC_L1C_L3C };
 void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, enum LSC_LDCC c);
@@ -345,6 +348,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
       float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
       __global const uint* restrict wp =
           (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);
+#if !(SCAN_DIAG & 4)   /* bit 4 drops w.S */
       for (uint kb = 0; kb < KBLKS; ++kb) {
         const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
         hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
@@ -352,6 +356,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
         lo = intel_sub_group_bf16_bf16_matrix_mad_k16(
             as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);
       }
+#endif
       const uint4 uw = vload4(0, (__global const uint*)(
           u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + col0));
       ushort ua[DM], vb[DM];
@@ -376,6 +381,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
     }
     barrier(CLK_LOCAL_MEM_FENCE);
 
+#if !(SCAN_DIAG & 1)   /* DIAGNOSTIC (probe only): bit 1 drops the o stage */
     // 2. Q.S is a split pair, and so is A2 - the operand the 2026-09-23 2x2
     //    above found responsible for the whole gate failure. `vn` stays single
     //    BF16 because moving it to fp32 changed no printed cosine at all.
@@ -410,6 +416,8 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
                             c * CHUNK_V + col0);
     }
 
+#endif
+#if !(SCAN_DIAG & 2)   /* bit 2 drops the state update */
     // 3. The high chain begins with decayed fp32 master state; the low chain
     // begins at zero.  Combine exactly once after all position blocks.
     {
@@ -434,6 +442,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
       S0 += lo0;
       S1 += lo1;
     }
+#endif
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   {
