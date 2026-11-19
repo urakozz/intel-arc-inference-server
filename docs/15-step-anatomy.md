@@ -101,8 +101,7 @@ Every wait has a time limit. A half that does not arrive in time fails the step 
 and every later step throws until the engine is reset.
 
 Tensor parallel has no slots and serves one request at a time; `--max-num-seqs` above 1 means replica. Tensor parallel
-with slots was tried and ruled out, because replica is faster at 2 to 4 requests with MTP
-([low-priority-work.md](low-priority-work.md)).
+with slots was tried and ruled out, because replica is faster at 2 to 4 requests with MTP.
 
 Prefill cuts the prompt into chunks and takes them in pairs. Each card walks both chunks layer by layer, alternating,
 so that while chunk A's half crosses to the other card on the copy engine, the compute engine runs chunk B's unit. Each

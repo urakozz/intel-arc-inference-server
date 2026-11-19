@@ -57,4 +57,3 @@ card can do, and [17-running-models.md](17-running-models.md) to run a model.
 
 | | |
 |---|---|
-| [low-priority-work.md](low-priority-work.md) | work that is ruled out for now or not scheduled |
