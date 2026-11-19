@@ -1,9 +1,11 @@
 # Architecture
 
 This document describes how the engine is put together: the toolchain, how the two cards are used, how
-speculative decoding fits in, and the two execution paths, decode and prefill. It is for anyone who wants to read
-or change the engine's code. In one sentence: every decode token replays a Level Zero command list that was
-captured once, and the prompt (prefill) runs as a Level Zero walk over our own OpenCL C kernels.
+speculative decoding fits in, and the two execution paths, decode (writing the answer, one token per step) and
+prefill (reading the prompt). It is for anyone who wants to read or change the engine's code.
+
+In one sentence: every decode token replays a Level Zero command list that was captured once, and the prompt runs as
+a Level Zero walk over our own OpenCL C kernels.
 
 ## Language and toolchain
 
@@ -38,8 +40,8 @@ work that preceded this project gave three independent signs of that
 - Measured MBU (memory bandwidth utilisation, the share of the card's bandwidth actually used) sat at 50-63% on
   those models. The card was idle, waiting for work.
 
-So the first goal was not a faster GEMM. It was a decode step that does no host work per token. That is done:
-99.7% of a decode step now runs inside the GPU fence, and the host spends 97 us per token. What remains is kernel
+So the first goal was not a faster GEMM. It was a decode step that does no host work per token. Today 99.7% of a
+decode step runs inside the GPU fence, and the host spends 97 us per token. What remains is kernel
 efficiency, which is a different problem ([05-perf-model.md](05-perf-model.md)).
 
 ## More than one model
@@ -52,7 +54,7 @@ kernels, the loader and the server. The engine picks the model from the checkpoi
 |---|---|
 | Ornith 1.5 | a mixture of experts (MoE): a router picks a few expert networks for each token |
 | Qwen3.8-Flash-Next | a larger MoE, served whole on two cards, with part of its routed experts kept in host memory (the expert tier) |
-| Kolibri-1 | MoE with sliding-window attention layers; supported by the code but parked |
+| Kolibri-1 | MoE with sliding-window attention layers; supported by the code but not tuned |
 
 Per-model status and commands are in [17-running-models.md](17-running-models.md).
 
@@ -79,7 +81,7 @@ The four modes:
   speed, but each card holds only half the weights, so it serves models that are too big for one card or have no
   tensor-parallel path. The prefix cache and the MTP head work across the split.
 
-Speed numbers per mode are in the benchmark record.
+Speed numbers per mode are in the [README](../README.md#speed) and [17-running-models.md](17-running-models.md).
 
 ### Several requests at once: `--max-num-seqs`
 
@@ -173,11 +175,11 @@ DFlash on one card for one session, and the server says so at startup, recommend
 
 Where speculative output differs from the plain run, it is checked against a float32 CPU reference, the f32 judge
 ([14-golden-gate.md](14-golden-gate.md)). Commands and measured speeds are in
-[17-running-models.md](17-running-models.md) and the benchmark record.
+[17-running-models.md](17-running-models.md).
 
 ## The prompt pass backends
 
-The prompt pass (prefill) runs in bf16 by default. `--prefill-backend l0-int8` is an opt-in alternative that runs
+The prompt pass runs in bf16 by default. `--prefill-backend l0-int8` is an opt-in alternative that runs
 the MLP's linears with int8 activations ([16-int8-prefill.md](16-int8-prefill.md)).
 
 ## Component layout
@@ -346,7 +348,13 @@ and `M` is a runtime argument in all of them:
 | `pf_gemm` | our own DPAS GEMM |
 | `pf_gemm_small`, `pf_gemm_q4` | the same on small tiles for short chunks; `pf_gemm_q4` converts the int4 words itself, with no slab |
 | `pf_attn_prep`, `pf_attn`, `pf_flash_attn` | q/k norm, RoPE, the KV write, then attention (the fused flash form is the default; the composed form remains) |
-| `pf_gdn_conv`, `pf_gdn_wy`, `pf_gdn_scan` | the chunked delta net |
+| `pf_norm_fused` | the residual fold and RMSNorm of a row in one launch |
+| `pf_gdn_conv`, `pf_gdn_front`, `pf_gdn_wy`, `pf_gdn_intra`, `pf_gdn_scan` | the chunked delta net: conv1d and l2norm (`pf_gdn_front` does both in one launch), the intra-chunk WY stages (`pf_gdn_intra` in one launch), then the scan across chunks |
+| `pf_route` | the bf16 GEMVs of a chunk with many rows: the MoE router and shared gate, the delta net's `a‖b` |
+| `pf_moe`, `pf_moe_sort_mw` | an MoE block's routing glue: top-k, sort by expert, gather and combine |
+| `pf_moe_q4gemm`, `pf_moe_gemm` | the grouped expert GEMM, one launch for every expert's tiles; `pf_moe_q4gemm` reads the int4 expert blocks directly |
+| `pf_int8`, `pf_moe_w4a8` | the opt-in `l0-int8` prompt pass's linears ([16-int8-prefill.md](16-int8-prefill.md)) |
+| `pf_tp` | tensor-parallel prefill's residual fold |
 
 The decode kernels' split-K (splitting the reduction dimension K over several work-groups and summing their partial
 results) exists to buy hardware threads at `M = 1`. At `M = 2048` a `[S][M][N]` rectangle of partials at gate‖up's
@@ -416,8 +424,6 @@ saved by one card gives a prefix cache hit on the other.
 The store is made of 2 GiB pieces for a two-card reason. On two cards the second card maps the first card's host
 allocation. A mapping larger than 4 GiB can fail in the kernel, which answers "busy", and the GPU driver retries a
 busy answer forever: a hang, not an error. So any host allocation that both cards use stays at or below 4 GiB.
-
-Results are in the benchmark record, "Prefix caching".
 
 The server also owns the tokenizer and chat template. Both are host code on the request path: encode once per
 request, detokenise once per token, off the card's critical path and overlapping the next replay. Details are in

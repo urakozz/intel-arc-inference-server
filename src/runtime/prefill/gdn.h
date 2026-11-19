@@ -60,15 +60,17 @@ inline constexpr size_t kGdnChunkLaunches = 10;
 
 // MoE-model prefill phase 2: a MoE model's
 // gdn_chunk (Ornith) runs the conv + l2norm as one launch (pf_gdn_front, bitwise) and, on the l0 backend, A / T /
-// w, u / A2 as one launch (pf_gdn_intra, judged). Dense models (Qwen3.8, its TP card) keep the ten launches.
+// w, u / A2 as one launch (pf_gdn_intra, judged). Qwen3.8 on one card runs the front too (nine launches); its TP
+// card keeps the ten.
 // The launches one gdn_chunk call appends for `d` on backend `b`.
 size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 
 // Phase 3 Task 2: on a MoE model the a||b runs as the dense GEMM (tiled_gemm on its B slab, made once by
 // make_route_slabs - still one launch) into rows at pitch pf_route_slab_pitch(128) = 256 in the MoE scratch's
 // GEMM region, and gdn_chunk's pf_gdn_gate reads that pitch (pf_gdn_conv _AB256). On both backends since open-work
-// 35 (l0-int8's GEMV form left Ornith's served tool-call row on a 0.05-ulp tie the f32 judge rejects). A dense
-// model: one pf_ab_proj launch into ab_out.
+// 35 (l0-int8's GEMV form left Ornith's served tool-call row on a 0.05-ulp tie the f32 judge rejects). Qwen3.8 at
+// its one-card heads (runtime::prefill_ab_on_gemm) the same, into ab_out at pitch 256 (judged, not bitwise: 47 ms of
+// GEMV at 4k); a tensor-parallel card: one pf_ab_proj launch into ab_out.
 bool ab_on_gemm(const model::ModelDesc& d);
 
 // A MoE model's (Ornith) qkv||z partials at a chunk of more than kPfSmallMaxRows rows (pf_gemm): stored as the bf16

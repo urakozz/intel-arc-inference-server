@@ -361,10 +361,10 @@ bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, ui
   return ok;
 }
 
-// MoE prefill phase 3 Task 7: attn_chunk's flash launch (Ornith: pf_flash_attn_r32_Q16KV2, 32 rows a work-group, Q in registers)
+// attn_chunk's whole-chunk flash launch (Qwen3.8 and Ornith: pf_flash_attn_pair, two sub-groups sharing 16 rows of a head)
 // against TODAY's RPW 8 binary launched directly on the same Q / K / V, at the descriptor's heads. Bar: pf_o's words
 // bitwise equal on every head and every row of the computed 8-row blocks [0, ceil8(C)).
-bool case_flash_r32_bitwise(l0::Context& ctx, l0::CmdList& imm, const model::ModelDesc& desc, uint32_t pos,
+bool case_flash_pair_bitwise(l0::Context& ctx, l0::CmdList& imm, const model::ModelDesc& desc, uint32_t pos,
                             uint32_t C) {
   using runtime::prefill::PtrArg;
   using runtime::prefill::arg_val;
@@ -410,7 +410,7 @@ bool case_flash_r32_bitwise(l0::Context& ctx, l0::CmdList& imm, const model::Mod
         }
       }
   const bool ok = differ == 0 && nonfinite == 0;
-  std::printf("\n--- flash r32 vs today's RPW 8 binary (%u q / %u kv heads), pos %u C %u: %zu of %zu words differ, "
+  std::printf("\n--- flash pair vs today's RPW 8 binary (%u q / %u kv heads), pos %u C %u: %zu of %zu words differ, "
               "non-finite %zu -- %s\n", qh, kvh, pos, C, differ, size_t(qh) * c8 * kHD, nonfinite, ok ? "PASS" : "FAIL");
   if (first != SIZE_MAX)
     std::printf("  first differing word: head %zu row %zu dim %zu: got %.9g today %.9g\n", first / (size_t(rows) * kHD),
@@ -418,7 +418,7 @@ bool case_flash_r32_bitwise(l0::Context& ctx, l0::CmdList& imm, const model::Mod
   return ok;
 }
 
-// MoE prefill phase 3: the gate fused into the 32-row flash launch (attn_chunk with the gate's source and target)
+// MoE prefill phase 3: the gate fused into the pair flash launch (attn_chunk with the gate's source and target)
 // against attn_chunk then attn_gate_chunk on the same inputs. Bar: the o_proj input's bf16 words bitwise equal on every
 // row [0, C), and nothing written past row C.
 bool case_flash_gate_fused(l0::Context& ctx, l0::CmdList& imm, const model::ModelDesc& desc, uint32_t pos, uint32_t C) {
@@ -467,7 +467,7 @@ bool case_flash_gate_fused(l0::Context& ctx, l0::CmdList& imm, const model::Mode
     }
   for (size_t i = size_t(C) * out_n; i < fus.size(); ++i) past += fus[i] != 0xBEEF;
   const bool ok = fused && differ == 0 && past == 0;
-  std::printf("\n--- flash r32 with the fused gate vs flash + pf_attn_gate (%u q / %u kv heads), pos %u C %u: fused %s, "
+  std::printf("\n--- flash pair with the fused gate vs flash + pf_attn_gate (%u q / %u kv heads), pos %u C %u: fused %s, "
               "%zu of %zu words differ, %zu written past row C -- %s\n", qh, kvh, pos, C, fused ? "yes" : "NO", differ,
               size_t(C) * out_n, past, ok ? "PASS" : "FAIL");
   if (first != SIZE_MAX)
@@ -492,20 +492,23 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  // Phase 3 Task 7: Ornith's 32-row binding bitwise today's binary.
+  // The pair binding bitwise the RPW 8 binary, on both models, and deep in the cache.
   {
     bool ok = true;
-    for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u}})
-      ok &= case_flash_r32_bitwise(d.ctx, d.imm, model::ornith(), pos, C);
+    for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u}, std::pair{40001u, 2048u}})
+      for (const model::ModelDesc* desc : {&model::qwen38(), &model::ornith()})
+        ok &= case_flash_pair_bitwise(d.ctx, d.imm, *desc, pos, C);
     if (!ok) {
-      std::fprintf(stderr, "GATE FAILED: pf_flash_attn_r32 is not bitwise today's pf_flash_attn\n");
+      std::fprintf(stderr, "GATE FAILED: pf_flash_attn_pair is not bitwise today's pf_flash_attn\n");
       return 1;
     }
   }
-  // Phase 3: the gate fused into that launch, bitwise the separate pf_attn_gate.
+  // Phase 3: the gate fused into that launch, bitwise the separate pf_attn_gate; deep short chunks (the split-K
+  // form, 16 and 200 rows) fuse it into the merge, bitwise the merge then pf_attn_gate.
   {
     bool ok = true;
-    for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u}})
+    for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u},
+                                 std::pair{5000u, 16u}, std::pair{9000u, 200u}})
       ok &= case_flash_gate_fused(d.ctx, d.imm, model::ornith(), pos, C);
     if (!ok) {
       std::fprintf(stderr, "GATE FAILED: the fused gate is not bitwise pf_attn_gate\n");

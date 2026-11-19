@@ -103,7 +103,8 @@ int main(int argc, char** argv) {
   using runtime::prefill::linear_i8_launches;
   using runtime::prefill::linear_i8_silu;
   Dev d;
-  CHECK(linear_i8_launches(model::GemvShape{5120, 2048, 1, 0}) == 5);
+  CHECK(linear_i8_launches(model::GemvShape{5120, 2048, 1, 0}, 5120) == 5);    // 1024-column slabs
+  CHECK(linear_i8_launches(model::GemvShape{5120, 34816, 1, 0}, 17408) == 25);  // 3072: 11 + the last 1024
 
   // x [pad256(M)][K]: rows [0, M) random, rows [M, pad256(M)) NaN bf16.
   const uint32_t Mp = pad256(kM);
@@ -125,7 +126,7 @@ int main(int argc, char** argv) {
   d.cx.reset_launches();
   linear_i8(d.cx, d.kc, d.s, d.q, w0, dx.as<uint16_t>(), kM);
   d.cx.wait();
-  CHECK(d.cx.launches() == linear_i8_launches(w0.shape));
+  CHECK(d.cx.launches() == linear_i8_launches(w0.shape, d.q.max_k()));
   const std::vector<float> y0 = partials_rows(d, kM, kN);
   const double r0 = rel_l2(y0, ref);
   std::printf("linear_i8 K=%u N=%u M=%u L0: rel L2 %.4f %%\n", kK, kN, kM, 100.0 * r0);
@@ -154,7 +155,7 @@ int main(int argc, char** argv) {
   d.cx.reset_launches();
   linear_i8_silu(d.cx, d.kc, d.s, d.q, wg, dx.as<uint16_t>(), kM, dout.as<uint16_t>(), ldx);
   d.cx.wait();
-  CHECK(d.cx.launches() == linear_i8_launches(wg.shape));
+  CHECK(d.cx.launches() == linear_i8_launches(wg.shape, d.q.max_k()));
   std::vector<uint16_t> got(size_t(kM) * ldx);
   d.imm.copy(got.data(), dout.ptr(), got.size() * 2);
   size_t bad = 0;

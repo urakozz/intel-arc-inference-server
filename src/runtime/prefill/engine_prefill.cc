@@ -110,7 +110,8 @@ void Engine::prepare_prefill() {
   if (!pfx_)
     pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
                                                                     &destroy_prefill);
-  // Phase 3 Task 2: a MoE model's router / a||b B slabs, once, outside any chunk (counted by the memory plan).
+  // Phase 3 Task 2: a MoE model's router / a||b B slabs (Qwen3.8 one card: a||b's), once, outside any chunk (counted
+  // by the memory plan).
   prefill::make_route_slabs(pfx_->cx, pfx_->kc, *pf_, model_, 0, model_.desc->layers);
   // Open-work 38: the mixer linears' bf16 slabs (counted by the plan too), finished here so no timed prefill pays them.
   if (pf_dense_bf16_) {
@@ -126,8 +127,8 @@ void Engine::prepare_prefill() {
   // any recording: cached by weight, so after the first call this loop only
   // looks them up, and no recorded list ever holds the host finish of
   // pf_colmax_rot.
-  // Not a||b: prefill runs it as a bf16 GEMV (pf_ab_proj) on every backend, over the
-  // checkpoint's bf16 weight or (spec 15 §13) an int4 a||b's bf16 copy - never through h8.
+  // Not a||b: prefill runs it in bf16 (the dense GEMM, or pf_ab_proj on a tensor-parallel card) on every backend,
+  // over the checkpoint's bf16 weight or (spec 15 §13) an int4 a||b's bf16 copy - never through h8.
   // Not the mixer linears either: l0-int8 runs them on the l0 walk (open-work 16 / 17).
   for (const auto& [key, w] : model_.linears)
     if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&

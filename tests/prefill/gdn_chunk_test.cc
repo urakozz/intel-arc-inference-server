@@ -200,6 +200,25 @@ Fixture make_fixture() {
   return f;
 }
 
+// The launches one gdn_chunk call appends (nine: Qwen3.8's conv + l2norm run as one).
+size_t walk_launches(const runtime::PrefillScratch& s) {
+  return runtime::prefill::gdn_chunk_launches(s.desc(), runtime::PrefillBackend::L0);
+}
+
+// Qwen3.8's walk writes o as the bf16 word the gated head rounds it to (pf_gdn_scan_OB): its words widened, and
+// a plain scan's fp32 o rounded the same way for the bitwise comparisons.
+std::vector<float> read_walk_o(Dev& d, const runtime::PrefillScratch& s, uint32_t C) {
+  std::vector<uint16_t> w(size_t(C) * kMixerN);
+  d.imm.copy(w.data(), s.gdn_o.ptr(), w.size() * 2);
+  std::vector<float> o(w.size());
+  for (size_t e = 0; e < w.size(); ++e) o[e] = common::bf16_to_f32(w[e]);
+  return o;
+}
+std::vector<float> as_bf16(std::vector<float> o) {
+  for (float& v : o) v = common::bf16_to_f32(common::f32_to_bf16(v));
+  return o;
+}
+
 // One `gdn_chunk` walk of `kPositions` positions in chunks of `width`, from a
 // zeroed state and ring. Returns state, ring, o and y for the whole walk.
 struct Walk {
@@ -228,8 +247,8 @@ Walk run_chunked(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
         d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(), d_y.as<uint16_t>());
     d.cx.wait();
     // gdn_o and y are per-chunk scratch; harvest before the next call.
-    d.imm.copy(r.o.data() + size_t(p) * kMixerN, s.gdn_o.ptr(),
-               size_t(C) * kMixerN * sizeof(float));
+    const std::vector<float> o = read_walk_o(d, s, C);
+    std::copy(o.begin(), o.end(), r.o.begin() + size_t(p) * kMixerN);
     d.imm.copy(r.y.data() + size_t(p) * kMixerN, d_y.ptr(), size_t(C) * kMixerN * 2);
   }
   r.launches = d.cx.launches();
@@ -297,8 +316,9 @@ size_t check_vs_staged(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz, l0::
     std::vector<float> o_got(size_t(C) * kMixerN), o_ref(o_got.size());
     d.imm.copy(st_got.data(), d_state.ptr(), d_state.size());
     d.imm.copy(st_ref.data(), pre.ptr(), pre.size());
-    d.imm.copy(o_got.data(), s.gdn_o.ptr(), o_got.size() * 4);
+    o_got = read_walk_o(d, s, C);
     d.imm.copy(o_ref.data(), o2.ptr(), o_ref.size() * 4);
+    o_ref = as_bf16(o_ref);
     CHECK(std::memcmp(st_got.data(), st_ref.data(), st_got.size() * 4) == 0);
     CHECK(std::memcmp(o_got.data(), o_ref.data(), o_got.size() * 4) == 0);
     for (float v : st_got) CHECK(std::isfinite(v));
@@ -327,13 +347,14 @@ void check_selected_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz
                               d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
                               d_y.as<uint16_t>());
   d.cx.wait();
-  CHECK_EQ(d.cx.launches(), runtime::prefill::kGdnChunkLaunches);
-  ScanOutput actual{std::vector<float>(kStateElems), std::vector<float>(size_t(C) * kMixerN)};
+  CHECK_EQ(d.cx.launches(), walk_launches(s));
+  ScanOutput actual{std::vector<float>(kStateElems), read_walk_o(d, s, C)};
   d.imm.copy(actual.state.data(), d_state.ptr(), d_state.size());
-  d.imm.copy(actual.o.data(), s.gdn_o.ptr(), size_t(C) * kMixerN * sizeof(float));
 
-  const ScanOutput expected = run_direct_scan(d, s, expected_state, C, selected);
-  const ScanOutput other = run_direct_scan(d, s, opposite_state, C, opposite);
+  ScanOutput expected = run_direct_scan(d, s, expected_state, C, selected);
+  ScanOutput other = run_direct_scan(d, s, opposite_state, C, opposite);
+  expected.o = as_bf16(expected.o);
+  other.o = as_bf16(other.o);
   CHECK(std::memcmp(actual.state.data(), expected.state.data(), d_state.size()) == 0);
   CHECK(std::memcmp(actual.o.data(), expected.o.data(), actual.o.size() * sizeof(float)) == 0);
   CHECK(std::memcmp(actual.state.data(), other.state.data(), d_state.size()) != 0 ||
@@ -353,7 +374,7 @@ void check_selected_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz
 // for it again adds nothing; the OPPOSITE entry was never built, so asking for
 // it adds exactly one. Hard-wiring the register selector back to `pf_gdn_solve`
 // inverts both counts and fails here. The launch count is asserted in the same
-// call, so cache observation cannot hide a change to the ten-launch contract.
+// call, so cache observation cannot hide a change to the launch contract.
 void check_solve_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
                           l0::Mem& d_ab, l0::Mem& d_small, l0::Mem& d_state,
                           l0::Mem& d_ring, l0::Mem& d_y, const char* selected,
@@ -370,18 +391,18 @@ void check_solve_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
                               d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
                               d_y.as<uint16_t>());
   d.cx.wait();
-  CHECK_EQ(d.cx.launches(), runtime::prefill::kGdnChunkLaunches);
+  CHECK_EQ(d.cx.launches(), walk_launches(s));
   const size_t built = d.kc.kernels();
-  CHECK_EQ(built, runtime::prefill::kGdnChunkLaunches);
+  CHECK_EQ(built, walk_launches(s));
 
-  d.kc.get(kernels::pf_gdn_wy_variant(), selected);
+  d.kc.get(kernels::pf_gdn_wy_variant() + "_WB", selected);   // the walk's (pf_gdn_wy_WB)
   CHECK_EQ(d.kc.kernels(), built);            // the call already built it
-  d.kc.get(kernels::pf_gdn_wy_variant(), opposite);
+  d.kc.get(kernels::pf_gdn_wy_variant() + "_WB", opposite);
   CHECK_EQ(d.kc.kernels(), built + 1);        // the call never built it
   std::printf("solve dispatch: gdn_chunk built %s (cache %zu -> %zu) and not %s "
               "(%zu -> %zu); %zu launches\n",
               selected, built, built, opposite, built, built + 1,
-              runtime::prefill::kGdnChunkLaunches);
+              walk_launches(s));
 }
 }  // namespace
 
@@ -423,9 +444,9 @@ int main(int argc, char** argv) {
   std::printf("scan entry: LAUNCHED %s\n", runtime::prefill::gdn_scan_launched_entry());
   // 2 x 2048 at the default cap, ONE call at cap 4096 (plan 5d).
   const uint32_t n_calls = (kPositions + kC - 1) / kC;
-  CHECK_EQ(got.launches, n_calls * runtime::prefill::kGdnChunkLaunches);
-  std::printf("launches: %zu for %u chunk(s) of %u (%zu per gdn_chunk, ruling R3's tenth included)\n",
-              got.launches, n_calls, kC, runtime::prefill::kGdnChunkLaunches);
+  CHECK_EQ(got.launches, n_calls * walk_launches(s));
+  std::printf("launches: %zu for %u chunk(s) of %u (%zu per gdn_chunk, ruling R3's head included)\n",
+              got.launches, n_calls, kC, walk_launches(s));
 
   // --- 1. vs the CPU fp32 recurrent reference -------------------------------
   {
@@ -498,7 +519,7 @@ int main(int argc, char** argv) {
   {
     const Walk one =
         run_chunked(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y, kPositions, 1);
-    CHECK_EQ(one.launches, size_t(kPositions) * runtime::prefill::kGdnChunkLaunches);
+    CHECK_EQ(one.launches, size_t(kPositions) * walk_launches(s));
     std::puts("case 3: C = 1 x 4096 vs DEVICE gdn_step x 4096 (the degenerate path)");
     report("gdn_state", band(one.state, dev_state));
     report("gdn_o", band(one.o, dev_o));

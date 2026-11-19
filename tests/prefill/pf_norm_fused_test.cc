@@ -1,9 +1,11 @@
 // Phase 2 Task 5: pf_norm_fused.cl's
 // pf_res_norm - the residual fold and the RMSNorm in one launch - against the two-launch walk it replaces
-// (pf_res_fold + pf_norm_finish), every byte of the residual and of x, at Ornith's hidden 2048, S_PREV 0
-// and 1, M = 2048 (a chunk) and M = 37 (a ragged tail), on random rows of a residual stream's magnitudes.
+// (pf_res_fold + pf_norm_finish), every byte of the residual and of x, at the hidden size given on the command line
+// (Ornith 2048, Qwen3.8 5120), S_PREV 0 and 1, M = 2048 (a chunk) and M = 37 (a ragged tail), on random rows of a
+// residual stream's magnitudes.
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -19,7 +21,8 @@ using pf_harness::random_bf16;
 using pf_harness::random_f32;
 using pf_harness::upload;
 
-constexpr uint32_t kK = 2048, kG = 20;
+constexpr uint32_t kG = 20;
+uint32_t kK = 2048;   // the hidden size, from argv
 
 struct Out {
   std::vector<uint16_t> resid, x;
@@ -90,7 +93,8 @@ void check_case(Dev& d, uint32_t M, uint32_t SP) {
 }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc > 1) kK = uint32_t(std::atoi(argv[1]));
   Dev d;
   for (uint32_t SP : {0u, 1u})
     for (uint32_t M : {2048u, 37u}) check_case(d, M, SP);

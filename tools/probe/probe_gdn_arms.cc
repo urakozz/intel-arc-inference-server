@@ -9,9 +9,13 @@
 //   * time: arm and production as interleaved pairs after a warm-up, the order alternating each round, median
 //     of `--rounds`; global timestamps around the one launch (the state reset is outside them).
 //
+// A Qwen3.8 dump (heads 16 / 48, no pf_gdn_intra binary): the production pf_gdn_A, pf_gdn_solve, pf_gdn_wu and
+// pf_gdn_A2_hilo make w, u and A2, and the arms are Qwen3.8's (pf_gdn_scan_OB against pf_gdn_scan).
+//
 // --bytes: the two byte-moving kernels instead (no dump needed): pf_gdn_front and pf_gated_head against their
 // candidates on synthetic inputs of Ornith's shapes at C = 4096 (a fixed pseudo-random fill; the arithmetic is per
-// element, so equal words on it are the same check), outputs compared word for word, timed as above.
+// element, so equal words on it are the same check), outputs compared word for word, timed as above; then Qwen3.8's
+// head (pf_gated_head_OB on the bf16 o against pf_gated_head) at 16 / 48 heads.
 //
 //   probe_gdn_arms --dump DIR [--calls 0,9,21] [--rounds 15] [--only BIN] [--tile N] | --bytes [--rounds 15]
 #include <algorithm>
@@ -81,6 +85,9 @@ const Arm kArms[] = {
     {"intra", "pf_gdn_intra_stop2_GK16V32", "pf_gdn_intra"},
     {"intra", "pf_gdn_intra_stop3_GK16V32", "pf_gdn_intra"},
     {"intra", "pf_gdn_intra_stop4_GK16V32", "pf_gdn_intra"},
+    // Qwen3.8 (16 / 48 heads)
+    {"scan_obf", "pf_gdn_scan_OB", "pf_gdn_scan_dpas_split"},
+    {"wu", "pf_gdn_wy_WB", "pf_gdn_wu"},   // vb / kb staged as bf16 words (WU_B16): w and u compared
 };
 
 }  // namespace
@@ -216,6 +223,36 @@ int main(int argc, char** argv) {
         std::printf("ARM {\"C\":%u,\"arm\":\"pf_gated_head_sgo_GK16V32\",\"bitwise\":%s,\"prod_ms\":%.4f,\"arm_ms\":%.4f,"
                     "\"ratio\":%.3f}\n", C, s3 ? "true" : "false", p3, a3, a3 / p3);
       }
+      {   // Qwen3.8: pf_gated_head_OB on the scan's bf16 o against pf_gated_head on the fp32 o, 16 / 48 heads
+        constexpr uint32_t H8 = 48, qkvz8 = (2 * hk + H8) * kDim + H8 * kDim;
+        std::vector<float> p8(size_t(C) * qkvz8), o8(size_t(C) * H8 * kDim);
+        for (float& x : p8) x = 3.0f * rnd();
+        for (float& x : o8) x = 0.2f * rnd();
+        std::vector<uint16_t> ob8(o8.size());
+        for (size_t e = 0; e < o8.size(); ++e) ob8[e] = bf(o8[e]);
+        l0::Mem d_p8(ctx, l0::MemKind::Device, p8.size() * 4), d_o8(ctx, l0::MemKind::Device, o8.size() * 4),
+            d_ob8(ctx, l0::MemKind::Device, ob8.size() * 2), d_ya(ctx, l0::MemKind::Device, o8.size() * 2),
+            d_yb(ctx, l0::MemKind::Device, o8.size() * 2);
+        cx.copy(d_p8.ptr(), p8.data(), p8.size() * 4);
+        cx.copy(d_o8.ptr(), o8.data(), o8.size() * 4);
+        cx.copy(d_ob8.ptr(), ob8.data(), ob8.size() * 2);
+        cx.wait();
+        l0::Kernel& kP = kc(kernels::pf_gated_head_variant(), "pf_gated_head");
+        l0::Kernel& kO = kc("pf_gated_head_OB", "pf_gated_head_sg");
+        auto hp8 = [&] {
+          cx.launch(kP, H8, C, 1, {PtrArg(d_p8.ptr()), PtrArg(d_o8.ptr()), PtrArg(d_gw.ptr()), PtrArg(d_ya.ptr()), arg_val(C)});
+        };
+        auto ho8 = [&] {
+          cx.launch(kO, H8 / 8, C, 1, {PtrArg(d_p8.ptr()), PtrArg(d_ob8.ptr()), PtrArg(d_gw.ptr()), PtrArg(d_yb.ptr()),
+                                       arg_val(C)});
+        };
+        hp8();
+        ho8();
+        const bool s8 = same(d_ya, d_yb, o8.size() * 2);
+        auto [p, a] = time_pair(hp8, ho8, [] {});
+        std::printf("ARM {\"C\":%u,\"arm\":\"pf_gated_head_OB\",\"bitwise\":%s,\"prod_ms\":%.4f,\"arm_ms\":%.4f,"
+                    "\"ratio\":%.3f}\n", C, s8 ? "true" : "false", p, a, a / p);
+      }
       return 0;
     }
     for (int call : calls) {
@@ -252,13 +289,24 @@ int main(int argc, char** argv) {
       cx.copy(d_g.ptr(), g.data(), g.size() * 4);
       cx.copy(d_b.ptr(), beta.data(), g.size() * 4);
       cx.wait();
-      const std::string sfx = kernels::gdn_suffix(hk, H);
-      l0::Kernel& kIn = kc(kernels::pf_gdn_intra_variant(hk, H), "pf_gdn_intra");
+      const bool q38 = hk == 16 && H == 48;   // Qwen3.8: the four-launch W / U / A2 walk, its own arms
       l0::Kernel& kScan = kc(kernels::pf_gdn_scan_variant(hk, H), "pf_gdn_scan_dpas_split");
+      l0::Mem d_T(ctx, l0::MemKind::Device, q38 ? size_t(nch) * H * kCt * kCt * 4 : 4);
       auto intra = [&](l0::Kernel& k, void* w, void* u, void* a2) {
+        if (q38) {   // gdn.cc's launches 5-8
+          const std::string wy = kernels::pf_gdn_wy_variant(hk, H);
+          cx.launch(kc(wy, "pf_gdn_A"), H, nch, 4, {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_b.ptr()),
+                                                    PtrArg(d_T.ptr()), arg_val(C)});
+          cx.launch(kc(wy, "pf_gdn_solve"), H, nch, 1, {PtrArg(d_T.ptr()), arg_val(C)});
+          cx.launch(kc(wy, "pf_gdn_wu"), H, nch, 2, {PtrArg(d_xb.ptr()), PtrArg(d_T.ptr()), PtrArg(d_g.ptr()),
+                                                     PtrArg(d_b.ptr()), PtrArg(w), PtrArg(u), arg_val(C)});
+          cx.launch(kc(wy, "pf_gdn_A2_hilo"), H, nch, 4, {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(a2), arg_val(C)});
+          return;
+        }
         cx.launch(k, H, nch, 1, {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_b.ptr()), PtrArg(w), PtrArg(u),
                                  PtrArg(a2), arg_val(C)});
       };
+      l0::Kernel& kIn = q38 ? kScan : kc(kernels::pf_gdn_intra_variant(hk, H), "pf_gdn_intra");
       auto scan = [&](l0::Kernel& k) {
         cx.launch(k, H, 4, 1, {PtrArg(d_xb.ptr()), PtrArg(d_w.ptr()), PtrArg(d_u.ptr()), PtrArg(d_A2.ptr()),
                                PtrArg(d_g.ptr()), PtrArg(d_S.ptr()), PtrArg(d_o.ptr()), arg_val(C)});
@@ -293,10 +341,24 @@ int main(int argc, char** argv) {
 
       for (const Arm& arm : kArms) {
         if (!only.empty() && only != arm.bin) continue;
+        if (q38 != (std::strstr(arm.bin, "_GK16V32") == nullptr)) continue;   // the dump's model's arms only
         l0::Kernel& kA = kc(arm.bin, arm.entry);
         const bool is_scan = std::strncmp(arm.kind, "scan", 4) == 0, obf = std::strcmp(arm.kind, "scan_obf") == 0;
+        const bool is_wu = std::strcmp(arm.kind, "wu") == 0;   // Qwen3.8: d_T holds the solved T of the walk above
+        l0::Kernel& kWu = kc(kernels::pf_gdn_wy_variant(hk, H), "pf_gdn_wu");
+        auto wu = [&](l0::Kernel& k) {
+          cx.launch(k, H, nch, 2, {PtrArg(d_xb.ptr()), PtrArg(d_T.ptr()), PtrArg(d_g.ptr()), PtrArg(d_b.ptr()),
+                                   PtrArg(d_w2.ptr()), PtrArg(d_u2.ptr()), arg_val(C)});
+        };
         bool same = true;
-        if (is_scan) {
+        if (is_wu) {
+          wu(kA);
+          std::vector<uint16_t> w(nwu), u(nwu);
+          cx.copy(w.data(), d_w2.ptr(), nwu * 2);
+          cx.copy(u.data(), d_u2.ptr(), nwu * 2);
+          cx.wait();
+          same = std::memcmp(w.data(), w_ref.data(), nwu * 2) == 0 && std::memcmp(u.data(), u_ref.data(), nwu * 2) == 0;
+        } else if (is_scan) {
           std::vector<float> o, S;
           cx.copy(d_S.ptr(), d_S0.ptr(), nS * 4);
           scan(kA);
@@ -326,6 +388,7 @@ int main(int argc, char** argv) {
           if (is_scan) cx.copy(d_S.ptr(), d_S0.ptr(), nS * 4);
           cx.timestamp(stamp);
           if (is_scan) scan(cand ? kA : kScan);
+          else if (is_wu) wu(cand ? kA : kWu);
           else if (cand) intra(kA, d_w2.ptr(), d_u2.ptr(), d_A22.ptr());
           else intra(kIn, d_w2.ptr(), d_u2.ptr(), d_A22.ptr());
           cx.timestamp(stamp + 1);

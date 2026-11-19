@@ -1513,18 +1513,17 @@ class DriverTest(unittest.TestCase):
         return r
 
     def box_address(self):
-        """BOX from tools/box.env - this tree's, else the main checkout's (a worktree has none)."""
+        """BOX from the environment, else from the main checkout's .env (every worktree shares it)."""
+        if os.environ.get("BOX"):
+            return os.environ["BOX"]
         common = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
                                 capture_output=True, text=True, cwd=ROOT).stdout.strip()
-        for d in (ROOT, os.path.dirname(common) if common else None):
-            try:
-                with open(os.path.join(d, "tools", "box.env")) as f:
-                    m = re.search(r"^\s*(?:export\s+)?BOX=(\S+)", f.read(), re.M)
-            except (OSError, TypeError):
-                continue
-            if m and m.group(1).strip("'\""):
-                return m.group(1).strip("'\"")
-        return None
+        try:
+            with open(os.path.join(os.path.dirname(common), ".env")) as f:
+                m = re.search(r"^\s*(?:export\s+)?BOX=(\S+)", f.read(), re.M)
+        except (OSError, TypeError):
+            return None
+        return m.group(1).strip("'\"") if m and m.group(1).strip("'\"") else None
 
     def test_dry_run_full(self):
         out = self.run_driver("--dry-run").stdout

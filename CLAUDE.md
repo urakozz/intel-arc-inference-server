@@ -48,8 +48,8 @@ not finished: Backlog, the card and CPU columns, Done, and a low-priority pool.
 
 ## The box
 
-- The Mac never compiles C++. Build and test on the box with `tools/box.sh build|run` (`tools/box.env` names it;
-  it is git-ignored and never printed or committed).
+- The Mac never compiles C++. Build and test on the box with `tools/box.sh build|run` (`BOX` in the main
+  checkout's git-ignored `.env` names it; never print it or write it into a tracked file).
 - Never write IP addresses or hostnames into files; mask ssh output with
   `sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g'`.
 - Every GPU job goes through `tools/gpu_lock.sh card <N> -- ...` or `tools/gpu_lock.sh box -- ...`; never set

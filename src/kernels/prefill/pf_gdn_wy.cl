@@ -104,6 +104,11 @@
 #define TS_LD 68          /* TsT's row stride: 64 padded to a multiple of 4 */
 #define PB 4              /* positions per block; each subgroup owns two blocks */
 #define VPW 2             /* output columns per lane */
+/* WU_B16 1: pf_gdn_wu stages vb / kb as the bf16 words Q1 / Q2 round them to (the fp32 it read back is that word
+   widened), halving their SLM: 34,304 B a work-group, three resident per Xe-core instead of two. Bitwise. */
+#ifndef WU_B16
+#define WU_B16 0
+#endif
 
 #include "bf16.h"
 
@@ -833,7 +838,11 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
   const uint dcol = cxh * WU_COLS;                // the half's base in the 128-wide head dim
 
   __local float TsT[CT * TS_LD];
+#if WU_B16
+  __local ushort vbs[CT * WU_COLS], kbs[CT * WU_COLS];
+#else
   __local float vbs[CT * WU_COLS], kbs[CT * WU_COLS];
+#endif
   __local float bts[CT], egs[CT];
 
   __global const float* restrict Tt = T + ((size_t)(chunk * HEADS + h) * CT) * CT;
@@ -852,8 +861,13 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
     const size_t row = (size_t)(base_m + j) * CONV_ROWS;
     const float v = bf16f(xb[row + V_OFF + h * DIM + dcol + d]);
     const float kv = bf16f(xb[row + K_OFF + kh * DIM + dcol + d]);
+#if WU_B16
+    vbs[p] = rne_bf16(v * bts[j]);                                              // Q1
+    kbs[p] = rne_bf16(kv * bts[j] * egs[j]);                                    // Q2
+#else
     vbs[p] = bf16f(rne_bf16(v * bts[j]));                                       // Q1
     kbs[p] = bf16f(rne_bf16(kv * bts[j] * egs[j]));                             // Q2
+#endif
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -873,8 +887,13 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
 
   // --- phase A: both blocks, j ascending -----------------------------------
   for (int j = 0; j <= jl; ++j) {
+#if WU_B16
+    const ushort2 vw = vload2(0, vbs + (uint)j * WU_COLS + c0), kw = vload2(0, kbs + (uint)j * WU_COLS + c0);
+    const float2 vv = (float2)(bf16f(vw.s0), bf16f(vw.s1)), kk = (float2)(bf16f(kw.s0), bf16f(kw.s1));
+#else
     const float2 vv = vload2(0, vbs + (uint)j * WU_COLS + c0);
     const float2 kk = vload2(0, kbs + (uint)j * WU_COLS + c0);
+#endif
     const float4 tl = vload4(0, TsT + (uint)j * TS_LD + il);
     const float4 th = vload4(0, TsT + (uint)j * TS_LD + ih);
     const float tv[2 * PB] = {tl.s0, tl.s1, tl.s2, tl.s3, th.s0, th.s1, th.s2, th.s3};
@@ -889,8 +908,13 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
 
   // --- phase B: the high block alone, j continuing to ascend ----------------
   for (int j = jl + 1; j <= jh; ++j) {
+#if WU_B16
+    const ushort2 vw = vload2(0, vbs + (uint)j * WU_COLS + c0), kw = vload2(0, kbs + (uint)j * WU_COLS + c0);
+    const float2 vv = (float2)(bf16f(vw.s0), bf16f(vw.s1)), kk = (float2)(bf16f(kw.s0), bf16f(kw.s1));
+#else
     const float2 vv = vload2(0, vbs + (uint)j * WU_COLS + c0);
     const float2 kk = vload2(0, kbs + (uint)j * WU_COLS + c0);
+#endif
     const float4 th = vload4(0, TsT + (uint)j * TS_LD + ih);
     const float tv[PB] = {th.s0, th.s1, th.s2, th.s3};
 #pragma unroll

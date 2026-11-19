@@ -5,8 +5,11 @@ It is for a reader who wants to understand the trade between bytes, accuracy and
 model's on-disk and on-card form. The hardware facts it relies on are measured in
 [01-hardware.md](01-hardware.md).
 
-The decision: weights are int4, activations stay 16-bit (W4A16), and every supported checkpoint is normalised to
-one canonical on-card layout at load time.
+The decision in short:
+
+- weights are int4 (4-bit integers, with one 16-bit scale per group of 64 weights);
+- activations, the values flowing between layers, stay 16-bit (W4A16);
+- every supported checkpoint is normalised to one canonical on-card layout at load time.
 
 ## Why not the alternatives
 
@@ -98,18 +101,18 @@ N = 16384, where layout 0's power-of-two 64 KB row stride caps it at 419 GB/s ag
 four shapes layout 0 is 1.1 % to 6.8 % ahead. It is worth re-running if the shape mix changes. The full table and
 the argument are in [12-kernels.md](12-kernels.md).
 
-## Activations: W4A16 for decode and prefill, W4A8 measured and rejected
+## Activations: W4A16 by default, W4A8 measured and rejected for dense layers
 
-The weight format is settled: int4, symmetric. The width of the activations is a separate decision, and the
-obvious split between the two regimes, decode (generating one token at a time) and prefill (reading the whole
-prompt at once), turned out not to pay.
+The weight format is settled: int4, symmetric. The width of the activations is a separate decision, made per regime:
+decode (generating one token at a time) and prefill (reading the whole prompt at once).
 
 | | Activations | Why |
 |---|---|---|
 | Decode | bf16 (W4A16) | Bandwidth-bound. The multiply is not the cost and the activations are one vector, so quantising them buys nothing. |
-| Prefill | bf16 (W4A16) | Compute-bound, and the obvious int8 candidate was built and measured (below). |
+| Prefill, default | bf16 (W4A16) | Compute-bound. The obvious W4A8 candidate was built and measured, and lost (below). |
+| Prefill, opt-in `--prefill-backend l0-int8` | int8 | The int4 weights are widened to int8 and the activations Hadamard-rotated before quantising (W8A8, [16-int8-prefill.md](16-int8-prefill.md)); MoE experts run W4A8 there. Faster on Qwen3.8, slower on Ornith. |
 
-W4A8 was the natural candidate for prefill, and it lost. Battlemage does have a native mixed int8 x int4 DPAS
+W4A8 was the natural candidate for dense prefill linears, and it lost. Battlemage does have a native mixed int8 x int4 DPAS
 with no upconversion, gated only on the int4 matrix having no zero points, which `sym: true` satisfies. But the
 mixed builtin's K is 32, the same as int8's, so it runs at exactly the int8 rate, 2.000x bf16 and not 4x
 ([01-hardware.md](01-hardware.md)). Built against real weights and real activations, the kernel measured 1.017x the
@@ -117,7 +120,7 @@ bf16 two-pass control, and 0.965x once the activation quantiser it needs was cou
 per-group rescale cost 3.0 to 3.4 ms of the 5.440 ms while the matrix math it rescales cost 1.99 ms. It also
 showed 2.79 % relative L2 error against the bf16 result (worst-row cosine 0.9976), driven by activation outliers.
 
-So the same checkpoint serves both regimes, and the activation path is the same too. Symmetric checkpoints are
+So the same checkpoint serves both regimes, and by default the activation path is the same too. Symmetric checkpoints are
 still preferable, since an asymmetric one forfeits the mixed DPAS path outright and needs a zero-point stream in
 every kernel, but that preference no longer rests on a performance claim.
 
@@ -149,7 +152,8 @@ On top of that format, three choices are made per run, not per file. The output 
 load to int8 with one scale per row. The KV cache, the stored keys and values of every earlier token, is bf16 or,
 with `--kv-cache int8`, a rotated int8 form. And the prefill linears are bf16 or, with
 `--prefill-backend l0-int8`, the Hadamard-rotated int8 path of [16-int8-prefill.md](16-int8-prefill.md), computed
-from the same int4 file. The int8 prefill together with the int8 KV cache is a known fail: the engine warns at
-startup, and about 3 % of tool calls that copy exact text from a long prompt come out wrong.
+from the same int4 file. Do not combine the int8 prefill with the int8 KV cache: the engine warns at startup, and
+about 3 % of tool calls that copy exact text from a long prompt come out wrong.
 
-MXFP4 and FP8 stay rejected for the reasons above, and no other third-party quantisation format is supported.
+MXFP4 and FP8 stay rejected for the reasons above. Beyond GPTQ-packed AutoRound and symmetric compressed-tensors,
+no other quantisation format is supported.

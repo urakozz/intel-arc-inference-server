@@ -30,13 +30,12 @@ if [ "${1:-}" = child ]; then
   kill -TERM "$2" 2>/dev/null || true
   exit 0
 fi
-_box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
-# shellcheck source=/dev/null
-[ -r "$_box_env" ] && . "$_box_env"
+# shellcheck source=tools/box_env.sh
+. "$(dirname "${BASH_SOURCE[0]:-$0}")/box_env.sh"
 if [ -z "${BOX:-}" ] && [ "$(uname)" = Linux ] && [ -d "$HOME/b70" ]; then
   remote=(bash -s --)
 else
-  : "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
+  : "${BOX:?set BOX=user@host in .env in the main checkout root (see .env.example) or in the environment}"
   remote=(ssh -o ConnectTimeout=20 "$BOX" bash -s --)
 fi
 

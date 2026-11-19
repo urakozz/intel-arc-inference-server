@@ -105,7 +105,11 @@
 //   KV8     0 | 1
 //   PAIR    0 | 1              (default 0) the 3l split above: needs KT 32, DSPLIT 128; at KS 1 (spec 33, the
 //                              16-row line, bf16) there is no slice merge and the exchange is the pair sub-groups'
-//   PVX     0 | 2 | ...        (default 0, PAIR) P V-only sub-groups a slice, keeping it even
+//                              at DSPLIT 256 (KS > 1; SOLO, the 5..8-row lines) S splits by key atom and SRB row
+//                              blocks (K read and widened once for them), one owner a row block runs its softmax, and
+//                              P V splits as PAIR's: 6 row blocks + PVX fit 32 sub-groups at KS 4, where PAIR's 12 do not
+//   SRB     1 | 2 | 3          (default 2, SOLO) row blocks a score sub-group computes: 2 ceil(RB / SRB) of them a slice
+//   PVX     0 | 2 | ...        (default 0, PAIR) P V-only sub-groups a slice, keeping it even (SOLO: any count)
 //   PVR     1 | 2 | ...        (default 1, PAIR at KS 1) the sub-groups split into PVR groups, each owning RB / PVR
 //                              row blocks' P V (its dim atoms over SPS / PVR sub-groups): V read PVR times, fewer
 //                              accumulators and P V DPAS a sub-group
@@ -211,10 +215,21 @@
 #ifndef PVR
 #define PVR 1
 #endif
-#if PAIR && (KT != 32 || DSPLIT != 128)
-#error "attn_verify_dpas: PAIR needs KT 32 and DSPLIT 128"
+// SOLO: PAIR at DSPLIT 256 (KS > 1, the 5..8-row lines) - S by (key atom, SRB row blocks) into SLM, one owner a row
+// block (sub-group rb) for its softmax; P V and the merge split as PAIR's, the merge's O staging in the q staging's SLM
+// (q is dead by then).
+#define SOLO (PAIR && DS == 1)
+#ifndef SRB
+#define SRB 2                                   /* SOLO: row blocks a score sub-group computes one key atom of */
 #endif
-#if PVX && (!PAIR || SPS % 2)
+#define NSS (2 * ((RB + SRB - 1) / SRB))        /* SOLO: score sub-groups a slice (key atom x row-block group) */
+#if SOLO && RB + PVX < NSS
+#error "attn_verify_dpas SOLO: a slice needs NSS sub-groups (raise PVX or SRB)"
+#endif
+#if PAIR && (KT != 32 || (DSPLIT != 128 && (DSPLIT != 256 || KS == 1)))
+#error "attn_verify_dpas: PAIR needs KT 32 and DSPLIT 128 (or 256 at KS > 1)"
+#endif
+#if PVX && (!PAIR || (!SOLO && SPS % 2))
 #error "attn_verify_dpas: PVX needs PAIR and keeps a slice's sub-group count even"
 #endif
 #if PVR != 1 && (!PAIR || KS != 1 || RB % PVR || SPS % PVR)
@@ -232,8 +247,13 @@
 #define MERGE_BYTES (KS > 1 ? RB * 8 * HD * 4 + (PAIR ? 0 : RB * DS * 8 * 2 * 4) : 0)
 // PAIR's arrays at their sizes: the S exchange (at KS 1 for the pair sub-groups only), P and corr a slice and row
 // block, and at KS > 1 the slices' row maxima and the merged sums.
-#define PAIR_BYTES (PAIR ? (KS == 1 ? RB * DS : NSG) * 512 + KS * RB * (4 * 256 + 512) + (KS > 1 ? (KS + 1) * RB * 32 : 0) : 0)
-#if QS_BYTES + MERGE_BYTES + PAIR_BYTES > 131072
+#define PAIR_BYTES (PAIR ? (SOLO ? KS * RB * 1024 : (KS == 1 ? RB * DS : NSG) * 512) + KS * RB * (4 * 256 + 512) + (KS > 1 ? (KS + 1) * RB * 32 : 0) : 0)
+#if SOLO
+#define QM_BYTES (QS_BYTES > MERGE_BYTES ? QS_BYTES : MERGE_BYTES)   /* q staging and the merge's O share it */
+#else
+#define QM_BYTES (QS_BYTES + MERGE_BYTES)
+#endif
+#if QM_BYTES + PAIR_BYTES > 131072
 #error "attn_verify_dpas: SLM over 128 KB (q staging + slice merge)"
 #endif
 
@@ -508,6 +528,51 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
     sacc_b = intel_sub_group_bf16_bf16_matrix_mad_k16(qa, as_int8(vload8(0, kb)), sacc_b);            \
   }
 #endif
+// SOLO: S_ATOM for row blocks r0 .. r0 + SRB - 1 (those < RB) into sr[], each K atom read (and widened) once for all.
+#define S_RB_DPAS(sr, r0, kk, kb)                                                                      \
+  _Pragma("unroll") for (uint i = 0; i < SRB; ++i)                                                    \
+    if ((r0) + i < RB) {                                                                              \
+      const short8 qa = as_short8(intel_sub_group_block_read_us8(&qs[(((r0) + i) * NDA + (kk)) * 128])); \
+      sr[i] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa, as_int8(vload8(0, kb)), sr[i]);            \
+      S_RB_LO(sr, r0, kk, kb)                                                                         \
+    }
+#if QSPLIT
+#define S_RB_LO(sr, r0, kk, kb)                                                                        \
+  {                                                                                                   \
+    const short8 ql = as_short8(intel_sub_group_block_read_us8(&qsl[(((r0) + i) * NDA + (kk)) * 128])); \
+    sr[i] = intel_sub_group_bf16_bf16_matrix_mad_k16(ql, as_int8(vload8(0, kb)), sr[i]);              \
+  }
+#else
+#define S_RB_LO(sr, r0, kk, kb)
+#endif
+#if KV8
+#define S_ATOM_RB(sr, r0, kbase)                                                                       \
+  _Pragma("unroll") for (uint kp = 0; kp < NDA / 2; ++kp) {                                           \
+    uint k8[8];                                                                                       \
+    intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)KV_K, KV_HEADS * HD, (int)KV_H, \
+                                                        KV_HEADS * HD,                                \
+                                                        (int2)((int)((j * HD + 32u * kp) / 4u), (int)(KV_Y(kbase))), k8); \
+    _Pragma("unroll") for (uint h = 0; h < 2u; ++h) {                                                 \
+      const uint kk = 2u * kp + h;                                                                    \
+      uint kb[8];                                                                                     \
+      _Pragma("unroll") for (uint z = 0; z < 4u; ++z) {                                               \
+        const uint2 pr = kv8_bf4(k8[4u * h + z]);                                                     \
+        kb[2u * z] = pr.x;                                                                            \
+        kb[2u * z + 1u] = pr.y;                                                                       \
+      }                                                                                               \
+      S_RB_DPAS(sr, r0, kk, kb)                                                                       \
+    }                                                                                                 \
+  }
+#else
+#define S_ATOM_RB(sr, r0, kbase)                                                                       \
+  _Pragma("unroll") for (uint kk = 0; kk < NDA; ++kk) {                                               \
+    uint kb[8];                                                                                       \
+    intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)KV_K, KV_HEADS * HD * 2, (int)KV_H, \
+                                                        KV_HEADS * HD * 2,                            \
+                                                        (int2)((int)((j * HD + 16u * kk) / 2u), (int)(KV_Y(kbase))), kb); \
+    S_RB_DPAS(sr, r0, kk, kb)                                                                         \
+  }
+#endif
 // s = S * 1/16 (KV8: (S * k_scale) * 1/16) for the keys kbase + lane, -INF past each row's bound.
 #if KV8
 #define S_MASK(sacc_b, kbase)                                                                          \
@@ -567,9 +632,17 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   if (!live0 && !live1) return;                 // uniform over the work-group, before any barrier
 
   // q as bf16 A atoms in SLM: qs[(rb * 16 + kk) * 128 + r * 16 + lane] = q[row r of rb][16 kk + lane].
+#if SOLO
+  __local uint qm[QM_BYTES / 4];
+  __local ushort* const qs = (__local ushort*)qm;
+#if QSPLIT
+  __local ushort* const qsl = qs + RB * NDA * 128;
+#endif
+#else
   __local ushort qs[RB * NDA * 128];
 #if QSPLIT
   __local ushort qsl[RB * NDA * 128];
+#endif
 #endif
   for (uint i = lid; i < RB * NDA * 128; i += WG) {
     const uint b = i / (NDA * 128), kk = (i / 128) % NDA, r = (i / 16) % 8, e = i % 16;
@@ -628,7 +701,11 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   for (uint r2 = 0; r2 < RB; ++r2)
 #pragma unroll
     for (uint a = 0; a < NAM; ++a) o[r2][a] = (float8)(0.0f);
+#if SOLO
+  __local float sx[KS * RB * 2 * 128];          // [slice][row block][key atom][r * 16 + lane]: raw S
+#else
   __local float sx[NSG * 128];                  // [sub-group][r * 16 + lane]: its key atom of S
+#endif
   __local ushort spp[KS * RB * 4 * 128];        // [slice][row block][pa 0, pa 1, pl 0, pl 1][r * 16 + lane]
   __local float spc[KS * RB * 128];             // [slice][row block][r * 16 + lane]: the step's corr
 #else
@@ -692,6 +769,28 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
               (int)KV_H, KV_HEADS * HD * (KV8 ? 1 : 2), (int2)((int)(32u * c), (int)KV_Y(t0)));
       }
 #endif
+#if SOLO
+      // ---- S: sub-group (g, b) = (qi / 2, qi % 2) computes key atom b of row blocks [g SRB, + SRB) (K read and
+      // widened once for them), raw into SLM; then row block qi's owner reads both atoms, scales and masks ----
+      if (act && qi < NSS) {
+        const uint sb = qi & 1u, r0 = (qi >> 1) * SRB;
+        float8 sr[SRB];
+#pragma unroll
+        for (uint i = 0; i < SRB; ++i) sr[i] = (float8)(0.0f);
+        S_ATOM_RB(sr, r0, t0 + 16u * sb)
+#pragma unroll
+        for (uint i = 0; i < SRB; ++i)
+          if (r0 + i < RB) intel_sub_group_block_write8((__local uint*)&sx[((k * RB + r0 + i) * 2u + sb) * 128u], as_uint8(sr[i]));
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+      if (qk) {
+        float8 sacc[NKA];
+#pragma unroll
+        for (uint b = 0; b < NKA; ++b) {
+          sacc[b] = as_float8(intel_sub_group_block_read8((__local const uint*)&sx[((k * RB + rb) * 2u + b) * 128u]));
+          S_MASK(sacc[b], t0 + 16u * b)
+        }
+#else
       // ---- S's key atom ds, scaled and masked, swapped with the pair's other atom ----
       float8 so = (float8)(0.0f);
       if (qk) {
@@ -705,6 +804,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
         float8 sacc[NKA];
         sacc[0] = ds == 0u ? so : sp;
         sacc[1] = ds == 0u ? sp : so;
+#endif
         float8 tmax = (float8)(-INFINITY);
 #pragma unroll
         for (uint b = 0; b < NKA; ++b) tmax = fmax(tmax, sacc[b]);
@@ -812,7 +912,12 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
           intel_sub_group_block_write_us8(&spp[((k * RB + rb) * 4u + 0u) * 128u], as_ushort8(pa[0]));
           intel_sub_group_block_write_us8(&spp[((k * RB + rb) * 4u + 1u) * 128u], as_ushort8(pa[1]));
           intel_sub_group_block_write8((__local uint*)&spc[(k * RB + rb) * 128u], as_uint8(corr));
+#if SOLO
+        }
+        {
+#else
         } else {
+#endif
           intel_sub_group_block_write_us8(&spp[((k * RB + rb) * 4u + 2u) * 128u], as_ushort8(pl[0]));
           intel_sub_group_block_write_us8(&spp[((k * RB + rb) * 4u + 3u) * 128u], as_ushort8(pl[1]));
         }
@@ -848,6 +953,49 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
       }
 #else
       if (act) {
+#if SOLO
+        // ---- O += P V: this sub-group's dim atoms (V read and widened first), then a row block at a time ----
+        uint vb[NAM][16];                       // 32 keys x 16 dims as key pairs (VNNI; rows past `end`: 0)
+#pragma unroll
+        for (uint a = 0; a < NAM; ++a) {
+          if (a >= na) break;                   // uniform
+          const uint dim0 = 16u * (a0 + a);
+#if KV8
+          uint v4[8];
+          intel_sub_group_2d_block_read_transform_8b_32r16x1c(
+              (__global void*)KV_V, KV_HEADS * HD, (int)KV_H, KV_HEADS * HD, (int2)((int)(j * HD + dim0), (int)KV_Y(t0)), v4);
+#pragma unroll
+          for (uint i = 0; i < 8u; ++i) {
+            const uint2 pw = kv8_bf4(v4[i]);
+            vb[a][2u * i] = pw.x;
+            vb[a][2u * i + 1u] = pw.y;
+          }
+#else
+          intel_sub_group_2d_block_read_transform_16b_32r16x1c(
+              (__global void*)KV_V, KV_HEADS * HD * 2, (int)KV_H, KV_HEADS * HD * 2, (int2)((int)(j * HD + dim0), (int)KV_Y(t0)),
+              vb[a]);
+#endif
+        }
+#pragma unroll
+        for (uint r2 = 0; r2 < RB; ++r2) {
+          short8 pr[4];
+#pragma unroll
+          for (uint i = 0; i < 4u; ++i)
+            pr[i] = as_short8(intel_sub_group_block_read_us8(&spp[((k * RB + r2) * 4u + i) * 128u]));
+          const float8 cr = as_float8(intel_sub_group_block_read8((__local const uint*)&spc[(k * RB + r2) * 128u]));
+#pragma unroll
+          for (uint a = 0; a < NAM; ++a) {
+            o[r2][a] *= cr;
+            if (a >= na) continue;              // uniform
+            o[r2][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[0], as_int8(vload8(0, vb[a])), o[r2][a]);
+            o[r2][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[1], as_int8(vload8(0, vb[a] + 8u)), o[r2][a]);
+#if PSPLIT
+            o[r2][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[2], as_int8(vload8(0, vb[a])), o[r2][a]);
+            o[r2][a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pr[3], as_int8(vload8(0, vb[a] + 8u)), o[r2][a]);
+#endif
+          }
+        }
+#else
         // ---- O += P V: this sub-group's dim atoms, every row block ----
         short8 pr[RB][4];
 #pragma unroll
@@ -889,6 +1037,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #endif
           }
         }
+#endif  // SOLO
       }
 #endif  // KS == 1
 #else
@@ -974,7 +1123,11 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   }
 #elif PAIR
   // Split as P V was (header): the dim owners merge O for every row block, the pair's ds 0 its sums and maxima.
+#if SOLO
+  __local float* const macc = (__local float*)qm;   // [rb][r][dim]: q's staging, read last before the barrier below
+#else
   __local float macc[RB * 8 * HD];              // [rb][r][dim]
+#endif
   __local float mown[KS * RB * 8];              // [slice][rb][r]: the slice's own row maximum
   __local float msm[RB * 8];                    // [rb][r]: the merged row sum so far
   if (ds == 0u && !helper) {

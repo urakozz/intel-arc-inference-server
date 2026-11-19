@@ -10,7 +10,8 @@ produced it are in `tools/probe/`; rerun them before trusting a figure after a d
 
 ## Device properties
 
-Read once from `torch.xpu.get_device_properties(0)` while the box still had PyTorch; the properties are the card's and do not change with the driver. The driver versions in use are under the software stack below.
+Read once from `torch.xpu.get_device_properties(0)`. The properties are the card's and do not change with the
+driver.
 
 ```
 name                   Intel(R) Arc(TM) Pro B70 Graphics
@@ -57,10 +58,10 @@ max 588), 20 timed iterations after 5 warm-ups. That agrees with the torch probe
 peak.
 
 **590 GB/s is the roofline denominator.** It is the rate through the launch path this engine actually uses, and
-every roofline figure in the benchmark record and [05-perf-model.md](05-perf-model.md) divides by it. So
+every roofline figure in [05-perf-model.md](05-perf-model.md) divides by it. So
 these documents use two bases, and each figure should say which: "of the measured 590" is what a kernel can reach,
-"of the 638 peak" is what the memory could carry. Older records took the peak as 608 GB/s, a 19 Gbps figure;
-their percentages of peak are about 5 % too high.
+"of the 638 peak" is what the memory could carry. A figure computed against 608 GB/s (a 19 Gbps memory clock) is
+about 5 % too high.
 
 Seed a bandwidth probe's buffer with incompressible data. The B70 compresses device-local memory losslessly, so a
 buffer filled by `zeCommandListAppendMemoryFill` with one repeated 32-bit word reads back at 1022 GB/s, above the
@@ -191,13 +192,15 @@ intermediate buffers changed nothing.
 The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM.
 
 Peer-to-peer access (P2P: one card writing straight into the other's memory over PCIe, without bouncing through
-host RAM) works natively on the mainline Linux 7.4.0-rc2 kernel. Tensor parallel (every layer split across both
-cards) needs it: each card writes its partial results straight into the other card's memory every layer. The layer
-split (pipeline parallel) does not: it hands the hidden state over through host memory, because a peer copy measured
-no faster there.
+host RAM) works natively on the mainline Linux 7.4.0-rc2 kernel. Both two-card modes use it:
 
-An early measurement had prefill 3.2-3.4 % slower on the second card ([10-the-box.md](10-the-box.md)). The cause
-was never pinned down.
+- tensor parallel (every layer split across both cards): each card writes its partial results straight into the
+  other card's memory every layer;
+- pipeline parallel (the layers split between the cards): the first card copies the hidden state into the second
+  card's memory once per step, ordered by a cross-device event.
+
+One measurement had prefill 3.2-3.4 % slower on the second card ([10-the-box.md](10-the-box.md)). The cause was never
+pinned down.
 
 The BAR is the window through which the CPU sees a card's memory. The firmware caps it at 16 GB per card
 (ReBarState 14; 15 does not boot), and the `xe` kernel driver resizes both cards to the full 32 GB when it loads.
@@ -206,7 +209,7 @@ A lasting "busy" is a hang. The Level Zero runtime retries an ioctl that returns
 never surfaces as an error. This is why any host allocation that both cards map stays at or below 4 GiB; the
 prefix cache, for one, is pinned in 2 GiB pieces.
 
-The current stack is compute runtime 26.40.40196.15, IGC (the Intel Graphics Compiler) 2.42.6 and Level Zero
-loader 1.34. The `driver_version` line at the top and the rates in this document come from earlier stacks. The
-hardware rates (DPAS, bandwidth) are properties of the silicon and are not expected to move. Kernel timings
-can move with the compiler, and the current speed rows are the quiet-box session of 2026-11-15 in the benchmark record.
+The box's driver stack is listed in [10-the-box.md](10-the-box.md#versions-on-the-box). The rates in this document
+were measured on earlier stacks. The hardware rates (DPAS, bandwidth) are properties of the silicon and are not
+expected to move. Kernel timings can move with the compiler; the current speed numbers are in the
+[README](../README.md#speed).

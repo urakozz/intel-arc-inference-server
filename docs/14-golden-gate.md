@@ -5,6 +5,8 @@ asserts and what it only reports, and the rules for the cases where two correct 
 disagree. It is for anyone changing a kernel, the loader or the decode loop who needs to know what "it passes" means
 here.
 
+## Why a gate against an outside reference
+
 Every kernel test in this repo compares a kernel with a host reference this project wrote: `gemv_test` grades
 `gemv.cl` against `gemv_ref.h`, and `gdn_step_test` grades `gdn_step.cl` against `gdn_ref.h`. Those tests find
 transcription bugs. They cannot find a shared misunderstanding: a reference and a kernel written from the same wrong
@@ -208,7 +210,8 @@ checkpoint's author packed the nibbles would move the engine and the oracle toge
 Closing that needs a third implementation that shares nothing with either. A one-off offline vLLM run was it. It
 handed the three committed `.ids` files to an offline `vllm.LLM` as `prompt_token_ids`, so no tokenizer is involved on
 either side and a tokenizer difference cannot pose as a token difference. It read the oracle's `tokens` tensor
-straight from the golden `.safetensors`, not from a derived copy, and passed only if every id matched. The script has since been removed; the result stands as recorded.
+straight from the golden `.safetensors`, not from a derived copy, and passed only if every id matched. The script is
+not kept in the repo; the result below is the record.
 
 The result: 96 of 96 ids equal across the three prompts. All three implementations agree.
 
@@ -339,4 +342,4 @@ this project that really competes for the host.
 the box; it does not gate a merge. It counts passed, failed and skipped tests separately, because a skipped test, such
 as the gate with no golden set present, is not a pass. The tests that need checkpoints and golden sets run as stages
 of the box validation (`tools/box_validate.sh`), on demand, and a test whose inputs are byte-identical to a recorded
-pass keeps that pass. What has not been run yet is tracked as open work.
+pass keeps that pass.

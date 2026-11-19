@@ -182,7 +182,7 @@ uint16_t rne_bf16(float f) {
 float bf16f(uint16_t h) { return common::bf16_to_f32(h); }
 float silu_f32(float x) { return x / (1.0f + std::exp(-x)); }
 
-// One pf_gemm_i8 launch: grid (M / 256, N / 128), WG 512. `C` is fp32 [M][ldc],
+// One pf_gemm_i8 launch: grid (M / 256, N / kPfGemmI8WgN), WG 512. `C` is fp32 [M][ldc],
 // or for the SiLU build bf16 x [M][ldc] (ldc = ldx).
 void run_gemm(pf_harness::Dev& d, bool silu, const l0::Mem& xq, const l0::Mem& xs,
               const l0::Mem& w8, const l0::Mem& ws, const l0::Mem& C, uint32_t M, uint32_t K,
@@ -201,7 +201,7 @@ void run_gemm(pf_harness::Dev& d, bool silu, const l0::Mem& xq, const l0::Mem& x
   k.arg(8, K / 2);   // ldxq, in int8 pairs
   k.arg(9, N);       // ldb
   k.arg(10, ldc);
-  d.run(k, M / 256, N / 128);
+  d.run(k, M / 256, N / kernels::kPfGemmI8WgN);
 }
 
 // The exact int32 accumulators: acc[m][n] = sum_k x[m][k] w[k][n], w read out of

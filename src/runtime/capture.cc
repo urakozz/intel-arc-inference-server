@@ -122,7 +122,7 @@ constexpr uint32_t kWgArgmax = 256;   // argmax.cl WG_ARGMAX       (Task 3)
 // below.)
 constexpr uint32_t kGemvColsPerWg = 64;
 // prep_silu_mul: SILU_CHUNK outputs per work-group (prep.cl).
-constexpr uint32_t kSiluChunk = 4096;
+constexpr uint32_t kSiluChunk = 256;
 // argmax_stage1: CHUNK logits per work-group (argmax.cl).
 constexpr uint32_t kArgmaxChunk = 1024;
 // gdn_step: CHUNK_V = 32 state columns per work-group, so 128/32 chunks of a
@@ -846,6 +846,10 @@ class Capture {
   // production list keep kAttnV2Blocks.
   // Spec 32: a one-card deep verify list (32 or 64 rows: the attention in row chunks, the delta-net step a chain).
   bool deep() const { return mode_ == Mode::Verify && kCapM > DecodeScratchDims::kWideM; }
+  // Item 40: the wide and deep lists (16 / 32 / 64 rows, Qwen3.8 one card) bind their bf16 GEMVs' ROWG builds, kRowG
+  // rows a group.
+  static constexpr uint32_t kRowG = 8;
+  bool wide_rowg() const { return mode_ == Mode::Verify && kCapM >= DecodeScratchDims::kWideM; }
   uint32_t attn_tgt() const {
     return vattn_ == VerifyAttn::Dpas && !sb_.pages && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
                                                                           : DecodeBuffers::kAttnV2Blocks;
@@ -1185,6 +1189,16 @@ class Capture {
             "the bf16 GEMV's output allocation is smaller than its [M][N] fp32 result");
     // The work-group is one lane per column per K slice - the kernel's
     // reqd_work_group_size(COLS_PER_WG / 16 * KSPLIT subgroups of 16).
+    // Item 40: the wide and deep lists' a||b in one launch, rows in groups of 8 on grid dimension 0 (gemv_bf16.cl,
+    // ROWG): 8 work-groups a launch had left the card mostly idle; every row keeps its bits.
+    if (id == LinearId::AB && wide_rowg()) {
+      l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kRowG, s.K, s.N, t, true), "gemv_bf16", t.cols * t.ksplit);
+      k.arg_ptr(0, w.mem.ptr());
+      k.arg_ptr(1, x);
+      k.arg_ptr(2, out.ptr());
+      launch(k, kCapM / kRowG, s.N / t.cols);
+      return;
+    }
     // Spec 32e: a||b at 64 rows runs as two 32-row launches - the 64-row build ran 6x the 32-row one (14.8 against
     // 2.4 ms a token, measured); a row's arithmetic does not depend on M, so every row keeps its bits.
     const uint32_t mr = kCapM == 64 && id == LinearId::AB ? 32 : kCapM;
@@ -1227,8 +1241,8 @@ class Capture {
   void mlp(uint32_t layer, uint32_t mixer_s) {
     res_norm(mixer_s, at(small_of(layer).norms, sl_.norms_off_post));
     const uint32_t gu_s = gemv(layer, LinearId::GateUp, b_.x.ptr());
-    // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (I/4096, M) = (5, M)
-    // at I = 17408 (ragged last chunk 1024), WG 256.
+    // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (I/256, M) = (68, M)
+    // at I = 17408 (item 42: one output a lane), WG 256.
     // Spec 28b: SILU_S is baked - gate||up's S, or the _S1 build after gemm_sm's 2x8 work-group.
     {
       l0::Kernel& k = kernel(kernels::gemm_sm_silu_variant(kCapM, d_.intermediate, gu_s,
@@ -1723,6 +1737,14 @@ class Capture {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Bf16, "the MTP head's linears are bf16");
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(s.N);
+    if (wide_rowg()) {   // item 40: one launch, rows in groups of 8 (as gemv_bf16 above)
+      l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kRowG, s.K, s.N, t, true), "gemv_bf16", t.cols * t.ksplit);
+      k.arg_ptr(0, w.mem.ptr());
+      k.arg_ptr(1, x);
+      k.arg_ptr(2, out);
+      launch(k, kCapM / kRowG, s.N / t.cols);
+      return;
+    }
     // Spec 32e: in a deep list, 16-row launches - the 32- and 64-row builds ran 4.2 / 8.9x the 16-row one (5.2 / 11.0
     // against 1.24 ms a token, measured); a row's arithmetic does not depend on M, so every row keeps its bits.
     const uint32_t mr = deep() ? DecodeScratchDims::kWideM : kCapM;

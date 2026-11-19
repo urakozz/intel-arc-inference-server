@@ -252,7 +252,7 @@ int main() {
         {"prep_norm_finish", "pfs_norm_finish_M2048", "prep_norm_finish", Kind::NormFinish, false,
          256, kFoldGroups, kM, 129, b_norm_finish},
         {"prep_silu_mul (S8)", "pfs_silu_mul_M2048", "prep_silu_mul", Kind::Silu, false,
-         256, 5, kM, 64, b_silu_s8},
+         256, 68, kM, 64, b_silu_s8},
         {"prep_gated_head", "pfs_gated_head_M2048", "prep_gated_head", Kind::GatedHead, false,
          128, 48, kM, 48, b_gated},
     };

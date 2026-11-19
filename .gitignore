@@ -104,11 +104,10 @@ Thumbs.db
 *~
 
 # ---- Local, do not share ---------------------------------------------------
+# .env holds the box's address for the remote build/bench helpers (copy .env.example).
 .env
 *.local
 local.*
-# Machine address for the remote build/bench helpers. Copy box.env.example.
-tools/box.env
 # A .git moved aside before a history rewrite. Never part of the tree: the old
 # packs still hold everything a rewrite was meant to remove.
 .git.pre-rewrite-*

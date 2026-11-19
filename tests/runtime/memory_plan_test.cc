@@ -70,8 +70,10 @@ void check_sizes_qwen38() {
   for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
     CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 16 * 258 * 4);
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q, runtime::PrefillScratchDims::kCDefault);
-  CHECK_EQ(s.eager(), size_t{699514776});
-  CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q, runtime::PrefillScratchDims::kCDefault).eager(), size_t{699514776});
+  // ab_out at the a||b GEMM's pitch 256: 2048 x 256 x 4 B (1,048,576 B over the GEMV's 128 columns).
+  CHECK_EQ(s.ab_out, size_t{2048} * 256 * 4);
+  CHECK_EQ(s.eager(), size_t{700563352});
+  CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q, runtime::PrefillScratchDims::kCDefault).eager(), size_t{700563352});
   CHECK_EQ(s.slab, size_t{35651584});
   CHECK_EQ(s.pf_s, size_t{805306368});
   CHECK_EQ(s.pf_p, size_t{402653184});
@@ -181,7 +183,9 @@ void check_sizes_ornith() {
   // Phase 3 Task 2: l0's router / a||b B slabs - 40 x [2048][512] + 30 x [2048][256] bf16, per stage by layer range.
   CHECK_EQ(runtime::route_slab_bytes(o, 0, o.layers), size_t{40} * 2048 * 512 * 2 + size_t{30} * 2048 * 256 * 2);
   CHECK_EQ(runtime::route_slab_bytes(o, 0, 4), size_t{4} * 2048 * 512 * 2 + size_t{3} * 2048 * 256 * 2);
-  CHECK_EQ(runtime::route_slab_bytes(model::qwen38(), 0, model::qwen38().layers), size_t{0});
+  // Qwen3.8 one card: the a||b's only, 48 x [5120][256] bf16; a tensor-parallel card none (its GEMV).
+  CHECK_EQ(runtime::route_slab_bytes(model::qwen38(), 0, model::qwen38().layers), size_t{48} * 5120 * 256 * 2);
+  CHECK_EQ(runtime::route_slab_bytes(model::tp_card_desc(model::qwen38(), model::TpCrossing::Folded), 0, 64), size_t{0});
   // Dense models carry none, and their slab / int8 K are what they were.
   CHECK_EQ(runtime::moe_prefill_layout(model::qwen38()).total, size_t{0});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38(), runtime::PrefillScratchDims::kCDefault).moe, size_t{0});
@@ -228,14 +232,14 @@ void check_spec6_line() {
   CHECK_EQ(p.decode_state, size_t{230990208});
   // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
   // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.
-  CHECK_EQ(p.prefill_scratch, size_t{699514776} + 35651584);
-  CHECK_EQ(p.prefill_lazy, size_t{35651584});   // flash attention, no MTP: the slab only
+  CHECK_EQ(p.prefill_scratch, size_t{700563352} + 35651584 + 125829120);
+  CHECK_EQ(p.prefill_lazy, size_t{35651584} + 125829120);   // flash attention, no MTP: the slab and a||b's GEMM slabs
   CHECK_EQ(p.int8, size_t{73932800});
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.231 GB, prefill scratch 0.735 GB,"
-        " int8 0.074 GB, total 27.746 GB of 32.530 GB");   // no MTP: no deep verify list, a 16-row scratch
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.231 GB, prefill scratch 0.862 GB,"
+        " int8 0.074 GB, total 27.873 GB of 32.530 GB");   // + a||b's GEMM slabs 0.126 GB, ab_out at pitch 256   // no MTP: no deep verify list, a 16-row scratch
 }
 
 void check_paths() {
@@ -251,12 +255,12 @@ void check_paths() {
   CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden +
                                  runtime::DecodeScratchDims::sizes(65536, q, 64).total() -
                                  runtime::DecodeScratchDims::sizes(65536, q).total());
-  CHECK_EQ(mtp.prefill_lazy, s.slab);
+  CHECK_EQ(mtp.prefill_lazy, s.slab + runtime::route_slab_bytes(q, 0, q.layers));
   CHECK_EQ(mtp.model, base.model + kMtpWeights);
   // l0: the slab always, no Int8State.
   runtime::PrefillPath l0{true, PrefillBackend::L0};
   const runtime::MemoryPlan pl0 = runtime::plan(q, 65536, false, kQwenInt8Weights, l0);
-  CHECK_EQ(pl0.prefill_lazy, s.slab);
+  CHECK_EQ(pl0.prefill_lazy, s.slab + runtime::route_slab_bytes(q, 0, q.layers));
   CHECK_EQ(pl0.int8, size_t{0});
   // Decode only (ruling R7): no prefill scratch, no int8, no MTP hidden rows.
   runtime::PrefillPath none{false, PrefillBackend::L0Int8};
@@ -492,7 +496,7 @@ void check_kv_int8() {
 //   resid        4096 x 5120 x 2 B                             =    41,943,040
 //   x            4096 x 17408 x 2 B                            =   142,606,336
 //   partials     4096 x 34816 x 4 B                            =   570,425,344
-//   ab_out       4096 x 128 x 4 B                              =     2,097,152
+//   ab_out       4096 x 256 x 4 B   (a||b's dense GEMM rows)   =     4,194,304
 //   norm_sumsq   20 x 4096 x 4 B                               =       327,680
 //   gdn_o        4096 x 48 x 128 x 4 B                         =   100,663,296
 //   mixer_out    4096 x 6144 x 2 B                             =    50,331,648
@@ -510,9 +514,9 @@ void check_kv_int8() {
 //   pf_attn      same                                          =    50,331,648
 //   pf_o         24 x 4096 x 256 x 4 B                         =   100,663,296
 //   pf_rowsum    24 x 4096 x 4 B                               =       393,216
-//                                                        total = 1,397,972,888
+//                                                        total = 1,400,070,040
 // Cross-check: the three rows that do not scale (logits, argmax_part, gdn_seed) are
-// 1,056,664 B, so 2 x (699,514,776 - 1,056,664) + 1,056,664 = 1,397,972,888 (+698,458,112).
+// 1,056,664 B, so 2 x (700,563,352 - 1,056,664) + 1,056,664 = 1,400,070,040 (+699,506,688).
 void check_chunk_cap() {
   using D = runtime::PrefillScratchDims;
   const model::ModelDesc& q = model::qwen38();
@@ -523,7 +527,7 @@ void check_chunk_cap() {
   CHECK_EQ(s.resid, size_t{41943040});
   CHECK_EQ(s.x, size_t{142606336});
   CHECK_EQ(s.partials, size_t{570425344});
-  CHECK_EQ(s.ab_out, size_t{2097152});
+  CHECK_EQ(s.ab_out, size_t{4194304});
   CHECK_EQ(s.norm_sumsq, size_t{327680});
   CHECK_EQ(s.gdn_o, size_t{100663296});
   CHECK_EQ(s.mixer_out, size_t{50331648});
@@ -541,9 +545,9 @@ void check_chunk_cap() {
   CHECK_EQ(s.pf_attn, size_t{50331648});
   CHECK_EQ(s.pf_o, size_t{100663296});
   CHECK_EQ(s.pf_rowsum, size_t{393216});
-  CHECK_EQ(s.eager(), size_t{1397972888});
-  CHECK_EQ(s.eager() - D::sizes(16384, q, 2048).eager(), size_t{698458112});
-  CHECK_EQ(D::sizes(16384, q, 2048).eager(), size_t{699514776});   // the 2048 table, unchanged
+  CHECK_EQ(s.eager(), size_t{1400070040});
+  CHECK_EQ(s.eager() - D::sizes(16384, q, 2048).eager(), size_t{699506688});
+  CHECK_EQ(D::sizes(16384, q, 2048).eager(), size_t{700563352});   // the 2048 table (ab_out at pitch 256)
   CHECK_EQ(s.slab, size_t{35651584});                               // one slab: no row count in it
   CHECK_EQ(s.pf_s, size_t{2} * 805306368);                          // 6 x 4096 x 16384 x 4 B
   CHECK_EQ(s.pf_p, size_t{2} * 402653184);
@@ -605,11 +609,11 @@ void check_chunk_cap() {
   const size_t w = kQwenInt8Weights + kMtpWeights;
   const runtime::MemoryPlan p2 = runtime::plan(q, 65536, true, w, i8c2);
   const runtime::MemoryPlan p4 = runtime::plan(q, 65536, true, w, i8c4);
-  CHECK_EQ(p4.prefill_scratch - p2.prefill_scratch, size_t{698458112});
+  CHECK_EQ(p4.prefill_scratch - p2.prefill_scratch, size_t{699506688});
   CHECK_EQ(p4.int8 - p2.int8, size_t{35659776});
   CHECK_EQ(p4.mtp_hidden - p2.mtp_hidden, size_t{20971520});
   CHECK_EQ(p4.kv, p2.kv);
-  CHECK_EQ(p4.total() - p2.total(), size_t{698458112 + 35659776 + 20971520});   // ~0.755 GB
+  CHECK_EQ(p4.total() - p2.total(), size_t{699506688 + 35659776 + 20971520});   // ~0.756 GB
   CHECK_EQ(runtime::plan(q, 65536, true, w, runtime::PrefillPath{true, PrefillBackend::L0Int8}).total(),
            p2.total());                                                         // the default is 2048
   runtime::DrafterPlan dr;

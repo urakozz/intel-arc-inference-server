@@ -57,6 +57,12 @@ add_pf_res_fold(5120 0 20)   # layer 0's leading norm: nothing to fold
 add_pf_res_fold(5120 1 20)   # every other norm (ruling R1: S = 1)
 add_ocloc_kernel(pf_norm_finish_K5120_G20_W20 SOURCE ${PF_PREP_CL}
                  DEFINES K=5120 NORM_G=20 NORM_WGS=20)
+# The residual fold + RMSNorm in one launch (pf_norm_fused.cl), bitwise the pair above - Ornith's
+# phase 2 Task 5 form at Qwen3.8's hidden size.
+foreach(SP 0 1)
+  add_ocloc_kernel(pf_res_norm_K5120_SP${SP}_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
+                   DEFINES K=5120 S_PREV=${SP} FOLD_G=20)
+endforeach()
 add_ocloc_kernel(pf_silu_mul SOURCE ${PF_PREP_CL})
 add_ocloc_kernel(pf_embed_gather SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_embed.cl
                  DEFINES HIDDEN=5120 VOCAB=248320)
@@ -92,8 +98,25 @@ add_ocloc_kernel(pf_ab_proj SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
 # width as a runtime argument.
 add_ocloc_kernel(pf_gdn_conv SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
                  DEFINES NEGA_OFF=40960 DTBIAS_OFF=41008)
+# Qwen3.8 on one card: a||b by pf_gemm_T0, as Ornith's (below) - the weight re-laid once as a zero-padded [K][256]
+# slab, and pf_gdn_gate reading the GEMM's rows at pitch 256 (Flash-Next binds the same pf_gdn_conv_AB256).
+add_ocloc_kernel(pf_route_slab_K5120_N128_P256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                 DEFINES K=5120 N=128 ROUTE_SLAB=256)
+add_ocloc_kernel(pf_gdn_conv_AB256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
+                 DEFINES NEGA_OFF=40960 DTBIAS_OFF=41008 AB_STRIDE=256)
 add_ocloc_kernel(pf_gdn_wy SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_wy.cl)
 add_ocloc_kernel(pf_gdn_scan SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl)
+# Qwen3.8's one-card GDN walk on Ornith's bitwise forms (runtime/prefill/gdn.cc dense_bundle): the conv + l2norm in
+# one launch with a lane's partials read first (FRONT_PRELOAD), the scan writing o as the bf16 word the head rounds
+# it to with q.S beside w.S and two barriers a step (SCAN_OBF16 SCAN_QS1=2 SCAN_FOLD), the head one sub-group a
+# (position, head) reading that o (HEAD_SG HEAD_OBF16), and pf_gdn_wu staging vb / kb as bf16 words (WU_B16, three
+# work-groups an Xe-core; probe_gdn_arms 0.85x at 4k) - all bitwise. Additive: the binaries above keep their command
+# lines.
+add_ocloc_kernel(pf_gdn_wy_WB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_wy.cl DEFINES WU_B16=1)
+add_ocloc_kernel(pf_gdn_front_PL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl DEFINES FRONT_PRELOAD=1)
+add_ocloc_kernel(pf_gdn_scan_OB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl
+                 DEFINES SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1)
+add_ocloc_kernel(pf_gated_head_OB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl DEFINES HEAD_SG=1 HEAD_OBF16=1)
 
 # --- The execution-context probe (plan 6b Task 2) ---------------------------
 # Bound only by tests/prefill/context_test.cc; it proves the immediate list's
@@ -268,18 +291,20 @@ set(PF_INT8_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_int8.cl)
 set(PF_HAD_K 3072 5120 6144 17408)
 foreach(K IN LISTS PF_HAD_K)
   math(EXPR NBLK "${K} / 1024")
-  add_ocloc_kernel(pf_quant_had_K${K} SOURCE ${PF_INT8_CL} DEFINES PF_QUANT_HAD=1 NBLK=${NBLK})
+  add_ocloc_kernel(pf_quant_had_K${K} SOURCE ${PF_INT8_CL} DEFINES PF_QUANT_HAD=1 NBLK=${NBLK} FWHT_FMA=1)
 endforeach()
 add_ocloc_kernel(pf_quant_had_K8704 SOURCE ${PF_INT8_CL}
-                 DEFINES PF_QUANT_HAD=1 NBLK=9 PAD_K=1)
+                 DEFINES PF_QUANT_HAD=1 NBLK=9 PAD_K=1 FWHT_FMA=1)
 foreach(L 0 1)
   add_ocloc_kernel(pf_requant_rot_L${L}_PAD SOURCE ${PF_INT8_CL}
-                   DEFINES PF_REQUANT_ROT=1 LAYOUT=${L} PAD_K=1)
-  add_ocloc_kernel(pf_requant_rot_L${L} SOURCE ${PF_INT8_CL} DEFINES PF_REQUANT_ROT=1 LAYOUT=${L})
+                   DEFINES PF_REQUANT_ROT=1 LAYOUT=${L} PAD_K=1 FWHT_FMA=1)
+  add_ocloc_kernel(pf_requant_rot_L${L} SOURCE ${PF_INT8_CL} DEFINES PF_REQUANT_ROT=1 LAYOUT=${L} FWHT_FMA=1)
 endforeach()
-add_ocloc_kernel(pf_gemm_i8 SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1
+# The GEMM's 256 x 256 tile and raster order (I8_WIDE, I8_RASTER; the int32 sums and so every output
+# byte are the 256 x 128 tile's): 4k gate||up + down walk 853 -> 731 ms in probe_prefill_split.
+add_ocloc_kernel(pf_gemm_i8 SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 I8_WIDE=1 I8_RASTER=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
-add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_EPI=1
+add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_EPI=1 I8_WIDE=1 I8_RASTER=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
 
 # Spec 6 (plan 6b): the fused flash attention, plan 6a's winner pfa_KT64_R16_H6_Q0;
@@ -287,6 +312,11 @@ add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_
 # exp2 enabled on 2026-09-27 accepting its 7.6e-6 K3a miss on l0 (spec 6 §9).
 add_ocloc_kernel(pf_flash_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                  DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 OPTIONS -cl-intel-256-GRF-per-thread)
+# The PAIR form (two sub-groups share 16 rows of a head, so each K / V operand feeds two row blocks; bitwise the line
+# above): 0.62-0.75x of it at 2k-128k keys (tools/probe/probe_pf_attn_long, HPW 2 the best of 1 / 2 / 3 / 6). attn_chunk
+# binds it for whole chunks; the split and paged forms stay on the line above.
+add_ocloc_kernel(pf_flash_attn_pair SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                 DEFINES KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 PAIR=1 OPTIONS -cl-intel-256-GRF-per-thread)
 # 3l (2): the split-K form for short chunks deep in the cache (SPLIT=1: spans of the key range into
 # pf_o's spare rows) and the merge that folds the spans into pf_o. Additive: pf_flash_attn's
 # command line and token stream are unchanged.
@@ -324,6 +354,11 @@ if(B70_KV8)
                    OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_flash_attn_kv8_raw SOURCE ${KV8_CL}
                    DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # The raw form's pair (KV8_PAIR, pf_flash_attn_pair's structure with each key atom's scales in its own sub-group;
+  # bitwise the line above): attn_chunk_kv8 binds it for whole chunks over the widened rows.
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_pair SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 KV8_PAIR=1
                    OPTIONS -cl-intel-256-GRF-per-thread)
   # 3l (2): the split forms over int8 (in place, and raw after kv8_widen); pf_flash_merge folds them.
   add_ocloc_kernel(pf_flash_attn_kv8_split SOURCE ${KV8_CL}
@@ -459,18 +494,25 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_flash_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
-  # MoE prefill phase 3 Task 7 (arm pfao_KT64_R32_H8_Q1): 32 query rows
-  # a work-group (4 sub-groups a head share each K / V tile), Q held in registers across key tiles. A sub-group's
-  # arithmetic and key order are the line above's, so the output is bitwise; attn_chunk binds it. Ornith only: at
-  # Qwen3.8's HPW 6 the same form was slower (plan Task 7 record).
-  add_ocloc_kernel(pf_flash_attn_r32_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
-                   DEFINES KT=64 RPW=32 HPW=8 QREG=1 EXP2=1 ${PF_ORNITH_FA}
+  # The PAIR form (pf_flash_attn_pair above at Ornith's heads; it replaced the 32-row RPW 32 / QREG 1 form, which it
+  # beats 0.68-0.75x at 2k-262k keys, bitwise); attn_chunk binds it.
+  add_ocloc_kernel(pf_flash_attn_pair_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 PAIR=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
   # The same with pf_attn_gate fused into the epilogue (GATE_EPI: its arithmetic statement for statement, bitwise), the
   # prefill walk's form for a bf16 cache; the line above stays for attn_chunk's callers that gate apart (the tests).
-  add_ocloc_kernel(pf_flash_attn_r32g_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
-                   DEFINES KT=64 RPW=32 HPW=8 QREG=1 EXP2=1 GATE_EPI=1 ${PF_ORNITH_FA}
+  add_ocloc_kernel(pf_flash_attn_pairg_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 PAIR=1 GATE_EPI=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
+  # 3l (2) at Ornith's heads: the short-chunk split (HPW 8 = the GQA group) and its merge, plain (attn_chunk's callers
+  # that gate apart) and with pf_attn_gate fused (GATE_EPI, the prefill walk's).
+  add_ocloc_kernel(pf_flash_attn_split_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 SPLIT=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_merge_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 FLASH_MERGE=1 ${PF_ORNITH_FA})
+  add_ocloc_kernel(pf_flash_mergeg_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 FLASH_MERGE=1 GATE_EPI=1 ${PF_ORNITH_FA})
   # The MoE block. TM (the tile rows) is mirrored by kernels::pf_moe::kTileM.
   add_ocloc_kernel(pf_moe_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
                    DEFINES K=2048 N=272 COLS_PER_WG=16 KSPLIT=16)

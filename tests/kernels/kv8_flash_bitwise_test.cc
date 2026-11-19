@@ -25,7 +25,7 @@ constexpr uint32_t kHD = 256, kQH = 24, kKVH = 4;
 
 void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
              l0::Kernel& gate, uint32_t pos, uint32_t C, bool time, uint32_t head_groups,
-             l0::Kernel* widen) {
+             l0::Kernel* widen, uint32_t fast_rows) {
   const bool raw = widen != nullptr;
   const uint32_t depth = pos + C, rows = (C + 255u) & ~255u;
   std::mt19937 rng(pos + C);
@@ -102,7 +102,8 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
     kernel.arg(7, C);
     kernel.arg(8, rows);
     auto list = l0::CmdList::regular(d.ctx);
-    list.launch(kernel, (C + 7u) / 8u, kKVH, &kernel == &fast ? head_groups : 1);
+    list.launch(kernel, &kernel == &fast ? (C + fast_rows - 1u) / fast_rows : (C + 7u) / 8u, kKVH,
+                &kernel == &fast ? head_groups : 1);
     list.launch(gate, kQH, C);
     list.close();
     d.q.execute(list, &d.fence);
@@ -127,7 +128,7 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
     l0::EventPool pool(d.ctx, 1);
     l0::Event event(pool, 0);
     auto list = l0::CmdList::regular(d.ctx);
-    list.launch(fast, (C + 7u) / 8u, kKVH, head_groups, &event);
+    list.launch(fast, (C + fast_rows - 1u) / fast_rows, kKVH, head_groups, &event);
     list.close();
     for (uint32_t i = 0; i < 4; ++i) {
       event.reset();
@@ -265,11 +266,12 @@ int main(int argc, char** argv) {
     std::puts("kv8_flash_bitwise_test --chunk-time: done");
     return 0;
   }
-  CHECK(argc <= 4);
-  bool time = false, raw = false;
+  CHECK(argc <= 5);
+  bool time = false, raw = false, pair = false;
   for (int i = 2; i < argc; ++i) {
     if (std::string(argv[i]) == "--time") time = true;
     else if (std::string(argv[i]) == "--raw") raw = true;
+    else if (std::string(argv[i]) == "--pair") pair = true;   // KV8_PAIR: 16 rows, two sub-groups a head
     else CHECK(false);
   }
   pf_harness::Dev d;
@@ -287,9 +289,9 @@ int main(int argc, char** argv) {
   ze_kernel_properties_t props{};
   props.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
   ZE_CHECK(zeKernelGetProperties(fast.handle(), &props));
-  // Probe binaries keep RPW=8 and vary how many of the six heads share a group.
-  const uint32_t hpw = props.requiredGroupSizeX / 16;
-  CHECK(hpw > 0 && props.requiredGroupSizeX == hpw * 16 && 6 % hpw == 0);
+  // Probe binaries keep RPW=8 and vary how many of the six heads share a group; a pair binary has two sub-groups a head.
+  const uint32_t sg_per_head = pair ? 2u : 1u, hpw = props.requiredGroupSizeX / (16 * sg_per_head);
+  CHECK(hpw > 0 && props.requiredGroupSizeX == hpw * 16 * sg_per_head && 6 % hpw == 0);
   fast.group_size(props.requiredGroupSizeX);
   std::printf("kernel: HPW %u, private %u B, spill %u B\n", hpw, props.privateMemSize, props.spillMemSize);
   control.group_size(96);
@@ -298,6 +300,6 @@ int main(int argc, char** argv) {
                             {2000u, 2048u}, {13209u, 2048u}, {30963u, 37u},
                             {64991u, 9u}, {127743u, 257u}, {28952u, 2048u},
                             {62952u, 2048u}, {125952u, 2048u}, {0u, 4096u}})
-    compare(d, fast, control, gate, shape.first, shape.second, time, 6 / hpw, widen.get());
+    compare(d, fast, control, gate, shape.first, shape.second, time, 6 / hpw, widen.get(), pair ? 16u : 8u);
   std::puts("kv8_flash_bitwise_test: PASS");
 }

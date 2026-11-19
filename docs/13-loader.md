@@ -2,13 +2,31 @@
 
 This document explains how the engine turns a Hugging Face checkpoint on disk into the weights the kernels read
 on the card. It is for readers who want to know what the engine assumes about a checkpoint, how those assumptions
-are checked, and where every byte of device memory goes. The walk-through uses Qwen3.8-27B; the other model families
-follow the same rules and get their own sections near the end.
+are checked, and where every byte of device memory goes.
 
 The loader has one job: produce exactly the device buffers the kernels were benchmarked against, and fail loudly,
 naming the tensor, if the checkpoint does not mean what the engine assumes. When `loader::load` returns, everything
 the decode loop needs is on the card in its final layout. Nothing is converted, branched on or discovered while the
 model runs.
+
+## Map of a load
+
+The walk-through uses Qwen3.8-27B; the other families follow the same rules. A load runs these steps, each with its
+own section below:
+
+1. find the snapshot in the Hugging Face cache, never downloading ("Finding the snapshot");
+2. read the tensor list from the index file ("The index file is the list of tensors");
+3. classify every linear from the tensors present, not the config labels, and check the quantisation invariants on
+   every word ("Classification", "The three data checks");
+4. map checkpoint names onto the model description, skipping the vision tower and, unless asked for, the MTP head
+   ("The name view");
+5. fuse linears that read the same input, repack them into the layout each shape was tuned for, and bake constants
+   such as RMSNorm's `1 + w` ("Fusion", "What the loader bakes in", "Layout and split-K");
+6. upload, then cross-check the bytes per token against the figure computed from the headers ("Memory and the `W`
+   cross-check"), with a test that reads the weights back off the card ("Proving the bytes").
+
+The later sections cover the other checkpoint forms the loader accepts: a self-quantised checkpoint with an int4
+head, g128 groups, compressed-tensors, and Qwen3.8-Flash-Next.
 
 The code is `src/loader/{snapshot,safetensors,quant,loader}.{h,cc}` plus `src/loader/small_layout.h`, which holds
 the small-tensor block offsets shared with the model description and the device kernels. The loader is driven by
@@ -108,7 +126,7 @@ prefill dequant's arithmetic (`LoadedModel::ab_prefill`, counted in `total()` bu
 checkpoints"), `sym == true`, and `desc_act` is false or absent. Absence is auto-round's way of writing false, and the
 loader proves it from the shipped `g_idx` count instead of taking it on trust (see "The packed-head checkpoint"). It
 throws on any `+:` (include) dynamic rule that is not an exact restatement of the top-level settings; that pattern is
-what made a published MTP head unusable (the benchmark record). It also throws on an unrecognised `quant_method` or
+what made a published MTP head unusable. It also throws on an unrecognised `quant_method` or
 `packing_format`, and on an `extra_config` module that claims to be packed at anything but g64 symmetric int4.
 
 ### The three data checks

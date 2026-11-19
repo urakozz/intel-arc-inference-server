@@ -1,7 +1,7 @@
 // 3l: the production attn_verify_dpas[_kv8] (src/kernels/attn_verify_dpas.cl) against its frozen copy at main 865da900
 // (tests/kernels/attn_verify_control.cl, the same levers and options), every partial word (mx, sm, acc[256]) and every
 // word of v2's reduce over them, bf16 KV at M = 2..8 and 16 (the built lists; 16 against the frozen copy at the 16-row
-// line's own levers, KS 1 DSPLIT 128) and int8 KV at M = 2..4. Depths through the
+// line's own levers, KS 1 DSPLIT 128) and int8 KV at M = 2..8. Depths through the
 // block-stride changes and the long tails, all rows and one inactive, two input fills (patterned scales with -0,
 // subnormals and the largest finite code; then every finite fp16 code cycled over the positions).
 //   attn_verify_bitwise_test [--negative] [--cand <prefix>] [--min-m <M>] [--max-m <M>]
@@ -167,6 +167,7 @@ int main(int argc, char** argv) {
   std::vector<std::pair<uint32_t, bool>> shapes;
   for (uint32_t m = 2; m <= 4; ++m) shapes.push_back({m, true});
 #ifdef B70_VERIFY_TEST_M8
+  for (uint32_t m = 5; m <= 8; ++m) shapes.push_back({m, true});
   for (uint32_t m = 2; m <= 8; ++m) shapes.push_back({m, false});
   shapes.push_back({16, false});
 #else

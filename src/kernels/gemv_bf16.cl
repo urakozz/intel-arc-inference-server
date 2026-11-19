@@ -99,7 +99,17 @@ __kernel void gemv_bf16(__global const ushort* restrict w,
   const uint sg = get_sub_group_id();
   const uint tile_idx = sg / KSPLIT;  // which 16-column tile of this work-group
   const uint q = sg % KSPLIT;         // which K slice of that tile
+#ifdef ROWG
+  // ROWG (item 40; undefined on every other command line): the rows of a wide / deep verify list as groups of M on
+  // grid dimension 0 and the column work-groups on dimension 1, so one launch fills the card and a column tile's
+  // groups run side by side (its weights come from memory once, from the cache for the other groups). A row's sum
+  // depends on its own x row alone, so every row is bitwise the plain build's.
+  const uint n_tile = get_group_id(1) * TILES_PER_WG + tile_idx;
+  x += (size_t)get_group_id(0) * M * K;
+  out += (size_t)get_group_id(0) * M * N;
+#else
   const uint n_tile = get_group_id(0) * TILES_PER_WG + tile_idx;
+#endif
   const uint n = n_tile * SG + lane;
   const uint k8_0 = q * K8_PER_SG;
   __global const ushort* tile = w + (size_t)n_tile * K8 * 128 + (size_t)k8_0 * 128;

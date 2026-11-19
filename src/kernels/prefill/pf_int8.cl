@@ -21,6 +21,18 @@
 #define SG 16
 #include "bf16.h"
 
+// The lane-shuffle butterfly stage: lane l keeps v + o, or o - v where bit h of l is set. FWHT_FMA 1 issues it
+// as one fma(v, +-1, o): v x +-1 is exact, so the single rounding is the add's or the subtract's own and every
+// value is the select form's bytes (o - v and o + (-v) round alike, 0 included).
+#ifndef FWHT_FMA
+#define FWHT_FMA 0
+#endif
+#if FWHT_FMA
+#define PF_BFLY(v, o, neg, sh) fma((v), (sh), (o))
+#else
+#define PF_BFLY(v, o, neg, sh) ((neg) ? ((o) - (v)) : ((v) + (o)))
+#endif
+
 #ifdef PF_QUANT_HAD
 #ifndef NBLK
 #error "pf_quant_had: NBLK (= K / 1024) must be defined"
@@ -56,10 +68,13 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
   }
 #pragma unroll
   for (uint h = 1u; h < 16u; h <<= 1) {
+#if FWHT_FMA
+    const float sh = (l & h) ? -1.0f : 1.0f;
+#endif
 #pragma unroll
     for (uint j = 0; j < 64u; ++j) {
       const float o = sub_group_shuffle_xor(v[j], h);
-      v[j] = (l & h) ? (o - v[j]) : (v[j] + o);
+      v[j] = PF_BFLY(v[j], o, l & h, sh);
     }
   }
 #pragma unroll
@@ -196,10 +211,13 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
   }
 #pragma unroll
   for (uint h = 1u; h < 16u; h <<= 1) {
+#if FWHT_FMA
+    const float sh = (l & h) ? -1.0f : 1.0f;
+#endif
 #pragma unroll
     for (uint j = 0; j < 64u; ++j) {
       const float o = sub_group_shuffle_xor(v[j], h);
-      v[j] = (l & h) ? (o - v[j]) : (v[j] + o);
+      v[j] = PF_BFLY(v[j], o, l & h, sh);
     }
   }
 }
@@ -268,14 +286,31 @@ __kernel void pf_colmax_rot(__global const uint* restrict qw, __global const hal
 // pw8_gemm (tools/probe/probe_w8a8.cl), the gsweep tile: WG 256 x 128, 32
 // sub-groups 8 (m) x 4 (n), per sub-group 32 m x 32 n, B int8 VNNI-4, int32
 // accumulation over the whole K. Mainloop and plain epilogue copied verbatim
-// with only the probe's `sig` argument and its store removed.
+// with only the probe's `sig` argument and its store removed. The production
+// binaries build it with I8_WIDE and I8_RASTER (below; grid (M / 256, N / 256)).
+#ifndef I8_WIDE
+#define I8_WIDE 0
+#endif
+#ifndef I8_RASTER
+#define I8_RASTER 0
+#endif
 #define CHUNK 64
 #define WG_M 256
-#define WG_N 128
 #define SG_M 32
-#define SG_N 32
 #define NA 4
+#if I8_WIDE
+// I8_WIDE: pf_gemm's own tile shape - WG 256 x 256, per sub-group 32 m x 64 n (four
+// n-atoms), 32 dpas per 64-k chunk instead of 16 for the same A message. Each
+// accumulator still sums the same k32 products in the same order, so its int32
+// sums - and with them the fp32 epilogue - are the narrow tile's bytes.
+#define WG_N 256
+#define SG_N 64
+#define NB 4
+#else
+#define WG_N 128
+#define SG_N 32
 #define NB 2
+#endif
 #if SILU_EPI
 // pf_gemm.cl's chain, verbatim (the numerics contract with pf_prep.cl).
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
@@ -287,8 +322,16 @@ __kernel void pf_gemm_i8(__global const ushort* restrict xq16, __global const fl
                          __global const uint* restrict w8, __global const float* restrict ws,
                          __global float* restrict C, uint M, uint K, uint N, uint ldxq, uint ldb,
                          uint ldc) {
+#if I8_RASTER
+  // pf_gemm's RASTER order: the N axis fastest, so a wave holds fewer row blocks and each A row block is read
+  // from memory once per slab rather than once per wave.
+  const uint wid = get_group_id(0) + get_num_groups(0) * get_group_id(1);
+  const uint m0 = (wid / get_num_groups(1)) * WG_M;
+  const uint n0 = (wid % get_num_groups(1)) * WG_N;
+#else
   const uint m0 = get_group_id(0) * WG_M;
   const uint n0 = get_group_id(1) * WG_N;
+#endif
   const uint s = get_sub_group_id();
   const uint mb = m0 + SG_M * (s >> 2);
   const uint nb = n0 + SG_N * (s & 3u);
@@ -309,9 +352,15 @@ __kernel void pf_gemm_i8(__global const ushort* restrict xq16, __global const fl
     const int kpf = pf * CHUNK;
     intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)xq16, x_w, x_h, x_p,
                                                   (int2)(kpf / 2, (int)(m0 + 8u * s)));
+#if I8_WIDE
+    intel_sub_group_2d_block_prefetch_32b_8r16x1c(
+        (__global void*)w8, b_w, b_h, b_p,
+        (int2)((int)(n0 + 16u * (s >> 1)), kpf / 4 + 8 * (int)(s & 1u)));
+#else
     intel_sub_group_2d_block_prefetch_32b_4r16x1c(
         (__global void*)w8, b_w, b_h, b_p,
         (int2)((int)(n0 + 16u * (s >> 2)), kpf / 4 + 4 * (int)(s & 3u)));
+#endif
   }
 
   for (uint ch = 0; ch < NCH; ++ch) {
@@ -332,9 +381,15 @@ __kernel void pf_gemm_i8(__global const ushort* restrict xq16, __global const fl
       const int kpf = (int)((ch + 2u) * CHUNK);
       intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)xq16, x_w, x_h, x_p,
                                                     (int2)(kpf / 2, (int)(m0 + 8u * s)));
+#if I8_WIDE
+      intel_sub_group_2d_block_prefetch_32b_8r16x1c(
+          (__global void*)w8, b_w, b_h, b_p,
+          (int2)((int)(n0 + 16u * (s >> 1)), kpf / 4 + 8 * (int)(s & 1u)));
+#else
       intel_sub_group_2d_block_prefetch_32b_4r16x1c(
           (__global void*)w8, b_w, b_h, b_p,
           (int2)((int)(n0 + 16u * (s >> 2)), kpf / 4 + 4 * (int)(s & 3u)));
+#endif
     }
 
     #pragma unroll
@@ -361,24 +416,29 @@ __kernel void pf_gemm_i8(__global const ushort* restrict xq16, __global const fl
   // mainloop above already names the A operand's x_*.
   __global ushort* restrict X = (__global ushort*)C;
   const int o_w = (int)(N * 2u), o_h = (int)M, o_p = (int)(ldc * 2u);
-  const float wg = as_float(intel_sub_group_block_read((__global const uint*)(ws + nb)));
-  const float wu = as_float(intel_sub_group_block_read((__global const uint*)(ws + nb + 16u)));
+  // I8_WIDE: atoms 2p and 2p + 1 are pair p's gate and up blocks, at gate column nb + 32 p.
 #define PF_SILU_ROW_I8(r)                                                     \
   do {                                                                        \
     const float xsr = xs[mb + 8u * (uint)a + r];                              \
-    const float g = (float)acc[a][0].s##r * (wg * xsr);                       \
-    const float u = (float)acc[a][1].s##r * (wu * xsr);                       \
+    const float g = (float)acc[a][2 * p].s##r * (wg * xsr);                   \
+    const float u = (float)acc[a][2 * p + 1].s##r * (wu * xsr);               \
     const ushort g_b = rne_bf16(g), u_b = rne_bf16(u);                        \
     const ushort s_b = rne_bf16(silu_f32(bf16f(g_b)));                        \
     xv[r] = rne_bf16(bf16f(s_b) * bf16f(u_b));                                \
   } while (0)
 #pragma unroll
-  for (int a = 0; a < NA; ++a) {
-    ushort xv[8];
-    PF_SILU_ROW_I8(0); PF_SILU_ROW_I8(1); PF_SILU_ROW_I8(2); PF_SILU_ROW_I8(3);
-    PF_SILU_ROW_I8(4); PF_SILU_ROW_I8(5); PF_SILU_ROW_I8(6); PF_SILU_ROW_I8(7);
-    intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, o_w, o_h, o_p,
-                                               (int2)((int)(nb >> 1), (int)(mb + 8u * (uint)a)), xv);
+  for (int p = 0; p < NB / 2; ++p) {
+    const uint ng = nb + 32u * (uint)p;
+    const float wg = as_float(intel_sub_group_block_read((__global const uint*)(ws + ng)));
+    const float wu = as_float(intel_sub_group_block_read((__global const uint*)(ws + ng + 16u)));
+#pragma unroll
+    for (int a = 0; a < NA; ++a) {
+      ushort xv[8];
+      PF_SILU_ROW_I8(0); PF_SILU_ROW_I8(1); PF_SILU_ROW_I8(2); PF_SILU_ROW_I8(3);
+      PF_SILU_ROW_I8(4); PF_SILU_ROW_I8(5); PF_SILU_ROW_I8(6); PF_SILU_ROW_I8(7);
+      intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, o_w, o_h, o_p,
+                                                 (int2)((int)(ng >> 1), (int)(mb + 8u * (uint)a)), xv);
+    }
   }
 #undef PF_SILU_ROW_I8
 #else

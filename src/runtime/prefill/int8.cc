@@ -31,6 +31,12 @@ void check_weight(const loader::DeviceWeight& w, uint32_t max_k) {
   require(sh.layout != 0 || w.scales != nullptr, "layout 0 weight has no independent scales allocation");
 }
 
+// The walk's slab: the whole 1024-column slabs w8_slab ([max_k / 4][1024] u32, max_k x 1024 bytes)
+// holds at this rotated K, at most N.
+uint32_t slab_cols(const model::GemvShape& sh, uint32_t max_k) {
+  return std::min(sh.N, max_k / int8_padded_k(sh.K) * kNs);
+}
+
 // Everything linear_l0's walks require, on the h8 path. `rows`: the fewer of the two
 // scratches' chunk caps (PrefillScratch's partials, Int8State's xq / xs).
 void check_walk(const loader::DeviceWeight& w, uint32_t M, uint32_t max_k, uint32_t rows) {
@@ -44,6 +50,8 @@ void check_walk(const loader::DeviceWeight& w, uint32_t M, uint32_t max_k, uint3
 
 // The shared walk: quantise x once, then per slab requant into w8_slab and one
 // GEMM whose output pointer and pitch `c_at(n0)` / `ldc` choose the epilogue.
+// A slab is as many 1024-column slabs as w8_slab holds at this K (gate||up's K 5120:
+// 3072 columns, down's 17408: 1024) - fewer, larger launches, the same bytes.
 // All on cx's in-order list; no host wait except the instrument's.
 template <class COut>
 void walk(Context& cx, KernelCache& kc, Int8State& q, const loader::DeviceWeight& w,
@@ -61,21 +69,23 @@ void walk(Context& cx, KernelCache& kc, Int8State& q, const loader::DeviceWeight
   const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
   const float* ws = sc.first.as<float>();
   l0::Mem& w8 = q.w8_slab();
+  const uint32_t ns = slab_cols(sh, q.max_k());
 
   // x [pad256(M)][K] at pitch K -> xq [pad256(M)][Kq] int8, xs [pad256(M)].
   cx.launch(quant, Mp, 1, 1,
             {PtrArg(x), PtrArg(sgn.ptr()), PtrArg(q.xq().ptr()), PtrArg(q.xs().ptr()),
              arg_val(sh.K)});
   profile_wait(cx, Phase::kI8Quant);
-  for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
-    cx.launch(requant, kNs / 16, int8_padded_k(sh.K) / kRotBlock, 1,
+  for (uint32_t n0 = 0; n0 < sh.N; n0 += ns) {
+    const uint32_t wn = std::min(ns, sh.N - n0);
+    cx.launch(requant, wn / 16, int8_padded_k(sh.K) / kRotBlock, 1,
               {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(sc.second.ptr()),
-               PtrArg(w8.ptr()), arg_val(n0), arg_val(sh.N), arg_val(sh.K), arg_val(kNs)});
+               PtrArg(w8.ptr()), arg_val(n0), arg_val(sh.N), arg_val(sh.K), arg_val(wn)});
     profile_wait(cx, Phase::kI8Requant);
-    cx.launch(gemm, Mp / 256, kNs / 128, 1,
+    cx.launch(gemm, Mp / 256, wn / kernels::kPfGemmI8WgN, 1,
               {PtrArg(q.xq().ptr()), PtrArg(q.xs().ptr()), PtrArg(w8.ptr()), PtrArg(ws + n0),
-               PtrArg(c_at(n0)), arg_val(Mp), arg_val(Kq), arg_val(kNs), arg_val(ldxq),
-               arg_val(kNs), arg_val(ldc)});
+               PtrArg(c_at(n0)), arg_val(Mp), arg_val(Kq), arg_val(wn), arg_val(ldxq),
+               arg_val(wn), arg_val(ldc)});
     profile_wait(cx, Phase::kI8Gemm);
   }
 }
@@ -165,7 +175,10 @@ size_t Int8State::bytes() const {
   return b;
 }
 
-size_t linear_i8_launches(const model::GemvShape& sh) { return 1 + 2 * (size_t(sh.N) / kNs); }
+size_t linear_i8_launches(const model::GemvShape& sh, uint32_t max_k) {
+  const uint32_t ns = slab_cols(sh, max_k);
+  return 1 + 2 * size_t((sh.N + ns - 1) / ns);
+}
 
 void linear_i8(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
                const loader::DeviceWeight& w, const uint16_t* x, uint32_t M, float* out) {

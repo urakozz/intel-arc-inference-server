@@ -1,9 +1,11 @@
 # Prior art: what to borrow, what to avoid
 
-This document lists the other projects whose code taught this one something, what each is good for, and the traps
-found in them. It is for a reader about to write a kernel or chase a driver surprise who wants to know where to
-look first. None of it is built into the engine: the engine is C++ on Level Zero with its own OpenCL C kernels,
-and these projects are references to read.
+This document lists the libraries and code bases whose source taught this project something, what each is good
+for, and the traps found in them. It is for a reader about to write a kernel or chase a driver surprise who wants to
+know where to look first.
+
+None of it is built into the engine. The engine is C++ on Level Zero with its own OpenCL C kernels, and these
+projects are references to read.
 
 ## `sycl-tla`, the kernel templates
 
@@ -33,8 +35,7 @@ for CRI with the comment "Skip int8 x int4 for CRI as the dpas is removed". No m
 `include/cutlass/gemm/collective/xe_mma_mixed_input.hpp` still widens int4 to 16 bits before the multiply. So the
 instruction is reachable at the atom level, and what is missing is a mainloop, not a driver feature.
 
-That looked for a while like the most attractive opening in this document. It is closed. The mixed builtin's K is
-32, the same as int8's, so it runs at 2.000x bf16 rather than 4x, and a W4A8 kernel built on it measured slower
+It does not pay, though. The mixed builtin's K is 32, the same as int8's, so it runs at 2.000x bf16 rather than 4x, and a W4A8 kernel built on it measured slower
 than the bf16 two-pass control once its activation quantiser was counted ([01-hardware.md](01-hardware.md) and
 [02-formats.md](02-formats.md)).
 
@@ -96,7 +97,7 @@ and it failed a bitwise identity extraction against our dequant oracle on 39.6 %
 
 ## Traps inherited from the vLLM XPU work
 
-These were all hit in production on this hardware, and they are expensive to rediscover.
+These were all hit while running vLLM on this hardware, and they are expensive to rediscover.
 
 ### Kernels must be capture-safe by construction
 

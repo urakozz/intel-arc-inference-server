@@ -12,10 +12,9 @@
 # Nothing is deleted. A full tools/box_validate.sh launch runs it with --dry-run (the list only).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.."
-_box_env="$PWD/tools/box.env"
-# shellcheck source=/dev/null
-[ -r "$_box_env" ] && . "$_box_env"
-: "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
+# shellcheck source=tools/box_env.sh
+. tools/box_env.sh
+: "${BOX:?set BOX=user@host in .env in the main checkout root (see .env.example) or in the environment}"
 dry=0
 [ "${1:-}" = --dry-run ] && dry=1
 # The local branches, as the box tree names tools/box_dir.sh gives them: spec<N>[.<M>][<letter>]... -> spec17c,

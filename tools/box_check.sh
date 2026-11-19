@@ -23,7 +23,7 @@
 #   --card N                section 3's card
 #   --no-tests              sections 1 and 2 only
 #
-# Logs on the box under ~/b70/logs/box-check/<tree>. BOX as for tools/box.sh (tools/box.env).
+# Logs on the box under ~/b70/logs/box-check/<tree>. BOX as for tools/box.sh (.env).
 # Exit status 0 when no section FAILs.
 set -u
 
@@ -41,12 +41,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# shellcheck source=/dev/null
-# A worktree has no tools/box.env of its own (untracked): fall back to the main checkout's.
-for f in "$root/tools/box.env" "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/../tools/box.env"; do
-  [ -z "${BOX:-}" ] && [ -r "$f" ] && . "$f"
-done
-: "${BOX:?set BOX=user@host in the environment or in tools/box.env}"
+# shellcheck source=tools/box_env.sh
+. "$root/tools/box_env.sh"
+: "${BOX:?set BOX=user@host in .env in the main checkout root (see .env.example) or in the environment}"
 export BOX
 # shellcheck source=tools/box_dir.sh
 . "$root/tools/box_dir.sh"

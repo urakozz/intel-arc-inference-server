@@ -270,9 +270,13 @@ struct MoePrefillLayout {
 MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk_cap = 2048);
 // tmax(C): the tile table's fixed length for a C-row chunk - the grouped GEMMs' grid.
 uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
-// Phase 3 Task 2: the l0 backend's persistent pf_gemm B slabs of a MoE model's layers [first, last) - every layer's
+// The prompt pass's GDN a||b on the dense GEMM (prefill::ab_on_gemm): a MoE model (phase 3 Task 2), and Qwen3.8 at
+// its one-card GDN heads (16 / 48; a tensor-parallel card's 8 / 24 keep the GEMV).
+bool prefill_ab_on_gemm(const model::ModelDesc& desc);
+// Phase 3 Task 2: the persistent pf_gemm B slabs of layers [first, last) - a MoE model's every layer's
 // router || shared gate, bf16 [hidden][pf_route_slab_pitch(router_n)], and every GDN layer's a||b, bf16
-// [hidden][pf_route_slab_pitch(128)] (PrefillScratch::gemm_slab; Ornith 40 x 2 MiB + 30 x 1 MiB). 0 when dense.
+// [hidden][pf_route_slab_pitch(128)] (PrefillScratch::gemm_slab; Ornith 40 x 2 MiB + 30 x 1 MiB, Qwen3.8 48 x
+// 2.5 MiB). 0 when prefill_ab_on_gemm is false.
 size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last);
 // Open-work 38: a MoE model's mixer linears (qkv||z and out_proj, q||k||v and o_proj) unpacked to bf16 once
 // (prefill::make_dense_slabs, PrefillScratch::gemm_slab), K x N each - Ornith 2.56 GB. 0 when dense.

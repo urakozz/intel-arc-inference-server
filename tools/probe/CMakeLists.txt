@@ -997,6 +997,31 @@ foreach(_pvr 1 2)
                    OPTIONS -cl-intel-256-GRF-per-thread)
   list(APPEND PVD_TARGETS kernel_vdpas_wide_pvr${_pvr}_M16)
 endforeach()
+# The 5..8-row lines' PAIR split at KS 4 as SOLO (DSPLIT 256: S by key atom and SRB row blocks, one softmax owner a row
+# block, P V by dim atom over the slice), PVX to 8 sub-groups a slice (32 a work-group): `vdpas_solo_M<M>[_KV8]` SRB 2,
+# `vdpas_solo3_M8[_KV8]` SRB 3 (attn_verify_bitwise_test --cand vdpas_solo_, probe_kv8_decode arms).
+if(B70_VERIFY_M8 AND B70_KV8)
+  set(_solo_pvx_5 4)
+  set(_solo_pvx_6 3)
+  set(_solo_pvx_7 2)
+  set(_solo_pvx_8 2)
+  foreach(_arm "solo;5;2" "solo;6;2" "solo;7;2" "solo;8;2" "solo3;8;3")
+    list(GET _arm 0 _tag)
+    list(GET _arm 1 MM)
+    list(GET _arm 2 _srb)
+    foreach(_kv 0 1)
+      set(_sfx "")
+      if(_kv)
+        set(_sfx _KV8)
+      endif()
+      add_ocloc_kernel(vdpas_${_tag}_M${MM}${_sfx} SOURCE ${PVD_CL}
+                       DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1
+                               PAIR=1 PVX=${_solo_pvx_${MM}} SRB=${_srb} KV8=${_kv}
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+      list(APPEND PVD_TARGETS kernel_vdpas_${_tag}_M${MM}${_sfx})
+    endforeach()
+  endforeach()
+endif()
 add_custom_target(pvd_kernels DEPENDS ${PVD_TARGETS})
 add_executable(probe_verify_attn probe_verify_attn.cc)
 target_include_directories(probe_verify_attn PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -1405,7 +1430,8 @@ if(B70_ORNITH)
   b70_target_kernel_dir(probe_gdn_arms)
   add_dependencies(probe_gdn_arms kernel_pf_gdn_scan_pf1_GK16V32 kernel_pf_gdn_scan_pf2_GK16V32
                    kernel_pf_gdn_scan_cvt_GK16V32 kernel_pf_gdn_intra_cvt_GK16V32 kernel_pf_gdn_intra_GK16V32
-                   kernel_pf_gdn_scan_GK16V32 ${_pga_diag})
+                   kernel_pf_gdn_scan_GK16V32 ${_pga_diag} kernel_pf_gdn_scan kernel_pf_gdn_scan_OB kernel_pf_gdn_wy
+                   kernel_pf_gated_head kernel_pf_gated_head_OB kernel_pf_gdn_wy_WB)
 endif()
 
 # --- probe_route: phase 2 Task 6, pf_route.cl's tilings against pf_ab_proj (bitwise, then time); phase 3 Task 1: + the
@@ -1487,3 +1513,36 @@ add_executable(probe_moe_int8_replay probe_moe_int8_replay.cc)
 target_include_directories(probe_moe_int8_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_moe_int8_replay PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0)
 b70_target_kernel_dir(probe_moe_int8_replay)
+
+# --- probe_pf_attn_long: the full-chunk prefill attention deep in the cache, today's binary against PAIR ---------
+# `pfal_H<hpw>[_Q16KV2]` is src/kernels/prefill/pf_flash_attn.cl's PAIR form (two sub-groups share 16 rows of a head) at
+# HPW q-heads a work-group. No production binary binds these.
+set(PFAL_TARGETS "")
+foreach(H 1 2 3 6)
+  add_ocloc_kernel(pfal_H${H} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=16 HPW=${H} QREG=0 EXP2=1 PAIR=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND PFAL_TARGETS kernel_pfal_H${H})
+endforeach()
+if(B70_ORNITH)
+  foreach(H 1 2 4 8)
+    add_ocloc_kernel(pfal_H${H}_Q16KV2 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl
+                     DEFINES KT=64 RPW=16 HPW=${H} QREG=0 EXP2=1 PAIR=1 FA_Q_HEADS=16 FA_KV_HEADS=2
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PFAL_TARGETS kernel_pfal_H${H}_Q16KV2)
+  endforeach()
+endif()
+# `pfal_kv8_H<hpw>` (--kv8): src/kernels/kv8.cl's KV8_PAIR form over the widened int8 rows at HPW q-heads a work-group.
+if(B70_KV8)
+  foreach(H 1 2 3 6)
+    add_ocloc_kernel(pfal_kv8_H${H} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/kv8.cl
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=${H} QREG=0 EXP2=1 KV8_PAIR=1
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PFAL_TARGETS kernel_pfal_kv8_H${H})
+  endforeach()
+endif()
+add_executable(probe_pf_attn_long probe_pf_attn_long.cc)
+target_include_directories(probe_pf_attn_long PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_pf_attn_long PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model pthread)
+b70_target_kernel_dir(probe_pf_attn_long)
+get_property(PFAL_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_pf_attn_long ${PFAL_TARGETS} ${PFAL_KERNELS})

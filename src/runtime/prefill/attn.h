@@ -75,9 +75,10 @@ const char* attn_mode_name(AttnMode m);
 // 0 runs today's one-pass launch (bitwise as before); otherwise the key range [0, pos) is cut
 // into flash_split_count(pos, span) spans of `span` keys (a multiple of the 64-key tile), one
 // work-group each per 8 rows and kv head, folded by pf_flash_merge (attn.cc has the measurement
-// behind the rule). Built at Qwen3.8's heads (24 / 4) and a tensor-parallel card's (12 / 2); any
-// other model keeps today's launch. Auto is the engine's; Off / On are a test seam (the timing
-// pairs and the f32 judge's two runs): On splits whenever a split is possible (pos >= 64).
+// behind the rule). Built at Qwen3.8's heads (24 / 4), a tensor-parallel card's (12 / 2) and Ornith's
+// (16 / 2, whose prefill walk gates in the merge); any other model keeps today's launch. Auto is the
+// engine's; Off / On are a test seam (the timing pairs and the f32 judge's two runs): On splits whenever
+// a split is possible (pos >= 64).
 enum class FlashSplit { Auto, Off, On };
 FlashSplit flash_split_mode();
 void set_flash_split_for_test(FlashSplit m);
@@ -163,14 +164,13 @@ inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, Prefill
 inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b, uint32_t pos = 0) {
   return attn_chunk_launches(d, C, b, attn_mode(), pos);
 }
-// MoE prefill phase 3: Ornith's 16 / 2 heads gate inside the 32-row flash launch on a bf16 cache (the prefill walk), so
-// the walk's gate launch is 0 there; the int8 cache keeps pf_attn_gate_kv8.
-inline bool attn_gate_fused(const model::ModelDesc& d, uint32_t C, uint32_t pos, KvCache kv) {
-  return kv == KvCache::Bf16 && attn_mode() == AttnMode::Flash && d.fa_q_heads == 16 && d.fa_kv_heads == 2 &&
-         flash_split_span(d, pos, C) == 0;
+// MoE prefill phase 3: Ornith's 16 / 2 heads gate inside the pair flash launch on a bf16 cache (the prefill walk), or
+// inside the merge of a split chunk, so the walk's gate launch is 0 there; the int8 cache keeps pf_attn_gate_kv8.
+inline bool attn_gate_fused(const model::ModelDesc& d, KvCache kv) {
+  return kv == KvCache::Bf16 && attn_mode() == AttnMode::Flash && d.fa_q_heads == 16 && d.fa_kv_heads == 2;
 }
-inline size_t attn_gate_launches(const model::ModelDesc& d, uint32_t C, uint32_t pos, KvCache kv) {
-  return attn_gate_fused(d, C, pos, kv) ? 0 : kAttnGateLaunches;
+inline size_t attn_gate_launches(const model::ModelDesc& d, KvCache kv) {
+  return attn_gate_fused(d, kv) ? 0 : kAttnGateLaunches;
 }
 
 }  // namespace runtime::prefill

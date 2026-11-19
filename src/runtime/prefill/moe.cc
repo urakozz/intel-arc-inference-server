@@ -8,6 +8,7 @@
 #include "runtime/buffer_sizes.h"
 #include "loader/loader.h"
 #include "runtime/prefill/backend.h"
+#include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/profile.h"
@@ -160,10 +161,10 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
 void make_route_slabs(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m, uint32_t first,
                       uint32_t last) {
   const model::ModelDesc& d = *m.desc;
-  if (!d.is_moe()) return;
+  if (!ab_on_gemm(d)) return;
   for (const model::LayerDesc& L : d.layer_descs()) {
     if (L.index < first || L.index >= last) continue;
-    tiled_slab(cx, kc, s, m.moe[L.index - first].router.mem.ptr(), d.moe.router_n(), d.hidden);
+    if (d.is_moe()) tiled_slab(cx, kc, s, m.moe[L.index - first].router.mem.ptr(), d.moe.router_n(), d.hidden);
     if (L.kind == model::LayerKind::GDN) {
       const loader::DeviceWeight& ab = loader::prefill_ab(m, L.index);
       tiled_slab(cx, kc, s, ab.mem.ptr(), ab.shape.N, d.hidden);

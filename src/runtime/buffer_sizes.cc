@@ -239,7 +239,11 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   // S = 1 (ruling R1), so the rectangle is [C][max int4 N] and not
   // [S][C][N] - the sole reason a 2048-row chunk fits at all.
   s.partials = size_t{kC} * max_int4_n(desc) * kFp32;
-  s.ab_out = size_t{kC} * desc.shape(model::LinearId::AB).N * kFp32;
+  // Qwen3.8 on one card: the a||b's dense GEMM rows, fp32 [pad256(kC)][pf_route_slab_pitch(N)] (a MoE model writes
+  // them inside its MoE scratch).
+  s.ab_out = !desc.is_moe() && prefill_ab_on_gemm(desc)
+                 ? size_t{kC + 255} / 256 * 256 * kernels::pf_route_slab_pitch(desc.shape(model::LinearId::AB).N) * kFp32
+                 : size_t{kC} * desc.shape(model::LinearId::AB).N * kFp32;
   s.norm_sumsq = size_t{kNormGroups} * kC * kFp32;
   s.gdn_o = size_t{kC} * desc.gdn_value_dim() * kFp32;
   s.mixer_out = size_t{kC} * mixer_width(desc) * kBf16;
@@ -466,9 +470,15 @@ namespace {
 size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 }  // namespace
 
+bool prefill_ab_on_gemm(const model::ModelDesc& desc) {
+  return desc.is_moe() ||
+         (desc.gdn_k_heads == kernels::kRefGdnKHeads && desc.gdn_v_heads == kernels::kRefGdnVHeads);
+}
+
 size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last) {
-  if (!desc.is_moe()) return 0;
-  const size_t router = size_t{desc.hidden} * kernels::pf_route_slab_pitch(desc.moe.router_n()) * kBf16;
+  if (!prefill_ab_on_gemm(desc)) return 0;
+  const size_t router =
+      desc.is_moe() ? size_t{desc.hidden} * kernels::pf_route_slab_pitch(desc.moe.router_n()) * kBf16 : 0;
   const size_t ab = size_t{desc.hidden} * kernels::pf_route_slab_pitch(desc.shape(model::LinearId::AB).N) * kBf16;
   size_t b = 0;
   for (const model::LayerDesc& L : desc.layer_descs())
