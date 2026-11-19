@@ -185,7 +185,7 @@ contexts (`--one-card`) went from 3 rejected rows with the all-linears form (two
 `l0-int8` together with `--kv-cache int8` is a known failure. Each prefill attention layer then reads K and V rows
 the chunk has just written in int8, and the int8 linears amplify that rounding: about 3 % of tool calls that copy
 exact text from a long prompt come out wrong. The server prints a startup warning for this combination; the `l0`
-prefill or the bf16 cache avoids it. A fix idea is in [low-priority-work.md](low-priority-work.md).
+prefill or the bf16 cache avoids it. A fix is known (read the chunk's own new rows from bf16) and not yet built.
 
 On an MoE model, int8 only in the routed experts is still a speed option with some quality risk, since a near-tie
 between two experts can flip. More generally the int8 path's results drift from the reference every few days,

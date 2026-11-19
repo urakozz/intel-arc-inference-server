@@ -90,7 +90,7 @@ card takes up to 4 slots; two cards run `replica` and split the slots between th
 `pp` refuse N above 1. An explicit `--max-len` that does not fit beside the other slots fails at startup and names
 the memory plan. `--parallel replica` on its own means N = 2, one request a card. A request that runs into the end
 of its slot finishes with `length` and is logged. Tensor parallel with slots was built and ruled out, because
-`replica` is faster for several requests at once ([low-priority-work.md](low-priority-work.md)).
+`replica` is faster for several requests at once.
 
 Why fixed slots and not a shared KV pool? The KV cache holds the attention keys and values of every earlier
 position, and it is most of a request's memory. The engine is tuned for one or two people running local agentic
@@ -99,7 +99,7 @@ reserved at startup, so the main session always has its context, nothing is ever
 later to free memory), and no request races another for memory. vLLM's paged pool, one pool of small KV blocks
 shared by all requests with `max_model_len` the most any one request may reach, uses memory better when request
 sizes vary. The price is block tables in every attention kernel, a preemption policy and the latency spikes it
-causes. That option was considered and postponed ([low-priority-work.md](low-priority-work.md)).
+causes. That option was considered and postponed.
 
 ### How the two cards stay in step under tensor parallel
 

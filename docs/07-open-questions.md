@@ -3,8 +3,7 @@
 This page lists what is genuinely not known about the card and the numerics, ranked by how much the answer would
 change the design. It is for anyone about to design around one of these points: nothing here is settled, and
 nothing here should become an assumption in a design without being measured first. These are questions, not work
-items. Scheduled work is tracked separately and ruled-out work in
-[low-priority-work.md](low-priority-work.md).
+items; scheduled and ruled-out work are tracked separately.
 
 Questions that have been answered are not kept here; their answers live where they are used. The DPAS rate
 landscape (DPAS is the card's matrix multiply-accumulate instruction) is in [01-hardware.md](01-hardware.md), the

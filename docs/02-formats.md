@@ -150,7 +150,6 @@ load to int8 with one scale per row. The KV cache, the stored keys and values of
 with `--kv-cache int8`, a rotated int8 form. And the prefill linears are bf16 or, with
 `--prefill-backend l0-int8`, the Hadamard-rotated int8 path of [16-int8-prefill.md](16-int8-prefill.md), computed
 from the same int4 file. The int8 prefill together with the int8 KV cache is a known fail: the engine warns at
-startup, and about 3 % of tool calls that copy exact text from a long prompt come out wrong
-([low-priority-work.md](low-priority-work.md)).
+startup, and about 3 % of tool calls that copy exact text from a long prompt come out wrong.
 
 MXFP4 and FP8 stay rejected for the reasons above, and no other third-party quantisation format is supported.
