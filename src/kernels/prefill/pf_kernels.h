@@ -95,15 +95,18 @@ inline std::string pf_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRef
 inline std::string pf_flash_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn" + fa_suffix(q, kv);
 }
-// MoE prefill phase 3 Task 7: the same source at RPW 32 / QREG 1 (bitwise the above), built at Ornith's 16 / 2 only
-// (Qwen3.8 and the TP card keep pf_flash_attn); grid (ceil(C / kPfFlashR32Rows), kv-heads, 1).
-constexpr unsigned kPfFlashR32Rows = 32;
-inline std::string pf_flash_attn_r32_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
-  return "pf_flash_attn_r32" + fa_suffix(q, kv);
+// The same source's PAIR form (bitwise the above): two sub-groups share 16 rows of a head, kPfFlashPairHeads heads a
+// work-group; built at Qwen3.8's 24 / 4 and Ornith's 16 / 2 (the TP card keeps pf_flash_attn); grid
+// (ceil(C / kPfFlashPairRows), kv-heads, GQA / kPfFlashPairHeads).
+constexpr unsigned kPfFlashPairRows = 16;
+constexpr unsigned kPfFlashPairHeads = 2;
+inline std::string pf_flash_attn_pair_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_pair" + fa_suffix(q, kv);
 }
-// ... with pf_attn_gate fused into its epilogue: two more arguments (qkv_partials, the o_proj input), pf_o not written.
-inline std::string pf_flash_attn_r32g_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
-  return "pf_flash_attn_r32g" + fa_suffix(q, kv);
+// ... with pf_attn_gate fused into its epilogue (Ornith): two more arguments (qkv_partials, the o_proj input), pf_o not
+// written.
+inline std::string pf_flash_attn_pairg_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_pairg" + fa_suffix(q, kv);
 }
 // Spec 12b (`--kv-cache int8`, src/kernels/kv8.cl): the prefill path over the int8 KV
 // cache - the writer (pf_attn_prep_q16's chain, then rotate and quantise), the flash
@@ -122,6 +125,12 @@ inline std::string pf_flash_attn_kv8_raw_variant(unsigned q = kRefFaQHeads,
                                                  unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn_kv8_raw" + fa_suffix(q, kv);
 }
+// ... its pair form (kv8.cl KV8_PAIR, bitwise the above): kPfFlashPairRows rows, kPfFlashPairHeads heads a work-group;
+// built at Qwen3.8's 24 / 4 (Ornith has no int8-KV prompt path, the TP card keeps the above); grid
+// (ceil(C / kPfFlashPairRows), kv-heads, GQA / kPfFlashPairHeads).
+inline std::string pf_flash_attn_kv8_raw_pair_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_kv8_raw_pair" + fa_suffix(q, kv);
+}
 // 3l (2): the split-K forms for short chunks deep in the cache (pf_flash_attn.cl SPLIT,
 // kv8.cl KV8_SPLIT) and the merge that folds their spans into pf_o (FLASH_MERGE).
 inline std::string pf_flash_attn_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
@@ -135,6 +144,10 @@ inline std::string pf_flash_attn_kv8_raw_split_variant(unsigned q = kRefFaQHeads
 }
 inline std::string pf_flash_merge_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_merge" + fa_suffix(q, kv);
+}
+// ... with pf_attn_gate fused (Ornith, GATE_EPI): two more arguments (qkv_partials, the o_proj input), pf_o not written.
+inline std::string pf_flash_mergeg_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_mergeg" + fa_suffix(q, kv);
 }
 // The a||b projection, mirroring gemv_bf16's {COLS_PER_WG 16, KSPLIT 16}
 // tiling so that at M = 1 it is BIT-IDENTICAL to the binary capture.cc binds.
@@ -243,6 +256,8 @@ inline std::string pf_requant_rot_variant(unsigned layout, bool padded = false) 
   return "pf_requant_rot_L" + std::to_string(layout) + (padded ? "_PAD" : "");
 }
 inline std::string pf_gemm_i8_variant(bool silu) { return silu ? "pf_gemm_i8_SILU" : "pf_gemm_i8"; }
+// pf_gemm_i8's work-group columns (its I8_WIDE tile, 256 x 256): grid (M / 256, N / kPfGemmI8WgN).
+inline constexpr unsigned kPfGemmI8WgN = 256;
 
 // --- Spec 15d: a mixture-of-experts model's prefill (Ornith) -----------------------------
 // The router || shared-gate GEMV over the chunk: pf_gemv_bf16.cl (entry `pf_ab_proj`) at

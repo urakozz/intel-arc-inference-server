@@ -10,7 +10,8 @@
 //               then gemm_l0 (pf_gemm above 1024 rows; gate||up with its SiLU epilogue)
 //   l0_dq       the walk's dequants alone
 //   l0_gemm     the walk's GEMMs alone (each slab reads the slab buffer as it stands)
-//   i8          runtime/prefill/int8.cc's walk: pf_quant_had once, then per slab pf_requant_rot and
+//   i8          runtime/prefill/int8.cc's walk: pf_quant_had once, then per slab (as many 1024-column slabs as
+//               the w8 scratch holds at K) pf_requant_rot and
 //               pf_gemm_i8 (plain, or gate||up's SiLU form), with each layer's own column scales
 //               (pf_colmax_rot + the host finish, as Int8State::compute_scales)
 //   i8_quant / i8_requant / i8_gemm   its three kernels alone
@@ -29,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -188,6 +190,8 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   l0::Kernel& quant = kc(kernels::pf_quant_had_variant(K), "pf_quant_had");
   l0::Kernel& requant = kc(kernels::pf_requant_rot_variant(sh.layout), "pf_requant_rot");
   l0::Kernel& gemm8 = kc(kernels::pf_gemm_i8_variant(sh.silu), "pf_gemm_i8");
+  // int8.cc's slab: the whole 1024-column slabs the w8 scratch holds at this K
+  const uint32_t ns8 = std::min(N, kMaxK / K * kNs);
   l0::Mem& w8 = q.w8_slab();
 
   auto deq = [&](uint32_t n0, uint32_t l) {
@@ -209,18 +213,19 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
               {PtrArg(dx.ptr()), PtrArg(sgn.ptr()), PtrArg(q.xq().ptr()), PtrArg(q.xs().ptr()), arg_val(K)});
   };
   auto rq = [&](uint32_t n0, uint32_t l) {
-    cx.launch(requant, kNs / 16, K / kRot, 1,
+    const uint32_t wn = std::min(ns8, N - n0);
+    cx.launch(requant, wn / 16, K / kRot, 1,
               {PtrArg(bank[l]->words.ptr()), PtrArg(bank[l]->scale_ptr()), PtrArg(bits.ptr()),
-               PtrArg(bank[l]->inv->ptr()), PtrArg(w8.ptr()), arg_val(n0), arg_val(N), arg_val(K), arg_val(kNs)});
+               PtrArg(bank[l]->inv->ptr()), PtrArg(w8.ptr()), arg_val(n0), arg_val(N), arg_val(K), arg_val(wn)});
   };
   auto g8 = [&](uint32_t M, uint32_t n0, uint32_t l, l0::Mem& o) {
-    const uint32_t Mp = pad256(M);
+    const uint32_t Mp = pad256(M), wn = std::min(ns8, N - n0);
     void* c = sh.silu ? static_cast<void*>(o.as<uint16_t>() + n0 / 2) : static_cast<void*>(o.as<float>() + n0);
     const uint32_t ldc = sh.silu ? N / 2 : N;
-    cx.launch(gemm8, Mp / 256, kNs / 128, 1,
+    cx.launch(gemm8, Mp / 256, wn / kernels::kPfGemmI8WgN, 1,
               {PtrArg(q.xq().ptr()), PtrArg(q.xs().ptr()), PtrArg(w8.ptr()),
-               PtrArg(bank[l]->ws->as<float>() + n0), PtrArg(c), arg_val(Mp), arg_val(K), arg_val(kNs),
-               arg_val(K / 2), arg_val(kNs), arg_val(ldc)});
+               PtrArg(bank[l]->ws->as<float>() + n0), PtrArg(c), arg_val(Mp), arg_val(K), arg_val(wn),
+               arg_val(K / 2), arg_val(wn), arg_val(ldc)});
   };
   auto l0_walk = [&](uint32_t M, uint32_t l, l0::Mem& o) {
     for (uint32_t n0 = 0; n0 < N; n0 += kNs) {
@@ -230,11 +235,54 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   };
   auto i8_walk = [&](uint32_t M, uint32_t l, l0::Mem& o) {
     q8(M);
-    for (uint32_t n0 = 0; n0 < N; n0 += kNs) {
+    for (uint32_t n0 = 0; n0 < N; n0 += ns8) {
       rq(n0, l);
       g8(M, n0, l, o);
     }
   };
+
+  // --- reference binaries: when the kernel directory holds pf_quant_had_K<K>_REF / pf_requant_rot_L<l>_REF (another
+  // build's binaries copied in under that name), layer 0's xq, xs and every w8 slab against theirs, every byte -------
+  const std::string qref = kernels::pf_quant_had_variant(K) + "_REF", rref = kernels::pf_requant_rot_variant(sh.layout) + "_REF";
+  if (std::ifstream(kernels::path(qref)).good() && std::ifstream(kernels::path(rref)).good()) {
+    l0::Kernel& quant_ref = kc(qref, "pf_quant_had");
+    l0::Kernel& requant_ref = kc(rref, "pf_requant_rot");
+    const uint32_t M = kMaxRows;
+    auto grab = [&](const l0::Mem& m, size_t n) {
+      cx.wait();
+      std::vector<uint8_t> h(n);
+      copy(ctx, h.data(), m.ptr(), n);
+      return h;
+    };
+    auto qrun = [&](l0::Kernel& k) {
+      cx.launch(k, M, 1, 1,
+                {PtrArg(dx.ptr()), PtrArg(sgn.ptr()), PtrArg(q.xq().ptr()), PtrArg(q.xs().ptr()), arg_val(K)});
+    };
+    size_t bad = 0, total = 0;
+    qrun(quant);
+    const std::vector<uint8_t> xa = grab(q.xq(), size_t(M) * K), sa = grab(q.xs(), size_t(M) * 4);
+    qrun(quant_ref);
+    const std::vector<uint8_t> xb = grab(q.xq(), size_t(M) * K), sb = grab(q.xs(), size_t(M) * 4);
+    for (size_t i = 0; i < xa.size(); ++i) bad += xa[i] != xb[i];
+    for (size_t i = 0; i < sa.size(); ++i) bad += sa[i] != sb[i];
+    total += xa.size() + sa.size();
+    for (uint32_t n0 = 0; n0 < N; n0 += kNs) {
+      auto rrun = [&](l0::Kernel& k) {
+        cx.launch(k, kNs / 16, K / kRot, 1,
+                  {PtrArg(bank[0]->words.ptr()), PtrArg(bank[0]->scale_ptr()), PtrArg(bits.ptr()),
+                   PtrArg(bank[0]->inv->ptr()), PtrArg(w8.ptr()), arg_val(n0), arg_val(N), arg_val(K), arg_val(kNs)});
+      };
+      rrun(requant);
+      const std::vector<uint8_t> wa = grab(w8, size_t(K) * kNs);
+      rrun(requant_ref);
+      const std::vector<uint8_t> wb = grab(w8, size_t(K) * kNs);
+      for (size_t i = 0; i < wa.size(); ++i) bad += wa[i] != wb[i];
+      total += wa.size();
+    }
+    std::printf("REFBIN {\"shape\":\"%s\",\"quant\":\"%s\",\"requant\":\"%s\",\"bytes\":%zu,\"differ\":%zu}\n",
+                sh.tag, qref.c_str(), rref.c_str(), total, bad);
+    if (bad) throw std::runtime_error(std::string(sh.tag) + ": the rotation kernels differ from the reference binaries");
+  }
 
   // --- sanity: layer 0, int8 vs bf16 arithmetic of the same linear --------------------------------
   for (uint32_t M : rows) {
@@ -274,8 +322,8 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
     arms.push_back({"l0_gemm", M, [&, M] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) gemm16(M, n0, out_a); }});
     arms.push_back({"i8", M, [&, M] { for (uint32_t l = 0; l < L; ++l) i8_walk(M, l, out_b); }});
     arms.push_back({"i8_quant", M, [&, M] { for (uint32_t l = 0; l < L; ++l) q8(M); }});
-    arms.push_back({"i8_requant", M, [&] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) rq(n0, l); }});
-    arms.push_back({"i8_gemm", M, [&, M] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) g8(M, n0, l, out_b); }});
+    arms.push_back({"i8_requant", M, [&] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += ns8) rq(n0, l); }});
+    arms.push_back({"i8_gemm", M, [&, M] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += ns8) g8(M, n0, l, out_b); }});
   }
   auto timed = [&](const std::function<void()>& launches) {
     const auto start = std::chrono::steady_clock::now();

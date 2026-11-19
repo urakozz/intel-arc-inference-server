@@ -4,7 +4,7 @@
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
 - **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
-- **Prompts read at 2,083 t/s on one card, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
+- **Prompts read at 1,905 t/s on one card with MTP on, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 - **Ornith 1.5 35B-A3B:** prompts read at **11,036 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 - **Qwen3.8-Flash-Next:** prompts read at **3,103 t/s**, code written at **82-92 t/s** (two cards, experts offloaded to RAM).
@@ -21,12 +21,12 @@ arrives faster. A **prefix cache hit** is a follow-up turn whose earlier convers
 
 Prefill, t/s:
 
-| setup | 4k prompt | 16k prompt |
-|---|---:|---:|
-| one card | 1,788 | 1,624 |
-| one card, `--prefill-backend l0-int8` (opt-in) | 2,083 | 1,845 |
-| two cards, `tp` | 2,931 | 2,683 |
-| two cards, `tp`, `--prefill-backend l0-int8` (opt-in) | **3,217** | **2,937** |
+| setup | 4k prompt | 16k prompt | 64k prompt |
+|---|---:|---:|---:|
+| one card, MTP on (the default server) | 1,667 | - | 1,236 |
+| one card, MTP on, `--prefill-backend l0-int8` (opt-in) | 1,905 | - | 1,448 |
+| two cards, `tp`, MTP off | 2,931 | 2,683 | - |
+| two cards, `tp`, MTP off, `--prefill-backend l0-int8` (opt-in) | **3,217** | **2,937** | - |
 
 Generation, t/s (several requests: the total; llama-benchy tg128 at 0 / 32k tokens of context):
 

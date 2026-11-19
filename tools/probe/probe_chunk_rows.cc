@@ -179,7 +179,7 @@ Result run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefi
                  PtrArg(w8.ptr()), arg_val(n0), arg_val(N), arg_val(K), arg_val(kNs)});
       void* c = sh.silu ? static_cast<void*>(reinterpret_cast<uint16_t*>(ob) + n0 / 2)
                         : static_cast<void*>(reinterpret_cast<float*>(ob) + n0);
-      cx.launch(gemm8, M / 256, kNs / 128, 1,
+      cx.launch(gemm8, M / 256, kNs / kernels::kPfGemmI8WgN, 1,
                 {PtrArg(xq.ptr()), PtrArg(xs.ptr()), PtrArg(w8.ptr()), PtrArg(dws.as<float>() + n0),
                  PtrArg(c), arg_val(M), arg_val(K), arg_val(kNs), arg_val(ldxq), arg_val(kNs),
                  arg_val(ldc)});

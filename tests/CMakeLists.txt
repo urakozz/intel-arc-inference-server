@@ -277,6 +277,17 @@ add_dependencies(pf_prep_test
   kernel_prep_silu_mul_M1)
 add_test(NAME pf_prep_test COMMAND pf_prep_test)
 
+# The residual fold + RMSNorm in one launch against the pair, every byte (Qwen3.8's 5120 here; Ornith's 2048 below).
+add_executable(pf_norm_fused_test prefill/pf_norm_fused_test.cc)
+target_include_directories(pf_norm_fused_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                           ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(pf_norm_fused_test PRIVATE b70_l0)
+b70_target_kernel_dir(pf_norm_fused_test)
+add_dependencies(pf_norm_fused_test kernel_pf_res_fold_K5120_SP0_G20 kernel_pf_res_fold_K5120_SP1_G20
+                 kernel_pf_norm_finish_K5120_G20_W20 kernel_pf_res_norm_K5120_SP0_G20 kernel_pf_res_norm_K5120_SP1_G20)
+add_test(NAME pf_norm_fused_qwen_test COMMAND pf_norm_fused_test 5120)
+set_tests_properties(pf_norm_fused_qwen_test PROPERTIES LABELS "prefill")
+
 add_executable(pf_gemv_test prefill/pf_gemv_test.cc)
 target_include_directories(pf_gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
                            ${CMAKE_SOURCE_DIR}/tests/kernels)
@@ -329,7 +340,7 @@ target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
                            ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gdn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
 b70_target_kernel_dir(gdn_chunk_test)
-add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
+add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gdn_front_PL kernel_pf_gdn_scan_OB kernel_pf_gated_head_OB kernel_pf_gdn_wy_WB
   kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
 add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
 set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
@@ -353,7 +364,7 @@ target_include_directories(attn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
                            ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(attn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
 b70_target_kernel_dir(attn_chunk_test)
-add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16 kernel_pf_flash_attn
+add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16 kernel_pf_flash_attn kernel_pf_flash_attn_pair
                  kernel_pf_gemm_T0 kernel_pf_gemm_T1)
 add_test(NAME attn_chunk_test COMMAND attn_chunk_test)
 set_tests_properties(attn_chunk_test PROPERTIES TIMEOUT 3600)
@@ -454,7 +465,7 @@ endif()
 
 # 3l: the production attn_verify_dpas[_kv8] against its frozen copy (kernels/attn_verify_control.cl, main 865da900's
 # source with main's levers and options, hardcoded here so a lever change shows up as a mismatch), every partial and
-# reduced word, bf16 at M = 2..8 (2..4 without B70_VERIFY_M8) and int8 at M = 2..4.
+# reduced word, bf16 and int8 at M = 2..8 (2..4 without B70_VERIFY_M8).
 if(B70_VERIFY_DPAS AND B70_MTP AND B70_KV8)
   set(_vctl_m 2 3 4)
   if(B70_VERIFY_M8)
@@ -466,9 +477,6 @@ if(B70_VERIFY_DPAS AND B70_MTP AND B70_KV8)
       set(_sfx "")
       if(_kv)
         set(_sfx _KV8)
-        if(MM GREATER 4)
-          continue()
-        endif()
       endif()
       add_ocloc_kernel(attn_verify_control_M${MM}${_sfx} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/attn_verify_control.cl
         DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1 KV8=${_kv}
@@ -515,6 +523,12 @@ b70_target_kernel_dir(gemv_bf16_test)
 # to the reference tolerance (spec 1.5 lever L2 reorders the sum).
 add_dependencies(gemv_bf16_test kernel_gemv_bf16_M1_K5120_N128
   kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
+# Item 40: the ROWG builds against the plain 16-row ones.
+if(B70_MTP AND B70_VERIFY_M8)
+  add_dependencies(gemv_bf16_test kernel_gemv_bf16_M16_K5120_N128_C16_S16 kernel_gemv_bf16_M16_K10240_N5120
+    kernel_gemv_bf16_M16_K5120_N14336 kernel_gemv_bf16_M8_K5120_N128_C16_S16_RG kernel_gemv_bf16_M8_K10240_N5120_RG
+    kernel_gemv_bf16_M8_K5120_N14336_RG)
+endif()
 add_test(NAME gemv_bf16_test COMMAND gemv_bf16_test)
 
 # Spec 9 (plan 9b Task 2): the int8 lm_head GEMV at its real shape, M = 1 and 4, against
@@ -1020,9 +1034,10 @@ set(B70_PREFILL_KERNELS
   kernel_pf_gemm_q4_A8_B1_S4_L0_SLM_SILU
   kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
   kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
-  kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj
-  kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn kernel_pf_flash_attn_split kernel_pf_flash_merge
+  kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj kernel_pf_route_slab_K5120_N128_P256 kernel_pf_gdn_conv_AB256
+  kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn kernel_pf_flash_attn_pair kernel_pf_flash_attn_split kernel_pf_flash_merge
   kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
+  kernel_pf_gdn_front_PL kernel_pf_gdn_scan_OB kernel_pf_gated_head_OB kernel_pf_gdn_wy_WB
   kernel_pf_dequant_tile_K5120_N16384_L1_T0
   kernel_pf_dequant_tile_K6144_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N34816_L0_T0
@@ -1171,7 +1186,7 @@ set_tests_properties(prefill_turns_test PROPERTIES LABELS "checkpoint;golden;pre
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 if(B70_KV8)
   add_dependencies(prefill_turns_test kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8
-    kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split)
+    kernel_pf_flash_attn_kv8_raw_pair kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split)
   add_test(NAME prefill_turns_kv8_test COMMAND prefill_turns_test ${B70_TEST_SNAPSHOT} int8)
   set_tests_properties(prefill_turns_kv8_test PROPERTIES LABELS "checkpoint;golden;prefill;kv8"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
@@ -1798,8 +1813,8 @@ if(B70_KV8)
     kernel_attn_prep_M1_KV8 kernel_attn_prep_M2_KV8 kernel_attn_prep_M3_KV8 kernel_attn_prep_M4_KV8
     kernel_attn_v2_M1_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M2_T${ATTN_V2_TGT}_KV8
     kernel_attn_v2_M3_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M4_T${ATTN_V2_TGT}_KV8
-    kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8
-    kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split)
+    kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_flash_attn_kv8_raw_pair
+    kernel_pf_attn_gate_kv8 kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split)
   if(B70_MTP)
     list(APPEND B70_KV8_KERNELS kernel_attn_prep_M1_S1_KV8 kernel_attn_prep_M2_S1_KV8
       kernel_attn_prep_M3_S1_KV8 kernel_attn_prep_M4_S1_KV8)
@@ -1832,7 +1847,7 @@ if(B70_KV8)
   target_link_libraries(kv8_flash_bitwise_test PRIVATE b70_l0)
   b70_target_kernel_dir(kv8_flash_bitwise_test)
   add_dependencies(kv8_flash_bitwise_test kernel_kv8_flash_control
-    kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8)
+    kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_flash_attn_kv8_raw_pair kernel_pf_attn_gate_kv8)
   # 3l (2): the split-K short-chunk attention (both KV forms) against today's kernels and fp64.
   add_executable(flash_split_test prefill/flash_split_test.cc)
   target_include_directories(flash_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -1848,6 +1863,9 @@ if(B70_KV8)
   add_test(NAME kv8_flash_raw_bitwise_test COMMAND kv8_flash_bitwise_test
     ${B70_KERNEL_DIR}/pf_flash_attn_kv8_raw.bin --raw)
   set_tests_properties(kv8_flash_raw_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 1800)
+  add_test(NAME kv8_flash_raw_pair_bitwise_test COMMAND kv8_flash_bitwise_test
+    ${B70_KERNEL_DIR}/pf_flash_attn_kv8_raw_pair.bin --raw --pair)
+  set_tests_properties(kv8_flash_raw_pair_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 1800)
 
   add_ocloc_kernel(kv8_scale_test SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_scale_test.cl
     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
@@ -2035,7 +2053,8 @@ if(B70_ORNITH)
     kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32
     kernel_pf_gated_head_GK16V32 kernel_pf_gdn_intra_GK16V32 kernel_pf_gdn_front_GK16V32 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20
     kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
-    kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_r32_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
+    kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_pair_Q16KV2 kernel_pf_flash_attn_pairg_Q16KV2
+    kernel_pf_flash_attn_split_Q16KV2 kernel_pf_flash_merge_Q16KV2 kernel_pf_flash_mergeg_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
     kernel_pf_moe_combine_norm_E256_T8_D2048_I512_G20
     kernel_pf_route_slab_K2048_N272_P512 kernel_pf_route_slab_K2048_N128_P256 kernel_moe_M1_E256_T8_D2048_I512_R512
     kernel_pf_gdn_conv_GK16V32_AB256 kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
@@ -2052,18 +2071,14 @@ if(B70_ORNITH)
                              ${CMAKE_SOURCE_DIR}/tests/kernels)
   target_link_libraries(gdn_front_test PRIVATE b70_l0)
   b70_target_kernel_dir(gdn_front_test)
-  add_dependencies(gdn_front_test kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_front_GK16V32)
+  add_dependencies(gdn_front_test kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_front_GK16V32 kernel_pf_gdn_conv
+                   kernel_pf_gdn_front_PL)
   add_test(NAME gdn_front_test COMMAND gdn_front_test)
   set_tests_properties(gdn_front_test PROPERTIES LABELS "ornith;prefill")
 
-  add_executable(pf_norm_fused_test prefill/pf_norm_fused_test.cc)
-  target_include_directories(pf_norm_fused_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
-                             ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(pf_norm_fused_test PRIVATE b70_l0)
-  b70_target_kernel_dir(pf_norm_fused_test)
   add_dependencies(pf_norm_fused_test kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
                    kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20)
-  add_test(NAME pf_norm_fused_test COMMAND pf_norm_fused_test)
+  add_test(NAME pf_norm_fused_test COMMAND pf_norm_fused_test 2048)
   set_tests_properties(pf_norm_fused_test PROPERTIES LABELS "ornith;prefill")
 
   add_executable(pf_moe_test kernels/pf_moe_test.cc)
@@ -2071,7 +2086,20 @@ if(B70_ORNITH)
   target_link_libraries(pf_moe_test PRIVATE b70_prefill_host b70_l0)
   b70_target_kernel_dir(pf_moe_test)
   add_dependencies(pf_moe_test ${B70_ORNITH_PREFILL_KERNELS})
-  add_dependencies(attn_chunk_test kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_r32_Q16KV2)
+  add_dependencies(attn_chunk_test kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_pair_Q16KV2 kernel_pf_flash_attn_pairg_Q16KV2
+    kernel_pf_flash_attn_split_Q16KV2 kernel_pf_flash_merge_Q16KV2 kernel_pf_flash_mergeg_Q16KV2)
+  # 3l (2) at Ornith's heads: the split against the pair form and fp64, the gated merge bitwise the merge + pf_attn_gate;
+  # the HPW 4 split is a timing arm only (flash_split_test --ornith --time).
+  if(TARGET flash_split_test)
+    add_ocloc_kernel(pf_flash_attn_split_Q16KV2_H4 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl
+                     DEFINES KT=64 RPW=8 HPW=4 QREG=0 EXP2=1 SPLIT=1 FA_Q_HEADS=16 FA_KV_HEADS=2
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_dependencies(flash_split_test kernel_pf_flash_attn_pair_Q16KV2 kernel_pf_flash_attn_pairg_Q16KV2
+      kernel_pf_flash_attn_split_Q16KV2 kernel_pf_flash_attn_split_Q16KV2_H4 kernel_pf_flash_merge_Q16KV2
+      kernel_pf_flash_mergeg_Q16KV2 kernel_pf_attn_Q16KV2)
+    add_test(NAME flash_split_ornith_test COMMAND flash_split_test --ornith)
+    set_tests_properties(flash_split_ornith_test PROPERTIES LABELS "ornith;prefill" TIMEOUT 1800)
+  endif()
   add_test(NAME pf_moe_test COMMAND pf_moe_test)
   set_tests_properties(pf_moe_test PROPERTIES LABELS "ornith;prefill" TIMEOUT 1800)
 

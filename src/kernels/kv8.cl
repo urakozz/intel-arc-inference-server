@@ -943,6 +943,188 @@ __kernel void kv8_widen(__global const char* restrict K,
 }
 #endif
 
+#ifndef KV8_PAIR
+#define KV8_PAIR 0
+#endif
+#if KV8_PAIR
+// KV8_PAIR=1 (long-context prefill over the widened rows): pf_flash_attn.cl's PAIR form (its comment is the contract:
+// two sub-groups share 16 query rows of one head, scores by key-atom pair, row maxima through SLM, sub-group 0 hands
+// p0 + p1 to sub-group 1, which finishes l in the order ((p0 + p1) + p2) + p3, both publish P, each owns half of O's
+// dims over all four key atoms in order). The scales stay with the key atoms that own them: a sub-group multiplies
+// its own keys' scores by their K scale and its own P atoms by their V scale before publishing them; the row sum
+// stays sum p. Bitwise the RPW 8 raw form above. Grid (ceil(C / 16), kv-heads, GQA / HPW).
+#if !KV8_RAW || KV8_SPLIT || defined(KV_PAGED) || KT != 64 || RPW != 16 || QREG
+#error "pf_flash_attn_kv8 KV8_PAIR: KV8_RAW, KT 64, RPW 16, no KV8_SPLIT / KV_PAGED / QREG"
+#endif
+__attribute__((reqd_work_group_size(SG * 2 * HPW, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
+                                __global const KV8_VALUE* restrict Kc,
+                                __global const ushort* restrict Ks,
+                                __global const KV8_VALUE* restrict Vc,
+                                __global const ushort* restrict Vs,
+                                __global float* restrict O, uint pos, uint C, uint rows) {
+  const uint s = get_sub_group_id(), l = get_sub_group_local_id();
+  const uint k = s & 1u, hp = s >> 1;                              // key half / dim half; the pair
+  const uint j = get_group_id(1);                                  // kv head
+  const uint h = j * KV8F_GQAU + get_group_id(2) * HPW + hp;       // q head
+  const uint r0 = get_group_id(0) * 16u;                           // first of 16 rows
+  if (r0 >= C) return;                                             // uniform over the work-group
+  const uint depth = pos + C;
+  const int q_w = KV8F_Q * HD * 2, q_h = (int)C, q_p = KV8F_Q * HD * 2;
+  const int kv_w = KV8F_KV * HD * 2, kv_h = (int)depth, kv_p = KV8F_KV * HD * 2;
+  __local float smax[HPW * 32];      // [pair][k][16 rows]: the tile's row maxima of key half k
+  __local float sa[HPW * 256];       // [pair][rb][r * 16 + lane]: sub-group 0's p0 + p1
+  __local ushort sp[HPW * 1024];     // [pair][rb * 4 + b][r * 16 + lane]: P times the key's V scale, bf16
+  __local float sl[HPW * 16];        // [pair][16 rows]: l after the walk
+
+  float8 o[2][NDA / 2];
+#pragma unroll
+  for (uint rb = 0; rb < 2u; ++rb)
+#pragma unroll
+    for (uint dd = 0; dd < NDA / 2; ++dd) o[rb][dd] = (float8)(0.0f);
+  float8 m[2] = {(float8)(-INFINITY), (float8)(-INFINITY)}, lsum[2] = {(float8)(0.0f), (float8)(0.0f)};
+  const uint last = min(depth, pos + r0 + 16u);
+  for (uint t0 = 0; t0 < last; t0 += KT) {
+    float8 sacc[2][2];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) sacc[rb][0] = sacc[rb][1] = (float8)(0.0f);
+#pragma unroll
+    for (uint kk = 0; kk < NDA; kk += 2) {
+      short8 qa[2][2];
+#pragma unroll
+      for (uint rb = 0; rb < 2u; ++rb) {
+        ushort t[16];
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)Q, q_w, q_h, q_p,
+                                                  (int2)((int)(h * HD + 16u * kk), (int)(r0 + 8u * rb)), t);
+        qa[rb][0] = as_short8(vload8(0, t));
+        qa[rb][1] = as_short8(vload8(0, t + 8));
+      }
+#pragma unroll
+      for (uint kq = 0; kq < 2u; ++kq)
+#pragma unroll
+        for (uint bb = 0; bb < 2u; ++bb) {
+          uint kb[8];
+          intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+              (__global void*)Kc, kv_w, kv_h, kv_p,
+              (int2)((int)((j * HD + 16u * (kk + kq)) / 2u), (int)(t0 + 16u * (2u * k + bb))), kb);
+#pragma unroll
+          for (uint rb = 0; rb < 2u; ++rb)
+            sacc[rb][bb] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[rb][kq], as_int8(vload8(0, kb)), sacc[rb][bb]);
+        }
+    }
+    // this lane's key's K and V scales, per key atom of this half (lane = key t0 + 16 (2k + bb) + l)
+    float skl[2], svl[2];
+#pragma unroll
+    for (uint bb = 0; bb < 2u; ++bb) {
+      const uint key = t0 + 16u * (2u * k + bb) + l;
+      const bool live = key < depth;
+      skl[bb] = live ? kv8_flash_scale(Ks, (size_t)key * KV8F_KVU + j) : 0.0f;
+      svl[bb] = live ? kv8_flash_scale(Vs, (size_t)key * KV8F_KVU + j) : 0.0f;
+    }
+    // scale by the key's K scale, mask, this half's row maxima (component r = row r0 + 8 rb + r)
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) {
+      const uint rr = r0 + 8u * rb;
+      float8 tmax = (float8)(-INFINITY), red;
+#pragma unroll
+      for (uint bb = 0; bb < 2u; ++bb) {
+        const uint key = t0 + 16u * (2u * k + bb) + l;
+        const float sk = skl[bb];
+#define MASK(r) sacc[rb][bb].s##r = (key <= pos + rr + r && key < depth) ? (sacc[rb][bb].s##r * sk) * SCORE_SCALE : -INFINITY;
+        MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
+#undef MASK
+        tmax = fmax(tmax, sacc[rb][bb]);
+      }
+#define RED(r) red.s##r = sub_group_reduce_max(tmax.s##r);
+      RED(0) RED(1) RED(2) RED(3) RED(4) RED(5) RED(6) RED(7)
+#undef RED
+      if (l == 0) vstore8(red, 0, smax + hp * 32u + k * 16u + 8u * rb);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    float8 corr[2], mnew[2];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) {
+      mnew[rb] = fmax(m[rb], fmax(vload8(0, smax + hp * 32u + 8u * rb), vload8(0, smax + hp * 32u + 16u + 8u * rb)));
+      corr[rb] = EXPF(m[rb] - mnew[rb]);
+      float8 part = (float8)(0.0f);
+#pragma unroll
+      for (uint bb = 0; bb < 2u; ++bb) {
+        sacc[rb][bb] = EXPF(sacc[rb][bb] - mnew[rb]);   // p, kept for sub-group 1's sum
+        part += sacc[rb][bb];
+        const float8 ps = sacc[rb][bb] * svl[bb];
+        short8 pa;
+#define CV(r) pa.s##r = as_short(rne_bf16(ps.s##r));
+        CV(0) CV(1) CV(2) CV(3) CV(4) CV(5) CV(6) CV(7)
+#undef CV
+        intel_sub_group_block_write_us8(sp + hp * 1024u + (rb * 4u + 2u * k + bb) * 128u, as_ushort8(pa));
+      }
+      if (k == 0) intel_sub_group_block_write8((__local uint*)(sa + hp * 256u + rb * 128u), as_uint8(part));
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (k == 1) {
+#pragma unroll
+      for (uint rb = 0; rb < 2u; ++rb) {
+        float8 psum = as_float8(intel_sub_group_block_read8((__local const uint*)(sa + hp * 256u + rb * 128u)));
+        psum += sacc[rb][0];
+        psum += sacc[rb][1];
+        float8 rsum;
+#define SUM(r) rsum.s##r = sub_group_reduce_add(psum.s##r);
+        SUM(0) SUM(1) SUM(2) SUM(3) SUM(4) SUM(5) SUM(6) SUM(7)
+#undef SUM
+        lsum[rb] = lsum[rb] * corr[rb] + rsum;
+      }
+    }
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) {
+      m[rb] = mnew[rb];
+#pragma unroll
+      for (uint dd = 0; dd < NDA / 2; ++dd) o[rb][dd] *= corr[rb];
+    }
+    short8 pa[2][NKA];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb)
+#pragma unroll
+      for (uint b = 0; b < NKA; ++b)
+        pa[rb][b] = as_short8(intel_sub_group_block_read_us8(sp + hp * 1024u + (rb * 4u + b) * 128u));
+    // O += (P s) V over this sub-group's dim atoms 8k + dd, key atoms in order
+#pragma unroll
+    for (uint b = 0; b < NKA; b += 2)
+#pragma unroll
+      for (uint dd = 0; dd < NDA / 2; dd += 2) {
+        uint vb[32];
+        intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+            (__global void*)Vc, kv_w, kv_h, kv_p, (int2)((int)(j * HD + 16u * (8u * k + dd)), (int)(t0 + 16u * b)), vb);
+#pragma unroll
+        for (uint c = 0; c < 2u; ++c)
+#pragma unroll
+          for (uint ks = 0; ks < 2u; ++ks)
+#pragma unroll
+            for (uint rb = 0; rb < 2u; ++rb)
+              o[rb][dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(
+                  pa[rb][b + ks], as_int8(vload8(0, vb + c * 16u + 8u * ks)), o[rb][dd + c]);
+      }
+  }
+  if (k == 1 && l == 0) {
+    vstore8(lsum[0], 0, sl + hp * 16u);
+    vstore8(lsum[1], 0, sl + hp * 16u + 8u);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  __global float* Oh = O + (size_t)h * rows * HD;
+#pragma unroll
+  for (uint rb = 0; rb < 2u; ++rb) {
+    const uint rr = r0 + 8u * rb;
+    if (rr >= C) break;                                            // a block wholly past C is not written
+    const float8 inv = 1.0f / vload8(0, sl + hp * 16u + 8u * rb);
+#pragma unroll
+    for (uint dd = 0; dd < NDA / 2; ++dd) {
+      float8 w = o[rb][dd] * inv;
+      intel_sub_group_2d_block_write_32b_8r16x1c((__global void*)Oh, HD * 4, (int)rows, HD * 4,
+                                                 (int2)((int)(16u * (8u * k + dd)), (int)rr), (__private uint*)&w);
+    }
+  }
+}
+#else
 // 3l (2): KV8_SPLIT=1 is pf_flash_attn.cl's SPLIT form (its header: spans of the key range,
 // unnormalised O and m, l into the partials area; pf_flash_merge folds them). Unset, the token
 // stream is unchanged.
@@ -1171,4 +1353,5 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
   }
 #endif
 }
+#endif  // KV8_PAIR
 #endif  // KV8_FLASH

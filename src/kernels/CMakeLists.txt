@@ -816,12 +816,20 @@ if(B70_VERIFY_DPAS AND B70_MTP)
   # 3l: the MTP verify rows M = 2..4, both KV forms, split the same
   # values over the work-group differently - PAIR (S by key atom in each row block's two sub-groups, P V by dim
   # atom over every row block) and, at M = 3 / 4 (three row blocks), PVX = 2 P V-only sub-groups a slice: 32
-  # sub-groups, a whole core. Bitwise the frozen kernel (tests/kernels/attn_verify_bitwise_test.cc). M = 5..8
-  # (DFlash only, not re-timed) keep VDPAS_LEVERS; their 6+ row blocks exceed 32 sub-groups in the PAIR split.
+  # sub-groups, a whole core. Bitwise the frozen kernel (tests/kernels/attn_verify_bitwise_test.cc). M = 5..8's
+  # 4-6 row blocks exceed 32 sub-groups (and 128 KB of SLM) in the PAIR split: int8 KV takes SOLO there (PAIR at
+  # DSPLIT 256: S by key atom over two row blocks a sub-group, one softmax owner a row block, P V as PAIR's; PVX to
+  # 8 sub-groups a slice), bitwise the same frozen kernel; at 8 rows 0.78 / 0.68x the plain line at 64k / 128k keys,
+  # below bf16's own 8-row time. bf16 KV keeps VDPAS_LEVERS (SOLO is 1.11x at 32k keys there).
   set(VDPAS_LEVERS_PAIR KT=32 PACK_H=0 KS=4 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1)
+  set(VDPAS_LEVERS_SOLO KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1 PAIR=1 SRB=2)
   set(_vdpas_pvx_2 0)
   set(_vdpas_pvx_3 2)
   set(_vdpas_pvx_4 2)
+  set(_vdpas_pvx_5 4)
+  set(_vdpas_pvx_6 3)
+  set(_vdpas_pvx_7 2)
+  set(_vdpas_pvx_8 2)
   set(_vdpas_m 2 3 4)
   if(B70_VERIFY_M8)
     list(APPEND _vdpas_m 5 6 7 8)
@@ -846,20 +854,23 @@ if(B70_VERIFY_DPAS AND B70_MTP)
     if(B70_VERIFY_M8)
       foreach(MM 5 6 7 8)
         add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8 SOURCE ${VDPAS_CL}
-                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=1
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_SOLO} PVX=${_vdpas_pvx_${MM}}
+                                 KV8=1
                          OPTIONS ${VDPAS_OPTIONS})
       endforeach()
     endif()
   endif()
   # Plan 19v3b Task 0: the slots' paged twins (block above) of the MTP verify lists' M = 2..4, both KV forms.
   if(B70_VERIFY_M8 AND B70_KV8)
-    foreach(MM 2 3 4 5 6 7 8)   # M = 5..8 (plan 19v3b Tasks 3-7): slot 0's DFlash verify lists, the plain levers
-      if(MM LESS_EQUAL 4)
-        set(_pg_lv ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}})
-      else()
-        set(_pg_lv ${VDPAS_LEVERS})
-      endif()
+    foreach(MM 2 3 4 5 6 7 8)   # M = 5..8 (plan 19v3b Tasks 3-7): slot 0's DFlash verify lists, the one-card lines' levers
       foreach(KV8 0 1)
+        if(MM LESS_EQUAL 4)
+          set(_pg_lv ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}})
+        elseif(KV8)
+          set(_pg_lv ${VDPAS_LEVERS_SOLO} PVX=${_vdpas_pvx_${MM}})
+        else()
+          set(_pg_lv ${VDPAS_LEVERS})
+        endif()
         set(_kv "")
         if(KV8)
           set(_kv _KV8)
@@ -967,6 +978,12 @@ if(B70_MTP AND B70_VERIFY_M8)
     endforeach()
   endif()
   add_ocloc_kernel(gdn_ring_commit SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gdn_ring_commit.cl DEFINES CTRL_POS=0 CTRL_RC=31)
+  # Item 40: the 16-, 32- and 64-row lists' bf16 GEMVs (a||b, the MTP head's fc and q||k||v) in one launch each, rows
+  # in groups of 8 on grid dimension 0 (ROWG) - every row bitwise the plain builds'.
+  add_ocloc_kernel(gemv_bf16_M8_K5120_N128_C16_S16_RG SOURCE ${GEMV_BF16_CL}
+                   DEFINES M=8 K=5120 N=128 COLS_PER_WG=16 KSPLIT=16 ROWG=1)
+  add_ocloc_kernel(gemv_bf16_M8_K10240_N5120_RG SOURCE ${GEMV_BF16_CL} DEFINES M=8 K=10240 N=5120 ROWG=1)
+  add_ocloc_kernel(gemv_bf16_M8_K5120_N14336_RG SOURCE ${GEMV_BF16_CL} DEFINES M=8 K=5120 N=14336 ROWG=1)
 endif()
 # ==== Spec 32 ================================================================== (end) ====
 
@@ -1488,13 +1505,12 @@ if(B70_Q4EXP)
   add_ocloc_kernel(pf_gdn_front SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl)
   # MoE-model prefill phase 3 Task 8: the router and a||b by pf_gemm_T0, as Ornith's (prefill/CMakeLists.txt) - the
   # weights re-laid as zero-padded [K][P] slabs each chunk, and the two consumers at the GEMM's row pitch P (decode's
-  # q4_route and Qwen3.8's pf_gdn_conv keep theirs).
+  # q4_route keeps its).
   add_ocloc_kernel(pf_route_slab_K2560_N528_P768 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=528 ROUTE_SLAB=768)
   add_ocloc_kernel(pf_route_slab_K2560_N128_P256 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=128 ROUTE_SLAB=256)
   add_ocloc_kernel(q4_route_M1_E512_T10_N528_L256_P768 SOURCE ${Q4_CL}/q4_moe.cl
                    DEFINES M=1 ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=768)
-  add_ocloc_kernel(pf_gdn_conv_AB256 SOURCE ${Q4_PF_REUSE}/pf_gdn_conv.cl
-                   DEFINES NEGA_OFF=40960 DTBIAS_OFF=41008 AB_STRIDE=256)
+  # pf_gdn_conv_AB256 (pf_gdn_gate at pitch 256) is Qwen3.8's binary: prefill/CMakeLists.txt builds it.
   add_ocloc_kernel(pf_embed_gather_D2560 SOURCE ${Q4_PF_REUSE}/pf_embed.cl DEFINES HIDDEN=2560 VOCAB=248320)
   add_ocloc_kernel(pf_ab_proj_D2560 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl DEFINES K=2560 N=128 COLS_PER_WG=16 KSPLIT=16)
   add_ocloc_kernel(pf_moe_router_K2560_N528 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl

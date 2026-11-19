@@ -302,7 +302,7 @@ void case_res_norm_two_stage(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV, ui
 
 // `exact_silu`: force every gate column to sum to 30.0f, making silu(gate)
 // provably 30.0f on host and device alike, so the whole chain is bit-exact.
-// `N`: the MLP intermediate - Qwen3.8's 17408 (5 work-groups, the last covering 1024).
+// `N`: the MLP intermediate - Qwen3.8's 17408 (68 work-groups of 256 outputs, prep.cl's SILU_CHUNK).
 void case_silu_mul(Dev& d, uint32_t M, bool exact_silu, uint32_t N = prep_ref::kSiluN) {
   const uint32_t S = prep_ref::kSiluS, FN = 2 * N;
   std::vector<float> partials = random_f32(size_t(S) * M * FN, exact_silu ? 401 : 400, 0.f, 1.f);
@@ -323,7 +323,7 @@ void case_silu_mul(Dev& d, uint32_t M, bool exact_silu, uint32_t N = prep_ref::k
   k.group_size(256);
   k.arg_ptr(0, pbuf.ptr());
   k.arg_ptr(1, xbuf.ptr());
-  d.run(k, (N + 4095) / 4096, M);
+  d.run(k, (N + 255) / 256, M);
 
   std::vector<uint16_t> x_got(size_t(M) * N);
   download(d.imm, x_got, xbuf);

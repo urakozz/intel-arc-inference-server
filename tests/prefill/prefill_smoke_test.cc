@@ -139,13 +139,13 @@ int main(int argc, char** argv) {
 
   // The launch arithmetic, pinned. `step_chunk_launches(model::qwen38(), )` is derived from the
   // walk itself (src/runtime/prefill/step.cc's closing block); one chunk from a fresh engine
-  // advances the counter by it + 5 for the head (1089 + 5 in Flash mode, 1265 + 5 composed, at
+  // advances the counter by it + 5 for the head (1041 + 5 in Flash mode, 1217 + 5 composed, at
   // this C: open-work 3b runs each int4 linear of a chunk this short as ONE pf_gemm_q4 launch).
   // If this ever differs, print both and re-derive the arithmetic from the walk.
   const size_t per_chunk =
       runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort, kv);
   const size_t head = runtime::prefill::kStepHeadLaunches;
-  CHECK_EQ(per_chunk, size_t(env_mode == AttnMode::Flash ? 1089 : 1265) + widen);
+  CHECK_EQ(per_chunk, size_t(env_mode == AttnMode::Flash ? 1041 : 1217) + widen);
   CHECK_EQ(head, size_t(5));
   CHECK_EQ(eng.prefill_launches(), per_chunk + head);
   std::printf("launch arithmetic: %zu L0 per chunk + %zu head = %zu for one chunk\n", per_chunk, head,
@@ -156,25 +156,25 @@ int main(int argc, char** argv) {
   //
   // The parity program's S3 splits the QK^T GEMM into ROW BLOCKS of 256, so the count is
   // a function of C for the first time; S2a then fuses `pf_silu_mul` into the gate||up slab
-  // GEMM's epilogue and every layer loses one launch. 8625 while one block covers the chunk
-  // (C <= 256, this test's own shape) and 9073 at the C = 2048 the bench and the server run
-  // (1 + 48 x 135 + 16 x (130 + 4 x 8), derived from src/runtime/prefill/step.cc's closing
-  // block). Open-work 3b: at C <= 192 every int4 linear is one launch (1 + 48 x 19 + 16 x 22 =
-  // 1265 composed at this C). Open-work 3d's SLM gate/up epilogue keeps one launch through
+  // GEMM's epilogue and every layer loses one launch. 8577 while one block covers the chunk
+  // (C <= 256, this test's own shape) and 9025 at the C = 2048 the bench and the server run
+  // (1 + 48 x 134 + 16 x (130 + 4 x 8), derived from src/runtime/prefill/step.cc's closing
+  // block). Open-work 3b: at C <= 192 every int4 linear is one launch (1 + 48 x 18 + 16 x 22 =
+  // 1217 composed at this C). Open-work 3d's SLM gate/up epilogue keeps one launch through
   // 320 rows; above that, through 384 rows, every linear but gate||up remains fused.
   runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
   CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort),
-           size_t(1265));
+           size_t(1217));
   CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048),
-           size_t(9073));
+           size_t(9025));
   // Spec 6: in Flash mode attention is ONE launch per FA layer, so a chunk drops by
-  // 16 x (attn_chunk_launches_composed(C) - 1): 8449 on L0 and 8577 on l0-int8 at C = 1000
-  // (drop 368) and 2048 (drop 624), 1 + 48 x 135 + 16 x 123 (derived); at C = 64 (drop 176)
-  // L0 is 1089 (open-work 3b: 1 + 48 x 19 + 16 x 11, one pf_gemm_q4 launch a linear).
-  // Open-work 3d keeps L0 at 1089 through C = 320 (the SLM gate/up epilogue is one launch);
-  // at C = 321 it is 5377 (gate||up's 68 slab launches: 1 + 48 x 86 + 16 x 78). Open-work 17:
+  // 16 x (attn_chunk_launches_composed(C) - 1): 8401 on L0 and 8529 on l0-int8 at C = 1000
+  // (drop 368) and 2048 (drop 624), 1 + 48 x 134 + 16 x 123 (derived); at C = 64 (drop 176)
+  // L0 is 1041 (open-work 3b: 1 + 48 x 18 + 16 x 11, one pf_gemm_q4 launch a linear).
+  // Open-work 3d keeps L0 at 1041 through C = 320 (the SLM gate/up epilogue is one launch);
+  // at C = 321 it is 5329 (gate||up's 68 slab launches: 1 + 48 x 85 + 16 x 78). Open-work 17:
   // l0-int8's mixer linears are the l0 walk's, one pf_gemm_q4 launch each through C = 384, so
-  // it is 6081 there (1 + 48 x 97 + 16 x 89: gate||up 68 + down 10 slab launches and 2 quantisers).
+  // it is 6033 there (1 + 48 x 96 + 16 x 89: gate||up 68 + down 10 slab launches and 2 quantisers).
   for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0, runtime::PrefillBackend::L0Int8})
     for (uint32_t C : {kShort, 250u, 300u, 320u, 321u, 1000u, 2048u}) {
       runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
                   runtime::prefill_backend_name(b), C, composed, flash, drop);
       CHECK_EQ(composed - flash, drop);
       const bool l0 = b == runtime::PrefillBackend::L0;
-      CHECK_EQ(flash, size_t(!l0 ? (C <= 384u ? 6081 : 8577) : C <= 320u ? 1089 : C == 321u ? 5377 : 8449));
+      CHECK_EQ(flash, size_t(!l0 ? (C <= 384u ? 6033 : 8529) : C <= 320u ? 1041 : C == 321u ? 5329 : 8401));
       CHECK_EQ(drop, size_t(C <= 256u ? 176 : C <= 321u ? 240 : C == 1000u ? 368 : 624));
     }
   runtime::prefill::set_attn_mode_for_test(env_mode);
@@ -197,11 +197,11 @@ int main(int argc, char** argv) {
   if (env_mode == AttnMode::Flash) {
     using runtime::KvCache;
     CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort,
-                                                   KvCache::Bf16, 32768), size_t(1089 + 16));
+                                                   KvCache::Bf16, 32768), size_t(1041 + 16));
     CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort,
-                                                   KvCache::Int8, 32768), size_t(1089 + 16));
+                                                   KvCache::Int8, 32768), size_t(1041 + 16));
     CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 128,
-                                                   KvCache::Int8, 32768), size_t(1089 + 32));
+                                                   KvCache::Int8, 32768), size_t(1041 + 32));
     CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048, kv, 32768),
              runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048, kv));
     eng.reset();
@@ -287,8 +287,8 @@ int main(int argc, char** argv) {
   // ---- 8. the L0 backend's launch arithmetic, MEASURED (ruling E1) --------
   // Section 2 measured one chunk from a fresh engine; this one measures it again after
   // sections 3-7 have used the engine. One chunk on L0 from a reset must advance the SAME
-  // counter by `step_chunk_launches(model::qwen38(), L0, C) + kStepHeadLaunches` (1089 + 5 = 1094
-  // at this C in Flash mode, 1265 + 5 composed, derived from src/runtime/prefill/step.cc's closing block). The delta
+  // counter by `step_chunk_launches(model::qwen38(), L0, C) + kStepHeadLaunches` (1041 + 5 = 1046
+  // at this C in Flash mode, 1217 + 5 composed, derived from src/runtime/prefill/step.cc's closing block). The delta
   // is taken rather than the absolute, because `prefill_launches()` is cumulative
   // over the engine's whole life and sections 2-7 already spent some of it.
   for (uint32_t C : {kShort, 250u, 300u}) {
@@ -308,12 +308,12 @@ int main(int argc, char** argv) {
                 runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C, kv),
                 runtime::prefill::kStepHeadLaunches);
     CHECK_EQ(l0_delta, l0_want);
-    const size_t flash_count = 1094 + widen;
+    const size_t flash_count = 1046 + widen;
     CHECK_EQ(l0_want, env_mode == AttnMode::Flash ? flash_count : flash_count + (C <= 256u ? 176 : 240));
   }
 
   // The shape that S3 actually changed: C = 2048 is eight QK^T row blocks, so the
-  // same counter must advance by 9073 + 5. One chunk, so the ragged-tail arithmetic is
+  // same counter must advance by 9025 + 5. One chunk, so the ragged-tail arithmetic is
   // not in the way -- exactly the C = 64 measurement above at the bench's width.
   const size_t wide_before = eng.prefill_launches();
   eng.reset();
@@ -329,7 +329,7 @@ int main(int argc, char** argv) {
               runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048, kv),
               runtime::prefill::kStepHeadLaunches);
   CHECK_EQ(wide_delta, wide_want);
-  CHECK_EQ(wide_want, size_t(env_mode == AttnMode::Flash ? 8454 : 9078) + widen);
+  CHECK_EQ(wide_want, size_t(env_mode == AttnMode::Flash ? 8406 : 9030) + widen);
   }   // the first engine is gone: the Review Focus below needs fresh ones
 
   // ---- 9. spec 6 Review Focus: a composed session after a flash session ----

@@ -13,6 +13,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/profile.h"
 
@@ -157,10 +158,17 @@ static std::atomic<const char*> g_scan_launched{nullptr};
 static bool intra_one_launch(const model::ModelDesc& d, PrefillBackend b) {
   return d.is_moe() && b == PrefillBackend::L0;
 }
-size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
-  return kGdnChunkLaunches - (d.is_moe() ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
+// Qwen3.8 on one card (a dense model at the reference 16 / 48 heads) runs Ornith's bitwise GDN forms: the conv +
+// l2norm as one launch (pf_gdn_front_PL), the scan writing o as bf16 words (pf_gdn_scan_OB) and the sub-group head
+// reading them (pf_gated_head_OB), and pf_gdn_wu staging vb / kb as bf16 words (pf_gdn_wy_WB). A tensor-parallel
+// card's 8 / 24 heads keep the plain binaries.
+static bool dense_bundle(const model::ModelDesc& d) {
+  return !d.is_moe() && d.gdn_k_heads == kernels::kRefGdnKHeads && d.gdn_v_heads == kernels::kRefGdnVHeads;
 }
-bool ab_on_gemm(const model::ModelDesc& d) { return d.is_moe(); }
+size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
+  return kGdnChunkLaunches - (d.is_moe() || dense_bundle(d) ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
+}
+bool ab_on_gemm(const model::ModelDesc& d) { return runtime::prefill_ab_on_gemm(d); }
 bool qkvz_bf16(const model::ModelDesc& d, uint32_t C) { return d.is_moe() && C > kPfSmallMaxRows; }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
@@ -204,17 +212,19 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   void* p_o = s.gdn_o.ptr();
 
   const std::string conv = kernels::pf_gdn_conv_variant(k_heads, heads);
-  const std::string wy = kernels::pf_gdn_wy_variant(k_heads, heads);
-  const std::string scan = kernels::pf_gdn_scan_variant(k_heads, heads);
+  const bool dense = dense_bundle(d);
+  const std::string wy = kernels::pf_gdn_wy_variant(k_heads, heads) + (dense ? "_WB" : "");
+  const std::string scan = kernels::pf_gdn_scan_variant(k_heads, heads) + (dense ? "_OB" : "");
 
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1,
             {PtrArg(conv_ring), PtrArg(p_seed), arg_val(pos)});
   profile_wait(cx, Phase::kGdnSeed);
-  if (d.is_moe()) {
+  if (d.is_moe() || dense) {
     //  2-3 (phase 2 Task 2) - the conv1d + SiLU and the q / k l2norm in one launch (pf_gdn_front.cl),
     //      bitwise the pair below; FB = 32 positions a work-group.
-    const std::string front = kernels::pf_gdn_front_variant(k_heads, heads) + (partials_bf16 ? "_PB" : "");
+    const std::string front =
+        kernels::pf_gdn_front_variant(k_heads, heads) + (partials_bf16 ? "_PB" : dense ? "_PL" : "");
     cx.launch(kc(front, "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
               {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb), PtrArg(conv_ring),
                arg_val(pos), arg_val(C)});
@@ -284,10 +294,11 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
              PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
   g_scan_launched.store(scan_entry);     // the dispatch proof, after the append
   profile_wait(cx, Phase::kGdnScan);
-  // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller. A MoE model's (Ornith) runs one
-  //      sub-group a (position, head), 8 heads a work-group, on the bf16 o its scan wrote (pf_gated_head.cl).
-  if (d.is_moe())
-    cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads) + (partials_bf16 ? "_PB" : ""),
+  // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller. A MoE model's (Ornith) and Qwen3.8's
+  //      one-card walk run one sub-group a (position, head), 8 heads a work-group, on the bf16 o the scan wrote
+  //      (pf_gated_head.cl).
+  if (d.is_moe() || dense)
+    cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads) + (partials_bf16 ? "_PB" : dense ? "_OB" : ""),
                      "pf_gated_head_sg"),
               heads / 8, C, 1,
               {PtrArg(qkvz_partials), PtrArg(p_o), PtrArg(gated_w), PtrArg(y), arg_val(C)});

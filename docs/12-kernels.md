@@ -2,13 +2,25 @@
 
 This is the reference for the engine's device kernels (a kernel is a function that runs on the GPU). For each
 kernel it says what it computes, how the work is spread over the hardware and why, what was rejected and on what
-evidence, and the numbers that decided it. It is for readers who want to understand why a kernel is shaped the
-way it is, or who are about to change one. The kernels are OpenCL C in `src/kernels/`, compiled ahead of time for
-the B70 with `ocloc`; the host code that launches them is in `src/runtime/`.
+evidence, and the numbers that decided it. It is for readers who want to understand why a kernel is shaped the way
+it is, or who are about to change one.
 
-The doc covers the kernels of the main model, Qwen3.8-27B, for decode (generating one token at a time) and for
-prefill (reading the prompt in chunks). The kernels of the other models live in their own directories and are
-listed at the end.
+The kernels are OpenCL C in `src/kernels/`, compiled ahead of time for the B70 with `ocloc`; the host code that
+launches them is in `src/runtime/`. The doc covers the kernels of the main model, Qwen3.8-27B, for decode
+(generating one token at a time) and for prefill (reading the prompt in chunks), then Ornith's mixture-of-experts
+prompt pass. The other models' own kernels are listed at the end.
+
+## Map
+
+| part | kernels | what decides their shape |
+|---|---|---|
+| decode linears | `gemv`, `gemv_i8w`, `gemv_bf16`, `gemm_sm`, `gemm_sm_wide` | reading weights at the memory system's rate; split-K to fill the card at one row |
+| between the linears | `prep_*`, `embed_gather`, `argmax` | matching torch's bf16 rounding points exactly; enough sub-groups |
+| GDN decode | `gdn_step` | a 128 x 128 fp32 state per head, updated in place |
+| decode attention | `attn_prep`, `attn_decode_v2`, `attn_reduce_v2`, `attn_verify_dpas` | a fixed grid under replay, a fixed softmax merge order |
+| prefill linears | `pf_dequant_slab` + `pf_gemm`, `pf_gemm_small`, `pf_gemm_q4`, the int8 path | DPAS throughput; no host waits |
+| prefill attention and GDN | `pf_flash_attn`, `gdn_chunk` (`pf_gdn_*`) | register pressure; the chunked delta rule's precision |
+| MoE prompt pass | `pf_moe_*`, the routing, `pf_gdn_front`, `pf_gdn_intra` | many small expert GEMMs; the glue between them |
 
 **Contents**
 
@@ -20,7 +32,8 @@ listed at the end.
   [`argmax`](#argmax---deterministic-greedy-sampling-in-two-fixed-stages)
 - [`gdn_step`, the gated delta-rule decode step](#gdn_step---the-gated-delta-rule-decode-step)
 - [Decode attention](#decode-attention), including the int8 KV cache and the verify attention
-- [Prefill kernels](#prefill-kernels), ending with [how the prefill kernels got here](#how-the-prefill-kernels-got-here)
+- [Prefill kernels](#prefill-kernels), including [the MoE prompt pass](#the-moe-prompt-pass-ornith) and
+  [how the prefill kernels got here](#how-the-prefill-kernels-got-here)
 - [Kernels of the other models](#kernels-of-the-other-models)
 
 ## Words used throughout
@@ -63,9 +76,9 @@ compresses device-local memory, so a buffer of one repeated word reads back fast
 any timing taken from it is fiction ([01-hardware.md](01-hardware.md)). Real weights are incompressible within a
 cache line, and so is the probes' data.
 
-Most per-kernel numbers were taken in August and September 2026 on the first driver stack, on one card at a
-context depth of 4096. They are kept as dated evidence for why a kernel is shaped as it is, not as today's speed.
-Today's speeds are in the benchmark record.
+Most per-kernel numbers were taken on the first driver stack, on one card at a context depth of 4096. They are
+kept as evidence for why a kernel is shaped as it is, not as today's speed. Today's speeds are in the
+[README](../README.md#speed).
 
 ---
 
@@ -90,12 +103,11 @@ Speculative decoding guesses several tokens ahead and checks them in one verify 
 bind the same kernels compiled for M rows, with `gemm_sm` in place of `gemv` for M >= 2, and `attn_verify_dpas`
 in place of `attn_decode_v2` where the depth rule says so.
 
-Plain decode on one card runs at about 33.5 tokens/s at depth 4096, with the int8 `lm_head` and a bf16 KV cache
-(the tensor-parallel table in the benchmark record has the row; the older decode rows there use the
-bf16 head). Decode is a stream of weight reads, and the GEMV family was about 69% of the step in the anatomy
+Plain decode (MTP off) on one card runs at about 33.5 tokens/s at depth 4096, with the int8 `lm_head` and a bf16
+KV cache. Decode is a stream of weight reads, and the GEMV family was about 69% of the step in the anatomy
 below, so most of the work in this doc is about reading the weights at the memory system's rate.
 
-### The per-launch anatomy of 2026-08-25
+### The first per-launch anatomy
 
 This is the only complete per-launch breakdown. The step then was 42.141 ms/token, with the bf16 `lm_head`, the
 first attention kernel and 645 launches, every row measured in situ on an idle box:
@@ -109,7 +121,7 @@ first attention kernel and 645 launches, every row measured in situ on an idle b
 | `gdn_step` | 0.733 | 1.7% |
 | everything else | 0.7 | 1.7% |
 
-Three kernel changes that day took the step to 36.32 ms: splitting the a‖b GEMV's K axis 16 ways (2.335 to
+Three kernel changes in the same session took the step to 36.32 ms: splitting the a‖b GEMV's K axis 16 ways (2.335 to
 0.256 ms), splitting the residual norm over 20 work-groups (2.893 to 0.484 ms), and shrinking the attention block
 from 256 to 64 positions (6.058 to 3.839 ms for the attention family). Each has its section below, and the full
 before and after is in [15-step-anatomy.md](15-step-anatomy.md). The per-kernel shares were not re-measured on
@@ -202,7 +214,7 @@ own layout, so most weights are mapped without a repack.
 
 ### Measured
 
-The layout and `S` matrix was measured with `probe_gemv` on 2026-08-24, on the first driver stack: M = 1, random
+The layout and `S` matrix was measured with `probe_gemv` on the first driver stack: M = 1, random
 weights, each configuration 40 launches in one list cycling enough weight copies to miss the 24 MB L2, GB/s
 counting weight bytes only, and every one of the 50 int4 configurations checked against a double-precision CPU
 reference. Best GB/s per layout at each shape:
@@ -255,7 +267,7 @@ When a checkpoint ships a packed head, `lm_head` is a `gemv` at 5120×248320, S 
 `gemv_M1_K5120_N248320_S1_L1`), instead of a `gemv_bf16`. `S = 1` is what lets the output go straight into
 `logits`: `gemv` writes `out[(s·M + m)·N + n]`, which at `S = 1` is the fp32 `[M][N]` layout the argmax reads, so
 there is no partial slice and no extra kernel. `N/64 = 3880` work-groups (15,520 sub-groups) already fill the
-device. Measured in situ on 2026-08-26: 1178 µs, 573 GB/s (97% of the 590 GB/s the device streams), against the
+device. Measured in situ: 1178 µs, 573 GB/s (97% of the 590 GB/s the device streams), against the
 bf16 head's 4381 µs for 3.8× the bytes. The published Qwen3.8 checkpoint ships a bf16 head, which the engine
 quantises to int8 at load, so this int4 form is a compiled capability for checkpoints that ship a packed head, not
 the default.
@@ -273,7 +285,7 @@ The weight is stored `[n_tile][k16][16 k][16 n]`, so one `intel_sub_group_block_
 `k` bytes, and the scale is applied once to the fp32 sum, `(x · q) · s`, rather than per element. It is one
 ascending chain over `k` with no atomic and no data-dependent branch, so replays are bitwise.
 
-Measured in situ on 2026-09-28 (the benchmark record, "int8 lm_head"): 2205 µs at 577 GB/s, 99.6% of
+Measured in situ: 2205 µs at 577 GB/s, 99.6% of
 the bf16 launch's rate, so the halved bytes are the whole 2.0 ms a token saved. The accuracy rules for the head
 are in that section.
 
@@ -305,7 +317,7 @@ recover.
 ### a‖b, and the lesson it taught
 
 a‖b is the shape that needed both knobs. At `{64, 1}` the whole launch is 8 sub-groups reading 1.31 MB at 26.9
-GB/s. In situ on 2026-08-25, three changes that did not help, then the one that did:
+GB/s. In situ, three changes that did not help, then the one that did:
 
 | change | sub-groups | µs/launch |
 |---|---|---|
@@ -396,9 +408,8 @@ the other rows hold, and that is why the tuning table needs no M column.
 
 ### Measured
 
-On one card with the int8 head at depth 4096, on a busy box, 2026-11-01: the verify step costs 1.04 / 1.09 / 1.14 /
-1.18 / 1.30 / 1.36 / 1.57 plain steps at M = 2..8, against `gemv`'s 1.16 up to 3.17
-(the benchmark record, "The verify step on gemm_sm").
+On one card with the int8 head at depth 4096, on a busy box, the verify step costs 1.04 / 1.09 / 1.14 /
+1.18 / 1.30 / 1.36 / 1.57 plain steps at M = 2..8, against `gemv`'s 1.16 up to 3.17.
 
 ### `gemm_sm_wide` - the same rows past 16
 
@@ -490,7 +501,7 @@ Why two launches: the single-launch form (`prep_res_norm`) ran RMSNorm's whole-r
 which is one Xe-core (16 sub-groups). In situ it took 22.3 µs at 17.0 GB/s, 129 times a token, because one core's
 issue rate, not DRAM, was the limit (the 320 KB of partials it folds had just been written by the GEMV before it,
 so most of that traffic was L2). Splitting it onto 20 work-groups each (`G = W = 20`, 320 sub-groups instead of
-16) cut the site from 2893 to 484 µs/token (stage A 2.0 µs, stage B 1.7 µs a launch, in situ 2026-08-25). A third
+16) cut the site from 2893 to 484 µs/token (stage A 2.0 µs, stage B 1.7 µs a launch, in situ). A third
 run with stage B on one work-group (`W = 1`) saved only 1.45 of the 2.41 ms: the rescale pass is the same
 latency-bound walk and needed the same treatment.
 
@@ -617,7 +628,7 @@ show the list still works.
 Rejected: `zeCommandListAppendMemoryCopy`, whose source address is captured at append time like a kernel argument,
 so it cannot express this; re-recording the list per token, which defeats the capture; a wider grid.
 
-Measured on 2026-08-25: 3.65 µs per token, the median of 5 replays of a closed list of 512 back-to-back launches,
+Measured: 3.65 µs per token, the median of 5 replays of a closed list of 512 back-to-back launches,
 printed by `embed_gather_test`. At 64 launches per execution the same kernel reads 6.59 µs, so short bursts cost
 more (cause not established; clock ramp-up is a guess), and the 512-launch figure is the marginal cost on a device
 already working. It is about 0.01% of the step.
@@ -693,10 +704,10 @@ reference, through one closed list replayed once per case. After every replay `o
 Rejected: a global atomic max (determinism); one work-group scanning all 248320 logits (993 KB of streaming on one
 Xe-core of 32); `work_group_reduce_max`, which cannot carry the index and whose order cannot be stated; packing
 (value, index) into a `ulong` (not needed). Sampling with temperature, top-p and top-k is not this kernel; it runs
-on the host at about 0.54 ms/token (the benchmark record, "Host sampling"), and greedy decoding is
+on the host at about 0.54 ms/token, and greedy decoding is
 unaffected by it.
 
-Measured on 2026-08-25: 4.39 µs per token for both stages, with the same method and short-burst caveat as
+Measured: 4.39 µs per token for both stages, with the same method and short-burst caveat as
 `embed_gather`. These two token-boundary kernels are the only numbers in this doc small enough to stop thinking
 about.
 
@@ -825,7 +836,7 @@ are because they are the bars a driver change must not break.
 
 ### Measured: 0.733 ms/token, 1.09× its own floor
 
-In situ on 2026-08-25: 48 launches of 15.276 µs each, 0.733 ms/token (1.7% of the step then). The traffic is the
+In situ: 48 launches of 15.276 µs each, 0.733 ms/token (1.7% of the step then). The traffic is the
 state, read and written once: 48 × 128 × 128 × 4 B = 3.146 MB per layer, about 396 MB a token with the redundant
 conv reads. That is 540 GB/s effective, 92% of the measured 590, and 1.09× the floor of 0.671 ms. The kernel is at
 its lower bound: making it perfect would be worth about 0.06 ms. The occupancy problem it was first suspected of
@@ -912,8 +923,8 @@ instructions before a surviving one saved only 39% of what pricing it at the ave
 ablation that removes all the barriers prices the average barrier, which is the wrong number for removing one of
 seven.
 
-v1 against v2, measured with `probe_decode_attn ab` (one engine with both lists captured over the same buffers;
-the benchmark record, "Decode attention at depth", 2026-09-28, bf16 head): the whole decode step took
+v1 against v2, measured with `probe_decode_attn ab` (one engine with both lists captured over the same buffers,
+bf16 head): the whole decode step took
 33.72 against 31.84 ms at depth 4096, and 98.36 against 49.68 ms at depth 130816 (10.2 to 20.1 tokens/s). v2
 matches v1 on real data to one bf16 ulp (cosine 0.999999491 at 65536 keys).
 
@@ -1009,7 +1020,7 @@ cover for per-row causal masking.
 ### Measured
 
 These are the first-generation pair's numbers, kept because they explain the shape of the kernel family and
-because the method carries over. In situ, depth 4096, 2026-08-25:
+because the method carries over. In situ, depth 4096:
 
 - With 256 positions per work-group (the first choice), `attn_decode` took 361 to 370 µs a launch, 5.8 to 5.9
   ms/token, the largest non-GEMV row of the step, with 68 of 256 work-groups live at depth 4096.
@@ -1058,7 +1069,7 @@ rows, 8 to a row block. K is read through the transposed 2D block read and V thr
 K/V are widened to exact bf16 per message), and the online softmax per row is in fp32 with `exp`.
 
 q and P are carried as a high plus a low bf16 limb (`QSPLIT`, `PSPLIT`: `hi = rne_bf16(x)`, `lo = rne_bf16(x −
-hi)`, two DPAS per atom), about 16 significant bits instead of 8. That fixed a failure found on 2026-11-04: with P
+hi)`, two DPAS per atom), about 16 significant bits instead of 8. That fixed a failure: with P
 rounded to bf16, the row error grew to 1 − cos of about 2e-5 against fp64 (v2: about 1e-8), which over 16 layers
 moved a DFlash verify row's logits by up to 9 and its argmax off the f32 top. Random-data tests (cosine about
 0.99999 either way) cannot see this; only a real-weights f32 check did.
@@ -1069,7 +1080,7 @@ M = 1 always, and DPAS at M >= 2 from a measured depth. For bf16: M = 2 from 115
 (bf16, M = 2), 1.71 (M = 4) and 8.22 (M = 8), timed on a busy box. A later long-context rework (int8 K by 2D reads,
 S split by key atom, P·V by dimension atom) made the whole verify step at 150k keys 11.4% faster in bf16 and 20.5%
 faster in int8, bitwise the previous kernel. Re-timing on that kernel would move four of the thresholds, but each
-move changes rounding, so they stay until the f32 judge has checked them (tracked as open work).
+move changes rounding, so they stay until the f32 judge has checked them.
 
 The 16-row line, for prompt lookup's wide verify, takes the same split at one key slice. Each row block's two
 sub-groups compute one key atom of the scores each and swap them through SLM (`PAIR`); 8 more sub-groups make 32
@@ -1115,11 +1126,11 @@ Two rules hold across the whole family:
   473 ms per chunk, against 130 ms at `S = 1`.
 
 The prefill path runs entirely on Level Zero. A chunk never waits on the host, and every GEMM is one of the
-engine's own OpenCL C kernels on the same in-order command list as everything else (the sycl-tla backend these
-replaced was removed on 2026-10-27). With the default flash attention a full chunk is `1 + 48 × 135 + 16 × 123 =
+engine's own OpenCL C kernels on the same in-order command list as everything else (they replaced a sycl-tla
+backend, now removed). With the default flash attention a full chunk is `1 + 48 × 135 + 16 × 123 =
 8449` launches (derived from the walk in `src/runtime/prefill/step.cc`, and asserted by `prefill_smoke_test`
 through `Context::launches()`); `step_head` adds 5 once per `prefill()`. Short chunks use fewer launches (below).
-Where the time goes, per phase, is in the benchmark record.
+`B70_PREFILL_PROFILE=1` prints where the time goes, per phase.
 
 ### The small kernels, transcribed from decode
 
@@ -1178,8 +1189,7 @@ the `pitch` is the leading dimension, so a read never clamps inside the matrix o
 Measured: the probe this kernel generalises reached 156.53 TFLOP/s and was bitwise equal to `sycl-tla`
 ([08-decode-vs-prefill.md](08-decode-vs-prefill.md), "How prefill got here"). In production it runs at 161.7
 TFLOP/s, about 88% of the measured 183.45 TFLOP/s bf16 DPAS peak. Separating the two halves with one wait per slab
-(a 4096-token prompt, 7616 launches each) gave `slab_dequant` 274.5 ms and `slab_gemm` 1344.3 ms (September 2026,
-first driver stack).
+(a 4096-token prompt, 7616 launches each) gave `slab_dequant` 274.5 ms and `slab_gemm` 1344.3 ms (first driver stack).
 
 What was tried and dropped, each on a number:
 
@@ -1241,6 +1251,35 @@ VNNI-transform read, the softmax is fp32 online with P rounded to bf16 as the P�
 folded with `log2(e)` so the exponential is `exp2` (the flash research below explains why that matters).
 `pf_attn_gate` (`pf_attn.cl`) is `attn_reduce`'s tail, `rne_bf16(f32(rne_bf16(o)) · sigmoid(gate))`, with the gate
 read from `qkv_partials`.
+
+Whole chunks on Qwen3.8 and Ornith run the same source's pair form, `pf_flash_attn_pair` (`PAIR=1`; Ornith's walk
+uses `pf_flash_attn_pairg`, with the gate fused into the epilogue). With 8 rows a sub-group, every K and V operand
+feeds one `dpas.8x8`: 68 KB of operand reads per 128 DPAS a 64-key tile, which held the kernel near 21 % of the bf16
+peak at any depth. In the pair form two sub-groups share 16 rows of one head. Sub-group k computes the scores of key
+atoms 2k and 2k+1 for both 8-row blocks. The row maxima meet in SLM, sub-group 0 hands its `p0 + p1` to sub-group 1,
+which finishes the row sum in the original order, and both publish P in SLM. Each then accumulates half of O's
+dimensions over all four key atoms in order. Every operand feeds two row blocks, so the reads fall to 43 KB per 128
+DPAS, and since no value, operand or order changes the output is bitwise the 8-row kernel's. A work-group is two
+such pairs, two q-heads, on the same 16 rows. Measured with `tools/probe/probe_pf_attn_long` on one layer, a
+2048-row chunk: 0.62 to 0.75 of the 8-row kernel's time at 2k to 128k keys on Qwen3.8 (34 % of peak), and 0.68 to
+0.74 of Ornith's former 32-row form at 2k to 262k keys. The int8 KV cache's whole chunks on Qwen3.8 run the same
+structure over the widened rows, `pf_flash_attn_kv8_raw_pair` (`kv8.cl`, `KV8_PAIR=1`): each sub-group multiplies
+its own key atoms' scores by their K scales and its own P atoms by their V scales before publishing them, so the
+output is bitwise `pf_flash_attn_kv8_raw`'s; `probe_pf_attn_long --kv8` measures 0.59 to 0.60 of its time at 64k
+and 128k keys. The split form for short chunks, the paged KV of sequence slots and the TP card's 12 / 2 heads keep
+the 8-row kernel (Ornith has no int8-KV prompt path).
+
+A short chunk deep in the cache - an agentic turn of a few to a few hundred new tokens - gives a whole-chunk launch
+only a handful of work-groups: 16 rows on Ornith are 8 work-groups for the whole card, each walking every key. The
+split form (`pf_flash_attn_split`, `SPLIT=1`, the 8-row kernel's tile loop) cuts the key range into spans, one
+work-group per span, 8 rows and kv head, each writing its unnormalised O and its running max and sum; `pf_flash_merge`
+folds the spans (the largest max, each span weighted by `exp2` of its distance to it). It changes the softmax's
+association, so it is judged, not bitwise: on synthetic data `flash_split_test` holds it to the fp64 attention (it
+lands closer than the whole-chunk kernel). The span count is a rule in `runtime/prefill/attn.cc`. On Qwen3.8 it takes
+chunks to 128 rows from 1024 keys (a 16-row turn at 128k keys 4.5x faster). On Ornith (16 / 2 heads) it takes twice
+the spans, cut to whole waves of 128 work-groups, and chunks to 256 rows from 8192 keys; the merge there also applies
+the output gate (`pf_flash_mergeg`, bitwise `pf_attn_gate`). Ten FA layers at 128k keys: 16 rows 130.7 to 10.5 ms, 64
+rows 130.7 to 33.8 ms, 256 rows 158.5 to 121.6 ms.
 
 The composed attention (`pf_gemm_T1` for `S = QKᵀ` per 256-row block, `pf_softmax_causal`, `pf_gemm_T0` for `P V`,
 batched over a group's six q-heads, then `pf_attn_gate`) is kept only as the correctness reference the tests grade
@@ -1320,9 +1359,53 @@ The rest of a MoE model's layer is also bitwise:
 - `pf_res_norm` (`pf_norm_fused.cl`) is the residual fold and RMSNorm in one work-group per row;
 - `pf_gemv_rows` (`pf_route.cl`) is the router and a‖b GEMVs at 16 rows × 2 column tiles a work-group.
 
+### The MoE prompt pass (Ornith)
+
+Ornith's layers have a different shape from Qwen3.8's: hidden size 2048, 30 GDN and 10 attention layers, and a
+256-expert MoE (each token routed to 8 experts plus a shared one) in place of the dense MLP. Its one-card prompt pass
+reads a 4,096-token prompt at 11,036 t/s and a 16,384-token prompt at 8,800. Every kernel below is bitwise against
+the one it replaced unless it says otherwise.
+
+The MoE block of a chunk (`src/runtime/prefill/moe.cc`):
+
+1. Route. The router and the shared expert's gate run as one bf16 GEMM over the chunk (`pf_gemm_T0`, with their
+   weights laid out as zero-padded slabs by `pf_route.cl`'s helpers). The top-k then runs as one sub-group a token
+   (`moe.cl` built with `ROUTE_SG`): no SLM, no barrier, slots taken in rank order. At a 4k prompt that took the
+   top-k from 6.28 to 0.71 ms.
+2. Sort. `pf_moe_sort_mw` groups the routed rows by expert as a multi-work-group histogram, scan and scatter. It
+   writes a tile table padded with -1, so the host never reads per-expert counts.
+3. Gather and GEMM. `pf_moe_q4gemm` is the grouped expert GEMM: one launch covers every expert's tiles, and it reads
+   the int4 expert blocks directly, converting them to bf16 in registers as the k loop reaches them. There is no
+   separate dequant pass over the layer's 256 experts. The gate‖up form applies SiLU in its epilogue, and reads the
+   shared expert's rows straight from the chunk's activations (`SH_X`), so the gather writes only the routed rows.
+4. Combine. The weighted sum of each token's expert outputs and the next RMSNorm read 16-byte pieces a lane.
+
+The expert GEMM's register plan matters more than its arithmetic. With a register double buffer it spilled 38-41
+registers at every shape. The production build (`NODB=1 PF_W=2 PF_A=1 AK16=1`) drops the double buffer, prefetches
+the weights two groups and the activations one step ahead into L1, and reads the activations per k16 half. It builds
+without a spill and takes 0.75x the time of the double-buffered kernel at 2048- and 4096-row chunks, bitwise. A
+128-register form measured 0.985x of the spill-free kernel and was not taken.
+
+The GDN chain of a MoE model differs from Qwen3.8's in five places:
+
+- `pf_gdn_front` replaces `pf_gdn_conv` + `pf_gdn_l2norm` (above), and reads its 32 partials a lane before using the
+  first (`FRONT_PRELOAD`).
+- `pf_gdn_intra` replaces the four intra-chunk launches (above); its W / U stage puts channels on lanes and uses
+  VNNI block loads and block writes (`INTRA_WU2`).
+- The scan computes `q·S` beside `w·S` and folds `A2·vn` into the state update's loop, so a step needs two barriers
+  instead of three (`SCAN_QS1=2 SCAN_FOLD=1`, 0.90x the scan's time). It stores `o` as the bf16 word the gated head
+  rounds it to (`SCAN_OBF16`).
+- `pf_gated_head` runs one sub-group per (position, head) on that bf16 `o` (`HEAD_SG`).
+- On a chunk wider than 1024 rows the `qkv‖z` GEMM writes its partials as bf16 (`pf_gemm`'s `C_BF16` form, two
+  rounded atoms packed into one 32-bit block write), the words the front and the head round them to anyway.
+
+The mixer's dense linears (`qkv‖z`, `out_proj`, `q‖k‖v`, `o_proj`) are kept unpacked in bf16 for the one-card prompt
+pass when they fit beside the context (2.56 GB); otherwise every chunk unpacks them as before. A 4096-row chunk uses
+the N-fastest slab order and the block-store unpack, as Qwen3.8's does.
+
 ### How the prefill kernels got here
 
-These are the kernel-level conclusions of the September 2026 prefill investigations. The strategy-level ones are in
+These are the kernel-level conclusions of the investigations that shaped the prefill path. The strategy-level ones are in
 [08-decode-vs-prefill.md](08-decode-vs-prefill.md), "How prefill got here".
 
 #### The split-bf16 scan: the design, the failed gate, the fix
@@ -1341,7 +1424,7 @@ in bf16 the gate is 92 of 93 whatever `vn` is, and with `A2` in fp32 it is 93 of
 row. The fix splits `A2` only, and `vn` stays one bf16. A fixture aimed at the `A2` chain (`A2 = 22.65625`, one bf16
 ulp of the high limb) was confirmed to fail when the low chain was deleted.
 
-Since 2026-11-10 `pf_gdn_A2_hilo` writes those `A2` hi/lo words itself and the scan reads them from global memory.
+`pf_gdn_A2_hilo` writes those `A2` hi/lo words itself and the scan reads them from global memory.
 That took SLM from 40,448 to 30,208 B a work-group, four work-groups a core instead of three, and the scan row from
 64.1 to 44.7 ms for a 2048 chunk, bitwise.
 
@@ -1367,7 +1450,7 @@ output; and the matrix is `(I + A)^-1`, not `(I - A)^-1`.
 
 #### Flash prefill research, and what shipped
 
-The question in September 2026 was how to make `pf_flash_attn` faster. It took 116.3 ms for the attention of a
+The question was how to make `pf_flash_attn` faster. It took 116.3 ms for the attention of a
 4096-token prompt, 28 TFLOP/s or 15% of the 183.45 TFLOP/s peak, against vLLM's 63.1 ms. The findings:
 
 - The kernel spilled registers, and `exp` was the cause. The main loop was 1639 instructions per 128 `dpas.8x8`,
@@ -1389,7 +1472,7 @@ The question in September 2026 was how to make `pf_flash_attn` faster. It took 1
   dimension (1.3× to 1.8× beyond that), and larger K messages (1.0× to 1.1×).
 - What shipped: 8 rows per work-group first (attention 101 ms, from 117), then `exp2` as well (81 ms). The `exp2`
   form moves the rounding point and failed the narrow flash-against-composed check on `l0` (0.999951245 against
-  0.999959889), so it was held back for review and accepted on 2026-09-27; it ships as `EXP2=1`. The
+  0.999959889), so it was held back for review and then accepted; it ships as `EXP2=1`. The
   experimental variants live in `tools/probe/pfa_levers_research.cl`.
 
 ---

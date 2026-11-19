@@ -76,10 +76,11 @@ inline constexpr GemvBf16Tiling gemv_bf16_tiling(unsigned N) {
 // binaries that existed before this knob did. `_S` is `gemv.cl`'s letter for a
 // split-K width and means the same thing here, one level down (in a work-group
 // rather than across them).
-inline std::string gemv_bf16_variant(unsigned M, unsigned K, unsigned N, GemvBf16Tiling t) {
+// `_RG` (item 40): the ROWG build - groups of M rows on grid dimension 0, the column work-groups on dimension 1.
+inline std::string gemv_bf16_variant(unsigned M, unsigned K, unsigned N, GemvBf16Tiling t, bool rowg = false) {
   return "gemv_bf16_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N) +
          (t.cols == kGemvBf16Cols ? "" : "_C" + std::to_string(t.cols)) +
-         (t.ksplit == 1 ? "" : "_S" + std::to_string(t.ksplit));
+         (t.ksplit == 1 ? "" : "_S" + std::to_string(t.ksplit)) + (rowg ? "_RG" : "");
 }
 
 // Spec 9 §3: the int8 `lm_head` GEMV (src/kernels/gemv_i8w.cl). One tiling, gemv_bf16's

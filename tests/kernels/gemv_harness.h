@@ -128,7 +128,9 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
 inline GemvResult run_gemv_bf16(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
                                 const common::Bf16Tiled& w, const std::vector<uint16_t>& x,
                                 uint32_t M, int timed_launches,
-                                kernels::GemvBf16Tiling t = {kernels::kGemvBf16Cols, 1}) {
+                                kernels::GemvBf16Tiling t = {kernels::kGemvBf16Cols, 1}, uint32_t rowg = 0) {
+  // rowg > 0 (item 40): the ROWG build at M rows a group, rowg groups - x and the output hold M x rowg rows.
+  const uint32_t rows = rowg ? M * rowg : M;
   GemvResult r;
   r.weight_bytes = w.bytes();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -140,8 +142,8 @@ inline GemvResult run_gemv_bf16(l0::Context& ctx, l0::Queue& q, l0::Fence& fence
   }
   l0::Mem xbuf(ctx, l0::MemKind::Device, x.size() * 2);
   imm.copy(xbuf.ptr(), x.data(), x.size() * 2);
-  l0::Mem obuf(ctx, l0::MemKind::Device, size_t(M) * w.N * 4);
-  l0::Module mod(ctx, kernels::path(kernels::gemv_bf16_variant(M, w.K, w.N, t)));
+  l0::Mem obuf(ctx, l0::MemKind::Device, size_t(rows) * w.N * 4);
+  l0::Module mod(ctx, kernels::path(kernels::gemv_bf16_variant(M, w.K, w.N, t, rowg > 0)));
   l0::Kernel k = mod.kernel("gemv_bf16");
   // The work-group is one lane per column per K slice, which is the kernel's
   // reqd_work_group_size; the grid stays N / cols work-groups.
@@ -152,9 +154,11 @@ inline GemvResult run_gemv_bf16(l0::Context& ctx, l0::Queue& q, l0::Fence& fence
   // below cycle through the other weight copies.
   {
     l0::CmdList list = l0::CmdList::regular(ctx);
-    bind(0); list.launch(k, w.N / t.cols); list.close();
+    bind(0);
+    if (rowg) list.launch(k, rowg, w.N / t.cols); else list.launch(k, w.N / t.cols);
+    list.close();
     q.execute(list, &fence); fence.wait();
-    r.out.resize(size_t(M) * w.N);
+    r.out.resize(size_t(rows) * w.N);
     imm.copy(r.out.data(), obuf.ptr(), r.out.size() * 4);
   }
   if (timed_launches > 0) {

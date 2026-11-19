@@ -26,7 +26,8 @@ int main(int argc, char** argv) {
                       capacity, false, kv8 ? runtime::KvCache::Int8 : runtime::KvCache::Bf16);
   eng.set_prefill_backend(runtime::PrefillBackend::L0);
   eng.prepare_prefill();
-  const size_t raw_bytes = kv8 ? size_t(16777216) : 0;  // K/V, 4096 positions, 4 heads x 256 bf16.
+  // K/V, 4096 positions, 4 heads x 256 bf16; and prepare_prefill's a||b GEMM slabs, 48 x [5120][256] bf16.
+  const size_t raw_bytes = (kv8 ? size_t(16777216) : 0) + size_t{48} * 5120 * 256 * 2;
   CHECK_EQ(eng.prefill_scratch()->lazy_bytes(), raw_bytes);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   std::ofstream dump(argv[3], std::ios::binary);

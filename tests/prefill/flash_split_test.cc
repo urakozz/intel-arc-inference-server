@@ -15,6 +15,12 @@
 //                               rotating order after a warm-up, 7 rounds, medians. A span of 0 is
 //                               today's path; int8 arms: today's widen + raw, widen + raw split,
 //                               in-place split.
+//   flash_split_test --ornith [--time ...]
+//                               the same at Ornith's 16 / 2 heads, bf16 only, against what its prefill walk
+//                               binds today: the pair form (pf_o, for the fp64 bar) / with the gate fused
+//                               (pairg, timed), 10 FA layers a list. Adds the bitwise bar of the gated merge
+//                               (pf_flash_mergeg) against the merge then pf_attn_gate; times the split at
+//                               HPW 8 (the engine's) and HPW 4 (a test-only build).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -38,7 +44,8 @@
 
 namespace {
 
-constexpr uint32_t kQH = 24, kKvH = 4, kHD = 256, kKT = 64;
+uint32_t kQH = 24, kKvH = 4;   // Qwen3.8's heads; --ornith sets Ornith's 16 / 2
+constexpr uint32_t kHD = 256, kKT = 64;
 
 uint32_t pad256(uint32_t x) { return (x + 255u) & ~255u; }
 uint32_t c8_of(uint32_t C) { return (C + 7u) & ~7u; }
@@ -69,6 +76,7 @@ struct Caches {
   std::vector<uint16_t> q, kb, vb;     // bf16 Q [C][24][256], K / V [depth][4][256]
   std::vector<int8_t> k8, v8;          // int8 rows
   std::vector<uint16_t> ks, vs;        // fp16 scales [depth][4]
+  std::vector<float> g;                // qkv_partials [C][(2 q + 2 kv) x 256]: the gate's source (Ornith)
 };
 
 Caches make(uint32_t pos, uint32_t C, float qscale) {
@@ -94,6 +102,8 @@ Caches make(uint32_t pos, uint32_t C, float qscale) {
     c.ks[i] = common::kv8::f32_to_f16_rne(float(1 + r.next() % 100u) / 4096.0f);
     c.vs[i] = common::kv8::f32_to_f16_rne(float(1 + r.next() % 100u) / 4096.0f);
   }
+  c.g.resize(size_t(C) * (2 * kQH + 2 * kKvH) * kHD);
+  for (auto& e : c.g) e = r.uni() * 3.0f;
   return c;
 }
 
@@ -147,8 +157,8 @@ struct Dev2 : pf_harness::Dev {
 // The device side of one shape: every buffer, and the launches of each arm appended to a list.
 struct Shape {
   uint32_t pos, C, rows, c8;
-  l0::Mem q, kb, vb, k8, v8, ks, vs, raw, o, part;
-  Shape(Dev2& d, const Caches& c, uint32_t pos_, uint32_t C_, uint32_t max_spans)
+  l0::Mem q, kb, vb, k8, v8, ks, vs, raw, o, part, g, out;
+  Shape(pf_harness::Dev& d, const Caches& c, uint32_t pos_, uint32_t C_, uint32_t max_spans)
       : pos(pos_), C(C_), rows(pad256(C_)), c8(c8_of(C_)),
         q(pf_harness::upload(d.ctx, d.imm, c.q)), kb(pf_harness::upload(d.ctx, d.imm, c.kb)),
         vb(pf_harness::upload(d.ctx, d.imm, c.vb)), k8(pf_harness::upload(d.ctx, d.imm, c.k8)),
@@ -156,7 +166,8 @@ struct Shape {
         vs(pf_harness::upload(d.ctx, d.imm, c.vs)),
         raw(d.ctx, l0::MemKind::Device, c.kb.size() * 2 * sizeof(uint16_t)),
         o(d.ctx, l0::MemKind::Device, size_t(kQH) * rows * kHD * sizeof(float)),
-        part(d.ctx, l0::MemKind::Device, size_t(max_spans) * kQH * c8 * (kHD + 2) * sizeof(float)) {}
+        part(d.ctx, l0::MemKind::Device, size_t(max_spans) * kQH * c8 * (kHD + 2) * sizeof(float)),
+        g(pf_harness::upload(d.ctx, d.imm, c.g)), out(d.ctx, l0::MemKind::Device, size_t(C_) * kQH * kHD * 2) {}
   uint16_t* kraw() { return raw.as<uint16_t>(); }
   uint16_t* vraw() { return raw.as<uint16_t>() + size_t(pos + C) * kKvH * kHD; }
   float* ml(uint32_t n) { return part.as<float>() + size_t(n) * kQH * c8 * kHD; }
@@ -338,20 +349,215 @@ int time_arms(Dev2& d, const std::vector<uint32_t>& poss, const std::vector<uint
   return 0;
 }
 
+// --- Ornith (--ornith) -------------------------------------------------------------------------------------------
+
+struct DevO : pf_harness::Dev {
+  l0::Module pm{ctx, kernels::path("pf_flash_attn_pair_Q16KV2")}, pgm{ctx, kernels::path("pf_flash_attn_pairg_Q16KV2")};
+  l0::Module sm{ctx, kernels::path("pf_flash_attn_split_Q16KV2")};
+  l0::Module s4m{ctx, kernels::path("pf_flash_attn_split_Q16KV2_H4")};
+  l0::Module mm{ctx, kernels::path("pf_flash_merge_Q16KV2")}, mgm{ctx, kernels::path("pf_flash_mergeg_Q16KV2")};
+  l0::Module gm{ctx, kernels::path("pf_attn_Q16KV2")};
+  l0::Kernel pair{pm, "pf_flash_attn"}, pairg{pgm, "pf_flash_attn"}, split{sm, "pf_flash_attn"};
+  l0::Kernel split4{s4m, "pf_flash_attn"}, merge{mm, "pf_flash_merge"}, mergeg{mgm, "pf_flash_merge"};
+  l0::Kernel gate{gm, "pf_attn_gate"};
+  DevO() {
+    for (l0::Kernel* k : {&pair, &pairg, &split4}) k->group_size(64);
+    split.group_size(128);
+    for (l0::Kernel* k : {&merge, &mergeg, &gate}) k->group_size(256);
+  }
+};
+
+// One FA layer: today's pair form at span 0, else the split (HPW 8, or HPW 4 with `h4`) and the merge. `gated`: the
+// prefill walk's forms (pairg, mergeg) into `out`; else pf_o.
+void append_o(DevO& d, l0::CmdList& list, Shape& s, uint32_t span, bool h4, bool gated) {
+  uint32_t a = 0;
+  auto head_args = [&](l0::Kernel& k, void* o) {
+    a = 0;
+    k.arg_ptr(a++, s.q.ptr());
+    k.arg_ptr(a++, s.kb.ptr());
+    k.arg_ptr(a++, s.vb.ptr());
+    k.arg_ptr(a++, o);
+    k.arg(a++, s.pos);
+    k.arg(a++, s.C);
+    k.arg(a++, s.rows);
+  };
+  if (!span) {
+    l0::Kernel& k = gated ? d.pairg : d.pair;
+    head_args(k, s.o.ptr());
+    if (gated) {
+      k.arg_ptr(a++, s.g.ptr());
+      k.arg_ptr(a++, s.out.ptr());
+    }
+    list.launch(k, (s.C + 15u) / 16u, kKvH, kQH / kKvH / 2u);
+    return;
+  }
+  const uint32_t n = spans_of(s.pos, span);
+  l0::Kernel& k = h4 ? d.split4 : d.split;
+  head_args(k, s.part.ptr());
+  k.arg_ptr(a++, s.ml(n));
+  k.arg(a++, span);
+  list.launch(k, (s.C + 7u) / 8u, kKvH, (h4 ? 2u : 1u) * n);
+  l0::Kernel& m = gated ? d.mergeg : d.merge;
+  m.arg_ptr(0, s.part.ptr());
+  m.arg_ptr(1, s.ml(n));
+  m.arg_ptr(2, s.o.ptr());
+  m.arg(3, s.C);
+  m.arg(4, s.rows);
+  m.arg(5, n);
+  if (gated) {
+    m.arg_ptr(6, s.g.ptr());
+    m.arg_ptr(7, s.out.ptr());
+  }
+  list.launch(m, s.C, kQH, 1);
+}
+
+template <class F>
+void run_list(pf_harness::Dev& d, F append) {
+  auto list = l0::CmdList::regular(d.ctx);
+  append(list);
+  list.close();
+  d.q.execute(list, &d.fence);
+  d.fence.wait();
+}
+
+int check_ornith(DevO& d) {
+  struct Case { uint32_t pos, C, n; };
+  const std::vector<Case> cases = {{64, 1, 1},       {65, 1, 2},        {1000, 16, 4},    {4095, 7, 16},
+                                   {8191, 64, 8},    {32768, 1, 128},   {32768, 16, 64},  {32768, 128, 16},
+                                   {32700, 33, 9},   {131072, 1, 256},  {131071, 64, 32}, {131072, 128, 14},
+                                   {100000, 256, 7}, {262143, 16, 64},  {262144, 64, 16}};
+  bool ok = true;
+  for (const Case& cs : cases) {
+    const Caches c = make(cs.pos, cs.C, 2.0f);
+    const uint32_t span = span_for(cs.pos, cs.n), n = spans_of(cs.pos, span);
+    Shape s(d, c, cs.pos, cs.C, n);
+    std::vector<uint32_t> rws = {0, cs.C - 1, cs.C / 2, std::min(cs.C - 1, 7u)};
+    std::sort(rws.begin(), rws.end());
+    rws.erase(std::unique(rws.begin(), rws.end()), rws.end());
+    std::vector<std::pair<uint32_t, uint32_t>> rh;
+    for (uint32_t r : rws)
+      for (uint32_t h = 0; h < kQH; ++h) rh.push_back({r, h});
+    std::vector<std::vector<double>> ref;
+    for (auto [r, h] : rh) ref.push_back(reference(c, cs.pos, r, h, false));
+    std::vector<float> base(s.o.size() / sizeof(float)), got(base.size());
+    d.imm.fill(s.o.ptr(), 0x7FC00000u, s.o.size());
+    run_list(d, [&](l0::CmdList& l) { append_o(d, l, s, 0, false, false); });
+    pf_harness::download(d.imm, base, s.o);
+    d.imm.fill(s.o.ptr(), 0x7FC00000u, s.o.size());
+    run_list(d, [&](l0::CmdList& l) { append_o(d, l, s, span, false, false); });
+    pf_harness::download(d.imm, got, s.o);
+    // the gated merge against the merge's pf_o (just written) through pf_attn_gate
+    const size_t out_n = size_t(cs.C) * kQH * kHD;
+    std::vector<uint16_t> sep(out_n), fus(out_n);
+    run_list(d, [&](l0::CmdList& l) {
+      d.gate.arg_ptr(0, s.o.ptr());
+      d.gate.arg_ptr(1, s.g.ptr());
+      d.gate.arg_ptr(2, s.out.ptr());
+      d.gate.arg(3, s.rows * kHD);
+      l.launch(d.gate, kQH, cs.C, 1);
+    });
+    pf_harness::download(d.imm, sep, s.out);
+    d.imm.fill(s.out.ptr(), 0xBEEFBEEFu, s.out.size());
+    run_list(d, [&](l0::CmdList& l) { append_o(d, l, s, span, false, true); });
+    pf_harness::download(d.imm, fus, s.out);
+    size_t gdiff = 0;
+    for (size_t i = 0; i < out_n; ++i) gdiff += sep[i] != fus[i];
+    size_t nonfinite = 0;
+    double diff = 0, mag = 0;
+    for (uint32_t h = 0; h < kQH; ++h)
+      for (uint32_t r = 0; r < cs.C; ++r)
+        for (uint32_t x = 0; x < kHD; ++x) {
+          const size_t i = (size_t(h) * s.rows + r) * kHD + x;
+          nonfinite += !std::isfinite(got[i]) || !std::isfinite(base[i]);
+          diff = std::max(diff, double(std::fabs(got[i] - base[i])));
+          mag = std::max(mag, double(std::fabs(base[i])));
+        }
+    const Err eb = against(base, ref, rh, s.rows), es = against(got, ref, rh, s.rows);
+    const bool pass = nonfinite == 0 && gdiff == 0 && es.worst_cos >= 0.99999 && es.max_abs <= 2.0 * eb.max_abs + 1e-6;
+    std::printf("ornith pos %6u C %3u spans %3u (span %6u): today cos %.8f err %.3g | split cos %.8f err %.3g"
+                " | split - today max %.3g of %.3g | gated merge vs merge + gate: %zu of %zu words differ %s\n",
+                cs.pos, cs.C, n, span, eb.worst_cos, eb.max_abs, es.worst_cos, es.max_abs, diff, mag, gdiff, out_n,
+                pass ? "ok" : "FAIL");
+    std::fflush(stdout);
+    ok = ok && pass;
+  }
+  std::puts(ok ? "flash_split_test --ornith: PASS" : "flash_split_test --ornith: FAIL");
+  return ok ? 0 : 1;
+}
+
+int time_ornith(DevO& d, const std::vector<uint32_t>& poss, const std::vector<uint32_t>& rowsv,
+                const std::vector<uint32_t>& spans) {
+  using Clock = std::chrono::steady_clock;
+  for (uint32_t pos : poss)
+    for (uint32_t C : rowsv) {
+      const Caches c = make(pos, C, 2.0f);
+      uint32_t max_n = 1;
+      for (uint32_t sp : spans)
+        if (sp) max_n = std::max(max_n, spans_of(pos, sp));
+      Shape s(d, c, pos, C, max_n);
+      struct Arm { std::string name; l0::CmdList list; };
+      std::vector<Arm> arms;
+      for (uint32_t sp : spans)
+        for (bool h4 : {false, true}) {
+          if ((sp == 0 && h4) || (sp && sp >= pos + kKT)) continue;
+          Arm a{sp ? std::string(h4 ? "split H4" : "split H8") + " span " + std::to_string(sp) + " n " +
+                         std::to_string(spans_of(pos, sp))
+                   : std::string("today (pairg)"),
+                l0::CmdList::regular(d.ctx)};
+          for (uint32_t layer = 0; layer < 10; ++layer) append_o(d, a.list, s, sp, h4, true);
+          a.list.close();
+          arms.push_back(std::move(a));
+        }
+      auto once = [&](Arm& a) {
+        const auto t0 = Clock::now();
+        d.q.execute(a.list, &d.fence);
+        d.fence.wait();
+        return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+      };
+      for (int w = 0; w < 2; ++w)
+        for (auto& a : arms) once(a);
+      std::vector<std::vector<double>> ms(arms.size());
+      for (uint32_t round = 0; round < 7; ++round)
+        for (size_t i = 0; i < arms.size(); ++i) {
+          const size_t a = (round + i) % arms.size();
+          ms[a].push_back(once(arms[a]));
+        }
+      for (size_t a = 0; a < arms.size(); ++a) {
+        std::sort(ms[a].begin(), ms[a].end());
+        std::printf("time ornith pos %6u C %4u %-30s 10 layers %9.3f ms [%.3f, %.3f]\n", pos, C, arms[a].name.c_str(),
+                    ms[a][3], ms[a].front(), ms[a].back());
+      }
+      std::fflush(stdout);
+    }
+  std::puts("flash_split_test --ornith --time: done");
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  Dev2 d;
-  if (argc > 1 && std::string(argv[1]) == "--time") {
-    CHECK(argc > 2);
-    const auto poss = list_of(argv[2]);
-    std::vector<uint32_t> rowsv = {1, 16, 64, 128, 256, 512}, spans = {0, 512, 1024, 2048, 4096, 8192, 16384};
-    for (int i = 3; i + 1 < argc; i += 2) {
+  int a = 1;
+  const bool ornith = a < argc && std::string(argv[a]) == "--ornith";
+  if (ornith) {
+    kQH = 16;
+    kKvH = 2;
+    ++a;
+  }
+  const bool timing = a < argc && std::string(argv[a]) == "--time";
+  std::vector<uint32_t> poss, rowsv = {1, 16, 64, 128, 256, 512}, spans = {0, 512, 1024, 2048, 4096, 8192, 16384};
+  if (timing) {
+    CHECK(argc > a + 1);
+    poss = list_of(argv[a + 1]);
+    for (int i = a + 2; i + 1 < argc; i += 2) {
       if (std::string(argv[i]) == "--rows") rowsv = list_of(argv[i + 1]);
       else if (std::string(argv[i]) == "--spans") spans = list_of(argv[i + 1]);
       else CHECK(false);
     }
-    return time_arms(d, poss, rowsv, spans);
   }
-  return check(d);
+  if (ornith) {
+    DevO d;
+    return timing ? time_ornith(d, poss, rowsv, spans) : check_ornith(d);
+  }
+  Dev2 d;
+  return timing ? time_arms(d, poss, rowsv, spans) : check(d);
 }

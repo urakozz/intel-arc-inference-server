@@ -111,7 +111,7 @@ std::vector<uint16_t> run_silu(Dev& d, bool pf, uint32_t M, const std::vector<fl
   k.arg_ptr(0, pbuf.ptr());
   k.arg_ptr(1, xbuf.ptr());
   if (pf) k.arg<uint32_t>(2, M);
-  d.run(k, (N + 4095) / 4096, M);
+  d.run(k, pf ? (N + 4095) / 4096 : (N + 255) / 256, M);   // pf_prep.cl's SILU_CHUNK 4096, prep.cl's 256
   std::vector<uint16_t> x(size_t(M) * N);
   download(d.imm, x, xbuf);
   return x;

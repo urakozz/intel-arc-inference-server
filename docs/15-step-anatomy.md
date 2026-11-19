@@ -1,15 +1,18 @@
 # The step, launch by launch
 
 This document describes what one decode step and one prefill step are made of, in each run mode, and where the time
-in a one-card decode step goes, measured kernel by kernel inside the replayed command list. [12-kernels.md](12-kernels.md)
-says what each kernel does; this document says how they add up to a step. It is for readers who want to understand
-why the kernel work went where it did, and how to measure a step without fooling themselves.
+in a one-card decode step goes, measured kernel by kernel inside the replayed command list. It is for readers who want
+to understand why the kernel work went where it did, and how to measure a step without fooling themselves.
+[12-kernels.md](12-kernels.md) says what each kernel does; this document says how they add up to a step.
 
-Part 1 is the step as the code runs it today: one card, several requests at once, replica, tensor parallel and
-pipeline parallel. Part 2 is the one-card decode profile of 2026-08-25, kept as the record of the method and its
-lessons. Its absolute numbers come from that day's software stack (a 42.141 ms step, taken to 36.32 ms by the three
-changes it describes), not today's. Current speeds are in the benchmark record. The last section covers the
-prefill walk.
+The document has three parts:
+
+1. **Part 1** is the step as the code runs it today: one card, several requests at once, replica, tensor parallel and
+   pipeline parallel.
+2. **Part 2** is the first one-card decode profile, kept as the record of the method and its lessons. Its absolute
+   numbers come from the first build (a 42.141 ms step, taken to 36.32 ms by the three changes it describes), not
+   today's. Current speeds are in the [README](../README.md#speed).
+3. **The prefill walk** covers how a prompt chunk is made up and timed.
 
 ## Part 1: what a step is today
 
@@ -115,7 +118,7 @@ peer write, and after the fence the host mirrors card 1's control block into car
 card's, since the cards take turns; the gain is memory, for models too big for one card. Prefill is a chunk pipeline:
 card 0 runs a chunk's first layers and hands its rows to card 1 while starting on the next chunk.
 
-## Part 2: the one-card decode profile of 2026-08-25
+## Part 2: the first one-card decode profile
 
 ### Read this before any number below
 
@@ -130,8 +133,7 @@ carries a flush an unprofiled list never pays. Four consequences follow:
 - A per-kernel time here is directly comparable with a probe's. The duration runs from `kernelStart` to `kernelEnd`;
   the flush lands after `kernelEnd`, so being observed inflates nothing about a kernel's own execution.
 - The gap between kernels is an upper bound, since each gap contains one flush.
-- The fence-to-fence wall time is not the time per token. The step time is the `--bench` median in
-  the benchmark record.
+- The fence-to-fence wall time is not the time per token. The step time is the `b70-decode --bench` median.
 - A single run's mean is not an attribution: it carries the instrument's drift. "The attribution floor" below prices
   that drift; read it before believing any difference under about 0.3 ms.
 
@@ -144,10 +146,10 @@ estimated (from a model or an extrapolation).
 tools/box.sh run "./build/src/cli/b70-decode <checkpoint> --profile --depth 4096 --steps 32"
 ```
 
-On an idle box, 2026-08-25, one Intel Arc Pro B70, `--max-len 16384`. `--profile` first ingests 4096 synthetic ids on
+On an idle box, one Intel Arc Pro B70, `--max-len 16384`. `--profile` first ingests 4096 synthetic ids on
 an uninstrumented list (an ordinary decode), then builds a second, profiled list against the same buffers and replays
 32 instrumented steps, resetting every event before each replay and reading the durations only after the fence. The
-profiled positions were 4096 to 4127, so 17 attention blocks were live at that day's `ATTN_BLOCK` of 256 positions.
+profiled positions were 4096 to 4127, so 17 attention blocks were live at the then `ATTN_BLOCK` of 256 positions.
 
 The launch count in the first tables, 645, is that run's. The residual-norm split described below turned each of the
 129 `prep_res_norm` sites into two launches, so the walk is now 774, and a run today prints 774 wherever 645 appears.
@@ -218,12 +220,12 @@ of the device's bandwidth, 1.09 times its own bound. Making it perfect would sav
 
 `lm_head` was 10.4% of the step, and no tuning could help it. It took 4.376 ms in one launch at 581 GB/s, 98.5% of the
 measured 590 GB/s. The bytes are the lever, not the kernel. The published checkpoint ships a bf16 head, so this
-project quotes only comparisons with vLLM that read the same bytes (the benchmark record says why); the
-engine has since moved to an int8 head quantised at load ([13-loader.md](13-loader.md)).
+project quotes only comparisons with vLLM that read the same bytes ([05-perf-model.md](05-perf-model.md#1-quantise-lm_head)
+says why); the engine serves an int8 head quantised at load ([13-loader.md](13-loader.md)).
 
-### The three changes of 2026-08-25
+### The three changes that followed
 
-All three were made against this profile's own ranking, measured with its own instrument on the same day, in this
+All three were made against this profile's own ranking, measured with its own instrument in one session, in this
 order, because each one corrected the model the next was designed on.
 
 | change | what shipped | site in the step | bench step, ms | bench difference, ms |
@@ -326,7 +328,7 @@ online-softmax model (it predicted 123 us or less; measured 153.1) and the barri
 
 The 0.31 ms outside the kernels, and `attn_reduce`'s 56.8 us spread across processes, have unknown causes. Everything
 above is the M = 1 decode step on one card. The small kernels are the ones whose costs move most with M; the M = 2 to
-8 row lists and the verify kernels are measured in the benchmark record, not here.
+8 row lists and the verify kernels are not covered here.
 
 ## The prefill walk
 
@@ -345,7 +347,8 @@ A GDN layer is 2 norm launches, the slab dequantisation and GEMM pairs of three 
 `gdn_chunk` launches and 2 more norms. An attention layer has the same skeleton with `pf_attn_prep`, `pf_attn_gate` and
 the attention itself. Only the composed attention's count depends on C (it computes QK^T per 256-row block, so the
 masked half is skipped); the rest does not, so one set of binaries serves every `--prefill-chunk` width. The default
-chunk is 2048; 4096 is built and opt-in.
+chunk cap is 2048, widened to 4096 when the memory plan has room for it beside the context; `b70-decode
+--prefill-chunk C` sets it explicitly.
 
 The sycl-tla backend that came before needed 656 host waits per chunk and ten times the scratch memory. Moving the
 linears onto Level Zero was worth +6.76% on prefill, all of it in the linears, and the extra launches cost no host
@@ -353,8 +356,7 @@ time ([04-architecture.md](04-architecture.md)).
 
 ### Where the time goes
 
-Per-phase shares and the history of prefill records are in the benchmark record. Two structural facts
-matter here.
+`B70_PREFILL_PROFILE=1` prints the per-phase shares of a run. Two structural facts matter here.
 
 The linears are the walk: `linear_l0` is over 60% of a chunk. With one wait per slab, a 4096-token prompt measures
 `slab_dequant` at 274.5 ms and `slab_gemm` at 1344.3 ms, over 7616 launches each. That is an attribution, not a
@@ -363,13 +365,12 @@ GEMM half.
 
 The delta-net scan was the biggest miss in this project's estimates. A projection that widened decode's `gdn_step` to
 M = 2048 said 15.4 ms per chunk; the first working version measured 984.1 ms, 64 times more. Rewrites, and then the
-split-bf16 DPAS scan, brought it down (the benchmark record). A projection that stretches a kernel written for one shape to a
+split-bf16 DPAS scan, brought it down. A projection that stretches a kernel written for one shape to a
 shape three orders of magnitude away measures nothing.
 
 ### Chunk width: fixed and per-position cost
 
-A single-chunk sweep at C = 256, 512, 1024 and 2048 (2026-09-09, an older stack) measured 411.5 ms fixed per chunk and
-0.852 ms per position (derived from a two-point fit). At C = 256 the fixed part is 70% of the chunk, which is why
-throughput rose with chunk width across the range then available. The widest chunk is now 4096. The scratch memory is
-sized by the chunk cap, so the width is chosen per session, not changed freely; its measured effect is in
-the benchmark record.
+A single-chunk sweep at C = 256, 512, 1024 and 2048, on an older stack, measured 411.5 ms fixed per chunk and 0.852 ms
+per position (derived from a two-point fit). At C = 256 the fixed part is 70% of the chunk, which is why throughput
+rose with chunk width across that range. The widest chunk is now 4096. The scratch memory is sized by the chunk cap,
+so the width is chosen per session, not changed freely.

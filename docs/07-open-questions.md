@@ -1,9 +1,10 @@
 # Open questions
 
 This page lists what is genuinely not known about the card and the numerics, ranked by how much the answer would
-change the design. It is for anyone about to design around one of these points: nothing here is settled, and
-nothing here should become an assumption in a design without being measured first. These are questions, not work
-items; scheduled and ruled-out work are tracked separately.
+change the design. It is for anyone about to design around one of these points.
+
+Nothing here is settled, and nothing here should become an assumption in a design without being measured first.
+These are questions, not a to-do list.
 
 Questions that have been answered are not kept here; their answers live where they are used. The DPAS rate
 landscape (DPAS is the card's matrix multiply-accumulate instruction) is in [01-hardware.md](01-hardware.md), the
@@ -15,11 +16,11 @@ format decisions in [02-formats.md](02-formats.md), the time decomposition and t
 - Is W4A4 (int4 weights times int4 activations) usable? No. The DPAS rate is real, 4.000x bf16, but int4
   activations roughly double the output error ([05-perf-model.md](05-perf-model.md)).
 - Is W8A8 worth anything for prefill? Yes. The int8 prefill path, which turns the int4 weights into rotated int8 and
-  does the matrix math in int8, is the `l0-int8` backend, about 30% faster than the bf16 walk
-  ([16-int8-prefill.md](16-int8-prefill.md), the benchmark record).
+  does the matrix math in int8, is the opt-in `l0-int8` backend, about 1.15x the bf16 pass on one card for Qwen3.8
+  ([16-int8-prefill.md](16-int8-prefill.md)).
 - Does quantising `lm_head` (the output head that turns the last hidden state into vocabulary logits) to int8 cost
-  accuracy? Not measurably against the gates, and it is the serving default (the benchmark record, "int8 lm_head"). The
-  int4 head is still open, below.
+  accuracy? Not measurably against the gates, and it is the serving default
+  ([05-perf-model.md](05-perf-model.md#1-quantise-lm_head)). The int4 head is still open, below.
 - Why did the DPAS verify-attention kernel pick the wrong token at 8 rows? It rounded the softmax weights to bf16
   before the P x V product. Splitting each weight into two bf16 halves fixed it, and the f32 judge
   ([14-golden-gate.md](14-golden-gate.md)) now covers the kernel.
@@ -50,7 +51,7 @@ show it can be planned around.
 
 ## 3. What sets the decode attention kernel's per-launch cost?
 
-On the 2026-08 driver stack the retiled attention launch cost 224.046 us, and its largest named term was the KV load
+On an early driver stack the retiled attention launch cost 224.046 us, and its largest named term was the KV load
 path at 55.4% (39.2% the 32-byte load messages themselves, 16.2% cache service). Four successive cost models failed
 on it: two broke on a third depth point, a per-work-group occupancy ceiling broke on a bit-identical rewrite, and a
 fill-fraction model and its refit broke on a block-size sweep. What is missing is a model that predicts the launch
@@ -64,15 +65,15 @@ address a function of the loop variable.
 
 ## 4. Is the second card really slower at prefill?
 
-On 2026-09-05, with the same binary, the same checkpoint and the same ten minutes, prefill lost 3.2% to 3.4% on
-device 1 and decode 0.2% to 0.4%, reproducing on two checkpoints and far outside the spreads (the benchmark record, "The two
-cards are not interchangeable"). That pattern points to sustained compute, not bandwidth. Neither card drives a
-display, both report identical unprivileged PCIe link fields, and reading the clock frequencies needs root.
+In one session, with the same binary, the same checkpoint and the same ten minutes, prefill lost 3.2% to 3.4% on
+device 1 and decode 0.2% to 0.4%, reproducing on two checkpoints and far outside the spreads. That pattern points to
+sustained compute, not bandwidth. Neither card drives a display, both report identical unprivileged PCIe link
+fields, and reading the clock frequencies needs root.
 
-The most likely explanation since found is that a hardware monitoring tool (`hw-smi`) was open during that
-measurement, and the cards are now treated as equal for new runs. The gap has not been re-measured with the tool
-closed, so the validation tooling still keeps timed series rows on device 0, and every series row in
-the benchmark record names its card.
+The most likely explanation is that a hardware monitoring tool (`hw-smi`) was open during that measurement; a monitor
+that holds forcewake keeps the cards out of their idle state ([10-the-box.md](10-the-box.md#after-a-reboot)). The
+cards are treated as equal for new runs, but the gap has not been re-measured with the tool closed, so the
+validation tooling still keeps timed series rows on device 0, and a series row names its card.
 
 ## 5. The split-BF16 delta-net scan's remaining single-precision operand
 

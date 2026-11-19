@@ -3,8 +3,10 @@
 The engine is developed on a laptop and built, tested and benchmarked on a separate Linux machine with the cards in
 it. These docs call that machine "the box", and commands name it `$BOX`. This document describes what the box has
 to be, how a remote build and the validation runs work, how GPU access is shared between jobs, and the traps that
-have cost time. It is for anyone setting up a similar machine or running jobs on this one. Nothing in the engine
-requires the laptop-and-box arrangement, but the tools assume it.
+have cost time.
+
+It is for anyone setting up a similar machine or running jobs on this one. Nothing in the engine requires the
+laptop-and-box arrangement, but the tools assume it.
 
 The laptop never compiles C++: every build and test runs on the box, `tools/box_check.sh` for a branch and
 `tools/box_validate.sh` for the full list.
@@ -17,7 +19,7 @@ The box is a Linux workstation, a Dell T5810-class Broadwell-EP host, with two c
 |---|---|
 | OS | Linux. Ubuntu is what this was developed against; no Windows or macOS runtime exists |
 | CPU / RAM | a many-core CPU and, on this box, 121 GB of RAM: the CPU oracle wants about 70 GB free for a layer-streamed 27B forward. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not ([09-vllm-patch-postmortem.md](09-vllm-patch-postmortem.md)) |
-| GPU | 2 x Intel Arc Pro B70 (Battlemage / Xe2), 32 GB each. One card is enough for everything except the two-card modes (tensor parallel, replica, pipeline parallel; the benchmark record); the second is also useful as an idle control |
+| GPU | 2 x Intel Arc Pro B70 (Battlemage / Xe2), 32 GB each. One card is enough for everything except the two-card modes (tensor parallel, replica, pipeline parallel); the second is also useful as an idle control |
 | Driver | `libze_intel_gpu`, IGC and `intel-ocloc`. The B70 is `bmg-g31`, so kernels build with `ocloc -device bmg-g31` |
 | Level Zero | headers and loader from the distribution packages |
 | Host compilers | GCC 16 (`/usr/local/bin/g++-16.2`, the default the build picks; C++26 with static reflection, `-freflection`) and CMake 4.2 or later, plus `ccache`. GCC 16's `libstdc++` is newer than the system's: the binaries find it through their rpath (`/usr/local/lib64`), so no `LD_LIBRARY_PATH` is needed. The system `g++` 15.2 stays for other projects |
@@ -33,12 +35,8 @@ reference vLLM stack.
 |---|---|
 | kernel (running) | Linux 7.4.0-rc2 (mainline), which supports peer-to-peer access natively (earlier kernels needed a local patch) |
 | IGC (Intel Graphics Compiler, which turns OpenCL C into GPU code) | 2.42.6, from the GitHub release debs |
-| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.40.40196.8, from the GitHub release debs (held, so an apt upgrade does not move it) |
+| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.40.40196.15, from the Ubuntu 26.04 PPA packages (`~26.04~ppa1`) |
 | Level Zero loader | 1.34 |
-
-This stack was installed on 2026-11-04 and changed both the compiler and the runtime, so speed rows in BENCHMARKS
-taken before that date come from the older stack (compute runtime 26.35, IGC 2.41.5) until they are re-measured on a
-quiet box (tracked as open work).
 
 Kernel binaries cannot go stale silently. `cmake/ocloc_stamp.cmake` records `ocloc --version` and the real paths of
 the `libigc` / `libigdfcl` libraries the loader resolves, and rewrites a stamp file only when they change. Every
@@ -49,17 +47,17 @@ compiler at all, so the oneAPI and oneDNN versions on the box matter only to the
 
 Peer-to-peer access (P2P) is one card reading or writing the other card's memory directly over PCIe. Tensor parallel
 exchanges partial results this way every layer, and the hardware check refuses two visible cards that cannot both reach
-each other's memory, with the advice to run on one card with `ZE_AFFINITY_MASK=0`. Peer access needs a kernel that supports it (the mainline 7.4.0-rc2 above does) and both cards
-under one PCIe root complex.
+each other's memory, with the advice to run on one card with `ZE_AFFINITY_MASK=0`. Peer access needs a kernel that
+supports it (the mainline 7.4.0-rc2 above does) and both cards under one PCIe root complex.
 
 The BAR is the window through which the host or the other card reaches a card's memory. The firmware's resizable-BAR
 setting (ReBarState 14) caps it at 16 GB (15 does not boot); the `xe` driver resizes both cards' BARs to the full
 32 GB when it loads.
 
 The driver can answer EBUSY ("busy") to a request, and the runtime retries that forever. With no retry limit, an
-EBUSY that never clears is a hang, not an error. It happened with one large pinned host allocation that the second
-card maps through a shared import (the prefix cache). The rule since then is that any host allocation both cards use
-stays at or below 4 GiB, which is why the prefix cache is made of 2 GiB pieces.
+EBUSY that never clears is a hang, not an error. One large pinned host allocation that the second card maps through
+a shared import (the prefix cache) triggered it. So any host allocation both cards use stays at or below 4 GiB, which
+is why the prefix cache is made of 2 GiB pieces.
 
 ## Where things live on the box
 
@@ -110,10 +108,15 @@ and never during a timed row. A finished reference lands in the data tree (`~/b7
 
 ## Driving a remote build
 
-`tools/box.sh` syncs the tree, configures, builds and runs `ctest` over ssh. Set `BOX=user@host` before using it, or
-put it in the untracked `tools/box.env`; there is no default address in the repo. `REMOTE_DIR`, `JOBS`, `BUILD_DIR`
-and `CMAKE_ARGS` override the rest. Each branch or worktree gets its own remote tree (`tools/box_dir.sh`), so
-parallel lines of work do not overwrite one another.
+`tools/box.sh` syncs the tree, configures, builds and runs `ctest` over ssh. First put `BOX=user@host` in a `.env`
+in the main checkout's root:
+
+- the file is git-ignored; copy `.env.example` to start;
+- every worktree reads that one file (`tools/box_env.sh` loads it), and an exported `BOX` wins;
+- there is no default address in the repo.
+
+`REMOTE_DIR`, `JOBS`, `BUILD_DIR` and `CMAKE_ARGS` override the rest. Each branch or worktree gets its own remote tree
+(`tools/box_dir.sh`), so parallel lines of work do not overwrite one another.
 
 ```sh
 tools/box.sh sync                 # rsync the tree
@@ -195,11 +198,10 @@ sample, `merge.dflash`, runs outside the changed tests' time cap. It runs:
 
 It keeps its own state (`<sha>-merge-vs-<baseline>`) and does not stand for a quick or a full run.
 
-The quick run, `tools/box_validate.sh --quick`, is for every change. It was meant to take an hour; on a box shared
-with other jobs it once took about 3 hours, most of it G0's gate outputs and the suite under the whole-box lock. Since
-then the baseline build is reused, and G0's gates, the suite and the rest of the suite (`x.rest`) hold one card, so
-the other card stays free. Only the tests labelled `pp` or `tp` (`g0.suite_2card`, `x.rest_2card`) and the stages
-that really use two cards hold the whole box. How much that saves is not measured yet.
+The quick run, `tools/box_validate.sh --quick`, is for every change and aims at about an hour. The baseline build is
+reused, and G0's gates, the suite and the rest of the suite (`x.rest`) hold one card, so the other card stays free.
+Only the tests labelled `pp` or `tp` (`g0.suite_2card`, `x.rest_2card`) and the stages that really use two cards hold
+the whole box.
 
 The quick run is G0 as in the full run, except that the suite runs only the tests that load no model (no
 `checkpoint` label), followed by a fixed sample of each model's kernel, decode, prefill and serving stages, a few with
@@ -233,10 +235,10 @@ The orchestrator is the one detached `tools/box_validate/remote.sh` process on t
 These are the rules it enforces, and what follows from them.
 
 A state is a commit paired with a baseline. Results live in `~/b70-validate/<tree>/<HEAD sha12>-vs-<baseline sha12>/`
-(default baseline `3769e2a5`; `--baseline main` when validating a branch before its merge). Every launch that should
+(default baseline `c03661e5`; `--baseline main` when validating a branch before its merge). Every launch that should
 add to one state must come from the same commit with the same baseline; otherwise G0 is not PASS there and every
 later stage is SKIP "blocked". So when main may move under a long run, launch from a detached worktree
-(`git worktree add --detach ../b70-boxday main`, with the untracked `tools/box.env` copied in, never committed). A
+(`git worktree add --detach ../b70-boxday main`; `BOX` comes from the main checkout's `.env`). A
 `-dirty` suffix in the state name means the tree had uncommitted changes. A fix is a new commit and so a new state,
 and G0 runs again; `--state <old name>` keeps adding to the old state, and is only for fixes that touch no device code
 and nothing G0 compares.
@@ -321,18 +323,18 @@ silently invalidates a measurement: the CLIs have no device flag; `ZE_AFFINITY_M
 enumerates; one card is device 0 of that view, and two are devices 0 and 1 (`ZE_AFFINITY_MASK=1` runs on the second
 card alone).
 
-The two cards may not be interchangeable. In one session on 2026-09-05, with the same binary and checkpoint, prefill
-lost 3.2% to 3.4% on the second card while decode lost only 0.2% to 0.4%: a difference in sustained compute rather
-than bandwidth. The likeliest cause found since is a hardware monitoring tool left open during that measurement, but
-it has not been re-measured ([07-open-questions.md](07-open-questions.md)). So the validation tooling keeps series rows
-on device 0, and every series row in the benchmark record names its card.
+The two cards may not be interchangeable. In one session, with the same binary and checkpoint, prefill lost 3.2% to
+3.4% on the second card while decode lost only 0.2% to 0.4%: a difference in sustained compute rather than bandwidth.
+The likeliest cause is a hardware monitoring tool left open during that measurement (see "After a reboot" below on
+monitors that hold forcewake), but it has not been re-measured ([07-open-questions.md](07-open-questions.md)). So the
+validation tooling keeps series rows on device 0, and a series row names its card.
 
 ## Why an idle box matters
 
 A benchmark row counts as a record only when the box is provably idle: zero containers and zero processes holding a
 DRM file descriptor on any card, checked before and after the run set. The harness measures that condition itself and
-prints the grade the run earned. A grade is quoted as printed and never upgraded by hand. The grade ladder is in
-the benchmark record.
+prints the grade the run earned (`tools/box_validate/idle.sh`): RECORD when no container runs and no process holds a
+DRM file descriptor on any card, ITERATE otherwise. A grade is quoted as printed and never upgraded by hand.
 
 Idleness matters unevenly, and both halves are measured:
 
@@ -363,10 +365,9 @@ grade, because "submitted no work" is supporting evidence, not proof.
 The grade is fragile: a desktop daemon or another job's container appearing mid-run turns a row ITERATE. The stage's
 own `IDLE after` line catches it, and `--redo <id>` in a clean window fixes it.
 
-## The reference stack
+## Running vLLM on the box
 
-The vLLM container that produces the baseline numbers, the exact serve command and the exact bench command are all in
-the benchmark record. Two things about running it are worth knowing first.
+The box can also run vLLM's XPU container as a reference stack. Two things about running it are worth knowing first.
 
 - Read the vLLM version string the server prints, never the image tag. A tag gets rebuilt: one tag in this project's
   history carried two builds 149 commits apart under the same name, and a number attributed to the wrong one cannot be
@@ -441,9 +442,3 @@ boot; the cold links just dangle until it is back. Check both after a reboot, be
 `findmnt ~/b70/hdd ~/b70/hdd3 && tools/hf_tier.sh status`. A cold model whose disk is missing shows `broken`. A stage
 run checks its data once, at launch (`have.env`), so a run launched before the disk was back needs a fresh launch.
 Device names move between boots, so mount by UUID, never by `/dev/sdX`.
-
-The driver's minimum GPU clock on a B70 is 1200 MHz; `tools/box_setup/gpu-min-freq.service` sets each card's to its
-hardware minimum (400 MHz) at boot, so an awake but quiet card clocks down (install steps in the unit file). An idle
-card should sit in C6 (`tile0/gt0/gtidle/idle_status` = `gt-c6`, about 42 W). A GPU monitor that keeps the cards'
-forcewake held (debugfs `gt0/powergate_info`: `GT.ref_count` above 0) keeps them out of C6 at full clock, about 98 W
-each: close it when it is not needed.

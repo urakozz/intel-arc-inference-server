@@ -110,7 +110,10 @@
 #else
 #error "INTERMEDIATE: only 17408 (Qwen3.8) and 8704 (Qwen3.8 per TP card) are built"
 #endif
-#define SILU_CHUNK 4096   /* 5 work-groups cover 17408; the last does 1024 */
+// Item 42: one output a lane - 68 work-groups cover 17408 (34 at the TP card's 8704). 4096 (5 work-groups, 16 outputs
+// a lane) measured 11.8 us a launch on Qwen3.8 at M = 1; the per-element chain is unchanged, so every output keeps its
+// bits. runtime/capture.cc's kSiluChunk is the host's copy.
+#define SILU_CHUNK 256
 
 // prep_gated_head's shapes, likewise fixed: qkv‖z is 16384 wide with z at
 // column 10240, split-K S = 1; 48 v-heads of 128 (model::Qwen35).
@@ -375,8 +378,8 @@ __kernel void prep_norm_finish(__global const float* restrict sumsq,
 //   x_out[m][k] = rne_bf16(f32(s_b) · f32(u_b))
 //
 // No reduction, no SLM, no barrier: one output per iteration, `SILU_CHUNK`
-// outputs per work-group. Grid = (5, M) at N = 17408 - the last chunk covers
-// 1024 and the `k < k1` bound is what makes that safe.
+// outputs per work-group. Grid = (68, M) at N = 17408; the `k < k1` bound keeps
+// a ragged last chunk safe.
 __attribute__((reqd_work_group_size(WG_SILU, 1, 1)))
 __kernel void prep_silu_mul(__global const float* restrict partials,
                             __global ushort* restrict x_out) {

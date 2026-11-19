@@ -42,7 +42,7 @@
 #   G0's checks on both cards; the reused baseline and the one-card G0 stages take part of that off - not yet
 #   measured); the full run on demand, hours.
 # Run control:
-#   --baseline REF   G0's reference build (default 3769e2a5: main on 2026-11-18, the four test fixes merged;
+#   --baseline REF   G0's reference build (default c03661e5: main on 2026-11-18, the four test fixes merged;
 #                    `--baseline main` when validating a branch before merging)
 #                    A complete build of the baseline, with its recorded gate outputs, is kept in
 #                    ~/b70-inference-server-g0-<sha> and reused while the commit, build settings, compiler, ocloc
@@ -74,7 +74,7 @@
 # recorded. --dry-run / --list print the lock each stage takes. The stages themselves:
 # tools/box_validate/stages.sh.
 #
-# Env: BOX (tools/box.env), REMOTE_DIR / BOX_SUFFIX (default suffix `validate`: the tree
+# Env: BOX (.env), REMOTE_DIR / BOX_SUFFIX (default suffix `validate`: the tree
 # ~/b70-inference-server-validate), BASE_DIR (~/b70-inference-server-g0-<sha>), DATA_DIR
 # (the tree holding oracle-out*, default b70-inference-server), JOBS, DEVICE (0, as --device), PORT,
 # CMAKE_ARGS, SNAP_QWEN / SNAP_ORNITH / SNAP_KOLIBRI, TOK_PYTHON, OPENCODE_LOG,
@@ -128,7 +128,7 @@ while [ $# -gt 0 ]; do
 done
 DEVICE="${DEVICE:-0}"
 export DEVICE
-BASELINE_REF="${BASELINE_REF:-3769e2a5}"
+BASELINE_REF="${BASELINE_REF:-c03661e5}"
 [ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
 [ "$NIGHTLY" = 0 ] || [ "$QUICK" = 0 ] || die "--nightly is a full run: drop --quick"
 [ "$MERGE" = 0 ] || [ "$QUICK" = 0 ] || die "--merge-check and --quick are two tiers: pick one"
@@ -397,7 +397,7 @@ fi
 
 if [ "$MODE" = dry ]; then
   echo "# tools/box_validate.sh --dry-run: every command, nothing connects."
-  echo "# \$BOX is the address in tools/box.env; ~ and \$HOME are the box's."
+  echo "# \$BOX is the address in .env; ~ and \$HOME are the box's."
   echo "# tree under test: $SHA -> \$BOX:~/$REMOTE_DIR"
   echo "# baseline: $BASELINE_REF = $BASE_SHA -> \$BOX:~/$BASE_DIR"
   echo "# state: \$BOX:~/$STATE_REL  (fetched to $LOCAL_STATE)"
@@ -437,10 +437,9 @@ if [ "$MODE" = dry ]; then
 fi
 
 # ---- from here on the box is needed --------------------------------------------------------
-_box_env="$ROOT/tools/box.env"
-# shellcheck source=/dev/null
-[ -r "$_box_env" ] && . "$_box_env"
-: "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
+# shellcheck source=tools/box_env.sh
+. "$ROOT/tools/box_env.sh"
+: "${BOX:?set BOX=user@host in .env in the main checkout root (see .env.example) or in the environment}"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=20 -o ServerAliveCountMax=3)
 
 fetch_and_summarise() {

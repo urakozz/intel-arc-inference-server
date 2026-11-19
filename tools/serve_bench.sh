@@ -47,13 +47,9 @@ PORT="${PORT:-8000}"
 SERVED_NAME="${SERVED_NAME:-b70}"
 RUNS="${RUNS:-3}"
 BUILD=1
-# Machine address. Set BOX in the environment, or put it in tools/box.env
-# (untracked; copy tools/box.env.example). There is no default: a wrong
-# address should fail loudly rather than quietly talk to the wrong machine.
-_box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
-# shellcheck source=/dev/null
-[ -r "$_box_env" ] && . "$_box_env"
-: "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
+# shellcheck source=tools/box_env.sh
+. "$(dirname "${BASH_SOURCE[0]:-$0}")/box_env.sh"
+: "${BOX:?set BOX=user@host in .env in the main checkout root (see .env.example) or in the environment}"
 # shellcheck source=tools/box_dir.sh
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/box_dir.sh"
 REMOTE_DIR="$(b70_remote_dir "$(dirname "${BASH_SOURCE[0]:-$0}")/..")"

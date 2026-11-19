@@ -1,9 +1,11 @@
 # Postmortem: months of patching vLLM's XPU kernels
 
 Before this engine existed, months went into patching vLLM's XPU kernels on this exact hardware. This document
-records what was tried, what it cost and why it did not work, because that failure is the main argument for why
-this project exists. It is for anyone tempted to speed up decode by tuning kernels before looking at the host. The
-patches were real optimisations, several of them upstream PRs; the mistake was optimising the wrong layer.
+records what was tried, what it cost and why it did not work. That failure is the main argument for why this
+project exists.
+
+It is for anyone tempted to speed up decode (generating tokens one at a time) by tuning kernels before looking at the
+host. The patches were real optimisations, several of them upstream PRs; the mistake was optimising the wrong layer.
 
 ## What was done
 
@@ -28,9 +30,11 @@ Each was built, benchmarked and attributed individually.
 The patch stack was a prefill win and a decode loss. The pristine build, with no patches, was the fastest decode
 configuration on both quantisations.
 
-The tables are prompt processing at 4096 tokens (pp4096) and token generation of 256 tokens (tg256), in tokens per
-second, with `--max-num-seqs 2`. In the columns, p0 is the pristine source build, v5 has patches 01-05, v6 has 01-06
-and v11 has 01-11; c1 and c2 are one and two requests at once.
+How to read the tables:
+
+- rows: prompt processing at 4096 tokens (pp4096) and token generation of 256 tokens (tg256), in tokens per second,
+  with `--max-num-seqs 2`; c1 and c2 are one and two requests at once;
+- columns: p0 is the pristine source build, v5 has patches 01-05, v6 has 01-06 and v11 has 01-11.
 
 MXFP4:
 

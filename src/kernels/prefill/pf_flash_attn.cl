@@ -110,7 +110,204 @@ inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 #ifndef FLASH_MERGE
 #define FLASH_MERGE 0
 #endif
-#if !FLASH_MERGE
+#ifndef PAIR
+#define PAIR 0
+#endif
+#if PAIR
+// PAIR=1 (long-context prefill): two sub-groups share 16 query rows of one head, so every K and V operand feeds two
+// row blocks' DPAS instead of one (the token stream above reads 68 KB of operands per 128 DPAS a 64-key tile, this
+// form 43 KB). Who computes what changes; no value, operand or order does:
+//   S       sub-group k of the pair computes the scores of key atoms 2k, 2k + 1 for both row blocks (the same DPAS
+//           chain over the 16 dim atoms); the row maxima meet through SLM (barrier 1), mnew = fmax(m, fmax(max of
+//           atoms 0-1, max of atoms 2-3)) - a max of the same set.
+//   l       psum keeps its order ((p0 + p1) + p2) + p3: sub-group 0 publishes p0 + p1, sub-group 1 adds p2, p3, reduces
+//           and owns l; it hands l over once, after the walk.
+//   P V     both publish their P atoms in SLM (barrier 2); sub-group k owns dim atoms 8k .. 8k + 7 of O for both row
+//           blocks over all four key atoms in order.
+// A work-group is HPW pairs (one per q-head of its group) on the same 16 rows, so every sub-group walks the same
+// tiles and the barriers are uniform. Row block 0 may walk one tile more than in the 8-row form, wholly masked
+// for it: corr 1 and P 0, so its numbers stay the same. Grid (ceil(C / 16), kv-heads, GQA / HPW).
+#if KT != 64 || RPW != 16 || SPLIT || QREG || defined(KV_PAGED)
+#error "pf_flash_attn PAIR: KT 64, RPW 16, no SPLIT / QREG / KV_PAGED"
+#endif
+__attribute__((reqd_work_group_size(SG * 2 * HPW, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_flash_attn(__global const ushort* restrict Q, __global const ushort* restrict Kc,
+                  __global const ushort* restrict Vc, __global float* restrict O,
+                  uint pos, uint C, uint rows
+#if GATE_EPI
+                  , __global const float* restrict G, __global ushort* restrict Out
+#endif
+                  ) {
+  const uint s = get_sub_group_id(), l = get_sub_group_local_id();
+  const uint k = s & 1u, hp = s >> 1;                              // key half / dim half; the pair
+  const uint j = get_group_id(1);                                  // kv head
+  const uint h = j * FA_GQA + get_group_id(2) * HPW + hp;          // q head
+  const uint r0 = get_group_id(0) * 16u;                           // first of 16 rows
+  if (r0 >= C) return;                                             // uniform over the work-group
+  const uint depth = pos + C;
+  const int q_w = FA_QH * HD * 2, q_h = (int)C, q_p = FA_QH * HD * 2;
+  const int kt_w = FA_KVH * HD * 2, kt_h = (int)depth, kt_p = FA_KVH * HD * 2;
+  const int v_w = FA_KVH * HD * 2, v_h = (int)depth, v_p = FA_KVH * HD * 2;
+  __local float smax[HPW * 32];      // [pair][k][16 rows]: the tile's row maxima of key half k
+  __local float sa[HPW * 256];       // [pair][rb][r * 16 + lane]: sub-group 0's p0 + p1
+  __local ushort sp[HPW * 1024];     // [pair][rb * 4 + b][r * 16 + lane]: P, bf16
+  __local float sl[HPW * 16];        // [pair][16 rows]: l after the walk
+
+  float8 o[2][NDA / 2];
+#pragma unroll
+  for (uint rb = 0; rb < 2u; ++rb)
+#pragma unroll
+    for (uint dd = 0; dd < NDA / 2; ++dd) o[rb][dd] = (float8)(0.0f);
+  float8 m[2] = {(float8)(-INFINITY), (float8)(-INFINITY)}, lsum[2] = {(float8)(0.0f), (float8)(0.0f)};
+  const uint last = min(depth, pos + r0 + 16u);
+  for (uint t0 = 0; t0 < last; t0 += KT) {
+    float8 sacc[2][2];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) sacc[rb][0] = sacc[rb][1] = (float8)(0.0f);
+#pragma unroll
+    for (uint kk = 0; kk < NDA; kk += 2) {
+      short8 qa[2][2];
+#pragma unroll
+      for (uint rb = 0; rb < 2u; ++rb) {
+        ushort t[16];
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)Q, q_w, q_h, q_p,
+                                                  (int2)((int)(h * HD + 16u * kk), (int)(r0 + 8u * rb)), t);
+        qa[rb][0] = as_short8(vload8(0, t));
+        qa[rb][1] = as_short8(vload8(0, t + 8));
+      }
+#pragma unroll
+      for (uint kq = 0; kq < 2u; ++kq)
+#pragma unroll
+        for (uint bb = 0; bb < 2u; ++bb) {
+          uint kb[8];
+          intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+              (__global void*)Kc, kt_w, kt_h, kt_p,
+              (int2)((int)((j * HD + 16u * (kk + kq)) / 2u), (int)(t0 + 16u * (2u * k + bb))), kb);
+#pragma unroll
+          for (uint rb = 0; rb < 2u; ++rb)
+            sacc[rb][bb] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[rb][kq], as_int8(vload8(0, kb)), sacc[rb][bb]);
+        }
+    }
+    // scale, mask, this half's row maxima (component r = row r0 + 8 rb + r; lane = key t0 + 16 (2k + bb) + l)
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) {
+      const uint rr = r0 + 8u * rb;
+      float8 tmax = (float8)(-INFINITY), red;
+#pragma unroll
+      for (uint bb = 0; bb < 2u; ++bb) {
+        const uint key = t0 + 16u * (2u * k + bb) + l;
+#define MASK(r) sacc[rb][bb].s##r = (key <= pos + rr + r && key < depth) ? sacc[rb][bb].s##r * SCORE_SCALE : -INFINITY;
+        MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
+#undef MASK
+        tmax = fmax(tmax, sacc[rb][bb]);
+      }
+#define RED(r) red.s##r = sub_group_reduce_max(tmax.s##r);
+      RED(0) RED(1) RED(2) RED(3) RED(4) RED(5) RED(6) RED(7)
+#undef RED
+      if (l == 0) vstore8(red, 0, smax + hp * 32u + k * 16u + 8u * rb);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    float8 corr[2], mnew[2];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) {
+      mnew[rb] = fmax(m[rb], fmax(vload8(0, smax + hp * 32u + 8u * rb), vload8(0, smax + hp * 32u + 16u + 8u * rb)));
+      corr[rb] = EXPF(m[rb] - mnew[rb]);
+      float8 part = (float8)(0.0f);
+#pragma unroll
+      for (uint bb = 0; bb < 2u; ++bb) {
+        sacc[rb][bb] = EXPF(sacc[rb][bb] - mnew[rb]);   // p, kept for sub-group 1's sum
+        part += sacc[rb][bb];
+        short8 pa;
+#define CV(r) pa.s##r = as_short(rne_bf16(sacc[rb][bb].s##r));
+        CV(0) CV(1) CV(2) CV(3) CV(4) CV(5) CV(6) CV(7)
+#undef CV
+        intel_sub_group_block_write_us8(sp + hp * 1024u + (rb * 4u + 2u * k + bb) * 128u, as_ushort8(pa));
+      }
+      if (k == 0) intel_sub_group_block_write8((__local uint*)(sa + hp * 256u + rb * 128u), as_uint8(part));
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (k == 1) {
+#pragma unroll
+      for (uint rb = 0; rb < 2u; ++rb) {
+        float8 psum = as_float8(intel_sub_group_block_read8((__local const uint*)(sa + hp * 256u + rb * 128u)));
+        psum += sacc[rb][0];
+        psum += sacc[rb][1];
+        float8 rsum;
+#define SUM(r) rsum.s##r = sub_group_reduce_add(psum.s##r);
+        SUM(0) SUM(1) SUM(2) SUM(3) SUM(4) SUM(5) SUM(6) SUM(7)
+#undef SUM
+        lsum[rb] = lsum[rb] * corr[rb] + rsum;
+      }
+    }
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) {
+      m[rb] = mnew[rb];
+#pragma unroll
+      for (uint dd = 0; dd < NDA / 2; ++dd) o[rb][dd] *= corr[rb];
+    }
+    short8 pa[2][NKA];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb)
+#pragma unroll
+      for (uint b = 0; b < NKA; ++b)
+        pa[rb][b] = as_short8(intel_sub_group_block_read_us8(sp + hp * 1024u + (rb * 4u + b) * 128u));
+    // O += P V over this sub-group's dim atoms 8k + dd, key atoms in order
+#pragma unroll
+    for (uint b = 0; b < NKA; b += 2)
+#pragma unroll
+      for (uint dd = 0; dd < NDA / 2; dd += 2) {
+        uint vb[32];
+        intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+            (__global void*)Vc, v_w, v_h, v_p, (int2)((int)(j * HD + 16u * (8u * k + dd)), (int)(t0 + 16u * b)), vb);
+#pragma unroll
+        for (uint c = 0; c < 2u; ++c)
+#pragma unroll
+          for (uint ks = 0; ks < 2u; ++ks)
+#pragma unroll
+            for (uint rb = 0; rb < 2u; ++rb)
+              o[rb][dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(
+                  pa[rb][b + ks], as_int8(vload8(0, vb + c * 16u + 8u * ks)), o[rb][dd + c]);
+      }
+  }
+  if (k == 1 && l == 0) {
+    vstore8(lsum[0], 0, sl + hp * 16u);
+    vstore8(lsum[1], 0, sl + hp * 16u + 8u);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+#pragma unroll
+  for (uint rb = 0; rb < 2u; ++rb) {
+    const uint rr = r0 + 8u * rb;
+    if (rr >= C) break;                                            // a block wholly past C is not written
+    const float8 inv = 1.0f / vload8(0, sl + hp * 16u + 8u * rb);
+#if GATE_EPI
+    const int g_w = QKV_N * 4, o_w = OUT_N * 2;
+#pragma unroll
+    for (uint dd = 0; dd < NDA / 2; ++dd) {
+      const uint da = 8u * k + dd;
+      const float8 w = o[rb][dd] * inv;
+      float8 gt;
+      intel_sub_group_2d_block_read_32b_8r16x1c((__global void*)G, g_w, (int)C, g_w,
+                                                (int2)((int)(h * 2u * HD + HD + 16u * da), (int)rr), (__private uint*)&gt);
+      ushort8 ov;
+#define GATE(r) ov.s##r = rne_bf16(bf16f(rne_bf16(w.s##r)) * sigmoid_f32(bf16f(rne_bf16(gt.s##r))));
+      GATE(0) GATE(1) GATE(2) GATE(3) GATE(4) GATE(5) GATE(6) GATE(7)
+#undef GATE
+      intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)Out, o_w, (int)C, o_w,
+                                                 (int2)((int)(h * HD + 16u * da), (int)rr), (__private ushort*)&ov);
+    }
+#else
+    __global float* Oh = O + (size_t)h * rows * HD;
+#pragma unroll
+    for (uint dd = 0; dd < NDA / 2; ++dd) {
+      float8 w = o[rb][dd] * inv;
+      intel_sub_group_2d_block_write_32b_8r16x1c((__global void*)Oh, HD * 4, (int)rows, HD * 4,
+                                                 (int2)((int)(16u * (8u * k + dd)), (int)rr), (__private uint*)&w);
+    }
+#endif
+  }
+}
+#elif !FLASH_MERGE
 __attribute__((reqd_work_group_size(SG * SGS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 #if SPLIT
@@ -304,10 +501,15 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #endif  // !FLASH_MERGE
 
 #if FLASH_MERGE
-// pf_flash_merge(Op, ML, O, C, rows, n): grid (C, q-heads), one work-item a dim.
+// pf_flash_merge(Op, ML, O, C, rows, n): grid (C, q-heads), one work-item a dim. GATE_EPI (Ornith): pf_attn_gate's
+// statement on the merged value, into the o_proj input row Out [C][OUT_N]; O is not written.
 __attribute__((reqd_work_group_size(HD, 1, 1)))
 __kernel void pf_flash_merge(__global const float* restrict Op, __global const float* restrict ML,
-                             __global float* restrict O, uint C, uint rows, uint nsp) {
+                             __global float* restrict O, uint C, uint rows, uint nsp
+#if GATE_EPI
+                             , __global const float* restrict G, __global ushort* restrict Out
+#endif
+                             ) {
   const uint r = get_group_id(0), h = get_group_id(1), d = get_local_id(0);
   const uint c8 = (C + 7u) & ~7u;
   const size_t stride = (size_t)FA_QH * c8, at = (size_t)h * c8 + r;
@@ -319,6 +521,12 @@ __kernel void pf_flash_merge(__global const float* restrict Op, __global const f
     lsum += w * ML[(nsp + sp) * stride + at];
     acc += w * Op[(sp * stride + at) * HD + d];
   }
+#if GATE_EPI
+  const float ov = acc * (1.0f / lsum);
+  const float g = bf16f(rne_bf16(G[(size_t)r * QKV_N + (size_t)h * 2 * HD + HD + d]));
+  Out[(size_t)r * OUT_N + (size_t)h * HD + d] = rne_bf16(bf16f(rne_bf16(ov)) * sigmoid_f32(g));
+#else
   O[((size_t)h * rows + r) * HD + d] = acc * (1.0f / lsum);
+#endif
 }
 #endif  // FLASH_MERGE

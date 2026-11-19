@@ -1,28 +1,31 @@
-# The target model
+# The target model: Qwen3.8-27B
 
 This document describes Qwen3.8-27B (`model_type: qwen3_5`), the engine's first and main model, in the detail the
-kernels need: its shapes, the exact math of each layer, and where its bytes are. It is for a reader who wants to
-see what one decode step has to compute and read, and why the engine is built the way it is. A general engine
-cannot hardcode the things this one hardcodes; specialising to the model is the whole strategy.
+kernels need: its shapes, the exact math of each layer, and where its bytes are. It is for a reader who wants to see
+what one decode step has to compute and read, and why the engine is built the way it is.
 
-The focus is Qwen3.8-27B for agentic coding first, then Qwen3.8-Flash-Next; the order is kept in
-the list of unfinished work. The other models, Ornith 1.5, Kolibri-1 and Qwen3.8-Flash-Next (`qwen4_exp`), each
-have their own engine, specialised the same way. Muse-Glimmer and Agnes 3.0 Flash were dropped and are no longer
-supported.
+A general engine cannot hardcode the things this one hardcodes. Specialising to the model is the whole strategy.
 
-Qwen3.8-Flash-Next is 12 QSA sparse-attention layers and 36 GDN layers, a 512-expert MoE (mixture of experts: a
-router picks a few expert networks per token), 4-stream hyper-connections and a 51.8 GB n-gram embedding held in
-host memory. Decode, prefill and `b70-serve` (with the prefix cache and the MTP head) are built, and its prefill
-matches an f32 reference. The whole model does not fit two 32 GB cards, so it is served on two cards with part of
-its routed experts read from host memory; `--layers N` still loads a truncated model for development. Its chat
-template is Qwen3.8's byte for byte; its tokenizer is not (the original's split adds `\p{M}`, and Intel's interim
-checkpoint ships Qwen3.8's file). What each model runs, and with which flags, is in
-[17-running-models.md](17-running-models.md).
+## The other models
 
-## The checkpoint
+Qwen3.8-27B, used for agentic coding, comes first; Qwen3.8-Flash-Next is next in line. Ornith 1.5, Kolibri-1 and
+Qwen3.8-Flash-Next (`qwen4_exp`) each have their own engine, specialised the same way. Muse-Glimmer and Agnes 3.0
+Flash were dropped and are no longer supported.
 
-`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`: GPTQ g64 symmetric, int4 weights, bf16 `lm_head`. This engine
-and vLLM serve the same files, which is what makes the comparison in the benchmark record fair.
+| model | in short |
+|---|---|
+| Ornith 1.5 35B-A3B | 40 layers: 30 GDN (gated delta-net, a linear-attention layer) and 10 full attention; a 256-expert MoE (mixture of experts: a router picks a few expert networks per token) with top-8 routing plus a shared expert; about 3 B parameters active per token |
+| Qwen3.8-Flash-Next | 12 QSA sparse-attention layers and 36 GDN layers, a 512-expert top-10 MoE, 4-stream hyper-connections and a 51.8 GB n-gram embedding held in host memory. The whole model does not fit two 32 GB cards, so it is served on two cards with part of its routed experts read from host memory. Its chat template is Qwen3.8's byte for byte; its tokenizer is not (the original's split adds `\p{M}`) |
+| Kolibri-1 | 50 MoE layers (384 experts, top 6, plus a shared expert), 40 of them with sliding-window attention; needs two cards at int4 |
+
+What each model runs, and with which flags, is in [17-running-models.md](17-running-models.md).
+
+## Qwen3.8-27B
+
+### The checkpoint
+
+`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`: GPTQ g64 symmetric, int4 weights, bf16 `lm_head`. vLLM serves
+the same files, so the two can be compared on identical weights.
 
 Everything below is read from the snapshot's `config.json` and the safetensors headers, not assumed.
 
@@ -103,8 +106,7 @@ model, so a draft step reads 0.85 + 2.54 GB and the width of `lm_head` matters t
 
 The engine loads the MTP head behind `--spec mtp`, which is also what `b70-serve`'s default `--spec auto` picks on
 this model. It drafts up to K tokens and verifies them in one step of K + 1 rows (speculative decoding: the main
-model checks several guessed tokens for about the cost of one, and keeps those it agrees with; the benchmark record,
-"MTP speculative decoding"). K is chosen per iteration from each request's own acceptance rate, up to
+model checks several guessed tokens for about the cost of one, and keeps those it agrees with). K is chosen per iteration from each request's own acceptance rate, up to
 `--spec-max`. With `--spec off` the head is skipped.
 
 ### Layer math, checked against the modeling file
@@ -231,7 +233,7 @@ in two bought 2.4 ms. What the kernels do while they run is the problem; how man
 
 Per token of context the KV cache holds 16 full-attention layers x 4 KV heads x 256 x 2 (K and V) x 2 B = 64 KB.
 At pp4096 + tg256 (a 4096-token prompt and 256 generated tokens), 4352 tokens, that is 285 MB; at
-`--max-model-len 16k` it is 1.07 GB. Attention at depth 4096 reads about 270 MB per token, around 1.7 % of `W`.
+a 16k context it is 1.07 GB. Attention at depth 4096 reads about 270 MB per token, around 1.7 % of `W`.
 The GDN conv state is 10240 x 3 x 2 B = 61 KB per layer. A ring KV buffer sized to `max_model_len` is a rounding
 error next to the weights, so there is no memory reason for paged KV with one sequence.
 
@@ -253,13 +255,13 @@ happens not to need that rule; the next checkpoint may.
 
 ## Benchmark command
 
-Every vLLM number in these docs came from this command, so new ones must too:
+Served decode speeds, ours and vLLM's alike, are measured with this command:
 
 ```bash
-uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model "$MODEL" \
+uvx llama-benchy --base-url http://<host>:8000/v1 --model "$MODEL" \
   --pp 4096 --tg 256 --concurrency 1 --depth 1 \
   --no-cache --exact-tg --latency-mode generation
 ```
 
-Prefill is measured directly rather than through `llama-benchy`'s derived `pp` figure; the reason, and every
-measured row, is in the benchmark record.
+Prefill is measured on the device (`b70-decode --bench --prefill-length`) rather than through `llama-benchy`'s `pp`
+figure, which includes HTTP ([17-running-models.md](17-running-models.md#benchmarks-and-greedy-runs)).

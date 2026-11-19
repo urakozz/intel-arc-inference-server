@@ -2,13 +2,13 @@
 
 This doc covers the host-side text handling that turns an OpenAI-style chat request into token ids and the
 generated ids back into streamed text. It is for anyone working on the server, adding a model with a new
-template, or wondering why a prompt's ids differ from another engine's.
+template, or wondering why a prompt's ids differ from what another implementation produces.
 
 `/v1/chat/completions` needs three pieces of host code before the GPU sees anything: a byte-level BPE encoder
 (byte-pair encoding: text is split into bytes and frequent byte pairs are merged into vocabulary entries), a Jinja
 chat template (the model's own script for laying out roles, tools and thinking markers as text), and a
 detokeniser that streams partial UTF-8 safely. For each of them, owning every dependency and shipping something
-that works today pull in opposite directions, and the choices below say which way each one went.
+that works today pull in opposite directions. The choices below say which way each one went.
 
 ## What the checkpoint ships
 
@@ -136,7 +136,8 @@ whose `server::ChatFormat` reads them. Kolibri-1 reads them (including `reasonin
 ### Tool calls
 
 Rendering tool definitions into the prompt is covered by the parity vectors. Parsing tool calls out of the model's
-output is server code, one parser per family in `src/server/toolcall*.cc`: Qwen's XML format and Kolibri-1's own.
+output is server code, one parser per format in `src/server/toolcall*.cc`: Qwen's XML format (Qwen3.8, Ornith,
+Flash-Next) and Kolibri-1's hermes JSON inside `<tool_call>`.
 
 ### Key order is part of the prompt
 
@@ -147,7 +148,7 @@ them, and a parsed call keeps the model's argument order. This matters because t
 and vLLM render for the same request (0 of 36 agentic prompts matched), and a client echoing a call back had it
 re-rendered in a different order from the one the model wrote, so the next turn diverged inside the
 prefix-cached span. With ordered keys, `prompt_order_test` matches 36 of 36 agentic prompts and 12 of 12 edit and
-copy prompts against the reference tokenizer's ids (2026-11-03).
+copy prompts against the reference tokenizer's ids.
 
 ## Streaming detokenisation
 
@@ -192,8 +193,8 @@ an older driver stack, each against a bar set before the run. Decode over HTTP m
 tokens against the CLI's 2919.6 ms, a difference of -3.77 ms, indistinguishable from zero. Encoding and HTTP
 framing add nothing on top of the device-side prefill, and detokenisation overlaps the next replay.
 
-Host sampling (temperature, top-k, top-p) measured 0.537 ms/token against a 0.62 ms bar and is on by default.
-Every row is in the benchmark record.
+Host sampling (temperature, top-k, top-p) measured 0.537 ms/token against a 0.62 ms bar, and every request that
+asks for sampling uses it.
 
 ## What it costs the design
 

@@ -63,6 +63,7 @@ void linear_i8(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
 void linear_i8_silu(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
                     const loader::DeviceWeight& w, const uint16_t* x, uint32_t M,
                     uint16_t* out, uint32_t ldx);
-size_t linear_i8_launches(const model::GemvShape& sh);   // 1 + 2 * N / 1024
+// 1 + 2 x the walk's slabs: as many 1024-column slabs a launch pair as the [max_k / 4][1024] w8 slab holds at K.
+size_t linear_i8_launches(const model::GemvShape& sh, uint32_t max_k);
 
 }  // namespace runtime::prefill

@@ -1,9 +1,10 @@
 # Why decode and prefill want opposite kernels
 
-This is the central idea of the project, and most of the other design choices follow from it. Read it before
-writing a kernel: if you read only one document here, make it this one. It explains why generating one token
-(decode) and reading a prompt (prefill) need different kernels, what vLLM does about it, and how this
-engine's prefill path was arrived at.
+This is the central idea of the project, and most of the other design choices follow from it. It explains why
+generating one token (decode) and reading a prompt (prefill) need different kernels, what vLLM does about it, and how
+this engine's prefill path was arrived at.
+
+Read it before writing a kernel. If you read only one document here, make it this one.
 
 ## The two regimes
 
@@ -84,7 +85,7 @@ it, because otherwise speculation costs a full weight read for every row it chec
 The engine has that kernel. Speculative decoding (the model's MTP head, a DFlash draft model, prompt lookup) makes
 `M` 2..8 on every verify step, and those steps run a small-batch DPAS GEMM, `gemm_sm`
 ([12-kernels.md](12-kernels.md)), that reads each weight tile once for all `M` rows. Verifying 8 rows went from the
-cost of 3.17 plain decode steps to 1.57 (measured on a busy box; the table is in the benchmark record).
+cost of 3.17 plain decode steps to 1.57 (measured on a busy box).
 `M = 1` keeps the GEMV, bit for bit.
 
 ## Design rules that follow
@@ -136,7 +137,8 @@ int8 after a Hadamard rotation of the activations and weights, and is faster sti
 
 ### How prefill got here
 
-These are the investigations of September 2026 that decided the prefill design. The kernel-level side of the same
+These are the investigations that decided the prefill design. The numbers are from that time; the current speeds
+are in the [README](../README.md#speed). The kernel-level side of the same
 work is in [12-kernels.md](12-kernels.md), "How the prefill kernels got here".
 
 **What vLLM runs.** Read from its source: on XPU the int4 linears go through `torch.ops._xpu_C.int4_gemm_w4a16` into
@@ -174,7 +176,7 @@ across repetitions of one call, which fails the determinism gate outright. A new
 byte-identical over eight repetitions and four fixtures. It is a numerical and performance reference, not a drop-in;
 no model-level gate for vendor arithmetic was ever run.
 
-**The matched comparison (2026-09-20).** Same box, same checkpoint, 4096 ids, chunk 2048, three warm requests: this
+**The matched comparison.** Same box, same checkpoint, 4096 ids, chunk 2048, three warm requests: this
 engine took 2748.2 ms (1490 t/s), of which the recorded Level Zero chunks were 2734.4 ms; vLLM took 2544.0 ms
 (1610.04 t/s), with the same first token on every path. The warm gap was 204 ms, not the roughly 657 ms that an older,
 uncontrolled 1973 t/s vLLM figure implied (its vLLM and oneDNN revisions were never recorded, so that figure explains
@@ -187,8 +189,8 @@ about 497 ms faster than vLLM's, and everything else about 634 ms slower (1031.3
 against 141.8, attention 148.2 against 63.1, SiLU and multiply 98.7 against 51.3). That is how the path with fewer
 layers of software still lost, and it sent the work to the GDN scan, attention and pointwise fusion rather than the
 GEMM. All three landed: the split-BF16 scan (2.33x on its row), a QK kernel that stopped computing the masked half,
-and SiLU folded into the gate‖up epilogue. They are the difference between the 1490 t/s here and the 1670.72 t/s
-measured at the time.
+and SiLU folded into the gate‖up epilogue. They took the engine from the 1490 t/s here to 1670.72 t/s, past vLLM; later kernel
+work brought it to 1,788 t/s.
 
 The linear path itself, split with one wait per slab for attribution, took 274.5 ms in `slab_dequant` and 1344.3 ms
 in `slab_gemm` over 7616 launches each. The GEMM half sits about 5% above its own floor (199 TFLOP at
@@ -201,7 +203,7 @@ exact in every case exercised (GDN state, conv history, both KV caches, control 
 tails and eviction), but it saved only 13.75 ms against a 204 ms gap, about 0.5%. It was not the lever, the
 complexity was real, and it was removed.
 
-**Continuing a prefill is correct (2026-09-28).** A prefill that starts at a non-zero `pos` gives the right answer.
+**Continuing a prefill is correct.** A prefill that starts at a non-zero `pos` gives the right answer.
 Two alarms suggested otherwise. In one, the final hidden state after an `l0-int8` prefill, compared with `M = 1`
 decode, had a median cosine of 0.99971 but 0.27 at row 2091, just past the first 2048-row chunk edge. In the other, a
 prefill split into two calls at 3000 had a last-row logits cosine of 0.91 against one call. Both were the model
@@ -228,5 +230,5 @@ shallow-layer rows and GDN layer 0's state, with splits at multiples of 64 bitwi
 | Decode `M=2..8` | tile partly used | small-batch DPAS GEMM `gemm_sm`, weights read once for all rows |
 | Prefill | W4A16 XMX tiles | W4A16, own DPAS GEMM, zero host waits |
 
-Prefill is ahead of vLLM. Decode at `M=1` was about 5% behind it in the last matched comparison
-(the benchmark record). The kernel for `M` in 2..8 that motivated the original idea exists here.
+Prefill is ahead of vLLM. Plain decode at `M=1` was about 5% behind it in the last matched comparison
+([05-perf-model.md](05-perf-model.md)). The kernel for `M` in 2..8 that motivated the original idea exists here.

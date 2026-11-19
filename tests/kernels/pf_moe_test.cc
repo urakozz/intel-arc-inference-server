@@ -627,7 +627,7 @@ void grouped_vs_dense(Dev& d, Kernels& k, Layer& L, Bufs& b, const Run& r, uint3
   k.kdense_i8.arg(8, kH / 2);
   k.kdense_i8.arg(9, kNall);
   k.kdense_i8.arg(10, kI);
-  d.run(k.kdense_i8, Mp / 256, kNG / 128);
+  d.run(k.kdense_i8, Mp / 256, kNG / kernels::kPfGemmI8WgN);
   const std::vector<uint16_t> xd8 = d.read<uint16_t>(X8, size_t(C) * kI);
   // down, dense over expert e's sorted h rows: [r0, r0 + cnt), padded to 256 rows
   uint32_t r0 = kNone, cnt = 0;

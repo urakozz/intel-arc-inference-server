@@ -10,6 +10,7 @@
 // shipped tiling ever goes back to an unsplit one.
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <vector>
 #include "check.h"
 #include "common/bf16.h"
@@ -82,6 +83,20 @@ int main() {
     CHECK_EQ(shipped.cols, kernels::kGemvBf16TinyCols);
     CHECK_EQ(kernels::gemv_bf16_tiling(248320).cols, kernels::kGemvBf16Cols);
     CHECK_EQ(kernels::gemv_bf16_tiling(248320).ksplit, 1u);
+  }
+
+  // Item 40: the wide / deep lists' ROWG builds (8 rows a group on grid dimension 0) - 16 rows as two groups, byte
+  // for byte the plain 16-row build's, at a||b and the MTP head's fc and q||k||v.
+  for (const auto& [K, N] : {std::pair<uint32_t, uint32_t>{5120, 128}, {10240, 5120}, {5120, 14336}}) {
+    const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(N);
+    const Inputs in = make_inputs(16, K, N);
+    const std::vector<float> plain = run_gemv_bf16(ctx, q, f, in.w, in.x, 16, 0, t).out;
+    const std::vector<float> rg = run_gemv_bf16(ctx, q, f, in.w, in.x, 8, 0, t, 2).out;
+    CHECK_EQ(plain.size(), rg.size());
+    const bool same = std::memcmp(plain.data(), rg.data(), plain.size() * sizeof(float)) == 0;
+    std::printf("gemv_bf16 K=%u N=%u: ROWG 2 x 8 rows vs the 16-row build %s\n", K, N, same ? "bitwise" : "DIFFER");
+    CHECK(same);
+    CHECK(max_abs_err(rg, in.ref) <= tol_for(in.ref));
   }
 
   // lm_head: 2.5 GB of weights, one tiling - the grid fills the device on N.
