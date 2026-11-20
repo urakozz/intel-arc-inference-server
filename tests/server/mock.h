@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -118,7 +119,8 @@ struct MockEngine : server::EngineIface {
     ring = ids;   // spec 19f's mock drafter: the prompt's positions projected at prefill
   }
 
-  uint32_t step(const server::Sampling&) override {
+  uint32_t step(const server::Sampling& s) override {
+    sample_first(s);
     const int now_active = ++active;
     max_active = std::max(max_active.load(), now_active);
     if (step_ms != 0) std::this_thread::sleep_for(std::chrono::milliseconds(step_ms));
@@ -130,6 +132,20 @@ struct MockEngine : server::EngineIface {
 
   uint32_t max_len() override { return 1024; }
   uint32_t pos() override { return static_cast<uint32_t>(last_prompt.size() + at); }
+  // PERF-91: the pending id is the script's next id; `peek` false is an engine that cannot say (the server's older
+  // path: the first id comes back from the first decode call).
+  bool peek = true;
+  std::optional<uint32_t> pending_id(const server::Sampling& s) override {
+    if (!peek) return std::nullopt;
+    sample_first(s);
+    return target(at);
+  }
+  // A sampled request's first id is drawn, not the prompt's argmax: with `sampled_script` set, a request that samples
+  // generates it instead of `script`, from its first id on (pending_id or the first step, whichever comes first).
+  std::vector<uint32_t> sampled_script;
+  void sample_first(const server::Sampling& s) {
+    if (at == 0 && !s.greedy && !sampled_script.empty()) script = sampled_script;
+  }
 
   // Spec 8 (plan 8c): a scripted speculative engine. With mtp > 0, step_many(s, k)
   // returns the next `bursts[i % bursts.size()]` ids of the script (clamped to
@@ -307,6 +323,7 @@ struct StateMockEngine : server::EngineIface {
   }
   uint32_t max_len() override { return maxlen; }
   uint32_t pos() override { return p; }
+  std::optional<uint32_t> pending_id(const server::Sampling&) override { return cur; }   // PERF-91: what step() returns next
 
   uint32_t block() override { return blk; }
   size_t state_bytes() override { return sizeof(uint64_t); }
@@ -514,6 +531,18 @@ struct MockBatchEngine : server::BatchEngineIface {
     return it != fail_at.end() && ++slot_steps[i] == it->second;
   }
   uint32_t slot_max_len(uint32_t i) override { return lens.empty() ? maxlen : lens.at(i); }
+  // PERF-91: `peek` - pending_id says the slot's pending id (off: the engine cannot, the scheduler's older order).
+  // `sample_first` - the prompt's last chunk draws a sampled request's first id from its seed (first_draw), as
+  // cli::SlotsEngine's prefill does.
+  bool peek = false, sample_first = false;
+  std::optional<uint32_t> pending_id(uint32_t i, const server::Sampling&) override {
+    if (!peek || !slot.at(i).pending) return std::nullopt;
+    return slot.at(i).cur;
+  }
+  uint32_t first_draw(const server::Sampling& s) const {
+    std::mt19937_64 g(s.seed);
+    return words[g() % words.size()];
+  }
   uint32_t verify_k() override { return lookup; }
   uint32_t prefill_cut(uint32_t, uint32_t at, uint32_t remaining) override {
     return cut == 0 ? 0 : std::min(remaining, cut - at % cut);
@@ -601,6 +630,7 @@ struct MockBatchEngine : server::BatchEngineIface {
         s.prompt_end = s.p;
         s.cur = next(s);
         s.pending = true;
+        if (sample_first && c.sampling != nullptr && !c.sampling->greedy && s.cur != eos) s.cur = first_draw(*c.sampling);
       }
     }
     clock += total / prefill_rate;

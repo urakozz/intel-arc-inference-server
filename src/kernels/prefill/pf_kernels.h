@@ -69,6 +69,12 @@ inline std::string pf_norm_finish_strided_variant(unsigned K, unsigned G, unsign
   return pf_norm_finish_variant(K, G, W) + "_X" + std::to_string(X);
 }
 inline std::string pf_bf16_slab_variant(unsigned K) { return "pf_bf16_slab_K" + std::to_string(K); }
+// PERF-85 (pf_norm_fused.cl): the head's input norm in one launch (ZERO_RESID), and the embedding gather with both
+// pre-fc norms in one (MTP_FRONT, entry pf_mtp_front).
+inline std::string pf_res_norm_zero_variant(unsigned K, unsigned G) { return pf_res_norm_variant(K, 1, G) + "_Z"; }
+inline std::string pf_mtp_front_variant(unsigned K, unsigned G) {
+  return "pf_mtp_front_K" + std::to_string(K) + "_G" + std::to_string(G);
+}
 inline std::string pf_gated_head_variant(unsigned gdn_k = kRefGdnKHeads,
                                          unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gated_head" + gdn_suffix(gdn_k, gdn_v);
@@ -83,6 +89,8 @@ inline std::string pf_attn_prep_q16_variant(unsigned q = kRefFaQHeads,
                                             unsigned kv = kRefFaKvHeads) {
   return "pf_attn_prep_q16" + fa_suffix(q, kv);
 }
+// PERF-85: the same build over the kv heads only (KV_ONLY, grid (kv-heads, C)) - its name after kv_paged's suffix.
+inline std::string kv_only(const std::string& variant) { return variant + "_KVO"; }
 // The composed path's own two kernels, one binary: `pf_softmax_causal` (the
 // causal row softmax between the QK^T and PV GEMMs) and `pf_attn_gate` (the
 // output gate that lived in decode's `attn_reduce`, ruling A16).

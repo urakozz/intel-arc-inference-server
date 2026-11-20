@@ -14,7 +14,8 @@
 // ids. The block hook is set in every run, so every run's chunks end at the same block ends.
 //   default (one card, or two with pp2):
 //     0. state_bytes() / kv_bytes(n) are runtime::qwen4exp::state_snapshot_bytes / kv_snapshot_bytes;
-//     a. restores at the BLOCK ENDS 2048 and 4096 (the hook's own saves during the cold prefill): reset, load_kv(0,
+//     a. restores at the BLOCK ENDS 2048 and 4096 (the hook's own saves during the cold prefill; under pp 2048 is
+//        inside the first pair of chunks and is saved by a prefill of [0, 2048) alone): reset, load_kv(0,
 //        at) + load_state(at), prefill the tail, 32 greedy ids - the ids, the last logits, routes, selections, every
 //        layer's persistent bytes (KV, compressed keys, tail rings, GDN states and conv rings, the PLE rings) and the
 //        PLE ids BITWISE the cold run's (qwen4exp_rig::read_state);
@@ -177,8 +178,15 @@ int run_default(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   e.set_block_hook([&](uint32_t end, bool) { at_hook[end] = save(e); });
   e.reset();
   e.prefill(prompt);
-  CHECK(at_hook.count(2048) && at_hook.count(4096) && at_hook.count(kN));
+  // PERF-30: under pp chunks 0 and 1 run as one pair, so the block end 2048 inside it is not hooked; a prefill of
+  // [0, 2048) alone (the same first chunk) saves there at its prompt end
+  CHECK(at_hook.count(4096) && at_hook.count(kN) && at_hook.count(2048) == (e.devices() == 1));
   const Out cold = finish(e);
+  if (!at_hook.count(2048)) {
+    e.reset();
+    e.prefill(slice(prompt, 0, 2048));
+    CHECK(at_hook.count(2048));
+  }
   const std::map<uint32_t, Saved> cold_saves = at_hook;   // b / c below re-save at 2048 / 4096 from other chunkings
   for (uint32_t at : {2048u, 4096u}) {
     e.reset();

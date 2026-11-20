@@ -382,6 +382,10 @@ int main() {
   case_res_norm_two_stage(d, 1, 5120, 0, 20, 20);
   case_res_norm_two_stage(d, 1, 5120, 4, 20, 20);
   case_res_norm_two_stage(d, 1, 5120, 4, 20, 1);
+  // The MoE models' hiddens: K 2048 (Ornith) folds a chunk of 103 a work-group, K 2560 one of 128.
+  case_res_norm_two_stage(d, 1, 2048, 0, 20, 20);
+  case_res_norm_two_stage(d, 1, 2048, 4, 20, 20);
+  case_res_norm_two_stage(d, 1, 2560, 0, 20, 20);
   case_silu_mul(d, 1, false);
   case_silu_mul(d, 1, true);
   case_gated_head(d, 1, false);

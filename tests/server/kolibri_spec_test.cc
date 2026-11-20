@@ -13,11 +13,15 @@
 //   3. The deferred commit: pos() counts the kept ids before the commit; a save flushes it.
 //   4. Sampled: the walk's seed comes from the request's RNG, every emitted id is a defined token, a seeded request is
 //      reproducible.
+//   6. PERF-91: pending_id after a prefill / ingest is the id the first step / iteration returns, settled as that call
+//      settles it (greedy masked, sampled drawn from the request's RNG first); peeking changes no later id; while a
+//      run's commit is deferred it cannot say.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include "check.h"
@@ -267,6 +271,59 @@ int main() {
     for (double d : c.draft) CHECK(d == c.draft[0] && d > 0.0 && d < 1.0);
     std::printf("5. cost (%s head, DERIVED): verify M 8 %.3f, a draft %.3f plain steps\n", i8 ? "int8" : "bf16", c.verify[7],
                 c.draft[0]);
+  }
+  // --- 6. PERF-91: the first id peeked before the first call ---------------------------------------------------------------
+  {
+    // `peek`: pending_id before the first call, checked against what the call returns; `ingest`: the prompt's last id
+    // through ingest (--prefix-split-last's path).
+    auto run = [&](const std::vector<uint32_t>& prompt, const server::Sampling& s, uint32_t K, bool peek, bool ingest) {
+      FakeEngine e;
+      FakeDrafter fd{e};
+      cli::kolibri::KolibriDraftHooks h;
+      h.draft = [&fd](uint32_t k, float T, uint64_t seed) -> const runtime::dflash::DFlashDraftOut& { return fd.draft(k, T, seed); };
+      Adapter a(e, kUsed, 7, h);
+      if (ingest) {
+        a.prefill(std::vector<uint32_t>(prompt.begin(), prompt.end() - 1));
+        a.ingest({prompt.back()});
+      } else {
+        a.prefill(prompt);
+      }
+      std::optional<uint32_t> first;
+      if (peek) {
+        first = a.pending_id(s);
+        CHECK(first.has_value() && *first < kUsed);
+        CHECK(a.pending_id(s) == first);   // a second peek draws nothing
+      }
+      std::vector<uint32_t> out;
+      while (out.size() < 120) {
+        for (uint32_t id : K ? a.step_many(s, K) : std::vector<uint32_t>{a.step(s)}) out.push_back(id);
+        if (K && out.size() < 120) CHECK(!a.pending_id(s).has_value());   // the run's commit is deferred
+      }
+      if (peek) CHECK(out[0] == *first);
+      out.resize(120);
+      return out;
+    };
+    server::Sampling sampled;
+    sampled.greedy = false;
+    sampled.temperature = 0.7f;
+    sampled.top_p = 1.0f;
+    sampled.top_k = 0;
+    sampled.has_seed = true;
+    uint32_t cases = 0;
+    for (const auto& prompt : prompts)
+      for (bool ingest : {false, true}) {
+        if (ingest && prompt.size() < 2) continue;
+        for (uint32_t K : {0u, 7u}) {
+          CHECK(run(prompt, greedy(), K, true, ingest) == run(prompt, greedy(), K, false, ingest));
+          for (uint64_t seed : {1u, 2u, 3u}) {
+            sampled.seed = seed;
+            CHECK(run(prompt, sampled, K, true, ingest) == run(prompt, sampled, K, false, ingest));
+          }
+          ++cases;
+        }
+      }
+    std::printf("6. pending_id: the first call's id, the same 120 ids with and without the peek (greedy and 3 seeds, "
+                "plain and K 7, after a prefill and an ingest: %u cases); nullopt while a commit is deferred\n", cases);
   }
   std::printf("kolibri_spec_test: OK\n");
   return 0;

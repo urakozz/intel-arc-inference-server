@@ -39,24 +39,23 @@ namespace runtime::qwen4exp {
 
 struct Q4TpPrefillState {
   struct Dev {
-    Dev(l0::Context& c, const model::Qwen4ExpDesc& card, const model::Qwen4ExpDesc& one, uint32_t max_len)
+    Dev(l0::Context& c, const model::Qwen4ExpDesc& card, const model::Qwen4ExpDesc& one, uint32_t max_len, uint32_t rows)
         : cx(c),
           kc(c),
-          s(c, card, max_len),
-          fold(c, l0::MemKind::Device, size_t(kTpPfChunks) * 2 * 2 * kPfC * one.hidden * 4, 4096),
-          yf(c, l0::MemKind::Device, size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4, 4096),
-          H1(c, l0::MemKind::Device, size_t(kPfC) * one.hc_n() * 2),
-          inj1(c, l0::MemKind::Device, size_t(kPfC) * one.hc * 4),
-          lists1(c, l0::MemKind::Device, size_t(kPfC) * kListRow * 4),
+          s(c, card, max_len, rows),
+          fold(c, l0::MemKind::Device, size_t(kTpPfChunks) * 2 * 2 * rows * one.hidden * 4, 4096),
+          yf(c, l0::MemKind::Device, size_t(pf_tiles(one, rows)) * kPfTm * one.hidden * 4, 4096),
+          H1(c, l0::MemKind::Device, size_t(rows) * one.hc_n() * 2),
+          inj1(c, l0::MemKind::Device, size_t(rows) * one.hc * 4),
+          lists1(c, l0::MemKind::Device, size_t(rows) * kListRow * 4),
           ctl(c, l0::MemKind::Host, kTpPfChunks * sizeof(Control)),
           rctl(c, l0::MemKind::Host, kTpPfChunks * sizeof(Control)) {
       std::memset(ctl.ptr(), 0, ctl.size());
       std::memset(rctl.ptr(), 0, rctl.size());
-      const uint32_t ord = copy_ordinal(c.device());
-      if (ord != UINT32_MAX) {
+      if (const std::vector<l0::CopyEngine> ce = c.copy_engines(); !ce.empty()) {
         ze_command_queue_desc_t qd{};
         qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
-        qd.ordinal = ord;
+        qd.ordinal = ce[0].ordinal;
         qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
         qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
         qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
@@ -69,15 +68,15 @@ struct Q4TpPrefillState {
         zeCommandListDestroy(bcs);
       }
     }
-    // chunk h's slot k: fp32 [2 slices][kPfC][hidden]
-    size_t slot_off(uint32_t h, uint32_t k) const { return (size_t(h) * 2 + k) * 2 * kPfC * hidden; }
+    // chunk h's slot k: fp32 [2 slices][rows][hidden]
+    size_t slot_off(uint32_t h, uint32_t k) const { return (size_t(h) * 2 + k) * 2 * s.rows * hidden; }
     Control* ctl_at(uint32_t h) { return ctl.as<Control>() + h; }
     Control* rctl_at(uint32_t h) { return rctl.as<Control>() + h; }
-    uint32_t* ids_at(uint32_t h) { return s.ids.as<uint32_t>() + size_t(h) * kPfC; }   // s.ids holds kPfDepth chunks
+    uint32_t* ids_at(uint32_t h) { return s.ids.as<uint32_t>() + size_t(h) * s.rows; }   // s.ids holds kPfDepth chunks
     prefill::Context cx;
     prefill::KernelCache kc;
     Qwen4ExpPrefillScratch s;
-    l0::Mem fold;       // fp32 [chunk][2 slots][2 slices][kPfC][hidden]
+    l0::Mem fold;       // fp32 [chunk][2 slots][2 slices][rows][hidden]
     l0::Mem yf;         // fp32 [tmax x 32][hidden]
     l0::Mem H1, inj1;   // the pair's second chunk's residual rows and inject weights (the first's are s.H / s.inj)
     l0::Mem lists1;     // its selection rows of one QSA layer (the indexer split by rows; the first's: s.lists)
@@ -137,7 +136,9 @@ void require(bool ok, const std::string& what) {
 void Qwen4ExpTpEngine::prepare_prefill() {
   if (pf_) return;
   const model::Qwen4ExpDesc& d = model_.desc;
-  for (const std::string& v : kernels::qwen4exp::tp_prefill_variants(d, model_.ple.scale == loader::Q4PleScale::Bf16))
+  const uint32_t rows = model_.pf_rows;   // the planner's chunk rows (kPfC or kPfCWide)
+  for (const std::string& v :
+       kernels::qwen4exp::tp_prefill_variants(d, model_.ple.scale == loader::Q4PleScale::Bf16, rows))
     require(std::ifstream(kernels::path(v)).good(),
             v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
   require(d.forms.shared == model::Q4Form::Int4,
@@ -146,23 +147,23 @@ void Qwen4ExpTpEngine::prepare_prefill() {
   pf_ = std::unique_ptr<Q4TpPrefillState, void (*)(Q4TpPrefillState*)>(ps, &destroy_tp_prefill);
   ps->timeout_ns = uint64_t(opt_.timeout_ms) * 1000000ull;
   for (uint32_t r = 0; r < 2; ++r) {
-    ps->dev[r] = std::make_unique<Q4TpPrefillState::Dev>(cards_[r]->ctx, cards_[r]->desc, d, max_len_);
+    ps->dev[r] = std::make_unique<Q4TpPrefillState::Dev>(cards_[r]->ctx, cards_[r]->desc, d, max_len_, rows);
     ps->dev[r]->hidden = d.hidden;
     ps->dev[r]->ring = make_pf_ring(cards_[r]->ctx, model_.parts[r], cards_[r]->desc);
     require(ps->dev[r]->s.bytes() + ps->dev[r]->fold.size() + ps->dev[r]->yf.size() + ps->dev[r]->H1.size() +
                     ps->dev[r]->inj1.size() + ps->dev[r]->lists1.size() + (ps->dev[r]->ring ? pf_ring_bytes(d) : 0) ==
-                prefill_sizes(cards_[r]->desc, max_len_).total() + tp_prefill_bytes(d),
+                prefill_sizes(cards_[r]->desc, max_len_, rows).total() + tp_prefill_bytes(d, rows),
             "card " + std::to_string(r) + "'s prefill allocation is not the plan's (prefill_sizes + tp_prefill_bytes)");
   }
   if (mtp_) {   // Task 5: the head's pass on card 1
-    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_bind_.single))
+    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_bind_.single, rows, d.hc_int8))
       require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with B70_MTP=ON");
     Q4TpPrefillState::Dev& D = *ps->dev[1];
     l0::Context& c1 = cards_[1]->ctx;
-    D.mtp_R = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, mtp_prefill_R_bytes(d));
+    D.mtp_R = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, mtp_prefill_R_bytes(d, rows));
     D.hctl = std::make_unique<l0::Mem>(c1, l0::MemKind::Host, kTpPfChunks * sizeof(Control));
-    D.mtp_part = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(kPfC) * pf_ld(d.qkvg_n()) * 4);
-    D.mtp_q16 = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(kPfC) * d.q_n() * 2);
+    D.mtp_part = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(rows) * pf_ld(d.qkvg_n()) * 4);
+    D.mtp_q16 = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(rows) * d.q_n() * 2);
   }
   const bool overlap = ps->dev[0]->bcs && ps->dev[1]->bcs;   // both cards' copy engines, or neither crosses there
   for (uint32_t r = 0; r < 2; ++r) {
@@ -232,7 +233,7 @@ std::vector<uint32_t> Qwen4ExpTpEngine::read_prefill_routes() {
   require(bool(pf_), "read_prefill_routes before the first prefill");
   Q4TpPrefillState::Dev& D = *pf_->dev[0];
   require(D.cx.wait_for(pf_->timeout_ns), "card 0's prefill list is still running");
-  std::vector<uint32_t> v(size_t(model_.desc.layers) * kPfC * kRouteWords);
+  std::vector<uint32_t> v(size_t(model_.desc.layers) * model_.pf_rows * kRouteWords);
   cards_[0]->imm.copy(v.data(), D.s.routes.ptr(), v.size() * 4);
   return v;
 }
@@ -241,8 +242,9 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   const model::Qwen4ExpDesc& d = model_.desc;
   if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
   require(!ids.empty(), "no ids");
-  if (chunk == 0) chunk = kPfC;
-  require(chunk <= kPfC, "chunk " + std::to_string(chunk) + " exceeds kPfC " + std::to_string(kPfC));
+  if (chunk == 0) chunk = model_.pf_rows;
+  require(chunk <= model_.pf_rows, "chunk " + std::to_string(chunk) + " exceeds the prefill scratch's " +
+                                       std::to_string(model_.pf_rows) + " rows");
   for (uint32_t id : ids) require(id < d.vocab, "id " + std::to_string(id) + " is outside the vocabulary");
   const uint32_t base = cards_[0]->ctl->pos;
   require(size_t(base) + ids.size() <= max_len_,
@@ -254,10 +256,10 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
       fail("card " + std::to_string(r) + "'s last decode step is still running");
     c.pending = false;
   }
-  // Task 5: the prefill's GDN path reads slot 0 directly, so a live slot a commit left is copied there first; a verify
-  // waiting for its commit is dropped (the prompt continues from pos).
+  // Task 5: the prefill's GDN path reads gdn_state directly, so the rows a commit left are replayed into it first
+  // (PERF-51); a verify waiting for its commit is dropped (the prompt continues from pos).
   if (mtp_) {
-    mtp_normalise_live();
+    flush_gdn();
     verify_k_ = kNoVerify;
   }
   prepare_prefill();
@@ -331,14 +333,16 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   };
   // Spec 7's prefix cache: with a block hook every chunk ends at a block end or at the prompt end (the one-card
   // engine's rule, one shared function); the hook runs after each pair that ends mid-prompt on a block end, with both
-  // cards idle (Qwen3.8's tp rule: the block ends inside a pair are not hooked), and at the prompt's end.
+  // cards idle (Qwen3.8's tp rule: the block ends inside a pair are not hooked), and at the prompt's end. PERF-36: a
+  // 4096-row chunk's snapshot points are 4096 apart, and the prompt's last kPrefillTail positions run in 2048-row chunks
+  // (the one-card engine's rule).
   const bool hooked = static_cast<bool>(block_hook_);
   uint32_t last_C = 0, last_h = 0;
   for (size_t off = 0; off < ids.size();) {
     uint32_t pos[kTpPfChunks], C[kTpPfChunks], n = 0;
     for (size_t o = off; n < kTpPfChunks && o < ids.size(); ++n) {
       pos[n] = base + uint32_t(o);
-      C[n] = prefill_chunk_rows(pos[n], ids.size() - o, chunk, hooked, kBlock);
+      C[n] = prefill_chunk_rows(pos[n], ids.size() - o, chunk, hooked, kBlock, /*wide_stride=*/true, kPrefillTail);
       o += C[n];
     }
     P.reset_events();

@@ -6,6 +6,8 @@
 //              tp_res_fold   in place of the next prep_res_fold: waits (bounded) for the peer's chunk in this card's
 //                            OWN landing buffer, then folds both cards' parts into the residual exactly as
 //                            prep_res_fold folds one card's split-K slices, and reduces the chunk's sum of squares.
+//              TP_WIRE_COLS  (with TP_SUM) tp_sum alone, after a linear that sends its own work-groups' chunks
+//                            (gemv.cl GEMV_TP_SEND): the same sums, the waits on the sender's chunks.
 //   TP_ARGMAX  tp_argmax_stage1 / tp_argmax_stage2   argmax.cl's two stages over this card's vocabulary half
 //                            (VOCAB rows, the first VOCAB_USED real), the index offset by ID_BASE (the half's first
 //                            id); stage 2 also writes the winner's fp32 bits to ctrl[CTRL_OUTV + m] so the host can
@@ -71,7 +73,20 @@
 #endif
 #define CHUNK ((K + FOLD_G - 1) / FOLD_G)
 #define DATA_WORDS (S_MSG * TP_MROWS * K)
+#ifdef TP_WIRE_COLS
+// PERF-44: the sender is a linear with the send folded in (gemv.cl GEMV_TP_SEND): the landing's chunks are its
+// work-groups, TP_WIRE_COLS columns of one slice - chunk c = s x WIRE_G + column group, J = WIRE_G x S_MSG x TP_MROWS.
+// Only tp_sum is built; its work-group (g, m) waits for the WIRE_WAITS chunks under its K range, then sums as before.
+#if !defined(TP_SUM) || FOLDED || K % TP_WIRE_COLS != 0 || CHUNK % TP_WIRE_COLS != 0 || K != FOLD_G * CHUNK
+#error "tp.cl TP_WIRE_COLS: tp_sum of the slices form, whole sender chunks under each work-group"
+#endif
+#define WIRE_G (K / TP_WIRE_COLS)
+#define WIRE_PER_G (CHUNK / TP_WIRE_COLS)
+#define WIRE_WAITS (WIRE_PER_G * S_MSG)
+#define J_CHUNKS (WIRE_G * S_MSG * TP_MROWS)
+#else
 #define J_CHUNKS (FOLD_G * TP_MROWS)
+#endif
 // The wire: the landing layout, the waits' failure record and the per-chunk call numbers (q4_moe.cl's wired MoE
 // shares them).
 #include "tp_wire.h"
@@ -79,6 +94,7 @@
 // prep.cl's two roundings, token for token (the fold's arithmetic is prep_res_fold's).
 #include "bf16.h"
 
+#ifndef TP_WIRE_COLS
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void tp_send(__global const float* restrict partials, __global uint* land, __global uint* ctr,
              __global float* restrict own) {
@@ -113,13 +129,22 @@ void tp_send(__global const float* restrict partials, __global uint* land, __glo
     atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
   }
 }
+#endif  // !TP_WIRE_COLS
 
-// One part's contribution to the fold's chain: S slices of [S][M][K], from this card's memory or (remote) the landing.
+// One part's contribution to the fold's chain: S slices of [S][M][K], from this card's memory or (remote) the landing
+// (REMOTE_SRC(s): the data slot slice s came in - under TP_WIRE_COLS its sender chunk's, else the one chunk's `src`).
 #define LOCAL_PART(acc)                                                                   \
   for (uint s = 0; s < S_MSG; ++s) acc += mine[((size_t)s * M + m) * K + k];
 #define REMOTE_PART(acc)                                                                  \
-  for (uint s = 0; s < S_MSG; ++s) acc += as_float(SYS_LOAD(src + ((size_t)s * M + m) * K + k, memory_order_relaxed));
+  for (uint s = 0; s < S_MSG; ++s)                                                        \
+    acc += as_float(SYS_LOAD(REMOTE_SRC(s) + ((size_t)s * M + m) * K + k, memory_order_relaxed));
+#ifdef TP_WIRE_COLS
+#define REMOTE_SRC(s) (land + (s_want[(s) * WIRE_PER_G + (k - k0) / TP_WIRE_COLS] & 1u) * DATA_WORDS)
+#else
+#define REMOTE_SRC(s) src
+#endif
 
+#ifndef TP_WIRE_COLS
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void tp_res_fold(__global const float* restrict mine, __global const uint* land, __global ushort* restrict resid,
                           __global float* restrict sumsq, __global uint* ctr, __global uint* state, uint spin_limit) {
@@ -176,6 +201,8 @@ __kernel void tp_res_fold(__global const float* restrict mine, __global const ui
   if (lid == 0) sumsq[(size_t)g * M + m] = red[0];
 }
 
+#endif  // !TP_WIRE_COLS
+
 #ifdef TP_SUM
 // Spec 19 v3c: the DFlash drafter's all-reduce - tp_res_fold's wait and its fixed order (card 0's part first), the sum
 // written whole in fp32 into `out` slice 0 ([M][K]: the conv's finish side folds it into the drafter's fp32 residual)
@@ -186,11 +213,21 @@ __kernel void tp_sum(__global const float* restrict mine, __global const uint* l
   const uint g = get_group_id(0);
   const uint m = get_group_id(1);
   const uint lid = get_local_id(0);
+#ifdef TP_WIRE_COLS
+  // lane i < WIRE_WAITS waits for sender chunk (slice i / WIRE_PER_G, column group g WIRE_PER_G + i % WIRE_PER_G)
+  __local uint s_want[WIRE_WAITS];
+  if (lid < WIRE_WAITS) {
+    const uint c = (lid / WIRE_PER_G) * WIRE_G + g * WIRE_PER_G + lid % WIRE_PER_G;
+    const uint j = c * TP_MROWS + m;
+    const uint want = tp_next(ctr, c, m);
+    s_want[lid] = want;
+#else
   const uint j = g * TP_MROWS + m;
   __local uint s_want;
   if (lid == 0) {
     const uint want = tp_next(ctr, g, m);
     s_want = want;
+#endif
     const uint slot = want & 1u;
     if (SYS_LOAD(state, memory_order_relaxed) == 0u) {
       uint got = 0u, i = 0u;
@@ -205,7 +242,9 @@ __kernel void tp_sum(__global const float* restrict mine, __global const uint* l
   }
   barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
   atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_acquire, memory_scope_all_svm_devices);
+#ifndef TP_WIRE_COLS
   __global const uint* src = land + (s_want & 1u) * DATA_WORDS;
+#endif
   const uint k0 = g * CHUNK;
   uint k1 = k0 + CHUNK;
   if (k1 > K) k1 = K;

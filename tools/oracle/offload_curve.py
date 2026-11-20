@@ -9,11 +9,10 @@ the routing profile plan 22b's loader reads (decision 8).
     offload_curve.py mtp     --traces DIR --K 1,2,3,4 --f F [--json FILE]
     offload_curve.py prefill --traces DIR --chunk 2048,4096 --f 0.6:0.9:0.05 [--json FILE]
     offload_curve.py profile --traces DIR --out FILE [--sources CLASS|NAME,...]
-    offload_curve.py project --shape laguna --curve FILE [--mtp FILE] [--json FILE]
+    offload_curve.py project --budget FILE --curve FILE [--p0 FILE] [--swap FILE] [--mtp FILE] [--prefill FILE] [--json FILE]
 
-Every command takes --shape flash-next|laguna (default flash-next): the model the traces are of (SHAPES: experts,
-top-k, the decoder layers the traces' L axis holds, an expert's record bytes; Laguna's bytes a token too). A shape
-that names its layers is checked against the traces.
+Every command takes --shape flash-next (the default): the model the traces are of (SHAPES: experts, top-k, the decoder
+layers the traces' L axis holds, an expert's record bytes). A shape that names its layers is checked against the traces.
 
 The traces are `<DIR>/<name>.routes.safetensors` (21-QFN-v1a's TRACE_FORMAT, qwen4exp_ref.py trace): ids i32 [T][L][k]
 ascending, p f32, onorm f32, mtp_ids / mtp_p / mtp_onorm [T][k] (row T-1 of the head -1 / 0); metadata layers,
@@ -31,14 +30,9 @@ global greedy over all (layer, expert) pairs by the profile's counts - the margi
 own curve - round(f x L x E) slots in total (ties: lower layer, lower id). h = routed slots that hit / all routed
 slots, over every layer and row.
 
-**Prompt and answer.** A trace whose metadata carries `answer_from` (laguna_ref.py trace) has prompt rows [0, a) and
-answer rows [a, T); `curve` then also scores the two apart (decode speed depends on the answer rows). Profiles are
-built from all rows.
-
 Every table is printed and, with --json FILE, written as JSON for the record.
 
-`project` (P0.7) is below; with --shape laguna it is spec 30 §7.1's two-constant decode model, §8's drafter formula
-and §13's stop rule instead.
+`project` (P0.7) is below.
 """
 import os
 import sys
@@ -56,14 +50,9 @@ import re  # noqa: E402
 import numpy as np  # noqa: E402
 
 EXPERT_BYTES = 1740800 + 870400        # loader/qwen4exp_layout.h: q4_gate_up_block_bytes + q4_down_block_bytes
-# A model's shape. layers: the decoder layer of each index of a trace's L axis (None: 0 .. L-1, not checked). Laguna
-# (spec 30 §1-2, derived from the config and the tensor shapes): 256 experts top-10 in layers 1..47 (layer 0 dense), an
-# expert 3,342,336 + 1,671,168 B at int4 g64; D / R the bytes a decode token reads outside / inside the routed experts,
-# tp the same per card in tensor parallel; 48 decoder layers; 48 KiB of bf16 KV a position (12 full layers).
+# A model's shape. layers: the decoder layer of each index of a trace's L axis (None: 0 .. L-1, not checked).
 SHAPES = {
     "flash-next": {"experts": 512, "top_k": 10, "layers": None, "expert_bytes": EXPERT_BYTES},
-    "laguna": {"experts": 256, "top_k": 10, "layers": list(range(1, 48)), "expert_bytes": 5013504,
-               "D": 2.181e9, "R": 2.356e9, "tp": (1.137e9, 1.178e9), "decoder_layers": 48, "kv_row_bytes": 49152},
 }
 A4_RE = re.compile(r"^t\d+_[A-Za-z]+-[A-Za-z0-9_]+$")
 CLASSES = ("A4", "agentic", "code", "prose", "opencode")
@@ -112,7 +101,6 @@ class Trace:
         self.cls = source_class(self.name)
         self.T, self.layers, self.top_k = (int(x) for x in self.ids.shape)
         self.experts = int(self.meta.get("experts", 512))
-        self.answer_from = int(self.meta.get("answer_from", self.T))
         with open(path, "rb") as fh:
             self.sha256 = hashlib.sha256(fh.read()).hexdigest()
 
@@ -197,17 +185,12 @@ def resident_1d(counts: np.ndarray, f: float) -> np.ndarray:
     return res
 
 
-def rows_of(t, part: str) -> np.ndarray:
-    """A trace's ids [T][L][k] restricted to its prompt rows [0, answer_from), its answer rows, or all."""
-    return t.ids[: t.answer_from] if part == "prompt" else t.ids[t.answer_from:] if part == "answer" else t.ids
-
-
-def hit_rate(traces, res: np.ndarray, part: str = "all"):
-    """(hits, total routed slots) of `traces` (their `part` rows) against resident mask res [L][E]."""
+def hit_rate(traces, res: np.ndarray):
+    """(hits, total routed slots) of `traces` against resident mask res [L][E]."""
     hits = total = 0
     for t in traces:
         L = t.layers
-        h = res[np.arange(L)[None, :, None], rows_of(t, part)]
+        h = res[np.arange(L)[None, :, None], t.ids]
         hits += int(h.sum())
         total += int(h.size)
     return hits, total
@@ -227,7 +210,6 @@ def curve(traces, L: int, E: int, fs, split: str = "hash") -> dict:
         raise SystemExit("offload_curve curve: one half is empty (too few sources for --split hash; use --split none)")
     cnt = [counts_of(g, L, E) if g else None for g in groups]
     allc = counts_of(traces, L, E)
-    parts = ("prompt", "answer") if any(t.answer_from < t.T for t in traces) else ()
     rows = []
     for f in fs:
         row = {"f": f}
@@ -238,10 +220,6 @@ def curve(traces, L: int, E: int, fs, split: str = "hash") -> dict:
                 ins = [hit_rate(groups[0], r0), hit_rate(groups[1], r1)]
                 row[pol + "_held"] = (_ratio(*held[0]) + _ratio(*held[1])) / 2
                 row[pol + "_in"] = (_ratio(*ins[0]) + _ratio(*ins[1])) / 2
-                for part in parts:   # held out per part: each source scored on the other half's profile
-                    a0, b0 = hit_rate(groups[1], r0, part)
-                    a1, b1 = hit_rate(groups[0], r1, part)
-                    row[f"{pol}_held_{part}"] = _ratio(a0 + a1, b0 + b1)
                 for c in CLASSES:   # held out per class: each source scored on the other half's profile
                     hh = tt = 0
                     for g, r_other in ((0, r1), (1, r0)):
@@ -254,8 +232,6 @@ def curve(traces, L: int, E: int, fs, split: str = "hash") -> dict:
                 r = fill(allc, f)
                 row[pol + "_in"] = _ratio(*hit_rate(traces, r))
                 row[pol + "_held"] = float("nan")
-                for part in parts:
-                    row[f"{pol}_in_{part}"] = _ratio(*hit_rate(traces, r, part))
                 for c in CLASSES:
                     sel = [t for t in traces if t.cls == c]
                     a, b = hit_rate(sel, r)
@@ -268,7 +244,7 @@ def curve(traces, L: int, E: int, fs, split: str = "hash") -> dict:
         for target in (0.90, 0.95, 0.99):
             fr = next((r["f"] for r in rows if r[f"{pol}_{key}"] >= target), None)
             reach[f"{pol}_{key}_{target:.2f}"] = fr
-    return {"split": split, "halves": half, "rows": rows, "reach": reach, "parts": list(parts),
+    return {"split": split, "halves": half, "rows": rows, "reach": reach,
             "sources": {t.name: {"class": t.cls, "T": t.T} for t in traces}}
 
 
@@ -276,7 +252,7 @@ class LayerSlice:
     """A trace restricted to layers [lo, hi) (a device's), for the per-device curve."""
 
     def __init__(self, t, lo: int, hi: int):
-        self.name, self.cls, self.T, self.top_k, self.answer_from = t.name, t.cls, t.T, t.top_k, t.answer_from
+        self.name, self.cls, self.T, self.top_k = t.name, t.cls, t.T, t.top_k
         self.ids = t.ids[:, lo:hi, :]
         self.layers = hi - lo
 
@@ -661,100 +637,9 @@ def card_options(dev: dict | None, curve_rows, f: float, key: str, swap):
     return opts
 
 
-# --- spec 30 (Laguna): the two-constant decode model (§7.1), the drafter (§8), the stop rule (§13) ------------------------
-B_FIT_GBPS = 518.0        # §7.1: B and c fitted to Qwen3.8 (15.54 GB, 64 layers, 29.45 t/s) and Ornith (2.345 GB, 40, 142.8)
-C_LAYER_MS = 0.062
-B_21V2_GBPS = 457.8       # spec 21-QFN-v2's single ratio (Qwen3.8's), no per-layer term: the upper bound
-P_LINK_GBPS = 11.2        # host RAM to a card, pinned, in place (measured on Flash-Next's 2.6 MB records)
-ALLREDUCE_MS = 0.0035     # one P2P all-reduce (Qwen3.8 tensor parallel); two a layer
-KV_MS_PER_GB = 2.19       # Qwen3.8's measured decode slope with context (31.41 t/s at 4k -> 20.13 at 128k)
-DRAFT_MS = 3.0            # §8: a draft pass of the 1.1 GB int8 drafter (derived)
-CONTEXT_F = {32768: 0.88, 65536: 0.85, 131072: 0.80}   # §4: the resident fraction the planner reaches, bf16 KV
-STOP_H, GO_H, DRAFT_TAU, DRAFT_BAR = 0.90, 0.95, 5.0, 1.25   # §13's stop rule and the drafter's bar
-
-
-def decode2_ms(D: float, R: float, h: float, L: int, B: float = B_FIT_GBPS, c: float = C_LAYER_MS,
-               P: float = P_LINK_GBPS, extra_ms: float = 0.0) -> float:
-    """Spec 30 §7.1, the serial law (bytes, GB/s -> ms a token): (D + h R) / B + L c + (1 - h) R / P + extra."""
-    return (D + h * R) / B / 1e6 + L * c + (1 - h) * R / P / 1e6 + extra_ms
-
-
-def two_constant_tps(sh: dict, h: float, tp: bool = False, upper: bool = False, ctx: int = 0) -> float:
-    """t/s of one request: the layer split (D, R over one link at a time) or tensor parallel (each card half of D and R
-    on its own link, two all-reduces a layer); `upper` = spec 21-QFN-v2's constants; ctx adds the full layers' KV reads at
-    Qwen3.8's measured slope (half a card in tensor parallel)."""
-    L = sh["decoder_layers"]
-    D, R = sh["tp"] if tp else (sh["D"], sh["R"])
-    extra = 2 * L * ALLREDUCE_MS if tp else 0.0
-    extra += ctx * sh["kv_row_bytes"] / 1e9 * KV_MS_PER_GB * (0.5 if tp else 1.0)
-    B, c = (B_21V2_GBPS, 0.0) if upper else (B_FIT_GBPS, C_LAYER_MS)
-    return 1e3 / decode2_ms(D, R, h, L, B, c, extra_ms=extra)
-
-
-def drafter_speedup(sh: dict, h: float, u: float, tau: float, draft_ms: float = DRAFT_MS) -> float:
-    """Spec 30 §8 (layer split): t_plain / ((t_verify(u) + t_draft) / tau), the verify reading D once and u R of
-    experts (u = distinct experts a layer over the M rows / top_k)."""
-    L = sh["decoder_layers"]
-    return decode2_ms(sh["D"], sh["R"], h, L) / ((decode2_ms(sh["D"], u * sh["R"], h, L) + draft_ms) / tau)
-
-
-def project_laguna(a) -> None:
-    sh = SHAPES[a.shape]
-    cj = json.load(open(a.curve))
-    key = "held" if cj.get("split") == "hash" else "in"
-    if "answer" not in cj.get("parts", []):
-        raise SystemExit("offload_curve project: the curve has no answer rows (traces without answer_from)")
-
-    def h_at(f):
-        """The best static fill's answer-position h at f, and which fill."""
-        hu, hp = interp(cj["rows"], f, f"uniform_{key}_answer"), interp(cj["rows"], f, f"perlayer_{key}_answer")
-        return (hp, "per-layer") if hp >= hu else (hu, "uniform")
-    out = {"key": key, "contexts": [], "spec_table": [], "drafter": []}
-    print(f"project ({a.shape}): spec 30 §7.1's serial law, B {B_FIT_GBPS:g} GB/s, c {C_LAYER_MS * 1e3:g} us a layer "
-          f"(fitted), P {P_LINK_GBPS:g} GB/s; the upper bound B {B_21V2_GBPS:g}, c 0; h = the answer positions' "
-          f"best static fill ({key}); all speeds DERIVED")
-    print("| h | layer split | tensor parallel | layer split, upper | tensor parallel, upper |")
-    print("|---:|---:|---:|---:|---:|")
-    for h in (1.0, 0.99, 0.976, 0.95, 0.92, 0.90, 0.88, 0.85, 0.80):
-        r = [two_constant_tps(sh, h, tp, up) for up in (False, True) for tp in (False, True)]
-        out["spec_table"].append({"h": h, "pp": r[0], "tp": r[1], "pp_upper": r[2], "tp_upper": r[3]})
-        print(f"| {h:.3f} | {r[0]:.0f} | {r[1]:.0f} | {r[2]:.0f} | {r[3]:.0f} |")
-    print("| context | f | h (measured) | fill | layer split t/s | tensor parallel t/s |")
-    print("|---:|---:|---:|---|---:|---:|")
-    for ctx, f in CONTEXT_F.items():
-        h, fill = h_at(f)
-        pp, tp = two_constant_tps(sh, h, False, ctx=ctx), two_constant_tps(sh, h, True, ctx=ctx)
-        out["contexts"].append({"ctx": ctx, "f": f, "h": h, "fill": fill, "pp": pp, "tp": tp})
-        print(f"| {ctx} | {f:.2f} | {h:.4f} | {fill} | {pp:.1f} | {tp:.1f} |")
-    h32 = out["contexts"][0]["h"]
-    u8 = None
-    if a.mtp:
-        u8 = next((x["u"] for x in json.load(open(a.mtp))["K"] if x["M"] == 8), None)
-    if u8 is None:
-        print("drafter: no 8-row verify union (offload_curve.py mtp --K 7 --json) - not projected")
-        drafter = "NOT PROJECTED"
-    else:
-        print(f"| tau | u(8) | h | drafter speedup (layer split) |")
-        print("|---:|---:|---:|---:|")
-        for tau in (3.5, 4.5, DRAFT_TAU, 6.0):
-            sp = drafter_speedup(sh, h32, u8, tau)
-            out["drafter"].append({"tau": tau, "u": u8, "h": h32, "speedup": sp})
-            print(f"| {tau:g} | {u8:.3f} | {h32:.4f} | {sp:.2f} |")
-        drafter = "KEEP" if drafter_speedup(sh, h32, u8, DRAFT_TAU) >= DRAFT_BAR else "STRUCK"
-    verdict = "STOP" if h32 < STOP_H else "NEEDS A DECISION" if h32 < GO_H else "GO"
-    out.update(verdict=verdict, drafter_verdict=drafter, h32=h32, u8=u8)
-    _dump(a, out)
-    print(f"{verdict}: answer-position h {h32:.4f} at f {CONTEXT_F[32768]:.2f} (32,768 tokens, static, {key}); "
-          f"thresholds {STOP_H:.2f} / {GO_H:.2f}. DRAFTER: {drafter}" +
-          ("" if u8 is None else f" (tau {DRAFT_TAU:g}, u(8) {u8:.3f}: {drafter_speedup(sh, h32, u8, DRAFT_TAU):.2f}x "
-                                 f"against {DRAFT_BAR:g}x)"))
-
-
 def cmd_project(a) -> None:
-    if a.shape == "laguna":
-        return project_laguna(a)
     if not a.budget:
-        raise SystemExit("offload_curve project: --budget is required for this shape")
+        raise SystemExit("offload_curve project: --budget is required")
     budget = read_budget(a.budget)
     p0 = read_p0(a.p0) if a.p0 else {"law": {}, "P_gbps": {}, "alpha": {}, "copy_expert_us": {}, "copy_both_gbps": None,
                                       "lines": 0}
@@ -917,7 +802,7 @@ def cmd_project(a) -> None:
 def project_args(sub) -> None:
     p = sub.add_parser("project")
     p.add_argument("--shape", default="flash-next", choices=sorted(SHAPES))
-    p.add_argument("--budget", help="Task 1's budget-json lines (qwen4exp_plan_test --budget-json); not for laguna")
+    p.add_argument("--budget", help="Task 1's budget-json lines (qwen4exp_plan_test --budget-json)")
     p.add_argument("--p0", help="probe_offload's po lines (copy, zc): the law and P per card")
     p.add_argument("--curve", required=True, help="offload_curve.py curve --json")
     p.add_argument("--swap", help="offload_curve.py swap --json (its best gain, when positive)")
@@ -987,13 +872,6 @@ def cmd_curve(a) -> None:
         cls = [row.get(f"perlayer_{key}_{c}") for c in CLASSES]
         print(f"| {row['f']:.3f} | {row['uniform_in']:.4f} | {row['uniform_held']:.4f} | {row['perlayer_in']:.4f} | "
               f"{row['perlayer_held']:.4f} | " + " | ".join("-" if v is None else f"{v:.4f}" for v in cls) + " |")
-    if r["parts"]:
-        print("| f | " + " | ".join(f"{pol} {key} {part}" for part in r["parts"] for pol in ("uniform", "per-layer"))
-              + " |")
-        print("|---:|" + "---:|" * (2 * len(r["parts"])))
-        for row in r["rows"]:
-            print(f"| {row['f']:.3f} | " + " | ".join(f"{row[f'{pol}_{key}_{part}']:.4f}" for part in r["parts"]
-                                                      for pol in ("uniform", "perlayer")) + " |")
     for k_, v in r["reach"].items():
         print(f"reach {k_}: f = {'not reached' if v is None else f'{v:.3f}'}")
     if a.budget:

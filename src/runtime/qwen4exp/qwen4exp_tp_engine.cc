@@ -106,6 +106,10 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
         c.drafts.push_back(build(c.ctx, model_, model_.parts[r], c.buffers, nullptr, nullptr, nullptr, ls, &mtp_bind_,
                                  &c.binding));
       }
+      ListSpec ls;
+      ls.kind = ListKind::GdnFlush;
+      c.flush.emplace(build(c.ctx, model_, model_.parts[r], c.buffers, nullptr, nullptr, nullptr, ls, nullptr,
+                            &c.binding));   // PERF-51
     }
   // One warm-up step: a list's first submission makes every host allocation its kernels reach resident (the expert
   // mirrors, the PLE table), which can hold one card past the other's bounded wait. Its result is discarded; a
@@ -435,18 +439,12 @@ std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, 
     case SnapTensor::PleRing:   // replicated: card 0's on save, both cards' on load
       for (uint32_t c = 0; c < (load ? 2u : 1u); ++c) out.push_back({c, base(c) + r.offset, 0, r.bytes});
       return out;
-    case SnapTensor::GdnState: {   // a layer's v-heads: card 0's then card 1's, from the LIVE slot (spec 8)
+    case SnapTensor::GdnState: {   // a layer's v-heads: card 0's then card 1's (PERF-51: save_state flushes first)
       const size_t S = gdn_state_bytes_per_layer(d), H = S / 2;
       if (r.offset % S != 0 || r.bytes % S != 0)
         throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: a GDN state run that is not whole layers");
       for (size_t i = 0; i < r.bytes / S; ++i)
-        for (uint32_t c = 0; c < 2; ++c) {
-          const Qwen4ExpBuffers& b = cards_[c]->buffers;
-          const uint32_t live = cards_[c]->ctl->gdn_live, li = uint32_t(r.offset / S + i);
-          uint8_t* dev = live == 0 ? base(c) + size_t(li) * H
-                                   : static_cast<uint8_t*>(b.gdn_spec->ptr()) + (size_t(li) * (kGdnSlots - 1) + live - 1) * H;
-          out.push_back({c, dev, i * S + c * H, H});
-        }
+        for (uint32_t c = 0; c < 2; ++c) out.push_back({c, base(c) + (r.offset / S + i) * H, i * S + c * H, H});
       return out;
     }
     case SnapTensor::ConvRing: {   // a row's channels q | k | v, each card 0's part then card 1's
@@ -493,6 +491,7 @@ void Qwen4ExpTpEngine::save_state(void* host) {
   if (broken_) throw std::runtime_error("tensor parallel: a crossing failed earlier in this session; reset() first");
   if (verify_k_ != kNoVerify)
     throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine::save_state: a verify is pending its commit");
+  flush_gdn();
   auto* h = static_cast<uint8_t*>(host);
   const uint32_t eos = model_.desc.ple_eos;
   for (const SnapRun& r : state_runs(model_.desc, model::Q4Placement::one(model_.desc), pos(), mtp())) {
@@ -511,7 +510,7 @@ void Qwen4ExpTpEngine::load_state(const void* host, uint32_t p) {
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::load_state: pos " + std::to_string(p) +
                              " exceeds max_len " + std::to_string(max_len_));
   if (broken_) reset();   // a failed crossing: the restore below rewrites what the session reads
-  for (auto& c : cards_) c->ctl->gdn_live = 0;   // the GDN state goes into slot 0, made live (spec 8's rule)
+  for (auto& c : cards_) c->ctl->gdn_pend = 0;   // PERF-51: no committed rows over a loaded state
   verify_k_ = kNoVerify;
   const auto* h = static_cast<const uint8_t*>(host);
   for (const SnapRun& r : state_runs(model_.desc, model::Q4Placement::one(model_.desc), p, mtp())) {
@@ -694,6 +693,8 @@ void Qwen4ExpTpEngine::verify(uint32_t k) {
   verify_pos_ = p;
   verify_k_ = k;
   submit(&cards_[0]->verify[k], &cards_[1]->verify[k]);
+  // PERF-51: the lists replayed the committed rows; a second replay must not (gdn_step.cl, DEFERRED)
+  for (auto& c : cards_) c->ctl->gdn_pend &= ~0xFFu;
 }
 
 void Qwen4ExpTpEngine::commit(uint32_t j, uint32_t next_token) {
@@ -705,10 +706,11 @@ void Qwen4ExpTpEngine::commit(uint32_t j, uint32_t next_token) {
   if (next_token >= model_.desc.vocab)
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::commit: next_token " + std::to_string(next_token) +
                              " is outside the vocabulary");
-  // Row j's GDN state is slot (live + j) % 4 on both cards: make it live. Row j's pre-mixer H (hh row 1 + j) is the
-  // next iteration's R_{pos-1}.
+  // PERF-51: rows 0..j are what the next launch replays into the GDN state on both cards - they sit in the parity the
+  // verify wrote, the other one (gdn_step.cl, DEFERRED). Row j's pre-mixer H (hh row 1 + j) is the next iteration's
+  // R_{pos-1}.
   for (auto& c : cards_) {
-    c->ctl->gdn_live = (c->ctl->gdn_live + j) % kGdnSlots;
+    c->ctl->gdn_pend = (j + 1) | ((((c->ctl->gdn_pend >> 8) & 1u) ^ 1u) << 8);
     c->ctl->pos = verify_pos_ + j + 1;
     c->ctl->n_active = 1;
     c->ctl->cur_token[0] = next_token;
@@ -719,8 +721,8 @@ void Qwen4ExpTpEngine::commit(uint32_t j, uint32_t next_token) {
 
 void Qwen4ExpTpEngine::mtp_step1() {
   if (pos() == 0) {
-    // No R_{-1}: the plain lists, which read and write GDN slot 0, then card 1's pre-mixer H into hh row 0.
-    mtp_normalise_live();
+    // No R_{-1}: the plain lists, which read and write gdn_state (no committed rows at pos 0), then card 1's pre-mixer
+    // H into hh row 0.
     step_plain();
     cards_[1]->imm.copy(mtp_->hh_row(0), cards_[1]->buffers.H.ptr(), size_t(model_.desc.hc_n()) * 2);
     return;
@@ -729,16 +731,15 @@ void Qwen4ExpTpEngine::mtp_step1() {
   commit(0, verify_ids()[0]);
 }
 
-void Qwen4ExpTpEngine::mtp_normalise_live() {
-  if (!mtp_) return;
-  const model::Qwen4ExpDesc& d = model_.desc;
-  for (auto& c : cards_) {
-    const uint32_t live = c->ctl->gdn_live;
-    if (live == 0) continue;
-    const size_t S = gdn_state_bytes_per_layer(c->desc);
-    for (uint32_t l = 0; l < d.layers; ++l)
-      if (!d.is_qsa(l)) c->imm.copy(c->buffers.gdn_state_layer(l), c->buffers.gdn_slot(l, live), S);
-    c->ctl->gdn_live = 0;
+void Qwen4ExpTpEngine::flush_gdn() {
+  if (!mtp_ || (cards_[0]->ctl->gdn_pend & 0xFFu) == 0) return;
+  for (auto& c : cards_) {   // no crossing in a flush list: each card on its own
+    const uint32_t n = c->ctl->n_active;
+    c->ctl->n_active = 0;   // the flush list replays and stores only
+    c->queue.execute(c->flush->list, &c->fence);
+    c->fence.wait();
+    c->ctl->gdn_pend &= ~0xFFu;
+    c->ctl->n_active = n;
   }
 }
 

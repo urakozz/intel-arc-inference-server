@@ -432,12 +432,12 @@ BatchEngineIface::Chunk Scheduler::next_chunk(const Job& j, bool cut) {
   const uint32_t len = static_cast<uint32_t>(j.req.prompt.size());
   const uint32_t slot = static_cast<uint32_t>(j.slot);
   const uint32_t end = j.split ? len - 1 : len;
-  if (j.prefilled >= end) return {slot, j.req.prompt.data() + len - 1, 1, true, true};
+  if (j.prefilled >= end) return {slot, j.req.prompt.data() + len - 1, 1, true, true, &j.req.sampling};
   uint32_t n = end - j.prefilled;
   const uint32_t engine_cut = engine_.prefill_cut(slot, j.prefilled, n);
   if (engine_cut != 0) n = std::min(n, engine_cut);
   else if (cut && opts_.chunk != 0) n = std::min(n, opts_.chunk);
-  return {slot, j.req.prompt.data() + j.prefilled, n, !j.split && j.prefilled + n == len, false};
+  return {slot, j.req.prompt.data() + j.prefilled, n, !j.split && j.prefilled + n == len, false, &j.req.sampling};
 }
 
 bool Scheduler::prefill_plan(PrefillCall& call) {
@@ -494,6 +494,29 @@ void Scheduler::prefill_done(PrefillCall& call, std::exception_ptr error) {
     if (!c.last) continue;
     j->state = Job::State::Decoding;
     if (j->max_tokens == 0) finish(j, Finish::Length);
+    else peek_first(j);
+  }
+}
+
+// PERF-91 (server.cc's generate_tail): the prompt's last chunk left the first id pending. It goes through the per-id
+// rules - and out through on_token - now, before the first step; that step returns it first and the round consumes it
+// as before (fed, counted), so the engine and the cache get the same calls in the same order. An id that ends the
+// request still waits for that step: the slot holds it, as the serial server's session does.
+void Scheduler::peek_first(const std::shared_ptr<Job>& j) {
+  try {
+    j->first = engine_.pending_id(static_cast<uint32_t>(j->slot), j->req.sampling);
+    if (!j->first) return;
+    const uint32_t id = *j->first;
+    if (impl_->eos.contains(id) && !j->req.ignore_eos && j->req.min_tokens == 0) {
+      j->first_ends = Finish::Stop;
+      return;
+    }
+    ++j->fin.completion_tokens;
+    if (impl_->lookup && opts_.lookup_history != 0) j->out.push_back(id);
+    if (j->req.on_token && !j->req.on_token(id)) j->first_ends = Finish::Stop;
+    else if (j->max_tokens <= 1) j->first_ends = Finish::Length;
+  } catch (const std::exception& error) {
+    finish(j, Finish::Error, error.what());
   }
 }
 
@@ -623,6 +646,15 @@ bool Scheduler::spec_round() {
           impl_->matchers[slot]->append(id);
         if (cache_) cache_->fed(slot, id);
         ++j->steps;
+        if (j->steps == 1 && j->first) {   // PERF-91: peeked - its rules have run
+          if (id != *j->first) throw std::logic_error("BatchEngineIface::pending_id: the first step returned another id");
+          if (j->first_ends) {
+            ended = true;
+            reason = *j->first_ends;
+            break;
+          }
+          continue;
+        }
         const bool is_eos = impl_->eos.contains(id);
         if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
           ended = true;
@@ -705,6 +737,11 @@ bool Scheduler::decode_round() {
     try {   // plan 13b review: a throwing on_token ends this request only; the next rows still get their ids
       if (cache_) cache_->fed(rows[i].slot, id);
       ++j->steps;
+      if (j->steps == 1 && j->first) {   // PERF-91: peeked - its rules have run
+        if (id != *j->first) throw std::logic_error("BatchEngineIface::pending_id: the first step returned another id");
+        if (j->first_ends) finish(j, *j->first_ends);
+        continue;
+      }
       const bool is_eos = impl_->eos.contains(id);
       if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
         finish(j, Finish::Stop);

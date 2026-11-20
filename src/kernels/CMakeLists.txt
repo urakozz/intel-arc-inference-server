@@ -1,5 +1,7 @@
 add_ocloc_kernel(noop SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/noop.cl)
 add_ocloc_kernel(bw_sum SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/bw_sum.cl)
+add_ocloc_kernel(bw_sum_sweep SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/bw_sum.cl DEFINES BW_SWEEP=1)
+add_ocloc_kernel(bw_sum_lsc SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/bw_sum.cl DEFINES BW_LSC=1)
 add_ocloc_kernel(ctrl_read SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/ctrl_read.cl)
 
 set(GEMV_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv.cl)
@@ -37,7 +39,13 @@ function(add_gemv_variant M K N S L)
                                       (K EQUAL 6144 AND N EQUAL 2560 AND S EQUAL 4)))
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1 GEMV_AHEAD=2)
   endif()
-  add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
+  # PERF-44: an optional TP builds the shape's cell with tp_send folded in (GEMV_TP_SEND), named _TP.
+  set(suffix)
+  if(ARGN STREQUAL "TP")
+    set(suffix _TP)
+    list(APPEND extra_defs GEMV_TP_SEND=1)
+  endif()
+  add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L}${suffix} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
 endfunction()
 # Probe matrix (spec 1 §4.2): the five int4 shapes the 27B runs after load-time
@@ -65,6 +73,16 @@ add_ocloc_kernel(gemv_control_M1_K6144_N5120_S4_L0 SOURCE ${GEMV_CL}
 # probe sweep over this shape would cost five more ocloc compiles of a
 # 3880-work-group kernel to price splits the binding cannot use.
 add_gemv_variant(1 5120 248320 1 1)  # lm_head int4: 3880 work-groups, device full
+# PERF-111: probe_gemv --tiles' cells, never bound by the engine - the production layout-1 cells (qkv||z, the int4
+# head) with the tiles k-group-major (GEMV_KMAJOR), alone and with two k-groups in flight. `_KM` / `_KM_A2`.
+add_ocloc_kernel(gemv_M1_K5120_N16384_S1_L1_KM SOURCE ${GEMV_CL}
+                 DEFINES M=1 K=5120 N=16384 S=1 LAYOUT=1 GEMV_KMAJOR=1)
+add_ocloc_kernel(gemv_M1_K5120_N16384_S1_L1_KM_A2 SOURCE ${GEMV_CL}
+                 DEFINES M=1 K=5120 N=16384 S=1 LAYOUT=1 GEMV_KMAJOR=1 GEMV_AHEAD=2)
+add_ocloc_kernel(gemv_M1_K5120_N248320_S1_L1_KM SOURCE ${GEMV_CL}
+                 DEFINES M=1 K=5120 N=248320 S=1 LAYOUT=1 GEMV_DEQ_SHIFT=1 GEMV_KMAJOR=1)
+add_ocloc_kernel(gemv_M1_K5120_N248320_S1_L1_KM_A2 SOURCE ${GEMV_CL}
+                 DEFINES M=1 K=5120 N=248320 S=1 LAYOUT=1 GEMV_DEQ_SHIFT=1 GEMV_KMAJOR=1 GEMV_AHEAD=2)
 
 set(GEMV_BF16_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv_bf16.cl)
 # `C` and `S` are the kernel's COLS_PER_WG (output columns per work-group) and
@@ -95,6 +113,14 @@ function(add_gemv_i8w_variant M K N)
   add_ocloc_kernel(gemv_i8w_M${M}_K${K}_N${N} SOURCE ${GEMV_I8W_CL} DEFINES M=${M} K=${K} N=${N})
 endfunction()
 add_gemv_i8w_variant(1 5120 248320)
+# PERF-111: probe_gemv --tiles' head cells, never bound by the engine: steps k-major (_KM), with four reads in flight
+# (_KM_A4), and four in flight in today's order (_A4) to tell the two apart. The same three for gemv_bf16's head.
+foreach(v "KM;GEMV_KMAJOR=1" "KM_A4;GEMV_KMAJOR=1;GEMV_AHEAD=4" "A4;GEMV_AHEAD=4")
+  list(GET v 0 tag)
+  list(SUBLIST v 1 -1 defs)
+  add_ocloc_kernel(gemv_i8w_M1_K5120_N248320_${tag} SOURCE ${GEMV_I8W_CL} DEFINES M=1 K=5120 N=248320 ${defs})
+  add_ocloc_kernel(gemv_bf16_M1_K5120_N248320_${tag} SOURCE ${GEMV_BF16_CL} DEFINES M=1 K=5120 N=248320 ${defs})
+endforeach()
 # a‖b as the runtime binds it since spec 1.5's lever L2 (kernels::gemv_bf16_tiling):
 # 8 work-groups of 16 K-slice subgroups = 128 threads, against 8. `16` is
 # measured, not chosen: 1 / 4 / 16 read 48.774 / 13.115 / 5.340 us in situ
@@ -1352,6 +1378,16 @@ function(add_q4_decode_rows MM)
   add_ocloc_kernel(q4_hc_combine_norm_M${MM}_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} HC_SRC=3 HC_NORM=1)
   add_ocloc_kernel(q4_hc_up_mix_M${MM}_I SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=336 UP_INJECT=1)
   add_ocloc_kernel(q4_hc_up_mix_M${MM} SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=320 UP_INJECT=0)
+  # PERF-66: the int8 form (Qwen4ExpDesc::hc_int8) - the up-mix over int8 up tiles (_Q8) and the down||inject /
+  # final mixer's down GEMV (q4_hc_down_i8, in gemv_bf16's place)
+  add_ocloc_kernel(q4_hc_up_mix_M${MM}_I_Q8 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=336 UP_INJECT=1 UP_I8=1)
+  add_ocloc_kernel(q4_hc_up_mix_M${MM}_Q8 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} UP_DOWN=320 UP_INJECT=0 UP_I8=1)
+  foreach(N 336 320)
+    add_ocloc_kernel(q4_hc_down_i8_M${MM}_N${N}_KS16 SOURCE ${Q4_CL}/q4_hc.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HC_DOWN_I8=${N} DN_KS=16)
+  endforeach()
   # q4_ple.cl: the gather from host USM by the table's scale dtype (+ q4_ple_check).
   add_ocloc_kernel(q4_ple_gather_M${MM}_BF16 SOURCE ${Q4_CL}/q4_ple.cl
                    DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1)
@@ -1408,10 +1444,15 @@ endif()
 #   tp.cl    tp_send + tp_sum at hidden 2560 per rank, the slices form: out_proj / o_proj's 2 local slices summed in one
 #            card's S4 order into one row (the combine's _S1). With these and the MoE's wired sums every value is one
 #            card's, bit for bit. tp_argmax per vocabulary half is Qwen3.8's
+#   PERF-44  the decode lists bind out_proj / o_proj's gemv with tp_send folded in (_TP, GEMV_TP_SEND: chunk = one
+#            work-group's 64 columns of a slice) and tp_sum waiting on those chunks (_sum_W64, TP_WIRE_COLS 64): the
+#            same sums, one launch and one pass fewer a layer. The plain gemv and _sum stay: qwen4exp_tp_wire_test's
+#            control
 if(B70_Q4EXP AND B70_TP)
   add_gemv_variant(1 2560 8192 1 0)
   add_gemv_variant(1 2560 6656 2 0)
   add_gemv_variant(1 3072 2560 2 0)   # one card's S4 slices 2r, 2r + 1: the slices crossing is one card's chain
+  add_gemv_variant(1 3072 2560 2 0 TP)
   add_gemv_i8w_variant(1 2560 124160)
   add_ocloc_kernel(prep_gated_head_M1_GK8V24_SIG SOURCE ${PREP_CL}
                    DEFINES M=1 GDN_GATE_SIGMOID=1 GDN_K_HEADS=8 GDN_V_HEADS=24)
@@ -1427,26 +1468,32 @@ if(B70_Q4EXP AND B70_TP)
                              Q4_EXPERT_TABLE=1 RANK=${R})
     add_ocloc_kernel(tp_cross_M1_K2560_G20_S2_X_R${R}_sum SOURCE ${TP_CL}
                      DEFINES TP_CROSS=1 M=1 K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1)
+    add_ocloc_kernel(tp_cross_M1_K2560_G20_S2_X_R${R}_sum_W64 SOURCE ${TP_CL}
+                     DEFINES TP_CROSS=1 M=1 K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1 TP_WIRE_COLS=64)
   endforeach()
 endif()
 # ==== Plan 21-QFN-v2b: Qwen3.8-Flash-Next tensor parallel decode ==== (end) ====
 
 # ==== Plan 21-QFN-v2b Task 5: Qwen3.8-Flash-Next MTP under tensor parallel ==== (begin) ====
 # Additive only: new names. A card's verify list at M = 1..4 (runtime/qwen4exp/qwen4exp_capture.cc, tp + Verify) at
-# model::q4_tp_card's shapes beyond the M = 1 decode list's: the GDN slots at 8 / 24 heads (SPEC_SLOT_STRIDE one
-# layer's state at 24 heads, layer-major as gdn_step_slots_M<M>_G1), and at M = 2..4 the card's linears (gemv, every
+# model::q4_tp_card's shapes beyond the M = 1 decode list's: the GDN step's DEFERRED build at 8 / 24 heads (PERF-51; one
+# layer's pending rows a parity, layer-major as gdn_step_defer_M<M>_G1), and at M = 2..4 the card's linears (gemv, every
 # row the M = 1 step's arithmetic), prep_gated_head _SIG, attn_prep and q4_qsa_attn at 12 / 1 heads, the MoE's halves
 # and the slices crossing. tp_argmax at M = 2..4 is Qwen3.8's (spec 17d, the same vocabulary halves); the MTP head
 # runs whole on card 1 with spec 21-QFN-v1e's binaries.
 if(B70_Q4EXP AND B70_TP AND B70_MTP)
   foreach(MM 1 2 3 4)
-    add_ocloc_kernel(gdn_step_slots_M${MM}_GK8V24_G1 SOURCE ${GDN_CL}
-                     DEFINES ${CTRL_DEFINES} NEGA_OFF=20480 DTBIAS_OFF=20504 GDN_K_HEADS=8 GDN_V_HEADS=24 SPEC_SLOTS=1
-                             CTRL_LIVE=19 SPEC_SLOT_STRIDE=393216 M=${MM})
+    # PERF-51: the verify lists' DEFERRED build at the card's 8 / 24 heads, layer-major as gdn_step_defer_M<M>_G1 (it
+    # replaces gdn_step_slots_M<M>_GK8V24_G1): PEND_PAR = ONE layer's pending rows, 64 rows x (8 + 24) x 128 bf16 +
+    # 64 x 24 x 2 fp32 (kernels::gdn_pend_layer_bytes)
+    add_ocloc_kernel(gdn_step_defer_M${MM}_GK8V24_G1 SOURCE ${GDN_CL}
+                     DEFINES ${CTRL_DEFINES} NEGA_OFF=20480 DTBIAS_OFF=20504 GDN_K_HEADS=8 GDN_V_HEADS=24 DEFERRED=1
+                             CTRL_PEND=30 PEND_PAR=536576 M=${MM})
     if(MM GREATER 1)
       add_gemv_variant(${MM} 2560 8192 1 0)
       add_gemv_variant(${MM} 2560 6656 2 0)
       add_gemv_variant(${MM} 3072 2560 2 0)
+      add_gemv_variant(${MM} 3072 2560 2 0 TP)
       add_gemv_i8w_variant(${MM} 2560 124160)
       add_ocloc_kernel(prep_gated_head_M${MM}_GK8V24_SIG SOURCE ${PREP_CL}
                        DEFINES M=${MM} GDN_GATE_SIGMOID=1 GDN_K_HEADS=8 GDN_V_HEADS=24)
@@ -1462,6 +1509,9 @@ if(B70_Q4EXP AND B70_TP AND B70_MTP)
                                  MOE_TP_PART=1 Q4_EXPERT_TABLE=1 RANK=${R})
         add_ocloc_kernel(tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum SOURCE ${TP_CL}
                          DEFINES TP_CROSS=1 M=${MM} K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1)
+        add_ocloc_kernel(tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum_W64 SOURCE ${TP_CL}
+                         DEFINES TP_CROSS=1 M=${MM} K=2560 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R} TP_SUM=1
+                                 TP_WIRE_COLS=64)
         # open-work item 48: the union-read MoE on the card's halves (q4_moe_finish stays the per-row binary's)
         set(_ud M=${MM} MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=320 UP_KS=4 DN_KS=1 SHARED_BF16=0 MOE_TP_PART=1 RANK=${R})
         add_ocloc_kernel(q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R${R}_U SOURCE ${Q4_CL}/q4_moe_union.cl DEFINES ${_ud})
@@ -1494,22 +1544,34 @@ endif()
 # 2560, pf_dequant_slab.cl (qkv||z, q||gate||k||v int4 layout 0), prefill/slab_bf16.cl's bf16 slab (q4_ prefix),
 # pf_attn_prep.cl (q16), pf_attn.cl (the gate) and pf_flash_attn.cl at 24 q / 2 kv heads (HPW 6 of GQA 12, KT 64, RPW
 # 8, EXP2 as the existing binary, 256 GRF), pf_moe_gemm.cl (gate||up 2560 x 1280 SiLU, down 640 x 2560); bound by
-# name, nothing built here: Qwen3.8's pf_gdn_conv / _wy / _scan (the GDN shape is Qwen3.8's), pf_gemm_T0, 21-QFN-v1c's
+# name, nothing built here: Qwen3.8's pf_gdn_conv / _intra / _scan_OB / _front_PL (the GDN shape is Qwen3.8's), pf_gemm_T0, 21-QFN-v1c's
 # q4_route_M1 (grid (1, C)); Kolibri's pf_int4_slab_K6144_N2560 (out_proj / o_proj int4) is built here
 # only when Kolibri's block is off. What a chunk binds: runtime/qwen4exp/qwen4exp_prefill.cc (launch counts in
 # runtime/qwen4exp/qwen4exp_sizes.cc: they depend on the chunk's dense / sparse rows).
 if(B70_Q4EXP)
   set(Q4_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
+  # PERF-20 / PERF-21: the GDN walk on Qwen3.8's one-card bitwise forms (prefill/CMakeLists.txt: pf_gdn_front_PL, the
+  # conv + l2norm with a lane's partials read first; pf_gdn_scan_OB, o written as bf16 words with q.S beside w.S and two
+  # barriers a step) and the gated head one sub-group a (position, head) on that bf16 o (HEAD_SG HEAD_OBF16). The plain
+  # pf_gated_head_SIG and pf_gdn_front stay, test-only: qwen4exp_pf_gdn_bundle_test's old walk.
   add_ocloc_kernel(pf_gated_head_SIG SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl DEFINES GDN_GATE_SIGMOID=1)
+  add_ocloc_kernel(pf_gated_head_SIG_OB SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl
+                   DEFINES GDN_GATE_SIGMOID=1 HEAD_SG=1 HEAD_OBF16=1)
   # MoE-model prefill phase 2 (Task 8): the GDN front at Qwen3.8's GDN shape, which this family shares.
   add_ocloc_kernel(pf_gdn_front SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl)
+  # The qkv||z partials as the bf16 words the front and the head round them to (a chunk past kPfSmallMaxRows rows:
+  # pf_gemm_T0_B16, prefill/CMakeLists.txt): the front / head forms reading them (QKVZ_BF16, Ornith's _PB) - bitwise.
+  add_ocloc_kernel(pf_gated_head_SIG_OB_PB SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl
+                   DEFINES GDN_GATE_SIGMOID=1 HEAD_SG=1 HEAD_OBF16=1 QKVZ_BF16=1)
+  add_ocloc_kernel(pf_gdn_front_PL_PB SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl DEFINES FRONT_PRELOAD=1 QKVZ_BF16=1)
   # MoE-model prefill phase 3 Task 8: the router and a||b by pf_gemm_T0, as Ornith's (prefill/CMakeLists.txt) - the
   # weights re-laid as zero-padded [K][P] slabs each chunk, and the two consumers at the GEMM's row pitch P (decode's
   # q4_route keeps its).
   add_ocloc_kernel(pf_route_slab_K2560_N528_P768 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=528 ROUTE_SLAB=768)
   add_ocloc_kernel(pf_route_slab_K2560_N128_P256 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=128 ROUTE_SLAB=256)
+  # PERF-27: one sub-group a token (ROUTE_SG; the name kept, the walk launches it by its reqd_work_group_size)
   add_ocloc_kernel(q4_route_M1_E512_T10_N528_L256_P768 SOURCE ${Q4_CL}/q4_moe.cl
-                   DEFINES M=1 ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=768)
+                   DEFINES M=1 ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=768 ROUTE_SG=1)
   # pf_gdn_conv_AB256 (pf_gdn_gate at pitch 256) is Qwen3.8's binary: prefill/CMakeLists.txt builds it.
   add_ocloc_kernel(pf_embed_gather_D2560 SOURCE ${Q4_PF_REUSE}/pf_embed.cl DEFINES HIDDEN=2560 VOCAB=248320)
   add_ocloc_kernel(pf_ab_proj_D2560 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl DEFINES K=2560 N=128 COLS_PER_WG=16 KSPLIT=16)
@@ -1543,12 +1605,41 @@ if(B70_Q4EXP)
   add_ocloc_kernel(q4_hc_combine_norm_M2048_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=3 HC_NORM=1)
   add_ocloc_kernel(q4_hc_up_mix_M2048_I_D512_R4C64 SOURCE ${Q4_CL}/q4_hc.cl
                    DEFINES ${CTRL_DEFINES} M=2048 UP_DOWN=512 UP_INJECT=1 UP_ROWS=4 UP_COLS=64)
+  # PERF-66: the int8 form - the up-mix over int8 up tiles and the down||inject slab dequantised from int8
+  add_ocloc_kernel(q4_hc_up_mix_M2048_I_D512_R4C64_Q8 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 UP_DOWN=512 UP_INJECT=1 UP_ROWS=4 UP_COLS=64 UP_I8=1)
+  add_ocloc_kernel(q4_hc_slab_i8_N336 SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} HC_SLAB_I8=336)
   add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF SOURCE ${Q4_CL}/q4_qsa.cl
                    DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4)
   add_ocloc_kernel(q4_ple_gather_M2048_BF16_PF SOURCE ${Q4_CL}/q4_ple.cl
                    DEFINES ${CTRL_DEFINES} M=2048 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1 PLE_PF=1)
   add_ocloc_kernel(q4_ple_gather_M2048_F32_PF SOURCE ${Q4_CL}/q4_ple.cl
                    DEFINES ${CTRL_DEFINES} M=2048 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0 PLE_PF=1)
+  # PERF-36: the binaries above that bake M, again at M = 4096 (kernels::qwen4exp::kPfCWide, the 4096-row chunk) - M only
+  # bounds a launch's rows, so a row's arithmetic is the M = 2048 build's - and the whole int4 slabs' block-store form
+  # for the wide chunk's N-fastest walk (Qwen3.8's open-work 18 pair with pf_gemm_T0_R, bit-identical to the plain one)
+  add_ocloc_kernel(q4_hc_combine_norm_M4096_E SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=4096 HC_SRC=0 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M4096_S1 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 HC_SRC=1 SRC_S=1 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M4096_Y SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=4096 HC_SRC=2 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M4096_Y_NN SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 HC_SRC=2 HC_NORM=0)
+  add_ocloc_kernel(q4_hc_combine_norm_M4096_X SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=4096 HC_SRC=3 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_up_mix_M4096_I_D512_R4C64 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 UP_DOWN=512 UP_INJECT=1 UP_ROWS=4 UP_COLS=64)
+  add_ocloc_kernel(q4_hc_up_mix_M4096_I_D512_R4C64_Q8 SOURCE ${Q4_CL}/q4_hc.cl   # PERF-66's int8 form
+                   DEFINES ${CTRL_DEFINES} M=4096 UP_DOWN=512 UP_INJECT=1 UP_ROWS=4 UP_COLS=64 UP_I8=1)
+  add_ocloc_kernel(q4_qsa_M4096_T512_W1024_PF SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4)
+  add_ocloc_kernel(q4_ple_gather_M4096_BF16_PF SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1 PLE_PF=1)
+  add_ocloc_kernel(q4_ple_gather_M4096_F32_PF SOURCE ${Q4_CL}/q4_ple.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0 PLE_PF=1)
+  add_ocloc_kernel(q4_pf_ple_C4096 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=4096)
+  foreach(N 16384 13312)
+    add_ocloc_kernel(pf_dequant_slab_K2560_N${N}_L0_BS SOURCE ${Q4_PF_REUSE}/pf_dequant_slab.cl
+                     DEFINES K=2560 N=${N} LAYOUT=0 BLOCK_STORE=1)
+  endforeach()
   # the attention: q16 prep, the gate, the dense flash (rows <= 2050) at 24 / 2 heads; the sparse flash and its eager
   # twin (B70_Q4_ATTN=eager: one switch for decode and prefill)
   set(Q4_PF_FA FA_Q_HEADS=24 FA_KV_HEADS=2)
@@ -1568,6 +1659,9 @@ if(B70_Q4EXP)
   # the MoE: the sort / gather / dequant / combine (TM and KC: kernels::qwen4exp::kPfTm / kPfC), the grouped GEMMs
   add_ocloc_kernel(q4_pf_moe_E512_T10_D2560_I640_L256 SOURCE ${Q4_CL}/q4_pf_moe.cl
                    DEFINES PF_E=512 PF_K=10 PF_WG=256 PF_EPL=2 PF_D=2560 PF_INTER=640 TM=32 KC=2048)
+  # test-only (tests/kernels/qwen4exp_pf_glue_test.cc, PERF-27): the combine one column a lane, the comparison's form
+  add_ocloc_kernel(q4_pf_moe_E512_T10_D2560_I640_L256_C1 SOURCE ${Q4_CL}/q4_pf_moe.cl
+                   DEFINES PF_E=512 PF_K=10 PF_WG=256 PF_EPL=2 PF_D=2560 PF_INTER=640 TM=32 KC=2048 PF_COMBINE_C1=1)
   add_ocloc_kernel(pf_moe_gemm_K2560_N1280_SILU SOURCE ${Q4_PF_REUSE}/pf_moe_gemm.cl
                    DEFINES K=2560 N=1280 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_gemm_K640_N2560 SOURCE ${Q4_PF_REUSE}/pf_moe_gemm.cl
@@ -1578,13 +1672,39 @@ if(B70_Q4EXP)
   # plan 2026-11-12 Task 3 / 7: the grouped GEMMs read straight from the int4 blocks, at this family's shapes
   add_ocloc_kernel(pf_moe_q4gemm_K2560_N1280_SILU SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
                    DEFINES K=2560 N=1280 EXPERTS=512 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  # PERF-25: the direct expert GEMMs (the down here, the _SHX gate||up below; a tp card's further down) at Ornith's
+  # spill-free register plan (prefill/CMakeLists.txt's E1: no register double buffer, the weights two groups and A
+  # one step ahead prefetched into L1, A read per k16 half - the same DPAS chain, bitwise; 0.70-0.80x at C 2048).
+  # Each one's _DB twin keeps the register double buffer it replaced, for qwen4exp_pf_glue_test's comparison only.
+  # The _TBL binaries keep the double buffer: with a fifth of the experts in host memory the plan ran 1.19-2.08x, and
+  # without the weight prefetch (PF_W 0) still 1.01x.
+  set(Q4_PF_E1 NODB=1 PF_W=2 PF_A=1 AK16=1)
+  set(Q4_PF_E1_0 ${Q4_PF_E1})   # by Q4_EXPERT_TABLE: direct on the plan, _TBL (Q4_PF_E1_1, unset) not
   add_ocloc_kernel(pf_moe_q4gemm_K640_N2560 SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                   DEFINES K=640 N=2560 EXPERTS=512 ${Q4_PF_E1} OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_q4gemm_K640_N2560_DB SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
                    DEFINES K=640 N=2560 EXPERTS=512 OPTIONS -cl-intel-256-GRF-per-thread)
   # plan 21-QFN-v2a Task 8: the same through the expert tier's table rows (Q4_EXPERT_TABLE, _TBL)
   add_ocloc_kernel(pf_moe_q4gemm_K2560_N1280_SILU_TBL SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
                    DEFINES K=2560 N=1280 EXPERTS=512 SILU_EPI=1 Q4_EXPERT_TABLE=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_q4gemm_K640_N2560_TBL SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
                    DEFINES K=640 N=2560 EXPERTS=512 Q4_EXPERT_TABLE=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  # PERF-27: the walk's gate||up - the shared expert's rows read from x itself (SH_X), q4_pf_gather_routed skipping
+  # them; direct and _TBL. The two plain gate||up above stay for the kernel test's comparison.
+  foreach(TB 0 1)
+    set(_t "")
+    if(TB)
+      set(_t _TBL)
+    endif()
+    add_ocloc_kernel(pf_moe_q4gemm_K2560_N1280_SILU${_t}_SHX SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                     DEFINES K=2560 N=1280 EXPERTS=512 SILU_EPI=1 Q4_EXPERT_TABLE=${TB} SH_X=1 ${Q4_PF_E1_${TB}}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    if(NOT TB)
+      add_ocloc_kernel(pf_moe_q4gemm_K2560_N1280_SILU_SHX_DB SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                       DEFINES K=2560 N=1280 EXPERTS=512 SILU_EPI=1 Q4_EXPERT_TABLE=0 SH_X=1
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+    endif()
+  endforeach()
   # the PLE block over a chunk
   add_ocloc_kernel(q4_pf_ple_C2048 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=2048)
 endif()
@@ -1596,10 +1716,11 @@ endif()
 # shapes (runtime/qwen4exp/qwen4exp_prefill.cc, tp):
 #   linears  qkv||z 2560 x 8192 (whole slabs), q||gate||k||v 2560 x 6656 and out_proj / o_proj 3072 x 2560 (a tail):
 #            int4 layout 0 and Intel's bf16 tiles
-#   GDN      pf_gdn_front, the gate at the GEMM's pitch 256 (the card's small block: negA / dt_bias at 20480 / 20504,
-#            as Qwen3.8's card) and pf_gated_head _SIG at 8 / 24 heads; pf_gdn_conv / _wy / _scan _GK8V24 are Qwen3.8's
+#   GDN      pf_gdn_front _PL, the gate at the GEMM's pitch 256 (the card's small block: negA / dt_bias at 20480 / 20504,
+#            as Qwen3.8's card), pf_gdn_scan _OB, pf_gated_head _SIG_OB and pf_gdn_intra (PERF-19) at 8 / 24 heads;
+#            pf_gdn_conv _GK8V24 is Qwen3.8's
 #   QSA      pf_attn_prep_q16, pf_attn (the gate), pf_flash_attn and q4_pf_sparse_attn at 12 q / 1 kv heads
-#   MoE      pf_moe_q4gemm gate||up 2560 x 640 (WGN 4: 128 columns a work-group) and down 320 x 2560 with fp32 rows
+#   MoE      pf_moe_q4gemm gate||up 2560 x 640 (WGN 4: 128 columns a work-group; the walk's _SHX) and down 320 x 2560 with fp32 rows
 #            (OUT_F32), direct and _TBL; q4_pf_moe_combine_f32: the card's fp32 partial of the block's output
 #   the fold q4_hc_combine_norm _S2 at M = 2048 (and _NN) and M = 1 (the head's row): the two cards' fp32 partials,
 #            card 0's first, one rounding - both cards fold the same two rows, so both hold the same H
@@ -1620,11 +1741,24 @@ if(B70_Q4EXP AND B70_TP)
                      DEFINES K=${K} N=${N})
   endforeach()
   set(Q4_TP_GDN GDN_K_HEADS=8 GDN_V_HEADS=24)
+  # PERF-20 / PERF-21: the card's walk on one card's bitwise forms at its heads (_PL / _OB / _SIG_OB); Qwen3.8's tp
+  # card keeps the plain pf_gdn_scan_GK8V24. The plain front and head stay, test-only (qwen4exp_pf_gdn_bundle_test).
   add_ocloc_kernel(pf_gdn_front_GK8V24 SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl DEFINES ${Q4_TP_GDN})
+  add_ocloc_kernel(pf_gdn_front_GK8V24_PL SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl DEFINES ${Q4_TP_GDN} FRONT_PRELOAD=1)
+  add_ocloc_kernel(pf_gdn_scan_GK8V24_OB SOURCE ${Q4_PF_REUSE}/pf_gdn_scan.cl
+                   DEFINES ${Q4_TP_GDN} SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1)
   add_ocloc_kernel(pf_gdn_conv_GK8V24_AB256 SOURCE ${Q4_PF_REUSE}/pf_gdn_conv.cl
                    DEFINES NEGA_OFF=20480 DTBIAS_OFF=20504 AB_STRIDE=256 ${Q4_TP_GDN})
   add_ocloc_kernel(pf_gated_head_GK8V24_SIG SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl
                    DEFINES GDN_GATE_SIGMOID=1 ${Q4_TP_GDN})
+  add_ocloc_kernel(pf_gated_head_GK8V24_SIG_OB SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl
+                   DEFINES GDN_GATE_SIGMOID=1 HEAD_SG=1 HEAD_OBF16=1 ${Q4_TP_GDN})
+  # PERF-19: the one-launch intra-chunk stages (A, T, W / U, A2) at the card's heads, as one card's pf_gdn_intra.
+  add_ocloc_kernel(pf_gdn_intra_GK8V24 SOURCE ${Q4_PF_REUSE}/pf_gdn_intra.cl DEFINES ${Q4_TP_GDN} INTRA_WU2=1)
+  add_ocloc_kernel(pf_gdn_front_GK8V24_PL_PB SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl
+                   DEFINES ${Q4_TP_GDN} FRONT_PRELOAD=1 QKVZ_BF16=1)
+  add_ocloc_kernel(pf_gated_head_GK8V24_SIG_OB_PB SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl
+                   DEFINES GDN_GATE_SIGMOID=1 HEAD_SG=1 HEAD_OBF16=1 QKVZ_BF16=1 ${Q4_TP_GDN})
   set(Q4_TP_PF_FA FA_Q_HEADS=12 FA_KV_HEADS=1)
   add_ocloc_kernel(pf_attn_prep_q16_Q12KV1 SOURCE ${Q4_PF_REUSE}/pf_attn_prep.cl
                    DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${Q4_TP_PF_FA})
@@ -1642,17 +1776,42 @@ if(B70_Q4EXP AND B70_TP)
     add_ocloc_kernel(pf_moe_q4gemm_K2560_N640_SILU${_t} SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
                      DEFINES K=2560 N=640 EXPERTS=512 SILU_EPI=1 WGN=4 Q4_EXPERT_TABLE=${TB}
                      OPTIONS -cl-intel-256-GRF-per-thread)
-    add_ocloc_kernel(pf_moe_q4gemm_K320_N2560_F32${_t} SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
-                     DEFINES K=320 N=2560 EXPERTS=512 OUT_F32=1 Q4_EXPERT_TABLE=${TB}
+    # PERF-27: the walk's (the shared expert's rows from x, SH_X); the one above stays for the kernel test
+    # PERF-25: the two bound ones as one card's - direct on Q4_PF_E1 (their _DB twins test-only), _TBL as before
+    add_ocloc_kernel(pf_moe_q4gemm_K2560_N640_SILU${_t}_SHX SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                     DEFINES K=2560 N=640 EXPERTS=512 SILU_EPI=1 WGN=4 Q4_EXPERT_TABLE=${TB} SH_X=1 ${Q4_PF_E1_${TB}}
                      OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_moe_q4gemm_K320_N2560_F32${_t} SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                     DEFINES K=320 N=2560 EXPERTS=512 OUT_F32=1 Q4_EXPERT_TABLE=${TB} ${Q4_PF_E1_${TB}}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    if(NOT TB)
+      add_ocloc_kernel(pf_moe_q4gemm_K2560_N640_SILU_SHX_DB SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                       DEFINES K=2560 N=640 EXPERTS=512 SILU_EPI=1 WGN=4 Q4_EXPERT_TABLE=0 SH_X=1
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+      add_ocloc_kernel(pf_moe_q4gemm_K320_N2560_F32_DB SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                       DEFINES K=320 N=2560 EXPERTS=512 OUT_F32=1 Q4_EXPERT_TABLE=0
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+    endif()
   endforeach()
   add_ocloc_kernel(q4_pf_moe_combine_f32_E512_T10_D2560 SOURCE ${Q4_CL}/q4_pf_moe.cl
                    DEFINES PF_E=512 PF_K=10 PF_WG=256 PF_EPL=2 PF_D=2560 PF_INTER=640 TM=32 KC=2048 PF_COMBINE_F32=1)
+  # test-only (qwen4exp_pf_glue_test, PERF-27): the fp32 combine one column a lane
+  add_ocloc_kernel(q4_pf_moe_combine_f32_E512_T10_D2560_C1 SOURCE ${Q4_CL}/q4_pf_moe.cl
+                   DEFINES PF_E=512 PF_K=10 PF_WG=256 PF_EPL=2 PF_D=2560 PF_INTER=640 TM=32 KC=2048 PF_COMBINE_F32=1
+                           PF_COMBINE_C1=1)
   add_ocloc_kernel(q4_hc_combine_norm_M2048_S2 SOURCE ${Q4_CL}/q4_hc.cl
                    DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=1 SRC_S=2 HC_NORM=1)
   add_ocloc_kernel(q4_hc_combine_norm_M2048_S2_NN SOURCE ${Q4_CL}/q4_hc.cl
                    DEFINES ${CTRL_DEFINES} M=2048 HC_SRC=1 SRC_S=2 HC_NORM=0)
   add_ocloc_kernel(q4_hc_combine_norm_M1_S2 SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} M=1 HC_SRC=1 SRC_S=2 HC_NORM=1)
+  # PERF-36: the fold at M = 4096 (its two slices sit M rows apart: the 4096-row chunk's slots) and the card's whole
+  # qkv||z slabs' block-store form
+  add_ocloc_kernel(q4_hc_combine_norm_M4096_S2 SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 HC_SRC=1 SRC_S=2 HC_NORM=1)
+  add_ocloc_kernel(q4_hc_combine_norm_M4096_S2_NN SOURCE ${Q4_CL}/q4_hc.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 HC_SRC=1 SRC_S=2 HC_NORM=0)
+  add_ocloc_kernel(pf_dequant_slab_K2560_N8192_L0_BS SOURCE ${Q4_PF_REUSE}/pf_dequant_slab.cl
+                   DEFINES K=2560 N=8192 LAYOUT=0 BLOCK_STORE=1)
 endif()
 # ==== Plan 21-QFN-v2b Task 4: Qwen3.8-Flash-Next tensor parallel prefill ==== (end) ====
 
@@ -1664,8 +1823,11 @@ endif()
 #     MoE), attn_prep _Q24KV2 / _S1, prep_gated_head _SIG, embed_gather D2560, the GEMVs at this family's shapes (gemv
 #     int4 S1 / S2 / S4 layout 0, gemv_bf16 for Intel's dense arms, the HC downs, the indexer, the router, a||b, the PLE
 #     key||value, lm_head bf16 and int8); Qwen3.8's argmax_stage1_M<M> by name (vocab 248077 used);
-#     gdn_step_slots_M<1..4>_G1 - gdn_step.cl's SPEC_SLOTS at SPEC_SLOT_STRIDE = ONE layer's state (48 x 128 x 128
-#     floats): the engine lays gdn_spec out layer-major, so no layer count is baked (Qwen3.8's _M<M> bakes 48 layers);
+#     gdn_step_defer_M<1..4>_G1 (PERF-51; gdn_step_slots_M<M>_G1 and its three state slots a layer before) -
+#     gdn_step.cl's DEFERRED (verify-cost-m8's: no per-row state, the committed rows replayed by the next launch) with
+#     PEND_PAR = ONE layer's pending rows, 64 rows x (16 + 48) x 128 bf16 + 64 x 48 x 2 fp32 (kernels::
+#     gdn_pend_layer_bytes): the engine lays a layer's two parities side by side, layer-major, so no layer count is
+#     baked (a device holds its part's GDN layers; Qwen3.8's gdn_step_defer_M<M> bakes 48 layers a parity);
 #     q4_pf_ple_C4 - 21-QFN-v1d's three-launch PLE block at C = 4 (q4_ple_block is M = 1 only);
 #   the MTP head (draft at M = 1, its KV pass in every verify at M = 1..4, the prefill's pass at M = 2048):
 #     q4_mtp.cl (q4_mtp_norm: the gather of t, gemma_rms of the embedding and the SINGLE / per-STREAM RMS of the
@@ -1674,9 +1836,10 @@ endif()
 #     The head's own layer is bf16 dense / bf16 shared (loader::q4_mtp_desc) with int4 experts: 21-QFN-v1c's / 21-QFN-v1d's Intel-form
 #     binaries serve it.
 if(B70_Q4EXP AND B70_MTP)
-  set(Q4_SLOT_DEFINES ${GDN_DEFINES} SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=786432)
   foreach(MM 1 2 3 4)
-    add_ocloc_kernel(gdn_step_slots_M${MM}_G1 SOURCE ${GDN_CL} DEFINES ${Q4_SLOT_DEFINES} M=${MM})
+    # PERF-51: the verify lists' DEFERRED build (header above)
+    add_ocloc_kernel(gdn_step_defer_M${MM}_G1 SOURCE ${GDN_CL}
+                     DEFINES ${GDN_DEFINES} DEFERRED=1 CTRL_PEND=30 PEND_PAR=1073152 M=${MM})
     add_gemv_bf16_variant(${MM} 2560 2560 64 1)   # fc_embedding / fc_hidden
     foreach(NF SINGLE STREAM)
       if(NF STREQUAL SINGLE)
@@ -1709,14 +1872,59 @@ if(B70_Q4EXP AND B70_MTP)
                            UNION_COUNT=1)
   add_ocloc_kernel(q4_pf_ple_C4 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=4)
   # the prefill's head pass (kernels::qwen4exp::mtp_prefill_variants; 21-QFN-v1d's binaries otherwise)
+  # PERF-85: the head's attn_prep over the kv heads only (pf_attn_prep.cl KV_ONLY, as Ornith's and Qwen3.8's heads)
+  add_ocloc_kernel(pf_attn_prep_q16_Q24KV2_KVO SOURCE ${Q4_PF_REUSE}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${Q4_PF_FA} KV_ONLY=1)
   add_ocloc_kernel(q4_mtp_M2048_SINGLE_PF SOURCE ${Q4_CL}/q4_mtp.cl
                    DEFINES ${CTRL_DEFINES} M=2048 MTP_NORM_SINGLE=1 MTP_PF=1)
   add_ocloc_kernel(q4_mtp_M2048_STREAM_PF SOURCE ${Q4_CL}/q4_mtp.cl
                    DEFINES ${CTRL_DEFINES} M=2048 MTP_NORM_SINGLE=0 MTP_PF=1)
+  # PERF-36: the head pass at the 4096-row chunk (M only bounds the rows)
+  add_ocloc_kernel(q4_mtp_M4096_SINGLE_PF SOURCE ${Q4_CL}/q4_mtp.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 MTP_NORM_SINGLE=1 MTP_PF=1)
+  add_ocloc_kernel(q4_mtp_M4096_STREAM_PF SOURCE ${Q4_CL}/q4_mtp.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 MTP_NORM_SINGLE=0 MTP_PF=1)
   add_ocloc_kernel(q4_pf_bf16_slab_K2560_N2560 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/slab_bf16.cl
                    DEFINES K=2560 N=2560)
 endif()
 # ==== Spec 21-QFN-v1e: Qwen3.8-Flash-Next MTP ==== (end) ====
+
+# ==== PERF-53 (plan 21-QFN-v3b): Qwen3.8-Flash-Next's DFlash 2 drafter ==== (begin) ====
+# Additive only: new names. incoai/Qwen3.8-Flash-Next-DFlash2 (kernels::dflash::kFlashNext): hidden 2560, 32 / 8 heads x
+# 128, FF 7680, block 8, the 2048 window over a 2048-slot ring, conv group 16 x 2 taps, selector rank 256, the target's
+# 248320-row head. Built here: df_prep and df_proj_wide at its hidden and MLP, the drafter's bf16 linears at M 8 and
+# the target's head at the 7 draft rows; bound by name from spec 19b's block: df_attn (Qwen3.8's drafter has the same
+# 32 / 8 x 128 attention), df_topk over the 248077 tokens, df_select's V2 walk at rank 256.
+if(B70_Q4EXP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_ocloc_kernel(df_prep_M8_H2560_I7680_Q32KV8_D128_G16T2_R2048_V248320 SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=2560 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                           INTER=7680 NH=32 NKV=8 HD=128 RING=2048)
+  add_ocloc_kernel(df_proj_wide_H2560_KV8_D128_R2048 SOURCE ${DF_DIR}/df_proj_wide.cl
+                   DEFINES H=2560 WG=256 EPS=1e-06f NKV=8 HD=128 RING=2048)
+  # q||k||v, o, gate||up, down, fc (5 taps of 2560), the context's k||v; then the conv kernel projections and the
+  # selector's at the tiny tiling (kernels::gemv_bf16_tiling below N 2048)
+  foreach(KN "2560 6144" "4096 2560" "2560 15360" "7680 2560" "12800 2560" "2560 2048")
+    separate_arguments(KN)
+    list(GET KN 0 _k)
+    list(GET KN 1 _n)
+    if(NOT TARGET kernel_gemv_bf16_M8_K${_k}_N${_n})
+      add_gemv_bf16_variant(8 ${_k} ${_n} 64 1)
+    endif()
+  endforeach()
+  foreach(_n 640 256)
+    if(NOT TARGET kernel_gemv_bf16_M8_K2560_N${_n}_C16_S16)
+      add_gemv_bf16_variant(8 2560 ${_n} 16 16)
+    endif()
+  endforeach()
+  # the target's head at the 7 draft rows: int8 (ours, quantised at load) and bf16
+  if(NOT TARGET kernel_gemv_i8w_M7_K2560_N248320)
+    add_gemv_i8w_variant(7 2560 248320)
+  endif()
+  if(NOT TARGET kernel_gemv_bf16_M7_K2560_N248320)
+    add_gemv_bf16_variant(7 2560 248320 64 1)
+  endif()
+endif()
+# ==== PERF-53 (plan 21-QFN-v3b): Qwen3.8-Flash-Next's DFlash 2 drafter ==== (end) ====
 
 
 # ==== Spec 15e: Ornith's MTP lists (model::ornith(), B70_ORNITH and B70_MTP) ===== (begin) ==
@@ -1780,6 +1988,11 @@ if(B70_ORNITH AND B70_MTP)
     add_ocloc_kernel(gdn_step_slots_M${MM}_G30_GK16V32 SOURCE ${GDN_CL}
                      DEFINES ${CTRL_DEFINES} NEGA_OFF=32768 DTBIAS_OFF=32800 ${ORNITH_GDN_HEADS}
                              SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=15728640 M=${MM})
+    # PERF-51: the one-card verify lists' DEFERRED build (verify-cost-m8's) at Ornith's shapes; PEND_PAR = 30 layers x
+    # (64 rows x (16 + 32) x 128 bf16 + 64 x 32 x 2 fp32) bytes (kernels::gdn_pend_parity_bytes)
+    add_ocloc_kernel(gdn_step_defer_M${MM}_G30_GK16V32 SOURCE ${GDN_CL}
+                     DEFINES ${CTRL_DEFINES} NEGA_OFF=32768 DTBIAS_OFF=32800 ${ORNITH_GDN_HEADS}
+                             DEFERRED=1 CTRL_PEND=30 PEND_PAR=24084480 M=${MM})
     add_gemv_bf16_variant(${MM} 4096 2048 64 1)    # fc (and, at M = 1, the draft's o)
     add_gemv_bf16_variant(${MM} 2048 9216 64 1)    # q||k||v
     add_ocloc_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096 SOURCE ${PREP_CL}
@@ -2171,5 +2384,20 @@ if(B70_KOLIBRI AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   # The head at the 7 draft rows: M 7 is also a verify M above (built there).
 endif()
 # ==== Kolibri DSpark ==== (end) ====
+
+# prep_test's two-stage norm at the MoE hiddens (test-only where no model builds them): K 2048 is Ornith's, whose
+# 20 fold work-groups run a chunk of 103 (not a multiple of the 256-lane tree), K 2560 a chunk of 128.
+foreach(SP 0 4)
+  if(NOT TARGET kernel_prep_res_fold_M1_K2048_SP${SP}_G20)
+    add_prep_res_fold(1 2048 ${SP} 20)
+  endif()
+endforeach()
+if(NOT TARGET kernel_prep_norm_finish_M1_K2048_G20_W20)
+  add_prep_norm_finish(1 2048 20 20)
+endif()
+if(NOT TARGET kernel_prep_res_fold_M1_K2560_SP0_G20)
+  add_prep_res_fold(1 2560 0 20)
+endif()
+add_prep_norm_finish(1 2560 20 20)
 
 add_subdirectory(prefill)

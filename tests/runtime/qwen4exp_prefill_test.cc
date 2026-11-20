@@ -3,7 +3,7 @@
 // synth-ckpt: 4 layers - 3 GDN incl. the PLE layer, 1 QSA) carry it before Intel's; the golden gate itself is
 // qwen4exp_golden_test's `prefill` mode.
 //
-//   qwen4exp_prefill_test <checkpoint> <ids> [all | split | pp | gdn] [pp2[:split]] [int8] [layers:N] [judge:<file>]
+//   qwen4exp_prefill_test <checkpoint> <ids> [all | split | pp | wide | gdn] [pp2[:split]] [int8] [layers:N] [judge:<file>]
 //
 // The prompt: <ids> cycled to kN = 4500 positions - three chunks at the default width: 0..2047 (all dense), 2048..4095
 // (rows 2048..2050 dense, the rest sparse: Review Focus 1's straddling chunk) and 4096..4499 (all sparse, a 404-row
@@ -61,10 +61,19 @@
 //     recorded + replayed, a split continuation (2051 + rest), chunks of 64; each card's prefill launches are
 //     prefill_device_launches'; P4 - device 0's half of a chunk dropped (drop_next_handoff): the prefill throws within
 //     its bound naming device 1, the next prefill is refused until reset(), which recovers bitwise.
-//   mode `gdn` (no checkpoint; argv[1] / argv[2] ignored): gdn_chunk_q4 (the ten launches, pf_gated_head_SIG) against
+//   mode `wide` (PERF-36, one card): the 4096-row scratch (Q4LoadedModel::pf_rows = kPfCWide) - the walk's launches for
+//     chunks 4096 + 404 and the plan's prefill term; the kN ids in chunks of 4096 (0..4095: the dense rows to 2050, the
+//     rest sparse, in one chunk) against chunks of 2048 on the same scratch and against the 2048-row scratch's default
+//     run: every layer's state, the logits, the first token and the last chunk's route rows BITWISE (the M = 4096 builds
+//     only bound a launch's rows, the block-store slabs and pf_gemm_T0_R are bit-identical to the plain pair, and the
+//     chunk ends sit at multiples of 64).
+//   mode `gdn` (no checkpoint; argv[1] / argv[2] ignored): gdn_chunk_q4 (the six launches, pf_gated_head_SIG_OB) against
 //     decode's gdn_step_M1 + prep_gated_head_M1_SIG over 2048 positions on the device - the self-consistency oracle
 //     of spec 6 §6.3 (gdn_chunk_test's case 2; the band printed, a 2.5e-1 max-relative tripwire) - and 2048 in one
 //     call against 32 x 64: state, ring and y BITWISE.
+//   mode `gdn-pb` (no checkpoint): the qkv||z partials as bf16 (pf_gemm_T0_B16, the front / head _PB) against the
+//     fp32 partials at one card's and a tp card's heads - the GEMM's words rne of its sums, gdn_chunk_q4's state,
+//     ring and y BITWISE (2048 in one call, 1100 + 948).
 //
 // B70_Q4_ATTN=eager runs the eager attention in BOTH halves (prefill's q4_pf_sparse_attn EAGER and decode's
 // q4_qsa_attn_eager; one variable, one parser) - so mode `all`'s comparisons 4-6 are between matched variants.
@@ -98,6 +107,7 @@
 #include "runtime/control.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/gdn.h"
+#include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/kernels.h"
 #include "runtime/qwen4exp/qwen4exp_prefill_gdn.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
@@ -820,6 +830,47 @@ int run_split(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   return ok ? 0 : 1;
 }
 
+int run_wide(const std::string& snap_dir, qwen4exp_rig::Options o, const Ids& prompt) {
+  const uint32_t n = uint32_t(prompt.size()), last = n - rq::kPfCWide;   // the last chunk's rows either way (404)
+  qwen4exp_rig::Rig rig;
+  qwen4exp_rig::build(rig, snap_dir, o);   // the 2048-row scratch
+  rig.eng->reset();
+  rig.eng->prefill(prompt);
+  const Snap narrow = snap(*rig.eng, false);
+  const std::vector<uint32_t> nr = rig.eng->read_prefill_routes();
+  o.pf_rows = rq::kPfCWide;
+  qwen4exp_rig::build(rig, snap_dir, o);
+  rq::Qwen4ExpEngine& e = *rig.eng;
+  const model::Qwen4ExpDesc& d = e.model().desc;
+  e.prepare_prefill();
+  const size_t l0 = e.prefill_launches();
+  e.reset();
+  e.prefill(prompt);   // chunks of 4096 and 404
+  CHECK_EQ(e.prefill_launches() - l0, rq::prefill_chunk_launches(d, e.model().placement, 0, rq::kPfCWide) +
+                                          rq::prefill_chunk_launches(d, e.model().placement, rq::kPfCWide, last) +
+                                          rq::kPrefillHeadLaunches);
+  CHECK_EQ(e.memory_use(0).prefill_scratch, rq::prefill_state(d, 1, 0, e.max_len(), rq::kPfCWide));
+  const Snap wide = snap(e, false);
+  const std::vector<uint32_t> wr = e.read_prefill_routes();
+  e.reset();
+  e.prefill(prompt, rq::kPfC);
+  const Snap wide2048 = snap(e, false);
+  bool routes = true;
+  for (uint32_t l = 0; l < d.layers; ++l)
+    routes = routes && std::equal(nr.begin() + rq::pf_route_at(l) / 4,
+                                  nr.begin() + rq::pf_route_at(l) / 4 + size_t(last) * rq::kRouteWords,
+                                  wr.begin() + rq::pf_route_at(l, rq::kPfCWide) / 4);
+  const bool same_scratch = wide.state_equal(wide2048), cross = wide.state_equal(narrow);
+  std::printf("wide: the 4096-row scratch %.3f GB (the 2048-row %.3f), %zu launches for a 4096-row chunk at 0; chunks of 4096 "
+              "vs 2048 on it: %s; vs the 2048-row scratch's run: %s, the last chunk's route rows %s\n",
+              rq::prefill_sizes(d, e.max_len(), rq::kPfCWide).total() / 1e9, rq::prefill_sizes(d, e.max_len()).total() / 1e9,
+              rq::prefill_chunk_launches(d, e.model().placement, 0, rq::kPfCWide), same_scratch ? "bitwise" : "DIFFER",
+              cross ? "bitwise" : "DIFFER", routes ? "bitwise" : "DIFFER");
+  if (!same_scratch) print_diffs(d, wide2048, wide, e.max_len());
+  if (!cross) print_diffs(d, narrow, wide, e.max_len());
+  return same_scratch && cross && routes ? 0 : 1;
+}
+
 int run_pp(const std::string& snap_dir, qwen4exp_rig::Options o, const Ids& prompt) {
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::Options one = o;
@@ -1033,11 +1084,137 @@ int run_gdn() {
   return bit && bs.max_rel < 2.5e-1 && by.max_rel < 2.5e-1 ? 0 : 1;
 }
 
+// ---- mode gdn-pb: the qkv||z partials as bf16 (pf_gemm_T0_B16, the front / head _PB) against the fp32 partials --------
+// At one card's heads (16 / 48) and a tensor-parallel card's (8 / 24), the walk's form (a||b at pitch 256, the
+// _AB256 gate): x [2048][2560] times the qkv||z slabs by gemm_l0 into fp32 partials and into bf16 ones - every word
+// rne of its fp32 sum - then gdn_chunk_q4 over each, in one call and as 1100 + 948 rows (the 2D block read past a
+// chunk's last row, the second chunk's seed from the ring): state, ring and y BITWISE.
+int run_gdn_pb() {
+  constexpr uint32_t P = 2048, K = 2560, NS = 1024, AB = kq::kPfAbPitch;
+  l0::Context ctx(0);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  runtime::prefill::Context cx(ctx);
+  runtime::prefill::KernelCache kc(ctx);
+  std::printf("qwen4exp_prefill_test gdn-pb on %s\n", ctx.name().c_str());
+  const auto up = [&](const void* p, size_t bytes) {
+    l0::Mem m(ctx, l0::MemKind::Device, bytes);
+    imm.copy(m.ptr(), p, bytes);
+    return m;
+  };
+  std::mt19937 rng(0x8b16);
+  std::normal_distribution<float> xn(0.0f, 1.0f), wn(0.0f, 0.5f / std::sqrt(float(K))), a(0.0f, 1.0f), conv(0.0f, 0.5f);
+  std::uniform_real_distribution<float> negA(-4.0f, -1.0f), gw(0.5f, 1.5f);
+  std::vector<uint16_t> x(size_t(P) * K);
+  for (uint16_t& v : x) v = common::f32_to_bf16(xn(rng));
+  l0::Mem dx = up(x.data(), x.size() * 2);
+  const rq::GdnScratchSizes gs = rq::gdn_scratch_sizes(rq::kPfC);
+  l0::Mem scratch(ctx, l0::MemKind::Device, gs.total());
+  bool ok = true;
+  for (const uint32_t hk : {16u, kq::kTpGdnK}) {
+    const uint32_t hv = hk == 16 ? kq::kGdnHeads : kq::kTpGdnV;
+    const uint32_t conv_n = (2 * hk + hv) * 128, qkvz_n = conv_n + hv * 128, mix = hv * 128;
+    const loader::SmallLayout sl = loader::make_small_layout(K, conv_n, hv);
+    std::vector<uint16_t> w(size_t(qkvz_n) * K);   // the slabs, [qkvz_n / 1024][K][1024]
+    for (uint16_t& v : w) v = common::f32_to_bf16(wn(rng));
+    std::vector<float> ab(size_t(P) * AB, 0.0f), small(sl.gdn_block_bytes / 4, 0.0f);
+    for (uint32_t m = 0; m < P; ++m)
+      for (uint32_t h = 0; h < 2 * hv; ++h) ab[size_t(m) * AB + h] = a(rng);
+    for (size_t i = 0; i < size_t(conv_n) * 4; ++i) small[i] = conv(rng);
+    for (uint32_t h = 0; h < hv; ++h) {
+      small[sl.gdn_off_nega / 4 + h] = negA(rng);
+      small[sl.gdn_off_dtbias / 4 + h] = -4.0f;
+    }
+    uint16_t* gwp = reinterpret_cast<uint16_t*>(small.data()) + sl.gdn_off_gated_norm / 2;
+    for (uint32_t i = 0; i < 128; ++i) gwp[i] = common::f32_to_bf16(gw(rng));
+    l0::Mem dw = up(w.data(), w.size() * 2), da = up(ab.data(), ab.size() * 4), ds = up(small.data(), sl.gdn_block_bytes);
+    l0::Mem c32(ctx, l0::MemKind::Device, size_t(P) * qkvz_n * 4), c16(ctx, l0::MemKind::Device, size_t(P) * qkvz_n * 2);
+    for (uint32_t n0 = 0; n0 < qkvz_n; n0 += NS) {
+      const runtime::prefill::GemmBatch gb{P, K, NS, 1, K, NS, qkvz_n, 0, 0, 0};
+      const uint16_t* B = dw.as<uint16_t>() + size_t(n0) * K;
+      runtime::prefill::gemm_l0(cx, kc, gb, dx.as<uint16_t>(), B, c32.as<float>() + n0, false);
+      runtime::prefill::gemm_l0(cx, kc, gb, dx.as<uint16_t>(), B, reinterpret_cast<float*>(c16.as<uint16_t>() + n0), false,
+                                false, /*bf16_c=*/true);
+    }
+    cx.wait();
+    std::vector<float> h32(size_t(P) * qkvz_n);
+    std::vector<uint16_t> h16(size_t(P) * qkvz_n);
+    imm.copy(h32.data(), c32.ptr(), h32.size() * 4);
+    imm.copy(h16.data(), c16.ptr(), h16.size() * 2);
+    size_t dc = 0;
+    for (size_t i = 0; i < h16.size(); ++i) dc += h16[i] != common::f32_to_bf16(h32[i]);
+    std::printf("gdn-pb %u / %u heads: pf_gemm_T0_B16 vs rne(pf_gemm_T0) over [%u][%u]: %zu differing words\n", hk, hv, P,
+                qkvz_n, dc);
+    ok = ok && dc == 0;
+    l0::Mem st(ctx, l0::MemKind::Device, size_t(hv) * 128 * 128 * 4),
+        rg(ctx, l0::MemKind::Device, size_t(rq::kConvRing) * conv_n * 2), y(ctx, l0::MemKind::Device, size_t(P) * mix * 2);
+    struct Out {
+      std::vector<uint8_t> state, ring, y;
+    };
+    const auto chunked = [&](bool bf16, uint32_t width) {
+      imm.fill(st.ptr(), 0u, st.size());
+      imm.fill(rg.ptr(), 0u, rg.size());
+      Out o;
+      o.y.assign(size_t(P) * mix * 2, 0);
+      for (uint32_t p = 0; p < P; p += width) {
+        const uint32_t C = std::min(width, P - p);
+        rq::GdnChunkBuffers b;
+        b.k_heads = hk;
+        b.v_heads = hv;
+        b.qkvz = bf16 ? static_cast<const void*>(c16.as<uint16_t>() + size_t(p) * qkvz_n)
+                      : static_cast<const void*>(c32.as<float>() + size_t(p) * qkvz_n);
+        b.qkvz_bf16 = bf16;
+        b.ab = da.as<float>() + size_t(p) * AB;
+        b.ab_pitch = AB;
+        b.state = st.as<float>();
+        b.ring = rg.as<uint16_t>();
+        b.small = ds.ptr();
+        b.gated_norm_off = sl.gdn_off_gated_norm;
+        b.y = y.as<uint16_t>();
+        uint8_t* base = static_cast<uint8_t*>(scratch.ptr());
+        size_t off = 0;
+        b.xb = base + off; off += gs.xb;
+        b.seed = base + off; off += gs.seed;
+        b.g = base + off; off += gs.g;
+        b.beta = base + off; off += gs.beta;
+        b.A = base + off; off += gs.A;
+        b.A2 = base + off; off += gs.A2;
+        b.w = base + off; off += gs.w;
+        b.u = base + off; off += gs.u;
+        b.o = base + off;
+        rq::gdn_chunk_q4(cx, kc, b, p, C);
+        cx.wait();
+        imm.copy(o.y.data() + size_t(p) * mix * 2, y.ptr(), size_t(C) * mix * 2);
+      }
+      o.state.resize(st.size());
+      o.ring.resize(rg.size());
+      imm.copy(o.state.data(), st.ptr(), st.size());
+      imm.copy(o.ring.data(), rg.ptr(), rg.size());
+      return o;
+    };
+    const auto differ = [](const std::vector<uint8_t>& u, const std::vector<uint8_t>& v) {
+      size_t n = 0;
+      for (size_t i = 0; i < u.size(); ++i) n += u[i] != v[i];
+      return n;
+    };
+    for (const uint32_t width : {P, 1100u}) {
+      const Out f = chunked(false, width), b = chunked(true, width);
+      const size_t ds_ = differ(f.state, b.state), dr = differ(f.ring, b.ring), dy = differ(f.y, b.y);
+      std::printf("gdn-pb %u / %u heads, chunks of %u: bf16 partials (_PB) vs fp32: state %zu, ring %zu, y %zu differing "
+                  "bytes (of %zu, %zu, %zu)\n",
+                  hk, hv, width, ds_, dr, dy, f.state.size(), f.ring.size(), f.y.size());
+      ok = ok && ds_ == 0 && dr == 0 && dy == 0;
+    }
+  }
+  std::printf("qwen4exp_prefill_test gdn-pb %s\n", ok ? "OK (bitwise)" : "FAILED");
+  return ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [all|split|pp|gdn] [pp2[:split]] [int8] [layers:N] [judge:<file>]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [all|split|pp|wide|gdn|gdn-pb] [pp2[:split]] [int8] [layers:N] [judge:<file>]\n",
+                 argv[0]);
     return 2;
   }
   std::string mode = "all";
@@ -1048,7 +1225,7 @@ int main(int argc, char** argv) {
   o.timeout_ms = 60000;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
-    if (a == "all" || a == "split" || a == "pp" || a == "gdn") mode = a;
+    if (a == "all" || a == "split" || a == "pp" || a == "wide" || a == "gdn" || a == "gdn-pb") mode = a;
     else if (a == "pp2") o.devices = 2;
     else if (a.rfind("pp2:", 0) == 0) { o.devices = 2; o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10)); }
     else if (a == "int8") o.int8_head = true;
@@ -1061,6 +1238,7 @@ int main(int argc, char** argv) {
     }
   }
   if (mode == "gdn") return run_gdn();
+  if (mode == "gdn-pb") return run_gdn_pb();
   std::string why;
   const std::string snap_dir = qwen4exp_rig::qwen4exp_snapshot(argv[1], &why);
   if (snap_dir.empty()) {
@@ -1081,6 +1259,11 @@ int main(int argc, char** argv) {
   if (mode == "pp") {
     o.prefill_timeout_ms = 30000;   // P4's dropped hand-off throws within this bound
     return run_pp(snap_dir, o, prompt);
+  }
+  if (mode == "wide") {
+    const int rc = run_wide(snap_dir, o, prompt);
+    std::puts(rc == 0 ? "qwen4exp_prefill_test OK" : "qwen4exp_prefill_test FAILED");
+    return rc;
   }
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::build(rig, snap_dir, o);

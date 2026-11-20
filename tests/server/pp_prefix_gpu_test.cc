@@ -12,7 +12,8 @@
 //
 // Sequences (prefix_gpu_test's, L = long32k.ids, C = code.ids repeated): a continue, b prompt
 // end, c mid-block, d block boundary, e side request (every KV block from the host), f the same
-// prompt. Each turn decodes 32 ids; with MTP (argv [3] K > 0, the head loaded on both) every
+// prompt, h the same prompt at once (PERF-92: without the split f and h restore the whole prompt
+// on both sides, nothing prefilled - the first id from the saved head image). Each turn decodes 32 ids; with MTP (argv [3] K > 0, the head loaded on both) every
 // turn decodes through step_many(greedy, K) (the server's loop), and the comparison is the ids
 // and the session (the speculative bursts do not leave a per-step logits row).
 //
@@ -123,7 +124,7 @@ Result run_seq(Side& side, char n, const Ids& L, const Ids& C, server::HostAlloc
   } else {
     const Ids t1 = slice(L, 0, 3500);
     (void)turn(s, side, t1, kGen, r, nullptr);
-    (void)turn(s, side, slice(L, 20000, 20300), 8, r, nullptr);
+    if (n == 'f') (void)turn(s, side, slice(L, 20000, 20300), 8, r, nullptr);
     final_prompt = t1;
   }
   r.ids = turn(s, side, final_prompt, kGen, r, &r.rows);
@@ -213,7 +214,7 @@ int main(int argc, char** argv) {
   CHECK(L.size() >= 20300);
   const size_t cache_bytes = size_t(6) << 30;
   PinnedAlloc alloc(d0, cache_bytes);   // one context: both devices' copies reach it
-  const char seqs[] = {'a', 'b', 'c', 'd', 'e', 'f'};
+  const char seqs[] = {'a', 'b', 'c', 'd', 'e', 'f', 'h'};
   std::printf("pp_prefix_gpu_test: mtp K %u, split_last %d, %s head, kv %s\n", g_k, int(g_split),
               loader::lm_head_form_name(head),
               runtime::kv_cache_name(kv));
@@ -279,7 +280,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "pp_prefix_gpu_test FAILED (split %u)\n", split);
     return 1;
   }
-  std::printf("pp_prefix_gpu_test OK: sequences a-f through b70-serve's adapters, two cards (split %u) "
+  std::printf("pp_prefix_gpu_test OK: sequences a-h through b70-serve's adapters, two cards (split %u) "
               "bitwise one card\n", split);
   return 0;
 }

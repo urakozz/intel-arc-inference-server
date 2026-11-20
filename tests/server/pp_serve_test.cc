@@ -28,11 +28,17 @@
 //      layer) equal to the plain run's;
 //   4. spec 7's request path (server::PrefixSession over the adapter, block 16): restore at the
 //      prompt end / mid-block / on a block / after a side request / the same prompt - every
-//      cached turn's ids equal to a cold one-device run, without and with MTP (K = 2);
+//      cached turn's ids equal to a cold one-device run, without and with MTP (K = 2); PERF-92:
+//      the same prompt (after a side request, and at once) is restored whole, nothing prefilled;
 //   5. the server (HTTP, the Qwen chat format): a greedy chat = the one-device decode run on
 //      the response's prompt_token_ids; again from the cache (cached_tokens > 0) with the same
-//      ids; --mtp 2 and --spec lookup give the same ids; --prefix-split-last; a seeded sampled
-//      request reproducible on a fresh server (plain and MTP), every id a word.
+//      ids (PERF-92: the whole prompt); --mtp 2 and --spec lookup give the same ids;
+//      --prefix-split-last; a seeded sampled request reproducible on a fresh server (plain and
+//      MTP), every id a word, and again from the cache (PERF-92: the first id drawn from the
+//      restored row - the device row is the last step's by then);
+//   6. PERF-91: pending_id after a prefill / ingest is the id the first step / iteration returns (a sampled first id
+//      drawn there, from the request's RNG first); peeking changes no later id; while a run's commit is deferred it
+//      cannot say. (The server in 5 peeks every request and checks the first call's id against it.)
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -40,6 +46,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -665,7 +672,8 @@ void case_prefix() {
   using K = server::PrefixCache::Plan;
   MallocAlloc alloc;
   for (uint32_t mtp_k : {0u, 2u})
-    for (const char* name : {"b prompt end", "c mid-block", "d block boundary", "e side request", "f same prompt"}) {
+    for (const char* name :
+         {"b prompt end", "c mid-block", "d block boundary", "e side request", "f same prompt", "h exact repeat"}) {
       FakeEngine eng(2, 512, KvCache::Bf16, mtp_k != 0, some_words());
       Adapter ad(eng, 248077, kV, mtp_k);
       CHECK_EQ(ad.block(), FakeEngine::kBlock);
@@ -688,14 +696,19 @@ void case_prefix() {
       } else {
         const Ids t1 = slice(L, 0, 120);
         turn1 = turn(s, ad, t1, 16, mtp_k);
-        (void)turn(s, ad, slice(L, 300, 330), 4, mtp_k);
+        if (n == 'f') (void)turn(s, ad, slice(L, 300, 330), 4, mtp_k);
         final_prompt = t1;
       }
       server::PrefixSession::Report rep;
+      const size_t prefilled = eng.prefilled;
       const Ids got = turn(s, ad, final_prompt, 16, mtp_k, &rep);
       CHECK(rep.kind == K::Restore);
       CHECK(got == cold(final_prompt, 16));
-      if (n == 'f') CHECK(got == turn1);
+      if (n == 'f' || n == 'h') {   // PERF-92: restored whole (h from the resident session), nothing prefilled
+        CHECK(got == turn1);
+        CHECK_EQ(rep.restart, uint32_t(final_prompt.size()));
+        CHECK_EQ(eng.prefilled, prefilled);
+      }
       CHECK(eng.state_loads > 0);
       std::printf("  %s, mtp %u: %s at %u, 16 ids == a cold one-device run\n", name, mtp_k,
                   server::plan_kind_name(rep.kind), rep.restart);
@@ -774,7 +787,7 @@ void case_server() {
     const json r2 = f.chat(greedy);
     CHECK(r2.at("choices").at(0).at("token_ids").get<Ids>() == served);
     const uint32_t cached = r2.at("usage").at("prompt_tokens_details").at("cached_tokens").get<uint32_t>();
-    CHECK(cached > 0 && cached < prompt.size());
+    CHECK_EQ(cached, uint32_t(prompt.size()));   // PERF-92: the prompt-end snapshot keeps the head image
     CHECK(f.eng.state_loads > 0);
     std::printf("server --pp 2: greedy chat, %zu prompt ids -> %zu ids == one card's decode run; again: "
                 "restored at %u, the same ids\n", prompt.size(), served.size(), cached);
@@ -814,10 +827,90 @@ void case_server() {
     CHECK(a == b);
     CHECK(a == again);
     CHECK(!a.empty());
+    {   // PERF-92: the same seeded request again from the cache - restored whole, the first id from the saved row
+      ServeFixture g(/*cache=*/true, mtp_k, false);
+      CHECK(g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>() == a);
+      const size_t prefilled = g.eng.prefilled;
+      const json r = g.chat(sampled);
+      CHECK(r.at("choices").at(0).at("token_ids").get<Ids>() == a);
+      CHECK_EQ(r.at("usage").at("prompt_tokens_details").at("cached_tokens").get<uint32_t>(),
+               uint32_t(r.at("prompt_token_ids").size()));
+      CHECK_EQ(g.eng.prefilled, prefilled);
+    }
     for (uint32_t id : a) CHECK(std::find(words.begin(), words.end(), id) != words.end() || id == 248046);
-    std::printf("server --pp 2%s: a seeded sampled request reproducible (%zu ids), every id a word\n",
+    std::printf("server --pp 2%s: a seeded sampled request reproducible (%zu ids), every id a word, and again "
+                "restored whole from the cache\n",
                 mtp_k ? " --mtp 2" : "", a.size());
   }
+  // The first id is sampled too, not the prompt's argmax (served[0], the greedy run's): over 16 seeds at temperature 1
+  // it is not always the argmax - plain and with MTP after a prefill, and with MTP after a prefix-cache restore whose
+  // last prompt id goes through ingest (--prefix-split-last).
+  for (const auto& [mtp_k, split_last] : std::vector<std::pair<uint32_t, bool>>{{0, false}, {2, false}, {2, true}}) {
+    ServeFixture g(/*cache=*/split_last, mtp_k, false, split_last);
+    uint32_t argmax_first = 0;
+    for (uint32_t seed = 1; seed <= 16; ++seed) {
+      const Ids got =
+          g.chat({{"temperature", 1.0}, {"seed", seed}}).at("choices").at(0).at("token_ids").get<Ids>();
+      CHECK(!got.empty());
+      argmax_first += got[0] == served[0];
+    }
+    CHECK(argmax_first < 16);
+    std::printf("server --pp 2%s%s: the first id over 16 seeds at temperature 1: the argmax %u times\n",
+                mtp_k ? " --mtp 2" : "", split_last ? " --prefix-split-last" : "", argmax_first);
+  }
+}
+
+// ---- 6. PERF-91: the first id peeked before the first call ---------------------------------------------------------
+void case_pending_id() {
+  // `peek`: pending_id before the first call, checked against what the call returns; `ingest`: the prompt's last id
+  // through ingest (--prefix-split-last's path).
+  auto run = [](uint32_t devices, const server::Sampling& s, uint32_t mtp_k, bool peek, bool ingest) {
+    FakeEngine eng(devices, 512, KvCache::Bf16, mtp_k != 0, some_words());
+    Adapter ad(eng, 248077, kV, mtp_k);
+    const Ids p = prompt_of(53, 6);
+    if (ingest) {
+      ad.prefill(Ids(p.begin(), p.end() - 1));
+      ad.ingest({p.back()});
+    } else {
+      ad.prefill(p);
+    }
+    std::optional<uint32_t> first;
+    if (peek) {
+      first = ad.pending_id(s);
+      CHECK(first.has_value());
+      CHECK(ad.pending_id(s) == first);   // a second peek draws nothing
+    }
+    Ids out;
+    while (out.size() < 64) {
+      for (uint32_t id : mtp_k ? ad.step_many(s, mtp_k) : Ids{ad.step(s)}) out.push_back(id);
+      if (mtp_k && out.size() < 64) CHECK(!ad.pending_id(s).has_value());   // the run's commit is deferred
+    }
+    if (peek) CHECK(out[0] == *first);
+    out.resize(64);
+    return out;
+  };
+  server::Sampling greedy, sampled;
+  sampled.greedy = false;
+  sampled.temperature = 1.0f;
+  sampled.top_k = 8;
+  sampled.has_seed = true;
+  uint32_t not_argmax = 0;
+  for (uint32_t devices : {1u, 2u})
+    for (uint32_t mtp_k : {0u, 2u})
+      for (bool ingest : {false, true}) {
+        const Ids g = run(devices, greedy, mtp_k, true, ingest);
+        CHECK(g == run(devices, greedy, mtp_k, false, ingest));
+        for (uint64_t seed = 1; seed <= 4; ++seed) {
+          sampled.seed = seed;
+          const Ids a = run(devices, sampled, mtp_k, true, ingest);
+          CHECK(a == run(devices, sampled, mtp_k, false, ingest));
+          not_argmax += a[0] != g[0];
+        }
+      }
+  CHECK(not_argmax > 0);   // the peek drew sampled first ids, not only the argmax
+  std::printf("pending_id: the first call's id, the same 64 ids with and without the peek (greedy and 4 seeds, one "
+              "device and two, +- MTP 2, after a prefill and an ingest; %u sampled first ids off the argmax); "
+              "nullopt while a commit is deferred\n", not_argmax);
 }
 
 }  // namespace
@@ -828,6 +921,7 @@ int main() {
   case_mtp_m2();
   case_prefix();
   case_server();
+  case_pending_id();
   std::printf("pp_serve_test OK\n");
   return 0;
 }

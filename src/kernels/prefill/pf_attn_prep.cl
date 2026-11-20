@@ -117,6 +117,9 @@
 
 #define WG_PREP 256
 
+// KV_ONLY (PERF-85: a caller that reads the cached K / V and never attn_q - the MTP head's prompt pass): grid
+// (KV_HEADS, C), work-group w is the full grid's Q_HEADS + w, the same text; no q-head work-group runs.
+
 // KV_PAGED (plan 19v3b Task 0: the KV page in positions, runtime::kKvPage; undefined on every other command line):
 // kv_k / kv_v are the layer's whole cache and a last argument `pages` maps the KV pages - position pos + m is cache
 // row pages[(pos + m) / KV_PAGED] x KV_PAGED + (pos + m) % KV_PAGED. The values written are unchanged.
@@ -147,7 +150,11 @@ __kernel void pf_attn_prep(__global const uint* restrict ctrl,
                            , __global const uint* restrict pages
 #endif
                            ) {
+#ifdef KV_ONLY
+  const uint wg = Q_HEADS + get_group_id(0);
+#else
   const uint wg = get_group_id(0);
+#endif
   const uint m = get_group_id(1);
   const uint i = get_local_id(0);
   __local float red[WG_PREP];   // the norm's sum of squares

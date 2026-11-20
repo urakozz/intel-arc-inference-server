@@ -39,6 +39,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
 #include <string>
@@ -230,18 +231,19 @@ class ReplicaEngine : public server::BatchEngineIface {
       const uint32_t slot = c.slot;
       std::vector<uint32_t> ids(c.ids, c.ids + c.n);
       const bool replay = c.replay, last = c.last;
+      const server::Sampling* sampling = c.sampling;
       if (!single(slot)) {   // the card's batched engine, its own slot number, cut as the card's one call cuts it
-        inflight_[slot] = worker(slot).post([this, slot, ids = std::move(ids), replay, last] {
+        inflight_[slot] = worker(slot).post([this, slot, ids = std::move(ids), replay, last, sampling] {
           server::BatchEngineIface& b = batch(slot);
           const uint32_t l = local(slot);
           if (replay) {
-            b.prefill({{l, ids.data(), static_cast<uint32_t>(ids.size()), last, true}});
+            b.prefill({{l, ids.data(), static_cast<uint32_t>(ids.size()), last, true, sampling}});
             return;
           }
           size_t at = 0;
           while (at < ids.size()) {
             const uint32_t n = cut(slot, b.pos(l), static_cast<uint32_t>(ids.size() - at), 0);
-            b.prefill({{l, ids.data() + at, n, last && at + n == ids.size(), false}});
+            b.prefill({{l, ids.data() + at, n, last && at + n == ids.size(), false, sampling}});
             at += n;
           }
         });
@@ -273,6 +275,14 @@ class ReplicaEngine : public server::BatchEngineIface {
     if (!f.valid()) return;
     std::future<void> done = std::move(f);   // the slot is free again whatever get() throws
     done.get();
+  }
+
+  // PERF-91: the slot's card peeks on its thread (a single-sequence card draws a sampled first id there, as the
+  // serial server's pending_id does; a card with slots drew it in its prefill).
+  std::optional<uint32_t> pending_id(uint32_t slot, const server::Sampling& sampling) override {
+    std::optional<uint32_t> id;
+    on(slot, [&] { id = single(slot) ? card(slot).pending_id(sampling) : batch(slot).pending_id(local(slot), sampling); });
+    return id;
   }
 
   std::vector<uint32_t> step_batch(const std::vector<Row>& rows) override {

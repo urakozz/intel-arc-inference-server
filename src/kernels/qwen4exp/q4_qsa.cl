@@ -52,8 +52,8 @@
 // after the same ids. Unset (every 21-QFN-v1c binary), IDX_LD is IDX_N and the tail write is the prep's, token for token
 // (commit 6499948's rule: the preprocessed source of every existing binary is unchanged).
 #ifdef QSA_PF
-#if M < 1 || M > 2048
-#error "q4_qsa: the prefill form is M = 1..2048 (kernels::qwen4exp::kPfC)"
+#if M < 1 || M > 4096
+#error "q4_qsa: the prefill form is M = 1..4096 (kernels::qwen4exp::kPfCWide)"
 #endif
 #ifndef SCORE_R
 #error "q4_qsa: the prefill form's SCORE_R (kernels::qwen4exp::kPfScoreRows) must be defined"

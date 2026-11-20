@@ -484,6 +484,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   }
   std::vector<uint32_t> burst;
   size_t burst_at = 0;
+  double t_decode = 0;   // when the first engine call returned: AdaptiveK's settle window starts there
   PromptLookup& matcher = impl_->lookup;
   const auto next_lookup = [&]() -> uint32_t {
     if (burst_at == burst.size()) {
@@ -587,12 +588,35 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       // kSettleSeconds, while the engine may still be refilling its expert cache over the host link after the prefill.
       constexpr double kSettleSeconds = 0.3;
       const double t1 = steady_seconds();
-      const bool settled =
-          opts_.mtp_adaptive.measure && outcome.t_first_token > 0 && t0 - outcome.t_first_token > kSettleSeconds;
+      const bool settled = opts_.mtp_adaptive.measure && t_decode > 0 && t0 - t_decode > kSettleSeconds;
       if (policy) policy->observe(k, std::min<uint32_t>(k, uint32_t(burst.size() - 1)), settled ? t1 - t0 : 0);
     }
     return burst[burst_at++];
   };
+  // One generated id's end-of-text rules (EOS, then its text and the stop strings): true when it ends the request.
+  const auto take = [&](uint32_t id) {
+    const bool is_eos = impl_->eos.contains(id);
+    if (is_eos && !r.ignore_eos && outcome.out_ids.size() >= r.min_tokens) {
+      outcome.finish_reason = "stop";
+      eos_stop = true;
+      return true;
+    }
+    outcome.out_ids.push_back(id);
+    return text.push_id(id, is_eos);
+  };
+  // PERF-91: the prefill left the first id pending. It goes through the text rules - and out to a streaming client -
+  // before the first decode step or proposer iteration runs; that call returns it first and the loop consumes it as
+  // before, so the engine, the prefix session and the penalty's seen ids get the same calls in the same order. An id
+  // that ends the request still runs that one call, as before: the session holds it.
+  std::optional<uint32_t> first;
+  bool first_ends = false;
+  if (max_tokens > 0 && !gone()) {
+    first = deps_.engine.pending_id(sampling);
+    if (first) {
+      outcome.t_first_token = steady_seconds();
+      first_ends = take(*first);
+    }
+  }
   for (uint32_t generated = 0; generated < max_tokens; ++generated) {
     if (gone()) {   // the client hung up: stop here, the engine's state is every id fed so far
       outcome.cancelled = true;
@@ -601,15 +625,16 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     const uint32_t id = next_id();
     session.fed(id);
     if (penalised) seen.add(id);
-    if (generated == 0) outcome.t_first_token = steady_seconds();
-    const bool is_eos = impl_->eos.contains(id);
-    if (is_eos && !r.ignore_eos && outcome.out_ids.size() >= r.min_tokens) {
-      outcome.finish_reason = "stop";
-      eos_stop = true;
-      break;
+    if (generated == 0) {
+      t_decode = steady_seconds();
+      if (first) {
+        if (id != *first) throw std::logic_error("EngineIface::pending_id: the first decode call returned another id");
+        if (first_ends) break;
+        continue;
+      }
+      outcome.t_first_token = t_decode;
     }
-    outcome.out_ids.push_back(id);
-    if (text.push_id(id, is_eos)) break;
+    if (take(id)) break;
   }
   if (burst_at < burst.size())
     deps_.engine.truncate_to(deps_.engine.pos() - static_cast<uint32_t>(burst.size() - burst_at));

@@ -83,6 +83,91 @@ inline float silu_t(float x) { return x / (1.0f + exp_torch(-x)); }
 #if ROUTE_K < 1 || ROUTE_K > 15 || ROUTE_E != 2 * ROUTE_WG || ROUTE_LN < ROUTE_E + 1
 #error "q4_route: 1 <= TOP_K <= 15 (the route row's ids), two experts a lane, the row holds the shared gate"
 #endif
+// ROUTE_SG 1 (the prefill's q4_route_..._P768 binary only, PERF-27 - Ornith's moe.cl ROUTE_SG at 512 experts / top 10;
+// tests/kernels/qwen4exp_pf_glue_test.cc compares its every word with decode's binary, the form below): ONE SUB-GROUP
+// a token, lane l holding experts 16 j + l (j < 32) - no SLM, no barrier, no candidate set. The max is exact in any
+// order; the sum tree's strides 256 .. 16 are the register pairs j, j + stride / 16 and 8 .. 1 are shuffles - the
+// same additions in the same order; the 11 slots are taken one at a time, each the best untaken expert by (p
+// descending, id ascending), which is the RANK order below.
+#ifndef ROUTE_SG
+#define ROUTE_SG 0
+#endif
+#if ROUTE_SG
+#if ROUTE_E != 512 || ROUTE_K != 10
+#error "q4_route ROUTE_SG: built for 512 experts, top 10 (a lane's 32 experts in one u32 of taken bits, the row's words)"
+#endif
+#define RPL (ROUTE_E / SG)
+#define RSLOTS (ROUTE_K + 1)
+__attribute__((reqd_work_group_size(SG, 1, 1))) Q4_SG16
+__kernel void q4_route(__global const float* restrict logits, __global uint* restrict route) {
+  const uint m = get_group_id(1);
+  const uint lane = get_sub_group_local_id();
+  const __global float* restrict lr = logits + (size_t)m * ROUTE_LN;
+  float ex[RPL], red[RPL];
+#pragma unroll
+  for (uint j = 0; j < RPL; ++j) ex[j] = rf(lr[SG * j + lane]);
+  float mx = ex[0];
+#pragma unroll
+  for (uint j = 1; j < RPL; ++j) mx = fmax(mx, ex[j]);
+#pragma unroll
+  for (uint st = SG / 2; st > 0; st >>= 1) mx = fmax(mx, intel_sub_group_shuffle_xor(mx, st));
+#pragma unroll
+  for (uint j = 0; j < RPL; ++j) red[j] = ex[j] = exp_torch(ex[j] - mx);
+#pragma unroll
+  for (uint js = RPL / 2; js > 0; js >>= 1)
+#pragma unroll
+    for (uint j = 0; j < js; ++j) red[j] += red[j + js];
+  float s = red[0];
+#pragma unroll
+  for (uint st = SG / 2; st > 0; st >>= 1) s = s + intel_sub_group_shuffle(s, (lane + st) & (SG - 1));
+  const float sum = sub_group_broadcast(s, 0);
+#pragma unroll
+  for (uint j = 0; j < RPL; ++j) ex[j] = ex[j] / sum;   // p
+
+  uint taken = 0u;   // bit j: expert SG j + lane is in a slot
+  uint top_id[RSLOTS];
+  float top_p[RSLOTS];
+#pragma unroll
+  for (uint k = 0; k < RSLOTS; ++k) {
+    float bp = -1.0f;   // below every p; a NaN p is never taken (the slot keeps the form below's default: id k, p 0)
+    uint be = k;
+#pragma unroll
+    for (uint j = 0; j < RPL; ++j)
+      if (!((taken >> j) & 1u) && ex[j] > bp) {   // strict: the lower j (the lower id) keeps a tie
+        bp = ex[j];
+        be = SG * j + lane;
+      }
+#pragma unroll
+    for (uint st = SG / 2; st > 0; st >>= 1) {
+      const float op = intel_sub_group_shuffle_xor(bp, st);
+      const uint oe = intel_sub_group_shuffle_xor(be, st);
+      if (op > bp || (op == bp && oe < be)) {
+        bp = op;
+        be = oe;
+      }
+    }
+    top_id[k] = be;
+    top_p[k] = bp < 0.0f ? 0.0f : bp;
+    if (bp >= 0.0f && be % SG == lane) taken |= 1u << (be / SG);
+  }
+  float s10 = 0.0f;
+#pragma unroll
+  for (uint k = 0; k < ROUTE_K; ++k) s10 += top_p[k];
+  // lane l writes words l and l + 16 of the row (every other word zero, as the form below)
+  uint lo = 0u, hi = 0u;
+#pragma unroll
+  for (uint k = 0; k < ROUTE_K; ++k) {
+    if (lane == R_IDS + k) lo = top_id[k];
+    if (lane + 16u == R_W + k) hi = as_uint(rf(top_p[k] / s10));
+  }
+  if (lane + 16u == R_SG) hi = as_uint(rf(sigmoid_t(rf(lr[ROUTE_E]))));
+  if (lane + 16u == R_P10) hi = as_uint(top_p[ROUTE_K - 1]);
+  if (lane + 16u == R_P11) hi = as_uint(top_p[ROUTE_K]);
+  __global uint* restrict r = route + (size_t)m * RW;
+  r[lane] = lo;
+  r[lane + 16u] = hi;
+}
+#else
 #define ROUTE_NG (ROUTE_WG / SG)   // sub-groups, each the max of its 32 experts
 #if ROUTE_NG < ROUTE_K + 1
 #error "q4_route: the threshold needs at least TOP_K + 1 sub-group maxima"
@@ -184,6 +269,7 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
     r[R_P11] = as_uint(top_p[ROUTE_K]);
   }
 }
+#endif  // ROUTE_SG
 #endif  // ROUTE_E
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -423,6 +509,9 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
 #endif
 }
 #if MOE_TP_PART
+#if HIDDEN % 256 != 0
+#error "q4_moe_finish: HIDDEN must be whole 256-column work-groups (its grid is HIDDEN / 256)"
+#endif
 // q4_moe_finish(route, slots, land, ctr, state, spin_limit, y) - grid (HIDDEN / 256, M), WG 256: tp_sum's wait for
 // the peer's 16 chunks under this work-group (lane c < 16 waits for chunk 16 g + c), each slot the two cards' values
 // summed from 0 (card 0's first), then q4_moe_down's epilogue, token for token: y bf16 [M][HIDDEN].

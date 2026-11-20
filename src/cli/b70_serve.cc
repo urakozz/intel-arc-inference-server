@@ -385,7 +385,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     StdoutToStderr redirect;
     return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head,
                                  s.desc.layers == full.layers ? 0 : s.desc.layers, a.loads_head(),
-                                 s.tier ? &*s.tier : nullptr, s.tier1 ? &*s.tier1 : nullptr);
+                                 s.tier ? &*s.tier : nullptr, s.tier1 ? &*s.tier1 : nullptr, s.pf_rows);
   }();
   if (da.pipe.tp()) {   // plan 21v2b: tensor parallel - every layer's half on each card (Qwen4ExpTpEngine)
     runtime::qwen4exp::Qwen4ExpTpEngine engine(*c0, *c1, std::move(model), s.max_len);
@@ -410,7 +410,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                engine.model().desc.layers < engine.model().checkpoint_layers
                    ? "--layers " + std::to_string(engine.model().desc.layers)
                    : std::string("whole"),
-               options.chat_format.name(), engine.launches(0), runtime::qwen4exp::kPfC, engine.mtp() ? a.mtp_k : 0,
+               options.chat_format.name(), engine.launches(0), engine.model().pf_rows, engine.mtp() ? a.mtp_k : 0,
                engine.mtp() ? " (the head whole on card 1)" : "", loader::lm_head_form_name(da.lm_head),
                engine.state_bytes(), engine.kv_bytes(4) / 4);
     return listen_until_stopped(server, options);
@@ -448,7 +448,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
              engine.model().desc.layers < engine.model().checkpoint_layers
                  ? "--layers " + std::to_string(engine.model().desc.layers)
                  : std::string("whole"),
-             options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
+             options.chat_format.name(), placement.c_str(), engine.model().pf_rows,
              runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
              engine.mtp() ? (std::string(" (the head: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
                              " norm, reuse selection" +

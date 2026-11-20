@@ -112,6 +112,11 @@ DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture
   if (opt(dc, "attention_value_scale")) refuse("attention_value_scale is not supported");
   if (bool_or(dc, "attention_sink_bias", bool_or(c, "add_swa_attention_sink_bias", false)))
     refuse("attention_sink_bias is not supported");
+  // Ripple-65B's DFlash2 drafter lists its last (full) layer here; the DFlash kernels rotate every layer.
+  if (const Value* nr = opt(c, "no_rope_layers")) {
+    if (!nr->is_array()) refuse("no_rope_layers is not a list");
+    if (!nr->arr().empty()) refuse("no_rope_layers: a drafter layer without RoPE is not supported");
+  }
 
   d.layers = u32(c, "num_hidden_layers");
   d.hidden = u32(c, "hidden_size");
@@ -298,6 +303,32 @@ void check_dspark(const DFlashDesc& d) {
   if (d.sel_rank != 256) bad("markov_rank " + std::to_string(d.sel_rank) + " is not 256");
   if (d.eps != 1e-6f) bad("rms_norm_eps is not 1e-6 (df_prep bakes it)");
   if (d.vocab != 128000) bad("vocab_size " + std::to_string(d.vocab) + " is not 128000");
+}
+
+void check_flash_next_dflash(const DFlashDesc& d) {
+  auto bad = [](const std::string& what) {
+    throw std::runtime_error("Flash-Next DFlash drafter: " + what + " - the drafter's kernels are built for "
+                             "incoai/Qwen3.8-Flash-Next-DFlash2's shapes (kernels::dflash::kFlashNext)");
+  };
+  if (d.dspark() || !d.v2()) bad("architectures[0] is " + d.architecture + ", not DFlash2DraftModel");
+  if (d.hidden != 2560) bad("hidden_size " + std::to_string(d.hidden) + " is not 2560");
+  if (d.q_heads != 32 || d.kv_heads != 8 || d.head_dim != 128)
+    bad("heads " + std::to_string(d.q_heads) + " / " + std::to_string(d.kv_heads) + " x " + std::to_string(d.head_dim) +
+        " are not 32 / 8 x 128");
+  if (d.inter != 7680) bad("intermediate_size " + std::to_string(d.inter) + " is not 7680");
+  if (d.taps != std::vector<uint32_t>{5, 15, 25, 35, 45})
+    bad("target_layer_ids are not 5, 15, 25, 35, 45 (the engine taps those layers)");
+  if (d.block != 8) bad("block_size " + std::to_string(d.block) + " is not 8");
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (d.window[l] != 2048)
+      bad("layer " + std::to_string(l) + "'s sliding_window " + std::to_string(d.window[l]) + " is not 2048");
+    if (d.causal[l]) bad("layer " + std::to_string(l) + " is causal");
+  }
+  if (d.conv_group != 16 || d.conv_taps != 2) bad("the convolutions are not 16-wide groups of 2 taps");
+  if (d.sel_rank != 256 || d.sel_top_k != 16) bad("the selector is not rank 256, top 16");
+  if (d.eps != 1e-6f) bad("rms_norm_eps is not 1e-6 (df_prep bakes it)");
+  if (d.vocab != 248320) bad("vocab_size " + std::to_string(d.vocab) + " is not 248320");
+  if (d.mask_id != 248077) bad("mask_token_id " + std::to_string(d.mask_id) + " is not 248077");
 }
 
 DFlashDesc dflash_tp_card_desc(const DFlashDesc& d) {

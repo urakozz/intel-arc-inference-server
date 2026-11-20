@@ -102,7 +102,7 @@ class Qwen4ExpTpEngine {
   size_t expert_words_checked() const { return words_checked_; }
 
   // --- plan 21v2b Task 4: prefill (b70_qwen4exp_prefill) ---------------------------------------------------------------
-  // Runs `ids` from pos in chunks of `chunk` (0 = kPfC) on both cards, then the head on the last row: pos +=
+  // Runs `ids` from pos in chunks of `chunk` (0 = model().pf_rows) on both cards, then the head on the last row: pos +=
   // ids.size() on both, the first generated id pending in cur_token. A crossing or a card that does not finish within
   // the bound releases both lists, throws naming the card and the chunk, and the engine stays failed until reset().
   void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
@@ -115,7 +115,7 @@ class Qwen4ExpTpEngine {
   // swapping host memory out under the model's page cache, see loader::MappedFile.)
   double read_host_experts();
   size_t prefill_launches() const;   // both cards' prefill lists, since prepare_prefill
-  // u32 [layers][kPfC][32]: every layer's route rows of the last chunk (card 0's; both cards route on the same bits).
+  // u32 [layers][pf_rows][32]: every layer's route rows of the last chunk (card 0's; both cards route on the same bits).
   std::vector<uint32_t> read_prefill_routes();
   // Spec 7's block and hook, Qwen4ExpEngine's contract: with a hook every chunk ends at a block end or at the prompt
   // end; the hook runs after each chunk whose end is a multiple of kBlock (both cards idle, pos == end, n_active 0)
@@ -163,7 +163,7 @@ class Qwen4ExpTpEngine {
   void require_mtp(const char* what) const;
   void step_plain();    // one decode step: both cards' M = 1 lists
   void mtp_step1();     // the head's plain token: verify(0) + commit(0), or at pos 0 the plain list and R_0
-  void mtp_normalise_live();
+  void flush_gdn();      // PERF-51: the rows the last commit left replayed into gdn_state on both cards (flush lists)
   [[noreturn]] void fail(const std::string& what);
   void ple_init();
   void expert_check();

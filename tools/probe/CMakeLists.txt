@@ -4,7 +4,7 @@ add_executable(probe_bw probe_bw.cc)
 target_include_directories(probe_bw PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_bw PRIVATE b70_l0)
 b70_target_kernel_dir(probe_bw)
-add_dependencies(probe_bw kernel_bw_sum)
+add_dependencies(probe_bw kernel_bw_sum kernel_bw_sum_sweep kernel_bw_sum_lsc)
 
 add_executable(probe_replay probe_replay.cc)
 target_include_directories(probe_replay PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
@@ -1086,6 +1086,13 @@ target_link_libraries(probe_small_chunk PRIVATE b70_prefill_host b70_runtime b70
 b70_target_kernel_dir(probe_small_chunk)
 add_dependencies(probe_small_chunk ${PCR_PF_KERNELS} ${ALL_KERNELS})
 
+# --- probe_int8_short: l0-int8's MLP at short chunks, the h8 walk against the bf16 walk ------------
+add_executable(probe_int8_short probe_int8_short.cc)
+target_include_directories(probe_int8_short PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_int8_short PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_int8_short)
+add_dependencies(probe_int8_short ${PCR_PF_KERNELS})
+
 # --- probe_fused_small: open-work 3b, short chunks' int4 linears without the bf16 slab ------------
 # pf_gemm_q4 (src/kernels/prefill/
 # pf_gemm_q4.cl) against the slab walk (pf_dequant_slab + gemm_l0), bitwise, then timed interleaved.
@@ -1377,6 +1384,16 @@ if(B70_ORNITH)
   b70_target_kernel_dir(probe_gdn_intra)
   add_dependencies(probe_gdn_intra kernel_pf_gdn_intra_dbg_GK16V32 kernel_pf_gdn_intra_GK16V32
                    kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32)
+  # Qwen3.8's 16 / 48 heads (a dump of the one-card walk)
+  add_ocloc_kernel(pf_gdn_intra_dbg SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl DEFINES INTRA_DBG=1)
+  add_dependencies(probe_gdn_intra kernel_pf_gdn_intra_dbg kernel_pf_gdn_intra kernel_pf_gdn_wy kernel_pf_gdn_scan)
+  # Qwen3.8-Flash-Next's tensor-parallel card at 8 / 24 heads (--synth 8,24,C; its one card is the 16 / 48 above)
+  if(B70_Q4EXP AND B70_TP)
+    add_ocloc_kernel(pf_gdn_intra_dbg_GK8V24 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
+                     DEFINES INTRA_DBG=1 GDN_K_HEADS=8 GDN_V_HEADS=24)
+    add_dependencies(probe_gdn_intra kernel_pf_gdn_intra_dbg_GK8V24 kernel_pf_gdn_intra_GK8V24 kernel_pf_gdn_wy_GK8V24
+                     kernel_pf_gdn_scan_GK8V24)
+  endif()
 endif()
 
 # --- probe_gdn_arms: Ornith's GDN scan / intra against candidate builds of the same entries, real inputs, bitwise ---

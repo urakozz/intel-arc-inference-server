@@ -13,10 +13,10 @@ Everything is C++26, built with GCC 16 (`g++-16.2`) and CMake. C++26's static re
 three jobs: it maps Kolibri's and Flash-Next's `config.json` onto their descriptors (`src/common/json_reflect.h`),
 maps the server's OpenAI requests, responses and stream chunks onto structs (`src/server/json_struct.h`), and turns
 each binary's flags into one struct that generates its parser and `--help` (`src/cli/flags.h`). The engine build
-uses no SYCL and no `icpx`.
+uses no SYCL and no `icpx`
 
 Level Zero, Intel's low-level GPU runtime, is the only runtime. Device kernels are OpenCL C, compiled offline with
-`ocloc` to device binaries and loaded with `zeModuleCreate`.
+`ocloc` to device binaries and loaded with `zeModuleCreate`
 
 Python appears in one place, `tools/`, for offline weight conversion, the CPU oracle (a reference forward pass on
 the CPU) and benchmark glue. It is never on the serving path: Python is part of the overhead this engine exists to
@@ -48,7 +48,7 @@ efficiency, which is a different problem ([05-perf-model.md](05-perf-model.md)).
 
 The layout in this document is Qwen3.8's. Qwen3.8 is the focus model, used for agentic coding. Every other family
 has its own engine and descriptor built on the same foundations: Level Zero command lists, our own OpenCL C
-kernels, the loader and the server. The engine picks the model from the checkpoint's `config.json`.
+kernels, the loader and the server. The engine picks the model from the checkpoint's `config.json`
 
 | model | what is different about it |
 |---|---|
@@ -66,7 +66,7 @@ Per-model status and commands are in [17-running-models.md](17-running-models.md
   asked for is something `tp` does not run (DFlash, a draft vocabulary, the `l0-int8` prefill). It runs `replica`
   when `--max-num-seqs` is above 1.
 - Any other model, or Qwen3.8 outside those conditions, runs on one card when the model and the asked context fit
-  it, and otherwise as `pp`.
+  it, and otherwise as `pp`
 
 The four modes:
 
@@ -369,7 +369,7 @@ The server is OpenAI-compatible. `src/server/` provides `/v1/models`, `/v1/chat/
 `TemplateIface` and `EngineIface`. `b70-serve` wires those interfaces to the checkpoint's real tokenizer and template
 and to the engine its run mode needs. The one intentional parsing deviation is that an absent `temperature` means
 greedy sampling. The parser also accepts the extension fields `min_tokens`, `ignore_eos`, `return_token_ids`, `seed`
-and `stream_options.include_usage`.
+and `stream_options.include_usage`
 
 With one request at a time (`--max-num-seqs 1`, the default; one card, `tp` or `pp`), requests share one engine
 through a bounded FIFO queue, and requests beyond its waiting depth of 4 receive 503. `Engine::prefill` runs every

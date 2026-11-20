@@ -154,10 +154,6 @@ static const char* gdn_a2_entry() { return "pf_gdn_A2_hilo"; }
 // writer stores the same entry, so the value read is unchanged.
 static std::atomic<const char*> g_scan_launched{nullptr};
 
-// Phase 2: a MoE model's launches 2-3 are one (Task 2) and, on l0, 5-8 one (Task 3).
-static bool intra_one_launch(const model::ModelDesc& d, PrefillBackend b) {
-  return d.is_moe() && b == PrefillBackend::L0;
-}
 // Qwen3.8 on one card (a dense model at the reference 16 / 48 heads) runs Ornith's bitwise GDN forms: the conv +
 // l2norm as one launch (pf_gdn_front_PL), the scan writing o as bf16 words (pf_gdn_scan_OB) and the sub-group head
 // reading them (pf_gated_head_OB), and pf_gdn_wu staging vb / kb as bf16 words (pf_gdn_wy_WB). A tensor-parallel
@@ -165,8 +161,13 @@ static bool intra_one_launch(const model::ModelDesc& d, PrefillBackend b) {
 static bool dense_bundle(const model::ModelDesc& d) {
   return !d.is_moe() && d.gdn_k_heads == kernels::kRefGdnKHeads && d.gdn_v_heads == kernels::kRefGdnVHeads;
 }
-size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
-  return kGdnChunkLaunches - (d.is_moe() || dense_bundle(d) ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
+// Phase 2: a MoE model's launches 2-3 are one (Task 2) and, on l0, 5-8 one (Task 3). PERF-19: Qwen3.8's one-card
+// walk (not a pipeline stage's) binds the same one-launch 5-8 (pf_gdn_intra at 16 / 48 heads) on both backends.
+static bool intra_one_launch(const model::ModelDesc& d, PrefillBackend b, bool one_card) {
+  return d.is_moe() ? b == PrefillBackend::L0 : dense_bundle(d) && one_card;
+}
+size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b, bool one_card) {
+  return kGdnChunkLaunches - (d.is_moe() || dense_bundle(d) ? 1 : 0) - (intra_one_launch(d, b, one_card) ? 3 : 0);
 }
 bool ab_on_gemm(const model::ModelDesc& d) { return runtime::prefill_ab_on_gemm(d); }
 bool qkvz_bf16(const model::ModelDesc& d, uint32_t C) { return d.is_moe() && C > kPfSmallMaxRows; }
@@ -183,7 +184,7 @@ static const char* gdn_solve_entry() { return "pf_gdn_solve"; }
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const void* qkvz_partials, const float* ab_out, float* gdn_state,
                uint16_t* conv_ring, const void* small, uint16_t* y, PrefillBackend backend,
-               bool partials_bf16) {
+               bool partials_bf16, bool one_card) {
   require(!partials_bf16 || s.desc().is_moe(), "bf16 qkv||z partials are a MoE model's (pf_gdn_front)");
   require(C > 0, "C must be > 0");
   require(C <= s.chunk_cap(),
@@ -251,11 +252,12 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});
   profile_wait(cx, Phase::kGdnGate);
   dump_gdn_inputs(cx, s, C);
-  if (intra_one_launch(d, backend)) {
+  if (intra_one_launch(d, backend, one_card)) {
     //  5-8 (phase 2 Task 3) - A, T, w / u and A2 in one launch: pf_gdn_intra.cl, one work-group per
     //      (v-head, sub-chunk), the scan's inputs in its layouts. Judged, not bitwise: DPAS dots, a blocked
-    //      solve, T as hi / lo limbs (Q1-Q4 bf16 as before). l0 only: on l0-int8 it flips a determined row of
-    //      prefill_gate_ornith_l0-int8 (2026-11-12 record), so l0-int8 is not supported yet and keeps 5-8.
+    //      solve, T as hi / lo limbs (Q1-Q4 bf16 as before). A MoE model: l0 only (on l0-int8 it flips a
+    //      determined row of prefill_gate_ornith_l0-int8, 2026-11-12 record). Qwen3.8 (PERF-19): the one-card walk
+    //      on both backends at 16 / 48 heads (INTRA_WU2).
     cx.launch(kc(kernels::pf_gdn_intra_variant(k_heads, heads), "pf_gdn_intra"), heads, nch, 1,
               {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2),
                arg_val(C)});

@@ -25,8 +25,9 @@
 //      two-card session does, and the reverse;
 //   5. the server (HTTP, Kolibri's chat format): a greedy chat's ids equal the decode run on the response's
 //      prompt_token_ids (b70-decode --prefill's flow) - the box stage r28.serve does the same on the card;
-//      the same request again restores from the cache; a seeded sampled request is reproducible, draws its
-//      FIRST id from the prefill's row too, and only words the row allows; a greedy argmax on a head row
+//      the same request again restores from the cache (PERF-92: the whole prompt, nothing prefilled); a seeded
+//      sampled request is reproducible, draws its FIRST id from the prefill's row too (from the cache: the
+//      restored row, no device read), and only words the row allows; a greedy argmax on a head row
 //      the tokenizer does not define (127998 / 127999) is replaced by the masked row's argmax (Review
 //      Focus 3).
 #include <algorithm>
@@ -617,12 +618,12 @@ void case_server() {
   FakeKolibri decode(small_desc(), KolPlacement::one(small_desc()), 8192, f.eng.words);
   decode.prefill(prompt);
   CHECK(decode.generate(24) == served);
-  // The same request again: restored from the prompt-end snapshot (rings + KV), the same ids.
+  // The same request again: restored from the prompt-end snapshot (rings + KV + PERF-92's head image), the same ids.
   const json r2 = f.chat(greedy);
   CHECK(r2.at("prompt_token_ids").get<Ids>() == prompt);
   CHECK(r2.at("choices").at(0).at("token_ids").get<Ids>() == served);
   const uint32_t cached = r2.at("usage").at("prompt_tokens_details").at("cached_tokens").get<uint32_t>();
-  CHECK_EQ(cached, 2048u);   // the block-end snapshot: the prompt is past 2048, its own end cannot restore
+  CHECK_EQ(cached, uint32_t(prompt.size()));   // PERF-92: the whole prompt, nothing prefilled
   CHECK(f.eng.state_loads > 0);
   std::printf("server: greedy chat of %zu prompt ids -> 24 ids == the decode run; again: restored at %u, same ids\n",
               prompt.size(), cached);
@@ -643,6 +644,16 @@ void case_server() {
   }
   CHECK(a == b);
   CHECK_EQ(reads, a.size() + 1);
+  {   // PERF-92: again from the cache - the same ids, the first drawn from the restored row (n rows read for n ids)
+    ServeFixture g(/*cache=*/true);
+    CHECK(g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>() == a);
+    const size_t before = g.eng.logits_reads;
+    const json r = g.chat(sampled);
+    CHECK(r.at("choices").at(0).at("token_ids").get<Ids>() == a);
+    CHECK_EQ(r.at("usage").at("prompt_tokens_details").at("cached_tokens").get<uint32_t>(),
+             uint32_t(r.at("prompt_token_ids").size()));
+    CHECK_EQ(g.eng.logits_reads - before, a.size());
+  }
   for (uint32_t id : a) CHECK(std::find(f.eng.words.begin(), f.eng.words.end(), id) != f.eng.words.end());
   std::printf("server: a seeded request with Kolibri's default sampling reproducible (%zu ids, %zu rows read), "
               "every id a vocabulary word\n", a.size(), reads);

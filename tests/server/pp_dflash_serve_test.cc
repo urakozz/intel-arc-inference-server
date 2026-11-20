@@ -19,6 +19,8 @@
 //   3. spec 7's request path (server::PrefixSession over the adapter): a turn restored from the previous turn's
 //      request-end snapshot after a side request drafts exactly as the uninterrupted session (the per-iteration
 //      acceptance equal), its ids the plain run's; the store's root is store_root(kv form, the drafter's key);
+//      PERF-92: the same prompt again after a side request is restored whole (the prompt-end snapshot's head image,
+//      nothing prefilled) and drafts exactly as its first run;
 //   4. the adapter's refusals: --spec dflash without a drafter, --spec-max past the drafter's block, with lookup.
 #include <algorithm>
 #include <cmath>
@@ -363,6 +365,26 @@ void test_sampled() {
   std::printf("2. a seeded sampled K = 7 run twice: identical, every id a word OK\n");
 }
 
+// One request over PrefixSession: n ids by greedy K = 7 iterations, kept to n as the server keeps them.
+Ids run_turn(server::PrefixSession& s, Adapter& a, const Ids& prompt, uint32_t n,
+             server::PrefixSession::Report* rep = nullptr) {
+  const server::PrefixSession::Report r = s.begin(prompt);
+  if (rep) *rep = r;
+  server::Sampling greedy;
+  Ids out;
+  while (out.size() < n) {
+    const Ids burst = a.step_many(greedy, 7);
+    const size_t keep = std::min<size_t>(burst.size(), n - out.size());
+    for (size_t i = 0; i < keep; ++i) {
+      out.push_back(burst[i]);
+      s.fed(burst[i]);
+    }
+    if (keep < burst.size()) a.truncate_to(a.pos() - uint32_t(burst.size() - keep));
+  }
+  s.end();
+  return out;
+}
+
 // A session of turns over PrefixSession; returns turn 2's per-iteration (pos, drafts right) and its ids.
 struct Turn2 {
   std::vector<std::pair<uint32_t, uint32_t>> log;
@@ -375,21 +397,10 @@ Turn2 session(bool side_request) {
   MallocAlloc alloc;
   server::PrefixSession s(a, 1 << 22, &alloc);
   CHECK_EQ(s.cache()->kv_form(), server::store_root(0, e.drafter_key()));
-  server::Sampling greedy;
   const auto turn = [&](const Ids& prompt, uint32_t n, server::PrefixCache::Plan::Kind* kind) {
-    const server::PrefixSession::Report r = s.begin(prompt);
+    server::PrefixSession::Report r;
+    const Ids out = run_turn(s, a, prompt, n, &r);
     if (kind) *kind = r.kind;
-    Ids out;
-    while (out.size() < n) {
-      const Ids burst = a.step_many(greedy, 7);
-      const size_t keep = std::min<size_t>(burst.size(), n - out.size());
-      for (size_t i = 0; i < keep; ++i) {
-        out.push_back(burst[i]);
-        s.fed(burst[i]);
-      }
-      if (keep < burst.size()) a.truncate_to(a.pos() - uint32_t(burst.size() - keep));
-    }
-    s.end();
     return out;
   };
   const Ids A = prompt_of(9, 40);
@@ -416,6 +427,30 @@ void test_prefix() {
               got.log.size(), got.log.front().second);
 }
 
+// PERF-92: the same prompt after a side request - restored whole from the prompt-end snapshot (the drafter's ring in
+// its state, the pending id and the last row in its head image), nothing prefilled: it drafts as its first run did.
+void test_exact_repeat() {
+  FakeTapPipe e(1024, true);
+  Adapter a(e, kV, kV, 7, false, true);
+  MallocAlloc alloc;
+  server::PrefixSession s(a, 1 << 22, &alloc);
+  const Ids A = prompt_of(9, 40);
+  size_t at = e.log.size();
+  const Ids g1 = run_turn(s, a, A, 40);
+  const std::vector<std::pair<uint32_t, uint32_t>> log1(e.log.begin() + long(at), e.log.end());
+  (void)run_turn(s, a, prompt_of(11, 33), 12);
+  server::PrefixSession::Report r;
+  at = e.log.size();
+  const Ids g2 = run_turn(s, a, A, 40, &r);
+  const std::vector<std::pair<uint32_t, uint32_t>> log2(e.log.begin() + long(at), e.log.end());
+  CHECK(r.kind == server::PrefixCache::Plan::Restore);
+  CHECK_EQ(r.restart, uint32_t(A.size()));
+  CHECK(g2 == g1);
+  CHECK(log2 == log1);
+  std::printf("3b. the same prompt after a side request: restored whole at %u, %zu iterations drafted as its first "
+              "run, ids equal OK\n", r.restart, log2.size());
+}
+
 void test_refusals() {
   int refused = 0;
   const auto expect = [&](const std::function<void()>& f, const char* what) {
@@ -439,6 +474,7 @@ int main() {
   test_lossless();
   test_sampled();
   test_prefix();
+  test_exact_repeat();
   test_refusals();
   std::printf("pp_dflash_serve_test OK\n");
   return 0;

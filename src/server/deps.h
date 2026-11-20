@@ -93,6 +93,11 @@ struct EngineIface {
   virtual uint32_t step(const Sampling& s) = 0;
   virtual uint32_t max_len() = 0;
   virtual uint32_t pos() = 0;
+  // PERF-91: the pending id - what the next step(), step_many() or proposer iteration returns first - read without
+  // running a decode step. After a prefill or ingest it is the first generated id, which the server then sends before
+  // that call runs; a request that samples draws it here from the prompt's last logits row, as that call would.
+  // std::nullopt (the default) where the engine cannot say: the server learns it from the call.
+  virtual std::optional<uint32_t> pending_id(const Sampling&) { return std::nullopt; }
 
   // Spec 7 (plan 7c): the prefix cache's engine calls, runtime::Engine's (plan 7b) behind
   // EngineAdapter. Defaults throw, so an engine without them runs with the cache off only.
@@ -111,6 +116,14 @@ struct EngineIface {
   virtual void save_kv(uint32_t, uint32_t, void*) { unsupported<int>(); }
   virtual void load_kv(uint32_t, uint32_t, const void*) { unsupported<int>(); }
   virtual void set_block_hook(BlockHook) { unsupported<int>(); }
+  // PERF-92: what the first decode call reads beyond the state and the KV once a prefill has ended - the last
+  // prompt row's logits (a sampled first id draws from them) and the pending id. head_bytes() == 0 (the default):
+  // none kept, a prompt is never restored whole. save_head runs in the prompt-end hook after save_state and save_kv;
+  // load_head after load_state and load_kv at that same pos, and then leaves the engine as that prefill did - the
+  // first generated id pending, a new request begun - with nothing to prefill.
+  virtual size_t head_bytes() { return 0; }
+  virtual void save_head(void*) { unsupported<int>(); }
+  virtual void load_head(const void*) { unsupported<int>(); }
   // runtime::Engine::ingest: ids through the decode replay, one each; the prefix cache
   // feeds the last prompt id this way so that the prompt-end snapshot sits at len - 1.
   virtual void ingest(const std::vector<uint32_t>&) { unsupported<int>(); }

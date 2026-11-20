@@ -16,15 +16,19 @@
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
-// Spec 21-QFN-v1d: Qwen3.8-Flash-Next's prefill - one chunk of at most kPfC positions through one device's layers on the
+// Spec 21-QFN-v1d: Qwen3.8-Flash-Next's prefill - one chunk of at most kPfC positions (PERF-36: or kPfCWide, the
+// scratch's rows; past kPfC the int4 slabs dequantise in the block-store form and the slab GEMMs run N-fastest,
+// both bit-identical to the plain pair, so a 4096-row chunk is two 2048-row chunks bitwise) through one device's layers on the
 // Level Zero list (spec 21-QFN-v1 §4.2 "Prefill"; Kolibri's 20d arrangement, runtime/kolibri/kolibri_prefill.h), no host
 // wait inside it. The walk, per chunk on a device (qwen4exp_sizes.h counts it):
 //
 //   device 0       pf_embed_gather (the chunk's ids; layer 0's combine _E repeats the rows into the 4 streams)
 //   a gated res.   q4_hc_combine_norm (M = C: folds what is pending - _E / _S1 / _Y / _X) · the down||inject bf16 slab
 //                  {10240, 336} (one 512-column slab) + pf_gemm · q4_hc_up_mix _D512 (M = C)
-//   GDN layer      HC · qkv||z: 16 slabs (pf_dequant_slab int4 layout 0 | q4_pf_bf16_slab) + pf_gemm · a||b
-//                  pf_ab_proj (hidden 2560) · gdn_chunk_q4 (Qwen3.8's ten binaries, the tenth pf_gated_head_SIG) ·
+//   GDN layer      HC · qkv||z: 16 slabs (pf_dequant_slab int4 layout 0 | q4_pf_bf16_slab) + pf_gemm (past 1024 rows
+//                  pf_gemm_T0_B16: bf16 partials) · a||b
+//                  pf_ab_proj (hidden 2560) · gdn_chunk_q4 (Qwen3.8's GDN binaries, the head pf_gated_head_SIG_OB; the
+//                  front / head _PB on bf16 partials) ·
 //                  out_proj 3 slabs (pf_int4_slab_dequant | q4_pf_bf16_slab) + pf_gemm · HC · the MoE
 //   QSA layer      HC · q||gate||k||v 13 slabs + pf_gemm · the indexer bf16 slab {2560, 640} + pf_gemm (pitch 768) ·
 //                  pf_attn_prep_q16 _Q24KV2 (q / k (1 + w) norms, partial RoPE, every row's K / V at its position) ·
@@ -51,14 +55,15 @@
 namespace runtime::qwen4exp {
 
 // Every allocation runtime::qwen4exp::prefill_sizes names, exactly those (allocated by the first prefill: a
-// decode-only engine holds none). One per device.
+// decode-only engine holds none). One per device, at `rows` chunk rows (kPfC or kPfCWide: Q4LoadedModel::pf_rows).
 struct Qwen4ExpPrefillScratch {
-  Qwen4ExpPrefillScratch(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t max_len);
+  Qwen4ExpPrefillScratch(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t max_len, uint32_t rows = kPfC);
   l0::Mem ids;   // host memory: the chunk's ids (the embedding on device 0, the PLE gather and ring on its device)
   l0::Mem H, xn, x, down_f32, inj, partials, slab, idx_f32, idx_q, scores, lists, diag, q16, o, attn_out, ab, gdn, logits,
       routes, hdr, tiles, row_tok, pair_row, xg, h, y, w, ple_ids, cnt, items;
   const model::Qwen4ExpDesc& desc;
   uint32_t max_len;
+  uint32_t rows;   // a chunk's most rows: every [rows] stride of the walk, the M = rows binaries
   size_t bytes() const;
 };
 
@@ -72,7 +77,7 @@ struct Qwen4ExpPrefillScratch {
 // keys and tail ring); last, `R` row C into hh row 0 (R_{pos+C-1}: the next chunk's row 0, the first draft's R).
 struct Qwen4ExpMtpPrefill {
   Qwen4ExpMtpBuffers* bufs = nullptr;
-  l0::Mem* R = nullptr;            // bf16 [kPfC + 1][10240] (mtp_prefill_R_bytes)
+  l0::Mem* R = nullptr;            // bf16 [rows + 1][10240] (mtp_prefill_R_bytes)
   const void* embed = nullptr;     // device 0's embedding table (peer-read on two cards)
   bool single = true;              // decision 4's norm form
   const Control* hctl = nullptr;   // the head's Control for this chunk (its slot: the next chunk's may be written)
@@ -103,7 +108,7 @@ struct Q4TpPrefill {
   const model::Qwen4ExpDesc* card = nullptr;   // model::q4_tp_card(m.desc, rank)
   const void* embed = nullptr;                 // the embedding table this card gathers from
   const void* ple_ptrs = nullptr;              // this card's PLE pointer table
-  float* fold[2] = {nullptr, nullptr};         // fp32 [2][kPfC][hidden] a slot (slice r: card r's partial)
+  float* fold[2] = {nullptr, nullptr};         // fp32 [2][rows][hidden] a slot (slice r: card r's partial)
   float* peer_fold[2] = {nullptr, nullptr};    // the peer's slots (this card writes their slice `rank`)
   float* yf = nullptr;                         // fp32 [tmax x 32][hidden]: the down GEMM's rows
   const l0::SyncEventPool* ev = nullptr;       // sent(card, u) = ev[ev_off + card x units + u]
@@ -137,7 +142,8 @@ struct Q4TpPrefill {
 // part's l - first) uses buffer (l - first) & 1, its copy waits for the MoE of layer l - 2 to release that buffer, and
 // the layer's MoE waits for its copy and reads through a staged row (the table row with every block wholly inside the
 // copied prefix pointing into the buffer instead). The same bytes are read from VRAM instead of host memory: bitwise.
-// Under tp the pair's two chunks share each layer's copy (the second chunk releases the buffer).
+// Under tp the pair's two chunks share each layer's copy (the second chunk releases the buffer); under pp too
+// (PERF-30, prefill_pair_pp), on each device.
 struct Q4PfRing {
   void* stage[2] = {nullptr, nullptr};
   const uint8_t* rows = nullptr;          // device u64 [the part's layers][1024]: the staged rows
@@ -203,9 +209,6 @@ struct Q4LendState {
 // selections, scores or H, which the accessors read after a prefill) and the read ahead's two buffers.
 std::vector<Q4LendState::Region> lend_regions(const Qwen4ExpPrefillScratch& s, const Q4PfRingState* ring);
 
-// The copy-only queue group's ordinal (COPY without COMPUTE), or UINT32_MAX.
-uint32_t copy_ordinal(ze_device_handle_t dev);
-
 // ONE chunk at absolute position `pos`, C rows, through device `part.device`'s layers. The caller has written the ids
 // into `ids` (the chunk's slot of s.ids), set `ctl` - this chunk's Control for this device, host memory, a copy of the
 // device's with pos = pos, n_active = C (the HC, the prep, the indexer, the PLE kernels read both) - and - device 1 of
@@ -219,6 +222,38 @@ void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefi
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,
                    const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
                    const uint32_t* ids, const Q4PfRing* ring = nullptr);
+
+// PERF-30: a chunk's own residual rows, inject weights and MoE output (bf16 [rows][10240], fp32 [rows][4], bf16
+// [rows][2560]) - the pair's first chunk under pp keeps these apart from the scratch's s.H / s.inj / s.y, which
+// the second chunk (or a chunk alone) uses, so the last chunk leaves its rows where prefill_head reads them.
+struct Q4PfOwnRows {
+  void* H = nullptr;
+  void* inj = nullptr;
+  void* y = nullptr;
+};
+// One chunk of a pp pair: prefill_chunk's per-chunk arguments.
+struct Q4PfChunk {
+  uint32_t pos = 0, C = 0;
+  const l0::Mem* injected = nullptr;
+  const Qwen4ExpMtpPrefill* mtp = nullptr;
+  const Control* ctl = nullptr;
+  const uint32_t* ids = nullptr;
+  const Q4PfRing* ring = nullptr;      // the read ahead (the pair's first: issue_first; the last: issue_rest), or null
+  const Q4PfOwnRows* own = nullptr;    // the pair's first chunk's rows (null: the scratch's)
+};
+// PERF-30: `n` (1 or 2) consecutive chunks on one device of two (`--parallel pp`), a layer at a time - chunk A's
+// layer l, then chunk B's - so each staged layer's copy into the read ahead serves both (tp's arrangement,
+// prefill_pair_tp: A's ring view copies the first two layers, B's releases each buffer and copies the layer two on).
+// B's layer l follows A's on the in-order list, so a layer's state (KV, compressed keys, GDN state, rings) is A's
+// when B reads it, as when A ran every layer first; the scratch a layer writes is read inside that layer, except
+// the residual rows, the inject weights and the MoE output, which A keeps in `own`. Each chunk runs prefill_chunk's
+// launches in prefill_chunk's order on its own inputs: bitwise the sequential form. A's embedding (device 0) is
+// gathered right before its first layer and B's right after it (both use the scratch's x); each chunk's tail
+// (device 0's materialising _Y_NN, the MTP head's pass) runs after both chunks' last layers, A's first (the head's
+// R_{pos-1} chain). Appends prefill_device_launches(...) per chunk.
+void prefill_pair_pp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s,
+                     const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, bool eager,
+                     bool two_cards, const std::array<Q4PfChunk, 2>& chunks, uint32_t n);
 
 // Plan 21v2b Task 4: a chunk on both tensor-parallel cards (Q4TpPrefill), prefill_chunk's contract per card at the
 // card's shapes (each appends prefill_device_launches at its descriptor and one placement). From one host thread, a

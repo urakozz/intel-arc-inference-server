@@ -1,7 +1,8 @@
-// tp_wire.h - tp.cl's crossing protocol as shared pieces (included by tp.cl's TP_CROSS family and by
-// qwen4exp/q4_moe.cl's wired MoE, MOE_TP_WIRE): the landing buffer's layout, the system-scope load, the wait's failure
-// record and the per-chunk call numbers. tp.cl's header comment states the protocol; runtime/tp_protocol.h mirrors
-// it on the host. The includer defines M, TP_MROWS, DATA_WORDS (the slot's data words) and J_CHUNKS (FOLD_G x TP_MROWS).
+// tp_wire.h - tp.cl's crossing protocol as shared pieces (included by tp.cl's TP_CROSS family, by
+// qwen4exp/q4_moe.cl's wired MoE, MOE_TP_WIRE, and by gemv.cl's GEMV_TP_SEND): the landing buffer's layout, the
+// system-scope load, the wait's failure record and the per-chunk call numbers. tp.cl's header comment states the
+// protocol; runtime/tp_protocol.h mirrors it on the host. The includer defines M, TP_MROWS, DATA_WORDS (the slot's
+// data words) and J_CHUNKS (FOLD_G x TP_MROWS).
 #define TP_SLOTS 2u
 #define TP_FLAG_STRIDE 16u
 #define TP_PAGE 1024u

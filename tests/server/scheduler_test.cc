@@ -850,6 +850,69 @@ void test_kv_form() {
   std::printf("kv form: PrefixSlots keys by the engine's KV form OK\n");
 }
 
+// PERF-91: with an engine that peeks (pending_id), each request's first id goes out after the prompt's last chunk,
+// before the first step - plain and speculative - and every request ends exactly as without the peek: the same ids,
+// reasons and engine calls, also when the first id ends it (EOS, max_tokens 1, a stop string at once). The chunk that
+// ends the prompt carries the request's sampling: a sampled request's first id is drawn there.
+void test_first_id_peek() {
+  const std::vector<Spec> specs = {
+      {P(1, 10), 12, {}},
+      {P(2, 6), 12, seeded(7)},
+      {P(21, 5), 12, {}},      // EOS as its first id
+      {P(22, 5), 12, {}, 0, 1},   // EOS first but min_tokens 1
+      {P(3, 7), 1, {}},        // max_tokens 1
+      {P(4, 8), 12, {}, 1},    // a stop string at its first id
+      {P(5, 9), 12, seeded(9)},
+  };
+  for (const uint32_t spec : {0u, 2u}) {
+    std::vector<Out> outs[2];
+    std::vector<std::string> events[2];
+    std::vector<std::string> at_first(specs.size());
+    for (const bool peek : {false, true}) {
+      MockBatchEngine eng(3);
+      configure(eng);
+      eng.eos_at[21] = 1;
+      eng.eos_at[22] = 1;
+      eng.spec = spec;
+      eng.peek = peek;
+      eng.sample_first = true;
+      Scheduler s(eng, opts(4));
+      std::vector<Out>& out = outs[peek];
+      out.resize(specs.size());
+      for (size_t i = 0; i < specs.size(); ++i) {
+        SchedRequest r = make(specs[i], out[i], eng);
+        auto inner = r.on_token;
+        r.on_token = [&, i, inner, peek](uint32_t id) {
+          if (peek && out[i].ids.empty()) at_first[i] = eng.events.back();
+          return inner(id);
+        };
+        CHECK(s.submit(std::move(r)) != nullptr);
+      }
+      drain(s);
+      events[peek] = eng.events;
+    }
+    CHECK(events[0] == events[1]);
+    for (size_t i = 0; i < specs.size(); ++i) {
+      const Out &a = outs[0][i], &b = outs[1][i];
+      CHECK(a.ids == b.ids);
+      CHECK_EQ(a.fin.reason, b.fin.reason);
+      CHECK_EQ(a.fin.completion_tokens, b.fin.completion_tokens);
+      CHECK_EQ(b.done_calls, 1);
+      CHECK(!b.token_after_done);
+      if (!b.ids.empty()) CHECK(at_first[i].rfind("prefill", 0) == 0);   // sent before the first step
+    }
+    MockBatchEngine ref(1);
+    CHECK(outs[1][2].ids.empty() && outs[1][2].fin.reason == Finish::Stop);
+    CHECK(outs[1][3].ids.size() > 1 && outs[1][3].ids[0] == ref.eos);
+    CHECK(outs[1][4].ids.size() == 1 && outs[1][4].fin.reason == Finish::Length);
+    CHECK(outs[1][5].ids.size() == 1 && outs[1][5].fin.reason == Finish::Stop);
+    CHECK_EQ(outs[1][1].ids.at(0), ref.first_draw(specs[1].s));
+    CHECK_EQ(outs[1][6].ids.at(0), ref.first_draw(specs[6].s));
+  }
+  std::printf("first id peeked: sent after the prompt's last chunk, the same ids and ends as without, plain and "
+              "speculative; a sampled first id drawn at the prompt's end\n");
+}
+
 int main() {
   test_batch_independence();
   test_per_row_stops();
@@ -866,6 +929,7 @@ int main() {
   test_prefill_cut_and_overlap();
   test_parallel_prefill();
   test_callback_throws();
+  test_first_id_peek();
   std::printf("scheduler_test: all cases passed\n");
   return 0;
 }

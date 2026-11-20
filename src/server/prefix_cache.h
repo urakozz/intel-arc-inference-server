@@ -27,6 +27,11 @@
 // the tie rule. Without it (the default) the
 // tail is one prefill and the prompt-end snapshot is at len; a restore at a block end then
 // reproduces a cold run bitwise.
+//
+// PERF-92: without the split the prompt-end snapshot also keeps the engine's head image
+// (EngineIface::save_head: the last prompt row's logits and the first generated id), so the
+// same prompt again restores the whole of it - pos == len, the first id pending, no prefill.
+// Only such a snapshot is a restore point at len; every other one stays at <= len - 1.
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -59,8 +64,10 @@ class PrefixCache {
   // indexer key every 4 positions (kv_bytes(1) holds none), so sizing by kv_bytes(1) x n under-allocates
   // every entry and save_kv overruns it into the next (r34.serve, 2026-11-04). The server's constructor.
   using KvBytesFn = std::function<size_t(uint32_t)>;
+  // `head_bytes` (PERF-92): EngineIface::head_bytes, the image a prompt-end snapshot may keep beside its state and
+  // KV (0: none).
   PrefixCache(size_t budget_bytes, size_t state_bytes, KvBytesFn kv_bytes, uint32_t block,
-              HostAlloc& alloc, HashFn hash = {}, uint64_t kv_form = 0);
+              HostAlloc& alloc, HashFn hash = {}, uint64_t kv_form = 0, size_t head_bytes = 0);
   ~PrefixCache();
   PrefixCache(const PrefixCache&) = delete;
   PrefixCache& operator=(const PrefixCache&) = delete;
@@ -71,10 +78,11 @@ class PrefixCache {
     uint32_t begin, end;
     void* host;
   };
-  // What a store call must copy: engine.save_state(state) if non-null, then every piece.
-  // Empty (state == nullptr, kv empty) when nothing is to be stored.
+  // What a store call must copy: engine.save_state(state) if non-null, then every piece, then
+  // engine.save_head(head) if non-null. Empty (state == nullptr, kv empty) when nothing is to be stored.
   struct Slot {
     void* state = nullptr;
+    void* head = nullptr;                // PERF-92: a new snapshot asked for with `head`
     std::vector<Piece> kv;
     std::vector<Entry*> entries;         // for commit()
     bool empty() const { return state == nullptr && kv.empty(); }
@@ -83,7 +91,10 @@ class PrefixCache {
   // card holds exactly ids[0:end). Stores every block of ids[0:floor(end/block)*block) the
   // store lacks (as many as the budget fits, in order) and a snapshot at `end` (if it is
   // not present and its blocks are). Entries reserved here are pinned until release().
-  Slot reserve(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end);
+  // `head` (PERF-92): the snapshot keeps the engine's head image too (head_bytes > 0 only) - the
+  // prompt end's, so a later plan() may restore all of ids[0:end]. A snapshot already present
+  // at `end` is kept as it is.
+  Slot reserve(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end, bool head = false);
   void commit(const Slot& slot);         // after the engine has filled it
 
   struct Plan {
@@ -91,6 +102,7 @@ class PrefixCache {
     uint32_t restart = 0;                // positions [0, restart) are reused
     uint32_t kv_from = 0;                // Restore: KV [kv_from, restart) comes from the host
     const void* state = nullptr;         // Restore
+    const void* head = nullptr;          // Restore of the whole prompt: engine.load_head(head) (PERF-92)
     struct Run {
       uint32_t begin, end;
       const void* host;
@@ -99,8 +111,10 @@ class PrefixCache {
   };
   // `resident` = the ids whose state and KV the card holds (resident.size() == pos),
   // `resident_valid` false after a failure. Pins the entries it returns until release().
+  // `whole` (PERF-92): a snapshot at len that keeps a head image may be the restore point
+  // (restart == len); otherwise restart <= len - 1.
   Plan plan(const std::vector<uint32_t>& prompt, const std::vector<uint32_t>& resident,
-            bool resident_valid);
+            bool resident_valid, bool whole = false);
   // Unpins everything plan() and reserve() pinned; drops reserved entries never committed.
   void release();
 
@@ -120,7 +134,7 @@ class PrefixCache {
   void remove(Entry* e);
   void pin(Entry* e);
 
-  size_t budget_, state_bytes_;
+  size_t budget_, state_bytes_, head_bytes_;
   KvBytesFn kv_bytes_;
   uint32_t block_;
   HostAlloc& alloc_;
@@ -158,13 +172,14 @@ class PrefixSession {
   PrefixCache* cache() { return cache_.get(); }
 
  private:
-  void store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end);
+  void store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end, bool head = false);
 
   EngineIface& engine_;
   std::unique_ptr<PrefixCache> cache_;
   std::vector<uint32_t> resident_;
   bool valid_ = false;
   const std::vector<uint32_t>* prompt_ = nullptr;   // the prompt being prefilled
+  size_t head_at_ = 0;                  // PERF-92: the prompt-end hook's pos whose snapshot keeps the head (0: none)
   double store_ms_ = 0;
 };
 

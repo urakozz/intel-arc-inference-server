@@ -1,4 +1,5 @@
 #include "l0/cmdlist.h"
+#include <vector>
 #include "common/copy_chunks.h"
 #include "l0/error.h"
 #include "l0/event.h"
@@ -10,6 +11,19 @@ CmdList CmdList::immediate(Context& ctx, uint32_t ordinal) {
   qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
   qd.ordinal = ordinal;
   qd.mode = ZE_COMMAND_QUEUE_MODE_SYNCHRONOUS;
+  qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
+  ze_command_list_handle_t l = nullptr;
+  ZE_CHECK(zeCommandListCreateImmediate(ctx.handle(), ctx.device(), &qd, &l));
+  return CmdList(l, true);
+}
+
+CmdList CmdList::immediate_copy(Context& ctx) {
+  const std::vector<CopyEngine> e = ctx.copy_engines();
+  ze_command_queue_desc_t qd{};
+  qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
+  qd.ordinal = e.empty() ? 0 : e[0].ordinal;
+  qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
+  qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
   qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
   ze_command_list_handle_t l = nullptr;
   ZE_CHECK(zeCommandListCreateImmediate(ctx.handle(), ctx.device(), &qd, &l));
@@ -61,4 +75,5 @@ void CmdList::wait_event(ze_event_handle_t e) {
 }
 void CmdList::close() { ZE_CHECK(zeCommandListClose(l_)); }
 void CmdList::reset() { ZE_CHECK(zeCommandListReset(l_)); }
+void CmdList::host_synchronize() { ZE_CHECK(zeCommandListHostSynchronize(l_, UINT64_MAX)); }
 }  // namespace l0

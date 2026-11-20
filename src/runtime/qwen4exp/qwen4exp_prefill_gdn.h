@@ -8,22 +8,23 @@
 
 // Spec 21-QFN-v1d: gdn_chunk_q4 - the WY-chunked gated delta rule for ONE Qwen3.8-Flash-Next GDN layer over `C` new
 // positions: runtime::prefill::gdn_chunk's ten launches (src/runtime/prefill/gdn.cc), in its order and with its
-// binaries, over this family's own buffers - the tenth launch is pf_gated_head_SIG (the sigmoid output gate,
+// binaries, over this family's own buffers - the last launch is pf_gated_head_SIG_OB (the sigmoid output gate,
 // `output_gate_type: sigmoid`) where gdn_chunk binds pf_gated_head's silu form by name.
 //
 // Why a sibling and not gdn_chunk itself (plan 21-QFN-v1d "Dependencies"): gdn_chunk takes a runtime::PrefillScratch sized by
 // a model::ModelDesc (Qwen3.8's ~GB of scratch, its descriptor's GDN shape) and binds pf_gated_head by name.
 // gdn.cc is not edited. The GDN shape is Qwen3.8's (16 k / 48 v heads x 128, 10240 conv channels; the small block's
 // conv / negA / dt_bias at Qwen3.8's offsets: loader::make_small_layout(2560, 10240, 48) == kQwen38Small's GDN part),
-// so Qwen3.8's pf_gdn_conv / pf_gdn_wy / pf_gdn_scan binaries apply as built; the scan and solve entries are
-// gdn.cc's (gdn_scan_entry_name()).
+// so Qwen3.8's pf_gdn_conv / pf_gdn_intra / pf_gdn_scan_OB / pf_gdn_front_PL binaries apply as built; the scan entry is gdn.cc's
+// (gdn_scan_entry_name()). PERF-19: launches 5-8 are one (pf_gdn_intra, as a MoE model's gdn_chunk on l0) - six in all.
 //
 // It reads and writes the SAME gdn_state and conv_ring decode's gdn_step uses, in decode's layouts, so decode
 // continues from pos + C with no translation; the gated head's output `y` is the out_proj input.
 namespace runtime::qwen4exp {
 
 // Every buffer gdn_chunk_q4 reads or writes (PrefillScratch's gdn_* fields, explicit):
-//   qkvz      fp32 [C][16384]   the qkv||z linear at S = 1 (rounded to bf16 inside, gdn_step's single point)
+//   qkvz      fp32 [C][16384]   the qkv||z linear at S = 1 (rounded to bf16 inside, gdn_step's single point), or
+//             bf16 [C][16384]   those rounded words (qkvz_bf16: pf_gemm_T0_B16's C, read by the front / head _PB)
 //   ab        fp32 [C][128]     a at [0, 48), b at [48, 96)
 //   state     fp32 [48][128][128]  the layer's decode state (in place)
 //   ring      bf16 [32][10240]  the layer's decode conv ring (in place; kConvRing slots)
@@ -32,7 +33,8 @@ namespace runtime::qwen4exp {
 //   the chain's scratch at gdn_scratch_sizes(C) (qwen4exp_sizes.h)
 struct GdnChunkBuffers {
   uint32_t k_heads = 16, v_heads = 48;   // plan 21v2b Task 4: a tensor-parallel card's 8 / 24 (its 5120 conv channels)
-  const float* qkvz = nullptr;
+  const void* qkvz = nullptr;
+  bool qkvz_bf16 = false;
   const float* ab = nullptr;
   uint32_t ab_pitch = 128;   // a||b's row pitch: 128 (the GEMV's), or 256 (phase 3 Task 8: the dense GEMM's rows)
   float* state = nullptr;
@@ -44,7 +46,7 @@ struct GdnChunkBuffers {
        *u = nullptr, *o = nullptr;
 };
 
-// kGdnChunkLaunches (10) launches on cx, in order; C in (0, kPfC]; throws otherwise or on a missing buffer.
+// gdn_chunk_q4_launches() (6) launches on cx, in order; C in (0, kPfCWide]; throws otherwise or on a missing buffer.
 void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunkBuffers& b, uint32_t pos, uint32_t C);
 
 }  // namespace runtime::qwen4exp

@@ -38,11 +38,22 @@ int main(int argc, char** argv) {
   CHECK(!block.empty() && !reused.empty());
   CHECK_EQ(kq::kMtpVerifyRows, rq::kVerifyRows);
   CHECK_EQ(rq::kVerifyRows, rq::kMaxDraft + 1);
-  CHECK_EQ(rq::kGdnSlots, 4u);
   CHECK_EQ(kq::mtp_variant(1, true), std::string("q4_mtp_M1_SINGLE"));
   CHECK_EQ(kq::mtp_variant(4, false), std::string("q4_mtp_M4_STREAM"));
   CHECK_EQ(kq::mtp_variant(2048, true, true), std::string("q4_mtp_M2048_SINGLE_PF"));
-  CHECK_EQ(kq::gdn_slots_variant(3), std::string("gdn_step_slots_M3_G1"));
+  // PERF-51: the verify lists' DEFERRED GDN step, one layer's pending rows a parity (one card 16 / 48 heads, tp 8 / 24)
+  CHECK_EQ(kq::gdn_defer_variant(3), std::string("gdn_step_defer_M3_G1"));
+  CHECK_EQ(kq::tp_gdn_defer_variant(4), std::string("gdn_step_defer_M4_GK8V24_G1"));
+  {
+    const model::Qwen4ExpDesc& f = model::qwen4exp();
+    const model::Qwen4ExpDesc c = model::q4_tp_card(f, 0);
+    CHECK_EQ(rq::gdn_pend_layer_bytes(f), kernels::gdn_pend_layer_bytes(16, 48));
+    CHECK_EQ(rq::gdn_pend_layer_bytes(c), kernels::gdn_pend_layer_bytes(8, 24));
+    CHECK_EQ(rq::gdn_pend_bytes(f, model::Q4Placement::one(f), 0), size_t(36) * 2 * 1073152);   // 77.3 MB
+    const model::Q4Placement two = model::Q4Placement::two(f, 24);
+    CHECK_EQ(rq::gdn_pend_bytes(f, two, 0) + rq::gdn_pend_bytes(f, two, 1), size_t(36) * 2 * 1073152);
+    CHECK_EQ(rq::gdn_pend_bytes(c, model::Q4Placement::one(c), 0), size_t(36) * 2 * 536576);
+  }
   CHECK_EQ(kq::fc_variant(4), std::string("gemv_bf16_M4_K2560_N2560"));
   CHECK_EQ(kq::pf_ple_verify_variant(), std::string("q4_pf_ple_C4"));
   CHECK_EQ(kq::qkvg_m_variant(3, true), std::string("gemv_M3_K2560_N13312_S2_L0"));
@@ -58,7 +69,10 @@ int main(int argc, char** argv) {
   std::set<std::string> bound;
   model::Qwen4ExpDesc intel = model::qwen4exp();
   intel.forms = {model::Q4Form::Bf16, model::Q4Form::Bf16, model::Q4Form::Bf16, 128};
-  for (const model::Qwen4ExpDesc* f : {&model::qwen4exp(), static_cast<const model::Qwen4ExpDesc*>(&intel)})
+  model::Qwen4ExpDesc ours8 = model::qwen4exp(), intel8 = intel;   // PERF-66: the int8 hyper-connection mixers
+  ours8.hc_int8 = intel8.hc_int8 = true;
+  const model::Qwen4ExpDesc* forms[] = {&model::qwen4exp(), &intel, &ours8, &intel8};
+  for (const model::Qwen4ExpDesc* f : forms)
     for (bool eager : {false, true})
       for (bool ple_bf16 : {false, true})
         for (bool int8 : {false, true})
@@ -69,8 +83,9 @@ int main(int argc, char** argv) {
               for (const std::string& v : kq::verify_variants(*f, M, int8, eager, ple_bf16, single, kernels::LinearKind::Gemv))
                 bound.insert(v);
             }
-            for (const std::string& v : kq::draft_variants(int8, eager, single)) bound.insert(v);
-            for (const std::string& v : kq::mtp_prefill_variants(single)) bound.insert(v);
+            for (const std::string& v : kq::draft_variants(int8, eager, single, f->hc_int8)) bound.insert(v);
+            for (unsigned C : {kq::kPfC, kq::kPfCWide})   // PERF-36: both chunk sizes' head pass
+              for (const std::string& v : kq::mtp_prefill_variants(single, C, f->hc_int8)) bound.insert(v);
           }
   for (const std::string& v : bound)
     if (!block.count(v) && !reused.count(v)) {

@@ -17,10 +17,10 @@ class CmdList;
 // the whole decode scratch. Kolibri's KolibriBuffers arrangement.
 //
 // Spec 21-QFN-v1e (`mtp`): the scratch holds kVerifyRows rows (the verify lists run at M = k + 1 <= 4; the per-layer rows
-// - routes, selections, diagnostics - are strided by `rows`), gdn_spec holds the verify's state slots 1..3 of every
-// GDN layer of the device (LAYER-major: layer i's slot s at gdn_spec + (3 i + s - 1) x one state - the stride
-// gdn_step_slots_M<M>_G1 bakes), and the PLE layer's device holds the verify's PLE rows (q4_pf_ple at C = 4). The
-// head's own buffers are Qwen4ExpMtpBuffers (the last device).
+// - routes, selections, diagnostics - are strided by `rows`), gdn_pend holds the verify's pending GDN rows of every
+// GDN layer of the device (PERF-51; LAYER-major: layer i's parity p at gdn_pend + (2 i + p) x gdn_pend_layer_bytes -
+// gdn_step_defer_M<M>_G1 bakes one layer's rows as its parity stride), and the PLE layer's device holds the verify's
+// PLE rows (q4_pf_ple at C = 4). The head's own buffers are Qwen4ExpMtpBuffers (the last device).
 //
 // Plan 21-QFN-v2b Task 5 (`scratch`, a tensor-parallel card that holds the MTP head): the decode scratch sized for that
 // descriptor (one card's widths: the head's layer runs whole), the persistent groups for `d` (the card's halves).
@@ -43,9 +43,9 @@ struct Qwen4ExpBuffers {
   //     written once at construction) -------------------------------------------------------------------------
   l0::Mem H, xn, x, partials, down_f32, inj, ab, gdn_o, idx_f32, idx_q, scores, list, diag, attn_q, attn_gate,
       attn_part, attn_out, logits_r, routes, moe_h, y, ple_e, ple_kv, ple_ids, ple_consts, logits, argmax_part;
-  // --- spec 21-QFN-v1e, with the MTP head (null without): the verify's GDN state slots 1..3 (never zeroed: a slot is read
-  //     only after a verify wrote it - Control::gdn_live is 0 after reset / load_state) and the PLE rows ----------
-  std::unique_ptr<l0::Mem> gdn_spec;        // fp32 [its GDN layers][3][48][128][128]
+  // --- spec 21-QFN-v1e, with the MTP head (null without): the verify's pending GDN rows (PERF-51; never zeroed: rows
+  //     are read only after a verify wrote them - Control::gdn_pend is 0 after reset / load_state) and the PLE rows -
+  std::unique_ptr<l0::Mem> gdn_pend;        // [its GDN layers][2][gdn_pend_layer_bytes]
   std::unique_ptr<l0::Mem> ple_gated, ple_gn;   // bf16 [kVerifyRows][10240] each (the PLE layer's device)
 
   const model::Qwen4ExpDesc& desc;
@@ -63,10 +63,8 @@ struct Qwen4ExpBuffers {
   void* tail_layer(uint32_t layer) const;      // [8][128]
   void* gdn_state_layer(uint32_t layer) const;
   void* conv_ring_layer(uint32_t layer) const;
-  // Spec 21-QFN-v1e: GDN layer `layer`'s state slot s (0: gdn_state_layer; 1..3: gdn_spec's) and its gdn_spec base (the
-  // slots 1..3 gdn_step_slots_M<M>_G1 addresses from).
-  void* gdn_slot(uint32_t layer, uint32_t s) const;
-  void* gdn_spec_layer(uint32_t layer) const;
+  // PERF-51: GDN layer `layer`'s pending rows (parity 0; gdn_step_defer_M<M>_G1 adds the parity stride).
+  void* gdn_pend_layer(uint32_t layer) const;
   void* ple_ids_ring() const { return ple.ptr(); }
   void* ple_conv_ring() const { return static_cast<uint8_t*>(ple.ptr()) + kPleConvOff; }
   // The per-layer scratch rows at this buffer's stride.
@@ -75,7 +73,7 @@ struct Qwen4ExpBuffers {
   size_t diag_off(uint32_t qsa_index) const { return diag_at_r(qsa_index, rows); }
   size_t persistent_bytes() const;
   size_t scratch_bytes() const;
-  size_t mtp_bytes() const;   // gdn_spec + the PLE rows (0 without the head)
+  size_t mtp_bytes() const;   // gdn_pend + the PLE rows (0 without the head)
   // control (then n_active = 1 is the caller's), the KV, keys, tails, GDN state, rings - in construction order.
   void zero(l0::CmdList& imm);
 };

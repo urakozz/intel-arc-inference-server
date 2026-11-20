@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "kernels/prefill/pf_kernels.h"
+#include "kernels/qwen4exp_kernels.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
 #include "runtime/tp_protocol.h"   // tp::Layout (header-only)
@@ -155,7 +156,8 @@ constexpr uint32_t kPfHdrWords = (4 + 512 + 1 + 15) / 16 * 16;   // kernels::qwe
 constexpr uint32_t kPfIdxLd = 768, kPfHcDownLd = 512;            // kernels::qwen4exp::kPfIdxLd / kPfHcDownLd
 }  // namespace
 
-size_t gdn_chunk_q4_launches() { return kGdnChunkLaunches - 1; }   // phase 2: conv + l2norm in one launch
+// phase 2: conv + l2norm in one launch; PERF-19: A / solve / W-U / A2 in one (pf_gdn_intra)
+size_t gdn_chunk_q4_launches() { return kGdnChunkLaunches - 1 - 3; }
 
 GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   // Qwen3.8's GDN shape (the family's): 16 k / 48 v heads x 128, 10240 conv channels.
@@ -194,8 +196,8 @@ uint32_t pf_batches_dn(const model::Qwen4ExpDesc& d) {
   return (d.experts + 1 + per - 1) / per;
 }
 
-PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
-  const size_t C = kPfC, T = pf_tiles(d, kPfC), R = T * kPfTm, qsa = std::max<uint32_t>(1u, d.qsa_before(d.layers));
+PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, uint32_t rows) {
+  const size_t C = rows, T = pf_tiles(d, rows), R = T * kPfTm, qsa = std::max<uint32_t>(1u, d.qsa_before(d.layers));
   size_t pn = 0, kslab = 0;
   for (model::Q4LinearId id : {model::Q4LinearId::GdnQkvz, model::Q4LinearId::GdnOut, model::Q4LinearId::QsaQkvg,
                                model::Q4LinearId::QsaO}) {
@@ -224,7 +226,7 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.o = size_t(d.q_heads) * C * d.head_dim * 4;
   s.attn_out = C * d.q_n() * 2;
   s.ab = C * kernels::pf_route_slab_pitch(model::Qwen4ExpDesc::kAbPaddedN) * 4;   // phase 3 Task 8: the GEMM's rows, pitch 256
-  s.gdn = gdn_scratch_sizes(kPfC).total();
+  s.gdn = gdn_scratch_sizes(rows).total();
   s.logits = C * kernels::pf_route_slab_pitch(d.router_n()) * 4;                  // ... and the router's, pitch 768
   s.routes = size_t(d.layers) * C * kRouteWords * 4;
   s.hdr = size_t(kPfHdrWords) * 4;
@@ -237,20 +239,25 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.w = pf_block_gu_bytes(d);   // Intel's bf16 shared expert's one-block copy (plan 2026-11-12)
   s.ple_ids = C * d.ple_heads * 8;
   s.cnt = (C + 63) / 64 * d.experts * 4;
-  s.items = size_t(pf_items(d, kPfC)) * 16;
+  s.items = size_t(pf_items(d, rows)) * 16;
   return s;
 }
 
-PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d) { return pp_landing_layout(size_t(kPfC) * d.hc_n() * 2, 0); }
-size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev) {
-  return dev == 0 ? 0 : kPfDepth * pf_landing_layout(d).total;
+PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d, uint32_t rows) {
+  return pp_landing_layout(size_t(rows) * d.hc_n() * 2, 0);
+}
+size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows) {
+  return dev == 0 ? 0 : kPfDepth * pf_landing_layout(d, rows).total;
+}
+size_t pf_pair_bytes(const model::Qwen4ExpDesc& d, uint32_t rows) {
+  return size_t(rows) * (size_t(d.hc_n()) * 2 + size_t(d.hc) * 4 + size_t(d.hidden) * 2);
 }
 
 size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t pos,
                                uint32_t C, bool injected, bool mtp) {
   model::validate(p, d);
   if (dev >= p.devices) throw std::out_of_range("qwen4exp::prefill_device_launches: device " + std::to_string(dev));
-  if (C == 0 || C > kPfC) throw std::invalid_argument("qwen4exp::prefill_device_launches: C = " + std::to_string(C));
+  if (C == 0 || C > kPfCWide) throw std::invalid_argument("qwen4exp::prefill_device_launches: C = " + std::to_string(C));
   const uint32_t dense = pf_dense_rows(pos, C), sparse = C - dense;
   const auto lin = [&](uint32_t N) { return size_t(2) * pf_slabs(N); };   // a slab kernel + pf_gemm per slab
   const size_t hc = 1 + lin(d.hc_down_rows()) + 1;
@@ -280,8 +287,9 @@ size_t prefill_chunk_launches(const model::Qwen4ExpDesc& d, const model::Q4Place
   for (uint32_t dev = 0; dev < p.devices; ++dev) n += prefill_device_launches(d, p, dev, pos, C, injected, mtp);
   return n;
 }
-size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len) {
-  return prefill_sizes(d, max_len).total() + (devices > 1 ? pf_link_bytes(d, dev) : 0) + pf_ring_bytes(d);
+size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len, uint32_t rows) {
+  return prefill_sizes(d, max_len, rows).total() +
+         (devices > 1 ? pf_link_bytes(d, dev, rows) + pf_pair_bytes(d, rows) : 0) + pf_ring_bytes(d);
 }
 size_t pf_ring_bytes(const model::Qwen4ExpDesc& d) { return 2 * kPfRingBytes + size_t(d.layers) * 2 * d.experts * 8; }
 
@@ -305,7 +313,7 @@ PpBalance pp_split(const model::Qwen4ExpDesc& d, uint32_t max_len, bool int8_hea
 }
 
 std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
-                             bool int8_head, bool mtp, bool debug_tap, bool prefill) {
+                             bool int8_head, bool mtp, bool debug_tap, bool prefill, uint32_t pf_rows) {
   model::validate(p, d);
   std::vector<DevicePlan> out(p.devices);
   for (uint32_t dev = 0; dev < p.devices; ++dev) {
@@ -321,12 +329,12 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     const PersistentSizes ps = persistent_sizes(d, p, dev, max_len);
     dp.kv = ps.kv_total();
     dp.state = ps.state();
-    // Spec 21-QFN-v1e: with the head, the scratch's verify rows, gdn_spec, the verify's PLE rows, the head's buffers (the
-    // last device: its KV and keys go to `kv`), a link of kVerifyRows rows, and the prefill's R rows.
+    // Spec 21-QFN-v1e: with the head, the scratch's verify rows, gdn_pend (PERF-51), the verify's PLE rows, the head's
+    // buffers (the last device: its KV and keys go to `kv`), a link of kVerifyRows rows, and the prefill's R rows.
     const uint32_t rows = mtp ? kVerifyRows : kM;
     dp.scratch = scratch_sizes(d, max_len, kDefaultQ4Attn, rows).total() + (debug_tap ? tap_bytes(d) : 0);
     if (mtp) {
-      dp.state += gdn_spec_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
+      dp.state += gdn_pend_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
       if (dev + 1 == p.devices) {
         const MtpSizes ms = mtp_sizes(d, max_len);
         dp.kv += ms.kv + ms.idx_keys + ms.idx_tail;
@@ -336,8 +344,8 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     }
     dp.link = p.devices == 2 ? link_bytes_rows(d, dev, rows) : 0;
     dp.decode_state = dp.state + dp.scratch + dp.link;
-    dp.prefill_scratch = prefill ? prefill_state(d, p.devices, dev, max_len) : 0;
-    if (prefill && mtp && dev + 1 == p.devices) dp.prefill_scratch += mtp_prefill_R_bytes(d);
+    dp.prefill_scratch = prefill ? prefill_state(d, p.devices, dev, max_len, pf_rows) : 0;
+    if (prefill && mtp && dev + 1 == p.devices) dp.prefill_scratch += mtp_prefill_R_bytes(d, pf_rows);
   }
   return out;
 }
@@ -473,10 +481,11 @@ double ExpertBudget::f() const {
 
 ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
                            bool int8_head, bool mtp, bool prefill,
-                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve) {
-  const std::vector<DevicePlan> dp = plan(d, p, max_len, int8_head, mtp, false, prefill);
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t pf_rows) {
+  const std::vector<DevicePlan> dp = plan(d, p, max_len, int8_head, mtp, false, prefill, pf_rows);
   ExpertBudget b;
   b.max_len = max_len;
+  b.pf_rows = pf_rows;
   b.devices = p.devices;
   b.mtp = mtp;
   b.prefill = prefill;
@@ -522,6 +531,7 @@ std::string budget_json(const ExpertBudget& b) {
   std::string f;
   f = std::format("{:.6f}", b.f());
   std::string s = "{\"max_len\":" + std::to_string(b.max_len) + ",\"devices\":" + std::to_string(b.devices) +
+                  ",\"pf_rows\":" + std::to_string(b.pf_rows) +
                   ",\"mtp\":" + (b.mtp ? "true" : "false") + ",\"prefill\":" + (b.prefill ? "true" : "false") +
                   ",\"int8_head\":" + (b.int8_head ? "true" : "false") + ",\"dense\":\"" +
                   model::q4_form_name(b.forms.dense) + "\",\"shared\":\"" + model::q4_form_name(b.forms.shared) +
@@ -635,6 +645,18 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
   return t;
 }
 
+double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vector<uint32_t>& prof) {
+  double hit = 0, all = 0;
+  for (uint32_t l = 0; l < t.layers; ++l)
+    for (uint32_t e = 0; e < t.experts; ++e) {
+      const double c = prof.empty() ? 1.0 : prof[size_t(l) * t.experts + e];
+      all += c;
+      hit += t.resident(l, e) ? c : 0.0;
+    }
+  const double h = all > 0 ? hit / all : 1.0, R = double(b.read_routed);
+  return ((double(b.read_non_routed) + h * R) / kTierVramGbps + (1.0 - h) * R / kTierHostGbps) / 1e6;
+}
+
 void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t) {
   if (t.layers != d.layers || t.experts != d.experts)
     throw std::logic_error("qwen4exp::apply_tier: the tier is not this descriptor's layers x experts");
@@ -654,40 +676,42 @@ void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const 
 // --- plan 21-QFN-v2b: tensor parallel ---------------------------------------------------------------------------------
 size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one) {
   size_t b = tp::kStateWords * 4 + size_t(one.top_k + 1) * one.hidden * 4;   // the state words, the MoE's slots
-  for (uint32_t s : {kTpOutSlices, one.top_k + 1}) {
-    const tp::Layout L{one.hidden, s, tp::kFoldG};
+  // the card's two layouts (qwen4exp_tp_card.h): out_proj / o_proj's chunks are its gemv's work-groups (PERF-44), the
+  // MoE's its down's
+  for (const tp::Layout& L : {tp::Layout{one.hidden, kTpOutSlices, kernels::qwen4exp::kTpOutFoldG},
+                              tp::Layout{one.hidden, one.top_k + 1, kernels::qwen4exp::kTpMoeFoldG}})
     b += L.total_bytes() + 2 * L.counter_bytes();
-  }
   return b;
 }
 
-size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one) {
+size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one, uint32_t rows) {
   // Task 4 Step 2: two chunks in flight - each its fold slots, the second its residual rows, inject weights and
   // selection rows of one QSA layer (the indexer split by rows)
-  return size_t(kTpPfChunks) * 2 * 2 * kPfC * one.hidden * 4 + size_t(pf_tiles(one, kPfC)) * kPfTm * one.hidden * 4 +
-         size_t(kTpPfChunks - 1) * kPfC * (size_t(one.hc_n()) * 2 + size_t(one.hc) * 4 + size_t(kListRow) * 4) +
+  return size_t(kTpPfChunks) * 2 * 2 * rows * one.hidden * 4 + size_t(pf_tiles(one, rows)) * kPfTm * one.hidden * 4 +
+         size_t(kTpPfChunks - 1) * rows * (size_t(one.hc_n()) * 2 + size_t(one.hc) * 4 + size_t(kListRow) * 4) +
          pf_ring_bytes(one);
 }
 
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
-                                bool int8_head, bool mtp, bool debug_tap, bool prefill) {
+                                bool int8_head, bool mtp, bool debug_tap, bool prefill, uint32_t pf_rows) {
   model::validate(p, one);
   if (!p.tp) throw std::invalid_argument("qwen4exp::tp_plan: the placement is not the tensor-parallel form");
   std::vector<DevicePlan> out;
   for (uint32_t r = 0; r < model::kQ4TpCards; ++r) {
     const model::Qwen4ExpDesc c = model::q4_tp_card(one, r);
     const model::Q4Placement pc = model::Q4Placement::one(c);
-    DevicePlan dp = plan(c, pc, max_len, int8_head, false, debug_tap, prefill)[0];
+    DevicePlan dp = plan(c, pc, max_len, int8_head, false, debug_tap, prefill, pf_rows)[0];
     dp.device = r;
-    if (prefill) dp.prefill_scratch += tp_prefill_bytes(one);
+    if (prefill) dp.prefill_scratch += tp_prefill_bytes(one, pf_rows);
     // plan() put the card's half-vocabulary embedding on it: the embedding is one card's table, whole, or absent.
     dp.weights -= loader::q4_embed_bytes(c);
     if (p.holds_embed(r)) dp.weights += loader::q4_embed_bytes(one);
     if (mtp) {
-      // Both cards verify (their halves at M rows, GDN slots, the PLE rows); the head's card adds the head whole.
+      // Both cards verify (their halves at M rows, the GDN pending rows, the PLE rows); the head's card adds the head
+      // whole.
       const bool head = p.holds_mtp(r);
       dp.mtp = head;
-      dp.state += gdn_spec_bytes(c, pc, 0) + ple_verify_bytes(c, pc, 0);
+      dp.state += gdn_pend_bytes(c, pc, 0) + ple_verify_bytes(c, pc, 0);
       dp.scratch = scratch_sizes(head ? one : c, max_len, kDefaultQ4Attn, kVerifyRows).total() +
                    (debug_tap ? tap_bytes(c) : 0);
       if (head) {
@@ -698,8 +722,8 @@ std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4P
         dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits + ms.routes;
         // the head pass's R rows, and (Task 5) its own rows at one card's widths: k||v columns / fh, q16
         if (prefill)
-          dp.prefill_scratch += mtp_prefill_R_bytes(one) + size_t(kPfC) * pf_ld(one.qkvg_n()) * 4 +
-                                size_t(kPfC) * one.q_n() * 2;
+          dp.prefill_scratch += mtp_prefill_R_bytes(one, pf_rows) + size_t(pf_rows) * pf_ld(one.qkvg_n()) * 4 +
+                                size_t(pf_rows) * one.q_n() * 2;
       }
     }
     dp.model = dp.weights + dp.rope;
@@ -712,11 +736,12 @@ std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4P
 
 ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
                               bool int8_head, bool mtp, bool prefill,
-                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve) {
-  const std::vector<DevicePlan> dp = tp_plan(one, p, max_len, int8_head, mtp, false, prefill);
+                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t pf_rows) {
+  const std::vector<DevicePlan> dp = tp_plan(one, p, max_len, int8_head, mtp, false, prefill, pf_rows);
   const model::Qwen4ExpDesc c = model::q4_tp_card(one, 0);
   ExpertBudget b;
   b.max_len = max_len;
+  b.pf_rows = pf_rows;
   b.devices = model::kQ4TpCards;
   b.mtp = mtp;
   b.prefill = prefill;
@@ -762,7 +787,7 @@ ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, u
 }
 
 size_t tp_device_launches(const model::Qwen4ExpDesc& one) {
-  return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(3) * one.layers;
+  return device_launches(one, model::Q4Placement::one(one), 0, Q4Attn::Flash) + size_t(2) * one.layers;
 }
 
 size_t tp_verify_launches(const model::Qwen4ExpDesc& one, uint32_t M, bool head) {
@@ -774,6 +799,46 @@ double tp_card_f(const ExpertBudget& b, uint32_t rank) {
   if (b.layers == 0 || b.experts == 0) return 0.0;
   const size_t n = std::min<size_t>(b.experts, b.cache[rank] / (size_t(b.layers) * b.expert_bytes));
   return double(n) / b.experts;
+}
+
+// --- PERF-36: the prompt pass's chunk rows ------------------------------------------------------------------------------
+size_t pf_lend_bytes(const model::Qwen4ExpDesc& c, uint32_t max_len, uint32_t rows, const model::Qwen4ExpDesc* tp_one) {
+  const PrefillSizes s = prefill_sizes(c, max_len, rows);   // lend_regions' list (qwen4exp_prefill.cc)
+  size_t b = s.xg + s.w + s.h + s.partials + s.slab + s.gdn + s.o + s.q16 + s.attn_out + s.idx_f32 + s.xn + s.x +
+             s.down_f32 + s.y + 2 * kPfRingBytes;
+  if (tp_one)   // the pair's fold slots and the down GEMM's rows (qwen4exp_tp_prefill.cc's lent regions)
+    b += size_t(kTpPfChunks) * 2 * 2 * rows * tp_one->hidden * 4 + size_t(pf_tiles(*tp_one, rows)) * kPfTm * tp_one->hidden * 4;
+  return b;
+}
+
+PfChunkChoice pf_chunk_choice(const model::Qwen4ExpDesc& d, const ExpertBudget& narrow, const ExpertBudget& wide,
+                              const std::vector<uint32_t>* counts, bool tp) {
+  if (narrow.pf_rows != kPfC || wide.pf_rows != kPfCWide || narrow.devices != wide.devices ||
+      narrow.max_len != wide.max_len)
+    throw std::invalid_argument("qwen4exp::pf_chunk_choice: the budgets are not kPfC's and kPfCWide's of one plan");
+  const model::Qwen4ExpDesc c = tp ? model::q4_tp_card(d, 0) : d;
+  const std::vector<uint32_t> none;
+  const std::vector<uint32_t>& prof = counts ? *counts : none;
+  // decode's residents: the budget's cache plus what the tier borrows between prefills (fill_tier's rank either way)
+  const auto decode_ms = [&](const ExpertBudget& b) {
+    ExpertBudget dec = b;
+    for (uint32_t i = 0; i < b.devices; ++i)
+      if (b.cache[i] > 0) dec.cache[i] += pf_lend_bytes(c, b.max_len, b.pf_rows, tp ? &d : nullptr);
+    return tier_decode_ms(dec, tp ? tp_fill_tier(d, dec, 0, counts) : fill_tier(d, dec, counts), prof);
+  };
+  PfChunkChoice ch;
+  ch.ms_narrow = decode_ms(narrow);
+  ch.ms_wide = decode_ms(wide);
+  const size_t lend_grow = pf_lend_bytes(c, narrow.max_len, kPfCWide, tp ? &d : nullptr) -
+                           pf_lend_bytes(c, narrow.max_len, kPfC, tp ? &d : nullptr);
+  bool room = true;
+  for (uint32_t i = 0; i < narrow.devices; ++i) {
+    ch.grow[i] = wide.non_routed[i] - narrow.non_routed[i];
+    ch.held[i] = ch.grow[i] - std::min(ch.grow[i], lend_grow);
+    room = room && wide.cache[i] > 0;
+  }
+  ch.rows = room && ch.ms_wide <= ch.ms_narrow * (1.0 + kPfWideDecodeBar) ? kPfCWide : kPfC;
+  return ch;
 }
 
 // --- spec 21-QFN-v1e: the MTP head, the verify and draft lists ---------------------------------------------------------
@@ -806,9 +871,12 @@ MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   return s;
 }
 
-size_t gdn_spec_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev) {
+size_t gdn_pend_layer_bytes(const model::Qwen4ExpDesc& d) {
+  return size_t{64} * (d.gdn_k_heads + d.gdn_v_heads) * d.gdn_head * 2 + size_t{64} * d.gdn_v_heads * 2 * 4;
+}
+size_t gdn_pend_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev) {
   const uint32_t gdn = p.count(dev) - count_qsa(d, p.first(dev), p.end(dev));
-  return line(size_t(kGdnSlots - 1) * gdn * gdn_state_bytes_per_layer(d));
+  return line(size_t(gdn) * 2 * gdn_pend_layer_bytes(d));
 }
 
 size_t ple_verify_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev) {
@@ -824,7 +892,7 @@ size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows
 }
 
 size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len) {
-  size_t b = gdn_spec_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
+  size_t b = gdn_pend_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
   b += scratch_sizes(d, max_len, kDefaultQ4Attn, kVerifyRows).total() - scratch_sizes(d, max_len, kDefaultQ4Attn).total();
   if (p.devices == 2) b += link_bytes_rows(d, dev, kVerifyRows) - link_bytes(d, dev);
   if (dev + 1 == p.devices) b += mtp_sizes(d, max_len).total();

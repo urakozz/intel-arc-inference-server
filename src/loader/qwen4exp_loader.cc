@@ -165,7 +165,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
                       const QuantScan& scan, uint32_t max_len, const model::Q4Placement& placement, LmHeadForm lm_form,
                       const std::array<size_t, runtime::kPpDevices>& caps, size_t reserve, const char* forced,
                       const runtime::qwen4exp::ExpertTier* tier, const runtime::qwen4exp::ExpertTier* tier1, bool mtp,
-                      std::chrono::steady_clock::time_point t0) {
+                      uint32_t pf_rows, std::chrono::steady_clock::time_point t0) {
   namespace rq = runtime::qwen4exp;
   const bool int8 = lm_form == LmHeadForm::Int8;
   const model::Qwen4ExpDesc card[2] = {model::q4_tp_card(d, 0), model::q4_tp_card(d, 1)};
@@ -174,7 +174,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
     const rq::ExpertTier* given = r == 0 ? tier : tier1;
     T[r] = given ? *given
            : forced && *forced
-               ? rq::tp_fill_tier(d, rq::tp_expert_budget(d, placement, max_len, int8, mtp, true, caps, reserve), r,
+               ? rq::tp_fill_tier(d, rq::tp_expert_budget(d, placement, max_len, int8, mtp, true, caps, reserve, pf_rows), r,
                                   nullptr, forced)
                : rq::all_resident(d);
     if (T[r].layers != d.layers || T[r].experts != d.experts)
@@ -206,6 +206,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
   m.desc = d;
   m.placement = placement;
   m.max_len = max_len;
+  m.pf_rows = pf_rows;
   m.int8_head = int8;
   m.mtp = mtp;
   m.checkpoint_layers = full.layers;
@@ -327,10 +328,11 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
   m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   const double gb = 1e9;
   std::print("load_qwen4exp: {}\n  model       {} ({}): {:d} of {:d} layers, tensor parallel over two cards (the "
-             "embedding {}), dense {}, routed experts int4 g{:d}; {:d} tensors, 0 unconsumed\n",
+             "embedding {}), dense {}, hyper-connections {}, routed experts int4 g{:d}; {:d} tensors, 0 unconsumed\n",
              o.snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.layers, full.layers,
              placement.ends == model::Q4TpEnds::Both ? "on both cards" : "on card 0",
-             model::q4_form_name(d.forms.dense), d.forms.expert_group, set.tensors().size());
+             model::q4_form_name(d.forms.dense), d.hc_int8 ? "int8" : "bf16", d.forms.expert_group,
+             set.tensors().size());
   std::print("  skipped     by design: {:d} visual tensors, {:d} bf16 PLE shards{}\n", visual, shards,
              mtp ? "" : (", " + std::to_string(mtp_skipped) + " mtp.* (the head not loaded)").c_str());
   for (const Q4DevicePart& P : m.parts) {
@@ -393,20 +395,23 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
   const Opened o = open(snapshot_or_repo);
   const SafetensorsSet set(o.snap);   // the headers only: the forms are read from the names
   const model::Qwen4ExpDesc pre = model::qwen4exp_desc(o.cfg, model::Q4Forms{});
-  return limited(model::qwen4exp_desc(o.cfg, q4_forms(set, pre)), layers_limit);
+  model::Qwen4ExpDesc d = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
+  d.hc_int8 = q4_hc_int8();
+  return limited(d, layers_limit);
 }
 
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement, LmHeadForm lm_form,
                             uint32_t layers_limit, bool mtp, const runtime::qwen4exp::ExpertTier* tier,
-                            const runtime::qwen4exp::ExpertTier* tier1) {
+                            const runtime::qwen4exp::ExpertTier* tier1, uint32_t pf_rows) {
   const auto t0 = std::chrono::steady_clock::now();
   const Opened o = open(snapshot_or_repo);
   const QuantConfig qc = check_qwen4exp_checkpoint_config(o.cfg);
   SafetensorsSet set(o.snap);
   // The checkpoint's own descriptor (every layer), then its forms from the names.
   const model::Qwen4ExpDesc pre = model::qwen4exp_desc(o.cfg, model::Q4Forms{});
-  const model::Qwen4ExpDesc full = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
+  model::Qwen4ExpDesc full = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
+  full.hc_int8 = q4_hc_int8();
   if (max_len == 0) throw std::runtime_error(full.name + ": max_len 0 is not a model length");
   if (max_len > full.trained_max_len)
     throw std::runtime_error(full.name + ": max_len " + std::to_string(max_len) + " exceeds the trained context " +
@@ -444,13 +449,14 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   const char* forced = std::getenv("B70_Q4_RESIDENT");
   if (placement.tp) {
     return load_tp(devices, o, ck, set, full, d, scan, max_len, placement, lm_form, caps, reserve, forced, tier, tier1, mtp,
-                   t0);
+                   pf_rows, t0);
   }
   const runtime::qwen4exp::ExpertTier T =
       tier ? *tier
       : forced && *forced
           ? runtime::qwen4exp::fill_tier(
-                d, runtime::qwen4exp::expert_budget(d, placement, max_len, lm_form == LmHeadForm::Int8, mtp, true, caps, reserve),
+                d, runtime::qwen4exp::expert_budget(d, placement, max_len, lm_form == LmHeadForm::Int8, mtp, true, caps, reserve,
+                                                    pf_rows),
                 nullptr, forced)
           : runtime::qwen4exp::all_resident(d);
   if (T.layers != d.layers || T.experts != d.experts)
@@ -476,6 +482,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   m.desc = d;
   m.placement = placement;
   m.max_len = max_len;
+  m.pf_rows = pf_rows;
   m.int8_head = int8;
   m.mtp = mtp;
   m.checkpoint_layers = full.layers;
@@ -588,10 +595,12 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   m.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   const double gb = 1e9;
-  std::print("load_qwen4exp: {}\n  model       {} ({}): {:d} of {:d} layers ({:d} QSA), dense {}, shared {}, routed experts "
-             "int4 g{:d}{}, {:d} subnormal f16 scales; {:d} tensors, every name accounted for, 0 unconsumed\n",
+  std::print("load_qwen4exp: {}\n  model       {} ({}): {:d} of {:d} layers ({:d} QSA), dense {}, shared {}, "
+             "hyper-connections {}, routed experts int4 g{:d}{}, {:d} subnormal f16 scales; {:d} tensors, every name "
+             "accounted for, 0 unconsumed\n",
              o.snap.c_str(), d.name.c_str(), d.architecture.c_str(), d.layers, full.layers, d.qsa_before(d.layers),
-             model::q4_form_name(d.forms.dense), model::q4_form_name(d.forms.shared), d.forms.expert_group,
+             model::q4_form_name(d.forms.dense), model::q4_form_name(d.forms.shared), d.hc_int8 ? "int8" : "bf16",
+             d.forms.expert_group,
              d.forms.expert_group == 128 ? " (expanded exactly to g64)" : "", scan.subnormal_scales,
              set.tensors().size());
   std::print("  skipped     by design: {:d} visual tensors, {:d} bf16 PLE shards (the int8 file replaces them){}\n", visual,

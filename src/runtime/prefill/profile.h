@@ -62,6 +62,10 @@ enum class Phase : uint32_t {
   kMoeWeights,  // the expert weights into the grouped GEMMs' B form (requant / dequant)
   kMoeGemm,     // the grouped GEMMs, gate||up and down
   kMoeCombine,  // pf_moe_combine (the weighted sum and the residual fold)
+  // The speculative path's share of the prompt pass: the MTP head's KV fill (step_mtp_kv after its final norm) and
+  // the DFlash drafter's projection of the tapped rows (project_wide or the 8-row projection lists).
+  kMtpKv,
+  kDraftProj,
   // Phase 2 Task 1: the one-time setup outside the measured call (l0-int8's pf_colmax_rot
   // scale pass, Int8State::compute_scales). Closed by its own wait so it no longer lands in
   // the walk's first bucket (it was 73 of the 114 ms "norm" row at 4k l0-int8).

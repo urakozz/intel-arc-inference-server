@@ -34,6 +34,19 @@
 #if (K % 16) != 0
 #error "K must be a multiple of 16"
 #endif
+// PERF-111, both off by default (probe_gemv --tiles' cells). GEMV_KMAJOR 1: the 256 B steps ordered [k16][n_tile]
+// instead of [n_tile][k16] (common::tiles_k_major at load), so at each step the launch's sub-groups read
+// neighbouring bytes rather than each walking its own 80 KB slab. GEMV_AHEAD A: A steps' block reads issued before
+// the first is used. Neither changes the arithmetic or its order: bitwise the default build.
+#ifndef GEMV_KMAJOR
+#define GEMV_KMAJOR 0
+#endif
+#ifndef GEMV_AHEAD
+#define GEMV_AHEAD 1
+#endif
+#if (K16 % GEMV_AHEAD) != 0
+#error "GEMV_AHEAD must divide K / 16"
+#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
@@ -51,22 +64,43 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
   float acc[M];
   for (int m = 0; m < M; ++m) acc[m] = 0.f;
 
+#define I8W_STEP(wf, k16)                                         \
+  for (int m = 0; m < M; ++m) {                                   \
+    const ushort16 xv = vload16(0, x + (size_t)m * K + k16 * 16); \
+    float a = acc[m];                                             \
+    a += wf.s0 * bf16f(xv.s0); a += wf.s1 * bf16f(xv.s1);         \
+    a += wf.s2 * bf16f(xv.s2); a += wf.s3 * bf16f(xv.s3);         \
+    a += wf.s4 * bf16f(xv.s4); a += wf.s5 * bf16f(xv.s5);         \
+    a += wf.s6 * bf16f(xv.s6); a += wf.s7 * bf16f(xv.s7);         \
+    a += wf.s8 * bf16f(xv.s8); a += wf.s9 * bf16f(xv.s9);         \
+    a += wf.sa * bf16f(xv.sa); a += wf.sb * bf16f(xv.sb);         \
+    a += wf.sc * bf16f(xv.sc); a += wf.sd * bf16f(xv.sd);         \
+    a += wf.se * bf16f(xv.se); a += wf.sf * bf16f(xv.sf);         \
+    acc[m] = a;                                                   \
+  }
+#if GEMV_KMAJOR || GEMV_AHEAD > 1
+#if GEMV_KMAJOR
+  tile = w + (size_t)n_tile * 256;
+  const size_t step = (size_t)(N / SG) * 256;
+#else
+  const size_t step = 256;
+#endif
+  for (uint k0 = 0; k0 < K16; k0 += GEMV_AHEAD) {
+    uchar16 wq[GEMV_AHEAD];
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < GEMV_AHEAD; ++j)
+      wq[j] = intel_sub_group_block_read_uc16(tile + j * step);
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < GEMV_AHEAD; ++j) {
+      const float16 wf = convert_float16(as_char16(wq[j]));
+      I8W_STEP(wf, (k0 + j))
+    }
+    tile += GEMV_AHEAD * step;
+  }
+#else
   for (uint k16 = 0; k16 < K16; ++k16, tile += 256) {
     const float16 wf = convert_float16(as_char16(intel_sub_group_block_read_uc16(tile)));
-    for (int m = 0; m < M; ++m) {
-      const ushort16 xv = vload16(0, x + (size_t)m * K + k16 * 16);
-      float a = acc[m];
-      a += wf.s0 * bf16f(xv.s0); a += wf.s1 * bf16f(xv.s1);
-      a += wf.s2 * bf16f(xv.s2); a += wf.s3 * bf16f(xv.s3);
-      a += wf.s4 * bf16f(xv.s4); a += wf.s5 * bf16f(xv.s5);
-      a += wf.s6 * bf16f(xv.s6); a += wf.s7 * bf16f(xv.s7);
-      a += wf.s8 * bf16f(xv.s8); a += wf.s9 * bf16f(xv.s9);
-      a += wf.sa * bf16f(xv.sa); a += wf.sb * bf16f(xv.sb);
-      a += wf.sc * bf16f(xv.sc); a += wf.sd * bf16f(xv.sd);
-      a += wf.se * bf16f(xv.se); a += wf.sf * bf16f(xv.sf);
-      acc[m] = a;
-    }
+    I8W_STEP(wf, k16)
   }
+#endif
   const float s = scales[n];
   for (int m = 0; m < M; ++m) out[(size_t)m * N + n] = acc[m] * s;
 }

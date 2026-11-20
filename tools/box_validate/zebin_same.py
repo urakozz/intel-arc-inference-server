@@ -26,7 +26,10 @@ def sections(path: str, root: str):
     for h in hdr:
         name = names[h[0]:names.index(b"\0", h[0])]
         body = b"" if h[1] == 8 else data[h[4]:h[4] + h[5]]   # SHT_NOBITS has no bytes
-        out.append((name, h[1], body.replace(root.encode(), b"<tree>")))
+        # A path into the tree spelled from its root either way: older builds named -I<tree>/src/kernels, builds
+        # since the ocloc cache name src/kernels from the tree's root (cmake/ocloc.cmake).
+        body = body.replace(root.encode() + b"/", b"").replace(root.encode(), b"<tree>")
+        out.append((name, h[1], body))
     return out
 
 

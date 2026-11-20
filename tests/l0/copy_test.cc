@@ -14,6 +14,9 @@
 // allocations (default one). B70_COPY_PINNED_FILL_GB=<f>: f GiB of device memory allocated and written on each card
 // first. B70_COPY_PINNED_RESIDENT=1: zeContextMakeMemoryResident on card 0 then card 1 before the copies. A step that
 // takes over B70_COPY_PINNED_WATCHDOG seconds (default 120) prints COPY_HANG and exits 2.
+//
+// Also: the queue groups and copy-only engines the runtime exposes are printed, and a host -> device copy on the first
+// copy engine's list (l0::CmdList::immediate_copy) is byte-compared.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -184,6 +187,35 @@ int pinned_probe(size_t gb) {
   return 0;
 }
 
+void copy_engine(l0::Context& ctx, l0::CmdList& imm) {
+  uint32_t ng = 0;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(ctx.device(), &ng, nullptr));
+  std::vector<ze_command_queue_group_properties_t> g(ng);
+  for (auto& q : g) q.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(ctx.device(), &ng, g.data()));
+  for (uint32_t i = 0; i < ng; ++i)
+    std::printf("queue group %u: %s%s engines %u\n", i,
+                g[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE ? "compute " : "",
+                g[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY ? "copy " : "", g[i].numQueues);
+  const std::vector<l0::CopyEngine> ce = ctx.copy_engines();
+  std::printf("copy-only engines: %zu", ce.size());
+  for (const l0::CopyEngine& e : ce) std::printf(" (group %u, index %u)", e.ordinal, e.index);
+  std::printf("\n");
+
+  const size_t n = (size_t(64) << 20) + 3 * 4096;
+  l0::Mem host(ctx, l0::MemKind::Host, n);
+  for (size_t i = 0; i < n; ++i) host.as<uint8_t>()[i] = static_cast<uint8_t>(i * 13 + (i >> 16));
+  l0::Mem dev(ctx, l0::MemKind::Device, n);
+  imm.fill(dev.ptr(), 0u, n);
+  l0::CmdList bcs = l0::CmdList::immediate_copy(ctx);
+  bcs.copy(dev.ptr(), host.ptr(), n);
+  bcs.host_synchronize();
+  std::vector<uint8_t> back(n);
+  imm.copy(back.data(), dev.ptr(), n);
+  CHECK_EQ(std::memcmp(back.data(), host.ptr(), n), 0);
+  std::printf("copy-engine copy: %zu bytes identical\n", n);
+}
+
 }  // namespace
 
 int main() {
@@ -206,6 +238,7 @@ int main() {
   imm.fill(shared.ptr(), 0xA5A5A5A5u, 64);
   CHECK_EQ(shared.as<uint32_t>()[0], 0xA5A5A5A5u);
   CHECK_EQ(shared.as<uint32_t>()[15], 0xA5A5A5A5u);
+  copy_engine(ctx, imm);
   std::puts("copy_test OK");
   if (const char* s = std::getenv("B70_COPY_STRESS")) return stress(ctx, imm, std::atof(s));
   return 0;

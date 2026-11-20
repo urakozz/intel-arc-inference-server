@@ -37,6 +37,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <optional>
 #include <print>
 #include <random>
 #include <stdexcept>
@@ -130,11 +132,21 @@ struct PipelineEngineAdapterT : server::EngineIface {
 
   void reset() override {
     pending_ = false;   // the session is discarded; nothing to commit
+    first_ = false;
     eng.reset();
   }
 
   // EngineAdapter's measurement lines: the previous request's, when the next one starts.
   void prefill(const std::vector<uint32_t>& ids) override {
+    begin_request();
+    eng.prefill(ids);
+    first_ = true;
+    first_host_ = false;
+    gen_start_ = std::chrono::steady_clock::now();
+  }
+
+  // A new request (prefill(), or load_head() in its place): the previous one's summary lines, the counters reset.
+  void begin_request() {
     rng_seeded = false;   // a new request: its first sampled step reseeds (EngineAdapter's rule)
     if (gen_tokens_ > 0) {
       const double ms =
@@ -167,11 +179,10 @@ struct PipelineEngineAdapterT : server::EngineIface {
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
-    eng.prefill(ids);
-    gen_start_ = std::chrono::steady_clock::now();
   }
 
   uint32_t step(const server::Sampling& sampling) override {
+    sample_first(sampling);
     flush_commit();
     const uint32_t id = eng.generate(1)[0];
     if (!sampling.greedy) sample_into_pending(sampling);
@@ -181,11 +192,19 @@ struct PipelineEngineAdapterT : server::EngineIface {
 
   uint32_t max_len() override { return eng.max_len(); }
   uint32_t pos() override { return pending_ ? pending_pos_ + pending_j_ + 1 : eng.pos(); }
+  // PERF-91: EngineAdapter::pending_id - with no deferred commit, the engine's pending id (what step() and every
+  // iteration below return first); a sampled request's first id is drawn here, as the call would draw it.
+  std::optional<uint32_t> pending_id(const server::Sampling& sampling) override {
+    if (pending_) return std::nullopt;
+    sample_first(sampling);
+    return eng.pending();
+  }
 
   // --- spec 8: one speculative iteration (EngineAdapter::step_many) -------------------------
   uint32_t mtp_k() override { return k_; }
 
   std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
+    sample_first(sampling);
     if constexpr (kTap) {
       if (df_) {   // spec 19d; spec 19 v3c: the commit's projection rides with the next draft where it can
         flush_commit(HasDeferredCommit<Engine>::value);
@@ -328,6 +347,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
                                             const Proposer& propose) override {
     if constexpr (HasDrafterWindow<Engine>::value && kTap) {
       if (!dflash_lookup_) throw std::logic_error("PipelineEngineAdapter::step_drafts_or_many without --spec dflash-lookup");
+      sample_first(sampling);
       flush_commit(HasDeferredCommit<Engine>::value);
       const uint32_t x = eng.pending();
       const std::vector<uint32_t> d = propose(x);
@@ -360,6 +380,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
   uint32_t verify_k() override { return lookup_ ? Engine::kMaxDraft : 0; }
 
   std::vector<uint32_t> step_drafts(const server::Sampling& sampling, const Proposer& propose) override {
+    sample_first(sampling);
     flush_commit();
     const uint32_t x = eng.pending();
     const std::vector<uint32_t> d = propose(x);
@@ -433,7 +454,29 @@ struct PipelineEngineAdapterT : server::EngineIface {
   }
   void load_state(const void* host, uint32_t p) override {
     pending_ = false;
+    first_ = false;
     eng.load_state(host, p);
+  }
+  // PERF-92 (EngineAdapter's): the prompt pass's last logits row (fp32, V) then the pending id - read in the prompt-end
+  // hook, after the head on the last card (pp) / both cards' halves merged (tp) has left both. load_head puts the id back
+  // on every card and keeps the row on the host for sample_first. What MTP drafts from (the head's hidden row and KV
+  // layer) and the DFlash drafter's ring are in the state and the KV already.
+  size_t head_bytes() override { return size_t(V_) * sizeof(float) + sizeof(uint32_t); }
+  void save_head(void* host) override {
+    auto* h = static_cast<uint8_t*>(host);
+    eng.read_logits_into(reinterpret_cast<float*>(h), 1);
+    const uint32_t id = eng.pending();
+    std::memcpy(h + size_t(V_) * sizeof(float), &id, sizeof(uint32_t));
+  }
+  void load_head(const void* host) override {
+    begin_request();
+    const auto* h = static_cast<const uint8_t*>(host);
+    std::memcpy(rows_ + size_t(Engine::kMaxDraft) * V_, h, size_t(V_) * sizeof(float));   // sample_into_pending's row
+    uint32_t id;
+    std::memcpy(&id, h + size_t(V_) * sizeof(float), sizeof(uint32_t));
+    eng.set_token(id);
+    first_ = first_host_ = true;
+    gen_start_ = std::chrono::steady_clock::now();
   }
   void save_kv(uint32_t b, uint32_t e, void* host) override {
     flush_commit();
@@ -445,14 +488,27 @@ struct PipelineEngineAdapterT : server::EngineIface {
     rng_seeded = false;
     flush_commit();
     eng.ingest(ids);
+    first_ = true;
+    first_host_ = false;
+  }
+
+  // EngineAdapter::sample_first: after a prefill or ingest the pending id is the argmax of the prompt's last row, which
+  // the engine leaves in its logits row (read_logits_into(host, 1)); a sampled request draws it from that row.
+  // PERF-92: after load_head the row is already on the host (`first_host_`).
+  void sample_first(const server::Sampling& sampling) {
+    if (!first_) return;
+    first_ = false;
+    const bool host = std::exchange(first_host_, false);
+    if (!sampling.greedy) sample_into_pending(sampling, host);
   }
 
   // The step's logits row (device 1's), filtered and drawn as EngineAdapter's sample(); the
   // id replaces the argmax as the pending id on both devices. The RNG seeds itself once per request.
-  void sample_into_pending(const server::Sampling& sampling) {
+  // `host`: the row is in place already (load_head's).
+  void sample_into_pending(const server::Sampling& sampling, bool host = false) {
     seed_rng(sampling);
     float* row = rows_ + size_t(Engine::kMaxDraft) * V_;
-    eng.read_logits_into(row, 1);
+    if (!host) eng.read_logits_into(row, 1);
     eng.set_token(server::draw(server::filter_probs(row, vocab_used, sampling), rng));
   }
 
@@ -464,6 +520,8 @@ struct PipelineEngineAdapterT : server::EngineIface {
   float* rows_ = nullptr;   // the engine's pinned rows: q [kMaxDraft][V] then p [kMaxDraft + 1][V]
   std::mt19937_64 rng;
   bool rng_seeded = false;
+  bool first_ = false;   // the pending id is still the prompt pass's argmax
+  bool first_host_ = false;   // PERF-92: that row is in the sample row of rows_ (load_head)
   uint32_t gen_tokens_ = 0;
   std::chrono::steady_clock::time_point gen_start_{};
   uint32_t k_ = 0;

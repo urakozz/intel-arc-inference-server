@@ -13,8 +13,7 @@ Synthetic traces built here with known answers (21-QFN-v1a's TRACE_FORMAT, writt
 - M = K + 1 unions: repeated rows give 10 a layer, disjoint rows 10 M;
 - prefill: chunks of one repeated row stream 10 experts a layer;
 - counts sum to T x L x k; the profile round-trips;
-- Laguna's shape (spec 30): §7.1's decode table (+-1 t/s) and §8's drafter table (+-0.02) from the formulas; prompt and
-  answer rows scored apart; verify unions to 8 rows (u(M)); `project --shape laguna` ends in the stop rule's verdict;
+- verify unions to 8 rows (u(M));
 - the tiny model's own traces (qwen4exp_ref.py trace on a 16-expert / top-4 tiny made by qwen4exp_make_tiny.py over
   q4exp_agentic and code, at most 512 ids each): every subcommand runs.
 """
@@ -54,7 +53,7 @@ class Skip(Exception):
     pass
 
 
-def write_trace(d, name, ids, p=None, onorm=None, mtp_ids=None, experts=64, mtp=True, answer_from=None):
+def write_trace(d, name, ids, p=None, onorm=None, mtp_ids=None, experts=64, mtp=True):
     """ids int [T][L][k] (each row's k distinct ids, sorted here); p / onorm default 1 / k and 1."""
     os.makedirs(d, exist_ok=True)
     ids = np.sort(np.asarray(ids, dtype=np.int32), axis=-1)
@@ -70,8 +69,6 @@ def write_trace(d, name, ids, p=None, onorm=None, mtp_ids=None, experts=64, mtp=
         t["mtp_onorm"] = np.where(m >= 0, 1.0, 0.0).astype(np.float32)
     meta = {"model": "synthetic", "checkpoint": "/synthetic", "checkpoint_revision": "synth0", "source": name,
             "T": str(T), "layers": str(L), "top_k": str(k), "experts": str(experts), "format": "test"}
-    if answer_from is not None:
-        meta["answer_from"] = str(answer_from)
     save_file(t, os.path.join(d, f"{name}.routes.safetensors"), metadata=meta)
 
 
@@ -472,64 +469,6 @@ def test_project_per_device_and_swaps():
     print(f"  per card h {rows[32768]['h']} on its own layers; swaps applied at f 0.5 only, their copies charged")
 
 
-SPEC30_DECODE = {   # spec 30 §7.1: h -> layer split, tensor parallel, the same with spec 21-QFN-v2's constants (t/s)
-    1.00: (85, 128, 101, 185), 0.99: (73, 113, 84, 156), 0.976: (60, 98, 67, 127), 0.95: (45, 77, 50, 95),
-    0.92: (36, 62, 38, 74), 0.90: (31, 55, 33, 64), 0.88: (27, 50, 29, 57), 0.85: (24, 43, 25, 48),
-    0.80: (19, 35, 20, 39)}
-SPEC30_DRAFTER = {  # spec 30 §8: (tau, u) -> speedup at h 1.00, 0.976, 0.95, 0.90 (layer split, 3 ms a draft)
-    (3.5, 4.9): (1.27, 1.03, 0.93, 0.85), (4.5, 4.9): (1.63, 1.32, 1.20, 1.09), (4.5, 3.5): (2.02, 1.73, 1.60, 1.48),
-    (6.0, 4.9): (2.17, 1.77, 1.59, 1.45)}
-
-
-def test_laguna_decode_table():
-    sh = OC.SHAPES["laguna"]
-    for h, want in SPEC30_DECODE.items():
-        got = [OC.two_constant_tps(sh, h, tp, up) for up in (False, True) for tp in (False, True)]
-        assert all(abs(g - w) <= 1.0 for g, w in zip(got, want)), (h, got, want)
-    # §7.1 at depth: h 0.976, the layer split 58 / 50 / 42 / 33 t/s at 4k / 32k / 64k / 128k
-    for ctx, want in ((4096, 58), (32768, 50), (65536, 42), (131072, 33)):
-        got = OC.two_constant_tps(sh, 0.976, ctx=ctx)
-        assert abs(got - want) <= 1.0, (ctx, got, want)
-    print("  spec 30 §7.1's table (9 h x 4) and its depth row within 1 t/s")
-
-
-def test_laguna_drafter_table():
-    sh = OC.SHAPES["laguna"]
-    for (tau, u), want in SPEC30_DRAFTER.items():
-        got = [OC.drafter_speedup(sh, h, u, tau) for h in (1.0, 0.976, 0.95, 0.90)]
-        assert all(abs(g - w) <= 0.02 for g, w in zip(got, want)), (tau, u, got, want)
-    print("  spec 30 §8's drafter table (4 x 4) within 0.02")
-
-
-def test_answer_split():
-    """Prompt rows route to experts [0, 128), answer rows to [128, 256): a fill at f 0.5 from both halves' counts
-    holds the busier set, so the two parts score apart; answer_from absent -> no parts."""
-    d = os.path.join(TMP, "answer")
-    L, k, E = 47, 10, 256
-    for j, (Tp, Ta) in enumerate(((600, 100), (580, 120), (620, 80), (590, 110))):
-        prompt = cycling_rows(Tp, L, k, lambda l: 128)
-        answer = cycling_rows(Ta, L, k, lambda l: 128, offset=128)
-        write_trace(d, f"t{j}_task-f{j}", np.concatenate([prompt, answer]), experts=E, mtp=False, answer_from=Tp)
-    tr = OC.load_traces(d, shape="laguna")
-    assert tr[0].answer_from == 600
-    r = OC.curve(tr, L, E, [0.5], "hash")
-    row = r["rows"][0]
-    assert r["parts"] == ["prompt", "answer"]
-    assert row["uniform_held_prompt"] == 1.0 and row["uniform_held_answer"] == 0.0, row
-    res = OC.resident_uniform(OC.counts_of(tr, L, E), 0.5)
-    a, b = OC.hit_rate(tr, res, "answer")
-    assert (a, b) == (0, sum(t.T - t.answer_from for t in tr) * L * k)
-    d2 = os.path.join(TMP, "answer-none")
-    write_trace(d2, "code", cycling_rows(50, 2, 3, lambda l: 12), experts=12, mtp=False)
-    assert OC.curve(OC.load_traces(d2), 2, 12, [0.5], "none")["parts"] == []
-    try:
-        OC.load_traces(d2, shape="laguna")
-        raise AssertionError("a 2-layer trace passed as Laguna's shape")
-    except SystemExit:
-        pass
-    print("  prompt rows h 1, answer rows h 0 at f 0.5; no answer_from -> no parts; a wrong shape is refused")
-
-
 def test_mtp_unions_to_8():
     d = os.path.join(TMP, "mtp8")
     L, k, E, T = 3, 10, 256, 64
@@ -550,36 +489,10 @@ def test_mtp_unions_to_8():
     print("  disjoint rows: u(M) = M for M 2..8; misses equal the per-window brute force")
 
 
-def test_project_laguna_cli():
-    """Laguna-shaped traces (47 layers, 256 experts, top-10) that route only [0, 200): at f 0.80..0.88 every routed
-    expert is resident (h 1) -> GO; curve, mtp --K 7 and project chain through their JSON."""
-    d = os.path.join(TMP, "laguna-cli")
-    L, k, E = 47, 10, 256
-    for j in range(4):
-        write_trace(d, f"t{j}_task-f{j}", cycling_rows(400, L, k, lambda l: 200), experts=E, mtp=False,
-                    answer_from=300)
-    cj, mj = os.path.join(TMP, "lc.curve.json"), os.path.join(TMP, "lc.mtp.json")
-    py = [sys.executable, os.path.join(_HERE, "offload_curve.py")]
-    for cmd in (["curve", "--traces", d, "--shape", "laguna", "--f", "0.70:0.90:0.01", "--json", cj],
-                ["mtp", "--traces", d, "--shape", "laguna", "--K", "1,2,3,4,5,6,7", "--f", "0.88", "--json", mj]):
-        r = subprocess.run(py + cmd, capture_output=True, text=True)
-        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
-    r = subprocess.run(py + ["project", "--shape", "laguna", "--curve", cj, "--mtp", mj], capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
-    last = r.stdout.strip().splitlines()[-1]
-    assert last.startswith("GO: answer-position h 1.0000"), last
-    u8 = next(x["u"] for x in json.load(open(mj))["K"] if x["M"] == 8)
-    assert u8 == 8.0, u8                     # cycling rows of 10 consecutive ids: 8 rows touch 80 distinct
-    want = "KEEP" if OC.drafter_speedup(OC.SHAPES["laguna"], 1.0, u8, 5.0) >= 1.25 else "STRUCK"
-    assert last.endswith(f"against 1.25x)") and f"DRAFTER: {want}" in last, last
-    print(f"  project --shape laguna: {last}")
-
-
 TESTS = [test_curve_analytic, test_holdout_disjoint, test_swap_never_lands_is_static, test_mtp_unions,
          test_prefill_repeated_row, test_counts_and_profile_roundtrip, test_cli_synthetic, test_tiny_model_traces,
          test_project_spec_table, test_tp_spec_table, test_swap_policies, test_project_stop_flips,
-         test_project_per_device_and_swaps, test_laguna_decode_table, test_laguna_drafter_table, test_answer_split,
-         test_mtp_unions_to_8, test_project_laguna_cli]
+         test_project_per_device_and_swaps, test_mtp_unions_to_8]
 
 
 def main() -> None:

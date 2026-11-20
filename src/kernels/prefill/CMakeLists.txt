@@ -117,6 +117,9 @@ add_ocloc_kernel(pf_gdn_front_PL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front
 add_ocloc_kernel(pf_gdn_scan_OB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl
                  DEFINES SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1)
 add_ocloc_kernel(pf_gated_head_OB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl DEFINES HEAD_SG=1 HEAD_OBF16=1)
+# Ornith's one-launch intra-chunk kernel (A, T, W / U, A2 - pf_gdn_intra.cl) at Qwen3.8's 16 / 48 heads, judged not
+# bitwise; gdn.cc binds it on the one-card l0 walk (l0-int8 keeps pf_gdn_wy_WB's four). Additive.
+add_ocloc_kernel(pf_gdn_intra SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_intra.cl DEFINES INTRA_WU2=1)
 
 # --- The execution-context probe (plan 6b Task 2) ---------------------------
 # Bound only by tests/prefill/context_test.cc; it proves the immediate list's
@@ -145,6 +148,15 @@ add_ocloc_kernel(pf_gemm_T0_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 RASTER=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
 add_ocloc_kernel(pf_gemm_T0_SILU_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1 RASTER=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
+# The bf16-C form (C_BF16: rne of each fp32 sum) for the qkv||z partials of Ornith and Qwen3.8-Flash-Next, whose
+# readers (pf_gdn_front / pf_gated_head _PB) round them to those words anyway. Additive.
+if(B70_ORNITH OR B70_Q4EXP)
+  add_ocloc_kernel(pf_gemm_T0_B16 SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 C_BF16=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # its raster form (a chunk past one wave a slab: Ornith's, Qwen3.8-Flash-Next's 4096-row chunk)
+  add_ocloc_kernel(pf_gemm_T0_B16_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 C_BF16=1 RASTER=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+endif()
 
 # Open-work 3a: pf_gemm for a short chunk (pf_gemm_small.cl), bit-identical to the two above:
 # NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups a work-group - the two tiles
@@ -339,6 +351,14 @@ if(B70_MTP)
     add_ocloc_kernel(pf_bf16_slab_K${K} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_bf16_slab.cl
                      DEFINES K=${K})
   endforeach()
+  # PERF-85: the head's pass in fewer launches, bitwise - the gather and both pre-fc norms in one (MTP_FRONT), the
+  # input norm's fold + finish in one (ZERO_RESID), and attn_prep over the kv heads only (KV_ONLY).
+  add_ocloc_kernel(pf_mtp_front_K5120_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
+                   DEFINES K=5120 S_PREV=0 FOLD_G=20 MTP_FRONT=1)
+  add_ocloc_kernel(pf_res_norm_K5120_SP1_G20_Z SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
+                   DEFINES K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+  add_ocloc_kernel(pf_attn_prep_q16_KVO SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 KV_ONLY=1)
 endif()
 
 # Spec 12b (`--kv-cache int8`): the prefill path over the int8 KV cache, from the same
@@ -376,6 +396,8 @@ endif()
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   add_ocloc_kernel(pf_attn_prep_q16_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
                    DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 KV_PAGED=${KV_PAGE})
+  add_ocloc_kernel(pf_attn_prep_q16_PG${KV_PAGE}_KVO SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 KV_PAGED=${KV_PAGE} KV_ONLY=1)
   add_ocloc_kernel(pf_flash_attn_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV_PAGED=${KV_PAGE} OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_flash_attn_split_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
@@ -455,11 +477,8 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
                    DEFINES ${PF_ORNITH_GDN} HEAD_SG=1 HEAD_OBF16=1)
   # The qkv||z partials as the bf16 words their readers round them to (a chunk past kPfSmallMaxRows rows, which
-  # runs pf_gemm): the GEMM's bf16-C form and the front / head reading it - bitwise. Additive.
-  add_ocloc_kernel(pf_gemm_T0_B16 SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 C_BF16=1
-                   OPTIONS -cl-intel-256-GRF-per-thread)
-  add_ocloc_kernel(pf_gemm_T0_B16_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 C_BF16=1 RASTER=1
-                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # runs pf_gemm): the GEMM's bf16-C forms (pf_gemm_T0_B16 / _R above, shared with Qwen3.8-Flash-Next) and the front /
+  # head reading them - bitwise. Additive.
   add_ocloc_kernel(pf_gated_head_GK16V32_PB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
                    DEFINES ${PF_ORNITH_GDN} HEAD_SG=1 HEAD_OBF16=1 QKVZ_BF16=1)
   add_ocloc_kernel(pf_gdn_front_GK16V32_PB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
@@ -563,6 +582,13 @@ if(B70_ORNITH AND B70_MTP)
     add_ocloc_kernel(pf_bf16_slab_K${K} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_bf16_slab.cl
                      DEFINES K=${K})
   endforeach()
+  # PERF-85 at Ornith's shapes (spec 8's block above has Qwen3.8's).
+  add_ocloc_kernel(pf_mtp_front_K2048_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
+                   DEFINES K=2048 S_PREV=0 FOLD_G=20 MTP_FRONT=1)
+  add_ocloc_kernel(pf_res_norm_K2048_SP1_G20_Z SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
+                   DEFINES K=2048 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+  add_ocloc_kernel(pf_attn_prep_q16_Q16KV2_KVO SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA} KV_ONLY=1)
 endif()
 # ==== Spec 15e ================================================================ (end) ====
 

@@ -12,6 +12,14 @@
 // No sum is re-associated and no rounding point moves, so x and the residual are the two-launch walk's
 // bytes; tests/prefill/pf_prep_test.cc compares every byte. The group sums are not written: the
 // pipeline-parallel hand-off (spec 16c), which ships them, keeps the two-launch walk.
+//
+// PERF-85, the MTP head's prompt pass (runtime/prefill/step.cc step_mtp_kv), two more forms of the same text:
+//   ZERO_RESID (S_PREV 1): pf_res_fold's _Z fold - the residual starts at the partials, rne(0.0f + partials) -
+//      then the norm: the head's input_layernorm over fc's output, bitwise pf_res_fold _Z + pf_norm_finish.
+//   MTP_FRONT (S_PREV 0): kernel pf_mtp_front, grid (1, M, 2) - pf_embed_gather of ids[m] and the two pre-fc norms
+//      in one launch: z 0 the embedding row normed by w_e into x[m][0, K), z 1 the hidden row hid[m] normed by w_h
+//      into x[m][K, 2K) (pf_norm_finish's X_STRIDE 2K). The S_PREV 0 fold writes its row back unchanged, so only x
+//      is written: bitwise the five launches (gather, fold + finish twice).
 
 #ifndef K
 #error "pf_norm_fused: K (the hidden size) must be defined"
@@ -25,6 +33,12 @@
 #ifndef FOLD_G
 #define FOLD_G 20
 #endif
+#ifndef ZERO_RESID
+#define ZERO_RESID 0
+#endif
+#if ZERO_RESID && S_PREV != 1
+#error "pf_norm_fused: ZERO_RESID starts the residual at the partials (S_PREV 1)"
+#endif
 #define WG 256
 #define SG 16
 #define FOLD_CHUNK ((K + FOLD_G - 1) / FOLD_G)
@@ -32,21 +46,39 @@
 #if FOLD_CHUNK > WG
 #error "pf_norm_fused: a fold group wider than the work-group (pf_res_fold's lanes would add twice)"
 #endif
+#if defined(MTP_FRONT) && S_PREV != 0
+#error "pf_norm_fused: MTP_FRONT norms rows as they are (S_PREV 0)"
+#endif
 
 #include "bf16.h"
 
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
+#ifdef MTP_FRONT
+__kernel void pf_mtp_front(__global const uint* restrict ids,
+                           __global const ushort* restrict embed,
+                           __global const ushort* restrict hid,
+                           __global const float* restrict w_e,
+                           __global const float* restrict w_h,
+                           __global ushort* restrict x_out, uint m_count) {
+#else
 __kernel void pf_res_norm(__global const float* restrict partials,
                           __global ushort* restrict resid,
                           __global const float* restrict norm_w,
                           __global ushort* restrict x_out, uint m_count) {
+#endif
   const uint m = get_group_id(1);
   const uint lid = get_local_id(0);
   const uint sg = lid / SG, lane = lid % SG;
   __local float sq[K];
   __local float gs[FOLD_G];
+#ifdef MTP_FRONT
+  const uint z = get_group_id(2);
+  __global const ushort* rp = z == 0 ? embed + (size_t)ids[m] * K : hid + (size_t)m * K;
+  __global const float* restrict norm_w = z == 0 ? w_e : w_h;
+#else
   __global ushort* rp = resid + (size_t)m * K;
+#endif
 
   ushort rb[PER];
 #pragma unroll
@@ -58,7 +90,11 @@ __kernel void pf_res_norm(__global const float* restrict partials,
 #else
       float acc = 0.f;
       acc += partials[(size_t)m * K + k];
+#if ZERO_RESID
+      const ushort r_b = rne_bf16(acc);
+#else
       const ushort r_b = rne_bf16(bf16f(rp[k]) + bf16f(rne_bf16(acc)));
+#endif
       rp[k] = r_b;
 #endif
       rb[i] = r_b;
@@ -99,6 +135,10 @@ __kernel void pf_res_norm(__global const float* restrict partials,
 #pragma unroll
   for (uint i = 0; i < PER; ++i) {
     const uint k = lid + i * WG;
+#ifdef MTP_FRONT
+    if (k < K) x_out[(size_t)m * 2 * K + z * K + k] = rne_bf16(bf16f(rb[i]) * rstd * norm_w[k]);
+#else
     if (k < K) x_out[(size_t)m * K + k] = rne_bf16(bf16f(rb[i]) * rstd * norm_w[k]);
+#endif
   }
 }

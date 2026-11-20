@@ -33,7 +33,7 @@ static_assert(offsetof(Control, pos) == kernels::ctrl_index::kPos * 4 &&
               "runtime::Control and CTRL_DEFINES disagree");
 static_assert(kM == 1, "the Qwen3.8-Flash-Next decode binaries are M = 1 only");
 static_assert(kVerifyRows == kq::kMtpVerifyRows, "the verify rows moved (sizes vs kernels)");
-static_assert(offsetof(Control, gdn_live) == 19 * 4, "gdn_step's CTRL_LIVE (19) is not Control::gdn_live");
+static_assert(offsetof(Control, gdn_pend) == 30 * 4, "gdn_step's CTRL_PEND (30) is not Control::gdn_pend");
 
 constexpr uint32_t kWgGdn = 256, kGdnChunks = 4, kWgGated = 128, kWgAttnPrep = 256;
 
@@ -53,6 +53,7 @@ class Walk {
         step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
+    if (spec_.kind == ListKind::GdnFlush) return gdn_flush();
     if (tp_)
       check_tp();
     else
@@ -97,6 +98,7 @@ class Walk {
       case ListKind::Draft:
         want = tp_ && !part_.mtp ? kTpDraftHeadLaunches : draft_launches(b_.attn, spec_.select);
         break;
+      case ListKind::GdnFlush: break;
     }
     require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s " + kind_name() + " list has " +
                                             std::to_string(step_.kernel_count) + " launches, not the " +
@@ -114,6 +116,7 @@ class Walk {
       case ListKind::Decode: return "decode";
       case ListKind::Verify: return "verify (M = " + std::to_string(M_) + ")";
       case ListKind::Draft: return "draft step " + std::to_string(spec_.draft);
+      case ListKind::GdnFlush: return "GDN flush";
     }
     return "?";
   }
@@ -173,7 +176,8 @@ class Walk {
     std::vector<std::string> need;
     if (spec_.kind != ListKind::Decode) {
       require(mtp_ && mtp_->bufs && mtp_->embed, "a " + kind_name() + " list without the MTP head's binding");
-      require(b_.rows == kVerifyRows && b_.gdn_spec, "the MTP lists need the buffers' verify rows and GDN slots");
+      require(b_.rows == kVerifyRows && b_.gdn_pend, "the MTP lists need the buffers' verify rows and GDN pending "
+                                                     "rows");
       if (b_.holds_ple()) require(b_.ple_gated && b_.ple_gn, "the PLE layer's device holds no verify PLE rows");
       if (last) {
         require(part_.mtp && part_.mtp_fc && part_.mtp_mixer, "the last device holds no MTP head (load with mtp)");
@@ -193,7 +197,7 @@ class Walk {
     else if (spec_.kind == ListKind::Verify)
       need = kq::verify_variants(d_, M_, int8, eager, bf16s, mtp_->single, lkind());
     else
-      need = kq::draft_variants(int8, eager, mtp_->single);
+      need = kq::draft_variants(int8, eager, mtp_->single, d_.hc_int8);
     for (const std::string& v : need)   // a missing binary is named before a command is appended
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON" +
@@ -217,8 +221,9 @@ class Walk {
     require(spec_.kind == ListKind::Verify ? M_ >= 1 && M_ <= b_.rows : M_ == 1,
             "a tensor-parallel " + kind_name() + " list over buffers of " + std::to_string(b_.rows) + " rows");
     if (spec_.kind != ListKind::Decode) {
-      require(mtp_ && b_.rows == kVerifyRows && b_.gdn_spec && (!b_.holds_ple() || (b_.ple_gated && b_.ple_gn)),
-              "a tensor-parallel " + kind_name() + " list needs the head's binding, the verify rows and GDN slots");
+      require(mtp_ && b_.rows == kVerifyRows && b_.gdn_pend && (!b_.holds_ple() || (b_.ple_gated && b_.ple_gn)),
+              "a tensor-parallel " + kind_name() + " list needs the head's binding, the verify rows and the GDN "
+              "pending rows");
       if (part_.mtp)
         require(part_.mtp_fc && part_.mtp_mixer && mtp_->bufs && mtp_->embed &&
                     b_.partials.size() >= scratch_sizes(d_, b_.max_len, b_.attn, kVerifyRows).partials,
@@ -236,47 +241,38 @@ class Walk {
     const unsigned rank = tp_->link->rank;
     std::vector<std::string> need = {
         kq::embed_variant(M_), kq::tp_moe_variant(tbl, rank, M_), kq::tp_moe_variant(tbl, rank, M_, M_ > 1 && !spec_.opt.force_per_row_moe),
-        spec_.kind == ListKind::Verify ? kq::tp_gdn_slots_variant(M_) : kq::tp_gdn_variant(),
+        spec_.kind == ListKind::Verify ? kq::tp_gdn_defer_variant(M_) : kq::tp_gdn_variant(),
         kq::tp_gated_head_sig_variant(M_), kq::tp_attn_prep_variant(M_), kq::tp_qsa_attn_variant(M_),
-        kq::tp_sum_variant(rank, M_), kq::hc_combine_norm_variant(M_, HcSrc::Slices, 1, true), kq::route_variant(M_),
+        kq::tp_sum_variant(rank, M_, true), kq::hc_combine_norm_variant(M_, HcSrc::Slices, 1, true), kq::route_variant(M_),
         kq::qsa_variant(M_), kernels::gemv_variant(M_, d_.hidden, c.qkvz_n(), 1, 0),
-        kernels::gemv_variant(M_, d_.hidden, c.qkvg_n(), 2, 0), kernels::gemv_variant(M_, c.q_n(), d_.hidden, kq::kTpOutS, 0),
+        kernels::gemv_variant(M_, d_.hidden, c.qkvg_n(), 2, 0), kq::tp_out_gemv_variant(M_, c.q_n()),
         kernels::gemv_i8w_variant(M_, d_.hidden, c.vocab), kernels::tp_argmax_variant(M_, c.vocab, c.vocab_used, rank * c.vocab)};
     if (spec_.kind == ListKind::Verify && M_ > 1) need.push_back(kq::pf_ple_verify_variant());
     if (spec_.kind == ListKind::Draft) need.push_back(kernels::draft_prob_variant(c.vocab, c.vocab_used));
     if (spec_.kind != ListKind::Decode && part_.mtp)
-      for (const std::string& v : spec_.kind == ListKind::Draft ? kq::draft_variants(true, false, mtp_->single)
-                                                                : std::vector<std::string>{kq::mtp_variant(M_, mtp_->single)})
+      for (const std::string& v : spec_.kind == ListKind::Draft
+                                      ? kq::draft_variants(true, false, mtp_->single, d_.hc_int8)
+                                      : std::vector<std::string>{kq::mtp_variant(M_, mtp_->single)})
         need.push_back(v);
     for (const std::string& v : need)
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
   }
 
-  // Plan 21-QFN-v2b: out_proj / o_proj's all-reduce in the slices form over `buf` (in place) - tp_send(buf, peer_land,
-  // send_ctr, buf), then tp_sum(buf, land, buf, sum_ctr, state, spin_limit) into one row (the next combine folds it as
-  // one slice). The MoE's is wired into its down and finish (moe()).
+  // Plan 21-QFN-v2b: out_proj / o_proj's all-reduce in the slices form over `buf` (in place). PERF-44: the send is
+  // folded into the linear (linear(..., send): each gemv work-group pushes its chunk into the peer's landing), so here
+  // only tp_sum(buf, land, buf, sum_ctr, state, spin_limit) - it waits for the peer's chunks and sums into one row (the
+  // next combine folds it as one slice). The MoE's is wired into its down and finish (moe()).
   void cross(void* buf) {
     const TpLink& t = *tp_->link;
-    const std::string v = kq::tp_sum_variant(t.rank, M_);
-    {
-      l0::Kernel& k = kernel(v, "tp_send", kq::kTpWg);
-      k.arg_ptr(0, buf);
-      k.arg_ptr(1, t.peer_land);
-      k.arg_ptr(2, t.send_ctr);
-      k.arg_ptr(3, buf);   // unused in the slices form
-      launch(k, kq::kTpFoldG, M_);
-    }
-    {
-      l0::Kernel& k = kernel(v, "tp_sum", kq::kTpWg);
-      k.arg_ptr(0, buf);
-      k.arg_ptr(1, t.land);
-      k.arg_ptr(2, buf);
-      k.arg_ptr(3, t.fold_ctr);
-      k.arg_ptr(4, t.state);
-      k.arg<uint32_t>(5, t.spin_limit);
-      launch(k, kq::kTpFoldG, M_);
-    }
+    l0::Kernel& k = kernel(kq::tp_sum_variant(t.rank, M_, true), "tp_sum", kq::kTpWg);
+    k.arg_ptr(0, buf);
+    k.arg_ptr(1, t.land);
+    k.arg_ptr(2, buf);
+    k.arg_ptr(3, t.fold_ctr);
+    k.arg_ptr(4, t.state);
+    k.arg<uint32_t>(5, t.spin_limit);
+    launch(k, kq::kTpFoldG, M_);
     slices_ = 1;
   }
 
@@ -336,14 +332,14 @@ class Walk {
       pending_layer_ = -1;
     }
   }
-  // A gated residual: combine_norm (what is pending) -> xn; gemv_bf16 down||inject -> down_f32; q4_hc_up_mix ->
-  // x (the block input) and, with inject, inj.
+  // A gated residual: combine_norm (what is pending) -> xn; the down||inject GEMV -> down_f32; q4_hc_up_mix -> x
+  // (the block input) and, with inject, inj.
   void hc(const l0::Mem& block, bool inject) {
     const loader::Q4HcOffsets o = loader::q4_hc_offsets(d_, inject);
     combine(src_, true, reinterpret_cast<const float*>(at(block, o.norm)));
     src_ = HcSrc::None;
-    bf16_linear(at(block, o.down), d_.hc_n(), o.down_n, b_.xn.ptr(), b_.down_f32.ptr(), b_.down_f32.size());
-    l0::Kernel& k = kernel(kq::hc_up_mix_variant(M_, inject), "q4_hc_up_mix", kq::kUpMixWg);
+    hc_down(block, o);
+    l0::Kernel& k = kernel(kq::hc_up_mix_variant(M_, inject, o.int8), "q4_hc_up_mix", kq::kUpMixWg);
     k.arg_ptr(0, ctrl_);
     k.arg_ptr(1, b_.down_f32.ptr());
     k.arg_ptr(2, at(block, o.up));
@@ -353,6 +349,20 @@ class Walk {
     launch(k, d_.hidden / 16, M_);
   }
 
+  // A hyper-connection block's down||inject GEMV over xn -> down_f32: gemv_bf16 over the bf16 tiles, or (PERF-66)
+  // q4_hc_down_i8 over the int8 form - gemv_bf16's arguments and output, grid N / 16.
+  void hc_down(const l0::Mem& block, const loader::Q4HcOffsets& o) {
+    if (!o.int8) {
+      bf16_linear(at(block, o.down), d_.hc_n(), o.down_n, b_.xn.ptr(), b_.down_f32.ptr(), b_.down_f32.size());
+      return;
+    }
+    require(b_.down_f32.size() >= size_t(M_) * o.down_n * 4, "down_f32 is smaller than [M][N]");
+    l0::Kernel& k = kernel(kq::hc_down_i8_variant(M_, o.down_n == kq::kHcDownN), "q4_hc_down_i8", kq::hc_down_i8_wg());
+    k.arg_ptr(0, at(block, o.down));
+    k.arg_ptr(1, b_.xn.ptr());
+    k.arg_ptr(2, b_.down_f32.ptr());
+    launch(k, o.down_n / 16);
+  }
   // gemv_bf16(w, x, out) over {K, N} tiles at `w`, M rows (`rows`: M_ unless given), grid N / cols.
   void bf16_linear(const void* w, uint32_t K, uint32_t N, const void* x, void* out, size_t out_bytes, uint32_t rows = 0) {
     const uint32_t R = rows ? rows : M_;
@@ -375,8 +385,9 @@ class Walk {
   }
   // A dense linear into `out`: gemv(w, scales, x, out) grid (N / 64, S) for int4 layout 0 - at M >= 2 gemm_sm (spec
   // 28d: gemv's arguments and [S][M][N] output at the shape's S, the consumer's fold unchanged) -, gemv_bf16
-  // otherwise. Returns the slices it wrote (S, 1 for bf16).
-  uint32_t linear(const loader::DeviceWeight& w, const void* x, const l0::Mem& out) {
+  // otherwise. Returns the slices it wrote (S, 1 for bf16). `send` (PERF-44, tp's out_proj / o_proj): the gemv with
+  // tp_send folded in, its chunks into send->peer_land (cross() then sums).
+  uint32_t linear(const loader::DeviceWeight& w, const void* x, const l0::Mem& out, const TpLink* send = nullptr) {
     const model::GemvShape& s = w.shape;
     if (w.kind == model::WeightKind::Int4) {
       require(s.layout == 0 && w.scales, "a Qwen3.8-Flash-Next int4 linear is GPTQ layout 0 with its own scales");
@@ -386,12 +397,20 @@ class Walk {
               "no gemm_sm row for the int4 linear " + std::to_string(s.K) + " x " + std::to_string(s.N) +
                   " (kernels::kSmallMTuning)");
       if (t) require(kernels::gemm_sm_out_s(*t) == s.S, "gemm_sm writes another split-K S than the consumer folds");
+      if (send)
+        require(!t && s.N == d_.hidden && s.S == kq::kTpOutS,
+                "the send-folded gemv is out_proj / o_proj's: N 2560, S 2, gemv (kernels::qwen4exp::tp_out_gemv_variant)");
       l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M_, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
-                        : kernel(kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout), "gemv", 64);
+                        : kernel(send ? kq::tp_out_gemv_variant(M_, s.K) : kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout),
+                                 "gemv", 64);
       k.arg_ptr(0, w.mem.ptr());
       k.arg_ptr(1, w.scales->ptr());
       k.arg_ptr(2, x);
       k.arg_ptr(3, out.ptr());
+      if (send) {
+        k.arg_ptr(4, send->peer_land);
+        k.arg_ptr(5, send->send_ctr);
+      }
       if (t)
         launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
       else
@@ -500,23 +519,7 @@ class Walk {
     require(L.gdn_qkvz->shape.N == c_.qkvz_n() && L.gdn_qkvz->shape.S == 1, "qkv||z is not the card's at S 1");
     linear(*L.gdn_qkvz, b_.x.ptr(), b_.partials);
     linear(*L.gdn_ab, b_.x.ptr(), b_.ab);
-    const bool slots = spec_.kind == ListKind::Verify;
-    {
-      // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o [, state_spec]), grid (48 heads, 4
-      // chunks); the verify's slots build reads the live slot and writes row r's state into slot (live + r) % 4
-      l0::Kernel& k = kernel(tp_ ? (slots ? kq::tp_gdn_slots_variant(M_) : kq::tp_gdn_variant())
-                                 : slots ? kq::gdn_slots_variant(M_) : kq::gdn_variant(M_),
-                             "gdn_step", kWgGdn);
-      k.arg_ptr(0, ctrl_);
-      k.arg_ptr(1, b_.partials.ptr());
-      k.arg_ptr(2, b_.ab.ptr());
-      k.arg_ptr(3, L.gdn_small->ptr());
-      k.arg_ptr(4, b_.conv_ring_layer(l));
-      k.arg_ptr(5, b_.gdn_state_layer(l));
-      k.arg_ptr(6, b_.gdn_o.ptr());
-      if (slots) k.arg_ptr(7, b_.gdn_spec_layer(l));
-      launch(k, c_.gdn_v_heads, kGdnChunks);
-    }
+    gdn_step(l, L, spec_.kind == ListKind::Verify);
     {
       // prep_gated_head(qkvz_partials, gdn_o, gated_w, x_out) - the sigmoid gate (_SIG), grid (48, M)
       l0::Kernel& k = kernel(tp_ ? kq::tp_gated_head_sig_variant(M_) : kq::gated_head_sig_variant(M_), "prep_gated_head",
@@ -527,9 +530,54 @@ class Walk {
       k.arg_ptr(3, b_.attn_out.ptr());
       launch(k, c_.gdn_v_heads, M_);
     }
-    slices_ = linear(*L.gdn_out, b_.attn_out.ptr(), b_.partials);
+    slices_ = linear(*L.gdn_out, b_.attn_out.ptr(), b_.partials, tp_ ? tp_->link : nullptr);
     src_ = HcSrc::Slices;
     if (tp_) cross(b_.partials.ptr());
+  }
+
+  // gdn_step(ctrl, qkvz_partials, ab_out, gdn_small, conv_ring, state, gdn_o [, pend]), grid (48 heads, 4 chunks).
+  // `defer` (the verify and flush lists; PERF-51): the DEFERRED build - it first replays the rows the last commit left
+  // in the layer's pending rows (Control::gdn_pend) into the state, then runs its own rows and writes their recurrence
+  // inputs to the other parity, no per-row state.
+  void gdn_step(uint32_t l, const loader::Q4Layer& L, bool defer) {
+    l0::Kernel& k = kernel(tp_ ? (defer ? kq::tp_gdn_defer_variant(M_) : kq::tp_gdn_variant())
+                               : defer ? kq::gdn_defer_variant(M_) : kq::gdn_variant(M_),
+                           "gdn_step", kWgGdn);
+    k.arg_ptr(0, ctrl_);
+    k.arg_ptr(1, b_.partials.ptr());
+    k.arg_ptr(2, b_.ab.ptr());
+    k.arg_ptr(3, L.gdn_small->ptr());
+    k.arg_ptr(4, b_.conv_ring_layer(l));
+    k.arg_ptr(5, b_.gdn_state_layer(l));
+    k.arg_ptr(6, b_.gdn_o.ptr());
+    if (defer) k.arg_ptr(7, b_.gdn_pend_layer(l));
+    launch(k, c_.gdn_v_heads, kGdnChunks);
+  }
+
+  // PERF-51: the flush list - every GDN layer's DEFERRED step at M = 1, replayed at n_active 0: it applies the rows the
+  // last commit left (Control::gdn_pend) to the state and stores it, nothing more (gdn_step.cl, DEFERRED). The engine
+  // runs it before anything reads the state directly (a snapshot, a prefill).
+  CapturedStep gdn_flush() {
+    require(M_ == 1 && b_.gdn_pend && !link_ && !tap_ && !injected_,
+            "the GDN flush list is M = 1 over the buffers' pending rows (the MTP head), with no hand-off");
+    require(gdn_pend_layer_bytes(c_) == kernels::gdn_pend_layer_bytes(c_.gdn_k_heads, c_.gdn_v_heads),
+            "runtime::qwen4exp::gdn_pend_layer_bytes is not the kernels' (the DEFERRED build's PEND_PAR)");
+    const std::string v = tp_ ? kq::tp_gdn_defer_variant(1) : kq::gdn_defer_variant(1);
+    require(std::ifstream(kernels::path(v)).good(),
+            v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_MTP=ON");
+    size_t n = 0;
+    for (uint32_t l = part_.first; l < part_.end; ++l)
+      if (!d_.is_qsa(l)) {
+        layer_ = int(l);
+        const loader::Q4Layer& L = part_.layer(l);
+        require(L.gdn_small != nullptr, "GDN layer " + std::to_string(l) + " is not loaded");
+        gdn_step(l, L, true);
+        ++n;
+      }
+    layer_ = -1;
+    require(step_.kernel_count == n && step_.labels.size() == n, "the GDN flush list has one launch a GDN layer");
+    step_.list.close();
+    return std::move(step_);
   }
 
   // --- a QSA layer's pieces (the main layers' and the MTP head's) --------------------------------------------------
@@ -650,7 +698,7 @@ class Walk {
     void* listp = injected_ ? at(*injected_, list_at(qi)) : at(b_.list, b_.list_off(qi));
     if (!injected_) qsa_select(t, listp, at(b_.diag, b_.diag_off(qi)));
     qsa_attend(t, listp);
-    slices_ = linear(*L.qsa_o, b_.attn_out.ptr(), b_.partials);
+    slices_ = linear(*L.qsa_o, b_.attn_out.ptr(), b_.partials, tp_ ? tp_->link : nullptr);
     src_ = HcSrc::Slices;
     if (tp_) cross(b_.partials.ptr());
   }
@@ -724,9 +772,9 @@ class Walk {
     const loader::Q4HcOffsets o = loader::q4_hc_offsets(d_, false);
     require(src_ == HcSrc::Y, "the final mixer follows a MoE block");
     combine(HcSrc::Y, true, reinterpret_cast<const float*>(at(mixer, o.norm)));
-    bf16_linear(at(mixer, o.down), d_.hc_n(), o.down_n, b_.xn.ptr(), b_.down_f32.ptr(), b_.down_f32.size());
+    hc_down(mixer, o);
     {
-      l0::Kernel& k = kernel(kq::hc_up_mix_variant(M_, false), "q4_hc_up_mix", kq::kUpMixWg);
+      l0::Kernel& k = kernel(kq::hc_up_mix_variant(M_, false, o.int8), "q4_hc_up_mix", kq::kUpMixWg);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.down_f32.ptr());
       k.arg_ptr(2, at(mixer, o.up));

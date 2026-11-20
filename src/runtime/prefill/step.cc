@@ -101,8 +101,8 @@ void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_pre
 void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, void* ctrl, uint32_t pos,
                 uint32_t C, const model::LayerDesc& L, const loader::SmallTensors& small, uint8_t* gdn_base,
                 uint8_t* ring_base, uint32_t kv_base, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem, const KvLayout& kv,
-                PrefillBackend backend, Int8State* q, uint32_t& gdn, uint32_t& fa, float* out = nullptr,
-                const void* pages = nullptr) {
+                PrefillBackend backend, Int8State* q, uint32_t& gdn, uint32_t& fa, bool one_card,
+                float* out = nullptr, const void* pages = nullptr) {
   const model::ModelDesc& d = *m.desc;
   const uint32_t l = L.index;
   const bool kv8 = kv.form == KvCache::Int8;
@@ -131,7 +131,7 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     gdn_chunk(cx, kc, s, pos, C, s.partials.ptr(), ab,
               reinterpret_cast<float*>(gdn_base + size_t(gdn) * gdn_state_stride),
               reinterpret_cast<uint16_t*>(ring_base + size_t(gdn) * conv_ring_stride),
-              small.gdn.ptr(), s.mixer_out.as<uint16_t>(), backend, zb);   // y stride v-heads x 128
+              small.gdn.ptr(), s.mixer_out.as<uint16_t>(), backend, zb, one_card);   // y stride v-heads x 128
     ++gdn;
     pf_linear(cx, kc, s, m, l, LinearId::OutProj, s.mixer_out.as<uint16_t>(), C, backend, q, out);
     return;
@@ -243,7 +243,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     }
 
     mixer_body(cx, kc, s, m, ctrl, pos, C, L, small, gdn_base, ring_base, kv_base, kv_k_mem, kv_v_mem, kv,
-               backend, q, gdn, fa, nullptr, pages);
+               backend, q, gdn, fa, w.first == 0 && w.last == d.layers, nullptr, pages);   // one card: every layer
 
     // Spec 15d: a MoE model's FFN - the post-attention norm into x (pitch hidden), then
     // the routed experts and the shared expert through the grouped GEMMs, folded into
@@ -263,7 +263,8 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     // The MLP half (mlp_body has why its normed rows go to `mixer_out`).
     pf_res_norm(cx, kc, s, 1u, at_const(small.norms, s.desc().small_layout().norms_off_post),
                 s.partials.ptr(), s.resid.ptr(), s.mixer_out.ptr(), C);   // stride hidden
-    mlp_body(cx, kc, s, m, l, C, backend, q);
+    // PERF-88: a short chunk's MLP on the bf16 walk (one card and the pipeline stages; the tp card keeps h8).
+    mlp_body(cx, kc, s, m, l, C, dense_mlp_backend(backend, C), q);
   }
   // Spec 16c: the cut - layer `last`'s fold, on this device. It reads no weight, and the
   // next device starts that layer at its norm-finish over what this one hands off.
@@ -445,7 +446,7 @@ void step_tp_unit(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedM
   for (uint32_t i = 0; i < l; ++i) (d.is_fa(i) ? fa : gdn) += 1;
   const model::LayerDesc L{l, d.is_fa(l) ? model::LayerKind::FA : model::LayerKind::GDN, {}, {}};
   mixer_body(cx, kc, s, m, ctrl, pos, C, L, small, static_cast<uint8_t*>(gdn_state_mem.ptr()),
-             static_cast<uint8_t*>(conv_ring_mem.ptr()), 0, kv_k_mem, kv_v_mem, kv, backend, q, gdn, fa, io.own);
+             static_cast<uint8_t*>(conv_ring_mem.ptr()), 0, kv_k_mem, kv_v_mem, kv, backend, q, gdn, fa, false, io.own);
 }
 
 void step_tp_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, void* ctrl,
@@ -563,36 +564,28 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   require(kv_n0 % kernels::kPfSlabWidth == 0, "q_proj is not a whole number of slabs");
   // 1. The main model's final norm on every row (what decode's b.x holds after a
   //    step), into hid rows 1..C. step_head's own single-row norm is then skipped.
+  //    PERF-85: the pair's one-launch form, bitwise.
   pf_res_norm(cx, kc, s, m.desc->ffn_fold_s() == 0 ? 0u : 1u, m.final_norm.ptr(),
-              s.partials.ptr(), s.resid.ptr(), hid + H, C, /*fused=*/false);
+              s.partials.ptr(), s.resid.ptr(), hid + H, C);
   const uint32_t rows = mtp_kv_rows(pos, C);
   if (rows == 0) return;
   const uint32_t r0 = C - rows;   // 1 at pos 0 (no h_{-1}), else 0
-  // 2. embed(ids[r0 + r]) -> resid rows (the main residual is dead after step 1).
-  cx.launch(kc(kernels::pf_embed_gather_variant(s.desc().hidden), "pf_embed_gather"), 1, rows, 1,
-            {PtrArg(s.ids.as<uint32_t>() + r0), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()),
+  // 2-3. embed(ids[r0 + r]) and the two pre-fc norms into one [rows][2 x hidden] row of x, embed first, hidden
+  //    second - PERF-85: one launch (pf_mtp_front), bitwise the gather and the two fold + finish pairs.
+  cx.launch(kc(kernels::pf_mtp_front_variant(H, G), "pf_mtp_front"), 1, rows, 2,
+            {PtrArg(s.ids.as<uint32_t>() + r0), PtrArg(m.embed.ptr()), PtrArg(hid + size_t(r0) * H),
+             PtrArg(at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormPreE))),
+             PtrArg(at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormPreH))), PtrArg(s.x.ptr()),
              arg_val(rows)});
-  // 3. The two pre-fc norms into one [rows][2 x hidden] row of x: embed first, hidden second.
-  const std::string fold0 = kernels::pf_res_fold_variant(H, 0, G);
-  const std::string cat = kernels::pf_norm_finish_strided_variant(H, G, G, 2 * H);
-  auto fold_norm = [&](const std::string& fv, const std::string& nv, const void* partials,
-                       void* resid, const void* w, void* out) {
-    cx.launch(kc(fv, "pf_res_fold"), G, rows, 1,
-              {PtrArg(partials), PtrArg(resid), PtrArg(s.norm_sumsq.ptr()), arg_val(rows)});
-    cx.launch(kc(nv, "pf_norm_finish"), G, rows, 1,
-              {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(w), PtrArg(out), arg_val(rows)});
-  };
-  fold_norm(fold0, cat, s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormPreE)),
-            s.x.ptr());
-  fold_norm(fold0, cat, s.partials.ptr(), hid + size_t(r0) * H,
-            at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormPreH)), s.x.as<uint16_t>() + H);
   // 4. fc -> partials [rows][hidden]; the head's residual starts at fc's output
-  //    (ZERO_RESID), input_layernorm -> x (pitch hidden).
+  //    (ZERO_RESID), input_layernorm -> x (pitch hidden) - PERF-85: fold + finish in one launch, bitwise.
   linear_bf16(cx, kc, s, h.fc, s.x.as<uint16_t>(), rows, 0, H, s.partials.as<float>(), H);
-  fold_norm(kernels::pf_res_fold_zero_variant(H, G), kernels::pf_norm_finish_variant(H, G, G),
-            s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormInput)), s.x.ptr());
-  // 5. Only the k||v columns of q||k||v, then attn_prep writes K/V at hctl.pos + r. Its q
-  //    rows read unwritten partials columns into pf_q, which nothing reads.
+  cx.launch(kc(kernels::pf_res_norm_zero_variant(H, G), "pf_res_norm"), 1, rows, 1,
+            {PtrArg(s.partials.ptr()), PtrArg(s.resid.ptr()),
+             PtrArg(at_const(h.norms, loader::mtp_norm_off(*m.desc, loader::kMtpNormInput))), PtrArg(s.x.ptr()),
+             arg_val(rows)});
+  // 5. Only the k||v columns of q||k||v, then attn_prep writes K/V at hctl.pos + r - PERF-85: over the kv heads
+  //    only (the q heads' rows would land in pf_q, which nothing reads).
   linear_bf16(cx, kc, s, h.qkv, s.x.as<uint16_t>(), rows, kv_n0, h.qkv.shape.N,
               s.partials.as<float>(), h.qkv.shape.N);
   if (kv.int8())   // spec 12b: the head's KV in the main cache's form
@@ -600,8 +593,9 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
                         m.rope.as<float>(), kv, pages);
   else
     attn_prep_chunk(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
-                    m.rope.as<float>(), static_cast<uint16_t*>(kv.k), static_cast<uint16_t*>(kv.v), pages);
-  profile_wait(cx, Phase::kAttnPrep);
+                    m.rope.as<float>(), static_cast<uint16_t*>(kv.k), static_cast<uint16_t*>(kv.v), pages,
+                    /*kv_only=*/true);
+  profile_wait(cx, Phase::kMtpKv);
 }
 
 void step_tp_final(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, const float* p0,
@@ -673,43 +667,45 @@ void step_tp_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const Loade
 }
 
 size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
-  if (mtp_kv_rows(pos, C) == 0) return 2;
-  // final norm 2 + embed 1 + 2 x 2 pre-norms + fc (2 x 5) + fold/norm 2 + k||v (2 x 2)
-  // + attn_prep 1
-  return 2 + 1 + 4 + 10 + 2 + 4 + kAttnPrepLaunches;
+  if (mtp_kv_rows(pos, C) == 0) return 1;
+  // final norm 1 + embed and the pre-norms 1 (PERF-85) + fc (2 x 5) + fold/norm 1 + k||v (2 x 2) + attn_prep 1
+  return 1 + 1 + 10 + 1 + 4 + kAttnPrepLaunches;
 }
 
 // --- the launch arithmetic, derived from the walk above ---------------------
 //
-// Per layer, the launches that are not the four int4 linears': GDN 2 (res_norm) + 1 (a||b)
-//   + 10 (gdn_chunk; 9 on one card, where the conv + l2norm run as one) + 2 (res_norm) + 1 (silu_mul) = 16 (15);
-//   FA 2 + 1 (attn_prep) + the
-//   attention + 1 (attn_gate) + 2 + 1 (silu_mul). Boundary: 1 (embed).
-// `step_head` adds 5 once per prefill: 2 (final norm) + 1 (lm_head) + 2 (argmax).
+// Per layer, the launches that are not the four int4 linears': GDN 1 (res_norm: the fused pf_res_norm, phase 2
+//   Task 5) + 1 (a||b) + gdn_chunk (9; 6 on Qwen3.8's one card, PERF-19) + 1 (res_norm) = 3 + gdn_chunk;
+//   FA 1 + 1 (attn_prep) + the attention + 1 (attn_gate) + 1. Boundary: 1 (embed).
+// `step_head` adds 5 once per prefill: 2 (final norm, the unfused pair) + 1 (lm_head) + 2 (argmax).
 // L0 (spec 2.1 S2): each int4 linear is 2 x (N / 1024) slab launches -- GDN: qkv||z 32 +
 // out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 + o_proj 10 + 68 + 10 = 116
-// (Qwen3.8; `slab_launches` reads the descriptor's rows).
+// (Qwen3.8; `slab_launches` reads the descriptor's rows). `pf_silu_mul` is fused into the gate||up GEMM's
+// epilogue (parity program S2a), so it adds nothing.
 // L0 (parity program S3): the composed attention issues QK^T per row block of 256 rows (P·V
 // is not -- see attn.cc), so it is 4 x (2 + blocks) launches -- the one term that depends on C.
-// L0 (parity program S2a): `pf_silu_mul` is fused into the gate||up slab GEMM's epilogue,
-// so EVERY layer loses exactly one launch.
 // L0 (spec 6, plan 6b): in Flash mode -- the default, `attn_mode()` -- attention is ONE
-// `pf_flash_attn` launch per FA layer, so an FA layer is 123 launches whatever C is, and a
-// chunk is 1 + 48 x 134 + 16 x 123 = 8401 at every C (derived; l0-int8 8529 above C = 384, 6033 below).
-// The composed reference (a test's set_attn_mode_for_test) gives 8577 at C <= 256 and 9025 at C = 2048 (derived).
+// `pf_flash_attn` launch per FA layer, so on Qwen3.8's one card a GDN layer is 129 and an FA layer 121 launches
+// above 384 rows, a chunk 1 + 48 x 129 + 16 x 121 = 8129 (derived). The composed reference (a test's
+// set_attn_mode_for_test) gives 945 at C = 64 and 8753 at C = 2048 (derived).
 // L0 (open-work 3b): an int4 linear of C <= kPfQ4MaxRows rows (gate||up's SiLU form: C <=
 // kPfQ4SiluMaxRows) is ONE pf_gemm_q4 launch instead of its slab walk (pf_q4_tile), so the count
-// depends on C again: Flash, C <= 320: 1 + 48 x 18 + 16 x 11 = 1041. Open-work 3d's SLM
+// depends on C again: Flash, C <= 320: 1 + 48 x 13 + 16 x 9 = 769. Open-work 3d's SLM
 // gate/up epilogue keeps one launch at 193..320. At 321..384 gate||up returns to its 68 slab
-// launches, 1 + 48 x 85 + 16 x 78 = 5329; above, 8401 as before (derived). l0-int8's
-// h8 linears are its own walk (linear_i8) and keep the slab count; its mixer linears are the
-// l0 walk's (open-work 17; a MoE model's too, open-work 16), pf_gemm_q4 included.
+// launches, 1 + 48 x 80 + 16 x 76 = 5057; above, 8129 as before (derived). l0-int8's h8 linears are its own walk
+// (linear_i8: the quantiser, then as many 1024-column slabs a launch pair as the w8 slab holds - Qwen3.8's gate||up
+// 1 + 2 x 12, down 1 + 2 x 5), so above kInt8Bf16MlpMaxRows its chunk is 8129 - 64 x (78 - 36) = 5441 (derived);
+// its mixer linears are the l0 walk's (open-work 17; a MoE model's too, open-work 16), pf_gemm_q4 included.
+// PERF-88: a dense model's chunk of C <= kInt8Bf16MlpMaxRows runs its MLP on the l0 walk too, so l0-int8 counts as
+// l0 there.
 namespace {
 // One int4 linear's launches on backend b at C rows: the slab walk's 2 x N / 1024, or 1 when L0
-// runs it as pf_gemm_q4 (including SLM gate/up). l0-int8's quantiser is counted by the callers.
+// runs it as pf_gemm_q4 (including SLM gate/up); an h8 linear is linear_i8's walk, its quantiser included, at the
+// Int8State's max_k (prefill_int8_max_k, on one card and on a pipeline stage).
 size_t linear_launches(const model::ModelDesc& d, LinearId id, PrefillBackend b, uint32_t C) {
   if (l0_int8_bf16_linear(d, id)) b = PrefillBackend::L0;   // pf_linear's binding
-  if (b == PrefillBackend::L0 && pf_q4_tile(C, id == LinearId::GateUp) != nullptr) return 1;
+  if (b == PrefillBackend::L0Int8) return linear_i8_launches(d.shape(id), prefill_int8_max_k(d));
+  if (pf_q4_tile(C, id == LinearId::GateUp) != nullptr) return 1;
   return 2 * size_t(d.shape(id).N / 1024);
 }
 // The launches of one layer kind's four int4 linears.
@@ -719,48 +715,49 @@ size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind, PrefillBa
     if (d.linear(id).kind == model::WeightKind::Int4) n += linear_launches(d, id, b, C);
   return n;
 }
-size_t l0_gdn_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
-  return 2 + 1 + gdn_chunk_launches(d, b) + 2 + 1 + slab_launches(d, model::LayerKind::GDN, b, C) - 1;   // - 1: the fused SiLU
+// A walk_layers pf_res_norm: phase 2 Task 5's one fused launch, every model (step_head's and step_mtp_kv's
+// unfused pairs are counted there).
+constexpr size_t kResNormLaunches = 1;
+// `gdn_b`: the backend gdn_chunk runs on (walk_layers' own; `b` is the MLP's, dense_mlp_backend).
+size_t l0_gdn_layer_launches(const model::ModelDesc& d, PrefillBackend gdn_b, PrefillBackend b, uint32_t C,
+                             bool one_card) {
+  return kResNormLaunches + 1 + gdn_chunk_launches(d, gdn_b, one_card) + kResNormLaunches +
+         slab_launches(d, model::LayerKind::GDN, b, C);
 }
-size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, uint32_t pos = 0) {
-  return 2 + kAttnPrepLaunches + attn_chunk_launches(d, C, PrefillBackend::L0, pos) + kAttnGateLaunches +
-         2 + 1 + slab_launches(d, model::LayerKind::FA, b, C) - 1;   // - 1: the fused SiLU
+size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, uint32_t pos, KvCache kv) {
+  return kResNormLaunches + kAttnPrepLaunches + attn_chunk_launches(d, C, PrefillBackend::L0, pos, kv) +
+         kAttnGateLaunches + kResNormLaunches + slab_launches(d, model::LayerKind::FA, b, C);
 }
 }  // namespace
-// Spec 15d, a MoE model. Per layer: the input norm 2, the mixer's two
+// Spec 15d, a MoE model. Per layer: the input norm 1, the mixer's two
 // int4 linears (2 x N / 1024 slab launches each; l0's walk on l0-int8 too, open-work 16),
 // the mixer itself (GDN: a||b + gdn_chunk; FA: attn_prep + attention + gate),
-// the post-attention norm 2 and moe_chunk_launches. Ornith at C <= 2048, flash:
+// the post-attention norm 1 and moe_chunk_launches. Ornith at C <= 2048, flash:
 // GDN 2 + 24 + 1 + 10 + 4 + 2 + 11 = 54, FA 2 + 18 + 1 + 1 + 1 + 4 + 2 + 11 = 40 on l0,
 // so 1 + 30 x 54 + 10 x 40 = 2021 (derived; l0-int8 differs in moe_chunk_launches and gdn_chunk_launches only).
 // Phase 3 Task 5: a walk's every layer but its last runs the next layer's input norm inside its combine, so a chunk
 // is layers - 1 fewer.
 namespace {
-// A pf_res_norm's launches: the fold and the finish, or phase 2 Task 5's one.
-size_t res_norm_launches(const model::ModelDesc& d) { return d.is_moe() ? 1 : 2; }
 size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv, uint32_t pos) {
   auto lin = [&](LinearId id) { return linear_launches(d, id, b, C); };
-  const size_t nrm = res_norm_launches(d);
+  const size_t nrm = kResNormLaunches;
   const size_t ffn = nrm + moe_chunk_launches(d, b);
-  const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
-  const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
+  const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b, true) + lin(LinearId::OutProj) + ffn;
+  const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos, kv) +
                     attn_gate_launches(d, kv) + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa - (d.layers - 1) * nrm;
 }
-// spec 5: l0-int8's activation quantisers (pf_quant_had) in one dense layer, one per h8 linear: gate||up and down
-// (open-work 17: the four mixer linears are the l0 walk's).
-constexpr size_t kDenseQuantisers = 2;
 }  // namespace
 
-size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv, uint32_t pos) {
+size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv, uint32_t pos,
+                           bool one_card) {
   // 3l (2): an int8 split read in place widens nothing.
   const size_t widen = kv == KvCache::Int8 && !kv8_split_in_place(d, pos, C) ? d.fa_layers : 0;
   if (d.is_moe()) return moe_step_chunk_launches(d, b, C, kv, pos) + widen;
-  const size_t base =
-      1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C, pos) + widen;
-  if (b != PrefillBackend::L0Int8) return base;
-  // spec 5: +1 launch (the activation quantiser) per h8 linear, the slab walk being the same 2 x N/1024 launches.
-  return base + size_t(d.layers) * kDenseQuantisers;
+  const PrefillBackend gdn_b = b;
+  b = dense_mlp_backend(b, C);   // PERF-88: walk_layers' binding (step_tp_unit is not counted here)
+  return 1 + d.gdn_layers * l0_gdn_layer_launches(d, gdn_b, b, C, one_card) +
+         d.fa_layers * l0_fa_layer_launches(d, b, C, pos, kv) + widen;
 }
 // Spec 16c: one layer's launches, the terms step_chunk_launches adds up.
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
@@ -769,14 +766,16 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   const size_t widen = !gdn && kv == KvCache::Int8 && !kv8_split_in_place(d, pos, C) ? 1 : 0;
   if (d.is_moe()) {
     auto lin = [&](LinearId id) { return linear_launches(d, id, b, C); };
-    const size_t nrm = res_norm_launches(d);
+    const size_t nrm = kResNormLaunches;
     const size_t ffn = nrm + moe_chunk_launches(d, b);
-    return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn
-               : nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
+    return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b, false) + lin(LinearId::OutProj) + ffn
+               : nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos, kv) +
                      attn_gate_launches(d, kv) + lin(LinearId::OProj) + ffn + widen;
   }
-  const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C, pos);
-  return (b == PrefillBackend::L0Int8 ? l0n + kDenseQuantisers : l0n) + widen;
+  const PrefillBackend gdn_b = b;
+  b = dense_mlp_backend(b, C);   // PERF-88: walk_layers' binding (step_tp_unit is not counted here)
+  // a pipeline stage's layer (step_stage_launches): never the one-card GDN walk
+  return (gdn ? l0_gdn_layer_launches(d, gdn_b, b, C, false) : l0_fa_layer_launches(d, b, C, pos, kv)) + widen;
 }
 
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
@@ -785,17 +784,17 @@ size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   for (const model::LayerDesc& L : d.layer_descs())
     if (L.index >= st.first && L.index < st.last) n += step_layer_launches(d, b, C, L.kind, kv, pos);
   n += st.has_embed() ? 1 : 0;   // pf_embed_gather
-  // layer `first`'s pf_res_fold ran on the previous device: its norm is the lone pf_norm_finish
-  n -= st.has_embed() ? 0 : res_norm_launches(d) - 1;
+  // (layer `first`'s pf_res_fold ran on the previous device: its norm is the lone pf_norm_finish, one launch as
+  // the fused pf_res_norm it replaces)
   n += st.has_head(d) ? 0 : 1;   // the cut: layer `last`'s pf_res_fold
   // a MoE stage's layers but its last: the next layer's input norm ran inside the combine (phase 3 Task 5)
-  n -= d.is_moe() ? (st.last - st.first - 1) * res_norm_launches(d) : 0;
+  n -= d.is_moe() ? (st.last - st.first - 1) * kResNormLaunches : 0;
   return n;
 }
 
 size_t step_cut_extra_launches(const model::ModelDesc& d) {
   // the input norm split into fold + norm-finish, and (phase 3 Task 5) stage 0's last combine without the norm
-  return 2 - res_norm_launches(d) + (d.is_moe() ? res_norm_launches(d) : 0);
+  return 2 - kResNormLaunches + (d.is_moe() ? kResNormLaunches : 0);
 }
 
 }  // namespace runtime::prefill

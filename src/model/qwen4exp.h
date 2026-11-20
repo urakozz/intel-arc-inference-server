@@ -132,6 +132,10 @@ struct Qwen4ExpDesc {
   std::vector<uint32_t> eos;                            // {248046, 248044} (generation_config.json)
   float rms_eps = 0;
   Q4Forms forms;
+  // Not the checkpoint's: the hyper-connection mixers' device form, chosen at load (B70_Q4_HC, loader::q4_hc_int8;
+  // spec 21-QFN-v2 §7 lever 5, PERF-66). Both checkpoints ship them bf16; true = int8 with one fp16 scale per 32 k
+  // (loader::Q4HcOffsets).
+  bool hc_int8 = false;
   // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21-QFN-v1c's sweep - copied from Qwen3.8's measured map
   // at the nearest shapes (out_proj / o_proj S4, q||k||v S2). qkv||z is S 1,
   // fixed: gdn_step and prep_gated_head read S 1 (prep.cl:118-123).

@@ -15,11 +15,11 @@ The decision in short:
 
 | Candidate | Verdict |
 |-----------|---------|
-| FP8 | Rejected. 8 bits a weight is twice int4's traffic on a decode that is bandwidth-bound, and there is no reachable FP8 matrix multiply on this card at all: the compiler declares only the scaled forms and the backend crashes on them ([01-hardware.md](01-hardware.md)). Its whole advantage elsewhere is hardware this card lacks. |
-| MXFP4 | Rejected on this card. The backend refuses FP4 DPAS by name and every microscaling entry point crashes the compiler, so MXFP4 would have to be emulated as int4 plus a decode in the ALU, with block scales applied outside the instruction. At an effective 4.25 bits a weight it is also byte-identical to GPTQ g64, so it buys nothing for a bandwidth-bound decode either. |
-| int4 GPTQ | Supported; the same tensor layout as AutoRound (below). |
-| int4 AutoRound | The primary format: the best accuracy at 4 bits of the options we have checkpoints for. |
-| int4 compressed-tensors (llm-compressor `pack-quantized`) | Supported when symmetric, group 64 or 128. The nibbles are GPTQ's (q + 8, low nibble first), stored [N][K/8], with scales [N][K/g]. The loader transposes both into the GPTQ layout exactly and needs no kernel change ([13-loader.md](13-loader.md), "compressed-tensors symmetric checkpoints"). Asymmetric checkpoints, activation-order permutations and other group sizes are refused. Loading one prints a note that our AutoRound g64 is the recommended format. |
+| FP8 | Rejected. 8 bits a weight is twice int4's traffic on a decode that is bandwidth-bound, and there is no reachable FP8 matrix multiply on this card at all: the compiler declares only the scaled forms and the backend crashes on them ([01-hardware.md](01-hardware.md)). Its whole advantage elsewhere is hardware this card lacks |
+| MXFP4 | Rejected on this card. The backend refuses FP4 DPAS by name and every microscaling entry point crashes the compiler, so MXFP4 would have to be emulated as int4 plus a decode in the ALU, with block scales applied outside the instruction. At an effective 4.25 bits a weight it is also byte-identical to GPTQ g64, so it buys nothing for a bandwidth-bound decode either |
+| int4 GPTQ | Supported; the same tensor layout as AutoRound (below) |
+| int4 AutoRound | The primary format: the best accuracy at 4 bits of the options we have checkpoints for |
+| int4 compressed-tensors (llm-compressor `pack-quantized`) | Supported when symmetric, group 64 or 128. The nibbles are GPTQ's (q + 8, low nibble first), stored [N][K/8], with scales [N][K/g]. The loader transposes both into the GPTQ layout exactly and needs no kernel change ([13-loader.md](13-loader.md), "compressed-tensors symmetric checkpoints"). Asymmetric checkpoints, activation-order permutations and other group sizes are refused. Loading one prints a note that our AutoRound g64 is the recommended format |
 
 ## AutoRound and GPTQ: a config difference, not a layout difference
 
@@ -73,7 +73,7 @@ same in 0.14.2 and 0.17.0.
 
 AutoRound's `dynamic` rules let one checkpoint carry layers at different widths. One published 27B has 97 layers
 at bf16, 17 at int8 and the rest int4; the int8 ones are the attention `out_proj` and `o_proj`, two `down_proj`,
-and layer 0's `in_proj_qkv` and `in_proj_z`.
+and layer 0's `in_proj_qkv` and `in_proj_z`
 
 The loader therefore treats the width of each layer as data, not as a global constant. Retrofitting that later is
 painful; vLLM's XPU path still hard-gates it and raises `NotImplementedError` on 8-bit.
@@ -108,9 +108,9 @@ decode (generating one token at a time) and prefill (reading the whole prompt at
 
 | | Activations | Why |
 |---|---|---|
-| Decode | bf16 (W4A16) | Bandwidth-bound. The multiply is not the cost and the activations are one vector, so quantising them buys nothing. |
-| Prefill, default | bf16 (W4A16) | Compute-bound. The obvious W4A8 candidate was built and measured, and lost (below). |
-| Prefill, opt-in `--prefill-backend l0-int8` | int8 | The int4 weights are widened to int8 and the activations Hadamard-rotated before quantising (W8A8, [16-int8-prefill.md](16-int8-prefill.md)); MoE experts run W4A8 there. Faster on Qwen3.8, slower on Ornith. |
+| Decode | bf16 (W4A16) | Bandwidth-bound. The multiply is not the cost and the activations are one vector, so quantising them buys nothing |
+| Prefill, default | bf16 (W4A16) | Compute-bound. The obvious W4A8 candidate was built and measured, and lost (below) |
+| Prefill, opt-in `--prefill-backend l0-int8` | int8 | The int4 weights are widened to int8 and the activations Hadamard-rotated before quantising (W8A8, [16-int8-prefill.md](16-int8-prefill.md)); MoE experts run W4A8 there. Faster on Qwen3.8, slower on Ornith |
 
 W4A8 was the natural candidate for dense prefill linears, and it lost. Battlemage does have a native mixed int8 x int4 DPAS
 with no upconversion, gated only on the int4 matrix having no zero points, which `sym: true` satisfies. But the

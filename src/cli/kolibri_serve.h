@@ -32,7 +32,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
+#include <optional>
 #include <print>
 #include <random>
 #include <stdexcept>
@@ -99,18 +101,13 @@ struct KolibriEngineAdapterT : server::EngineIface {
     rng_seeded_ = false;   // a new request: its first sampled step reseeds
     eng.prefill(ids);
     fresh_ = true;
+    head_host_ = false;
     gen_start_ = std::chrono::steady_clock::now();
   }
 
   uint32_t step(const server::Sampling& sampling) override {
     flush_commit();
-    // The first id after a prefill / ingest: the head's row of the last prompt position is still in the
-    // logits buffer - sample it rather than keep the device argmax.
-    if (fresh_) {
-      if (sampling.greedy) mask_pending();
-      else sample_into_pending(sampling);
-      fresh_ = false;
-    }
+    settle_first(sampling);
     const uint32_t id = eng.generate(1)[0];
     if (!sampling.greedy) sample_into_pending(sampling);
     else mask_pending();
@@ -120,6 +117,13 @@ struct KolibriEngineAdapterT : server::EngineIface {
 
   uint32_t max_len() override { return eng.max_len(); }
   uint32_t pos() override { return pending_ ? pending_pos_ + pending_j_ + 1 : eng.pos(); }
+  // PERF-91: with no deferred commit, the pending id step() and step_many return first - the first id settled here
+  // after a prefill / ingest (sampled or masked), as the call would settle it.
+  std::optional<uint32_t> pending_id(const server::Sampling& sampling) override {
+    if (pending_) return std::nullopt;
+    settle_first(sampling);
+    return eng.pending();
+  }
 
   // --- Kolibri DSpark: speculative decoding ------------------------------------------------------------------------------
   uint32_t mtp_k() override { return df_.on() ? k_ : 0; }
@@ -180,6 +184,28 @@ struct KolibriEngineAdapterT : server::EngineIface {
     eng.load_state(host, p);
     fresh_ = false;
   }
+  // PERF-92 (EngineAdapter's): the prompt pass's last logits row (fp32, vocab) then the pending id as the head left it
+  // (the device argmax, not yet masked or sampled) - read in the prompt-end hook. load_head puts the id back on every
+  // device and the row into host_logits_, so the first id is settled from it as after that prefill. DSpark drafts from
+  // the pending id and its ring, which the state carries.
+  size_t head_bytes() override { return size_t(eng.vocab()) * sizeof(float) + sizeof(uint32_t); }
+  void save_head(void* host) override {
+    auto* h = static_cast<uint8_t*>(host);
+    eng.read_logits_into(reinterpret_cast<float*>(h));
+    const uint32_t id = eng.pending();
+    std::memcpy(h + size_t(eng.vocab()) * sizeof(float), &id, sizeof(uint32_t));
+  }
+  void load_head(const void* host) override {
+    report();
+    rng_seeded_ = false;   // a new request, as prefill()
+    const auto* h = static_cast<const uint8_t*>(host);
+    std::memcpy(host_logits_.data(), h, size_t(eng.vocab()) * sizeof(float));
+    uint32_t id;
+    std::memcpy(&id, h + size_t(eng.vocab()) * sizeof(float), sizeof(uint32_t));
+    eng.set_token(id);
+    fresh_ = head_host_ = true;
+    gen_start_ = std::chrono::steady_clock::now();
+  }
   void save_kv(uint32_t b, uint32_t e, void* host) override {
     flush_commit();
     eng.save_kv(b, e, host);
@@ -191,22 +217,35 @@ struct KolibriEngineAdapterT : server::EngineIface {
     rng_seeded_ = false;
     eng.ingest(ids);
     fresh_ = true;
+    head_host_ = false;
   }
 
   // The logits row of the step just run (the next token's distribution), filtered and drawn as
   // EngineAdapter's sample(); the id replaces the device argmax as the pending id. The RNG seeds itself
-  // once per request, from the request's seed (EngineAdapter's rule).
-  void sample_into_pending(const server::Sampling& sampling) {
+  // once per request, from the request's seed (EngineAdapter's rule). `host`: the row is in place already (load_head's).
+  void sample_into_pending(const server::Sampling& sampling, bool host = false) {
     seed_rng(sampling);
-    eng.read_logits_into(host_logits_.data());
+    if (!host) eng.read_logits_into(host_logits_.data());
     eng.set_token(server::draw(server::filter_probs(host_logits_.data(), vocab_used_, sampling), rng_));
+  }
+
+  // The first id after a prefill / ingest: the head's row of the last prompt position is still in the logits buffer -
+  // sample it rather than keep the device argmax (greedy: masked). Once a request, by whichever call reads it first.
+  // PERF-92: after load_head that row is in host_logits_ already (`head_host_`).
+  void settle_first(const server::Sampling& sampling) {
+    if (!fresh_) return;
+    const bool host = std::exchange(head_host_, false);
+    if (sampling.greedy) mask_pending(host);
+    else sample_into_pending(sampling, host);
+    fresh_ = false;
   }
 
   // Greedy: a device argmax on an id the tokenizer does not define becomes the masked row's argmax (the
   // lowest id among equal maxima, the device argmax's tie rule).
-  void mask_pending() {
+  // `host`: the row is in host_logits_ already (load_head's).
+  void mask_pending(bool host = false) {
     if (eng.pending() < vocab_used_) return;
-    eng.read_logits_into(host_logits_.data());
+    if (!host) eng.read_logits_into(host_logits_.data());
     const float* row = host_logits_.data();
     eng.set_token(uint32_t(std::max_element(row, row + vocab_used_) - row));
     ++masked_;
@@ -251,12 +290,7 @@ struct KolibriEngineAdapterT : server::EngineIface {
       ++iters_at_k_[0];
       return {step(sampling)};
     }
-    // The pending id x_n is settled as step() settles it (after a prefill / ingest: sampled or masked on the host).
-    if (fresh_) {
-      if (sampling.greedy) mask_pending();
-      else sample_into_pending(sampling);
-      fresh_ = false;
-    }
+    settle_first(sampling);   // the pending id x_n, settled as step() settles it
     const uint32_t n = eng.pos(), x = eng.pending();
     float T = 0.0f;
     uint64_t seed = 0;
@@ -312,6 +346,7 @@ struct KolibriEngineAdapterT : server::EngineIface {
   std::mt19937_64 rng_;
   bool rng_seeded_ = false;
   bool fresh_ = false;   // a prefill / ingest left the pending id; no step since
+  bool head_host_ = false;   // PERF-92: host_logits_ holds that pending id's row (load_head)
   uint32_t gen_tokens_ = 0;
   uint64_t masked_ = 0;
   std::chrono::steady_clock::time_point gen_start_{};

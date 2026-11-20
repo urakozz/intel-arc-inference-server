@@ -18,6 +18,11 @@
 //                       up            bf16 tiles {K 320, N 10240}                          6,553,600 B
 //                       norm          fp32 (1 + w) [10240]                                    40,960 B
 //                     13,475,840 B each, 26,951,680 B a layer
+//                     int8 (Qwen4ExpDesc::hc_int8, PERF-66): each linear as int8 tiles [N/16][K/16][16 k][16 n]
+//                     (loader::int8_tiled_index) followed by its fp16 scales [K/32][N] (one per 32 k of a row,
+//                     loader::quantise_int8_g32_tiled) - the kernels find the scales right after the tiles:
+//                       down||inject  3,440,640 + 215,040 B   up  3,276,800 + 204,800 B   norm  40,960 B
+//                     7,178,240 B each (the final mixer: 7,004,160 B)
 //   GDN layers        qkv||z {2560, 16384} (S 1), a||b bf16 tiles {2560, 128} (96 used), out_proj
 //                     {6144, 2560}: int4 GPTQ layout 0 (words [K/8][N] + f16 scales [K/64][N]) - ours - or
 //                     bf16 tiles - Intel's; the small block make_small_layout(2560, 10240, 48) (conv taps
@@ -77,16 +82,22 @@ inline size_t q4_gate_up_offset(const model::Qwen4ExpDesc& d, uint32_t e) { retu
 inline size_t q4_down_offset(const model::Qwen4ExpDesc& d, uint32_t e) { return size_t(e) * q4_down_block_bytes(d); }
 
 // --- a hyper-connection block (one gated residual, or the final mixer: no inject rows) ----------------------
+inline constexpr uint32_t kQ4HcGroup = 32;   // the int8 form's k a scale (spec 21-QFN-v2 §7 lever 5: basalt's "hc8")
+inline constexpr size_t q4_hc_i8_bytes(uint32_t K, uint32_t N) {
+  return size_t(K) * N + size_t(K / kQ4HcGroup) * N * 2;
+}
 struct Q4HcOffsets {
   uint32_t down_n = 0;                        // 336 (inject) or 320 (the final mixer)
+  bool int8 = false;                          // hc_int8: each linear's scales follow its tiles
   size_t down = 0, up = 0, norm = 0, total = 0;   // byte offsets; total = the allocation
 };
 inline Q4HcOffsets q4_hc_offsets(const model::Qwen4ExpDesc& d, bool inject) {
   Q4HcOffsets o;
   o.down_n = inject ? d.hc_down_rows() : d.hc_low;
+  o.int8 = d.hc_int8;
   o.down = 0;
-  o.up = o.down + q4_bf16_bytes(d.hc_n(), o.down_n);
-  o.norm = o.up + q4_bf16_bytes(d.hc_low, d.hc_n());
+  o.up = o.down + (o.int8 ? q4_hc_i8_bytes(d.hc_n(), o.down_n) : q4_bf16_bytes(d.hc_n(), o.down_n));
+  o.norm = o.up + (o.int8 ? q4_hc_i8_bytes(d.hc_low, d.hc_n()) : q4_bf16_bytes(d.hc_low, d.hc_n()));
   o.total = o.norm + size_t(d.hc_n()) * 4;
   return o;
 }

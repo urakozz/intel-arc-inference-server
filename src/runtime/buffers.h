@@ -66,7 +66,10 @@ struct PersistentBuffers : PersistentDims {
   // The five fills Engine::reset() does, in the order the constructor does
   // them. It is one place, so "reset writes exactly what construction wrote"
   // is a property of the code rather than of two lists agreeing.
-  void zero(l0::CmdList& imm);
+  // PERF-90: the KV only at positions [0, kv_end) of every layer (and at int8 their
+  // scales) - Engine::reset passes the positions written since the last zero; the
+  // rest is still zero, so the bytes match a whole fill.
+  void zero(l0::CmdList& imm, uint32_t kv_end = UINT32_MAX);
 
  private:
   // The public constructor delegates here with sizes(max_len, desc, kv).
@@ -288,7 +291,8 @@ struct MtpBuffers : MtpDims {
   // draft list writes only V''s entries of its row, so every other entry must read as
   // q = 0 to the host's acceptance - -inf, which filter_probs turns into probability 0 -
   // and nothing else ever writes them, so once per construction and reset is enough.
-  void zero(l0::CmdList& imm);
+  // PERF-90: kv_end as PersistentBuffers::zero's.
+  void zero(l0::CmdList& imm, uint32_t kv_end = UINT32_MAX);
 
  private:
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,

@@ -36,7 +36,8 @@ using prefill::Phase;
 using prefill::PtrArg;
 
 // The constants qwen4exp_sizes.h spells device-free, held to the kernels' host mirror here.
-static_assert(kPfC == kq::kPfC && kPfTm == kq::kPfTm && kPfSlab == kq::kPfSlab && kPfBatchBytes == kq::kPfBatchBytes,
+static_assert(kPfC == kq::kPfC && kPfCWide == kq::kPfCWide && kPfTm == kq::kPfTm && kPfSlab == kq::kPfSlab &&
+                  kPfBatchBytes == kq::kPfBatchBytes,
               "runtime/qwen4exp/qwen4exp_sizes.h and kernels/qwen4exp_kernels.h disagree on the prefill chunk");
 static_assert(kq::kPfTm == kernels::pf_moe::kTileM, "the grouped GEMM's tile is pf_moe_gemm's TM");
 static_assert(kq::kPfSlab == kernels::kPfSlabWidth, "a whole slab is pf_gemm's 1024 columns");
@@ -57,12 +58,20 @@ class Walk {
   Walk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
        const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager, const l0::Mem* injected,
        bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl, const uint32_t* ids, const Q4TpPrefill* tp,
-       const Q4PfRing* ring)
+       const Q4PfRing* ring, const Q4PfOwnRows* own = nullptr)
       : cx_(cx), kc_(kc), s_(s), m_(m), part_(part), d_(m.desc), c_(tp ? *tp->card : m.desc), b_(b), pos_(pos), C_(C),
         eager_(eager), injected_(injected), two_(two_cards), dense_(pf_dense_rows(pos, C)), mtp_(mtp), ctl_(ctl),
-        ids_(ids), tp_(tp), ring_(ring), split_(tp && tp_split_rows(pos, C)), ctrl_(ctl), rows_(C) {}
+        ids_(ids), tp_(tp), ring_(ring), own_(own), split_(tp && tp_split_rows(pos, C)), ctrl_(ctl), rows_(C),
+        R_(s.rows), wide_(C > kPfC) {}
 
   void run() {
+    begin();
+    for (uint32_t l = part_.first; l < part_.end; ++l) layer(l);
+    end();
+  }
+
+  // PERF-30: run() a piece at a time (prefill_pair_pp): begin, layer(l) for each of the part's layers, end.
+  void begin() {
     check();
     ring_begin();
     if (part_.device == 0 || tp_) {
@@ -74,7 +83,8 @@ class Walk {
     } else {
       src_ = HcSrc::None;   // device 1: H landed materialised
     }
-    for (uint32_t l = part_.first; l < part_.end; ++l) layer(l);
+  }
+  void end() {
     if (two_ && part_.device == 0) combine(HcSrc::Y, false, nullptr);   // _Y_NN: the materialised H crosses
     if (mtp_) mtp_pass();
     const size_t want =
@@ -84,6 +94,8 @@ class Walk {
                             std::to_string(C_) + " rows) appended " + std::to_string(n_) + " launches, not the " +
                             std::to_string(want) + " runtime::qwen4exp::prefill_device_launches gives");
   }
+
+  void pp_layer(uint32_t l) { layer(l); }
 
   // Plan 21v2b Task 4: a tensor-parallel card's chunk a unit at a time (prefill_pair_tp): tp_begin, then for each
   // unit u < 2 x layers tp_unit(u) - its body, ending in this card's copy and sent(rank, u) (a QSA mixer under the
@@ -138,7 +150,7 @@ class Walk {
 
  private:
   void check() {
-    require(C_ > 0 && C_ <= kPfC, "C = " + std::to_string(C_) + " is outside (0, kPfC]");
+    require(C_ > 0 && C_ <= R_, "C = " + std::to_string(C_) + " is outside (0, the scratch's " + std::to_string(R_) + " rows]");
     require(size_t(pos_) + C_ <= b_.max_len, "pos + C exceeds max_len");
     require(d_.hidden == kq::kHidden && d_.hc_n() == kq::kHcN && d_.hc_down_rows() == kq::kHcDownN &&
                 d_.q_heads == kq::kQHeads && d_.kv_heads == kq::kKvHeads && d_.head_dim == kq::kHd &&
@@ -167,21 +179,21 @@ class Walk {
       if (b_.holds_ple())
         require(m_.ple_device == part_.device && m_.ple.ptrs, "the PLE layer's device holds no pointer table");
     }
-    const PrefillSizes ps = prefill_sizes(c_, b_.max_len);
+    const PrefillSizes ps = prefill_sizes(c_, b_.max_len, R_);
     require(s_.partials.size() == ps.partials && s_.xg.size() == ps.xg && s_.w.size() == ps.w &&
                 s_.routes.size() == ps.routes && s_.lists.size() == ps.lists && s_.scores.size() == ps.scores &&
                 s_.slab.size() == ps.slab && s_.gdn.size() == ps.gdn,
             "the prefill scratch is not runtime::qwen4exp::prefill_sizes'");
     require(ps.hdr == size_t(kq::pf_hdr::words()) * 4, "the sort's header width moved");
-    if (injected_) require(injected_->size() >= pf_injected_bytes(d_), "the injected selection rows are short");
+    if (injected_) require(injected_->size() >= pf_injected_bytes(d_, R_), "the injected selection rows are short");
     if (mtp_) {   // spec 21-QFN-v1e: the head's pass (the last device)
       require(tp_ ? part_.mtp != nullptr : part_.device + 1 == b_.placement.devices,
               "the MTP head's prefill pass off the last device (tp: off the head's card)");
       require(part_.mtp && part_.mtp_fc && part_.rope && mtp_->bufs && mtp_->R && mtp_->embed && mtp_->hctl,
               "the MTP head's prefill pass without the head, its fc block, the RoPE table or its buffers");
-      require(mtp_->R->size() >= mtp_prefill_R_bytes(d_), "the head's R rows are shorter than [kPfC + 1][10240]");
-      require(s_.xg.size() >= size_t(kPfC) * (d_.hc_n() + d_.hidden) * 2 &&
-                  s_.o.size() >= size_t(kPfC) * d_.hidden * 4 && s_.partials.size() >= size_t(kPfC) * d_.hc * d_.hidden * 4,
+      require(mtp_->R->size() >= mtp_prefill_R_bytes(d_, R_), "the head's R rows are shorter than [rows + 1][10240]");
+      require(s_.xg.size() >= size_t(R_) * (d_.hc_n() + d_.hidden) * 2 &&
+                  s_.o.size() >= size_t(R_) * d_.hidden * 4 && s_.partials.size() >= size_t(R_) * d_.hc * d_.hidden * 4,
               "the prefill scratch does not hold the head's fusion rows (xh / xe in xg, fe in o, fh in partials)");
     }
   }
@@ -197,12 +209,17 @@ class Walk {
   //   int4 (layout 0): pf_dequant_slab(w, scales, slab, n0)            whole slabs, grid (1024 / 16, K / 64)
   //                    pf_int4_slab_dequant(w, scales, slab, n0, ns)     with a tail, grid (ns / 16, K / 64)
   //   bf16 (tiled):    kol_pf_bf16_slab(w, slab, n0, ns)               grid (ns / 16, K / 8)
-  void slabs(bool int4, const void* w, const void* scales, uint32_t K, uint32_t N, const void* x, void* out, uint32_t ld) {
+  // `bf16_out`: out holds bf16 (rne of each fp32 sum, ld in bf16 elements) - pf_gemm_T0_B16, rows_ above
+  // kPfSmallMaxRows only (gemm_l0's bf16 C). `hc8` (PERF-66): the bf16 arm's slab from a hyper-connection block's
+  // int8 form (q4_hc_slab_i8: the bf16 slab's arguments and grid).
+  void slabs(bool int4, const void* w, const void* scales, uint32_t K, uint32_t N, const void* x, void* out, uint32_t ld,
+             bool bf16_out = false, bool hc8 = false) {
     require(K % 64 == 0 && N % 16 == 0, "a linear is not whole k-groups / tiles");
     require(s_.slab.size() >= size_t(K) * pf_slab_width(N, 0) * 2, "the slab buffer is smaller than [K][slab]");
     require(ld >= pf_ld(N), "the output pitch does not hold the padded columns");
     const bool tail = kq::pf_int4_slab_tail(N);
-    l0::Kernel& sk = int4 ? kc_(kq::pf_int4_slab_variant(K, N), tail ? "pf_int4_slab_dequant" : "pf_dequant_slab")
+    l0::Kernel& sk = int4 ? kc_(kq::pf_int4_slab_variant(K, N, wide_), tail ? "pf_int4_slab_dequant" : "pf_dequant_slab")
+                   : hc8  ? kc_(kq::pf_hc_slab_variant(true), "q4_hc_slab_i8")
                           : kc_(kq::pf_bf16_slab_variant(K, N), "kol_pf_bf16_slab");
     for (uint32_t n0 = 0; n0 < N;) {
       const uint32_t ns = pf_slab_width(N, n0);
@@ -213,9 +230,11 @@ class Walk {
       else
         launch(sk, ns / 16, K / 8, 1, {PtrArg(w), PtrArg(s_.slab.ptr()), arg_val(n0), arg_val(ns)});
       prefill::profile_wait(cx_, Phase::kSlabDequant);
+      // PERF-36: a chunk wider than 2048 rows numbers the GEMM's work-groups N-fastest (pf_gemm_T0_R: the same tiles and
+      // DPAS chain) - past one wave a slab, the plain order reads each row block of x once a wave, not once a slab
       const prefill::GemmBatch gb{rows_, K, ns, 1, K, ns, ld, 0, 0, 0};
-      prefill::gemm_l0(cx_, kc_, gb, static_cast<const uint16_t*>(x), s_.slab.as<uint16_t>(),
-                       static_cast<float*>(out) + n0, false);
+      float* c = bf16_out ? reinterpret_cast<float*>(static_cast<uint16_t*>(out) + n0) : static_cast<float*>(out) + n0;
+      prefill::gemm_l0(cx_, kc_, gb, static_cast<const uint16_t*>(x), s_.slab.as<uint16_t>(), c, false, wide_, bf16_out);
       ++n_;
       prefill::profile_wait(cx_, Phase::kSlabGemm);
       n0 += ns;
@@ -233,23 +252,23 @@ class Walk {
     prefill::tiled_gemm(cx_, kc_, s_.slab.as<uint16_t>(), N, K, s_.x.as<uint16_t>(), rows_, out);
     ++n_;
   }
-  void linear(const loader::DeviceWeight& w, const void* x, void* out, uint32_t ld) {
+  void linear(const loader::DeviceWeight& w, const void* x, void* out, uint32_t ld, bool bf16_out = false) {
     const bool i4 = w.kind == model::WeightKind::Int4;
     require(i4 ? (w.shape.layout == 0 && bool(w.scales)) : w.kind == model::WeightKind::Bf16,
             "a Qwen3.8-Flash-Next dense linear is int4 GPTQ layout 0 with its scales, or bf16 tiled");
     require(i4 == (d_.forms.dense == model::Q4Form::Int4), "the linear's form is not the descriptor's dense arm");
-    slabs(i4, w.mem.ptr(), i4 ? w.scales->ptr() : nullptr, w.shape.K, w.shape.N, x, out, ld);
+    slabs(i4, w.mem.ptr(), i4 ? w.scales->ptr() : nullptr, w.shape.K, w.shape.N, x, out, ld, bf16_out);
   }
 
-  // q4_hc_combine_norm(ctrl, H, src, inj, norm_w, xn) at M = kPfC, grid (4, C): folds what is pending, then (norm)
+  // q4_hc_combine_norm(ctrl, H, src, inj, norm_w, xn) at M = the scratch's rows, grid (4, C): folds what is pending, then (norm)
   // the grouped norm with `w`.
   void combine(HcSrc src, bool norm, const float* w) {
     const void* sp = H_();   // _X reads nothing
     if (src == HcSrc::Embed) sp = s_.x.ptr();
     if (src == HcSrc::Slices) sp = tp_ ? static_cast<const void*>(fold_) : s_.partials.ptr();   // S 1, or tp's two
-    if (src == HcSrc::Y) sp = s_.y.ptr();
+    if (src == HcSrc::Y) sp = y_();
     const std::string v =
-        tp_ && src == HcSrc::Slices ? kq::tp_pf_fold_variant(norm) : kq::pf_hc_combine_norm_variant(src, norm);
+        tp_ && src == HcSrc::Slices ? kq::tp_pf_fold_variant(norm, R_) : kq::pf_hc_combine_norm_variant(src, norm, R_);
     launch(kc_(v, "q4_hc_combine_norm"), d_.hc, rows_, 1,
            {PtrArg(ctrl()), PtrArg(H_()), PtrArg(sp), PtrArg(inj_()),
             PtrArg(w ? static_cast<const void*>(w) : s_.partials.ptr()), PtrArg(s_.xn.ptr())});
@@ -262,8 +281,9 @@ class Walk {
     require(o.down_n == kq::kHcDownN, "the HC down||inject tiles are not {10240, 336}");
     combine(src_, true, reinterpret_cast<const float*>(at(block, o.norm)));
     src_ = HcSrc::None;
-    slabs(false, at(block, o.down), nullptr, d_.hc_n(), o.down_n, s_.xn.ptr(), s_.down_f32.ptr(), kq::kPfHcDownLd);
-    launch(kc_(kq::pf_hc_up_mix_variant(), "q4_hc_up_mix"), d_.hidden / kq::kPfHcUpCols,
+    slabs(false, at(block, o.down), nullptr, d_.hc_n(), o.down_n, s_.xn.ptr(), s_.down_f32.ptr(), kq::kPfHcDownLd,
+          false, o.int8);
+    launch(kc_(kq::pf_hc_up_mix_variant(R_, o.int8), "q4_hc_up_mix"), d_.hidden / kq::kPfHcUpCols,
            (rows_ + kq::kPfHcUpRows - 1) / kq::kPfHcUpRows, 1,
            {PtrArg(ctrl()), PtrArg(s_.down_f32.ptr()), PtrArg(at(block, o.up)), PtrArg(s_.xn.ptr()), PtrArg(s_.x.ptr()),
             PtrArg(inj_())});
@@ -286,7 +306,7 @@ class Walk {
 
   // The PLE layer's prologue: materialise H (unless it landed so), the gather from host USM over the chunk, the
   // key||value projections, then gate / conv / ring (q4_pf_ple.cl: a row's conv never reads a ring slot this chunk
-  // overwrites). The gated / gn rows live in xg's first 2 x [kPfC][10240] (xg is free outside the MoE).
+  // overwrites). The gated / gn rows live in xg's first 2 x [rows][10240] (xg is free outside the MoE).
   void ple(const loader::Q4Layer& L) {
     require(bool(L.ple), "the PLE layer holds no PLE block");
     if (src_ != HcSrc::None) {
@@ -295,7 +315,7 @@ class Walk {
     }
     const bool bf16s = m_.ple.scale == loader::Q4PleScale::Bf16;
     // q4_ple_gather(ctrl, ids_ring, ptrs, consts, e, ids_out, ids) _PF, grid (16 heads, C): e into x
-    l0::Kernel& pg = kc_(kq::pf_ple_gather_variant(bf16s), "q4_ple_gather");
+    l0::Kernel& pg = kc_(kq::pf_ple_gather_variant(bf16s, R_), "q4_ple_gather");
     pg.indirect_host();   // the PLE table's host-USM ranges are reached through m_.ple.ptrs
     launch(pg, d_.ple_heads, C_, 1,
            {PtrArg(ctrl()), PtrArg(b_.ple_ids_ring()), PtrArg(tp_ ? tp_->ple_ptrs : m_.ple.ptrs->ptr()),
@@ -307,9 +327,9 @@ class Walk {
             "the PLE block's norms / taps are not contiguous after norm_key (q4_pf_ple.cl indexes them so)");
     slabs(false, at(*L.ple, o.kv), nullptr, d_.ple_e(), d_.ple_kv_n(), s_.x.ptr(), s_.partials.ptr(), pf_ld(d_.ple_kv_n()));
     void* gated = s_.xg.ptr();
-    void* gn = at(s_.xg, size_t(kPfC) * d_.hc_n() * 2);
+    void* gn = at(s_.xg, size_t(R_) * d_.hc_n() * 2);
     const void* pw = at(*L.ple, o.norm_key);
-    const std::string v = kq::pf_ple_variant();
+    const std::string v = kq::pf_ple_variant(R_);
     // q4_pf_ple_gate(ctrl, kv, H, pw, gated, gn), grid (4 streams, C)
     launch(kc_(v, "q4_pf_ple_gate"), d_.hc, C_, 1,
            {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(H_()), PtrArg(pw), PtrArg(gated), PtrArg(gn)});
@@ -329,14 +349,18 @@ class Walk {
     require(L.gdn_ab->kind == model::WeightKind::Bf16 && L.gdn_ab->shape.N == model::Qwen4ExpDesc::kAbPaddedN &&
                 L.gdn_ab->shape.K == d_.hidden,
             "a||b is not bf16 {2560, 128} (pf_ab_proj's tiles)");
-    linear(*L.gdn_qkvz, s_.x.ptr(), s_.partials.ptr(), pf_ld(c_.qkvz_n()));
+    // A chunk past kPfSmallMaxRows rows (pf_gemm): the partials as the bf16 words gdn_chunk_q4's front and head round
+    // them to (Ornith's gdn.cc qkvz_bf16) - bitwise, half the bytes. Shorter chunks keep fp32 (pf_gemm_small).
+    const bool zb = rows_ > prefill::kPfSmallMaxRows;
+    linear(*L.gdn_qkvz, s_.x.ptr(), s_.partials.ptr(), pf_ld(c_.qkvz_n()), zb);
     // phase 3 Task 8: a||b by the dense GEMM, rows at pitch kPfAbPitch (256) read by pf_gdn_gate's _AB256 build
     tiled_gemm(*L.gdn_ab, s_.ab.as<float>());
-    const GdnScratchSizes g = gdn_scratch_sizes(kPfC);
+    const GdnScratchSizes g = gdn_scratch_sizes(R_);
     GdnChunkBuffers gb;
     gb.k_heads = c_.gdn_k_heads;
     gb.v_heads = c_.gdn_v_heads;
-    gb.qkvz = s_.partials.as<float>();
+    gb.qkvz = s_.partials.ptr();
+    gb.qkvz_bf16 = zb;
     gb.ab = s_.ab.as<float>();
     gb.ab_pitch = kq::kPfAbPitch;
     gb.state = static_cast<float*>(b_.gdn_state_layer(l));
@@ -400,7 +424,7 @@ class Walk {
   void indexer(uint32_t l, const loader::Q4Layer& L) {
     const uint32_t qi = d_.qsa_before(l);
     slabs(false, L.qsa_idx->mem.ptr(), nullptr, d_.hidden, d_.idx_n(), s_.x.ptr(), s_.idx_f32.ptr(), kq::kPfIdxLd);
-    const std::string qv = kq::pf_qsa_variant();
+    const std::string qv = kq::pf_qsa_variant(R_);
     // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys) _PF - grid (5, C)
     launch(kc_(qv, "q4_qsa_prep"), d_.idx_heads + 1, C_, 1,
            {PtrArg(ctrl()), PtrArg(s_.idx_f32.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
@@ -425,13 +449,13 @@ class Walk {
       // q4_qsa_select(ctrl, scores, stride, list, diag) - grid (1, n): decode's rule per row
       launch(kc_(qv, "q4_qsa_select"), 1, n, 1,
              {PtrArg(ctrl()), PtrArg(s_.scores.ptr()), arg_val(stride), PtrArg(lists),
-              PtrArg(at(s_.diag, pf_diag_at(qi) + size_t(r0) * 8))});
+              PtrArg(at(s_.diag, pf_diag_at(qi, R_) + size_t(r0) * 8))});
       ctrl_ = ctl_;
     }
     prefill::profile_wait(cx_, Phase::kAttnPrep);
     if (!split_) return;
     // this card's selection rows into the same rows of the peer's
-    uint8_t* dst = static_cast<uint8_t*>(tp_->peer_lists) + (tp_->lists ? 0 : pf_list_at(qi)) + r0 * lrow;
+    uint8_t* dst = static_cast<uint8_t*>(tp_->peer_lists) + (tp_->lists ? 0 : pf_list_at(qi, R_)) + r0 * lrow;
     const size_t bytes = size_t(n) * lrow;
     const uint32_t r = tp_->rank;
     if (tp_->bcs) {
@@ -459,7 +483,7 @@ class Walk {
       launch(kc_(fv, "pf_flash_attn"), (dense_ + kq::kPfFlashRpw - 1) / kq::kPfFlashRpw, c_.kv_heads,
              c_.q_heads / c_.kv_heads / kq::kPfFlashHpw,
              {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s_.o.ptr()), arg_val(pos_), arg_val(dense_),
-              arg_val(kPfC)});
+              arg_val(R_)});
     }
     if (sparse > 0) {
       // q4_pf_sparse_attn(Q, Kc, Vc, lists, O, r0, rows) - grid (sparse rows, 2 kv heads), after the flash (whose last
@@ -467,13 +491,13 @@ class Walk {
       launch(kc_(tp_ ? kq::tp_pf_sparse_attn_variant() : kq::pf_sparse_attn_variant(eager_), "q4_pf_sparse_attn"), sparse,
              c_.kv_heads, 1,
              {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(kv_v), PtrArg(lists), PtrArg(s_.o.ptr()), arg_val(dense_),
-              arg_val(kPfC)});
+              arg_val(R_)});
     }
     prefill::profile_wait(cx_, Phase::kAttnFlash);
     // pf_attn_gate(o, qkv_partials, out, stride_h) _Q24KV2 - grid (24, C): out = rne(rne(o) x sigmoid(gate))
     launch(kc_(tp_ ? kernels::pf_attn_variant(kq::kTpQHeads, kq::kTpKvHeads) : kq::pf_gate_q4_variant(), "pf_attn_gate"),
            c_.q_heads, C_, 1,
-           {PtrArg(s_.o.ptr()), PtrArg(s_.partials.ptr()), PtrArg(s_.attn_out.ptr()), arg_val(uint32_t(kPfC * d_.head_dim))});
+           {PtrArg(s_.o.ptr()), PtrArg(s_.partials.ptr()), PtrArg(s_.attn_out.ptr()), arg_val(uint32_t(R_ * d_.head_dim))});
     linear(*L.qsa_o, s_.attn_out.ptr(), row_out(), pf_ld(d_.hidden));
     src_ = HcSrc::Slices;
     if (tp_) cross();
@@ -502,7 +526,7 @@ class Walk {
   void moe(uint32_t l, const loader::Q4Layer& L) {
     require(L.router->shape.N == d_.router_n() && L.router->shape.K == d_.hidden && L.router->kind == model::WeightKind::Bf16,
             "the router is not bf16 [528][2560]");
-    void* rt = at(s_.routes, pf_route_at(l));
+    void* rt = at(s_.routes, pf_route_at(l, R_));
     // phase 3 Task 8: the router by the dense GEMM, rows at pitch kPfRouterPitch (768); q4_route's _P768 build
     // (decode's arithmetic, ROUTE_LN = 768) reads row m
     tiled_gemm(*L.router, s_.logits.as<float>());
@@ -522,11 +546,13 @@ class Walk {
              {PtrArg(rt), PtrArg(s_.cnt.ptr()), PtrArg(s_.row_tok.ptr()), PtrArg(s_.pair_row.ptr()), arg_val(C_)});
     }
     prefill::profile_wait(cx_, Phase::kMoeSort);
-    // q4_pf_gather(x, hdr, row_tok, xg) - grid (tmax x TM)
-    launch(kc_(v, "q4_pf_gather"), tmax * kPfTm, 1, 1,
+    const bool shb = d_.forms.shared == model::Q4Form::Bf16;
+    // q4_pf_gather[_routed](x, hdr, row_tok, xg) - grid (tmax x TM); PERF-27: our int4 shared expert's gate||up reads
+    // its rows from x itself (the _SHX binaries), so the gather writes the routed rows only; Intel's bf16 one runs
+    // the batch walk over xg's shared rows
+    launch(kc_(v, shb ? "q4_pf_gather" : "q4_pf_gather_routed"), tmax * kPfTm, 1, 1,
            {PtrArg(s_.x.ptr()), PtrArg(s_.hdr.ptr()), PtrArg(s_.row_tok.ptr()), PtrArg(s_.xg.ptr())});
     prefill::profile_wait(cx_, Phase::kMoeGather);
-    const bool shb = d_.forms.shared == model::Q4Form::Bf16;
     {
       // plan 2026-11-12 Task 7: pf_moe_q4gemm over the work items, the int4 blocks read in place (bitwise the batch
       // walk); Intel's bf16 shared expert (no int4 form) keeps its one-block dequant + GEMM after
@@ -546,8 +572,7 @@ class Walk {
       const void* w_dn = tbl ? static_cast<const uint8_t*>(row) + size_t(d_.experts) * 8 : L.down->ptr();
       // tp (plan 21v2b Task 4): the card's half of every expert - gate||up 2560 x 640 (128 columns a work-group), the
       // down over its K half into fp32 rows (yf), then the card's fp32 partial of the block's output
-      l0::Kernel& gu = kc_(tp_ ? kq::tp_pf_moe_gu_variant(tbl) : kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true, tbl),
-                           "pf_moe_q4gemm");
+      l0::Kernel& gu = kc_(tp_ ? kq::tp_pf_moe_gu_variant(tbl) : kq::pf_moe_gu_variant(tbl), "pf_moe_q4gemm");
       l0::Kernel& dn = kc_(tp_ ? kq::tp_pf_moe_dn_variant(tbl)
                                : kernels::pf_moe_q4gemm_variant(d_.moe_inter, d_.hidden, false, tbl),
                            "pf_moe_q4gemm");
@@ -558,7 +583,7 @@ class Walk {
       }
       launch(gu, NG / gu_wg, ib, 1,
              {PtrArg(s_.items.ptr()), PtrArg(s_.xg.ptr()), PtrArg(w_gu),
-              PtrArg(shb ? nullptr : L.shared->ptr()), PtrArg(s_.h.ptr())});
+              PtrArg(shb ? nullptr : L.shared->ptr()), PtrArg(s_.h.ptr()), PtrArg(s_.x.ptr()), PtrArg(s_.hdr.ptr())});
       prefill::profile_wait(cx_, Phase::kMoeGemm);
       // (the shared block alone: the walk starts at block d_.experts, whose dequant returns before `w` is read - so
       // `blocks` is null, never the table row, which this binary would read without the indirect-access flag)
@@ -580,16 +605,16 @@ class Walk {
     if (tp_) {
       // q4_pf_moe_combine_f32(route, hdr, pair_row, yf, out, C) - grid (2560 / 256, C): the card's fp32 partial into its
       // fold slice, then the crossing
-      launch(kc_(kq::tp_pf_combine_variant(), "q4_pf_moe_combine_f32"), d_.hidden / kq::kPfCombineWg, C_, 1,
+      launch(kc_(kq::tp_pf_combine_variant(), "q4_pf_moe_combine_f32"), d_.hidden / kq::kPfCombineF32Cols, C_, 1,
              {PtrArg(rt), PtrArg(s_.hdr.ptr()), PtrArg(s_.pair_row.ptr()), PtrArg(tp_->yf), PtrArg(row_out()), arg_val(C_)});
       prefill::profile_wait(cx_, Phase::kMoeCombine);
       src_ = HcSrc::Slices;
       cross();
       return;
     }
-    // q4_pf_moe_combine(route, hdr, pair_row, y, out, C) - grid (2560 / 256, C): the block's y (NOT folded into H)
-    launch(kc_(v, "q4_pf_moe_combine"), d_.hidden / kq::kPfCombineWg, C_, 1,
-           {PtrArg(rt), PtrArg(s_.hdr.ptr()), PtrArg(s_.pair_row.ptr()), PtrArg(s_.xg.ptr()), PtrArg(s_.y.ptr()), arg_val(C_)});
+    // q4_pf_moe_combine(route, hdr, pair_row, y, out, C) - grid (2560 / 512, C): the block's y (NOT folded into H)
+    launch(kc_(v, "q4_pf_moe_combine"), d_.hidden / kq::kPfCombineCols, C_, 1,
+           {PtrArg(rt), PtrArg(s_.hdr.ptr()), PtrArg(s_.pair_row.ptr()), PtrArg(s_.xg.ptr()), PtrArg(y_()), arg_val(C_)});
     prefill::profile_wait(cx_, Phase::kMoeCombine);
     src_ = HcSrc::Y;
   }
@@ -598,7 +623,7 @@ class Walk {
   HcSrc moe_src() const { return tp_ ? HcSrc::Slices : HcSrc::Y; }
   // Where a row-parallel unit's output goes: the partials (one card), or this card's slice of the unit's fold slot.
   void* row_out() const {
-    return tp_ ? tp_->fold[unit_ & 1u] + size_t(tp_->rank) * kPfC * d_.hidden : s_.partials.ptr();
+    return tp_ ? tp_->fold[unit_ & 1u] + size_t(tp_->rank) * R_ * d_.hidden : s_.partials.ptr();
   }
   // This card's slice into the peer's slot and sent(rank, u); tp_wait appends the wait for the peer's, after the
   // peer's unit u has been appended (prefill_pair_tp), and points the next combine at the slot.
@@ -607,7 +632,7 @@ class Walk {
   void cross() {
     const uint32_t u = unit_++, r = tp_->rank;
     require(u < tp_->units, "more row-parallel units than 2 x layers");
-    const size_t off = size_t(r) * kPfC * d_.hidden;
+    const size_t off = size_t(r) * R_ * d_.hidden;
     float* dst = tp_->peer_fold[u & 1u] + off;
     const float* src = tp_->fold[u & 1u] + off;
     const size_t bytes = size_t(C_) * d_.hidden * 4;
@@ -634,13 +659,15 @@ class Walk {
     if (!ring_ || !ring_->issue_first) return;
     for (uint32_t l = part_.first; l < std::min(part_.end, part_.first + 2); ++l) ring_copy(l, nullptr);
   }
-  // The chunk's residual rows and inject weights (the pair's second chunk has its own: Q4TpPrefill::H / inj).
-  void* H_() const { return tp_ && tp_->H ? tp_->H : s_.H.ptr(); }
-  void* inj_() const { return tp_ && tp_->inj ? tp_->inj : s_.inj.ptr(); }
+  // The chunk's residual rows and inject weights (tp: the pair's second chunk has its own, Q4TpPrefill::H / inj; pp:
+  // the pair's first, Q4PfOwnRows) and its MoE output (pp's pair: the first chunk's own).
+  void* H_() const { return tp_ && tp_->H ? tp_->H : own_ ? own_->H : s_.H.ptr(); }
+  void* inj_() const { return tp_ && tp_->inj ? tp_->inj : own_ ? own_->inj : s_.inj.ptr(); }
+  void* y_() const { return own_ ? own_->y : s_.y.ptr(); }
   // QSA layer qi's selection rows: the injected ones, the pair's second chunk's one layer (tp), or the scratch's.
   void* lists_(uint32_t qi) const {
-    if (injected_) return at(*injected_, pf_list_at(qi));
-    return tp_ && tp_->lists ? tp_->lists : at(s_.lists, pf_list_at(qi));
+    if (injected_) return at(*injected_, pf_list_at(qi, R_));
+    return tp_ && tp_->lists ? tp_->lists : at(s_.lists, pf_list_at(qi, R_));
   }
   // Row `row` of the chunk's event block at this unit (Q4TpPrefill::rctl: 4 + card sent, 6 + card ready).
   ze_event_handle_t lists_ev(uint32_t row) const { return tp_->ev->handle(tp_->ev_off + row * tp_->units + unit_); }
@@ -659,7 +686,7 @@ class Walk {
       prefill::profile_wait(cx_, Phase::kSlabDequant);
       const prefill::GemmBatch gb{rows, K, ns, 1, K, ns, ld, 0, 0, 0};
       prefill::gemm_l0(cx_, kc_, gb, static_cast<const uint16_t*>(x), s_.slab.as<uint16_t>(),
-                       static_cast<float*>(out) + n0, false);
+                       static_cast<float*>(out) + n0, false, wide_);
       ++n_;
       prefill::profile_wait(cx_, Phase::kSlabGemm);
       n0 += ns;
@@ -680,8 +707,8 @@ class Walk {
       const l0::Mem& fc = *part_.mtp_fc;
       const loader::Q4Layer& L = *part_.mtp;
       void* xh = s_.xg.ptr();                                   // bf16 [rows][10240] = [4 rows][2560]
-      void* xe = at(s_.xg, size_t(kPfC) * d_.hc_n() * 2);       // bf16 [rows][2560]
-      const std::string v = kq::mtp_variant(kPfC, mtp_->single, true);
+      void* xe = at(s_.xg, size_t(R_) * d_.hc_n() * 2);         // bf16 [rows][2560]
+      const std::string v = kq::mtp_variant(R_, mtp_->single, true);
       // q4_mtp_norm(ctrl, R, embed, w_e, w_h, xe, xh, ids) _PF - grid (1 + 4, rows): R_{q} and t_{q+1} for the head's
       // rows q = pos - 1 + r0 .. (the chunk's ids from r0)
       launch(kc_(v, "q4_mtp_norm"), 1 + d_.hc, rows, 1,
@@ -705,12 +732,12 @@ class Walk {
       bf16_cols(L.qsa_qkvg->mem.ptr(), d_.hidden, d_.qkvg_n(), 2 * d_.q_n(), d_.qkvg_n(), rows, s_.x.ptr(), part,
                 pf_ld(d_.qkvg_n()));
       bf16_cols(L.qsa_idx->mem.ptr(), d_.hidden, d_.idx_n(), 0, d_.idx_n(), rows, s_.x.ptr(), s_.idx_f32.ptr(), kq::kPfIdxLd);
-      // pf_attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v) q16 - grid (24 + 2, rows): the
-      // head's K / V at its positions (q16 is written and never read)
-      launch(kc_(kq::pf_attn_prep_q4_variant(), "pf_attn_prep"), d_.q_heads + d_.kv_heads, rows, 1,
+      // pf_attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v) q16 _KVO - grid (2, rows): the
+      // head's K / V at its positions; PERF-85: the kv heads only (the q heads' rows went to q16, which nothing reads)
+      launch(kc_(kernels::kv_only(kq::pf_attn_prep_q4_variant()), "pf_attn_prep"), kq::kKvHeads, rows, 1,
              {PtrArg(ctrl()), PtrArg(part), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()), PtrArg(q16),
               PtrArg(nullptr), PtrArg(mb.k()), PtrArg(mb.v())});
-      const std::string qv = kq::pf_qsa_variant();
+      const std::string qv = kq::pf_qsa_variant(R_);
       // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys) _PF - grid (5, rows); q4_qsa_ring - grid (1, 8)
       launch(kc_(qv, "q4_qsa_prep"), d_.idx_heads + 1, rows, 1,
              {PtrArg(ctrl()), PtrArg(s_.idx_f32.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
@@ -740,52 +767,57 @@ class Walk {
   const uint32_t* ids_;             // this chunk's ids (its slot of s.ids)
   const Q4TpPrefill* tp_;           // plan 21v2b Task 4: a tensor-parallel card's chunk, or null
   const Q4PfRing* ring_;            // the host-memory experts read ahead, or null (read in place)
+  const Q4PfOwnRows* own_;          // PERF-30: the pp pair's first chunk's own rows, or null (the scratch's)
   const bool split_;                // tp: the indexer split by rows on this chunk (tp_split_rows)
   bool attend_ = false;             // tp: the unit's QSA layer attends in tp_rest, after the peer's selection rows
   uint32_t unit_ = 0;               // tp: the row-parallel units crossed so far this chunk
   const float* fold_ = nullptr;     // tp: the fold slot the pending combine reads
   const void* ctrl_;                // ctl_, or the head's chunk Control for its pass
   uint32_t rows_;                   // the rows a combine / up_mix / linear covers: C, or the head's rows
+  const uint32_t R_;                // the scratch's chunk rows (kPfC or kPfCWide): every [rows] stride, the M builds
+  const bool wide_;                 // PERF-36: a chunk past kPfC rows - the block-store slabs, pf_gemm_T0_R
   HcSrc src_ = HcSrc::None;
   size_t n_ = 0;
 };
 
 }  // namespace
 
-Qwen4ExpPrefillScratch::Qwen4ExpPrefillScratch(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t max_len_)
-    : ids(ctx, l0::MemKind::Host, prefill_sizes(d, max_len_).ids),
-      H(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).H),
-      xn(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).xn),
-      x(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).x),
-      down_f32(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).down_f32),
-      inj(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).inj),
-      partials(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).partials),
-      slab(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).slab),
-      idx_f32(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).idx_f32),
-      idx_q(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).idx_q),
-      scores(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).scores),
-      lists(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).lists),
-      diag(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).diag),
-      q16(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).q16),
-      o(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).o),
-      attn_out(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).attn_out),
-      ab(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).ab),
-      gdn(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).gdn),
-      logits(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).logits),
-      routes(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).routes),
-      hdr(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).hdr),
-      tiles(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).tiles),
-      row_tok(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).row_tok),
-      pair_row(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).pair_row),
-      xg(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).xg),
-      h(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).h),
-      y(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).y),
-      w(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).w),
-      ple_ids(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).ple_ids),
-      cnt(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).cnt),
-      items(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).items),
+Qwen4ExpPrefillScratch::Qwen4ExpPrefillScratch(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t max_len_,
+                                               uint32_t rows_)
+    : ids(ctx, l0::MemKind::Host, prefill_sizes(d, max_len_, rows_).ids),
+      H(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).H),
+      xn(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).xn),
+      x(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).x),
+      down_f32(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).down_f32),
+      inj(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).inj),
+      partials(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).partials),
+      slab(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).slab),
+      idx_f32(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).idx_f32),
+      idx_q(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).idx_q),
+      scores(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).scores),
+      lists(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).lists),
+      diag(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).diag),
+      q16(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).q16),
+      o(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).o),
+      attn_out(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).attn_out),
+      ab(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).ab),
+      gdn(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).gdn),
+      logits(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).logits),
+      routes(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).routes),
+      hdr(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).hdr),
+      tiles(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).tiles),
+      row_tok(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).row_tok),
+      pair_row(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).pair_row),
+      xg(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).xg),
+      h(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).h),
+      y(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).y),
+      w(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).w),
+      ple_ids(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).ple_ids),
+      cnt(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).cnt),
+      items(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_, rows_).items),
       desc(d),
-      max_len(max_len_) {}
+      max_len(max_len_),
+      rows(rows_) {}
 
 size_t Qwen4ExpPrefillScratch::bytes() const {
   return ids.size() + H.size() + xn.size() + x.size() + down_f32.size() + inj.size() + partials.size() + slab.size() +
@@ -800,6 +832,27 @@ void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefi
                    const l0::Mem* injected, bool two_cards, const Qwen4ExpMtpPrefill* mtp, const Control* ctl,
                    const uint32_t* ids, const Q4PfRing* ring) {
   Walk(cx, kc, s, m, part, b, pos, C, eager, injected, two_cards, mtp, ctl, ids, nullptr, ring).run();
+}
+
+void prefill_pair_pp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s,
+                     const loader::Q4LoadedModel& m, const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, bool eager,
+                     bool two_cards, const std::array<Q4PfChunk, 2>& chunks, uint32_t n) {
+  if (n == 0 || n > 2) throw std::runtime_error("runtime::qwen4exp::prefill_pair_pp: " + std::to_string(n) + " chunks");
+  if (n == 2 && (!chunks[0].own || chunks[1].own || (chunks[0].ring == nullptr) != (chunks[1].ring == nullptr)))
+    throw std::runtime_error("runtime::qwen4exp::prefill_pair_pp: the pair's first chunk keeps its own rows, the second "
+                             "the scratch's, and both read the experts the same way");
+  std::array<std::optional<Walk>, 2> w;
+  for (uint32_t h = 0; h < n; ++h) {
+    const Q4PfChunk& c = chunks[h];
+    w[h].emplace(cx, kc, s, m, part, b, c.pos, c.C, eager, c.injected, two_cards, c.mtp, c.ctl, c.ids, nullptr, c.ring,
+                 c.own);
+  }
+  for (uint32_t l = part.first; l < part.end; ++l)
+    for (uint32_t h = 0; h < n; ++h) {
+      if (l == part.first) w[h]->begin();   // the embedding rows into the scratch's x, read by this chunk's layer alone
+      w[h]->pp_layer(l);
+    }
+  for (uint32_t h = 0; h < n; ++h) w[h]->end();
 }
 
 void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array<Q4TpChunk, 2>, 2>& chunks,
@@ -836,15 +889,31 @@ void prefill_pair_tp(const loader::Q4LoadedModel& m, const std::array<std::array
     }
 }
 
+namespace {
+// The final mixer's down GEMV over the last row's xn -> b.down_f32 (M 1): gemv_bf16 {10240, 320}, or (PERF-66)
+// q4_hc_down_i8 over the int8 form.
+void final_mixer_down(prefill::Context& cx, prefill::KernelCache& kc, const l0::Mem& mixer,
+                      const loader::Q4HcOffsets& o, Qwen4ExpBuffers& b) {
+  if (o.int8) {
+    cx.launch(kc(kq::hc_down_i8_variant(1, false), "q4_hc_down_i8"), o.down_n / 16, 1, 1,
+              {PtrArg(at(mixer, o.down)), PtrArg(b.xn.ptr()), PtrArg(b.down_f32.ptr())});
+    return;
+  }
+  const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(o.down_n);
+  cx.launch(kc(kernels::gemv_bf16_variant(1, kq::kHcN, o.down_n, t), "gemv_bf16"), o.down_n / t.cols, 1, 1,
+            {PtrArg(at(mixer, o.down)), PtrArg(b.xn.ptr()), PtrArg(b.down_f32.ptr())});
+}
+}  // namespace
+
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                   const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t last_row, const void* R_last) {
   const model::Qwen4ExpDesc& d = m.desc;
-  if (last_row >= kPfC) throw std::runtime_error("runtime::qwen4exp::prefill_head: last_row past kPfC");
+  if (last_row >= s.rows) throw std::runtime_error("runtime::qwen4exp::prefill_head: last_row past the scratch's rows");
   if (!part.final_mixer || !part.lm_head)
     throw std::runtime_error("runtime::qwen4exp::prefill_head: device " + std::to_string(part.device) + " holds no head");
   const loader::Q4HcOffsets o = loader::q4_hc_offsets(d, false);
   // decode's final mixer over the last row: combine _Y (M 1: the row's H, its pending y and inject weights) -> b.xn;
-  // gemv_bf16 {10240, 320} -> b.down_f32; q4_hc_up_mix (M 1, no inject) -> b.x. Spec 21-QFN-v1e: with the MTP head's pass
+  // final_mixer_down -> b.down_f32; q4_hc_up_mix (M 1, no inject) -> b.x. Spec 21-QFN-v1e: with the MTP head's pass
   // the rows were materialised (R_last: nothing pending, combine _X - the same norm over the same H).
   if (R_last)
     cx.launch(kc(kq::hc_combine_norm_variant(1, HcSrc::None, 0, true), "q4_hc_combine_norm"), d.hc, 1, 1,
@@ -855,12 +924,8 @@ void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefil
               {PtrArg(b.control.ptr()), PtrArg(at(s.H, size_t(last_row) * d.hc_n() * 2)),
                PtrArg(at(s.y, size_t(last_row) * d.hidden * 2)), PtrArg(at(s.inj, size_t(last_row) * d.hc * 4)),
                PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
-  {
-    const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(o.down_n);
-    cx.launch(kc(kernels::gemv_bf16_variant(1, d.hc_n(), o.down_n, t), "gemv_bf16"), o.down_n / t.cols, 1, 1,
-              {PtrArg(at(*part.final_mixer, o.down)), PtrArg(b.xn.ptr()), PtrArg(b.down_f32.ptr())});
-  }
-  cx.launch(kc(kq::hc_up_mix_variant(1, false), "q4_hc_up_mix"), d.hidden / 16, 1, 1,
+  final_mixer_down(cx, kc, *part.final_mixer, o, b);
+  cx.launch(kc(kq::hc_up_mix_variant(1, false, o.int8), "q4_hc_up_mix"), d.hidden / 16, 1, 1,
             {PtrArg(b.control.ptr()), PtrArg(b.down_f32.ptr()), PtrArg(at(*part.final_mixer, o.up)), PtrArg(b.xn.ptr()),
              PtrArg(b.x.ptr()), PtrArg(b.inj.ptr())});
   const loader::DeviceWeight& lm = *part.lm_head;
@@ -883,7 +948,7 @@ void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPre
                      uint32_t rank, const model::Qwen4ExpDesc& card, const void* H, const void* inj,
                      const void* R_last) {
   const model::Qwen4ExpDesc& d = m.desc;
-  if (last_row >= kPfC) throw std::runtime_error("runtime::qwen4exp::prefill_head_tp: last_row past kPfC");
+  if (last_row >= s.rows) throw std::runtime_error("runtime::qwen4exp::prefill_head_tp: last_row past the scratch's rows");
   if (!part.final_mixer || !part.lm_head || part.lm_head->kind != model::WeightKind::Int8 ||
       part.lm_head->shape.N != card.vocab)
     throw std::runtime_error("runtime::qwen4exp::prefill_head_tp: card " + std::to_string(rank) +
@@ -899,19 +964,15 @@ void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPre
                PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
   } else {
   for (uint32_t q = 0; q < 2; ++q)
-    cx.copy(static_cast<uint8_t*>(b.partials.ptr()) + q * row, fold + (size_t(q) * kPfC + last_row) * d.hidden, row);
+    cx.copy(static_cast<uint8_t*>(b.partials.ptr()) + q * row, fold + (size_t(q) * s.rows + last_row) * d.hidden, row);
   cx.launch(kc(kq::tp_head_fold_variant(), "q4_hc_combine_norm"), d.hc, 1, 1,
             {PtrArg(b.control.ptr()), PtrArg(static_cast<const uint8_t*>(H ? H : s.H.ptr()) + size_t(last_row) * d.hc_n() * 2),
              PtrArg(b.partials.ptr()),
              PtrArg(static_cast<const uint8_t*>(inj ? inj : s.inj.ptr()) + size_t(last_row) * d.hc * 4),
              PtrArg(at(*part.final_mixer, o.norm)), PtrArg(b.xn.ptr())});
   }
-  {
-    const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(o.down_n);
-    cx.launch(kc(kernels::gemv_bf16_variant(1, d.hc_n(), o.down_n, t), "gemv_bf16"), o.down_n / t.cols, 1, 1,
-              {PtrArg(at(*part.final_mixer, o.down)), PtrArg(b.xn.ptr()), PtrArg(b.down_f32.ptr())});
-  }
-  cx.launch(kc(kq::hc_up_mix_variant(1, false), "q4_hc_up_mix"), d.hidden / 16, 1, 1,
+  final_mixer_down(cx, kc, *part.final_mixer, o, b);
+  cx.launch(kc(kq::hc_up_mix_variant(1, false, o.int8), "q4_hc_up_mix"), d.hidden / 16, 1, 1,
             {PtrArg(b.control.ptr()), PtrArg(b.down_f32.ptr()), PtrArg(at(*part.final_mixer, o.up)), PtrArg(b.xn.ptr()),
              PtrArg(b.x.ptr()), PtrArg(b.inj.ptr())});
   const loader::DeviceWeight& lm = *part.lm_head;
@@ -923,19 +984,6 @@ void prefill_head_tp(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPre
             {PtrArg(b.logits.ptr()), PtrArg(b.argmax_part.ptr())});
   cx.launch(kc(v, "tp_argmax_stage2"), 1, 1, 1, {PtrArg(b.control.ptr()), PtrArg(b.argmax_part.ptr())});
   prefill::profile_wait(cx, Phase::kHead);
-}
-
-uint32_t copy_ordinal(ze_device_handle_t dev) {
-  uint32_t n = 0;
-  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, nullptr));
-  std::vector<ze_command_queue_group_properties_t> p(n);
-  for (auto& q : p) q.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
-  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, p.data()));
-  for (uint32_t i = 0; i < n; ++i)
-    if ((p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
-        !(p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE))
-      return i;
-  return UINT32_MAX;
 }
 
 Q4PfRingState::Q4PfRingState(l0::Context& ctx, const loader::Q4DevicePart& part, const model::Qwen4ExpDesc& card) {
@@ -965,10 +1013,10 @@ Q4PfRingState::Q4PfRingState(l0::Context& ctx, const loader::Q4DevicePart& part,
   rows = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, t.size() * 8);
   imm.copy(rows->ptr(), t.data(), t.size() * 8);
   ev = std::make_unique<l0::SyncEventPool>(ctx, std::vector<const l0::Context*>{&ctx}, 2 * n);
-  const uint32_t ord = copy_ordinal(ctx.device());
+  const std::vector<l0::CopyEngine> ce = ctx.copy_engines();
   ze_command_queue_desc_t qd{};
   qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
-  qd.ordinal = ord == UINT32_MAX ? 0 : ord;   // no copy-only engine: the compute group (correct, no overlap)
+  qd.ordinal = ce.empty() ? 0 : ce[0].ordinal;   // no copy-only engine: the compute group (correct, no overlap)
   qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
   qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
   qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;

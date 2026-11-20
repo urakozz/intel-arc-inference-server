@@ -30,6 +30,16 @@
 #ifndef GEMV_AHEAD
 #define GEMV_AHEAD 1
 #endif
+// GEMV_KMAJOR 1 (layout 1 only, PERF-111): the 544 B tiles ordered [g][n_tile] instead of [n_tile][g]
+// (common::tiles_k_major, one repack at load), so at each k-group the launch's sub-groups read neighbouring tiles
+// rather than each walking its own slab of K. probe_bw measured the two fronts at ~603 against 495-584 GB/s. Same
+// loads, same arithmetic and order: bitwise the [n_tile][g] build.
+#ifndef GEMV_KMAJOR
+#define GEMV_KMAJOR 0
+#endif
+#if GEMV_KMAJOR && LAYOUT != 1
+#error "gemv: GEMV_KMAJOR is layout 1 only"
+#endif
 #if GEMV_BLOCK2D
 #if LAYOUT != 0
 #error "gemv: GEMV_BLOCK2D is layout 0 only"
@@ -45,8 +55,33 @@
 #define G (K / GROUP)
 #define G_PER_S (G / S)
 #define TILE_U32 136   /* 128 u32 of nibbles + 8 u32 of scales = 544 B */
+// The host's require on N (capture.cc), here too: a binary built at any other shape would leave columns or k-groups
+// unread.
+#if N % WG_N != 0
+#error "gemv: N must be a multiple of 64 (one work-group's columns)"
+#endif
+#if K % GROUP != 0 || G % S != 0
+#error "gemv: K must be whole 64-row groups and S must divide K / 64"
+#endif
 #if G_PER_S % GEMV_AHEAD != 0
 #error "gemv: GEMV_AHEAD must divide the k-groups of a slice"
+#endif
+// GEMV_TP_SEND (PERF-44, Qwen3.8-Flash-Next tp decode's out_proj / o_proj): tp.cl's tp_send folded into the linear -
+// each work-group is one chunk of the crossing per row (its 64 columns of slice s: chunk s x N / 64 + group x, row m)
+// and writes its partial both to `out` and to the peer's landing (tp_wire.h's layout at [S][M][N]), then the stamp
+// lines and the flags, as tp_send does. tp.cl's tp_sum under TP_WIRE_COLS 64 waits for these chunks. The arithmetic
+// is unchanged; every other binary leaves it unset.
+#ifndef GEMV_TP_SEND
+#define GEMV_TP_SEND 0
+#endif
+#if GEMV_TP_SEND
+#define TP_MROWS 8
+#if M > TP_MROWS
+#error "gemv GEMV_TP_SEND: M <= 8 (the landing's rows)"
+#endif
+#define DATA_WORDS (S * TP_MROWS * N)
+#define J_CHUNKS ((N / WG_N) * S * TP_MROWS)
+#include "tp_wire.h"
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -89,7 +124,11 @@ __attribute__((reqd_work_group_size(WG_N, 1, 1)))
 __kernel void gemv(__global const uint* restrict w,
                    __global const half* restrict scales,
                    __global const ushort* restrict x,
-                   __global float* restrict out) {
+                   __global float* restrict out
+#if GEMV_TP_SEND
+                   , __global uint* land, __global uint* ctr
+#endif
+                   ) {
   const uint lane = get_sub_group_local_id();
   const uint n_tile = get_group_id(0) * SG_PER_WG + get_sub_group_id();
   const uint n = n_tile * SG + lane;
@@ -120,7 +159,11 @@ __kernel void gemv(__global const uint* restrict w,
 #endif
       scalea[a] = (float)scales[(size_t)g * N + n];
 #else
+#if GEMV_KMAJOR
+      __global const uint* tile = w + ((size_t)g * (N / SG) + n_tile) * TILE_U32;
+#else
       __global const uint* tile = w + ((size_t)n_tile * G + g) * TILE_U32;
+#endif
       uint8 blk = intel_sub_group_block_read8(tile);
       wv[0] = blk.s0; wv[1] = blk.s1; wv[2] = blk.s2; wv[3] = blk.s3;
       wv[4] = blk.s4; wv[5] = blk.s5; wv[6] = blk.s6; wv[7] = blk.s7;
@@ -144,5 +187,35 @@ __kernel void gemv(__global const uint* restrict w,
     }
   }
 
+#if GEMV_TP_SEND
+  // tp_send for the chunks (c, m), m < M: the call numbers, each row's 64 words here and in the peer's landing, the
+  // stamp lines, the flags.
+  const uint lid = get_local_id(0);
+  const uint c = s * (N / WG_N) + get_group_id(0);
+  __local uint s_n[M];
+  if (lid == 0)
+    for (uint m = 0; m < M; ++m) s_n[m] = tp_next(ctr, c, m);
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (int m = 0; m < M; ++m) {
+    const size_t e = ((size_t)s * M + m) * N + n;
+    out[e] = acc[m];
+    land[(s_n[m] & 1u) * DATA_WORDS + e] = as_uint(acc[m]);
+  }
+  for (uint i = lid; i < M * TP_TRAILER_STRIDE; i += WG_N) {
+    const uint m = i / TP_TRAILER_STRIDE;
+    const uint t = s_n[m];
+    land[TRAILER(t & 1u, c * TP_MROWS + m) + i % TP_TRAILER_STRIDE] = t;
+  }
+  atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
+  barrier(CLK_GLOBAL_MEM_FENCE);
+  if (lid == 0) {
+    for (uint m = 0; m < M; ++m) {
+      const uint t = s_n[m];
+      *(volatile __global uint*)(land + FLAG(t & 1u, c * TP_MROWS + m)) = t;
+    }
+    atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
+  }
+#else
   for (int m = 0; m < M; ++m) out[((size_t)s * M + m) * N + n] = acc[m];
+#endif
 }

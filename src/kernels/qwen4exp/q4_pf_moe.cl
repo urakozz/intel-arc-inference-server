@@ -1,13 +1,14 @@
 // q4_pf_moe.cl - spec 21-QFN-v1d: Qwen3.8-Flash-Next's routed experts over a PREFILL chunk - everything of the MoE block
 // but the router GEMV (prefill/pf_gemv_bf16.cl at {2560, 528}), the route (21-QFN-v1c's q4_moe.cl q4_route, decode's binary
 // on grid (1, C)) and the grouped GEMMs (spec 15d's prefill/pf_moe_gemm.cl, unchanged, at this family's shapes). One
-// binary (kernels::qwen4exp::pf_moe_variant), seven entry points:
+// binary (kernels::qwen4exp::pf_moe_variant), eight entry points:
 //
 //   q4_pf_sort(route, hdr, tiles, row_tok, pair_row, C, tmax)            grid (1), WG PF_WG (256)
 //   q4_pf_gather(x, hdr, row_tok, xg)                                   grid (rows), WG 64
+//   q4_pf_gather_routed(x, hdr, row_tok, xg)                            grid (rows), WG 64
 //   q4_pf_dequant_gu / _gu_shb(w_gu, w_sh, hdr, out, b0, b1)            grid (2I / 16, D / 64, b1 - b0), WG 16
 //   q4_pf_dequant_dn / _dn_shb(w_dn, w_sh, hdr, out, b0, b1)            grid (D / 16, I / 64, b1 - b0), WG 16
-//   q4_pf_moe_combine(route, hdr, pair_row, y, out, C)                  grid (D / 256, C), WG 256
+//   q4_pf_moe_combine(route, hdr, pair_row, y, out, C)                  grid (D / 512, C), WG 64
 //
 // Kolibri's kol_pf_moe.cl (spec 20d) is the design - the sorted layout, the header, the tmax bound, the determinism
 // argument, restated below - with this family's three differences:
@@ -191,6 +192,20 @@ __kernel void q4_pf_gather(__global const uint4* restrict x, __global const uint
     xg[(size_t)r * W + i] = t == NONE ? (uint4)(0u) : x[(size_t)t * W + i];
 }
 
+// q4_pf_gather_routed - q4_pf_gather over the routed experts' rows only (r < hdr[H_SHARED_ROW]): our int4 shared expert
+// reads its rows from x itself (pf_moe_q4gemm.cl's SH_X binaries, PERF-27). Intel's bf16 shared expert keeps
+// q4_pf_gather (its batch walk reads the shared rows of xg).
+__attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
+__kernel void q4_pf_gather_routed(__global const uint4* restrict x, __global const uint* restrict hdr,
+                                  __global const uint* restrict row_tok, __global uint4* restrict xg) {
+  const uint r = get_group_id(0);
+  if (r >= hdr[H_SHARED_ROW]) return;
+  const uint t = row_tok[r];
+  const uint W = PF_D * 2 / 16;
+  for (uint i = get_local_id(0); i < W; i += WG_GATHER)
+    xg[(size_t)r * W + i] = t == NONE ? (uint4)(0u) : x[(size_t)t * W + i];
+}
+
 // ---------------------------------------------------------------------------------------
 // The bf16 B operand of pf_moe_gemm.cl: weight blocks [b0, b1) of one layer into out[b - b0] = bf16 [K][N]
 // row-major. Block b < PF_E: the routed expert's int4 layout-1 block (loader/qwen4exp_layout.h: Q4_EXPERT_GU /
@@ -253,14 +268,27 @@ Q4_PF_DEQUANT(q4_pf_dequant_dn_shb, PF_INTER, PF_D, Q4_EXPERT_DN, 1)
 #undef Q4_PF_DQ_INT4
 
 // ---------------------------------------------------------------------------------------
-// q4_pf_moe_combine - token t, hidden column n = 256 x grid.x + lane: q4_moe_down's epilogue over the down GEMM's
-// sorted rows. y holds rne(down) per row (pf_moe_gemm's plain epilogue rounds once, as q4_moe_down's rf(red)), so:
+// q4_pf_moe_combine - token t, hidden columns n0 .. n0 + 7 a lane (n0 = 512 x grid.x + 8 x lane): q4_moe_down's
+// epilogue over the down GEMM's sorted rows. y holds rne(down) per row (pf_moe_gemm's plain epilogue rounds once, as
+// q4_moe_down's rf(red)), so per column:
 //
 //   sum = 0;  for k = 0 .. PF_K-1 (the route row's slots: RANK order):
 //             sum = sum + rf(f32(y[pair_row[t][k]][n]) x w_k)        the product rounded to bf16, then the fp32 add
 //   out[t][n] = rne(f32(rne(sum)) + f32(rne(f32(y[shared row + t][n]) x sg)))
 //
-// - decode's chain with the down sums read instead of computed; NOT folded into H.
+// - decode's chain with the down sums read instead of computed; NOT folded into H. PERF-27 (Ornith's combine): every
+// row is read as one 16-byte piece a lane (a 256-byte message a sub-group; one column a lane was a 32-byte message),
+// each column's chain unchanged. PF_COMBINE_C1 (a test-only binary, tests/kernels/qwen4exp_pf_glue_test.cc) keeps the
+// one-column-a-lane form, grid (PF_D / 256, C), for the comparison.
+#ifndef PF_COMBINE_C1
+#define PF_COMBINE_C1 0
+#endif
+#if PF_D % 512 != 0
+#error "q4_pf_moe_combine: PF_D whole 512-column work-groups (64 lanes x 8 columns)"
+#endif
+#define CN_PER 8
+#define WG_CN 64
+#if PF_COMBINE_C1
 __attribute__((reqd_work_group_size(WG_COMBINE, 1, 1)))
 __kernel void q4_pf_moe_combine(__global const uint* restrict route, __global const uint* restrict hdr,
                                 __global const uint* restrict pair_row, __global const ushort* restrict y,
@@ -279,12 +307,49 @@ __kernel void q4_pf_moe_combine(__global const uint* restrict route, __global co
   const ushort sh_b = rne_bf16(bf16f(y[(size_t)(hdr[H_SHARED_ROW] + t) * PF_D + n]) * as_float(rr[R_SG]));
   out[(size_t)t * PF_D + n] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
 }
+#else
+__attribute__((reqd_work_group_size(WG_CN, 1, 1)))
+__kernel void q4_pf_moe_combine(__global const uint* restrict route, __global const uint* restrict hdr,
+                                __global const uint* restrict pair_row, __global const ushort* restrict y,
+                                __global ushort* restrict out, uint C) {
+#pragma OPENCL FP_CONTRACT OFF
+  const uint n0 = (get_group_id(0) * WG_CN + get_local_id(0)) * CN_PER;
+  const uint t = get_group_id(1);
+  if (t >= C) return;
+  __global const uint* restrict rr = route + (size_t)t * RW;
+  float sum[CN_PER];
+#pragma unroll
+  for (uint i = 0; i < CN_PER; ++i) sum[i] = 0.0f;
+#pragma unroll
+  for (uint k = 0; k < PF_K; ++k) {
+    const float wk = as_float(rr[R_W + k]);
+    const ushort8 d8 = *(__global const ushort8*)(y + (size_t)pair_row[t * PF_K + k] * PF_D + n0);
+    const ushort d_b[CN_PER] = {d8.s0, d8.s1, d8.s2, d8.s3, d8.s4, d8.s5, d8.s6, d8.s7};
+#pragma unroll
+    for (uint i = 0; i < CN_PER; ++i) sum[i] = sum[i] + rf(bf16f(d_b[i]) * wk);
+  }
+  const float sg = as_float(rr[R_SG]);
+  const ushort8 s8 = *(__global const ushort8*)(y + (size_t)(hdr[H_SHARED_ROW] + t) * PF_D + n0);
+  const ushort ds_b[CN_PER] = {s8.s0, s8.s1, s8.s2, s8.s3, s8.s4, s8.s5, s8.s6, s8.s7};
+  ushort o[CN_PER];
+#pragma unroll
+  for (uint i = 0; i < CN_PER; ++i) {
+    const ushort r_b = rne_bf16(sum[i]);
+    const ushort sh_b = rne_bf16(bf16f(ds_b[i]) * sg);
+    o[i] = rne_bf16(bf16f(r_b) + bf16f(sh_b));
+  }
+  *(__global ushort8*)(out + (size_t)t * PF_D + n0) = (ushort8)(o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7]);
+}
+#endif
 
 #ifdef PF_COMBINE_F32
 // Plan 21v2b Task 4: q4_pf_moe_combine_f32(route, hdr, pair_row, y, out, C) - a tensor-parallel card's partial of the
 // block's output over its K half of every down: y holds the down GEMM's fp32 sums (pf_moe_q4gemm OUT_F32), and
 //   out[t][n] = (sum_k f32(y[pair_row[t][k]][n]) x w_k, k in the route row's RANK order) + f32(y[shared row + t][n]) x sg
 // in fp32, nothing rounded - the two cards' rows are added (card 0's first) and rounded once by the next combine (_S2).
+// PERF-27: lane l owns columns n0 .. n0 + 3 (n0 = 256 x grid.x + 4 l), one 16-byte piece a row; grid (PF_D / 256, C)
+// as the one-column form (PF_COMBINE_C1, the test's comparison).
+#if PF_COMBINE_C1
 __attribute__((reqd_work_group_size(WG_COMBINE, 1, 1)))
 __kernel void q4_pf_moe_combine_f32(__global const uint* restrict route, __global const uint* restrict hdr,
                                     __global const uint* restrict pair_row, __global const float* restrict y,
@@ -298,4 +363,22 @@ __kernel void q4_pf_moe_combine_f32(__global const uint* restrict route, __globa
   for (uint k = 0; k < PF_K; ++k) sum = sum + y[(size_t)pair_row[t * PF_K + k] * PF_D + n] * as_float(rr[R_W + k]);
   out[(size_t)t * PF_D + n] = sum + y[(size_t)(hdr[H_SHARED_ROW] + t) * PF_D + n] * as_float(rr[R_SG]);
 }
+#else
+__attribute__((reqd_work_group_size(WG_COMBINE / 4, 1, 1)))
+__kernel void q4_pf_moe_combine_f32(__global const uint* restrict route, __global const uint* restrict hdr,
+                                    __global const uint* restrict pair_row, __global const float* restrict y,
+                                    __global float* restrict out, uint C) {
+#pragma OPENCL FP_CONTRACT OFF
+  const uint n0 = get_group_id(0) * WG_COMBINE + get_local_id(0) * 4;
+  const uint t = get_group_id(1);
+  if (t >= C) return;
+  __global const uint* restrict rr = route + (size_t)t * RW;
+  float4 sum = (float4)(0.0f);
+#pragma unroll
+  for (uint k = 0; k < PF_K; ++k)
+    sum = sum + *(__global const float4*)(y + (size_t)pair_row[t * PF_K + k] * PF_D + n0) * as_float(rr[R_W + k]);
+  *(__global float4*)(out + (size_t)t * PF_D + n0) =
+      sum + *(__global const float4*)(y + (size_t)(hdr[H_SHARED_ROW] + t) * PF_D + n0) * as_float(rr[R_SG]);
+}
+#endif
 #endif

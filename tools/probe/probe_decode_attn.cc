@@ -39,6 +39,7 @@
 #include <string>
 #include <vector>
 
+#include "kernels/kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/event.h"
@@ -347,7 +348,7 @@ int run_arms(int argc, char** argv) {
 
   std::vector<Arm> arms;
   for (const ArmDef& d : defs) {
-    const std::string bin = std::string(B70_KERNEL_DIR) + "/pda_" + d.tag + "_M" + std::to_string(M) + ".bin";
+    const std::string bin = std::string(kernels::kernel_dir()) + "/pda_" + d.tag + "_M" + std::to_string(M) + ".bin";
     if (!std::ifstream(bin).good()) {
       std::printf("# %s: NO BINARY (%s), skipped\n", d.tag.c_str(), bin.c_str());
       continue;

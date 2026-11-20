@@ -183,26 +183,38 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 // The launch arithmetic, derived from the walk itself rather than restated:
 // what `Context::launches()` advances by. `C` is the chunk width: since the parity
 // program's S3 the composed attention issues its QK^T GEMM per 256-row block, so a chunk's
-// launch count depends on it there (8625 at C <= 256, 9073 at C = 2048).
+// launch count depends on it there (Qwen3.8: 945 at C = 64, 8753 at C = 2048; step.cc's closing block).
 // Spec 6: the count follows `attn_mode()`; in Flash mode (the default) attention is one
 // launch per FA layer; int8 KV adds one exact raw-widening launch per FA layer.
 // Spec 14: per model - the layer counts and the gate||up slab count are the descriptor's.
 // 3l (2): `pos` is the chunk's first position - a short chunk deep in the cache splits its
 // attention (flash_split_span) and adds the merge per FA layer.
+// `one_card`: step_chunk's walk (false: what a pipeline's two stages add up to, without the one-card GDN form).
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           KvCache kv = KvCache::Bf16, uint32_t pos = 0);
+                           KvCache kv = KvCache::Bf16, uint32_t pos = 0, bool one_card = true);
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
+// PERF-88: on a dense model's one-card walk (and a pipeline stage's; step_tp_unit keeps h8) l0-int8's MLP (gate||up, down) takes the bf16 l0 walk on a chunk of at most this many
+// rows - pf_gemm_q4, or the slab walk with pf_gemm_small - instead of the h8 walk, whose per-chunk rotated int8
+// rebuild of every weight costs a full chunk's time whatever the rows (tools/probe/probe_int8_short.cc). Not
+// bitwise: those rows' MLP is bf16 math. The chunk is then l0's launch for launch. The probe's one layer's MLP,
+// h8 against bf16 (ms, 2026-11-19, card 0, two interleaved runs): 16 rows 3.81 / 0.72, 128 3.62 / 1.49, 256 3.68 /
+// 2.07, 384 4.00 / 2.79, 512 4.01-4.18 / 3.74-4.01, 640 4.99 / 4.11, 768 4.58-5.09 / 4.74-4.77, 1024 5.16 / 5.59,
+// 2048 6.26 / 8.82: the bf16 walk wins through 640 in both runs, and 768 is a tie.
+inline constexpr uint32_t kInt8Bf16MlpMaxRows = 640;
+inline PrefillBackend dense_mlp_backend(PrefillBackend b, uint32_t C) {
+  return b == PrefillBackend::L0Int8 && C <= kInt8Bf16MlpMaxRows ? PrefillBackend::L0 : b;
+}
 // Spec 16c: one layer's launches, and a stage's: its
 // layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so
-// the two stages add up to step_chunk_launches plus step_cut_extra_launches (the pipeline
+// the two stages add up to step_chunk_launches (one_card false) plus step_cut_extra_launches (the pipeline
 // asserts it). `pos` as there (3l (2)).
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            model::LayerKind kind, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            const PpStage& st, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
-// What the cut adds over one card on a MoE model: the input norm is one fused pf_res_norm on one card,
-// at the cut the fold on stage 0 plus the norm-finish on stage 1 - one launch more; and stage 0's last
-// combine runs without the next layer's norm (phase 3 Task 5) - one more. 0 on other models.
+// What the cut adds over one card: the input norm is one fused pf_res_norm on one card, at the cut the
+// fold on stage 0 plus the norm-finish on stage 1 - one launch more; and on a MoE model stage 0's last
+// combine runs without the next layer's norm (phase 3 Task 5) - one more.
 size_t step_cut_extra_launches(const model::ModelDesc& d);
 
 }  // namespace runtime::prefill

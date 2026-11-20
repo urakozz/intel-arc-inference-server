@@ -75,7 +75,7 @@ The measured memory bandwidth utilisation of 50-63% on those models is the direc
 | large | XMX tiles | compute-bound |
 
 A GEMV gated strictly at `M == 1` drops onto a general path the moment speculative decoding produces two or more
-tokens. vLLM's tile becomes fully used only at `M = 8`.
+tokens. vLLM's tile becomes fully used only at `M = 8`
 
 Weights dominate decode traffic and activations are negligible, so the right kernel for `M` in 2..8 is
 weight-stationary: stream each weight tile once and multiply it into all `M` activation vectors held in registers,

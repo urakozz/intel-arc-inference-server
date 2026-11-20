@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <iterator>
 #include <print>
@@ -133,6 +134,8 @@ struct EngineAdapter : server::EngineIface {
 
   void reset() override {
     pending_ = pending_lookup_ = false;   // the session is discarded; nothing to commit
+    first_row_ = nullptr;
+    first_host_ = false;
     eng.reset();
   }
 
@@ -148,7 +151,16 @@ struct EngineAdapter : server::EngineIface {
   // line, delayed by one request -- `tools/serve_bench.sh`'s host-sampling
   // measurement sends one trailing no-op request to flush the last line.
   void prefill(const std::vector<uint32_t>& ids) override {
+    begin_request();
+    eng.prefill(ids);
+    first_row_ = eng.prefill_scratch()->logits.ptr();   // the prompt pass's head writes its own row
+    gen_start_ = std::chrono::steady_clock::now();
+  }
+
+  // A new request (prefill(), or load_head() in its place): the previous one's summary lines, the counters reset.
+  void begin_request() {
     rng_seeded = false;   // a new request: its first sampled step reseeds (seed_rng)
+    first_host_ = false;
     if (gen_tokens_ > 0) {
       const double ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - gen_start_)
@@ -187,11 +199,10 @@ struct EngineAdapter : server::EngineIface {
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
-    eng.prefill(ids);
-    gen_start_ = std::chrono::steady_clock::now();
   }
 
   uint32_t step(const server::Sampling& sampling) override {
+    sample_first(sampling);
     flush_commit();
     const uint32_t id = eng.generate(1)[0];
     if (!sampling.greedy) sample_into_control(sampling);
@@ -201,6 +212,12 @@ struct EngineAdapter : server::EngineIface {
 
   uint32_t max_len() override { return eng.max_len(); }
   uint32_t pos() override { return pending_ ? pending_pos_ + pending_j_ + 1 : eng.pos(); }
+  // PERF-91: with no deferred commit, cur_token[0] - what step() and every iteration below read as x.
+  std::optional<uint32_t> pending_id(const server::Sampling& sampling) override {
+    if (pending_) return std::nullopt;
+    sample_first(sampling);
+    return eng.control()->cur_token[0];
+  }
 
   // --- spec 8 §3.3 / §3.6: one speculative iteration (plan 8c Task 2) ------------------
   //
@@ -213,6 +230,7 @@ struct EngineAdapter : server::EngineIface {
   // `k_req` (spec 8 §10): the iteration's K, <= mtp_k(); `--spec mtp` varies it per
   // iteration, 0 is one plain step.
   std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
+    sample_first(sampling);
     if (df_) return step_dflash(sampling, k_req);   // spec 19c
     flush_commit();
     const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
@@ -357,6 +375,7 @@ struct EngineAdapter : server::EngineIface {
 
   std::vector<uint32_t> step_drafts(const server::Sampling& sampling,
                                     const Proposer& propose) override {
+    sample_first(sampling);
     flush_commit();
     auto* control = eng.control();
     const uint32_t x = control->cur_token[0];
@@ -395,6 +414,7 @@ struct EngineAdapter : server::EngineIface {
   std::vector<uint32_t> step_drafts_or_many(const server::Sampling& sampling, uint32_t k_dflash,
                                             const Proposer& propose) override {
     if (!dflash_lookup_) throw std::logic_error("EngineAdapter::step_drafts_or_many without --spec dflash-lookup");
+    sample_first(sampling);
     flush_commit();
     auto* control = eng.control();
     const uint32_t x = control->cur_token[0];
@@ -437,6 +457,7 @@ struct EngineAdapter : server::EngineIface {
                                                  const Proposer& propose, const DraftChoice& choose,
                                                  const LookupConfirm& confirm) override {
     if (!mtp_lookup()) throw std::logic_error("EngineAdapter::step_drafts_or_confirmed without the MTP head");
+    sample_first(sampling);
     flush_commit();
     const uint32_t x = eng.control()->cur_token[0];
     const std::vector<uint32_t> d = propose(x);
@@ -576,7 +597,25 @@ struct EngineAdapter : server::EngineIface {
   }
   void load_state(const void* host, uint32_t p) override {
     pending_ = pending_lookup_ = false;
+    first_row_ = nullptr;
+    first_host_ = false;
     eng.load_state(host, p);
+  }
+  // PERF-92: the prompt pass's last logits row (fp32, kVocab) then cur_token[0] - read in the prompt-end hook, where
+  // the prefill has left both. load_head puts the id back and keeps the row on the host for sample_first.
+  size_t head_bytes() override { return size_t(model::Qwen35::kVocab) * sizeof(float) + sizeof(uint32_t); }
+  void save_head(void* host) override {
+    auto* h = static_cast<uint8_t*>(host);
+    imm.copy(h, eng.prefill_scratch()->logits.ptr(), size_t(model::Qwen35::kVocab) * sizeof(float));
+    std::memcpy(h + size_t(model::Qwen35::kVocab) * sizeof(float), &eng.control()->cur_token[0], sizeof(uint32_t));
+  }
+  void load_head(const void* host) override {
+    begin_request();
+    const auto* h = static_cast<const uint8_t*>(host);
+    std::memcpy(host_logits.data(), h, size_t(model::Qwen35::kVocab) * sizeof(float));
+    std::memcpy(&eng.control()->cur_token[0], h + size_t(model::Qwen35::kVocab) * sizeof(float), sizeof(uint32_t));
+    first_host_ = true;
+    gen_start_ = std::chrono::steady_clock::now();
   }
   void save_kv(uint32_t b, uint32_t e, void* host) override {
     flush_commit();
@@ -586,8 +625,29 @@ struct EngineAdapter : server::EngineIface {
   void set_block_hook(BlockHook hook) override { eng.set_block_hook(std::move(hook)); }
   void ingest(const std::vector<uint32_t>& ids) override {
     rng_seeded = false;
+    first_host_ = false;
     flush_commit();
     eng.ingest(ids);
+    first_row_ = eng.buffers().logits.ptr();   // the decode replay's row
+  }
+
+  // The first id after a prefill or ingest: the prompt pass left the argmax of its last row in cur_token[0]. A
+  // sampled request draws it from that row instead (`first_row_`: the prefill's own logits, or the replay's after an
+  // ingest), before pending_id() or the first step reads it - so sampling applies from the first generated id on.
+  // PERF-92: after load_head the row is already on the host (`first_host_`).
+  void sample_first(const server::Sampling& sampling) {
+    if (first_host_) {
+      first_host_ = false;
+      if (!sampling.greedy) {
+        seed_rng(sampling);
+        eng.control()->cur_token[0] = sample(host_logits.data(), vocab_used, sampling, rng);
+      }
+      return;
+    }
+    if (!first_row_) return;
+    const void* row = first_row_;
+    first_row_ = nullptr;
+    if (!sampling.greedy) sample_into_control(sampling, row);
   }
 
   // Reads back the replay's fp32 logits row (`eng.buffers().logits`, [1][
@@ -606,10 +666,10 @@ struct EngineAdapter : server::EngineIface {
   // seeded request draws the same ids however long the server has run, and an unseeded
   // one never continues an earlier request's stream (the box's r12.d2, 2026-10-22: a
   // second identical seeded request differed when the RNG seeded once per process).
-  void sample_into_control(const server::Sampling& sampling) {
+  void sample_into_control(const server::Sampling& sampling) { sample_into_control(sampling, eng.buffers().logits.ptr()); }
+  void sample_into_control(const server::Sampling& sampling, const void* row) {
     seed_rng(sampling);
-    imm.copy(host_logits.data(), eng.buffers().logits.ptr(),
-             model::Qwen35::kVocab * sizeof(float));
+    imm.copy(host_logits.data(), row, model::Qwen35::kVocab * sizeof(float));
     const uint32_t id = sample(host_logits.data(), vocab_used, sampling, rng);
     eng.control()->cur_token[0] = id;
   }
@@ -620,6 +680,8 @@ struct EngineAdapter : server::EngineIface {
   std::vector<float> host_logits;
   std::mt19937_64 rng;
   bool rng_seeded = false;
+  const void* first_row_ = nullptr;   // the last prompt row's logits while the first id is the prompt pass's argmax
+  bool first_host_ = false;           // PERF-92: that row is in host_logits (load_head)
   uint32_t gen_tokens_ = 0;
   std::chrono::steady_clock::time_point gen_start_{};
   // Spec 8.

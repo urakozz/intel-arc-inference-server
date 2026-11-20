@@ -27,6 +27,7 @@
 #include "runtime/prefill/kernels.h"
 #include "runtime/prefill/linear_l0.h"
 #include "runtime/prefill/moe.h"
+#include "runtime/prefill/profile.h"
 #include "runtime/prefill/step.h"
 
 namespace runtime {
@@ -78,6 +79,9 @@ MemoryComponents Engine::memory_use() const {
   // Spec 19c: a drafter's verify slots are decode state, its prefill tap staging prefill scratch, and the drafter
   // itself (weights, ring, taps, scratch) its own term.
   if (df_slots_) c.decode_state += df_slots_->size();
+  // Spec 32: the deferred GDN rows and the deep verify lists' chain scratch - Engine's own, not MtpBuffers'
+  // (MtpDims::sizes' `deep` term).
+  c.decode_state += (gdn_pend_ ? gdn_pend_->size() : 0) + (gdn_x_ ? gdn_x_->size() + conv_x_->size() : 0);
   c.prefill_scratch = (pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0) + (df_pf_taps_ ? df_pf_taps_->size() : 0);
   c.drafter = drafter_ ? drafter_->bytes() : 0;
   c.int8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
@@ -138,7 +142,8 @@ void Engine::prepare_prefill() {
 
 void Engine::drafter_project_staged(uint32_t pos, uint32_t n) {
   if (drafter_->project_wide(pfx_->cx, pfx_->kc, *pf_, df_pf_taps_->ptr(), pos, n)) {
-    pfx_->cx.wait();   // the ring's rows have landed: a block hook's snapshot, the next draft
+    prefill::timed_wait(pfx_->cx, prefill::Phase::kDraftProj);   // the ring's rows have landed: a block hook's
+                                                                  // snapshot, the next draft
     return;
   }
   const size_t row = drafter_->tap_layers().size() * size_t(model_.desc->hidden) * 2;
@@ -231,6 +236,16 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   pslot.kv_base = sq.base;
   pslot.pages = sq.bind.pages;   // plan 19v3b Task 0: several slots' KV is paged
   const prefill::PrefillSlot* slot = slots() > 1 ? &pslot : nullptr;
+  // PERF-89: the copies a mid-prompt hook leaves on the copy engine end before this call returns or throws.
+  struct SnapDrain {
+    const Engine& e;
+    ~SnapDrain() {
+      try {
+        e.snap_wait();
+      } catch (...) {
+      }
+    }
+  } snap_drain{*this};
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
     C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock, /*wide_stride=*/true,
@@ -239,6 +254,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     std::memcpy(pf_->ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = base + uint32_t(off);
     control_->n_active = C;
+    note_kv(base + uint32_t(off) + C);   // PERF-90: before the chunk writes, so a throw leaves it counted
     if (mtp_) {
       const uint32_t pos = base + uint32_t(off);
       hctl_->pos = pos == 0 ? 0 : pos - 1;
@@ -273,7 +289,15 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       // the hook runs, so a hook that throws leaves pos matching the chunks written.
       control_->pos = end;
       control_->n_active = 0;
-      block_hook_(end, true);
+      snap_wait();   // PERF-89: the previous hook's copies, whose staging this one reuses
+      snap_async_ = true;
+      try {
+        block_hook_(end, true);
+      } catch (...) {
+        snap_async_ = false;
+        throw;
+      }
+      snap_async_ = false;
     }
   }
 
@@ -286,6 +310,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prefill::step_head(pfx_->cx, pfx_->kc, *pf_, model_, control_, last,
                      mtp_ ? reinterpret_cast<uint8_t*>(hid) + size_t(C) * hid_row : nullptr);
   pfx_->cx.wait();
+  snap_wait();   // PERF-89: the last mid-prompt hook's copies ran beside the last chunk; this hook's are blocking
   if (hooked) {
     const uint32_t end = base + uint32_t(ids.size());
     block_hook_(end, end % kBlock == 0);

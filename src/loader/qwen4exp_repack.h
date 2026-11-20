@@ -41,6 +41,10 @@ namespace loader {
 // or fused routed expert in the main model is refused by name (the bf16 original is the reference's input,
 // never the engine's).
 model::Q4Forms q4_forms(const SafetensorsSet& st, const model::Qwen4ExpDesc& d);
+// The hyper-connection mixers' load-time form (the loader sets Qwen4ExpDesc::hc_int8 from it): B70_Q4_HC=int8|bf16,
+// unset bf16 until the int8 form passes its gate (spec 21-QFN-v2 §7 lever 5: an A/B switch for timing and quality,
+// not a user flag). Throws on any other value.
+bool q4_hc_int8();
 
 // Every text-model tensor the checkpoint of `d` in forms `f` ships, by name (21-QFN-v1a's qwen4exp_ref.expected_names
 // with the int4 linears' `.weight` replaced by `.qweight` / `.scales` / `.qzeros`), WITHOUT the PLE table's

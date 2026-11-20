@@ -7,14 +7,13 @@
 #include "kernels/xe_cores.h"
 #include "kernels/shape_suffix.h"
 
-#ifndef B70_KERNEL_DIR
-#error "B70_KERNEL_DIR must be defined (use b70_target_kernel_dir in CMake)"
-#endif
-
 namespace kernels {
+// Absolute path of the build's compiled device binaries; defined in the build's generated kernel_dir.cc, which
+// b70_target_kernel_dir in CMake links.
+const char* kernel_dir();
 // Absolute path of a compiled device binary by variant name.
 inline std::string path(const std::string& variant) {
-  return std::string(B70_KERNEL_DIR) + "/" + variant + ".bin";
+  return std::string(kernel_dir()) + "/" + variant + ".bin";
 }
 inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, unsigned L) {
   return "gemv_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N) +
@@ -475,10 +474,27 @@ inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, un
 // binds the 8-slot build, `_N8` (runtime::MtpBuffers::slots).
 // verify-cost-m8: gdn_step.cl's DEFERRED build at M rows (M = 1..8), Qwen3.8's 48 GDN layers and heads only - the
 // pending rows' parity stride is baked: kGdnPendParityBytes = 48 layers x kGdnPendLayerBytes.
-inline constexpr size_t kGdnPendLayerBytes = 64 * (16 + 48) * 128 * 2 + 64 * 48 * 2 * 4;   // PR = 64 rows (spec 32)
-inline constexpr size_t kGdnPendParityBytes = 48 * kGdnPendLayerBytes;
+// PERF-51: Ornith's (30 layers, 16 / 32 heads, M = 1..4) too, `_G30_GK16V32` - one layer's rows at its heads
+// (gdn_pend_layer_bytes), its parity stride baked as Ornith's PEND_PAR.
+inline constexpr size_t gdn_pend_layer_bytes(unsigned gdn_k, unsigned gdn_v) {
+  return size_t{64} * (gdn_k + gdn_v) * 128 * 2 + size_t{64} * gdn_v * 2 * 4;   // PR = 64 rows (spec 32)
+}
+inline constexpr size_t gdn_pend_parity_bytes(unsigned gdn_layers, unsigned gdn_k, unsigned gdn_v) {
+  return gdn_layers * gdn_pend_layer_bytes(gdn_k, gdn_v);
+}
+inline constexpr size_t kGdnPendLayerBytes = gdn_pend_layer_bytes(16, 48);
+inline constexpr size_t kGdnPendParityBytes = gdn_pend_parity_bytes(48, 16, 48);
 static_assert(kGdnPendParityBytes == 51511296, "src/kernels/CMakeLists.txt's PEND_PAR");
-inline std::string gdn_step_defer_variant(unsigned M) { return "gdn_step_defer_M" + std::to_string(M); }
+static_assert(gdn_pend_parity_bytes(30, 16, 32) == 24084480, "src/kernels/CMakeLists.txt's Ornith PEND_PAR");
+// The shapes a DEFERRED build exists for: Qwen3.8's and Ornith's.
+inline constexpr bool gdn_defer_built(unsigned gdn_layers, unsigned gdn_k, unsigned gdn_v) {
+  return (gdn_layers == 48 && gdn_k == 16 && gdn_v == 48) || (gdn_layers == 30 && gdn_k == 16 && gdn_v == 32);
+}
+inline std::string gdn_step_defer_variant(unsigned M, unsigned gdn_layers = 48, unsigned gdn_k = kRefGdnKHeads,
+                                          unsigned gdn_v = kRefGdnVHeads) {
+  return "gdn_step_defer_M" + std::to_string(M) + (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers)) +
+         gdn_suffix(gdn_k, gdn_v);
+}
 // Spec 32: a link of the 32- / 64-row lists' chain (gdn_step.cl, ROW0) and its scratch: the conv rows 16.. of a list,
 // [48 GDN layers][48 rows][10240] bf16; the ring copy (gdn_ring_commit.cl) moves the committed ones into the ring.
 inline std::string gdn_step_chain_variant(unsigned row0) { return "gdn_step_defer_M16_R" + std::to_string(row0); }

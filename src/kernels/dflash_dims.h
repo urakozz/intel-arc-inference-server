@@ -1,6 +1,6 @@
 #pragma once
 // Spec 19b: the DFlash kernels' fixed geometry as plain constants (no kernel paths - kernels/dflash_kernels.h has the
-// binary names), so host-only code (the planner's sizes, the control block) can share them without B70_KERNEL_DIR.
+// binary names), so host-only code (the planner's sizes, the control block) can share them without kernels::kernel_dir().
 namespace kernels::dflash {
 
 inline constexpr unsigned kM = 8;          // the block's rows (the list's M): anchor + up to 7 drafts

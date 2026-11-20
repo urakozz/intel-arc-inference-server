@@ -78,7 +78,7 @@ A few older paths stay at the top level, because every validation run uses them:
   other tree links to;
 - the validation tree `~/b70-inference-server-validate`;
 - its baseline builds `~/b70-inference-server-g0-<sha12>`, which the identical-binaries check compares against;
-- the validation results, `~/b70-validate/<tree>/<state>/`.
+- the validation results, `~/b70-validate/<tree>/<state>/`
 
 The GPU lock files `~/b70-gpu*.lock` and `~/b70-gpu.wait` stay in `$HOME` for good: every script opens them there,
 and a lock moved under a running holder no longer excludes anything.
@@ -166,7 +166,7 @@ Our own jobs are stopped with `tools/box_stop.sh`. It stops only the kinds of jo
 
 To see what the box is doing, run `tools/box_status.sh` (read-only; `--watch N` refreshes every N seconds). It shows
 the GPU locks and who holds them, the jobs waiting for a card, the CPU reference job and the logs written in the last
-half hour. `tools/box_tidy.sh --dry-run` lists stale branch trees that it would move to `~/b70/trash`.
+half hour. `tools/box_tidy.sh --dry-run` lists stale branch trees that it would move to `~/b70/trash`
 
 ## Validation runs
 
@@ -175,7 +175,7 @@ do. It runs the rows and stages of `tools/box_validate/stages.sh` (`tools/box_va
 detached orchestrator on the box, under the GPU lock. The first stage is the identical-binaries check, G0: kernel
 binaries and gate outputs must be identical to a baseline build, and the run stops if they are not. The run can be
 resumed after an ssh drop or a reboot, and when it is done it writes `box-validation-<date>.md`. Its results are on
-the box under `~/b70-validate/`, and the latest result of every stage is in `~/b70/logs/stage-latest.txt`.
+the box under `~/b70-validate/`, and the latest result of every stage is in `~/b70/logs/stage-latest.txt`
 
 ### When each run happens
 
@@ -247,7 +247,7 @@ Selecting stages:
 
 - `--list` and `--dry-run` print every stage with the lock it will take; read them first.
 - `--only <ids or row prefixes>` runs the preflight `pre` plus those stages and never adds G0, which must already be
-  PASS in the state. A row prefix (`r22`) means the row's default stages; opt-in stages need their id or `--with <id>`.
+  PASS in the state. A row prefix (`r22`) means the row's default stages; opt-in stages need their id or `--with <id>`
 - `--skip <ids>` leaves stages out (they stay "not run" for a later `--only`), and `--redo <ids>` runs a PASS again.
 - Manual stages are never run by the orchestrator; their commands are in `--dry-run --with` and in the summary.
 - A stage whose prerequisite is not PASS in this state is SKIP "needs PASS first", so the launch order is also the
@@ -294,7 +294,7 @@ Two orchestrators can share one tree and one state. Each device has its own run 
 it alone; a RUNNING stage whose claim is free belonged to a dead orchestrator and runs again. G0 runs alone, a stage
 that builds holds `.build.lock`, and the `cpu` stages of the two orchestrators run one at a time (`.cpu.lock`, because
 of the CPU references' RAM and the host tests' fixed `/tmp` directories). Servers listen on 8013 (device 0) and 8113
-(device 1), and `progress.log` marks lines `[d0]` / `[d1]`.
+(device 1), and `progress.log` marks lines `[d0]` / `[d1]`
 
 To launch the second stream, from the same tree and commit after the first one started, run
 `tools/box_validate.sh --device 1 --only <stages> --no-wait`, then `--status` to see both. Beside a running
@@ -433,7 +433,7 @@ NVMe folder to the trash.
 
 Flash-Next's int8 PLE file (`ple_int8.py`, 52 GB) is not a cache model. Its NVMe copy is the main tree's
 `oracle-out-q4exp-ple-int8/`, a real folder with an `oracle-out*` name so that `tools/box.sh sync --delete` leaves it
-alone; its cold copy is `~/b70/hdd/b70/qwen3.8-flash-next-ple-int8/`.
+alone; its cold copy is `~/b70/hdd/b70/qwen3.8-flash-next-ple-int8/`
 
 ## After a reboot
 
@@ -441,4 +441,4 @@ The 8 TB and 3 TB disks are mounted from `/etc/fstab` by UUID with `nofail`, so 
 boot; the cold links just dangle until it is back. Check both after a reboot, before any validation run:
 `findmnt ~/b70/hdd ~/b70/hdd3 && tools/hf_tier.sh status`. A cold model whose disk is missing shows `broken`. A stage
 run checks its data once, at launch (`have.env`), so a run launched before the disk was back needs a fresh launch.
-Device names move between boots, so mount by UUID, never by `/dev/sdX`.
+Device names move between boots, so mount by UUID, never by `/dev/sdX`

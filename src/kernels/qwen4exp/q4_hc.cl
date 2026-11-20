@@ -32,7 +32,23 @@
 // for step (torch's Vectorized<float>::exp; tests/kernels/eager_attn_ref.h's), so this file and tests/kernels/qwen4exp_ref.h
 // (hc_combine_norm, hc_up_mix) agree bit for bit.
 //
-// Plain OpenCL C (no sub-group functions).
+// **PERF-66: the int8 form** (spec 21-QFN-v2 §7 lever 5; loader::Q4HcOffsets under Qwen4ExpDesc::hc_int8): each
+// linear's weights are int8 tiles [N/16][K/16][16 k][16 n] (element (k, n) at (n / 16) x 16K + 16k + n % 16) and its
+// fp16 scales [K/32][N] follow the tiles directly (one per 32 k of a column: loader::quantise_int8_g32_tiled). Judged,
+// not bitwise against the bf16 form; each kernel below is bitwise its host twin (tests/kernels/qwen4exp_ref.h). With
+// g = a group of 32 k:  t_g = fma chain over the group's k ascending of f32(q) x v (exact products), then
+// acc = fma(t_g, f32(s_g), acc), g ascending.
+//   q4_hc_down_i8(w, x, out)                 HC_DOWN_I8 = N (336 / 320)   grid N / 16, WG 16 x DN_KS
+//       the down||inject GEMV in place of gemv_bf16 (same arguments, fp32 [M][N] out): sub-group q of a tile owns
+//       k in [q K / DN_KS, (q + 1) K / DN_KS) and its own acc; the slices merge by gemv_bf16's tree (strides
+//       DN_KS / 2 .. 1). Sub-group block reads (cl_intel_subgroups), as gemv_i8w.
+//   q4_hc_up_mix ... _Q8                     UP_I8 = 1: the up linear's chain above in place of the bf16 fma chain;
+//       everything else (activations, sigmoid, mean, inject) unchanged; the one-row and the _R forms
+//   q4_hc_slab_i8(w, out, n0, ns)            HC_SLAB_I8 = N   grid (ns / 16, K / 8), WG 16
+//       the prefill's down||inject slab in place of kol_pf_bf16_slab (same arguments and grid):
+//       out[k][c] = rne_bf16(f32(q) x f32(s)) for n = n0 + c < N, else 0
+//
+// Plain OpenCL C (no sub-group functions) but q4_hc_down_i8.
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M
@@ -151,10 +167,13 @@ __kernel void q4_hc_combine_norm(__global const uint* restrict ctrl, __global us
 #if UP_DOWN < LOW + 4 * UP_INJECT
 #error "q4_hc_up_mix: UP_DOWN (the down GEMV's row pitch) must hold the 320 rows and the inject's 4"
 #endif
+#ifndef UP_I8
+#define UP_I8 0
+#endif
 #define WG_UP 64
 #define K8 (LOW / 8)   /* 40 k-octets of the up tiles */
 //   down_f32  fp32 [M][UP_DOWN]   gemv_bf16's output (320 down rows, then the 4 inject rows under _I)
-//   up        bf16 gemv_bf16 tiles {K 320, N 10240}: [n_tile][k_octet][8 k][16 n]
+//   up        bf16 gemv_bf16 tiles {K 320, N 10240}: [n_tile][k_octet][8 k][16 n]; _Q8: int8 tiles, then the scales
 //   xn        bf16 [M][4][2560]   x bf16 [M][2560]   inj fp32 [M][4]
 #ifdef UP_ROWS
 // _R<UP_ROWS>[C<UP_COLS>] (the prefill's, M = 2048): one work-group owns UP_ROWS rows of UP_COLS columns (4 x UP_COLS
@@ -195,6 +214,22 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
   barrier(CLK_LOCAL_MEM_FENCE);
   const uint s = lid / UP_COLS, ci = lid % UP_COLS;
   const uint c = g * UP_COLS + ci, n = s * HIDDEN + c;
+#if UP_I8
+  float acc[UP_ROWS];
+  for (uint r = 0; r < UP_ROWS; ++r) acc[r] = 0.0f;
+  __global const char* restrict tile = (__global const char*)up + (size_t)(n / 16) * LOW * 16 + n % 16;
+  __global const half* restrict sc = (__global const half*)((__global const uchar*)up + (size_t)LOW * HCN);
+  for (uint kg = 0; kg < LOW / 32; ++kg) {   // kg: the 32-k group (g is the work-group)
+    float t[UP_ROWS];
+    for (uint r = 0; r < UP_ROWS; ++r) t[r] = 0.0f;
+    for (uint i = 0; i < 32; ++i) {
+      const float wv = (float)tile[(size_t)(kg * 32 + i) * 16];
+      for (uint r = 0; r < UP_ROWS; ++r) t[r] = fma(a[r * LOW + kg * 32 + i], wv, t[r]);
+    }
+    const float sv = vload_half((size_t)kg * HCN + n, sc);
+    for (uint r = 0; r < UP_ROWS; ++r) acc[r] = fma(t[r], sv, acc[r]);
+  }
+#else
   __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128 + n % 16;
   float acc[UP_ROWS];
   for (uint r = 0; r < UP_ROWS; ++r) acc[r] = 0.0f;
@@ -203,6 +238,7 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
       const float wv = bf16f(tile[(size_t)k8 * 128 + i * 16]);
       for (uint r = 0; r < UP_ROWS; ++r) acc[r] = fma(a[r * LOW + k8 * 8 + i], wv, acc[r]);
     }
+#endif
   for (uint r = 0; r < UP_ROWS; ++r)
     if (r < nr) {
       const float gv = rf(sigmoid_t(rf(acc[r])));
@@ -237,10 +273,21 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
   barrier(CLK_LOCAL_MEM_FENCE);
   const uint s = lid / 16, ci = lid % 16;
   const uint c = g * 16 + ci, n = s * HIDDEN + c;
+#if UP_I8
+  float acc = 0.0f;
+  __global const char* restrict tile = (__global const char*)up + (size_t)(n / 16) * LOW * 16 + n % 16;
+  __global const half* restrict sc = (__global const half*)((__global const uchar*)up + (size_t)LOW * HCN);
+  for (uint kg = 0; kg < LOW / 32; ++kg) {   // kg: the 32-k group (g is the work-group)
+    float t = 0.0f;
+    for (uint i = 0; i < 32; ++i) t = fma(a[kg * 32 + i], (float)tile[(size_t)(kg * 32 + i) * 16], t);
+    acc = fma(t, vload_half((size_t)kg * HCN + n, sc), acc);
+  }
+#else
   __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128 + n % 16;
   float acc = 0.0f;
   for (uint k8 = 0; k8 < K8; ++k8)
     for (uint i = 0; i < 8; ++i) acc = fma(a[k8 * 8 + i], bf16f(tile[(size_t)k8 * 128 + i * 16]), acc);
+#endif
   const float gv = rf(sigmoid_t(rf(acc)));
   p[lid] = rf(gv * bf16f(xn[(size_t)m * HCN + n]));
   barrier(CLK_LOCAL_MEM_FENCE);
@@ -248,3 +295,95 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
 }
 #endif  // UP_ROWS
 #endif  // UP_DOWN
+
+// ---------------------------------------------------------------------------------------------------------------
+#ifdef HC_DOWN_I8
+#pragma OPENCL EXTENSION cl_intel_subgroups : enable
+#pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
+#pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
+#ifndef DN_KS
+#error "q4_hc_down_i8: DN_KS (the sub-groups splitting a tile's K) must be defined"
+#endif
+#define DN_N HC_DOWN_I8
+#define DN_G (HCN / 32 / DN_KS)   /* groups of 32 k a sub-group */
+#if (HCN / 32) % DN_KS != 0 || (DN_KS & (DN_KS - 1)) != 0 || DN_N % 16 != 0
+#error "q4_hc_down_i8: DN_KS must be a power of two dividing K / 32, N whole 16-column tiles"
+#endif
+//   w    int8 tiles {K 10240, N}, then fp16 scales [320][N]      x  bf16 [M][10240] (xn)      out  fp32 [M][N]
+__attribute__((intel_reqd_sub_group_size(16)))
+__attribute__((reqd_work_group_size(16 * DN_KS, 1, 1)))
+__kernel void q4_hc_down_i8(__global const uchar* restrict w, __global const ushort* restrict x,
+                            __global float* restrict out) {
+  __local float red[DN_KS][M][16];
+  const uint lane = get_sub_group_local_id();
+  const uint q = get_sub_group_id();
+  const uint n = get_group_id(0) * 16 + lane;
+  const uint g0 = q * DN_G;
+  __global const uchar* tile = w + (size_t)get_group_id(0) * HCN * 16 + (size_t)g0 * 512;
+  __global const half* restrict sc = (__global const half*)(w + (size_t)HCN * DN_N);
+  float acc[M];
+  for (uint m = 0; m < M; ++m) acc[m] = 0.0f;
+  for (uint g = g0; g < g0 + DN_G; ++g, tile += 512) {
+    const float16 w0 = convert_float16(as_char16(intel_sub_group_block_read_uc16(tile)));
+    const float16 w1 = convert_float16(as_char16(intel_sub_group_block_read_uc16(tile + 256)));
+    const float sv = vload_half((size_t)g * DN_N + n, sc);
+    for (uint m = 0; m < M; ++m) {
+      const ushort16 x0 = vload16(0, x + (size_t)m * HCN + g * 32);
+      const ushort16 x1 = vload16(0, x + (size_t)m * HCN + g * 32 + 16);
+      float t = 0.0f;
+      t = fma(w0.s0, bf16f(x0.s0), t); t = fma(w0.s1, bf16f(x0.s1), t);
+      t = fma(w0.s2, bf16f(x0.s2), t); t = fma(w0.s3, bf16f(x0.s3), t);
+      t = fma(w0.s4, bf16f(x0.s4), t); t = fma(w0.s5, bf16f(x0.s5), t);
+      t = fma(w0.s6, bf16f(x0.s6), t); t = fma(w0.s7, bf16f(x0.s7), t);
+      t = fma(w0.s8, bf16f(x0.s8), t); t = fma(w0.s9, bf16f(x0.s9), t);
+      t = fma(w0.sa, bf16f(x0.sa), t); t = fma(w0.sb, bf16f(x0.sb), t);
+      t = fma(w0.sc, bf16f(x0.sc), t); t = fma(w0.sd, bf16f(x0.sd), t);
+      t = fma(w0.se, bf16f(x0.se), t); t = fma(w0.sf, bf16f(x0.sf), t);
+      t = fma(w1.s0, bf16f(x1.s0), t); t = fma(w1.s1, bf16f(x1.s1), t);
+      t = fma(w1.s2, bf16f(x1.s2), t); t = fma(w1.s3, bf16f(x1.s3), t);
+      t = fma(w1.s4, bf16f(x1.s4), t); t = fma(w1.s5, bf16f(x1.s5), t);
+      t = fma(w1.s6, bf16f(x1.s6), t); t = fma(w1.s7, bf16f(x1.s7), t);
+      t = fma(w1.s8, bf16f(x1.s8), t); t = fma(w1.s9, bf16f(x1.s9), t);
+      t = fma(w1.sa, bf16f(x1.sa), t); t = fma(w1.sb, bf16f(x1.sb), t);
+      t = fma(w1.sc, bf16f(x1.sc), t); t = fma(w1.sd, bf16f(x1.sd), t);
+      t = fma(w1.se, bf16f(x1.se), t); t = fma(w1.sf, bf16f(x1.sf), t);
+      acc[m] = fma(t, sv, acc[m]);
+    }
+  }
+  for (uint m = 0; m < M; ++m) red[q][m][lane] = acc[m];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = DN_KS / 2; stride > 0; stride >>= 1) {
+    if (q < stride)
+      for (uint m = 0; m < M; ++m) red[q][m][lane] += red[q + stride][m][lane];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (q == 0)
+    for (uint m = 0; m < M; ++m) out[(size_t)m * DN_N + n] = red[0][m][lane];
+}
+#endif  // HC_DOWN_I8
+
+// ---------------------------------------------------------------------------------------------------------------
+#ifdef HC_SLAB_I8
+#define SL_N HC_SLAB_I8
+#if SL_N % 16 != 0
+#error "q4_hc_slab_i8: N must be whole 16-column tiles"
+#endif
+//   w    int8 tiles {K 10240, N}, then fp16 scales [320][N]      out  bf16 [K][ns] row-major (pf_gemm's B operand)
+__attribute__((reqd_work_group_size(16, 1, 1)))
+__kernel void q4_hc_slab_i8(__global const uchar* restrict w, __global ushort* restrict out, const uint n0,
+                            const uint ns) {
+  const uint lane = get_local_id(0);
+  const uint t = get_group_id(0);
+  const uint k8 = get_group_id(1);
+  __global ushort* restrict o = out + (size_t)(k8 * 8) * ns + t * 16 + lane;
+  if (n0 + t * 16 >= SL_N) {   // uniform per work-group (N % 16 == 0)
+    for (uint i = 0; i < 8; ++i) o[(size_t)i * ns] = (ushort)0;
+    return;
+  }
+  const uint n = n0 + t * 16 + lane;
+  __global const char* restrict tile = (__global const char*)w + (size_t)(n / 16) * HCN * 16 + n % 16;
+  __global const half* restrict sc = (__global const half*)(w + (size_t)HCN * SL_N);
+  const float sv = vload_half((size_t)(k8 / 4) * SL_N + n, sc);   // 8 k of one 32-k group
+  for (uint i = 0; i < 8; ++i) o[(size_t)i * ns] = rne_bf16((float)tile[(size_t)(k8 * 8 + i) * 16] * sv);
+}
+#endif  // HC_SLAB_I8

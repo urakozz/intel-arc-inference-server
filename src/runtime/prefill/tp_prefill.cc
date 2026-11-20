@@ -78,19 +78,6 @@ constexpr uint32_t kPair = kTpPrefillChunks;   // chunks in flight
 constexpr uint32_t kLandSlots = 2;             // landing slots per chunk (unit parity)
 uint64_t ns(uint32_t ms) { return uint64_t(ms) * 1000000ull; }
 
-// The copy-only queue group's ordinal (COPY without COMPUTE), or UINT32_MAX.
-uint32_t copy_ordinal(ze_device_handle_t dev) {
-  uint32_t n = 0;
-  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, nullptr));
-  std::vector<ze_command_queue_group_properties_t> p(n);
-  for (auto& q : p) q.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
-  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev, &n, p.data()));
-  for (uint32_t i = 0; i < n; ++i)
-    if ((p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
-        !(p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE))
-      return i;
-  return UINT32_MAX;
-}
 }  // namespace
 
 // One card's prefill half.
@@ -106,11 +93,10 @@ struct TpPfCard {
         ctl(c, l0::MemKind::Host, kPair * sizeof(Control)),
         ids(c, l0::MemKind::Host, size_t(kPair) * cap * 4) {
     std::memset(ctl.ptr(), 0, ctl.size());
-    const uint32_t ord = copy_ordinal(c.device());
-    if (ord != UINT32_MAX) {
+    if (const std::vector<l0::CopyEngine> ce = c.copy_engines(); !ce.empty()) {
       ze_command_queue_desc_t qd{};
       qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
-      qd.ordinal = ord;
+      qd.ordinal = ce[0].ordinal;
       qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
       qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
       qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
@@ -482,6 +468,9 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         prefill::step_tp_head(k.cx, k.kc, k.s, cd(r).model, cd(r).ctl, r == 0 ? mine : theirs,
                               r == 0 ? theirs : mine, static_cast<uint8_t*>(k.resid(last_h)) + at * 2, used, first,
                               mtp_ ? k.hid->as<uint16_t>() + size_t(C) * d.hidden : nullptr);
+        // The card's half into decode's logits too, where read_logits_into gathers it: a sampled request draws its
+        // first id there.
+        k.cx.copy(cd(r).buffers.logits.ptr(), k.s.logits.ptr(), size_t(rows) * sizeof(float));
       }
     }
     for (uint32_t r = 0; r < model::kTpSize; ++r)

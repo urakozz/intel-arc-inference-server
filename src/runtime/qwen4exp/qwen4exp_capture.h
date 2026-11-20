@@ -43,7 +43,8 @@
 // **Spec 21-QFN-v1e: spec 8's lists** (`spec.kind`; runtime/engine.h's draft / verify / commit contracts):
 //   Verify at M = k + 1 rows, every device: the decode list at M rows (Control::cur_token[0..M) the ids, positions
 //     pos .. pos + M - 1; every kernel row-independent - the verify row r IS the M = 1 step at its position, plan 21-QFN-v1e
-//     Review Focus 2) with gdn_step_slots_M<M>_G1 (row r's GDN state into slot (gdn_live + r) % 4) and, on the PLE
+//     Review Focus 2) with gdn_step_defer_M<M>_G1 (PERF-51: the rows the last commit left replayed into the state
+//     first, the M rows' recurrence inputs into the other parity of the pending rows, no per-row state) and, on the PLE
 //     layer at M > 1, q4_pf_ple's gate / conv / ring at C = 4 for q4_ple_block; the hand-off carries M rows; on the
 //     last device the final mixer, lm_head and argmax at M (out_token[0..M), pos += M), then a copy of the M
 //     pre-mixer rows of H into the head's hh rows 1..M, then the head's KV pass over the M rows - positions pos - 1 ..
@@ -59,10 +60,12 @@
 //     the next step's R), lm_head into the head's logits row i, argmax into the head's Control (out_token[0],
 //     cur_token[0], pos + 1), then the row's softmax max and normaliser into its draft_stat (draft_prob.cl, open-work
 //     49: the head's probability for the per-step K).
+//   GdnFlush (PERF-51, every device): the DEFERRED gdn_step of each of the device's GDN layers at M = 1, run at
+//     n_active 0 - the committed rows replayed into the state, nothing else; one launch a GDN layer.
 // The launch counts are runtime::qwen4exp's verify_device_launches / draft_launches, asserted at capture.
 namespace runtime::qwen4exp {
 
-enum class ListKind { Decode, Verify, Draft };
+enum class ListKind { Decode, Verify, Draft, GdnFlush };
 struct ListSpec {
   ListKind kind = ListKind::Decode;
   uint32_t M = 1;        // Verify: 1..kVerifyRows; Decode / Draft: 1
@@ -85,8 +88,8 @@ struct MtpBinding {
 // Plan 21-QFN-v2b: a tensor-parallel card's decode list (`tp` non-null; Decode, M = 1, flash attention). The buffers are
 // the card's (Qwen4ExpBuffers over `card` = model::q4_tp_card at one card's placement, device 0); the walk is one
 // card's over every layer, at the card's widths, with Qwen3.8's crossing (runtime::TpLink, src/kernels/tp.cl) after
-// each row-parallel linear, in the slices form (tp_send pushes the card's raw slices into the peer's landing buffer,
-// tp_sum waits for the peer's): out_proj / o_proj run at split-K 2 over the card's K half - one card's slices 2r,
+// each row-parallel linear, in the slices form (out_proj / o_proj's gemv pushes the card's raw slices into the peer's
+// landing buffer, tp_send folded into it - PERF-44; tp_sum waits for the peer's): out_proj / o_proj run at split-K 2 over the card's K half - one card's slices 2r,
 // 2r + 1 - and tp_sum adds card 0's two then card 1's into one row (one card's S4 chain), which the next combine folds
 // as one slice (_S1); the MoE's down writes each slot's dot over the card's K half (MOE_TP_PART: one card's two DN_KS
 // partials) into `slots` and sends it to the peer's landing (`moe`, tp.cl's protocol inside the down), and

@@ -14,6 +14,10 @@ class CmdList {
  public:
   static CmdList immediate(Context& ctx, uint32_t ordinal = 0);
   static CmdList regular(Context& ctx, uint32_t ordinal = 0);
+  // An asynchronous in-order immediate list on the device's copy-only engine (the compute
+  // ordinal on a device without one): its copies run beside the compute lists, and
+  // host_synchronize() waits for every one appended so far.
+  static CmdList immediate_copy(Context& ctx);
   ~CmdList();
   CmdList(CmdList&& o) noexcept;
   CmdList(const CmdList&) = delete;
@@ -36,6 +40,7 @@ class CmdList {
   void wait_event(ze_event_handle_t e);
   void close();
   void reset();
+  void host_synchronize();
   bool is_immediate() const { return immediate_; }
   ze_command_list_handle_t handle() const { return l_; }
 
