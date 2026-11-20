@@ -124,9 +124,10 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
   setup_slots(lens);
   {
     const model::ModelDesc& d = *model_.desc;
-    if (slots() == 1 && (mtp_ || drafter) && d.gdn_layers == 48 && d.gdn_k_heads == kernels::kRefGdnKHeads &&
-        d.gdn_v_heads == kernels::kRefGdnVHeads) {
-      gdn_pend_ = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, 2 * kernels::kGdnPendParityBytes);
+    // PERF-51: Ornith's shapes too.
+    if (slots() == 1 && (mtp_ || drafter) && kernels::gdn_defer_built(d.gdn_layers, d.gdn_k_heads, d.gdn_v_heads)) {
+      gdn_pend_ = std::make_unique<l0::Mem>(
+          ctx, l0::MemKind::Device, 2 * kernels::gdn_pend_parity_bytes(d.gdn_layers, d.gdn_k_heads, d.gdn_v_heads));
       seqs_[0].bind.gdn_pend = gdn_pend_->ptr();
       seqs_[0].tv.gdn_pend = gdn_pend_.get();
       gdn_flush_ = std::make_unique<CapturedStep>(build_gdn_flush(ctx, model_, buffers_, gdn_pend_->ptr()));
@@ -550,6 +551,8 @@ void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
 static_assert(MtpDims::kGdnPendParity == kernels::kGdnPendParityBytes &&
                   MtpDims::kGdnConvXLayer == kernels::kGdnConvXLayerBytes,
               "MtpDims' deep terms are the kernels' pending rows and conv scratch");
+static_assert(MtpDims::kGdnPendParityOrnith == kernels::gdn_pend_parity_bytes(30, 16, 32),
+              "MtpDims' Ornith pending rows are the kernels'");
 void Engine::capture_wide(const CaptureOptions& opt) {
   const model::ModelDesc& d = *model_.desc;
   if (!gdn_pend_ || !wide_lists(model_, kv_cache(), slots())) return;
@@ -645,8 +648,11 @@ void Engine::reset() {
   // constructor filled it - one function, so "reset writes what construction
   // wrote" is a property of the code and not of two lists agreeing. Scratch is
   // left alone on purpose - see the header.
-  persist_.zero(imm_);
-  if (mtp_) mtp_->zero(imm_);
+  // PERF-90: the KV at the positions written since the last zero only.
+  note_kv(control_->pos + kKvAhead);
+  persist_.zero(imm_, kv_end_);
+  if (mtp_) mtp_->zero(imm_, kv_end_);
+  kv_end_ = 0;
   // Spec 19c: the drafter's slots (as MtpBuffers::zero does the head's) and a cold drafter.
   if (df_slots_) imm_.fill(df_slots_->ptr(), 0u, df_slots_->size());
   if (drafter_) drafter_->reset(imm_);
@@ -987,10 +993,33 @@ size_t Engine::kv_bytes(uint32_t n_pos) const {
   return 2 * persist_.kv_lay.pos_bytes() * (fa + (mtp_ ? 1 : 0)) * n_pos;   // K and V
 }
 
+void Engine::snap_copy(void* host, const void* dev, size_t bytes) const {
+  if (!snap_bcs_) snap_bcs_ = std::make_unique<l0::CmdList>(l0::CmdList::immediate_copy(ctx_));
+  snap_bcs_->copy(host, dev, bytes);
+  snap_pending_ = true;
+}
+
+void Engine::snap_wait() const {
+  if (!snap_pending_) return;
+  snap_bcs_->host_synchronize();
+  snap_pending_ = false;
+}
+
 void Engine::save_state(void* host) const {
   flush_projection();
   auto* h = static_cast<uint8_t*>(host);
   const Seq& s = seq();
+  // PERF-89: inside a mid-prompt hook with the MTP head the next chunk rewrites the state, the ring and hh row 0, so
+  // they are copied in the host layout into the sequence's verify slots (from state 1 on; a prefill keeps slot 0 live,
+  // mtp_normalise_live) and go to the host from there on the copy engine.
+  if (snap_async_ && mtp_) {
+    const size_t gdn = persist_.gdn_state.size(), ring = persist_.conv_ring.size();
+    imm_.copy(s.spec, live_gdn_slot(), gdn);
+    imm_.copy(s.spec + gdn, s.ring, ring);
+    imm_.copy(s.spec + gdn + ring, s.hh, hid_bytes(*model_.desc));
+    snap_copy(h, s.spec, state_bytes());
+    return;
+  }
   // The LIVE GDN slot (spec 8: after a commit it may be one of gdn_spec's; spec 19c: of the
   // drafter's slots). Spec 19d (spec 19 decision 5, as ruled there): with a drafter its whole ring
   // follows, so a restore resumes the drafter bitwise where this snapshot found it.
@@ -1022,6 +1051,7 @@ void Engine::load_state(const void* host, uint32_t pos) {
     control_->gdn_live = 0;
     s.verify_k = kNoVerify;
   }
+  note_kv(control_->pos + kKvAhead);   // PERF-90: the rows written up to here stay written
   control_->pos = pos;
   control_->n_active = 0;
 }
@@ -1072,15 +1102,49 @@ void Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
   check_range(begin, end, max_len(), "save_kv");
   if (begin == end) return;
   auto* h = static_cast<uint8_t*>(host);
-  for (const KvRun& r : kv_runs(persist_, mtp_.get(), kv_rows(seq(), begin, end))) {
-    imm_.copy(h, r.dev, r.bytes);
+  const std::vector<KvRun> runs = kv_runs(persist_, mtp_.get(), kv_rows(seq(), begin, end));
+  if (!snap_async_) {
+    for (const KvRun& r : runs) {
+      imm_.copy(h, r.dev, r.bytes);
+      h += r.bytes;
+    }
+    return;
+  }
+  // PERF-89, inside a mid-prompt hook: later chunks write rows from the hook's end on, so the runs go to the host on
+  // the copy engine as they stand - all but the MTP head's row end - 1, which the next chunk's step_mtp_kv rewrites
+  // (its own last position): that row is copied now, after save_state's image in the verify slots, and written over
+  // its place in the host image after the runs (the list is in order).
+  for (const KvRun& r : runs) {
+    snap_copy(h, r.dev, r.bytes);
     h += r.bytes;
+  }
+  const uint32_t at = control_->pos;   // the hook's end
+  if (!mtp_ || begin >= at || at > end) return;
+  const KvLayout& H = mtp_->kv_lay;   // kv_runs' addressing of the head's row
+  const size_t row = kv_rows(seq(), at - 1, at)[0].first, rb = persist_.kv_lay.row_bytes(),
+               sb = persist_.kv_lay.scale_row_bytes();
+  const std::pair<const uint8_t*, size_t> parts[4] = {
+      {mtp_->kv_k.as<uint8_t>() + H.rows_offset(0) + row * rb, rb},
+      {mtp_->kv_v.as<uint8_t>() + H.rows_offset(0) + row * rb, rb},
+      {mtp_->kv_k.as<uint8_t>() + H.scales_offset(0) + row * sb, sb},
+      {mtp_->kv_v.as<uint8_t>() + H.scales_offset(0) + row * sb, sb}};
+  uint8_t* stage = seq().spec + state_bytes();
+  for (const auto& [dev, bytes] : parts) {
+    if (bytes == 0) continue;   // bf16: no scales
+    imm_.copy(stage, dev, bytes);
+    h = static_cast<uint8_t*>(host);
+    for (const KvRun& r : runs) {
+      if (dev >= r.dev && dev + bytes <= r.dev + r.bytes) snap_copy(h + (dev - r.dev), stage, bytes);
+      h += r.bytes;
+    }
+    stage += bytes;
   }
 }
 
 void Engine::load_kv(uint32_t begin, uint32_t end, const void* host) {
   check_range(begin, end, max_len(), "load_kv");
   if (begin == end) return;
+  note_kv(end);   // PERF-90
   const auto* h = static_cast<const uint8_t*>(host);
   for (const KvRun& r : kv_runs(persist_, mtp_.get(), kv_rows(seq(), begin, end))) {
     imm_.copy(r.dev, h, r.bytes);

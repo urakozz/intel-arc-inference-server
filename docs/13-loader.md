@@ -70,7 +70,7 @@ The report's `lm_head` line names the form and the quantisation time, and the `W
 1. If `arg` is a directory containing `config.json`, that directory is the snapshot.
 2. Otherwise `arg` must be an `<org>/<name>` repo id. It becomes `$HF_HOME/hub/models--<org>--<name>` (or
    `~/.cache/huggingface/hub/...`), the revision is read from `refs/main`, and the snapshot is
-   `snapshots/<revision>/`.
+   `snapshots/<revision>/`
 3. Anything else throws, naming the exact path it looked for.
 
 The server never fetches a model, for two reasons. A download path would put a network dependency inside the serving
@@ -199,11 +199,11 @@ layer, which keeps a fixed-size recurrent state instead of a growing cache; FA i
 
 | Fused | Parts | How | Why |
 |---|---|---|---|
-| `QkvZ` 5120→16384 | `in_proj_qkv` (10240) ‖ `in_proj_z` (6144) | concat | Both read the same input `h` in the same GDN step. One GEMV (matrix-vector product) instead of two means one weight stream and one launch, and it gives an `N` of 16384, the one shape where layout 1 beats layout 0 (below). |
+| `QkvZ` 5120→16384 | `in_proj_qkv` (10240) ‖ `in_proj_z` (6144) | concat | Both read the same input `h` in the same GDN step. One GEMV (matrix-vector product) instead of two means one weight stream and one launch, and it gives an `N` of 16384, the one shape where layout 1 beats layout 0 (below) |
 | `AB` 5120→128 | `in_proj_a` (48) ‖ `in_proj_b` (48), zero-padded | concat and pad | Two 0.5 MB bf16 GEMVs are pure launch overhead; fused they are one 1.3 MB read. `N = 96` is not a multiple of the 16-wide tile, so 32 zero rows pad it to 128. |
-| `GateUp` 5120→34816 | `gate_proj` ‖ `up_proj` | interleave in 16s | See below. |
-| `Qkv` 5120→14336 | `q_proj` (12288) ‖ `k_proj` (1024) ‖ `v_proj` (1024) | concat | Same `h`, same step; grouped-query attention at 6:1 makes k and v tiny on their own. |
-| `OutProj`, `OProj`, `Down`, `LmHead` | one each | single | Nothing to fuse. |
+| `GateUp` 5120→34816 | `gate_proj` ‖ `up_proj` | interleave in 16s | See below |
+| `Qkv` 5120→14336 | `q_proj` (12288) ‖ `k_proj` (1024) ‖ `v_proj` (1024) | concat | Same `h`, same step; grouped-query attention at 6:1 makes k and v tiny on their own |
+| `OutProj`, `OProj`, `Down`, `LmHead` | one each | single | Nothing to fuse |
 
 Gate and up are interleaved in blocks of 16 rather than concatenated because of how the MLP uses them. The MLP is
 `W_down · (silu(W_gate h) ⊙ W_up h)`: output column `n` of `gate` is multiplied by column `n` of `up`. A subgroup (the
@@ -247,7 +247,7 @@ multiplier. Storing `1 + w` as bf16 would add a rounding the reference does not 
 weakest: `w` is small, so `1 + w` sits just above 1.0, where bf16's 8-bit mantissa steps by 2⁻⁸. That is up to 0.39%
 error on the multiplier at about 130 sites (128 layer norms and the final norm), compounding down 64 layers. fp32
 removes the rounding and costs 1,337,344 B of VRAM, 0.0086% of the weights. The bake applies to `input_layernorm`,
-`post_attention_layernorm`, the full-attention layers' `q_norm` and `k_norm`, and the final `norm`.
+`post_attention_layernorm`, the full-attention layers' `q_norm` and `k_norm`, and the final `norm`
 
 `linear_attn.norm.weight` is deliberately left alone: plain `w`, still bf16. `Qwen3_5RMSNormGated` is the one norm in
 the model without the `+1`, and it multiplies by `silu(z)` after normalising. Baking `+1` into it would be a silent
@@ -379,7 +379,7 @@ loader: .../snapshots/<revision>/
 Every uploaded byte lands in exactly one bucket, and the buckets sum to the allocation total. An int4 weight is
 `K·N/2` bytes of nibbles plus `K·N/32` bytes of f16 scales in either layout (a layout-1 tile is 136 u32: 128 of
 nibbles and 8 of scales), so the `int4` and `scales` lines split it exactly. `a‖b`'s 96 real rows and 32 zero rows
-split its buffer exactly between `bf16_linear` and `pad`.
+split its buffer exactly between `bf16_linear` and `pad`
 
 `W` is the number of bytes one decode token reads, which sets the bandwidth ceiling on decode speed.
 [03-models.md](03-models.md) measured `W = 15.519 GB` from the checkpoint headers alone. The loader recomputes the same
@@ -412,7 +412,7 @@ complexity at 13 s.
 Device VRAM is 32.6 GB ([01-hardware.md](01-hardware.md)), so 18.1 GB of weights leaves room for the KV cache (the
 stored keys and values of every past position), the delta-net state and the activations. `l0::Mem` adds
 `ze_relaxed_allocation_limits_exp_desc_t` automatically for the two allocations (`lm_head`, `embed_tokens`) that
-exceed the device's `maxMemAllocSize`.
+exceed the device's `maxMemAllocSize`
 
 ## Proving the bytes: the device round trip
 
@@ -439,12 +439,12 @@ check would fail if the block layout moved:
   `[163840]` equals `−exp(bf16_to_f32(src A_log[0]))`; `dt_bias[0]` at `[164032]` equals `bf16_to_f32(src)`; and the
   gated norm at `[164224]` is the checkpoint's raw bf16 word, neither `1+w` nor widened. That last check is the one
   that would catch someone "fixing" the inconsistency.
-- A full-attention layer's `k_norm`: layer 3's, fp32 `1 + w` at `[1024]`.
+- A full-attention layer's `k_norm`: layer 3's, fp32 `1 + w` at `[1024]`
 - The final norm, fp32 `1 + w` in its own allocation.
 - The `a‖b` padding: rows 96 to 127 of the tiled `[128][5120]` buffer read back as zero, all 163,840 of them, so the
   32 pad rows contribute nothing to the GEMV.
 - The RoPE table: `p = 0` is exactly `(1, 0)` and `p = 1`'s first frequency is `(cos 1, sin 1)`. `inv_freq[0] = θ⁰ =
-  1`, so this catches a wrong sign on the `θ` exponent or a transposed `[2][32]`.
+  1`, so this catches a wrong sign on the `θ` exponent or a transposed `[2][32]`
 - `embed_tokens` is compared bit for bit with the checkpoint.
 
 The test also asserts `report.unconsumed == 0`, which is what makes the claim that nothing is skipped by accident
@@ -492,7 +492,7 @@ wrong model. Both observed spellings are named, and anything else throws with th
 deliberately does not interpret; `extra_config` is a per-module object, so `bits: 16` is counted as an exclusion and
 `bits: 4` is checked for `group_size == 64` and `sym`. A module packed at g128 would otherwise dequantise wrong with
 nothing to catch it. The `+:` hazard has no counterpart here: a claim that a module is packed is checked against the
-shipped tensors at every load site, by `classify`.
+shipped tensors at every load site, by `classify`
 
 `desc_act` is absent, and the loader proves what the absence means instead of assuming it. The auto-round writer never
 reorders columns, so it never writes the key. Inferring `false` from silence is the kind of assumption the loader
@@ -515,7 +515,7 @@ shape and layout the captured command list binds.
 
 The int4 row is `{K 5120, N 248320, S 1, layout 1}`. `src/model/qwen35.h` and [12-kernels.md](12-kernels.md) argue for
 `S = 1`; in short, 3880 work-groups already fill the device, and `S = 1` lets the command list write the result
-straight into `logits`.
+straight into `logits`
 
 `lm_head` keeps its own byte bucket in both forms: 2,542,796,800 B in bf16 and 675,430,400 B in int4 (`K·N/2` nibbles
 plus `K·N/32` scales). It has to, because it is the one row whose format differs; folding it into `int4` and `scales`
@@ -571,7 +571,7 @@ family loads and serves, and the only evidence is a line in the log. That is del
 refuse a checkpoint over an unread tensor), but it matters which claims depend on it. The handling of both `lm_head`
 forms does: the top-level branch of `build_view` puts every `lm_head.*` name in the view, and what proves each is
 either consumed or deliberately dropped (the packed head's `.qzeros`) is the unconsumed count being 0 in the test. A
-future head form with a fourth tensor would load silently and be caught only by `ctest -L checkpoint`.
+future head form with a fourth tensor would load silently and be caught only by `ctest -L checkpoint`
 
 One consequence is not obvious. `assert_quant_invariants` walks the whole `SafetensorsSet`, so it also scans the 8
 int4 `mtp` modules' `qzeros` and `scales`, tensors the engine does not load from this checkpoint. That is a deliberate
@@ -676,7 +676,7 @@ What is refused, by field or by tensor:
   compressed, and a non-empty `sparsity_config` or `transform_config` (rotations put the weights in another basis);
 - a non-identity `weight_g_idx`, under any `actorder`;
 - a compressed-tensors config over `.qweight` tensors, or a GPTQ config over `.weight_packed`, refused by
-  `check_quant_scan`.
+  `check_quant_scan`
 
 `actorder` `"weight"`, `"static"` (an alias for weight) and null are accepted. They quantise in activation order but
 assign groups in stored column order, which is the identity k / group the kernels compute. `"group"` and `"dynamic"`
@@ -706,7 +706,7 @@ g128, `actorder` static, bf16 scales, an fp8 `kv_cache_scheme`). Refused: the ch
 
 `loader::load_qwen4exp` (`src/loader/qwen4exp_*`) is a separate loader. It reuses `resolve_snapshot`,
 `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` and `check_quant_scan`, `LinearSrc::classify`, the
-int8 head and `rtn_int4_g64`.
+int8 head and `rtn_int4_g64`
 
 Checkpoint forms are read from the tensor names. `q4_forms` reads three groups, each all-or-nothing, as `.qweight`
 (int4) or `.weight` (bf16): the dense projections (the delta-net `in_proj_qkv`, `in_proj_z` and `out_proj`, and the

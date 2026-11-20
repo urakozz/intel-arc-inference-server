@@ -421,7 +421,9 @@ int main(int argc, char** argv) {
     const Snap two = snap(e, imm, N);
     char what[32];
     std::snprintf(what, sizeof what, "split %u:", s);
-    if (s % 64 == 0) {
+    // PERF-88: on a dense model's l0-int8 a chunk of at most kInt8Bf16MlpMaxRows rows runs its MLP on the bf16
+    // walk, so where the chunks fall changes the bytes - such a split is judged like any other.
+    if (s % 64 == 0 && !(int8 && !e.model().desc->is_moe())) {
       // The GDN chunks fall where the one-call run's do: nothing may differ.
       const bool same = bitwise(two);
       std::printf("  %-14s %s\n", what, same ? "bitwise equal (a multiple of 64)"

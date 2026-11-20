@@ -9,6 +9,18 @@ get_filename_component(B70_KERNEL_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/kern
 # kernel depends on it, so a driver / IGC upgrade recompiles them all.
 set(B70_OCLOC_STAMP "${B70_KERNEL_DIR}/.ocloc-toolchain")
 execute_process(COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_LIST_DIR}/ocloc_stamp.cmake" "${B70_OCLOC_STAMP}" "${OCLOC_EXECUTABLE}")
+# Every kernel compiles through tools/ocloc_cache.py, a content-addressed cache every tree on the box shares
+# (~/b70/cache/ocloc; B70_OCLOC_CACHE=0 in the build's environment bypasses it). It runs in the tree's root with
+# tree-relative paths: the build options are kept inside each zebin, so an absolute -I would make two trees' binaries
+# differ and their cache keys too. Without python3 ocloc runs directly.
+get_filename_component(B70_TREE_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+file(RELATIVE_PATH B70_KERNEL_SRC_REL "${B70_TREE_ROOT}" "${B70_KERNEL_SRC_DIR}")
+find_program(B70_PYTHON3 python3)
+if(B70_PYTHON3)
+  set(B70_OCLOC_COMMAND "${B70_PYTHON3}" "${B70_TREE_ROOT}/tools/ocloc_cache.py" "${B70_OCLOC_STAMP}" "${OCLOC_EXECUTABLE}")
+else()
+  set(B70_OCLOC_COMMAND "${OCLOC_EXECUTABLE}")
+endif()
 add_custom_target(ocloc_toolchain ALL
   COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_LIST_DIR}/ocloc_stamp.cmake" "${B70_OCLOC_STAMP}" "${OCLOC_EXECUTABLE}"
   BYPRODUCTS "${B70_OCLOC_STAMP}"
@@ -45,7 +57,7 @@ function(add_ocloc_kernel NAME)
   # The project-wide options: the language version, the correctly rounded
   # divide/sqrt every host-comparable kernel needs (see above) and src/kernels
   # on the include path (bf16.h, tp_wire.h).
-  set(opts "-cl-std=CL3.0 -cl-fp32-correctly-rounded-divide-sqrt -I${B70_KERNEL_SRC_DIR}")
+  set(opts "-cl-std=CL3.0 -cl-fp32-correctly-rounded-divide-sqrt -I${B70_KERNEL_SRC_REL}")
   foreach(d IN LISTS K_DEFINES)
     string(APPEND opts " -D${d}")
   endforeach()
@@ -55,13 +67,18 @@ function(add_ocloc_kernel NAME)
     endif()
     string(APPEND opts " ${o}")
   endforeach()
+  # Paths inside the tree spelled from its root, where ocloc runs (see B70_OCLOC_COMMAND above).
+  string(REPLACE "${B70_TREE_ROOT}/" "" opts "${opts}")
+  get_filename_component(src "${K_SOURCE}" ABSOLUTE)
+  file(RELATIVE_PATH src "${B70_TREE_ROOT}" "${src}")
   set(out "${B70_KERNEL_DIR}/${NAME}.bin")
   add_custom_command(
     OUTPUT "${out}"
-    COMMAND "${OCLOC_EXECUTABLE}" compile
-            -file "${K_SOURCE}" -device "${B70_OCLOC_DEVICE}"
+    COMMAND ${B70_OCLOC_COMMAND} compile
+            -file "${src}" -device "${B70_OCLOC_DEVICE}"
             -output "${NAME}" -output_no_suffix -out_dir "${B70_KERNEL_DIR}"
             -options "${opts}"
+    WORKING_DIRECTORY "${B70_TREE_ROOT}"
     DEPENDS "${K_SOURCE}" ${K_DEPENDS} "${B70_KERNEL_SRC_DIR}/bf16.h" "${B70_KERNEL_SRC_DIR}/tp_wire.h"
             "${B70_OCLOC_STAMP}"
     COMMENT "ocloc ${NAME}"

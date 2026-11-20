@@ -39,7 +39,7 @@ A clean experiment does not exist yet. Comparing a self-quantised checkpoint aga
 head with everything else in which two quantiser runs differ: the `quant_method` spelling, `packing_format`, whether
 `g_idx` is shipped, how modules are excluded, and the published checkpoint's unpublished tuning. The experiment
 that would answer it is one pair of checkpoints quantised by the same script and version, differing only in whether
-the head is packed, judged by perplexity or `lm_eval`.
+the head is packed, judged by perplexity or `lm_eval`
 
 ## 2. Can the 24 MB L2 cache be used deliberately?
 

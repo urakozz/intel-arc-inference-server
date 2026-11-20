@@ -518,6 +518,8 @@ struct PipelineEngine::PrefillDriver {
     const void* normed = S.mtp ? p.mtp_hid->as<uint8_t>() + size_t(c.rows) * S.model.desc->hidden * 2
                                : nullptr;
     prefill::step_head(D.cx, D.kc, D.scratch, S.model, S.ctl, c.rows - 1, normed);
+    // The row into decode's logits too, where read_logits_into reads it: a sampled request draws its first id there.
+    D.cx.copy(S.buffers.logits.ptr(), D.scratch.logits.ptr(), model::Qwen35::kVocab * sizeof(float));
   }
 
   void drain() {
@@ -580,7 +582,7 @@ void PipelineEngine::prepare_prefill() {
     for (uint32_t C : {1u, 256u, cap})
       if (prefill::step_stage_launches(d, b, C, stage(0), kv_) +
               prefill::step_stage_launches(d, b, C, stage(1), kv_) !=
-          prefill::step_chunk_launches(d, b, C, kv_) + prefill::step_cut_extra_launches(d))
+          prefill::step_chunk_launches(d, b, C, kv_, 0, false) + prefill::step_cut_extra_launches(d))
         throw std::logic_error("runtime::PipelineEngine::prepare_prefill: the two stages' launches "
                                "at C = " + std::to_string(C) + " do not add up to one card's");
     pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, cap);

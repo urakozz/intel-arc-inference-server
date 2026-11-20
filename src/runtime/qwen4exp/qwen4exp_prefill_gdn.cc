@@ -9,9 +9,10 @@
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/profile.h"
 
-// gdn_chunk_q4 - runtime/prefill/gdn.cc's launches (a MoE model's four-launch intra form: nine), statement for
-// statement in their order, grids and arguments, over GdnChunkBuffers instead of a PrefillScratch; the one binding that differs is the tenth
-// (pf_gated_head_SIG). The comments of gdn.cc hold for every launch here (ordering is the in-order list's alone;
+// gdn_chunk_q4 - runtime/prefill/gdn.cc's launches (a MoE model's one-launch intra form: six), statement for
+// statement in their order, grids and arguments, over GdnChunkBuffers instead of a PrefillScratch, on Qwen3.8's one-card
+// bitwise forms (PERF-20 / PERF-21: front _PL, scan _OB; a tensor-parallel card's own _GK8V24 forms); the one binding
+// that differs is the head (pf_gated_head _SIG_OB). The comments of gdn.cc hold for every launch here (ordering is the in-order list's alone;
 // launch 9 is the only writer of the state).
 namespace runtime::qwen4exp {
 namespace {
@@ -30,18 +31,15 @@ void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::qwen4exp::gdn_chunk_q4: " + what);
 }
 
-// gdn.cc's solve entry (its selector went in the zero-config cleanup).
-const char* solve_entry() { return "pf_gdn_solve"; }
-
 }  // namespace
 
 void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunkBuffers& b, uint32_t pos, uint32_t C) {
-  require(C > 0 && C <= kq::kPfC, "C = " + std::to_string(C) + " is outside (0, " + std::to_string(kq::kPfC) + "]");
+  require(C > 0 && C <= kq::kPfCWide,
+          "C = " + std::to_string(C) + " is outside (0, " + std::to_string(kq::kPfCWide) + "]");
   require(b.qkvz && b.ab && b.state && b.ring && b.small && b.y && b.xb && b.seed && b.g && b.beta && b.A && b.A2 && b.w &&
               b.u && b.o,
           "a buffer is missing");
   const char* const scan_entry = prefill::gdn_scan_entry_name();   // gdn.cc's (gdn.h)
-  const char* const solve = solve_entry();
   const uint32_t kKHeads = b.k_heads, kVHeads = b.v_heads, kConvDim = (2 * kKHeads + kVHeads) * kHd;
   require((kKHeads == 16 && kVHeads == kq::kGdnHeads) || (kKHeads == kq::kTpGdnK && kVHeads == kq::kTpGdnV),
           "the GDN heads are one card's (16 / 48) or a tensor-parallel card's (8 / 24)");
@@ -50,13 +48,14 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   const uint32_t conv_groups = kConvDim / kConvWg;
   const void* gated_w = static_cast<const uint8_t*>(b.small) + b.gated_norm_off;
   const std::string conv = kernels::pf_gdn_conv_variant(kKHeads, kVHeads);
-  const std::string wy = kernels::pf_gdn_wy_variant(kKHeads, kVHeads);
-  const std::string scan = kernels::pf_gdn_scan_variant(kKHeads, kVHeads);
+  const std::string scan = kernels::pf_gdn_scan_variant(kKHeads, kVHeads) + "_OB";
+  const std::string pb = b.qkvz_bf16 ? "_PB" : "";   // the qkv||z partials as bf16 words (gdn.cc's partials_bf16)
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1, {PtrArg(b.ring), PtrArg(b.seed), arg_val(pos)});
   prefill::profile_wait(cx, Phase::kGdnSeed);
-  //  2-3 - conv + SiLU + q / k l2norm in one launch (phase 2 Task 2, gdn.cc's pf_gdn_front), bitwise.
-  cx.launch(kc(kernels::pf_gdn_front_variant(kKHeads, kVHeads), "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
+  //  2-3 - conv + SiLU + q / k l2norm in one launch (phase 2 Task 2, gdn.cc's pf_gdn_front; PERF-20: _PL, a lane's
+  //        partials read first), bitwise.
+  cx.launch(kc(kernels::pf_gdn_front_variant(kKHeads, kVHeads) + "_PL" + pb, "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
             {PtrArg(b.qkvz), PtrArg(b.seed), PtrArg(b.small), PtrArg(b.xb), PtrArg(b.ring), arg_val(pos), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnConv);
   //  4 - head scalars and the intra-chunk cumulative gate.
@@ -65,27 +64,22 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   cx.launch(kc(gate, "pf_gdn_gate"), kVHeads, nch, 1,
             {PtrArg(b.ab), PtrArg(b.small), PtrArg(b.g), PtrArg(b.beta), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnGate);
-  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. (gdn.cc's one-launch pf_gdn_intra for 5-8 is not bound here
-  //      yet: it is judged, and qwen4exp_prefill_intel_test matches the routes against the engine trace recorded in
-  //      oracle-out-q4exp-f32-aligned-L18, which has to be re-made first - phase 2 Task 8, 2026-11-12.)
-  cx.launch(kc(wy, "pf_gdn_A"), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.A), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnA);
-  //  6 - T = (I + A)^-1 in place over A (gdn.cc's pf_gdn_solve).
-  cx.launch(kc(wy, solve), kVHeads, nch, 1, {PtrArg(b.A), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnSolve);
-  //  7 - u = T vb and w = T kb.
-  cx.launch(kc(wy, "pf_gdn_wu"), kVHeads, nch, 2,
-            {PtrArg(b.xb), PtrArg(b.A), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), arg_val(C)});
+  //  5-8 (PERF-19, as Ornith's walk and Qwen3.8's one-card walk) - A, T, w / u and A2 in one launch: gdn.cc's
+  //      pf_gdn_intra, one work-group per (v-head, 64-row sub-chunk), the scan's inputs in its layouts. Judged, not
+  //      bitwise against pf_gdn_wy's four (DPAS dots, a blocked solve, T as hi / lo limbs; Q1-Q4 bf16 as before).
+  //      Every walk binds it: one card and a pipeline stage at 16 / 48 heads (Qwen3.8's binary), a tensor-parallel
+  //      card at 8 / 24 (pf_gdn_intra_GK8V24), INTRA_WU2 both. b.A is not read.
+  cx.launch(kc(kernels::pf_gdn_intra_variant(kKHeads, kVHeads), "pf_gdn_intra"), kVHeads, nch, 1,
+            {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnWu);
-  //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i, as the scan's packed hi / lo words (gdn.h).
-  cx.launch(kc(wy, prefill::gdn_a2_entry_name()), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.A2), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnA2);
-  //  9 - the sequential chunk-to-chunk state scan; the only writer of the state.
+  //  9 - the sequential chunk-to-chunk state scan; the only writer of the state. PERF-20 (_OB): o written as the bf16
+  //      word the head rounds it to, q.S beside w.S, two barriers a step - bitwise.
   cx.launch(kc(scan, scan_entry), kVHeads, kStateColChunks, 1,
             {PtrArg(b.xb), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), PtrArg(b.g), PtrArg(b.state), PtrArg(b.o), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnScan);
-  // 10 - the gated head with the SIGMOID gate (pf_gated_head_SIG): the mixer's last launch, y post-gate.
-  cx.launch(kc(kernels::pf_gated_head_variant(kKHeads, kVHeads) + "_SIG", "pf_gated_head"), kVHeads, C, 1,
+  // 10 - the gated head with the SIGMOID gate, one sub-group a (position, head), 8 heads a work-group, on the bf16 o
+  //      (PERF-21, pf_gated_head _SIG_OB, bitwise _SIG): the mixer's last launch, y post-gate.
+  cx.launch(kc(kernels::pf_gated_head_variant(kKHeads, kVHeads) + "_SIG_OB" + pb, "pf_gated_head_sg"), kVHeads / 8, C, 1,
             {PtrArg(b.qkvz), PtrArg(b.o), PtrArg(gated_w), PtrArg(b.y), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnHead);
 }

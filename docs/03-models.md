@@ -97,7 +97,7 @@ That is about 198 MB per full-attention layer, times 16 = 3.2 GB.
 
 At the top level, `embed_tokens` is BF16 `[248320, 5120]`, 2.54 GB, but only one row is gathered per token, so it
 costs about no traffic. `lm_head.weight` is BF16 `[248320, 5120]`, 2.54 GB, and is read in full on every token.
-Then there is `norm.weight`.
+Then there is `norm.weight`
 
 The MTP head (multi-token prediction: an extra layer trained to guess the next tokens) is all bf16, 0.85 GB:
 `mtp.fc` `[5120, 10240]` (fusing embedding ‖ hidden), `pre_fc_norm_embedding`, `pre_fc_norm_hidden`, one full
@@ -175,7 +175,7 @@ only the last token's logits are needed.
 
 **Per-token state the decode list owns.** Per GDN layer, a conv window `[10240 x 3]` bf16 and
 `S[48 x 128 x 128]` fp32; per full-attention layer, a KV ring `[max_model_len x 4 x 256]` x 2 bf16 (the KV cache:
-the keys and values of every earlier token); plus `position`.
+the keys and values of every earlier token); plus `position`
 
 ### Byte accounting
 

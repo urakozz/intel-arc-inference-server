@@ -41,9 +41,28 @@ PersistentBuffers::PersistentBuffers(l0::Context& ctx, uint32_t max_len, const P
   zero(imm);
 }
 
-void PersistentBuffers::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&control, &gdn_state, &conv_ring, &kv_k, &kv_v})
+namespace {
+// PERF-90: one K or V allocation of layout L at positions [0, end) of every layer, and at int8 their scales; the whole
+// allocation, as before, once end reaches max_len.
+void zero_kv(l0::CmdList& imm, l0::Mem& m, const KvLayout& L, uint32_t end) {
+  if (end >= L.max_len) {
+    imm.fill(m.ptr(), 0u, m.size());
+    return;
+  }
+  if (end == 0) return;
+  uint8_t* b = m.as<uint8_t>();
+  for (uint32_t l = 0; l < L.layers; ++l) {
+    imm.fill(b + L.rows_offset(l), 0u, size_t(end) * L.row_bytes());
+    if (L.scale_row_bytes()) imm.fill(b + L.scales_offset(l), 0u, size_t(end) * L.scale_row_bytes());
+  }
+}
+}  // namespace
+
+void PersistentBuffers::zero(l0::CmdList& imm, uint32_t kv_end) {
+  for (l0::Mem* m : {&control, &gdn_state, &conv_ring})
     imm.fill(m->ptr(), 0u, m->size());
+  zero_kv(imm, kv_k, kv_lay, kv_end);
+  zero_kv(imm, kv_v, kv_lay, kv_end);
 }
 
 size_t PersistentBuffers::bytes() const {
@@ -201,8 +220,12 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
   zero(imm);
 }
 
-void MtpBuffers::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&hctl, &gdn_spec, &kv_k, &kv_v, &hh, &dh})
+void MtpBuffers::zero(l0::CmdList& imm, uint32_t kv_end) {
+  for (l0::Mem* m : {&hctl, &gdn_spec})
+    imm.fill(m->ptr(), 0u, m->size());
+  zero_kv(imm, kv_k, kv_lay, kv_end);
+  zero_kv(imm, kv_v, kv_lay, kv_end);
+  for (l0::Mem* m : {&hh, &dh})
     imm.fill(m->ptr(), 0u, m->size());
   imm.fill(logits.ptr(), draft_vocab ? kNegInfBits : 0u, logits.size());   // spec 8 §11
   if (dv_logits) imm.fill(dv_logits->ptr(), 0u, dv_logits->size());

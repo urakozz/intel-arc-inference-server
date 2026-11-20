@@ -181,6 +181,52 @@ inline void hc_up_mix(const float* down_f32, bool inject, const uint16_t* up, co
   }
 }
 
+// --- PERF-66: the int8 form (q4_hc.cl's _Q8 / q4_hc_down_i8 / q4_hc_slab_i8) ---------------------------------------
+// int8 tiles [N/16][K/16][16 k][16 n] (loader::int8_tiled_index); scales fp16 [K/32][N] right after them.
+inline size_t i8_index(uint32_t K, uint32_t k, uint32_t n) { return (size_t(n / 16) * K + k) * 16 + n % 16; }
+// One column's group chain: t_g = fma over the group's 32 k ascending of f32(q) x v(k), acc = fma(t_g, f32(s_g), acc).
+template <class V>
+inline float i8_group_dot(const int8_t* q, const uint16_t* sc, uint32_t K, uint32_t N, uint32_t n, uint32_t g0,
+                          uint32_t g1, V v) {
+  float acc = 0.0f;
+  for (uint32_t g = g0; g < g1; ++g) {
+    float t = 0.0f;
+    for (uint32_t k = 32 * g; k < 32 * g + 32; ++k) t = std::fma(float(q[i8_index(K, k, n)]), v(k), t);
+    acc = std::fma(t, common::f16_to_f32(sc[size_t(g) * N + n]), acc);
+  }
+  return acc;
+}
+// q4_hc_down_i8 for one row: K = 10240, the DN_KS slices (each its own chain), then gemv_bf16's pairwise tree.
+inline void hc_down_i8(const int8_t* q, const uint16_t* sc, uint32_t N, uint32_t ks, const uint16_t* xn, float* out) {
+  const uint32_t G = kHcN / 32 / ks;
+  std::vector<float> red(ks);
+  for (uint32_t n = 0; n < N; ++n) {
+    for (uint32_t j = 0; j < ks; ++j)
+      red[j] = i8_group_dot(q, sc, kHcN, N, n, j * G, (j + 1) * G, [&](uint32_t k) { return f32(xn[k]); });
+    for (uint32_t stride = ks / 2; stride > 0; stride >>= 1)
+      for (uint32_t j = 0; j < stride; ++j) red[j] += red[j + stride];
+    out[n] = red[0];
+  }
+}
+// q4_hc_up_mix _Q8 for one row: hc_up_mix with the up linear over int8 tiles {K 320, N 10240} and their scales.
+inline void hc_up_mix_q8(const float* down_f32, bool inject, const int8_t* up, const uint16_t* sc, const uint16_t* xn,
+                         uint16_t* x, float* inj) {
+  float a[kHcLow];
+  for (uint32_t j = 0; j < kHcLow; ++j) a[j] = hc_act(down_f32[j]);
+  if (inject)
+    for (uint32_t s = 0; s < kInj; ++s) inj[s] = hc_inj(down_f32[kHcLow + s]);
+  for (uint32_t c = 0; c < kHidden; ++c) {
+    float p[kHc];
+    for (uint32_t s = 0; s < kHc; ++s) {
+      const uint32_t n = s * kHidden + c;
+      const float acc = i8_group_dot(up, sc, kHcLow, kHcN, n, 0, kHcLow / 32, [&](uint32_t k) { return a[k]; });
+      const float g = rf(sigmoid_t(rf(acc)));
+      p[s] = rf(g * f32(xn[n]));
+    }
+    x[c] = rne((((p[0] + p[1]) + p[2]) + p[3]) / 4.0f);
+  }
+}
+
 // --- PLE (spec 21-QFN-v1 §2.4) -------------------------------------------------------------------------------------------
 // The id-ring rule (21-QFN-v1a's reading of M:1107-1121): t1 = id[p - 1] (EOS if p < 1); t2 = t1 == EOS ? EOS :
 // id[p - 2] (EOS if p < 2). `id(q)` is the token at position q <= p.

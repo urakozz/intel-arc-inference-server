@@ -60,9 +60,10 @@
 #ifndef AK16
 #define AK16 0
 #endif
-// SH_X 1 (Ornith's _SHX binary): the shared expert's A rows are read from the chunk's x itself - its sorted rows are
-// the tokens in order (row Rs + t is token t, Rs = hdr[1], pf_moe.cl's H_SHARED_ROW), so the gather skips them
-// (pf_moe_gather_routed). The same words. Its reads stay inside x: an item ends at most at Rs + C rounded up to whole
+// SH_X 1 (Ornith's _SHX binary; Flash-Next's _SHX gate||up binaries, one card's and a tp card's, PERF-27): the shared
+// expert's A rows are read from the chunk's x itself - its sorted rows are the tokens in order (row Rs + t is token t,
+// Rs = hdr[1], pf_moe.cl's / q4_pf_moe.cl's H_SHARED_ROW), so the gather skips them (pf_moe_gather_routed,
+// q4_pf_gather_routed). The same words. Its reads stay inside x: an item ends at most at Rs + C rounded up to whole
 // 32-row tiles, and x has the chunk cap's rows (a multiple of 256).
 #ifndef SH_X
 #define SH_X 0

@@ -141,9 +141,13 @@ size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p
 // --- spec 21-QFN-v1d: the prefill chunk ------------------------------------------------------------------------------
 // One chunk of at most kPfC positions (= kernels::qwen4exp::kPfC, checked in qwen4exp_prefill.cc): every allocation
 // Qwen4ExpPrefillScratch makes on a device, as device-free arithmetic.
-inline constexpr uint32_t kPfC = 2048;
+// PERF-36: or of at most kPfCWide - the scratch's chunk rows (`rows` below: kPfC or kPfCWide) are the planner's choice
+// (pf_chunk_choice), and every [kPfC] term below is [rows]. A 4096-row chunk reads each missed expert once a chunk, not
+// twice, and its slab GEMMs run the N-fastest order (each activation block read once a slab, not once a wave).
+inline constexpr uint32_t kPfC = 2048, kPfCWide = 4096;
 // Two cards overlap consecutive chunks (qwen4exp_prefill_engine.cc): every per-chunk input the host writes (the ids,
-// the Controls, the injected rows) and the hand-off's landing buffer are doubled, chunk j's at slot j % kPfDepth.
+// the Controls, the injected rows) and the hand-off's landing buffer are doubled, chunk j's at slot j % kPfDepth
+// (PERF-30: the two chunks of a pair, which each device walks together).
 inline constexpr uint32_t kPfDepth = 2;
 // The host-memory experts read ahead (qwen4exp_prefill.h, Q4PfRing): each of its two device buffers holds this much
 // of a layer's host mirror (a layer's misses are ~0.14-0.28 GB at the served fills).
@@ -154,6 +158,10 @@ inline constexpr size_t kPfRingBytes = size_t(256) << 20;
 // Under tp only a pair's two chunks use the ring (they share each copy): a chunk alone read in place at every length
 // measured (1536 rows 1423 / 1143 ms).
 inline constexpr uint32_t kPfRingMinRows = 1280;
+// PERF-30: two cards (pp) walk each device's chunks in pairs that share each layer's copy (prefill_pair_pp), so a
+// pair uses the ring when its two chunks' rows together reach kPfRingMinRows (a chunk alone: C1 = 0) - the copy is
+// paid once for both (derived from the single-chunk numbers above, not measured per pair).
+inline bool pf_ring_staged(uint32_t C0, uint32_t C1) { return C0 + C1 >= kPfRingMinRows; }
 inline constexpr uint32_t kPfTm = 32;                          // the grouped GEMM's tile rows (pf_moe_gemm TM)
 inline constexpr uint32_t kPfSlab = 1024;                      // a whole slab of a dense linear
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;     // one weight batch of bf16 expert blocks
@@ -173,7 +181,8 @@ inline uint32_t pf_dense_rows(uint32_t pos, uint32_t C) {
 //   xb bf16 [C][10240], seed bf16 [3][10240], g / beta fp32 [C][48], A / A2 fp32 [C/64][48][64][64],
 //   w / u bf16 [C][48][128], o fp32 [C][48][128]   (PrefillScratch's gdn_* fields at this family's - Qwen3.8's - shape)
 inline constexpr size_t kGdnChunkLaunches = 10;
-// MoE-model prefill phase 2: conv + l2norm in one launch (pf_gdn_front) - 9.
+// MoE-model prefill phase 2: conv + l2norm in one launch (pf_gdn_front) - 9; PERF-19: the intra-chunk stages in one
+// (pf_gdn_intra) - 6.
 size_t gdn_chunk_q4_launches();
 inline constexpr uint32_t kGdnChunk = 64;   // the WY sub-chunk (PrefillScratchDims::kGdnChunk)
 struct GdnScratchSizes {
@@ -235,22 +244,27 @@ struct PrefillSizes {
            items;
   }
 };
-PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);
-inline size_t pf_route_at(uint32_t layer) { return size_t(layer) * kPfC * kRouteWords * 4; }
-inline size_t pf_list_at(uint32_t qsa_index) { return size_t(qsa_index) * kPfC * kListRow * 4; }
-inline size_t pf_diag_at(uint32_t qsa_index) { return size_t(qsa_index) * kPfC * 2 * 4; }
+PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, uint32_t rows = kPfC);
+inline size_t pf_route_at(uint32_t layer, uint32_t rows = kPfC) { return size_t(layer) * rows * kRouteWords * 4; }
+inline size_t pf_list_at(uint32_t qsa_index, uint32_t rows = kPfC) { return size_t(qsa_index) * rows * kListRow * 4; }
+inline size_t pf_diag_at(uint32_t qsa_index, uint32_t rows = kPfC) { return size_t(qsa_index) * rows * 2 * 4; }
 // The injected selection on prefill (spec 21-QFN-v1 F3's debug input): host USM [qsa layers][kPfC][kListRow] u32 per device,
 // filled by the caller's injector before each chunk (Qwen4ExpEngine::set_prefill_injector).
-inline size_t pf_injected_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.qsa_before(d.layers)) * kPfC * kListRow * 4; }
+inline size_t pf_injected_bytes(const model::Qwen4ExpDesc& d, uint32_t rows = kPfC) {
+  return size_t(d.qsa_before(d.layers)) * rows * kListRow * 4;
+}
 // The two-card prefill hand-off: kPfDepth runtime::PipelineLinks over spec 16b's layout at chunk size - each kPfC
 // rows of the materialised H (42 MB) and no norm sums; pf_link_bytes counts them all.
-PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d);
-size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
+PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d, uint32_t rows = kPfC);
+size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows = kPfC);
+// PERF-30: on two cards each device also holds the pair's first chunk's own rows (Q4PfOwnRows) - H bf16
+// [rows][10240], inj fp32 [rows][4], y bf16 [rows][2560]: 52.5 MB at kPfC (derived), 105 MB at kPfCWide.
+size_t pf_pair_bytes(const model::Qwen4ExpDesc& d, uint32_t rows = kPfC);
 // The prefill walk's launches on one device for the chunk at `pos` of C rows (the hand-off's copies and barriers
 // excluded): they depend on the chunk's dense / sparse rows (pf_dense_rows):
 //   device 0     pf_embed_gather                                                                              1
 //   a gated residual  combine_norm, the HC down slab + pf_gemm, up_mix                                         4
-//   a GDN layer  2 HC + qkv||z 16 slabs x 2, a||b (slab + GEMM), gdn_chunk_q4's 10, out_proj 3 slabs x 2 + the MoE's 27      84
+//   a GDN layer  2 HC + qkv||z 16 slabs x 2, a||b (slab + GEMM), gdn_chunk_q4's 6, out_proj 3 slabs x 2 + the MoE's 27       80
 //   a QSA layer  2 HC + q||gate||k||v 13 x 2, the indexer 1 x 2, pf_attn_prep_q16, q4_qsa_prep, q4_qsa_ring,
 //                pf_attn_gate, o_proj 3 x 2 + the MoE's 27                                                    73
 //                + q4_qsa_score / _select when the chunk has sparse rows (not injected)                       + 2
@@ -260,13 +274,15 @@ size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 //                key||value 13 slabs x 2, q4_pf_ple_gate / _conv / _ring                                    31 (30)
 //   two cards    device 0 ends with combine_norm _Y_NN (the materialised H crosses)                          + 1
 // The last chunk's head on the last device: kPrefillHeadLaunches (decode's final mixer, lm_head, argmax x 2).
+// C in (0, kPfCWide].
 size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t pos,
                                uint32_t C, bool injected = false, bool mtp = false);
 size_t prefill_chunk_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, uint32_t C,
                               bool injected = false, bool mtp = false);
 inline constexpr size_t kPrefillHeadLaunches = 6;
-// A device's prefill scratch + its prefill link (two devices): what `prefill` plans into DevicePlan::prefill_scratch.
-size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len);
+// A device's prefill scratch + its prefill link and the pair's rows (two devices): what `prefill` plans into
+// DevicePlan::prefill_scratch.
+size_t prefill_state(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t dev, uint32_t max_len, uint32_t rows = kPfC);
 // The read ahead's two buffers and its staged rows (every layer's at most) on a prefilling device (Q4PfRingState).
 size_t pf_ring_bytes(const model::Qwen4ExpDesc& d);
 
@@ -274,11 +290,12 @@ size_t pf_ring_bytes(const model::Qwen4ExpDesc& d);
 // Spec 8's machinery (runtime/engine.h's draft / verify / commit contracts) on this family. With the head loaded:
 //   - every device's decode scratch holds kVerifyRows rows (the verify lists run at M = k + 1 <= 4): the M-strided
 //     terms of scratch_sizes x 4, the per-layer rows (routes, selections, diagnostics) strided by 4 rows;
-//   - every device holds gdn_spec: (kGdnSlots - 1) more GDN states per GDN layer, LAYER-major ([its GDN layers][3]
-//     [48][128][128] fp32) - gdn_step_slots_M<M>_G1 bakes ONE layer's state as SPEC_SLOT_STRIDE, so a layer's slots
-//     are its state (slot 0) and gdn_spec's three after it, whatever the layer count (Qwen3.8's binaries bake a whole
-//     48-layer slot; spec 8 §3.4's rule otherwise unchanged: verify row r writes slot (live + r) % 4, commit(j) makes
-//     slot (live + j) % 4 live);
+//   - every device holds gdn_pend (PERF-51, Qwen3.8's deferred GDN commit; three state slots a layer, 340 MB at 36
+//     GDN layers, before it): the verify's rows' recurrence inputs, LAYER-major ([its GDN layers][2 parities][one
+//     layer's pending rows], gdn_pend_layer_bytes) - gdn_step_defer_M<M>_G1 bakes ONE layer's rows as PEND_PAR, so no
+//     layer count is baked. A verify writes no per-row state; commit(j) leaves rows 0..j for the next launch to replay
+//     into the state (Control::gdn_pend), and the engine replays them first (its flush list) wherever the state is
+//     read: a snapshot, a prefill;
 //   - the PLE layer's device holds the verify's PLE rows (gated, gn bf16 [4][10240]: q4_ple_block is M = 1 only, so
 //     a verify at M > 1 runs q4_pf_ple's gate / conv / ring at C = 4 - 21-QFN-v1d's cut of the same chain);
 //   - the last device holds the head's buffers (MtpSizes): its Control (the head runs one position behind the main
@@ -289,7 +306,6 @@ size_t pf_ring_bytes(const model::Qwen4ExpDesc& d);
 // The plan carries all of it (plan(..., mtp)).
 inline constexpr uint32_t kMaxDraft = 3;                  // drafts an iteration: verify at M <= 4
 inline constexpr uint32_t kVerifyRows = kMaxDraft + 1;    // the decode scratch's rows with the head
-inline constexpr uint32_t kGdnSlots = 4;                  // gdn_step SPEC_SLOTS' N_SLOTS (slot 0 = the layer's state)
 // Decision 4 (`pre_fc_norm_hidden`): vLLM's single RMS over the 4 x 2560 values (the default, ruled) or one RMS per
 // stream (llama.cpp's reading of the same [10240] weight). B70_Q4_MTP_NORM=single|per_stream, read at engine
 // construction; unset or empty is single; anything else throws.
@@ -307,11 +323,15 @@ struct MtpSizes {
   size_t total() const { return persistent() + list + diag + xe + xh + fe + fh + logits + routes; }
 };
 MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);
-// gdn_spec on a device: (kGdnSlots - 1) x its GDN layers x 3,145,728 B (a 64-byte line when it has none).
-size_t gdn_spec_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
+// PERF-51: one GDN layer's pending rows at d's heads, gdn_step.cl's DEFERRED PR = 64 rows: kf bf16 [64][k heads][128],
+// v bf16 [64][v heads][128], {decay, beta} fp32 [64][v heads] - 1,073,152 B at 16 / 48 heads, 536,576 at the tp card's
+// 8 / 24 (kernels::gdn_pend_layer_bytes; qwen4exp_capture.cc holds them equal).
+size_t gdn_pend_layer_bytes(const model::Qwen4ExpDesc& d);
+// gdn_pend on a device: its GDN layers x 2 parities x gdn_pend_layer_bytes (a 64-byte line when it has none).
+size_t gdn_pend_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
 // The verify's PLE rows on the PLE layer's device: gated, gn bf16 [kVerifyRows][10240] each (0 elsewhere).
 size_t ple_verify_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
-// What the head adds to a device's plan beyond its weights: gdn_spec, the PLE rows, (last device) MtpSizes, and the
+// What the head adds to a device's plan beyond its weights: gdn_pend, the PLE rows, (last device) MtpSizes, and the
 // decode scratch's extra rows (scratch_sizes at kVerifyRows less at 1).
 size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len);
 // The scratch's per-layer row offsets at `rows` rows a layer (1 without the head, kVerifyRows with it).
@@ -323,7 +343,7 @@ PpLandingLayout landing_layout_rows(const model::Qwen4ExpDesc& d, uint32_t rows)
 size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows);
 
 // The lists' launches (the copies excluded, as device_launches):
-//   verify at M on a device: device_launches' list at M rows - the GDN step is gdn_step_slots, and on the PLE layer
+//   verify at M on a device: device_launches' list at M rows - the GDN step is gdn_step_defer, and on the PLE layer
 //     at M > 1 q4_ple_block's one launch is q4_pf_ple's three (+ 2) - and, on the last device, the head's KV pass over
 //     the M rows (positions pos - 1 .. pos + M - 2: the head on (R_q, t_{q+1})): q4_mtp_norm, fc_embedding, fc_hidden
 //     (one M = 4 GEMV a row: a row's 4 streams), q4_mtp_fuse, the attn side's gated residual (3), q||gate||k||v,
@@ -343,7 +363,9 @@ size_t draft_launches(Q4Attn a, bool select);
 inline uint32_t mtp_prefill_rows(uint32_t pos, uint32_t C) { return pos == 0 ? C - 1 : C; }
 size_t mtp_prefill_launches(uint32_t pos, uint32_t C);
 // The prefill's R rows for the head pass on the last device: bf16 [kPfC + 1][10240] (row 0 R_{pos-1}).
-inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d) { return size_t(kPfC + 1) * d.hc_n() * 2; }
+inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d, uint32_t rows = kPfC) {
+  return size_t(rows + 1) * d.hc_n() * 2;
+}
 
 // --- spec 21-QFN-v1e: spec 7's prefix-cache snapshots --------------------------------------------------------------
 // The STATE at position p is everything the next token reads that is not a per-position block (plan 21-QFN-v1e Review
@@ -374,8 +396,8 @@ inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d) { return size_t(
 //   PleIds / PleRing   the PLE layer device's `ple` allocation (the id ring at 0, the conv ring at kPleConvOff)
 //   MtpKv / MtpIdxKeys / MtpIdxTail / MtpHidden   the head's (the last device): [K | V][max_len][512] bf16,
 //                                                  [max_len / 4][128], [8][128], R_{p-1} [10240] bf16
-//   GdnState with the MTP head: the engine reads / writes the LIVE slot (spec 8's gdn_live: a commit may leave the
-//   state in one of the verify's slots); load_state writes slot 0 and makes it live.
+//   GdnState with the MTP head: the engine replays the rows the last commit left into the state before save_state
+//   reads it (PERF-51's flush); load_state clears them (Control::gdn_pend).
 // `zero` runs are positions before 0: save_state writes the cold run's history to the host (zeros; the PLE ids as
 // EOS 248044 - q4_ple_gather reads a missing predecessor as EOS), load_state copies the host's bytes back into
 // those slots (the kernels never read them: every read of a position before 0 is masked by p >= q). `pad` runs are
@@ -427,9 +449,11 @@ struct DevicePlan : MemoryComponents {
   uint32_t vram_experts = 0, routed_experts = 0;
   size_t host_experts = 0;
 };
-// `prefill` (spec 21-QFN-v1d): each device's prefill scratch and prefill link (prefill_state) in prefill_scratch.
+// `prefill` (spec 21-QFN-v1d): each device's prefill scratch and prefill link (prefill_state) in prefill_scratch, at
+// `pf_rows` chunk rows (PERF-36).
 std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
-                             bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false);
+                             bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false,
+                             uint32_t pf_rows = kPfC);
 // Whether every device's plan + reserve fits its capacity.
 bool fits(const std::vector<DevicePlan>& p, const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
 // `--layers auto`: the largest N in [ple_layer + 1, d.layers] whose truncated model (layers [0, N), the final
@@ -466,6 +490,7 @@ std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement&
 // --budget-json FILE).
 struct ExpertBudget {
   uint32_t max_len = 0, devices = 0;
+  uint32_t pf_rows = kPfC;                       // the prefill scratch's chunk rows planned (PERF-36)
   bool mtp = false, prefill = false, int8_head = false;
   model::Q4Forms forms;                          // the descriptor's (ours: int4 dense; Intel's: bf16)
   std::array<size_t, kPpDevices> capacity{};     // the device_bytes it was given
@@ -485,7 +510,7 @@ struct ExpertBudget {
 };
 ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
                            bool int8_head, bool mtp, bool prefill,
-                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t pf_rows = kPfC);
 // One line: {"max_len":..,"devices":..,"mtp":..,"prefill":..,"int8_head":..,"dense":"int4"|"bf16",..,"cache":[..],
 // "f":..}.
 std::string budget_json(const ExpertBudget& b);
@@ -516,6 +541,13 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
                      const std::string& forced = "");
 // The plan with a tier: each device's weights (and model) less its layers' non-resident experts' blocks.
 void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t);
+// The decode projection (derived; the whole model's --max-len auto and PERF-36's chunk rule): a token reads the
+// non-routed bytes and h of the routed ones from VRAM at kTierVramGbps and the rest from host memory at kTierHostGbps,
+// one after the other (measured on the card: a kernel's host reads add to its VRAM time); h is the share of the
+// profile's routes `t` keeps resident (without a profile: the resident fraction). Milliseconds a token.
+inline constexpr double kTierVramGbps = 457.8;   // 77.6 % of the B70's 590 GB/s (Qwen3.8's decode)
+inline constexpr double kTierHostGbps = 11.2;    // one expert read in place from pinned host memory (PCIe 3.0 x16)
+double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vector<uint32_t>& prof);
 
 // --- plan 21-QFN-v2b: tensor parallel (`--parallel tp`) -----------------------------------------------------------------
 // The crossings' device bytes on a card (Qwen3.8's runtime::tp::Layout at hidden 2560, the slices form): for each of
@@ -530,7 +562,7 @@ size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
 // weights fp32 [kPfC][4] - 603 MB at hidden 2560 (derived); and its selection rows of one QSA layer, u32
 // [kPfC][kListRow] (the indexer split by rows, below).
 inline constexpr uint32_t kTpPfChunks = 2;
-size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one);
+size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one, uint32_t rows = kPfC);
 // The indexer split by rows (qwen4exp_prefill.h, Q4TpPrefill::rctl): on a chunk with sparse rows and at least
 // kTpSplitMin rows, card 0 scores and selects rows [0, tp_rows_cut(C)), card 1 the rest, and each copies its
 // selection rows to the peer - the same kernels on fewer rows, so the lists are bitwise the replicated walk's.
@@ -540,24 +572,26 @@ inline uint32_t tp_rows_cut(uint32_t C) { return C / 2; }
 // A card's plan under `p.tp` (one DevicePlan per card): plan() over model::q4_tp_card(one, rank) at one card's
 // placement - its halves of every layer, its halves of the KV (1 kv head) and of the GDN state (24 heads), the indexer
 // keys and the PLE state whole, the decode (and prefill) scratch at the card's shapes - with the embedding whole where
-// p.holds_embed, the final mixer and lm_head's vocabulary half on both, and with `mtp` the verify rows and GDN slots on
-// both and the head whole where p.holds_mtp (its buffers, and the decode scratch at one card's widths there: the
+// p.holds_embed, the final mixer and lm_head's vocabulary half on both, and with `mtp` the verify rows and GDN pending
+// rows on both and the head whole where p.holds_mtp (its buffers, and the decode scratch at one card's widths there: the
 // head's layer runs at one card's shapes); `link` the crossing.
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
-                                bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false);
+                                bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false,
+                                uint32_t pf_rows = kPfC);
 // The routed-expert budget under tp: expert_budget's fields with each card's cache over every layer, expert_bytes a
 // half expert (1,305,600 B), routed_total both cards' halves of every expert (f() their mean), and the reads a card's
 // (read_routed R / 2, read_non_routed its D: the hyper-connections, router, indexer and PLE whole, the rest halved).
 ExpertBudget tp_expert_budget(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
                               bool int8_head, bool mtp, bool prefill,
-                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
+                              const std::array<size_t, kPpDevices>& device_bytes, size_t reserve,
+                              uint32_t pf_rows = kPfC);
 // Card `rank`'s resident experts: fill_tier over that card's cache alone - the same profile and rank order on both
 // cards, so the smaller card's set is a prefix of the other's in every layer.
 ExpertTier tp_fill_tier(const model::Qwen4ExpDesc& one, const ExpertBudget& b, uint32_t rank,
                         const std::vector<uint32_t>* counts, const std::string& forced = "");
-// A card's tp decode list (flash attention): one card's list (device_launches at Q4Placement::one) with tp_send +
-// tp_sum after out_proj / o_proj and q4_moe_finish after the down (the MoE's crossing is wired into the two): + 3 a
-// layer. 923 at 48 layers (779 + 144).
+// A card's tp decode list (flash attention): one card's list (device_launches at Q4Placement::one) with tp_sum after
+// out_proj / o_proj and q4_moe_finish after the down (both crossings' sends are wired into the linear before them:
+// out_proj / o_proj's gemv, PERF-44, and the MoE's down): + 2 a layer. 875 at 48 layers (779 + 96).
 size_t tp_device_launches(const model::Qwen4ExpDesc& one);
 // Task 5 Step 0: a card's verify list at M rows - the decode list's with the PLE layer's q4_pf_ple at M > 1 (+2) and,
 // on the head's card, the head's KV pass (10 + M), as one card's verify_device_launches adds them.
@@ -567,5 +601,34 @@ size_t tp_verify_launches(const model::Qwen4ExpDesc& one, uint32_t M, bool head)
 inline constexpr size_t kTpDraftHeadLaunches = 5;
 // Card `rank`'s resident fraction: the budget's count a layer over the layer's experts (min 1).
 double tp_card_f(const ExpertBudget& b, uint32_t rank);
+
+// --- PERF-36: the prompt pass's chunk rows --------------------------------------------------------------------------
+// The spare VRAM is the expert cache, so the 4096-row chunk's larger scratch is experts out of VRAM: 1.0-1.2 GB a card
+// at 32768 on one card or pp (390-450 of 8,200-9,900 cached experts), 1.35-1.5 GB under tp (derived: qwen4exp_plan_test
+// section 9). Most of it is lent back to the tier between prefills (Q4LendState: the working rows, the read ahead's
+// buffers, tp's fold slots and down rows - pf_lend_bytes), so DECODE loses only the rest: the score, selection, route
+// and diagnostic rows, H, the ids, the pp hand-off's landing slots and the pair's own rows (PERF-30: +52.5 MB a card at
+// 4096) and the head pass's R rows - 0.38-0.52 GB a card at 32768 (145-197 experts), 0.40-0.57 under tp, more with the
+// context (the score rows). The rule (no flag): the wide chunk when the projected decode (tier_decode_ms over the
+// residents decode sees - the budget's cache plus the lent bytes, filled in the profile's rank) is at most
+// kPfWideDecodeBar slower than at kPfC, and the wide plan leaves every card an expert cache; else kPfC. Every expert
+// resident at both: the wide chunk costs decode nothing. With uniform routes (no profile) it keeps 2048 under pp and tp
+// at 32768 (+5.4 / +3.5 %) and takes 4096 on one card (+0.8 %); the routing profile beside the checkpoint decides at
+// load. The prompt pass itself loses the whole growth's residents (more misses a chunk, each read once a chunk instead
+// of once a 2048 rows): measured after the tuned quant, not derived here.
+inline constexpr double kPfWideDecodeBar = 0.01;
+// The bytes of a device's prefill the tier borrows between prefills at `rows` (lend_regions, + the read ahead's two
+// buffers; under tp, `tp_one` = the whole descriptor: + the pair's fold slots and down rows).
+size_t pf_lend_bytes(const model::Qwen4ExpDesc& c, uint32_t max_len, uint32_t rows, const model::Qwen4ExpDesc* tp_one);
+struct PfChunkChoice {
+  uint32_t rows = kPfC;
+  double ms_narrow = 0, ms_wide = 0;             // the decode projection at kPfC / kPfCWide (ms a token)
+  std::array<size_t, kPpDevices> grow{};         // per card: the plan's bytes the wide chunk adds (the prompt pass's cost)
+  std::array<size_t, kPpDevices> held{};         // per card: of those, what decode keeps out of the experts' reach
+};
+// `narrow` / `wide`: the budgets at kPfC / kPfCWide (expert_budget or tp_expert_budget - `tp_one` set - at the same
+// length and placement form); `counts` the routing profile or null (id order, every expert alike).
+PfChunkChoice pf_chunk_choice(const model::Qwen4ExpDesc& d, const ExpertBudget& narrow, const ExpertBudget& wide,
+                              const std::vector<uint32_t>* counts, bool tp);
 
 }  // namespace runtime::qwen4exp

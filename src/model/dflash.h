@@ -114,6 +114,12 @@ void check_dflash_target(const DFlashDesc& d, const DFlashTargetShape& target);
 // each refusal naming the key: the DSpark form, hidden 2560, 20 / 4 heads x 128, intermediate 6144, every layer sliding
 // at 2048 (|q - k| <= 2047) and causal, block 8, 5 taps, Markov rank 256, rms_norm_eps 1e-6, vocabulary 128000.
 void check_dspark(const DFlashDesc& d);
+// PERF-53 (plan 21-QFN-v3b): Qwen3.8-Flash-Next's drafter (incoai/Qwen3.8-Flash-Next-DFlash2) is the one its kernels
+// are built for (kernels::dflash::kFlashNext) - before the device, each refusal naming the key: DFlash 2 (vLLM form),
+// hidden 2560, 32 / 8 heads x 128, intermediate 7680, every layer sliding at 2048 and non-causal, block 8, the taps
+// 5 / 15 / 25 / 35 / 45 (each the mean of the target's four hyper-connection streams after that layer: the authors' capture),
+// convolutions 16 x 2 taps, selector rank 256 / top 16, rms_norm_eps 1e-6, vocabulary 248320, mask 248077.
+void check_flash_next_dflash(const DFlashDesc& d);
 // Spec 19 v3c: one `--parallel tp` card's half of a drafter (runtime::dflash::TpDFlashDrafter) - half the q and kv heads
 // and half the MLP; every other field the whole drafter's (its hidden, layers, taps, window, convolutions, selector,
 // vocabulary). Throws unless the heads and the MLP halve into whole 16-row tiles.

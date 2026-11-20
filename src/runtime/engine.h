@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -168,6 +169,10 @@ class Engine {
   // decode list, which reads `pos` and the persistent buffers these calls write in
   // place. Host pointers are l0::MemKind::Host allocations (device-visible). The caller
   // must not have a prefill or a replay in flight -- none of the public calls leaves one.
+  // PERF-89: the exception is a mid-prompt block hook (below): there save_kv's device-to-host
+  // copies, and with the MTP head save_state's (from a device copy of the state in the
+  // sequence's verify slots, idle during a prefill), go on the copy engine and run while the
+  // next chunk computes; the host bytes are complete once prefill() returns or throws.
   static constexpr uint32_t kBlock = 2048;
   // Spec 8 §3.5 (plan 8b Review Focus 4): with MTP on, the state also carries the
   // head's input hidden h_{pos-1} (MtpBuffers::hh row 0, 10240 B) and the KV the head's
@@ -489,6 +494,10 @@ class Engine {
   // verify-cost-m8: the committed rows the next verify would replay (Control::gdn_pend), into gdn_state now - the
   // flush list at n_active 0. Every reader of the GDN state calls it first; nothing to do without pending rows.
   void flush_gdn() const;
+  // PERF-89: a mid-prompt hook's snapshot copies, appended to the copy engine's list (made on first use), and the
+  // wait for every one appended so far.
+  void snap_copy(void* host, const void* dev, size_t bytes) const;
+  void snap_wait() const;
   // Spec 19c (defined in engine_prefill.cc): the prefill tail of the drafter's ring - the n staged tap rows
   // (df_pf_taps_ rows 0..n-1) at positions pos .. pos + n - 1, projected at prefill width (TapDrafter::project_wide)
   // or, where the drafter has no such path, 8 rows a replay.
@@ -577,6 +586,14 @@ class Engine {
   uint32_t max_draft_of(const Seq& s) const;
   void drop_rows_commits();   // the selected slot's unprojected rows commits (reset / restore discard them)
   void zero_slot();
+  // PERF-90, one slot: a bound on the KV positions written since the last zero (all of them until the constructor's
+  // reset). reset() zeroes positions [0, kv_end_) only - the rest is still zero, so the bytes match a whole fill. It is
+  // raised before pos is lowered (load_state, reset) and by the host's own KV writes (prefill chunks, load_kv);
+  // kKvAhead covers the rows a decode, draft or verify step writes past the pos it leaves (a 64-row verify keeps at
+  // least one row, a draft chain writes the head's rows up to 3 ahead).
+  static constexpr uint32_t kKvAhead = 2 * DecodeScratchDims::kDeepM;
+  uint32_t kv_end_ = UINT32_MAX;
+  void note_kv(uint32_t end) { kv_end_ = std::max(kv_end_, end); }
   // Plan 19v3b Task 0: the KV page table's host copy (empty with one slot) and the cache rows of slot `s`'s positions
   // [begin, end) as (first row, rows) runs - consecutive pages merged, so one run unless the table scatters them.
   std::vector<uint32_t> pages_;
@@ -614,6 +631,11 @@ class Engine {
   // Uploads, readbacks and snapshot copies only, never a token. `mutable`: the
   // save_* calls are const on the session and still append to it.
   mutable l0::CmdList imm_;
+  // PERF-89: the copy engine's list for a mid-prompt hook's snapshot copies (null until the first), `snap_async_` set
+  // while such a hook runs, `snap_pending_` while copies may be in flight.
+  mutable std::unique_ptr<l0::CmdList> snap_bcs_;
+  bool snap_async_ = false;
+  mutable bool snap_pending_ = false;
   Control* control_;               // shared memory: the selected slot's (slot 0's is buffers_.control)
   Control* hctl_ = nullptr;        // spec 8: the selected slot's head control block (slot 0's: MtpBuffers::hctl)
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;

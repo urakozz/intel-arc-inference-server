@@ -21,7 +21,7 @@
 namespace runtime::qwen4exp {
 
 // One card: its descriptor (the buffers keep a reference to it, so it is declared first), buffers, queue, crossing.
-// With the MTP head (`mtp`): the verify rows and GDN slots, the MoE's slots at kVerifyRows rows; the head's card
+// With the MTP head (`mtp`): the verify rows and GDN pending rows, the MoE's slots at kVerifyRows rows; the head's card
 // (`head`) sizes its decode scratch at one card's widths (the head's layer runs whole there).
 struct Qwen4ExpTpEngine::Card {
   Card(l0::Context& c, const model::Qwen4ExpDesc& one, uint32_t rank, uint32_t max_len, bool mtp = false,
@@ -33,7 +33,7 @@ struct Qwen4ExpTpEngine::Card {
         fence(queue),
         imm(l0::CmdList::immediate(c)),
         ctl(buffers.control.as<Control>()),
-        lo{one.hidden, kTpOutSlices, tp::kFoldG},
+        lo{one.hidden, kTpOutSlices, kernels::qwen4exp::kTpOutFoldG},
         lm{one.hidden, one.top_k + 1, kernels::qwen4exp::kTpMoeFoldG},
         land_o(c, l0::MemKind::Device, lo.total_bytes(), 4096),
         land_m(c, l0::MemKind::Device, lm.total_bytes(), 4096),
@@ -59,6 +59,7 @@ struct Qwen4ExpTpEngine::Card {
   // Task 5 Step 0 (the MTP head): the verify lists at M = 1..kVerifyRows and the draft steps (the head's card: spec
   // 21e's step on its half of the head; the other card: its half of the head over the peer's row, into dctl)
   std::vector<CapturedStep> verify, drafts;
+  std::optional<CapturedStep> flush;   // PERF-51: the GDN flush list (the committed rows into the state)
   std::unique_ptr<l0::Mem> dctl;   // runtime::Control, shared: the card without the head's draft winner
 };
 

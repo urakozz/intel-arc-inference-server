@@ -126,7 +126,7 @@ Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
       r.route.push_back(routes(c, 0));
     }
     c.e.commit(0, c.e.verify_ids()[0]);
-    if (keep) r.state.push_back(gdn_slot(c, c.ctl->gdn_live));
+    if (keep) r.state.push_back(read(c, c.e.gdn_state_now(), c.gdn_bytes));   // PERF-51: the committed state
     r.g.push_back(c.ctl->cur_token[0]);
   }
   return r;
@@ -163,13 +163,25 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const char* what, const std::vec
   std::vector<std::vector<uint8_t>> lg4(kK + 1), st4(kK + 1), rt4(kK + 1);
   for (int pass = 0; pass < 2; ++pass)
     for (uint32_t k = pass == 0 ? kK : 1; pass == 0 ? k == kK : k <= kK; ++k) {
+      // Row r's state: its slot after verify(k); with the deferred build (PERF-51: no per-row state) the committed
+      // state after verify(k) + commit(r).
+      std::vector<std::vector<uint8_t>> rs;
+      if (c.e.gdn_deferred())
+        for (uint32_t r = 0; r <= k; ++r) {
+          s0.restore(c);
+          for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
+          c.e.verify(k);
+          c.e.commit(r, c.e.verify_ids()[r]);
+          rs.push_back(read(c, c.e.gdn_state_now(), c.gdn_bytes));
+        }
       s0.restore(c);
       for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
       c.e.verify(k);
       const std::vector<uint8_t> lg = read(c, c.e.verify_logits_device(), size_t(k + 1) * V * 4);
       for (uint32_t r = 0; r <= k; ++r) {
         const std::vector<uint8_t> row(lg.begin() + size_t(r) * V * 4, lg.begin() + size_t(r + 1) * V * 4);
-        const std::vector<uint8_t> st = gdn_slot(c, (c.ctl->gdn_live + r) % runtime::MtpBuffers::kSlots);
+        const std::vector<uint8_t> st =
+            c.e.gdn_deferred() ? rs[r] : gdn_slot(c, (c.ctl->gdn_live + r) % runtime::MtpBuffers::kSlots);
         const std::vector<uint8_t> rt = routes(c, r);
         if (pass == 0) {
           lg4[r] = row;

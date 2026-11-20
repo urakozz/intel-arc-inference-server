@@ -18,10 +18,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
 #include "common/int4.h"
+#include "common/repack.h"
 #include "gemv_harness.h"
 #include "gemv_ref.h"
 #include "l0/context.h"
@@ -205,6 +207,142 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
               all_ok ? "every row passed" : "**A ROW FAILED - see the WRONG/DIFFER cells above**");
   return all_ok ? 0 : 1;
 }
+// --- PERF-111: k-major tiles ---------------------------------------------------
+// `probe_gemv --tiles`: each layout-1 / head gemv against its GEMV_KMAJOR (and GEMV_AHEAD) builds, A B A B. The
+// control is the production binary over today's [n_tile][k] tiles; each variant reads the same tiles reordered
+// [k][n_tile] (common::tiles_k_major) or, for `_A4`, today's order. Every variant must match the control byte for
+// byte (same arithmetic, same order). GB/s counts weight bytes; ~604 is probe_bw's grid-stride read.
+struct TileShape {
+  const char* name;
+  char kind;  // '4' int4 layout 1, '8' gemv_i8w, 'b' gemv_bf16
+  uint32_t K, N;
+  int launches;
+  const char* control;
+  std::vector<const char*> variants;  // names ending in _A4 read today's order; every other one k-major
+};
+
+int run_tiles(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
+  const TileShape shapes[] = {
+      {"qkv‖z int4", '4', 5120, 16384, 40, "gemv_M1_K5120_N16384_S1_L1",
+       {"gemv_M1_K5120_N16384_S1_L1_KM", "gemv_M1_K5120_N16384_S1_L1_KM_A2"}},
+      {"lm_head int4", '4', 5120, 248320, 10, "gemv_M1_K5120_N248320_S1_L1",
+       {"gemv_M1_K5120_N248320_S1_L1_KM", "gemv_M1_K5120_N248320_S1_L1_KM_A2"}},
+      {"lm_head int8", '8', 5120, 248320, 10, "gemv_i8w_M1_K5120_N248320",
+       {"gemv_i8w_M1_K5120_N248320_KM", "gemv_i8w_M1_K5120_N248320_KM_A4", "gemv_i8w_M1_K5120_N248320_A4"}},
+      {"lm_head bf16", 'b', 5120, 248320, 10, "gemv_bf16_M1_K5120_N248320",
+       {"gemv_bf16_M1_K5120_N248320_KM", "gemv_bf16_M1_K5120_N248320_KM_A4", "gemv_bf16_M1_K5120_N248320_A4"}},
+  };
+  bool all_ok = true;
+  std::puts("# probe_gemv --tiles - k-major tiles\n");
+  for (const TileShape& sh : shapes) {
+    // Today's tiles and scales as bytes; the k-major copy is the same tiles reordered.
+    std::vector<uint8_t> w, scales;
+    size_t tile_bytes = 256, k_steps = sh.K / 16;
+    if (sh.kind == '4') {
+      common::Int4Gptq g = common::Int4Gptq::random(sh.K, sh.N, 42);
+      std::vector<uint32_t> t = g.tiled();
+      w.assign(reinterpret_cast<const uint8_t*>(t.data()), reinterpret_cast<const uint8_t*>(t.data() + t.size()));
+      scales.assign(reinterpret_cast<const uint8_t*>(g.scales.data()),
+                    reinterpret_cast<const uint8_t*>(g.scales.data() + g.scales.size()));
+      tile_bytes = 544;
+      k_steps = sh.K / 64;
+    } else if (sh.kind == '8') {
+      std::mt19937 rng(42);
+      w.resize(size_t(sh.K) * sh.N);
+      for (size_t i = 0; i < w.size(); i += 4) {
+        const uint32_t r = rng();
+        std::memcpy(&w[i], &r, 4);
+      }
+      std::vector<float> sc(sh.N);
+      std::uniform_real_distribution<float> sd(0.001f, 0.01f);
+      for (float& v : sc) v = sd(rng);
+      scales.assign(reinterpret_cast<const uint8_t*>(sc.data()), reinterpret_cast<const uint8_t*>(sc.data() + sc.size()));
+    } else {
+      std::vector<uint16_t> t = random_bf16(size_t(sh.K) * sh.N, 3, -0.05f, 0.05f);
+      w.assign(reinterpret_cast<const uint8_t*>(t.data()), reinterpret_cast<const uint8_t*>(t.data() + t.size()));
+      k_steps = sh.K / 8;
+    }
+    std::vector<uint8_t> wk(w.size());
+    common::tiles_k_major(w.data(), sh.N / 16, k_steps, tile_bytes, wk.data());
+    // An int4 layout-1 tile carries its scales, so the scales buffer is bound but unread there.
+    const size_t weight_bytes = sh.kind == '4' ? w.size() : w.size() + (sh.kind == '8' ? scales.size() : 0);
+    std::vector<uint16_t> x = random_bf16(sh.K, 5);
+
+    l0::CmdList imm = l0::CmdList::immediate(ctx);
+    const int NB = std::max(2, int((72u << 20) / w.size()) + 1);
+    std::vector<l0::Mem> wb, wkb;
+    for (int i = 0; i < NB; ++i) {
+      wb.emplace_back(ctx, l0::MemKind::Device, w.size());
+      imm.copy(wb.back().ptr(), w.data(), w.size());
+      wkb.emplace_back(ctx, l0::MemKind::Device, w.size());
+      imm.copy(wkb.back().ptr(), wk.data(), w.size());
+    }
+    l0::Mem sbuf(ctx, l0::MemKind::Device, std::max<size_t>(scales.size(), 4));
+    if (!scales.empty()) imm.copy(sbuf.ptr(), scales.data(), scales.size());
+    l0::Mem xbuf(ctx, l0::MemKind::Device, x.size() * 2);
+    imm.copy(xbuf.ptr(), x.data(), x.size() * 2);
+    l0::Mem obuf(ctx, l0::MemKind::Device, size_t(sh.N) * 4);
+    const char* entry = sh.kind == '4' ? "gemv" : sh.kind == '8' ? "gemv_i8w" : "gemv_bf16";
+
+    // One timed run: the correctness launch over copy 0 (read back), then `launches` launches cycling the copies.
+    auto run = [&](const char* name, std::vector<float>& out) {
+      const std::string n(name);
+      const bool kmajor = n != sh.control && n.substr(n.size() - 3) != "_A4";
+      std::vector<l0::Mem>& bufs = kmajor ? wkb : wb;
+      l0::Module mod(ctx, kernels::path(n));
+      l0::Kernel k = mod.kernel(entry);
+      k.group_size(64);
+      auto bind = [&](int i) {
+        uint32_t a = 0;
+        k.arg_ptr(a++, bufs[i].ptr());
+        if (sh.kind != 'b') k.arg_ptr(a++, sbuf.ptr());
+        k.arg_ptr(a++, xbuf.ptr());
+        k.arg_ptr(a++, obuf.ptr());
+      };
+      {
+        l0::CmdList list = l0::CmdList::regular(ctx);
+        bind(0);
+        list.launch(k, sh.N / 64);
+        list.close();
+        q.execute(list, &f);
+        f.wait();
+        out.resize(sh.N);
+        imm.copy(out.data(), obuf.ptr(), out.size() * 4);
+      }
+      l0::CmdList list = l0::CmdList::regular(ctx);
+      for (int i = 0; i < sh.launches; ++i) { bind(i % NB); list.launch(k, sh.N / 64); }
+      list.close();
+      return double(weight_bytes) / (time_list(q, f, list, sh.launches) * 1e3);
+    };
+
+    std::printf("\n## %s - %u×%u, %.1f MB of weights\n\n", sh.name, sh.K, sh.N, double(weight_bytes) / 1e6);
+    std::vector<float> control_out, out;
+    run(sh.control, control_out);  // warm-up, discarded
+    std::vector<const char*> names{sh.control};
+    names.insert(names.end(), sh.variants.begin(), sh.variants.end());
+    std::vector<std::vector<double>> gbps(names.size());
+    std::vector<bool> same(names.size(), true);
+    for (int round = 0; round < 2; ++round)
+      for (size_t i = 0; i < names.size(); ++i) {
+        gbps[i].push_back(run(names[i], out));
+        if (i == 0) control_out = out;
+        else if (std::memcmp(out.data(), control_out.data(), out.size() * 4) != 0) same[i] = false;
+      }
+    std::printf("| kernel | round 1 GB/s | round 2 GB/s | mean | %% of 604 | %% of 638 | Δ%% vs control | bytes |\n");
+    std::printf("|---|---|---|---|---|---|---|---|\n");
+    const double base = (gbps[0][0] + gbps[0][1]) / 2;
+    for (size_t i = 0; i < names.size(); ++i) {
+      const double m = (gbps[i][0] + gbps[i][1]) / 2;
+      all_ok = all_ok && same[i];
+      std::printf("| %s | %.0f | %.0f | %.0f | %.1f%% | %.1f%% | %+.1f%% | %s |\n", names[i], gbps[i][0], gbps[i][1], m,
+                  100.0 * m / 604.0, 100.0 * m / 638.0, 100.0 * (m / base - 1.0),
+                  i == 0 ? "(the control)" : same[i] ? "identical" : "**DIFFER**");
+    }
+    std::fflush(stdout);
+  }
+  std::printf("\nbyte compare against the control: %s\n", all_ok ? "every variant identical" : "**A VARIANT DIFFERS**");
+  return all_ok ? 0 : 1;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -212,6 +350,7 @@ int main(int argc, char** argv) {
   l0::Queue q(ctx);
   l0::Fence f(q);
   if (argc > 1 && std::string(argv[1]) == "--loads") return run_loads(ctx, q, f);
+  if (argc > 1 && std::string(argv[1]) == "--tiles") return run_tiles(ctx, q, f);
   // --variants K N S <kernel>...: each named gemv.cl binary at one shape; the first is the control, every other one
   // must be its output byte for byte (the load knobs keep the arithmetic). Run twice in order, the first pass a warm-up.
   if (argc > 5 && std::string(argv[1]) == "--variants") {

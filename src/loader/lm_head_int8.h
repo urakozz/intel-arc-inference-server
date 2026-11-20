@@ -45,6 +45,15 @@ float quantise_row_int8(const uint16_t* w, uint32_t K, int8_t* q);
 void quantise_int8_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* q_tiled,
                          float* scales, unsigned threads = 0);
 
+// PERF-66 (spec 21-QFN-v2 §7 lever 5): Flash-Next's hyper-connection mixers at load - the same tiled layout, one
+// fp16 scale per 32 k of a row instead of one fp32 scale a row: for row n, group g (k in [32g, 32g + 32)),
+// `s = fp16_rne(max|W| / 127)` (the quotient in fp32; subnormal halves kept), `q = rne(W / float(s))` clamped to
+// [-127, 127]; a group whose s is 0 gets q = 0. scales_f16 is [K/32][N] (group-major: a sub-group's 16 columns
+// read 32 contiguous bytes). K must be a multiple of 32, N of 16. `threads` as quantise_int8_tiled's; the result
+// does not depend on it.
+void quantise_int8_g32_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* q_tiled, uint16_t* scales_f16,
+                             unsigned threads = 0);
+
 // Spec 8 §11: the draft vocabulary's compact head. Rows `ids[0..n)` of a tiled [N][K]
 // int8 head (the layout above) and their scales, gathered into the SAME tiled layout at
 // N' = n: compact row j is row ids[j], byte for byte, and out_scales[j] = scales[ids[j]].

@@ -36,7 +36,10 @@ int main(int argc, char** argv) {
   std::set<std::string> bound;
   model::Qwen4ExpDesc intel = d;
   intel.forms = {model::Q4Form::Bf16, model::Q4Form::Bf16, model::Q4Form::Bf16, 128};
-  for (const model::Qwen4ExpDesc* f : {&d, static_cast<const model::Qwen4ExpDesc*>(&intel)})
+  model::Qwen4ExpDesc ours8 = d, intel8 = intel;   // PERF-66: the int8 hyper-connection mixers (B70_Q4_HC=int8)
+  ours8.hc_int8 = intel8.hc_int8 = true;
+  const model::Qwen4ExpDesc* forms[] = {&d, &intel, &ours8, &intel8};
+  for (const model::Qwen4ExpDesc* f : forms)
     for (bool int8 : {false, true})
       for (bool eager : {false, true})
         for (bool two : {false, true})
@@ -58,6 +61,8 @@ int main(int argc, char** argv) {
   CHECK(kq::qsa_attn_variant(1, false) == "q4_qsa_attn_M1_T32" && kq::qsa_attn_variant(1, true) == "q4_qsa_attn_eager_M1");
   CHECK(kq::route_variant(1) == "q4_route_M1_E512_T10_N528_L256");
   CHECK(kq::hc_down_variant(true) == "gemv_bf16_M1_K10240_N336_C16_S16");
+  CHECK(kq::hc_down_variant(false, true) == "q4_hc_down_i8_M1_N320_KS16");
+  CHECK(kq::hc_up_mix_variant(1, true, true) == "q4_hc_up_mix_M1_I_Q8");
   CHECK(kq::attn_prep_q4_variant(1, 1) == "attn_prep_M1_Q24KV2_S1");
   std::printf("qwen4exp_variant_names_test OK: %zu bound names, %zu binaries\n", bound.size(), built.size());
   return 0;

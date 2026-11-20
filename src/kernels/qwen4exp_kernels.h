@@ -21,6 +21,7 @@
 //
 // The source files (src/kernels/qwen4exp/):
 //   q4_hc.cl              q4_hc_combine_norm, q4_hc_up_mix                    plain OpenCL C
+//                         q4_hc_down_i8, q4_hc_slab_i8 (PERF-66's int8 form)  sub-groups / plain
 //   q4_ple.cl             q4_ple_gather, q4_ple_block, q4_ple_check           plain OpenCL C
 //   q4_qsa.cl             q4_qsa_prep, q4_qsa_score, q4_qsa_select            plain OpenCL C
 //   q4_qsa_attn.cl        q4_qsa_attn, q4_qsa_reduce (flash, sub-groups)       card only
@@ -97,8 +98,18 @@ inline std::string hc_combine_norm_variant(unsigned M, HcSrc src, unsigned S, bo
   }
   return norm ? v : v + "_NN";
 }
-// "q4_hc_up_mix_M1_I" (a gated residual: 320 + 4 inject rows) | "q4_hc_up_mix_M1" (the final mixer).
-inline std::string hc_up_mix_variant(unsigned M, bool inject) { return "q4_hc_up_mix" + m_(M) + (inject ? "_I" : ""); }
+// "q4_hc_up_mix_M1_I" (a gated residual: 320 + 4 inject rows) | "q4_hc_up_mix_M1" (the final mixer), + "_Q8" for the
+// int8 up tiles (PERF-66, model::Qwen4ExpDesc::hc_int8).
+inline std::string hc_up_mix_variant(unsigned M, bool inject, bool hc8 = false) {
+  return "q4_hc_up_mix" + m_(M) + (inject ? "_I" : "") + (hc8 ? "_Q8" : "");
+}
+// PERF-66: the int8 down||inject GEMV in gemv_bf16's place (its arguments, grid N / 16): "q4_hc_down_i8_M1_N336_KS16".
+inline constexpr unsigned kHcDownI8Ks = 16;
+inline constexpr unsigned hc_down_i8_wg() { return 16 * kHcDownI8Ks; }
+inline std::string hc_down_i8_variant(unsigned M, bool inject) {
+  return "q4_hc_down_i8" + m_(M) + "_N" + std::to_string(inject ? kHcDownN : kHcLow) + "_KS" +
+         std::to_string(kHcDownI8Ks);
+}
 // q4_ple.cl: the gather by the table's scale dtype (decision 7: bf16 the default file), the block, the check.
 inline std::string ple_gather_variant(unsigned M, bool bf16_scale) {
   return "q4_ple_gather" + m_(M) + (bf16_scale ? "_BF16" : "_F32");
@@ -130,7 +141,8 @@ inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head"
 
 // Plan 21-QFN-v2b: a tensor-parallel card's decode binaries (model::q4_tp_card's shapes; src/kernels/CMakeLists.txt's
 // "Plan 21-QFN-v2b" block): the MoE at the half width 320 with the card's fp32 partial (MOE_TP_PART, DN_KS 1), the GDN at
-// Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_send + tp_sum at hidden 2560 (FOLD_G 20; S the local slices).
+// Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_sum at hidden 2560 (FOLD_G 20; S the local slices) after the
+// send-folded out_proj / o_proj gemv.
 inline constexpr unsigned kTpInter = kInter / 2;
 inline std::string tp_moe_variant(bool table, unsigned rank, unsigned M = 1, bool union_read = false) {
   return "q4_moe_M" + std::to_string(M) + "_E512_T10_D2560_I320_SH4" + (table ? "_TBL" : "") + "_TP_R" +
@@ -143,17 +155,26 @@ inline constexpr unsigned tp_moe_gate_up_groups() { return kSlots * (2 * kTpInte
 inline constexpr unsigned tp_moe_down_wg() { return 16 * kSlots * 1; }                          // 176: DN_KS 1
 inline std::string tp_gated_head_sig_variant(unsigned M = 1) { return "prep_gated_head_M" + std::to_string(M) + "_GK8V24_SIG"; }
 inline std::string tp_gdn_variant() { return "gdn_step_M1_GK8V24"; }
-// Task 5 Step 0 (MTP under tp): the verify's GDN slots at the card's heads, layer-major as gdn_slots_variant (one
-// layer's state at 24 heads a slot): gdn_step_slots_M<M>_GK8V24_G1
-inline std::string tp_gdn_slots_variant(unsigned M) { return "gdn_step_slots_M" + std::to_string(M) + "_GK8V24_G1"; }
+// Task 5 Step 0 (MTP under tp): the verify's GDN step at the card's heads - PERF-51's DEFERRED build, layer-major as
+// gdn_defer_variant (one layer's pending rows at 8 / 24 heads a parity): gdn_step_defer_M<M>_GK8V24_G1
+inline std::string tp_gdn_defer_variant(unsigned M) { return "gdn_step_defer_M" + std::to_string(M) + "_GK8V24_G1"; }
+static_assert(gdn_pend_layer_bytes(8, 24) == 536576, "src/kernels/CMakeLists.txt's tp PEND_PAR");
 inline std::string tp_attn_prep_variant(unsigned M = 1) { return "attn_prep_M" + std::to_string(M) + "_Q12KV1"; }
 inline std::string tp_qsa_attn_variant(unsigned M = 1) { return "q4_qsa_attn_M" + std::to_string(M) + "_T32_Q12KV1"; }
 inline constexpr unsigned kTpFoldG = 20, kTpWg = 256, kTpOutS = 2, kTpFinishWg = 256;
-// out_proj / o_proj's crossing: the card's 2 slices summed in one card's order into one row
-inline std::string tp_sum_variant(unsigned rank, unsigned M = 1) {
+// out_proj / o_proj's crossing: the card's 2 slices summed in one card's order into one row. `wired` (PERF-44): the
+// gemv sends its own work-groups' chunks (tp_out_gemv_variant) and tp_sum waits on those (TP_WIRE_COLS 64).
+inline std::string tp_sum_variant(unsigned rank, unsigned M = 1, bool wired = false) {
   return "tp_cross_M" + std::to_string(M) + "_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
-         "_X_R" + std::to_string(rank) + "_sum";
+         "_X_R" + std::to_string(rank) + "_sum" + (wired ? "_W64" : "");
 }
+// PERF-44: out_proj / o_proj's gemv (the card's K rows x 2560, S 2, int4 L0) with tp_send folded in (gemv.cl
+// GEMV_TP_SEND): gemv(w, scales, x, out, peer_land, send_ctr); its landing has kTpOutFoldG chunks a row (one a
+// work-group).
+inline std::string tp_out_gemv_variant(unsigned M, unsigned K) {
+  return kernels::gemv_variant(M, K, kHidden, kTpOutS, 0) + "_TP";
+}
+inline constexpr unsigned kTpOutFoldG = kHidden / 64 * kTpOutS;   // 80
 
 // The reused kernels at this family's shapes.
 inline std::string embed_variant(unsigned M) { return embed_gather_variant(M, kHidden); }   // embed_gather_M1_D2560
@@ -165,7 +186,9 @@ inline std::string attn_prep_q4_variant(unsigned M, unsigned S) {
   return S == 1 ? attn_prep_s1_variant(M, kQHeads, kKvHeads) : attn_prep_variant(M, kQHeads, kKvHeads);
 }
 inline std::string bf16_variant(unsigned K, unsigned N) { return gemv_bf16_variant(1, K, N, gemv_bf16_tiling(N)); }
-inline std::string hc_down_variant(bool inject) { return bf16_variant(kHcN, inject ? kHcDownN : kHcLow); }
+inline std::string hc_down_variant(bool inject, bool hc8 = false) {
+  return hc8 ? hc_down_i8_variant(1, inject) : bf16_variant(kHcN, inject ? kHcDownN : kHcLow);
+}
 inline std::string idx_variant() { return bf16_variant(kHidden, kIdxN); }
 inline std::string router_variant() { return bf16_variant(kHidden, kRouterN); }
 inline std::string ab_variant() { return bf16_variant(kHidden, kAbN); }
@@ -191,7 +214,7 @@ inline std::string attn_v2_q4_variant(unsigned M) { return attn_v2_variant(M, kA
 // layer's prologue). Capture checks each exists before appending a command;
 // tests/kernels/qwen4exp_variant_names_test.cc holds the union to the CMake block's list.
 inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
-                                                bool ple_bf16_scale = true) {
+                                                bool ple_bf16_scale = true, bool hc8 = false) {
   const unsigned S = int4_dense ? 4u : 1u;
   std::vector<std::string> v = {
       embed_variant(1),
@@ -200,10 +223,10 @@ inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf1
       hc_combine_norm_variant(1, HcSrc::Y, 0, true),
       hc_combine_norm_variant(1, HcSrc::None, 0, true),
       hc_combine_norm_variant(1, HcSrc::Y, 0, false),
-      hc_down_variant(true),
-      hc_down_variant(false),
-      hc_up_mix_variant(1, true),
-      hc_up_mix_variant(1, false),
+      hc_down_variant(true, hc8),
+      hc_down_variant(false, hc8),
+      hc_up_mix_variant(1, true, hc8),
+      hc_up_mix_variant(1, false, hc8),
       qkvz_variant(int4_dense),
       ab_variant(),
       gdn_variant(1),
@@ -234,7 +257,7 @@ inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bo
                                                 bool ple_bf16_scale = true) {
   (void)two_cards;
   return decode_variants(d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
-                         ple_bf16_scale);
+                         ple_bf16_scale, d.hc_int8);
 }
 
 // =================================================================================================================
@@ -252,10 +275,16 @@ inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bo
 // was (commit 6499948's rule): prefill/pf_gated_head.cl GDN_GATE_SIGMOID (`pf_gated_head_SIG`), q4_qsa.cl QSA_PF
 // (the M = kPfC prep without the in-launch ring write + q4_qsa_ring; `_PF`), q4_ple.cl PLE_PF (the gather's tokens
 // from the chunk's id buffer, no ring write; `_PF`).
-inline constexpr unsigned kPfC = 2048, kPfTm = 32, kPfSlab = 1024;
+// PERF-36: the binaries that bake the chunk's rows (M = C: the HC, the indexer, the PLE gather and block, the head pass,
+// tp's fold) are also built at kPfCWide; a variant's `C` is the scratch's chunk rows (runtime::qwen4exp::kPfC or
+// kPfCWide), never a chunk's own (the fold's slots are M rows apart). In these sources M only bounds n_active, so a
+// row's bits are the same at either build.
+inline constexpr unsigned kPfC = 2048, kPfCWide = 4096, kPfTm = 32, kPfSlab = 1024;
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;   // gate||up: 513 blocks of 6,553,600 B, 81 a batch, 7
                                                              // batches; down: 3,276,800 B, 163 a batch, 4 (derived)
-inline constexpr unsigned kPfSortWg = 256, kPfGatherWg = 64, kPfCombineWg = 256, kPfDequantWg = 16;
+inline constexpr unsigned kPfSortWg = 256, kPfGatherWg = 64, kPfDequantWg = 16;
+// PERF-27: hidden columns a combine work-group - q4_pf_moe_combine 64 lanes x 8, q4_pf_moe_combine_f32 64 x 4
+inline constexpr unsigned kPfCombineCols = 512, kPfCombineF32Cols = 256;
 inline constexpr unsigned kPfKt = 32, kPfSparseWg = 32;      // q4_pf_sparse_attn: list entries a tile, 2 sub-groups
 inline constexpr unsigned kPfPleWg = 256, kPfRingWg = 128;   // q4_pf_ple_*; q4_qsa_ring (= kPrepWg)
 inline constexpr unsigned kPfIdxLd = 768;                    // the indexer GEMM's row pitch: pf_ld(640)
@@ -277,30 +306,41 @@ inline std::string pf_sparse_attn_variant(bool eager) {   // "q4_pf_sparse_attn_
   return std::string("q4_pf_sparse_attn_Q") + std::to_string(kQHeads) + "KV" + std::to_string(kKvHeads) +
          (eager ? "_EAGER" : "");
 }
-inline std::string pf_ple_variant() { return "q4_pf_ple_C" + std::to_string(kPfC); }   // "q4_pf_ple_C2048"
+inline std::string pf_ple_variant(unsigned C = kPfC) { return "q4_pf_ple_C" + std::to_string(C); }   // "q4_pf_ple_C2048"
 // prefill/slab_bf16.cl's bf16 slab at this family's shapes (its entry point keeps the name kol_pf_bf16_slab).
 inline std::string pf_bf16_slab_variant(unsigned K, unsigned N) {
   return "q4_pf_bf16_slab_K" + std::to_string(K) + "_N" + std::to_string(N);
 }
+// PERF-66: the int8 down||inject slab in the bf16 slab's place (its arguments and grid): "q4_hc_slab_i8_N336".
+inline std::string pf_hc_slab_variant(bool hc8) {
+  return hc8 ? "q4_hc_slab_i8_N" + std::to_string(kHcDownN) : pf_bf16_slab_variant(kHcN, kHcDownN);
+}
 // The int4 (layout 0) slabs: whole 1024-column slabs through prefill/pf_dequant_slab.cl (qkv||z, q||gate||k||v), a
 // zero-padded tail through prefill/slab_dequant_int4.cl (out_proj / o_proj: 2560 = 1024 + 1024 + 512).
 inline bool pf_int4_slab_tail(unsigned N) { return N % kPfSlab != 0; }
-inline std::string pf_int4_slab_variant(unsigned K, unsigned N) {
+// PERF-36: a chunk wider than kPfC rows (`wide`) dequantises the whole slabs with the block-store form (_BS) and runs
+// pf_gemm_T0_R (the N-fastest order) - Qwen3.8's open-work 18 pair, both bit-identical to the plain pair.
+inline std::string pf_int4_slab_variant(unsigned K, unsigned N, bool wide = false) {
   return pf_int4_slab_tail(N) ? "pf_int4_slab_K" + std::to_string(K) + "_N" + std::to_string(N)
-                              : pf_dequant_slab_variant(K, N, 0);
+                              : pf_dequant_slab_variant(K, N, 0, wide);
 }
 // 21-QFN-v1c's sources at M = kPfC; the up-mix in the _R form (kPfHcUpRows rows of kPfHcUpCols columns a work-group,
 // grid (2560 / kPfHcUpCols, C / kPfHcUpRows)) - each row bitwise the one-row form's.
-inline std::string pf_hc_combine_norm_variant(HcSrc src, bool norm) { return hc_combine_norm_variant(kPfC, src, 1, norm); }
-inline std::string pf_hc_up_mix_variant() {   // "q4_hc_up_mix_M2048_I_D512_R4C64": UP_DOWN = the GEMM's pitch
-  return hc_up_mix_variant(kPfC, true) + "_D" + std::to_string(kPfHcDownLd) + "_R" + std::to_string(kPfHcUpRows) + "C" +
-         std::to_string(kPfHcUpCols);
+inline std::string pf_hc_combine_norm_variant(HcSrc src, bool norm, unsigned C = kPfC) {
+  return hc_combine_norm_variant(C, src, 1, norm);
 }
-inline std::string pf_qsa_variant() { return qsa_variant(kPfC) + "_PF"; }   // "q4_qsa_M2048_T512_W1024_PF"
+// "q4_hc_up_mix_M2048_I_D512_R4C64": UP_DOWN = the GEMM's pitch; + "_Q8" over the int8 up tiles (PERF-66)
+inline std::string pf_hc_up_mix_variant(unsigned C = kPfC, bool hc8 = false) {
+  return hc_up_mix_variant(C, true) + "_D" + std::to_string(kPfHcDownLd) + "_R" + std::to_string(kPfHcUpRows) + "C" +
+         std::to_string(kPfHcUpCols) + (hc8 ? "_Q8" : "");
+}
+inline std::string pf_qsa_variant(unsigned C = kPfC) { return qsa_variant(C) + "_PF"; }   // "q4_qsa_M2048_T512_W1024_PF"
 // Its q4_qsa_score: SCORE_R rows a work-group (src/kernels/CMakeLists.txt), grid (ceil(n / kScoreWg), pf_score_groups).
 inline constexpr unsigned kPfScoreRows = 4;
 inline unsigned pf_score_groups(unsigned C) { return (C + kPfScoreRows - 1) / kPfScoreRows; }
-inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_variant(kPfC, bf16_scale) + "_PF"; }
+inline std::string pf_ple_gather_variant(bool bf16_scale, unsigned C = kPfC) {
+  return ple_gather_variant(C, bf16_scale) + "_PF";
+}
 // The reused prefill binaries at this family's shapes.
 inline std::string pf_embed_variant() { return pf_embed_gather_variant(kHidden); }          // pf_embed_gather_D2560
 inline std::string pf_ab_variant() { return pf_ab_proj_variant(kHidden); }                  // pf_ab_proj_D2560
@@ -315,7 +355,10 @@ inline std::string pf_route_gemm_variant() { return route_variant(1) + "_P" + st
 inline std::string pf_gdn_gate_gemm_variant() { return kernels::pf_gdn_gate_gemm_variant(16, 48, kPfAbPitch); }
 inline std::string pf_gemm_gu_variant() { return pf_moe_gemm_variant(kHidden, 2 * kInter, false, true); }
 inline std::string pf_gemm_dn_variant() { return pf_moe_gemm_variant(kInter, kHidden, false, false); }
-inline std::string pf_gated_head_sig_variant() { return pf_gated_head_variant() + "_SIG"; }   // pf_gated_head_SIG
+// PERF-27: the walk's gate||up, the shared expert's rows read from x itself (SH_X: "pf_moe_q4gemm_K2560_N1280_SILU[_TBL]_SHX")
+inline std::string pf_moe_gu_variant(bool table) { return pf_moe_q4gemm_variant(kHidden, 2 * kInter, true, table) + "_SHX"; }
+// PERF-21: the sigmoid head one sub-group a (position, head) on the scan's bf16 o (pf_gated_head_SIG_OB)
+inline std::string pf_gated_head_sig_variant() { return pf_gated_head_variant() + "_SIG_OB"; }
 inline std::string pf_attn_prep_q4_variant() { return pf_attn_prep_q16_variant(kQHeads, kKvHeads); }
 inline std::string pf_flash_q4_variant() { return pf_flash_attn_variant(kQHeads, kKvHeads); }
 inline std::string pf_gate_q4_variant() { return pf_attn_variant(kQHeads, kKvHeads); }
@@ -324,22 +367,29 @@ inline std::string pf_gate_q4_variant() { return pf_attn_variant(kQHeads, kKvHea
 // attention form and the PLE scale form (the shared expert's form is an entry point of q4_pf_moe, not a binary). The
 // last row's head is decode's binaries (decode_variants: the capture checks them). Two cards add nothing (the chunk
 // crosses by copy).
-inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bool ple_bf16_scale = true) {
+inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bool ple_bf16_scale = true,
+                                                unsigned C = kPfC, bool hc8 = false) {
+  const bool wide = C > kPfC;
   std::vector<std::string> v = {
       pf_embed_variant(),
-      pf_hc_combine_norm_variant(HcSrc::Embed, true),
-      pf_hc_combine_norm_variant(HcSrc::Slices, true),
-      pf_hc_combine_norm_variant(HcSrc::Y, true),
-      pf_hc_combine_norm_variant(HcSrc::None, true),
-      pf_hc_combine_norm_variant(HcSrc::Y, false),
-      pf_bf16_slab_variant(kHcN, kHcDownN),
+      pf_hc_combine_norm_variant(HcSrc::Embed, true, C),
+      pf_hc_combine_norm_variant(HcSrc::Slices, true, C),
+      pf_hc_combine_norm_variant(HcSrc::Y, true, C),
+      pf_hc_combine_norm_variant(HcSrc::None, true, C),
+      pf_hc_combine_norm_variant(HcSrc::Y, false, C),
+      pf_hc_slab_variant(hc8),
       pf_gemm_variant(false),
-      pf_hc_up_mix_variant(),
+      pf_gemm_variant(false, wide),
+      pf_hc_up_mix_variant(C, hc8),
       pf_ab_variant(),
       pf_gdn_conv_variant(),
-      pf_gdn_wy_variant(),
-      pf_gdn_scan_variant(),
-      pf_gdn_front_variant(),       // MoE-model prefill phase 2: conv + l2norm in one launch
+      pf_gdn_intra_variant(),       // PERF-19: A / solve / W-U / A2 in one launch (Qwen3.8's binary)
+      pf_gdn_scan_variant() + "_OB",    // PERF-20 / PERF-21: Qwen3.8's one-card scan (o as bf16 words) and front
+      pf_gdn_front_variant() + "_PL",   // MoE-model prefill phase 2: conv + l2norm in one launch
+      pf_gdn_front_variant() + "_PL_PB",   // a chunk past kPfSmallMaxRows rows: qkv||z as bf16 (pf_gemm_T0_B16)
+      kernels::pf_gemm_bf16c_variant(),
+      kernels::pf_gemm_bf16c_variant(wide),   // PERF-36's 4096-row chunk: pf_gemm_T0_B16_R
+      pf_gated_head_sig_variant() + "_PB",
       pf_router_slab_variant(),     // phase 3 Task 8: the router and a||b on the dense GEMM
       pf_ab_slab_variant(),
       pf_route_gemm_variant(),
@@ -347,7 +397,7 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_gated_head_sig_variant(),
       pf_bf16_slab_variant(kHidden, kIdxN),
       pf_attn_prep_q4_variant(),
-      pf_qsa_variant(),
+      pf_qsa_variant(C),
       pf_flash_q4_variant(),
       pf_sparse_attn_variant(eager),
       pf_gate_q4_variant(),
@@ -357,17 +407,17 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_gemm_gu_variant(),
       pf_gemm_dn_variant(),
       pf_moe_sort_mw_variant(kExperts, kTopK),            // plan 2026-11-12 Task 7: the sort and the fused GEMMs
-      pf_moe_q4gemm_variant(kHidden, 2 * kInter, true),
+      pf_moe_gu_variant(false),                           // PERF-27: the shared expert's rows from x
       pf_moe_q4gemm_variant(kInter, kHidden, false),
-      pf_moe_q4gemm_variant(kHidden, 2 * kInter, true, true),   // the expert tier's table form
+      pf_moe_gu_variant(true),                            // the expert tier's table form
       pf_moe_q4gemm_variant(kInter, kHidden, false, true),
-      pf_ple_gather_variant(ple_bf16_scale),
+      pf_ple_gather_variant(ple_bf16_scale, C),
       pf_bf16_slab_variant(kHidden, kPleKvN),
-      pf_ple_variant(),
+      pf_ple_variant(C),
   };
   if (int4_dense) {
-    v.push_back(pf_int4_slab_variant(kHidden, kQkvzN));
-    v.push_back(pf_int4_slab_variant(kHidden, kQkvgN));
+    v.push_back(pf_int4_slab_variant(kHidden, kQkvzN, wide));
+    v.push_back(pf_int4_slab_variant(kHidden, kQkvgN, wide));
     v.push_back(pf_int4_slab_variant(kGdnZN, kHidden));
   } else {
     v.push_back(pf_bf16_slab_variant(kHidden, kQkvzN));
@@ -376,8 +426,9 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
   }
   return v;
 }
-inline std::vector<std::string> prefill_variants(const model::Qwen4ExpDesc& d, bool eager, bool ple_bf16_scale = true) {
-  return prefill_variants(d.forms.dense == model::Q4Form::Int4, eager, ple_bf16_scale);
+inline std::vector<std::string> prefill_variants(const model::Qwen4ExpDesc& d, bool eager, bool ple_bf16_scale = true,
+                                                unsigned C = kPfC) {
+  return prefill_variants(d.forms.dense == model::Q4Form::Int4, eager, ple_bf16_scale, C, d.hc_int8);
 }
 
 // Plan 21v2b Task 4: a tensor-parallel card's prefill binaries (src/kernels/CMakeLists.txt's "Plan 21v2b Task 4" block;
@@ -386,33 +437,40 @@ inline std::vector<std::string> prefill_variants(const model::Qwen4ExpDesc& d, b
 // partials (_S2). Flash attention only (the eager form is one card's).
 inline constexpr unsigned kTpGdnK = 8, kTpGdnV = 24, kTpQHeads = 12, kTpKvHeads = 1;
 inline constexpr unsigned kTpPfGuWgN = 128;   // pf_moe_q4gemm_K2560_N640_SILU's columns a work-group (WGN 4)
-inline std::string tp_pf_moe_gu_variant(bool table) { return pf_moe_q4gemm_variant(kHidden, 2 * kTpInter, true, table); }
+inline std::string tp_pf_moe_gu_variant(bool table) {   // PERF-27: "pf_moe_q4gemm_K2560_N640_SILU[_TBL]_SHX"
+  return pf_moe_q4gemm_variant(kHidden, 2 * kTpInter, true, table) + "_SHX";
+}
 inline std::string tp_pf_moe_dn_variant(bool table) {   // "pf_moe_q4gemm_K320_N2560_F32[_TBL]"
   return "pf_moe_q4gemm_K" + std::to_string(kTpInter) + "_N" + std::to_string(kHidden) + "_F32" + (table ? "_TBL" : "");
 }
 inline std::string tp_pf_combine_variant() { return "q4_pf_moe_combine_f32_E512_T10_D2560"; }
-inline std::string tp_pf_fold_variant(bool norm) { return hc_combine_norm_variant(kPfC, HcSrc::Slices, 2, norm); }
+inline std::string tp_pf_fold_variant(bool norm, unsigned C = kPfC) { return hc_combine_norm_variant(C, HcSrc::Slices, 2, norm); }
 inline std::string tp_head_fold_variant() { return hc_combine_norm_variant(1, HcSrc::Slices, 2, true); }
 inline std::string tp_pf_sparse_attn_variant() { return "q4_pf_sparse_attn_Q12KV1"; }
-inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& one, bool ple_bf16_scale = true) {
+inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& one, bool ple_bf16_scale = true,
+                                                   unsigned C = kPfC) {
   const model::Qwen4ExpDesc c = model::q4_tp_card(one, 0);
-  const bool i4 = one.forms.dense == model::Q4Form::Int4;
+  const bool i4 = one.forms.dense == model::Q4Form::Int4, wide = C > kPfC;
   std::vector<std::string> v = {
-      pf_embed_variant(), pf_hc_combine_norm_variant(HcSrc::Embed, true), pf_hc_combine_norm_variant(HcSrc::None, true),
-      tp_pf_fold_variant(true), tp_pf_fold_variant(false), tp_head_fold_variant(), pf_bf16_slab_variant(kHcN, kHcDownN),
-      pf_gemm_variant(false), pf_hc_up_mix_variant(), pf_gdn_conv_variant(kTpGdnK, kTpGdnV),
-      pf_gdn_wy_variant(kTpGdnK, kTpGdnV), pf_gdn_scan_variant(kTpGdnK, kTpGdnV), pf_gdn_front_variant(kTpGdnK, kTpGdnV),
+      pf_embed_variant(), pf_hc_combine_norm_variant(HcSrc::Embed, true, C), pf_hc_combine_norm_variant(HcSrc::None, true, C),
+      tp_pf_fold_variant(true, C), tp_pf_fold_variant(false, C), tp_head_fold_variant(), pf_hc_slab_variant(one.hc_int8),
+      pf_gemm_variant(false), pf_gemm_variant(false, wide), pf_hc_up_mix_variant(C, one.hc_int8),
+      pf_gdn_conv_variant(kTpGdnK, kTpGdnV),
+      pf_gdn_intra_variant(kTpGdnK, kTpGdnV), pf_gdn_scan_variant(kTpGdnK, kTpGdnV) + "_OB",
+      pf_gdn_front_variant(kTpGdnK, kTpGdnV) + "_PL", pf_gdn_front_variant(kTpGdnK, kTpGdnV) + "_PL_PB",
+      kernels::pf_gemm_bf16c_variant(), kernels::pf_gemm_bf16c_variant(wide),
+      pf_gated_head_variant(kTpGdnK, kTpGdnV) + "_SIG_OB_PB",
       pf_router_slab_variant(), pf_ab_slab_variant(), pf_route_gemm_variant(),
-      kernels::pf_gdn_gate_gemm_variant(kTpGdnK, kTpGdnV, kPfAbPitch), pf_gated_head_variant(kTpGdnK, kTpGdnV) + "_SIG",
-      pf_bf16_slab_variant(kHidden, kIdxN), pf_attn_prep_q16_variant(kTpQHeads, kTpKvHeads), pf_qsa_variant(),
+      kernels::pf_gdn_gate_gemm_variant(kTpGdnK, kTpGdnV, kPfAbPitch), pf_gated_head_variant(kTpGdnK, kTpGdnV) + "_SIG_OB",
+      pf_bf16_slab_variant(kHidden, kIdxN), pf_attn_prep_q16_variant(kTpQHeads, kTpKvHeads), pf_qsa_variant(C),
       pf_flash_attn_variant(kTpQHeads, kTpKvHeads), tp_pf_sparse_attn_variant(), pf_attn_variant(kTpQHeads, kTpKvHeads),
       pf_moe_variant(), pf_moe_sort_mw_variant(kExperts, kTopK), tp_pf_moe_gu_variant(false), tp_pf_moe_dn_variant(false),
       tp_pf_moe_gu_variant(true), tp_pf_moe_dn_variant(true), tp_pf_combine_variant(),
-      pf_ple_gather_variant(ple_bf16_scale), pf_bf16_slab_variant(kHidden, kPleKvN), pf_ple_variant()};
+      pf_ple_gather_variant(ple_bf16_scale, C), pf_bf16_slab_variant(kHidden, kPleKvN), pf_ple_variant(C)};
   for (const model::Q4LinearId id :
        {model::Q4LinearId::GdnQkvz, model::Q4LinearId::QsaQkvg, model::Q4LinearId::GdnOut}) {
     const model::Q4Linear l = c.linear(id);
-    v.push_back(i4 ? pf_int4_slab_variant(l.shape.K, l.shape.N) : pf_bf16_slab_variant(l.shape.K, l.shape.N));
+    v.push_back(i4 ? pf_int4_slab_variant(l.shape.K, l.shape.N, wide) : pf_bf16_slab_variant(l.shape.K, l.shape.N));
   }
   return v;
 }
@@ -422,9 +480,10 @@ inline std::vector<std::string> tp_prefill_variants(const model::Qwen4ExpDesc& o
 // CMakeLists.txt's spec 21-QFN-v1e block (B70_Q4EXP and B70_MTP). What the lists bind (runtime/qwen4exp/qwen4exp_capture.cc):
 //   verify at M = k + 1 (1..4), every device: 21-QFN-v1c's decode list at M rows - every 21-QFN-v1c kernel rebuilt at M = 2..4 (the
 //     q4_ sources, attn_prep _Q24KV2 / _S1, prep_gated_head _SIG, embed_gather D2560, the GEMVs at this family's
-//     shapes) - with the GDN step `gdn_step_slots_M<M>_G1` (spec 8's state slots, SPEC_SLOT_STRIDE = ONE layer's
-//     state: the engine lays gdn_spec out layer-major, so the stride does not bake a layer count - Qwen3.8's
-//     `gdn_step_slots_M<M>` bakes its 48-layer slot) and, on the PLE layer at M > 1, q4_pf_ple (21-QFN-v1d's three-launch
+//     shapes) - with the GDN step `gdn_step_defer_M<M>_G1` (PERF-51: verify-cost-m8's DEFERRED build, no per-row state,
+//     the committed rows replayed by the next launch; PEND_PAR = ONE layer's pending rows: the engine lays a layer's
+//     two parities side by side, layer-major, so it does not bake a layer count - Qwen3.8's `gdn_step_defer_M<M>`
+//     bakes 48 layers a parity) and, on the PLE layer at M > 1, q4_pf_ple (21-QFN-v1d's three-launch
 //     cut of q4_ple_block, which is M = 1 only) at C = 4; argmax_stage1_M<M> is Qwen3.8's (vocab 248077 used);
 //   the head's KV pass in every verify list (last device): q4_mtp (norm, fuse) at M, fc_embedding gemv_bf16 {2560,
 //     2560} at M and fc_hidden at M = 4 a row, the attn side's gated residual (_X: H materialised by the fuse), the
@@ -442,7 +501,8 @@ inline constexpr unsigned kMtpWg = 256;
 inline std::string mtp_variant(unsigned M, bool single, bool pf = false) {
   return "q4_mtp" + m_(M) + (single ? "_SINGLE" : "_STREAM") + (pf ? "_PF" : "");
 }
-inline std::string gdn_slots_variant(unsigned M) { return gdn_step_slots_variant(M, 1); }   // gdn_step_slots_M<M>_G1
+inline std::string gdn_defer_variant(unsigned M) { return "gdn_step_defer_M" + std::to_string(M) + "_G1"; }
+static_assert(gdn_pend_layer_bytes(16, kGdnHeads) == 1073152, "src/kernels/CMakeLists.txt's PEND_PAR (_G1)");
 inline std::string pf_ple_verify_variant() { return "q4_pf_ple_C" + std::to_string(kMtpVerifyRows); }   // q4_pf_ple_C4
 inline std::string bf16_m_variant(unsigned M, unsigned K, unsigned N) { return gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N)); }
 inline std::string fc_variant(unsigned M) { return bf16_m_variant(M, kHidden, kHidden); }   // gemv_bf16_M<M>_K2560_N2560
@@ -466,7 +526,7 @@ inline std::string lm_head_m_variant(unsigned M, bool int8, LinearKind k = Linea
 // form, the head form, the attention form, the PLE scale form and the norm form. Two cards add nothing new (the
 // materialising _Y_NN is every list's).
 inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
-                                                bool ple_bf16_scale, bool single, LinearKind k) {
+                                                bool ple_bf16_scale, bool single, LinearKind k, bool hc8 = false) {
   const unsigned S = int4_dense ? 4u : 1u;
   std::vector<std::string> v = {
       embed_variant(M),
@@ -475,13 +535,13 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
       hc_combine_norm_variant(M, HcSrc::Y, 0, true),
       hc_combine_norm_variant(M, HcSrc::None, 0, true),
       hc_combine_norm_variant(M, HcSrc::Y, 0, false),
-      bf16_m_variant(M, kHcN, kHcDownN),
-      bf16_m_variant(M, kHcN, kHcLow),
-      hc_up_mix_variant(M, true),
-      hc_up_mix_variant(M, false),
+      hc8 ? hc_down_i8_variant(M, true) : bf16_m_variant(M, kHcN, kHcDownN),
+      hc8 ? hc_down_i8_variant(M, false) : bf16_m_variant(M, kHcN, kHcLow),
+      hc_up_mix_variant(M, true, hc8),
+      hc_up_mix_variant(M, false, hc8),
       qkvz_m_variant(M, int4_dense, k),
       bf16_m_variant(M, kHidden, kAbN),
-      gdn_slots_variant(M),
+      gdn_defer_variant(M),
       gated_head_sig_variant(M),
       out_m_variant(M, int4_dense, k),
       qkvg_m_variant(M, int4_dense, k),
@@ -516,7 +576,7 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
 inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, unsigned M, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single, LinearKind k) {
   return verify_variants(M, d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
-                         ple_bf16_scale, single, k);
+                         ple_bf16_scale, single, k, d.hc_int8);
 }
 inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, unsigned M, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single) {
@@ -524,17 +584,17 @@ inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, un
 }
 // Every binary a draft step binds (the last device, M = 1): the head's layer is bf16 dense and bf16 shared
 // (loader::q4_mtp_desc) with int4 experts, whatever the main model's form.
-inline std::vector<std::string> draft_variants(bool int8_head, bool eager, bool single) {
+inline std::vector<std::string> draft_variants(bool int8_head, bool eager, bool single, bool hc8 = false) {
   return {mtp_variant(1, single),
           fc_variant(1),
           fc_variant(kMtpVerifyRows),
           hc_combine_norm_variant(1, HcSrc::None, 0, true),
           hc_combine_norm_variant(1, HcSrc::Slices, 1, true),
           hc_combine_norm_variant(1, HcSrc::Y, 0, true),
-          hc_down_variant(true),
-          hc_down_variant(false),
-          hc_up_mix_variant(1, true),
-          hc_up_mix_variant(1, false),
+          hc_down_variant(true, hc8),
+          hc_down_variant(false, hc8),
+          hc_up_mix_variant(1, true, hc8),
+          hc_up_mix_variant(1, false, hc8),
           qkvg_variant(false),
           idx_variant(),
           attn_prep_q4_variant(1, 1u),
@@ -550,18 +610,19 @@ inline std::vector<std::string> draft_variants(bool int8_head, bool eager, bool 
           draft_prob_variant(kVocab, kVocabUsed)};   // open-work 49: the head's probability for the step-K choice
 }
 // Every binary the prefill's head pass binds (the last device, a chunk).
-inline std::vector<std::string> mtp_prefill_variants(bool single) {
-  return {mtp_variant(kPfC, single, true),
+inline std::vector<std::string> mtp_prefill_variants(bool single, unsigned C = kPfC, bool hc8 = false) {
+  return {mtp_variant(C, single, true),
           pf_bf16_slab_variant(kHidden, kHidden),
           pf_gemm_variant(false),
-          pf_hc_combine_norm_variant(HcSrc::None, true),
-          pf_hc_combine_norm_variant(HcSrc::Y, false),
-          pf_bf16_slab_variant(kHcN, kHcDownN),
-          pf_hc_up_mix_variant(),
+          pf_gemm_variant(false, C > kPfC),
+          pf_hc_combine_norm_variant(HcSrc::None, true, C),
+          pf_hc_combine_norm_variant(HcSrc::Y, false, C),
+          pf_hc_slab_variant(hc8),
+          pf_hc_up_mix_variant(C, hc8),
           pf_bf16_slab_variant(kHidden, kQkvgN),
           pf_bf16_slab_variant(kHidden, kIdxN),
-          pf_attn_prep_q4_variant(),
-          pf_qsa_variant(),
+          kernels::kv_only(pf_attn_prep_q4_variant()),   // PERF-85: the kv heads only
+          pf_qsa_variant(C),
           hc_combine_norm_variant(1, HcSrc::None, 0, true)};   // prefill_head's final mixer over R (H materialised)
 }
 

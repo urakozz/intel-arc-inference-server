@@ -473,14 +473,20 @@ struct SlotsCard : server::BatchEngineIface {
     seen();
     slot.at(s)->reset();
   }
+  std::vector<bool> sampled_last;   // per prompt end: the chunk carried a sampled request's sampling
   void prefill(const std::vector<Chunk>& chunks) override {
     seen();
     log += 'p';
     for (const Chunk& c : chunks) {
+      if (c.last) sampled_last.push_back(c.sampling != nullptr && !c.sampling->greedy);
       std::vector<uint32_t> ids(c.ids, c.ids + c.n);
       if (c.replay) slot.at(c.slot)->ingest(ids);
       else slot.at(c.slot)->prefill(ids);
     }
+  }
+  std::optional<uint32_t> pending_id(uint32_t s, const server::Sampling& sampling) override {
+    seen();
+    return slot.at(s)->pending_id(sampling);
   }
   std::vector<uint32_t> step_batch(const std::vector<Row>& rows) override {
     seen();
@@ -556,8 +562,11 @@ void test_slots_per_card() {
   CHECK(*c1.threads.begin() == eng.thread_of(1));
   CHECK(*std::max_element(c0.step_rows.begin(), c0.step_rows.end()) == 2);
   CHECK(*std::max_element(c1.step_rows.begin(), c1.step_rows.end()) == 2);
+  // The prompt's last chunk reaches the card with its request's sampling (b, seeded, on card 1).
+  CHECK(c0.sampled_last == std::vector<bool>({false, false}));
+  CHECK(c1.sampled_last == std::vector<bool>({true, false}));
   std::printf("slots per card: 4 requests on 2 x 2 slots as alone; one step call per card on its thread; grants "
-              "0, 2, 1, 3\n");
+              "0, 2, 1, 3; the first id peeked on the card's thread; the sampling reaches the prompt's last chunk\n");
 }
 
 // Routing: a continuation goes to the slot (card) holding its prefix even when the other card has more free slots;

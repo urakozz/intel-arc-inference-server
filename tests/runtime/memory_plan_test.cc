@@ -335,10 +335,14 @@ void check_draft_vocab() {
       const size_t want = size_t(rows) * 5120 * (int8 ? 1 : 2) + (int8 ? size_t(rows) * 4 : 0) +
                           size_t(rows) * 4;
       CHECK_EQ(p.draft_vocab, want);
-      CHECK_EQ(p.mtp_buffers, off.mtp_buffers + size_t(rows) * 4);   // dv_logits fp32 [|V'|]
+      // Spec 32e: a draft vocabulary builds no deep verify list - its decode scratch keeps 16 rows, not 64, and
+      // MtpBuffers lose the deep lists' chain scratch (a GDN state and the conv rows; gdn_pend_ stays).
+      const size_t chain = size_t{128} * 128 * q.gdn_v_heads * q.gdn_layers * 4 +
+                           size_t{q.gdn_layers} * runtime::MtpDims::kGdnConvXLayer;
+      CHECK_EQ(p.mtp_buffers, off.mtp_buffers + size_t(rows) * 4 - chain);   // dv_logits fp32 [|V'|]
       CHECK_EQ(runtime::MtpDims::sizes(65536, q, rows).dv_logits, size_t(rows) * 4);
-      // Spec 32e: a draft vocabulary builds no deep verify list - its decode scratch keeps 16 rows, not 64.
-      CHECK_EQ(p.total(), off.total() + want + size_t(rows) * 4 - runtime::DecodeScratchDims::sizes(65536, q, 64).total() +
+      CHECK_EQ(p.total(), off.total() + want + size_t(rows) * 4 - chain -
+                              runtime::DecodeScratchDims::sizes(65536, q, 64).total() +
                               runtime::DecodeScratchDims::sizes(65536, q).total());
       CHECK_EQ(p.model, off.model);   // not in the weights
     }

@@ -7,6 +7,12 @@
 #include "l0/gpu_info.h"
 
 namespace l0 {
+// A copy-only engine: its queue group (COPY without COMPUTE) and the engine's index in the group.
+struct CopyEngine {
+  uint32_t ordinal;
+  uint32_t index;
+};
+
 // Driver init + one GPU device + one context. `device_index` counts GPU
 // devices of the first driver, in enumeration order (default 0).
 //
@@ -61,6 +67,9 @@ class Context {
   // The device's total memory (zeDeviceGetMemoryProperties' totalSize, summed): the
   // "of <GB>" of Engine::memory_line() and the budget --max-len auto plans against.
   size_t memory_bytes() const;
+  // Every copy-only engine of the device: the copy-only queue groups in ordinal order, each group's engines in index
+  // order (empty: none). The copy-engine lists run on the first (a B70 has one).
+  std::vector<CopyEngine> copy_engines() const;
 
  private:
   ze_driver_handle_t driver_ = nullptr;

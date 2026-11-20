@@ -23,12 +23,13 @@
 // Spec 21-QFN-v1d: the prompt through Qwen4ExpEngine::prefill in chunks:
 //   --prefill          (--ids) the prompt prefilled, then --n greedy ids
 //   --prefill-length N (--bench) depth N prefilled and timed (the pp row), then --tg decoded
-//   --prefill-chunk C  the chunk width, <= 2048 (kernels::qwen4exp::kPfC; the default)
+//   --prefill-chunk C  the chunk width, <= 4096 (the argument parser's cap; the default: the planner's 2048 or 4096,
+//                      runtime::qwen4exp::pf_chunk_choice; a C past 2048 plans the 4096-row scratch)
 //   --prefill-backend l0  the only backend (the default here)
 // A prefilling run plans the prefill scratch (and, on two cards, the prefill hand-off) into --layers auto, --max-len
 // auto and the fit.
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 5's h8 linears rotate in whole 1024-k
-// Hadamard blocks; the hidden is 2560), --prefill-chunk above 2048, --spec mtp
+// Hadamard blocks; the hidden is 2560), --spec mtp
 // (b70-decode runs plain; the head - spec 21-QFN-v1e - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
 // bf16 first; kv8.cl hard-codes 24 q / 4 kv heads) and --profile (Task 7 times it with --bench).
 #include <algorithm>
@@ -97,7 +98,7 @@ struct DecodeArgs {
   bool layers_auto = false;     // --layers auto
   PipelineArgs pipe;            // devices as parsed (1 when --parallel was not given)
   bool pp_given = false;
-  // Spec 21-QFN-v1d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
+  // Spec 21-QFN-v1d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = the planner's),
   // --prefill-backend as parsed (l0 only).
   bool prefill = false, pp = false, pp_backend_given = false;
   uint32_t pp_chunk = 0;
@@ -123,9 +124,6 @@ inline void check_args(const DecodeArgs& a) {
     throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only, not l0-int8: its h8 linears "
                              "rotate in whole 1024-k Hadamard blocks and this model's hidden is 2560 - "
                              "--prefill-backend l0, or omit it");
-  if (a.pp_chunk > runtime::qwen4exp::kPfC)
-    throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Qwen3.8-Flash-Next's prefill chunk " +
-                             std::to_string(runtime::qwen4exp::kPfC) + " (the prefill scratch is sized for it)");
   if (a.mtp)
     throw std::runtime_error("b70-decode runs Qwen3.8-Flash-Next plain: its MTP head is served by b70-serve "
                              "--spec mtp and measured by qwen4exp_mtp_test - drop --spec mtp");
@@ -165,27 +163,26 @@ struct Settled {
   std::optional<runtime::qwen4exp::ExpertTier> tier;   // the whole model's (load_qwen4exp's tier); with --layers N
                                                        // none: every expert resident (or B70_Q4_RESIDENT's, the loader)
   std::optional<runtime::qwen4exp::ExpertTier> tier1;  // --parallel tp: card 1's (`tier` is card 0's)
+  uint32_t pf_rows = runtime::qwen4exp::kPfC;          // the prefill scratch's chunk rows (runtime::qwen4exp::pf_chunk_choice)
 };
 
 // The whole model's --max-len auto (spec 21-QFN-v2 §9): each GB of context is a GB of experts out of VRAM, so the largest
-// of 32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's. The projection (derived): a
-// token reads the non-routed bytes and h of the routed ones from VRAM at kTierVramGbps and the rest from host memory at
-// kTierHostGbps, one after the other (measured on the card: a kernel's host reads add to its VRAM time); h is the
-// share of the profile's routes the fill keeps resident (without a profile: the resident fraction).
+// of 32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's (runtime::qwen4exp::
+// tier_decode_ms, derived).
 inline constexpr uint32_t kWholeMinLen = 32768;
-inline constexpr double kTierVramGbps = 457.8;   // 77.6 % of the B70's 590 GB/s (Qwen3.8's decode)
-inline constexpr double kTierHostGbps = 11.2;    // one expert read in place from pinned host memory (PCIe 3.0 x16)
-inline double tier_decode_ms(const runtime::qwen4exp::ExpertBudget& b, const runtime::qwen4exp::ExpertTier& t,
-                             const std::vector<uint32_t>& prof) {
-  double hit = 0, all = 0;
-  for (uint32_t l = 0; l < t.layers; ++l)
-    for (uint32_t e = 0; e < t.experts; ++e) {
-      const double c = prof.empty() ? 1.0 : prof[size_t(l) * t.experts + e];
-      all += c;
-      hit += t.resident(l, e) ? c : 0.0;
-    }
-  const double h = all > 0 ? hit / all : 1.0, R = double(b.read_routed);
-  return ((double(b.read_non_routed) + h * R) / kTierVramGbps + (1.0 - h) * R / kTierHostGbps) / 1e6;
+using runtime::qwen4exp::tier_decode_ms;
+
+// The prefill chunk's line: what the 4096-row chunk's scratch keeps from the experts and the projected decode either way.
+inline void print_pf_rows(const runtime::qwen4exp::PfChunkChoice& c) {
+  size_t held = 0, grow = 0;
+  for (size_t i = 0; i < c.held.size(); ++i) {
+    held = std::max(held, c.held[i]);
+    grow = std::max(grow, c.grow[i]);
+  }
+  std::print(stderr, "prefill chunk: {:d} rows (the 4096-row chunk's scratch takes {:.3f} GB a card from the experts, "
+             "{:.3f} GB of it while decoding - the rest is lent back between prompts; projected decode {:.2f} -> {:.2f} ms "
+             "a token, {} {:.0f}%)\n", c.rows, grow / 1e9, held / 1e9, c.ms_narrow, c.ms_wide,
+             c.rows == runtime::qwen4exp::kPfCWide ? "within" : "over", 100 * runtime::qwen4exp::kPfWideDecodeBar);
 }
 
 // The layer count, placement and max_len for this run, from the planner (before the load: each layer goes straight
@@ -234,7 +231,9 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     const char* forced = std::getenv("B70_Q4_RESIDENT");
     std::string prof_path;
     const std::vector<uint32_t> prof = whole ? loader::load_q4_profile(snapshot, full, &prof_path) : std::vector<uint32_t>{};
-    const auto budget = [&](uint32_t len) { return rq::tp_expert_budget(d, s.placement, len, int8, hd, pf, dev, a.reserve); };
+    const auto budget = [&](uint32_t len, uint32_t rows = rq::kPfC) {
+      return rq::tp_expert_budget(d, s.placement, len, int8, hd, pf, dev, a.reserve, rows);
+    };
     const auto tier = [&](const rq::ExpertBudget& b, uint32_t r) {
       return rq::tp_fill_tier(d, b, r, prof.empty() ? nullptr : &prof, forced ? forced : "");
     };
@@ -267,12 +266,21 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
       s.max_len = runtime::kMinAutoMaxLen;
       std::print(stderr, "max_len: auto -> {:d} (--layers N under --parallel tp)\n", s.max_len);
     }
-    const rq::ExpertBudget b = budget(s.max_len);
+    if (pf && (whole || forced)) {   // the 4096-row chunk when decode keeps its residents (pf_chunk_choice)
+      const rq::PfChunkChoice c = rq::pf_chunk_choice(d, budget(s.max_len), budget(s.max_len, rq::kPfCWide),
+                                                      prof.empty() ? nullptr : &prof, true);
+      s.pf_rows = c.rows;
+      print_pf_rows(c);
+    } else if (pf && rq::fits(rq::tp_plan(d, s.placement, s.max_len, int8, hd, false, pf, rq::kPfCWide), dev, a.reserve)) {
+      s.pf_rows = rq::kPfCWide;   // every expert resident either way: the wide chunk when its plan fits
+    }
+    if (a.pp_chunk > rq::kPfC) s.pf_rows = rq::kPfCWide;   // an asked chunk past 2048 rows is planned
+    const rq::ExpertBudget b = budget(s.max_len, s.pf_rows);
     if (whole || forced) {
       s.tier = tier(b, 0);
       s.tier1 = tier(b, 1);
     }
-    const std::vector<rq::DevicePlan> pl = rq::tp_plan(d, s.placement, s.max_len, int8, hd, false, pf);
+    const std::vector<rq::DevicePlan> pl = rq::tp_plan(d, s.placement, s.max_len, int8, hd, false, pf, s.pf_rows);
     if (!s.tier) rq::require_fits(pl, dev, a.reserve);   // every expert resident: the whole plan must fit
     const size_t mirror = s.tier ? s.tier->host_bytes(card) + s.tier1->host_bytes(card) : 0;
     std::print(stderr, "layers: {} {:d}, each card half of every layer (--parallel tp); max_len {:d}\n",
@@ -300,8 +308,8 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
       return devs == 1 ? model::Q4Placement::one(d)
                        : model::Q4Placement::two(d, a.pipe.split_auto ? rq::pp_split(d, len, int8, hd, pf).split : a.pipe.split);
     };
-    const auto tier_at = [&](uint32_t len, rq::ExpertBudget* out = nullptr) {
-      const rq::ExpertBudget b = rq::expert_budget(d, place(len), len, int8, hd, pf, dev, a.reserve);
+    const auto tier_at = [&](uint32_t len, rq::ExpertBudget* out = nullptr, uint32_t rows = rq::kPfC) {
+      const rq::ExpertBudget b = rq::expert_budget(d, place(len), len, int8, hd, pf, dev, a.reserve, rows);
       if (out) *out = b;
       return rq::fill_tier(d, b, prof.empty() ? nullptr : &prof, forced ? forced : "");
     };
@@ -335,10 +343,20 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     s.placement = place(s.max_len);
     std::print(stderr, "layers: all {:d} (the routed experts that do not fit the card{} in pinned host memory); max_len {:d}\n",
                d.layers, devs == 2 ? "s" : "", s.max_len);
-    s.tier = tier_at(s.max_len);
+    if (pf) {   // the 4096-row chunk when decode keeps its residents (pf_chunk_choice), on the split chosen above
+      const auto at = [&](uint32_t rows) {
+        return rq::expert_budget(d, s.placement, s.max_len, int8, hd, pf, dev, a.reserve, rows);
+      };
+      const rq::PfChunkChoice c = rq::pf_chunk_choice(d, at(rq::kPfC), at(rq::kPfCWide), prof.empty() ? nullptr : &prof,
+                                                      false);
+      s.pf_rows = c.rows;
+      print_pf_rows(c);
+    }
+    if (a.pp_chunk > rq::kPfC) s.pf_rows = rq::kPfCWide;   // an asked chunk past 2048 rows is planned
+    s.tier = tier_at(s.max_len, nullptr, s.pf_rows);
     std::print(stderr, "experts: {}{}\n", s.tier->source.c_str(),
                prof.empty() ? "" : (" (" + prof_path + ")").c_str());
-    std::vector<rq::DevicePlan> pl = rq::plan(d, s.placement, s.max_len, int8, hd, false, pf);
+    std::vector<rq::DevicePlan> pl = rq::plan(d, s.placement, s.max_len, int8, hd, false, pf, s.pf_rows);
     rq::apply_tier(pl, d, *s.tier);
     rq::require_fits(pl, dev, a.reserve);
     host_line(s.tier->host_bytes(d));
@@ -384,7 +402,10 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     if (devs == 2 && a.pipe.split_auto) p = model::Q4Placement::two(d, rq::pp_split(d, len, int8, hd, pf).split);
     std::print(stderr, "max_len: {:d} (--max-len)\n", len);
   }
-  const std::vector<rq::DevicePlan> pl = rq::plan(d, p, len, int8, hd, false, pf);
+  // every expert resident (B70_Q4_RESIDENT aside): the 4096-row chunk when its plan fits
+  if ((pf && rq::fits(rq::plan(d, p, len, int8, hd, false, pf, rq::kPfCWide), dev, a.reserve)) || a.pp_chunk > rq::kPfC)
+    s.pf_rows = rq::kPfCWide;
+  const std::vector<rq::DevicePlan> pl = rq::plan(d, p, len, int8, hd, false, pf, s.pf_rows);
   rq::require_fits(pl, dev, a.reserve);
   const char* forced_l = std::getenv("B70_Q4_RESIDENT");
   host_line(0, forced_l && *forced_l ? " (B70_Q4_RESIDENT's mirrors are checked at load)" : "");
@@ -441,7 +462,8 @@ int run_decode(const DecodeArgs& a) {
   loader::Q4LoadedModel model = [&] {
     Redirect redirect;
     return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head,
-                                 s.desc.layers == full.layers ? 0 : s.desc.layers, false, s.tier ? &*s.tier : nullptr);
+                                 s.desc.layers == full.layers ? 0 : s.desc.layers, false, s.tier ? &*s.tier : nullptr,
+                                 nullptr, s.pf_rows);
   }();
   if (model.desc.layers < model.checkpoint_layers)
     std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the final mixer reads layer "
@@ -457,7 +479,7 @@ int run_decode(const DecodeArgs& a) {
   // Spec 21-QFN-v1d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
   // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
   // cur_token (argmax_stage2 is its last launch).
-  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : runtime::qwen4exp::kPfC;
+  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : s.pf_rows;
   size_t pp_launches0 = 0;
   if (a.prefills()) {
     eng.prepare_prefill();
@@ -557,12 +579,12 @@ int run_decode_tp(const DecodeArgs& a) {
     Redirect redirect;
     return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head,
                                  s.desc.layers == full.layers ? 0 : s.desc.layers, false, s.tier ? &*s.tier : nullptr,
-                                 s.tier1 ? &*s.tier1 : nullptr);
+                                 s.tier1 ? &*s.tier1 : nullptr, s.pf_rows);
   }();
   runtime::qwen4exp::Qwen4ExpTpEngine eng(*c0, *c1, std::move(model), s.max_len);
   std::print(stderr, "engine: Qwen3.8-Flash-Next, --parallel tp, {:d} launches a token a card, max_len {:d}; {:d} expert "
              "block words read back through the tables\n", eng.launches(0), eng.max_len(), eng.expert_words_checked());
-  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : runtime::qwen4exp::kPfC;
+  const uint32_t chunk = a.pp_chunk ? a.pp_chunk : s.pf_rows;
   size_t pp_launches0 = 0;
   if (a.prefills()) {
     eng.prepare_prefill();

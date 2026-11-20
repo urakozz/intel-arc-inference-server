@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <random>
 #include <ranges>
 #include <stdexcept>
@@ -104,7 +105,17 @@ class SlotsEngine : public server::BatchEngineIface {
         a.ingest(ids);   // --prefix-split-last: the last prompt id through the decode replay
       else
         a.prefill(ids);
+      // The slots share the prefill scratch and the logits rows, so the prompt's last row is gone by the slot's first
+      // step: a sampled request draws its first id here, from the row this chunk just wrote, with the adapter's
+      // generator seeded as the serial server seeds it (its first draw). A chunk that does not end the prompt keeps
+      // the argmax (the row is not the prompt's last).
+      a.sample_first(c.last && c.sampling != nullptr ? *c.sampling : server::Sampling{});
     }
+  }
+  // PERF-91: the slot's adapter peeks (its first id already drawn above).
+  std::optional<uint32_t> pending_id(uint32_t slot, const server::Sampling& sampling) override {
+    if (pending_.at(slot).on) return std::nullopt;
+    return on(slot).pending_id(sampling);
   }
 
   std::vector<uint32_t> step_batch(const std::vector<Row>& rows) override {

@@ -119,6 +119,20 @@ std::vector<ze_device_handle_t> visible_gpus() {
 
 size_t Context::memory_bytes() const { return device_memory(dev_); }
 
+std::vector<CopyEngine> Context::copy_engines() const {
+  uint32_t n = 0;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev_, &n, nullptr));
+  std::vector<ze_command_queue_group_properties_t> p(n);
+  for (auto& q : p) q.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+  ZE_CHECK(zeDeviceGetCommandQueueGroupProperties(dev_, &n, p.data()));
+  std::vector<CopyEngine> e;
+  for (uint32_t i = 0; i < n; ++i)
+    if ((p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
+        !(p[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE))
+      for (uint32_t q = 0; q < p[i].numQueues; ++q) e.push_back({i, q});
+  return e;
+}
+
 std::vector<GpuInfo> Context::gpu_infos() {
   std::vector<GpuInfo> out;
   for (ze_device_handle_t d : visible_gpus()) {

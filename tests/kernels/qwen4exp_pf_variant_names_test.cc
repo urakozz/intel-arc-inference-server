@@ -24,6 +24,7 @@ int main(int argc, char** argv) {
   }
   CHECK(!built.empty());
   CHECK_EQ(kq::kPfC, 2048u);
+  CHECK_EQ(kq::kPfCWide, 4096u);
   CHECK_EQ(kq::pf_hdr::words(), 528u);
   CHECK_EQ(kq::kPfTm, kernels::pf_moe::kTileM);
   CHECK_EQ(kq::kPfSlab, kernels::kPfSlabWidth);
@@ -41,26 +42,35 @@ int main(int argc, char** argv) {
   CHECK_EQ(kq::pf_bf16_slab_variant(10240, 336), std::string("q4_pf_bf16_slab_K10240_N336"));
   CHECK_EQ(kq::pf_int4_slab_variant(2560, 16384), std::string("pf_dequant_slab_K2560_N16384_L0"));
   CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560), std::string("pf_int4_slab_K6144_N2560"));
+  CHECK_EQ(kq::pf_int4_slab_variant(2560, 16384, true), std::string("pf_dequant_slab_K2560_N16384_L0_BS"));
+  CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560, true), std::string("pf_int4_slab_K6144_N2560"));   // a tail: no _BS form
+  CHECK_EQ(kq::pf_qsa_variant(kq::kPfCWide), std::string("q4_qsa_M4096_T512_W1024_PF"));
   CHECK_EQ(kq::pf_qsa_variant(), std::string("q4_qsa_M2048_T512_W1024_PF"));
   CHECK_EQ(kq::pf_ple_gather_variant(true), std::string("q4_ple_gather_M2048_BF16_PF"));
   CHECK_EQ(kq::pf_hc_up_mix_variant(), std::string("q4_hc_up_mix_M2048_I_D512_R4C64"));
+  CHECK_EQ(kq::pf_hc_up_mix_variant(kq::kPfC, true), std::string("q4_hc_up_mix_M2048_I_D512_R4C64_Q8"));
+  CHECK_EQ(kq::pf_hc_slab_variant(true), std::string("q4_hc_slab_i8_N336"));
   CHECK_EQ(kq::pf_hc_combine_norm_variant(kq::HcSrc::Slices, true), std::string("q4_hc_combine_norm_M2048_S1"));
   CHECK_EQ(kq::pf_embed_variant(), std::string("pf_embed_gather_D2560"));
   CHECK_EQ(kq::pf_ab_variant(), std::string("pf_ab_proj_D2560"));
   CHECK_EQ(kq::pf_router_variant(), std::string("pf_moe_router_K2560_N528"));
   CHECK_EQ(kq::pf_gemm_gu_variant(), std::string("pf_moe_gemm_K2560_N1280_SILU"));
   CHECK_EQ(kq::pf_gemm_dn_variant(), std::string("pf_moe_gemm_K640_N2560"));
-  CHECK_EQ(kq::pf_gated_head_sig_variant(), std::string("pf_gated_head_SIG"));
+  CHECK_EQ(kq::pf_gated_head_sig_variant(), std::string("pf_gated_head_SIG_OB"));
   CHECK_EQ(kq::pf_flash_q4_variant(), std::string("pf_flash_attn_Q24KV2"));
   CHECK_EQ(kq::pf_attn_prep_q4_variant(), std::string("pf_attn_prep_q16_Q24KV2"));
   CHECK_EQ(kq::pf_gate_q4_variant(), std::string("pf_attn_Q24KV2"));
   std::set<std::string> bound;
   model::Qwen4ExpDesc intel = model::qwen4exp();
   intel.forms = {model::Q4Form::Bf16, model::Q4Form::Bf16, model::Q4Form::Bf16, 128};
-  for (const model::Qwen4ExpDesc* f : {&model::qwen4exp(), static_cast<const model::Qwen4ExpDesc*>(&intel)})
+  model::Qwen4ExpDesc ours8 = model::qwen4exp(), intel8 = intel;   // PERF-66: the int8 hyper-connection mixers
+  ours8.hc_int8 = intel8.hc_int8 = true;
+  const model::Qwen4ExpDesc* forms[] = {&model::qwen4exp(), &intel, &ours8, &intel8};
+  for (const model::Qwen4ExpDesc* f : forms)
     for (bool eager : {false, true})
       for (bool ple_bf16 : {false, true})
-        for (const std::string& v : kq::prefill_variants(*f, eager, ple_bf16)) bound.insert(v);
+        for (unsigned C : {kq::kPfC, kq::kPfCWide})   // PERF-36: the 2048- and the 4096-row chunk's scratch
+          for (const std::string& v : kq::prefill_variants(*f, eager, ple_bf16, C)) bound.insert(v);
   for (const std::string& v : bound)
     if (!built.count(v)) {
       std::fprintf(stderr, "the Qwen3.8-Flash-Next prefill walk binds %s, which B70_Q4EXP_PREFILL_KERNELS does not list\n",

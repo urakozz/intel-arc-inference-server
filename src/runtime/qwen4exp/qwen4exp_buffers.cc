@@ -65,8 +65,8 @@ Qwen4ExpBuffers::Qwen4ExpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d,
   model::validate(p, d);
   if (len % d.idx_compress != 0)
     throw std::invalid_argument("Qwen4ExpBuffers: max_len " + std::to_string(len) + " is not whole indexer blocks");
-  if (mtp) {   // spec 21-QFN-v1e: the verify's GDN slots and (the PLE layer's device) its PLE rows
-    gdn_spec = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, gdn_spec_bytes(d, p, dev));
+  if (mtp) {   // spec 21-QFN-v1e: the verify's pending GDN rows (PERF-51) and (the PLE layer's device) its PLE rows
+    gdn_pend = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, gdn_pend_bytes(d, p, dev));
     if (holds_ple()) {
       const size_t half = ple_verify_bytes(d, p, dev) / 2;
       ple_gated = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, half);
@@ -115,20 +115,16 @@ void* Qwen4ExpBuffers::conv_ring_layer(uint32_t layer) const {
   return static_cast<uint8_t*>(conv_ring.ptr()) + size_t(i) * conv_ring_bytes_per_layer(desc);
 }
 
-void* Qwen4ExpBuffers::gdn_spec_layer(uint32_t layer) const {
-  require_kind(*this, layer, false, "gdn_spec_layer");
-  if (!gdn_spec) throw std::logic_error("Qwen4ExpBuffers::gdn_spec_layer: no verify slots (the MTP head is not loaded)");
+void* Qwen4ExpBuffers::gdn_pend_layer(uint32_t layer) const {
+  require_kind(*this, layer, false, "gdn_pend_layer");
+  if (!gdn_pend)
+    throw std::logic_error("Qwen4ExpBuffers::gdn_pend_layer: no pending rows (the MTP head is not loaded)");
   const uint32_t i = kind_index(desc, placement.first(device), layer);
-  return static_cast<uint8_t*>(gdn_spec->ptr()) + size_t(i) * (kGdnSlots - 1) * gdn_state_bytes_per_layer(desc);
-}
-void* Qwen4ExpBuffers::gdn_slot(uint32_t layer, uint32_t s) const {
-  if (s == 0) return gdn_state_layer(layer);
-  if (s >= kGdnSlots) throw std::logic_error("Qwen4ExpBuffers::gdn_slot: slot " + std::to_string(s));
-  return static_cast<uint8_t*>(gdn_spec_layer(layer)) + size_t(s - 1) * gdn_state_bytes_per_layer(desc);
+  return static_cast<uint8_t*>(gdn_pend->ptr()) + size_t(i) * 2 * gdn_pend_layer_bytes(desc);
 }
 
 size_t Qwen4ExpBuffers::mtp_bytes() const {
-  return (gdn_spec ? gdn_spec->size() : 0) + (ple_gated ? ple_gated->size() + ple_gn->size() : 0);
+  return (gdn_pend ? gdn_pend->size() : 0) + (ple_gated ? ple_gated->size() + ple_gn->size() : 0);
 }
 
 size_t Qwen4ExpBuffers::persistent_bytes() const {

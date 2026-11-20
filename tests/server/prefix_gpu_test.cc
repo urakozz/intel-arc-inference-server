@@ -20,15 +20,19 @@
 //      turn 1 + generated + L[5000:5700]: restore at 5064 with every KV block from the host
 //   f  turn 1 L[0:3500], a side request, turn 2 = turn 1's prompt again: restore at 3499
 //      and one id fed (Review Focus 5) -- the same path as turn 1's own, so its 32 tokens
-//      must be turn 1's, bitwise.
+//      must be turn 1's, bitwise. Without the split (PERF-92) the prompt-end snapshot keeps
+//      the head image: the whole prompt is restored from the host at 3500, nothing prefilled.
+//   h  PERF-92, the exact repeat: turn 1 L[0:3500], then the same prompt at once - restored
+//      whole from the resident session (no KV copied, no row read; with the split, as f), its
+//      32 tokens turn 1's, bitwise.
 //   g  the control for b, no cache: b's final prompt through b's cached path without the
 //      cache (prefill [0,2999), prefill [2999,3699), the last id by a replay), against the
 //      one full prefill -- what the split alone costs.
 // argv: [1] snapshot, [2] prompts dir, [3] backend l0 | l0-int8 (default: the build's),
 //       [4] near-tie flips allowed per sequence (default 1 on l0-int8, else 0),
 //       [5] split: 1 = PrefixSession's opt-in split_last (the plans above), 0 = the default
-//           (b restores at 3000, f at the block end 2048 and prefills the rest, g splits
-//           the prefill at 3000 with no replay).
+//           (b restores at 3000, f and h whole at 3500, g splits the prefill at 3000 with
+//           no replay).
 //       [6] K: 0 (default) = no MTP head; K > 0 loads the head (`loader::load(..., true)`)
 //           and builds EngineAdapter with --mtp K (spec 8 M5: C2 with MTP on). The turns
 //           still decode by step(), so the rows compared are the same; what changes is
@@ -184,7 +188,7 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     } else {
       const Ids t1 = slice(L, 0, 3500);
       turn1_gen = turn(s, rig.ad, t1, kGen);
-      (void)turn(s, rig.ad, slice(L, 20000, 20300), 8);
+      if (n == 'f') (void)turn(s, rig.ad, slice(L, 20000, 20300), 8);
       final_prompt = t1;
     }
     rep = s.begin(final_prompt, g_split);
@@ -205,12 +209,15 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     std::printf("  ** plan %s at %u, expected %s at %u **\n", server::plan_kind_name(rep.kind),
                 rep.restart, server::plan_kind_name(want.kind), want.restart);
 
-  if (want.name[0] == 'f') {
+  if (want.name[0] == 'f' || want.name[0] == 'h') {
     uint32_t same = 0;
     for (uint32_t p = 0; p < kGen; ++p) same += cand_tok[p] == turn1_gen[p];
-    std::printf("  %s: %u/%u tokens bitwise equal to turn 1's own%s\n", want.name.c_str(), same,
-                kGen, same == kGen ? "" : "  ** FAIL **");
-    return ok && same == kGen;
+    // h without the split: the resident session's KV is the prompt's, so nothing is copied either.
+    const bool none_copied = want.name[0] != 'h' || g_split || rep.kv_bytes == 0;
+    std::printf("  %s: %u/%u tokens bitwise equal to turn 1's own, %zu prompt ids, %zu prefilled, kv %zu B%s\n",
+                want.name.c_str(), same, kGen, final_prompt.size(), final_prompt.size() - rep.restart -
+                (g_split ? 1 : 0), rep.kv_bytes, same == kGen && none_copied ? "" : "  ** FAIL **");
+    return ok && same == kGen && none_copied;
   }
   if (cand_rows.empty()) return false;
 
@@ -321,8 +328,8 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
 }  // namespace
 
 int main(int argc, char** argv) {
-  // At 4096-row chunks the hook runs every 4096 positions, so f's 3500-id prompt has no block snapshot: cold.
-  const bool wide = b70test::take_chunk_cap_arg(argc, argv) > runtime::PrefillScratchDims::kCDefault;
+  // At 4096-row chunks the hook runs every 4096 positions; f's and h's prompt-end snapshot is there all the same.
+  b70test::take_chunk_cap_arg(argc, argv);
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   golden::load_end_of_turn(snap);
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
@@ -354,9 +361,8 @@ int main(int argc, char** argv) {
                                  {"c mid-block", K::Restore, 4096},
                                  {"d block boundary", K::Restore, 4096},
                                  {"e side request", K::Restore, 5064},
-                                 g_split ? Seq{"f same prompt", K::Restore, 3499u}
-                                 : wide  ? Seq{"f same prompt", K::Cold, 0u}
-                                         : Seq{"f same prompt", K::Restore, 2048u},
+                                 {"f same prompt", K::Restore, g_split ? 3499u : 3500u},
+                                 {"h exact repeat", K::Restore, g_split ? 3499u : 3500u},
                                  {"g control for b: its split, no cache", K::Cold, 0}};
   bool all = true;
   for (const Seq& s : seqs) all = run_seq(rig, s, L, C, allowed) && all;
@@ -364,7 +370,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "prefix_gpu_test FAILED\n");
     return 1;
   }
-  std::printf("\nprefix_gpu_test OK: sequences a-f, cached against cold under the tie-aware"
-              " rule, same-prompt bitwise\n");
+  std::printf("\nprefix_gpu_test OK: sequences a-h, cached against cold under the tie-aware"
+              " rule, same-prompt and exact repeat bitwise\n");
   return 0;
 }

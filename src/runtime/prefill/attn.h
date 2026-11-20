@@ -96,9 +96,11 @@ bool kv8_split_in_place(const model::ModelDesc& d, uint32_t pos, uint32_t C);
 //     Plan 19v3b Task 0: `pages` (a sequence slot's KV page table, its first entry - runtime/buffer_sizes.h) set,
 //     kv_k / kv_v are the layer's whole cache and the paged twin writes the slot's rows through the table; the same
 //     for every call below that takes it (Qwen3.8's flash forms only).
+//     PERF-85: `kv_only` launches the kv heads' work-groups only (grid (4, C), the KV_ONLY build): the K / V
+//     written as above, `s.pf_q` not at all - for a caller that never reads it (the MTP head's prompt pass).
 void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                      const float* qkv_partials, const float* fa_small, const float* rope,
-                     uint16_t* kv_k, uint16_t* kv_v, const void* pages = nullptr);
+                     uint16_t* kv_k, uint16_t* kv_v, const void* pages = nullptr, bool kv_only = false);
 
 // (2) Causal attention of the C queries over the cache rows [0, pos + C).
 //     Writes `s.pf_o` -- fp32 [24][rows][256], per-head stride `rows * 256`
@@ -156,13 +158,26 @@ inline size_t attn_chunk_launches_composed(const model::ModelDesc& d, uint32_t C
                                            PrefillBackend b) {
   return size_t(d.fa_kv_heads) * (2 + size_t(attn_row_blocks(C, b)));
 }
-// 3l (2): a split chunk (flash_split_span at `pos`) adds the merge.
+// PERF-98: a whole chunk's pair form runs as launches of at most this many rows (rows r.. as their own chunk at pos + r,
+// q and the outputs offset by r: every row's walk, value and order is the one launch's, bitwise). One 4096-row
+// launch keeps three times the work-groups of the card in flight that drift apart over the long causal walk;
+// tools/probe/probe_pf_attn_long --sub, card 0, ratio to the 8-row kernel, one 4096-row launch -> 2048-row launches:
+// Qwen3.8 at 64k keys 0.733 -> 0.668, 128k 0.706 -> 0.677; Ornith at 128k 0.704 -> 0.606-0.618. 1024-row launches
+// time as 2048 (Ornith 128k 0.617, Qwen3.8 C 2048 at 128k 0.616 vs 0.626 whole), 512 lose (0.804): too few work-groups.
+constexpr uint32_t kPairLaunchRows = 2048;
+// 3l (2): a split chunk (flash_split_span at `pos`) adds the merge. A whole chunk on Qwen3.8's heads (pair form, paged
+// or int8 cache alike) or Ornith's bf16 cache is ceil(C / kPairLaunchRows) launches, any other chunk one.
 inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b,
-                                  AttnMode mode, uint32_t pos = 0) {
-  return mode == AttnMode::Flash ? 1 + (flash_split_span(d, pos, C) ? 1 : 0) : attn_chunk_launches_composed(d, C, b);
+                                  AttnMode mode, uint32_t pos = 0, KvCache kv = KvCache::Bf16) {
+  if (mode != AttnMode::Flash) return attn_chunk_launches_composed(d, C, b);
+  if (flash_split_span(d, pos, C)) return 2;
+  const bool rowed = (d.fa_q_heads == 24 && d.fa_kv_heads == 4) ||
+                     (d.fa_q_heads == 16 && d.fa_kv_heads == 2 && kv == KvCache::Bf16);
+  return rowed ? (C + kPairLaunchRows - 1) / kPairLaunchRows : 1;
 }
-inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b, uint32_t pos = 0) {
-  return attn_chunk_launches(d, C, b, attn_mode(), pos);
+inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b, uint32_t pos = 0,
+                                  KvCache kv = KvCache::Bf16) {
+  return attn_chunk_launches(d, C, b, attn_mode(), pos, kv);
 }
 // MoE prefill phase 3: Ornith's 16 / 2 heads gate inside the pair flash launch on a bf16 cache (the prefill walk), or
 // inside the merge of a split chunk, so the walk's gate launch is 0 there; the int8 cache keeps pf_attn_gate_kv8.

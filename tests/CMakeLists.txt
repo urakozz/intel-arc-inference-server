@@ -287,6 +287,12 @@ add_dependencies(pf_norm_fused_test kernel_pf_res_fold_K5120_SP0_G20 kernel_pf_r
                  kernel_pf_norm_finish_K5120_G20_W20 kernel_pf_res_norm_K5120_SP0_G20 kernel_pf_res_norm_K5120_SP1_G20)
 add_test(NAME pf_norm_fused_qwen_test COMMAND pf_norm_fused_test 5120)
 set_tests_properties(pf_norm_fused_qwen_test PROPERTIES LABELS "prefill")
+if(B70_MTP)   # PERF-85: the MTP head's prompt-pass forms (_Z, pf_mtp_front) against the launches they replace
+  add_dependencies(pf_norm_fused_test kernel_pf_res_fold_K5120_SP1_G20_Z kernel_pf_res_norm_K5120_SP1_G20_Z
+                   kernel_pf_embed_gather kernel_pf_norm_finish_K5120_G20_W20_X10240 kernel_pf_mtp_front_K5120_G20)
+  add_test(NAME pf_norm_fused_mtp_qwen_test COMMAND pf_norm_fused_test 5120 mtp)
+  set_tests_properties(pf_norm_fused_mtp_qwen_test PROPERTIES LABELS "prefill;mtp")
+endif()
 
 add_executable(pf_gemv_test prefill/pf_gemv_test.cc)
 target_include_directories(pf_gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -340,7 +346,7 @@ target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
                            ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gdn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
 b70_target_kernel_dir(gdn_chunk_test)
-add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gdn_front_PL kernel_pf_gdn_scan_OB kernel_pf_gated_head_OB kernel_pf_gdn_wy_WB
+add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gdn_front_PL kernel_pf_gdn_scan_OB kernel_pf_gated_head_OB kernel_pf_gdn_wy_WB kernel_pf_gdn_intra
   kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
 add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
 set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
@@ -368,6 +374,16 @@ add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16 kernel_p
                  kernel_pf_gemm_T0 kernel_pf_gemm_T1)
 add_test(NAME attn_chunk_test COMMAND attn_chunk_test)
 set_tests_properties(attn_chunk_test PROPERTIES TIMEOUT 3600)
+if(B70_MTP)   # PERF-85: attn_prep over the kv heads only (the MTP head's prompt pass), bitwise the full grid's K / V
+  add_executable(pf_attn_prep_kvo_test prefill/pf_attn_prep_kvo_test.cc)
+  target_include_directories(pf_attn_prep_kvo_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                             ${CMAKE_SOURCE_DIR}/tests/kernels ${CMAKE_SOURCE_DIR}/tests/prefill)
+  target_link_libraries(pf_attn_prep_kvo_test PRIVATE b70_l0)
+  b70_target_kernel_dir(pf_attn_prep_kvo_test)
+  add_dependencies(pf_attn_prep_kvo_test kernel_pf_attn_prep_q16 kernel_pf_attn_prep_q16_KVO)
+  add_test(NAME pf_attn_prep_kvo_qwen_test COMMAND pf_attn_prep_kvo_test 24 4)
+  set_tests_properties(pf_attn_prep_kvo_qwen_test PROPERTIES LABELS "prefill;mtp")
+endif()
 
 # D3's scan-only arithmetic discriminator is direct Level Zero/OpenCL C, so it
 # must run in both configurations.  The fixtures make removal of either BF16
@@ -575,6 +591,8 @@ b70_target_kernel_dir(prep_test)
 add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP4
   kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP4_G20
   kernel_prep_norm_finish_M1_K5120_G20_W20 kernel_prep_norm_finish_M1_K5120_G20_W1
+  kernel_prep_res_fold_M1_K2048_SP0_G20 kernel_prep_res_fold_M1_K2048_SP4_G20 kernel_prep_norm_finish_M1_K2048_G20_W20
+  kernel_prep_res_fold_M1_K2560_SP0_G20 kernel_prep_norm_finish_M1_K2560_G20_W20
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1)
 add_test(NAME prep_test COMMAND prep_test)
 
@@ -1037,7 +1055,7 @@ set(B70_PREFILL_KERNELS
   kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj kernel_pf_route_slab_K5120_N128_P256 kernel_pf_gdn_conv_AB256
   kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn kernel_pf_flash_attn_pair kernel_pf_flash_attn_split kernel_pf_flash_merge
   kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
-  kernel_pf_gdn_front_PL kernel_pf_gdn_scan_OB kernel_pf_gated_head_OB kernel_pf_gdn_wy_WB
+  kernel_pf_gdn_front_PL kernel_pf_gdn_scan_OB kernel_pf_gated_head_OB kernel_pf_gdn_wy_WB kernel_pf_gdn_intra
   kernel_pf_dequant_tile_K5120_N16384_L1_T0
   kernel_pf_dequant_tile_K6144_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N34816_L0_T0
@@ -1521,9 +1539,10 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 1)
   add_test(NAME prefix_gpu_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8)
-  # The opt-in split_last path (b70-serve --prefix-split-last), same sequences.
+  # The opt-in split_last path (b70-serve --prefix-split-last), same sequences, with l0's near-tie allowance of 1:
+  # the split only feeds the prompt's last id by a decode replay, and sequence e's row 30 is the same sub-ulp flip.
   add_test(NAME prefix_gpu_split_l0_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 0 1)
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 1 1)
   add_test(NAME prefix_gpu_split_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 1)
   # Open-work 18: the same sequences at 4096-row chunks (Qwen3.8's default where the plan has room).
@@ -2080,6 +2099,15 @@ if(B70_ORNITH)
                    kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20)
   add_test(NAME pf_norm_fused_test COMMAND pf_norm_fused_test 2048)
   set_tests_properties(pf_norm_fused_test PROPERTIES LABELS "ornith;prefill")
+  if(B70_MTP)   # PERF-85 at Ornith's hidden
+    add_dependencies(pf_norm_fused_test kernel_pf_res_fold_K2048_SP1_G20_Z kernel_pf_res_norm_K2048_SP1_G20_Z
+                     kernel_pf_embed_gather_D2048 kernel_pf_norm_finish_K2048_G20_W20_X4096 kernel_pf_mtp_front_K2048_G20)
+    add_test(NAME pf_norm_fused_mtp_test COMMAND pf_norm_fused_test 2048 mtp)
+    set_tests_properties(pf_norm_fused_mtp_test PROPERTIES LABELS "ornith;prefill;mtp")
+    add_dependencies(pf_attn_prep_kvo_test kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_prep_q16_Q16KV2_KVO)
+    add_test(NAME pf_attn_prep_kvo_ornith_test COMMAND pf_attn_prep_kvo_test 16 2)
+    set_tests_properties(pf_attn_prep_kvo_ornith_test PROPERTIES LABELS "ornith;prefill;mtp")
+  endif()
 
   add_executable(pf_moe_test kernels/pf_moe_test.cc)
   target_include_directories(pf_moe_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -2225,7 +2253,7 @@ if(B70_ORNITH AND B70_MTP)
   endforeach()
   foreach(MM 1 2 3 4)
     list(APPEND B70_ORNITH_MTP_KERNELS
-      kernel_gdn_step_slots_M${MM}_G30_GK16V32 kernel_gemv_bf16_M${MM}_K4096_N2048
+      kernel_gdn_step_slots_M${MM}_G30_GK16V32 kernel_gdn_step_defer_M${MM}_G30_GK16V32 kernel_gemv_bf16_M${MM}_K4096_N2048
       kernel_gemv_bf16_M${MM}_K2048_N9216 kernel_prep_norm_finish_M${MM}_K2048_G20_W20_X4096
       kernel_prep_res_fold_M${MM}_K2048_SP1_G20_Z kernel_attn_prep_M${MM}_Q16KV2_S1)
   endforeach()
@@ -2233,15 +2261,17 @@ if(B70_ORNITH AND B70_MTP)
   foreach(NV 32768 65536 131072)
     list(APPEND B70_ORNITH_MTP_KERNELS kernel_gemv_i8w_M1_K2048_N${NV} kernel_gemv_bf16_M1_K2048_N${NV})
   endforeach()
-  list(APPEND B70_ORNITH_MTP_KERNELS kernel_pf_res_fold_K2048_SP1_G20_Z
-    kernel_pf_norm_finish_K2048_G20_W20_X4096 kernel_pf_bf16_slab_K4096 kernel_pf_bf16_slab_K2048)
+  # PERF-85: the head's prompt pass binds the one-launch forms; pf_res_fold _Z and pf_norm_finish _X4096 stay built
+  # as pf_norm_fused_mtp_test's reference.
+  list(APPEND B70_ORNITH_MTP_KERNELS kernel_pf_bf16_slab_K4096 kernel_pf_bf16_slab_K2048
+    kernel_pf_mtp_front_K2048_G20 kernel_pf_res_norm_K2048_SP1_G20_Z kernel_pf_attn_prep_q16_Q16KV2_KVO)
   # What the lists reuse: 15c's decode list, 15d's prefill kernels, spec 8's shared ones.
   set(_o15e_reused ${B70_ORNITH_DECODE_KERNELS}
     kernel_argmax_stage1_M2 kernel_argmax_stage1_M3 kernel_argmax_stage1_M4
     kernel_dv_argmax_N32768 kernel_dv_argmax_N65536 kernel_dv_argmax_N131072
     kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
     kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_embed_gather_D2048
-    kernel_pf_attn_prep_q16_Q16KV2)
+    kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_res_norm_K2048_SP0_G20)
   get_property(_o28b_gemm_sm GLOBAL PROPERTY B70_GEMM_SM_KERNELS)   # spec 28b: the verify lists' dense gemm_sm
   list(APPEND _o15e_reused ${_o28b_gemm_sm})
   foreach(t ${B70_ORNITH_MTP_KERNELS} ${_o15e_reused})
@@ -3210,6 +3240,8 @@ if(B70_Q4EXP)
     kernel_q4_hc_combine_norm_M1_S4 kernel_q4_hc_combine_norm_M1_Y kernel_q4_hc_combine_norm_M1_Y_NN
     kernel_q4_hc_combine_norm_M1_X kernel_q4_hc_up_mix_M1_I kernel_q4_hc_up_mix_M1
     kernel_gemv_bf16_M1_K10240_N336_C16_S16 kernel_gemv_bf16_M1_K10240_N320_C16_S16
+    kernel_q4_hc_up_mix_M1_I_Q8 kernel_q4_hc_up_mix_M1_Q8 kernel_q4_hc_down_i8_M1_N336_KS16
+    kernel_q4_hc_down_i8_M1_N320_KS16
     kernel_gemv_M1_K2560_N16384_S1_L0 kernel_gemv_bf16_M1_K2560_N16384 kernel_gemv_bf16_M1_K2560_N128_C16_S16
     kernel_gdn_step_M1 kernel_prep_gated_head_M1_SIG kernel_gemv_M1_K6144_N2560_S4_L0 kernel_gemv_bf16_M1_K6144_N2560
     kernel_gemv_M1_K2560_N13312_S2_L0 kernel_gemv_bf16_M1_K2560_N13312 kernel_gemv_bf16_M1_K2560_N640_C16_S16
@@ -3233,7 +3265,8 @@ if(B70_Q4EXP)
   target_include_directories(qwen4exp_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(qwen4exp_kernels_test PRIVATE b70_l0 b70_qwen4exp_loader)
   b70_target_kernel_dir(qwen4exp_kernels_test)
-  add_dependencies(qwen4exp_kernels_test ${B70_Q4EXP_DECODE_KERNELS} kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2)
+  add_dependencies(qwen4exp_kernels_test ${B70_Q4EXP_DECODE_KERNELS} kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2
+    kernel_q4_hc_up_mix_M2048_I_D512_R4C64_Q8 kernel_q4_hc_slab_i8_N336)   # PERF-66's prefill forms (test 8)
   add_test(NAME qwen4exp_kernels_test COMMAND qwen4exp_kernels_test)
   set_tests_properties(qwen4exp_kernels_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77 TIMEOUT 1800)
   # Task 3: the runtime on the card - F4 on decode (plan == allocation, two runs bitwise, the injected capture fed
@@ -3293,12 +3326,12 @@ if(B70_Q4EXP)
       ${CMAKE_SOURCE_DIR}/tests/runtime)
     target_link_libraries(qwen4exp_tp_test PRIVATE b70_qwen4exp_runtime b70_l0)
     add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_gemv_M1_K2560_N8192_S1_L0
-      kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S2_L0 kernel_gemv_i8w_M1_K2560_N124160
+      kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S2_L0_TP kernel_gemv_i8w_M1_K2560_N124160
       kernel_prep_gated_head_M1_GK8V24_SIG kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1
       kernel_q4_qsa_attn_M1_T32_Q12KV1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0
       kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R0
       kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R1
-      kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum
+      kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum_W64 kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum_W64
       kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
     foreach(mode pp tp)   # pp writes the reference rows tp reads: run in this order (ctest -R qwen4exp_tp_)
       add_test(NAME qwen4exp_tp_${mode}_test COMMAND qwen4exp_tp_test ${B70_Q4EXP_RTN_SNAPSHOT}
@@ -3338,19 +3371,28 @@ if(B70_Q4EXP)
     kernel_pf_embed_gather_D2560 kernel_q4_hc_combine_norm_M2048_E kernel_q4_hc_combine_norm_M2048_S1
     kernel_q4_hc_combine_norm_M2048_Y kernel_q4_hc_combine_norm_M2048_X kernel_q4_hc_combine_norm_M2048_Y_NN
     kernel_q4_pf_bf16_slab_K10240_N336 kernel_pf_gemm_T0 kernel_q4_hc_up_mix_M2048_I_D512_R4C64 kernel_pf_ab_proj_D2560
-    kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gdn_front
+    kernel_q4_hc_up_mix_M2048_I_D512_R4C64_Q8 kernel_q4_hc_slab_i8_N336
+    kernel_pf_gdn_conv kernel_pf_gdn_intra kernel_pf_gdn_scan_OB kernel_pf_gdn_front_PL kernel_pf_gdn_front_PL_PB
+    kernel_pf_gemm_T0_B16 kernel_pf_gated_head_SIG_OB_PB
     kernel_pf_route_slab_K2560_N528_P768 kernel_pf_route_slab_K2560_N128_P256
     kernel_q4_route_M1_E512_T10_N528_L256_P768 kernel_pf_gdn_conv_AB256
-    kernel_pf_moe_sort_mw_E512_T10 kernel_pf_moe_q4gemm_K2560_N1280_SILU kernel_pf_moe_q4gemm_K640_N2560
-    kernel_pf_moe_q4gemm_K2560_N1280_SILU_TBL kernel_pf_moe_q4gemm_K640_N2560_TBL
-    kernel_pf_gated_head_SIG kernel_q4_pf_bf16_slab_K2560_N640
+    kernel_pf_moe_sort_mw_E512_T10 kernel_pf_moe_q4gemm_K2560_N1280_SILU_SHX kernel_pf_moe_q4gemm_K640_N2560
+    kernel_pf_moe_q4gemm_K2560_N1280_SILU_TBL_SHX kernel_pf_moe_q4gemm_K640_N2560_TBL
+    kernel_pf_gated_head_SIG_OB kernel_q4_pf_bf16_slab_K2560_N640
     kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF kernel_pf_flash_attn_Q24KV2
     kernel_q4_pf_sparse_attn_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_EAGER kernel_pf_attn_Q24KV2
     kernel_pf_moe_router_K2560_N528 kernel_q4_route_M1_E512_T10_N528_L256 kernel_q4_pf_moe_E512_T10_D2560_I640_L256
     kernel_pf_moe_gemm_K2560_N1280_SILU kernel_pf_moe_gemm_K640_N2560 kernel_q4_ple_gather_M2048_BF16_PF
     kernel_q4_ple_gather_M2048_F32_PF kernel_q4_pf_bf16_slab_K2560_N12800 kernel_q4_pf_ple_C2048
     kernel_pf_dequant_slab_K2560_N16384_L0 kernel_pf_dequant_slab_K2560_N13312_L0 kernel_pf_int4_slab_K6144_N2560
-    kernel_q4_pf_bf16_slab_K2560_N16384 kernel_q4_pf_bf16_slab_K2560_N13312 kernel_q4_pf_bf16_slab_K6144_N2560)
+    kernel_q4_pf_bf16_slab_K2560_N16384 kernel_q4_pf_bf16_slab_K2560_N13312 kernel_q4_pf_bf16_slab_K6144_N2560
+    # PERF-36: the 4096-row chunk's builds (M = 4096, the block-store slabs, pf_gemm_T0_R)
+    kernel_q4_hc_combine_norm_M4096_E kernel_q4_hc_combine_norm_M4096_S1 kernel_q4_hc_combine_norm_M4096_Y
+    kernel_q4_hc_combine_norm_M4096_X kernel_q4_hc_combine_norm_M4096_Y_NN kernel_q4_hc_up_mix_M4096_I_D512_R4C64
+    kernel_q4_hc_up_mix_M4096_I_D512_R4C64_Q8
+    kernel_q4_qsa_M4096_T512_W1024_PF kernel_q4_ple_gather_M4096_BF16_PF kernel_q4_ple_gather_M4096_F32_PF
+    kernel_q4_pf_ple_C4096 kernel_pf_dequant_slab_K2560_N16384_L0_BS kernel_pf_dequant_slab_K2560_N13312_L0_BS
+    kernel_pf_gemm_T0_R kernel_pf_gemm_T0_B16_R)
   # Host: the names the walk binds (kernels::qwen4exp::prefill_variants) are exactly this list.
   add_executable(qwen4exp_pf_variant_names_test kernels/qwen4exp_pf_variant_names_test.cc)
   target_include_directories(qwen4exp_pf_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3395,10 +3437,17 @@ if(B70_Q4EXP)
   add_test(NAME qwen4exp_prefill_synth_eager_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} all)
   set_tests_properties(qwen4exp_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_Q4_ATTN=eager")
   add_test(NAME prefill_split_qwen4exp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} split)
+  # PERF-36: the 4096-row chunk against 2048-row chunks, bitwise (both dense arms)
+  foreach(f ours intel)
+    add_test(NAME qwen4exp_prefill_wide_${f}_test COMMAND qwen4exp_prefill_test ${_q4s}/${f}/ckpt ${_q4ids} wide)
+    list(APPEND _q4pf qwen4exp_prefill_wide_${f}_test)
+  endforeach()
   add_test(NAME qwen4exp_prefill_gdn_test COMMAND qwen4exp_prefill_test - - gdn)
+  add_test(NAME qwen4exp_prefill_gdn_pb_test COMMAND qwen4exp_prefill_test - - gdn-pb)
   set_tests_properties(${_q4pf} qwen4exp_prefill_synth_eager_test prefill_split_qwen4exp_test
     PROPERTIES LABELS "checkpoint;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  set_tests_properties(qwen4exp_prefill_gdn_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  set_tests_properties(qwen4exp_prefill_gdn_test qwen4exp_prefill_gdn_pb_test PROPERTIES LABELS "qwen4exp;prefill"
+    SKIP_RETURN_CODE 77 TIMEOUT 1800)
   # two cards (16b's pieces): one card against --parallel pp --pipeline-split 2 bitwise on the ours synthetic, the split test
   # across two cards; Intel's truncated model on two cards at the planner's N with prefill (37 at 32768: 38 does not fit
   # beside the prefill scratch)
@@ -3452,27 +3501,27 @@ endif()
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --bench --prefill-length 64 --prefill-backend l0-int8
   EXPECT "1024-k Hadamard blocks")
-b70_cli_reject(cli_reject_qwen4exp_prefill_chunk ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
-  --prefill-chunk 4096 EXPECT "exceeds Qwen3.8-Flash-Next's prefill chunk 2048")
 # ==== Spec 21-QFN-v1d: Qwen3.8-Flash-Next prefill ==== (end) ====
 # Plan 21-QFN-v2b Task 4: the tensor-parallel prefill against pp's at --layers 18 on our RTN export, every expert resident
 # (B70_Q4EXP_RTN_SNAPSHOT): pp writes its prefill's rows, tp reads them (ctest -R qwen4exp_tp_prefill_, in this order).
 if(B70_Q4EXP AND B70_TP)
   set(B70_Q4EXP_TP_KERNELS kernel_gemv_M1_K2560_N8192_S1_L0 kernel_gemv_M1_K2560_N6656_S2_L0
-    kernel_gemv_M1_K3072_N2560_S2_L0 kernel_gemv_i8w_M1_K2560_N124160 kernel_prep_gated_head_M1_GK8V24_SIG
+    kernel_gemv_M1_K3072_N2560_S2_L0_TP kernel_gemv_i8w_M1_K2560_N124160 kernel_prep_gated_head_M1_GK8V24_SIG
     kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1 kernel_q4_qsa_attn_M1_T32_Q12KV1
     kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R1
     kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R1
-    kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum
+    kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum_W64 kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum_W64
     kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
   set(B70_Q4EXP_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K2560_N8192_L0 kernel_pf_int4_slab_K2560_N6656
     kernel_pf_int4_slab_K3072_N2560 kernel_q4_pf_bf16_slab_K2560_N8192 kernel_q4_pf_bf16_slab_K2560_N6656
-    kernel_q4_pf_bf16_slab_K3072_N2560 kernel_pf_gdn_front_GK8V24 kernel_pf_gdn_conv_GK8V24_AB256
-    kernel_pf_gated_head_GK8V24_SIG kernel_pf_gdn_conv_GK8V24 kernel_pf_gdn_wy_GK8V24 kernel_pf_gdn_scan_GK8V24
+    kernel_q4_pf_bf16_slab_K3072_N2560 kernel_pf_gdn_front_GK8V24_PL kernel_pf_gdn_conv_GK8V24_AB256
+    kernel_pf_gated_head_GK8V24_SIG_OB kernel_pf_gdn_conv_GK8V24 kernel_pf_gdn_intra_GK8V24 kernel_pf_gdn_scan_GK8V24_OB
+    kernel_pf_gdn_front_GK8V24_PL_PB kernel_pf_gated_head_GK8V24_SIG_OB_PB
     kernel_pf_attn_prep_q16_Q12KV1 kernel_pf_attn_Q12KV1 kernel_pf_flash_attn_Q12KV1 kernel_q4_pf_sparse_attn_Q12KV1
-    kernel_pf_moe_q4gemm_K2560_N640_SILU kernel_pf_moe_q4gemm_K2560_N640_SILU_TBL kernel_pf_moe_q4gemm_K320_N2560_F32
+    kernel_pf_moe_q4gemm_K2560_N640_SILU_SHX kernel_pf_moe_q4gemm_K2560_N640_SILU_TBL_SHX kernel_pf_moe_q4gemm_K320_N2560_F32
     kernel_pf_moe_q4gemm_K320_N2560_F32_TBL kernel_q4_pf_moe_combine_f32_E512_T10_D2560
-    kernel_q4_hc_combine_norm_M2048_S2 kernel_q4_hc_combine_norm_M2048_S2_NN kernel_q4_hc_combine_norm_M1_S2)
+    kernel_q4_hc_combine_norm_M2048_S2 kernel_q4_hc_combine_norm_M2048_S2_NN kernel_q4_hc_combine_norm_M1_S2
+    kernel_q4_hc_combine_norm_M4096_S2 kernel_q4_hc_combine_norm_M4096_S2_NN kernel_pf_dequant_slab_K2560_N8192_L0_BS)
   add_executable(qwen4exp_tp_prefill_test runtime/qwen4exp_tp_prefill_test.cc)
   b70_target_kernel_dir(qwen4exp_tp_prefill_test)
   target_include_directories(qwen4exp_tp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -3487,7 +3536,58 @@ if(B70_Q4EXP AND B70_TP)
       TIMEOUT 3600)
   endforeach()
   set_tests_properties(qwen4exp_tp_prefill_tp_test PROPERTIES DEPENDS qwen4exp_tp_prefill_pp_test)
+  # PERF-27: the MoE prompt-pass glue against the forms it replaced, no checkpoint - the prefill's one-sub-group
+  # q4_route against decode's (every word, random and tied logits), q4_pf_gather_routed + the _SHX gate||up against
+  # q4_pf_gather + the plain binary (one card's 2560 x 1280 and a tp card's 2560 x 640, direct and _TBL), the
+  # 16-byte combines against the one-column ones (_C1); PERF-25: the four direct expert GEMMs against their _DB twins
+  # (the register plan they replaced). `--time` adds the kernel times and the builds' spills.
+  add_executable(qwen4exp_pf_glue_test kernels/qwen4exp_pf_glue_test.cc)
+  target_include_directories(qwen4exp_pf_glue_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_pf_glue_test PRIVATE b70_l0 b70_qwen4exp_loader)
+  b70_target_kernel_dir(qwen4exp_pf_glue_test)
+  add_dependencies(qwen4exp_pf_glue_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS}
+    kernel_q4_route_M1_E512_T10_N528_L256 kernel_pf_moe_q4gemm_K2560_N1280_SILU kernel_pf_moe_q4gemm_K2560_N1280_SILU_TBL
+    kernel_pf_moe_q4gemm_K2560_N640_SILU kernel_pf_moe_q4gemm_K2560_N640_SILU_TBL
+    kernel_q4_pf_moe_E512_T10_D2560_I640_L256_C1 kernel_q4_pf_moe_combine_f32_E512_T10_D2560_C1
+    kernel_pf_moe_q4gemm_K2560_N1280_SILU_SHX_DB kernel_pf_moe_q4gemm_K640_N2560_DB
+    kernel_pf_moe_q4gemm_K2560_N640_SILU_SHX_DB kernel_pf_moe_q4gemm_K320_N2560_F32_DB)
+  add_test(NAME qwen4exp_pf_glue_test COMMAND qwen4exp_pf_glue_test)
+  set_tests_properties(qwen4exp_pf_glue_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  # PERF-20 / PERF-21: the GDN walk (gdn_chunk_q4: front _PL, scan _OB, head _SIG_OB) against the plain forms it
+  # replaced, no checkpoint - state, ring and y bitwise at one card's 16 / 48 heads and a tp card's 8 / 24, and PERF-8's
+  # walk on bf16 partials (_PB) against the old on fp32; `--time`
+  # adds the three kernels' times old against new at C 2048 and the builds' spills.
+  add_executable(qwen4exp_pf_gdn_bundle_test kernels/qwen4exp_pf_gdn_bundle_test.cc)
+  target_include_directories(qwen4exp_pf_gdn_bundle_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_pf_gdn_bundle_test PRIVATE b70_qwen4exp_prefill b70_l0)
+  b70_target_kernel_dir(qwen4exp_pf_gdn_bundle_test)
+  add_dependencies(qwen4exp_pf_gdn_bundle_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS}
+    kernel_pf_gdn_front kernel_pf_gdn_scan kernel_pf_gated_head_SIG kernel_pf_gdn_front_GK8V24 kernel_pf_gdn_scan_GK8V24
+    kernel_pf_gated_head_GK8V24_SIG)
+  add_test(NAME qwen4exp_pf_gdn_bundle_test COMMAND qwen4exp_pf_gdn_bundle_test)
+  set_tests_properties(qwen4exp_pf_gdn_bundle_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
   add_dependencies(qwen4exp_route_capture ${B70_Q4EXP_TP_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS})   # its tp mode
+  add_dependencies(qwen4exp_prefill_test ${B70_Q4EXP_TP_PREFILL_KERNELS})   # its gdn-pb mode's tp heads
+  # PERF-44 (one card, no checkpoint): out_proj / o_proj's send-folded gemv + the wired tp_sum bitwise the plain gemv +
+  # tp_send + tp_sum, two sides on one device each writing the other's landing; M 1, and 2..4 with the MTP builds.
+  set(_tpw_m 1)
+  if(B70_MTP)
+    list(APPEND _tpw_m 2 3 4)
+  endif()
+  set(_tpw_kernels)
+  foreach(MM IN LISTS _tpw_m)
+    list(APPEND _tpw_kernels kernel_gemv_M${MM}_K3072_N2560_S2_L0 kernel_gemv_M${MM}_K3072_N2560_S2_L0_TP)
+    foreach(R 0 1)
+      list(APPEND _tpw_kernels kernel_tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum kernel_tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum_W64)
+    endforeach()
+  endforeach()
+  add_executable(qwen4exp_tp_wire_test kernels/qwen4exp_tp_wire_test.cc)
+  target_include_directories(qwen4exp_tp_wire_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_tp_wire_test PRIVATE b70_l0 b70_model)
+  b70_target_kernel_dir(qwen4exp_tp_wire_test)
+  add_dependencies(qwen4exp_tp_wire_test ${_tpw_kernels})
+  add_test(NAME qwen4exp_tp_wire_test COMMAND qwen4exp_tp_wire_test ${_tpw_m})
+  set_tests_properties(qwen4exp_tp_wire_test PROPERTIES LABELS "qwen4exp;tp" SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
 # ==== Spec 21-QFN-v1e: Qwen3.8-Flash-Next served (label qwen4exp) ==== (begin) ====
 # Task 1 (host): the tokens and the template. 21-QFN-v1a found the original's tokenizer.json NOT Qwen3.8's (the split regex
@@ -3559,15 +3659,16 @@ if(B70_Q4EXP)
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # Task 3: the MTP head and spec 8's lists. B70_Q4EXP_MTP_KERNELS is src/kernels/CMakeLists.txt's spec 21-QFN-v1e block (the
-# verify lists' M = 2..4 binaries, gdn_step_slots_M<1..4>_G1, q4_pf_ple_C4, q4_mtp at M = 1..4 and _PF, the fc's);
+# verify lists' M = 2..4 binaries, gdn_step_defer_M<1..4>_G1 (PERF-51), q4_pf_ple_C4, q4_mtp at M = 1..4 and _PF, the fc's);
 # the lists also bind 21-QFN-v1c's decode binaries, 21-QFN-v1d's prefill binaries and Qwen3.8's argmax_stage1_M<2..4> by name,
 # and (open-work 49) the draft steps Qwen3.8's draft_prob over the whole row.
 if(B70_Q4EXP AND B70_MTP)
   set(_q4moe_per_row "")
   set(B70_Q4EXP_MTP_KERNELS kernel_q4_pf_ple_C4 kernel_q4_mtp_M2048_SINGLE_PF kernel_q4_mtp_M2048_STREAM_PF
-    kernel_q4_pf_bf16_slab_K2560_N2560)
+    kernel_q4_mtp_M4096_SINGLE_PF kernel_q4_mtp_M4096_STREAM_PF kernel_q4_pf_bf16_slab_K2560_N2560
+    kernel_pf_attn_prep_q16_Q24KV2_KVO)   # PERF-85
   foreach(MM 1 2 3 4)
-    list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gdn_step_slots_M${MM}_G1 kernel_gemv_bf16_M${MM}_K2560_N2560
+    list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gdn_step_defer_M${MM}_G1 kernel_gemv_bf16_M${MM}_K2560_N2560
       kernel_q4_mtp_M${MM}_SINGLE kernel_q4_mtp_M${MM}_STREAM)
     if(NOT MM EQUAL 1)
       list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N16384_S1_L0 kernel_gemv_M${MM}_K2560_N13312_S2_L0
@@ -3580,6 +3681,8 @@ if(B70_Q4EXP AND B70_MTP)
         kernel_attn_prep_M${MM}_Q24KV2_S1 kernel_q4_hc_combine_norm_M${MM}_E kernel_q4_hc_combine_norm_M${MM}_S1
         kernel_q4_hc_combine_norm_M${MM}_S4 kernel_q4_hc_combine_norm_M${MM}_Y kernel_q4_hc_combine_norm_M${MM}_Y_NN
         kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I kernel_q4_hc_up_mix_M${MM}
+        kernel_q4_hc_up_mix_M${MM}_I_Q8 kernel_q4_hc_up_mix_M${MM}_Q8 kernel_q4_hc_down_i8_M${MM}_N336_KS16
+        kernel_q4_hc_down_i8_M${MM}_N320_KS16
         kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024
         kernel_q4_qsa_attn_M${MM}_T32 kernel_q4_qsa_attn_eager_M${MM} kernel_q4_route_M${MM}_E512_T10_N528_L256
         kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_U kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_U
@@ -3609,6 +3712,18 @@ if(B70_Q4EXP AND B70_MTP)
   b70_target_kernel_dir(qwen4exp_mtp_names_test)
   add_test(NAME qwen4exp_mtp_names_test COMMAND qwen4exp_mtp_names_test ${B70_Q4EXP_MTP_KERNELS} --reused ${_q4mtp_reused})
   set_tests_properties(qwen4exp_mtp_names_test PROPERTIES LABELS qwen4exp)
+  # PERF-85: the head's attn_prep over the kv heads only, every K / V word against the full grid of the same source at
+  # 24 / 2 (the executable is the MTP block's above when that builds it - Qwen3.8's and Ornith's heads)
+  if(NOT TARGET pf_attn_prep_kvo_test)
+    add_executable(pf_attn_prep_kvo_test prefill/pf_attn_prep_kvo_test.cc)
+    target_include_directories(pf_attn_prep_kvo_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                               ${CMAKE_SOURCE_DIR}/tests/kernels ${CMAKE_SOURCE_DIR}/tests/prefill)
+    target_link_libraries(pf_attn_prep_kvo_test PRIVATE b70_l0)
+    b70_target_kernel_dir(pf_attn_prep_kvo_test)
+  endif()
+  add_dependencies(pf_attn_prep_kvo_test kernel_pf_attn_prep_q16_Q24KV2 kernel_pf_attn_prep_q16_Q24KV2_KVO)
+  add_test(NAME pf_attn_prep_kvo_fn_test COMMAND pf_attn_prep_kvo_test 24 2)
+  set_tests_properties(pf_attn_prep_kvo_fn_test PROPERTIES LABELS "qwen4exp;prefill;mtp")
   # On the card (box only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_mtp_test - M1 the head
   # against 21-QFN-v1a's port on tools/oracle/qwen4exp_mtp_fixture.py's data (both norm forms; SKIPs without the fixture),
   # M2 verify rows bitwise the plain steps, M3 greedy lossless at K = 1..3 (and the head off), the verify's cost and
@@ -3679,16 +3794,16 @@ if(B70_Q4EXP AND B70_MTP)
   if(B70_TP AND TARGET qwen4exp_tp_prefill_test)
     set(B70_Q4EXP_TP_MTP_KERNELS kernel_draft_prob_N124160_U124160 kernel_draft_prob_N124160_U123917)   # open-work 49
     foreach(MM 1 2 3 4)
-      list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gdn_step_slots_M${MM}_GK8V24_G1)
+      list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gdn_step_defer_M${MM}_GK8V24_G1)
       if(NOT MM EQUAL 1)
         list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N8192_S1_L0 kernel_gemv_M${MM}_K2560_N6656_S2_L0
-          kernel_gemv_M${MM}_K3072_N2560_S2_L0 kernel_gemv_i8w_M${MM}_K2560_N124160 kernel_prep_gated_head_M${MM}_GK8V24_SIG
+          kernel_gemv_M${MM}_K3072_N2560_S2_L0_TP kernel_gemv_i8w_M${MM}_K2560_N124160 kernel_prep_gated_head_M${MM}_GK8V24_SIG
           kernel_attn_prep_M${MM}_Q12KV1 kernel_q4_qsa_attn_M${MM}_T32_Q12KV1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0_U kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1_U
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0_U kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1_U
-          kernel_tp_cross_M${MM}_K2560_G20_S2_X_R0_sum kernel_tp_cross_M${MM}_K2560_G20_S2_X_R1_sum
+          kernel_tp_cross_M${MM}_K2560_G20_S2_X_R0_sum_W64 kernel_tp_cross_M${MM}_K2560_G20_S2_X_R1_sum_W64
           kernel_tp_argmax_M${MM}_N124160_U124160_B0 kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
       endif()
     endforeach()
@@ -4136,6 +4251,25 @@ target_include_directories(tp_shapes_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAK
   ${CMAKE_SOURCE_DIR}/tools/probe)
 target_link_libraries(tp_shapes_test PRIVATE b70_model)
 add_test(NAME tp_shapes_test COMMAND tp_shapes_test)
+
+# ==== PERF-53 (plan 21-QFN-v3b): Qwen3.8-Flash-Next's DFlash 2 drafter (labels qwen4exp;dflash) ==== (begin) ====
+# The descriptor: the published config held to its kernels and to Flash-Next. Host only.
+add_executable(flash_next_dflash_desc_test model/flash_next_dflash_desc_test.cc)
+target_include_directories(flash_next_dflash_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(flash_next_dflash_desc_test PRIVATE b70_dflash_model b70_qwen4exp_model)
+add_test(NAME flash_next_dflash_desc_test
+         COMMAND flash_next_dflash_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/flash_next_dflash/config.json)
+set_tests_properties(flash_next_dflash_desc_test PROPERTIES LABELS "qwen4exp;dflash")
+# Every binary the drafter's lists name is compiled (src/kernels/CMakeLists.txt's PERF-53 block and spec 19b's). Host
+# only (reads the kernel directory).
+if(B70_Q4EXP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(flash_next_dflash_names_test kernels/flash_next_dflash_names_test.cc)
+  target_include_directories(flash_next_dflash_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  b70_target_kernel_dir(flash_next_dflash_names_test)
+  add_test(NAME flash_next_dflash_names_test COMMAND flash_next_dflash_names_test)
+  set_tests_properties(flash_next_dflash_names_test PROPERTIES LABELS "qwen4exp;dflash")
+endif()
+# ==== PERF-53 (plan 21-QFN-v3b): Qwen3.8-Flash-Next's DFlash 2 drafter ==== (end) ====
 
 # ==== Kolibri DSpark: speculative decoding for Kolibri-1 (label kolibri) ==== (begin) ====
 # intuit/Kolibri-1-dspark beside Kolibri-1 (docs/17-running-models.md "Kolibri-1 with DSpark"). Host tests run on the Mac's

@@ -189,6 +189,7 @@ void test_config_refusals(const std::string& path) {
        "quantization_config"},
       {"\"block_size\": 8,", "\"block_size\": 8, \"attention_value_scale\": 0.5,", "attention_value_scale"},
       {"\"block_size\": 8,", "\"block_size\": 8, \"attention_sink_bias\": true,", "attention_sink_bias"},
+      {"\"attention_bias\": false", "\"attention_bias\": false, \"no_rope_layers\": [4]", "no_rope_layers"},
   };
   for (const Case& k : cases) {
     std::printf("  refusal %-26s ", k.needle.c_str());

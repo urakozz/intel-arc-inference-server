@@ -1,0 +1,6 @@
+config.json: incoai/Qwen3.8-Flash-Next-DFlash2 @ a22a174 ("DFlash 2 release"), config.json key for key (2026-11-20).
+model.safetensors (1.21 GB, 81 tensors, header read 2026-11-20): fc [2560, 12800] (5 taps x 2560: each the mean of the four
+hyper-connection streams of a completed layer - patches/qwen38-dflash2-capture.patch), no embed_tokens / lm_head (the
+target's), candidate_selector.{hidden_projection [256, 2560], predecessor_codebook / successor_codebook [248320, 256]},
+per layer q / k / v / o, q_norm / k_norm, gate / up / down, the two norms, attention_conv / mlp_conv (base_kernel [2, 2, 2560],
+kernel_projection [640, 2560]); hidden_norm, norm.

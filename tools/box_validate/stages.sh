@@ -1718,7 +1718,7 @@ st_r33_host() {
 }
 stage r33.k1 33 default card - r33.host "F2 for the prefill, no checkpoint: the 30 binaries built (kbins - their first ocloc compile) and qwen4exp_pf_kernels_test - the slabs exact, the HC / indexer / PLE at M 2048 bitwise q4ref's, the router rows bitwise decode's and q4_route on grid (1, C), the MoE (sort / gather / dequant exact, block 512 in both shared forms, GROUPED == DENSE bitwise, reversed and replayed bitwise), the sort adversaries, the dense flash and the sparse flash against fp64 (>= 0.99999) at chunk starts 2048 / 4096 / 30000 / 131072 / a 300-row tail, EAGER (0.9999 / 0.999), pf_attn_gate; and qwen4exp_prefill_gdn_test (gdn_chunk_q4 against decode's gdn_step + _SIG: 64-chunks bitwise, the band printed)"
 st_r33_k1() {
-  kbins pf_gated_head_SIG pf_embed_gather_D2560 pf_ab_proj_D2560 pf_moe_router_K2560_N528 pf_dequant_slab_K2560_N16384_L0 \
+  kbins pf_gated_head_SIG_OB pf_embed_gather_D2560 pf_ab_proj_D2560 pf_moe_router_K2560_N528 pf_dequant_slab_K2560_N16384_L0 \
     pf_dequant_slab_K2560_N13312_L0 q4_pf_bf16_slab_K2560_N16384 q4_pf_bf16_slab_K2560_N13312 q4_pf_bf16_slab_K6144_N2560 \
     q4_pf_bf16_slab_K2560_N640 q4_pf_bf16_slab_K10240_N336 q4_pf_bf16_slab_K2560_N12800 q4_hc_combine_norm_M2048_E \
     q4_hc_combine_norm_M2048_S1 q4_hc_combine_norm_M2048_Y q4_hc_combine_norm_M2048_Y_NN q4_hc_combine_norm_M2048_X \
@@ -1816,8 +1816,8 @@ stage r34.k1 34 default card - r34.host "the 21-QFN-v1e block's 122 binaries bui
 st_r34_k1() {
   kbins \
     attn_prep_M2_Q24KV2 attn_prep_M2_Q24KV2_S1 attn_prep_M3_Q24KV2 attn_prep_M3_Q24KV2_S1 attn_prep_M4_Q24KV2 \
-    attn_prep_M4_Q24KV2_S1 embed_gather_M2_D2560 embed_gather_M3_D2560 embed_gather_M4_D2560 gdn_step_slots_M1_G1 \
-    gdn_step_slots_M2_G1 gdn_step_slots_M3_G1 gdn_step_slots_M4_G1 gemv_M2_K2560_N13312_S2_L0 \
+    attn_prep_M4_Q24KV2_S1 embed_gather_M2_D2560 embed_gather_M3_D2560 embed_gather_M4_D2560 gdn_step_defer_M1_G1 \
+    gdn_step_defer_M2_G1 gdn_step_defer_M3_G1 gdn_step_defer_M4_G1 gemv_M2_K2560_N13312_S2_L0 \
     gemv_M2_K2560_N16384_S1_L0 gemv_M2_K6144_N2560_S4_L0 gemv_M3_K2560_N13312_S2_L0 gemv_M3_K2560_N16384_S1_L0 \
     gemv_M3_K6144_N2560_S4_L0 gemv_M4_K2560_N13312_S2_L0 gemv_M4_K2560_N16384_S1_L0 gemv_M4_K6144_N2560_S4_L0 \
     gemv_bf16_M1_K2560_N2560 gemv_bf16_M2_K10240_N320_C16_S16 gemv_bf16_M2_K10240_N336_C16_S16 \

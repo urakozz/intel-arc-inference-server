@@ -81,6 +81,20 @@
 #if (K8 % KSPLIT) != 0 || (KSPLIT & (KSPLIT - 1)) != 0
 #error "KSPLIT must be a power of two dividing K/8 (the merge is a pairwise tree)"
 #endif
+// PERF-111, both off by default (probe_gemv --tiles' cells). GEMV_KMAJOR 1: the 256 B steps ordered [k8][n_tile]
+// instead of [n_tile][k8] (common::tiles_k_major at load), so at each step the launch's sub-groups read
+// neighbouring bytes rather than each walking its own slab. GEMV_AHEAD A: A steps' block reads issued before the
+// first is used - the KU idea rejected above in the slab order, re-asked in the k-major one. Neither changes the
+// arithmetic or its order: bitwise the default build.
+#ifndef GEMV_KMAJOR
+#define GEMV_KMAJOR 0
+#endif
+#ifndef GEMV_AHEAD
+#define GEMV_AHEAD 1
+#endif
+#if (K8_PER_SG % GEMV_AHEAD) != 0
+#error "GEMV_AHEAD must divide a sub-group's K / 8 steps"
+#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
@@ -117,18 +131,39 @@ __kernel void gemv_bf16(__global const ushort* restrict w,
   float acc[M];
   for (int m = 0; m < M; ++m) acc[m] = 0.f;
 
+#define BF16_STEP(wv, k8)                                       \
+  for (int m = 0; m < M; ++m) {                                 \
+    ushort8 xv = vload8(0, x + (size_t)m * K + k8 * 8);         \
+    float a = acc[m];                                           \
+    a += bf16f(wv.s0) * bf16f(xv.s0); a += bf16f(wv.s1) * bf16f(xv.s1); \
+    a += bf16f(wv.s2) * bf16f(xv.s2); a += bf16f(wv.s3) * bf16f(xv.s3); \
+    a += bf16f(wv.s4) * bf16f(xv.s4); a += bf16f(wv.s5) * bf16f(xv.s5); \
+    a += bf16f(wv.s6) * bf16f(xv.s6); a += bf16f(wv.s7) * bf16f(xv.s7); \
+    acc[m] = a;                                                 \
+  }
+#if GEMV_KMAJOR || GEMV_AHEAD > 1
+#if GEMV_KMAJOR
+  tile = w + ((size_t)k8_0 * (N / SG) + n_tile) * 128;
+  const size_t step = (size_t)(N / SG) * 128;
+#else
+  const size_t step = 128;
+#endif
+  for (uint k0 = k8_0; k0 < k8_0 + K8_PER_SG; k0 += GEMV_AHEAD) {
+    ushort8 wq[GEMV_AHEAD];
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < GEMV_AHEAD; ++j)
+      wq[j] = intel_sub_group_block_read_us8(tile + j * step);
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < GEMV_AHEAD; ++j) {
+      const ushort8 wv = wq[j];
+      BF16_STEP(wv, (k0 + j))
+    }
+    tile += GEMV_AHEAD * step;
+  }
+#else
   for (uint k8 = k8_0; k8 < k8_0 + K8_PER_SG; ++k8, tile += 128) {
     ushort8 wv = intel_sub_group_block_read_us8(tile);
-    for (int m = 0; m < M; ++m) {
-      ushort8 xv = vload8(0, x + (size_t)m * K + k8 * 8);
-      float a = acc[m];
-      a += bf16f(wv.s0) * bf16f(xv.s0); a += bf16f(wv.s1) * bf16f(xv.s1);
-      a += bf16f(wv.s2) * bf16f(xv.s2); a += bf16f(wv.s3) * bf16f(xv.s3);
-      a += bf16f(wv.s4) * bf16f(xv.s4); a += bf16f(wv.s5) * bf16f(xv.s5);
-      a += bf16f(wv.s6) * bf16f(xv.s6); a += bf16f(wv.s7) * bf16f(xv.s7);
-      acc[m] = a;
-    }
+    BF16_STEP(wv, k8)
   }
+#endif
 #if KSPLIT == 1
   for (int m = 0; m < M; ++m) out[(size_t)m * N + n] = acc[m];
 #else

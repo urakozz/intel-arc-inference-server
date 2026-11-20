@@ -326,7 +326,8 @@ struct MtpSizes {
   size_t hctl, gdn_spec, kv_k, kv_v, hh, dh, logits;
   size_t dv_logits;   // spec 8 §11: fp32 [|V'|], 0 without a draft vocabulary
   // Spec 32: one sequence on Qwen3.8's GDN shapes - the deferred GDN rows (two parities, 64 rows each) and, over the
-  // bf16 KV cache, the deep verify lists' chain scratch (a GDN state and the conv rows 16..).
+  // bf16 KV cache, the deep verify lists' chain scratch (a GDN state and the conv rows 16..). PERF-51: on Ornith's, the
+  // deferred rows alone.
   size_t deep;
   size_t total() const { return hctl + gdn_spec + kv_k + kv_v + hh + dh + logits + dv_logits + deep; }
 };
@@ -337,6 +338,8 @@ struct MtpDims {
   // Spec 32: kernels::kGdnPendParityBytes and kGdnConvXLayerBytes (kernels/kernels.h; engine.cc holds them equal).
   static constexpr size_t kGdnPendParity = size_t{48} * (64 * (16 + 48) * 128 * 2 + 64 * 48 * 2 * 4);
   static constexpr size_t kGdnConvXLayer = size_t{48} * 10240 * 2;
+  // PERF-51: kernels::gdn_pend_parity_bytes at Ornith's 30 GDN layers, 16 / 32 heads (engine.cc holds them equal).
+  static constexpr size_t kGdnPendParityOrnith = size_t{30} * (64 * (16 + 32) * 128 * 2 + 64 * 32 * 2 * 4);
   // Spec 19a (plan 19a Task 4): the most GDN state slots a buffer may carry - a verify
   // list at M rows needs M slots, and DecodeScratchDims::kM = 8 bounds M.
   static constexpr uint32_t kMaxSlots = 8;

@@ -295,10 +295,15 @@ MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t
   s.dh = size_t{desc.hidden} * kBf16;
   s.logits = size_t{kMaxK} * Q::kVocab * kFp32;
   s.dv_logits = size_t{draft_vocab} * kFp32;   // spec 8 §11: the compact head's logits
-  // Spec 32: Engine's gdn_pend_ and, where the deep lists are built, gdn_x_ / conv_x_ (runtime/engine.cc).
+  // Spec 32: Engine's gdn_pend_ and, where the deep lists are built (bf16 KV, no draft vocabulary:
+  // DecodeScratchDims::rows' kDeepM), gdn_x_ / conv_x_ (runtime/engine.cc).
   if (seqs == 1 && desc.gdn_layers == 48 && desc.gdn_k_heads == kernels::kRefGdnKHeads &&
       desc.gdn_v_heads == kernels::kRefGdnVHeads)
-    s.deep = 2 * kGdnPendParity + (kv == KvCache::Bf16 ? gdn_state_bytes(desc) + size_t{desc.gdn_layers} * kGdnConvXLayer : 0);
+    s.deep = 2 * kGdnPendParity + (kv == KvCache::Bf16 && draft_vocab == 0
+                                       ? gdn_state_bytes(desc) + size_t{desc.gdn_layers} * kGdnConvXLayer
+                                       : 0);
+  else if (seqs == 1 && desc.gdn_layers == 30 && desc.gdn_k_heads == 16 && desc.gdn_v_heads == 32)
+    s.deep = 2 * kGdnPendParityOrnith;   // PERF-51
   return s;
 }
 

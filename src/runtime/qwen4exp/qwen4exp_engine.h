@@ -141,7 +141,7 @@ class Qwen4ExpEngine {
   size_t expert_words_checked() const { return expert_words_checked_; }
 
   // --- spec 21-QFN-v1d: prefill (defined in b70_qwen4exp_prefill) --------------------------------------------------------
-  // Runs `ids` from the current pos in chunks of `chunk` (0 = kPfC 2048) through runtime/qwen4exp/qwen4exp_prefill.h's
+  // Runs `ids` from the current pos in chunks of `chunk` (0 = model().pf_rows: 2048 or 4096) through qwen4exp_prefill.h's
   // walk on every device, then decode's head on the last row: leaves pos += ids.size() on every device and the first
   // generated id pending in cur_token (Engine::prefill's contract). The state it writes (KV, compressed keys and tail
   // rings, GDN state and conv rings, the PLE rings) is decode's to a cosine bar (the GEMMs' sum orders, the chunked GDN,
@@ -160,14 +160,14 @@ class Qwen4ExpEngine {
   size_t prefill_launches() const;
   size_t prefill_launches(uint32_t dev) const;
   bool prefill_ready() const { return pf_bytes_ != 0; }
-  // u32 [layers][kPfC][32]: every layer's route rows of the last chunk (rows [0, C) written; pf_route_at), each
+  // u32 [layers][pf_rows][32]: every layer's route rows of the last chunk (rows [0, C) written; pf_route_at), each
   // layer's from the device holding it. Throws before the first prefill.
   std::vector<uint32_t> read_prefill_routes();
-  // QSA layer `layer`'s selection rows of the last chunk, u32 [kPfC][kListRow] (positions [0, count), the count at
+  // QSA layer `layer`'s selection rows of the last chunk, u32 [pf_rows][kListRow] (positions [0, count), the count at
   // kCountWord; rows [0, C) written, the dense rows' identity lists only when the chunk had sparse rows - or the
   // injected rows when injected() is on).
   std::vector<uint32_t> read_prefill_selection(uint32_t layer);
-  // fp32 [kPfC][max_len / 4]: the last chunk's rows' block scores in the LAST QSA layer (read_last_qsa_scores' rule;
+  // fp32 [pf_rows][max_len / 4]: the last chunk's rows' block scores in the LAST QSA layer (read_last_qsa_scores' rule;
   // rows [0, C) written when the chunk had sparse rows).
   std::vector<float> read_prefill_last_qsa_scores();
   // The injected run on prefill (spec 21-QFN-v1 F3's debug input): with injected() on, before each chunk the engine calls
@@ -179,7 +179,8 @@ class Qwen4ExpEngine {
   // chunk ends at a block end or at the prompt end (runtime::prefill_chunk_rows), and the hook is called on the host
   // after each chunk whose end is a multiple of kBlock (pos == end_pos, n_active 0 on every device; on two cards device
   // 0 may already run the next chunk - save_state / save_kv read the block end's state all the same) and once at the
-  // prompt end (the first generated id in cur_token).
+  // prompt end (the first generated id in cur_token). PERF-30: on two cards the chunks run in pairs, and only a pair's
+  // end is hooked (a block end inside a pair is not: no moment holds its state), as under tp.
   static constexpr uint32_t kBlock = 2048;
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
@@ -190,9 +191,10 @@ class Qwen4ExpEngine {
   // runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs give both HOST layouts, the same under --parallel 1 and --parallel pp
   // (spec 16b's rule). state_bytes() is 115,651,592 B at the real 48 layers and kv_bytes(n) the blocks of n positions
   // from a block start (25,344 B a position; derived). save_state copies the state at pos() (the zero runs' history:
-  // zeros, the PLE ids as EOS); load_state writes it back and sets pos on every device (n_active 0; the GDN state into
-  // slot 0, made live; the prefill that follows every restore, spec 7 §3.3 step 4, sets the pending id). save_kv /
-  // load_kv copy [begin, end), begin a multiple of 4 (the cache's is of kBlock); begin == end copies nothing. Every
+  // zeros, the PLE ids as EOS; the rows a commit left replayed first); load_state writes it back and sets pos on every
+  // device (n_active 0; the GDN state into gdn_state with no committed rows over it; the prefill that follows every
+  // restore, spec 7 §3.3 step 4, sets the pending id). save_kv / load_kv copy [begin, end), begin a multiple of 4 (the
+  // cache's is of kBlock); begin == end copies nothing. Every
   // call runs on the devices' immediate lists with no step in flight (a failed hand-off is reset by load_state,
   // which overwrites everything a session reads). KV bf16 (spec 21-QFN-v1 decision 8): kv_cache() is KvCache::Bf16, the
   // prefix cache's kv_form 0.
@@ -208,8 +210,9 @@ class Qwen4ExpEngine {
   //
   // On iff the model was loaded with its head (loader::load_qwen4exp(..., mtp = true)); off, none of this allocates
   // or captures anything and every call below throws. On, every device's scratch holds kVerifyRows rows and its GDN
-  // layers three more state slots, the last device the head's buffers (runtime/qwen4exp/qwen4exp_sizes.h), and the
-  // engine captures a verify list per M = 1..4 on every device and kMaxDraft draft lists on the last.
+  // layers their pending rows (PERF-51), the last device the head's buffers (runtime/qwen4exp/qwen4exp_sizes.h), and
+  // the engine captures a verify list per M = 1..4 and a GDN flush list on every device and kMaxDraft draft lists on
+  // the last.
   //
   // One iteration at pos = n, pending id x_n in cur_token[0] (every device's):
   //   draft(k)       the head drafts d_1..d_k on the last device: step i at position n - 1 + i on (R, t) - step 0 on
@@ -220,11 +223,12 @@ class Qwen4ExpEngine {
   //                  `more(i, p)` (open-work 49, greedy): p the head's softmax probability at draft i's argmax (fp32,
   //                  max-subtracted, draft_prob.cl); false stops drafting there, so draft_ids() may hold fewer than k.
   //   verify(k)      the main model at M = k + 1 rows (x_n, d_1..d_k at n..n+k) on every device: row r's argmax in
-  //                  verify_ids()[r], its logits row r (read_logits_into(host, k + 1)), its GDN state into slot
-  //                  (live + r) % 4, every row its own selection and top-10; then the head's KV pass over the rows
-  //                  (positions n - 1 .. n + k - 1 from (R_{n-1+r}, x_{n+r})).
-  //   commit(j, t)   j accepted drafts (0 <= j <= k): pos = n + j + 1 on every device, row j's GDN slot live, R_{n+j}
-  //                  the next draft's R, t the pending id. Rows past j are stale and never read (plan 21-QFN-v1e Review Focus 2).
+  //                  verify_ids()[r], its logits row r (read_logits_into(host, k + 1)), its GDN recurrence inputs into
+  //                  the pending rows (PERF-51; no per-row state), every row its own selection and top-10; then the
+  //                  head's KV pass over the rows (positions n - 1 .. n + k - 1 from (R_{n-1+r}, x_{n+r})).
+  //   commit(j, t)   j accepted drafts (0 <= j <= k): pos = n + j + 1 on every device, rows 0..j left for the next
+  //                  launch to replay into the GDN state (Control::gdn_pend), R_{n+j} the next draft's R, t the pending
+  //                  id. Rows past j are stale and never read (plan 21-QFN-v1e Review Focus 2).
   // verify(0) + commit(0, verify_ids()[0]) is one plain token; with the head on, ingest() and generate() run exactly
   // that (pos 0: the plain list, then its pre-mixer H into the head's R row), so the head's KV stays filled whatever
   // mix of plain and speculative steps runs; prefill() runs the head's pass per chunk (Review Focus 4).
@@ -252,9 +256,8 @@ class Qwen4ExpEngine {
   uint32_t last_verify_rows() const { return last_verify_m_; }
   // QSA layer `layer`'s selection of the last verify's row r (positions, then the count) - M2's per-row compare.
   std::vector<uint32_t> read_verify_selection(uint32_t layer, uint32_t r);
-  // fp32 [48][128][128] of GDN layer `layer`'s state in slot s (0..3; the live one is Control::gdn_live).
-  std::vector<float> read_gdn_slot(uint32_t layer, uint32_t s);
-  uint32_t gdn_live() const;
+  // fp32 [48][128][128] of GDN layer `layer`'s committed state (PERF-51: the rows the last commit left replayed first).
+  std::vector<float> read_gdn_state(uint32_t layer);
   // u32 [count + 1] of draft step 0's selection (positions, then the count) and step i's route row (the head's MoE).
   std::vector<uint32_t> read_draft_selection();
   std::vector<uint32_t> read_draft_routes(uint32_t i);
@@ -292,10 +295,11 @@ class Qwen4ExpEngine {
   uint8_t* snap_ptr(const SnapRun& r) const;
   void settle_all(const char* what);
   // Spec 21-QFN-v1e: the MTP head's plain token (verify(0) + commit(0), or at pos 0 the plain list and R_0 into hh row 0),
-  // what ingest() and generate() run with the head on; the live GDN slot copied into slot 0 (before anything that
-  // reads gdn_state directly: prefill); the check every MTP call starts with.
+  // what ingest() and generate() run with the head on; PERF-51: the rows the last commit left replayed into gdn_state
+  // on every device (the flush lists, at n_active 0; before anything that reads gdn_state directly: a snapshot, a
+  // prefill); the check every MTP call starts with.
   void mtp_step1();
-  void mtp_normalise_live();
+  void flush_gdn();
   void require_mtp(const char* what) const;
   Control* hctl() const;
 

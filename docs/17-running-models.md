@@ -13,7 +13,7 @@ Every flag is listed in the [README](../README.md#flags), and environment variab
 - Prefill (reading the prompt) speeds are the prompt pass alone, on a 4,096-token prompt unless a row says otherwise.
 - Decode (writing the answer) speeds use MTP speculative decoding with prompt lookup on, which are the defaults. They
   are measured on the golden code, prose and tool-call prompts, 256 generated tokens each, and given as
-  `code / prose / tool calls`.
+  `code / prose / tool calls`
 - With several requests at once, the figure is their total.
 - Context lengths are what the memory planner gives per card with the MTP head loaded, at the default 1.5 GB reserve
   on the 32.53 GB card.
@@ -216,7 +216,7 @@ section "The DFlash P0".
 ```
 
 `b70-decode` defaults to one card, `--max-len 16384` and no speculative decoding, so its rows stay comparable over
-time. [15-step-anatomy.md](15-step-anatomy.md) explains how to read `--profile`.
+time. [15-step-anatomy.md](15-step-anatomy.md) explains how to read `--profile`
 
 To benchmark a running server with llama-benchy, start it without `--prefix-split-last` (that flag is for sessions):
 
@@ -374,7 +374,7 @@ card, is refused. `--parallel tp` is Qwen3.8's only.
 ### Options that differ from Qwen3.8
 
 - `--kv-cache int8` is not built for Ornith's attention shape. It is not needed for context, since 262,144 fits in
-  bf16. `B70_KV_CACHE` must stay `bf16`.
+  bf16. `B70_KV_CACHE` must stay `bf16`
 - Use the default prompt pass (`l0`). `l0-int8` is opt-in and slower than the bf16 pass on Ornith. It also loses
   routing accuracy against f32: on the box, 1314 differing expert sets on the prefill path against the bf16
   reference's 1140, and no 8-bit activation scheme studied won that back. Its model-level accuracy checks are
@@ -474,7 +474,7 @@ kernel can move the server's host memory to swap, and the experts read from it t
 ### Truncated runs: `--layers`
 
 `--layers N` loads the first N layers, then the final mixer and the head. It is a development mode. `--layers auto`
-takes the planner's N: 18-19 of Intel's layers on one card, 38-39 on two, depending on `--max-len`.
+takes the planner's N: 18-19 of Intel's layers on one card, 38-39 on two, depending on `--max-len`
 
 The prefill scratch is about 1.5 GB per card (the 512 MiB expert weight batch and score rows that grow with
 `--max-len`). It is planned into `--layers auto` and `--max-len auto` when a run prefills; with it, Intel's forms fit
@@ -524,7 +524,7 @@ Two cards split the model one of two ways:
 Decode with MTP is as fast or faster under `tp` (0.99-1.35x `pp`'s on text). Prefill is slower: 0.69x `pp`'s for a
 32k-token prompt and 0.81x for 128k. Both cards still run their own hyper-connections and part of the indexer's block
 scoring (the scoring itself is split across the cards). `tp` needs `--lm-head int8` in `b70-decode` (`b70-serve`
-always uses it) and `--layers N` rather than `--layers auto`, and has no `--pipeline-split`.
+always uses it) and `--layers N` rather than `--layers auto`, and has no `--pipeline-split`
 
 ```sh
 # every command below needs the PLE int8 file beside the snapshot (<snapshot>-ple-int8/)

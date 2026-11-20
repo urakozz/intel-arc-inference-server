@@ -53,6 +53,7 @@ void verify_names(const model::ModelDesc& d, unsigned M, bool int8, std::set<std
   out.insert(kernels::gemv_variant(M, ab4.K, ab4.N, ab4.S, ab4.layout));
   if (M >= 2) out.insert(kernels::int4_linear_variant(kernels::LinearKind::SmallM, M, ab4.K, ab4.N, ab4.S, ab4.layout));
   out.insert(kernels::gdn_step_slots_variant(M, d.gdn_layers, k, v));
+  out.insert(kernels::gdn_step_defer_variant(M, d.gdn_layers, k, v));   // PERF-51: one slot's lists, the flush (M 1)
   out.insert(kernels::prep_gated_head_variant(M, k, v));
   out.insert(kernels::attn_prep_variant(M, q, kv));
   out.insert(kernels::attn_v2_variant(M, kT, q, kv));
@@ -100,14 +101,12 @@ void draft_names(const model::ModelDesc& d, bool int8, unsigned nv, std::set<std
 // step_mtp_kv (the prefill's head KV fill) beyond the main chunk's binaries.
 void prefill_names(const model::ModelDesc& d, std::set<std::string>& out) {
   const unsigned H = d.hidden;
-  out.insert(kernels::pf_res_fold_variant(H, d.ffn_fold_s() == 0 ? 0 : 1, kG));   // final norm
-  out.insert(kernels::pf_norm_finish_variant(H, kG, kG));
-  out.insert(kernels::pf_embed_gather_variant(H));
-  out.insert(kernels::pf_norm_finish_strided_variant(H, kG, kG, 2 * H));
-  out.insert(kernels::pf_res_fold_zero_variant(H, kG));
+  out.insert(kernels::pf_res_norm_variant(H, d.ffn_fold_s() == 0 ? 0 : 1, kG));   // final norm (PERF-85: one launch)
+  out.insert(kernels::pf_mtp_front_variant(H, kG));                       // the gather + both pre-fc norms
+  out.insert(kernels::pf_res_norm_zero_variant(H, kG));                   // input_layernorm
   out.insert(kernels::pf_bf16_slab_variant(2 * H));                       // fc
   out.insert(kernels::pf_bf16_slab_variant(H));                           // q||k||v
-  out.insert(kernels::pf_attn_prep_q16_variant(d.fa_q_heads, d.fa_kv_heads));
+  out.insert(kernels::kv_only(kernels::pf_attn_prep_q16_variant(d.fa_q_heads, d.fa_kv_heads)));
 }
 
 }  // namespace
@@ -153,10 +152,11 @@ int main(int argc, char** argv) {
   // A few names spelled out, so a change in a helper is seen here and not only as a
   // missing binary on the box.
   CHECK(bound.count("gdn_step_slots_M1_G30_GK16V32") && bound.count("gdn_step_slots_M4_G30_GK16V32"));
+  CHECK(bound.count("gdn_step_defer_M1_G30_GK16V32") && bound.count("gdn_step_defer_M4_G30_GK16V32"));
   CHECK(bound.count("moe_M4_E256_T8_D2048_I512") && bound.count("attn_prep_M2_Q16KV2_S1"));
   CHECK(bound.count("prep_norm_finish_M3_K2048_G20_W20_X4096") &&
         bound.count("prep_res_fold_M1_K2048_SP1_G20_Z") && bound.count("gemv_bf16_M1_K4096_N2048"));
-  CHECK(bound.count("pf_res_fold_K2048_SP1_G20_Z") && bound.count("pf_bf16_slab_K4096"));
+  CHECK(bound.count("pf_res_norm_K2048_SP1_G20_Z") && bound.count("pf_bf16_slab_K4096"));
   // Spec 15 §13: the int4 checkpoint's a||b and Qwen3.8's argmax (vocab_used 248077).
   CHECK(bound.count("gemv_M4_K2048_N128_S1_L1") && bound.count("gemv_bf16_M4_K2048_N128_C16_S16"));
   CHECK(bound.count("argmax_stage1_M3") && !bound.count("argmax_stage1_M3_V248070"));

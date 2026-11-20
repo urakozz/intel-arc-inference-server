@@ -43,15 +43,16 @@ namespace runtime::prefill {
 //     `Context::kernel(variant, entry, wg)`; the cache lives beside `Context`
 //     instead (`kernels.h`).
 //
-// Ten launches per call, in the order `gdn.cc` lists them. `C` must be in
+// At most ten launches per call (gdn_chunk_launches), in the order `gdn.cc` lists them. `C` must be in
 // (0, s.chunk_cap()]; anything else throws.
 //
-// `backend` (phase 2): on a MoE model the l0 backend binds the one-launch intra-chunk kernel; l0-int8 (and every
-// dense model) keeps the four launches.
+// `backend` (phase 2): on a MoE model the l0 backend binds the one-launch intra-chunk kernel; l0-int8 keeps the
+// four launches. `one_card` (PERF-19): Qwen3.8's one-card walk binds it on both backends; a pipeline stage and
+// the tp card keep the four.
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const void* qkvz_partials, const float* ab_out, float* gdn_state,
                uint16_t* conv_ring, const void* small, uint16_t* y,
-               PrefillBackend backend = PrefillBackend::L0, bool partials_bf16 = false);
+               PrefillBackend backend = PrefillBackend::L0, bool partials_bf16 = false, bool one_card = false);
 
 // What one `gdn_chunk` call appends to the L0 list. Asserted through
 // `Context::launches()` rather than restated in prose; Task 14's launch
@@ -60,10 +61,10 @@ inline constexpr size_t kGdnChunkLaunches = 10;
 
 // MoE-model prefill phase 2: a MoE model's
 // gdn_chunk (Ornith) runs the conv + l2norm as one launch (pf_gdn_front, bitwise) and, on the l0 backend, A / T /
-// w, u / A2 as one launch (pf_gdn_intra, judged). Qwen3.8 on one card runs the front too (nine launches); its TP
-// card keeps the ten.
+// w, u / A2 as one launch (pf_gdn_intra, judged). Qwen3.8 runs the front too (nine launches), and on one card the
+// one-launch intra as well (six); its TP card keeps the ten.
 // The launches one gdn_chunk call appends for `d` on backend `b`.
-size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
+size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b, bool one_card);
 
 // Phase 3 Task 2: on a MoE model the a||b runs as the dense GEMM (tiled_gemm on its B slab, made once by
 // make_route_slabs - still one launch) into rows at pitch pf_route_slab_pitch(128) = 256 in the MoE scratch's

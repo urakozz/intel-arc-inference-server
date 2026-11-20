@@ -1,12 +1,14 @@
 #include "loader/qwen4exp_repack.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <ranges>
 #include <stdexcept>
 
 #include "common/bf16.h"
 #include "common/repack.h"
+#include "loader/lm_head_int8.h"
 #include "loader/rope_table.h"
 #include "loader/rtn.h"
 
@@ -82,6 +84,13 @@ void agree(const SafetensorsSet& st, const std::string& base, Q4Form f, const ch
 }
 
 }  // namespace
+
+bool q4_hc_int8() {
+  const char* e = std::getenv("B70_Q4_HC");
+  if (e == nullptr || *e == '\0' || std::strcmp(e, "bf16") == 0) return false;
+  if (std::strcmp(e, "int8") == 0) return true;
+  throw std::runtime_error(std::string("B70_Q4_HC=") + e + ": expected int8 or bf16 (unset: bf16)");
+}
 
 model::Q4Forms q4_forms(const SafetensorsSet& st, const Qwen4ExpDesc& d) {
   const auto& ts = st.tensors();
@@ -364,9 +373,16 @@ void Q4Checkpoint::hc(const std::string& base, bool inject, std::vector<uint8_t>
     std::memcpy(rows.data() + size_t(d_.hc_low) * HC, inj.weight, size_t(d_.hc) * HC * 2);
     L.src_bf16_bytes += size_t(d_.hc) * HC * 2;
   }
-  common::repack_bf16_tiled(rows.data(), HC, o.down_n, reinterpret_cast<uint16_t*>(out.data() + o.down));
   const LinearSrc up = bf16(base + ".input_mix_weight_up", d_.hc_low, HC);
-  common::repack_bf16_tiled(up.weight, d_.hc_low, HC, reinterpret_cast<uint16_t*>(out.data() + o.up));
+  if (o.int8) {   // PERF-66: int8 tiles, their fp16 scales right after them (q4_hc.cl reads them there)
+    quantise_int8_g32_tiled(rows.data(), HC, o.down_n, reinterpret_cast<int8_t*>(out.data() + o.down),
+                            reinterpret_cast<uint16_t*>(out.data() + o.down + size_t(HC) * o.down_n));
+    quantise_int8_g32_tiled(up.weight, d_.hc_low, HC, reinterpret_cast<int8_t*>(out.data() + o.up),
+                            reinterpret_cast<uint16_t*>(out.data() + o.up + size_t(d_.hc_low) * HC));
+  } else {
+    common::repack_bf16_tiled(rows.data(), HC, o.down_n, reinterpret_cast<uint16_t*>(out.data() + o.down));
+    common::repack_bf16_tiled(up.weight, d_.hc_low, HC, reinterpret_cast<uint16_t*>(out.data() + o.up));
+  }
   L.src_bf16_bytes += size_t(d_.hc_low) * HC * 2;
   one_plus_w(base + ".hc_norm.weight", HC, out.data() + o.norm);
   L.src_bf16_bytes += size_t(HC) * 2;

@@ -53,7 +53,14 @@ once when the model loads. The recipe (Hadamard rotation, int8 math) is called "
 
 On the dense model Qwen3.8, only the MLP runs h8: gate‖up and down, the two linears where K = 17,408 and most of
 the gain is. The four mixer linears (the gated delta-net's input and output projections, and attention's q‖k‖v
-and o_proj) run in bf16, exactly as on `l0`.
+and o_proj) run in bf16, exactly as on `l0`
+
+On one card (and in the two-card pipeline), a short chunk (640 rows or fewer) runs its MLP in bf16 too; under `tp` it stays h8. The h8 path rebuilds every weight as rotated int8 on
+each chunk, whatever its length, so a 30-row chunk paid a full chunk's weight rebuild. The bf16 short-chunk
+GEMMs read the int4 weights directly and spread the few rows over every core. The MLP of a 16-row chunk then takes
+46 ms instead of 244 ms (all 64 layers), and a 512-row chunk takes 239 to 256 ms instead of 257 to 268. At 768 rows
+the two paths tie, and above that h8 is faster. This matters because the prefix cache cuts prompts at 2048-token
+blocks, so most prompts end in a short chunk, and every follow-up turn of a session is one.
 
 Why not the mixer too: an all-linears form was built and is faster, but on a 2,820-token prompt it made one row pick
 a token the f32 reference puts 7.9 logits below its own top, which is not a near-tie. With the mixer in bf16 the

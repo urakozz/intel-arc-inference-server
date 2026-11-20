@@ -16,7 +16,8 @@ struct PrefixCache::Entry {
   std::vector<uint32_t> ids;             // ids [begin, end), exact
   void* state = nullptr;                 // snapshot only
   void* kv = nullptr;                    // KV [begin, end) in save_kv's layout (may be null)
-  size_t bytes = 0;                      // one allocation: state then KV
+  void* head = nullptr;                  // PERF-92: a prompt-end snapshot's head image (may be null)
+  size_t bytes = 0;                      // one allocation: state, KV, head
   std::vector<Entry*> children;
   uint64_t lru = 0;
   int pins = 0;
@@ -59,9 +60,10 @@ PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_byte
                   block, alloc, std::move(hash), kv_form) {}
 
 PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, KvBytesFn kv_bytes, uint32_t block,
-                         HostAlloc& alloc, HashFn hash, uint64_t kv_form)
+                         HostAlloc& alloc, HashFn hash, uint64_t kv_form, size_t head_bytes)
     : budget_(budget_bytes),
       state_bytes_(state_bytes),
+      head_bytes_(head_bytes),
       kv_bytes_(std::move(kv_bytes)),
       block_(block),
       alloc_(alloc),
@@ -147,7 +149,7 @@ void* PrefixCache::alloc(size_t bytes) {
 }
 
 PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_t end,
-                                       bool is_block_end) {
+                                       bool is_block_end, bool head) {
   Slot slot;
   if (end == 0 || ids.size() < end) return slot;
   if (is_block_end != (end % block_ == 0))
@@ -193,7 +195,8 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
     return slot;
   }
   const size_t kv = end > base ? kv_bytes_(end - base) : 0;
-  const size_t bytes = state_bytes_ + kv;
+  const size_t hb = head ? head_bytes_ : 0;
+  const size_t bytes = state_bytes_ + kv + hb;
   // Spec 18d: an engine without recurrent state (state_bytes() == 0) has an
   // empty snapshot at a block end - a restore point that costs nothing. It gets no
   // allocation (a HostAlloc need not hand out zero bytes) and a non-null marker, so the
@@ -210,12 +213,14 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   e->hash = hash(node->hash, e->ids.data(), end - base);
   e->state = p;
   e->kv = kv ? static_cast<uint8_t*>(p) + state_bytes_ : nullptr;
+  e->head = hb ? static_cast<uint8_t*>(p) + state_bytes_ + kv : nullptr;
   e->bytes = bytes;
   e->lru = ++clock_;
   used_ += bytes;
   node->children.push_back(e.get());
   pin(e.get());
   slot.state = p;
+  slot.head = e->head;
   if (kv) slot.kv.push_back({base, end, e->kv});
   slot.entries.push_back(e.get());
   all_.push_back(std::move(e));
@@ -244,7 +249,8 @@ void PrefixCache::release() {
 }
 
 PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,
-                                    const std::vector<uint32_t>& resident, bool resident_valid) {
+                                    const std::vector<uint32_t>& resident, bool resident_valid,
+                                    bool whole) {
   Plan out;
   const uint32_t len = uint32_t(prompt.size());
   if (len == 0) return out;
@@ -256,7 +262,9 @@ PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,
   const bool cont = resident_valid && !resident.empty() && resident.size() <= len - 1 &&
                     lcp == resident.size();
 
-  // The deepest snapshot whose ids are prompt[0:p], p <= len - 1.
+  // The deepest snapshot whose ids are prompt[0:p], p <= len - 1 - or with `whole` p == len for one
+  // that keeps a head image (PERF-92).
+  const uint32_t top = whole ? len : len - 1;
   std::vector<Entry*> chain;             // matched blocks, root excluded
   Entry* node = root_.get();
   Entry* best = nullptr;
@@ -264,13 +272,13 @@ PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,
     for (Entry* c : node->children) {
       if (c->is_block || !c->ready) continue;
       const uint32_t e = c->end;
-      if (e > len - 1) continue;
+      if (e > len - 1 && (e > top || c->head == nullptr)) continue;
       if (best != nullptr && e <= best->end) continue;
       if (c->hash != hash(node->hash, prompt.data() + node->end, e - node->end)) continue;
       if (!same_ids(c->ids, prompt.data() + node->end)) continue;
       best = c;
     }
-    if (node->end + block_ > len - 1) break;
+    if (node->end + block_ > top) break;
     Entry* b = find_block(node, prompt.data() + node->end);
     if (b == nullptr) break;
     chain.push_back(b);
@@ -281,6 +289,7 @@ PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,
     out.kind = Plan::Restore;
     out.restart = best->end;
     out.state = best->state;
+    if (best->end == len) out.head = best->head;
     const uint32_t d = std::min(lcp, best->end);
     out.kv_from = best->end;
     for (Entry* b : chain) {
@@ -323,9 +332,10 @@ PrefixSession::PrefixSession(EngineIface& engine, size_t budget_bytes, HostAlloc
   cache_ = std::make_unique<PrefixCache>(budget_bytes, engine.state_bytes(),
                                          [this](uint32_t n) { return engine_.kv_bytes(n); },
                                          engine.block(), *alloc, PrefixCache::HashFn{},
-                                         store_root(engine.kv_form(), engine.drafter_key()));
+                                         store_root(engine.kv_form(), engine.drafter_key()),
+                                         engine.head_bytes());
   engine_.set_block_hook([this](uint32_t end, bool is_block_end) {
-    if (prompt_ != nullptr) store(*prompt_, end, is_block_end);
+    if (prompt_ != nullptr) store(*prompt_, end, is_block_end, end == head_at_);
   });
 }
 
@@ -333,12 +343,13 @@ PrefixSession::~PrefixSession() {
   if (cache_) engine_.set_block_hook({});
 }
 
-void PrefixSession::store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end) {
+void PrefixSession::store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end, bool head) {
   const auto t0 = std::chrono::steady_clock::now();
-  const PrefixCache::Slot slot = cache_->reserve(ids, end, is_block_end);
+  const PrefixCache::Slot slot = cache_->reserve(ids, end, is_block_end, head);
   if (!slot.empty()) {
     if (slot.state) engine_.save_state(slot.state);
     for (const auto& p : slot.kv) engine_.save_kv(p.begin, p.end, p.host);
+    if (slot.head) engine_.save_head(slot.head);
     cache_->commit(slot);
   }
   store_ms_ += ms_since(t0);
@@ -354,7 +365,8 @@ PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt,
     r.prefill_ms = ms_since(t0);
     return r;
   }
-  const PrefixCache::Plan plan = cache_->plan(prompt, resident_, valid_);
+  // PERF-92: the whole prompt may be restored only where its prompt-end snapshot sits at len (no split).
+  const PrefixCache::Plan plan = cache_->plan(prompt, resident_, valid_, !split_last);
   valid_ = false;
   store_ms_ = 0;
   try {
@@ -367,16 +379,19 @@ PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt,
         engine_.load_kv(run.begin, run.end, run.host);
         r.kv_bytes += engine_.kv_bytes(run.end - run.begin);
       }
+      if (plan.head) engine_.load_head(plan.head);   // PERF-92: pos == len, the first id pending
     }
     r.restore_ms = ms_since(t0);
     const auto t1 = std::chrono::steady_clock::now();
     // split_last: the tail to len - 1 (its last hook call is the prompt-end snapshot, at
     // len - 1), then the last id through one decode replay. Otherwise the whole tail in one
-    // prefill, the prompt-end snapshot at len. Either way pos == len with the first
-    // generated id pending; plan() keeps restart <= len - 1.
+    // prefill, the prompt-end snapshot at len (with the head image, PERF-92). Either way pos ==
+    // len with the first generated id pending; plan() keeps restart <= len - 1 except for a
+    // whole-prompt restore, which leaves nothing to prefill.
     const size_t end = split_last ? prompt.size() - 1 : prompt.size();
     if (plan.restart < end) {
       prompt_ = &prompt;
+      head_at_ = split_last ? 0 : end;
       engine_.prefill(std::vector<uint32_t>(prompt.begin() + plan.restart, prompt.begin() + end));
       prompt_ = nullptr;
     }

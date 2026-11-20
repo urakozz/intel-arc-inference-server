@@ -44,6 +44,7 @@
 #include "check.h"
 #include "common/bf16.h"
 #include "common/repack.h"
+#include "loader/lm_head_int8.h"
 #include "loader/qwen4exp_layout.h"
 #include "loader/qwen4exp_repack.h"
 #include "loader/quant.h"
@@ -298,6 +299,26 @@ void check_one_plus_w(const uint8_t* dst, const uint16_t* w, uint32_t n) {
 void check_hc(const Qwen4ExpDesc& d, const std::vector<uint8_t>& blk, const Tensors& ts, const std::string& base, bool inject) {
   const loader::Q4HcOffsets o = loader::q4_hc_offsets(d, inject);
   CHECK_EQ(blk.size(), o.total);
+  if (o.int8) {   // PERF-66: each linear is quantise_int8_g32_tiled of its rows (down's padded with zero rows), byte
+                  // for byte, its fp16 scales right after its tiles
+    const uint32_t HC = d.hc_n();
+    std::vector<uint16_t> rows(size_t(o.down_n) * HC, 0);
+    std::memcpy(rows.data(), view<uint16_t>(ts, base + ".input_mix_weight_down.weight"), size_t(d.hc_low) * HC * 2);
+    if (inject)
+      std::memcpy(rows.data() + size_t(d.hc_low) * HC, view<uint16_t>(ts, base + ".block_inject_weight.weight"),
+                  size_t(d.hc) * HC * 2);
+    const auto same = [&](const uint16_t* w, uint32_t K, uint32_t N, size_t off) {
+      std::vector<uint8_t> want(loader::q4_hc_i8_bytes(K, N));
+      loader::quantise_int8_g32_tiled(w, K, N, reinterpret_cast<int8_t*>(want.data()),
+                                      reinterpret_cast<uint16_t*>(want.data() + size_t(K) * N), 3);
+      CHECK(std::memcmp(blk.data() + off, want.data(), want.size()) == 0);
+    };
+    same(rows.data(), HC, o.down_n, o.down);
+    same(view<uint16_t>(ts, base + ".input_mix_weight_up.weight"), d.hc_low, HC, o.up);
+    CHECK_EQ(o.up, loader::q4_hc_i8_bytes(HC, o.down_n));
+    check_one_plus_w(blk.data() + o.norm, view<uint16_t>(ts, base + ".hc_norm.weight"), HC);
+    return;
+  }
   const uint16_t* dt = reinterpret_cast<const uint16_t*>(blk.data() + o.down);
   const uint16_t* ut = reinterpret_cast<const uint16_t*>(blk.data() + o.up);
   const uint16_t* dn = view<uint16_t>(ts, base + ".input_mix_weight_down.weight");
@@ -624,6 +645,17 @@ void check_form(const Q4Forms& want, bool mtp) {
     CHECK(std::memcmp(ck.embed(), view<uint16_t>(ts, d.prefix + "embed_tokens.weight"), loader::q4_embed_bytes(d)) == 0);
     CHECK(std::memcmp(ck.lm_head(), view<uint16_t>(ts, "lm_head.weight"), size_t(d.vocab) * H * 2) == 0);
     check_hc(d, ck.final_mixer(), ts, d.prefix + "hyper_connection_mixer", false);
+    {   // PERF-66: the int8 form of the same blocks (hc_int8, B70_Q4_HC=int8), a layer's and the final mixer
+      Qwen4ExpDesc d8 = d;
+      d8.hc_int8 = true;
+      loader::Q4Checkpoint ck8(d8, set);
+      loader::Q4HostLayer h8;
+      ck8.repack_layer(0, h8);
+      CHECK_EQ(h8.bytes().hc_attn, loader::q4_layer_bytes(d8, 0).hc_attn);
+      check_hc(d8, h8.hc_attn, ts, Qwen4ExpDesc::layer_prefix(0) + "attn_hyper_connection", true);
+      check_hc(d8, h8.hc_mlp, ts, Qwen4ExpDesc::layer_prefix(0) + "mlp_hyper_connection", true);
+      check_hc(d8, ck8.final_mixer(), ts, d.prefix + "hyper_connection_mixer", false);
+    }
     const loader::Q4PleConstants pc = ck.ple_constants();
     CHECK(pc.multipliers[0] == 11 && pc.multipliers[2] == 17 && pc.sizes[15] == 1024 && pc.offsets[3] == 3300);
     CHECK_EQ(ck.skip_ple_shards(), size_t(2));
@@ -711,6 +743,11 @@ int main() {
   CHECK_EQ(g.hc_attn + g.hc_mlp, size_t(2) * (loader::q4_bf16_bytes(10240, 336) + loader::q4_bf16_bytes(320, 10240) +
                                               size_t(10240) * 4));
   CHECK_EQ(loader::q4_final_mixer_bytes(d), loader::q4_bf16_bytes(10240, 320) * 2 + size_t(10240) * 4);
+  Qwen4ExpDesc d8 = d;   // PERF-66: the int8 hyper-connection blocks (qwen4exp_layout.h's numbers)
+  d8.hc_int8 = true;
+  CHECK_EQ(loader::q4_hc_offsets(d8, true).total, size_t(7178240));
+  CHECK_EQ(loader::q4_final_mixer_bytes(d8), size_t(7004160));
+  CHECK_EQ(loader::q4_hc_offsets(d, true).total, size_t(13475840));
   CHECK_EQ(loader::q4_lm_head_bytes(d, true), size_t(248320) * 2560 + size_t(248320) * 4);
   CHECK_EQ(g.router, loader::q4_bf16_bytes(2560, 528));
   CHECK_EQ(g.gdn_qkvz, loader::q4_bf16_bytes(2560, 16384));

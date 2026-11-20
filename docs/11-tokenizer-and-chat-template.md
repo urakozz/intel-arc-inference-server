@@ -131,13 +131,13 @@ removed.
 A request's `chat_template_kwargs` reach the template through `chat::Template::render(..., kwargs)` for models
 whose `server::ChatFormat` reads them. Kolibri-1 reads them (including `reasoning_effort`); Qwen only takes
 `enable_thinking`. Ornith and Kolibri-1 have their own template tests, `template_ornith_test` and
-`template_kolibri_test`.
+`template_kolibri_test`
 
 ### Tool calls
 
 Rendering tool definitions into the prompt is covered by the parity vectors. Parsing tool calls out of the model's
 output is server code, one parser per format in `src/server/toolcall*.cc`: Qwen's XML format (Qwen3.8, Ornith,
-Flash-Next) and Kolibri-1's hermes JSON inside `<tool_call>`.
+Flash-Next) and Kolibri-1's hermes JSON inside `<tool_call>`
 
 ### Key order is part of the prompt
 

@@ -1118,7 +1118,7 @@ int run(int argc, char** argv) {
   const auto t0 = std::chrono::steady_clock::now();
   size_t pp_launches = 0;
   if (have_prefill_len || prefill) {
-    if (have_prefill_len) runtime::prefill::profile_reset();
+    runtime::prefill::profile_reset();
     eng.prefill(ids, pp_chunk);
     if (have_prefill_len) pp_launches = eng.prefill_launches() - pp_launches_setup;
   } else {
@@ -1134,7 +1134,9 @@ int run(int argc, char** argv) {
                ids.size(), ingest_ms,
                ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
                pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), pp_launches, eng.pos());
-  if (have_prefill_len) runtime::prefill::profile_report("--prefill-length", ingest_ms);
+  // --prefill too: the prompt pass with the MTP head or the DFlash drafter attached (--spec), which --bench refuses.
+  if (have_prefill_len || prefill)
+    runtime::prefill::profile_report(have_prefill_len ? "--prefill-length" : "--prefill", ingest_ms);
   if (!have_prefill_len && !prefill)
     std::print(stderr, "ingest: {:d} ids in {:.1f} ms ({:.2f} ms/token), pos {:d}\n", ids.size(),
                ingest_ms, ids.empty() ? 0.0 : ingest_ms / double(ids.size()), eng.pos());

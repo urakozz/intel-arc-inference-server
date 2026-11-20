@@ -36,8 +36,10 @@ struct Qwen4ExpEngine::Stage {
   mutable l0::CmdList imm;
   Control* ctl;
   std::optional<CapturedStep> step, inj_step;
-  // Spec 21-QFN-v1e, with the MTP head: the verify lists at M = 1..4 and (the last device) the draft steps.
+  // Spec 21-QFN-v1e, with the MTP head: the verify lists at M = 1..4 and (the last device) the draft steps; PERF-51 the
+  // GDN flush list (the committed rows into the state).
   std::vector<CapturedStep> verify, drafts;
+  std::optional<CapturedStep> flush;
 };
 
 Qwen4ExpEngine::Stage& Qwen4ExpEngine::st(uint32_t dev) const {
@@ -109,6 +111,11 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
         st(i).verify.push_back(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
                                      nullptr, nullptr, ls, &mtp_bind_));
       }
+    for (uint32_t i = 0; i < p.devices; ++i) {
+      ListSpec ls;
+      ls.kind = ListKind::GdnFlush;
+      st(i).flush.emplace(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, nullptr, nullptr, nullptr, ls));
+    }
     for (uint32_t s = 0; s < kMaxDraft; ++s) {
       ListSpec ls;
       ls.kind = ListKind::Draft;
@@ -544,6 +551,7 @@ std::vector<uint16_t> Qwen4ExpEngine::read_idx_keys(uint32_t layer, uint32_t fir
 std::vector<uint8_t> Qwen4ExpEngine::read_layer_state(uint32_t layer) {
   const model::Qwen4ExpDesc& d = model_.desc;
   if (layer >= d.layers) throw std::out_of_range("read_layer_state: layer " + std::to_string(layer));
+  flush_gdn();   // PERF-51: the committed GDN state
   Stage& s = st(model_.placement.device_of(layer));
   const Qwen4ExpBuffers& b = s.buffers;
   std::vector<uint8_t> out;
@@ -606,17 +614,9 @@ uint8_t* Qwen4ExpEngine::snap_ptr(const SnapRun& r) const {
     case SnapTensor::IdxKeys: m = &b.idx_keys; break;
     case SnapTensor::IdxTail: m = &b.idx_tail; break;
     case SnapTensor::GdnState: {
-      // The LIVE slot (spec 8: after a commit the state may be one of gdn_spec's): the layer's slice of gdn_state at
-      // slot 0, else gdn_spec's slot (layer-major: [its GDN layers][3][state]).
-      const uint32_t live = mtp_ ? st(r.device).ctl->gdn_live : 0;
-      if (live == 0) {
-        m = &b.gdn_state;
-        break;
-      }
-      const size_t S = gdn_state_bytes_per_layer(model_.desc), i = r.offset / S;
-      if (r.offset % S != 0 || r.bytes != S || !b.gdn_spec)
-        throw std::logic_error("runtime::qwen4exp::Qwen4ExpEngine: a GDN state run that is not one layer's state");
-      return static_cast<uint8_t*>(b.gdn_spec->ptr()) + (i * (kGdnSlots - 1) + (live - 1)) * S;
+      // gdn_state, always (PERF-51: the rows a commit left are replayed into it first - save_state flushes).
+      m = &b.gdn_state;
+      break;
     }
     case SnapTensor::ConvRing: m = &b.conv_ring; break;
     case SnapTensor::PleIds:
@@ -640,6 +640,7 @@ void Qwen4ExpEngine::save_state(void* host) {
   settle_all("save_state");
   if (verify_k_ != kNoVerify)
     throw std::logic_error("runtime::qwen4exp::Qwen4ExpEngine::save_state: a verify is pending its commit");
+  flush_gdn();
   auto* h = static_cast<uint8_t*>(host);
   const uint32_t eos = model_.desc.ple_eos;
   const uint8_t* shadow = pf_shadow_;   // inside a two-card block hook: device 0's runs, in this order
@@ -663,8 +664,8 @@ void Qwen4ExpEngine::load_state(const void* host, uint32_t p) {
                              " exceeds max_len " + std::to_string(max_len_));
   if (broken_) reset();   // a failed hand-off: the restore below rewrites what the session reads
   settle_all("load_state");
-  // The GDN state goes into slot 0, made live (spec 8's rule) - before snap_ptr resolves the runs.
-  for (auto& s : st_) s->ctl->gdn_live = 0;
+  // The GDN state goes into gdn_state with no committed rows over it (PERF-51).
+  for (auto& s : st_) s->ctl->gdn_pend = 0;
   verify_k_ = kNoVerify;
   const auto* h = static_cast<const uint8_t*>(host);
   for (const SnapRun& r : state_runs(model_.desc, model_.placement, p, mtp())) {
@@ -813,6 +814,8 @@ void Qwen4ExpEngine::verify(uint32_t k) {
   std::vector<CapturedStep*> lists;
   for (uint32_t i = 0; i < st_.size(); ++i) lists.push_back(&st(i).verify[k]);
   submit(lists);
+  // PERF-51: the lists replayed the committed rows; a second replay must not (gdn_step.cl, DEFERRED)
+  for (auto& s : st_) s->ctl->gdn_pend &= ~0xFFu;
 }
 
 void Qwen4ExpEngine::commit(uint32_t j, uint32_t next_token) {
@@ -824,10 +827,10 @@ void Qwen4ExpEngine::commit(uint32_t j, uint32_t next_token) {
   if (next_token >= model_.desc.vocab)
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::commit: next_token " + std::to_string(next_token) +
                              " is outside the vocabulary");
-  // Row j's GDN state is slot (live + j) % 4 on every device: make it live. Row j's pre-mixer H (hh row 1 + j) is
-  // the next iteration's R_{pos-1}.
+  // PERF-51: rows 0..j are what the next launch replays into the GDN state - they sit in the parity the verify wrote,
+  // the other one (gdn_step.cl, DEFERRED). Row j's pre-mixer H (hh row 1 + j) is the next iteration's R_{pos-1}.
   for (auto& s : st_) {
-    s->ctl->gdn_live = (s->ctl->gdn_live + j) % kGdnSlots;
+    s->ctl->gdn_pend = (j + 1) | ((((s->ctl->gdn_pend >> 8) & 1u) ^ 1u) << 8);
     s->ctl->pos = verify_pos_ + j + 1;
     s->ctl->n_active = 1;
     s->ctl->cur_token[0] = next_token;
@@ -839,9 +842,9 @@ void Qwen4ExpEngine::commit(uint32_t j, uint32_t next_token) {
 
 void Qwen4ExpEngine::mtp_step1() {
   if (pos() == 0) {
-    // No R_{-1}: the plain list, which reads and writes GDN slot 0 (live is 0 at pos 0 - reset() and load_state()
-    // both leave it so), then its pre-mixer H (the final mixer's combine materialised it in b.H) into hh row 0.
-    if (st(0).ctl->gdn_live != 0) mtp_normalise_live();
+    // No R_{-1}: the plain list, which reads and writes gdn_state (no committed rows at pos 0 - reset() and
+    // load_state() both leave none), then its pre-mixer H (the final mixer's combine materialised it in b.H) into hh
+    // row 0.
     step_once();
     Stage& L = st(uint32_t(st_.size()) - 1);
     L.imm.copy(mtp_->hh_row(0), L.buffers.H.ptr(), size_t(model_.desc.hc_n()) * 2);
@@ -851,17 +854,15 @@ void Qwen4ExpEngine::mtp_step1() {
   commit(0, verify_ids()[0]);
 }
 
-void Qwen4ExpEngine::mtp_normalise_live() {
-  if (!mtp_) return;
-  const uint32_t live = st(0).ctl->gdn_live;
-  if (live == 0) return;
-  const model::Qwen4ExpDesc& d = model_.desc;
-  const size_t S = gdn_state_bytes_per_layer(d);
-  for (uint32_t i = 0; i < st_.size(); ++i) {
-    Stage& s = st(i);
-    for (uint32_t l = model_.placement.first(i); l < model_.placement.end(i); ++l)
-      if (!d.is_qsa(l)) s.imm.copy(s.buffers.gdn_state_layer(l), s.buffers.gdn_slot(l, live), S);
-    s.ctl->gdn_live = 0;
+void Qwen4ExpEngine::flush_gdn() {
+  if (!mtp_ || (st(0).ctl->gdn_pend & 0xFFu) == 0) return;
+  for (auto& s : st_) {
+    const uint32_t n = s->ctl->n_active;
+    s->ctl->n_active = 0;   // the flush list replays and stores only
+    s->queue.execute(s->flush->list, &s->fence);
+    s->fence.wait();
+    s->ctl->gdn_pend &= ~0xFFu;
+    s->ctl->n_active = n;
   }
 }
 
@@ -917,17 +918,16 @@ std::vector<uint32_t> Qwen4ExpEngine::read_verify_selection(uint32_t layer, uint
   return out;
 }
 
-std::vector<float> Qwen4ExpEngine::read_gdn_slot(uint32_t layer, uint32_t slot) {
+std::vector<float> Qwen4ExpEngine::read_gdn_state(uint32_t layer) {
   const model::Qwen4ExpDesc& d = model_.desc;
-  if (layer >= d.layers || d.is_qsa(layer)) throw std::out_of_range("read_gdn_slot: layer " + std::to_string(layer));
-  if (slot != 0) require_mtp("read_gdn_slot");
+  if (layer >= d.layers || d.is_qsa(layer)) throw std::out_of_range("read_gdn_state: layer " + std::to_string(layer));
+  settle_all("read_gdn_state");
+  flush_gdn();
   Stage& s = st(model_.placement.device_of(layer));
   std::vector<float> v(gdn_state_bytes_per_layer(d) / 4);
-  s.imm.copy(v.data(), s.buffers.gdn_slot(layer, slot), v.size() * 4);
+  s.imm.copy(v.data(), s.buffers.gdn_state_layer(layer), v.size() * 4);
   return v;
 }
-
-uint32_t Qwen4ExpEngine::gdn_live() const { return st(0).ctl->gdn_live; }
 
 std::vector<uint32_t> Qwen4ExpEngine::read_draft_selection() {
   require_mtp("read_draft_selection");

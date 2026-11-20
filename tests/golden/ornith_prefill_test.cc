@@ -255,17 +255,18 @@ int main(int argc, char** argv) {
     eng.reset();
     const size_t before = eng.prefill_launches();
     eng.prefill(prose);
-    const size_t want = runtime::prefill::step_chunk_launches(d, backend, n) + 5;
+    const size_t want = runtime::prefill::step_chunk_launches(d, backend, n, eng.kv_cache()) + 5;
     CHECK_EQ(eng.prefill_launches() - before, want);
-    // 2100 ids: two chunks (2048 + 52)
+    // 2100 ids: two chunks (2048 + 52); the second starts at 2048, deep enough that its attention splits (one merge
+    // launch a FA layer, step_chunk_launches at its pos)
     std::vector<uint32_t> longer(2100);
     for (size_t i = 0; i < longer.size(); ++i) longer[i] = prose[i % prose.size()];
     eng.reset();
     const size_t b2 = eng.prefill_launches();
     eng.prefill(longer);
     CHECK_EQ(eng.prefill_launches() - b2,
-             runtime::prefill::step_chunk_launches(d, backend, 2048) +
-                 runtime::prefill::step_chunk_launches(d, backend, 52) + 5);
+             runtime::prefill::step_chunk_launches(d, backend, 2048, eng.kv_cache()) +
+                 runtime::prefill::step_chunk_launches(d, backend, 52, eng.kv_cache(), 2048) + 5);
     std::printf("1. walk: %zu launches per chunk (%s), + 5 for the head\n",
                 runtime::prefill::step_chunk_launches(d, backend, 2048),
                 runtime::prefill_backend_name(backend));

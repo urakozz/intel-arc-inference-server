@@ -70,6 +70,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -178,6 +179,10 @@ class Job {
   // yet joined), and which.
   bool inflight = false;
   BatchEngineIface::Chunk chunk{0, nullptr, 0, false, false};
+  // PERF-91: the first id, peeked after the prompt's last chunk and already through the per-id rules (sent), and the
+  // reason it ends the request - both settled when the first step returns it.
+  std::optional<uint32_t> first;
+  std::optional<Finish::Reason> first_ends;
 };
 
 // Spec 7 per slot: the scheduler's prefix-cache calls. PrefixSlots is the implementation
@@ -265,6 +270,7 @@ class Scheduler {
   BatchEngineIface::Chunk next_chunk(const Job& job, bool cut);
   bool prefill_plan(PrefillCall& call);
   void prefill_done(PrefillCall& call, std::exception_ptr error);
+  void peek_first(const std::shared_ptr<Job>& job);   // PERF-91
   bool overlapped_prefills(bool after_step);   // plan 13b: join the finished chunks, start the next ones
   bool card_busy(uint32_t card) const;         // replica x slots: a chunk still runs on the card
   std::vector<bool> chunk_on_card() const;     // replica x slots: a chunk not yet joined on the card

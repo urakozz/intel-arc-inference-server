@@ -475,7 +475,7 @@ Walked moe_walk(Dev& dv, MoeBufs& b, uint32_t C, bool shb) {
            arg_val(b0), arg_val(b1), arg_val(0u)});
   }
   w.y = dv.rd<uint16_t>(b.xg, size_t(tmax) * kq::kPfTm * H);
-  dv.go(v, "q4_pf_moe_combine", H / 256, C, 1,
+  dv.go(v, "q4_pf_moe_combine", H / kq::kPfCombineCols, C, 1,
         {PtrArg(b.rt.ptr()), PtrArg(b.hdr.ptr()), PtrArg(b.pair_row.ptr()), PtrArg(b.xg.ptr()), PtrArg(b.out.ptr()), arg_val(C)});
   w.out = dv.rd<uint16_t>(b.out, size_t(C) * H);
   return w;

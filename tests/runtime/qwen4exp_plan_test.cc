@@ -24,6 +24,7 @@
 //      whole), a token's reads a card (D, R) against the derivation (2.53 / 0.627 GB), and for both replication forms
 //      (the embedding and the MTP head on both cards; the embedding on card 0, the head on card 1) at the bench's and
 //      the server's configurations: each card's plan, cache, resident count a layer and f, the pinned total.
+//   9. PERF-36: the 4096-row prefill scratch's cost (pf_chunk_choice) - one card, pp, tp at the default settings.
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -294,12 +295,14 @@ int main(int argc, char** argv) {
   {
     // the launches per chunk (the formula, asserted; printed): a gated residual 4, a GDN layer 84, a QSA layer 73 +
     // score / select (sparse rows) + flash (dense rows) + sparse (sparse rows), the PLE layer + 31, device 0 + 1
-    // phase 2: gdn_chunk_q4_launches() is 9 (conv + l2norm in one launch). The MoE block, plan 2026-11-12: 9 (router,
+    // phase 2: gdn_chunk_q4_launches() is 9 (conv + l2norm in one launch), PERF-19: 6 (the intra-chunk stages in one
+    // launch). The MoE block, plan 2026-11-12: 9 (router,
     // route, the sort's three launches, gather, one fused GEMM a projection, combine; our int4 shared expert);
     // phase 3 Task 8: the router and a||b are a slab re-lay + pf_gemm each - the MoE 10, a||b 2
     const size_t moe = 10;
     const size_t gdn = 2 * 4 + 32 + 2 + rq::gdn_chunk_q4_launches() + 6 + moe,
                  qsa = 2 * 4 + 26 + 2 + 3 + 1 + 6 + moe, ple = 1 + 1 + 26 + 3;
+    CHECK_EQ(rq::gdn_chunk_q4_launches(), size_t(6));
     CHECK_EQ(gdn, size_t(58) + rq::gdn_chunk_q4_launches());
     CHECK_EQ(qsa, size_t(56));
     CHECK_EQ(rq::pf_batches_gu(ours), 7u);
@@ -352,6 +355,15 @@ int main(int argc, char** argv) {
     // the plan with prefill (Intel's forms, 32768): the prefill scratch is planned; the N that fit
     const std::vector<rq::DevicePlan> pp = rq::plan(i18, Q4Placement::one(i18), 32768, true, false, false, true);
     CHECK_EQ(pp[0].prefill_scratch, p32.total() + rq::pf_ring_bytes(i18));   // + the read ahead's buffers and rows
+    // PERF-30: two cards walk the chunks in pairs - each device also holds the pair's first chunk's H, inj and y
+    // rows; a pair reads through the read ahead when its rows together reach kPfRingMinRows (a chunk alone: its own)
+    CHECK_EQ(rq::pf_pair_bytes(i18), size_t(2048) * (10240 * 2 + 4 * 4 + 2560 * 2));
+    for (uint32_t dev = 0; dev < 2; ++dev)
+      CHECK_EQ(rq::prefill_state(i18, 2, dev, 32768),
+               p32.total() + rq::pf_link_bytes(i18, dev) + rq::pf_pair_bytes(i18) + rq::pf_ring_bytes(i18));
+    CHECK_EQ(rq::prefill_state(i18, 1, 0, 32768), p32.total() + rq::pf_ring_bytes(i18));
+    CHECK(rq::pf_ring_staged(2048, 2048) && rq::pf_ring_staged(2048, 0) && rq::pf_ring_staged(640, 640));
+    CHECK(!rq::pf_ring_staged(1279, 0) && !rq::pf_ring_staged(640, 639) && !rq::pf_ring_staged(64, 64));
     const uint32_t n1d = rq::layers_that_fit(intel, 1, 32768, true, false, kCard, kReserve, false);
     const uint32_t n1p = rq::layers_that_fit(intel, 1, 32768, true, false, kCard, kReserve, true);
     const uint32_t n2d = rq::layers_that_fit(intel, 2, 32768, true, false, kCard, kReserve, false);
@@ -515,6 +527,58 @@ int main(int argc, char** argv) {
                     model::q4_tp_ends_name(e), (ple + host) / 1e9, ple / 1e9, host / 1e9);
       }
     }
+  }
+  // --- 9. PERF-36: the prompt pass's chunk rows (pf_chunk_choice) ----------------------------------------------------
+  // The 4096-row scratch against the 2048-row one at the default settings (the int8 head, the MTP head, the 1.5 GB
+  // reserve, 32.53 GB cards) - the whole model one card, pp (the split chosen at 2048) and tp (the embedding on card 0):
+  // what it adds to each card's plan (the prompt pass's experts), what of that decode keeps out of the experts' reach,
+  // the projected decode either way and the rule's pick, with the routes uniform (no profile here: the box's profile,
+  // beside the checkpoint, decides at load). --layers 18 on one card (every expert resident): the wide chunk.
+  {
+    const size_t xb = loader::q4_gate_up_block_bytes(ours) + loader::q4_down_block_bytes(ours);
+    for (uint32_t L : {32768u, 65536u, 131072u}) {
+      const rq::PrefillSizes n = rq::prefill_sizes(ours, L), w = rq::prefill_sizes(ours, L, rq::kPfCWide);
+      CHECK(w.total() > n.total() && w.slab == n.slab && w.w == n.w && w.scores == 2 * n.scores && w.lists == 2 * n.lists);
+      CHECK_EQ(rq::pf_lend_bytes(ours, L, rq::kPfC, nullptr),
+               n.xg + n.w + n.h + n.partials + n.slab + n.gdn + n.o + n.q16 + n.attn_out + n.idx_f32 + n.xn + n.x +
+                   n.down_f32 + n.y + 2 * rq::kPfRingBytes);
+      struct Form {
+        const char* what;
+        Q4Placement pl;
+        bool tp;
+      };
+      for (const Form& f : {Form{"one card", Q4Placement::one(ours), false},
+                            Form{"pp", Q4Placement::two(ours, rq::pp_split(ours, L, true, true, true).split), false},
+                            Form{"tp", Q4Placement::tp2(ours, model::Q4TpEnds::Split), true}}) {
+        if (f.tp && L > 65536) continue;
+        const auto at = [&](uint32_t rows) {
+          return f.tp ? rq::tp_expert_budget(ours, f.pl, L, true, true, true, caps, kReserve, rows)
+                      : rq::expert_budget(ours, f.pl, L, true, true, true, caps, kReserve, rows);
+        };
+        const rq::ExpertBudget bn = at(rq::kPfC), bw = at(rq::kPfCWide);
+        CHECK(bn.pf_rows == rq::kPfC && bw.pf_rows == rq::kPfCWide);
+        const rq::PfChunkChoice c = rq::pf_chunk_choice(ours, bn, bw, nullptr, f.tp);
+        const size_t eb = f.tp ? bn.expert_bytes : xb;
+        for (uint32_t i = 0; i < bn.devices; ++i) {
+          CHECK(c.grow[i] > c.held[i] && c.held[i] > 0);
+          std::printf("PERF-36: %s at %u, card %u: the 4096-row scratch adds %.3f GB (%zu experts%s of %zu cached), decode "
+                      "keeps %.3f GB of it (%zu)\n", f.what, L, i, c.grow[i] / 1e9, c.grow[i] / eb, f.tp ? " halves" : "",
+                      bn.cache[i] / eb, c.held[i] / 1e9, c.held[i] / eb);
+        }
+        std::printf("PERF-36: %s at %u: projected decode %.3f -> %.3f ms a token (%+.2f %%, uniform routes): %u rows\n",
+                    f.what, L, c.ms_narrow, c.ms_wide, 100 * (c.ms_wide / c.ms_narrow - 1), c.rows);
+      }
+    }
+    const Qwen4ExpDesc i18 = rq::truncated(ours, 18);
+    const Q4Placement p18 = Q4Placement::one(i18);
+    const rq::PfChunkChoice c18 =
+        rq::pf_chunk_choice(i18, rq::expert_budget(i18, p18, 32768, true, false, true, caps, kReserve),
+                            rq::expert_budget(i18, p18, 32768, true, false, true, caps, kReserve, rq::kPfCWide), nullptr,
+                            false);
+    CHECK_EQ(c18.rows, rq::kPfCWide);
+    CHECK(rq::fits(rq::plan(i18, p18, 32768, true, false, false, true, rq::kPfCWide), caps, kReserve));
+    std::printf("PERF-36: --layers 18 one card at 32768 (every expert resident): %u rows, the scratch +%.3f GB\n", c18.rows,
+                c18.grow[0] / 1e9);
   }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
               "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused without the expert tier\n",

@@ -34,9 +34,15 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZE REQUIRED IMPORTED_TARGET level-zero)
 include(cmake/ocloc.cmake)
 
-# Adds -DB70_KERNEL_DIR="<abs path>" so tests and probes can find .bin files.
+# kernels::kernel_dir() (src/kernels/kernels.h) names the compiled device binaries' directory, so tests and probes
+# can find .bin files. The absolute path lives in this one generated file rather than in a -D on every target: a -D
+# differs between two trees and would keep ccache from sharing any object that includes kernels.h.
+file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/kernel_dir.cc"
+     CONTENT "namespace kernels {\nconst char* kernel_dir() { return \"@B70_KERNEL_DIR@\"; }\n}  // namespace kernels\n"
+     @ONLY)
+add_library(b70_kernel_dir STATIC "${CMAKE_BINARY_DIR}/kernel_dir.cc")
 function(b70_target_kernel_dir TARGET)
-  target_compile_definitions(${TARGET} PRIVATE B70_KERNEL_DIR="${B70_KERNEL_DIR}")
+  target_link_libraries(${TARGET} PRIVATE b70_kernel_dir)
 endfunction()
 
 # spec §10 asks for `make golden`. The oracle cannot run from this build tree:

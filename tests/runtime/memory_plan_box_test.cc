@@ -126,7 +126,9 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   CHECK_EQ(b.conv_ring.size(), ps.conv_ring);
   CHECK_EQ(b.kv_k.size(), ps.kv_k);
   CHECK_EQ(b.kv_v.size(), ps.kv_v);
-  const runtime::DecodeScratchSizes ds = runtime::DecodeScratchDims::sizes(L, d);
+  // Spec 32e: the rows the engine sized its decode scratch for (64 where the deep verify lists can be built).
+  const runtime::DecodeScratchSizes ds =
+      runtime::DecodeScratchDims::sizes(L, d, runtime::DecodeScratchDims::rows(d, mtp, eng.kv_cache(), 1, dv.rows != 0));
   CHECK_EQ(b.resid.size(), ds.resid);
   CHECK_EQ(b.x.size(), ds.x);
   CHECK_EQ(b.partials.size(), ds.partials);

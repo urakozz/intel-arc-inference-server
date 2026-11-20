@@ -223,6 +223,94 @@ void case_unbuffered_first_frame() {
               static_cast<long long>(first_ms), static_cast<long long>(last_gap_ms));
 }
 
+// PERF-91: the first id (the prefill's pending one) streams before the first decode call runs; an engine that cannot
+// say it (peek off) streams it after that call, as before.
+void case_first_id_before_step() {
+  for (const bool peek : {true, false}) {
+    Fixture fixture;
+    fixture.engine.peek = peek;
+    fixture.engine.script = ids(fixture, "one two three");
+    fixture.engine.step_ms = 50;
+    json request = chat_body();
+    request["stream"] = true;
+    request["max_tokens"] = 3;
+    auto client = fixture.client();
+    const StreamReply reply = stream(client, "/v1/chat/completions", request);
+    CHECK_EQ(reply.status, 200);
+    CHECK_EQ(streamed_text(sse_frames(reply.body)), std::string("one two three "));
+    Clock::time_point first{};
+    for (size_t i = 0; i < reply.chunks.size(); ++i)
+      if (first == Clock::time_point{} && reply.chunks[i].find("\"content\"") != std::string::npos)
+        first = reply.arrivals[i];
+    CHECK_EQ(fixture.engine.step_times.size(), 3U);
+    CHECK(peek ? first < fixture.engine.step_times[0] : first > fixture.engine.step_times[0]);
+  }
+}
+
+// PERF-91: a first id that ends the request (EOS, a stop string, max_tokens 1) ends it as before - the same body, and
+// the engine still runs the one call that consumes it (plain and MTP: the burst cut back to it).
+void case_first_id_ends() {
+  struct Case {
+    const char* script;
+    json stop;
+    uint32_t max_tokens;
+    uint32_t mtp;
+  };
+  const Case cases[] = {{"<|im_end|> x", json::array(), 8, 0}, {"STOP alpha", json::array({"STOP"}), 8, 0},
+                        {"one two", json::array(), 1, 0},      {"<|im_end|> x y z", json::array(), 8, 3},
+                        {"STOP alpha beta gamma", json::array({"STOP"}), 8, 3}, {"one two three four five", json::array(), 1, 3}};
+  for (const Case& c : cases) {
+    std::string bodies[2];
+    std::vector<uint32_t> truncations[2];
+    size_t at[2] = {};
+    for (const bool peek : {true, false}) {
+      Fixture fixture;
+      fixture.engine.peek = peek;
+      fixture.engine.mtp = c.mtp;
+      fixture.engine.script = ids(fixture, c.script);
+      json request = chat_body();
+      request["stop"] = c.stop;
+      request["max_tokens"] = c.max_tokens;
+      auto client = fixture.client();
+      const auto response = client.Post("/v1/chat/completions", request.dump(), "application/json");
+      CHECK(response);
+      CHECK_EQ(response->status, 200);
+      json body = json::parse(response->body);
+      body.erase("id");
+      body.erase("created");
+      bodies[peek] = body.dump();
+      truncations[peek] = fixture.engine.truncations;
+      at[peek] = fixture.engine.at;
+    }
+    CHECK_EQ(bodies[1], bodies[0]);
+    CHECK_EQ(truncations[1], truncations[0]);
+    CHECK_EQ(at[1], at[0]);
+    CHECK_EQ(at[1], 1U);
+  }
+}
+
+// A sampled request's first id comes from sampling, not the prompt's argmax: the server hands the request's sampling to
+// pending_id, so the streamed first id is the one the first decode call returns (the server throws on a mismatch);
+// a greedy request keeps the argmax. With peek off the first call draws it.
+void case_first_id_sampled() {
+  for (const bool peek : {true, false})
+    for (const bool sampled : {false, true}) {
+      Fixture fixture;
+      fixture.engine.peek = peek;
+      fixture.engine.script = ids(fixture, "one two three");
+      fixture.engine.sampled_script = ids(fixture, "four five six");
+      json request = chat_body();
+      request["stream"] = true;
+      request["max_tokens"] = 3;
+      request["temperature"] = sampled ? 1.0 : 0.0;
+      request["seed"] = 7;
+      auto client = fixture.client();
+      const StreamReply reply = stream(client, "/v1/chat/completions", request);
+      CHECK_EQ(reply.status, 200);
+      CHECK_EQ(streamed_text(sse_frames(reply.body)), std::string(sampled ? "four five six " : "one two three "));
+    }
+}
+
 void case_stop_strings() {
   Fixture fixture;
   fixture.engine.script = ids(fixture, "alpha beta STOP gamma <|im_end|>");
@@ -515,6 +603,9 @@ int main() {
   case_unknown_fields();
   case_tool_calls();
   case_request_log();
-  std::printf("protocol_test OK: 13 cases\n");
+  case_first_id_before_step();
+  case_first_id_ends();
+  case_first_id_sampled();
+  std::printf("protocol_test OK: 16 cases\n");
   return 0;
 }

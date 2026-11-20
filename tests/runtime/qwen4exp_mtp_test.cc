@@ -17,8 +17,9 @@
 //   M2  (F5, Review Focus 2) verify rows are decode rows: from S0 (a prompt prefilled - a short one, and 2100 ids so
 //       the selection is active) the reference is 4 plain steps (verify(0) + commit(0)); for k = 1..3 the restored S0
 //       verifies the true greedy drafts at M = k + 1 and row r is BITWISE step r: logits, route rows, every QSA
-//       layer's selection, K / V written at pos + r, the GDN state in slot (live + r) % 4; then commit(k) and 8 more
-//       plain ids equal the reference's;
+//       layer's selection, K / V written at pos + r, the GDN state after commit(r) (PERF-51: the verify writes no
+//       per-row state - row r's is the committed state of a verify(k) + commit(r) from S0, against the plain step's
+//       after its commit); then commit(k) and 8 more plain ids equal the reference's;
 //   M3  (F5) greedy lossless: 64 ids by draft / verify / commit at K = 1, 2, 3 (spec 8's greedy acceptance) equal
 //       generate(64) with the head - and with the head off (a second engine): the short and the 2100-id prompts;
 //   cost the verify's cost: ms a draft step and a verify at K = 0..3 (median of 16 iterations, interleaved), and per
@@ -31,7 +32,7 @@
 // exists for the synthetics): N4 - every verify row's logits cosine >= 0.99999 against the plain step's; N6 - the ids
 // (a verify row's argmax, the 8 after commit, M3's 64) identical to the plain run's or first differing at a near-tie
 // by the golden tie rule (tests/server/greedy_tie.h: the plain row's runner-up within 1 bf16 ulp; the comparison
-// stops there). Routes, selections, K / V and the GDN slots are printed (differing rows, cosine), not gated: they
+// stops there). Routes, selections, K / V and the GDN states are printed (differing rows, cosine), not gated: they
 // follow from the rows' last bits. The cost line of each arm is the speed before / after.
 // Exit 77 (SKIP) when the checkpoint is absent, has no MTP head, or two GPUs are needed.
 #include <algorithm>
@@ -184,7 +185,7 @@ struct StepRef {
   std::vector<uint32_t> routes;                     // [layers][32]
   std::vector<std::vector<uint32_t>> sel;           // per QSA layer
   std::vector<std::vector<uint16_t>> k, v;          // per QSA layer: the row written at pos + r
-  std::vector<std::vector<float>> gdn;              // per GDN layer: the live state after the step
+  std::vector<std::vector<float>> gdn;              // per GDN layer: the committed state after the step (PERF-51)
   uint32_t id = 0;
 };
 
@@ -203,12 +204,17 @@ StepRef record(rq::Qwen4ExpEngine& e, uint32_t r, uint32_t M, uint32_t n) {
       s.sel.push_back(e.read_verify_selection(l, r));
       s.k.push_back(e.read_kv(l, n + r, 1, false));
       s.v.push_back(e.read_kv(l, n + r, 1, true));
-    } else {
-      s.gdn.push_back(e.read_gdn_slot(l, (e.gdn_live() + r) % rq::kGdnSlots));
     }
   }
   s.id = e.verify_ids()[r];
   return s;
+}
+// PERF-51: every GDN layer's committed state (read_gdn_state replays the rows the last commit left first).
+std::vector<std::vector<float>> gdn_states(rq::Qwen4ExpEngine& e) {
+  std::vector<std::vector<float>> v;
+  for (uint32_t l = 0; l < e.model().desc.layers; ++l)
+    if (!e.model().desc.is_qsa(l)) v.push_back(e.read_gdn_state(l));
+  return v;
 }
 
 std::string first_diff(const StepRef& a, const StepRef& b) {
@@ -269,21 +275,32 @@ int run_m2(rq::Qwen4ExpEngine& e, const Ids& base, bool bitwise) {
       ref.push_back(record(e, 0, 1, n + r));
       g.push_back(ref.back().id);
       e.commit(0, ref.back().id);
+      ref.back().gdn = gdn_states(e);
     }
     // the greedy sequence from S0: g[0..3] stepped above, then generate's ids (its first is g[4], the pending one)
     Ids full(g.begin(), g.begin() + rq::kVerifyRows);
     const Ids cont = e.generate(8);
     full.insert(full.end(), cont.begin(), cont.end());
     for (uint32_t k = 1; k <= rq::kMaxDraft; ++k) {
-      e.reset();
-      e.load_kv(0, n, kv.data());
-      e.load_state(st.data(), n);
-      e.set_token(g[0]);
-      for (uint32_t i = 0; i < k; ++i) e.set_draft_input(i, g[1 + i]);
-      e.verify(k);
+      const auto from_s0 = [&] {
+        e.reset();
+        e.load_kv(0, n, kv.data());
+        e.load_state(st.data(), n);
+        e.set_token(g[0]);
+        for (uint32_t i = 0; i < k; ++i) e.set_draft_input(i, g[1 + i]);
+        e.verify(k);
+      };
+      // row r's GDN state: the committed state after verify(k) + commit(r) from S0 (PERF-51: no per-row state)
+      std::vector<std::vector<std::vector<float>>> row_gdn;
       for (uint32_t r = 0; r <= k; ++r) {
-        // row r's GDN slot is (live + r) % 4 with live 0 after load_state; record() reads that slot
-        const StepRef got = record(e, r, k + 1, n);
+        from_s0();
+        e.commit(r, g[r + 1]);
+        row_gdn.push_back(gdn_states(e));
+      }
+      from_s0();
+      for (uint32_t r = 0; r <= k; ++r) {
+        StepRef got = record(e, r, k + 1, n);
+        got.gdn = row_gdn[r];
         if (bitwise) {
           const std::string diff = first_diff(got, ref[r]);
           if (!diff.empty()) {
@@ -308,7 +325,7 @@ int run_m2(rq::Qwen4ExpEngine& e, const Ids& base, bool bitwise) {
           gdn = std::min(gdn, cosine(got.gdn[i].data(), ref[r].gdn[i].data(), got.gdn[i].size()));
         const bool ok = c >= 0.99999 && tv.v != greedy_tie::Verdict::Diverged;
         std::printf("M2 gemm_sm prompt %zu, k %u, row %u: logits cosine %.7f (N4 >= 0.99999), id %s; route rows "
-                    "differing %zu, selections differing %zu, K / V cosine %.7f, GDN slot cosine %.7f%s\n", len, k, r, c,
+                    "differing %zu, selections differing %zu, K / V cosine %.7f, GDN state cosine %.7f%s\n", len, k, r, c,
                     verdict_name(tv), route_rows, sel, kv, gdn, ok ? "" : " - FAIL");
         bad += !ok;
       }
@@ -329,8 +346,8 @@ int run_m2(rq::Qwen4ExpEngine& e, const Ids& base, bool bitwise) {
       }
     }
     std::printf("M2 [%s] prompt of %zu ids (pos %u): verify rows at M = 2, 3, 4 %s\n", arm, len, n,
-                bitwise ? (bad ? "DIFFER from M = 1's steps (logits, routes, selections, K / V, GDN slots, ids)"
-                               : "bitwise M = 1's steps (logits, routes, selections, K / V, GDN slots, ids)")
+                bitwise ? (bad ? "DIFFER from M = 1's steps (logits, routes, selections, K / V, GDN states, ids)"
+                               : "bitwise M = 1's steps (logits, routes, selections, K / V, GDN states, ids)")
                         : (bad ? "FAIL spec 28's N4 / N6 (lines above)" : "pass spec 28's N4 / N6 (lines above)"));
   }
   return bad;

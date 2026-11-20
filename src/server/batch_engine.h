@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -70,8 +71,14 @@ struct BatchEngineIface {
     // (EngineIface::ingest), not the prefill - the last prompt id, after the prefill to
     // len - 1 whose end the prompt-end snapshot holds.
     bool replay = false;
+    // The request's sampling: a chunk that ends the prompt draws the first generated id from the prompt's last
+    // logits row with it (EngineAdapter::sample_first), as the serial server does. Null: the argmax.
+    const Sampling* sampling = nullptr;
   };
   virtual void prefill(const std::vector<Chunk>& chunks) = 0;
+  // PERF-91 per slot: EngineIface::pending_id's twin - the slot's pending id read without a decode step, which the
+  // scheduler then sends before that step runs. std::nullopt (the default): the scheduler learns it from the step.
+  virtual std::optional<uint32_t> pending_id(uint32_t /*slot*/, const Sampling& /*sampling*/) { return std::nullopt; }
   // Plan 13b: how many of `remaining` prompt ids the slot's next prefill call takes at `pos`;
   // 0 = the scheduler's own rule (SchedulerOptions::chunk). A replica engine returns its
   // card's own cut (runtime::prefill_chunk_rows, the cut one runtime::Engine::prefill call

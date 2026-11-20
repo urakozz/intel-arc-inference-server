@@ -76,6 +76,9 @@ namespace G = gdn_ref;
 
 constexpr uint32_t kPositions = 4096;                 // the plan's bar
 uint32_t kC = 2048;   // the chunk cap: 2048 (ruling A13), or 4096 under --chunk-cap 4096 (plan 5d; set first in main)
+// The a||b row pitch gdn_chunk's pf_gdn_gate reads: the dense GEMM's pf_route_slab_pitch(128) = 256 on Qwen3.8
+// (runtime::prefill::ab_on_gemm), where decode's gdn_step and the CPU reference read kAbStride = 128. Set in main.
+uint32_t kAbWalk = G::kAbStride;
 constexpr uint32_t kStateElems = G::kHeads * G::kDim * G::kDim;   // 48*128*128
 constexpr uint32_t kRingElems = G::kRing * G::kConvRows;
 constexpr uint32_t kMixerN = G::kHeads * G::kDim;                 // 6144
@@ -200,9 +203,10 @@ Fixture make_fixture() {
   return f;
 }
 
-// The launches one gdn_chunk call appends (nine: Qwen3.8's conv + l2norm run as one).
-size_t walk_launches(const runtime::PrefillScratch& s) {
-  return runtime::prefill::gdn_chunk_launches(s.desc(), runtime::PrefillBackend::L0);
+// The launches one gdn_chunk call appends: nine on the four intra-chunk launches (Qwen3.8's conv + l2norm run as
+// one), six on the one-card walk's one-launch pf_gdn_intra (PERF-19).
+size_t walk_launches(const runtime::PrefillScratch& s, bool one_card) {
+  return runtime::prefill::gdn_chunk_launches(s.desc(), runtime::PrefillBackend::L0, one_card);
 }
 
 // Qwen3.8's walk writes o as the bf16 word the gated head rounds it to (pf_gdn_scan_OB): its words widened, and
@@ -220,7 +224,8 @@ std::vector<float> as_bf16(std::vector<float> o) {
 }
 
 // One `gdn_chunk` walk of `kPositions` positions in chunks of `width`, from a
-// zeroed state and ring. Returns state, ring, o and y for the whole walk.
+// zeroed state and ring, as the one-card walk binds it (pf_gdn_intra). Returns state, ring, o and y for the whole
+// walk.
 struct Walk {
   std::vector<float> state, o;
   std::vector<uint16_t> ring, y;
@@ -243,8 +248,9 @@ Walk run_chunked(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
     runtime::prefill::gdn_chunk(
         d.cx, d.kc, s, p, C,
         static_cast<const float*>(d_qkvz.ptr()) + size_t(p) * G::kQkvzN,
-        static_cast<const float*>(d_ab.ptr()) + size_t(p) * G::kAbStride,
-        d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(), d_y.as<uint16_t>());
+        static_cast<const float*>(d_ab.ptr()) + size_t(p) * kAbWalk,
+        d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(), d_y.as<uint16_t>(), runtime::PrefillBackend::L0,
+        false, true);
     d.cx.wait();
     // gdn_o and y are per-chunk scratch; harvest before the next call.
     const std::vector<float> o = read_walk_o(d, s, C);
@@ -294,7 +300,7 @@ size_t check_vs_staged(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz, l0::
     d.imm.copy(pre.ptr(), d_state.ptr(), d_state.size());
     runtime::prefill::gdn_chunk(
         d.cx, d.kc, s, p, C, static_cast<const float*>(d_qkvz.ptr()) + size_t(p) * G::kQkvzN,
-        static_cast<const float*>(d_ab.ptr()) + size_t(p) * G::kAbStride, d_state.as<float>(),
+        static_cast<const float*>(d_ab.ptr()) + size_t(p) * kAbWalk, d_state.as<float>(),
         d_ring.as<uint16_t>(), d_small.ptr(), d_y.as<uint16_t>());
     d.cx.wait();
     // The intermediate: pf_gdn_A2's fp32 tile from the call's own xb and gate, packed here.
@@ -347,7 +353,7 @@ void check_selected_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz
                               d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
                               d_y.as<uint16_t>());
   d.cx.wait();
-  CHECK_EQ(d.cx.launches(), walk_launches(s));
+  CHECK_EQ(d.cx.launches(), walk_launches(s, false));
   ScanOutput actual{std::vector<float>(kStateElems), read_walk_o(d, s, C)};
   d.imm.copy(actual.state.data(), d_state.ptr(), d_state.size());
 
@@ -391,9 +397,9 @@ void check_solve_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
                               d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
                               d_y.as<uint16_t>());
   d.cx.wait();
-  CHECK_EQ(d.cx.launches(), walk_launches(s));
+  CHECK_EQ(d.cx.launches(), walk_launches(s, false));
   const size_t built = d.kc.kernels();
-  CHECK_EQ(built, walk_launches(s));
+  CHECK_EQ(built, walk_launches(s, false));
 
   d.kc.get(kernels::pf_gdn_wy_variant() + "_WB", selected);   // the walk's (pf_gdn_wy_WB)
   CHECK_EQ(d.kc.kernels(), built);            // the call already built it
@@ -402,7 +408,7 @@ void check_solve_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
   std::printf("solve dispatch: gdn_chunk built %s (cache %zu -> %zu) and not %s "
               "(%zu -> %zu); %zu launches\n",
               selected, built, built, opposite, built, built + 1,
-              walk_launches(s));
+              walk_launches(s, false));
 }
 }  // namespace
 
@@ -412,13 +418,20 @@ int main(int argc, char** argv) {
   std::printf("device: %s\n", d.ctx.name().c_str());
   const Fixture f = make_fixture();
 
+  runtime::PrefillScratch s(d.ctx, 16384, model::qwen38(), kC);
+  if (runtime::prefill::ab_on_gemm(s.desc()))
+    kAbWalk = kernels::pf_route_slab_pitch(s.desc().shape(model::LinearId::AB).N);
+  // The walks read the same a||b rows at gdn_chunk's pitch (d_ab); decode's oracle at kAbStride (d_ab_step).
+  std::vector<float> ab_walk(size_t(kPositions) * kAbWalk, 0.0f);
+  for (uint32_t m = 0; m < kPositions; ++m)
+    std::copy_n(f.ab.data() + size_t(m) * G::kAbStride, G::kAbStride, ab_walk.data() + size_t(m) * kAbWalk);
   l0::Mem d_qkvz = pf_harness::upload(d.ctx, d.imm, f.qkvz);
-  l0::Mem d_ab = pf_harness::upload(d.ctx, d.imm, f.ab);
+  l0::Mem d_ab = pf_harness::upload(d.ctx, d.imm, ab_walk);
+  l0::Mem d_ab_step = pf_harness::upload(d.ctx, d.imm, f.ab);
   l0::Mem d_small = pf_harness::upload(d.ctx, d.imm, f.small);
   l0::Mem d_state(d.ctx, l0::MemKind::Device, size_t(kStateElems) * 4);
   l0::Mem d_ring(d.ctx, l0::MemKind::Device, size_t(kRingElems) * 2);
   l0::Mem d_y(d.ctx, l0::MemKind::Device, size_t(kC) * kMixerN * 2);
-  runtime::PrefillScratch s(d.ctx, 16384, model::qwen38(), kC);
 
   // The walk's entries (the selectors that could move them went in the zero-config cleanup):
   // the split scan, and the vector solve.
@@ -444,9 +457,9 @@ int main(int argc, char** argv) {
   std::printf("scan entry: LAUNCHED %s\n", runtime::prefill::gdn_scan_launched_entry());
   // 2 x 2048 at the default cap, ONE call at cap 4096 (plan 5d).
   const uint32_t n_calls = (kPositions + kC - 1) / kC;
-  CHECK_EQ(got.launches, n_calls * walk_launches(s));
+  CHECK_EQ(got.launches, n_calls * walk_launches(s, true));
   std::printf("launches: %zu for %u chunk(s) of %u (%zu per gdn_chunk, ruling R3's head included)\n",
-              got.launches, n_calls, kC, walk_launches(s));
+              got.launches, n_calls, kC, walk_launches(s, true));
 
   // --- 1. vs the CPU fp32 recurrent reference -------------------------------
   {
@@ -495,7 +508,7 @@ int main(int argc, char** argv) {
     for (uint32_t p = 0; p < kPositions; ++p) {
       c->pos = p;
       const void* qrow = static_cast<const float*>(d_qkvz.ptr()) + size_t(p) * G::kQkvzN;
-      const void* arow = static_cast<const float*>(d_ab.ptr()) + size_t(p) * G::kAbStride;
+      const void* arow = static_cast<const float*>(d_ab_step.ptr()) + size_t(p) * G::kAbStride;
       d.cx.launch(k_gdn, G::kHeads, G::kChunks, 1,
                   {PtrArg(ctrl.ptr()), PtrArg(qrow), PtrArg(arow), PtrArg(d_small.ptr()),
                    PtrArg(rg.ptr()), PtrArg(st.ptr()), PtrArg(o1.ptr())});
@@ -519,7 +532,7 @@ int main(int argc, char** argv) {
   {
     const Walk one =
         run_chunked(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y, kPositions, 1);
-    CHECK_EQ(one.launches, size_t(kPositions) * walk_launches(s));
+    CHECK_EQ(one.launches, size_t(kPositions) * walk_launches(s, true));
     std::puts("case 3: C = 1 x 4096 vs DEVICE gdn_step x 4096 (the degenerate path)");
     report("gdn_state", band(one.state, dev_state));
     report("gdn_o", band(one.o, dev_o));

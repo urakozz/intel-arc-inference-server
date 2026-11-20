@@ -477,3 +477,106 @@ python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple 
   VRAM. The layer blocks' losses (5e1 .. 7e3) are MSEs of the residual stream, which grows layer by layer.
   The `taps` stage needs the whole build (the probe loads the engine's kernel binaries); it builds it when the probe
   is missing.
+
+## Nemotron 3.5 Super: our AutoRound export (`tools/quantize/quantize_nemotron.sh`)
+
+`nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` (249 GB, OpenMDW-1.1) -> int4 g64 symmetric,
+`auto_round:auto_gptq`, tuned (200 iterations, 128 x 2048 rows of nvidia/OpenCodeInstruct through the chat template,
+batch 8), text only, with the MTP layer. Nemotron 3.5 Bolt (Super compressed: the same 88 blocks, 40 Mamba-2, 40
+latent MoE, 8 NoPE attention) had no quantisation tool in the repo; the reference's Mamba ops and the export check
+are restored from its tools (commit 55e8923f) and adapted to Super (512 x 2688 experts in every MoE block, top-22,
+the MTP layer, the native `nemotron_h` config).
+
+```sh
+tools/quantize/quantize_nemotron.sh check-download   # DOWNLOAD OK ... (--sha: also hashes)
+tools/quantize/quantize_nemotron.sh start            # detached, card 1; refuses unless download, RAM (80 GB) and disk (150 GB) are ready
+tools/quantize/quantize_nemotron.sh status           # blocks done / 88, s per block, RAM, disk, the result
+tools/quantize/quantize_nemotron.sh stop             # TERM to the run's process group; start resumes at the first unfinished block
+tools/quantize/quantize_nemotron.sh selftest         # the whole pipeline on a tiny model on the box CPU, then the reference
+```
+
+- **What is int4:** every block's routed experts, shared expert, `fc1/fc2_latent_proj`, Mamba `in_proj` / `out_proj`,
+  attention `q/k/v/o_proj`. **Kept as the source ships them:** routers (BF16) and their F32 bias, `conv1d`, norms,
+  A_log / D / dt_bias (BF16), the embedding, `lm_head` (no `quant_lm_head`: it would turn low CPU memory and the
+  resume off; the engine builds its int8 head at load). The vision tower and projector are dropped (`strip`).
+- **The MTP layer** (`language_model.mtp.layers.{0,1}.*`) is not a transformers module (the omni wrapper and the
+  native class ignore `mtp.*` on load), so AutoRound never tunes it. At export its `missing_tensors.py` copies it
+  from the source and RTNs every linear the config does not exclude; `autoround_run.py` excludes eh_proj, the
+  attention, the shared expert and the latent projections (bits 16 in `extra_config`), so its 512 routed experts
+  are int4 g64 (RTN) and the rest bf16. `check.py` refuses an export without every MTP tensor.
+- **Names:** AutoRound writes the trunk back under the source's `language_model.backbone.*` (its `extra_config`
+  entries spell `language_model.model.*`); the experts per expert; the MTP layer under its source names in
+  `model_extra_tensors.safetensors`.
+- **Stages:** `quant` (AutoRound, meta skeleton, one block of the original at a time, per-block resume),
+  `strip` (vision out; AutoRound's own rename of that tower back to checkpoint names is lossy anyway),
+  `scales` (the Mamba `out_proj` scales AutoRound keeps BF16 for this family -> F16 exactly), `bf16` (every
+  unquantised tensor bitwise the source's; fp32 widenings restored), `check` (`nemotron/check.py`).
+- **The CPU reference** `tools/oracle/nemotron_ref.py` (`run` / `compare` / `hfcheck`) reads the original or the export
+  layer-major from the safetensors (no transformers model; a few GB of RAM for the 249 GB original), MTP drafts
+  included; the selftest holds it against transformers' native class (fp32) and runs the tiny's bf16 original
+  against its int4 export.
+- **Proven on the tiny model** (2026-11-20, box CPU, `selftest-20261120-050920.log` in `~/b70/logs/nemotron-quant/`):
+  `nemotron_make_tiny.py` (hidden 256, blocks mamba / moe / attention / moe, 16 experts top-4, the MTP layer, a
+  one-block vision tower, the real tokenizer and remote code); AutoRound on the meta-skeleton path in 91 s, peak
+  RSS 1.6 GiB; 110 int4 linears (32 of them the MTP layer's routed experts, RTN); `strip` 28 vision tensors;
+  `scales` 1 BF16 out_proj scale tensor -> F16; `bf16` 33 tensors bitwise the source's (15 restored from fp32);
+  `check` ACCEPTED; `NEMOTRON QUANT: OK`. Reference: `hfcheck` against transformers fp32 max |diff| 5.6e-7 of the
+  largest logit, top-1 1.000; bf16 vs int4 export logits mean cosine 0.985, MTP logits 0.992, the same 4 greedy tokens.
+- **The real run (derived, not measured):** 40 MoE blocks of 512 experts (2.82 G expert weights each, Flash-Next's
+  2.52 G block took 57 min tuned on one card, the expert loop dominating) + 48 small blocks: **~45-65 h on one card**
+  - measure the first MoE block (block 1) with `status` and extrapolate. VRAM: the MoE block's tuning state
+  (~14 B a weight) + its bf16 weights ~45 GB, over the 31.9 GB card (Flash-Next ran at 38.9 GB with the Xe driver
+  evicting to host RAM). RAM ~50 GB (activations 2 x 4.3 GB, a block and its unfused copy 11 GB, the spill);
+  `start` waits for MemAvailable >= 80 GB, so not beside the Flash-Next run. Disk: export ~68 GB + resume 8.6 GB.
+
+## Ripple-65B Preview (`tools/quantize/quantize_ripple.sh`)
+
+`ricursiveAI/Ripple-65B-Preview` (bf16, 130 GB, remote code `modeling_ricursive.py`, pinned snapshot `d58dbcf4`) ->
+W4A16 g64 symmetric `auto_round:auto_gptq`, tuned (200 iterations, 128 x 2048 rows of nvidia/OpenCodeInstruct
+through the chat template, batch 8, seed 42) - the Flash-Next recipe. `lm_head` and the embedding stay bf16 (the
+engine builds its int8 head at load). The commands and stages are in the script's header:
+
+```sh
+tools/quantize/quantize_ripple.sh selftest          # tiny random Ripple, box CPU, both attention arms, ~5 min
+tools/quantize/quantize_ripple.sh start             # detached, card 1; refuses unless data, RAM and disk are ready
+tools/quantize/quantize_ripple.sh status            # blocks done / 80, s per block, RAM, the result
+tools/quantize/quantize_ripple.sh stop              # TERM to the run's process group; start resumes
+ATTN=bf16 tools/quantize/quantize_ripple.sh start   # attention bf16, only the MLP int4
+```
+
+What is particular to Ripple (`ripple/autoround_run.py`):
+
+- **Low CPU memory for a dense model.** AutoRound builds its meta skeleton by itself only for fused-MoE
+  checkpoints and would load a dense model whole (130 GB > the box's RAM). `AR_DISK_STREAM_MODEL=1` forces the
+  skeleton: each block is read from the checkpoint when it is tuned, written and freed; the run refuses if
+  AutoRound did not take that path.
+- **Value residuals need no shim.** Every layer gets the same tensor, the scaled embedding rows, as the
+  `value_residual` keyword. AutoRound caches the first block's tensor keywords per sample and replays them into
+  every block (only the hidden states are chained; a resume re-captures them from block 0). A forward pre-hook on
+  every decoder layer refuses a call without it - the remote code would silently fall back to the normed input.
+  The hook is one function for all layers and records nothing while compiling: a per-layer closure made every block
+  a new graph and hit dynamo's recompile limit (16) on the tiny model's fifth block.
+- **Masks.** AutoRound masks each row's last token, so the remote code's `_update_causal_mask` builds a 4-D causal
+  mask; the sliding layers cut it to the window (the tiny model's window 32 binds at 128-token rows as the real
+  1024 does at 2048), the NoPE layers use it as is.
+- **On the CPU** (`DEVICE=cpu`, the selftest) a streamed block comes out bf16 while AutoRound computes in fp32
+  ("expected m1 and m2 to have the same dtype"); `autoround_run.py` casts each materialised block to the compute
+  dtype there, and the `bf16` stage restores the unquantised tensors to the source's bytes.
+- **`ATTN=bf16`** puts `self_attn` in AutoRound's ignore list: q / k / v / o / g ship as bf16 `.weight` with
+  `extra_config` bits 16, which the loader accepts today. int8 attention would be this export with the engine
+  quantising those tensors to int8 at load, as it does for `lm_head`: the loader takes int4 and bf16 linears only.
+- **The export keeps the source's bytes** for the remote code, tokenizer files, chat template and
+  `generation_config.json` (AutoRound re-serialises the tokenizer and writes its own generation config).
+  `ripple/check.py` checks them, every source config key and the attention arm; in the selftest (`RELOAD=1`) it
+  also loads the export with transformers + trust_remote_code and compares it with the engine's dequantisation.
+
+Selftest (2026-11-20, box CPU, AutoRound `8186d8b6`, transformers 5.19.0, 10 iterations on 8 x 128 OpenCodeInstruct
+rows; `ripple/make_tiny.py`: hidden 256, layers 0-4 of the real pattern, the 78 tensor names equal to the real
+index's; `~/b70/logs/ripple-quant/selftest-20261120-043938.log`): `RIPPLE SELFTEST: OK both arms`, ~2 min per arm.
+
+| | `ATTN=int4` | `ATTN=bf16` |
+|---|---|---|
+| quant | meta skeleton, 40/40 linears, block losses -10 % .. -47 %, peak RSS 1.3 GiB | 15/40 (the MLP), 26 bf16 exclusions |
+| bf16 | 38 unquantised tensors bitwise the source's (restored from fp32) | 63 |
+| reload vs the engine's dequantisation | relative L2 1.5e-3, argmax 30/30 | 1.7e-3, 30/30 |
+| `check_gptq_export.py` | VERIFIED B70-READY | VERIFIED B70-READY |

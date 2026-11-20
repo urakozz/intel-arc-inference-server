@@ -194,4 +194,32 @@ inline std::vector<std::string> dspark_draft_variants(bool int8_head) {
   return v;
 }
 
+// ==== PERF-53 (plan 21-QFN-v3b): Qwen3.8-Flash-Next's DFlash 2 drafter (incoai/Qwen3.8-Flash-Next-DFlash2) ====
+// kFlashNext: hidden 2560, 32 / 8 heads x 128 (Qwen3.8's drafter's attention: df_attn's binaries are shared), FF 7680,
+// the 2048 window over a 2048-slot ring, conv group 16 x 2 taps, selector rank 256, top 16, block 8; the target's
+// 248320-row head of which 248077 are tokens. New binaries only where the hidden or the MLP is baked (df_prep,
+// df_proj_wide) and the linears at its K / N; df_attn, df_topk and df_select are Qwen3.8's (the same defines). The
+// drafter's linears are bf16 in this first form (the packed int4 export is plan 21-QFN-v3b Task 1); the target's head
+// at the 7 draft rows int8 (ours, quantised at load) or bf16. A check verifies at most 3 drafts (the 4-row lists).
+inline constexpr Shape kFlashNext{2560, 7680, 32, 8, 128, 2048, 2048, 16, 2, 256, 248320, 248077, kM, kAttnPb};
+// Every binary its draft and projection lists bind (one card; the attention in its production form: the H1 / B4 reduce
+// and the KS 4 DPAS part). tests/kernels/flash_next_dflash_names_test.cc holds the union to the CMake PERF-53 block.
+inline std::vector<std::string> flash_next_draft_variants(bool int8_head) {
+  const Shape& s = kFlashNext;
+  std::vector<std::string> v = {prep_variant(s), proj_wide_variant(s), attn_variant(s, 1, 4), attn_dpas_variant(s, 4),
+                                select_variant(true, s), topk_variant(s.vocab, s.used, false)};
+  for (const auto& [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
+                             {s.NH * s.HD, s.H},                                                    // o
+                             {s.H, 2 * s.I},                                                        // gate||up
+                             {s.I, s.H},                                                            // down
+                             {5 * s.H, s.H},                                                        // fc (5 taps)
+                             {s.H, 2 * s.NKV * s.HD},                                               // context k||v
+                             {s.H, 2 * s.ctaps * (s.H / s.group)},                                  // conv kernels
+                             {s.H, s.rank}})                                                        // selector
+    v.push_back(gemv_bf16_variant(kM, K, N, gemv_bf16_tiling(N)));
+  v.push_back(int8_head ? gemv_i8w_variant(kR, s.H, s.vocab)
+                        : gemv_bf16_variant(kR, s.H, s.vocab, gemv_bf16_tiling(s.vocab)));
+  return v;
+}
+
 }  // namespace kernels::dflash

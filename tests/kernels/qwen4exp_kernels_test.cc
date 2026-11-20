@@ -27,12 +27,23 @@
 //      2050 (identity lists) against attn_v2_M1_T32_Q24KV2's dense result within the same bar - the gate
 //      +30 on both sides (sigmoid 1: attn_v2 multiplies by the fp32 sigmoid, q4_qsa_reduce by its bf16 rounding,
 //      so with the gate saturated both outputs are rne(o))
+//   8. PERF-66, the int8 hyper-connection form (judged against bf16, bitwise against its host twins):
+//      loader::quantise_int8_g32_tiled against an independent host quantiser (bytes and fp16 scales bitwise; zero
+//      groups and groups with subnormal scales included); q4_hc_down_i8 (N 336 / 320, M 1..4 where built),
+//      q4_hc_up_mix _I_Q8 / _Q8 and the prefill's _R4C64_Q8 (37 rows) against qwen4exp_ref.h's hc_down_i8 /
+//      hc_up_mix_q8, q4_hc_slab_i8 against rne(q x s); then the int8 mixer against the bf16 one (gemv_bf16 +
+//      q4_hc_up_mix) on the same random weights: max / mean relative error and cosine of down's output and of x
 //
 // Opt-in modes (each runs alone):
 //   --bench-attn       decision 10's evidence: the sparse kernel (q4_qsa_attn + q4_qsa_reduce over the identity
 //                      list) against attn_v2 (attn_decode_v2 + attn_reduce_v2) at depths 512 / 1024 / 2048 -
 //                      lists of 100 launch pairs, 3 warm-up replays each, then 3 rounds of 20 replays with A and B
 //                      interleaved replay by replay; the median round, printed in us per launch pair
+//   --bench-hc8        PERF-66's timing: the down||inject GEMV (gemv_bf16 vs q4_hc_down_i8) and the up-mix
+//                      (q4_hc_up_mix _I vs _I_Q8) at M = 1..4 (those built) - lists of 96 launches over 48 distinct
+//                      weight copies in turn (as decode's 96 gated residuals: the weights come from memory, not the
+//                      cache), 3 warm-up replays, 3 rounds of 20 replays bf16 / int8 interleaved; the median round in
+//                      us a launch. A tensor-parallel card replicates the mixers: its shapes are these
 //   --ple-rate [GB]    plan Task 5 Step 1: 16 + 16 host-USM ranges per 21-QFN-v1b's rule (head sizes the real primes
 //                      q4_ple_primes(20000000, 16, 0) scaled so int8 rows + bf16 scales total GB; default 16, 51.8
 //                      the real table), refused by 21-QFN-v1b's host-fit rule (exit 77); q4_ple_gather_M1_BF16 alone in
@@ -52,6 +63,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <string>
@@ -70,6 +82,7 @@
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "l0/queue.h"
+#include "loader/lm_head_int8.h"
 #include "loader/qwen4exp_ple.h"
 #include "loader/qwen4exp_ple_hash.h"
 #include "loader/qwen4exp_repack.h"
@@ -304,6 +317,244 @@ void hc_tests(Dev& d) {
     di.all(d.read<float>(ijb, 4), ih);
     report(name + " x", dx);
     report(name + (inject ? " inj" : " inj untouched"), di);
+  }
+}
+
+// ---- 8. PERF-66: the int8 hyper-connection form --------------------------------------------------------------------
+bool built(const std::string& v) { return std::ifstream(kernels::path(v)).good(); }
+
+// An independent fp16 rounding for the host check: the nearest positive half by bisection over the bit patterns
+// (monotonic for positive halves), ties to the even pattern.
+uint16_t f16_nearest(float x) {
+  uint16_t lo = 0, hi = 0x7BFF;
+  while (hi - lo > 1) {
+    const uint16_t mid = uint16_t((lo + hi) / 2);
+    (common::f16_to_f32(mid) <= x ? lo : hi) = mid;
+  }
+  const double dl = double(x) - common::f16_to_f32(lo), dh = double(common::f16_to_f32(hi)) - x;
+  if (dl < dh) return lo;
+  if (dh < dl) return hi;
+  return (lo & 1u) ? hi : lo;
+}
+// The int8 block of one {K, N} linear as the loader lays it: the tiles, then the fp16 scales.
+struct I8Lin {
+  std::vector<int8_t> q;
+  std::vector<uint16_t> sc;
+  std::vector<uint8_t> blob() const {
+    std::vector<uint8_t> b(q.size() + sc.size() * 2);
+    std::memcpy(b.data(), q.data(), q.size());
+    std::memcpy(b.data() + q.size(), sc.data(), sc.size() * 2);
+    return b;
+  }
+};
+// rows: bf16 [N][K] row-major (the checkpoint's [out][in]).
+I8Lin quantise(const std::vector<uint16_t>& rows, uint32_t K, uint32_t N) {
+  I8Lin l{std::vector<int8_t>(size_t(K) * N), std::vector<uint16_t>(size_t(K / 32) * N)};
+  loader::quantise_int8_g32_tiled(rows.data(), K, N, l.q.data(), l.sc.data());
+  return l;
+}
+// The bf16 tiles of the same rows (gemv_bf16's layout) for the bf16 mixer.
+std::vector<uint16_t> bf16_tiles(const std::vector<uint16_t>& rows, uint32_t K, uint32_t N) {
+  std::vector<uint16_t> t(rows.size());
+  for (uint32_t n = 0; n < N; ++n)
+    for (uint32_t k = 0; k < K; ++k) t[qr::tile_index(K, k, n)] = rows[size_t(n) * K + k];
+  return t;
+}
+struct Err {
+  double max_rel = 0, sum_rel = 0, dot = 0, na = 0, nb = 0;
+  size_t n = 0;
+  // rel = |a - b| / max(|b|, 1e-3 x rms(b)) after the pass; collected raw here
+  std::vector<double> a, b;
+  void add(double x, double ref) { a.push_back(x), b.push_back(ref); }
+  void done() {
+    double ss = 0;
+    for (double v : b) ss += v * v;
+    const double floor = 1e-3 * std::sqrt(ss / std::max<size_t>(1, b.size()));
+    for (size_t i = 0; i < a.size(); ++i) {
+      const double r = std::fabs(a[i] - b[i]) / std::max(std::fabs(b[i]), floor);
+      max_rel = std::max(max_rel, r);
+      sum_rel += r;
+      dot += a[i] * b[i], na += a[i] * a[i], nb += b[i] * b[i];
+    }
+    n = a.size();
+  }
+  double cosine() const { return dot / std::sqrt(na * nb); }
+};
+void report_err(const std::string& what, Err& e, double min_cos) {
+  e.done();
+  const bool ok = e.cosine() >= min_cos;
+  std::printf("  %s%s: int8 vs bf16 over %zu values: max rel %.3e, mean rel %.3e, cosine %.9f (bar %.4f)\n",
+              ok ? "" : "FAIL ", what.c_str(), e.n, e.max_rel, e.sum_rel / std::max<size_t>(1, e.n), e.cosine(),
+              min_cos);
+  if (!ok) ++failures;
+}
+
+void hc8_tests(Dev& d) {
+  // (a) the host conversion: random rows with an all-zero group, a group of tiny values (a subnormal scale) and a
+  // small group with zeros in it
+  {
+    const uint32_t K = 320, N = 48;
+    std::vector<uint16_t> rows = random_bf16(size_t(K) * N, -0.3f, 0.3f, 801);
+    for (uint32_t k = 0; k < 32; ++k) rows[size_t(5) * K + 64 + k] = 0;                 // row 5, group 2: zero
+    for (uint32_t k = 0; k < 32; ++k) rows[size_t(9) * K + k] = rne(1e-6f * (k + 1));    // row 9, group 0: subnormal
+    for (uint32_t k = 0; k < 32; ++k) rows[size_t(17) * K + 288 + k] = rne(-3e-4f * (k % 7));
+    const I8Lin l = quantise(rows, K, N);
+    std::vector<int8_t> wq(l.q.size());
+    std::vector<uint16_t> ws(l.sc.size());
+    for (uint32_t n = 0; n < N; ++n)
+      for (uint32_t g = 0; g < K / 32; ++g) {
+        float amax = 0.f;
+        for (uint32_t k = 32 * g; k < 32 * g + 32; ++k) amax = std::max(amax, std::fabs(f32(rows[size_t(n) * K + k])));
+        const uint16_t h = f16_nearest(amax / 127.0f);
+        const float sv = common::f16_to_f32(h);
+        ws[size_t(g) * N + n] = h;
+        for (uint32_t k = 32 * g; k < 32 * g + 32; ++k) {
+          const float r = sv == 0.f ? 0.f : std::nearbyint(f32(rows[size_t(n) * K + k]) / sv);
+          wq[qr::i8_index(K, k, n)] = int8_t(std::min(127.f, std::max(-127.f, r)));
+        }
+      }
+    Diff dq, ds;
+    std::vector<uint8_t> gq(l.q.begin(), l.q.end()), rq(wq.begin(), wq.end());
+    dq.all(gq, rq);
+    ds.all(l.sc, ws);
+    report("quantise_int8_g32_tiled bytes (K 320, N 48)", dq);
+    report("quantise_int8_g32_tiled fp16 scales", ds);
+    report_bool("the subnormal group keeps a nonzero scale", ws[9] != 0 && ws[9] < 0x0400);
+  }
+  Ctl ctl(d.ctx);
+  ctl.at(7);
+  const std::vector<uint16_t> xn = random_bf16(size_t(4) * HCN, -2.f, 2.f, 811);   // four rows
+  l0::Mem xnb = d.upload(xn);
+  // (b) the down GEMV, both shapes: int8 against its host twin (each row bitwise), and against gemv_bf16
+  for (bool inject : {true, false}) {
+    const uint32_t N = inject ? qk::kHcDownN : qk::kHcLow;
+    std::vector<uint16_t> rows = random_bf16(size_t(N) * HCN, -0.05f, 0.05f, 820 + inject);
+    if (inject)
+      for (size_t i = size_t(324) * HCN; i < rows.size(); ++i) rows[i] = 0;   // the padded rows 324..335
+    const I8Lin l = quantise(rows, HCN, N);
+    l0::Mem wb = d.upload(l.blob()), tb = d.upload(bf16_tiles(rows, HCN, N));
+    for (uint32_t M = 1; M <= 4; ++M) {
+      const std::string name = qk::hc_down_i8_variant(M, inject);
+      if (!built(name)) continue;
+      l0::Module m(d.ctx, kernels::path(name));
+      l0::Mem ob = d.zeros(size_t(M) * N * 4);
+      launch(d, m, "q4_hc_down_i8", qk::hc_down_i8_wg(), {N / 16, 1, 1}, {wb, xnb, ob});
+      const std::vector<float> got = d.read<float>(ob, size_t(M) * N);
+      Diff df;
+      for (uint32_t r = 0; r < M; ++r) {
+        std::vector<float> want(N), g(got.begin() + size_t(r) * N, got.begin() + size_t(r + 1) * N);
+        qr::hc_down_i8(l.q.data(), l.sc.data(), N, qk::kHcDownI8Ks, xn.data() + size_t(r) * HCN, want.data());
+        df.all(g, want, size_t(r) * N);
+      }
+      report(name, df);
+      if (M != 1) continue;
+      const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(N);
+      l0::Module mb(d.ctx, kernels::path(kernels::gemv_bf16_variant(1, HCN, N, t)));
+      l0::Mem bb = d.zeros(size_t(N) * 4);
+      launch(d, mb, "gemv_bf16", t.cols * t.ksplit, {N / t.cols, 1, 1}, {tb, xnb, bb});
+      const std::vector<float> ref = d.read<float>(bb, N);
+      Err e;
+      for (uint32_t n = 0; n < (inject ? 324u : N); ++n) e.add(got[n], ref[n]);
+      report_err(name + " (down's output)", e, 0.9999);
+    }
+  }
+  // (c) the up-mix: _Q8 against its host twin, then the whole int8 mixer (down + up-mix) against the bf16 one
+  for (bool inject : {true, false}) {
+    const uint32_t N = inject ? qk::kHcDownN : qk::kHcLow;
+    const std::vector<uint16_t> up_rows = random_bf16(size_t(HCN) * qk::kHcLow, -0.15f, 0.15f, 830 + inject);
+    const I8Lin lu = quantise(up_rows, qk::kHcLow, HCN);
+    l0::Mem ub8 = d.upload(lu.blob()), ub = d.upload(bf16_tiles(up_rows, qk::kHcLow, HCN));
+    const std::vector<float> down = random_f32(N, -6.f, 6.f, 840 + inject);
+    l0::Mem db = d.upload(down);
+    {
+      const std::string name = qk::hc_up_mix_variant(1, inject, true);
+      l0::Module m(d.ctx, kernels::path(name));
+      l0::Mem xb = d.zeros(size_t(D) * 2), ijb = d.zeros(16);
+      launch(d, m, "q4_hc_up_mix", qk::kUpMixWg, {D / 16, 1, 1}, {ctl.m, db, ub8, xnb, xb, ijb});
+      std::vector<uint16_t> xh(D);
+      std::vector<float> ih(4, 0.0f);
+      qr::hc_up_mix_q8(down.data(), inject, lu.q.data(), lu.sc.data(), xn.data(), xh.data(), ih.data());
+      Diff dx, di;
+      dx.all(d.read<uint16_t>(xb, D), xh);
+      di.all(d.read<float>(ijb, 4), ih);
+      report(name + " x", dx);
+      report(name + (inject ? " inj" : " inj untouched"), di);
+    }
+    // the whole mixer over one row: down (int8 / bf16) -> up-mix (_Q8 / bf16) -> x
+    std::vector<uint16_t> drows = random_bf16(size_t(N) * HCN, -0.05f, 0.05f, 850 + inject);
+    const I8Lin ld = quantise(drows, HCN, N);
+    l0::Mem dw8 = d.upload(ld.blob()), dw = d.upload(bf16_tiles(drows, HCN, N));
+    l0::Mem d8 = d.zeros(size_t(N) * 4), d16 = d.zeros(size_t(N) * 4);
+    l0::Mem x8 = d.zeros(size_t(D) * 2), x16 = d.zeros(size_t(D) * 2), i8 = d.zeros(16), i16 = d.zeros(16);
+    {
+      l0::Module m(d.ctx, kernels::path(qk::hc_down_i8_variant(1, inject)));
+      launch(d, m, "q4_hc_down_i8", qk::hc_down_i8_wg(), {N / 16, 1, 1}, {dw8, xnb, d8});
+      const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(N);
+      l0::Module mb(d.ctx, kernels::path(kernels::gemv_bf16_variant(1, HCN, N, t)));
+      launch(d, mb, "gemv_bf16", t.cols * t.ksplit, {N / t.cols, 1, 1}, {dw, xnb, d16});
+      l0::Module u8(d.ctx, kernels::path(qk::hc_up_mix_variant(1, inject, true)));
+      launch(d, u8, "q4_hc_up_mix", qk::kUpMixWg, {D / 16, 1, 1}, {ctl.m, d8, ub8, xnb, x8, i8});
+      l0::Module u16(d.ctx, kernels::path(qk::hc_up_mix_variant(1, inject)));
+      launch(d, u16, "q4_hc_up_mix", qk::kUpMixWg, {D / 16, 1, 1}, {ctl.m, d16, ub, xnb, x16, i16});
+    }
+    const std::vector<uint16_t> g8 = d.read<uint16_t>(x8, D), g16 = d.read<uint16_t>(x16, D);
+    Err ex;
+    for (uint32_t c = 0; c < D; ++c) ex.add(f32(g8[c]), f32(g16[c]));
+    report_err(std::string("the mixer's x (") + (inject ? "gated residual" : "final mixer") + ")", ex, 0.999);
+    if (inject) {
+      const std::vector<float> a = d.read<float>(i8, 4), b = d.read<float>(i16, 4);
+      Err ei;
+      for (uint32_t s2 = 0; s2 < 4; ++s2) ei.add(a[s2], b[s2]);
+      report_err("the mixer's inject weights", ei, 0.999);
+    }
+  }
+  // (d) the prefill's forms: _R4C64_Q8 over 37 rows (down at the GEMM's pitch 512) and the int8 slab
+  {
+    const uint32_t C = 37, LD = qk::kPfHcDownLd;
+    const std::string name = qk::pf_hc_up_mix_variant(qk::kPfC, true);
+    if (built(name)) {
+      const std::vector<uint16_t> up_rows = random_bf16(size_t(HCN) * qk::kHcLow, -0.15f, 0.15f, 860);
+      const I8Lin lu = quantise(up_rows, qk::kHcLow, HCN);
+      const std::vector<float> down = random_f32(size_t(C) * LD, -6.f, 6.f, 861);
+      const std::vector<uint16_t> xr = random_bf16(size_t(C) * HCN, -2.f, 2.f, 862);
+      Ctl cc(d.ctx);
+      cc.at(0, C);
+      l0::Mem ub8 = d.upload(lu.blob()), db = d.upload(down), xrb = d.upload(xr);
+      l0::Mem xb = d.zeros(size_t(C) * D * 2), ijb = d.zeros(size_t(C) * 16);
+      l0::Module m(d.ctx, kernels::path(name));
+      launch(d, m, "q4_hc_up_mix", qk::kHc * qk::kPfHcUpCols,
+             {D / qk::kPfHcUpCols, (C + qk::kPfHcUpRows - 1) / qk::kPfHcUpRows, 1}, {cc.m, db, ub8, xrb, xb, ijb});
+      const std::vector<uint16_t> gx = d.read<uint16_t>(xb, size_t(C) * D);
+      const std::vector<float> gi = d.read<float>(ijb, size_t(C) * 4);
+      Diff dx, di;
+      for (uint32_t r = 0; r < C; ++r) {
+        std::vector<uint16_t> xh(D);
+        std::vector<float> ih(4, 0.0f);
+        qr::hc_up_mix_q8(down.data() + size_t(r) * LD, true, lu.q.data(), lu.sc.data(), xr.data() + size_t(r) * HCN,
+                         xh.data(), ih.data());
+        dx.all(std::vector<uint16_t>(gx.begin() + size_t(r) * D, gx.begin() + size_t(r + 1) * D), xh, size_t(r) * D);
+        di.all(std::vector<float>(gi.begin() + size_t(r) * 4, gi.begin() + size_t(r + 1) * 4), ih, size_t(r) * 4);
+      }
+      report(name + " x (37 rows)", dx);
+      report(name + " inj", di);
+    }
+    const std::string sname = qk::pf_hc_slab_variant(true);
+    if (built(sname)) {
+      const uint32_t N = qk::kHcDownN, NS = 512;
+      const std::vector<uint16_t> rows = random_bf16(size_t(N) * HCN, -0.05f, 0.05f, 870);
+      const I8Lin l = quantise(rows, HCN, N);
+      l0::Mem wb = d.upload(l.blob()), ob = d.filled(size_t(HCN) * NS * 2, 0xFFFFFFFFu);
+      l0::Module m(d.ctx, kernels::path(sname));
+      launch(d, m, "q4_hc_slab_i8", 16, {NS / 16, HCN / 8, 1}, {wb, ob, 0u, NS});
+      std::vector<uint16_t> want(size_t(HCN) * NS, 0);
+      for (uint32_t k = 0; k < HCN; ++k)
+        for (uint32_t n = 0; n < N; ++n)
+          want[size_t(k) * NS + n] =
+              rne(float(l.q[qr::i8_index(HCN, k, n)]) * common::f16_to_f32(l.sc[size_t(k / 32) * N + n]));
+      Diff ds;
+      ds.all(d.read<uint16_t>(ob, size_t(HCN) * NS), want);
+      report(sname + " (n0 0, ns 512: 176 zero columns)", ds);
+    }
   }
 }
 
@@ -950,6 +1201,84 @@ int bench_attn(Dev& d) {
   return 0;
 }
 
+// ---- --bench-hc8 -------------------------------------------------------------------------------------------------
+int bench_hc8(Dev& d) {
+  const uint32_t R = 96, NC = 48, NR = 20, ROUNDS = 3, N = qk::kHcDownN;
+  const std::vector<uint16_t> rows = random_bf16(size_t(N) * HCN, -0.05f, 0.05f, 900);
+  const std::vector<uint16_t> up_rows = random_bf16(size_t(HCN) * qk::kHcLow, -0.15f, 0.15f, 901);
+  const I8Lin ld = quantise(rows, HCN, N), lu = quantise(up_rows, qk::kHcLow, HCN);
+  const std::vector<uint8_t> db8 = ld.blob(), ub8 = lu.blob();
+  const std::vector<uint16_t> dbt = bf16_tiles(rows, HCN, N), ubt = bf16_tiles(up_rows, qk::kHcLow, HCN);
+  std::vector<l0::Mem> dw8, dw, uw8, uw;   // NC copies each: a launch reads its weights from memory
+  for (uint32_t i = 0; i < NC; ++i) {
+    dw8.push_back(d.upload(db8));
+    dw.push_back(d.upload(dbt));
+    uw8.push_back(d.upload(ub8));
+    uw.push_back(d.upload(ubt));
+  }
+  const std::vector<uint16_t> xn = random_bf16(size_t(4) * HCN, -2.f, 2.f, 902);
+  const std::vector<float> down = random_f32(size_t(4) * N, -6.f, 6.f, 903);
+  l0::Mem xnb = d.upload(xn), db = d.upload(down), ob = d.zeros(size_t(4) * N * 4), xb = d.zeros(size_t(4) * D * 2),
+          ijb = d.zeros(64);
+  Ctl ctl(d.ctx);
+  std::printf("bench-hc8: %u launches a list over %u weight copies, 3 warm-up replays, %u rounds of %u replays "
+              "interleaved bf16 / int8; the median round. One card; a tensor-parallel card runs the same shapes (the "
+              "mixers are replicated)\n",
+              R, NC, ROUNDS, NR);
+  const auto replay = [&](l0::CmdList& l) {
+    const auto t0 = std::chrono::steady_clock::now();
+    d.q.execute(l, &d.f);
+    d.f.wait();
+    return seconds_since(t0);
+  };
+  const auto pair = [&](const char* what, uint32_t M, std::vector<l0::Kernel>& ka, uint32_t ga,
+                        std::vector<l0::Kernel>& kb, uint32_t gb, uint32_t gy) {
+    l0::CmdList la = l0::CmdList::regular(d.ctx), lb = l0::CmdList::regular(d.ctx);
+    for (uint32_t r = 0; r < R; ++r) {
+      la.launch(ka[r % NC], ga, gy, 1);
+      lb.launch(kb[r % NC], gb, gy, 1);
+    }
+    la.close();
+    lb.close();
+    for (int w = 0; w < 3; ++w) {
+      replay(la);
+      replay(lb);
+    }
+    std::vector<double> ta, tb;
+    for (uint32_t round = 0; round < ROUNDS; ++round) {
+      double sa = 0, sb = 0;
+      for (uint32_t i = 0; i < NR; ++i) {
+        sa += replay(la);
+        sb += replay(lb);
+      }
+      ta.push_back(sa / (NR * R) * 1e6);
+      tb.push_back(sb / (NR * R) * 1e6);
+    }
+    std::printf("bench-hc8: %s M %u: bf16 %.2f us, int8 %.2f us a launch (%.2fx; rounds %.2f / %.2f / %.2f vs %.2f / "
+                "%.2f / %.2f)\n",
+                what, M, median(ta), median(tb), median(ta) / median(tb), ta[0], ta[1], ta[2], tb[0], tb[1], tb[2]);
+  };
+  for (uint32_t M = 1; M <= 4; ++M) {
+    const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(N);
+    const std::string vb = kernels::gemv_bf16_variant(M, HCN, N, t), v8 = qk::hc_down_i8_variant(M, true);
+    const std::string ub = qk::hc_up_mix_variant(M, true), u8 = qk::hc_up_mix_variant(M, true, true);
+    if (!built(vb) || !built(v8) || !built(ub) || !built(u8)) continue;
+    ctl.at(7, M);
+    l0::Module mb(d.ctx, kernels::path(vb)), m8(d.ctx, kernels::path(v8));
+    l0::Module nb(d.ctx, kernels::path(ub)), n8(d.ctx, kernels::path(u8));
+    std::vector<l0::Kernel> kb, k8, jb, j8;
+    for (uint32_t i = 0; i < NC; ++i) {
+      kb.push_back(bind(mb, "gemv_bf16", t.cols * t.ksplit, {dw[i], xnb, ob}));
+      k8.push_back(bind(m8, "q4_hc_down_i8", qk::hc_down_i8_wg(), {dw8[i], xnb, ob}));
+      jb.push_back(bind(nb, "q4_hc_up_mix", qk::kUpMixWg, {ctl.m, db, uw[i], xnb, xb, ijb}));
+      j8.push_back(bind(n8, "q4_hc_up_mix", qk::kUpMixWg, {ctl.m, db, uw8[i], xnb, xb, ijb}));
+    }
+    pair("down||inject {10240, 336}", M, kb, N / t.cols, k8, N / 16, 1);
+    pair("up-mix _I {320, 10240}", M, jb, D / 16, j8, D / 16, M);
+  }
+  return 0;
+}
+
 // ---- --ple-rate ----------------------------------------------------------------------------------------------------
 struct PleTable {   // 16 + 16 host-USM ranges in the primary context: every device of it reads them
   std::vector<uint64_t> sizes, offs;
@@ -1108,17 +1437,19 @@ int ple_rate(double gb) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  bool bench = false, rate = false;
+  bool bench = false, rate = false, bench8 = false;
   double gb = 16.0;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--bench-attn") {
       bench = true;
+    } else if (a == "--bench-hc8") {
+      bench8 = true;
     } else if (a == "--ple-rate") {
       rate = true;
       if (i + 1 < argc && argv[i + 1][0] != '-') gb = std::atof(argv[++i]);
     } else {
-      std::fprintf(stderr, "usage: qwen4exp_kernels_test [--bench-attn | --ple-rate [GB]]\n");
+      std::fprintf(stderr, "usage: qwen4exp_kernels_test [--bench-attn | --bench-hc8 | --ple-rate [GB]]\n");
       return 2;
     }
   }
@@ -1134,8 +1465,10 @@ int main(int argc, char** argv) {
   if (rate) return ple_rate(gb > 0 ? gb : 16.0);
   Dev d;
   if (bench) return bench_attn(d);
+  if (bench8) return bench_hc8(d);
   std::printf("qwen4exp_kernels_test on %s\n", d.ctx.name().c_str());
   hc_tests(d);
+  hc8_tests(d);
   ple_tests(d);
   qsa_tests(d);
   moe_tests(d);

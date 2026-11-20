@@ -82,6 +82,7 @@ struct Q4LoadedModel {
   Q4PleTable ple;                                  // host USM, device-visible from every device of the context
   uint32_t ple_device = 0;                         // whose context allocated it and holds its pointer table
   uint32_t max_len = 0, checkpoint_layers = 0;
+  uint32_t pf_rows = runtime::qwen4exp::kPfC;      // the engines' prefill chunk rows (the planner's, settle / pf_rows)
   bool int8_head = false, mtp = false;
   runtime::qwen4exp::ExpertTier tier;              // where each routed expert lives (all resident without a tier);
                                                    // under tp card 0's halves
@@ -117,7 +118,8 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 // table, the mirrors and a 16 GiB margin exceed MemAvailable, naming the bytes: check_q4_host_fit), each device's
 // table of block addresses read back equal, and the load check's samples (Q4DevicePart::check_*; the engine reads
 // them through the table). The layers bind the table form unless B70_Q4_EXPERTS=direct (refused with any expert in
-// host memory).
+// host memory). `pf_rows`: the prefill scratch's chunk rows the caller planned (runtime::qwen4exp::kPfC or kPfCWide:
+// pf_chunk_choice), kept for the engine; a B70_Q4_RESIDENT tier is filled from the budget at those rows.
 // Plan 21-QFN-v2b, `placement.tp`: each layer repacked once and cut into its two halves (loader::q4_tp_layer), each half
 // uploaded onto its card with that card's tier (`tier` card 0's, `tier1` card 1's; null: B70_Q4_RESIDENT's placement
 // through tp_fill_tier, else every expert resident); the final mixer and lm_head's vocabulary half (rows [124160 r,
@@ -128,7 +130,8 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
                             uint32_t max_len, const model::Q4Placement& placement,
                             LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false,
                             const runtime::qwen4exp::ExpertTier* tier = nullptr,
-                            const runtime::qwen4exp::ExpertTier* tier1 = nullptr);
+                            const runtime::qwen4exp::ExpertTier* tier1 = nullptr,
+                            uint32_t pf_rows = runtime::qwen4exp::kPfC);
 
 // The routing profile beside the checkpoint (`<snapshot>-expert-profile.safetensors`: offload_curve.py profile's
 // u32 counts [layers][experts], format "spec22-profile-1"): its counts, or empty when there is no such file; a file

@@ -703,9 +703,9 @@ class Capture {
                  : mode_ == Mode::VerifyTaps && tv_->gdn_pend    ? tv_->gdn_pend->ptr()
                                                                  : nullptr;
     if (pend) {
-      require(d_.gdn_layers == 48 && d_.gdn_k_heads == kernels::kRefGdnKHeads &&
-                  d_.gdn_v_heads == kernels::kRefGdnVHeads,
-              "gdn_step_defer_M<M> is built at Qwen3.8's GDN shapes only");
+      require(kernels::gdn_defer_built(d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads),
+              "gdn_step_defer_M<M> is built at Qwen3.8's and Ornith's GDN shapes only");
+      const size_t pend_layer = kernels::gdn_pend_layer_bytes(d_.gdn_k_heads, d_.gdn_v_heads);   // PERF-51
       if (deep()) {
         // Spec 32 (gdn_step.cl, ROW0): kCapM / 16 links of the 16-row build, link r0 bound at the list's row r0 of the
         // partials, a||b and gdn_o; the chain's scratch state and conv rows are this layer's slices.
@@ -718,14 +718,15 @@ class Capture {
           k.arg_ptr(4, ring0() + size_t(g) * conv_ring_stride());
           k.arg_ptr(5, state0() + size_t(g) * gdn_state_stride());
           k.arg_ptr(6, static_cast<uint8_t*>(b_.gdn_o.ptr()) + size_t(r0) * d_.gdn_value_dim() * kFp32);
-          k.arg_ptr(7, static_cast<uint8_t*>(pend) + size_t(g) * kernels::kGdnPendLayerBytes);
+          k.arg_ptr(7, static_cast<uint8_t*>(pend) + size_t(g) * pend_layer);
           k.arg_ptr(8, static_cast<uint8_t*>(sb_.gdn_x) + size_t(g) * gdn_state_stride());
           k.arg_ptr(9, static_cast<uint8_t*>(sb_.conv_x) + size_t(g) * kernels::kGdnConvXLayerBytes);
           launch(k, d_.gdn_v_heads, kGdnStateChunks);
         }
         return;
       }
-      l0::Kernel& k = kernel(kernels::gdn_step_defer_variant(kCapM), "gdn_step", kWgGdn);
+      l0::Kernel& k = kernel(kernels::gdn_step_defer_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads),
+                             "gdn_step", kWgGdn);
       k.arg_ptr(0, ctrl());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, b_.ab_out.ptr());
@@ -733,7 +734,7 @@ class Capture {
       k.arg_ptr(4, ring0() + size_t(g) * conv_ring_stride());
       k.arg_ptr(5, state0() + size_t(g) * gdn_state_stride());
       k.arg_ptr(6, b_.gdn_o.ptr());
-      k.arg_ptr(7, static_cast<uint8_t*>(pend) + size_t(g) * kernels::kGdnPendLayerBytes);
+      k.arg_ptr(7, static_cast<uint8_t*>(pend) + size_t(g) * pend_layer);
       launch(k, d_.gdn_v_heads, kGdnStateChunks);
       return;
     }

@@ -52,6 +52,11 @@ constexpr uint32_t kOrnithSplitMaxRows = 256;
 constexpr uint32_t kOrnithWideMinPos = 8192;     // chunks over kSplitMaxRows
 constexpr uint32_t kOrnithMinSpan = 512;         // chunks over 32 rows
 constexpr uint32_t kOrnithWave = 128;
+// PERF-12 follow-up (flash_split_test --time, 16 FA layers, card 0, bf16): Qwen3.8's 24 / 4 heads at C > 32 take
+// pf_o's room cut to whole waves of kOrnithWave work-groups too - 64 rows at 128k keys 98.6 -> 82.8 ms (16 -> 24
+// spans), 128 rows 180.0 -> 166.5 (13 -> 12) and at 64k 92.5 -> 87.4; shallower than kQwenWaveMinPos the old rule
+// stays (8192 keys: 7.1 ms at 16 or 10 spans alike).
+constexpr uint32_t kQwenWaveMinPos = 16384;
 // int8 KV: up to this many rows the split reads the int8 rows in place (no kv8_widen of pos + C rows - the
 // widening alone is ~1 ms a layer at 32k); above it, kv8_widen + the raw split (its tiles convert nothing).
 constexpr uint32_t kSplitInPlaceMaxRows = 64;
@@ -101,7 +106,10 @@ uint32_t flash_split_span(const model::ModelDesc& d, uint32_t pos, uint32_t C) {
   const uint32_t c8 = (C + 7u) & ~7u, rows = attn_rows(C, PrefillBackend::L0);
   const uint32_t room = uint32_t(uint64_t(PrefillScratchDims::kCDefault - rows) * kHeadDim / (uint64_t(c8) * (kHeadDim + 2)));
   uint32_t n = ornith ? std::max(128u / (c8 / 8u), 32u) : std::max(64u / (c8 / 8u), 16u);
-  if (ornith) {   // whole waves: n x (row blocks x kv-heads) work-groups
+  // Qwen3.8 one card, C > 32 deep in the cache: Ornith's whole-wave cut over pf_o's room (kQwenWaveMinPos).
+  const bool qwen_waves = d.fa_q_heads == 24 && d.fa_kv_heads == 4 && C > 32 && pos >= kQwenWaveMinPos;
+  if (qwen_waves) n = room;
+  if (ornith || qwen_waves) {   // whole waves: n x (row blocks x kv-heads) work-groups
     n = std::min(n, room);
     const uint32_t q = kOrnithWave / std::gcd(kOrnithWave, c8 / 8u * d.fa_kv_heads);
     if (n >= q) n -= n % q;
@@ -120,21 +128,23 @@ const char* attn_mode_name(AttnMode m) { return m == AttnMode::Flash ? "flash" :
 
 void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                      const float* qkv_partials, const float* fa_small, const float* rope,
-                     uint16_t* kv_k, uint16_t* kv_v, const void* pages) {
-  // Spec 15b: grid (q-heads + kv-heads, C) - 28 work-groups per row on Qwen3.8.
+                     uint16_t* kv_k, uint16_t* kv_v, const void* pages, bool kv_only) {
+  // Spec 15b: grid (q-heads + kv-heads, C) - 28 work-groups per row on Qwen3.8; kv_only (PERF-85) kv-heads.
   const uint32_t q_heads = s.desc().fa_q_heads, kv_heads = s.desc().fa_kv_heads;
+  const uint32_t gx = kv_only ? kv_heads : q_heads + kv_heads;
+  auto name = [&](std::string v) { return kv_only ? kernels::kv_only(v) : v; };
   // Argument 5 is `attn_gate`, which the Q_BF16 build does not write (the gate
   // is read from `qkv_partials` by `pf_attn_gate`). Null rather than a spare
   // buffer, so a build that DID write it would fault at once instead of
   // silently filling scratch nobody reads.
   if (pages) {   // plan 19v3b Task 0: a slot's paged KV
-    cx.launch(kc(kernels::kv_paged(kernels::pf_attn_prep_q16_variant(q_heads, kv_heads)), "pf_attn_prep"),
-              q_heads + kv_heads, C, 1,
+    cx.launch(kc(name(kernels::kv_paged(kernels::pf_attn_prep_q16_variant(q_heads, kv_heads))), "pf_attn_prep"),
+              gx, C, 1,
               {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope), PtrArg(s.pf_q.ptr()),
                PtrArg(nullptr), PtrArg(kv_k), PtrArg(kv_v), PtrArg(pages)});
     return;
   }
-  cx.launch(kc(kernels::pf_attn_prep_q16_variant(q_heads, kv_heads), "pf_attn_prep"), q_heads + kv_heads, C, 1,
+  cx.launch(kc(name(kernels::pf_attn_prep_q16_variant(q_heads, kv_heads)), "pf_attn_prep"), gx, C, 1,
             {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope),
              PtrArg(s.pf_q.ptr()), PtrArg(nullptr), PtrArg(kv_k), PtrArg(kv_v)});
 }
@@ -197,31 +207,44 @@ bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     const bool pair = !pages && ((q_heads == 24 && kv_heads == 4) || (q_heads == 16 && kv_heads == 2));
     if (pages) {   // plan 19v3b Task 0: a slot's paged KV
       require(q_heads == 24 && kv_heads == 4, "a paged KV (sequence slots) is Qwen3.8's: no other paged flash is built");
-      cx.launch(kc(kernels::kv_paged(kernels::pf_flash_attn_variant(q_heads, kv_heads)), "pf_flash_attn"),
-                (C + 7u) / 8u, kv_heads, 1,
-                {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C),
-                 arg_val(rows), PtrArg(pages)});
+      for (uint32_t r = 0; r < C; r += kPairLaunchRows) {   // launched as the pair form is (attn_chunk_launches)
+        const uint32_t c = std::min(kPairLaunchRows, C - r);
+        cx.launch(kc(kernels::kv_paged(kernels::pf_flash_attn_variant(q_heads, kv_heads)), "pf_flash_attn"),
+                  (c + 7u) / 8u, kv_heads, 1,
+                  {PtrArg(q + r * q_row), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.as<float>() + size_t(r) * kHeadDim),
+                   arg_val(pos + r), arg_val(c), arg_val(rows), PtrArg(pages)});
+      }
       profile_wait(cx, Phase::kAttnFlash);
       return false;
     }
-    const uint32_t gx = pair ? (C + kernels::kPfFlashPairRows - 1u) / kernels::kPfFlashPairRows : (C + 7u) / 8u;
-    const uint32_t gz = pair ? q_heads / kv_heads / kernels::kPfFlashPairHeads : 1u;
+    if (!pair) {
+      cx.launch(kc(kernels::pf_flash_attn_variant(q_heads, kv_heads), "pf_flash_attn"), (C + 7u) / 8u, kv_heads, 1,
+                {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C),
+                 arg_val(rows)});
+      profile_wait(cx, Phase::kAttnFlash);
+      return false;
+    }
+    const uint32_t gz = q_heads / kv_heads / kernels::kPfFlashPairHeads;
     // Phase 3: Ornith's walk passes the gate's source and target; its pair launch then gates in the epilogue (bitwise
     // pf_attn_gate).
-    if (pair && gate_out && q_heads == 16) {
-      require(gate_src != nullptr, "the fused gate needs qkv_partials");
-      cx.launch(kc(kernels::pf_flash_attn_pairg_variant(q_heads, kv_heads), "pf_flash_attn"), gx, kv_heads, gz,
-                {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C), arg_val(rows),
-                 PtrArg(gate_src), PtrArg(gate_out)});
-      profile_wait(cx, Phase::kAttnFlash);
-      return true;
+    const bool gated = gate_out && q_heads == 16;
+    require(!gated || gate_src != nullptr, "the fused gate needs qkv_partials");
+    const size_t qkv_n = size_t(2 * q_heads + 2 * kv_heads) * kHeadDim;   // a gate source row (pf_flash_attn's QKV_N)
+    for (uint32_t r = 0; r < C; r += kPairLaunchRows) {
+      const uint32_t c = std::min(kPairLaunchRows, C - r);
+      const uint32_t gx = (c + kernels::kPfFlashPairRows - 1u) / kernels::kPfFlashPairRows;
+      float* const o = s.pf_o.as<float>() + size_t(r) * kHeadDim;
+      if (gated)
+        cx.launch(kc(kernels::pf_flash_attn_pairg_variant(q_heads, kv_heads), "pf_flash_attn"), gx, kv_heads, gz,
+                  {PtrArg(q + r * q_row), PtrArg(kv_k), PtrArg(kv_v), PtrArg(o), arg_val(pos + r), arg_val(c),
+                   arg_val(rows), PtrArg(gate_src + r * qkv_n), PtrArg(gate_out + r * q_row)});
+      else
+        cx.launch(kc(kernels::pf_flash_attn_pair_variant(q_heads, kv_heads), "pf_flash_attn"), gx, kv_heads, gz,
+                  {PtrArg(q + r * q_row), PtrArg(kv_k), PtrArg(kv_v), PtrArg(o), arg_val(pos + r), arg_val(c),
+                   arg_val(rows)});
     }
-    cx.launch(kc(pair ? kernels::pf_flash_attn_pair_variant(q_heads, kv_heads)
-                      : kernels::pf_flash_attn_variant(q_heads, kv_heads), "pf_flash_attn"), gx, kv_heads, gz,
-              {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos),
-               arg_val(C), arg_val(rows)});
     profile_wait(cx, Phase::kAttnFlash);
-    return false;
+    return gated;
   }
   require(!pages, "a paged KV (sequence slots) prefills through the flash attention only");
   // Spec 2.1 §3.4: the depth pads to 256 -- pf_gemm's tile -- and every per-head slot is
@@ -424,15 +447,22 @@ void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t po
     return;
   }
   if (pages)
-    cx.launch(kc(variant, "pf_flash_attn_kv8"), (C + 7u) / 8u, kv_heads, 1,
-              {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(s.pf_o.ptr()), arg_val(pos),
-               arg_val(C), arg_val(rows), PtrArg(pages)});
+    for (uint32_t r = 0; r < C; r += kPairLaunchRows) {   // launched as the pair form is (attn_chunk_launches)
+      const uint32_t c = std::min(kPairLaunchRows, C - r);
+      cx.launch(kc(variant, "pf_flash_attn_kv8"), (c + 7u) / 8u, kv_heads, 1,
+                {PtrArg(q + size_t(r) * q_heads * kHeadDim), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs),
+                 PtrArg(s.pf_o.as<float>() + size_t(r) * kHeadDim), arg_val(pos + r), arg_val(c), arg_val(rows),
+                 PtrArg(pages)});
+    }
   else if (q_heads == 24 && kv_heads == 4)   // the pair form (bitwise the raw binary), as attn_chunk's whole chunks
-    cx.launch(kc(kernels::pf_flash_attn_kv8_raw_pair_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
-              (C + kernels::kPfFlashPairRows - 1u) / kernels::kPfFlashPairRows, kv_heads,
-              q_heads / kv_heads / kernels::kPfFlashPairHeads,
-              {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs),
-               PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C), arg_val(rows)});
+    for (uint32_t r = 0; r < C; r += kPairLaunchRows) {   // and launched as it: kPairLaunchRows rows at a time
+      const uint32_t c = std::min(kPairLaunchRows, C - r);
+      cx.launch(kc(kernels::pf_flash_attn_kv8_raw_pair_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
+                (c + kernels::kPfFlashPairRows - 1u) / kernels::kPfFlashPairRows, kv_heads,
+                q_heads / kv_heads / kernels::kPfFlashPairHeads,
+                {PtrArg(q + size_t(r) * q_heads * kHeadDim), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs),
+                 PtrArg(s.pf_o.as<float>() + size_t(r) * kHeadDim), arg_val(pos + r), arg_val(c), arg_val(rows)});
+    }
   else
     cx.launch(kc(variant, "pf_flash_attn_kv8"),
               (C + 7u) / 8u, kv_heads, 1,

@@ -4,9 +4,9 @@
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
 - **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
-- **Prompts read at 1,905 t/s on one card with MTP on, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
+- **Prompts read at 2,253 t/s on one card with MTP on, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
-- **Ornith 1.5 35B-A3B:** prompts read at **11,036 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
+- **Ornith 1.5 35B-A3B:** prompts read at **11,223 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 - **Qwen3.8-Flash-Next:** prompts read at **3,103 t/s**, code written at **82-92 t/s** (two cards, experts offloaded to RAM).
 
 One choice to make - how many requests run at once. The engine sizes everything else.
@@ -21,12 +21,21 @@ arrives faster. A **prefix cache hit** is a follow-up turn whose earlier convers
 
 Prefill, t/s:
 
-| setup | 4k prompt | 16k prompt | 64k prompt |
-|---|---:|---:|---:|
-| one card, MTP on (the default server) | 1,667 | - | 1,236 |
-| one card, MTP on, `--prefill-backend l0-int8` (opt-in) | 1,905 | - | 1,448 |
-| two cards, `tp`, MTP off | 2,931 | 2,683 | - |
-| two cards, `tp`, MTP off, `--prefill-backend l0-int8` (opt-in) | **3,217** | **2,937** | - |
+| setup | 4k prompt | 16k prompt | 32k prompt | 64k prompt | 128k prompt |
+|---|---:|---:|---:|---:|---:|
+| one card, MTP on (the default server) | 1,780 | - | - | 1,294 | - |
+| one card, MTP on, `--prefill-backend l0-int8` (opt-in) | 2,253 | - | - | 1,526 | - |
+| two cards, `tp`, MTP off | 2,931 | 2,683 | - | - | - |
+| two cards, `tp`, MTP off, `--prefill-backend l0-int8` (opt-in) | **3,217** | **2,937** | - | - | - |
+
+Writing after a prompt of that length, one card, t/s:
+
+| setup | 4k prompt | 16k prompt | 32k prompt | 64k prompt | 128k prompt |
+|---|---:|---:|---:|---:|---:|
+| MTP | - | - | 50 | - | - |
+| DFlash, `--kv-cache int8` | - | - | 90 | 93 | 90 |
+
+A dash is not measured yet.
 
 Generation, t/s (several requests: the total; llama-benchy tg128 at 0 / 32k tokens of context):
 
@@ -40,16 +49,16 @@ Generation, t/s (several requests: the total; llama-benchy tg128 at 0 / 32k toke
 | DFlash, 1 request, one card | **164** | 65 | 111 | **139** / 83 |
 | DFlash, 2 requests, two cards `replica` | 317 | 127 | 191 | |
 
-DFlash is `--spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`.
+DFlash is `--spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`
 
 ### Ornith 1.5 35B-A3B
 
 Prefill, t/s:
 
-| setup | 4k prompt | 16k prompt |
-|---|---:|---:|
-| one card | 11,036 | 8,800 |
-| two cards `replica`, 2 requests (total) | **19,117** | **13,728** |
+| setup | 4k prompt | 16k prompt | 32k prompt | 64k prompt | 128k prompt | 262k prompt |
+|---|---:|---:|---:|---:|---:|---:|
+| one card | 11,223 | 8,800 | 7,420 | 5,428 | 3,544 | 2,096 |
+| two cards `replica`, 2 requests (total) | **19,117** | **13,728** | - | - | - | - |
 
 Generation with MTP, t/s:
 
@@ -67,7 +76,7 @@ Prefill, t/s:
 | two cards `pp` | **3,103** | **2,458** |
 | two cards `tp` | 2,128 | 1,988 |
 
-A short prompt (43 tokens) gets its first token in 0.38 s on `pp`, 0.50 s on `tp`.
+A short prompt (43 tokens) gets its first token in 0.38 s on `pp`, 0.50 s on `tp`
 
 Generation, t/s:
 
@@ -158,7 +167,7 @@ Kolibri-1); Qwen3.8 is the one everything is tuned for.
 | `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
 | `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; it also copies repeats of earlier text |
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
-| `--draft-model PATH` | none; required with `--spec dflash` | the draft model: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB of the context's memory). |
+| `--draft-model PATH` | none; required with `--spec dflash` | the draft model: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB of the context's memory) |
 | `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
 | `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; Qwen3.8 and Ornith) |
 | `--prefix-cache-gb auto\|N` | `auto` | the prefix cache in pinned system RAM; `auto` = up to 32 GiB from what is free, `0` = off |

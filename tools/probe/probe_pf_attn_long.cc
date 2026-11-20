@@ -1,7 +1,7 @@
 // probe_pf_attn_long - the full-chunk prefill attention deep in the cache: today's binary against
 // pf_flash_attn.cl's PAIR form, bitwise and timed on the production shapes.
 //
-//   probe_pf_attn_long <pos> <C> [--heads 24x4|16x2] [--kv8] [--arms <name>[,...]] [--rounds N]
+//   probe_pf_attn_long <pos> <C> [--heads 24x4|16x2] [--kv8] [--arms <name>[,...]] [--rounds N] [--sub R]
 //
 // Inputs: Q bf16 [C][q-heads][256] N(0,1), K / V bf16 [pos + C][kv-heads][256] N(0,1) (one layer's cache).
 // --kv8 (Qwen3.8's heads): the int8 KV cache's whole-chunk flash over the widened rows instead - K / V are int8 values
@@ -65,6 +65,7 @@ int main(int argc, char** argv) {
     bool ornith = false, kv8 = false;
     std::string arms_arg;
     int rounds = 7;
+    uint32_t sub = 0;   // --sub R: each arm as launches of R rows (pos + r, Q and O offset by r); 0 = one launch
     for (int i = 3; i < argc; ++i) {
       const std::string a = argv[i];
       auto val = [&]() -> std::string {
@@ -75,6 +76,7 @@ int main(int argc, char** argv) {
       else if (a == "--kv8") kv8 = true;
       else if (a == "--arms") arms_arg = val();
       else if (a == "--rounds") rounds = std::stoi(val());
+      else if (a == "--sub") sub = uint32_t(std::stoul(val()));
       else throw std::runtime_error("unknown argument " + a);
     }
     if (kv8 && ornith) throw std::runtime_error("--kv8: Ornith has no int8-KV prompt path");
@@ -146,14 +148,30 @@ int main(int argc, char** argv) {
       l0::CmdList::immediate(ctx).fill(p.out->ptr(), 0u, o_elems * 4);
     }
     auto run = [&](Path& p) {
-      if (kv8)
+      if (kv8 && (sub == 0 || &p == &paths[0]))
         cx.launch(*p.k, p.gx, kvh, p.gz,
                   {PtrArg(dq.ptr()), PtrArg(dk.ptr()), PtrArg(dks.ptr()), PtrArg(dv.ptr()), PtrArg(dvs.ptr()),
                    PtrArg(p.out->ptr()), arg_val(pos), arg_val(C), arg_val(rows)});
-      else
+      else if (kv8)
+        for (uint32_t r = 0; r < C; r += sub) {
+          const uint32_t c = std::min(sub, C - r);
+          cx.launch(*p.k, (c + 15u) / 16u, kvh, p.gz,
+                    {PtrArg(static_cast<char*>(dq.ptr()) + size_t(r) * qh * kHD * 2), PtrArg(dk.ptr()), PtrArg(dks.ptr()),
+                     PtrArg(dv.ptr()), PtrArg(dvs.ptr()), PtrArg(static_cast<char*>(p.out->ptr()) + size_t(r) * kHD * 4),
+                     arg_val(pos + r), arg_val(c), arg_val(rows)});
+        }
+      else if (sub == 0 || &p == &paths[0])
         cx.launch(*p.k, p.gx, kvh, p.gz,
                   {PtrArg(dq.ptr()), PtrArg(dk.ptr()), PtrArg(dv.ptr()), PtrArg(p.out->ptr()), arg_val(pos), arg_val(C),
                    arg_val(rows)});
+      else
+        for (uint32_t r = 0; r < C; r += sub) {
+          const uint32_t c = std::min(sub, C - r);
+          cx.launch(*p.k, (c + 15u) / 16u, kvh, p.gz,
+                    {PtrArg(static_cast<char*>(dq.ptr()) + size_t(r) * qh * kHD * 2), PtrArg(dk.ptr()), PtrArg(dv.ptr()),
+                     PtrArg(static_cast<char*>(p.out->ptr()) + size_t(r) * kHD * 4), arg_val(pos + r), arg_val(c),
+                     arg_val(rows)});
+        }
     };
     for (Path& p : paths) {
       run(p);

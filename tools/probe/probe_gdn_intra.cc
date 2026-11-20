@@ -13,6 +13,7 @@
 // `--rounds`, at C = the dump's rows and at 2C (the dump tiled twice). Global timestamps around the launches.
 //
 //   probe_gdn_intra --dump DIR [--calls 0,9,21] [--rounds 9] [--no-time]
+//   probe_gdn_intra --synth K,V,C [--calls 0,1] ...   (host-made inputs at K / V heads and C rows; synthesize())
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -20,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -59,6 +61,11 @@ std::vector<T> read_bin(const std::string& path) {
   f.seekg(0);
   f.read(reinterpret_cast<char*>(v.data()), std::streamsize(n));
   return v;
+}
+uint16_t bf16(float x) {   // round to nearest even (finite x)
+  uint32_t u;
+  std::memcpy(&u, &x, 4);
+  return uint16_t((u + 0x7fffu + ((u >> 16) & 1u)) >> 16);
 }
 
 struct Shape {
@@ -187,6 +194,45 @@ Err err(size_t n, const std::vector<double>& ref, F get) {
   return e;
 }
 
+// --synth K,V,C (PERF-19, Qwen3.8-Flash-Next without its weights): inputs made on the host in the dump's layouts, what
+// pf_gdn_front and pf_gdn_gate write from gdn_chunk_test's fixture - q / k l2-normed per head and v as bf16 words; g the
+// ascending fp32 sum over each 64-row sub-chunk of negA * softplus(a + dt_bias), beta = sigmoid(b) (a, b bf16 words,
+// negA in [-4, -1]). An even call: dt_bias -4 (long memory, the fixture's); an odd call: dt_bias 0 (fast decay).
+void synthesize(const Shape& sh, int call, std::vector<uint16_t>& xb, std::vector<float>& g, std::vector<float>& beta) {
+  std::mt19937 rng(0x19u + uint32_t(call));
+  std::normal_distribution<float> nq(0.0f, 1.0f), nv(0.0f, 0.5f), nab(0.0f, 1.0f);
+  std::uniform_real_distribution<float> una(-4.0f, -1.0f);
+  xb.assign(size_t(sh.C) * sh.conv, 0);
+  std::vector<float> head(kDim);
+  for (uint32_t m = 0; m < sh.C; ++m) {
+    uint16_t* row = xb.data() + size_t(m) * sh.conv;
+    for (uint32_t h = 0; h < 2 * sh.hk; ++h) {   // the q heads, then the k heads
+      double ss = 0;
+      for (float& v : head) {
+        v = nq(rng);
+        ss += double(v) * v;
+      }
+      const float inv = float(1.0 / std::sqrt(ss));
+      for (uint32_t d = 0; d < kDim; ++d) row[size_t(h) * kDim + d] = bf16(head[d] * inv);
+    }
+    for (uint32_t i = sh.v_off(); i < sh.conv; ++i) row[i] = bf16(nv(rng));
+  }
+  std::vector<float> negA(sh.hv), acc(sh.hv, 0.0f);
+  for (float& a : negA) a = una(rng);
+  const float dt_bias = call % 2 ? 0.0f : -4.0f;
+  g.assign(size_t(sh.C) * sh.hv, 0.0f);
+  beta = g;
+  for (uint32_t m = 0; m < sh.C; ++m) {
+    if (m % kCt == 0) std::fill(acc.begin(), acc.end(), 0.0f);
+    for (uint32_t h = 0; h < sh.hv; ++h) {
+      const float x = f32(bf16(nab(rng))) + dt_bias, b = f32(bf16(nab(rng)));
+      acc[h] += negA[h] * (x > 20.0f ? x : std::log1p(std::exp(x)));
+      g[size_t(m) * sh.hv + h] = acc[h];
+      beta[size_t(m) * sh.hv + h] = 1.0f / (1.0f + std::exp(-b));
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -196,9 +242,14 @@ int main(int argc, char** argv) {
     int rounds = 9;
     bool time = true;
     uint32_t c_override = 0;   // --c N: probe the first N rows only (a ragged tail sub-chunk)
+    uint32_t synth_k = 0, synth_v = 0, synth_c = 0;   // --synth K,V,C: synthetic inputs, no dump
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "--dump" && i + 1 < argc) dir = argv[++i];
+      else if (a == "--synth" && i + 1 < argc) {
+        if (std::sscanf(argv[++i], "%u,%u,%u", &synth_k, &synth_v, &synth_c) != 3 || synth_k == 0 || synth_c == 0)
+          throw std::runtime_error("--synth takes K,V,C (k-heads, v-heads, rows)");
+      }
       else if (a == "--rounds" && i + 1 < argc) rounds = std::max(1, std::atoi(argv[++i]));
       else if (a == "--no-time") time = false;
       else if (a == "--c" && i + 1 < argc) c_override = uint32_t(std::atoi(argv[++i]));
@@ -208,11 +259,11 @@ int main(int argc, char** argv) {
         std::string tok;
         while (std::getline(ss, tok, ',')) calls.push_back(std::atoi(tok.c_str()));
       } else {
-        std::fprintf(stderr, "usage: probe_gdn_intra --dump DIR [--calls 0,9,21] [--rounds 9] [--no-time]\n");
+        std::fprintf(stderr, "usage: probe_gdn_intra (--dump DIR | --synth K,V,C) [--calls 0,9,21] [--rounds 9] [--no-time]\n");
         return 2;
       }
     }
-    if (dir.empty()) throw std::runtime_error("--dump DIR is required");
+    if (dir.empty() == (synth_k == 0)) throw std::runtime_error("one of --dump DIR or --synth K,V,C is required");
     l0::Context ctx(0);
     const char* mask = std::getenv("ZE_AFFINITY_MASK");
     std::printf("# probe_gdn_intra: control (pf_gdn_A, _solve, _wu, _A2_hilo) vs D-a (pf_gdn_intra)\n");
@@ -222,16 +273,24 @@ int main(int argc, char** argv) {
     bool gate = true;
 
     for (int call : calls) {
-      const std::string base = dir + "/gdn" + std::to_string(call);
       Shape sh{};
-      {
-        std::ifstream f(base + ".txt");
-        if (!(f >> sh.C >> sh.hk >> sh.hv >> sh.conv)) throw std::runtime_error("cannot read " + base + ".txt");
+      std::vector<uint16_t> xb;
+      std::vector<float> g, beta;
+      if (synth_k > 0) {
+        sh = {synth_c, synth_k, synth_v, (2 * synth_k + synth_v) * kDim};
+        synthesize(sh, call, xb, g, beta);
+      } else {
+        const std::string base = dir + "/gdn" + std::to_string(call);
+        {
+          std::ifstream f(base + ".txt");
+          if (!(f >> sh.C >> sh.hk >> sh.hv >> sh.conv)) throw std::runtime_error("cannot read " + base + ".txt");
+        }
+        xb = read_bin<uint16_t>(base + "_xb.bin");
+        g = read_bin<float>(base + "_g.bin");
+        beta = read_bin<float>(base + "_beta.bin");
+        if (xb.size() != size_t(sh.C) * sh.conv || g.size() != size_t(sh.C) * sh.hv || beta.size() != g.size())
+          throw std::runtime_error(base + ": sizes do not match the .txt");
       }
-      const std::vector<uint16_t> xb = read_bin<uint16_t>(base + "_xb.bin");
-      const std::vector<float> g = read_bin<float>(base + "_g.bin"), beta = read_bin<float>(base + "_beta.bin");
-      if (xb.size() != size_t(sh.C) * sh.conv || g.size() != size_t(sh.C) * sh.hv || beta.size() != g.size())
-        throw std::runtime_error(base + ": sizes do not match the .txt");
       const uint32_t c_file = sh.C;
       if (c_override > 0 && c_override < sh.C) sh.C = c_override;
       const uint32_t H = sh.hv;

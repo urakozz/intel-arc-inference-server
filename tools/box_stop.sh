@@ -14,6 +14,10 @@
 #   tools/box_stop.sh q4exp-count-wait  the Flash-Next count-gate driver, only while its GPU job is waiting
 #   tools/box_stop.sh dflash-quant      the DFlash drafter quantisation (tools/quantize/quantize_dflash.sh run,
 #                                       ~/b70/hdd/quant/dflash-current): its process group; `start` resumes
+#   tools/box_stop.sh ripple-quant      the Ripple quantisation (tools/quantize/quantize_ripple.sh run,
+#                                       ~/b70/quant/ripple-current): its process group; `start` resumes
+#   tools/box_stop.sh nemotron-quant    the Nemotron quantisation (tools/quantize/quantize_nemotron.sh run,
+#                                       ~/b70/hdd/quant/nemotron-current): its process group; `start` resumes
 #   tools/box_stop.sh tree <branch>      jobs whose working directory is that branch's ~/b70/trees tree, plus its oracle containers
 #   tools/box_stop.sh job <branch> <pid> one process tree, verified to be working in that branch
 #   tools/box_stop.sh main-job <pid>    one process tree working in the main tree (~/b70-inference-server: CPU
@@ -39,10 +43,10 @@ else
   remote=(ssh -o ConnectTimeout=20 "$BOX" bash -s --)
 fi
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 what="${1:-}"; arg="${2:-}"; job_pid="${3:-}"
 case "$what" in
-  list|cpu-chain|hf-tier|validation|q4exp-count-wait|dflash-quant) [ -z "$arg" ] || usage ;;
+  list|cpu-chain|hf-tier|validation|q4exp-count-wait|dflash-quant|ripple-quant|nemotron-quant) [ -z "$arg" ] || usage ;;
   cpu-job|tree) [[ "$arg" =~ ^[A-Za-z0-9._-]+$ ]] || usage ;;
   job) [[ "$arg" =~ ^[A-Za-z0-9._-]+$ && "$job_pid" =~ ^[1-9][0-9]*$ ]] || usage ;;
   main-job) [[ "$arg" =~ ^[1-9][0-9]*$ ]] || usage ;;
@@ -110,6 +114,18 @@ case "$what" in
     stop_pids $(pgrep -g "$p")
     echo "resume with: tools/quantize/quantize_dflash.sh start"
     ;;
+  ripple-quant|nemotron-quant)
+    case $what in
+      ripple-quant) run=$HOME/b70/quant/ripple-current; script=quantize_ripple.sh ;;
+      *) run=$HOME/b70/hdd/quant/nemotron-current; script=quantize_nemotron.sh ;;
+    esac
+    run=$(readlink -f "$run" 2>/dev/null || true)
+    p=$(cat "$run/run.pid" 2>/dev/null || true)
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null || { echo "no $what run is running"; exit 0; }
+    tr '\0' ' ' < "/proc/$p/cmdline" | grep -q "$script run" || { echo "refused: pid $p is not $script run"; exit 2; }
+    stop_pids $(pgrep -g "$p")
+    echo "stopped the run in $run; resume with: tools/quantize/$script start"
+    ;;
   list)
     echo "== cpu chain";   pgrep -af 'b70/scripts/cpu-refs-chain.sh' | grep -v pgrep || echo "  not running"
     echo "== cpu jobs";    for f in "$CPU_LOG"/state/*.pid; do [ -e "$f" ] || continue; p=$(cat "$f"); kill -0 "$p" 2>/dev/null && echo "  $(basename "$f" .pid) pid $p"; done
@@ -117,6 +133,8 @@ case "$what" in
     echo "== hf-tier";     pgrep -af 'hf-tier-chain|tools/hf_tier.py' | grep -v pgrep || echo "  not running"
     echo "== validation";  pgrep -af 'box_validate/remote.sh' | grep -v pgrep | cut -c1-160 || echo "  not running"
     echo "== dflash-quant"; pgrep -af 'quantize_dflash.sh run' | grep -v pgrep || echo "  not running"
+    echo "== ripple-quant"; pgrep -af 'quantize_ripple.sh run' | grep -v pgrep || echo "  not running"
+    echo "== nemotron-quant"; pgrep -af 'quantize_nemotron.sh run' | grep -v pgrep || echo "  not running"
     echo "== main-tree jobs (stop one with main-job <pid>)"
     for f in /proc/[0-9]*/cwd; do
       wd=$(readlink "$f" 2>/dev/null || true)

@@ -52,8 +52,11 @@ backup_private_docs() {
       echo "box: WARNING the private docs backup of docs/$d failed; it is not on the box" >&2
   done
 }
+# C/C++ go through ccache when the box has it: one cache shared by every branch tree (paths under ~/b70/trees are
+# hashed relative to it), so a new branch's tree reuses every unchanged object.
+CCACHE_ENV="CCACHE_BASEDIR=\$HOME/b70/trees CCACHE_NOHASHDIR=1 CCACHE_MAXSIZE=20G"
 configure_and_build() {
-  ssh "$BOX" "cd '$REMOTE_DIR' && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS"
+  ssh "$BOX" "cd '$REMOTE_DIR' && L=\$(command -v ccache >/dev/null && echo '-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache' || true) && export $CCACHE_ENV && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release \$L $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS"
 }
 
 # ssh carries no environment of its own, so `ZE_AFFINITY_MASK=1 tools/box.sh test ...`

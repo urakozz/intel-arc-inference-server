@@ -25,7 +25,18 @@
 // final (chunk j writes later positions). A hook that throws drains device 0 and copies the shadow back: the state is
 // the block end's, as on one card. Each walk runs the same launches in the same order on its own device as before,
 // so the result is the sequential form's, bitwise.
+//
+// **Pairs (PERF-30).** On two cards each device walks the chunks in pairs (2p, 2p + 1) a layer at a time
+// (prefill_pair_pp), so each layer's copy of its host-memory experts into the read ahead serves both chunks - tp's
+// arrangement. The overlap above then runs per pair: device 0 runs pair p while device 1 runs pair p - 1. Chunk j's
+// slot is still j % kPfDepth (its place in its pair), but a device's slots are written right before that device's
+// half of the pair is appended (its lists idle): device 0's for pair p after it finished p - 1, device 1's after it
+// finished p - 1 - device 1 may still read its slots of pair p - 1 while device 0 runs pair p. Device 0's hand-off
+// (H into the two landing buffers, their events) is appended after its walk only once device 1 has finished pair
+// p - 1, whose copies out of those buffers it would overwrite. The block hook runs after each pair that ends
+// mid-prompt on a block end (tp's rule: a block end inside a pair is not hooked - no moment holds the state at it).
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,20 +63,24 @@ struct Qwen4ExpPrefillState {
     prefill::Context cx;
     prefill::KernelCache kc;
     Qwen4ExpPrefillScratch s;
-    std::unique_ptr<l0::Mem> inj[kPfDepth];   // host USM [qsa layers][kPfC][kListRow] a slot: the injected rows (lazy)
+    std::unique_ptr<l0::Mem> inj[kPfDepth];   // host USM [qsa layers][rows][kListRow] a slot: the injected rows (lazy)
     std::unique_ptr<l0::Mem> mtp_R;   // spec 21-QFN-v1e, the last device with the MTP head: the head pass's R rows
     l0::Mem ctl;                      // host [kPfDepth] Control: the chunks' Controls
     std::unique_ptr<l0::Mem> hctl;    // the last device with the MTP head: host [kPfDepth] Control, the head's
     std::unique_ptr<Q4PfRingState> ring;   // the host-memory experts read ahead (null: no expert table)
     std::unique_ptr<Q4LendState> lend;     // the scratch lent to the tier between prefills (with the ring)
-    Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len)
-        : cx(c), kc(c), s(c, d, max_len), ctl(c, l0::MemKind::Host, kPfDepth * sizeof(Control)) {}
+    // PERF-30, two devices: the pair's first chunk's own residual rows, inject weights and MoE output (pf_pair_bytes)
+    std::unique_ptr<l0::Mem> H1, inj1, y1;
+    Q4PfOwnRows own;
+    Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len, uint32_t rows)
+        : cx(c), kc(c), s(c, d, max_len, rows), ctl(c, l0::MemKind::Host, kPfDepth * sizeof(Control)) {}
     Control* ctl_at(uint32_t k) { return ctl.as<Control>() + k; }
-    uint32_t* ids_at(uint32_t k) { return s.ids.as<uint32_t>() + size_t(k) * kPfC; }
+    uint32_t* ids_at(uint32_t k) { return s.ids.as<uint32_t>() + size_t(k) * s.rows; }
   };
   std::vector<std::unique_ptr<Dev>> dev;
   std::unique_ptr<PipelineLink> link[kPfDepth];   // two devices: at chunk size (pf_landing_layout), one a slot
-  std::unique_ptr<l0::Mem> shadow[kPfDepth];      // two devices with a block hook: host, device 0's state runs (lazy)
+  std::unique_ptr<l0::Mem> shadow[kPfDepth];      // two devices with a block hook: host, device 0's state runs at
+                                                  // pair p's end at p % kPfDepth (lazy)
   uint32_t last = 0;                              // the last chunk's slot (read_prefill_selection's injected rows)
   uint64_t timeout_ns = 0;
   void signal_links() {
@@ -103,30 +118,38 @@ void Qwen4ExpEngine::prepare_prefill() {
   if (pf_) return;
   const model::Qwen4ExpDesc& d = model_.desc;
   const bool eager = attn_ == Q4Attn::Eager;
+  const uint32_t rows = model_.pf_rows;   // the planner's chunk rows (kPfC or kPfCWide)
   // A missing binary is named here, before anything is allocated or appended (the decode capture's rule); the head's
   // binaries are decode's, which the capture already checked.
-  for (const std::string& v : kernels::qwen4exp::prefill_variants(d, eager, model_.ple.scale == loader::Q4PleScale::Bf16))
+  for (const std::string& v :
+       kernels::qwen4exp::prefill_variants(d, eager, model_.ple.scale == loader::Q4PleScale::Bf16, rows))
     require(std::ifstream(kernels::path(v)).good(),
             v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON");
   if (mtp_)   // spec 21-QFN-v1e: the head's pass per chunk
-    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_norm_ == MtpNorm::Single))
+    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_norm_ == MtpNorm::Single, rows, d.hc_int8))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_MTP=ON");
   auto* ps = new Qwen4ExpPrefillState();
   pf_ = std::unique_ptr<Qwen4ExpPrefillState, void (*)(Qwen4ExpPrefillState*)>(ps, &destroy_prefill);
   ps->timeout_ns = uint64_t(opt_.prefill_timeout_ms) * 1000000ull;
   for (uint32_t i = 0; i < devices(); ++i)
-    ps->dev.push_back(std::make_unique<Qwen4ExpPrefillState::Dev>(stage_ctx(i), d, max_len_));
+    ps->dev.push_back(std::make_unique<Qwen4ExpPrefillState::Dev>(stage_ctx(i), d, max_len_, rows));
   if (devices() == 2)
-    for (auto& l : ps->link) l = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d));
+    for (auto& l : ps->link) l = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d, rows));
   if (mtp_) {
     ps->dev[devices() - 1]->mtp_R =
-        std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Device, mtp_prefill_R_bytes(d));
+        std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Device, mtp_prefill_R_bytes(d, rows));
     ps->dev[devices() - 1]->hctl =
         std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Host, kPfDepth * sizeof(Control));
   }
   for (uint32_t i = 0; i < devices(); ++i) {
     Qwen4ExpPrefillState::Dev& D = *ps->dev[i];
+    if (devices() == 2) {
+      D.H1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, size_t(rows) * d.hc_n() * 2);
+      D.inj1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, size_t(rows) * d.hc * 4);
+      D.y1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, size_t(rows) * d.hidden * 2);
+      D.own = {D.H1->ptr(), D.inj1->ptr(), D.y1->ptr()};
+    }
     D.ring = make_pf_ring(stage_ctx(i), model_.parts[i], d);
     if (D.ring)
       D.lend = std::make_unique<Q4LendState>(stage_ctx(i), model_.parts[i], d, model_.tier, lend_regions(D.s, D.ring.get()),
@@ -150,11 +173,13 @@ void Qwen4ExpEngine::prepare_prefill() {
   for (uint32_t i = 0; i < devices(); ++i) {
     size_t link = 0;
     for (auto& l : ps->link) link += l ? l->bytes(i) : 0;
-    pf_dev_bytes_[i] = ps->dev[i]->s.bytes() + link + (ps->dev[i]->mtp_R ? ps->dev[i]->mtp_R->size() : 0) +
-                       (ps->dev[i]->ring ? pf_ring_bytes(d) : 0);
+    const Qwen4ExpPrefillState::Dev& D = *ps->dev[i];
+    const size_t pair = D.H1 ? D.H1->size() + D.inj1->size() + D.y1->size() : 0;
+    pf_dev_bytes_[i] = D.s.bytes() + link + pair + (D.mtp_R ? D.mtp_R->size() : 0) + (D.ring ? pf_ring_bytes(d) : 0);
     pf_bytes_ += pf_dev_bytes_[i];
-    require(ps->dev[i]->s.bytes() == prefill_sizes(d, max_len_).total(), "the prefill scratch is not prefill_sizes()'s");
-    require(!ps->link[0] || link == pf_link_bytes(d, i), "the prefill link is not pf_link_bytes()'s");
+    require(ps->dev[i]->s.bytes() == prefill_sizes(d, max_len_, rows).total(), "the prefill scratch is not prefill_sizes()'s");
+    require(!ps->link[0] || link == pf_link_bytes(d, i, rows), "the prefill link is not pf_link_bytes()'s");
+    require(!D.H1 || pair == pf_pair_bytes(d, rows), "the pair's rows are not pf_pair_bytes()'s");
   }
   pf_settle_ = [ps] { return ps->settle(); };
 }
@@ -171,13 +196,15 @@ size_t Qwen4ExpEngine::prefill_launches() const {
 std::vector<uint32_t> Qwen4ExpEngine::read_prefill_routes() {
   require(bool(pf_), "read_prefill_routes before the first prefill");
   const model::Qwen4ExpDesc& d = model_.desc;
-  std::vector<uint32_t> v(size_t(d.layers) * kPfC * kRouteWords, 0);
+  const uint32_t rows = model_.pf_rows;
+  std::vector<uint32_t> v(size_t(d.layers) * rows * kRouteWords, 0);
   for (uint32_t i = 0; i < devices(); ++i) {
     Qwen4ExpPrefillState::Dev& D = *pf_->dev[i];
     require(D.cx.wait_for(pf_->timeout_ns), "device " + std::to_string(i) + "'s prefill list is still running");
     const uint32_t first = model_.placement.first(i), n = model_.placement.count(i);
-    stage_imm(i).copy(v.data() + pf_route_at(first) / 4, static_cast<const uint8_t*>(D.s.routes.ptr()) + pf_route_at(first),
-                      size_t(n) * kPfC * kRouteWords * 4);
+    stage_imm(i).copy(v.data() + pf_route_at(first, rows) / 4,
+                      static_cast<const uint8_t*>(D.s.routes.ptr()) + pf_route_at(first, rows),
+                      size_t(n) * rows * kRouteWords * 4);
   }
   return v;
 }
@@ -190,11 +217,12 @@ std::vector<uint32_t> Qwen4ExpEngine::read_prefill_selection(uint32_t layer) {
   const uint32_t qi = d.qsa_before(layer), dev = model_.placement.device_of(layer);
   Qwen4ExpPrefillState::Dev& D = *pf_->dev[dev];
   require(D.cx.wait_for(pf_->timeout_ns), "device " + std::to_string(dev) + "'s prefill list is still running");
-  std::vector<uint32_t> v(size_t(kPfC) * kListRow);
+  const uint32_t rows = model_.pf_rows;
+  std::vector<uint32_t> v(size_t(rows) * kListRow);
   if (injected_ && D.inj[pf_->last])
-    std::memcpy(v.data(), static_cast<const uint8_t*>(D.inj[pf_->last]->ptr()) + pf_list_at(qi), v.size() * 4);
+    std::memcpy(v.data(), static_cast<const uint8_t*>(D.inj[pf_->last]->ptr()) + pf_list_at(qi, rows), v.size() * 4);
   else
-    stage_imm(dev).copy(v.data(), static_cast<const uint8_t*>(D.s.lists.ptr()) + pf_list_at(qi), v.size() * 4);
+    stage_imm(dev).copy(v.data(), static_cast<const uint8_t*>(D.s.lists.ptr()) + pf_list_at(qi, rows), v.size() * 4);
   return v;
 }
 
@@ -208,7 +236,7 @@ std::vector<float> Qwen4ExpEngine::read_prefill_last_qsa_scores() {
   const uint32_t dev = model_.placement.device_of(last);
   Qwen4ExpPrefillState::Dev& D = *pf_->dev[dev];
   require(D.cx.wait_for(pf_->timeout_ns), "device " + std::to_string(dev) + "'s prefill list is still running");
-  std::vector<float> v(size_t(kPfC) * (max_len_ / d.idx_compress));
+  std::vector<float> v(size_t(model_.pf_rows) * (max_len_ / d.idx_compress));
   stage_imm(dev).copy(v.data(), D.s.scores.ptr(), v.size() * 4);
   return v;
 }
@@ -217,8 +245,9 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const model::Qwen4ExpDesc& d = model_.desc;
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
   require(!ids.empty(), "no ids");
-  if (chunk == 0) chunk = kPfC;
-  require(chunk <= kPfC, "chunk " + std::to_string(chunk) + " exceeds kPfC " + std::to_string(kPfC));
+  if (chunk == 0) chunk = model_.pf_rows;
+  require(chunk <= model_.pf_rows, "chunk " + std::to_string(chunk) + " exceeds the prefill scratch's " +
+                                       std::to_string(model_.pf_rows) + " rows");
   for (uint32_t id : ids)
     require(id < d.vocab, "id " + std::to_string(id) + " is outside the vocabulary (" + std::to_string(d.vocab) +
                               " rows) - pf_embed_gather has no debug_flag channel, so the host is the only bound");
@@ -229,10 +258,10 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   for (uint32_t i = 0; i < devices(); ++i)   // no decode step in flight writes the state or the Control
     require(settle(i), "device " + std::to_string(i) + "'s last decode step is still running");
   if (injected_) require(bool(pf_inject_), "the injected run on prefill needs set_prefill_injector's lists");
-  // Spec 21-QFN-v1e: the prefill's GDN path reads slot 0 directly, so a live slot a commit left is copied there first; a
-  // verify waiting for its commit is dropped (the prompt continues from pos).
+  // Spec 21-QFN-v1e: the prefill's GDN path reads gdn_state directly, so the rows a commit left are replayed into it
+  // first (PERF-51); a verify waiting for its commit is dropped (the prompt continues from pos).
   if (mtp_) {
-    mtp_normalise_live();
+    flush_gdn();
     verify_k_ = kNoVerify;
   }
 
@@ -240,22 +269,24 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   Qwen4ExpPrefillState& P = *pf_;
   for (auto& D : P.dev)   // the lent experts' rows back: this prefill overwrites the scratch
     if (D->lend) D->lend->reclaim();
-  Qwen4ExpMtpPrefill mp;
-  if (mtp_) {
-    mp.bufs = mtp_.get();
-    mp.R = P.dev[devices() - 1]->mtp_R.get();
-    mp.embed = mtp_bind_.embed;
-    mp.single = mtp_norm_ == MtpNorm::Single;
-  }
   const bool eager = attn_ == Q4Attn::Eager;
   const uint32_t ndev = devices();
+  Qwen4ExpMtpPrefill mp[kPfDepth];   // the head's pass, a slot each (its Control: the slot's)
+  if (mtp_)
+    for (uint32_t k = 0; k < kPfDepth; ++k) {
+      mp[k].bufs = mtp_.get();
+      mp[k].R = P.dev[ndev - 1]->mtp_R.get();   // one: the passes run in order on the last device's list
+      mp[k].embed = mtp_bind_.embed;
+      mp[k].single = mtp_norm_ == MtpNorm::Single;
+      mp[k].hctl = P.dev[ndev - 1]->hctl->as<Control>() + k;
+    }
   const uint64_t tmo = P.timeout_ns;
   const bool inj = injected_;
   if (inj)
     for (uint32_t i = 0; i < ndev; ++i)
       for (auto& m : P.dev[i]->inj)
         if (!m) {
-          m = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Host, pf_injected_bytes(d));
+          m = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Host, pf_injected_bytes(d, model_.pf_rows));
           std::memset(m->ptr(), 0, m->size());
         }
   const auto set_ctl = [&](uint32_t pos, uint32_t n) {
@@ -266,7 +297,10 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   };
 
   // Spec 21-QFN-v1e's prefix cache: with a block hook every chunk ends at a block end or at the prompt end - Engine::prefill's
-  // rule, one shared function - so each completed block is a storable one.
+  // rule, one shared function - so each completed block is a storable one. PERF-36, Qwen3.8's rule (open-work 18): a
+  // 4096-row chunk hooks every 4096 positions (the block between is stored as KV by the hook's store call), and over the
+  // last kPrefillTail positions (6144-8191 after the round-down) the chunks are 2048 rows with a hook at every block
+  // end, so a follow-up turn that leaves the prompt within them restarts at most 2047 positions back.
   const bool hooked = static_cast<bool>(block_hook_);
   struct Chunk {
     uint32_t pos, C;
@@ -275,7 +309,7 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   std::vector<Chunk> chunks;
   for (size_t off = 0; off < ids.size();) {
     const uint32_t pos = base + uint32_t(off);
-    const uint32_t C = prefill_chunk_rows(pos, ids.size() - off, chunk, hooked, kBlock);
+    const uint32_t C = prefill_chunk_rows(pos, ids.size() - off, chunk, hooked, kBlock, /*wide_stride=*/true, kPrefillTail);
     off += C;
     chunks.push_back({pos, C, hooked && off < ids.size() && (pos + C) % kBlock == 0});
   }
@@ -284,89 +318,123 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (two && hooked)
     for (auto& m : P.shadow)
       if (!m) m = std::make_unique<l0::Mem>(stage_ctx(0), l0::MemKind::Host, state_bytes());
-  bool sent[kPfDepth] = {true, true};   // P4's test hook: whether device 0's half of the slot's chunk was appended
+  bool sent[kPfDepth] = {true, true};   // P4's test hook: whether device 0's half of the slot's pair was appended
 
-  // Chunk j's slot: the ids on every device, every device's chunk Control (a copy of its block at pos / C), the head's,
-  // the injected rows into the device holding each QSA layer.
-  const auto fill = [&](uint32_t j) {
+  // Chunk j's slot on device i (written while that device's lists are idle): the ids, the device's chunk Control (a
+  // copy of its block at pos / C), on the last device the head's, the injected rows of the device's QSA layers.
+  const auto fill = [&](uint32_t i, uint32_t j) {
     const Chunk& c = chunks[j];
     const uint32_t k = j % kPfDepth;
-    for (uint32_t i = 0; i < ndev; ++i) {
-      Qwen4ExpPrefillState::Dev& D = *P.dev[i];
-      std::memcpy(D.ids_at(k), ids.data() + (c.pos - base), size_t(c.C) * 4);
-      *D.ctl_at(k) = *stage_control(i);
-      D.ctl_at(k)->pos = c.pos;
-      D.ctl_at(k)->n_active = c.C;
-    }
-    if (mtp_) {   // spec 21-QFN-v1e: the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
-      Control* h = P.dev[ndev - 1]->hctl->as<Control>() + k;
+    Qwen4ExpPrefillState::Dev& D = *P.dev[i];
+    std::memcpy(D.ids_at(k), ids.data() + (c.pos - base), size_t(c.C) * 4);
+    *D.ctl_at(k) = *stage_control(i);
+    D.ctl_at(k)->pos = c.pos;
+    D.ctl_at(k)->n_active = c.C;
+    if (mtp_ && i + 1 == ndev) {   // spec 21-QFN-v1e: the head's pass covers positions pos - 1 .. pos + C - 2 (from 0 at pos 0)
+      Control* h = D.hctl->as<Control>() + k;
       *h = *hctl();
       h->pos = c.pos == 0 ? 0 : c.pos - 1;
       h->n_active = mtp_prefill_rows(c.pos, c.C);
     }
-    if (inj) {   // the caller's lists for this chunk, into the device holding each QSA layer
+    if (inj) {   // the caller's lists for this chunk, of each QSA layer this device holds
       for (uint32_t l = 0; l < d.layers; ++l) {
-        if (!d.is_qsa(l)) continue;
-        const uint32_t qi = d.qsa_before(l), dv = model_.placement.device_of(l);
+        if (!d.is_qsa(l) || model_.placement.device_of(l) != i) continue;
+        const uint32_t qi = d.qsa_before(l);
         pf_inject_(qi, c.pos, c.C,
-                   reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(P.dev[dv]->inj[k]->ptr()) + pf_list_at(qi)));
+                   reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(D.inj[k]->ptr()) + pf_list_at(qi, model_.pf_rows)));
       }
     }
   };
-  // One device's walk for chunk j (appended immediately), on its slot.
+  // One card: the walk for chunk j (appended immediately), on its slot.
   const auto run_dev = [&](uint32_t i, uint32_t j) {
     Qwen4ExpPrefillState::Dev& D = *P.dev[i];
     const uint32_t k = j % kPfDepth;
     const bool head = mtp_ && i + 1 == ndev;
-    if (head) mp.hctl = D.hctl->as<Control>() + k;
     if (D.ring) D.ring->reset();   // the device's lists are idle: its previous chunk has finished
     const Q4PfRing ring = D.ring ? D.ring->view(true, true) : Q4PfRing{};
-    const bool staged = D.ring && chunks[j].C >= kPfRingMinRows;   // a short chunk reads its experts in place
+    const bool staged = D.ring && pf_ring_staged(chunks[j].C, 0);   // a short chunk reads its experts in place
     prefill_chunk(D.cx, D.kc, D.s, model_, model_.parts[i], stage_buffers(i), chunks[j].pos, chunks[j].C, eager,
-                  inj ? D.inj[k].get() : nullptr, two, head ? &mp : nullptr, D.ctl_at(k), D.ids_at(k),
+                  inj ? D.inj[k].get() : nullptr, two, head ? &mp[k] : nullptr, D.ctl_at(k), D.ids_at(k),
                   staged ? &ring : nullptr);
   };
-  const size_t rows_max = size_t(kPfC) * d.hc_n() * 2;
+  // Two cards (PERF-30): pair p is chunks 2p and 2p + 1 (the prompt's last pair may be one chunk), at slots 0 and 1.
+  const uint32_t npair = (n + 1) / 2;
+  const auto pair_n = [&](uint32_t p) { return std::min(2u, n - 2 * p); };
+  // Chunk h of pair p's residual rows on device D: the pair's first chunk's own, else the scratch's.
+  const auto rows_H = [&](Qwen4ExpPrefillState::Dev& D, uint32_t p, uint32_t h) {
+    return pair_n(p) == 2 && h == 0 ? D.H1->ptr() : D.s.H.ptr();
+  };
+  // Device i's half of pair p (its lists idle): its slots, then both chunks a layer at a time.
+  const auto walk = [&](uint32_t i, uint32_t p) {
+    Qwen4ExpPrefillState::Dev& D = *P.dev[i];
+    const uint32_t m = pair_n(p), j0 = 2 * p;
+    for (uint32_t h = 0; h < m; ++h) fill(i, j0 + h);
+    if (D.ring) D.ring->reset();
+    const bool staged = D.ring && pf_ring_staged(chunks[j0].C, m == 2 ? chunks[j0 + 1].C : 0);
+    const bool head = mtp_ && i + 1 == ndev;
+    std::array<Q4PfRing, 2> rv{};
+    std::array<Q4PfChunk, 2> c{};
+    for (uint32_t h = 0; h < m; ++h) {   // chunk j0 + h's slot is h (j0 is even)
+      const Chunk& ch = chunks[j0 + h];
+      if (staged) rv[h] = D.ring->view(h == 0, h + 1 == m);
+      c[h] = {ch.pos, ch.C, inj ? D.inj[h].get() : nullptr, head ? &mp[h] : nullptr, D.ctl_at(h), D.ids_at(h),
+              staged ? &rv[h] : nullptr, m == 2 && h == 0 ? &D.own : nullptr};
+    }
+    prefill_pair_pp(D.cx, D.kc, D.s, model_, model_.parts[i], stage_buffers(i), eager, two, c, m);
+  };
+  const size_t rows_max = size_t(model_.pf_rows) * d.hc_n() * 2;
   if (two)
     require(rows_max <= P.link[0]->layout.resid_bytes && P.link[0]->layout.sumsq_bytes == 0,
             "the prefill landing buffer does not hold a chunk's H rows (and no norm sums)");
-  // Device 0's half of chunk j: the walk, [hooked: its state runs into the shadow], H into the landing slot, the event.
-  const auto run0 = [&](uint32_t j) {
-    const uint32_t k = j % kPfDepth;
-    PipelineLink& L = *P.link[k];
-    L.event->host_reset();
-    // P4's test hook (drop_next_handoff, decode's): device 0's half of this chunk is not appended - a hand-off that
+  // Device 0's walk of pair p, [hooked at the pair's end: its state runs into the shadow].
+  const auto run0 = [&](uint32_t p) {
+    const uint32_t k = p % kPfDepth;
+    // P4's test hook (drop_next_handoff, decode's): device 0's half of this pair is not appended - a hand-off that
     // never arrives.
     sent[k] = !drop_next_;
     drop_next_ = false;
     if (!sent[k]) return;
     Qwen4ExpPrefillState::Dev& D0 = *P.dev[0];
-    run_dev(0, j);
-    if (chunks[j].hook) {
+    walk(0, p);
+    const Chunk& last = chunks[2 * p + pair_n(p) - 1];
+    if (last.hook) {
       uint8_t* sh = P.shadow[k]->as<uint8_t>();
-      for (const SnapRun& r : state_runs(d, model_.placement, chunks[j].pos + chunks[j].C, mtp()))
+      for (const SnapRun& r : state_runs(d, model_.placement, last.pos + last.C, mtp()))
         if (r.device == 0 && !r.pad && !r.zero) {
           require(sh + r.bytes <= P.shadow[k]->as<uint8_t>() + P.shadow[k]->size(), "device 0's state runs exceed the shadow");
           D0.cx.copy(sh, snap_ptr(r), r.bytes);
           sh += r.bytes;
         }
     }
-    D0.cx.copy(L.landing.as<uint8_t>(), D0.s.H.ptr(), size_t(chunks[j].C) * d.hc_n() * 2);
-    D0.cx.signal(L.event->handle());
   };
-  const auto run1 = [&](uint32_t j) {
-    PipelineLink& L = *P.link[j % kPfDepth];
+  // Device 0's hand-off of pair p after its walk - appended once device 1 has finished pair p - 1 (whose copies out
+  // of the landing buffers it overwrites): each chunk's H into landing slot h, its event.
+  const auto send0 = [&](uint32_t p) {
+    for (uint32_t h = 0; h < pair_n(p); ++h) P.link[h]->event->host_reset();
+    if (!sent[p % kPfDepth]) return;
+    Qwen4ExpPrefillState::Dev& D0 = *P.dev[0];
+    for (uint32_t h = 0; h < pair_n(p); ++h) {
+      PipelineLink& L = *P.link[h];
+      D0.cx.copy(L.landing.as<uint8_t>(), rows_H(D0, p, h), size_t(chunks[2 * p + h].C) * d.hc_n() * 2);
+      D0.cx.signal(L.event->handle());
+    }
+  };
+  const auto run1 = [&](uint32_t p) {
     Qwen4ExpPrefillState::Dev& D1 = *P.dev[1];
-    D1.cx.wait_event(L.event->handle());
-    D1.cx.copy(D1.s.H.ptr(), L.landing.as<uint8_t>(), size_t(chunks[j].C) * d.hc_n() * 2);
-    run_dev(1, j);
+    for (uint32_t h = 0; h < pair_n(p); ++h) {
+      PipelineLink& L = *P.link[h];
+      D1.cx.wait_event(L.event->handle());
+      D1.cx.copy(rows_H(D1, p, h), L.landing.as<uint8_t>(), size_t(chunks[2 * p + h].C) * d.hc_n() * 2);
+    }
+    walk(1, p);
   };
+  // One card: chunk j; two cards: pair j.
   const auto wait0 = [&](uint32_t j) {
     if (!P.dev[0]->cx.wait_for(tmo))
-      fail("device 0's prefill chunk at " + std::to_string(chunks[j].pos) + " did not finish within " +
+      fail("device 0's prefill chunk at " + std::to_string(chunks[two ? 2 * j : j].pos) + " did not finish within " +
            std::to_string(opt_.prefill_timeout_ms) + " ms");
   };
-  const auto wait1 = [&](uint32_t j) {
+  const auto wait1 = [&](uint32_t p) {
     Qwen4ExpPrefillState::Dev& D0 = *P.dev[0];
     Qwen4ExpPrefillState::Dev& D1 = *P.dev[1];
     if (D1.cx.wait_for(tmo)) return;
@@ -375,23 +443,26 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     P.signal_links();
     const bool drained = D1.cx.wait_for(tmo);
     const bool d0 = D0.cx.wait_for(tmo);
-    fail("device 1's prefill chunk at " + std::to_string(chunks[j].pos) + " (" + std::to_string(chunks[j].C) +
+    const Chunk& c = chunks[2 * p];
+    uint32_t rows = 0;
+    for (uint32_t h = 0; h < pair_n(p); ++h) rows += chunks[2 * p + h].C;
+    fail("device 1's prefill chunks at " + std::to_string(c.pos) + " (" + std::to_string(rows) +
          " rows) did not finish within " + std::to_string(opt_.prefill_timeout_ms) + " ms - " +
          (d0 ? "device 0 finished but its rows never released device 1" : "device 0 did not finish either") +
          " (the prefill link's cross-device event; device 1 " + (drained ? "released" : "did not drain") + ")" +
-         (sent[j % kPfDepth] ? "" : " [device 0's half was not appended: drop_next_handoff()]"));
+         (sent[p % kPfDepth] ? "" : " [device 0's half was not appended: drop_next_handoff()]"));
   };
   // A mid-prompt block end: the state holds exactly [0, end); say so in every Control before the hook runs, so a hook
-  // that throws leaves pos matching the chunks written. On two cards device 0 may be inside the next chunk: its state
-  // runs come from the shadow, and a throwing hook gets them back.
-  const auto hook = [&](uint32_t j) {
+  // that throws leaves pos matching the chunks written. On two cards (chunk j ends pair `p`) device 0 may be inside the
+  // next pair: its state runs come from the shadow, and a throwing hook gets them back.
+  const auto hook = [&](uint32_t j, uint32_t p) {
     const uint32_t end = chunks[j].pos + chunks[j].C;
     set_ctl(end, 0);
     if (!two) {
       block_hook_(end, true);
       return;
     }
-    pf_shadow_ = P.shadow[j % kPfDepth]->as<uint8_t>();
+    pf_shadow_ = P.shadow[p % kPfDepth]->as<uint8_t>();
     try {
       block_hook_(end, true);
     } catch (...) {
@@ -408,26 +479,26 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     pf_shadow_ = nullptr;
   };
 
-  for (uint32_t j = 0; j < n; ++j) {
-    if (!two) {
-      fill(j);
+  if (!two) {
+    for (uint32_t j = 0; j < n; ++j) {
+      fill(0, j);
       run_dev(0, j);
       wait0(j);
-      if (chunks[j].hook) hook(j);
-      continue;
+      if (chunks[j].hook) hook(j, 0);
     }
-    if (j >= 1) wait0(j - 1);
-    fill(j);
-    run0(j);
-    if (j >= 1) {
-      wait1(j - 1);
-      if (chunks[j - 1].hook) hook(j - 1);
+  } else {
+    for (uint32_t p = 0; p < npair; ++p) {
+      if (p >= 1) wait0(p - 1);
+      run0(p);
+      if (p >= 1) {
+        wait1(p - 1);
+        if (chunks[2 * p - 1].hook) hook(2 * p - 1, p - 1);   // pair p - 1 is whole: it is not the last
+      }
+      send0(p);
+      run1(p);
     }
-    run1(j);
-  }
-  if (two) {
-    wait1(n - 1);
-    wait0(n - 1);
+    wait1(npair - 1);
+    wait0(npair - 1);
   }
   P.last = (n - 1) % kPfDepth;
   const uint32_t C = chunks[n - 1].C;
@@ -442,7 +513,7 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   set_ctl(base + uint32_t(ids.size()) - 1, 1);
   {
     Qwen4ExpPrefillState::Dev& D = *P.dev[ndev - 1];
-    const void* R_last = mtp_ ? static_cast<const uint8_t*>(mp.R->ptr()) + size_t(C) * d.hc_n() * 2 : nullptr;
+    const void* R_last = mtp_ ? static_cast<const uint8_t*>(mp[0].R->ptr()) + size_t(C) * d.hc_n() * 2 : nullptr;
     prefill_head(D.cx, D.kc, D.s, model_, model_.parts[ndev - 1], stage_buffers(ndev - 1), C - 1, R_last);
     if (!D.cx.wait_for(tmo))
       fail("device " + std::to_string(ndev - 1) + "'s prefill head did not finish within " +

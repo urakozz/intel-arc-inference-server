@@ -99,19 +99,22 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
     return 1;
   }
   runtime::MtpBuffers* mtp4 = e.mtp_buffers();
-  auto mtp8 = std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc, e.draft_vocab(), e.kv_cache(),
-                                                    runtime::MtpDims::kMaxSlots);
+  // Ornith (30 GDN layers): its verify lists are built at M = 1..4 only (the 4-slot MtpBuffers).
+  const uint32_t max_m = e.model().desc->gdn_layers == 48 ? 8 : 4;
+  auto mtp8 = max_m > 4 ? std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc, e.draft_vocab(),
+                                                                e.kv_cache(), runtime::MtpDims::kMaxSlots)
+                        : nullptr;
   auto buf_for = [&](uint32_t M) -> runtime::MtpBuffers& { return M <= 4 ? *mtp4 : *mtp8; };
   std::map<uint32_t, runtime::CapturedStep> lists, lists_g;
-  for (uint32_t M = 1; M <= 8; ++M)
+  for (uint32_t M = 1; M <= max_m; ++M)
     lists.emplace(M, runtime::build_verify(ctx, e.model(), e.buffers(), buf_for(M), M));
   // Spec 28b: the same lists forced onto today's gemv (runtime::CaptureOptions) - the pre-28b step, in the same
   // session, interleaved with the production (gemm_sm) one.
   const runtime::CaptureOptions force_gemv{runtime::LinearForce::Gemv};
-  for (uint32_t M = 2; M <= 8; ++M)
+  for (uint32_t M = 2; M <= max_m; ++M)
     lists_g.emplace(M, runtime::build_verify(ctx, e.model(), e.buffers(), buf_for(M), M, nullptr, force_gemv));
   std::printf("verify lists M = 1..8: %zu launches each (M = 5..8 over a probe-owned %u-slot MtpBuffers, %.2f GB)\n",
-              lists.at(1).kernel_count, mtp8->slots, mtp8->bytes() / 1e9);
+              lists.at(1).kernel_count, mtp8 ? mtp8->slots : 0, mtp8 ? mtp8->bytes() / 1e9 : 0.0);
   l0::Queue q(ctx);
   l0::Fence fence(q);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -143,11 +146,11 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
     return s / n;
   };
   auto arm = [&](uint32_t M, uint32_t n) { return arm_on(lists, M, n); };
-  for (uint32_t M = 1; M <= 8; ++M) arm(M, 8);   // warm-up
-  for (uint32_t M = 2; M <= 8; ++M) arm_on(lists_g, M, 8);
+  for (uint32_t M = 1; M <= max_m; ++M) arm(M, 8);   // warm-up
+  for (uint32_t M = 2; M <= max_m; ++M) arm_on(lists_g, M, 8);
   std::map<uint32_t, std::vector<double>> ms, ratio, ms1, msg, ratiog;
   for (uint32_t r = 0; r < rounds; ++r)
-    for (uint32_t M = 1; M <= 8; ++M) {
+    for (uint32_t M = 1; M <= max_m; ++M) {
       // M = 1, M (production) and M forced onto gemv, the order rotating by round
       double t1 = 0, tm = 0, tg = 0;
       for (uint32_t j = 0; j < 3; ++j) {
@@ -169,7 +172,7 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
               "range | M=1 ms in the pairs | gemv-forced ms | gemv-forced x M=1 |\n|---|---|---|---|---|---|---|---|\n",
               replays, rounds, depth);
   std::map<uint32_t, double> step;
-  for (uint32_t M = 1; M <= 8; ++M) {
+  for (uint32_t M = 1; M <= max_m; ++M) {
     auto v = ms[M], rr = ratio[M];
     std::sort(v.begin(), v.end());
     std::sort(rr.begin(), rr.end());
@@ -181,7 +184,7 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
   // 1p. the profiled lists, per family
   std::map<std::string, std::map<uint32_t, double>> fam;
   std::map<uint32_t, double> tot;
-  for (uint32_t M = 1; M <= 8; ++M) {
+  for (uint32_t M = 1; M <= max_m; ++M) {
     runtime::ProfileEvents prof(ctx);
     runtime::CapturedStep instr = runtime::build_verify(ctx, e.model(), e.buffers(), buf_for(M), M, &prof);
     std::vector<double> acc(instr.kernel_count, 0.0);
@@ -217,7 +220,7 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
                           : f.rfind("attn", 0) == 0       ? "attention (attn*)"
                           : f.rfind("gdn_step", 0) == 0   ? "gdn_step"
                                                           : "everything else";
-    for (uint32_t M = 1; M <= 8; ++M) grp[g][M] += v[M];
+    for (uint32_t M = 1; M <= max_m; ++M) grp[g][M] += v[M];
   }
   row("sum", tot);
   std::printf("\ngrouped (spec 28 §6), profiled ms/step:\n"
@@ -227,7 +230,7 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
   std::printf("\nthe non-GEMV share (all but the int4 GEMV and the int8 head) applied to 1v's unprofiled step:\n"
               "| M | profiled sum | non-GEMV profiled | share | unprofiled step ms | non-GEMV ms (derived) | GEMV ms (derived) |\n"
               "|---|---|---|---|---|---|---|\n");
-  for (uint32_t M = 1; M <= 8; ++M) {
+  for (uint32_t M = 1; M <= max_m; ++M) {
     const double gemv = grp["int4 GEMV (gemv)"][M] + grp["int8 head (gemv_i8w)"][M];
     const double share = tot[M] > 0 ? (tot[M] - gemv) / tot[M] : 0;
     std::printf("| %u | %.3f | %.3f | %.4f | %.3f | %.3f | %.3f |\n", M, tot[M], tot[M] - gemv, share, step[M],
