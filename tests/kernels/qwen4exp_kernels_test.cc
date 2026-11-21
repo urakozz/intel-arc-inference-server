@@ -29,21 +29,25 @@
 //      so with the gate saturated both outputs are rne(o))
 //   8. PERF-66, the int8 hyper-connection form (judged against bf16, bitwise against its host twins):
 //      loader::quantise_int8_g32_tiled against an independent host quantiser (bytes and fp16 scales bitwise; zero
-//      groups and groups with subnormal scales included); q4_hc_down_i8 (N 336 / 320, M 1..4 where built),
-//      q4_hc_up_mix _I_Q8 / _Q8 and the prefill's _R4C64_Q8 (37 rows) against qwen4exp_ref.h's hc_down_i8 /
+//      groups and groups with subnormal scales included); q4_hc_down_i8 (N 336 / 320, M 1..4, its _A where built),
+//      q4_hc_up_mix _I_Q8_B / _Q8_B and the prefill's _R4C64_Q8 (37 rows) against qwen4exp_ref.h's hc_down_i8 /
 //      hc_up_mix_q8, q4_hc_slab_i8 against rne(q x s); then the int8 mixer against the bf16 one (gemv_bf16 +
-//      q4_hc_up_mix) on the same random weights: max / mean relative error and cosine of down's output and of x
+//      q4_hc_up_mix) on the same random weights: max / mean relative error and cosine of down's output and of x;
+//      PERF-106's decode up-mix (the lists' forms: _B, one work-group a row; bf16 and int8, both shapes) at M 1..4
+//      against the twins per row, n_active M and M - 1
 //
 // Opt-in modes (each runs alone):
 //   --bench-attn       decision 10's evidence: the sparse kernel (q4_qsa_attn + q4_qsa_reduce over the identity
 //                      list) against attn_v2 (attn_decode_v2 + attn_reduce_v2) at depths 512 / 1024 / 2048 -
 //                      lists of 100 launch pairs, 3 warm-up replays each, then 3 rounds of 20 replays with A and B
 //                      interleaved replay by replay; the median round, printed in us per launch pair
-//   --bench-hc8        PERF-66's timing: the down||inject GEMV (gemv_bf16 vs q4_hc_down_i8) and the up-mix
-//                      (q4_hc_up_mix _I vs _I_Q8) at M = 1..4 (those built) - lists of 96 launches over 48 distinct
-//                      weight copies in turn (as decode's 96 gated residuals: the weights come from memory, not the
-//                      cache), 3 warm-up replays, 3 rounds of 20 replays bf16 / int8 interleaved; the median round in
-//                      us a launch. A tensor-parallel card replicates the mixers: its shapes are these
+//   --bench-hc8        PERF-66's and PERF-106's timing at M = 1..4 (those built), each pair A / B: the down||inject
+//                      GEMV (gemv_bf16 vs the lists' q4_hc_down_i8, that vs its _A); then the int8 pair, the down and
+//                      the up-mix _I after it (a list entry = both launches): the lists' (raw sums, _Q8_B a work-group
+//                      a row) vs lead 4's (_A, at M >= 2 the up-mix _R<M>C16_Q8_B_A) - lists of 96 launches
+//                      over 48 distinct weight copies in turn (as decode's 96 gated residuals: the weights come from
+//                      memory, not the cache), 3 warm-up replays, 3 rounds of 20 replays A / B interleaved; the median
+//                      round in us a launch. A tensor-parallel card replicates the mixers: its shapes are these
 //   --ple-rate [GB]    plan Task 5 Step 1: 16 + 16 host-USM ranges per 21-QFN-v1b's rule (head sizes the real primes
 //                      q4_ple_primes(20000000, 16, 0) scaled so int8 rows + bf16 scales total GB; default 16, 51.8
 //                      the real table), refused by 21-QFN-v1b's host-fit rule (exit 77); q4_ple_gather_M1_BF16 alone in
@@ -425,7 +429,8 @@ void hc8_tests(Dev& d) {
   ctl.at(7);
   const std::vector<uint16_t> xn = random_bf16(size_t(4) * HCN, -2.f, 2.f, 811);   // four rows
   l0::Mem xnb = d.upload(xn);
-  // (b) the down GEMV, both shapes: int8 against its host twin (each row bitwise), and against gemv_bf16
+  // (b) the down GEMV, both shapes, the lists' raw sums and the _A (the up-mix's activations) where built: int8
+  // against its host twin (each row bitwise), and against gemv_bf16 (activated alike for _A)
   for (bool inject : {true, false}) {
     const uint32_t N = inject ? qk::kHcDownN : qk::kHcLow;
     std::vector<uint16_t> rows = random_bf16(size_t(N) * HCN, -0.05f, 0.05f, 820 + inject);
@@ -433,30 +438,33 @@ void hc8_tests(Dev& d) {
       for (size_t i = size_t(324) * HCN; i < rows.size(); ++i) rows[i] = 0;   // the padded rows 324..335
     const I8Lin l = quantise(rows, HCN, N);
     l0::Mem wb = d.upload(l.blob()), tb = d.upload(bf16_tiles(rows, HCN, N));
-    for (uint32_t M = 1; M <= 4; ++M) {
-      const std::string name = qk::hc_down_i8_variant(M, inject);
-      if (!built(name)) continue;
-      l0::Module m(d.ctx, kernels::path(name));
-      l0::Mem ob = d.zeros(size_t(M) * N * 4);
-      launch(d, m, "q4_hc_down_i8", qk::hc_down_i8_wg(), {N / 16, 1, 1}, {wb, xnb, ob});
-      const std::vector<float> got = d.read<float>(ob, size_t(M) * N);
-      Diff df;
-      for (uint32_t r = 0; r < M; ++r) {
-        std::vector<float> want(N), g(got.begin() + size_t(r) * N, got.begin() + size_t(r + 1) * N);
-        qr::hc_down_i8(l.q.data(), l.sc.data(), N, qk::kHcDownI8Ks, xn.data() + size_t(r) * HCN, want.data());
-        df.all(g, want, size_t(r) * N);
+    for (uint32_t M = 1; M <= 4; ++M)
+      for (bool act : {false, true}) {
+        const std::string name = qk::hc_down_i8_variant(M, inject, act);
+        if (!built(name)) continue;
+        l0::Module m(d.ctx, kernels::path(name));
+        l0::Mem ob = d.zeros(size_t(M) * N * 4);
+        launch(d, m, "q4_hc_down_i8", qk::hc_down_i8_wg(), {N / 16, 1, 1}, {wb, xnb, ob});
+        const std::vector<float> got = d.read<float>(ob, size_t(M) * N);
+        Diff df;
+        for (uint32_t r = 0; r < M; ++r) {
+          std::vector<float> want(N), g(got.begin() + size_t(r) * N, got.begin() + size_t(r + 1) * N);
+          qr::hc_down_i8(l.q.data(), l.sc.data(), N, qk::kHcDownI8Ks, xn.data() + size_t(r) * HCN, want.data());
+          if (act) qr::hc_down_act(want.data(), N);
+          df.all(g, want, size_t(r) * N);
+        }
+        report(name, df);
+        if (M != 1) continue;
+        const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(N);
+        l0::Module mb(d.ctx, kernels::path(kernels::gemv_bf16_variant(1, HCN, N, t)));
+        l0::Mem bb = d.zeros(size_t(N) * 4);
+        launch(d, mb, "gemv_bf16", t.cols * t.ksplit, {N / t.cols, 1, 1}, {tb, xnb, bb});
+        std::vector<float> ref = d.read<float>(bb, N);
+        if (act) qr::hc_down_act(ref.data(), N);
+        Err e;
+        for (uint32_t n = 0; n < (inject ? 324u : N); ++n) e.add(got[n], ref[n]);
+        report_err(name + (act ? " (down's activations)" : " (down's output)"), e, 0.9999);
       }
-      report(name, df);
-      if (M != 1) continue;
-      const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(N);
-      l0::Module mb(d.ctx, kernels::path(kernels::gemv_bf16_variant(1, HCN, N, t)));
-      l0::Mem bb = d.zeros(size_t(N) * 4);
-      launch(d, mb, "gemv_bf16", t.cols * t.ksplit, {N / t.cols, 1, 1}, {tb, xnb, bb});
-      const std::vector<float> ref = d.read<float>(bb, N);
-      Err e;
-      for (uint32_t n = 0; n < (inject ? 324u : N); ++n) e.add(got[n], ref[n]);
-      report_err(name + " (down's output)", e, 0.9999);
-    }
   }
   // (c) the up-mix: _Q8 against its host twin, then the whole int8 mixer (down + up-mix) against the bf16 one
   for (bool inject : {true, false}) {
@@ -555,6 +563,48 @@ void hc8_tests(Dev& d) {
       ds.all(d.read<uint16_t>(ob, size_t(HCN) * NS), want);
       report(sname + " (n0 0, ns 512: 176 zero columns)", ds);
     }
+  }
+  // (e) PERF-106: the decode up-mix the lists bind (qk::hc_up_mix_variant: a work-group a row, grid (160, M)) at
+  // M = 1..4, bf16 and int8, both shapes: each active row bitwise its host twin; with n_active = M - 1 the last row's
+  // x and inject weights left untouched
+  {
+    const std::vector<uint16_t> up_rows = random_bf16(size_t(HCN) * qk::kHcLow, -0.15f, 0.15f, 880);
+    const I8Lin lu = quantise(up_rows, qk::kHcLow, HCN);
+    const std::vector<uint16_t> ubt = bf16_tiles(up_rows, qk::kHcLow, HCN);
+    l0::Mem ub8 = d.upload(lu.blob()), ub = d.upload(ubt);
+    for (uint32_t M = 1; M <= 4; ++M)
+      for (bool inject : {true, false})
+        for (bool hc8 : {false, true}) {
+          const std::string name = qk::hc_up_mix_variant(M, inject, hc8);
+          if (!built(name)) continue;
+          const uint32_t N = inject ? qk::kHcDownN : qk::kHcLow;
+          const std::vector<float> down = random_f32(size_t(M) * N, -6.f, 6.f, 881 + M);
+          l0::Module m(d.ctx, kernels::path(name));
+          for (uint32_t na = M; na + 1 >= M && na > 0; --na) {
+            Ctl cm(d.ctx);
+            cm.at(7, na);
+            l0::Mem db = d.upload(down), xb = d.zeros(size_t(M) * D * 2), ijb = d.zeros(size_t(M) * 16);
+            launch(d, m, "q4_hc_up_mix", qk::kUpMixWg, {D / 16, M, 1}, {cm.m, db, hc8 ? ub8 : ub, xnb, xb, ijb});
+            const std::vector<uint16_t> gx = d.read<uint16_t>(xb, size_t(M) * D);
+            const std::vector<float> gi = d.read<float>(ijb, size_t(M) * 4);
+            Diff dx, di;
+            for (uint32_t r = 0; r < M; ++r) {
+              std::vector<uint16_t> xh(D, 0);
+              std::vector<float> ih(4, 0.0f);
+              if (r < na && hc8)
+                qr::hc_up_mix_q8(down.data() + size_t(r) * N, inject, lu.q.data(), lu.sc.data(),
+                                 xn.data() + size_t(r) * HCN, xh.data(), ih.data());
+              else if (r < na)
+                qr::hc_up_mix(down.data() + size_t(r) * N, inject, ubt.data(), xn.data() + size_t(r) * HCN, xh.data(),
+                              ih.data());
+              dx.all(std::vector<uint16_t>(gx.begin() + size_t(r) * D, gx.begin() + size_t(r + 1) * D), xh,
+                     size_t(r) * D);
+              di.all(std::vector<float>(gi.begin() + size_t(r) * 4, gi.begin() + size_t(r + 1) * 4), ih, size_t(r) * 4);
+            }
+            report(name + " x (n_active " + std::to_string(na) + ")", dx);
+            report(name + " inj (n_active " + std::to_string(na) + ")", di);
+          }
+        }
   }
 }
 
@@ -1208,21 +1258,18 @@ int bench_hc8(Dev& d) {
   const std::vector<uint16_t> up_rows = random_bf16(size_t(HCN) * qk::kHcLow, -0.15f, 0.15f, 901);
   const I8Lin ld = quantise(rows, HCN, N), lu = quantise(up_rows, qk::kHcLow, HCN);
   const std::vector<uint8_t> db8 = ld.blob(), ub8 = lu.blob();
-  const std::vector<uint16_t> dbt = bf16_tiles(rows, HCN, N), ubt = bf16_tiles(up_rows, qk::kHcLow, HCN);
-  std::vector<l0::Mem> dw8, dw, uw8, uw;   // NC copies each: a launch reads its weights from memory
+  const std::vector<uint16_t> dbt = bf16_tiles(rows, HCN, N);
+  std::vector<l0::Mem> dw8, dw, uw8;   // NC copies each: a launch reads its weights from memory
   for (uint32_t i = 0; i < NC; ++i) {
     dw8.push_back(d.upload(db8));
     dw.push_back(d.upload(dbt));
     uw8.push_back(d.upload(ub8));
-    uw.push_back(d.upload(ubt));
   }
   const std::vector<uint16_t> xn = random_bf16(size_t(4) * HCN, -2.f, 2.f, 902);
-  const std::vector<float> down = random_f32(size_t(4) * N, -6.f, 6.f, 903);
-  l0::Mem xnb = d.upload(xn), db = d.upload(down), ob = d.zeros(size_t(4) * N * 4), xb = d.zeros(size_t(4) * D * 2),
-          ijb = d.zeros(64);
+  l0::Mem xnb = d.upload(xn), ob = d.zeros(size_t(4) * N * 4), xb = d.zeros(size_t(4) * D * 2), ijb = d.zeros(64);
   Ctl ctl(d.ctx);
   std::printf("bench-hc8: %u launches a list over %u weight copies, 3 warm-up replays, %u rounds of %u replays "
-              "interleaved bf16 / int8; the median round. One card; a tensor-parallel card runs the same shapes (the "
+              "interleaved A / B; the median round. One card; a tensor-parallel card runs the same shapes (the "
               "mixers are replicated)\n",
               R, NC, ROUNDS, NR);
   const auto replay = [&](l0::CmdList& l) {
@@ -1231,12 +1278,22 @@ int bench_hc8(Dev& d) {
     d.f.wait();
     return seconds_since(t0);
   };
-  const auto pair = [&](const char* what, uint32_t M, std::vector<l0::Kernel>& ka, uint32_t ga,
-                        std::vector<l0::Kernel>& kb, uint32_t gb, uint32_t gy) {
+  // A binary's NC kernels, one a weight copy (its module kept alive with the bench)
+  std::vector<std::unique_ptr<l0::Module>> mods;
+  struct Form {
+    std::string name;
+    std::vector<l0::Kernel> k;
+    uint32_t gx, gy;
+    std::vector<l0::Kernel> k2;   // a second launch after each (the up-mix after the down: the pair)
+    uint32_t gx2 = 0, gy2 = 0;
+  };
+  const auto pair = [&](const char* what, uint32_t M, Form& a, Form& b) {
     l0::CmdList la = l0::CmdList::regular(d.ctx), lb = l0::CmdList::regular(d.ctx);
     for (uint32_t r = 0; r < R; ++r) {
-      la.launch(ka[r % NC], ga, gy, 1);
-      lb.launch(kb[r % NC], gb, gy, 1);
+      la.launch(a.k[r % NC], a.gx, a.gy, 1);
+      if (!a.k2.empty()) la.launch(a.k2[r % NC], a.gx2, a.gy2, 1);
+      lb.launch(b.k[r % NC], b.gx, b.gy, 1);
+      if (!b.k2.empty()) lb.launch(b.k2[r % NC], b.gx2, b.gy2, 1);
     }
     la.close();
     lb.close();
@@ -1254,27 +1311,48 @@ int bench_hc8(Dev& d) {
       ta.push_back(sa / (NR * R) * 1e6);
       tb.push_back(sb / (NR * R) * 1e6);
     }
-    std::printf("bench-hc8: %s M %u: bf16 %.2f us, int8 %.2f us a launch (%.2fx; rounds %.2f / %.2f / %.2f vs %.2f / "
+    std::printf("bench-hc8: %s M %u: %s %.2f us, %s %.2f us a launch (%.2fx; rounds %.2f / %.2f / %.2f vs %.2f / "
                 "%.2f / %.2f)\n",
-                what, M, median(ta), median(tb), median(ta) / median(tb), ta[0], ta[1], ta[2], tb[0], tb[1], tb[2]);
+                what, M, a.name.c_str(), median(ta), b.name.c_str(), median(tb), median(ta) / median(tb), ta[0], ta[1],
+                ta[2], tb[0], tb[1], tb[2]);
+  };
+  const auto down_form = [&](const std::string& v) {
+    mods.push_back(std::make_unique<l0::Module>(d.ctx, kernels::path(v)));
+    Form f{v, {}, N / 16, 1, {}, 0, 0};
+    for (uint32_t i = 0; i < NC; ++i)
+      f.k.push_back(bind(*mods.back(), "q4_hc_down_i8", qk::hc_down_i8_wg(), {dw8[i], xnb, ob}));
+    return f;
+  };
+  // the pair: `down` then the int8 up-mix _I `up` over its output, grid (160, gy)
+  const auto pair_form = [&](const std::string& down, const std::string& up, uint32_t gy) {
+    Form f = down_form(down);
+    mods.push_back(std::make_unique<l0::Module>(d.ctx, kernels::path(up)));
+    f.name += " + " + up;
+    f.gx2 = D / 16;
+    f.gy2 = gy;
+    for (uint32_t i = 0; i < NC; ++i)
+      f.k2.push_back(bind(*mods.back(), "q4_hc_up_mix", qk::kUpMixWg, {ctl.m, ob, uw8[i], xnb, xb, ijb}));
+    return f;
   };
   for (uint32_t M = 1; M <= 4; ++M) {
+    // lead 4's candidate: the down writes the activations (_A), the up-mix reads them - at M >= 2 in the _R<M>C16
+    // form (lead 2: the M rows in one work-group, grid (160, 1))
     const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(N);
-    const std::string vb = kernels::gemv_bf16_variant(M, HCN, N, t), v8 = qk::hc_down_i8_variant(M, true);
-    const std::string ub = qk::hc_up_mix_variant(M, true), u8 = qk::hc_up_mix_variant(M, true, true);
-    if (!built(vb) || !built(v8) || !built(ub) || !built(u8)) continue;
+    const std::string vb = kernels::gemv_bf16_variant(M, HCN, N, t), vk = qk::hc_down_i8_variant(M, true),
+                      va = qk::hc_down_i8_variant(M, true, true), uk = qk::hc_up_mix_variant(M, true, true),
+                      ua = "q4_hc_up_mix_M" + std::to_string(M) + "_I" +
+                           (M > 1 ? "_R" + std::to_string(M) + "C16" : "") + "_Q8_B_A";
+    if (!built(vb) || !built(vk) || !built(va) || !built(uk) || !built(ua)) continue;
     ctl.at(7, M);
-    l0::Module mb(d.ctx, kernels::path(vb)), m8(d.ctx, kernels::path(v8));
-    l0::Module nb(d.ctx, kernels::path(ub)), n8(d.ctx, kernels::path(u8));
-    std::vector<l0::Kernel> kb, k8, jb, j8;
-    for (uint32_t i = 0; i < NC; ++i) {
-      kb.push_back(bind(mb, "gemv_bf16", t.cols * t.ksplit, {dw[i], xnb, ob}));
-      k8.push_back(bind(m8, "q4_hc_down_i8", qk::hc_down_i8_wg(), {dw8[i], xnb, ob}));
-      jb.push_back(bind(nb, "q4_hc_up_mix", qk::kUpMixWg, {ctl.m, db, uw[i], xnb, xb, ijb}));
-      j8.push_back(bind(n8, "q4_hc_up_mix", qk::kUpMixWg, {ctl.m, db, uw8[i], xnb, xb, ijb}));
-    }
-    pair("down||inject {10240, 336}", M, kb, N / t.cols, k8, N / 16, 1);
-    pair("up-mix _I {320, 10240}", M, jb, D / 16, j8, D / 16, M);
+    mods.push_back(std::make_unique<l0::Module>(d.ctx, kernels::path(vb)));
+    Form fb{vb, {}, N / t.cols, 1, {}, 0, 0};
+    for (uint32_t i = 0; i < NC; ++i)
+      fb.k.push_back(bind(*mods.back(), "gemv_bf16", t.cols * t.ksplit, {dw[i], xnb, ob}));
+    Form fk = down_form(vk), fa = down_form(va);
+    pair("down||inject {10240, 336}", M, fb, fk);
+    pair("down||inject {10240, 336}, lead 4 (the activations written)", M, fk, fa);
+    Form pk = pair_form(vk, uk, M), pa = pair_form(va, ua, 1);
+    pair("down||inject + up-mix _I (the pair), lead 4", M, pk, pa);
   }
   return 0;
 }

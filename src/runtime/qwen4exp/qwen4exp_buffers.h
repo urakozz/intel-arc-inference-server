@@ -22,6 +22,10 @@ class CmdList;
 // gdn_step_defer_M<M>_G1 bakes one layer's rows as its parity stride), and the PLE layer's device holds the verify's
 // PLE rows (q4_pf_ple at C = 4). The head's own buffers are Qwen4ExpMtpBuffers (the last device).
 //
+// Spec 39: every buffer here is named as a member of PersistentSizes, ScratchSizes or VerifySizes (Qwen4ExpMtpBuffers':
+// MtpSizes), whose annotations say how it is planned, reset and snapshotted - a static_assert below refuses a buffer
+// without one, and bytes(), zero() and snap_mem() walk them by reflection.
+//
 // Plan 21-QFN-v2b Task 5 (`scratch`, a tensor-parallel card that holds the MTP head): the decode scratch sized for that
 // descriptor (one card's widths: the head's layer runs whole), the persistent groups for `d` (the card's halves).
 namespace runtime::qwen4exp {
@@ -71,10 +75,9 @@ struct Qwen4ExpBuffers {
   size_t route_off(uint32_t layer) const { return route_at_r(layer, rows); }
   size_t list_off(uint32_t qsa_index) const { return list_at_r(qsa_index, rows); }
   size_t diag_off(uint32_t qsa_index) const { return diag_at_r(qsa_index, rows); }
-  size_t persistent_bytes() const;
-  size_t scratch_bytes() const;
-  size_t mtp_bytes() const;   // gdn_pend + the PLE rows (0 without the head)
-  // control (then n_active = 1 is the caller's), the KV, keys, tails, GDN state, rings - in construction order.
+  // The allocated bytes of the buffers in gpu_state group g (spec 39: memory_line's kv, decode state's state / scratch).
+  size_t bytes(gs::Group g) const;
+  // Every zero_on_reset buffer (control, then n_active = 1 is the caller's; the KV, keys, tails, GDN state, rings).
   void zero(l0::CmdList& imm);
 };
 
@@ -98,7 +101,17 @@ struct Qwen4ExpMtpBuffers {
   void* v() const { return static_cast<uint8_t*>(kv.ptr()) + size_t(max_len) * desc.kv_n() * 2; }
   void* hh_row(uint32_t r) const { return static_cast<uint8_t*>(hh.ptr()) + size_t(r) * desc.hc_n() * 2; }
   size_t bytes() const;
-  void zero(l0::CmdList& imm);
+  size_t bytes(gs::Group g) const;
+  void zero(l0::CmdList& imm);   // every zero_on_reset buffer: the head's Control, KV, keys, tail, R rows
 };
+
+static_assert(gs::buffers_problem<l0::Mem, Qwen4ExpBuffers, PersistentSizes, ScratchSizes, VerifySizes>().empty(),
+              gs::buffers_problem<l0::Mem, Qwen4ExpBuffers, PersistentSizes, ScratchSizes, VerifySizes>());
+static_assert(gs::buffers_problem<l0::Mem, Qwen4ExpMtpBuffers, MtpSizes>().empty(),
+              gs::buffers_problem<l0::Mem, Qwen4ExpMtpBuffers, MtpSizes>());
+
+// The allocation a snapshot run of tensor t addresses - the buffer whose sizes member claims t (spec 39): b's, else
+// the head's (mtp: null without it, or off its device); null when neither holds it.
+const l0::Mem* snap_mem(const Qwen4ExpBuffers& b, const Qwen4ExpMtpBuffers* mtp, SnapTensor t);
 
 }  // namespace runtime::qwen4exp

@@ -125,6 +125,28 @@ inline uint16_t quantise(const float* y, int8_t* q) { return quantise_n<kHeadDim
 
 inline float dequant(int8_t q, uint16_t s16) { return float(q) * f16f(s16); }
 
+// PERF-114 (the int8 prompt pass, kv8.cl KV8_I8S): the prompt pass's rotated bf16 q row (values in fp32) as int8 with an fp32
+// scale (no fp16 rounding): s = amax / 127, q8 = s == 0 ? 0 : clamp(rint(y / s), -127, 127). Returns s.
+inline float quantise_q(const float* y, int8_t* q) {
+  float amax = 0.0f;
+  for (uint32_t i = 0; i < kHeadDim; ++i) amax = std::fmax(amax, std::fabs(y[i]));
+  const float s = amax / 127.0f;
+  for (uint32_t i = 0; i < kHeadDim; ++i) {
+    float r = s == 0.0f ? 0.0f : std::nearbyint(y[i] / s);
+    r = std::fmin(std::fmax(r, -127.0f), 127.0f);
+    q[i] = int8_t(r);
+  }
+  return s;
+}
+
+// ... and its score against one int8 key row with fp16 scale k_s16: the int32 dot (exact), then times the q scale,
+// the key's scale and `score_scale` (the flash's 1/16 log2 e), in that order, each one fp32 rounding.
+inline float score_i8(const int8_t* q, float q_s, const int8_t* k, uint16_t k_s16, float score_scale) {
+  int32_t dot = 0;
+  for (uint32_t i = 0; i < kHeadDim; ++i) dot += int32_t(q[i]) * int32_t(k[i]);
+  return ((float(dot) * q_s) * f16f(k_s16)) * score_scale;
+}
+
 // The writer's whole chain for one K or V row as the cache's bf16 value would hold it
 // (`x` = f32(rne_bf16(.)), exactly what the bf16 cache stores): rotate, quantise.
 inline uint16_t encode(const float* x, int8_t* q) {

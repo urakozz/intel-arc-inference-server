@@ -83,6 +83,21 @@
 #define SCORE_SCALE ATTN_SCALE
 #define EXPF(x) exp(x)
 #endif
+// FA_SKELETON=1 (probe-only, spec 38a Task 1: tools/probe's pfas_* arms of the PAIR and WIDE forms): EXPF and the
+// sub-group max / sum of the softmax become identities, so an arm times its form's loads, DPAS, SLM traffic and
+// barriers without the softmax's arithmetic. Its output is not attention. Unset everywhere else.
+#ifndef FA_SKELETON
+#define FA_SKELETON 0
+#endif
+#if FA_SKELETON
+#undef EXPF
+#define EXPF(x) (x)
+#define FA_RMAX(x) (x)
+#define FA_RADD(x) (x)
+#else
+#define FA_RMAX(x) sub_group_reduce_max(x)
+#define FA_RADD(x) sub_group_reduce_add(x)
+#endif
 
 #include "bf16.h"
 
@@ -113,7 +128,16 @@ inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 #ifndef PAIR
 #define PAIR 0
 #endif
-#if PAIR
+#ifndef WIDE
+#define WIDE 0
+#endif
+#if FA_SKELETON && !PAIR && !WIDE
+#error "pf_flash_attn FA_SKELETON: the PAIR or WIDE form only"
+#endif
+#if WIDE
+// WIDE=1 (spec 38, PERF-112): 32 rows of a head over four sub-groups, O split by dim quarters - see the header.
+#include "prefill/pf_flash_wide.h"
+#elif PAIR
 // PAIR=1 (long-context prefill): two sub-groups share 16 query rows of one head, so every K and V operand feeds two
 // row blocks' DPAS instead of one (the token stream above reads 68 KB of operands per 128 DPAS a 64-key tile, this
 // form 43 KB). Who computes what changes; no value, operand or order does:
@@ -129,6 +153,9 @@ inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 // for it: corr 1 and P 0, so its numbers stay the same. Grid (ceil(C / 16), kv-heads, GQA / HPW).
 #if KT != 64 || RPW != 16 || SPLIT || QREG || defined(KV_PAGED)
 #error "pf_flash_attn PAIR: KT 64, RPW 16, no SPLIT / QREG / KV_PAGED"
+#endif
+#ifndef PAIR_QSLM
+#define PAIR_QSLM 0
 #endif
 __attribute__((reqd_work_group_size(SG * 2 * HPW, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -153,6 +180,20 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
   __local float sa[HPW * 256];       // [pair][rb][r * 16 + lane]: sub-group 0's p0 + p1
   __local ushort sp[HPW * 1024];     // [pair][rb * 4 + b][r * 16 + lane]: P, bf16
   __local float sl[HPW * 16];        // [pair][16 rows]: l after the walk
+#if PAIR_QSLM
+  // PAIR_QSLM=n (probe-only, spec 38a Task 1: does SLM have read bandwidth beside L1's?): Q of dim atoms 0 .. 2n - 1
+  // is read once into SLM before the walk and from there every tile; the same values, so bitwise. Unset elsewhere.
+  __local ushort sq[HPW * PAIR_QSLM * 512];   // [pair][rb][dim-atom pair][256]
+  for (uint i = k; i < 2u * PAIR_QSLM; i += 2u) {
+    const uint rb = i / PAIR_QSLM, kp = i % PAIR_QSLM;
+    ushort t[16];
+    intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)Q, q_w, q_h, q_p,
+                                              (int2)((int)(h * HD + 32u * kp), (int)(r0 + 8u * rb)), t);
+    intel_sub_group_block_write_us8(sq + (hp * 2u * PAIR_QSLM + i) * 256u, vload8(0, t));
+    intel_sub_group_block_write_us8(sq + (hp * 2u * PAIR_QSLM + i) * 256u + 128u, vload8(0, t + 8));
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+#endif
 
   float8 o[2][NDA / 2];
 #pragma unroll
@@ -170,6 +211,14 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
       short8 qa[2][2];
 #pragma unroll
       for (uint rb = 0; rb < 2u; ++rb) {
+#if PAIR_QSLM
+        if (kk < 2u * PAIR_QSLM) {
+          __local const ushort* const qs = sq + (hp * 2u * PAIR_QSLM + rb * PAIR_QSLM + kk / 2u) * 256u;
+          qa[rb][0] = as_short8(intel_sub_group_block_read_us8(qs));
+          qa[rb][1] = as_short8(intel_sub_group_block_read_us8(qs + 128u));
+          continue;
+        }
+#endif
         ushort t[16];
         intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)Q, q_w, q_h, q_p,
                                                   (int2)((int)(h * HD + 16u * kk), (int)(r0 + 8u * rb)), t);
@@ -202,7 +251,7 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #undef MASK
         tmax = fmax(tmax, sacc[rb][bb]);
       }
-#define RED(r) red.s##r = sub_group_reduce_max(tmax.s##r);
+#define RED(r) red.s##r = FA_RMAX(tmax.s##r);
       RED(0) RED(1) RED(2) RED(3) RED(4) RED(5) RED(6) RED(7)
 #undef RED
       if (l == 0) vstore8(red, 0, smax + hp * 32u + k * 16u + 8u * rb);
@@ -234,7 +283,7 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
         psum += sacc[rb][0];
         psum += sacc[rb][1];
         float8 rsum;
-#define SUM(r) rsum.s##r = sub_group_reduce_add(psum.s##r);
+#define SUM(r) rsum.s##r = FA_RADD(psum.s##r);
         SUM(0) SUM(1) SUM(2) SUM(3) SUM(4) SUM(5) SUM(6) SUM(7)
 #undef SUM
         lsum[rb] = lsum[rb] * corr[rb] + rsum;

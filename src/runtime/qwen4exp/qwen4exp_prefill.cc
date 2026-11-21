@@ -819,13 +819,7 @@ Qwen4ExpPrefillScratch::Qwen4ExpPrefillScratch(l0::Context& ctx, const model::Qw
       max_len(max_len_),
       rows(rows_) {}
 
-size_t Qwen4ExpPrefillScratch::bytes() const {
-  return ids.size() + H.size() + xn.size() + x.size() + down_f32.size() + inj.size() + partials.size() + slab.size() +
-         idx_f32.size() + idx_q.size() + scores.size() + lists.size() + diag.size() + q16.size() + o.size() +
-         attn_out.size() + ab.size() + gdn.size() + logits.size() + routes.size() + hdr.size() + tiles.size() +
-         row_tok.size() + pair_row.size() + xg.size() + h.size() + y.size() + w.size() + ple_ids.size() + cnt.size() +
-         items.size();
-}
+size_t Qwen4ExpPrefillScratch::bytes() const { return gs::buffer_bytes<l0::Mem, PrefillSizes>(*this); }
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,
                    const loader::Q4DevicePart& part, Qwen4ExpBuffers& b, uint32_t pos, uint32_t C, bool eager,

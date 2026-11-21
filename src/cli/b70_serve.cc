@@ -135,7 +135,12 @@ struct Flags {
   [[=Section("\n  Still being measured (they go when their numbers decide):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
   std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
-  [[=Help("l0|l0-int8", "the prompt pass: bf16, or int8 on the matrix engines.", "l0")]] Arg<std::string> prefill_backend;
+  [[=Help("l0|l0-int8",
+          "the prompt pass: bf16, or int8 - every prompt linear, the context (it turns on\n"
+          "--kv-cache int8) and the attention scores: 40-47 % faster prompts than bf16 on\n"
+          "Qwen3.8-27B; the most likely next token differs at 3 of 585 positions, 0 of 12 long\n"
+          "exact-copy tool calls changed.",
+          "l0")]] Arg<std::string> prefill_backend;
   [[=Help("off|32k|64k|128k", "the MTP head's (or DFlash drafter's) draft vocabulary.")]]
   std::string draft_vocab = "off";   // spec 8 §11: off until the box rows decide
   [[=Help("FILE", "the draft vocabulary's ids (with --draft-vocab).")]] std::string draft_vocab_ids;
@@ -610,6 +615,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
              runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  served.is_moe(), served.name);
+  cli::notice_int8_prefill(engine.prefill_backend(), served);
   if (drafter) {   // spec 19d: the drafter's policy line, as on one card
     std::print(stderr, "spec dflash (--parallel pp, device 1): {} drafter, K <= {:d}, ",
                loader::draft_format_name(a.dflash.format), a.dflash.max_k);
@@ -750,6 +756,7 @@ int serve_tp(const TpServe& a, server::Options options) {
              loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  false, card.name);
+  cli::notice_int8_prefill(engine.prefill_backend(), card);
   if (engine.has_drafter())   // kept as an explicit choice, with the advice
     std::print(stderr, "note: DFlash under --parallel tp is not faster than DFlash on one card for one session; for "
                        "speed use --parallel 1 --spec dflash (one card), --parallel replica --spec dflash (a drafter "
@@ -900,6 +907,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
              loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engines[0]->kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  engines[0]->model().desc->is_moe(), engines[0]->model().desc->name);
+  cli::notice_int8_prefill(engines[0]->prefill_backend(), *engines[0]->model().desc);
   if (options.spec_mtp_lookup)   // open-work 27 / 28 on each card, one card's lines
     std::print(stderr,
                "spec mtp: prompt lookup inside MTP on each card - ENTER a match of >= {:d} ids, STAY while a verify "
@@ -1016,6 +1024,10 @@ int run(int argc, char** argv) {
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
     throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" + pp_backend_arg + "'");
+  // PERF-114: l0-int8 on a dense model runs on the int8 context (the KV cache), turned on here.
+  const bool int8_dense = have_pp_backend && pp_backend == runtime::PrefillBackend::L0Int8 &&
+                          cli::int8_context_model(path);
+  if (have_pp_backend) kv_cache = cli::int8_pass_kv(pp_backend, int8_dense, f.kv_cache, kv_cache);
   if (!draft_vocab_ids.empty() && draft_vocab == 0)
     throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
@@ -1204,7 +1216,7 @@ int run(int argc, char** argv) {
 
   runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
-  cli::warn_int8_prefill_kv8(pp_path.backend, kv_cache);
+  cli::check_int8_prefill_kv8(pp_path.backend, kv_cache, int8_dense);
 
   // Spec 16d: the pipeline's refusals that need no checkpoint (cli/pipeline_serve.h) - the override flags on
   // one card and prefill profiling - before the snapshot is even resolved; the model's own follow below.
@@ -1360,9 +1372,16 @@ int run(int argc, char** argv) {
   // --max-num-seqs (plan 13c's slots): N > 1 slots on this card - slot 0 the largest context that
   // fits beside N - 1 slots of 32768 (or the asked --max-len), several requests at once (Qwen3.8; not beside a
   // drafter or a draft vocabulary: refused above). 1: settle()'s one slot.
+  // Spec 31: with the MTP head or none, the N requests share a KV page pool instead (settle_pool: what N sequences'
+  // state leaves, in pages; a request up to the trained context or --max-len). Beside a DFlash drafter, fixed slots.
   std::vector<uint32_t> slot_lens;
   uint32_t max_len = 0;
-  if (max_num_seqs > 1) {
+  runtime::PoolShape pool;
+  if (max_num_seqs > 1 && !drafter_load) {
+    pool = cli::settle_pool(context, model, max_len_arg, max_num_seqs, mem_reserve, pp_path, kv_cache, drafter_plan);
+    max_len = uint32_t(pool.positions());
+    slot_lens.assign(max_num_seqs, pool.cap);
+  } else if (max_num_seqs > 1) {
     slot_lens = cli::settle_slots(context, model, max_len_arg, max_num_seqs, mem_reserve, pp_path, kv_cache,
                                   drafter_plan);
     max_len = runtime::slots_kv_len(slot_lens);   // one RoPE table, one KV allocation of the slots' pages
@@ -1371,8 +1390,12 @@ int run(int argc, char** argv) {
     slot_lens = {max_len};
   }
   const runtime::PrefillPath settled =
-      cli::settle_chunk_cap(context, model, slot_lens, mem_reserve, pp_path, kv_cache, drafter_plan, 0);
-  std::print(stderr, "slots: {:d} ({}) - {}\n", slot_lens.size(), runtime::slot_layout_name(slot_lens).c_str(),
+      cli::settle_chunk_cap(context, model, slot_lens, mem_reserve, pp_path, kv_cache, drafter_plan, 0, 0, 1,
+                            pool.pages != 0 ? &pool : nullptr);
+  const std::string layout = pool.pages != 0 ? std::to_string(pool.seqs) + " sharing " + std::to_string(pool.pages) +
+                                                   " KV pages, one up to " + std::to_string(pool.cap)
+                                             : runtime::slot_layout_name(slot_lens);
+  std::print(stderr, "slots: {:d} ({}) - {}\n", slot_lens.size(), layout.c_str(),
              slot_lens.size() > 1 ? "several requests at once on this card" : "one request at a time");
   std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
   if (drafter_load)
@@ -1380,7 +1403,7 @@ int run(int argc, char** argv) {
                                                                drafter_load->head_rows, max_len, dflash.max_k);
   const bool draft_vocab_on = model.draft_vocab != nullptr;
   runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get(),
-                         slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{});
+                         slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{}, pool.pages);
   if (drafter) drafter->attach(engine, draft_vocab_on);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
   engine.set_prefill_chunk_cap(settled.chunk_cap);   // plan 5d
@@ -1422,8 +1445,7 @@ int run(int argc, char** argv) {
     slots_engine = std::make_unique<cli::SlotsEngine>(engine, tokenizer.vocab_used(), dflash.on ? dflash.max_k : mtp_k,
                                                       spec_lookup, /*hooked=*/options.prefix_cache_bytes != 0,
                                                       runtime::Engine::kMaxRows, dflash.on);
-    options.parallel_desc = "1 card, " + std::to_string(engine.slots()) + " sequence slots (" +
-                            runtime::slot_layout_name(slot_lens) + ")";
+    options.parallel_desc = "1 card, " + std::to_string(engine.slots()) + " sequence slots (" + layout + ")";
   }
   server::Server server({tokenizer, chat_template, slots_engine ? slots_engine->adapter(0) : engine_adapter}, options,
                         slots_engine.get());
@@ -1439,6 +1461,7 @@ int run(int argc, char** argv) {
              runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, spec_lookup, options.lookup_min_match, spec.max_k, options.lookup_history,
                  mtp_on && spec.adaptive, served.is_moe(), served.name);
+  cli::notice_int8_prefill(engine.prefill_backend(), served);
   if (options.spec_mtp_lookup)   // open-work 27
     std::print(stderr,
                "spec mtp: prompt lookup inside MTP - ENTER a match of >= {:d} ids, STAY while a verify keeps >= {:d} (and "

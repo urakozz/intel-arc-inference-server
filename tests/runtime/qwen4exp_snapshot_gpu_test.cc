@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "check.h"
+#include "contract_death.h"
 #include "qwen4exp_rig.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
@@ -330,6 +331,9 @@ int main(int argc, char** argv) {
   rq::Qwen4ExpEngine& e = *rig.eng;
   std::printf("qwen4exp_snapshot_gpu_test: %u ids, %u layers, %u device(s)%s\n", kN, e.model().desc.layers, e.devices(),
               e.devices() == 2 ? (std::string(", split ") + std::to_string(e.split())).c_str() : "");
+  // The restore's bound is a contract: a pos past max_len ends the process before any device work.
+  CHECK(dies([&] { e.load_state(nullptr, e.max_len() + 1); }));
+  std::printf("  load_state past max_len ends the process (a contract)\n");
   const int rc = run_default(e, ids);
   std::printf("qwen4exp_snapshot_gpu_test %s\n", rc == 0 ? "OK" : "FAILED");
   return rc;

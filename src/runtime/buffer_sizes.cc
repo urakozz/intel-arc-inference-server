@@ -180,11 +180,12 @@ PersistentSizes PersistentDims::stage_sizes(uint32_t max_len, const model::Model
 }
 
 uint32_t DecodeScratchDims::rows(const model::ModelDesc& desc, bool mtp, KvCache kv, uint32_t seqs, bool draft_vocab) {
-  return mtp && seqs == 1 && kv == KvCache::Bf16 && !draft_vocab && desc.fa_q_heads == 24 && desc.fa_kv_heads == 4 &&
-                 desc.gdn_layers == 48 && desc.gdn_k_heads == kernels::kRefGdnKHeads &&
-                 desc.gdn_v_heads == kernels::kRefGdnVHeads
-             ? kDeepM
-             : kWideM;
+  const bool qwen = desc.fa_q_heads == 24 && desc.fa_kv_heads == 4 && desc.gdn_layers == 48 &&
+                    desc.gdn_k_heads == kernels::kRefGdnKHeads && desc.gdn_v_heads == kernels::kRefGdnVHeads;
+  // PERF-56: Ornith's 16 / 2 attention heads and 30 delta-net layers of 16 / 32 heads
+  const bool ornith = desc.fa_q_heads == 16 && desc.fa_kv_heads == 2 && desc.gdn_layers == 30 &&
+                      desc.gdn_k_heads == 16 && desc.gdn_v_heads == 32;
+  return mtp && seqs == 1 && kv == KvCache::Bf16 && !draft_vocab && (qwen || ornith) ? kDeepM : kWideM;
 }
 
 DecodeScratchSizes DecodeScratchDims::sizes(uint32_t /*max_len*/, const model::ModelDesc& desc, uint32_t rows) {
@@ -216,7 +217,8 @@ MoeScratchLayout moe_scratch_layout(const model::ModelDesc& desc) {
   MoeScratchLayout l;
   if (!desc.is_moe()) return l;
   const model::MoeDesc& m = desc.moe;
-  const size_t kM = DecodeScratchDims::kM;
+  // PERF-56: rows for the wide lookup verify lists' 64 (Ornith one card); every list indexes its own rows from 0
+  const size_t kM = DecodeScratchDims::kDeepM;
   l.layer_slots = desc.layers + 1;
   l.logits_layer = kM * m.router_n() * kFp32;
   l.route_layer = kM * kMoeRouteWords * sizeof(uint32_t);
@@ -295,15 +297,6 @@ MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t
   s.dh = size_t{desc.hidden} * kBf16;
   s.logits = size_t{kMaxK} * Q::kVocab * kFp32;
   s.dv_logits = size_t{draft_vocab} * kFp32;   // spec 8 §11: the compact head's logits
-  // Spec 32: Engine's gdn_pend_ and, where the deep lists are built (bf16 KV, no draft vocabulary:
-  // DecodeScratchDims::rows' kDeepM), gdn_x_ / conv_x_ (runtime/engine.cc).
-  if (seqs == 1 && desc.gdn_layers == 48 && desc.gdn_k_heads == kernels::kRefGdnKHeads &&
-      desc.gdn_v_heads == kernels::kRefGdnVHeads)
-    s.deep = 2 * kGdnPendParity + (kv == KvCache::Bf16 && draft_vocab == 0
-                                       ? gdn_state_bytes(desc) + size_t{desc.gdn_layers} * kGdnConvXLayer
-                                       : 0);
-  else if (seqs == 1 && desc.gdn_layers == 30 && desc.gdn_k_heads == 16 && desc.gdn_v_heads == 32)
-    s.deep = 2 * kGdnPendParityOrnith;   // PERF-51
   return s;
 }
 
@@ -359,6 +352,32 @@ size_t SlotDims::draft_control_at(uint32_t seqs) { return rows_control_at(seqs) 
 size_t SlotDims::rows_table_at(uint32_t seqs) { return rows_control_at(seqs) + 4 * kCtl; }
 size_t SlotDims::head_table_at(uint32_t seqs) { return rows_table_at(seqs) + kTable; }
 size_t SlotDims::draft_table_at(uint32_t seqs) { return head_table_at(seqs) + kTable; }
+
+EngineSizes EngineDims::sizes(const model::ModelDesc& desc, KvCache kv, uint32_t draft_vocab, uint32_t seqs, bool mtp,
+                              bool drafter, bool debug_tap) {
+  EngineSizes s;
+  if (debug_tap) s.tap = size_t{desc.layers} * desc.hidden * kBf16;
+  if (drafter) s.df_slots = TapVerifyDims::gdn_spec_bytes(desc) + size_t{seqs - 1} * SlotDims::kDrafterStates * gdn_state_bytes(desc);
+  if (seqs != 1 || !(mtp || drafter)) return s;
+  // The shapes kernels::gdn_defer_built names (engine.cc holds the parities equal to the kernels').
+  const bool qwen = desc.gdn_layers == 48 && desc.gdn_k_heads == kernels::kRefGdnKHeads &&
+                    desc.gdn_v_heads == kernels::kRefGdnVHeads;
+  const bool ornith = desc.gdn_layers == 30 && desc.gdn_k_heads == 16 && desc.gdn_v_heads == 32;
+  if (qwen) s.gdn_pend = 2 * MtpDims::kGdnPendParity;
+  else if (ornith) s.gdn_pend = 2 * MtpDims::kGdnPendParityOrnith;   // PERF-51
+  if ((qwen || ornith) && mtp && kv == KvCache::Bf16 && draft_vocab == 0) {   // PERF-56: Ornith's deep lists too
+    s.gdn_x = gdn_state_bytes(desc);
+    s.conv_x = size_t{desc.gdn_layers} * (qwen ? MtpDims::kGdnConvXLayer : MtpDims::kGdnConvXLayerOrnith);
+  }
+  return s;
+}
+
+EnginePrefillSizes engine_prefill_sizes(const model::ModelDesc& desc, uint32_t chunk_cap, bool mtp, uint32_t n_taps) {
+  EnginePrefillSizes s;
+  if (mtp) s.mtp_hid = mtp_prefill_hidden_bytes(desc, chunk_cap);
+  if (n_taps) s.df_taps = TapVerifyDims::prefill_taps_bytes(desc, n_taps, chunk_cap);
+  return s;
+}
 
 size_t TapVerifyDims::gdn_spec_bytes(const model::ModelDesc& desc) {
   return size_t{kSlots - 1} * gdn_state_bytes(desc);
@@ -423,9 +442,9 @@ void set_default_prefill_chunk_cap(uint32_t cap) {
 }
 }  // namespace testing
 
-bool l0_int8_bf16_linear(const model::ModelDesc&, model::LinearId id) {
-  return id == model::LinearId::QkvZ || id == model::LinearId::OutProj || id == model::LinearId::Qkv ||
-         id == model::LinearId::OProj;
+bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id) {
+  return desc.is_moe() && (id == model::LinearId::QkvZ || id == model::LinearId::OutProj ||
+                            id == model::LinearId::Qkv || id == model::LinearId::OProj);
 }
 
 Int8ScratchSizes int8_scratch_sizes(uint32_t max_k, uint32_t chunk_cap) {

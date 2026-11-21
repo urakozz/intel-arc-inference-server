@@ -444,7 +444,7 @@ add_test(NAME attn_verify_ref_test COMMAND attn_verify_ref_test)
 # attn_verify_dpas names are its arguments (every (M, KV form) the rule can bind must be on a CMake line).
 set(_vattn_built)
 foreach(MM 2 3 4 5 6 7 8 16 32 64)   # 16: open-work 28's wide list; 32 / 64: spec 32's deep lists
-  foreach(SFX "" _KV8 _Q12KV2 _Q12KV2_KV8)   # spec 17d: the per-card 12 / 2 builds
+  foreach(SFX "" _KV8 _Q12KV2 _Q12KV2_KV8 _Q16KV2)   # spec 17d: the per-card 12 / 2 builds; PERF-56: Ornith's 16 / 2
     if(TARGET kernel_attn_verify_dpas_M${MM}_T32${SFX})
       list(APPEND _vattn_built attn_verify_dpas_M${MM}_T32${SFX})
     endif()
@@ -477,6 +477,14 @@ if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set_tests_properties(attn_verify_dpas_test PROPERTIES TIMEOUT 3600)
   add_test(NAME attn_verify_dpas_kv8_m8_test COMMAND attn_verify_dpas_test --kv8-m8)
   set_tests_properties(attn_verify_dpas_kv8_m8_test PROPERTIES LABELS "kv8;dflash" TIMEOUT 300)
+  if(B70_ORNITH)   # PERF-56: Ornith's heads in its wide lookup verify lists (row chunks of 8), against v2 at M = 1
+    add_dependencies(attn_verify_dpas_test kernel_attn_v2_M1_T32_Q16KV2)
+    foreach(MM 16 32 64)
+      add_dependencies(attn_verify_dpas_test kernel_attn_verify_dpas_M${MM}_T32_Q16KV2 kernel_attn_v2_M${MM}_T32_Q16KV2)
+    endforeach()
+    add_test(NAME attn_verify_dpas_ornith_wide_test COMMAND attn_verify_dpas_test --ornith-wide)
+    set_tests_properties(attn_verify_dpas_ornith_wide_test PROPERTIES LABELS "ornith;mtp" TIMEOUT 600)
+  endif()
 endif()
 
 # 3l: the production attn_verify_dpas[_kv8] against its frozen copy (kernels/attn_verify_control.cl, main 865da900's
@@ -893,6 +901,11 @@ add_executable(slot_plan_test runtime/slot_plan_test.cc)
 target_include_directories(slot_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(slot_plan_test PRIVATE b70_plan)
 add_test(NAME slot_plan_test COMMAND slot_plan_test)
+# Spec 31 (plan 31 Task 3): the slots' KV page allocator (runtime/kv_pool.h), host only.
+add_executable(kv_pool_test runtime/kv_pool_test.cc)
+target_include_directories(kv_pool_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kv_pool_test PRIVATE b70_plan)
+add_test(NAME kv_pool_test COMMAND kv_pool_test)
 
 # The five checkpoint-labelled tests below (loader::load, argv[1] or [3])
 # default with no argument to the HF repo id
@@ -1146,7 +1159,7 @@ add_test(NAME snapshot_cap4096_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT} -
 set_tests_properties(snapshot_test snapshot_cap4096_test PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
 # Spec 5 T3 (plan 5b Task 2): l0-int8 on the engine - a smoke cosine against l0 and the
-# l0 + 128 launch delta (open-work 17: two quantisers a layer, the MLP's). The int8 kernels are in
+# launch delta step_chunk_launches derives (PERF-113: every linear an h8 walk). The int8 kernels are in
 # B70_PREFILL_KERNELS above.
 add_test(NAME prefill_int8_test COMMAND prefill_int8_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_int8_test PROPERTIES LABELS "checkpoint;prefill"
@@ -1405,6 +1418,33 @@ b70_cli_reject(cli_reject_prefill_backend_with_ids ${B70_NO_MODEL} --ids ${B70_O
 # "--prefill-backend expects l0 or l0-int8".
 b70_cli_reject(cli_reject_prefill_backend_value ${B70_NO_MODEL} --bench --prefill-length 64
   --prefill-backend cuda EXPECT "--prefill-backend expects l0 or l0-int8")
+# PERF-114: l0-int8 on a dense model runs on the int8 context - an explicit --kv-cache bf16 is refused (the missing
+# model reads as dense); --turbo is gone, an unknown flag.
+b70_cli_reject(cli_reject_int8_kv_bf16 ${B70_NO_MODEL} --bench --prefill-length 64
+  --prefill-backend l0-int8 --kv-cache bf16 EXPECT "--prefill-backend l0-int8 runs on the int8 context")
+b70_cli_reject(cli_reject_turbo_unknown ${B70_NO_MODEL} --bench --prefill-length 64
+  --prefill-backend l0-int8 --turbo EXPECT "unknown option")
+# PERF-113: the int8 prompt pass's startup notice - printed with l0-int8 on the dense model, not with l0, and (below,
+# B70_ORNITH) not on a MoE model, whose l0-int8 is the W4A8 experts the numbers did not measure. A real load (the
+# model's descriptor decides), so `checkpoint`; each run must reach its "prefill backend:" line.
+function(b70_int8_notice name want snapshot backend)
+  add_test(NAME ${name} COMMAND sh -c [==[
+want=$1
+shift
+out=$("$@" 2>&1)
+printf '%s
+' "$out" >&2
+printf '%s
+' "$out" | grep -q '^prefill backend: ' || { echo "b70_int8_notice: the run never reached its prefill" >&2; exit 1; }
+if printf '%s
+' "$out" | grep -qF 'the int8 prompt pass is on'; then got=1; else got=0; fi
+[ "$got" = "$want" ] || { echo "b70_int8_notice: notice printed $got, expected $want" >&2; exit 1; }
+]==] b70_int8_notice ${want} $<TARGET_FILE:b70-decode> ${snapshot} --bench --prefill-length 64 --tg 1
+    --prefill-backend ${backend})
+  set_tests_properties(${name} PROPERTIES LABELS checkpoint TIMEOUT 600)
+endfunction()
+b70_int8_notice(cli_int8_notice 1 ${B70_TEST_SNAPSHOT} l0-int8)
+b70_int8_notice(cli_no_int8_notice 0 ${B70_TEST_SNAPSHOT} l0)
 # "unknown option" - anything starting with '-' the parse loop does not know.
 b70_cli_reject(cli_reject_unknown_flag ${B70_NO_MODEL} --bench --frobnicate)
 # "a snapshot directory or HF repo id is required" - no positional argument.
@@ -1603,15 +1643,15 @@ if(B70_MTP)
     "Qwen3.8's f32 judges of the forced contexts, the engine's int8 head")
   # The judge by prefill form: the tests that prefill with l0-int8 (every mtp_gpu_test
   # registration) are judged by references whose prompt pass applies the same int8 rounding - f32_refs.sh
-  # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form). Open-work 17:
-  # int8 on the MLP's linears only (the mixer linears bf16), so a new dir and variable name - the old ones hold the
-  # all-int8 form's references, and a build tree's cache would keep the old path.
-  set(B70_QWEN_FORCED_JUDGE_PFI8MLP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8mlp-forced" CACHE PATH
+  # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form). PERF-113: int8
+  # on every prompt linear, so a new dir and variable name - the old ones hold the MLP-only form's references, and a
+  # build tree's cache would keep the old path.
+  set(B70_QWEN_FORCED_JUDGE_PFI8ALL "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8all-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts with the l0-int8 prompt pass (the mtp_gpu_test registrations)")
   # The judge by KV form: the int8 KV cache's twins (mtp_gpu_kv8_test, the DFlash *_kv8_test) are judged by references
   # whose attention reads K / V through the same int8 rounding - f32_refs.sh forced-qwen-kv8 / forced-qwen-pfi8-kv8
   # (qwen_forced.py --kv8: int8_sim.kv8_fq, bitwise kv8.h's codes, kv8_sim_test).
-  set(B70_QWEN_FORCED_JUDGE_PFI8MLP_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8mlp-kv8-forced" CACHE PATH
+  set(B70_QWEN_FORCED_JUDGE_PFI8ALL_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8all-kv8-forced" CACHE PATH
     "Qwen3.8's f32 judges with the l0-int8 prompt pass and the int8 KV cache (mtp_gpu_kv8_test)")
   set(B70_QWEN_FORCED_JUDGE_I8HEAD_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-kv8-forced" CACHE PATH
     "Qwen3.8's f32 judges with the int8 head and the int8 KV cache (the DFlash *_kv8_test)")
@@ -1644,6 +1684,13 @@ if(B70_MTP)
     add_test(NAME slots_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
     add_test(NAME slots_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
     add_test(NAME slots_nomtp_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --mtp off)
+    # Spec 31 (plan 31 Task 5): the KV page pool's sequences against the fixed slots (slots_test.cc's --pool cases).
+    add_test(NAME slots_pool_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --pool)
+    add_test(NAME slots_pool_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --pool)
+    set_tests_properties(slots_pool_test PROPERTIES LABELS "checkpoint;mtp;slots" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      TIMEOUT 3600)
+    set_tests_properties(slots_pool_kv8_test PROPERTIES LABELS "checkpoint;mtp;slots;kv8" SKIP_RETURN_CODE 77 ENVIRONMENT "B70_KV_CACHE=int8"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
     set_tests_properties(slots_nomtp_test PROPERTIES LABELS "checkpoint;slots" SKIP_RETURN_CODE 77
       ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
@@ -1665,7 +1712,7 @@ if(B70_MTP)
     add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
-      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8ALL};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     # Spec 8 §11's M3 gate: drafts over a 128k draft vocabulary, greedy output identical to
     # the plain loop (= --draft-vocab off) on the golden and A4 prompts at every K, and the
@@ -1678,7 +1725,7 @@ if(B70_MTP)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES
       LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8ALL};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
     # Open-work 27: prompt lookup inside MTP through EngineAdapter - D2 against the plain loop on golden, A4 and the
     # edit / copy set's 8k / 32k prompts by the f32 judge (the int8 head's references), the warm head, a truncate
     # inside a lookup burst, a seeded sampled run reproducible.
@@ -1724,7 +1771,7 @@ exec "$@"
       # their own contexts' bf16 top-k files come from f32_refs.sh bf16top-qwen over r69.forced_dumps' longctx dumps).
       set_tests_properties(mtp_gpu_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
         SKIP_RETURN_CODE 77
-        ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+        ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8ALL};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
     endif()
   endforeach()
@@ -1786,6 +1833,7 @@ if(B70_ORNITH)
     CACHE PATH "Ornith's f32 reference with the l0-int8 prefill linears (the l0-int8 prefill gates' judge)")
   set(B70_ORNITH_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/tests/golden/prompts"
     CACHE PATH "Ornith's prompt ids (the committed ones: the int4 checkpoint's tokenizer gives them)")
+  b70_int8_notice(cli_no_int8_notice_ornith 0 ${B70_ORNITH_SNAPSHOT} l0-int8)   # PERF-113: no Qwen3.8 numbers here
   # The greedy argmax is Qwen3.8's argmax_stage1_M1 (vocab_used 248077, spec 15 §13); a||b is
   # the int4 checkpoint's gemv_M1_K2048_N128_S1_L1, its bf16 form kept for a checkpoint that
   # ships a||b bf16.
@@ -1833,7 +1881,8 @@ if(B70_KV8)
     kernel_attn_v2_M1_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M2_T${ATTN_V2_TGT}_KV8
     kernel_attn_v2_M3_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M4_T${ATTN_V2_TGT}_KV8
     kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_flash_attn_kv8_raw_pair
-    kernel_pf_attn_gate_kv8 kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split)
+    kernel_pf_attn_gate_kv8 kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split
+    kernel_pf_attn_prep_kv8_I8S kernel_pf_flash_attn_kv8_raw_pair_I8S)   # PERF-114 (the int8 pass's scores)
   if(B70_MTP)
     list(APPEND B70_KV8_KERNELS kernel_attn_prep_M1_S1_KV8 kernel_attn_prep_M2_S1_KV8
       kernel_attn_prep_M3_S1_KV8 kernel_attn_prep_M4_S1_KV8)
@@ -1885,6 +1934,23 @@ if(B70_KV8)
   add_test(NAME kv8_flash_raw_pair_bitwise_test COMMAND kv8_flash_bitwise_test
     ${B70_KERNEL_DIR}/pf_flash_attn_kv8_raw_pair.bin --raw --pair)
   set_tests_properties(kv8_flash_raw_pair_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 1800)
+  # PERF-114 (the int8 prompt pass): the int8-score writer and pair (kv8.cl KV8_I8S) - the writer bitwise its host twin, the pair
+  # bitwise the bf16 pair on power-of-two q scales (and paged bitwise contiguous), real scales against the CPU twin.
+  add_executable(kv8_i8s_test kernels/kv8_i8s_test.cc)
+  target_include_directories(kv8_i8s_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(kv8_i8s_test PRIVATE b70_l0)
+  b70_target_kernel_dir(kv8_i8s_test)
+  add_dependencies(kv8_i8s_test kernel_pf_attn_prep_kv8_I8S kernel_pf_flash_attn_kv8_raw_pair
+    kernel_pf_flash_attn_kv8_raw_pair_I8S)
+  if(B70_MTP AND B70_VERIFY_M8)
+    add_dependencies(kv8_i8s_test kernel_pf_flash_attn_kv8_raw_pair_I8S_PG${KV_PAGE})
+  endif()
+  if(B70_TP)
+    add_dependencies(kv8_i8s_test kernel_pf_flash_attn_kv8_raw_Q12KV2 kernel_pf_flash_attn_kv8_raw_pair_I8S_Q12KV2)
+  endif()
+  add_test(NAME kv8_i8s_test COMMAND kv8_i8s_test)
+  set_tests_properties(kv8_i8s_test PROPERTIES LABELS kv8 SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
   add_ocloc_kernel(kv8_scale_test SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_scale_test.cl
     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
@@ -2031,7 +2097,7 @@ if(B70_KV8)
     add_test(NAME mtp_gpu_kv8_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     b70_kv8_twin(mtp_gpu)
     set_property(TEST mtp_gpu_kv8_test APPEND PROPERTY ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP_KV8}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8ALL_KV8}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   if(TEST prefix_gpu_int8_test)
     add_test(NAME prefix_gpu_int8_kv8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
@@ -2265,6 +2331,9 @@ if(B70_ORNITH AND B70_MTP)
   # as pf_norm_fused_mtp_test's reference.
   list(APPEND B70_ORNITH_MTP_KERNELS kernel_pf_bf16_slab_K4096 kernel_pf_bf16_slab_K2048
     kernel_pf_mtp_front_K2048_G20 kernel_pf_res_norm_K2048_SP1_G20_Z kernel_pf_attn_prep_q16_Q16KV2_KVO)
+  # PERF-56: the wide lookup verify lists' own builds (src/kernels' PERF-56 block; empty without B70_VERIFY_M8).
+  get_property(_o56_wide GLOBAL PROPERTY B70_ORNITH_WIDE_KERNELS)
+  list(APPEND B70_ORNITH_MTP_KERNELS ${_o56_wide})
   # What the lists reuse: 15c's decode list, 15d's prefill kernels, spec 8's shared ones.
   set(_o15e_reused ${B70_ORNITH_DECODE_KERNELS}
     kernel_argmax_stage1_M2 kernel_argmax_stage1_M3 kernel_argmax_stage1_M4
@@ -2272,6 +2341,10 @@ if(B70_ORNITH AND B70_MTP)
     kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
     kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_embed_gather_D2048
     kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_res_norm_K2048_SP0_G20)
+  if(_o56_wide)   # PERF-56: Qwen3.8's argmax pair at the wide lists' rows (the same vocabulary)
+    list(APPEND _o15e_reused kernel_argmax_stage1_M16 kernel_argmax_stage1_M32 kernel_argmax_stage1_M64
+      kernel_argmax_stage2_W16 kernel_argmax_stage2_W32 kernel_argmax_stage2_W64)
+  endif()
   get_property(_o28b_gemm_sm GLOBAL PROPERTY B70_GEMM_SM_KERNELS)   # spec 28b: the verify lists' dense gemm_sm
   list(APPEND _o15e_reused ${_o28b_gemm_sm})
   foreach(t ${B70_ORNITH_MTP_KERNELS} ${_o15e_reused})
@@ -2295,6 +2368,10 @@ if(B70_ORNITH AND B70_MTP)
   b70_target_kernel_dir(moe_m_test)
   add_dependencies(moe_m_test kernel_moe_M1_E256_T8_D2048_I512 kernel_moe_M2_E256_T8_D2048_I512
     kernel_moe_M3_E256_T8_D2048_I512 kernel_moe_M4_E256_T8_D2048_I512)
+  if(B70_VERIFY_M8)   # PERF-56: the wide lookup verify lists' rows
+    add_dependencies(moe_m_test kernel_moe_M16_E256_T8_D2048_I512 kernel_moe_M32_E256_T8_D2048_I512
+      kernel_moe_M64_E256_T8_D2048_I512)
+  endif()
   add_test(NAME moe_m_test COMMAND moe_m_test)
   set_tests_properties(moe_m_test PROPERTIES LABELS "ornith;mtp" TIMEOUT 900)
 
@@ -2332,6 +2409,17 @@ if(B70_ORNITH AND B70_MTP)
       ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced")
     set_tests_properties(ornith_mtp_bf16head_test PROPERTIES
       ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-forced")
+  endif()
+  # PERF-56: mtp_verify_test's W16 / W32 / W64 cases on Ornith one card - its int8 head, its int8-head forced judges
+  # (W16's rows against the plain steps; W32 / W64 bitwise the 16-row list's rows, no judge).
+  if(TARGET mtp_verify_test AND B70_VERIFY_M8)
+    add_test(NAME mtp_verify_wide_ornith_test COMMAND mtp_verify_test ${B70_ORNITH_SNAPSHOT} 16384 rule wide)
+    set_tests_properties(mtp_verify_wide_ornith_test PROPERTIES LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77
+      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
+    add_test(NAME mtp_verify_deep_ornith_test COMMAND mtp_verify_test ${B70_ORNITH_SNAPSHOT} 16384 rule deep)
+    set_tests_properties(mtp_verify_deep_ornith_test PROPERTIES LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
   endif()
 endif()
 # ==== Spec 15e ============================================================= (end) ====
@@ -3237,13 +3325,13 @@ if(B70_Q4EXP)
   # argmax, Kolibri's 6144 x 2560 int4 and bf16 - are bound by name and listed too).
   set(B70_Q4EXP_DECODE_KERNELS
     kernel_embed_gather_M1_D2560 kernel_q4_hc_combine_norm_M1_E kernel_q4_hc_combine_norm_M1_S1
-    kernel_q4_hc_combine_norm_M1_S4 kernel_q4_hc_combine_norm_M1_Y kernel_q4_hc_combine_norm_M1_Y_NN
-    kernel_q4_hc_combine_norm_M1_X kernel_q4_hc_up_mix_M1_I kernel_q4_hc_up_mix_M1
+    kernel_q4_hc_combine_norm_M1_S8 kernel_q4_hc_combine_norm_M1_Y kernel_q4_hc_combine_norm_M1_Y_NN
+    kernel_q4_hc_combine_norm_M1_X kernel_q4_hc_up_mix_M1_I_B kernel_q4_hc_up_mix_M1_B
     kernel_gemv_bf16_M1_K10240_N336_C16_S16 kernel_gemv_bf16_M1_K10240_N320_C16_S16
-    kernel_q4_hc_up_mix_M1_I_Q8 kernel_q4_hc_up_mix_M1_Q8 kernel_q4_hc_down_i8_M1_N336_KS16
-    kernel_q4_hc_down_i8_M1_N320_KS16
+    kernel_q4_hc_up_mix_M1_I_Q8_B kernel_q4_hc_up_mix_M1_Q8_B kernel_q4_hc_down_i8_M1_N336_KS32
+    kernel_q4_hc_down_i8_M1_N320_KS32
     kernel_gemv_M1_K2560_N16384_S1_L0 kernel_gemv_bf16_M1_K2560_N16384 kernel_gemv_bf16_M1_K2560_N128_C16_S16
-    kernel_gdn_step_M1 kernel_prep_gated_head_M1_SIG kernel_gemv_M1_K6144_N2560_S4_L0 kernel_gemv_bf16_M1_K6144_N2560
+    kernel_gdn_step_M1 kernel_prep_gated_head_M1_SIG kernel_gemv_M1_K6144_N2560_S8_L0 kernel_gemv_bf16_M1_K6144_N2560
     kernel_gemv_M1_K2560_N13312_S2_L0 kernel_gemv_bf16_M1_K2560_N13312 kernel_gemv_bf16_M1_K2560_N640_C16_S16
     kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_S1 kernel_q4_qsa_M1_T512_W1024 kernel_q4_qsa_attn_M1_T32
     kernel_q4_qsa_attn_eager_M1 kernel_gemv_bf16_M1_K2560_N528_C16_S16 kernel_q4_route_M1_E512_T10_N528_L256
@@ -3267,6 +3355,14 @@ if(B70_Q4EXP)
   b70_target_kernel_dir(qwen4exp_kernels_test)
   add_dependencies(qwen4exp_kernels_test ${B70_Q4EXP_DECODE_KERNELS} kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2
     kernel_q4_hc_up_mix_M2048_I_D512_R4C64_Q8 kernel_q4_hc_slab_i8_N336)   # PERF-66's prefill forms (test 8)
+  foreach(MM 1 2 3 4)   # PERF-106's --bench-hc8: lead 4's pair (the down _A, the up-mix _A; _R<M>C16 at M >= 2)
+    if(MM GREATER 1)
+      add_dependencies(qwen4exp_kernels_test kernel_q4_hc_up_mix_M${MM}_I_R${MM}C16_Q8_B_A)
+    else()
+      add_dependencies(qwen4exp_kernels_test kernel_q4_hc_up_mix_M1_I_Q8_B_A)
+    endif()
+    add_dependencies(qwen4exp_kernels_test kernel_q4_hc_down_i8_M${MM}_N336_KS32_A)
+  endforeach()
   add_test(NAME qwen4exp_kernels_test COMMAND qwen4exp_kernels_test)
   set_tests_properties(qwen4exp_kernels_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77 TIMEOUT 1800)
   # Task 3: the runtime on the card - F4 on decode (plan == allocation, two runs bitwise, the injected capture fed
@@ -3326,12 +3422,12 @@ if(B70_Q4EXP)
       ${CMAKE_SOURCE_DIR}/tests/runtime)
     target_link_libraries(qwen4exp_tp_test PRIVATE b70_qwen4exp_runtime b70_l0)
     add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_gemv_M1_K2560_N8192_S1_L0
-      kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S2_L0_TP kernel_gemv_i8w_M1_K2560_N124160
+      kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S4_L0_TP kernel_gemv_i8w_M1_K2560_N124160
       kernel_prep_gated_head_M1_GK8V24_SIG kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1
       kernel_q4_qsa_attn_M1_T32_Q12KV1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0
       kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R0
       kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R1
-      kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum_W64 kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum_W64
+      kernel_tp_cross_M1_K2560_G20_S4_X_R0_sum_W64 kernel_tp_cross_M1_K2560_G20_S4_X_R1_sum_W64
       kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
     foreach(mode pp tp)   # pp writes the reference rows tp reads: run in this order (ctest -R qwen4exp_tp_)
       add_test(NAME qwen4exp_tp_${mode}_test COMMAND qwen4exp_tp_test ${B70_Q4EXP_RTN_SNAPSHOT}
@@ -3506,11 +3602,11 @@ b70_cli_reject(cli_reject_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --bench --
 # (B70_Q4EXP_RTN_SNAPSHOT): pp writes its prefill's rows, tp reads them (ctest -R qwen4exp_tp_prefill_, in this order).
 if(B70_Q4EXP AND B70_TP)
   set(B70_Q4EXP_TP_KERNELS kernel_gemv_M1_K2560_N8192_S1_L0 kernel_gemv_M1_K2560_N6656_S2_L0
-    kernel_gemv_M1_K3072_N2560_S2_L0_TP kernel_gemv_i8w_M1_K2560_N124160 kernel_prep_gated_head_M1_GK8V24_SIG
+    kernel_gemv_M1_K3072_N2560_S4_L0_TP kernel_gemv_i8w_M1_K2560_N124160 kernel_prep_gated_head_M1_GK8V24_SIG
     kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1 kernel_q4_qsa_attn_M1_T32_Q12KV1
     kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R1
     kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R1
-    kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum_W64 kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum_W64
+    kernel_tp_cross_M1_K2560_G20_S4_X_R0_sum_W64 kernel_tp_cross_M1_K2560_G20_S4_X_R1_sum_W64
     kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
   set(B70_Q4EXP_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K2560_N8192_L0 kernel_pf_int4_slab_K2560_N6656
     kernel_pf_int4_slab_K3072_N2560 kernel_q4_pf_bf16_slab_K2560_N8192 kernel_q4_pf_bf16_slab_K2560_N6656
@@ -3574,11 +3670,15 @@ if(B70_Q4EXP AND B70_TP)
   if(B70_MTP)
     list(APPEND _tpw_m 2 3 4)
   endif()
-  set(_tpw_kernels)
+  # PERF-109: at the S4 split, and the S2 split's plain gemv as the judged control (--bench: the S2 fused pair and one
+  # card's S4 gemv against the new)
+  set(_tpw_kernels kernel_gemv_M1_K3072_N2560_S2_L0_TP kernel_tp_cross_M1_K2560_G20_S2_X_R0_sum_W64
+    kernel_tp_cross_M1_K2560_G20_S2_X_R1_sum_W64 kernel_gemv_M1_K6144_N2560_S8_L0)
   foreach(MM IN LISTS _tpw_m)
-    list(APPEND _tpw_kernels kernel_gemv_M${MM}_K3072_N2560_S2_L0 kernel_gemv_M${MM}_K3072_N2560_S2_L0_TP)
+    list(APPEND _tpw_kernels kernel_gemv_M${MM}_K3072_N2560_S4_L0 kernel_gemv_M${MM}_K3072_N2560_S4_L0_TP
+      kernel_gemv_M${MM}_K3072_N2560_S2_L0)
     foreach(R 0 1)
-      list(APPEND _tpw_kernels kernel_tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum kernel_tp_cross_M${MM}_K2560_G20_S2_X_R${R}_sum_W64)
+      list(APPEND _tpw_kernels kernel_tp_cross_M${MM}_K2560_G20_S4_X_R${R}_sum kernel_tp_cross_M${MM}_K2560_G20_S4_X_R${R}_sum_W64)
     endforeach()
   endforeach()
   add_executable(qwen4exp_tp_wire_test kernels/qwen4exp_tp_wire_test.cc)
@@ -3586,6 +3686,9 @@ if(B70_Q4EXP AND B70_TP)
   target_link_libraries(qwen4exp_tp_wire_test PRIVATE b70_l0 b70_model)
   b70_target_kernel_dir(qwen4exp_tp_wire_test)
   add_dependencies(qwen4exp_tp_wire_test ${_tpw_kernels})
+  if(TARGET kernel_gemv_M1_K6144_N2560_S4_L0)   # Kolibri's o_proj: --bench's one-card S4 control
+    add_dependencies(qwen4exp_tp_wire_test kernel_gemv_M1_K6144_N2560_S4_L0)
+  endif()
   add_test(NAME qwen4exp_tp_wire_test COMMAND qwen4exp_tp_wire_test ${_tpw_m})
   set_tests_properties(qwen4exp_tp_wire_test PROPERTIES LABELS "qwen4exp;tp" SKIP_RETURN_CODE 77 TIMEOUT 600)
 endif()
@@ -3627,6 +3730,26 @@ target_include_directories(qwen4exp_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/sr
 target_link_libraries(qwen4exp_snapshot_test PRIVATE b70_qwen4exp_plan)
 add_test(NAME qwen4exp_snapshot_test COMMAND qwen4exp_snapshot_test)
 set_tests_properties(qwen4exp_snapshot_test PROPERTIES LABELS qwen4exp TIMEOUT 300)
+# Spec 39 Task 1: runtime/gpu_state.h - the rules and walks on a fixture, Flash-Next's reflected sums against the
+# hand-written ones. Host only. Then the two builds that must fail (excluded from all; each test builds its target and
+# passes on the refusal's text): a sizes member without an annotation, a buffer without a sizes member.
+add_executable(gpu_state_test runtime/gpu_state_test.cc)
+target_include_directories(gpu_state_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(gpu_state_test PRIVATE b70_qwen4exp_plan)
+add_test(NAME gpu_state_test COMMAND gpu_state_test)
+set_tests_properties(gpu_state_test PROPERTIES LABELS qwen4exp)
+foreach(_case unannotated unplanned)
+  string(TOUPPER ${_case} _CASE)
+  add_library(gpu_state_fail_${_case} OBJECT EXCLUDE_FROM_ALL runtime/gpu_state_fail.cc)
+  target_include_directories(gpu_state_fail_${_case} PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_compile_definitions(gpu_state_fail_${_case} PRIVATE GPU_STATE_FAIL_${_CASE})
+  add_test(NAME gpu_state_${_case}_test
+           COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target gpu_state_fail_${_case})
+endforeach()
+set_tests_properties(gpu_state_unannotated_test PROPERTIES LABELS qwen4exp
+                     PASS_REGULAR_EXPRESSION "Sizes::idx_q4 has no GPU state annotation")
+set_tests_properties(gpu_state_unplanned_test PROPERTIES LABELS qwen4exp
+                     PASS_REGULAR_EXPRESSION "Bufs::idx_q4 is a buffer without exactly one sizes member")
 # On the card (box only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_snapshot_gpu_test - restores at
 # the block ends 2048 / 4096 bitwise the cold run, at the request ends 2049..2052 (the QSA cut), 5000 and 1 bitwise the
 # session that never left; one card, two (pp2:2), and `cross` (a two-card snapshot continues on one card and the
@@ -3672,17 +3795,17 @@ if(B70_Q4EXP AND B70_MTP)
       kernel_q4_mtp_M${MM}_SINGLE kernel_q4_mtp_M${MM}_STREAM)
     if(NOT MM EQUAL 1)
       list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N16384_S1_L0 kernel_gemv_M${MM}_K2560_N13312_S2_L0
-        kernel_gemv_M${MM}_K6144_N2560_S4_L0 kernel_gemv_bf16_M${MM}_K2560_N16384 kernel_gemv_bf16_M${MM}_K2560_N13312
+        kernel_gemv_M${MM}_K6144_N2560_S8_L0 kernel_gemv_bf16_M${MM}_K2560_N16384 kernel_gemv_bf16_M${MM}_K2560_N13312
         kernel_gemv_bf16_M${MM}_K6144_N2560 kernel_gemv_bf16_M${MM}_K2560_N128_C16_S16
         kernel_gemv_bf16_M${MM}_K10240_N336_C16_S16 kernel_gemv_bf16_M${MM}_K10240_N320_C16_S16
         kernel_gemv_bf16_M${MM}_K2560_N640_C16_S16 kernel_gemv_bf16_M${MM}_K2560_N528_C16_S16
         kernel_gemv_bf16_M${MM}_K2560_N12800 kernel_gemv_bf16_M${MM}_K2560_N248320 kernel_gemv_i8w_M${MM}_K2560_N248320
         kernel_embed_gather_M${MM}_D2560 kernel_prep_gated_head_M${MM}_SIG kernel_attn_prep_M${MM}_Q24KV2
         kernel_attn_prep_M${MM}_Q24KV2_S1 kernel_q4_hc_combine_norm_M${MM}_E kernel_q4_hc_combine_norm_M${MM}_S1
-        kernel_q4_hc_combine_norm_M${MM}_S4 kernel_q4_hc_combine_norm_M${MM}_Y kernel_q4_hc_combine_norm_M${MM}_Y_NN
-        kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I kernel_q4_hc_up_mix_M${MM}
-        kernel_q4_hc_up_mix_M${MM}_I_Q8 kernel_q4_hc_up_mix_M${MM}_Q8 kernel_q4_hc_down_i8_M${MM}_N336_KS16
-        kernel_q4_hc_down_i8_M${MM}_N320_KS16
+        kernel_q4_hc_combine_norm_M${MM}_S8 kernel_q4_hc_combine_norm_M${MM}_Y kernel_q4_hc_combine_norm_M${MM}_Y_NN
+        kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I_B kernel_q4_hc_up_mix_M${MM}_B
+        kernel_q4_hc_up_mix_M${MM}_I_Q8_B kernel_q4_hc_up_mix_M${MM}_Q8_B
+        kernel_q4_hc_down_i8_M${MM}_N336_KS32 kernel_q4_hc_down_i8_M${MM}_N320_KS32
         kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024
         kernel_q4_qsa_attn_M${MM}_T32 kernel_q4_qsa_attn_eager_M${MM} kernel_q4_route_M${MM}_E512_T10_N528_L256
         kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_U kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_U
@@ -3697,7 +3820,7 @@ if(B70_Q4EXP AND B70_MTP)
   # above stay bound under the tests' override (CaptureOptions::force_linear).
   foreach(MM 2 3 4)
     list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gemm_sm_M${MM}_K2560_N16384_S1_L0_mg kernel_gemm_sm_M${MM}_K2560_N13312_S2_L0_mg
-      kernel_gemm_sm_M${MM}_K6144_N2560_S4_L0_mg kernel_gemm_sm_i8w_M${MM}_K2560_N248320_wg)
+      kernel_gemm_sm_M${MM}_K6144_N2560_S8_L0_mg kernel_gemm_sm_i8w_M${MM}_K2560_N248320_wg)
   endforeach()
   set(_q4mtp_reused ${B70_Q4EXP_DECODE_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} kernel_argmax_stage1_M2
     kernel_argmax_stage1_M3 kernel_argmax_stage1_M4 kernel_draft_prob_N248320_U248077 ${_q4moe_per_row})
@@ -3797,13 +3920,13 @@ if(B70_Q4EXP AND B70_MTP)
       list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gdn_step_defer_M${MM}_GK8V24_G1)
       if(NOT MM EQUAL 1)
         list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N8192_S1_L0 kernel_gemv_M${MM}_K2560_N6656_S2_L0
-          kernel_gemv_M${MM}_K3072_N2560_S2_L0_TP kernel_gemv_i8w_M${MM}_K2560_N124160 kernel_prep_gated_head_M${MM}_GK8V24_SIG
+          kernel_gemv_M${MM}_K3072_N2560_S4_L0_TP kernel_gemv_i8w_M${MM}_K2560_N124160 kernel_prep_gated_head_M${MM}_GK8V24_SIG
           kernel_attn_prep_M${MM}_Q12KV1 kernel_q4_qsa_attn_M${MM}_T32_Q12KV1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0_U kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1_U
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R0_U kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R1_U
-          kernel_tp_cross_M${MM}_K2560_G20_S2_X_R0_sum_W64 kernel_tp_cross_M${MM}_K2560_G20_S2_X_R1_sum_W64
+          kernel_tp_cross_M${MM}_K2560_G20_S4_X_R0_sum_W64 kernel_tp_cross_M${MM}_K2560_G20_S4_X_R1_sum_W64
           kernel_tp_argmax_M${MM}_N124160_U124160_B0 kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
       endif()
     endforeach()

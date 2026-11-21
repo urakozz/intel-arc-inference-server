@@ -3,10 +3,12 @@
 // a function of the ids it covers (KV of position p: the ids' hash up to p; the state at
 // e: the hash up to e), so a plan's runs and state can be checked against the prompt: a
 // wrong hit, a snapshot without its blocks, or a freed entry shows as a mismatch.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <random>
 #include <vector>
@@ -357,7 +359,7 @@ void test_stress() {
 
 // r34.serve (2026-11-04): an engine whose save_kv writes more than n x kv_bytes(1) for n positions -
 // Qwen3.8-Flash-Next's blocks carry one compressed indexer key every 4 positions - gets entries sized by
-// its own kv_bytes(n): a block kv_bytes(block), a snapshot state + kv_bytes(end - base). Sized by
+// its own kv_bytes(n): a block kv_bytes(block), a snapshot its state and kv_bytes(end - base) (two allocations). Sized by
 // kv_bytes(1) x n every entry was short and save_kv overran it into the next allocation.
 void test_kv_bytes_fn() {
   MallocAlloc m;
@@ -373,7 +375,13 @@ void test_kv_bytes_fn() {
   CHECK_EQ(s.kv.size(), size_t(1));
   c.commit(s);
   CHECK_EQ(c.bytes_used(), 2 * kv(8) + 2 * kState + kv(3));
-  for (const auto& [p, n] : m.live) CHECK(n == kv(8) || n == kState || n == kState + kv(3));
+  // Every allocation: the two blocks, the two snapshots' states, and the snapshot at 19's tail on its own.
+  std::vector<size_t> sizes;
+  for (const auto& [p, n] : m.live) sizes.push_back(n);
+  std::sort(sizes.begin(), sizes.end());
+  std::vector<size_t> want = {kv(8), kv(8), kState, kState, kv(3)};
+  std::sort(want.begin(), want.end());
+  CHECK(sizes == want);
   c.release();
   std::printf("  kv_bytes(n): entries sized by the engine's own function (blocks %zu B, not %zu)\n", kv(8), 8 * kv(1));
 }
@@ -475,7 +483,110 @@ void test_tail() {
   std::printf("mixed chunks (open-work 18): restarts a block apart over the tail, two before it\n");
 }
 
+// Spec 31: keep() holds an evicted session's blocks and snapshot against eviction until unkeep(); release() leaves
+// them held; a session the store lacks gives no handle.
+void test_keep() {
+  MallocAlloc m;
+  const size_t block_bytes = kB * kKv, snap_bytes = kState + 2 * kKv;
+  PrefixCache c(2 * block_bytes + snap_bytes, kState, kKv, kB, m);
+  const Ids s1 = seq(10, 10);
+  store(c, s1, 10);                                  // blocks 0, 1 + a snapshot at 10: the whole budget
+  c.release();
+  CHECK_EQ(c.bytes_used(), c.budget());
+  const uint64_t h = c.keep(s1, 10);
+  CHECK(h != 0);
+  CHECK_EQ(c.keep(seq(10, 9000), 10), uint64_t(0));  // nothing stored for it
+  const PrefixCache::Slot blocked = c.reserve(seq(8, 7000), 4, true);
+  CHECK(blocked.empty());                            // every entry is held
+  c.release();
+  auto p = c.plan(cat(s1, {1}), {}, false);
+  CHECK(p.kind == PrefixCache::Plan::Restore && p.restart == 10);
+  check_plan(p, cat(s1, {1}));
+  c.release();
+  c.unkeep(h);
+  c.unkeep(h);                                       // a second unkeep does nothing
+  const PrefixCache::Slot freed = c.reserve(seq(8, 7000), 4, true);
+  CHECK(!freed.empty());
+  c.commit(freed);
+  c.release();
+  std::printf("keep: an evicted session's entries held until unkeep OK\n");
+}
+
+// b70-serve's pinned store (cli/serve_adapters.h, PinnedAlloc): first fit over 2 GiB pieces in 64 KiB units, a free
+// joining its neighbours inside a piece. Offsets only - the store never writes through its pointers.
+struct PieceAlloc : server::HostAlloc {
+  static constexpr size_t kUnit = size_t(64) << 10, kPiece = size_t(2) << 30, kStride = kPiece + kUnit;
+  static constexpr uintptr_t kBase = 0x100000;
+  std::map<size_t, size_t> free_;
+  explicit PieceAlloc(size_t bytes) {
+    size_t i = 0;
+    for (size_t left = bytes / kUnit * kUnit; left > 0; ++i) {
+      const size_t n = std::min(left, kPiece);
+      free_[i * kStride] = n;
+      left -= n;
+    }
+  }
+  void* alloc(size_t bytes) override {
+    const size_t n = (bytes + kUnit - 1) / kUnit * kUnit;
+    for (auto it = free_.begin(); it != free_.end(); ++it) {
+      if (it->second < n) continue;
+      const size_t off = it->first, len = it->second;
+      free_.erase(it);
+      if (len > n) free_[off + n] = len - n;
+      return reinterpret_cast<void*>(kBase + off);
+    }
+    return nullptr;
+  }
+  void free(void* p, size_t bytes) override {
+    size_t off = reinterpret_cast<uintptr_t>(p) - kBase, len = (bytes + kUnit - 1) / kUnit * kUnit;
+    auto next = free_.lower_bound(off);
+    if (next != free_.end() && next->first == off + len) {
+      len += next->second;
+      next = free_.erase(next);
+    }
+    if (next != free_.begin()) {
+      auto prev = std::prev(next);
+      if (prev->first + prev->second == off) {
+        off = prev->first;
+        len += prev->second;
+        free_.erase(prev);
+      }
+    }
+    free_[off] = len;
+  }
+};
+
+// A long prompt in the server's pinned store, at Qwen3.8's sizes (bf16 KV with the MTP head's layer: 69,632 B a
+// position, 142.6 MB a 2048-position block; the state 182.5 MB): a snapshot at every block end as the slots server
+// stores them, then the prompt end and the request end. The store keeps the request-end snapshot - before the
+// snapshot's state and tail were two allocations, the pieces held no hole for their sum after the churn and the
+// store lost every snapshot, keeping only the blocks (b70-serve, a 123,110-id prompt, 16 GiB).
+void test_pinned_pieces() {
+  constexpr uint32_t kBlk = 2048, kPrompt = 123110, kEnd = 123174;
+  constexpr size_t kPos = 69632, kSt = size_t(150994944) + 31457280 + 10240, kBudget = size_t(16) << 30;
+  PieceAlloc m(kBudget);
+  PrefixCache c(kBudget, kSt, PrefixCache::KvBytesFn([](uint32_t n) { return size_t(n) * kPos; }), kBlk, m);
+  const Ids s = seq(kEnd, 77);
+  const auto store_at = [&](uint32_t end) {
+    const PrefixCache::Slot r = c.reserve(s, end, end % kBlk == 0);
+    c.commit(r);
+    c.release();
+  };
+  for (uint32_t e = kBlk; e < kPrompt; e += kBlk) store_at(e);
+  store_at(kPrompt);
+  store_at(kEnd);
+  CHECK(c.bytes_used() <= c.budget());
+  const PrefixCache::Plan p = c.plan(cat(s, {1}), {}, false);
+  CHECK(p.kind == PrefixCache::Plan::Restore);
+  CHECK_EQ(p.restart, kEnd);
+  c.release();
+  std::printf("pinned pieces: a %u-id session at Qwen3.8's sizes restores to its request end (%zu entries, %.2f of "
+              "%.2f GB) OK\n", kEnd, c.entries(), c.bytes_used() / 1e9, c.budget() / 1e9);
+}
+
 int main() {
+  test_keep();
+  test_pinned_pieces();
   test_tail();
   test_wide_chunks();
   test_plans();

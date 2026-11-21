@@ -19,6 +19,8 @@
 //      pages (runtime::slots_kv_len; plan_slots at it, the page table's u32 a page in SlotDims), one slot exactly its
 //      length; the auto layouts at 1 / 2 / 4 slots, bf16 and int8 (printed with their pages), lose less than one page
 //      a slot to the rounding; BatchLayout's KV bases are page boundaries.
+//   5. spec 31, the KV page pool (plan_pool, pool_that_fits): check_pool's comment.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -80,8 +82,8 @@ void check_decided_layout() {
   CHECK_EQ(ctl, size_t{10} * 768 + 3 * 256);   // Control 768 B (spec 32)
   const size_t pages = size_t(229376 / runtime::kKvPage) * 4;   // plan 19v3b Task 0: the page table, 112 pages
   CHECK_EQ(runtime::SlotDims::sizes(q, 4, true, 112).pages, pages);
-  // spec 32: one sequence carries the deferred GDN rows (MtpSizes::deep), several do not
-  const size_t deep = runtime::MtpDims::sizes(131072, q, 0, KvCache::Int8).deep;
+  // spec 32: one sequence carries the deferred GDN rows (EngineSizes::gdn_pend), several do not
+  const size_t deep = runtime::EngineDims::sizes(q, KvCache::Int8, 0, 1, true, false).gdn_pend;
   CHECK_EQ(p.total(), size_t(int64_t(b.total() + rope + ctl + pages - deep) + hh));
   // 3e sized the widening scratch at the sum: 384 MiB (98304 positions x 4 KiB) more than the longest slot needs.
   CHECK_EQ(runtime::plan(q, 229376, true, kQwenInt8Weights + kMtpWeights, {}, {}, KvCache::Int8).prefill_lazy -
@@ -89,7 +91,9 @@ void check_decided_layout() {
            size_t{402653184});
   CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
-  CHECK_EQ(p.slot_state, size_t(int64_t(size_t{3} * (4 * size_t{150994944} + 31457280) + ctl + pages - deep) + hh));
+  // (spec 39: the deferred rows leave plan()'s `deep`, not the slots' state)
+  CHECK_EQ(p.slot_state, size_t(int64_t(size_t{3} * (4 * size_t{150994944} + 31457280) + ctl + pages) + hh));
+  CHECK_EQ(p.deep, size_t{0});
   // §9.1: "total 29.10 GB, 1.93 GB spare" (l0-int8); on the l0 default 0.087 GB less (batch_rows_test's 29.01).
   // + the a||b's dense GEMM slabs (0.126 GB).
   CHECK_NEAR(p.total() / kGB,
@@ -203,6 +207,91 @@ void check_pages() {
                   seqs > 1 ? std::to_string(total / P).c_str() : "-", lost);
     }
 }
+// Spec 31 (plan 31 Task 4): the KV page pool. The pool at the fixed slots' pages differs from plan_slots only by the
+// page table (a cap-long table a sequence); the pool that fits uses the
+// card as fully as the fixed slots, less one page a request and the cap-sized scratch; the sizes at 2 / 3 / 4
+// requests, bf16 and int8, are printed (the startup lines' numbers).
+void check_pool() {
+  const model::ModelDesc& q = model::qwen38();
+  const size_t w = kQwenInt8Weights + kMtpWeights;
+  constexpr uint32_t kTrained = 262144, P = runtime::kKvPage;
+  const std::vector<uint32_t> lens{131072, 32768, 32768, 32768};
+  for (KvCache kv : {KvCache::Bf16, KvCache::Int8}) {
+    const runtime::PoolShape s{4, 112, 131072};
+    CHECK_EQ(runtime::pool_table_pages(s), 4u * 64);
+    const runtime::MemoryPlan pool = runtime::plan_pool(q, s, true, w, {}, kv);
+    const runtime::MemoryPlan fixed = runtime::plan_slots(q, lens, true, w, {}, {}, kv);
+    CHECK_EQ(pool.max_len, 229376u);
+    CHECK_EQ(pool.kv, fixed.kv);
+    CHECK_EQ(pool.pool_pages, 112u);
+    CHECK(pool.slot_lens == (std::vector<uint32_t>(4, 131072)));
+    CHECK_EQ(pool.total(), fixed.total() + size_t(4 * 64 - 112) * 4);   // the longer page table only
+  }
+  // A page's bytes: every full-attention layer's and the MTP head's.
+  const auto kv_bytes = [&](uint64_t positions, KvCache kv) {
+    const runtime::PersistentSizes ps = runtime::PersistentDims::sizes(uint32_t(positions), q, kv);
+    return ps.kv_k + ps.kv_v + 2 * runtime::MtpDims::sizes(uint32_t(positions), q, 0, kv).kv_k;
+  };
+  std::printf("| --max-num-seqs | KV | pool (MTP, --max-len auto) | one request up to | fixed slots | total GB | "
+              "spare GB |\n");
+  for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
+    for (uint32_t seqs = 2; seqs <= runtime::SlotDims::kMaxSeqs; ++seqs) {
+      const runtime::PoolShape s = runtime::pool_that_fits(q, seqs, true, w, kDevice, kReserve, kTrained, {}, kv);
+      CHECK(s.seqs == seqs && s.pages != 0);
+      CHECK_EQ(s.cap, std::min<uint32_t>(s.pages * P, kTrained));
+      const runtime::MemoryPlan p = runtime::plan_pool(q, s, true, w, {}, kv);
+      CHECK(p.total() + kReserve <= kDevice);
+      if (s.pages < seqs * (kTrained / P)) {   // one page more does not fit
+        const runtime::PoolShape more{seqs, s.pages + 1, std::min<uint32_t>((s.pages + 1) * P, kTrained)};
+        CHECK(runtime::plan_pool(q, more, true, w, {}, kv).total() + kReserve > kDevice);
+      }
+      // As full as the fixed slots: the pool's positions are not below their sum less one page a request and the
+      // positions the pool's further cap-sized terms (the widening rows, the page table) take.
+      const std::vector<uint32_t> l =
+          runtime::slot_layout(runtime::slot0_len_that_fits(q, seqs, true, w, kDevice, kReserve, kTrained, {}, kv), seqs);
+      const runtime::MemoryPlan f = runtime::plan_slots(q, l, true, w, {}, {}, kv);
+      const size_t page = kv_bytes(P, kv);
+      const int64_t more_scratch = int64_t(p.total() - kv_bytes(s.positions(), kv)) - int64_t(f.total() - kv_bytes(f.max_len, kv));
+      const uint64_t scratch_pages = more_scratch > 0 ? (uint64_t(more_scratch) + page - 1) / page : 0;
+      CHECK(s.positions() + uint64_t(seqs) * P + scratch_pages * P >= runtime::slots_kv_len(l));
+      const double t = p.total() / kGB;
+      std::printf("| %u | %s | %u pages of %u = %llu positions | %u | %s = %u | %.3f | %.3f |\n", seqs,
+                  runtime::kv_cache_name(kv), s.pages, P, static_cast<unsigned long long>(s.positions()), s.cap,
+                  runtime::slot_layout_name(l).c_str(), runtime::slots_kv_len(l), t, double(kDevice - kReserve) / kGB - t);
+    }
+  // One request plans byte for byte what plan() plans (the MTP deep term at one sequence, no draft vocabulary): the
+  // pool never reaches --max-num-seqs 1.
+  for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
+    for (const uint32_t L : {65536u, 262144u}) {
+      const runtime::MemoryPlan one = runtime::plan_slots(q, {L}, true, w, {}, {}, kv);
+      const runtime::MemoryPlan ref = runtime::plan(q, L, true, w, {}, {}, kv);
+      CHECK_EQ(one.total(), ref.total());
+      CHECK_EQ(one.mtp_buffers, ref.mtp_buffers);
+      CHECK(one.slot_lens.empty() && one.pool_pages == 0);
+    }
+  // The startup breakdown names the pool.
+  const std::string line = runtime::describe(runtime::plan_pool(q, {4, 70, 143360}, true, w, {}, KvCache::Bf16), kDevice,
+                                             kReserve);
+  CHECK(line.find("4 requests sharing a KV pool of 70 pages of 2048, one up to 143360") != std::string::npos);
+  // Refusals: one sequence (plan() itself), five, a cap off the grid or past the pool; a limit below one quantum.
+  const auto throws = [](auto f) {
+    try {
+      f();
+    } catch (const std::invalid_argument&) {
+      return true;
+    }
+    return false;
+  };
+  CHECK(throws([&] { runtime::plan_pool(q, {1, 64, 131072}, true, w); }));
+  CHECK(throws([&] { runtime::plan_pool(q, {5, 64, 131072}, true, w); }));
+  CHECK(throws([&] { runtime::plan_pool(q, {4, 64, 131000}, true, w); }));
+  CHECK(throws([&] { runtime::plan_pool(q, {4, 64, 131072 + 256}, true, w); }));
+  CHECK(throws([&] { runtime::pool_that_fits(q, 4, true, w, kDevice, kReserve, 255); }));
+  // An explicit --max-len caps a request: the pool stops at seqs requests of it.
+  const runtime::PoolShape capped = runtime::pool_that_fits(q, 2, true, w, kDevice, kReserve, 32768, {}, KvCache::Int8);
+  CHECK_EQ(capped.cap, 32768u);
+  CHECK_EQ(capped.pages, 2u * 16);
+}
 }  // namespace
 
 int main() {
@@ -210,6 +299,7 @@ int main() {
   check_decided_layout();
   check_layout_rule();
   check_pages();
+  check_pool();
   std::printf("slot_plan_test OK\n");
   return 0;
 }

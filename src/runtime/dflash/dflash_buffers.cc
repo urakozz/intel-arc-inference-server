@@ -9,6 +9,13 @@ namespace runtime::dflash {
 
 namespace {
 l0::Mem dev(l0::Context& ctx, size_t bytes) { return l0::Mem(ctx, l0::MemKind::Device, bytes); }
+// A zero_on_reset buffer's fill: shared memory from the host, device memory on the list.
+void fill(l0::CmdList& imm, l0::Mem& m) {
+  if (m.kind() == l0::MemKind::Shared)
+    std::memset(m.ptr(), 0, m.size());
+  else
+    imm.fill(m.ptr(), 0u, m.size());
+}
 }  // namespace
 
 DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint32_t th, uint32_t rows, uint32_t ml,
@@ -57,23 +64,21 @@ DFlashSession::DFlashSession(l0::Context& ctx, const DFlashSizes& sz)
   zero(imm);
 }
 
-size_t DFlashSession::bytes() const { return dctl.size() + out.size() + ring_k.size() + ring_v.size() + taps.size(); }
+size_t DFlashSession::bytes() const { return gs::buffer_bytes<l0::Mem, SessionSizes>(*this); }
 
 void DFlashSession::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&ring_k, &ring_v, &taps}) imm.fill(m->ptr(), 0u, m->size());
-  std::memset(dctl.ptr(), 0, dctl.size());
-  std::memset(out.ptr(), 0, out.size());
+  gs::zero<l0::Mem, SessionSizes>(*this, [&](l0::Mem& m) { fill(imm, m); });
 }
 
 void DFlashBuffers::add_sessions(l0::Context& ctx, uint32_t n) {
   while (sessions.size() + 1 < n) sessions.push_back(std::make_unique<DFlashSession>(ctx, sz));
   if (n > 1 && !seqs) {
-    const size_t t = (kernels::dflash::kM + 8 * kernels::dflash::kSeqs) * 4;
-    seqs = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, t);
-    proj_seqs = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, t);
-    rows_taps = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.taps);
-    std::memset(seqs->ptr(), 0, t);
-    std::memset(proj_seqs->ptr(), 0, t);
+    const RowsSizes r = rows_sizes(sz, n);
+    seqs = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, r.seqs);
+    proj_seqs = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, r.proj_seqs);
+    rows_taps = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, r.rows_taps);
+    std::memset(seqs->ptr(), 0, r.seqs);
+    std::memset(proj_seqs->ptr(), 0, r.proj_seqs);
     l0::CmdList imm = l0::CmdList::immediate(ctx);
     imm.fill(rows_taps->ptr(), 0u, rows_taps->size());
   }
@@ -86,34 +91,21 @@ DFlashBuffers::Session DFlashBuffers::session(uint32_t s) {
 }
 
 void DFlashBuffers::zero_session(l0::CmdList& imm, uint32_t s) {
-  const Session x = session(s);
-  for (l0::Mem* m : {x.ring_k, x.ring_v, x.taps}) imm.fill(m->ptr(), 0u, m->size());
-  std::memset(x.dctl->ptr(), 0, x.dctl->size());
-  std::memset(x.out->ptr(), 0, x.out->size());
+  if (s == 0)
+    gs::zero<l0::Mem, SessionSizes>(*this, [&](l0::Mem& m) { fill(imm, m); });
+  else
+    sessions.at(s - 1)->zero(imm);
 }
 
 size_t DFlashBuffers::bytes() const {
-  size_t b = 0;
-  for (const l0::Mem* m : {&dctl, &out, &rope, &ring_k, &ring_v, &taps, &resid, &h, &x, &xa, &gout, &q, &kb, &vb,
-                           &part, &kv, &logits, &tpart, &cand, &unary})
-    b += m->size();
-  if (co) b += co->size();
-  if (hid) b += hid->size();
-  if (candidate) b += candidate->size();
+  size_t b = gs::buffer_bytes<l0::Mem, SessionSizes, DFlashSizes, RowsSizes>(*this);
   for (const auto& s : sessions) b += s->bytes();
-  if (seqs) b += seqs->size() + proj_seqs->size() + rows_taps->size();
   return b;
 }
 
+// Every zero_on_reset buffer: the first session's and the draft list's scratch (not the RoPE table, a constant).
 void DFlashBuffers::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&ring_k, &ring_v, &taps, &resid, &h, &x, &xa, &gout, &q, &kb, &vb, &part, &kv, &logits, &tpart,
-                     &cand, &unary})
-    imm.fill(m->ptr(), 0u, m->size());
-  if (co) imm.fill(co->ptr(), 0u, co->size());
-  if (hid) imm.fill(hid->ptr(), 0u, hid->size());
-  if (candidate) imm.fill(candidate->ptr(), 0u, candidate->size());
-  std::memset(dctl.ptr(), 0, dctl.size());
-  std::memset(out.ptr(), 0, out.size());
+  gs::zero<l0::Mem, SessionSizes, DFlashSizes, RowsSizes>(*this, [&](l0::Mem& m) { fill(imm, m); });
 }
 
 }  // namespace runtime::dflash

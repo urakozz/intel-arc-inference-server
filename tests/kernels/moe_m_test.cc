@@ -9,10 +9,11 @@
 //
 //   1. M rows with distinct logits (one row with exact ties at the top-8 boundary, one with
 //      every row's x different): the route rows, h and the folded resid of row m of
-//      moe_M<M> == moe_M1 run on row m alone, for M = 2, 3, 4;
+//      moe_M<M> == moe_M1 run on row m alone, for M = 2, 3, 4 and (PERF-56: the wide lookup
+//      verify lists) 16, 32, 64;
 //   2. the rows reversed inside the launch: each row's bits are unchanged (a row's result
 //      does not depend on its neighbours or its position);
-//   3. the MoE scratch's own rows (kM = 8 per layer slot, runtime::moe_scratch_layout) are
+//   3. the MoE scratch's own rows (kDeepM = 64 per layer slot, runtime::moe_scratch_layout) are
 //      where capture binds an M-row launch: the strides used here are its.
 #include <cstdint>
 #include <cstdio>
@@ -125,7 +126,8 @@ int main() {
   l0::Mem gub = d.upload(gu.data(), gu.size() * 4), dnb = d.upload(dn.data(), dn.size() * 4);
   std::mt19937 rng(1505);
   std::uniform_real_distribution<float> ld(-3.f, 3.f), xd(-0.1f, 0.1f), rd(-2.f, 2.f);
-  const uint32_t kMax = 4, LW = kS.router_n, RW = moe_ref::kWords, HW = kS.slots() * kS.inter;
+  // PERF-56: the wide lookup verify lists' 16 / 32 / 64 rows beside the MTP lists' 2..4
+  const uint32_t kMax = 64, LW = kS.router_n, RW = moe_ref::kWords, HW = kS.slots() * kS.inter;
   std::vector<float> logits(size_t(kMax) * LW);
   for (float& v : logits) v = ld(rng);
   // Row 1: exact ties across the top-8 boundary (the lower ids taken, per row).
@@ -139,7 +141,7 @@ int main() {
   for (uint32_t m = 0; m < kMax; ++m)
     one.push_back(run(d, 1, row_of(logits, LW, m), row_of(x, kS.hidden, m),
                       row_of(resid, kS.hidden, m), gub, dnb));
-  for (uint32_t M = 2; M <= kMax; ++M) {
+  for (uint32_t M : {2u, 3u, 4u, 16u, 32u, 64u}) {
     for (bool reversed : {false, true}) {
       std::vector<float> lg;
       std::vector<uint16_t> xs, rs;

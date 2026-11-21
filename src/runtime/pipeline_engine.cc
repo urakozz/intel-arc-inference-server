@@ -38,10 +38,12 @@ StageLink PipelineLink::binding() const {
   return s;
 }
 
-size_t PipelineLink::bytes(uint32_t device) const { return device == 0 ? 0 : landing.size(); }
+size_t PipelineLink::bytes(uint32_t device) const {
+  return device == 0 ? 0 : gs::buffer_bytes<l0::Mem, LinkSizes>(*this);   // device 1's
+}
 
 void PipelineLink::zero(l0::CmdList& imm1) {
-  imm1.fill(landing.ptr(), 0u, landing.size());
+  gs::zero<l0::Mem, LinkSizes>(*this, [&](l0::Mem& m) { imm1.fill(m.ptr(), 0u, m.size()); });
   event->host_reset();
 }
 
@@ -206,7 +208,7 @@ void PipelineEngine::reset() {
   // Spec 16d: and the MTP state (Engine::reset's mtp_->zero), on both devices.
   if (st(1).mtp) st(1).mtp->zero(st(1).imm);
   for (uint32_t d = 0; d < kPpDevices; ++d)   // spec 19d: device 1 holds its own slots with a drafter
-    if (st(d).gdn_spec) st(d).imm.fill(st(d).gdn_spec->ptr(), 0u, st(d).gdn_spec->size());
+    gs::zero<l0::Mem, StageSizes>(st(d), [&](l0::Mem& m) { st(d).imm.fill(m.ptr(), 0u, m.size()); });
   if (drafter_) drafter_->reset(st(1).imm);   // a cold drafter
   verify_k_ = kNoVerify;
   draft_ids_.clear();
@@ -745,6 +747,10 @@ void PipelineEngine::mtp_before_prefill() {
 }
 
 MemoryComponents PipelineEngine::memory_use(uint32_t dev) const {
+  static_assert(gs::buffers_problem<l0::Mem, PipelineEngine>().empty(), gs::buffers_problem<l0::Mem, PipelineEngine>());
+  // Spec 39 (here: Stage is private to the engine): its own allocations are StageSizes', one of each name.
+  static_assert(gs::buffers_problem<l0::Mem, Stage, StageSizes>().empty(),
+                gs::buffers_problem<l0::Mem, Stage, StageSizes>());
   const Stage& s = st(dev);
   MemoryComponents c;
   c.model = model_device_bytes(s.model);
@@ -752,7 +758,7 @@ MemoryComponents PipelineEngine::memory_use(uint32_t dev) const {
   c.decode_state = s.persist.bytes() - c.kv + s.scratch.bytes() + link_->bytes(dev);
   // Spec 16d: the MTP state (device 1's MtpBuffers, device 0's verify slots) is decode
   // state, the draft vocabulary its own term - Engine::memory_use's split, per device.
-  c.decode_state += (s.mtp ? s.mtp->bytes() : 0) + (s.gdn_spec ? s.gdn_spec->size() : 0);
+  c.decode_state += (s.mtp ? s.mtp->bytes() : 0) + gs::buffer_bytes<l0::Mem, StageSizes>(s);
   if (dev == kPpDevices - 1 && drafter_) c.drafter = drafter_->bytes();   // spec 19d
   if (s.model.draft_vocab) {
     c.draft_vocab = s.model.draft_vocab->bytes();

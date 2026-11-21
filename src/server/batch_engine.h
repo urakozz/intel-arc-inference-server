@@ -174,6 +174,18 @@ struct BatchEngineIface {
       throw std::logic_error("BatchEngineIface::truncate_to: no speculative run to shorten on this engine");
   }
 
+  // Spec 31: an engine whose slots share one pool of KV pages, each page block() positions (kv_pool_pages() > 0; 0 =
+  // fixed slot lengths, every engine before). slot_max_len is then the per-request cap, the same for every slot. A
+  // slot holds pages_held(slot) pages; take_pages(slot, upto) makes them cover positions [0, upto) - false, and
+  // nothing changed, when the free pages do not. reset(slot) gives all of the slot's pages back (an idle session
+  // evicted: its next request restarts from the prefix cache); a restore takes the pages it fills (cli::SlotsEngine's
+  // engine in load_kv, the mock in load_state).
+  // The scheduler takes the pages a prefill or a step writes before it calls it.
+  virtual uint32_t kv_pool_pages() { return 0; }
+  virtual uint32_t pages_free() { return 0; }
+  virtual uint32_t pages_held(uint32_t /*slot*/) { return 0; }
+  virtual bool take_pages(uint32_t /*slot*/, uint32_t /*upto*/) { return true; }
+
   // Spec 7 (plan 7b's snapshot calls), per slot. The host layouts are EngineIface's: one
   // state blob of state_bytes(), KV in save_kv's layout, kv_bytes(n) for n positions.
   // Defaults throw, so an engine without them runs with the prefix cache off only.

@@ -92,6 +92,10 @@ void plan_case() {
                                                     runtime::KvCache::Bf16, dr);
   CHECK(with.draft_vocab > 0 && with.total() == without.total() + with.draft_vocab);
   CHECK(with.drafter_slots == runtime::TapVerifyDims::gdn_spec_bytes(d));
+  // Spec 39: one sequence with a drafter on Qwen3.8's shapes makes the deferred GDN rows (Engine::own_.gdn_pend) -
+  // planned now (103,022,592 B; plan() left them out before), without the head's deep chain scratch.
+  CHECK(with.deep == 2 * runtime::MtpDims::kGdnPendParity && with.deep == size_t{103022592});
+  CHECK(runtime::plan_slots(d, {32768, 32768}, false, 17'000'000'000ull, {}, {}, runtime::KvCache::Bf16, dr).deep == 0);
   const runtime::MemoryPlan decode_only = runtime::plan(d, 32768, false, 17'000'000'000ull,
                                                         runtime::PrefillPath{false}, {}, runtime::KvCache::Bf16, dr);
   CHECK(decode_only.drafter_taps == 0 && without.drafter_taps == runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));

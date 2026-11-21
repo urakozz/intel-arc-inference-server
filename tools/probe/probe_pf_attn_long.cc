@@ -13,6 +13,9 @@
 // is compared with the control's (the count of differing words and the largest ulp distance are printed).
 // Timing: L0 kernel timestamps, a 5-round warm-up, then N rounds interleaving the control and every arm; the
 // headline is the median paired ratio arm / control. PROBE-ONLY: no runtime path binds an arm.
+// Spec 38a Task 1: `pfaw*` and `pfas_wide*` arms are the WIDE form (32 rows a work-group: grid ceil(C / 32), also
+// inside --sub launches); `pfas_*` arms are skeletons (FA_SKELETON: softmax arithmetic stubbed), timed and not
+// compared.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -122,7 +125,7 @@ int main(int argc, char** argv) {
     struct Path {
       std::string name;
       l0::Kernel* k;
-      uint32_t gx, gz;
+      uint32_t gx, gz, rpw;   // grid x, grid z, rows a work-group
       std::unique_ptr<l0::Mem> out;
       std::vector<float> host;
       std::vector<double> ms, ratio;
@@ -130,7 +133,7 @@ int main(int argc, char** argv) {
     std::vector<Path> paths;
     const char* fn = kv8 ? "pf_flash_attn_kv8" : "pf_flash_attn";
     const std::string ctl = kv8 ? kernels::pf_flash_attn_kv8_raw_variant(qh, kvh) : kernels::pf_flash_attn_variant(qh, kvh);
-    paths.push_back({ctl, &kc(ctl, fn), (C + 7u) / 8u, 1, nullptr, {}, {}, {}});
+    paths.push_back({ctl, &kc(ctl, fn), (C + 7u) / 8u, 1, 8, nullptr, {}, {}, {}});
     for (size_t st = 0; st <= arms_arg.size();) {
       const size_t e = std::min(arms_arg.find(',', st), arms_arg.size());
       const std::string nm = arms_arg.substr(st, e - st) + sfx;
@@ -141,7 +144,8 @@ int main(int argc, char** argv) {
       }
       const uint32_t hpw = nm.find("_H") == std::string::npos ? kernels::kPfFlashPairHeads
                                                               : uint32_t(std::stoul(nm.substr(nm.find("_H") + 2)));
-      paths.push_back({nm, &kc(nm, fn), (C + 15u) / 16u, gqa / hpw, nullptr, {}, {}, {}});
+      const uint32_t rpw = nm.rfind("pfaw", 0) == 0 || nm.rfind("pfas_wide", 0) == 0 ? 32u : 16u;
+      paths.push_back({nm, &kc(nm, fn), (C + rpw - 1u) / rpw, gqa / hpw, rpw, nullptr, {}, {}, {}});
     }
     for (Path& p : paths) {
       p.out = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, o_elems * 4);
@@ -155,7 +159,7 @@ int main(int argc, char** argv) {
       else if (kv8)
         for (uint32_t r = 0; r < C; r += sub) {
           const uint32_t c = std::min(sub, C - r);
-          cx.launch(*p.k, (c + 15u) / 16u, kvh, p.gz,
+          cx.launch(*p.k, (c + p.rpw - 1u) / p.rpw, kvh, p.gz,
                     {PtrArg(static_cast<char*>(dq.ptr()) + size_t(r) * qh * kHD * 2), PtrArg(dk.ptr()), PtrArg(dks.ptr()),
                      PtrArg(dv.ptr()), PtrArg(dvs.ptr()), PtrArg(static_cast<char*>(p.out->ptr()) + size_t(r) * kHD * 4),
                      arg_val(pos + r), arg_val(c), arg_val(rows)});
@@ -167,7 +171,7 @@ int main(int argc, char** argv) {
       else
         for (uint32_t r = 0; r < C; r += sub) {
           const uint32_t c = std::min(sub, C - r);
-          cx.launch(*p.k, (c + 15u) / 16u, kvh, p.gz,
+          cx.launch(*p.k, (c + p.rpw - 1u) / p.rpw, kvh, p.gz,
                     {PtrArg(static_cast<char*>(dq.ptr()) + size_t(r) * qh * kHD * 2), PtrArg(dk.ptr()), PtrArg(dv.ptr()),
                      PtrArg(static_cast<char*>(p.out->ptr()) + size_t(r) * kHD * 4), arg_val(pos + r), arg_val(c),
                      arg_val(rows)});
@@ -180,6 +184,10 @@ int main(int argc, char** argv) {
       copy(ctx, p.host.data(), p.out->ptr(), o_elems * 4);
     }
     for (size_t i = 1; i < paths.size(); ++i) {
+      if (paths[i].name.rfind("pfas_", 0) == 0) {
+        std::printf("%s: skeleton arm, not compared\n", paths[i].name.c_str());
+        continue;
+      }
       size_t differ = 0;
       int64_t worst = 0;
       for (uint32_t hh = 0; hh < qh; ++hh)

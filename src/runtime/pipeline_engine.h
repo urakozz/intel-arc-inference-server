@@ -133,6 +133,8 @@ struct PipelineLink {
   // Zeroes the landing buffer; resets the event.
   void zero(l0::CmdList& imm1);   // device 1's immediate list
 };
+static_assert(gs::buffers_problem<l0::Mem, PipelineLink, LinkSizes>().empty(),
+              gs::buffers_problem<l0::Mem, PipelineLink, LinkSizes>());
 
 class PipelineEngine {
  public:
@@ -369,6 +371,7 @@ class PipelineEngine {
   TapDrafter* drafter_ = nullptr;   // spec 19d: on device 1, borrowed
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
+  [[=gs::Outside("pinned host memory: outside the device plan")]]
   std::unique_ptr<l0::Mem> host_rows_;   // host_rows(): pinned, device 1's context
   bool broken_ = false, drop_next_ = false;
   std::array<bool, kPpDevices> pending_{};   // a submitted step whose fence is not yet seen

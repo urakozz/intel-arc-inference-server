@@ -66,11 +66,11 @@ Qwen4ExpBuffers::Qwen4ExpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d,
   if (len % d.idx_compress != 0)
     throw std::invalid_argument("Qwen4ExpBuffers: max_len " + std::to_string(len) + " is not whole indexer blocks");
   if (mtp) {   // spec 21-QFN-v1e: the verify's pending GDN rows (PERF-51) and (the PLE layer's device) its PLE rows
-    gdn_pend = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, gdn_pend_bytes(d, p, dev));
+    const VerifySizes vs = verify_sizes(d, p, dev);
+    gdn_pend = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, vs.gdn_pend);
     if (holds_ple()) {
-      const size_t half = ple_verify_bytes(d, p, dev) / 2;
-      ple_gated = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, half);
-      ple_gn = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, half);
+      ple_gated = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, vs.ple_gated);
+      ple_gn = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, vs.ple_gn);
     }
   }
 }
@@ -123,30 +123,25 @@ void* Qwen4ExpBuffers::gdn_pend_layer(uint32_t layer) const {
   return static_cast<uint8_t*>(gdn_pend->ptr()) + size_t(i) * 2 * gdn_pend_layer_bytes(desc);
 }
 
-size_t Qwen4ExpBuffers::mtp_bytes() const {
-  return (gdn_pend ? gdn_pend->size() : 0) + (ple_gated ? ple_gated->size() + ple_gn->size() : 0);
-}
-
-size_t Qwen4ExpBuffers::persistent_bytes() const {
-  return control.size() + kv.size() + idx_keys.size() + idx_tail.size() + gdn_state.size() + conv_ring.size() + ple.size();
-}
-size_t Qwen4ExpBuffers::scratch_bytes() const {
-  size_t n = 0;
-  for (const l0::Mem* m : {&H, &xn, &x, &partials, &down_f32, &inj, &ab, &gdn_o, &idx_f32, &idx_q, &scores, &list, &diag,
-                           &attn_q, &attn_gate, &attn_part, &attn_out, &logits_r, &routes, &moe_h, &y, &ple_e, &ple_kv,
-                           &ple_ids, &ple_consts, &logits, &argmax_part})
-    n += m->size();
-  return n;
+size_t Qwen4ExpBuffers::bytes(gs::Group g) const {
+  return gs::buffer_bytes<l0::Mem, PersistentSizes, ScratchSizes, VerifySizes>(*this, g);
 }
 
 void Qwen4ExpBuffers::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&control, &kv, &idx_keys, &idx_tail, &gdn_state, &conv_ring, &ple}) imm.fill(m->ptr(), 0u, m->size());
+  gs::zero<l0::Mem, PersistentSizes, ScratchSizes, VerifySizes>(*this,
+                                                                [&](l0::Mem& m) { imm.fill(m.ptr(), 0u, m.size()); });
+}
+
+const l0::Mem* snap_mem(const Qwen4ExpBuffers& b, const Qwen4ExpMtpBuffers* mtp, SnapTensor t) {
+  if (const l0::Mem* m = gs::snapshot_buffer<l0::Mem, SnapTensor, PersistentSizes, ScratchSizes, VerifySizes>(b, t))
+    return m;
+  return mtp ? gs::snapshot_buffer<l0::Mem, SnapTensor, MtpSizes>(*mtp, t) : nullptr;
 }
 
 // --- spec 21-QFN-v1e: the MTP head's buffers ------------------------------------------------------------------------------
 #define Q4_MS mtp_sizes(d, len)
 Qwen4ExpMtpBuffers::Qwen4ExpMtpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t len)
-    : hctl(ctx, l0::MemKind::Shared, Q4_MS.ctl),
+    : hctl(ctx, l0::MemKind::Shared, Q4_MS.hctl),
       kv(ctx, l0::MemKind::Device, Q4_MS.kv),
       idx_keys(ctx, l0::MemKind::Device, Q4_MS.idx_keys),
       idx_tail(ctx, l0::MemKind::Device, Q4_MS.idx_tail),
@@ -167,14 +162,12 @@ Qwen4ExpMtpBuffers::Qwen4ExpMtpBuffers(l0::Context& ctx, const model::Qwen4ExpDe
 #undef Q4_MS
 
 size_t Qwen4ExpMtpBuffers::bytes() const {
-  size_t n = 0;
-  for (const l0::Mem* m : {&hctl, &kv, &idx_keys, &idx_tail, &hh, &list, &diag, &xe, &xh, &fe, &fh, &logits, &routes})
-    n += m->size();
-  return n;
+  return bytes(gs::Group::Kv) + bytes(gs::Group::State) + bytes(gs::Group::Scratch);
 }
+size_t Qwen4ExpMtpBuffers::bytes(gs::Group g) const { return gs::buffer_bytes<l0::Mem, MtpSizes>(*this, g); }
 
 void Qwen4ExpMtpBuffers::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&hctl, &kv, &idx_keys, &idx_tail, &hh}) imm.fill(m->ptr(), 0u, m->size());
+  gs::zero<l0::Mem, MtpSizes>(*this, [&](l0::Mem& m) { imm.fill(m.ptr(), 0u, m.size()); });
 }
 
 }  // namespace runtime::qwen4exp

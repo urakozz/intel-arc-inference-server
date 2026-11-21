@@ -39,6 +39,16 @@ uint32_t PrefixSlots::match(uint32_t slot, const std::vector<uint32_t>& prompt) 
 uint32_t PrefixSlots::begin(uint32_t slot, const std::vector<uint32_t>& prompt) {
   Slot& s = slots_.at(slot);
   const PrefixCache::Plan plan = cache_.plan(prompt, s.resident, s.valid);
+  // Spec 31: an evicted session's entries are held no longer once it comes back (plan() pinned what it restores).
+  for (auto it = held_.begin(); it != held_.end();) {
+    const bool back = it->ids.size() <= prompt.size() && std::equal(it->ids.begin(), it->ids.end(), prompt.begin());
+    if (!back) {
+      ++it;
+      continue;
+    }
+    cache_.unkeep(it->handle);
+    it = held_.erase(it);
+  }
   s.valid = false;
   try {
     if (plan.kind == PrefixCache::Plan::Cold) {
@@ -77,13 +87,45 @@ void PrefixSlots::end(uint32_t slot) {
   const uint32_t pos = engine_.pos(slot);   // the engine's pos is the truth
   if (s.resident.size() > pos) s.resident.resize(pos);
   if (s.resident.size() != pos) {
+    std::print(stderr, "prefix cache: slot {:d}'s request end not stored: the cache saw {:d} ids, the slot holds {:d}\n",
+               slot, s.resident.size(), pos);
     s.valid = false;
     return;
   }
   store(slot, pos);
+  bool snap = false;
+  const uint32_t blocks = cache_.holds(s.resident, pos, &snap);
+  if (!snap)   // a store that did not fit (or no store at all): say so, a later turn will prefill again
+    std::print(stderr, "prefix cache: slot {:d}'s request end ({:d} ids) not stored: {:d} of its {:d} blocks and no "
+                       "snapshot; the store has {:d} entries, {:.2f} of {:.2f} GB\n",
+               slot, pos, blocks, pos / cache_.block(), cache_.entries(), cache_.bytes_used() / 1e9,
+               cache_.budget() / 1e9);
 }
 
 void PrefixSlots::fail(uint32_t slot) { slots_.at(slot).valid = false; }
+
+uint32_t PrefixSlots::evict(uint32_t slot) {
+  Slot& s = slots_.at(slot);
+  uint32_t restore_at = 0;
+  if (s.valid) {
+    const uint64_t h = cache_.keep(s.resident, uint32_t(s.resident.size()), &restore_at);
+    if (h != 0) held_.push_back({s.resident, h});
+    if (restore_at == 0) {   // what the store has of it instead
+      bool snap = false;
+      const uint32_t blocks = cache_.holds(s.resident, uint32_t(s.resident.size()), &snap);
+      std::print(stderr, "prefix cache: slot {:d}'s session ({:d} ids): {:d} of its {:d} blocks stored, no snapshot at "
+                         "its end; the store has {:d} entries, {:.2f} of {:.2f} GB\n",
+                 slot, s.resident.size(), blocks, s.resident.size() / cache_.block(), cache_.entries(),
+                 cache_.bytes_used() / 1e9, cache_.budget() / 1e9);
+    }
+    if (held_.size() > slots_.size()) {   // bounded: as many held sessions as slots, the oldest let go first
+      cache_.unkeep(held_.front().handle);
+      held_.pop_front();
+    }
+  }
+  s.valid = false;
+  return restore_at;
+}
 
 uint32_t PrefixSlots::held(uint32_t slot) {
   const Slot& s = slots_.at(slot);
@@ -135,6 +177,11 @@ struct Scheduler::Impl {
   bool overlap = false;
   std::vector<uint32_t> slot_card;
   uint32_t n_cards = 0;
+  // Spec 31: the slots share a KV page pool (BatchEngineIface::kv_pool_pages); when each slot's last request ended
+  // (idle sessions leave the card least recently used first).
+  bool pool = false;
+  std::vector<uint64_t> ended;
+  uint64_t ends = 0;
 };
 
 struct Scheduler::PrefillCall {
@@ -158,6 +205,8 @@ Scheduler::Scheduler(BatchEngineIface& engine, SchedulerOptions opts, SlotCacheI
     impl_->n_cards = std::max(impl_->n_cards, impl_->slot_card.back() + 1);
   }
   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());
+  impl_->pool = engine_.kv_pool_pages() != 0;
+  impl_->ended.assign(impl_->n_slots, 0);
   if (opts_.lookup) {   // plan 13b: server.cc's refusals for --spec lookup, per engine
     if (engine_.verify_k() == 0)
       throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
@@ -276,8 +325,11 @@ int Scheduler::pick_slot(const Job& job) const {
     if (!impl_->slots[s]) ++free_on[impl_->slot_card[s]];
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
     if (impl_->slots[s] || impl_->slot_len[s] < need) continue;
-    const uint32_t m = cache_ ? cache_->match(s, job.req.prompt) : 0;
-    const uint32_t h = cache_ ? cache_->held(s) : 0;
+    uint32_t m = cache_ ? cache_->match(s, job.req.prompt) : 0;
+    // Spec 31: in a pool only a match that continues the slot's session counts - a shorter one (a shared first id)
+    // would drop that session from the card for nothing, while a slot holding no pages is free.
+    if (impl_->pool && m < cache_held(s)) m = 0;
+    const uint32_t h = impl_->pool ? engine_.pages_held(s) : cache_ ? cache_->held(s) : 0;   // spec 31: pages held
     const uint32_t f = free_on[impl_->slot_card[s]];
     const bool better = best < 0 || m > best_match ||
                         (m == best_match && (m == 0 && f != best_free ? f > best_free : h < best_held));
@@ -358,8 +410,15 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
     // Review Focus 5: the prefix plan is taken here, at the grant, against what the slot
     // and the host store hold now - not when the request arrived.
     uint32_t restart = 0;
+    // Spec 31: a slot whose idle session this request does not continue gives that session up as an eviction does
+    // (its prefix cache entries held for its next turn).
+    if (impl_->pool && engine_.pages_held(slot) != 0 && (!cache_ || cache_->match(slot, job->req.prompt) < cache_held(slot)))
+      evict(slot);
     if (cache_) restart = cache_->begin(slot, job->req.prompt);
     else engine_.reset(slot);
+    // Spec 31: the reservation the admission made room for (tick: reserve_upto).
+    if (impl_->pool && !engine_.take_pages(slot, reserve_upto(*job, slot)))
+      throw std::logic_error("scheduler: the KV pages made free for a request were gone at its grant");
     job->prefilled = restart;
     job->fin.cached_tokens = restart;
     if (impl_->lookup || impl_->mtp_lookup)
@@ -377,10 +436,15 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
   if (job->slot >= 0) {
     const uint32_t slot = static_cast<uint32_t>(job->slot);
     // --max-num-seqs: a request cut by its slot's end, not its max_tokens, is said.
-    if (reason == Finish::Length && job->req.prompt.size() + job->steps >= impl_->slot_len[slot])
-      std::print(stderr, "scheduler: a request reached the end of slot {:d} ({:d} positions{}): finished with length\n",
-                 slot, impl_->slot_len[slot],
-                 impl_->n_cards > 1 ? (", card " + std::to_string(impl_->slot_card[slot])).c_str() : "");
+    if (reason == Finish::Length && job->req.prompt.size() + job->steps >= impl_->slot_len[slot]) {
+      if (impl_->pool)
+        std::print(stderr, "scheduler: a request reached the longest a request may grow ({:d} positions): finished "
+                           "with length\n", impl_->slot_len[slot]);
+      else
+        std::print(stderr, "scheduler: a request reached the end of slot {:d} ({:d} positions{}): finished with length\n",
+                   slot, impl_->slot_len[slot],
+                   impl_->n_cards > 1 ? (", card " + std::to_string(impl_->slot_card[slot])).c_str() : "");
+    }
     if (job->inflight) {   // a chunk still on the card: join it first (the tick only gets here once it is ready)
       try {
         engine_.prefill_end(slot);
@@ -410,6 +474,7 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
       }
     }
     impl_->slots[slot] = nullptr;
+    impl_->ended[slot] = ++impl_->ends;
     std::lock_guard<std::mutex> lock(impl_->mu);
     --impl_->active;
   }
@@ -571,6 +636,19 @@ bool Scheduler::spec_round() {
     for (size_t i = 0; i < all.size(); ++i) all[i] = i;
     deal(all, budget);
   }
+  if (impl_->pool) {   // spec 31: the pages the verify writes - with no page for the drafts, a plain step
+    std::vector<std::shared_ptr<Job>> kept;
+    std::vector<uint32_t> kept_k;
+    for (size_t i = 0; i < jobs.size(); ++i) {
+      const uint32_t pos = engine_.pos(static_cast<uint32_t>(jobs[i]->slot));
+      if (ks[i] > 0 && !grow(jobs[i], pos + ks[i] + 1, /*end=*/false)) ks[i] = 0;
+      if (ks[i] == 0 && !grow(jobs[i], pos + 1)) continue;
+      kept.push_back(jobs[i]);
+      kept_k.push_back(ks[i]);
+    }
+    jobs = std::move(kept);
+    ks = std::move(kept_k);
+  }
   for (size_t i = 0; i < jobs.size(); ++i) {
     const auto& j = jobs[i];
     BatchEngineIface::SpecRow row{static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, ks[i], nullptr};
@@ -699,10 +777,12 @@ bool Scheduler::decode_round() {
   std::vector<std::shared_ptr<Job>> jobs;
   std::vector<BatchEngineIface::Row> rows;
   const std::vector<bool> busy = chunk_on_card();
-  for (const auto& j : impl_->slots) {
+  for (std::shared_ptr<Job> j : impl_->slots) {   // a copy: grow() may finish the job and empty its slot
     if (!j || j->state != Job::State::Decoding || busy[impl_->slot_card[static_cast<uint32_t>(j->slot)]]) continue;
+    const uint32_t slot = static_cast<uint32_t>(j->slot);
+    if (impl_->pool && !grow(j, engine_.pos(slot) + 1)) continue;   // spec 31: the page the step writes
     jobs.push_back(j);
-    rows.push_back({static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng});
+    rows.push_back({slot, &j->req.sampling, &j->rng});
   }
   if (rows.empty()) return false;
   std::vector<uint32_t> ids;
@@ -835,6 +915,76 @@ bool Scheduler::overlapped_prefills(bool after_step) {
   return true;
 }
 
+// Spec 31 §6: what a request reserves at its grant - its prompt, one page of output and a verify's rows - within
+// the cap. Never all of max_tokens: agent clients ask for the whole context, and the pool would serve one at a time.
+uint32_t Scheduler::reserve_upto(const Job& job, uint32_t slot) const {
+  const uint64_t upto = uint64_t(job.req.prompt.size()) + engine_.block() + impl_->cap + 1;
+  return static_cast<uint32_t>(std::min<uint64_t>(upto, impl_->slot_len[slot]));
+}
+
+// The positions the slot's resident session holds by the prefix cache's view (0 without a cache).
+uint32_t Scheduler::cache_held(uint32_t slot) const { return cache_ ? cache_->held(slot) : 0; }
+
+// The idle slot whose session ended longest ago, holding pages, other than `keep`; -1 when none.
+int Scheduler::oldest_idle(uint32_t keep) const {
+  int best = -1;
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    if (s == keep || impl_->slots[s] || engine_.pages_held(s) == 0) continue;
+    if (best < 0 || impl_->ended[s] < impl_->ended[static_cast<uint32_t>(best)]) best = static_cast<int>(s);
+  }
+  return best;
+}
+
+// An idle session leaves the card: its pages go back to the pool. Its blocks and its request-end snapshot are in the
+// host prefix cache (stored when its request ended), so its next turn is a prefix cache hit.
+void Scheduler::evict(uint32_t slot) {
+  const uint32_t pages = engine_.pages_held(slot);
+  engine_.reset(slot);
+  const uint32_t held = cache_ ? cache_->evict(slot) : 0;   // the slot holds nothing now; its next grant plans anew
+  if (held != 0)
+    std::print(stderr, "scheduler: slot {:d}'s idle session left the card for a new request ({:d} KV pages back to the "
+                       "pool; its next turn restores {:d} positions from the prefix cache)\n", slot, pages, held);
+  else
+    std::print(stderr, "scheduler: slot {:d}'s idle session left the card for a new request ({:d} KV pages back to the "
+                       "pool; the prefix cache holds no snapshot of it, so its next turn prefills again)\n", slot, pages);
+}
+
+// Frees pages until `slot` can take its pages up to `upto` (its own pages count), evicting idle sessions least
+// recently used first. False - and nothing evicted - when even every idle session's pages would not cover it.
+bool Scheduler::make_room(uint32_t slot, uint32_t upto) {
+  const uint32_t blk = engine_.block();
+  const uint32_t want = static_cast<uint32_t>((uint64_t(upto) + blk - 1) / blk);
+  const uint32_t own = engine_.pages_held(slot);
+  if (want <= own) return true;
+  uint32_t idle = 0;
+  for (uint32_t s = 0; s < impl_->n_slots; ++s)
+    if (s != slot && !impl_->slots[s]) idle += engine_.pages_held(s);
+  if (engine_.pages_free() + idle < want - own) return false;
+  while (engine_.pages_free() < want - own) evict(static_cast<uint32_t>(oldest_idle(slot)));
+  return true;
+}
+
+// A running request's pages up to `upto` before a step writes there; idle sessions leave the card for it. With none
+// left the request ends with "length" when `end` (spec 31 §7.3) - false either way.
+bool Scheduler::grow(const std::shared_ptr<Job>& job, uint32_t upto, bool end) {
+  const uint32_t slot = static_cast<uint32_t>(job->slot);
+  upto = std::min(upto, impl_->slot_len[slot]);   // near the cap the engine drafts fewer
+  while (!engine_.take_pages(slot, upto)) {
+    const int idle = oldest_idle(slot);
+    if (idle < 0) {
+      if (!end) return false;
+      uint32_t running = 0;
+      for (const auto& j : impl_->slots) running += j != nullptr;
+      std::print(stderr, "kv pool full: {:d} pages, {:d} requests running; --kv-cache int8 or a smaller "
+                         "--max-num-seqs gives a request more\n", engine_.kv_pool_pages(), running);
+      finish(job, Finish::Length);
+      return false;
+    }
+    evict(static_cast<uint32_t>(idle));
+  }
+  return true;
+}
+
 bool Scheduler::tick() {
   bool did = false;
   // 1. Cancellations: queued ones leave the queue, granted ones free their slot.
@@ -880,7 +1030,8 @@ bool Scheduler::tick() {
   std::vector<std::shared_ptr<Job>> back;
   for (const auto& j : granted) {
     const int slot = pick_slot(*j);
-    if (slot < 0) {
+    // Spec 31: the pool must cover the reservation - idle sessions leave the card for it, else the request waits.
+    if (slot < 0 || (impl_->pool && !make_room(static_cast<uint32_t>(slot), reserve_upto(*j, static_cast<uint32_t>(slot))))) {
       back.push_back(j);
       continue;
     }

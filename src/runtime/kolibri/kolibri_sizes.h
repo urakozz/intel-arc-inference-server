@@ -26,6 +26,11 @@ inline constexpr KolAttn kDefaultKolAttn = KolAttn::Flash;   // until the box A/
 KolAttn kolibri_attn();
 const char* kol_attn_name(KolAttn a);
 
+// Spec 20e's snapshot runs' tensors (the snapshot section below), each claimed by exactly one sizes member's
+// gpu_state::Snapshot annotation (spec 39) - how KolibriEngine finds a run's allocation.
+enum class SnapTensor : uint32_t { FullK, FullV, RingK, RingV };
+using KolSnap = gs::Snapshot<SnapTensor>;
+
 // One device's persistent group (zeroed by KolibriBuffers::zero, KolibriEngine::reset):
 //   control      runtime::Control, shared memory
 //   full_k/v     bf16 [its full layers][max_len][kv_heads][head_dim] each - the growing KV, 20 KiB a
@@ -33,11 +38,17 @@ const char* kol_attn_name(KolAttn a);
 //   ring_k/v     bf16 [its sliding layers][kRing][kv_heads][head_dim] each - 8 MiB a layer (K and V),
 //                335.5 MB for the 40 sliding layers (derived)
 // An empty group (a device with no full / no sliding layer) still allocates one 64-byte line.
+// Spec 39: KolibriBuffers holds one allocation of each name (with ScratchSizes' and EagerSizes').
 struct PersistentSizes {
-  size_t control = 0, full_k = 0, full_v = 0, ring_k = 0, ring_v = 0;
-  size_t kv() const { return full_k + full_v + ring_k + ring_v; }
-  size_t total() const { return control + kv(); }
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("load_state writes pos and n_active")]] size_t control = 0;
+  [[=gs::kv, =gs::zero_on_reset, =KolSnap{SnapTensor::FullK}]] size_t full_k = 0;
+  [[=gs::kv, =gs::zero_on_reset, =KolSnap{SnapTensor::FullV}]] size_t full_v = 0;
+  [[=gs::kv, =gs::zero_on_reset, =KolSnap{SnapTensor::RingK}]] size_t ring_k = 0;
+  [[=gs::kv, =gs::zero_on_reset, =KolSnap{SnapTensor::RingV}]] size_t ring_v = 0;
+  size_t kv() const { return gs::bytes(*this, gs::Group::Kv); }
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<PersistentSizes, SnapTensor>().empty(), gs::sizes_problem<PersistentSizes, SnapTensor>());
 PersistentSizes persistent_sizes(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev,
                                  uint32_t max_len);
 inline size_t full_kv_bytes_per_pos(const model::Kolibri1Desc& d) {
@@ -71,19 +82,34 @@ inline size_t ring_layer_rows_bytes(const model::Kolibri1Desc& d) {
 //   logits           fp32 [M][vocab]
 //   argmax_part      fp32 [M][ceil(vocab / 1024)][2]
 struct ScratchSizes {
-  size_t resid = 0, x = 0, a = 0, mo = 0, partials = 0, sumsq_a = 0, sumsq_r = 0, attn_q = 0, attn_part = 0,
-         attn_out = 0, logits_r = 0, routes = 0, moe_h = 0, logits = 0, argmax_part = 0;
-  size_t total() const {
-    return resid + x + a + mo + partials + sumsq_a + sumsq_r + attn_q + attn_part + attn_out + logits_r + routes +
-           moe_h + logits + argmax_part;
-  }
+  [[=gs::scratch]] size_t resid = 0;
+  [[=gs::scratch]] size_t x = 0;
+  [[=gs::scratch]] size_t a = 0;
+  [[=gs::scratch]] size_t mo = 0;
+  [[=gs::scratch]] size_t partials = 0;
+  [[=gs::scratch]] size_t sumsq_a = 0;
+  [[=gs::scratch]] size_t sumsq_r = 0;
+  [[=gs::scratch]] size_t attn_q = 0;
+  [[=gs::scratch]] size_t attn_part = 0;
+  [[=gs::scratch]] size_t attn_out = 0;
+  [[=gs::scratch]] size_t logits_r = 0;
+  [[=gs::scratch]] size_t routes = 0;
+  [[=gs::scratch]] size_t moe_h = 0;
+  [[=gs::scratch]] size_t logits = 0;
+  [[=gs::scratch]] size_t argmax_part = 0;
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<ScratchSizes, SnapTensor>().empty(), gs::sizes_problem<ScratchSizes, SnapTensor>());
 // `M` (Kolibri DSpark): the verify lists' scratch at M rows; attn_part holds at most kol_attn.cl's 4 rows (a deeper verify
 // runs its attention in two launches over the same parts).
 ScratchSizes scratch_sizes(const model::Kolibri1Desc& d, uint32_t M = kM);
 size_t partials_floats(const model::Kolibri1Desc& d);
 // Eager's score row, fp32 [M][q_heads][max_len]; 0 under flash.
 size_t attn_scores_bytes(const model::Kolibri1Desc& d, uint32_t max_len, KolAttn a = kolibri_attn());
+// Spec 39: KolibriBuffers' eager score row (attn_scores_bytes; no allocation under flash).
+struct EagerSizes {
+  [[=gs::scratch]] size_t attn_scores = 0;
+};
 inline constexpr uint32_t kRouteWords = 32;   // = kernels::kolibri::route::kWords
 inline size_t route_at(uint32_t layer) { return size_t(layer) * kM * kRouteWords * 4; }
 // The residual tap (debug): bf16 [layers][M][hidden] on every device (its layers' rows written).
@@ -160,14 +186,31 @@ uint32_t pf_batches_dn(const model::Kolibri1Desc& d);
 //   xg        bf16 [tmax x TM][hidden]          the gathered A, then down's y
 //   h         bf16 [tmax x TM][moe_inter]       gate||up's SiLU h
 //   w         bf16 kPfBatchBytes                the expert weight batch
+// Spec 39: KolibriPrefillScratch holds one allocation of each name.
 struct PrefillSizes {
-  size_t ids = 0, resid = 0, x = 0, a = 0, mo = 0, partials = 0, slab = 0, sumsq_a = 0, sumsq_r = 0, attn_q = 0,
-         attn_out = 0, logits = 0, routes = 0, hdr = 0, tiles = 0, row_tok = 0, pair_row = 0, xg = 0, h = 0, w = 0;
-  size_t total() const {
-    return ids + resid + x + a + mo + partials + slab + sumsq_a + sumsq_r + attn_q + attn_out + logits + routes + hdr +
-           tiles + row_tok + pair_row + xg + h + w;
-  }
+  [[=gs::scratch]] size_t ids = 0;
+  [[=gs::scratch]] size_t resid = 0;
+  [[=gs::scratch]] size_t x = 0;
+  [[=gs::scratch]] size_t a = 0;
+  [[=gs::scratch]] size_t mo = 0;
+  [[=gs::scratch]] size_t partials = 0;
+  [[=gs::scratch]] size_t slab = 0;
+  [[=gs::scratch]] size_t sumsq_a = 0;
+  [[=gs::scratch]] size_t sumsq_r = 0;
+  [[=gs::scratch]] size_t attn_q = 0;
+  [[=gs::scratch]] size_t attn_out = 0;
+  [[=gs::scratch]] size_t logits = 0;
+  [[=gs::scratch]] size_t routes = 0;
+  [[=gs::scratch]] size_t hdr = 0;
+  [[=gs::scratch]] size_t tiles = 0;
+  [[=gs::scratch]] size_t row_tok = 0;
+  [[=gs::scratch]] size_t pair_row = 0;
+  [[=gs::scratch]] size_t xg = 0;
+  [[=gs::scratch]] size_t h = 0;
+  [[=gs::scratch]] size_t w = 0;
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<PrefillSizes, SnapTensor>().empty(), gs::sizes_problem<PrefillSizes, SnapTensor>());
 PrefillSizes prefill_sizes(const model::Kolibri1Desc& d);
 inline size_t pf_route_at(uint32_t layer) { return size_t(layer) * kPfC * kRouteWords * 4; }
 // The two-card prefill hand-off: a second runtime::PipelineLink over spec 16b's layout at
@@ -196,11 +239,13 @@ inline constexpr size_t kPrefillHeadLaunches = 5;   // fold + norm over the last
 // (the GEMVs' and the norms' per-row order; kol_attn.cl's per-row key bound and absolute 64-key blocks).
 inline constexpr uint32_t kVerifyRows = 8;     // M <= 8: Control::cur_token's 8 ids, DSpark's block
 inline constexpr uint32_t kAttnRowsMax = 4;    // kol_attn.cl's M bound (kernels::kolibri::kAttnMaxM)
-struct VerifySizes {
-  ScratchSizes scratch;   // scratch_sizes(d, kVerifyRows)
-  size_t control_hi = 0;  // runtime::Control, shared memory
-  size_t total() const { return scratch.total() + control_hi; }
+// Spec 39: KolibriVerifyBuffers holds one allocation of each name - the scratch (scratch_sizes(d, kVerifyRows), the
+// base) and control_hi (runtime::Control, shared memory; the host writes it before each verify).
+struct VerifySizes : ScratchSizes {
+  [[=gs::scratch]] size_t control_hi = 0;
+  size_t total() const { return ScratchSizes::total() + gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<VerifySizes, SnapTensor>().empty(), gs::sizes_problem<VerifySizes, SnapTensor>());
 VerifySizes verify_sizes(const model::Kolibri1Desc& d);
 // The verify hand-off: kVerifyRows rows of the residual and their [kNormG][M] sums (a step moves M rows).
 PpLandingLayout verify_landing_layout(const model::Kolibri1Desc& d);
@@ -285,7 +330,10 @@ std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement
 // ring_k, ring_v), in host order. `zero` runs cover positions before 0: save_state writes zeros to the
 // host for them (the device slots are not read), load_state copies the host's zeros into their slots.
 inline uint32_t state_positions(const model::Kolibri1Desc& d) { return d.window - 1; }   // 512
-enum class SnapTensor : uint32_t { FullK, FullV, RingK, RingV };
+// (SnapTensor, the runs' tensors, is declared before PersistentSizes.)
+static_assert(gs::snapshot_problem<SnapTensor, PersistentSizes, ScratchSizes, EagerSizes, VerifySizes, PrefillSizes>()
+                  .empty(),
+              gs::snapshot_problem<SnapTensor, PersistentSizes, ScratchSizes, EagerSizes, VerifySizes, PrefillSizes>());
 struct SnapRun {
   uint32_t device = 0;
   SnapTensor tensor = SnapTensor::FullK;

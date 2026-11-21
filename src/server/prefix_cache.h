@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -117,6 +118,14 @@ class PrefixCache {
             bool resident_valid, bool whole = false);
   // Unpins everything plan() and reserve() pinned; drops reserved entries never committed.
   void release();
+  // Spec 31: an evicted session's entries - the blocks of ids[0:end) and the snapshot at `end`, as far as the store
+  // has them - held until unkeep(handle), never evicted meanwhile, so its next turn restores them. release() leaves
+  // them held. Returns the handle (0: nothing held); `restore_at` gets the position a later plan() can restore it to
+  // from what is held - the snapshot's end, 0 when the store has none for it (its blocks alone restore nothing).
+  uint64_t keep(const std::vector<uint32_t>& ids, uint32_t end, uint32_t* restore_at = nullptr);
+  // What the store holds of ids[0:end): its blocks from the start (how many) and whether the snapshot at `end`.
+  uint32_t holds(const std::vector<uint32_t>& ids, uint32_t end, bool* snapshot) const;
+  void unkeep(uint64_t handle);
 
   size_t bytes_used() const { return used_; }
   uint64_t kv_form() const;              // the root of every chain (spec 12b)
@@ -132,6 +141,7 @@ class PrefixCache {
   bool evict_one();
   void* alloc(size_t bytes);             // alloc with eviction retries
   void remove(Entry* e);
+  void free_entry(const Entry& e);   // a block's one allocation, a snapshot's two
   void pin(Entry* e);
 
   size_t budget_, state_bytes_, head_bytes_;
@@ -142,6 +152,8 @@ class PrefixCache {
   std::unique_ptr<Entry> root_;
   std::vector<std::unique_ptr<Entry>> all_;
   std::vector<Entry*> pinned_;
+  std::map<uint64_t, std::vector<Entry*>> kept_;   // spec 31: keep()'s entries by handle
+  uint64_t next_keep_ = 0;
   size_t used_ = 0;
   uint64_t clock_ = 0;
 };

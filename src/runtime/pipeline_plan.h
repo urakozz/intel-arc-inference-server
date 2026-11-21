@@ -185,6 +185,18 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
 // Spec 19d: `slots` = the verify lists' slot count (MtpDims::kSlots = 4 for MTP, TapVerifyDims::kSlots = 8 for a
 // drafter - the gdn_step_slots_M<M>_N<slots> binaries): (slots - 2) whole slots + the stage's share of the last.
 size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t slots = MtpDims::kSlots);
+// Spec 39: a stage's own allocation beside its PersistentBuffers / DecodeScratch / MtpBuffers (PipelineEngine::Stage):
+// device 0's MTP verify slots or either device's drafter slots, pp_gdn_spec_bytes; and PipelineLink's landing on
+// device 1 (pp_landing_layout's total), which device 0's step writes and device 1's reads.
+struct StageSizes {
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::GdnSpec}]] size_t gdn_spec = 0;
+};
+struct LinkSizes {
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("read only in the step device 0 filled it")]]
+  size_t landing = 0;
+};
+static_assert(gs::sizes_problem<StageSizes, EngineSnap>().empty(), gs::sizes_problem<StageSizes, EngineSnap>());
+static_assert(gs::sizes_problem<LinkSizes, EngineSnap>().empty(), gs::sizes_problem<LinkSizes, EngineSnap>());
 // The head's prefill state on the last device (spec 16d): the hidden rows step_mtp_kv
 // writes (mtp_prefill_hidden_bytes) and its two Control blocks (one per chunk in flight).
 size_t pp_mtp_prefill_bytes(const model::ModelDesc& d, uint32_t chunk_cap);

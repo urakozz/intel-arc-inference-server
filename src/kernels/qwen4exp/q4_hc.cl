@@ -48,7 +48,19 @@
 //       the prefill's down||inject slab in place of kol_pf_bf16_slab (same arguments and grid):
 //       out[k][c] = rne_bf16(f32(q) x f32(s)) for n = n0 + c < N, else 0
 //
-// Plain OpenCL C (no sub-group functions) but q4_hc_down_i8.
+// **PERF-106: the decode mixers tuned** (each form bitwise the one before it):
+//   UP_BLK 1 (_B)    the up-mix reads its weights by sub-group block reads: a sub-group (16 lanes) is one stream's 16
+//                    columns, one weight tile, so a lane gets 16 k (int8) / 8 k (bf16) a read instead of one scalar
+//                    load a k at stride 16; the fma chain and its order are unchanged
+//   _R<M>C16         at M >= 2 (the verify): the _R form below over all M rows in one work-group (grid (160, 1)), each
+//                    weight read once for the M rows instead of once a row
+//   DN_ACT 1 (_A)    q4_hc_down_i8's merged lanes write a_j (n < 320) and the inject value (320 <= n < 324) in place
+//                    of the raw sums; UP_ACT 1 (_A) the up-mix reads them instead of computing the 320 SiLUs in each
+//                    of its 160 work-groups (the int8 form only: the bf16 down is gemv_bf16)
+//   The lists bind _B (one work-group a row) and the down's raw sums at every M: _R<M>C16 alone lost to _B
+//   (0.64-0.84x); _R<M>C16 with _A is the bench's candidate pair only
+//
+// Plain OpenCL C (no sub-group functions) but q4_hc_down_i8 and the up-mix's _B.
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M
@@ -85,6 +97,9 @@ inline float exp_torch(float d) {
 }
 inline float sigmoid_t(float x) { return 1.0f / (1.0f + exp_torch(-x)); }
 inline float silu_t(float x) { return x / (1.0f + exp_torch(-x)); }
+// down's row d -> a_j = rne(silu(f32(rne(f32(rne(d_j)) / 4)))), inj_s = rne(2 x rne(sigmoid(rne(rne(d_{320+s}) / 4))))
+inline float hc_act(float d) { return rf(silu_t(rf(rf(d) / 4.0f))); }
+inline float hc_inj(float d) { return rf(2.0f * rf(sigmoid_t(rf(rf(d) / 4.0f)))); }
 
 inline uint n_rows(__global const uint* restrict ctrl) {
   const uint n = ctrl[CTRL_NACT];
@@ -170,16 +185,53 @@ __kernel void q4_hc_combine_norm(__global const uint* restrict ctrl, __global us
 #ifndef UP_I8
 #define UP_I8 0
 #endif
+#ifndef UP_BLK
+#define UP_BLK 0
+#endif
+#ifndef UP_ACT
+#define UP_ACT 0
+#endif
+#if UP_ACT && !UP_I8
+#error "q4_hc_up_mix _A: only the int8 form's down (q4_hc_down_i8 _A) writes the activations"
+#endif
+#if UP_ACT   // down_f32 holds a_j and the inject values (q4_hc_down_i8 _A)
+#define UP_A(v) (v)
+#define UP_INJ(v) (v)
+#else
+#define UP_A(v) hc_act(v)
+#define UP_INJ(v) hc_inj(v)
+#endif
+#if UP_BLK
+#pragma OPENCL EXTENSION cl_intel_subgroups : enable
+#pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
+#pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
+#define UP_SG __attribute__((intel_reqd_sub_group_size(16)))
+// t = the fma chain over 8 k ascending: a[0..7] x w's lanes in order (the scalar loop's arithmetic)
+inline float fma8(__local const float* a, float8 w, float t) {
+  t = fma(a[0], w.s0, t); t = fma(a[1], w.s1, t); t = fma(a[2], w.s2, t); t = fma(a[3], w.s3, t);
+  t = fma(a[4], w.s4, t); t = fma(a[5], w.s5, t); t = fma(a[6], w.s6, t); t = fma(a[7], w.s7, t);
+  return t;
+}
+// The sub-group's weights by block reads: lane l gets column n0 + l of the tile, component i its k (tile + i x 16).
+inline float16 up_i8_16k(__global const uchar* tile) {   // 16 k of an int8 tile
+  return convert_float16(as_char16(intel_sub_group_block_read_uc16(tile)));
+}
+inline float8 up_bf16_8k(__global const ushort* tile) {   // one k-octet of a bf16 tile
+  return as_float8(convert_uint8(intel_sub_group_block_read_us8(tile)) << 16);
+}
+#else
+#define UP_SG
+#endif
 #define WG_UP 64
 #define K8 (LOW / 8)   /* 40 k-octets of the up tiles */
 //   down_f32  fp32 [M][UP_DOWN]   gemv_bf16's output (320 down rows, then the 4 inject rows under _I)
 //   up        bf16 gemv_bf16 tiles {K 320, N 10240}: [n_tile][k_octet][8 k][16 n]; _Q8: int8 tiles, then the scales
 //   xn        bf16 [M][4][2560]   x bf16 [M][2560]   inj fp32 [M][4]
 #ifdef UP_ROWS
-// _R<UP_ROWS>[C<UP_COLS>] (the prefill's, M = 2048): one work-group owns UP_ROWS rows of UP_COLS columns (4 x UP_COLS
-// lanes, a lane a (stream, column)), so each up weight is read once for UP_ROWS rows and each row's 320 activations are
-// computed once for UP_COLS columns; every row's arithmetic is the one-row form's, in its order. Grid
-// (2560 / UP_COLS, M / UP_ROWS).
+// _R<UP_ROWS>[C<UP_COLS>] (the prefill's, M = 2048; decode's at M = UP_ROWS >= 2, PERF-106): one work-group owns
+// UP_ROWS rows of UP_COLS columns (4 x UP_COLS lanes, a lane a (stream, column)), so each up weight is read once for
+// UP_ROWS rows and each row's 320 activations are computed once for UP_COLS columns; every row's arithmetic is the
+// one-row form's, in its order. Grid (2560 / UP_COLS, M / UP_ROWS).
 #ifndef UP_COLS
 #define UP_COLS 16
 #endif
@@ -187,7 +239,10 @@ __kernel void q4_hc_combine_norm(__global const uint* restrict ctrl, __global us
 #if UP_ROWS * HC > WG_UR
 #error "q4_hc_up_mix _R: the inject rows (UP_ROWS x 4) must fit one work-group"
 #endif
-__attribute__((reqd_work_group_size(WG_UR, 1, 1)))
+#if UP_BLK && UP_COLS % 16 != 0
+#error "q4_hc_up_mix _R _B: a sub-group's 16 lanes must be one weight tile's columns"
+#endif
+UP_SG __attribute__((reqd_work_group_size(WG_UR, 1, 1)))
 __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const float* restrict down_f32,
                            __global const ushort* restrict up, __global const ushort* restrict xn,
                            __global ushort* restrict x, __global float* restrict inj) {
@@ -201,12 +256,12 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
   __local float p[UP_ROWS * WG_UR];
   for (uint i = lid; i < UP_ROWS * LOW; i += WG_UR) {
     const uint r = i / LOW, jj = i % LOW;
-    a[i] = r < nr ? rf(silu_t(rf(rf(down_f32[(size_t)(m0 + r) * UP_DOWN + jj]) / 4.0f))) : 0.0f;
+    a[i] = r < nr ? UP_A(down_f32[(size_t)(m0 + r) * UP_DOWN + jj]) : 0.0f;
   }
 #if UP_INJECT
   if (g == 0 && lid < nr * HC) {
     const uint r = lid / HC, s = lid % HC;
-    inj[(m0 + r) * HC + s] = rf(2.0f * rf(sigmoid_t(rf(rf(down_f32[(size_t)(m0 + r) * UP_DOWN + LOW + s]) / 4.0f))));
+    inj[(m0 + r) * HC + s] = UP_INJ(down_f32[(size_t)(m0 + r) * UP_DOWN + LOW + s]);
   }
 #else
   (void)inj;
@@ -217,27 +272,47 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
 #if UP_I8
   float acc[UP_ROWS];
   for (uint r = 0; r < UP_ROWS; ++r) acc[r] = 0.0f;
+#if UP_BLK
+  __global const uchar* restrict tile = (__global const uchar*)up + (size_t)(n / 16) * LOW * 16;   // the sub-group's
+#else
   __global const char* restrict tile = (__global const char*)up + (size_t)(n / 16) * LOW * 16 + n % 16;
+#endif
   __global const half* restrict sc = (__global const half*)((__global const uchar*)up + (size_t)LOW * HCN);
   for (uint kg = 0; kg < LOW / 32; ++kg) {   // kg: the 32-k group (g is the work-group)
     float t[UP_ROWS];
     for (uint r = 0; r < UP_ROWS; ++r) t[r] = 0.0f;
+#if UP_BLK
+    const float16 w0 = up_i8_16k(tile + kg * 512), w1 = up_i8_16k(tile + kg * 512 + 256);
+    for (uint r = 0; r < UP_ROWS; ++r) {
+      __local const float* ar = a + r * LOW + kg * 32;
+      t[r] = fma8(ar + 24, w1.hi, fma8(ar + 16, w1.lo, fma8(ar + 8, w0.hi, fma8(ar, w0.lo, t[r]))));
+    }
+#else
     for (uint i = 0; i < 32; ++i) {
       const float wv = (float)tile[(size_t)(kg * 32 + i) * 16];
       for (uint r = 0; r < UP_ROWS; ++r) t[r] = fma(a[r * LOW + kg * 32 + i], wv, t[r]);
     }
+#endif
     const float sv = vload_half((size_t)kg * HCN + n, sc);
     for (uint r = 0; r < UP_ROWS; ++r) acc[r] = fma(t[r], sv, acc[r]);
   }
 #else
-  __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128 + n % 16;
   float acc[UP_ROWS];
   for (uint r = 0; r < UP_ROWS; ++r) acc[r] = 0.0f;
+#if UP_BLK
+  __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128;   // the sub-group's
+  for (uint k8 = 0; k8 < K8; ++k8) {
+    const float8 w = up_bf16_8k(tile + k8 * 128);
+    for (uint r = 0; r < UP_ROWS; ++r) acc[r] = fma8(a + r * LOW + k8 * 8, w, acc[r]);
+  }
+#else
+  __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128 + n % 16;
   for (uint k8 = 0; k8 < K8; ++k8)
     for (uint i = 0; i < 8; ++i) {
       const float wv = bf16f(tile[(size_t)k8 * 128 + i * 16]);
       for (uint r = 0; r < UP_ROWS; ++r) acc[r] = fma(a[r * LOW + k8 * 8 + i], wv, acc[r]);
     }
+#endif
 #endif
   for (uint r = 0; r < UP_ROWS; ++r)
     if (r < nr) {
@@ -253,7 +328,7 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
   }
 }
 #else
-__attribute__((reqd_work_group_size(WG_UP, 1, 1)))
+UP_SG __attribute__((reqd_work_group_size(WG_UP, 1, 1)))
 __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const float* restrict down_f32,
                            __global const ushort* restrict up, __global const ushort* restrict xn,
                            __global ushort* restrict x, __global float* restrict inj) {
@@ -264,29 +339,44 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
   __local float a[LOW];
   __local float p[WG_UP];
   __global const float* restrict d = down_f32 + (size_t)m * UP_DOWN;
-  for (uint jj = lid; jj < LOW; jj += WG_UP) a[jj] = rf(silu_t(rf(rf(d[jj]) / 4.0f)));
+  for (uint jj = lid; jj < LOW; jj += WG_UP) a[jj] = UP_A(d[jj]);
 #if UP_INJECT
-  if (g == 0 && lid < HC) inj[m * HC + lid] = rf(2.0f * rf(sigmoid_t(rf(rf(d[LOW + lid]) / 4.0f))));
+  if (g == 0 && lid < HC) inj[m * HC + lid] = UP_INJ(d[LOW + lid]);
 #else
   (void)inj;
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);
-  const uint s = lid / 16, ci = lid % 16;
+  const uint s = lid / 16, ci = lid % 16;   // _B: sub-group s, lane ci
   const uint c = g * 16 + ci, n = s * HIDDEN + c;
 #if UP_I8
   float acc = 0.0f;
+#if UP_BLK
+  __global const uchar* restrict tile = (__global const uchar*)up + (size_t)(n / 16) * LOW * 16;   // the sub-group's
+#else
   __global const char* restrict tile = (__global const char*)up + (size_t)(n / 16) * LOW * 16 + n % 16;
+#endif
   __global const half* restrict sc = (__global const half*)((__global const uchar*)up + (size_t)LOW * HCN);
   for (uint kg = 0; kg < LOW / 32; ++kg) {   // kg: the 32-k group (g is the work-group)
     float t = 0.0f;
+#if UP_BLK
+    const float16 w0 = up_i8_16k(tile + kg * 512), w1 = up_i8_16k(tile + kg * 512 + 256);
+    __local const float* ak = a + kg * 32;
+    t = fma8(ak + 24, w1.hi, fma8(ak + 16, w1.lo, fma8(ak + 8, w0.hi, fma8(ak, w0.lo, t))));
+#else
     for (uint i = 0; i < 32; ++i) t = fma(a[kg * 32 + i], (float)tile[(size_t)(kg * 32 + i) * 16], t);
+#endif
     acc = fma(t, vload_half((size_t)kg * HCN + n, sc), acc);
   }
 #else
-  __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128 + n % 16;
   float acc = 0.0f;
+#if UP_BLK
+  __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128;   // the sub-group's
+  for (uint k8 = 0; k8 < K8; ++k8) acc = fma8(a + k8 * 8, up_bf16_8k(tile + k8 * 128), acc);
+#else
+  __global const ushort* restrict tile = up + (size_t)(n / 16) * K8 * 128 + n % 16;
   for (uint k8 = 0; k8 < K8; ++k8)
     for (uint i = 0; i < 8; ++i) acc = fma(a[k8 * 8 + i], bf16f(tile[(size_t)k8 * 128 + i * 16]), acc);
+#endif
 #endif
   const float gv = rf(sigmoid_t(rf(acc)));
   p[lid] = rf(gv * bf16f(xn[(size_t)m * HCN + n]));
@@ -303,6 +393,9 @@ __kernel void q4_hc_up_mix(__global const uint* restrict ctrl, __global const fl
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #ifndef DN_KS
 #error "q4_hc_down_i8: DN_KS (the sub-groups splitting a tile's K) must be defined"
+#endif
+#ifndef DN_ACT
+#define DN_ACT 0
 #endif
 #define DN_N HC_DOWN_I8
 #define DN_G (HCN / 32 / DN_KS)   /* groups of 32 k a sub-group */
@@ -358,7 +451,14 @@ __kernel void q4_hc_down_i8(__global const uchar* restrict w, __global const ush
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   if (q == 0)
-    for (uint m = 0; m < M; ++m) out[(size_t)m * DN_N + n] = red[0][m][lane];
+    for (uint m = 0; m < M; ++m) {
+#if DN_ACT   // _A: the up-mix's a_j and inject values (columns 324.. are padding, left raw)
+      const float v = red[0][m][lane];
+      out[(size_t)m * DN_N + n] = n < LOW ? hc_act(v) : n < LOW + HC ? hc_inj(v) : v;
+#else
+      out[(size_t)m * DN_N + n] = red[0][m][lane];
+#endif
+    }
 }
 #endif  // HC_DOWN_I8
 

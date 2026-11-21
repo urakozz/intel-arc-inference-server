@@ -33,14 +33,56 @@
 //   candidate    u32 [R][80] with the candidate head (64 or 80 used); tpart then holds up to top80 per chunk
 namespace runtime::dflash {
 
-struct DFlashSizes {
-  size_t dctl = 0, out = 0, rope = 0, ring_k = 0, ring_v = 0, taps = 0, resid = 0, h = 0, x = 0, xa = 0, gout = 0,
-         co = 0, q = 0, kb = 0, vb = 0, part = 0, kv = 0, logits = 0, tpart = 0, cand = 0, unary = 0, hid = 0, candidate = 0;
-  size_t total() const {
-    return dctl + out + rope + ring_k + ring_v + taps + resid + h + x + xa + gout + co + q + kb + vb + part + kv +
-           logits + tpart + cand + unary + hid + candidate;
-  }
+// Spec 39: the ring a session snapshot holds (ring_snapshot_bytes: ring_k, then ring_v), each claimed by one member.
+enum class DFlashSnap : uint32_t { RingK, RingV };
+using DfSnap = gs::Snapshot<DFlashSnap>;
+// One sequence's session (plan 19v3b) - DFlashSession's allocations, and the first sequence's in DFlashBuffers.
+struct SessionSizes {
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("set_draft_params writes K, T and the seed before a draft")]]
+  size_t dctl = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft writes its readback")]] size_t out = 0;
+  [[=gs::state, =gs::zero_on_reset, =DfSnap{DFlashSnap::RingK}]] size_t ring_k = 0;
+  [[=gs::state, =gs::zero_on_reset, =DfSnap{DFlashSnap::RingV}]] size_t ring_v = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("the verify list writes them before the projection reads")]]
+  size_t taps = 0;
+  size_t total() const { return gs::bytes(*this); }
 };
+// DFlashBuffers' allocations: a session's (the base) and the draft list's (spec 39: one allocation of each name).
+struct DFlashSizes : SessionSizes {
+  [[=gs::constant]] size_t rope = 0;   // uploaded once at construction
+  [[=gs::scratch, =gs::zero_on_reset]] size_t resid = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t h = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t x = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t xa = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t gout = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t co = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t q = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t kb = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t vb = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t part = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t kv = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t logits = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t tpart = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t cand = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t unary = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t hid = 0;
+  [[=gs::scratch, =gs::zero_on_reset]] size_t candidate = 0;
+  size_t total() const { return SessionSizes::total() + gs::bytes(*this); }
+};
+// Plan 19v3b, with several sequence slots only (DFlashBuffers::add_sessions): the batched draft's row table, the rows
+// projection's table (shared, [kM + 8 kSeqs] u32 each) and the row lists' taps (`taps`' size). The host writes the
+// tables before each batched list and the row lists write the taps before the projection reads them.
+struct RowsSizes {
+  [[=gs::scratch]] size_t seqs = 0;
+  [[=gs::scratch]] size_t proj_seqs = 0;
+  [[=gs::scratch]] size_t rows_taps = 0;
+  size_t total() const { return gs::bytes(*this); }
+};
+static_assert(gs::sizes_problem<SessionSizes, DFlashSnap>().empty(), gs::sizes_problem<SessionSizes, DFlashSnap>());
+static_assert(gs::sizes_problem<DFlashSizes, DFlashSnap>().empty(), gs::sizes_problem<DFlashSizes, DFlashSnap>());
+static_assert(gs::sizes_problem<RowsSizes, DFlashSnap>().empty(), gs::sizes_problem<RowsSizes, DFlashSnap>());
+static_assert(gs::snapshot_problem<DFlashSnap, SessionSizes, DFlashSizes, RowsSizes>().empty(),
+              gs::snapshot_problem<DFlashSnap, SessionSizes, DFlashSizes, RowsSizes>());
 
 // The drafter's RoPE table: [rows][head_dim] fp32, cos in the first half, sin in the second, angle = pos x
 // theta^(-2j / head_dim) in double, rounded once (tools/oracle/dflash_ref.py rope(); tests/kernels/dflash_ref.h
@@ -51,6 +93,8 @@ std::vector<float> rope_table(double theta, uint32_t head_dim, uint32_t rows);
 uint32_t ring_slots(const model::DFlashDesc& d, uint32_t layer, uint32_t max_len);
 DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len,
                   loader::DraftFormat format = loader::DraftFormat::Int8, bool candidate_head = false);
+// The row tables and the row lists' taps of a drafter beside several sequence slots (0 for one).
+RowsSizes rows_sizes(const DFlashSizes& s, uint32_t seqs);
 
 // The planner's term (runtime/memory_plan.h DrafterPlan): the weights (loader::dflash_weight_bytes) plus the buffers,
 // split into what max_len does not move and what it adds per position (the RoPE rows; a full layer's ring rows).

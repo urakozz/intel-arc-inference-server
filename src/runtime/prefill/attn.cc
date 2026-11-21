@@ -84,7 +84,18 @@ void launch_merge(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, u
             {PtrArg(a.part), PtrArg(a.ml), PtrArg(s.pf_o.ptr()), arg_val(C), arg_val(rows), arg_val(a.n)});
 }
 
+// PERF-114: kv8.cl KV8_I8S's q scales, fp32 [C][q-heads], in pf_q past its int8 rows at the chunk cap (pf_q is
+// bf16 [kC][q-heads][256], so its second half is free once q is int8).
+float* kv8_q_scales(PrefillScratch& s) {
+  return reinterpret_cast<float*>(s.pf_q.as<int8_t>() + size_t(s.chunk_cap()) * s.desc().fa_q_heads * kHeadDim);
+}
+
 }  // namespace
+
+bool kv8_int8_scores(const model::ModelDesc& d, PrefillBackend b, uint32_t pos, uint32_t C) {
+  const bool built = (d.fa_q_heads == 24 && d.fa_kv_heads == 4) || (d.fa_q_heads == 12 && d.fa_kv_heads == 2);
+  return b == PrefillBackend::L0Int8 && built && !flash_split_span(d, pos, C);
+}
 
 bool kv8_split_in_place(const model::ModelDesc& d, uint32_t pos, uint32_t C) {
   return C <= kSplitInPlaceMaxRows && flash_split_span(d, pos, C) != 0;
@@ -365,9 +376,22 @@ void require_kv8_path(PrefillBackend) {
 
 void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                          const float* qkv_partials, const float* fa_small, const float* rope,
-                         const KvLayer& kv, const void* pages) {
+                         const KvLayer& kv, const void* pages, bool int8_q) {
   require(kv.int8(), "attn_prep_chunk_kv8 needs the int8 cache's scales");
   const uint32_t q_heads = s.desc().fa_q_heads, kv_heads = s.desc().fa_kv_heads;
+  if (int8_q && pages) {   // PERF-114: the same launch with q as int8 and its scales (KV8_I8S)
+    cx.launch(kc(kernels::kv_paged(kernels::pf_attn_prep_kv8_i8s_variant(q_heads, kv_heads)), "attn_prep_kv8"),
+              q_heads + kv_heads, C, 1, {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope), PtrArg(s.pf_q.ptr()),
+                  PtrArg(nullptr), PtrArg(kv.k), PtrArg(kv.v), PtrArg(kv.ks), PtrArg(kv.vs), PtrArg(kv8_q_scales(s)),
+                  PtrArg(pages)});
+    return;
+  }
+  if (int8_q) {
+    cx.launch(kc(kernels::pf_attn_prep_kv8_i8s_variant(q_heads, kv_heads), "attn_prep_kv8"), q_heads + kv_heads, C, 1,
+              {PtrArg(ctrl), PtrArg(qkv_partials), PtrArg(fa_small), PtrArg(rope), PtrArg(s.pf_q.ptr()),
+               PtrArg(nullptr), PtrArg(kv.k), PtrArg(kv.v), PtrArg(kv.ks), PtrArg(kv.vs), PtrArg(kv8_q_scales(s))});
+    return;
+  }
   // kv8.cl's attn_prep_kv8 at PF = 1: grid (q-heads + kv-heads, C), no gate (null, as for
   // pf_attn_prep_q16), bf16 rotated q into pf_q, the int8 rows and scales.
   if (pages) {   // plan 19v3b Task 0: a slot's paged KV
@@ -409,6 +433,34 @@ void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t po
   // Plan 19v3b Task 0: a slot's paged KV binds every launch below in its paged twin (the merge and the widened rows
   // are the sequence's own, unpaged).
   const auto pg = [&](const std::string& v) { return pages ? kernels::kv_paged(v) : v; };
+  if (kv8_int8_scores(s.desc(), backend, pos, C)) {   // PERF-114: kv8_widen keeping K int8, then the int8-score pair, as below
+    const auto i8s = pg(kernels::pf_flash_attn_kv8_raw_pair_i8s_variant(q_heads, kv_heads));
+    if (pages)
+      cx.launch(kc(i8s, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,
+                {PtrArg(kv.k), PtrArg(kv.v), PtrArg(k), PtrArg(v), arg_val(count), PtrArg(pages)});
+    else
+      cx.launch(kc(i8s, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,
+                {PtrArg(kv.k), PtrArg(kv.v), PtrArg(k), PtrArg(v), arg_val(count)});
+    const auto* q8 = reinterpret_cast<const int8_t*>(q);
+    const float* qs = kv8_q_scales(s);
+    for (uint32_t r = 0; r < C; r += kPairLaunchRows) {
+      const uint32_t c = std::min(kPairLaunchRows, C - r), pr = pos + r;
+      const uint32_t gx = (c + kernels::kPfFlashPairRows - 1u) / kernels::kPfFlashPairRows,
+                     gz = q_heads / kv_heads / kernels::kPfFlashPairHeads;
+      if (pages)
+        cx.launch(kc(i8s, "pf_flash_attn_kv8"), gx, kv_heads, gz,
+                  {PtrArg(q8 + size_t(r) * q_heads * kHeadDim), PtrArg(qs + size_t(r) * q_heads), PtrArg(k),
+                   PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(s.pf_o.as<float>() + size_t(r) * kHeadDim),
+                   arg_val(pr), arg_val(c), arg_val(rows), PtrArg(pages)});
+      else
+        cx.launch(kc(i8s, "pf_flash_attn_kv8"), gx, kv_heads, gz,
+                  {PtrArg(q8 + size_t(r) * q_heads * kHeadDim), PtrArg(qs + size_t(r) * q_heads), PtrArg(k),
+                   PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(s.pf_o.as<float>() + size_t(r) * kHeadDim),
+                   arg_val(pr), arg_val(c), arg_val(rows)});
+    }
+    profile_wait(cx, Phase::kAttnFlash);
+    return;
+  }
   if (span && kv8_split_in_place(s.desc(), pos, C)) {   // 3l (2): a short chunk deep in the cache, read in place
     const SplitArea a = split_area(s, pos, C, span);
     l0::Kernel& kk = kc(pg(kernels::pf_flash_attn_kv8_split_variant(q_heads, kv_heads)), "pf_flash_attn_kv8");

@@ -16,8 +16,8 @@ format decisions in [02-formats.md](02-formats.md), the time decomposition and t
 - Is W4A4 (int4 weights times int4 activations) usable? No. The DPAS rate is real, 4.000x bf16, but int4
   activations roughly double the output error ([05-perf-model.md](05-perf-model.md)).
 - Is W8A8 worth anything for prefill? Yes. The int8 prefill path, which turns the int4 weights into rotated int8 and
-  does the matrix math in int8, is the opt-in `l0-int8` backend, about 1.15x the bf16 pass on one card for Qwen3.8
-  ([16-int8-prefill.md](16-int8-prefill.md)).
+  does the matrix math in int8, is the opt-in `l0-int8` backend, 1.24x to 1.46x the bf16 pass on one card for
+  Qwen3.8 ([16-int8-prefill.md](16-int8-prefill.md)).
 - Does quantising `lm_head` (the output head that turns the last hidden state into vocabulary logits) to int8 cost
   accuracy? Not measurably against the gates, and it is the serving default
   ([05-perf-model.md](05-perf-model.md#1-quantise-lm_head)). The int4 head is still open, below.

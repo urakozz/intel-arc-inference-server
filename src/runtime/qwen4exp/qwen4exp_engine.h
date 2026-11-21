@@ -202,7 +202,8 @@ class Qwen4ExpEngine {
   size_t kv_bytes(uint32_t n_pos) const;
   KvCache kv_cache() const { return KvCache::Bf16; }
   void save_state(void* host);
-  void load_state(const void* host, uint32_t pos);
+  void load_state(const void* host, uint32_t pos)
+    pre(pos <= max_len_);
   void save_kv(uint32_t begin, uint32_t end, void* host);
   void load_kv(uint32_t begin, uint32_t end, const void* host);
 
@@ -242,7 +243,8 @@ class Qwen4ExpEngine {
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   void verify(uint32_t k);
   const uint32_t* verify_ids() const;   // the last device's out_token[0..k]
-  void commit(uint32_t j, uint32_t next_token);
+  void commit(uint32_t j, uint32_t next_token)
+    pre(next_token < model_.desc.vocab);
   // Spec 19e's prompt lookup: draft i's id from outside (every device's cur_token[1 + i]) before verify(k).
   void set_draft_input(uint32_t i, uint32_t id);
   // The last verify's (or plain step's) logits rows [0, rows) - fp32 [rows][vocab] - and draft step i's head row.
@@ -311,7 +313,10 @@ class Qwen4ExpEngine {
   std::vector<std::unique_ptr<Stage>> st_;
   std::unique_ptr<PipelineLink> link_;
   StageLink binding_;
-  std::vector<std::unique_ptr<l0::Mem>> taps_, inj_rows_;
+  [[=gs::Outside("the debug tap, a device each: memory_use and the plan's debug_tap term count it")]]
+  std::vector<std::unique_ptr<l0::Mem>> taps_;
+  [[=gs::Outside("the injected selection rows, a device each: host memory, outside the device plan")]]
+  std::vector<std::unique_ptr<l0::Mem>> inj_rows_;
   bool broken_ = false, drop_next_ = false, injected_ = false;
   std::vector<bool> pending_;
   size_t ple_pages_checked_ = 0, expert_words_checked_ = 0;
@@ -325,7 +330,7 @@ class Qwen4ExpEngine {
   static constexpr uint32_t kNoVerify = ~0u;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0, last_verify_m_ = 0;
   std::vector<uint32_t> draft_ids_;
-  std::unique_ptr<l0::Mem> host_rows_;
+  [[=gs::Outside("pinned host memory: outside the device plan")]] std::unique_ptr<l0::Mem> host_rows_;
   // Spec 21-QFN-v1d: set by prepare_prefill (b70_qwen4exp_prefill) - releases a prefill list waiting on a hand-off that will
   // not come and waits (bounded) for every prefill list to go idle; reset() calls it.
   std::function<bool()> pf_settle_;

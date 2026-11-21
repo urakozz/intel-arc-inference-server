@@ -66,40 +66,32 @@ void* KolibriBuffers::v_layer(uint32_t layer) const {
                                 : static_cast<uint8_t*>(full_v.ptr()) + size_t(i) * full_layer_rows_bytes(desc, max_len);
 }
 
-size_t KolibriBuffers::scratch_bytes() const {
-  return resid.size() + x.size() + a.size() + mo.size() + partials.size() + sumsq_a.size() + sumsq_r.size() +
-         attn_q.size() + attn_part.size() + attn_out.size() + logits_r.size() + routes.size() + moe_h.size() +
-         logits.size() + argmax_part.size() + (attn_scores ? attn_scores->size() : 0);
-}
+size_t KolibriBuffers::scratch_bytes() const { return gs::buffer_bytes<l0::Mem, ScratchSizes, EagerSizes>(*this); }
 
 void KolibriBuffers::zero(l0::CmdList& imm) {
-  for (l0::Mem* m : {&control, &full_k, &full_v, &ring_k, &ring_v}) imm.fill(m->ptr(), 0u, m->size());
+  gs::zero<l0::Mem, PersistentSizes>(*this, [&](l0::Mem& m) { imm.fill(m.ptr(), 0u, m.size()); });
 }
 
 KolibriVerifyBuffers::KolibriVerifyBuffers(l0::Context& ctx, const model::Kolibri1Desc& d)
-    : resid(ctx, l0::MemKind::Device, verify_sizes(d).scratch.resid),
-      x(ctx, l0::MemKind::Device, verify_sizes(d).scratch.x),
-      a(ctx, l0::MemKind::Device, verify_sizes(d).scratch.a),
-      mo(ctx, l0::MemKind::Device, verify_sizes(d).scratch.mo),
-      partials(ctx, l0::MemKind::Device, verify_sizes(d).scratch.partials),
-      sumsq_a(ctx, l0::MemKind::Device, verify_sizes(d).scratch.sumsq_a),
-      sumsq_r(ctx, l0::MemKind::Device, verify_sizes(d).scratch.sumsq_r),
-      attn_q(ctx, l0::MemKind::Device, verify_sizes(d).scratch.attn_q),
-      attn_part(ctx, l0::MemKind::Device, verify_sizes(d).scratch.attn_part),
-      attn_out(ctx, l0::MemKind::Device, verify_sizes(d).scratch.attn_out),
-      logits_r(ctx, l0::MemKind::Device, verify_sizes(d).scratch.logits_r),
-      routes(ctx, l0::MemKind::Device, verify_sizes(d).scratch.routes),
-      moe_h(ctx, l0::MemKind::Device, verify_sizes(d).scratch.moe_h),
-      logits(ctx, l0::MemKind::Device, verify_sizes(d).scratch.logits),
-      argmax_part(ctx, l0::MemKind::Device, verify_sizes(d).scratch.argmax_part),
+    : resid(ctx, l0::MemKind::Device, verify_sizes(d).resid),
+      x(ctx, l0::MemKind::Device, verify_sizes(d).x),
+      a(ctx, l0::MemKind::Device, verify_sizes(d).a),
+      mo(ctx, l0::MemKind::Device, verify_sizes(d).mo),
+      partials(ctx, l0::MemKind::Device, verify_sizes(d).partials),
+      sumsq_a(ctx, l0::MemKind::Device, verify_sizes(d).sumsq_a),
+      sumsq_r(ctx, l0::MemKind::Device, verify_sizes(d).sumsq_r),
+      attn_q(ctx, l0::MemKind::Device, verify_sizes(d).attn_q),
+      attn_part(ctx, l0::MemKind::Device, verify_sizes(d).attn_part),
+      attn_out(ctx, l0::MemKind::Device, verify_sizes(d).attn_out),
+      logits_r(ctx, l0::MemKind::Device, verify_sizes(d).logits_r),
+      routes(ctx, l0::MemKind::Device, verify_sizes(d).routes),
+      moe_h(ctx, l0::MemKind::Device, verify_sizes(d).moe_h),
+      logits(ctx, l0::MemKind::Device, verify_sizes(d).logits),
+      argmax_part(ctx, l0::MemKind::Device, verify_sizes(d).argmax_part),
       control_hi(ctx, l0::MemKind::Shared, verify_sizes(d).control_hi) {
   std::memset(control_hi.ptr(), 0, control_hi.size());
 }
 
-size_t KolibriVerifyBuffers::bytes() const {
-  return resid.size() + x.size() + a.size() + mo.size() + partials.size() + sumsq_a.size() + sumsq_r.size() +
-         attn_q.size() + attn_part.size() + attn_out.size() + logits_r.size() + routes.size() + moe_h.size() +
-         logits.size() + argmax_part.size() + control_hi.size();
-}
+size_t KolibriVerifyBuffers::bytes() const { return gs::buffer_bytes<l0::Mem, ScratchSizes, VerifySizes>(*this); }
 
 }  // namespace runtime::kolibri

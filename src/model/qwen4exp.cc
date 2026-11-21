@@ -52,9 +52,9 @@ Qwen4ExpDesc make_qwen4exp() {
   d.eos = {248046, 248044};
   d.rms_eps = 1e-6f;
   d.forms = {};
-  d.gdn_out_s = 4;         // PROVISIONAL (header)
+  d.gdn_out_s = 8;         // PERF-109 (header)
   d.qkvg_s = 2;
-  d.o_s = 4;
+  d.o_s = 8;
   return d;
 }
 

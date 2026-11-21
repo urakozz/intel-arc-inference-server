@@ -47,9 +47,14 @@ struct DrafterPlan {
   // the ENGINE's side of it (runtime/tap_drafter.h): TapVerifyDims' 7 more GDN state slots for the verify lists at
   // M <= 8 (in decode_state) and, when the engine prefills, the tap staging (in prefill_scratch, lazy).
   uint32_t n_taps = 0;
+  // Spec 39: its window when every layer slides (0 otherwise): TpEngine's prefill stages the taps of the prompt's last
+  // window, not of a chunk.
+  uint32_t window = 0;
   // Plan 19v3b: one sequence's session inside `fixed` / `per_position` - its context ring, tap buffer, control block
   // and readback (runtime/dflash/dflash_buffers.h); every further sequence slot holds its own.
   size_t session_fixed = 0, session_per_position = 0;
+  // Spec 39: beside several sequence slots, the batched draft's row tables and the row lists' taps (once).
+  size_t rows = 0;
   bool on() const { return weights != 0; }
   size_t bytes(uint32_t max_len) const { return weights + fixed + per_position * size_t(max_len); }
   size_t session(uint32_t len) const { return session_fixed + session_per_position * size_t(len); }
@@ -69,7 +74,7 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 //                       linears leave it unallocated until a later slab-backed call.
 //   l0-int8             Int8State (xq, xs, w8, every int4 linear's column scales - on a MoE
 //                       model also every layer's expert gate||up array, spec 15d); the L0
-//                       slab only with MTP (step_mtp_kv's bf16 linears walk it).
+//                       slab (a MoE model's mixer linears, a dense model's short chunks, MTP's bf16 linears).
 //   (the flash attention builds no pf_s / pf_p: those are the composed attention's, a test-only
 //   reference since the zero-config cleanup, and no engine plans them)
 //
@@ -112,6 +117,9 @@ struct MemoryPlan : MemoryComponents {
   size_t rope = 0;           // in model: Qwen35::rope_table_bytes(max_len)
   size_t mtp_buffers = 0;    // in decode_state: MtpBuffers
   size_t mtp_hidden = 0;     // in decode_state: Engine::prefill's MTP hidden rows
+  // In decode_state: spec 32's deferred GDN rows and deep chain scratch (EngineSizes' gdn_pend, gdn_x, conv_x) - one
+  // sequence with the MTP head or a drafter. 0 elsewhere.
+  size_t deep = 0;
   size_t prefill_lazy = 0;   // in prefill_scratch: the lazy buffers `path` builds
   // Spec 15c, a mixture-of-experts model: the loader's expert blocks, routers and shared
   // experts (loader::moe_bytes - already inside `model_bytes`, the loaded total), and the
@@ -131,6 +139,9 @@ struct MemoryPlan : MemoryComponents {
   // further slots' GDN states and hh rows in MtpBuffers. Empty / 0 for one sequence: plan() itself.
   std::vector<uint32_t> slot_lens;
   size_t slot_state = 0;
+  // Spec 31, a KV page pool (plan_pool): its pages (max_len = pool_pages x kKvPage); slot_lens is then every
+  // sequence's reach, the per-request cap. 0 for fixed slots and one sequence.
+  uint32_t pool_pages = 0;
 };
 
 // `kv` (spec 12b, `--kv-cache`): the KV cache's form - its term follows it (bf16: 64 KiB
@@ -215,5 +226,31 @@ uint32_t slot0_len_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool m
                              KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 // "131072 + 3 x 32768" - the startup line's form of a layout.
 std::string slot_layout_name(const std::vector<uint32_t>& lens);
+
+// --- spec 31: a KV page pool shared by the sequences of one card ---------------------------------------------------
+//
+// `seqs` sequences share `pages` KV pages of kKvPage positions; one request grows up to `cap` positions (a multiple
+// of kMaxLenQuantum, at most the pool). Every sequence is alike: its fixed state, and a page table as long as the cap.
+struct PoolShape {
+  uint32_t seqs = 0, pages = 0, cap = 0;
+  uint64_t positions() const { return uint64_t(pages) * kKvPage; }
+};
+// The page table's entries: kv_pages(cap) a sequence.
+uint32_t pool_table_pages(const PoolShape& s);
+// plan() at the pool's positions (the main cache's and the head's KV, the RoPE table: the engine's max_len), with what
+// one request reaches at the cap - int8 prefill's widening scratch, slot 0's drafter and every further sequence's
+// drafter session -
+// plus the further sequences' state as plan_slots counts it, the page table at pool_table_pages. Throws
+// std::invalid_argument outside [2, SlotDims::kMaxSeqs] sequences (one is plan()) or for a cap off the grid or past
+// the pool.
+MemoryPlan plan_pool(const model::ModelDesc& desc, const PoolShape& s, bool mtp, size_t model_bytes,
+                     const PrefillPath& path = {}, KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
+// The largest pool whose plan_pool total + `reserve_bytes` <= `device_bytes`: the most pages - no more than `seqs`
+// requests at the cap can use - with the cap min(pages x kKvPage, `limit` on the quantum grid). `limit` is the trained
+// context under --max-len auto, or the explicit --max-len. pages 0 when not even a pool of
+// kv_pages(min(kMinAutoMaxLen, limit)) fits. Throws std::invalid_argument when `limit` is below one quantum.
+PoolShape pool_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, size_t model_bytes, size_t device_bytes,
+                         size_t reserve_bytes, uint32_t limit, const PrefillPath& path = {},
+                         KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
 }  // namespace runtime

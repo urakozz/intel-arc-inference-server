@@ -67,6 +67,8 @@ void Engine::set_prefill_chunk_cap(uint32_t cap) {
 }
 
 MemoryComponents Engine::memory_use() const {
+  // Spec 39: every allocation of the engine is in a paired buffers struct (none of its own members is one).
+  static_assert(gs::buffers_problem<l0::Mem, Engine>().empty(), gs::buffers_problem<l0::Mem, Engine>());
   MemoryComponents c;
   c.model = model_.report.total();
   c.kv = persist_.kv_k.size() + persist_.kv_v.size();
@@ -74,15 +76,15 @@ MemoryComponents Engine::memory_use() const {
   // decode state; the head's weights are in `model` (LoadReport::mtp_bytes). Spec 13c: so do
   // the further sequence slots' (SlotBuffers; their MTP part is in MtpBuffers already).
   c.decode_state = persist_.bytes() - c.kv + decode_scratch_.bytes() +
-                   (mtp_ ? mtp_->bytes() : 0) + (mtp_pf_hid_ ? mtp_pf_hid_->size() : 0) +
+                   (mtp_ ? mtp_->bytes() : 0) + (pf_own_.mtp_hid ? pf_own_.mtp_hid->size() : 0) +
                    (slot_bufs_ ? slot_bufs_->bytes() : 0);
-  // Spec 19c: a drafter's verify slots are decode state, its prefill tap staging prefill scratch, and the drafter
-  // itself (weights, ring, taps, scratch) its own term.
-  if (df_slots_) c.decode_state += df_slots_->size();
-  // Spec 32: the deferred GDN rows and the deep verify lists' chain scratch - Engine's own, not MtpBuffers'
-  // (MtpDims::sizes' `deep` term).
-  c.decode_state += (gdn_pend_ ? gdn_pend_->size() : 0) + (gdn_x_ ? gdn_x_->size() + conv_x_->size() : 0);
-  c.prefill_scratch = (pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0) + (df_pf_taps_ ? df_pf_taps_->size() : 0);
+  // Spec 39: Engine's own allocations (EngineBuffers) are decode state - spec 19c's drafter verify slots, spec 32's
+  // deferred GDN rows and deep chain scratch, and the debug tap (which this sum left out before). A drafter's prefill
+  // tap staging is prefill scratch, and the drafter itself (weights, ring, taps, scratch) its own term.
+  c.decode_state += own_.bytes();
+  // EnginePrefillSizes by name: the plan puts the head's hidden rows in decode state and the tap staging in prefill
+  // scratch (MemoryPlan::mtp_hidden, drafter_taps).
+  c.prefill_scratch = (pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0) + (pf_own_.df_taps ? pf_own_.df_taps->size() : 0);
   c.drafter = drafter_ ? drafter_->bytes() : 0;
   c.int8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
   // Spec 8 §11: the draft vocabulary's compact head and id table - the loader's, but
@@ -133,7 +135,7 @@ void Engine::prepare_prefill() {
   // pf_colmax_rot.
   // Not a||b: prefill runs it in bf16 (the dense GEMM, or pf_ab_proj on a tensor-parallel card) on every backend,
   // over the checkpoint's bf16 weight or (spec 15 §13) an int4 a||b's bf16 copy - never through h8.
-  // Not the mixer linears either: l0-int8 runs them on the l0 walk (open-work 16 / 17).
+  // Not a MoE model's mixer linears either: l0-int8 runs them on the l0 walk there (open-work 16).
   for (const auto& [key, w] : model_.linears)
     if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
         w.kind == model::WeightKind::Int4 && !l0_int8_bf16_linear(*model_.desc, key.second))
@@ -141,7 +143,7 @@ void Engine::prepare_prefill() {
 }
 
 void Engine::drafter_project_staged(uint32_t pos, uint32_t n) {
-  if (drafter_->project_wide(pfx_->cx, pfx_->kc, *pf_, df_pf_taps_->ptr(), pos, n)) {
+  if (drafter_->project_wide(pfx_->cx, pfx_->kc, *pf_, pf_own_.df_taps->ptr(), pos, n)) {
     prefill::timed_wait(pfx_->cx, prefill::Phase::kDraftProj);   // the ring's rows have landed: a block hook's
                                                                   // snapshot, the next draft
     return;
@@ -149,7 +151,7 @@ void Engine::drafter_project_staged(uint32_t pos, uint32_t n) {
   const size_t row = drafter_->tap_layers().size() * size_t(model_.desc->hidden) * 2;
   for (uint32_t r = 0; r < n; r += 8) {
     const uint32_t g = std::min<uint32_t>(8, n - r);
-    imm_.copy(drafter_->taps().ptr(), df_pf_taps_->as<uint8_t>() + size_t(r) * row, size_t(g) * row);
+    imm_.copy(drafter_->taps().ptr(), pf_own_.df_taps->as<uint8_t>() + size_t(r) * row, size_t(g) * row);
     replay_aux(drafter_->projection(pos + r, g));
   }
 }
@@ -177,6 +179,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         std::to_string(max_len()) +
         " -- the KV cache and the RoPE table stop there. Start a new session with reset(), or"
         " load the model and the engine with a larger max_len.");
+  need_pages(cur_, base + uint32_t(ids.size()), "prefill");   // spec 31: the call's positions, before a chunk writes
 
   prepare_prefill();
 
@@ -211,21 +214,20 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
                                "prefill runs for the last row only - not built (no published drafter does)");
     mtp_normalise_live();
     seq().verify_k = kNoVerify;
-    if (!df_pf_taps_)
-      df_pf_taps_ = std::make_unique<l0::Mem>(
+    if (!pf_own_.df_taps)
+      pf_own_.df_taps = std::make_unique<l0::Mem>(
           ctx_, l0::MemKind::Device,
-          TapVerifyDims::prefill_taps_bytes(*model_.desc, uint32_t(drafter_->tap_layers().size()),
-                                            pf_->chunk_cap()));
+          engine_prefill_sizes(*model_.desc, pf_->chunk_cap(), false, uint32_t(drafter_->tap_layers().size())).df_taps);
     const uint64_t end = uint64_t(base) + ids.size(), w = drafter_->window();
     df_from = uint32_t(end > w ? std::max<uint64_t>(base, end - w) : base);
   }
   if (mtp_) {
     mtp_normalise_live();
     seq().verify_k = kNoVerify;
-    if (!mtp_pf_hid_)
-      mtp_pf_hid_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device,
-                                              mtp_prefill_hidden_bytes(*model_.desc, pf_->chunk_cap()));
-    hid = mtp_pf_hid_->as<uint16_t>();
+    if (!pf_own_.mtp_hid)
+      pf_own_.mtp_hid = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device,
+                                                  engine_prefill_sizes(*model_.desc, pf_->chunk_cap(), true, 0).mtp_hid);
+    hid = pf_own_.mtp_hid->as<uint16_t>();
   }
   const size_t hid_row = size_t(model_.desc->hidden) * 2;
   // Spec 13c: the selected slot's state, ring and KV range (slot 0 of a one-slot engine: the buffers' own, unchanged).
@@ -235,6 +237,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   pslot.conv_ring = sq.ring;
   pslot.kv_base = sq.base;
   pslot.pages = sq.bind.pages;   // plan 19v3b Task 0: several slots' KV is paged
+  if (pool_) pslot.positions = layout_.total();   // spec 31: the sequences' table regions
   const prefill::PrefillSlot* slot = slots() > 1 ? &pslot : nullptr;
   // PERF-89: the copies a mid-prompt hook leaves on the copy engine end before this call returns or throws.
   struct SnapDrain {
@@ -265,7 +268,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     const uint32_t cpos = base + uint32_t(off);
     prefill::PrefillTaps df_taps;
     if (drafter_) {
-      df_taps.dst = df_pf_taps_->ptr();
+      df_taps.dst = pf_own_.df_taps->ptr();
       df_taps.sites = &df_sites;
       df_taps.n_taps = uint32_t(drafter_->tap_layers().size());
       df_taps.r0 = df_from > cpos ? std::min(df_from - cpos, C) : 0;

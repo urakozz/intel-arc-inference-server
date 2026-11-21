@@ -16,10 +16,19 @@
 #include "runtime/tp_protocol.h"   // tp::Layout (header-only)
 
 namespace runtime::qwen4exp {
+static_assert(kTpOutSlices == kernels::qwen4exp::kTpOutS, "the out crossing's landing holds the send-folded gemv's slices");
 namespace {
 
 constexpr size_t kLine = 64;   // an empty group's allocation
 size_t line(size_t b) { return b ? b : kLine; }
+
+// A sizes struct's members into the plan by their gpu_state groups (spec 39).
+template <class S>
+void add_groups(DevicePlan& dp, const S& s) {
+  dp.kv += gs::bytes(s, gs::Group::Kv);
+  dp.state += gs::bytes(s, gs::Group::State);
+  dp.scratch += gs::bytes(s, gs::Group::Scratch);
+}
 
 uint32_t count_qsa(const model::Qwen4ExpDesc& d, uint32_t first, uint32_t end) {
   uint32_t n = 0;
@@ -249,9 +258,18 @@ PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d, uint32_t rows) {
 size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows) {
   return dev == 0 ? 0 : kPfDepth * pf_landing_layout(d, rows).total;
 }
-size_t pf_pair_bytes(const model::Qwen4ExpDesc& d, uint32_t rows) {
-  return size_t(rows) * (size_t(d.hc_n()) * 2 + size_t(d.hc) * 4 + size_t(d.hidden) * 2);
+PfDevDeviceSizes pf_dev_sizes(const model::Qwen4ExpDesc& d, uint32_t rows, bool head, bool pair) {
+  PfDevDeviceSizes s;
+  if (head) s.mtp_R = mtp_prefill_R_bytes(d, rows);
+  if (pair) {
+    s.H1 = size_t(rows) * d.hc_n() * 2;
+    s.inj1 = size_t(rows) * d.hc * 4;
+    s.y1 = size_t(rows) * d.hidden * 2;
+  }
+  return s;
 }
+
+size_t pf_pair_bytes(const model::Qwen4ExpDesc& d, uint32_t rows) { return gs::bytes(pf_dev_sizes(d, rows, false, true)); }
 
 size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t pos,
                                uint32_t C, bool injected, bool mtp) {
@@ -334,18 +352,13 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     const uint32_t rows = mtp ? kVerifyRows : kM;
     dp.scratch = scratch_sizes(d, max_len, kDefaultQ4Attn, rows).total() + (debug_tap ? tap_bytes(d) : 0);
     if (mtp) {
-      dp.state += gdn_pend_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
-      if (dev + 1 == p.devices) {
-        const MtpSizes ms = mtp_sizes(d, max_len);
-        dp.kv += ms.kv + ms.idx_keys + ms.idx_tail;
-        dp.state += ms.ctl + ms.hh;
-        dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits + ms.routes;
-      }
+      add_groups(dp, verify_sizes(d, p, dev));
+      if (dev + 1 == p.devices) add_groups(dp, mtp_sizes(d, max_len));
     }
     dp.link = p.devices == 2 ? link_bytes_rows(d, dev, rows) : 0;
     dp.decode_state = dp.state + dp.scratch + dp.link;
     dp.prefill_scratch = prefill ? prefill_state(d, p.devices, dev, max_len, pf_rows) : 0;
-    if (prefill && mtp && dev + 1 == p.devices) dp.prefill_scratch += mtp_prefill_R_bytes(d, pf_rows);
+    if (prefill && mtp && dev + 1 == p.devices) dp.prefill_scratch += pf_dev_sizes(d, pf_rows, true, false).mtp_R;
   }
   return out;
 }
@@ -674,22 +687,45 @@ void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const 
 }
 
 // --- plan 21-QFN-v2b: tensor parallel ---------------------------------------------------------------------------------
-size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one) {
-  size_t b = tp::kStateWords * 4 + size_t(one.top_k + 1) * one.hidden * 4;   // the state words, the MoE's slots
-  // the card's two layouts (qwen4exp_tp_card.h): out_proj / o_proj's chunks are its gemv's work-groups (PERF-44), the
-  // MoE's its down's
-  for (const tp::Layout& L : {tp::Layout{one.hidden, kTpOutSlices, kernels::qwen4exp::kTpOutFoldG},
-                              tp::Layout{one.hidden, one.top_k + 1, kernels::qwen4exp::kTpMoeFoldG}})
-    b += L.total_bytes() + 2 * L.counter_bytes();
-  return b;
+TpCardSizes tp_card_sizes(const model::Qwen4ExpDesc& one, bool mtp, bool draft_ctl) {
+  // the card's two layouts: out_proj / o_proj's chunks are its gemv's work-groups (PERF-44), the MoE's its down's
+  const tp::Layout lo{one.hidden, kTpOutSlices, kernels::qwen4exp::kTpOutFoldG};
+  const tp::Layout lm{one.hidden, one.top_k + 1, kernels::qwen4exp::kTpMoeFoldG};
+  TpCardSizes s;
+  s.land_o = lo.total_bytes();
+  s.land_m = lm.total_bytes();
+  s.ctr_so = s.ctr_fo = lo.counter_bytes();
+  s.ctr_sm = s.ctr_fm = lm.counter_bytes();
+  s.slots = size_t(one.top_k + 1) * (mtp ? kVerifyRows : 1) * one.hidden * 4;
+  s.state = tp::kStateWords * 4;
+  if (draft_ctl) s.dctl = sizeof(Control);
+  return s;
+}
+
+size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one, bool mtp, bool draft_ctl) {
+  return tp_card_sizes(one, mtp, draft_ctl).total();
+}
+
+TpPfDevSizes tp_pf_dev_sizes(const model::Qwen4ExpDesc& one, uint32_t rows, bool head) {
+  // Task 4 Step 2: two chunks in flight - each its fold slots, the second its residual rows, inject weights and
+  // selection rows of one QSA layer (the indexer split by rows)
+  static_assert(kTpPfChunks == 2, "one second chunk's rows");
+  TpPfDevSizes s;
+  s.fold = size_t(kTpPfChunks) * 2 * 2 * rows * one.hidden * 4;
+  s.yf = size_t(pf_tiles(one, rows)) * kPfTm * one.hidden * 4;
+  s.H1 = size_t(rows) * one.hc_n() * 2;
+  s.inj1 = size_t(rows) * one.hc * 4;
+  s.lists1 = size_t(rows) * kListRow * 4;
+  if (head) {   // Task 5: the head's pass on its card
+    s.mtp_R = mtp_prefill_R_bytes(one, rows);
+    s.mtp_part = size_t(rows) * pf_ld(one.qkvg_n()) * 4;
+    s.mtp_q16 = size_t(rows) * one.q_n() * 2;
+  }
+  return s;
 }
 
 size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one, uint32_t rows) {
-  // Task 4 Step 2: two chunks in flight - each its fold slots, the second its residual rows, inject weights and
-  // selection rows of one QSA layer (the indexer split by rows)
-  return size_t(kTpPfChunks) * 2 * 2 * rows * one.hidden * 4 + size_t(pf_tiles(one, rows)) * kPfTm * one.hidden * 4 +
-         size_t(kTpPfChunks - 1) * rows * (size_t(one.hc_n()) * 2 + size_t(one.hc) * 4 + size_t(kListRow) * 4) +
-         pf_ring_bytes(one);
+  return gs::bytes(tp_pf_dev_sizes(one, rows, false)) + pf_ring_bytes(one);
 }
 
 std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4Placement& p, uint32_t max_len,
@@ -711,23 +747,21 @@ std::vector<DevicePlan> tp_plan(const model::Qwen4ExpDesc& one, const model::Q4P
       // whole.
       const bool head = p.holds_mtp(r);
       dp.mtp = head;
-      dp.state += gdn_pend_bytes(c, pc, 0) + ple_verify_bytes(c, pc, 0);
       dp.scratch = scratch_sizes(head ? one : c, max_len, kDefaultQ4Attn, kVerifyRows).total() +
                    (debug_tap ? tap_bytes(c) : 0);
+      add_groups(dp, verify_sizes(c, pc, 0));
       if (head) {
         dp.weights += loader::q4_mtp_bytes(one);
-        const MtpSizes ms = mtp_sizes(one, max_len);
-        dp.kv += ms.kv + ms.idx_keys + ms.idx_tail;
-        dp.state += ms.ctl + ms.hh;
-        dp.scratch += ms.list + ms.diag + ms.xe + ms.xh + ms.fe + ms.fh + ms.logits + ms.routes;
+        add_groups(dp, mtp_sizes(one, max_len));
         // the head pass's R rows, and (Task 5) its own rows at one card's widths: k||v columns / fh, q16
-        if (prefill)
-          dp.prefill_scratch += mtp_prefill_R_bytes(one, pf_rows) + size_t(pf_rows) * pf_ld(one.qkvg_n()) * 4 +
-                                size_t(pf_rows) * one.q_n() * 2;
+        if (prefill) {
+          const TpPfDevSizes t = tp_pf_dev_sizes(one, pf_rows, true);
+          dp.prefill_scratch += t.mtp_R + t.mtp_part + t.mtp_q16;
+        }
       }
     }
     dp.model = dp.weights + dp.rope;
-    dp.link = tp_crossing_bytes(one);
+    dp.link = tp_crossing_bytes(one, mtp, mtp && r == 0);   // spec 39: the verify rows' slots, card 0's draft Control
     dp.decode_state = dp.state + dp.scratch + dp.link;
     out.push_back(dp);
   }
@@ -806,8 +840,10 @@ size_t pf_lend_bytes(const model::Qwen4ExpDesc& c, uint32_t max_len, uint32_t ro
   const PrefillSizes s = prefill_sizes(c, max_len, rows);   // lend_regions' list (qwen4exp_prefill.cc)
   size_t b = s.xg + s.w + s.h + s.partials + s.slab + s.gdn + s.o + s.q16 + s.attn_out + s.idx_f32 + s.xn + s.x +
              s.down_f32 + s.y + 2 * kPfRingBytes;
-  if (tp_one)   // the pair's fold slots and the down GEMM's rows (qwen4exp_tp_prefill.cc's lent regions)
-    b += size_t(kTpPfChunks) * 2 * 2 * rows * tp_one->hidden * 4 + size_t(pf_tiles(*tp_one, rows)) * kPfTm * tp_one->hidden * 4;
+  if (tp_one) {   // the pair's fold slots and the down GEMM's rows (qwen4exp_tp_prefill.cc's lent regions)
+    const TpPfDevSizes t = tp_pf_dev_sizes(*tp_one, rows, false);
+    b += t.fold + t.yf;
+  }
   return b;
 }
 
@@ -855,7 +891,7 @@ const char* mtp_norm_name(MtpNorm n) { return n == MtpNorm::PerStream ? "per_str
 MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   const size_t R = kVerifyRows;
   MtpSizes s;
-  s.ctl = sizeof(Control);
+  s.hctl = sizeof(Control);
   s.kv = size_t(max_len) * 2 * d.kv_n() * 2;
   s.idx_keys = size_t(max_len / d.idx_compress) * d.idx_dim * 2;
   s.idx_tail = size_t(kIdxTail) * d.idx_dim * 2;
@@ -884,6 +920,13 @@ size_t ple_verify_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& 
   return has_ple ? 2 * size_t(kVerifyRows) * d.hc_n() * 2 : 0;
 }
 
+VerifySizes verify_sizes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev) {
+  VerifySizes s;
+  s.gdn_pend = gdn_pend_bytes(d, p, dev);
+  s.ple_gated = s.ple_gn = ple_verify_bytes(d, p, dev) / 2;
+  return s;
+}
+
 PpLandingLayout landing_layout_rows(const model::Qwen4ExpDesc& d, uint32_t rows) {
   return pp_landing_layout(size_t(rows) * d.hc_n() * 2, 0);
 }
@@ -892,7 +935,7 @@ size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows
 }
 
 size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len) {
-  size_t b = gdn_pend_bytes(d, p, dev) + ple_verify_bytes(d, p, dev);
+  size_t b = gs::bytes(verify_sizes(d, p, dev));
   b += scratch_sizes(d, max_len, kDefaultQ4Attn, kVerifyRows).total() - scratch_sizes(d, max_len, kDefaultQ4Attn).total();
   if (p.devices == 2) b += link_bytes_rows(d, dev, kVerifyRows) - link_bytes(d, dev);
   if (dev + 1 == p.devices) b += mtp_sizes(d, max_len).total();

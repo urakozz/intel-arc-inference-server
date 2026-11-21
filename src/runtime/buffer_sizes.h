@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 #include "model/model_desc.h"
+#include "runtime/gpu_state.h"
 
 // The byte size of every runtime allocation that a model and a max_len decide, as
 // device-free arithmetic (the max_len auto amendment of spec 6, §10). There is ONE
@@ -17,6 +18,15 @@
 // `DecodeScratch::kAttnBlock` and `DecodeScratch::sizes()` are still spelled the way
 // every call site has always spelled them, and this header needs no Level Zero.
 namespace runtime {
+namespace gs = gpu_state;
+
+// Spec 39: the allocations runtime::Engine's snapshot (save_state / save_kv, the prefix cache's) reads. Each is claimed
+// by exactly one sizes member's gpu_state::Snapshot annotation below; the live GDN state is whichever slot gdn_live
+// names - PersistentBuffers::gdn_state, a state of MtpBuffers::gdn_spec, SlotBuffers::states or the drafter's slots.
+enum class EngineSnap : uint32_t {
+  KvK, KvV, GdnState, ConvRing, GdnSpec, HeadKvK, HeadKvV, HeadHidden, SlotStates, SlotRings, DrafterSlots
+};
+using EngSnap = gs::Snapshot<EngineSnap>;
 
 // --- the KV cache's form (spec 12b) --------------------------------------------------
 
@@ -78,10 +88,18 @@ KvLayout kv_layout(uint32_t max_len, const model::ModelDesc& desc, uint32_t laye
 
 // --- PersistentBuffers ---------------------------------------------------------------
 
+// Spec 39: PersistentBuffers holds one allocation of each name; the annotations are its plan group, reset and snapshot.
 struct PersistentSizes {
-  size_t control, gdn_state, conv_ring, kv_k, kv_v;
-  size_t total() const { return control + gdn_state + conv_ring + kv_k + kv_v; }
+  [[=gs::state, =gs::zero_on_reset,
+    =gs::NotSnapshotted("load_state writes gdn_live, gdn_pend, pos and n_active; the prefill after it the pending id")]]
+  size_t control = 0;
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::GdnState}]] size_t gdn_state = 0;
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::ConvRing}]] size_t conv_ring = 0;
+  [[=gs::kv, =gs::zero_on_reset, =EngSnap{EngineSnap::KvK}]] size_t kv_k = 0;
+  [[=gs::kv, =gs::zero_on_reset, =EngSnap{EngineSnap::KvV}]] size_t kv_v = 0;
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<PersistentSizes, EngineSnap>().empty(), gs::sizes_problem<PersistentSizes, EngineSnap>());
 
 struct PersistentDims {
   static constexpr uint32_t kConvRing = 32;   // ring depth >= M + 3 (spec §9.4; open-work 28: the 16-row verify)
@@ -97,15 +115,25 @@ struct PersistentDims {
 
 // --- DecodeScratch -------------------------------------------------------------------
 
+// Spec 39: DecodeScratch holds one allocation of each name.
 struct DecodeScratchSizes {
-  size_t resid, x, partials, ab_out, norm_sumsq, gdn_o, attn_q, attn_gate, attn_part,
-      attn_out, logits, argmax_part;
-  size_t moe;   // spec 15c: MoeScratchLayout::total, 0 on a dense model (no allocation)
-  size_t total() const {
-    return resid + x + partials + ab_out + norm_sumsq + gdn_o + attn_q + attn_gate + attn_part +
-           attn_out + logits + argmax_part + moe;
-  }
+  [[=gs::scratch]] size_t resid = 0;
+  [[=gs::scratch]] size_t x = 0;
+  [[=gs::scratch]] size_t partials = 0;
+  [[=gs::scratch]] size_t ab_out = 0;
+  [[=gs::scratch]] size_t norm_sumsq = 0;
+  [[=gs::scratch]] size_t gdn_o = 0;
+  [[=gs::scratch]] size_t attn_q = 0;
+  [[=gs::scratch]] size_t attn_gate = 0;
+  [[=gs::scratch]] size_t attn_part = 0;
+  [[=gs::scratch]] size_t attn_out = 0;
+  [[=gs::scratch]] size_t logits = 0;
+  [[=gs::scratch]] size_t argmax_part = 0;
+  [[=gs::scratch]] size_t moe = 0;   // spec 15c: MoeScratchLayout::total, 0 on a dense model (no allocation)
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<DecodeScratchSizes, EngineSnap>().empty(),
+              gs::sizes_problem<DecodeScratchSizes, EngineSnap>());
 
 // Spec 15c: a mixture-of-experts model's decode scratch - ONE allocation
 // (DecodeScratch::moe), three regions, sized here and nowhere else:
@@ -201,8 +229,8 @@ struct DecodeScratchDims {
   static constexpr uint32_t kNormGroups = 20;
 
   // Spec 32e: the decode scratch's rows - kDeepM where the deep verify lists can be built (one sequence, the MTP head
-  // without a draft vocabulary, bf16 KV, Qwen3.8's attention and delta-net shapes; the engine also needs the int8
-  // head), kWideM elsewhere.
+  // without a draft vocabulary, bf16 KV, Qwen3.8's attention and delta-net shapes - PERF-56: or Ornith's; the engine
+  // also needs the int8 head), kWideM elsewhere.
   static uint32_t rows(const model::ModelDesc& desc, bool mtp, KvCache kv, uint32_t seqs, bool draft_vocab);
   static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t rows = kWideM);
 };
@@ -213,18 +241,44 @@ struct DecodeScratchDims {
 // at the size its accessor allocates on first use. Which lazy ones a session builds is
 // a property of the backend and the attention path, not of this struct: see
 // `prefill_lazy_bytes` in runtime/memory_plan.h.
-struct PrefillScratchSizes {
-  size_t ids, resid, x, partials, ab_out, norm_sumsq, gdn_o, mixer_out, logits, argmax_part,
-      gdn_xb, gdn_seed, gdn_g, gdn_beta, gdn_A, gdn_A2, gdn_w, gdn_u, pf_q, pf_attn, pf_o,
-      pf_rowsum;
-  size_t slab, pf_s, pf_p, kv8_raw;   // lazy; kv8_raw is exact, unscaled bf16 K/V for one layer
-  size_t moe = 0;   // spec 15d: MoePrefillLayout::total, eager on a MoE model, 0 when dense
-  size_t eager() const {
-    return ids + resid + x + partials + ab_out + norm_sumsq + gdn_o + mixer_out + logits +
-           argmax_part + gdn_xb + gdn_seed + gdn_g + gdn_beta + gdn_A + gdn_A2 + gdn_w + gdn_u +
-           pf_q + pf_attn + pf_o + pf_rowsum + moe;
-  }
+// Spec 39: the lazy ones (the base) and the eager ones, PrefillScratch's allocations of these names. Every one is
+// scratch: no prefill kernel reads what it has not written in that chunk.
+struct PrefillLazySizes {
+  [[=gs::scratch]] size_t slab = 0;
+  [[=gs::scratch]] size_t pf_s = 0;
+  [[=gs::scratch]] size_t pf_p = 0;
+  [[=gs::scratch]] size_t kv8_raw = 0;   // exact, unscaled bf16 K/V for one layer
 };
+struct PrefillScratchSizes : PrefillLazySizes {
+  [[=gs::scratch]] size_t ids = 0;
+  [[=gs::scratch]] size_t resid = 0;
+  [[=gs::scratch]] size_t x = 0;
+  [[=gs::scratch]] size_t partials = 0;
+  [[=gs::scratch]] size_t ab_out = 0;
+  [[=gs::scratch]] size_t norm_sumsq = 0;
+  [[=gs::scratch]] size_t gdn_o = 0;
+  [[=gs::scratch]] size_t mixer_out = 0;
+  [[=gs::scratch]] size_t logits = 0;
+  [[=gs::scratch]] size_t argmax_part = 0;
+  [[=gs::scratch]] size_t gdn_xb = 0;
+  [[=gs::scratch]] size_t gdn_seed = 0;
+  [[=gs::scratch]] size_t gdn_g = 0;
+  [[=gs::scratch]] size_t gdn_beta = 0;
+  [[=gs::scratch]] size_t gdn_A = 0;
+  [[=gs::scratch]] size_t gdn_A2 = 0;
+  [[=gs::scratch]] size_t gdn_w = 0;
+  [[=gs::scratch]] size_t gdn_u = 0;
+  [[=gs::scratch]] size_t pf_q = 0;
+  [[=gs::scratch]] size_t pf_attn = 0;
+  [[=gs::scratch]] size_t pf_o = 0;
+  [[=gs::scratch]] size_t pf_rowsum = 0;
+  [[=gs::scratch]] size_t moe = 0;   // spec 15d: MoePrefillLayout::total, eager on a MoE model, 0 when dense
+  size_t eager() const { return gs::bytes(*this); }   // this struct's own members, not the lazy base's
+};
+static_assert(gs::sizes_problem<PrefillLazySizes, EngineSnap>().empty(),
+              gs::sizes_problem<PrefillLazySizes, EngineSnap>());
+static_assert(gs::sizes_problem<PrefillScratchSizes, EngineSnap>().empty(),
+              gs::sizes_problem<PrefillScratchSizes, EngineSnap>());
 
 // Spec 15d: a mixture-of-experts model's PREFILL scratch - one allocation
 // (PrefillScratch::moe), regions at these offsets, sized here and nowhere else
@@ -322,15 +376,25 @@ void set_default_prefill_chunk_cap(uint32_t cap);
 
 // --- MtpBuffers (spec 8) -------------------------------------------------------------
 
+// Spec 39: MtpBuffers holds one allocation of each name. (Spec 32's deferred GDN rows and deep chain scratch were a
+// `deep` term here with no MtpBuffers member: they are Engine's, EngineSizes below.)
 struct MtpSizes {
-  size_t hctl, gdn_spec, kv_k, kv_v, hh, dh, logits;
-  size_t dv_logits;   // spec 8 §11: fp32 [|V'|], 0 without a draft vocabulary
-  // Spec 32: one sequence on Qwen3.8's GDN shapes - the deferred GDN rows (two parities, 64 rows each) and, over the
-  // bf16 KV cache, the deep verify lists' chain scratch (a GDN state and the conv rows 16..). PERF-51: on Ornith's, the
-  // deferred rows alone.
-  size_t deep;
-  size_t total() const { return hctl + gdn_spec + kv_k + kv_v + hh + dh + logits + dv_logits + deep; }
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("draft() writes the head's pos, n_active and token")]]
+  size_t hctl = 0;
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::GdnSpec}]] size_t gdn_spec = 0;
+  [[=gs::kv, =gs::zero_on_reset, =EngSnap{EngineSnap::HeadKvK}]] size_t kv_k = 0;
+  [[=gs::kv, =gs::zero_on_reset, =EngSnap{EngineSnap::HeadKvV}]] size_t kv_v = 0;
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::HeadHidden}]] size_t hh = 0;   // the snapshot holds row 0
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft chain writes it before reading it")]]
+  size_t dh = 0;
+  // Under a draft vocabulary reset fills it with -inf (MtpBuffers::zero), which nothing but V''s entries overwrites.
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft writes its row's entries before they are read")]]
+  size_t logits = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft writes it before reading it")]]
+  size_t dv_logits = 0;   // spec 8 §11: fp32 [|V'|], 0 without a draft vocabulary
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<MtpSizes, EngineSnap>().empty(), gs::sizes_problem<MtpSizes, EngineSnap>());
 
 struct MtpDims {
   static constexpr uint32_t kSlots = 4;   // M <= 4: K <= 3 drafts + the pending token
@@ -340,6 +404,8 @@ struct MtpDims {
   static constexpr size_t kGdnConvXLayer = size_t{48} * 10240 * 2;
   // PERF-51: kernels::gdn_pend_parity_bytes at Ornith's 30 GDN layers, 16 / 32 heads (engine.cc holds them equal).
   static constexpr size_t kGdnPendParityOrnith = size_t{30} * (64 * (16 + 32) * 128 * 2 + 64 * 32 * 2 * 4);
+  // PERF-56: kernels::gdn_conv_x_layer_bytes at Ornith's 8192 conv channels (engine.cc holds them equal).
+  static constexpr size_t kGdnConvXLayerOrnith = size_t{48} * 8192 * 2;
   // Spec 19a (plan 19a Task 4): the most GDN state slots a buffer may carry - a verify
   // list at M rows needs M slots, and DecodeScratchDims::kM = 8 bounds M.
   static constexpr uint32_t kMaxSlots = 8;
@@ -396,15 +462,24 @@ inline constexpr uint32_t kv_pages(uint32_t len) { return uint32_t((uint64_t(len
 // length, several the sum of their lengths each rounded up to whole pages. Throws std::invalid_argument for no slot or
 // past 32 bits.
 uint32_t slots_kv_len(const std::vector<uint32_t>& lens);
+// Spec 39: SlotBuffers holds one allocation of each name.
 struct SlotSizes {
-  size_t states = 0, rings = 0, controls = 0, pages = 0;
-  size_t total() const { return states + rings + controls + pages; }
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::SlotStates}]] size_t states = 0;
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::SlotRings}]] size_t rings = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("load_state writes the slot's Control fields")]]
+  size_t controls = 0;
+  [[=gs::state, =gs::KeptOnReset("the engine writes the page table and the page pool keeps it"),
+    =gs::NotSnapshotted("the pool's table, not a session's state")]]
+  size_t pages = 0;
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<SlotSizes, EngineSnap>().empty(), gs::sizes_problem<SlotSizes, EngineSnap>());
 struct SlotDims {
   static constexpr uint32_t kMaxSeqs = 4;         // slot 0 and at most 3 short slots (spec 13 §11.2)
   static constexpr uint32_t kShortLen = 32768;    // a short slot's positions (none shorter)
   // All zero at seqs = 1. Throws std::invalid_argument outside [1, kMaxSeqs]. `kv_pages`: the slots' KV pages
-  // (slots_kv_len / kKvPage), the page table's entries. `drafter` (plan 19v3b, MTP off): a further slot's states are
+  // (slots_kv_len / kKvPage), the page table's entries; with the KV page pool (spec 31) every sequence's table as long
+  // as the per-request cap, runtime::pool_table_pages. `drafter` (plan 19v3b, MTP off): a further slot's states are
   // kDrafterStates (its live state and 3 speculative - K <= 3; slot 0's 8 are the engine's, TapVerifyDims).
   static constexpr uint32_t kDrafterStates = 4;
   static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages = 0,
@@ -432,6 +507,42 @@ struct TapVerifyDims {
   static size_t gdn_spec_bytes(const model::ModelDesc& desc);
   static size_t prefill_taps_bytes(const model::ModelDesc& desc, uint32_t n_taps, uint32_t chunk_cap);
 };
+
+// --- Engine's own allocations (spec 39) -----------------------------------------------
+//
+// runtime::Engine's buffers outside the groups above (EngineBuffers, buffers.h), sized here so the planner and the
+// engine read one formula (an allocation is made exactly when its size is not 0):
+//   tap       debug_resid's residual copy, bf16 [layers][1][hidden] (capture.cc's kCapM = 1)
+//   df_slots  a drafter's GDN states: slot 0's 7 (TapVerifyDims::gdn_spec_bytes), then each further slot's
+//             SlotDims::kDrafterStates
+//   gdn_pend  one sequence with a proposer (the MTP head or a drafter) on a shape gdn_step's DEFERRED build exists for
+//             (kernels::gdn_defer_built: Qwen3.8's, Ornith's): the pending GDN rows, two parities of
+//             kernels::gdn_pend_parity_bytes (verify-cost-m8, PERF-51)
+//   gdn_x, conv_x  spec 32: the deep verify lists' chain scratch - one sequence with the MTP head on Qwen3.8's GDN
+//             shapes (PERF-56: or Ornith's) over the bf16 cache without a draft vocabulary (DecodeScratchDims::rows'
+//             kDeepM); a GDN state and the conv rows 16.. (kernels::gdn_conv_x_layer_bytes at the model's conv
+//             channels a layer). The engine makes them on its first capture of those lists (the int8 head's:
+//             Engine::capture_wide); the plan counts them where they can be.
+struct EngineSizes {
+  [[=gs::scratch]] size_t tap = 0;
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::DrafterSlots}]] size_t df_slots = 0;
+  [[=gs::state, =gs::KeptOnReset("read only after a commit set Control::gdn_pend, which reset clears"),
+    =gs::NotSnapshotted("save_state replays them into the state first; load_state clears Control::gdn_pend")]]
+  size_t gdn_pend = 0;
+  [[=gs::scratch]] size_t gdn_x = 0;
+  [[=gs::scratch]] size_t conv_x = 0;
+  size_t total() const { return gs::bytes(*this); }
+};
+static_assert(gs::sizes_problem<EngineSizes, EngineSnap>().empty(), gs::sizes_problem<EngineSizes, EngineSnap>());
+static_assert(gs::snapshot_problem<EngineSnap, PersistentSizes, DecodeScratchSizes, MtpSizes, SlotSizes, EngineSizes>()
+                  .empty(),
+              gs::snapshot_problem<EngineSnap, PersistentSizes, DecodeScratchSizes, MtpSizes, SlotSizes, EngineSizes>());
+struct EngineDims {
+  // `seqs` the engine's sequence slots; `mtp` / `drafter` its proposer; `debug_tap` Engine's debug_resid.
+  static EngineSizes sizes(const model::ModelDesc& desc, KvCache kv, uint32_t draft_vocab, uint32_t seqs, bool mtp,
+                           bool drafter, bool debug_tap = false);
+};
+
 // Where the verify list copies each tap: for every site s in [0, layers] the indices t into `layers` whose
 // tapped layer is s - 1 - copied after the input fold of layer s (layer s - 1's output), or for s == layers
 // after the final norm's fold (the last layer's output). Throws std::invalid_argument unless `layers` is
@@ -445,22 +556,33 @@ std::vector<std::vector<uint32_t>> tap_sites(const model::ModelDesc& desc, const
 // Spec 8 (plan 8b Task 3): `Engine::prefill`'s MTP hidden rows, bf16 [chunk_cap + 1][hidden],
 // allocated on the first prefill of an engine that carries the head.
 size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc, uint32_t chunk_cap);
+// Spec 39: Engine's own prefill allocations (EnginePrefillBuffers, buffers.h), made on the first prefill that needs
+// each: the MTP head's hidden rows (mtp_prefill_hidden_bytes; row 0 carries the last chunk's row into the next - a
+// restore's prefill starts again from the head's hh row 0) and a drafter's tap staging (TapVerifyDims::
+// prefill_taps_bytes; written for the chunk's rows before they are projected).
+struct EnginePrefillSizes {
+  [[=gs::scratch]] size_t mtp_hid = 0;
+  [[=gs::scratch]] size_t df_taps = 0;
+};
+static_assert(gs::sizes_problem<EnginePrefillSizes, EngineSnap>().empty(),
+              gs::sizes_problem<EnginePrefillSizes, EngineSnap>());
+EnginePrefillSizes engine_prefill_sizes(const model::ModelDesc& desc, uint32_t chunk_cap, bool mtp, uint32_t n_taps);
 
 // --- prefill::Int8State (spec 5, the h8 path) ----------------------------------------
 
 // The three scratch buffers Int8State's constructor allocates for its `max_k` (the
 // MLP intermediate: down's K), and - separately, because they are built per weight
 // on first use - the rotated column scales: ws and 1/ws, fp32 [N] each, for every
-// h8 linear of every layer (lm_head excluded: it is never an h8 linear; the mixer linears
-// neither, l0_int8_bf16_linear). Both are
+// h8 linear of every layer (lm_head excluded: it is never an h8 linear; a MoE model's mixer
+// linears neither, l0_int8_bf16_linear). Both are
 // what `Int8State::bytes()` counts. The per-K sign tables (`signs_f32`, `sign_bits`:
 // K x 4 + K / 8 bytes for each of the 3-4 distinct K, ~0.1 MB) are NOT in bytes() and
 // so are not here either; they are inside the reserve (memory_plan.h).
 //
-// Open-work 17: on a dense model `l0-int8` runs the four mixer linears (qkv||z, out_proj, q||k||v, o_proj) on the
-// bf16 l0 walk and keeps int8 for the MLP (gate||up, down) - the rotated int8 mixer linears carried the long-prompt
-// miss. Open-work 16: a MoE model the same (its MLP is the experts: W4A8 for the routed ones, the shared expert bf16,
-// prefill::moe_chunk). True for those four.
+// Open-work 16: on a MoE model `l0-int8` runs the four mixer linears (qkv||z, out_proj, q||k||v, o_proj) on the
+// bf16 l0 walk (its MLP is the experts: W4A8 for the routed ones, the shared expert bf16, prefill::moe_chunk). True
+// for those four there. A dense model runs every prompt linear on h8 (PERF-113, 2026-11-21; open-work 17's
+// MLP-only form is gone): never true.
 bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id);
 struct Int8ScratchSizes {
   size_t xq, xs, w8;

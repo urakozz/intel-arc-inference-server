@@ -80,6 +80,15 @@ class SlotsEngine : public server::BatchEngineIface {
     return m;
   }
   uint32_t slot_max_len(uint32_t slot) override { return e_.slot_len(slot); }
+  // Spec 31: the engine's KV page pool (kv_pool_pages() 0: fixed slots, and the scheduler never asks).
+  uint32_t kv_pool_pages() override { return e_.kv_pool_pages(); }
+  uint32_t pages_free() override { return e_.pages_free(); }
+  uint32_t pages_held(uint32_t slot) override { return e_.pages_held(slot); }
+  bool take_pages(uint32_t slot, uint32_t upto) override {
+    if (e_.kv_pool_pages() == 0) return true;
+    e_.select(slot);
+    return e_.take_pages(upto);
+  }
   uint32_t pos(uint32_t slot) override {
     const Pending& p = pending_.at(slot);
     if (p.on) return p.pos + p.j + 1;

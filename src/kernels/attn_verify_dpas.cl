@@ -124,8 +124,9 @@
 //
 // Heads: Qwen3.8's 24 q / 4 kv (Agnes shares them), or (spec 17d) a tensor-parallel card's half, 12 q / 2 kv - the
 // same groups of 6, so a work-group's walk, operands and order are the 24 / 4 build's for those heads (property R:
-// row for row bitwise the one-card kernel's heads 12 r .. 12 r + 11); the grid is (2, TGT). Another model's heads
-// keep v2 (the rule).
+// row for row bitwise the one-card kernel's heads 12 r .. 12 r + 11); the grid is (2, TGT). PERF-56: Ornith's 16 q /
+// 2 kv (groups of 8, GQA 8) in its wide lookup verify lists only - an M 8 build in row chunks (RCHUNK 16 / 32 / 64),
+// since 16 rows of 8 heads would need the whole 128 KB of SLM for q alone. Another model's heads keep v2 (the rule).
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
@@ -158,8 +159,11 @@
 #if defined(FA_Q_HEADS) != defined(FA_KV_HEADS)
 #error "attn_verify_dpas: FA_Q_HEADS and FA_KV_HEADS come together"
 #endif
-#if defined(FA_Q_HEADS) && !(FA_Q_HEADS == 12 && FA_KV_HEADS == 2)
-#error "attn_verify_dpas: Qwen3.8's 24 / 4 heads, or a tensor-parallel card's 12 / 2 (spec 17d); other heads keep attn_v2"
+#if defined(FA_Q_HEADS) && !(FA_Q_HEADS == 12 && FA_KV_HEADS == 2) && !(FA_Q_HEADS == 16 && FA_KV_HEADS == 2)
+#error "attn_verify_dpas: Qwen3.8's 24 / 4, a TP card's 12 / 2 (spec 17d) or Ornith's 16 / 2 heads; others keep attn_v2"
+#endif
+#if defined(FA_Q_HEADS) && FA_Q_HEADS == 16 && (M != 8 || !defined(RCHUNK))
+#error "attn_verify_dpas: Ornith's 16 / 2 heads are an M 8 build in row chunks (RCHUNK)"
 #endif
 #if !((M >= 2 && M <= 8) || M == 16)
 #error "attn_verify_dpas: M is 2..8 (16 for the probe's record)"
@@ -170,12 +174,19 @@
 // for the other chunks (spec 32e) - is exactly the 16-row kernel's work-group (j, blk) launched at pos + 16 c with
 // rows 16 c .. 16 c + 15 - the same walk, operands and order (property R), so each row is bitwise the 16-row list's
 // row at the same key count. It reads q rows 16 c .. and writes the partials of a list of RCHUNK rows
-// ([24][TGT][RCHUNK][258]).
+// ([24][TGT][RCHUNK][258]). PERF-56: at Ornith's 16 / 2 heads the build is M 8 (chunks of 8 rows) and RCHUNK 16, 32 or
+// 64 - every Ornith wide list, the 16-row one too.
 #ifdef RCHUNK
-#if M != 16 || (RCHUNK != 32 && RCHUNK != 64) || EAGER
-#error "attn_verify_dpas RCHUNK: an M 16 DPAS build, 32 or 64 rows"
+#if EAGER || !((M == 16 && (RCHUNK == 32 || RCHUNK == 64)) || \
+               (M == 8 && defined(FA_Q_HEADS) && (RCHUNK == 16 || RCHUNK == 32 || RCHUNK == 64)))
+#error "attn_verify_dpas RCHUNK: an M 16 DPAS build, 32 or 64 rows (Ornith's heads: M 8, 16, 32 or 64 rows)"
 #endif
 #define PROWS RCHUNK
+#if M == 16
+#define RCROWS 16u
+#else
+#define RCROWS 8u
+#endif
 #else
 #define PROWS M
 #endif
@@ -196,7 +207,11 @@
 #define Q_HEADS 24
 #define KV_HEADS 4
 #endif
+#if defined(FA_Q_HEADS) && FA_Q_HEADS == 16
+#define GQA 8
+#else
 #define GQA 6
+#endif
 #define HD 256
 #define SG 16
 #define PART 258
@@ -612,7 +627,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   const uint ds = qi % DS;                      // dim half (PAIR: key atom)
 
 #ifdef RCHUNK
-  const uint c0 = 16u * get_group_id(0);        // the chunk's first row
+  const uint c0 = RCROWS * get_group_id(0);     // the chunk's first row
   const uint pos = ctrl[CTRL_POS] + c0;
   uint n_act = ctrl[CTRL_NACT];
   n_act = n_act > c0 ? n_act - c0 : 0u;

@@ -20,7 +20,7 @@
 // checkpoint or --layers N differs only in its layer count.
 //
 // The source files (src/kernels/qwen4exp/):
-//   q4_hc.cl              q4_hc_combine_norm, q4_hc_up_mix                    plain OpenCL C
+//   q4_hc.cl              q4_hc_combine_norm, q4_hc_up_mix                    plain OpenCL C (up-mix _B: sub-groups)
 //                         q4_hc_down_i8, q4_hc_slab_i8 (PERF-66's int8 form)  sub-groups / plain
 //   q4_ple.cl             q4_ple_gather, q4_ple_block, q4_ple_check           plain OpenCL C
 //   q4_qsa.cl             q4_qsa_prep, q4_qsa_score, q4_qsa_select            plain OpenCL C
@@ -98,17 +98,21 @@ inline std::string hc_combine_norm_variant(unsigned M, HcSrc src, unsigned S, bo
   }
   return norm ? v : v + "_NN";
 }
-// "q4_hc_up_mix_M1_I" (a gated residual: 320 + 4 inject rows) | "q4_hc_up_mix_M1" (the final mixer), + "_Q8" for the
-// int8 up tiles (PERF-66, model::Qwen4ExpDesc::hc_int8).
+// "q4_hc_up_mix_M1_I_B" (a gated residual: 320 + 4 inject rows) | "q4_hc_up_mix_M1_B" (the final mixer), "_Q8_B" for
+// the int8 up tiles (PERF-66, model::Qwen4ExpDesc::hc_int8). PERF-106: _B the weights by sub-group block reads, one
+// work-group a row at every M. Grid (2560 / 16, M).
 inline std::string hc_up_mix_variant(unsigned M, bool inject, bool hc8 = false) {
-  return "q4_hc_up_mix" + m_(M) + (inject ? "_I" : "") + (hc8 ? "_Q8" : "");
+  return "q4_hc_up_mix" + m_(M) + (inject ? "_I" : "") + (hc8 ? "_Q8_B" : "_B");
 }
-// PERF-66: the int8 down||inject GEMV in gemv_bf16's place (its arguments, grid N / 16): "q4_hc_down_i8_M1_N336_KS16".
-inline constexpr unsigned kHcDownI8Ks = 16;
+// PERF-66: the int8 down||inject GEMV in gemv_bf16's place (its arguments, grid N / 16): "q4_hc_down_i8_M1_N336_KS32".
+// KS: the sub-groups splitting a tile's K (DN_KS; PERF-106 lead 3: 32, was 16 - another slice and merge order,
+// judged). `act` (_A, PERF-106 lead 4, the bench's candidate): it writes the up-mix's activations (the 320 SiLUs and
+// the 4 inject values) in place of the raw sums.
+inline constexpr unsigned kHcDownI8Ks = 32;
 inline constexpr unsigned hc_down_i8_wg() { return 16 * kHcDownI8Ks; }
-inline std::string hc_down_i8_variant(unsigned M, bool inject) {
+inline std::string hc_down_i8_variant(unsigned M, bool inject, bool act = false) {
   return "q4_hc_down_i8" + m_(M) + "_N" + std::to_string(inject ? kHcDownN : kHcLow) + "_KS" +
-         std::to_string(kHcDownI8Ks);
+         std::to_string(kHcDownI8Ks) + (act ? "_A" : "");
 }
 // q4_ple.cl: the gather by the table's scale dtype (decision 7: bf16 the default file), the block, the check.
 inline std::string ple_gather_variant(unsigned M, bool bf16_scale) {
@@ -161,20 +165,20 @@ inline std::string tp_gdn_defer_variant(unsigned M) { return "gdn_step_defer_M" 
 static_assert(gdn_pend_layer_bytes(8, 24) == 536576, "src/kernels/CMakeLists.txt's tp PEND_PAR");
 inline std::string tp_attn_prep_variant(unsigned M = 1) { return "attn_prep_M" + std::to_string(M) + "_Q12KV1"; }
 inline std::string tp_qsa_attn_variant(unsigned M = 1) { return "q4_qsa_attn_M" + std::to_string(M) + "_T32_Q12KV1"; }
-inline constexpr unsigned kTpFoldG = 20, kTpWg = 256, kTpOutS = 2, kTpFinishWg = 256;
-// out_proj / o_proj's crossing: the card's 2 slices summed in one card's order into one row. `wired` (PERF-44): the
+inline constexpr unsigned kTpFoldG = 20, kTpWg = 256, kTpOutS = 4, kTpFinishWg = 256;
+// out_proj / o_proj's crossing: the card's 4 slices summed in one card's order into one row (PERF-109: one card's S8). `wired` (PERF-44): the
 // gemv sends its own work-groups' chunks (tp_out_gemv_variant) and tp_sum waits on those (TP_WIRE_COLS 64).
 inline std::string tp_sum_variant(unsigned rank, unsigned M = 1, bool wired = false) {
   return "tp_cross_M" + std::to_string(M) + "_K" + std::to_string(kHidden) + "_G" + std::to_string(kTpFoldG) + "_S" + std::to_string(kTpOutS) +
          "_X_R" + std::to_string(rank) + "_sum" + (wired ? "_W64" : "");
 }
-// PERF-44: out_proj / o_proj's gemv (the card's K rows x 2560, S 2, int4 L0) with tp_send folded in (gemv.cl
+// PERF-44: out_proj / o_proj's gemv (the card's K rows x 2560, S 4, int4 L0) with tp_send folded in (gemv.cl
 // GEMV_TP_SEND): gemv(w, scales, x, out, peer_land, send_ctr); its landing has kTpOutFoldG chunks a row (one a
 // work-group).
 inline std::string tp_out_gemv_variant(unsigned M, unsigned K) {
   return kernels::gemv_variant(M, K, kHidden, kTpOutS, 0) + "_TP";
 }
-inline constexpr unsigned kTpOutFoldG = kHidden / 64 * kTpOutS;   // 80
+inline constexpr unsigned kTpOutFoldG = kHidden / 64 * kTpOutS;   // 160
 
 // The reused kernels at this family's shapes.
 inline std::string embed_variant(unsigned M) { return embed_gather_variant(M, kHidden); }   // embed_gather_M1_D2560
@@ -196,13 +200,13 @@ inline std::string ple_kv_variant() { return bf16_variant(kHidden, kPleKvN); }
 inline std::string lm_head_variant(bool int8) {
   return int8 ? gemv_i8w_variant(1, kHidden, kVocab) : bf16_variant(kHidden, kVocab);
 }
-// The dense arms (model::Qwen4ExpDesc's {S, layout}: int4 layout 0 qkv||z S 1, q||gate||k||v S 2, out / o S 4
-// PROVISIONAL; or Intel's bf16 tiles).
+// The dense arms (model::Qwen4ExpDesc's {S, layout}: int4 layout 0 qkv||z S 1, q||gate||k||v S 2 PROVISIONAL, out / o
+// S 8 (PERF-109); or Intel's bf16 tiles).
 inline std::string qkvz_variant(bool int4) { return int4 ? gemv_variant(1, kHidden, kQkvzN, 1, 0) : bf16_variant(kHidden, kQkvzN); }
 inline std::string qkvg_variant(bool int4, unsigned S = 2) {
   return int4 ? gemv_variant(1, kHidden, kQkvgN, S, 0) : bf16_variant(kHidden, kQkvgN);
 }
-inline std::string out_variant(bool int4, unsigned S = 4) {   // GDN out_proj and QSA o_proj: both 6144 x 2560
+inline std::string out_variant(bool int4, unsigned S = 8) {   // GDN out_proj and QSA o_proj: both 6144 x 2560
   return int4 ? gemv_variant(1, kGdnZN, kHidden, S, 0) : bf16_variant(kGdnZN, kHidden);
 }
 // Decision 10's evidence only (qwen4exp_kernels_test --bench-attn): attention v2 at the QSA shape, dense.
@@ -215,7 +219,7 @@ inline std::string attn_v2_q4_variant(unsigned M) { return attn_v2_variant(M, kA
 // tests/kernels/qwen4exp_variant_names_test.cc holds the union to the CMake block's list.
 inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
                                                 bool ple_bf16_scale = true, bool hc8 = false) {
-  const unsigned S = int4_dense ? 4u : 1u;
+  const unsigned S = int4_dense ? 8u : 1u;
   std::vector<std::string> v = {
       embed_variant(1),
       hc_combine_norm_variant(1, HcSrc::Embed, 0, true),
@@ -331,7 +335,7 @@ inline std::string pf_hc_combine_norm_variant(HcSrc src, bool norm, unsigned C =
 }
 // "q4_hc_up_mix_M2048_I_D512_R4C64": UP_DOWN = the GEMM's pitch; + "_Q8" over the int8 up tiles (PERF-66)
 inline std::string pf_hc_up_mix_variant(unsigned C = kPfC, bool hc8 = false) {
-  return hc_up_mix_variant(C, true) + "_D" + std::to_string(kPfHcDownLd) + "_R" + std::to_string(kPfHcUpRows) + "C" +
+  return "q4_hc_up_mix" + m_(C) + "_I_D" + std::to_string(kPfHcDownLd) + "_R" + std::to_string(kPfHcUpRows) + "C" +
          std::to_string(kPfHcUpCols) + (hc8 ? "_Q8" : "");
 }
 inline std::string pf_qsa_variant(unsigned C = kPfC) { return qsa_variant(C) + "_PF"; }   // "q4_qsa_M2048_T512_W1024_PF"
@@ -516,7 +520,7 @@ inline std::string qkvg_m_variant(unsigned M, bool int4, LinearKind k = LinearKi
   return int4 ? int4_linear_variant(k, M, kHidden, kQkvgN, 2, 0) : bf16_m_variant(M, kHidden, kQkvgN);
 }
 inline std::string out_m_variant(unsigned M, bool int4, LinearKind k = LinearKind::Gemv) {
-  return int4 ? int4_linear_variant(k, M, kGdnZN, kHidden, 4, 0) : bf16_m_variant(M, kGdnZN, kHidden);
+  return int4 ? int4_linear_variant(k, M, kGdnZN, kHidden, 8, 0) : bf16_m_variant(M, kGdnZN, kHidden);
 }
 inline std::string lm_head_m_variant(unsigned M, bool int8, LinearKind k = LinearKind::Gemv) {
   return int8 ? int8_linear_variant(k, M, kHidden, kVocab) : bf16_m_variant(M, kHidden, kVocab);
@@ -527,7 +531,7 @@ inline std::string lm_head_m_variant(unsigned M, bool int8, LinearKind k = Linea
 // materialising _Y_NN is every list's).
 inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single, LinearKind k, bool hc8 = false) {
-  const unsigned S = int4_dense ? 4u : 1u;
+  const unsigned S = int4_dense ? 8u : 1u;
   std::vector<std::string> v = {
       embed_variant(M),
       hc_combine_norm_variant(M, HcSrc::Embed, 0, true),

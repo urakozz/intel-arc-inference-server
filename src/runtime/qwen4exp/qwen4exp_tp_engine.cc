@@ -79,7 +79,7 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
     mtp_bind_.single = runtime::qwen4exp::mtp_norm() == MtpNorm::Single;
     draft_ev_ = std::make_unique<l0::SyncEvent>(d0, std::vector<const l0::Context*>{&d0, &d1});
     Card& c0 = *cards_[0];
-    c0.dctl = std::make_unique<l0::Mem>(d0, l0::MemKind::Shared, sizeof(Control));
+    c0.dctl = std::make_unique<l0::Mem>(d0, l0::MemKind::Shared, tp_card_sizes(d, true, true).dctl);
     for (auto& c : cards_) c->binding.draft_ready = draft_ev_->handle();
     c0.binding.peer_x = cards_[1]->buffers.x.ptr();
     c0.binding.draft_ctl = c0.dctl->ptr();
@@ -200,6 +200,10 @@ void Qwen4ExpTpEngine::ple_init() {
 }
 
 void Qwen4ExpTpEngine::reset() {
+  // Spec 39 (here: Card is private to the engine): the card's own allocations are TpCardSizes', one of each name.
+  static_assert(gs::buffers_problem<l0::Mem, Card, TpCardSizes>().empty(), gs::buffers_problem<l0::Mem, Card, TpCardSizes>());
+  static_assert(gs::buffers_problem<l0::Mem, Qwen4ExpTpEngine>().empty(),
+                gs::buffers_problem<l0::Mem, Qwen4ExpTpEngine>());
   if (pf_settle_ && !pf_settle_())
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::reset: a prefill list is still running after " +
                              std::to_string(opt_.timeout_ms) + " ms");
@@ -212,10 +216,7 @@ void Qwen4ExpTpEngine::reset() {
   }
   for (auto& c : cards_) {
     c->buffers.zero(c->imm);
-    for (l0::Mem* m : {&c->land_o, &c->land_m, &c->ctr_so, &c->ctr_fo, &c->ctr_sm, &c->ctr_fm})
-      c->imm.fill(m->ptr(), 0u, m->size());
-    std::memset(c->state.ptr(), 0, c->state.size());
-    if (c->dctl) std::memset(c->dctl->ptr(), 0, c->dctl->size());
+    c->zero_own();   // spec 39: the crossings' landings and counters, the state words, the draft Control
   }
   if (mtp_) {
     mtp_->zero(cards_[1]->imm);   // the head's Control, KV, keys, tail, R rows
@@ -402,26 +403,8 @@ bool row_split(SnapTensor t) { return t == SnapTensor::Kv; }
 std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, bool load) const {
   const model::Qwen4ExpDesc& d = model_.desc;
   const auto base = [&](uint32_t c) -> uint8_t* {
-    const Qwen4ExpBuffers& b = cards_[c]->buffers;
-    switch (r.tensor) {
-      case SnapTensor::Kv: return static_cast<uint8_t*>(b.kv.ptr());
-      case SnapTensor::IdxKeys: return static_cast<uint8_t*>(b.idx_keys.ptr());
-      case SnapTensor::IdxTail: return static_cast<uint8_t*>(b.idx_tail.ptr());
-      case SnapTensor::GdnState: return static_cast<uint8_t*>(b.gdn_state.ptr());
-      case SnapTensor::ConvRing: return static_cast<uint8_t*>(b.conv_ring.ptr());
-      case SnapTensor::PleIds:
-      case SnapTensor::PleRing: return static_cast<uint8_t*>(b.ple.ptr());
-      case SnapTensor::MtpKv:
-      case SnapTensor::MtpIdxKeys:
-      case SnapTensor::MtpIdxTail:
-      case SnapTensor::MtpHidden:
-        if (!mtp_) break;
-        return static_cast<uint8_t*>(r.tensor == SnapTensor::MtpKv        ? mtp_->kv.ptr()
-                                     : r.tensor == SnapTensor::MtpIdxKeys ? mtp_->idx_keys.ptr()
-                                     : r.tensor == SnapTensor::MtpIdxTail ? mtp_->idx_tail.ptr()
-                                                                          : mtp_->hh.ptr());   // row 0: R_{pos-1}
-      default: break;
-    }
+    // the head's tensors (MtpHidden: hh row 0, R_{pos-1}) are mtp_'s, on card 1
+    if (const l0::Mem* m = snap_mem(cards_[c]->buffers, mtp_.get(), r.tensor)) return static_cast<uint8_t*>(m->ptr());
     throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpTpEngine: a ") + snap_tensor_name(r.tensor) +
                            " snapshot run without the MTP head");
   };
@@ -441,8 +424,7 @@ std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, 
       return out;
     case SnapTensor::GdnState: {   // a layer's v-heads: card 0's then card 1's (PERF-51: save_state flushes first)
       const size_t S = gdn_state_bytes_per_layer(d), H = S / 2;
-      if (r.offset % S != 0 || r.bytes % S != 0)
-        throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: a GDN state run that is not whole layers");
+      contract_assert(r.offset % S == 0 && r.bytes % S == 0);   // a GDN state run of whole layers
       for (size_t i = 0; i < r.bytes / S; ++i)
         for (uint32_t c = 0; c < 2; ++c) out.push_back({c, base(c) + (r.offset / S + i) * H, i * S + c * H, H});
       return out;
@@ -450,8 +432,7 @@ std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, 
     case SnapTensor::ConvRing: {   // a row's channels q | k | v, each card 0's part then card 1's
       const size_t row = size_t(d.conv_rows()) * 2, crow = row / 2;
       const size_t qk = size_t(d.gdn_k_heads) * d.gdn_head * 2, v = size_t(d.gdn_v_heads) * d.gdn_head * 2;
-      if (r.offset % row != 0 || r.bytes % row != 0)
-        throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: a conv ring run that is not whole rows");
+      contract_assert(r.offset % row == 0 && r.bytes % row == 0);   // a conv ring run of whole rows
       const std::array<std::array<size_t, 3>, 3> seg = {{{0, 0, qk / 2}, {qk, qk / 2, qk / 2}, {2 * qk, qk, v / 2}}};
       for (size_t i = 0; i < r.bytes / row; ++i)
         for (const auto& [one, card, bytes] : seg)
@@ -461,8 +442,7 @@ std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, 
     }
     case SnapTensor::Kv: {   // a position's kv heads: card 0's row then card 1's (row_split: copied through staging)
       const size_t row = size_t(d.kv_n()) * 2, crow = row / 2;
-      if (r.offset % row != 0 || r.bytes % row != 0)
-        throw std::logic_error("runtime::qwen4exp::Qwen4ExpTpEngine: a K / V run that is not whole rows");
+      contract_assert(r.offset % row == 0 && r.bytes % row == 0);   // a K / V run of whole rows
       for (uint32_t c = 0; c < 2; ++c) out.push_back({c, base(c) + r.offset / 2, c * crow, r.bytes / 2});
       return out;
     }
@@ -506,9 +486,6 @@ void Qwen4ExpTpEngine::save_state(void* host) {
 }
 
 void Qwen4ExpTpEngine::load_state(const void* host, uint32_t p) {
-  if (p > max_len_)
-    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::load_state: pos " + std::to_string(p) +
-                             " exceeds max_len " + std::to_string(max_len_));
   if (broken_) reset();   // a failed crossing: the restore below rewrites what the session reads
   for (auto& c : cards_) c->ctl->gdn_pend = 0;   // PERF-51: no committed rows over a loaded state
   verify_k_ = kNoVerify;
@@ -703,9 +680,6 @@ void Qwen4ExpTpEngine::commit(uint32_t j, uint32_t next_token) {
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::commit: j " + std::to_string(j) +
                              (verify_k_ == kNoVerify ? " with no verify() pending"
                                                      : " exceeds the last verify's k " + std::to_string(verify_k_)));
-  if (next_token >= model_.desc.vocab)
-    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine::commit: next_token " + std::to_string(next_token) +
-                             " is outside the vocabulary");
   // PERF-51: rows 0..j are what the next launch replays into the GDN state on both cards - they sit in the parity the
   // verify wrote, the other one (gdn_step.cl, DEFERRED). Row j's pre-mixer H (hh row 1 + j) is the next iteration's
   // R_{pos-1}.

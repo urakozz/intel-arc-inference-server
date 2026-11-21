@@ -199,7 +199,7 @@ struct PrefillScratch : PrefillScratchDims {
   // (plan 6d-composed Task 4 Step 3). One accessor, so the rule reads the
   // allocation instead of a second copy of the constant.
   // 0 until the composed path has run (spec 6).
-  size_t pf_s_bytes() const { return pf_s_ ? pf_s_->size() : 0; }
+  size_t pf_s_bytes() const { return pf_s ? pf_s->size() : 0; }
 
   // Spec 2.1 §3.3: the l0 backend's expansion, allocated on first use (ruling R7's pattern one
   // level down) so a session pays only for the backend it runs.
@@ -220,6 +220,9 @@ struct PrefillScratch : PrefillScratchDims {
     return it == gemm_slabs_.end() ? nullptr : &it->second;
   }
   size_t lazy_bytes() const;
+  // The lazy allocations (PrefillLazySizes' names), null until their accessor above makes them. Spec 39: public so the
+  // reflected walks reach them; the accessors are the way in.
+  std::unique_ptr<l0::Mem> slab, pf_s, pf_p, kv8_raw;
 
  private:
   PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap,
@@ -227,7 +230,7 @@ struct PrefillScratch : PrefillScratchDims {
   l0::Context* ctx_;
   const model::ModelDesc* desc_;
   uint32_t chunk_cap_;
-  std::unique_ptr<l0::Mem> slab_, pf_s_, pf_p_, kv8_raw_;
+  [[=gs::Outside("one slab per weight, made on first use: route_slab_bytes and dense_slab_bytes count them")]]
   std::map<const void*, l0::Mem> gemm_slabs_;
 };
 
@@ -320,6 +323,36 @@ struct SlotBuffers : SlotDims {
   void zero(l0::CmdList& imm);   // every byte (Engine::reset)
   uint8_t* control_block(size_t off) const { return controls.as<uint8_t>() + off; }
 };
+
+// Spec 39: Engine's own prefill allocations (EnginePrefillSizes), each null until the first prefill that needs it.
+struct EnginePrefillBuffers {
+  std::unique_ptr<l0::Mem> mtp_hid, df_taps;
+};
+
+// Spec 39: runtime::Engine's own allocations (EngineSizes, runtime/buffer_sizes.h: what each is and when it is made),
+// each null until the engine makes it from its EngineSizes member.
+struct EngineBuffers {
+  std::unique_ptr<l0::Mem> tap, df_slots, gdn_pend, gdn_x, conv_x;
+  size_t bytes() const;
+  void zero(l0::CmdList& imm);   // the zero_on_reset ones: the drafter's slots
+};
+
+// Spec 39: each group holds exactly one allocation of each of its sizes struct's members (by name), so bytes() and
+// zero() walk the annotations (runtime/gpu_state.h) and a buffer outside the plan does not compile.
+static_assert(gs::buffers_problem<l0::Mem, PersistentBuffers, PersistentSizes>().empty(),
+              gs::buffers_problem<l0::Mem, PersistentBuffers, PersistentSizes>());
+static_assert(gs::buffers_problem<l0::Mem, DecodeScratch, DecodeScratchSizes>().empty(),
+              gs::buffers_problem<l0::Mem, DecodeScratch, DecodeScratchSizes>());
+static_assert(gs::buffers_problem<l0::Mem, MtpBuffers, MtpSizes>().empty(),
+              gs::buffers_problem<l0::Mem, MtpBuffers, MtpSizes>());
+static_assert(gs::buffers_problem<l0::Mem, SlotBuffers, SlotSizes>().empty(),
+              gs::buffers_problem<l0::Mem, SlotBuffers, SlotSizes>());
+static_assert(gs::buffers_problem<l0::Mem, EngineBuffers, EngineSizes>().empty(),
+              gs::buffers_problem<l0::Mem, EngineBuffers, EngineSizes>());
+static_assert(gs::buffers_problem<l0::Mem, PrefillScratch, PrefillLazySizes, PrefillScratchSizes>().empty(),
+              gs::buffers_problem<l0::Mem, PrefillScratch, PrefillLazySizes, PrefillScratchSizes>());
+static_assert(gs::buffers_problem<l0::Mem, EnginePrefillBuffers, EnginePrefillSizes>().empty(),
+              gs::buffers_problem<l0::Mem, EnginePrefillBuffers, EnginePrefillSizes>());
 
 // The VIEW. Every public name capture.cc uses, with the same types as before
 // except that the l0::Mem members are references into the two groups. The

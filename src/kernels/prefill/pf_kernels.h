@@ -139,6 +139,14 @@ inline std::string pf_flash_attn_kv8_raw_variant(unsigned q = kRefFaQHeads,
 inline std::string pf_flash_attn_kv8_raw_pair_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn_kv8_raw_pair" + fa_suffix(q, kv);
 }
+// PERF-114 (the int8 prompt pass, kv8.cl KV8_I8S): the writer with int8 q and fp32 q scales, and the pair (with its kv8_widen)
+// scoring by int8 DPAS; at Qwen3.8's 24 / 4 and the tensor-parallel card's 12 / 2.
+inline std::string pf_attn_prep_kv8_i8s_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_attn_prep_kv8_I8S" + fa_suffix(q, kv);
+}
+inline std::string pf_flash_attn_kv8_raw_pair_i8s_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_kv8_raw_pair_I8S" + fa_suffix(q, kv);
+}
 // 3l (2): the split-K forms for short chunks deep in the cache (pf_flash_attn.cl SPLIT,
 // kv8.cl KV8_SPLIT) and the merge that folds their spans into pf_o (FLASH_MERGE).
 inline std::string pf_flash_attn_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {

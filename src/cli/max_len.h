@@ -13,6 +13,7 @@
 //                            (loader::set_max_len); an explicit N is held to the same
 //                            plan and refused with its breakdown instead of failing in
 //                            an allocation later
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,7 @@
 #include "kernels/kernels.h"
 #include "l0/context.h"
 #include "loader/loader.h"
+#include "model/model_desc.h"
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/memory_plan.h"
@@ -80,13 +82,41 @@ inline runtime::PrefillPath prefill_path(bool prefill, runtime::PrefillBackend b
   return {prefill, backend};
 }
 
-// 3o (accepted as a known FAIL): the l0-int8 prefill with int8 KV compounds two roundings
-// - one of the 36 tool-call scenarios writes an invalid edit.
-inline void warn_int8_prefill_kv8(runtime::PrefillBackend backend, runtime::KvCache kv) {
-  if (backend == runtime::PrefillBackend::L0Int8 && kv == runtime::KvCache::Int8)
-    std::print(stderr, "warning: --prefill-backend l0-int8 with --kv-cache int8 is a known fail: ~3% of tool calls "
-                       "that copy exact text from a long prompt can come out wrong; use the l0 prefill or the bf16 "
-                       "cache\n");
+// PERF-114 (the owner's decision of 2026-11-21): on a dense model l0-int8 runs on the int8 context - its attention
+// scores read the int8 keys - so it turns `--kv-cache int8` on and refuses an explicit bf16. `dense`: the checkpoint is
+// not a MoE model (cli::int8_context_model). Returns the KV cache form to run.
+inline runtime::KvCache int8_pass_kv(runtime::PrefillBackend backend, bool dense, const std::string& kv_cache_flag,
+                                     runtime::KvCache kv) {
+  if (backend != runtime::PrefillBackend::L0Int8 || !dense) return kv;
+  if (!kv_cache_flag.empty() && runtime::parse_kv_cache(kv_cache_flag.c_str()) != runtime::KvCache::Int8)
+    throw std::runtime_error("--prefill-backend l0-int8 runs on the int8 context (its attention reads the int8 KV "
+                             "cache); drop --kv-cache bf16, or use the bf16 prompt pass (--prefill-backend l0)");
+  return runtime::KvCache::Int8;
+}
+
+// 3o: a MoE model's l0-int8 (W4A8 experts) beside the int8 KV cache compounds two roundings - on Qwen3.8 with the MLP
+// alone int8, ~3 % of the tool calls that copy exact text from a long prompt went wrong - so it is refused there.
+inline void check_int8_prefill_kv8(runtime::PrefillBackend backend, runtime::KvCache kv, bool dense) {
+  if (backend == runtime::PrefillBackend::L0Int8 && kv == runtime::KvCache::Int8 && !dense)
+    throw std::runtime_error("--prefill-backend l0-int8 does not run with --kv-cache int8 on this model: the two "
+                             "roundings together change tool calls that copy exact text from a long prompt; use the "
+                             "bf16 prompt pass (--prefill-backend l0) or the bf16 cache");
+}
+
+// The startup notice while the int8 prompt pass is on - what it costs, measured against the bf16 prompt pass. Printed
+// once, with the startup lines (b70-serve, b70-decode), for a dense model only: a MoE model's l0-int8 is its W4A8
+// experts beside bf16 mixer linears (open-work 16), not what these numbers measured.
+// Measured 2026-11-21 on Qwen3.8-27B (PERF-114's box turn: every linear int8, the int8 context, int8 attention scores),
+// one card, served, MTP on, two interleaved rounds: 1.109 / 1.145 / 1.177 / 1.216x the earlier MLP-only int8 pass at
+// 3.9k / 30k / 61k / 122k ids (1.40-1.47x l0); top-1 582 / 585 over 4k-64k against l0 on the bf16 cache; 0 of 12
+// exact-copy requests (8k-99k) differ from l0; the golden gates 93 / 93 and the long gate 32 / 32.
+inline void notice_int8_prefill(runtime::PrefillBackend backend, const model::ModelDesc& d) {
+  if (backend != runtime::PrefillBackend::L0Int8 || d.is_moe()) return;
+  std::print(stderr, "the int8 prompt pass is on: every prompt linear, the context (KV cache) and the prompt's "
+                     "attention scores run in int8, 11-22 % faster than the earlier int8 pass (40-47 % faster than the "
+                     "bf16 pass). Measured on Qwen3.8-27B against the bf16 pass: the most likely next token differs at "
+                     "3 of 585 positions; 0 of 12 long exact-copy tool calls changed; the long-prompt gate passed. For "
+                     "full quality, use the default bf16 pass (--prefill-backend l0).\n");
 }
 
 // Spec 12b: `--kv-cache bf16|int8` (default runtime::default_kv_cache(): B70_KV_CACHE, unset
@@ -208,6 +238,43 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
   return lens;
 }
 
+// Step 4 under --max-num-seqs with the KV page pool (spec 31): a card's `seqs` > 1 sequences share the pages left
+// beside their fixed state (runtime::pool_that_fits). --max-len auto lets one request use the whole pool (up to the
+// trained context); an explicit --max-len L caps a request at L and is refused when the pool cannot hold one request
+// of L. `m` is re-tabled at the pool's positions (runtime::Engine's max_len; every sequence counts from 0 up to the
+// cap). Prints the pool's line and the plan's breakdown like settle().
+inline runtime::PoolShape settle_pool(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg& a, uint32_t seqs,
+                                      size_t reserve_bytes, const runtime::PrefillPath& path, runtime::KvCache kv,
+                                      const runtime::DrafterPlan& drafter = {}) {
+  const model::ModelDesc& d = *m.desc;
+  const bool mtp = m.mtp != nullptr;
+  const size_t weights = m.report.total() - m.report.rope_bytes;
+  const size_t device = ctx.memory_bytes();
+  const uint32_t limit = a.is_auto ? m.trained_max_len : a.value;   // check_before_load: auto has a trained context
+  const std::string beside = " with --max-num-seqs " + std::to_string(seqs);
+  const runtime::PoolShape s =
+      runtime::pool_that_fits(d, seqs, mtp, weights, device, reserve_bytes, limit, path, kv, drafter);
+  if (s.pages == 0) {
+    const uint32_t least = std::min(runtime::kMinAutoMaxLen, limit / runtime::kMaxLenQuantum * runtime::kMaxLenQuantum);
+    throw std::runtime_error(
+        "not even " + std::to_string(least) + " positions of KV fit" + beside + " - " +
+        runtime::describe(runtime::plan_pool(d, {seqs, runtime::kv_pages(least), least}, mtp, weights, path, kv, drafter),
+                          device, reserve_bytes) +
+        ". A smaller --max-num-seqs");
+  }
+  if (!a.is_auto && s.cap < a.value)
+    throw std::runtime_error("--max-len " + std::to_string(a.value) + " does not fit" + beside + ": the KV left beside " +
+                             std::to_string(seqs) + " requests' state holds " + std::to_string(s.positions()) +
+                             " positions. --max-len auto, at most " + std::to_string(s.cap) +
+                             ", or a smaller --max-num-seqs");
+  std::print(stderr, "kv pool: {:d} pages of {:d} ({:d} tokens) shared by {:d} requests; one request up to {:d}{}\n",
+             s.pages, runtime::kKvPage, s.positions(), seqs, s.cap, a.is_auto ? "" : " (--max-len)");
+  loader::set_max_len(ctx, m, uint32_t(s.positions()), s.cap);   // the engine's max_len: the pool; a request <= the cap
+  std::print(stderr, "{}\n",
+             runtime::describe(runtime::plan_pool(d, s, mtp, weights, path, kv, drafter), device, reserve_bytes).c_str());
+  return s;
+}
+
 // Plan 5d: the prefill chunk cap (2048 or 4096), in two steps around settle().
 //
 //   asked = runtime::prefill_chunk_cap_for(--prefill-chunk C, desc)   0 when no C was given;
@@ -244,12 +311,17 @@ inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d) {
 // (PrefillPath::dense_bf16, runtime::dense_slab_bytes) when the plan at these lengths and this cap has room for
 // them, else every chunk unpacks them as before - bitwise the same prompt pass. Returns `path` at the cap chosen and
 // with that choice: the engine is given both (set_prefill_chunk_cap, set_prefill_dense_bf16).
+// `pool` (spec 31): the KV page pool settle_pool gave - every plan here is then plan_pool's at it, not the slots'.
 inline runtime::PrefillPath settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
                                              const std::vector<uint32_t>& lens, size_t reserve_bytes,
                                              const runtime::PrefillPath& path, runtime::KvCache kv,
                                              const runtime::DrafterPlan& drafter, uint32_t asked, uint32_t card = 0,
-                                             uint32_t cards = 1) {
+                                             uint32_t cards = 1, const runtime::PoolShape* pool = nullptr) {
   const size_t weights = m.report.total() - m.report.rope_bytes;
+  const auto plan_at = [&](const runtime::PrefillPath& p) {
+    return pool ? runtime::plan_pool(*m.desc, *pool, m.mtp != nullptr, weights, p, kv, drafter)
+                : runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, p, draft_vocab_plan(m), kv, drafter);
+  };
   const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
   if (path.prefill && why == nullptr) {
@@ -259,9 +331,7 @@ inline runtime::PrefillPath settle_chunk_cap(l0::Context& ctx, const loader::Loa
     } else {   // the slots' plan (settle_slots'), not slot 0's alone
       runtime::PrefillPath wide = path;
       wide.chunk_cap = runtime::PrefillScratchDims::kCMax;
-      cap = runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, wide, draft_vocab_plan(m), kv, drafter).total() +
-                        reserve_bytes <=
-                    ctx.memory_bytes()
+      cap = plan_at(wide).total() + reserve_bytes <= ctx.memory_bytes()
                 ? runtime::PrefillScratchDims::kCMax
                 : runtime::PrefillScratchDims::kCDefault;
     }
@@ -274,14 +344,12 @@ inline runtime::PrefillPath settle_chunk_cap(l0::Context& ctx, const loader::Loa
   if (const size_t dense = runtime::dense_slab_bytes(*m.desc); path.prefill && dense != 0) {
     runtime::PrefillPath with = at;
     with.dense_bf16 = true;
-    at.dense_bf16 = runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, with, draft_vocab_plan(m), kv,
-                                        drafter).total() + reserve_bytes <= ctx.memory_bytes();
+    at.dense_bf16 = plan_at(with).total() + reserve_bytes <= ctx.memory_bytes();
     std::print(stderr, "prefill dense weights: {} ({:.3f} GB in bf16 {})\n",
                at.dense_bf16 ? "kept in bf16" : "unpacked every chunk", dense / 1e9,
                at.dense_bf16 ? "fit beside this max_len" : "would not fit beside this max_len");
   }
-  const runtime::MemoryPlan p =
-      runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, at, draft_vocab_plan(m), kv, drafter);
+  const runtime::MemoryPlan p = plan_at(at);
   std::print(stderr, "{}",
              runtime::vram_block({runtime::vram_parts(p, runtime::vram_state_name(p), "DFlash drafter"),
                                   reserve_bytes, ctx.memory_bytes()},

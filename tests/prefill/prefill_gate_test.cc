@@ -188,7 +188,10 @@ int main(int argc, char** argv) {
   if (near_miss_rule) std::printf("near-miss rule (l0-int8 on a MoE model): f32 margin < 8 bf16 ulps and (the bf16 "
                                   "twin misses it too, or logits cosine vs f32 >= the twin's - 1e-5)\n");
   const char* const scan_entry = runtime::prefill::gdn_scan_entry_name();
-  runtime::Engine eng(ctx, std::move(model), kMaxLen);
+  // PERF-114: l0-int8 runs on the int8 context (the CLIs turn it on with it) on a dense model.
+  const bool int8_ctx = backend == runtime::PrefillBackend::L0Int8 && !model.desc->is_moe();
+  runtime::Engine eng(ctx, std::move(model), kMaxLen, /*debug_resid=*/false,
+                      int8_ctx ? runtime::KvCache::Int8 : runtime::default_kv_cache());
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
   // The scan selector's DISPATCH PROOF (parity-program design §11). A gate run

@@ -14,6 +14,7 @@
 
 #include "model/model_desc.h"
 #include "runtime/memory_plan.h"
+#include "runtime/tp_protocol.h"   // tp::Layout (header-only)
 
 namespace runtime {
 
@@ -33,8 +34,53 @@ std::vector<std::array<uint32_t, 2>> tp_prefill_chunks(uint32_t pos, size_t n, u
 // The device bytes TpEngine's prefill holds on a card beside its PrefillScratch: the second chunk's residual, each
 // chunk's own half of the row-parallel output and its two landing slots.
 size_t tp_prefill_extra_bytes(const model::ModelDesc& card, uint32_t chunk_cap);
+inline constexpr uint32_t kTpPrefillLandSlots = 2;   // a chunk's landing slots (the units' parity)
+// Spec 39: TpEngine's prefill card's own allocations beside its PrefillScratch (TpPfCard, prefill/tp_prefill.cc), one
+// of each name - in device memory: chunk B's residual rows, both chunks' own halves and landing slots (tp_prefill_extra_
+// bytes), the MTP head's hidden rows and slab (tp_prefill_mtp_bytes), a drafter's tap rows of the prompt's last window;
+// in host memory (outside the device plan): the pair's Controls and ids, the head's Controls. Every one is written for a
+// chunk before it is read.
+struct TpPfDeviceSizes {
+  [[=gs::scratch]] size_t resid_b = 0;
+  [[=gs::scratch]] size_t own = 0;
+  [[=gs::scratch]] size_t land = 0;
+  [[=gs::scratch]] size_t hid = 0;
+  [[=gs::scratch]] size_t hslab = 0;
+  [[=gs::scratch]] size_t df_taps = 0;
+  size_t total() const { return gs::bytes(*this); }
+};
+struct TpPfHostSizes {
+  [[=gs::scratch]] size_t ctl = 0;
+  [[=gs::scratch]] size_t ids = 0;
+  [[=gs::scratch]] size_t hctl = 0;
+};
+static_assert(gs::sizes_problem<TpPfDeviceSizes, EngineSnap>().empty(), gs::sizes_problem<TpPfDeviceSizes, EngineSnap>());
+static_assert(gs::sizes_problem<TpPfHostSizes, EngineSnap>().empty(), gs::sizes_problem<TpPfHostSizes, EngineSnap>());
+// `n_taps` / `window` a drafter's taps and its window (0: none) - TpEngine stages the window's rows, not a chunk's.
+TpPfDeviceSizes tp_pf_device_sizes(const model::ModelDesc& card, uint32_t chunk_cap, bool mtp, uint32_t n_taps = 0,
+                                   uint32_t window = 0);
 
-// The crossing's device bytes on one card (TpEngine::Card's allocations).
+// Spec 39: TpEngine::Card's own allocations beside its PersistentBuffers / DecodeScratch / MtpBuffers (one of each
+// name, runtime/tp_engine_card.h): the crossing - the landing buffer (the other card's tp_send writes it), the two call
+// counter arrays, the shared state words (a step's first failure), the folded row - the debug tap and a drafter's GDN
+// slots 1..7 at the card's shapes.
+struct TpCardSizes {
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("a landing slot is read only in the step that filled it")]]
+  size_t land = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("both cards' counters advance together; a restore keeps them")]]
+  size_t send_ctr = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("both cards' counters advance together; a restore keeps them")]]
+  size_t fold_ctr = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("a step's first failure, read after its fence")]]
+  size_t state = 0;
+  [[=gs::scratch]] size_t own = 0;
+  [[=gs::scratch]] size_t tap = 0;
+  [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::DrafterSlots}]] size_t df_slots = 0;
+  size_t total() const { return gs::bytes(*this); }
+};
+static_assert(gs::sizes_problem<TpCardSizes, EngineSnap>().empty(), gs::sizes_problem<TpCardSizes, EngineSnap>());
+TpCardSizes tp_card_sizes(const model::ModelDesc& card, const tp::Layout& L, bool folded, bool tap, bool drafter);
+// The crossing's device bytes on one card (TpCardSizes without the tap and the drafter's slots).
 size_t tp_crossing_bytes(const model::ModelDesc& card, model::TpCrossing c);
 
 // One card's plan at max_len; `model_bytes` the card's loaded weights without the RoPE table.

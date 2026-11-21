@@ -11,11 +11,15 @@
 //      largest length whose plan + reserve fits, and never above auto without it.
 //   4. rope_table == the host twin's (bitwise) at positions 0..300 and 131000..131071; the lists' launch formulas
 //      (87 for DFlash 2, 66 for v1, 8 for the projection).
+//   5. spec 31 (plan 31 Task 4): the KV page pool with the drafter (--spec dflash, MTP off) on the 32.53 GB card -
+//      every further sequence's drafter session at the per-request cap instead of a short slot's 32768; printed
+//      against the fixed slots at 2 / 3 / 4 requests, bf16 and int8.
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "check.h"
 #include "common/json.h"
@@ -105,7 +109,10 @@ int main(int argc, char** argv) {
   CHECK_EQ(dr.n_taps, 5u);
   CHECK_EQ(on.drafter_slots, runtime::TapVerifyDims::gdn_spec_bytes(q));
   CHECK_EQ(on.drafter_taps, runtime::TapVerifyDims::prefill_taps_bytes(q, 5, runtime::PrefillScratchDims::kCDefault));
-  CHECK_EQ(on.total(), off.total() + dr.bytes(32768) + on.drafter_slots + on.drafter_taps);
+  // Spec 39: and one sequence's deferred GDN rows (Engine's gdn_pend: two parities at Qwen3.8's shapes), planned with
+  // a drafter since the engine makes them with either proposer.
+  CHECK_EQ(on.deep, size_t{103022592});
+  CHECK_EQ(on.total(), off.total() + dr.bytes(32768) + on.drafter_slots + on.drafter_taps + on.deep);
   const std::string loff = runtime::format_memory("x", off, 32'000'000'000ull),
                     lon = runtime::format_memory("x", on, 32'000'000'000ull);
   CHECK(loff.find("drafter") == std::string::npos && lon.find(" drafter ") != std::string::npos);
@@ -172,7 +179,10 @@ int main(int argc, char** argv) {
       const auto three = runtime::plan_slots(q, lens, false, target, {}, {}, kv, hp4);
       const size_t states = size_t(2) * runtime::SlotDims::kDrafterStates * runtime::PersistentDims::sizes(0, q).gdn_state;
       CHECK_EQ(three.slot_state, runtime::SlotDims::sizes(q, 3, false, runtime::slots_kv_len(lens) / runtime::kKvPage,
-                                                          true).total() + 2 * hp4.session(32768));
+                                                          true).total() + 2 * hp4.session(32768) + hp4.rows);
+      // Spec 39: the row tables (two of [8 + 8 x 4] u32) and the row lists' taps, once beside several slots - the
+      // allocations DFlashBuffers::add_sessions makes, unplanned before.
+      CHECK_EQ(hp4.rows, size_t{2} * (8 + 8 * 4) * 4 + s4.taps);
       CHECK_EQ(runtime::SlotDims::sizes(q, 3, false, 0, true).states, states);
       CHECK_EQ(three.drafter, hp4.bytes(runtime::slots_kv_len(lens)));
       CHECK_EQ(three.drafter_slots, runtime::TapVerifyDims::gdn_spec_bytes(q));   // slot 0's 7 more
@@ -246,6 +256,29 @@ int main(int argc, char** argv) {
                                  2 * 5120 * 4));
     std::printf("snapshot ring %zu B; the drafter's key moves with its format, a norm weight and a tap\n",
                 rd::ring_snapshot_bytes(d, 16384));
+  }
+  // 5. spec 31: the page pool with the drafter
+  {
+    const size_t w = size_t{16812371968};   // Qwen3.8 int8 weights, int8 lm_head (slot_plan_test's kQwenInt8Weights)
+    const size_t device = 32530000000ull, reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+    const runtime::DrafterPlan dp = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int8);
+    std::printf("drafter session: %zu B + %zu B a position\n", dp.session_fixed, dp.session_per_position);
+    std::printf("| --max-num-seqs | KV | pool (DFlash, MTP off) | one request up to | sessions at the cap GB | fixed "
+                "slots | their sessions GB |\n");
+    for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8})
+      for (uint32_t seqs = 2; seqs <= runtime::SlotDims::kMaxSeqs; ++seqs) {
+        const runtime::PoolShape ps = runtime::pool_that_fits(q, seqs, false, w, device, reserve, 262144, {}, kv, dp);
+        CHECK(ps.pages != 0);
+        const runtime::MemoryPlan pp = runtime::plan_pool(q, ps, false, w, {}, kv, dp);
+        CHECK(pp.total() + reserve <= device);
+        CHECK_EQ(pp.drafter, dp.bytes(ps.cap));   // the first sequence's drafter at the cap
+        const uint32_t slot0 = runtime::slot0_len_that_fits(q, seqs, false, w, device, reserve, 262144, {}, kv, dp);
+        std::printf("| %u | %s | %u pages = %llu positions | %u | %.3f | %s | %.3f |\n", seqs,
+                    runtime::kv_cache_name(kv), ps.pages, static_cast<unsigned long long>(ps.positions()), ps.cap,
+                    (seqs - 1) * dp.session(ps.cap) / 1e9,
+                    slot0 != 0 ? runtime::slot_layout_name(runtime::slot_layout(slot0, seqs)).c_str() : "none fits",
+                    (seqs - 1) * dp.session(runtime::SlotDims::kShortLen) / 1e9);
+      }
   }
   std::printf("dflash_plan_test: PASS\n");
   return 0;

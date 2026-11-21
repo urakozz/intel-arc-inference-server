@@ -66,6 +66,8 @@ struct Qwen4ExpPrefillScratch {
   uint32_t rows;   // a chunk's most rows: every [rows] stride of the walk, the M = rows binaries
   size_t bytes() const;
 };
+static_assert(gs::buffers_problem<l0::Mem, Qwen4ExpPrefillScratch, PrefillSizes>().empty(),
+              gs::buffers_problem<l0::Mem, Qwen4ExpPrefillScratch, PrefillSizes>());
 
 // Spec 21-QFN-v1e: the MTP head's pass over a chunk (plan 21-QFN-v1e Review Focus 4: the head's KV is filled for every position the
 // main model has), on the last device after its layers: combine _Y_NN over the chunk (its rows of R, the main model's
@@ -170,6 +172,8 @@ struct Q4PfRingState {
   std::unique_ptr<l0::SyncEventPool> ev;
   ze_command_list_handle_t list = nullptr;
 };
+static_assert(gs::buffers_problem<l0::Mem, Q4PfRingState, RingSizes>().empty(),
+              gs::buffers_problem<l0::Mem, Q4PfRingState, RingSizes>());
 std::unique_ptr<Q4PfRingState> make_pf_ring(l0::Context& ctx, const loader::Q4DevicePart& part,
                                             const model::Qwen4ExpDesc& card);
 // Plan 21-QFN-v2b Task 7 Step 2: the prefill scratch lent to the expert tier between prefills. The scratch (and the

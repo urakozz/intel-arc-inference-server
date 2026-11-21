@@ -152,8 +152,8 @@ On top of that format, three choices are made per run, not per file. The output 
 load to int8 with one scale per row. The KV cache, the stored keys and values of every earlier token, is bf16 or,
 with `--kv-cache int8`, a rotated int8 form. And the prefill linears are bf16 or, with
 `--prefill-backend l0-int8`, the Hadamard-rotated int8 path of [16-int8-prefill.md](16-int8-prefill.md), computed
-from the same int4 file. Do not combine the int8 prefill with the int8 KV cache: the engine warns at startup, and
-about 3 % of tool calls that copy exact text from a long prompt come out wrong.
+from the same int4 file. On Qwen3.8 the int8 prefill runs on the int8 KV cache, which it turns on, and scores the
+prompt's attention in int8 too.
 
 MXFP4 and FP8 stay rejected for the reasons above. Beyond GPTQ-packed AutoRound and symmetric compressed-tensors,
 no other quantisation format is supported.

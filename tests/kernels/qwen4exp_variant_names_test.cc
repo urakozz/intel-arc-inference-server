@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
     built.insert(a.substr(7));
   }
   CHECK(!built.empty());
-  // The descriptor's shapes and PROVISIONAL split-K cells are the names' (qkvz S1, q||gate||k||v S2, out / o S4).
+  // The descriptor's shapes and PROVISIONAL split-K cells are the names' (qkvz S1, q||gate||k||v S2, out / o S8).
   const model::Qwen4ExpDesc& d = model::qwen4exp();
   CHECK(d.hidden == kq::kHidden && d.hc_n() == kq::kHcN && d.hc_low == kq::kHcLow && d.hc_down_rows() == kq::kHcDownN);
   CHECK(d.q_heads == kq::kQHeads && d.kv_heads == kq::kKvHeads && d.head_dim == kq::kHd && d.qkvg_n() == kq::kQkvgN);
@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
   CHECK(d.experts == kq::kExperts && d.top_k == kq::kTopK && d.moe_inter == kq::kInter && d.router_n() == kq::kRouterN);
   CHECK(d.ple_heads == kq::kPleHeads && d.ple_dim == kq::kPleDim && d.ple_kv_n() == kq::kPleKvN && d.ple_eos == kq::kPleEos);
   CHECK(d.vocab == kq::kVocab && d.vocab_used == kq::kVocabUsed && d.qkvz_n() == kq::kQkvzN);
-  CHECK(d.linear(model::Q4LinearId::GdnQkvz).shape.S == 1 && d.qkvg_s == 2 && d.gdn_out_s == 4 && d.o_s == 4);
+  CHECK(d.linear(model::Q4LinearId::GdnQkvz).shape.S == 1 && d.qkvg_s == 2 && d.gdn_out_s == 8 && d.o_s == 8);
   std::set<std::string> bound;
   model::Qwen4ExpDesc intel = d;
   intel.forms = {model::Q4Form::Bf16, model::Q4Form::Bf16, model::Q4Form::Bf16, 128};
@@ -61,8 +61,8 @@ int main(int argc, char** argv) {
   CHECK(kq::qsa_attn_variant(1, false) == "q4_qsa_attn_M1_T32" && kq::qsa_attn_variant(1, true) == "q4_qsa_attn_eager_M1");
   CHECK(kq::route_variant(1) == "q4_route_M1_E512_T10_N528_L256");
   CHECK(kq::hc_down_variant(true) == "gemv_bf16_M1_K10240_N336_C16_S16");
-  CHECK(kq::hc_down_variant(false, true) == "q4_hc_down_i8_M1_N320_KS16");
-  CHECK(kq::hc_up_mix_variant(1, true, true) == "q4_hc_up_mix_M1_I_Q8");
+  CHECK(kq::hc_down_variant(false, true) == "q4_hc_down_i8_M1_N320_KS32");
+  CHECK(kq::hc_up_mix_variant(1, true, true) == "q4_hc_up_mix_M1_I_Q8_B");
   CHECK(kq::attn_prep_q4_variant(1, 1) == "attn_prep_M1_Q24KV2_S1");
   std::printf("qwen4exp_variant_names_test OK: %zu bound names, %zu binaries\n", bound.size(), built.size());
   return 0;

@@ -4,7 +4,7 @@
 optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
 - **Qwen3.8-27B:** **164 t/s** writing code for one session on one card (DFlash); **342 t/s** in total with 8 requests on two cards.
-- **Prompts read at 2,253 t/s on one card with MTP on, 3,217 t/s on two** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
+- **Prompts read at 2,800 t/s on one card with MTP on** (Qwen3.8-27B, 4,096 tokens, the opt-in int8 prompt pass).
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 - **Ornith 1.5 35B-A3B:** prompts read at **11,223 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 - **Qwen3.8-Flash-Next:** prompts read at **3,103 t/s**, code written at **82-92 t/s** (two cards, experts offloaded to RAM).
@@ -23,10 +23,11 @@ Prefill, t/s:
 
 | setup | 4k prompt | 16k prompt | 32k prompt | 64k prompt | 128k prompt |
 |---|---:|---:|---:|---:|---:|
-| one card, MTP on (the default server) | 1,780 | - | - | 1,294 | - |
-| one card, MTP on, `--prefill-backend l0-int8` (opt-in) | 2,253 | - | - | 1,526 | - |
+| one card, MTP on (the default server) | 1,906 | - | 1,640 | 1,397 | 1,072 |
+| one card, MTP on, `--prefill-backend l0-int8` (opt-in) | **2,800** | - | **2,346** | **1,985** | **1,500** |
 | two cards, `tp`, MTP off | 2,931 | 2,683 | - | - | - |
-| two cards, `tp`, MTP off, `--prefill-backend l0-int8` (opt-in) | **3,217** | **2,937** | - | - | - |
+| two cards, `tp`, MTP off, `--prefill-backend l0-int8` (opt-in; derived, not yet measured) | **~3,800** | **~3,500** | ~3,300 | ~2,950 | ~2,350 |
+| two cards, `replica`, 2 requests (total), `--prefill-backend l0-int8` (opt-in; derived, not yet measured) | **~4,750** | - | ~4,000 | - | - |
 
 Writing after a prompt of that length, one card, t/s:
 
@@ -35,7 +36,9 @@ Writing after a prompt of that length, one card, t/s:
 | MTP | - | - | 50 | - | - |
 | DFlash, `--kv-cache int8` | - | - | 90 | 93 | 90 |
 
-A dash is not measured yet.
+A dash is not measured yet. "Derived" numbers are worked out from the measured ones above: `tp` as half the
+one-card time plus the measured cost of the cards' exchange (4 % optimistic against the measured 16k `tp` row),
+`replica` as two cards at the efficiency measured for Ornith below.
 
 Generation, t/s (several requests: the total; llama-benchy tg128 at 0 / 32k tokens of context):
 
@@ -107,6 +110,9 @@ uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-Aut
 uvx --from huggingface_hub hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 ```
 
+Or in a container: the [Dockerfile](Dockerfile) builds the same, and its header has the `docker run` line (the
+host needs only the `xe` driver).
+
 [The model](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ) is Qwen3.8-27B compressed to 4-bit
 weights with AutoRound, in groups of 64 rather than the usual 128 - better accuracy for about 2 % of prefill speed.
 
@@ -139,9 +145,12 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
 - **`N = 1` (the default):** one request with the largest context that fits. On two cards every layer is split over
   both (`--parallel tp`) - the fastest single session, at the model's full 262,144 tokens. On one card add
   `--kv-cache int8` to get the full context there too.
-- **`N = 2` to `4` on one card, up to `8` on two:** shaped for a coding agent with subagents. The first slot (one
-  per card on two cards) gets the largest context that fits - the main session; the other slots get a shorter
-  context, enough for subagent tasks. On two cards every card runs its own copy of the model (`--parallel replica`).
+- **`N = 2` to `4` on one card, up to `8` on two:** shaped for a coding agent with subagents. On one card the
+  requests share the card's KV cache: the main session can use most of it while its subagents run short, and a
+  finished session's memory goes to the next request that needs it. A 123k-token prompt runs beside two short ones,
+  and an idle session pushed out to make room resumes from the prefix cache in about a second. On two cards every
+  card runs its own copy of the model (`--parallel replica`) with fixed slots, as with `--spec dflash` on one card:
+  the first gets the largest context that fits, the others 32,768 tokens.
 
 Speculative decoding (the model's MTP head) and the prefix cache are on by default; the DFlash draft model is
 `--spec dflash --draft-model ...`. Ready-made recipes with their context sizes:
@@ -162,14 +171,14 @@ Kolibri-1); Qwen3.8 is the one everything is tuned for.
 | flag | default | what it does |
 |---|---|---|
 | `<snapshot-or-repo>` | required | a Hugging Face repo id in the local cache, or a snapshot directory; never downloads |
-| `--max-num-seqs N` | `1` | how many requests run at once; the context follows. Slot 0 gets the largest context that fits beside N - 1 slots of 32,768 tokens. Up to 4 per card; on two cards N > 1 runs a model copy per card |
-| `--max-len auto\|L` | `auto` | context length (slot 0's with `--max-num-seqs`). `auto`: the largest that fits, up to the model's 262,144 |
+| `--max-num-seqs N` | `1` | how many requests run at once. On one card they share one pool of KV cache, and any one may use all of it; on two cards (or with `--spec dflash`) slot 0 gets the largest context beside slots of 32,768 tokens, and two cards run a model copy each. Up to 4 per card |
+| `--max-len auto\|L` | `auto` | context length (the most one request may use with `--max-num-seqs`). `auto`: the largest that fits, up to the model's 262,144 |
 | `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
 | `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; it also copies repeats of earlier text |
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
 | `--draft-model PATH` | none; required with `--spec dflash` | the draft model: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB of the context's memory) |
 | `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
-| `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; Qwen3.8 and Ornith) |
+| `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; Qwen3.8 and Ornith). On Qwen3.8 `int8` means every prompt linear, the context (it implies `--kv-cache int8`) and the attention scores in int8: 40-47 % faster prompts; measured against the bf16 pass, the most likely next token differs at 3 of 585 positions and 0 of 12 long exact-copy tool calls changed. On Ornith: its experts in int8 |
 | `--prefix-cache-gb auto\|N` | `auto` | the prefix cache in pinned system RAM; `auto` = up to 32 GiB from what is free, `0` = off |
 | `--prefix-split-last` | off | for chat clients that drop the reasoning (opencode): the next turn is a prefix cache hit exactly where it diverges. On for agentic sessions, off for benchmarks |
 | `--host H`, `--port P` | `0.0.0.0`, `8000` | where it listens |

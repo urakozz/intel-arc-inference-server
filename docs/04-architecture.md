@@ -180,7 +180,7 @@ Where speculative output differs from the plain run, it is checked against a flo
 ## The prompt pass backends
 
 The prompt pass runs in bf16 by default. `--prefill-backend l0-int8` is an opt-in alternative that runs
-the MLP's linears with int8 activations ([16-int8-prefill.md](16-int8-prefill.md)).
+every prompt linear with int8 activations ([16-int8-prefill.md](16-int8-prefill.md)).
 
 ## Component layout
 

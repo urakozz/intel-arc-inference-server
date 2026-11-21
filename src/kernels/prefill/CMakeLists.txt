@@ -388,6 +388,12 @@ if(B70_KV8)
                    DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
                    OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_attn_gate_kv8 SOURCE ${KV8_CL} DEFINES KV8_GATE=1)
+  # PERF-114 (the int8 prompt pass, kv8.cl KV8_I8S): int8 attention scores in the prompt pass - the writer with int8 q and its
+  # fp32 scales, and the pair flash (with its kv8_widen, K kept int8) scoring by int8 DPAS. Additive only.
+  add_ocloc_kernel(pf_attn_prep_kv8_I8S SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1 KV8_I8S=1)
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_pair_I8S SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 KV8_PAIR=1 KV8_I8S=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
 endif()
 
 # Plan 19v3b Task 0 (src/kernels/CMakeLists.txt's block of that name): a slot's prefill over its paged KV - the writers
@@ -413,6 +419,12 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   add_ocloc_kernel(pf_flash_attn_kv8_raw_split_PG${KV_PAGE} SOURCE ${KV8_CL}
                    DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV_PAGED=${KV_PAGE}
                    OPTIONS -cl-intel-256-GRF-per-thread)
+  # PERF-114: the int8-score writer and pair over a slot's paged KV (the pair reads the widened rows, its scales by page).
+  add_ocloc_kernel(pf_attn_prep_kv8_I8S_PG${KV_PAGE} SOURCE ${KV8_CL}
+                   DEFINES ${KV8_PREP_DEFINES} PF=1 KV8_I8S=1 KV_PAGED=${KV_PAGE})
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_pair_I8S_PG${KV_PAGE} SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 KV8_PAIR=1 KV8_I8S=1
+                   KV_PAGED=${KV_PAGE} OPTIONS -cl-intel-256-GRF-per-thread)
 endif()
 
 # --- Spec 15d: Ornith 1.5 35B-A3B prefill (model::ornith()) -------------------------------
@@ -654,8 +666,14 @@ if(B70_TP)
     add_ocloc_kernel(pf_flash_attn_kv8_raw_split_Q12KV2 SOURCE ${KV8_CL}
                      DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${PF_TP_FA}
                      OPTIONS -cl-intel-256-GRF-per-thread)
+    # PERF-114: the int8 pass's int8 attention scores at the card's 12 / 2 heads (kv8.cl KV8_I8S, the pair form).
+    add_ocloc_kernel(pf_attn_prep_kv8_I8S_Q12KV2 SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1 KV8_I8S=1 ${PF_TP_FA})
+    add_ocloc_kernel(pf_flash_attn_kv8_raw_pair_I8S_Q12KV2 SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 KV8_PAIR=1 KV8_I8S=1 ${PF_TP_FA}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
     list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_attn_prep_kv8_Q12KV2 kernel_pf_flash_attn_kv8_raw_Q12KV2
-         kernel_pf_attn_gate_kv8_Q12KV2 kernel_pf_flash_attn_kv8_split_Q12KV2 kernel_pf_flash_attn_kv8_raw_split_Q12KV2)
+         kernel_pf_attn_gate_kv8_Q12KV2 kernel_pf_flash_attn_kv8_split_Q12KV2 kernel_pf_flash_attn_kv8_raw_split_Q12KV2
+         kernel_pf_attn_prep_kv8_I8S_Q12KV2 kernel_pf_flash_attn_kv8_raw_pair_I8S_Q12KV2)
   endif()
   set(B70_TP_PREFILL_KERNELS ${B70_TP_PREFILL_KERNELS} CACHE INTERNAL "spec 17c: the binaries a TP prefill chunk binds")
 endif()

@@ -77,7 +77,7 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 |---|---:|---|
 | default, bf16 KV cache | 171,008 | 138 / 57 / 100 t/s, prefill 1,788 t/s |
 | full context: int8 KV cache | 262,144 | not measured |
-| faster prefill (opt-in): int8 prompt pass, bf16 cache | 171,008 | prefill 2,337 t/s |
+| faster prefill (opt-in): int8 prompt pass (brings the int8 cache) | 262,144 | prefill 2,800 t/s at 3,931 tokens (bf16 1,906), MTP on |
 | four requests at once: `--max-num-seqs 4` | 46,080 + 3 x 32,768 (bf16 cache), 167,936 + 3 x 32,768 (int8 cache) | not measured |
 
 ```sh
@@ -89,14 +89,16 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 On a machine with one card, `--parallel 1` can be left out.
 
-Do not combine the int8 prompt pass with the int8 KV cache. Together they round too much, and about 3 % of tool calls
-that copy exact text from a long prompt come out wrong.
+The int8 prompt pass runs every prompt linear, the context (the KV cache) and the prompt's attention scores in
+int8, and prints its measured cost at startup: on long tool calls that copy exact text, none of 12 differed from the
+bf16 pass, and the most likely next token differed at 3 of 585 positions ([16-int8-prefill.md](16-int8-prefill.md)).
+It turns `--kv-cache int8` on; an explicit `--kv-cache bf16` beside it is refused.
 
 ### Two cards
 
 | recipe | mode | context | speed |
 |---|---|---:|---|
-| one session, fastest (the default) | `tp`: every layer split over both cards; needs peer access | 262,144 (bf16 cache) | 123 / 74 / 115 t/s; prefill 2,931 t/s, 3,217 with `--prefill-backend l0-int8` |
+| one session, fastest (the default) | `tp`: every layer split over both cards; needs peer access | 262,144 (bf16 cache) | 123 / 74 / 115 t/s; prefill 2,931 t/s, 3,217 with `--prefill-backend l0-int8` (measured with the earlier MLP-only int8 pass; today's form - every linear, the int8 context and int8 scores - is not timed on two cards yet) |
 | two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 171,008 (bf16) or 262,144 (int8) each | 164 / 108 / 144 t/s total |
 | most requests at once: `--max-num-seqs 8` | `replica`, 4 slots per card | 46,080 + 3 x 32,768 (bf16) or 167,936 + 3 x 32,768 (int8) per card | 342 / 300 / 233 t/s total at 8 requests, 282 / 189 / 206 at 4 |
 

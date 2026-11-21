@@ -40,7 +40,7 @@ struct KolibriBuffers {
   void* k_layer(uint32_t layer) const;
   void* v_layer(uint32_t layer) const;
   bool holds(uint32_t layer) const { return layer >= placement.first(device) && layer < placement.end(device); }
-  size_t persistent_bytes() const { return control.size() + full_k.size() + full_v.size() + ring_k.size() + ring_v.size(); }
+  size_t persistent_bytes() const { return gs::buffer_bytes<l0::Mem, PersistentSizes>(*this); }
   size_t scratch_bytes() const;
   // control (then n_active = 1), the full KV and the rings - in construction order.
   void zero(l0::CmdList& imm);
@@ -56,5 +56,11 @@ struct KolibriVerifyBuffers {
   l0::Mem control_hi;   // runtime::Control, shared memory
   size_t bytes() const;
 };
+
+// Spec 39: one allocation of each sizes member's name (runtime/gpu_state.h).
+static_assert(gs::buffers_problem<l0::Mem, KolibriBuffers, PersistentSizes, ScratchSizes, EagerSizes>().empty(),
+              gs::buffers_problem<l0::Mem, KolibriBuffers, PersistentSizes, ScratchSizes, EagerSizes>());
+static_assert(gs::buffers_problem<l0::Mem, KolibriVerifyBuffers, ScratchSizes, VerifySizes>().empty(),
+              gs::buffers_problem<l0::Mem, KolibriVerifyBuffers, ScratchSizes, VerifySizes>());
 
 }  // namespace runtime::kolibri

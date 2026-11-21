@@ -33,8 +33,21 @@
 //       each: ids), every slot's KV rows (hashed in position order) and slot 1's snapshot image (save_kv): all
 //       bitwise the same under both tables, and every slot's lone session the same as slot 0's. S1 prints its
 //       session's digest - the same line on main (contiguous slots) is the "bitwise to main" check.
+//   `--pool` (slots_pool_test, slots_pool_kv8_test; spec 31 / plan 31 Task 5): the fixed-slot engine's lone session
+//   (slot 0: a 5000-id prompt over three pages, 16 plain steps, 4 MTP iterations at K = 3) is the reference; then an
+//   engine of 4 sequences sharing a KV page pool (20 pages - the fixed engine's 40960 positions - a request up to
+//   36864):
+//   P1  the same session alone gives the reference's ids and every step's logits bitwise with its pages handed out
+//       in order, reversed, and interleaved with a second request that grows beside it (a step of it after each).
+//   P2  the session's further growth (a prefill over another page, rejected drafts) and its reset leave the second
+//       request's state and KV bytes unchanged; the reset gives every page back, each reads all zero (main and head,
+//       rows and scales), and the next request on those pages gives the reference again.
+//   P3  a request grows past 32768 while the others are empty, the same ids in sequence 3 as in sequence 0.
+//   P4  with no page free, max_verify_k() stops at the page's end and a verify that needs the next page is refused
+//       with nothing of the sequence written; it then continues as an uninterrupted request does.
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -43,6 +56,7 @@
 #include <vector>
 
 #include "check.h"
+#include "contract_death.h"
 #include "golden_common.h"
 #include "greedy_tie.h"
 #include "l0/cmdlist.h"
@@ -525,6 +539,190 @@ bool s7(Ctx& c, const std::vector<uint32_t>& prompt, const std::vector<std::vect
   return same_slots && lone && kv;
 }
 
+// ---- spec 31: the KV page pool ----------------------------------------------------------------------------------
+
+struct Session {
+  std::vector<uint32_t> ids;
+  std::vector<uint64_t> logits;
+  bool operator==(const Session&) const = default;
+};
+// Sequence q's lone session, without a reset (the caller decides the pages it starts with) - s7's: the prompt, 16
+// plain steps, 4 MTP iterations at K = 3; `beside` after every step (another sequence's work).
+Session session(Ctx& c, uint32_t q, const std::vector<uint32_t>& prompt, const std::function<void()>& beside = {}) {
+  Engine& e = c.e;
+  Session o;
+  e.select(q);
+  e.prefill(prompt);
+  for (int i = 0; i < 20; ++i) {
+    for (uint32_t id : lone_step(c, i < 16 || !e.mtp() ? 0 : 3, &o.logits)) o.ids.push_back(id);
+    if (beside) {
+      beside();
+      e.select(q);
+    }
+  }
+  return o;
+}
+void reset_all(Engine& e) {
+  for (uint32_t q = e.slots(); q-- > 0;) {
+    e.select(q);
+    e.reset();
+  }
+}
+// Every byte of physical page `page` - every layer's K and V rows (and at int8 their scales), main and head - is 0.
+bool page_zero(Ctx& c, uint32_t page) {
+  Engine& e = c.e;
+  bool zero = true;
+  const auto one = [&](const runtime::KvLayout& L, void* k, void* vv) {
+    for (uint32_t l = 0; l < L.layers; ++l) {
+      const runtime::KvLayer y = L.at_base(L.layer(k, vv, l), page * runtime::kKvPage);
+      for (int t = 0; t < 4; ++t) {
+        void* ptr = t == 0 ? y.k : t == 1 ? y.v : t == 2 ? y.ks : y.vs;
+        if (!ptr) continue;
+        const size_t n = size_t(runtime::kKvPage) * (t < 2 ? L.row_bytes() : L.scale_row_bytes());
+        for (size_t off = 0; off < n; off += c.host.size()) {
+          const size_t m = std::min(c.host.size(), n - off);
+          c.imm.copy(c.host.ptr(), static_cast<const uint8_t*>(ptr) + off, m);
+          const uint8_t* b = static_cast<const uint8_t*>(c.host.ptr());
+          zero = zero && std::all_of(b, b + m, [](uint8_t x) { return x == 0; });
+        }
+      }
+    }
+  };
+  one(e.buffers().kv_lay, e.buffers().kv_k.ptr(), e.buffers().kv_v.ptr());
+  if (e.mtp_buffers()) one(e.mtp_buffers()->kv_lay, e.mtp_buffers()->kv_k.ptr(), e.mtp_buffers()->kv_v.ptr());
+  return zero;
+}
+std::string pages_str(const std::vector<uint32_t>& v) {
+  std::string out;
+  for (uint32_t p : v) out += (out.empty() ? "" : ",") + std::to_string(p);
+  return out;
+}
+
+bool pool_cases(Ctx& c, const Session& ref, const std::vector<uint32_t>& prompt, const std::vector<uint32_t>& p1,
+                const std::vector<uint32_t>& p2, const std::vector<uint32_t>& grow, const std::vector<uint32_t>& edge) {
+  Engine& e = c.e;
+  constexpr uint32_t P = runtime::kKvPage;
+  bool ok = true;
+  // P1, in order.
+  reset_all(e);
+  const Session a = session(c, 0, prompt);
+  const std::vector<uint32_t> pa = e.pool_pages_of(0);
+  bool r = a == ref;
+  std::printf("P1 in order (pages %s): %s\n", pages_str(pa).c_str(), r ? "PASS (ids and logits = the fixed slots')" : "FAIL");
+  ok &= r;
+  // P1, reversed: sequences 1..3 take a page each and give them back in that order - the next three come out reversed.
+  reset_all(e);
+  for (uint32_t q = 1; q < 4; ++q) {
+    e.select(q);
+    CHECK(e.take_pages(P));
+  }
+  for (uint32_t q = 1; q < 4; ++q) {
+    e.select(q);
+    e.reset();
+  }
+  const Session b = session(c, 0, prompt);
+  const std::vector<uint32_t> pb = e.pool_pages_of(0);
+  r = b == ref && pb.size() >= 3 && pb[0] > pb[1] && pb[1] > pb[2];
+  std::printf("P1 reversed (pages %s): %s\n", pages_str(pb).c_str(), r ? "PASS" : "FAIL");
+  ok &= r;
+  // P1, interleaved with sequence 1's pages, sequence 1 stepping beside it.
+  reset_all(e);
+  for (uint32_t i = 1; i <= 3; ++i)
+    for (uint32_t q = 0; q < 2; ++q) {
+      e.select(q);
+      CHECK(e.take_pages(i * P));
+    }
+  e.select(1);
+  e.prefill(p1);
+  const Session d = session(c, 0, prompt, [&] {
+    e.select(1);
+    lone_step(c, 0);
+  });
+  const std::vector<uint32_t> pd = e.pool_pages_of(0), p1d = e.pool_pages_of(1);
+  r = d == ref;
+  std::printf("P1 interleaved (pages %s; beside it %s): %s\n", pages_str(pd).c_str(), pages_str(p1d).c_str(),
+              r ? "PASS" : "FAIL");
+  ok &= r;
+  // P2: sequence 0 grows (a prefill over another page, rejected drafts), then resets; sequence 1 does not move.
+  e.select(1);
+  const uint32_t n1 = e.pos();
+  const uint64_t h1 = c.slot_hash(1, n1);
+  e.select(0);
+  e.prefill(p2);
+  for (int i = 0; i < 6; ++i) lone_step(c, i % 2 && e.mtp() ? 3 : 0);
+  const std::vector<uint32_t> held = e.pool_pages_of(0);
+  const uint32_t free_before = e.pages_free();
+  e.select(0);
+  e.reset();
+  bool zero = e.pages_held(0) == 0 && e.pages_free() == free_before + held.size();
+  for (uint32_t p : held) zero = zero && page_zero(c, p);
+  r = c.slot_hash(1, n1) == h1;
+  std::printf("P2 sequence 0's growth to %zu pages, drafts and reset: sequence 1 %s; its pages back and all zero: %s\n",
+              held.size(), r ? "byte-identical" : "MOVED - FAIL", zero ? "yes" : "NO - FAIL");
+  ok &= r && zero;
+  const Session g = session(c, 2, prompt);   // the pages sequence 0 gave back are the next ones taken
+  const std::vector<uint32_t> pg = e.pool_pages_of(2);
+  bool reused = true;
+  for (uint32_t p : pg) reused = reused && std::find(held.begin(), held.end(), p) != held.end();
+  r = g == ref && reused;
+  std::printf("P2 the next request on those pages (%s, reused %s): %s\n", pages_str(pg).c_str(), reused ? "yes" : "no",
+              r ? "PASS (the reference's ids and logits)" : "FAIL");
+  ok &= r;
+  // P3: past 32768 with the others empty.
+  std::vector<uint32_t> long_ids[2];
+  for (const uint32_t q : {3u, 0u}) {
+    reset_all(e);
+    e.select(q);
+    e.prefill(grow);
+    std::vector<uint32_t>& ids = long_ids[q == 0];
+    for (int i = 0; i < 4; ++i)
+      for (uint32_t id : lone_step(c, 0)) ids.push_back(id);
+    CHECK(e.pos() > 32768u && e.pages_held(q) == runtime::kv_pages(e.pos() + 1));
+  }
+  r = long_ids[0] == long_ids[1];
+  std::printf("P3 a request of %zu ids past 32768 (sequence 3, then 0): %s\n", grow.size(), r ? "PASS" : "FAIL");
+  ok &= r;
+  // P4: a verify that needs a page the pool does not have.
+  reset_all(e);
+  e.select(2);
+  e.prefill(edge);
+  std::vector<uint32_t> want;
+  for (int i = 0; i < 9; ++i)
+    for (uint32_t id : lone_step(c, 0)) want.push_back(id);
+  e.reset();
+  e.select(0);
+  e.prefill(edge);
+  for (uint32_t q = 1; q < 4; ++q) {   // the others take every free page
+    e.select(q);
+    CHECK(e.take_pages(std::min(e.pages_free(), runtime::kv_pages(e.max_len())) * P));
+  }
+  e.select(0);
+  const uint32_t mvk = e.max_verify_k(), pos = e.pos();
+  const uint64_t before = c.slot_hash(0, pos);
+  bool refused = false;
+  try {
+    e.verify(3);
+  } catch (const std::runtime_error&) {
+    refused = true;
+  }
+  const bool same = c.slot_hash(0, pos) == before && e.pos() == pos;
+  std::vector<uint32_t> got;
+  for (uint32_t id : lone_step(c, 0)) got.push_back(id);
+  for (uint32_t q = 1; q < 4; ++q) {
+    e.select(q);
+    e.reset();
+  }
+  e.select(0);
+  for (int i = 0; i < 8; ++i)
+    for (uint32_t id : lone_step(c, 0)) got.push_back(id);
+  r = mvk == P - pos - 1 && refused && same && got == want;
+  std::printf("P4 no free page at pos %u: max_verify_k %u, verify(3) %s, the sequence %s, then %s\n", pos, mvk,
+              refused ? "refused" : "NOT refused - FAIL", same ? "unchanged" : "MOVED - FAIL",
+              got == want ? "as an uninterrupted request (9 ids)" : "DIFFERENT - FAIL");
+  ok &= r;
+  return ok;
+}
+
 // S4 / S5: four requests alone and together.
 struct Streams {
   std::vector<std::vector<uint32_t>> ids;
@@ -619,9 +817,54 @@ bool s4(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts, const std::st
 }
 }  // namespace
 
+// Spec 31: the fixed slots' reference, then the pool engine on the same card (the first engine and its model freed).
+int pool_main(const std::string& checkpoint) {
+  const uint32_t total = runtime::slots_kv_len(kSlots);
+  constexpr uint32_t kPoolPages = 20, kCap = 36864;
+  CHECK_EQ(kPoolPages * runtime::kKvPage, total);
+  l0::Context ctx(0);
+  const auto long32k = golden::read_ids("tests/golden/prompts/long32k.ids");
+  const auto code = golden::read_ids("tests/golden/prompts/code.ids");
+  const auto prose = golden::read_ids("tests/golden/prompts/prose.ids");
+  CHECK(long32k.size() > 9000 && !code.empty() && !prose.empty());
+  const std::vector<uint32_t> prompt = cut(long32k, 0, 5000);
+  Session ref;
+  {
+    Engine f(ctx, loader::load(ctx, checkpoint, total, true, loader::LmHeadForm::Int8), total, false,
+             runtime::default_kv_cache(), nullptr, kSlots);
+    f.prepare_prefill();
+    Ctx c(ctx, f);
+    reset_all(f);
+    ref = session(c, 0, prompt);
+    std::printf("slots_test --pool: the fixed slots' session (slot 0 of %s): ids %016llx logits %016llx\n",
+                runtime::slot_layout_name(kSlots).c_str(), (unsigned long long)fnv(ref.ids.data(), ref.ids.size() * 4),
+                (unsigned long long)fnv(ref.logits.data(), ref.logits.size() * 8));
+  }
+  Engine e(ctx, loader::load(ctx, checkpoint, total, true, loader::LmHeadForm::Int8), total, false,
+           runtime::default_kv_cache(), nullptr, std::vector<uint32_t>(4, kCap), kPoolPages);
+  e.prepare_prefill();
+  std::printf("slots_test --pool: 4 sequences up to %u sharing %u pages of %u, %s KV; %s\n", e.max_len(),
+              e.kv_pool_pages(), runtime::kKvPage, runtime::kv_cache_name(e.kv_cache()), e.memory_line().c_str());
+  CHECK_EQ(e.slots(), 4u);
+  CHECK_EQ(e.slot_base(1), runtime::kv_pages(kCap) * runtime::kKvPage);
+  CHECK_EQ(e.pages_free(), kPoolPages);
+  // The engine's bounds are contracts: a violation ends the process before any device work - a cache row past the
+  // positions the sequence's pages hold (none yet), a slot the engine does not have, a snapshot past its pages.
+  CHECK(dies([&] { e.kv_row(0, e.pages_held(0) * runtime::kKvPage); }));
+  CHECK(dies([&] { e.select(e.slots()); }));
+  CHECK(dies([&] { e.save_kv(0, 1, nullptr); }));
+  std::printf("slots_test --pool: kv_row, select and save_kv past their bounds end the process (contracts)\n");
+  Ctx c(ctx, e);
+  const bool ok = pool_cases(c, ref, prompt, cut(code, 0, 1200), cut(prose, 0, 2500), cut(long32k, 0, 33500),
+                             cut(long32k, 0, runtime::kKvPage - 2));
+  std::printf("slots_test --pool: %s\n", ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
   const std::string checkpoint = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   golden::load_end_of_turn(checkpoint);
+  if (argc > 2 && std::string(argv[2]) == "--pool") return pool_main(checkpoint);
   const uint32_t total = runtime::slots_kv_len(kSlots);
   l0::Context ctx(0);
   const bool mtp = !(argc > 3 && std::string(argv[2]) == "--mtp" && std::string(argv[3]) == "off");

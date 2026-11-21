@@ -43,11 +43,11 @@ struct Q4TpPrefillState {
         : cx(c),
           kc(c),
           s(c, card, max_len, rows),
-          fold(c, l0::MemKind::Device, size_t(kTpPfChunks) * 2 * 2 * rows * one.hidden * 4, 4096),
-          yf(c, l0::MemKind::Device, size_t(pf_tiles(one, rows)) * kPfTm * one.hidden * 4, 4096),
-          H1(c, l0::MemKind::Device, size_t(rows) * one.hc_n() * 2),
-          inj1(c, l0::MemKind::Device, size_t(rows) * one.hc * 4),
-          lists1(c, l0::MemKind::Device, size_t(rows) * kListRow * 4),
+          fold(c, l0::MemKind::Device, tp_pf_dev_sizes(one, rows, false).fold, 4096),
+          yf(c, l0::MemKind::Device, tp_pf_dev_sizes(one, rows, false).yf, 4096),
+          H1(c, l0::MemKind::Device, tp_pf_dev_sizes(one, rows, false).H1),
+          inj1(c, l0::MemKind::Device, tp_pf_dev_sizes(one, rows, false).inj1),
+          lists1(c, l0::MemKind::Device, tp_pf_dev_sizes(one, rows, false).lists1),
           ctl(c, l0::MemKind::Host, kTpPfChunks * sizeof(Control)),
           rctl(c, l0::MemKind::Host, kTpPfChunks * sizeof(Control)) {
       std::memset(ctl.ptr(), 0, ctl.size());
@@ -91,6 +91,8 @@ struct Q4TpPrefillState {
     std::unique_ptr<Q4PfRingState> ring;   // the host-memory experts read ahead (null: no expert table)
     std::unique_ptr<Q4LendState> lend;     // the scratch lent to the tier between prefills (with the ring)
   };
+  static_assert(gs::buffers_problem<l0::Mem, Dev, TpPfDevSizes, TpPfHostSizes>().empty(),
+                gs::buffers_problem<l0::Mem, Dev, TpPfDevSizes, TpPfHostSizes>());
   // [chunk][sent card 0 | sent card 1 | ready card 0 | ready card 1 | the same four of the row split's lists][unit]
   Q4TpPrefillState(l0::Context& d0, l0::Context& d1, uint32_t units)
       : ev(d0, {&d0, &d1}, kTpPfChunks * 8 * units), units(units) {}
@@ -150,8 +152,8 @@ void Qwen4ExpTpEngine::prepare_prefill() {
     ps->dev[r] = std::make_unique<Q4TpPrefillState::Dev>(cards_[r]->ctx, cards_[r]->desc, d, max_len_, rows);
     ps->dev[r]->hidden = d.hidden;
     ps->dev[r]->ring = make_pf_ring(cards_[r]->ctx, model_.parts[r], cards_[r]->desc);
-    require(ps->dev[r]->s.bytes() + ps->dev[r]->fold.size() + ps->dev[r]->yf.size() + ps->dev[r]->H1.size() +
-                    ps->dev[r]->inj1.size() + ps->dev[r]->lists1.size() + (ps->dev[r]->ring ? pf_ring_bytes(d) : 0) ==
+    require(ps->dev[r]->s.bytes() + gs::buffer_bytes<l0::Mem, TpPfDevSizes>(*ps->dev[r]) +
+                    (ps->dev[r]->ring ? pf_ring_bytes(d) : 0) ==
                 prefill_sizes(cards_[r]->desc, max_len_, rows).total() + tp_prefill_bytes(d, rows),
             "card " + std::to_string(r) + "'s prefill allocation is not the plan's (prefill_sizes + tp_prefill_bytes)");
   }
@@ -160,10 +162,11 @@ void Qwen4ExpTpEngine::prepare_prefill() {
       require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with B70_MTP=ON");
     Q4TpPrefillState::Dev& D = *ps->dev[1];
     l0::Context& c1 = cards_[1]->ctx;
-    D.mtp_R = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, mtp_prefill_R_bytes(d, rows));
+    const TpPfDevSizes t = tp_pf_dev_sizes(d, rows, true);
+    D.mtp_R = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, t.mtp_R);
     D.hctl = std::make_unique<l0::Mem>(c1, l0::MemKind::Host, kTpPfChunks * sizeof(Control));
-    D.mtp_part = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(rows) * pf_ld(d.qkvg_n()) * 4);
-    D.mtp_q16 = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, size_t(rows) * d.q_n() * 2);
+    D.mtp_part = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, t.mtp_part);
+    D.mtp_q16 = std::make_unique<l0::Mem>(c1, l0::MemKind::Device, t.mtp_q16);
   }
   const bool overlap = ps->dev[0]->bcs && ps->dev[1]->bcs;   // both cards' copy engines, or neither crosses there
   for (uint32_t r = 0; r < 2; ++r) {

@@ -154,6 +154,16 @@ int main() {
         CHECK_EQ(mp.kv, pc.kv_k + pc.kv_v);
         CHECK(mp.decode_state > runtime::tp_crossing_bytes(d, c));
       }
+    // Spec 39: a drafter's prefill tap staging on a card is its window's rows (TpPfCard::df_taps), not a chunk's.
+    {
+      runtime::DrafterPlan dr;
+      dr.weights = 1;
+      dr.n_taps = 5;
+      dr.window = 4096;
+      const runtime::MemoryPlan mp = runtime::tp_card_plan(d, c, 16384, size_t(11e9), runtime::KvCache::Bf16,
+                                                           runtime::PrefillPath{}, false, dr);
+      CHECK_EQ(mp.drafter_taps, runtime::TapVerifyDims::prefill_taps_bytes(d, 5, 4096));
+    }
     const runtime::tp::Layout L = runtime::tp::layout(d, c);
     CHECK_EQ(L.s_msg, c == model::TpCrossing::Slices ? 2u : 1u);
     std::printf("%s: crossing %zu B a card (landing %zu B)\n", d.name.c_str(), runtime::tp_crossing_bytes(d, c),

@@ -59,15 +59,15 @@ void zero_kv(l0::CmdList& imm, l0::Mem& m, const KvLayout& L, uint32_t end) {
 }  // namespace
 
 void PersistentBuffers::zero(l0::CmdList& imm, uint32_t kv_end) {
-  for (l0::Mem* m : {&control, &gdn_state, &conv_ring})
-    imm.fill(m->ptr(), 0u, m->size());
-  zero_kv(imm, kv_k, kv_lay, kv_end);
-  zero_kv(imm, kv_v, kv_lay, kv_end);
+  gs::zero<l0::Mem, PersistentSizes>(*this, [&](l0::Mem& m) {
+    if (&m == &kv_k || &m == &kv_v)
+      zero_kv(imm, m, kv_lay, kv_end);
+    else
+      imm.fill(m.ptr(), 0u, m.size());
+  });
 }
 
-size_t PersistentBuffers::bytes() const {
-  return control.size() + gdn_state.size() + conv_ring.size() + kv_k.size() + kv_v.size();
-}
+size_t PersistentBuffers::bytes() const { return gs::buffer_bytes<l0::Mem, PersistentSizes>(*this); }
 
 // --- DecodeScratch -----------------------------------------------------------
 
@@ -90,11 +90,7 @@ DecodeScratch::DecodeScratch(l0::Context& ctx, const DecodeScratchSizes& s)
       // Spec 15c: sized by moe_scratch_layout (0 bytes, so no allocation, when dense).
       moe(s.moe ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, s.moe) : nullptr) {}
 
-size_t DecodeScratch::bytes() const {
-  return resid.size() + x.size() + partials.size() + ab_out.size() + norm_sumsq.size() +
-         gdn_o.size() + attn_q.size() + attn_gate.size() + attn_part.size() + attn_out.size() +
-         logits.size() + argmax_part.size() + (moe ? moe->size() : 0);
-}
+size_t DecodeScratch::bytes() const { return gs::buffer_bytes<l0::Mem, DecodeScratchSizes>(*this); }
 
 // --- PrefillScratch ----------------------------------------------------------
 
@@ -141,37 +137,30 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::
   if (s.moe) moe = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, s.moe);
 }
 
-size_t PrefillScratch::bytes() const {
-  return ids.size() + resid.size() + x.size() + partials.size() + ab_out.size() +
-         norm_sumsq.size() + gdn_o.size() + mixer_out.size() + logits.size() +
-         argmax_part.size() + gdn_xb.size() + gdn_seed.size() + gdn_g.size() +
-         gdn_beta.size() + gdn_A.size() + gdn_A2.size() + gdn_w.size() + gdn_u.size() +
-         pf_q.size() + pf_attn.size() + pf_o.size() +
-         pf_rowsum.size() + (moe ? moe->size() : 0);
-}
+size_t PrefillScratch::bytes() const { return gs::buffer_bytes<l0::Mem, PrefillScratchSizes>(*this); }
 
 l0::Mem& PrefillScratch::slab_buffer() {
-  if (!slab_)
-    slab_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).slab);
-  return *slab_;
+  if (!slab)
+    slab = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).slab);
+  return *slab;
 }
 l0::Mem& PrefillScratch::pf_s_buffer() {
-  if (!pf_s_)
-    pf_s_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).pf_s);
-  return *pf_s_;
+  if (!pf_s)
+    pf_s = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).pf_s);
+  return *pf_s;
 }
 l0::Mem& PrefillScratch::pf_p_buffer() {
-  if (!pf_p_)
-    pf_p_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).pf_p);
-  return *pf_p_;
+  if (!pf_p)
+    pf_p = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).pf_p);
+  return *pf_p;
 }
 l0::Mem& PrefillScratch::kv8_raw_buffer() {
-  if (!kv8_raw_) {
+  if (!kv8_raw) {
     const size_t bytes = sizes(kv8_len, *desc_, chunk_cap_).kv8_raw;   // 3j: one sequence's positions
     if (bytes == 0) throw std::runtime_error("int8 raw prefill scratch requires 24 query / 4 KV heads (or a TP card's 12 / 2)");
-    kv8_raw_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, bytes);
+    kv8_raw = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, bytes);
   }
-  return *kv8_raw_;
+  return *kv8_raw;
 }
 l0::Mem& PrefillScratch::gemm_slab(const void* w, size_t bytes, bool& fresh) {
   auto it = gemm_slabs_.find(w);
@@ -183,9 +172,7 @@ l0::Mem& PrefillScratch::gemm_slab(const void* w, size_t bytes, bool& fresh) {
 size_t PrefillScratch::lazy_bytes() const {
   size_t g = 0;
   for (const auto& [w, m] : gemm_slabs_) g += m.size();
-  return (slab_ ? slab_->size() : 0) +
-         (pf_s_ ? pf_s_->size() : 0) + (pf_p_ ? pf_p_->size() : 0) +
-         (kv8_raw_ ? kv8_raw_->size() : 0) + g;
+  return gs::buffer_bytes<l0::Mem, PrefillLazySizes>(*this) + g;
 }
 
 // --- MtpBuffers (spec 8) -----------------------------------------------------
@@ -221,20 +208,15 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
 }
 
 void MtpBuffers::zero(l0::CmdList& imm, uint32_t kv_end) {
-  for (l0::Mem* m : {&hctl, &gdn_spec})
-    imm.fill(m->ptr(), 0u, m->size());
-  zero_kv(imm, kv_k, kv_lay, kv_end);
-  zero_kv(imm, kv_v, kv_lay, kv_end);
-  for (l0::Mem* m : {&hh, &dh})
-    imm.fill(m->ptr(), 0u, m->size());
-  imm.fill(logits.ptr(), draft_vocab ? kNegInfBits : 0u, logits.size());   // spec 8 §11
-  if (dv_logits) imm.fill(dv_logits->ptr(), 0u, dv_logits->size());
+  gs::zero<l0::Mem, MtpSizes>(*this, [&](l0::Mem& m) {
+    if (&m == &kv_k || &m == &kv_v)
+      zero_kv(imm, m, kv_lay, kv_end);
+    else
+      imm.fill(m.ptr(), (&m == &logits && draft_vocab) ? kNegInfBits : 0u, m.size());   // spec 8 §11
+  });
 }
 
-size_t MtpBuffers::bytes() const {
-  return hctl.size() + gdn_spec.size() + kv_k.size() + kv_v.size() + hh.size() + dh.size() +
-         logits.size() + (dv_logits ? dv_logits->size() : 0);
-}
+size_t MtpBuffers::bytes() const { return gs::buffer_bytes<l0::Mem, MtpSizes>(*this); }
 
 // --- SlotBuffers (spec 13c) --------------------------------------------------
 
@@ -250,12 +232,18 @@ SlotBuffers::SlotBuffers(l0::Context& ctx, const model::ModelDesc& desc, uint32_
   zero(imm);
 }
 
-size_t SlotBuffers::bytes() const { return (states ? states->size() : 0) + rings.size() + controls.size() + pages.size(); }
+size_t SlotBuffers::bytes() const { return gs::buffer_bytes<l0::Mem, SlotSizes>(*this); }
 
 void SlotBuffers::zero(l0::CmdList& imm) {
-  if (states) imm.fill(states->ptr(), 0u, states->size());
-  imm.fill(rings.ptr(), 0u, rings.size());
-  imm.fill(controls.ptr(), 0u, controls.size());
+  gs::zero<l0::Mem, SlotSizes>(*this, [&](l0::Mem& m) { imm.fill(m.ptr(), 0u, m.size()); });   // pages: kept
+}
+
+// --- EngineBuffers (spec 39) -------------------------------------------------
+
+size_t EngineBuffers::bytes() const { return gs::buffer_bytes<l0::Mem, EngineSizes>(*this); }
+
+void EngineBuffers::zero(l0::CmdList& imm) {
+  gs::zero<l0::Mem, EngineSizes>(*this, [&](l0::Mem& m) { imm.fill(m.ptr(), 0u, m.size()); });
 }
 
 // --- DecodeBuffers, the view -------------------------------------------------

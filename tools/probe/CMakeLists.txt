@@ -1093,6 +1093,17 @@ target_link_libraries(probe_int8_short PRIVATE b70_prefill_host b70_runtime b70_
 b70_target_kernel_dir(probe_int8_short)
 add_dependencies(probe_int8_short ${PCR_PF_KERNELS})
 
+# --- probe_int8_kl: PERF-113, an int8 prompt pass's top-1 agreement and KL against the bf16 pass at long depth ------
+add_executable(probe_int8_kl probe_int8_kl.cc)
+target_include_directories(probe_int8_kl PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_int8_kl PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
+b70_target_kernel_dir(probe_int8_kl)
+add_dependencies(probe_int8_kl ${PT_KERNELS} ${PT_PF_KERNELS})
+if(B70_KV8)   # PERF-114: the int8 pass's int8 KV and int8-score attention
+  add_dependencies(probe_int8_kl kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8
+    kernel_pf_attn_prep_kv8_I8S kernel_pf_flash_attn_kv8_raw_pair_I8S)
+endif()
+
 # --- probe_fused_small: open-work 3b, short chunks' int4 linears without the bf16 slab ------------
 # pf_gemm_q4 (src/kernels/prefill/
 # pf_gemm_q4.cl) against the slab walk (pf_dequant_slab + gemm_l0), bitwise, then timed interleaved.
@@ -1557,6 +1568,39 @@ if(B70_KV8)
     list(APPEND PFAL_TARGETS kernel_pfal_kv8_H${H})
   endforeach()
 endif()
+# Spec 38a Task 1 (PERF-112), Qwen3.8's heads. `pfaw*`: the WIDE form (src/kernels/prefill/pf_flash_wide.h: 32 rows of a
+# head over four sub-groups), `pfaw_H<hpw>` with the score product a tile ahead (WIDE_AHEAD 1), `pfaw0_H1` one tile at
+# a time, `pfawq1_H1` with one 32-row Q read a dim atom (the spill fallback). `pfas_*`: the same and today's PAIR at
+# FA_SKELETON 1 (softmax arithmetic stubbed; timed, not compared). `pfaq_pair_H2`: PAIR with Q's first 8 dim atoms
+# read from SLM (PAIR_QSLM 4: is SLM a second read port?). No production binary binds any of these.
+set(PFAW_COMMON KT=64 QREG=0 EXP2=1)
+set(PFAW_HDR DEPENDS ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_wide.h)
+foreach(SK "" "s")
+  set(_pre pfaw)
+  set(_def "")
+  if(SK STREQUAL "s")
+    set(_pre pfas_wide)
+    set(_def FA_SKELETON=1)
+  endif()
+  foreach(H 1 2)
+    add_ocloc_kernel(${_pre}_H${H} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl ${PFAW_HDR}
+                     DEFINES ${PFAW_COMMON} RPW=32 HPW=${H} WIDE=1 WIDE_AHEAD=1 ${_def}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PFAL_TARGETS kernel_${_pre}_H${H})
+  endforeach()
+  add_ocloc_kernel(${_pre}0_H1 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl ${PFAW_HDR}
+                   DEFINES ${PFAW_COMMON} RPW=32 HPW=1 WIDE=1 WIDE_AHEAD=0 ${_def}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(${_pre}q1_H1 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl ${PFAW_HDR}
+                   DEFINES ${PFAW_COMMON} RPW=32 HPW=1 WIDE=1 WIDE_AHEAD=1 WIDE_Q1=1 ${_def}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND PFAL_TARGETS kernel_${_pre}0_H1 kernel_${_pre}q1_H1)
+endforeach()
+add_ocloc_kernel(pfas_pair_H2 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl
+                 DEFINES ${PFAW_COMMON} RPW=16 HPW=2 PAIR=1 FA_SKELETON=1 OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pfaq_pair_H2 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_flash_attn.cl
+                 DEFINES ${PFAW_COMMON} RPW=16 HPW=2 PAIR=1 PAIR_QSLM=4 OPTIONS -cl-intel-256-GRF-per-thread)
+list(APPEND PFAL_TARGETS kernel_pfas_pair_H2 kernel_pfaq_pair_H2)
 add_executable(probe_pf_attn_long probe_pf_attn_long.cc)
 target_include_directories(probe_pf_attn_long PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_pf_attn_long PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model pthread)
