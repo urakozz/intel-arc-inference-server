@@ -128,6 +128,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
     eng.set_prefill_chunk_cap(pf.chunk_cap);   // plan 5d: the cap the plan counted
     std::print(stderr, "prefill backend: {}, both devices (the chunk pipeline)\n",
                runtime::prefill_backend_name(eng.prefill_backend()));
+    notice_int8_prefill(eng.prefill_backend(), *eng.model(0).desc);
     eng.prepare_prefill();
   }
   for (uint32_t i = 0; i < runtime::kPpDevices; ++i)

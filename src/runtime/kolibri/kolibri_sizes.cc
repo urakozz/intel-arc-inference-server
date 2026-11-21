@@ -73,7 +73,7 @@ ScratchSizes scratch_sizes(const model::Kolibri1Desc& d, uint32_t M) {
 // --- Kolibri DSpark: the verify lists ------------------------------------------------------------------
 VerifySizes verify_sizes(const model::Kolibri1Desc& d) {
   VerifySizes v;
-  v.scratch = scratch_sizes(d, kVerifyRows);
+  static_cast<ScratchSizes&>(v) = scratch_sizes(d, kVerifyRows);
   v.control_hi = sizeof(Control);
   return v;
 }

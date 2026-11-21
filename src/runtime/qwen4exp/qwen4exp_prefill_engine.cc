@@ -77,6 +77,8 @@ struct Qwen4ExpPrefillState {
     Control* ctl_at(uint32_t k) { return ctl.as<Control>() + k; }
     uint32_t* ids_at(uint32_t k) { return s.ids.as<uint32_t>() + size_t(k) * s.rows; }
   };
+  static_assert(gs::buffers_problem<l0::Mem, Dev, PfDevDeviceSizes, PfDevHostSizes>().empty(),
+                gs::buffers_problem<l0::Mem, Dev, PfDevDeviceSizes, PfDevHostSizes>());
   std::vector<std::unique_ptr<Dev>> dev;
   std::unique_ptr<PipelineLink> link[kPfDepth];   // two devices: at chunk size (pf_landing_layout), one a slot
   std::unique_ptr<l0::Mem> shadow[kPfDepth];      // two devices with a block hook: host, device 0's state runs at
@@ -106,6 +108,13 @@ struct Qwen4ExpPrefillState {
     return ok;
   }
 };
+// Spec 39: the state's own allocation - device 0's state runs at a pair's end, host memory (outside the plan), written
+// at the block end before save_state reads it.
+struct PfStateSizes {
+  [[=gs::scratch]] size_t shadow = 0;
+};
+static_assert(gs::buffers_problem<l0::Mem, Qwen4ExpPrefillState, PfStateSizes>().empty(),
+              gs::buffers_problem<l0::Mem, Qwen4ExpPrefillState, PfStateSizes>());
 
 namespace {
 void destroy_prefill(Qwen4ExpPrefillState* p) { delete p; }
@@ -137,17 +146,18 @@ void Qwen4ExpEngine::prepare_prefill() {
   if (devices() == 2)
     for (auto& l : ps->link) l = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d, rows));
   if (mtp_) {
-    ps->dev[devices() - 1]->mtp_R =
-        std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Device, mtp_prefill_R_bytes(d, rows));
+    ps->dev[devices() - 1]->mtp_R = std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Device,
+                                                              pf_dev_sizes(d, rows, true, false).mtp_R);
     ps->dev[devices() - 1]->hctl =
         std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Host, kPfDepth * sizeof(Control));
   }
   for (uint32_t i = 0; i < devices(); ++i) {
     Qwen4ExpPrefillState::Dev& D = *ps->dev[i];
     if (devices() == 2) {
-      D.H1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, size_t(rows) * d.hc_n() * 2);
-      D.inj1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, size_t(rows) * d.hc * 4);
-      D.y1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, size_t(rows) * d.hidden * 2);
+      const PfDevDeviceSizes ds = pf_dev_sizes(d, rows, false, true);
+      D.H1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, ds.H1);
+      D.inj1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, ds.inj1);
+      D.y1 = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device, ds.y1);
       D.own = {D.H1->ptr(), D.inj1->ptr(), D.y1->ptr()};
     }
     D.ring = make_pf_ring(stage_ctx(i), model_.parts[i], d);
@@ -174,12 +184,14 @@ void Qwen4ExpEngine::prepare_prefill() {
     size_t link = 0;
     for (auto& l : ps->link) link += l ? l->bytes(i) : 0;
     const Qwen4ExpPrefillState::Dev& D = *ps->dev[i];
+    // Spec 39: the device's own allocations beside the scratch (PfDevDeviceSizes: the pair's rows, the head's R rows).
     const size_t pair = D.H1 ? D.H1->size() + D.inj1->size() + D.y1->size() : 0;
-    pf_dev_bytes_[i] = D.s.bytes() + link + pair + (D.mtp_R ? D.mtp_R->size() : 0) + (D.ring ? pf_ring_bytes(d) : 0);
+    pf_dev_bytes_[i] = D.s.bytes() + link + gs::buffer_bytes<l0::Mem, PfDevDeviceSizes>(D) +
+                       (D.ring ? pf_ring_bytes(d) : 0);
     pf_bytes_ += pf_dev_bytes_[i];
-    require(ps->dev[i]->s.bytes() == prefill_sizes(d, max_len_, rows).total(), "the prefill scratch is not prefill_sizes()'s");
-    require(!ps->link[0] || link == pf_link_bytes(d, i, rows), "the prefill link is not pf_link_bytes()'s");
-    require(!D.H1 || pair == pf_pair_bytes(d, rows), "the pair's rows are not pf_pair_bytes()'s");
+    contract_assert(ps->dev[i]->s.bytes() == prefill_sizes(d, max_len_, rows).total());   // prefill_sizes()'s scratch
+    contract_assert(!ps->link[0] || link == pf_link_bytes(d, i, rows));                  // pf_link_bytes()'s link
+    contract_assert(!D.H1 || pair == pf_pair_bytes(d, rows));                            // pf_pair_bytes()'s rows
   }
   pf_settle_ = [ps] { return ps->settle(); };
 }
@@ -383,9 +395,8 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     prefill_pair_pp(D.cx, D.kc, D.s, model_, model_.parts[i], stage_buffers(i), eager, two, c, m);
   };
   const size_t rows_max = size_t(model_.pf_rows) * d.hc_n() * 2;
-  if (two)
-    require(rows_max <= P.link[0]->layout.resid_bytes && P.link[0]->layout.sumsq_bytes == 0,
-            "the prefill landing buffer does not hold a chunk's H rows (and no norm sums)");
+  // The prefill landing buffer holds a chunk's H rows (and no norm sums).
+  contract_assert(!two || (rows_max <= P.link[0]->layout.resid_bytes && P.link[0]->layout.sumsq_bytes == 0));
   // Device 0's walk of pair p, [hooked at the pair's end: its state runs into the shadow].
   const auto run0 = [&](uint32_t p) {
     const uint32_t k = p % kPfDepth;
@@ -401,7 +412,7 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       uint8_t* sh = P.shadow[k]->as<uint8_t>();
       for (const SnapRun& r : state_runs(d, model_.placement, last.pos + last.C, mtp()))
         if (r.device == 0 && !r.pad && !r.zero) {
-          require(sh + r.bytes <= P.shadow[k]->as<uint8_t>() + P.shadow[k]->size(), "device 0's state runs exceed the shadow");
+          contract_assert(sh + r.bytes <= P.shadow[k]->as<uint8_t>() + P.shadow[k]->size());   // within the shadow
           D0.cx.copy(sh, snap_ptr(r), r.bytes);
           sh += r.bytes;
         }

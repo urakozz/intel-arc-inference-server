@@ -41,19 +41,44 @@ std::vector<std::array<uint32_t, 2>> tp_prefill_chunks(uint32_t pos, size_t n, u
   return out;
 }
 
+TpPfDeviceSizes tp_pf_device_sizes(const model::ModelDesc& card, uint32_t chunk_cap, bool mtp, uint32_t n_taps,
+                                   uint32_t window) {
+  TpPfDeviceSizes s;
+  const size_t row = size_t(chunk_cap) * card.hidden;
+  s.resid_b = row * 2;                                                  // chunk B's residual, bf16
+  s.own = size_t(kTpPrefillChunks) * row * 4;                           // the chunks' own halves, fp32
+  s.land = size_t(kTpPrefillChunks) * kTpPrefillLandSlots * row * 4;    // their landing slots, fp32
+  if (mtp) {
+    s.hid = (size_t(chunk_cap) + 1) * card.hidden * 2;
+    s.hslab = size_t(2) * card.hidden * kernels::kPfSlabWidth * 2;      // fc's K: [2 x hidden][1024]
+  }
+  if (n_taps) s.df_taps = TapVerifyDims::prefill_taps_bytes(card, n_taps, window);
+  return s;
+}
+
 size_t tp_prefill_extra_bytes(const model::ModelDesc& card, uint32_t chunk_cap) {
-  // TpPfCard: chunk B's residual (bf16), the two chunks' own halves and the four landing slots (fp32).
-  return size_t(chunk_cap) * card.hidden * (2 + kTpPrefillChunks * 4 + kTpPrefillChunks * 2 * 4);
+  const TpPfDeviceSizes s = tp_pf_device_sizes(card, chunk_cap, false);
+  return s.resid_b + s.own + s.land;
+}
+
+TpCardSizes tp_card_sizes(const model::ModelDesc& card, const tp::Layout& L, bool folded, bool tap, bool drafter) {
+  TpCardSizes s;
+  s.land = L.total_bytes();
+  s.send_ctr = s.fold_ctr = L.counter_bytes();
+  s.state = tp::kStateWords * 4;
+  if (folded) s.own = size_t(tp::kMRows) * card.hidden * 4;
+  if (tap) s.tap = size_t(card.layers) * card.hidden * 2;
+  if (drafter) s.df_slots = TapVerifyDims::gdn_spec_bytes(card);
+  return s;
 }
 
 size_t tp_crossing_bytes(const model::ModelDesc& card, model::TpCrossing c) {
-  const tp::Layout L = tp::layout(card, c);
-  const size_t own = c == model::TpCrossing::Folded ? size_t(tp::kMRows) * card.hidden * 4 : 0;
-  return L.total_bytes() + 2 * L.counter_bytes() + tp::kStateWords * 4 + own;
+  return tp_card_sizes(card, tp::layout(card, c), c == model::TpCrossing::Folded, false, false).total();
 }
 
 size_t tp_prefill_mtp_bytes(const model::ModelDesc& card, uint32_t chunk_cap) {
-  return (size_t(chunk_cap) + 1) * card.hidden * 2 + size_t(2) * card.hidden * kernels::kPfSlabWidth * 2;
+  const TpPfDeviceSizes s = tp_pf_device_sizes(card, chunk_cap, true);
+  return s.hid + s.hslab;
 }
 
 MemoryPlan tp_card_plan(const model::ModelDesc& card, model::TpCrossing c, uint32_t max_len, size_t model_bytes,
@@ -61,6 +86,12 @@ MemoryPlan tp_card_plan(const model::ModelDesc& card, model::TpCrossing c, uint3
   MemoryPlan p = plan(card, max_len, /*mtp=*/false, model_bytes, path, {}, kv, drafter);
   p.decode_state += tp_crossing_bytes(card, c);
   if (path.prefill) p.prefill_scratch += tp_prefill_extra_bytes(card, path.chunk_cap);
+  // Spec 39: a drafter's tap staging is the prompt's last window here (TpPfCard::df_taps), not plan()'s chunk.
+  if (path.prefill && drafter.on() && drafter.window) {
+    const size_t taps = tp_pf_device_sizes(card, path.chunk_cap, false, drafter.n_taps, drafter.window).df_taps;
+    p.prefill_scratch = p.prefill_scratch - p.drafter_taps + taps;
+    p.drafter_taps = taps;
+  }
   if (mtp) {
     p.mtp = true;
     p.mtp_buffers = MtpDims::tp_sizes(max_len, card, model::qwen38(), kv).total();

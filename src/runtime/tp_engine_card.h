@@ -11,6 +11,7 @@
 #include "l0/memory.h"
 #include "l0/queue.h"
 #include "runtime/tp_engine.h"
+#include "runtime/tp_plan.h"   // TpCardSizes
 
 namespace runtime {
 
@@ -27,16 +28,16 @@ struct TpEngine::Card {
         fence(queue),
         imm(l0::CmdList::immediate(c)),
         ctl(buffers.control.as<Control>()),
-        land(c, l0::MemKind::Device, L.total_bytes(), 4096),
-        send_ctr(c, l0::MemKind::Device, L.counter_bytes()),
-        fold_ctr(c, l0::MemKind::Device, L.counter_bytes()),
-        state(c, l0::MemKind::Shared, tp::kStateWords * 4),
-        own(folded ? std::make_unique<l0::Mem>(c, l0::MemKind::Device,
-                                               size_t(tp::kMRows) * model.desc->hidden * 4)
-                   : nullptr),
-        tap(tap_on ? std::make_unique<l0::Mem>(c, l0::MemKind::Device,
-                                                size_t(model.desc->layers) * model.desc->hidden * 2)
-                   : nullptr) {}
+        land(c, l0::MemKind::Device, sizes(L, folded, tap_on).land, 4096),
+        send_ctr(c, l0::MemKind::Device, sizes(L, folded, tap_on).send_ctr),
+        fold_ctr(c, l0::MemKind::Device, sizes(L, folded, tap_on).fold_ctr),
+        state(c, l0::MemKind::Shared, sizes(L, folded, tap_on).state),
+        own(folded ? std::make_unique<l0::Mem>(c, l0::MemKind::Device, sizes(L, folded, tap_on).own) : nullptr),
+        tap(tap_on ? std::make_unique<l0::Mem>(c, l0::MemKind::Device, sizes(L, folded, tap_on).tap) : nullptr) {}
+  // Spec 39: the card's own allocations' sizes (TpCardSizes, runtime/tp_plan.h); df_slots is made by TpEngine.
+  TpCardSizes sizes(const tp::Layout& L, bool folded, bool tap_on) const {
+    return tp_card_sizes(*model.desc, L, folded, tap_on, false);
+  }
   l0::Context& ctx;
   loader::LoadedModel model;
   // Declaration order is construction order: `buffers` binds references into the two above it (Engine's rule).
@@ -75,15 +76,19 @@ struct TpEngine::Card {
     return const_cast<uint8_t*>(spec) + size_t(live - 1) * persist.gdn_state.size();
   }
 
-  size_t bytes_crossing() const {
-    return land.size() + send_ctr.size() + fold_ctr.size() + state.size() + (own ? own->size() : 0);
-  }
-  void zero_crossing() {
-    imm.fill(land.ptr(), 0u, land.size());
-    imm.fill(send_ctr.ptr(), 0u, send_ctr.size());
-    imm.fill(fold_ctr.ptr(), 0u, fold_ctr.size());
-    std::memset(state.ptr(), 0, state.size());
+  // Spec 39: every allocation above of TpCardSizes' names (the crossing, the tap, the drafter's slots).
+  size_t bytes() const { return gs::buffer_bytes<l0::Mem, TpCardSizes>(*this); }
+  // Every zero_on_reset one: the crossing's landing, counters and state words, and (spec 39: reset left them before)
+  // the drafter's slots.
+  void zero() {
+    gs::zero<l0::Mem, TpCardSizes>(*this, [&](l0::Mem& m) {
+      if (m.kind() == l0::MemKind::Shared)
+        std::memset(m.ptr(), 0, m.size());
+      else
+        imm.fill(m.ptr(), 0u, m.size());
+    });
   }
 };
+
 
 }  // namespace runtime

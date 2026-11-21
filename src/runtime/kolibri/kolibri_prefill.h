@@ -51,6 +51,8 @@ struct KolibriPrefillScratch {
   const model::Kolibri1Desc& desc;
   size_t bytes() const;
 };
+static_assert(gs::buffers_problem<l0::Mem, KolibriPrefillScratch, PrefillSizes>().empty(),
+              gs::buffers_problem<l0::Mem, KolibriPrefillScratch, PrefillSizes>());
 
 // B70_KOLIBRI_ATTN=eager selects the reference-rounding attention in prefill as in decode - one parser,
 // runtime::kolibri::kolibri_attn() (kolibri_sizes.h); KolibriEngine reads it once, at construction.

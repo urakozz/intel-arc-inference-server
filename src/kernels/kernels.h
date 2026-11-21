@@ -116,7 +116,7 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // The choices are plan 28b's lever measurement (spec 28, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
-enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4 };
+enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4, kSmVerify4Wide = 5 };
 // Spec 32e: an int4 row's gemm_sm_wide shape past 16 rows (src/kernels/gemm_sm_wide.cl; plan 34a Task 1 measured both):
 // kWideRc32 - row chunks of 32 a sub-group, a weight prefetch one group ahead, 256 GRF; kWideSwap - one sub-group for
 // every row, the prefetch two groups ahead, 128 GRF. Item 41 (64 rows): kWideRc32U - kWideRc32 with the K walk unrolled
@@ -128,6 +128,7 @@ struct SmallMTuning {
   bool wg, magic, grf256, blk2d;
   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head);
   // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter). kSmAll also 32 and 64 (spec 32).
+  // kSmVerify4Wide: 2..4 and the wide lookup verify lists' 16, 32 and 64 (PERF-56, Ornith).
   unsigned char mset = kSmAll;
   // Spec 32: from this M on the variant carries 256 GRF (0: never; grf256 already means every M). GRF changes who
   // holds a value, not the value, so it is the one knob that may vary with M (property R).
@@ -151,12 +152,15 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 248320, 1, 2, true, false, false, false, kSmAll, 32},  // the int8 lm_head (gemm_sm_i8w at 32 and 64 too)
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the 28b addition, 2026-11-01) at its verify
     // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
-    // and the bf16 router stay as they are (spec 28m)
-    {2048, 12288, 1, 1, false, true, false, false, kSmVerify4},      // qkv||z
-    {4096, 2048, 4, 0, false, true, false, false, kSmVerify4},       // out_proj, o_proj
-    {2048, 9216, 2, 0, false, true, false, false, kSmVerify4},       // q||k||v
-    {2048, 128, 1, 1, false, true, false, false, kSmVerify4},        // a||b (the int4 checkpoint's)
-    {2048, 248320, 1, 2, false, false, false, false, kSmVerify4},    // the int8 lm_head
+    // and the bf16 router stay as they are (spec 28m). PERF-56: also at the wide lookup verify lists' 16 / 32 / 64
+    // rows - at 32 / 64 the int4 rows take gemm_sm_wide with the arms of Qwen3.8's row of the same form, the head 256
+    // GRF from 32 rows (PROVISIONAL, not swept at Ornith's shapes)
+    {2048, 12288, 1, 1, false, true, false, false, kSmVerify4Wide, 0, kWideRc32, kWideRc32H},   // qkv||z
+    {4096, 2048, 4, 0, false, true, false, false, kSmVerify4Wide, 0, kWideSwap, kWideRc32U},    // out_proj, o_proj
+    {2048, 9216, 2, 0, false, true, false, false, kSmVerify4Wide, 0, kWideRc32, kWideRc32H},    // q||k||v
+    {2048, 128, 1, 1, false, true, false, false, kSmVerify4Wide, 0, kWideRc32, kWideRc32H},     // a||b (the int4
+                                                                                                // checkpoint's)
+    {2048, 248320, 1, 2, false, false, false, false, kSmVerify4Wide, 32},                       // the int8 lm_head
     // Spec 28d: z-lab/Qwen3.8-27B-DFlash2's int8 linears at its block's M = 8 (the draft and projection lists,
     // runtime/dflash/dflash_capture.cc) and the compact draft heads at its 7 draft rows (the full head is Qwen3.8's
     // row above, built at 7). All in-work-group split-K: the int8 form has no grid split-K, and without it a column's
@@ -201,7 +205,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     // indexer, the router, the HC and the MTP head's) stay gemv_bf16.
     {2560, 16384, 1, 0, false, true, false, false, kSmVerify4},      // GDN qkv||z
     {2560, 13312, 2, 0, false, true, false, false, kSmVerify4},      // QSA q||gate||k||v
-    {6144, 2560, 4, 0, false, true, false, false, kSmVerify4},       // GDN out_proj, QSA o_proj
+    {6144, 2560, 8, 0, false, true, false, false, kSmVerify4},       // GDN out_proj, QSA o_proj (PERF-109: S8)
     {2560, 248320, 1, 2, true, false, false, false, kSmVerify4},     // the int8 lm_head
     // Spec 17d: a tensor-parallel card's shapes (model::tp_card_desc, the folded crossing) at its verify lists'
     // M = 2..4 - each the one-card row's knobs for the per-card cell (gemv's S / layout, magic dequant, the 2D read
@@ -283,6 +287,7 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
 inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
   switch (t.mset) {
     case kSmVerify4: return {2, 3, 4};
+    case kSmVerify4Wide: return {2, 3, 4, 16, 32, 64};   // PERF-56: Ornith's wide lookup verify lists
     case kSmVerify8: return {2, 3, 4, 5, 6, 7, 8};
     case kSmDraft8: return {8};
     case kSmDraft7: return {7};
@@ -465,6 +470,9 @@ inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, un
   return "attn_verify_dpas_M" + std::to_string(M) + "_T" + std::to_string(T) + fa_suffix(q, kv) +
          (kv8 ? "_KV8" : "");
 }
+// The rows of one work-group's chunk where a list's DPAS attention runs in row chunks (attn_verify_dpas.cl, RCHUNK):
+// 16 at groups of 6 heads (Qwen3.8's deep lists), 8 at Ornith's groups of 8 (PERF-56: every wide list, 16 rows too).
+inline constexpr unsigned attn_verify_chunk_rows(unsigned q, unsigned kv) { return q == 16 && kv == 2 ? 8 : 16; }
 // SPEC_SLOT_STRIDE (one slot of MtpBuffers::gdn_spec, gdn_layers x 48 x 128 x 128
 // floats) is baked, so a model with another GDN layer count is another binary:
 // Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`; the
@@ -497,9 +505,18 @@ inline std::string gdn_step_defer_variant(unsigned M, unsigned gdn_layers = 48, 
 }
 // Spec 32: a link of the 32- / 64-row lists' chain (gdn_step.cl, ROW0) and its scratch: the conv rows 16.. of a list,
 // [48 GDN layers][48 rows][10240] bf16; the ring copy (gdn_ring_commit.cl) moves the committed ones into the ring.
-inline std::string gdn_step_chain_variant(unsigned row0) { return "gdn_step_defer_M16_R" + std::to_string(row0); }
+// PERF-56: Ornith's links are its 16-row DEFERRED build's name with `_R<row0>`, its conv scratch at its 8192 channels
+// and its ring copy `gdn_ring_commit_C8192` (CONV_ROWS); Qwen3.8's names are unchanged.
+inline std::string gdn_step_chain_variant(unsigned row0, unsigned gdn_layers = 48, unsigned gdn_k = kRefGdnKHeads,
+                                          unsigned gdn_v = kRefGdnVHeads) {
+  return gdn_step_defer_variant(16, gdn_layers, gdn_k, gdn_v) + "_R" + std::to_string(row0);
+}
 inline constexpr size_t kGdnConvXRows = 48;
-inline constexpr size_t kGdnConvXLayerBytes = kGdnConvXRows * 10240 * 2;
+inline constexpr size_t gdn_conv_x_layer_bytes(unsigned conv_rows) { return kGdnConvXRows * conv_rows * 2; }
+inline constexpr size_t kGdnConvXLayerBytes = gdn_conv_x_layer_bytes(10240);
+inline std::string gdn_ring_commit_variant(unsigned conv_rows) {
+  return conv_rows == 10240 ? std::string("gdn_ring_commit") : "gdn_ring_commit_C" + std::to_string(conv_rows);
+}
 inline std::string gdn_step_slots_variant(unsigned M, unsigned gdn_layers,
                                           unsigned gdn_k = kRefGdnKHeads,
                                           unsigned gdn_v = kRefGdnVHeads, unsigned slots = 4) {

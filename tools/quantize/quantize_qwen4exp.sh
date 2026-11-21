@@ -55,7 +55,7 @@
 #
 # Overridables (environment): MODEL (Qwen/Qwen3.8-Flash-Next or a snapshot dir), QUANT_ROOT
 # ($HOME/b70/hdd/quant), OUT (default: the run `current` points at, else QUANT_ROOT/Qwen3.8-Flash-Next-
-# W4A16-g64-<date>), PLE_DIR ($HOME/b70/scratch/flash-next-ple), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), RAM_CAP_GB, RAM_MIN_GB,
+# W4A16-g64-<date>), PLE_DIR ($HOME/b70/scratch/flash-next-ple), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), GRAD_ACCUM (1: BATCH x GRAD_ACCUM rows a tuning step), RAM_CAP_GB, RAM_MIN_GB,
 # DISK_MIN_GB, DATASET, VENVPY, SITE, AR_REPO, AR_REF, LOGDIR ($HOME/b70/logs/flash-next-quant).
 set -euo pipefail
 
@@ -71,6 +71,7 @@ ITERS="${ITERS:-200}"
 NSAMPLES="${NSAMPLES:-128}"
 SEQLEN="${SEQLEN:-2048}"
 BATCH="${BATCH:-8}"
+GRAD_ACCUM="${GRAD_ACCUM:-1}"
 RAM_CAP_GB="${RAM_CAP_GB:-115}"
 RAM_MIN_GB="${RAM_MIN_GB:-100}"
 DISK_MIN_GB="${DISK_MIN_GB:-300}"
@@ -127,7 +128,7 @@ stage_quant() {
   mkdir -p "$OUT/work" "$OUT/resume"
   AR_WORK_SPACE="$OUT/work" AR_RESUME_DIR="$OUT/resume" locked "$VENVPY" "$Q/autoround_run.py" \
     --model "$SNAP" --out "$OUT/export" --device "$DEVICE" --iters "$ITERS" --nsamples "$NSAMPLES" \
-    --seqlen "$SEQLEN" --batch-size "$BATCH" --ple-dir "$PLE_DIR" --dataset "$DATASET"
+    --seqlen "$SEQLEN" --batch-size "$BATCH" --grad-accum "$GRAD_ACCUM" --ple-dir "$PLE_DIR" --dataset "$DATASET"
 }
 
 stage_scales() {
@@ -188,7 +189,7 @@ run_stages() {
   env_py
   ar_run_guard "$OUT" || exit 2
   echo "quantize_qwen4exp: $(date -u +%FT%TZ) MODEL=$MODEL ($SNAP) OUT=$OUT DEVICE=$DEVICE CARD=$CARD ITERS=$ITERS" \
-       "NSAMPLES=$NSAMPLES SEQLEN=$SEQLEN BATCH=$BATCH DATASET=$DATASET auto-round $AR_COMMIT (base ${AR_BASE:0:8}, $AR_REF)"
+       "NSAMPLES=$NSAMPLES SEQLEN=$SEQLEN BATCH=$BATCH GRAD_ACCUM=$GRAD_ACCUM DATASET=$DATASET auto-round $AR_COMMIT (base ${AR_BASE:0:8}, $AR_REF)"
   for s in "${STAGES[@]}"; do
     [ "$s" = "$from" ] && hit=1
     if [ -n "$only" ] && [ "$s" != "$only" ]; then continue; fi

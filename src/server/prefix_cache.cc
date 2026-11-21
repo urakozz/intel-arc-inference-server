@@ -17,7 +17,10 @@ struct PrefixCache::Entry {
   void* state = nullptr;                 // snapshot only
   void* kv = nullptr;                    // KV [begin, end) in save_kv's layout (may be null)
   void* head = nullptr;                  // PERF-92: a prompt-end snapshot's head image (may be null)
-  size_t bytes = 0;                      // one allocation: state, KV, head
+  size_t bytes = 0;                      // everything it holds
+  // A snapshot's two allocations: `state` holds the state then the head (state_alloc bytes), `kv` the tail's KV (the
+  // rest of `bytes`). A block's one allocation is `kv`.
+  size_t state_alloc = 0;
   std::vector<Entry*> children;
   uint64_t lru = 0;
   int pins = 0;
@@ -78,8 +81,12 @@ PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, KvBytesFn kv_b
 uint64_t PrefixCache::kv_form() const { return root_->hash; }
 
 PrefixCache::~PrefixCache() {
-  for (auto& e : all_)
-    if (e->bytes) alloc_.free(e->state ? e->state : e->kv, e->bytes);
+  for (auto& e : all_) free_entry(*e);
+}
+
+void PrefixCache::free_entry(const Entry& e) {
+  if (e.state_alloc) alloc_.free(e.state, e.state_alloc);
+  if (e.kv && e.bytes > e.state_alloc) alloc_.free(e.kv, e.bytes - e.state_alloc);
 }
 
 size_t PrefixCache::entries() const { return all_.size(); }
@@ -115,7 +122,7 @@ void PrefixCache::pin(Entry* e) {
 void PrefixCache::remove(Entry* e) {
   Entry* p = e->parent;
   p->children.erase(std::find(p->children.begin(), p->children.end(), e));
-  if (e->bytes) alloc_.free(e->state ? e->state : e->kv, e->bytes);
+  free_entry(*e);
   used_ -= e->bytes;
   auto it = std::find_if(all_.begin(), all_.end(), [e](const auto& u) { return u.get() == e; });
   all_.erase(it);
@@ -196,14 +203,24 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   }
   const size_t kv = end > base ? kv_bytes_(end - base) : 0;
   const size_t hb = head ? head_bytes_ : 0;
-  const size_t bytes = state_bytes_ + kv + hb;
-  // Spec 18d: an engine without recurrent state (state_bytes() == 0) has an
-  // empty snapshot at a block end - a restore point that costs nothing. It gets no
-  // allocation (a HostAlloc need not hand out zero bytes) and a non-null marker, so the
-  // slot is still filled (save_state of zero bytes) and plan() still hands it to
-  // load_state, which restores pos alone; remove() and the destructor free only bytes > 0.
-  void* p = bytes != 0 ? alloc(bytes) : static_cast<void*>(&kNoBytes);
+  const size_t sb = state_bytes_ + hb;
+  // The state (with the head) and the tail's KV are two allocations. Every state is the same size and a tail at most
+  // a block, so each fits the hole an evicted snapshot or block left in the pinned pieces; one allocation of their sum
+  // fitted neither, and after a long prompt's snapshot at every block end the pieces held no hole that large - the
+  // store kept a session's blocks and lost every snapshot, so nothing of it could be restored.
+  // Spec 18d: an engine without recurrent state (state_bytes() == 0) has an empty snapshot at a block end - a
+  // restore point that costs nothing. It gets no allocation (a HostAlloc need not hand out zero bytes) and a non-null
+  // marker, so the slot is still filled (save_state of zero bytes) and plan() still hands it to load_state, which
+  // restores pos alone; free_entry() frees only what was allocated.
+  void* p = sb != 0 ? alloc(sb) : static_cast<void*>(&kNoBytes);
   if (p == nullptr) return slot;
+  used_ += sb;   // counted before the KV's room is made, so the budget holds both
+  void* q = nullptr;
+  if (kv != 0 && (q = alloc(kv)) == nullptr) {
+    if (sb != 0) alloc_.free(p, sb);
+    used_ -= sb;
+    return slot;
+  }
   auto e = std::make_unique<Entry>();
   e->is_block = false;
   e->parent = node;
@@ -212,11 +229,12 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   e->ids.assign(ids.begin() + base, ids.begin() + end);
   e->hash = hash(node->hash, e->ids.data(), end - base);
   e->state = p;
-  e->kv = kv ? static_cast<uint8_t*>(p) + state_bytes_ : nullptr;
-  e->head = hb ? static_cast<uint8_t*>(p) + state_bytes_ + kv : nullptr;
-  e->bytes = bytes;
+  e->kv = q;
+  e->head = hb ? static_cast<uint8_t*>(p) + state_bytes_ : nullptr;
+  e->state_alloc = sb;
+  e->bytes = sb + kv;
   e->lru = ++clock_;
-  used_ += bytes;
+  used_ += kv;
   node->children.push_back(e.get());
   pin(e.get());
   slot.state = p;
@@ -246,6 +264,48 @@ void PrefixCache::release() {
       }
     }
   }
+}
+
+uint64_t PrefixCache::keep(const std::vector<uint32_t>& ids, uint32_t end, uint32_t* restore_at) {
+  if (restore_at) *restore_at = 0;
+  std::vector<Entry*> held;
+  Entry* node = root_.get();
+  while (node->end + block_ <= end) {
+    Entry* b = find_block(node, ids.data() + node->end);
+    if (b == nullptr || !b->ready) break;
+    held.push_back(b);
+    node = b;
+  }
+  if (end != 0)   // its snapshot hangs off the block at its base (the chain's end when the store has every block)
+    if (Entry* s = find_snap(node, ids.data() + node->end, end); s != nullptr && s->ready) {
+      held.push_back(s);
+      if (restore_at) *restore_at = end;
+    }
+  if (held.empty()) return 0;
+  for (Entry* e : held) ++e->pins;
+  kept_[++next_keep_] = std::move(held);
+  return next_keep_;
+}
+
+uint32_t PrefixCache::holds(const std::vector<uint32_t>& ids, uint32_t end, bool* snapshot) const {
+  uint32_t n = 0;
+  Entry* node = root_.get();
+  while (node->end + block_ <= end) {
+    Entry* b = find_block(node, ids.data() + node->end);
+    if (b == nullptr) break;
+    ++n;
+    node = b;
+  }
+  const Entry* s = end != 0 ? find_snap(node, ids.data() + node->end, end) : nullptr;
+  *snapshot = s != nullptr && s->ready;
+  return n;
+}
+
+void PrefixCache::unkeep(uint64_t handle) {
+  const auto it = kept_.find(handle);
+  if (it == kept_.end()) return;
+  for (Entry* e : it->second) --e->pins;
+  kept_.erase(it);
 }
 
 PrefixCache::Plan PrefixCache::plan(const std::vector<uint32_t>& prompt,

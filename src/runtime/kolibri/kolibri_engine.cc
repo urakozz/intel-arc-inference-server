@@ -265,14 +265,11 @@ void KolibriEngine::read_logits_into(float* host) {
 uint32_t KolibriEngine::pending() const { return st(uint32_t(st_.size()) - 1).ctl->cur_token[0]; }
 
 // --- spec 20e: prefix-cache snapshots ----------------------------------------------------------------
+// Spec 39: the buffer whose sizes member claims `t` (the `default:` branch that sent any other tensor to ring_v is gone).
 l0::Mem& KolibriEngine::snap_mem(uint32_t dev, SnapTensor t) const {
-  KolibriBuffers& b = st(dev).buffers;
-  switch (t) {
-    case SnapTensor::FullK: return b.full_k;
-    case SnapTensor::FullV: return b.full_v;
-    case SnapTensor::RingK: return b.ring_k;
-    default: return b.ring_v;
-  }
+  l0::Mem* m = gs::snapshot_buffer<l0::Mem, SnapTensor, PersistentSizes>(st(dev).buffers, t);
+  contract_assert(m != nullptr);   // every tensor is claimed (snapshot_problem)
+  return *m;
 }
 
 void KolibriEngine::settle_all(const char* what) {
@@ -359,12 +356,15 @@ std::vector<uint16_t> KolibriEngine::read_kv(uint32_t layer, uint32_t first, uin
 }
 
 MemoryComponents KolibriEngine::memory_use(uint32_t dev) const {
+  // Spec 39: every allocation of the engine is in a paired buffers struct or says why not.
+  static_assert(gs::buffers_problem<l0::Mem, KolibriEngine>().empty(), gs::buffers_problem<l0::Mem, KolibriEngine>());
   const loader::KolDevicePart& P = model_.parts.at(dev);
   const KolibriBuffers& b = st(dev).buffers;
   MemoryComponents c;
   c.model = P.bytes + P.rope_bytes;
-  c.kv = b.full_k.size() + b.full_v.size() + b.ring_k.size() + b.ring_v.size();
-  c.decode_state = b.control.size() + b.scratch_bytes() + (taps_[dev] ? taps_[dev]->size() : 0) +
+  c.kv = gs::buffer_bytes<l0::Mem, PersistentSizes>(b, gs::Group::Kv);
+  c.decode_state = gs::buffer_bytes<l0::Mem, PersistentSizes>(b, gs::Group::State) + b.scratch_bytes() +
+                   (taps_[dev] ? taps_[dev]->size() : 0) +
                    (link_ ? link_->bytes(dev) : 0);
   c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 20d: 0 until prepared
   if (dev < vb_.size()) c.decode_state += vb_[dev]->bytes() + (vlink_ ? vlink_->bytes(dev) : 0);   // Kolibri DSpark

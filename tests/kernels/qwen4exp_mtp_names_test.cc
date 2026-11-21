@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
   // spec 28d: the lists' rule (gemv_kind) - gemm_sm at M >= 2, gemv at M = 1
   CHECK_EQ(kq::qkvg_m_variant(3, true, kernels::gemv_kind(3)), std::string("gemm_sm_M3_K2560_N13312_S2_L0_mg"));
   CHECK_EQ(kq::qkvz_m_variant(2, true, kernels::gemv_kind(2)), std::string("gemm_sm_M2_K2560_N16384_S1_L0_mg"));
-  CHECK_EQ(kq::out_m_variant(4, true, kernels::gemv_kind(4)), std::string("gemm_sm_M4_K6144_N2560_S4_L0_mg"));
+  CHECK_EQ(kq::out_m_variant(4, true, kernels::gemv_kind(4)), std::string("gemm_sm_M4_K6144_N2560_S8_L0_mg"));
   CHECK_EQ(kq::lm_head_m_variant(2, true, kernels::gemv_kind(2)), std::string("gemm_sm_i8w_M2_K2560_N248320_wg"));
   CHECK_EQ(kq::qkvz_m_variant(1, true, kernels::gemv_kind(1)), std::string("gemv_M1_K2560_N16384_S1_L0"));
   CHECK_EQ(kq::qkvz_m_variant(2, false, kernels::gemv_kind(2)), std::string("gemv_bf16_M2_K2560_N16384"));

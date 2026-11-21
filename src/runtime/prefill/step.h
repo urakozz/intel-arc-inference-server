@@ -57,12 +57,22 @@ struct PrefillSlot {
   void* conv_ring = nullptr;
   uint32_t kv_base = 0;
   const void* pages = nullptr;
+  // Spec 31: the page table's positions (a KV page pool's sequences each own a region of kv_pages(cap) entries, so
+  // kv_base + pos may pass the allocation's max_len); 0: max_len.
+  uint32_t positions = 0;
 };
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
                 l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q,
-                const PrefillTaps* taps = nullptr, const PrefillSlot* slot = nullptr);
+                const PrefillTaps* taps = nullptr, const PrefillSlot* slot = nullptr)
+  pre((q != nullptr) == (backend == PrefillBackend::L0Int8))
+  pre(C > 0 && C <= s.chunk_cap())
+  // a slot's positions: its page table's with a KV page pool (PrefillSlot::positions), else max_len
+  pre(size_t(pos) + C + (slot ? slot->kv_base : 0) <= size_t(slot && slot->positions ? slot->positions : max_len))
+  // the taps' sites cover every layer and none is the final norm's fold
+  pre(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(m.desc->layers) + 1 &&
+                taps->sites->back().empty()));
 
 // Spec 16c (pipeline parallel prefill across two B70s): step_chunk restricted to one pipeline
 // stage's layers [st.first, st.last), on the device `cx` / `s` / `m` belong to - `m` a stage
@@ -79,8 +89,8 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::L
 //            the last chunk, as on one card.
 //
 // L0 backends and the flash attention only; `ctrl` is any Control block holding the chunk's
-// pos / n_active (the pipeline keeps one per chunk in flight). Throws, by name, for anything
-// else.
+// pos / n_active (the pipeline keeps one per chunk in flight). Throws, by name, for another
+// attention or cache path; the bounds below are its contract.
 //
 // `taps` (spec 19d, a drafter across the split): step_chunk's, for the sites this stage walks - each device writes
 // its own taps' columns of the one staging ([row - r0][tap][hidden], on the drafter's device: device 0's copies go
@@ -89,7 +99,15 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::L
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, const void* ids,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
                 l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q,
-                const PpStage& st, const PrefillTaps* taps = nullptr);
+                const PpStage& st, const PrefillTaps* taps = nullptr)
+  pre((q != nullptr) == (backend == PrefillBackend::L0Int8))
+  pre(C > 0 && C <= s.chunk_cap())
+  pre(size_t(pos) + C <= size_t(max_len))
+  // two stages: layers [0, s) and [s, layers); the first embeds (ids given), the second resumes from the hand-off
+  pre(st.first < st.last && st.last <= m.desc->layers && (st.has_embed() || st.has_head(*m.desc)))
+  pre(st.has_embed() == (ids != nullptr))
+  pre(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(m.desc->layers) + 1 &&
+                taps->sites->back().empty()));
 
 // Spec 17c (tensor parallel prefill, runtime::TpEngine::prefill - runtime/prefill/tp_prefill.cc): one TP card's
 // chunk as 2 x layers UNITS, so the units of two chunks in flight can interleave with the crossings between them.
@@ -193,8 +211,9 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            KvCache kv = KvCache::Bf16, uint32_t pos = 0, bool one_card = true);
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
-// PERF-88: on a dense model's one-card walk (and a pipeline stage's; step_tp_unit keeps h8) l0-int8's MLP (gate||up, down) takes the bf16 l0 walk on a chunk of at most this many
-// rows - pf_gemm_q4, or the slab walk with pf_gemm_small - instead of the h8 walk, whose per-chunk rotated int8
+// PERF-88: on a dense model's one-card walk (and a pipeline stage's; step_tp_unit keeps h8) l0-int8's linears (the
+// MLP's, and since PERF-113 the mixer's: walk_layers) take the bf16 l0 walk on a chunk of at most this many rows
+// - pf_gemm_q4, or the slab walk with pf_gemm_small - instead of the h8 walk, whose per-chunk rotated int8
 // rebuild of every weight costs a full chunk's time whatever the rows (tools/probe/probe_int8_short.cc). Not
 // bitwise: those rows' MLP is bf16 math. The chunk is then l0's launch for launch. The probe's one layer's MLP,
 // h8 against bf16 (ms, 2026-11-19, card 0, two interleaved runs): 16 rows 3.81 / 0.72, 128 3.62 / 1.49, 256 3.68 /

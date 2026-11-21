@@ -24,7 +24,7 @@ int main() {
 
   // --- 1. the verify scratch --------------------------------------------------------------------------------------------
   {
-    const rk::ScratchSizes one = rk::scratch_sizes(d), v = rk::verify_sizes(d).scratch;
+    const rk::ScratchSizes one = rk::scratch_sizes(d), v = rk::verify_sizes(d);
     CHECK_EQ(v.resid, one.resid * 8);
     CHECK_EQ(v.partials, one.partials * 8);
     CHECK_EQ(v.sumsq_r, one.sumsq_r * 8);

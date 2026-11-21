@@ -1,23 +1,31 @@
 # The int8 prompt pass
 
 The prompt pass (prefill: reading the whole prompt before the first token is generated) runs in bf16 by default.
-`--prefill-backend l0-int8` is an optional faster form that feeds some of the linear layers int8 activations,
-which the card's matrix instruction multiplies at twice the bf16 rate.
+`--prefill-backend l0-int8` is an optional faster form that feeds every linear layer of the prompt pass int8
+activations, which the card's matrix instruction multiplies at twice the bf16 rate. On Qwen3.8 it also keeps the
+context (the KV cache) in int8 - it turns `--kv-cache int8` on - and computes the prompt's attention scores in int8.
 
 This doc explains what runs in int8, how that recipe was chosen over the alternatives, what it gains and where it
 fails. It is for readers deciding whether to turn the option on, and for anyone curious why a 4-bit model ends up
 doing 8-bit arithmetic.
 
-On Qwen3.8-27B it reads a prompt about 1.3x faster than bf16 on one card and about 1.10x faster under tensor
-parallel:
+On Qwen3.8-27B, one card, served by `b70-serve` with MTP on, it reads a prompt 1.40x to 1.47x faster than bf16
+(two interleaved rounds each, prompt tokens a second; the earlier int8 pass, int8 in the MLP only, for comparison):
 
-| setup | `l0` (bf16), 4k / 16k prompt | `l0-int8`, 4k / 16k prompt |
-|---|---:|---:|
-| one card | 1,788 / 1,624 t/s | 2,337 / 2,059 t/s |
-| two cards, `tp` | 2,931 / 2,683 t/s | 3,217 / 2,937 t/s |
+| prompt tokens | `l0` (bf16) | earlier int8 pass | `l0-int8` | gain over bf16 |
+|---:|---:|---:|---:|---:|
+| 3,931 | 1,906 | 2,524 | 2,800 | 1.47x |
+| 30,199 | 1,640 | 2,050 | 2,346 | 1.43x |
+| 60,609 | 1,397 | 1,687 | 1,985 | 1.42x |
+| 122,435 | 1,072 | 1,234 | 1,500 | 1.40x |
 
-It stays opt-in because its rounding drifts from the reference more than the bf16 path does; the "Limits" section
-lists the known failures. On Ornith it is slower than the bf16 pass.
+Two cards (`tp`, `pp`) run the same form; they have not been timed or gated with it yet (see "Tensor parallel").
+
+What it costs, measured against the bf16 prompt pass on the same server: none of 12 long tool calls that copy exact
+text (8k to 99k tokens) came out different; the most likely next token differed at 3 of 585 positions over 4k to
+64k prompts (all three on 4k prompts); the golden gates passed 93 of 93 rows and the 2,820-token long gate 32 of 32
+against the CPU reference. It stays opt-in because its rounding still drifts from the reference more than the bf16 path does; the
+"Limits" section lists what it does not run with. On Ornith it is slower than the bf16 pass.
 
 ## What runs
 
@@ -51,21 +59,23 @@ once when the model loads. The recipe (Hadamard rotation, int8 math) is called "
 
 ### Which linears run h8
 
-On the dense model Qwen3.8, only the MLP runs h8: gate‖up and down, the two linears where K = 17,408 and most of
-the gain is. The four mixer linears (the gated delta-net's input and output projections, and attention's q‖k‖v
-and o_proj) run in bf16, exactly as on `l0`
+On the dense model Qwen3.8 every prompt linear runs h8: the MLP's gate‖up and down, and the four mixer linears (the
+gated delta-net's input and output projections, and attention's q‖k‖v and o_proj), all with the same 1024-wide
+rotation. Only the gated delta-net's small a‖b projection and the output head stay bf16.
 
-On one card (and in the two-card pipeline), a short chunk (640 rows or fewer) runs its MLP in bf16 too; under `tp` it stays h8. The h8 path rebuilds every weight as rotated int8 on
-each chunk, whatever its length, so a 30-row chunk paid a full chunk's weight rebuild. The bf16 short-chunk
-GEMMs read the int4 weights directly and spread the few rows over every core. The MLP of a 16-row chunk then takes
-46 ms instead of 244 ms (all 64 layers), and a 512-row chunk takes 239 to 256 ms instead of 257 to 268. At 768 rows
-the two paths tie, and above that h8 is faster. This matters because the prefix cache cuts prompts at 2048-token
-blocks, so most prompts end in a short chunk, and every follow-up turn of a session is one.
+On one card (and in the two-card pipeline), a short chunk (640 rows or fewer) runs every linear in bf16 instead;
+under `tp` it stays h8. The h8 path rebuilds every weight as rotated int8 on each chunk, whatever its length, so a
+30-row chunk paid a full chunk's weight rebuild. The bf16 short-chunk GEMMs read the int4 weights directly and
+spread the few rows over every core. The MLP of a 16-row chunk then takes 46 ms instead of 244 ms (all 64 layers),
+and a 512-row chunk takes 239 to 256 ms instead of 257 to 268. At 768 rows the two paths tie, and above that h8 is
+faster. The 640-row bound was measured on the MLP; the mixer linears follow it. This matters because the prefix
+cache cuts prompts at 2048-token blocks, so most prompts end in a short chunk, and every follow-up turn of a session
+is one.
 
-Why not the mixer too: an all-linears form was built and is faster, but on a 2,820-token prompt it made one row pick
-a token the f32 reference puts 7.9 logits below its own top, which is not a near-tie. With the mixer in bf16 the
-long-prompt gate passes 32 of 32 rows and the logits sit as close to f32 as `l0`'s do. The price is about a third of
-the speed-up over `l0` (see "Mixer in bf16: the trade").
+The mixer linears were not always int8. An earlier build of this all-linears form made one row of the 2,820-token
+long gate pick a token the f32 reference puts 7.9 logits below its own top, so for a while the pass ran int8 in the
+MLP only and kept the mixer in bf16, at about two thirds of the speed-up. On today's kernels the all-linears form
+passes that gate 32 of 32 and the measurements in "Quality" below, so it is the int8 pass again.
 
 Mixture-of-experts models (MoE: each token is routed to a few of many expert MLPs) such as Ornith run no h8
 linears at all. Under `l0-int8` their dense linears, router and GDN a‖b projection stay bf16 as on `l0`, and only
@@ -141,27 +151,19 @@ That first build read a 4,096-token prompt 1.28x faster than the bf16 prefill of
 session, with decode unchanged. On the golden gate it matched the bf16 prefill apart from one bf16 near-tie, which
 was accepted.
 
-## Mixer in bf16: the trade
+## Quality
 
-The MLP-only form against the all-linears form on one card, interleaved, median of 3, while the other card ran a
-test:
+Measured on Qwen3.8-27B, one card, against the bf16 prompt pass (`l0`) or the CPU reference:
 
-| prompt tokens | `l0` | `l0-int8`, all linears | `l0-int8`, MLP only | MLP only vs `l0` |
-|---|---:|---:|---:|---:|
-| 4,096 | 1,739.9 | 2,256.3 | 2,082.5 | 1.20x |
-| 16,384 | 1,568.7 | 1,980.5 | 1,844.6 | 1.18x |
+| check | result |
+|---|---|
+| 12 served tool calls that copy exact text back, 8k to 99k tokens (MTP on, 256 tokens each) | all 12 byte-identical to `l0`'s |
+| next-token choice after the prompt, then 64 forced decode steps, 9 prompts at 4k / 32k / 64k (the bf16 side on the bf16 cache) | 582 of 585 positions agree (99.5 %); mean KL 5.2e-3, at 32k and 64k 1e-5 to 2e-4 |
+| golden gates (prose, code, CJK; also at chunk 16, chunk 1000, chunk cap 4096, int8 head) | 93 of 93 determined rows each, under the standing allowance of one near-tie |
+| long gate, 2,820 tokens in chunks of 1,024 | 32 of 32 rows, worst layer cosine 0.982 |
 
-It keeps about two thirds of the gain of the all-linears form (1.30x / 1.26x). The `l0` column is from that session;
-the bf16 pass has since become faster (1,788 / 1,624 t/s), so the current gain is smaller, as in the table at the top.
-Accuracy improved:
-`prefill_gate_long_int8_test`, on a 2,820-token prompt, passes 32 of 32 rows with the worst logits cosine 0.947
-against the CPU reference (`l0`: 0.935; the all-linears form 31 of 32 at 0.819), and the per-layer split test
-against bf16 moves closer everywhere (logits 0.9998 against 0.9994 to 0.9997). On the short golden prompts one row
-changed: CJK row 9 is again the one-ulp bf16 near-tie accepted for `l0-int8` earlier, so those gates pass 92 of 93
-under the standing allowance of one. `l0` is bit for bit unchanged.
-
-It also needs less memory for the int8 state (0.074 GB instead of 0.085, since the mixer linears need no rotated
-column scales), but now needs the bf16 slab (0.036 GB) on `l0-int8` too.
+The three positions that differ are all on 4k prompts; the MLP-only form differed on four. The int8 state takes
+0.085 GB (every linear's rotated column scales), and the bf16 slab stays allocated for the short chunks.
 
 ## Tensor parallel
 
@@ -171,8 +173,10 @@ zero-extend it to K = 9216 before rotating and running the int8 GEMM. Checkpoint
 the int8 scratch and the GEMM use the padded width. Padding with zeros leaves the dot product unchanged before
 quantisation, and needs neither another crossing of activations between the cards nor a persistent weight copy.
 The other per-card widths already fit whole blocks: out_proj / o_proj K = 3072 and the column-parallel linears
-K = 5120, and every output width is whole 1024-column slabs. As on one card, only gate‖up and down run int8; the
-mixer linears take the bf16 slab walk on both cards.
+K = 5120, and every output width is whole 1024-column slabs. As on one card, every linear runs int8, the mixer
+linears included. Each card keeps its half of the context in int8 and scores its 12 query heads against its 2 KV
+heads in int8, with the same kernel built at the card's head counts; the pipeline (`pp`) runs the one-card form on
+each card's layers.
 
 A 512-wide local rotation was tried first and removed after f32-rejected differences of up to 30.67 bf16 ulps.
 Rotating at full width before splitting would need activation and weight data from the other card at the split
@@ -183,27 +187,29 @@ judges differences on that same context against the f32 reference, with the docu
 bf16 ulps (`spec_judge.h`, [14-golden-gate.md](14-golden-gate.md)). Missing references print their context keys
 and SKIP. `--one-card` runs the one-card int8 pass on the same contexts as a diagnostic.
 
-Measured idle on both cards, interleaved, median of 3, with 2048-row chunks, int8 head, bf16 KV cache,
-`max_len` 32768 and 32 generated tokens. The "all linears" column is the earlier form:
+Measured idle on both cards with an earlier build of this all-linears form, interleaved, median of 3, MTP off, with
+2048-row chunks, int8 head, bf16 KV cache, `max_len` 32768 and 32 generated tokens:
 
-| prompt tokens | TP bf16, t/s | TP int8, all linears, t/s | TP int8, MLP only, t/s |
-|---|---:|---:|---:|
-| 4096 | 2934.67 | 3322.73 (+13.2 %) | 3,217 |
-| 16384 | 2673.31 | 3047.73 (+14.0 %) | 2,937 |
+| prompt tokens | TP bf16, t/s | TP int8, t/s |
+|---|---:|---:|
+| 4096 | 2934.67 | 3322.73 (+13.2 %) |
+| 16384 | 2673.31 | 3047.73 (+14.0 %) |
 
-The MLP-only form is 0.967x / 0.962x of the all-linears form, measured against it directly in a separate session.
-With it, the TP gate has one row that differs: `t2_explain-loader` row 32 picks a token 30.67 bf16 ulps below the
-f32 top (the all-linears form picked another one, 2.55 ulps below). It was reviewed and accepted as a known
-divergence, so the test prints it and does not fail on it. In the same session the one-card pass on the same
-contexts (`--one-card`) went from 3 rejected rows with the all-linears form (two on the long prompt at 63.5 and
-50.3 ulps, and 27.5 on `t2_explain-linear_l0`) to 1 (8.55 ulps, `t6_usage-step` row 61).
+On that build the TP gate's one differing row, `t2_explain-loader` row 32, picked a token 2.55 bf16 ulps below the
+f32 top, inside the near-miss bar. The current build has not been timed or gated on two cards yet, under `tp` or
+`pp`.
 
 ## Limits
 
-`l0-int8` together with `--kv-cache int8` is a known failure. Each prefill attention layer then reads K and V rows
-the chunk has just written in int8, and the int8 linears amplify that rounding: about 3 % of tool calls that copy
-exact text from a long prompt come out wrong. The server prints a startup warning for this combination; the `l0`
-prefill or the bf16 cache avoids it. A fix is known (read the chunk's own new rows from bf16) and not built.
+On Qwen3.8 `l0-int8` runs on the int8 context: the CLIs turn `--kv-cache int8` on with it and refuse an explicit
+`--kv-cache bf16`. The prompt's attention scores are int8 too: each query row is quantised to int8 per head with one
+fp32 scale over its 256 rotated dims, and Q times K is an int32 dot product scaled by the query's and the key's
+scales; softmax and the value product stay as they are. Half the bytes of Q and K reach the matrix engines, which is
+where the long-prompt attention kernel spends its time, so the gain grows with the prompt. Short chunks deep in a
+session keep bf16 scores. The measured cost is the table above; with the MLP alone in int8 and the int8 cache, about
+3 % of exact-copy tool calls once came out wrong, which this form, measured, does not repeat.
+
+Every time `l0-int8` is on, the server prints a startup notice with the measured cost above.
 
 On an MoE model, int8 only in the routed experts carries some quality risk, since a near-tie between two experts can
 flip, and on Ornith it is slower than the bf16 pass. More generally the int8 path's results drift further from the

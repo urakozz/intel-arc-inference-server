@@ -146,7 +146,12 @@ struct Flags {
   [[=Section("\nstill being measured (they go when their numbers decide):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
   std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
-  [[=Help("l0|l0-int8", "--prefill-length / --prefill: bf16, or int8 on the matrix engines.", "l0")]]
+  [[=Help("l0|l0-int8",
+          "--prefill-length / --prefill: bf16, or int8 - every prompt linear, the context (it\n"
+          "turns on --kv-cache int8) and the attention scores: 40-47 % faster prompts than bf16\n"
+          "on Qwen3.8-27B; the most likely next token differs at 3 of 585 positions, 0 of 12\n"
+          "long exact-copy tool calls changed.",
+          "l0")]]
   Arg<std::string> prefill_backend;
 };
 
@@ -843,6 +848,10 @@ int run(int argc, char** argv) {
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
     throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" +
                              pp_backend_arg + "'");
+  // PERF-114: l0-int8 on a dense model runs on the int8 context (the KV cache), turned on here.
+  const bool int8_dense = have_pp_backend && pp_backend == runtime::PrefillBackend::L0Int8 &&
+                          cli::int8_context_model(path);
+  if (have_pp_backend) kv_cache = cli::int8_pass_kv(pp_backend, int8_dense, f.kv_cache, kv_cache);
   if (!synthetic && !have_n) {
     usage();
     throw std::runtime_error("--ids needs --n");
@@ -942,7 +951,7 @@ int run(int argc, char** argv) {
   runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
-  if (have_prefill_len || prefill) cli::warn_int8_prefill_kv8(pp_path.backend, kv_cache);
+  if (have_prefill_len || prefill) cli::check_int8_prefill_kv8(pp_path.backend, kv_cache, int8_dense);
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --parallel's refusals are argument-only, so they come before the device too.
@@ -1110,6 +1119,7 @@ int run(int argc, char** argv) {
     eng.set_prefill_chunk_cap(settled.chunk_cap);   // plan 5d: the cap the plan counted
     eng.set_prefill_dense_bf16(settled.dense_bf16);   // open-work 38: likewise
     std::print(stderr, "prefill backend: {}\n", runtime::prefill_backend_name(eng.prefill_backend()));
+    cli::notice_int8_prefill(eng.prefill_backend(), *eng.model().desc);
     eng.prepare_prefill();
     pp_launches_setup = eng.prefill_launches();
   }

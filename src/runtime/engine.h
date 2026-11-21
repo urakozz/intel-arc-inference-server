@@ -20,6 +20,7 @@
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
+#include "runtime/kv_pool.h"
 #include "runtime/memory_plan.h"
 #include "runtime/prefill_backend.h"
 #include "runtime/prefill_chunks.h"
@@ -73,9 +74,13 @@ class Engine {
   // `slots` (spec 13c): the lengths of the engine's sequence slots, max_len their slots_kv_len (runtime/buffer_sizes.h:
   // each slot whole KV pages) - see "spec 13c" below. Empty (the default) is one slot of max_len: today's engine,
   // allocation for allocation and list for list.
+  //
+  // `pool_pages` (spec 31, the KV page pool): > 0 makes the KV `pool_pages` pages of kKvPage positions (max_len =
+  // pool_pages x kKvPage) that the sequences take as they grow - see "spec 31" below. `slot_lens` then names every
+  // sequence's cap, all equal (2..SlotDims::kMaxSeqs of them). 0 (the default): fixed slots as above.
   Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len,
          bool debug_resid = false, KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr,
-         std::vector<uint32_t> slot_lens = {});
+         std::vector<uint32_t> slot_lens = {}, uint32_t pool_pages = 0);
 
   // Zeroes exactly the persistent group - control, gdn_state, conv_ring, kv_k,
   // kv_v. Scratch is deliberately NOT zeroed: no step may read scratch it has
@@ -189,16 +194,19 @@ class Engine {
   void save_state(void* host) const;
   // Writes both (and the hidden row / the drafter's ring), then control.pos = pos, control.n_active = 0.
   // cur_token is NOT restored: prefill at least one id after a restore (spec 7 §3.3 step 4).
-  void load_state(const void* host, uint32_t pos);
+  void load_state(const void* host, uint32_t pos)
+    pre(pos <= max_len());
   // Positions [begin, end) of kv_k and kv_v. Host layout: K [16][end-begin][4][256]
-  // bf16, then V the same; with MTP on, [17] layers each, the head's cache last. begin == end copies nothing (host may be null). Throws
-  // unless begin <= end <= max_len.
+  // bf16, then V the same; with MTP on, [17] layers each, the head's cache last. begin == end copies nothing (host
+  // may be null). begin <= end <= max_len - for save_kv with a KV page pool, <= the positions its pages hold.
   // Spec 12b, int8: K is [layers][end-begin][4][256] int8 rows, then [layers][end-begin][4]
   // fp16 scales (the head's layer last in both), then V the same - kv_bytes(end - begin)
   // bytes. A store holds one form only: the bytes are not convertible, so the prefix cache
   // keys its entries by the engine's form as well (server/prefix_cache.h).
-  void save_kv(uint32_t begin, uint32_t end, void* host) const;
-  void load_kv(uint32_t begin, uint32_t end, const void* host);
+  void save_kv(uint32_t begin, uint32_t end, void* host) const
+    pre(begin <= end && end <= (pool_ ? pages_held(cur_) * kKvPage : max_len()));
+  void load_kv(uint32_t begin, uint32_t end, const void* host)
+    pre(begin <= end && end <= max_len());
 
   // Spec 7 §3.2: called on the host after every prefill chunk whose end position is a
   // multiple of kBlock, with the device idle and the persistent state exactly at
@@ -242,7 +250,7 @@ class Engine {
   // documented in exactly one place - runtime/capture.h's `debug_resid`
   // paragraph - and is not restated here.
   std::vector<uint16_t> read_debug_resid();  // throws unless debug_resid
-  bool debug_resid() const { return tap_ != nullptr; }
+  bool debug_resid() const { return own_.tap != nullptr; }
 
   // --- spec 8: MTP speculative decoding (plan 8b) --------------------------------
   //
@@ -320,20 +328,21 @@ class Engine {
     return kWideK;
   }
   const float* verify_logits_device() const;   // [k + 1][kVocab] fp32, device memory
-  void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
+  void commit(uint32_t j, uint32_t next_token, bool defer_projection = false)
+    pre(next_token < model::Qwen35::kVocab);
   void flush_projection() const;
   uint64_t queue_submissions() const { return queue_.submissions(); }
   // verify-cost-m8, tests and probes: whether the verify lists commit by replay (gdn_step's DEFERRED build), whether
   // committed rows are pending (a state read flushes them: one more submission), and the committed GDN state.
-  bool gdn_deferred() const { return gdn_pend_ != nullptr; }
-  bool gdn_rows_pending() const { return gdn_pend_ && (control_->gdn_pend & 0xFFu) != 0; }
+  bool gdn_deferred() const { return own_.gdn_pend != nullptr; }
+  bool gdn_rows_pending() const { return own_.gdn_pend && (control_->gdn_pend & 0xFFu) != 0; }
   const void* gdn_state_now() const { return live_gdn_slot(); }
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
   MtpBuffers* mtp_buffers() { return mtp_.get(); }
   // The last prefill chunk's main hidden rows: bf16 [chunk_cap + 1][hidden], row 1 + r = position
   // (last chunk base + r) post-final-norm (step_mtp_kv). Null before an MTP prefill.
-  const l0::Mem* mtp_prefill_hidden() const { return mtp_pf_hid_.get(); }
+  const l0::Mem* mtp_prefill_hidden() const { return pf_own_.mtp_hid.get(); }
   const CapturedStep& verify_step(uint32_t M) const;
   const CapturedStep& draft_step(uint32_t i) const;
   // Spec 28c, tests and probes only (no engine flag, no environment variable): capture the verify lists again under
@@ -378,7 +387,7 @@ class Engine {
   // Spec 19c: the drafter's GDN state slots 1..7 (slot-major, one gdn_state each); null without a drafter. Plan
   // 19v3b: with several slots, every further slot's 4 states follow (slot q's state 0 at 7 + 4 (q - 1)) - the row
   // lists' state pool.
-  const l0::Mem* drafter_slots() const { return df_slots_.get(); }
+  const l0::Mem* drafter_slots() const { return own_.df_slots.get(); }
   // Replays a list that is not the Engine's own (the drafter's draft and projection lists) on this engine's queue
   // and waits for it: nothing of the Engine's is in flight before or after. The list must only read Control and
   // the buffers it was captured against.
@@ -414,24 +423,55 @@ class Engine {
   // positions and KV rows past the commit, which nothing reads (spec 13 §9: B3).
   static constexpr uint32_t kMaxRows = DecodeScratchDims::kM;   // 8
   uint32_t slots() const { return static_cast<uint32_t>(seqs_.size()); }
-  void select(uint32_t slot);
+  void select(uint32_t slot)
+    pre(slot < slots());
   uint32_t selected() const { return cur_; }
   uint32_t slot_len(uint32_t slot) const { return seqs_.at(slot).len; }
   uint32_t slot_base(uint32_t slot) const { return seqs_.at(slot).base; }
   // Plan 19v3b Task 0 - the KV page table (empty with one slot) and, tests and probes, a new one: a permutation of the
   // pages, written to the card and the host's copy. The KV moves no byte, so every slot is reset() after it (the
-  // caller's: a slot's session continues only across an identity rewrite). Throws for a wrong length or no
-  // permutation, or with one slot.
+  // caller's: a slot's session continues only across an identity rewrite). Several slots, no KV page pool (it writes
+  // the table) and a permutation of the pages.
   const std::vector<uint32_t>& kv_page_table() const { return pages_; }
   const void* kv_page_table_device() const { return slot_bufs_ ? slot_bufs_->pages.ptr() : nullptr; }
-  void set_kv_page_table(const std::vector<uint32_t>& table);
-  // The cache row (every FA layer's, main and head) of slot q's position p.
-  uint32_t kv_row(uint32_t slot, uint32_t p) const;
+  // Probes (probe_slots_speed --list-ab): what the row lists bind, to build them again contiguous and paged.
+  const BatchRowsBind& rows_bind() const { return rows_bind_; }
+  void set_kv_page_table(const std::vector<uint32_t>& table)
+    pre(!pages_.empty())
+    pre(pool_ == nullptr)
+    pre(table.size() == pages_.size());
+  // The cache row (every FA layer's, main and head) of slot q's position p: below the positions its pages hold with a
+  // KV page pool, its slot_len without one.
+  uint32_t kv_row(uint32_t slot, uint32_t p) const
+    pre(slot < slots())
+    pre(p < (pool_ ? pages_held(slot) * kKvPage : slot_len(slot)));
+  // --- spec 31: the KV page pool ----------------------------------------------------------------------------------
+  //
+  // With `pool_pages` (the constructor's) every sequence is alike: slot_len = the per-request cap, slot_base its
+  // region of the page table (kv_pages(cap) entries a sequence), and its KV pages are taken from the pool as it grows
+  // (runtime::KvPool on the host, each new table entry written to the card between submits). Every call that writes
+  // KV takes the pages it writes first - prefill (the call's positions), a plain step, draft(k), verify(k),
+  // verify_rows and draft_rows (up to pos + k + 1), load_kv - and throws, with nothing written, when the pool cannot
+  // cover them; max_verify_k() counts the pages the sequence could still take. reset() gives the selected sequence's
+  // pages back and zeroes only their rows below its written bound (PERF-90's bound, kept per sequence). The kernels
+  // are the fixed slots' paged builds: only the table's contents differ. A table entry no page backs reads page 0 and
+  // is never read or written (every read and write is below the positions the sequence holds).
+  uint32_t kv_pool_pages() const { return pool_ ? pool_->pages_total() : 0; }
+  uint32_t pages_free() const { return pool_ ? pool_->pages_free() : 0; }
+  uint32_t pages_held(uint32_t slot) const { return pool_ ? uint32_t(pool_->pages_of(slot).size()) : 0; }
+  // The physical pages slot `slot` holds, its positions' order (empty without a pool).
+  std::vector<uint32_t> pool_pages_of(uint32_t slot) const { return pool_ ? pool_->pages_of(slot) : std::vector<uint32_t>{}; }
+  // The selected sequence's pages up to position `upto` (exclusive), taken now: false, and nothing changed, when the
+  // free pages do not cover them. A pool, and at most the per-request cap.
+  bool take_pages(uint32_t upto)
+    pre(pool_ != nullptr) { return take_pages_of(cur_, upto); }
   struct Run {
     uint32_t slot = 0;
     uint32_t k = 0;   // drafts in the slot's cur_token[1..k]
   };
-  void verify_rows(const std::vector<Run>& runs);
+  void verify_rows(const std::vector<Run>& runs)
+    pre(slots() >= 2)
+    pre(runs.size() <= kMaxRows);
   // The MTP drafts of several slots at once (runtime::build_draft_rows: the head and lm_head read once a draft index
   // for all of them): runs[r] = (slot, k), 2 <= runs <= kMaxDraftRows, every k in 1..max_verify_k() of its slot and
   // every slot room for max(k). Each run drafts max(k) ids and keeps its first k: they land in its cur_token[1..k] and
@@ -441,7 +481,8 @@ class Engine {
   static constexpr uint32_t kMaxDraftRows = 4;
   void draft_rows(const std::vector<Run>& runs,
                   const std::function<uint32_t(size_t r, uint32_t i, uint32_t argmax)>& pick = {});
-  const uint32_t* rows_ids() const;            // [rows] the argmax of every row, run order
+  const uint32_t* rows_ids() const            // [rows] the argmax of every row, run order
+    pre(slots() >= 2);
   const float* rows_logits_device() const;     // [rows][kVocab] fp32, device memory (verify_logits_device()'s)
   // The selected slot's Control (shared memory): the pending id cur_token[0], the drafts cur_token[1..k].
   Control* control() const { return control_; }
@@ -499,7 +540,7 @@ class Engine {
   void snap_copy(void* host, const void* dev, size_t bytes) const;
   void snap_wait() const;
   // Spec 19c (defined in engine_prefill.cc): the prefill tail of the drafter's ring - the n staged tap rows
-  // (df_pf_taps_ rows 0..n-1) at positions pos .. pos + n - 1, projected at prefill width (TapDrafter::project_wide)
+  // (pf_own_.df_taps rows 0..n-1) at positions pos .. pos + n - 1, projected at prefill width (TapDrafter::project_wide)
   // or, where the drafter has no such path, 8 rows a replay.
   void drafter_project_staged(uint32_t pos, uint32_t n);
 
@@ -521,7 +562,9 @@ class Engine {
   std::optional<uint32_t> pf_chunk_cap_;       // plan 5d; unset = default_prefill_chunk_cap()
   bool pf_dense_bf16_ = false;                 // open-work 38
   BlockHook block_hook_;
-  std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
+  // Spec 39: Engine's own allocations (EngineSizes: the debug tap, the drafter's slots, the deferred GDN rows, the deep
+  // chain scratch), each null until made.
+  EngineBuffers own_;
   // Spec 8: null unless the model carries the MTP head. Declared before step_ so it
   // exists when the lists are captured (constructor body).
   std::unique_ptr<MtpBuffers> mtp_;
@@ -566,6 +609,7 @@ class Engine {
     uint32_t verify_k = kNoVerify, verify_pos = 0;
     // Where commit(j) takes row j's hidden: hh row 1 after verify(), the row list's saved row r0 after verify_rows.
     const uint8_t* verify_hidden = nullptr;
+    uint32_t kv_end = 0;   // spec 31: PERF-90's written bound for this sequence (note_kv), what reset() zeroes
   };
   std::vector<Seq> seqs_;
   uint32_t cur_ = 0;
@@ -580,7 +624,7 @@ class Engine {
   std::vector<CapturedStep> draft_rows_steps_;   // MTP: the row draft lists at M = 2..min(slots, kMaxDraftRows)
   DraftRowsBind draft_bind_;
   BatchLayout layout_;
-  void setup_slots(const std::vector<uint32_t>& lens);
+  void setup_slots(const std::vector<uint32_t>& lens, uint32_t pool_pages);
   void capture_slot(uint32_t q);
   uint32_t gdn_index(uint32_t slot, uint32_t k) const { return seqs_[slot].first + k; }
   uint32_t max_draft_of(const Seq& s) const;
@@ -593,7 +637,15 @@ class Engine {
   // least one row, a draft chain writes the head's rows up to 3 ahead).
   static constexpr uint32_t kKvAhead = 2 * DecodeScratchDims::kDeepM;
   uint32_t kv_end_ = UINT32_MAX;
-  void note_kv(uint32_t end) { kv_end_ = std::max(kv_end_, end); }
+  void note_kv(uint32_t end) {
+    kv_end_ = std::max(kv_end_, end);
+    seqs_[cur_].kv_end = std::max(seqs_[cur_].kv_end, end);   // spec 31: the pool's per-sequence bound
+  }
+  // Spec 31: the pool (null with fixed slots), a sequence's pages taken (the table entries written), and the same
+  // that throws for `what` when the pool is full.
+  std::unique_ptr<KvPool> pool_;
+  bool take_pages_of(uint32_t slot, uint32_t upto);
+  void need_pages(uint32_t slot, uint32_t upto, const char* what);
   // Plan 19v3b Task 0: the KV page table's host copy (empty with one slot) and the cache rows of slot `s`'s positions
   // [begin, end) as (first row, rows) runs - consecutive pages merged, so one run unless the table scatters them.
   std::vector<uint32_t> pages_;
@@ -603,25 +655,21 @@ class Engine {
   double deep_capture_ms_[2] = {0, 0};   // spec 32e: the 32- and 64-row lists'
   void capture_verify(uint32_t M, const CaptureOptions& opt);
   void capture_wide(const CaptureOptions& opt);   // open-work 28: the 16-row list where it is built
-  std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [chunk_cap + 1][hidden], lazy
-  // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims; plan 19v3b: and the further slots' states), and
-  // the prefill's tap staging (bf16 [chunk_cap][taps][hidden], lazy: the first prefill).
+  // Spec 39: the prefill's own allocations (EnginePrefillSizes: the MTP head's hidden rows, a drafter's tap staging).
+  EnginePrefillBuffers pf_own_;
+  // Spec 19c: the borrowed drafter (its GDN slots: own_.df_slots), and the prefill's tap staging (bf16
+  // [chunk_cap][taps][hidden], lazy: the first prefill).
   TapDrafter* drafter_ = nullptr;
-  std::unique_ptr<l0::Mem> df_slots_;
-  // verify-cost-m8: one sequence slot with a proposer on Qwen3.8's GDN shapes - the verify lists bind gdn_step's
-  // DEFERRED build (no per-row state; the committed rows are replayed by the next launch) over these pending rows
-  // (two parities of kernels::kGdnPendParityBytes), and gdn_flush_ applies them where the state is read. Null
-  // elsewhere: the slot builds, gdn_live moved at commit.
-  std::unique_ptr<l0::Mem> gdn_pend_;
+  // verify-cost-m8: with the pending GDN rows (own_.gdn_pend) the verify lists bind gdn_step's DEFERRED build (no
+  // per-row state; the committed rows are replayed by the next launch), and gdn_flush_ applies them where the state
+  // is read. Null elsewhere: the slot builds, gdn_live moved at commit.
   std::unique_ptr<CapturedStep> gdn_flush_;
-  // Spec 32: the deep lists' chain scratch (SlotBind::gdn_x / conv_x) and the ring copy a commit of rows 16.. runs
-  // (gdn_ring_commit.cl); deep_rows_ the widest rows B70_SPEC_LOOKUP_ROWS allows (64 unset).
-  std::unique_ptr<l0::Mem> gdn_x_, conv_x_;
+  // Spec 32: the ring copy a commit of rows 16.. runs (gdn_ring_commit.cl) beside the deep lists' chain scratch
+  // (own_.gdn_x / conv_x); deep_rows_ the widest rows B70_SPEC_LOOKUP_ROWS allows (64 unset).
   std::unique_ptr<l0::Module> ring_mod_;
   std::unique_ptr<l0::Kernel> ring_k_;
   std::unique_ptr<l0::CmdList> ring_list_;
   uint32_t deep_rows_ = 64;
-  std::unique_ptr<l0::Mem> df_pf_taps_;
   // Plan 19v3b: the commits of verify_rows runs not yet projected - one rows projection replay for all of them.
   mutable std::vector<TapDrafter::RowsCommit> rows_commits_;
   l0::CmdList* profile_projection_ = nullptr;   // CaptureOptions test/probe override, borrowed

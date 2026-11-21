@@ -288,6 +288,104 @@ bool kv8_m8(l0::Context& ctx) {
   return ok;
 }
 
+// PERF-56 (`--ornith-wide`): Ornith's 16 q / 2 kv heads in its wide lookup verify lists - attn_verify_dpas in row
+// chunks of 8 (attn_verify_dpas_M<W>_T32_Q16KV2, W = 16 / 32 / 64) and the attn_v2_M<W>_T32_Q16KV2 reduce, synthetic
+// bf16 KV: every gated row against v2's M = 1 step at pos + m (attn_v2_M1_T32_Q16KV2: N2b, cosine >= kN1), two runs
+// bitwise, and the 32- / 64-row launches' rows bitwise the 16-row launch at their 16-row block's position.
+bool ornith_wide(l0::Context& ctx) {
+  constexpr uint32_t QH = 16, KVH = 2, ROW = QH * kHD, L = 4096 + 64;
+  std::mt19937 rng(56);
+  std::normal_distribution<float> nd(0.f, 1.f);
+  std::vector<uint16_t> hk(size_t(L) * KVH * kHD), hv(hk.size());
+  for (auto& x : hk) x = common::f32_to_bf16(nd(rng));
+  for (auto& x : hv) x = common::f32_to_bf16(nd(rng));
+  l0::Queue q(ctx);
+  l0::Fence fence(q);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  l0::Mem ctrl(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
+  l0::Mem k(ctx, l0::MemKind::Device, hk.size() * 2), v(ctx, l0::MemKind::Device, hv.size() * 2);
+  imm.copy(k.ptr(), hk.data(), hk.size() * 2);
+  imm.copy(v.ptr(), hv.data(), hv.size() * 2);
+  l0::Mem aq(ctx, l0::MemKind::Device, size_t(64) * ROW * 4), ag(ctx, l0::MemKind::Device, size_t(64) * ROW * 4);
+  l0::Mem part(ctx, l0::MemKind::Device, size_t(QH) * kTgt * 64 * kPart * 4);
+  l0::Mem out(ctx, l0::MemKind::Device, size_t(64) * ROW * 2);
+  std::map<std::string, std::unique_ptr<l0::Module>> mods;
+  const auto mod = [&](const std::string& n) -> l0::Module& {
+    auto& m = mods[n];
+    if (!m) m = std::make_unique<l0::Module>(ctx, kernels::path(n));
+    return *m;
+  };
+  // One launch at (pos, M): the DPAS pair (M = 16 / 32 / 64) or v2's (M = 1); q / gate already uploaded.
+  const auto run = [&](uint32_t pos, uint32_t M) {
+    runtime::Control* c = ctrl.as<runtime::Control>();
+    c->pos = pos;
+    c->n_active = M;
+    l0::Module& rm = mod(kernels::attn_v2_variant(M, kTgt, QH, KVH));
+    const bool dpas = M > 1;
+    l0::Module& dm = dpas ? mod(kernels::attn_verify_dpas_variant(M, kTgt, false, QH, KVH)) : rm;
+    l0::Kernel dec(dm, dpas ? "attn_verify_dpas" : "attn_decode_v2");
+    dec.group_size(dpas ? wg_of(dec) : 256);
+    dec.arg_ptr(0, ctrl.ptr());
+    dec.arg_ptr(1, aq.ptr());
+    dec.arg_ptr(2, k.ptr());
+    dec.arg_ptr(3, v.ptr());
+    dec.arg_ptr(4, part.ptr());
+    l0::Kernel red(rm, "attn_reduce_v2");
+    red.group_size(256);
+    red.arg_ptr(0, ctrl.ptr());
+    red.arg_ptr(1, part.ptr());
+    red.arg_ptr(2, ag.ptr());
+    red.arg_ptr(3, out.ptr());
+    imm.fill(part.ptr(), 0xFFFFFFFFu, part.size());
+    l0::CmdList l = l0::CmdList::regular(ctx);
+    const uint32_t chunk = kernels::attn_verify_chunk_rows(QH, KVH);   // the capture's grid (capture.cc attn_pair)
+    if (dpas)
+      l.launch(dec, M / chunk, KVH, kTgt);
+    else
+      l.launch(dec, KVH, kTgt, 1);
+    l.launch(red, QH, M);
+    l.close();
+    imm.fill(out.ptr(), 0u, size_t(M) * ROW * 2);
+    q.execute(l, &fence);
+    fence.wait();
+    std::vector<uint16_t> o(size_t(M) * ROW);
+    imm.copy(o.data(), out.ptr(), o.size() * 2);
+    return o;
+  };
+  bool ok = true;
+  for (uint32_t pos : {0u, 1u, 5u, 63u, 2000u, 2040u, 4031u}) {
+    std::vector<float> qv(size_t(64) * ROW), gv(qv.size());
+    for (auto& x : qv) x = nd(rng);
+    for (auto& x : gv) x = nd(rng);
+    for (uint32_t W : {16u, 32u, 64u}) {
+      imm.copy(aq.ptr(), qv.data(), size_t(W) * ROW * 4);
+      imm.copy(ag.ptr(), gv.data(), size_t(W) * ROW * 4);
+      const std::vector<uint16_t> o1 = run(pos, W), o2 = run(pos, W);
+      uint32_t diff = 0;
+      for (uint32_t c = 1; W > 16 && c < W / 16; ++c) {   // block 0 is the 16-row launch at pos itself
+        imm.copy(aq.ptr(), &qv[size_t(16) * c * ROW], size_t(16) * ROW * 4);
+        imm.copy(ag.ptr(), &gv[size_t(16) * c * ROW], size_t(16) * ROW * 4);
+        const std::vector<uint16_t> o16 = run(pos + 16 * c, 16);
+        diff += std::memcmp(&o1[size_t(16) * c * ROW], o16.data(), size_t(16) * ROW * 2) != 0;
+      }
+      double n2b = 2, ab = 0;
+      for (uint32_t m = 0; m < W; ++m) {
+        imm.copy(aq.ptr(), &qv[size_t(m) * ROW], ROW * 4);
+        imm.copy(ag.ptr(), &gv[size_t(m) * ROW], ROW * 4);
+        const std::vector<uint16_t> one = run(pos + m, 1);
+        for (uint32_t h = 0; h < QH; ++h)
+          n2b = std::min(n2b, cos_rows(&o1[size_t(m) * ROW + h * kHD], &one[h * kHD], &ab));
+      }
+      const bool pass = o1 == o2 && diff == 0 && n2b >= kN1;
+      ok = ok && pass;
+      std::printf("O pos %4u rows %u: N2b worst %.8f (max abs %.3g)  rep %s  %u 16-row blocks differ from the 16-row "
+                  "launch%s\n",
+                  pos, W, n2b, ab, o1 == o2 ? "yes" : "NO", diff, pass ? "" : "  <-- FAIL");
+    }
+  }
+  return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -296,6 +394,11 @@ int main(int argc, char** argv) {
   if (argc > 1 && std::string(argv[1]) == "--kv8-m8") {
     const bool pass = kv8_m8(ctx);
     std::printf("attn_verify_dpas_kv8_m8_test: %s\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+  }
+  if (argc > 1 && std::string(argv[1]) == "--ornith-wide") {   // PERF-56
+    const bool pass = ornith_wide(ctx);
+    std::printf("attn_verify_dpas_ornith_wide_test: %s\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
   }
   std::mt19937 rng(28);

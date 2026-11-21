@@ -323,7 +323,7 @@ void check_figures() {
   const runtime::MtpSizes m = runtime::MtpDims::sizes(262144, o, 0, runtime::KvCache::Bf16);
   CHECK_EQ(m.gdn_spec, size_t{3} * 30 * 32 * 128 * 128 * 4);   // 3 slots x 62,914,560
   CHECK_EQ(m.kv_k, size_t{262144} * 2 * 256 * 2);              // one layer, 2 kv-heads
-  CHECK_EQ(m.hh, size_t{9} * 2048 * 2);
+  CHECK_EQ(m.hh, size_t{65} * 2048 * 2);                      // (64 + 1) rows: the wide verify lists' (spec 32)
   CHECK_EQ(m.dh, size_t{2048} * 2);
   CHECK_EQ(runtime::mtp_prefill_hidden_bytes(o, runtime::PrefillScratchDims::kCDefault), size_t{2049} * 2048 * 2);
   const size_t weights = kOrnithInt8Weights + loader::mtp_head_bytes(o);
@@ -336,7 +336,13 @@ void check_figures() {
                                                  runtime::KvCache::Bf16);
     CHECK_EQ(on.mtp_buffers, m.total());
     CHECK_EQ(on.mtp_hidden, runtime::mtp_prefill_hidden_bytes(o, runtime::PrefillScratchDims::kCDefault));
-    CHECK_EQ(on.decode_state, off.decode_state + m.total() + on.mtp_hidden);
+    // PERF-56: with the head the decode scratch holds the wide verify lists' 64 rows (16 without)
+    const size_t rows64 = runtime::DecodeScratchDims::sizes(262144, o, runtime::DecodeScratchDims::kDeepM).total() -
+                          runtime::DecodeScratchDims::sizes(262144, o).total();
+    // Engine's own (EngineSizes): the deferred GDN rows (2 x 24,084,480) and the deep lists' chain scratch (a GDN
+    // state 62,914,560 and 30 layers' conv rows 16.. at 8192 channels, 23,592,960)
+    CHECK_EQ(on.deep, size_t{48168960 + 62914560 + 23592960});
+    CHECK_EQ(on.decode_state, off.decode_state + m.total() + on.mtp_hidden + rows64 + on.deep);
     CHECK_EQ(on.model, off.model + loader::mtp_head_bytes(o));
     // step_mtp_kv's bf16 linears walk the L0 slab: on l0-int8 it is built for MTP alone.
     const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(262144, o, runtime::PrefillScratchDims::kCDefault);

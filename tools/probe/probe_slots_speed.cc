@@ -2,14 +2,20 @@
 // engine API (host writes, submit, fence - what the server pays per step, without HTTP and the scheduler).
 //
 //   probe_slots_speed <snapshot> [--kv bf16|int8] [--slots L0,L1,..] [--depth 4096] [--steps 48] [--rounds 3]
-//                     [--depths D0,D1,..] [--arms "NAME|NAME|.."]
+//                     [--depths D0,D1,..] [--arms "NAME|NAME|.."] [--table order|scatter]
 //
 // --depths: each slot's prefill length (default every slot `depth`) - e.g. slot 0 deep beside short slots.
 // --arms: only the arms of these names (as printed, e.g. "1 plain|4 K=1,1,1,1"), in the order below.
+// --table (spec 31 Task 2): `order` keeps the page table the engine writes (each slot's pages in order); `scatter`
+// rewrites it before the prefill to slots_test's scattered order - slot 0's and slot 1's pages alternating while both
+// have pages, then slot 2's, then slot 3's last page first - the layout a page pool hands out. Interleave runs of the
+// two for the comparison.
 // --list-ab N (plan 19v3b Task 0): instead of the arms, slot 0's plain decode list captured twice on the same buffers -
 //   contiguous (runtime::build's default binding: one-slot's binaries) and paged (the slot's page table, the identity) -
 //   and N replays of each, alternating (A B, then B A), each replay one plain step at slot 0's growing position: the
 //   median ms a step of each and paged / contiguous. Same process, same KV, same clocks: the paging's whole-step cost.
+//   Before it (spec 31 Task 2) the same for the 8-row verify: slot 0's and slot 1's 3 drafts each in one row list,
+//   contiguous (the unpaged row builds) and paged, the same rows every replay. Needs --table order.
 //
 // One engine (Qwen3.8, its MTP head, the int8 lm_head - the served form) with the given slots (default 4 x 32768),
 // every slot prefilled with `depth` ids of tests/golden/prompts/long32k.ids (each from its own offset). Then, per
@@ -174,6 +180,7 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> depths;
   std::vector<std::string> only;
   uint32_t list_ab = 0;
+  std::string table = "order";
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -184,6 +191,7 @@ int main(int argc, char** argv) {
     else if (a == "--rounds") rounds = uint32_t(std::stoul(next()));
     else if (a == "--depths") depths = parse_list(next());
     else if (a == "--list-ab") list_ab = uint32_t(std::stoul(next()));
+    else if (a == "--table") table = next();
     else if (a == "--arms") {
       const std::string l = next();
       for (size_t b = 0; b <= l.size();) {
@@ -197,6 +205,18 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
+  if (table != "order" && table != "scatter") {
+    std::fprintf(stderr, "--table expects order or scatter, got '%s'\n", table.c_str());
+    return 2;
+  }
+  if ((table == "scatter" || list_ab) && slots.size() < 2) {
+    std::fprintf(stderr, "--table scatter and --list-ab need two slots or more (one slot has no page table)\n");
+    return 2;
+  }
+  if (table == "scatter" && list_ab) {   // the contiguous lists read the KV where an in-order table puts it
+    std::fprintf(stderr, "--list-ab compares against the contiguous lists: it needs --table order\n");
+    return 2;
+  }
   const runtime::KvCache kv = runtime::parse_kv_cache(kv_s.c_str());
   const std::vector<uint32_t> file = read_ids("tests/golden/prompts/long32k.ids");
   if (file.empty()) {
@@ -209,9 +229,27 @@ int main(int argc, char** argv) {
   Engine e(ctx, loader::load(ctx, argv[1], total, /*mtp=*/true, loader::LmHeadForm::Int8), total, false, kv, nullptr,
            slots);
   e.prepare_prefill();
-  std::printf("probe_slots_speed: %u slots (%s), %s KV, depth %u, %u steps an arm, median of %u rounds\n%s\n", S,
-              runtime::slot_layout_name(slots).c_str(), runtime::kv_cache_name(kv), depth, steps, rounds,
-              e.memory_line().c_str());
+  if (table == "scatter") {
+    std::vector<std::vector<uint32_t>> virt(S);   // each slot's virtual pages
+    for (uint32_t q = 0; q < S; ++q)
+      for (uint32_t i = 0; i < runtime::kv_pages(e.slot_len(q)); ++i) virt[q].push_back(e.slot_base(q) / runtime::kKvPage + i);
+    std::vector<uint32_t> order;   // virtual pages in physical order
+    for (size_t i = 0; i < std::max(virt[0].size(), virt[1].size()); ++i) {
+      if (i < virt[0].size()) order.push_back(virt[0][i]);
+      if (i < virt[1].size()) order.push_back(virt[1][i]);
+    }
+    for (uint32_t q = 2; q < S; ++q)
+      for (size_t i = 0; i < virt[q].size(); ++i) order.push_back(q == 3 ? virt[q][virt[q].size() - 1 - i] : virt[q][i]);
+    std::vector<uint32_t> scattered(order.size());
+    for (uint32_t phys = 0; phys < order.size(); ++phys) scattered[order[phys]] = phys;
+    e.set_kv_page_table(scattered);
+    std::printf("page table (scatter), %zu pages, virtual page -> physical:", scattered.size());
+    for (size_t v = 0; v < scattered.size(); ++v) std::printf(" %u", scattered[v]);
+    std::printf("\n");
+  }
+  std::printf("probe_slots_speed: %u slots (%s), %s KV, depth %u, %u steps an arm, median of %u rounds, %s page table\n%s\n",
+              S, runtime::slot_layout_name(slots).c_str(), runtime::kv_cache_name(kv), depth, steps, rounds,
+              table.c_str(), e.memory_line().c_str());
   if (depths.empty()) depths.assign(S, depth);
   if (depths.size() != S) {
     std::fprintf(stderr, "--depths names %zu slots, the engine has %u\n", depths.size(), S);
@@ -226,32 +264,53 @@ int main(int argc, char** argv) {
     std::printf("prefill: slot %u, %u ids in %.2f s\n", q, depths[q], ms_since(t0) / 1000);
   }
   if (list_ab) {
-    e.select(0);
-    runtime::SlotBind paged;
-    paged.pages = e.kv_page_table_device();
-    runtime::CapturedStep la = runtime::build(ctx, e.model(), e.buffers()),
-                          lb = runtime::build(ctx, e.model(), e.buffers(), nullptr, nullptr, 1, {}, paged);
     l0::Queue q(ctx);
     l0::Fence f(q);
-    e.control()->n_active = 1;
     auto one = [&](runtime::CapturedStep& l) {
       const Clock::time_point t0 = Clock::now();
       q.execute(l.list, &f);
       f.wait();
       return ms_since(t0);
     };
-    for (int i = 0; i < 8; ++i) one(la), one(lb);   // warm-up
-    std::vector<double> ta, tb;
-    for (uint32_t i = 0; i < list_ab; ++i) {
-      if (i % 2) {
-        tb.push_back(one(lb));
-        ta.push_back(one(la));
-      } else {
-        ta.push_back(one(la));
-        tb.push_back(one(lb));
+    // Medians of N replays of each, alternating (A B, then B A), after 8 warm-up pairs.
+    auto ab = [&](runtime::CapturedStep& la, runtime::CapturedStep& lb) {
+      for (int i = 0; i < 8; ++i) one(la), one(lb);
+      std::vector<double> ta, tb;
+      for (uint32_t i = 0; i < list_ab; ++i) {
+        if (i % 2) {
+          tb.push_back(one(lb));
+          ta.push_back(one(la));
+        } else {
+          ta.push_back(one(la));
+          tb.push_back(one(lb));
+        }
       }
+      return std::pair{median(ta), median(tb)};
+    };
+    // Spec 31 Task 2: the 8-row verify - slot 0's and slot 1's three drafts each, one verify_rows step staging the row
+    // table and the controls, then the row list at 8 rows built twice on that binding, contiguous (no page table: the
+    // row builds' unpaged twins) and paged (the engine's), replayed. Nothing in a row list reads a Control's pos, so
+    // every replay runs the same rows; none is committed. First, so the decode lists below start at slot 0's pos.
+    for (uint32_t s = 0; s < 2; ++s) {
+      e.select(s);
+      e.draft(Engine::kMaxDraft);
     }
-    const double ma = median(ta), mb = median(tb);
+    e.verify_rows({{0, Engine::kMaxDraft}, {1, Engine::kMaxDraft}});
+    runtime::BatchRowsBind contiguous = e.rows_bind();
+    contiguous.pages = nullptr;
+    runtime::CapturedStep ra = runtime::build_rows(ctx, e.model(), e.buffers(), contiguous, Engine::kMaxRows),
+                          rb = runtime::build_rows(ctx, e.model(), e.buffers(), e.rows_bind(), Engine::kMaxRows);
+    const auto [va, vb] = ab(ra, rb);
+    std::printf("list-ab verify: %u rows (slot 0 at %u, slot 1 at %u, %u drafts each), %u replays an arm: contiguous "
+                "%.3f ms, paged %.3f ms, paged / contiguous %.4f\n", Engine::kMaxRows, depths[0], depths[1],
+                Engine::kMaxDraft, list_ab, va, vb, vb / va);
+    e.select(0);
+    runtime::SlotBind paged;
+    paged.pages = e.kv_page_table_device();
+    runtime::CapturedStep la = runtime::build(ctx, e.model(), e.buffers()),
+                          lb = runtime::build(ctx, e.model(), e.buffers(), nullptr, nullptr, 1, {}, paged);
+    e.control()->n_active = 1;
+    const auto [ma, mb] = ab(la, lb);
     std::printf("list-ab: slot 0 at %u..%u, %u steps an arm: contiguous %.3f ms, paged %.3f ms, paged / contiguous "
                 "%.4f\n", depths[0], e.pos(), list_ab, ma, mb, mb / ma);
     return 0;

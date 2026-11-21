@@ -208,6 +208,11 @@ inline void hc_down_i8(const int8_t* q, const uint16_t* sc, uint32_t N, uint32_t
     out[n] = red[0];
   }
 }
+// q4_hc_down_i8 _A (PERF-106): one row's raw sums [N] in place -> what the up-mix _A reads: a_j for n < 320, the
+// inject values for 320 <= n < 324 (N 336), the padding left raw.
+inline void hc_down_act(float* row, uint32_t N) {
+  for (uint32_t n = 0; n < N; ++n) row[n] = n < kHcLow ? hc_act(row[n]) : n < kHcLow + kInj ? hc_inj(row[n]) : row[n];
+}
 // q4_hc_up_mix _Q8 for one row: hc_up_mix with the up linear over int8 tiles {K 320, N 10240} and their scales.
 inline void hc_up_mix_q8(const float* down_f32, bool inject, const int8_t* up, const uint16_t* sc, const uint16_t* xn,
                          uint16_t* x, float* inj) {

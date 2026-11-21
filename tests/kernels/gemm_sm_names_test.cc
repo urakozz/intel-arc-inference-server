@@ -100,6 +100,15 @@ int main(int argc, char** argv) {
            std::string("gemm_sm_M4_K2048_N128_S1_L1_mg"));   // Ornith's a||b (M 2..4)
   CHECK_EQ(kernels::int8_linear_variant(kernels::LinearKind::SmallM, 2, 2048, 248320),
            std::string("gemm_sm_i8w_M2_K2048_N248320"));      // Ornith's head
+  // PERF-56: Ornith's rows at its wide lookup verify lists' 16 / 32 / 64 rows
+  CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 16, 2048, 12288, 1, 1),
+           std::string("gemm_sm_M16_K2048_N12288_S1_L1_mg"));
+  CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 64, 2048, 12288, 1, 1),
+           std::string("gemm_sm_wide_M64_K2048_N12288_S1_L1_mg_rc32_ah_u2_sb_pf1"));
+  CHECK_EQ(kernels::int8_linear_variant(kernels::LinearKind::SmallM, 16, 2048, 248320),
+           std::string("gemm_sm_i8w_M16_K2048_N248320"));
+  CHECK_EQ(kernels::int8_linear_variant(kernels::LinearKind::SmallM, 32, 2048, 248320),
+           std::string("gemm_sm_i8w_M32_K2048_N248320_g256"));
   CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 4, 3072, 1024, 2, 0),
            kernels::gemv_variant(4, 3072, 1024, 2, 0));        // an untuned shape
   CHECK_EQ(kernels::int8_linear_variant(kernels::LinearKind::Gemv, 8, 5120, 248320),

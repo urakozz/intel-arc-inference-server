@@ -297,11 +297,7 @@ KolibriPrefillScratch::KolibriPrefillScratch(l0::Context& ctx, const model::Koli
       w(ctx, l0::MemKind::Device, prefill_sizes(d).w),
       desc(d) {}
 
-size_t KolibriPrefillScratch::bytes() const {
-  return ids.size() + resid.size() + x.size() + a.size() + mo.size() + partials.size() + slab.size() + sumsq_a.size() +
-         sumsq_r.size() + attn_q.size() + attn_out.size() + logits.size() + routes.size() + hdr.size() + tiles.size() +
-         row_tok.size() + pair_row.size() + xg.size() + h.size() + w.size();
-}
+size_t KolibriPrefillScratch::bytes() const { return gs::buffer_bytes<l0::Mem, PrefillSizes>(*this); }
 
 bool prefill_attn_eager() { return kolibri_attn() == KolAttn::Eager; }   // one parser, kolibri_sizes.cc
 

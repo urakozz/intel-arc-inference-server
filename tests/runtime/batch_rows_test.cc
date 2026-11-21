@@ -91,6 +91,21 @@ void check_rules() {
   CHECK(throws([&] { runtime::check_rows(r, lay); }));
 }
 
+// Spec 31: a KV page pool's sequences - every one at the per-request cap. A row's base is its sequence's region of
+// the page table (kv_pages(cap) entries a sequence, whole pages); a row may sit anywhere below the cap, never at it.
+void check_pool_layout() {
+  const uint32_t cap = 36864 + 1000;   // 19 pages
+  BatchLayout lay;
+  for (int q = 0; q < 4; ++q) lay.slots.push_back({cap, true});
+  CHECK_EQ(lay.kv_base(1), 19u * runtime::kKvPage);
+  CHECK_EQ(lay.kv_base(3), 3u * 19 * runtime::kKvPage);
+  CHECK_EQ(lay.total(), 4u * 19 * runtime::kKvPage);   // the table's entries x kKvPage
+  const runtime::RowTable t = runtime::make_rows(lay, {{0, cap - 4, 4, 0, {4, 5, 6, 7}}, {3, 40, 4, 12, {12, 13, 14, 15}}});
+  CHECK_EQ(t[4].kv_base, 3u * 19 * runtime::kKvPage);
+  CHECK(throws([&] { runtime::make_rows(lay, {{2, cap - 1, 2, 8, {8, 9}}}); }));   // a row at the cap
+  std::printf("pool layout: 4 sequences of %u, bases a table region of 19 pages each\n", cap);
+}
+
 double gb(size_t b) { return double(b) / kGB; }
 
 void print(const char* name, const runtime::BatchMemory& m) {
@@ -146,6 +161,7 @@ void check_memory() {
 int main() {
   check_device_layout();
   check_rules();
+  check_pool_layout();
   check_memory();
   std::printf("batch_rows_test OK\n");
   return 0;

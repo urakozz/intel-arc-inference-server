@@ -573,17 +573,18 @@ std::vector<uint8_t> Qwen4ExpEngine::read_layer_state(uint32_t layer) {
 }
 
 MemoryComponents Qwen4ExpEngine::memory_use(uint32_t dev) const {
+  // Spec 39: every allocation of the engine is in a paired buffers struct or says why not.
+  static_assert(gs::buffers_problem<l0::Mem, Qwen4ExpEngine>().empty(), gs::buffers_problem<l0::Mem, Qwen4ExpEngine>());
   const loader::Q4DevicePart& P = model_.parts.at(dev);
   const Qwen4ExpBuffers& b = st(dev).buffers;
   MemoryComponents c;
   c.model = P.bytes + P.rope_bytes;
-  c.kv = b.kv.size() + b.idx_keys.size() + b.idx_tail.size();
-  c.decode_state = b.control.size() + b.gdn_state.size() + b.conv_ring.size() + b.ple.size() + b.scratch_bytes() +
-                   (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0) + b.mtp_bytes();
+  c.kv = b.bytes(gs::Group::Kv);
+  c.decode_state = b.bytes(gs::Group::State) + b.bytes(gs::Group::Scratch) + (taps_[dev] ? taps_[dev]->size() : 0) +
+                   (link_ ? link_->bytes(dev) : 0);
   if (mtp_ && dev + 1 == st_.size()) {   // spec 21-QFN-v1e: the head's KV and keys in kv, the rest in decode state (plan())
-    const size_t kv = mtp_->kv.size() + mtp_->idx_keys.size() + mtp_->idx_tail.size();
-    c.kv += kv;
-    c.decode_state += mtp_->bytes() - kv;
+    c.kv += mtp_->bytes(gs::Group::Kv);
+    c.decode_state += mtp_->bytes(gs::Group::State) + mtp_->bytes(gs::Group::Scratch);
   }
   c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 21-QFN-v1d: after prepare_prefill
   return c;
@@ -602,34 +603,11 @@ void Qwen4ExpEngine::settle_all(const char* what) {
 }
 
 uint8_t* Qwen4ExpEngine::snap_ptr(const SnapRun& r) const {
-  const Qwen4ExpBuffers& b = st(r.device).buffers;
-  const l0::Mem* m = nullptr;
-  const bool head = r.tensor == SnapTensor::MtpKv || r.tensor == SnapTensor::MtpIdxKeys ||
-                    r.tensor == SnapTensor::MtpIdxTail || r.tensor == SnapTensor::MtpHidden;
-  if (head && (!mtp_ || r.device + 1 != st_.size()))
-    throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpEngine: a ") + snap_tensor_name(r.tensor) +
-                           " snapshot run without the MTP head (or off the last device)");
-  switch (r.tensor) {
-    case SnapTensor::Kv: m = &b.kv; break;
-    case SnapTensor::IdxKeys: m = &b.idx_keys; break;
-    case SnapTensor::IdxTail: m = &b.idx_tail; break;
-    case SnapTensor::GdnState: {
-      // gdn_state, always (PERF-51: the rows a commit left are replayed into it first - save_state flushes).
-      m = &b.gdn_state;
-      break;
-    }
-    case SnapTensor::ConvRing: m = &b.conv_ring; break;
-    case SnapTensor::PleIds:
-    case SnapTensor::PleRing: m = &b.ple; break;
-    case SnapTensor::MtpKv: m = &mtp_->kv; break;
-    case SnapTensor::MtpIdxKeys: m = &mtp_->idx_keys; break;
-    case SnapTensor::MtpIdxTail: m = &mtp_->idx_tail; break;
-    case SnapTensor::MtpHidden: m = &mtp_->hh; break;   // row 0: R_{pos-1}
-  }
-  if (r.offset + r.bytes > m->size())
-    throw std::logic_error(std::string("runtime::qwen4exp::Qwen4ExpEngine: a ") + snap_tensor_name(r.tensor) +
-                           " snapshot run past its allocation (" + std::to_string(r.offset + r.bytes) + " > " +
-                           std::to_string(m->size()) + ")");
+  // GdnState is gdn_state, always (PERF-51: the rows a commit left are replayed into it first - save_state flushes);
+  // MtpHidden is hh (row 0: R_{pos-1}).
+  const l0::Mem* m = snap_mem(st(r.device).buffers, r.device + 1 == st_.size() ? mtp_.get() : nullptr, r.tensor);
+  contract_assert(m != nullptr);                       // the head's runs: with it, on the last device
+  contract_assert(r.offset + r.bytes <= m->size());   // a snapshot run within its allocation
   return static_cast<uint8_t*>(m->ptr()) + r.offset;
 }
 
@@ -659,9 +637,6 @@ void Qwen4ExpEngine::save_state(void* host) {
 }
 
 void Qwen4ExpEngine::load_state(const void* host, uint32_t p) {
-  if (p > max_len_)
-    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::load_state: pos " + std::to_string(p) +
-                             " exceeds max_len " + std::to_string(max_len_));
   if (broken_) reset();   // a failed hand-off: the restore below rewrites what the session reads
   settle_all("load_state");
   // The GDN state goes into gdn_state with no committed rows over it (PERF-51).
@@ -824,9 +799,6 @@ void Qwen4ExpEngine::commit(uint32_t j, uint32_t next_token) {
     throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::commit: j " + std::to_string(j) +
                              (verify_k_ == kNoVerify ? " with no verify() pending"
                                                      : " exceeds the last verify's k " + std::to_string(verify_k_)));
-  if (next_token >= model_.desc.vocab)
-    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::commit: next_token " + std::to_string(next_token) +
-                             " is outside the vocabulary");
   // PERF-51: rows 0..j are what the next launch replays into the GDN state - they sit in the parity the verify wrote,
   // the other one (gdn_step.cl, DEFERRED). Row j's pre-mixer H (hh row 1 + j) is the next iteration's R_{pos-1}.
   for (auto& s : st_) {

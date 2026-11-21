@@ -83,6 +83,19 @@ int main(int argc, char** argv) {
   CHECK(runtime::verify_attn_kind(16, 1, false, 24, 4) == VerifyAttn::Dpas);   // open-work 28: DPAS from the first key
   CHECK(runtime::verify_attn_kind(64, 1, false, 24, 4) == VerifyAttn::Dpas);   // spec 32: the deep lists, the same
   CHECK(runtime::verify_attn_kind(16, 32768, true, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
+  // PERF-56: Ornith's 16 / 2 heads bind DPAS in its wide lists only (bf16 KV; row chunks of 8), from the first key;
+  // its 2-4-row lists keep v2 (above). Where CMake built them (B70_VERIFY_M8), every width is on a line.
+  for (uint32_t M : {16u, 32u, 64u}) {
+    for (uint32_t keys : depths) {
+      CHECK(runtime::verify_attn_kind(M, keys, false, 16, 2) == VerifyAttn::Dpas);
+      CHECK(runtime::verify_attn_kind(M, keys, true, 16, 2, VerifyAttnForce::Dpas) == VerifyAttn::V2);
+      CHECK(runtime::verify_attn_kind(M, keys, false, 16, 2, VerifyAttnForce::V2) == VerifyAttn::V2);
+    }
+    CHECK(runtime::verify_attn_deep_from(M, false, 16, 2) == runtime::kDpasNever);
+    if (built.count(kernels::attn_verify_dpas_variant(16, 32, false, 16, 2)))
+      CHECK(built.count(kernels::attn_verify_dpas_variant(M, 32, false, 16, 2)) == 1);
+  }
+  CHECK(kernels::attn_verify_chunk_rows(16, 2) == 8 && kernels::attn_verify_chunk_rows(24, 4) == 16);
   std::printf("verify_attn_test: PASS (%zu table rows, %zu built names)\n", rows, built.size());
   return 0;
 }

@@ -13,7 +13,9 @@
 #ifndef CTRL_RC
 #error "gdn_ring_commit: CTRL_RC must be defined (Control::ring_commit)"
 #endif
-#define CONV_ROWS 10240   /* Qwen3.8's GDN conv channels (gdn_step.cl) */
+#ifndef CONV_ROWS
+#define CONV_ROWS 10240   /* Qwen3.8's GDN conv channels (gdn_step.cl); PERF-56: Ornith's 8192 by define */
+#endif
 #define RING 32           /* runtime::PersistentDims::kConvRing */
 #define XROWS 48          /* kernels::kGdnConvXRows */
 

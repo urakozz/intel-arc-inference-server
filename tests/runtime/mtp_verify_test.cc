@@ -307,6 +307,52 @@ bool w16(Ctx& c, const Snap& s0, const std::vector<uint32_t>& prompt, const std:
   return ok;
 }
 
+// PERF-56 probe for (d): every buffer a plain step may read that a restore does not write, by name - the decode
+// scratch, the head's buffers and the whole KV (main and head, rows past pos too) - as hashes.
+using BufHashes = std::vector<std::pair<std::string, uint64_t>>;
+BufHashes buf_hashes(Ctx& c) {
+  BufHashes out;
+  std::vector<uint8_t> h;
+  const auto add = [&](const char* name, const l0::Mem* m) {
+    if (!m || m->size() == 0) return;
+    h.resize(m->size());
+    c.imm.copy(h.data(), m->ptr(), h.size());
+    out.emplace_back(name, fnv(h.data(), h.size()));
+  };
+  runtime::DecodeBuffers& b = c.e.buffers();
+  add("control", &b.control);
+  add("kv_k", &b.kv_k), add("kv_v", &b.kv_v);
+  add("resid", &b.resid), add("x", &b.x), add("partials", &b.partials), add("ab_out", &b.ab_out);
+  add("norm_sumsq", &b.norm_sumsq), add("gdn_o", &b.gdn_o), add("attn_q", &b.attn_q), add("attn_gate", &b.attn_gate);
+  add("attn_part", &b.attn_part), add("attn_out", &b.attn_out), add("logits", &b.logits);
+  add("argmax_part", &b.argmax_part), add("moe", b.moe);
+  if (runtime::MtpBuffers* m = c.e.mtp_buffers()) {
+    add("mtp.hctl", &m->hctl), add("mtp.gdn_spec", &m->gdn_spec), add("mtp.kv_k", &m->kv_k), add("mtp.kv_v", &m->kv_v);
+    add("mtp.hh", &m->hh), add("mtp.dh", &m->dh), add("mtp.logits", &m->logits);
+  }
+  return out;
+}
+// The scratch a restore leaves as it was, zeroed: the decode scratch, the head's hidden rows past row 0 (row 0 is the
+// snapshot's), its speculative GDN slots, draft hidden and logits.
+void zero_scratch(Ctx& c) {
+  runtime::DecodeBuffers& b = c.e.buffers();
+  for (l0::Mem* m : {&b.resid, &b.x, &b.partials, &b.ab_out, &b.norm_sumsq, &b.gdn_o, &b.attn_q, &b.attn_gate,
+                     &b.attn_part, &b.attn_out, &b.logits, &b.argmax_part, b.moe})
+    if (m && m->size()) c.imm.fill(m->ptr(), 0u, m->size());
+  if (runtime::MtpBuffers* m = c.e.mtp_buffers()) {
+    const size_t row = size_t(c.e.model().desc->hidden) * 2;
+    c.imm.fill(static_cast<uint8_t*>(m->hh.ptr()) + row, 0u, m->hh.size() - row);
+    for (l0::Mem* x : {&m->gdn_spec, &m->dh, &m->logits}) c.imm.fill(x->ptr(), 0u, x->size());
+  }
+}
+// The whole KV zeroed (main and head; the restore after it writes rows [0, pos) back).
+void zero_kv(Ctx& c) {
+  runtime::DecodeBuffers& b = c.e.buffers();
+  for (l0::Mem* m : {&b.kv_k, &b.kv_v}) c.imm.fill(m->ptr(), 0u, m->size());
+  if (runtime::MtpBuffers* m = c.e.mtp_buffers())
+    for (l0::Mem* x : {&m->kv_k, &m->kv_v}) c.imm.fill(x->ptr(), 0u, x->size());
+}
+
 // W32 / W64 (header): the deep list of W rows against the 16-row list from the same state.
 bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
   constexpr uint32_t K16 = runtime::Engine::kWideK;
@@ -391,7 +437,9 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
     const auto to_j = [&](bool deep_arm) {   // pos = S0 + j + 1, the pending id g[j + 1]
       if (deep_arm) {
         deep(K);
-        c.e.commit(j, c.e.verify_ids()[j]);
+        // g[j + 1], as the 16-row arm commits: row j's own argmax is the 16-row list's (a), and on Ornith that may
+        // differ from the plain step's at a near-tie (W16 rows are judged, not bitwise, against plain steps there)
+        c.e.commit(j, g[j + 1]);
         return;
       }
       s0.restore(c);   // the 16-row lists over the same inputs, as (a): 15 rows a verify committed, the last j % 16
@@ -405,11 +453,19 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
     // What a snapshot carries that the session reads again: the GDN state, the conv ring's window (the 3 positions
     // before pos; a deep commit copies only those of its rows 16.. into the ring, so older slots may hold other
     // rows than plain steps leave - never read) and the head's hidden row.
-    const size_t ring_row = size_t(10240) * 2, layers = kGdnBytes / (size_t(48) * 128 * 128 * 4);
-    const auto paths = [&](bool deep_arm, std::vector<uint8_t>& state) {
+    const model::ModelDesc& md = *c.e.model().desc;   // PERF-56: Ornith's widths too
+    const size_t ring_row = size_t(md.gdn_conv_dim()) * 2, layers = md.gdn_layers;
+    // PERF-56: the KV rows [0, pos) too, and each half's ids on its own line's verdict
+    struct Probe {
+      BufHashes bufs;                           // after the restore, before the 64 ids
+      std::vector<uint32_t> zs, zk;             // the 64 ids again: scratch zeroed / KV past pos zeroed, after a restore
+    };
+    const auto paths = [&](bool deep_arm, std::vector<uint8_t>& state, std::vector<uint8_t>& kv,
+                           std::vector<uint32_t>& after, Probe& pr) {
       to_j(deep_arm);
       const Snap s(c);
       const uint8_t* h = s.st.as<uint8_t>();
+      kv.assign(s.kv.as<uint8_t>(), s.kv.as<uint8_t>() + c.e.kv_bytes(s.pos));
       state.assign(h, h + kGdnBytes);
       for (size_t l = 0; l < layers; ++l)
         for (uint32_t t = 1; t <= 3; ++t) {
@@ -419,21 +475,45 @@ bool w_deep(Ctx& c, const Snap& s0, uint32_t W) {
       state.insert(state.end(), h + kGdnBytes + layers * 32 * ring_row, h + c.e.state_bytes());
       c.e.generate(8);
       s.restore(c);
+      pr.bufs = buf_hashes(c);
       std::vector<uint32_t> ids = c.e.generate(64);
+      s.restore(c);
+      zero_scratch(c);
+      pr.zs = c.e.generate(64);
+      zero_kv(c);
+      s.restore(c);
+      pr.zk = c.e.generate(64);
       to_j(deep_arm);   // and straight on into a prefill (the deferred rows flushed by it, not by a snapshot)
       std::vector<uint32_t> f{c.ctl->cur_token[0]};
       f.insert(f.end(), fill.begin(), fill.end() - 1);
       c.e.prefill(f);
-      const std::vector<uint32_t> after = c.e.generate(64);
-      ids.insert(ids.end(), after.begin(), after.end());
+      after = c.e.generate(64);
       return ids;
     };
-    std::vector<uint8_t> st_deep, st_plain;
-    const std::vector<uint32_t> d_ids = paths(true, st_deep), p_ids = paths(false, st_plain);
-    const bool st_ok = st_deep == st_plain, ids_ok = d_ids == p_ids;
-    std::printf("  W%u (d) j=%u: snapshot (state, ring window, hidden row) %s the 16-row lists'; after load and after a 64-id prefill, 2 x 64 ids %s\n", W,
-                j, st_ok ? "bitwise" : "DIFFERS from", ids_ok ? "bitwise the 16-row lists'" : "DIFFER");
-    ok &= st_ok && ids_ok;
+    std::vector<uint8_t> st_deep, st_plain, kv_deep, kv_plain;
+    std::vector<uint32_t> d_after, p_after;
+    Probe d_pr, p_pr;
+    const std::vector<uint32_t> d_ids = paths(true, st_deep, kv_deep, d_after, d_pr),
+                                p_ids = paths(false, st_plain, kv_plain, p_after, p_pr);
+    const bool st_ok = st_deep == st_plain, kv_ok = kv_deep == kv_plain, load_ok = d_ids == p_ids,
+               pf_ok = d_after == p_after;
+    std::printf("  W%u (d) j=%u: snapshot (state, ring window, hidden row) %s the 16-row lists', KV rows [0, pos) %s; "
+                "64 ids after load %s, 64 ids after a 64-id prefill %s\n",
+                W, j, st_ok ? "bitwise" : "DIFFERS from", kv_ok ? "bitwise" : "DIFFER", load_ok ? "bitwise" : "DIFFER",
+                pf_ok ? "bitwise" : "DIFFER");
+    ok &= st_ok && kv_ok && load_ok && pf_ok;
+    if (!load_ok || !pf_ok) {   // PERF-56 probe: what the two sessions still differ in, and which zeroing aligns them
+      std::string differ;
+      for (size_t i = 0; i < d_pr.bufs.size(); ++i)
+        if (d_pr.bufs[i].second != p_pr.bufs[i].second) differ += " " + d_pr.bufs[i].first;
+      size_t first = 0;
+      while (first < d_ids.size() && d_ids[first] == p_ids[first]) ++first;
+      std::printf("  W%u (d) probe: after load the buffers differ in%s; the first id after load differs at step %zu "
+                  "(%u / %u); after load with the scratch zeroed the 64 ids %s, with the KV past pos zeroed %s\n",
+                  W, differ.empty() ? " none" : differ.c_str(), first, first < d_ids.size() ? d_ids[first] : 0u,
+                  first < p_ids.size() ? p_ids[first] : 0u, d_pr.zs == p_pr.zs ? "bitwise" : "DIFFER",
+                  d_pr.zk == p_pr.zk ? "bitwise" : "DIFFER");
+    }
   }
   return ok;
 }
@@ -532,23 +612,25 @@ int main(int argc, char** argv) {
       e.recapture_verify(runtime::attn_forced(v == "v2" ? runtime::VerifyAttnForce::V2 : runtime::VerifyAttnForce::Dpas));
     std::printf("verify attention: %s (spec 28c)\n", v.c_str());
   }
+  const model::ModelDesc& md = *e.model().desc;
   if (argc > 7 && std::string(argv[4]) == "trace") {   // spec 28c diagnostic
-    kGdnBytes = e.model().desc->gdn_layers * 48 * 128 * 128 * 4;
+    kGdnBytes = size_t(md.gdn_layers) * md.gdn_v_heads * 128 * 128 * 4;
     Ctx c{ctx, e, e.buffers().control.as<runtime::Control>(), l0::CmdList::immediate(ctx)};
     return trace(c, golden::read_ids(argv[5]), uint32_t(std::stoul(argv[6])), uint32_t(std::stoul(argv[7])));
   }
-  const size_t gdn_layers = e.model().desc->gdn_layers, fa_layers = e.model().desc->fa_layers;
-  kGdnBytes = gdn_layers * 48 * 128 * 128 * 4;
+  const size_t gdn_layers = md.gdn_layers, fa_layers = md.fa_layers;
+  kGdnBytes = gdn_layers * md.gdn_v_heads * 128 * 128 * 4;
   Ctx c{ctx, e, e.buffers().control.as<runtime::Control>(), l0::CmdList::immediate(ctx)};
   bool ok = true;
 
   // Sizes with the head (Review Focus 4): +hh0 in the state, a 17th KV layer.
   // Qwen3.8: 166723584 + 10240 and 134217728 / 16 x 17 (the gdn_state + conv ring of
-  // 48 GDN layers; 2048 positions of 16 FA layers' K and V).
-  CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 32 * 10240 * 2 + 10240);   // the ring 32 deep (open-work 28)
-  // Spec 12b: 4 x 256 x 2 B per layer and position at bf16, 4 x (256 + 2) B at int8.
-  CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *
-                                 (e.kv_cache() == runtime::KvCache::Int8 ? 4 * (256 + 2) : 4 * 256 * 2));
+  // 48 GDN layers; 2048 positions of 16 FA layers' K and V). PERF-56: at the loaded model's widths (Ornith's wide and
+  // deep lists run here too).
+  CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 32 * md.gdn_conv_dim() * 2 + md.hidden * 2);   // the ring 32 deep
+  // Spec 12b: kv heads x 256 x 2 B per layer and position at bf16, kv heads x (256 + 2) B at int8.
+  CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) * md.fa_kv_heads *
+                                 (e.kv_cache() == runtime::KvCache::Int8 ? (256 + 2) : 256 * 2));
 
   if (argc > 4 && std::string(argv[4]) == "deep") {   // W32 / W64 (header)
     CHECK(e.deep_built(runtime::Engine::kDeepK32) && e.deep_built(runtime::Engine::kDeepK64));
@@ -570,7 +652,7 @@ int main(int argc, char** argv) {
       e.prefill(head(ids, n));
       std::printf("W16 at n = %u\n", n);
       const Snap s0(c);
-      ok &= w16(c, s0, head(ids, n), "mtp_verify_qwen3.8_wide_int8_n" + std::to_string(n));
+      ok &= w16(c, s0, head(ids, n), "mtp_verify_" + md.name + "_wide_int8_n" + std::to_string(n));
     }
     std::printf("W16: %s\n", ok ? "PASS" : "FAIL");
     return spec_judge::exit_code(ok, "mtp_verify_wide_test");

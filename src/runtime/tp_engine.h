@@ -281,7 +281,7 @@ class TpEngine {
   std::array<l0::CmdList*, model::kTpSize> pending_projection_{};
   std::array<l0::CmdList*, model::kTpSize> pending_tail_{};
   BlockHook block_hook_;
-  std::unique_ptr<l0::Mem> host_rows_;
+  [[=gs::Outside("pinned host memory: outside the device plan")]] std::unique_ptr<l0::Mem> host_rows_;
   // Spec 17c: the prefill half (allocated by prepare_prefill; deleted through the pointer prefill code set, so this
   // archive needs none of it), its chunk cap and each card's device bytes (memory_use). Declared after cards_: it
   // goes first.

@@ -643,8 +643,11 @@ class Capture {
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
       if (sb_.pages) k.arg_ptr(5, sb_.pages);   // plan 19v3b Task 0
-      if (deep())   // spec 32: the deep lists' row chunks of 16, a block's chunks side by side (grid dimension 0)
-        launch(k, kCapM / 16, ad.fa_kv_heads, T);
+      // spec 32: the deep lists' row chunks of 16, a block's chunks side by side (grid dimension 0); PERF-56: Ornith's
+      // wide lists' chunks of 8, its 16-row list too
+      const uint32_t chunk = kernels::attn_verify_chunk_rows(ad.fa_q_heads, ad.fa_kv_heads);
+      if (vattn_ == VerifyAttn::Dpas && kCapM > chunk)
+        launch(k, kCapM / chunk, ad.fa_kv_heads, T);
       else
         launch(k, ad.fa_kv_heads, T, 1);
     }
@@ -710,7 +713,8 @@ class Capture {
         // Spec 32 (gdn_step.cl, ROW0): kCapM / 16 links of the 16-row build, link r0 bound at the list's row r0 of the
         // partials, a||b and gdn_o; the chain's scratch state and conv rows are this layer's slices.
         for (uint32_t r0 = 0; r0 < kCapM; r0 += 16) {
-          l0::Kernel& k = kernel(kernels::gdn_step_chain_variant(r0), "gdn_step", kWgGdn);
+          l0::Kernel& k = kernel(kernels::gdn_step_chain_variant(r0, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads),
+                                 "gdn_step", kWgGdn);
           k.arg_ptr(0, ctrl());
           k.arg_ptr(1, static_cast<uint8_t*>(b_.partials.ptr()) + size_t(r0) * d_.shape(LinearId::QkvZ).N * kFp32);
           k.arg_ptr(2, static_cast<uint8_t*>(b_.ab_out.ptr()) + size_t(r0) * d_.shape(LinearId::AB).N * kFp32);
@@ -720,7 +724,8 @@ class Capture {
           k.arg_ptr(6, static_cast<uint8_t*>(b_.gdn_o.ptr()) + size_t(r0) * d_.gdn_value_dim() * kFp32);
           k.arg_ptr(7, static_cast<uint8_t*>(pend) + size_t(g) * pend_layer);
           k.arg_ptr(8, static_cast<uint8_t*>(sb_.gdn_x) + size_t(g) * gdn_state_stride());
-          k.arg_ptr(9, static_cast<uint8_t*>(sb_.conv_x) + size_t(g) * kernels::kGdnConvXLayerBytes);
+          k.arg_ptr(9, static_cast<uint8_t*>(sb_.conv_x) +
+                           size_t(g) * kernels::gdn_conv_x_layer_bytes(d_.gdn_conv_dim()));
           launch(k, d_.gdn_v_heads, kGdnStateChunks);
         }
         return;

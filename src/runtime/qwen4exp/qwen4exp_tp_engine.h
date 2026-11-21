@@ -134,7 +134,8 @@ class Qwen4ExpTpEngine {
   size_t kv_bytes(uint32_t n_pos) const;
   KvCache kv_cache() const { return KvCache::Bf16; }
   void save_state(void* host);
-  void load_state(const void* host, uint32_t pos);
+  void load_state(const void* host, uint32_t pos)
+    pre(pos <= max_len_);
   void save_kv(uint32_t begin, uint32_t end, void* host);
   void load_kv(uint32_t begin, uint32_t end, const void* host);
   // The last step's logits, both halves (rows 1); pinned host rows for the sampled path.
@@ -152,7 +153,8 @@ class Qwen4ExpTpEngine {
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   void verify(uint32_t k);
   const uint32_t* verify_ids() const;
-  void commit(uint32_t j, uint32_t next_token);
+  void commit(uint32_t j, uint32_t next_token)
+    pre(next_token < model_.desc.vocab);
   void set_draft_input(uint32_t i, uint32_t id);
   void read_draft_logits_into(float* host, uint32_t i);
 
@@ -184,7 +186,7 @@ class Qwen4ExpTpEngine {
   std::unique_ptr<l0::SyncEvent> draft_ev_;
   static constexpr uint32_t kNoVerify = ~0u;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
-  std::unique_ptr<l0::Mem> host_rows_;
+  [[=gs::Outside("pinned host memory: outside the device plan")]] std::unique_ptr<l0::Mem> host_rows_;
   // One one-card snapshot run's pieces on the cards: (card, device pointer, host offset within the run, bytes).
   struct Piece {
     uint32_t card;

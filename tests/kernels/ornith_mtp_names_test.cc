@@ -72,6 +72,51 @@ void verify_names(const model::ModelDesc& d, unsigned M, bool int8, std::set<std
   out.insert(kernels::attn_prep_s1_variant(M, q, kv));
 }
 
+// PERF-56: the wide lookup verify lists at M = 16 / 32 / 64 rows (one card, bf16 KV, the int8 head): the M-row list as
+// verify_names' but gemm_sm only, the deferred GDN step (past 16 rows its chain links and the engine's ring copy), the
+// DPAS attention in row chunks with attn_v2's reduce, and the ROWG builds of every bf16 GEMV (a||b, the router, the
+// head's fc and q||k||v); the argmax pair writes the wide ids (Control::wide_out / deep_out).
+void wide_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& out) {
+  const unsigned H = d.hidden, k = d.gdn_k_heads, v = d.gdn_v_heads, q = d.fa_q_heads, kv = d.fa_kv_heads;
+  const model::MoeDesc& md = d.moe;
+  const auto rowg = [](unsigned K, unsigned N) {
+    return kernels::gemv_bf16_variant(8, K, N, kernels::gemv_bf16_tiling(N), true);
+  };
+  out.insert(kernels::embed_gather_variant(M, H));
+  out.insert(kernels::prep_res_fold_variant(M, H, 0, kG));
+  out.insert(kernels::prep_res_fold_variant(M, H, d.shape(model::LinearId::OutProj).S, kG));
+  out.insert(kernels::prep_res_fold_variant(M, H, d.shape(model::LinearId::OProj).S, kG));
+  out.insert(kernels::prep_norm_finish_variant(M, H, kG, kG));
+  for (model::LinearId id : {model::LinearId::QkvZ, model::LinearId::OutProj, model::LinearId::Qkv,
+                             model::LinearId::OProj}) {
+    const model::GemvShape& s = d.shape(id);
+    out.insert(kernels::int4_linear_variant(kernels::LinearKind::SmallM, M, s.K, s.N, s.S, s.layout));
+  }
+  out.insert(rowg(H, d.shape(model::LinearId::AB).N));
+  const model::GemvShape& ab4 = d.ab(model::WeightKind::Int4).shape;
+  out.insert(kernels::int4_linear_variant(kernels::LinearKind::SmallM, M, ab4.K, ab4.N, ab4.S, ab4.layout));
+  if (M == 16) {
+    out.insert(kernels::gdn_step_defer_variant(16, d.gdn_layers, k, v));
+  } else {
+    for (unsigned r0 = 0; r0 < M; r0 += 16) out.insert(kernels::gdn_step_chain_variant(r0, d.gdn_layers, k, v));
+    out.insert(kernels::gdn_ring_commit_variant(d.gdn_conv_dim()));
+  }
+  out.insert(kernels::prep_gated_head_variant(M, k, v));
+  out.insert(kernels::attn_prep_variant(M, q, kv));
+  out.insert(kernels::attn_v2_variant(M, kT, q, kv));
+  out.insert(kernels::attn_verify_dpas_variant(M, kT, false, q, kv));
+  out.insert(rowg(H, md.router_n()));
+  out.insert(kernels::moe_variant(M, md.experts, md.top_k, H, md.expert_intermediate));
+  out.insert(kernels::int8_linear_variant(kernels::LinearKind::SmallM, M, H, model::Qwen35::kVocab));
+  out.insert(kernels::argmax_stage1_variant(M, d.vocab_used));
+  out.insert(kernels::argmax_stage2_variant(M));
+  out.insert(kernels::prep_norm_finish_strided_variant(M, H, kG, kG, 2 * H));
+  out.insert(rowg(2 * H, H));                                             // fc
+  out.insert(kernels::prep_res_fold_zero_variant(M, H, kG));
+  out.insert(rowg(H, d.fa_qkv_n()));                                      // q||k||v
+  out.insert(kernels::attn_prep_s1_variant(M, q, kv));
+}
+
 // The draft list at M = 1 (capture.cc draft()): head_front, the attention pair, o, the
 // post norm (SP1), the MoE block on the head's weights, the final norm (SP0), the head.
 void draft_names(const model::ModelDesc& d, bool int8, unsigned nv, std::set<std::string>& out) {
@@ -134,6 +179,11 @@ int main(int argc, char** argv) {
     for (unsigned nv : kDraftVocab) draft_names(o, int8, nv, bound);
   }
   prefill_names(o, bound);
+  // PERF-56: where CMake built the wide lists (B70_VERIFY_M8)
+  const bool wide =
+      block.count(kernels::moe_variant(16, o.moe.experts, o.moe.top_k, o.hidden, o.moe.expert_intermediate)) != 0;
+  if (wide)
+    for (unsigned M : {16u, 32u, 64u}) wide_names(o, M, bound);
 
   int bad = 0;
   for (const std::string& n : bound)
@@ -160,6 +210,12 @@ int main(int argc, char** argv) {
   // Spec 15 §13: the int4 checkpoint's a||b and Qwen3.8's argmax (vocab_used 248077).
   CHECK(bound.count("gemv_M4_K2048_N128_S1_L1") && bound.count("gemv_bf16_M4_K2048_N128_C16_S16"));
   CHECK(bound.count("argmax_stage1_M3") && !bound.count("argmax_stage1_M3_V248070"));
+  if (wide) {   // PERF-56
+    CHECK(bound.count("attn_verify_dpas_M16_T32_Q16KV2") && bound.count("gdn_step_defer_M16_G30_GK16V32_R48"));
+    CHECK(bound.count("gemm_sm_wide_M32_K4096_N2048_S4_L0_mg_sw_pf2") &&
+          bound.count("gemm_sm_i8w_M64_K2048_N248320_g256"));
+    CHECK(bound.count("gdn_ring_commit_C8192") && bound.count("gemv_bf16_M8_K2048_N272_C16_S16_RG"));
+  }
   std::printf("ornith_mtp_names_test OK: %zu names bound by Ornith's MTP lists, %zu built by the "
               "15e block, %zu given\n",
               bound.size(), block.size(), all.size());

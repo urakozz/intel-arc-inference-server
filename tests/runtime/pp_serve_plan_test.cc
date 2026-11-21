@@ -167,6 +167,8 @@ void check_mtp_terms() {
           // The head's prefill rows and its two Control blocks (one per chunk in flight).
           const size_t mtp_pf =
               pf.prefill ? runtime::mtp_prefill_hidden_bytes(*d, runtime::PrefillScratchDims::kCDefault) + runtime::kPpPfDepth * sizeof(runtime::Control) : 0;
+          // Spec 39: MtpBuffers only - a stage makes none of Engine's deferred GDN rows or deep chain scratch, which
+          // MtpSizes' former `deep` term put here.
           CHECK_EQ(p1.decode_state, b1.decode_state + runtime::MtpDims::sizes(len, *d, dv, kv).total() + mtp_pf);
           // The head's slab: every backend's mixer linears hold it already (open-work 16 / 17).
           CHECK_EQ(p1.prefill_scratch, b1.prefill_scratch);

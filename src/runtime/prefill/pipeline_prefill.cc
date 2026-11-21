@@ -131,6 +131,33 @@ class Releaser {
 };
 
 // One device's prefill half.
+// Spec 39: the pipeline prefill's own allocations, by the memory line's component (memory() below) - each device's
+// Control blocks and stamps (decode state) and its block-end shadows of the GDN state and conv ring (prefill scratch);
+// device 1's hand-off landing and the head's prefill rows and Control blocks (decode state), the head's shadows and the
+// drafter's tap staging (prefill scratch); and device 0's ids (host memory, outside the device plan). Every one is
+// written for a chunk before it is read; the landing is zeroed with the events.
+struct PfDeviceDecodeSizes {
+  [[=gs::scratch]] size_t ctl = 0;
+  [[=gs::scratch]] size_t ts = 0;
+};
+struct PfDeviceShadowSizes {
+  [[=gs::scratch]] size_t shadow_gdn = 0;   // both chunks in flight: kDepth allocations
+  [[=gs::scratch]] size_t shadow_conv = 0;
+};
+struct PpPfDecodeSizes {
+  [[=gs::scratch, =gs::zero_on_reset]] size_t landing = 0;
+  [[=gs::scratch]] size_t mtp_hid = 0;
+  [[=gs::scratch]] size_t mtp_ctl = 0;
+};
+struct PpPfShadowSizes {
+  [[=gs::scratch]] size_t shadow_hh = 0;
+  [[=gs::scratch]] size_t shadow_head_kv = 0;
+  [[=gs::scratch]] size_t taps = 0;
+};
+struct PpPfHostSizes {
+  [[=gs::scratch]] size_t ids = 0;
+};
+
 struct PfDevice {
   PfDevice(l0::Context& c, const model::ModelDesc& d, uint32_t max_len, uint32_t chunk_cap)
       : ctx(c),
@@ -161,13 +188,9 @@ struct PfDevice {
   std::array<std::unique_ptr<l0::Mem>, kDepth> shadow_gdn, shadow_conv;
   Control* control(uint32_t j) { return ctl.as<Control>() + j % kDepth; }
   uint64_t* stamps(uint32_t j) { return ts.as<uint64_t>() + size_t(j % kDepth) * 2; }
-  size_t shadow_bytes() const {
-    size_t b = 0;
-    for (uint32_t s = 0; s < kDepth; ++s)
-      b += (shadow_gdn[s] ? shadow_gdn[s]->size() : 0) + (shadow_conv[s] ? shadow_conv[s]->size() : 0);
-    return b;
-  }
 };
+static_assert(gs::buffers_problem<l0::Mem, PfDevice, PfDeviceDecodeSizes, PfDeviceShadowSizes>().empty(),
+              gs::buffers_problem<l0::Mem, PfDevice, PfDeviceDecodeSizes, PfDeviceShadowSizes>());
 
 struct PipelinePrefill final : PipelinePrefillBase {
   PipelinePrefill(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d, uint32_t max_len,
@@ -212,7 +235,8 @@ struct PipelinePrefill final : PipelinePrefillBase {
     return drain(timeout_ms);
   }
   void zero() override {
-    imm1.fill(landing.ptr(), 0u, landing.size());
+    gs::zero<l0::Mem, PpPfDecodeSizes, PpPfShadowSizes, PpPfHostSizes>(
+        *this, [&](l0::Mem& m) { imm1.fill(m.ptr(), 0u, m.size()); });   // the landing
     for (auto& e : ready) e->host_reset();
     for (auto& e : hold) e->host_reset();
     for (auto& d : dev)
@@ -222,11 +246,13 @@ struct PipelinePrefill final : PipelinePrefillBase {
   MemoryComponents memory(uint32_t d) const override {
     const PfDevice& p = *dev.at(d);
     MemoryComponents c;
-    c.prefill_scratch = p.scratch.bytes() + p.scratch.lazy_bytes() + p.shadow_bytes() +
-                        (d == kPpDevices - 1 ? shadow_hh_bytes() + taps_bytes() : 0);
+    // Spec 39: device 1 holds this struct's own allocations (but ids, device 0's host memory).
+    const bool last = d == kPpDevices - 1;
+    c.prefill_scratch = p.scratch.bytes() + p.scratch.lazy_bytes() + gs::buffer_bytes<l0::Mem, PfDeviceShadowSizes>(p) +
+                        (last ? gs::buffer_bytes<l0::Mem, PpPfShadowSizes>(*this) : 0);
     c.int8 = p.int8 ? p.int8->bytes() : 0;
-    c.decode_state = p.ctl.size() + p.ts.size() +
-                     (d == 0 ? 0 : landing.size()) + mtp_bytes(d);
+    c.decode_state = gs::buffer_bytes<l0::Mem, PfDeviceDecodeSizes>(p) +
+                     (last ? gs::buffer_bytes<l0::Mem, PpPfDecodeSizes>(*this) : 0);
     return c;
   }
 
@@ -278,11 +304,6 @@ struct PipelinePrefill final : PipelinePrefillBase {
     for (auto& m : taps)
       if (!m) m = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, bytes);
   }
-  size_t taps_bytes() const {
-    size_t b = 0;
-    for (const auto& m : taps) b += m ? m->size() : 0;
-    return b;
-  }
   void ensure_mtp(l0::Context& d1, const model::ModelDesc& d) {
     if (mtp_hid) return;
     mtp_hid = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, mtp_prefill_hidden_bytes(d, cap));
@@ -290,19 +311,11 @@ struct PipelinePrefill final : PipelinePrefillBase {
     std::memset(mtp_ctl->ptr(), 0, mtp_ctl->size());
   }
   Control* head_control(uint32_t j) const { return mtp_ctl->as<Control>() + j % kDepth; }
-  size_t mtp_bytes(uint32_t d) const {
-    if (d != kPpDevices - 1 || !mtp_hid) return 0;
-    return mtp_hid->size() + mtp_ctl->size();
-  }
-  size_t shadow_hh_bytes() const {
-    size_t b = 0;
-    for (const auto& m : shadow_hh) b += m ? m->size() : 0;
-    for (const auto& m : shadow_head_kv) b += m ? m->size() : 0;
-    return b;
-  }
   // Declared last, destroyed first: the lists go before the events and buffers they name.
   std::array<std::unique_ptr<PfDevice>, kPpDevices> dev;
 };
+static_assert(gs::buffers_problem<l0::Mem, PipelinePrefill, PpPfDecodeSizes, PpPfShadowSizes, PpPfHostSizes>().empty(),
+              gs::buffers_problem<l0::Mem, PipelinePrefill, PpPfDecodeSizes, PpPfShadowSizes, PpPfHostSizes>());
 
 PipelinePrefill& as_pf(PipelinePrefillBase& b) { return static_cast<PipelinePrefill&>(b); }
 }  // namespace

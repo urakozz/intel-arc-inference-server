@@ -316,8 +316,14 @@ bool same_attn_as_m8(Ctx& c, const Snap& s0, uint32_t k) {
   return runtime::verify_attn_kind(k + 1, s0.pos + 1, false, d.fa_q_heads, d.fa_kv_heads) ==
          runtime::verify_attn_kind(kK + 1, s0.pos + 1, false, d.fa_q_heads, d.fa_kv_heads);
 }
-// The two-kernel judgement: `cos` (this path vs plain) against `cos8` (the M = 8 verify vs plain).
-bool near_m8(double cos, double cos8) { return golden::cos_dist_ratio(cos, cos8) <= golden::kCosSlack; }
+// The two-kernel judgement: `cos` (this path vs plain) against `cos8` (the M = 8 verify vs plain). The distance to
+// plain is the bar only where the f32 judge cannot decide: where it judged the verify's logits rows and passed them
+// (no farther from f32 than the plain step's, within the slack: `f32_closer`), a larger distance to plain is the plain
+// step's rounding, not the verify's - the taps and ring rows are the same kernel's rows - and the number stays
+// recorded.
+bool near_m8(double cos, double cos8, bool f32_closer = false) {
+  return f32_closer || golden::cos_dist_ratio(cos, cos8) <= golden::kCosSlack;
+}
 
 // T1 + D3: verify(k) with the true drafts, then commit(k). Since spec 28b: the
 // logits rows by the f32 judge where one exists (spec_judge.h; else cosine >= 0.99999), the taps and the committed
@@ -330,6 +336,7 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
       uint32_t(V));
   for (uint32_t k = 1; k <= kK; ++k) {
     const bool same = same_attn_as_m8(c, s0, k);
+    bool k_closer = true;   // every row of this verify judged and passed by the f32 judge
     // Row r's state: its slot after verify(k); with the deferred build (no per-row state) the committed state after
     // verify(k) + commit(r).
     std::vector<std::vector<float>> rs;
@@ -358,9 +365,11 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
       const bool id_ok = c.e.verify_ids()[r] == ref.g[r + 1];
       const bool t8bits = tr == m8.taps[r];
       const double ct8 = worst_row_cos(m8.taps[r], ref.taps[r], tr.size(), 1);
-      const bool t8 = same ? t8bits : near_m8(ct, ct8);
       const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(), rj, r + 1,
                                                         cl, uint32_t(VU));
+      const bool f32_closer = rv.judged && rv.ratio <= golden::kCosSlack;
+      k_closer &= f32_closer;
+      const bool t8 = same ? t8bits : near_m8(ct, ct8, f32_closer);
       char m8s[160];
       if (same) std::snprintf(m8s, sizeof m8s, "%s", t8bits ? "bitwise" : "DIFFER");
       else
@@ -378,7 +387,7 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
     const double rc = worst_row_cos(ring, ref.ring, ring_row_elems(c), k + 1);
     const bool r8bits = std::equal(ring.begin(), ring.end(), m8.ring.begin());
     const double rc8 = worst_row_cos(m8.ring, ref.ring, ring_row_elems(c), k + 1);
-    const bool r8 = same ? r8bits : near_m8(rc, rc8);
+    const bool r8 = same ? r8bits : near_m8(rc, rc8, k_closer);
     char m8s[160];
     if (same) std::snprintf(m8s, sizeof m8s, "%s", r8bits ? "bitwise" : "DIFFER");
     else
@@ -398,6 +407,8 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k, const std::vect
   bool ok = true;
   const M8 m8 = m8_reference(c, s0, ref);
   const golden::ForcedJudge fj;
+  const spec_judge::RowJudge rj = spec_judge::open_rows(
+      fj, tag + "_d3", prompt, std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + kK + 2), uint32_t(V));
   const size_t row = ring_row_elems(c);
   const std::vector<uint16_t> ring0 = [&] {
     s0.restore(c);
@@ -420,6 +431,17 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k, const std::vect
     c.e.verify(k);
     bool rows_ok = true;
     for (uint32_t r = 0; r <= j; ++r) rows_ok &= c.e.verify_ids()[r] == ref.g[r + 1];
+    // rows 0..j follow true drafts only: the same rows D3 judged; the f32 judge decides the committed ring rows
+    bool f32_closer = true;
+    {
+      const std::vector<float> lg = logits_rows(c, j + 1);
+      for (uint32_t r = 0; r <= j; ++r) {
+        const double cl = cosine(lg.data() + size_t(r) * V, ref.logits[r].data(), VU);
+        const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(), rj, r + 1,
+                                                          cl, uint32_t(VU));
+        f32_closer &= rv.judged && rv.ratio <= golden::kCosSlack;
+      }
+    }
     c.e.commit(j, c.e.verify_ids()[j]);
     const std::vector<float> live = committed_state(c);
     const double cs = cosine(live.data(), ref.state[j].data(), live.size());
@@ -429,7 +451,7 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k, const std::vect
     const bool committed_bits = std::equal(ring.begin(), ring.begin() + (j + 1) * row, m8.ring.begin());
     const double committed_cos = worst_row_cos(ring, ref.ring, row, j + 1);
     const double m8_cos = worst_row_cos(m8.ring, ref.ring, row, j + 1);
-    const bool committed = same ? committed_bits : near_m8(committed_cos, m8_cos);
+    const bool committed = same ? committed_bits : near_m8(committed_cos, m8_cos, f32_closer);
     char cm[200];
     if (same) std::snprintf(cm, sizeof cm, "%s", committed ? "projected (the M = 8 rows, bitwise)" : "WRONG");
     else

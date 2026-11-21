@@ -48,7 +48,8 @@ const void* at_const(const l0::Mem& m, size_t off) {
 // One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The l0 side is S2's
 // slab walk; the l0-int8 side is spec 5's h8 walk (quantiser, then requant + i8 GEMM per slab).
 // `out` (spec 17c): the row-parallel linears' output buffer under tensor parallel (linear_l0's); null is partials.
-// Open-work 16 / 17: the four mixer linears take the l0 side on l0-int8 too (l0_int8_bf16_linear).
+// Open-work 16: a MoE model's four mixer linears take the l0 side on l0-int8 too (l0_int8_bf16_linear); a dense
+// model runs them on h8 like the MLP (PERF-113).
 void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, uint32_t l, LinearId id,
                const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q, float* out = nullptr,
                bool bf16_out = false) {
@@ -146,7 +147,8 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   // ruling R5's, and ruling A14 retired it with the M = 64 route).
   if (kv8) {   // spec 12b: the same three launches over the int8 cache
     attn_prep_chunk_kv8(cx, kc, s, C, ctrl, s.partials.as<float>(),
-                        small.gdn.as<float>(), m.rope.as<float>(), lay, pages);
+                        small.gdn.as<float>(), m.rope.as<float>(), lay, pages,
+                        kv8_int8_scores(d, backend, pos, C));
     profile_wait(cx, Phase::kAttnPrep);
     attn_chunk_kv8(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), lay, backend, pages);
     attn_gate_chunk_kv8(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
@@ -242,8 +244,11 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
                    at_const(s.resid, size_t(taps->r0) * row), row, row, C - taps->r0);
     }
 
+    // PERF-113: a dense model's mixer linears follow the MLP's short-chunk rule (PERF-88) - a short chunk's whole
+    // layer is l0's. A MoE model passes its backend as it is (its mixer linears are l0's at every C).
+    const PrefillBackend mixer_b = d.is_moe() ? backend : dense_mlp_backend(backend, C);
     mixer_body(cx, kc, s, m, ctrl, pos, C, L, small, gdn_base, ring_base, kv_base, kv_k_mem, kv_v_mem, kv,
-               backend, q, gdn, fa, w.first == 0 && w.last == d.layers, nullptr, pages);   // one card: every layer
+               mixer_b, q, gdn, fa, w.first == 0 && w.last == d.layers, nullptr, pages);   // one card: every layer
 
     // Spec 15d: a MoE model's FFN - the post-attention norm into x (pitch hidden), then
     // the routed experts and the shared expert through the grouped GEMMs, folded into
@@ -280,23 +285,13 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem,
                 const KvLayout& kv, PrefillBackend backend, Int8State* q, const PrefillTaps* taps,
                 const PrefillSlot* slot) {
-  require((q != nullptr) == (backend == PrefillBackend::L0Int8),
-          "the int8 state must be given iff the backend is l0-int8");
-  require(C > 0 && C <= s.chunk_cap(),
-          "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
-  require(size_t(pos) + C + (slot ? slot->kv_base : 0) <= size_t(max_len), "pos + C exceeds max_len");
-  // Spec 19c: the taps' sites cover every layer and none is the final norm's fold (step.h).
-  require(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(m.desc->layers) + 1 &&
-                    taps->sites->back().empty()),
-          "the prefill taps need their staging and one site list per layer, none at the final fold");
-
   // The per-layer slice strides, re-derived from the descriptor here rather
   // than shared with buffers.cc -- capture.cc's arrangement, and for its
-  // reason: a divergence is then a throw from the four `require`s below, not a
+  // reason: a divergence is then a contract violation below, not a
   // wrong KV slot at position 3000. The layer COUNTS and (spec 15b) the head
   // counts and widths are the descriptor's.
   const model::ModelDesc& d = *m.desc;
-  require(&s.desc() == &d, "the prefill scratch was sized for another model");
+  contract_assert(&s.desc() == &d);   // the prefill scratch sized for this model
   // One layer's rows: bf16, or int8 with the scales after every layer's rows (spec 12b).
   const bool kv8 = kv.form == KvCache::Int8;
   const size_t kv_stride = size_t(max_len) * d.fa_kv_heads * Qwen35::kFaHeadDim * (kv8 ? 1 : 2);
@@ -304,20 +299,14 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
   // The conv channels (Qwen3.8: 10240 = (2 x 16 k-heads + 48 v-heads) x 128).
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
-  const std::string fa_n = std::to_string(d.fa_layers), gdn_n = std::to_string(d.gdn_layers);
-  require(kv.max_len == max_len && kv.layers == d.fa_layers && kv.layer_rows() == kv_stride,
-          "the KV layout is not " + fa_n + " FA layers at this max_len");
-  require(kv.bytes() == kv_k_mem.size(), "kv_k stride x " + fa_n + " FA layers != its allocation");
-  require(kv.bytes() == kv_v_mem.size(), "kv_v stride x " + fa_n + " FA layers != its allocation");
+  contract_assert(kv.max_len == max_len && kv.layers == d.fa_layers && kv.layer_rows() == kv_stride);
+  contract_assert(kv.bytes() == kv_k_mem.size());   // kv_k: stride x FA layers
+  contract_assert(kv.bytes() == kv_v_mem.size());   // kv_v: stride x FA layers
   if (kv8) require_kv8_path(backend);
-  // Spec 15d: a MoE model's FFN is the grouped-expert block (moe.cc).
-  if (d.is_moe())
-    require(m.moe.size() == d.layers, "a mixture-of-experts model prefills with every layer's "
-                                      "expert blocks loaded");
-  require(gdn_state_stride * d.gdn_layers == gdn_state_mem.size(),
-          "gdn_state stride x " + gdn_n + " GDN layers != its allocation");
-  require(conv_ring_stride * d.gdn_layers == conv_ring_mem.size(),
-          "conv_ring stride x " + gdn_n + " GDN layers != its allocation");
+  // Spec 15d: a MoE model's FFN is the grouped-expert block (moe.cc): every layer's expert blocks loaded.
+  contract_assert(!d.is_moe() || m.moe.size() == d.layers);
+  contract_assert(gdn_state_stride * d.gdn_layers == gdn_state_mem.size());
+  contract_assert(conv_ring_stride * d.gdn_layers == conv_ring_mem.size());
 
   // embed: ids -> resid, bf16 [C][hidden].
   cx.launch(kc(kernels::pf_embed_gather_variant(s.desc().hidden), "pf_embed_gather"), 1, C, 1,
@@ -326,8 +315,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   uint32_t gdn = 0, fa = 0;
   walk_layers(cx, kc, s, m, ctrl, pos, C, gdn_state_mem, conv_ring_mem, kv_k_mem, kv_v_mem, kv,
               backend, q, Walk{0, d.layers, false, false}, gdn, fa, taps, slot);
-  require(gdn == d.gdn_layers && fa == d.fa_layers,
-          "the layer table did not give " + gdn_n + " GDN and " + fa_n + " FA layers");
+  contract_assert(gdn == d.gdn_layers && fa == d.fa_layers);   // the layer table's GDN and FA layers
 }
 
 void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
@@ -335,40 +323,25 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
                 l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q,
                 const PpStage& st, const PrefillTaps* taps) {
-  require((q != nullptr) == (backend == PrefillBackend::L0Int8),
-          "the int8 state must be given iff the backend is l0-int8");
   require(attn_mode() == AttnMode::Flash,
           "a pipeline stage runs the flash attention only (the composed reference has no "
           "two-card walk)");
-  require(C > 0 && C <= s.chunk_cap(),
-          "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
-  require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
   const model::ModelDesc& d = *m.desc;
-  require(&s.desc() == &d, "the prefill scratch was sized for another model");
-  require(st.first < st.last && st.last <= d.layers && (st.has_embed() || st.has_head(d)),
-          "the pipeline prefill walks two stages: layers [0, s) and [s, layers)");
-  require(st.has_embed() == (ids != nullptr),
-          "the first stage embeds (ids given), the second resumes from the hand-off (none)");
-  require(m.layer_small.size() == st.layers() && (!d.is_moe() || m.moe.size() == st.layers()),
-          "the stage model does not hold exactly layers [" + std::to_string(st.first) + ", " +
-              std::to_string(st.last) + ")");
+  contract_assert(&s.desc() == &d);   // the prefill scratch sized for this model
+  // The stage model holds exactly layers [st.first, st.last).
+  contract_assert(m.layer_small.size() == st.layers() && (!d.is_moe() || m.moe.size() == st.layers()));
   // The stage's state: its own GDN and FA layers, the single-card strides.
   const bool kv8 = kv.form == KvCache::Int8;
   const size_t kv_stride = size_t(max_len) * d.fa_kv_heads * Qwen35::kFaHeadDim * (kv8 ? 1 : 2);
   const size_t gdn_state_stride =
       size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
-  require(kv.max_len == max_len && kv.layers == st.fa && kv.layer_rows() == kv_stride &&
-              kv.bytes() == kv_k_mem.size() && kv.bytes() == kv_v_mem.size(),
-          "the KV layout is not the stage's " + std::to_string(st.fa) + " FA layers at this max_len");
-  require(gdn_state_stride * st.gdn == gdn_state_mem.size() &&
-              conv_ring_stride * st.gdn == conv_ring_mem.size(),
-          "the GDN state / conv ring are not the stage's " + std::to_string(st.gdn) + " GDN layers");
+  // The KV layout, the GDN state and the conv ring are the stage's FA / GDN layers at this max_len.
+  contract_assert(kv.max_len == max_len && kv.layers == st.fa && kv.layer_rows() == kv_stride &&
+                  kv.bytes() == kv_k_mem.size() && kv.bytes() == kv_v_mem.size());
+  contract_assert(gdn_state_stride * st.gdn == gdn_state_mem.size() &&
+                  conv_ring_stride * st.gdn == conv_ring_mem.size());
   if (kv8) require_kv8_path(backend);
-  // Spec 19d: step_chunk's tap rule, per stage (step.h).
-  require(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(d.layers) + 1 &&
-                    taps->sites->back().empty()),
-          "the prefill taps need their staging and one site list per layer, none at the final fold");
 
   if (st.has_embed())
     cx.launch(kc(kernels::pf_embed_gather_variant(s.desc().hidden), "pf_embed_gather"), 1, C, 1,
@@ -376,9 +349,7 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   uint32_t gdn = 0, fa = 0;
   walk_layers(cx, kc, s, m, ctrl, pos, C, gdn_state_mem, conv_ring_mem, kv_k_mem, kv_v_mem, kv,
               backend, q, Walk{st.first, st.last, !st.has_embed(), !st.has_head(d)}, gdn, fa, taps);
-  require(gdn == st.gdn && fa == st.fa, "the stage's layer kinds are not its " +
-                                            std::to_string(st.gdn) + " GDN / " +
-                                            std::to_string(st.fa) + " FA");
+  contract_assert(gdn == st.gdn && fa == st.fa);   // the stage's layer kinds
 }
 
 // --- spec 17c: tensor parallel, one card's chunk as units (step.h) ---------------------------------------------
@@ -694,9 +665,9 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // gate/up epilogue keeps one launch at 193..320. At 321..384 gate||up returns to its 68 slab
 // launches, 1 + 48 x 80 + 16 x 76 = 5057; above, 8129 as before (derived). l0-int8's h8 linears are its own walk
 // (linear_i8: the quantiser, then as many 1024-column slabs a launch pair as the w8 slab holds - Qwen3.8's gate||up
-// 1 + 2 x 12, down 1 + 2 x 5), so above kInt8Bf16MlpMaxRows its chunk is 8129 - 64 x (78 - 36) = 5441 (derived);
-// its mixer linears are the l0 walk's (open-work 17; a MoE model's too, open-work 16), pf_gemm_q4 included.
-// PERF-88: a dense model's chunk of C <= kInt8Bf16MlpMaxRows runs its MLP on the l0 walk too, so l0-int8 counts as
+// 1 + 2 x 12, down 1 + 2 x 5); since PERF-113 a dense model's mixer linears are h8 walks too (linear_i8_launches
+// at their shapes), a MoE model's stay the l0 walk's (open-work 16), pf_gemm_q4 included.
+// PERF-88: a dense model's chunk of C <= kInt8Bf16MlpMaxRows runs every linear on the l0 walk, so l0-int8 counts as
 // l0 there.
 namespace {
 // One int4 linear's launches on backend b at C rows: the slab walk's 2 x N / 1024, or 1 when L0

@@ -167,8 +167,8 @@ class Walk {
       require(spec_.kind == ListKind::Decode && injected_->size() >= injected_bytes(d_), "the injected rows are a decode list's");
     const bool int4 = d_.forms.dense == model::Q4Form::Int4;
     if (int4)
-      require(d_.linear(model::Q4LinearId::GdnQkvz).shape.S == 1 && d_.qkvg_s == 2 && d_.gdn_out_s == 4 && d_.o_s == 4,
-              "the int4 cells moved from S1 / S2 / S4 / S4 (the names spell them)");
+      require(d_.linear(model::Q4LinearId::GdnQkvz).shape.S == 1 && d_.qkvg_s == 2 && d_.gdn_out_s == 8 && d_.o_s == 8,
+              "the int4 cells moved from S1 / S2 / S8 / S8 (the names spell them)");
     require((d_.forms.dense == model::Q4Form::Int4) == (d_.forms.shared == model::Q4Form::Int4),
             "the dense and shared forms differ (they are read together: ours int4, Intel's bf16)");
     const bool int8 = part_.lm_head ? part_.lm_head->kind == model::WeightKind::Int8 : false;
@@ -399,7 +399,7 @@ class Walk {
       if (t) require(kernels::gemm_sm_out_s(*t) == s.S, "gemm_sm writes another split-K S than the consumer folds");
       if (send)
         require(!t && s.N == d_.hidden && s.S == kq::kTpOutS,
-                "the send-folded gemv is out_proj / o_proj's: N 2560, S 2, gemv (kernels::qwen4exp::tp_out_gemv_variant)");
+                "the send-folded gemv is out_proj / o_proj's: N 2560, S 4, gemv (kernels::qwen4exp::tp_out_gemv_variant)");
       l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M_, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
                         : kernel(send ? kq::tp_out_gemv_variant(M_, s.K) : kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout),
                                  "gemv", 64);

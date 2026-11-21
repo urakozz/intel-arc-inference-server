@@ -28,6 +28,22 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 add_compile_options(-Wall -Wextra -Werror)
+# Host instruction set: the oldest supported CPU is Broadwell (AVX2, FMA, BMI2, F16C; no AVX-512); every newer
+# x86-64 runs this build. FMA contraction stays off so host math rounds as written (the CPU references are
+# compared bitwise).
+add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-march=broadwell> $<$<COMPILE_LANGUAGE:C,CXX>:-ffp-contract=off>)
+# Static reflection (C++26 P2996 + P3394 annotations) in every C++ target: runtime/gpu_state.h's annotated state
+# structs (spec 39) sit in headers most targets include.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-freflection>)
+# C++26 contracts (pre / post / contract_assert) state the engine's bounds in its interfaces. Enforced in every build
+# type, Release included (contracts do not follow NDEBUG): a violation is a bug in the caller, never a request's input,
+# so the handler below prints the predicate's text and where it failed, and the process ends (SIGABRT) instead of
+# serving from a wrong page or position. A request's or a flag's errors stay the plain exceptions.
+add_compile_options(-fcontracts -fcontract-evaluation-semantic=enforce)
+# The violation handler (src/common/contract_handler.cc), in every target linked after this line: its object is linked
+# directly, so a reference from any static library resolves whatever the link order.
+add_library(b70_contract_handler OBJECT src/common/contract_handler.cc)
+link_libraries(b70_contract_handler)
 
 include(cmake/tokenizer.cmake)
 find_package(PkgConfig REQUIRED)

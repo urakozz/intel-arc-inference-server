@@ -246,7 +246,8 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     dp.decode_state = ps.total() - dp.kv + scratch + dp.link;
     if (pf.prefill) {   // spec 16c: memory_plan.cc's prefill terms, per device
       const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, d, pf.chunk_cap);
-      // l0-int8: the mixer linears walk the slab too (open-work 16 / 17).
+      // l0-int8: a MoE model's mixer linears (open-work 16) and a dense model's short chunks (PERF-88) walk the slab
+      // too.
       dp.prefill_scratch = s.eager() + s.slab;
       // Phase 3 Task 2: the stage's router / a||b B slabs (a MoE model, both backends).
       dp.prefill_scratch += route_slab_bytes(d, st[i].first, st[i].last);

@@ -134,9 +134,15 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 // int8 form of the composed path: `require_kv8_path` refuses it, so an int8 cache is never
 // read as bf16.
 void require_kv8_path(PrefillBackend backend);
+// PERF-114 (l0-int8 over the int8 cache): whether the chunk at `pos` scores by int8 DPAS (kv8.cl
+// KV8_I8S) - a whole chunk on Qwen3.8's heads or a tensor-parallel card's 12 / 2 (the pair form); a split chunk keeps
+// the bf16 scores. The writer then stores q as int8 with its fp32 scales (kv8_q_scales) and attn_chunk_kv8 reads them: both ask
+// this with the same backend, pos and C.
+bool kv8_int8_scores(const model::ModelDesc& d, PrefillBackend b, uint32_t pos, uint32_t C);
+// `int8_q` (kv8_int8_scores): q into pf_q as int8 [C][q-heads][256], its fp32 scales after the chunk cap's rows.
 void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                          const float* qkv_partials, const float* fa_small, const float* rope,
-                         const KvLayer& kv, const void* pages = nullptr);
+                         const KvLayer& kv, const void* pages = nullptr, bool int8_q = false);
 void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                     const uint16_t* q, const KvLayer& kv, PrefillBackend backend, const void* pages = nullptr);
 void attn_gate_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,
@@ -172,7 +178,9 @@ inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, Prefill
   if (mode != AttnMode::Flash) return attn_chunk_launches_composed(d, C, b);
   if (flash_split_span(d, pos, C)) return 2;
   const bool rowed = (d.fa_q_heads == 24 && d.fa_kv_heads == 4) ||
-                     (d.fa_q_heads == 16 && d.fa_kv_heads == 2 && kv == KvCache::Bf16);
+                     (d.fa_q_heads == 16 && d.fa_kv_heads == 2 && kv == KvCache::Bf16) ||
+                     (d.fa_q_heads == 12 && d.fa_kv_heads == 2 && kv == KvCache::Int8 &&
+                      b == PrefillBackend::L0Int8);   // PERF-114: the int8-score pair on a tp card
   return rowed ? (C + kPairLaunchRows - 1) / kPairLaunchRows : 1;
 }
 inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b, uint32_t pos = 0,

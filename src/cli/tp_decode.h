@@ -127,6 +127,7 @@ int run_tp_decode(const TpDecodeArgs& a) {
     std::print(stderr, "prefill backend: {}, chunk cap {:d}, crossings {}\n",
                runtime::prefill_backend_name(eng.prefill_backend()), eng.prefill_chunk_cap(),
                eng.prefill_overlaps() ? "on the copy engines (the wavefront)" : "on the compute lists (no overlap)");
+    notice_int8_prefill(eng.prefill_backend(), card);
   }
   for (uint32_t r = 0; r < 2; ++r) std::print(stderr, "{}\n", eng.memory_line(r).c_str());
 

@@ -226,6 +226,7 @@ class KolibriEngine {
   KolAttn attn_;
   std::vector<std::unique_ptr<Stage>> st_;
   std::unique_ptr<PipelineLink> link_;
+  [[=gs::Outside("the debug tap, a device each: memory_use and the plan's debug_tap term count it")]]
   std::vector<std::unique_ptr<l0::Mem>> taps_;
   TapAt tap_at_ = TapAt::LayerOut;
   bool broken_ = false, drop_next_ = false;
@@ -239,6 +240,7 @@ class KolibriEngine {
   std::unique_ptr<PipelineLink> vlink_;
   std::vector<std::vector<std::optional<CapturedStep>>> vsteps_;
   TapSink* drafter_ = nullptr;
+  [[=gs::Outside("a drafter's prefill tap staging: memory_use counts it in prefill scratch")]]
   std::unique_ptr<l0::Mem> pf_taps_;
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;

@@ -68,6 +68,7 @@
 #include <cstddef>
 #include <exception>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -202,6 +203,13 @@ struct SlotCacheIface {
   // Plan 13b: positions the slot's resident session holds (what a grant there would evict);
   // the grant prefers, among equal matches, the slot that holds least.
   virtual uint32_t held(uint32_t /*slot*/) { return 0; }
+  // Spec 31: the slot's idle session leaves the card (its KV pages went back to the pool). Its entries in the host
+  // store - stored when its request ended - stay until it comes back (as many held sessions as slots, the oldest let
+  // go first). Returns the positions its next turn can restore from them (0: none - it prefills again).
+  virtual uint32_t evict(uint32_t slot) {
+    fail(slot);
+    return 0;
+  }
 };
 
 // The prefix cache per slot: one host store (PrefixCache) shared by the slots, one resident
@@ -220,6 +228,7 @@ class PrefixSlots : public SlotCacheIface {
   void end(uint32_t slot) override;
   void fail(uint32_t slot) override;
   uint32_t held(uint32_t slot) override;
+  uint32_t evict(uint32_t slot) override;
 
   PrefixCache& cache() { return cache_; }
   PrefixCache::Plan::Kind last_kind(uint32_t slot) const { return slots_.at(slot).kind; }
@@ -231,6 +240,12 @@ class PrefixSlots : public SlotCacheIface {
     bool valid = false;
     PrefixCache::Plan::Kind kind = PrefixCache::Plan::Cold;
   };
+  // Spec 31: evicted sessions' ids and their held entries (PrefixCache::keep), oldest first, as many as slots.
+  struct Held {
+    std::vector<uint32_t> ids;
+    uint64_t handle = 0;
+  };
+  std::deque<Held> held_;
   void store(uint32_t slot, uint32_t end);
 
   BatchEngineIface& engine_;
@@ -278,6 +293,13 @@ class Scheduler {
   bool spec_round();   // spec 19d
   void finish(const std::shared_ptr<Job>& job, Finish::Reason reason, std::string error = {});
   int pick_slot(const Job& job) const;   // -1: no free slot the prompt fits
+  // Spec 31, a KV page pool: the reservation, the eviction of idle sessions, a running request's growth.
+  uint32_t reserve_upto(const Job& job, uint32_t slot) const;
+  int oldest_idle(uint32_t keep) const;
+  uint32_t cache_held(uint32_t slot) const;
+  void evict(uint32_t slot);
+  bool make_room(uint32_t slot, uint32_t upto);
+  bool grow(const std::shared_ptr<Job>& job, uint32_t upto, bool end = true);
   double now() const;
 
   BatchEngineIface& engine_;

@@ -81,9 +81,11 @@ void check_sizes_qwen38() {
   const runtime::MtpSizes m = runtime::MtpDims::sizes(16384, q);
   CHECK_EQ(m.gdn_spec, size_t{3} * 150994944);
   CHECK_EQ(m.kv_k, size_t{33554432});
-  // spec 32: hh at 64 + 1 rows, hctl 768 B, the deferred GDN rows and the deep lists' chain scratch
-  CHECK_EQ(m.deep, size_t{103022592 + 150994944 + 47185920});
-  CHECK_EQ(m.total(), size_t{523176064 + 81920 + 491520 + 640} + m.deep);
+  // spec 32: hh at 64 + 1 rows, hctl 768 B; the deferred GDN rows and the deep lists' chain scratch are Engine's own
+  // (spec 39: EngineSizes, no longer a `deep` term of MtpSizes without an MtpBuffers member)
+  CHECK_EQ(m.total(), size_t{523176064 + 81920 + 491520 + 640});
+  const runtime::EngineSizes e = runtime::EngineDims::sizes(q, runtime::KvCache::Bf16, 0, 1, true, false);
+  CHECK_EQ(e.gdn_pend + e.gdn_x + e.conv_x, size_t{103022592 + 150994944 + 47185920});
   // Spec 19a: probe_mtp_steps' 8-slot buffer (verify M = 5..8) - 7 gdn_state copies, the
   // rest as at 4 slots; the default stays the 4 slots above, and [4, 8] is the range.
   const runtime::MtpSizes m8 = runtime::MtpDims::sizes(16384, q, 0, runtime::KvCache::Bf16, 8);
@@ -102,12 +104,14 @@ void check_sizes_qwen38() {
   CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault), size_t{2049} * 5120 * 2);
   // Int8State: xq 2048 x 17408 + xs 2048 x 4 + w8 (17408 / 4) x 1024 x 4, and the
   // column scales: 2 x 4 B x the N of every h8 linear - the MLP's gate||up 34816 and down
-  // 5120 in each of the 64 layers (open-work 17: the mixer linears are the l0 walk's).
+  // 5120 in each of the 64 layers, and (PERF-113: every prompt linear) the 48 GDN layers' qkv||z 16384 and out_proj
+  // 5120, the 16 FA layers' q||k||v 14336 and o_proj 5120.
   CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total(), size_t{35651584 + 8192 + 17825792});
-  CHECK_EQ(runtime::int8_scale_bytes(q), size_t{8} * 64 * (34816 + 5120));
-  // = 73,932,800 B (spec 6 §8.4 measured 84,680,704, "int8 0.085 GB", with all four int4 linears h8).
+  CHECK_EQ(runtime::int8_scale_bytes(q),
+           size_t{8} * (64 * (34816 + 5120) + 48 * (16384 + 5120) + 16 * (14336 + 5120)));
+  // = 84,680,704 B, spec 6 §8.4's measured "int8 0.085 GB" with all four int4 linears h8.
   CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total() + runtime::int8_scale_bytes(q),
-           size_t{73932800});
+           size_t{84680704});
 }
 
 // Spec 15c: Ornith 1.5 35B-A3B with the int8 head, derived from the descriptor and - spec
@@ -129,18 +133,18 @@ void check_sizes_ornith() {
   // 20 KiB of KV per position (spec 15 §2): 10 FA layers x 2 kv-heads x 256 x bf16, K and V.
   CHECK_EQ(runtime::PersistentDims::sizes(1, o).kv_k * 2, size_t{20} * 1024);
   // The MoE scratch (runtime::moe_scratch_layout): router logits and route rows per layer
-  // slot (40 + the MTP head's), the slots' SiLU x up rows once.
+  // slot (40 + the MTP head's), the slots' SiLU x up rows once - 64 rows each (PERF-56: the wide verify lists').
   const runtime::MoeScratchLayout ml = runtime::moe_scratch_layout(o);
   CHECK_EQ(ml.layer_slots, uint32_t(41));
-  CHECK_EQ(ml.logits_layer, size_t{8} * 272 * 4);                  // [kM][router_n] fp32
-  CHECK_EQ(ml.route_layer, size_t{8} * 32 * 4);                     // [kM][32] u32
-  CHECK_EQ(ml.route_off, size_t{41} * 8704);
-  CHECK_EQ(ml.h_off, size_t{41} * (8704 + 1024));
-  CHECK_EQ(ml.h, size_t{8} * 9 * 512 * 2);                          // [kM][slots][512] bf16
-  CHECK_EQ(ml.total, size_t{472576});
-  CHECK_EQ(ml.route_at(40), ml.route_off + 40 * size_t{1024});
+  CHECK_EQ(ml.logits_layer, size_t{64} * 272 * 4);                 // [kDeepM][router_n] fp32
+  CHECK_EQ(ml.route_layer, size_t{64} * 32 * 4);                    // [kDeepM][32] u32
+  CHECK_EQ(ml.route_off, size_t{41} * 69632);
+  CHECK_EQ(ml.h_off, size_t{41} * (69632 + 8192));
+  CHECK_EQ(ml.h, size_t{64} * 9 * 512 * 2);                         // [kDeepM][slots][512] bf16
+  CHECK_EQ(ml.total, size_t{3780608});
+  CHECK_EQ(ml.route_at(40), ml.route_off + 40 * size_t{8192});
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, o);
-  CHECK_EQ(d.moe, size_t{472576});
+  CHECK_EQ(d.moe, size_t{3780608});
   CHECK_EQ(d.x, size_t{16} * 4096 * 2);                             // 2 x hidden > 512, 16 rows
   CHECK_EQ(d.attn_part, size_t{16} * 32 * 16 * 258 * 4);            // v2 at 16 q-heads, 16 rows
   // Dense models carry no MoE scratch: their sizes are what they were.
@@ -152,7 +156,7 @@ void check_sizes_ornith() {
   decode_only.prefill = false;
   const runtime::MemoryPlan pl = runtime::plan(o, 262144, false, kOrnithInt8Weights, decode_only);
   CHECK_EQ(pl.moe_weights, size_t{17224171520ull});
-  CHECK_EQ(pl.moe_scratch, size_t{472576});
+  CHECK_EQ(pl.moe_scratch, size_t{3780608});
   CHECK_EQ(pl.kv, size_t{262144} * 20 * 1024);
   CHECK_EQ(pl.prefill_scratch, size_t{0});
   CHECK_EQ(runtime::max_len_that_fits(o, false, kOrnithInt8Weights, kDevice, kReserve, kTrained,
@@ -230,16 +234,16 @@ void check_spec6_line() {
   // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
   CHECK_EQ(p.decode_state, size_t{150994944 + 31457280 + 768} + 2 * (68652864 - 50724864 + 6340608));
   CHECK_EQ(p.decode_state, size_t{230990208});
-  // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
-  // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.
+  // l0-int8's short chunks walk the slab (lazy, PERF-88) - prefill scratch 0.700 -> 0.735 GB against the measured
+  // line; int8 0.085 GB as measured (PERF-113: every prompt linear's column scales).
   CHECK_EQ(p.prefill_scratch, size_t{700563352} + 35651584 + 125829120);
   CHECK_EQ(p.prefill_lazy, size_t{35651584} + 125829120);   // flash attention, no MTP: the slab and a||b's GEMM slabs
-  CHECK_EQ(p.int8, size_t{73932800});
+  CHECK_EQ(p.int8, size_t{84680704});
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
         "memory: model 18.116 GB, kv 8.590 GB, decode state 0.231 GB, prefill scratch 0.862 GB,"
-        " int8 0.074 GB, total 27.873 GB of 32.530 GB");   // + a||b's GEMM slabs 0.126 GB, ab_out at pitch 256   // no MTP: no deep verify list, a 16-row scratch
+        " int8 0.085 GB, total 27.884 GB of 32.530 GB");   // + a||b's GEMM slabs 0.126 GB, ab_out at pitch 256   // no MTP: no deep verify list, a 16-row scratch
 }
 
 void check_paths() {
@@ -252,7 +256,8 @@ void check_paths() {
   CHECK_EQ(mtp.mtp_buffers, runtime::MtpDims::sizes(65536, q).total());
   CHECK_EQ(mtp.mtp_hidden, runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault));
   // Spec 32e: with the head on bf16 KV the decode scratch holds the deep verify lists' 64 rows, not 16.
-  CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden +
+  CHECK_EQ(mtp.deep, size_t{103022592 + 150994944 + 47185920});   // spec 32: Engine's, with the head
+  CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden + mtp.deep +
                                  runtime::DecodeScratchDims::sizes(65536, q, 64).total() -
                                  runtime::DecodeScratchDims::sizes(65536, q).total());
   CHECK_EQ(mtp.prefill_lazy, s.slab + runtime::route_slab_bytes(q, 0, q.layers));
@@ -336,10 +341,11 @@ void check_draft_vocab() {
                           size_t(rows) * 4;
       CHECK_EQ(p.draft_vocab, want);
       // Spec 32e: a draft vocabulary builds no deep verify list - its decode scratch keeps 16 rows, not 64, and
-      // MtpBuffers lose the deep lists' chain scratch (a GDN state and the conv rows; gdn_pend_ stays).
+      // the engine loses the deep lists' chain scratch (a GDN state and the conv rows; gdn_pend stays).
       const size_t chain = size_t{128} * 128 * q.gdn_v_heads * q.gdn_layers * 4 +
                            size_t{q.gdn_layers} * runtime::MtpDims::kGdnConvXLayer;
-      CHECK_EQ(p.mtp_buffers, off.mtp_buffers + size_t(rows) * 4 - chain);   // dv_logits fp32 [|V'|]
+      CHECK_EQ(p.mtp_buffers, off.mtp_buffers + size_t(rows) * 4);   // dv_logits fp32 [|V'|]
+      CHECK_EQ(p.deep, off.deep - chain);
       CHECK_EQ(runtime::MtpDims::sizes(65536, q, rows).dv_logits, size_t(rows) * 4);
       CHECK_EQ(p.total(), off.total() + want + size_t(rows) * 4 - chain -
                               runtime::DecodeScratchDims::sizes(65536, q, 64).total() +
@@ -399,8 +405,10 @@ void check_kv_int8() {
   // The MTP head's one layer in the same form.
   CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Int8).kv_k, size_t{16384} * 1032);
   CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Int8).total(),
-           runtime::MtpDims::sizes(16384, q, 0, KvCache::Bf16).total() - 2 * size_t{16384} * (2048 - 1032) -
-               size_t{150994944 + 47185920});   // spec 32: no deep lists' chain scratch over int8 KV
+           runtime::MtpDims::sizes(16384, q, 0, KvCache::Bf16).total() - 2 * size_t{16384} * (2048 - 1032));
+  // spec 32: no deep lists' chain scratch over int8 KV (Engine's: spec 39's EngineSizes)
+  CHECK_EQ(runtime::EngineDims::sizes(q, KvCache::Int8, 0, 1, true, false).total(),
+           runtime::EngineDims::sizes(q, KvCache::Bf16, 0, 1, true, false).total() - size_t{150994944 + 47185920});
 
   // The layout: rows where they always were, then every layer's scales.
   const runtime::KvLayout l8 = runtime::kv_layout(16384, q, q.fa_layers, KvCache::Int8);
@@ -431,8 +439,8 @@ void check_kv_int8() {
                                                KvCache::Int8);
   CHECK_EQ(b16.kv, size_t{8589934592ull});
   CHECK_EQ(b8.kv, size_t{131072} * 33024);
-  CHECK_EQ(b16.mtp_buffers - b8.mtp_buffers,
-           size_t{2} * 131072 * (2048 - 1032) + 150994944 + 47185920);   // spec 32: the deep lists' scratch at bf16
+  CHECK_EQ(b16.mtp_buffers - b8.mtp_buffers, size_t{2} * 131072 * (2048 - 1032));
+  CHECK_EQ(b16.deep - b8.deep, size_t{150994944 + 47185920});   // spec 32: the deep lists' scratch at bf16
   CHECK_EQ(b16.model, b8.model);
   CHECK_EQ(b8.prefill_scratch - b16.prefill_scratch, size_t{131072} * 4 * 256 * 2 * 2);
   CHECK_EQ(b8.prefill_lazy - b16.prefill_lazy, size_t{536870912});

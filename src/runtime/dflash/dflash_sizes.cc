@@ -85,14 +85,24 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
   p.per_position = (b - a) / 4096;
   p.fixed = a - p.per_position * 4096;
   p.n_taps = uint32_t(d.taps.size());   // spec 19c: the engine's prefill tap staging
+  p.window = d.all_sliding() ? d.max_window() : 0;
   // Plan 19v3b: a sequence's session - ring, taps, control, readback - the same way (a full layer's ring grows).
   const auto session = [&](uint32_t L) {
-    const DFlashSizes s = sizes(d, target_hidden, head_rows, L, f, candidate_head);
-    return s.ring_k + s.ring_v + s.taps + s.dctl + s.out;
+    return sizes(d, target_hidden, head_rows, L, f, candidate_head).SessionSizes::total();
   };
   p.session_per_position = (session(8192) - session(4096)) / 4096;
   p.session_fixed = session(4096) - p.session_per_position * 4096;
+  // Spec 39: and beside several slots its row tables and row taps (DFlashBuffers::add_sessions; unplanned before).
+  p.rows = rows_sizes(sizes(d, target_hidden, head_rows, 4096, f, candidate_head), 2).total();
   return p;
+}
+
+RowsSizes rows_sizes(const DFlashSizes& s, uint32_t seqs) {
+  RowsSizes r;
+  if (seqs < 2) return r;
+  r.seqs = r.proj_seqs = (size_t(kernels::dflash::kM) + 8 * kernels::dflash::kSeqs) * 4;
+  r.rows_taps = s.taps;
+  return r;
 }
 
 size_t ring_snapshot_bytes(const model::DFlashDesc& d, uint32_t max_len) {

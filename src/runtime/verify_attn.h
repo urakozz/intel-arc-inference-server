@@ -85,9 +85,16 @@ inline bool verify_attn_heads(uint32_t q_heads, uint32_t kv_heads) {
   return (q_heads == 24 && kv_heads == 4) || (q_heads == 12 && kv_heads == 2);
 }
 
+// PERF-56: Ornith's 16 / 2 heads in its wide lookup verify lists (16, 32, 64 rows, bf16 KV) - the kernel in row chunks
+// of 8 (attn_verify_dpas.cl); its 2-4-row lists keep v2.
+inline bool verify_attn_wide_heads(uint32_t M, bool kv8, uint32_t q_heads, uint32_t kv_heads) {
+  return q_heads == 16 && kv_heads == 2 && !kv8 && (M == 16 || M == 32 || M == 64);
+}
+
 inline VerifyAttn verify_attn_kind(uint32_t M, uint32_t keys, bool kv8, uint32_t q_heads, uint32_t kv_heads,
                                    VerifyAttnForce f = VerifyAttnForce::Auto) {
-  if (M < 2 || !verify_attn_heads(q_heads, kv_heads)) return VerifyAttn::V2;   // before the table or the override
+  if (M < 2 || (!verify_attn_heads(q_heads, kv_heads) && !verify_attn_wide_heads(M, kv8, q_heads, kv_heads)))
+    return VerifyAttn::V2;   // before the table or the override
   if (f == VerifyAttnForce::V2) return VerifyAttn::V2;
   const VerifyAttnRow* r = verify_attn_row(M, kv8);
   if (r == nullptr) return VerifyAttn::V2;

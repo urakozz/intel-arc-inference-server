@@ -69,4 +69,10 @@ struct DFlashBuffers {
   void zero(l0::CmdList& imm);
 };
 
+// Spec 39: one allocation of each sizes member's name (runtime/gpu_state.h).
+static_assert(gs::buffers_problem<l0::Mem, DFlashSession, SessionSizes>().empty(),
+              gs::buffers_problem<l0::Mem, DFlashSession, SessionSizes>());
+static_assert(gs::buffers_problem<l0::Mem, DFlashBuffers, SessionSizes, DFlashSizes, RowsSizes>().empty(),
+              gs::buffers_problem<l0::Mem, DFlashBuffers, SessionSizes, DFlashSizes, RowsSizes>());
+
 }  // namespace runtime::dflash

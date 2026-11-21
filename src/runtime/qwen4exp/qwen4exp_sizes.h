@@ -8,6 +8,7 @@
 #include "loader/qwen4exp_ple_hash.h"   // Q4PleScale (header-only)
 #include "model/qwen4exp.h"
 #include "runtime/memory_plan.h"
+#include "runtime/gpu_state.h"
 #include "runtime/pipeline_plan.h"     // PpBalance, pp_balance, kPpDevices
 
 // Spec 21-QFN-v1b Task 5: Qwen3.8-Flash-Next's device memory as device-free arithmetic - the weights (the loader's
@@ -23,6 +24,14 @@
 // the development mode `--layers N` (the first N layers, then the final mixer and the head) is planned per
 // card by `layers_that_fit`.
 namespace runtime::qwen4exp {
+namespace gs = runtime::gpu_state;
+
+// Spec 7's snapshot runs' tensors (the snapshot section below): each is claimed by exactly one sizes member's
+// gpu_state::Snapshot annotation (spec 39), which is how the engines find a run's allocation.
+enum class SnapTensor : uint32_t {
+  Kv, IdxKeys, IdxTail, GdnState, ConvRing, PleIds, PleRing, MtpKv, MtpIdxKeys, MtpIdxTail, MtpHidden
+};
+using Snap = gs::Snapshot<SnapTensor>;
 
 // One device's persistent state at max_len (zeroed by reset):
 //   kv          bf16 [its QSA layers][max_len][2 kv heads][256], K and V    2048 B a position a layer
@@ -42,12 +51,23 @@ namespace runtime::qwen4exp {
 inline constexpr uint32_t kConvRing = 32;   // = PersistentDims::kConvRing (Qwen3.8's gdn_step ring)
 inline constexpr uint32_t kIdxTail = 8;     // the open block's raw keys (kernels::qwen4exp::kTailSlots)
 inline constexpr uint32_t kPleRing = 16;    // the PLE id and conv rings (kernels::qwen4exp::kPleRing)
+// Spec 39: the members' annotations are the plan's groups, reset's zeroing and the snapshot's allocations
+// (runtime/gpu_state.h); Qwen4ExpBuffers holds one allocation of each name.
 struct PersistentSizes {
-  size_t control = 0, kv = 0, idx_keys = 0, idx_tail = 0, gdn_state = 0, conv_ring = 0, ple = 0;
-  size_t kv_total() const { return kv + idx_keys + idx_tail; }
-  size_t state() const { return control + gdn_state + conv_ring + ple; }
-  size_t total() const { return kv_total() + state(); }
+  [[=gs::state, =gs::zero_on_reset,
+    =gs::NotSnapshotted("load_state writes pos, n_active and gdn_pend; the prefill after a restore the pending id")]]
+  size_t control = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::Kv}]] size_t kv = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::IdxKeys}]] size_t idx_keys = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::IdxTail}]] size_t idx_tail = 0;
+  [[=gs::state, =gs::zero_on_reset, =Snap{SnapTensor::GdnState}]] size_t gdn_state = 0;
+  [[=gs::state, =gs::zero_on_reset, =Snap{SnapTensor::ConvRing}]] size_t conv_ring = 0;
+  [[=gs::state, =gs::zero_on_reset, =Snap{SnapTensor::PleIds}, =Snap{SnapTensor::PleRing}]] size_t ple = 0;
+  size_t kv_total() const { return gs::bytes(*this, gs::Group::Kv); }
+  size_t state() const { return gs::bytes(*this, gs::Group::State); }
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<PersistentSizes, SnapTensor>().empty(), gs::sizes_problem<PersistentSizes, SnapTensor>());
 PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev,
                                  uint32_t max_len);
 // The KV and compressed keys of one position over the descriptor's QSA layers: 12 x (2048 + 64) = 25,344 B.
@@ -96,16 +116,36 @@ inline constexpr uint32_t kRouteWords = 32, kAttnTgt = 32, kAttnPart = 258, kPle
 //   ple_consts   u64 [35]               the hash constants (multipliers, sizes, offsets)
 //   logits, argmax_part   fp32 [M][248320], fp32 [M][243][2]
 struct ScratchSizes {
-  size_t H = 0, xn = 0, x = 0, partials = 0, down_f32 = 0, inj = 0, ab = 0, gdn_o = 0, idx_f32 = 0, idx_q = 0,
-         scores = 0, list = 0, diag = 0, attn_q = 0, attn_gate = 0, attn_part = 0, attn_out = 0, logits_r = 0,
-         routes = 0, moe_h = 0, y = 0, ple_e = 0, ple_kv = 0, ple_ids = 0, ple_consts = 0, logits = 0,
-         argmax_part = 0;
-  size_t total() const {
-    return H + xn + x + partials + down_f32 + inj + ab + gdn_o + idx_f32 + idx_q + scores + list + diag + attn_q +
-           attn_gate + attn_part + attn_out + logits_r + routes + moe_h + y + ple_e + ple_kv + ple_ids + ple_consts +
-           logits + argmax_part;
-  }
+  [[=gs::scratch]] size_t H = 0;
+  [[=gs::scratch]] size_t xn = 0;
+  [[=gs::scratch]] size_t x = 0;
+  [[=gs::scratch]] size_t partials = 0;
+  [[=gs::scratch]] size_t down_f32 = 0;
+  [[=gs::scratch]] size_t inj = 0;
+  [[=gs::scratch]] size_t ab = 0;
+  [[=gs::scratch]] size_t gdn_o = 0;
+  [[=gs::scratch]] size_t idx_f32 = 0;
+  [[=gs::scratch]] size_t idx_q = 0;
+  [[=gs::scratch]] size_t scores = 0;
+  [[=gs::scratch]] size_t list = 0;
+  [[=gs::scratch]] size_t diag = 0;
+  [[=gs::scratch]] size_t attn_q = 0;
+  [[=gs::scratch]] size_t attn_gate = 0;
+  [[=gs::scratch]] size_t attn_part = 0;
+  [[=gs::scratch]] size_t attn_out = 0;
+  [[=gs::scratch]] size_t logits_r = 0;
+  [[=gs::scratch]] size_t routes = 0;
+  [[=gs::scratch]] size_t moe_h = 0;
+  [[=gs::scratch]] size_t y = 0;
+  [[=gs::scratch]] size_t ple_e = 0;
+  [[=gs::scratch]] size_t ple_kv = 0;
+  [[=gs::scratch]] size_t ple_ids = 0;
+  [[=gs::constant]] size_t ple_consts = 0;   // the hash constants, written once at construction
+  [[=gs::scratch]] size_t logits = 0;
+  [[=gs::scratch]] size_t argmax_part = 0;
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<ScratchSizes, SnapTensor>().empty(), gs::sizes_problem<ScratchSizes, SnapTensor>());
 // `rows`: kM (1) without the MTP head, kVerifyRows (4) with it - every M-strided term x rows (spec 21-QFN-v1e).
 ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Attn a = q4_attn(), uint32_t rows = kM);
 size_t partials_floats(const model::Qwen4ExpDesc& d, uint32_t rows = kM);
@@ -234,17 +274,68 @@ uint32_t pf_batches_dn(const model::Qwen4ExpDesc& d);
 //                                                experts are read in place)
 //   cnt, items u32 [kPfC / 64][512], [items][4]  pf_moe_sort_mw's block counts and work items
 //   ple_ids    u64  [kPfC][16]                   the PLE row ids of the chunk's rows
+// Spec 39: Qwen4ExpPrefillScratch holds one allocation of each name; every one is written for a chunk before it is read.
 struct PrefillSizes {
-  size_t ids = 0, H = 0, xn = 0, x = 0, down_f32 = 0, inj = 0, partials = 0, slab = 0, idx_f32 = 0, idx_q = 0, scores = 0,
-         lists = 0, diag = 0, q16 = 0, o = 0, attn_out = 0, ab = 0, gdn = 0, logits = 0, routes = 0, hdr = 0, tiles = 0,
-         row_tok = 0, pair_row = 0, xg = 0, h = 0, y = 0, w = 0, ple_ids = 0, cnt = 0, items = 0;
-  size_t total() const {
-    return ids + H + xn + x + down_f32 + inj + partials + slab + idx_f32 + idx_q + scores + lists + diag + q16 + o +
-           attn_out + ab + gdn + logits + routes + hdr + tiles + row_tok + pair_row + xg + h + y + w + ple_ids + cnt +
-           items;
-  }
+  [[=gs::scratch]] size_t ids = 0;
+  [[=gs::scratch]] size_t H = 0;
+  [[=gs::scratch]] size_t xn = 0;
+  [[=gs::scratch]] size_t x = 0;
+  [[=gs::scratch]] size_t down_f32 = 0;
+  [[=gs::scratch]] size_t inj = 0;
+  [[=gs::scratch]] size_t partials = 0;
+  [[=gs::scratch]] size_t slab = 0;
+  [[=gs::scratch]] size_t idx_f32 = 0;
+  [[=gs::scratch]] size_t idx_q = 0;
+  [[=gs::scratch]] size_t scores = 0;
+  [[=gs::scratch]] size_t lists = 0;
+  [[=gs::scratch]] size_t diag = 0;
+  [[=gs::scratch]] size_t q16 = 0;
+  [[=gs::scratch]] size_t o = 0;
+  [[=gs::scratch]] size_t attn_out = 0;
+  [[=gs::scratch]] size_t ab = 0;
+  [[=gs::scratch]] size_t gdn = 0;
+  [[=gs::scratch]] size_t logits = 0;
+  [[=gs::scratch]] size_t routes = 0;
+  [[=gs::scratch]] size_t hdr = 0;
+  [[=gs::scratch]] size_t tiles = 0;
+  [[=gs::scratch]] size_t row_tok = 0;
+  [[=gs::scratch]] size_t pair_row = 0;
+  [[=gs::scratch]] size_t xg = 0;
+  [[=gs::scratch]] size_t h = 0;
+  [[=gs::scratch]] size_t y = 0;
+  [[=gs::scratch]] size_t w = 0;
+  [[=gs::scratch]] size_t ple_ids = 0;
+  [[=gs::scratch]] size_t cnt = 0;
+  [[=gs::scratch]] size_t items = 0;
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<PrefillSizes, SnapTensor>().empty(), gs::sizes_problem<PrefillSizes, SnapTensor>());
 PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, uint32_t rows = kPfC);
+// Spec 39: a device's prefill allocations beside its scratch (qwen4exp_prefill_engine.cc's Qwen4ExpPrefillState::Dev) -
+// in device memory the MTP head pass's R rows (the last device with the head, mtp_prefill_R_bytes) and, on two devices,
+// the pair's first chunk's own residual rows, inject weights and MoE output (pf_pair_bytes); in host memory (outside the
+// plan) the injected selection rows of both chunks in flight (pf_injected_bytes each, lazy), the chunks' Controls and
+// the head's. The read ahead's buffers (Q4PfRingState: its two stages and the staged rows) are RingSizes'.
+struct PfDevDeviceSizes {
+  [[=gs::scratch]] size_t mtp_R = 0;
+  [[=gs::scratch]] size_t H1 = 0;
+  [[=gs::scratch]] size_t inj1 = 0;
+  [[=gs::scratch]] size_t y1 = 0;
+};
+struct PfDevHostSizes {
+  [[=gs::scratch]] size_t inj = 0;
+  [[=gs::scratch]] size_t ctl = 0;
+  [[=gs::scratch]] size_t hctl = 0;
+};
+struct RingSizes {
+  [[=gs::scratch]] size_t stage = 0;
+  [[=gs::scratch]] size_t rows = 0;
+};
+static_assert(gs::sizes_problem<PfDevDeviceSizes, SnapTensor>().empty(), gs::sizes_problem<PfDevDeviceSizes, SnapTensor>());
+static_assert(gs::sizes_problem<PfDevHostSizes, SnapTensor>().empty(), gs::sizes_problem<PfDevHostSizes, SnapTensor>());
+static_assert(gs::sizes_problem<RingSizes, SnapTensor>().empty(), gs::sizes_problem<RingSizes, SnapTensor>());
+// `head`: the last device with the MTP head; `pair`: two devices.
+PfDevDeviceSizes pf_dev_sizes(const model::Qwen4ExpDesc& d, uint32_t rows, bool head, bool pair);
 inline size_t pf_route_at(uint32_t layer, uint32_t rows = kPfC) { return size_t(layer) * rows * kRouteWords * 4; }
 inline size_t pf_list_at(uint32_t qsa_index, uint32_t rows = kPfC) { return size_t(qsa_index) * rows * kListRow * 4; }
 inline size_t pf_diag_at(uint32_t qsa_index, uint32_t rows = kPfC) { return size_t(qsa_index) * rows * 2 * 4; }
@@ -316,12 +407,26 @@ const char* mtp_norm_name(MtpNorm n);
 // index_share_for_mtp_iteration - 21-QFN-v1a found it is not vLLM's default). The `fresh` arm (vLLM's default: select on
 // every step) and its B70_Q4_MTP_SELECT went in the zero-config cleanup (2026-11-06).
 
+// Qwen4ExpMtpBuffers holds one allocation of each name (spec 39).
 struct MtpSizes {
-  size_t ctl = 0, kv = 0, idx_keys = 0, idx_tail = 0, list = 0, diag = 0, hh = 0, xe = 0, xh = 0, fe = 0, fh = 0,
-         logits = 0, routes = 0;
-  size_t persistent() const { return ctl + kv + idx_keys + idx_tail + hh; }   // zeroed by reset
-  size_t total() const { return persistent() + list + diag + xe + xh + fe + fh + logits + routes; }
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("draft() writes pos, n_active and the token before each chain")]]
+  size_t hctl = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::MtpKv}]] size_t kv = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::MtpIdxKeys}]] size_t idx_keys = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::MtpIdxTail}]] size_t idx_tail = 0;
+  [[=gs::scratch]] size_t list = 0;
+  [[=gs::scratch]] size_t diag = 0;
+  [[=gs::state, =gs::zero_on_reset, =Snap{SnapTensor::MtpHidden}]] size_t hh = 0;   // the snapshot holds row 0
+  [[=gs::scratch]] size_t xe = 0;
+  [[=gs::scratch]] size_t xh = 0;
+  [[=gs::scratch]] size_t fe = 0;
+  [[=gs::scratch]] size_t fh = 0;
+  [[=gs::scratch]] size_t logits = 0;
+  [[=gs::scratch]] size_t routes = 0;
+  size_t persistent() const { return gs::per_sequence_bytes(*this); }   // zeroed by reset
+  size_t total() const { return gs::bytes(*this); }
 };
+static_assert(gs::sizes_problem<MtpSizes, SnapTensor>().empty(), gs::sizes_problem<MtpSizes, SnapTensor>());
 MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);
 // PERF-51: one GDN layer's pending rows at d's heads, gdn_step.cl's DEFERRED PR = 64 rows: kf bf16 [64][k heads][128],
 // v bf16 [64][v heads][128], {decay, beta} fp32 [64][v heads] - 1,073,152 B at 16 / 48 heads, 536,576 at the tp card's
@@ -331,6 +436,23 @@ size_t gdn_pend_layer_bytes(const model::Qwen4ExpDesc& d);
 size_t gdn_pend_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
 // The verify's PLE rows on the PLE layer's device: gated, gn bf16 [kVerifyRows][10240] each (0 elsewhere).
 size_t ple_verify_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
+// With the MTP head, a device's verify state (spec 39: Qwen4ExpBuffers' gdn_pend, ple_gated, ple_gn): the pending GDN
+// rows and the PLE rows, read only after the verify that wrote them (save_state refuses a pending verify).
+struct VerifySizes {
+  [[=gs::state, =gs::KeptOnReset("read only after a verify wrote them; Control::gdn_pend is 0 after reset"),
+    =gs::NotSnapshotted("save_state replays them into gdn_state first; load_state sets Control::gdn_pend to 0")]]
+  size_t gdn_pend = 0;
+  [[=gs::state, =gs::KeptOnReset("read only after the verify that wrote them"),
+    =gs::NotSnapshotted("save_state refuses a pending verify")]]
+  size_t ple_gated = 0;
+  [[=gs::state, =gs::KeptOnReset("read only after the verify that wrote them"),
+    =gs::NotSnapshotted("save_state refuses a pending verify")]]
+  size_t ple_gn = 0;
+};
+static_assert(gs::sizes_problem<VerifySizes, SnapTensor>().empty(), gs::sizes_problem<VerifySizes, SnapTensor>());
+static_assert(gs::snapshot_problem<SnapTensor, PersistentSizes, ScratchSizes, MtpSizes, VerifySizes>().empty(),
+              gs::snapshot_problem<SnapTensor, PersistentSizes, ScratchSizes, MtpSizes, VerifySizes>());
+VerifySizes verify_sizes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev);
 // What the head adds to a device's plan beyond its weights: gdn_pend, the PLE rows, (last device) MtpSizes, and the
 // decode scratch's extra rows (scratch_sizes at kVerifyRows less at 1).
 size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len);
@@ -402,9 +524,7 @@ inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d, uint32_t rows = 
 // EOS 248044 - q4_ple_gather reads a missing predecessor as EOS), load_state copies the host's bytes back into
 // those slots (the kernels never read them: every read of a position before 0 is masked by p >= q). `pad` runs are
 // host-only filler (the tails' rows past the open block): zeros on save, nothing written on load.
-enum class SnapTensor : uint32_t {
-  Kv, IdxKeys, IdxTail, GdnState, ConvRing, PleIds, PleRing, MtpKv, MtpIdxKeys, MtpIdxTail, MtpHidden
-};
+// (SnapTensor, the runs' tensors, is declared before PersistentSizes: each sizes member names the tensors it holds.)
 const char* snap_tensor_name(SnapTensor t);
 struct SnapRun {
   uint32_t device = 0;
@@ -553,8 +673,25 @@ double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vec
 // The crossings' device bytes on a card (Qwen3.8's runtime::tp::Layout at hidden 2560, the slices form): for each of
 // the two crossings - out_proj / o_proj's kTpOutSlices slices, the MoE's 11 slots - its landing buffer (the peer
 // writes it) and its send's and sum's counters; the state words; the MoE's slots fp32 [11][2560].
-inline constexpr uint32_t kTpOutSlices = 2;
-size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
+inline constexpr uint32_t kTpOutSlices = 4;   // kernels::qwen4exp::kTpOutS (PERF-109)
+// Spec 39: Qwen4ExpTpEngine::Card's own allocations beside its Qwen4ExpBuffers, one of each name (qwen4exp_tp_card.h) -
+// the two crossings' landings and counters, the MoE's slots fp32 [11][rows][2560] (rows: kVerifyRows with the MTP head;
+// the plan counted one row before), the state words, and on the card without the head its draft winner's Control.
+struct TpCardSizes {
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("a landing slot is read only in the step that filled it")]] size_t land_o = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("a landing slot is read only in the step that filled it")]] size_t land_m = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("both cards' counters advance together; a restore keeps them")]] size_t ctr_so = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("both cards' counters advance together; a restore keeps them")]] size_t ctr_fo = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("both cards' counters advance together; a restore keeps them")]] size_t ctr_sm = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("both cards' counters advance together; a restore keeps them")]] size_t ctr_fm = 0;
+  [[=gs::scratch]] size_t slots = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("a step's first failure, read after its fence")]] size_t state = 0;
+  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft step writes its winner")]] size_t dctl = 0;
+  size_t total() const { return gs::bytes(*this); }
+};
+static_assert(gs::sizes_problem<TpCardSizes, SnapTensor>().empty(), gs::sizes_problem<TpCardSizes, SnapTensor>());
+TpCardSizes tp_card_sizes(const model::Qwen4ExpDesc& one, bool mtp, bool draft_ctl);
+size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one, bool mtp = false, bool draft_ctl = false);
 // Plan 21v2b Task 4: a card's prefill beyond its scratch (prefill_sizes at the card's shapes): the two fold slots, fp32
 // [2][2][kPfC][hidden] (a slot's slice r is card r's partial of a row-parallel unit), and the down GEMM's fp32 rows
 // [tmax x 32][hidden] (qwen4exp_prefill.h, Q4TpPrefill). Plan 21-QFN-v2b Task 4 Step 2: kTpPfChunks chunks in flight
@@ -563,6 +700,30 @@ size_t tp_crossing_bytes(const model::Qwen4ExpDesc& one);
 // [kPfC][kListRow] (the indexer split by rows, below).
 inline constexpr uint32_t kTpPfChunks = 2;
 size_t tp_prefill_bytes(const model::Qwen4ExpDesc& one, uint32_t rows = kPfC);
+// Spec 39: a tp card's prefill allocations beside its scratch (qwen4exp_tp_prefill.cc's Q4TpPrefillState::Dev), one of
+// each name - in device memory both chunks' fold slots, the down GEMM's fp32 rows, the pair's second chunk's residual
+// rows, inject weights and selection rows (tp_prefill_bytes), and on the head's card its pass's R rows and own rows at
+// one card's widths (tp_plan's MTP prefill terms); in host memory (outside the plan) the chunks' Controls, row Controls
+// and the head's. Every one is written for a chunk before it is read.
+struct TpPfDevSizes {
+  [[=gs::scratch]] size_t fold = 0;
+  [[=gs::scratch]] size_t yf = 0;
+  [[=gs::scratch]] size_t H1 = 0;
+  [[=gs::scratch]] size_t inj1 = 0;
+  [[=gs::scratch]] size_t lists1 = 0;
+  [[=gs::scratch]] size_t mtp_R = 0;
+  [[=gs::scratch]] size_t mtp_part = 0;
+  [[=gs::scratch]] size_t mtp_q16 = 0;
+};
+struct TpPfHostSizes {
+  [[=gs::scratch]] size_t ctl = 0;
+  [[=gs::scratch]] size_t rctl = 0;
+  [[=gs::scratch]] size_t hctl = 0;
+};
+static_assert(gs::sizes_problem<TpPfDevSizes, SnapTensor>().empty(), gs::sizes_problem<TpPfDevSizes, SnapTensor>());
+static_assert(gs::sizes_problem<TpPfHostSizes, SnapTensor>().empty(), gs::sizes_problem<TpPfHostSizes, SnapTensor>());
+// `head`: the card that holds the MTP head.
+TpPfDevSizes tp_pf_dev_sizes(const model::Qwen4ExpDesc& one, uint32_t rows, bool head);
 // The indexer split by rows (qwen4exp_prefill.h, Q4TpPrefill::rctl): on a chunk with sparse rows and at least
 // kTpSplitMin rows, card 0 scores and selects rows [0, tp_rows_cut(C)), card 1 the rest, and each copies its
 // selection rows to the peer - the same kernels on fewer rows, so the lists are bitwise the replicated walk's.

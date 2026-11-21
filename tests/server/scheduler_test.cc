@@ -3,6 +3,7 @@
 // must equal the same request served alone; the cases cover streaming order, per-row
 // stops, disconnects, per-request seeds, the bounded queue, the prefix plan taken at the
 // slot grant, both admission policies, and prefill fairness in mock ticks.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -352,10 +353,12 @@ void test_queue_and_plan_at_grant() {
   }
 }
 
-// Spec 13 §8: batched admission holds a burst, then prefills it in one call.
-void test_batched_admission() {
+// Spec 13 §8: batched admission holds a burst, then prefills it in one call. Spec 31: the same with the slots' lengths
+// as one page pool (`pool`).
+void test_batched_admission(bool pool = false) {
   double now = 0;
   MockBatchEngine eng(4);
+  if (pool) eng.pool = 4 * eng.maxlen / eng.blk;
   SchedulerOptions o = opts(512, Admission::Batched);
   o.burst_hold_s = 0.005;
   o.clock = [&now] { return now; };
@@ -381,17 +384,26 @@ void test_batched_admission() {
   const size_t before = eng.events.size();
   for (int i = 3; i < 7; ++i) CHECK(s.submit(make({P(54 + i, 4), 3, {}}, x[i], eng)) != nullptr);
   CHECK(s.tick());
-  CHECK_EQ(eng.events[before + 4], std::string("prefill 0:4 1:4 2:4 3:4"));
+  // A pool grants the slot holding the fewest pages first, and a grant that gives up an idle session evicts it (one
+  // more reset): the same four chunks in one call, in another slot order.
+  if (pool) {
+    const auto it = std::find_if(eng.events.begin() + before, eng.events.end(),
+                                 [](const std::string& e) { return e.rfind("prefill ", 0) == 0; });
+    CHECK(it != eng.events.end() && std::count(it->begin(), it->end(), ':') == 4);
+  } else {
+    CHECK_EQ(eng.events[before + 4], std::string("prefill 0:4 1:4 2:4 3:4"));
+  }
   drain(s);
   for (int i = 0; i < 7; ++i) CHECK_EQ(x[i].fin.reason, Finish::Length);
   same_as_alone("batched admission", {P(52, 9), 5, {}}, x[1]);
-  std::printf("batched admission: a 3-request burst held 5 ms then one prefill call\n");
+  std::printf("batched admission%s: a 3-request burst held 5 ms then one prefill call\n", pool ? " (a page pool)" : "");
 }
 
 // Review Focus 3 / B4 fairness: a running request's worst inter-token gap (mock ticks: a
 // decode step costs 1, prefill 32 ids per tick) while a 32k prompt prefills.
-double worst_gap(Admission a, uint32_t chunk, uint32_t* ttft_ticks) {
+double worst_gap(Admission a, uint32_t chunk, uint32_t* ttft_ticks, bool pool = false) {
   MockBatchEngine eng(4, 40000);
+  if (pool) eng.pool = 4 * eng.maxlen / eng.blk;   // spec 31: the four slots' positions as one pool
   SchedulerOptions o = opts(chunk, a);
   o.burst_hold_s = 0;
   Scheduler s(eng, o);
@@ -424,6 +436,12 @@ void test_fairness() {
   CHECK(g512 <= 512.0 / 32 + 1 + 1e-9);
   CHECK(g2048 <= 2048.0 / 32 + 1 + 1e-9);
   CHECK(gb >= 32768.0 / 32);
+  // Spec 31: a page pool changes nothing here.
+  uint32_t t;
+  CHECK_EQ(worst_gap(Admission::Interleave, 512, &t, true), g512);
+  CHECK_EQ(t, ttft[0]);
+  CHECK_EQ(worst_gap(Admission::Batched, 512, &t, true), gb);
+  CHECK_EQ(t, ttft[2]);
 }
 
 // EOS rules as server.cc's: min_tokens and ignore_eos keep the EOS as an id; max_tokens 0.
@@ -854,7 +872,8 @@ void test_kv_form() {
 // before the first step - plain and speculative - and every request ends exactly as without the peek: the same ids,
 // reasons and engine calls, also when the first id ends it (EOS, max_tokens 1, a stop string at once). The chunk that
 // ends the prompt carries the request's sampling: a sampled request's first id is drawn there.
-void test_first_id_peek() {
+// Spec 31 (`pool`): the same with the slots' lengths as one page pool.
+void test_first_id_peek(bool pool = false) {
   const std::vector<Spec> specs = {
       {P(1, 10), 12, {}},
       {P(2, 6), 12, seeded(7)},
@@ -871,6 +890,7 @@ void test_first_id_peek() {
     for (const bool peek : {false, true}) {
       MockBatchEngine eng(3);
       configure(eng);
+      if (pool) eng.pool = 3 * eng.maxlen / eng.blk;
       eng.eos_at[21] = 1;
       eng.eos_at[22] = 1;
       eng.spec = spec;
@@ -909,8 +929,208 @@ void test_first_id_peek() {
     CHECK_EQ(outs[1][1].ids.at(0), ref.first_draw(specs[1].s));
     CHECK_EQ(outs[1][6].ids.at(0), ref.first_draw(specs[6].s));
   }
-  std::printf("first id peeked: sent after the prompt's last chunk, the same ids and ends as without, plain and "
-              "speculative; a sampled first id drawn at the prompt's end\n");
+  std::printf("first id peeked%s: sent after the prompt's last chunk, the same ids and ends as without, plain and "
+              "speculative; a sampled first id drawn at the prompt's end\n", pool ? " (a page pool)" : "");
+}
+
+// ---- Spec 31 (plan 31 Task 6): admission by free KV pages, idle sessions evicted to the prefix cache ------------
+
+// The fixed slots' lengths as one pool: a request may grow past any one slot's length; a prompt past the cap is
+// refused at submit as before.
+void test_slot_lengths_pool() {
+  MockBatchEngine eng(2);
+  eng.pool = (64 + 1024) / eng.blk;
+  configure(eng);
+  Scheduler s(eng, opts());
+  Out a, b, c, d, e;
+  CHECK(s.submit(make({P(71, 100), 8, {}}, a, eng)) != nullptr);
+  CHECK(s.submit(make({P(72, 60), 100, {}}, b, eng)) != nullptr);   // no 64-position slot: all 100 ids
+  drain(s);
+  CHECK_EQ(a.ids.size(), size_t(8));
+  CHECK_EQ(b.ids.size(), size_t(100));
+  same_as_alone("pool lengths, past a fixed slot's end", {P(72, 60), 100, {}}, b);
+  // Two long prompts run side by side: no long slot to wait for.
+  CHECK(s.submit(make({P(73, 200), 6, {}}, d, eng)) != nullptr);
+  CHECK(s.submit(make({P(74, 300), 6, {}}, e, eng)) != nullptr);
+  s.tick();
+  CHECK_EQ(s.active(), size_t(2));
+  drain(s);
+  CHECK(d.fin.slot != e.fin.slot);
+  same_as_alone("pool lengths, the second long prompt", {P(74, 300), 6, {}}, e);
+  bool threw = false;
+  try {
+    s.submit(make({P(75, 1024), 5, {}}, c, eng));
+  } catch (const std::invalid_argument& error) {
+    threw = std::string(error.what()).find("max_model_len is 1024") != std::string::npos;
+  }
+  CHECK(threw);
+  std::printf("pool lengths: a request grows past a fixed slot's end; two long prompts at once; past the cap: 400\n");
+}
+
+// A 100k-token request beside two short ones: slot 0 of the fixed layout (46,080 at bf16) refuses it, a pool of the
+// same card's 70 pages serves all three at once.
+void test_pool_long_beside_short() {
+  MockBatchEngine fixed(4, 46080);
+  fixed.lens = {46080, 32768, 32768, 32768};
+  Scheduler sf(fixed, opts());
+  Out refused;
+  bool threw = false;
+  try {
+    sf.submit(make({P(81, 100000), 40, {}}, refused, fixed));
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
+
+  MockBatchEngine eng(4, 70 * 2048);
+  eng.blk = 2048;
+  eng.pool = 70;
+  Scheduler s(eng, opts());
+  const std::vector<Spec> specs = {{P(81, 100000), 40, {}}, {P(82, 3000), 40, {}}, {P(83, 3000), 40, seeded(4)}};
+  std::vector<Out> outs(specs.size());
+  for (size_t i = 0; i < specs.size(); ++i) CHECK(s.submit(make(specs[i], outs[i], eng)) != nullptr);
+  drain(s);
+  bool three = false;
+  for (const auto& ev : eng.events) three = three || (ev.rfind("step ", 0) == 0 && ev.size() == std::string("step 0 1 2").size());
+  CHECK(three);
+  for (size_t i = 0; i < specs.size(); ++i) {
+    CHECK_EQ(outs[i].fin.reason, Finish::Length);
+    same_as_alone("pool, long beside short", specs[i], outs[i], 70 * 2048);
+  }
+  std::printf("pool: a 100000-id prompt the fixed slots refuse runs beside two short ones (70 pages of 2048)\n");
+}
+
+// A request short of pages evicts the least recently used idle session; that session's next turn is a prefix cache
+// hit restored from host memory, its ids those of the session served alone. Its entries stay pinned until then: with
+// a store just big enough for A's and B's sessions, C's entries push out B's (idle on the card, not pinned), never A's.
+void test_pool_evicts_idle() {
+  size_t after_ab = 0;
+  for (const bool tight : {false, true}) {
+    MockBatchEngine eng(3, 8192);
+    eng.blk = 256;
+    eng.pool = 48;
+    configure(eng);
+    MallocAlloc alloc;
+    server::PrefixSlots cache(eng, tight ? after_ab : size_t(1) << 26, alloc);
+    Scheduler s(eng, opts(), &cache);
+    const Spec a{P(91, 5000), 20, {}}, b{P(92, 5000), 20, {}}, c{P(93, 6000), 20, {}};
+    Out oa, ob, oc;
+    CHECK(s.submit(make(a, oa, eng)) != nullptr);
+    drain(s);
+    CHECK(s.submit(make(b, ob, eng)) != nullptr);
+    drain(s);
+    if (!tight) after_ab = cache.cache().bytes_used();
+    const uint32_t sa = uint32_t(oa.fin.slot), sb = uint32_t(ob.fin.slot);
+    CHECK(sa != sb);
+    CHECK_EQ(eng.pages_held(sa), 21u);   // prompt + a page of output + a row: 5257 positions
+    CHECK_EQ(eng.pages_held(sb), 21u);
+    CHECK(s.submit(make(c, oc, eng)) != nullptr);   // 25 pages, 6 free: A's session (the older) leaves the card
+    drain(s);
+    CHECK(uint32_t(oc.fin.slot) != sa && uint32_t(oc.fin.slot) != sb);
+    CHECK_EQ(eng.pages_held(sa), 0u);
+    CHECK_EQ(eng.pages_held(sb), 21u);
+    same_as_alone("pool eviction, C", c, oc, 8192);
+    // A's next turn: its whole conversation so far, then new ids. B's session (now the older) makes room.
+    Spec a2{a.prompt, 10, {}};
+    a2.prompt.insert(a2.prompt.end(), oa.ids.begin(), oa.ids.end());
+    for (uint32_t i = 0; i < 5; ++i) a2.prompt.push_back(7200 + i);
+    Out oa2;
+    CHECK(s.submit(make(a2, oa2, eng)) != nullptr);
+    drain(s);
+    CHECK_EQ(cache.last_kind(uint32_t(oa2.fin.slot)), server::PrefixCache::Plan::Restore);
+    CHECK_EQ(oa2.fin.cached_tokens, uint32_t(a.prompt.size() + oa.ids.size()));
+    CHECK_EQ(eng.pages_held(sb), 0u);
+    same_as_alone("pool eviction, A's next turn", a2, oa2, 8192);
+    std::printf("pool: an idle session evicted for a new request; its next turn restored %u positions from the "
+                "prefix cache%s\n", oa2.fin.cached_tokens,
+                tight ? " (a store of exactly A's and B's sessions: A's entries held while C's were stored)" : "");
+  }
+}
+
+// A request that shares only its first id with an idle long session takes a free slot, not its slot; when the
+// requests need its pages it leaves the card as an eviction (its entries held), and its next turn restores it whole.
+void test_pool_shared_first_id() {
+  MockBatchEngine eng(4, 8192);
+  eng.blk = 256;
+  eng.pool = 40;
+  configure(eng);
+  MallocAlloc alloc;
+  server::PrefixSlots cache(eng, size_t(1) << 26, alloc);
+  Scheduler s(eng, opts(), &cache);
+  const Spec l{P(7, 6000), 20, {}};
+  Out ol;
+  CHECK(s.submit(make(l, ol, eng)) != nullptr);
+  drain(s);
+  const uint32_t sl = uint32_t(ol.fin.slot);
+  std::vector<Spec> shorts;
+  for (uint32_t k = 0; k < 3; ++k) {
+    Spec x{P(60 + k, 2000), 8, {}};
+    x.prompt[0] = l.prompt[0];   // the same first id as the long session
+    shorts.push_back(x);
+  }
+  std::vector<Out> os(3);
+  for (uint32_t k = 0; k < 3; ++k) CHECK(s.submit(make(shorts[k], os[k], eng)) != nullptr);
+  drain(s);
+  // The first is granted while the long session still holds its pages: a free slot, not its slot. (Once it has left
+  // the card its slot is as free as any other.)
+  CHECK(uint32_t(os[0].fin.slot) != sl);
+  for (uint32_t k = 0; k < 3; ++k) same_as_alone("pool, a short request beside an idle long session", shorts[k], os[k], 8192);
+  CHECK(eng.pages_held(sl) < 25u);   // 25 + 3 x 9 pages > 40: the long session left the card (a short one may hold its slot)
+  Spec l2{l.prompt, 10, {}};
+  l2.prompt.insert(l2.prompt.end(), ol.ids.begin(), ol.ids.end());
+  for (uint32_t i = 0; i < 5; ++i) l2.prompt.push_back(7300 + i);
+  Out ol2;
+  CHECK(s.submit(make(l2, ol2, eng)) != nullptr);
+  drain(s);
+  CHECK_EQ(cache.last_kind(uint32_t(ol2.fin.slot)), server::PrefixCache::Plan::Restore);
+  CHECK_EQ(ol2.fin.cached_tokens, uint32_t(l.prompt.size() + ol.ids.size()));
+  same_as_alone("pool, the long session's next turn", l2, ol2, 8192);
+  std::printf("pool: requests sharing a long idle session's first id took a free slot; the session left the "
+              "card for their pages and its next turn restored %u positions\n", ol2.fin.cached_tokens);
+}
+
+// Every sequence running and no page free: the growing request ends with "length" where its pages end; the other
+// finishes unchanged, plain and with the first id peeked. A prompt that fits the cap but not the free pages waits, and is served when pages return.
+void test_pool_full() {
+  // With the first id peeked too (PERF-91): the reservation covers the first step, so no request ends for want of a
+  // page right after its first id went out.
+  for (const bool peek : {false, true}) {
+    MockBatchEngine eng(2, 4096);
+    eng.blk = 256;
+    eng.pool = 13;
+    eng.peek = peek;
+    Scheduler s(eng, opts());
+    const Spec a{P(101, 1000), 2000, {}};   // 5 pages reserved (to 1280), then it grows
+    const Spec b{P(102, 1700), 340, {}};    // 8 pages, ends at 2040: never grows
+    Out oa, ob;
+    CHECK(s.submit(make(a, oa, eng)) != nullptr);
+    CHECK(s.submit(make(b, ob, eng)) != nullptr);
+    drain(s);
+    CHECK_EQ(oa.fin.reason, Finish::Length);
+    CHECK_EQ(oa.ids.size(), size_t(280));   // position 1280 is on no page
+    const Out ra = alone(a, 4096);
+    CHECK(std::equal(oa.ids.begin(), oa.ids.end(), ra.ids.begin()));
+    same_as_alone("pool full, the other request", b, ob, 4096);
+  }
+  {
+    MockBatchEngine eng(2, 4096);
+    eng.blk = 256;
+    eng.pool = 13;
+    Scheduler s(eng, opts());
+    const Spec a{P(103, 2500), 50, {}};   // 11 pages
+    const Spec b{P(104, 1000), 10, {}};   // 5 pages, 2 free: waits
+    Out oa, ob;
+    CHECK(s.submit(make(a, oa, eng)) != nullptr);
+    CHECK(s.submit(make(b, ob, eng)) != nullptr);
+    s.tick();
+    CHECK_EQ(s.active(), size_t(1));
+    CHECK_EQ(s.waiting(), size_t(1));
+    drain(s);
+    CHECK_EQ(ob.fin.reason, Finish::Length);
+    CHECK(ob.t.at(0) > oa.t.back());   // served once A's pages came back
+    same_as_alone("pool, the request that waited", b, ob, 4096);
+  }
+  std::printf("pool full: the growing request ends with length, the other unchanged; a request waits for pages\n");
 }
 
 int main() {
@@ -930,6 +1150,13 @@ int main() {
   test_parallel_prefill();
   test_callback_throws();
   test_first_id_peek();
+  test_first_id_peek(true);
+  test_batched_admission(true);
+  test_slot_lengths_pool();
+  test_pool_long_beside_short();
+  test_pool_evicts_idle();
+  test_pool_shared_first_id();
+  test_pool_full();
   std::printf("scheduler_test: all cases passed\n");
   return 0;
 }

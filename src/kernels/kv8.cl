@@ -90,6 +90,19 @@
 #error "kv8 KV_PAGED: the gate reads no KV"
 #endif
 
+// KV8_I8S (PERF-114, the int8 prompt pass; undefined on every other command line): int8 attention scores in the prompt pass. The
+// writer (KV8_PREP, PF = 1) quantises the rotated bf16 q per row and head over its 256 dims - s = amax / 127 (fp32),
+// q8 = s == 0 ? 0 : clamp(rint(q / s), -127, 127) - into attn_q as int8 [C][q-heads][256] and s into q_scale
+// [C][q-heads]. The pair flash (KV8_PAIR) reads that q8 and K's int8 rows (kv8_widen copies them, V still widened to
+// bf16) and scores by int8 DPAS: s = ((float(int32 dot) * s_q) * s_k) * SCORE_SCALE - the dot exact (|dot| <= 256 x
+// 127 x 127 < 2^24), the three products in that order. Softmax, P and P V are the bf16 pair's, unchanged.
+#ifndef KV8_I8S
+#define KV8_I8S 0
+#endif
+#if KV8_I8S && !((KV8_PREP && defined(PF) && PF) || (KV8_FLASH && defined(KV8_PAIR) && KV8_PAIR))
+#error "kv8 KV8_I8S: the prefill writer (KV8_PREP, PF 1) and the pair flash (KV8_PAIR) only"
+#endif
+
 #if KV8_DEC || KV8_FLASH
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -266,6 +279,25 @@ inline void kv8_store(float y, uint i, __local float* red, __global char* restri
   barrier(CLK_LOCAL_MEM_FENCE);   // everyone has read red[0]
 }
 
+#if KV8_I8S
+// KV8_I8S's q: kv8_store's tree over the bf16 rotated q, an fp32 scale (no fp16 rounding).
+inline void kv8_store_q(float y, uint i, __local float* red, __global char* restrict row,
+                        __global float* restrict scale) {
+  red[i] = fabs(y);
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = KV8_WG / 2; stride > 0; stride >>= 1) {
+    if (i < stride) red[i] = fmax(red[i], red[i + stride]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float sf = red[0] / 127.0f;
+  float r = sf == 0.0f ? 0.0f : rint(y / sf);
+  r = fmin(fmax(r, -127.0f), 127.0f);
+  row[i] = (char)(int)r;
+  if (i == 0) *scale = sf;
+  barrier(CLK_LOCAL_MEM_FENCE);
+}
+#endif
+
 __attribute__((reqd_work_group_size(KV8_WG, 1, 1)))
 __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
                             __global const float* restrict qkv_partials,
@@ -274,6 +306,9 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
                             __global float* restrict attn_q, __global float* restrict attn_gate,
                             __global char* restrict kv_k, __global char* restrict kv_v,
                             __global ushort* restrict k_scale, __global ushort* restrict v_scale
+#if KV8_I8S
+                            , __global float* restrict q_scale
+#endif
 #ifdef BATCH_ROWS
                             , __global const uint* restrict rows
 #endif
@@ -340,7 +375,10 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 
   if (is_q) {                  // uniform: the barriers inside are reached by all or none
     const float y = kv8_rotate(outv, i, xch);
-#if PF
+#if KV8_I8S
+    kv8_store_q(bf16f(rne_bf16(y)), i, red, (__global char*)attn_q + ((size_t)m * Q_HEADS + h) * HD,
+                q_scale + (size_t)m * Q_HEADS + h);
+#elif PF
     ((__global ushort*)attn_q)[((size_t)m * Q_HEADS + h) * HD + i] = rne_bf16(y);
 #else
     attn_q[((size_t)m * Q_HEADS + h) * HD + i] = y;
@@ -938,7 +976,11 @@ __kernel void kv8_widen(__global const char* restrict K,
   const size_t src = ((size_t)pages[p / KV_PAGED] * KV_PAGED + p % KV_PAGED) * KV8F_KVU * HD + i % (KV8F_KVU * HD);
   const char16 k = vload16(0, K + src), v = vload16(0, V + src);
 #endif
+#if KV8_I8S
+  vstore16(k, 0, (__global char*)Kr + i);   // K stays int8: the scores' DPAS operand
+#else
   vstore16(convert_ushort16(as_uint16(convert_float16(k)) >> 16), 0, Kr + i);
+#endif
   vstore16(convert_ushort16(as_uint16(convert_float16(v)) >> 16), 0, Vr + i);
 }
 #endif
@@ -953,17 +995,30 @@ __kernel void kv8_widen(__global const char* restrict K,
 // dims over all four key atoms in order). The scales stay with the key atoms that own them: a sub-group multiplies
 // its own keys' scores by their K scale and its own P atoms by their V scale before publishing them; the row sum
 // stays sum p. Bitwise the RPW 8 raw form above. Grid (ceil(C / 16), kv-heads, GQA / HPW).
-#if !KV8_RAW || KV8_SPLIT || defined(KV_PAGED) || KT != 64 || RPW != 16 || QREG
-#error "pf_flash_attn_kv8 KV8_PAIR: KV8_RAW, KT 64, RPW 16, no KV8_SPLIT / KV_PAGED / QREG"
+// KV8_I8S (above): Q is int8 with QS [C][q-heads] fp32 beside it, Kc kv8_widen's int8 rows; each K tile is 8 int8
+// DPAS (32 dims) a row block and key atom into an int32 sum, then times the row's q scale; the rest is the form above.
+// With KV_PAGED (KV8_I8S only) the rows are the widened sequence's own and only the scales are read by page.
+#if !KV8_RAW || KV8_SPLIT || (defined(KV_PAGED) && !KV8_I8S) || KT != 64 || RPW != 16 || QREG
+#error "pf_flash_attn_kv8 KV8_PAIR: KV8_RAW, KT 64, RPW 16, no KV8_SPLIT / QREG, KV_PAGED with KV8_I8S only"
 #endif
 __attribute__((reqd_work_group_size(SG * 2 * HPW, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
+#if KV8_I8S
+__kernel void pf_flash_attn_kv8(__global const char* restrict Q,
+                                __global const float* restrict QS,
+                                __global const char* restrict Kc,
+#else
 __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
                                 __global const KV8_VALUE* restrict Kc,
+#endif
                                 __global const ushort* restrict Ks,
                                 __global const KV8_VALUE* restrict Vc,
                                 __global const ushort* restrict Vs,
-                                __global float* restrict O, uint pos, uint C, uint rows) {
+                                __global float* restrict O, uint pos, uint C, uint rows
+#ifdef KV_PAGED
+                                , __global const uint* restrict pages
+#endif
+                                ) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint k = s & 1u, hp = s >> 1;                              // key half / dim half; the pair
   const uint j = get_group_id(1);                                  // kv head
@@ -971,7 +1026,23 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
   const uint r0 = get_group_id(0) * 16u;                           // first of 16 rows
   if (r0 >= C) return;                                             // uniform over the work-group
   const uint depth = pos + C;
+#if KV8_I8S
+  const int q_w = KV8F_Q * HD, q_h = (int)C, q_p = KV8F_Q * HD;   // int8 q
+  const int k_w = KV8F_KV * HD;                                    // int8 K rows (width = pitch)
+  float8 qsr[2];   // the q scale of row r0 + 8 rb + r in component r; 0 past C (its scores are never written)
+#pragma unroll
+  for (uint rb = 0; rb < 2u; ++rb) {
+    float t[8];
+#pragma unroll
+    for (uint r = 0; r < 8u; ++r) {
+      const uint row = r0 + 8u * rb + r;
+      t[r] = row < C ? QS[(size_t)row * KV8F_Q + h] : 0.0f;
+    }
+    qsr[rb] = vload8(0, t);
+  }
+#else
   const int q_w = KV8F_Q * HD * 2, q_h = (int)C, q_p = KV8F_Q * HD * 2;
+#endif
   const int kv_w = KV8F_KV * HD * 2, kv_h = (int)depth, kv_p = KV8F_KV * HD * 2;
   __local float smax[HPW * 32];      // [pair][k][16 rows]: the tile's row maxima of key half k
   __local float sa[HPW * 256];       // [pair][rb][r * 16 + lane]: sub-group 0's p0 + p1
@@ -987,6 +1058,39 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
   const uint last = min(depth, pos + r0 + 16u);
   for (uint t0 = 0; t0 < last; t0 += KT) {
     float8 sacc[2][2];
+#if KV8_I8S
+    int8 iacc[2][2];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) iacc[rb][0] = iacc[rb][1] = (int8)(0);
+#pragma unroll
+    for (uint kk = 0; kk < HD / 32u; kk += 2) {   // int8 atoms of 32 dims, two a read
+      short8 qa[2][2];
+#pragma unroll
+      for (uint rb = 0; rb < 2u; ++rb) {
+        ushort t[16];
+        intel_sub_group_2d_block_read_16b_8r16x2c((__global void*)Q, q_w, q_h, q_p,
+                                                  (int2)((int)((h * HD + 32u * kk) / 2u), (int)(r0 + 8u * rb)), t);
+        qa[rb][0] = as_short8(vload8(0, t));
+        qa[rb][1] = as_short8(vload8(0, t + 8));
+      }
+#pragma unroll
+      for (uint kq = 0; kq < 2u; ++kq)
+#pragma unroll
+        for (uint bb = 0; bb < 2u; ++bb) {
+          uint kb[8];   // lane = key, its 32 dims as 8 words of 4 (low byte = lowest dim)
+          intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+              (__global void*)Kc, k_w, kv_h, k_w,
+              (int2)((int)((j * HD + 32u * (kk + kq)) / 4u), (int)(t0 + 16u * (2u * k + bb))), kb);
+#pragma unroll
+          for (uint rb = 0; rb < 2u; ++rb)
+            iacc[rb][bb] = intel_sub_group_i8_i8_matrix_mad_k32(qa[rb][kq], as_int8(vload8(0, kb)), iacc[rb][bb]);
+        }
+    }
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb)
+#pragma unroll
+      for (uint bb = 0; bb < 2u; ++bb) sacc[rb][bb] = convert_float8(iacc[rb][bb]) * qsr[rb];
+#else
 #pragma unroll
     for (uint rb = 0; rb < 2u; ++rb) sacc[rb][0] = sacc[rb][1] = (float8)(0.0f);
 #pragma unroll
@@ -1013,14 +1117,26 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
             sacc[rb][bb] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[rb][kq], as_int8(vload8(0, kb)), sacc[rb][bb]);
         }
     }
+#endif
     // this lane's key's K and V scales, per key atom of this half (lane = key t0 + 16 (2k + bb) + l)
     float skl[2], svl[2];
+#ifdef KV_PAGED
+    // the tile's page (KT divides KV_PAGED): key's scale row is ppr + key - pgs
+    const uint pgs = t0 / KV_PAGED * KV_PAGED;
+    const size_t ppr = (size_t)pages[t0 / KV_PAGED] * KV_PAGED;
+#endif
 #pragma unroll
     for (uint bb = 0; bb < 2u; ++bb) {
       const uint key = t0 + 16u * (2u * k + bb) + l;
       const bool live = key < depth;
+#ifndef KV_PAGED
       skl[bb] = live ? kv8_flash_scale(Ks, (size_t)key * KV8F_KVU + j) : 0.0f;
       svl[bb] = live ? kv8_flash_scale(Vs, (size_t)key * KV8F_KVU + j) : 0.0f;
+#else
+      const size_t krow = ppr + (key - pgs);
+      skl[bb] = live ? kv8_flash_scale(Ks, krow * KV8F_KVU + j) : 0.0f;
+      svl[bb] = live ? kv8_flash_scale(Vs, krow * KV8F_KVU + j) : 0.0f;
+#endif
     }
     // scale by the key's K scale, mask, this half's row maxima (component r = row r0 + 8 rb + r)
 #pragma unroll

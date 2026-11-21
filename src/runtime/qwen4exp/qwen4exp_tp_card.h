@@ -1,4 +1,5 @@
 #pragma once
+#include <cstring>
 #include <optional>
 
 #include "l0/cmdlist.h"
@@ -35,14 +36,14 @@ struct Qwen4ExpTpEngine::Card {
         ctl(buffers.control.as<Control>()),
         lo{one.hidden, kTpOutSlices, kernels::qwen4exp::kTpOutFoldG},
         lm{one.hidden, one.top_k + 1, kernels::qwen4exp::kTpMoeFoldG},
-        land_o(c, l0::MemKind::Device, lo.total_bytes(), 4096),
-        land_m(c, l0::MemKind::Device, lm.total_bytes(), 4096),
-        ctr_so(c, l0::MemKind::Device, lo.counter_bytes()),
-        ctr_fo(c, l0::MemKind::Device, lo.counter_bytes()),
-        ctr_sm(c, l0::MemKind::Device, lm.counter_bytes()),
-        ctr_fm(c, l0::MemKind::Device, lm.counter_bytes()),
-        slots(c, l0::MemKind::Device, size_t(one.top_k + 1) * (mtp ? kVerifyRows : 1) * one.hidden * 4),
-        state(c, l0::MemKind::Shared, tp::kStateWords * 4) {}
+        land_o(c, l0::MemKind::Device, tp_card_sizes(one, mtp, false).land_o, 4096),
+        land_m(c, l0::MemKind::Device, tp_card_sizes(one, mtp, false).land_m, 4096),
+        ctr_so(c, l0::MemKind::Device, tp_card_sizes(one, mtp, false).ctr_so),
+        ctr_fo(c, l0::MemKind::Device, tp_card_sizes(one, mtp, false).ctr_fo),
+        ctr_sm(c, l0::MemKind::Device, tp_card_sizes(one, mtp, false).ctr_sm),
+        ctr_fm(c, l0::MemKind::Device, tp_card_sizes(one, mtp, false).ctr_fm),
+        slots(c, l0::MemKind::Device, tp_card_sizes(one, mtp, false).slots),
+        state(c, l0::MemKind::Shared, tp_card_sizes(one, mtp, false).state) {}
   l0::Context& ctx;
   const model::Qwen4ExpDesc desc;
   Qwen4ExpBuffers buffers;
@@ -61,6 +62,17 @@ struct Qwen4ExpTpEngine::Card {
   std::vector<CapturedStep> verify, drafts;
   std::optional<CapturedStep> flush;   // PERF-51: the GDN flush list (the committed rows into the state)
   std::unique_ptr<l0::Mem> dctl;   // runtime::Control, shared: the card without the head's draft winner
+
+  // Spec 39: every allocation above of TpCardSizes' names (memory_line's), and reset's zeroing of the zero_on_reset ones.
+  size_t own_bytes() const { return gs::buffer_bytes<l0::Mem, TpCardSizes>(*this); }
+  void zero_own() {
+    gs::zero<l0::Mem, TpCardSizes>(*this, [&](l0::Mem& m) {
+      if (m.kind() == l0::MemKind::Shared)
+        std::memset(m.ptr(), 0, m.size());
+      else
+        imm.fill(m.ptr(), 0u, m.size());
+    });
+  }
 };
 
 }  // namespace runtime::qwen4exp

@@ -188,7 +188,7 @@ void TpEngine::reset() {
                                "after " + std::to_string(opt_.timeout_ms) + " ms");
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     cd(r).persist.zero(cd(r).imm);
-    cd(r).zero_crossing();
+    cd(r).zero();   // the crossing and (spec 39) the drafter's slots
     if (cd(r).mtp) cd(r).mtp->zero(cd(r).imm);   // spec 17d: the head's KV, slots, hidden rows and Control
     if (drafter_) drafter_->card(r).reset(cd(r).imm);   // spec 19 v3c: a cold drafter half
   }
@@ -420,7 +420,7 @@ void TpEngine::load_state(const void* host, uint32_t pos) {
       if (!settle(r))
         throw std::runtime_error("runtime::TpEngine::load_state: card " + std::to_string(r) +
                                  "'s failed step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
-    for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).zero_crossing();
+    for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).zero();
     broken_ = false;
     drop_ = -1;
   }
@@ -789,13 +789,17 @@ std::vector<uint16_t> TpEngine::read_debug_resid(uint32_t card) const {
 }
 
 MemoryComponents TpEngine::memory_use(uint32_t card) const {
+  static_assert(gs::buffers_problem<l0::Mem, TpEngine>().empty(), gs::buffers_problem<l0::Mem, TpEngine>());
   const Card& c = cd(card);
   MemoryComponents m;
   m.model = model_device_bytes(c.model);
   m.kv = c.persist.kv_k.size() + c.persist.kv_v.size();
-  m.decode_state = c.persist.bytes() - m.kv + c.scratch.bytes() + c.bytes_crossing() + (c.tap ? c.tap->size() : 0) +
-                   (c.mtp ? c.mtp->bytes() : 0) +           // spec 17d: the head's buffers
-                   (c.df_slots ? c.df_slots->size() : 0);   // spec 19 v3c: the drafter's GDN slots
+  // Spec 39: the card's own allocations (TpCardSizes: the crossing, the tap, spec 19 v3c's drafter slots), one of each
+  // name (here: Card is private to the engine).
+  static_assert(gs::buffers_problem<l0::Mem, Card, TpCardSizes>().empty(),
+                gs::buffers_problem<l0::Mem, Card, TpCardSizes>());
+  m.decode_state = c.persist.bytes() - m.kv + c.scratch.bytes() + c.bytes() +
+                   (c.mtp ? c.mtp->bytes() : 0);   // spec 17d: the head's buffers
   m.drafter = drafter_ ? drafter_->card(card).bytes() : 0;   // its half's weights and buffers
   m.prefill_scratch = pf_bytes_[card];   // spec 17c: after prepare_prefill()
   m.int8 = pf_int8_bytes_[card];

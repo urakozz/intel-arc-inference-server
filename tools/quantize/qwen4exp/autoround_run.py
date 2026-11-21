@@ -3,7 +3,7 @@
 """Stage `quant` of tools/quantize/quantize_qwen4exp.sh: AutoRound with spec 21-QFN-v2 §2's settings.
 
     autoround_run.py --model <bf16 snapshot> --out <dir> [--device xpu|cpu] [--iters 200]
-                     [--nsamples 128] [--seqlen 2048] [--batch-size 8]
+                     [--nsamples 128] [--seqlen 2048] [--batch-size 8] [--grad-accum 1]
                      [--dataset nvidia/OpenCodeInstruct:apply_chat_template]
                      --ple-dir <dir on NVMe> [--print-only]
 
@@ -56,6 +56,7 @@ def settings(a) -> dict:
     return {
         "scheme": "W4A16", "group_size": 64, "sym": True,
         "iters": a.iters, "nsamples": a.nsamples, "seqlen": a.seqlen, "batch_size": a.batch_size,
+        "gradient_accumulate_steps": a.grad_accum,
         "dataset": a.dataset, "low_gpu_mem_usage": True, "low_cpu_mem_usage": True, "device_map": a.device,
         "ignore_layers": ",".join(IGNORE), "seed": a.seed, "disable_model_free": True,
     }
@@ -143,6 +144,7 @@ def main() -> None:
     ap.add_argument("--nsamples", type=int, default=128)
     ap.add_argument("--seqlen", type=int, default=2048)
     ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--grad-accum", type=int, default=1, help="micro-batches a tuning step sums; batch-size x grad-accum is the step's batch")
     ap.add_argument("--dataset", default=OPENCODE + ":apply_chat_template")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--ple-dir", required=True, help="where the PLE table's raw bf16 file goes (fast disk, ~102 GB)")

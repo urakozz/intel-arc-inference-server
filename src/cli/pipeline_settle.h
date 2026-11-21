@@ -53,6 +53,31 @@ inline runtime::PpExtras pp_extras(const loader::LoadedModel& full, bool hook) {
   return x;
 }
 
+// PERF-114: whether l0-int8 on the checkpoint at `path` runs on the int8 context (cli::int8_pass_kv) - a dense model.
+// Read before any device from config.json's architectures[0]; a path or config that does not read counts as dense
+// (the load reports it by name), an architecture the Qwen family does not know (Flash-Next, Kolibri: their own flows
+// refuse l0-int8) as not.
+inline bool int8_context_model(const std::string& path) {
+  std::string snap;
+  try {
+    snap = loader::resolve_snapshot(path);
+  } catch (const std::exception&) {
+    return true;
+  }
+  std::ifstream f(snap + "config.json");
+  if (!f) return true;
+  std::stringstream ss;
+  ss << f.rdbuf();
+  const common::json::Value config = common::json::parse(ss.str());
+  const common::json::Value* archs = config.find("architectures");
+  if (!archs || !archs->is_array() || archs->arr().empty() || !archs->arr()[0].is_string()) return true;
+  try {
+    return !model::desc_for_architecture(archs->arr()[0].str()).is_moe();
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
 // The zero-config cleanup's `--parallel auto` for the Qwen family (Qwen3.8, Ornith): one card
 // when the model and the asked context fit it - the faster choice (one answer is not faster on two
 // cards, docs/17-running-models.md) - else pipeline parallel. Decided before the load, from the

@@ -1612,8 +1612,8 @@ st_r32_k1() {
     gemv_M1_K2560_N16384_S1_L0 gemv_M1_K2560_N13312_S2_L0 gemv_bf16_M1_K2560_N16384 gemv_bf16_M1_K2560_N13312 \
     gemv_bf16_M1_K10240_N336_C16_S16 gemv_bf16_M1_K10240_N320_C16_S16 gemv_bf16_M1_K2560_N640_C16_S16 \
     gemv_bf16_M1_K2560_N528_C16_S16 gemv_bf16_M1_K2560_N12800 gemv_bf16_M1_K2560_N248320 gemv_i8w_M1_K2560_N248320 \
-    q4_hc_combine_norm_M1_E q4_hc_combine_norm_M1_S1 q4_hc_combine_norm_M1_S4 q4_hc_combine_norm_M1_Y \
-    q4_hc_combine_norm_M1_Y_NN q4_hc_combine_norm_M1_X q4_hc_up_mix_M1_I q4_hc_up_mix_M1 q4_ple_gather_M1_BF16 \
+    q4_hc_combine_norm_M1_E q4_hc_combine_norm_M1_S1 q4_hc_combine_norm_M1_S8 q4_hc_combine_norm_M1_Y \
+    q4_hc_combine_norm_M1_Y_NN q4_hc_combine_norm_M1_X q4_hc_up_mix_M1_I_B q4_hc_up_mix_M1_B q4_ple_gather_M1_BF16 \
     q4_ple_gather_M1_F32 q4_ple_block_M1 q4_qsa_M1_T512_W1024 q4_qsa_attn_M1_T32 q4_qsa_attn_eager_M1 \
     q4_route_M1_E512_T10_N528_L256 q4_moe_M1_E512_T10_D2560_I640_SH4 q4_moe_M1_E512_T10_D2560_I640_SHB
   run_tests '^qwen4exp_kernels_test$' qwen4exp
@@ -1818,8 +1818,8 @@ st_r34_k1() {
     attn_prep_M2_Q24KV2 attn_prep_M2_Q24KV2_S1 attn_prep_M3_Q24KV2 attn_prep_M3_Q24KV2_S1 attn_prep_M4_Q24KV2 \
     attn_prep_M4_Q24KV2_S1 embed_gather_M2_D2560 embed_gather_M3_D2560 embed_gather_M4_D2560 gdn_step_defer_M1_G1 \
     gdn_step_defer_M2_G1 gdn_step_defer_M3_G1 gdn_step_defer_M4_G1 gemv_M2_K2560_N13312_S2_L0 \
-    gemv_M2_K2560_N16384_S1_L0 gemv_M2_K6144_N2560_S4_L0 gemv_M3_K2560_N13312_S2_L0 gemv_M3_K2560_N16384_S1_L0 \
-    gemv_M3_K6144_N2560_S4_L0 gemv_M4_K2560_N13312_S2_L0 gemv_M4_K2560_N16384_S1_L0 gemv_M4_K6144_N2560_S4_L0 \
+    gemv_M2_K2560_N16384_S1_L0 gemv_M2_K6144_N2560_S8_L0 gemv_M3_K2560_N13312_S2_L0 gemv_M3_K2560_N16384_S1_L0 \
+    gemv_M3_K6144_N2560_S8_L0 gemv_M4_K2560_N13312_S2_L0 gemv_M4_K2560_N16384_S1_L0 gemv_M4_K6144_N2560_S8_L0 \
     gemv_bf16_M1_K2560_N2560 gemv_bf16_M2_K10240_N320_C16_S16 gemv_bf16_M2_K10240_N336_C16_S16 \
     gemv_bf16_M2_K2560_N12800 gemv_bf16_M2_K2560_N128_C16_S16 gemv_bf16_M2_K2560_N13312 gemv_bf16_M2_K2560_N16384 \
     gemv_bf16_M2_K2560_N248320 gemv_bf16_M2_K2560_N2560 gemv_bf16_M2_K2560_N528_C16_S16 \
@@ -1832,12 +1832,12 @@ st_r34_k1() {
     gemv_bf16_M4_K2560_N2560 gemv_bf16_M4_K2560_N528_C16_S16 gemv_bf16_M4_K2560_N640_C16_S16 \
     gemv_bf16_M4_K6144_N2560 gemv_i8w_M2_K2560_N248320 gemv_i8w_M3_K2560_N248320 gemv_i8w_M4_K2560_N248320 \
     prep_gated_head_M2_SIG prep_gated_head_M3_SIG prep_gated_head_M4_SIG q4_hc_combine_norm_M2_E \
-    q4_hc_combine_norm_M2_S1 q4_hc_combine_norm_M2_S4 q4_hc_combine_norm_M2_X q4_hc_combine_norm_M2_Y \
-    q4_hc_combine_norm_M2_Y_NN q4_hc_combine_norm_M3_E q4_hc_combine_norm_M3_S1 q4_hc_combine_norm_M3_S4 \
+    q4_hc_combine_norm_M2_S1 q4_hc_combine_norm_M2_S8 q4_hc_combine_norm_M2_X q4_hc_combine_norm_M2_Y \
+    q4_hc_combine_norm_M2_Y_NN q4_hc_combine_norm_M3_E q4_hc_combine_norm_M3_S1 q4_hc_combine_norm_M3_S8 \
     q4_hc_combine_norm_M3_X q4_hc_combine_norm_M3_Y q4_hc_combine_norm_M3_Y_NN q4_hc_combine_norm_M4_E \
-    q4_hc_combine_norm_M4_S1 q4_hc_combine_norm_M4_S4 q4_hc_combine_norm_M4_X q4_hc_combine_norm_M4_Y \
-    q4_hc_combine_norm_M4_Y_NN q4_hc_up_mix_M2 q4_hc_up_mix_M2_I q4_hc_up_mix_M3 q4_hc_up_mix_M3_I q4_hc_up_mix_M4 \
-    q4_hc_up_mix_M4_I q4_moe_M2_E512_T10_D2560_I640_SH4 q4_moe_M2_E512_T10_D2560_I640_SHB \
+    q4_hc_combine_norm_M4_S1 q4_hc_combine_norm_M4_S8 q4_hc_combine_norm_M4_X q4_hc_combine_norm_M4_Y \
+    q4_hc_combine_norm_M4_Y_NN q4_hc_up_mix_M2_B q4_hc_up_mix_M2_I_B q4_hc_up_mix_M3_B q4_hc_up_mix_M3_I_B q4_hc_up_mix_M4_B \
+    q4_hc_up_mix_M4_I_B q4_moe_M2_E512_T10_D2560_I640_SH4 q4_moe_M2_E512_T10_D2560_I640_SHB \
     q4_moe_M3_E512_T10_D2560_I640_SH4 q4_moe_M3_E512_T10_D2560_I640_SHB q4_moe_M4_E512_T10_D2560_I640_SH4 \
     q4_moe_M4_E512_T10_D2560_I640_SHB q4_mtp_M1_SINGLE q4_mtp_M1_STREAM q4_mtp_M2048_SINGLE_PF \
     q4_mtp_M2048_STREAM_PF q4_mtp_M2_SINGLE q4_mtp_M2_STREAM q4_mtp_M3_SINGLE q4_mtp_M3_STREAM q4_mtp_M4_SINGLE \
@@ -2325,7 +2325,7 @@ st_r69_gates() {
 }
 # Spec 28 N4 / N6's f32 judges for Qwen3.8: the spec tests' forced contexts (B70_DUMP_FORCED,
 # tests/golden/forced_judge.h) -> tools/box_validate/f32_refs.sh forced-qwen (one f32 trie forward on the box CPU)
-# -> $DATA/oracle-out-qwen-f32{,-i8head,-pfi8mlp}-forced, which the tests' registrations read (B70_FORCED_JUDGE, tests/
+# -> $DATA/oracle-out-qwen-f32{,-i8head,-pfi8all}-forced, which the tests' registrations read (B70_FORCED_JUDGE, tests/
 # CMakeLists.txt). Until a context's judge is there its divergences AWAIT it: the test SKIPs (77), not FAILs.
 stage r69.forced_dumps 69 optin card qwen,dflash r69.kernels "the Qwen3.8 spec tests' forced contexts: mtp_verify_test, mtp_gpu_test (+ dv128k, both heads; + max_len 32768 / 131072, r6.mtp_long's, mtp_verify_test too), dflash_engine_test, dflash_gpu_test, dflash_lookup_gpu_test with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/qwen-spec/ (their verdicts here are not the gate: r69.gates / g0.suite are)"
 st_r69_forced_dumps() {

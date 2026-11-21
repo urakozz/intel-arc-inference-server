@@ -106,8 +106,8 @@ void validate(const Q4Placement& p, const Qwen4ExpDesc& d);
 
 // Plan 21-QFN-v2b: card `rank`'s descriptor under tp (Qwen3.8's model::tp_card_desc rule): half the QSA q / kv heads (12 /
 // 1), half the GDN k / v heads (8 / 24), half of every expert's and the shared expert's width (320), half the
-// vocabulary (124160 rows; vocab_used the rank's real ids), half out_proj's and o_proj's split-K (2: its slices are
-// one card's slices 2r, 2r + 1). Every width derived from these is the card's (qkv||z 8192,
+// vocabulary (124160 rows; vocab_used the rank's real ids), half out_proj's and o_proj's split-K (4: its slices are
+// one card's slices 4r .. 4r + 3). Every width derived from these is the card's (qkv||z 8192,
 // q||gate||k||v 6656, out_proj / o_proj K 3072, the conv 5120, the KV and GDN state halves); the hyper-connections,
 // the router, the indexer, the PLE and the RoPE table keep one card's. The kernels bake one card's shapes; their
 // card builds name these.
@@ -137,8 +137,9 @@ struct Qwen4ExpDesc {
   // (loader::Q4HcOffsets).
   bool hc_int8 = false;
   // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21-QFN-v1c's sweep - copied from Qwen3.8's measured map
-  // at the nearest shapes (out_proj / o_proj S4, q||k||v S2). qkv||z is S 1,
-  // fixed: gdn_step and prep_gated_head read S 1 (prep.cl:118-123).
+  // at the nearest shapes (q||k||v S2); out_proj / o_proj S8 (PERF-109: a tp card's half at S4 launches 640 sub-groups
+  // instead of 320, and a tp slice stays one card's). qkv||z is S 1, fixed: gdn_step and prep_gated_head read S 1
+  // (prep.cl:118-123).
   uint32_t gdn_out_s = 0, qkvg_s = 0, o_s = 0;
 
   bool is_qsa(uint32_t l) const { return l % 4 == 3; }
