@@ -1,4 +1,7 @@
 #pragma once
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -24,6 +27,7 @@
 //                         q4_hc_down_i8, q4_hc_slab_i8 (PERF-66's int8 form)  sub-groups / plain
 //   q4_ple.cl             q4_ple_gather, q4_ple_block, q4_ple_check           plain OpenCL C
 //   q4_qsa.cl             q4_qsa_prep, q4_qsa_score, q4_qsa_select            plain OpenCL C
+//                         (_I4H: q4_qsa_score on sub-groups, int4 DPAS)
 //   q4_qsa_attn.cl        q4_qsa_attn, q4_qsa_reduce (flash, sub-groups)       card only
 //   q4_qsa_attn_eager.cl  q4_qsa_attn_eager (the reference's bf16 chain)      plain OpenCL C
 //   q4_moe.cl             q4_route, q4_moe_gate_up, q4_moe_down               block reads under
@@ -124,9 +128,14 @@ inline std::string ple_check_variant(bool bf16_scale) { return ple_gather_varian
 // q4_expert_check.cl: the expert tier's load check (plan 21-QFN-v2a Task 8), one binary; WG 64.
 inline std::string expert_check_variant() { return "q4_expert_check"; }
 inline constexpr uint32_t kExpertCheckWg = 64;
+// The indexer scores in int4 x int4 on DPAS after the 128-point Hadamard (`_I4H`, QSA_I4H=1) in every decode, verify, draft
+// and prefill binary. The bf16 form (no suffix) is built for the kernel test's and bench's reference only: `bf16` selects it.
+// A block's slot in the indexer cache is the packed key alone - nibbles [64] then two fp32 scales: kI4KeySlot bytes - and a
+// query row's packed heads sit in idx_q's fp32 row footprint.
+inline constexpr unsigned kI4KeySlot = kIdxDim / 2 + 8, kI4RowBytes = kIdxHeads * kIdxDim * 4;
 // q4_qsa.cl's three kernels are one binary per M (prep, score, select: attn.cl's arrangement).
-inline std::string qsa_variant(unsigned M) {
-  return "q4_qsa" + m_(M) + "_T" + std::to_string(kTopBlocks) + "_W" + std::to_string(kSelectWg);
+inline std::string qsa_variant(unsigned M, bool bf16 = false) {
+  return "q4_qsa" + m_(M) + "_T" + std::to_string(kTopBlocks) + "_W" + std::to_string(kSelectWg) + (bf16 ? "" : "_I4H");
 }
 // "q4_qsa_attn_M1_T32" (q4_qsa_attn + q4_qsa_reduce) | "q4_qsa_attn_eager_M1" (one kernel, B70_Q4_ATTN=eager).
 inline std::string qsa_attn_variant(unsigned M, bool eager) {
@@ -217,9 +226,11 @@ inline std::string attn_v2_q4_variant(unsigned M) { return attn_v2_variant(M, kA
 // the PLE scale form. Two-card lists add nothing new (the materialising _Y_NN is in every list: the PLE
 // layer's prologue). Capture checks each exists before appending a command;
 // tests/kernels/qwen4exp_variant_names_test.cc holds the union to the CMake block's list.
+// The split-K slices a mixer GEMV leaves for the combine to sum: the int4 dense form's 8, the bf16 form's 1.
+inline constexpr unsigned kHcSlicesInt4 = 8, kHcSlicesBf16 = 1;
 inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
                                                 bool ple_bf16_scale = true, bool hc8 = false) {
-  const unsigned S = int4_dense ? 8u : 1u;
+  const unsigned S = int4_dense ? kHcSlicesInt4 : kHcSlicesBf16;
   std::vector<std::string> v = {
       embed_variant(1),
       hc_combine_norm_variant(1, HcSrc::Embed, 0, true),
@@ -338,7 +349,10 @@ inline std::string pf_hc_up_mix_variant(unsigned C = kPfC, bool hc8 = false) {
   return "q4_hc_up_mix" + m_(C) + "_I_D" + std::to_string(kPfHcDownLd) + "_R" + std::to_string(kPfHcUpRows) + "C" +
          std::to_string(kPfHcUpCols) + (hc8 ? "_Q8" : "");
 }
-inline std::string pf_qsa_variant(unsigned C = kPfC) { return qsa_variant(C) + "_PF"; }   // "q4_qsa_M2048_T512_W1024_PF"
+// "q4_qsa_M2048_T512_W1024_PF_I4H" (bf16: the reference form without the suffix)
+inline std::string pf_qsa_variant(unsigned C = kPfC, bool bf16 = false) {
+  return qsa_variant(C, true) + "_PF" + (bf16 ? "" : "_I4H");
+}
 // Its q4_qsa_score: SCORE_R rows a work-group (src/kernels/CMakeLists.txt), grid (ceil(n / kScoreWg), pf_score_groups).
 inline constexpr unsigned kPfScoreRows = 4;
 inline unsigned pf_score_groups(unsigned C) { return (C + kPfScoreRows - 1) / kPfScoreRows; }
@@ -531,7 +545,7 @@ inline std::string lm_head_m_variant(unsigned M, bool int8, LinearKind k = Linea
 // materialising _Y_NN is every list's).
 inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single, LinearKind k, bool hc8 = false) {
-  const unsigned S = int4_dense ? 8u : 1u;
+  const unsigned S = int4_dense ? kHcSlicesInt4 : kHcSlicesBf16;
   std::vector<std::string> v = {
       embed_variant(M),
       hc_combine_norm_variant(M, HcSrc::Embed, 0, true),

@@ -2,7 +2,7 @@
 // shapes, against tests/kernels/qwen4exp_ref.h. Needs a B70, no checkpoint (synthetic weights); exits 77 (SKIP)
 // without a GPU. Every binary of the CMake block's spec 21-QFN-v1c section (kernels::qwen4exp names) - BITWISE unless said:
 //
-//   1. q4_hc_combine_norm _E, _S4, _S1, _Y, _X, _Y_NN (H and xn; _NN leaves xn untouched); q4_hc_up_mix _I and
+//   1. q4_hc_combine_norm _E, _S8, _S1, _Y, _X, _Y_NN (H and xn; _NN leaves xn untouched); q4_hc_up_mix _I and
 //      plain (x and the inject weights)
 //   2. q4_ple_gather _BF16 and _F32 from REAL host-USM ranges (16 per table + 16 of scales, l0::MemKind::Host at
 //      2 MiB, the device pointer table u64 [32] as loader/qwen4exp_ple_usm.cc builds it; the real multipliers,
@@ -35,12 +35,17 @@
 //      q4_hc_up_mix) on the same random weights: max / mean relative error and cosine of down's output and of x;
 //      PERF-106's decode up-mix (the lists' forms: _B, one work-group a row; bf16 and int8, both shapes) at M 1..4
 //      against the twins per row, n_active M and M - 1
+//   9. q4_qsa _I4H (the engine's indexer): the prep's packed query heads and compressed keys, the score (one row at
+//      600 / 65536 blocks, the prefill form's 10 rows) bitwise against q4ref::qsa_*_i4; the selection agreement with
+//      the bf16 form's on synthetic inputs (three regimes, 2.4k / 4k / 32k / 128k positions, 8 rows) printed
 //
 // Opt-in modes (each runs alone):
 //   --bench-attn       decision 10's evidence: the sparse kernel (q4_qsa_attn + q4_qsa_reduce over the identity
 //                      list) against attn_v2 (attn_decode_v2 + attn_reduce_v2) at depths 512 / 1024 / 2048 -
 //                      lists of 100 launch pairs, 3 warm-up replays each, then 3 rounds of 20 replays with A and B
 //                      interleaved replay by replay; the median round, printed in us per launch pair
+//   --bench-qsa-i4     the indexer's timing: score + select, bf16 / _I4H, decode at 4k / 32k / 128k positions and
+//                      the prefill form at 32k / 128k (bench_qsa_i4)
 //   --bench-hc8        PERF-66's and PERF-106's timing at M = 1..4 (those built), each pair A / B: the down||inject
 //                      GEMV (gemv_bf16 vs the lists' q4_hc_down_i8, that vs its _A); then the int8 pair, the down and
 //                      the up-mix _I after it (a list entry = both launches): the lists' (raw sums, _Q8_B a work-group
@@ -276,7 +281,7 @@ void hc_tests(Dev& d) {
   const std::vector<uint16_t> H0 = random_bf16(HCN, -2.f, 2.f, 1);
   const std::vector<float> w = bf16_vals(HCN, 0.5f, 1.5f, 2);
   const std::vector<float> inj = {rf(0.75f), rf(1.25f), rf(0.5f), rf(1.875f)};
-  const std::vector<float> slices = random_f32(size_t(4) * D, -0.5f, 0.5f, 3);
+  const std::vector<float> slices = random_f32(size_t(qk::kHcSlicesInt4) * D, -0.5f, 0.5f, 3);
   const std::vector<uint16_t> ybf = random_bf16(D, -1.f, 1.f, 4), emb = random_bf16(D, -0.1f, 0.1f, 5);
   l0::Mem ib = d.upload(inj), wb = d.upload(w), sl = d.upload(slices), yb = d.upload(ybf), eb = d.upload(emb);
   struct V {
@@ -284,7 +289,7 @@ void hc_tests(Dev& d) {
     uint32_t S;
     bool norm;
   };
-  for (const V& v : {V{qk::HcSrc::Embed, 0, true}, V{qk::HcSrc::Slices, 4, true}, V{qk::HcSrc::Slices, 1, true},
+  for (const V& v : {V{qk::HcSrc::Embed, 0, true}, V{qk::HcSrc::Slices, qk::kHcSlicesInt4, true}, V{qk::HcSrc::Slices, qk::kHcSlicesBf16, true},
                      V{qk::HcSrc::Y, 0, true}, V{qk::HcSrc::None, 0, true}, V{qk::HcSrc::Y, 0, false}}) {
     const std::string name = qk::hc_combine_norm_variant(1, v.src, v.S, v.norm);
     l0::Module m(d.ctx, kernels::path(name));
@@ -809,7 +814,7 @@ bool select_case(Dev& d, l0::Module& m, const std::vector<float>& scores, uint32
 }
 
 void qsa_tests(Dev& d) {
-  const std::string name = qk::qsa_variant(1);
+  const std::string name = qk::qsa_variant(1, true);
   l0::Module m(d.ctx, kernels::path(name));
   const model::Qwen4ExpDesc& md = model::qwen4exp();
   // -- prep
@@ -932,6 +937,185 @@ void qsa_tests(Dev& d) {
       report_bool(name + " q4_qsa_select n 65536 " + (k ? "coarse ties" : "the device's scores") + ", tails 0 and 3", ok, why);
     }
   }
+}
+
+// ---- 9. the int4 x int4 indexer (QSA_I4H) -----------------------------------------------------------------
+// Synthetic indexer inputs at real shapes: `rows` query rows [rows][4][128] and n compressed keys [n][128], bf16 values,
+// each vector rescaled to the RMS of the channel weights the (1 + w) norms leave. Regime 0: weights 1 + 0.3 N(0, 1);
+// 1: four of them x6 (outlier channels); 2: as 1, plus 400 keys pulled toward row 0's heads (relevant blocks).
+struct IdxSet {
+  std::vector<float> q;
+  std::vector<uint16_t> keys;
+};
+IdxSet idx_set(uint32_t n, uint32_t rows, int regime, uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::normal_distribution<float> nd(0.f, 1.f);
+  std::uniform_real_distribution<float> ud(0.f, 1.f);
+  std::vector<float> w(128);
+  float wm = 0;
+  for (float& x : w) x = 1.f + 0.3f * nd(rng);
+  if (regime >= 1)
+    for (int c = 0; c < 4; ++c) w[rng() % 128] *= 6.f;
+  for (float x : w) wm += x / 128.f;
+  const auto unit = [&](float* v) {   // RMS -> wm
+    double ss = 0;
+    for (int i = 0; i < 128; ++i) ss += double(v[i]) * v[i];
+    const float k = wm / float(std::sqrt(ss / 128.0) + 1e-30);
+    for (int i = 0; i < 128; ++i) v[i] *= k;
+  };
+  IdxSet s;
+  s.q.resize(size_t(rows) * 512);
+  for (uint32_t v = 0; v < rows * 4; ++v) {
+    float* x = s.q.data() + size_t(v) * 128;
+    for (int i = 0; i < 128; ++i) x[i] = nd(rng) * w[i];
+    unit(x);
+    for (int i = 0; i < 128; ++i) x[i] = rf(x[i]);
+  }
+  std::vector<float> k(size_t(n) * 128);
+  for (size_t i = 0; i < k.size(); ++i) k[i] = nd(rng) * w[i % 128];
+  if (regime == 2)
+    for (int r = 0; r < 400; ++r) {
+      const uint32_t b = rng() % n, h = rng() % 4;
+      const float a = 1.5f * std::sqrt(128.f) / wm * ud(rng);
+      for (int i = 0; i < 128; ++i) k[size_t(b) * 128 + i] += a * s.q[h * 128 + i] / std::sqrt(128.f);
+    }
+  s.keys.resize(k.size());
+  for (uint32_t b = 0; b < n; ++b) {
+    unit(k.data() + size_t(b) * 128);
+    for (int i = 0; i < 128; ++i) s.keys[size_t(b) * 128 + i] = rne(k[size_t(b) * 128 + i]);
+  }
+  return s;
+}
+// idx_keys in the QSA_I4H layout: slot b (kI4KeySlot B) = its packed key.
+std::vector<uint8_t> i4_slots(const std::vector<uint16_t>& keys, size_t slots) {
+  std::vector<uint8_t> out(slots * qk::kI4KeySlot, 0);
+  for (size_t b = 0; b < keys.size() / 128; ++b) qr::qsa_key_i4(keys.data() + b * 128, out.data() + b * qk::kI4KeySlot);
+  return out;
+}
+// idx_q rows in the QSA_I4H layout: row m's 2048-byte footprint = its packed heads.
+std::vector<uint8_t> i4_rows(const std::vector<float>& q) {
+  std::vector<uint8_t> out(q.size() * 4, 0);
+  for (size_t m = 0; m < q.size() / 512; ++m) qr::qsa_q_i4(q.data() + m * 512, out.data() + m * 2048);
+  return out;
+}
+// The selected blocks of one row (n > 512) as a set test: how many of `want`'s blocks `got` has.
+uint32_t common_blocks(const std::vector<uint32_t>& got, const std::vector<uint32_t>& want) {
+  uint32_t c = 0;
+  for (uint32_t b : want) c += std::binary_search(got.begin(), got.end(), b);
+  return c;
+}
+
+void qsa_i4_tests(Dev& d) {
+  const model::Qwen4ExpDesc& md = model::qwen4exp();
+  const size_t slot = qk::kI4KeySlot;   // the packed keys' slot stride
+  const std::string name = qk::qsa_variant(1);
+  l0::Module m(d.ctx, kernels::path(name));
+  // -- prep: the packed query heads, the packed compressed keys, the raw tail (bf16, as the bf16 form's)
+  {
+    const uint32_t ML = 9004;
+    const std::vector<float> rope = loader::q4_rope_table(md, ML);
+    const std::vector<float> small = bf16_vals(768, 0.5f, 1.5f, 200);
+    l0::Mem rb = d.upload(rope), smb = d.upload(small), qb = d.zeros(2048), tb = d.zeros(size_t(qk::kTailSlots) * 256),
+            kb = d.zeros(size_t(ML / 4) * slot), ib = d.zeros(640 * 4);
+    Ctl ctl(d.ctx);
+    std::vector<std::vector<uint16_t>> raw(ML);
+    Diff dq, dt, dk;
+    for (uint32_t pos : {0u, 1u, 2u, 3u, 2044u, 2045u, 2046u, 2047u, 2048u, 2049u, 2050u, 2051u, 8996u, 8997u, 8998u, 8999u}) {
+      const std::vector<float> idx = random_f32(qk::kIdxN, -3.f, 3.f, 300 + pos);
+      ctl.at(pos);
+      d.write(ib, idx);
+      launch(d, m, "q4_qsa_prep", qk::kPrepWg, {qk::kIdxHeads + 1, 1, 1}, {ctl.m, ib, smb, rb, qb, tb, kb});
+      std::vector<float> qh(512);
+      qr::qsa_q(idx.data(), small.data() + 512, rope.data() + size_t(pos) * 64, qh.data());
+      std::vector<uint8_t> want(2048, 0);
+      qr::qsa_q_i4(qh.data(), want.data());
+      want.resize(4 * 72);
+      dq.all(d.read<uint8_t>(qb, 4 * 72), want, size_t(pos) * 288);
+      raw[pos].resize(128);
+      qr::qsa_raw_key(idx.data(), raw[pos].data());
+      dt.all(d.read<uint16_t>(tb, 128, size_t(pos % qk::kTailSlots) * 256), raw[pos], size_t(pos) * 128);
+      if ((pos + 1) % qk::kBlock == 0) {
+        const uint32_t b = (pos + 1) / 4 - 1;
+        const uint16_t* r4[4] = {raw[4 * b].data(), raw[4 * b + 1].data(), raw[4 * b + 2].data(), raw[4 * b + 3].data()};
+        std::vector<uint16_t> key(128);
+        qr::qsa_block_key(r4, small.data() + 640, rope.data() + size_t(4 * b) * 64, key.data());
+        std::vector<uint8_t> packed(slot, 0);
+        qr::qsa_key_i4(key.data(), packed.data());
+        dk.all(d.read<uint8_t>(kb, slot, size_t(b) * slot), packed, size_t(b) * slot);
+      }
+    }
+    report(name + " q4_qsa_prep packed query heads (positions 0..3, 2044..2051, 8996..8999)", dq);
+    report(name + " q4_qsa_prep raw keys in the 8-slot tail", dt);
+    report(name + " q4_qsa_prep packed compressed keys (blocks 0, 511, 512, 2249)", dk);
+  }
+  // -- score, one row: bitwise the host twin, nothing past n
+  for (uint32_t n : {600u, 65536u}) {
+    const uint32_t stride = 65536, p = 4 * n - 1;
+    const IdxSet s = idx_set(n, 1, 1, 400 + n);
+    const std::vector<uint8_t> rows = i4_rows(s.q), slots = i4_slots(s.keys, stride);
+    Ctl ctl(d.ctx);
+    ctl.at(p);
+    l0::Mem qb = d.upload(rows), kb = d.upload(slots), sb = d.filled(size_t(stride) * 4, qr::as_u32(-1.0f));
+    launch(d, m, "q4_qsa_score", qk::kScoreWg, {stride / qk::kScoreWg, 1, 1}, {ctl.m, qb, kb, sb, stride});
+    std::vector<float> want(stride, -1.0f);
+    for (uint32_t b = 0; b < n; ++b) want[b] = qr::qsa_score_i4(rows.data(), slots.data() + size_t(b) * slot);
+    Diff ds;
+    ds.all(d.read<float>(sb, stride), want);
+    report(name + " q4_qsa_score at " + std::to_string(n) + " blocks (grid over 65536, nothing past n)", ds);
+  }
+  // -- the prefill form: SCORE_R rows a work-group, 10 rows straddling block ends (rows past C untouched)
+  {
+    const std::string pf = qk::pf_qsa_variant();
+    l0::Module mp(d.ctx, kernels::path(pf));
+    const uint32_t C = 10, p0 = 4 * 700 - 3, stride = 1024, nl = (p0 + C) / 4;
+    const IdxSet s = idx_set(nl, C, 2, 450);
+    const std::vector<uint8_t> rows = i4_rows(s.q), slots = i4_slots(s.keys, stride);
+    Ctl ctl(d.ctx);
+    ctl.at(p0, C);
+    l0::Mem qb = d.upload(rows), kb = d.upload(slots), sb = d.filled(size_t(C + 2) * stride * 4, qr::as_u32(-1.0f));
+    launch(d, mp, "q4_qsa_score", qk::kScoreWg, {(nl + qk::kScoreWg - 1) / qk::kScoreWg, qk::pf_score_groups(C), 1},
+           {ctl.m, qb, kb, sb, stride});
+    std::vector<float> want(size_t(C + 2) * stride, -1.0f);
+    for (uint32_t j = 0; j < C; ++j)
+      for (uint32_t b = 0; b < (p0 + j + 1) / 4; ++b)
+        want[size_t(j) * stride + b] = qr::qsa_score_i4(rows.data() + size_t(j) * 2048, slots.data() + size_t(b) * slot);
+    Diff ds;
+    ds.all(d.read<float>(sb, size_t(C + 2) * stride), want);
+    report(pf + " q4_qsa_score, 10 rows from p " + std::to_string(p0) + " (4 a work-group; each row its own blocks)", ds);
+  }
+  // -- selection against the bf16 form's (the device's int4 scores, 8 rows a set): per row the fraction of the bf16
+  //    top 512 kept
+  const char* regimes[] = {"plain", "outlier channels", "outliers + relevant blocks"};
+  for (int regime = 0; regime < 3; ++regime)
+    for (uint32_t n : {600u, 1024u, 8192u, 32768u}) {
+      const uint32_t stride = 32768, R = 8, p = 4 * n - 1;
+      const IdxSet s = idx_set(n, R, regime, 600 + 10 * regime + n);
+      const std::vector<uint8_t> rows = i4_rows(s.q), slots = i4_slots(s.keys, stride);
+      l0::Mem kb = d.upload(slots), sb = d.zeros(size_t(stride) * 4);
+      Ctl ctl(d.ctx);
+      ctl.at(p);
+      double sum = 0, worst = 1;
+      Diff ds;
+      for (uint32_t r = 0; r < R; ++r) {
+        l0::Mem qb = d.upload(rows.data() + size_t(r) * 2048, 2048);
+        launch(d, m, "q4_qsa_score", qk::kScoreWg, {stride / qk::kScoreWg, 1, 1}, {ctl.m, qb, kb, sb, stride});
+        const std::vector<float> got = d.read<float>(sb, n);
+        std::vector<float> ref(n), twin(n);
+        for (uint32_t b = 0; b < n; ++b) {
+          ref[b] = qr::qsa_score(s.q.data() + size_t(r) * 512, s.keys.data() + size_t(b) * 128);
+          twin[b] = qr::qsa_score_i4(rows.data() + size_t(r) * 2048, slots.data() + size_t(b) * slot);
+        }
+        ds.all(got, twin, size_t(r) * n);
+        const qr::Selection a = qr::qsa_select(ref.data(), p), g = qr::qsa_select(got.data(), p);
+        const double frac = double(common_blocks(g.blocks, a.blocks)) / qk::kTopBlocks;
+        sum += frac;
+        worst = std::min(worst, frac);
+      }
+      report(name + " agreement scores (" + regimes[regime] + ", " + std::to_string(n) + " blocks) vs the host twin", ds);
+      std::printf("  %s selection agreement with the bf16 form's, %s, %u blocks (%u positions), %u rows: mean %.4f, "
+                  "worst row %.4f\n",
+                  name.c_str(), regimes[regime], n, n * 4, R, sum / R, worst);
+    }
 }
 
 // ---- 4. the route and the MoE --------------------------------------------------------------------------------------
@@ -1251,6 +1435,76 @@ int bench_attn(Dev& d) {
   return 0;
 }
 
+// ---- --bench-qsa-i4 ----------------------------------------------------------------------------------------------
+// The indexer's scoring + selection (q4_qsa_score then q4_qsa_select, what a QSA layer launches) as bf16 vs _I4H: decode
+// (one row, the score grid over max_len / 4 = 32768 blocks as replay launches it) at 1k / 8k / 32k complete blocks and the
+// prefill form (2048 rows, SCORE_R 4) at 8k / 32k blocks (32k / 128k positions). Lists of R pairs, 3 warm-up replays
+// each, then A B A B: 2 rounds of N replays each, the forms interleaved; us a pair per round.
+int bench_qsa_i4(Dev& d) {
+  const uint32_t N = 10, stride = 32768;
+  const auto replay = [&](l0::CmdList& l) {
+    const auto t0 = std::chrono::steady_clock::now();
+    d.q.execute(l, &d.f);
+    d.f.wait();
+    return seconds_since(t0);
+  };
+  for (bool pf : {false, true})
+    for (uint32_t n : pf ? std::vector<uint32_t>{8192u, 32768u} : std::vector<uint32_t>{1024u, 8192u, 32768u}) {
+      const uint32_t C = pf ? qk::kPfC : 1, R = pf ? 2 : 100, p0 = 4 * n - C;   // the last row sees n blocks
+      const IdxSet s = idx_set(n, C, 2, 700 + n);
+      Ctl ctl(d.ctx);
+      ctl.at(p0, C);
+      std::vector<uint16_t> keys = s.keys;
+      keys.resize(size_t(stride) * 128, 0);
+      std::vector<std::unique_ptr<l0::Module>> mods;
+      std::vector<l0::Mem> bufs;
+      std::vector<l0::CmdList> lists;
+      std::vector<l0::Kernel> ks;
+      bufs.reserve(6);
+      lists.reserve(2);
+      ks.reserve(4);
+      bufs.push_back(d.zeros(size_t(C) * stride * 4));              // 0 scores
+      bufs.push_back(d.upload(s.q));                                 // 1 fp32 rows
+      bufs.push_back(d.upload(keys));                                // 2 bf16 keys
+      bufs.push_back(d.upload(i4_rows(s.q)));                        // 3 packed rows
+      bufs.push_back(d.upload(i4_slots(s.keys, stride)));            // 4 packed keys
+      bufs.push_back(d.zeros(size_t(C) * qk::kListRow * 4));        // 5 lists
+      bufs.push_back(d.zeros(size_t(C) * 8));                       // 6 diag
+      for (const bool bf16 : {true, false}) {
+        const std::string v = pf ? qk::pf_qsa_variant(qk::kPfC, bf16) : qk::qsa_variant(1, bf16);
+        if (!built(v)) {
+          std::printf("bench-qsa-i4: %s not built\n", v.c_str());
+          return 1;
+        }
+        mods.push_back(std::make_unique<l0::Module>(d.ctx, kernels::path(v)));
+        ks.push_back(bind(*mods.back(), "q4_qsa_score", qk::kScoreWg,
+                          {ctl.m, bf16 ? bufs[1] : bufs[3], bf16 ? bufs[2] : bufs[4], bufs[0], stride}));
+        ks.push_back(bind(*mods.back(), "q4_qsa_select", qk::kSelectWg, {ctl.m, bufs[0], stride, bufs[5], bufs[6]}));
+        lists.push_back(l0::CmdList::regular(d.ctx));
+        const uint32_t gx = pf ? (n + qk::kScoreWg - 1) / qk::kScoreWg : stride / qk::kScoreWg;
+        for (uint32_t r = 0; r < R; ++r) {
+          lists.back().launch(ks[ks.size() - 2], gx, pf ? qk::pf_score_groups(C) : 1, 1);
+          lists.back().launch(ks.back(), 1, C, 1);
+        }
+        lists.back().close();
+      }
+      for (int w = 0; w < 3; ++w)
+        for (l0::CmdList& l : lists) replay(l);
+      double t[2][2];
+      for (int round = 0; round < 2; ++round)
+        for (int k = 0; k < 2; ++k) {
+          double sum = 0;
+          for (uint32_t i = 0; i < N; ++i) sum += replay(lists[k]);
+          t[round][k] = sum / (N * R) * 1e6;
+        }
+      std::printf("bench-qsa-i4: %s, %u blocks (%u positions), score + select: bf16 %.2f / %.2f us, int4h %.2f / %.2f us "
+                  "(%.2fx) a pair, rounds A B A B\n",
+                  pf ? "prefill 2048 rows" : "decode 1 row", n, n * 4, t[0][0], t[1][0], t[0][1], t[1][1],
+                  (t[0][0] + t[1][0]) / (t[0][1] + t[1][1]));
+    }
+  return 0;
+}
+
 // ---- --bench-hc8 -------------------------------------------------------------------------------------------------
 int bench_hc8(Dev& d) {
   const uint32_t R = 96, NC = 48, NR = 20, ROUNDS = 3, N = qk::kHcDownN;
@@ -1515,7 +1769,7 @@ int ple_rate(double gb) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  bool bench = false, rate = false, bench8 = false;
+  bool bench = false, rate = false, bench8 = false, bench_i4 = false;
   double gb = 16.0;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -1523,11 +1777,13 @@ int main(int argc, char** argv) {
       bench = true;
     } else if (a == "--bench-hc8") {
       bench8 = true;
+    } else if (a == "--bench-qsa-i4") {
+      bench_i4 = true;
     } else if (a == "--ple-rate") {
       rate = true;
       if (i + 1 < argc && argv[i + 1][0] != '-') gb = std::atof(argv[++i]);
     } else {
-      std::fprintf(stderr, "usage: qwen4exp_kernels_test [--bench-attn | --bench-hc8 | --ple-rate [GB]]\n");
+      std::fprintf(stderr, "usage: qwen4exp_kernels_test [--bench-attn | --bench-hc8 | --bench-qsa-i4 | --ple-rate [GB]]\n");
       return 2;
     }
   }
@@ -1544,11 +1800,13 @@ int main(int argc, char** argv) {
   Dev d;
   if (bench) return bench_attn(d);
   if (bench8) return bench_hc8(d);
+  if (bench_i4) return bench_qsa_i4(d);
   std::printf("qwen4exp_kernels_test on %s\n", d.ctx.name().c_str());
   hc_tests(d);
   hc8_tests(d);
   ple_tests(d);
   qsa_tests(d);
+  qsa_i4_tests(d);
   moe_tests(d);
   eager_tests(d);
   gated_tests(d);

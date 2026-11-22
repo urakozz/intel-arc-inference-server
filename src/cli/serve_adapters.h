@@ -13,6 +13,7 @@
 #include <utility>
 #include <memory>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,8 +75,8 @@ struct TemplateAdapter : server::TemplateIface {
 // plan 8c) so p and q are filtered exactly as this row is;
 // `std::discrete_distribution` draws inside the kept prefix.
 inline uint32_t sample(const float* logits, uint32_t vocab_used, const server::Sampling& s,
-                       std::mt19937_64& rng) {
-  return server::draw(server::filter_probs(logits, vocab_used, s), rng);
+                       std::mt19937_64& rng, std::span<const uint32_t> tail = {}) {
+  return server::draw(server::filter_probs(logits, vocab_used, s, tail), rng);
 }
 
 struct EngineAdapter : server::EngineIface {
@@ -205,7 +206,7 @@ struct EngineAdapter : server::EngineIface {
     sample_first(sampling);
     flush_commit();
     const uint32_t id = eng.generate(1)[0];
-    if (!sampling.greedy) sample_into_control(sampling);
+    if (!sampling.greedy) sample_into_control(sampling, eng.buffers().logits.ptr(), {&id, 1});   // id: not yet in `seen`
     ++gen_tokens_;
     return id;
   }
@@ -251,13 +252,15 @@ struct EngineAdapter : server::EngineIface {
       float* p = q + runtime::Engine::kMaxDraft * V;
       // RNG order (Review Focus 4): the k draft samples, then accept_sampled's
       // uniforms, then its one correction/bonus draw.
+      std::vector<uint32_t> hist{x};   // the pending id and the drafts so far: what the penalty adds to the seen ids
       eng.draft(k, [&](uint32_t i) {
         imm.copy(q + i * V, eng.mtp_logits_device() + i * V, V * sizeof(float));
-        return server::sample_draft(q + i * V, vocab_used, sampling, rng);
+        hist.push_back(server::sample_draft(q + i * V, vocab_used, sampling, rng, hist));
+        return hist.back();
       });
       eng.verify(k);
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
-      a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V, sampling, rng);
+      a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V, sampling, rng, hist);
     }
     return spec_run(n, x, k, a, eng.draft_ids());
   }
@@ -338,7 +341,7 @@ struct EngineAdapter : server::EngineIface {
       drafts.assign(o.ids, o.ids + k);
       a = server::accept_greedy(eng.verify_ids(), drafts.data(), k);
     } else {
-      a = dflash_sampled(sampling, k, drafts);
+      a = dflash_sampled(sampling, x, k, drafts);
     }
     return spec_run(n, x, k, a, drafts);
   }
@@ -347,7 +350,8 @@ struct EngineAdapter : server::EngineIface {
   // (df_select.cl's murmur3 keying), then the acceptance's uniforms and its one correction / bonus draw (RNG order:
   // seed, uniforms, draw). A fresh key every iteration: no position's Gumbel noise is reused across iterations, so
   // each d_j is a fresh draw from q_j - what server::accept_sparse's losslessness assumes.
-  server::AcceptResult dflash_sampled(const server::Sampling& sampling, uint32_t k, std::vector<uint32_t>& drafts) {
+  server::AcceptResult dflash_sampled(const server::Sampling& sampling, uint32_t x, uint32_t k,
+                                       std::vector<uint32_t>& drafts) {
     seed_rng(sampling);
     const uint64_t seed = rng();   // the walk's Gumbel key: fresh every iteration, reproducible from the request's seed
     const float T = server::dflash_temperature(sampling);
@@ -361,7 +365,9 @@ struct EngineAdapter : server::EngineIface {
     constexpr size_t V = model::Qwen35::kVocab;
     float* p = spec_logits_->as<float>();
     imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
-    return server::accept_sparse(p, q, drafts.data(), k, vocab_used, V, sampling, rng);
+    std::vector<uint32_t> hist{x};
+    hist.insert(hist.end(), drafts.begin(), drafts.end());
+    return server::accept_sparse(p, q, drafts.data(), k, vocab_used, V, sampling, rng, hist);
   }
 
   // --- spec 19e: one iteration over drafts proposed outside the engine (prompt lookup) -----
@@ -395,7 +401,9 @@ struct EngineAdapter : server::EngineIface {
       constexpr size_t V = model::Qwen35::kVocab;
       float* p = spec_logits_->as<float>() + runtime::Engine::kMaxDraft * V;
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
-      a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng);
+      std::vector<uint32_t> hist{x};
+      hist.insert(hist.end(), d.begin(), d.begin() + k);
+      a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng, hist);
     }
     return spec_run(n, x, k, a, d);
   }
@@ -540,7 +548,9 @@ struct EngineAdapter : server::EngineIface {
       constexpr size_t V = model::Qwen35::kVocab;
       float* p = spec_logits_->as<float>();   // p rows 0..k (k + 1 <= 16 rows: the readback's room)
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
-      a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng);
+      std::vector<uint32_t> hist{x};
+      hist.insert(hist.end(), d.begin(), d.begin() + k);
+      a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng, hist);
     }
     return spec_run(n, x, k, a, d, true);
   }
@@ -666,11 +676,10 @@ struct EngineAdapter : server::EngineIface {
   // seeded request draws the same ids however long the server has run, and an unseeded
   // one never continues an earlier request's stream (the box's r12.d2, 2026-10-22: a
   // second identical seeded request differed when the RNG seeded once per process).
-  void sample_into_control(const server::Sampling& sampling) { sample_into_control(sampling, eng.buffers().logits.ptr()); }
-  void sample_into_control(const server::Sampling& sampling, const void* row) {
+  void sample_into_control(const server::Sampling& sampling, const void* row, std::span<const uint32_t> tail = {}) {
     seed_rng(sampling);
     imm.copy(host_logits.data(), row, model::Qwen35::kVocab * sizeof(float));
-    const uint32_t id = sample(host_logits.data(), vocab_used, sampling, rng);
+    const uint32_t id = sample(host_logits.data(), vocab_used, sampling, rng, tail);
     eng.control()->cur_token[0] = id;
   }
 

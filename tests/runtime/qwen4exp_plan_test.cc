@@ -95,8 +95,8 @@ int main(int argc, char** argv) {
   const std::array<size_t, runtime::kPpDevices> caps = {kCard, kCard};
 
   // --- 1. the persistent sizes ---------------------------------------------------------------------------
-  CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(12) * (2 * 512 * 2 + 128 * 2 / 4));
-  CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(25344));
+  CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(12) * (2 * 512 * 2 + (128 / 2 + 8) / 4));
+  CHECK_EQ(rq::kv_bytes_per_pos(ours), size_t(24792));
   CHECK_EQ(rq::gdn_state_bytes_per_layer(ours), size_t(48) * 128 * 128 * 4);
   CHECK_EQ(rq::conv_ring_bytes_per_layer(ours), size_t(32) * 10240 * 2);   // open-work 28: 32 deep
   CHECK_EQ(rq::ple_state_bytes(ours), size_t(64) + size_t(16) * 10240 * 2);   // 21-QFN-v1c: the 16-slot id and conv rings
@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
     const rq::PersistentSizes ps = rq::persistent_sizes(ours, Q4Placement::one(ours), 0, L);
     CHECK_EQ(ps.gdn_state, size_t(36) * rq::gdn_state_bytes_per_layer(ours));   // 113.2 MB
     CHECK_EQ(ps.kv, size_t(12) * L * 2048);
-    CHECK_EQ(ps.idx_keys, size_t(12) * (L / 4) * 256);
+    CHECK_EQ(ps.idx_keys, size_t(12) * (L / 4) * 72);
     CHECK_EQ(ps.kv + ps.idx_keys, rq::kv_bytes_per_pos(ours) * L);           // ~6.6 GB
     CHECK_EQ(ps.ple, rq::ple_state_bytes(ours));
     CHECK_EQ(ps.control, sizeof(runtime::Control));
@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(lb[0], loader::q4_layer_bytes(t, 0).total() + rq::gdn_state_bytes_per_layer(t) + rq::conv_ring_bytes_per_layer(t));
     CHECK_EQ(lb[1], loader::q4_layer_bytes(t, 1).total() + rq::gdn_state_bytes_per_layer(t) + rq::conv_ring_bytes_per_layer(t) +
                         rq::ple_state_bytes(t));
-    CHECK_EQ(lb[3], loader::q4_layer_bytes(t, 3).total() + size_t(L) * 2048 + size_t(L / 4) * 256 + 8 * 256);   // 21-QFN-v1c: 8 tail slots
+    CHECK_EQ(lb[3], loader::q4_layer_bytes(t, 3).total() + size_t(L) * 2048 + size_t(L / 4) * 72 + 8 * 256);   // 21-QFN-v1c: 8 tail slots
     const size_t ctl = sizeof(runtime::Control), rope = t.rope_table_bytes(L);
     const runtime::PpBalance direct = runtime::pp_balance(
         lb, loader::q4_embed_bytes(t) + rope + ctl, loader::q4_final_mixer_bytes(t) + loader::q4_lm_head_bytes(t, true) + rope + ctl);

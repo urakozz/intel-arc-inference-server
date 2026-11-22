@@ -171,9 +171,11 @@ MemoryPlan plan_sequences(const model::ModelDesc& desc, uint32_t positions, uint
   p.slot_state = SlotDims::sizes(desc, seqs, mtp, table_pages, drafter.on()).total();
   for (uint32_t q = 1; q < seqs; ++q) p.slot_state += drafter.session(session_lens[q]);   // plan 19v3b: their sessions
   if (seqs > 1) p.slot_state += drafter.rows;   // spec 39: and the row tables and row taps (unplanned before)
-  if (seqs > 1) {   // spec 32: several slots carry no deferred GDN rows and build no deep list
+  if (seqs > 1) {   // spec 32: several slots build no deep list; plan 31 Task 13: with MTP each its deferred GDN rows
+    const EngineSizes es = EngineDims::sizes(desc, kv, 0, seqs, mtp, drafter.on());
     p.decode_state -= p.deep;
-    p.deep = 0;
+    p.deep = es.gdn_pend + es.gdn_x + es.conv_x;
+    p.decode_state += p.deep;
   }
   if (mtp) {   // the further slots' GDN states and hh rows: MtpBuffers at `seqs`
     // Spec 32: may be negative - one sequence's hh rows (the deep lists' 65) outweigh the slots'.

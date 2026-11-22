@@ -5,8 +5,8 @@
 // sequence takes pages before a step writes them and gives them all back when it is reset or evicted.
 //
 // Every page has a reference count: 0 on the free list, 1 in one table. Above 1 is a page shared on purpose
-// (read-only prefix pages, spec 31 §9); take and release keep the count, so a shared page returns to the free list
-// only when its last holder releases it. A release names the rows to zero on the pages it frees - every row below the
+// (read-only prefix pages, spec 31 §9: share, make_private before a write); take and release keep the count, so a
+// shared page returns to the free list only when its last holder releases it, then zeroed whole. A release names the rows to zero on the pages it frees - every row below the
 // sequence's written bound, none above (PERF-90's written-range reset, per page): the engine zeroes those before a
 // page is handed out again, so a fresh sequence's pages are as zero as a fresh slot's.
 //
@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <vector>
 #include "runtime/buffer_sizes.h"
 
@@ -25,7 +26,7 @@ class KvPool {
   // `max_pages`: the longest table a sequence may hold (the per-request cap in pages).
   KvPool(uint32_t total, uint32_t seqs, uint32_t max_pages)
     pre(total != 0 && seqs != 0 && max_pages != 0)
-      : refs_(total, 0), tables_(seqs), max_pages_(max_pages) {
+      : refs_(total, 0), whole_(total, false), tables_(seqs), max_pages_(max_pages) {
     free_.reserve(total);
     for (uint32_t p = total; p-- > 0;) free_.push_back(p);
   }
@@ -64,11 +65,46 @@ class KvPool {
       if (--refs_[t[i]] != 0) continue;
       free_.push_back(t[i]);
       const uint64_t first = uint64_t(i) * kKvPage;
-      if (written > first) zero.push_back({t[i], static_cast<uint32_t>(std::min<uint64_t>(written - first, kKvPage))});
+      if (whole_[t[i]])   // a page that was shared: its every row was written (by its first holder)
+        zero.push_back({t[i], kKvPage});
+      else if (written > first)
+        zero.push_back({t[i], static_cast<uint32_t>(std::min<uint64_t>(written - first, kKvPage))});
+      whole_[t[i]] = false;
     }
     t.clear();
     std::reverse(zero.begin(), zero.end());   // in table order
     return zero;
+  }
+
+  // Spec 31 §9 (stage 2): `seq`'s next table entry becomes `from`'s page `index` - the positions [index kKvPage,
+  // (index + 1) kKvPage) both hold, read-only while both do (the page's count says how many). `seq` must hold exactly
+  // `index` pages and `from` more than `index`; throws std::invalid_argument otherwise. Returns the page.
+  uint32_t share(uint32_t seq, uint32_t index, uint32_t from) {
+    std::vector<uint32_t>& t = tables_.at(seq);
+    const std::vector<uint32_t>& f = tables_.at(from);
+    if (seq == from || t.size() != index || f.size() <= index || index + 1 > max_pages_)
+      throw std::invalid_argument("KvPool::share: page " + std::to_string(index) + " of a sequence holding " +
+                                  std::to_string(f.size()) + " into one holding " + std::to_string(t.size()));
+    const uint32_t p = f[index];
+    ++refs_[p];
+    whole_[p] = true;
+    t.push_back(p);
+    return p;
+  }
+  // Before `seq` writes into its page `index`: when the page is shared, `seq` gets a fresh page in its place (the
+  // others keep the old one); `old` and `fresh` say which (equal when it was its own). False - and nothing changed -
+  // when no page is free.
+  bool make_private(uint32_t seq, uint32_t index, uint32_t* old, uint32_t* fresh) {
+    std::vector<uint32_t>& t = tables_.at(seq);
+    *old = *fresh = t.at(index);
+    if (refs_[*old] == 1) return true;
+    if (free_.empty()) return false;
+    *fresh = free_.back();
+    free_.pop_back();
+    refs_[*fresh] = 1;
+    --refs_[*old];
+    t[index] = *fresh;
+    return true;
   }
 
   uint32_t pages_free() const { return static_cast<uint32_t>(free_.size()); }
@@ -81,6 +117,7 @@ class KvPool {
 
  private:
   std::vector<uint32_t> refs_;                 // per page
+  std::vector<bool> whole_;                    // per page: shared once, so all its rows were written
   std::vector<uint32_t> free_;                 // a stack; back() is taken next
   std::vector<std::vector<uint32_t>> tables_;  // per sequence
   uint32_t max_pages_;

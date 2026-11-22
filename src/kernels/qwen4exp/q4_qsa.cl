@@ -34,7 +34,26 @@
 //   diag [M][2] = {the 512th score, the 513th} ({+INF, -INF} without a cut) - the near-tie diagnostic (gate S).
 //
 // Plain OpenCL C (no sub-group functions).
+//
+// -DQSA_I4H=1 (`_I4H`, the engine's form) scores in int4 x int4 on DPAS after the 128-point Hadamard; the selection rule and
+// the exact attention after it are unchanged. Unset, the bf16 form (the kernel test's and bench's reference), the source
+// below is token for token what it was.
+//   q4_qsa_prep quantises each query head and each compressed key once: the bf16-valued vector, its plain 128-point
+//     Hadamard first (FWHT stages h = 1 .. 64 ascending, (i, i + h) -> (a + c, a - c), unscaled - kv8.cl's butterfly
+//     without the signs, DeepSeek-V3.2's indexer rotation), in two groups of 64 (one k64 DPAS each): amax =
+//     max |y|, s = amax / 7, code = s == 0 ? 0 : clamp(rint(y / s), -7, 7), element 2j the low nibble of byte j.
+//     Query row m in idx_q's fp32 row footprint: nibbles [h][64] at byte 0, scales fp32 [h][2] at byte 64 IDX_HEADS.
+//     Block b in idx_keys' I4_KEY_BYTES slot (72 B): nibbles [64] at byte 0, scales fp32 [2] at byte 64.
+//   q4_qsa_score: sub-group = 16 blocks (lane = block = DPAS column), A = 8 query vectors (row j, head h at
+//     8 t + r = j IDX_HEADS + h), one intel_sub_group_i4_i4_matrix_mad_k64 per group -> exact s32 dots d0, d1;
+//     a = ((float)d0 x (sq0 x sk0)) + ((float)d1 x (sq1 x sk1)), x 2^-7 (H H^T = 128 I), then the bf16
+//     form's relu, left fold over the heads and / sqrt(128). Same grids as the bf16 form (decode one row a
+//     work-group-row, prefill SCORE_R).
 #pragma OPENCL FP_CONTRACT OFF
+#ifdef QSA_I4H
+#pragma OPENCL EXTENSION cl_intel_subgroups : enable
+#pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
+#endif
 
 #ifndef M
 #define M 1
@@ -109,6 +128,40 @@ inline float norm_rope(__local float* v, __local float* red, float x, __global c
   return o;
 }
 
+#ifdef QSA_I4H
+#define I4_GROUP 64
+#define I4_ROW_BYTES (IDX_HEADS * IDX_DIM * 4)   /* a row's footprint in idx_q (fp32 in the bf16 form) */
+#define I4_NIB (IDX_DIM / 2)                     /* nibble bytes of one vector */
+#define I4_KEY_BYTES (I4_NIB + 8)                /* a block's slot in idx_keys: nibbles + two fp32 scales (bf16 form: IDX_DIM * 2) */
+// One vector (lane i: x, a bf16 value) -> its int4 codes and two group scales (the header's rule). Every lane calls it.
+inline void i4_pack(__local float* v, __local float* red, float x, uint i, __global uchar* restrict nib,
+                    __global float* restrict sc) {
+  v[i] = x;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint hb = 1; hb < IDX_DIM; hb <<= 1) {
+    const float a = v[i & ~hb], c = v[i | hb];
+    barrier(CLK_LOCAL_MEM_FENCE);
+    v[i] = (i & hb) ? a - c : a + c;
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  x = v[i];
+  red[i] = fabs(x);
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint s = I4_GROUP / 2; s > 0; s >>= 1) {
+    if (i % I4_GROUP < s) red[i] = fmax(red[i], red[i + s]);
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  const float scale = red[i / I4_GROUP * I4_GROUP] / 7.0f;
+  const float code = scale == 0.0f ? 0.0f : clamp(rint(x / scale), -7.0f, 7.0f);
+  barrier(CLK_LOCAL_MEM_FENCE);   // every lane has its group's amax before v is reused
+  v[i] = code;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if ((i & 1u) == 0) nib[i / 2] = (uchar)(((int)v[i] & 15) | (((int)v[i + 1] & 15) << 4));
+  if (i % I4_GROUP == 0) sc[i / I4_GROUP] = scale;
+  barrier(CLK_LOCAL_MEM_FENCE);
+}
+#endif
+
 //   idx_f32 fp32 [M][640]; small fp32: the layer's QSA block (idx q norm at 512, k norm at 640: (1 + w));
 //   rope fp32 [max_len][2][32]; idx_q fp32 [M][4][128]; tail bf16 [8][128]; idx_keys bf16 [max_len / 4][128]
 __attribute__((reqd_work_group_size(WG_PREP, 1, 1)))
@@ -125,8 +178,14 @@ __kernel void q4_qsa_prep(__global const uint* restrict ctrl, __global const flo
   const uint p = pos + m;
   if (h < IDX_HEADS) {
     const float x = rf(idx_f32[(size_t)m * IDX_LD + h * IDX_DIM + i]);
+#ifdef QSA_I4H
+    const float o = norm_rope(v, red, x, small + IDX_QNORM_OFF, rope + (size_t)p * 2 * ROT_HALF, i);
+    __global uchar* restrict row = (__global uchar*)idx_q + (size_t)m * I4_ROW_BYTES;
+    i4_pack(v, red, o, i, row + h * I4_NIB, (__global float*)(row + IDX_HEADS * I4_NIB) + h * 2);
+#else
     idx_q[((size_t)m * IDX_HEADS + h) * IDX_DIM + i] =
         norm_rope(v, red, x, small + IDX_QNORM_OFF, rope + (size_t)p * 2 * ROT_HALF, i);
+#endif
     return;
   }
   const ushort raw = rne_bf16(idx_f32[(size_t)m * IDX_LD + IDX_HEADS * IDX_DIM + i]);
@@ -140,7 +199,12 @@ __kernel void q4_qsa_prep(__global const uint* restrict ctrl, __global const flo
     }
     const float mean = rf((((k4[0] + k4[1]) + k4[2]) + k4[3]) / 4.0f);
     const float o = norm_rope(v, red, mean, small + IDX_KNORM_OFF, rope + (size_t)(b * BLK) * 2 * ROT_HALF, i);
+#ifdef QSA_I4H
+    __global uchar* restrict slot = (__global uchar*)idx_keys + (size_t)b * I4_KEY_BYTES;
+    i4_pack(v, red, o, i, slot, (__global float*)(slot + I4_NIB));   // o is the bf16 key's value
+#else
     idx_keys[(size_t)b * IDX_DIM + i] = rne_bf16(o);
+#endif
   }
 #ifndef QSA_PF
   tail[(size_t)(p % TAIL) * IDX_DIM + i] = raw;
@@ -167,7 +231,73 @@ __kernel void q4_qsa_ring(__global const uint* restrict ctrl, __global const flo
 
 // ---------------------------------------------------------------------------------------------------------------
 #define WG_SCORE 256
+#ifdef QSA_I4H
 #ifdef QSA_PF
+#define I4_ROWS SCORE_R
+#else
+#define I4_ROWS 1
+#endif
+#define I4_QV (I4_ROWS * IDX_HEADS)   /* query vectors a work-group */
+#define I4_QT ((I4_QV + 7) / 8)       /* DPAS A tiles of 8 */
+// Rows m0 .. m0 + I4_ROWS - 1 over blocks [256 g, 256 g + 256), the bf16 forms' grids and early-outs.
+__attribute__((reqd_work_group_size(WG_SCORE, 1, 1))) __attribute__((intel_reqd_sub_group_size(16)))
+__kernel void q4_qsa_score(__global const uint* restrict ctrl, __global const float* restrict idx_q,
+                           __global const ushort* restrict idx_keys, __global float* restrict scores, uint stride) {
+  const uint g = get_group_id(0);
+  const uint m0 = get_group_id(1) * I4_ROWS;
+  const uint lid = get_local_id(0);
+  const uint C = n_rows(ctrl);
+  if (m0 >= C) return;   // uniform
+  const uint rows = min((uint)I4_ROWS, C - m0), p0 = ctrl[CTRL_POS] + m0;
+  const uint nl = (p0 + rows) / BLK;   // the last row's complete blocks
+  if (g * WG_SCORE >= nl) return;      // uniform
+  // A rows: query vector v's group gg, lane l's 4 nibbles (bytes 2l, 2l + 1); vectors past the rows are zero
+  __local ushort qa[I4_QT * 8][2][16];
+  __local float qs[I4_QT * 8][2];
+  const __global uchar* restrict qb = (const __global uchar*)idx_q + (size_t)m0 * I4_ROW_BYTES;
+  for (uint t = lid; t < I4_QT * 8 * 32; t += WG_SCORE) {
+    const uint v = t / 32, gg = t / 16 % 2, l = t % 16;
+    const __global uchar* src = qb + (size_t)(v / IDX_HEADS) * I4_ROW_BYTES + v % IDX_HEADS * I4_NIB + gg * 32;
+    qa[v][gg][l] = v < rows * IDX_HEADS ? ((const __global ushort*)src)[l] : (ushort)0;
+  }
+  for (uint t = lid; t < I4_QT * 8 * 2; t += WG_SCORE) {
+    const uint v = t / 2;
+    const __global float* src = (const __global float*)(qb + (size_t)(v / IDX_HEADS) * I4_ROW_BYTES + IDX_HEADS * I4_NIB);
+    qs[v][t % 2] = v < rows * IDX_HEADS ? src[v % IDX_HEADS * 2 + t % 2] : 0.0f;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  const uint l = get_sub_group_local_id();
+  const uint b = g * WG_SCORE + lid;   // lane l of sub-group s: block 256 g + 16 s + l
+  const bool live = b < nl;
+  const __global uchar* restrict key = (const __global uchar*)idx_keys + (size_t)(live ? b : 0) * I4_KEY_BYTES;
+  int d[I4_QT][2][8];
+  for (uint gg = 0; gg < 2; ++gg) {   // every lane runs the DPAS (a sub-group operation); dead lanes' columns are 0
+    const int8 kb = live ? as_int8(vload8(0, (const __global uint*)(key + gg * 32))) : (int8)(0);
+    for (uint t = 0; t < I4_QT; ++t) {
+      ushort a8[8];
+      for (uint r = 0; r < 8; ++r) a8[r] = qa[t * 8 + r][gg][l];
+      vstore8(intel_sub_group_i4_i4_matrix_mad_k64(as_short8(vload8(0, a8)), kb, (int8)(0)), 0, d[t][gg]);
+    }
+  }
+  if (!live) return;
+  const float ks0 = ((const __global float*)(key + I4_NIB))[0], ks1 = ((const __global float*)(key + I4_NIB))[1];
+  for (uint j = 0; j < rows; ++j) {
+    if (b >= (p0 + j + 1) / BLK) continue;   // past row j's complete blocks
+    float s = 0.0f;                          // + 0 then the heads: the left fold ((r0 + r1) + r2) + ...
+    for (uint hh = 0; hh < IDX_HEADS; ++hh) {
+      const uint v = j * IDX_HEADS + hh;
+      float a0 = qs[v][0] * ks0;
+      a0 = (float)d[v / 8][0][v % 8] * a0;
+      float a1 = qs[v][1] * ks1;
+      a1 = (float)d[v / 8][1][v % 8] * a1;
+      float a = a0 + a1;
+      a = a * 0.0078125f;
+      s += a > 0.0f ? a : 0.0f;
+    }
+    scores[(size_t)(m0 + j) * stride + b] = s / SQRT_IDX;
+  }
+}
+#elif defined(QSA_PF)
 // Rows m0 .. m0 + SCORE_R - 1 (the chunk's rows past n_rows: none) over blocks [256 g, 256 g + 256): the group exits
 // whole past its last row's complete blocks; row j writes block b < its own n.
 __attribute__((reqd_work_group_size(WG_SCORE, 1, 1)))

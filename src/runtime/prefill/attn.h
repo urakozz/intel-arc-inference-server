@@ -171,14 +171,13 @@ inline size_t attn_chunk_launches_composed(const model::ModelDesc& d, uint32_t C
 // Qwen3.8 at 64k keys 0.733 -> 0.668, 128k 0.706 -> 0.677; Ornith at 128k 0.704 -> 0.606-0.618. 1024-row launches
 // time as 2048 (Ornith 128k 0.617, Qwen3.8 C 2048 at 128k 0.616 vs 0.626 whole), 512 lose (0.804): too few work-groups.
 constexpr uint32_t kPairLaunchRows = 2048;
-// 3l (2): a split chunk (flash_split_span at `pos`) adds the merge. A whole chunk on Qwen3.8's heads (pair form, paged
-// or int8 cache alike) or Ornith's bf16 cache is ceil(C / kPairLaunchRows) launches, any other chunk one.
+// 3l (2): a split chunk (flash_split_span at `pos`) adds the merge. A whole chunk on Qwen3.8's or Ornith's heads (pair
+// form, paged or int8 cache alike) is ceil(C / kPairLaunchRows) launches, any other chunk one.
 inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b,
                                   AttnMode mode, uint32_t pos = 0, KvCache kv = KvCache::Bf16) {
   if (mode != AttnMode::Flash) return attn_chunk_launches_composed(d, C, b);
   if (flash_split_span(d, pos, C)) return 2;
-  const bool rowed = (d.fa_q_heads == 24 && d.fa_kv_heads == 4) ||
-                     (d.fa_q_heads == 16 && d.fa_kv_heads == 2 && kv == KvCache::Bf16) ||
+  const bool rowed = (d.fa_q_heads == 24 && d.fa_kv_heads == 4) || (d.fa_q_heads == 16 && d.fa_kv_heads == 2) ||
                      (d.fa_q_heads == 12 && d.fa_kv_heads == 2 && kv == KvCache::Int8 &&
                       b == PrefillBackend::L0Int8);   // PERF-114: the int8-score pair on a tp card
   return rowed ? (C + kPairLaunchRows - 1) / kPairLaunchRows : 1;

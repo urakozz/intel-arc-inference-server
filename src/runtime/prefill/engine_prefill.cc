@@ -179,7 +179,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         std::to_string(max_len()) +
         " -- the KV cache and the RoPE table stop there. Start a new session with reset(), or"
         " load the model and the engine with a larger max_len.");
-  need_pages(cur_, base + uint32_t(ids.size()), "prefill");   // spec 31: the call's positions, before a chunk writes
+  need_pages(cur_, kv_write_from(cur_), base + uint32_t(ids.size()), "prefill");   // spec 31: before a chunk writes
 
   prepare_prefill();
 

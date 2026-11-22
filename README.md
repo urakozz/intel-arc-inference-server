@@ -105,9 +105,9 @@ cmake --build build -j
 ctest --test-dir build
 
 # the engine never downloads; fetch the model into the Hugging Face cache once
-uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
-uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound   # the DFlash drafter
-uvx --from huggingface_hub hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
+hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
+hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound   # the DFlash drafter
+hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 ```
 
 Or in a container: the [Dockerfile](Dockerfile) builds the same, and its header has the `docker run` line (the

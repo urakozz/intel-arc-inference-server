@@ -657,7 +657,59 @@ void test_slots_row_failure() {
 
 }  // namespace
 
+// Plan 31 Task 9: a KV page pool per card. Two long requests go to the two cards (the one with the most free pages
+// first), each served as alone; the first's next turn follows its prefix to its card (a continuation there); each
+// card's pages are its own - the other card's stay as they were. Each card a pooled MockBatchEngine.
+std::vector<uint32_t> pooled_alone(const std::vector<uint32_t>& prompt, uint32_t n) {
+  MockBatchEngine e(1, 8192);
+  e.blk = 256;
+  Scheduler s(e, SchedulerOptions{});
+  Out o;
+  CHECK(s.submit(req(prompt, n, o)) != nullptr);
+  drain(s);
+  return o.ids;
+}
+
+void test_pool_per_card() {
+  MockBatchEngine c0(2, 8192), c1(2, 8192);
+  for (MockBatchEngine* c : {&c0, &c1}) {
+    c->blk = 256;
+    c->pool = 40;
+    c->cut = 512;
+  }
+  cli::ReplicaEngine eng({{nullptr, 512, &c0}, {nullptr, 512, &c1}}, /*hooked=*/true, /*wide_stride=*/true);
+  CHECK_EQ(eng.kv_pool_pages(), 80u);
+  MallocAlloc alloc;
+  server::PrefixSlots cache(eng, 1 << 26, alloc);
+  Scheduler s(eng, SchedulerOptions{}, &cache);
+  const std::vector<uint32_t> A = P(41, 6000), B = P(42, 6000);
+  Out a, b;
+  CHECK(s.submit(req(A, 20, a)) != nullptr);
+  drain(s);
+  CHECK(s.submit(req(B, 20, b)) != nullptr);
+  drain(s);
+  CHECK_EQ(a.fin.slot, 0);
+  CHECK_EQ(b.fin.slot, 2);   // card 1: 40 free pages against card 0's 15
+  CHECK(a.ids == pooled_alone(A, 20));
+  CHECK(b.ids == pooled_alone(B, 20));
+  CHECK_EQ(eng.card_pages_free(0), 15u);
+  CHECK_EQ(eng.card_pages_free(1), 15u);
+  std::vector<uint32_t> a2 = A;
+  a2.insert(a2.end(), a.ids.begin(), a.ids.end());
+  for (uint32_t i = 0; i < 5; ++i) a2.push_back(9100 + i);
+  Out x;
+  CHECK(s.submit(req(a2, 10, x)) != nullptr);
+  drain(s);
+  CHECK_EQ(x.fin.slot, 0);
+  CHECK_EQ(cache.last_kind(0), server::PrefixCache::Plan::Continue);
+  CHECK(x.ids == pooled_alone(a2, 10));
+  CHECK_EQ(eng.card_pages_free(1), 15u);   // card 1 untouched
+  std::printf("pool per card: two long requests on the two cards (25 pages each of 40), as alone; the first's next "
+              "turn continues on its card\n");
+}
+
 int main() {
+  test_pool_per_card();
   test_two_at_once();
   test_card_failure();
   test_restore_across_cards();

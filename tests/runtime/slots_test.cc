@@ -45,6 +45,10 @@
 //   P3  a request grows past 32768 while the others are empty, the same ids in sequence 3 as in sequence 0.
 //   P4  with no page free, max_verify_k() stops at the page's end and a verify that needs the next page is refused
 //       with nothing of the sequence written; it then continues as an uninterrupted request does.
+// Plan 31 Task 12 (ornith_slots_test): the same cases on Ornith (its MoE layers and MoE MTP head; the KV form
+// B70_KV_CACHE's - ornith_slots_kv8_test / ornith_slots_pool_kv8_test: int8, PERF-64), the S4 tag `ornith_slots_`. `--one-slot` adds S0: S1's session in a one-slot engine first (loaded,
+// run and freed before the slots' engine) - slot 0's session of the four-slot engine gives its ids bitwise (the lists
+// differ: the one-slot engine's deferred delta-net rows and contiguous KV against the slots' state slots and pages).
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -172,27 +176,39 @@ std::vector<uint32_t> lone_step(Ctx& c, uint32_t k, std::vector<uint64_t>* logit
   return out;
 }
 
-// S1.
-bool s1(Ctx& c, const std::vector<uint32_t>& prompt) {
+// S1's session of slot q: the prompt, 32 plain steps, 8 MTP iterations at K = 3; every verify step's logits into `lg`.
+std::vector<uint32_t> s1_session(Ctx& c, uint32_t q, const std::vector<uint32_t>& prompt, std::vector<uint64_t>& lg) {
   Engine& e = c.e;
-  auto run = [&](uint32_t q, std::vector<uint64_t>& lg) {
-    e.select(q);
-    e.reset();
-    e.prefill(prompt);
-    std::vector<uint32_t> ids;
-    for (int i = 0; i < 32; ++i)
-      for (uint32_t id : lone_step(c, 0, &lg)) ids.push_back(id);
-    for (int i = 0; i < 8; ++i)
-      for (uint32_t id : lone_step(c, e.mtp() ? 3 : 0, &lg)) ids.push_back(id);
-    return ids;
-  };
+  e.select(q);
+  e.reset();
+  e.prefill(prompt);
+  std::vector<uint32_t> ids;
+  for (int i = 0; i < 32; ++i)
+    for (uint32_t id : lone_step(c, 0, &lg)) ids.push_back(id);
+  for (int i = 0; i < 8; ++i)
+    for (uint32_t id : lone_step(c, e.mtp() ? 3 : 0, &lg)) ids.push_back(id);
+  return ids;
+}
+
+// S1; `one` (S0, --one-slot): the one-slot engine's session and logits, slot 0's ids held to it.
+struct OneSlot {
+  std::vector<uint32_t> ids;
+  std::vector<uint64_t> logits;
+};
+bool s1(Ctx& c, const std::vector<uint32_t>& prompt, const OneSlot* one) {
   std::vector<uint64_t> l0, l2;
-  const std::vector<uint32_t> a = run(0, l0), b = run(2, l2);
-  const bool ok = a == b && l0 == l2;
+  const std::vector<uint32_t> a = s1_session(c, 0, prompt, l0), b = s1_session(c, 2, prompt, l2);
+  bool ok = a == b && l0 == l2;
   std::printf("S1 slot 0 vs slot 2, the same session alone (%zu ids, %zu verify steps): %s\n", a.size(), l0.size(),
               ok ? "PASS (ids and every step's logits bitwise)" : "FAIL");
   std::printf("S1 digest: ids %016llx logits %016llx\n", (unsigned long long)fnv(a.data(), a.size() * 4),
               (unsigned long long)fnv(l0.data(), l0.size() * 8));
+  if (one) {
+    const bool ids = a == one->ids;
+    std::printf("S0 slot 0 of four vs the one-slot engine, the same session: ids %s, every step's logits %s\n",
+                ids ? "bitwise (PASS)" : "DIFFER - FAIL", l0 == one->logits ? "bitwise" : "differ (ids gate)");
+    ok &= ids;
+  }
   return ok;
 }
 
@@ -817,6 +833,85 @@ bool s4(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts, const std::st
 }
 }  // namespace
 
+// Spec 31 §9 (plan 31 Task 8): shared prefix pages, engine level. A prefills 17000 ids (snapshots at 10000 and
+// 16384); the reference R restores A's snapshot at 16384 into its own pages (load_kv) and decodes; B restores the
+// same state on A's pages instead (share_page) - its ids are R's. A then rewrites its history from 10000, inside the
+// shared pages: its writes go to private copies and B's KV bytes and ids do not move; A ends and a new request takes
+// its sequence while B still reads the shared pages. At the end the pool is whole.
+bool pool_share(Ctx& c, const std::vector<uint32_t>& x, const std::vector<uint32_t>& tail,
+                const std::vector<uint32_t>& rewrite, const std::vector<uint32_t>& other) {
+  Engine& e = c.e;
+  constexpr uint32_t P = runtime::kKvPage, kMid = 10000, kSnap = 16384;
+  reset_all(e);
+  l0::Mem s_mid(c.ctx, l0::MemKind::Host, e.state_bytes()), s_snap(c.ctx, l0::MemKind::Host, e.state_bytes()),
+      kv(c.ctx, l0::MemKind::Host, e.kv_bytes(kSnap));
+  e.select(0);
+  e.prefill(std::vector<uint32_t>(x.begin(), x.begin() + kMid));
+  e.save_state(s_mid.ptr());
+  e.prefill(std::vector<uint32_t>(x.begin() + kMid, x.begin() + kSnap));
+  e.save_state(s_snap.ptr());
+  e.save_kv(0, kSnap, kv.ptr());
+  e.prefill(std::vector<uint32_t>(x.begin() + kSnap, x.end()));
+  const auto steps = [&](uint32_t n) {
+    std::vector<uint32_t> ids;
+    for (uint32_t i = 0; i < n; ++i)
+      for (uint32_t id : lone_step(c, 0)) ids.push_back(id);
+    return ids;
+  };
+  // R: the restore on its own pages.
+  e.select(2);
+  e.load_state(s_snap.ptr(), kSnap);
+  e.load_kv(0, kSnap, kv.ptr());
+  e.prefill(tail);
+  const std::vector<uint32_t> r = steps(32);
+  e.reset();
+  // B: the same restore on A's pages.
+  e.select(1);
+  e.load_state(s_snap.ptr(), kSnap);
+  bool mapped = true;
+  for (uint32_t i = 0; i < kSnap / P; ++i) mapped = mapped && e.share_page(1, i, 0);
+  const uint32_t free_shared = e.pages_free();
+  e.prefill(tail);
+  std::vector<uint32_t> b = steps(16);
+  uint32_t still = 0;
+  for (uint32_t i = 0; i < kSnap / P; ++i) still += e.pool_pages_of(1)[i] == e.pool_pages_of(0)[i];
+  bool ok = mapped && still == kSnap / P - 1;   // the last one became B's own: its head row at 16383 is B's
+  std::printf("P5 B on A's %u pages (%u still shared after its prefill, %u free): ids %s\n", kSnap / P, still,
+              free_shared, std::equal(b.begin(), b.end(), r.begin()) ? "= R's" : "DIFFER - FAIL");
+  ok &= std::equal(b.begin(), b.end(), r.begin());
+  // A rewrites its history from 10000, inside the shared pages.
+  e.select(1);
+  const uint32_t nb = e.pos();
+  const uint64_t hb = c.slot_hash(1, nb);
+  e.select(0);
+  e.load_state(s_mid.ptr(), kMid);
+  e.prefill(rewrite);
+  steps(4);
+  const bool a_private = e.pool_pages_of(0)[kMid / P] != e.pool_pages_of(1)[kMid / P] &&
+                         e.pool_pages_of(0)[kMid / P - 1] == e.pool_pages_of(1)[kMid / P - 1];
+  const bool b_same = c.slot_hash(1, nb) == hb;
+  e.select(1);
+  const std::vector<uint32_t> b2 = steps(8);
+  const bool b2_ok = std::equal(b2.begin(), b2.end(), r.begin() + 16);
+  std::printf("P5 A rewrites its history from %u: its page there private (the one below still shared): %s; B's bytes "
+              "%s, B's next ids %s\n", kMid, a_private ? "yes" : "NO - FAIL", b_same ? "unchanged" : "MOVED - FAIL",
+              b2_ok ? "= R's" : "DIFFER - FAIL");
+  ok &= a_private && b_same && b2_ok;
+  // A ends; a new request takes its sequence while B still reads the shared pages.
+  e.select(0);
+  e.reset();
+  e.prefill(other);
+  steps(4);
+  e.select(1);
+  const std::vector<uint32_t> b3 = steps(8);
+  const bool b3_ok = std::equal(b3.begin(), b3.end(), r.begin() + 24);
+  reset_all(e);
+  const bool whole = e.pages_free() == e.kv_pool_pages();
+  std::printf("P5 A's sequence reused while B reads the shared pages: B's ids %s; every session ended, the pool %s\n",
+              b3_ok ? "= R's" : "DIFFER - FAIL", whole ? "whole" : "NOT whole - FAIL");
+  return ok && b3_ok && whole;
+}
+
 // Spec 31: the fixed slots' reference, then the pool engine on the same card (the first engine and its model freed).
 int pool_main(const std::string& checkpoint) {
   const uint32_t total = runtime::slots_kv_len(kSlots);
@@ -857,8 +952,9 @@ int pool_main(const std::string& checkpoint) {
   Ctx c(ctx, e);
   const bool ok = pool_cases(c, ref, prompt, cut(code, 0, 1200), cut(prose, 0, 2500), cut(long32k, 0, 33500),
                              cut(long32k, 0, runtime::kKvPage - 2));
-  std::printf("slots_test --pool: %s\n", ok ? "PASS" : "FAIL");
-  return ok ? 0 : 1;
+  const bool shared = pool_share(c, cut(long32k, 0, 17000), cut(code, 0, 1000), cut(prose, 0, 2000), cut(long32k, 3, 3000));
+  std::printf("slots_test --pool: %s\n", ok && shared ? "PASS" : "FAIL");
+  return ok && shared ? 0 : 1;
 }
 
 int main(int argc, char** argv) {
@@ -868,6 +964,18 @@ int main(int argc, char** argv) {
   const uint32_t total = runtime::slots_kv_len(kSlots);
   l0::Context ctx(0);
   const bool mtp = !(argc > 3 && std::string(argv[2]) == "--mtp" && std::string(argv[3]) == "off");
+  const auto code = golden::read_ids("tests/golden/prompts/code.ids");
+  CHECK(!code.empty());
+  const std::vector<uint32_t> p1 = cut(code, 0, 1200);
+  // S0 (--one-slot): S1's session in a one-slot engine of slot 0's length, freed before the slots' engine loads.
+  OneSlot one;
+  const bool one_slot = argc > 2 && std::string(argv[2]) == "--one-slot";
+  if (one_slot) {
+    Engine f(ctx, loader::load(ctx, checkpoint, kSlots[0], mtp, loader::LmHeadForm::Int8), kSlots[0]);
+    f.prepare_prefill();
+    Ctx c(ctx, f);
+    one.ids = s1_session(c, 0, p1, one.logits);
+  }
   Engine e(ctx, loader::load(ctx, checkpoint, total, mtp, loader::LmHeadForm::Int8), total, false,
            runtime::default_kv_cache(), nullptr, kSlots);
   e.prepare_prefill();
@@ -877,18 +985,17 @@ int main(int argc, char** argv) {
   CHECK_EQ(e.slot_base(2), 16384u + 8192u);
   CHECK_EQ(e.max_len(), 16384u);
   const auto long32k = golden::read_ids("tests/golden/prompts/long32k.ids");
-  const auto code = golden::read_ids("tests/golden/prompts/code.ids");
   const auto prose = golden::read_ids("tests/golden/prompts/prose.ids");
   const auto lng = golden::read_ids("tests/golden/prompts/long.ids");
-  CHECK(long32k.size() > 9000 && !code.empty() && !prose.empty() && !lng.empty());
-  const std::vector<uint32_t> p_deep = cut(long32k, 0, 6000), p1 = cut(code, 0, 1200), p2 = cut(prose, 0, 900),
-                              p3 = cut(lng, 0, 1000);
+  CHECK(long32k.size() > 9000 && !prose.empty() && !lng.empty());
+  const std::vector<uint32_t> p_deep = cut(long32k, 0, 6000), p2 = cut(prose, 0, 900), p3 = cut(lng, 0, 1000);
   Ctx c(ctx, e);
   bool ok = true;
-  ok &= s1(c, p1);
+  ok &= s1(c, p1, one_slot ? &one : nullptr);
   ok &= s2(c, p1, p2, p3);
   ok &= s3(c, p_deep, p1, p2, p3);
-  const std::string tag = std::string("slots_") + runtime::kv_cache_name(e.kv_cache()) + (e.mtp() ? "" : "_nomtp");
+  const std::string tag = std::string(e.model().desc->is_moe() ? "ornith_slots_" : "slots_") +
+                          runtime::kv_cache_name(e.kv_cache()) + (e.mtp() ? "" : "_nomtp");
   ok &= s4(c, {p_deep, p1, p2, p3}, tag);
   if (e.mtp()) ok &= s6(c, {p_deep, p1, p2, p3});
   ok &= s7(c, cut(long32k, 0, 5000), {p_deep, p1, p2, p3});

@@ -77,16 +77,16 @@ int main() {
       CHECK_EQ(kernels::small_m_tuning(t.K, t.N, t.S, t.layout), &t);
     }
   // Ornith (the 28b addition): its dense int4 projections and int8 head on gemm_sm at its verify
-  // lists' M = 2..4 (PERF-56: and its wide lookup verify lists' 16 / 32 / 64), gemv at M = 1; the consumer's S
-  // unchanged.
+  // lists' M = 2..4 (plan 31 Task 12: its sequence slots' row lists' 5..8; PERF-56: its wide lookup verify lists'
+  // 16 / 32 / 64), gemv at M = 1; the consumer's S unchanged.
   const model::ModelDesc& o = model::ornith();
   for (LinearId id : {LinearId::Qkv, LinearId::OProj, LinearId::QkvZ, LinearId::OutProj, LinearId::AB}) {
     const model::GemvShape& s = id == LinearId::AB ? o.ab(model::WeightKind::Int4).shape : o.shape(id);
     const kernels::SmallMTuning* t = kernels::small_m_tuning(s.K, s.N, s.S, s.layout);
-    CHECK(t != nullptr && t->mset == kernels::kSmVerify4Wide && kernels::gemm_sm_out_s(*t) == s.S);
+    CHECK(t != nullptr && t->mset == kernels::kSmAll && kernels::gemm_sm_out_s(*t) == s.S);
     CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(1), 1, s.K, s.N, s.S, s.layout),
              kernels::gemv_variant(1, s.K, s.N, s.S, s.layout));
-    for (uint32_t M = 2; M <= 4; ++M)
+    for (uint32_t M = 2; M <= 8; ++M)
       CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(M), M, s.K, s.N, s.S, s.layout),
                kernels::gemm_sm_variant(M, *t));
   }
@@ -115,7 +115,7 @@ int main() {
   // Spec 28d: Qwen3.8-Flash-Next's dense int4 projections and its int8 head at M 2..4 (the verify lists).
   {
     const unsigned H = 2560;
-    const struct { unsigned K, N, S; } q4[] = {{H, 16384, 1}, {H, 13312, 2}, {6144, H, 4}};
+    const struct { unsigned K, N, S; } q4[] = {{H, 16384, 1}, {H, 13312, 2}, {6144, H, 8}};   // out_proj at S8 (PERF-109)
     for (const auto& r : q4) {
       const kernels::SmallMTuning* t = kernels::small_m_tuning(r.K, r.N, r.S, 0);
       CHECK(t != nullptr && t->mset == kernels::kSmVerify4 && kernels::gemm_sm_out_s(*t) == r.S);

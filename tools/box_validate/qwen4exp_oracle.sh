@@ -38,7 +38,7 @@
 #                  the snapshot) -> <data>/oracle-out-q4exp-synth/{ours,intel}/<p>.{ids,golden.safetensors,log}
 #                  (r32.oracle_synth; ESTIMATED ~0.5-1 h a set on the box CPU: 4 real-width layers, every expert);
 #                  a kept set without the gates' score tensors (qsa.score, route.top - since 2026-11-04) is moved to
-#                  ~/b70/trash/<date>/ and made again
+#                  ~/b70/trash/<date>/ and made again; Q4_SYNTH_FORMS="ours" limits the run to one form
 #   trace          teacher-forced routing traces for spec 22 P0.6 / P0.8: the 36 A4 scenarios
 #                  (tests/golden/toolcall/*.ids), q4exp_agentic, code, prose, and the opencode recording when
 #                  OPENCODE_LOG is set -> <data>/oracle-out-q4exp-traces/<name>.routes.safetensors
@@ -180,12 +180,13 @@ in_box() {
 }
 
 # has_scores <golden file> - its header names the score judge's tensors (qsa.score.L* when it has QSA selection rows,
-# route.top.p.L*): qwen4exp_ref.py run writes them since 2026-11-04; older sets judge by the gaps (golden_test)
+# route.top.p.L*, and since 2026-11-21 route.top.logit.L* - the one-ulp rule): qwen4exp_ref.py run writes them; older
+# sets judge by the gaps (golden_test)
 has_scores() {
   python3 -c 'import json, struct, sys
 f = open(sys.argv[1], "rb"); h = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
 sel = any(k.startswith("qsa.sel.") for k in h); sc = any(k.startswith("qsa.score.") for k in h)
-sys.exit(0 if any(k.startswith("route.top.p.") for k in h) and (sc or not sel) else 1)' "$1"
+sys.exit(0 if any(k.startswith("route.top.logit.") for k in h) and (sc or not sel) else 1)' "$1"
 }
 
 # golden <out dir> <partial dir> <prompt name> <extra run args> [scores]
@@ -389,7 +390,7 @@ case "$mode" in
       echo "qwen4exp_oracle: the synthetic checkpoints are absent - synth-ckpt first"
       "$0" "$data" synth-ckpt || rc=1
     fi
-    for f in ours intel; do
+    for f in ${Q4_SYNTH_FORMS:-ours intel}; do
       out="$data/oracle-out-q4exp-synth/$f"; part="oracle-out-q4exp-synth.partial/$f-golden"
       if [ "$dry" != 1 ] && [ ! -s "$out/ckpt-ple-int8/model.safetensors.index.json" ]; then
         echo "qwen4exp_oracle: synthetic $f absent after synth-ckpt"; rc=1; continue

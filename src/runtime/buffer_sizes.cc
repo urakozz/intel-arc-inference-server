@@ -270,8 +270,10 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   s.slab = size_t{slab_k(desc)} * kernels::kPfSlabWidth * kBf16;
   s.pf_s = size_t{desc.fa_gqa()} * kC * max_len * kFp32;
   s.pf_p = size_t{desc.fa_gqa()} * kC * max_len * kBf16;
-  // The int8 flash path's widening is built at Qwen3.8's heads and (spec 17c) a tensor-parallel card's 12 / 2.
-  if ((desc.fa_q_heads == 24 && desc.fa_kv_heads == 4) || (desc.fa_q_heads == 12 && desc.fa_kv_heads == 2))
+  // The int8 flash path's widening is built at Qwen3.8's heads, (spec 17c) a tensor-parallel card's 12 / 2 and
+  // (PERF-64) Ornith's 16 / 2.
+  if ((desc.fa_q_heads == 24 && desc.fa_kv_heads == 4) || (desc.fa_q_heads == 12 && desc.fa_kv_heads == 2) ||
+      (desc.fa_q_heads == 16 && desc.fa_kv_heads == 2))
     s.kv8_raw = size_t{max_len} * desc.fa_kv_n() * kBf16 * 2;
   s.moe = moe_prefill_layout(desc, chunk_cap).total;   // spec 15d: 0 on a dense model
   return s;
@@ -358,13 +360,16 @@ EngineSizes EngineDims::sizes(const model::ModelDesc& desc, KvCache kv, uint32_t
   EngineSizes s;
   if (debug_tap) s.tap = size_t{desc.layers} * desc.hidden * kBf16;
   if (drafter) s.df_slots = TapVerifyDims::gdn_spec_bytes(desc) + size_t{seqs - 1} * SlotDims::kDrafterStates * gdn_state_bytes(desc);
-  if (seqs != 1 || !(mtp || drafter)) return s;
+  // One sequence with a proposer; plan 31 Task 13: several with the MTP head, each its own pending rows (a lone
+  // request's verify lists the one-slot engine's), no deep lists.
+  if (seqs == 1 ? !(mtp || drafter) : !mtp) return s;
   // The shapes kernels::gdn_defer_built names (engine.cc holds the parities equal to the kernels').
   const bool qwen = desc.gdn_layers == 48 && desc.gdn_k_heads == kernels::kRefGdnKHeads &&
                     desc.gdn_v_heads == kernels::kRefGdnVHeads;
   const bool ornith = desc.gdn_layers == 30 && desc.gdn_k_heads == 16 && desc.gdn_v_heads == 32;
-  if (qwen) s.gdn_pend = 2 * MtpDims::kGdnPendParity;
-  else if (ornith) s.gdn_pend = 2 * MtpDims::kGdnPendParityOrnith;   // PERF-51
+  if (qwen) s.gdn_pend = size_t{seqs} * 2 * MtpDims::kGdnPendParity;
+  else if (ornith) s.gdn_pend = size_t{seqs} * 2 * MtpDims::kGdnPendParityOrnith;   // PERF-51
+  if (seqs != 1) return s;
   if ((qwen || ornith) && mtp && kv == KvCache::Bf16 && draft_vocab == 0) {   // PERF-56: Ornith's deep lists too
     s.gdn_x = gdn_state_bytes(desc);
     s.conv_x = size_t{desc.gdn_layers} * (qwen ? MtpDims::kGdnConvXLayer : MtpDims::kGdnConvXLayerOrnith);

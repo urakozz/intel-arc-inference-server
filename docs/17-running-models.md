@@ -26,7 +26,7 @@ Build as in the README (`cmake`, then `ctest`). The engine never downloads anyth
 Hugging Face cache once:
 
 ```sh
-uvx --from huggingface_hub hf download <org>/<name>
+hf download <org>/<name>
 ```
 
 There are two command-line tools:
@@ -67,7 +67,7 @@ sessions and leave it off for benchmarks. Every agentic recipe below includes it
 ## Qwen3.8-27B
 
 ```sh
-uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
+hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 ```
 
@@ -78,7 +78,7 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 | default, bf16 KV cache | 171,008 | 138 / 57 / 100 t/s, prefill 1,788 t/s |
 | full context: int8 KV cache | 262,144 | not measured |
 | faster prefill (opt-in): int8 prompt pass (brings the int8 cache) | 262,144 | prefill 2,800 t/s at 3,931 tokens (bf16 1,906), MTP on |
-| four requests at once: `--max-num-seqs 4` | 46,080 + 3 x 32,768 (bf16 cache), 167,936 + 3 x 32,768 (int8 cache) | not measured |
+| four requests at once: `--max-num-seqs 4` | one pool of 135,168 (bf16 cache) or 239,616 (int8 cache) shared by the four; any one may use all of it | 74 / 111 / 134 t/s total at 1 / 2 / 4 requests (int8 cache) |
 
 ```sh
 ./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last                                 # default
@@ -100,7 +100,7 @@ It turns `--kv-cache int8` on; an explicit `--kv-cache bf16` beside it is refuse
 |---|---|---:|---|
 | one session, fastest (the default) | `tp`: every layer split over both cards; needs peer access | 262,144 (bf16 cache) | 123 / 74 / 115 t/s; prefill 2,931 t/s, 3,217 with `--prefill-backend l0-int8` (measured with the earlier MLP-only int8 pass; today's form - every linear, the int8 context and int8 scores - is not timed on two cards yet) |
 | two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 171,008 (bf16) or 262,144 (int8) each | 164 / 108 / 144 t/s total |
-| most requests at once: `--max-num-seqs 8` | `replica`, 4 slots per card | 46,080 + 3 x 32,768 (bf16) or 167,936 + 3 x 32,768 (int8) per card | 342 / 300 / 233 t/s total at 8 requests, 282 / 189 / 206 at 4 |
+| most requests at once: `--max-num-seqs 8` | `replica`, 4 requests per card | a pool per card: 135,168 (bf16) or 239,616 (int8) shared by its four | 342 / 300 / 233 t/s total at 8 requests, 282 / 189 / 206 at 4 |
 
 ```sh
 ./build/src/cli/b70-serve $Q --prefix-split-last                                    # one session, tp
@@ -108,12 +108,23 @@ It turns `--kv-cache int8` on; an explicit `--kv-cache bf16` beside it is refuse
 ./build/src/cli/b70-serve $Q --max-num-seqs 8 --kv-cache int8 --prefix-split-last   # up to 8 requests
 ```
 
-How the slots work with `--max-num-seqs N`:
+How several requests share a card with `--max-num-seqs N`:
 
-- Slot 0 gets the largest context that fits beside N - 1 slots of 32,768 positions. Slot 0 is meant for the main
-  session, the others for shorter subagent tasks.
-- On two cards the slots are split between the cards, card 0 taking the odd one.
-- An explicit `--max-len` that does not fit beside the other slots is refused at startup, with the numbers.
+- The requests share one pool of KV cache pages (2,048 tokens each). Any one request may grow to the whole pool, up
+  to the model's 262,144 tokens or `--max-len`, while the others are short or idle. Startup prints the pool, for
+  example `kv pool: 66 pages of 2048 (135168 tokens) shared by 4 requests; one request up to 135168`.
+- A finished conversation keeps its pages until a new request needs them. Then the one idle longest gives them back
+  first; its next turn comes back from the prefix cache (a 123,000-token session in about 1 s) instead of being read
+  again.
+- With every request running and no page left, the request that needs one more finishes with `length`, and the log
+  says `kv pool full: ... --kv-cache int8 or a smaller --max-num-seqs gives a request more`.
+- Requests that start with the same tokens read the same pages for that start (the prefix cache's blocks) instead of
+  copying them; a request that writes into such a page gets its own copy first.
+- On two cards each card has its own pool, card 0 taking the odd request. A request goes to the card holding its
+  conversation, else to the card with the most free pages.
+- Beside the DFlash drafter (`--spec dflash`) the slots stay fixed: slot 0 gets the largest context that fits beside
+  N - 1 slots of 32,768 positions.
+- An explicit `--max-len` that does not fit is refused at startup, with the numbers.
 - `tp` serves one request at a time.
 
 ### Two cards, pipeline parallel
@@ -155,7 +166,7 @@ The int4 drafter accepts slightly fewer tokens per round than the int8 one (0.01
 prompts) and is faster overall.
 
 ```sh
-uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound   # once
+hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound   # once
 D=urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 
 # one card, with prompt lookup inside
@@ -305,7 +316,7 @@ A passing box test shows a configuration runs and is correct; it is not a speed 
 | checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | ours (int4 g64, not published) or Intel's interim W4A16 |
 | `b70-serve` | yes | yes | yes, two cards by default | the whole model on two cards (`--parallel auto` = pp), experts partly in pinned host memory |
 | `--parallel tp` | yes | refused | refused | yes, when asked: decode with MTP 0.99-1.35x pp's on text; prefill 0.69-0.81x pp's (32k / 128k-token prompt) |
-| `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request per card); more is refused | refused | refused |
+| `replica`, `--max-num-seqs` | yes | yes: up to 4 requests a card sharing a KV page pool, `replica` up to 8 | refused | refused |
 | `--parallel pp` (two cards) | yes | yes | its default | its default for the whole model |
 | `b70-decode` | yes | yes | decode and prefill, two cards by default | decode and prefill, the whole model or `--layers N` |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (an MoE head) | none (`auto` = off) | `b70-serve`: adaptive MTP by default, `--spec-max` 1 to 3; `b70-decode` decodes plain |
@@ -313,7 +324,7 @@ A passing box test shows a configuration runs and is correct; it is not a speed 
 | `--spec dflash` | yes: one card (with prompt lookup inside), up to 4 requests per card, `replica`, `tp` or `pp`, bf16 or int8 KV | no | `b70-serve`: the DSpark drafter (below); `b70-decode` refuses | refused |
 | `--kv-cache int8` | yes | not built | refused | refused |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default; use it); `l0-int8` opt-in and slower | `l0` only | `l0` only |
-| KV cache per position (bf16) | 64 KiB | 20 KiB | 20 KiB (+ 335.5 MB of sliding-window rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
+| KV cache per position (bf16) | 64 KiB | 20 KiB | 20 KiB (+ 335.5 MB of sliding-window rings) | 24.21 KiB (12 QSA layers: K + V 2 KiB + 18 B of indexer keys each) |
 | `--max-len auto`, one card, int8 head | 171,008 with MTP (the default); about 201k with `--spec off` | 262,144, with or without MTP (27.3 GB planned of 32.5, bf16 KV) | 262,144 on two cards (split at layer 25) | not served whole on one card; see below |
 | with `--kv-cache int8` | 262,144, with or without MTP | - | - | - |
 
@@ -351,12 +362,14 @@ token, not the bytes, set the rate. Weights are 19.45 GB with the int8 head, plu
 
 ```sh
 O=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
-uvx --from huggingface_hub hf download $O                 # 22.99 GB
+hf download $O                 # 22.99 GB
 
 # agentic session: the full trained context, 262,144, fits in bf16 with or without MTP
 ./build/src/cli/b70-serve $O --prefix-split-last
 # two sessions at once on two cards (replica: a model copy per card, one request each, full context each)
 ./build/src/cli/b70-serve $O --max-num-seqs 2 --prefix-split-last
+# up to four requests on one card, sharing a pool of 200 KV pages (409,600 tokens; one request up to 262,144)
+./build/src/cli/b70-serve $O --parallel 1 --max-num-seqs 4 --prefix-split-last
 
 ./build/src/cli/b70-decode $O --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256
@@ -370,13 +383,26 @@ Two cards serve two requests at once as `replica` (`--max-num-seqs 2`, or `--par
 own engine with the full context, MTP and the prefix cache. A prompt cached by one card is a prefix cache hit on the
 other. Each request is bitwise what it would be alone on its card.
 
-Several requests on one card (sequence slots) are built for Qwen3.8 only, so `--max-num-seqs` above 2, or 2 on one
-card, is refused. `--parallel tp` is Qwen3.8's only.
+Several requests also share one card, as for Qwen3.8 (`--max-num-seqs` up to 4 a card, a KV page pool per card; the
+list above Qwen3.8's run-mode table says how the pool is shared). A lone request on that server gives the ids it gives
+on the one-request server, at its speed: prompt lookup inside MTP and the per-step draft choice run beside the other
+requests too. Measured on one card, MTP on, 512 ids each behind a 2,820-token prompt, totals at 1 / 2 / 3 / 4 requests:
+
+| server | 1 | 2 | 3 | 4 |
+|---|---:|---:|---:|---:|
+| `--max-num-seqs 4` | 304 | 250 | 301 | 330 t/s |
+| one request at a time | 305 | 215 | 242 | 204 t/s |
+
+This prompt invites copying, so how much prompt lookup finds varies from run to run: one request alone found most of
+its ids there, the same requests two at a time far fewer on either server. With lookup off one request runs at 244
+t/s on both servers and two at once at 249. With four requests the pool leaves no room for the prompt pass's bf16 copy of the mixer
+weights: the first token comes 0.06 s later on this prompt (0.41 against 0.35 s). `--parallel tp` is Qwen3.8's only.
 
 ### Options that differ from Qwen3.8
 
-- `--kv-cache int8` is not built for Ornith's attention shape. It is not needed for context, since 262,144 fits in
-  bf16. `B70_KV_CACHE` must stay `bf16`
+- `--kv-cache int8` halves the KV bytes a position (about 11 KB against 22 KB), so a server with several requests
+  holds about twice the positions in its pool; one request does not need it, since 262,144 fits in bf16. It runs on
+  one card (and one copy a card with `--parallel replica`); `--parallel pp` refuses it, and so does `l0-int8`
 - Use the default prompt pass (`l0`). `l0-int8` is opt-in and slower than the bf16 pass on Ornith. It also loses
   routing accuracy against f32: on the box, 1314 differing expert sets on the prefill path against the bf16
   reference's 1140, and no 8-bit activation scheme studied won that back. Its model-level accuracy checks are
@@ -431,7 +457,7 @@ Two files have to sit beside the weights before the engine will load Flash-Next.
    F=~/models/qwen3.8-flash-next
    mkdir -p $F
    for f in $I_SNAP/*; do [ "$(basename $f)" = tokenizer.json ] || ln -s "$f" $F/; done
-   uvx --from huggingface_hub hf download Qwen/Qwen3.8-Flash-Next tokenizer.json --local-dir $F
+   hf download Qwen/Qwen3.8-Flash-Next tokenizer.json --local-dir $F
    ln -s $I_SNAP-ple-int8 $F-ple-int8                      # the PLE file beside the new directory
    ```
 
@@ -495,8 +521,8 @@ as OpenAI chat through the Qwen chat path. The template is Qwen3.8's (the origin
 Requests are greedy unless they ask for sampling.
 
 The prefix cache keeps this family's state with each snapshot: 115.7 MB for the 36 GDN states and convolution rows,
-the PLE history and the QSA open block's raw keys, plus 21 KB with the head. Each position takes 25,344 B in its blocks
-(plus 2,112 with the head), in one layout on one card or two.
+the PLE history and the QSA open block's raw keys, plus 21 KB with the head. Each position takes 24,792 B in its blocks
+(plus 2,066 with the head), in one layout on one card or two.
 
 MTP in `b70-serve`:
 

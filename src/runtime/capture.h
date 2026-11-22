@@ -223,9 +223,10 @@ struct TapVerify {
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const TapVerify& tv, uint32_t M, const CaptureOptions& opt = {},
                                const SlotBind& slot = {});
-// verify-cost-m8: one launch a GDN layer of gdn_step_defer_M1 over `pend` - run with Control::n_active 0 it replays
-// the committed rows into gdn_state and nothing else (the engine's flush before anything reads the state).
-CapturedStep build_gdn_flush(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, void* pend);
+// verify-cost-m8: one launch a GDN layer of gdn_step_defer_M1 over `slot.gdn_pend` - run with Control::n_active 0 it
+// replays the committed rows into the slot's gdn_state and nothing else (the engine's flush before anything reads the
+// state). Plan 31 Task 13: `slot` - the sequence slot's Control, state and ring (each null: the buffers' own).
+CapturedStep build_gdn_flush(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const SlotBind& slot);
 
 // (spec 28c: the stage verify builders below take CaptureOptions too - PipelineEngine's deep lists force DPAS.)
 // --- spec 16b: pipeline parallel decode ----------------------------------------------
@@ -333,8 +334,9 @@ struct BatchRowsBind {
   l0::Mem* taps = nullptr;
   std::vector<uint32_t> tap_layers;
 };
+// `prof` (probes only, probe_slots_speed --profile-rows): per-launch events exactly as build's - an observer only.
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
-                        uint32_t M);
+                        uint32_t M, ProfileEvents* prof = nullptr);
 // decode_launches(d), or with the head verify_launches(d) + 1 (the gather).
 size_t rows_launches(const model::ModelDesc& d, bool head);
 
@@ -344,7 +346,8 @@ size_t rows_launches(const model::ModelDesc& d, bool head);
 // head's attn_prep and decode attention are their `_ROWS` builds over the head's KV layer; every other launch is
 // build_draft's at M rows. The rows' post-mtp.norm hidden go back into dh rows 0..M-1, their logits into `logits`
 // [M][kVocab] fp32 and their argmax into hctl.out_token[0..M) (argmax_stage2's in-list advance lands in hctl, which
-// the host rewrites before every replay). draft_launches(d) launches. Dense heads only (Qwen3.8).
+// the host rewrites before every replay). draft_launches(d) launches. Qwen3.8's dense head and (plan 31 Task 12)
+// Ornith's MoE head (its MoE block at M rows, each row routed on its own).
 struct DraftRowsBind {
   void* hctl = nullptr;        // the head Control, shared: n_active = M, cur_token[0..M) the rows' input ids
   void* head_rows = nullptr;   // runtime::BatchRowTable, shared: each row's draft position, KV base, slot

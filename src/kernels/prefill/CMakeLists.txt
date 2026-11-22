@@ -114,8 +114,13 @@ add_ocloc_kernel(pf_gdn_scan SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl)
 # lines.
 add_ocloc_kernel(pf_gdn_wy_WB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_wy.cl DEFINES WU_B16=1)
 add_ocloc_kernel(pf_gdn_front_PL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl DEFINES FRONT_PRELOAD=1)
+# 256 GRF: at 128 this build spills 512 B a thread, and the prompt pass's immediate list keeps the scratch it first
+# got - after an int8 KV decode list (attn_decode_v2_kv8, up to 1920 B) or DFlash's df_attn_part (6144 B private)
+# has grown the card's scratch, the spilling scan faulted on freed scratch (DEVICE_LOST, served int8 DFlash, the
+# first long prompt after a short one). Bitwise the 128-GRF build; 0.87 against 0.75 ms a 2048-row launch.
+# prefill_scratch_test holds the prompt pass's binaries to no scratch.
 add_ocloc_kernel(pf_gdn_scan_OB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl
-                 DEFINES SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1)
+                 DEFINES SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1 OPTIONS -cl-intel-256-GRF-per-thread)
 add_ocloc_kernel(pf_gated_head_OB SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl DEFINES HEAD_SG=1 HEAD_OBF16=1)
 # Ornith's one-launch intra-chunk kernel (A, T, W / U, A2 - pf_gdn_intra.cl) at Qwen3.8's 16 / 48 heads, judged not
 # bitwise; gdn.cc binds it on the one-card l0 walk (l0-int8 keeps pf_gdn_wy_WB's four). Additive.
@@ -447,8 +452,8 @@ endif()
 #             (moe_M1_E256_T8_D2048_I512, grid (1, C)), pf_moe.cl (gather, dequant, combine),
 #             pf_moe_sort_mw.cl and the grouped GEMMs: gate||up bf16 and int8 (h8) with the SiLU
 #             epilogue, down bf16 (its K 512 is not whole 1024-k rotation blocks)
-# Not built for Ornith: the composed attention's identity prep (pf_attn_prep, fp32 q), the
-# int8 KV cache's prefill (spec 12b, Qwen3.8's shapes), the MTP head's (spec 15e).
+# Not built for Ornith: the composed attention's identity prep (pf_attn_prep, fp32 q), the MTP head's (spec 15e). The
+# int8 KV cache's prefill is PERF-64's block below.
 if(B70_ORNITH)
   set(PF_ORNITH_GDN GDN_K_HEADS=16 GDN_V_HEADS=32)
   set(PF_ORNITH_FA FA_Q_HEADS=16 FA_KV_HEADS=2)
@@ -484,8 +489,9 @@ if(B70_ORNITH)
   # to (SCAN_OBF16), and the head runs one sub-group a (position, head) reading it (HEAD_SG, HEAD_OBF16) - bitwise.
   # q.S beside w.S, A2.vn inside the state update's loop and S's split before the step's closing barrier (two
   # barriers a step, not three): SCAN_QS1=2 SCAN_FOLD=1 - bitwise (probe_gdn_arms, 2026-11-18).
+  # 256 GRF as pf_gdn_scan_OB (no spill, so no scratch on the prompt pass's list).
   add_ocloc_kernel(pf_gdn_scan_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl
-                   DEFINES ${PF_ORNITH_GDN} SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1)
+                   DEFINES ${PF_ORNITH_GDN} SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
                    DEFINES ${PF_ORNITH_GDN} HEAD_SG=1 HEAD_OBF16=1)
   # The qkv||z partials as the bf16 words their readers round them to (a chunk past kPfSmallMaxRows rows, which
@@ -603,6 +609,62 @@ if(B70_ORNITH AND B70_MTP)
                    DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA} KV_ONLY=1)
 endif()
 # ==== Spec 15e ================================================================ (end) ====
+
+# Plan 31 Task 12 (src/kernels/CMakeLists.txt's block of that name): an Ornith slot's prefill over its paged KV - the
+# writers (the head's too, KV_ONLY), the 8-row flash with pf_attn_gate fused into its epilogue (GATE_EPI: the pair
+# form's arithmetic and the gate's, bitwise the one-slot walk's pairg) and the short-chunk split; each its unpaged
+# twin's command line plus KV_PAGED (the gated 8-row form has no unpaged twin: the one-slot walk runs the pair). The
+# gated merge reads no KV. Additive only.
+if(B70_ORNITH AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
+  add_ocloc_kernel(pf_attn_prep_q16_Q16KV2_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA} KV_PAGED=${KV_PAGE})
+  add_ocloc_kernel(pf_attn_prep_q16_Q16KV2_PG${KV_PAGE}_KVO SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA} KV_PAGED=${KV_PAGE}
+                           KV_ONLY=1)
+  add_ocloc_kernel(pf_flash_attn_g_Q16KV2_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 GATE_EPI=1 ${PF_ORNITH_FA} KV_PAGED=${KV_PAGE}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_split_Q16KV2_PG${KV_PAGE} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 SPLIT=1 ${PF_ORNITH_FA} KV_PAGED=${KV_PAGE}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+endif()
+
+# PERF-64: Ornith's prefill over the int8 KV cache - spec 12b's writer, raw flash (with its kv8_widen), pair, splits and
+# gate at 16 q / 2 kv heads (HPW 8 = the GQA group for the 8-row forms, as Ornith's bf16 flash), and their paged twins
+# for the sequence slots / the pool, the pair among them (the paged pair reads the widened rows, its scales by page).
+# Each the command line of its Qwen3.8 twin above plus ${PF_ORNITH_FA} (and HPW 8); the merge is pf_flash_merge_Q16KV2.
+if(B70_ORNITH AND B70_KV8)
+  add_ocloc_kernel(pf_attn_prep_kv8_Q16KV2 SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1 ${PF_ORNITH_FA})
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_Q16KV2 SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_pair_Q16KV2 SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 KV8_PAIR=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_kv8_split_Q16KV2 SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_split_Q16KV2 SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_attn_gate_kv8_Q16KV2 SOURCE ${KV8_CL} DEFINES KV8_GATE=1 ${PF_ORNITH_FA})
+  if(B70_MTP AND B70_VERIFY_M8)
+    add_ocloc_kernel(pf_attn_prep_kv8_Q16KV2_PG${KV_PAGE} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} PF=1 ${PF_ORNITH_FA} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(pf_flash_attn_kv8_raw_Q16KV2_PG${KV_PAGE} SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA} KV_PAGED=${KV_PAGE}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_flash_attn_kv8_raw_pair_Q16KV2_PG${KV_PAGE} SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 KV8_PAIR=1 ${PF_ORNITH_FA}
+                             KV_PAGED=${KV_PAGE} OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_flash_attn_kv8_split_Q16KV2_PG${KV_PAGE} SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA} KV_PAGED=${KV_PAGE}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_flash_attn_kv8_raw_split_Q16KV2_PG${KV_PAGE} SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
+                             KV_PAGED=${KV_PAGE} OPTIONS -cl-intel-256-GRF-per-thread)
+  endif()
+endif()
 
 # ==== Spec 17c: tensor parallel PREFILL over two cards (`--parallel tp --prefill`, Qwen3.8) ======== (begin) ====
 # Additive only: new names (every binary above keeps its name and command line) and one new source, pf_tp.cl (the

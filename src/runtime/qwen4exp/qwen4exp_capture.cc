@@ -707,6 +707,9 @@ class Walk {
   void moe(const loader::Q4Layer& L, void* rt, bool shb) {
     require(L.router->shape.N == d_.router_n() && L.router->shape.K == d_.hidden, "the router is not [528][2560]");
     linear(*L.router, b_.x.ptr(), b_.logits_r);
+    if (tap_ && layer_ >= 0)   // the debug tap: this layer's router logits (the golden test's routing diagnostic)
+      step_.list.copy(at(*tap_, tap_router_at(d_) + size_t(layer_) * kM * d_.router_n() * 4), b_.logits_r.ptr(),
+                      size_t(kM) * d_.router_n() * 4);
     {
       l0::Kernel& k = kernel(kq::route_variant(M_), "q4_route", kq::kRouteLanes);
       k.arg_ptr(0, b_.logits_r.ptr());

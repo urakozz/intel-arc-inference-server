@@ -11,7 +11,8 @@
 //                   in fp32: an f16 times |q - 8| <= 8 holds at most 15 significant bits), hi = bf16(w), lo = bf16(w -
 //                   hi), so hi + lo = w exactly - one bf16 slab (the target's prefill dequant) measured 4.3e-3 off the
 //                   8-row path's exact weights; the GEMM runs against each, df_w_add sums them
-//   df_w_add        grid (NS / 256, rows), WG 256: c [rows][N] (pitch N, from column n0) += t [rows][NS]
+//   df_w_add        grid (NS / 256, rows), WG 256: c [rows][N] (pitch N, from column n0) = t [rows][NS] (the hi
+//                   slab's GEMM) + t [T + ...] (the lo slab's)
 //   df_w_norm       grid (1, rows), WG 256: df_norm over the GEMM's rows, the int8 column scales folded in first
 //                   (`scaled`; gemm_sm_i8w scales its output, pf_gemm does not); writes the bf16 x only
 //   df_w_ctx_store  grid (2 NKV, rows), WG HD: df_ctx_store for ONE layer - row r is position pos0 + r, k (k_norm,
@@ -79,9 +80,10 @@ __kernel void df_w_slab_q4(__global const uint* restrict w, __global ushort* res
 }
 
 __attribute__((reqd_work_group_size(256, 1, 1)))
-__kernel void df_w_add(__global const float* restrict t, __global float* restrict c, const uint NS, const uint N) {
+__kernel void df_w_add(__global const float* restrict t, __global float* restrict c, const uint NS, const uint N,
+                       const ulong T) {
   const uint j = get_global_id(0), r = get_group_id(1);
-  c[(size_t)r * N + j] = c[(size_t)r * N + j] + t[(size_t)r * NS + j];
+  c[(size_t)r * N + j] = t[(size_t)r * NS + j] + t[T + (size_t)r * NS + j];
 }
 
 // The fixed Σ: lane partials then strides WG/2 .. 1 (df_prep.cl's wg_sum).

@@ -13,6 +13,7 @@
 //     vendored tests/tokenizer/kolibri copy, T 1.0, top-p 0.97, top-k 128, sampled) is what a request
 //     without temperature / top_p / top_k samples with; a request's own fields win; temperature 0 is
 //     greedy; and a Qwen-format server keeps Sampling{} (greedy, T 1.0, top-p 0.95, top-k 20).
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -59,8 +60,10 @@ struct KolibriTemplate : server::TemplateIface {
 // MockEngine, recording the sampling of every step.
 struct RecordingEngine : MockEngine {
   std::vector<server::Sampling> seen;
+  std::vector<std::vector<uint32_t>> seen_ids;   // each step's penalty ids at the call (empty without a penalty)
   uint32_t step(const server::Sampling& s) override {
     seen.push_back(s);
+    seen_ids.push_back(s.seen ? s.seen->distinct() : std::vector<uint32_t>{});
     return MockEngine::step(s);
   }
 };
@@ -300,6 +303,38 @@ void case_sampling() {
   std::printf("sampling: Kolibri's defaults 1.0 / 0.97 / 128 sampled; request fields win; Qwen keeps Sampling{}\n");
 }
 
+// repetition_penalty reaches the engine: the request's prompt ids and every id sent so far are the penalty's seen ids, and
+// a greedy request becomes top-k 1 on the host (the device argmax knows nothing of the penalty). Penalty 1: untouched.
+void case_penalty() {
+  Fixture f;
+  f.script("abc", 127906);
+  json b = body();
+  b["temperature"] = 0;
+  b["repetition_penalty"] = 1.3;
+  post(f, b);
+  CHECK(f.engine.seen.size() >= 3);
+  for (const server::Sampling& s : f.engine.seen) {
+    CHECK(!s.greedy);
+    CHECK_EQ(s.top_k, 1u);
+    CHECK_EQ(s.repetition_penalty, 1.3f);
+    CHECK(s.seen != nullptr);
+  }
+  const std::vector<uint32_t>& prompt = f.engine.last_prompt;
+  const std::vector<uint32_t>& first = f.engine.seen_ids.front();
+  const std::vector<uint32_t>& later = f.engine.seen_ids.back();
+  for (uint32_t id : prompt) CHECK(std::find(first.begin(), first.end(), id) != first.end());
+  CHECK(later.size() > first.size());   // the ids sent since are in
+  CHECK(std::find(later.begin(), later.end(), f.engine.script.front()) != later.end());
+  Fixture g;
+  g.script("abc", 127906);
+  json c = body();
+  c["temperature"] = 0;
+  c["repetition_penalty"] = 1.0;
+  post(g, c);
+  for (const server::Sampling& s : g.engine.seen) CHECK(s.greedy && s.seen == nullptr && s.top_k == g_defaults.top_k);
+  std::printf("penalty: seen ids = prompt + ids sent, greedy -> host top-k 1; penalty 1.0 stays greedy\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -309,6 +344,7 @@ int main(int argc, char** argv) {
   case_eos();
   case_kwargs();
   case_stream();
+  case_penalty();
   case_sampling();
   std::printf("kolibri_server_test OK: 5 cases\n");
   return 0;

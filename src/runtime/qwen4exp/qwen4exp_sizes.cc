@@ -11,6 +11,7 @@
 
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/qwen4exp_kernels.h"
+#include "kernels/qwen4exp_kernels.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
 #include "runtime/tp_protocol.h"   // tp::Layout (header-only)
@@ -37,7 +38,7 @@ uint32_t count_qsa(const model::Qwen4ExpDesc& d, uint32_t first, uint32_t end) {
 }
 
 size_t qsa_state_per_layer(const model::Qwen4ExpDesc& d, uint32_t max_len) {
-  return size_t(max_len) * 2 * d.kv_n() * 2 + size_t(max_len / d.idx_compress) * d.idx_dim * 2 +
+  return size_t(max_len) * 2 * d.kv_n() * 2 + size_t(max_len / d.idx_compress) * idx_key_slot_bytes(d) +
          size_t(kIdxTail) * d.idx_dim * 2;
 }
 
@@ -61,7 +62,7 @@ PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Pl
   PersistentSizes s;
   s.control = sizeof(Control);
   s.kv = line(size_t(qsa) * max_len * 2 * d.kv_n() * 2);
-  s.idx_keys = line(size_t(qsa) * (max_len / d.idx_compress) * d.idx_dim * 2);
+  s.idx_keys = line(size_t(qsa) * (max_len / d.idx_compress) * idx_key_slot_bytes(d));
   s.idx_tail = line(size_t(qsa) * kIdxTail * d.idx_dim * 2);
   s.gdn_state = line(size_t(gdn) * gdn_state_bytes_per_layer(d));
   s.conv_ring = line(size_t(gdn) * conv_ring_bytes_per_layer(d));
@@ -71,7 +72,10 @@ PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Pl
 }
 
 size_t kv_bytes_per_pos(const model::Qwen4ExpDesc& d) {
-  return size_t(d.qsa_before(d.layers)) * (size_t(2) * d.kv_n() * 2 + size_t(d.idx_dim) * 2 / d.idx_compress);
+  return size_t(d.qsa_before(d.layers)) * (size_t(2) * d.kv_n() * 2 + idx_key_slot_bytes(d) / d.idx_compress);
+}
+size_t idx_key_slot_bytes(const model::Qwen4ExpDesc& d) {
+  return size_t(d.idx_dim) / 2 + 8;   // the packed key: nibbles, then two fp32 scales (q4_qsa.cl I4_KEY_BYTES)
 }
 
 size_t host_ple_bytes(const model::Qwen4ExpDesc& d, loader::Q4PleScale s) {
@@ -893,7 +897,7 @@ MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   MtpSizes s;
   s.hctl = sizeof(Control);
   s.kv = size_t(max_len) * 2 * d.kv_n() * 2;
-  s.idx_keys = size_t(max_len / d.idx_compress) * d.idx_dim * 2;
+  s.idx_keys = size_t(max_len / d.idx_compress) * idx_key_slot_bytes(d);
   s.idx_tail = size_t(kIdxTail) * d.idx_dim * 2;
   s.list = size_t(kListRow) * 4;
   s.diag = line(2 * 4);
@@ -978,7 +982,7 @@ const char* snap_tensor_name(SnapTensor t) {
 
 namespace {
 size_t kv_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.kv_n()) * 2; }          // 1024: a K (or V) row
-size_t key_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.idx_dim) * 2; }            // 256: a raw / block key
+size_t key_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.idx_dim) * 2; }            // 256: a raw key (a block key: idx_key_slot_bytes)
 size_t conv_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.conv_rows()) * 2; }   // 20,480
 size_t ple_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.hc_n()) * 2; }         // 20,480
 // Layer l's index among its device's layers of its kind (QSA or GDN): its slice of the device's group.
@@ -1029,7 +1033,7 @@ size_t kv_snapshot_bytes(const model::Qwen4ExpDesc& d, uint32_t begin, uint32_t 
                                 std::to_string(end) + ") does not start at a whole indexer block");
   const size_t layers = size_t(d.qsa_before(d.layers)) + (mtp ? 1 : 0);
   const size_t n = end - begin, blocks = end / d.idx_compress - begin / d.idx_compress;
-  return layers * (n * 2 * kv_row_bytes(d) + blocks * key_bytes(d));
+  return layers * (n * 2 * kv_row_bytes(d) + blocks * idx_key_slot_bytes(d));
 }
 
 std::vector<SnapRun> state_runs(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, bool mtp) {
@@ -1085,7 +1089,7 @@ std::vector<SnapRun> kv_runs(const model::Qwen4ExpDesc& d, const model::Q4Placem
     runs.push_back({dev, SnapTensor::Kv, base + size_t(begin) * row, n * row, false, false});          // K
     runs.push_back({dev, SnapTensor::Kv, base + rows + size_t(begin) * row, n * row, false, false});   // V
   }
-  const size_t kb = key_bytes(d), keys = size_t(max_len / d.idx_compress) * kb;
+  const size_t kb = idx_key_slot_bytes(d), keys = size_t(max_len / d.idx_compress) * kb;
   if (b1 > b0)
     for (uint32_t l = 0; l < d.layers; ++l) {
       if (!d.is_qsa(l)) continue;
@@ -1113,7 +1117,7 @@ size_t snap_tensor_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement&
     case SnapTensor::PleIds:
     case SnapTensor::PleRing: return s.ple;
     case SnapTensor::MtpKv: return size_t(max_len) * 2 * kv_row_bytes(d);
-    case SnapTensor::MtpIdxKeys: return size_t(max_len / d.idx_compress) * key_bytes(d);
+    case SnapTensor::MtpIdxKeys: return size_t(max_len / d.idx_compress) * idx_key_slot_bytes(d);
     case SnapTensor::MtpIdxTail: return size_t(kIdxTail) * key_bytes(d);
     case SnapTensor::MtpHidden: return size_t(d.hc_n()) * 2;
   }

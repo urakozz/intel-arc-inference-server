@@ -1614,7 +1614,7 @@ st_r32_k1() {
     gemv_bf16_M1_K2560_N528_C16_S16 gemv_bf16_M1_K2560_N12800 gemv_bf16_M1_K2560_N248320 gemv_i8w_M1_K2560_N248320 \
     q4_hc_combine_norm_M1_E q4_hc_combine_norm_M1_S1 q4_hc_combine_norm_M1_S8 q4_hc_combine_norm_M1_Y \
     q4_hc_combine_norm_M1_Y_NN q4_hc_combine_norm_M1_X q4_hc_up_mix_M1_I_B q4_hc_up_mix_M1_B q4_ple_gather_M1_BF16 \
-    q4_ple_gather_M1_F32 q4_ple_block_M1 q4_qsa_M1_T512_W1024 q4_qsa_attn_M1_T32 q4_qsa_attn_eager_M1 \
+    q4_ple_gather_M1_F32 q4_ple_block_M1 q4_qsa_M1_T512_W1024_I4H q4_qsa_attn_M1_T32 q4_qsa_attn_eager_M1 \
     q4_route_M1_E512_T10_N528_L256 q4_moe_M1_E512_T10_D2560_I640_SH4 q4_moe_M1_E512_T10_D2560_I640_SHB
   run_tests '^qwen4exp_kernels_test$' qwen4exp
   jgrab k1 '^qwen4exp_kernels_test$' 'exact|bitwise|ulp|cosine|differ|PASS|FAIL|OK'
@@ -1722,7 +1722,7 @@ st_r33_k1() {
     pf_dequant_slab_K2560_N13312_L0 q4_pf_bf16_slab_K2560_N16384 q4_pf_bf16_slab_K2560_N13312 q4_pf_bf16_slab_K6144_N2560 \
     q4_pf_bf16_slab_K2560_N640 q4_pf_bf16_slab_K10240_N336 q4_pf_bf16_slab_K2560_N12800 q4_hc_combine_norm_M2048_E \
     q4_hc_combine_norm_M2048_S1 q4_hc_combine_norm_M2048_Y q4_hc_combine_norm_M2048_Y_NN q4_hc_combine_norm_M2048_X \
-    q4_hc_up_mix_M2048_I_D512 q4_qsa_M2048_T512_W1024_PF q4_ple_gather_M2048_BF16_PF q4_ple_gather_M2048_F32_PF \
+    q4_hc_up_mix_M2048_I_D512 q4_qsa_M2048_T512_W1024_PF_I4H q4_ple_gather_M2048_BF16_PF q4_ple_gather_M2048_F32_PF \
     pf_attn_prep_q16_Q24KV2 pf_attn_Q24KV2 pf_flash_attn_Q24KV2 q4_pf_sparse_attn_Q24KV2 q4_pf_sparse_attn_Q24KV2_EAGER \
     q4_pf_moe_E512_T10_D2560_I640_L256 pf_moe_gemm_K2560_N1280_SILU pf_moe_gemm_K640_N2560 q4_pf_ple_C2048
   run_tests '^(qwen4exp_pf_kernels_test|qwen4exp_prefill_gdn_test)$' qwen4exp
@@ -1842,8 +1842,8 @@ st_r34_k1() {
     q4_moe_M4_E512_T10_D2560_I640_SHB q4_mtp_M1_SINGLE q4_mtp_M1_STREAM q4_mtp_M2048_SINGLE_PF \
     q4_mtp_M2048_STREAM_PF q4_mtp_M2_SINGLE q4_mtp_M2_STREAM q4_mtp_M3_SINGLE q4_mtp_M3_STREAM q4_mtp_M4_SINGLE \
     q4_mtp_M4_STREAM q4_pf_bf16_slab_K2560_N2560 q4_pf_ple_C4 q4_ple_gather_M2_BF16 q4_ple_gather_M2_F32 \
-    q4_ple_gather_M3_BF16 q4_ple_gather_M3_F32 q4_ple_gather_M4_BF16 q4_ple_gather_M4_F32 q4_qsa_M2_T512_W1024 \
-    q4_qsa_M3_T512_W1024 q4_qsa_M4_T512_W1024 q4_qsa_attn_M2_T32 q4_qsa_attn_M3_T32 q4_qsa_attn_M4_T32 \
+    q4_ple_gather_M3_BF16 q4_ple_gather_M3_F32 q4_ple_gather_M4_BF16 q4_ple_gather_M4_F32 q4_qsa_M2_T512_W1024_I4H \
+    q4_qsa_M3_T512_W1024_I4H q4_qsa_M4_T512_W1024_I4H q4_qsa_attn_M2_T32 q4_qsa_attn_M3_T32 q4_qsa_attn_M4_T32 \
     q4_qsa_attn_eager_M2 q4_qsa_attn_eager_M3 q4_qsa_attn_eager_M4 q4_route_M2_E512_T10_N528_L256 \
     q4_route_M3_E512_T10_N528_L256 q4_route_M4_E512_T10_N528_L256
   run_tests '^qwen4exp_mtp_names_test$'
@@ -2623,7 +2623,13 @@ st_r78_engine() {
   grab_all s '^S[0-9] |^slots_test|awaiting f32' 60
   finish
 }
-stage r78.lone   78 default card qwen r78.engine                     "B2 for a lone request: the golden and A4 prompts one at a time through b70-serve --max-num-seqs 4 --max-len 32768 (four slots of 32768, the scheduler) equal --max-len auto (one slot, the serial server) - bitwise, --spec off and mtp, prefix cache off (its restores are the two servers' own)"
+stage r78.ornith 78 default card ornith r78.host                     "Ornith's sequence slots (plan 31 Task 12): ornith_slots_test (slots_test's S0-S7 on Ornith, S0 against the one-slot engine; S4 by the int8 head's f32 references, the contexts dumped to oracle-forced-dumps/ornith-slots) and ornith_slots_pool_test (the KV page pool's P1-P5)"
+st_r78_ornith() {
+  run_tests '^ornith_slots(_pool)?_test$' ornith "" "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/ornith-slots"
+  grab_all ornith-slots '^S[0-9] |^P[0-9] |^slots_test|awaiting f32' 60
+  finish
+}
+stage r78.lone   78 default card qwen r78.engine                    "B2 for a lone request: the golden and A4 prompts one at a time through b70-serve --max-num-seqs 4 --max-len 32768 (four slots of 32768, the scheduler) equal --max-len auto (one slot, the serial server) - bitwise, --spec off and mtp, prefix cache off (its restores are the two servers' own)"
 st_r78_lone() {
   local sp
   for sp in off mtp; do
@@ -2634,7 +2640,7 @@ st_r78_lone() {
   grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^slots:' 20
   finish
 }
-stage r78.batch  78 default card qwen r78.lone                       "B1 through the server: the golden and A4 prompts two and four at a time (serve_client.py --concurrency) on b70-serve --max-num-seqs 4 --max-len 32768 against one at a time - identity recorded, every first difference by the f32 judge (serve_judge.py, the int8 head's references; one awaiting its reference SKIPs, never passes) - --spec off and mtp, prefix cache off"
+stage r78.batch  78 default card qwen r78.lone                       "B1 through the server: the golden and A4 prompts two and four at a time (serve_client.py --concurrency) on b70-serve --max-num-seqs 4 --max-len 32768 against one at a time - identity recorded, every first difference by the f32 judge (serve_judge.py, the int8 head's references; one awaiting its reference SKIPs, never passes) - --spec off and mtp, prefix cache off; then the KV page pool's long-beside-short case (pool_serve.py long: a ~123k-token prompt beside two short ones, served, the short ones as alone)"
 st_r78_batch() {
   local sp c
   for sp in off mtp; do
@@ -2644,7 +2650,11 @@ st_r78_batch() {
     x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE/$sp --ref c1"
     serve_judge "$STATE/$STAGE/$sp" c1 "--spec $sp: every first difference from one at a time by the f32 judge"
   done
-  grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^JUDGED|^SKIP_REASON' 40
+  # The KV page pool: a ~123k-token prompt beside two short ones on --max-num-seqs 4 (bf16 cache, MTP) - served, the
+  # short ones' ids as alone.
+  chk "PORT=$PORT tools/box_validate/pool_serve.sh $STATE/$STAGE/long long $SNAP_QWEN --max-num-seqs 4 --prefix-cache-gb 0" "a long prompt beside two short ones"
+  chk "python3 tools/box_validate/pool_serve.py check-long $STATE/$STAGE/long/long.json" "the long one served, the short ones as alone"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^JUDGED|^SKIP_REASON|^POOL_LONG' 40
   judged_finish
 }
 stage r78.b4     78 default card qwen r78.lone                       "B4 on the slots server (b70-serve --max-num-seqs 4 --max-len 32768): a stream dropped mid-request frees its slot (two requests right after both answered at once), a stop string ends one row of a pair, a stream beside a request streams the non-streamed text (replica_check.py's b4 on one card)"

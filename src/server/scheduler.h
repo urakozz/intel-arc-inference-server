@@ -247,6 +247,7 @@ class PrefixSlots : public SlotCacheIface {
   };
   std::deque<Held> held_;
   void store(uint32_t slot, uint32_t end);
+  int donor_of(uint32_t slot, const std::vector<uint32_t>& prompt, uint32_t upto) const;   // spec 31 §9
 
   BatchEngineIface& engine_;
   PrefixCache cache_;
@@ -297,8 +298,9 @@ class Scheduler {
   uint32_t reserve_upto(const Job& job, uint32_t slot) const;
   int oldest_idle(uint32_t keep) const;
   uint32_t cache_held(uint32_t slot) const;
+  bool pooled(uint32_t slot) const;
   void evict(uint32_t slot);
-  bool make_room(uint32_t slot, uint32_t upto);
+  bool make_room(uint32_t slot, uint32_t upto, uint32_t extra = 0);
   bool grow(const std::shared_ptr<Job>& job, uint32_t upto, bool end = true);
   double now() const;
 

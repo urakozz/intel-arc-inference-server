@@ -176,15 +176,22 @@ struct BatchEngineIface {
 
   // Spec 31: an engine whose slots share one pool of KV pages, each page block() positions (kv_pool_pages() > 0; 0 =
   // fixed slot lengths, every engine before). slot_max_len is then the per-request cap, the same for every slot. A
-  // slot holds pages_held(slot) pages; take_pages(slot, upto) makes them cover positions [0, upto) - false, and
-  // nothing changed, when the free pages do not. reset(slot) gives all of the slot's pages back (an idle session
-  // evicted: its next request restarts from the prefix cache); a restore takes the pages it fills (cli::SlotsEngine's
-  // engine in load_kv, the mock in load_state).
+  // slot holds pages_held(slot) pages; take_pages(slot, upto) makes them cover positions [0, upto), those its next
+  // step writes its own (a shared one copied) - false when the free pages do not cover it. reset(slot) gives all of
+  // the slot's pages back (an idle session evicted: its next request restarts from the prefix cache); load_kv takes
+  // the pages it fills.
   // The scheduler takes the pages a prefill or a step writes before it calls it.
   virtual uint32_t kv_pool_pages() { return 0; }
   virtual uint32_t pages_free() { return 0; }
   virtual uint32_t pages_held(uint32_t /*slot*/) { return 0; }
+  // Plan 31 Task 9 (--parallel replica): each card has its own pool; its free pages (one card: pages_free()).
+  virtual uint32_t card_pages_free(uint32_t /*card*/) { return pages_free(); }
+  virtual uint32_t card_pool_pages(uint32_t /*card*/) { return kv_pool_pages(); }
   virtual bool take_pages(uint32_t /*slot*/, uint32_t /*upto*/) { return true; }
+  // Spec 31 §9 (shared prefix pages): slot's next page becomes `from`'s page `index`, read-only for both until one
+  // writes there (take_pages then gives the writer a private copy). The caller vouches for the same KV there (the
+  // same ids, the page whole). False - nothing changed - when it cannot (no pool, or the tables do not line up).
+  virtual bool share_page(uint32_t /*slot*/, uint32_t /*index*/, uint32_t /*from*/) { return false; }
 
   // Spec 7 (plan 7b's snapshot calls), per slot. The host layouts are EngineIface's: one
   // state blob of state_bytes(), KV in save_kv's layout, kv_bytes(n) for n positions.

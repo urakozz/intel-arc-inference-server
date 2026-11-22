@@ -13,7 +13,10 @@
 // --list-ab N (plan 19v3b Task 0): instead of the arms, slot 0's plain decode list captured twice on the same buffers -
 //   contiguous (runtime::build's default binding: one-slot's binaries) and paged (the slot's page table, the identity) -
 //   and N replays of each, alternating (A B, then B A), each replay one plain step at slot 0's growing position: the
-//   median ms a step of each and paged / contiguous. Same process, same KV, same clocks: the paging's whole-step cost.
+//   median ms a step of each and paged / contiguous.
+// --profile-rows N (plan 31 Task 13): instead of the arms, the row list at 2 / 4 / 6 / 8 rows (slots 0 and 1, M / 2 - 1
+//   drafts each) built with per-launch events and replayed N times: ms a step per kernel (its variant with the M taken
+//   out, summed over the layers) at each M - where rows past 4 cost. Events add a flush each: shares, not times. Same process, same KV, same clocks: the paging's whole-step cost.
 //   Before it (spec 31 Task 2) the same for the 8-row verify: slot 0's and slot 1's 3 drafts each in one row list,
 //   contiguous (the unpaged row builds) and paged, the same rows every replay. Needs --table order.
 //
@@ -39,6 +42,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <regex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -179,7 +183,7 @@ int main(int argc, char** argv) {
   uint32_t depth = 4096, steps = 48, rounds = 3;
   std::vector<uint32_t> depths;
   std::vector<std::string> only;
-  uint32_t list_ab = 0;
+  uint32_t list_ab = 0, profile_rows = 0;
   std::string table = "order";
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
@@ -191,6 +195,7 @@ int main(int argc, char** argv) {
     else if (a == "--rounds") rounds = uint32_t(std::stoul(next()));
     else if (a == "--depths") depths = parse_list(next());
     else if (a == "--list-ab") list_ab = uint32_t(std::stoul(next()));
+    else if (a == "--profile-rows") profile_rows = uint32_t(std::stoul(next()));
     else if (a == "--table") table = next();
     else if (a == "--arms") {
       const std::string l = next();
@@ -315,6 +320,46 @@ int main(int argc, char** argv) {
                 "%.4f\n", depths[0], e.pos(), list_ab, ma, mb, mb / ma);
     return 0;
   }
+  if (profile_rows) {
+    l0::Queue q(ctx);
+    l0::Fence f(q);
+    const std::vector<uint32_t> Ms = {2, 4, 6, 8};
+    std::map<std::string, std::map<uint32_t, double>> fam;
+    std::map<uint32_t, double> tot;
+    const std::regex m_part("_M[0-9]+");
+    const std::string head = "L" + std::to_string(e.model().desc->layers) + " ";   // the MTP head's launches
+    for (const uint32_t M : Ms) {
+      const uint32_t k = M / 2 - 1;
+      for (uint32_t s = 0; s < 2 && k > 0; ++s) {
+        e.select(s);
+        e.draft(k);
+      }
+      e.verify_rows({{0, k}, {1, k}});   // stages the row table and the controls; nothing is committed
+      runtime::ProfileEvents prof(ctx);
+      runtime::CapturedStep l = runtime::build_rows(ctx, e.model(), e.buffers(), e.rows_bind(), M, &prof);
+      std::vector<double> acc(l.kernel_count, 0.0);
+      for (uint32_t i = 0; i < profile_rows + 4; ++i) {
+        for (l0::Event& ev : prof.events) ev.reset();
+        q.execute(l.list, &f);
+        f.wait();
+        if (i >= 4)
+          for (size_t j = 0; j < l.kernel_count; ++j) acc[j] += prof.events[j].duration_us();
+      }
+      for (size_t j = 0; j < l.kernel_count; ++j) {
+        const std::string& lb = l.labels[j];
+        const size_t a = lb.find(' ');
+        const std::string key = std::regex_replace(lb.substr(a + 1), m_part, "") + (lb.rfind(head, 0) == 0 ? " (head)" : "");
+        fam[key][M] += acc[j] / profile_rows / 1e3;
+        tot[M] += acc[j] / profile_rows / 1e3;
+      }
+    }
+    std::printf("\nprofiled row lists (slots 0 and 1, M / 2 - 1 drafts each; ms a step, events add a flush each):\n"
+                "| kernel | M=2 | M=4 | M=6 | M=8 | M=8 - M=4 |\n|---|---|---|---|---|---|\n");
+    for (auto& [name, v] : fam)
+      std::printf("| %s | %.3f | %.3f | %.3f | %.3f | %+.3f |\n", name.c_str(), v[2], v[4], v[6], v[8], v[8] - v[4]);
+    std::printf("| sum | %.3f | %.3f | %.3f | %.3f | %+.3f |\n", tot[2], tot[4], tot[6], tot[8], tot[8] - tot[4]);
+    return 0;
+  }
   std::vector<Arm> arms;
   arms.push_back(arm("1 plain", 1, 0));
   for (uint32_t k = 1; k <= 3; ++k) arms.push_back(arm("1 mtp K=" + std::to_string(k), 1, k));
@@ -341,6 +386,21 @@ int main(int argc, char** argv) {
     arms.push_back(rows_arm({3, 1, 0, 0}, false));
     arms.push_back(rows_arm({3, 0, 0, 0}, false));
   }
+  // Plan 31 Task 13: the scheduler's deal (scheduler.cc: every row its pending id, the drafts one at a time round the
+  // rows, each up to K 3) at a row budget of 6 and 7 - the arms a smaller budget runs, beside the 8-row ones above.
+  for (const uint32_t budget : {6u, 7u})
+    for (uint32_t n = 2; n <= S; ++n) {
+      std::vector<uint32_t> ks(n, 0);
+      for (uint32_t left = budget - n, i = 0; left > 0 && i < 3 * n; ++i)
+        if (ks[i % n] < 3) {
+          ++ks[i % n];
+          --left;
+        }
+      Arm a = rows_arm(ks, false);
+      bool have = false;
+      for (const Arm& x : arms) have = have || x.name == a.name;
+      if (!have) arms.push_back(std::move(a));
+    }
   if (!only.empty()) {
     std::vector<Arm> kept;
     for (Arm& a : arms)

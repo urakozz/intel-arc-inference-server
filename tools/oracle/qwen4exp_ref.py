@@ -47,6 +47,8 @@ not part of the text model (the MTP head is qwen4exp_mtp.py).
     route.top.ids.L<l> i32 [T+gen][16]  the fp32 softmax's top 16 experts (descending p), route.top.p.L<l> f32 [T+gen][16]
                                    their p - with qsa.score the golden gates' score judge (qwen4exp_golden_test: a
                                    differing selection / route is a rounding swap when the scores agree)
+    route.top.logit.L<l> f32 [T+gen][16]  those 16 experts' router logits (route.top.ids' order) - the MoE gates'
+                                   one-ulp rule (a swap at the cut within one bf16 ulp of the top_k-th logit)
     ple.ids       i64  [T+gen][16] the 16 n-gram rows each token read
     logits        f32  [Lr][V]     rows logits_row0 .. T+gen-1
     tokens        i32  [gen]       greedy;   nll f32 [T-1] the prompt's teacher-forced NLL
@@ -858,6 +860,7 @@ class Recorder:
                 top = full.topk(min(ROUTE_TOP, full.shape[-1]), dim=-1)
                 self._put(f"route.top.ids.L{i}", top.indices.to(torch.int32).clone())
                 self._put(f"route.top.p.L{i}", top.values.clone())
+                self._put(f"route.top.logit.L{i}", logits.detach().float().gather(-1, top.indices).clone())
             if self.want_p:                                                        # M:965-967 before the cast
                 top = full.gather(-1, idx.detach())
                 if self.tc.norm_topk_prob:
@@ -1212,7 +1215,7 @@ def cmd_run(a) -> None:
     if a.state_dump:
         # Keep only the final prompt chunk's decisions; generation logits are teacher-forced on tokens below.
         for i in range(tc.num_hidden_layers):
-            for k in ("route.ids", "route.w", "route.gap", "route.top.ids", "route.top.p"):
+            for k in ("route.ids", "route.w", "route.gap", "route.top.ids", "route.top.p", "route.top.logit"):
                 name = f"{k}.L{i}"
                 t[name] = t[name][row0:T].clone()
             name = f"qsa.sel.L{i}"

@@ -224,8 +224,9 @@ class Capture {
   }
   // Spec 13a / 13c: build_rows' list at M rows (the head's buffers from the binding, or none). Its Control and head
   // Control are the binding's: the slot binding below, with every state pointer slot 0's (index 0, ring 0).
-  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br, uint32_t cap_m)
-      : Capture(ctx, m, b, nullptr, nullptr, cap_m, br.mtp, Mode::Rows) {
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br, uint32_t cap_m,
+          ProfileEvents* prof = nullptr)
+      : Capture(ctx, m, b, nullptr, prof, cap_m, br.mtp, Mode::Rows) {
     br_ = &br;
     sb_.control = br.control;
     sb_.hctl = br.hctl;
@@ -393,9 +394,10 @@ class Capture {
     require(mode_ != Mode::TpVerify || step_.kernel_count == tp_verify_launches(d_),
             "the TP verify list has " + std::to_string(step_.kernel_count) + " launches, not tp_verify_launches()'s " +
                 std::to_string(tp_verify_launches(d_)));
-    require(mode_ != Mode::Rows || step_.kernel_count == rows_launches(d_, mtp_ != nullptr),
+    require(mode_ != Mode::Rows || step_.kernel_count == rows_launches(d_, mtp_ != nullptr) + split_launches_,
             "the row list has " + std::to_string(step_.kernel_count) + " launches, not rows_launches()'s " +
-                std::to_string(rows_launches(d_, mtp_ != nullptr)));
+                std::to_string(rows_launches(d_, mtp_ != nullptr)) + " (+ " + std::to_string(split_launches_) +
+                " for the attention's halves)");
 
     require(gdn == d_.gdn_layers && fa == d_.fa_layers,
             "layer kind counts are not the descriptor's " + std::to_string(d_.gdn_layers) +
@@ -557,12 +559,13 @@ class Capture {
     require((mode_ != Mode::Draft && mode_ != Mode::StageDraft) ||
                 (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
             "a draft list is M = 1 with draft index < kMaxK");
-    // Spec 13c: a row draft list - its table, Control, rows and logits; a dense head, the main cache's form.
+    // Spec 13c: a row draft list - its table, Control, rows and logits; the main cache's form. Plan 31 Task 12: a MoE
+    // head too (Ornith's: moe.cl routes each row on its own, the head's route rows its layer slot's M rows).
     require(mode_ != Mode::DraftRows ||
-                (dr_ != nullptr && dr_->hctl && dr_->head_rows && dr_->dh && dr_->logits && !d_.mtp_head_moe() &&
-                 !m_.draft_vocab && stage_ == nullptr),
-            "a row draft list needs its head Control, row table, hidden rows and logits rows (a dense head, no draft "
-            "vocabulary, one card)");
+                (dr_ != nullptr && dr_->hctl && dr_->head_rows && dr_->dh && dr_->logits && !m_.draft_vocab &&
+                 stage_ == nullptr),
+            "a row draft list needs its head Control, row table, hidden rows and logits rows (no draft vocabulary, "
+            "one card)");
     // Spec 13c: an engine with sequence slots holds every further sequence's kSlots states after them.
     require(mtp_->gdn_spec.size() ==
                 gdn_state_stride() * d_.gdn_layers * ((mtp_->slots - 1) + size_t(mtp_->slots) * (mtp_->seqs - 1)),
@@ -673,8 +676,7 @@ class Capture {
   void check_rows() {
     require(br_ != nullptr && br_->rows != nullptr && br_->control != nullptr,
             "a row list needs its row table (runtime::BatchRowTable) and its Control");
-    require(stage_ == nullptr && tap_ == nullptr && prof_ == nullptr,
-            "a row list is single-card, with no residual tap and no profiling events");
+    require(stage_ == nullptr && tap_ == nullptr, "a row list is single-card, with no residual tap");
     if (br_->taps) {   // plan 19v3b: the drafter's taps of every row
       sites_ = tap_sites(d_, br_->tap_layers);
       require(br_->taps->size() >= size_t(DecodeBuffers::kM) * br_->tap_layers.size() * d_.hidden * kBf16,
@@ -817,31 +819,46 @@ class Capture {
   }
 
   // Decode attention v2's row build (bf16 or its kv8 twin): the layer's whole cache, each group at its slot's base.
+  // Plan 31 Task 13: where a work-group's SLM at the list's rows - attn_v2.cl's qpack [M x GQA][256] fp32 and sc_x
+  // [2][M x GQA][16] fp32 - passes 64 KB, two work-groups no longer share an Xe core's 128 KB and the launch runs in
+  // two waves (Ornith's 8 rows: 72 KB, 5.75 ms against 2.30 at 6 rows, depth 4096): the rows go as two launches of half
+  // the rows each, the row table, q, gate and output at the half's first row and its partials after the first half's.
+  // A row's walk does not depend on the rows beside it (header, BATCH_ROWS), so every row keeps its bits.
   void attn_pair_rows(void* ctrl, const KvLayer& kv) {
+    const size_t gqa = d_.fa_q_heads / d_.fa_kv_heads, wave = 16;
+    const bool halves = mode_ == Mode::Rows && kCapM % 2 == 0 && kCapM * gqa * (Qwen35::kFaHeadDim + 2 * wave) * kFp32 > 65536;
+    const uint32_t mh = halves ? kCapM / 2 : kCapM;
     const std::string v =
-        pg(kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads));
-    {
-      l0::Kernel& k = kernel(v, kv8_ ? "attn_decode_v2_kv8" : "attn_decode_v2", kWgAttn);
-      uint32_t i = 0;
-      k.arg_ptr(i++, ctrl);
-      k.arg_ptr(i++, b_.attn_q.ptr());
-      k.arg_ptr(i++, kv.k);
-      if (kv8_) k.arg_ptr(i++, kv.ks);
-      k.arg_ptr(i++, kv.v);
-      if (kv8_) k.arg_ptr(i++, kv.vs);
-      k.arg_ptr(i++, b_.attn_part.ptr());
-      k.arg_ptr(i++, rows_table());
-      if (sb_.pages) k.arg_ptr(i, sb_.pages);   // plan 19v3b Task 0
-      launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
-    }
-    {
-      l0::Kernel& k = kernel(v, kv8_ ? "attn_reduce_v2_kv8" : "attn_reduce_v2", kWgAttn);
-      k.arg_ptr(0, ctrl);
-      k.arg_ptr(1, b_.attn_part.ptr());
-      k.arg_ptr(2, b_.attn_gate.ptr());
-      k.arg_ptr(3, b_.attn_out.ptr());
-      k.arg_ptr(4, rows_table());
-      launch(k, d_.fa_q_heads, kCapM);
+        pg(kernels::attn_v2_rows_variant(mh, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads));
+    const size_t q_row = size_t(d_.fa_q_heads) * Qwen35::kFaHeadDim;
+    for (uint32_t r0 = 0; r0 < kCapM; r0 += mh) {
+      split_launches_ += r0 > 0 ? 2 : 0;
+      uint8_t* const table = static_cast<uint8_t*>(rows_table()) + size_t(r0) * kBatchRowWords * 4;
+      uint8_t* const part = static_cast<uint8_t*>(b_.attn_part.ptr()) +
+                            (r0 / mh) * size_t(d_.fa_q_heads) * DecodeBuffers::kAttnV2Blocks * mh * (Qwen35::kFaHeadDim + 2) * kFp32;
+      {
+        l0::Kernel& k = kernel(v, kv8_ ? "attn_decode_v2_kv8" : "attn_decode_v2", kWgAttn);
+        uint32_t i = 0;
+        k.arg_ptr(i++, ctrl);
+        k.arg_ptr(i++, static_cast<uint8_t*>(b_.attn_q.ptr()) + r0 * q_row * kFp32);
+        k.arg_ptr(i++, kv.k);
+        if (kv8_) k.arg_ptr(i++, kv.ks);
+        k.arg_ptr(i++, kv.v);
+        if (kv8_) k.arg_ptr(i++, kv.vs);
+        k.arg_ptr(i++, part);
+        k.arg_ptr(i++, table);
+        if (sb_.pages) k.arg_ptr(i, sb_.pages);   // plan 19v3b Task 0
+        launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+      }
+      {
+        l0::Kernel& k = kernel(v, kv8_ ? "attn_reduce_v2_kv8" : "attn_reduce_v2", kWgAttn);
+        k.arg_ptr(0, ctrl);
+        k.arg_ptr(1, part);
+        k.arg_ptr(2, static_cast<uint8_t*>(b_.attn_gate.ptr()) + r0 * q_row * kFp32);
+        k.arg_ptr(3, static_cast<uint8_t*>(b_.attn_out.ptr()) + r0 * q_row * kBf16);
+        k.arg_ptr(4, table);
+        launch(k, d_.fa_q_heads, mh);
+      }
     }
   }
 
@@ -2174,10 +2191,8 @@ CapturedStep build_tp_verify_taps(l0::Context& ctx, const loader::LoadedModel& m
   return Capture(ctx, m, b, tv, link, M).options(opt).run();
 }
 
-CapturedStep build_gdn_flush(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, void* pend) {
-  SlotBind sb;
-  sb.gdn_pend = pend;
-  return Capture(ctx, m, b, nullptr, nullptr, 1, nullptr, Mode::GdnFlush).slot(sb).run();
+CapturedStep build_gdn_flush(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const SlotBind& slot) {
+  return Capture(ctx, m, b, nullptr, nullptr, 1, nullptr, Mode::GdnFlush).slot(slot).run();
 }
 
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
@@ -2225,11 +2240,11 @@ CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, De
 }
 
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
-                        uint32_t M) {
+                        uint32_t M, ProfileEvents* prof) {
   if (M == 0 || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build_rows: M " + std::to_string(M) + " is outside [1, " +
                              std::to_string(DecodeBuffers::kM) + "]");
-  return Capture(ctx, m, b, br, M).run();
+  return Capture(ctx, m, b, br, M, prof).run();
 }
 
 CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,

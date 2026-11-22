@@ -76,6 +76,11 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
   const model::ModelDesc* desc = stages[0].desc;
   if (!desc || stages[1].desc != desc)
     throw std::invalid_argument("runtime::PipelineEngine: the two stage models are not one model");
+  // PERF-64: a MoE model's int8 KV cache is built for one card (an engine a card, --parallel replica included).
+  if (desc->is_moe() && kv == KvCache::Int8)
+    throw std::runtime_error("--kv-cache int8 on " + desc->name + " runs on one card (or one copy a card with "
+                             "--parallel replica); pipeline parallel keeps the bf16 cache - drop --kv-cache int8 or "
+                             "--parallel pp");
   for (const loader::LoadedModel& m : stages)
     if (m.max_len != max_len)
       throw std::runtime_error("runtime::PipelineEngine: a stage model was loaded with max_len " +

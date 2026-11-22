@@ -177,33 +177,20 @@ inline void check_pipeline(const PipelineArgs& a, const PipelineContext& c) {
 }
 
 // Plan 13b: --parallel replica's refusals that need no device.
-// The architecture (config.json's architectures[0]) of the one model with sequence slots (plan 13c: several requests
-// on one card).
+// The architectures (config.json's architectures[0]) with sequence slots - several requests on one card (plan 13c;
+// plan 31 Task 12: Ornith too) - and with a replica engine: runtime::Engine's models, one engine per card.
 inline bool slots_architecture(const std::string& architecture) {
-  return architecture == "Qwen3_5ForConditionalGeneration";   // Qwen3.8 (model::qwen38)
+  return architecture == "Qwen3_5ForConditionalGeneration" ||      // Qwen3.8 (model::qwen38)
+         architecture == "Qwen3_5MoeForConditionalGeneration";     // Ornith (model::ornith)
 }
-// The architectures with a replica engine: runtime::Engine's models, one engine per card (Ornith: one request a card,
-// its engine has no slots).
-inline bool replica_architecture(const std::string& architecture) {
-  return slots_architecture(architecture) || architecture == "Qwen3_5MoeForConditionalGeneration";   // + Ornith
-}
+inline bool replica_architecture(const std::string& architecture) { return slots_architecture(architecture); }
 // `model` names the checkpoint in the refusal ("" when its config.json could not be read).
 inline void check_replica_model(const std::string& architecture, const std::string& model) {
   if (replica_architecture(architecture)) return;
-  throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (one engine per card, two "
-                           "requests at once); " +
+  throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (one engine per card, its requests "
+                           "sharing the card); " +
                            (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
                            " has no replica engine - --parallel auto, 1 or pp");
-}
-// A model without sequence slots (Ornith) runs one request a card: --max-num-seqs 2 on two cards (replica, or auto
-// that becomes replica), else 1. `a.mode` as given before the hardware gate, as resolved after it.
-inline void check_one_request_a_card(const PipelineArgs& a, uint32_t n, const std::string& architecture,
-                                     const std::string& model) {
-  if (n <= 1 || slots_architecture(architecture)) return;
-  if (n <= (a.replica() || a.mode == Parallel::Auto ? 2u : 1u)) return;
-  throw std::runtime_error("--max-num-seqs " + std::to_string(n) + " gives a card several requests (sequence slots, "
-                           "built for Qwen3.8 only); " + model + " runs one request a card - --max-num-seqs 2 on two "
-                           "cards (--parallel replica), or 1");
 }
 // The override flag belongs to pp; --spec dflash runs a drafter on each card, lookup inside DFlash is one card's.
 inline void check_replica_flags(const PipelineArgs& a, bool dflash_lookup) {
@@ -232,9 +219,8 @@ inline void require_two_devices_for_replica(uint32_t gpus) {
 // --max-num-seqs N (vLLM's flag, the same meaning): how many requests run at once - the user's
 // choice, and the context follows (slot 0 the largest that fits beside N - 1 slots of 32768 on its card,
 // cli::settle_slots). N = 1 (the default): one slot. N > 1: two cards run replica, each card its slots (card 0 the
-// odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Several slots a card are Qwen3.8's
-// (b70_serve.cc refuses the others by config.json - Ornith runs N = 2 as replica, one request a card - and DFlash and
-// a draft vocabulary beside slots).
+// odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Several slots a card are Qwen3.8's and
+// Ornith's (b70_serve.cc refuses the others by config.json, and a draft vocabulary beside slots).
 inline constexpr uint32_t kSlotsPerCard = runtime::SlotDims::kMaxSeqs;
 // Before the device: --parallel tp keeps one slot (TP + slots was ruled out, 2026-11-11) and pp runs one request;
 // replica runs a request on each card, so N is 2 to 8 there and 2 (one slot a card) when not given. Returns N.

@@ -1410,8 +1410,13 @@ function(add_q4_decode_rows MM)
   add_ocloc_kernel(q4_ple_gather_M${MM}_F32 SOURCE ${Q4_CL}/q4_ple.cl
                    DEFINES ${CTRL_DEFINES} M=${MM} PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=0)
   # q4_qsa.cl (prep, score, select), q4_qsa_attn.cl (flash: attn + reduce), q4_qsa_attn_eager.cl.
-  add_ocloc_kernel(q4_qsa_M${MM}_T512_W1024 SOURCE ${Q4_CL}/q4_qsa.cl
-                   DEFINES ${CTRL_DEFINES} M=${MM} TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES})
+  # _I4H: the indexer scored in int4 x int4 on DPAS after the 128-point Hadamard - the engine's form
+  add_ocloc_kernel(q4_qsa_M${MM}_T512_W1024_I4H SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=${MM} TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_I4H=1)
+  if(MM EQUAL 1)   # the bf16 form: the kernel test's and bench's reference
+    add_ocloc_kernel(q4_qsa_M${MM}_T512_W1024 SOURCE ${Q4_CL}/q4_qsa.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES})
+  endif()
   add_ocloc_kernel(q4_qsa_attn_M${MM}_T32 SOURCE ${Q4_CL}/q4_qsa_attn.cl
                    DEFINES ${CTRL_DEFINES} M=${MM} TGT=32 ${Q4_LIST_DEFINES})
   add_ocloc_kernel(q4_qsa_attn_eager_M${MM} SOURCE ${Q4_CL}/q4_qsa_attn_eager.cl
@@ -1632,6 +1637,8 @@ if(B70_Q4EXP)
   add_ocloc_kernel(q4_hc_slab_i8_N336 SOURCE ${Q4_CL}/q4_hc.cl DEFINES ${CTRL_DEFINES} HC_SLAB_I8=336)
   add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF SOURCE ${Q4_CL}/q4_qsa.cl
                    DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4)
+  add_ocloc_kernel(q4_qsa_M2048_T512_W1024_PF_I4H SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=2048 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4 QSA_I4H=1)
   add_ocloc_kernel(q4_ple_gather_M2048_BF16_PF SOURCE ${Q4_CL}/q4_ple.cl
                    DEFINES ${CTRL_DEFINES} M=2048 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1 PLE_PF=1)
   add_ocloc_kernel(q4_ple_gather_M2048_F32_PF SOURCE ${Q4_CL}/q4_ple.cl
@@ -1650,8 +1657,8 @@ if(B70_Q4EXP)
                    DEFINES ${CTRL_DEFINES} M=4096 UP_DOWN=512 UP_INJECT=1 UP_ROWS=4 UP_COLS=64)
   add_ocloc_kernel(q4_hc_up_mix_M4096_I_D512_R4C64_Q8 SOURCE ${Q4_CL}/q4_hc.cl   # PERF-66's int8 form
                    DEFINES ${CTRL_DEFINES} M=4096 UP_DOWN=512 UP_INJECT=1 UP_ROWS=4 UP_COLS=64 UP_I8=1)
-  add_ocloc_kernel(q4_qsa_M4096_T512_W1024_PF SOURCE ${Q4_CL}/q4_qsa.cl
-                   DEFINES ${CTRL_DEFINES} M=4096 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4)
+  add_ocloc_kernel(q4_qsa_M4096_T512_W1024_PF_I4H SOURCE ${Q4_CL}/q4_qsa.cl
+                   DEFINES ${CTRL_DEFINES} M=4096 TOPB=512 SEL_WG=1024 ${Q4_LIST_DEFINES} QSA_PF=1 SCORE_R=4 QSA_I4H=1)
   add_ocloc_kernel(q4_ple_gather_M4096_BF16_PF SOURCE ${Q4_CL}/q4_ple.cl
                    DEFINES ${CTRL_DEFINES} M=4096 PLE_GATHER=1 PLE_EOS=248044 PLE_SCALE_BF16=1 PLE_PF=1)
   add_ocloc_kernel(q4_ple_gather_M4096_F32_PF SOURCE ${Q4_CL}/q4_ple.cl
@@ -1766,8 +1773,9 @@ if(B70_Q4EXP AND B70_TP)
   # card keeps the plain pf_gdn_scan_GK8V24. The plain front and head stay, test-only (qwen4exp_pf_gdn_bundle_test).
   add_ocloc_kernel(pf_gdn_front_GK8V24 SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl DEFINES ${Q4_TP_GDN})
   add_ocloc_kernel(pf_gdn_front_GK8V24_PL SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl DEFINES ${Q4_TP_GDN} FRONT_PRELOAD=1)
+  # 256 GRF as prefill's pf_gdn_scan_OB (no spill, so no scratch on the prompt pass's list).
   add_ocloc_kernel(pf_gdn_scan_GK8V24_OB SOURCE ${Q4_PF_REUSE}/pf_gdn_scan.cl
-                   DEFINES ${Q4_TP_GDN} SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1)
+                   DEFINES ${Q4_TP_GDN} SCAN_OBF16=1 SCAN_QS1=2 SCAN_FOLD=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_gdn_conv_GK8V24_AB256 SOURCE ${Q4_PF_REUSE}/pf_gdn_conv.cl
                    DEFINES NEGA_OFF=20480 DTBIAS_OFF=20504 AB_STRIDE=256 ${Q4_TP_GDN})
   add_ocloc_kernel(pf_gated_head_GK8V24_SIG SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl
@@ -1975,8 +1983,8 @@ endif()
 #   draft, M = 1       o (bf16 4096 -> 2048, fc's binary), the post norm's SP1 fold; the
 #                      head's MoE layer runs 15c's moe_M1 and router binaries; with a draft
 #                      vocabulary (spec 8 §11) the compact head at K 2048
-# Not built for Ornith: the int8 KV cache's MTP writer (spec 12b's kv8 binaries are at
-# Qwen3.8's heads), an int4-checkpoint lm_head at M > 1 (as for Qwen3.8).
+# Not built for Ornith: an int4-checkpoint lm_head at M > 1 (as for Qwen3.8). The int8 KV cache's writers are
+# PERF-64's block below.
 if(B70_ORNITH AND B70_MTP)
   foreach(MM 2 3 4)
     add_gemv_variant(${MM} 2048 12288 1 1)       # qkv||z            PROVISIONAL S1 L1
@@ -2040,7 +2048,7 @@ endif()
 # the SLM for q) with attn_v2's reduce alone, moe.cl per row at W rows (a row is bitwise its M = 1 result:
 # moe_m_test), the deferred GDN step at 16 rows and the 32- / 64-row lists' chain links, the ring copy at 8192
 # channels, and the ROWG builds of the bf16 router (|| shared gate), a||b (a bf16 checkpoint's) and the head's fc and
-# q||k||v. The int4 linears and the int8 head are spec 28b's block below (kernels::kSmallMTuning, kSmVerify4Wide).
+# q||k||v. The int4 linears and the int8 head are spec 28b's block below (kernels::kSmallMTuning, kSmAll).
 if(B70_ORNITH AND B70_MTP AND B70_VERIFY_M8)
   set(ORNITH_WIDE_TARGETS "")
   macro(ornith_wide_kernel NAME)
@@ -2191,6 +2199,128 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
 endif()
 # ==== Plan 19v3b Task 0 ==== (end; the DPAS twins follow spec 28c's block) ====
 
+# ==== Plan 31 Task 12: Ornith's sequence slots on one card ==== (begin) ====
+# Additive only: new names at Ornith's shapes (model::ornith(): hidden 2048, GDN 16 k / 32 v heads over 30 layers, FA
+# 16 q / 2 kv heads, the MoE block), each the command line of its Qwen3.8 twin above plus Ornith's shape defines; no
+# source is copied, and a one-slot Ornith engine binds none of these.
+#   gdn_step_rows_M<M>_G30_GK16V32               the row lists' delta-net step (M = 2..8): BR_GDN_ORNITH's strides are
+#                                                one whole-model state (30 x 32 x 128 x 128 floats) and ring (30 x 32 x
+#                                                8192 ushorts)
+#   attn_prep_M<M>_Q16KV2[_S1]_PG2048            the per-slot lists' KV writers (M = 1..4: plain, verify, the head's)
+#   attn_v2_M<M>_T32_Q16KV2_PG2048               their decode attention (and the head's draft attention)
+#   attn_prep_M<M>_Q16KV2[_S1]_ROWS_PG2048       the row lists' (M = 2..8)
+#   attn_v2_M<M>_T32_Q16KV2_ROWS_PG2048
+#   the decode list at M = 5..8 (spec 15e's block builds 2..4): the norm pairs, embed_gather, a||b and the router in bf16,
+#   prep_gated_head, the MoE block, the bf16 lm_head, and the MTP head's KV fill (fc, q||k||v, the pre-fc norm pair into
+#   one row, the zero-residual fold); the int4 linears and the int8 head are gemm_sm's rows (spec 28b's block, M = 2..8)
+#   prep_res_fold_M<M>_K2048_SP1_G20            the row draft lists' post-attention fold (M = 2..4)
+# Ornith's verify attention is v2 at every M (runtime/verify_attn.h), so no DPAS twin is built; the int8 KV cache's
+# twins are PERF-64's block below.
+if(B70_ORNITH AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
+  set(BR_GDN_ORNITH SPEC_SLOT_STRIDE=15728640 RING_SLOT_STRIDE=7864320)
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} M=${MM} ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q16KV2${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${ORNITH_FA_HEADS}
+                             KV_PAGED=${KV_PAGE})
+  endforeach()
+  foreach(MM 2 3 4 5 6 7 8)
+    add_ocloc_kernel(gdn_step_rows_M${MM}_G30_GK16V32 SOURCE ${GDN_CL}
+                     DEFINES ${CTRL_DEFINES} NEGA_OFF=32768 DTBIAS_OFF=32800 ${ORNITH_GDN_HEADS} ${BROW_DEFINES}
+                             ${BR_GDN_ORNITH} M=${MM})
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+    # Past 4 rows a lane's running max, sum and output of NPR = 8 x M (q head, row) pairs (attn_v2.cl) outgrow 128
+    # GRF: 256 GRF there (who holds a value, not the value): 6 rows 2.62 -> 2.30 ms a step at depth 4096 (profiled).
+    # 8 rows run as two 4-row launches (runtime/capture.cc, attn_pair_rows: its SLM).
+    set(_orn_rows_grf "")
+    if(MM GREATER 4)
+      set(_orn_rows_grf OPTIONS -cl-intel-256-GRF-per-thread)
+    endif()
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q16KV2_ROWS${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2}
+                             ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE} ${_orn_rows_grf})
+  endforeach()
+  foreach(MM 5 6 7 8)
+    add_gemv_bf16_variant(${MM} 2048 128 16 16)     # a||b (a checkpoint that keeps it bf16)
+    add_gemv_bf16_variant(${MM} 2048 272 16 16)     # the router || shared gate
+    add_gemv_bf16_variant(${MM} 2048 248320 64 1)   # lm_head (bf16)
+    add_prep_res_fold(${MM} 2048 0 20)
+    add_prep_res_fold(${MM} 2048 4 20)
+    add_prep_norm_finish(${MM} 2048 20 20)
+    add_ocloc_kernel(embed_gather_M${MM}_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=2048 VOCAB=248320)
+    add_ocloc_kernel(prep_gated_head_M${MM}_GK16V32 SOURCE ${PREP_CL} DEFINES M=${MM} ${ORNITH_GDN_HEADS})
+    add_ocloc_kernel(moe_M${MM}_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
+                     DEFINES ${MOE_DEFINES} M=${MM} EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=272)
+    # the MTP head's KV fill of M rows
+    add_gemv_bf16_variant(${MM} 4096 2048 64 1)     # fc
+    add_gemv_bf16_variant(${MM} 2048 9216 64 1)     # q||k||v
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096)
+    add_ocloc_kernel(prep_res_fold_M${MM}_K2048_SP1_G20_Z SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
+  endforeach()
+  foreach(MM 2 3 4)
+    add_prep_res_fold(${MM} 2048 1 20)
+  endforeach()
+endif()
+# ==== Plan 31 Task 12 ==== (end) ====
+
+# ==== PERF-64: Ornith's int8 KV cache (`--kv-cache int8`) ==== (begin) ====
+# Additive only: kv8.cl's writer and decode reader at Ornith's 16 q / 2 kv heads, each the command line of its Qwen3.8
+# twin (spec 12b's block, the sequence slots' blocks above) plus ${ORNITH_FA_HEADS}; no source is copied. What an
+# Ornith list binds over an int8 cache, as its bf16 twins above:
+#   attn_prep_M<M>_Q16KV2[_S1]_KV8               one sequence's writers (M = 1..4: plain, MTP verify, the head's)
+#   attn_v2_M<M>_T32_Q16KV2_KV8                  their decode attention (and the head's draft attention)
+#   ..._PG2048, attn_prep_M<M>_Q16KV2[_S1]_KV8_ROWS_PG2048, attn_v2_M<M>_T32_Q16KV2_KV8_ROWS_PG2048
+#                                                the sequence slots' / the pool's (per slot M = 1..4, rows M = 2..8;
+#                                                past 4 rows 256 GRF, as the bf16 rows)
+# The wide lookup verify lists (16 / 32 / 64 rows) stay bf16-only, as Qwen3.8's (runtime::DecodeScratchDims::rows).
+if(B70_ORNITH AND B70_KV8)
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_KV8 SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 ${ORNITH_FA_HEADS})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q16KV2_KV8 SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} ${ORNITH_FA_HEADS})
+    if(B70_MTP)
+      add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS})
+    endif()
+  endforeach()
+  if(B70_MTP AND B70_VERIFY_M8)
+    set(_opg _PG${KV_PAGE})
+    foreach(MM 1 2 3 4)
+      add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_KV8${_opg} SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+      add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1_KV8${_opg} SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+      add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q16KV2_KV8${_opg} SOURCE ${KV8_CL}
+                       DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} ${ORNITH_FA_HEADS}
+                               KV_PAGED=${KV_PAGE})
+    endforeach()
+    foreach(MM 2 3 4 5 6 7 8)
+      set(_orn_grf "")
+      if(MM GREATER 4)
+        set(_orn_grf OPTIONS -cl-intel-256-GRF-per-thread)
+      endif()
+      add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_KV8_ROWS${_opg} SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=2 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+      add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1_KV8_ROWS${_opg} SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+      add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q16KV2_KV8_ROWS${_opg} SOURCE ${KV8_CL}
+                       DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} ${ORNITH_FA_HEADS}
+                               KV_PAGED=${KV_PAGE} ${_orn_grf})
+    endforeach()
+  endif()
+endif()
+# ==== PERF-64 ==== (end) ====
+
 # ==== Spec 28b: the small-M GEMM (gemm_sm.cl) ==== (begin) ====
 # Additive only: no existing variant's name or
 # command line moves (tools/kernel_cmdlines: +N / -0 / ~0), every M = 1 list binds what it bound before. Every list
@@ -2317,17 +2447,18 @@ if(B70_MTP)
     endforeach()
   endif()
 endif()
-# Ornith's dense projections at its verify lists' M = 2..4 (kSmVerify4; spec 15e's block builds the lists' gemv)
+# Ornith's dense projections at its verify lists' M = 2..4 (spec 15e's block builds the verify lists' gemv)
 set(GEMM_SM_ORNITH "2048 12288 1 1 MG" "4096 2048 4 0 MG" "2048 9216 2 0 MG" "2048 128 1 1 MG" "2048 248320 1 2")
 if(B70_ORNITH AND B70_MTP)
-  set(_m234 2 3 4)
-  gemm_sm_rows(GEMM_SM_ORNITH _m234)
-  # PERF-56: and at the wide lookup verify lists' 16 / 32 / 64 rows (kSmVerify4Wide): gemm_sm at 16, the int4 rows by
-  # gemm_sm_wide past it (the arms of Qwen3.8's row of the same form, "K N S L arm flags..."), the head by gemm_sm_i8w
-  # at 256 GRF (g256_from 32)
+  # Plan 31 Task 12: 2..8 (the sequence slots' row lists); PERF-56: and the wide lookup verify lists' 16 / 32 / 64
+  # rows - gemm_sm at 16, the int4 rows by gemm_sm_wide past it (the arms of Qwen3.8's row of the same form, "K N S L
+  # arm flags..."), the head by gemm_sm_i8w at 256 GRF (g256_from 32); kSmAll
+  set(_m_ornith 2 3 4)
   if(B70_VERIFY_M8)
-    set(_m16 16)
-    gemm_sm_rows(GEMM_SM_ORNITH _m16)
+    list(APPEND _m_ornith 5 6 7 8 16)
+  endif()
+  gemm_sm_rows(GEMM_SM_ORNITH _m_ornith)
+  if(B70_VERIFY_M8)
     set(GEMM_SM_ORNITH_WIDE_32 "2048 12288 1 1 rc32 MG" "4096 2048 4 0 sw MG" "2048 9216 2 0 rc32 MG"
                                "2048 128 1 1 rc32 MG")
     set(GEMM_SM_ORNITH_WIDE_64 "2048 12288 1 1 rc32h MG" "4096 2048 4 0 rc32u MG" "2048 9216 2 0 rc32h MG"

@@ -933,6 +933,23 @@ void test_first_id_peek(bool pool = false) {
               "speculative; a sampled first id drawn at the prompt's end\n", pool ? " (a page pool)" : "");
 }
 
+// Plan 31 Task 13: the per-step draft choice without lookup inside MTP (SchedulerOptions::step_k alone) - greedy rows
+// of a speculative engine run StepK, batched and alone, and every request gives the ids it gives alone.
+void test_step_k_without_lookup() {
+  const std::vector<Spec> specs = {{P(1, 10), 30, {}}, {P(2, 6), 20, {}}};
+  MockBatchEngine eng(2);
+  configure(eng);
+  eng.spec = 2;
+  SchedulerOptions o = opts(512);
+  o.step_k = true;
+  Scheduler s(eng, o);
+  std::vector<Out> outs(specs.size());
+  for (size_t i = 0; i < specs.size(); ++i) CHECK(s.submit(make(specs[i], outs[i], eng)) != nullptr);
+  drain(s);
+  for (size_t i = 0; i < specs.size(); ++i) same_as_alone("step K without lookup", specs[i], outs[i]);
+  std::printf("the per-step draft choice without lookup inside MTP: each request as alone\n");
+}
+
 // ---- Spec 31 (plan 31 Task 6): admission by free KV pages, idle sessions evicted to the prefix cache ------------
 
 // The fixed slots' lengths as one pool: a request may grow past any one slot's length; a prompt past the cap is
@@ -1089,6 +1106,61 @@ void test_pool_shared_first_id() {
               "card for their pages and its next turn restored %u positions\n", ol2.fin.cached_tokens);
 }
 
+// Spec 31 §9 (plan 31 Task 8): requests with the same start share read-only pages. B starts as A's prompt does: its
+// restore maps A's live pages instead of copying the blocks in, and B's ids are those of B alone. A's next turn
+// rewrites its history inside the shared pages - its writes go to pages of its own (the mock refuses a write into a
+// shared page) - and B continues unchanged; a third conversation takes A's slot while B still reads the pages; when
+// every session ends the pool is whole again.
+void test_pool_shared_pages() {
+  MockBatchEngine eng(3, 8192);
+  eng.blk = 256;
+  eng.pool = 40;
+  eng.cut = 512;   // chunks end every 512 ids, the cache's snapshots with them (the server's hooked cut)
+  configure(eng);
+  MallocAlloc alloc;
+  server::PrefixSlots cache(eng, size_t(1) << 26, alloc);
+  Scheduler s(eng, opts(), &cache);
+  const Spec a{P(201, 2000), 20, {}};
+  Out oa;
+  CHECK(s.submit(make(a, oa, eng)) != nullptr);
+  drain(s);
+  Spec b{std::vector<uint32_t>(a.prompt.begin(), a.prompt.begin() + 1536), 20, {}};
+  for (uint32_t i = 0; i < 500; ++i) b.prompt.push_back(9100 + i);
+  Out ob;
+  CHECK(s.submit(make(b, ob, eng)) != nullptr);
+  drain(s);
+  CHECK_EQ(cache.last_kind(uint32_t(ob.fin.slot)), server::PrefixCache::Plan::Restore);
+  CHECK_EQ(ob.fin.cached_tokens, 1536u);
+  CHECK_EQ(eng.shares, 6u);   // the blocks below the snapshot at 1536 B restarts from
+  const uint32_t sa = uint32_t(oa.fin.slot), sb = uint32_t(ob.fin.slot);
+  CHECK(sa != sb);
+  for (uint32_t i = 0; i < 6; ++i) CHECK_EQ(eng.tab[sb][i], eng.tab[sa][i]);
+  same_as_alone("pool, a request on shared pages", b, ob, 8192);
+  // A's next turn rewrites its history at 1300, inside the shared pages.
+  Spec a2{std::vector<uint32_t>(a.prompt.begin(), a.prompt.begin() + 1300), 12, {}};
+  for (uint32_t i = 0; i < 300; ++i) a2.prompt.push_back(9600 + i);
+  Out oa2;
+  CHECK(s.submit(make(a2, oa2, eng)) != nullptr);
+  drain(s);
+  same_as_alone("pool, a turn rewriting history inside shared pages", a2, oa2, 8192);
+  // A third conversation takes A's slot; B's next turn still reads the shared pages.
+  const Spec c{P(202, 3000), 8, {}};
+  Out oc;
+  CHECK(s.submit(make(c, oc, eng)) != nullptr);
+  drain(s);
+  Spec b2{b.prompt, 10, {}};
+  b2.prompt.insert(b2.prompt.end(), ob.ids.begin(), ob.ids.end());
+  for (uint32_t i = 0; i < 5; ++i) b2.prompt.push_back(9900 + i);
+  Out ob2;
+  CHECK(s.submit(make(b2, ob2, eng)) != nullptr);
+  drain(s);
+  same_as_alone("pool, B's next turn on the shared pages", b2, ob2, 8192);
+  for (uint32_t q = 0; q < 3; ++q) eng.reset(q);
+  CHECK_EQ(eng.pages_free(), eng.pool);
+  std::printf("pool: a request shared %u pages of an idle session; history rewritten in them went to private pages; "
+              "the pool whole after every session\n", 6u);
+}
+
 // Every sequence running and no page free: the growing request ends with "length" where its pages end; the other
 // finishes unchanged, plain and with the first id peeked. A prompt that fits the cap but not the free pages waits, and is served when pages return.
 void test_pool_full() {
@@ -1151,11 +1223,13 @@ int main() {
   test_callback_throws();
   test_first_id_peek();
   test_first_id_peek(true);
+  test_step_k_without_lookup();
   test_batched_admission(true);
   test_slot_lengths_pool();
   test_pool_long_beside_short();
   test_pool_evicts_idle();
   test_pool_shared_first_id();
+  test_pool_shared_pages();
   test_pool_full();
   std::printf("scheduler_test: all cases passed\n");
   return 0;

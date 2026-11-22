@@ -37,6 +37,7 @@
 #include <optional>
 #include <print>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -109,7 +110,7 @@ struct KolibriEngineAdapterT : server::EngineIface {
     flush_commit();
     settle_first(sampling);
     const uint32_t id = eng.generate(1)[0];
-    if (!sampling.greedy) sample_into_pending(sampling);
+    if (!sampling.greedy) sample_into_pending(sampling, false, {&id, 1});   // id: not yet in `seen`
     else mask_pending();
     ++gen_tokens_;
     return id;
@@ -223,10 +224,10 @@ struct KolibriEngineAdapterT : server::EngineIface {
   // The logits row of the step just run (the next token's distribution), filtered and drawn as
   // EngineAdapter's sample(); the id replaces the device argmax as the pending id. The RNG seeds itself
   // once per request, from the request's seed (EngineAdapter's rule). `host`: the row is in place already (load_head's).
-  void sample_into_pending(const server::Sampling& sampling, bool host = false) {
+  void sample_into_pending(const server::Sampling& sampling, bool host = false, std::span<const uint32_t> tail = {}) {
     seed_rng(sampling);
     if (!host) eng.read_logits_into(host_logits_.data());
-    eng.set_token(server::draw(server::filter_probs(host_logits_.data(), vocab_used_, sampling), rng_));
+    eng.set_token(server::draw(server::filter_probs(host_logits_.data(), vocab_used_, sampling, tail), rng_));
   }
 
   // The first id after a prefill / ingest: the head's row of the last prompt position is still in the logits buffer -
@@ -325,7 +326,10 @@ struct KolibriEngineAdapterT : server::EngineIface {
       for (uint32_t j = 0; j < k; ++j)
         q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T);
       eng.read_verify_logits(spec_logits_.data(), k + 1);
-      a = server::accept_sparse(spec_logits_.data(), q, drafts.data(), k, vocab_used_, eng.vocab(), sampling, rng_);
+      std::vector<uint32_t> hist{x};   // the repetition penalty's tail: the pending id, then the drafts
+      hist.insert(hist.end(), drafts.begin(), drafts.end());
+      a = server::accept_sparse(spec_logits_.data(), q, drafts.data(), k, vocab_used_, eng.vocab(), sampling, rng_,
+                                hist);
     }
     pending_ = true;
     pending_pos_ = n;

@@ -79,11 +79,20 @@ struct Sampling {
   // Model properties, set with the server's sampling defaults - never request fields.
   float logit_mult = 1.0f;
   float softcap = 0.0f;
-  // Spec 24e (decision 1): HF's repetition penalty (1.0: none), applied to the host logits row before temperature, top-k and
-  // top-p over `seen` - the distinct ids of the request's prompt and of every id the server has consumed so far, kept by the
-  // server for the request when the penalty is not 1 (null otherwise). An engine adapter that does not apply it ignores both.
+  // HF's repetition penalty (1.0: none), applied to the host logits row before temperature, top-k and top-p over `seen` -
+  // the distinct ids of the request's prompt and of every id the server has consumed so far (null when the penalty is 1) -
+  // and, in a step or a speculative iteration, the pending id and drafts not yet consumed (server::filter_probs' `tail`).
   float repetition_penalty = 1.0f;
   const SeenIds* seen = nullptr;
+  // A request with a penalty: `ids` are its seen ids, and a greedy one becomes the same choice taken on the host - top-k
+  // 1 over the penalised row - since the device argmax knows nothing of the penalty.
+  void penalise(const SeenIds& ids) {
+    seen = &ids;
+    if (greedy) {
+      greedy = false;
+      top_k = 1;
+    }
+  }
 };
 
 struct EngineIface {

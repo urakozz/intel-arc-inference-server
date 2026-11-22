@@ -284,10 +284,10 @@ void indexer(Dev& dv) {
     const std::vector<float> rows = rf32(size_t(C) * LD, -3.f, 3.f, 30 + pos);
     dv.imm.copy(idx.ptr(), rows.data(), rows.size() * 4);
     dv.set_ctl(pos, C);
-    dv.go(kq::pf_qsa_variant(), "q4_qsa_prep", 5, C, 1,
+    dv.go(kq::pf_qsa_variant(kq::kPfC, true), "q4_qsa_prep", 5, C, 1,
           {PtrArg(dv.ctrl.ptr()), PtrArg(idx.ptr()), PtrArg(dsmall.ptr()), PtrArg(drope.ptr()), PtrArg(q.ptr()),
            PtrArg(tail.ptr()), PtrArg(keys.ptr())});
-    dv.go(kq::pf_qsa_variant(), "q4_qsa_ring", 1, 8, 1, {PtrArg(dv.ctrl.ptr()), PtrArg(idx.ptr()), PtrArg(tail.ptr())});
+    dv.go(kq::pf_qsa_variant(kq::kPfC, true), "q4_qsa_ring", 1, 8, 1, {PtrArg(dv.ctrl.ptr()), PtrArg(idx.ptr()), PtrArg(tail.ptr())});
     std::vector<float> qh(size_t(C) * 512);
     qp::qsa_prep_chunk(rows.data(), LD, pos, C, small.data() + 512, small.data() + 640, rope.data(), tail_h.data(), keys_h.data(),
                        qh.data());
@@ -302,9 +302,9 @@ void indexer(Dev& dv) {
   const uint32_t C = 2048, p0 = pos - C;
   l0::Mem sc = dv.zeros(size_t(C) * stride * 4), lists = dv.zeros(size_t(C) * kListRow * 4), diag = dv.zeros(size_t(C) * 8);
   dv.set_ctl(p0, C);
-  dv.go(kq::pf_qsa_variant(), "q4_qsa_score", (stride + 255) / 256, kq::pf_score_groups(C), 1,
+  dv.go(kq::pf_qsa_variant(kq::kPfC, true), "q4_qsa_score", (stride + 255) / 256, kq::pf_score_groups(C), 1,
         {PtrArg(dv.ctrl.ptr()), PtrArg(q.ptr()), PtrArg(keys.ptr()), PtrArg(sc.ptr()), arg_val(stride)});
-  dv.go(kq::pf_qsa_variant(), "q4_qsa_select", 1, C, 1,
+  dv.go(kq::pf_qsa_variant(kq::kPfC, true), "q4_qsa_select", 1, C, 1,
         {PtrArg(dv.ctrl.ptr()), PtrArg(sc.ptr()), arg_val(stride), PtrArg(lists.ptr()), PtrArg(diag.ptr())});
   const std::vector<float> sd = dv.rd<float>(sc, size_t(C) * stride);
   const std::vector<uint32_t> ld = dv.rd<uint32_t>(lists, size_t(C) * kListRow);

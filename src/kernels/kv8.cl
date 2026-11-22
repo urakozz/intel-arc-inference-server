@@ -997,9 +997,10 @@ __kernel void kv8_widen(__global const char* restrict K,
 // stays sum p. Bitwise the RPW 8 raw form above. Grid (ceil(C / 16), kv-heads, GQA / HPW).
 // KV8_I8S (above): Q is int8 with QS [C][q-heads] fp32 beside it, Kc kv8_widen's int8 rows; each K tile is 8 int8
 // DPAS (32 dims) a row block and key atom into an int32 sum, then times the row's q scale; the rest is the form above.
-// With KV_PAGED (KV8_I8S only) the rows are the widened sequence's own and only the scales are read by page.
-#if !KV8_RAW || KV8_SPLIT || (defined(KV_PAGED) && !KV8_I8S) || KT != 64 || RPW != 16 || QREG
-#error "pf_flash_attn_kv8 KV8_PAIR: KV8_RAW, KT 64, RPW 16, no KV8_SPLIT / QREG, KV_PAGED with KV8_I8S only"
+// With KV_PAGED the rows are the widened sequence's own and only the scales are read by page (PERF-64: the bf16-score
+// pair too, Ornith's slots; bitwise the paged RPW 8 raw form as the unpaged pair is the unpaged one).
+#if !KV8_RAW || KV8_SPLIT || KT != 64 || RPW != 16 || QREG
+#error "pf_flash_attn_kv8 KV8_PAIR: KV8_RAW, KT 64, RPW 16, no KV8_SPLIT / QREG"
 #endif
 __attribute__((reqd_work_group_size(SG * 2 * HPW, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))

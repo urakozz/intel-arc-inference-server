@@ -86,22 +86,24 @@ Speed numbers per mode are in the [README](../README.md#speed) and [17-running-m
 ### Several requests at once: `--max-num-seqs`
 
 `--max-num-seqs N` (vLLM's name for it) sets how many requests run at once, and the context length follows from
-it. The default, 1, is one request at the largest context that fits. With N above 1 (Qwen3.8), a card holds
-sequence slots: slot 0 gets the largest context that fits beside N - 1 further slots of 32768 positions each. One
-card takes up to 4 slots; two cards run `replica` and split the slots between them, up to 8 (4 a card). `tp` and
-`pp` refuse N above 1. An explicit `--max-len` that does not fit beside the other slots fails at startup and names
-the memory plan. `--parallel replica` on its own means N = 2, one request a card. A request that runs into the end
-of its slot finishes with `length` and is logged. Tensor parallel with slots was built and ruled out, because
-`replica` is faster for several requests at once.
+it. The default, 1, is one request at the largest context that fits. With N above 1 (Qwen3.8) a card holds N
+sequences - each its own delta-net states, conv ring, control blocks and captured lists - and one pool of KV pages
+of 2,048 positions that they share (`src/runtime/kv_pool.h`). The planner gives the pool what the N sequences' fixed
+state leaves on the card; any one request may grow to all of it, up to the trained context or `--max-len`. Each
+sequence reads its KV through a page table; the attention kernels look a page up once per 2,048 keys, the same
+kernels as one request's (within 1 % of the contiguous layout to 32k, 1.06 % at 131k). The host hands a sequence its
+pages before a step writes them and takes them back, zeroing only the rows that were written, when it ends or is
+evicted. One card takes up to 4 sequences; two cards run `replica`, a pool per card, up to 8. `tp` and `pp` refuse N
+above 1. `--parallel replica` on its own means N = 2, one request a card. Tensor parallel with several requests was
+built and ruled out, because `replica` is faster for several requests at once.
 
-Why fixed slots and not a shared KV pool? The KV cache holds the attention keys and values of every earlier
-position, and it is most of a request's memory. The engine is tuned for one or two people running local agentic
-sessions: a main session that needs its full context plus a few short helper requests. Each slot's KV memory is
-reserved at startup, so the main session always has its context, nothing is ever preempted (stopped and recomputed
-later to free memory), and no request races another for memory. vLLM's paged pool, one pool of small KV blocks
-shared by all requests with `max_model_len` the most any one request may reach, uses memory better when request
-sizes vary. The price is block tables in every attention kernel, a preemption policy and the latency spikes it
-causes. That option was considered and postponed.
+The scheduler admits a request when a sequence is free and the pool covers its prompt plus a page; it does not
+reserve `max_tokens` (agent clients ask for the whole context). Idle sessions are the swap space: a conversation
+that has finished keeps its pages until a new request needs them, then the one idle longest leaves the card, its
+prefix cache entries held until its next turn restores them. A running request that finds no page left finishes
+with `length`. Requests that start the same way share the pages of that start, read-only; the first write into a
+shared page gives the writer a private copy. Nothing running is ever preempted. Beside the DFlash drafter the
+sequences keep fixed lengths: slot 0 the largest context that fits beside N - 1 slots of 32,768 positions.
 
 ### How the two cards stay in step under tensor parallel
 

@@ -147,11 +147,11 @@ void print_state_diff(rq::Qwen4ExpEngine& e, const qwen4exp_rig::State& got, con
     const uint8_t* a = got.layers[l].data();
     const uint8_t* b = want.layers[l].data();
     if (d.is_qsa(l)) {
-      const size_t row = size_t(d.kv_n()) * 2, kv = size_t(L) * row, kb = size_t(d.idx_dim) * 2;
+      const size_t row = size_t(d.kv_n()) * 2, kv = size_t(L) * row, kb = size_t(d.idx_dim) * 2, ks = rq::idx_key_slot_bytes(d);
       std::printf("     L%u QSA (pos %u): first K row differing %lld, V row %lld, key block %lld (of %u); tail slots"
                   " differing:%s\n", l, pos, (long long)first_row(a, b, row, pos), (long long)first_row(a + kv, b + kv, row, pos),
-                  (long long)first_row(a + 2 * kv, b + 2 * kv, kb, pos / 4), pos / 4,
-                  slots(a + 2 * kv + size_t(L / 4) * kb, b + 2 * kv + size_t(L / 4) * kb, kb, rq::kIdxTail).c_str());
+                  (long long)first_row(a + 2 * kv, b + 2 * kv, ks, pos / 4), pos / 4,
+                  slots(a + 2 * kv + size_t(L / 4) * ks, b + 2 * kv + size_t(L / 4) * ks, kb, rq::kIdxTail).c_str());
     } else {
       const size_t S = rq::gdn_state_bytes_per_layer(d), R = rq::conv_ring_bytes_per_layer(d) / rq::kConvRing;
       std::printf("     L%u GDN: state %s; conv slots differing:%s (live: %u %u %u)\n", l,

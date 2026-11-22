@@ -108,9 +108,10 @@
 // Vc are the layer's whole cache and a last argument `pages` maps the KV pages - key p is cache row
 // pages[p / KV_PAGED] x KV_PAGED + p % KV_PAGED. A tile of KT keys starts at a multiple of KT and KT divides
 // KV_PAGED, so a tile is in one page: its K and V reads take that page as the surface (rows to the page's end or to
-// `depth`, the zeros past it as before). Every value and order is the contiguous kernel's.
-#if defined(KV_PAGED) && (KV_PAGED % KT != 0 || GATE_EPI || FLASH_MERGE)
-#error "pf_flash_attn KV_PAGED: whole tiles a page; the r8 / split forms only"
+// `depth`, the zeros past it as before). Every value and order is the contiguous kernel's. Plan 31 Task 12: the r8 form
+// with GATE_EPI too (Ornith's slots).
+#if defined(KV_PAGED) && (KV_PAGED % KT != 0 || (GATE_EPI && SPLIT) || FLASH_MERGE)
+#error "pf_flash_attn KV_PAGED: whole tiles a page; the r8 (gated or not) / split forms only"
 #endif
 #ifndef GATE_EPI
 #define GATE_EPI 0

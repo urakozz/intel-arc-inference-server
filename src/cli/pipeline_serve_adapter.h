@@ -41,6 +41,7 @@
 #include <optional>
 #include <print>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -185,7 +186,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
     sample_first(sampling);
     flush_commit();
     const uint32_t id = eng.generate(1)[0];
-    if (!sampling.greedy) sample_into_pending(sampling);
+    if (!sampling.greedy) sample_into_pending(sampling, false, {&id, 1});   // id: not yet in `seen`
     ++gen_tokens_;
     return id;
   }
@@ -228,13 +229,15 @@ struct PipelineEngineAdapterT : server::EngineIface {
       float* p = q + size_t(Engine::kMaxDraft) * V_;
       // RNG order (spec 8 Review Focus 4): the k draft samples, then accept_sampled's
       // uniforms, then its one correction / bonus draw.
+      std::vector<uint32_t> hist{x};   // the pending id and the drafts so far: the repetition penalty's tail
       eng.draft(k, [&](uint32_t i) {
         eng.read_draft_logits_into(q + size_t(i) * V_, i);
-        return server::sample_draft(q + size_t(i) * V_, vocab_used, sampling, rng);
+        hist.push_back(server::sample_draft(q + size_t(i) * V_, vocab_used, sampling, rng, hist));
+        return hist.back();
       });
       eng.verify(k);
       eng.read_logits_into(p, k + 1);
-      a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V_, sampling, rng);
+      a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V_, sampling, rng, hist);
     }
     return spec_run(n, x, k, a, eng.draft_ids());
   }
@@ -330,7 +333,9 @@ struct PipelineEngineAdapterT : server::EngineIface {
         q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T);
       float* p = rows_;
       eng.read_logits_into(p, k + 1);
-      a = server::accept_sparse(p, q, drafts.data(), k, vocab_used, V_, sampling, rng);
+      std::vector<uint32_t> hist{x};
+      hist.insert(hist.end(), drafts.begin(), drafts.end());
+      a = server::accept_sparse(p, q, drafts.data(), k, vocab_used, V_, sampling, rng, hist);
     }
     return spec_run(n, x, k, a, drafts);
   }
@@ -368,7 +373,9 @@ struct PipelineEngineAdapterT : server::EngineIface {
         seed_rng(sampling);
         float* p = rows_;
         eng.read_logits_into(p, k + 1);
-        a = server::accept_point_mass(p, d.data(), k, vocab_used, V_, sampling, rng);
+        std::vector<uint32_t> hist{x};
+        hist.insert(hist.end(), d.begin(), d.begin() + k);
+        a = server::accept_point_mass(p, d.data(), k, vocab_used, V_, sampling, rng, hist);
       }
       return spec_run(n, x, k, a, d, true);
     } else {
@@ -398,7 +405,9 @@ struct PipelineEngineAdapterT : server::EngineIface {
       seed_rng(sampling);
       float* p = rows_ + size_t(Engine::kMaxDraft) * V_;
       eng.read_logits_into(p, k + 1);
-      a = server::accept_point_mass(p, d.data(), k, vocab_used, V_, sampling, rng);
+      std::vector<uint32_t> hist{x};
+      hist.insert(hist.end(), d.begin(), d.begin() + k);
+      a = server::accept_point_mass(p, d.data(), k, vocab_used, V_, sampling, rng, hist);
     }
     return spec_run(n, x, k, a, d);
   }
@@ -505,11 +514,11 @@ struct PipelineEngineAdapterT : server::EngineIface {
   // The step's logits row (device 1's), filtered and drawn as EngineAdapter's sample(); the
   // id replaces the argmax as the pending id on both devices. The RNG seeds itself once per request.
   // `host`: the row is in place already (load_head's).
-  void sample_into_pending(const server::Sampling& sampling, bool host = false) {
+  void sample_into_pending(const server::Sampling& sampling, bool host = false, std::span<const uint32_t> tail = {}) {
     seed_rng(sampling);
     float* row = rows_ + size_t(Engine::kMaxDraft) * V_;
     if (!host) eng.read_logits_into(row, 1);
-    eng.set_token(server::draw(server::filter_probs(row, vocab_used, sampling), rng));
+    eng.set_token(server::draw(server::filter_probs(row, vocab_used, sampling, tail), rng));
   }
 
   Engine& eng;

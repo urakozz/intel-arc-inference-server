@@ -15,6 +15,7 @@
 //     qsa.score.L{l} F32  [R][W]           the rows of qsa.sel: every complete block's score (n = (p + 1) / 4; -1 past)
 //     route.top.ids.L{l} I32, route.top.p.L{l} F32  [T + gen][16]   the fp32 softmax's top 16 (descending p)
 //                                          (qsa.score / route.top: since 2026-11-04 - older sets judge by the gaps)
+//     route.top.logit.L{l} F32 [T + gen][16]   those 16 experts' router logits (since 2026-11-21; the one-ulp rule)
 //     ple.ids        I64  [T + gen][16]    the 16 PLE rows each position read
 //     H.L{l}         BF16 [A][10240]       the 4-stream H after layer l, rows T + gen - A .. (the tap diagnostic)
 // The prompts read: q4exp_short (must exist), q4exp_4k, q4exp_agentic - each whose files exist.
@@ -31,7 +32,17 @@
 //            its weights in p, against the reference's p) below the reference's p of rank 9. The route row keeps no
 //            other p, so that difference is a lower bound: a swap it cannot show still passes the gap rule (a
 //            NEAR-TIE: one expert, the gap within B70_Q4_TIE_TOL 1e-3 - the rule before 2026-11-04, and the only one
-//            for an old golden set without route.top.*); anything else FAILS
+//            for an old golden set without route.top.*). With the reference's router logits (route.top.logit) a
+//            one-expert swap at the cut also passes as a ONE-ULP TIE: the reference's top_k-th expert dropped, its
+//            top_k-th and (top_k + 1)-th logits within one bf16 ulp of the former - the MoE gates' standing rule
+//            (Ornith's; golden_common.h's ulp_near_tie): the engine rounds the logits to bf16 before the softmax.
+//            With the engine's own router logits too (the debug tap: the decode rows), a one-expert swap of one of the
+//            reference's top_k for its (top_k + 1)-th passes as a DRIFT SWAP when the engine took by its own logits
+//            (q4_route's top-k checked against the tap) and the two experts' reference logit gap is within 2 x
+//            the row's measured router-logit noise - the worst |engine - reference| logit over the reference's top 16:
+//            each of the two can move by that much, so a smaller gap can flip (g2, 2026-11-21: the three rows at
+//            1.32 - 1.39 x, the noise 2.2 - 4.5 bf16 ulps on cut and other experts alike - the forward's drift
+//            against the reference by layer 1 - 3 of a 12k-row prompt, not the router path). Anything else FAILS
 //   gate S   at every (row >= 2051, QSA layer) the engine's selected block set against qsa.sel. With the reference's
 //            block scores (qsa.score) on the LAST QSA layer (the engine keeps that layer's scores:
 //            read_last_qsa_scores / read_prefill_last_qsa_scores): a ROUNDING SWAP when the row's scores agree
@@ -87,6 +98,9 @@ float env_tol(const char* name, float dflt) {
 
 struct Counts {
   uint64_t rows = 0, exact = 0, near = 0, swaps = 0, undetermined = 0, bad = 0;
+  uint64_t ulp = 0;   // routing: one-ulp ties (golden::ulp_near_tie)
+  uint64_t drift = 0;   // routing: drift swaps (the cut's logit gap within 2 x the row's measured logit noise)
+  double drift_ratio_max = 0;   // their gap / noise
   double cos_min = 1, deficit_ratio_max = 0;   // over the swaps judged by scores
 };
 
@@ -112,10 +126,15 @@ double cos_f32(const float* a, const float* b, size_t n) {
 // a ROUNDING SWAP when the row's scores agree (cosine >= kScoreCos) and every item the engine took instead lies within
 // twice the row's score difference ("noise") below the reference's cut - both sides run one top-k rule over their own
 // scores, so rounding moves the cut's neighbours and nothing else; a larger deficit is a wrong row, not rounding.
+// The factor 2 is the bound itself: when every score is off by at most `noise`, a block the engine took instead of one
+// the reference took has a reference score at most 2 x noise below the reference's cut. The int4 indexer's score error
+// is quantisation, not rounding (a row's scores agree to a cosine below kScoreCos, noise ~1 on scores of a few units),
+// so a selection is judged by that bound alone (`min_cos` 0, the cosine still printed); the observed deficits of the
+// synthetic set (0.05 / 0.048 / 0.19 against noise 0.84 / 0.80 / 1.27) sit at 0.06-0.15 of `noise`, far inside it.
 struct Swap {
-  double cos = 1, noise = 0, deficit = 0;
+  double cos = 1, noise = 0, deficit = 0, min_cos = kScoreCos;
   size_t swapped = 0;
-  bool ok() const { return cos >= kScoreCos && deficit <= 2 * noise; }
+  bool ok() const { return cos >= min_cos && deficit <= 2 * noise; }
 };
 void count_swap(const Swap& s, Counts& c) {
   ++c.swaps;
@@ -128,6 +147,7 @@ void count_swap(const Swap& s, Counts& c) {
 Swap judge_selection(const float* e, const float* r, uint32_t n, const std::vector<uint32_t>& eb,
                      const std::vector<uint32_t>& rb) {
   Swap s;
+  s.min_cos = 0;   // the engine's indexer is the int4 form (see Swap)
   for (uint32_t b = 0; b < n; ++b) s.noise = std::max(s.noise, std::fabs(double(e[b]) - r[b]));
   s.cos = cos_f32(e, r, n);
   double cut = INFINITY;
@@ -146,8 +166,25 @@ struct RouteRef {
   const int32_t* top_ids = nullptr;
   const float* top_p = nullptr;
   const float* w = nullptr;
+  const float* top_logit = nullptr;   // route.top.logit: top_ids' router logits (null: an older golden set)
   uint32_t top = 0;
+  uint32_t k = 10;   // the model's top-k (spec 37: a shape set's - 8 at the small MoE)
+  uint32_t experts = 0;   // the router's experts (the engine's logits row: [experts] then the shared gate)
 };
+// The engine's own top-k check over its tapped logits: q4_route ranks bf16(logit) (softmax is monotone), so every
+// expert it took must be at least every expert it left. Returns the worst violation (> 0: it took against its own
+// logits).
+double route_against_own(const uint32_t* row, const float* eng, const RouteRef& ref) {
+  std::vector<bool> took(ref.experts, false);
+  float lo = INFINITY, hi = -INFINITY;
+  for (uint32_t i = 0; i < ref.k; ++i) {
+    took[row[kr::kIds + i]] = true;
+    lo = std::min(lo, common::bf16_to_f32(common::f32_to_bf16(eng[row[kr::kIds + i]])));
+  }
+  for (uint32_t e = 0; e < ref.experts; ++e)
+    if (!took[e]) hi = std::max(hi, common::bf16_to_f32(common::f32_to_bf16(eng[e])));
+  return double(hi) - lo;
+}
 // Routing: the row's score difference ("noise", in p) is the larger of the cut's - the engine's p of rank 9 / 10
 // (route row kP10 / kP11) against the reference's - and the experts both took: the engine's renormalised weight in p
 // (x the reference's top-10 sum) against the reference's p (the route row keeps no other p; the weight is bf16, so
@@ -182,8 +219,10 @@ Swap judge_route(const uint32_t* row, const int32_t* want, const RouteRef& ref) 
 
 // The engine's route row (rank order) against the reference's top-10 (its topk order), as sets. With the reference's
 // router scores (`ref.top_p`) a difference is judged by scores; without them (an old golden set) by the gap rule.
+// `eng`: the engine's router logits of this (row, layer) (fp32, before q4_route's bf16 rounding: the debug tap) - with
+// the reference's (route.top.logit), a differing row prints both at the cut.
 void compare_route(const uint32_t* row, const int32_t* want, float gap, float tol, const RouteRef& ref, Counts& c,
-                   const char* p, uint32_t r, uint32_t l) {
+                   const char* p, uint32_t r, uint32_t l, const float* eng = nullptr) {
   ++c.rows;
   std::vector<uint32_t> g(row + kr::kIds, row + kr::kIds + 10), w(want, want + 10);
   std::sort(g.begin(), g.end());
@@ -214,12 +253,72 @@ void compare_route(const uint32_t* row, const int32_t* want, float gap, float to
     ++c.near;
     return;
   }
+  if (ref.top_logit && og.size() == 1 && ow.size() == 1 && ow[0] == uint32_t(ref.top_ids[ref.k - 1]) &&
+      golden::ulp_near_tie(std::vector<float>(ref.top_logit, ref.top_logit + ref.top), ref.top, ref.k)) {
+    ++c.ulp;
+    return;
+  }
+  // the engine took against its own logits: q4_route's top-k, whatever the reference says
+  const double own = eng && ref.experts ? route_against_own(row, eng, ref) : 0.0;
+  // a drift swap at the cut: the reference's (top_k + 1)-th taken for one of its top_k (dropped at rank t)
+  const int32_t* dropped =
+      ref.top_logit && ow.size() == 1 ? std::find(ref.top_ids, ref.top_ids + ref.k, int32_t(ow[0])) : nullptr;
+  if (eng && own <= 0 && dropped && dropped != ref.top_ids + ref.k && og.size() == 1 &&
+      og[0] == uint32_t(ref.top_ids[ref.k])) {
+    double noise = 0;   // the row's router-logit noise: the worst |engine - reference| over the reference's top
+    for (uint32_t t = 0; t < ref.top; ++t)
+      noise = std::max(noise, std::fabs(double(eng[ref.top_ids[t]]) - ref.top_logit[t]));
+    const double lgap = double(ref.top_logit[dropped - ref.top_ids]) - ref.top_logit[ref.k];
+    if (noise > 0 && lgap <= 2 * noise) {
+      ++c.drift;
+      c.drift_ratio_max = std::max(c.drift_ratio_max, lgap / noise);
+      return;
+    }
+  }
   if (ref.top_p) {
     ++c.bad;
-    if (c.bad <= 10)
+    if (c.bad <= 10) {
       std::printf("    %s L%u row %u: the expert set differs beyond rounding (%zu experts, reference gap %.3e, weights "
                   "cosine %.6f, deficit %.3e, score noise %.3e)\n", p, l, r, og.size(), double(gap), s.cos, s.deficit,
                   s.noise);
+      if (ref.top_logit) {   // the cut in logits: the reference's top_k-th / (top_k + 1)-th, and the engine's own
+        const float l8 = ref.top_logit[ref.k - 1], l9 = ref.top_logit[ref.k];
+        std::printf("      reference logits: rank %u expert %d %.6f, rank %u expert %d %.6f, gap %.6f = %.2f bf16 ulp at "
+                    "the former (%.6f)\n", ref.k, ref.top_ids[ref.k - 1], double(l8), ref.k + 1, ref.top_ids[ref.k],
+                    double(l9), double(l8) - l9, (double(l8) - l9) / golden::bf16_ulp_at(l8), golden::bf16_ulp_at(l8));
+        if (eng) {
+          double worst = 0;   // engine - reference over the reference's top experts
+          for (uint32_t t = 0; t < ref.top; ++t)
+            worst = std::max(worst, std::fabs(double(eng[ref.top_ids[t]]) - ref.top_logit[t]));
+          for (uint32_t t : {ref.k - 1, ref.k}) {
+            const uint32_t e = uint32_t(ref.top_ids[t]);
+            const float rb = common::bf16_to_f32(common::f32_to_bf16(eng[e]));
+            std::printf("      engine logit of expert %u: %.6f (bf16 %.6f), reference %.6f, difference %.2f ulp\n", e,
+                        double(eng[e]), double(rb), double(ref.top_logit[t]),
+                        (double(eng[e]) - ref.top_logit[t]) / golden::bf16_ulp_at(ref.top_logit[t]));
+          }
+          for (uint32_t e : og) std::printf("      engine took expert %u: logit %.6f\n", e, double(eng[e]));
+          for (uint32_t e : ow) std::printf("      engine dropped expert %u: logit %.6f\n", e, double(eng[e]));
+          std::printf("      engine vs reference over the reference's top %u: worst |difference| %.6f\n", ref.top, worst);
+          if (own > 0) std::printf("      q4_route took against its own bf16 logits by %.6f\n", own);
+          std::printf("      engine set (rank order):");
+          for (uint32_t i = 0; i < ref.k; ++i)
+            std::printf(" %u:%.6f", row[kr::kIds + i], double(eng[row[kr::kIds + i]]));
+          if (ref.experts) {   // the engine's own top 10 by its tapped logits
+            std::vector<uint32_t> o(ref.experts);
+            for (uint32_t e = 0; e < ref.experts; ++e) o[e] = e;
+            std::partial_sort(o.begin(), o.begin() + 10, o.end(),
+                              [&](uint32_t a, uint32_t b) { return eng[a] > eng[b]; });
+            std::printf("\n      engine top 10:");
+            for (uint32_t i = 0; i < 10; ++i) std::printf(" %u:%.6f", o[i], double(eng[o[i]]));
+          }
+          std::printf("\n      reference top 10:");
+          for (uint32_t t = 0; t < 10 && t < ref.top; ++t)
+            std::printf(" %d:%.6f", ref.top_ids[t], double(ref.top_logit[t]));
+          std::printf("\n");
+        }
+      }
+    }
     return;
   }
   ++c.bad;
@@ -376,7 +475,7 @@ int main(int argc, char** argv) {
     }
     // the reference's router scores per layer (route.top.*) - absent in an old golden set
     std::vector<const int32_t*> top_ids(d.layers, nullptr);
-    std::vector<const float*> top_p(d.layers, nullptr), route_w(d.layers, nullptr);
+    std::vector<const float*> top_p(d.layers, nullptr), route_w(d.layers, nullptr), top_logit(d.layers, nullptr);
     uint32_t top_k = 0;
     for (uint32_t l = 0; l < d.layers; ++l) {
       const std::string ls = std::to_string(l);
@@ -390,14 +489,18 @@ int main(int argc, char** argv) {
       top_ids[l] = g.i32("route.top.ids.L" + ls, size_t(rows) * top_k);
       top_p[l] = g.f32("route.top.p.L" + ls, size_t(rows) * top_k);
       route_w[l] = g.f32("route.w.L" + ls, size_t(rows) * 10);
+      if (g.has("route.top.logit.L" + ls)) top_logit[l] = g.f32("route.top.logit.L" + ls, size_t(rows) * top_k);
     }
     const auto route_ref = [&](uint32_t l, uint32_t row) {
       RouteRef r;
+      r.k = d.top_k;
+      r.experts = d.experts;
       if (!top_p[l]) return r;
       r.top = top_k;
       r.top_ids = top_ids[l] + size_t(row) * top_k;
       r.top_p = top_p[l] + size_t(row) * top_k;
       r.w = route_w[l] + size_t(row) * 10;
+      if (top_logit[l]) r.top_logit = top_logit[l] + size_t(row) * top_k;
       return r;
     };
     std::printf("  judge: routing %s; gate S %s\n",
@@ -438,15 +541,17 @@ int main(int argc, char** argv) {
     };
     const auto check_row = [&](uint32_t row) {
       const std::vector<uint32_t> r = eng.read_routes();
+      const std::vector<float> rl = eng.read_debug_router();   // the router tap
       for (uint32_t l = 0; l < d.layers; ++l) {
         const std::string ls = std::to_string(l);
         if (!g.has("route.ids.L" + ls)) continue;
         const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * 10) + size_t(row) * 10;
         const float gap = g.f32("route.gap.L" + ls, rows)[row];
-        const uint64_t near0 = route_c.near + route_c.swaps + route_c.undetermined;
+        const uint64_t near0 = route_c.near + route_c.ulp + route_c.drift + route_c.swaps + route_c.undetermined;
         compare_route(r.data() + size_t(l) * rq::kRouteWords, gi, gap, tie_tol, route_ref(l, row), route_c, pname.c_str(),
-                      row, l);
-        if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] |= 2;
+                      row, l, rl.empty() ? nullptr : rl.data() + size_t(l) * d.router_n());
+        if (route_c.near + route_c.ulp + route_c.drift + route_c.swaps + route_c.undetermined != near0)
+          near_row[row] |= 2;
       }
       for (const Sel& s : sels) {   // gate S
         if (row < kDenseRows || !s.blocks || row < s.row0) continue;
@@ -517,10 +622,11 @@ int main(int argc, char** argv) {
           if (!g.has("route.ids.L" + ls)) continue;
           const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * 10) + size_t(row) * 10;
           const float gap = g.f32("route.gap.L" + ls, rows)[row];
-          const uint64_t near0 = route_c.near + route_c.swaps + route_c.undetermined;
+          const uint64_t near0 = route_c.near + route_c.ulp + route_c.drift + route_c.swaps + route_c.undetermined;
           compare_route(r.data() + rq::pf_route_at(l) / 4 + size_t(row - row0) * rq::kRouteWords, gi, gap, tie_tol,
                         route_ref(l, row), route_c, pname.c_str(), row, l);
-          if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] |= 2;
+          if (route_c.near + route_c.ulp + route_c.drift + route_c.swaps + route_c.undetermined != near0)
+            near_row[row] |= 2;
         }
       // the engine's block scores of the last chunk's rows in the last QSA layer (rows [0, C) written when the chunk
       // had sparse rows; none under inject: the selection is the reference's)
@@ -601,9 +707,11 @@ int main(int argc, char** argv) {
     for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
     std::printf("\n");
   }
-  std::printf("\nrouting: %llu (row, layer) - %llu exact, %llu near-ties (gap rule), %llu rounding swaps (scores: weights "
-              "cosine >= %.6f, deficit <= %.2f x the score noise), %llu exact ties (undetermined), %llu differing\n",
+  std::printf("\nrouting: %llu (row, layer) - %llu exact, %llu near-ties (gap rule), %llu one-ulp ties (logits), %llu "
+              "drift swaps (logit gap <= %.2f x the row's logit noise), %llu rounding swaps (scores: weights cosine >= "
+              "%.6f, deficit <= %.2f x the score noise), %llu exact ties (undetermined), %llu differing\n",
               (unsigned long long)route_c.rows, (unsigned long long)route_c.exact, (unsigned long long)route_c.near,
+              (unsigned long long)route_c.ulp, (unsigned long long)route_c.drift, route_c.drift_ratio_max,
               (unsigned long long)route_c.swaps, route_c.cos_min, route_c.deficit_ratio_max,
               (unsigned long long)route_c.undetermined, (unsigned long long)route_c.bad);
   std::printf("gate S: %llu (row >= 2051, QSA layer) - %llu exact, %llu near-ties (gap rule), %llu rounding swaps (scores: "

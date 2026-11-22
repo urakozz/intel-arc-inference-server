@@ -423,6 +423,71 @@ int main() {
     CHECK(run(5) != run(6));
     ++cases;
   }
-  std::printf("spec_accept_test: %d/7 cases passed\n", cases);
-  return cases == 7 ? 0 : 1;
+  // Case 8: the repetition penalty (HF's rule): a seen id's positive logit is divided, a negative one multiplied; an id
+  // listed twice is penalised once; 1.0 changes nothing; the penalty reaches filter_probs (seen ids and the tail) and
+  // the acceptance rows (row i: the pending id and drafts 1..i).
+  {
+    std::vector<float> row = {2.0f, -2.0f, 0.5f, 3.0f};
+    server::apply_repetition_penalty(row.data(), 4, {0, 1, 1, 9}, 2.0f);
+    CHECK(row == (std::vector<float>{1.0f, -4.0f, 0.5f, 3.0f}));
+    std::vector<float> same = row;
+    server::apply_repetition_penalty(same.data(), 4, {0, 1, 2, 3}, 1.0f);
+    CHECK(same == row);
+
+    Sampling s;
+    s.greedy = false;
+    s.top_k = 1;
+    s.temperature = 1.0f;
+    const std::vector<float> logits = {1.0f, 5.0f, 4.0f};
+    CHECK_EQ(server::filter_probs(logits.data(), 3, s).ids[0], 1u);   // no penalty: the leader
+    s.repetition_penalty = 2.0f;
+    CHECK_EQ(server::filter_probs(logits.data(), 3, s).ids[0], 1u);   // a penalty, nothing seen: the leader
+    server::SeenIds seen;
+    seen.add(1);
+    s.penalise(seen);
+    CHECK_EQ(server::filter_probs(logits.data(), 3, s).ids[0], 2u);   // 5 / 2 < 4
+    server::Sampling t = s;
+    t.seen = nullptr;
+    const uint32_t tail[] = {1};
+    CHECK_EQ(server::filter_probs(logits.data(), 3, t, tail).ids[0], 2u);   // the same through the tail
+    s.repetition_penalty = 1.0f;
+    CHECK_EQ(server::filter_probs(logits.data(), 3, s, tail).ids[0], 1u);   // penalty 1.0 ignores both
+    // penalise(): a greedy request becomes top-k 1 on the host; a sampled one keeps its fields.
+    Sampling g;
+    server::SeenIds none;
+    g.penalise(none);
+    CHECK(!g.greedy && g.top_k == 1u && g.seen == &none);
+    Sampling h;
+    h.greedy = false;
+    h.top_k = 40;
+    h.penalise(none);
+    CHECK(h.top_k == 40u);
+
+    // Acceptance rows: row 0 follows x = 1, row 1 follows x = 1, d_1 = 2, row 2 (the bonus) the same plus d_2 = 0.
+    // top-k 1, penalty 2 over logits (id 0..2) rows: leader 1 (5) vs 2 (4) -> 2 after x = 1; row 1: ids 1 and 2 seen,
+    // leader 0 (6 vs 5 / 2, 4 / 2).
+    const std::vector<float> rows = {1.0f, 5.0f, 4.0f,    //
+                                     6.0f, 5.0f, 4.0f,    //
+                                     1.0f, 5.0f, 4.0f};
+    Sampling a;
+    a.greedy = false;
+    a.top_k = 1;
+    a.repetition_penalty = 2.0f;
+    const uint32_t history[] = {1, 2, 0};
+    const uint32_t drafts[] = {2, 0};
+    std::mt19937_64 rng(1);
+    server::AcceptResult r = server::accept_point_mass(rows.data(), drafts, 2, 3, 3, a, rng, history);
+    CHECK_EQ(r.accepted, 2u);   // d_1 = 2 is row 0's penalised leader, d_2 = 0 row 1's
+    CHECK_EQ(r.next_token, 1u);   // row 2 after x, d_1, d_2: ids 1, 2, 0 all penalised -> 2.5, 2, 0.5
+    const uint32_t wrong[] = {1, 0};   // the unpenalised leader of row 0
+    r = server::accept_point_mass(rows.data(), wrong, 2, 3, 3, a, rng, history);
+    CHECK_EQ(r.accepted, 0u);
+    CHECK_EQ(r.next_token, 2u);
+    a.repetition_penalty = 1.0f;
+    r = server::accept_point_mass(rows.data(), wrong, 2, 3, 3, a, rng, history);
+    CHECK_EQ(r.accepted, 2u);   // penalty 1.0: the rows as given, the history unused
+    ++cases;
+  }
+  std::printf("spec_accept_test: %d/8 cases passed\n", cases);
+  return cases == 8 ? 0 : 1;
 }

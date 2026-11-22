@@ -359,6 +359,72 @@ inline float qsa_score(const float* q, const uint16_t* key) {
   }
   return (((r[0] + r[1]) + r[2]) + r[3]) / kSqrtIdx;
 }
+// q4_qsa.cl's QSA_I4H form (the plain 128-point Hadamard first). One vector of bf16 values ->
+// 64 nibble bytes (element 2j the low nibble of byte j) and two group scales: amax / 7, codes clamp(rint(y / s)).
+constexpr uint32_t kI4Group = 64, kI4Nib = kIdxDim / 2;
+inline void qsa_fwht128(float* x) {   // stages h = 1 .. 64 ascending, (i, i + h) -> (a + c, a - c)
+  for (uint32_t h = 1; h < kIdxDim; h <<= 1)
+    for (uint32_t i = 0; i < kIdxDim; ++i)
+      if ((i & h) == 0) {
+        const float a = x[i], c = x[i | h];
+        x[i] = a + c;
+        x[i | h] = a - c;
+      }
+}
+inline void qsa_i4_pack(const float* in, uint8_t* nib, float* sc) {
+  float y[kIdxDim];
+  std::copy(in, in + kIdxDim, y);
+  qsa_fwht128(y);
+  int8_t code[kIdxDim];
+  for (uint32_t g = 0; g < kIdxDim / kI4Group; ++g) {
+    float amax = 0.0f;
+    for (uint32_t i = g * kI4Group; i < (g + 1) * kI4Group; ++i) amax = std::fmax(amax, std::fabs(y[i]));
+    const float s = amax / 7.0f;
+    sc[g] = s;
+    for (uint32_t i = g * kI4Group; i < (g + 1) * kI4Group; ++i)
+      code[i] = s == 0.0f ? 0 : int8_t(std::clamp(std::nearbyint(y[i] / s), -7.0f, 7.0f));
+  }
+  for (uint32_t j = 0; j < kI4Nib; ++j) nib[j] = uint8_t((code[2 * j] & 15) | ((code[2 * j + 1] & 15) << 4));
+}
+inline int32_t i4_at(const uint8_t* nib, uint32_t i) {
+  const int32_t v = (nib[i / 2] >> (4 * (i & 1))) & 15;
+  return v >= 8 ? v - 16 : v;
+}
+// The query heads [4][128] (qsa_q's) -> idx_q's row footprint: nibbles [4][64], then fp32 scales [4][2].
+inline void qsa_q_i4(const float* q, uint8_t* row) {
+  for (uint32_t h = 0; h < kIdxHeads; ++h) {
+    float sc[2];
+    qsa_i4_pack(q + h * kIdxDim, row + h * kI4Nib, sc);
+    std::memcpy(row + kIdxHeads * kI4Nib + h * 8, sc, 8);
+  }
+}
+// A compressed key (bf16, qsa_block_key's) -> its idx_keys slot's first 72 bytes: nibbles [64], fp32 scales [2].
+inline void qsa_key_i4(const uint16_t* key, uint8_t* slot) {
+  float x[kIdxDim], sc[2];
+  for (uint32_t i = 0; i < kIdxDim; ++i) x[i] = f32(key[i]);
+  qsa_i4_pack(x, slot, sc);
+  std::memcpy(slot + kI4Nib, sc, 8);
+}
+// A block's score from the packed row and slot: per head the exact group dots d0, d1,
+// ((float)d0 x (sq0 x sk0)) + ((float)d1 x (sq1 x sk1)) x 2^-7, relu, the left fold, / sqrt(128).
+inline float qsa_score_i4(const uint8_t* row, const uint8_t* slot) {
+  float ks[2], s = 0.0f;
+  std::memcpy(ks, slot + kI4Nib, 8);
+  for (uint32_t h = 0; h < kIdxHeads; ++h) {
+    float qs[2];
+    std::memcpy(qs, row + kIdxHeads * kI4Nib + h * 8, 8);
+    int32_t d[2] = {0, 0};
+    for (uint32_t i = 0; i < kIdxDim; ++i) d[i / kI4Group] += i4_at(row + h * kI4Nib, i) * i4_at(slot, i);
+    float a0 = qs[0] * ks[0];
+    a0 = float(d[0]) * a0;
+    float a1 = qs[1] * ks[1];
+    a1 = float(d[1]) * a1;
+    float a = a0 + a1;
+    a = a * 0.0078125f;
+    s += a > 0.0f ? a : 0.0f;
+  }
+  return s / kSqrtIdx;
+}
 // The selection of row p over its n = (p + 1) / 4 complete blocks' scores (spec 21-QFN-v1 §2.3, decision 3): n <= 512
 // selects everything - the list 0 .. p; else the top 512 by (score desc, block asc) - EXACT ties to the lower
 // block - written ascending, each block expanded to its 4 positions, then the open block's tail 4n .. p.

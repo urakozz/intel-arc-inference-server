@@ -456,6 +456,20 @@ std::vector<uint16_t> Qwen4ExpEngine::read_debug_H() {
   return v;
 }
 
+std::vector<float> Qwen4ExpEngine::read_debug_router() {
+  const model::Qwen4ExpDesc& d = model_.desc;
+  if (!taps_[0])
+    throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine: no router tap (needs debug_tap)");
+  std::vector<float> v(size_t(d.layers) * d.router_n());
+  for (uint32_t i = 0; i < st_.size(); ++i) {
+    const uint32_t first = model_.placement.first(i), n = model_.placement.count(i);
+    st(i).imm.copy(v.data() + size_t(first) * d.router_n(),
+                   static_cast<const uint8_t*>(taps_[i]->ptr()) + tap_router_at(d) + size_t(first) * d.router_n() * 4,
+                   size_t(n) * d.router_n() * 4);
+  }
+  return v;
+}
+
 std::vector<uint32_t> Qwen4ExpEngine::read_routes() {
   const model::Qwen4ExpDesc& d = model_.desc;
   std::vector<uint32_t> v(size_t(d.layers) * kRouteWords);
@@ -542,8 +556,8 @@ std::vector<uint16_t> Qwen4ExpEngine::read_idx_keys(uint32_t layer, uint32_t fir
   if (layer >= d.layers || !d.is_qsa(layer)) throw std::out_of_range("read_idx_keys: layer " + std::to_string(layer));
   if (size_t(first_block) + count > max_len_ / d.idx_compress) throw std::out_of_range("read_idx_keys: past max_len");
   Stage& s = st(model_.placement.device_of(layer));
-  std::vector<uint16_t> out(size_t(count) * d.idx_dim);
-  s.imm.copy(out.data(), static_cast<const uint8_t*>(s.buffers.idx_keys_layer(layer)) + size_t(first_block) * d.idx_dim * 2,
+  std::vector<uint16_t> out(size_t(count) * idx_key_slot_bytes(d) / 2);   // the packed-key slots
+  s.imm.copy(out.data(), static_cast<const uint8_t*>(s.buffers.idx_keys_layer(layer)) + size_t(first_block) * idx_key_slot_bytes(d),
              out.size() * 2);
   return out;
 }
@@ -562,7 +576,7 @@ std::vector<uint8_t> Qwen4ExpEngine::read_layer_state(uint32_t layer) {
   };
   if (d.is_qsa(layer)) {
     append(b.k_layer(layer), size_t(max_len_) * d.kv_n() * 2 * 2);   // K then V
-    append(b.idx_keys_layer(layer), size_t(max_len_ / d.idx_compress) * d.idx_dim * 2);
+    append(b.idx_keys_layer(layer), size_t(max_len_ / d.idx_compress) * idx_key_slot_bytes(d));
     append(b.tail_layer(layer), size_t(kIdxTail) * d.idx_dim * 2);
   } else {
     append(b.gdn_state_layer(layer), gdn_state_bytes_per_layer(d));
@@ -967,9 +981,9 @@ std::vector<uint16_t> Qwen4ExpEngine::read_mtp_idx_keys(uint32_t first_block, ui
   require_mtp("read_mtp_idx_keys");
   const model::Qwen4ExpDesc& d = model_.desc;
   if (size_t(first_block) + count > max_len_ / d.idx_compress) throw std::out_of_range("read_mtp_idx_keys: past max_len");
-  std::vector<uint16_t> out(size_t(count) * d.idx_dim);
+  std::vector<uint16_t> out(size_t(count) * idx_key_slot_bytes(d) / 2);
   st(uint32_t(st_.size()) - 1).imm.copy(out.data(), static_cast<const uint8_t*>(mtp_->idx_keys.ptr()) +
-                                                    size_t(first_block) * d.idx_dim * 2,
+                                                    size_t(first_block) * idx_key_slot_bytes(d),
                                         out.size() * 2);
   return out;
 }

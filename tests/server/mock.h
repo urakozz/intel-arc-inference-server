@@ -444,8 +444,9 @@ struct DrafterMockEngine : StateMockEngine {
 // makes the output a copy of the context `echo` positions back.
 //
 // Spec 31: `pool` > 0 makes the slots share that many KV pages of `blk` positions (the per-request cap is maxlen):
-// take_pages hands them out, reset and a restore's load_state give back and take, and every position a prefill, a step
-// or load_kv writes must be on a page its slot holds - a scheduler that steps before taking the page throws here.
+// take_pages hands them out (and makes a shared page about to be written private), reset gives back, load_kv takes,
+// share_page maps another slot's page (spec 31 §9); every position a prefill, a step or load_kv writes must be on a
+// page its slot holds and holds alone - a scheduler that steps before taking the page throws here.
 struct MockBatchEngine : server::BatchEngineIface {
   struct Slot {
     std::vector<uint32_t> kv;
@@ -515,7 +516,11 @@ struct MockBatchEngine : server::BatchEngineIface {
   }
   void consume(Slot& s, uint32_t id) {
     if (s.p >= maxlen) throw std::runtime_error("mock: past max_len");
-    if (pool != 0 && s.p >= held[uint32_t(&s - slot.data())] * blk) throw std::logic_error("mock: a position on no page");
+    if (pool != 0) {   // spec 31: a write goes to a page the slot holds, and never into a shared one
+      const std::vector<uint32_t>& t = tab[uint32_t(&s - slot.data())];
+      if (s.p >= t.size() * blk) throw std::logic_error("mock: a position on no page");
+      if (refs[t[s.p / blk]] > 1) throw std::logic_error("mock: a write into a shared page");
+    }
     s.kv[s.p++] = id;
     s.state = StateMockEngine::mix(s.state, id);
   }
@@ -591,22 +596,62 @@ struct MockBatchEngine : server::BatchEngineIface {
 
   // Spec 31.
   uint32_t pool = 0;
-  std::map<uint32_t, uint32_t> held;   // slot -> its pages
+  // Spec 31 §9: physical pages - each slot's table, a count per page (shared above 1), the pages in use.
+  std::map<uint32_t, std::vector<uint32_t>> tab;
+  std::map<uint32_t, uint32_t> refs;
+  uint32_t next_page = 0, shares = 0;
+  std::vector<uint32_t> spare;
   uint32_t kv_pool_pages() override { return pool; }
   uint32_t pages_free() override {
     uint32_t used = 0;
-    for (const auto& [i, n] : held) used += n;
+    for (const auto& [p, n] : refs) used += n != 0;
     return pool - used;
   }
-  uint32_t pages_held(uint32_t i) override { return pool != 0 ? held[i] : 0; }
+  uint32_t pages_held(uint32_t i) override { return pool != 0 ? uint32_t(tab[i].size()) : 0; }
+  uint32_t fresh() {
+    if (!spare.empty()) {
+      const uint32_t p = spare.back();
+      spare.pop_back();
+      return p;
+    }
+    return next_page++;
+  }
+  // The pages a step writes from the slot's position on: taken, and a shared one replaced by a private copy.
   bool take_pages(uint32_t i, uint32_t upto) override {
     if (pool == 0) return true;
     if (upto > maxlen) throw std::logic_error("mock: pages past the cap");
+    std::vector<uint32_t>& t = tab[i];
     const uint32_t want = (upto + blk - 1) / blk;
-    if (want <= held[i]) return true;
-    if (want - held[i] > pages_free()) return false;
-    held[i] = want;
+    uint32_t need = want > t.size() ? want - uint32_t(t.size()) : 0;
+    const uint32_t from = slot.at(i).p / blk;
+    for (uint32_t j = from; j < t.size() && j < want; ++j) need += refs[t[j]] > 1;
+    if (need > pages_free()) return false;
+    for (uint32_t j = from; j < t.size() && j < want; ++j)
+      if (refs[t[j]] > 1) {
+        --refs[t[j]];
+        t[j] = fresh();
+        refs[t[j]] = 1;
+      }
+    while (t.size() < want) {
+      t.push_back(fresh());
+      refs[t.back()] = 1;
+    }
     return true;
+  }
+  bool share_page(uint32_t i, uint32_t index, uint32_t from) override {
+    if (pool == 0 || i == from || tab[i].size() != index || tab[from].size() <= index) return false;
+    const uint32_t p = tab[from][index];
+    tab[i].push_back(p);
+    ++refs[p];
+    ++shares;
+    std::copy(slot.at(from).kv.begin() + index * blk, slot.at(from).kv.begin() + (index + 1) * blk,
+              slot.at(i).kv.begin() + index * blk);   // the page's content, which the mock keeps per slot
+    return true;
+  }
+  void release(uint32_t i) {
+    for (uint32_t p : tab[i])
+      if (--refs[p] == 0) spare.push_back(p);
+    tab[i].clear();
   }
 
   uint32_t slots() override { return static_cast<uint32_t>(slot.size()); }
@@ -624,7 +669,7 @@ struct MockBatchEngine : server::BatchEngineIface {
     s.pending = false;
     s.ring.assign(window, 0);
     run_of(i).clear();
-    if (pool != 0) held[i] = 0;
+    if (pool != 0) release(i);
     events.push_back(ev("reset", i, 0));
   }
   void prefill(const std::vector<Chunk>& chunks) override {
@@ -784,7 +829,6 @@ struct MockBatchEngine : server::BatchEngineIface {
     events.push_back(ev("save_state", i, slot[i].p));
   }
   void load_state(uint32_t i, const void* host, uint32_t at) override {
-    if (!take_pages(i, at)) throw std::runtime_error("mock: no pages for a restore");
     Slot& s = slot.at(i);
     std::memcpy(&s.state, host, sizeof(uint64_t));
     if (spec && ring_in_state)
@@ -798,7 +842,13 @@ struct MockBatchEngine : server::BatchEngineIface {
     std::memcpy(host, slot.at(i).kv.data() + b, size_t(e - b) * 4);
   }
   void load_kv(uint32_t i, uint32_t b, uint32_t e, const void* host) override {
-    if (pool != 0 && e > held[i] * blk) throw std::logic_error("mock: a restore past the slot's pages");
+    if (pool != 0) {   // a restore takes the pages it fills (the engine's load_kv), the write starting at b
+      const uint32_t at = slot.at(i).p;
+      slot.at(i).p = b;
+      const bool ok = take_pages(i, e);
+      slot.at(i).p = at;
+      if (!ok) throw std::runtime_error("mock: no pages for a restore");
+    }
     std::memcpy(slot.at(i).kv.data() + b, host, size_t(e - b) * 4);
   }
 };

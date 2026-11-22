@@ -442,10 +442,10 @@ class Walk {
       if (split_) ctrl_ = tp_->rctl;   // pos = row r0's, n_active = n
       // q4_qsa_score(ctrl, idx_q, idx_keys, scores, stride) _PF - grid (ceil(nb / 256), ceil(n / 4)), nb the last row's
       // complete blocks; work-groups past their rows' blocks exit on their first instruction
+      float* const q_r0 = s_.idx_q.as<float>() + size_t(r0) * d_.idx_heads * d_.idx_dim;
       launch(kc_(qv, "q4_qsa_score"), ((pos_ + r0 + n) / kq::kBlock + kq::kScoreWg - 1) / kq::kScoreWg,
              kq::pf_score_groups(n), 1,
-             {PtrArg(ctrl()), PtrArg(s_.idx_q.as<float>() + size_t(r0) * d_.idx_heads * d_.idx_dim),
-              PtrArg(b_.idx_keys_layer(l)), PtrArg(s_.scores.ptr()), arg_val(stride)});
+             {PtrArg(ctrl()), PtrArg(q_r0), PtrArg(b_.idx_keys_layer(l)), PtrArg(s_.scores.ptr()), arg_val(stride)});
       // q4_qsa_select(ctrl, scores, stride, list, diag) - grid (1, n): decode's rule per row
       launch(kc_(qv, "q4_qsa_select"), 1, n, 1,
              {PtrArg(ctrl()), PtrArg(s_.scores.ptr()), arg_val(stride), PtrArg(lists),

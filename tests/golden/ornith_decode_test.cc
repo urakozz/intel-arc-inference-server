@@ -113,15 +113,6 @@ std::vector<float> router_row(const golden::Golden& g, bool f32, const model::Mo
   return lg;
 }
 
-// The judge's near-tie: the top_k-th and (top_k + 1)-th f32 logits within one bf16 ulp of the former.
-bool ulp_near_tie(const std::vector<float>& lg, uint32_t experts, uint32_t top_k) {
-  std::vector<float> s(lg.begin(), lg.begin() + experts);
-  std::nth_element(s.begin(), s.begin() + top_k, s.end(), std::greater<float>());
-  const float l9 = s[top_k];
-  const float l8 = *std::min_element(s.begin(), s.begin() + top_k);
-  return double(l8) - double(l9) <= golden::bf16_ulp_at(l8);
-}
-
 // Two top_k sets (ids by rank): equal, or at a near-tie all but the boundary expert equal, or not.
 enum class SetCmp { Exact, Tie, Bad };
 SetCmp compare_sets(const uint32_t* got, const uint32_t* ref, uint32_t top_k, bool near_tie) {
@@ -150,7 +141,7 @@ void r2_position(const golden::Golden& g, const golden::Golden* judge, const std
     const uint32_t* row = reinterpret_cast<const uint32_t*>(moe.data() + ml.route_at(l));   // m = 0
     ++c.rows;
     const float pk = want.p[md.top_k - 1];
-    const bool near_tie = judge ? ulp_near_tie(lg, md.experts, md.top_k) : (pk - want.p9) <= kR2TieRel * pk;
+    const bool near_tie = judge ? golden::ulp_near_tie(lg, md.experts, md.top_k) : (pk - want.p9) <= kR2TieRel * pk;
     if (judge) {
       const moe_ref::Route b = moe_ref::route(router_row(g, false, d, l, r, rows).data(), s);
       const SetCmp bc = compare_sets(b.ids, want.ids, md.top_k, near_tie);

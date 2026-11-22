@@ -38,7 +38,7 @@ struct Qwen4ExpBuffers {
   // --- persistent: zeroed by zero() (Qwen4ExpEngine::reset) -------------------------------------------------
   l0::Mem control;      // runtime::Control, shared memory
   l0::Mem kv;           // bf16 [its QSA layers][K | V][max_len][2][256]
-  l0::Mem idx_keys;     // bf16 [its QSA layers][max_len / 4][128]
+  l0::Mem idx_keys;     // packed int4 [its QSA layers][max_len / 4][idx_key_slot_bytes]
   l0::Mem idx_tail;     // bf16 [its QSA layers][8][128]
   l0::Mem gdn_state;    // fp32 [its GDN layers][48][128][128]
   l0::Mem conv_ring;    // bf16 [its GDN layers][16][10240]
@@ -63,7 +63,7 @@ struct Qwen4ExpBuffers {
   // Layer `layer`'s rows on this device (it must live here and be of the kind asked).
   void* k_layer(uint32_t layer) const;        // [max_len][2][256]
   void* v_layer(uint32_t layer) const;
-  void* idx_keys_layer(uint32_t layer) const;  // [max_len / 4][128]
+  void* idx_keys_layer(uint32_t layer) const;  // [max_len / 4][idx_key_slot_bytes]
   void* tail_layer(uint32_t layer) const;      // [8][128]
   void* gdn_state_layer(uint32_t layer) const;
   void* conv_ring_layer(uint32_t layer) const;

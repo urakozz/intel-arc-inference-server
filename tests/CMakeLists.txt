@@ -1147,6 +1147,15 @@ foreach(b l0 l0-int8)
   set_tests_properties(prefill_split_${b}_cap4096_test PROPERTIES LABELS "checkpoint;prefill"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
 endforeach()
+# The prompt pass's kernels need no scratch: the walk's pf_* binaries, every entry (its immediate list keeps the
+# scratch it first got, which a decode list's larger scratch frees).
+add_executable(prefill_scratch_test prefill/prefill_scratch_test.cc)
+target_include_directories(prefill_scratch_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(prefill_scratch_test PRIVATE b70_l0)
+b70_target_kernel_dir(prefill_scratch_test)
+add_dependencies(prefill_scratch_test ${B70_PREFILL_KERNELS})
+list(TRANSFORM B70_PREFILL_KERNELS REPLACE "^kernel_" "" OUTPUT_VARIABLE _prefill_bins)
+add_test(NAME prefill_scratch_test COMMAND prefill_scratch_test ${_prefill_bins})
 # Spec 7 C1 (plan 7b): state and KV snapshots restore bitwise; the block hook.
 add_executable(snapshot_test runtime/snapshot_test.cc)
 target_include_directories(snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src
@@ -1856,6 +1865,14 @@ if(B70_ORNITH)
     --accept=code:3,cjk:15)   # known divergences, 2026-10-23 (debug 2026-10-26)
   set_tests_properties(golden_gate_ornith_test golden_gate_ornith_i8head_test PROPERTIES
     LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # PERF-64: the served form (the int8 head) over the int8 KV cache, by the same f32 judge and the bf16 list plus
+  # prose row 18, accepted by the owner 2026-11-22: the engine picks 32 (the bf16 golden's token), the f32 judge 760
+  # by 0.456 logit (7 bf16 ulp; the bf16 cache passes this row).
+  add_test(NAME golden_gate_ornith_i8head_kv8_test COMMAND golden_gate_test
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8 --judge=${B70_ORNITH_F32_I8HEAD_DIR}
+    --accept=code:3,cjk:15,prose:18=32)
+  set_tests_properties(golden_gate_ornith_i8head_kv8_test PROPERTIES LABELS "checkpoint;golden;ornith;kv8"
+    SKIP_RETURN_CODE 77 TIMEOUT 3600 ENVIRONMENT "B70_KV_CACHE=int8")
 
   add_executable(ornith_decode_test golden/ornith_decode_test.cc)
   target_include_directories(ornith_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -1951,6 +1968,19 @@ if(B70_KV8)
   endif()
   add_test(NAME kv8_i8s_test COMMAND kv8_i8s_test)
   set_tests_properties(kv8_i8s_test PROPERTIES LABELS kv8 SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  # PERF-64: the int8 KV cache's binaries at Ornith's 16 / 2 heads bitwise their Qwen3.8 twins on the same heads (the
+  # writers, decode v2, the flash forms and the gate), and its paged prefill twins bitwise the unpaged ones.
+  if(B70_ORNITH)
+    add_executable(kv8_ornith_test kernels/kv8_ornith_test.cc)
+    target_include_directories(kv8_ornith_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+    target_link_libraries(kv8_ornith_test PRIVATE b70_l0)
+    b70_target_kernel_dir(kv8_ornith_test)
+    get_property(_kv8o_k DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+    get_property(_kv8o_pf DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+    add_dependencies(kv8_ornith_test ${_kv8o_k} ${_kv8o_pf})
+    add_test(NAME kv8_ornith_test COMMAND kv8_ornith_test)
+    set_tests_properties(kv8_ornith_test PROPERTIES LABELS "kv8;ornith" TIMEOUT 1800)
+  endif()
 
   add_ocloc_kernel(kv8_scale_test SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_scale_test.cl
     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
@@ -2242,6 +2272,15 @@ if(B70_ORNITH)
     # than the bf16 reference (tools/box_validate/f32_refs.sh split; absent: the fixed bars).
     set_tests_properties(prefill_split_ornith_${b}_test PROPERTIES ENVIRONMENT
       "B70_SPLIT_REFS=${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-f32.golden.safetensors,${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-bf16.golden.safetensors")
+    # PERF-64: the prompt pass over the int8 KV cache, by the same f32 judge; cjk row 15 at chunk 0 accepted by the
+    # owner 2026-11-22 for the engine's 99737 (f32 97663 by 0.299 logit, 3.02 ulp - the row the c16 list accepts).
+    if(b STREQUAL "l0")
+      add_test(NAME prefill_gate_ornith_l0_kv8_test COMMAND prefill_gate_test
+        ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${_judge}
+        --accept=cjk:15=99737 prose,code,cjk 0 l0 0)
+      set_tests_properties(prefill_gate_ornith_l0_kv8_test PROPERTIES LABELS "checkpoint;golden;prefill;ornith;kv8"
+        SKIP_RETURN_CODE 77 TIMEOUT 3600 ENVIRONMENT "B70_KV_CACHE=int8")
+    endif()
     # l0-int8 on a MoE model is opt-in and its accuracy gates are diagnostic
     # (the tests print their verdicts and do not fail on them); prefill_gate's quantisation-aware judge (pfi8: a miss
     # there is a kernel error, not an accuracy loss) still gates.
@@ -2409,6 +2448,31 @@ if(B70_ORNITH AND B70_MTP)
       ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced")
     set_tests_properties(ornith_mtp_bf16head_test PROPERTIES
       ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-forced")
+    # PERF-64: the MTP verify and draft lists over the int8 KV cache, by the int8 head's forced judges.
+    add_test(NAME ornith_mtp_kv8_test COMMAND ornith_mtp_test ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_PROMPTS_DIR} int8)
+    set_tests_properties(ornith_mtp_kv8_test PROPERTIES LABELS "checkpoint;mtp;ornith;kv8" SKIP_RETURN_CODE 77
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
+      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced;B70_KV_CACHE=int8")
+    # Plan 31 Task 12: Ornith's sequence slots - slots_test's cases on Ornith (slots_test.cc), with S0 against the
+    # one-slot engine; S4 judged by the int8 head's f32 references of the forced contexts.
+    if(TARGET slots_test)
+      add_dependencies(slots_test ${_o15e_k} ${_o15e_pf})
+      add_test(NAME ornith_slots_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --one-slot)
+      set_tests_properties(ornith_slots_test PROPERTIES LABELS "checkpoint;mtp;slots;ornith" SKIP_RETURN_CODE 77
+        ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+      # Plan 31 Task 14: the KV page pool's cases on Ornith (slots_test.cc's --pool: P1-P5 against its fixed slots).
+      add_test(NAME ornith_slots_pool_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --pool)
+      set_tests_properties(ornith_slots_pool_test PROPERTIES LABELS "checkpoint;mtp;slots;ornith" SKIP_RETURN_CODE 77
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+      # PERF-64: both over the int8 KV cache (the restore and reset cases included: S2, P2).
+      add_test(NAME ornith_slots_kv8_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --one-slot)
+      add_test(NAME ornith_slots_pool_kv8_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --pool)
+      set_tests_properties(ornith_slots_kv8_test ornith_slots_pool_kv8_test PROPERTIES
+        LABELS "checkpoint;mtp;slots;ornith;kv8" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
+        ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced;B70_KV_CACHE=int8")
+    endif()
   endif()
   # PERF-56: mtp_verify_test's W16 / W32 / W64 cases on Ornith one card - its int8 head, its int8-head forced judges
   # (W16's rows against the plain steps; W32 / W64 bitwise the 16-row list's rows, no judge).
@@ -2854,14 +2918,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_pp_handoff_removed ${B70_NO_MODEL} --parallel pp --pipeline-handoff copy
     EXPECT "unknown option '--pipeline-handoff'")
   # Plan 13b: --parallel replica is Qwen3.8's and Ornith's - other models by name (their config.json), an unreadable
-  # checkpoint, the pp override flags, more than one Ornith request a card (tests/model/ornith: config.json only); all
-  # before the device.
-  b70_serve_reject(cli_reject_serve_replica_ornith_slots ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --parallel replica
-    --max-num-seqs 4 EXPECT "runs one request a card")
-  b70_serve_reject(cli_reject_serve_replica_ornith_auto ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --max-num-seqs 3
-    EXPECT "--max-num-seqs 3 gives a card several requests")
-  b70_serve_reject(cli_reject_serve_replica_ornith_one ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --parallel 1
-    --max-num-seqs 2 EXPECT "--max-num-seqs 2 on two cards")
+  # checkpoint, the pp override flags; all before the device.
   b70_serve_reject(cli_reject_serve_replica_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --parallel replica
     EXPECT "has no replica engine")
   b70_serve_reject(cli_reject_serve_replica_no_model ${B70_NO_MODEL} --parallel replica
@@ -2871,8 +2928,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_serve_pp_value
     cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_removed
     cli_reject_serve_replica_kolibri cli_reject_serve_replica_no_model
-    cli_reject_serve_replica_split cli_reject_serve_replica_ornith_slots cli_reject_serve_replica_ornith_auto
-    cli_reject_serve_replica_ornith_one
+    cli_reject_serve_replica_split
     PROPERTIES LABELS pp)
 endif()
 # ==== Spec 16d ============================================================= (end) ====
@@ -3333,7 +3389,7 @@ if(B70_Q4EXP)
     kernel_gemv_M1_K2560_N16384_S1_L0 kernel_gemv_bf16_M1_K2560_N16384 kernel_gemv_bf16_M1_K2560_N128_C16_S16
     kernel_gdn_step_M1 kernel_prep_gated_head_M1_SIG kernel_gemv_M1_K6144_N2560_S8_L0 kernel_gemv_bf16_M1_K6144_N2560
     kernel_gemv_M1_K2560_N13312_S2_L0 kernel_gemv_bf16_M1_K2560_N13312 kernel_gemv_bf16_M1_K2560_N640_C16_S16
-    kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_S1 kernel_q4_qsa_M1_T512_W1024 kernel_q4_qsa_attn_M1_T32
+    kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_S1 kernel_q4_qsa_M1_T512_W1024_I4H kernel_q4_qsa_attn_M1_T32
     kernel_q4_qsa_attn_eager_M1 kernel_gemv_bf16_M1_K2560_N528_C16_S16 kernel_q4_route_M1_E512_T10_N528_L256
     kernel_q4_moe_M1_E512_T10_D2560_I640_SH4 kernel_q4_moe_M1_E512_T10_D2560_I640_SHB
     kernel_q4_moe_M1_E512_T10_D2560_I640_SH4_TBL kernel_q4_moe_M1_E512_T10_D2560_I640_SHB_TBL kernel_q4_expert_check
@@ -3354,7 +3410,8 @@ if(B70_Q4EXP)
   target_link_libraries(qwen4exp_kernels_test PRIVATE b70_l0 b70_qwen4exp_loader)
   b70_target_kernel_dir(qwen4exp_kernels_test)
   add_dependencies(qwen4exp_kernels_test ${B70_Q4EXP_DECODE_KERNELS} kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q24KV2
-    kernel_q4_hc_up_mix_M2048_I_D512_R4C64_Q8 kernel_q4_hc_slab_i8_N336)   # PERF-66's prefill forms (test 8)
+    kernel_q4_hc_up_mix_M2048_I_D512_R4C64_Q8 kernel_q4_hc_slab_i8_N336    # PERF-66's prefill forms (test 8)
+    kernel_q4_qsa_M1_T512_W1024 kernel_q4_qsa_M2048_T512_W1024_PF)   # test 9, --bench-qsa-i4: the bf16 reference forms
   foreach(MM 1 2 3 4)   # PERF-106's --bench-hc8: lead 4's pair (the down _A, the up-mix _A; _R<M>C16 at M >= 2)
     if(MM GREATER 1)
       add_dependencies(qwen4exp_kernels_test kernel_q4_hc_up_mix_M${MM}_I_R${MM}C16_Q8_B_A)
@@ -3475,7 +3532,7 @@ if(B70_Q4EXP)
     kernel_pf_moe_sort_mw_E512_T10 kernel_pf_moe_q4gemm_K2560_N1280_SILU_SHX kernel_pf_moe_q4gemm_K640_N2560
     kernel_pf_moe_q4gemm_K2560_N1280_SILU_TBL_SHX kernel_pf_moe_q4gemm_K640_N2560_TBL
     kernel_pf_gated_head_SIG_OB kernel_q4_pf_bf16_slab_K2560_N640
-    kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF kernel_pf_flash_attn_Q24KV2
+    kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF_I4H kernel_pf_flash_attn_Q24KV2
     kernel_q4_pf_sparse_attn_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_EAGER kernel_pf_attn_Q24KV2
     kernel_pf_moe_router_K2560_N528 kernel_q4_route_M1_E512_T10_N528_L256 kernel_q4_pf_moe_E512_T10_D2560_I640_L256
     kernel_pf_moe_gemm_K2560_N1280_SILU kernel_pf_moe_gemm_K640_N2560 kernel_q4_ple_gather_M2048_BF16_PF
@@ -3486,7 +3543,7 @@ if(B70_Q4EXP)
     kernel_q4_hc_combine_norm_M4096_E kernel_q4_hc_combine_norm_M4096_S1 kernel_q4_hc_combine_norm_M4096_Y
     kernel_q4_hc_combine_norm_M4096_X kernel_q4_hc_combine_norm_M4096_Y_NN kernel_q4_hc_up_mix_M4096_I_D512_R4C64
     kernel_q4_hc_up_mix_M4096_I_D512_R4C64_Q8
-    kernel_q4_qsa_M4096_T512_W1024_PF kernel_q4_ple_gather_M4096_BF16_PF kernel_q4_ple_gather_M4096_F32_PF
+    kernel_q4_qsa_M4096_T512_W1024_PF_I4H kernel_q4_ple_gather_M4096_BF16_PF kernel_q4_ple_gather_M4096_F32_PF
     kernel_q4_pf_ple_C4096 kernel_pf_dequant_slab_K2560_N16384_L0_BS kernel_pf_dequant_slab_K2560_N13312_L0_BS
     kernel_pf_gemm_T0_R kernel_pf_gemm_T0_B16_R)
   # Host: the names the walk binds (kernels::qwen4exp::prefill_variants) are exactly this list.
@@ -3502,7 +3559,8 @@ if(B70_Q4EXP)
   target_include_directories(qwen4exp_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(qwen4exp_pf_kernels_test PRIVATE b70_prefill_host b70_qwen4exp_loader b70_l0)
   b70_target_kernel_dir(qwen4exp_pf_kernels_test)
-  add_dependencies(qwen4exp_pf_kernels_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pf_gemm_T0_SILU)
+  add_dependencies(qwen4exp_pf_kernels_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pf_gemm_T0_SILU
+    kernel_q4_qsa_M2048_T512_W1024_PF)   # the bf16 reference form
   add_test(NAME qwen4exp_pf_kernels_test COMMAND qwen4exp_pf_kernels_test)
   set_tests_properties(qwen4exp_pf_kernels_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
   # Task 3: the prefill walk on the card (box only; SKIP 77 without the synthetic checkpoints / Intel's).
@@ -3806,7 +3864,7 @@ if(B70_Q4EXP AND B70_MTP)
         kernel_q4_hc_combine_norm_M${MM}_X kernel_q4_hc_up_mix_M${MM}_I_B kernel_q4_hc_up_mix_M${MM}_B
         kernel_q4_hc_up_mix_M${MM}_I_Q8_B kernel_q4_hc_up_mix_M${MM}_Q8_B
         kernel_q4_hc_down_i8_M${MM}_N336_KS32 kernel_q4_hc_down_i8_M${MM}_N320_KS32
-        kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024
+        kernel_q4_ple_gather_M${MM}_BF16 kernel_q4_ple_gather_M${MM}_F32 kernel_q4_qsa_M${MM}_T512_W1024_I4H
         kernel_q4_qsa_attn_M${MM}_T32 kernel_q4_qsa_attn_eager_M${MM} kernel_q4_route_M${MM}_E512_T10_N528_L256
         kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_U kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_U
         kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4_TBL_U kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB_TBL_U)

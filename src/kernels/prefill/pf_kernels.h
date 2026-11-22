@@ -116,6 +116,11 @@ inline std::string pf_flash_attn_pair_variant(unsigned q = kRefFaQHeads, unsigne
 inline std::string pf_flash_attn_pairg_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn_pairg" + fa_suffix(q, kv);
 }
+// Plan 31 Task 12: the 8-row form with the gate fused (GATE_EPI, the pairg's two arguments) - built paged only, at
+// Ornith's 16 / 2 (an Ornith slot's prefill; the pair form takes no page table).
+inline std::string pf_flash_attn_g_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_g" + fa_suffix(q, kv);
+}
 // Spec 12b (`--kv-cache int8`, src/kernels/kv8.cl): the prefill path over the int8 KV
 // cache - the writer (pf_attn_prep_q16's chain, then rotate and quantise), the flash
 // attention reading int8 + scales, and the gate that un-rotates first. Additive.

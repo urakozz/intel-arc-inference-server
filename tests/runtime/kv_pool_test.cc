@@ -38,6 +38,19 @@ void check_consistent(const KvPool& pool) {
   }
 }
 
+// With shared pages: every count equals the tables holding the page, and free + distinct pages held == total.
+void check_consistent_shared(const KvPool& pool) {
+  std::vector<uint32_t> seen(pool.pages_total(), 0);
+  for (uint32_t s = 0; s < pool.seqs(); ++s)
+    for (uint32_t p : pool.pages_of(s)) ++seen[p];
+  uint32_t held = 0;
+  for (uint32_t p = 0; p < pool.pages_total(); ++p) {
+    CHECK_EQ(pool.refs(p), seen[p]);
+    held += seen[p] != 0;
+  }
+  CHECK_EQ(held + pool.pages_free(), pool.pages_total());
+}
+
 void check_take_release() {
   KvPool pool(10, 3, 8);
   CHECK_EQ(pool.pages_free(), 10u);
@@ -175,6 +188,55 @@ void check_release_zeros() {
   std::printf("release: the rows below the written bound on the freed pages, none above\n");
 }
 
+// Spec 31 §9: shared pages. A share raises the count, a release lowers it; the page goes back (zeroed whole) only with
+// its last holder. A write into a shared page gets a private one; with no free page it is refused unchanged.
+void check_share() {
+  KvPool pool(8, 3, 8);
+  CHECK(pool.take(0, 3 * kKvPage));                      // A: pages 0, 1, 2
+  const std::vector<uint32_t> a = pool.pages_of(0);
+  CHECK_EQ(pool.share(1, 0, 0), a[0]);                   // B shares A's first two pages
+  CHECK_EQ(pool.share(1, 1, 0), a[1]);
+  CHECK(pool.take(1, 3 * kKvPage));                      // and has a third of its own
+  CHECK_EQ(pool.refs(a[0]), 2u);
+  CHECK(pool.pages_of(1)[2] != a[2]);
+  CHECK_EQ(pool.pages_free(), 4u);
+  bool threw = false;
+  try {
+    pool.share(1, 1, 0);                                 // not B's next entry
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
+  // B writes into page 1: a private copy; A keeps the old one.
+  uint32_t old = 0, fresh = 0;
+  CHECK(pool.make_private(1, 1, &old, &fresh));
+  CHECK(old == a[1] && fresh != a[1]);
+  CHECK_EQ(pool.refs(a[1]), 1u);
+  CHECK_EQ(pool.pages_of(1)[1], fresh);
+  CHECK(pool.make_private(1, 2, &old, &fresh) && old == fresh);   // its own page: nothing to do
+  // A ends: its page 0 stays (B holds it); pages 1 and 2 go back - page 1 whole (it was shared), page 2 to A's bound.
+  const std::vector<KvPool::Zero> z = pool.release(0, 3 * kKvPage - 10);
+  CHECK_EQ(z.size(), size_t{2});
+  CHECK(z[0].page == a[1] && z[0].rows == kKvPage);
+  CHECK(z[1].page == a[2] && z[1].rows == kKvPage - 10);
+  CHECK_EQ(pool.refs(a[0]), 1u);
+  // B ends: page 0 goes back whole even though B wrote none of it.
+  const std::vector<KvPool::Zero> zb = pool.release(1, 10);
+  bool page0_whole = false;
+  for (const KvPool::Zero& x : zb) page0_whole = page0_whole || (x.page == a[0] && x.rows == kKvPage);
+  CHECK(page0_whole);
+  CHECK_EQ(pool.pages_free(), 8u);
+  check_consistent_shared(pool);
+  // No free page for a private copy: refused, nothing changed.
+  KvPool full(2, 2, 2);
+  CHECK(full.take(0, kKvPage));
+  full.share(1, 0, 0);
+  CHECK(full.take(1, 2 * kKvPage));                      // the last page
+  CHECK(!full.make_private(1, 0, &old, &fresh));
+  CHECK_EQ(full.refs(full.pages_of(0)[0]), 2u);
+  std::printf("share: counts rise and fall, a shared page freed whole with its last holder, writes go private\n");
+}
+
 }  // namespace
 
 int main() {
@@ -183,6 +245,7 @@ int main() {
   check_every_order();
   check_random();
   check_release_zeros();
+  check_share();
   std::printf("kv_pool_test: ok\n");
   return 0;
 }

@@ -10,6 +10,7 @@
                                                  a long session's first turn, three short requests together (enough
                                                  pages that the idle long session leaves the card), its second turn
   pool_serve.py compare A.json B.json            the same ids in both (IDENTICAL / NOT IDENTICAL per request)
+  pool_serve.py check-long F                     a `long` run's verdict: POOL_LONG served / FAIL
 
 Greedy, ignore_eos, return_token_ids. Exit 0 when every request was answered (compare: when every one matches).
 """
@@ -92,7 +93,19 @@ def main():
     c = sub.add_parser("compare")
     c.add_argument("a")
     c.add_argument("b")
+    k = sub.add_parser("check-long")
+    k.add_argument("file")
     a = ap.parse_args()
+
+    if a.cmd == "check-long":
+        with open(a.file) as f:
+            r = json.load(f)
+        ok = "error" not in r["long.beside"] and all(
+            r[n + ".beside"].get("ids") is not None and r[n + ".beside"].get("ids") == r[n + ".alone"].get("ids")
+            for n in ("prose", "code"))
+        print(f"POOL_LONG {'served, the short ones as alone' if ok else 'FAIL'} (prompt "
+              f"{r['long.beside'].get('prompt_tokens')} tokens)")
+        return 0 if ok else 1
 
     if a.cmd == "compare":
         with open(a.a) as f:

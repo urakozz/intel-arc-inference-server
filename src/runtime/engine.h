@@ -334,8 +334,8 @@ class Engine {
   uint64_t queue_submissions() const { return queue_.submissions(); }
   // verify-cost-m8, tests and probes: whether the verify lists commit by replay (gdn_step's DEFERRED build), whether
   // committed rows are pending (a state read flushes them: one more submission), and the committed GDN state.
-  bool gdn_deferred() const { return own_.gdn_pend != nullptr; }
-  bool gdn_rows_pending() const { return own_.gdn_pend && (control_->gdn_pend & 0xFFu) != 0; }
+  bool gdn_deferred() const { return seq().pend != nullptr; }
+  bool gdn_rows_pending() const { return seq().pend && (control_->gdn_pend & 0xFFu) != 0; }
   const void* gdn_state_now() const { return live_gdn_slot(); }
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
@@ -464,7 +464,12 @@ class Engine {
   // The selected sequence's pages up to position `upto` (exclusive), taken now: false, and nothing changed, when the
   // free pages do not cover them. A pool, and at most the per-request cap.
   bool take_pages(uint32_t upto)
-    pre(pool_ != nullptr) { return take_pages_of(cur_, upto); }
+    pre(pool_ != nullptr) { return take_pages_of(cur_, upto, kv_write_from(cur_)); }
+  // Spec 31 §9 (shared prefix pages): slot's next page becomes `from_slot`'s page `index` - its positions [index
+  // kKvPage, (index + 1) kKvPage), read-only for both until one writes there (then that one gets a private copy, see
+  // take_pages). The caller vouches that both hold the same KV there (the same ids, the page whole). False - nothing
+  // changed - unless `slot` holds exactly `index` pages and `from_slot` more.
+  bool share_page(uint32_t slot, uint32_t index, uint32_t from_slot);
   struct Run {
     uint32_t slot = 0;
     uint32_t k = 0;   // drafts in the slot's cur_token[1..k]
@@ -534,7 +539,7 @@ class Engine {
   const void* live_gdn_slot() const;
   // verify-cost-m8: the committed rows the next verify would replay (Control::gdn_pend), into gdn_state now - the
   // flush list at n_active 0. Every reader of the GDN state calls it first; nothing to do without pending rows.
-  void flush_gdn() const;
+  void flush_gdn() const { flush_gdn(seq()); }
   // PERF-89: a mid-prompt hook's snapshot copies, appended to the copy engine's list (made on first use), and the
   // wait for every one appended so far.
   void snap_copy(void* host, const void* dev, size_t bytes) const;
@@ -594,7 +599,7 @@ class Engine {
     uint8_t* hh = nullptr;          // MTP: [kM + 1] rows ([kWideM + 1] on one slot), row 0 = h_{pos-1}
     std::vector<CapturedStep> plain;   // the plain list of each slot of several (one slot's is step_)
     std::vector<CapturedStep> draft_steps;    // [kMaxDraft], MTP on only
-    std::vector<CapturedStep> draft_prob_steps;   // open-work 13: the same ending in draft_prob, slot 0 of one slot
+    std::vector<CapturedStep> draft_prob_steps;   // open-work 13: the same ending in draft_prob (plan 31: every slot)
     std::vector<CapturedStep> verify_steps;   // [M - 1] for M = 1..kSlots
     // Spec 28c (§3, decided 2026-10-31: two lists per M are acceptable): where the measured
     // verify-attention table switches an M to DPAS at a depth (runtime/verify_attn.h, a finite dpas_from > 1), the
@@ -607,6 +612,11 @@ class Engine {
     std::unique_ptr<CapturedStep> deep32, deep64;   // spec 32: the 32- and 64-row lists, where the 16-row one is
     std::vector<uint32_t> draft_ids;
     uint32_t verify_k = kNoVerify, verify_pos = 0;
+    // verify-cost-m8 (plan 31 Task 13: every slot of several with the MTP head): its slice of own_.gdn_pend (two
+    // parities of kernels::gdn_pend_parity_bytes) its verify lists' DEFERRED build replays, and the list that applies
+    // them where the state is read. Null elsewhere: the slot builds, gdn_live moved at commit.
+    uint8_t* pend = nullptr;
+    std::unique_ptr<CapturedStep> flush;
     // Where commit(j) takes row j's hidden: hh row 1 after verify(), the row list's saved row r0 after verify_rows.
     const uint8_t* verify_hidden = nullptr;
     uint32_t kv_end = 0;   // spec 31: PERF-90's written bound for this sequence (note_kv), what reset() zeroes
@@ -615,6 +625,7 @@ class Engine {
   uint32_t cur_ = 0;
   Seq& seq() { return seqs_[cur_]; }
   const Seq& seq() const { return seqs_[cur_]; }
+  void flush_gdn(const Seq& s) const;   // flush_gdn() for sequence `s` (verify_rows: every run's slot)
   // Slot 0 of several is paged (plan 19v3b Task 0): its own plain list, like every further slot's.
   const CapturedStep& plain() const { return seqs_[cur_].plain.empty() ? step_ : seqs_[cur_].plain.at(0); }
   CapturedStep& plain() { return seqs_[cur_].plain.empty() ? step_ : seqs_[cur_].plain.at(0); }
@@ -644,8 +655,12 @@ class Engine {
   // Spec 31: the pool (null with fixed slots), a sequence's pages taken (the table entries written), and the same
   // that throws for `what` when the pool is full.
   std::unique_ptr<KvPool> pool_;
-  bool take_pages_of(uint32_t slot, uint32_t upto);
-  void need_pages(uint32_t slot, uint32_t upto, const char* what);
+  // Pages up to `upto`, and those from `from` on made the sequence's own (a shared one copied first).
+  bool take_pages_of(uint32_t slot, uint32_t upto, uint32_t from);
+  void need_pages(uint32_t slot, uint32_t from, uint32_t upto, const char* what);
+  uint32_t kv_write_from(uint32_t slot) const;   // the first position a step of the slot writes
+  void write_table(uint32_t slot, uint32_t index, uint32_t n);   // its entries [index, index + n) to the card
+  void copy_rows(uint32_t src_row, uint32_t dst_row, uint32_t n);   // every FA layer's KV rows, main and head
   // Plan 19v3b Task 0: the KV page table's host copy (empty with one slot) and the cache rows of slot `s`'s positions
   // [begin, end) as (first row, rows) runs - consecutive pages merged, so one run unless the table scatters them.
   std::vector<uint32_t> pages_;
@@ -660,10 +675,10 @@ class Engine {
   // Spec 19c: the borrowed drafter (its GDN slots: own_.df_slots), and the prefill's tap staging (bf16
   // [chunk_cap][taps][hidden], lazy: the first prefill).
   TapDrafter* drafter_ = nullptr;
-  // verify-cost-m8: with the pending GDN rows (own_.gdn_pend) the verify lists bind gdn_step's DEFERRED build (no
-  // per-row state; the committed rows are replayed by the next launch), and gdn_flush_ applies them where the state
-  // is read. Null elsewhere: the slot builds, gdn_live moved at commit.
-  std::unique_ptr<CapturedStep> gdn_flush_;
+  // verify-cost-m8: with the pending GDN rows (own_.gdn_pend; plan 31 Task 13: a slice for every slot of several
+  // with the MTP head, Seq::pend) the verify lists bind gdn_step's DEFERRED build (no per-row state; the committed rows
+  // are replayed by the next launch), and the slot's flush list (Seq::flush) applies them where the state is read.
+  // Null elsewhere: the slot builds, gdn_live moved at commit.
   // Spec 32: the ring copy a commit of rows 16.. runs (gdn_ring_commit.cl) beside the deep lists' chain scratch
   // (own_.gdn_x / conv_x); deep_rows_ the widest rows B70_SPEC_LOOKUP_ROWS allows (64 unset).
   std::unique_ptr<l0::Module> ring_mod_;

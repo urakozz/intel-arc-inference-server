@@ -680,6 +680,8 @@ def test_cli_run_and_hfcheck():
     assert torch.equal(t["route.top.ids.L0"][:, :k].sort(-1).values, t["route.ids.L0"].sort(-1).values)
     gap = t["route.top.p.L0"][:, k - 1] - t["route.top.p.L0"][:, k]
     assert torch.equal(gap, t["route.gap.L0"])
+    lg = t["route.top.logit.L0"]   # the same experts' logits: descending as their p
+    assert lg.shape == t["route.top.p.L0"].shape and bool((lg[:, :-1] >= lg[:, 1:]).all())
     assert t["nll"].shape == (T - 1,) and t["tokens"].shape == (G,)
     assert "QSA 512th/513th gap" in r.stdout and "MoE 2th/3th gap" in r.stdout, r.stdout[-1500:]
     r = subprocess.run(py + ["hfcheck", snap, "--layers", "4", "--n", "2060", "--gen", "2"], capture_output=True,

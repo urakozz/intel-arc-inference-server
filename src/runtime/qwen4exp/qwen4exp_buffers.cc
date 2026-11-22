@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "kernels/qwen4exp_kernels.h"
 #include "l0/cmdlist.h"
 
 namespace runtime::qwen4exp {
@@ -97,7 +98,7 @@ void* Qwen4ExpBuffers::v_layer(uint32_t layer) const {
 void* Qwen4ExpBuffers::idx_keys_layer(uint32_t layer) const {
   require_kind(*this, layer, true, "idx_keys_layer");
   const uint32_t i = kind_index(desc, placement.first(device), layer);
-  return static_cast<uint8_t*>(idx_keys.ptr()) + size_t(i) * (max_len / desc.idx_compress) * desc.idx_dim * 2;
+  return static_cast<uint8_t*>(idx_keys.ptr()) + size_t(i) * (max_len / desc.idx_compress) * idx_key_slot_bytes(desc);
 }
 void* Qwen4ExpBuffers::tail_layer(uint32_t layer) const {
   require_kind(*this, layer, true, "tail_layer");

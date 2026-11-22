@@ -138,6 +138,24 @@ double cos_bf16(const uint16_t* a, const uint16_t* b, size_t n) {
   if (aa == 0 && bb == 0) return 1.0;
   return (aa == 0 || bb == 0) ? 0.0 : ab / std::sqrt(aa * bb);   // one side zero: unlike (not 0 / 0)
 }
+// One compressed key's slot (nibbles [64], fp32 scales [2]: the Hadamard-rotated, int4-packed key) -> its idx_dim values,
+// the rotation undone: the codes x their group scale, one more unscaled 128-point butterfly, / 128.
+void unpack_key(const uint8_t* slot, const model::Qwen4ExpDesc& d, float* out) {
+  float sc[2];
+  std::memcpy(sc, slot + d.idx_dim / 2, sizeof(sc));
+  for (uint32_t i = 0; i < d.idx_dim; ++i) {
+    const int n = (slot[i / 2] >> (4 * (i & 1))) & 15;
+    out[i] = float((n ^ 8) - 8) * sc[i / 64];
+  }
+  for (uint32_t h = 1; h < d.idx_dim; h <<= 1)
+    for (uint32_t i = 0; i < d.idx_dim; ++i)
+      if (!(i & h)) {
+        const float a = out[i], c = out[i | h];
+        out[i] = a + c;
+        out[i | h] = a - c;
+      }
+  for (uint32_t i = 0; i < d.idx_dim; ++i) out[i] /= float(d.idx_dim);
+}
 double cos_f32(const float* a, const float* b, size_t n) {
   double ab = 0, aa = 0, bb = 0;
   for (size_t i = 0; i < n; ++i) {
@@ -224,8 +242,14 @@ StateCmp compare_state(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& 
       for (uint32_t p = 0; p < n; ++p) add(std::min(cos_bf16(A + p * row, B + p * row, row),
                                                     cos_bf16(A + (size_t(max_len) + p) * row, B + (size_t(max_len) + p) * row, row)));
       off = size_t(max_len) * row * 2;
-      for (uint32_t blk = 0; blk < n / 4; ++blk) add(cos_bf16(A + off + size_t(blk) * d.idx_dim, B + off + size_t(blk) * d.idx_dim, d.idx_dim));
-      off += size_t(max_len / d.idx_compress) * d.idx_dim;
+      const size_t slot = rq::idx_key_slot_bytes(d);
+      for (uint32_t blk = 0; blk < n / 4; ++blk) {   // the packed keys, unpacked, a cosine row a block
+        std::vector<float> ka(d.idx_dim), kb(d.idx_dim);
+        unpack_key(reinterpret_cast<const uint8_t*>(A + off) + blk * slot, d, ka.data());
+        unpack_key(reinterpret_cast<const uint8_t*>(B + off) + blk * slot, d, kb.data());
+        add(cos_f32(ka.data(), kb.data(), d.idx_dim));
+      }
+      off += size_t(max_len / d.idx_compress) * slot / 2;
       for (uint32_t k = 0; k < rq::kIdxTail; ++k) {   // the tail ring's raw keys, a cosine row a slot
         const uint16_t* ta = A + off + size_t(k) * d.idx_dim;
         const uint16_t* tb = B + off + size_t(k) * d.idx_dim;
@@ -286,8 +310,8 @@ void print_diffs(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& b, uin
       region("K rows", l, A, B, row, max_len);
       region("V rows", l, A + size_t(max_len) * row, B + size_t(max_len) * row, row, max_len);
       off = size_t(max_len) * row * 2;
-      region("indexer key blocks", l, A + off, B + off, size_t(d.idx_dim) * 2, max_len / d.idx_compress);
-      off += size_t(max_len / d.idx_compress) * d.idx_dim * 2;
+      region("indexer key blocks", l, A + off, B + off, rq::idx_key_slot_bytes(d), max_len / d.idx_compress);
+      off += size_t(max_len / d.idx_compress) * rq::idx_key_slot_bytes(d);
       region("tail slots", l, A + off, B + off, size_t(d.idx_dim) * 2, rq::kIdxTail);
       off += size_t(rq::kIdxTail) * d.idx_dim * 2;
     } else {
@@ -438,17 +462,26 @@ struct F32Judge {
       const uint8_t* p = pf.layers[l].data();
       const uint8_t* v = dec.layers[l].data();
       size_t off = 0;
-      const auto compare = [&](const char* kind, size_t elems, bool fp32 = false) {
+      const auto compare = [&](const char* kind, size_t elems, bool fp32 = false, bool packed = false) {
         const std::string key = "state.L" + std::to_string(l) + "." + kind;
         const float* pr = file.f32(this->key("prefill", key), elems);
         const float* dr = file.f32(this->key("decode", key), elems);
         CHECK(q4judge::finite_reference(pr, elems));
         CHECK(q4judge::finite_reference(dr, elems));
+        std::vector<float> pk, dk;   // `packed`: the blocks' packed keys, unpacked
+        if (packed) {
+          pk.resize(elems);
+          dk.resize(elems);
+          for (size_t blk = 0; blk < elems / d.idx_dim; ++blk) {
+            unpack_key(p + off + blk * rq::idx_key_slot_bytes(d), d, pk.data() + blk * d.idx_dim);
+            unpack_key(v + off + blk * rq::idx_key_slot_bytes(d), d, dk.data() + blk * d.idx_dim);
+          }
+        }
         q4judge::Cosine pc, dc;
         for (size_t i = 0; i < elems; ++i) {
-          const double pv = fp32 ? reinterpret_cast<const float*>(p + off)[i]
+          const double pv = packed ? pk[i] : fp32 ? reinterpret_cast<const float*>(p + off)[i]
                                  : common::bf16_to_f32(reinterpret_cast<const uint16_t*>(p + off)[i]);
-          const double dv = fp32 ? reinterpret_cast<const float*>(v + off)[i]
+          const double dv = packed ? dk[i] : fp32 ? reinterpret_cast<const float*>(v + off)[i]
                                  : common::bf16_to_f32(reinterpret_cast<const uint16_t*>(v + off)[i]);
           pc.add(pv, pr[i]);
           dc.add(dv, dr[i]);
@@ -460,8 +493,8 @@ struct F32Judge {
         off += size_t(max_len) * d.kv_n() * 2;
         compare("v", size_t(pf.pos) * d.kv_n());
         off += size_t(max_len) * d.kv_n() * 2;
-        compare("ckeys", size_t(pf.pos / d.idx_compress) * d.idx_dim);
-        off += size_t(max_len / d.idx_compress) * d.idx_dim * 2;
+        compare("ckeys", size_t(pf.pos / d.idx_compress) * d.idx_dim, false, true);
+        off += size_t(max_len / d.idx_compress) * rq::idx_key_slot_bytes(d);
         compare("tail", size_t(rq::kIdxTail) * d.idx_dim);
         off += size_t(rq::kIdxTail) * d.idx_dim * 2;
       } else {

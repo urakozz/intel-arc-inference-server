@@ -667,8 +667,11 @@ CapturedStep build_dflash_tail(l0::Context& ctx, const loader::DFlashWeights& w,
 
 // project_wide: the projection list's walk (Walk::project above) with every GEMM on pf_gemm - per
 // linear, slabs of its columns as bf16 B (df_w_slab_*; int4 as two slabs whose sum is the exact weight, a GEMM against
-// each, df_w_add), then the rows against each. fc's slab is 512 columns:
-// [25600][512] fits the scratch's slab ([17408][1024] on Qwen3.8), a 1024-column one does not.
+// each, df_w_add), then the rows against each. A slab is as wide as fits (1024 columns at most): in partials past the
+// projection's rows (Qwen3.8 at a 2048-row chunk: 184 MB, fc's int4 hi||lo at 1024 columns 105 MB) with int4's two
+// GEMM outputs in the scratch's slab, else in the slab ([17408][1024] on Qwen3.8) with them after it. PERF-121: fc's
+// int4 slabs were 256 columns, so its GEMMs ran 8 work-groups of 2048 rows; wider slabs and the hi and lo GEMMs as
+// one batched launch fill the card. The same DPAS chain per output and the same hi + lo sum: bitwise.
 bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const loader::DFlashWeights& w,
                   DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n, uint32_t session) {
   const DFlashBuffers::Session ss = b.session(session);
@@ -683,29 +686,50 @@ bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch
   float* const out = s.partials.as<float>() + size_t(cap) * H;
   float* const kv = out + size_t(cap) * H;
   l0::Mem& slab = s.slab_buffer();
-  require(s.partials.size() >= (size_t(cap) * (2 * H + KV)) * 4 && s.x.size() >= size_t(cap) * H * 2 &&
-              slab.size() >= size_t(w.fc->shape.K) * 512 * 2,
+  require(s.partials.size() >= (size_t(cap) * (2 * H + KV)) * 4 && s.x.size() >= size_t(cap) * H * 2,
           "the prefill scratch is smaller than the wide projection's rows (not Qwen3.8's)");
+  uint8_t* const tail = reinterpret_cast<uint8_t*>(kv + size_t(cap) * KV);
+  const size_t tail_bytes = s.partials.size() - size_t(cap) * (2 * H + KV) * 4;
   const std::string v = kernels::dflash::proj_wide_variant();
   l0::Kernel& un = kc(v, scaled ? "df_w_slab_i8" : q4 ? "df_w_slab_q4" : "df_w_slab_bf16");
-  // C [n][N] (pitch N) = A [n][K] x the N columns of `wt` (their first tile), ns columns a slab. int4: the hi slab's
-  // GEMM into C, the lo slab's into t (after both slabs, pad256(n) rows), then C += t.
-  const auto linear = [&](const void* wt, const uint16_t* A, uint32_t K, uint32_t N, uint32_t ns, float* C) {
-    uint16_t* const hi = slab.as<uint16_t>();
-    float* const t = reinterpret_cast<float*>(hi + 2 * size_t(K) * ns);
-    require(!q4 || (2 * size_t(K) * ns * 2 + size_t(prefill::pad256(n)) * ns * 4 <= slab.size()),
-            "the prefill scratch's slab is smaller than an int4 linear's two slabs and their sum");
+  // C [n][N] (pitch N) = A [n][K] x the N columns of `wt` (their first tile), ns columns a slab. int4: the hi and lo
+  // slabs' GEMMs into t [2][pad256(n)][ns], then C = t[0] + t[1].
+  const auto linear = [&](const void* wt, const uint16_t* A, uint32_t K, uint32_t N, float* C) {
+    const size_t b_col = (q4 ? 2 : 1) * size_t(K) * 2, t_col = q4 ? 2 * size_t(prefill::pad256(n)) * 4 : 0;
+    const auto widest = [&](const auto& fits) {
+      for (uint32_t ns = 1024; ns >= 256; ns /= 2)
+        if (N % ns == 0 && fits(size_t(ns))) return ns;
+      return 0u;
+    };
+    uint16_t* hi = reinterpret_cast<uint16_t*>(tail);
+    float* t = slab.as<float>();
+    uint32_t ns = widest([&](size_t c) { return c * b_col <= tail_bytes && c * t_col <= slab.size(); });
+    if (!ns) {   // B and t share the slab
+      ns = widest([&](size_t c) { return c * (b_col + t_col) <= slab.size(); });
+      hi = slab.as<uint16_t>();
+      t = reinterpret_cast<float*>(hi + b_col / 2 * ns);
+    }
+    require(ns != 0, "the prefill scratch holds no 256-column slab of a " + std::to_string(K) + "-row linear");
+    const size_t T = size_t(prefill::pad256(n)) * ns;
     for (uint32_t n0 = 0; n0 < N; n0 += ns) {
       cx.launch(un, ns / 256, K / (scaled ? 16 : q4 ? 64 : 8), 1,
-                {PtrArg(wt), PtrArg(slab.ptr()), arg_val(n0), arg_val(K), arg_val(ns)});
-      prefill::gemm_l0(cx, kc, prefill::GemmBatch{n, K, ns, 1, K, ns, N, 0, 0, 0}, A, hi, C + n0, /*transB=*/false);
-      if (!q4) continue;
-      prefill::gemm_l0(cx, kc, prefill::GemmBatch{n, K, ns, 1, K, ns, ns, 0, 0, 0}, A, hi + size_t(K) * ns, t,
-                       /*transB=*/false);
-      cx.launch(kc(v, "df_w_add"), ns / 256, n, 1, {PtrArg(t), PtrArg(C + n0), arg_val(ns), arg_val(N)});
+                {PtrArg(wt), PtrArg(hi), arg_val(n0), arg_val(K), arg_val(ns)});
+      if (!q4) {
+        prefill::gemm_l0(cx, kc, prefill::GemmBatch{n, K, ns, 1, K, ns, N, 0, 0, 0}, A, hi, C + n0, /*transB=*/false);
+        continue;
+      }
+      if (n > prefill::kPfSmallMaxRows) {   // both slabs one launch; pf_small_tile's rows run each on its own
+        prefill::gemm_l0(cx, kc, prefill::GemmBatch{n, K, ns, 2, K, ns, ns, 0, size_t(K) * ns, T}, A, hi, t,
+                         /*transB=*/false);
+      } else {
+        for (uint32_t i = 0; i < 2; ++i)
+          prefill::gemm_l0(cx, kc, prefill::GemmBatch{n, K, ns, 1, K, ns, ns, 0, 0, 0}, A, hi + i * size_t(K) * ns,
+                           t + i * T, /*transB=*/false);
+      }
+      cx.launch(kc(v, "df_w_add"), ns / 256, n, 1, {PtrArg(t), PtrArg(C + n0), arg_val(ns), arg_val(N), arg_val(T)});
     }
   };
-  linear(w.fc->mem.ptr(), static_cast<const uint16_t*>(taps), w.fc->shape.K, H, q4 ? 256 : 512, out);
+  linear(w.fc->mem.ptr(), static_cast<const uint16_t*>(taps), w.fc->shape.K, H, out);
   const void* const fc_scales = scaled ? w.fc->scales->ptr() : out;   // unscaled: never read
   cx.launch(kc(v, "df_w_norm"), 1, n, 1,
             {PtrArg(out), PtrArg(fc_scales), PtrArg(w.hidden_norm->ptr()), PtrArg(s.x.ptr()), arg_val(scaled)});
@@ -715,7 +739,7 @@ bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch
     const loader::DeviceWeight& qkv = w.layers[l].qkv;
     const auto* wm = static_cast<const uint8_t*>(qkv.mem.ptr()) +
                      (q4 ? q_n / 16 * (H / 64) * 136 * 4 : q_n * H * (scaled ? 1 : 2));
-    linear(wm, s.x.as<uint16_t>(), H, KV, q4 ? 512 : 1024, kv);
+    linear(wm, s.x.as<uint16_t>(), H, KV, kv);
     const void* const scales = scaled ? static_cast<const void*>(qkv.scales->as<float>() + q_n) : kv;
     cx.launch(kc(v, "df_w_ctx_store"), 2 * d.kv_heads, n, 1,
               {PtrArg(kv), PtrArg(scales), PtrArg(w.qk_norm->as<float>() + (size_t(l) * 2 + 1) * d.head_dim),

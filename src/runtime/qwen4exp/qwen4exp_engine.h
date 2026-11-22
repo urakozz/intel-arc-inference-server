@@ -92,6 +92,9 @@ class Qwen4ExpEngine {
 
   // bf16 [layers][10240] of the last replay, each layer's row from the device holding it (debug_tap).
   std::vector<uint16_t> read_debug_H();
+  // fp32 [layers][router_n] of the last replay: each MoE layer's router GEMV output before q4_route's bf16 rounding
+  // (debug_tap; a MoE model).
+  std::vector<float> read_debug_router();
   // u32 [layers][32]: every layer's route row of the last replay (kernels::qwen4exp::route).
   std::vector<uint32_t> read_routes();
   // QSA layer `layer`'s selection of the last replay: positions [0, count) then the count (count + 1 words).
@@ -190,7 +193,7 @@ class Qwen4ExpEngine {
   // head its tail and R_{pos-1}) and the blocks (K / V rows and the complete blocks' compressed keys; the head's last):
   // runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs give both HOST layouts, the same under --parallel 1 and --parallel pp
   // (spec 16b's rule). state_bytes() is 115,651,592 B at the real 48 layers and kv_bytes(n) the blocks of n positions
-  // from a block start (25,344 B a position; derived). save_state copies the state at pos() (the zero runs' history:
+  // from a block start (24,792 B a position; derived). save_state copies the state at pos() (the zero runs' history:
   // zeros, the PLE ids as EOS; the rows a commit left replayed first); load_state writes it back and sets pos on every
   // device (n_active 0; the GDN state into gdn_state with no committed rows over it; the prefill that follows every
   // restore, spec 7 §3.3 step 4, sets the pending id). save_kv / load_kv copy [begin, end), begin a multiple of 4 (the

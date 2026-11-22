@@ -5,7 +5,7 @@
 //
 //   1. the bytes: the runs' total is state_snapshot_bytes / kv_snapshot_bytes at pos 0, 1, 3, 4, 2049..2052, 5000
 //      (and every run inside its allocation), with and without the MTP head; the real model's 115,651,592 B of
-//      state and 25,344 B a position (derived, spec 21-QFN-v1 §3), + 21,248 / + 2,112 with the head;
+//      state and 24,792 B a position (derived, spec 21-QFN-v1 §3), + 21,248 / + 2,066 with the head;
 //   2. one host layout for --pp 1 and --pp 2 (plan 21-QFN-v1e Review Focus 5): the host image saved under
 //      Q4Placement::one is byte for byte the one saved under two(d, 1), two(d, 2) and two(d, 3) at --layers 4, and
 //      under one / two(d, 24) at 48 layers - the state and the kv of [0, 2051), [2048, 4096), [4096, 5000);
@@ -67,7 +67,7 @@ struct SimDevices {
   void layout(uint32_t dev, int a, size_t& slice, std::vector<uint32_t>& layers) const {
     layers.clear();
     const SnapTensor t = SnapTensor(a);
-    const size_t key = size_t(d.idx_dim) * 2;
+    const size_t key = size_t(d.idx_dim) * 2, slot = rq::idx_key_slot_bytes(d);
     for (uint32_t l = p.first(dev); l < p.end(dev); ++l) {
       const bool qsa = d.is_qsa(l);
       if ((t == SnapTensor::Kv || t == SnapTensor::IdxKeys || t == SnapTensor::IdxTail) && qsa) layers.push_back(l);
@@ -76,7 +76,7 @@ struct SimDevices {
     }
     switch (t) {
       case SnapTensor::Kv: slice = size_t(max_len) * 2 * d.kv_n() * 2; break;
-      case SnapTensor::IdxKeys: slice = size_t(max_len / d.idx_compress) * key; break;
+      case SnapTensor::IdxKeys: slice = size_t(max_len / d.idx_compress) * slot; break;
       case SnapTensor::IdxTail: slice = size_t(rq::kIdxTail) * key; break;
       case SnapTensor::GdnState: slice = rq::gdn_state_bytes_per_layer(d); break;
       case SnapTensor::ConvRing: slice = rq::conv_ring_bytes_per_layer(d); break;
@@ -275,9 +275,9 @@ void history(const Qwen4ExpDesc& d, uint32_t max_len) {
           pr[1].bytes == 2 * ple);
   }
   // The kv runs: [2048, 2052) holds blocks 512 only; [4096, 5000) blocks 1024..1249; a begin off the block grid throws.
-  CHECK_EQ(rq::kv_snapshot_bytes(d, 2048, 2052, false), size_t(qsa) * (4 * 2048 + 256));
+  CHECK_EQ(rq::kv_snapshot_bytes(d, 2048, 2052, false), size_t(qsa) * (4 * 2048 + 72));
   CHECK_EQ(rq::kv_snapshot_bytes(d, 2048, 2051, false), size_t(qsa) * 3 * 2048);
-  CHECK_EQ(rq::kv_snapshot_bytes(d, 4096, 5000, true), size_t(qsa + 1) * (904 * 2048 + 226 * 256));
+  CHECK_EQ(rq::kv_snapshot_bytes(d, 4096, 5000, true), size_t(qsa + 1) * (904 * 2048 + 226 * 72));
   bool threw = false;
   try {
     rq::kv_runs(d, one, max_len, 2, 8, false);
@@ -294,9 +294,9 @@ int main() {
   // The real model (derived): 36 x 3,145,728 + 36 x 61,440 + 8 + 184,320 + 12 x 768 = 115,651,592 B.
   CHECK_EQ(rq::state_snapshot_bytes(full, false), size_t(115651592));
   CHECK_EQ(rq::state_snapshot_bytes(full, true), size_t(115651592 + 768 + 20480));
-  CHECK_EQ(rq::kv_snapshot_bytes(full, 0, 4096, false), size_t(4096) * 25344);
+  CHECK_EQ(rq::kv_snapshot_bytes(full, 0, 4096, false), size_t(4096) * 24792);
   CHECK_EQ(rq::kv_snapshot_bytes(full, 0, 4096, false) / 4096, rq::kv_bytes_per_pos(full));
-  CHECK_EQ(rq::kv_snapshot_bytes(full, 0, 4096, true), size_t(4096) * (25344 + 2112));
+  CHECK_EQ(rq::kv_snapshot_bytes(full, 0, 4096, true), size_t(4096) * (24792 + 2066));
   std::printf("the real model: state %zu B (%.1f MB; + %zu with the head), blocks %zu B a position (+ %zu)\n",
               rq::state_snapshot_bytes(full, false), rq::state_snapshot_bytes(full, false) / 1e6,
               rq::state_snapshot_bytes(full, true) - rq::state_snapshot_bytes(full, false),

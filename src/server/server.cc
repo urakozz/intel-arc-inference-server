@@ -105,8 +105,7 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     if (opts_.spec_dflash_lookup)
       throw std::invalid_argument("--spec dflash-lookup runs on one engine; not under the scheduler");
     if (opts_.spec_mtp_lookup && !batch->mtp_lookup())   // open-work 27: replica's one request a card has it
-      throw std::invalid_argument("prompt lookup inside MTP is built for one request a card; not "
-                                  "beside several slots on a card");
+      throw std::invalid_argument("prompt lookup inside MTP needs the MTP head on every card's engine");
   }
   if (opts_.spec_lookup) {
     if (deps_.engine.verify_k() == 0)
@@ -143,8 +142,7 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     // Open-work 27 under replica: the scheduler's greedy rows choose their drafts per step beside lookup inside MTP,
     // as the serial server's do.
     const char* env = std::getenv("B70_MTP_STEP_K");
-    const bool chooses = impl_->batch ? opts_.spec_mtp_lookup && impl_->batch->chooses_drafts()
-                                      : deps_.engine.chooses_drafts();
+    const bool chooses = impl_->batch ? impl_->batch->chooses_drafts() : deps_.engine.chooses_drafts();
     impl_->step_k = opts_.mtp_auto && chooses && !(env != nullptr && std::string(env) == "0");
   }
   // Plan 13b: under the scheduler the cache is per slot (PrefixSlots) and deps_.engine is never hooked or driven.
@@ -427,14 +425,14 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
                            Outcome& outcome, const std::function<void(const Delta&)>& emit,
                            const std::function<bool()>& gone) {
   PrefixSession& session = *impl_->prefix;
-  // Spec 24e (decision 1): a request with a repetition penalty carries the distinct ids of its prompt and of every id
-  // consumed so far, for an engine adapter that applies it (the host sampler, before temperature / top-k / top-p).
+  // A request with a repetition penalty carries the distinct ids of its prompt and of every id consumed so far, for the
+  // host sampler (before temperature / top-k / top-p).
   SeenIds seen;
   Sampling sampling = r.sampling;
   const bool penalised = sampling.repetition_penalty != 1.0f;
   if (penalised) {
     for (uint32_t id : outcome.prompt_ids) seen.add(id);
-    sampling.seen = &seen;
+    sampling.penalise(seen);
   }
   // Chat: the text goes through the tool-call parser of the model's format (server/chat_format.h). Qwen: with
   // thinking on, the prompt ends in "<think>\n" and the output opens with reasoning.
@@ -882,7 +880,7 @@ std::shared_ptr<Server::BatchedRun> Server::submit_batched(const Request& r) {
   const bool penalised = sr.sampling.repetition_penalty != 1.0f;
   if (penalised) {
     for (uint32_t id : outcome.prompt_ids) run->seen.add(id);
-    sr.sampling.seen = &run->seen;
+    sr.sampling.penalise(run->seen);
   }
   const std::shared_ptr<Run> rp = run;   // the callbacks keep the run alive until the scheduler drops them
   const std::set<uint32_t>* eos = &impl_->eos;

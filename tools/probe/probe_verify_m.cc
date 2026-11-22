@@ -38,6 +38,11 @@
 //       and the grouping spec 28 §6 needs - int4 GEMV, the int8 head, attention, gdn_step,
 //       everything else - with the non-GEMV share applied to 1v's unprofiled step (the events'
 //       flush per launch inflates the profiled absolutes; shares, not times, carry over).
+// `--experts 1` (plan 31 Task 11, a MoE model - Ornith): how many distinct experts a batched step would read. Each
+// of the golden, A4 and long prompts is prefilled alone on a one-request engine, then one draft(3) + verify(3) - four
+// rows of that request - and every layer's four route rows are read back from the MoE scratch. Printed: the mean
+// distinct routed experts per layer for 1 / 2 / 4 / 8 rows taken from 1, 2 or 4 different prompts (consecutive rows
+// of each), against top_k x rows - what rows from several requests cost in expert reads over rows of one.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -47,6 +52,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "kernels/kernels.h"
@@ -59,6 +65,7 @@
 #include "l0/module.h"
 #include "l0/queue.h"
 #include "loader/loader.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
@@ -79,6 +86,97 @@ constexpr uint32_t kPrompt[] = {
     279,   197616, 2271, 13,   469,   68042, 29123, 7247, 383,  279, 1387,  12615, 1345, 279,
     49813, 78911, 1141, 20459, 13,    3113,  7840,  279,  2981, 1000, 381,  16850, 1495, 13};
 constexpr size_t kPromptLen = sizeof(kPrompt) / sizeof(kPrompt[0]);
+
+// ---- plan 31 Task 11: distinct experts per batched step (--experts) -----------------------
+std::vector<uint32_t> read_ids_file(const std::string& p) {
+  std::vector<uint32_t> v;
+  if (FILE* f = std::fopen(p.c_str(), "r")) {
+    unsigned x;
+    while (std::fscanf(f, "%u", &x) == 1) v.push_back(x);
+    std::fclose(f);
+  }
+  return v;
+}
+
+int run_experts(l0::Context& ctx, const std::string& path) {
+  constexpr uint32_t kMaxLen = 32768, kRows = 4;
+  runtime::Engine e(ctx, loader::load(ctx, path, kMaxLen, /*mtp=*/true, loader::LmHeadForm::Int8), kMaxLen);
+  const model::ModelDesc& d = *e.model().desc;
+  if (!d.is_moe()) {
+    std::fprintf(stderr, "--experts: %s is not a MoE model\n", d.name.c_str());
+    return 2;
+  }
+  std::vector<std::pair<std::string, std::vector<uint32_t>>> prompts;
+  for (const char* n : {"prose", "code", "cjk", "long"})
+    prompts.push_back({n, read_ids_file(std::string("tests/golden/prompts/") + n + ".ids")});
+  for (const char* n : {"t1_define-box", "t1_define-loader"})
+    prompts.push_back({n, read_ids_file(std::string("tests/golden/toolcall/") + n + ".ids")});
+  const std::vector<uint32_t> l32 = read_ids_file("tests/golden/prompts/long32k.ids");
+  if (l32.size() > 20000) {
+    prompts.push_back({"long32k[0:6000]", {l32.begin(), l32.begin() + 6000}});
+    prompts.push_back({"long32k[12000:18000]", {l32.begin() + 12000, l32.begin() + 18000}});
+  }
+  for (const auto& [n, p] : prompts)
+    if (p.empty()) {
+      std::fprintf(stderr, "--experts: no ids for %s (run from the source tree)\n", n.c_str());
+      return 2;
+    }
+  const runtime::MoeScratchLayout ml = runtime::moe_scratch_layout(d);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  std::vector<uint32_t> route(size_t(kRows) * kernels::moe_route::kWords);
+  // routes[prompt][layer][row] = the row's top_k expert ids
+  std::vector<std::vector<std::vector<std::vector<uint32_t>>>> routes;
+  for (const auto& [n, p] : prompts) {
+    e.reset();
+    e.prefill(p);
+    e.draft(kRows - 1);
+    e.verify(kRows - 1);
+    std::vector<std::vector<std::vector<uint32_t>>> per_layer(d.layers);
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      imm.copy(route.data(), e.buffers().moe->as<uint8_t>() + ml.route_at(l), route.size() * 4);
+      for (uint32_t r = 0; r < kRows; ++r) {
+        const uint32_t* row = route.data() + size_t(r) * kernels::moe_route::kWords + kernels::moe_route::kIds;
+        per_layer[l].push_back(std::vector<uint32_t>(row, row + d.moe.top_k));
+      }
+    }
+    routes.push_back(std::move(per_layer));
+    std::printf("experts: %s (%zu ids) routed\n", n.c_str(), p.size());
+  }
+  // Mean distinct experts per layer over `rows` rows taken as rows / sources consecutive rows of `sources` prompts
+  // (every run of `sources` consecutive prompts, wrapping).
+  const auto distinct = [&](uint32_t rows, uint32_t sources) {
+    const uint32_t each = rows / sources, np = uint32_t(routes.size());
+    double sum = 0;
+    uint32_t n = 0;
+    for (uint32_t first = 0; first < np; ++first)
+      for (uint32_t l = 0; l < d.layers; ++l) {
+        std::vector<uint32_t> u;
+        for (uint32_t s = 0; s < sources; ++s)
+          for (uint32_t r = 0; r < each; ++r) {
+            const auto& ids = routes[(first + s) % np][l][r];
+            u.insert(u.end(), ids.begin(), ids.end());
+          }
+        std::sort(u.begin(), u.end());
+        sum += double(std::unique(u.begin(), u.end()) - u.begin());
+        ++n;
+      }
+    return sum / n;
+  };
+  std::printf("| rows | from 1 request | from 2 requests | from 4 requests | top_k x rows |\n");
+  for (const uint32_t rows : {1u, 2u, 4u, 8u}) {
+    std::string c[3];
+    const uint32_t src[3] = {1, 2, 4};
+    for (int i = 0; i < 3; ++i) {
+      char b[32] = "-";
+      if (rows % src[i] == 0 && rows / src[i] <= kRows) std::snprintf(b, sizeof b, "%.1f", distinct(rows, src[i]));
+      c[i] = b;
+    }
+    std::printf("| %u | %s | %s | %s | %u |\n", rows, c[0].c_str(), c[1].c_str(), c[2].c_str(), rows * d.moe.top_k);
+  }
+  std::printf("experts: %u routed a layer, top_k %u, %u layers, %zu prompts\n", d.moe.experts, d.moe.top_k, d.layers,
+              prompts.size());
+  return 0;
+}
 
 // ---- spec 28a: the verify lists at M = 1..8 (--verify8) ---------------------------------
 int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint32_t replays,
@@ -248,7 +346,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::string path = argv[1];
-  uint32_t depth = 4096, replays = 64, rounds = 3, device = 0, max_len = 16384, verify8 = 0;
+  uint32_t depth = 4096, replays = 64, rounds = 3, device = 0, max_len = 16384, verify8 = 0, experts = 0;
   for (int i = 2; i + 1 < argc; i += 2) {
     const std::string a = argv[i];
     const uint32_t v = uint32_t(std::stoul(argv[i + 1]));
@@ -257,11 +355,13 @@ int main(int argc, char** argv) {
     else if (a == "--rounds") rounds = v;
     else if (a == "--device") device = v;
     else if (a == "--verify8") verify8 = v;
+    else if (a == "--experts") experts = v;
     else throw std::runtime_error("unknown flag " + a);
   }
 
   l0::Context ctx(device);
   std::printf("device: %s\n", ctx.name().c_str());
+  if (experts) return run_experts(ctx, path);
   if (verify8) return run_verify8(ctx, path, depth, replays, rounds);
   loader::LoadedModel model = loader::load(ctx, path, max_len);
   runtime::Engine eng(ctx, std::move(model), max_len);

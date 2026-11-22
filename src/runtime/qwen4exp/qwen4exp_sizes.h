@@ -35,7 +35,7 @@ using Snap = gs::Snapshot<SnapTensor>;
 
 // One device's persistent state at max_len (zeroed by reset):
 //   kv          bf16 [its QSA layers][max_len][2 kv heads][256], K and V    2048 B a position a layer
-//   idx_keys    bf16 [its QSA layers][max_len / 4][128]                    the compressed indexer keys, 64 B a
+//   idx_keys    packed int4 [its QSA layers][max_len / 4][72 B]            the compressed indexer keys, 18 B a
 //                                                                          position a layer
 //   idx_tail    bf16 [its QSA layers][8][128]                              the raw keys of the open block, slot
 //                                                                          p % 8 (21-QFN-v1c: 8, not spec 21-QFN-v1 §4.2's 4 -
@@ -70,8 +70,10 @@ struct PersistentSizes {
 static_assert(gs::sizes_problem<PersistentSizes, SnapTensor>().empty(), gs::sizes_problem<PersistentSizes, SnapTensor>());
 PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev,
                                  uint32_t max_len);
-// The KV and compressed keys of one position over the descriptor's QSA layers: 12 x (2048 + 64) = 25,344 B.
+// The KV and compressed keys of one position over the descriptor's QSA layers: 12 x (2048 + 18) = 24,792 B.
 size_t kv_bytes_per_pos(const model::Qwen4ExpDesc& d);
+// A compressed key's slot in the indexer cache: the packed int4 key alone (nibbles, then two fp32 scales: 72 B).
+size_t idx_key_slot_bytes(const model::Qwen4ExpDesc& d);
 size_t gdn_state_bytes_per_layer(const model::Qwen4ExpDesc& d);   // 3,145,728
 size_t conv_ring_bytes_per_layer(const model::Qwen4ExpDesc& d);   // 327,680
 size_t ple_state_bytes(const model::Qwen4ExpDesc& d);             // 16 x 4 + 16 x 10240 x 2
@@ -151,8 +153,12 @@ ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Att
 size_t partials_floats(const model::Qwen4ExpDesc& d, uint32_t rows = kM);
 inline size_t route_at(uint32_t layer) { return size_t(layer) * kM * kRouteWords * 4; }
 inline size_t list_at(uint32_t qsa_index) { return size_t(qsa_index) * kM * kListRow * 4; }
-// The residual tap (debug): bf16 [layers][M][10240] on every device (its layers' rows written).
-inline size_t tap_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.layers) * kM * d.hc_n() * 2; }
+// The residual tap (debug): bf16 [layers][M][10240] on every device (its layers' rows written), then each MoE layer's
+// router GEMV output fp32 [layers][M][router_n] (before q4_route's bf16 rounding; at tap_router_at).
+inline size_t tap_router_at(const model::Qwen4ExpDesc& d) { return size_t(d.layers) * kM * d.hc_n() * 2; }
+inline size_t tap_bytes(const model::Qwen4ExpDesc& d) {
+  return tap_router_at(d) + size_t(d.layers) * kM * d.router_n() * 4;
+}
 // The injected selection (spec 21-QFN-v1 F3's debug input): host USM [qsa layers][M][kListRow] u32 per device.
 inline size_t injected_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.qsa_before(d.layers)) * kM * kListRow * 4; }
 
@@ -508,9 +514,9 @@ inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d, uint32_t rows = 
 //          [QSA layers: raw keys 4 floor(p/4) .. p-1, padded to 3 rows of 256 B]
 //          (mtp) [the head's raw keys 4 floor((p-1)/4) .. p-2, padded to 3 rows][R_{p-1}: 20,480 B]
 //   kv     [QSA layers: K rows [begin, end) then V rows, 1024 B a row each][QSA layers: keys of blocks
-//          [begin/4, floor(end/4)), 256 B each] (mtp) [the head's K, V, then its keys - last]
+//          [begin/4, floor(end/4)), 72 B each] (mtp) [the head's K, V, then its keys - last]
 // 115,651,592 B of state at the real 48 layers (derived: 36 x 3,145,728 + 36 x 61,440 + 8 + 184,320 + 12 x 768;
-// + 21,248 with the head) and 25,344 B a position of blocks (12 x (2048 + 64); + 2,112 with the head).
+// + 21,248 with the head) and 24,792 B a position of blocks (12 x (2048 + 18); + 2,066 with the head).
 //
 // A run is one contiguous range of one device allocation (`tensor`, `offset` into it), in host order:
 //   Kv / IdxKeys / IdxTail / GdnState / ConvRing   the device's kv, idx_keys, idx_tail, gdn_state, conv_ring (offset

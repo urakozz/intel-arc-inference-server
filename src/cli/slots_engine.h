@@ -89,6 +89,9 @@ class SlotsEngine : public server::BatchEngineIface {
     e_.select(slot);
     return e_.take_pages(upto);
   }
+  bool share_page(uint32_t slot, uint32_t index, uint32_t from) override {
+    return e_.kv_pool_pages() != 0 && e_.share_page(slot, index, from);
+  }
   uint32_t pos(uint32_t slot) override {
     const Pending& p = pending_.at(slot);
     if (p.on) return p.pos + p.j + 1;
@@ -142,6 +145,11 @@ class SlotsEngine : public server::BatchEngineIface {
 
   uint32_t spec_k() override { return adapters_[0]->mtp_k(); }
   uint32_t verify_k() override { return adapters_[0]->verify_k(); }
+  // Plan 31 Task 13: lookup inside MTP and the per-step draft choice per request, as the serial server's (a lone row is
+  // its slot's EngineAdapter::step_drafts_or_confirmed; in a step of several rows a row the proposer answers verifies
+  // the lookup drafts, up to its K, and the others draft with the head).
+  bool mtp_lookup() override { return !df_ && adapters_[0]->mtp_lookup(); }
+  bool chooses_drafts() override { return !df_ && adapters_[0]->chooses_drafts(); }
   uint32_t row_budget(uint32_t active) override {
     if (active <= 1) return 0;   // the slot's own verify lists
     return active > mtp_active_max_ ? active : runtime::Engine::kMaxRows;
@@ -151,7 +159,12 @@ class SlotsEngine : public server::BatchEngineIface {
       ++lone_steps_;
       const SpecRow& r = rows[0];
       EngineAdapter& a = on(r.slot);
+      if (r.mtp_lookup)
+        return {a.step_drafts_or_confirmed(*r.sampling, r.k, *r.propose,
+                                           r.choose ? *r.choose : server::EngineIface::DraftChoice{},
+                                           r.confirm ? *r.confirm : server::EngineIface::LookupConfirm{})};
       if (r.propose != nullptr) return {a.step_drafts(*r.sampling, *r.propose)};
+      if (r.choose != nullptr) return {a.step_chosen(*r.sampling, r.k, *r.choose)};   // the per-step choice
       if (a.mtp_k() > 0) return {a.step_many(*r.sampling, r.k)};
       return {{a.step(*r.sampling)}};
     }
@@ -231,15 +244,28 @@ class SlotsEngine : public server::BatchEngineIface {
     std::vector<size_t> q_row(rows.size(), 0);   // each sampled MTP row's first q row in q_host
     size_t q_used = 0;
     std::vector<size_t> mtp;                     // the rows the MTP head drafts for
+    std::vector<bool> looked(rows.size(), false);   // the rows verifying the request's own drafts
+    // Lookup inside MTP: a row the proposer answers verifies the lookup drafts whatever K its MTP policy chose (as the
+    // lone row's EngineAdapter::lookup_run), within the rows the step's budget leaves - its K, then the rows the
+    // scheduler's deal left unused.
+    uint32_t spare = runtime::Engine::kMaxRows;
+    for (const SpecRow& r : rows) spare = spare > r.k + 1 ? spare - (r.k + 1) : 0;
     for (size_t i = 0; i < rows.size(); ++i) {
       const SpecRow& r = rows[i];
       EngineAdapter& a = *adapters_.at(r.slot);
       e_.select(r.slot);
       runtime::Control* c = e_.control();
       xs[i] = c->cur_token[0];
-      if (r.propose != nullptr) {   // prompt lookup: the request's own drafts
-        const std::vector<uint32_t> d = (*r.propose)(xs[i]);
+      std::vector<uint32_t> d;
+      if (r.propose != nullptr) d = (*r.propose)(xs[i]);
+      if (r.propose != nullptr && (!r.mtp_lookup || !d.empty())) {   // prompt lookup: the request's own drafts
+        looked[i] = true;
         ks[i] = std::min<uint32_t>({static_cast<uint32_t>(d.size()), runtime::Engine::kMaxDraft, e_.max_verify_k()});
+        if (r.mtp_lookup && ks[i] > r.k) {
+          const uint32_t extra = std::min(ks[i] - r.k, spare);
+          ks[i] = r.k + extra;
+          spare -= extra;
+        }
         drafts[i].assign(d.begin(), d.begin() + ks[i]);
         for (uint32_t t = 0; t < ks[i]; ++t) c->cur_token[1 + t] = drafts[i][t];
       } else if (a.mtp_k() > 0) {
@@ -263,12 +289,16 @@ class SlotsEngine : public server::BatchEngineIface {
       e_.select(rows[i].slot);
       if (e_.max_verify_k() < deepest) deepest = 0;
     }
+    // The repetition penalty's tail for a sampled draft: the row's pending id and the drafts it has drawn so far.
+    std::vector<std::vector<uint32_t>> hist(rows.size());
+    for (size_t i : mtp) hist[i] = {xs[i]};
     auto sample_q = [&](size_t i, uint32_t t, const float* dev) {
       const SpecRow& r = rows[i];
       EngineAdapter& a = *adapters_.at(r.slot);
       float* q = q_host + (q_row[i] + t) * V;
       a.imm.copy(q, dev, V * sizeof(float));
-      return server::sample_draft(q, vocab_used_, *r.sampling, a.rng);
+      hist[i].push_back(server::sample_draft(q, vocab_used_, *r.sampling, a.rng, hist[i]));
+      return hist[i].back();
     };
     if (mtp.size() >= 2 && deepest > 0 && mtp.size() <= runtime::Engine::kMaxDraftRows) {
       std::vector<runtime::Engine::Run> dr;
@@ -309,14 +339,16 @@ class SlotsEngine : public server::BatchEngineIface {
       } else {
         a.seed_rng(*r.sampling);
         a.imm.copy(p_host, e_.rows_logits_device() + size_t(r0) * V, (k + 1) * V * sizeof(float));
+        std::vector<uint32_t> history{xs[i]};   // the repetition penalty's tail: the pending id, then the drafts
+        history.insert(history.end(), drafts[i].begin(), drafts[i].begin() + k);
         if (k == 0) {
           acc.accepted = 0;
-          acc.next_token = sample(p_host, vocab_used_, *r.sampling, a.rng);
-        } else if (r.propose != nullptr) {
-          acc = server::accept_point_mass(p_host, drafts[i].data(), k, vocab_used_, V, *r.sampling, a.rng);
+          acc.next_token = sample(p_host, vocab_used_, *r.sampling, a.rng, history);
+        } else if (looked[i]) {
+          acc = server::accept_point_mass(p_host, drafts[i].data(), k, vocab_used_, V, *r.sampling, a.rng, history);
         } else {
           acc = server::accept_sampled(p_host, q_host + q_row[i] * V, drafts[i].data(), k, vocab_used_, V,
-                                       *r.sampling, a.rng);
+                                       *r.sampling, a.rng, history);
         }
       }
       Pending& pd = pending_[r.slot];
@@ -388,14 +420,16 @@ class SlotsEngine : public server::BatchEngineIface {
       } else {
         a.seed_rng(*r.sampling);
         a.imm.copy(p_host, e_.rows_logits_device() + size_t(r0) * V, (k + 1) * V * sizeof(float));
+        std::vector<uint32_t> history{xs[i]};   // the repetition penalty's tail: the pending id, then the drafts
+        history.insert(history.end(), drafts[i].begin(), drafts[i].begin() + k);
         if (k == 0) {
-          acc.next_token = sample(p_host, vocab_used_, *r.sampling, a.rng);
+          acc.next_token = sample(p_host, vocab_used_, *r.sampling, a.rng, history);
         } else {
           const runtime::dflash::DFlashDraftOut& o = df_->readback(r.slot);
           server::SparseQ q[runtime::Engine::kMaxRows];
           for (uint32_t j = 0; j < k; ++j)
             q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, temps[i]);
-          acc = server::accept_sparse(p_host, q, drafts[i].data(), k, vocab_used_, V, *r.sampling, a.rng);
+          acc = server::accept_sparse(p_host, q, drafts[i].data(), k, vocab_used_, V, *r.sampling, a.rng, history);
         }
       }
       Pending& pd = pending_[r.slot];

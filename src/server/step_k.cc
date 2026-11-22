@@ -89,8 +89,11 @@ int StepK::choose(uint32_t j, float p) {
   return static_cast<int>(stop);
 }
 
-void StepK::observe(uint32_t accepted) {
-  if (!answered_) verified_ = drafted_;
+void StepK::observe(uint32_t accepted, uint32_t made) {
+  // Plan 31 Task 13: drafts made without choose() (a step of several rows drafts K for every row at once) are
+  // `made` - the request's rates learn from them, the probability calibration does not (no p was read).
+  const bool chosen = drafted_ > 0;
+  if (!answered_) verified_ = chosen ? drafted_ : made;
   if (accepted > verified_)
     throw std::invalid_argument("StepK::observe: " + std::to_string(accepted) + " drafts kept of " +
                                 std::to_string(verified_));
@@ -98,7 +101,7 @@ void StepK::observe(uint32_t accepted) {
   const uint32_t tested = verified_ == 0 ? 0 : std::min(verified_, accepted + 1);
   for (uint32_t i = 0; i < tested; ++i) {
     const bool ok = i < accepted;
-    calib_.observe(i, p_[i], ok);
+    if (chosen) calib_.observe(i, p_[i], ok);
     s_[i] = o_.decay * s_[i] + (ok ? 1.0 : 0.0);
     t_[i] = o_.decay * t_[i] + 1.0;
   }

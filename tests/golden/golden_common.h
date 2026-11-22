@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -375,6 +376,16 @@ double bf16_ulp_at(float v) {
   int e = 0;
   std::frexp(std::fabs(v), &e);
   return std::ldexp(1.0, e - 8);
+}
+// The MoE gates' near-tie (Ornith's ruling; the qwen4_exp golden test's too): the top_k-th and (top_k + 1)-th router
+// logits within one bf16 ulp of the former - the engine rounds the logits to bf16 before the softmax, so either expert
+// may take the last slot. `lg` holds at least the top_k + 1 largest logits of the row (any order).
+bool ulp_near_tie(const std::vector<float>& lg, uint32_t experts, uint32_t top_k) {
+  std::vector<float> s(lg.begin(), lg.begin() + experts);
+  std::nth_element(s.begin(), s.begin() + top_k, s.end(), std::greater<float>());
+  const float l9 = s[top_k];
+  const float l8 = *std::min_element(s.begin(), s.begin() + top_k);
+  return double(l8) - double(l9) <= bf16_ulp_at(l8);
 }
 struct JudgedRow {
   GoldenDecision d;      // set ascending; determined() == the row binds exactly

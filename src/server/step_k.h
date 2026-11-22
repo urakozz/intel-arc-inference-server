@@ -61,7 +61,8 @@ class StepK {
   int choose(uint32_t j, float p);
   // After the verify: drafts kept of the ones verified (the last answer of choose(), or every draft made when the
   // engine stopped drafting before it answered - the last positions of max_len).
-  void observe(uint32_t accepted);
+  // `made` (plan 31 Task 13): the drafts verified when they were made without choose() - a step of several rows.
+  void observe(uint32_t accepted, uint32_t made = 0);
 
   uint32_t verified() const { return verified_; }
   uint32_t max_k() const { return max_k_; }

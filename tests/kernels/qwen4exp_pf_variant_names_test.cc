@@ -44,8 +44,9 @@ int main(int argc, char** argv) {
   CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560), std::string("pf_int4_slab_K6144_N2560"));
   CHECK_EQ(kq::pf_int4_slab_variant(2560, 16384, true), std::string("pf_dequant_slab_K2560_N16384_L0_BS"));
   CHECK_EQ(kq::pf_int4_slab_variant(6144, 2560, true), std::string("pf_int4_slab_K6144_N2560"));   // a tail: no _BS form
-  CHECK_EQ(kq::pf_qsa_variant(kq::kPfCWide), std::string("q4_qsa_M4096_T512_W1024_PF"));
-  CHECK_EQ(kq::pf_qsa_variant(), std::string("q4_qsa_M2048_T512_W1024_PF"));
+  CHECK_EQ(kq::pf_qsa_variant(kq::kPfCWide), std::string("q4_qsa_M4096_T512_W1024_PF_I4H"));
+  CHECK_EQ(kq::pf_qsa_variant(), std::string("q4_qsa_M2048_T512_W1024_PF_I4H"));
+  CHECK_EQ(kq::pf_qsa_variant(kq::kPfC, true), std::string("q4_qsa_M2048_T512_W1024_PF"));
   CHECK_EQ(kq::pf_ple_gather_variant(true), std::string("q4_ple_gather_M2048_BF16_PF"));
   CHECK_EQ(kq::pf_hc_up_mix_variant(), std::string("q4_hc_up_mix_M2048_I_D512_R4C64"));
   CHECK_EQ(kq::pf_hc_up_mix_variant(kq::kPfC, true), std::string("q4_hc_up_mix_M2048_I_D512_R4C64_Q8"));

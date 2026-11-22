@@ -20,12 +20,14 @@
 //      length; the auto layouts at 1 / 2 / 4 slots, bf16 and int8 (printed with their pages), lose less than one page
 //      a slot to the rounding; BatchLayout's KV bases are page boundaries.
 //   5. spec 31, the KV page pool (plan_pool, pool_that_fits): check_pool's comment.
+//   6. plan 31 Task 12, Ornith's fixed slots: check_ornith's comment.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
 #include "check.h"
+#include "loader/moe_layout.h"
 #include "model/model_desc.h"
 #include "model/qwen35.h"
 #include "runtime/batch_rows.h"
@@ -39,6 +41,9 @@ using runtime::KvCache;
 constexpr size_t kLmBf16 = 2542796800ull, kLmInt8 = 1271398400ull + 993280ull;
 constexpr size_t kQwenInt8Weights = 18086971392ull - 4194304ull - kLmBf16 + kLmInt8;   // 16,812,371,968
 constexpr size_t kMtpWeights = 424673280ull * 2 + 5ull * 5120 * 4 + 2048;               // 849,451,008
+// memory_plan_test.cc's Ornith with the int8 head (the int4 checkpoint's a||b), the MTP head apart.
+constexpr size_t kOrnithInt8Weights = 30ull * 18637312 + 10ull * 14501888 + 40ull * 430604288 +
+                                      1017118720ull + 509552640ull + 8192;   // 19,454,989,312
 constexpr size_t kDevice = 32530000000ull;
 constexpr size_t kReserve = size_t(runtime::kDefaultReserveGb * 1e9);
 constexpr double kGB = 1e9;
@@ -82,22 +87,26 @@ void check_decided_layout() {
   CHECK_EQ(ctl, size_t{10} * 768 + 3 * 256);   // Control 768 B (spec 32)
   const size_t pages = size_t(229376 / runtime::kKvPage) * 4;   // plan 19v3b Task 0: the page table, 112 pages
   CHECK_EQ(runtime::SlotDims::sizes(q, 4, true, 112).pages, pages);
-  // spec 32: one sequence carries the deferred GDN rows (EngineSizes::gdn_pend), several do not
+  // spec 32: one sequence carries the deferred GDN rows (EngineSizes::gdn_pend); plan 31 Task 13: with MTP several
+  // carry their own each
   const size_t deep = runtime::EngineDims::sizes(q, KvCache::Int8, 0, 1, true, false).gdn_pend;
-  CHECK_EQ(p.total(), size_t(int64_t(b.total() + rope + ctl + pages - deep) + hh));
+  const size_t deep4 = runtime::EngineDims::sizes(q, KvCache::Int8, 0, 4, true, false).gdn_pend;
+  CHECK_EQ(deep4, 4 * deep);
+  CHECK_EQ(p.total(), size_t(int64_t(b.total() + rope + ctl + pages - deep + deep4) + hh));
   // 3e sized the widening scratch at the sum: 384 MiB (98304 positions x 4 KiB) more than the longest slot needs.
   CHECK_EQ(runtime::plan(q, 229376, true, kQwenInt8Weights + kMtpWeights, {}, {}, KvCache::Int8).prefill_lazy -
                p.prefill_lazy,
            size_t{402653184});
   CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
-  // (spec 39: the deferred rows leave plan()'s `deep`, not the slots' state)
+  // (spec 39: the deferred rows are plan()'s `deep`, not the slots' state)
   CHECK_EQ(p.slot_state, size_t(int64_t(size_t{3} * (4 * size_t{150994944} + 31457280) + ctl + pages) + hh));
-  CHECK_EQ(p.deep, size_t{0});
+  CHECK_EQ(p.deep, deep4);
   // §9.1: "total 29.10 GB, 1.93 GB spare" (l0-int8); on the l0 default 0.087 GB less (batch_rows_test's 29.01).
   // + the a||b's dense GEMM slabs (0.126 GB).
   CHECK_NEAR(p.total() / kGB,
-             29.119 + double(size_t{131072} * 4 * 256 * 2 * 2 + runtime::route_slab_bytes(q, 0, q.layers)) / kGB, 0.01);
+             29.119 + double(size_t{131072} * 4 * 256 * 2 * 2 + runtime::route_slab_bytes(q, 0, q.layers) + deep4) / kGB,
+             0.01);   // + the four sequences' deferred GDN rows (plan 31 Task 13)
   std::printf("plan_slots 131072 + 3 x 32768, int8 KV, MTP: %.3f GB (batch_memory %.3f + RoPE %.3f + hh %.6f + "
               "controls %zu B + page table %zu B), spare %.3f GB\n",
               p.total() / kGB, b.total() / kGB, rope / kGB, hh / kGB, ctl, pages,
@@ -292,6 +301,64 @@ void check_pool() {
   CHECK_EQ(capped.cap, 32768u);
   CHECK_EQ(capped.pages, 2u * 16);
 }
+// Plan 31 Task 12: Ornith's fixed slots - bf16 KV (Ornith has no int8 KV cache), MTP (its MoE head). One slot plans
+// byte for byte what plan() plans; slot 0 reaches the trained 262144 beside three slots of 32768 (spec 31 §4a,
+// derived there); the layouts at 1..4 slots are printed (the startup lines' numbers).
+void check_ornith() {
+  const model::ModelDesc& o = model::ornith();
+  const size_t w = kOrnithInt8Weights + loader::mtp_head_bytes(o);
+  constexpr uint32_t kTrained = 262144;
+  for (const uint32_t L : {65536u, kTrained}) {
+    const runtime::MemoryPlan one = runtime::plan_slots(o, {L}, true, w, {}, {}, KvCache::Bf16);
+    const runtime::MemoryPlan ref = runtime::plan(o, L, true, w, {}, {}, KvCache::Bf16);
+    CHECK_EQ(one.total(), ref.total());
+    CHECK_EQ(one.decode_state, ref.decode_state);
+    CHECK_EQ(one.mtp_buffers, ref.mtp_buffers);
+    CHECK(one.slot_lens.empty() && one.slot_state == 0);
+  }
+  const auto fit = [&](uint32_t seqs) {
+    return runtime::slot0_len_that_fits(o, seqs, true, w, kDevice, kReserve, kTrained, {}, KvCache::Bf16);
+  };
+  CHECK_EQ(fit(4), kTrained);
+  // A further slot: its four GDN states (30 x 32 x 128 x 128 fp32 each) and its conv ring (30 x 32 x 8192 bf16).
+  const std::vector<uint32_t> four = runtime::slot_layout(kTrained, 4);
+  const runtime::MemoryPlan p = runtime::plan_slots(o, four, true, w, {}, {}, KvCache::Bf16);
+  const runtime::SlotSizes ss = runtime::SlotDims::sizes(o, 4, true, p.max_len / runtime::kKvPage);
+  CHECK_EQ(ss.rings, size_t{3} * 15728640);
+  CHECK_EQ(runtime::MtpDims::sizes(p.max_len, o, 0, KvCache::Bf16, runtime::MtpDims::kSlots, 4).gdn_spec -
+               runtime::MtpDims::sizes(p.max_len, o, 0, KvCache::Bf16).gdn_spec,
+           size_t{3} * 4 * 62914560);
+  std::printf("| Ornith --max-num-seqs | KV | slots (MTP, --max-len auto) | total GB | spare GB |\n");
+  for (uint32_t seqs = 1; seqs <= runtime::SlotDims::kMaxSeqs; ++seqs) {
+    const std::vector<uint32_t> l = runtime::slot_layout(fit(seqs), seqs);
+    const double t = runtime::plan_slots(o, l, true, w, {}, {}, KvCache::Bf16).total() / kGB;
+    std::printf("| %u | bf16 | %s | %.3f | %.3f |\n", seqs, runtime::slot_layout_name(l).c_str(), t,
+                double(kDevice - kReserve) / kGB - t);
+  }
+  std::printf("Ornith 262144 + 3 x 32768, MTP: %s\n", runtime::describe(p, kDevice, kReserve).c_str());
+  // Plan 31 Task 14: Ornith's pool at 2..4 requests - as full as the fixed slots (check_pool's bar: not below their
+  // positions less one page a request and the pool's further cap-sized terms).
+  constexpr uint32_t P = runtime::kKvPage;
+  const auto kv_bytes = [&](uint64_t positions) {
+    const runtime::PersistentSizes ps = runtime::PersistentDims::sizes(uint32_t(positions), o, KvCache::Bf16);
+    return ps.kv_k + ps.kv_v + 2 * runtime::MtpDims::sizes(uint32_t(positions), o, 0, KvCache::Bf16).kv_k;
+  };
+  std::printf("| Ornith --max-num-seqs | pool (MTP, bf16, --max-len auto) | one request up to | fixed slots | total GB |\n");
+  for (uint32_t seqs = 2; seqs <= runtime::SlotDims::kMaxSeqs; ++seqs) {
+    const runtime::PoolShape ps = runtime::pool_that_fits(o, seqs, true, w, kDevice, kReserve, kTrained, {}, KvCache::Bf16);
+    CHECK(ps.pages != 0 && ps.cap == std::min<uint32_t>(ps.pages * P, kTrained));
+    const runtime::MemoryPlan pp = runtime::plan_pool(o, ps, true, w, {}, KvCache::Bf16);
+    CHECK(pp.total() + kReserve <= kDevice);
+    const std::vector<uint32_t> l = runtime::slot_layout(fit(seqs), seqs);
+    const runtime::MemoryPlan f = runtime::plan_slots(o, l, true, w, {}, {}, KvCache::Bf16);
+    const int64_t more = int64_t(pp.total() - kv_bytes(ps.positions())) - int64_t(f.total() - kv_bytes(f.max_len));
+    const uint64_t more_pages = more > 0 ? (uint64_t(more) + kv_bytes(P) - 1) / kv_bytes(P) : 0;
+    CHECK(ps.positions() + uint64_t(seqs) * P + more_pages * P >= runtime::slots_kv_len(l));
+    std::printf("| %u | %u pages of %u = %llu positions | %u | %s = %u | %.3f |\n", seqs, ps.pages, P,
+                static_cast<unsigned long long>(ps.positions()), ps.cap, runtime::slot_layout_name(l).c_str(),
+                runtime::slots_kv_len(l), pp.total() / kGB);
+  }
+}
 }  // namespace
 
 int main() {
@@ -300,6 +367,7 @@ int main() {
   check_layout_rule();
   check_pages();
   check_pool();
+  check_ornith();
   std::printf("slot_plan_test OK\n");
   return 0;
 }

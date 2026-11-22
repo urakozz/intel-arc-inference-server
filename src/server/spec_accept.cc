@@ -13,7 +13,17 @@ double FilteredProbs::prob(uint32_t id) const {
   return 0.0;
 }
 
-FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampling& s) {
+FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampling& s,
+                           std::span<const uint32_t> tail) {
+  std::vector<float> penalised;
+  if (s.repetition_penalty != 1.0f && (s.seen || !tail.empty())) {
+    penalised.assign(logits, logits + vocab_used);
+    std::vector<uint32_t> ids;
+    if (s.seen) ids = s.seen->distinct();
+    ids.insert(ids.end(), tail.begin(), tail.end());
+    apply_repetition_penalty(penalised.data(), vocab_used, ids, s.repetition_penalty);
+    logits = penalised.data();
+  }
   const uint32_t k = std::min(s.top_k == 0 ? vocab_used : s.top_k, vocab_used);
   FilteredProbs f;
   std::vector<uint32_t>& idx = f.ids;
@@ -78,6 +88,13 @@ uint32_t draw(const FilteredProbs& f, std::mt19937_64& rng) {
   return f.ids[d(rng)];
 }
 
+namespace {
+// Row i follows the pending id and drafts 1..i: history[0 .. i].
+std::span<const uint32_t> row_tail(std::span<const uint32_t> history, uint32_t i) {
+  return history.first(std::min<size_t>(history.size(), size_t(i) + 1));
+}
+}  // namespace
+
 AcceptResult accept_greedy(const uint32_t* verify_argmax, const uint32_t* drafts, uint32_t k) {
   uint32_t j = 0;
   while (j < k && drafts[j] == verify_argmax[j]) ++j;
@@ -85,17 +102,17 @@ AcceptResult accept_greedy(const uint32_t* verify_argmax, const uint32_t* drafts
 }
 
 uint32_t sample_draft(const float* q_row, uint32_t vocab_used, const Sampling& s,
-                      std::mt19937_64& rng) {
-  return draw(filter_probs(q_row, vocab_used, s), rng);
+                      std::mt19937_64& rng, std::span<const uint32_t> tail) {
+  return draw(filter_probs(q_row, vocab_used, s, tail), rng);
 }
 
 AcceptResult accept_sampled(const float* p_rows, const float* q_rows, const uint32_t* drafts,
                             uint32_t k, uint32_t vocab_used, size_t row_stride,
-                            const Sampling& s, std::mt19937_64& rng) {
+                            const Sampling& s, std::mt19937_64& rng, std::span<const uint32_t> history) {
   std::uniform_real_distribution<double> uniform(0.0, 1.0);
   for (uint32_t i = 0; i < k; ++i) {
-    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s);
-    const FilteredProbs q = filter_probs(q_rows + i * row_stride, vocab_used, s);
+    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s, row_tail(history, i));
+    const FilteredProbs q = filter_probs(q_rows + i * row_stride, vocab_used, s, row_tail(history, i));
     const double qd = q.prob(drafts[i]);
     if (!(qd > 0.0))
       throw std::logic_error("server::accept_sampled: draft " + std::to_string(i) + " (id " +
@@ -116,7 +133,7 @@ AcceptResult accept_sampled(const float* p_rows, const float* q_rows, const uint
     std::discrete_distribution<uint32_t> d(residual.begin(), residual.end());
     return {i, p.ids[d(rng)]};
   }
-  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
+  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s, row_tail(history, k)), rng)};
 }
 
 double SparseQ::prob(uint32_t id) const {
@@ -147,7 +164,8 @@ SparseQ dflash_q(const uint32_t* cand, const float* scores, uint32_t n, float te
 float dflash_temperature(const Sampling& s) { return s.temperature > 0.0f ? s.temperature : 1.0f; }
 
 AcceptResult accept_sparse(const float* p_rows, const SparseQ* q, const uint32_t* drafts, uint32_t k,
-                           uint32_t vocab_used, size_t row_stride, const Sampling& s, std::mt19937_64& rng) {
+                           uint32_t vocab_used, size_t row_stride, const Sampling& s, std::mt19937_64& rng,
+                           std::span<const uint32_t> history) {
   std::uniform_real_distribution<double> uniform(0.0, 1.0);
   for (uint32_t i = 0; i < k; ++i) {
     const double qd = q[i].prob(drafts[i]);
@@ -155,7 +173,7 @@ AcceptResult accept_sparse(const float* p_rows, const SparseQ* q, const uint32_t
       throw std::logic_error("server::accept_sparse: draft " + std::to_string(i) + " (id " +
                              std::to_string(drafts[i]) +
                              ") has q = 0 - it is not one of the row's candidates the walk could draw");
-    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s);
+    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s, row_tail(history, i));
     const double pd = p.prob(drafts[i]);
     if (uniform(rng) < std::min(1.0, pd / qd)) continue;   // accepted with probability min(1, p/q)
     std::vector<double> residual(p.ids.size());
@@ -168,15 +186,15 @@ AcceptResult accept_sparse(const float* p_rows, const SparseQ* q, const uint32_t
     std::discrete_distribution<uint32_t> d(residual.begin(), residual.end());
     return {i, p.ids[d(rng)]};
   }
-  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
+  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s, row_tail(history, k)), rng)};
 }
 
 AcceptResult accept_point_mass(const float* p_rows, const uint32_t* drafts, uint32_t k,
                                uint32_t vocab_used, size_t row_stride, const Sampling& s,
-                               std::mt19937_64& rng) {
+                               std::mt19937_64& rng, std::span<const uint32_t> history) {
   std::uniform_real_distribution<double> uniform(0.0, 1.0);
   for (uint32_t i = 0; i < k; ++i) {
-    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s);
+    const FilteredProbs p = filter_probs(p_rows + i * row_stride, vocab_used, s, row_tail(history, i));
     const double pd = p.prob(drafts[i]);
     if (uniform(rng) < pd) continue;   // accepted with probability p(d_i)
     // Rejected: p without d_i, renormalised (max(0, p - q) with q the point mass on d_i).
@@ -190,7 +208,7 @@ AcceptResult accept_point_mass(const float* p_rows, const uint32_t* drafts, uint
     std::discrete_distribution<uint32_t> d(residual.begin(), residual.end());
     return {i, p.ids[d(rng)]};
   }
-  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s), rng)};
+  return {k, draw(filter_probs(p_rows + k * row_stride, vocab_used, s, row_tail(history, k)), rng)};
 }
 
 }  // namespace server

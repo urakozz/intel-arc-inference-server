@@ -116,7 +116,7 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // The choices are plan 28b's lever measurement (spec 28, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
-enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4, kSmVerify4Wide = 5 };
+enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3, kSmVerify8 = 4 };
 // Spec 32e: an int4 row's gemm_sm_wide shape past 16 rows (src/kernels/gemm_sm_wide.cl; plan 34a Task 1 measured both):
 // kWideRc32 - row chunks of 32 a sub-group, a weight prefetch one group ahead, 256 GRF; kWideSwap - one sub-group for
 // every row, the prefetch two groups ahead, 128 GRF. Item 41 (64 rows): kWideRc32U - kWideRc32 with the K walk unrolled
@@ -128,7 +128,6 @@ struct SmallMTuning {
   bool wg, magic, grf256, blk2d;
   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head);
   // kSmVerify8: 2..8 (spec 19 v3c: a TP card's verify rows with a DFlash drafter). kSmAll also 32 and 64 (spec 32).
-  // kSmVerify4Wide: 2..4 and the wide lookup verify lists' 16, 32 and 64 (PERF-56, Ornith).
   unsigned char mset = kSmAll;
   // Spec 32: from this M on the variant carries 256 GRF (0: never; grf256 already means every M). GRF changes who
   // holds a value, not the value, so it is the one knob that may vary with M (property R).
@@ -151,16 +150,16 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {17408, 5120, 4, 0, false, true, false, true, kSmAll, 0, kWideRc32, kWideRc32U},   // down
     {5120, 248320, 1, 2, true, false, false, false, kSmAll, 32},  // the int8 lm_head (gemm_sm_i8w at 32 and 64 too)
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the 28b addition, 2026-11-01) at its verify
-    // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
-    // and the bf16 router stay as they are (spec 28m). PERF-56: also at the wide lookup verify lists' 16 / 32 / 64
-    // rows - at 32 / 64 the int4 rows take gemm_sm_wide with the arms of Qwen3.8's row of the same form, the head 256
-    // GRF from 32 rows (PROVISIONAL, not swept at Ornith's shapes)
-    {2048, 12288, 1, 1, false, true, false, false, kSmVerify4Wide, 0, kWideRc32, kWideRc32H},   // qkv||z
-    {4096, 2048, 4, 0, false, true, false, false, kSmVerify4Wide, 0, kWideSwap, kWideRc32U},    // out_proj, o_proj
-    {2048, 9216, 2, 0, false, true, false, false, kSmVerify4Wide, 0, kWideRc32, kWideRc32H},    // q||k||v
-    {2048, 128, 1, 1, false, true, false, false, kSmVerify4Wide, 0, kWideRc32, kWideRc32H},     // a||b (the int4
+    // lists' M = 2..4 and (plan 31 Task 12) its sequence slots' row lists' 5..8 - gemv's PROVISIONAL S / layout, magic
+    // dequant, no lever swept; the routed experts (moe.cl) and the bf16 router stay as they are (spec 28m). PERF-56:
+    // also at the wide lookup verify lists' 16 / 32 / 64 rows - at 32 / 64 the int4 rows take gemm_sm_wide with the
+    // arms of Qwen3.8's row of the same form, the head 256 GRF from 32 rows (PROVISIONAL, not swept at Ornith's shapes)
+    {2048, 12288, 1, 1, false, true, false, false, kSmAll, 0, kWideRc32, kWideRc32H},   // qkv||z
+    {4096, 2048, 4, 0, false, true, false, false, kSmAll, 0, kWideSwap, kWideRc32U},    // out_proj, o_proj
+    {2048, 9216, 2, 0, false, true, false, false, kSmAll, 0, kWideRc32, kWideRc32H},    // q||k||v
+    {2048, 128, 1, 1, false, true, false, false, kSmAll, 0, kWideRc32, kWideRc32H},     // a||b (the int4
                                                                                                 // checkpoint's)
-    {2048, 248320, 1, 2, false, false, false, false, kSmVerify4Wide, 32},                       // the int8 lm_head
+    {2048, 248320, 1, 2, false, false, false, false, kSmAll, 32},                       // the int8 lm_head
     // Spec 28d: z-lab/Qwen3.8-27B-DFlash2's int8 linears at its block's M = 8 (the draft and projection lists,
     // runtime/dflash/dflash_capture.cc) and the compact draft heads at its 7 draft rows (the full head is Qwen3.8's
     // row above, built at 7). All in-work-group split-K: the int8 form has no grid split-K, and without it a column's
@@ -282,12 +281,12 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
 }
 // The M each row is built at (src/kernels/CMakeLists.txt's spec 28b block; gemm_sm_names_test holds the two
-// together): 2..8 and 16 for Qwen3.8's linears and head; Ornith's and Flash-Next's at their verify lists'
-// 2..4; the DFlash drafter's linears at its block's 8 and its draft heads at 7 (spec 28d).
+// together): 2..8 and 16 for Qwen3.8's linears and head; Ornith's at 2..8 (its verify lists, its slots' row lists),
+// Flash-Next's at its verify lists' 2..4; the DFlash drafter's linears at its block's 8 and its draft heads at 7
+// (spec 28d).
 inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
   switch (t.mset) {
     case kSmVerify4: return {2, 3, 4};
-    case kSmVerify4Wide: return {2, 3, 4, 16, 32, 64};   // PERF-56: Ornith's wide lookup verify lists
     case kSmVerify8: return {2, 3, 4, 5, 6, 7, 8};
     case kSmDraft8: return {8};
     case kSmDraft7: return {7};

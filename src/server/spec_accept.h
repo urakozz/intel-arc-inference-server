@@ -4,6 +4,7 @@
 // tests/server/spec_accept_test.cc.
 #include <cstdint>
 #include <random>
+#include <span>
 #include <vector>
 
 #include "server/deps.h"
@@ -36,7 +37,12 @@ struct FilteredProbs {
   // the filter dropped it.
   double prob(uint32_t id) const;
 };
-FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampling& s);
+//
+// With Sampling::repetition_penalty != 1 the penalty (apply_repetition_penalty below) goes onto a copy of the row first,
+// over `s.seen` and `tail` - the ids consumed after the ones `s.seen` holds, i.e. the pending id and the drafts before
+// this row in a speculative iteration. A penalty of 1: the row as given, nothing copied.
+FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampling& s,
+                           std::span<const uint32_t> tail = {});
 
 // Spec 24e (decision 1): Hugging Face's repetition penalty (logits_process.py, RepetitionPenaltyLogitsProcessor) on the host
 // logits row, applied BEFORE filter_probs - before temperature, top-k and top-p, HF's order, so the penalty can demote a
@@ -70,7 +76,7 @@ AcceptResult accept_greedy(const uint32_t* verify_argmax, const uint32_t* drafts
 AcceptResult accept_sampled(const float* p_rows /*[k+1][row_stride]*/,
                             const float* q_rows /*[k][row_stride]*/, const uint32_t* drafts,
                             uint32_t k, uint32_t vocab_used, size_t row_stride,
-                            const Sampling& s, std::mt19937_64& rng);
+                            const Sampling& s, std::mt19937_64& rng, std::span<const uint32_t> history = {});
 
 // Spec 19e (plan 19e Review Focus 1): lossless sampling when the drafts are DETERMINISTIC
 // (prompt lookup: the proposal is a point mass, q_i = 1 on d_i and 0 elsewhere). The rule
@@ -83,11 +89,15 @@ AcceptResult accept_sampled(const float* p_rows /*[k+1][row_stride]*/,
 // one draw for the correction/bonus. No q rows: nothing was sampled to propose.
 AcceptResult accept_point_mass(const float* p_rows /*[k+1][row_stride]*/, const uint32_t* drafts,
                                uint32_t k, uint32_t vocab_used, size_t row_stride,
-                               const Sampling& s, std::mt19937_64& rng);
+                               const Sampling& s, std::mt19937_64& rng, std::span<const uint32_t> history = {});
 
-// A draft sampled from the head's row q_i, filtered like p.
+// With a repetition penalty, `history` is {x, d_1 .. d_k} (the pending id, then the drafts): row i's penalty covers
+// s.seen and history[0 .. i], the ids consumed before the row's own - what a plain step at that position would use.
+// Empty history (no penalty): rows are filtered as they are.
+
+// A draft sampled from the head's row q_i, filtered like p (`tail`: the pending id and the drafts before it).
 uint32_t sample_draft(const float* q_row, uint32_t vocab_used, const Sampling& s,
-                      std::mt19937_64& rng);
+                      std::mt19937_64& rng, std::span<const uint32_t> tail = {});
 
 // --- spec 19c: the DFlash drafter's sparse q (spec 19 §2 "The walk", §6 D4) --------------
 //
@@ -115,6 +125,6 @@ float dflash_temperature(const Sampling& s);
 // drawn before the drafts, comes first).
 AcceptResult accept_sparse(const float* p_rows /*[k+1][row_stride]*/, const SparseQ* q /*[k]*/,
                            const uint32_t* drafts, uint32_t k, uint32_t vocab_used, size_t row_stride,
-                           const Sampling& s, std::mt19937_64& rng);
+                           const Sampling& s, std::mt19937_64& rng, std::span<const uint32_t> history = {});
 
 }  // namespace server

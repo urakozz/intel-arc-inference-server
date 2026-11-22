@@ -147,6 +147,9 @@ class ReplicaEngine : public server::BatchEngineIface {
             f.block = b.block();
             f.kv_form = b.kv_form();
             f.drafter_key = b.drafter_key();
+            f.mtp_lookup = b.mtp_lookup();   // plan 31 Task 13: a card's slots run lookup inside MTP too
+            f.wide_k = b.lookup_wide_k(l);
+            f.chooses = b.chooses_drafts();
           }
         });
         facts_.push_back(f);
@@ -312,7 +315,7 @@ class ReplicaEngine : public server::BatchEngineIface {
   // MTP (open-work 27: a row with mtp_lookup, the card's step_drafts_or_confirmed).
   uint32_t spec_k() override { return facts_[0].mtp_k; }
   uint32_t verify_k() override { return facts_[0].verify_k; }
-  // Open-work 27: lookup inside MTP on every card (each a single-sequence engine: a card with slots has none), each
+  // Open-work 27: lookup inside MTP on every card (plan 31 Task 13: a card with slots too), each
   // card's own wide verify depth (open-work 28), the per-step draft choice on every card (open-work 13).
   bool mtp_lookup() override {
     for (const Facts& f : facts_)
@@ -345,6 +348,7 @@ class ReplicaEngine : public server::BatchEngineIface {
                                                                row.choose ? *row.choose : E::DraftChoice{},
                                                                row.confirm ? *row.confirm : E::LookupConfirm{});
                         else if (row.propose != nullptr) runs[r] = e.step_drafts(*row.sampling, *row.propose);
+                        else if (row.choose != nullptr) runs[r] = e.step_chosen(*row.sampling, row.k, *row.choose);
                         else if (facts_[row.slot].mtp_k > 0) runs[r] = e.step_many(*row.sampling, row.k);
                         else runs[r] = {e.step(*row.sampling)};
                       }),
@@ -384,6 +388,46 @@ class ReplicaEngine : public server::BatchEngineIface {
   }
   uint64_t kv_form() override { return facts_[0].kv_form; }
   uint64_t drafter_key() override { return facts_[0].drafter_key; }
+
+  // Plan 31 Task 9: a KV page pool per card with slots (cli::SlotsEngine over a pool engine); the scheduler sees their
+  // sum and each card's own, and a slot's pages are its card's. Pages never cross cards: share_page within one.
+  uint32_t kv_pool_pages() override {
+    uint32_t n = 0;
+    for (uint32_t c = 0; c < cards_.size(); ++c)
+      if (cards_[c].slots != nullptr) on_card(c, [&] { n += cards_[c].slots->kv_pool_pages(); });
+    return n;
+  }
+  uint32_t pages_free() override {
+    uint32_t n = 0;
+    for (uint32_t c = 0; c < cards_.size(); ++c) n += card_pages_free(c);
+    return n;
+  }
+  uint32_t card_pool_pages(uint32_t c) override {
+    uint32_t n = 0;
+    if (cards_.at(c).slots != nullptr) on_card(c, [&] { n = cards_[c].slots->kv_pool_pages(); });
+    return n;
+  }
+  uint32_t card_pages_free(uint32_t c) override {
+    uint32_t n = 0;
+    if (cards_.at(c).slots != nullptr) on_card(c, [&] { n = cards_[c].slots->pages_free(); });
+    return n;
+  }
+  uint32_t pages_held(uint32_t slot) override {
+    uint32_t n = 0;
+    if (!single(slot)) on(slot, [&] { n = batch(slot).pages_held(local(slot)); });
+    return n;
+  }
+  bool take_pages(uint32_t slot, uint32_t upto) override {
+    bool ok = true;
+    if (!single(slot)) on(slot, [&] { ok = batch(slot).take_pages(local(slot), upto); });
+    return ok;
+  }
+  bool share_page(uint32_t slot, uint32_t index, uint32_t from) override {
+    if (single(slot) || slot_card_.at(from) != slot_card_.at(slot)) return false;
+    bool ok = false;
+    on(slot, [&] { ok = batch(slot).share_page(local(slot), index, local(from)); });
+    return ok;
+  }
   void save_state(uint32_t slot, void* host) override {
     on(slot, [&] {
       if (single(slot)) card(slot).save_state(host);
