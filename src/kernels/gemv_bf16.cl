@@ -96,13 +96,34 @@
 #error "GEMV_AHEAD must divide a sub-group's K / 8 steps"
 #endif
 
+#if INK_CONTROLLER == 1
+#include "bf16.h"
+#else
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
+#endif
 
 __attribute__((intel_reqd_sub_group_size(SG)))
 __attribute__((reqd_work_group_size(WG_N, 1, 1)))
+#if INK_CONTROLLER
+__kernel void gemv_bf16(__global const ushort* w0, __global const ushort* w1, __global const ushort* w2,
+                        __global const ushort* g0, __global const ushort* g1, __global const ushort* g2,
+                        __global const ushort* x,
+#if INK_CONTROLLER == 1
+                        __global ushort* out
+#else
+                        __global float* out
+#endif
+                        ) {
+  const uint stream = get_group_id(1), gain = get_group_id(2);
+  const __global ushort* w = gain ? (stream == 0 ? g0 : stream == 1 ? g1 : g2)
+                                  : (stream == 0 ? w0 : stream == 1 ? w1 : w2);
+  x += (size_t)stream * M * K;
+  out += (size_t)(gain * get_num_groups(1) + stream) * M * N;
+#else
 __kernel void gemv_bf16(__global const ushort* restrict w,
                         __global const ushort* restrict x,
                         __global float* restrict out) {
+#endif
 #if KSPLIT > 1
   // [subgroup][m][lane]: one fp32 partial per column per K slice. At the a‖b
   // tiling that is 16 subgroups x M 1 x 16 lanes x 4 B = **1024 B** per
@@ -165,7 +186,11 @@ __kernel void gemv_bf16(__global const ushort* restrict w,
   }
 #endif
 #if KSPLIT == 1
+#if INK_CONTROLLER == 1
+  for (int m = 0; m < M; ++m) out[(size_t)m * N + n] = rne_bf16(acc[m]);
+#else
   for (int m = 0; m < M; ++m) out[(size_t)m * N + n] = acc[m];
+#endif
 #else
   for (int m = 0; m < M; ++m) red[sg][m][lane] = acc[m];
   barrier(CLK_LOCAL_MEM_FENCE);

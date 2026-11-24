@@ -3,6 +3,7 @@ add_ocloc_kernel(bw_sum SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/bw_sum.cl)
 add_ocloc_kernel(bw_sum_sweep SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/bw_sum.cl DEFINES BW_SWEEP=1)
 add_ocloc_kernel(bw_sum_lsc SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/bw_sum.cl DEFINES BW_LSC=1)
 add_ocloc_kernel(ctrl_read SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/ctrl_read.cl)
+add_ocloc_kernel(host_read SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/host_read.cl)
 
 set(GEMV_CL ${CMAKE_CURRENT_SOURCE_DIR}/gemv.cl)
 function(add_gemv_variant M K N S L)
@@ -41,9 +42,19 @@ function(add_gemv_variant M K N S L)
   endif()
   # PERF-44: an optional TP builds the shape's cell with tp_send folded in (GEMV_TP_SEND), named _TP.
   set(suffix)
+  # PERF-108: a tensor parallel card's qkv||z at every M splits each tile's K over 4 sub-groups of the work-group
+  # (GEMV_KSL; kernels::gemv_ksl names it _KS4)
+  if(N EQUAL 8192 AND S EQUAL 1 AND ((K EQUAL 5120 AND L EQUAL 1) OR (K EQUAL 2560 AND L EQUAL 0)))
+    set(suffix _KS4)
+    list(APPEND extra_defs GEMV_KSL=4)
+  endif()
   if(ARGN STREQUAL "TP")
     set(suffix _TP)
     list(APPEND extra_defs GEMV_TP_SEND=1)
+  # PERF-44 on Qwen3.8 tp: an optional TF builds it with the folded crossing's tp_send as its tail (TP_FOLD_SEND), _TF.
+  elseif(ARGN STREQUAL "TF")
+    set(suffix _TF)
+    list(APPEND extra_defs TP_FOLD_SEND=1 TP_FOLD_G=20)
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L}${suffix} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -402,8 +413,11 @@ if(B70_MTP)
       add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
       add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
     endif()
-    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
-                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+    # PERF-84: the head's two pre-fc norms, one fold and one finish over both sources
+    add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP0_G20_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 S_PREV=0 FOLD_G=20 PRE_FC_PAIR=1)
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240 PRE_FC_PAIR=1)
     add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
     add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
@@ -479,8 +493,11 @@ if(B70_VERIFY_M8 AND B70_MTP)
     # the MTP head's KV fill of M rows
     add_gemv_bf16_variant(${MM} 10240 5120 64 1)   # fc
     add_gemv_bf16_variant(${MM} 5120 14336 64 1)   # q||k||v
-    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
-                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+    # PERF-84: the head's two pre-fc norms, one fold and one finish over both sources
+    add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP0_G20_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 S_PREV=0 FOLD_G=20 PRE_FC_PAIR=1)
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240 PRE_FC_PAIR=1)
     add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
     add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
@@ -606,6 +623,23 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16_SEQS SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320 SEQS=4)
+  # Plan 40a Task 4: the batched draft at four blocks of up to 8 rows (M 32, kernels::dflash::kSeqsRows) for the int4
+  # drafter with the candidate head - df_prep, the DPAS part (a block's DPAS rows at its row0) and its reduce, the
+  # selector walk (MAXR the readback's 8, ROWS the table's 32). The candidate select / rerank are row-wise (their R
+  # is the grid's): the R 7 binaries at 31 rows.
+  add_ocloc_kernel(df_prep_M32_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8_SEQS
+                   SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 M=32 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16
+                           CTAPS=2 INTER=17408 NH=32 NKV=8 HD=128 RING=2048 SEQS=4)
+  add_ocloc_kernel(df_attn_M32_Q32KV8_D128_R2048_W2048_P128_dpas_g256_SEQS SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=32 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=1 SEQS=4
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(df_attn_M32_Q32KV8_D128_R2048_W2048_P128_H1_B4_SEQS SOURCE ${DF_DIR}/df_attn_rows.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=32 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
+                           CAUSAL=0 HPW=1 RPW=4 SEQS=4)
+  add_ocloc_kernel(df_select_M32_K16_Q16_RK256_V248320_H16_SEQS SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} FOLD=1 MAXR=8 ROWS=32 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320
+                           SEQS=4)
   add_ocloc_kernel(df_select_v1_M8_K16 SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=0)
   add_gemv_bf16_variant(7 5120 248320 64 1)           # the full bf16 head at 7 rows
@@ -768,6 +802,9 @@ endif()
 #   prep     prep_silu_mul_M1_I8704, prep_gated_head_M1_GK8V24; the norm pair's SP0 fold and finish are one card's
 #   GDN, FA  gdn_step_M1_GK8V24, attn_prep_M1_Q12KV2 / attn_v2_M1_T32_Q12KV2 and their _KV8 twins
 #   tp.cl    tp_cross (tp_send + tp_res_fold) per rank and form, tp_argmax per vocabulary half
+#   PERF-44  the folded form's lists bind out_proj / o_proj / down with tp_send as their tail (gemv _TF, gemm_sm _tf at
+#            the verify rows: TP_FOLD_SEND, tp_fold_send.h - the last work-group under a chunk sends it); tp_send is
+#            left to the slices form and the DFlash drafter
 option(B70_TP "build the tensor-parallel decode variants (spec 17b)" ON)
 if(B70_TP)
   set(TP_CL ${CMAKE_CURRENT_SOURCE_DIR}/tp.cl)
@@ -778,6 +815,10 @@ if(B70_TP)
     add_gemv_variant(1 3072 5120 ${S} 0)    # out_proj, o_proj: the card's K rows
     add_gemv_variant(1 8704 5120 ${S} 0)    # down
   endforeach()
+  # PERF-44: what the folded lists bind - the two with the folded tp_send as their tail (the plain S4 pair is
+  # tp_fold_send_test's control)
+  add_gemv_variant(1 3072 5120 4 0 TF)
+  add_gemv_variant(1 8704 5120 4 0 TF)
   add_gemv_i8w_variant(1 5120 124160)   # the int8 head's vocabulary half
   add_ocloc_kernel(prep_silu_mul_M1_I8704 SOURCE ${PREP_CL} DEFINES M=1 INTERMEDIATE=8704)
   set(TP_GDN_HEADS GDN_K_HEADS=8 GDN_V_HEADS=24)
@@ -809,9 +850,10 @@ if(B70_TP)
   add_ocloc_kernel(tp_argmax_M1_N124160_U123917_B124160 SOURCE ${TP_CL}
                    DEFINES ${TP_ARGMAX_DEFINES} VOCAB_USED=123917 ID_BASE=124160)
   set(B70_TP_KERNELS
-      kernel_gemv_M1_K5120_N8192_S1_L1 kernel_gemv_M1_K5120_N7168_S2_L0 kernel_gemv_M1_K5120_N17408_S8_L0
+      kernel_gemv_M1_K5120_N8192_S1_L1_KS4 kernel_gemv_M1_K5120_N7168_S2_L0 kernel_gemv_M1_K5120_N17408_S8_L0
       kernel_gemv_M1_K3072_N5120_S2_L0 kernel_gemv_M1_K8704_N5120_S2_L0 kernel_gemv_M1_K3072_N5120_S4_L0
-      kernel_gemv_M1_K8704_N5120_S4_L0 kernel_gemv_i8w_M1_K5120_N124160 kernel_prep_silu_mul_M1_I8704
+      kernel_gemv_M1_K8704_N5120_S4_L0 kernel_gemv_M1_K3072_N5120_S4_L0_TF kernel_gemv_M1_K8704_N5120_S4_L0_TF
+      kernel_gemv_i8w_M1_K5120_N124160 kernel_prep_silu_mul_M1_I8704
       kernel_prep_gated_head_M1_GK8V24 kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV2
       kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q12KV2
       kernel_tp_cross_M1_K5120_G20_S2_X_R0 kernel_tp_cross_M1_K5120_G20_S2_X_R1
@@ -910,8 +952,11 @@ if(B70_VERIFY_DPAS AND B70_MTP)
   if(B70_VERIFY_M8)
     # verify-cost-m8 probe: the DPAS verify attention (and its v2 reduce) at 8 / 16 key blocks a row
     # (CaptureOptions::probe_attn_tgt); M = 2..4 at the PAIR levers, 5..8 at the plain ones - the production lines' levers
-    foreach(TT 8 16)
+    foreach(TT 2 4 8 16)   # PERF-120: 2 and 4 too
       foreach(MM 2 3 4 5 6 7 8)
+        if(MM EQUAL 8 AND TT EQUAL 8)
+          continue()   # PERF-120: the production 8-row lines below
+        endif()
         add_ocloc_kernel(attn_v2_M${MM}_T${TT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                          DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} EXP2=${ATTN_V2_EXP2})
         if(MM LESS_EQUAL 4)
@@ -932,6 +977,28 @@ if(B70_VERIFY_DPAS AND B70_MTP)
                            DEFINES ${CTRL_DEFINES} M=${MM} TGT=${TT} ${_lv} KV8=1 OPTIONS -cl-intel-256-GRF-per-thread)
         endif()
       endforeach()
+    endforeach()
+    # PERF-120 (plan 40a Task 7): the one-sequence 8-row verify (DFlash K 7) at 8 key blocks a row
+    # (runtime::verify_attn_blocks): attn_verify_dpas_M8_T8[_KV8][_PG<page>] at the M = 8 lines' levers above (bf16
+    # VDPAS_LEVERS, int8 SOLO) and their reduce attn_v2_M8_T8[_KV8][_PG<page>]; the per-card 12 / 2 twins are in spec
+    # 19 v3c's TP block. -2.6 % at depth 4k, -5.6 % at 30k on the bf16 verify against 32 blocks.
+    foreach(PG "" _PG${KV_PAGE})
+      set(_pgd "")
+      if(PG)
+        set(_pgd KV_PAGED=${KV_PAGE})
+      endif()
+      add_ocloc_kernel(attn_v2_M8_T8${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                       DEFINES ${CTRL_DEFINES} M=8 TGT=8 EXP2=${ATTN_V2_EXP2} ${_pgd})
+      add_ocloc_kernel(attn_verify_dpas_M8_T8${PG} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=8 TGT=8 ${VDPAS_LEVERS} KV8=0 ${_pgd}
+                       OPTIONS ${VDPAS_OPTIONS})
+      if(B70_KV8)
+        add_ocloc_kernel(attn_v2_M8_T8_KV8${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kv8.cl
+                         DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=8 TGT=8 ${_pgd})
+        add_ocloc_kernel(attn_verify_dpas_M8_T8_KV8${PG} SOURCE ${VDPAS_CL}
+                         DEFINES ${CTRL_DEFINES} M=8 TGT=8 ${VDPAS_LEVERS_SOLO} PVX=${_vdpas_pvx_8} KV8=1 ${_pgd}
+                         OPTIONS ${VDPAS_OPTIONS})
+      endif()
     endforeach()
   endif()
 endif()
@@ -989,8 +1056,11 @@ if(B70_MTP AND B70_VERIFY_M8)
     add_ocloc_kernel(prep_gated_head_M${MM} SOURCE ${PREP_CL} DEFINES M=${MM})
     add_attn_prep(${MM})
     # the MTP head's KV fill of W rows (its fc and q||k||v: the 16-row builds, in 16-row launches)
-    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240 SOURCE ${PREP_CL}
-                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240)
+    # PERF-84: the head's two pre-fc norms, one fold and one finish over both sources
+    add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP0_G20_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 S_PREV=0 FOLD_G=20 PRE_FC_PAIR=1)
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K5120_G20_W20_X10240_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=5120 NORM_G=20 NORM_WGS=20 X_STRIDE=10240 PRE_FC_PAIR=1)
     add_ocloc_kernel(prep_res_fold_M${MM}_K5120_SP1_G20_Z SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=5120 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
     add_ocloc_kernel(attn_prep_M${MM}_S1 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} QKV_S=1)
@@ -1124,6 +1194,20 @@ if(B70_TP AND B70_MTP AND B70_VERIFY_M8)
         add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_Q12KV2_KV8 SOURCE ${VDPAS_CL}
                          DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=1 ${TP_FA_HEADS}
                          OPTIONS ${VDPAS_OPTIONS})
+      endif()
+      if(MM EQUAL 8)   # PERF-120: the one-card 8-row verify's 8 key blocks a row (runtime::verify_attn_blocks)
+        add_ocloc_kernel(attn_v2_M8_T8_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                         DEFINES ${CTRL_DEFINES} M=8 TGT=8 EXP2=${ATTN_V2_EXP2} ${TP_FA_HEADS})
+        add_ocloc_kernel(attn_verify_dpas_M8_T8_Q12KV2 SOURCE ${VDPAS_CL}
+                         DEFINES ${CTRL_DEFINES} M=8 TGT=8 ${VDPAS_LEVERS} KV8=0 ${TP_FA_HEADS}
+                         OPTIONS ${VDPAS_OPTIONS})
+        if(B70_KV8)
+          add_ocloc_kernel(attn_v2_M8_T8_Q12KV2_KV8 SOURCE ${KV8_CL}
+                           DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=8 TGT=8 ${TP_FA_HEADS})
+          add_ocloc_kernel(attn_verify_dpas_M8_T8_Q12KV2_KV8 SOURCE ${VDPAS_CL}
+                           DEFINES ${CTRL_DEFINES} M=8 TGT=8 ${VDPAS_LEVERS} KV8=1 ${TP_FA_HEADS}
+                           OPTIONS ${VDPAS_OPTIONS})
+        endif()
       endif()
     endif()
     foreach(R 0 1)
@@ -2024,8 +2108,11 @@ if(B70_ORNITH AND B70_MTP)
                              DEFERRED=1 CTRL_PEND=30 PEND_PAR=24084480 M=${MM})
     add_gemv_bf16_variant(${MM} 4096 2048 64 1)    # fc (and, at M = 1, the draft's o)
     add_gemv_bf16_variant(${MM} 2048 9216 64 1)    # q||k||v
-    add_ocloc_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096 SOURCE ${PREP_CL}
-                     DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096)
+    # PERF-84: the head's two pre-fc norms, one fold and one finish over both sources
+    add_ocloc_kernel(prep_res_fold_M${MM}_K2048_SP0_G20_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 S_PREV=0 FOLD_G=20 PRE_FC_PAIR=1)
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096 PRE_FC_PAIR=1)
     add_ocloc_kernel(prep_res_fold_M${MM}_K2048_SP1_G20_Z SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=2048 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
     add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1 SOURCE ${ATTN_CL}
@@ -2082,8 +2169,11 @@ if(B70_ORNITH AND B70_MTP AND B70_VERIFY_M8)
     ornith_wide_kernel(moe_M${MM}_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
                        DEFINES ${MOE_DEFINES} M=${MM} EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=272)
     # the MTP head's KV fill of W rows (its fc and q||k||v: the ROWG builds below)
-    ornith_wide_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096 SOURCE ${PREP_CL}
-                       DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096)
+    # PERF-84: the head's two pre-fc norms, one fold and one finish over both sources
+    ornith_wide_kernel(prep_res_fold_M${MM}_K2048_SP0_G20_P2 SOURCE ${PREP_CL}
+                       DEFINES M=${MM} K=2048 S_PREV=0 FOLD_G=20 PRE_FC_PAIR=1)
+    ornith_wide_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096_P2 SOURCE ${PREP_CL}
+                       DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096 PRE_FC_PAIR=1)
     ornith_wide_kernel(prep_res_fold_M${MM}_K2048_SP1_G20_Z SOURCE ${PREP_CL}
                        DEFINES M=${MM} K=2048 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
     ornith_wide_kernel(attn_prep_M${MM}_Q16KV2_S1 SOURCE ${ATTN_CL}
@@ -2140,6 +2230,19 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8_ROWS SOURCE ${KV8_CL}
                      DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT})
   endforeach()
+  # Plan 40a Task 2: the row lists' delta-net step in the DEFERRED form (gdn_step.cl, BATCH_ROWS with DEFERRED) - each
+  # run replays its sequence's committed rows and writes no per-row state. BROW_PEND: the row word with the sequence's
+  # pending count and parity; PEND_SEQ: one sequence's pending rows, two parities (EngineSizes::gdn_pend / sequences).
+  foreach(MM 2 3 4 5 6 7 8)
+    add_ocloc_kernel(gdn_step_rows_defer_M${MM} SOURCE ${GDN_CL}
+                     DEFINES ${GDN_DEFINES} ${BROW_DEFINES} ${BR_GDN_QWEN} BROW_PEND=5 DEFERRED=1 CTRL_PEND=30
+                             PEND_PAR=51511296 PEND_SEQ=103022592 M=${MM})
+  endforeach()
+  # Plan 40a Task 3: the 16- and 32-row lists' delta-net step - the M 8 build over chunks of whole runs (WIDE_ROWS:
+  # the list's rows at most; grid dimension 2 the chunk, a run a work-group).
+  add_ocloc_kernel(gdn_step_rows_defer_M8_W32 SOURCE ${GDN_CL}
+                   DEFINES ${GDN_DEFINES} ${BROW_DEFINES} ${BR_GDN_QWEN} BROW_PEND=5 DEFERRED=1 CTRL_PEND=30
+                           PEND_PAR=51511296 PEND_SEQ=103022592 M=8 WIDE_ROWS=32)
   # Spec 13c: the MTP head's draft at M = 2..4 rows of different slots (runtime::build_draft_rows - every other binary
   # it binds is the verify lists' or the rows' above): the head's o, gate||up and down at M rows (bf16, the {64, 1}
   # tiling of their M = 1 twins) and the post-attention fold over o's S = 1 output.
@@ -2196,6 +2299,43 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8_ROWS${PG} SOURCE ${KV8_CL}
                      DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} KV_PAGED=${KV_PAGE})
   endforeach()
+  # Plan 40a Task 3: the 16- and 32-row lists' KV writers, main and head (their attention runs the 8-row builds above
+  # on groups of 8 rows; every other per-row build is the one-sequence 16- / 32-row lists')
+  foreach(MM 16 32)
+    add_ocloc_kernel(attn_prep_M${MM}_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=2 KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_S1_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 KV_PAGED=${KV_PAGE})
+  endforeach()
+  # Plan 40a Task 3: their attention - attn_verify_dpas at the one-sequence M 8 lines' levers (bf16 VDPAS_LEVERS, int8
+  # SOLO), a run of up to 8 rows a work-group (BATCH_ROWS, grid dimension 2), the partials of attn_v2's 8-row groups
+  # (ROWS_W: the widest list) for their reduce (attn_v2_M8_T32[_KV8]_ROWS_PG<page> above)
+  if(B70_VERIFY_DPAS)
+    foreach(KV8 0 1)
+      if(KV8)
+        set(_kv _KV8)
+        set(_rw_lv ${VDPAS_LEVERS_SOLO} PVX=${_vdpas_pvx_8})
+      else()
+        set(_kv "")
+        set(_rw_lv ${VDPAS_LEVERS})
+      endif()
+      # PERF-120 (plan 40a Task 7): at 4 key blocks a run (runtime::Engine::kRowsAttnBlocks: 16 to 18 % off the 32-row
+      # step against 32 blocks at depth 4k / 12k / 30k; 2 blocks measured level, 64 / 128 slower), their reduce the v2
+      # row build at TGT 4 below
+      add_ocloc_kernel(attn_verify_dpas_M8_T4${_kv}_ROWS${PG} SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=8 TGT=4 ${_rw_lv} KV8=${KV8}
+                               KV_PAGED=${KV_PAGE} ROWS_W=32
+                       OPTIONS ${VDPAS_OPTIONS})
+    endforeach()
+    add_ocloc_kernel(attn_v2_M8_T4_ROWS${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=8 TGT=4 EXP2=${ATTN_V2_EXP2} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_v2_M8_T4_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=8 TGT=4 KV_PAGED=${KV_PAGE})
+  endif()
 endif()
 # ==== Plan 19v3b Task 0 ==== (end; the DPAS twins follow spec 28c's block) ====
 
@@ -2261,8 +2401,11 @@ if(B70_ORNITH AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
     # the MTP head's KV fill of M rows
     add_gemv_bf16_variant(${MM} 4096 2048 64 1)     # fc
     add_gemv_bf16_variant(${MM} 2048 9216 64 1)     # q||k||v
-    add_ocloc_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096 SOURCE ${PREP_CL}
-                     DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096)
+    # PERF-84: the head's two pre-fc norms, one fold and one finish over both sources
+    add_ocloc_kernel(prep_res_fold_M${MM}_K2048_SP0_G20_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 S_PREV=0 FOLD_G=20 PRE_FC_PAIR=1)
+    add_ocloc_kernel(prep_norm_finish_M${MM}_K2048_G20_W20_X4096_P2 SOURCE ${PREP_CL}
+                     DEFINES M=${MM} K=2048 NORM_G=20 NORM_WGS=20 X_STRIDE=4096 PRE_FC_PAIR=1)
     add_ocloc_kernel(prep_res_fold_M${MM}_K2048_SP1_G20_Z SOURCE ${PREP_CL}
                      DEFINES M=${MM} K=2048 S_PREV=1 FOLD_G=20 ZERO_RESID=1)
   endforeach()
@@ -2321,6 +2464,58 @@ if(B70_ORNITH AND B70_KV8)
 endif()
 # ==== PERF-64 ==== (end) ====
 
+# ==== PERF-120: Ornith's row lists of 16 and 32 rows across sequences (plan 40a's builds at Ornith's shapes) ====
+# Additive only: each the command line of its Qwen3.8 twin (plan 40a's lines in the row blocks above) plus Ornith's
+# shape defines; no source is copied. What an Ornith slots engine with the MTP head binds:
+#   gdn_step_rows_defer_M8_W32_G30_GK16V32       the 16- and 32-row lists' delta-net step in the DEFERRED form (WIDE_ROWS:
+#                                                a run a work-group): each run replays its sequence's pending rows
+#                                                (PEND_SEQ: two parities of PERF-51's PEND_PAR); BR_GDN_ORNITH's strides.
+#                                                The 2..8-row lists keep the slot build (runtime::Engine: 4 % faster)
+#   attn_prep_M<M>_Q16KV2[_S1][_KV8]_ROWS_PG2048 their KV writers, main and head (M = 16, 32)
+#   attn_verify_dpas_M8_T4_Q16KV2[_KV8]_ROWS_PG2048
+#                                                their attention, one launch a step (BATCH_ROWS, a run a work-group) at
+#                                                4 key blocks a run; GQA 8 needs its own levers - bf16 PERF-56's Ornith
+#                                                line (PAIR at KS 1), int8 SOLO at KS 2 (PAIR at KS 1 is bf16-only)
+#   attn_v2_M8_T4_Q16KV2[_KV8]_ROWS_PG2048       their reduce, a group of 8 rows (256 GRF as the 8-row row builds)
+# Ornith's lone verify is v2 (runtime/verify_attn.h), so a run is not bitwise its lone verify: the f32 judge.
+if(B70_ORNITH AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8 AND B70_VERIFY_DPAS)
+  set(_orn_rdefer ${CTRL_DEFINES} NEGA_OFF=32768 DTBIAS_OFF=32800 ${ORNITH_GDN_HEADS} ${BROW_DEFINES} ${BR_GDN_ORNITH}
+                  BROW_PEND=5 DEFERRED=1 CTRL_PEND=30 PEND_PAR=24084480 PEND_SEQ=48168960)
+  add_ocloc_kernel(gdn_step_rows_defer_M8_W32_G30_GK16V32 SOURCE ${GDN_CL} DEFINES ${_orn_rdefer} M=8 WIDE_ROWS=32)
+  foreach(MM 16 32)
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1_ROWS${PG} SOURCE ${ATTN_CL}
+                     DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=2 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+    add_ocloc_kernel(attn_prep_M${MM}_Q16KV2_S1_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE})
+  endforeach()
+  add_ocloc_kernel(attn_verify_dpas_M8_T4_Q16KV2_ROWS${PG} SOURCE ${VDPAS_CL}
+                   DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=8 TGT=4 KT=32 PACK_H=0 KS=1 DSPLIT=128 QSPLIT=1 PSPLIT=1
+                           PAIR=1 PVX=16 PVR=2 KV8=0 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE} ROWS_W=32
+                   OPTIONS ${VDPAS_OPTIONS})
+  add_ocloc_kernel(attn_verify_dpas_M8_T4_Q16KV2_KV8_ROWS${PG} SOURCE ${VDPAS_CL}
+                   DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=8 TGT=4 KT=32 PACK_H=0 KS=2 DSPLIT=256 QSPLIT=1 PSPLIT=1
+                           PAIR=1 SRB=2 PVX=8 KV8=1 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE} ROWS_W=32
+                   OPTIONS ${VDPAS_OPTIONS})
+  add_ocloc_kernel(attn_v2_M8_T4_Q16KV2_ROWS${PG} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                   DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} M=8 TGT=4 EXP2=${ATTN_V2_EXP2} ${ORNITH_FA_HEADS}
+                           KV_PAGED=${KV_PAGE} OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(attn_v2_M8_T4_Q16KV2_KV8_ROWS${PG} SOURCE ${KV8_CL}
+                   DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=8 TGT=4 ${ORNITH_FA_HEADS} KV_PAGED=${KV_PAGE}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # their MoE block reading each routed expert once for the rows routed to it (moe.cl MOE_UNION; every pair bitwise
+  # the per-row kernels' - moe_m_test)
+  foreach(MM 16 32)
+    add_ocloc_kernel(moe_M${MM}_E256_T8_D2048_I512_U SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
+                     DEFINES ${MOE_DEFINES} ${CTRL_DEFINES} M=${MM} EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512
+                             ROUTER_N=272 MOE_UNION=1)
+  endforeach()
+endif()
+# ==== PERF-120 (Ornith) ==== (end) ====
+
 # ==== Spec 28b: the small-M GEMM (gemm_sm.cl) ==== (begin) ====
 # Additive only: no existing variant's name or
 # command line moves (tools/kernel_cmdlines: +N / -0 / ~0), every M = 1 list binds what it bound before. Every list
@@ -2332,10 +2527,11 @@ endif()
 # at 2..4; the DFlash drafter's at
 # its block's 8 / draft rows' 7 (spec 28d).
 set(GEMM_SM_TARGETS "")
-# add_gemm_sm_variant(M K N S L [WG] [MG] [G256] [B2D]) - L 2 is the int8 form (gemm_sm_i8w_*), S 1 there. The
+# add_gemm_sm_variant(M K N S L [WG] [MG] [G256] [B2D] [GATE 1|2]) - L 2 is the int8 form (gemm_sm_i8w_*), S 1 there;
+# GATE (PERF-123, head_gate.h) the build with the head choice's extra argument. The
 # source by its full path: tools/probe calls these helpers from its own directory scope.
 function(add_gemm_sm_variant M K N S L)
-  cmake_parse_arguments(G "WG;MG;G256;B2D" "" "" ${ARGN})
+  cmake_parse_arguments(G "WG;MG;G256;B2D;TF" "GATE" "" ${ARGN})
   set(defs M=${M} K=${K} N=${N} S=${S} LAYOUT=${L})
   set(tag "")
   set(opts "")
@@ -2355,6 +2551,16 @@ function(add_gemm_sm_variant M K N S L)
     list(APPEND defs BLK2D=1)
     string(APPEND tag _b2d)
   endif()
+  if(G_GATE)
+    list(APPEND defs GATE=${G_GATE})
+    string(APPEND tag _gate${G_GATE})
+  endif()
+  # PERF-44 on Qwen3.8 tp: the folded crossing's tp_send as the tail (TP_FOLD_SEND); not a kSmallMTuning row, so kept
+  # out of GEMM_SM_TARGETS (gemm_sm_names_test) in GEMM_SM_TF_TARGETS
+  if(G_TF)
+    list(APPEND defs TP_FOLD_SEND=1 TP_FOLD_G=20)
+    string(APPEND tag _tf)
+  endif()
   if(L EQUAL 2)
     set(name gemm_sm_i8w_M${M}_K${K}_N${N}${tag})
   else()
@@ -2362,7 +2568,11 @@ function(add_gemm_sm_variant M K N S L)
   endif()
   if(NOT TARGET kernel_${name})
     add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl DEFINES ${defs} ${opts})
-    set(GEMM_SM_TARGETS ${GEMM_SM_TARGETS} kernel_${name} PARENT_SCOPE)
+    if(G_TF)
+      set(GEMM_SM_TF_TARGETS ${GEMM_SM_TF_TARGETS} kernel_${name} PARENT_SCOPE)
+    else()
+      set(GEMM_SM_TARGETS ${GEMM_SM_TARGETS} kernel_${name} PARENT_SCOPE)
+    endif()
   endif()
 endfunction()
 # Spec 32e: add_gemm_sm_wide_variant(M K N S L ARM [WG] [MG] [B2D]) - gemm_sm_wide.cl past 16 rows; ARM rc32 (row chunks
@@ -2447,6 +2657,34 @@ if(B70_MTP)
     endforeach()
   endif()
 endif()
+# PERF-123: Qwen3.8's one-card verify lists at M = 2..8 choose their head a step (head_gate.h): the full int8 head
+# (GATE 1) or the 2-bit candidate pass (gemm_sm LAYOUT 3), df_candidate's top 64 a row, head_cand.cl's gather of those
+# columns, the exact rescore (gemm_sm_i8w at N 512 with the full head's knobs) and its argmax (GATE 2).
+if(B70_MTP AND B70_VERIFY_M8 AND B70_DFLASH)
+  foreach(MM 2 3 4 5 6 7 8)
+    add_gemm_sm_variant(${MM} 5120 248320 1 2 WG GATE 1)
+    add_gemm_sm_variant(${MM} 5120 248320 1 3 GATE 2)
+    add_gemm_sm_variant(${MM} 5120 512 1 2 WG GATE 2)
+    add_gemm_sm_variant(${MM} 5120 512 1 2 WG)   # the table row's own build, which gemm_sm_test runs (no gate argument)
+  endforeach()
+  add_ocloc_kernel(df_candidate_R7_N248320_U248077_K64_gate2 SOURCE ${DF_DIR}/df_candidate.cl
+                   DEFINES R=7 N=248320 USED=248077 GATE=2)
+  add_ocloc_kernel(head_cand_K5120_C64_NC512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/head_cand.cl
+                   DEFINES K=5120 C=64 NC=512 GATE=2)
+endif()
+# PERF-123 on Ornith: the same head choice at its hidden 2048 - its int8 head's own knobs (no wg), the 2-bit pass, the
+# rescore at N 512 with the full head's knobs; df_candidate's gate-2 build above is shared (the same vocabulary).
+if(B70_ORNITH AND B70_MTP AND B70_VERIFY_M8 AND B70_DFLASH)
+  foreach(MM 2 3 4 5 6 7 8)
+    add_gemm_sm_variant(${MM} 2048 248320 1 2 GATE 1)
+    add_gemm_sm_variant(${MM} 2048 248320 1 3 GATE 2)
+    add_gemm_sm_variant(${MM} 2048 512 1 2 GATE 2)
+    add_gemm_sm_variant(${MM} 2048 248320 1 3)   # the table rows' own builds, which gemm_sm_test runs
+    add_gemm_sm_variant(${MM} 2048 512 1 2)
+  endforeach()
+  add_ocloc_kernel(head_cand_K2048_C64_NC512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/head_cand.cl
+                   DEFINES K=2048 C=64 NC=512 GATE=2)
+endif()
 # Ornith's dense projections at its verify lists' M = 2..4 (spec 15e's block builds the verify lists' gemv)
 set(GEMM_SM_ORNITH "2048 12288 1 1 MG" "4096 2048 4 0 MG" "2048 9216 2 0 MG" "2048 128 1 1 MG" "2048 248320 1 2")
 if(B70_ORNITH AND B70_MTP)
@@ -2488,6 +2726,14 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   gemm_sm_rows(GEMM_SM_DFLASH_HEAD _m7)
   set(GEMM_SM_DFLASH_CANDIDATE "5120 248320 1 1 MG" "5120 248320 1 3")   # 3: spec 19 v3d's 2-bit candidates
   gemm_sm_rows(GEMM_SM_DFLASH_CANDIDATE _m7)
+  # Plan 40a Task 4: the batched pass at four blocks - the grid split-K int4 rows at 32 by gemm_sm_wide's row chunk
+  # (kSmDraft8W), the 2-bit candidate head at its 31 rows at 256 GRF (kSmDraft7W, g256_from 31).
+  foreach(row "5120 6144 4" "4096 5120 4" "5120 34816 8" "17408 5120 4" "25600 5120 8" "5120 2048 8" "5120 1280 16"
+              "5120 256 16")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    add_gemm_sm_wide_variant(32 ${f} 1 rc32 MG)
+  endforeach()
+  add_gemm_sm_variant(31 5120 248320 1 3 G256)
   add_gemv_variant(7 5120 248320 1 1)
   foreach(row "5120 6144 4" "4096 5120 4" "5120 34816 8" "17408 5120 4" "25600 5120 8"
               "5120 2048 8" "5120 1280 16" "5120 256 16")
@@ -2512,11 +2758,16 @@ endif()
 # Spec 17d: a tensor-parallel card's shapes (model::tp_card_desc, the folded crossing) at its verify lists' M = 2..4 -
 # the one-card rows' knobs for the per-card cell of each shape (gemv's S / layout, magic dequant, the 2D read where
 # the one-card cell has it); gate||up keeps gemv's grid split-K (no 2x8 work-group: its SiLU is the S 8 build).
-set(GEMM_SM_TP17D "5120 8192 1 1 MG" "5120 7168 2 0 MG B2D" "5120 17408 8 0 MG" "3072 5120 4 0 MG B2D"
+set(GEMM_SM_TP17D "5120 8192 1 1 WG MG" "5120 7168 2 0 MG B2D" "5120 17408 8 0 MG" "3072 5120 4 0 MG B2D"
                   "8704 5120 4 0 MG B2D" "5120 124160 1 2 WG")
 if(B70_TP AND B70_MTP)
   set(_m2to8 2 3 4 5 6 7 8)   # spec 19 v3c: M = 5..8 for a DFlash drafter's verify rows (kSmVerify8)
   gemm_sm_rows(GEMM_SM_TP17D _m2to8)
+  # PERF-44: out_proj / o_proj and down with the folded tp_send as their tail (capture binds these on a TP card)
+  set(GEMM_SM_TP17D_TF "3072 5120 4 0 MG B2D TF" "8704 5120 4 0 MG B2D TF")
+  gemm_sm_rows(GEMM_SM_TP17D_TF _m2to8)
+  set(B70_TP_VERIFY_KERNELS ${B70_TP_VERIFY_KERNELS} ${GEMM_SM_TF_TARGETS} CACHE INTERNAL
+      "spec 17d: the binaries a TP verify list binds")
 endif()
 # Spec 19 v3c: the DFlash drafter's half on a TP card at its block's 8 rows, the candidate heads' half at its 7.
 set(GEMM_SM_DFLASH_TP "5120 3072 1 2 WG" "2048 5120 1 2 WG" "5120 17408 1 2 WG" "8704 5120 1 2 WG" "5120 1024 1 2 WG"
@@ -2642,3 +2893,154 @@ endif()
 add_prep_norm_finish(1 2560 20 20)
 
 add_subdirectory(prefill)
+
+# Release-format expert linears at Inkling's shapes. The route and activation
+# variants are selected separately by the model runtime.
+foreach(fmt NVFP4 MXFP8)
+  if(fmt STREQUAL "NVFP4")
+    set(wfmt 1)
+  else()
+    set(wfmt 2)
+  endif()
+  add_ocloc_kernel(kol_moe_E128_T8_D2304_I1152_${fmt} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
+                   DEFINES WFMT=${wfmt} MOE_E=128 MOE_K=8 HIDDEN=2304 INTER=1152 UP_KS=4 DN_KS=1 MOE_SHARED=0)
+  add_ocloc_kernel(pf_moe_q4gemm_K2304_N2304_SILU_${fmt} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_moe_q4gemm.cl
+                   DEFINES WFMT=${wfmt} K=2304 N=2304 EXPERTS=128 SILU_EPI=1 WGN=4
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_q4gemm_K1152_N2304_${fmt} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_moe_q4gemm.cl
+                   DEFINES WFMT=${wfmt} K=1152 N=2304 EXPERTS=128 WGN=4
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(expert_fp_bytes_${fmt} SOURCE ${CMAKE_SOURCE_DIR}/tests/kernels/expert_fp_bytes.cl
+                   DEFINES WFMT=${wfmt} DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/expert_fp.h)
+endforeach()
+
+# Inkling decode and verify. The format-only variants above are also used by
+# the expert byte test. The capped variants here implement Inkling's epilogue.
+set(INKLING_KERNELS "")
+set(INKLING_SMALL_M "")
+foreach(M RANGE 1 8)
+  foreach(ctrl "4608;64;1" "64;2304;2")
+    list(GET ctrl 0 k)
+    list(GET ctrl 1 n)
+    list(GET ctrl 2 phase)
+    set(name gemv_bf16_M${M}_K${k}_N${n}_INKCTRL)
+    add_ocloc_kernel(${name} SOURCE ${GEMV_BF16_CL}
+                     DEFINES M=${M} K=${k} N=${n} COLS_PER_WG=64 KSPLIT=1 INK_CONTROLLER=${phase})
+    list(APPEND INKLING_KERNELS ${name})
+  endforeach()
+  foreach(kn "2304;3072" "2304;1024" "2304;384" "2304;64" "2304;200064" "3072;2304")
+    list(GET kn 0 k)
+    list(GET kn 1 n)
+    if(M EQUAL 1)
+      add_gemv_i8w_variant(${M} ${k} ${n})
+      list(APPEND INKLING_KERNELS gemv_i8w_M${M}_K${k}_N${n})
+    else()
+      add_gemm_sm_variant(${M} ${k} ${n} 1 2)
+      list(APPEND INKLING_KERNELS gemm_sm_i8w_M${M}_K${k}_N${n})
+      list(APPEND INKLING_SMALL_M kernel_gemm_sm_i8w_M${M}_K${k}_N${n})
+    endif()
+  endforeach()
+  foreach(kn "2304;128" "4608;64" "64;2304" "2304;1024")
+    list(GET kn 0 k)
+    list(GET kn 1 n)
+    add_gemv_bf16_variant(${M} ${k} ${n} 64 1)
+    list(APPEND INKLING_KERNELS gemv_bf16_M${M}_K${k}_N${n})
+  endforeach()
+  if(M EQUAL 1)
+    set(name gemv_i8w_M1_K2304_N3072_QKV1024)
+    add_ocloc_kernel(${name} SOURCE ${GEMV_I8W_CL} DEFINES M=1 K=2304 N=3072 QKV_NKV=1024)
+  else()
+    set(name gemm_sm_i8w_M${M}_K2304_N3072_QKV1024)
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gemm_sm.cl
+                     DEFINES M=${M} K=2304 N=3072 S=1 LAYOUT=2 QKV_NKV=1024)
+  endif()
+  list(APPEND INKLING_KERNELS ${name})
+  if(M EQUAL 1)
+    set(name gemv_i8w_M1_K2304_N3072_QKV1024_FULL)
+    add_ocloc_kernel(${name} SOURCE ${GEMV_I8W_CL}
+                     DEFINES M=1 K=2304 N=3072 QKV_NKV=1024 INK_ATTN_PROJECTIONS=1)
+  else()
+    set(name gemm_sm_i8w_M${M}_K2304_N3072_QKV1024_FULL)
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gemm_sm.cl
+                     DEFINES M=${M} K=2304 N=3072 S=1 LAYOUT=2 QKV_NKV=1024 INK_ATTN_PROJECTIONS=1)
+  endif()
+  list(APPEND INKLING_KERNELS ${name})
+  set(name ink_embed_gather_M${M}_D2304_V201024)
+  add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
+                   DEFINES ${CTRL_DEFINES} M=${M} HIDDEN=2304 VOCAB=201024)
+  list(APPEND INKLING_KERNELS ${name})
+  set(name ink_argmax_stage1_M${M}_N200064_V200058)
+  add_ocloc_kernel(${name} SOURCE ${ARGMAX_CL} DEFINES ${CTRL_DEFINES} M=${M} VOCAB=200064 VOCAB_USED=200058)
+  list(APPEND INKLING_KERNELS ${name})
+
+  set(ink_union)
+  if(M GREATER 1)
+    set(ink_union MOE_UNION=1)
+  endif()
+  foreach(row "NVFP4;1" "MXFP8;2")
+    list(GET row 0 fmt)
+    list(GET row 1 wfmt)
+    set(name kol_moe_M${M}_E128_T8_D2304_I1152_CAP_${fmt})
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
+                    DEFINES M=${M} WFMT=${wfmt} MOE_E=128 MOE_K=8 HIDDEN=2304 INTER=1152 UP_KS=4 DN_KS=1
+                    MOE_SHARED=0 MOE_OUT_F32=1 SWIGLU_CAP_G=4.0f SWIGLU_CAP_U=25.0f ${ink_union})
+    list(APPEND INKLING_KERNELS ${name})
+    if(M EQUAL 1)
+      add_ocloc_kernel(${name}_POST SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
+                       DEFINES M=1 WFMT=${wfmt} MOE_E=128 MOE_K=8 HIDDEN=2304 INTER=1152 UP_KS=4 DN_KS=1
+                               MOE_SHARED=0 MOE_OUT_F32=1 SWIGLU_CAP_G=4.0f SWIGLU_CAP_U=25.0f INK_MOE_POST=1)
+      list(APPEND INKLING_KERNELS ${name}_POST)
+    endif()
+  endforeach()
+  foreach(window "W1024_R4096;1024;4096" "F;0;0")
+    list(GET window 0 tag)
+    list(GET window 1 w)
+    list(GET window 2 ring)
+    set(name kol_attn_M${M}_T32_Q24KV8_REL16E1024_SINK_GATE_${tag})
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_attn.cl
+                    DEFINES ${CTRL_DEFINES} M=${M} TGT=32 Q_HEADS=24 KV_HEADS=8 WINDOW=${w} RING=${ring}
+                    REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1)
+    list(APPEND INKLING_KERNELS ${name})
+  endforeach()
+endforeach()
+
+add_ocloc_kernel(kol_route_E128_T8_N128_L128_RENORM SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
+                 DEFINES ROUTE_E=128 ROUTE_K=8 ROUTE_WG=128 ROUTE_EPL=1 ROUTE_LN=128 ROUTE_RENORM=1 ROUTE_SCALE=8.0f)
+list(APPEND INKLING_KERNELS kol_route_E128_T8_N128_L128_RENORM)
+add_ocloc_kernel(kol_route_E128_T8_N128_L128_RENORM_M1_FUSED SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
+                 DEFINES ROUTE_E=128 ROUTE_K=8 ROUTE_WG=128 ROUTE_EPL=1 ROUTE_LN=128
+                         ROUTE_RENORM=1 ROUTE_SCALE=8.0f INK_ROUTE_M1=1)
+list(APPEND INKLING_KERNELS kol_route_E128_T8_N128_L128_RENORM_M1_FUSED)
+foreach(kn "2304;3072" "3072;2304" "2304;9216" "9216;2304")
+  list(GET kn 0 k)
+  list(GET kn 1 n)
+  add_gemv_bf16_variant(8 ${k} ${n} 64 1)
+  list(APPEND INKLING_KERNELS gemv_bf16_M8_K${k}_N${n})
+endforeach()
+add_gemv_i8w_variant(1 256 200064)
+add_gemv_bf16_variant(1 5120 768 64 1)
+list(APPEND INKLING_KERNELS gemv_i8w_M1_K256_N200064 gemv_bf16_M1_K5120_N768)
+set(INKLING_DCTL DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5)
+add_ocloc_kernel(df_prep_M8_H2304_I9216_Q24KV8_D128_R2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_prep.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 H=2304 WG=256 EPS=1e-06f INTER=9216 NH=24 NKV=8 HD=128 RING=2048 INK_CONTEXT=1)
+add_ocloc_kernel(df_attn_M8_Q24KV8_D128_R2048_W1024_P128 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_attn.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 NH=24 NKV=8 HD=128 RING=2048 WIN=1024 PB=128 WGA=128 FIXED_DRAFT_WINDOW=1)
+list(APPEND INKLING_KERNELS df_prep_M8_H2304_I9216_Q24KV8_D128_R2048 df_attn_M8_Q24KV8_D128_R2048_W1024_P128)
+
+add_ocloc_kernel(ink_glue_H2304 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_glue.cl DEFINES H=2304 ${CTRL_DEFINES})
+add_ocloc_kernel(ink_glue_H2304_CTRL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_glue.cl
+                 DEFINES H=2304 ${CTRL_DEFINES} INK_CONTROLLER_FUSION=1)
+list(APPEND INKLING_KERNELS ink_glue_H2304_CTRL)
+add_ocloc_kernel(ink_prep_Q24KV8_D128_REL16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl DEFINES ${CTRL_DEFINES})
+add_ocloc_kernel(ink_prep_Q24KV8_D128_REL16_FUSED SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl
+                 DEFINES ${CTRL_DEFINES} INK_FUSED_PREP=1)
+list(APPEND INKLING_KERNELS ink_prep_Q24KV8_D128_REL16_FUSED)
+add_ocloc_kernel(df_attn_M8_Q24KV8_D128_FULL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_attn.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 NH=24 NKV=8 HD=128 RING=0 WIN=0 PB=128 WGA=128
+                 FULL_TARGETS=32)
+add_ocloc_kernel(df_inkling_markov_H2304_R256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_draft.cl
+                 DEFINES ${CTRL_DEFINES})
+list(APPEND INKLING_KERNELS ink_glue_H2304 ink_prep_Q24KV8_D128_REL16
+     df_attn_M8_Q24KV8_D128_FULL df_inkling_markov_H2304_R256)
+set_property(GLOBAL APPEND PROPERTY B70_GEMM_SM_KERNELS ${INKLING_SMALL_M})
+set(B70_INKLING_KERNELS ${INKLING_KERNELS} CACHE INTERNAL "Inkling shared kernel variants")

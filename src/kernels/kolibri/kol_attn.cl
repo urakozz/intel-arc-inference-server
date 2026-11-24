@@ -46,8 +46,11 @@
 #if Q_HEADS % KV_HEADS != 0
 #error "kol_attn: q-heads must be a multiple of kv-heads"
 #endif
-#if M < 1 || M > 4
-#error "kol_attn: M is 1..4"
+#if M < 1 || (!REL_BIAS && M > 4) || (REL_BIAS && M > 8)
+#error "kol_attn: unsupported row count"
+#endif
+#if REL_BIAS && !defined(REL_DIM)
+#error "kol_attn: REL_DIM must accompany the relative bias extent"
 #endif
 #define SLIDING (WINDOW != 0)
 #if SLIDING && ((RING % 64) != 0 || RING < WINDOW + M || (WINDOW + M + 63) / 64 + 1 > TGT)
@@ -120,7 +123,12 @@ __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const float* restrict attn_q,
                               __global const ushort* restrict kv_k, __global const ushort* restrict kv_v,
-                              __global float* restrict attn_part) {
+                              __global float* restrict attn_part
+#if REL_BIAS
+                              , __global const float* restrict relative_q,
+                                __global const float* restrict relative_table
+#endif
+                              ) {
   const uint j = get_group_id(0);
   const uint blk = get_group_id(1);
   const uint lid = get_local_id(0);
@@ -208,7 +216,22 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
         if (m < mlo || m >= mhi) continue;    // uniform
         const uint bound = pos + m, lo = key_lo(bound);
         const uint p = p0 + lane;
+#if REL_BIAS
+        float mine = -INFINITY;
+        if (p <= bound && p >= lo) {
+          mine = sc_x[buf][pr][lane] * SSCALE;
+          const uint distance = bound - p;
+          if (distance < REL_BIAS) {
+            const __global float* r = relative_q + ((size_t)m * Q_HEADS + j * GQA + pr % GQA) * REL_DIM;
+            float bias = 0.0f;
+#pragma unroll
+            for (uint d = 0; d < REL_DIM; ++d) bias = fma(r[d], relative_table[d * REL_BIAS + distance], bias);
+            mine += bias;
+          }
+        }
+#else
         const float mine = (p <= bound && p >= lo) ? sc_x[buf][pr][lane] * SSCALE : -INFINITY;
+#endif
         const float nmx = fmax(mx[pr], sub_group_reduce_max(mine));
         float resc, wl;
         if (nmx > -INFINITY) {
@@ -253,7 +276,14 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
 // ascending (a block that saw none of the row's keys - bmx -INF - is skipped), rne(acc / sm).
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void kol_attn_reduce(__global const uint* restrict ctrl, __global const float* restrict attn_part,
-                              __global ushort* restrict attn_out) {
+                              __global ushort* restrict attn_out
+#if SINK_TOK
+                              , __global const float* restrict sinks
+#endif
+#if GATE
+                              , __global const float* restrict gate
+#endif
+                              ) {
   const uint h = get_group_id(0);
   const uint m = get_group_id(1);
   const uint d = get_local_id(0);
@@ -274,7 +304,11 @@ __kernel void kol_attn_reduce(__global const uint* restrict ctrl, __global const
     hsm[b] = p[1];
   }
   barrier(CLK_LOCAL_MEM_FENCE);
+#if SINK_TOK
+  float mx = sinks[(size_t)m * SINK_PITCH + h], sm = 1.0f, acc = 0.0f;
+#else
   float mx = -INFINITY, sm = 0.0f, acc = 0.0f;
+#endif
   for (uint b = 0; b < nb; ++b) {
     const float bmx = hmx[b], bsm = hsm[b];
     if (!(bmx > -INFINITY)) continue;   // a block below the row's window
@@ -286,5 +320,10 @@ __kernel void kol_attn_reduce(__global const uint* restrict ctrl, __global const
     acc = fma(acc, a, bacc * bs);
     mx = nmx;
   }
+#if GATE
+  const size_t out = (size_t)m * OUT_N + (size_t)h * HD + d;
+  attn_out[out] = rne_bf16((acc / sm) / (1.0f + exp(-gate[out])));
+#else
   attn_out[(size_t)m * OUT_N + (size_t)h * HD + d] = rne_bf16(acc / sm);
+#endif
 }

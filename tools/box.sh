@@ -9,6 +9,8 @@
 # Env: BOX (ssh target), REMOTE_DIR (relative to $HOME on the box; default from
 #      the branch, see tools/box_dir.sh), BOX_SUFFIX, JOBS,
 #      BUILD_DIR (default build), CMAKE_ARGS (extra -D flags for the configure step).
+# BUILD_TARGETS selects a space-separated CMake target list for an isolated build.
+# BOX_IDLE_CMAKE checks for another build before starting CMake.
 set -euo pipefail
 # shellcheck source=tools/box_env.sh
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/box_env.sh"
@@ -56,7 +58,15 @@ backup_private_docs() {
 # hashed relative to it), so a new branch's tree reuses every unchanged object.
 CCACHE_ENV="CCACHE_BASEDIR=\$HOME/b70/trees CCACHE_NOHASHDIR=1 CCACHE_MAXSIZE=20G"
 configure_and_build() {
-  ssh "$BOX" "cd '$REMOTE_DIR' && L=\$(command -v ccache >/dev/null && echo '-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache' || true) && export $CCACHE_ENV && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release \$L $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS"
+  local idle_check="" targets=""
+  if [[ ${BOX_IDLE_CMAKE:-0} == 1 ]]; then
+    idle_check='if pgrep -x cmake >/dev/null; then echo "box: CMake is busy" >&2; exit 75; fi; '
+  fi
+  if [[ -n ${BUILD_TARGETS:-} ]]; then
+    [[ $BUILD_TARGETS =~ ^[a-zA-Z0-9_.\ -]+$ ]] || { echo "invalid BUILD_TARGETS" >&2; return 2; }
+    targets="--target $BUILD_TARGETS"
+  fi
+  ssh "$BOX" "cd '$REMOTE_DIR' && ${idle_check}L=\$(command -v ccache >/dev/null && echo '-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache' || true) && export $CCACHE_ENV && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release \$L $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS $targets"
 }
 
 # ssh carries no environment of its own, so `ZE_AFFINITY_MASK=1 tools/box.sh test ...`

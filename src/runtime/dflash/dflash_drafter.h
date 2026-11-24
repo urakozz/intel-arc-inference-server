@@ -32,7 +32,9 @@ class DFlashDrafter final : public TapDrafter {
   // `head_rows`: the rows of the target head the draft list reads - the full lm_head's (vocab_size) or a draft
   // vocabulary's |V'| (LoadedModel::draft_vocab). `max_len`: the engine's (the RoPE rows). `max_k`: the deepest
   // block the engine verifies, 1 .. desc.max_k() (7 for DFlash 2's block of 8; `--spec-max`).
-  DFlashDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t head_rows, uint32_t max_len, uint32_t max_k);
+  // `seqs` (plan 40a Task 4): the engine's sequence slots - beside several, the scratch holds the batched pass's rows.
+  DFlashDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t head_rows, uint32_t max_len, uint32_t max_k,
+                uint32_t seqs = 1);
 
   // Captures the draft list against the engine's target model (embedding, head: the full one, or with
   // `draft_vocab` the compact one LoadedModel::draft_vocab holds) and its Control block. `e` must have been built
@@ -60,8 +62,13 @@ class DFlashDrafter final : public TapDrafter {
 
   // Plan 19v3b, the batched draft and the row steps (runtime/tap_drafter.h): the lists over DFlashBuffers' tables.
   void draft_rows(Engine& e, const std::vector<DraftRun>& runs) override;
+  // beside several slots, the scratch's rows (the wide lists: rows projection at add_sessions, the draft at attach)
+  uint32_t draft_rows_max() const override { return b_.sessions.empty() ? kernels::dflash::kM : b_.draft_rows; }
   const DFlashDraftOut& readback(uint32_t slot) override { return *b_.session(slot).readback(); }
   l0::Mem& rows_taps() override { return *b_.rows_taps; }
+  std::shared_ptr<const loader::DeviceWeight> candidate_head2() const override {
+    return w_.candidate_bits == 2 ? w_.candidate_head : nullptr;
+  }
   l0::CmdList& rows_projection(const std::vector<RowsCommit>& commits) override;
   const CapturedStep* draft_rows_step() const { return seqs_draft_.get(); }
 
@@ -104,6 +111,8 @@ class DFlashDrafter final : public TapDrafter {
   std::vector<CapturedStep> drafts_;
   std::unique_ptr<CapturedStep> seqs_draft_;   // the batched draft list (several slots)
   std::unique_ptr<CapturedStep> rows_project_;   // the rows projection (several slots)
+  // Plan 40a Task 4: the batched draft at four blocks and the rows projection at kSeqsRows rows (seqs_rows' forms).
+  std::unique_ptr<CapturedStep> seqs_draft_w_, rows_project_w_;
   DFlashBuffers::Session ses() const { return const_cast<DFlashBuffers&>(b_).session(cur_); }
 };
 

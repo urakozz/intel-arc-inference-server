@@ -1188,6 +1188,9 @@ foreach(v gemv_M1_K5120_N16384_S1_L1 gemv_M1_K6144_N5120_S4_L0 gemv_M1_K5120_N14
     add_dependencies(probe_tp kernel_${v})
   endif()
 endforeach()
+# PERF-108: `probe_gemv --pair 5120 8192 1 1 ptp_gemv_M1_K5120_N8192_S1_L1` times the tp card's qkv||z as it was
+# against the engine's _KS4 build (Flash-Next's control is pgv_da2_M1_K2560_N8192_S1, above)
+add_dependencies(probe_gemv kernel_ptp_gemv_M1_K5120_N8192_S1_L1)
 # --- probe_tp_pf: spec 17c step 1, tensor-parallel prefill's 2048-row crossing (D8) ----------------------------
 # `probe_tp_pf.cl` is a PROBE kernel (ptpf_copy, the
 # kernel push / pull arms): no runtime path binds it. The GEMM load is the production pf_gemm_T0.

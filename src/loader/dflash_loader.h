@@ -30,7 +30,9 @@ struct DFlashWeights {
   DraftFormat format = DraftFormat::Int8;
   bool packed = false;                               // the checkpoint's own packed int4 linears (DFlashCheckpoint)
   uint32_t target_hidden = 0;
-  std::unique_ptr<DeviceWeight> candidate_head;      // C3: optional int4 copy; exact int8 head stays in target
+  // C3: optional int4 copy; exact int8 head stays in target. Shared (PERF-123): the target's greedy verify lists read
+  // the 2-bit copy too - runtime::TapDrafter::candidate_head2, or loader::LoadedModel::cand_head when the target has one.
+  std::shared_ptr<const DeviceWeight> candidate_head;
   // Spec 19 v3d Task 7: the 2-bit head with 80 candidates by default; 4 (layout 1) / 64
   // the earlier form, for A/B.
   unsigned candidate_bits = 2;                       // 4 (layout 1) or 2 (gemm_sm's layout 3)
@@ -62,6 +64,9 @@ struct DFlashWeights {
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
                            DraftFormat format, unsigned threads = 0, bool candidate_head = false,
                            unsigned candidate_bits = 2, unsigned candidates = 80, int tp_rank = -1);
+// PERF-123: the 2-bit copy (gemm_sm's layout 3, dflash_candidate_head2) of an int8 head on `ctx`'s device, its bytes
+// added to `bytes`.
+std::shared_ptr<const DeviceWeight> candidate_head2(l0::Context& ctx, const DeviceWeight& int8_head, size_t& bytes);
 // The same against a target given by its parts: its descriptor, its lm_head rows and its embedding (bf16
 // [rows][hidden] on this device) - what the overload above reads off a LoadedModel; a device test passes a synthetic
 // target (tests/runtime/dflash_draft_test.cc).

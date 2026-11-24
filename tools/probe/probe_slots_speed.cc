@@ -1,26 +1,26 @@
 // probe_slots_speed - spec 13c (plan 13c Task 5): the decode speed of runtime::Engine's sequence slots, through the
 // engine API (host writes, submit, fence - what the server pays per step, without HTTP and the scheduler).
 //
-//   probe_slots_speed <snapshot> [--kv bf16|int8] [--slots L0,L1,..] [--depth 4096] [--steps 48] [--rounds 3]
-//                     [--depths D0,D1,..] [--arms "NAME|NAME|.."] [--table order|scatter]
+//   probe_slots_speed <snapshot> [--kv bf16|int8] [--seqs 4] [--cap 32768] [--depth 4096] [--steps 48] [--rounds 3]
+//                     [--depths D0,D1,..] [--arms "NAME|NAME|.."]
 //
+// --seqs / --cap: the engine's sequences and each one's cap; they share a KV page pool of seqs x cap positions.
 // --depths: each slot's prefill length (default every slot `depth`) - e.g. slot 0 deep beside short slots.
 // --arms: only the arms of these names (as printed, e.g. "1 plain|4 K=1,1,1,1"), in the order below.
-// --table (spec 31 Task 2): `order` keeps the page table the engine writes (each slot's pages in order); `scatter`
-// rewrites it before the prefill to slots_test's scattered order - slot 0's and slot 1's pages alternating while both
-// have pages, then slot 2's, then slot 3's last page first - the layout a page pool hands out. Interleave runs of the
-// two for the comparison.
-// --list-ab N (plan 19v3b Task 0): instead of the arms, slot 0's plain decode list captured twice on the same buffers -
-//   contiguous (runtime::build's default binding: one-slot's binaries) and paged (the slot's page table, the identity) -
-//   and N replays of each, alternating (A B, then B A), each replay one plain step at slot 0's growing position: the
-//   median ms a step of each and paged / contiguous.
 // --profile-rows N (plan 31 Task 13): instead of the arms, the row list at 2 / 4 / 6 / 8 rows (slots 0 and 1, M / 2 - 1
 //   drafts each) built with per-launch events and replayed N times: ms a step per kernel (its variant with the M taken
-//   out, summed over the layers) at each M - where rows past 4 cost. Events add a flush each: shares, not times. Same process, same KV, same clocks: the paging's whole-step cost.
-//   Before it (spec 31 Task 2) the same for the 8-row verify: slot 0's and slot 1's 3 drafts each in one row list,
-//   contiguous (the unpaged row builds) and paged, the same rows every replay. Needs --table order.
+//   out, summed over the layers) at each M - where rows past 4 cost. Events add a flush each: shares, not times.
 //
-// One engine (Qwen3.8, its MTP head, the int8 lm_head - the served form) with the given slots (default 4 x 32768),
+// --wide N (plan 40a Task 3): instead of the arms, T(W) - one row step across the slots at W = 8 / 16 / 32 rows (every
+//   slot K = W / S - 1 drafts: ids of the prompt file, not the head's), against slot 0's plain step (its own verify(0)),
+//   interleaved, N steps an arm a round: each step's verify_rows (the staging, the replay, the wait) timed; then every
+//   run committed whole ("all": its k + 1 rows pending - the next step replays them, the served case) or at its pending
+//   id ("0": one row). Medians over the rounds, and x the plain step. The MTP head's KV fill rides in every row list.
+// --moe-ab (PERF-120, with --wide on a MoE model): the 16- and 32-row arms twice - the engine's lists (the union read)
+//   and rebuilt with the per-row MoE block (Engine::probe_rows_moe_union) - each round both halves, A B then B A.
+//
+// One engine (Qwen3.8, its MTP head, the int8 lm_head - the served form) with the given sequences (default 4 up to
+// 32768, a pool of 131072 positions),
 // every slot prefilled with `depth` ids of tests/golden/prompts/long32k.ids (each from its own offset). Then, per
 // round, every arm in a rotated order, `steps` steps each, greedy - real drafts, real acceptance:
 //
@@ -39,6 +39,7 @@
 // largest n whose best MTP arm beats n plain.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -47,10 +48,15 @@
 #include <utility>
 #include <vector>
 
+#include "kernels/kernels.h"
+#include "l0/cmdlist.h"
 #include "l0/context.h"
+#include "l0/memory.h"
 #include "l0/fence.h"
 #include "l0/queue.h"
 #include "loader/loader.h"
+#include "runtime/buffer_sizes.h"
+#include "runtime/buffers.h"
 #include "runtime/engine.h"
 
 namespace {
@@ -174,29 +180,31 @@ uint32_t step(Engine& e, const Arm& a, double* draft_ms) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: %s <snapshot> [--kv bf16|int8] [--slots L0,..] [--depth N] [--steps N] [--rounds N]\n",
+    std::fprintf(stderr,
+                 "usage: %s <snapshot> [--kv bf16|int8] [--seqs N] [--cap N] [--depth N] [--steps N] [--rounds N]\n",
                  argv[0]);
     return 2;
   }
   std::string kv_s = "bf16";
-  std::vector<uint32_t> slots = {32768, 32768, 32768, 32768};
+  uint32_t S = 4, cap = 32768;
   uint32_t depth = 4096, steps = 48, rounds = 3;
   std::vector<uint32_t> depths;
   std::vector<std::string> only;
-  uint32_t list_ab = 0, profile_rows = 0;
-  std::string table = "order";
+  uint32_t profile_rows = 0, wide = 0;
+  bool moe_ab = false;
   for (int i = 2; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
     if (a == "--kv") kv_s = next();
-    else if (a == "--slots") slots = parse_list(next());
+    else if (a == "--seqs") S = uint32_t(std::stoul(next()));
+    else if (a == "--cap") cap = uint32_t(std::stoul(next()));
     else if (a == "--depth") depth = uint32_t(std::stoul(next()));
     else if (a == "--steps") steps = uint32_t(std::stoul(next()));
     else if (a == "--rounds") rounds = uint32_t(std::stoul(next()));
     else if (a == "--depths") depths = parse_list(next());
-    else if (a == "--list-ab") list_ab = uint32_t(std::stoul(next()));
     else if (a == "--profile-rows") profile_rows = uint32_t(std::stoul(next()));
-    else if (a == "--table") table = next();
+    else if (a == "--wide") wide = uint32_t(std::stoul(next()));
+    else if (a == "--moe-ab") moe_ab = true;
     else if (a == "--arms") {
       const std::string l = next();
       for (size_t b = 0; b <= l.size();) {
@@ -210,16 +218,8 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (table != "order" && table != "scatter") {
-    std::fprintf(stderr, "--table expects order or scatter, got '%s'\n", table.c_str());
-    return 2;
-  }
-  if ((table == "scatter" || list_ab) && slots.size() < 2) {
-    std::fprintf(stderr, "--table scatter and --list-ab need two slots or more (one slot has no page table)\n");
-    return 2;
-  }
-  if (table == "scatter" && list_ab) {   // the contiguous lists read the KV where an in-order table puts it
-    std::fprintf(stderr, "--list-ab compares against the contiguous lists: it needs --table order\n");
+  if (S < 2 || cap % runtime::kKvPage != 0) {
+    std::fprintf(stderr, "--seqs needs two sequences or more and --cap whole KV pages of %u\n", runtime::kKvPage);
     return 2;
   }
   const runtime::KvCache kv = runtime::parse_kv_cache(kv_s.c_str());
@@ -228,33 +228,14 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "tests/golden/prompts/long32k.ids not found (run from the source tree)\n");
     return 2;
   }
-  const uint32_t total = runtime::slots_kv_len(slots);   // plan 19v3b Task 0: whole KV pages a slot
-  const uint32_t S = uint32_t(slots.size());
+  const uint32_t total = S * cap;   // the pool: every sequence at its cap at once
   l0::Context ctx(0);
   Engine e(ctx, loader::load(ctx, argv[1], total, /*mtp=*/true, loader::LmHeadForm::Int8), total, false, kv, nullptr,
-           slots);
+           std::vector<uint32_t>(S, cap), total / runtime::kKvPage);
   e.prepare_prefill();
-  if (table == "scatter") {
-    std::vector<std::vector<uint32_t>> virt(S);   // each slot's virtual pages
-    for (uint32_t q = 0; q < S; ++q)
-      for (uint32_t i = 0; i < runtime::kv_pages(e.slot_len(q)); ++i) virt[q].push_back(e.slot_base(q) / runtime::kKvPage + i);
-    std::vector<uint32_t> order;   // virtual pages in physical order
-    for (size_t i = 0; i < std::max(virt[0].size(), virt[1].size()); ++i) {
-      if (i < virt[0].size()) order.push_back(virt[0][i]);
-      if (i < virt[1].size()) order.push_back(virt[1][i]);
-    }
-    for (uint32_t q = 2; q < S; ++q)
-      for (size_t i = 0; i < virt[q].size(); ++i) order.push_back(q == 3 ? virt[q][virt[q].size() - 1 - i] : virt[q][i]);
-    std::vector<uint32_t> scattered(order.size());
-    for (uint32_t phys = 0; phys < order.size(); ++phys) scattered[order[phys]] = phys;
-    e.set_kv_page_table(scattered);
-    std::printf("page table (scatter), %zu pages, virtual page -> physical:", scattered.size());
-    for (size_t v = 0; v < scattered.size(); ++v) std::printf(" %u", scattered[v]);
-    std::printf("\n");
-  }
-  std::printf("probe_slots_speed: %u slots (%s), %s KV, depth %u, %u steps an arm, median of %u rounds, %s page table\n%s\n",
-              S, runtime::slot_layout_name(slots).c_str(), runtime::kv_cache_name(kv), depth, steps, rounds,
-              table.c_str(), e.memory_line().c_str());
+  std::printf("probe_slots_speed: %u sequences up to %u sharing %u KV pages, %s KV, depth %u, %u steps an arm, median of "
+              "%u rounds\n%s\n",
+              S, cap, e.kv_pool_pages(), runtime::kv_cache_name(kv), depth, steps, rounds, e.memory_line().c_str());
   if (depths.empty()) depths.assign(S, depth);
   if (depths.size() != S) {
     std::fprintf(stderr, "--depths names %zu slots, the engine has %u\n", depths.size(), S);
@@ -268,56 +249,214 @@ int main(int argc, char** argv) {
     e.prefill(ids);
     std::printf("prefill: slot %u, %u ids in %.2f s\n", q, depths[q], ms_since(t0) / 1000);
   }
-  if (list_ab) {
-    l0::Queue q(ctx);
-    l0::Fence f(q);
-    auto one = [&](runtime::CapturedStep& l) {
-      const Clock::time_point t0 = Clock::now();
-      q.execute(l.list, &f);
-      f.wait();
-      return ms_since(t0);
+  if (wide) {
+    struct W {
+      uint32_t rows = 0;   // 0: slot 0's plain step
+      bool all = false;
+      std::vector<double> ms;
+      bool via16 = false;    // PERF-120: the step on the 16-row list (Engine::probe_rows_wide_from)
+      bool per_row = false;  // PERF-120 --moe-ab: the lists with the per-row MoE block
     };
-    // Medians of N replays of each, alternating (A B, then B A), after 8 warm-up pairs.
-    auto ab = [&](runtime::CapturedStep& la, runtime::CapturedStep& lb) {
-      for (int i = 0; i < 8; ++i) one(la), one(lb);
-      std::vector<double> ta, tb;
-      for (uint32_t i = 0; i < list_ab; ++i) {
-        if (i % 2) {
-          tb.push_back(one(lb));
-          ta.push_back(one(la));
-        } else {
-          ta.push_back(one(la));
-          tb.push_back(one(lb));
+    std::vector<W> ws{{0, false, {}}};
+    moe_ab = moe_ab && e.model().desc->is_moe() && e.max_rows() > Engine::kMaxRows;
+    for (const uint32_t rows : {4u, 8u, 16u, 32u})
+      if (rows % S == 0 && rows / S >= 1 && rows / S <= Engine::kMaxRows && rows <= e.max_rows()) {
+        ws.push_back({rows, true, {}});   // the served case: every run committed whole
+        if (rows <= Engine::kMaxRows && e.max_rows() > Engine::kMaxRows) ws.push_back({rows, true, {}, true});
+        if (rows > Engine::kMaxRows && moe_ab) ws.push_back({rows, true, {}, false, true});
+      }
+    size_t fid = 0;
+    auto one = [&](W& w) {
+      if (w.rows == 0) {
+        e.select(0);
+        const Clock::time_point t0 = Clock::now();
+        e.verify(0);
+        const double ms = ms_since(t0);
+        e.commit(0, e.verify_ids()[0]);
+        return ms;
+      }
+      const uint32_t k = w.rows / S - 1;
+      std::vector<Engine::Run> runs;
+      for (uint32_t q = 0; q < S; ++q) {
+        e.select(q);
+        for (uint32_t j = 1; j <= k; ++j) e.control()->cur_token[j] = file[fid++ % file.size()];
+        runs.push_back({q, k});
+      }
+      e.probe_rows_wide_from(w.via16 ? 2 : 0);
+      const Clock::time_point t0 = Clock::now();
+      e.verify_rows(runs);
+      const double ms = ms_since(t0);
+      e.probe_rows_wide_from(0);
+      const std::vector<uint32_t> out(e.rows_ids(), e.rows_ids() + w.rows);
+      for (uint32_t q = 0; q < S; ++q) {
+        e.select(q);
+        const uint32_t j = w.all ? k : 0;
+        e.commit(j, out[q * (k + 1) + j]);
+      }
+      return ms;
+    };
+    // --moe-ab: a round's halves on the union lists and on the per-row ones (A B, then B A); a wide arm in its own half
+    const auto half = [&](bool per_row) {
+      if (moe_ab) e.probe_rows_moe_union(!per_row);
+      return [per_row](const W& w) { return w.rows <= Engine::kMaxRows || w.per_row == per_row; };
+    };
+    for (const bool pr : {false, true}) {
+      const auto in = half(pr);
+      for (W& w : ws)
+        if (in(w))
+          for (int i = 0; i < 4; ++i) one(w);
+      if (!moe_ab) break;
+    }
+    for (uint32_t r = 0; r < rounds; ++r)
+      for (uint32_t hf = 0; hf < (moe_ab ? 2u : 1u); ++hf) {
+        const auto in = half((r + hf) % 2 == 1);
+        for (uint32_t i = 0; i < wide; ++i)
+          for (size_t a = 0; a < ws.size(); ++a) {   // interleaved: every arm once a step, the order rotated
+            W& w = ws[(a + i + r) % ws.size()];
+            if (in(w)) w.ms.push_back(one(w));
+          }
+      }
+    if (moe_ab) e.probe_rows_moe_union(true);
+    const double base = median(ws[0].ms);
+    std::printf("\nT(W): one row step of %u slots x K = W / %u - 1, every arm once a step (rotated), %u steps x %u rounds; "
+                "slot 0 ends at %u\n| rows | committed | list | ms (median) | x the plain step |\n|---|---|---|---|---|\n",
+                S, S, wide, rounds, (e.select(0), e.pos()));
+    for (const W& w : ws)
+      std::printf("| %s | %s | %s | %.2f | %.3f |\n", w.rows ? std::to_string(w.rows).c_str() : "1 (plain)",
+                  w.rows ? (w.all ? "all" : "0") : "-",
+                  w.via16 ? "the 16-row list" : w.per_row ? "per-row MoE" : "engine",
+                  median(w.ms), median(w.ms) / base);
+    // PERF-120 (Ornith): the distinct routed experts a step of W rows reads, mean a layer, from the route rows of one
+    // step at each width (moe.cl reads every row's TOP_K experts on its own: W x TOP_K expert reads a layer)
+    if (const model::ModelDesc& d = *e.model().desc; d.is_moe()) {
+      const runtime::MoeScratchLayout ml = runtime::moe_scratch_layout(d);
+      l0::CmdList imm = l0::CmdList::immediate(ctx);
+      std::printf("\ndistinct routed experts a layer (of %u, top %u) in one row step:\n| rows | distinct | reads |\n"
+                  "|---|---|---|\n", d.moe.experts, d.moe.top_k);
+      for (W& w : ws) {
+        if (!w.rows || w.via16 || w.per_row) continue;
+        one(w);
+        std::vector<uint32_t> route(size_t(w.rows) * kernels::moe_route::kWords);
+        double sum = 0;
+        for (uint32_t l = 0; l < d.layers; ++l) {
+          imm.copy(route.data(), e.buffers().moe->as<uint8_t>() + ml.route_at(l), route.size() * 4);
+          std::vector<bool> seen(d.moe.experts, false);
+          uint32_t n = 0;
+          for (uint32_t r = 0; r < w.rows; ++r)
+            for (uint32_t k = 0; k < d.moe.top_k; ++k) {
+              const uint32_t x = route[size_t(r) * kernels::moe_route::kWords + kernels::moe_route::kIds + k];
+              if (x < d.moe.experts && !seen[x]) seen[x] = true, ++n;
+            }
+          sum += n;
+        }
+        std::printf("| %u | %.1f | %u |\n", w.rows, sum / d.layers, w.rows * d.moe.top_k);
+      }
+    }
+    // PERF-120: the key blocks' arithmetic - one step of 8 and of 32 rows from the same state, each count against
+    // the engine's lists
+    {
+      std::vector<l0::Mem> st;
+      std::vector<uint32_t> pos(S), pend(S);
+      for (uint32_t q = 0; q < S; ++q) {
+        e.select(q);
+        e.flush_projection();
+        pos[q] = e.pos();
+        pend[q] = e.control()->cur_token[0];
+        st.emplace_back(ctx, l0::MemKind::Host, e.state_bytes());
+        e.save_state(st.back().ptr());
+      }
+      l0::CmdList imm = l0::CmdList::immediate(ctx);
+      for (const uint32_t rows : {8u}) {
+        if (e.max_rows() <= Engine::kMaxRows || rows % S) continue;
+        const uint32_t k = rows / S - 1;
+        std::vector<std::vector<float>> logits;
+        std::vector<std::vector<uint32_t>> ids;
+        const std::vector<uint32_t> ts = {0, 1};   // 1: on the 16-row list
+        for (const uint32_t t : ts) {
+          std::vector<Engine::Run> runs;
+          for (uint32_t q = 0; q < S; ++q) {
+            e.select(q);
+            e.load_state(st[q].ptr(), pos[q]);
+            e.control()->cur_token[0] = pend[q];
+            for (uint32_t j = 1; j <= k; ++j) e.control()->cur_token[j] = file[(997 * q + j) % file.size()];
+            runs.push_back({q, k});
+          }
+          e.probe_rows_wide_from(t ? 2 : 0);
+          e.verify_rows(runs);
+          e.probe_rows_wide_from(0);
+          ids.emplace_back(e.rows_ids(), e.rows_ids() + rows);
+          logits.emplace_back(size_t(rows) * model::Qwen35::kVocab);
+          imm.copy(logits.back().data(), e.rows_logits_device(), logits.back().size() * 4);
+        }
+        for (size_t t = 1; t < ts.size(); ++t) {
+          uint32_t same = 0;
+          double worst = 0;
+          for (size_t i = 0; i < rows; ++i) same += ids[t][i] == ids[0][i];
+          for (size_t i = 0; i < logits[0].size(); ++i)
+            worst = std::max(worst, double(std::fabs(logits[t][i] - logits[0][i])));
+          std::printf("%u rows on the 16-row list against their own, from the same state: %u of %u ids equal, "
+                      "max |logit diff| %.3e\n", rows, same, rows, worst);
         }
       }
-      return std::pair{median(ta), median(tb)};
-    };
-    // Spec 31 Task 2: the 8-row verify - slot 0's and slot 1's three drafts each, one verify_rows step staging the row
-    // table and the controls, then the row list at 8 rows built twice on that binding, contiguous (no page table: the
-    // row builds' unpaged twins) and paged (the engine's), replayed. Nothing in a row list reads a Control's pos, so
-    // every replay runs the same rows; none is committed. First, so the decode lists below start at slot 0's pos.
-    for (uint32_t s = 0; s < 2; ++s) {
-      e.select(s);
-      e.draft(Engine::kMaxDraft);
     }
-    e.verify_rows({{0, Engine::kMaxDraft}, {1, Engine::kMaxDraft}});
-    runtime::BatchRowsBind contiguous = e.rows_bind();
-    contiguous.pages = nullptr;
-    runtime::CapturedStep ra = runtime::build_rows(ctx, e.model(), e.buffers(), contiguous, Engine::kMaxRows),
-                          rb = runtime::build_rows(ctx, e.model(), e.buffers(), e.rows_bind(), Engine::kMaxRows);
-    const auto [va, vb] = ab(ra, rb);
-    std::printf("list-ab verify: %u rows (slot 0 at %u, slot 1 at %u, %u drafts each), %u replays an arm: contiguous "
-                "%.3f ms, paged %.3f ms, paged / contiguous %.4f\n", Engine::kMaxRows, depths[0], depths[1],
-                Engine::kMaxDraft, list_ab, va, vb, vb / va);
-    e.select(0);
-    runtime::SlotBind paged;
-    paged.pages = e.kv_page_table_device();
-    runtime::CapturedStep la = runtime::build(ctx, e.model(), e.buffers()),
-                          lb = runtime::build(ctx, e.model(), e.buffers(), nullptr, nullptr, 1, {}, paged);
-    e.control()->n_active = 1;
-    const auto [ma, mb] = ab(la, lb);
-    std::printf("list-ab: slot 0 at %u..%u, %u steps an arm: contiguous %.3f ms, paged %.3f ms, paged / contiguous "
-                "%.4f\n", depths[0], e.pos(), list_ab, ma, mb, mb / ma);
+    if (!profile_rows) return 0;
+    // With --profile-rows N: each width's list built with per-launch events over the table the last verify_rows of that
+    // width staged (the session is not committed after), N replays - ms a step by kernel family (the variant with its
+    // M taken out), summed over the layers. Events add a flush each: shares, not times.
+    l0::Queue pq(ctx);
+    l0::Fence pf(pq);
+    const std::regex m_part("_M[0-9]+|_W[0-9]+");
+    const std::string head = "L" + std::to_string(e.model().desc->layers) + " ";
+    std::map<std::string, std::map<uint32_t, double>> fam;
+    std::map<uint32_t, double> tot;
+    std::vector<uint32_t> Ws;
+    for (const W& w : ws)
+      if (w.rows && !w.via16 && !w.per_row) Ws.push_back(w.rows);
+    for (const uint32_t rows : Ws) {
+      const uint32_t k = rows / S - 1;
+      std::vector<Engine::Run> runs;
+      for (uint32_t q = 0; q < S; ++q) {
+        e.select(q);
+        for (uint32_t j = 1; j <= k; ++j) e.control()->cur_token[j] = file[fid++ % file.size()];
+        runs.push_back({q, k});
+      }
+      e.verify_rows(runs);
+      runtime::ProfileEvents prof(ctx);
+      runtime::BatchRowsBind rb = e.rows_bind();
+      if (rows > Engine::kMaxRows) {   // the engine's wide lists' binding (Engine::build_rows_wide)
+        rb.attn_blocks = Engine::kRowsAttnBlocks;
+        rb.moe_union = e.model().desc->is_moe();
+      }
+      runtime::CapturedStep l = runtime::build_rows(ctx, e.model(), e.buffers(), rb, rows, &prof);
+      std::vector<double> acc(l.kernel_count, 0.0);
+      for (uint32_t i = 0; i < profile_rows + 4; ++i) {
+        for (l0::Event& ev : prof.events) ev.reset();
+        pq.execute(l.list, &pf);
+        pf.wait();
+        if (i >= 4)
+          for (size_t j = 0; j < l.kernel_count; ++j) acc[j] += prof.events[j].duration_us();
+      }
+      for (size_t j = 0; j < l.kernel_count; ++j) {
+        const std::string& lb = l.labels[j];
+        const size_t a = lb.find(' ');
+        const std::string key = std::regex_replace(lb.substr(a + 1), m_part, "") + (lb.rfind(head, 0) == 0 ? " (head)" : "");
+        fam[key][rows] += acc[j] / profile_rows / 1e3;
+        tot[rows] += acc[j] / profile_rows / 1e3;
+      }
+    }
+    std::printf("\nprofiled row lists (%u slots x K = W / %u - 1; ms a step, events add a flush each):\n| kernel |", S, S);
+    for (const uint32_t rows : Ws) std::printf(" W=%u |", rows);
+    std::printf("\n|---|");
+    for (size_t i = 0; i < Ws.size(); ++i) std::printf("---|");
+    std::printf("\n");
+    for (auto& [name, v] : fam) {
+      std::printf("| %s |", name.c_str());
+      for (const uint32_t rows : Ws) std::printf(" %.3f |", v[rows]);
+      std::printf("\n");
+    }
+    std::printf("| sum |");
+    for (const uint32_t rows : Ws) std::printf(" %.3f |", tot[rows]);
+    std::printf("\n");
     return 0;
   }
   if (profile_rows) {
@@ -367,12 +506,13 @@ int main(int argc, char** argv) {
     arms.push_back(arm("1 plain s" + std::to_string(q), 1, 0));
     arms.back().slot = q;
   }
-  // n slots: plain; K the same everywhere (rows draft and, for the record, own drafts); and the 8-row budget's two
+  // n slots: plain; K the same everywhere (rows draft and, for the record, own drafts) within the engine's rows; and the
+  // 8-row budget's two
   // allocations at 3 / 4 slots - the oldest request first (3, then what is left) or one at a time round the rows.
   for (uint32_t n = 2; n <= S; ++n) {
     arms.push_back(rows_arm(std::vector<uint32_t>(n, 0), false));
     for (uint32_t k = 1; k <= 3; ++k)
-      if (n * (k + 1) <= Engine::kMaxRows) {
+      if (n * (k + 1) <= e.max_rows()) {   // plan 40a Task 5: 16 rows (K 3 x 4) where the wide lists exist
         arms.push_back(rows_arm(std::vector<uint32_t>(n, k), false));
         if (k == 1) arms.push_back(rows_arm(std::vector<uint32_t>(n, k), true));
       }

@@ -66,14 +66,18 @@ CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w
 // Plan 19v3b, the batched draft: one block a slot of `controls` (the engine's slots, 2..4; slot z = session z), the rows
 // and each block's anchor, pos, K, temperature and seed from DFlashBuffers::seqs (set_draft_rows); the same walk with the
 // block-aware launches in their SEQS form (df_embed, the convolutions, df_qkv_prep, df_attn_part / reduce, df_select:
-// each block's drafts into its slot's Control and its session's readback). draft_launches(d) launches.
+// each block's drafts into its slot's Control and its session's readback). draft_launches(d) launches. `rows` (plan 40a
+// Task 4): the list's M - kM (the blocks packed), or kSeqsRows (block i at rows kM i ..: the int4 drafter with the
+// 2-bit candidate head, its head at the kSeqsRows - 1 rows past row 0; the scratch sized for it, DFlashBuffers::draft_rows).
 CapturedStep build_dflash_draft_seqs(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
                                      DFlashBuffers& b, const std::vector<const void*>& controls,
-                                     const CaptureOptions& opt = {});
+                                     const CaptureOptions& opt = {}, uint32_t rows = kernels::dflash::kM);
 // Plan 19v3b, the rows projection: build_dflash_project's walk over DFlashBuffers::rows_taps (the row lists' taps), its
 // ring store in the SEQS form - each row of DFlashBuffers::proj_seqs' slots committed into that slot's session ring.
+// `rows` (plan 40a Task 4): kM, or kSeqsRows (the int4 drafter's) - the row steps' rows it projects.
 CapturedStep build_dflash_project_rows(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
-                                       uint32_t slots, const CaptureOptions& opt = {});
+                                       uint32_t slots, const CaptureOptions& opt = {},
+                                       uint32_t rows = kernels::dflash::kM);
 CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
                                   const CaptureOptions& opt = {}, uint32_t session = 0);
 bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const loader::DFlashWeights& w,

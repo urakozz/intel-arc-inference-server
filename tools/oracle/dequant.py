@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The reference meaning of the int4 GPTQ bits, shared with the C++ loader.
+"""CPU decoders for GPTQ int4 and Inkling expert formats.
 
 dequant_gptq computes w = (q - 8) * scale with the product in fp32 and ONE
 cast to bf16 - the same single-rounding path as common::f32_to_bf16 on the
@@ -44,6 +44,29 @@ def dequant_gptq(qweight: torch.Tensor, scales: torch.Tensor, group_size: int = 
     w32 = (q.to(torch.float32) - 8.0) * scales.to(torch.float32).repeat_interleave(group_size, dim=0)
     return w32.to(torch.bfloat16)
 
+
+def nvfp4_to_f32(codes, scales, amax, denominator):
+    """Release byte order, E4M3FN per 16 K values and one FP32 factor per expert."""
+    raw_scales = scales.view(torch.uint8)
+    if (raw_scales >= 127).any():
+        raise ValueError("NVFP4 has a negative or NaN E4M3 scale")
+    magnitudes = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6.,
+                               -0., -.5, -1., -1.5, -2., -3., -4., -6.])
+    nibbles = torch.stack((codes & 15, codes >> 4), dim=-1).flatten(-2).long()
+    outer = amax.float() / denominator.float()
+    if not (torch.isfinite(outer) & (outer > 0) & (denominator > 0)).all():
+        raise ValueError("NVFP4 has an invalid amax or outer scale denominator")
+    return (magnitudes[nibbles] * scales.float().repeat_interleave(16, dim=-1)
+            * outer.reshape(outer.shape + (1,) * (nibbles.ndim - outer.ndim)))
+
+
+def mxfp8_to_f32(values, scales):
+    """E4M3FN weights and stored per-row E8M0 scale bytes."""
+    if ((values.view(torch.uint8) & 127) == 127).any():
+        raise ValueError("MXFP8 has an E4M3 NaN weight")
+    if (scales == 255).any():
+        raise ValueError("MXFP8 has an E8M0 NaN scale")
+    return torch.ldexp(values.float(), (scales.int() - 127).repeat_interleave(32, dim=-1))
 
 def main() -> None:
     ap = argparse.ArgumentParser()

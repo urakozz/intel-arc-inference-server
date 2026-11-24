@@ -10,6 +10,9 @@ inline constexpr unsigned kWg = 256;       // df_prep's, df_topk's, df_select's 
 inline constexpr unsigned kAttnPb = 128, kAttnWg = 128;   // df_attn_part: ring offsets per block, its work-group
 // Plan 19v3b: the batched draft's blocks - one a sequence slot of a card (runtime::SlotDims::kMaxSeqs).
 inline constexpr unsigned kSeqs = 4;
+// Plan 40a Task 4: the batched draft's widest list - kSeqs blocks of kM rows, block z at rows kM z .. (the int4 drafter
+// with the candidate head; the other forms keep one list of kM rows).
+inline constexpr unsigned kSeqsRows = kSeqs * kM;
 inline constexpr unsigned kTopkChunk = 4096;              // df_topk_stage1's logits per work-group
 
 // Grid split-K for the int4 layout-1 block linears. Consumers fold these slices inside their existing launch.

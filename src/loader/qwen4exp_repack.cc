@@ -222,6 +222,10 @@ Q4LayerBytes Q4HostLayer::bytes() const {
   return b;
 }
 
+bool q4_ple_shard(const Qwen4ExpDesc& d, const std::string& name) {
+  return starts_with(name, Qwen4ExpDesc::layer_prefix(d.ple_layer) + kPleShards);
+}
+
 Q4Checkpoint::Q4Checkpoint(const Qwen4ExpDesc& d, const SafetensorsSet& set) : d_(d), set_(set) {}
 
 void Q4Checkpoint::check_names(bool mtp) const {

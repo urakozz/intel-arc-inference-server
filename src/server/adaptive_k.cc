@@ -141,6 +141,50 @@ AdaptiveK::AdaptiveK(const AdaptiveKOptions& opts)
     throw std::invalid_argument("AdaptiveK: the prior needs 0 < prior <= 1 and a weight > 0");
 }
 
+double RowCost::verify(uint32_t rows) const {
+  if (rows <= 8) return 1.0 + (v8 - 1.0) * (rows > 1 ? rows - 1 : 0) / 7.0;
+  return rows <= 16 ? v16 : v32;
+}
+
+double RowCost::step(const std::vector<uint32_t>& ks) const {
+  uint32_t rows = 0, deepest = 0, drafting = 0;
+  for (uint32_t k : ks) {
+    rows += k + 1;
+    deepest = std::max(deepest, k);
+    if (k > 0) drafting += k + 1;
+  }
+  const double drafts = !dflash ? mtp_draft * deepest : drafting == 0 ? 0.0 : drafting <= 8 ? dflash8 : dflash32;
+  return verify(rows) + drafts;
+}
+
+std::vector<uint32_t> deal_by_cost(const std::vector<double>& alpha, const std::vector<uint32_t>& want, uint32_t budget,
+                                   const std::function<double(const std::vector<uint32_t>&)>& cost) {
+  std::vector<uint32_t> k(alpha.size(), 0);
+  const auto rate = [&] {
+    double e = 0;
+    for (size_t n = 0; n < k.size(); ++n) e += AdaptiveK::expected_ids(alpha[n], k[n]);
+    return e / cost(k);
+  };
+  std::vector<uint32_t> best = k;
+  double best_rate = rate();
+  for (size_t rows = k.size(); rows < budget; ++rows) {
+    size_t pick = k.size();
+    double gain = -1;
+    for (size_t n = 0; n < k.size(); ++n)
+      if (k[n] < want[n] && std::pow(alpha[n], k[n] + 1.0) > gain) {
+        gain = std::pow(alpha[n], k[n] + 1.0);
+        pick = n;
+      }
+    if (pick == k.size()) break;
+    ++k[pick];
+    if (const double r = rate(); r > best_rate) {
+      best_rate = r;
+      best = k;
+    }
+  }
+  return best;
+}
+
 double AdaptiveK::expected_ids(double alpha, uint32_t k) {
   if (alpha >= 1.0) return k + 1.0;
   return (1.0 - std::pow(alpha, static_cast<double>(k + 1))) / (1.0 - alpha);

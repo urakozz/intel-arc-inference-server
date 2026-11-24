@@ -628,7 +628,7 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
       t.rank.insert(t.rank.end(), o.begin(), o.end());
     }
     t.source = counts ? "the routing profile's most-routed experts, the same count a layer"
-                      : "id order (no routing profile beside the checkpoint)";
+                      : "id order (no routing profile in or beside the snapshot)";
   } else if (forced == "all" || forced == "none") {
     std::fill(t.vram.begin(), t.vram.end(), uint8_t(forced == "all"));
   } else if (forced == "adversarial") {

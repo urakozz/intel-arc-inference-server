@@ -124,8 +124,10 @@ inline std::string pf_flash_attn_g_variant(unsigned q = kRefFaQHeads, unsigned k
 // Spec 12b (`--kv-cache int8`, src/kernels/kv8.cl): the prefill path over the int8 KV
 // cache - the writer (pf_attn_prep_q16's chain, then rotate and quantise), the flash
 // attention reading int8 + scales, and the gate that un-rotates first. Additive.
-inline std::string pf_attn_prep_kv8_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
-  return "pf_attn_prep_kv8" + fa_suffix(q, kv);
+// PERF-107: `own` names the l0-int8 prompt pass's twins for a split chunk (kv8.cl KV8_OWN): the writer also stores the
+// chunk's rows as bf16 into the widened scratch, the split readers take those rows from it.
+inline std::string pf_attn_prep_kv8_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads, bool own = false) {
+  return "pf_attn_prep_kv8" + std::string(own ? "_own" : "") + fa_suffix(q, kv);
 }
 inline std::string pf_flash_attn_kv8_variant(unsigned q = kRefFaQHeads,
                                              unsigned kv = kRefFaKvHeads) {
@@ -157,11 +159,13 @@ inline std::string pf_flash_attn_kv8_raw_pair_i8s_variant(unsigned q = kRefFaQHe
 inline std::string pf_flash_attn_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn_split" + fa_suffix(q, kv);
 }
-inline std::string pf_flash_attn_kv8_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
-  return "pf_flash_attn_kv8_split" + fa_suffix(q, kv);
+inline std::string pf_flash_attn_kv8_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads,
+                                                   bool own = false) {
+  return "pf_flash_attn_kv8_split" + std::string(own ? "_own" : "") + fa_suffix(q, kv);
 }
-inline std::string pf_flash_attn_kv8_raw_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
-  return "pf_flash_attn_kv8_raw_split" + fa_suffix(q, kv);
+inline std::string pf_flash_attn_kv8_raw_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads,
+                                                       bool own = false) {
+  return "pf_flash_attn_kv8_raw_split" + std::string(own ? "_own" : "") + fa_suffix(q, kv);
 }
 inline std::string pf_flash_merge_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_merge" + fa_suffix(q, kv);

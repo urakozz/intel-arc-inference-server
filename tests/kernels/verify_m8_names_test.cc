@@ -64,7 +64,8 @@ void verify_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& 
   out.insert(kernels::argmax_stage1_variant(M, d.vocab_used));
   out.insert(kernels::argmax_stage2_variant());
   // head_kv_fill (head_front)
-  out.insert(kernels::prep_norm_finish_strided_variant(M, H, kG, kG, 2 * H));
+  out.insert(kernels::prep_res_fold_pair_variant(M, H, kG));             // PERF-84: both pre-fc norms
+  out.insert(kernels::prep_norm_finish_pair_variant(M, H, kG, kG));
   out.insert(bf16(M, 2 * H, H));                                          // fc
   out.insert(kernels::prep_res_fold_zero_variant(M, H, kG));
   out.insert(bf16(M, H, d.fa_qkv_n()));                                   // q||k||v

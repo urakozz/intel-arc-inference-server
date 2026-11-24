@@ -65,6 +65,7 @@ TpCardSizes tp_card_sizes(const model::ModelDesc& card, const tp::Layout& L, boo
   TpCardSizes s;
   s.land = L.total_bytes();
   s.send_ctr = s.fold_ctr = L.counter_bytes();
+  if (folded) s.send_ctr += size_t(L.fold_g) * 4;   // PERF-44: the folded tp_send tail's arrival counters
   s.state = tp::kStateWords * 4;
   if (folded) s.own = size_t(tp::kMRows) * card.hidden * 4;
   if (tap) s.tap = size_t(card.layers) * card.hidden * 2;

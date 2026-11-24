@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <print>
 #include <stdexcept>
 #include <utility>
 
@@ -136,6 +138,11 @@ bool PrefixCache::evict_one() {
     if (victim == nullptr || e->lru < victim->lru) victim = e;
   }
   if (victim == nullptr) return false;
+  // A dropped snapshot is a prefix cache miss for the next prompt that would have restored from it: say so.
+  std::print(stderr, "prefix cache: full - dropped the least recently used {} ending at {:d} ids ({:.1f} MB) for a new entry; "
+                     "{:d} entries left, {:.2f} of {:.2f} GB\n",
+             victim->is_block ? "block" : "snapshot", victim->end, victim->bytes / 1e6, all_.size() - 1,
+             (used_ - victim->bytes) / 1e9, budget_ / 1e9);
   remove(victim);
   return true;
 }

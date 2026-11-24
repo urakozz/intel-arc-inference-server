@@ -304,8 +304,11 @@ inline bool run_start(__global const uint* rows, uint m) {
 // cells of `state`; the pending rows it reads (parity par) are written by no work-group of this launch (they write
 // par ^ 1); the replay's kf rows reach SLM before any work-item uses them.
 #ifdef DEFERRED
-#if defined(SPEC_SLOTS) || defined(BATCH_ROWS)
-#error "gdn_step: DEFERRED, SPEC_SLOTS and BATCH_ROWS are three different builds"
+#ifdef SPEC_SLOTS
+#error "gdn_step: DEFERRED and SPEC_SLOTS are two different builds"
+#endif
+#if defined(BATCH_ROWS) && (!defined(BROW_PEND) || !defined(PEND_SEQ) || defined(ROW0))
+#error "gdn_step BATCH_ROWS with DEFERRED: BROW_PEND and PEND_SEQ (bytes a sequence's pending rows) must be defined, no ROW0"
 #endif
 #if !defined(CTRL_PEND) || !defined(PEND_PAR)
 #error "gdn_step DEFERRED: CTRL_PEND and PEND_PAR (bytes a parity) must be defined"
@@ -335,6 +338,31 @@ inline bool run_start(__global const uint* rows, uint m) {
 #define PEND_V_OFF (PR * KHEADS * DIM)             /* ushorts: kf [PR][KHEADS][DIM], then v [PR][HEADS][DIM] */
 #define PEND_S_OFF (PR * (KHEADS + HEADS) * DIM / 2)   /* floats: then {decay, beta} [PR][HEADS] */
 inline __global ushort* pend_at(__global uchar* p, uint par) { return (__global ushort*)(p + (size_t)par * PEND_PAR); }
+#endif
+// BATCH_ROWS with DEFERRED (plan 40a Task 2): a row step whose sequences keep their state by replay. Each run - a
+// sequence's rows - is the one-sequence DEFERRED build's step on that sequence: at its first row the tile is read from
+// its ONE state (index `src`), the sequence's committed rows are replayed from its own pending rows (`pend` + slot x
+// PEND_SEQ, the layer's slice there; count and parity from the row's word BROW_PEND, the sequence's Control::gdn_pend
+// as the host copied it) and the tile goes back, then the run's rows run on it and their recurrence inputs go to the
+// sequence's other parity at the run's row index. No per-row state is written (`dst` is unused). The replay, the
+// batched norms and the recurrence are the DEFERRED build's operations in its order, so a run is bitwise what that
+// sequence's own DEFERRED verify list computes for the same rows. Safe without a cross-work-group barrier as both
+// builds are: a work-item reads and writes only its own cells of a state, a run's pending rows (parity par) are
+// written by no work-group of this launch, and two runs never share a sequence (check_rows).
+//
+// WIDE_ROWS (plan 40a Task 3; with BATCH_ROWS and DEFERRED at M 8 or 16): the row lists of 16 and 32 rows. Their SLM
+// at 32 rows (the rows' q / k / v and norms) passes a work-group's 64 KB, so the build stays at M rows a work-group and
+// the list's runs (each at most 8 rows) go in chunks of whole runs: grid dimension 2 is the chunk, chunk z the z-th of
+// the runs packed greedily in row order into at most M rows (a chunk closes before the run that would pass M). Every
+// work-group finds its chunk from the table itself (n_active <= WIDE_ROWS rows) and runs it as the M build runs its
+// rows - the partials, a||b, gdn_o and the table at the chunk's first row - so a run's arithmetic is the deferred row
+// build's at any width. Task 3's lever: M 8 - a work-group a run of up to 8 rows (34 KB of SLM, three work-groups an Xe
+// core) instead of two runs at M 16 (49 KB, two), which doubled the 32-row step's waves; the host launches a chunk a
+// sequence (a chunk holds at least one run).
+#ifdef WIDE_ROWS
+#if !defined(BATCH_ROWS) || !defined(DEFERRED) || (M != 8 && M != 16)
+#error "gdn_step WIDE_ROWS: the deferred row build at M 8 or 16"
+#endif
 #endif
 
 // ---------------------------------------------------------------------------
@@ -450,6 +478,28 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 #else
   uint n_act = ctrl[CTRL_NACT];
 #endif
+#ifdef WIDE_ROWS
+  {   // this work-group's chunk of whole runs (header, WIDE_ROWS); uniform across the work-group
+    const uint n_tot = min(n_act, (uint)WIDE_ROWS), z = get_group_id(2);
+    uint c0 = 0, ci = 0, m = 0;
+    while (m < n_tot) {
+      uint m1 = m + 1;
+      while (m1 < n_tot && !run_start(rows, m1)) ++m1;
+      if (m1 - c0 > M) {
+        if (ci == z) break;
+        ++ci;
+        c0 = m;
+      }
+      m = m1;
+    }
+    if (ci != z) return;
+    n_act = m - c0;
+    rows += (size_t)c0 * BROW_WORDS;
+    qkvz_partials += (size_t)c0 * QKVZ_N;   // QKVZ_S 1: the partials are [rows][QKVZ_N]
+    ab_out += (size_t)c0 * AB_STRIDE;
+    gdn_o += (size_t)c0 * HEADS * DIM;
+  }
+#endif
   if (n_act > M) n_act = M;                // the compiled variant is the ceiling
 #ifndef DEFERRED
   if (n_act == 0) return;                  // uniform across the work-group
@@ -461,7 +511,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // are its own registers and only the pre-step history touches the ring.
   // -------------------------------------------------------------------------
   const uint kh = h / V_PER_K;             // repeat_interleave(·, V_PER_K): v-head -> k-head
-#ifdef DEFERRED
+#if defined(DEFERRED) && !defined(BATCH_ROWS)
   // The previous step's committed rows (header, DEFERRED): their kf into SLM now, read after section 1's barrier.
   const uint pend_word = ctrl[CTRL_PEND];
   const uint par = (pend_word >> 8) & 1u;
@@ -578,7 +628,7 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   const float negA = gdn_small[NEGA_OFF + h];      // the loader's -exp(A_log), fp32
   const float dt_bias = gdn_small[DTBIAS_OFF + h];
 
-#ifdef DEFERRED
+#if defined(DEFERRED) && !defined(BATCH_ROWS)
   // 2a. The previous step's committed rows (header, DEFERRED): its recurrence on its stored inputs, then the tile back.
   if (n_rep) {   // the rows' kf reached rep_k before section 1's barrier
     const __global ushort* restrict pr = pend_at(pend, par);
@@ -663,7 +713,145 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
   // -------------------------------------------------------------------------
   // 3. One token at a time: head scalars, l2norm, the recurrence.
   // -------------------------------------------------------------------------
-#ifdef DEFERRED
+#if defined(DEFERRED) && defined(BATCH_ROWS)
+  // A row step of several sequences, each run the one-sequence DEFERRED step on its own sequence (header, BATCH_ROWS
+  // with DEFERRED): the head scalars of every row, then per run the replay of its committed rows, its rows' inputs
+  // and the pipelined recurrence of the loop below. Runs are uniform across the work-group (the table), so are the
+  // barriers; one more barrier at each run's start keeps rep_k / rep_red and the rows' SLM buffers apart between runs.
+  float dec[M], bet[M];
+  for (uint m = 0; m < n_act; ++m) {
+    const ushort a_b = rne_bf16(ab_out[(size_t)m * AB_STRIDE + h]);
+    const ushort b_b = rne_bf16(ab_out[(size_t)m * AB_STRIDE + B_OFF + h]);
+    bet[m] = 1.0f / (1.0f + exp(-bf16f(b_b)));
+    dec[m] = exp(negA * softplus_f32(bf16f(a_b) + dt_bias));
+  }
+  for (uint m0 = 0; m0 < n_act;) {
+    uint m1 = m0 + 1;
+    while (m1 < n_act && !run_start(rows, m1)) ++m1;
+    __global float* restrict st = state_at(state, state_pool, rows[m0 * BROW_WORDS + BROW_SRC]);
+    __global uchar* restrict sp = pend + (size_t)rows[m0 * BROW_WORDS + BROW_SLOT] * PEND_SEQ;
+    const uint pend_word = rows[m0 * BROW_WORDS + BROW_PEND];
+    const uint par = (pend_word >> 8) & 1u;
+    const uint n_rep = min(pend_word & 0xFFu, (uint)PR);
+    for (uint kk = 0; kk < BAND_K; ++kk) {
+      S[kk][0] = st[sbase + (size_t)kk * DIM];
+      S[kk][1] = st[sbase + (size_t)kk * DIM + SG];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    const __global ushort* restrict pr = pend_at(sp, par);
+    if (n_rep) {   // section 2a, on this run's sequence
+      const __global float* restrict ps = (const __global float*)pr + PEND_S_OFF;
+      for (uint i = lid; i < min(n_rep, (uint)REP_ROWS) * DIM; i += WG_GDN)
+        rep_k[i / DIM][i % DIM] = bf16f(pr[((i / DIM) * KHEADS + kh) * DIM + i % DIM]);
+      barrier(CLK_LOCAL_MEM_FENCE);
+      for (uint r = 0; r < n_rep; ++r) {
+        if (r > 0 && r % REP_ROWS == 0) {
+          barrier(CLK_LOCAL_MEM_FENCE);
+          for (uint i = lid; i < min(n_rep - r, (uint)REP_ROWS) * DIM; i += WG_GDN)
+            rep_k[i / DIM][i % DIM] = bf16f(pr[((r + i / DIM) * KHEADS + kh) * DIM + i % DIM]);
+          barrier(CLK_LOCAL_MEM_FENCE);
+        }
+        const float decay = ps[(r * HEADS + h) * 2], beta = ps[(r * HEADS + h) * 2 + 1];
+        for (uint kk = 0; kk < BAND_K; ++kk) {
+          S[kk][0] *= decay;
+          S[kk][1] *= decay;
+        }
+        float p0 = 0.0f, p1 = 0.0f;
+        for (uint kk = 0; kk < BAND_K; ++kk) {
+          const float kfv = rep_k[r % REP_ROWS][sgid * BAND_K + kk];
+          p0 = fma(S[kk][0], kfv, p0);
+          p1 = fma(S[kk][1], kfv, p1);
+        }
+        rep_red[r & 1][sgid][lane] = p0;
+        rep_red[r & 1][sgid][lane + SG] = p1;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        float kv0, kv1;
+        band_sum(rep_red[r & 1], lane, &kv0, &kv1);
+        const __global ushort* restrict pv = pr + PEND_V_OFF + (r * HEADS + h) * DIM + c * CHUNK_V;
+        const float d0 = (bf16f(pv[lane]) - kv0) * beta;
+        const float d1 = (bf16f(pv[lane + SG]) - kv1) * beta;
+        for (uint kk = 0; kk < BAND_K; ++kk) {
+          const float kfv = rep_k[r % REP_ROWS][sgid * BAND_K + kk];
+          S[kk][0] = fma(kfv, d0, S[kk][0]);
+          S[kk][1] = fma(kfv, d1, S[kk][1]);
+        }
+      }
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        st[sbase + (size_t)kk * DIM] = S[kk][0];
+        st[sbase + (size_t)kk * DIM + SG] = S[kk][1];
+      }
+    }
+    __global ushort* restrict pw = pend_at(sp, par ^ 1u);
+    if (c == 0)   // the run's rows' recurrence inputs, at the run's row index (header, DEFERRED)
+      for (uint m = m0; m < m1; ++m) {
+        const uint q = m - m0;
+        if (lid < DIM) pw[PEND_V_OFF + (q * HEADS + h) * DIM + lid] = xs[2][m][lid];
+        else if (h % V_PER_K == 0) pw[(q * KHEADS + kh) * DIM + lid - DIM] = (ushort)(as_uint(rk[m][lid - DIM]) >> 16);
+        if (lid == 0) {
+          __global float* restrict psw = (__global float*)pw + PEND_S_OFF + (q * HEADS + h) * 2;
+          psw[0] = dec[m];
+          psw[1] = bet[m];
+        }
+      }
+    for (uint kk = 0; kk < BAND_K; ++kk) {   // the run's first row: its decay and kv partials
+      S[kk][0] *= dec[m0];
+      S[kk][1] *= dec[m0];
+    }
+    {
+      float p0 = 0.0f, p1 = 0.0f;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rk[m0][sgid * BAND_K + kk];
+        p0 = fma(S[kk][0], kfv, p0);
+        p1 = fma(S[kk][1], kfv, p1);
+      }
+      kv_red[m0 & 1][sgid][lane] = p0;
+      kv_red[m0 & 1][sgid][lane + SG] = p1;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint m = m0; m < m1; ++m) {   // the DEFERRED loop below, over the run's rows
+      float kv0, kv1;
+      band_sum(kv_red[m & 1], lane, &kv0, &kv1);
+      const float d0 = (bf16f(xs[2][m][c * CHUNK_V + lane]) - kv0) * bet[m];
+      const float d1 = (bf16f(xs[2][m][c * CHUNK_V + lane + SG]) - kv1) * bet[m];
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float kfv = rk[m][sgid * BAND_K + kk];
+        S[kk][0] = fma(kfv, d0, S[kk][0]);
+        S[kk][1] = fma(kfv, d1, S[kk][1]);
+      }
+      float r0 = 0.0f, r1 = 0.0f;
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        const float qfv = rq[m][sgid * BAND_K + kk];
+        r0 = fma(qfv, S[kk][0], r0);
+        r1 = fma(qfv, S[kk][1], r1);
+      }
+      o_red[m & 1][sgid][lane] = r0;
+      o_red[m & 1][sgid][lane + SG] = r1;
+      if (m + 1 < m1) {
+        for (uint kk = 0; kk < BAND_K; ++kk) {
+          S[kk][0] *= dec[m + 1];
+          S[kk][1] *= dec[m + 1];
+        }
+        float p0 = 0.0f, p1 = 0.0f;
+        for (uint kk = 0; kk < BAND_K; ++kk) {
+          const float kfv = rk[m + 1][sgid * BAND_K + kk];
+          p0 = fma(S[kk][0], kfv, p0);
+          p1 = fma(S[kk][1], kfv, p1);
+        }
+        kv_red[(m + 1) & 1][sgid][lane] = p0;
+        kv_red[(m + 1) & 1][sgid][lane + SG] = p1;
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+      if (sgid == 0) {
+        float o0, o1;
+        band_sum(o_red[m & 1], lane, &o0, &o1);
+        __global float* restrict op = gdn_o + ((size_t)m * HEADS + h) * DIM + c * CHUNK_V;
+        op[lane] = o0;
+        op[lane + SG] = o1;
+      }
+    }
+    m0 = m1;
+  }
+#elif defined(DEFERRED)
   // The DEFERRED builds (M = 1 too): the same operations on S in the same order, one barrier a row instead of two. Row m's
   // o partials (from S after its update) and row m + 1's kv partials (from S after row m + 1's decay - the next
   // operation on S either way) go to SLM together, before one barrier; then every work-item takes row m + 1's kv tree

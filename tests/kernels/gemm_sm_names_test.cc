@@ -36,6 +36,18 @@ int main(int argc, char** argv) {
   std::set<std::string> want;
   for (const kernels::SmallMTuning& t : kernels::kSmallMTuning)
     for (unsigned M : kernels::gemm_sm_built_m(t)) want.insert(kernels::gemm_sm_variant(M, t));
+  // PERF-123: the head's gated builds (head_gate.h) at the verify lists' M 2..8 - the full int8 head (gate 1), the 2-bit
+  // candidate pass and the exact rescore of its candidates (gate 2) - beside the plain builds above.
+  for (unsigned K : {5120u, 2048u})   // Qwen3.8's and Ornith's heads
+  for (unsigned M = 2; M <= 8; ++M) {
+    const kernels::SmallMTuning* full = kernels::small_m_tuning(K, 248320, 1, 2);
+    const kernels::SmallMTuning* cand = kernels::small_m_tuning(K, 248320, 1, 3);
+    const kernels::SmallMTuning* resc = kernels::small_m_tuning(K, 512, 1, 2);
+    CHECK(full != nullptr && cand != nullptr && resc != nullptr);
+    want.insert(kernels::gated_variant(kernels::gemm_sm_variant(M, *full), 1));
+    want.insert(kernels::gated_variant(kernels::gemm_sm_variant(M, *cand), 2));
+    want.insert(kernels::gated_variant(kernels::gemm_sm_variant(M, *resc), 2));
+  }
   // keys are unique: one row per (K, N, S, layout)
   size_t rows = 0;
   for (const kernels::SmallMTuning& t : kernels::kSmallMTuning) {

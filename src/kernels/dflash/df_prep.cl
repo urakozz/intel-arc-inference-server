@@ -252,6 +252,50 @@ __kernel void df_qkv_prep(__global const uint* restrict ctrl, __global const flo
   }
 }
 
+#if INK_CONTEXT
+__attribute__((reqd_work_group_size(HD, 1, 1)))
+__kernel void df_ink_qkv(__global const uint* ctrl, __global const float* q_raw,
+                         __global const float* k_raw, __global const float* v_raw,
+                         __global const float* q_norm, __global const float* k_norm,
+                         __global const float* rope, __global float* q,
+                         __global float* k, __global float* v) {
+  const uint h = get_group_id(0), r = get_group_id(1), i = get_local_id(0);
+  const uint pos = ctrl[CTRL_POS] + r;
+  __local float scratch[HD];
+  if (h < NH) {
+    const size_t at = ((size_t)r * NH + h) * HD + i;
+    q[at] = head_norm_rope(q_raw[at], q_norm, rope, pos, scratch);
+  } else if (h < NH + NKV) {
+    const size_t at = ((size_t)r * NKV + h - NH) * HD + i;
+    k[at] = head_norm_rope(k_raw[at], k_norm, rope, pos, scratch);
+  } else {
+    const size_t at = ((size_t)r * NKV + h - NH - NKV) * HD + i;
+    v[at] = v_raw[at];
+  }
+}
+#endif
+
+#if INK_CONTEXT
+// Inkling's context K/V are projected independently from their layer's
+// target tap mix. A zero ring uses the full cache at the absolute position.
+__attribute__((reqd_work_group_size(HD, 1, 1)))
+__kernel void df_ink_context(__global const uint* restrict dctl,
+                             __global const float* restrict k, __global const float* restrict v,
+                             __global const float* restrict norm, __global const float* restrict rope,
+                             __global ushort* restrict cache_k, __global ushort* restrict cache_v,
+                             uint ring) {
+  const uint head = get_group_id(0), row = get_group_id(1), lane = get_local_id(0);
+  if (row >= dctl[DCTL_PN]) return;
+  const uint pos = dctl[DCTL_PPOS] + row;
+  const uint slot = ring ? pos % ring : pos;
+  const size_t src = ((size_t)row * NKV + head) * HD + lane;
+  const size_t dst = ((size_t)slot * NKV + head) * HD + lane;
+  __local float temp[HD];
+  cache_k[dst] = f2bf(head_norm_rope(k[src], norm, rope, pos, temp));
+  cache_v[dst] = f2bf(v[src]);
+}
+#endif
+
 #ifdef RING
 // kv: the projection GEMVs' outputs [L][M][2 KVN] (layer l's k || v rows of q||k||v); qk_norm [L][q | k][HD];
 // ring_k / ring_v [L][RING][NKV][HD] bf16.

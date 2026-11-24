@@ -189,55 +189,6 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
   return len;
 }
 
-// Step 4 under --max-num-seqs: a card's `seqs` > 1 sequence slots (plan 13c), slot 0 the
-// largest context that fits beside seqs - 1 slots of SlotDims::kShortLen (auto) or exactly the asked N, refused with
-// the plan's numbers when it does not fit beside them. `m` is re-tabled at runtime::slots_kv_len (one RoPE table, one
-// KV allocation of the slots' pages). Returns the layout; prints the choice and the plan's breakdown like settle().
-// `drafter` (plan 19v3b): a DFlash drafter's plan - slot 0's drafter and every further slot's session and states. No
-// draft vocabulary beside slots (refused before the load).
-inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg& a, uint32_t seqs,
-                                          size_t reserve_bytes, const runtime::PrefillPath& path, runtime::KvCache kv,
-                                          const runtime::DrafterPlan& drafter = {}) {
-  const model::ModelDesc& d = *m.desc;
-  const bool mtp = m.mtp != nullptr;
-  const size_t weights = m.report.total() - m.report.rope_bytes;
-  const size_t device = ctx.memory_bytes();
-  const double gb = 1e9;
-  const uint32_t cap = m.trained_max_len != 0 ? m.trained_max_len : a.value;
-  const uint32_t fit = cap < runtime::kMaxLenQuantum
-                           ? 0
-                           : runtime::slot0_len_that_fits(d, seqs, mtp, weights, device, reserve_bytes, cap, path, kv, drafter);
-  const std::string beside = " beside " + std::to_string(seqs - 1) + " slot" + (seqs > 2 ? "s" : "") + " of " +
-                             std::to_string(runtime::SlotDims::kShortLen) + " (--max-num-seqs " +
-                             std::to_string(seqs) + ")";
-  const uint32_t len = a.is_auto ? fit : a.value;
-  if (len == 0)
-    throw std::runtime_error(
-        "--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) + " positions fit slot 0" + beside +
-        " - " +
-        runtime::describe(runtime::plan_slots(d, runtime::slot_layout(runtime::kMinAutoMaxLen, seqs), mtp, weights,
-                                              path, {}, kv, drafter),
-                          device, reserve_bytes) +
-        ". A smaller --max-num-seqs");
-  const std::vector<uint32_t> lens = runtime::slot_layout(len, seqs);
-  const runtime::MemoryPlan p = runtime::plan_slots(d, lens, mtp, weights, path, {}, kv, drafter);
-  if (!a.is_auto && p.total() + reserve_bytes > device)
-    throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit" + beside + ": " +
-                             runtime::describe(p, device, reserve_bytes) + ". The largest slot 0 that fits beside them is " +
-                             std::to_string(fit) + " (--max-len auto), or a smaller --max-num-seqs");
-  if (a.is_auto)
-    std::print(stderr,
-               "max_len: auto -> slot 0 {:d} (the largest multiple of {:d} that fits{} in {:.3f} GB with a {:.3f} GB "
-               "reserve; trained context {:d})\n",
-               len, runtime::kMaxLenQuantum, beside.c_str(), device / gb, reserve_bytes / gb, m.trained_max_len);
-  else
-    std::print(stderr, "max_len: slot 0 {:d} (--max-len){}\n", len, beside.c_str());
-  // slot 0 is the longest; the slots' page-rounded sum may pass the trained context
-  loader::set_max_len(ctx, m, runtime::slots_kv_len(lens), len);
-  std::print(stderr, "{}\n", runtime::describe(p, device, reserve_bytes).c_str());
-  return lens;
-}
-
 // Step 4 under --max-num-seqs with the KV page pool (spec 31): a card's `seqs` > 1 sequences share the pages left
 // beside their fixed state (runtime::pool_that_fits). --max-len auto lets one request use the whole pool (up to the
 // trained context); an explicit --max-len L caps a request at L and is refused when the pool cannot hold one request
@@ -281,7 +232,7 @@ inline runtime::PoolShape settle_pool(l0::Context& ctx, loader::LoadedModel& m, 
 //                                                                     refuses C > 4096
 //   path.chunk_cap = planned_chunk_cap(asked)    what settle() plans max_len at
 //   max_len = settle(..., path, ...)
-//   cap = settle_chunk_cap(..., slot lengths, path, ..., asked)   what the engine is given
+//   cap = settle_chunk_cap(..., max_len, path, ..., asked)   what the engine is given
 //
 // An asked cap (b70-decode's --prefill-chunk) is planned and kept as it is: an explicit 4096
 // shortens what auto gives the context. With nothing asked, every model takes ruling (i) of
@@ -289,10 +240,16 @@ inline runtime::PoolShape settle_pool(l0::Context& ctx, loader::LoadedModel& m, 
 // amortise over twice the rows; Qwen3.8: open-work 18, ~5.6 % faster cold,
 // - max_len (and every request slot) is planned
 // at 2048 and 4096 is taken only when the plan at those lengths has room for it
-// (runtime::prefill_chunk_cap_that_fits, or runtime::plan_slots beside --max-num-seqs). Qwen3.8's
+// (runtime::prefill_chunk_cap_that_fits, or runtime::plan_pool beside --max-num-seqs). Qwen3.8's
 // hooked prefill keeps 2048-row chunks over a prompt's last 6144+ positions (runtime::kPrefillTail),
 // so a prefix-cache hit after a turn still restarts at most 2047 rows back. There is no
 // environment variable or server flag for it: the engine side chooses.
+//
+// The owner's ruling of 2026-11-24 reverses (i) for one case: --max-len auto on the bf16 prompt pass (l0) plans at
+// 4096 (the four-argument form below) - Qwen3.8 one card, MTP on: max_len 157,184 at 2048 against 133,120 at 4096,
+// prompts 4k 1,850 -> 1,974 t/s (+6.7 %), 30k 1,586 -> 1,685 (+6.2 %). The full context stays with l0-int8 (its int8
+// cache), two cards, or an explicit --max-len N (4096 only when it fits beside N, as before). Ornith already ran
+// 4096-row chunks at its auto context; Kolibri-1, Flash-Next and the two-card modes settle elsewhere, unchanged.
 inline uint32_t planned_chunk_cap(uint32_t asked) {
   return asked != 0 ? asked : runtime::PrefillScratchDims::kCDefault;
 }
@@ -303,7 +260,15 @@ inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d) {
   runtime::check_prefill_chunk_cap(d, cap);
   return cap;
 }
-// `lens`: the request slots' lengths (one entry without --max-num-seqs), as settle() / settle_slots() gave them.
+// The same for a one-card settle (one engine, its slots or its page pool; b70-serve, --parallel replica's cards,
+// b70-decode): `a` and `backend` decide the 2026-11-24 rule above.
+inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d, const MaxLenArg& a,
+                                  runtime::PrefillBackend backend) {
+  if (asked != 0 || !a.is_auto || backend != runtime::PrefillBackend::L0) return planned_chunk_cap(asked, d);
+  runtime::check_prefill_chunk_cap(d, runtime::PrefillScratchDims::kCMax);
+  return runtime::PrefillScratchDims::kCMax;
+}
+// `max_len`: one request's, as settle() gave it (the pool's positions beside `pool`).
 // Prints the card's VRAM chart (runtime/vram_bars.h) at the cap chosen; `card` of `cards` names it (--parallel replica
 // settles each card on its own).
 //
@@ -311,32 +276,36 @@ inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d) {
 // (PrefillPath::dense_bf16, runtime::dense_slab_bytes) when the plan at these lengths and this cap has room for
 // them, else every chunk unpacks them as before - bitwise the same prompt pass. Returns `path` at the cap chosen and
 // with that choice: the engine is given both (set_prefill_chunk_cap, set_prefill_dense_bf16).
-// `pool` (spec 31): the KV page pool settle_pool gave - every plan here is then plan_pool's at it, not the slots'.
+// `pool` (spec 31): the KV page pool settle_pool gave (--max-num-seqs N) - every plan here is then plan_pool's at it.
 inline runtime::PrefillPath settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
-                                             const std::vector<uint32_t>& lens, size_t reserve_bytes,
+                                             uint32_t max_len, size_t reserve_bytes,
                                              const runtime::PrefillPath& path, runtime::KvCache kv,
                                              const runtime::DrafterPlan& drafter, uint32_t asked, uint32_t card = 0,
                                              uint32_t cards = 1, const runtime::PoolShape* pool = nullptr) {
   const size_t weights = m.report.total() - m.report.rope_bytes;
   const auto plan_at = [&](const runtime::PrefillPath& p) {
     return pool ? runtime::plan_pool(*m.desc, *pool, m.mtp != nullptr, weights, p, kv, drafter)
-                : runtime::plan_slots(*m.desc, lens, m.mtp != nullptr, weights, p, draft_vocab_plan(m), kv, drafter);
+                : runtime::plan(*m.desc, max_len, m.mtp != nullptr, weights, p, draft_vocab_plan(m), kv, drafter);
   };
   const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
   if (path.prefill && why == nullptr) {
-    if (lens.size() == 1) {
+    if (!pool) {
       cap = runtime::prefill_chunk_cap_that_fits(*m.desc, m.mtp != nullptr, weights, ctx.memory_bytes(),
-                                                 reserve_bytes, lens[0], path, draft_vocab_plan(m), kv, drafter);
-    } else {   // the slots' plan (settle_slots'), not slot 0's alone
+                                                 reserve_bytes, max_len, path, draft_vocab_plan(m), kv, drafter);
+    } else {   // the sequences' plan, not one request's alone
       runtime::PrefillPath wide = path;
       wide.chunk_cap = runtime::PrefillScratchDims::kCMax;
       cap = plan_at(wide).total() + reserve_bytes <= ctx.memory_bytes()
                 ? runtime::PrefillScratchDims::kCMax
                 : runtime::PrefillScratchDims::kCDefault;
     }
-    why = cap == runtime::PrefillScratchDims::kCMax ? "the plan at this max_len has room for it"
-                                                   : "4096 would not fit beside this max_len";
+    // planned_chunk_cap's 2026-11-24 rule: auto sized the context for 4096 (so it fits), and says so.
+    const bool sized = path.chunk_cap == runtime::PrefillScratchDims::kCMax;
+    why = sized ? "the context was sized for 4096-row chunks, the faster prompt pass; --prefill-backend l0-int8 "
+                  "(the int8 cache) or two cards give the longer context"
+          : cap == runtime::PrefillScratchDims::kCMax ? "the plan at this max_len has room for it"
+                                                      : "4096 would not fit beside this max_len";
   }
   if (path.prefill && why) std::print(stderr, "prefill chunk cap: {:d} ({})\n", cap, why);   // the default says nothing
   runtime::PrefillPath at = path;

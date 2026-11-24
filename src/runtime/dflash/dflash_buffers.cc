@@ -19,12 +19,13 @@ void fill(l0::CmdList& imm, l0::Mem& m) {
 }  // namespace
 
 DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint32_t th, uint32_t rows, uint32_t ml,
-                             loader::DraftFormat format, bool candidate_head, bool host_candidates)
+                             loader::DraftFormat format, bool candidate_head, bool host_candidates, uint32_t dr)
     : desc(d),
       target_hidden(th),
       head_rows(rows),
       max_len(ml),
-      sz(sizes(d, th, rows, ml, format, candidate_head)),
+      draft_rows(dr),
+      sz(sizes(d, th, rows, ml, format, candidate_head, dr)),
       dctl(ctx, l0::MemKind::Shared, sz.dctl),
       out(ctx, l0::MemKind::Shared, sz.out),
       rope(dev(ctx, sz.rope)),

@@ -71,6 +71,12 @@ function(add_ocloc_kernel NAME)
   string(REPLACE "${B70_TREE_ROOT}/" "" opts "${opts}")
   get_filename_component(src "${K_SOURCE}" ABSOLUTE)
   file(RELATIVE_PATH src "${B70_TREE_ROOT}" "${src}")
+  if(src MATCHES "(^|/)(moe|kol_moe|pf_moe_q4gemm)[.]cl$")
+    list(APPEND K_DEPENDS "${B70_KERNEL_SRC_DIR}/expert_fp.h")
+  endif()
+  if(src MATCHES "(^|/)(moe|kol_moe)[.]cl$")
+    list(APPEND K_DEPENDS "${B70_KERNEL_SRC_DIR}/expert_fp_gemv.h")
+  endif()
   set(out "${B70_KERNEL_DIR}/${NAME}.bin")
   add_custom_command(
     OUTPUT "${out}"

@@ -31,6 +31,9 @@
 #if (N % COLS_PER_WG) != 0
 #error "N must be a multiple of COLS_PER_WG: the grid is N / COLS_PER_WG"
 #endif
+#if QKV_NKV && QKV_NKV % WG_N != 0
+#error "gemv_i8w: Q/K/V outputs must have whole work-group widths"
+#endif
 #if (K % 16) != 0
 #error "K must be a multiple of 16"
 #endif
@@ -55,9 +58,57 @@ __attribute__((reqd_work_group_size(WG_N, 1, 1)))
 __kernel void gemv_i8w(__global const uchar* restrict w,
                        __global const float* restrict scales,
                        __global const ushort* restrict x,
-                       __global float* restrict out) {
+                       __global float* restrict out
+#if QKV_NKV
+                       , __global const uchar* wk, __global const float* sk, __global const ushort* xk, __global float* ok
+                       , __global const uchar* wv, __global const float* sv, __global const ushort* xv, __global float* ov
+#if INK_ATTN_PROJECTIONS
+                       , __global const uchar* wg, __global const float* sgate, __global float* og
+                       , __global const uchar* wr, __global const float* sr, __global float* orr
+                       , __global const uchar* ws, __global const float* ss, __global float* os
+#endif
+#endif
+                       ) {
+#if QKV_NKV
+  uint group = get_group_id(0);
+  uint columns = N;
+#if INK_ATTN_PROJECTIONS
+  const uint block = WG_N;
+  const uint qkv_groups = (N + 2 * QKV_NKV) / block;
+  if (group >= qkv_groups) {
+    group -= qkv_groups;
+    if (group < N / block) {
+      w = wg; scales = sgate; out = og;
+    } else {
+      group -= N / block;
+      if (group < 384 / block) {
+        columns = 384;
+        w = wr; scales = sr; out = orr;
+      } else {
+        group -= 384 / block;
+        columns = 64;
+        w = ws; scales = ss; out = os;
+      }
+    }
+  } else
+#endif
+  if (group >= N / WG_N) {
+    group -= N / WG_N;
+    if (group < QKV_NKV / WG_N) {
+      w = wk; scales = sk; x = xk; out = ok;
+    } else {
+      group -= QKV_NKV / WG_N;
+      w = wv; scales = sv; x = xv; out = ov;
+    }
+    columns = QKV_NKV;
+  }
+#endif
   const uint lane = get_sub_group_local_id();
+#if QKV_NKV
+  const uint n_tile = group * TILES_PER_WG + get_sub_group_id();
+#else
   const uint n_tile = get_group_id(0) * TILES_PER_WG + get_sub_group_id();
+#endif
   const uint n = n_tile * SG + lane;
   __global const uchar* tile = w + (size_t)n_tile * K16 * 256;
 
@@ -81,7 +132,11 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
 #if GEMV_KMAJOR || GEMV_AHEAD > 1
 #if GEMV_KMAJOR
   tile = w + (size_t)n_tile * 256;
+#if QKV_NKV
+  const size_t step = (size_t)(columns / SG) * 256;
+#else
   const size_t step = (size_t)(N / SG) * 256;
+#endif
 #else
   const size_t step = 256;
 #endif
@@ -102,5 +157,9 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
   }
 #endif
   const float s = scales[n];
+#if QKV_NKV
+  for (int m = 0; m < M; ++m) out[(size_t)m * columns + n] = acc[m] * s;
+#else
   for (int m = 0; m < M; ++m) out[(size_t)m * N + n] = acc[m] * s;
+#endif
 }

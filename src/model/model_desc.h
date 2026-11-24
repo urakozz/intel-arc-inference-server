@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include "loader/small_layout.h"
@@ -35,6 +36,8 @@
 //
 // Descriptors are process-lifetime singletons: hold them by reference/pointer.
 namespace model {
+
+bool is_inkling2_model_type(std::string_view type);
 
 // Spec 15b: the feed-forward block's kind. Dense is the SwiGLU MLP the table's
 // GateUp / Down rows run; Moe adds routed experts (`MoeDesc`), run by spec 15c's

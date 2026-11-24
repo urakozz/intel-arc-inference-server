@@ -25,9 +25,10 @@ uint32_t checked_max_k(const model::DFlashDesc& d, uint32_t k) {
 }  // namespace
 
 DFlashDrafter::DFlashDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t head_rows, uint32_t max_len,
-                             uint32_t max_k)
+                             uint32_t max_k, uint32_t seqs)
     : w_(std::move(w)),
-      b_(ctx, w_.desc, w_.target_hidden, head_rows, max_len, w_.format, bool(w_.candidate_head)),
+      b_(ctx, w_.desc, w_.target_hidden, head_rows, max_len, w_.format, bool(w_.candidate_head), false,
+         seqs > 1 ? seqs_rows(w_.format, bool(w_.candidate_head)) : kernels::dflash::kM),
       max_k_(checked_max_k(w_.desc, max_k)),
       project_(build_dflash_project(ctx, w_, b_)) {
   // Spec 19d: the store's name for this drafter - its shapes, format and the two norms' weights as loaded.
@@ -64,23 +65,30 @@ void DFlashDrafter::add_sessions(l0::Context& ctx, uint32_t n) {
   b_.add_sessions(ctx, n);
   for (uint32_t q = 1; q < n; ++q) projects_.push_back(build_dflash_project(ctx, w_, b_, {}, q));
   if (n > 1) rows_project_ = std::make_unique<CapturedStep>(build_dflash_project_rows(ctx, w_, b_, n));
+  if (n > 1 && b_.draft_rows > kernels::dflash::kM)
+    rows_project_w_ = std::make_unique<CapturedStep>(build_dflash_project_rows(ctx, w_, b_, n, {}, b_.draft_rows));
 }
 
 l0::CmdList& DFlashDrafter::rows_projection(const std::vector<RowsCommit>& commits) {
   require(rows_project_ != nullptr, "rows_projection() without sessions");
   namespace kd = kernels::dflash;
+  // Plan 40a Task 4: the 8-row list while the commits fit it, else the kSeqsRows one (the table at that list's M).
+  uint32_t end = 0;
+  for (const RowsCommit& c : commits) end = std::max(end, c.row0 + c.n);
+  const uint32_t M = end <= kd::kM ? kd::kM : kd::kSeqsRows;
+  require(M == kd::kM || rows_project_w_, "rows commits past row " + std::to_string(kd::kM) + " without the wide list");
   uint32_t* t = b_.proj_seqs->as<uint32_t>();
-  std::fill(t, t + kd::kM + 8 * kd::kSeqs, 0u);
-  std::fill(t, t + kd::kM, 0xFFFFFFFFu);
+  std::fill(t, t + M + 8 * kd::kSeqs, 0u);
+  std::fill(t, t + M, 0xFFFFFFFFu);
   for (const RowsCommit& c : commits) {
-    require(c.slot < sessions() && c.n >= 1 && c.row0 + c.n <= kd::kM,
+    require(c.slot < sessions() && c.n >= 1 && c.row0 + c.n <= M,
             "a rows commit of slot " + std::to_string(c.slot) + " outside the rows");
     for (uint32_t r = c.row0; r < c.row0 + c.n; ++r) t[r] = c.slot;
-    t[kd::kM + 8 * c.slot] = c.row0;
-    t[kd::kM + 8 * c.slot + 1] = c.n;
-    t[kd::kM + 8 * c.slot + 2] = c.pos;
+    t[M + 8 * c.slot] = c.row0;
+    t[M + 8 * c.slot + 1] = c.n;
+    t[M + 8 * c.slot + 2] = c.pos;
   }
-  return rows_project_->list;
+  return (M == kd::kM ? rows_project_ : rows_project_w_)->list;
 }
 
 void DFlashDrafter::select(uint32_t slot) {
@@ -104,27 +112,37 @@ void DFlashDrafter::attach(Engine& e, bool draft_vocab) {
   if (e.slots() > 1)
     seqs_draft_ = std::make_unique<CapturedStep>(
         build_dflash_draft_seqs(e.context(), w_, dflash_target(e.model(), draft_vocab), b_, ctrls));
+  if (e.slots() > 1 && b_.draft_rows > kernels::dflash::kM)   // plan 40a Task 4: four blocks
+    seqs_draft_w_ = std::make_unique<CapturedStep>(build_dflash_draft_seqs(
+        e.context(), w_, dflash_target(e.model(), draft_vocab), b_, ctrls, {}, b_.draft_rows));
   engine_ = &e;
 }
 
 void DFlashDrafter::draft_rows(Engine& e, const std::vector<DraftRun>& runs) {
   require(engine_ == &e && seqs_draft_, "draft_rows() before attach() to an engine of several slots");
   namespace kd = kernels::dflash;
+  // Plan 40a Task 4: the runs packed into the 8-row list while they fit it, else each its own block of the
+  // kSeqsRows list (block i at rows kM i ..: every block's rows at the DPAS part's row block).
+  uint32_t need = 0;
+  for (const DraftRun& r : runs) need += r.k + 1;
+  const bool wide = need > kd::kM;
+  require(!wide || (seqs_draft_w_ && runs.size() <= kd::kSeqs),
+          std::to_string(need) + " draft rows: the batched draft takes " + std::to_string(draft_rows_max()));
+  const uint32_t M = wide ? kd::kSeqsRows : kd::kM;
   uint32_t* t = b_.seqs->as<uint32_t>();
-  std::fill(t, t + kd::kM + 8 * kd::kSeqs, 0u);
-  std::fill(t, t + kd::kM, 0xFFFFFFFFu);
+  std::fill(t, t + M + 8 * kd::kSeqs, 0u);
+  std::fill(t, t + M, 0xFFFFFFFFu);
   uint32_t row = 0;
   for (const DraftRun& r : runs) {
-    require(r.slot < sessions() && t[kd::kM + 8 * r.slot + 1] == 0, "a run's slot is outside the engine or twice");
+    require(r.slot < sessions() && t[M + 8 * r.slot + 1] == 0, "a run's slot is outside the engine or twice");
     const Engine::SlotView v = e.slot_view(r.slot);
-    require(r.k >= 1 && r.k <= max_k_ && r.k + 1 <= v.states && v.control->pos + r.k + 1 <= v.len &&
-                row + r.k + 1 <= kd::kM,
+    require(r.k >= 1 && r.k <= max_k_ && v.control->pos + r.k + 1 <= v.len && row + r.k + 1 <= M,
             "slot " + std::to_string(r.slot) + ": k " + std::to_string(r.k) + " at pos " +
                 std::to_string(v.control->pos) + " (rows so far " + std::to_string(row) + ")");
     DFlashCtl c{};   // the same rules and encoding as one slot's draft (set_draft_params)
     set_draft_params(c, w_.desc, r.k, r.temperature, r.seed);
     for (uint32_t i = 0; i <= r.k; ++i) t[row + i] = r.slot;
-    uint32_t* f = t + kd::kM + 8 * r.slot;
+    uint32_t* f = t + M + 8 * r.slot;
     f[0] = row;
     f[1] = r.k + 1;
     f[2] = v.control->pos;
@@ -133,9 +151,9 @@ void DFlashDrafter::draft_rows(Engine& e, const std::vector<DraftRun>& runs) {
     std::memcpy(&f[5], &c.temperature, 4);
     f[6] = c.seed_lo;
     f[7] = c.seed_hi;
-    row += r.k + 1;
+    row = wide ? row + kd::kM : row + r.k + 1;
   }
-  e.replay_aux(seqs_draft_->list);
+  e.replay_aux((wide ? seqs_draft_w_ : seqs_draft_)->list);
   for (const DraftRun& r : runs)
     require(b_.session(r.slot).readback()->k == r.k, "slot " + std::to_string(r.slot) + "'s batched draft drafted " +
                                                          std::to_string(b_.session(r.slot).readback()->k) + " ids");

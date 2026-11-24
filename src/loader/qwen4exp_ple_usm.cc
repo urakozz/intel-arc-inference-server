@@ -45,6 +45,7 @@ Q4PleTable load_q4_ple(l0::Context& ctx, const model::Qwen4ExpDesc& d, const std
   // 1. Every range, then a tag at the start of every 2 MiB page of every range, then every tag read back:
   //    an allocation that aliased another's pages shows the later range's tag (spec 22 P0.5's check).
   const uint32_t H = h.heads();
+  // Plain Host, not HostLocked, as the expert mirrors: locking waits for the two-card startup fix (PERF-70).
   for (uint32_t i = 0; i < H; ++i) {
     t.q.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, h.q_bytes(i), kQ4PlePage));
     t.s.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, h.s_bytes(i), kQ4PlePage));

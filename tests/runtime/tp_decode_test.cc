@@ -4,11 +4,13 @@
 //              each step's logits row (the row that decided the id), and at the end the per-layer residual taps, the
 //              logits, every layer's GDN state and conv ring (save_state), the KV of [0, pos) (save_kv), pos.
 //   slices     --parallel tp with model::TpCrossing::Slices: the same run. T1: the two cards' residual taps and Controls
-//              identical after the run. T2: BITWISE the reference - ids, logits, taps, state, KV (the one-card host
-//              layouts, runtime/tp_gather.h). Then reset() and the whole run again, bitwise (replay).
-//   folded     the folded crossing (spec 17a's form): T1 bitwise between the cards; T2 by the golden tie rule
-//              (tests/server/greedy_tie.h: the first divergence, if any, must be the reference row's runner-up at a
-//              top-2 margin <= 1 bf16 ulp) - another summation order than one card's, so judged, not bitwise.
+//              identical after the run. T2 by the golden tie rule (tests/server/greedy_tie.h: the first divergence, if
+//              any, must be the reference row's runner-up at a top-2 margin <= 1 bf16 ulp) - PERF-108's qkv||z splits
+//              each tile's K over 4 sub-groups of the work-group on a tp card (one card's keeps one), another summation
+//              order, so judged, not bitwise; whether logits, taps, state and KV still match one card is printed. Then
+//              reset() and the whole run again, bitwise the first run (replay).
+//   folded     the folded crossing (spec 17a's form): T1 bitwise between the cards; T2 by the golden tie rule - another
+//              summation order than one card's, so judged, not bitwise.
 //
 // argv: [1] the checkpoint, [2] the crossings to run ("both", "slices", "folded"); `bench <crossing> <depth> <tg>`
 // instead times one engine (the speed stage's folded arm: b70-decode has no crossing switch, decision D1's constant).
@@ -173,28 +175,43 @@ int main(int argc, char** argv) {
   bool ok = true;
   if (mode == "both" || mode == "slices") {
     runtime::TpEngine e = make_tp(d0, d1, ckpt, model::TpCrossing::Slices, kv, true);
-    CHECK_EQ(e.step(0).kernel_count, runtime::tp_launches(*e.model(0).desc));
+    CHECK_EQ(e.step(0).kernel_count, runtime::tp_launches(*e.model(0).desc, false));
     for (uint32_t r = 0; r < 2; ++r) std::printf("slices: %s\n", e.memory_line(r).c_str());
+    Record first;
     for (int round = 0; round < 2; ++round) {
       e.reset();
       const Record got = run_tp(e, prompt);
-      const std::string what = std::string("slices") + (round ? " (replayed after reset)" : "");
-      bool same = got.ids == ref.ids;
-      if (!same) {
-        const greedy_tie::Result v = greedy_tie::classify(ref.ids, steps, got.ids);
-        std::fprintf(stderr, "%s: ids differ at %zu\n", what.c_str(), v.at);
-      }
-      same &= same_bytes((what + ": logits").c_str(), ref.logits.data(), got.logits.data(), ref.logits.size() * 4);
-      same &= same_bytes((what + ": residual taps").c_str(), ref.taps.data(), got.taps.data(), ref.taps.size() * 2);
       CHECK_EQ(ref.state.size(), got.state.size());
-      same &= same_bytes((what + ": GDN state + conv ring").c_str(), ref.state.data(), got.state.data(),
-                         ref.state.size());
       CHECK_EQ(ref.kv.size(), got.kv.size());
-      same &= same_bytes((what + ": KV").c_str(), ref.kv.data(), got.kv.data(), ref.kv.size());
       CHECK_EQ(ref.pos, got.pos);
-      std::printf("%s: T1 bitwise between the cards; T2 %s one card (%zu ids, logits, %zu B state, %zu B KV)\n",
-                  what.c_str(), same ? "BITWISE" : "DIFFERS FROM", got.ids.size(), got.state.size(), got.kv.size());
-      ok &= same;
+      if (round == 0) {
+        first = got;
+        const greedy_tie::Result v = greedy_tie::classify(ref.ids, steps, got.ids);
+        const char* verdict = v.v == greedy_tie::Verdict::Same ? "identical ids"
+                              : v.v == greedy_tie::Verdict::Tie ? "a near-tie divergence (<= 1 bf16 ulp)"
+                                                                : "DIVERGED (not a near-tie)";
+        std::printf("slices: T1 bitwise between the cards; T2 judged against one card: %s", verdict);
+        if (v.v != greedy_tie::Verdict::Same)
+          std::printf(" at id %zu (margin %.2f ulp, candidate rank %u)", v.at, v.margin_ulps, v.cand_rank);
+        const auto bitwise = [](const void* a, const void* b, size_t n) {
+          return first_diff(a, b, n) == n ? "yes" : "no";
+        };
+        std::printf("; bitwise one card: logits %s, taps %s, state %s, KV %s\n",
+                    bitwise(ref.logits.data(), got.logits.data(), ref.logits.size() * 4),
+                    bitwise(ref.taps.data(), got.taps.data(), ref.taps.size() * 2),
+                    bitwise(ref.state.data(), got.state.data(), ref.state.size()),
+                    bitwise(ref.kv.data(), got.kv.data(), ref.kv.size()));
+        ok &= v.v != greedy_tie::Verdict::Diverged;
+      } else {
+        // Replay: the slices engine is bitwise itself.
+        bool same = got.ids == first.ids;
+        same &= same_bytes("slices replay: logits", first.logits.data(), got.logits.data(), first.logits.size() * 4);
+        same &= same_bytes("slices replay: residual taps", first.taps.data(), got.taps.data(), first.taps.size() * 2);
+        same &= same_bytes("slices replay: state", first.state.data(), got.state.data(), first.state.size());
+        same &= same_bytes("slices replay: KV", first.kv.data(), got.kv.data(), first.kv.size());
+        std::printf("slices (replayed after reset): %s\n", same ? "bitwise the first run" : "DIFFERS");
+        ok &= same;
+      }
     }
   }
   if (mode == "both" || mode == "folded") {

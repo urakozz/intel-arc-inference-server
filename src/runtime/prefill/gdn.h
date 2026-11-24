@@ -47,8 +47,8 @@ namespace runtime::prefill {
 // (0, s.chunk_cap()]; anything else throws.
 //
 // `backend` (phase 2): on a MoE model the l0 backend binds the one-launch intra-chunk kernel; l0-int8 keeps the
-// four launches. `one_card` (PERF-19): Qwen3.8's one-card walk binds it on both backends; a pipeline stage and
-// the tp card keep the four.
+// four launches. `one_card` (PERF-19): Qwen3.8's one-card walk and a pipeline stage (its rings are one card's,
+// bitwise) bind it on both backends; the tp card keeps the four.
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const void* qkvz_partials, const float* ab_out, float* gdn_state,
                uint16_t* conv_ring, const void* small, uint16_t* y,

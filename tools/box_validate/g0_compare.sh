@@ -59,8 +59,13 @@ fi
 n_differ=$(wc -l < "$out/differ.txt" | tr -d ' ')
 n_removed=$(wc -l < "$out/removed.txt" | tr -d ' ')
 n_common=$(awk '{ print $2 }' "$out/baseline.sha" | LC_ALL=C sort | LC_ALL=C comm -12 - <(awk '{ print $2 }' "$out/under-test.sha" | LC_ALL=C sort) | wc -l | tr -d ' ')
-if [ "$n_differ" -gt 0 ]; then
-  echo "G0 FAIL: $n_differ binaries present in both builds differ:"; head -50 "$out/differ.txt"
+# G0_KERNEL_SOURCES_CHANGED=1 (set by tools/box_validate.sh when src/kernels or cmake/ changed between the baseline and
+# the tree under test): differing binaries are expected, so they are listed, not failed - outputs are judged by g0.bitwise.
+src_changed="${G0_KERNEL_SOURCES_CHANGED:-0}"
+if [ "$n_differ" -gt 0 ] && [ "$src_changed" = 1 ]; then
+  echo "G0 kernel sources changed since the baseline: $n_differ binaries differ (listed in differ.txt):"; head -50 "$out/differ.txt"
+elif [ "$n_differ" -gt 0 ]; then
+  echo "G0 FAIL: $n_differ binaries present in both builds differ, with the kernel sources unchanged:"; head -50 "$out/differ.txt"
 fi
 if [ "$n_removed" -gt 0 ]; then
   echo "G0 the baseline has $n_removed binaries the tree under test does not build:"; head -50 "$out/removed.txt"
@@ -69,9 +74,13 @@ if [ -s "$out/added.txt" ]; then
   echo "G0 added (only under test): $(wc -l < "$out/added.txt" | tr -d ' ')"; sed 's/^/  + /' "$out/added.txt" | head -200
 fi
 [ "$n_common" -gt 0 ] || { echo "G0 FAIL: no kernel binary in common - wrong build directories?"; exit 2; }
-[ "$n_differ" -eq 0 ] || exit 1
-if [ "$n_removed" -gt 0 ] && [ "${G0_ALLOW_REMOVED:-0}" != 1 ]; then
+[ "$n_differ" -eq 0 ] || [ "$src_changed" = 1 ] || exit 1
+if [ "$n_removed" -gt 0 ] && [ "${G0_ALLOW_REMOVED:-0}" != 1 ] && [ "$src_changed" != 1 ]; then
   echo "G0 FAIL: removed binaries (G0_ALLOW_REMOVED=1 accepts them)"; exit 1
 fi
-echo "G0 PASS: every kernel binary present in both builds is byte-identical"
+if [ "$src_changed" = 1 ] && [ "$((n_differ + n_removed))" -gt 0 ]; then
+  echo "G0 PASS: $n_differ binaries differ and $n_removed are gone, all with their kernel sources changed since the baseline"
+else
+  echo "G0 PASS: every kernel binary present in both builds is byte-identical"
+fi
 exit 0

@@ -38,7 +38,7 @@
 #endif
 #define SG 16
 #define GROUP 64
-#define TILE_U32 136                /* layout 1: 128 u32 of nibbles + 8 u32 of f16 scales */
+#include "expert_fp.h"
 #define RW 32                       /* route row words (kernels::kolibri::route::kWords) */
 #define R_IDS 0
 #define R_W 8
@@ -54,6 +54,9 @@
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 
+#if WFMT != 0
+#include "expert_fp_gemv.h"
+#else
 // moe.cl's dot8 / tile_dot, verbatim.
 inline float dot8(uint word, ushort8 xv) {
   float a = 0.f;
@@ -86,6 +89,8 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
   }
   return acc;
 }
+#endif
+
 // ---------------------------------------------------------------------------------------
 // kol_route - one work-group per token, ROUTE_EPL experts per lane (lane l: l, l + WG, ...).
 //   sel_e = logits[m][e] + bias[e]            e < ROUTE_E;  e >= ROUTE_E: -INF, never ranked
@@ -100,6 +105,31 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
 #error "kol_route: 1 <= TOP_K <= 8, TOP_K < E <= the lanes' slots == the logits row (router_n)"
 #endif
 #define ROUTE_SLOTS (ROUTE_WG * ROUTE_EPL)
+#if INK_ROUTE_M1
+// All logits of one row fit in a work-group, so the selection can consume
+// the tiled BF16 GEMV result directly from local memory.
+__attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
+KOL_SG16
+__kernel void kol_route(__global const ushort* restrict weights, __global const ushort* restrict x,
+                        __global const float* restrict bias, __global uint* restrict route) {
+  const uint m = 0, lane = get_local_id(0);
+  const uint tile = get_sub_group_id();
+  __local float lsel[ROUTE_SLOTS], lr[ROUTE_SLOTS];
+  __local uint top_id[ROUTE_K + 1];
+  __local float top_sel[ROUTE_K + 1];
+  const __global ushort* w = weights + (size_t)tile * (2304 / 8) * 128;
+  float acc = 0.f;
+  for (uint k8 = 0; k8 < 2304 / 8; ++k8, w += 128) {
+    const ushort8 wv = intel_sub_group_block_read_us8(w);
+    const ushort8 xv = vload8(0, x + k8 * 8);
+    acc += bf16f(wv.s0) * bf16f(xv.s0); acc += bf16f(wv.s1) * bf16f(xv.s1);
+    acc += bf16f(wv.s2) * bf16f(xv.s2); acc += bf16f(wv.s3) * bf16f(xv.s3);
+    acc += bf16f(wv.s4) * bf16f(xv.s4); acc += bf16f(wv.s5) * bf16f(xv.s5);
+    acc += bf16f(wv.s6) * bf16f(xv.s6); acc += bf16f(wv.s7) * bf16f(xv.s7);
+  }
+  lr[lane] = acc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+#else
 __attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
 __kernel void kol_route(__global const float* restrict logits, __global const float* restrict bias,
                         __global uint* restrict route) {
@@ -109,9 +139,14 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
   __local uint top_id[ROUTE_K + 1];
   __local float top_sel[ROUTE_K + 1];
   const __global float* restrict lr = logits + (size_t)m * ROUTE_LN;
+#endif
   for (uint q = 0; q < ROUTE_EPL; ++q) {
     const uint e = lane + q * ROUTE_WG;
+#if ROUTE_RENORM
+    lsel[e] = e < ROUTE_E ? sigmoid_f32(lr[e]) + bias[e] : -INFINITY;
+#else
     lsel[e] = e < ROUTE_E ? lr[e] + bias[e] : -INFINITY;
+#endif
   }
   if (lane <= ROUTE_K) {   // a defined row even if NaNs break the ranking
     top_id[lane] = lane;
@@ -156,6 +191,12 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
       r[R_W + j] = wb;
       r[R_SEL + j] = sb;
     }
+#if ROUTE_RENORM
+    float sum = 0.0f;
+    for (uint k = 0; k < ROUTE_K; ++k) sum += as_float(r[R_W + k]);
+    for (uint k = 0; k < ROUTE_K; ++k)
+      r[R_W + k] = as_uint((as_float(r[R_W + k]) / (sum + 1e-20f)) * ROUTE_SCALE);
+#endif
     r[R_NEXT] = as_uint(top_sel[ROUTE_K]);
     r[R_LMIN] = as_uint(lmin);
     for (uint k = R_LMIN + 1; k < RW; ++k) r[k] = 0u;
@@ -173,14 +214,17 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
 #if MOE_K < 1 || MOE_K > 8
 #error "kol_moe: MOE_K is 1..8 (the route row holds 8 slots)"
 #endif
-#define SLOTS (MOE_K + 1)
+#ifndef MOE_SHARED
+#define MOE_SHARED 1
+#endif
+#define SLOTS (MOE_K + MOE_SHARED)
 #define SHARED_SLOT MOE_K
 #define G_UP (HIDDEN / GROUP)
 #define NT_UP (2 * INTER / SG)
-#define UP_BLK_U32 ((size_t)NT_UP * G_UP * TILE_U32)
+#define UP_BLK_U32 ((size_t)NT_UP * G_UP * TILE_U32 + EXPERT_OUTER_WORDS)
 #define G_DN (INTER / GROUP)
 #define NT_DN (HIDDEN / SG)
-#define DN_BLK_U32 ((size_t)NT_DN * G_DN * TILE_U32)
+#define DN_BLK_U32 ((size_t)NT_DN * G_DN * TILE_U32 + EXPERT_OUTER_WORDS)
 #define WG_UP (4 * SG * UP_KS)
 #define WG_DN (SG * SLOTS * DN_KS)
 #if HIDDEN % GROUP != 0 || INTER % 32 != 0 || INTER % GROUP != 0 || HIDDEN % SG != 0
@@ -228,10 +272,28 @@ __kernel void kol_moe_gate_up(__global const uint* restrict route, __global cons
   }
   if (q == 0 && (tile_idx & 1u) == 0) {
     const uint i = blk * 32 + (tile_idx / 2) * SG + lane;
+#if defined(SWIGLU_CAP_G) && defined(SWIGLU_CAP_U)
+    float g = red[sg][lane], u = red[sg + UP_KS][lane];
+#if WFMT == 1
+    const float outer = as_float(blk_w[UP_BLK_U32 - 1]);
+    g *= outer;
+    u *= outer;
+#endif
+    const float a = tanh(g / SWIGLU_CAP_G) * SWIGLU_CAP_G;
+    const float b = tanh(u / SWIGLU_CAP_U) * SWIGLU_CAP_U;
+    h[((size_t)m * SLOTS + slot) * INTER + i] = rne_bf16(a * sigmoid_f32(g) * b);
+#else
+#if WFMT == 1
+    const float outer = as_float(blk_w[UP_BLK_U32 - 1]);
+    const ushort g_b = rne_bf16(red[sg][lane] * outer);
+    const ushort u_b = rne_bf16(red[sg + UP_KS][lane] * outer);
+#else
     const ushort g_b = rne_bf16(red[sg][lane]);
     const ushort u_b = rne_bf16(red[sg + UP_KS][lane]);
+#endif
     const ushort s_b = rne_bf16(silu_f32(bf16f(g_b)));
     h[((size_t)m * SLOTS + slot) * INTER + i] = rne_bf16(bf16f(s_b) * bf16f(u_b));
+#endif
   }
 }
 
@@ -242,7 +304,14 @@ __attribute__((reqd_work_group_size(WG_DN, 1, 1)))
 KOL_SG16
 __kernel void kol_moe_down(__global const uint* restrict route, __global const ushort* restrict h,
                            __global const uint* restrict w, __global const uint* restrict w_sh,
+#if INK_MOE_POST
+                           __global float* restrict mo, __global const float* history,
+                           __global const float* taps, __global float* residual, __global ushort* draft_tap) {
+#elif MOE_OUT_F32
+                           __global float* restrict mo) {
+#else
                            __global ushort* restrict mo) {
+#endif
   __local float red[SLOTS * DN_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -271,11 +340,170 @@ __kernel void kol_moe_down(__global const uint* restrict route, __global const u
 #pragma OPENCL FP_CONTRACT OFF
     float sum = 0.0f;
     for (uint j = 0; j < MOE_K; ++j) {
-      const float t = bf16f(rne_bf16(red[j * DN_KS][lane])) * as_float(rr[R_W + j]);
+      float dot = red[j * DN_KS][lane];
+#if WFMT == 1
+      const uint e = min(rr[R_IDS + j], (uint)(MOE_E - 1));
+      dot *= as_float(w[(size_t)(e + 1) * DN_BLK_U32 - 1]);
+#endif
+#if MOE_OUT_F32
+      const float t = dot * as_float(rr[R_W + j]);
+#else
+      const float t = bf16f(rne_bf16(dot)) * as_float(rr[R_W + j]);
+#endif
       sum = sum + t;
     }
-    const float sh = bf16f(rne_bf16(red[SHARED_SLOT * DN_KS][lane]));
-    mo[(size_t)m * HIDDEN + n_tile * SG + lane] = rne_bf16(sum + sh);
+#if MOE_SHARED
+    float sh = red[SHARED_SLOT * DN_KS][lane];
+#if WFMT == 1
+    sh *= as_float(w_sh[DN_BLK_U32 - 1]);
+#endif
+    sum += bf16f(rne_bf16(sh));
+#endif
+#if INK_MOE_POST
+    const uint i = n_tile * SG + lane;
+    const __global float* filter = taps + i * 4;
+    float conv = 0.f;
+    for (uint t = 0; t < 3; ++t) conv += filter[t] * history[t * HIDDEN + i];
+    conv += filter[3] * sum;
+    const float value = (sum + conv) / sqrt(5.f) + residual[i];
+    mo[i] = sum;
+    residual[i] = value;
+    if (draft_tap) draft_tap[i] = rne_bf16(value);
+#elif MOE_OUT_F32
+    mo[(size_t)m * HIDDEN + n_tile * SG + lane] = sum;
+#else
+    mo[(size_t)m * HIDDEN + n_tile * SG + lane] = rne_bf16(sum);
+#endif
   }
 }
 #endif  // MOE_E
+
+#if MOE_UNION
+#if M < 2 || M > 8 || MOE_E != 128 || MOE_SHARED || !WFMT || !MOE_OUT_F32 || DN_KS != 1
+#error "kol_moe union requires 2 to 8 rows and 128 routed floating-point experts"
+#endif
+#if HIDDEN % 128 != 0 || !defined(SWIGLU_CAP_G) || !defined(SWIGLU_CAP_U)
+#error "kol_moe union finish requires a 128-wide hidden tile and softcapped SwiGLU"
+#endif
+// Compact the distinct experts. Each packed nibble is the slot of this
+// expert in one row, or 15 if that row did not select it.
+__attribute__((reqd_work_group_size(MOE_E, 1, 1)))
+__kernel void kol_moe_union_plan(__global const uint* route, __global uint2* plan) {
+  const uint e = get_local_id(0);
+  uint slots = 0;
+#pragma unroll
+  for (uint r = 0; r < M; ++r) {
+    uint slot = 15;
+    for (uint k = 0; k < MOE_K; ++k)
+      if (route[r * RW + R_IDS + k] == e) slot = k;
+    slots |= slot << (4 * r);
+  }
+  __local uint index[MOE_E], total;
+  const bool live = slots != (0xffffffffu >> (32 - 4 * M));
+  index[e] = live;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (e == 0) {
+    uint n = 0;
+    for (uint i = 0; i < MOE_E; ++i) {
+      const uint active = index[i];
+      index[i] = n;
+      n += active;
+    }
+    total = n;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (live) plan[index[e]] = (uint2)(e, slots);
+  if (e >= total && e < M * MOE_K) plan[e] = (uint2)(MOE_E, 0);
+}
+
+__attribute__((reqd_work_group_size(WG_UP, 1, 1)))
+KOL_SG16
+__kernel void kol_moe_union_gate_up(__global const uint2* plan, __global const ushort* x,
+                                   __global const uint* w, __global ushort* h) {
+  const uint2 item = plan[get_group_id(1)];
+  if (item.x >= MOE_E) return;
+  const uint lid = get_local_id(0), lane = lid % SG, sg = lid / SG;
+  const uint blk = get_group_id(0), tile_idx = sg / UP_KS, q = sg % UP_KS;
+  const uint n_tile = blk * 4 + tile_idx, g0 = q * (G_UP / UP_KS);
+  const __global uint* expert = w + (size_t)item.x * UP_BLK_U32;
+  float acc[M] = {0};
+  tile_dot_rows(expert + ((size_t)n_tile * G_UP + g0) * TILE_U32, x, item.y,
+                HIDDEN, 0, g0, g0 + G_UP / UP_KS, lane, acc);
+  __local float red[M][4 * UP_KS][SG];
+#pragma unroll
+  for (uint r = 0; r < M; ++r) red[r][sg][lane] = acc[r];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = UP_KS / 2; stride; stride >>= 1) {
+    if (q < stride)
+#pragma unroll
+      for (uint r = 0; r < M; ++r) red[r][sg][lane] += red[r][sg + stride][lane];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (q != 0 || (tile_idx & 1u)) return;
+#if WFMT == 1
+  const float outer = as_float(expert[UP_BLK_U32 - 1]);
+#else
+  const float outer = 1.f;
+#endif
+  const uint i = blk * 32 + (tile_idx / 2) * SG + lane;
+#pragma unroll
+  for (uint r = 0; r < M; ++r) {
+    const uint slot = (item.y >> (4 * r)) & 15u;
+    if (slot >= MOE_K) continue;
+    const float g = red[r][sg][lane] * outer, u = red[r][sg + UP_KS][lane] * outer;
+    const float a = tanh(g / SWIGLU_CAP_G) * SWIGLU_CAP_G;
+    const float b = tanh(u / SWIGLU_CAP_U) * SWIGLU_CAP_U;
+    h[((size_t)r * MOE_K + slot) * INTER + i] = rne_bf16(a * sigmoid_f32(g) * b);
+  }
+}
+
+__attribute__((reqd_work_group_size(4 * SG, 1, 1)))
+KOL_SG16
+__kernel void kol_moe_union_down(__global const uint2* plan, __global const ushort* h,
+                                __global const uint* w, __global float* expert_out) {
+  const uint2 item = plan[get_group_id(1)];
+  if (item.x >= MOE_E) return;
+  const uint n_tile = get_group_id(0) * 4 + get_sub_group_id(), lane = get_sub_group_local_id();
+  const __global uint* expert = w + (size_t)item.x * DN_BLK_U32;
+  float acc[M] = {0};
+  tile_dot_rows(expert + (size_t)n_tile * G_DN * TILE_U32, h, item.y,
+                MOE_K * INTER, INTER, 0, G_DN, lane, acc);
+#if WFMT == 1
+  const float outer = as_float(expert[DN_BLK_U32 - 1]);
+#else
+  const float outer = 1.f;
+#endif
+#pragma unroll
+  for (uint r = 0; r < M; ++r) {
+    const uint slot = (item.y >> (4 * r)) & 15u;
+    if (slot < MOE_K) expert_out[((size_t)r * MOE_K + slot) * HIDDEN + n_tile * SG + lane] = acc[r] * outer;
+  }
+}
+
+// Preserve the per-row expert sum in slot order, then fold the short
+// convolution and residual. Each channel sees all its rows and its history.
+#pragma OPENCL FP_CONTRACT OFF
+__attribute__((reqd_work_group_size(128, 1, 1)))
+__kernel void kol_moe_union_finish(__global const uint* route, __global const float* expert_out,
+                                  __global const float* history, __global const float* taps,
+                                  __global float* pending, __global float* residual, __global ushort* draft_tap) {
+  const uint i = get_global_id(0);
+  float rows[M] = {0};
+#pragma unroll
+  for (uint r = 0; r < M; ++r) {
+    for (uint j = 0; j < MOE_K; ++j)
+      rows[r] += expert_out[((size_t)r * MOE_K + j) * HIDDEN + i] * as_float(route[r * RW + R_W + j]);
+    pending[(size_t)r * HIDDEN + i] = rows[r];
+    float sum = 0.f;
+    for (uint tap = 0; tap < 4; ++tap) {
+      const int t = (int)r + (int)tap - 3;
+      const float x = t < 0 ? history[(t + 3) * HIDDEN + i] : rows[t];
+      sum += taps[i * 4 + tap] * x;
+    }
+    const size_t at = (size_t)r * HIDDEN + i;
+    const float value = residual[at] + (rows[r] + sum) / sqrt(5.f);
+    residual[at] = value;
+    if (draft_tap) draft_tap[(size_t)r * 4 * HIDDEN + i] = rne_bf16(value);
+  }
+}
+#endif

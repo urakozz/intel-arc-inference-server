@@ -402,7 +402,7 @@ class Walk {
                 "the send-folded gemv is out_proj / o_proj's: N 2560, S 4, gemv (kernels::qwen4exp::tp_out_gemv_variant)");
       l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M_, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
                         : kernel(send ? kq::tp_out_gemv_variant(M_, s.K) : kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout),
-                                 "gemv", 64);
+                                 "gemv", kernels::gemv_wg_size(s.K, s.N, s.S, s.layout));
       k.arg_ptr(0, w.mem.ptr());
       k.arg_ptr(1, w.scales->ptr());
       k.arg_ptr(2, x);

@@ -3,8 +3,8 @@
 //
 //   L   the lists: the head is the MoE head (its bf16 experts int4 g64 RTN at load, 771
 //       linears from the published head), its device bytes are loader::mtp_head_bytes; the
-//       verify lists are verify_launches() = 536 at M = 1..4, the drafts draft_launches() =
-//       24 (the head's FFN is the 4-launch MoE block);
+//       verify lists are verify_launches() = 534 at M = 1..4, the drafts draft_launches() =
+//       22 (the head's FFN is the 4-launch MoE block);
 //   M2  (spec 15e Review Focus 3; spec 8 A6 on Ornith) from a prefilled state S0 and the
 //       true greedy drafts g[1..k], verify(k) for k = 1..3. Since spec 28b the verify rows'
 //       dense projections run gemm_sm (DPAS) and are no longer bitwise the M = 1 rows, so the
@@ -293,8 +293,8 @@ int main(int argc, char** argv) {
   CHECK_EQ(model.report.unconsumed, size_t(0));
   runtime::Engine e(ctx, std::move(model), kMaxLen);
   CHECK(e.mtp());
-  CHECK_EQ(runtime::verify_launches(d), size_t(536));
-  CHECK_EQ(runtime::draft_launches(d), size_t(24));
+  CHECK_EQ(runtime::verify_launches(d), size_t(534));
+  CHECK_EQ(runtime::draft_launches(d), size_t(22));
   for (uint32_t M = 1; M <= runtime::MtpBuffers::kSlots; ++M)
     CHECK_EQ(e.verify_step(M).kernel_count, runtime::verify_launches(d));
   for (uint32_t i = 0; i < runtime::Engine::kMaxDraft; ++i)

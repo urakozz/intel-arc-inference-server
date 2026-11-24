@@ -73,9 +73,13 @@ inline float murmur3_uniform(uint seed_lo, uint seed_hi, uint pos, uint key) {
 
 // SEQS (plan 19v3b, the batched draft): grid (blocks) - block z of the row table (df_prep.cl's `seqs`) walks its own
 // rows: its anchor, pos, K, temperature and seed from the table, its candidates at head rows row0 + j (hid row
-// row0 + j + 1), its drafts into its slot's Control (ctrl<z>) and readback (out<z>).
+// row0 + j + 1), its drafts into its slot's Control (ctrl<z>) and readback (out<z>). ROWS (plan 40a Task 4): the
+// table's and the selector projection's rows (32: four blocks of up to MAXR), MAXR's by default.
+#ifndef ROWS
+#define ROWS MAXR
+#endif
 #ifdef SEQS
-#define SQ(z, f) seqs[MAXR + 8 * (z) + (f)]
+#define SQ(z, f) seqs[ROWS + 8 * (z) + (f)]
 #define RJ(j) (row0 + (j))
 #else
 #define RJ(j) (j)
@@ -108,7 +112,10 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
   __global uint* restrict out = z == 0 ? out0 : z == 1 ? out1 : z == 2 ? out2 : out3;
   const uint p = SQ(z, 2), anchor = SQ(z, 4);
   uint K = SQ(z, 3);
-  if (K > MAXR - 1 - row0) K = MAXR - 1 - row0;
+  if (K > ROWS - 1 - row0) K = ROWS - 1 - row0;
+#if ROWS != MAXR
+  if (K > MAXR - 1) K = MAXR - 1;
+#endif
   const float T = as_float(SQ(z, 5));
   const uint seed_lo = SQ(z, 6), seed_hi = SQ(z, 7);
 #else
@@ -139,7 +146,7 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
 #ifdef FOLD
     for (uint r = lid; r < RANK; r += WG) {
       float a = 0.0f;
-      for (uint s = 0; s < 16; ++s) a = a + hid[((size_t)s * MAXR + RJ(j) + 1) * RANK + r];
+      for (uint s = 0; s < 16; ++s) a = a + hid[((size_t)s * ROWS + RJ(j) + 1) * RANK + r];
       folded[r] = a;
     }
     barrier(CLK_LOCAL_MEM_FENCE);

@@ -370,6 +370,38 @@ int main(int argc, char** argv) {
       }
     return ok ? 0 : 1;
   }
+  // --pair K N S L <control>: the named control binary (gemv's 64 work-items) against the engine's binary of the shape
+  // (kernels::gemv_variant, its work-group: PERF-108's _KS builds), one warm-up pair, then two interleaved pairs. A
+  // reordered sum is held to the double-precision reference (both errors printed), not to bit-identity.
+  if (argc == 7 && std::string(argv[1]) == "--pair") {
+    const uint32_t K = uint32_t(std::atoi(argv[2])), N = uint32_t(std::atoi(argv[3])), S = uint32_t(std::atoi(argv[4])),
+                   L = uint32_t(std::atoi(argv[5]));
+    common::Int4Gptq w = common::Int4Gptq::random(K, N, 42);
+    std::vector<uint16_t> x = random_bf16(K, 5);
+    std::vector<float> ref;
+    gemv_ref(w, x, 1, ref);
+    const double tol = tol_for(ref);
+    const std::string cand = kernels::gemv_variant(1, K, N, S, L);
+    double us[2] = {0, 0}, err[2] = {0, 0};
+    bool same = true;
+    for (int pass = 0; pass < 3; ++pass) {
+      GemvResult a = run_gemv(ctx, q, f, w, x, {1, K, N, S, L, argv[6]}, 40);
+      GemvResult b = run_gemv(ctx, q, f, w, x, {1, K, N, S, L}, 40);
+      if (pass == 0) continue;
+      us[0] += a.us_per_launch / 2;
+      us[1] += b.us_per_launch / 2;
+      err[0] = max_abs_err(a.out, ref);
+      err[1] = max_abs_err(b.out, ref);
+      same = std::memcmp(a.out.data(), b.out.data(), a.out.size() * 4) == 0;
+      std::printf("pair %d: %s %.2f us, %s %.2f us\n", pass, argv[6], a.us_per_launch, cand.c_str(), b.us_per_launch);
+    }
+    const double mb = double(w.bytes()) * 1e-3;
+    std::printf("control   %-34s %7.2f us %5.0f GB/s  max abs err vs fp64 %.3g\n", argv[6], us[0], mb / us[0], err[0]);
+    std::printf("candidate %-34s %7.2f us %5.0f GB/s  max abs err vs fp64 %.3g (tol %.3g)%s\n", cand.c_str(), us[1],
+                mb / us[1], err[1], tol, same ? ", bitwise the control" : "");
+    std::printf("candidate / control: %.3f\n", us[1] / us[0]);
+    return err[0] <= tol && err[1] <= tol ? 0 : 1;
+  }
   const double peak = kPeak;
   struct Shape { uint32_t K, N; const char* name; };
   // Names use U+2016 (‖), not '|': this table is pasted into docs/ as markdown.

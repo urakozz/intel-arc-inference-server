@@ -30,7 +30,7 @@
 // the same engine, which the draft vocabulary does not touch (it runs no draft list) and
 // which A11 showed identical to `--draft-vocab off`'s MTP output - so identity here is
 // "128k equals off", token for token, at every K. It also checks that every draft list
-// still has 23 launches. Bench rows carry `dv=<size>` for §11's off / 32k / 64k / 128k
+// still has 21 launches. Bench rows carry `dv=<size>` for §11's off / 32k / 64k / 128k
 // acceptance and t/s rows (run `--lm-head int8` alone for the off arm).
 //
 // A3 mode (spec 28c, spec 10 A3's form):  mtp_gpu_test <snapshot> <backend> --a3 [--max-len 65536] [--vattn ..]
@@ -205,12 +205,12 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
   if (kVattn != runtime::VerifyAttnForce::Auto) L.eng.recapture_verify(runtime::attn_forced(kVattn));
   std::printf("verify attention: %s (spec 28c; --vattn), %u deep verify lists (%.0f ms to capture)\n",
               runtime::verify_attn_force_name(kVattn), L.eng.verify_deep_lists(), L.eng.verify_deep_capture_ms());
-  // Spec 8 §11: the draft lists keep 23 launches with a draft vocabulary (the compact
+  // Spec 8 §11: the draft lists keep 21 launches (PERF-84: 23 before) with a draft vocabulary (the compact
   // GEMV and the two dv_argmax stages replace lm_head and the two argmax stages).
   int launch_fail = 0;
   for (uint32_t i = 0; i < runtime::Engine::kMaxDraft; ++i)
-    if (L.eng.draft_step(i).kernel_count != 23) ++launch_fail;
-  std::printf("draft lists: %zu launches each (want 23), lm_head %s, draft vocab %s\n",
+    if (L.eng.draft_step(i).kernel_count != 21) ++launch_fail;
+  std::printf("draft lists: %zu launches each (want 21), lm_head %s, draft vocab %s\n",
               L.eng.draft_step(0).kernel_count, loader::lm_head_form_name(head.lm_head),
               loader::draft_vocab_name(L.eng.draft_vocab()).c_str());
   const std::string src = ".";

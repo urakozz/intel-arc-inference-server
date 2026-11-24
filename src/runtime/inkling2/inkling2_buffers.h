@@ -1,0 +1,43 @@
+#pragma once
+#include "l0/memory.h"
+#include "runtime/inkling2/inkling2_sizes.h"
+
+namespace runtime::inkling2 {
+
+struct WeightBuffers {
+  std::unique_ptr<l0::Mem> model, draft;
+  std::array<std::unique_ptr<l0::Mem>, model::Inkling2Desc::layers> layers;
+  const l0::Mem& arena(uint32_t index) const;
+};
+struct PersistentBuffers {
+  l0::Mem control, full_k, full_v, ring_k, ring_v, conv_k, conv_v, conv_attn, conv_mlp;
+  PersistentBuffers(l0::Context& ctx, const PersistentSizes& sizes);
+};
+struct ScratchBuffers {
+  std::unique_ptr<l0::Mem> residual, block_bank, messages, controller, inputs, projections, full_taps, attention_parts,
+      attn_output, routes, expert_union, expert_hidden, expert_output, pending_conv, logits, argmax_parts, draft_taps;
+  ScratchBuffers(l0::Context& ctx, const ScratchSizes& sizes);
+};
+struct DraftBuffers {
+  std::unique_ptr<l0::Mem> rope, draft_control, draft_full_k, draft_full_v, draft_ring_k, draft_ring_v,
+      block_hidden, block_projections, draft_parts, context_mix, markov, draft_logits;
+  DraftBuffers(l0::Context& ctx, const DraftSizes& sizes);
+};
+static_assert(gs::buffers_problem<l0::Mem, WeightBuffers, WeightSizes>().empty());
+static_assert(gs::buffers_problem<l0::Mem, PersistentBuffers, PersistentSizes>().empty());
+static_assert(gs::buffers_problem<l0::Mem, ScratchBuffers, ScratchSizes>().empty());
+static_assert(gs::buffers_problem<l0::Mem, DraftBuffers, DraftSizes>().empty());
+
+// The byte plan is checked before creating any allocation. Contents are
+// uploaded by a separate stage, so a failed load can unwind the arenas.
+struct Buffers {
+  PersistentBuffers persistent;
+  ScratchBuffers scratch;
+  DraftBuffers draft;
+  WeightBuffers weights;
+  Buffers(l0::Context& ctx, const Sizes& sizes, const loader::Inkling2WeightLayout& layout);
+  void upload(l0::Context& ctx, const loader::Inkling2Checkpoint& checkpoint, unsigned threads = 0);
+  void zero(l0::Context& ctx);
+};
+
+}  // namespace runtime::inkling2

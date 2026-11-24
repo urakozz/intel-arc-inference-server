@@ -12,8 +12,9 @@
 //       deferred review item).
 //   (spec 19 v3d) a row with the 2D block read is bitwise its plain-read twin at every M, where that twin is built.
 //   N3  property R: every row of every M bitwise equal (every slice) to the same row at the largest built M;
-//       (spec 32e) where the row binds gemm_sm_wide past 16 rows, rows 16..M-1 also bitwise gemm_sm at 16 rows over
-//       the same inputs placed in its rows 0..15, and every gemm_sm_wide binary has no spill and no private memory;
+//       (spec 32e) where the row binds gemm_sm_wide past 16 rows, rows G..M-1 also bitwise gemm_sm at G rows over
+//       the same inputs placed in its rows 0..G-1 (G the largest built M up to 16: 16, or 8 for the drafter's batched
+//       rows), and every gemm_sm_wide binary has no spill and no private memory;
 //       then `trials` trials (default 1000 a row) of a probe row at a random index among fresh random rows,
 //       at a random built M - row bitwise equal to its reference. The output buffer is filled with a NaN
 //       pattern before EVERY run (28a's deferred item: a stale result can never pass as a fresh one).
@@ -226,8 +227,12 @@ gemm_sm::N2 n2_cols(const std::vector<float>& got, const std::vector<double>& re
   return gemm_sm::n2(g, r, b, M, C);
 }
 
-int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t seed) {
-  const std::vector<unsigned> ms = kernels::gemm_sm_built_m(t);
+// A lever alternate is built at 2..8 and 16 (tools/probe/CMakeLists.txt); the 32 / 64 binaries exist only for the
+// deep rows, so a lever row is held to the M it is built at.
+int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t seed, bool lever) {
+  std::vector<unsigned> ms = kernels::gemm_sm_built_m(t);
+  if (lever)
+    std::erase_if(ms, [&](unsigned M) { return M > 16 && !exists(kernels::gemm_sm_variant(M, t)); });
   const uint32_t Mmax = ms.back();
   const std::string name0 = kernels::gemm_sm_variant(Mmax, t);
   for (uint32_t M : ms)
@@ -321,7 +326,7 @@ int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t s
       if (!bitwise(row_slices(p, b.S, M, t.N, m), row_slices(pmax, bmax.S, Mmax, t.N, m))) ++r_diff;
     }
   }
-  // R, spec 32e: gemm_sm_wide's rows past 16 against gemm_sm at 16 rows over the same 16 rows (rows 0..15 are part 1),
+  // R, spec 32e: gemm_sm_wide's rows past G against gemm_sm at G rows over the same G rows (rows 0..G-1 are part 1),
   // and its binaries keep every value in registers (no spill, no private memory: zeKernelGetProperties).
   size_t v2_diff = 0, v2_rows = 0;
   for (uint32_t M : ms) {
@@ -336,18 +341,22 @@ int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t s
       ++fails;
     }
   }
+  // gemm_sm at G rows, the largest built M up to 16: 16, or 8 for the drafter's batched rows (built at 8 and 32)
+  uint32_t G = 0;
+  for (uint32_t M : ms)
+    if (M <= 16) G = std::max(G, M);
   if (kernels::gemm_sm_wide_arm(Mmax, t)) {
-    Bound b16 = bind_gemm_sm(d, t, 16);
-    for (uint32_t c = 1; c < Mmax / 16; ++c) {
-      const std::vector<uint16_t> xc(x.begin() + size_t(16) * c * t.K, x.begin() + size_t(16) * (c + 1) * t.K);
-      const std::vector<float> p16 = run(d, bf, b16, xc, t.N);
-      for (uint32_t m = 0; m < 16; ++m, ++v2_rows)
-        if (!bitwise(row_slices(p16, b16.S, 16, t.N, m), row_slices(pmax, bmax.S, Mmax, t.N, 16 * c + m))) ++v2_diff;
+    Bound bg = bind_gemm_sm(d, t, G);
+    for (uint32_t c = 1; c < Mmax / G; ++c) {
+      const std::vector<uint16_t> xc(x.begin() + size_t(G) * c * t.K, x.begin() + size_t(G) * (c + 1) * t.K);
+      const std::vector<float> pg = run(d, bf, bg, xc, t.N);
+      for (uint32_t m = 0; m < G; ++m, ++v2_rows)
+        if (!bitwise(row_slices(pg, bg.S, G, t.N, m), row_slices(pmax, bmax.S, Mmax, t.N, G * c + m))) ++v2_diff;
     }
   }
   if (v2_diff) {
-    std::printf("FAIL %s: %zu of %zu rows past 16 differ from gemm_sm at 16 rows over the same inputs\n",
-                name0.c_str(), v2_diff, v2_rows);
+    std::printf("FAIL %s: %zu of %zu rows past %u differ from gemm_sm at %u rows over the same inputs\n",
+                name0.c_str(), v2_diff, v2_rows, G, G);
     ++fails;
   }
   // R, part 2: probe rows at random indices among fresh random rows, at random built M.
@@ -401,15 +410,17 @@ int main(int argc, char** argv) {
   l0::Fence f(q);
   Dev d{ctx, q, f};
   std::vector<kernels::SmallMTuning> rows(std::begin(kernels::kSmallMTuning), std::end(kernels::kSmallMTuning));
+  const size_t production = rows.size();
   if (levers)
     for (const auto& r : gemm_sm::lever_rows()) rows.push_back(r);
   int fails = 0, ran = 0;
   uint32_t seed = 1;
-  for (const kernels::SmallMTuning& t : rows) {
+  for (size_t i = 0; i < rows.size(); ++i) {
+    const kernels::SmallMTuning& t = rows[i];
     ++seed;
     if (!only.empty() && kernels::gemm_sm_variant(8, t).find(only) == std::string::npos) continue;
     ++ran;
-    fails += test_row(d, t, trials, seed);
+    fails += test_row(d, t, trials, seed, i >= production);
   }
   CHECK(ran > 0);
   if (fails) {

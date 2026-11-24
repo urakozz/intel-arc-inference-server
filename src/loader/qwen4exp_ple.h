@@ -74,8 +74,8 @@ void check_q4_host_fit(size_t ple_bytes, size_t mirror_bytes, size_t prefix_byte
 // MemAvailable from /proc/meminfo in bytes; 0 when unreadable (not Linux).
 size_t q4_mem_available();
 
-// "<snapshot>-ple-int8/" (the snapshot path without its trailing slash; the only place the engine looks since the
-// zero-config cleanup removed B70_Q4_PLE and --ple-dir). Throws,
+// "<snapshot>/ple-int8/" (shipped inside our model repo), else "<snapshot>-ple-int8/" (the snapshot path without its
+// trailing slash; made once by ple_int8.py; the zero-config cleanup removed B70_Q4_PLE and --ple-dir). Throws,
 // naming the directory and ple_int8.py's command line, when it holds no model.safetensors.index.json.
 std::string q4_ple_dir(const std::string& snapshot_dir);
 

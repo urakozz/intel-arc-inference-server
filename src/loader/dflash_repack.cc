@@ -7,6 +7,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 #include "common/bf16.h"
 #include "common/json.h"
@@ -293,7 +294,13 @@ DFlashHostLinear dflash_candidate_head2(const int8_t* tiled, const float* row_sc
   h.kind = model::WeightKind::Int4;   // a packed-integer head: the int4 vector carries the 2-bit tiles
   const uint32_t G = K / 64;
   h.int4.assign(size_t(N / 16) * G * 72, 0u);
-  for (uint32_t n = 0; n < N; ++n)
+  // Row blocks of 16 (one tile column each) split over the host's threads (PERF-123: it runs at every MTP load too);
+  // every row is quantised as before, so the bytes do not depend on the split.
+  const uint32_t blocks = N / 16, threads = std::max(1u, std::min(32u, std::thread::hardware_concurrency()));
+  std::vector<std::thread> pool;
+  for (uint32_t t = 0; t < threads; ++t)
+    pool.emplace_back([&, t] {
+  for (uint32_t n = blocks * t / threads * 16; n < blocks * (t + 1) / threads * 16; ++n)
     for (uint32_t g = 0; g < G; ++g) {
       const auto* p = tiled + (size_t(n / 16) * (K / 16) + g * 4) * 256 + n % 16;
       auto value = [&](uint32_t k) { return float(p[(k / 16) * 256 + (k % 16) * 16]) * row_scales[n]; };
@@ -312,6 +319,8 @@ DFlashHostLinear dflash_candidate_head2(const int8_t* tiled, const float* row_sc
       }
       reinterpret_cast<uint16_t*>(tile + 64)[n % 16] = sh;
     }
+    });
+  for (std::thread& th : pool) th.join();
   return h;
 }
 

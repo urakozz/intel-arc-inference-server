@@ -78,12 +78,12 @@ void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, e
 #define SG 16
 #define NONE 0xFFFFFFFFu
 #define GROUP 64
-#define TILE_U32 136
+#include "expert_fp.h"
 #define R (8 * NA)
 #define CN (16 * NB)
 #define WG_N (CN * WGN)
 #define G (K / GROUP)
-#define BLK_U32 ((size_t)(N / 16) * (K / GROUP) * TILE_U32)
+#define BLK_U32 ((size_t)(N / 16) * (K / GROUP) * TILE_U32 + EXPERT_OUTER_WORDS)
 #if N % WG_N != 0 || K % GROUP != 0
 #error "pf_moe_q4gemm: N whole work-group blocks, K whole 64-k groups"
 #endif
@@ -100,6 +100,7 @@ void __builtin_IB_lsc_prefetch_global_uint(const __global uint* base, int off, e
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 #endif
 
+#if WFMT == 0
 // One VNNI pair (k 2p low, 2p + 1 high) of column word w (nibble i = k 8 j + i, unxored) at the column's scale.
 inline uint q4_pair(uint w, int p, float scale) {
   const float c = -24.0f * scale;
@@ -123,6 +124,22 @@ inline int8 q4_half(uint w0, uint w1, float scale) {
   v.s7 = q4_pair(w1, 3, scale);
   return as_int8(v);
 }
+
+#else
+inline int8 fp_half(const __global uint* tile, uint lane, uint k) {
+  const float scale = fp_tile_scale(tile, lane, k);
+  uint pairs[8];
+#pragma unroll
+  for (uint p = 0; p < 8; ++p) {
+    const uint i = 2 * p;
+    const uint word = FP_TILE_WORD(tile, lane, k + i);
+    const ushort lo = rne_bf16(fp_weight(word, i % FP_VALUES_PER_WORD, scale));
+    const ushort hi = rne_bf16(fp_weight(word, (i + 1) % FP_VALUES_PER_WORD, scale));
+    pairs[p] = (uint)lo | ((uint)hi << 16);
+  }
+  return as_int8(vload8(0, pairs));
+}
+#endif
 
 __attribute__((reqd_work_group_size(SG * WGN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
@@ -168,6 +185,10 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
 #pragma unroll
     for (int b = 0; b < NB; ++b) acc[a][b] = (float8)(0.0f);
 
+#if WFMT != 0
+  const uint fp_lane = get_sub_group_local_id();
+  for (uint g = 0; g < G; ++g) {
+#else
   uint wq[NB][8];
   float sc[NB];
 #define LOAD_GROUP(gg, WQ, SC)                                                                     \
@@ -199,6 +220,7 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
     uint wn[NB][8];
     float sn_[NB];
     if (g + 1 < G) { LOAD_GROUP(g + 1, wn, sn_) }
+#endif
 #endif
 #pragma unroll
     for (int h = 0; h < 2; ++h) {   // the group's two 32-k tiles, in k order
@@ -238,14 +260,19 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
 #endif
 #pragma unroll
         for (int b = 0; b < NB; ++b) {
+#if WFMT != 0
+          const __global uint* tile = Wb + ((size_t)(nb / 16 + (uint)b) * G + g) * TILE_U32;
+          const int8 bv = fp_half(tile, fp_lane, 32u * h + 16u * ks);
+#else
           const int8 bv = q4_half(wq[b][4 * h + 2 * ks], wq[b][4 * h + 2 * ks + 1], sc[b]);
+#endif
 #pragma unroll
           for (int a = 0; a < NA; ++a)
             if (a < 4 || full) acc[a][b] = intel_sub_group_bf16_bf16_matrix_mad_k16(af[a], bv, acc[a][b]);
         }
       }
     }
-#if !NODB
+#if WFMT == 0 && !NODB
 #pragma unroll
     for (int b = 0; b < NB; ++b) {
 #pragma unroll
@@ -256,6 +283,14 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
   }
 #undef LOAD_GROUP
 #undef PREFETCH_GROUP
+
+#if WFMT == 1
+  const float outer = as_float(Wb[BLK_U32 - 1]);
+#pragma unroll
+  for (int a = 0; a < NA; ++a)
+#pragma unroll
+    for (int b = 0; b < NB; ++b) acc[a][b] *= outer;
+#endif
 
   // The surface ends at the item's last row: a 64-row sub-group over a 32-row item writes only its first half.
   const int live_rows = min((int)R, (int)rows);

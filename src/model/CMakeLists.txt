@@ -30,3 +30,6 @@ target_link_libraries(b70_dflash_model PUBLIC b70_model)
 foreach(_t b70_kolibri_model b70_qwen4exp_model)
   target_compile_options(${_t} PRIVATE -freflection)
 endforeach()
+
+add_library(b70_inkling2_model STATIC inkling2.cc)
+target_link_libraries(b70_inkling2_model PUBLIC b70_model)

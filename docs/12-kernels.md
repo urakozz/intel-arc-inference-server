@@ -1177,7 +1177,8 @@ offsets A, B and C, so one launch serves a batched GEMM. The variants:
   2048 rows a slab is one wave either way). The conversion stores each word's eight values as one 2D block
   message. The tiles, DPAS chain and values are the same, so the output is bit-identical. With these, a 4096-row
   chunk makes the prompt pass 5.6% faster from 4,096 to 32,768 prompt tokens on `l0`. Qwen3.8 takes 4096-row chunks
-  where the memory plan has room for them, keeping 2048-row chunks over a prompt's last 6,144 or more positions so
+  where the memory plan has room for them - always under `--max-len auto` on `l0`, which sizes the context for them
+  - keeping 2048-row chunks over a prompt's last 6,144 or more positions so
   a prefix-cache hit after a turn restarts at most 2,047 rows back. The MoE models' dense linears and every chunk
   up to 2048 rows keep the plain binaries.
 

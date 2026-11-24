@@ -618,12 +618,16 @@ void test_slots_chunk_step_alternate() {
   // A tick only polls the card's prefill (it runs on the card's thread): as drain, bound by ticks, not by time.
   for (long i = 0; i < 1000000 && a.ids.size() < 3; ++i) s.tick();
   CHECK(a.ids.size() >= 3);
-  CHECK(s.submit(req(P(42, 40), 4, b)) != nullptr);    // 1 free each: the lower slot, card 0's slot 1 - 5 chunks of 8
+  Out c;
+  CHECK(s.submit(req(P(43, 5), 300, c)) != nullptr);   // card 1 (no request running there): slot 2
+  CHECK(s.submit(req(P(42, 40), 4, b)) != nullptr);    // card 0's slot 1, the one free - 5 chunks of 8
   drain(s);
   CHECK_EQ(a.fin.slot, 0);
   CHECK_EQ(b.fin.slot, 1);
+  CHECK_EQ(c.fin.slot, 2);
   CHECK(a.ids == alone(P(41, 5), 300));
   CHECK(b.ids == alone(P(42, 40), 4));
+  CHECK(c.ids == alone(P(43, 5), 300));
   const std::string& log = c0.log;
   const size_t first = log.find('p', 1), last = log.rfind('p');
   CHECK(first != std::string::npos && last > first);

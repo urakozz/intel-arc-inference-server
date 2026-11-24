@@ -21,6 +21,7 @@
 //   pipeline parallel      b70-decode: one card (b70-serve --parallel pp serves it)
 // and by the loader / the capture (with the reason): a target the drafter is not trained for
 // (model::check_dflash_target), an int4 lm_head (the draft head reads int8 or bf16 rows).
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -138,6 +139,21 @@ inline Loaded load(l0::Context& ctx, const Args& a, const loader::LoadedModel& t
     throw std::runtime_error("--spec-max " + std::to_string(a.max_k) + " exceeds the drafter's block (" +
                              std::to_string(l.w.desc.max_k()) + " drafts)");
   return l;
+}
+
+// PERF-123: with the MTP head (`mtp_on`) over Qwen3.8's or Ornith's int8 head on one card, the head's 2-bit copy the
+// greedy verify lists scan for candidates (loader::LoadedModel::cand_head), built before the plan so its bytes are in
+// the model's total. A DFlash drafter brings its own (runtime::TapDrafter::candidate_head2); nothing to do then.
+inline void main_candidate_head(l0::Context& ctx, loader::LoadedModel& m, bool mtp_on) {
+  const loader::DeviceWeight& lm = m.linears.at({loader::kTopLevel, model::LinearId::LmHead});
+  if (!mtp_on || lm.kind != model::WeightKind::Int8 || (lm.shape.K != 5120 && lm.shape.K != 2048) ||
+      lm.shape.N != model::Qwen35::kVocab)
+    return;
+  const auto t0 = std::chrono::steady_clock::now();
+  m.cand_head = loader::candidate_head2(ctx, lm, m.report.cand_head_bytes);
+  std::fprintf(stderr, "greedy candidate head: int2 g64 copy of the int8 head, top 64 rescored exactly, %zu B, %.1f s\n",
+               m.report.cand_head_bytes,
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
 }  // namespace cli::dflash

@@ -86,7 +86,8 @@ inline GemvResult run_gemv(l0::Context& ctx, l0::Queue& q, l0::Fence& fence,
   l0::Module mod(ctx, kernels::path(c.variant ? std::string(c.variant)
                                               : kernels::gemv_variant(c.M, c.K, c.N, c.S, c.L)));
   l0::Kernel k = mod.kernel("gemv");
-  k.group_size(64);
+  // A named override is a probe build at gemv's 64 work-items; the engine's binary takes its shape's (PERF-108).
+  k.group_size(c.variant ? 64 : kernels::gemv_wg_size(c.K, c.N, c.S, c.L));
   auto bind = [&](int i) {
     k.arg_ptr(0, wbufs[i].ptr());
     k.arg_ptr(1, sbufs[i].ptr());

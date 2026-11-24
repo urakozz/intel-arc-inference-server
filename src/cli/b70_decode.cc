@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -31,6 +32,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -38,6 +40,8 @@
 #include "cli/flags.h"
 #include "cli/hardware_gate.h"
 #include "cli/stdout_to_stderr.h"
+#include "cli/inkling2_decode.h"
+#include "runtime/inkling2/inkling2_engine.h"
 #include "cli/kolibri_decode.h"
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
@@ -101,21 +105,22 @@ using cli::flags::Arg;
 using cli::flags::Help;
 using cli::flags::Section;
 struct Flags {
+  [[=Help("", "print Inkling's one-card memory plan from checkpoint headers")]] bool plan = false;
   [[=Help("<file>", "whitespace-separated token ids")]] std::string ids;
   [[=Help("<N>", "ids to generate, greedily; t/s on stderr")]] Arg<uint32_t> n;
   [[=Help("", "run the prompt through the engine's prefill instead of one decode replay per id")]] bool prefill = false;
-  [[=Help("S", "--ids only: off, mtp (the MTP head, adaptive K <= --spec-max 1..3;\n"
+  [[=Help("S", "off, mtp (the MTP head for --ids, adaptive K <= --spec-max 1..3;\n"
                "Qwen3.8, Ornith) or dflash (Qwen3.8's DFlash drafter, K <= --spec-max\n"
-               "1..7, one card; --draft-model PATH, required). Greedy: the ids equal the plain run's.")]]
+               "1..7, one card; --draft-model PATH, required). Inkling accepts mtp or auto\n"
+               "for its built-in DSpark drafter in --ids and --bench.")]]
   Arg<std::string> spec{"off"};   // a developer tool: the plain list unless asked (cli/spec_args.h)
   [[=Help("K", "the proposer's cap (see --spec).", "the most")]] Arg<uint32_t> spec_max;
   [[=Help("PATH", "--spec dflash's drafter.")]] Arg<std::string> draft_model;   // spec 19c
   // Spec 6 §10: 16384 stays the default here, so bench rows stay comparable; `auto` plans the largest max_len that
   // fits, as b70-serve's default does.
-  [[=Help("L", "KV cache and RoPE capacity (16384 keeps bench rows comparable); any\n"
-               "multiple of 256 up to the trained context, refused if it does not fit; auto =\n"
-               "the largest that fits.")]]
-  std::string max_len = "16384";
+  [[=Help("L", "KV cache and RoPE capacity. The default is auto for Inkling and 16384 for other\n"
+               "models. Auto finds the largest length that fits.")]]
+  Arg<std::string> max_len{"16384"};
   [[=Help("P", "auto: one card when the model and the context fit it, else pp; 1;\n"
                "pp: the layers over two cards (--prefill runs the two-card chunk\n"
                "pipeline). Kolibri-1 defaults to two cards.\n"
@@ -139,7 +144,8 @@ struct Flags {
                "session's chunk cap; above 2048 the buffers hold 4096-row chunks, planned).", "2048")]]
   Arg<uint32_t> prefill_chunk;
   [[=Help("", "ingest --depth synthetic ids, then replay --steps INSTRUMENTED steps and print\n"
-              "the per-launch anatomy (never a bench row).")]]
+              "the per-launch anatomy (never a bench row). Inkling times target steps with 1, 2, and 8"
+              " rows, committing one row per step.")]]
   bool profile = false;
   [[=Help("N", "--profile: instrumented steps.")]] Arg<uint32_t> steps{32};
   [[=Help("R", "--profile: R sessions over one ingest, a per-family mean +/- spread table.")]] Arg<uint32_t> repeats{1};
@@ -160,6 +166,7 @@ void usage() {
       stderr,
       "usage: b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill] [--spec mtp|dflash]\n"
       "                                     [--max-len 16384|auto] [--parallel auto|1|pp|tp]\n"
+      "       b70-decode <Inkling snapshot-or-repo> --plan [--max-len auto] [--spec auto|off]\n"
       "\n"
       "  ids in, ids out (no tokenizer: tools/oracle/tokenize.py turns text into an --ids file);\n"
       "  stdout is one generated id per line, everything else goes to stderr. The model is chosen\n"
@@ -176,7 +183,7 @@ void usage() {
 
 using cli::StdoutToStderr;
 
-std::vector<uint32_t> read_ids(const std::string& path) {
+std::vector<uint32_t> read_ids(const std::string& path, uint32_t vocab = Qwen35::kVocab) {
   std::ifstream f(path);
   if (!f) throw std::runtime_error("cannot open --ids file '" + path + "'");
   std::vector<uint32_t> ids;
@@ -186,9 +193,9 @@ std::vector<uint32_t> read_ids(const std::string& path) {
     // Not kVocabUsed: rows [kVocabUsed, kVocab) exist in the embedding table
     // and a checkpoint may legitimately spell one. Beyond kVocab the gather
     // would read past the allocation, so that is the hard bound.
-    if (id >= Qwen35::kVocab)
+    if (id >= vocab)
       throw std::runtime_error("--ids file '" + path + "': id " + std::to_string(id) +
-                               " is outside the vocabulary (" + std::to_string(Qwen35::kVocab) +
+                               " is outside the vocabulary (" + std::to_string(vocab) +
                                " rows)");
     ids.push_back(id);
   }
@@ -636,6 +643,8 @@ int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::Lm
     std::fflush(stdout);
     ++printed;
   };
+  if constexpr (std::is_same_v<Eng, runtime::Engine>)
+    eng.greedy_head(true);   // greedy ids only: the verify head's candidate pass where the lists carry it
   const auto t0 = std::chrono::steady_clock::now();
   while (printed < n) {
     const uint32_t want = policy ? policy->next() : mtp_k;
@@ -691,6 +700,7 @@ int generate_dflash(runtime::Engine& eng, uint32_t n, uint32_t max_k) {
     std::fflush(stdout);
     ++printed;
   };
+  eng.greedy_head(true);   // greedy ids only: the verify head's candidate pass where the lists carry it
   const auto t0 = std::chrono::steady_clock::now();
   while (printed < n) {
     const uint32_t k = std::min(max_k, eng.max_verify_k());
@@ -726,6 +736,154 @@ int generate_dflash(runtime::Engine& eng, uint32_t n, uint32_t max_k) {
   return 0;
 }
 
+int run_inkling(const std::string& path, const Flags& f) {
+  const auto spec = f.spec.given ? f.spec.value : "auto";
+  if (spec != "off" && spec != "auto" && spec != "mtp")
+    throw std::runtime_error("Inkling accepts --spec off, auto or mtp");
+  if (f.prefill || f.prefill_length.given || f.prefill_chunk.given || f.prefill_backend.given)
+    throw std::runtime_error("Inkling supports decode and replay prompt ingestion. Use --bench with --depth to time decode.");
+  if (f.layers.given || f.draft_model.given || f.pipeline_split.given ||
+      (f.parallel != "auto" && f.parallel != "1") || !f.kv_cache.empty())
+    throw std::runtime_error("Inkling decode requires one card and the checkpoint's built-in drafter and KV format");
+  if (int(f.bench) + int(f.profile) + int(!f.ids.empty()) != 1)
+    throw std::runtime_error("Choose one of --bench, --profile or --ids for Inkling decode");
+  if ((f.n.given && f.ids.empty()) || (f.tg.given && !f.bench) || (f.depth.given && !f.ids.empty()) ||
+      ((f.steps.given || f.repeats.given) && !f.profile) || (f.profile && (f.spec.given || f.spec_max.given)))
+    throw std::runtime_error("Use --steps and --repeats with --profile, --tg with --bench, and --n with --ids");
+  const uint32_t n = f.bench ? f.tg.value : f.profile ? f.steps.value : f.n.value;
+  const uint32_t cap = f.spec_max.given ? f.spec_max.value : 7;
+  if (n == 0 || cap == 0 || cap > 7)
+    throw std::runtime_error("Inkling requires a positive generation length and --spec-max from 1 to 7");
+  if (f.profile && f.repeats.value == 0) throw std::runtime_error("Inkling --repeats must be positive");
+
+  const loader::Inkling2Checkpoint checkpoint(path);
+  const bool draft = !f.profile && spec != "off" && checkpoint.has_drafter();
+  if (!f.profile && spec != "off" && !draft) std::print(stderr, "Inkling checkpoint has no mtp.safetensors. Using plain decode.\n");
+  auto length = cli::parse_max_len(f.max_len.given ? f.max_len.value : "auto");
+  cli::check_before_load(length, model::Inkling2Desc::trained_max_len, false);
+  std::vector<uint32_t> ids;
+  const size_t needed = size_t(n) + (f.profile ? runtime::inkling2::kRows : 0);
+  if (f.bench || f.profile) {
+    if (f.depth.value == 0 || f.depth.value + needed > model::Inkling2Desc::trained_max_len)
+      throw std::runtime_error("Inkling --depth and --tg must fit the trained context");
+    ids.resize(f.depth.value);
+    for (size_t i = 0; i < ids.size(); ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
+  } else {
+    ids = read_ids(f.ids, model::Inkling2Desc::vocab);
+  }
+
+  l0::Context ctx(0);
+  const auto& desc = checkpoint.desc();
+  const auto& weights = checkpoint.layout();
+  const size_t card = ctx.memory_bytes();
+  const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+  if (length.is_auto)
+    length.value = runtime::inkling2::max_len_that_fits(desc, weights, card, reserve, draft);
+  if (ids.empty() || ids.size() + needed > length.value)
+    throw std::runtime_error("Set --max-len to fit the prompt and generated tokens");
+  if (card <= reserve || runtime::inkling2::sizes(desc, weights, length.value, draft).memory().total() > card - reserve)
+    throw std::runtime_error("Inkling does not fit on this card at the requested --max-len");
+
+  runtime::inkling2::Engine engine(ctx, checkpoint, length.value, draft);
+  const auto ingest = [&] {
+    uint32_t next = 0;
+    for (size_t i = 0; i < ids.size();) {
+      const uint32_t rows = uint32_t(std::min<size_t>(runtime::inkling2::kRows, ids.size() - i));
+      next = engine.verify({ids.data() + i, rows}).back();
+      engine.commit(rows);
+      i += rows;
+    }
+    return next;
+  };
+  if (f.profile) {
+    std::array<double, runtime::inkling2::kRows> ms{};
+    for (const uint32_t rows : {1u, 2u, runtime::inkling2::kRows}) {
+      for (uint32_t repeat = 0; repeat < f.repeats.value; ++repeat) {
+        engine.reset();
+        ingest();
+        for (uint32_t i = 0; i < n + 1; ++i) {
+          std::array<uint32_t, runtime::inkling2::kRows> input{};
+          for (uint32_t j = 0; j < rows; ++j) input[j] = kBenchPrompt[(i + j) % kBenchPromptLen];
+          const auto start = std::chrono::steady_clock::now();
+          engine.verify({input.data(), rows});
+          engine.commit(1);
+          if (i) ms[rows - 1] += std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - start).count();
+        }
+      }
+      ms[rows - 1] /= double(n) * f.repeats.value;
+      std::println("Inkling {}-row target with one-row commit, {} kernel launches, {:.3f} ms per step, {:.3f}x plain",
+                   rows, engine.launch_count(rows, 1), ms[rows - 1], ms[rows - 1] / ms[0]);
+    }
+    return 0;
+  }
+  uint32_t next = ingest();
+  std::vector<uint32_t> output;
+  output.reserve(n);
+  std::optional<server::AdaptiveK> policy;
+  double plain_ms = 0.;
+  uint32_t iterations = 0, proposed = 0, accepted = 0, plain_steps = 0;
+  const auto start = std::chrono::steady_clock::now();
+  while (output.size() < n) {
+    const auto previous = uint32_t(output.size());
+    const auto remaining = n - previous - 1;
+    // The first plain row records its list. The next measures a replay, then
+    // a two-row round measures the proposal and the cost of verifying it.
+    uint32_t drafts = 0;
+    if (draft && remaining) drafts = policy ? std::min(policy->next(), remaining) : uint32_t(iterations == 2);
+    double proposal_ms = 0.;
+    const auto round = std::chrono::steady_clock::now();
+    next = engine.step_drafted(next, drafts, output, draft && !policy && drafts ? &proposal_ms : nullptr);
+    const auto kept = uint32_t(output.size()) - previous - 1;
+    if (draft) {
+      const double round_ms =
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - round).count();
+      if (policy) {
+        policy->observe(drafts, kept, round_ms);
+      } else if (drafts) {
+        server::AdaptiveKOptions options;
+        options.max_k = cap;
+        options.prior = .65;
+        options.warmup = 0;
+        options.probe_every = 0;
+        options.hysteresis = 0.;
+        options.measure = true;
+        options.cost.verify.clear();
+        // Linear prior for unseen widths from the warmed one-/two-row 4k
+        // target probe. The session's own full-round samples replace it.
+        constexpr double per_extra_row = .653;
+        for (uint32_t k = 0; k <= cap; ++k) options.cost.verify.push_back(1. + k * per_extra_row);
+        options.cost.draft.assign(cap, proposal_ms / plain_ms);
+        policy.emplace(options);
+        policy->observe(0, 0, plain_ms);
+        policy->observe(drafts, kept, round_ms);
+      } else if (iterations == 1) {
+        plain_ms = round_ms;
+      }
+    }
+    proposed += drafts;
+    accepted += kept;
+    plain_steps += drafts == 0;
+    ++iterations;
+    if (!f.bench) {
+      for (size_t i = previous; i < output.size(); ++i) std::println("{}", output[i]);
+      std::fflush(stdout);
+    }
+  }
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  std::print(stderr, "Inkling generated {} ids in {} iterations, {:.2f} t/s, {:.2f} ms/token, DSpark {}\n",
+             n, iterations, n * 1000.0 / ms, ms / n, draft ? "on" : "off");
+  if (proposed)
+    std::print(stderr, "Inkling DSpark accepted {} of {} proposed ids ({:.1f}%), {} one-row steps\n",
+               accepted, proposed, 100.0 * accepted / proposed, plain_steps);
+  if (f.bench) {
+    const char* sha = std::getenv("B70_GIT_SHA");
+    std::println("| b70-decode {} Inkling DSpark {} | {} | {} | {:.2f} | {:.2f} |",
+                 sha && *sha ? sha : "unknown", draft ? "on" : "off", ids.size(), n, n * 1000.0 / ms, ms / n);
+  }
+  return 0;
+}
+
 int run(int argc, char** argv) {
   std::string path;
   Flags f;
@@ -733,10 +891,17 @@ int run(int argc, char** argv) {
     usage();
     return 0;
   }
+  const bool inkling = cli::inkling2::is_inkling2(path);
+  if (f.plan) {
+    if (!inkling) throw std::runtime_error("--plan requires an Inkling 2 Mini checkpoint");
+    return cli::inkling2::plan(path, cli::parse_max_len(f.max_len.given ? f.max_len.value : "auto"),
+                               f.spec.given ? f.spec.value : "auto");
+  }
+  if (inkling) return run_inkling(path, f);
   const std::string ids_path = f.ids;
   uint32_t n = f.n.value, depth = f.depth.value, tg = f.tg.value, steps = f.steps.value,
            repeats = f.repeats.value;
-  cli::MaxLenArg max_len_arg = cli::parse_max_len(f.max_len);
+  cli::MaxLenArg max_len_arg = cli::parse_max_len(f.max_len.value);
   uint32_t max_len = max_len_arg.value;   // 0 for auto until cli::settle
   // The zero-config cleanup: the engine decides the device memory the plan leaves free
   // (runtime::kDefaultReserveGb), the lm_head (int8, as b70-serve: spec 9 - loader::LmHeadForm stays the tests'
@@ -1061,6 +1226,7 @@ int run(int argc, char** argv) {
     StdoutToStderr redirect;
     return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/mtp_on, lm_head);
   }();
+  cli::dflash::main_candidate_head(ctx, model, mtp_on);   // PERF-123: before the plan
   // Spec 19c: the drafter beside the target, before the plan. Its load line goes to stderr like the target's (box
   // row 55, 2026-10-27: on stdout it put a line ahead of the ids and r55.decode's cmp against the plain run failed).
   std::unique_ptr<cli::dflash::Loaded> drafter_load;
@@ -1075,14 +1241,15 @@ int run(int argc, char** argv) {
   // Plan 5d: the chunk cap --prefill-chunk needs (Ornith above 2048 refused by name), planned.
   const uint32_t asked_cap =
       have_prefill_len || prefill ? runtime::prefill_chunk_cap_for(pp_chunk, *model.desc) : 0;
-  if (pp_path.prefill) pp_path.chunk_cap = cli::planned_chunk_cap(asked_cap, *model.desc);   // decode-only: no cap read
+  if (pp_path.prefill)   // decode-only: no cap read
+    pp_path.chunk_cap = cli::planned_chunk_cap(asked_cap, *model.desc, max_len_arg, pp_path.backend);
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
   max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
   if (max_len_arg.is_auto) check_len(max_len);
   const runtime::PrefillPath settled =
-      cli::settle_chunk_cap(ctx, model, {max_len}, mem_reserve, pp_path, kv_cache, drafter_plan, asked_cap);
+      cli::settle_chunk_cap(ctx, model, max_len, mem_reserve, pp_path, kv_cache, drafter_plan, asked_cap);
 
   // --profile forks here: it replays an instrumented capture and has to reset
   // 774 events before every replay, which is the caller's job by design

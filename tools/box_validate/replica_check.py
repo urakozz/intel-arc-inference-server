@@ -267,12 +267,17 @@ def first_diff(a, b):
 
 
 def compare(a):
+    import serve_judge as sj
+    # judge_pair grades each stream up to its end-of-turn id, as serve_judge does: --snapshot's eos list, else the
+    # `eos [..]` line b70-serve printed in the server.log next to the replica's server-log directory.
+    a.dir = os.path.dirname(os.path.abspath(a.server_log))
+    a.stops, src = sj.end_of_turn_ids(a)
+    print(f"replica_check: end of turn ids {sorted(a.stops)} ({src or 'no eos list: every row graded'})")
     rep = load(a.replica)
     cards = [load(a.card0), load(a.card1)]
     where = slots(a.server_log)
     logs = server_records(a.server_log)
     alone_logs = [server_records(os.path.join(os.path.dirname(path), "server-log")) for path in (a.card0, a.card1)]
-    import serve_judge as sj
     reviewed, cache, awaiting = sj.reviewed_rows(a.header), {}, set()
     bad = skipped = 0
     used = set()
@@ -399,6 +404,7 @@ def main():
             c.add_argument("--dump", default=os.path.join(ROOT, "oracle-forced-dumps", "qwen-serve"))
             c.add_argument("--judge", default=os.path.join(ROOT, "oracle-out-qwen-f32-i8head-forced"))
             c.add_argument("--bf16", default=os.path.join(ROOT, "oracle-out-qwen-bf16top-forced"))
+            c.add_argument("--snapshot", help="the model snapshot dir (its generation_config.json eos list)")
             c.add_argument("--tag", default="serve_int8")
             c.add_argument("--header", default=os.path.join(ROOT, "tests", "server", "spec_judge.h"))
             c.add_argument("--vocab-used", type=int, default=248077)

@@ -79,6 +79,20 @@ int main(int argc, char** argv) {
     for (uint32_t keys : depths)
       CHECK(runtime::verify_attn_kind(M, keys, true, 24, 4) == VerifyAttn::Dpas);
   }
+  // PERF-120: a DPAS list's key blocks - 8 at M = 8 (every head form and KV form the rule binds there, paged too,
+  // each with its reduce), 32 elsewhere
+  for (uint32_t M : {2u, 3u, 4u, 5u, 6u, 7u, 16u, 32u, 64u}) CHECK(runtime::verify_attn_blocks(M) == 32);
+  CHECK(runtime::verify_attn_blocks(8) == 8);
+  for (bool kv8 : {false, true})
+    for (const std::string& n : {kernels::attn_verify_dpas_variant(8, 8, kv8), kernels::attn_verify_dpas_variant(8, 8, kv8, 12, 2),
+                                 kernels::kv_paged(kernels::attn_verify_dpas_variant(8, 8, kv8)),
+                                 kv8 ? kernels::attn_v2_kv8_variant(8, 8) : kernels::attn_v2_variant(8, 8),
+                                 kv8 ? kernels::attn_v2_kv8_variant(8, 8, 12, 2) : kernels::attn_v2_variant(8, 8, 12, 2),
+                                 kernels::kv_paged(kv8 ? kernels::attn_v2_kv8_variant(8, 8) : kernels::attn_v2_variant(8, 8))})
+      if (!built.count(n)) {
+        std::fprintf(stderr, "the 8-row DPAS verify binds %s, which no CMake line builds\n", n.c_str());
+        CHECK(false);
+      }
   CHECK(runtime::verify_attn_kind(9, 32768, false, 24, 4, VerifyAttnForce::Dpas) == VerifyAttn::V2);
   CHECK(runtime::verify_attn_kind(16, 1, false, 24, 4) == VerifyAttn::Dpas);   // open-work 28: DPAS from the first key
   CHECK(runtime::verify_attn_kind(64, 1, false, 24, 4) == VerifyAttn::Dpas);   // spec 32: the deep lists, the same

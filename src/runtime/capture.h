@@ -149,6 +149,10 @@ struct SlotBind {
   // whole-model GDN state) and the conv rows 16.. ([48 layers][kernels::kGdnConvXRows][10240] bf16; gdn_step.cl ROW0).
   void* gdn_x = nullptr;
   void* conv_x = nullptr;
+  // PERF-123: the engine's head choice word (head_gate.h). Set, a one-card verify list (a tap drafter's too) at M 2..8
+  // over Qwen3.8's / Ornith's int8 head with loader::LoadedModel::cand_head carries both heads, gated: the full head,
+  // or the 2-bit candidate pass + the exact rescore of 64 candidates a row. Null: the full head alone.
+  const void* head_gate = nullptr;
 };
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
@@ -162,8 +166,8 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
 // Ornith 526.
 size_t decode_launches(const model::ModelDesc& d);
 // Spec 15e: the MTP lists' launch counts, which their walks assert on themselves too.
-// verify_launches: decode_launches + the head's 10-launch KV fill, at every M (Qwen3.8
-// 784, Ornith 536). draft_launches: 23 with a dense head, 24 with a MoE head
+// verify_launches: decode_launches + the head's 8-launch KV fill, at every M (Qwen3.8
+// 782, Ornith 534). draft_launches: 21 with a dense head, 22 with a MoE head
 // (its FFN is the 4-launch MoE block in place of gate||up, SiLU, down) - a draft
 // vocabulary swaps 3 launches for 3.
 size_t verify_launches(const model::ModelDesc& d);
@@ -178,7 +182,7 @@ size_t draft_launches(const model::ModelDesc& d);
 // hctl.pos = pos - 1, hctl.n_active = M, hctl.cur_token = cur_token): row r is the pair
 // (hh[r], cur_token[r]), i.e. (h_{pos-1+r}, x[pos+r]). argmax ids land in out_token[0..M),
 // logits in `logits` [M][kVocab]; argmax_stage2 advances pos by M (the caller rewinds it
-// at commit). 774 + 10 launches at every M (verify_launches; Ornith 526 + 10, spec 15e:
+// at commit). 774 + 8 launches at every M (verify_launches; Ornith 526 + 8, spec 15e:
 // its MoE blocks at M rows run moe.cl per row, routing every row independently).
 // M is 1..mtp.slots: kSlots = 4 on every engine; spec 19a's probe (probe_mtp_steps, max M
 // 8) builds M = 5..8 over an 8-slot MtpBuffers, binding `gdn_step_slots_M<M>_N8` and the
@@ -333,6 +337,19 @@ struct BatchRowsBind {
   // [kM][tap_layers.size()][hidden], row r at row r (the rows projection reads them). Null: no taps.
   l0::Mem* taps = nullptr;
   std::vector<uint32_t> tap_layers;
+  // Plan 40a Task 2: the sequences' pending delta-net rows (Engine's own_.gdn_pend, sequence s at s x
+  // EngineSizes::gdn_pend / sequences) - gdn_step's DEFERRED row build: no per-row state, each run replays its
+  // sequence's committed rows (row word BROW_PEND). Null: the row build, every row's state into its dst.
+  void* pend = nullptr;
+  // Plan 40a Task 3: the sequences a step's rows come from (its runs at most) - the 16- and 32-row lists' grids launch
+  // a run of the attention and a chunk of the delta-net step a sequence.
+  uint32_t seqs = 0;
+  // PERF-120 (plan 40a Task 7): the 16- and 32-row lists' key blocks a run (attn_verify_dpas' TGT and its reduce's,
+  // at most DecodeScratch::kAttnV2Blocks) - 0: kAttnV2Blocks; runtime::Engine binds kRowsAttnBlocks.
+  uint32_t attn_blocks = 0;
+  // PERF-120: the 16- and 32-row lists' MoE block reads each routed expert once for the rows routed to it (moe.cl
+  // MOE_UNION: every row bitwise the per-row block's); false: the per-row block. runtime::Engine binds it on a MoE model.
+  bool moe_union = false;
 };
 // `prof` (probes only, probe_slots_speed --profile-rows): per-launch events exactly as build's - an observer only.
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
@@ -364,12 +381,13 @@ CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, De
 // sized by model::tp_card_desc), with three differences (src/kernels/tp.cl has the kernels, runtime/tp_protocol.h the
 // protocol):
 //   - after each row-parallel linear (out_proj, o_proj, down) a tp_send pushes this card's part into the PEER's
-//     landing buffer (128 launches a token on Qwen3.8);
+//     landing buffer (128 launches a token on Qwen3.8); PERF-44: under the folded form the send is the linear's
+//     tail (gemv / gemm_sm TP_FOLD_SEND), no launch of its own;
 //   - the residual fold that consumes such a linear is tp_res_fold: it waits for the peer's part in this card's own
 //     landing buffer and folds both cards' parts in one fixed order (the slices form: prep_res_fold's one-card chain);
 //   - the head is the card's vocabulary half (gemv_i8w at its 124160 rows) and tp_argmax's two stages: the global id
 //     and its value into this card's Control (out_token, out_value); the host merges the two cards (TpEngine).
-// Launches: tp_launches(d). No profiling events; the residual tap (debug_resid) as build()'s.
+// Launches: tp_launches(d, link.folded). No profiling events; the residual tap (debug_resid) as build()'s.
 struct TpLink {
   uint32_t rank = 0;
   bool folded = false;              // model::TpCrossing::Folded
@@ -385,8 +403,9 @@ struct TpLink {
 };
 CapturedStep build_tp(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TpLink& link,
                       l0::Mem* debug_resid = nullptr);
-// decode_launches(d) + one tp_send per row-parallel linear (2 a layer): Qwen3.8's card 774 + 128 = 902.
-size_t tp_launches(const model::ModelDesc& d);
+// decode_launches(d) (tp_res_fold in place of each prep_res_fold) + in the slices form one tp_send per row-parallel
+// linear (2 a layer; the folded form's is the linear's tail, PERF-44): Qwen3.8's card 774 folded, 902 slices.
+size_t tp_launches(const model::ModelDesc& d, bool folded);
 
 // --- spec 17d: MTP under tensor parallel ---------------------------------------------------------------------------
 //
@@ -410,7 +429,7 @@ CapturedStep build_tp_verify(l0::Context& ctx, const loader::LoadedModel& m, Dec
                              const TpLink& link, uint32_t M, const CaptureOptions& opt = {});
 CapturedStep build_tp_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
                             const TpLink& link, uint32_t i, bool prob = false);
-// tp_launches(d) + the head's 10-launch KV fill: Qwen3.8's card 912 at every M.
+// tp_launches(d, true) + the head's 10-launch KV fill: Qwen3.8's card 784 at every M.
 size_t tp_verify_launches(const model::ModelDesc& d);
 
 // --- spec 19 v3c: a tap drafter under tensor parallel (DFlash) ----------------------------------------------------
@@ -420,8 +439,8 @@ size_t tp_verify_launches(const model::ModelDesc& d);
 // card's heads over the drafter's `tv.slots` (8) state slots (gdn_step_slots_M<M>_N8_GK8V24), tp.cl's argmax at M rows
 // (each row's winner of the card's half and its value: the host merges, TpEngine), and the TAPS from the card's own
 // residual: after every fold both cards hold the same residual bitwise (TpEngine's T1), so each card copies every
-// row's taps into its own drafter half's buffer and nothing crosses for them. No MTP head. tp_launches(d) launches (the
-// taps are copies). `opt` as build_verify_taps' (the deep list: CaptureOptions::force_attn; `profile` at
+// row's taps into its own drafter half's buffer and nothing crosses for them. No MTP head. tp_launches(d, true)
+// launches (the taps are copies). `opt` as build_verify_taps' (the deep list: CaptureOptions::force_attn; `profile` at
 // `profile_m`: per-launch events, the probe's crossings' share).
 CapturedStep build_tp_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TapVerify& tv,
                                   const TpLink& link, uint32_t M, const CaptureOptions& opt = {});

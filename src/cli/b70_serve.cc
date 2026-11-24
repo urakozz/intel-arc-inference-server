@@ -92,15 +92,15 @@ struct Flags {
                "(packed int4).")]]
   Arg<std::string> draft_model;
   [[=Help("N", "how many requests run at once (vLLM's flag); the context follows. 1:\n"
-               "one request at the largest context that fits. N > 1 (Qwen3.8, Ornith): a\n"
-               "card holds up to 4 slots - slot 0 the largest context that fits beside N - 1\n"
-               "slots of 32768 positions (e.g. 131072 + 3 x 32768); one card up to 4, two cards\n"
-               "(replica, the slots split between the cards) up to 8. A request that reaches its\n"
-               "slot's end finishes with \"length\" and is logged.")]]
+               "one request at the largest context that fits. N > 1 (Qwen3.8, Ornith): the\n"
+               "requests share the card's KV cache pages, and any one may grow to all of them\n"
+               "(up to the trained context or --max-len); one card up to 4, two cards (replica,\n"
+               "a pool each) up to 8. A request that finds no page left finishes with \"length\"\n"
+               "and is logged.")]]
   Arg<uint32_t> max_num_seqs{1};   // (cli/pipeline_args.h)
-  [[=Help("auto|L", "auto: the largest context that fits beside the weights (beside the\n"
-                    "other slots with --max-num-seqs), at most the trained one; L: slot 0 exactly L,\n"
-                    "any multiple of 256 up to the trained context, refused if it does not fit.")]]
+  [[=Help("auto|L", "auto: the largest context that fits beside the weights (with\n"
+                    "--max-num-seqs, the most one request may use), at most the trained one; L: exactly\n"
+                    "L, any multiple of 256 up to the trained context, refused if it does not fit.")]]
   std::string max_len = "auto";   // spec 6 §10
   [[=Help("P", "auto: Qwen3.8 on two cards runs tp at --max-num-seqs 1 with --max-len\n"
                "auto and replica at --max-num-seqs above 1; otherwise one card when the model\n"
@@ -129,7 +129,9 @@ struct Flags {
   bool prefix_split_last = false;
   [[=Help("N|auto", "Qwen3.8-Flash-Next only: load its first N layers (development mode); without it\n"
                     "the whole model is served, the experts that do not fit the cards read from pinned\n"
-                    "host memory. Its PLE int8 file is <snapshot>-ple-int8/.")]]
+                    "host memory. Its PLE int8 file is <snapshot>/ple-int8/ (in our model repo) or <snapshot>-ple-int8/;\n"
+                    "its routing profile <snapshot>/expert-profile.safetensors (in our model repo) or\n"
+                    "<snapshot>-expert-profile.safetensors.")]]
   Arg<std::string> layers;   // spec 21-QFN-v1e (until spec 22)
   [[=Section("\n  Still being measured (they go when their numbers decide):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
@@ -186,8 +188,11 @@ void print_eos(const std::vector<uint32_t>& ids) {
 // Spec 7: the prefix cache's pinned system RAM, sized after the model is loaded (so
 // "available" already excludes the process's own load) - shared by the Qwen-family and the
 // other families' paths. Returns null when the cache is off; sets options.prefix_cache_bytes / prefix_alloc.
+// `two_cards`: the context spans both cards. Locked host memory (PERF-70) is one card's only: the second card's first
+// copy out of it fails with ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY (replica 2026-11-24: every card-1 request; Flash-Next
+// tp 2026-11-18), so two-card modes keep plain pinned Host memory, as before the lock.
 std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix_auto,
-                                               uint32_t prefix_cache_gb, server::Options& options) {
+                                               uint32_t prefix_cache_gb, server::Options& options, bool two_cards) {
   std::unique_ptr<PinnedAlloc> prefix_alloc;
   const cli::HostMemory host = cli::host_memory();
   std::string prefix_why = "explicit";
@@ -203,6 +208,7 @@ std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix
   }
   if (prefix_cache_gb > 0) {
     const auto t0 = std::chrono::steady_clock::now();
+    if (!two_cards) l0::lock_host_memory(size_t(prefix_cache_gb) << 30);   // locked when RLIMIT_MEMLOCK covers it
     prefix_alloc = std::make_unique<PinnedAlloc>(context, size_t(prefix_cache_gb) << 30);
     options.prefix_cache_bytes = prefix_alloc->size();
     options.prefix_alloc = prefix_alloc.get();
@@ -213,6 +219,22 @@ std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix
     std::print(stderr, "{}", runtime::vram_host_line({{"prefix cache", prefix_alloc->size()}}));
   } else {
     std::print(stderr, "prefix cache: off ({})\n", prefix_why.c_str());
+  }
+  // The prefix cache is every model's HostLocked allocation (Flash-Next's PLE table and expert mirrors stay plain Host).
+  const size_t locked = l0::host_locked_bytes(), swappable = l0::host_unlocked_bytes();
+  if (locked > 0)
+    std::print(stderr, "host memory: {:.1f} GB locked against swap\n", locked / 1e9);
+  if (swappable > 0 && two_cards) {
+    std::print(stderr, "host memory: {:.1f} GB can be swapped out under memory pressure (not locked: with two cards the "
+                       "second card cannot copy from locked host memory)\n",
+               swappable / 1e9);
+  } else if (swappable > 0) {
+    const size_t limit = l0::memlock_limit();
+    std::print(stderr,
+               "host memory: {:.1f} GB can be swapped out under memory pressure, and a request then waits while it "
+               "comes back from disk: the memlock limit (ulimit -l) is {:d} KiB; to lock it, set it to unlimited "
+               "(memlock in /etc/security/limits.d/, LimitMEMLOCK=infinity in a systemd unit) and log in again\n",
+               swappable / 1e9, limit / 1024);
   }
   return prefix_alloc;
 }
@@ -325,7 +347,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   options.sampling_defaults = defaults;
   // Pinned host memory of the one context both cards share: either device's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
-      make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+      make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
   options.parallel_desc = "pp - the layers split over 2 cards (Kolibri-1 needs both)";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
@@ -399,7 +421,8 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     cli::pp::PipelineEngineAdapterT<runtime::qwen4exp::Qwen4ExpTpEngine> engine_adapter(
         engine, tokenizer.vocab_used(), engine.vocab(), a.mtp_k, a.spec_lookup);
     cq::chat_options(options, eos);
-    const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+    const std::unique_ptr<PinnedAlloc> prefix_alloc =
+        make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
     // After every pinned allocation (the prefix cache's too): the first request does not pay the mirrors' first reads.
     std::print(stderr, "experts: the host-memory experts read once on both cards in {:.0f} ms\n",
                engine.read_host_experts());
@@ -435,7 +458,8 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
       engine, tokenizer.vocab_used(), engine.vocab(), a.mtp_k, a.spec_lookup);
   cq::chat_options(options, eos);
   // Pinned host memory of the one context both cards share: either device's copies reach it.
-  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+  const std::unique_ptr<PinnedAlloc> prefix_alloc =
+      make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options, c1 != nullptr);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
       devs == 2 ? std::string("--parallel pp (split ") +
@@ -594,7 +618,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   options.eos_ids = a.eos;
   // Pinned host memory of the one context both cards share: either device's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
-      make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
+      make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
   options.parallel_desc = "pp - the layers split over 2 cards";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   std::print(stderr, "b70-serve: {} on http://{}:{:d}, max_len {:d}, eos ", options.served_model.c_str(),
@@ -736,7 +760,8 @@ int serve_tp(const TpServe& a, server::Options options) {
       a.dflash.on, a.dflash_lookup);
   options.eos_ids = a.eos;
   // Pinned host memory of the one context both cards share: either card's copies reach it.
-  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
+  const std::unique_ptr<PinnedAlloc> prefix_alloc =
+      make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
   options.parallel_desc = "tp - every layer split over 2 cards";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   std::print(stderr, "b70-serve: {} on http://{}:{:d}, max_len {:d}, eos ", options.served_model.c_str(),
@@ -772,7 +797,7 @@ int serve_tp(const TpServe& a, server::Options options) {
 // (another model, one visible card, the pp override flags, lookup inside DFlash) ran in run(), before the device.
 // --spec dflash: each card loads its own drafter beside its engine, as on one card (one slot a card).
 // Replica x slots (2026-11-10; --max-num-seqs): --max-num-seqs N splits between the cards (card 0
-// the odd one); a card's slots are plan 13c's (cli::settle_slots over that card's own memory), and a card with
+// the odd one); a card's requests share its KV page pool (cli::settle_pool over that card's own memory), and a card with
 // several is a cli::SlotsEngine behind the replica engine - N requests at once.
 struct ReplicaServe {
   std::string snapshot_dir;
@@ -824,34 +849,32 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     if (a.dflash.on) drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(c, a.dflash, model));
     const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
     runtime::PrefillPath pf = a.pp_path;
-    pf.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
+    pf.chunk_cap = cli::planned_chunk_cap(0, *model.desc, a.max_len_arg, pf.backend);
     const uint32_t seqs = (a.max_num_seqs + 1 - i) / 2;   // card 0 the odd one
     std::vector<uint32_t> slot_lens;
     uint32_t max_len = 0;
-    runtime::PoolShape pool;   // plan 31 Task 9: a card's requests share its KV page pool, as on one card
+    // Plan 31 Task 9: a card's requests share its KV page pool, as on one card (plan 40a: beside a drafter too).
+    runtime::PoolShape pool;
     std::print(stderr, "card {:d}: ", i);
-    if (seqs > 1 && !drafter_load) {
+    if (seqs > 1) {
       pool = cli::settle_pool(c, model, a.max_len_arg, seqs, a.mem_reserve, pf, a.kv_cache, drafter_plan);
       max_len = uint32_t(pool.positions());
       slot_lens.assign(seqs, pool.cap);
-    } else if (seqs > 1) {
-      slot_lens = cli::settle_slots(c, model, a.max_len_arg, seqs, a.mem_reserve, pf, a.kv_cache, drafter_plan);
-      max_len = runtime::slots_kv_len(slot_lens);   // one RoPE table, one KV allocation of the slots' pages
     } else {
       max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache, drafter_plan);
       slot_lens = {max_len};
     }
-    const runtime::PrefillPath settled = cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache,
+    const runtime::PrefillPath settled = cli::settle_chunk_cap(c, model, max_len, a.mem_reserve, pf, a.kv_cache,
                                                                drafter_plan, 0, i, 2, pool.pages != 0 ? &pool : nullptr);
     const uint32_t chunk_cap = settled.chunk_cap;
     const std::string layout = pool.pages != 0 ? std::to_string(pool.seqs) + " sharing " + std::to_string(pool.pages) +
                                                      " KV pages, one up to " + std::to_string(pool.cap)
-                                               : runtime::slot_layout_name(slot_lens);
+                                               : std::to_string(max_len);
     std::print(stderr, "card {:d}: slots: {:d} ({})\n", i, slot_lens.size(), layout.c_str());
     std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
     if (drafter_load)
       drafter = std::make_unique<runtime::dflash::DFlashDrafter>(c, std::move(drafter_load->w), drafter_load->head_rows,
-                                                                 max_len, a.dflash.max_k);
+                                                                 max_len, a.dflash.max_k, uint32_t(slot_lens.size()));
     const bool draft_vocab_on = model.draft_vocab != nullptr;
     auto engine = std::make_unique<runtime::Engine>(c, std::move(model), max_len, /*debug_resid=*/false, a.kv_cache,
                                                     drafter.get(),
@@ -874,7 +897,8 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
   TemplateAdapter chat_template(a.snapshot_dir);
   options.eos_ids = a.eos;
   // The prefix store: one pinned allocation in the shared context, sized after both loads.
-  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
+  const std::unique_ptr<PinnedAlloc> prefix_alloc =
+      make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
   // The prompt's cut is the serial server's: hooked (every chunk ends at a stride end) when the cache is on. A card
   // with one slot is today's EngineAdapter; one with several, 13c's SlotsEngine (an EngineAdapter per slot).
   const bool hooked = options.prefix_cache_bytes != 0;
@@ -1356,6 +1380,7 @@ int run(int argc, char** argv) {
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
                         /*mtp=*/mtp_k > 0 || spec_lookup, lm_head, dv_spec);
   }();
+  cli::dflash::main_candidate_head(context, model, mtp_k > 0 || spec_lookup);   // PERF-123: before the plan
   // Spec 19c: the drafter beside the target, before the plan (its weights and buffers, and the engine's verify
   // slots and prefill taps for it, come out of what auto can give the context).
   std::unique_ptr<cli::dflash::Loaded> drafter_load;
@@ -1369,41 +1394,38 @@ int run(int argc, char** argv) {
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
   // Plan 5d: the prefill chunk cap - 2048, or 4096 when the plan has room (cli/settle_chunk_cap) -
-  // planned with max_len and given to the engine.
-  pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
+  // planned with max_len and given to the engine; auto on the bf16 pass plans at 4096 (cli::planned_chunk_cap).
+  pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc, max_len_arg, pp_path.backend);
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
-  // --max-num-seqs (plan 13c's slots): N > 1 slots on this card - slot 0 the largest context that
-  // fits beside N - 1 slots of 32768 (or the asked --max-len), several requests at once (Qwen3.8; not beside a
-  // drafter or a draft vocabulary: refused above). 1: settle()'s one slot.
-  // Spec 31: with the MTP head or none, the N requests share a KV page pool instead (settle_pool: what N sequences'
-  // state leaves, in pages; a request up to the trained context or --max-len). Beside a DFlash drafter, fixed slots.
+  // --max-num-seqs (plan 13c's slots): N > 1 sequences on this card, several requests at once (not beside a draft
+  // vocabulary: refused above). 1: settle()'s one slot.
+  // Spec 31: the N requests share a KV page pool (settle_pool: what N sequences' state leaves, in pages; a
+  // request up to the trained context or --max-len) - with the MTP head, none, or (plan 40a) a DFlash drafter, whose
+  // sessions are a fixed size whatever a request's length.
   std::vector<uint32_t> slot_lens;
   uint32_t max_len = 0;
   runtime::PoolShape pool;
-  if (max_num_seqs > 1 && !drafter_load) {
+  if (max_num_seqs > 1) {
     pool = cli::settle_pool(context, model, max_len_arg, max_num_seqs, mem_reserve, pp_path, kv_cache, drafter_plan);
     max_len = uint32_t(pool.positions());
     slot_lens.assign(max_num_seqs, pool.cap);
-  } else if (max_num_seqs > 1) {
-    slot_lens = cli::settle_slots(context, model, max_len_arg, max_num_seqs, mem_reserve, pp_path, kv_cache,
-                                  drafter_plan);
-    max_len = runtime::slots_kv_len(slot_lens);   // one RoPE table, one KV allocation of the slots' pages
   } else {
     max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
     slot_lens = {max_len};
   }
   const runtime::PrefillPath settled =
-      cli::settle_chunk_cap(context, model, slot_lens, mem_reserve, pp_path, kv_cache, drafter_plan, 0, 0, 1,
+      cli::settle_chunk_cap(context, model, max_len, mem_reserve, pp_path, kv_cache, drafter_plan, 0, 0, 1,
                             pool.pages != 0 ? &pool : nullptr);
   const std::string layout = pool.pages != 0 ? std::to_string(pool.seqs) + " sharing " + std::to_string(pool.pages) +
                                                    " KV pages, one up to " + std::to_string(pool.cap)
-                                             : runtime::slot_layout_name(slot_lens);
+                                             : std::to_string(max_len);
   std::print(stderr, "slots: {:d} ({}) - {}\n", slot_lens.size(), layout.c_str(),
              slot_lens.size() > 1 ? "several requests at once on this card" : "one request at a time");
   std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
   if (drafter_load)
     drafter = std::make_unique<runtime::dflash::DFlashDrafter>(context, std::move(drafter_load->w),
-                                                               drafter_load->head_rows, max_len, dflash.max_k);
+                                                               drafter_load->head_rows, max_len, dflash.max_k,
+                                                               uint32_t(slot_lens.size()));
   const bool draft_vocab_on = model.draft_vocab != nullptr;
   runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get(),
                          slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{}, pool.pages);
@@ -1439,7 +1461,7 @@ int run(int argc, char** argv) {
   options.eos_ids = eos;
   // Sized after the model is loaded, so "available" already excludes the process's own load.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
-      make_prefix_alloc(context, prefix_auto, prefix_cache_gb, options);
+      make_prefix_alloc(context, prefix_auto, prefix_cache_gb, options, /*two_cards=*/false);
   options.parallel_desc = "1 card";
   // Plan 13c: several slots - the scheduler over cli::SlotsEngine (the serial server's EngineAdapter per slot, the
   // row lists for a step of several requests).

@@ -3,10 +3,10 @@
 // arithmetic around it: the rules a table must keep, the slots' KV bases, and the memory of a layout by spec 13
 // §9.1's method. Device-free and header-only. Plan 13a's probe (tools/probe/probe_batch_step) and, since plan 13c,
 // runtime::Engine's sequence slots (Engine::verify_rows, runtime::build_rows) use it; the planner's own arithmetic
-// for the engine's layouts is runtime::plan_slots (memory_plan.h) - batch_memory below is section 9.1's method,
+// for the engine's sequences is runtime::plan_pool (memory_plan.h) - batch_memory below is section 9.1's method,
 // which tests/runtime/slot_plan_test reconciles it with byte for byte.
 //
-// **The device layout.** BatchRowTable is 256 B of shared memory the host writes before a replay; the kernels'
+// **The device layout.** BatchRowTable is 1 KB of shared memory (32 rows since plan 40a Task 3) the host writes before a replay; the kernels'
 // BATCH_ROWS builds (gdn_step.cl, attn.cl, attn_v2.cl, kv8.cl) read row m's words at m * kBatchRowWords with the
 // indices of src/kernels/CMakeLists.txt's BROW_DEFINES (kernels::batch_row, src/kernels/batch_kernels.h - the host
 // mirror, static_asserted against this struct there). The row count is the list's Control::n_active, as for every
@@ -19,6 +19,8 @@
 //            pool's slot i - 1); later rows of the slot carry the state in registers
 //   dst      the GDN state index the state after THIS row is written to
 //   slot     the slot (its conv ring; rows of one slot are contiguous - a run)
+//   pend     plan 40a, the DEFERRED row build: the slot's Control::gdn_pend before the step (its committed rows the
+//            run replays first, and their parity); dst is then unused - no per-row state is written
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -37,16 +39,17 @@ namespace runtime {
 
 struct BatchRow {
   uint32_t pos = 0, kv_base = 0, src = 0, dst = 0, slot = 0;
-  uint32_t pad[3] = {0, 0, 0};
+  uint32_t pend = 0;   // plan 40a: the slot's pending delta-net rows, count | parity << 8 (the deferred row build)
+  uint32_t pad[2] = {0, 0};
 };
 inline constexpr uint32_t kBatchRowWords = 8;
 static_assert(sizeof(BatchRow) == kBatchRowWords * 4, "a row is eight words");
 struct BatchRowTable {
-  BatchRow row[DecodeScratchDims::kM];
+  BatchRow row[DecodeScratchDims::kWideRowsM];
 };
-static_assert(sizeof(BatchRowTable) == 256, "the table is 8 rows of 32 B");
+static_assert(sizeof(BatchRowTable) == 1024, "the table is 32 rows of 32 B");
 // A step's rows on the host (make_rows): at most the table's.
-using RowTable = std::inplace_vector<BatchRow, DecodeScratchDims::kM>;
+using RowTable = std::inplace_vector<BatchRow, DecodeScratchDims::kWideRowsM>;
 
 // One slot of a layout: its positions and whether it carries the MTP head's state (spec 13 §9.2: the engine's MTP
 // setting holds for every slot of a served layout; the planner's arithmetic below takes it per slot so the
@@ -56,8 +59,8 @@ struct SlotSpec {
   bool mtp = true;
 };
 
-// The slots' KV ranges: one allocation at the slots' sum, slot s at the positions after slots 0..s-1 - with several
-// slots each range whole KV pages (plan 19v3b Task 0: runtime::slots_kv_len, SlotDims).
+// The slots' KV ranges: slot s at the positions after slots 0..s-1 - with several slots each range whole KV pages
+// (plan 19v3b Task 0): the engine's regions of the pool's page table (spec 31), and batch_memory's layouts.
 struct BatchLayout {
   std::vector<SlotSpec> slots;
   uint32_t kv_len(uint32_t slot) const {   // the positions slot `slot`'s range takes
@@ -82,19 +85,23 @@ struct BatchLayout {
 struct RowRun {
   uint32_t slot = 0, pos = 0, rows = 1, src = 0;
   std::inplace_vector<uint32_t, DecodeScratchDims::kM> dst;
+  uint32_t pend = 0;   // plan 40a: the slot's pending rows word (BatchRow::pend), the deferred row build
 };
-using RowRuns = std::inplace_vector<RowRun, DecodeScratchDims::kM>;   // a step's runs: one row each at least
+using RowRuns = std::inplace_vector<RowRun, DecodeScratchDims::kWideRowsM>;   // a step's runs: one row each at least
 
 // The rules a table keeps - the kernels assume them and check none:
-//   1..kM rows; a slot < the layout's, a row's position < its slot's max_len, kv_base the slot's;
+//   1..kWideRowsM rows (plan 40a Task 3), a run at most kM; a slot < the layout's, a row's position < its slot's max_len,
+//   kv_base the slot's;
 //   a slot's rows contiguous (one run per slot), at consecutive positions, with one src;
 //   every dst distinct, and no dst another run's src (every work-group walks the runs in order, so a later run would
 //   read a state an earlier run of the same step had overwritten; its OWN src it may write - the tile is read first).
-inline void check_rows(std::span<const BatchRow> rows, const BatchLayout& lay) {
+//   `deferred` (plan 40a, the DEFERRED row build): no row writes a dst - every dst is its run's src, unchecked.
+inline void check_rows(std::span<const BatchRow> rows, const BatchLayout& lay, bool deferred = false) {
   auto fail = [](const std::string& w) { throw std::invalid_argument("runtime::check_rows: " + w); };
-  if (rows.empty() || rows.size() > DecodeScratchDims::kM)
-    fail(std::to_string(rows.size()) + " rows; a step carries 1.." + std::to_string(DecodeScratchDims::kM));
-  std::inplace_vector<uint32_t, DecodeScratchDims::kM> seen, srcs;   // per run: its slot, its src
+  if (rows.empty() || rows.size() > DecodeScratchDims::kWideRowsM)
+    fail(std::to_string(rows.size()) + " rows; a step carries 1.." + std::to_string(DecodeScratchDims::kWideRowsM));
+  std::inplace_vector<uint32_t, DecodeScratchDims::kWideRowsM> seen, srcs;   // per run: its slot, its src
+  uint32_t run = 0;
   for (size_t m = 0; m < rows.size(); ++m) {
     const BatchRow& r = rows[m];
     if (r.slot >= lay.slots.size()) fail("row " + std::to_string(m) + " names slot " + std::to_string(r.slot));
@@ -103,6 +110,9 @@ inline void check_rows(std::span<const BatchRow> rows, const BatchLayout& lay) {
            std::to_string(r.slot) + "'s " + std::to_string(lay.slots[r.slot].max_len));
     if (r.kv_base != lay.kv_base(r.slot)) fail("row " + std::to_string(m) + "'s kv_base is not its slot's");
     const bool first = m == 0 || rows[m - 1].slot != r.slot;
+    run = first ? 1 : run + 1;
+    if (run > DecodeScratchDims::kM)   // the wide lists' delta-net chunks hold whole runs of at most kM (gdn_step.cl)
+      fail("row " + std::to_string(m) + ": a run of more than " + std::to_string(DecodeScratchDims::kM) + " rows");
     if (first) {
       if (std::ranges::contains(seen, r.slot))
         fail("slot " + std::to_string(r.slot) + "'s rows are split (a slot is one run)");
@@ -116,7 +126,7 @@ inline void check_rows(std::span<const BatchRow> rows, const BatchLayout& lay) {
   for (size_t i = 0; i < srcs.size(); ++i)
     for (size_t j = i + 1; j < srcs.size(); ++j)
       if (srcs[i] == srcs[j]) fail("two runs read one src " + std::to_string(srcs[i]));
-  for (size_t m = 0; m < rows.size(); ++m) {
+  for (size_t m = 0; m < rows.size() && !deferred; ++m) {
     for (size_t n = m + 1; n < rows.size(); ++n)
       if (rows[m].dst == rows[n].dst) fail("rows " + std::to_string(m) + " and " + std::to_string(n) + " write one dst");
     for (size_t n = 0; n < rows.size(); ++n)
@@ -126,7 +136,7 @@ inline void check_rows(std::span<const BatchRow> rows, const BatchLayout& lay) {
 }
 
 // The runs as a table, checked.
-inline RowTable make_rows(const BatchLayout& lay, const RowRuns& runs) {
+inline RowTable make_rows(const BatchLayout& lay, const RowRuns& runs, bool deferred = false) {
   RowTable t;
   for (const RowRun& run : runs) {
     if (run.rows == 0 || run.dst.size() != run.rows)
@@ -142,10 +152,11 @@ inline RowTable make_rows(const BatchLayout& lay, const RowRuns& runs) {
       r.src = run.src;
       r.dst = run.dst[j];
       r.slot = run.slot;
+      r.pend = run.pend;
       t.push_back(r);
     }
   }
-  check_rows(t, lay);
+  check_rows(t, lay, deferred);
   return t;
 }
 

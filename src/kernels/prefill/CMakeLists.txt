@@ -733,9 +733,21 @@ if(B70_TP)
     add_ocloc_kernel(pf_flash_attn_kv8_raw_pair_I8S_Q12KV2 SOURCE ${KV8_CL}
                      DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=16 HPW=2 QREG=0 EXP2=1 KV8_PAIR=1 KV8_I8S=1 ${PF_TP_FA}
                      OPTIONS -cl-intel-256-GRF-per-thread)
+    # PERF-107: the int8 pass's split chunk at the card's heads reads its own rows as bf16 (kv8.cl KV8_OWN): the
+    # writer's and the two split readers' twins (attn.h kv8_own_rows). Additive: the lines above keep their command
+    # lines.
+    add_ocloc_kernel(pf_attn_prep_kv8_own_Q12KV2 SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1 KV8_OWN=1 ${PF_TP_FA})
+    add_ocloc_kernel(pf_flash_attn_kv8_split_own_Q12KV2 SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV8_OWN=1 ${PF_TP_FA}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_flash_attn_kv8_raw_split_own_Q12KV2 SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 KV8_OWN=1 ${PF_TP_FA}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
     list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_attn_prep_kv8_Q12KV2 kernel_pf_flash_attn_kv8_raw_Q12KV2
          kernel_pf_attn_gate_kv8_Q12KV2 kernel_pf_flash_attn_kv8_split_Q12KV2 kernel_pf_flash_attn_kv8_raw_split_Q12KV2
-         kernel_pf_attn_prep_kv8_I8S_Q12KV2 kernel_pf_flash_attn_kv8_raw_pair_I8S_Q12KV2)
+         kernel_pf_attn_prep_kv8_I8S_Q12KV2 kernel_pf_flash_attn_kv8_raw_pair_I8S_Q12KV2
+         kernel_pf_attn_prep_kv8_own_Q12KV2 kernel_pf_flash_attn_kv8_split_own_Q12KV2
+         kernel_pf_flash_attn_kv8_raw_split_own_Q12KV2)
   endif()
   set(B70_TP_PREFILL_KERNELS ${B70_TP_PREFILL_KERNELS} CACHE INTERNAL "spec 17c: the binaries a TP prefill chunk binds")
 endif()

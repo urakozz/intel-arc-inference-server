@@ -14,8 +14,10 @@
 // differently from the M = 1 GEMV); the slots' isolation is bitwise (B3).
 //
 // The row budget (row_budget): one row decoding - none (the slot's own verify lists, K <= 3); several - 8 rows a step
-// (runtime::Engine::kMaxRows), and with more than mtp_active_max rows decoding no drafts at all (plain batched decode:
-// the measured costs decide). The scheduler clips the rows' K to it.
+// (runtime::Engine::kMaxRows; plan 40a: the engine's max_rows(), 32, where it has the wide lists - MTP, or a drafter
+// whose batched pass takes four blocks), and with more than mtp_active_max rows decoding no drafts at all (plain
+// batched decode: the measured costs decide). The scheduler clips the rows' K to it; with the wide lists it deals them
+// by row_cost (server::RowCost: the measured cost of a step's rows and drafts).
 //
 // Plan 19v3b, `--spec dflash` beside slots: a lone row is its slot's EngineAdapter::step_dflash (bitwise the one-slot
 // server); a step of several rows drafts them in ONE batched draft pass (runtime::TapDrafter::draft_rows: each slot's
@@ -38,6 +40,7 @@
 #include "cli/serve_adapters.h"
 #include "runtime/engine.h"
 #include "runtime/prefill_chunks.h"
+#include "server/adaptive_k.h"
 #include "server/batch_engine.h"
 #include "server/spec_accept.h"
 
@@ -64,8 +67,9 @@ class SlotsEngine : public server::BatchEngineIface {
     e_.select(0);
     pending_.resize(e_.slots());
     constexpr size_t V = model::Qwen35::kVocab;
-    // Pinned readback rows (EngineAdapter's): q [kMaxRows][V] (each row's drafts), p [kMaxRows][V].
-    host_ = std::make_unique<l0::Mem>(engine.context(), l0::MemKind::Host, size_t(2) * runtime::Engine::kMaxRows * V * 4);
+    // Pinned readback rows (EngineAdapter's): q [max_rows][V] (each row's drafts), p [kMaxRows][V] (one run's rows).
+    host_ = std::make_unique<l0::Mem>(engine.context(), l0::MemKind::Host,
+                                      size_t(e_.max_rows() + runtime::Engine::kMaxRows) * V * 4);
   }
 
   // Tests and the record.
@@ -80,7 +84,7 @@ class SlotsEngine : public server::BatchEngineIface {
     return m;
   }
   uint32_t slot_max_len(uint32_t slot) override { return e_.slot_len(slot); }
-  // Spec 31: the engine's KV page pool (kv_pool_pages() 0: fixed slots, and the scheduler never asks).
+  // Spec 31: the engine's KV page pool (kv_pool_pages() 0: one sequence, and the scheduler never asks).
   uint32_t kv_pool_pages() override { return e_.kv_pool_pages(); }
   uint32_t pages_free() override { return e_.pages_free(); }
   uint32_t pages_held(uint32_t slot) override { return e_.pages_held(slot); }
@@ -152,7 +156,12 @@ class SlotsEngine : public server::BatchEngineIface {
   bool chooses_drafts() override { return !df_ && adapters_[0]->chooses_drafts(); }
   uint32_t row_budget(uint32_t active) override {
     if (active <= 1) return 0;   // the slot's own verify lists
-    return active > mtp_active_max_ ? active : runtime::Engine::kMaxRows;
+    return active > mtp_active_max_ ? active : e_.max_rows();
+  }
+  double row_cost(const std::vector<uint32_t>& ks) override {
+    if (e_.max_rows() <= runtime::Engine::kMaxRows) return 0;   // the 8-row lists: the round-robin deal
+    // PERF-120: Ornith's own measured table (its MoE rows cost more a row than Qwen3.8's)
+    return (e_.model().desc->is_moe() ? server::RowCost::ornith() : server::RowCost{df_ != nullptr}).step(ks);
   }
   std::vector<std::vector<uint32_t>> step_spec(const std::vector<SpecRow>& rows) override {
     if (rows.size() == 1) {
@@ -237,7 +246,7 @@ class SlotsEngine : public server::BatchEngineIface {
     flush_all();   // every slot committed: the row lists' saved rows are rewritten below
     constexpr size_t V = model::Qwen35::kVocab;
     float* q_host = host_->as<float>();
-    float* p_host = q_host + runtime::Engine::kMaxRows * V;
+    float* p_host = q_host + e_.max_rows() * V;
     std::vector<runtime::Engine::Run> runs;
     std::vector<std::vector<uint32_t>> drafts(rows.size());
     std::vector<uint32_t> xs(rows.size()), ks(rows.size(), 0);
@@ -376,7 +385,7 @@ class SlotsEngine : public server::BatchEngineIface {
     ++batched_steps_;
     flush_all();
     constexpr size_t V = model::Qwen35::kVocab;
-    float* p_host = host_->as<float>() + runtime::Engine::kMaxRows * V;
+    float* p_host = host_->as<float>() + e_.max_rows() * V;
     std::vector<runtime::Engine::Run> runs;
     std::vector<runtime::TapDrafter::DraftRun> draft;
     std::vector<uint32_t> xs(rows.size());

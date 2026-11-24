@@ -28,6 +28,8 @@
 // Work-group z is block z: its ring (ring_k<z> / ring_v<z>), its rows at their positions pos + (i - row0), live while
 // i - row0 <= K; it writes only its own rows' partials. By property R a block's rows are bitwise the same block drafted
 // alone at rows 0.. (the probe probe_df_attn_seqs checks it).
+// M 32 (plan 40a Task 4, SEQS only): four blocks of up to 8 rows - block z's DPAS row block is the table rows
+// row0 .. row0 + 7 (the host aligns row0 to 8), the same arithmetic as at M 8 for each.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL FP_CONTRACT OFF
@@ -54,8 +56,15 @@
 #error "df_attn_dpas: KS must divide the block's key atoms"
 #endif
 #define KPS (KA / KS)
-#if M != 8 || (HD % 16) != 0 || (PB % 16) != 0 || (RING % PB) != 0 || RING < WIN
-#error "df_attn_dpas: M 8 (one DPAS row block), HD and PB multiples of 16, RING a multiple of PB and >= WIN"
+#if defined(SEQS) && M == 32
+#define RB 1   // a block's DPAS rows start at its row0
+#elif M != 8
+#error "df_attn_dpas: M 8 (one DPAS row block), or 32 with SEQS (four)"
+#else
+#define RB 0
+#endif
+#if (HD % 16) != 0 || (PB % 16) != 0 || (RING % PB) != 0 || RING < WIN
+#error "df_attn_dpas: HD and PB multiples of 16, RING a multiple of PB and >= WIN"
 #endif
 
 inline ushort f2bf(float f) {
@@ -124,7 +133,11 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
                            __global const float* restrict q, __global const ushort* restrict ring_k,
                            __global const ushort* restrict ring_v, const float scale, __global float* restrict part) {
 #endif
+#if RB
+  __local float s_all[G][8][PB];   // the scores, then read back by row for the max
+#else
   __local float s_all[G][M][PB];   // the scores, then read back by row for the max
+#endif
 #if KS > 1
   __local float o_x[G][KS - 1][M][HD];   // the other key slices' P V
   __local float l_x[G][KS - 1][M];
@@ -138,6 +151,9 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
   __global const ushort* restrict ring_k = z == 0 ? ring_k0 : z == 1 ? ring_k1 : z == 2 ? ring_k2 : ring_k3;
   __global const ushort* restrict ring_v = z == 0 ? ring_v0 : z == 1 ? ring_v1 : z == 2 ? ring_v2 : ring_v3;
   if (rows == 0) return;   // a slot with no rows this step (uniform: the whole group returns before any barrier)
+#if RB
+  const uint i0 = row0;   // the DPAS row block's first table row
+#endif
 #else
   const uint p = ctrl[CTRL_POS], K = dctl[DCTL_K];
 #endif
@@ -147,7 +163,11 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
   for (uint a = 0; a < DA; ++a)
     for (int i = 0; i < 8; ++i) {
       ushort hi, mid, lo;
+#if RB
+      split3(q[((size_t)(i0 + i) * NH + h) * HD + a * 16 + lane], &hi, &mid, &lo);
+#else
       split3(q[((size_t)i * NH + h) * HD + a * 16 + lane], &hi, &mid, &lo);
+#endif
       set8(&qh[a], i, hi);
       set8(&qm[a], i, mid);
       set8(&ql[a], i, lo);
@@ -168,9 +188,15 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     }
     for (int i = 0; i < 8; ++i) {
 #ifdef SEQS
+#if RB
+      const uint ri = i0 + (uint)i - row0;   // the row's index in its block (huge below row0)
+      const long lo = (long)p + (long)ri - (long)(WIN - 1);
+      const bool live = i0 + (uint)i >= row0 && ri < rows && pos >= 0 && pos >= lo && ri <= K;
+#else
       const uint ri = (uint)i - row0;   // the row's index in its block (huge below row0)
       const long lo = (long)p + (long)ri - (long)(WIN - 1);
       const bool live = (uint)i >= row0 && ri < rows && pos >= 0 && pos >= lo && ri <= K;
+#endif
 #else
       const long lo = (long)p + (long)i - (long)(WIN - 1);
       const bool live = pos >= 0 && pos >= lo && (uint)i <= K;
@@ -198,7 +224,11 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     for (int i = 0; i < 8; ++i) {
 #ifdef SEQS
       // another block's row or one past K (uniform in the sub-group): p = 0 without the exp - the same zeros
+#if RB
+      if (i0 + (uint)i < row0 || i0 + (uint)i - row0 > K || i0 + (uint)i - row0 >= rows) {
+#else
       if ((uint)i < row0 || (uint)i - row0 > K || (uint)i - row0 >= rows) {
+#endif
         set8(&ph, i, 0);
         set8(&pm, i, 0);
         set8(&pl, i, 0);
@@ -247,14 +277,19 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
 #endif
   // ---- the partials ----------------------------------------------------------------------------------------------
   for (int i = 0; i < 8; ++i) {
-#ifdef SEQS
+#if RB
+    if (i0 + (uint)i < row0 || i0 + (uint)i - row0 >= rows) continue;   // another block's row
+    __global float* dst = part + (((size_t)h * TGT + b) * M + i0 + i) * PART;
+#elif defined(SEQS)
     if ((uint)i < row0 || (uint)i - row0 >= rows) continue;   // another block's row
 #endif
     float l = sub_group_reduce_add(lsum[i]);
 #if KS > 1
     for (uint k = 0; k < KS - 1; ++k) l += l_x[g][k][i];
 #endif
+#if !RB
     __global float* dst = part + (((size_t)h * TGT + b) * M + i) * PART;
+#endif
     if (lane == 0) {
       dst[0] = mrow[i];
       dst[1] = l;

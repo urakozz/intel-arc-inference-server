@@ -34,8 +34,8 @@ inline constexpr Shape kQwen38Tp{5120, 8704, 16, 4};
 inline constexpr unsigned kTpVocabHalf = 124160;   // a card's rows of the 248320-row head (card 1's real: 123917)
 
 inline std::string s_(unsigned v) { return std::to_string(v); }
-inline std::string prep_variant(const Shape& s = kQwen38, bool split = false) {
-  return "df_prep_M" + s_(kM) + "_H" + s_(s.H) + "_I" + s_(s.I) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" +
+inline std::string prep_variant(const Shape& s = kQwen38, bool split = false, unsigned M = kM) {
+  return "df_prep_M" + s_(M) + "_H" + s_(s.H) + "_I" + s_(s.I) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" +
          s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) +
          (split ? "_F8Q4R4U8C16H16K8" : "");
 }
@@ -81,10 +81,18 @@ inline std::string rerank_half_variant(unsigned used, unsigned base, unsigned c)
 inline std::string tp_sum_variant(unsigned s, unsigned rank) {
   return "tp_cross_M8_K5120_G20_S" + s_(s) + "_F_R" + s_(rank) + "_sum";
 }
-inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false) {
-  return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
+inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false, unsigned M = kM) {
+  return v2 ? "df_select_M" + s_(M) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
                    (split ? "_H16" : "")
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
+}
+// Plan 40a Task 4: the batched draft's block-aware binaries at `M` rows (kM or kSeqsRows; `split` the int4 drafter's
+// FOLD forms) - the prep, the DPAS part and its reduce, the selector walk.
+inline std::vector<std::string> seqs_variants(unsigned M, bool split) {
+  Shape w = kQwen38;
+  w.M = M;
+  return {prep_variant(kQwen38, split, M) + "_SEQS", attn_seqs_part_variant(w), attn_seqs_reduce_variant(w),
+          select_variant(true, kQwen38, split, M) + "_SEQS"};
 }
 
 // The drafter's linears at the block's M rows, in their form (`int8`: gemm_sm_i8w at kSmallMTuning's row of the shape

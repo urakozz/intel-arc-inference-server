@@ -33,6 +33,16 @@ b70_target_kernel_dir(event_test)
 add_dependencies(event_test kernel_noop)
 add_test(NAME event_test COMMAND event_test)
 
+# l0::MemKind::HostLocked (host memory locked against swap): mlock on a driver allocation locks nothing, a HostLocked
+# allocation under a covering limit is locked and read by a copy and an indirect kernel read on every card, and under a
+# limit that does not cover it is plain Host memory. Two cards when visible (tools/gpu_lock.sh box).
+add_executable(host_lock_test l0/host_lock_test.cc)
+target_include_directories(host_lock_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(host_lock_test PRIVATE b70_l0)
+b70_target_kernel_dir(host_lock_test)
+add_dependencies(host_lock_test kernel_host_read)
+add_test(NAME host_lock_test COMMAND host_lock_test)
+
 # The prefill execution context (spec 2.1 §3.5): the Level Zero list, through
 # b70_prefill_host.
 add_executable(context_test prefill/context_test.cc)
@@ -450,6 +460,14 @@ foreach(MM 2 3 4 5 6 7 8 16 32 64)   # 16: open-work 28's wide list; 32 / 64: sp
     endif()
   endforeach()
 endforeach()
+# PERF-120: the 8-row lists' 8 key blocks (runtime::verify_attn_blocks), unpaged and paged, with their reduce
+foreach(SFX "" _KV8 _Q12KV2 _Q12KV2_KV8 _PG${KV_PAGE} _KV8_PG${KV_PAGE})
+  foreach(K attn_verify_dpas attn_v2)
+    if(TARGET kernel_${K}_M8_T8${SFX})
+      list(APPEND _vattn_built ${K}_M8_T8${SFX})
+    endif()
+  endforeach()
+endforeach()
 add_executable(verify_attn_test runtime/verify_attn_test.cc)
 target_include_directories(verify_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(verify_attn_test PRIVATE b70_model)
@@ -536,6 +554,9 @@ add_dependencies(gemv_test
   kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N14336_S2_L0
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N34816_S8_L0
   kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M2_K6144_N5120_S1_L0)
+if(B70_TP AND B70_Q4EXP)   # PERF-108: the tp cards' qkv||z (_KS4)
+  add_dependencies(gemv_test kernel_gemv_M1_K5120_N8192_S1_L1_KS4 kernel_gemv_M1_K2560_N8192_S1_L0_KS4)
+endif()
 add_test(NAME gemv_test COMMAND gemv_test)
 
 add_executable(gemv_bf16_test kernels/gemv_bf16_test.cc)
@@ -641,8 +662,8 @@ if(B70_VERIFY_M8 AND B70_MTP)
       kernel_prep_silu_mul_M${MM} kernel_prep_gated_head_M${MM} kernel_embed_gather_M${MM}
       kernel_argmax_stage1_M${MM} kernel_attn_prep_M${MM} kernel_attn_v2_M${MM}_T${ATTN_V2_TGT}
       kernel_gdn_step_slots_M${MM}_N8 kernel_gemv_bf16_M${MM}_K10240_N5120
-      kernel_gemv_bf16_M${MM}_K5120_N14336 kernel_prep_norm_finish_M${MM}_K5120_G20_W20_X10240
-      kernel_prep_res_fold_M${MM}_K5120_SP1_G20_Z kernel_attn_prep_M${MM}_S1)
+      kernel_gemv_bf16_M${MM}_K5120_N14336 kernel_prep_norm_finish_M${MM}_K5120_G20_W20_X10240_P2
+      kernel_prep_res_fold_M${MM}_K5120_SP0_G20_P2 kernel_prep_res_fold_M${MM}_K5120_SP1_G20_Z kernel_attn_prep_M${MM}_S1)
   endforeach()
   foreach(KN K5120_N6144 K4096_N5120 K5120_N34816 K17408_N5120 K25600_N5120 K5120_N2048)
     list(APPEND B70_VERIFY_M8_KERNELS kernel_gemv_i8w_M8_${KN} kernel_gemv_bf16_M8_${KN})
@@ -896,7 +917,7 @@ target_include_directories(batch_rows_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(batch_rows_test PRIVATE b70_plan)
 add_test(NAME batch_rows_test COMMAND batch_rows_test)
 
-# Spec 13c (plan 13c Task 1): the planner's sequence slots (plan_slots, slot_layout), host only.
+# Spec 13c / spec 31: the planner's sequences of one card (plan_pool, pool_that_fits), host only.
 add_executable(slot_plan_test runtime/slot_plan_test.cc)
 target_include_directories(slot_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(slot_plan_test PRIVATE b70_plan)
@@ -1188,10 +1209,12 @@ add_test(NAME prefill_gate_int8_test COMMAND prefill_gate_test
 set_tests_properties(prefill_gate_int8_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # Spec 9 L3: the l0 and l0-int8 gates again with the int8 lm_head (argv[8]). argv[7] is
-# each backend's standing near-tie allowance (0 on l0, 1 on l0-int8), unchanged.
+# each backend's standing near-tie allowance (0 on l0, 1 on l0-int8), unchanged - except l0 with the int8 head,
+# which takes the same one: cjk row 9, accepted by the owner 2026-11-23 (the engine's 105874 vs the golden's 95895,
+# 0.003 apart in the engine's logits and one bf16 ulp apart in the golden, 13.9375 vs 13.875).
 add_test(NAME prefill_gate_l0_i8head_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
-  prose,code,cjk 0 l0 0 int8)
+  prose,code,cjk 0 l0 1 int8)
 add_test(NAME prefill_gate_int8_i8head_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
   prose,code,cjk 0 l0-int8 1 int8)
@@ -1681,8 +1704,8 @@ if(B70_MTP)
   add_test(NAME mtp_verify_deep_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT} 16384 rule deep)
   set_tests_properties(mtp_verify_deep_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
-  # Spec 13c (plan 13c Tasks 2-3): runtime::Engine's sequence slots - S1 a slot alone is today's engine, S2 the slots'
-  # isolation (prefill, decode, reset, snapshots), S3 B1 / B3 for the row kernels (bitwise, mixed K and depth), S4 B1
+  # Spec 13c (plan 13c Tasks 2-3): runtime::Engine's sequence slots on the KV page pool - S1 a slot alone is today's
+  # engine, S2 the slots' isolation (prefill, decode, reset, snapshots), S3 B1 / B3 for the row kernels (bitwise, mixed K and depth), S4 B1
   # by the f32 judge (the int8 head's references; a divergence without one AWAITS it: 77), S5 determinism. Both KV forms.
   if(B70_VERIFY_M8 AND B70_KV8)   # the row builds (src/kernels: B70_MTP, B70_VERIFY_M8, B70_KV8)
     add_executable(slots_test runtime/slots_test.cc)
@@ -1693,7 +1716,8 @@ if(B70_MTP)
     add_test(NAME slots_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
     add_test(NAME slots_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
     add_test(NAME slots_nomtp_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --mtp off)
-    # Spec 31 (plan 31 Task 5): the KV page pool's sequences against the fixed slots (slots_test.cc's --pool cases).
+    # Spec 31 (plan 31 Task 5): the KV page pool's own cases (slots_test.cc's --pool: pages in any order, reset, growth,
+    # a full pool, shared prefix pages).
     add_test(NAME slots_pool_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --pool)
     add_test(NAME slots_pool_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --pool)
     set_tests_properties(slots_pool_test PROPERTIES LABELS "checkpoint;mtp;slots" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
@@ -2359,8 +2383,8 @@ if(B70_ORNITH AND B70_MTP)
   foreach(MM 1 2 3 4)
     list(APPEND B70_ORNITH_MTP_KERNELS
       kernel_gdn_step_slots_M${MM}_G30_GK16V32 kernel_gdn_step_defer_M${MM}_G30_GK16V32 kernel_gemv_bf16_M${MM}_K4096_N2048
-      kernel_gemv_bf16_M${MM}_K2048_N9216 kernel_prep_norm_finish_M${MM}_K2048_G20_W20_X4096
-      kernel_prep_res_fold_M${MM}_K2048_SP1_G20_Z kernel_attn_prep_M${MM}_Q16KV2_S1)
+      kernel_gemv_bf16_M${MM}_K2048_N9216 kernel_prep_norm_finish_M${MM}_K2048_G20_W20_X4096_P2
+      kernel_prep_res_fold_M${MM}_K2048_SP0_G20_P2 kernel_prep_res_fold_M${MM}_K2048_SP1_G20_Z kernel_attn_prep_M${MM}_Q16KV2_S1)
   endforeach()
   list(APPEND B70_ORNITH_MTP_KERNELS kernel_prep_res_fold_M1_K2048_SP1_G20)
   foreach(NV 32768 65536 131072)
@@ -2409,7 +2433,7 @@ if(B70_ORNITH AND B70_MTP)
     kernel_moe_M3_E256_T8_D2048_I512 kernel_moe_M4_E256_T8_D2048_I512)
   if(B70_VERIFY_M8)   # PERF-56: the wide lookup verify lists' rows
     add_dependencies(moe_m_test kernel_moe_M16_E256_T8_D2048_I512 kernel_moe_M32_E256_T8_D2048_I512
-      kernel_moe_M64_E256_T8_D2048_I512)
+      kernel_moe_M64_E256_T8_D2048_I512 kernel_moe_M16_E256_T8_D2048_I512_U kernel_moe_M32_E256_T8_D2048_I512_U)
   endif()
   add_test(NAME moe_m_test COMMAND moe_m_test)
   set_tests_properties(moe_m_test PROPERTIES LABELS "ornith;mtp" TIMEOUT 900)
@@ -2455,14 +2479,14 @@ if(B70_ORNITH AND B70_MTP)
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
       ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced;B70_KV_CACHE=int8")
     # Plan 31 Task 12: Ornith's sequence slots - slots_test's cases on Ornith (slots_test.cc), with S0 against the
-    # one-slot engine; S4 judged by the int8 head's f32 references of the forced contexts.
+    # one-request engine; S4 judged by the int8 head's f32 references of the forced contexts.
     if(TARGET slots_test)
       add_dependencies(slots_test ${_o15e_k} ${_o15e_pf})
       add_test(NAME ornith_slots_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --one-slot)
       set_tests_properties(ornith_slots_test PROPERTIES LABELS "checkpoint;mtp;slots;ornith" SKIP_RETURN_CODE 77
         ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-      # Plan 31 Task 14: the KV page pool's cases on Ornith (slots_test.cc's --pool: P1-P5 against its fixed slots).
+      # Plan 31 Task 14: the KV page pool's cases on Ornith (slots_test.cc's --pool: P1-P5).
       add_test(NAME ornith_slots_pool_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --pool)
       set_tests_properties(ornith_slots_pool_test PROPERTIES LABELS "checkpoint;mtp;slots;ornith" SKIP_RETURN_CODE 77
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
@@ -2659,9 +2683,9 @@ set_tests_properties(tp_protocol_test PROPERTIES TIMEOUT 300)
 
 # On the box, both cards (gpu_lock.sh box); SKIP (77) with fewer than two GPUs or without peer access both ways.
 # tp_kernels_test (no checkpoint): the crossing against prep_res_fold, bitwise (slices) / the host's sum (folded),
-# 300 replays. tp_decode_test (T1 / T2): the prose prompt + 64 greedy ids against one card on card 0 - slices BITWISE
-# (ids, logits, residual taps, state, KV), folded judged by the golden tie rule, both T1 bitwise between the cards and
-# replayed after reset; its `bench` mode times one crossing (row 79's speed stage). tp_fail_test (T4): a card's list
+# 300 replays. tp_decode_test (T1 / T2): the prose prompt + 64 greedy ids against one card on card 0 - both crossings
+# judged by the golden tie rule (slices since PERF-108's in-work-group K split of a card's qkv||z), both T1 bitwise
+# between the cards and replayed after reset bitwise; its `bench` mode times one crossing (row 79's speed stage). tp_fail_test (T4): a card's list
 # dropped, the step throws within its bounds, reset() recovers.
 add_executable(tp_kernels_test kernels/tp_kernels_test.cc)
 target_include_directories(tp_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -2672,6 +2696,30 @@ if(B70_TP_STRESS_KERNELS)   # the `stress` mode's both trailer layouts at M = 1.
   add_dependencies(tp_kernels_test ${B70_TP_STRESS_KERNELS})
 endif()
 add_test(NAME tp_kernels_test COMMAND tp_kernels_test)
+# PERF-44: the folded crossing's tp_send as the linear's tail against the plain linear + tp_send, both sides on ONE card
+# (no checkpoint; ctest -R tp_fold_send_test): bitwise at M 1 (gemv) and the verify rows (gemm_sm) built.
+add_executable(tp_fold_send_test kernels/tp_fold_send_test.cc)
+target_include_directories(tp_fold_send_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(tp_fold_send_test PRIVATE b70_l0 b70_model)
+b70_target_kernel_dir(tp_fold_send_test)
+add_dependencies(tp_fold_send_test ${B70_TP_KERNELS})
+set(_tfs_m 1)
+if(B70_MTP)
+  set(_tfs_m 1 2 3 4)
+  if(B70_VERIFY_M8)
+    set(_tfs_m 1 2 3 4 5 6 7 8)
+  endif()
+  add_dependencies(tp_fold_send_test ${B70_TP_VERIFY_KERNELS})
+  foreach(MM ${_tfs_m})
+    if(NOT MM EQUAL 1)
+      add_dependencies(tp_fold_send_test kernel_gemm_sm_M${MM}_K3072_N5120_S4_L0_mg_b2d
+                       kernel_gemm_sm_M${MM}_K8704_N5120_S4_L0_mg_b2d kernel_tp_cross_M${MM}_K5120_G20_S4_F_R0
+                       kernel_tp_cross_M${MM}_K5120_G20_S4_F_R1)
+    endif()
+  endforeach()
+endif()
+add_test(NAME tp_fold_send_test COMMAND tp_fold_send_test ${_tfs_m})
+set_tests_properties(tp_fold_send_test PROPERTIES LABELS tp SKIP_RETURN_CODE 77 TIMEOUT 600)
 add_executable(tp_decode_test runtime/tp_decode_test.cc)
 target_include_directories(tp_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden ${CMAKE_SOURCE_DIR}/tests/server)
@@ -2717,6 +2765,12 @@ set_tests_properties(tp_prefill_int8_test PROPERTIES
   LABELS "checkpoint;tp;prefill" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   SKIP_RETURN_CODE 77 TIMEOUT 3600 ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
 if(B70_KV8)
+  # PERF-107: the int8 pass on the int8 cache (its served form), a follow-up turn's tail as split chunks; the same
+  # contexts and f32 judges as tp_prefill_int8_test.
+  add_test(NAME tp_prefill_int8_kv8_test COMMAND tp_prefill_int8_test ${B70_TEST_SNAPSHOT})
+  set_tests_properties(tp_prefill_int8_kv8_test PROPERTIES
+    LABELS "checkpoint;tp;prefill;kv8" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
+    ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${_tp_pf_judge}")
   add_test(NAME tp_prefill_kv8_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(tp_prefill_kv8_test PROPERTIES
     LABELS "checkpoint;tp;kv8" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
@@ -3478,7 +3532,7 @@ if(B70_Q4EXP)
     target_include_directories(qwen4exp_tp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
       ${CMAKE_SOURCE_DIR}/tests/runtime)
     target_link_libraries(qwen4exp_tp_test PRIVATE b70_qwen4exp_runtime b70_l0)
-    add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_gemv_M1_K2560_N8192_S1_L0
+    add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_gemv_M1_K2560_N8192_S1_L0_KS4
       kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S4_L0_TP kernel_gemv_i8w_M1_K2560_N124160
       kernel_prep_gated_head_M1_GK8V24_SIG kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1
       kernel_q4_qsa_attn_M1_T32_Q12KV1 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0
@@ -3659,7 +3713,7 @@ b70_cli_reject(cli_reject_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --bench --
 # Plan 21-QFN-v2b Task 4: the tensor-parallel prefill against pp's at --layers 18 on our RTN export, every expert resident
 # (B70_Q4EXP_RTN_SNAPSHOT): pp writes its prefill's rows, tp reads them (ctest -R qwen4exp_tp_prefill_, in this order).
 if(B70_Q4EXP AND B70_TP)
-  set(B70_Q4EXP_TP_KERNELS kernel_gemv_M1_K2560_N8192_S1_L0 kernel_gemv_M1_K2560_N6656_S2_L0
+  set(B70_Q4EXP_TP_KERNELS kernel_gemv_M1_K2560_N8192_S1_L0_KS4 kernel_gemv_M1_K2560_N6656_S2_L0
     kernel_gemv_M1_K3072_N2560_S4_L0_TP kernel_gemv_i8w_M1_K2560_N124160 kernel_prep_gated_head_M1_GK8V24_SIG
     kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1 kernel_q4_qsa_attn_M1_T32_Q12KV1
     kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TP_R1
@@ -3977,7 +4031,7 @@ if(B70_Q4EXP AND B70_MTP)
     foreach(MM 1 2 3 4)
       list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gdn_step_defer_M${MM}_GK8V24_G1)
       if(NOT MM EQUAL 1)
-        list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N8192_S1_L0 kernel_gemv_M${MM}_K2560_N6656_S2_L0
+        list(APPEND B70_Q4EXP_TP_MTP_KERNELS kernel_gemv_M${MM}_K2560_N8192_S1_L0_KS4 kernel_gemv_M${MM}_K2560_N6656_S2_L0
           kernel_gemv_M${MM}_K3072_N2560_S4_L0_TP kernel_gemv_i8w_M${MM}_K2560_N124160 kernel_prep_gated_head_M${MM}_GK8V24_SIG
           kernel_attn_prep_M${MM}_Q12KV1 kernel_q4_qsa_attn_M${MM}_T32_Q12KV1
           kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R0 kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TP_R1
@@ -4262,10 +4316,15 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   target_include_directories(dflash_slots_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(dflash_slots_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader
-    b70_l0 b70_model)
+    b70_l0 b70_model b70_server)
   add_dependencies(dflash_slots_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_slots_test COMMAND dflash_slots_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_slots_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  # Plan 40a Task 1: the drafter beside the KV page pool - pages in any order, reset, a longer prompt: bitwise the
+  # one-slot engine.
+  add_test(NAME dflash_slots_pool_test COMMAND dflash_slots_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT} --pool)
+  set_tests_properties(dflash_slots_pool_test PROPERTIES LABELS "checkpoint;dflash;slots" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # The DFlash verify at M = 2..8 on the int8 KV cache against the plain loop: v2 + gemv lists bitwise (ids and the
   # KV rows they wrote) at every K, the production / gemm_sm / DPAS arms' first difference recorded.
@@ -4558,3 +4617,72 @@ get_property(_b70_all_tests DIRECTORY PROPERTY TESTS)
 foreach(_t IN LISTS _b70_all_tests)
   set_property(TEST ${_t} APPEND PROPERTY ENVIRONMENT B70_TEST_NAME=${_t})
 endforeach()
+
+add_executable(expert_fp_test loader/expert_fp_test.cc)
+target_include_directories(expert_fp_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(expert_fp_test PRIVATE b70_loader)
+add_test(NAME expert_fp_test COMMAND expert_fp_test)
+set(B70_INKLING_SNAPSHOT "" CACHE PATH "Inkling-2-Mini snapshot for the sampled expert format test")
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME expert_fp_release_test COMMAND expert_fp_test "${B70_INKLING_SNAPSHOT}")
+endif()
+
+add_executable(expert_fp_gpu_test kernels/expert_fp_gpu_test.cc)
+target_include_directories(expert_fp_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(expert_fp_gpu_test PRIVATE b70_loader b70_l0)
+b70_target_kernel_dir(expert_fp_gpu_test)
+add_dependencies(expert_fp_gpu_test kernel_expert_fp_bytes_NVFP4 kernel_expert_fp_bytes_MXFP8)
+foreach(fmt NVFP4 MXFP8)
+  add_dependencies(expert_fp_gpu_test kernel_kol_moe_E128_T8_D2304_I1152_${fmt}
+                   kernel_pf_moe_q4gemm_K2304_N2304_SILU_${fmt} kernel_pf_moe_q4gemm_K1152_N2304_${fmt})
+endforeach()
+add_test(NAME expert_fp_gpu_test COMMAND expert_fp_gpu_test)
+
+add_executable(inkling2_host_test loader/inkling2_host_test.cc)
+target_include_directories(inkling2_host_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_host_test PRIVATE b70_inkling2_plan)
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_host_test COMMAND inkling2_host_test "${B70_INKLING_SNAPSHOT}")
+endif()
+
+add_executable(inkling2_variant_names_test kernels/inkling2_variant_names_test.cc)
+target_include_directories(inkling2_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_variant_names_test PRIVATE b70_inkling2_model)
+add_test(NAME inkling2_variant_names_test COMMAND inkling2_variant_names_test ${B70_INKLING_KERNELS})
+
+add_executable(inkling2_ops_test kernels/inkling2_ops_test.cc)
+target_include_directories(inkling2_ops_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME inkling2_ops_test COMMAND inkling2_ops_test)
+
+add_executable(inkling2_golden_test golden/inkling2_golden_test.cc)
+target_include_directories(inkling2_golden_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_golden_test PRIVATE b70_inkling2_model b70_loader)
+set(B70_INKLING_GOLDEN "" CACHE FILEPATH "Inkling FP32 CPU golden for the judge's self-check")
+if(B70_INKLING_GOLDEN)
+  add_test(NAME inkling2_golden_file_test COMMAND inkling2_golden_test "${B70_INKLING_GOLDEN}")
+endif()
+
+add_executable(inkling2_ops_gpu_test kernels/inkling2_ops_gpu_test.cc)
+target_include_directories(inkling2_ops_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_ops_gpu_test PRIVATE b70_l0)
+b70_target_kernel_dir(inkling2_ops_gpu_test)
+add_dependencies(inkling2_ops_gpu_test kernel_ink_glue_H2304 kernel_ink_prep_Q24KV8_D128_REL16
+                 kernel_kol_route_E128_T8_N128_L128_RENORM
+                 kernel_kol_attn_M1_T32_Q24KV8_REL16E1024_SINK_GATE_F
+                 kernel_kol_moe_M2_E128_T8_D2304_I1152_CAP_NVFP4
+                 kernel_kol_moe_M2_E128_T8_D2304_I1152_CAP_MXFP8)
+add_test(NAME inkling2_ops_gpu_test COMMAND inkling2_ops_gpu_test)
+
+add_executable(inkling2_decode_test golden/inkling2_decode_test.cc)
+target_include_directories(inkling2_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_decode_test PRIVATE b70_inkling2_runtime)
+foreach(name IN LISTS B70_INKLING_KERNELS)
+  add_dependencies(inkling2_decode_test kernel_${name})
+endforeach()
+set(B70_INKLING_PROMPT "" CACHE FILEPATH "Token IDs for the Inkling FP32 CPU golden")
+if(B70_INKLING_SNAPSHOT AND B70_INKLING_GOLDEN AND B70_INKLING_PROMPT)
+  add_test(NAME inkling2_decode_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+           "${B70_INKLING_PROMPT}" "${B70_INKLING_GOLDEN}")
+  add_test(NAME inkling2_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+           "${B70_INKLING_PROMPT}" "${B70_INKLING_GOLDEN}" draft)
+endif()

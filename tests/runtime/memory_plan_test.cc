@@ -63,7 +63,8 @@ void check_sizes_qwen38() {
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, q, 64).total(), size_t{8} * (68652864 - 50724864 + 6340608));
   CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 1, false), 64u);
   CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Int8, 1, false), 16u);
-  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 2, false), 16u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 2, false), 32u);   // plan 40a Task 3
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, false, runtime::KvCache::Int8, 4, false), 16u);
   CHECK_EQ(runtime::DecodeScratchDims::rows(q, false, runtime::KvCache::Bf16, 1, false), 16u);
   // 128k (spec 6): KV 8,589,934,592.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
@@ -141,12 +142,19 @@ void check_sizes_ornith() {
   CHECK_EQ(ml.route_off, size_t{41} * 69632);
   CHECK_EQ(ml.h_off, size_t{41} * (69632 + 8192));
   CHECK_EQ(ml.h, size_t{64} * 9 * 512 * 2);                         // [kDeepM][slots][512] bf16
-  CHECK_EQ(ml.total, size_t{3780608});
+  CHECK_EQ(ml.dn, size_t{32} * 9 * 2048 * 2);                       // PERF-120: [kWideRowsM][slots][hidden] bf16
+  CHECK_EQ(ml.dn_off, ml.h_off + ml.h);
+  CHECK_EQ(ml.plan, size_t{1 + 2 * 260 + 32 * 9} * 4);              // its plan: 260 items at most, 288 pairs
+  CHECK_EQ(ml.total, size_t{4963492});
   CHECK_EQ(ml.route_at(40), ml.route_off + 40 * size_t{8192});
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, o);
-  CHECK_EQ(d.moe, size_t{3780608});
+  CHECK_EQ(d.moe, size_t{4963492});
   CHECK_EQ(d.x, size_t{16} * 4096 * 2);                             // 2 x hidden > 512, 16 rows
   CHECK_EQ(d.attn_part, size_t{16} * 32 * 16 * 258 * 4);            // v2 at 16 q-heads, 16 rows
+  // PERF-120: several sequences with the MTP head keep the 32-row lists' scratch, either KV form
+  CHECK_EQ(runtime::DecodeScratchDims::rows(o, true, runtime::KvCache::Int8, 4, false), 32u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(o, true, runtime::KvCache::Bf16, 2, false), 32u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(o, false, runtime::KvCache::Bf16, 4, false), 16u);
   // Dense models carry no MoE scratch: their sizes are what they were.
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
   // The plan (decode only: Ornith's prefill is spec 15d) carries both MoE terms, and the
@@ -156,7 +164,7 @@ void check_sizes_ornith() {
   decode_only.prefill = false;
   const runtime::MemoryPlan pl = runtime::plan(o, 262144, false, kOrnithInt8Weights, decode_only);
   CHECK_EQ(pl.moe_weights, size_t{17224171520ull});
-  CHECK_EQ(pl.moe_scratch, size_t{3780608});
+  CHECK_EQ(pl.moe_scratch, size_t{4963492});
   CHECK_EQ(pl.kv, size_t{262144} * 20 * 1024);
   CHECK_EQ(pl.prefill_scratch, size_t{0});
   CHECK_EQ(runtime::max_len_that_fits(o, false, kOrnithInt8Weights, kDevice, kReserve, kTrained,
@@ -257,7 +265,8 @@ void check_paths() {
   CHECK_EQ(mtp.mtp_hidden, runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault));
   // Spec 32e: with the head on bf16 KV the decode scratch holds the deep verify lists' 64 rows, not 16.
   CHECK_EQ(mtp.deep, size_t{103022592 + 150994944 + 47185920});   // spec 32: Engine's, with the head
-  CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden + mtp.deep +
+  // PERF-123: + the verify lists' head choice word (64 B, EngineSizes::head_gate)
+  CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden + mtp.deep + 64 +
                                  runtime::DecodeScratchDims::sizes(65536, q, 64).total() -
                                  runtime::DecodeScratchDims::sizes(65536, q).total());
   CHECK_EQ(mtp.prefill_lazy, s.slab + runtime::route_slab_bytes(q, 0, q.layers));
@@ -673,6 +682,18 @@ void check_chunk_cap() {
         CHECK_EQ(runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, 65536, path, {}, r.kv),
                  4096u);
     }
+
+  // The 2026-11-24 ruling (cli::planned_chunk_cap): --max-len auto on the bf16 prompt pass plans at 4096 - a shorter
+  // auto context below the trained one, and the chunk cap chosen at it is 4096.
+  for (const Row& r : rows) {
+    const runtime::PrefillPath at2{true, PrefillBackend::L0, 2048}, at4{true, PrefillBackend::L0, 4096};
+    const uint32_t L2 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, at2, {}, r.kv);
+    const uint32_t L4 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, at4, {}, r.kv);
+    CHECK(L4 != 0 && L4 <= L2);
+    if (L2 < kTrained) CHECK(L4 < L2);
+    CHECK_EQ(runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, L4, at4, {}, r.kv), 4096u);
+    std::printf("auto at 4096 %-26s l0      max_len %6u (at 2048: %6u)\n", r.what, L4, L2);
+  }
 }
 }  // namespace
 

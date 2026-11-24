@@ -20,6 +20,14 @@ inline std::string tp_cross_variant(unsigned M, unsigned hidden, unsigned fold_g
   return "tp_cross_M" + std::to_string(M) + "_K" + std::to_string(hidden) + "_G" + std::to_string(fold_g) + "_S" +
          std::to_string(s_loc) + (folded ? "_F" : "_X") + "_R" + std::to_string(rank);
 }
+// PERF-44: a row-parallel linear of the folded crossing with tp_send as its tail (gemv.cl / gemm_sm.cl TP_FOLD_SEND,
+// tp_fold_send.h): its gemv / gemm_sm variant name + this suffix, arguments (w, scales, x, out, peer_land, send_ctr,
+// own). Its arrival counters follow the send's call counters: tp::Layout::fold_g words more in send_ctr (TP_FOLD_G is
+// the layout's fold_g, 20).
+inline std::string tp_fold_send_variant(const std::string& linear, bool gemm_sm) {
+  return linear + (gemm_sm ? "_tf" : "_TF");
+}
+
 // tp_argmax_stage1 / _stage2 over a card's `rows` logits, `used` of them real, its first id `base`.
 inline std::string tp_argmax_variant(unsigned M, unsigned rows, unsigned used, unsigned base) {
   return "tp_argmax_M" + std::to_string(M) + "_N" + std::to_string(rows) + "_U" + std::to_string(used) + "_B" +

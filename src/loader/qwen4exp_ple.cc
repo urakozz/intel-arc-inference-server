@@ -173,12 +173,16 @@ size_t q4_mem_available() {
 std::string q4_ple_dir(const std::string& snapshot_dir) {
   std::string s = snapshot_dir;
   while (!s.empty() && s.back() == '/') s.pop_back();
-  const std::string dir = s + "-ple-int8/";
   struct stat st {};
+  const std::string inside = s + "/ple-int8/";   // shipped in the model repo
+  if (::stat((inside + "model.safetensors.index.json").c_str(), &st) == 0) return inside;
+  const std::string dir = s + "-ple-int8/";
   if (::stat((dir + "model.safetensors.index.json").c_str(), &st) != 0)
-    throw std::runtime_error("no PLE int8 table at " + dir + ": the engine reads the n-gram "
-                             "table as int8 rows from a one-time file beside the checkpoint - "
-                             "make it with: python3 tools/quantize/qwen4exp/ple_int8.py " + snapshot_dir + " " + dir);
+    throw std::runtime_error("no PLE int8 table at " + inside + " or " + dir + ": the engine reads the n-gram "
+                             "table as int8 rows - it ships as ple-int8/ in "
+                             "urakozz/Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ (download that folder too), or make it "
+                             "from a checkpoint's bf16 table with: python3 tools/quantize/qwen4exp/ple_int8.py " +
+                             snapshot_dir + " " + dir);
   return dir;
 }
 

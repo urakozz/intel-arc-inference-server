@@ -1,0 +1,7 @@
+# Transformers modeling_inkling2_loop.py SHA256:
+# 1c8e65b45a11c13ecad86c088105acd5e4567123ef6599844a95912d242e9f28
+transformers @ git+https://github.com/huggingface/transformers.git@1097d1570e6208063fa49575bb2b6e756a50c2f6
+torch>=2.8
+safetensors>=0.5
+pytest
+numpy

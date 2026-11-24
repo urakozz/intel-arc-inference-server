@@ -108,7 +108,7 @@ void Engine::prepare_prefill() {
   // Plan 5d: every per-chunk buffer at the session's chunk cap (checked against the model).
   const uint32_t cap = prefill_chunk_cap();
   check_prefill_chunk_cap(*model_.desc, cap);
-  // 3j: int8's widening scratch at the longest slot (one sequence prefills at a time; runtime::plan_slots).
+  // 3j: int8's widening scratch at the longest slot (one sequence prefills at a time; runtime::plan_pool).
   uint32_t longest = 0;
   for (uint32_t q = 0; q < slots(); ++q) longest = std::max(longest, slot_len(q));
   if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc, cap, longest));

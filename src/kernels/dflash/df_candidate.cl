@@ -2,6 +2,7 @@
 // The final candidate list contains real ids only. NaN never wins; ties choose the lower id.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL FP_CONTRACT OFF
+#include "head_gate.h"   /* GATE 2 (PERF-123): the main head's candidates at verify, greedy steps only */
 #define WG 256
 #define SG 16
 #ifndef C
@@ -78,7 +79,8 @@ __kernel void df_candidate_stage1(__global const float* restrict logits, __globa
 
 __attribute__((intel_reqd_sub_group_size(SG)))
 __attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void df_candidate_stage2(__global const float* restrict part, __global uint* restrict cand) {
+__kernel void df_candidate_stage2(__global const float* restrict part, __global uint* restrict cand GATE_ARG) {
+  GATE_RETURN
   const uint r = get_group_id(0), lid = get_local_id(0);
   __local float sv[WG / SG];
   __local uint si[WG / SG];
@@ -115,7 +117,8 @@ inline uint okey(float x) {
 
 __attribute__((intel_reqd_sub_group_size(SG)))
 __attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void df_candidate_select1(__global const float* restrict logits, __global float* restrict part) {
+__kernel void df_candidate_select1(__global const float* restrict logits, __global float* restrict part GATE_ARG) {
+  GATE_RETURN
   const uint chunk = get_group_id(0), r = get_group_id(1), lid = get_local_id(0);
   const uint sg = get_sub_group_id(), lane = get_sub_group_local_id();
   __local uint hist[WG / SG][16];

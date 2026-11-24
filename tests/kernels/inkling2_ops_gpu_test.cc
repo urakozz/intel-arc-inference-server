@@ -1,0 +1,314 @@
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdio>
+#include <initializer_list>
+#include <vector>
+
+#include "check.h"
+#include "common/expert_fp.h"
+#include "kernels/inkling2_kernels.h"
+#include "kernels/inkling2_ref.h"
+#include "l0/cmdlist.h"
+#include "l0/kernel.h"
+#include "l0/memory.h"
+#include "l0/module.h"
+#include "runtime/control.h"
+
+int main() {
+  namespace ink = kernels::inkling2;
+  constexpr uint32_t H = ink::D::hidden;
+  l0::Context ctx(0);
+  auto list = l0::CmdList::immediate(ctx);
+  const auto upload = [&](const auto& a) {
+    l0::Mem m(ctx, l0::MemKind::Device, a.size() * sizeof(a[0]));
+    list.copy(m.ptr(), a.data(), m.size());
+    return m;
+  };
+  l0::Module glue(ctx, kernels::path(std::string(ink::kGlue)));
+  const auto bits = [](float x) { return std::bit_cast<uint32_t>(x); };
+  std::vector<float> x(H, 2.f), q(H, 0.f), mix(H);
+  auto input = upload(x), query = upload(q), out = upload(mix);
+  auto depth = glue.kernel("ink_depth_mix");
+  depth.group_size(128);
+  depth.arg_ptr(0, input.ptr());
+  depth.arg_ptr(1, query.ptr());
+  depth.arg_ptr(2, out.ptr());
+  depth.arg(3, uint32_t(1));
+  depth.arg(4, uint32_t(1));
+  depth.arg(5, 1e-6f);
+  depth.arg_ptr(6, nullptr);
+  list.launch(depth, 1, 1);
+  list.copy(mix.data(), out.ptr(), out.size());
+  const auto want = inkling2_ref::depth_mix(x, q, 1e-6f);
+  for (size_t i = 0; i < mix.size(); ++i) CHECK_EQ(bits(mix[i]), bits(want[i]));
+
+  std::vector<float> bank(2 * H), gamma(H);
+  for (size_t i = 0; i < H; ++i) {
+    bank[i] = float(int(i % 9) - 4);
+    bank[H + i] = float(i % 13);
+    gamma[i] = .5f + float(i % 8) / 8.f;
+  }
+  std::vector<uint16_t> normed(H);
+  auto bank_dev = upload(std::span(bank).first(H)), last_dev = upload(std::span(bank).subspan(H));
+  auto gamma_dev = upload(gamma), normed_dev = upload(normed);
+  auto mix_norm = glue.kernel("ink_depth_mix_norm");
+  mix_norm.group_size(128);
+  mix_norm.arg_ptr(0, bank_dev.ptr());
+  mix_norm.arg_ptr(1, query.ptr());
+  mix_norm.arg_ptr(2, normed_dev.ptr());
+  mix_norm.arg(3, 2u);
+  mix_norm.arg(4, 1u);
+  mix_norm.arg(5, 1e-6f);
+  mix_norm.arg_ptr(6, gamma_dev.ptr());
+  mix_norm.arg_ptr(7, nullptr);
+  mix_norm.arg_ptr(8, nullptr);
+  mix_norm.arg_ptr(9, last_dev.ptr());
+  list.launch(mix_norm, 1, 1);
+  list.copy(normed.data(), normed_dev.ptr(), normed_dev.size());
+  const auto mixed = inkling2_ref::depth_mix(bank, q, 1e-6f);
+  const float inv = 1.f / std::sqrt(inkling2_ref::sqnorm(mixed) / H + 1e-6f);
+  for (size_t i = 0; i < H; ++i)
+    CHECK_EQ(normed[i], common::f32_to_bf16((mixed[i] * inv) * gamma[i]));
+
+  std::vector<float> gain(H), forget(H), message(H);
+  for (size_t i = 0; i < H; ++i) {
+    gain[i] = i % 2 ? 100.f : -100.f;
+    forget[i] = i % 3 ? 0.f : 100.f;
+    message[i] = float(i % 11);
+  }
+  auto gains = upload(gain), forgets = upload(forget), messages = upload(message);
+  auto controller = glue.kernel("ink_controller_blend");
+  controller.group_size(128);
+  controller.arg_ptr(0, input.ptr());
+  controller.arg_ptr(1, messages.ptr());
+  controller.arg_ptr(2, forgets.ptr());
+  controller.arg_ptr(3, gains.ptr());
+  controller.arg_ptr(4, out.ptr());
+  list.launch(controller, H / 128, 1);
+  list.copy(mix.data(), out.ptr(), out.size());
+  for (size_t i = 0; i < H; ++i)
+    CHECK_EQ(bits(mix[i]), bits(inkling2_ref::controller(x[i], message[i], forget[i], gain[i])));
+
+  std::vector<float> hist(3 * H), taps(4 * H);
+  for (size_t i = 0; i < hist.size(); ++i) hist[i] = float(i % 11);
+  for (size_t i = 0; i < taps.size(); ++i) taps[i] = (int(i % 7) - 3) * .125f;
+  auto history = upload(hist), weights = upload(taps);
+  auto post = glue.kernel("ink_post_conv");
+  post.group_size(128);
+  post.arg_ptr(0, input.ptr());
+  post.arg_ptr(1, history.ptr());
+  post.arg_ptr(2, weights.ptr());
+  post.arg_ptr(3, nullptr);
+  post.arg_ptr(4, out.ptr());
+  post.arg_ptr(5, normed_dev.ptr());
+  list.launch(post, H / 128, 1);
+  list.copy(mix.data(), out.ptr(), out.size());
+  list.copy(normed.data(), normed_dev.ptr(), normed_dev.size());
+  for (size_t i = 0; i < mix.size(); ++i) {
+    const float expected = inkling2_ref::convolve(x, hist, H, 0, i, taps);
+    CHECK_EQ(bits(mix[i]), bits(expected));
+    CHECK_EQ(normed[i], common::f32_to_bf16(expected));
+  }
+
+  constexpr uint32_t K = ink::D::kv_n, D = ink::D::head_dim;
+  std::vector<float> kv(K), kv_hist(3 * K), kv_taps(4 * K);
+  std::copy_n(x.begin(), K, kv.begin());
+  std::copy_n(hist.begin(), 3 * K, kv_hist.begin());
+  std::copy_n(taps.begin(), 4 * K, kv_taps.begin());
+  auto kin = upload(kv), kh = upload(kv_hist), kw = upload(kv_taps);
+  std::vector<uint16_t> cache(K);
+  auto ko = upload(cache);
+  std::vector<runtime::Control> control(1);
+  control[0].n_active = 1;
+  auto ctrl = upload(control);
+  l0::Module prep(ctx, kernels::path(std::string(ink::kPrep)));
+  auto prepare_kv = prep.kernel("ink_kv_prep");
+  prepare_kv.group_size(D);
+  prepare_kv.arg_ptr(0, kin.ptr());
+  prepare_kv.arg_ptr(1, kh.ptr());
+  prepare_kv.arg_ptr(2, kw.ptr());
+  prepare_kv.arg_ptr(3, nullptr);
+  prepare_kv.arg_ptr(4, ko.ptr());
+  prepare_kv.arg_ptr(5, ctrl.ptr());
+  prepare_kv.arg(6, 0u);
+  prepare_kv.arg(8, 1e-6f);
+  prepare_kv.arg(9, 2.f);
+  for (const uint32_t key : {0u, 1u}) {
+    prepare_kv.arg(7, key);
+    list.launch(prepare_kv, ink::D::kv_heads, 1);
+    list.copy(cache.data(), ko.ptr(), ko.size());
+    for (uint32_t h = 0; h < ink::D::kv_heads; ++h) {
+      std::array<float, D> expected;
+      for (uint32_t i = 0; i < D; ++i)
+        expected[i] = inkling2_ref::convolve(kv, kv_hist, K, 0, h * D + i, kv_taps);
+      inkling2_ref::head_scale(expected, 2.f, 1e-6f, key == 0);
+      for (uint32_t i = 0; i < D; ++i)
+        CHECK_EQ(cache[h * D + i], common::f32_to_bf16(expected[i]));
+    }
+  }
+
+  constexpr uint32_t visits = 2, verify_rows = 3, accepted = 2;
+  constexpr std::array<uint32_t, 4> widths{K, K, H, H};
+  std::vector<float> pending(visits * verify_rows * 2 * (K + H));
+  for (size_t i = 0; i < pending.size(); ++i) pending[i] = float(i);
+  auto pending_dev = upload(pending);
+  std::vector<std::vector<float>> history_host;
+  std::vector<l0::Mem> history_dev;
+  for (auto width : widths) {
+    history_host.emplace_back(visits * 3 * width, -1.f);
+    history_dev.push_back(upload(history_host.back()));
+  }
+  auto commit = glue.kernel("ink_commit_conv");
+  commit.group_size(128);
+  commit.arg_ptr(0, pending_dev.ptr());
+  for (uint32_t stream = 0; stream < widths.size(); ++stream) commit.arg_ptr(stream + 1, history_dev[stream].ptr());
+  commit.arg(5, verify_rows);
+  commit.arg(6, accepted);
+  list.launch(commit, 2 * (K + H) / 128, visits);
+  size_t offset = 0;
+  for (uint32_t stream = 0; stream < widths.size(); ++stream) {
+    const uint32_t width = widths[stream];
+    std::vector<float> observed(history_host[stream].size());
+    list.copy(observed.data(), history_dev[stream].ptr(), history_dev[stream].size());
+    for (uint32_t v = 0; v < visits; ++v) {
+      const size_t src = (v * 2 * (K + H) + offset) * verify_rows;
+      const size_t dst = v * 3 * width;
+      inkling2_ref::commit_conv(std::span(pending).subspan(src, verify_rows * width),
+                               std::span(history_host[stream]).subspan(dst, 3 * width), width, accepted);
+    }
+    CHECK(observed == history_host[stream]);
+    offset += width;
+  }
+
+  constexpr uint32_t Q = ink::D::q_heads, E = ink::D::relative_extent, R = ink::D::relative_dim;
+  std::vector<float> attn_q(Q * D), rel_q(Q * R), rel_table(R * E), sinks(64), gate(Q * D);
+  for (uint32_t h = 0; h < Q; ++h) rel_q[h * R] = 1.f;
+  rel_table[0] = .5f;
+  std::vector<uint16_t> keys(16 * K), values(16 * K, common::f32_to_bf16(2.f)), attention(Q * D);
+  std::vector<float> parts(Q * ink::kPartitions * (D + 2));
+  auto aq = upload(attn_q), rq = upload(rel_q), rt = upload(rel_table), si = upload(sinks), ga = upload(gate);
+  auto ca_k = upload(keys), ca_v = upload(values), ap = upload(parts), ao = upload(attention);
+  l0::Module attn(ctx, kernels::path(ink::attn(1, false)));
+  auto decode = attn.kernel("kol_attn_decode");
+  decode.group_size(D);
+  decode.arg_ptr(0, ctrl.ptr());
+  decode.arg_ptr(1, aq.ptr());
+  decode.arg_ptr(2, ca_k.ptr());
+  decode.arg_ptr(3, ca_v.ptr());
+  decode.arg_ptr(4, ap.ptr());
+  decode.arg_ptr(5, rq.ptr());
+  decode.arg_ptr(6, rt.ptr());
+  list.launch(decode, ink::D::kv_heads, ink::kPartitions);
+  auto reduce = attn.kernel("kol_attn_reduce");
+  reduce.group_size(D);
+  reduce.arg_ptr(0, ctrl.ptr());
+  reduce.arg_ptr(1, ap.ptr());
+  reduce.arg_ptr(2, ao.ptr());
+  reduce.arg_ptr(3, si.ptr());
+  reduce.arg_ptr(4, ga.ptr());
+  list.launch(reduce, Q, 1);
+  list.copy(attention.data(), ao.ptr(), ao.size());
+  for (uint32_t h = 0; h < Q; ++h) {
+    const float bias = inkling2_ref::relative_bias(std::span(rel_q).subspan(h * R, R), rel_table, E, 0);
+    const auto want_attn = inkling2_ref::gated_value(2.f, 1.f + std::exp(-bias), 0.f);
+    for (uint32_t i = 0; i < D; ++i) CHECK_EQ(attention[h * D + i], want_attn);
+  }
+
+  std::vector<float> logits(128), bias(128);
+  for (uint32_t i = 0; i < 8; ++i) bias[120 + i] = .25f;
+  auto logits_dev = upload(logits), bias_dev = upload(bias);
+  std::vector<uint32_t> route(32);
+  auto route_dev = upload(route);
+  l0::Module router(ctx, kernels::path(ink::route()));
+  auto route_k = router.kernel("kol_route");
+  route_k.group_size(128);
+  route_k.arg_ptr(0, logits_dev.ptr());
+  route_k.arg_ptr(1, bias_dev.ptr());
+  route_k.arg_ptr(2, route_dev.ptr());
+  list.launch(route_k, 1, 1);
+  list.copy(route.data(), route_dev.ptr(), route_dev.size());
+  for (uint32_t i = 0; i < 8; ++i) {
+    CHECK_EQ(route[i], 120 + i);
+    CHECK_EQ(route[8 + i], bits(1.f));
+  }
+  CHECK_EQ(route[24], bits(.5f));
+  // Overlapping rows share four experts. Compare both output stages with
+  // the per-row kernels, including distinct expert ids and both pack formats.
+  constexpr uint32_t M = 2, top = ink::D::top_k, inter = ink::D::inter, experts = 12;
+  std::vector<uint32_t> routes(M * 32);
+  for (uint32_t r = 0; r < M; ++r)
+    for (uint32_t slot = 0; slot < top; ++slot) {
+      routes[r * 32 + slot] = 4 * r + slot;
+      routes[r * 32 + 8 + slot] = bits(float(slot + 1) / 32.f);
+    }
+  std::vector<uint16_t> expert_x(M * H), expert_h(M * top * inter);
+  for (size_t i = 0; i < expert_x.size(); ++i) expert_x[i] = common::f32_to_bf16(float(int(i % 11) - 5) / 32.f);
+  std::vector<float> residual(M * H), expert_history(3 * H), expert_taps(4 * H);
+  for (size_t i = 0; i < residual.size(); ++i) residual[i] = float(i % 17) / 32.f;
+  for (size_t i = 0; i < expert_history.size(); ++i) expert_history[i] = float(i % 13) / 8.f;
+  for (size_t i = 0; i < expert_taps.size(); ++i) expert_taps[i] = float(int(i % 5) - 2) / 32.f;
+  auto er = upload(routes), ex = upload(expert_x), eh = upload(expert_h), uh = upload(expert_h);
+  auto y = upload(residual), raw = upload(residual), rs = upload(residual);
+  auto hh = upload(expert_history), et = upload(expert_taps);
+  l0::Mem plan(ctx, l0::MemKind::Device, M * top * 2 * sizeof(uint32_t));
+  std::vector<uint16_t> output_taps(M * 4 * H);
+  auto tap_dev = upload(output_taps);
+  for (const auto format : {common::ExpertFpFormat::Nvfp4, common::ExpertFpFormat::Mxfp8}) {
+    const auto packed = [&](uint32_t k, uint32_t n) {
+      const bool nv = format == common::ExpertFpFormat::Nvfp4;
+      const auto words = common::expert_fp_tile_words(format);
+      const uint32_t tiles = n / 16 * (k / 64), stride = tiles * words + nv;
+      std::vector<uint32_t> w(experts * stride);
+      for (uint32_t e = 0; e < experts; ++e) {
+        for (uint32_t t = 0; t < tiles; ++t) {
+          auto* tile = w.data() + e * stride + t * words;
+          const uint32_t values = 32 * common::expert_fp_code_bits(format);
+          for (uint32_t i = 0; i < values; ++i)
+            tile[i] = nv ? ((t + i + e) % 2 ? 0x12395921u : 0x94122219u)
+                         : ((t + i + e) % 2 ? 0x18249c20u : 0x22981919u);
+          std::fill(tile + values, tile + words, nv ? 0x30303030u : 0x7c7c7c7cu);
+        }
+        if (nv) w[(e + 1) * stride - 1] = bits(.5f + float(e) / 32.f);
+      }
+      return upload(w);
+    };
+    auto up = packed(H, inter * 2), down = packed(inter, H);
+    l0::Module moe(ctx, kernels::path(ink::moe(M, format)));
+    auto run = [&](const char* name, uint32_t wg, uint32_t gx, uint32_t gy, std::initializer_list<void*> args) {
+      auto kernel = moe.kernel(name);
+      kernel.group_size(wg);
+      uint32_t j = 0;
+      for (auto ptr : args) kernel.arg_ptr(j++, ptr);
+      list.launch(kernel, gx, gy);
+    };
+    run("kol_moe_gate_up", 256, top * inter / 32, M, {er.ptr(), ex.ptr(), up.ptr(), nullptr, eh.ptr()});
+    run("kol_moe_down", 128, H / 16, M, {er.ptr(), eh.ptr(), down.ptr(), nullptr, y.ptr()});
+    run("kol_moe_union_plan", 128, 1, 1, {er.ptr(), plan.ptr()});
+    run("kol_moe_union_gate_up", 256, inter / 32, top * M, {plan.ptr(), ex.ptr(), up.ptr(), uh.ptr()});
+    l0::Mem contrib(ctx, l0::MemKind::Device, M * top * H * sizeof(float));
+    run("kol_moe_union_down", 64, H / 64, top * M, {plan.ptr(), uh.ptr(), down.ptr(), contrib.ptr()});
+    list.copy(rs.ptr(), residual.data(), rs.size());
+    run("kol_moe_union_finish", 128, H / 128, 1, {er.ptr(), contrib.ptr(), hh.ptr(), et.ptr(), raw.ptr(), rs.ptr(), tap_dev.ptr()});
+
+    std::vector<uint16_t> union_h(expert_h.size());
+    list.copy(expert_h.data(), eh.ptr(), eh.size());
+    list.copy(union_h.data(), uh.ptr(), uh.size());
+    CHECK(expert_h == union_h);
+    std::vector<float> expected(residual.size()), union_y(residual.size());
+    list.copy(expected.data(), y.ptr(), y.size());
+    list.copy(union_y.data(), raw.ptr(), raw.size());
+    for (size_t i = 0; i < expected.size(); ++i) CHECK_EQ(bits(expected[i]), bits(union_y[i]));
+    list.copy(union_y.data(), rs.ptr(), rs.size());
+    list.copy(output_taps.data(), tap_dev.ptr(), tap_dev.size());
+    for (uint32_t r = 0; r < M; ++r)
+      for (uint32_t i = 0; i < H; ++i) {
+        const size_t at = r * H + i;
+        const float conv = inkling2_ref::convolve(expected, expert_history, H, r, i, expert_taps);
+        CHECK_EQ(bits(conv + residual[at]), bits(union_y[at]));
+        CHECK_EQ(output_taps[r * 4 * H + i], common::f32_to_bf16(union_y[at]));
+      }
+  }
+
+  std::puts("Inkling GPU depth mix, controller blend, short convolution, KV, relative attention and routing match host bits. Expert unions match per-row bits.");
+}

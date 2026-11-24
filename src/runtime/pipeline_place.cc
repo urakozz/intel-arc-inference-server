@@ -136,7 +136,8 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
                          full.desc,
                          nullptr,
                          {},
-                         {}};
+                         {},
+                         nullptr};
   // Layers [split, layers) and the top-level linears (lm_head): moved, then freed on
   // device 0 as each one goes, so device 0's peak is the whole model and no more.
   for (auto it = full.linears.begin(); it != full.linears.end();) {

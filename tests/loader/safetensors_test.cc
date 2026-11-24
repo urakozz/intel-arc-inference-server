@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -70,6 +71,29 @@ int main() {
   bool threw = false;
   try { loader::SafetensorsSet bad(snap); } catch (const std::runtime_error& e) {
     threw = std::string(e.what()).find("ghost") != std::string::npos;
+  }
+  CHECK(threw);
+
+  // `skip`: a file holding only skipped tensors is never opened (here it does not exist); a skipped tensor in a file
+  // that is read stays in.
+  std::ofstream(dir + "/model.safetensors.index.json")
+      << R"({"weight_map":{"t0":"a.safetensors","dup":"a.safetensors","s0":"gone.safetensors","s1":"gone.safetensors"}})";
+  {
+    // std::function spelled out: a capture-free lambda also converts to the single_file_ok bool
+    const std::function<bool(const std::string&)> skip = [](const std::string& n) { return n[0] == 's' || n == "dup"; };
+    loader::SafetensorsSet slim(snap, skip);
+    CHECK_EQ(slim.tensors().size(), size_t(2));
+    CHECK_EQ(slim.data(slim.tensors().at("t0"))[0], uint8_t(1));
+    CHECK_EQ(slim.data(slim.tensors().at("dup"))[0], uint8_t(0xAA));
+  }
+  // A missing file with any tensor that is not skipped is still an error naming it.
+  threw = false;
+  try {
+    const std::function<bool(const std::string&)> skip_s0 = [](const std::string& n) { return n == "s0"; };
+    loader::SafetensorsSet bad(snap, skip_s0);
+  }
+  catch (const std::runtime_error& e) {
+    threw = std::string(e.what()).find("gone.safetensors") != std::string::npos;
   }
   CHECK(threw);
 

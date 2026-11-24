@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(kd::int4_slices(K, N), S);
     const auto* t = kernels::small_m_tuning(K, N, S, 1);
     CHECK(t && kernels::gemm_sm_out_s(*t) == S);
-    CHECK_EQ(kernels::gemm_sm_built_m(*t), std::vector<unsigned>{8});
+    CHECK((kernels::gemm_sm_built_m(*t) == std::vector<unsigned>{8, 32}));   // plan 40a Task 4: the batched pass's 32
     CHECK_EQ(kd::linear_variant(2u, 8, K, N), kernels::gemm_sm_variant(8, *t));
   }
   for (bool v2 : {true, false})

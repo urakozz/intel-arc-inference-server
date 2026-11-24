@@ -42,7 +42,7 @@
 #   G0's checks on both cards; the reused baseline and the one-card G0 stages take part of that off - not yet
 #   measured); the full run on demand, hours.
 # Run control:
-#   --baseline REF   G0's reference build (default c03661e5: main on 2026-11-18, the four test fixes merged;
+#   --baseline REF   G0's reference build (default origin/main, the last pushed main; was c03661e5 = main on 2026-11-18;
 #                    `--baseline main` when validating a branch before merging)
 #                    A complete build of the baseline, with its recorded gate outputs, is kept in
 #                    ~/b70-inference-server-g0-<sha> and reused while the commit, build settings, compiler, ocloc
@@ -128,7 +128,8 @@ while [ $# -gt 0 ]; do
 done
 DEVICE="${DEVICE:-0}"
 export DEVICE
-BASELINE_REF="${BASELINE_REF:-c03661e5}"
+# Default baseline: the last pushed main (origin/main), so G0 compares against the newest published state.
+BASELINE_REF="${BASELINE_REF:-origin/main}"
 [ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
 [ "$NIGHTLY" = 0 ] || [ "$QUICK" = 0 ] || die "--nightly is a full run: drop --quick"
 [ "$MERGE" = 0 ] || [ "$QUICK" = 0 ] || die "--merge-check and --quick are two tiers: pick one"
@@ -238,7 +239,9 @@ mkdir -p "$(dirname "$OUT")"
 q() { printf '%q' "$1"; }
 remote_env() {
   local s
-  s="B70_GIT_SHA=$(q "$SHA") BV_BASE_SHA=$BASE_SHA BV_BASE_REF=$(q "$BASELINE_REF")"
+  local ksrc=0
+  git diff --quiet "$BASE_SHA" "$SHA" -- src/kernels cmake || ksrc=1
+  s="B70_GIT_SHA=$(q "$SHA") BV_BASE_SHA=$BASE_SHA BV_BASE_REF=$(q "$BASELINE_REF") G0_KERNEL_SOURCES_CHANGED=$ksrc"
   s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_NO_REUSE=$NO_REUSE BV_QUICK=$QUICK BV_MERGE=$MERGE BV_REDO=$(q "$REDO_IDS")"
   local v
   for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_ORNITH SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \

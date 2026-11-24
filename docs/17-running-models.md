@@ -75,10 +75,10 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 | recipe | context | speed |
 |---|---:|---|
-| default, bf16 KV cache | 171,008 | 138 / 57 / 100 t/s, prefill 1,788 t/s |
+| default, bf16 KV cache (sized for 4096-row prompt chunks, the faster prompt pass) | 146,944 | 138 / 57 / 100 t/s, prefill 1,908 t/s at 3,931 tokens, MTP on |
 | full context: int8 KV cache | 262,144 | not measured |
-| faster prefill (opt-in): int8 prompt pass (brings the int8 cache) | 262,144 | prefill 2,800 t/s at 3,931 tokens (bf16 1,906), MTP on |
-| four requests at once: `--max-num-seqs 4` | one pool of 135,168 (bf16 cache) or 239,616 (int8 cache) shared by the four; any one may use all of it | 74 / 111 / 134 t/s total at 1 / 2 / 4 requests (int8 cache) |
+| faster prefill (opt-in): int8 prompt pass (brings the int8 cache) | 262,144 | prefill 2,800 t/s at 3,931 tokens (bf16 1,908), MTP on |
+| four requests at once: `--max-num-seqs 4` | one pool of 118,784 (bf16 cache) or about 219k (int8 cache, derived) shared by the four; any one may use all of it | 74 / 111 / 134 t/s total at 1 / 2 / 4 requests (int8 cache) |
 
 ```sh
 ./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last                                 # default
@@ -99,8 +99,8 @@ It turns `--kv-cache int8` on; an explicit `--kv-cache bf16` beside it is refuse
 | recipe | mode | context | speed |
 |---|---|---:|---|
 | one session, fastest (the default) | `tp`: every layer split over both cards; needs peer access | 262,144 (bf16 cache) | 123 / 74 / 115 t/s; prefill 2,931 t/s, 3,217 with `--prefill-backend l0-int8` (measured with the earlier MLP-only int8 pass; today's form - every linear, the int8 context and int8 scores - is not timed on two cards yet) |
-| two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 171,008 (bf16) or 262,144 (int8) each | 164 / 108 / 144 t/s total |
-| most requests at once: `--max-num-seqs 8` | `replica`, 4 requests per card | a pool per card: 135,168 (bf16) or 239,616 (int8) shared by its four | 342 / 300 / 233 t/s total at 8 requests, 282 / 189 / 206 at 4 |
+| two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 146,944 (bf16) or 262,144 (int8) each | 164 / 108 / 144 t/s total |
+| most requests at once: `--max-num-seqs 8` | `replica`, 4 requests per card | a pool per card: 118,784 (bf16) or about 219k (int8, derived) shared by its four | 342 / 300 / 233 t/s total at 8 requests, 282 / 189 / 206 at 4 |
 
 ```sh
 ./build/src/cli/b70-serve $Q --prefix-split-last                                    # one session, tp
@@ -122,8 +122,8 @@ How several requests share a card with `--max-num-seqs N`:
   copying them; a request that writes into such a page gets its own copy first.
 - On two cards each card has its own pool, card 0 taking the odd request. A request goes to the card holding its
   conversation, else to the card with the most free pages.
-- Beside the DFlash drafter (`--spec dflash`) the slots stay fixed: slot 0 gets the largest context that fits beside
-  N - 1 slots of 32,768 positions.
+- Beside the DFlash drafter (`--spec dflash`) the requests share the pool the same way; every request has its own
+  drafter session of a fixed size, whatever its length.
 - An explicit `--max-len` that does not fit is refused at startup, with the numbers.
 - `tp` serves one request at a time.
 
@@ -173,7 +173,7 @@ D=urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound
 ./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last --spec dflash --draft-model $D
 # one card with the int8 KV cache
 ./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --draft-model $D
-# one card, up to four requests at once (int8 KV cache: 135,168 + 3 x 32,768 positions)
+# one card, up to four requests at once, sharing the card's KV cache
 ./build/src/cli/b70-serve $Q --parallel 1 --max-num-seqs 4 --kv-cache int8 --spec dflash --draft-model $D
 # two cards, two sessions: a drafter on each card
 ./build/src/cli/b70-serve $Q --max-num-seqs 2 --spec dflash --draft-model $D
@@ -208,7 +208,7 @@ Several requests on a card (`--max-num-seqs`, up to 4 per card):
   two requests, 1 each for four.
 - Against `--spec mtp` in the same mode (one card, int8 KV cache) it is 1.15x with one request, 1.12x with two and
   0.97x with four.
-- Slot 0 gets 135,168 positions beside three of 32,768; the drafter takes the difference.
+- The requests share the card's KV cache pages as without the drafter: any one may grow to the whole pool.
 - Refused, by name: `--spec dflash-lookup` and `--draft-vocab` with several requests on a card, more than four
   requests per card, and every model other than Qwen3.8.
 
@@ -325,7 +325,7 @@ A passing box test shows a configuration runs and is correct; it is not a speed 
 | `--kv-cache int8` | yes | not built | refused | refused |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default; use it); `l0-int8` opt-in and slower | `l0` only | `l0` only |
 | KV cache per position (bf16) | 64 KiB | 20 KiB | 20 KiB (+ 335.5 MB of sliding-window rings) | 24.21 KiB (12 QSA layers: K + V 2 KiB + 18 B of indexer keys each) |
-| `--max-len auto`, one card, int8 head | 171,008 with MTP (the default); about 201k with `--spec off` | 262,144, with or without MTP (27.3 GB planned of 32.5, bf16 KV) | 262,144 on two cards (split at layer 25) | not served whole on one card; see below |
+| `--max-len auto`, one card, int8 head | 146,944 with MTP (the default; the context is sized for 4096-row prompt chunks); about 190k with `--spec off` (derived) | 262,144, with or without MTP (27.3 GB planned of 32.5, bf16 KV) | 262,144 on two cards (split at layer 25) | not served whole on one card; see below |
 | with `--kv-cache int8` | 262,144, with or without MTP | - | - | - |
 
 ## Ornith 1.5 35B-A3B
@@ -430,16 +430,25 @@ Qwen's `Qwen3.8-Flash-Next` (`model_type qwen4_exp`) is a large MoE model:
 - 4-stream hyper-connections in place of a single residual stream;
 - a per-layer n-gram embedding (PLE) whose 51.8 GB int8 table lives in host memory and is read by the card directly.
 
-Two checkpoints load. Our own g64 export (`tools/quantize/quantize_qwen4exp.sh`, not published) is the one served
-whole. Intel's interim `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (int4 g128 experts, bf16 dense layers) loads
+Two checkpoints load. Our own g64 export (`tools/quantize/quantize_qwen4exp.sh`) is the one served whole. The engine
+reads its n-gram table from `ple-int8/` only, so the download can leave out 96 GB of the bf16 table (files 4-23, kept in
+the repo for other engines), about 133 GB in all:
+
+```sh
+hf download urakozz/Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ \
+  --exclude "model-0000[4-9]-*" --exclude "model-0001?-*" --exclude "model-0002[0-3]-*"
+```
+
+Intel's interim `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` (int4 g128 experts, bf16 dense layers) loads
 through the exact g64 expansion ([13-loader.md](13-loader.md)) and runs truncated (`--layers N`).
 
 ### Preparing a snapshot
 
 Two files have to sit beside the weights before the engine will load Flash-Next.
 
-1. The PLE table, converted to int8 once. That writes about 51.8 GB next to the snapshot, so check free disk space
-   first. The engine looks for `<snapshot>-ple-int8/` and, if it is missing, refuses with this command:
+1. The PLE table in int8. Our model repo ships it as `ple-int8/` inside the snapshot. For another export, convert it
+   once (about 51.8 GB next to the snapshot, so check free disk space first). The engine looks for
+   `<snapshot>/ple-int8/`, then `<snapshot>-ple-int8/`, and if both are missing refuses with this command:
 
    ```sh
    python3 tools/quantize/qwen4exp/ple_int8.py <snapshot> <snapshot>-ple-int8/
@@ -469,11 +478,11 @@ Our export, two cards, at about 1-4k context:
 
 | | `pp` | `tp` |
 |---|---:|---:|
-| prefill, 32k-token prompt | 3,103 t/s | 2,128 t/s |
-| prefill, 128k-token prompt | 2,458 t/s | 1,988 t/s |
-| first token, 43-token prompt | 0.38 s | 0.50 s |
-| decode, MTP off (code / prose / tool calls) | 58 / 49 / 49-60 t/s | 63 / 51 / 55-62 t/s |
-| decode, MTP (code / prose / tool calls) | 81 / 56 / 80-105 t/s | 82-92 / 60-65 / 89-99 t/s |
+| prefill, 32k-token prompt | 3,415 t/s | 2,234 t/s |
+| prefill, 128k-token prompt | 2,918 t/s | 1,980 t/s |
+| first token, 43-token prompt | 0.30 s | 0.30 s |
+| decode, MTP off (code / prose / tool calls) | 54-59 / 48-49 / 52-63 t/s | 59-66 / 49-55 / 54-70 t/s |
+| decode, MTP (code / prose / tool calls) | 72-89 / 45-59 / 78-105 t/s | 84-92 / 49-70 / 74-114 t/s |
 
 `--max-len auto` gives 65,536. Passkey retrieval is 3 of 3 at 61,955 ids, and a prefix cache hit's output is identical
 to the cold run.
@@ -487,8 +496,10 @@ whole (no `--layers`):
   layer.
 - The kernels read the rest in place from pinned host memory: one range per layer, about 12.4 GB beside the 51.8 GB
   PLE table. A miss costs its bytes at about 11.2 GB/s on top of the VRAM time.
-- Which experts are most routed comes from a routing profile, `<snapshot>-expert-profile.safetensors`, made by
-  `tools/oracle/offload_curve.py profile`. Without one, experts are kept by id. Our profile counts 42 routing traces:
+- Which experts are most routed comes from a routing profile made by `tools/oracle/offload_curve.py profile`. Our model
+  repo ships it as `expert-profile.safetensors` inside the snapshot; for another export, put it beside the snapshot as
+  `<snapshot>-expert-profile.safetensors`. The engine looks inside first, and the startup line names the file it
+  read. Without one, experts are kept by id. Ours counts 42 routing traces of the export itself:
   the 36 tool-call conversations, an agentic transcript and 7.5 % prose (repository docs, a novel, the golden prose
   prompts). It gives a derived 81 % of expert reads served from VRAM on two cards at 32,768.
 - `--max-len auto` takes the longest of 32,768, 65,536, 131,072 and 262,144 whose projected decode speed stays within

@@ -31,13 +31,14 @@ struct DFlashSession {
 struct DFlashBuffers {
   // head_rows: the target's lm_head rows, or a draft vocabulary's |V'| (the head GEMV's N).
   // `host_candidates` (spec 19 v3c, a TP card's half): cand and unary in shared memory - the host merges the two
-  // cards' top-16 lists between the draft list and the tail.
+  // cards' top-16 lists between the draft list and the tail. `draft_rows` (plan 40a Task 4): the scratch's rows -
+  // the block's kM, or the batched pass's seqs_rows() beside several sequences.
   DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows,
                 uint32_t max_len, loader::DraftFormat format = loader::DraftFormat::Int8, bool candidate_head = false,
-                bool host_candidates = false);
+                bool host_candidates = false, uint32_t draft_rows = kernels::dflash::kM);
 
   model::DFlashDesc desc;
-  uint32_t target_hidden, head_rows, max_len;
+  uint32_t target_hidden, head_rows, max_len, draft_rows;
   DFlashSizes sz;
   l0::Mem dctl, out;   // shared
   l0::Mem rope, ring_k, ring_v, taps, resid, h, x, xa, gout, q, kb, vb, part, kv, logits, tpart, cand, unary;
@@ -54,8 +55,9 @@ struct DFlashBuffers {
   };
   Session session(uint32_t s);
   void zero_session(l0::CmdList& imm, uint32_t s);
-  // Plan 19v3b: the batched draft's row table (shared, uint [kM + 8 kSeqs]: per row its slot or 0xFFFFFFFF, then per
-  // slot row0, rows, pos, K, anchor, temperature bits, seed lo, seed hi - df_prep.cl's SEQS) - with sessions only.
+  // Plan 19v3b: the batched draft's row table (shared, uint [M + 8 kSeqs] for the list's M rows, room for kSeqsRows:
+  // per row its slot or 0xFFFFFFFF, then per slot row0, rows, pos, K, anchor, temperature bits, seed lo, seed hi -
+  // df_prep.cl's SEQS) - with sessions only.
   std::unique_ptr<l0::Mem> seqs;
   // Plan 19v3b: the row lists' taps (every row's, [kM][taps][hidden] bf16 as `taps`) and the rows projection's table
   // (`seqs`' layout: per slot row0, its committed rows, its first position) - with sessions only.

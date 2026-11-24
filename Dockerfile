@@ -4,11 +4,11 @@
 # toolchain, CMake and Rust, and a slim runtime with the Level Zero runtime libraries, GCC 16.2's libstdc++, the
 # binaries and the compiled device kernels.
 #
-#   docker build -t b70-serve .
+#   docker build -t urakozz/intel-arc-inference-server .
 #
 #   docker run --rm --device /dev/dri --group-add "$(getent group render | cut -d: -f3)" \
 #       -v ~/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 \
-#       b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --prefix-split-last --kv-cache int8
+#       urakozz/intel-arc-inference-server urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --prefix-split-last --kv-cache int8
 #
 # - The host needs the `xe` kernel driver; the image brings the user-space runtime, not the driver.
 # - `--device /dev/dri` hands over every card. `--group-add` with the host's render group id lets the server open the
@@ -45,7 +45,7 @@ ARG RUST_VERSION
 # Intel's compute stack from the graphics PPA, pinned to what the development box runs: compute runtime
 # 26.40.40196.15 (ocloc and the Level Zero driver, which pull in the matching IGC) and Level Zero loader 1.34.0.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        software-properties-common ca-certificates curl git cmake ninja-build pkg-config python3 build-essential \
+        software-properties-common ca-certificates curl git cmake ninja-build pkg-config python3 build-essential ccache \
     && add-apt-repository -y ppa:kobuk-team/intel-graphics \
     && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         intel-ocloc=26.40.40196.15-1~26.04~ppa1 \
@@ -59,9 +59,12 @@ ENV PATH=/root/.cargo/bin:${PATH}
 WORKDIR /opt/b70
 COPY . .
 # The kernel directory's path is compiled into the binaries, so the runtime stage keeps /opt/b70/build/kernels.
-# The kernel cache is the development box's shared one: a container build compiles every kernel.
-ENV B70_OCLOC_CACHE=0
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j"$(nproc)"
+# Every kernel is compiled fresh; ccache lives in a BuildKit cache mount, so a rebuild recompiles only changed C++.
+ENV B70_OCLOC_CACHE=0 CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,id=b70-ccache,target=/root/.cache/ccache \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    && cmake --build build -j"$(nproc)"
 
 # ---- Runtime -------------------------------------------------------------------------------------------------------
 FROM ${UBUNTU} AS runtime

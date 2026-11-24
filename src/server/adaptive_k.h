@@ -3,6 +3,7 @@
 // from the request's own acceptance so far. Pure host code, unit-tested by
 // tests/server/adaptive_k_test.cc; the server keeps one AdaptiveK per request.
 #include <cstdint>
+#include <functional>
 #include <inplace_vector>
 #include <string>
 #include <vector>
@@ -85,6 +86,33 @@ struct MtpCost {
   uint32_t max_k() const;              // the deepest K both lists cover
   double cost(uint32_t k) const;       // K = 0: 1 (a plain step)
 };
+
+// Plan 40a Task 5: one step of several sequences' rows (runtime::Engine::verify_rows and its drafts) in plain steps,
+// for the scheduler's deal (BatchEngineIface::row_cost). The verify by its rows: the 2..8-row lists, the 16- and 32-row
+// ones (padded) - measured 2026-11-22 at depth 4096, four sequences, int8 KV and head (probe_slots_speed --wide, A B A B:
+// 1.44 / 1.74 / 2.13 at 8 / 16 / 32 rows; at 2..7 rows the line to the plain step's 1.00). The drafts: the MTP head one
+// step a draft index over the rows drafting that far (`mtp_draft`, the int8 head's draft[0]); the DFlash drafter one
+// batched pass of its 8 rows or its four blocks (`dflash8`, `dflash32`: the packed int4 drafter, 4.55 / 7.20 ms against
+// the lone K 7 draft's 4.49 ms = 0.217 plain - dflash_slots_test T, card 0, the other card busy, 2026-11-22).
+// PERF-120: `v8` / `v16` / `v32` the verify at 8 / 16 / 32 rows (Qwen3.8's above); ornith() Ornith's table.
+struct RowCost {
+  bool dflash = false;
+  double mtp_draft = 0.13, dflash8 = 0.22, dflash32 = 0.35;
+  double v8 = 1.44, v16 = 1.74, v32 = 2.13;
+  double verify(uint32_t rows) const;
+  double step(const std::vector<uint32_t>& ks) const;   // one entry a row: its drafts
+  // Ornith (MTP, its MoE head): measured 2026-11-23 at depth 4096, four sequences, int8 KV and head, card 0 beside the
+  // other card's quantisation (probe_slots_speed --wide, the union-read MoE): 2.28 / 3.03 / 4.49 plain steps at 8 / 16
+  // / 32 rows; the head's draft over four rows 1.81 ms against the 7.85 ms plain step.
+  static RowCost ornith() { return {.mtp_draft = 0.23, .v8 = 2.28, .v16 = 3.03, .v32 = 4.49}; }
+};
+
+// Plan 40a Task 5, the scheduler's deal over a cost table: the drafts go one at a time to the row whose next draft is
+// likeliest kept (alpha^(k+1) - its request's acceptance; the earlier row on a tie), each up to its `want`, so every
+// count of drafts has its most expected ids; the deal keeps the count with the most expected ids per `cost` of the
+// step, its rows (each draft one, each row's pending id one) within `budget`. Rows in age order; returns their drafts.
+std::vector<uint32_t> deal_by_cost(const std::vector<double>& alpha, const std::vector<uint32_t>& want, uint32_t budget,
+                                   const std::function<double(const std::vector<uint32_t>&)>& cost);
 
 struct AdaptiveKOptions {
   uint32_t max_k = 3;

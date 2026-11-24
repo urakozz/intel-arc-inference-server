@@ -60,6 +60,8 @@ void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, ui
   }
   if (nh != 0) {
     // One pinned range a layer, at most experts x 2.6 MB (1.34 GB): under the 4 GiB a range both cards may map.
+    // Plain Host, not HostLocked: a locked mirror failed tp's startup copies (OUT_OF_DEVICE_MEMORY); it waits for the
+    // two-card startup fix (PERF-70).
     L.mirror = std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, size_t(nh) * (gu + dn), size_t(2) << 20);
     uint8_t* m = L.mirror->as<uint8_t>();
     for (uint32_t e = 0, s = 0; e < experts; ++e)
@@ -148,6 +150,12 @@ Opened open(const std::string& snapshot_or_repo) {
   if (!model::is_qwen4exp_model_type(mt))
     throw std::runtime_error("load_qwen4exp: " + o.snap + " is model_type '" + mt + "', not qwen4_exp");
   return o;
+}
+
+// The checkpoint's tensors, without opening the files that hold only the PLE table's bf16 shards (~96 GB): the engine
+// reads the int8 table (q4_ple_dir), so a download may leave them out.
+SafetensorsSet q4_set(const std::string& snap, const model::Qwen4ExpDesc& pre) {
+  return SafetensorsSet(snap, [&](const std::string& name) { return q4_ple_shard(pre, name); });
 }
 
 model::Qwen4ExpDesc limited(const model::Qwen4ExpDesc& full, uint32_t layers_limit) {
@@ -365,8 +373,9 @@ std::vector<uint32_t> load_q4_profile(const std::string& snapshot_or_repo, const
                                       std::string* path_out) {
   std::string s = resolve_snapshot(snapshot_or_repo);
   while (!s.empty() && s.back() == '/') s.pop_back();
-  const std::string path = s + "-expert-profile.safetensors";
   struct stat st {};
+  std::string path = s + "/expert-profile.safetensors";   // shipped in the model repo
+  if (::stat(path.c_str(), &st) != 0) path = s + "-expert-profile.safetensors";
   if (::stat(path.c_str(), &st) != 0) return {};
   if (path_out) *path_out = path;
   const MappedFile f(path);
@@ -393,8 +402,8 @@ std::vector<uint32_t> load_q4_profile(const std::string& snapshot_or_repo, const
 
 model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit) {
   const Opened o = open(snapshot_or_repo);
-  const SafetensorsSet set(o.snap);   // the headers only: the forms are read from the names
   const model::Qwen4ExpDesc pre = model::qwen4exp_desc(o.cfg, model::Q4Forms{});
+  const SafetensorsSet set = q4_set(o.snap, pre);   // the headers only: the forms are read from the names
   model::Qwen4ExpDesc d = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
   d.hc_int8 = q4_hc_int8();
   return limited(d, layers_limit);
@@ -407,9 +416,9 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   const auto t0 = std::chrono::steady_clock::now();
   const Opened o = open(snapshot_or_repo);
   const QuantConfig qc = check_qwen4exp_checkpoint_config(o.cfg);
-  SafetensorsSet set(o.snap);
   // The checkpoint's own descriptor (every layer), then its forms from the names.
   const model::Qwen4ExpDesc pre = model::qwen4exp_desc(o.cfg, model::Q4Forms{});
+  SafetensorsSet set = q4_set(o.snap, pre);
   model::Qwen4ExpDesc full = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
   full.hc_int8 = q4_hc_int8();
   if (max_len == 0) throw std::runtime_error(full.name + ": max_len 0 is not a model length");

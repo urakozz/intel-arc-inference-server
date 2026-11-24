@@ -1,7 +1,9 @@
 // TP int8 prefill: golden prompts and every committed tool-call prompt against one card's
 // bf16 prompt pass. After a difference, teacher-force the reference ids so every compared
 // row has the same context. Each differing id must pass the f32 judge or its
-// documented near-miss bar (docs/14-golden-gate.md, spec_judge.h).
+// documented near-miss bar (docs/14-golden-gate.md, spec_judge.h). B70_KV_CACHE=int8 (tp_prefill_int8_kv8_test, the
+// form l0-int8 runs in): a prompt's last kTail ids go as a second prefill, a follow-up turn's tail - two short chunks
+// deep in the cache (128 + 32 rows: the widened and the in-place split reads, PERF-107's own rows).
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -19,7 +21,7 @@
 #include "runtime/tp_engine.h"
 
 namespace {
-constexpr uint32_t kMaxLen = 16384, kGen = 64;
+constexpr uint32_t kMaxLen = 16384, kGen = 64, kTail = 160;
 constexpr loader::LmHeadForm kHead = loader::LmHeadForm::Int8;
 struct Case {
   std::string name;
@@ -27,14 +29,19 @@ struct Case {
 };
 
 template <class E, class Pending>
-int gate(E& e, const std::vector<Case>& cases, const Pending& pending, const char* label) {
+int gate(E& e, const std::vector<Case>& cases, const Pending& pending, const char* label, bool tail) {
   const golden::ForcedJudge fj;
   bool ok = true;
   std::vector<std::string> awaiting;
   std::vector<uint32_t> first;
   for (const Case& c : cases) {
     e.reset();
-    e.prefill(c.prompt);
+    if (tail && c.prompt.size() > kTail) {
+      e.prefill(std::vector<uint32_t>(c.prompt.begin(), c.prompt.end() - kTail));
+      e.prefill(std::vector<uint32_t>(c.prompt.end() - kTail, c.prompt.end()));
+    } else {
+      e.prefill(c.prompt);
+    }
     CHECK_EQ(e.pos(), uint32_t(c.prompt.size()));
     std::vector<uint32_t> got;
     for (uint32_t i = 0; i < kGen; ++i) {
@@ -118,6 +125,8 @@ int main(int argc, char** argv) {
   std::sort(tools.begin(), tools.end());
   CHECK(!tools.empty());
   for (const auto& p : tools) cases.push_back({p.stem().string(), golden::read_ids(p.string()), {}});
+  const runtime::KvCache kv = runtime::default_kv_cache();
+  const bool tail = kv == runtime::KvCache::Int8;
   {
     runtime::Engine one(d0, loader::load(d0, ckpt, kMaxLen, false, kHead), kMaxLen, false, runtime::KvCache::Bf16);
     one.set_prefill_backend(runtime::PrefillBackend::L0);
@@ -130,19 +139,19 @@ int main(int argc, char** argv) {
   }
   if (argc > 2 && std::string(argv[2]) == "--one-card") {
     // Diagnose whether a rejected TP id also occurs with the existing one-card int8 pass.
-    runtime::Engine e(d0, loader::load(d0, ckpt, kMaxLen, false, kHead), kMaxLen, false, runtime::KvCache::Bf16);
+    runtime::Engine e(d0, loader::load(d0, ckpt, kMaxLen, false, kHead), kMaxLen, false, kv);
     e.set_prefill_backend(runtime::PrefillBackend::L0Int8);
     e.prepare_prefill();
-    return gate(e, cases, [&] { return e.control()->cur_token[0]; }, "one_card_int8_diagnostic");
+    return gate(e, cases, [&] { return e.control()->cur_token[0]; }, "one_card_int8_diagnostic", tail);
   }
   runtime::TpEngine e(d0, d1,
       {loader::load_tp(d0, ckpt, {0, runtime::kTpDefaultCrossing}, kMaxLen, kHead),
-       loader::load_tp(d1, ckpt, {1, runtime::kTpDefaultCrossing}, kMaxLen, kHead)}, kMaxLen, {}, runtime::KvCache::Bf16);
+       loader::load_tp(d1, ckpt, {1, runtime::kTpDefaultCrossing}, kMaxLen, kHead)}, kMaxLen, {}, kv);
   e.set_prefill_backend(runtime::PrefillBackend::L0Int8);
   e.prepare_prefill();
   return gate(e, cases, [&] {
     CHECK_EQ(e.control(0).cur_token[0], e.control(1).cur_token[0]);
     CHECK_EQ(e.control(0).pos, e.control(1).pos);
     return e.pending();
-  }, "tp_prefill_int8_test");
+  }, kv == runtime::KvCache::Int8 ? "tp_prefill_int8_kv8_test" : "tp_prefill_int8_test", tail);
 }

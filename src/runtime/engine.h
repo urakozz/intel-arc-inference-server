@@ -71,13 +71,11 @@ class Engine {
   // lists at M = 1 .. drafter->max_k() + 1 with the taps (build_verify_taps); ingest(), generate() and commit() keep
   // the drafter's ring filled (see "spec 19c" below). Not with the MTP head (one proposer per engine): throws.
   //
-  // `slots` (spec 13c): the lengths of the engine's sequence slots, max_len their slots_kv_len (runtime/buffer_sizes.h:
-  // each slot whole KV pages) - see "spec 13c" below. Empty (the default) is one slot of max_len: today's engine,
-  // allocation for allocation and list for list.
-  //
-  // `pool_pages` (spec 31, the KV page pool): > 0 makes the KV `pool_pages` pages of kKvPage positions (max_len =
-  // pool_pages x kKvPage) that the sequences take as they grow - see "spec 31" below. `slot_lens` then names every
-  // sequence's cap, all equal (2..SlotDims::kMaxSeqs of them). 0 (the default): fixed slots as above.
+  // `slot_lens` (spec 13c) and `pool_pages` (spec 31, the KV page pool): empty and 0 (the default) - or one length,
+  // max_len - is one sequence of max_len: today's engine, allocation for allocation and list for list. Several
+  // sequences share a KV page pool: `pool_pages` pages of kKvPage positions (max_len = pool_pages x kKvPage) that they
+  // take as they grow, and `slot_lens` names every sequence's cap, all equal (2..SlotDims::kMaxSeqs of them) - see
+  // "spec 13c" and "spec 31" below. Several sequences without a pool throw.
   Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len,
          bool debug_resid = false, KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr,
          std::vector<uint32_t> slot_lens = {}, uint32_t pool_pages = 0);
@@ -298,6 +296,10 @@ class Engine {
   uint32_t draft_vocab() const { return model_.draft_vocab ? model_.draft_vocab->size() : 0; }
   // A tap drafter may supply its list: pending projection, draft and verify run in one submit.
   void verify(uint32_t k, l0::CmdList* draft = nullptr);
+  // PERF-123: on, the next verifies at 2..8 rows take the main head as the 2-bit candidate pass + the exact rescore
+  // where the lists carry it (Qwen3.8's int8 head with loader::LoadedModel::cand_head): verify_ids() is the same argmax,
+  // but verify_logits_device() then holds the 2-bit scores - a request that reads the logits (sampled) keeps it off.
+  void greedy_head(bool on) { greedy_head_ = on; }
   const uint32_t* verify_ids() const {
     const uint32_t k = seq().verify_k;
     return k == kWideK ? control_->wide_out : k == kDeepK32 || k == kDeepK64 ? control_->deep_out : control_->out_token;
@@ -379,14 +381,13 @@ class Engine {
   bool has_drafter() const { return drafter_ != nullptr; }
   TapDrafter* tap_drafter() const { return drafter_; }
   // The deepest k verify() takes: kMaxDraft with the MTP head, drafter->max_k() with a drafter, 0 otherwise.
-  // Plan 19v3b: the selected slot's - a further slot beside a drafter holds 4 GDN states, so K <= 3 there.
+  // The selected slot's (plan 40a Task 2: every slot of several keeps its rows pending, so the drafter's whole block).
   uint32_t max_draft() const;
   // The GDN slot count of the verify lists: MtpBuffers::kSlots (MTP) or TapVerifyDims::kSlots (drafter) - the
-  // selected slot's (plan 19v3b: a further slot beside a drafter, SlotDims::kDrafterStates).
+  // selected slot's (plan 40a Task 2: 1 for a slot of several beside a drafter - its rows pending).
   uint32_t gdn_slots() const { return seq().states; }
-  // Spec 19c: the drafter's GDN state slots 1..7 (slot-major, one gdn_state each); null without a drafter. Plan
-  // 19v3b: with several slots, every further slot's 4 states follow (slot q's state 0 at 7 + 4 (q - 1)) - the row
-  // lists' state pool.
+  // Spec 19c: the drafter's GDN state slots 1..7 (slot-major, one gdn_state each) of a one-slot engine; null without a
+  // drafter or with several slots (plan 40a Task 2: their rows pending, each slot one state in SlotBuffers).
   const l0::Mem* drafter_slots() const { return own_.df_slots.get(); }
   // Replays a list that is not the Engine's own (the drafter's draft and projection lists) on this engine's queue
   // and waits for it: nothing of the Engine's is in flight before or after. The list must only read Control and
@@ -395,19 +396,16 @@ class Engine {
 
   // --- spec 13c: sequence slots - several requests on one card ------------------------------------------------
   //
-  // `slots` (the constructor's): the engine's sequence slots, max_len their slots_kv_len (empty: one slot of max_len -
-  // today's engine). Slot q is the positions [slot_base(q), + slot_len(q)) of the KV caches (the main one and the MTP
-  // head's), with its own GDN states (gdn_slots() of them: the live one and, with MTP, three speculative), conv ring,
-  // Control, head Control and hh rows, and its own copy of every captured list (plain, verify and draft) bound to them
-  // - so a slot alone runs exactly today's arithmetic over its own state: bitwise what a one-slot engine computes for
-  // that session.
+  // `slot_lens` (the constructor's): the engine's sequence slots (one: today's engine). Slot q is up to slot_len(q)
+  // positions of the KV caches (the main one and the MTP head's), with its own GDN states (gdn_slots() of them: the
+  // live one and, with MTP, three speculative), conv ring, Control, head Control and hh rows, and its own copy of every
+  // captured list (plain, verify and draft) bound to them - so a slot alone runs exactly today's arithmetic over its
+  // own state: bitwise what a one-slot engine computes for that session.
   //
-  // Plan 19v3b Task 0: with several slots those positions are KV pages (runtime/buffer_sizes.h, kKvPage): slot q's
-  // page p is the cache's page kv_page_table()[slot_base(q) / kKvPage + p] of every FA layer, main and head, and every
-  // slot's lists - slot 0's too - and the row lists bind the paged binaries over that table (capture.h, SlotBind). The
-  // engine writes the table once, the identity (each slot's pages its own range), so the bytes lie where a contiguous
-  // slot's would. set_kv_page_table (tests and probes) maps them elsewhere; snapshots (save_kv / load_kv) keep their
-  // format whatever the table.
+  // Plan 19v3b Task 0: with several slots those positions are KV pages of the pool (runtime/buffer_sizes.h, kKvPage;
+  // "spec 31" below): slot q's page p is the cache's page kv_page_table()[slot_base(q) / kKvPage + p] of every FA
+  // layer, main and head, and every slot's lists - slot 0's too - and the row lists bind the paged binaries over that
+  // table (capture.h, SlotBind). Snapshots (save_kv / load_kv) keep their format whatever the table.
   //
   // Every single-sequence call above and below (reset, ingest, prefill, generate, draft, verify, commit,
   // max_verify_k, pos, max_len, the snapshots, control) acts on the SELECTED slot - select(q); 0 at construction.
@@ -422,39 +420,51 @@ class Engine {
   // (gdn_step's state indices, the KV bases), and a rejected row writes only its own slot's speculative state, ring
   // positions and KV rows past the commit, which nothing reads (spec 13 §9: B3).
   static constexpr uint32_t kMaxRows = DecodeScratchDims::kM;   // 8
+  // Plan 40a Task 3: with the MTP head beside several Qwen3.8 sequences (the deferred delta-net rows, the int8 head)
+  // the row lists also exist at 16 and 32 rows - a step of 9..16 or 17..32 rows runs the wider list, the rows past its
+  // n_active the table's padding. max_rows() is a step's ceiling: kMaxWideRows there, kMaxRows elsewhere; every run at
+  // most kMaxRows rows (a sequence with pending rows verifies up to kMaxRows - 1 drafts in a row step).
+  static constexpr uint32_t kMaxWideRows = DecodeScratchDims::kWideRowsM;   // 32
+  uint32_t max_rows() const { return rows_wide_[1] ? kMaxWideRows : kMaxRows; }
+  // PERF-120 (plan 40a Task 7): the 16- and 32-row lists' attention at 4 key blocks a run (BatchRowsBind::attn_blocks)
+  // - fewer, longer key walks: the 32-row step 67.9 / 74.4 / 86.4 ms at 32 blocks, 59.6 / 64.7 / 76.4 at 8, 55.8 /
+  // 60.8 / 72.4 at 4 (depth 4k / 12k / 30k, 4 sequences, int8 KV, interleaved; 64 and 128 blocks slower still).
+  static constexpr uint32_t kRowsAttnBlocks = 4;
+  // PERF-120: a step of 8 rows whose deepest row is at kRowsWideDepth or past it runs the 16-row list (its DPAS
+  // attention; rows 8.. padding) - 4 sequences x K 1, int8 KV: 43.9 -> 44.7 ms at 4k (kept on its own list), 52.2 ->
+  // 49.9 at 12k, 68.8 -> 61.4 at 30k; a 4-row step loses on the 16-row list at every depth (37.7 -> 43.3 at 4k, 46.3 ->
+  // 60.5 at 30k); 5..7 rows not measured (their own lists).
+  static constexpr uint32_t kRowsWideDepth = 8192;
+  // Tests and probes: every step of m..8 rows on the 16-row list (0: the rule above).
+  void probe_rows_wide_from(uint32_t m) { rows_wide_from_ = m; }
+  // PERF-120, tests and probes: the 16- and 32-row lists built again with the MoE union read or the per-row MoE block
+  // (BatchRowsBind::moe_union; the engine's own: union on a MoE model). Only where the wide lists exist.
+  void probe_rows_moe_union(bool on);
   uint32_t slots() const { return static_cast<uint32_t>(seqs_.size()); }
   void select(uint32_t slot)
     pre(slot < slots());
   uint32_t selected() const { return cur_; }
   uint32_t slot_len(uint32_t slot) const { return seqs_.at(slot).len; }
   uint32_t slot_base(uint32_t slot) const { return seqs_.at(slot).base; }
-  // Plan 19v3b Task 0 - the KV page table (empty with one slot) and, tests and probes, a new one: a permutation of the
-  // pages, written to the card and the host's copy. The KV moves no byte, so every slot is reset() after it (the
-  // caller's: a slot's session continues only across an identity rewrite). Several slots, no KV page pool (it writes
-  // the table) and a permutation of the pages.
+  // Plan 19v3b Task 0 - the KV page table's host copy (empty with one slot).
   const std::vector<uint32_t>& kv_page_table() const { return pages_; }
-  const void* kv_page_table_device() const { return slot_bufs_ ? slot_bufs_->pages.ptr() : nullptr; }
-  // Probes (probe_slots_speed --list-ab): what the row lists bind, to build them again contiguous and paged.
+  // Probes (probe_slots_speed --profile-rows): what the row lists bind, to build them again with events.
   const BatchRowsBind& rows_bind() const { return rows_bind_; }
-  void set_kv_page_table(const std::vector<uint32_t>& table)
-    pre(!pages_.empty())
-    pre(pool_ == nullptr)
-    pre(table.size() == pages_.size());
   // The cache row (every FA layer's, main and head) of slot q's position p: below the positions its pages hold with a
-  // KV page pool, its slot_len without one.
+  // KV page pool, max_len with one sequence.
   uint32_t kv_row(uint32_t slot, uint32_t p) const
     pre(slot < slots())
     pre(p < (pool_ ? pages_held(slot) * kKvPage : slot_len(slot)));
   // --- spec 31: the KV page pool ----------------------------------------------------------------------------------
   //
-  // With `pool_pages` (the constructor's) every sequence is alike: slot_len = the per-request cap, slot_base its
+  // With several sequences (the constructor's `pool_pages`) every sequence is alike: slot_len = the per-request cap, slot_base its
   // region of the page table (kv_pages(cap) entries a sequence), and its KV pages are taken from the pool as it grows
   // (runtime::KvPool on the host, each new table entry written to the card between submits). Every call that writes
   // KV takes the pages it writes first - prefill (the call's positions), a plain step, draft(k), verify(k),
   // verify_rows and draft_rows (up to pos + k + 1), load_kv - and throws, with nothing written, when the pool cannot
   // cover them; max_verify_k() counts the pages the sequence could still take. reset() gives the selected sequence's
   // pages back and zeroes only their rows below its written bound (PERF-90's bound, kept per sequence). The kernels
-  // are the fixed slots' paged builds: only the table's contents differ. A table entry no page backs reads page 0 and
+  // are the paged builds (plan 19v3b Task 0). A table entry no page backs reads page 0 and
   // is never read or written (every read and write is below the positions the sequence holds).
   uint32_t kv_pool_pages() const { return pool_ ? pool_->pages_total() : 0; }
   uint32_t pages_free() const { return pool_ ? pool_->pages_free() : 0; }
@@ -476,7 +486,7 @@ class Engine {
   };
   void verify_rows(const std::vector<Run>& runs)
     pre(slots() >= 2)
-    pre(runs.size() <= kMaxRows);
+    pre(runs.size() <= max_rows());
   // The MTP drafts of several slots at once (runtime::build_draft_rows: the head and lm_head read once a draft index
   // for all of them): runs[r] = (slot, k), 2 <= runs <= kMaxDraftRows, every k in 1..max_verify_k() of its slot and
   // every slot room for max(k). Each run drafts max(k) ids and keeps its first k: they land in its cur_token[1..k] and
@@ -577,7 +587,7 @@ class Engine {
   std::unique_ptr<SlotBuffers> slot_bufs_;
   CapturedStep step_;   // slot 0's plain list (the other slots' are Seq::plain)
 
-  // Spec 13c: one sequence slot - its range of the KV caches, the device addresses of its state, its Control blocks
+  // Spec 13c: one sequence slot - its region of the KV page table, the device addresses of its state, its Control blocks
   // and every list captured for it (slot 0's: the buffers' own state, today's lists; Seq::bind all null).
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
   struct Seq {
@@ -631,6 +641,11 @@ class Engine {
   CapturedStep& plain() { return seqs_[cur_].plain.empty() ? step_ : seqs_[cur_].plain.at(0); }
   // Spec 13c: the row lists at M = 2..kMaxRows (index M - 2) and what they read - several slots only.
   std::vector<CapturedStep> rows_steps_;
+  std::unique_ptr<CapturedStep> rows_wide_[2];   // plan 40a Task 3: the 16- and 32-row lists, where built
+  void build_rows_wide(bool moe_union);
+  uint32_t rows_wide_from_ = 0;
+  uint32_t rows_w_ = 0;                          // the last row step's list width (its ids' Control fields)
+  bool rows_defer_ = false;                      // the last row step left its delta-net rows pending (PERF-120)
   BatchRowsBind rows_bind_;
   std::vector<CapturedStep> draft_rows_steps_;   // MTP: the row draft lists at M = 2..min(slots, kMaxDraftRows)
   DraftRowsBind draft_bind_;
@@ -652,7 +667,7 @@ class Engine {
     kv_end_ = std::max(kv_end_, end);
     seqs_[cur_].kv_end = std::max(seqs_[cur_].kv_end, end);   // spec 31: the pool's per-sequence bound
   }
-  // Spec 31: the pool (null with fixed slots), a sequence's pages taken (the table entries written), and the same
+  // Spec 31: the pool (null with one sequence), a sequence's pages taken (the table entries written), and the same
   // that throws for `what` when the pool is full.
   std::unique_ptr<KvPool> pool_;
   // Pages up to `upto`, and those from `from` on made the sequence's own (a shared one copied first).
@@ -682,6 +697,7 @@ class Engine {
   // Spec 32: the ring copy a commit of rows 16.. runs (gdn_ring_commit.cl) beside the deep lists' chain scratch
   // (own_.gdn_x / conv_x); deep_rows_ the widest rows B70_SPEC_LOOKUP_ROWS allows (64 unset).
   std::unique_ptr<l0::Module> ring_mod_;
+  bool greedy_head_ = false;   // PERF-123: verify() writes it into own_.head_gate (head_gate.h; 1: the candidate pass)
   std::unique_ptr<l0::Kernel> ring_k_;
   std::unique_ptr<l0::CmdList> ring_list_;
   uint32_t deep_rows_ = 64;

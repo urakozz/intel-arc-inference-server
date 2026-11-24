@@ -133,14 +133,12 @@ struct MemoryPlan : MemoryComponents {
   // prefill_scratch, counted with prefill only). 0 without a drafter.
   size_t drafter_slots = 0;
   size_t drafter_taps = 0;
-  // Spec 13c, an engine with sequence slots (plan_slots): their lengths (max_len is slots_kv_len of them: the
-  // KV, the RoPE table and the head's KV are at it), and the further slots' state, inside
-  // decode_state - SlotDims (rings, control blocks, the GDN states without MTP) and with MTP the
-  // further slots' GDN states and hh rows in MtpBuffers. Empty / 0 for one sequence: plan() itself.
+  // Spec 31, several sequences sharing a KV page pool (plan_pool): its pages (max_len = pool_pages x kKvPage: the KV,
+  // the RoPE table and the head's KV are at it), every sequence's reach (the per-request cap), and the further
+  // sequences' state, inside decode_state - SlotDims (rings, control blocks, the page table, the GDN states without
+  // MTP) and with MTP their GDN states and hh rows in MtpBuffers. Empty / 0 for one sequence: plan() itself.
   std::vector<uint32_t> slot_lens;
   size_t slot_state = 0;
-  // Spec 31, a KV page pool (plan_pool): its pages (max_len = pool_pages x kKvPage); slot_lens is then every
-  // sequence's reach, the per-request cap. 0 for fixed slots and one sequence.
   uint32_t pool_pages = 0;
 };
 
@@ -197,36 +195,6 @@ uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, siz
 // is non-zero, the reserve and the device total.
 std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_bytes);
 
-// --- spec 13c: sequence slots on one card (spec 13 §11.2) ----------------------------------------------------------
-//
-// An engine of `lens.size()` sequence slots (runtime::Engine's `slots`): plan() at slots_kv_len(lens) positions (one
-// KV allocation of whole pages; the RoPE table and the head's KV at it too) plus the further slots' state - SlotDims'
-// rings, controls, page table and (MTP off) GDN states, and with MTP the further slots' GDN states and hh rows in
-// MtpBuffers (MtpDims' `seqs`).
-// Int8 prefill's widening scratch is at the LONGEST slot (3j: one sequence prefills at a time; PrefillScratch::kv8_len).
-// One length is plan(desc, lens[0], ...) exactly. Throws std::invalid_argument for no slot, more than
-// SlotDims::kMaxSeqs, or a draft vocabulary beside slots (not built).
-// Plan 19v3b: with a drafter (MTP off), plan() counts slot 0's drafter, its 7 more GDN states and the tap staging;
-// every further slot adds its drafter session (DrafterPlan::session at its length) and its GDN states, 1 + 3
-// speculative (SlotDims with a drafter).
-MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>& lens, bool mtp, size_t model_bytes,
-                      const PrefillPath& path = {}, const DraftVocabPlan& dv = {}, KvCache kv = default_kv_cache(),
-                      const DrafterPlan& drafter = {});
-
-// --max-num-seqs N's layout on a card (spec 13 §11.2's shape): slot 0 at `slot0`, then
-// seqs - 1 slots of SlotDims::kShortLen positions.
-std::vector<uint32_t> slot_layout(uint32_t slot0, uint32_t seqs);
-// The largest slot 0 - a multiple of kMaxLenQuantum, at most `cap` (the trained context) - whose
-// slot_layout(slot0, seqs) plan_slots total + `reserve_bytes` <= `device_bytes`: --max-len auto under
-// --max-num-seqs. 0 when not even min(kMinAutoMaxLen, cap) fits. One slot is max_len_that_fits without a drafter or a
-// draft vocabulary. Throws std::invalid_argument when `cap` is below one quantum or `seqs` is outside
-// [1, SlotDims::kMaxSeqs].
-uint32_t slot0_len_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, size_t model_bytes,
-                             size_t device_bytes, size_t reserve_bytes, uint32_t cap, const PrefillPath& path = {},
-                             KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
-// "131072 + 3 x 32768" - the startup line's form of a layout.
-std::string slot_layout_name(const std::vector<uint32_t>& lens);
-
 // --- spec 31: a KV page pool shared by the sequences of one card ---------------------------------------------------
 //
 // `seqs` sequences share `pages` KV pages of kKvPage positions; one request grows up to `cap` positions (a multiple
@@ -240,7 +208,9 @@ uint32_t pool_table_pages(const PoolShape& s);
 // plan() at the pool's positions (the main cache's and the head's KV, the RoPE table: the engine's max_len), with what
 // one request reaches at the cap - int8 prefill's widening scratch, slot 0's drafter and every further sequence's
 // drafter session -
-// plus the further sequences' state as plan_slots counts it, the page table at pool_table_pages. Throws
+// plus the further sequences' state (MemoryPlan::slot_state), the page table at pool_table_pages. With a drafter (MTP
+// off), plan() counts slot 0's drafter and the tap staging; every further sequence adds its drafter session
+// (DrafterPlan::session) and its GDN state, its committed rows pending (plan 40a Task 2). Throws
 // std::invalid_argument outside [2, SlotDims::kMaxSeqs] sequences (one is plan()) or for a cap off the grid or past
 // the pool.
 MemoryPlan plan_pool(const model::ModelDesc& desc, const PoolShape& s, bool mtp, size_t model_bytes,

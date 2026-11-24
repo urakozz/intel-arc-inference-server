@@ -139,10 +139,17 @@ void require_kv8_path(PrefillBackend backend);
 // the bf16 scores. The writer then stores q as int8 with its fp32 scales (kv8_q_scales) and attn_chunk_kv8 reads them: both ask
 // this with the same backend, pos and C.
 bool kv8_int8_scores(const model::ModelDesc& d, PrefillBackend b, uint32_t pos, uint32_t C);
+// PERF-107 (l0-int8 over the int8 cache): whether the chunk at `pos` reads its own rows as bf16 (kv8.cl KV8_OWN) - a
+// split chunk on a tensor-parallel card's 12 / 2, the one bf16-score chunk the int8 linears feed (a whole chunk scores
+// by int8, kv8_int8_scores; one card and pp run a split chunk's layer on the l0 walk, dense_mlp_backend). The writer
+// then also stores the chunk's rotated K / V rows as bf16 into the widened scratch at their positions and
+// attn_chunk_kv8 reads them from there, older rows from the int8 cache: both ask this with the same backend, pos and C.
+bool kv8_own_rows(const model::ModelDesc& d, PrefillBackend b, uint32_t pos, uint32_t C);
 // `int8_q` (kv8_int8_scores): q into pf_q as int8 [C][q-heads][256], its fp32 scales after the chunk cap's rows.
+// `own` (kv8_own_rows): also the chunk's K / V rows as bf16 into the widened scratch (unpaged).
 void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,
                          const float* qkv_partials, const float* fa_small, const float* rope,
-                         const KvLayer& kv, const void* pages = nullptr, bool int8_q = false);
+                         const KvLayer& kv, const void* pages = nullptr, bool int8_q = false, bool own = false);
 void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                     const uint16_t* q, const KvLayer& kv, PrefillBackend backend, const void* pages = nullptr);
 void attn_gate_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C,

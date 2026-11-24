@@ -136,11 +136,14 @@ static_assert(gs::sizes_problem<DecodeScratchSizes, EngineSnap>().empty(),
               gs::sizes_problem<DecodeScratchSizes, EngineSnap>());
 
 // Spec 15c: a mixture-of-experts model's decode scratch - ONE allocation
-// (DecodeScratch::moe), three regions, sized here and nowhere else:
+// (DecodeScratch::moe), five regions, sized here and nowhere else:
 //
 //   logits  fp32 [layer slots][kM][router_n]   the router || shared-gate GEMV's output
 //   route   u32  [layer slots][kM][kMoeRouteWords]   moe_route's rows (ids, weights, gate)
 //   h       bf16 [kM][top_k + 1][expert_intermediate]   SiLU(gate) x up of every slot
+//   dn      bf16 [kWideRowsM][top_k + 1][hidden]   PERF-120: the row lists' union read - each slot's down output
+//                                                 (moe.cl MOE_UNION, moe_down_union -> moe_finish)
+//   plan    u32 [kernels::moe_union_plan_words(kWideRowsM, top_k)]   its plan (moe_union_plan: each expert's rows)
 //
 // The first two are PER LAYER - a layer's MoE block writes its own slice - so after a
 // step every layer's routing is still on the card for R2's router gate to read back
@@ -151,7 +154,7 @@ inline constexpr uint32_t kMoeRouteWords = 32;   // = kernels::moe_route::kWords
 struct MoeScratchLayout {
   uint32_t layer_slots = 0;
   size_t logits_layer = 0, route_layer = 0;   // bytes per layer slot
-  size_t logits_off = 0, route_off = 0, h_off = 0, h = 0;
+  size_t logits_off = 0, route_off = 0, h_off = 0, h = 0, dn_off = 0, dn = 0, plan_off = 0, plan = 0;
   size_t total = 0;
   size_t logits_at(uint32_t layer) const { return logits_off + size_t(layer) * logits_layer; }
   size_t route_at(uint32_t layer) const { return route_off + size_t(layer) * route_layer; }
@@ -166,6 +169,9 @@ struct DecodeScratchDims {
   // Spec 32: the one-card deep verify lists' rows (32 and 64): what one sequence's hh rows are sized for, and the
   // decode scratch on an engine that can build those lists (rows()); every other engine's scratch keeps kWideM.
   static constexpr uint32_t kDeepM = 64;
+  // Plan 40a Task 3: the row lists across sequences reach 32 rows (16 and 32 beside today's 2..8) on Qwen3.8 with a
+  // proposer - the decode scratch of such an engine (rows()), its row tables, the rows' hh and tap rows.
+  static constexpr uint32_t kWideRowsM = 32;
   // KV positions per `attn_decode` work-group - spec 1.5's lever L5 took it
   // from 256 to 64. Since the zero-config cleanup (2026-11-06) decode attention v1
   // (attn.cl's attn_decode / attn_reduce) is no engine's: it survives only as the
@@ -230,7 +236,8 @@ struct DecodeScratchDims {
 
   // Spec 32e: the decode scratch's rows - kDeepM where the deep verify lists can be built (one sequence, the MTP head
   // without a draft vocabulary, bf16 KV, Qwen3.8's attention and delta-net shapes - PERF-56: or Ornith's; the engine
-  // also needs the int8 head), kWideM elsewhere.
+  // also needs the int8 head), kWideM elsewhere. Plan 40a Task 3: kWideRowsM for several Qwen3.8 sequences with a
+  // proposer (`mtp`: the MTP head or a drafter), whose row lists reach 32 rows.
   static uint32_t rows(const model::ModelDesc& desc, bool mtp, KvCache kv, uint32_t seqs, bool draft_vocab);
   static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t rows = kWideM);
 };
@@ -427,9 +434,9 @@ struct MtpDims {
   static MtpSizes tp_sizes(uint32_t max_len, const model::ModelDesc& card, const model::ModelDesc& head, KvCache kv);
   // Spec 13c: MtpBuffers::hh's rows. One sequence: kM + 1 (row 0 = h_{pos-1}, rows 1..M the
   // verify rows' hidden). `seqs` > 1: each sequence's kM + 1 rows (sequence q's from row
-  // q x (kM + 1)), then the row lists' saved hidden rows (kM: the rows' post-final-norm `x`),
-  // the head's input rows (kM, gathered from the two regions before by embed_gather) and the
-  // row draft list's chain rows (kM: runtime::build_draft_rows' dh).
+  // q x (kM + 1)), then the row lists' saved hidden rows (kWideRowsM since plan 40a Task 3: the rows'
+  // post-final-norm `x`), the head's input rows (kWideRowsM, gathered from the two regions before by
+  // embed_gather) and the row draft list's chain rows (kM: runtime::build_draft_rows' dh).
   static uint32_t hh_rows(uint32_t seqs);
 };
 
@@ -449,19 +456,14 @@ struct MtpDims {
 //             and their three row tables
 //   pages     the page table (plan 19v3b Task 0, below): one u32 a KV page of every slot, device memory
 //
-// The slots' KV in pages (plan 19v3b Task 0): every slot's full-attention KV - the main cache's layers and the MTP
-// head's - is whole pages of kKvPage positions. Slot q's KV range is kv_pages(len_q) pages from its KV base (a
-// multiple of kKvPage: the slots' summed page-rounded lengths before it), and the table maps the allocation's pages:
-// position p of slot q is row table[base_q / kKvPage + p / kKvPage] x kKvPage + p % kKvPage of every FA layer
-// (KvLayout's rows and scales). The engine fills the table once, the identity (slot q's pages are its range), so the
-// layout is the contiguous one; the kernels look a page up once per kKvPage keys. 2048 is the prefill chunk and the
-// prefix cache's snapshot stride. One slot has no table.
+// The slots' KV in pages (plan 19v3b Task 0; spec 31's pool): every slot's full-attention KV - the main cache's layers
+// and the MTP head's - is pages of kKvPage positions. Slot q's region of the table is kv_pages(cap) entries from its
+// base (a multiple of kKvPage), and the table maps them to the pool's pages: position p of slot q is row
+// table[base_q / kKvPage + p / kKvPage] x kKvPage + p % kKvPage of every FA layer (KvLayout's rows and scales). The
+// kernels look a page up once per kKvPage keys. 2048 is the prefill chunk and the prefix cache's snapshot stride. One
+// slot has no table.
 inline constexpr uint32_t kKvPage = 2048;
 inline constexpr uint32_t kv_pages(uint32_t len) { return uint32_t((uint64_t(len) + kKvPage - 1) / kKvPage); }
-// The KV positions an engine of these slots allocates (its max_len, the loader's RoPE table's too): one slot its
-// length, several the sum of their lengths each rounded up to whole pages. Throws std::invalid_argument for no slot or
-// past 32 bits.
-uint32_t slots_kv_len(const std::vector<uint32_t>& lens);
 // Spec 39: SlotBuffers holds one allocation of each name.
 struct SlotSizes {
   [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::SlotStates}]] size_t states = 0;
@@ -475,15 +477,11 @@ struct SlotSizes {
 };
 static_assert(gs::sizes_problem<SlotSizes, EngineSnap>().empty(), gs::sizes_problem<SlotSizes, EngineSnap>());
 struct SlotDims {
-  static constexpr uint32_t kMaxSeqs = 4;         // slot 0 and at most 3 short slots (spec 13 §11.2)
-  static constexpr uint32_t kShortLen = 32768;    // a short slot's positions (none shorter)
-  // All zero at seqs = 1. Throws std::invalid_argument outside [1, kMaxSeqs]. `kv_pages`: the slots' KV pages
-  // (slots_kv_len / kKvPage), the page table's entries; with the KV page pool (spec 31) every sequence's table as long
-  // as the per-request cap, runtime::pool_table_pages. `drafter` (plan 19v3b, MTP off): a further slot's states are
-  // kDrafterStates (its live state and 3 speculative - K <= 3; slot 0's 8 are the engine's, TapVerifyDims).
-  static constexpr uint32_t kDrafterStates = 4;
-  static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages = 0,
-                         bool drafter = false);
+  static constexpr uint32_t kMaxSeqs = 4;         // the sequences of one card (spec 13 §11.2)
+  // All zero at seqs = 1. Throws std::invalid_argument outside [1, kMaxSeqs]. `kv_pages`: the page table's entries -
+  // every sequence's table as long as the per-request cap, runtime::pool_table_pages (spec 31). Without MTP a further slot holds one GDN state (plan 40a Task 2:
+  // beside a drafter too - its committed rows stay pending, EngineSizes::gdn_pend).
+  static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages = 0);
   // Byte offsets inside SlotBuffers::controls (a Control is 128 B, a row table 256 B).
   static size_t control_at(uint32_t seqs, uint32_t seq);        // slot seq's Control, 1 <= seq < seqs
   static size_t head_control_at(uint32_t seqs, uint32_t seq);   // its head's Control (MTP)
@@ -513,9 +511,9 @@ struct TapVerifyDims {
 // runtime::Engine's buffers outside the groups above (EngineBuffers, buffers.h), sized here so the planner and the
 // engine read one formula (an allocation is made exactly when its size is not 0):
 //   tap       debug_resid's residual copy, bf16 [layers][1][hidden] (capture.cc's kCapM = 1)
-//   df_slots  a drafter's GDN states: slot 0's 7 (TapVerifyDims::gdn_spec_bytes), then each further slot's
-//             SlotDims::kDrafterStates
-//   gdn_pend  one sequence with a proposer (the MTP head or a drafter) on a shape gdn_step's DEFERRED build exists for
+//   df_slots  a drafter's GDN states of one sequence: 7 (TapVerifyDims::gdn_spec_bytes); none with several (plan 40a)
+//   gdn_pend  a sequence with a proposer (the MTP head or a drafter; plan 31 / 40a: each of several, sequence s at s x
+//             gdn_pend / sequences) on a shape gdn_step's DEFERRED build exists for
 //             (kernels::gdn_defer_built: Qwen3.8's, Ornith's): the pending GDN rows, two parities of
 //             kernels::gdn_pend_parity_bytes (verify-cost-m8, PERF-51)
 //   gdn_x, conv_x  spec 32: the deep verify lists' chain scratch - one sequence with the MTP head on Qwen3.8's GDN
@@ -531,6 +529,9 @@ struct EngineSizes {
   size_t gdn_pend = 0;
   [[=gs::scratch]] size_t gdn_x = 0;
   [[=gs::scratch]] size_t conv_x = 0;
+  // PERF-123: the word the verify lists' gated head kernels read (head_gate.h), shared, written by Engine::verify
+  // before every replay - Qwen3.8 with a proposer, 64 B (one cache line), whatever the slots.
+  [[=gs::scratch]] size_t head_gate = 0;
   size_t total() const { return gs::bytes(*this); }
 };
 static_assert(gs::sizes_problem<EngineSizes, EngineSnap>().empty(), gs::sizes_problem<EngineSizes, EngineSnap>());

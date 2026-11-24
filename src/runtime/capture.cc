@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "kernels/dflash_kernels.h"
 #include "kernels/kernels.h"
 #include "kernels/tp_kernels.h"
 #include "loader/loader.h"
@@ -88,6 +89,7 @@ static_assert(offsetof(BatchRow, kv_base) == kernels::batch_row::kKvBase * 4, "B
 static_assert(offsetof(BatchRow, src) == kernels::batch_row::kSrc * 4, "BROW_SRC moved");
 static_assert(offsetof(BatchRow, dst) == kernels::batch_row::kDst * 4, "BROW_DST moved");
 static_assert(offsetof(BatchRow, slot) == kernels::batch_row::kSlot * 4, "BROW_SLOT moved");
+static_assert(offsetof(BatchRow, pend) == kernels::batch_row::kPend * 4, "BROW_PEND moved");
 // Plan 19v3b Task 0: the KV page the _PG builds bake (KV_PAGE, src/kernels/CMakeLists.txt).
 static_assert(kKvPage == kernels::kKvPage, "the KV page: runtime/buffer_sizes.h and kernels/kernels.h (KV_PAGE)");
 
@@ -306,7 +308,7 @@ class Capture {
       layer_ = head_layer();
       draft();
       if (prob_) draft_prob();
-      // Spec 15e: 23 launches with a dense head, 24 with a MoE head (draft_launches). Spec 17d: the head's own
+      // Spec 15e: 21 launches with a dense head, 22 with a MoE head (draft_launches). Spec 17d: the head's own
       // descriptor under TP (tp.cl's two argmax stages replace argmax.cl's one for one). Open-work 13: 2 more with
       // the probability.
       const size_t want = draft_launches(hd()) + (prob_ ? 2 : 0);
@@ -385,19 +387,21 @@ class Capture {
       }
       head_kv_fill(br_->hin);
     }
-    require(mode_ != Mode::Tp || step_.kernel_count == tp_launches(d_),
+    // require() builds its message before it tests, so the TP count is read only where a TpLink is bound.
+    const size_t tp_want = tp_ ? tp_launches(d_, tp_->folded) : 0;
+    require(mode_ != Mode::Tp || step_.kernel_count == tp_want,
             "the TP list has " + std::to_string(step_.kernel_count) + " launches, not tp_launches()'s " +
-                std::to_string(tp_launches(d_)));
-    require(mode_ != Mode::TpVerifyTaps || step_.kernel_count == tp_launches(d_),
+                std::to_string(tp_want));
+    require(mode_ != Mode::TpVerifyTaps || step_.kernel_count == tp_want,
             "the TP tap verify list has " + std::to_string(step_.kernel_count) + " launches, not tp_launches()'s " +
-                std::to_string(tp_launches(d_)));
+                std::to_string(tp_want));
     require(mode_ != Mode::TpVerify || step_.kernel_count == tp_verify_launches(d_),
             "the TP verify list has " + std::to_string(step_.kernel_count) + " launches, not tp_verify_launches()'s " +
                 std::to_string(tp_verify_launches(d_)));
     require(mode_ != Mode::Rows || step_.kernel_count == rows_launches(d_, mtp_ != nullptr) + split_launches_,
             "the row list has " + std::to_string(step_.kernel_count) + " launches, not rows_launches()'s " +
                 std::to_string(rows_launches(d_, mtp_ != nullptr)) + " (+ " + std::to_string(split_launches_) +
-                " for the attention's halves)");
+                " for the attention's halves and the MoE union's combine)");
 
     require(gdn == d_.gdn_layers && fa == d_.fa_layers,
             "layer kind counts are not the descriptor's " + std::to_string(d_.gdn_layers) +
@@ -408,17 +412,17 @@ class Capture {
             "the decode list has " + std::to_string(step_.kernel_count) + " launches, not the " +
                 std::to_string(decode_launches(d_)) + " decode_launches() gives " + d_.name);
     // Spec 15e: the verify list is the decode list at M rows plus the head's KV fill
-    // (verify_launches): Qwen3.8 784, Ornith 536, at every M.
+    // (verify_launches): Qwen3.8 782, Ornith 534, at every M.
     // Spec 32: a deep list's delta-net step is kCapM / 16 links a layer; spec 32e: its bf16 GEMVs run in row chunks.
-    const size_t links = (deep() ? (kCapM / 16 - 1) * size_t(d_.gdn_layers) : 0) + split_launches_;
+    const size_t links = (deep() ? (kCapM / 16 - 1) * size_t(d_.gdn_layers) : 0) + split_launches_ + cand_launches_;
     require(mode_ != Mode::Verify || step_.kernel_count == verify_launches(d_) + links,
             "the verify list has " + std::to_string(step_.kernel_count) + " launches, not the " +
                 std::to_string(verify_launches(d_) + links) + " verify_launches() gives " + d_.name);
     // Spec 19c: a tap drafter's verify list launches exactly the decode list's kernels at M rows
     // (the taps are copies, which no count includes).
-    require(mode_ != Mode::VerifyTaps || step_.kernel_count == decode_launches(d_),
+    require(mode_ != Mode::VerifyTaps || step_.kernel_count == decode_launches(d_) + cand_launches_,
             "the tap verify list has " + std::to_string(step_.kernel_count) + " launches, not the " +
-                std::to_string(decode_launches(d_)) + " decode_launches() gives " + d_.name);
+                std::to_string(decode_launches(d_) + cand_launches_) + " decode_launches() gives " + d_.name);
     // Every Kernel this walk made was launched exactly once, so kernels[i] is
     // what launch i ran - which is the property that makes the vector a usable
     // record of the list rather than a lifetime bag.
@@ -447,10 +451,22 @@ class Capture {
     // Spec 13a: a row list binds the `_ROWS` pair (attn_pair_rows), not the production one - which at M = 5..8 over
     // int8 KV nothing builds (B70_KV8's decode block stops at M = 4).
     if (mode_ == Mode::Rows)
-      attn_bins = {pg(kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads))};
+      attn_bins = {pg(kernels::attn_v2_rows_variant(attn_rows_group(), rows_blocks(), kv8_, d_.fa_q_heads,
+                                                    d_.fa_kv_heads))};
+    // Plan 40a Task 3: the 16- and 32-row lists' attention on DPAS (attn_pair_rows), partials for 32 rows and paged.
+    if (rows_dpas()) {
+      attn_bins.push_back(kernels::kv_paged(kernels::attn_verify_dpas_rows_variant(rows_blocks(), kv8_, d_.fa_q_heads,
+                                                                                   d_.fa_kv_heads)));
+      attn_bins.push_back(pg(kernels::attn_v2_rows_variant(DecodeScratchDims::kM, rows_blocks(), kv8_, d_.fa_q_heads,
+                                                         d_.fa_kv_heads)));
+      require(sb_.pages != nullptr && br_->seqs > 0 &&
+                  b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_, DecodeScratchDims::kWideRowsM).attn_part,
+              "a row list past 8 rows needs the paged KV, its sequence count and the partials of 32 rows");
+    }
     // attn_part is sized by DecodeScratchDims::sizes: v2's fixed 32 blocks per row (spec 32e: 64 rows only on an engine
     // that builds the deep lists).
-    require(b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_, std::max(kCapM, DecodeScratchDims::kWideM)).attn_part,
+    require(b_.attn_part.size() >= size_t(d_.fa_q_heads) * DecodeBuffers::kAttnV2Blocks *
+                                       std::max(kCapM, DecodeScratchDims::kWideM) * (Qwen35::kFaHeadDim + 2) * kFp32,
             std::string("attn_part (") + std::to_string(b_.attn_part.size()) + " B) is smaller than decode attention "
                 "v2's partials");
     // Spec 28c: an M >= 2 list of v2 binds attn_verify_dpas + the v2 binary's reduce where the measured rule
@@ -460,8 +476,12 @@ class Capture {
       vattn_ = !rows
                    ? verify_attn_kind(kCapM, vattn_keys_, kv8_, d_.fa_q_heads, d_.fa_kv_heads, opt_.force_attn)
                    : VerifyAttn::V2;
-      if (vattn_ == VerifyAttn::Dpas)
+      if (vattn_ == VerifyAttn::Dpas) {
         attn_bins.push_back(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_, d_.fa_q_heads, d_.fa_kv_heads)));
+        // PERF-120: its reduce at its key blocks (8 at M = 8)
+        attn_bins.push_back(pg(kv8_ ? kernels::attn_v2_kv8_variant(kCapM, attn_tgt(), d_.fa_q_heads, d_.fa_kv_heads)
+                                    : kernels::attn_v2_variant(kCapM, attn_tgt(), d_.fa_q_heads, d_.fa_kv_heads)));
+      }
     }
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
@@ -679,9 +699,15 @@ class Capture {
     require(stage_ == nullptr && tap_ == nullptr, "a row list is single-card, with no residual tap");
     if (br_->taps) {   // plan 19v3b: the drafter's taps of every row
       sites_ = tap_sites(d_, br_->tap_layers);
-      require(br_->taps->size() >= size_t(DecodeBuffers::kM) * br_->tap_layers.size() * d_.hidden * kBf16,
-              "the rows' tap buffer is smaller than [kM][taps][hidden] bf16");
+      require(br_->taps->size() >= size_t(kCapM) * br_->tap_layers.size() * d_.hidden * kBf16,
+              "the rows' tap buffer is smaller than [M][taps][hidden] bf16");
     }
+    // Plan 40a Task 3: the 16- and 32-row lists - the deferred delta-net rows (gdn_step.cl WIDE_ROWS), Qwen3.8's and
+    // (PERF-120) Ornith's shapes.
+    require(kCapM <= DecodeScratchDims::kM ||
+                (br_->pend && kernels::gdn_defer_built(d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads)),
+            "a row list past " + std::to_string(DecodeScratchDims::kM) +
+                " rows needs the deferred delta-net rows (Qwen3.8's and Ornith's shapes)");
     if (!mtp_) return;
     // The head's KV fill: its buffers in the main cache's form and length, its table and Control, the gather.
     require(m_.mtp != nullptr, "a row list with the head needs the loaded MTP head");
@@ -705,6 +731,7 @@ class Capture {
     // verify-cost-m8: a one-card verify list (or the flush list) handed the engine's pending rows binds the DEFERRED
     // build, whose eighth argument is this layer's slice of them (gdn_step.cl, DEFERRED).
     void* pend = mode_ == Mode::Verify || mode_ == Mode::GdnFlush ? sb_.gdn_pend
+                 : mode_ == Mode::VerifyTaps && sb_.gdn_pend     ? sb_.gdn_pend   // plan 40a: a slot's own
                  : mode_ == Mode::VerifyTaps && tv_->gdn_pend    ? tv_->gdn_pend->ptr()
                                                                  : nullptr;
     if (pend) {
@@ -777,8 +804,17 @@ class Capture {
     launch(k, d_.gdn_v_heads, kGdnStateChunks);
   }
 
+  // Plan 40a Task 2: with the sequences' pending rows (BatchRowsBind::pend) the DEFERRED row build, its eleventh
+  // argument this layer's slice of sequence 0's pending rows (the kernel steps PEND_SEQ a sequence).
+  // Plan 40a Task 3: the 16- and 32-row lists bind the M 8 build over chunks of whole runs (gdn_step.cl, WIDE_ROWS): a
+  // chunk a sequence at most (grid dimension 2; a chunk past the table's returns).
   void gdn_step_rows(uint32_t layer, uint32_t g) {
-    l0::Kernel& k = kernel(kernels::gdn_step_rows_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads),
+    const bool wide = kCapM > DecodeScratchDims::kM;
+    const std::string v = kernels::gdn_step_rows_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads);
+    l0::Kernel& k = kernel(wide ? kernels::gdn_step_rows_wide_variant(d_.gdn_layers, d_.gdn_k_heads, d_.gdn_v_heads)
+                           : br_->pend ? kernels::gdn_step_rows_defer_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
+                                                                              d_.gdn_v_heads)
+                                       : v,
                            "gdn_step", kWgGdn);
     k.arg_ptr(0, ctrl());
     k.arg_ptr(1, b_.partials.ptr());
@@ -793,7 +829,10 @@ class Capture {
     k.arg_ptr(8, (br_->ring_pool ? static_cast<const uint8_t*>(br_->ring_pool) : ring0()) +
                      size_t(g) * conv_ring_stride());
     k.arg_ptr(9, br_->rows);
-    launch(k, d_.gdn_v_heads, kGdnStateChunks);
+    if (br_->pend)
+      k.arg_ptr(10, static_cast<uint8_t*>(br_->pend) +
+                        size_t(g) * kernels::gdn_pend_layer_bytes(d_.gdn_k_heads, d_.gdn_v_heads));
+    launch(k, d_.gdn_v_heads, kGdnStateChunks, wide ? br_->seqs : 1);
   }
 
   // attn_prep's (or attn_prep_kv8's) row build over one KV layer; `s1` the MTP head's QKV_S 1 build.
@@ -824,19 +863,56 @@ class Capture {
   // two waves (Ornith's 8 rows: 72 KB, 5.75 ms against 2.30 at 6 rows, depth 4096): the rows go as two launches of half
   // the rows each, the row table, q, gate and output at the half's first row and its partials after the first half's.
   // A row's walk does not depend on the rows beside it (header, BATCH_ROWS), so every row keeps its bits.
-  void attn_pair_rows(void* ctrl, const KvLayer& kv) {
+  // Plan 40a Task 3: the 16- and 32-row lists in groups of 8 rows for the reduce, their attention one launch of
+  // attn_verify_dpas's row build (rows_dpas): a run of up to 8 rows a work-group, grid (kv heads, blocks, sequences) -
+  // each run bitwise the one-sequence DPAS verify of its rows - writing the groups' partials, the padding rows' too
+  // (attn_verify_dpas.cl, BATCH_ROWS). The 8 v2 launches an 8-row group ran one after another were 21 of the 32-row
+  // step's 76 ms at depth 4096.
+  bool rows_dpas() const { return mode_ == Mode::Rows && kCapM > DecodeScratchDims::kM; }
+  // PERF-120: the row lists' key blocks a run (BatchRowsBind::attn_blocks); every other list kAttnV2Blocks.
+  uint32_t rows_blocks() const {
+    return mode_ == Mode::Rows && br_->attn_blocks ? br_->attn_blocks : DecodeBuffers::kAttnV2Blocks;
+  }
+  uint32_t attn_rows_group() const {
+    if (rows_dpas()) return DecodeScratchDims::kM;   // PERF-120: the DPAS launch's groups (its reduce needs no q SLM)
     const size_t gqa = d_.fa_q_heads / d_.fa_kv_heads, wave = 16;
-    const bool halves = mode_ == Mode::Rows && kCapM % 2 == 0 && kCapM * gqa * (Qwen35::kFaHeadDim + 2 * wave) * kFp32 > 65536;
-    const uint32_t mh = halves ? kCapM / 2 : kCapM;
-    const std::string v =
-        pg(kernels::attn_v2_rows_variant(mh, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads));
+    uint32_t mh = kCapM;
+    while (mode_ == Mode::Rows && mh % 2 == 0 && mh * gqa * (Qwen35::kFaHeadDim + 2 * wave) * kFp32 > 65536) mh /= 2;
+    return mh;
+  }
+  void attn_pair_rows(void* ctrl, const KvLayer& kv) {
+    const uint32_t mh = attn_rows_group();
+    const uint32_t T = rows_blocks();
+    const std::string v = pg(kernels::attn_v2_rows_variant(mh, T, kv8_, d_.fa_q_heads, d_.fa_kv_heads));
     const size_t q_row = size_t(d_.fa_q_heads) * Qwen35::kFaHeadDim;
+    if (rows_dpas()) {
+      require(mh == DecodeScratchDims::kM, "the row lists' DPAS attention writes groups of 8 rows");
+      l0::Kernel& k = kernel(kernels::kv_paged(kernels::attn_verify_dpas_rows_variant(T, kv8_, d_.fa_q_heads,
+                                                                                      d_.fa_kv_heads)),
+                             kv8_ ? "attn_verify_dpas_kv8" : "attn_verify_dpas", 0);
+      ze_kernel_properties_t p{};
+      p.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+      require(zeKernelGetProperties(k.handle(), &p) == ZE_RESULT_SUCCESS && p.requiredGroupSizeX >= 16,
+              "attn_verify_dpas: no reqd_work_group_size in the binary");
+      k.group_size(p.requiredGroupSizeX);
+      uint32_t i = 0;
+      k.arg_ptr(i++, ctrl);
+      k.arg_ptr(i++, b_.attn_q.ptr());
+      k.arg_ptr(i++, kv.k);
+      if (kv8_) k.arg_ptr(i++, kv.ks);
+      k.arg_ptr(i++, kv.v);
+      if (kv8_) k.arg_ptr(i++, kv.vs);
+      k.arg_ptr(i++, b_.attn_part.ptr());
+      k.arg_ptr(i++, rows_table());
+      k.arg_ptr(i, sb_.pages);
+      launch(k, d_.fa_kv_heads, T, br_->seqs);
+    }
     for (uint32_t r0 = 0; r0 < kCapM; r0 += mh) {
-      split_launches_ += r0 > 0 ? 2 : 0;
+      split_launches_ += r0 > 0 ? (rows_dpas() ? 1 : 2) : 0;
       uint8_t* const table = static_cast<uint8_t*>(rows_table()) + size_t(r0) * kBatchRowWords * 4;
       uint8_t* const part = static_cast<uint8_t*>(b_.attn_part.ptr()) +
-                            (r0 / mh) * size_t(d_.fa_q_heads) * DecodeBuffers::kAttnV2Blocks * mh * (Qwen35::kFaHeadDim + 2) * kFp32;
-      {
+                            (r0 / mh) * size_t(d_.fa_q_heads) * T * mh * (Qwen35::kFaHeadDim + 2) * kFp32;
+      if (!rows_dpas()) {
         l0::Kernel& k = kernel(v, kv8_ ? "attn_decode_v2_kv8" : "attn_decode_v2", kWgAttn);
         uint32_t i = 0;
         k.arg_ptr(i++, ctrl);
@@ -865,17 +941,18 @@ class Capture {
   // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
   // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
   // verify-cost-m8 probe: the DPAS verify attention's key blocks a row (CaptureOptions::probe_attn_tgt; 16 at M = 8:
-  // -0.5 ms, not merged - it moves pp_dflash_test's two-card rows off the one card's). v2, the paged lists and every
-  // production list keep kAttnV2Blocks.
+  // -0.5 ms, not merged - it moves pp_dflash_test's two-card rows off the one card's). v2 keeps kAttnV2Blocks.
   // Spec 32: a one-card deep verify list (32 or 64 rows: the attention in row chunks, the delta-net step a chain).
   bool deep() const { return mode_ == Mode::Verify && kCapM > DecodeScratchDims::kWideM; }
   // Item 40: the wide and deep lists (16 / 32 / 64 rows, Qwen3.8 one card) bind their bf16 GEMVs' ROWG builds, kRowG
   // rows a group.
   static constexpr uint32_t kRowG = 8;
-  bool wide_rowg() const { return mode_ == Mode::Verify && kCapM >= DecodeScratchDims::kWideM; }
+  // Plan 40a Task 3: the 16- and 32-row lists across sequences too.
+  bool wide_rowg() const { return (mode_ == Mode::Verify || mode_ == Mode::Rows) && kCapM >= DecodeScratchDims::kWideM; }
+  // PERF-120: a DPAS list's blocks by M (verify_attn_blocks: 8 at M = 8), the probe's count over it.
   uint32_t attn_tgt() const {
-    return vattn_ == VerifyAttn::Dpas && !sb_.pages && opt_.probe_attn_tgt ? opt_.probe_attn_tgt
-                                                                          : DecodeBuffers::kAttnV2Blocks;
+    if (vattn_ != VerifyAttn::Dpas) return DecodeBuffers::kAttnV2Blocks;
+    return !sb_.pages && opt_.probe_attn_tgt ? opt_.probe_attn_tgt : verify_attn_blocks(kCapM);
   }
   l0::Kernel& dpas_kernel() {
     l0::Kernel& k = kernel(pg(kernels::attn_verify_dpas_variant(kCapM, attn_tgt(), kv8_,
@@ -1082,19 +1159,31 @@ class Capture {
     if (t)
       require(kernels::gemm_sm_out_s(*t) == s.S || id == LinearId::GateUp,
               "gemm_sm writes another split-K S than the consumer folds (only gate||up's SiLU has an S 1 build)");
-    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(kCapM, *t),
-                               kernels::gemm_sm_wg_size(kCapM, *t))
-                      : kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
+    // Spec 17b: a row-parallel linear's crossing. PERF-44: the folded form's tp_send is the linear's tail (gemv /
+    // gemm_sm TP_FOLD_SEND, kernels::tp_fold_send_variant); the slices form keeps tp_send after it.
+    const bool cross = tp_main() && layer != loader::kTopLevel && loader::tp_row_parallel(id);
+    const bool fold_send = cross && tp_->folded;
+    if (fold_send)
+      require(s.S == tp_s_ && (!t || !t->wg), "the folded tp_send tail is grid split-K at the crossing's " +
+                                                   std::to_string(tp_s_) + " slices");
+    std::string v = t ? kernels::gemm_sm_variant(kCapM, *t) : kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout);
+    if (fold_send) v = kernels::tp_fold_send_variant(v, t != nullptr);
+    l0::Kernel& k = t ? kernel(v, kernels::gemm_sm_entry(kCapM, *t), kernels::gemm_sm_wg_size(kCapM, *t))
+                      : kernel(v, "gemv", kernels::gemv_wg_size(s.K, s.N, s.S, s.layout));
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, s.layout == 0 ? w.scales->ptr() : w.mem.ptr());
     k.arg_ptr(2, x);
     k.arg_ptr(3, out.ptr());
+    if (fold_send) {
+      k.arg_ptr(4, tp_->peer_land);
+      k.arg_ptr(5, tp_->send_ctr);
+      k.arg_ptr(6, tp_->own);
+    }
     if (t)
       launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
     else
       launch(k, s.N / kGemvColsPerWg, s.S);
-    if (tp_main() && layer != loader::kTopLevel && loader::tp_row_parallel(id))   // spec 17b
-      tp_send(t ? kernels::gemm_sm_out_s(*t) : s.S);
+    if (cross && !fold_send) tp_send(t ? kernels::gemm_sm_out_s(*t) : s.S);
     return t ? kernels::gemm_sm_out_s(*t) : s.S;
   }
 
@@ -1238,20 +1327,106 @@ class Capture {
   // gemv_i8w(w, scales, x, out) - src/kernels/gemv_i8w.cl (spec 9 §3), grid N/64, WG 64.
   // The int8 `lm_head` only: int8 rows tiled [N/16][K/16][16][16] in `w.mem` and one
   // fp32 scale per row in `w.scales`. Writes the fp32 [M][N] result straight at `out`.
-  void gemv_i8w(const loader::DeviceWeight& w, const void* x, const void* out) {
+  // PERF-123: the head choice's word when this list carries both heads - a one-card verify list (a tap drafter's
+  // too) at 2..8 rows over the int8 head, with its 2-bit copy loaded (LoadedModel::cand_head); null otherwise.
+  const void* cand_gate() const {
+    const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
+    const bool on = sb_.head_gate && m_.cand_head && (mode_ == Mode::Verify || mode_ == Mode::VerifyTaps) &&
+                    kCapM >= 2 && kCapM <= 8 && lm.kind == model::WeightKind::Int8 &&
+                    kernels::small_m_tuning(lm.shape.K, lm.shape.N, 1, 3) &&
+                    kernels::small_m_tuning(lm.shape.K, kernels::kHeadCandNc, 1, 2);
+    return on ? sb_.head_gate : nullptr;
+  }
+  // PERF-123: the head on a greedy step (head_gate.h GATE 2; the full head ran its GATE 1 build above, argmax_stage1
+  // read its logits): the 2-bit head over the rows into `logits`, df_candidate's top 64 a row, those columns of the
+  // int8 head gathered (head_cand.cl) and rescored by gemm_sm_i8w at N 512 with the full head's knobs - so each score
+  // is bitwise the full head's - then their argmax into argmax_part for argmax_stage2. The scratch is `partials`,
+  // dead since the final norm folded it.
+  void head_candidates(const loader::DeviceWeight& lm, const void* gate) {
+    namespace kd = kernels::dflash;
+    const uint32_t K = lm.shape.K, N = lm.shape.N, C = kernels::kHeadCandC, NC = kernels::kHeadCandNc;
+    const kernels::SmallMTuning& t2 = *kernels::small_m_tuning(K, N, 1, 3);
+    const kernels::SmallMTuning& tx = *kernels::small_m_tuning(K, NC, 1, 2);
+    const size_t chunks = (N + kd::kTopkChunk - 1) / kd::kTopkChunk;
+    uint8_t* const part = static_cast<uint8_t*>(b_.partials.ptr());   // fp32 [8][chunks][C][2]
+    uint8_t* const cand = part + size_t(8) * chunks * C * 8;            // u32 [8][C]
+    uint8_t* const cw = cand + size_t(8) * C * 4;                       // int8 [NC/16][K/16][16][16]
+    uint8_t* const cs = cw + size_t(NC) * K;                            // fp32 [NC]
+    uint8_t* const score = cs + size_t(NC) * 4;                         // fp32 [8][NC]
+    require(score + size_t(8) * NC * 4 <= part + b_.partials.size(), "partials is smaller than the candidate scratch");
+    {
+      l0::Kernel& k = kernel(kernels::gated_variant(kernels::gemm_sm_variant(kCapM, t2), 2),
+                             kernels::gemm_sm_entry(kCapM, t2), kernels::gemm_sm_wg_size(kCapM, t2));
+      k.arg_ptr(0, m_.cand_head->mem.ptr());
+      k.arg_ptr(1, m_.cand_head->mem.ptr());
+      k.arg_ptr(2, b_.x.ptr());
+      k.arg_ptr(3, b_.logits.ptr());
+      k.arg_ptr(4, gate);
+      launch(k, N / kernels::gemm_sm_cols(t2), kernels::gemm_sm_grid_y(t2));
+    }
+    const std::string cv = kernels::gated_variant(kd::candidate_topk_variant(C), 2);
+    {
+      l0::Kernel& k = kernel(cv, "df_candidate_select1", kd::kWg);
+      k.arg_ptr(0, b_.logits.ptr());
+      k.arg_ptr(1, part);
+      k.arg_ptr(2, gate);
+      launch(k, uint32_t(chunks), kCapM);
+    }
+    {
+      l0::Kernel& k = kernel(cv, "df_candidate_stage2", kd::kWg);
+      k.arg_ptr(0, part);
+      k.arg_ptr(1, cand);
+      k.arg_ptr(2, gate);
+      launch(k, kCapM);
+    }
+    {
+      l0::Kernel& k = kernel(kernels::head_cand_variant(K), "head_cand_gather", 256);
+      k.arg_ptr(0, lm.mem.ptr());
+      k.arg_ptr(1, lm.scales->ptr());
+      k.arg_ptr(2, cand);
+      k.arg_ptr(3, cw);
+      k.arg_ptr(4, cs);
+      k.arg_ptr(5, gate);
+      launch(k, kCapM * C * (K / 16) / 256);
+    }
+    {
+      l0::Kernel& k = kernel(kernels::gated_variant(kernels::gemm_sm_variant(kCapM, tx), 2),
+                             kernels::gemm_sm_entry(kCapM, tx), kernels::gemm_sm_wg_size(kCapM, tx));
+      k.arg_ptr(0, cw);
+      k.arg_ptr(1, cs);
+      k.arg_ptr(2, b_.x.ptr());
+      k.arg_ptr(3, score);
+      k.arg_ptr(4, gate);
+      launch(k, NC / kernels::gemm_sm_cols(tx), kernels::gemm_sm_grid_y(tx));
+    }
+    {
+      l0::Kernel& k = kernel(kernels::head_cand_variant(K), "head_cand_argmax", 256);
+      k.arg_ptr(0, score);
+      k.arg_ptr(1, cand);
+      k.arg_ptr(2, b_.argmax_part.ptr());
+      k.arg_ptr(3, gate);
+      launch(k, kCapM);
+    }
+    cand_launches_ += 6;
+  }
+  // PERF-123: `gate` set (cand_gate), the build that skips itself on a greedy step (head_gate.h GATE 1).
+  void gemv_i8w(const loader::DeviceWeight& w, const void* x, const void* out, const void* gate = nullptr) {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Int8, "gemv_i8w bound to a non-int8 weight");
     require(bool(w.scales), "the int8 lm_head has no fp32 row-scale allocation");
     require(s.N % kernels::kGemvI8wCols == 0, "gemv_i8w N is not a multiple of 64");
     // Spec 28b: at M >= 2 a tuned shape binds gemm_sm_i8w - gemv_i8w's arguments and [M][N] output.
     const kernels::SmallMTuning* t = small_m(s.K, s.N, 1, 2);
-    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(kCapM, *t),
-                               kernels::gemm_sm_wg_size(kCapM, *t))
+    require(!gate || t, "a gated int8 head without a gemm_sm_i8w row");
+    l0::Kernel& k = t ? kernel(gate ? kernels::gated_variant(kernels::gemm_sm_variant(kCapM, *t), 1)
+                                    : kernels::gemm_sm_variant(kCapM, *t),
+                               kernels::gemm_sm_entry(kCapM, *t), kernels::gemm_sm_wg_size(kCapM, *t))
                       : kernel(kernels::gemv_i8w_variant(kCapM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, w.scales->ptr());
     k.arg_ptr(2, x);
     k.arg_ptr(3, out);
+    if (gate) k.arg_ptr(4, gate);
     if (t)
       launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
     else
@@ -1319,13 +1494,55 @@ class Capture {
     require(w.router.shape.N == md.router_n() && w.router.shape.K == d_.hidden,
             "the MoE router weight is not [router_n][hidden]");
     head_gemv(w.router, b_.x.ptr(), lg);   // gemv_bf16; the [M][router_n] fp32 logits
+    // PERF-120: the wide row lists' union read (BatchRowsBind::moe_union) - `_U`'s route, its plan (each expert's rows),
+    // the experts' items each a work-group over its rows, and the per-row combine (moe_finish): two launches more.
+    const bool uni = mode_ == Mode::Rows && kCapM > DecodeScratchDims::kM && br_->moe_union;
     const std::string v =
-        kernels::moe_variant(kCapM, md.experts, md.top_k, d_.hidden, md.expert_intermediate);
+        kernels::moe_variant(kCapM, md.experts, md.top_k, d_.hidden, md.expert_intermediate) + (uni ? "_U" : "");
     {
       l0::Kernel& k = kernel(v, "moe_route", md.experts);
       k.arg_ptr(0, lg);
       k.arg_ptr(1, rt);
       launch(k, 1, kCapM);
+    }
+    if (uni) {
+      require(kCapM <= DecodeScratchDims::kWideRowsM && ml.dn != 0, "the MoE union read is built at 16 and 32 rows");
+      void* dn = at(*b_.moe, ml.dn_off);
+      void* plan = at(*b_.moe, ml.plan_off);
+      const uint32_t items = kernels::moe_union_items(kCapM, md.top_k);
+      {
+        l0::Kernel& k = kernel(v, "moe_union_plan", md.experts);
+        k.arg_ptr(0, ctrl());
+        k.arg_ptr(1, rt);
+        k.arg_ptr(2, plan);
+        launch(k, 1);
+      }
+      {
+        l0::Kernel& k = kernel(v, "moe_gate_up_union", kernels::moe_gate_up_wg());
+        k.arg_ptr(0, plan);
+        k.arg_ptr(1, b_.x.ptr());
+        k.arg_ptr(2, w.gate_up.ptr());
+        k.arg_ptr(3, h);
+        launch(k, items * (kernels::moe_gate_up_groups(md.top_k, md.expert_intermediate) / md.slots()));
+      }
+      {
+        l0::Kernel& k = kernel(v, "moe_down_union", 16 * kernels::kMoeUnionTiles * kernels::kMoeDnKs);
+        k.arg_ptr(0, plan);
+        k.arg_ptr(1, h);
+        k.arg_ptr(2, w.down.ptr());
+        k.arg_ptr(3, dn);
+        launch(k, items * (d_.hidden / 16 / kernels::kMoeUnionTiles));
+      }
+      {
+        l0::Kernel& k = kernel(v, "moe_finish", 16);
+        k.arg_ptr(0, ctrl());
+        k.arg_ptr(1, rt);
+        k.arg_ptr(2, dn);
+        k.arg_ptr(3, b_.resid.ptr());
+        launch(k, d_.hidden / 16, kCapM);
+      }
+      split_launches_ += 2;
+      return;
     }
     {
       l0::Kernel& k = kernel(v, "moe_gate_up", kernels::moe_gate_up_wg());
@@ -1485,7 +1702,7 @@ class Capture {
     } else if (lm.kind == model::WeightKind::Int8) {
       require(b_.logits.size() >= size_t(kCapM) * lm.shape.N * sizeof(float),
               "logits is smaller than the int8 head's [M][N] fp32 result");
-      gemv_i8w(lm, b_.x.ptr(), b_.logits.ptr());
+      gemv_i8w(lm, b_.x.ptr(), b_.logits.ptr(), cand_gate());
     } else {
       gemv_bf16(loader::kTopLevel, LinearId::LmHead, b_.x.ptr(), b_.logits);
     }
@@ -1515,6 +1732,7 @@ class Capture {
       k.arg_ptr(1, b_.argmax_part.ptr());
       launch(k, (Qwen35::kVocab + kArgmaxChunk - 1) / kArgmaxChunk, kCapM);
     }
+    if (const void* gate = cand_gate()) head_candidates(lm, gate);
     // argmax_stage2(ctrl, part) - argmax.cl (Task 3), grid (1, 1), WG 256. The
     // only writer of `pos` and `cur_token` inside the list, and therefore the
     // last kernel of the step.
@@ -1668,11 +1886,18 @@ class Capture {
 
   // Spec 19c: what a tap drafter's verify list needs - its slots (one whole gdn_state each, slot 0
   // being gdn_state itself), the tap buffer at [kM][taps][hidden] and the tapped layers.
+  // Plan 40a Task 2: with pending rows (the DEFERRED build) no slot is read or written - only the tap buffer is needed.
   void check_taps() {
-    require(tv_ != nullptr && (tv_->gdn_spec != nullptr || sb_.gdn_spec != nullptr) && tv_->taps != nullptr,
-            "a tap verify list needs its GDN slots and its tap buffer");
+    require(tv_ != nullptr && tv_->taps != nullptr, "a tap verify list needs its tap buffer");
     require(stage_ == nullptr && tap_ == nullptr,
             "a tap verify list is single-card, with no residual tap");
+    if (mode_ == Mode::VerifyTaps && (sb_.gdn_pend || tv_->gdn_pend)) {
+      sites_ = tap_sites(d_, tv_->layers);
+      require(tv_->taps->size() >= size_t(DecodeBuffers::kM) * tv_->layers.size() * d_.hidden * kBf16,
+              "the tap buffer is smaller than [kM][taps][hidden] bf16");
+      return;
+    }
+    require(tv_->gdn_spec != nullptr || sb_.gdn_spec != nullptr, "a tap verify list needs its GDN slots");
     require(tv_->slots == TapVerifyDims::kSlots || (sb_.gdn_spec && tv_->slots == MtpBuffers::kSlots),
             "a tap verify list binds gdn_step_slots_M<M>_N" + std::to_string(TapVerifyDims::kSlots) +
                 " (a slot's own states also _N" + std::to_string(MtpBuffers::kSlots) + "): " +
@@ -1789,7 +2014,7 @@ class Capture {
   void head_front(const void* hidden) {
     const loader::MtpHead& h = *m_.mtp;
     const model::ModelDesc& hd_ = hd();   // spec 17d: the head's own shapes under TP
-    const uint32_t G = DecodeBuffers::kNormGroups, H = hd_.hidden, X = 2 * H;
+    const uint32_t G = DecodeBuffers::kNormGroups, H = hd_.hidden;
     {
       l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM, hd_.hidden), "embed_gather", kWgEmbed);
       k.arg_ptr(0, hctl());
@@ -1797,12 +2022,27 @@ class Capture {
       k.arg_ptr(2, b_.resid.ptr());
       launch(k, 1, kCapM);
     }
-    const std::string fold0 = kernels::prep_res_fold_variant(kCapM, H, 0, G);
-    const std::string cat = kernels::prep_norm_finish_strided_variant(kCapM, H, G, G, X);
-    fold_norm(fold0, cat, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormPreE)),
-              b_.x.ptr());
-    fold_norm(fold0, cat, b_.partials.ptr(), const_cast<void*>(hidden),
-              at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormPreH)), at(b_.x, size_t(H) * kBf16));
+    // PERF-84: both pre-fc norms in one fold (grid 2G: the embedding's chunks, then the hidden's) and one finish
+    // (grid 2G: x[0:H], then x[H:2H]); each half is the one-source pair's arithmetic, bit for bit. Their 2G x M
+    // sums-of-squares go in `partials` (norm_sumsq holds G x M; fc overwrites partials after the finish).
+    {
+      l0::Kernel& k = kernel(kernels::prep_res_fold_pair_variant(kCapM, H, G), "prep_res_fold", kWgResFold);
+      k.arg_ptr(0, b_.norm_sumsq.ptr());   // unread (S_PREV = 0)
+      k.arg_ptr(1, b_.resid.ptr());
+      k.arg_ptr(2, b_.partials.ptr());
+      k.arg_ptr(3, hidden);
+      launch(k, 2 * G, kCapM);
+    }
+    {
+      l0::Kernel& k = kernel(kernels::prep_norm_finish_pair_variant(kCapM, H, G, G), "prep_norm_finish", kWgNormFinish);
+      k.arg_ptr(0, b_.partials.ptr());
+      k.arg_ptr(1, b_.resid.ptr());
+      k.arg_ptr(2, at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormPreE)));
+      k.arg_ptr(3, b_.x.ptr());
+      k.arg_ptr(4, hidden);
+      k.arg_ptr(5, at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormPreH)));
+      launch(k, 2 * G, kCapM);
+    }
     head_gemv(h.fc, b_.x.ptr(), b_.partials.ptr());
     fold_norm(kernels::prep_res_fold_zero_variant(kCapM, H, G),
               kernels::prep_norm_finish_variant(kCapM, H, G, G), b_.partials.ptr(),
@@ -1853,16 +2093,16 @@ class Capture {
 
   // The verify list's tail: only the head's K/V of the M rows are needed (the next
   // drafts attend over them); its output hidden and logits are not, so the walk stops
-  // at attn_prep. 10 launches.
+  // at attn_prep. 8 launches.
   void head_kv_fill(const void* hidden) { head_front(hidden); }
 
   // The draft list: the whole head at M = 1 on (hctl.cur_token[0], dh) at hctl.pos,
   // its post-mtp.norm hidden back into dh (the chain's next `h`), its logits into
-  // MtpBuffers::logits row draft_i_, the argmax into hctl. 23 launches and one copy -
+  // MtpBuffers::logits row draft_i_, the argmax into hctl. 21 launches and one copy -
   // with a draft vocabulary too (spec 8 §11: the compact GEMV and the two dv_argmax
   // stages replace lm_head and the two argmax stages one for one; mtp_gpu_test's gate
-  // checks 23 on whichever head it loaded, mtp_gpu_dv128k_test with V'). Spec 15e: a MoE
-  // head's FFN is the four-launch MoE block in place of gate||up, SiLU, down - 24.
+  // checks 21 on whichever head it loaded, mtp_gpu_dv128k_test with V'). Spec 15e: a MoE
+  // head's FFN is the four-launch MoE block in place of gate||up, SiLU, down - 22.
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
     const model::ModelDesc& hd_ = hd();   // spec 17d: the head's own shapes under TP
@@ -2061,7 +2301,8 @@ class Capture {
   // The list's M (rows in flight). Named like the constant it replaced so the
   // binding sites read unchanged; set once, before the walk.
   const uint32_t kCapM;
-  size_t split_launches_ = 0;   // spec 32e: the further launches of a deep list's row-chunked bf16 GEMVs
+  size_t split_launches_ = 0;
+  size_t cand_launches_ = 0;    // PERF-123: the greedy head's six launches (head_candidates)   // spec 32e: the further launches of a deep list's row-chunked bf16 GEMVs
   const MtpBuffers* mtp_;
   const Mode mode_;
   const uint32_t draft_i_;
@@ -2100,8 +2341,10 @@ class Capture {
 
 }  // namespace
 
-size_t tp_launches(const model::ModelDesc& d) { return decode_launches(d) + 2 * size_t(d.layers); }
-size_t tp_verify_launches(const model::ModelDesc& d) { return tp_launches(d) + 10; }
+size_t tp_launches(const model::ModelDesc& d, bool folded) {
+  return decode_launches(d) + (folded ? 0 : 2 * size_t(d.layers));
+}
+size_t tp_verify_launches(const model::ModelDesc& d) { return tp_launches(d, true) + 8; }
 
 CapturedStep build_tp(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TpLink& link,
                       l0::Mem* debug_resid) {
@@ -2128,18 +2371,18 @@ size_t decode_launches(const model::ModelDesc& d) {
   return 1 + size_t(d.layers) * (d.is_moe() ? 13 : 12) + 5;
 }
 
-// Spec 15e: the head's KV fill (head_front: embed, the two pre-fc norm pairs, fc, the
-// zero-residual fold pair, q||k||v, attn_prep) after the decode list at M rows.
-size_t verify_launches(const model::ModelDesc& d) { return decode_launches(d) + 10; }
+// Spec 15e: the head's KV fill (head_front: embed, the pre-fc norms' fold and finish (PERF-84: both norms in one
+// pair), fc, the zero-residual fold pair, q||k||v, attn_prep) after the decode list at M rows.
+size_t verify_launches(const model::ModelDesc& d) { return decode_launches(d) + 8; }
 
 // Spec 13c: the row list - the decode list, and with the head its KV fill plus the gather (capture.h, build_rows).
 size_t rows_launches(const model::ModelDesc& d, bool head) { return head ? verify_launches(d) + 1 : decode_launches(d); }
 
-// head_front 10, the attention pair 2, o 1, the post norm pair 2, the FFN (gate||up,
+// head_front 8, the attention pair 2, o 1, the post norm pair 2, the FFN (gate||up,
 // SiLU, down: 3; a MoE head's router, route, gate||up, down: 4), the final norm pair 2,
 // lm_head and the two argmax stages 3.
 size_t draft_launches(const model::ModelDesc& d) {
-  return 10 + 2 + 1 + 2 + (d.mtp_head_moe() ? 4 : 3) + 2 + 3;
+  return 8 + 2 + 1 + 2 + (d.mtp_head_moe() ? 4 : 3) + 2 + 3;
 }
 
 ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {
@@ -2177,9 +2420,11 @@ CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, Decode
 
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const TapVerify& tv, uint32_t M, const CaptureOptions& opt, const SlotBind& slot) {
-  if (M == 0 || M > tv.slots || M > DecodeBuffers::kM)
-    throw std::runtime_error("runtime::build_verify_taps: M " + std::to_string(M) +
-                             " is outside [1, " + std::to_string(tv.slots) + "] (TapVerify::slots)");
+  // Plan 40a Task 2: with pending rows (the DEFERRED build) the rows need no slot each - only the list's rows bound M.
+  const uint32_t most = slot.gdn_pend || tv.gdn_pend ? DecodeBuffers::kM : std::min(tv.slots, DecodeBuffers::kM);
+  if (M == 0 || M > most)
+    throw std::runtime_error("runtime::build_verify_taps: M " + std::to_string(M) + " is outside [1, " +
+                             std::to_string(most) + "] (TapVerify::slots, or the list's rows with pending rows)");
   return Capture(ctx, m, b, tv, M).options(opt).slot(slot).run();
 }
 
@@ -2241,9 +2486,9 @@ CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, De
 
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
                         uint32_t M, ProfileEvents* prof) {
-  if (M == 0 || M > DecodeBuffers::kM)
+  if (M == 0 || (M > DecodeBuffers::kM && M != 16 && M != DecodeScratchDims::kWideRowsM))   // plan 40a Task 3: 16, 32
     throw std::runtime_error("runtime::build_rows: M " + std::to_string(M) + " is outside [1, " +
-                             std::to_string(DecodeBuffers::kM) + "]");
+                             std::to_string(DecodeBuffers::kM) + "] and not 16 or 32");
   return Capture(ctx, m, b, br, M, prof).run();
 }
 

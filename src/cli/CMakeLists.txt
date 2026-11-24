@@ -14,7 +14,7 @@
 # changes runtime::build's 774 launches or its 19 modules.
 add_executable(b70-decode b70_decode.cc)
 target_include_directories(b70-decode PRIVATE ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70-decode PRIVATE b70_runtime b70_loader b70_model b70_l0 b70_prefill_host)
+target_link_libraries(b70-decode PRIVATE b70_runtime b70_loader b70_model b70_l0 b70_prefill_host b70_inkling2_runtime)
 b70_target_kernel_dir(b70-decode)
 get_property(ALL_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 # BUILDSYSTEM_TARGETS is per-directory and does not recurse, so the prefill

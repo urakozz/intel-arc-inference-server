@@ -5,6 +5,8 @@
 #include "kernels/shape_suffix.h"
 
 namespace model {
+
+bool is_inkling2_model_type(std::string_view type) { return type == "inkling2_loop"; }
 namespace {
 
 static_assert(kLinearCount == 8, "LinearId grew: add the row below and re-check the shape table");

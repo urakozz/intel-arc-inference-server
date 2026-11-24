@@ -869,3 +869,30 @@ Read a future three-way disagreement like this:
   in this directory, or run it with `python -P`.
 - **Never give the container a memory limit** and run one prompt at a time; the
   box has 121 GB and the dequantised model wants a large fraction of it.
+
+### Inkling 2 Mini text oracle
+
+Run from the repository root in a CPU Python environment. Install the
+dependencies in `tools/oracle/inkling2_requirements.txt` using a CPU Torch
+wheel. The self-test loads the tiny checkpoint through the pinned
+Transformers model and checks every visit and logits in FP32 and BF16.
+The upstream loader dequantizes the parity fixture in FP32 before its
+forward weights are cast. This retains the release's FP32 NVFP4 outer scale.
+
+```sh
+python -m pytest -q tools/oracle/test_inkling_ref.py
+python -m tools.oracle.inkling_make_tiny oracle-out-inkling2-tiny/checkpoint
+printf '%s\n' '3 7 11 19 31 3 7 11 19 31 3 7 11 19 31 3 7 11 19 31' > oracle-out-inkling2-tiny/prompt.ids
+python -m tools.oracle.inkling_ref run oracle-out-inkling2-tiny/checkpoint \
+  --prompt oracle-out-inkling2-tiny/prompt.ids --out oracle-out-inkling2-tiny/prose.golden.safetensors \
+  --dtype fp32 --gen 8 --chunk 8
+python -m tools.oracle.inkling_ref acceptance oracle-out-inkling2-tiny/checkpoint \
+  --prompt oracle-out-inkling2-tiny/prompt.ids --rounds 8
+```
+
+The golden file contains `logits`, `tokens`, `nll`, and the visit traces
+`H.L*`, `route.ids.L*`, `route.w.L*`, and `route.gap.L*`. The iteration
+suffix is the visit index. `K.L*` and `V.L*` hold each visit's remaining KV
+after generation, and `tap.*` contains the configured DSpark inputs.
+The acceptance command uses synthetic post-dense draft rows and the recurrent
+head against greedy target tokens. Dense draft inference is outside this check.

@@ -12,7 +12,7 @@
 //      only its verify slots - pp_gdn_spec_bytes, against the binaries' SPEC_SLOT_STRIDE;
 //   3. the block shadows: two of each device's GDN state + conv ring (+ device 1's hidden row
 //      with MTP), only with a prefill path;
-//   4. the stage verify lists' launches add up to verify_launches (decode_launches + 10) at
+//   4. the stage verify lists' launches add up to verify_launches (decode_launches + 8) at
 //      every legal split of Qwen3.8 and Ornith;
 //   5. pp_kv_runs: a two-device "save" of synthetic KV equals the one-card save (Engine's
 //      kv_runs, restated here) byte for byte - bf16 and int8, with and without the head's
@@ -235,12 +235,12 @@ void check_verify_launches() {
       if (!legal(*d, s)) continue;
       const std::array<runtime::PpStage, 2> st = runtime::pp_stages(*d, s);
       CHECK_EQ(runtime::pp_stage_verify_launches(*d, st[0]), runtime::pp_stage_launches(*d, st[0]));
-      CHECK_EQ(runtime::pp_stage_verify_launches(*d, st[1]), runtime::pp_stage_launches(*d, st[1]) + 10);
+      CHECK_EQ(runtime::pp_stage_verify_launches(*d, st[1]), runtime::pp_stage_launches(*d, st[1]) + 8);
       CHECK_EQ(runtime::pp_stage_verify_launches(*d, st[0]) + runtime::pp_stage_verify_launches(*d, st[1]),
-               decode + 10);   // verify_launches: 784 / 880 / 536
+               decode + 8);   // verify_launches: 782 / 878 / 534
     }
   }
-  std::printf("verify lists: the stages add up to 784 / 880 / 536 launches at every split\n");
+  std::printf("verify lists: the stages add up to 782 / 878 / 534 launches at every split\n");
 }
 
 // ---- 5 -------------------------------------------------------------------------------------

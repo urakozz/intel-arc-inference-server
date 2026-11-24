@@ -112,7 +112,8 @@ int main(int argc, char** argv) {
   // Spec 39: and one sequence's deferred GDN rows (Engine's gdn_pend: two parities at Qwen3.8's shapes), planned with
   // a drafter since the engine makes them with either proposer.
   CHECK_EQ(on.deep, size_t{103022592});
-  CHECK_EQ(on.total(), off.total() + dr.bytes(32768) + on.drafter_slots + on.drafter_taps + on.deep);
+  // PERF-123: + the verify lists' head choice word (64 B, EngineSizes::head_gate)
+  CHECK_EQ(on.total(), off.total() + dr.bytes(32768) + on.drafter_slots + on.drafter_taps + on.deep + 64);
   const std::string loff = runtime::format_memory("x", off, 32'000'000'000ull),
                     lon = runtime::format_memory("x", on, 32'000'000'000ull);
   CHECK(loff.find("drafter") == std::string::npos && lon.find(" drafter ") != std::string::npos);
@@ -159,8 +160,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  // Plan 19v3b Task 2: sequence slots with the drafter. One slot plans what plan() does; every further slot adds its
-  // drafter session (ring, taps, control, readback) and 4 GDN states (K <= 3); --max-len auto at 2 and 4 slots.
+  // Plan 19v3b Task 2: several sequences with the drafter (spec 31's pool): every further sequence adds its drafter
+  // session (ring, taps, control, readback) and its GDN state; --max-len auto at 2 and 4 sequences.
   {
     constexpr size_t target = 16'812'371'968ull, card = 32'530'000'000ull;
     const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
@@ -170,29 +171,36 @@ int main(int argc, char** argv) {
     CHECK_EQ(hp4.session(32768), s4.ring_k + s4.ring_v + s4.taps + s4.dctl + s4.out);
     CHECK_EQ(s4.ring_k + s4.ring_v, rd::ring_snapshot_bytes(d, 4096));
     for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8}) {
-      const auto one = runtime::plan_slots(q, {65536}, false, target, {}, {}, kv, hp4);
-      const auto ref = runtime::plan(q, 65536, false, target, {}, {}, kv, hp4);
-      CHECK_EQ(one.total(), ref.total());
-      CHECK_EQ(one.drafter, ref.drafter);
-      CHECK_EQ(one.slot_state, size_t(0));
-      const std::vector<uint32_t> lens{65536, 32768, 32768};
-      const auto three = runtime::plan_slots(q, lens, false, target, {}, {}, kv, hp4);
-      const size_t states = size_t(2) * runtime::SlotDims::kDrafterStates * runtime::PersistentDims::sizes(0, q).gdn_state;
-      CHECK_EQ(three.slot_state, runtime::SlotDims::sizes(q, 3, false, runtime::slots_kv_len(lens) / runtime::kKvPage,
-                                                          true).total() + 2 * hp4.session(32768) + hp4.rows);
-      // Spec 39: the row tables (two of [8 + 8 x 4] u32) and the row lists' taps, once beside several slots - the
-      // allocations DFlashBuffers::add_sessions makes, unplanned before.
-      CHECK_EQ(hp4.rows, size_t{2} * (8 + 8 * 4) * 4 + s4.taps);
-      CHECK_EQ(runtime::SlotDims::sizes(q, 3, false, 0, true).states, states);
-      CHECK_EQ(three.drafter, hp4.bytes(runtime::slots_kv_len(lens)));
-      CHECK_EQ(three.drafter_slots, runtime::TapVerifyDims::gdn_spec_bytes(q));   // slot 0's 7 more
+      const auto one = runtime::plan(q, 65536, false, target, {}, {}, kv, hp4);
+      const runtime::PoolShape ps{3, 64, 65536};   // 131072 positions, a request up to 65536
+      const auto three = runtime::plan_pool(q, ps, false, target, {}, kv, hp4);
+      // Plan 40a Task 2: every sequence of several one GDN state, its committed rows pending (EngineSizes::gdn_pend).
+      const size_t states = size_t(2) * runtime::PersistentDims::sizes(0, q).gdn_state;
+      CHECK_EQ(three.slot_state, runtime::SlotDims::sizes(q, 3, false, runtime::pool_table_pages(ps)).total() +
+                                     2 * hp4.session(65536) + hp4.rows);
+      // Spec 39: the row tables (two of [32 + 8 x 4] u32 since plan 40a Task 4) and the row lists' taps, once beside
+      // several slots - the allocations DFlashBuffers::add_sessions makes, unplanned before; plan 40a Task 3: the taps
+      // of 32 rows; Task 4: the draft scratch grown from 8 to the batched pass's 32 rows.
+      const rd::DFlashSizes w4 = rd::sizes(d, 5120, V, 4096, loader::DraftFormat::Int4G64, true, 32);
+      CHECK_EQ(rd::seqs_rows(loader::DraftFormat::Int4G64, true), 32u);
+      CHECK_EQ(rd::seqs_rows(loader::DraftFormat::Int8, false), 8u);
+      CHECK_EQ(w4.taps, s4.taps);
+      CHECK_EQ(w4.logits, s4.logits / 7 * 31);
+      CHECK_EQ(hp4.rows, size_t{2} * (32 + 8 * 4) * 4 + s4.taps * 4 + (w4.total() - s4.total()));
+      std::printf("the batched pass's scratch at 32 rows: %.1f MB more than the block's 8\n",
+                  double(w4.total() - s4.total()) / 1e6);
+      CHECK_EQ(runtime::SlotDims::sizes(q, 3, false, 0).states, states);
+      CHECK_EQ(three.drafter, hp4.bytes(65536));   // the first sequence's drafter at the cap
+      CHECK_EQ(three.drafter_slots, size_t(0));   // no verify slots beside several sequences
+      CHECK_EQ(three.deep, runtime::EngineDims::sizes(q, kv, 0, 3, false, true).gdn_pend);   // three sequences' rows
+      CHECK_EQ(one.drafter_slots, runtime::TapVerifyDims::gdn_spec_bytes(q));   // one sequence's 7 more
       for (uint32_t seqs : {2u, 4u}) {
-        const uint32_t s0 = runtime::slot0_len_that_fits(q, seqs, false, target, card, reserve, 262144, {}, kv, hp4);
-        const uint32_t m0 = runtime::slot0_len_that_fits(q, seqs, false, target, card, reserve, 262144, {}, kv);
-        CHECK(s0 <= m0);
-        std::printf("DFlash slots --max-len auto on 32.530 GB, %s KV, packed int4 drafter: %s (%u slots; without the "
-                    "drafter slot 0 %u)\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16",
-                    s0 ? runtime::slot_layout_name(runtime::slot_layout(s0, seqs)).c_str() : "does not fit", seqs, m0);
+        const runtime::PoolShape s0 = runtime::pool_that_fits(q, seqs, false, target, card, reserve, 262144, {}, kv, hp4);
+        const runtime::PoolShape m0 = runtime::pool_that_fits(q, seqs, false, target, card, reserve, 262144, {}, kv);
+        CHECK(s0.pages <= m0.pages);
+        std::printf("DFlash --max-num-seqs %u --max-len auto on 32.530 GB, %s KV, packed int4 drafter: %u pages, one "
+                    "request up to %u (without the drafter %u pages)\n", seqs,
+                    kv == runtime::KvCache::Int8 ? "int8" : "bf16", s0.pages, s0.cap, m0.pages);
       }
     }
   }
@@ -263,8 +271,7 @@ int main(int argc, char** argv) {
     const size_t device = 32530000000ull, reserve = size_t(runtime::kDefaultReserveGb * 1e9);
     const runtime::DrafterPlan dp = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int8);
     std::printf("drafter session: %zu B + %zu B a position\n", dp.session_fixed, dp.session_per_position);
-    std::printf("| --max-num-seqs | KV | pool (DFlash, MTP off) | one request up to | sessions at the cap GB | fixed "
-                "slots | their sessions GB |\n");
+    std::printf("| --max-num-seqs | KV | pool (DFlash, MTP off) | one request up to | sessions at the cap GB |\n");
     for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8})
       for (uint32_t seqs = 2; seqs <= runtime::SlotDims::kMaxSeqs; ++seqs) {
         const runtime::PoolShape ps = runtime::pool_that_fits(q, seqs, false, w, device, reserve, 262144, {}, kv, dp);
@@ -272,12 +279,8 @@ int main(int argc, char** argv) {
         const runtime::MemoryPlan pp = runtime::plan_pool(q, ps, false, w, {}, kv, dp);
         CHECK(pp.total() + reserve <= device);
         CHECK_EQ(pp.drafter, dp.bytes(ps.cap));   // the first sequence's drafter at the cap
-        const uint32_t slot0 = runtime::slot0_len_that_fits(q, seqs, false, w, device, reserve, 262144, {}, kv, dp);
-        std::printf("| %u | %s | %u pages = %llu positions | %u | %.3f | %s | %.3f |\n", seqs,
-                    runtime::kv_cache_name(kv), ps.pages, static_cast<unsigned long long>(ps.positions()), ps.cap,
-                    (seqs - 1) * dp.session(ps.cap) / 1e9,
-                    slot0 != 0 ? runtime::slot_layout_name(runtime::slot_layout(slot0, seqs)).c_str() : "none fits",
-                    (seqs - 1) * dp.session(runtime::SlotDims::kShortLen) / 1e9);
+        std::printf("| %u | %s | %u pages = %llu positions | %u | %.3f |\n", seqs, runtime::kv_cache_name(kv), ps.pages,
+                    static_cast<unsigned long long>(ps.positions()), ps.cap, (seqs - 1) * dp.session(ps.cap) / 1e9);
       }
   }
   std::printf("dflash_plan_test: PASS\n");

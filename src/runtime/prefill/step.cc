@@ -148,7 +148,7 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   if (kv8) {   // spec 12b: the same three launches over the int8 cache
     attn_prep_chunk_kv8(cx, kc, s, C, ctrl, s.partials.as<float>(),
                         small.gdn.as<float>(), m.rope.as<float>(), lay, pages,
-                        kv8_int8_scores(d, backend, pos, C));
+                        kv8_int8_scores(d, backend, pos, C), !pages && kv8_own_rows(d, backend, pos, C));
     profile_wait(cx, Phase::kAttnPrep);
     attn_chunk_kv8(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), lay, backend, pages);
     attn_gate_chunk_kv8(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
@@ -248,7 +248,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     // layer is l0's. A MoE model passes its backend as it is (its mixer linears are l0's at every C).
     const PrefillBackend mixer_b = d.is_moe() ? backend : dense_mlp_backend(backend, C);
     mixer_body(cx, kc, s, m, ctrl, pos, C, L, small, gdn_base, ring_base, kv_base, kv_k_mem, kv_v_mem, kv,
-               mixer_b, q, gdn, fa, w.first == 0 && w.last == d.layers, nullptr, pages);   // one card: every layer
+               mixer_b, q, gdn, fa, true, nullptr, pages);   // one card and a pipeline stage: the same GDN form (bitwise rings)
 
     // Spec 15d: a MoE model's FFN - the post-attention norm into x (pitch hidden), then
     // the routed experts and the shared expert through the grouped GEMMs, folded into
@@ -745,8 +745,8 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   }
   const PrefillBackend gdn_b = b;
   b = dense_mlp_backend(b, C);   // PERF-88: walk_layers' binding (step_tp_unit is not counted here)
-  // a pipeline stage's layer (step_stage_launches): never the one-card GDN walk
-  return (gdn ? l0_gdn_layer_launches(d, gdn_b, b, C, false) : l0_fa_layer_launches(d, b, C, pos, kv)) + widen;
+  // a pipeline stage's layer (step_stage_launches): the one-card GDN walk, so a stage's rows are one card's bitwise
+  return (gdn ? l0_gdn_layer_launches(d, gdn_b, b, C, true) : l0_fa_layer_launches(d, b, C, pos, kv)) + widen;
 }
 
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,

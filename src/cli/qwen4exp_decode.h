@@ -188,7 +188,7 @@ inline void print_pf_rows(const runtime::qwen4exp::PfChunkChoice& c) {
 // The layer count, placement and max_len for this run, from the planner (before the load: each layer goes straight
 // onto its device). `full` is the checkpoint's descriptor (all its layers). Prints the choice and the plan.
 // Without --layers the whole model loads with the expert tier: each card's VRAM left after the rest of the plan holds
-// the most-routed experts (the routing profile beside the checkpoint, else id order), the rest pinned host memory.
+// the most-routed experts (the routing profile in or beside the snapshot, else id order), the rest pinned host memory.
 // B70_Q4_RESIDENT (a test placement, runtime::qwen4exp::fill_tier) forces the residents at any layer count.
 // Host memory (plan 21-QFN-v2a Task 8): the PLE table, the experts' host mirrors and an explicit prefix cache are pinned
 // beside the cards - they must fit MemAvailable less 16 GiB (loader::check_q4_host_fit) before anything is pinned;

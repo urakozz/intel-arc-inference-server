@@ -143,7 +143,7 @@ struct PrefillScratch : PrefillScratchDims {
   // PrefillScratchDims. `kC` in the comments below is this scratch's chunk_cap().
 
   // Throws std::invalid_argument for a cap check_prefill_chunk_cap refuses. `kv8_len` (3j): the most positions one
-  // sequence holds - the longest spec 13c slot; 0 = max_len (one sequence, and the two-card pipeline).
+  // sequence holds - the pool's per-request cap; 0 = max_len (one sequence, and the two-card pipeline).
   PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap,
                  uint32_t kv8_len = 0);
 
@@ -179,8 +179,8 @@ struct PrefillScratch : PrefillScratchDims {
   std::unique_ptr<l0::Mem> moe;
   uint32_t max_len;
   // 3j: the positions kv8_raw_buffer() holds, K's then V's at k + kv8_len x kv-heads x 256. One sequence prefills at
-  // a time and its rows are slot-relative (kv_base apart), so with sequence slots it is the LONGEST slot, not
-  // max_len (their sum) - runtime::plan_slots counts it the same way.
+  // a time and its rows are slot-relative (kv_base apart), so with several sequences it is the per-request cap, not
+  // max_len (the pool's positions) - runtime::plan_pool counts it the same way.
   uint32_t kv8_len;
 
   // The most rows a chunk may have in this scratch (plan 5d): every per-chunk buffer above
@@ -211,6 +211,7 @@ struct PrefillScratch : PrefillScratchDims {
   l0::Mem& pf_s_buffer();      // fp32 [s_heads()][kC][max_len]  S = QK^T
   l0::Mem& pf_p_buffer();      // bf16 [s_heads()][kC][max_len]  P = softmax(S)
   l0::Mem& kv8_raw_buffer();   // bf16 [2][kv8_len][4][256], exact int8 values, scales applied by flash
+                               // (PERF-107: a tp card's l0-int8 split chunk, its own rows as their rotated bf16)
   // Phase 3 Task 2 (MoE, l0): weight `w`'s pf_gemm B slab, `bytes` long, allocated on the first call (`fresh` true:
   // the caller fills it - prefill::tiled_slab) and kept for the session; runtime::route_slab_bytes counts them.
   l0::Mem& gemm_slab(const void* w, size_t bytes, bool& fresh);
@@ -332,7 +333,7 @@ struct EnginePrefillBuffers {
 // Spec 39: runtime::Engine's own allocations (EngineSizes, runtime/buffer_sizes.h: what each is and when it is made),
 // each null until the engine makes it from its EngineSizes member.
 struct EngineBuffers {
-  std::unique_ptr<l0::Mem> tap, df_slots, gdn_pend, gdn_x, conv_x;
+  std::unique_ptr<l0::Mem> tap, df_slots, gdn_pend, gdn_x, conv_x, head_gate;
   size_t bytes() const;
   void zero(l0::CmdList& imm);   // the zero_on_reset ones: the drafter's slots
 };

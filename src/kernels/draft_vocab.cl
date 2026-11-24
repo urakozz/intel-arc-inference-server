@@ -26,7 +26,7 @@
 // compact logits at V''s ids. The -inf entries are written once (MtpBuffers::zero, at
 // construction and every reset - nothing else writes those entries); the V' entries change
 // every draft and are written here, by the lanes that already hold them in registers: one
-// extra store per logit and no extra launch, so the draft list keeps its 23 launches with
+// extra store per logit and no extra launch, so the draft list keeps its 21 launches with
 // or without V'. A greedy draft never reads the row; the stores cost NV * 4 B (at most
 // 512 KiB, against the 671 MB the compact GEMV reads at 128k).
 //

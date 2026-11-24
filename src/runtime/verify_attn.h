@@ -117,4 +117,10 @@ inline uint32_t verify_attn_deep_from(uint32_t M, bool kv8, uint32_t q_heads, ui
   return verify_attn_kind(M, kDpasNever - 1, kv8, q_heads, kv_heads) == VerifyAttn::Dpas ? r->dpas_from : kDpasNever;
 }
 
+// PERF-120 (plan 40a Task 7): the key blocks a row of a list's DPAS verify attention (its TGT and its v2 reduce's) - 8
+// at M = 8 (the DFlash K 7 verify, one card, a pipeline stage, a TP card, paged or not: -2.6 % at depth 4k, -5.6 % at
+// 30k against 32, bf16 KV; 4 and 2 lose at 30k), v2's 32 at every other M (2 and 4 rows within 0.1 % at any count).
+inline constexpr uint32_t kVerify8AttnBlocks = 8;
+inline constexpr uint32_t verify_attn_blocks(uint32_t M) { return M == 8 ? kVerify8AttnBlocks : 32; }
+
 }  // namespace runtime

@@ -34,10 +34,17 @@
 #endif
 #define G (NH / NKV)
 #define P (G * M)
+#if FULL_TARGETS
+#define TGT FULL_TARGETS
+#else
 #define TGT (RING / PB)
+#endif
 #define PART (HD + 2)
 #if (RING % PB) != 0 || RING < WIN
 #error "RING must be a multiple of PB and at least WIN"
+#endif
+#if FULL_TARGETS && WGA != HD
+#error "full context draft attention needs one work-item per head channel"
 #endif
 #if HD < M || (HD & (HD - 1)) != 0
 #error "df_attn_reduce's lanes are the head dim: HD must be a power of two and at least M"
@@ -71,6 +78,70 @@ inline float df_exp(float x) {
   return y * as_float((uint)((int)n + 127) << 23);
 }
 
+#if FULL_TARGETS
+// The growing context uses a fixed number of partitions. Each partition
+// streams score tiles and emits one online-softmax partial, so scratch
+// does not grow with context. Block K/V are still merged by df_attn_reduce.
+__attribute__((reqd_work_group_size(WGA, 1, 1)))
+__kernel void df_attn_part(__global const uint* restrict ctrl, __global const uint* restrict dctl,
+                           __global const float* restrict q, __global const ushort* restrict kv_k,
+                           __global const ushort* restrict kv_v, const float scale, __global float* restrict part) {
+  __local float qs[P * HD], scores[P * PB], rescale[P], tile_max[P], tile_sum[P];
+  const uint kvh = get_group_id(0), block = get_group_id(1), lid = get_local_id(0);
+  const uint p = ctrl[CTRL_POS], K = dctl[DCTL_K];
+  const uint stride = ((p + PB * TGT - 1) / (PB * TGT)) * PB;
+  const uint start = block * stride, end = min(start + stride, p);
+  for (uint e = lid; e < P * HD; e += WGA) {
+    const uint pr = e / HD, d = e % HD, gh = pr / M, r = pr % M;
+    qs[e] = r <= K ? q[((size_t)r * NH + kvh * G + gh) * HD + d] : 0.f;
+  }
+  float acc[P];
+  for (uint pr = 0; pr < P; ++pr) acc[pr] = 0.f;
+  if (lid < P) { tile_max[lid] = -INFINITY; tile_sum[lid] = 0.f; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (uint base = start; base < end; base += PB) {
+    const uint live = min(end - base, (uint)PB);
+    for (uint t = lid; t < live; t += WGA) {
+      const __global ushort* k = kv_k + ((size_t)(base + t) * NKV + kvh) * HD;
+      for (uint pr = 0; pr < P; ++pr) {
+        float dot = 0.f;
+        for (uint i = 0; i < HD; ++i) dot += qs[pr * HD + i] * bf16f(k[i]);
+        scores[pr * PB + t] = dot * scale;
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (lid < P) {
+      float mx = tile_max[lid];
+      for (uint t = 0; t < live; ++t) mx = fmax(mx, scores[lid * PB + t]);
+      const float a = df_exp(tile_max[lid] - mx);
+      float z = 0.f;
+      for (uint t = 0; t < live; ++t) {
+        const float w = df_exp(scores[lid * PB + t] - mx);
+        scores[lid * PB + t] = w;
+        z += w;
+      }
+      rescale[lid] = a;
+      tile_max[lid] = mx;
+      tile_sum[lid] = tile_sum[lid] * a + z;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint pr = 0; pr < P; ++pr)
+      acc[pr] *= rescale[pr];
+    for (uint t = 0; t < live; ++t) {
+      const float v = bf16f(kv_v[((size_t)(base + t) * NKV + kvh) * HD + lid]);
+      for (uint pr = 0; pr < P; ++pr) acc[pr] += v * scores[pr * PB + t];
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  for (uint pr = 0; pr < P; ++pr) {
+    const uint gh = pr / M, r = pr % M;
+    __global float* o = part + (((size_t)(kvh * G + gh) * TGT + block) * M + r) * PART;
+    o[2 + lid] = acc[pr];
+    if (lid == 0) { o[0] = tile_max[pr]; o[1] = tile_sum[pr]; }
+  }
+}
+#else
 __attribute__((reqd_work_group_size(WGA, 1, 1)))
 __kernel void df_attn_part(__global const uint* restrict ctrl, __global const uint* restrict dctl,
                            __global const float* restrict q, __global const ushort* restrict ring_k,
@@ -92,7 +163,11 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     __global const ushort* k = ring_k + ((size_t)slot * NKV + kvh) * HD;
     for (uint pr = 0; pr < P; ++pr) {
       const uint r = pr % M;
+#if FIXED_DRAFT_WINDOW
+      const long lo = (long)p - WIN;
+#else
       const long lo = (long)p + (long)r - (long)(WIN - 1);
+#endif
       float sc = -INFINITY;
       if (pos >= 0 && pos >= lo && r <= K) {
         float a = 0.0f;
@@ -139,6 +214,8 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     }
   }
 }
+
+#endif
 
 __attribute__((reqd_work_group_size(HD, 1, 1)))
 __kernel void df_attn_reduce(__global const uint* restrict ctrl, __global const uint* restrict dctl,

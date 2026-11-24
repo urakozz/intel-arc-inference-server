@@ -159,6 +159,9 @@ struct BatchEngineIface {
   // rows' K to it - every row keeps its pending id, the drafts go to the longest-running requests first - and feeds
   // each request's policy the K it was given.
   virtual uint32_t row_budget(uint32_t /*active*/) { return 0; }
+  // Plan 40a Task 5: a step's cost in plain steps when its rows draft `ks` (one entry a row; server::RowCost) - the
+  // scheduler then deals the drafts for the most expected ids per cost within the budget; 0: no table (the deal above).
+  virtual double row_cost(const std::vector<uint32_t>& /*ks*/) { return 0; }
   // Replica x slots: the budget of one card's step when `active` of its rows decode - with overlaps_prefill() the
   // scheduler deals each card's rows their drafts against that card's own budget (each card runs its own step).
   virtual uint32_t card_row_budget(uint32_t /*card*/, uint32_t active) { return row_budget(active); }
@@ -175,7 +178,7 @@ struct BatchEngineIface {
   }
 
   // Spec 31: an engine whose slots share one pool of KV pages, each page block() positions (kv_pool_pages() > 0; 0 =
-  // fixed slot lengths, every engine before). slot_max_len is then the per-request cap, the same for every slot. A
+  // no pool: each slot its own fixed length - one request on a card, or a test engine). slot_max_len is then the per-request cap, the same for every slot. A
   // slot holds pages_held(slot) pages; take_pages(slot, upto) makes them cover positions [0, upto), those its next
   // step writes its own (a shared one copied) - false when the free pages do not cover it. reset(slot) gives all of
   // the slot's pages back (an idle session evicted: its next request restarts from the prefix cache); load_kv takes

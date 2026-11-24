@@ -150,8 +150,8 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // linears, and the host time. 0 for a dense head or an int4-shipped one.
   size_t mtp_rtn_linears = 0;
   double mtp_rtn_seconds = 0;
-  size_t total() const;             // the eight byte fields above, + moe_bytes and
-                                    // ab_prefill_bytes below
+  size_t total() const;             // the eight byte fields above, + moe_bytes,
+                                    // ab_prefill_bytes and cand_head_bytes below
   // **`W`, as this load actually measured it** - the bytes a decode step
   // streams: everything in total() except `embed_tokens` (gathered one row per
   // token) and the RoPE table (~256 B per token). It is a FIELD rather than a
@@ -184,6 +184,8 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   // resident, in total(), NOT in read_per_token - decode never reads it. 0 when the
   // checkpoint ships a||b bf16 (prefill then reads the decode weight itself).
   size_t ab_prefill_bytes = 0;
+  // PERF-123: LoadedModel::cand_head's device bytes when the loader's caller built it (in total(), not per-token).
+  size_t cand_head_bytes = 0;
 };
 
 struct LoadedModel {
@@ -212,6 +214,11 @@ struct LoadedModel {
   // GDN layer index, its bf16 copy dequantised once at load by the prefill dequant's
   // arithmetic (loader/ab.h) - what prefill's pf_ab_proj reads. Empty when a||b is bf16.
   std::map<uint32_t, DeviceWeight> ab_prefill;
+  // PERF-123: a 2-bit copy of the int8 lm_head (gemm_sm's layout 3, loader::candidate_head2; Qwen3.8: 357,580,800 B)
+  // that a one-card engine's greedy verify lists scan for candidates before rescoring them on the int8 head. Built
+  // beside the MTP head by the CLI (cli::dflash::main_candidate_head, in report.cand_head_bytes), or a DFlash drafter's
+  // own (runtime::TapDrafter::candidate_head2, shared). Null: every verify runs the full head.
+  std::shared_ptr<const DeviceWeight> cand_head;
 };
 
 // The bf16 a||b weight prefill's pf_ab_proj reads for GDN layer `layer`: the int4

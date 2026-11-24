@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "l0/cmdlist.h"
@@ -118,10 +119,15 @@ class TapDrafter : public TapSink {
     uint32_t slot = 0, row0 = 0, n = 0, pos = 0;
   };
   virtual l0::Mem& rows_taps() = 0;
+  // PERF-123: the drafter's 2-bit copy of the target's int8 head (gemm_sm's layout 3) when it has one, which the
+  // engine's greedy verify lists read too (loader::LoadedModel::cand_head); null otherwise.
+  virtual std::shared_ptr<const loader::DeviceWeight> candidate_head2() const { return nullptr; }
   virtual l0::CmdList& rows_projection(const std::vector<RowsCommit>& commits) = 0;
   // Plan 19v3b, the batched draft: ONE pass of the block's 8 rows shared by the runs - each run a slot's block of k + 1
   // rows (its anchor cur_token[0] at its pos, k drafts, 1 <= k <= its max_verify_k(); greedy at temperature 0, else
-  // the Gumbel walk keyed by `seed`), in run order, at most 8 rows. Each slot's drafts land in its Control's
+  // the Gumbel walk keyed by `seed`), in run order, at most draft_rows_max() rows (plan 40a Task 4: past 8, a pass of
+  // up to four blocks of 8 - each run its own block - where the drafter has one; the row steps' commits then reach
+  // that many rows too). Each slot's drafts land in its Control's
   // cur_token[1..k] (what Engine::verify_rows reads) and its session's readback (readback(slot)). Any deferred
   // projection runs first.
   struct DraftRun {
@@ -130,6 +136,7 @@ class TapDrafter : public TapSink {
     uint64_t seed = 0;
   };
   virtual void draft_rows(Engine& e, const std::vector<DraftRun>& runs) = 0;
+  virtual uint32_t draft_rows_max() const = 0;
   virtual const dflash::DFlashDraftOut& readback(uint32_t slot) = 0;
 };
 

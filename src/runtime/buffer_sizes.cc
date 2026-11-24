@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include "kernels/batch_kernels.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/shape_suffix.h"
 #include "runtime/control.h"
@@ -185,6 +186,8 @@ uint32_t DecodeScratchDims::rows(const model::ModelDesc& desc, bool mtp, KvCache
   // PERF-56: Ornith's 16 / 2 attention heads and 30 delta-net layers of 16 / 32 heads
   const bool ornith = desc.fa_q_heads == 16 && desc.fa_kv_heads == 2 && desc.gdn_layers == 30 &&
                       desc.gdn_k_heads == 16 && desc.gdn_v_heads == 32;
+  // plan 40a Task 3: the 16- and 32-row lists across sequences (PERF-120: Ornith's too)
+  if (mtp && seqs > 1 && (qwen || ornith)) return kWideRowsM;
   return mtp && seqs == 1 && kv == KvCache::Bf16 && !draft_vocab && (qwen || ornith) ? kDeepM : kWideM;
 }
 
@@ -226,7 +229,11 @@ MoeScratchLayout moe_scratch_layout(const model::ModelDesc& desc) {
   l.route_off = l.logits_off + l.layer_slots * l.logits_layer;
   l.h_off = l.route_off + l.layer_slots * l.route_layer;
   l.h = kM * m.slots() * m.expert_intermediate * kBf16;
-  l.total = l.h_off + l.h;
+  l.dn_off = l.h_off + l.h;
+  l.dn = size_t{DecodeScratchDims::kWideRowsM} * m.slots() * desc.hidden * kBf16;   // PERF-120
+  l.plan_off = l.dn_off + l.dn;
+  l.plan = size_t{kernels::moe_union_plan_words(DecodeScratchDims::kWideRowsM, m.top_k)} * sizeof(uint32_t);
+  l.total = l.plan_off + l.plan;
   return l;
 }
 
@@ -312,32 +319,25 @@ MtpSizes MtpDims::tp_sizes(uint32_t max_len, const model::ModelDesc& card, const
 uint32_t MtpDims::hh_rows(uint32_t seqs) {
   const uint32_t one = DecodeScratchDims::kM + 1;
   // Open-work 28 / spec 32: one sequence's rows reach the deep verify lists' 64 (the slots' layout keeps kM).
-  return seqs <= 1 ? DecodeScratchDims::kDeepM + 1 : seqs * one + 3 * DecodeScratchDims::kM;
+  return seqs <= 1 ? DecodeScratchDims::kDeepM + 1
+                   : seqs * one + 2 * DecodeScratchDims::kWideRowsM + DecodeScratchDims::kM;
 }
 
 // --- spec 13c: SlotDims --------------------------------------------------------------------
 
 namespace {
-constexpr size_t kCtl = sizeof(Control), kTable = 256;   // runtime::BatchRowTable (batch_rows.h)
+// runtime::BatchRowTable (batch_rows.h): kWideRowsM rows of 32 B since plan 40a Task 3
+constexpr size_t kCtl = sizeof(Control), kTable = size_t{DecodeScratchDims::kWideRowsM} * 32;
 }  // namespace
 
-uint32_t slots_kv_len(const std::vector<uint32_t>& lens) {
-  if (lens.empty()) throw std::invalid_argument("runtime::slots_kv_len: no slot");
-  if (lens.size() == 1) return lens[0];
-  uint64_t total = 0;
-  for (uint32_t l : lens) total += uint64_t(kv_pages(l)) * kKvPage;
-  if (total > 0xFFFFFFFFull) throw std::invalid_argument("runtime::slots_kv_len: the slots' positions overflow 32 bits");
-  return static_cast<uint32_t>(total);
-}
-
-SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages, bool drafter) {
+SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp, uint32_t kv_pages) {
   if (seqs == 0 || seqs > kMaxSeqs)
     throw std::invalid_argument("runtime::SlotDims::sizes: " + std::to_string(seqs) + " sequence slots is outside [1, " +
                                 std::to_string(kMaxSeqs) + "]");
   SlotSizes s;
   if (seqs == 1) return s;
   const size_t more = seqs - 1;
-  s.states = mtp ? 0 : more * (drafter ? kDrafterStates : 1) * gdn_state_bytes(desc);
+  s.states = mtp ? 0 : more * gdn_state_bytes(desc);
   s.rings = more * PersistentDims::sizes(0, desc).conv_ring;
   s.controls = draft_table_at(seqs) + kTable;
   s.pages = size_t(kv_pages) * 4;
@@ -359,10 +359,13 @@ EngineSizes EngineDims::sizes(const model::ModelDesc& desc, KvCache kv, uint32_t
                               bool drafter, bool debug_tap) {
   EngineSizes s;
   if (debug_tap) s.tap = size_t{desc.layers} * desc.hidden * kBf16;
-  if (drafter) s.df_slots = TapVerifyDims::gdn_spec_bytes(desc) + size_t{seqs - 1} * SlotDims::kDrafterStates * gdn_state_bytes(desc);
-  // One sequence with a proposer; plan 31 Task 13: several with the MTP head, each its own pending rows (a lone
-  // request's verify lists the one-slot engine's), no deep lists.
-  if (seqs == 1 ? !(mtp || drafter) : !mtp) return s;
+  // Plan 40a Task 2: several sequences beside a drafter keep their committed rows pending (below), not in states.
+  if (drafter && seqs == 1) s.df_slots = TapVerifyDims::gdn_spec_bytes(desc);
+  if ((mtp || drafter) && ((desc.hidden == 5120 && desc.gdn_layers == 48) || (desc.hidden == 2048 && desc.gdn_layers == 30)))
+    s.head_gate = 64;   // PERF-123: Qwen3.8 and Ornith
+  // One sequence with a proposer; plan 31 Task 13 / plan 40a Task 2: several with the MTP head or a drafter, each its
+  // own pending rows (a lone request's verify lists the one-slot engine's), no deep lists.
+  if (!(mtp || drafter)) return s;
   // The shapes kernels::gdn_defer_built names (engine.cc holds the parities equal to the kernels').
   const bool qwen = desc.gdn_layers == 48 && desc.gdn_k_heads == kernels::kRefGdnKHeads &&
                     desc.gdn_v_heads == kernels::kRefGdnVHeads;

@@ -75,6 +75,15 @@
 #ifndef ZERO_RESID
 #define ZERO_RESID 0
 #endif
+// PERF-84, off by default so every existing binary is unchanged:
+//   PRE_FC_PAIR  the MTP head's two pre-fc norms in one fold and one finish: grid (2 x G, M), group g < G the first
+//                source (`resid`, the embedding -> x[0:K]), g >= G the second (`resid2`, the hidden -> x[K:2K] with
+//                `norm_w2`), the second half's Σx² chunks at sumsq + G·M. Each half's arithmetic and reduction order
+//                is the single-source build's, so both halves keep their bits. Built with S_PREV = 0 (fold) and
+//                X_STRIDE = 2K (finish).
+#ifndef PRE_FC_PAIR
+#define PRE_FC_PAIR 0
+#endif
 
 #define WG_RES 256
 #define WG_FOLD 256
@@ -287,12 +296,23 @@ __kernel void prep_res_norm(__global const float* restrict partials,
 __attribute__((reqd_work_group_size(WG_FOLD, 1, 1)))
 __kernel void prep_res_fold(__global const float* restrict partials,
                             __global ushort* restrict resid,
+#if PRE_FC_PAIR
+                            __global float* restrict sumsq,
+                            __global ushort* restrict resid2) {
+  const uint src = get_group_id(0) / FOLD_G;
+  const uint g = get_group_id(0) % FOLD_G;
+#else
                             __global float* restrict sumsq) {
   const uint g = get_group_id(0);
+#endif
   const uint m = get_group_id(1);
   const uint lid = get_local_id(0);
   __local float red[WG_FOLD];
+#if PRE_FC_PAIR
+  __global ushort* rp = (src ? resid2 : resid) + (size_t)m * K;
+#else
   __global ushort* rp = resid + (size_t)m * K;
+#endif
 
   const uint k0 = g * FOLD_CHUNK;
   uint k1 = k0 + FOLD_CHUNK;
@@ -323,7 +343,11 @@ __kernel void prep_res_fold(__global const float* restrict partials,
     if (lid < stride) red[lid] += red[lid + stride];
     barrier(CLK_LOCAL_MEM_FENCE);
   }
+#if PRE_FC_PAIR
+  if (lid == 0) sumsq[((size_t)src * FOLD_G + g) * M + m] = red[0];
+#else
   if (lid == 0) sumsq[(size_t)g * M + m] = red[0];
+#endif
 }
 
 // Stage B: the global Σ, the rms, and the normalised row.
@@ -350,22 +374,44 @@ __attribute__((reqd_work_group_size(WG_NORM, 1, 1)))
 __kernel void prep_norm_finish(__global const float* restrict sumsq,
                                __global const ushort* restrict resid,
                                __global const float* restrict norm_w,
+#if PRE_FC_PAIR
+                               __global ushort* restrict x_out,
+                               __global const ushort* restrict resid2,
+                               __global const float* restrict norm_w2) {
+  const uint src = get_group_id(0) / NORM_WGS;
+  const uint w = get_group_id(0) % NORM_WGS;
+#else
                                __global ushort* restrict x_out) {
   const uint w = get_group_id(0);
+#endif
   const uint m = get_group_id(1);
   const uint lid = get_local_id(0);
 
   float total = 0.f;
+#if PRE_FC_PAIR
+  for (uint g = 0; g < NORM_G; ++g) total += sumsq[((size_t)src * NORM_G + g) * M + m];
+#else
   for (uint g = 0; g < NORM_G; ++g) total += sumsq[(size_t)g * M + m];
+#endif
   const float mean = total / (float)K;
   const float rstd = 1.0f / sqrt(mean + 1e-6f);
 
+#if PRE_FC_PAIR
+  const __global ushort* rp = (src ? resid2 : resid) + (size_t)m * K;
+  const __global float* nw = src ? norm_w2 : norm_w;
+  const uint k0 = w * NORM_CHUNK;
+  uint k1 = k0 + NORM_CHUNK;
+  if (k1 > K) k1 = K;
+  for (uint k = k0 + lid; k < k1; k += WG_NORM)
+    x_out[(size_t)m * X_STRIDE + (size_t)src * K + k] = rne_bf16(bf16f(rp[k]) * rstd * nw[k]);
+#else
   const __global ushort* rp = resid + (size_t)m * K;
   const uint k0 = w * NORM_CHUNK;
   uint k1 = k0 + NORM_CHUNK;
   if (k1 > K) k1 = K;
   for (uint k = k0 + lid; k < k1; k += WG_NORM)
     x_out[(size_t)m * X_STRIDE + k] = rne_bf16(bf16f(rp[k]) * rstd * norm_w[k]);
+#endif
 }
 
 // ---------------------------------------------------------------------------

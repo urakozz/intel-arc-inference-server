@@ -79,13 +79,13 @@
 #define R_P9 25
 #define SG 16
 #define GROUP 64
-#define TILE_U32 136                /* layout 1: 128 u32 of nibbles + 8 u32 of f16 scales */
+#include "expert_fp.h"
 #define G_UP (HIDDEN / GROUP)       /* gate||up k-groups: 32 at hidden 2048 */
 #define NT_UP (2 * INTER / SG)      /* gate||up n-tiles per expert: 64 at INTER 512 */
-#define UP_BLK_U32 ((size_t)NT_UP * G_UP * TILE_U32)
+#define UP_BLK_U32 ((size_t)NT_UP * G_UP * TILE_U32 + EXPERT_OUTER_WORDS)
 #define G_DN (INTER / GROUP)        /* down k-groups: 8 */
 #define NT_DN (HIDDEN / SG)         /* down n-tiles: 128 */
-#define DN_BLK_U32 ((size_t)NT_DN * G_DN * TILE_U32)
+#define DN_BLK_U32 ((size_t)NT_DN * G_DN * TILE_U32 + EXPERT_OUTER_WORDS)
 #define WG_ROUTE EXPERTS
 #define WG_UP (4 * SG * UP_KS)      /* 4 n-tiles (2 gate + 2 up) x UP_KS K slices */
 #define WG_DN (SG * SLOTS * DN_KS)  /* 1 n-tile x SLOTS x DN_KS K slices */
@@ -118,6 +118,9 @@
 inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 
+#if WFMT != 0
+#include "expert_fp_gemv.h"
+#else
 // gemv.cl's dot8, the plain spelling: 8 nibbles of one word times 8 activations.
 inline float dot8(uint word, ushort8 xv) {
   float a = 0.f;
@@ -157,6 +160,8 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
   }
   return acc;
 }
+
+#endif
 
 // ---------------------------------------------------------------------------
 // moe_route - one work-group per token, one expert per lane (lane e owns expert e).
@@ -360,8 +365,14 @@ __kernel void moe_gate_up(__global const uint* restrict route,
   }
   if (q == 0 && (tile_idx & 1u) == 0) {
     const uint i = blk * 32 + (tile_idx / 2) * SG + lane;
+#if WFMT == 1
+    const float outer = as_float(w[(size_t)(e + 1) * UP_BLK_U32 - 1]);
+    const ushort g_b = rne_bf16(red[sg][lane] * outer);
+    const ushort u_b = rne_bf16(red[sg + UP_KS][lane] * outer);
+#else
     const ushort g_b = rne_bf16(red[sg][lane]);
     const ushort u_b = rne_bf16(red[sg + UP_KS][lane]);
+#endif
     const ushort s_b = rne_bf16(silu_f32(bf16f(g_b)));
     h[((size_t)m * SLOTS + slot) * INTER + i] = rne_bf16(bf16f(s_b) * bf16f(u_b));
   }
@@ -409,14 +420,224 @@ __kernel void moe_down(__global const uint* restrict route,
   if (sg == 0) {
     float sum = 0.0f;
     for (uint k = 0; k < TOP_K; ++k) {
+#if WFMT == 1
+      const uint ek = min(rr[R_IDS + k], (uint)SHARED);
+      const ushort d_b = rne_bf16(red[k * DN_KS][lane] * as_float(w[(size_t)(ek + 1) * DN_BLK_U32 - 1]));
+#else
       const ushort d_b = rne_bf16(red[k * DN_KS][lane]);
+#endif
       sum += bf16f(rne_bf16(bf16f(d_b) * as_float(rr[R_W + k])));
     }
     const ushort r_b = rne_bf16(sum);
+#if WFMT == 1
+    const ushort ds_b = rne_bf16(red[TOP_K * DN_KS][lane] * as_float(w[(size_t)(SHARED + 1) * DN_BLK_U32 - 1]));
+#else
     const ushort ds_b = rne_bf16(red[TOP_K * DN_KS][lane]);
+#endif
     const ushort sh_b = rne_bf16(bf16f(ds_b) * as_float(rr[R_SG]));
     const ushort o_b = rne_bf16(bf16f(r_b) + bf16f(sh_b));
     __global ushort* restrict rp = resid + (size_t)m * HIDDEN + n_tile * SG + lane;
     *rp = rne_bf16(bf16f(*rp) + bf16f(o_b));
   }
 }
+
+// ---------------------------------------------------------------------------
+// MOE_UNION (PERF-120; undefined on every other command line): the row lists of 16 and 32 rows across sequences
+// read each routed expert ONCE for (up to UR of) the rows routed to it - a 16-row step routes ~56 distinct experts a
+// layer for its 128 per-row reads, a 32-row step ~84 for 256 (Ornith, depth 4096). Five launches instead of three:
+//
+//   moe_route(logits, route)                            as above, grid (1, M)
+//   moe_union_plan(ctrl, route, plan)                   grid (1), WG EXPERTS
+//   moe_gate_up_union(plan, x, w_gu, h)                 grid (MAX_ITEMS x NT_UP/4), WG 64 x UP_KS
+//   moe_down_union(plan, h, w_dn, dn)                   grid (MAX_ITEMS x NT_DN/NTW), WG 16 x NTW x DN_KS
+//   moe_finish(ctrl, route, dn, resid)                  grid (HIDDEN / 16, M), WG 16
+//
+// The plan lists, for every expert (the shared one last, every live row at slot TOP_K), its (row, slot) pairs among
+// the list's n_active rows in (row, slot) order and its items - runs of at most UR of those pairs:
+//   plan[0] the items, plan[1 + 2 i] item i's expert, plan[2 + 2 i] its first pair | its pairs << 16,
+//   plan[1 + 2 MAX_ITEMS + p] pair p = row << 4 | slot.
+// Work-group (item, blk) of gate||up / down is moe_gate_up's / moe_down's work-group for each of its pairs with the
+// weight words read once a k-group: every pair's sums are tile_dot's, in its order (8 dot8 into a group sum, then the
+// group sum times the scale into the running sum), its K slices merged by the same tree - so h and each slot's down
+// output d_b are bitwise the per-row kernels'. moe_down_union writes d_b [M][SLOTS][HIDDEN] bf16 to `dn`; moe_finish is
+// moe_down's combine (fixed slot order, the shared gate, the residual fold) over them. A row at or past n_active (the
+// list's padding) is not read, written or folded. No atomic; no value depends on where a pair sits in the plan.
+#ifdef MOE_UNION
+#if WFMT != 0 || M > 32 || !defined(CTRL_NACT)
+#error "moe MOE_UNION: the int4 experts at M <= 32 rows, CTRL_NACT"
+#endif
+#define UR 8                        /* pairs an item: a pass over the weight words */
+#define NTW 8                       /* moe_down_union: n-tiles a work-group */
+#define WG_DNU (SG * NTW * DN_KS)
+#define MAX_ITEMS (M * TOP_K + (M + UR - 1) / UR)   /* every routed pair its own item, the shared expert's runs */
+#define PLAN_PAIRS (1 + 2 * MAX_ITEMS)
+#if NT_DN % NTW != 0
+#error "moe MOE_UNION: NTW divides the down's n-tiles"
+#endif
+
+// An exclusive prefix sum over the work-group (lane order) and its total: sub-group scans, then the sub-groups' sums.
+inline uint wg_scan(uint v, __local uint* sums, uint* total) {
+  const uint sg = get_local_id(0) / SG, nsg = get_local_size(0) / SG;
+  const uint before = sub_group_scan_exclusive_add(v);
+  if (get_sub_group_local_id() == SG - 1) sums[sg] = before + v;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  uint base = 0, all = 0;
+  for (uint s = 0; s < nsg; ++s) {
+    base += s < sg ? sums[s] : 0u;
+    all += sums[s];
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);   // sums is the next scan's
+  *total = all;
+  return base + before;
+}
+
+__attribute__((reqd_work_group_size(WG_ROUTE, 1, 1)))
+MOE_SG16
+__kernel void moe_union_plan(__global const uint* restrict ctrl, __global const uint* restrict route,
+                             __global uint* restrict plan) {
+  __local uint ids[M * TOP_K];
+  __local uint sums[WG_ROUTE / SG];
+  const uint e = get_local_id(0);
+  const uint n_act = min(ctrl[CTRL_NACT], (uint)M), np = n_act * TOP_K;
+  for (uint i = e; i < np; i += WG_ROUTE) ids[i] = route[(size_t)(i / TOP_K) * RW + R_IDS + i % TOP_K];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  uint c = 0;
+  for (uint i = 0; i < np; ++i) c += ids[i] == e ? 1u : 0u;
+  // the routed experts in id order, then the shared expert (every live row) after them
+  uint n_items, n_pairs;
+  const uint ioff = wg_scan((c + UR - 1) / UR, sums, &n_items);
+  const uint poff = wg_scan(c, sums, &n_pairs);
+  const uint sh_items = (n_act + UR - 1) / UR;
+  if (e == 0) plan[0] = n_items + sh_items;
+  __global uint* restrict pairs = plan + PLAN_PAIRS;
+  for (uint i = 0, k = poff; k < poff + c; ++i)
+    if (ids[i] == e) pairs[k++] = ((i / TOP_K) << 4) | (i % TOP_K);
+  for (uint j = 0; j * UR < c; ++j) {
+    plan[1 + 2 * (ioff + j)] = e;
+    plan[2 + 2 * (ioff + j)] = (poff + j * UR) | (min(c - j * UR, (uint)UR) << 16);
+  }
+  for (uint m = e; m < n_act; m += WG_ROUTE) pairs[n_pairs + m] = (m << 4) | TOP_K;
+  for (uint j = e; j < sh_items; j += WG_ROUTE) {
+    plan[1 + 2 * (n_items + j)] = SHARED;
+    plan[2 + 2 * (n_items + j)] = (n_pairs + j * UR) | (min(n_act - j * UR, (uint)UR) << 16);
+  }
+}
+
+__attribute__((reqd_work_group_size(WG_UP, 1, 1)))
+MOE_SG16
+__kernel void moe_gate_up_union(__global const uint* restrict plan,
+                                __global const ushort* restrict x,
+                                __global const uint* restrict w,
+                                __global ushort* restrict h) {
+  __local float red[UR][4 * UP_KS][SG];
+  const uint item = get_group_id(0) / (NT_UP / 4);
+  if (item >= plan[0]) return;
+  const uint lid = get_local_id(0);
+  const uint lane = lid % SG;
+  const uint sg = lid / SG;
+  const uint tile_idx = sg / UP_KS;
+  const uint q = sg % UP_KS;
+  const uint blk = get_group_id(0) % (NT_UP / 4);
+  const uint e = plan[1 + 2 * item], p0 = plan[2 + 2 * item] & 0xFFFFu, nr = plan[2 + 2 * item] >> 16;
+  const __global uint* restrict pairs = plan + PLAN_PAIRS + p0;
+  const uint n_tile = blk * 4 + tile_idx;
+  const uint g0 = q * (G_UP / UP_KS);
+  const __global uint* restrict tile = w + (size_t)e * UP_BLK_U32 + ((size_t)n_tile * G_UP + g0) * TILE_U32;
+  float acc[UR];
+  for (uint r = 0; r < UR; ++r) acc[r] = 0.f;
+  for (uint g = g0; g < g0 + G_UP / UP_KS; ++g, tile += TILE_U32) {
+    uint wv[8];
+    load_tile8(tile, lane, wv);
+    const float scale = vload_half(lane, (const __global half*)(tile + 128));
+    for (uint r = 0; r < UR; ++r)
+      if (r < nr) {
+        const __global ushort* restrict xr = x + (size_t)(pairs[r] >> 4) * HIDDEN;
+        float gacc = 0.f;
+        for (uint j = 0; j < 8; ++j) gacc += dot8(wv[j], vload8(0, xr + g * GROUP + j * 8));
+        acc[r] += gacc * scale;
+      }
+  }
+  for (uint r = 0; r < nr; ++r) red[r][sg][lane] = acc[r];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = UP_KS / 2; stride > 0; stride >>= 1) {
+    if (q < stride)
+      for (uint r = 0; r < nr; ++r) red[r][sg][lane] += red[r][sg + stride][lane];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (q == 0 && (tile_idx & 1u) == 0) {
+    const uint i = blk * 32 + (tile_idx / 2) * SG + lane;
+    for (uint r = 0; r < nr; ++r) {
+      const ushort g_b = rne_bf16(red[r][sg][lane]);
+      const ushort u_b = rne_bf16(red[r][sg + UP_KS][lane]);
+      const ushort s_b = rne_bf16(silu_f32(bf16f(g_b)));
+      h[((size_t)(pairs[r] >> 4) * SLOTS + (pairs[r] & 15u)) * INTER + i] = rne_bf16(bf16f(s_b) * bf16f(u_b));
+    }
+  }
+}
+
+__attribute__((reqd_work_group_size(WG_DNU, 1, 1)))
+MOE_SG16
+__kernel void moe_down_union(__global const uint* restrict plan,
+                             __global const ushort* restrict h,
+                             __global const uint* restrict w,
+                             __global ushort* restrict dn) {
+  __local float red[UR][NTW * DN_KS][SG];
+  const uint item = get_group_id(0) / (NT_DN / NTW);
+  if (item >= plan[0]) return;
+  const uint lid = get_local_id(0);
+  const uint lane = lid % SG;
+  const uint sg = lid / SG;
+  const uint t = sg / DN_KS;
+  const uint q = sg % DN_KS;
+  const uint n_tile = (get_group_id(0) % (NT_DN / NTW)) * NTW + t;
+  const uint e = plan[1 + 2 * item], p0 = plan[2 + 2 * item] & 0xFFFFu, nr = plan[2 + 2 * item] >> 16;
+  const __global uint* restrict pairs = plan + PLAN_PAIRS + p0;
+  const uint g0 = q * (G_DN / DN_KS);
+  const __global uint* restrict tile = w + (size_t)e * DN_BLK_U32 + ((size_t)n_tile * G_DN + g0) * TILE_U32;
+  float acc[UR];
+  for (uint r = 0; r < UR; ++r) acc[r] = 0.f;
+  for (uint g = g0; g < g0 + G_DN / DN_KS; ++g, tile += TILE_U32) {
+    uint wv[8];
+    load_tile8(tile, lane, wv);
+    const float scale = vload_half(lane, (const __global half*)(tile + 128));
+    for (uint r = 0; r < UR; ++r)
+      if (r < nr) {
+        const __global ushort* restrict hr = h + ((size_t)(pairs[r] >> 4) * SLOTS + (pairs[r] & 15u)) * INTER;
+        float gacc = 0.f;
+        for (uint j = 0; j < 8; ++j) gacc += dot8(wv[j], vload8(0, hr + g * GROUP + j * 8));
+        acc[r] += gacc * scale;
+      }
+  }
+  for (uint r = 0; r < nr; ++r) red[r][sg][lane] = acc[r];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = DN_KS / 2; stride > 0; stride >>= 1) {
+    if (q < stride)
+      for (uint r = 0; r < nr; ++r) red[r][sg][lane] += red[r][sg + stride][lane];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (q == 0)
+    for (uint r = 0; r < nr; ++r)
+      dn[((size_t)(pairs[r] >> 4) * SLOTS + (pairs[r] & 15u)) * HIDDEN + n_tile * SG + lane] = rne_bf16(red[r][sg][lane]);
+}
+
+__attribute__((reqd_work_group_size(SG, 1, 1)))
+MOE_SG16
+__kernel void moe_finish(__global const uint* restrict ctrl,
+                         __global const uint* restrict route,
+                         __global const ushort* restrict dn,
+                         __global ushort* restrict resid) {
+  const uint lane = get_local_id(0);
+  const uint n_tile = get_group_id(0);
+  const uint m = get_group_id(1);
+  if (m >= min(ctrl[CTRL_NACT], (uint)M)) return;
+  const __global uint* restrict rr = route + (size_t)m * RW;
+  const __global ushort* restrict dr = dn + (size_t)m * SLOTS * HIDDEN + n_tile * SG + lane;
+  float sum = 0.0f;
+  for (uint k = 0; k < TOP_K; ++k) sum += bf16f(rne_bf16(bf16f(dr[(size_t)k * HIDDEN]) * as_float(rr[R_W + k])));
+  const ushort r_b = rne_bf16(sum);
+  const ushort sh_b = rne_bf16(bf16f(dr[(size_t)TOP_K * HIDDEN]) * as_float(rr[R_SG]));
+  const ushort o_b = rne_bf16(bf16f(r_b) + bf16f(sh_b));
+  __global ushort* restrict rp = resid + (size_t)m * HIDDEN + n_tile * SG + lane;
+  *rp = rne_bf16(bf16f(*rp) + bf16f(o_b));
+}
+#endif

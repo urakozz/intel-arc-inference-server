@@ -65,7 +65,8 @@ void verify_names(const model::ModelDesc& d, unsigned M, bool int8, std::set<std
   out.insert(kernels::argmax_stage1_variant(M, d.vocab_used));
   out.insert(kernels::argmax_stage2_variant());
   // head_kv_fill (head_front)
-  out.insert(kernels::prep_norm_finish_strided_variant(M, H, kG, kG, 2 * H));
+  out.insert(kernels::prep_res_fold_pair_variant(M, H, kG));             // PERF-84: both pre-fc norms
+  out.insert(kernels::prep_norm_finish_pair_variant(M, H, kG, kG));
   out.insert(bf16(M, 2 * H, H));                                          // fc
   out.insert(kernels::prep_res_fold_zero_variant(M, H, kG));
   out.insert(bf16(M, H, d.fa_qkv_n()));                                   // q||k||v
@@ -110,7 +111,8 @@ void wide_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& ou
   out.insert(kernels::int8_linear_variant(kernels::LinearKind::SmallM, M, H, model::Qwen35::kVocab));
   out.insert(kernels::argmax_stage1_variant(M, d.vocab_used));
   out.insert(kernels::argmax_stage2_variant(M));
-  out.insert(kernels::prep_norm_finish_strided_variant(M, H, kG, kG, 2 * H));
+  out.insert(kernels::prep_res_fold_pair_variant(M, H, kG));             // PERF-84: both pre-fc norms
+  out.insert(kernels::prep_norm_finish_pair_variant(M, H, kG, kG));
   out.insert(rowg(2 * H, H));                                             // fc
   out.insert(kernels::prep_res_fold_zero_variant(M, H, kG));
   out.insert(rowg(H, d.fa_qkv_n()));                                      // q||k||v
@@ -122,8 +124,8 @@ void wide_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& ou
 void draft_names(const model::ModelDesc& d, bool int8, unsigned nv, std::set<std::string>& out) {
   const unsigned H = d.hidden;
   for (const std::string& n :   // head_front
-       {kernels::embed_gather_variant(1, H), kernels::prep_res_fold_variant(1, H, 0, kG),
-        kernels::prep_norm_finish_strided_variant(1, H, kG, kG, 2 * H), bf16(1, 2 * H, H),
+       {kernels::embed_gather_variant(1, H), kernels::prep_res_fold_pair_variant(1, H, kG),
+        kernels::prep_norm_finish_pair_variant(1, H, kG, kG), bf16(1, 2 * H, H),
         kernels::prep_res_fold_zero_variant(1, H, kG), kernels::prep_norm_finish_variant(1, H, kG, kG),
         bf16(1, H, d.fa_qkv_n()), kernels::attn_prep_s1_variant(1, d.fa_q_heads, d.fa_kv_heads)})
     out.insert(n);
@@ -204,7 +206,7 @@ int main(int argc, char** argv) {
   CHECK(bound.count("gdn_step_slots_M1_G30_GK16V32") && bound.count("gdn_step_slots_M4_G30_GK16V32"));
   CHECK(bound.count("gdn_step_defer_M1_G30_GK16V32") && bound.count("gdn_step_defer_M4_G30_GK16V32"));
   CHECK(bound.count("moe_M4_E256_T8_D2048_I512") && bound.count("attn_prep_M2_Q16KV2_S1"));
-  CHECK(bound.count("prep_norm_finish_M3_K2048_G20_W20_X4096") &&
+  CHECK(bound.count("prep_norm_finish_M3_K2048_G20_W20_X4096_P2") &&
         bound.count("prep_res_fold_M1_K2048_SP1_G20_Z") && bound.count("gemv_bf16_M1_K4096_N2048"));
   CHECK(bound.count("pf_res_norm_K2048_SP1_G20_Z") && bound.count("pf_bf16_slab_K4096"));
   // Spec 15 §13: the int4 checkpoint's a||b and Qwen3.8's argmax (vocab_used 248077).

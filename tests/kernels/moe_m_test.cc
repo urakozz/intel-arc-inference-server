@@ -14,7 +14,11 @@
 //   2. the rows reversed inside the launch: each row's bits are unchanged (a row's result
 //      does not depend on its neighbours or its position);
 //   3. the MoE scratch's own rows (kDeepM = 64 per layer slot, runtime::moe_scratch_layout) are
-//      where capture binds an M-row launch: the strides used here are its.
+//      where capture binds an M-row launch: the strides used here are its;
+//   4. PERF-120: the union read of the 16- and 32-row lists (moe_M<M>_..._U: moe_union_plan, moe_gate_up_union,
+//      moe_down_union, moe_finish) - every row below n_active bitwise moe_M1's on that row (route, h, resid; rows 20..28 route as row
+//      2 does, so an expert has more rows than a pass takes), every row past it left as it was; n_active M and M - 3.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -24,6 +28,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "kernels/batch_kernels.h"
 #include "kernels/kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -112,6 +117,61 @@ Out run(Dev& d, uint32_t M, const std::vector<float>& logits, const std::vector<
           d.read<uint16_t>(h, size_t(M) * kS.slots() * kS.inter), d.read<uint16_t>(rb, resid.size())};
 }
 
+// PERF-120: the union build (moe_variant's `_U`) of M rows, n_act of them live (Control's word CTRL_NACT = 1).
+Out run_union(Dev& d, uint32_t M, uint32_t n_act, const std::vector<float>& logits, const std::vector<uint16_t>& x,
+              const std::vector<uint16_t>& resid, const l0::Mem& gu, const l0::Mem& dn) {
+  l0::Module mod(d.ctx, kernels::path(kernels::moe_variant(M, kS.experts, kS.top_k, kS.hidden, kS.inter) + "_U"));
+  std::vector<uint32_t> c(32, 0);
+  c[1] = n_act;
+  l0::Mem ctrl = d.upload(c.data(), c.size() * 4);
+  l0::Mem lg = d.upload(logits.data(), logits.size() * 4);
+  l0::Mem xb = d.upload(x.data(), x.size() * 2);
+  l0::Mem rb = d.upload(resid.data(), resid.size() * 2);
+  l0::Mem route(d.ctx, l0::MemKind::Device, size_t(M) * moe_ref::kWords * 4);
+  l0::Mem h(d.ctx, l0::MemKind::Device, size_t(M) * kS.slots() * kS.inter * 2);
+  l0::Mem dout(d.ctx, l0::MemKind::Device, size_t(M) * kS.slots() * kS.hidden * 2);
+  l0::Mem plan(d.ctx, l0::MemKind::Device, size_t(kernels::moe_union_plan_words(M, kS.top_k)) * 4);
+  l0::Kernel kr = mod.kernel("moe_route");
+  kr.group_size(kS.experts);
+  kr.arg_ptr(0, lg.ptr());
+  kr.arg_ptr(1, route.ptr());
+  l0::Kernel kp = mod.kernel("moe_union_plan");
+  kp.group_size(kS.experts);
+  kp.arg_ptr(0, ctrl.ptr());
+  kp.arg_ptr(1, route.ptr());
+  kp.arg_ptr(2, plan.ptr());
+  l0::Kernel ku = mod.kernel("moe_gate_up_union");
+  ku.group_size(kernels::moe_gate_up_wg());
+  ku.arg_ptr(0, plan.ptr());
+  ku.arg_ptr(1, xb.ptr());
+  ku.arg_ptr(2, gu.ptr());
+  ku.arg_ptr(3, h.ptr());
+  l0::Kernel kd = mod.kernel("moe_down_union");
+  kd.group_size(16 * kernels::kMoeUnionTiles * kernels::kMoeDnKs);
+  kd.arg_ptr(0, plan.ptr());
+  kd.arg_ptr(1, h.ptr());
+  kd.arg_ptr(2, dn.ptr());
+  kd.arg_ptr(3, dout.ptr());
+  l0::Kernel kf = mod.kernel("moe_finish");
+  kf.group_size(16);
+  kf.arg_ptr(0, ctrl.ptr());
+  kf.arg_ptr(1, route.ptr());
+  kf.arg_ptr(2, dout.ptr());
+  kf.arg_ptr(3, rb.ptr());
+  l0::CmdList list = l0::CmdList::regular(d.ctx);
+  const uint32_t items = kernels::moe_union_items(M, kS.top_k);
+  list.launch(kr, 1, M);   // capture.cc moe_block's union grids
+  list.launch(kp, 1);
+  list.launch(ku, items * (kernels::moe_gate_up_groups(kS.top_k, kS.inter) / kS.slots()));
+  list.launch(kd, items * (kS.hidden / 16 / kernels::kMoeUnionTiles));
+  list.launch(kf, kS.hidden / 16, M);
+  list.close();
+  d.q.execute(list, &d.f);
+  d.f.wait();
+  return {d.read<uint32_t>(route, size_t(M) * moe_ref::kWords),
+          d.read<uint16_t>(h, size_t(M) * kS.slots() * kS.inter), d.read<uint16_t>(rb, resid.size())};
+}
+
 template <class T>
 std::vector<T> row_of(const std::vector<T>& v, size_t width, uint32_t m) {
   return std::vector<T>(v.begin() + m * width, v.begin() + (m + 1) * width);
@@ -132,6 +192,8 @@ int main() {
   for (float& v : logits) v = ld(rng);
   // Row 1: exact ties across the top-8 boundary (the lower ids taken, per row).
   for (uint32_t e : {9u, 40u, 41u, 77u, 130u, 131u, 200u, 201u, 250u}) logits[size_t(1) * LW + e] = 5.f;
+  // PERF-120: rows 20..28 route as row 2 (its logits; their own x): nine rows an expert, past a union pass's 8.
+  for (uint32_t m = 20; m <= 28; ++m) std::copy_n(logits.begin() + LW * 2, LW, logits.begin() + size_t(LW) * m);
   std::vector<uint16_t> x(size_t(kMax) * kS.hidden), resid(size_t(kMax) * kS.hidden);
   for (uint16_t& v : x) v = common::f32_to_bf16(xd(rng));
   for (uint16_t& v : resid) v = common::f32_to_bf16(rd(rng));
@@ -169,6 +231,23 @@ int main() {
     }
     std::printf("  moe_M%u: every row bitwise moe_M1's, in order and reversed\n", M);
   }
+  for (uint32_t M : {16u, 32u})
+    for (uint32_t n_act : {M, M - 3}) {
+      const Out got = run_union(d, M, n_act, std::vector<float>(logits.begin(), logits.begin() + size_t(M) * LW),
+                                std::vector<uint16_t>(x.begin(), x.begin() + size_t(M) * kS.hidden),
+                                std::vector<uint16_t>(resid.begin(), resid.begin() + size_t(M) * kS.hidden), gub, dnb);
+      for (uint32_t m = 0; m < M; ++m) {
+        const bool ok = m < n_act ? row_of(got.route, RW, m) == one[m].route && row_of(got.h, HW, m) == one[m].h &&
+                                        row_of(got.resid, kS.hidden, m) == one[m].resid
+                                  : row_of(got.resid, kS.hidden, m) == row_of(resid, kS.hidden, m);
+        if (!ok) {
+          std::fprintf(stderr, "moe_M%u_U (n_active %u) row %u is not %s\n", M, n_act, m,
+                       m < n_act ? "moe_M1's bits on that row" : "left as it was");
+          return 1;
+        }
+      }
+      std::printf("  moe_M%u_U, n_active %u: every live row bitwise moe_M1's, the rest untouched\n", M, n_act);
+    }
   // Row 1's tie: the lower ids, in id order (moe_route's rank rule), per row at every M.
   const uint32_t want[8] = {9, 40, 41, 77, 130, 131, 200, 201};
   for (uint32_t k = 0; k < 8; ++k) CHECK_EQ(one[1].route[moe_ref::kIds + k], want[k]);

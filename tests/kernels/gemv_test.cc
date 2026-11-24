@@ -54,6 +54,8 @@ int main() {
   run_case(ctx, q, f, {1, 5120, 34816, 8, 0});
   run_case(ctx, q, f, {1, 17408, 5120, 4, 0});
   run_case(ctx, q, f, {2, 6144, 5120, 1, 0});
+  run_case(ctx, q, f, {1, 5120, 8192, 1, 1});   // PERF-108: a tp card's qkv||z, the K split in the work-group (_KS4)
+  run_case(ctx, q, f, {1, 2560, 8192, 1, 0});
   std::puts("gemv_test OK");
   return 0;
 }

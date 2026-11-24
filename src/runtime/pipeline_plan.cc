@@ -174,9 +174,9 @@ size_t pp_mtp_prefill_bytes(const model::ModelDesc& d, uint32_t chunk_cap) {
 }
 
 size_t pp_stage_verify_launches(const model::ModelDesc& d, const PpStage& st) {
-  // The head's KV fill (capture.cc head_front): embed, the two pre-fc norm pairs, fc, the
-  // zero-residual fold pair, q||k||v, attn_prep - 10, as runtime::verify_launches adds.
-  return pp_stage_launches(d, st) + (st.has_head(d) ? 10 : 0);
+  // The head's KV fill (capture.cc head_front): embed, the pre-fc norms' fold and finish, fc, the
+  // zero-residual fold pair, q||k||v, attn_prep - 8, as runtime::verify_launches adds.
+  return pp_stage_launches(d, st) + (st.has_head(d) ? 8 : 0);
 }
 
 std::vector<PpKvRun> pp_kv_runs(const std::array<KvLayout, kPpDevices>& stage, const KvLayout* head,

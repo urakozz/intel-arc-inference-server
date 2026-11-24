@@ -11,6 +11,7 @@
 #include "kernels/dflash_dims.h"
 #include "common/json.h"
 #include "kernels/dflash_ref.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/dflash/dflash_buffers.h"
 
 int main(int argc, char** argv) {
@@ -56,9 +57,11 @@ int main(int argc, char** argv) {
   b.add_sessions(ctx, 4);
   CHECK_EQ(b.sessions.size(), size_t(3));
   const size_t per = b.sz.dctl + b.sz.out + b.sz.ring_k + b.sz.ring_v + b.sz.taps;
-  // and, with sessions, the batched draft's and the rows projection's tables and the row lists' taps
-  const size_t tables = 2 * size_t(kernels::dflash::kM + 8 * kernels::dflash::kSeqs) * 4;
-  CHECK_EQ(b.bytes(), b.sz.total() + 3 * per + tables + b.sz.taps);
+  // and, with sessions, the batched draft's and the rows projection's tables (the widest list's: four blocks) and
+  // the row lists' taps (the 32-row lists' rows)
+  const size_t tables = 2 * size_t(kernels::dflash::kSeqsRows + 8 * kernels::dflash::kSeqs) * 4;
+  const size_t rows_taps = b.sz.taps / kernels::dflash::kM * runtime::DecodeScratchDims::kWideRowsM;
+  CHECK_EQ(b.bytes(), b.sz.total() + 3 * per + tables + rows_taps);
   for (const auto& s : b.sessions) {
     CHECK(s->dctl.size() == b.dctl.size() && s->out.size() == b.out.size() && s->ring_k.size() == b.ring_k.size() &&
           s->ring_v.size() == b.ring_v.size() && s->taps.size() == b.taps.size());

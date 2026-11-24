@@ -43,6 +43,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
+#include "head_gate.h"   /* GATE (PERF-123): the full head or the candidate pass, chosen a step */
 
 #ifndef M
 #error "gemm_sm: M"
@@ -83,6 +84,9 @@
 #if (K % GROUP) != 0 || (G % S) != 0 || (G_PER_S % KSL) != 0
 #error "gemm_sm: S | K/64 and KSL | K/64/S"
 #endif
+#if QKV_NKV && (LAYOUT != 2 || QKV_NKV % (SG * NSGN) != 0)
+#error "gemm_sm: grouped Q/K/V requires int8 weights and whole work-group widths"
+#endif
 #if (N % (SG * NSGN)) != 0
 #error "gemm_sm: N must be a multiple of 16 x NSGN"
 #endif
@@ -94,6 +98,18 @@
 #endif
 #if BLK2D && LAYOUT != 0
 #error "gemm_sm: BLK2D is layout 0 only"
+#endif
+// TP_FOLD_SEND (PERF-44, Qwen3.8 tp's out_proj / o_proj / down at the folded crossing, verify rows): tp.cl's folded
+// tp_send as this linear's tail (tp_fold_send.h), the grid split-K int4 form only; every other binary leaves it unset.
+#ifndef TP_FOLD_SEND
+#define TP_FOLD_SEND 0
+#endif
+#if TP_FOLD_SEND
+#if SPLITK || LAYOUT > 1 || defined(QKV_NKV) || defined(GATE)
+#error "gemm_sm TP_FOLD_SEND: the grid split-K int4 form"
+#endif
+#define WG_COLS (SG * NSGN)
+#include "tp_fold_send.h"
 #endif
 #if (DEQ || SPLITK) && LAYOUT == 3
 #error "gemm_sm: the 2-bit form has one dequant and no in-work-group split-K"
@@ -156,18 +172,72 @@ __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void gemm_sm_i8w(__global const uchar* restrict w,
                           __global const float* restrict scales,
                           __global const ushort* restrict x,
-                          __global float* restrict out) {
+                          __global float* restrict out
+#if QKV_NKV
+                          , __global const uchar* wk, __global const float* sk, __global const ushort* xk, __global float* ok
+                          , __global const uchar* wv, __global const float* sv, __global const ushort* xv, __global float* ov
+#if INK_ATTN_PROJECTIONS
+                          , __global const uchar* wg, __global const float* sgate, __global float* og
+                          , __global const uchar* wr, __global const float* sr, __global float* orr
+                          , __global const uchar* ws, __global const float* ss, __global float* os
+#endif
+#endif
+                          GATE_ARG) {
 #else
 __kernel void gemm_sm(__global const uint* restrict w,
                       __global const half* restrict scales,
                       __global const ushort* restrict x,
-                      __global float* restrict out) {
+                      __global float* restrict out GATE_ARG
+#if TP_FOLD_SEND
+                      , __global uint* land, __global uint* ctr, __global float* own
+#endif
+                      ) {
+#endif
+  GATE_RETURN
+#if QKV_NKV
+  uint group = get_group_id(0);
+  uint columns = N;
+  const uint cols_per_group = SG * NSGN;
+#if INK_ATTN_PROJECTIONS
+  const uint block = cols_per_group;
+  const uint qkv_groups = (N + 2 * QKV_NKV) / block;
+  if (group >= qkv_groups) {
+    group -= qkv_groups;
+    if (group < N / block) {
+      w = wg; scales = sgate; out = og;
+    } else {
+      group -= N / block;
+      if (group < 384 / block) {
+        columns = 384;
+        w = wr; scales = sr; out = orr;
+      } else {
+        group -= 384 / block;
+        columns = 64;
+        w = ws; scales = ss; out = os;
+      }
+    }
+  } else
+#endif
+  if (group >= N / cols_per_group) {
+    group -= N / cols_per_group;
+    if (group < QKV_NKV / cols_per_group) {
+      w = wk; scales = sk; x = xk; out = ok;
+    } else {
+      group -= QKV_NKV / cols_per_group;
+      w = wv; scales = sv; x = xv; out = ov;
+    }
+    columns = QKV_NKV;
+  }
 #endif
   const uint lane = get_sub_group_local_id();
   const uint sg = get_sub_group_id();
   const uint col_sg = sg % NSGN;
   const uint ks = sg / NSGN;
+#if QKV_NKV
+  const uint n_tile = group * NSGN + col_sg;
+#else
   const uint n_tile = get_group_id(0) * NSGN + col_sg;
+#endif
   const uint n0 = n_tile * SG;
   const uint n = n0 + lane;
   const uint s = get_group_id(1);
@@ -285,11 +355,19 @@ __kernel void gemm_sm(__global const uint* restrict w,
       const int m = rb * 8 + r;
       if (m < M) {
 #if LAYOUT == 2
+#if QKV_NKV
+        out[(size_t)m * columns + n] = f8(acc[rb], r) * cs;
+#else
         out[(size_t)m * N + n] = f8(acc[rb], r) * cs;
+#endif
 #else
         out[((size_t)s * M + m) * N + n] = f8(acc[rb], r);
 #endif
       }
     }
+#if TP_FOLD_SEND
+  __local uint tpf[TPF_LOCAL];
+  tp_fold_send(out, land, ctr, own, tpf);
+#endif
 #endif
 }

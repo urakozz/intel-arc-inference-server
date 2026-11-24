@@ -271,6 +271,7 @@ struct EngineAdapter : server::EngineIface {
   std::vector<uint32_t> step_chosen(const server::Sampling& sampling, uint32_t k_req,
                                     const DraftChoice& choose) override {
     if (!sampling.greedy) throw std::logic_error("EngineAdapter::step_chosen: greedy requests only");
+    eng.greedy_head(true);
     flush_commit();
     const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
     if (k == 0) {
@@ -646,6 +647,7 @@ struct EngineAdapter : server::EngineIface {
   // ingest), before pending_id() or the first step reads it - so sampling applies from the first generated id on.
   // PERF-92: after load_head the row is already on the host (`first_host_`).
   void sample_first(const server::Sampling& sampling) {
+    eng.greedy_head(sampling.greedy);   // PERF-123: a greedy request needs only the verify rows' argmax
     if (first_host_) {
       first_host_ = false;
       if (!sampling.greedy) {
@@ -711,7 +713,7 @@ struct EngineAdapter : server::EngineIface {
   uint64_t mtp_iters_at_k[kMaxIterK + 1] = {};  // step_many calls per K
 };
 
-// Spec 7 §3.1: the prefix cache's pinned host memory. l0::MemKind::Host allocations of the
+// Spec 7 §3.1: the prefix cache's pinned host memory. l0::MemKind::HostLocked allocations of the
 // whole budget at server start (the P0 probe measured ~100 ms per GiB to allocate, too slow
 // per entry), carved first-fit in 64 KiB units with coalescing frees. Host-resident and
 // device-visible, so the engine's snapshot copies run at the probe's 12-14 GB/s.
@@ -734,7 +736,7 @@ struct PinnedAlloc : server::HostAlloc {
     for (size_t left = bytes / kUnit * kUnit; left > 0;) {
       const size_t n = left < kPiece ? left : kPiece;
       free_[pieces.size() * kStride] = n;
-      pieces.emplace_back(ctx, l0::MemKind::Host, n, kUnit);
+      pieces.emplace_back(ctx, l0::MemKind::HostLocked, n, kUnit);
       bytes_ += n;
       left -= n;
     }

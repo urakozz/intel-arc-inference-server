@@ -217,8 +217,7 @@ inline void require_two_devices_for_replica(uint32_t gpus) {
 }
 
 // --max-num-seqs N (vLLM's flag, the same meaning): how many requests run at once - the user's
-// choice, and the context follows (slot 0 the largest that fits beside N - 1 slots of 32768 on its card,
-// cli::settle_slots). N = 1 (the default): one slot. N > 1: two cards run replica, each card its slots (card 0 the
+// choice, and the context follows (the card's KV page pool, shared by its requests: cli::settle_pool). N = 1 (the default): one slot. N > 1: two cards run replica, each card its slots (card 0 the
 // odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Several slots a card are Qwen3.8's and
 // Ornith's (b70_serve.cc refuses the others by config.json, and a draft vocabulary beside slots).
 inline constexpr uint32_t kSlotsPerCard = runtime::SlotDims::kMaxSeqs;

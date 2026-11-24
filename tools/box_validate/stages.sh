@@ -1722,7 +1722,7 @@ st_r33_k1() {
     pf_dequant_slab_K2560_N13312_L0 q4_pf_bf16_slab_K2560_N16384 q4_pf_bf16_slab_K2560_N13312 q4_pf_bf16_slab_K6144_N2560 \
     q4_pf_bf16_slab_K2560_N640 q4_pf_bf16_slab_K10240_N336 q4_pf_bf16_slab_K2560_N12800 q4_hc_combine_norm_M2048_E \
     q4_hc_combine_norm_M2048_S1 q4_hc_combine_norm_M2048_Y q4_hc_combine_norm_M2048_Y_NN q4_hc_combine_norm_M2048_X \
-    q4_hc_up_mix_M2048_I_D512 q4_qsa_M2048_T512_W1024_PF_I4H q4_ple_gather_M2048_BF16_PF q4_ple_gather_M2048_F32_PF \
+    q4_hc_up_mix_M2048_I_D512_R4C64 q4_qsa_M2048_T512_W1024_PF_I4H q4_ple_gather_M2048_BF16_PF q4_ple_gather_M2048_F32_PF \
     pf_attn_prep_q16_Q24KV2 pf_attn_Q24KV2 pf_flash_attn_Q24KV2 q4_pf_sparse_attn_Q24KV2 q4_pf_sparse_attn_Q24KV2_EAGER \
     q4_pf_moe_E512_T10_D2560_I640_L256 pf_moe_gemm_K2560_N1280_SILU pf_moe_gemm_K640_N2560 q4_pf_ple_C2048
   run_tests '^(qwen4exp_pf_kernels_test|qwen4exp_prefill_gdn_test)$' qwen4exp
@@ -2610,7 +2610,7 @@ st_r77_serial() {
 }
 
 # ======================================================================================
-row 78 "spec 13c - several requests at once on ONE card: runtime::Engine's sequence slots (--max-num-seqs N: slot 0 beside N - 1 slots of 32768, spec 13 §11.2) behind server::Scheduler (cli::SlotsEngine); a lone request bitwise today's server, batched rows by the f32 judge (B1), the slots' isolation bitwise (B3), speed (plan 13c Tasks 2-5)"
+row 78 "spec 13c - several requests at once on ONE card: runtime::Engine's sequence slots (--max-num-seqs N: N requests sharing the card's KV page pool, spec 31) behind server::Scheduler (cli::SlotsEngine); a lone request bitwise today's server, batched rows by the f32 judge (B1), the slots' isolation bitwise (B3), speed (plan 13c Tasks 2-5)"
 rownote 78 "One card (kind card) for the gates; r78.speed holds the whole box (timed, opt-in, an idle box). Hand back: r78.engine's S lines, r78.lone's IDENTICAL lines and the slots: startup line, r78.batch's IDENTICAL / JUDGED lines and serve_judge's SKIP_REASON (the contexts awaiting their f32 reference, dumped to oracle-forced-dumps/qwen-slots and qwen-serve - f32_refs.sh forced-qwen makes them), r78.speed's tables (probe_slots_speed's '| arm |' rows and rule line, SLOTS_BENCH lines)."
 stage r78.host   78 default cpu  -    -                              "host: slot_plan_test (the planner's slots), batch_rows_test, scheduler_test, dflash_scheduler_test (S6: the 8-row budget)"
 st_r78_host() {

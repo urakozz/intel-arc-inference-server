@@ -95,7 +95,9 @@ void plan_case() {
   // Spec 39: one sequence with a drafter on Qwen3.8's shapes makes the deferred GDN rows (Engine::own_.gdn_pend) -
   // planned now (103,022,592 B; plan() left them out before), without the head's deep chain scratch.
   CHECK(with.deep == 2 * runtime::MtpDims::kGdnPendParity && with.deep == size_t{103022592});
-  CHECK(runtime::plan_slots(d, {32768, 32768}, false, 17'000'000'000ull, {}, {}, runtime::KvCache::Bf16, dr).deep == 0);
+  // Plan 40a Task 2: several sequences beside a drafter each keep their committed rows pending.
+  CHECK(runtime::plan_pool(d, {2, 32, 32768}, false, 17'000'000'000ull, {}, runtime::KvCache::Bf16, dr).deep ==
+        runtime::EngineDims::sizes(d, runtime::KvCache::Bf16, 0, 2, false, true).gdn_pend);
   const runtime::MemoryPlan decode_only = runtime::plan(d, 32768, false, 17'000'000'000ull,
                                                         runtime::PrefillPath{false}, {}, runtime::KvCache::Bf16, dr);
   CHECK(decode_only.drafter_taps == 0 && without.drafter_taps == runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));

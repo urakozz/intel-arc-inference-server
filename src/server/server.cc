@@ -213,7 +213,7 @@ bool Server::listen() {
     if (opts_.spec_lookup) {
       spec = "prompt lookup, K <= " + std::to_string(e.verify_k()) + " adaptive per request";
     } else if (e.mtp_k() > 0) {
-      spec = std::string(e.dflash_window() > 0 ? "dflash" : "mtp") + ", K <= " + std::to_string(e.mtp_k()) +
+      spec = std::string(e.drafter_key() != 0 ? "dflash" : "mtp") + ", K <= " + std::to_string(e.mtp_k()) +
              (opts_.mtp_auto ? (impl_->step_k ? " adaptive per step" : " adaptive per request") : " fixed") +
              (opts_.spec_dflash_lookup ? ", lookup inside dflash" : "") +
              (opts_.spec_mtp_lookup ? ", lookup inside mtp" : "");
@@ -681,7 +681,7 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
                " {:d} ids generated in {:.2f} s = {:.1f} t/s; context {:d} of {:d} ({:.0f} %){}\n",
                prompt, cached, prompt - cached, first_s, read_tps, out, decode_s, gen_tps, used, capacity,
                capacity ? 100.0 * double(used) / double(capacity) : 0.0,
-               outcome.slot >= 0 ? (std::string(", card ") + std::to_string(outcome.slot)).c_str() : "");
+               outcome.slot >= 0 ? (std::string(", slot ") + std::to_string(outcome.slot)).c_str() : "");
     std::fflush(stderr);
   }
   if (opts_.log_requests_dir.empty()) return;

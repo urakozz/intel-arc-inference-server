@@ -50,6 +50,8 @@ bool q4_hc_int8();
 // with the int4 linears' `.weight` replaced by `.qweight` / `.scales` / `.qzeros`), WITHOUT the PLE table's
 // shards (skipped by design: their count is the export's split, not the model's). `mtp` adds the head.
 std::vector<std::string> q4_expected_names(const model::Qwen4ExpDesc& d, const model::Q4Forms& f, bool mtp);
+// One of the PLE table's bf16 shards (`...ple.ple_embedding.ngram_embedding.*`), skipped by design.
+bool q4_ple_shard(const model::Qwen4ExpDesc& d, const std::string& name);
 
 // The RoPE table fp32 [max_len][2][rope_dims / 2], cos at [p][0][i], sin at [p][1][i], each a bf16 value -
 // the reference's fp32 steps (kol_rope_table's construction at theta 1e7 over the 64 rotary dims):

@@ -40,6 +40,14 @@
 #if GEMV_KMAJOR && LAYOUT != 1
 #error "gemv: GEMV_KMAJOR is layout 1 only"
 #endif
+// GEMV_KSL (PERF-108, a tensor parallel card's qkv||z): KSL sub-groups split each 16-column tile's k-groups of the slice
+// inside the work-group - sub-group q takes groups q, q + KSL, q + 2 KSL, ... of the slice, so the tile's sub-groups read
+// one contiguous run together - and SLM's fixed pairwise tree (gemv_bf16.cl's, prep.cl's: strides KSL/2 .. 1) folds them
+// into the slice's one partial. The grid (N / 64, S) and the output are unchanged; the work-group is 64 x KSL work-items
+// and the launch KSL x the sub-groups. The sum's order is not the unsplit chain's (judged, not bitwise).
+#ifndef GEMV_KSL
+#define GEMV_KSL 1
+#endif
 #if GEMV_BLOCK2D
 #if LAYOUT != 0
 #error "gemv: GEMV_BLOCK2D is layout 0 only"
@@ -66,6 +74,18 @@
 #if G_PER_S % GEMV_AHEAD != 0
 #error "gemv: GEMV_AHEAD must divide the k-groups of a slice"
 #endif
+#if (GEMV_KSL & (GEMV_KSL - 1)) != 0 || G_PER_S % (GEMV_KSL * GEMV_AHEAD) != 0
+#error "gemv: GEMV_KSL must be a power of two (the tree) and KSL x GEMV_AHEAD must divide the k-groups of a slice"
+#endif
+#if GEMV_KSL > 1
+#define G_FIRST(g0) ((g0) + q)
+#define G_STRIDE (GEMV_AHEAD * GEMV_KSL)
+#define G_AT(ga, a) ((ga) + (a) * GEMV_KSL)
+#else
+#define G_FIRST(g0) g0
+#define G_STRIDE GEMV_AHEAD
+#define G_AT(ga, a) ga + a
+#endif
 // GEMV_TP_SEND (PERF-44, Qwen3.8-Flash-Next tp decode's out_proj / o_proj): tp.cl's tp_send folded into the linear -
 // each work-group is one chunk of the crossing per row (its 64 columns of slice s: chunk s x N / 64 + group x, row m)
 // and writes its partial both to `out` and to the peer's landing (tp_wire.h's layout at [S][M][N]), then the stamp
@@ -75,6 +95,9 @@
 #define GEMV_TP_SEND 0
 #endif
 #if GEMV_TP_SEND
+#if GEMV_KSL > 1
+#error "gemv GEMV_TP_SEND: one sub-group a tile (GEMV_KSL 1)"
+#endif
 #define TP_MROWS 8
 #if M > TP_MROWS
 #error "gemv GEMV_TP_SEND: M <= 8 (the landing's rows)"
@@ -82,6 +105,22 @@
 #define DATA_WORDS (S * TP_MROWS * N)
 #define J_CHUNKS ((N / WG_N) * S * TP_MROWS)
 #include "tp_wire.h"
+#endif
+// TP_FOLD_SEND (PERF-44, Qwen3.8 tp's out_proj / o_proj / down at the folded crossing): tp.cl's folded tp_send as this
+// linear's tail (tp_fold_send.h - the last work-group under a chunk sums its slices and sends it); the arithmetic is
+// unchanged; every other binary leaves it unset.
+#ifndef TP_FOLD_SEND
+#define TP_FOLD_SEND 0
+#endif
+#if TP_FOLD_SEND
+#if GEMV_TP_SEND
+#error "gemv: GEMV_TP_SEND or TP_FOLD_SEND"
+#endif
+#if GEMV_KSL > 1
+#error "gemv TP_FOLD_SEND: one sub-group a tile (GEMV_KSL 1)"
+#endif
+#define WG_COLS WG_N
+#include "tp_fold_send.h"
 #endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -120,7 +159,11 @@ inline float dot8(uint word, ushort8 xv) {
 }
 
 __attribute__((intel_reqd_sub_group_size(SG)))
+#if GEMV_KSL > 1
+__attribute__((reqd_work_group_size(WG_N * GEMV_KSL, 1, 1)))
+#else
 __attribute__((reqd_work_group_size(WG_N, 1, 1)))
+#endif
 __kernel void gemv(__global const uint* restrict w,
                    __global const half* restrict scales,
                    __global const ushort* restrict x,
@@ -128,9 +171,20 @@ __kernel void gemv(__global const uint* restrict w,
 #if GEMV_TP_SEND
                    , __global uint* land, __global uint* ctr
 #endif
+#if TP_FOLD_SEND
+                   , __global uint* land, __global uint* ctr, __global float* own
+#endif
                    ) {
   const uint lane = get_sub_group_local_id();
+#if GEMV_KSL > 1
+  // [sub-group][m][lane]: each K slice's fp32 partial of its column, for the tree.
+  __local float red[SG_PER_WG * GEMV_KSL][M][SG];
+  const uint sg = get_sub_group_id();
+  const uint q = sg / SG_PER_WG;   // the K slice; the column tile is sg % SG_PER_WG
+  const uint n_tile = get_group_id(0) * SG_PER_WG + sg % SG_PER_WG;
+#else
   const uint n_tile = get_group_id(0) * SG_PER_WG + get_sub_group_id();
+#endif
   const uint n = n_tile * SG + lane;
   const uint s = get_group_id(1);
   const uint g0 = s * G_PER_S;
@@ -139,11 +193,11 @@ __kernel void gemv(__global const uint* restrict w,
   float acc[M];
   for (int m = 0; m < M; ++m) acc[m] = 0.f;
 
-  for (uint ga = g0; ga < g1; ga += GEMV_AHEAD) {
+  for (uint ga = G_FIRST(g0); ga < g1; ga += G_STRIDE) {
     uint wva[GEMV_AHEAD][8];
     float scalea[GEMV_AHEAD];
     __attribute__((opencl_unroll_hint)) for (uint a = 0; a < GEMV_AHEAD; ++a) {
-      const uint g = ga + a;
+      const uint g = G_AT(ga, a);
       __private uint* wv = wva[a];
 #if LAYOUT == 0
 #if GEMV_BLOCK2D
@@ -172,7 +226,7 @@ __kernel void gemv(__global const uint* restrict w,
 #endif
     }
     __attribute__((opencl_unroll_hint)) for (uint a = 0; a < GEMV_AHEAD; ++a) {
-      const uint g = ga + a;
+      const uint g = G_AT(ga, a);
       const __private uint* wv = wva[a];
       const float scale = scalea[a];
       float gacc[M];
@@ -215,7 +269,22 @@ __kernel void gemv(__global const uint* restrict w,
     }
     atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
   }
+#elif GEMV_KSL > 1
+  for (int m = 0; m < M; ++m) red[sg][m][lane] = acc[m];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  // The fixed tree: slice q < stride adds slice q + stride of the same column tile (SG_PER_WG sub-groups apart).
+  for (uint stride = GEMV_KSL / 2; stride > 0; stride >>= 1) {
+    if (q < stride)
+      for (int m = 0; m < M; ++m) red[sg][m][lane] += red[sg + stride * SG_PER_WG][m][lane];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (q == 0)
+    for (int m = 0; m < M; ++m) out[((size_t)s * M + m) * N + n] = red[sg][m][lane];
 #else
   for (int m = 0; m < M; ++m) out[((size_t)s * M + m) * N + n] = acc[m];
+#if TP_FOLD_SEND
+  __local uint tpf[TPF_LOCAL];
+  tp_fold_send(out, land, ctr, own, tpf);
+#endif
 #endif
 }

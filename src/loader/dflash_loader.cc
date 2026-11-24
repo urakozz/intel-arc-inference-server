@@ -49,7 +49,12 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   // Spec 19 v3c: a TP card's head is its vocabulary half; the drafter is held to the whole vocabulary.
   auto w = load_drafter(ctx, snapshot_or_repo, *target.desc, head.shape.N * (tp_rank >= 0 ? 2u : 1u), target.embed,
                         format, threads, tp_rank);
-  if (candidate_head) {
+  if (candidate_head && candidate_bits == 2 && tp_rank < 0 && target.cand_head) {
+    w.candidate_bits = 2;   // PERF-123: the target's own 2-bit copy (loaded beside its MTP head), counted there
+    if (candidates != 64 && candidates != 80) throw std::runtime_error("DFlash candidate head: 64 or 80 candidates");
+    w.candidates = candidates;
+    w.candidate_head = target.cand_head;
+  } else if (candidate_head) {
     const auto start = std::chrono::steady_clock::now();
     l0::CmdList imm = l0::CmdList::immediate(ctx);
     l0::Mem rows(ctx, l0::MemKind::Host, head.mem.size());
@@ -75,6 +80,17 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
     std::print("{}\n", line);
   }
   return w;
+}
+
+std::shared_ptr<const DeviceWeight> candidate_head2(l0::Context& ctx, const DeviceWeight& int8_head, size_t& bytes) {
+  if (int8_head.kind != model::WeightKind::Int8) throw std::runtime_error("candidate_head2: the head is not int8");
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  l0::Mem rows(ctx, l0::MemKind::Host, int8_head.mem.size());
+  std::vector<float> scales(int8_head.shape.N);
+  imm.copy(rows.ptr(), int8_head.mem.ptr(), rows.size());
+  imm.copy(scales.data(), int8_head.scales->ptr(), scales.size() * 4);
+  return upload_linear_u(
+      ctx, imm, dflash_candidate_head2(rows.as<int8_t>(), scales.data(), int8_head.shape.K, int8_head.shape.N), bytes);
 }
 
 namespace {

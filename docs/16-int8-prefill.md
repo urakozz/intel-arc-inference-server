@@ -10,13 +10,14 @@ fails. It is for readers deciding whether to turn the option on, and for anyone 
 doing 8-bit arithmetic.
 
 On Qwen3.8-27B, one card, served by `b70-serve` with MTP on, it reads a prompt 1.40x to 1.47x faster than bf16
-(two interleaved rounds each, prompt tokens a second; the earlier int8 pass, int8 in the MLP only, for comparison):
+(prompt tokens a second; the earlier int8 pass, int8 in the MLP only, for comparison). The bf16 pass runs
+4096-row chunks at the default `--max-len auto`, which sizes its context for them; one run after a warm-up each:
 
 | prompt tokens | `l0` (bf16) | earlier int8 pass | `l0-int8` | gain over bf16 |
 |---:|---:|---:|---:|---:|
-| 3,931 | 1,906 | 2,524 | 2,800 | 1.47x |
-| 30,199 | 1,640 | 2,050 | 2,346 | 1.43x |
-| 60,609 | 1,397 | 1,687 | 1,985 | 1.42x |
+| 3,931 | 1,908 | 2,524 | 2,800 | 1.47x |
+| 30,199 | 1,634 | 2,050 | 2,346 | 1.44x |
+| 60,609 | 1,395 | 1,687 | 1,985 | 1.42x |
 | 122,435 | 1,072 | 1,234 | 1,500 | 1.40x |
 
 Two cards (`tp`, `pp`) run the same form; they have not been timed or gated with it yet (see "Tensor parallel").

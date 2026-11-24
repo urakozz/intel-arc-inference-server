@@ -126,7 +126,8 @@
 // same groups of 6, so a work-group's walk, operands and order are the 24 / 4 build's for those heads (property R:
 // row for row bitwise the one-card kernel's heads 12 r .. 12 r + 11); the grid is (2, TGT). PERF-56: Ornith's 16 q /
 // 2 kv (groups of 8, GQA 8) in its wide lookup verify lists only - an M 8 build in row chunks (RCHUNK 16 / 32 / 64),
-// since 16 rows of 8 heads would need the whole 128 KB of SLM for q alone. Another model's heads keep v2 (the rule).
+// since 16 rows of 8 heads would need the whole 128 KB of SLM for q alone. PERF-120: and its row lists of 16 / 32 rows
+// across sequences (BATCH_ROWS, runs of up to 8 rows). Another model's heads keep v2 (the rule).
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
@@ -162,8 +163,8 @@
 #if defined(FA_Q_HEADS) && !(FA_Q_HEADS == 12 && FA_KV_HEADS == 2) && !(FA_Q_HEADS == 16 && FA_KV_HEADS == 2)
 #error "attn_verify_dpas: Qwen3.8's 24 / 4, a TP card's 12 / 2 (spec 17d) or Ornith's 16 / 2 heads; others keep attn_v2"
 #endif
-#if defined(FA_Q_HEADS) && FA_Q_HEADS == 16 && (M != 8 || !defined(RCHUNK))
-#error "attn_verify_dpas: Ornith's 16 / 2 heads are an M 8 build in row chunks (RCHUNK)"
+#if defined(FA_Q_HEADS) && FA_Q_HEADS == 16 && (M != 8 || !(defined(RCHUNK) || defined(BATCH_ROWS)))
+#error "attn_verify_dpas: Ornith's 16 / 2 heads are an M 8 build in row chunks (RCHUNK) or runs (BATCH_ROWS)"
 #endif
 #if !((M >= 2 && M <= 8) || M == 16)
 #error "attn_verify_dpas: M is 2..8 (16 for the probe's record)"
@@ -189,6 +190,26 @@
 #endif
 #else
 #define PROWS M
+#endif
+// BATCH_ROWS (plan 40a Task 3; undefined on every other command line): the 16- and 32-row lists of several sequences
+// (runtime::build_rows). A run - one sequence's consecutive rows, at most 8 (each sequence once a step, check_rows) - is
+// the one-sequence verify of its rows: work-group (j, blk, z) is exactly the M 8 kernel's work-group (j, blk) launched
+// at the z-th run's first position with its rows, over its sequence's KV (the row word BROW_KVB, its first page in the
+// table's positions) - the same walk, operands and order (property R), so each row is bitwise the one-sequence DPAS
+// verify's row at the same key count and KV. It reads q at the run's first row r0 and writes row m's partials where
+// attn_v2's row build over groups of M rows has them (group (r0 + m) / M, row (r0 + m) % M: [g][24][TGT][M][258]), so
+// the reduce is that build's attn_reduce_v2 a group. The rows past n_active up to ROWS_W (the table's padding) get a
+// partial of their block 0 that reduces to 0 (mx 0, sm 1, acc 0), written by work-groups (j, 0, 0). A run past the
+// table's last returns. Grid (4, TGT, the sequences); always paged (the row lists are the slots engine's).
+#ifdef BATCH_ROWS
+#if EAGER || defined(RCHUNK) || !defined(KV_PAGED) || M != 8 || !defined(ROWS_W) || !defined(BROW_WORDS) || \
+    !defined(BROW_POS) || !defined(BROW_KVB) || !defined(BROW_SLOT)
+#error "attn_verify_dpas BATCH_ROWS: the paged M 8 DPAS build with ROWS_W and the row table's BROW_* words"
+#endif
+#define PART_AT(qh, mm) \
+  attn_part + ((size_t)((r0 + (mm)) / M) * Q_HEADS * TGT * M + ((size_t)(qh) * TGT + blk) * M + (r0 + (mm)) % M) * PART
+#else
+#define PART_AT(qh, mm) attn_part + (((size_t)(qh) * TGT + blk) * PROWS + mm) * PART
 #endif
 #if KT != 32 && KT != 64
 #error "attn_verify_dpas: KT is 32 or 64"
@@ -609,6 +630,9 @@ __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* restrict attn_q, KV_ARGS,
                     __global float* restrict attn_part
+#ifdef BATCH_ROWS
+                    , __global const uint* restrict rows
+#endif
 #ifdef KV_PAGED
                     , __global const uint* restrict pages
 #endif
@@ -633,6 +657,26 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
   n_act = n_act > c0 ? n_act - c0 : 0u;
   attn_q += (size_t)c0 * Q_HEADS * HD;
   attn_part += (size_t)c0 * PART;
+#elif defined(BATCH_ROWS)
+  // The z-th run of the table (header, BATCH_ROWS); uniform across the work-group.
+  const uint n_tot = min(ctrl[CTRL_NACT], (uint)ROWS_W), z = get_group_id(2);
+  if (z == 0 && blk == 0)   // the padding rows' partials (header)
+    for (uint i = lid; i < (ROWS_W - n_tot) * GQA * PART; i += WG) {
+      const uint R = n_tot + i / (GQA * PART), qhl = (i / PART) % GQA, w = i % PART;
+      attn_part[((size_t)(R / M) * Q_HEADS * TGT * M + ((size_t)(j * GQA + qhl) * TGT) * M + R % M) * PART + w] =
+          w == 1 ? 1.0f : 0.0f;
+    }
+  uint r0 = 0;
+  for (uint zi = 0; zi < z && r0 < n_tot; ++zi) {
+    const uint slot = rows[r0 * BROW_WORDS + BROW_SLOT];
+    while (r0 < n_tot && rows[r0 * BROW_WORDS + BROW_SLOT] == slot) ++r0;
+  }
+  if (r0 >= n_tot) return;
+  uint n_act = 1;
+  while (r0 + n_act < n_tot && rows[(r0 + n_act) * BROW_WORDS + BROW_SLOT] == rows[r0 * BROW_WORDS + BROW_SLOT]) ++n_act;
+  const uint pos = rows[r0 * BROW_WORDS + BROW_POS];
+  pages += rows[r0 * BROW_WORDS + BROW_KVB] / KV_PAGED;   // the sequence's first page in the table
+  attn_q += (size_t)r0 * Q_HEADS * HD;
 #else
   const uint pos = ctrl[CTRL_POS];
   uint n_act = ctrl[CTRL_NACT];
@@ -1117,7 +1161,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
     bool oo;                                                                            \
     row_of(rb0 + r3, r, &qq, &mm, &oo);                                                 \
     if (oo && mm < n_act && (mm < msplit ? live0 : live1)) {                            \
-      __global float* restrict out = attn_part + (((size_t)(j * GQA + qq) * TGT + blk) * PROWS + mm) * PART; \
+      __global float* restrict out = PART_AT(j * GQA + qq, mm); \
       _Pragma("unroll") for (uint a = 0; a < NAM; ++a)                                  \
         if (a < na) out[2 + 16u * (a0 + a) + l] = o[r3][a].s##r;                        \
     }                                                                                   \
@@ -1129,7 +1173,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #define OUTS(r)                                                                         \
   if (okv.s##r && ((mv.s##r < msplit) ? live0 : live1)) {                               \
     __global float* restrict out =                                                      \
-        attn_part + (((size_t)(j * GQA + qhv.s##r) * TGT + blk) * PROWS + mv.s##r) * PART; \
+        PART_AT(j * GQA + qhv.s##r, mv.s##r); \
     out[0] = mrow.s##r;                                                                 \
     out[1] = lsum.s##r;                                                                 \
   }
@@ -1203,7 +1247,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
     bool oo;                                                                            \
     row_of(r2, r, &qq, &mm, &oo);                                                       \
     if (oo && mm < n_act && (mm < msplit ? live0 : live1)) {                            \
-      __global float* restrict out = attn_part + (((size_t)(j * GQA + qq) * TGT + blk) * PROWS + mm) * PART; \
+      __global float* restrict out = PART_AT(j * GQA + qq, mm); \
       _Pragma("unroll") for (uint a = 0; a < NAM; ++a)                                  \
         if (a < na) out[2 + 16u * (a0 + a) + l] = o[r2][a].s##r;                        \
       if (r2 == rb && ds == 0u && l == 0u && !helper) { out[0] = mrow.s##r; out[1] = lsum.s##r; } \
@@ -1220,7 +1264,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #define OUT(r)                                                                          \
   if (okv.s##r && ((mv.s##r < msplit) ? live0 : live1)) {                               \
     __global float* restrict out =                                                      \
-        attn_part + (((size_t)(j * GQA + qhv.s##r) * TGT + blk) * PROWS + mv.s##r) * PART; \
+        PART_AT(j * GQA + qhv.s##r, mv.s##r); \
     _Pragma("unroll") for (uint dd = 0; dd < NDD; ++dd) out[2 + ds * DSPLIT + 16u * dd + l] = o[dd].s##r; \
     if (ds == 0 && l == 0) { out[0] = mrow.s##r; out[1] = lsum.s##r; }                  \
   }

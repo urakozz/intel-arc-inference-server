@@ -42,3 +42,13 @@ add_subdirectory(qwen4exp)
 # Spec 19b: the DFlash drafter's buffers, planner term and its two captured lists (draft, projection) - its own
 # directory, beside the engines it serves (19c wires it into runtime::Engine).
 add_subdirectory(dflash)
+
+add_library(b70_inkling2_plan STATIC inkling2/inkling2_sizes.cc)
+target_link_libraries(b70_inkling2_plan PUBLIC b70_plan b70_inkling2_loader)
+
+add_library(b70_inkling2_buffers STATIC inkling2/inkling2_buffers.cc)
+target_link_libraries(b70_inkling2_buffers PUBLIC b70_inkling2_plan b70_dflash_plan b70_l0)
+
+add_library(b70_inkling2_runtime STATIC inkling2/inkling2_engine.cc)
+target_link_libraries(b70_inkling2_runtime PUBLIC b70_inkling2_buffers)
+b70_target_kernel_dir(b70_inkling2_runtime)

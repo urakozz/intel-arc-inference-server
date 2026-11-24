@@ -133,7 +133,8 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
                             const runtime::qwen4exp::ExpertTier* tier1 = nullptr,
                             uint32_t pf_rows = runtime::qwen4exp::kPfC);
 
-// The routing profile beside the checkpoint (`<snapshot>-expert-profile.safetensors`: offload_curve.py profile's
+// The routing profile (`<snapshot>/expert-profile.safetensors`, shipped in our model repo, else
+// `<snapshot>-expert-profile.safetensors` beside the checkpoint: offload_curve.py profile's
 // u32 counts [layers][experts], format "spec22-profile-1"): its counts, or empty when there is no such file; a file
 // of another shape or format is refused by name.
 std::vector<uint32_t> load_q4_profile(const std::string& snapshot_or_repo, const model::Qwen4ExpDesc& full,

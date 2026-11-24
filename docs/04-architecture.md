@@ -102,8 +102,8 @@ reserve `max_tokens` (agent clients ask for the whole context). Idle sessions ar
 that has finished keeps its pages until a new request needs them, then the one idle longest leaves the card, its
 prefix cache entries held until its next turn restores them. A running request that finds no page left finishes
 with `length`. Requests that start the same way share the pages of that start, read-only; the first write into a
-shared page gives the writer a private copy. Nothing running is ever preempted. Beside the DFlash drafter the
-sequences keep fixed lengths: slot 0 the largest context that fits beside N - 1 slots of 32,768 positions.
+shared page gives the writer a private copy. Nothing running is ever preempted. The same holds beside the DFlash
+drafter, whose sessions are a fixed size whatever a request's length.
 
 ### How the two cards stay in step under tensor parallel
 

@@ -46,15 +46,21 @@ uint32_t checked_max_len(const loader::LoadedModel& m, uint32_t max_len) {
   return max_len;
 }
 
-// Spec 13c: the slot lengths, checked against max_len before anything is allocated (empty: one slot of max_len).
-// Spec 31: with a page pool, every sequence's cap - all equal, at most the pool - and max_len the pool's positions.
+// The sequences' caps, checked against max_len before anything is allocated (empty: one sequence of max_len). Spec 31:
+// several sequences share a KV page pool - every cap equal, at most the pool - and max_len is the pool's positions.
 std::vector<uint32_t> checked_slots(const loader::LoadedModel& m, uint32_t max_len, std::vector<uint32_t> slots,
                                     uint32_t pool_pages) {
   if (slots.empty() && pool_pages != 0) throw std::runtime_error("runtime::Engine: a KV page pool without sequences");
   if (slots.empty()) return {max_len};
   for (uint32_t l : slots)
     if (l == 0) throw std::runtime_error("runtime::Engine: a sequence slot of 0 positions");
-  if (pool_pages != 0) {
+  if (pool_pages == 0) {
+    if (slots.size() > 1)
+      throw std::runtime_error("runtime::Engine: several sequences share a KV page pool - pass its pages");
+    if (slots[0] != max_len)
+      throw std::runtime_error("runtime::Engine: one sequence of " + std::to_string(slots[0]) +
+                               " positions, but max_len is " + std::to_string(max_len));
+  } else {
     if (slots.size() < 2 || std::count(slots.begin(), slots.end(), slots[0]) != std::ptrdiff_t(slots.size()))
       throw std::runtime_error("runtime::Engine: a KV page pool serves two or more sequences of one cap");
     if (uint64_t(pool_pages) * kKvPage != max_len || slots[0] > max_len)
@@ -62,10 +68,6 @@ std::vector<uint32_t> checked_slots(const loader::LoadedModel& m, uint32_t max_l
                                std::to_string(kKvPage) + " is max_len " + std::to_string(uint64_t(pool_pages) * kKvPage) +
                                " (asked " + std::to_string(max_len) + "), and a request's cap " +
                                std::to_string(slots[0]) + " at most that");
-  } else if (const uint32_t sum = slots_kv_len(slots); sum != max_len) {   // plan 19v3b Task 0: whole KV pages each
-    throw std::runtime_error("runtime::Engine: the sequence slots hold " + std::to_string(sum) +
-                             " positions (runtime::slots_kv_len), but max_len is " + std::to_string(max_len) +
-                             " - the KV caches are one allocation of the slots' pages");
   }
   if (slots.size() > SlotDims::kMaxSeqs)
     throw std::runtime_error("runtime::Engine: " + std::to_string(slots.size()) + " sequence slots; at most " +
@@ -94,6 +96,13 @@ bool wide_lists(const loader::LoadedModel& m, KvCache kv, size_t seqs) {
              DecodeScratchDims::kDeepM &&
          m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind == model::WeightKind::Int8;
 }
+// The decode scratch's rows: the deep lists' 64 (above), plan 40a Task 3's 32 for several Qwen3.8 sequences with a
+// proposer (DecodeScratchDims::rows, as the planner counts them), else 16.
+uint32_t scratch_rows(const loader::LoadedModel& m, KvCache kv, size_t seqs, bool drafter) {
+  if (wide_lists(m, kv, seqs)) return DecodeScratchDims::kDeepM;
+  return seqs > 1 ? DecodeScratchDims::rows(*m.desc, m.mtp != nullptr || drafter, kv, uint32_t(seqs), false)
+                  : DecodeScratchDims::kWideM;
+}
 }  // namespace
 
 Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bool debug_resid,
@@ -102,13 +111,14 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
       model_(std::move(model)),
       persist_(ctx, checked_max_len(model_, max_len), *model_.desc, kv),
       decode_scratch_(ctx, persist_.max_len, *model_.desc,
-                      wide_lists(model_, kv, checked_slots(model_, max_len, slot_lens, pool_pages).size()) ? DecodeScratchDims::kDeepM
-                                                                                               : DecodeScratchDims::kWideM),
+                      scratch_rows(model_, kv, checked_slots(model_, max_len, slot_lens, pool_pages).size(),
+                                   drafter != nullptr)),
       buffers_(persist_, decode_scratch_),
       own_{.tap = debug_resid ? std::make_unique<l0::Mem>(
                                     ctx, l0::MemKind::Device, EngineDims::sizes(*model_.desc, kv, 0, 1, false, false, true).tap)
                               : nullptr,
-            .df_slots = nullptr, .gdn_pend = nullptr, .gdn_x = nullptr, .conv_x = nullptr},
+            .df_slots = nullptr, .gdn_pend = nullptr, .gdn_x = nullptr, .conv_x = nullptr,
+            .head_gate = nullptr},
       mtp_(model_.mtp ? std::make_unique<MtpBuffers>(
                             ctx, persist_.max_len, *model_.desc,
                             model_.draft_vocab ? model_.draft_vocab->size() : 0u,   // spec 8 §11
@@ -134,8 +144,8 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
                                " ids a block; the verify lists take 1.." +
                                std::to_string(TapVerifyDims::kSlots - 1));
     drafter_ = drafter;
-    // Plan 19v3b: slot 0's 7 speculative states, then every further slot's SlotDims::kDrafterStates (setup_slots).
-    own_.df_slots = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, es.df_slots);
+    // Spec 19c: one sequence's 7 speculative states (plan 40a Task 2: several sequences keep their rows pending).
+    if (es.df_slots) own_.df_slots = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, es.df_slots);
   }
   setup_slots(lens, pool_pages);
   {
@@ -152,7 +162,17 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
         s.flush = std::make_unique<CapturedStep>(build_gdn_flush(ctx, model_, buffers_, s.bind));
       }
       if (slots() == 1) seqs_[0].tv.gdn_pend = own_.gdn_pend.get();
+      // Plan 40a Task 2: several slots' row lists bind the deferred row build over the same pending rows (every shape
+      // with gdn_pend: Qwen3.8's and, PERF-120, Ornith's).
+      if (slots() > 1) rows_bind_.pend = own_.gdn_pend->ptr();
     }
+  }
+  // PERF-123: the int8 head's 2-bit copy - the CLI's beside the MTP head, else a DFlash drafter's own - and the word
+  // the verify lists read for the head a step takes (greedy_head).
+  if (!model_.cand_head && drafter) model_.cand_head = drafter->candidate_head2();
+  if (es.head_gate) {
+    own_.head_gate = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, es.head_gate);
+    *own_.head_gate->as<uint32_t>() = 0;
   }
   if (drafter) {
     // Plan 19v3b: a drafter session per slot; slot 0's verify lists here, the further slots' in capture_slot.
@@ -162,8 +182,8 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
       rows_bind_.tap_layers = drafter->tap_layers();
     }
     Seq& z = seqs_[0];
-    z.tv.gdn_spec = z.bind.gdn_spec ? nullptr : own_.df_slots.get();   // several slots: the bound pool (setup_slots)
-    z.tv.slots = TapVerifyDims::kSlots;
+    z.tv.gdn_spec = own_.df_slots.get();   // one slot; several keep their rows pending (null)
+    z.tv.slots = z.states;
     z.tv.taps = &drafter->taps();
     z.tv.layers = drafter->tap_layers();
     for (uint32_t M = 1; M <= drafter->max_k() + 1; ++M) capture_verify(M, {});
@@ -186,8 +206,22 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
   // Plan 19v3b Task 0: slot 0 of several has its own paged plain list too (step_ stays the one-slot engine's).
   if (slots() > 1) seqs_[0].plain.push_back(build(ctx, model_, buffers_, nullptr, nullptr, 1, {}, seqs_[0].bind));
   for (uint32_t q = 1; q < slots(); ++q) capture_slot(q);
-  if (slots() > 1)
-    for (uint32_t M = 2; M <= kMaxRows; ++M) rows_steps_.push_back(build_rows(ctx, model_, buffers_, rows_bind_, M));
+  if (slots() > 1) {
+    // PERF-120: Ornith's 2..8-row lists keep the slot build (every row its state; main's binaries) - its deferred row
+    // build ran the 8-row step at 20.10 ms against 19.32 (4 sequences x K 1, int8 KV, A B A B); only its 16- and
+    // 32-row lists defer.
+    BatchRowsBind nb = rows_bind_;
+    if (model_.desc->is_moe()) nb.pend = nullptr;
+    for (uint32_t M = 2; M <= kMaxRows; ++M) rows_steps_.push_back(build_rows(ctx, model_, buffers_, nb, M));
+  }
+  // Plan 40a Task 3: the 16- and 32-row lists - the MTP head's sequences on Qwen3.8 (PERF-120: and Ornith) with their
+  // pending delta-net rows, the int8 head (gemm_sm_i8w's wide rows) and a decode scratch of kMaxWideRows rows. Task 4:
+  // and a drafter's whose batched draft takes that many rows (its rows projection the same).
+  if (slots() > 1 && (mtp_ || (drafter_ && drafter_->draft_rows_max() >= kMaxWideRows)) && rows_bind_.pend &&
+      decode_scratch_.logits.size() >= size_t(kMaxWideRows) * Qwen35::kVocab * 4 &&
+      model_.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind == model::WeightKind::Int8) {
+    build_rows_wide(model_.desc->is_moe());
+  }
   if (slots() > 1 && mtp_)
     for (uint32_t M = 2; M <= std::min(slots(), kMaxDraftRows); ++M)
       draft_rows_steps_.push_back(build_draft_rows(ctx, model_, buffers_, *mtp_, draft_bind_, M));
@@ -198,6 +232,19 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
 }
 
 // --- spec 13c: sequence slots ----------------------------------------------------------------------------------------
+
+void Engine::probe_rows_moe_union(bool on) {
+  if (!rows_wide_[1]) throw std::logic_error("runtime::Engine::probe_rows_moe_union: this engine has no 16- / 32-row lists");
+  build_rows_wide(on);
+}
+
+void Engine::build_rows_wide(bool moe_union) {
+  BatchRowsBind b = rows_bind_;
+  b.attn_blocks = kRowsAttnBlocks;   // PERF-120
+  b.moe_union = moe_union;
+  rows_wide_[0] = std::make_unique<CapturedStep>(build_rows(ctx_, model_, buffers_, b, 16));
+  rows_wide_[1] = std::make_unique<CapturedStep>(build_rows(ctx_, model_, buffers_, b, kMaxWideRows));
+}
 
 void Engine::setup_slots(const std::vector<uint32_t>& lens, uint32_t pool_pages) {
   const model::ModelDesc& d = *model_.desc;
@@ -210,11 +257,12 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens, uint32_t pool_pages)
     layout_.slots.push_back({lens[q], mtp_ != nullptr});
     seqs_[q].base = layout_.kv_base(q);   // plan 19v3b Task 0: with several slots, a page boundary
   }
-  // The GDN states a slot holds: MTP's kSlots, a drafter's 8 in slot 0 and kDrafterStates in a further slot, else 1;
-  // `first` numbers them as the row lists' pool does (index i >= 1 at pool + (i - 1) whole states).
+  // The GDN states a slot holds: MTP's kSlots, a drafter's 8 in one slot (plan 40a Task 2: 1 a slot of several - its
+  // committed rows stay pending), else 1; `first` numbers them as the row lists' pool does (index i >= 1 at pool +
+  // (i - 1) whole states).
   for (uint32_t q = 0; q < S; ++q) {
     Seq& s = seqs_[q];
-    s.states = mtp_ ? MtpBuffers::kSlots : drafter_ ? (q == 0 ? TapVerifyDims::kSlots : SlotDims::kDrafterStates) : 1;
+    s.states = mtp_ ? MtpBuffers::kSlots : drafter_ && S == 1 ? TapVerifyDims::kSlots : 1;
     s.first = q == 0 ? 0 : seqs_[q - 1].first + seqs_[q - 1].states;
   }
   Seq& z = seqs_[0];   // slot 0: the buffers' own state, today's binding (bind all null but, of several, its pages)
@@ -226,26 +274,21 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens, uint32_t pool_pages)
     z.spec = mtp_->gdn_spec.as<uint8_t>();
     z.hh = mtp_->hh.as<uint8_t>();
   }
-  if (drafter_) z.spec = own_.df_slots->as<uint8_t>();
+  if (drafter_ && S == 1) z.spec = own_.df_slots->as<uint8_t>();
   if (S == 1) return;
-  // Plan 19v3b Task 0: the KV page table - the identity, written once: slot q's pages are its own range. Spec 31, a
-  // pool: every sequence's region of kv_pages(cap) entries (its base, layout_'s), all page 0 until it takes pages.
-  const uint32_t n_pages = pool_pages != 0 ? layout_.total() / kKvPage : persist_.max_len / kKvPage;
-  // The further slots' GDN states live in MtpBuffers::gdn_spec (MTP) or own_.df_slots (a drafter): SlotBuffers holds none.
-  slot_bufs_ = std::make_unique<SlotBuffers>(ctx_, d, S, mtp_ != nullptr || drafter_ != nullptr, n_pages);
-  pages_.resize(n_pages);
-  for (uint32_t p = 0; p < n_pages; ++p) pages_[p] = pool_pages != 0 ? 0 : p;
-  if (pool_pages != 0) pool_ = std::make_unique<KvPool>(pool_pages, S, kv_pages(lens[0]));
+  // Spec 31, the KV page pool's table: every sequence's region of kv_pages(cap) entries (its base, layout_'s), all
+  // page 0 until it takes pages.
+  const uint32_t n_pages = layout_.total() / kKvPage;
+  // The further slots' GDN states live in MtpBuffers::gdn_spec (MTP), else SlotBuffers holds one a slot.
+  slot_bufs_ = std::make_unique<SlotBuffers>(ctx_, d, S, mtp_ != nullptr, n_pages);
+  pages_.assign(n_pages, 0);
+  pool_ = std::make_unique<KvPool>(pool_pages, S, kv_pages(lens[0]));
   imm_.copy(slot_bufs_->pages.ptr(), pages_.data(), size_t(n_pages) * 4);
   const uint32_t* table = slot_bufs_->pages.as<uint32_t>();
   z.bind.pages = table;
   // GDN index i >= 1 lives at pool + (i - 1) whole states: with MTP MtpBuffers::gdn_spec (slot 0's three, then every
   // further slot's four - MtpDims' `seqs`), without SlotBuffers::states (one a further slot).
-  // Plan 19v3b: beside a drafter own_.df_slots - slot 0's 7, then each further slot's 4.
-  uint8_t* pool = mtp_      ? mtp_->gdn_spec.as<uint8_t>()
-                  : drafter_ ? own_.df_slots->as<uint8_t>()
-                             : slot_bufs_->states->as<uint8_t>();
-  if (drafter_) z.bind.gdn_spec = z.spec;   // slot 0's verify lists bind the pool (its first 7 states)
+  uint8_t* pool = mtp_ ? mtp_->gdn_spec.as<uint8_t>() : slot_bufs_->states->as<uint8_t>();
   for (uint32_t q = 1; q < S; ++q) {
     Seq& s = seqs_[q];
     s.control = reinterpret_cast<Control*>(slot_bufs_->control_block(SlotDims::control_at(S, q)));
@@ -274,6 +317,7 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens, uint32_t pool_pages)
   b.state_pool = pool;
   b.ring_pool = slot_bufs_->rings.ptr();
   b.pages = table;
+  b.seqs = S;
   draft_bind_.pages = table;
   if (mtp_) {
     b.mtp = mtp_.get();
@@ -282,12 +326,12 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens, uint32_t pool_pages)
     b.gctl = slot_bufs_->control_block(SlotDims::gather_control_at(S));
     b.table = mtp_->hh.ptr();
     b.saved = mtp_->hh.as<uint8_t>() + size_t(S) * (DecodeScratchDims::kM + 1) * hid;
-    b.hin = static_cast<uint8_t*>(b.saved) + size_t(DecodeScratchDims::kM) * hid;
+    b.hin = static_cast<uint8_t*>(b.saved) + size_t(DecodeScratchDims::kWideRowsM) * hid;   // MtpDims::hh_rows
     // The row draft lists: their own head Control and table, the chain rows after the gather's, the logits rows of
     // the decode scratch (read before the verify that rewrites them).
     draft_bind_.hctl = slot_bufs_->control_block(SlotDims::draft_control_at(S));
     draft_bind_.head_rows = slot_bufs_->control_block(SlotDims::draft_table_at(S));
-    draft_bind_.dh = static_cast<uint8_t*>(b.hin) + size_t(DecodeScratchDims::kM) * hid;
+    draft_bind_.dh = static_cast<uint8_t*>(b.hin) + size_t(DecodeScratchDims::kWideRowsM) * hid;
     draft_bind_.logits = buffers_.logits.ptr();
   }
 }
@@ -298,7 +342,7 @@ void Engine::capture_slot(uint32_t q) {
   select(q);
   Seq& s = seq();
   s.plain.push_back(build(ctx_, model_, buffers_, nullptr, nullptr, 1, {}, s.bind));
-  if (drafter_) {   // plan 19v3b: its verify lists over its 4 states and its session's taps, M = 1 .. 4
+  if (drafter_) {   // plan 19v3b: its verify lists and its session's taps (plan 40a: deferred, M = 1 .. max_k + 1)
     s.tv.slots = s.states;
     s.tv.taps = &drafter_->taps();
     s.tv.layers = drafter_->tap_layers();
@@ -333,8 +377,8 @@ void Engine::zero_slot() {
     imm_.fill(s.spec, 0u, state * (MtpBuffers::kSlots - 1));
     imm_.fill(s.hh, 0u, size_t(DecodeScratchDims::kM + 1) * model_.desc->hidden * 2);
   }
-  if (drafter_) {   // plan 19v3b: its speculative states and its drafter session
-    imm_.fill(s.spec, 0u, state * (s.states - 1));
+  if (drafter_) {   // plan 19v3b: its speculative states (one slot) and its drafter session
+    if (s.states > 1) imm_.fill(s.spec, 0u, state * (s.states - 1));
     drafter_->reset(imm_);
   }
   // Its KV range, every layer (K, V and at int8 the scales; the head's layer too) - plan 19v3b Task 0: its pages.
@@ -460,27 +504,37 @@ void Engine::need_pages(uint32_t slot, uint32_t from, uint32_t upto, const char*
                            " free) - nothing was written");
 }
 
-void Engine::set_kv_page_table(const std::vector<uint32_t>& table) {
-  std::vector<bool> seen(pages_.size(), false);
-  for (uint32_t p : table) {
-    contract_assert(p < seen.size() && !seen[p]);   // a permutation of the KV's pages
-    seen[p] = true;
-  }
-  pages_ = table;
-  imm_.copy(slot_bufs_->pages.ptr(), pages_.data(), pages_.size() * 4);
-}
-
 void Engine::verify_rows(const std::vector<Run>& runs) {
   flush_projection();   // plan 19v3b: the rows' tap buffer is rewritten below
   RowRuns rr;
-  uint32_t M = 0;
+  // The list's width first (below): whether this step's delta-net rows defer (PERF-120: Ornith's narrow lists do not).
+  uint32_t M = 0, deepest = 0, k_states = 0;
+  for (const Run& r : runs) {
+    const Seq& s = seqs_.at(r.slot);
+    M += r.k + 1;
+    deepest = std::max(deepest, s.control->pos + r.k + 1);
+    k_states = std::max(k_states, r.k + 1 > s.states ? 1u : 0u);
+  }
+  // PERF-120: an 8-row step at depth on the 16-row list (kRowsWideDepth) - not on Ornith, whose padding rows cost their
+  // MoE reads: 17.9 -> 23.6 ms at depth 4096, 24.3 -> 23.7 at 30000 (four sequences, int8 KV, 2026-11-23); but an
+  // Ornith step with a run past its sequence's states goes there (its narrow lists write every row's state).
+  const bool moe = model_.desc->is_moe();
+  const bool on16 = rows_wide_[0] && (rows_wide_from_ ? M >= rows_wide_from_
+                                                      : (M == kMaxRows && deepest >= kRowsWideDepth && !moe) ||
+                                                            (moe && k_states));
+  const uint32_t W = M <= kMaxRows && !on16 ? M : M <= 16 ? 16 : kMaxWideRows;
+  const bool defer = rows_bind_.pend && (W > kMaxRows || !moe);
+  rows_defer_ = defer;
+  M = 0;
   for (const Run& r : runs) {
     const Seq& s = seqs_.at(r.slot);
     const uint32_t pos = s.control->pos;
-    if (r.k > max_draft_of(s) || (mtp_ && pos == 0) || size_t(pos) + r.k + 1 > s.len)
+    // Plan 40a Task 3: beside the wide lists a sequence's run takes up to kMaxRows - 1 drafts (its rows pending).
+    const uint32_t kmax = rows_wide_[1] ? kMaxRows - 1 : max_draft_of(s);
+    if (r.k > kmax || (mtp_ && pos == 0) || size_t(pos) + r.k + 1 > s.len)
       throw std::runtime_error("runtime::Engine::verify_rows: slot " + std::to_string(r.slot) + ": k " +
                                std::to_string(r.k) + " at pos " + std::to_string(pos) + " (k <= " +
-                               std::to_string(max_draft_of(s)) + ", pos >= 1 with the MTP head, pos + k + 1 <= its " +
+                               std::to_string(kmax) + ", pos >= 1 with the MTP head, pos + k + 1 <= its " +
                                std::to_string(s.len) + " positions)");
     for (uint32_t j = 0; j <= r.k; ++j)
       if (s.control->cur_token[j] >= Qwen35::kVocab)
@@ -488,21 +542,32 @@ void Engine::verify_rows(const std::vector<Run>& runs) {
                                  std::to_string(s.control->cur_token[j]) + " in row " + std::to_string(j) +
                                  " is outside the vocabulary");
     need_pages(r.slot, kv_write_from(r.slot), pos + r.k + 1, "verify_rows");   // spec 31: the rows' KV (main, head)
-    flush_gdn(s);   // plan 31 Task 13: its committed rows into its state before the row list reads it
+    // Plan 40a Task 2: the deferred row build replays the slot's committed rows itself (state 0, gdn_live 0 - every
+    // commit of a deferred slot leaves it there); the slot build reads a flushed state.
+    if (!defer) flush_gdn(s);
     RowRun x;
     x.slot = r.slot;
     x.pos = pos;
     x.rows = r.k + 1;
     const uint32_t live = s.control->gdn_live;
     x.src = gdn_index(r.slot, live);
-    for (uint32_t j = 0; j <= r.k; ++j) x.dst.push_back(gdn_index(r.slot, (live + j) % s.states));   // verify()'s
+    x.pend = defer ? s.control->gdn_pend : 0;
+    for (uint32_t j = 0; j <= r.k; ++j)   // verify()'s; unused by the deferred build
+      x.dst.push_back(defer ? x.src : gdn_index(r.slot, (live + j) % s.states));
     rr.push_back(x);
     M += x.rows;
   }
-  if (M < 2 || M > kMaxRows)
+  if (M < 2 || M > max_rows())
     throw std::runtime_error("runtime::Engine::verify_rows: " + std::to_string(M) + " rows; a row step takes 2.." +
-                             std::to_string(kMaxRows) + " (one slot's lone step is its own verify / generate)");
-  const RowTable t = make_rows(layout_, rr);   // check_rows: one run a slot, every rule
+                             std::to_string(max_rows()) + " (one slot's lone step is its own verify / generate)");
+  const RowTable t = make_rows(layout_, rr, defer);   // check_rows: one run a slot, every rule
+  // Plan 40a Task 3: the list - its own at M <= 8, else the 16- or 32-row one, whose rows M.. are padding: every
+  // kernel stops at n_active but embed_gather (an id each: 0), the gather (a valid hh row: 0) and the attention's
+  // groups of 8 (a row each: position 0 of the first run's sequence - one key of its own KV, read only).
+  rows_w_ = W;
+  // The ids' fields: cur_token / out_token at 8 rows, wide_cur / wide_out at 16, deep_cur / deep_out at 32
+  // (embed_gather.cl's CTRL_CUR, argmax.cl's CTRL_OUT).
+  const auto ids_in = [W](Control* c) { return W > 16 ? c->deep_cur : W > kMaxRows ? c->wide_cur : c->cur_token; };
   // The host's writes: the tables, the rows' ids, the head's pairs (h_{p-1}, x_p) at p - 1, the gather's table rows.
   auto* table = static_cast<BatchRowTable*>(rows_bind_.rows);
   auto* rc = static_cast<Control*>(rows_bind_.control);
@@ -511,8 +576,14 @@ void Engine::verify_rows(const std::vector<Run>& runs) {
   for (const RowRun& x : rr)
     for (uint32_t j = 0; j < x.rows; ++j, ++m) {
       table->row[m] = t[m];
-      rc->cur_token[m] = seqs_[x.slot].control->cur_token[j];
+      ids_in(rc)[m] = seqs_[x.slot].control->cur_token[j];
     }
+  BatchRow pad = t[0];
+  pad.pos = 0;
+  for (; m < W; ++m) {
+    table->row[m] = pad;
+    ids_in(rc)[m] = 0;
+  }
   if (mtp_) {
     auto* ht = static_cast<BatchRowTable*>(rows_bind_.head_rows);
     auto* hc = static_cast<Control*>(rows_bind_.hctl);
@@ -520,15 +591,21 @@ void Engine::verify_rows(const std::vector<Run>& runs) {
     hc->n_active = M;
     gc->n_active = M;
     const uint32_t row_hh = DecodeScratchDims::kM + 1, saved = slots() * row_hh;
-    for (uint32_t i = 0; i < M; ++i) {
+    for (uint32_t i = 0; i < W; ++i) {
+      if (i >= M) {   // padding (above)
+        ht->row[i] = pad;
+        ids_in(hc)[i] = 0;
+        ids_in(gc)[i] = 0;
+        continue;
+      }
       ht->row[i] = t[i];
       ht->row[i].pos = t[i].pos - 1;
-      hc->cur_token[i] = rc->cur_token[i];
+      ids_in(hc)[i] = ids_in(rc)[i];
       const bool first = i == 0 || t[i - 1].slot != t[i].slot;
-      gc->cur_token[i] = first ? t[i].slot * row_hh : saved + i - 1;
+      ids_in(gc)[i] = first ? t[i].slot * row_hh : saved + i - 1;
     }
   }
-  queue_.execute(rows_steps_.at(M - 2).list, &fence_);
+  queue_.execute(W <= kMaxRows ? rows_steps_.at(M - 2).list : rows_wide_[W > 16]->list, &fence_);
   fence_.wait();
   // Per run: committable as after its own verify(k) - row j's hidden is the saved row r0 + j.
   const size_t hid = size_t(model_.desc->hidden) * 2;
@@ -541,6 +618,8 @@ void Engine::verify_rows(const std::vector<Run>& runs) {
     s.from_rows = true;
     s.rows_row0 = r0;
     s.control->n_active = x.rows;
+    // Plan 40a Task 2: the list replayed the slot's committed rows (as Engine::verify clears them after its list).
+    if (defer) s.control->gdn_pend &= ~0xFFu;
     r0 += x.rows;
   }
 }
@@ -604,7 +683,8 @@ void Engine::draft_rows(const std::vector<Run>& runs,
 }
 
 const uint32_t* Engine::rows_ids() const {
-  return static_cast<const Control*>(rows_bind_.control)->out_token;
+  const Control* c = static_cast<const Control*>(rows_bind_.control);
+  return rows_w_ > 16 ? c->deep_out : rows_w_ > kMaxRows ? c->wide_out : c->out_token;   // plan 40a Task 3
 }
 const float* Engine::rows_logits_device() const { return buffers_.logits.as<float>(); }
 
@@ -612,6 +692,7 @@ const float* Engine::rows_logits_device() const { return buffers_.logits.as<floa
 
 void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
   Seq& s = seq();
+  s.bind.head_gate = own_.head_gate ? own_.head_gate->ptr() : nullptr;   // PERF-123: both heads, gated, at M 2..8
   auto one = [&](const CaptureOptions& o) {
     return drafter_ ? build_verify_taps(ctx_, model_, buffers_, s.tv, M, o, s.bind)
                     : build_verify(ctx_, model_, buffers_, *mtp_, M, nullptr, o, s.bind);
@@ -828,7 +909,8 @@ void Engine::require_spec(const char* what) const {
 }
 
 uint32_t Engine::max_draft_of(const Seq& s) const {
-  return mtp_ ? kMaxDraft : drafter_ ? std::min(drafter_->max_k(), s.states - 1) : 0;
+  // Plan 40a Task 2: a sequence with pending rows verifies the drafter's whole block whatever its states.
+  return mtp_ ? kMaxDraft : drafter_ ? (s.pend ? drafter_->max_k() : std::min(drafter_->max_k(), s.states - 1)) : 0;
 }
 uint32_t Engine::max_draft() const { return max_draft_of(seq()); }
 
@@ -966,6 +1048,7 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
     uint32_t* const hids = !wide ? hctl_->cur_token : k == kWideK ? hctl_->wide_cur : hctl_->deep_cur;
     for (uint32_t r = 0; r <= k; ++r) hids[r] = ids[r];
   }
+  if (own_.head_gate) *own_.head_gate->as<uint32_t>() = greedy_head_ ? 1u : 0u;   // PERF-123: the gated head kernels
   s.verify_pos = pos;
   s.verify_k = k;
   s.from_rows = false;
@@ -1003,7 +1086,9 @@ void Engine::commit(uint32_t j, uint32_t next_token, bool defer_projection) {
   // h_{pos-1}.
   // verify-cost-m8: with the pending rows, rows 0..j are what the next launch replays - they sit in the parity the
   // verify wrote, the other one (gdn_step.cl, DEFERRED).
-  if (s.pend && !s.from_rows)   // plan 31 Task 13: a row step's run wrote every row's state (the slot builds)
+  // Plan 31 Task 13: a row step's run of the slot build wrote every row's state; plan 40a Task 2: the deferred row
+  // build's run left its rows pending, as a verify does.
+  if (s.pend && (!s.from_rows || rows_defer_))
     control_->gdn_pend = (j + 1) | ((((control_->gdn_pend >> 8) & 1u) ^ 1u) << 8);
   else
     control_->gdn_live = (control_->gdn_live + j) % gdn_slots();

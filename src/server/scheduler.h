@@ -205,8 +205,9 @@ struct SlotCacheIface {
   virtual uint32_t held(uint32_t /*slot*/) { return 0; }
   // Spec 31: the slot's idle session leaves the card (its KV pages went back to the pool). Its entries in the host
   // store - stored when its request ended - stay until it comes back (as many held sessions as slots, the oldest let
-  // go first). Returns the positions its next turn can restore from them (0: none - it prefills again).
-  virtual uint32_t evict(uint32_t slot) {
+  // go first). Returns the positions its next turn can restore from them (0: none - it prefills again). Given up for
+  // a request that continues only its first `upto` ids, it holds nothing: that request restores at once.
+  virtual uint32_t evict(uint32_t slot, uint32_t /*upto*/) {
     fail(slot);
     return 0;
   }
@@ -228,7 +229,7 @@ class PrefixSlots : public SlotCacheIface {
   void end(uint32_t slot) override;
   void fail(uint32_t slot) override;
   uint32_t held(uint32_t slot) override;
-  uint32_t evict(uint32_t slot) override;
+  uint32_t evict(uint32_t slot, uint32_t upto) override;
 
   PrefixCache& cache() { return cache_; }
   PrefixCache::Plan::Kind last_kind(uint32_t slot) const { return slots_.at(slot).kind; }
@@ -299,7 +300,7 @@ class Scheduler {
   int oldest_idle(uint32_t keep) const;
   uint32_t cache_held(uint32_t slot) const;
   bool pooled(uint32_t slot) const;
-  void evict(uint32_t slot);
+  void evict(uint32_t slot, uint32_t upto = UINT32_MAX);   // upto: the ids of its session the new request continues
   bool make_room(uint32_t slot, uint32_t upto, uint32_t extra = 0);
   bool grow(const std::shared_ptr<Job>& job, uint32_t upto, bool end = true);
   double now() const;

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "kernels/dflash_dims.h"
 #include "loader/dflash_layout.h"
 #include "model/dflash.h"
 #include "runtime/memory_plan.h"
@@ -70,7 +71,8 @@ struct DFlashSizes : SessionSizes {
   size_t total() const { return SessionSizes::total() + gs::bytes(*this); }
 };
 // Plan 19v3b, with several sequence slots only (DFlashBuffers::add_sessions): the batched draft's row table, the rows
-// projection's table (shared, [kM + 8 kSeqs] u32 each) and the row lists' taps (`taps`' size). The host writes the
+// projection's table (shared, [kM + 8 kSeqs] u32 each) and the row lists' taps (`taps`' rows at the 32-row lists'
+// DecodeScratchDims::kWideRowsM since plan 40a Task 3). The host writes the
 // tables before each batched list and the row lists write the taps before the projection reads them.
 struct RowsSizes {
   [[=gs::scratch]] size_t seqs = 0;
@@ -91,8 +93,16 @@ std::vector<float> rope_table(double theta, uint32_t head_dim, uint32_t rows);
 
 // Every slot count of the ring for layer l: the window, or max_len for a full-attention layer.
 uint32_t ring_slots(const model::DFlashDesc& d, uint32_t layer, uint32_t max_len);
+// `rows`: the draft scratch's rows (resid .. candidate) - the block's kM, or (plan 40a Task 4) the batched pass's
+// seqs_rows() beside several sequences; a session's terms and the RoPE table stay at the block's.
 DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len,
-                  loader::DraftFormat format = loader::DraftFormat::Int8, bool candidate_head = false);
+                  loader::DraftFormat format = loader::DraftFormat::Int8, bool candidate_head = false,
+                  uint32_t rows = kernels::dflash::kM);
+// Plan 40a Task 4: the batched draft's widest list beside several sequences - four blocks of kM rows for the int4
+// drafter with the candidate head (its binaries), one block for the other forms.
+inline uint32_t seqs_rows(loader::DraftFormat f, bool candidate_head) {
+  return f == loader::DraftFormat::Int4G64 && candidate_head ? kernels::dflash::kSeqsRows : kernels::dflash::kM;
+}
 // The row tables and the row lists' taps of a drafter beside several sequence slots (0 for one).
 RowsSizes rows_sizes(const DFlashSizes& s, uint32_t seqs);
 

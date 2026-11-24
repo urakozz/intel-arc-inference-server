@@ -322,7 +322,41 @@ void test_draft_vocab_cost() {
 
 }  // namespace
 
+// Plan 40a Task 5: the scheduler's deal over the row-step costs (server::deal_by_cost, server::RowCost).
+void test_deal_by_cost() {
+  const server::RowCost df{true}, mtp{false};
+  const auto cost = [](const server::RowCost& c) { return [&c](const std::vector<uint32_t>& k) { return c.step(k); }; };
+  const auto rows = [](const std::vector<uint32_t>& k) {
+    uint32_t n = 0;
+    for (uint32_t x : k) n += x + 1;
+    return n;
+  };
+  // four requests at high acceptance, K 7 asked: the 32-row step, K 7 each
+  CHECK((server::deal_by_cost({0.85, 0.85, 0.85, 0.85}, {7, 7, 7, 7}, 32, cost(df)) == std::vector<uint32_t>{7, 7, 7, 7}));
+  // one at high acceptance keeps 7 while three at low get fewer - a 16-row step; every row low: plain rows
+  const std::vector<uint32_t> low = server::deal_by_cost({0.85, 0.2, 0.2, 0.2}, {7, 7, 7, 7}, 32, cost(df));
+  CHECK(low[0] == 7 && low[1] < 7 && low[2] < 7 && low[3] < 7 && rows(low) <= 16);
+  CHECK((server::deal_by_cost({0.3, 0.3, 0.3, 0.3}, {7, 7, 7, 7}, 32, cost(df)) == std::vector<uint32_t>{0, 0, 0, 0}));
+  // three at K 7: 24 rows (the 32-row list) where their acceptance pays for it, else at most the 16-row list's
+  CHECK((server::deal_by_cost({0.85, 0.85, 0.85}, {7, 7, 7}, 32, cost(df)) == std::vector<uint32_t>{7, 7, 7}));
+  const std::vector<uint32_t> mid = server::deal_by_cost({0.6, 0.6, 0.6}, {7, 7, 7}, 32, cost(df));
+  CHECK(rows(mid) <= 16 && rows(mid) > 8);
+  // the 8-row budget: the drafts stay inside it
+  CHECK(rows(server::deal_by_cost({0.85, 0.85, 0.85, 0.85}, {7, 7, 7, 7}, 8, cost(df))) <= 8);
+  // MTP (a draft index a head step): four at 0.8 asking K 3 - the 16-row list, K 3 each
+  CHECK((server::deal_by_cost({0.8, 0.8, 0.8, 0.8}, {3, 3, 3, 3}, 32, cost(mtp)) == std::vector<uint32_t>{3, 3, 3, 3}));
+  // nothing asked: plain rows
+  CHECK((server::deal_by_cost({0.9, 0.9}, {0, 0}, 32, cost(df)) == std::vector<uint32_t>{0, 0}));
+  // PERF-120, Ornith's table: four at 0.8 asking K 3 still the 16-row list; at 0.5 the 8-row step (K 1 each) pays more
+  const server::RowCost orn = server::RowCost::ornith();
+  CHECK((server::deal_by_cost({0.8, 0.8, 0.8, 0.8}, {3, 3, 3, 3}, 32, cost(orn)) == std::vector<uint32_t>{3, 3, 3, 3}));
+  CHECK(rows(server::deal_by_cost({0.5, 0.5, 0.5, 0.5}, {3, 3, 3, 3}, 32, cost(orn))) <= 8);
+  std::printf("deal_by_cost: K 7 x 4 at 0.85 (32 rows), three low-acceptance rows cut to %u rows, three at 0.6 in %u rows OK\n",
+              rows(low), rows(mid));
+}
+
 int main() {
+  test_deal_by_cost();
   test_model();
   test_dflash_measured_cost();
   test_flash_next_cost();

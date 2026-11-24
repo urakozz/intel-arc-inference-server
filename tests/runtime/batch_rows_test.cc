@@ -50,7 +50,7 @@ void check_device_layout() {
   CHECK_EQ(kernels::batch_row::kSrc, 2u);
   CHECK_EQ(kernels::batch_row::kDst, 3u);
   CHECK_EQ(kernels::batch_row::kSlot, 4u);
-  CHECK_EQ(sizeof(runtime::BatchRowTable), size_t{256});
+  CHECK_EQ(sizeof(runtime::BatchRowTable), size_t{1024});   // plan 40a Task 3: 32 rows
 }
 
 void check_rules() {
@@ -71,7 +71,15 @@ void check_rules() {
   CHECK(!throws([&] { runtime::make_rows(lay, {{1, 10, 2, 1, {1, 5}}, {3, 10, 1, 3, {3}}}); }));
   // The rules.
   CHECK(throws([&] { runtime::make_rows(lay, {}); }));                                            // no row
-  CHECK(throws([&] { runtime::make_rows(lay, {{0, 0, 5, 0, {4, 5, 6, 7, 8}}, {1, 0, 4, 1, {9, 10, 11, 12}}}); }));  // 9 rows
+  // Plan 40a Task 3: 9 rows in two runs is a step (the 16-row list's); a run of 9 rows is not.
+  CHECK(!throws([&] { runtime::make_rows(lay, {{0, 0, 5, 0, {4, 5, 6, 7, 8}}, {1, 0, 4, 1, {9, 10, 11, 12}}}); }));
+  {
+    std::vector<runtime::BatchRow> r9(9);
+    for (uint32_t m = 0; m < 9; ++m) r9[m].pos = m;   // slot 0, kv_base 0, one src
+    CHECK(throws([&] { runtime::check_rows(r9, lay, true); }));
+    r9.resize(8);
+    CHECK(!throws([&] { runtime::check_rows(r9, lay, true); }));
+  }
   CHECK(throws([&] { runtime::make_rows(lay, {{4, 0, 1, 4, {5}}}); }));                             // no slot 4
   CHECK(throws([&] { runtime::make_rows(lay, {{1, 8191, 2, 1, {5, 6}}}); }));                       // past the slot
   CHECK(throws([&] { runtime::make_rows(lay, {{1, 10, 1, 1, {5}}, {2, 10, 1, 2, {6}}, {1, 11, 1, 1, {7}}}); }));  // split

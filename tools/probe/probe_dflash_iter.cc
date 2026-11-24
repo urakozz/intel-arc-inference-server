@@ -4,8 +4,11 @@
 //   by kernel family (VPROFILE_* lines); --verify-pairs: only the uninstrumented pairs (VPROFILE_PAIR)
 // probe_dflash_iter TARGET DRAFTER --engine-taps SOURCES.json OUT_DIR [--anchors 16]
 // SOURCES: [{name, prompt_ids, cont_ids}]. Taps use dump_taps.py's safetensors format.
+// probe_dflash_iter TARGET DRAFTER --candidate-head --main-rank SOURCES.json: PERF-123's 2-bit rank of the main argmax
+// --greedy-head: the verify lists take the main head's candidate pass (runtime::Engine::greedy_head)
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -14,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -132,6 +136,84 @@ void rank_margin(runtime::Engine& e, df::DFlashDrafter& d, RankMargin& rm, uint3
     rm.ranks16.push_back(r16);
     ++rm.rows;
   }
+}
+
+// PERF-123 step 2 (--main-rank SOURCES): the main model's verify rows of real DFlash rounds (each source's prompt,
+// then up to 256 greedy ids, all 8 rows of every round) - the 2-bit candidate head (the drafter's, gemm_sm layout 3)
+// over the engine's final-normed rows beside the exact int8 head's logits: the candidate rank of the exact argmax
+// (ties in the 2-bit scores counted against it). C candidates are safe when no row's rank exceeds C.
+void main_rank(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources) {
+  const uint32_t H = e.model().desc->hidden, used = e.model().desc->vocab_used;
+  const uint32_t N = e.model().linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
+  if (!d.weights().candidate_head) throw std::runtime_error("--main-rank needs --candidate-head (the 2-bit head)");
+  const kernels::SmallMTuning* t = kernels::small_m_tuning(H, N, 1, 3);
+  l0::Mem two(e.context(), l0::MemKind::Device, size_t(2) * 7 * N * 4);
+  l0::Module mod(e.context(), kernels::path(kernels::gemm_sm_variant(7, *t)));
+  l0::Kernel k(mod, kernels::gemm_sm_entry(*t));
+  k.group_size(kernels::gemm_sm_wg_size(*t));
+  const void* w = d.weights().candidate_head->mem.ptr();
+  std::vector<float> cl(size_t(8) * N), el(size_t(8) * N);
+  std::vector<uint32_t> ranks;
+  uint32_t worst = 0;
+  std::string worst_at;
+  l0::CmdList imm = l0::CmdList::immediate(e.context());
+  for (const auto& source : sources) {
+    const std::string name = source.at("name");
+    const auto prompt = source.at("prompt_ids").get<std::vector<uint32_t>>();
+    const auto eos = source.at("eos_ids").get<std::vector<uint32_t>>();
+    e.reset();
+    e.prefill(prompt);
+    uint32_t generated = 0, src_worst = 0, src_rows = 0;
+    bool ended = false;
+    while (generated < 256 && !ended) {
+      const uint32_t anchor = e.control()->cur_token[0];
+      const auto out = d.draft(e, 7, 0.0f, 0);
+      e.verify(7);
+      // rows 0..6 in one launch, row 7 in a second (rows 1..7, its last row kept)
+      l0::CmdList list = l0::CmdList::regular(e.context());
+      for (uint32_t s = 0; s < 2; ++s) {
+        k.arg_ptr(0, w);
+        k.arg_ptr(1, w);
+        k.arg_ptr(2, static_cast<uint8_t*>(e.buffers().x.ptr()) + size_t(s) * H * 2);
+        k.arg_ptr(3, static_cast<uint8_t*>(two.ptr()) + size_t(s) * 7 * N * 4);
+        list.launch(k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+      }
+      list.close();
+      e.replay_aux(list);
+      imm.copy(cl.data(), two.ptr(), size_t(7) * N * 4);
+      imm.copy(cl.data() + size_t(7) * N, static_cast<uint8_t*>(two.ptr()) + size_t(13) * N * 4, size_t(N) * 4);
+      imm.copy(el.data(), e.verify_logits_device(), el.size() * 4);
+      for (uint32_t r = 0; r < 8; ++r) {
+        const float* c = cl.data() + size_t(r) * N;
+        const float* x = el.data() + size_t(r) * N;
+        uint32_t top = 0;
+        for (uint32_t v = 1; v < used; ++v)
+          if (x[v] > x[top]) top = v;
+        if (top != e.verify_ids()[r]) throw std::runtime_error(name + ": the host argmax is not the verify's");
+        uint32_t rank = 1;
+        for (uint32_t v = 0; v < used; ++v) rank += v != top && c[v] >= c[top];
+        ranks.push_back(rank);
+        src_worst = std::max(src_worst, rank);
+        ++src_rows;
+        if (rank > worst) { worst = rank; worst_at = name; }
+      }
+      const auto accepted = server::accept_greedy(e.verify_ids(), out.ids, 7);
+      for (uint32_t j = 0; j <= accepted.accepted && generated < 256; ++j) {
+        const uint32_t token = j ? out.ids[j - 1] : anchor;
+        ++generated;
+        if (std::find(eos.begin(), eos.end(), token) != eos.end()) { ended = true; break; }
+      }
+      e.commit(accepted.accepted, accepted.next_token);
+    }
+    std::printf("MAIN_RANK %s rows=%u worst=%u\n", name.c_str(), src_rows, src_worst);
+    std::fflush(stdout);
+  }
+  std::sort(ranks.begin(), ranks.end());
+  auto over = [&](uint32_t c) { return size_t(ranks.end() - std::upper_bound(ranks.begin(), ranks.end(), c)); };
+  std::printf("MAIN_RANK_TOTAL rows=%zu worst=%u (%s) p99=%u p999=%u over16=%zu over32=%zu over64=%zu over128=%zu "
+              "over256=%zu (2-bit candidate rank of the exact int8 argmax at verify)\n",
+              ranks.size(), worst, worst_at.c_str(), ranks[size_t(ranks.size() * 0.99)],
+              ranks[size_t(ranks.size() * 0.999)], over(16), over(32), over(64), over(128), over(256));
 }
 
 void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, const std::string& dir,
@@ -576,15 +658,90 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
                 median(m_ms), median(one_ms), median(excess), median(ratio));
   }
 }
+// PERF-120: the one-sequence verify lists' DPAS attention at each key-block count of `ts` (CaptureOptions::
+// probe_attn_tgt; ts[0] the reference), interleaved - every round each count recaptured in turn (rotated), `calls`
+// verifies of 2 / 4 / 8 rows from the same state; then one verify of 8 rows a count, its ids and logits against ts[0].
+void verify_tgt_ab(runtime::Engine& e, uint32_t depth, unsigned calls, unsigned rounds, const std::vector<uint32_t>& ts,
+                   const runtime::CaptureOptions& base) {
+  std::ifstream input("tests/golden/prompts/long32k.ids");
+  std::vector<uint32_t> file;
+  for (uint32_t id; input >> id;) file.push_back(id);
+  if (file.empty()) throw std::runtime_error("no long32k.ids");
+  std::vector<uint32_t> prompt(depth);
+  for (size_t i = 0; i < prompt.size(); ++i) prompt[i] = file[i % file.size()];
+  e.recapture_verify(base);
+  e.prefill(std::vector<uint32_t>(prompt.begin(), prompt.end() - 1));
+  l0::Mem saved(e.context(), l0::MemKind::Host, e.state_bytes());
+  e.save_state(saved.ptr());
+  auto restore = [&]() {
+    e.load_state(saved.ptr(), depth - 1);
+    e.control()->cur_token[0] = prompt.back();
+    e.control()->n_active = 1;
+    e.verify(0);
+    e.commit(0, e.verify_ids()[0]);
+  };
+  auto verify = [&](uint32_t m) {
+    for (uint32_t j = 1; j < m; ++j) e.control()->cur_token[j] = file[j % file.size()];
+    e.verify(m - 1);
+  };
+  auto at = [&](uint32_t t) {
+    runtime::CaptureOptions opt = base;
+    opt.probe_attn_tgt = t;
+    e.recapture_verify(opt);
+  };
+  std::map<uint32_t, std::map<uint32_t, std::vector<double>>> ms;   // t -> m -> per-round ms
+  for (unsigned r = 0; r <= rounds; ++r)
+    for (size_t i = 0; i < ts.size(); ++i) {
+      const uint32_t t = ts[(i + r) % ts.size()];
+      at(t);
+      for (uint32_t m : {2u, 4u, 8u}) {
+        for (unsigned w = 0; w < 2; ++w) {
+          restore();
+          verify(m);
+        }
+        double sum = 0;
+        for (unsigned c = 0; c < calls; ++c) {
+          restore();
+          sum += timed([&]() { verify(m); });
+        }
+        if (r) ms[t][m].push_back(sum / calls);
+      }
+    }
+  for (uint32_t t : ts)
+    for (uint32_t m : {2u, 4u, 8u})
+      std::printf("VTGT depth=%u blocks=%u m=%u ms=%.4f vs_blocks%u=%.4f\n", depth, t, m, median(ms[t][m]), ts[0],
+                  median(ms[t][m]) / median(ms[ts[0]][m]));
+  std::vector<std::vector<float>> logits;
+  std::vector<std::vector<uint32_t>> ids;
+  l0::CmdList imm = l0::CmdList::immediate(e.context());
+  for (uint32_t t : ts) {
+    at(t);
+    restore();
+    verify(8);
+    ids.emplace_back(e.verify_ids(), e.verify_ids() + 8);
+    logits.emplace_back(size_t(8) * model::Qwen35::kVocab);
+    imm.copy(logits.back().data(), e.verify_logits_device(), logits.back().size() * 4);
+  }
+  for (size_t i = 1; i < ts.size(); ++i) {
+    uint32_t same = 0;
+    double worst = 0;
+    for (size_t r = 0; r < 8; ++r) same += ids[i][r] == ids[0][r];
+    for (size_t x = 0; x < logits[0].size(); ++x) worst = std::max(worst, double(std::fabs(logits[i][x] - logits[0][x])));
+    std::printf("VTGT_ARITH depth=%u blocks=%u against %u: %u of 8 ids equal, max |logit diff| %.3e\n", depth, ts[i],
+                ts[0], same, worst);
+  }
+  e.recapture_verify(base);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-int4] [--candidates-64]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N] [--rank-margin]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-int4] [--candidates-64]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] [--greedy-head] | --engine-taps SOURCES OUT [--anchors N] [--rank-margin] | --main-rank SOURCES");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
-    bool candidate_head = false, vprofile = false, vpairs = false;
+    bool candidate_head = false, vprofile = false, vpairs = false, mrank = false, greedy_head = false;
+    std::vector<uint32_t> tgt_ab;
     RankMargin rm;
     runtime::CaptureOptions vbase;   // --verify-profile / --verify-pairs: the lists' options
     unsigned candidate_bits = 2, attn_ks = 0, candidates = 80;   // the loader's defaults
@@ -598,6 +755,7 @@ int main(int argc, char** argv) {
       if (arg == "--verify-pairs") { vprofile = vpairs = true; continue; }
       if (arg == "--rank-margin") { rm.on = true; continue; }   // spec 19 v3d Task 7, with --engine-taps
       if (arg == "--probe-one-store") { vbase.probe_gdn_one_store = true; continue; }   // verify-cost-m8: timing only
+      if (arg == "--greedy-head") { greedy_head = true; continue; }   // PERF-123: the verify head's candidate pass
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
@@ -609,9 +767,14 @@ int main(int argc, char** argv) {
       }
       else if (arg == "--anchors") anchors = std::stoul(argv[++i]);
       else if (arg == "--attn-tgt") vbase.probe_attn_tgt = std::stoul(argv[++i]);   // verify-cost-m8
+      else if (arg == "--attn-tgt-ab") {   // PERF-120: e.g. 32,8,4,2
+        std::stringstream list(argv[++i]);
+        for (std::string t; std::getline(list, t, ',');) tgt_ab.push_back(std::stoul(t));
+      }
       else if (arg == "--ab-ksplit") vbase.probe_ab_ksplit = std::stoul(argv[++i]);   // verify-cost-m8
       else if (arg == "--attn-ks") attn_ks = std::stoul(argv[++i]);   // spec 19 v3d: the profiled list's key split
       else if (arg == "--engine-taps" && i + 2 < argc) { sources_path = argv[++i]; out = argv[++i]; }
+      else if (arg == "--main-rank") { sources_path = argv[++i]; mrank = true; }   // PERF-123 step 2
       else throw std::runtime_error("unknown option: " + arg);
     }
     if (!calls || !rounds || !anchors) throw std::runtime_error("calls, rounds and anchors must be positive");
@@ -633,8 +796,11 @@ int main(int argc, char** argv) {
     runtime::Engine e(ctx, std::move(model), max_len, false, kv, &drafter);
     std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
     drafter.attach(e, false);
-    if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs, vbase);
+    e.greedy_head(greedy_head);
+    if (!tgt_ab.empty()) verify_tgt_ab(e, depth, calls, rounds, tgt_ab, vbase);
+    else if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs, vbase);
     else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds, attn_ks);
+    else if (mrank) main_rank(e, drafter, sources);
     else engine_taps(e, drafter, sources, out, anchors, rm);
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "probe_dflash_iter: %s\n", ex.what());

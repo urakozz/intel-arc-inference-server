@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include "common/json.h"
@@ -68,7 +69,14 @@ std::vector<std::pair<std::string, TensorInfo>> SafetensorsSet::parse_header(con
 
 SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir) : SafetensorsSet(snapshot_dir, false) {}
 
-SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, bool single_file_ok) {
+SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, bool single_file_ok)
+    : SafetensorsSet(snapshot_dir, single_file_ok, nullptr) {}
+
+SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, const std::function<bool(const std::string&)>& skip)
+    : SafetensorsSet(snapshot_dir, false, skip) {}
+
+SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, bool single_file_ok,
+                               const std::function<bool(const std::string&)>& skip) {
   std::ifstream ixf(snapshot_dir + "model.safetensors.index.json");
   if (!ixf && single_file_ok && std::ifstream(snapshot_dir + "model.safetensors")) {
     // One file, its header the manifest (spec 19b): the same bounds check as an indexed shard's.
@@ -98,11 +106,19 @@ SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, bool single_file
   ss << ixf.rdbuf();
   common::json::Value ix = common::json::parse(ss.str());
   const auto& wm = ix.at("weight_map").obj();
+  // Files holding only skipped tensors: never opened.
+  std::set<std::string> unread;
+  if (skip) {
+    std::set<std::string> read;
+    for (const auto& [tensor, filev] : wm) (skip(tensor) ? unread : read).insert(filev.str());
+    for (const std::string& f : read) unread.erase(f);
+  }
 
   std::map<std::string, uint32_t> file_id;
   std::map<std::string, std::map<std::string, TensorInfo>> per_file;  // file -> header map
   for (const auto& [tensor, filev] : wm) {
     const std::string& fname = filev.str();
+    if (unread.contains(fname)) continue;
     if (!file_id.contains(fname)) {
       file_id[fname] = uint32_t(files_.size());
       files_.emplace_back(snapshot_dir + fname);

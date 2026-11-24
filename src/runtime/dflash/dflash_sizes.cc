@@ -6,6 +6,7 @@
 #include <string>
 
 #include "kernels/dflash_dims.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/dflash/dflash_control.h"
 
 namespace runtime::dflash {
@@ -31,15 +32,15 @@ uint32_t ring_slots(const model::DFlashDesc& d, uint32_t layer, uint32_t max_len
 }
 
 DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len,
-                  loader::DraftFormat format, bool candidate_head) {
-  const size_t M = kd::kM, R = kd::kR, H = d.hidden;
+                  loader::DraftFormat format, bool candidate_head, uint32_t rows) {
+  const size_t M = rows, R = rows - 1, H = d.hidden;
   DFlashSizes s;
   s.dctl = sizeof(DFlashCtl);
   s.out = sizeof(DFlashDraftOut);
-  s.rope = (size_t(max_len) + M) * d.head_dim * 4;
+  s.rope = (size_t(max_len) + kd::kM) * d.head_dim * 4;   // a block's rows reach pos + kM - 1
   for (uint32_t l = 0; l < d.layers; ++l) s.ring_k += size_t(ring_slots(d, l, max_len)) * d.kv_n() * 2;
   s.ring_v = s.ring_k;
-  s.taps = M * d.fc_k(target_hidden) * 2;
+  s.taps = size_t(kd::kM) * d.fc_k(target_hidden) * 2;   // a session's: one verify list's rows
   s.resid = s.h = M * H * 4;
   s.x = M * H * 2;
   s.xa = M * std::max({size_t(H), size_t(d.q_n()), size_t(d.inter)}) * 2;
@@ -92,16 +93,20 @@ DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uin
   };
   p.session_per_position = (session(8192) - session(4096)) / 4096;
   p.session_fixed = session(4096) - p.session_per_position * 4096;
-  // Spec 39: and beside several slots its row tables and row taps (DFlashBuffers::add_sessions; unplanned before).
-  p.rows = rows_sizes(sizes(d, target_hidden, head_rows, 4096, f, candidate_head), 2).total();
+  // Spec 39: and beside several slots its row tables and row taps (DFlashBuffers::add_sessions; unplanned before);
+  // plan 40a Task 4: and the scratch's growth to the batched pass's rows.
+  const DFlashSizes one = sizes(d, target_hidden, head_rows, 4096, f, candidate_head);
+  p.rows = rows_sizes(one, 2).total() +
+           (sizes(d, target_hidden, head_rows, 4096, f, candidate_head, seqs_rows(f, candidate_head)).total() -
+            one.total());
   return p;
 }
 
 RowsSizes rows_sizes(const DFlashSizes& s, uint32_t seqs) {
   RowsSizes r;
   if (seqs < 2) return r;
-  r.seqs = r.proj_seqs = (size_t(kernels::dflash::kM) + 8 * kernels::dflash::kSeqs) * 4;
-  r.rows_taps = s.taps;
+  r.seqs = r.proj_seqs = (size_t(kd::kSeqsRows) + 8 * kd::kSeqs) * 4;   // the widest list's table
+  r.rows_taps = s.taps / kd::kM * DecodeScratchDims::kWideRowsM;   // plan 40a Task 3: the 32-row lists' rows
   return r;
 }
 

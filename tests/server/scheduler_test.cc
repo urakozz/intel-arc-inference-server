@@ -1064,6 +1064,43 @@ void test_pool_evicts_idle() {
   }
 }
 
+// Every slot holds an idle session, so new requests take a slot whose session they do not continue. Those sessions
+// hold no entries in the host store past what the new request continues: with a store of exactly two sessions, X's
+// sessions given up for Y's must not push Y's snapshots out, and Y's prompts sent again restore as with room to spare.
+void test_pool_given_up_session_holds_nothing() {
+  size_t after_x = 0;
+  uint32_t roomy = 0;
+  for (const bool tight : {false, true}) {
+    MockBatchEngine eng(2, 8192);
+    eng.blk = 256;
+    eng.pool = 64;
+    eng.cut = 512;   // prefill calls end at 512 and 1024: a snapshot at each, as the engine's 2048 chunks
+    configure(eng);
+    MallocAlloc alloc;
+    server::PrefixSlots cache(eng, tight ? after_x : size_t(1) << 26, alloc);
+    Scheduler s(eng, opts(), &cache);
+    auto round = [&](const std::vector<Spec>& specs) {
+      std::vector<Out> outs(specs.size());
+      for (size_t i = 0; i < specs.size(); ++i) CHECK(s.submit(make(specs[i], outs[i], eng)) != nullptr);
+      drain(s);
+      return outs;
+    };
+    round({{P(81, 1100), 20, {}}, {P(82, 1100), 20, {}}});
+    if (!tight) after_x = cache.cache().bytes_used();
+    const std::vector<Spec> y{{P(83, 1100), 20, {}}, {P(84, 1100), 20, {}}};
+    round(y);
+    const std::vector<Out> again = round(y);
+    for (size_t i = 0; i < y.size(); ++i) {
+      CHECK_EQ(cache.last_kind(uint32_t(again[i].fin.slot)), server::PrefixCache::Plan::Restore);
+      if (!tight && i == 0) roomy = again[i].fin.cached_tokens;
+      CHECK_EQ(again[i].fin.cached_tokens, roomy);
+      same_as_alone("pool, a prompt sent again", y[i], again[i], 8192);
+    }
+  }
+  std::printf("pool: sessions given up for new requests hold nothing; prompts sent again restore %u positions with a "
+              "store of exactly two sessions\n", roomy);
+}
+
 // A request that shares only its first id with an idle long session takes a free slot, not its slot; when the
 // requests need its pages it leaves the card as an eviction (its entries held), and its next turn restores it whole.
 void test_pool_shared_first_id() {
@@ -1205,6 +1242,90 @@ void test_pool_full() {
   std::printf("pool full: the growing request ends with length, the other unchanged; a request waits for pages\n");
 }
 
+// Replica x slots with a pool per card (8 slots, 4 on each of two cards): new requests sent together split evenly
+// across the cards - a slot granted in the same tick has taken no pages yet, so its card must not look as free as
+// the idle one.
+void test_replica_spread() {
+  struct TwoCards : MockBatchEngine {
+    using MockBatchEngine::MockBatchEngine;
+    uint32_t card_of(uint32_t s) override { return s / 4; }
+    uint32_t card_pool_pages(uint32_t) override { return pool / 2; }
+    uint32_t card_pages_free(uint32_t c) override {
+      uint32_t held = 0;
+      for (uint32_t s = 4 * c; s < 4 * c + 4; ++s) held += pages_held(s);
+      return pool / 2 - held;
+    }
+  };
+  for (const uint32_t n : {2u, 4u}) {
+    TwoCards eng(8);
+    eng.overlap = true;
+    eng.pool = 8 * eng.maxlen / eng.blk;
+    Scheduler s(eng, opts());
+    std::vector<Out> outs(n);
+    std::vector<Spec> specs;
+    for (uint32_t i = 0; i < n; ++i) {
+      specs.push_back({P(130 + i, 20), 6, {}});
+      CHECK(s.submit(make(specs[i], outs[i], eng)) != nullptr);
+    }
+    drain(s);
+    uint32_t on[2] = {0, 0};
+    for (uint32_t i = 0; i < n; ++i) {
+      ++on[eng.card_of(uint32_t(outs[i].fin.slot))];
+      same_as_alone("replica spread", specs[i], outs[i]);
+    }
+    CHECK_EQ(on[0], n / 2);
+    CHECK_EQ(on[1], n / 2);
+  }
+  std::printf("replica spread: 2 and 4 requests sent together split evenly over two cards of 4 slots\n");
+}
+
+// Replica x slots: a request that arrives while the other card runs a chunk starts on the idle card in that tick,
+// without asking the busy card for its pages (the real engine asks on the card's thread, so the tick would wait
+// behind the chunk and the two prompts would prefill one after the other).
+void test_replica_busy_card() {
+  struct TwoCards : MockBatchEngine {
+    using MockBatchEngine::MockBatchEngine;
+    uint32_t asked_busy = 0;
+    bool running(uint32_t c) const {
+      for (uint32_t s = 4 * c; s < 4 * c + 4; ++s)
+        if (const auto it = busy.find(s); it != busy.end() && it->second != 0) return true;
+      return false;
+    }
+    uint32_t card_of(uint32_t s) override { return s / 4; }
+    uint32_t card_pool_pages(uint32_t) override { return pool / 2; }
+    uint32_t pages_held(uint32_t s) override {
+      asked_busy += running(s / 4);
+      return MockBatchEngine::pages_held(s);
+    }
+    uint32_t card_pages_free(uint32_t c) override {
+      asked_busy += running(c);
+      uint32_t held = 0;
+      for (uint32_t s = 4 * c; s < 4 * c + 4; ++s) held += MockBatchEngine::pages_held(s);
+      return pool / 2 - held;
+    }
+  };
+  TwoCards eng(8);
+  eng.overlap = true;
+  eng.prefill_polls = 1000;
+  eng.pool = 8 * eng.maxlen / eng.blk;
+  Scheduler s(eng, opts());
+  const Spec a{P(140, 300), 6, {}}, b{P(150, 300), 6, {}};
+  Out oa, ob;
+  CHECK(s.submit(make(a, oa, eng)) != nullptr);
+  s.tick();   // A's chunk starts on its card and runs
+  CHECK(s.submit(make(b, ob, eng)) != nullptr);
+  s.tick();
+  CHECK_EQ(s.waiting(), size_t(0));   // B granted while A's chunk runs
+  CHECK_EQ(eng.asked_busy, 0u);
+  eng.prefill_polls = 0;
+  drain(s);
+  CHECK(eng.card_of(uint32_t(oa.fin.slot)) != eng.card_of(uint32_t(ob.fin.slot)));
+  same_as_alone("replica busy card", a, oa);
+  same_as_alone("replica busy card", b, ob);
+  std::printf("replica busy card: a request arriving during the other card's chunk starts at once, the busy card "
+              "not asked\n");
+}
+
 int main() {
   test_batch_independence();
   test_per_row_stops();
@@ -1229,8 +1350,11 @@ int main() {
   test_pool_long_beside_short();
   test_pool_evicts_idle();
   test_pool_shared_first_id();
+  test_pool_given_up_session_holds_nothing();
   test_pool_shared_pages();
   test_pool_full();
+  test_replica_spread();
+  test_replica_busy_card();
   std::printf("scheduler_test: all cases passed\n");
   return 0;
 }

@@ -5,7 +5,7 @@
 #   tools/box_validate/pool_serve.sh <out dir> <case> <snapshot> [b70-serve flags...] [-- pool_serve.py flags]
 # Writes <out dir>/<case>.json (the case's ids) and <out dir>/server.log; prints the case's lines and the server's
 # slots / pool / eviction lines. Env: PORT (8013), WAIT (900 s), B70_SERVE (default this tree's build/src/cli/b70-serve;
-# main's build for the fixed slots' reference).
+# another build for a reference).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 [ $# -ge 3 ] || { echo "usage: $0 <out dir> <case> <snapshot> [serve flags] -- [case flags]" >&2; exit 2; }

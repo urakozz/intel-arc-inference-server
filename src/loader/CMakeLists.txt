@@ -2,7 +2,7 @@
 # kernels expect. It links b70_model because the model description (what linears
 # exist, their fusion and shape) is the table it walks - docs/13-loader.md.
 add_library(b70_loader STATIC snapshot.cc safetensors.cc quant.cc loader.cc lm_head_int8.cc
-            trained_context.cc draft_vocab.cc moe.cc ab.cc)
+            trained_context.cc draft_vocab.cc moe.cc expert_fp.cc ab.cc)
 find_package(Threads REQUIRED)
 target_include_directories(b70_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_loader PUBLIC b70_l0 b70_model Threads::Threads)
@@ -35,3 +35,6 @@ add_library(b70_dflash_loader STATIC dflash_repack.cc dflash_loader.cc dflash_tp
 target_include_directories(b70_dflash_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_dflash_loader PUBLIC b70_loader b70_dflash_model b70_l0)
 
+
+add_library(b70_inkling2_loader STATIC inkling2_loader.cc)
+target_link_libraries(b70_inkling2_loader PUBLIC b70_loader b70_inkling2_model)

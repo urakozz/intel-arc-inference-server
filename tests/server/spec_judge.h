@@ -118,6 +118,8 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"tp_mtp_m2_long_44f7f924c8179828", 0, 198, 271, 22.96, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k1_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
     {"tp_dflash_long_k3_44f7f924c8179828", 0, 198, 271, 23.30, "2026-11-14", kTpVerifyNarrowReason},
+    // the same row at K = 7 once a tp card's qkv||z splits K in the work-group (main has it at K = 1 / 3); 2026-11-24
+    {"tp_dflash_long_k7_44f7f924c8179828", 0, 198, 271, 22.96, "2026-11-24", kTpVerifyNarrowReason},
     // tp_prefill_kv8_test long: TP's plain decode after its int8-KV prefill takes the same flip at output 62; measured
     // 2026-11-15 (open-work 30 (2)) outside one card's distance band - unexplained, accepted
     {"tp_prefill_kv8_long_fa12c9167b2eaa28", 62, 198, 271, 24.80, "2026-11-14", kTpPrefillNarrowReason},

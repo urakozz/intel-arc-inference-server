@@ -946,7 +946,7 @@ std::vector<uint32_t> tp_small_elems(const model::ModelDesc& one, const std::str
 
 size_t LoadReport::total() const {
   return int4_bytes + scale_bytes + bf16_linear_bytes + embed_bytes + lm_head_bytes + small_bytes +
-         pad_bytes + mtp_bytes + moe_bytes + ab_prefill_bytes;
+         pad_bytes + mtp_bytes + moe_bytes + ab_prefill_bytes + cand_head_bytes;
 }
 
 namespace {
@@ -1078,7 +1078,8 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
                 &desc,
                 nullptr,
                 {},
-                {}};
+                {},
+                nullptr};
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   m.report.quant_note = quant_note;
   imm.copy(m.embed.ptr(), set.data(emb), set.bytes(emb));

@@ -207,7 +207,7 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 // Spec 14: per model - the layer counts and the gate||up slab count are the descriptor's.
 // 3l (2): `pos` is the chunk's first position - a short chunk deep in the cache splits its
 // attention (flash_split_span) and adds the merge per FA layer.
-// `one_card`: step_chunk's walk (false: what a pipeline's two stages add up to, without the one-card GDN form).
+// `one_card`: step_chunk's walk (false: the tp card's four-launch GDN form; a pipeline's two stages add up to true).
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            KvCache kv = KvCache::Bf16, uint32_t pos = 0, bool one_card = true);
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
@@ -225,7 +225,7 @@ inline PrefillBackend dense_mlp_backend(PrefillBackend b, uint32_t C) {
 }
 // Spec 16c: one layer's launches, and a stage's: its
 // layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so
-// the two stages add up to step_chunk_launches (one_card false) plus step_cut_extra_launches (the pipeline
+// the two stages add up to step_chunk_launches plus step_cut_extra_launches (the pipeline
 // asserts it). `pos` as there (3l (2)).
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            model::LayerKind kind, KvCache kv = KvCache::Bf16, uint32_t pos = 0);

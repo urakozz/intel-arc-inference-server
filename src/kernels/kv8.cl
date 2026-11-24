@@ -102,6 +102,24 @@
 #if KV8_I8S && !((KV8_PREP && defined(PF) && PF) || (KV8_FLASH && defined(KV8_PAIR) && KV8_PAIR))
 #error "kv8 KV8_I8S: the prefill writer (KV8_PREP, PF 1) and the pair flash (KV8_PAIR) only"
 #endif
+// KV8_OWN (PERF-107; undefined on every other command line): the l0-int8 prompt pass's attention reads the chunk's
+// own rows as bf16, older rows from the int8 cache, where it scores in bf16 - a split chunk (a whole chunk scores by
+// int8 DPAS, KV8_I8S, its K int8 by design). The writer (PF = 1, bf16 q) also stores rne_bf16 of each rotated K / V
+// row into the widened scratch (kr, vr) at the row's position; the split readers take `own` (the chunk's first
+// position) and use scale 1 for keys at or past it, whose scratch rows are those bf16 values. The raw split widens
+// only the rows before `own`; the in-place split reads its tiles from int8 and, where a tile reaches `own`, takes
+// those keys from the scratch instead (Kr, Vr). Every other value and order is the build without it.
+#ifndef KV8_OWN
+#define KV8_OWN 0
+#endif
+#if KV8_OWN && (KV8_I8S || !((KV8_PREP && defined(PF) && PF && !defined(BATCH_ROWS)) || KV8_FLASH))
+#error "kv8 KV8_OWN: the prefill writer (PF = 1, bf16 q) and the split flash readers only"
+#endif
+#if KV8_OWN
+#define KV8_SC(key, x) ((key) >= own ? 1.0f : (x))
+#else
+#define KV8_SC(key, x) x
+#endif
 
 #if KV8_DEC || KV8_FLASH
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
@@ -309,6 +327,9 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 #if KV8_I8S
                             , __global float* restrict q_scale
 #endif
+#if KV8_OWN
+                            , __global ushort* restrict kr, __global ushort* restrict vr
+#endif
 #ifdef BATCH_ROWS
                             , __global const uint* restrict rows
 #endif
@@ -403,6 +424,11 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
     const float vb = bf16f(rne_bf16(qkv_sum(qkv_partials, m, V_OFF + (size_t)h * HD + i)));
     const float yv = kv8_rotate(vb, i, xch);
     kv8_store(yv, i, red, kv_v + row * HD, v_scale + row);
+#if KV8_OWN
+    const size_t own_row = ((size_t)(pos + m) * KV_HEADS + h) * HD + i;   // the scratch's sequence position
+    kr[own_row] = rne_bf16(yk);
+    vr[own_row] = rne_bf16(yv);
+#endif
   }
 }
 #endif  // KV8_PREP
@@ -988,6 +1014,20 @@ __kernel void kv8_widen(__global const char* restrict K,
 #ifndef KV8_PAIR
 #define KV8_PAIR 0
 #endif
+#ifndef KV8_SPLIT
+#define KV8_SPLIT 0
+#endif
+#if KV8_OWN && !KV8_SPLIT
+#error "kv8 KV8_OWN: the split forms only (a whole chunk on the int8 pass scores by int8, KV8_I8S)"
+#endif
+// The reader's KV8_OWN arguments, after its own: `own`, and for the in-place split the widened scratch.
+#if KV8_OWN && KV8_RAW
+#define KV8_OWN_ARGS , uint own
+#elif KV8_OWN
+#define KV8_OWN_ARGS , uint own, __global const ushort* restrict Kr, __global const ushort* restrict Vr
+#else
+#define KV8_OWN_ARGS
+#endif
 #if KV8_PAIR
 // KV8_PAIR=1 (long-context prefill over the widened rows): pf_flash_attn.cl's PAIR form (its comment is the contract:
 // two sub-groups share 16 query rows of one head, scores by key-atom pair, row maxima through SLM, sub-group 0 hands
@@ -1245,9 +1285,6 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
 // 3l (2): KV8_SPLIT=1 is pf_flash_attn.cl's SPLIT form (its header: spans of the key range,
 // unnormalised O and m, l into the partials area; pf_flash_merge folds them). Unset, the token
 // stream is unchanged.
-#ifndef KV8_SPLIT
-#define KV8_SPLIT 0
-#endif
 __attribute__((reqd_work_group_size(SG * SGS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 #if KV8_SPLIT
@@ -1257,7 +1294,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
                                 __global const KV8_VALUE* restrict Vc,
                                 __global const ushort* restrict Vs,
                                 __global float* restrict O, uint pos, uint C, uint rows,
-                                __global float* restrict ML, uint span
+                                __global float* restrict ML, uint span KV8_OWN_ARGS
 #ifdef KV_PAGED
                                 , __global const uint* restrict pages
 #endif
@@ -1359,6 +1396,19 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
           kb[2u * z] = pair.s0;
           kb[2u * z + 1u] = pair.s1;
         }
+#if KV8_OWN
+        if (t0 + KT > own) {   // the tile reaches the chunk's own rows: those keys (lane = key) from the scratch
+          uint rk[16];
+#pragma unroll
+          for (uint a = 0; a < 2u; ++a)
+            intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+                (__global void*)Kr, KV8F_KV * HD * 2, (int)depth, KV8F_KV * HD * 2,
+                (int2)((int)((j * HD + 16u * (kk + a)) / 2u), (int)(t0 + 16u * b)), rk + 8u * a);
+          if (t0 + 16u * b + l >= own)
+#pragma unroll
+            for (uint z = 0; z < 16u; ++z) kb[z] = rk[z];
+        }
+#endif
         sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[kk], as_int8(vload8(0, kb)), sacc[b]);
         sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[kk + 1u], as_int8(vload8(1, kb)), sacc[b]);
       }
@@ -1371,12 +1421,12 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
       const uint key = t0 + 16u * b + l;
       const bool live = key < depth;
 #ifndef KV_PAGED
-      const float sk = live ? kv8_flash_scale(Ks, (size_t)key * KV8F_KVU + j) : 0.0f;
-      svl[b] = live ? kv8_flash_scale(Vs, (size_t)key * KV8F_KVU + j) : 0.0f;
+      const float sk = live ? KV8_SC(key, kv8_flash_scale(Ks, (size_t)key * KV8F_KVU + j)) : 0.0f;
+      svl[b] = live ? KV8_SC(key, kv8_flash_scale(Vs, (size_t)key * KV8F_KVU + j)) : 0.0f;
 #else
       const size_t krow = ppr + (key - pgs);
-      const float sk = live ? kv8_flash_scale(Ks, krow * KV8F_KVU + j) : 0.0f;
-      svl[b] = live ? kv8_flash_scale(Vs, krow * KV8F_KVU + j) : 0.0f;
+      const float sk = live ? KV8_SC(key, kv8_flash_scale(Ks, krow * KV8F_KVU + j)) : 0.0f;
+      svl[b] = live ? KV8_SC(key, kv8_flash_scale(Vs, krow * KV8F_KVU + j)) : 0.0f;
 #endif
 #define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && live) ? (sacc[b].s##r * sk) * SCORE_SCALE : -INFINITY;
       MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
@@ -1438,6 +1488,22 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
             vb[c * 16u + 2u * z + 1u] = pair.s1;
           }
         }
+#if KV8_OWN
+        if (t0 + KT > own) {   // the own keys' halves from the scratch: vb[c * 16 + jj] holds keys 2 jj, 2 jj + 1
+          uint rv[32];
+          intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+              (__global void*)Vr, KV8F_KV * HD * 2, (int)depth, KV8F_KV * HD * 2,
+              (int2)((int)(j * HD + 16u * dd), (int)(t0 + 16u * b)), rv);
+#pragma unroll
+          for (uint c = 0; c < 2u; ++c)
+#pragma unroll
+            for (uint jj = 0; jj < 16u; ++jj) {
+              const uint key = t0 + 16u * b + 2u * jj;   // the low half's key (even)
+              const uint msk = (key >= own ? 0xFFFFu : 0u) | (key + 1u >= own ? 0xFFFF0000u : 0u);
+              vb[c * 16u + jj] = (rv[c * 16u + jj] & msk) | (vb[c * 16u + jj] & ~msk);
+            }
+        }
+#endif
 #endif
 #pragma unroll
         for (uint c = 0; c < 2u; ++c)

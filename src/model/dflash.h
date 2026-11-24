@@ -40,7 +40,7 @@ namespace model {
 // aux_hidden_state_layer_ids (each the INPUT of that target layer: taps = ids - 1, update_dspark's rule), block_size,
 // mask_token_id and the DSpark keys at the top level. Its confidence head (a per-position acceptance estimate) is read
 // for its shape only: the engine's AdaptiveK picks K from the observed acceptance.
-enum class DFlashForm : uint32_t { Vllm = 0, DSpark = 3 };
+enum class DFlashForm : uint32_t { Vllm = 0, DSpark = 3, InklingDSpark = 4 };
 
 struct DFlashDesc {
   DFlashForm form = DFlashForm::Vllm;

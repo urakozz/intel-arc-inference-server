@@ -23,6 +23,7 @@ inline constexpr unsigned kKvBase = 1;   // BROW_KVB
 inline constexpr unsigned kSrc = 2;      // BROW_SRC
 inline constexpr unsigned kDst = 3;      // BROW_DST
 inline constexpr unsigned kSlot = 4;     // BROW_SLOT
+inline constexpr unsigned kPend = 5;     // BROW_PEND (plan 40a): the run's sequence's pending count | parity << 8
 }  // namespace batch_row
 
 // gdn_step's row build: SPEC_SLOT_STRIDE (one whole-model GDN state) and RING_SLOT_STRIDE (one whole-model conv
@@ -31,6 +32,38 @@ inline std::string gdn_step_rows_variant(unsigned M, unsigned gdn_layers, unsign
                                          unsigned gdn_v = kRefGdnVHeads) {
   return "gdn_step_rows_M" + std::to_string(M) + (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers)) +
          gdn_suffix(gdn_k, gdn_v);
+}
+// Plan 40a Task 2: the DEFERRED row build (BROW_PEND, PEND_SEQ - the shapes kernels::gdn_defer_built names; PERF-120:
+// Ornith's `_G30_GK16V32` too).
+inline std::string gdn_step_rows_defer_variant(unsigned M, unsigned gdn_layers = 48, unsigned gdn_k = kRefGdnKHeads,
+                                               unsigned gdn_v = kRefGdnVHeads) {
+  return "gdn_step_rows_defer_M" + std::to_string(M) +
+         (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers)) + gdn_suffix(gdn_k, gdn_v);
+}
+// Plan 40a Task 3: the 16- and 32-row lists' delta-net step - the M 8 deferred build over chunks of whole runs
+// (gdn_step.cl, WIDE_ROWS 32), a chunk a sequence a launch at most (grid dimension 2).
+inline std::string gdn_step_rows_wide_variant(unsigned gdn_layers = 48, unsigned gdn_k = kRefGdnKHeads,
+                                              unsigned gdn_v = kRefGdnVHeads) {
+  return "gdn_step_rows_defer_M8_W32" + (gdn_layers == 48 ? std::string() : "_G" + std::to_string(gdn_layers)) +
+         gdn_suffix(gdn_k, gdn_v);
+}
+// Plan 40a Task 3: the 16- and 32-row lists' attention - attn_verify_dpas.cl's M 8 line (BATCH_ROWS: a run a
+// work-group's grid dimension 2) writing the partials of attn_v2_rows_variant(8, ...)'s groups for its reduce. Paged
+// only (kv_paged's _PG suffix after it).
+inline std::string attn_verify_dpas_rows_variant(unsigned T, bool kv8, unsigned q = kRefFaQHeads,
+                                                 unsigned kv = kRefFaKvHeads) {
+  return "attn_verify_dpas_M8_T" + std::to_string(T) + fa_suffix(q, kv) + (kv8 ? "_KV8" : "") + "_ROWS";
+}
+// PERF-120: the 16- and 32-row lists' MoE block reading each routed expert once for its rows (moe.cl, MOE_UNION):
+// moe_variant's name with `_U` - moe_route, moe_union_plan, moe_gate_up_union and moe_down_union over (the plan's
+// most items x their n-tile groups), moe_finish over (hidden / 16, M). The down's n-tiles a work-group (moe.cl's NTW),
+// the pairs an item (UR), the plan's items at most (MAX_ITEMS) and its words (moe.cl's plan layout).
+inline constexpr unsigned kMoeUnionTiles = 8, kMoeUnionPairs = 8;
+inline constexpr unsigned moe_union_items(unsigned M, unsigned top_k) {
+  return M * top_k + (M + kMoeUnionPairs - 1) / kMoeUnionPairs;
+}
+inline constexpr unsigned moe_union_plan_words(unsigned M, unsigned top_k) {
+  return 1 + 2 * moe_union_items(M, top_k) + M * (top_k + 1);
 }
 // attn.cl's attn_prep (`s1`: the MTP head's QKV_S = 1 build) and kv8.cl's writer (`kv8`), row builds.
 inline std::string attn_prep_rows_variant(unsigned M, bool s1, bool kv8, unsigned q = kRefFaQHeads,

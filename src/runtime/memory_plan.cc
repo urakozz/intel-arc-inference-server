@@ -80,7 +80,7 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   // the deep lists' chain scratch - Engine's own (EngineSizes), as the engine allocates them.
   const EngineSizes es = EngineDims::sizes(desc, kv, dv.rows, 1, mtp, drafter.on());
   p.deep = es.gdn_pend + es.gdn_x + es.conv_x;
-  p.decode_state += p.deep;
+  p.decode_state += p.deep + es.head_gate;   // PERF-123: and the verify lists' head choice word
   // Spec 19c: the engine's side of a drafter - 7 more GDN slots, and the prefill's tap staging.
   if (drafter.on()) {
     p.drafter_slots = es.df_slots;
@@ -145,7 +145,7 @@ uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, siz
 }
 
 namespace {
-// plan_slots' and plan_pool's shared body: plan() at `positions` (the one KV allocation: the main cache's and the head's
+// plan_pool's body: plan() at `positions` (the one KV allocation: the main cache's and the head's
 // layers, and the RoPE table) with slot 0's drafter at `reach` (the furthest position a sequence writes), int8 prefill's
 // widening scratch at `longest` (one sequence prefills at a time), and the further sequences' state - SlotDims' at
 // `table_pages` page table entries, their drafter sessions at `session_lens`, and with MTP their GDN states and hh rows.
@@ -157,9 +157,11 @@ MemoryPlan plan_sequences(const model::ModelDesc& desc, uint32_t positions, uint
   // Spec 31: the pool's drafter reaches one request's cap; the RoPE table stays at the pool's positions (the engine's
   // max_len, the loader's table - one number, runtime::Engine).
   if (reach != positions) p.drafter = drafter.bytes(reach);
-  // Spec 32e: several slots build no deep verify list - their decode scratch keeps kWideM rows, not plan()'s.
-  p.decode_state -= DecodeScratchDims::sizes(positions, desc, DecodeScratchDims::rows(desc, mtp, kv, 1, false)).total() -
-                    DecodeScratchDims::sizes(positions, desc).total();
+  // Spec 32e: several slots build no deep verify list - their decode scratch keeps kWideM rows, not plan()'s; plan 40a
+  // Task 3: kWideRowsM beside a proposer on Qwen3.8 (the 32-row lists across sequences).
+  p.decode_state -=
+      DecodeScratchDims::sizes(positions, desc, DecodeScratchDims::rows(desc, mtp, kv, 1, false)).total() -
+      DecodeScratchDims::sizes(positions, desc, DecodeScratchDims::rows(desc, mtp || drafter.on(), kv, seqs, false)).total();
   // 3j: int8 prefill's widening scratch holds one sequence's rows (one prefills at a time, slot-relative), so the
   // engine sizes it at the longest slot (PrefillScratch::kv8_len), not at the sum plan() counted.
   if (path.prefill && kv == KvCache::Int8) {
@@ -168,10 +170,14 @@ MemoryPlan plan_sequences(const model::ModelDesc& desc, uint32_t positions, uint
     p.prefill_lazy -= extra;
     p.prefill_scratch -= extra;
   }
-  p.slot_state = SlotDims::sizes(desc, seqs, mtp, table_pages, drafter.on()).total();
+  p.slot_state = SlotDims::sizes(desc, seqs, mtp, table_pages).total();
+  if (seqs > 1 && p.drafter_slots != 0) {   // plan 40a Task 2: several sequences beside a drafter hold no verify slots
+    p.decode_state -= p.drafter_slots;
+    p.drafter_slots = 0;
+  }
   for (uint32_t q = 1; q < seqs; ++q) p.slot_state += drafter.session(session_lens[q]);   // plan 19v3b: their sessions
   if (seqs > 1) p.slot_state += drafter.rows;   // spec 39: and the row tables and row taps (unplanned before)
-  if (seqs > 1) {   // spec 32: several slots build no deep list; plan 31 Task 13: with MTP each its deferred GDN rows
+  if (seqs > 1) {   // spec 32: several slots build no deep list; plan 31 Task 13 / 40a: each its deferred GDN rows
     const EngineSizes es = EngineDims::sizes(desc, kv, 0, seqs, mtp, drafter.on());
     p.decode_state -= p.deep;
     p.deep = es.gdn_pend + es.gdn_x + es.conv_x;
@@ -188,20 +194,6 @@ MemoryPlan plan_sequences(const model::ModelDesc& desc, uint32_t positions, uint
   return p;
 }
 }  // namespace
-
-MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>& lens, bool mtp, size_t model_bytes,
-                      const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv, const DrafterPlan& drafter) {
-  if (lens.empty() || lens.size() > SlotDims::kMaxSeqs)
-    throw std::invalid_argument("runtime::plan_slots: " + std::to_string(lens.size()) + " slots (1.." +
-                                std::to_string(SlotDims::kMaxSeqs) + ")");
-  if (lens.size() == 1) return plan(desc, lens[0], mtp, model_bytes, path, dv, kv, drafter);
-  if (dv.rows != 0) throw std::invalid_argument("runtime::plan_slots: a draft vocabulary beside sequence slots is not built");
-  const uint32_t total = slots_kv_len(lens);
-  MemoryPlan p = plan_sequences(desc, total, total, *std::max_element(lens.begin(), lens.end()), lens,
-                                total / kKvPage, mtp, model_bytes, path, kv, drafter);
-  p.slot_lens = lens;
-  return p;
-}
 
 uint32_t pool_table_pages(const PoolShape& s) { return s.seqs * kv_pages(s.cap); }
 
@@ -246,39 +238,6 @@ PoolShape pool_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, 
   return shape(lo);
 }
 
-std::vector<uint32_t> slot_layout(uint32_t slot0, uint32_t seqs) {
-  std::vector<uint32_t> lens(seqs, SlotDims::kShortLen);
-  lens[0] = slot0;
-  return lens;
-}
-
-uint32_t slot0_len_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, size_t model_bytes,
-                             size_t device_bytes, size_t reserve_bytes, uint32_t cap, const PrefillPath& path,
-                             KvCache kv, const DrafterPlan& drafter) {
-  if (cap < kMaxLenQuantum)
-    throw std::invalid_argument("slot0_len_that_fits: the cap " + std::to_string(cap) + " is below one " +
-                                std::to_string(kMaxLenQuantum) + "-position quantum");
-  // plan_slots is plan() at the summed positions plus terms of the slot count (or the longest slot), so it is
-  // non-decreasing in slot 0 like plan() in max_len.
-  return largest_that_fits(cap, [&](uint32_t len) {
-    return plan_slots(desc, slot_layout(len, seqs), mtp, model_bytes, path, {}, kv, drafter).total() + reserve_bytes <=
-           device_bytes;
-  });
-}
-
-std::string slot_layout_name(const std::vector<uint32_t>& lens) {
-  if (lens.empty()) return "no slot";
-  std::string s = std::to_string(lens[0]);
-  size_t i = 1;
-  while (i < lens.size()) {
-    size_t j = i;
-    while (j < lens.size() && lens[j] == lens[i]) ++j;
-    s += " + " + (j - i > 1 ? std::to_string(j - i) + " x " : std::string()) + std::to_string(lens[i]);
-    i = j;
-  }
-  return s;
-}
-
 std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_bytes) {
   const double gb = 1e9;
   const std::string label = "plan at max_len " + std::to_string(p.max_len);
@@ -314,10 +273,6 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
   if (p.pool_pages != 0) {   // spec 31
     buf = std::format(", {:d} requests sharing a KV pool of {:d} pages of {:d}, one up to {:d}, their state {:.3f} GB in"
                       " decode state", p.slot_lens.size(), p.pool_pages, kKvPage, p.slot_lens[0], p.slot_state / gb);
-    s += buf;
-  } else if (!p.slot_lens.empty()) {   // spec 13c
-    buf = std::format(", {:d} slots ({}), their state {:.3f} GB in decode state", p.slot_lens.size(),
-       slot_layout_name(p.slot_lens).c_str(), p.slot_state / gb);
     s += buf;
   }
   if (p.kv_cache == KvCache::Int8) s += ", int8 KV cache";   // spec 12b; bf16 says nothing
