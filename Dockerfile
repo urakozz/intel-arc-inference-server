@@ -81,6 +81,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 COPY --from=gcc /gcc-root/usr/local/lib64/libstdc++.so.6* /gcc-root/usr/local/lib64/libgcc_s.so.1 /usr/local/lib64/
 COPY --from=builder /opt/b70/build/src/cli/b70-serve /opt/b70/build/src/cli/b70-decode /opt/b70/build/src/cli/
 COPY --from=builder /opt/b70/build/kernels /opt/b70/build/kernels
+# The chat template the server falls back to when a model ships none: its source path is compiled in.
+COPY --from=builder /opt/b70/src/tokenizer/chat_template_fallback.jinja /opt/b70/src/tokenizer/
 ENV HF_HOME=/root/.cache/huggingface
 EXPOSE 8000
 ENTRYPOINT ["/opt/b70/build/src/cli/b70-serve"]
