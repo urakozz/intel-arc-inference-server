@@ -4,10 +4,10 @@ The checkpoint every gate in this repo grades against -
 `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`, int4 **symmetric, group_size 64**,
 GPTQ export (`docs/03-models.md`) - was produced by AutoRound **with two local
 patches that are not upstream**. They lived only as uncommitted edits in
-`~/auto-round` on the box until 2026-09-22; `auto-round-local.patch` is that
+a local `auto-round` clone until 2026-09-22; `auto-round-local.patch` is that
 diff, captured so the recipe survives the disk.
 
-Checked against `origin/main` on 2026-09-22 (36 commits ahead of the box's
+Checked against `origin/main` on 2026-09-22 (36 commits ahead of the clone's
 `141e4c99`): **neither fix is upstream**, so the patch is still required.
 
 - **`calib_dataset.py`** - resets `os_cnt, have_bos, have_eos` per sample instead
@@ -117,14 +117,14 @@ so `ShardWriter.finalize` writes the plain `lm_head.weight` from the state dict.
 path turns immediate packing off when a quantised layer lives outside the blocks and packs every
 layer at export. Hence: the tuned script moved to 0.17.0, and the RTN script moved with `--disable_low_cpu_mem_usage`
 , which packs at export like the calibrated path. It holds the whole model in
-RAM (~54 GB bf16 for the 27B; the box has ~128 GB) and has not run on the 27B yet - the checker
+RAM (~54 GB bf16 for the 27B; the test machine has ~128 GB) and has not run on the 27B yet - the checker
 refuses the export if `lm_head` comes out unpacked. Not exercised on CPU: XPU; the 27B's GDN layers and MTP head (the
 scripts' checker guards the real run). On a CPU without bf16, both versions write unpacked tensors
-as F32 (the checker WARNs with `--source`); on the box's XPU they stay bf16.
+as F32 (the checker WARNs with `--source`); on an XPU they stay bf16.
 
 **Reproducibility.** The published checkpoints were not made by 0.17.0, and re-running a script
 now does not reproduce them byte for byte unless the version matches:
-`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` (the gate) by the patched box build (`~/auto-round`,
+`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` (the gate) by the patched build (`~/auto-round`,
 `141e4c99` plus `auto-round-local.patch`, `--format auto_gptq`, bf16 lm_head); the int4-lm_head RTN
 checkpoint of docs/13 by 0.14.2 (`autoround_version` 0.14.2, `tests/loader/quant_test.cc`'s
 fixture); `urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ` by **0.15.0** (its config's
@@ -220,7 +220,7 @@ GPUs for generation (~1.4M generated tokens): vLLM + `aleph-alpha-inference` on 
 less with `DEVICE=cuda`. `rtn`: well under an hour per arm. `tune`: AutoRound loads one 3 GB block
 of 384 experts at a time; on one H100-class GPU estimate 10-30 h per arm at 1024 x 2048 samples (the
 first block's time in the log x 50 is the honest figure - spec 20 decision 1 measures it). On the
-box: `DEVICE=xpu` for AutoRound works in principle; `calib` cannot run there at a useful speed.
+GPU machine: `DEVICE=xpu` for AutoRound works in principle; `calib` cannot run there at a useful speed.
 
 **Tested on the Mac** (tiny random Kolibri from `kolibri/make_tiny.py`: 5 layers, 16 experts, hidden
 128, the real tokenizer; in `agnes-ref-img` + a venv with auto-round 0.17.0 @ 6afaecdb, 3 threads):
@@ -242,10 +242,9 @@ symmetric everywhere it quantises (the routed and shared experts, QSA q/k/v/o, G
 head's routed experts), **tuned** (sign-SGD, 200 iterations, 128 x 2048 rows, batch 8 - the Qwen3.8 tuned recipe's
 sizes - of **nvidia/OpenCodeInstruct** through the checkpoint's chat template: the model is for agentic coding,
 ), **no comparison with Intel's checkpoint** - quality is ours against the bf16
-original and the f32 judge. The owner runs it on the box; the commands are in the open-work list's "Quantise
-Flash-Next" row.
+original and the f32 judge. The commands follow.
 
-### The commands (on the box, in the repo tree)
+### The commands (on the GPU machine, in the repo tree)
 
 ```sh
 tools/quantize/quantize_qwen4exp.sh check-download   # DOWNLOAD OK: 144 files, 360.02 GB ... (--sha: also hashes, ~30 min)
@@ -256,21 +255,19 @@ tools/quantize/quantize_qwen4exp.sh start            # after a stop, a crash or 
 tools/quantize/quantize_qwen4exp.sh selftest         # the whole pipeline on the tiny model, ~5 min (card 1; DEVICE=cpu: the CPU)
 ```
 
-- **Card:** one card, `tools/gpu_lock.sh card 1` (`CARD`): card 0 stays free for other card jobs. A whole-box job
-  (`tools/gpu_lock.sh box`, e.g. a validation run) waits until the quantisation ends - the lock protocol lets no
-  whole-box job start while a card job runs - so start validation runs before, or `stop` and `start` around them.
-- **Output and disks:** `QUANT_ROOT` = `~/b70/hdd/quant/` (the 8 TB disk, ~6 TB free) holds
+- **Card:** one card (`CARD`, default 1): card 0 stays free for other card jobs. A job that needs both cards waits
+  until the quantisation ends, so start such runs before, or `stop` and `start` around them.
+- **Output and disks:** `QUANT_ROOT` = `$B70_DATA/hdd/quant/` (a large disk) holds
   `Qwen3.8-Flash-Next-W4A16-g64-<date>/` (`flash-next-current` points at it): `export/<snapshot>-w4g64/` (the
   checkpoint), `export/<snapshot>-w4g64-ple-int8/` (the engine's PLE file), `resume/`, `work/`, `RESULT`, `run.log`
-  (-> `~/b70/logs/flash-next-quant/run-<time>.log`). `PLE_DIR` = `~/b70/scratch/flash-next-ple/` on the NVMe holds the
+  (-> `$B70_DATA/logs/flash-next-quant/run-<time>.log`). `PLE_DIR` = `$B70_DATA/scratch/flash-next-ple/` on a fast SSD holds the
   PLE table as one raw 102 GB file while `quant` runs (below). Growth (derived from the real-width probe and the tiny
   runs): `resume/` 21.5 GB from the first block on, overwritten each block (two fp32 files: 128 x 2048 x 10240 x 4 B
   each); the export ~1.4 GB a layer (512 experts 1.34 GB + the dense part), +102.4 GB of bf16 PLE table once layer 1
   is written, ~172 GB at the end (experts 64.2, MTP experts 1.3, dense ~1.7, embedding 1.3, head 0.34, vision ~0.9,
-  PLE 102.4); then the int8 PLE file 51.8 GB: **~245 GB on the 8 TB disk, 102 GB on the NVMe**. Not the USB disk:
-  it holds the 360 GB download and keeps ~98 GB free. Not the NVMe for the export: ~236 GB free today. `start` wants
+  PLE 102.4); then the int8 PLE file 51.8 GB: **~245 GB on the large disk, 102 GB on the SSD**. `start` wants
   300 GB free under `QUANT_ROOT` and 110 GB under `PLE_DIR`; after `FLASH-NEXT QUANT: OK` move `PLE_DIR` to
-  `~/b70/trash/<date>`.
+  `$B70_DATA/trash/<date>`.
 - **Stages** (`run --only S` / `--from S` reruns one): `quant` (AutoRound, the ~2 days), `bf16` (every unquantised
   tensor bitwise the source's: reads the ~172 GB export and the same bytes of the source, ~30-40 min, estimated),
   `head` (`lm_head` packed by `loader/rtn.h`'s rule and declared 4-bit, a minute), `ple` (`ple_int8.py`, reads
@@ -282,7 +279,7 @@ tools/quantize/quantize_qwen4exp.sh selftest         # the whole pipeline on the
   and ended `OK`). `start` on an unfinished run resumes it; a finished one is refused (a new run needs `OUT=<dir>`).
 - **Guards:** `start` refuses unless `check-download` passes, MemAvailable >= 100 GB (`RAM_MIN_GB`) and the disks have
   room; AutoRound runs inside `systemd-run --user --scope -p MemoryMax=115G -p MemorySwapMax=0`, so running out of
-  RAM kills the run (then `start` resumes it), never the box.
+  RAM kills the run (then `start` resumes it), never the machine.
 
 ### What the AutoRound of `~/auto-round` needed (each found on the tiny model or the real-width probe)
 
@@ -313,9 +310,9 @@ What the script does about the rest (`autoround_run.py`, `head_rtn.py`):
   packs it by the engine's rule and declares it (`extra_config["lm_head"]` bits 4 g64 sym).
 - **The PLE table file-backed.** Materialising layer 1, AutoRound reads all 128 `ngram_embedding.shard_*` tensors
   and `torch.cat`s them (`utils/disk_stream_util.py` `_assemble_sharded_tensor`): ~95 GiB of shards + a 95 GiB
-  result on a 121 GiB box - the run would die at layer 1. `autoround_run.py` replaces that one function for the
+  result on a 121 GiB machine - the run would die at layer 1. `autoround_run.py` replaces that one function for the
   table: the shards are streamed once into a raw bf16 file in `PLE_DIR` and the table is `torch.from_file` of it
-  (mmap), so only the rows the calibration tokens hit are read and the kernel may drop them again. On the NVMe
+  (mmap), so only the rows the calibration tokens hit are read and the kernel may drop them again. On an SSD
   because the first lookups are millions of small random reads (an hour-scale stall on the HDD, estimated). The
   `bf16` stage proves the exported table bitwise the source's (tiny runs: 255 tensors).
 - **The CPU path** (`DEVICE=cpu`, the tiny model only) needs `AR_DISABLE_META_LOAD=1` (the script sets it): with the
@@ -325,11 +322,11 @@ What the script does about the rest (`autoround_run.py`, `head_rtn.py`):
 
 Other settings: transformers **5.19.0** (the reference's pin; `SITE`, installed `--no-deps` beside the venv), the
 venv `~/auto-round/.venv` (python 3.12, torch 2.14.0+xpu), `TORCHINDUCTOR_COMPILE_THREADS=4`, offline hub and
-datasets (the box's WiFi is flaky). **Calibration data:** `DATASET` = `nvidia/OpenCodeInstruct:apply_chat_template`
+datasets (the network can drop). **Calibration data:** `DATASET` = `nvidia/OpenCodeInstruct:apply_chat_template`
 (AutoRound's registered loader `get_opencode_instruct_dataset`: 128 x 100 rows drawn, each a user turn + the
 assistant's answer through Qwen's template, ending in `<|im_end|>`, packed to 2048-token rows with the per-sample
 BOS/EOS reset of #2591); the 50 parquet shards come from the HF cache
-(`~/.cache/huggingface/hub/datasets--nvidia--OpenCodeInstruct`, 6.4 GB, hot on the NVMe). `autoround_run.py`
+(`~/.cache/huggingface/hub/datasets--nvidia--OpenCodeInstruct`, 6.4 GB, on the SSD). `autoround_run.py`
 refuses to start unless all 50 are there, and offline the fork's hub fallback is an error too, so the run cannot
 fall back to pile-10k: with an empty cache it exits "calibration data: nvidia/OpenCodeInstruct is not in the HF
 cache ... refusing to run" (checked). AutoRound takes the multimodal path for
@@ -337,14 +334,14 @@ cache ... refusing to run" (checked). AutoRound takes the multimodal path for
 standard text loader; the vision tower stays bf16 (the engine never loads it; `check_gptq_export.py --skip-prefix
 model.visual.`).
 
-### Proven on the tiny model (2026-11-11 evening, box time)
+### Proven on the tiny model (2026-11-11 evening, test machine)
 
 `make_tiny_vl.py`: `qwen4exp_make_tiny.py`'s fused `bf16` form (hidden 128, layers lllq, 16 experts top-4, the PLE at
 layer 1, the MTP head) + a 1-block vision tower + the tokenizer (qikp's tiny) + the processor files (Intel's
 snapshot until the original's are downloaded). The downloaded qikp tiny itself cannot be used: hidden 16, so no
 linear is a multiple of 64, and per-expert (not fused) experts. `selftest` (2 iterations, 8 x 128 rows):
 
-| | card (XPU) | box CPU (`DEVICE=cpu`) |
+| | card (XPU) | test-machine CPU (`DEVICE=cpu`) |
 |---|---|---|
 | `quant` | ~70 s, peak RSS 5.7 GiB; meta skeleton; 218 of 263 linears quantised; the PLE table from the file | 80 s, peak RSS 3.0 GiB; full load |
 | per-expert int4 | 64 routed experts (4 layers x 16), every shared expert, QSA q/k/v/o, GDN qkv / z / out | same |
@@ -354,13 +351,13 @@ linear is a multiple of 64, and per-expert (not fused) experts. `selftest` (2 it
 | `ple` / `check` | 16 heads; `check.py` ACCEPTED with the PLE file; `check_gptq_export.py` VERIFIED B70-READY | same |
 | result | `FLASH-NEXT QUANT: OK` | `FLASH-NEXT QUANT: OK` |
 
-Logs in `~/b70/logs/flash-next-quant/`: `selftest-cpu-opencode.log` (the final code: AutoRound `a6cf7487`,
+Logs in `$B70_DATA/logs/flash-next-quant/`: `selftest-cpu-opencode.log` (the final code: AutoRound `a6cf7487`,
 OpenCodeInstruct from the cache's 50 shards, 800 rows drawn for 8 x 128), `selftest-xpu-3.log` (card 1, the same
 code with pile-10k), the resume test
 in `tiny-resume/` (100 iterations, 128 x 2048 rows: stopped after block 0, the
 second `start` resumed at block 1, `OK`).
 
-### Sizing (2026-11-11, a real-width stand-in on the box)
+### Sizing (2026-11-11, a real-width stand-in on the test machine)
 
 The download had 4 of 131 shards, so the measurement used a stand-in at the real widths: 4 layers (GDN, GDN with a
 small PLE, GDN, QSA), hidden 2560, 512 experts top-10 of width 640, 24 q heads, random bf16 weights
@@ -385,7 +382,7 @@ it by an amount not measured; it is in the 57 min. **Two cards do not help:** `-
 the stand-in) ran AutoRound's data-parallel path with the whole block on xpu:1 (32 GB resident, all the compute,
 "Major device (xpu:1) has reached memory threshold") and xpu:0 at 7.6 GB idle; block 0 had not finished after 64 min (one card: 57); and
 on the tiny model it fails at the first QSA block ("Expected all tensors to be on the same device, xpu:1 and xpu:0",
-with and without torch.compile). So the recipe is one card with `tools/gpu_lock.sh card 1`.
+with and without torch.compile). So the recipe is one card (card 1).
 
 **Projection (derived):** 48 blocks x ~57 min = ~46 h (the 12 QSA blocks are not measured; the 512 experts dominate
 both kinds), + ~10 min for the PLE file, + the export of the MTP head and the `bf16` / `head` / `ple` / `check`
@@ -439,7 +436,7 @@ docker run --rm --memory 8g --cpus 4 -e PYTHONPATH=/ws/oracle-out-q4exp/site \
   -e TORCH_EXTENSIONS_DIR=/ws/oracle-out-q4exp/torch-ext -v "$PWD":/ws -w /ws agnes-ref-img:latest \
   python3 tools/quantize/qwen4exp/test_qwen4exp_quant.py
 # a synthetic checkpoint, its PLE file beside it and the check - the layout qwen4exp_load_synth_*_test reads
-# (box: r31.synth writes oracle-out-q4exp-synth/{ours,intel}/ckpt and ckpt-ple-int8 under $DATA)
+# (validation: r31.synth writes oracle-out-q4exp-synth/{ours,intel}/ckpt and ckpt-ple-int8 under $DATA)
 python3 tools/quantize/qwen4exp/make_synth.py oracle-out-q4exp-synth/ours/ckpt --form ours --mtp \
   --tokenizer oracle-out-q4exp/orig-small
 python3 tools/quantize/qwen4exp/ple_int8.py oracle-out-q4exp-synth/ours/ckpt oracle-out-q4exp-synth/ours/ckpt-ple-int8
@@ -464,10 +461,10 @@ python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple 
   `input_embedding_scale`. RoPE tables are float64-computed float32 values carried as int32 bits: AutoRound casts
   every floating block input to bf16. AutoRound gets a stub tokenizer (it requires one for a model object; every row
   is valid, no pad id).
-- **torch.compile is off** (`--torch-compile` turns it on): on the tiny drafter (box CPU, 50 iterations) the layer
+- **torch.compile is off** (`--torch-compile` turns it on): on the tiny drafter (test-machine CPU, 50 iterations) the layer
   blocks' backward fails under it ("modified by an inplace operation", a [hidden] float tensor); the encoder block
   passes. Not chased further: the drafter is small.
-- **Tiny-drafter smoke (2026-11-13, box CPU, 4 threads):** 20/20 linears quantised; 50 iterations cut the blocks'
+- **Tiny-drafter smoke (2026-11-13, test-machine CPU, 4 threads):** 20/20 linears quantised; 50 iterations cut the blocks'
   losses 4.3e-3 -> 1.9e-3 (encoder), 5.3e-2 -> 6.8e-3 and 5.7e-2 -> 9.6e-3 (layers), 7.8e-3 -> 1.8e-3 (selector); the
   export dequantised through the calibration forward is 9.5 % off the bf16 selector projection against 24 % for the
   2-iteration (RTN-start) export; `finalize` restored 16 fp32 widenings to the source's bf16 and the check VERIFIED.
@@ -492,7 +489,7 @@ tools/quantize/quantize_nemotron.sh check-download   # DOWNLOAD OK ... (--sha: a
 tools/quantize/quantize_nemotron.sh start            # detached, card 1; refuses unless download, RAM (80 GB) and disk (150 GB) are ready
 tools/quantize/quantize_nemotron.sh status           # blocks done / 88, s per block, RAM, disk, the result
 tools/quantize/quantize_nemotron.sh stop             # TERM to the run's process group; start resumes at the first unfinished block
-tools/quantize/quantize_nemotron.sh selftest         # the whole pipeline on a tiny model on the box CPU, then the reference
+tools/quantize/quantize_nemotron.sh selftest         # the whole pipeline on a tiny model on the CPU, then the reference
 ```
 
 - **What is int4:** every block's routed experts, shared expert, `fc1/fc2_latent_proj`, Mamba `in_proj` / `out_proj`,
@@ -515,7 +512,7 @@ tools/quantize/quantize_nemotron.sh selftest         # the whole pipeline on a t
   layer-major from the safetensors (no transformers model; a few GB of RAM for the 249 GB original), MTP drafts
   included; the selftest holds it against transformers' native class (fp32) and runs the tiny's bf16 original
   against its int4 export.
-- **Proven on the tiny model** (2026-11-20, box CPU, `selftest-20261120-050920.log` in `~/b70/logs/nemotron-quant/`):
+- **Proven on the tiny model** (2026-11-20, test-machine CPU, `selftest-20261120-050920.log` in `$B70_DATA/logs/nemotron-quant/`):
   `nemotron_make_tiny.py` (hidden 256, blocks mamba / moe / attention / moe, 16 experts top-4, the MTP layer, a
   one-block vision tower, the real tokenizer and remote code); AutoRound on the meta-skeleton path in 91 s, peak
   RSS 1.6 GiB; 110 int4 linears (32 of them the MTP layer's routed experts, RTN); `strip` 28 vision tensors;
@@ -537,7 +534,7 @@ through the chat template, batch 8, seed 42) - the Flash-Next recipe. `lm_head` 
 engine builds its int8 head at load). The commands and stages are in the script's header:
 
 ```sh
-tools/quantize/quantize_ripple.sh selftest          # tiny random Ripple, box CPU, both attention arms, ~5 min
+tools/quantize/quantize_ripple.sh selftest          # tiny random Ripple, test-machine CPU, both attention arms, ~5 min
 tools/quantize/quantize_ripple.sh start             # detached, card 1; refuses unless data, RAM and disk are ready
 tools/quantize/quantize_ripple.sh status            # blocks done / 80, s per block, RAM, the result
 tools/quantize/quantize_ripple.sh stop              # TERM to the run's process group; start resumes
@@ -547,7 +544,7 @@ ATTN=bf16 tools/quantize/quantize_ripple.sh start   # attention bf16, only the M
 What is particular to Ripple (`ripple/autoround_run.py`):
 
 - **Low CPU memory for a dense model.** AutoRound builds its meta skeleton by itself only for fused-MoE
-  checkpoints and would load a dense model whole (130 GB > the box's RAM). `AR_DISK_STREAM_MODEL=1` forces the
+  checkpoints and would load a dense model whole (130 GB > the test machine's RAM). `AR_DISK_STREAM_MODEL=1` forces the
   skeleton: each block is read from the checkpoint when it is tuned, written and freed; the run refuses if
   AutoRound did not take that path.
 - **Value residuals need no shim.** Every layer gets the same tensor, the scaled embedding rows, as the
@@ -570,9 +567,9 @@ What is particular to Ripple (`ripple/autoround_run.py`):
   `ripple/check.py` checks them, every source config key and the attention arm; in the selftest (`RELOAD=1`) it
   also loads the export with transformers + trust_remote_code and compares it with the engine's dequantisation.
 
-Selftest (2026-11-20, box CPU, AutoRound `8186d8b6`, transformers 5.19.0, 10 iterations on 8 x 128 OpenCodeInstruct
+Selftest (2026-11-20, test-machine CPU, AutoRound `8186d8b6`, transformers 5.19.0, 10 iterations on 8 x 128 OpenCodeInstruct
 rows; `ripple/make_tiny.py`: hidden 256, layers 0-4 of the real pattern, the 78 tensor names equal to the real
-index's; `~/b70/logs/ripple-quant/selftest-20261120-043938.log`): `RIPPLE SELFTEST: OK both arms`, ~2 min per arm.
+index's; `$B70_DATA/logs/ripple-quant/selftest-20261120-043938.log`): `RIPPLE SELFTEST: OK both arms`, ~2 min per arm.
 
 | | `ATTN=int4` | `ATTN=bf16` |
 |---|---|---|

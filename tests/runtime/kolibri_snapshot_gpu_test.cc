@@ -1,6 +1,6 @@
 // Spec 20e (plan 20e Task 3 Step 1, Review Focus 4): KolibriEngine's prefix-cache snapshot calls on the card
-// with a checkpoint - box only (labels checkpoint;kolibri). The synthetic checkpoints
-// (tools/box_validate/kolibri_oracle.sh synth: 5 real-width layers - 4 sliding, 1 full) carry it before spec
+// with a checkpoint - GPU only (labels checkpoint;kolibri). The synthetic checkpoints
+// (tools/oracle/kolibri_ref.py synth: 5 real-width layers - 4 sliding, 1 full) carry it before spec
 // 20b; the real one runs on two cards after it. The host side (the layouts, the adapter, spec 7's request path)
 // is kolibri_snapshot_test's.
 //

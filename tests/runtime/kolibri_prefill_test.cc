@@ -1,5 +1,5 @@
-// Spec 20d (KL3 on prefill, Review Focus 4-5): KolibriEngine::prefill on the card with a checkpoint - box
-// only (labels checkpoint;kolibri;prefill). The synthetic checkpoints (tools/box_validate/kolibri_oracle.sh
+// Spec 20d (KL3 on prefill, Review Focus 4-5): KolibriEngine::prefill on the card with a checkpoint - GPU
+// only (labels checkpoint;kolibri;prefill). The synthetic checkpoints (tools/oracle/kolibri_ref.py
 // synth: 5 real-width layers - 4 sliding, 1 full) carry it before spec 20b; the golden gate itself is
 // kolibri_golden_test's `prefill` mode.
 //
@@ -80,7 +80,7 @@ constexpr float kWeightAbs = 1.0f / 32;   // PROPOSED: |w_prefill - w_decode| on
 constexpr double kLayerMedian = 0.999;
 // Ruling 2026-11-03, the real checkpoint (more than kShallowLayers layers): layers [0, kShallowLayers) gated
 // at median >= kShallowMedian, the deeper layers PRINTED with their numbers, not gated. Why (2026-11-01/02 on the
-// box): a structural fault (a wrong ring slot, offset or lost row) shows from the first layer it touches, and layers
+// cards): a structural fault (a wrong ring slot, offset or lost row) shows from the first layer it touches, and layers
 // 0-5 - four sliding, the first full (NoPE) layer 4, the sliding layer after it - measured medians 0.999983 -
 // 0.999995 (a sixth of this bar's distance); past them two correct bf16 paths drift apart on Kolibri-1's tie-heavy
 // router (~15 % of the expert sets differ beyond a near-tie between any two of them): layer 29's median fell to

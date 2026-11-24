@@ -268,7 +268,7 @@ __kernel void prep_res_norm(__global const float* restrict partials,
 // **That does NOT mean the engine's tensors are unchanged, and the first draft
 // of this comment claimed it did.** The reordered Σ moves `x` in the last bf16
 // ulp somewhere in a real row; the next GEMV consumes that `x`; 60-odd layers
-// amplify it. Measured, before and after this lever on the same box: the golden
+// amplify it. Measured, before and after this lever on the same machine: the golden
 // gate's per-layer tap cosines **do move, in both directions** - `code`'s worst
 // tap 0.829 → 0.914, `prose`'s 0.99945 → 0.99481 - while the token ids stayed
 // 96/96 element-exact. The arbiter is the gate, not a tolerance and not a

@@ -22,7 +22,7 @@ the oracle below, and the tensors it dumps are the golden set.
 
 The record, on the bf16-head Qwen3.8 checkpoint, is 3 prompts of 32 greedy tokens each: 93 of 93 determined rows
 exactly equal to the oracle, and 3 undetermined rows, all inside the oracle's own set of tied top choices
-("Undetermined rows" below explains the term). The gate is rerun by the box validation, not on every change.
+("Undetermined rows" below explains the term). The gate is rerun by the maintainer's validation runs, not on every change.
 
 The prompts are 42, 61 and 38 token ids of English prose, Python source, and Chinese text ending in an emoji
 variation selector. Their ids are committed (`tests/golden/prompts/{prose,code,cjk}.ids`). The roughly 1 GB of golden
@@ -278,8 +278,8 @@ next few tokens and the model check them all in one pass of several rows; those 
 `gemm_sm` rather than the one-row GEMV.
 
 For those cases the gate is the f32 judge (`tests/server/spec_judge.h`, built on `tests/golden/forced_judge.h`). The
-test writes out each context it would judge (`B70_DUMP_FORCED`), the box CPU runs a float32 reference on exactly that
-context (`tools/box_validate/f32_refs.sh`), and the test reads it back (`B70_FORCED_JUDGE`). A speculative stream
+test writes out each context it would judge (`B70_DUMP_FORCED`), a CPU job runs a float32 reference on exactly that
+context (`tools/oracle/qwen_forced.py`), and the test reads it back (`B70_FORCED_JUDGE`). A speculative stream
 passes when one of these holds:
 
 - it is identical to the plain stream;
@@ -309,21 +309,20 @@ can be removed.
 
 Awaiting a reference. A divergence the plain rules fail, in a context that has no f32 reference yet, is not judged
 and so not failed either: it is reported as "awaiting f32 reference", and the test is skipped (exit code 77) when
-nothing else failed. A skip is never a pass. The contexts are dumped as always, and `f32_refs.sh` turns the dumps into
+nothing else failed. A skip is never a pass. The contexts are dumped as always, and the f32 reference job turns the dumps into
 references. Every divergence a judge does grade, and every structural or bitwise check, fails as before.
 
-New references are made quickly with the CPU bf16 shim (`tools/oracle/cpu_bf16.py`). The box CPU has no bf16
+New references are made quickly with the CPU bf16 shim (`tools/oracle/cpu_bf16.py`). The test machine's CPU has no bf16
 hardware, and torch's emulated bf16 GEMM there is about a thousand times slower than float32, so the shim does the
 GEMM in fp32 and rounds once to bf16. It is not bitwise torch's (`--no-exact-bf16-gemm` reproduces the old path and
-the existing golden sets), but it is as close to the f32 judge. CPU reference jobs run one at a time under the CPU
-model lock (`tools/box_validate/f32_ref_job.sh`).
+the existing golden sets), but it is as close to the f32 judge. CPU reference jobs run one at a time.
 
 ## Running the gate
 
 ```bash
-tools/box.sh test golden_gate_test          # sync + build + ctest
+ctest --test-dir build --output-on-failure -R golden_gate_test
 # or, for the full diagnostic log:
-tools/box.sh run './build/tests/golden_gate_test "$PWD/<golden-dir>" "$PWD/tests/golden/prompts" <snapshot>'
+./build/tests/golden_gate_test "$PWD/<golden-dir>" "$PWD/tests/golden/prompts" <snapshot>
 ```
 
 A golden set belongs to exactly one checkpoint, and to the container image that produced it, since the oracle is
@@ -338,8 +337,7 @@ of 19.5 GiB with a bf16 head. One checkpoint load serves all three prompts. Rege
 for all three prompts on an idle machine, and 28% longer beside a 12-core compile: the CPU oracle is the one thing in
 this project that really competes for the host.
 
-`tools/box_check.sh` runs `ctest -LE checkpoint`, the tests that need no model files, as a quick check of a branch on
-the box; it does not gate a merge. It counts passed, failed and skipped tests separately, because a skipped test, such
-as the gate with no golden set present, is not a pass. The tests that need checkpoints and golden sets run as stages
-of the box validation (`tools/box_validate.sh`), on demand, and a test whose inputs are byte-identical to a recorded
-pass keeps that pass.
+`ctest -LE checkpoint` runs the tests that need no model files, as a quick check of a branch; it does not gate a
+merge. Count passed, failed and skipped tests separately, because a skipped test, such as the gate with no golden set
+present, is not a pass. The tests that need checkpoints and golden sets run in the maintainer's validation runs, on
+demand, and a test whose inputs are byte-identical to a recorded pass keeps that pass.

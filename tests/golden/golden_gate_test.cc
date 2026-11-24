@@ -57,7 +57,7 @@
 // and the tokens cover it again.
 //
 // Label `checkpoint golden`: needs the real 19 GB checkpoint, a B70, and the
-// ~1 GB of oracle output that lives only on the box. Absent goldens are a SKIP
+// ~1 GB of oracle output that lives only on the GPU machine. Absent goldens are a SKIP
 // (exit 77), not a failure - the Mac never has them.
 #include <algorithm>
 #include <cmath>
@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
     const std::string g = gdir + "/" + p + ".golden.safetensors";
     if (!exists(g)) {
       std::printf(
-          "SKIP: %s is absent. The oracle dumps live only on the box "
+          "SKIP: %s is absent. The oracle dumps live only on the GPU machine "
           "(~1 GB, .gitignore'd) - see tools/oracle/README.md, 'Running it'.\n",
           g.c_str());
       return 77;

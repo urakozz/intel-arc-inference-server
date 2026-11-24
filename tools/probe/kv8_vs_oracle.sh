@@ -1,7 +1,7 @@
 #!/bin/bash
 # Spec 12b Q2/Q3 on the golden set: the int8 KV cache no further from the CPU oracle than
 # the bf16 one, less a tolerance. Registered as ctest `kv8_vs_oracle_test`; run from the repo
-# root on the box (build in ./build), B70_KV_CACHE selecting the cache.
+# root on the GPU machine (build in ./build), B70_KV_CACHE selecting the cache.
 #   tools/probe/kv8_vs_oracle.sh [oracle dir] [snapshot]
 # ctest passes B70_TEST_ORACLE_DIR and B70_TEST_SNAPSHOT, as the other golden registrations
 # do; by hand the defaults are ./oracle-out-primary and the checkpoint's repo id (refs/main).
@@ -13,13 +13,12 @@
 # 5.0e-5 / 3.3e-5 on prose / code / cjk), and
 # every gate run itself passes (the tie rule's allowance unchanged, spec 12 Q2).
 # Exit 0 iff both hold on both backends; 77 (ctest SKIP, as golden_gate_test) when the gate
-# reports the golden set absent - a tree without the oracle-out* links
-# (tools/box_validate/data.sh link); 1 otherwise. PASS is printed only from 96 parsed rows
+# reports the golden set absent - a tree without the oracle-out* sets; 1 otherwise. PASS is printed only from 96 parsed rows
 # per form and two gate runs that exited 0.
 cd "$(dirname "$0")/../.."
 oracle=${1:-oracle-out-primary}
 snap=${2:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}
-# Keep the four gate logs together; detached box jobs supply their own TMPDIR.
+# Keep the four gate logs together; detached jobs supply their own TMPDIR.
 out=${TMPDIR:-/tmp}/kv8_vs_oracle
 mkdir -p $out
 num='^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'

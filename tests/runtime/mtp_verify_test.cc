@@ -51,7 +51,7 @@
 // the capture's measured rule. Where DPAS is bound the verify rows are no longer bitwise their M = 1 steps: M2a's
 // cosine bars hold, its "(bitwise)" marks go.
 //
-// Spec 8 §12 (MTP at every context length; box queue row 6): with max_len above 16384
+// Spec 8 §12 (MTP at every context length; validation queue row 6): with max_len above 16384
 // (mtp_verify_{32k,128k}_test) the same cases run at that length, plus M2 deep in the
 // cache (n = max_len - 1026, n % 16 = 14) and RF4 at max_len / 2 + 4395 (spec 7 C1 with
 // MTP at ~64k on the 131072 run); RF3 sits at max_len - 4. The prompt is long32k.ids

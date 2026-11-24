@@ -4,7 +4,7 @@
 // builds (passed as arguments: tests/CMakeLists.txt's B70_Q4EXP_DECODE_KERNELS, `kernel_<name>`; the reused
 // binaries other blocks build - Qwen3.8's gdn_step_M1 / argmax, Kolibri's shared shapes - are in the list
 // too). Host only: a name the capture would ask for that no CMake line builds fails here on the Mac, not at capture
-// on the box; and nothing in the list is dead.
+// on the GPU machine; and nothing in the list is dead.
 #include <cstdio>
 #include <set>
 #include <string>

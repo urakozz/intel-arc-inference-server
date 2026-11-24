@@ -2,7 +2,7 @@
 # tools/probe/offload_links.sh - spec 22 P0.1 (plan 22a Task 2 Step 4): the PCIe links both B70s train at, every
 # bridge above each up to its root port, the CPU and the host memory channels.
 #
-#   offload_links.sh [--under-load S] [--channels N]          on the box (lspci, /sys, lscpu, sudo -n dmidecode)
+#   offload_links.sh [--under-load S] [--channels N]          on the GPU machine (lspci, /sys, lscpu, sudo -n dmidecode)
 #   offload_links.sh --lspci-file F [--dmidecode-file F]      parse saved text instead (the fixture: tools/probe/testdata)
 #   offload_links.sh --self-test                              the parser over tools/probe/testdata/lspci_b70.txt
 #
@@ -13,7 +13,7 @@
 # the first device below it (the card's on-board switch upstream port): the endpoint behind the switch reports an
 # internal link, printed but not used. Then `lscpu`, `sudo -n dmidecode -t memory` (the command to run by hand when
 # sudo -n is refused), the derived host RAM ceiling = channels x MT/s x 8 B (channels: --channels, else the populated
-# DIMMs capped at 4 - the T5810's Xeon E5 v3 / v4 has 4 channels, ASSUMED unless given).
+# DIMMs capped at 4 - a Xeon E5 v3 / v4 has 4 channels, ASSUMED unless given).
 #
 # Prints `link <dev> bdf=.. role=root|bridge|endpoint cap=Gen<g> x<w> sta=Gen<g> x<w> state=idle|load`, one line
 # `links: dev0 Gen<g> x<w>, dev1 Gen<g> x<w>` (per state) and `STOP: <card> trains below Gen3 x8` when one does

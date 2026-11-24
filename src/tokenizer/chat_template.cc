@@ -132,45 +132,28 @@ Template::Template(const std::string& dir, const std::string& template_file) : i
   // export of it) uses. transformers reads the .jinja first when both exist; so does this.
   // Spec 23e: an explicit file (b70-serve --chat-template) replaces both.
   const std::string jinja_path = dir + "/chat_template.jinja";
-  std::string template_source;
+  std::string template_source, origin;
   if (!template_file.empty()) {
     template_source = slurp(template_file);
+    origin = template_file;
   } else if (std::ifstream(jinja_path).good()) {
     template_source = slurp(jinja_path);
+    origin = jinja_path;
   } else if (config.contains("chat_template") && config.at("chat_template").is_string()) {
     template_source = config.at("chat_template").get<std::string>();
+    origin = dir + "/tokenizer_config.json";
   } else {
     throw std::runtime_error("chat::Template: " + dir + " has no chat_template.jinja and its "
                              "tokenizer_config.json no \"chat_template\" string");
   }
-  // This checkpoint's template uses Jinja's unsupported `is undefined` test.
-  // The source SHA keeps the equivalent minja fallback model-specific.
-  static constexpr const char* kFallbackTemplateSha256 =
-      "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041";
-  // Spec 15e: Ornith 1.5's chat_template.jinja (ornith-ai/Ornith-1.5-35B-A3B, Qwen3.5's
-  // template: no reasoning-effort block, every assistant turn keeps its <think> block) has
-  // one `is undefined` test, in render_content's null branch. minja knows `defined` but not
-  // `undefined`, so that test is spelled `is not defined` - the same predicate (since the b70
-  // minja patch keeps Undefined apart from None, exactly Jinja's) - for this source
-  // only, keyed like the fallback above.
-  static constexpr const char* kOrnithTemplateSha256 =
-      "182e77dd83bd8e9ca818b240b82e28f243762cd5dda32e6eef327df7b1cd107e";
-  // Plan 21-QFN-v2a Task 10: Qwen3.8-Flash-Next's newer template (Qwen/Qwen3.8-Flash-Next revision 812d96e1, which our
-  // export copies): Qwen3.8's (the fallback's source) plus {% generation %} blocks, with the same three
-  // `is undefined` tests; spelled `is not defined` the same way.
-  static constexpr const char* kFlashNextTemplateSha256 =
-      "af16f654968d47d09a6c604e00370b12dbc21f76456f59c9e98b82e84d9f6375";
-  const std::string sha = sha256_impl(template_source);
-  impl_->sha = sha;
-  std::string source = sha == kFallbackTemplateSha256 ? slurp(B70_CHAT_TEMPLATE_FALLBACK_PATH)
-                                                      : template_source;
-  if (sha == kOrnithTemplateSha256 || sha == kFlashNextTemplateSha256) {
-    static constexpr const char* kFrom = " is undefined";
-    static constexpr const char* kTo = " is not defined";
-    for (size_t at = source.find(kFrom); at != std::string::npos; at = source.find(kFrom, at))
-      source.replace(at, std::string(kFrom).size(), kTo);
+  impl_->sha = sha256_impl(template_source);
+  // A template the renderer cannot evaluate fails here, at load, naming the file - not at the first request.
+  try {
+    impl_->tmpl = std::make_unique<minja::chat_template>(template_source, impl_->bos, impl_->eos);
+    (void)render(nlohmann::ordered_json::array({{{"role", "user"}, {"content", "hello"}}}), nullptr, true);
+  } catch (const std::exception& error) {
+    throw std::runtime_error("the chat template " + origin + " cannot be rendered: " + error.what());
   }
-  impl_->tmpl = std::make_unique<minja::chat_template>(source, impl_->bos, impl_->eos);
 }
 
 Template::~Template() = default;

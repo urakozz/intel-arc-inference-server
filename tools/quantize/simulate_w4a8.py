@@ -16,7 +16,7 @@ sum(q_w * q_x) exactly in int32 and rescales once per 64-element group, which is
 mathematically what `(xq*xscale) @ W` does here up to fp32 accumulation order.
 The activation rounding is the modelled error; accumulation order is not.
 
-Usage (on the box, in a venv with torch+transformers and an XPU build):
+Usage (on the GPU machine, in a venv with torch+transformers and an XPU build):
 
   python3 tools/quantize/simulate_w4a8.py \
       --model ~/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/<sha> \

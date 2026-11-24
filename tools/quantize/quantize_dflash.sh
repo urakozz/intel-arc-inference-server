@@ -2,9 +2,9 @@
 # One command: z-lab/Qwen3.8-27B-DFlash2 (bf16) -> our AutoRound W4A16 g64 symmetric drafter, tuned on the
 # QUANTISED target's taps over the training opencode recordings (the open-work list, "DFlash drafter quant").
 #
-#   tools/quantize/quantize_dflash.sh start              start (or resume) the run, detached; on the box
+#   tools/quantize/quantize_dflash.sh start              start (or resume) the run, detached; on the GPU machine
 #   tools/quantize/quantize_dflash.sh status             stages done, taps dumped, AutoRound's block, the result
-#   tools/quantize/quantize_dflash.sh stop               stop the run (tools/box_stop.sh dflash-quant); start resumes
+#   tools/quantize/quantize_dflash.sh stop               stop the run; start resumes
 #   tools/quantize/quantize_dflash.sh selftest           quant/export/check on a tiny random drafter (~2 min)
 #   tools/quantize/quantize_dflash.sh run [--only S | --from S]   the stages in the foreground (what start runs)
 #
@@ -12,7 +12,7 @@
 #   sources  tools/quantize/dflash/sources.py: the requests of RECORDINGS (default opencode-session-int8 and
 #            opencode-session; opencode-session-2 is held out and refused, A4 / golden never enter) with >= 8
 #            continuation ids, cut at 256 ids and the first EOS, minus those already dumped
-#   taps     tools/probe/probe_dflash_iter --engine-taps on card CARD (tools/gpu_lock.sh card): the quantised
+#   taps     tools/probe/probe_dflash_iter --engine-taps on card CARD (under the card's lock): the quantised
 #            target TARGET teacher-forced over each request, its taps at the drafter's layers 5/19/33/47/61
 #            over the last 2048 prompt positions and the continuation, one dump per request in $WORK/taps
 #            (~8 GB); resumable per request (a rerun dumps only what is missing). The tree is built if the
@@ -21,8 +21,8 @@
 #            forward (tools/quantize/dflash/model.py = tools/oracle/dflash_ref.py's, batched): W4A16, group 64,
 #            symmetric, auto_round:auto_gptq, ITERS (200) sign-SGD iterations, NSAMPLES (128) samples of
 #            ANCHORS (32) blocks of 8 at the recordings' continuation positions, BATCH (8), seed 42, no
-#            quant_lm_head; on card CARD, or the box CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Restarts from
-#            the beginning after a stop (the raw export moved to ~/b70/trash/<date>).
+#            quant_lm_head; on card CARD, or the CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Restarts from
+#            the beginning after a stop (the raw export moved to $B70_DATA/trash/<date>).
 #   export   tools/quantize/dflash/finalize.py: checkpoint names, unpacked tensors bitwise the source's, the
 #            source's config.json + quantization_config, dflash_recipe.json, README.md with the provenance
 #   check    tools/quantize/check_gptq_export.py --dflash --source: packed = every drafter linear (fc and the
@@ -43,10 +43,10 @@
 #
 # Overridables (environment): DRAFTER (z-lab/Qwen3.8-27B-DFlash2 or a snapshot dir), TARGET
 # (urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ or a dir), RECORDINGS (space-separated dirs), QUANT_ROOT
-# ($HOME/b70/hdd/quant), OUT (default: the run `dflash-current` points at, else a new dated one), TAPS ($WORK/taps;
+# ($B70_DATA/hdd/quant), OUT (default: the run `dflash-current` points at, else a new dated one), TAPS ($WORK/taps;
 # another run's taps dir to reuse it), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, ANCHORS, BATCH,
 # CONTEXT (2304 context rows), RAM_CAP_GB (64), RAM_MIN_GB (40), DISK_MIN_GB (20), PROBE, VENVPY, SITE, AR_REPO, AR_REF,
-# LOGDIR ($HOME/b70/logs/dflash-quant).
+# LOGDIR ($B70_DATA/logs/dflash-quant).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
@@ -55,9 +55,9 @@ Q="$HERE/quantize/dflash"
 SELF="$HERE/quantize/quantize_dflash.sh"
 DRAFTER="${DRAFTER:-z-lab/Qwen3.8-27B-DFlash2}"
 TARGET="${TARGET:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
-RECORDINGS="${RECORDINGS:-$HOME/b70/logs/opencode-session-int8 $HOME/b70/logs/opencode-session}"
-QUANT_ROOT="${QUANT_ROOT:-$HOME/b70/hdd/quant}"
-LOGDIR="${LOGDIR:-$HOME/b70/logs/dflash-quant}"
+RECORDINGS="${RECORDINGS:-${B70_DATA:?set B70_DATA, the data root}/logs/opencode-session-int8 ${B70_DATA:?set B70_DATA, the data root}/logs/opencode-session}"
+QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/hdd/quant}"
+LOGDIR="${LOGDIR:-${B70_DATA:?set B70_DATA, the data root}/logs/dflash-quant}"
 DEVICE="${DEVICE:-xpu}"
 CARD="${CARD:-1}"
 ITERS="${ITERS:-200}"
@@ -101,18 +101,25 @@ env_py() {     # the latest AutoRound beside VENVPY, transformers 5.19.0 in SITE
 mem_avail_gb() { awk '/MemAvailable/ {printf "%d", $2 / 1048576}' /proc/meminfo; }
 disk_free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
 
+# card_run <cmd...>: on card CARD - through a machine-wide GPU lock wrapper at tools/gpu_lock.sh where the machine
+# has one, else by device affinity alone
+card_run() {
+  if [ -x "$HERE/gpu_lock.sh" ]; then "$HERE/gpu_lock.sh" card "$CARD" -- "$@"
+  else ZE_AFFINITY_MASK="$CARD" "$@"; fi
+}
+
 # locked <cmd...>: the device's lock, then a memory-capped scope
 locked() {
   local cap=(systemd-run --user --scope -q -p "MemoryMax=${RAM_CAP_GB}G" -p MemorySwapMax=0)
   if [ "$DEVICE" = xpu ]; then
-    "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+    card_run "${cap[@]}" "$@"
   else
     flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
   fi
 }
 
-to_trash() {   # move a leftover aside (nothing is deleted on the box)
-  local t; t="$HOME/b70/trash/$(date +%F)"; mkdir -p "$t"
+to_trash() {   # move a leftover aside to $B70_DATA/trash (nothing is deleted)
+  local t; t="${B70_DATA:?set B70_DATA, the data root}/trash/$(date +%F)"; mkdir -p "$t"
   mv "$1" "$t/$(basename "$1")-$(date +%H%M%S)"
 }
 
@@ -131,7 +138,7 @@ stage_taps() {
       cmake --build "$REPO/build" -j44 > "$WORK/probe-build.log" 2>&1 ||
         die "building $REPO/build failed: $WORK/probe-build.log"
     fi
-    (cd "$REPO" && "$HERE/gpu_lock.sh" card "$CARD" -- "$PROBE" "$TSNAP" "$DSNAP" --format int8 \
+    (cd "$REPO" && card_run "$PROBE" "$TSNAP" "$DSNAP" --format int8 \
       --engine-taps "$WORK/sources.json" "$TAPS" --anchors 1)
   fi
   stage_sources
@@ -249,6 +256,7 @@ case "${1:-}" in
       tr '\r' '\n' < "$WORK/run.log" | grep -v -E "^(Quantizing|packing|Writing)" | grep -v '^\s*$' | tail -5
     fi ;;
   stop)
+    [ -x "$HERE/box_stop.sh" ] || die "no stop helper on this machine: stop the run's AutoRound process yourself (pgrep -af autoround_run.py)"
     exec "$HERE/box_stop.sh" dflash-quant ;;
   selftest)
     W="$QUANT_ROOT/selftest-dflash-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$W"

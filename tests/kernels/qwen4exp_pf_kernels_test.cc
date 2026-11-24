@@ -1,7 +1,7 @@
 // Spec 21-QFN-v1d (F2 for the prefill): Qwen3.8-Flash-Next's prefill kernels on the card, at the real shapes, against
 // tests/kernels/qwen4exp_pf_ref.h / qwen4exp_ref.h and against the dense prefill GEMMs the grouped ones are built
 // from. Needs a B70, no checkpoint (synthetic weights). Every binary is one runtime/qwen4exp/qwen4exp_prefill.cc
-// binds (kernels::qwen4exp names), plus pf_gemm_T0_SILU for the dense comparison. Written blind on the Mac (box
+// binds (kernels::qwen4exp names), plus pf_gemm_T0_SILU for the dense comparison. Written blind on the Mac (validation
 // queue row 33).
 //
 //   1. the slabs: pf_dequant_slab at qkv||z 2560 x 16384 (whole slabs), pf_int4_slab at out / o 6144 x 2560

@@ -3,7 +3,7 @@
 // each golden prompt x 32 greedy tokens - with the per-layer ROUTING diagnostic, the selection gate S per QSA layer
 // and the PLE ids. kolibri_golden_test's copy (tests/golden/kolibri_golden_test.cc), this family's semantics.
 //
-// **The golden files** (qwen4exp_ref.py `run`; tools/box_validate/qwen4exp_oracle.sh synth | intel | intel-layers N):
+// **The golden files** (qwen4exp_ref.py `run`; tools/oracle/qwen4exp_ref.py synth | intel | intel-layers N):
 //   <oracle dir>/<prompt>.ids, <prompt>.golden.safetensors
 //     logits         F32  [Lr][248320]     rows T + gen - Lr .. T + gen - 1 (the tail; row t's forward consumed id t)
 //     tokens         I32  [gen]            the greedy continuation (gen = 32)
@@ -397,7 +397,7 @@ int main(int argc, char** argv) {
   for (const char* p : kPrompts)
     if (golden::exists(gdir + "/" + p + ".golden.safetensors") && golden::exists(gdir + "/" + p + ".ids")) prompts.push_back(p);
   if (prompts.empty() || prompts[0] != "q4exp_short") {
-    std::printf("SKIP: %s/q4exp_short.{ids,golden.safetensors} is absent (tools/box_validate/qwen4exp_oracle.sh synth)\n",
+    std::printf("SKIP: %s/q4exp_short.{ids,golden.safetensors} is absent (tools/oracle/qwen4exp_ref.py synth)\n",
                 gdir.c_str());
     return 77;
   }

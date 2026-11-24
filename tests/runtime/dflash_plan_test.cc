@@ -267,7 +267,7 @@ int main(int argc, char** argv) {
   }
   // 5. spec 31: the page pool with the drafter
   {
-    const size_t w = size_t{16812371968};   // Qwen3.8 int8 weights, int8 lm_head (slot_plan_test's kQwenInt8Weights)
+    const size_t w = size_t{16812371968};   // Qwen3.8 int8 weights, int8 lm_head (pool_plan_test's kQwenInt8Weights)
     const size_t device = 32530000000ull, reserve = size_t(runtime::kDefaultReserveGb * 1e9);
     const runtime::DrafterPlan dp = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int8);
     std::printf("drafter session: %zu B + %zu B a position\n", dp.session_fixed, dp.session_per_position);

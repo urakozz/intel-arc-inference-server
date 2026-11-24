@@ -1,8 +1,8 @@
 #!/bin/bash
 # ctest's launcher for every test (CMAKE_TEST_LAUNCHER, set in the top CMakeLists.txt): runs the
-# test as it is. With B70_TRACE_DIR set (tools/box_validate and tools/box_check.sh set it), it runs
+# test as it is. With B70_TRACE_DIR set (a validation run sets it), it runs
 # the test under strace and keeps the list of files the test - and every process it starts - looked
-# at, plus the environment it saw: tools/box_validate/reuse.py turns that into the test's inputs, so
+# at, plus the environment it saw: the validation run turns that into the test's inputs, so
 # a later run whose inputs are byte-identical takes the old PASS instead of running the test again.
 # strace stops only the traced file and exec calls (seccomp-bpf); the GPU work is untouched.
 if [ -z "${B70_TRACE_DIR:-}" ] || ! command -v strace > /dev/null; then exec "$@"; fi

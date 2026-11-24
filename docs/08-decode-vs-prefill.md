@@ -85,7 +85,7 @@ it, because otherwise speculation costs a full weight read for every row it chec
 The engine has that kernel. Speculative decoding (the model's MTP head, a DFlash draft model, prompt lookup) makes
 `M` 2..8 on every verify step, and those steps run a small-batch DPAS GEMM, `gemm_sm`
 ([12-kernels.md](12-kernels.md)), that reads each weight tile once for all `M` rows. Verifying 8 rows went from the
-cost of 3.17 plain decode steps to 1.57 (measured on a busy box).
+cost of 3.17 plain decode steps to 1.57 (measured on a busy machine).
 `M = 1` keeps the GEMV, bit for bit.
 
 ## Design rules that follow
@@ -176,7 +176,7 @@ across repetitions of one call, which fails the determinism gate outright. A new
 byte-identical over eight repetitions and four fixtures. It is a numerical and performance reference, not a drop-in;
 no model-level gate for vendor arithmetic was ever run.
 
-**The matched comparison.** Same box, same checkpoint, 4096 ids, chunk 2048, three warm requests: this
+**The matched comparison.** Same machine, same checkpoint, 4096 ids, chunk 2048, three warm requests: this
 engine took 2748.2 ms (1490 t/s), of which the recorded Level Zero chunks were 2734.4 ms; vLLM took 2544.0 ms
 (1610.04 t/s), with the same first token on every path. The warm gap was 204 ms, not the roughly 657 ms that an older,
 uncontrolled 1973 t/s vLLM figure implied (its vLLM and oneDNN revisions were never recorded, so that figure explains

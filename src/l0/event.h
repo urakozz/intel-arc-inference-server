@@ -6,7 +6,7 @@ namespace l0 {
 // Device timer calibration, queried once per context.
 // Uses ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES_1_2 explicitly so timerResolution
 // is pinned to cycles-per-second semantics. That is not a formality: on this
-// box the default stype reports 52 (NANOSECONDS per tick) where 1_2 reports
+// machine the default stype reports 52 (NANOSECONDS per tick) where 1_2 reports
 // 19200000 (cycles/sec) - reading the first as the second scales every
 // duration by 369231x. kernelTimestampValidBits masks the counter before any
 // subtraction; this driver reports 64 bits, so nothing wraps in practice, but

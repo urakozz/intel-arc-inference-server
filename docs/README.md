@@ -47,7 +47,6 @@ decided each design.
 |---|---|
 | [17-running-models.md](17-running-models.md) | the commands to download, serve and benchmark each model, per number of cards, and what each model supports |
 | [environment-variables.md](environment-variables.md) | what the programs, tests and scripts read from the environment (none of it needed to run the engine) |
-| [10-the-box.md](10-the-box.md) | the build and test machine: remote builds, the GPU lock, validation runs, why an idle box matters for a benchmark |
 
 ## Background
 

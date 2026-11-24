@@ -2,7 +2,7 @@
 // Fix round A (2026-11-01): the size limit on one host <-> device copy.
 //
 // NEO 26.35 copies a plain (non-USM) host source of 512 MB or more by mapping it
-// directly - no staging. On the box's fault-mode VM the kernel's userptr re-pin of
+// directly - no staging. On the test machine's fault-mode VM the kernel's userptr re-pin of
 // such a range can hit the 1 s HMM page-in timeout (-EBUSY) under host memory
 // pressure, which the GPU sees as a CAT error and an engine reset (card-1
 // load_checkpoint_test DEVICE_LOST, 2026-10-31). Every copy larger than

@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
   const std::string root = argc > 1 ? argv[1] : "oracle-out-q4exp-synth";
   if (!fs::exists(fs::path(root) / "ours" / "ckpt" / "config.json") ||
       !fs::exists(fs::path(root) / "intel" / "ckpt" / "config.json")) {
-    std::printf("SKIP: no synthetic checkpoints under %s (make_synth.py; box: r31.synth)\n", root.c_str());
+    std::printf("SKIP: no synthetic checkpoints under %s (make_synth.py; validation: r31.synth)\n", root.c_str());
     return 77;
   }
   for (const char* form : {"ours", "intel"}) {

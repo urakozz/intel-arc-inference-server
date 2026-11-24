@@ -9,8 +9,8 @@ get_filename_component(B70_KERNEL_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/kern
 # kernel depends on it, so a driver / IGC upgrade recompiles them all.
 set(B70_OCLOC_STAMP "${B70_KERNEL_DIR}/.ocloc-toolchain")
 execute_process(COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_LIST_DIR}/ocloc_stamp.cmake" "${B70_OCLOC_STAMP}" "${OCLOC_EXECUTABLE}")
-# Every kernel compiles through tools/ocloc_cache.py, a content-addressed cache every tree on the box shares
-# (~/b70/cache/ocloc; B70_OCLOC_CACHE=0 in the build's environment bypasses it). It runs in the tree's root with
+# Every kernel compiles through tools/ocloc_cache.py, a content-addressed cache every source tree on the machine shares
+# ($B70_DATA/cache/ocloc, else ~/.cache/b70-ocloc; B70_OCLOC_CACHE=0 in the build's environment bypasses it). It runs in the tree's root with
 # tree-relative paths: the build options are kept inside each zebin, so an absolute -I would make two trees' binaries
 # differ and their cache keys too. Without python3 ocloc runs directly.
 get_filename_component(B70_TREE_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)

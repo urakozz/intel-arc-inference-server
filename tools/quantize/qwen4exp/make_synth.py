@@ -5,7 +5,7 @@
     make_synth.py <out-dir> --form ours|intel --tokenizer <dir> [--config <config.json>] [--layers 4]
                   [--ple-base 1000] [--mtp] [--seed 0]
 
-Spec 21-QFN-v1b's loader, planner and (21-QFN-v1c) engine are built before any real checkpoint is on the box, and
+Spec 21-QFN-v1b's loader, planner and (21-QFN-v1c) engine are built before any real checkpoint is on the GPU machine, and
 21-QFN-v1c's golden gates need a checkpoint the engine and the reference both read. This writes one: every
 tensor named, typed and shaped as the export of `form` names it (`tools/oracle/qwen4exp_ref.py`
 `expected_names`), random weights, and only the first N layers:

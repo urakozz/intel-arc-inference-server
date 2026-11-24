@@ -17,7 +17,7 @@ blocks would turn low CPU memory and the per-block resume off - see the Flash-Ne
 Ripple-specific:
 - Remote code: AutoRound loads `RicursiveForCausalLM` through the snapshot's `auto_map` (trust_remote_code=True)
   and copies modeling_ricursive.py / configuration_ricursive.py into the export.
-- Low CPU memory: 130 GB of bf16 does not fit the box's 121 GB, and AutoRound only builds its meta skeleton by
+- Low CPU memory: 130 GB of bf16 does not fit the test machine's 121 GB, and AutoRound only builds its meta skeleton by
   itself for fused-MoE checkpoints - a dense model would be loaded whole. AR_DISK_STREAM_MODEL=1 (set here) forces
   the skeleton for any model: embedding, final norm and head are materialised (~2 GB), each block is read from the
   checkpoint when its turn comes, tuned, written to the export and freed. Checked after load: the run refuses if

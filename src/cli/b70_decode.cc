@@ -272,7 +272,7 @@ void print_rollup(const char* title, const char* what, std::vector<Agg> rows, ui
 // --- --repeats: repeated-run averaging (the memo's §5.4) ---------------------
 //
 // The problem it exists for, measured: the profiler reproduces to 0.006% over
-// two runs three minutes apart, but across a day of work on the box the
+// two runs three minutes apart, but across a day of work on the GPU machine the
 // *untouched* launches of the step drifted +0.30% / +0.50% / +0.56% across
 // spec 1.5's three levers - 0.12 to 0.18 ms per comparison. Two levers in a row
 // then missed their in-situ→bench prediction in OPPOSITE directions (L1 by
@@ -298,7 +298,7 @@ void print_rollup(const char* title, const char* what, std::vector<Agg> rows, ui
 struct Stat {
   double mean = 0.0, sd = 0.0, lo = 0.0, hi = 0.0;
   // The sample (n−1) standard deviation: the sessions are a sample of the
-  // sessions this box could have run, not the population. 0 by definition at
+  // sessions this machine could have run, not the population. 0 by definition at
   // one session, which is why `--repeats 1` prints no spread at all.
   static Stat of(const std::vector<double>& v) {
     Stat s;
@@ -612,7 +612,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
 // fed by its own acceptance, as one request is), the verify list at M = K + 1, the longest
 // prefix of drafts the main model's argmax agrees with, then commit. The pending id and the
 // accepted drafts are this iteration's ids, printed one per line as the plain loop does;
-// greedy acceptance keeps them equal to the plain run's ids, which is what the box's
+// greedy acceptance keeps them equal to the plain run's ids, which is what the test machine's
 // long-context checks diff (queue row 6). The last positions of max_len fall back to K = 0
 // (max_verify_k), and ids past --n are not printed.
 //
@@ -1227,7 +1227,7 @@ int run(int argc, char** argv) {
     return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/mtp_on, lm_head);
   }();
   cli::dflash::main_candidate_head(ctx, model, mtp_on);   // PERF-123: before the plan
-  // Spec 19c: the drafter beside the target, before the plan. Its load line goes to stderr like the target's (box
+  // Spec 19c: the drafter beside the target, before the plan. Its load line goes to stderr like the target's (validation
   // row 55, 2026-10-27: on stdout it put a line ahead of the ids and r55.decode's cmp against the plain run failed).
   std::unique_ptr<cli::dflash::Loaded> drafter_load;
   if (dflash.on) {
@@ -1333,7 +1333,7 @@ int run(int argc, char** argv) {
 
   // --bench. One shape, one row, and the decomposition that makes the row
   // actionable. Nothing here is tuned or retried: the number printed is the
-  // number the run produced. tools/bench_decode.sh is what runs it three times
+  // number the run produced. The benchmark harness runs it three times
   // and takes the median; the recorded step time is that median.
   eng.generate(tg);
   report_generate(eng, tg);
@@ -1367,8 +1367,8 @@ int run(int argc, char** argv) {
              100.0 * dispatch_ms / (eng.last_fence_ms() / double(tg)));
 
   // The row's identity comes from the environment, not from a configure-time
-  // git call: tools/box.sh syncs the tree WITHOUT .git, so the box cannot know
-  // its own sha. Whoever runs the bench exports it (tools/bench_decode.sh
+  // git call: a tree copied to the GPU machine WITHOUT .git cannot know
+  // its own sha. Whoever runs the bench exports it (the benchmark harness
   // does), and an unset variable prints as `unknown` rather than as a wrong
   // sha in a recorded measurement.
   const char* sha = std::getenv("B70_GIT_SHA");
@@ -1382,15 +1382,15 @@ int run(int argc, char** argv) {
   // The tg row above is byte-identical to what it always was, and the pp row
   // is a SECOND line rather than extra columns on it, so every existing parser
   // of the benchmark record's table keeps working (interfaces.md's CLI contract;
-  // tools/bench_decode.sh --prefill-length reads both).
+  // the benchmark harness reads both with --prefill-length).
   if (have_prefill_len)
     std::print("| b70-decode {}{} {} pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, head_tag.c_str(),
                runtime::prefill_backend_name(eng.prefill_backend()), depth,
                pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), ingest_ms,
                ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::print(stderr,
-             "(measured, one run. The recorded figure is the median of three on an idle box;\n"
-             " tools/bench_decode.sh is that harness. B70_GIT_SHA unset prints `unknown`.)\n");
+             "(measured, one run. The recorded figure is the median of three on an idle machine;\n"
+             " B70_GIT_SHA names the commit; unset it prints `unknown`.)\n");
   return 0;
 }
 }  // namespace

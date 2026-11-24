@@ -203,7 +203,7 @@ int main() {
   // assert_quant_invariants over a synthetic two-tensor set: the good pair
   // passes; a single corrupted qzeros word and a single non-identity g_idx
   // entry each throw, naming the tensor and the element index.
-  // per process: two box validation streams (one per card) may run this test at once
+  // per process: two validation streams (one per card) may run this test at once
   const std::string dir = "/tmp/b70_quant_test." + std::to_string(getpid());
   CHECK(system(("mkdir -p " + dir).c_str()) == 0);
   const std::string hdr =

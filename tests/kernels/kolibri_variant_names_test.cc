@@ -2,7 +2,7 @@
 // runtime/kolibri/kolibri_capture.cc forms) for every attention arm, head form and attention form,
 // against the ones src/kernels/CMakeLists.txt's Kolibri block builds (passed as arguments:
 // tests/CMakeLists.txt's B70_KOLIBRI_DECODE_KERNELS, `kernel_<name>`). Host only: a name the capture
-// would ask for that no CMake line builds fails here on the Mac, not at capture on the box; and
+// would ask for that no CMake line builds fails here on the Mac, not at capture on the GPU machine; and
 // nothing built is dead.
 #include <cstdio>
 #include <set>

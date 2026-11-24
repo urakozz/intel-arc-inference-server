@@ -21,7 +21,7 @@
 #     vLLM cannot load a quantized lm_head (measured, docs/14); set
 #     LM_HEAD=keep for a vLLM-loadable variant.
 #
-# Usage (on the box):  bash tools/quantize_qwen38_mxfp4.sh
+# Usage (on the GPU machine):  bash tools/quantize_qwen38_mxfp4.sh
 #   overridables: MODEL, OUT, DEVICE (cpu | xpu:1), WORKERS, LM_HEAD (quant|keep)
 set -euo pipefail
 

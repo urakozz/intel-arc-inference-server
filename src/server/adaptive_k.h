@@ -12,11 +12,11 @@ namespace server {
 
 // Step costs in units of one plain decode step: verify[m - 1] for a verify of M = m rows
 // (verify[0] = the plain step), draft[k - 1] for k drafts. Data, not code: defaults per
-// head form, overridable with `the cost table` so the box can calibrate.
+// head form, overridable with `the cost table` so the test machine can calibrate.
 struct MtpCost {
   static constexpr uint32_t kMaxRows = 8;   // a verify step's rows at most: runtime::DecodeScratchDims::kM
   // Spec 28b: the verify rows on gemm_sm (the small-M GEMM) - measured 2026-11-01 by probe_mtp_steps at depth 4096,
-  // bf16 head (busy-box timing on one card, to be re-checked on a quiet box; before 28b: 1.17 / 1.52 / 1.74).
+  // bf16 head (busy-machine timing on one card, to be re-checked on a quiet machine; before 28b: 1.17 / 1.52 / 1.74).
   std::inplace_vector<double, kMaxRows> verify{1.00, 1.04, 1.09, 1.13};
   std::inplace_vector<double, kMaxRows - 1> draft{0.19, 0.37, 0.55};
 
@@ -42,7 +42,7 @@ struct MtpCost {
   //   int8: 1.27 GB -> ~2.2 ms of the 32.65 ms int8 plain step = 0.067 of draft[0] 0.13
   //   bf16: 2.54 GB -> ~4.4 ms of the ~34 ms bf16 plain step   = 0.129 of draft[0] 0.19
   // The rest of a draft (the MTP head's own layer, its norms, the argmax) does not move.
-  // `probe_mtp_steps ... <form> <size>` on the box replaces the result (via the cost table).
+  // `probe_mtp_steps ... <form> <size>` on the GPU machine replaces the result (via the cost table).
   static constexpr double kInt8DraftHeadShare = 0.067 / 0.13;
   static constexpr double kBf16DraftHeadShare = 0.129 / 0.19;
   // This table with every draft[k - 1] scaled to draft[k - 1] * ((1 - head_share) +
@@ -56,20 +56,20 @@ struct MtpCost {
   MtpCost with_free_drafts() const;
 
   // Spec 19v2: one block drafts all K rows. The int8 H1/B4 full/candidate totals and per-mode verify rows are
-  // measured paired medians at depth4096 (2026-11-12, busy box); the benchmark record. The full-head decomposition
+  // measured paired medians at depth4096 (2026-11-12, busy machine); the benchmark record. The full-head decomposition
   // uses that profile's head GEMM, and BF16 doubles its head/body GEMM shares, retaining non-linear/host cost.
   // drafter_format: 0 bf16, 1 int8, 2 int4 g64; candidate_head is C3's top64/exact-rerank path.
   static MtpCost dflash(bool i8_head, unsigned drafter_format, bool candidate_head = false);
   static constexpr double kDFlashHeadInt8 = 2.166354 / 29.222498, kDFlashHeadBf16 = 2 * kDFlashHeadInt8;
   static constexpr double kDFlashDrafterInt8 = 0.298136 - kDFlashHeadInt8;
   static constexpr double kDFlashDrafterBf16 = kDFlashDrafterInt8 + 3.185105 / 29.222498;
-  // Spec 19 v3d (2026-11-14, card 0, busy box): the DPAS attention at KS 4, the radix candidate selection and the
+  // Spec 19 v3d (2026-11-14, card 0, busy machine): the DPAS attention at KS 4, the radix candidate selection and the
   // 2-bit head with 80 candidates - the draft pass 0.217462 of a plain step at depth 4096 (was 0.287036).
   static constexpr double kDFlashDraftCandidateInt8 = 0.217462;
   // The full-head int4 row: the experimental PRE-H1/B4 RTN estimate (the draft-vocabulary path only).
   static constexpr double kDFlashDrafterInt4 = 0.269526 - kDFlashHeadInt8;
   // The packed AutoRound drafter (urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound, the default; 2026-11-14, card 0,
-  // busy box): the draft pass 0.151481 of a plain step at depth 4096 (4.41 ms; int8 0.210086 in the same run).
+  // busy machine): the draft pass 0.151481 of a plain step at depth 4096 (4.41 ms; int8 0.210086 in the same run).
   static constexpr double kDFlashDraftCandidateInt4 = 0.151481;
   // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
   static double dflash_head_share(bool i8_head, unsigned drafter_format);
@@ -89,11 +89,11 @@ struct MtpCost {
 
 // Plan 40a Task 5: one step of several sequences' rows (runtime::Engine::verify_rows and its drafts) in plain steps,
 // for the scheduler's deal (BatchEngineIface::row_cost). The verify by its rows: the 2..8-row lists, the 16- and 32-row
-// ones (padded) - measured 2026-11-22 at depth 4096, four sequences, int8 KV and head (probe_slots_speed --wide, A B A B:
+// ones (padded) - measured 2026-11-22 at depth 4096, four sequences, int8 KV and head (probe_pool_speed --wide, A B A B:
 // 1.44 / 1.74 / 2.13 at 8 / 16 / 32 rows; at 2..7 rows the line to the plain step's 1.00). The drafts: the MTP head one
 // step a draft index over the rows drafting that far (`mtp_draft`, the int8 head's draft[0]); the DFlash drafter one
 // batched pass of its 8 rows or its four blocks (`dflash8`, `dflash32`: the packed int4 drafter, 4.55 / 7.20 ms against
-// the lone K 7 draft's 4.49 ms = 0.217 plain - dflash_slots_test T, card 0, the other card busy, 2026-11-22).
+// the lone K 7 draft's 4.49 ms = 0.217 plain - dflash_pool_test T, card 0, the other card busy, 2026-11-22).
 // PERF-120: `v8` / `v16` / `v32` the verify at 8 / 16 / 32 rows (Qwen3.8's above); ornith() Ornith's table.
 struct RowCost {
   bool dflash = false;
@@ -102,7 +102,7 @@ struct RowCost {
   double verify(uint32_t rows) const;
   double step(const std::vector<uint32_t>& ks) const;   // one entry a row: its drafts
   // Ornith (MTP, its MoE head): measured 2026-11-23 at depth 4096, four sequences, int8 KV and head, card 0 beside the
-  // other card's quantisation (probe_slots_speed --wide, the union-read MoE): 2.28 / 3.03 / 4.49 plain steps at 8 / 16
+  // other card's quantisation (probe_pool_speed --wide, the union-read MoE): 2.28 / 3.03 / 4.49 plain steps at 8 / 16
   // / 32 rows; the head's draft over four rows 1.81 ms against the 7.85 ms plain step.
   static RowCost ornith() { return {.mtp_draft = 0.23, .v8 = 2.28, .v16 = 3.03, .v32 = 4.49}; }
 };

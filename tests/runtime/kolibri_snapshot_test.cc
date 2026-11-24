@@ -24,7 +24,7 @@
 //   4. 16b's rule: a state and KV saved under --pp 2 (split 3) restore under --pp 1 and continue as the
 //      two-card session does, and the reverse;
 //   5. the server (HTTP, Kolibri's chat format): a greedy chat's ids equal the decode run on the response's
-//      prompt_token_ids (b70-decode --prefill's flow) - the box stage r28.serve does the same on the card;
+//      prompt_token_ids (b70-decode --prefill's flow) - the validation stage r28.serve does the same on the card;
 //      the same request again restores from the cache (PERF-92: the whole prompt, nothing prefilled); a seeded
 //      sampled request is reproducible, draws its FIRST id from the prefill's row too (from the cache: the
 //      restored row, no device read), and only words the row allows; a greedy argmax on a head row

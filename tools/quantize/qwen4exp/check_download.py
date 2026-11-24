@@ -6,7 +6,7 @@
 
 Compares the HF cache's snapshot of `--repo` (refs/main, as `hf download` leaves it) with the hub's own file
 list at that revision: every file present, every size equal; with --sha also every LFS file's sha256 (the
-hub's) - ~360 GB read, ~15-30 min on the box. Needs the hub (the file list and sizes); nothing is
+hub's) - ~360 GB read, ~15-30 min on the test machine. Needs the hub (the file list and sizes); nothing is
 downloaded. Prints `DOWNLOAD OK ...` (exit 0) or `DOWNLOAD NOT COMPLETE ...` with what is missing or wrong
 (exit 1).
 """

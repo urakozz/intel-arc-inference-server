@@ -692,7 +692,7 @@ bool grf_ok(const std::string& name, bool want256) {
 uint32_t launches_for(const Shape& s, uint32_t base) { return s.kind == 2 ? std::max(4u, base / 5) : base; }
 
 void box_line() {
-  std::printf("box load at start: ");
+  std::printf("machine load at start: ");
   std::fflush(stdout);
   if (std::system("uptime") != 0) std::puts("(uptime unavailable)");
 }

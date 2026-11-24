@@ -11,7 +11,7 @@
 //                    folded rule): the ids identical, or the first divergence a near-tie (<= 1 bf16 ulp) of the
 //                    reference row. The first id after a prefill has no recorded row, so a divergence there fails.
 //                    A divergence that is not a near-tie goes to the f32 judge of its context (forced_judge.h:
-//                    B70_DUMP_FORCED dumps it, tools/box_validate/f32_refs.sh forced-qwen makes the judge,
+//                    B70_DUMP_FORCED dumps it, tools/oracle/qwen_forced.py forced-qwen makes the judge,
 //                    B70_FORCED_JUDGE reads it): TP's id there must be one the judge accepts; without the judge the
 //                    test ends SKIP (77) "awaiting", never PASS.
 //                    The K split of the row-parallel linears is another summation order than one card's: logits,
@@ -282,7 +282,7 @@ int main(int argc, char** argv) {
       fj.dump(k, prompt, g.ids);
       const std::unique_ptr<golden::Golden> judge = fj.open(k, kGen, model::Qwen35::kVocab);
       if (!judge) {
-        std::printf("  AWAITING the f32 judge of %s (B70_DUMP_FORCED, then tools/box_validate/f32_refs.sh forced-qwen "
+        std::printf("  AWAITING the f32 judge of %s (B70_DUMP_FORCED, then tools/oracle/qwen_forced.py forced-qwen "
                     "with QWEN_KEYS_RE='^tp_prefill_'; B70_FORCED_JUDGE=<the int8-head judges' dir>)\n", k.c_str());
         awaiting = true;
       } else {

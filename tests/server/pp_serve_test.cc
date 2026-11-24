@@ -816,7 +816,7 @@ void case_server() {
       a = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
       words = g.eng.words;
       // The same server again, an unseeded sampled request between: the seed holds per request, not per
-      // process (the box's r12.d2 found the second identical seeded request differing, 2026-10-22).
+      // process (the test machine's r12.d2 found the second identical seeded request differing, 2026-10-22).
       g.chat({{"temperature", 0.8}, {"top_k", 8}});
       again = g.chat(sampled).at("choices").at(0).at("token_ids").get<Ids>();
     }

@@ -1,7 +1,7 @@
 #pragma once
 // Spec 13 §10 / §11 (plan 13b Task 3): b70-serve --parallel replica - two of today's single-sequence engines, one
 // per card, behind server::BatchEngineIface: a two-slot batched engine with no new kernels. Slot i IS card i's
-// engine (a server::EngineIface: EngineAdapter over a runtime::Engine on the box, a mock in the host test).
+// engine (a server::EngineIface: EngineAdapter over a runtime::Engine on the GPU machine, a mock in the host test).
 //
 // Threads (Review Focus 2): every call on a card's engine runs on that card's own worker thread, so the engines
 // never share a thread and each sees exactly the call sequence the serial server would make. A call over several

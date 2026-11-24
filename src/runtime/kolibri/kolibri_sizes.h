@@ -22,7 +22,7 @@ inline constexpr uint32_t kM = 1;   // Kolibri builds M = 1 only (no MTP head, s
 // eager form (the reference's bf16 chain). `B70_KOLIBRI_ATTN=flash|eager`, read at each call;
 // unset or empty is the default; anything else throws.
 enum class KolAttn { Flash, Eager };
-inline constexpr KolAttn kDefaultKolAttn = KolAttn::Flash;   // until the box A/B
+inline constexpr KolAttn kDefaultKolAttn = KolAttn::Flash;   // until the test machine A/B
 KolAttn kolibri_attn();
 const char* kol_attn_name(KolAttn a);
 

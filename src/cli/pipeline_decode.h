@@ -78,7 +78,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
     throw std::runtime_error(
         "--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 "
         "is false), and the hand-off writes it. Peer access needs the P2P-capable kernel and "
-        "both cards under one root complex (docs/10-the-box.md)");
+        "both cards under one root complex (docs/01-hardware.md)");
 
   loader::LoadedModel full = [&] {
     Redirect redirect;
@@ -191,14 +191,14 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
                            std::to_string(eng.split());
   std::print("| b70-decode {}{} | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha, tags.c_str(), a.depth, a.tg,
              eng.last_tok_per_s(), ms_per_token);
-  // Spec 16c: the pp row, one card's columns (tools/box_validate/summary.py reads a field
+  // Spec 16c: the pp row, one card's columns (the validation summary reads a field
   // ending in " pp"), the configuration in the tag.
   if (a.bench_prefill)
     std::print("| b70-decode {}{} {} pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha, tags.c_str(),
                runtime::prefill_backend_name(eng.prefill_backend()), a.depth, chunk, ingest_ms,
                ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::print(stderr,
-             "(measured, one run. The recorded figure is the median of three on an idle box;\n"
+             "(measured, one run. The recorded figure is the median of three on an idle machine;\n"
              " compare it with the one-card row, run interleaved.)\n");
   return 0;
 }

@@ -27,8 +27,8 @@
 //     (last_logits.py, chunk 1000) moves those rows as far. They are printed as the worst.
 // The same bars hold against M = 1 decode (a different chain: recurrent GDN, fp32 q).
 //
-// **The f32 judge.** With B70_SPLIT_REFS=<f32 dump>,<bf16 dump> (tools/box_validate/
-// f32_refs.sh split: ornith_ref.py run --lean --dump-kv of ids[0, N), in f32 and in bf16) every engine run - the one
+// **The f32 judge.** With B70_SPLIT_REFS=<f32 dump>,<bf16 dump> (the f32
+// reference, split: ornith_ref.py run --lean --dump-kv of ids[0, N), in f32 and in bf16) every engine run - the one
 // call, each split, decode - is held to "no further from f32 than the bf16 reference". Round 2 of the
 // 2026-10-31 rulings: by the near-miss gates' rule (forced_judge.h), not five strict metrics against one bf16 sample
 // - the last-row logits and the all-(layer, row) median, each a cosine distance to f32 at most kCosSlack (2) times
@@ -367,7 +367,7 @@ int main(int argc, char** argv) {
     f32p = r.substr(0, c);
     bf16p = r.substr(c + 1);
     if (!golden::exists(f32p) || !golden::exists(bf16p)) {
-      std::printf("  B70_SPLIT_REFS: %s absent (tools/box_validate/f32_refs.sh split) - the fixed bars apply\n", refs);
+      std::printf("  B70_SPLIT_REFS: %s absent (tools/oracle/qwen_forced.py split) - the fixed bars apply\n", refs);
       f32p.clear();
     }
   }

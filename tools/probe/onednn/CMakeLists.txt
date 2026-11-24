@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 # The stand-alone icpx build of P-C, oneDNN's bf16_int4 W4A16 matmul (probe_gemm_onednn_int4.cc,
 # docs/08-decode-vs-prefill.md ("How prefill got here")) - a REFERENCE TARGET, not part of the engine.
 # The engine build has no SYCL / icpx; this project is configured by hand,
-# after an engine build, and is in neither tools/box_check.sh nor the box rows:
+# after an engine build, and is in no test run:
 #
 #   cmake -S tools/probe/onednn -B build-onednn \
 #     -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/latest/bin/icpx -DB70_BUILD_DIR=$PWD/build
@@ -20,7 +20,7 @@ endif()
 add_compile_options(-Wall -Wextra -Werror)
 
 set(B70_BUILD_DIR "" CACHE PATH "an engine build tree (its src/loader, src/model and src/l0 archives)")
-set(B70_ONEDNN_ROOT "/opt/intel/oneapi/dnnl/latest" CACHE PATH "oneDNN install (docs/10-the-box.md)")
+set(B70_ONEDNN_ROOT "/opt/intel/oneapi/dnnl/latest" CACHE PATH "oneDNN install")
 get_filename_component(B70_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 foreach(lib src/loader/libb70_loader.a src/model/libb70_model.a src/l0/libb70_l0.a)
   if(NOT EXISTS "${B70_BUILD_DIR}/${lib}")

@@ -1,5 +1,5 @@
 // Spec 21-QFN-v1e Task 2 (plan 21-QFN-v1e Review Focus 1 and 5, spec 21-QFN-v1 F4's restores): Qwen4ExpEngine's prefix-cache snapshot
-// calls on the card with a checkpoint - box only (labels checkpoint;qwen4exp). The synthetic checkpoints (21-QFN-v1b's
+// calls on the card with a checkpoint - GPU only (labels checkpoint;qwen4exp). The synthetic checkpoints (21-QFN-v1b's
 // make_synth.py: 4 real-width layers - three GDN, the PLE layer among them, one QSA) carry it; Intel's truncated
 // model at --layers 18 when present. The host side (the layouts, round trips across placements) is
 // qwen4exp_snapshot_test's.

@@ -6,9 +6,9 @@
 // pinned host memory - with a watchdog: a copy that takes over 20 s prints COPY_HANG and exits 2 instead of hanging.
 // B70_COPY_STRESS_PINNED_GB=<n>: the pinned buffer is n GiB, like the server's prefix cache (16-32 GiB), and each pinned
 // copy walks to the next 64 MiB of it.
-// The device is ZE_AFFINITY_MASK's (run under tools/gpu_lock.sh card N).
+// The device is ZE_AFFINITY_MASK's.
 //
-// B70_COPY_PINNED_GB=<n> (run under tools/gpu_lock.sh box): instead, the prefix cache's first use on both cards - ONE
+// B70_COPY_PINNED_GB=<n> (both cards visible, nothing else on them): instead, the prefix cache's first use on both cards - ONE
 // context holding cards 0 and 1 (the server's), n GiB of l0::MemKind::Host memory written by the CPU, then a 1 MiB copy
 // out of the end of every allocation on card 0 and then on card 1. B70_COPY_PINNED_PIECE_GB=<p>: the n GiB as p GiB
 // allocations (default one). B70_COPY_PINNED_FILL_GB=<f>: f GiB of device memory allocated and written on each card

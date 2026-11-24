@@ -6,7 +6,7 @@
                [--max-cont 256] RECORDING_DIR...
 
 A recording is a directory of request JSONs (`prompt_ids`, `out_ids`) written by b70-serve's request log
-(~/b70/logs/opencode-session-int8, ~/b70/logs/opencode-session). Each request with a prompt and at least 8
+($B70_DATA/logs/opencode-session-int8, $B70_DATA/logs/opencode-session). Each request with a prompt and at least 8
 continuation ids (the probe's floor) becomes a source `<recording>/<request>`: the prompt and the recorded
 continuation cut at `--max-cont` ids and at the first EOS (dflash_v2_sources.stopped). The probe teacher-forces
 that continuation and dumps the quantised target's taps at the drafter's tap layers over its last 2048 prompt

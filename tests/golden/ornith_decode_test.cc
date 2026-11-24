@@ -17,7 +17,7 @@
 //      for the shared gate) in the golden dumps - spec 15a's oracle writes them
 //      beside the usual tensors; without them R2 is skipped with a message.
 //      With `--judge=<dir>` (Ornith's gates are judged by the
-//      f32 teacher-forced reference, tools/box_validate/f32_oracle.sh) the reference route
+//      f32 teacher-forced reference, tools/oracle/ornith_ref.py) the reference route
 //      is the f32 dump's: its router logits (F32) through the same formula, teacher-forced on
 //      the same tokens, and a near-tie is an 8th / 9th LOGIT gap within one bf16 ulp of the
 //      8th (golden_common.h's bf16_ulp_at: the engine rounds router logits to bf16 before the
@@ -29,7 +29,7 @@
 //
 // argv: <snapshot> <oracle dir> <prompt ids dir> [lm_head form] [--judge=<dir>]. Exit 77 (SKIP) when
 // the Ornith int4 checkpoint (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ, spec 15 §13)
-// is not on this machine - the Mac and a box without it skip, they do not fail.
+// is not on this machine - the Mac and a machine without it skip, they do not fail.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -207,7 +207,7 @@ int main(int argc, char** argv) {
     (void)loader::resolve_snapshot(snap);
   } catch (const std::exception& e) {
     std::printf("SKIP: no Ornith int4 checkpoint at '%s' (%s). None is published; spec 15a "
-                "decides its source (AutoRound g64 proposed) - see the box validation queue.\n",
+                "decides its source (AutoRound g64 proposed) - see the validation queue.\n",
                 snap.c_str(), e.what());
     return 77;
   }
@@ -291,7 +291,7 @@ int main(int argc, char** argv) {
     if (!judge_dir.empty()) {
       const std::string jpath = judge_dir + "/" + pname + ".golden.safetensors";
       if (!golden::exists(jpath)) {
-        std::printf("SKIP: the f32 judge %s is absent (tools/box_validate/f32_oracle.sh)\n", jpath.c_str());
+        std::printf("SKIP: the f32 judge %s is absent (tools/oracle/ornith_ref.py)\n", jpath.c_str());
         return 77;
       }
       J = std::make_unique<golden::Golden>(jpath);

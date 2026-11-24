@@ -7,7 +7,7 @@
 // next step throws "reset() first". The throw arrives within the bound plus slack; reset(); the prompt and 16 greedy ids
 // again equal a clean run's (a failed step leaves nothing behind that reset() does not clear).
 // The other two P4 refusals: a missing second card is `cli_reject_pipeline_one_gpu`
-// (ZE_AFFINITY_MASK=0, the shipped binary); no peer access cannot be produced on the box -
+// (ZE_AFFINITY_MASK=0, the shipped binary); no peer access cannot be produced on the GPU machine -
 // PipelineEngine and b70-decode refuse it before the load (zeDeviceCanAccessPeer).
 //
 // argv: [1] the checkpoint. Exits 77 (SKIP) with fewer than two GPUs or without peer access.

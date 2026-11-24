@@ -28,7 +28,7 @@
 //       holds a route row of 8 distinct expert ids < 256 whose weights sum to ~1.
 //
 // The acceptance rate and the verify cost at K = 1..3 (Review Focus 2) are printed, not
-// gated - the box records them.
+// gated - the test machine records them.
 //
 // usage: ornith_mtp_test <snapshot> <prompts dir> [lm_head form: bf16|int8]
 #include <algorithm>
@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
     (void)loader::resolve_snapshot(snap);
   } catch (const std::exception& e) {
     std::printf("SKIP: no Ornith int4 checkpoint at '%s' (%s). None is published; spec 15a "
-                "decides its source - see the box validation queue.\n",
+                "decides its source - see the validation queue.\n",
                 snap.c_str(), e.what());
     return 77;
   }

@@ -187,6 +187,6 @@ int main() {
   check_decided_layout();
   check_pool();
   check_ornith();
-  std::printf("slot_plan_test OK\n");
+  std::printf("pool_plan_test OK\n");
   return 0;
 }

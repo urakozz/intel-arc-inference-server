@@ -10,7 +10,7 @@
 // association, so the two runs are judged, not compared bitwise:
 //   B70_DUMP_FORCED=<dir>   dumps each run's context (tests/golden/forced_judge.h: prompt = the session's ids,
 //                           forced = its 32 ids; keys turns_qwen3.8_<kv>_d<depth>_<off|split>_<hash>) for
-//                           tools/box_validate/f32_refs.sh forced-qwen (QWEN_KEYS_RE=^turns_)
+//                           tools/oracle/qwen_forced.py forced-qwen (QWEN_KEYS_RE=^turns_)
 //   B70_FORCED_JUDGE=<dir>  judges both runs: rows the judge rejects (row j decides forced id j, the one-bf16-ulp
 //                           near-tie rule), each with its margin, and the logits cosine to the judge (min /
 //                           median). PASS per depth: the split run is rejected at no more rows than the OFF run,

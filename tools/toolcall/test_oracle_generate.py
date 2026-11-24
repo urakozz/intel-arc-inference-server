@@ -238,7 +238,7 @@ def test_args_qwen():
 def test_dense_keep():
     """The dense path's memory plan: layers kept = (cap - resident - 2 layers - the head's fp32 copy - slack) / a
     layer, clamped to [0, n]; none / an unknown cap keep none. Qwen3.8-27B's numbers: 64 layers of ~0.77 GB, a 2.5 GB
-    head and a 2.5 GB embedding, the box's 56g cap -> most layers kept."""
+    head and a 2.5 GB embedding, a 56g cap -> most layers kept."""
     import oracle_generate as og
     G = og.GiB
     p = og.dense_keep([G] * 10, 2 * G, G, 20 * G)
@@ -316,7 +316,7 @@ def test_dense_streamed_tiny():
     """The dense path (Qwen3.8, a4_ref.sh qwen): on a tiny random checkpoint, the layer-streamed run (every layer
     streamed: --resident none; some kept: a small ORACLE_MEM_GB; all kept: a large one) writes the same ids as a
     RESIDENT Qwen3_5ForCausalLM under the same cpu_bf16 shim, HF generate - bitwise. Needs torch + transformers with
-    qwen3_5 (agnes-ref-img / the box's reference image): skipped (printed) otherwise."""
+    qwen3_5 (agnes-ref-img / the reference image): skipped (printed) otherwise."""
     try:
         import torch
         from transformers.models.qwen3_5 import modeling_qwen3_5  # noqa: F401

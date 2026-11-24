@@ -1,5 +1,5 @@
 // Spec 21-QFN-v1e Task 3 Step 3 (spec 21-QFN-v1 F5; plan 21-QFN-v1e Review Focus 2, 3, 4): Qwen3.8-Flash-Next's MTP head and spec 8's draft /
-// verify / commit on the card - box only (labels checkpoint;qwen4exp). The synthetic checkpoints (21-QFN-v1b's make_synth.py
+// verify / commit on the card - GPU only (labels checkpoint;qwen4exp). The synthetic checkpoints (21-QFN-v1b's make_synth.py
 // --mtp: 4 real-width layers and the head, its bf16 experts RTN int4 g64 at load) carry it; Intel's --layers 18 when
 // present.
 //
@@ -7,7 +7,7 @@
 //                     [rows] (rows: the verify lists' per-row MoE, open-work item 48's pair against the union-read one)
 //
 // (no mode: all four). <fixture dir> holds tools/oracle/qwen4exp_mtp_fixture.py's mtp_{single,per_stream}.safetensors
-// for this checkpoint (box: r34.fixture); without them M1 SKIPs and the rest runs.
+// for this checkpoint (validation: r34.fixture); without them M1 SKIPs and the rest runs.
 //   M1  the head against 21-QFN-v1a's port (tools/oracle/qwen4exp_mtp.py MtpHead, vLLM's form, the engine-format experts:
 //       RTN int4 g64 dequantised), both pre_fc_norm_hidden forms (B70_Q4_MTP_NORM): per fixture sample i the engine
 //       at pos 1 (one id prefilled), R_0 replaced by the fixture's R_i (write_mtp_R), the pending id t_i, draft(3) -

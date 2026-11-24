@@ -1405,7 +1405,7 @@ endif()
 # ==== Spec 21-QFN-v1c: Qwen3.8-Flash-Next decode (model::qwen4exp()) ==== (begin) ====
 # Additive only but for ONE source: prep.cl gains -DGDN_GATE_SIGMOID (prep_gated_head's sigmoid gate, the `_SIG`
 # binary); every existing prep.cl variant keeps its command line and its preprocessed source token for token (the
-# 6499948 rule; G0's sha256 on the box). Family-only kernels live in src/kernels/qwen4exp/ and are named `q4_*` with
+# 6499948 rule; G0's sha256 on the GPU machine). Family-only kernels live in src/kernels/qwen4exp/ and are named `q4_*` with
 # every shape define in the name (src/kernels/qwen4exp_kernels.h is the host half); the reused sources run at this
 # family's shapes:
 #   gemv.cl         qkv||z 2560x16384 (S1 L0: gdn_step / prep_gated_head read S 1), q||gate||k||v 2560x13312 (S2 L0),
@@ -1476,7 +1476,7 @@ function(add_q4_decode_rows MM)
                      DEFINES ${CTRL_DEFINES} M=${MM} HC_DOWN_I8=${N} DN_KS=32)
   endforeach()
   # PERF-106's bench only (qwen4exp_kernels_test --bench-hc8): lead 4's pair (the down writes the activations, _A;
-  # the up-mix reads them, at M >= 2 in lead 2's _R<M>C16 form) against the lists' - removed with the box verdict
+  # the up-mix reads them, at M >= 2 in lead 2's _R<M>C16 form) against the lists' - removed with the measured verdict
   if(MM EQUAL 1)
     set(_upr "")
     set(_upr_d "")
@@ -1639,7 +1639,7 @@ endif()
 
 # ==== Spec 21-QFN-v1d: Qwen3.8-Flash-Next prefill ==== (begin) ====
 # Additive but for three sources, each gaining one define that every existing binary leaves unset - their
-# preprocessed source token for token as before (the 6499948 rule; G0's sha256 on the box, r33.k0):
+# preprocessed source token for token as before (the 6499948 rule; G0's sha256 on the GPU machine, r33.k0):
 #   prefill/pf_gated_head.cl  GDN_GATE_SIGMOID (pf_gated_head_SIG: the sigmoid gate, prep.cl's _SIG twin)
 #   qwen4exp/q4_qsa.cl        QSA_PF (the prep at M = 2048 without its in-launch ring write, + q4_qsa_ring; the indexer
 #                             rows at the GEMM's pitch 768)

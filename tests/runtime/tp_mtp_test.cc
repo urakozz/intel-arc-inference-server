@@ -12,7 +12,7 @@
 //                M2  greedy speculative decoding at K = 1, 2, 3 (draft -> verify -> the longest agreeing prefix ->
 //                    commit) against `plain`, graded by the spec judge (tests/server/spec_judge.h, N6: the tie rule,
 //                    then the f32 judges of the first divergence's context - B70_DUMP_FORCED dumps it,
-//                    tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_mtp_' makes it,
+//                    tools/oracle/qwen_forced.py forced-qwen with QWEN_KEYS_RE='^tp_mtp_' makes it,
 //                    B70_FORCED_JUDGE reads it - the bf16-unstable rule with plain TP's replayed row, the reviewed
 //                    rows); without a judge the test ends SKIP (77) "awaiting", never PASS. One tag for every K (the
 //                    contexts and their judges are shared). The acceptance (accepted / drafted) is printed;
@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
   golden::load_end_of_turn(ckpt);
   const std::string mode = argc > 2 ? argv[2] : "gate";
   const runtime::KvCache kv = runtime::default_kv_cache();
-  if (mode == "rows1") {   // one card: its own lock (gpu_lock.sh card N)
+  if (mode == "rows1") {   // one card: its own card (ZE_AFFINITY_MASK=N)
     l0::Context c0(0u);
     return rows_probe_one(c0, ckpt, argc > 3 ? uint32_t(std::atoi(argv[3])) : 3u,
                           argc > 4 ? argv[4] : "tests/golden/prompts/long.ids", kv);

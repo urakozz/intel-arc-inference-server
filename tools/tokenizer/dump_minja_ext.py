@@ -34,6 +34,9 @@ cases = [
     # undefined is not None: `defined` holds for a None value, fails for a missing one.
     ("defined", "{{ n is defined }} {{ d.n is defined }} {{ d.k is defined }} {{ d.missing is defined }} "
                 "{{ missing is defined }} {{ d['n'] is not defined }} {{ d.get('missing') is defined }}"),
+    # `undefined` is the same test negated (Qwen's templates write `enable_thinking is undefined`).
+    ("undefined", "{{ n is undefined }} {{ d.n is undefined }} {{ d.k is undefined }} {{ d.missing is undefined }} "
+                  "{{ missing is undefined }} {{ d['n'] is not undefined }} {{ d.get('missing') is undefined }}"),
     # (Printing None itself differs - Jinja writes "None", minja nothing - and is left alone:
     # changing it would move the Qwen3.8 renders.)
     ("defined_none", "{{ n is none }} {{ d.n is none }} {% if d.n is defined %}[{{ d.n is none }}]{% endif %}"

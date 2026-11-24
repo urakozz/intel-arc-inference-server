@@ -27,7 +27,7 @@ The model follows config.json's model_type:
                     layers kept once read, K from the memory plan under the container's cap -
                     --resident none keeps none; the rest re-read every forward), its bf16 GEMMs
                     as fp32 GEMMs of the bf16 values rounded once to bf16 (tools/oracle/cpu_bf16.py,
-                    the 2026-11-03 ruling for new references: the box CPU has no bf16
+                    the 2026-11-03 ruling for new references: the test machine's CPU has no bf16
                     units), HF generate, one scenario at a time (--batch is ignored). NOT bitwise
                     the pre-2026-11 torch-bf16 references (summation order); writes no .gap;
   qwen3_5_moe       Ornith 1.5 (spec 15e Task 3): tools/oracle/ornith_ref.py's layer-streamed
@@ -238,7 +238,7 @@ def mem_model(mtype: str, cfg: dict) -> dict:
 
 def mem_limit() -> int | None:
     """ORACLE_MEM_GB if set, else the container's memory cap (cgroup v2 / v1), else MemAvailable
-    now (an uncapped container on a shared host: the box); None when unknown."""
+    now (an uncapped container on a shared host); None when unknown."""
     if os.environ.get("ORACLE_MEM_GB"):
         return int(float(os.environ["ORACLE_MEM_GB"]) * GiB)
     for p in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
@@ -460,7 +460,7 @@ def dense_build(snap: str, keep: str = "auto"):
     """Qwen3.8 (model_type qwen3_5): transformers' Qwen3_5ForCausalLM on meta, eager attention, layer-streamed
     (tools/oracle/dump.py's stream_weights: embedding, final norm and lm_head resident, each decoder layer
     materialised per forward unless kept), the bf16 GEMMs as fp32 GEMMs of the bf16 values rounded once to bf16
-    (tools/oracle/cpu_bf16.py: the box CPU has no bf16 units). The checkpoint is the bf16 original or a GPTQ int4
+    (tools/oracle/cpu_bf16.py: the test machine's CPU has no bf16 units). The checkpoint is the bf16 original or a GPTQ int4
     one (dequantised as every oracle does). -> (model, text config, prefetcher, plan)."""
     import torch
     from transformers import AutoConfig

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # One command: ricursiveAI/Ripple-65B-Preview (bf16, 130 GB, remote code) -> our AutoRound int4 g64 symmetric
-# export, tuned; lm_head and the embedding stay bf16 (the engine builds its int8 head at load). On the box.
+# export, tuned; lm_head and the embedding stay bf16 (the engine builds its int8 head at load). On the GPU machine.
 #
 #   tools/quantize/quantize_ripple.sh start                    start (or resume) the run, detached
 #   tools/quantize/quantize_ripple.sh status                   blocks done, s per block, the ETA, RAM, the result
-#   tools/quantize/quantize_ripple.sh stop                     stop the run (tools/box_stop.sh ripple-quant); start resumes
-#   tools/quantize/quantize_ripple.sh selftest                 the whole pipeline on a tiny random Ripple, box CPU
+#   tools/quantize/quantize_ripple.sh stop                     stop the run; start resumes
+#   tools/quantize/quantize_ripple.sh selftest                 the whole pipeline on a tiny random Ripple, CPU
 #                                                              (both attention arms, ~5 min)
 #   tools/quantize/quantize_ripple.sh run [--only S | --from S]   the stages in the foreground (what start runs)
 #   ATTN=bf16 tools/quantize/quantize_ripple.sh start          the mixed-precision arm: attention bf16, MLP int4
@@ -18,7 +18,7 @@
 #          low CPU memory as a meta skeleton with each block read from the checkpoint when it is tuned
 #          (AR_DISK_STREAM_MODEL=1: AutoRound does that by itself only for fused-MoE checkpoints, and 130 GB of
 #          bf16 does not fit the RAM); a guard refuses any decoder-layer call without its value residual; low GPU
-#          memory; on card CARD (1) through tools/gpu_lock.sh, or the box CPU (DEVICE=cpu,
+#          memory; on card CARD (1) under its lock, or the CPU (DEVICE=cpu,
 #          /tmp/b70-cpu-model.lock). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32 files of the
 #          calibration activations, 2 x 5.4 GB, overwritten each block) - after a stop, `start` again continues at
 #          the first unfinished block.
@@ -35,29 +35,29 @@
 #          the export's README.md; the last line is "RIPPLE QUANT: OK <export>" or "RIPPLE QUANT: FAIL ..."
 #          (also in $OUT/RESULT)
 #
-# Disk: QUANT_ROOT (~/b70/quant on the NVMe): the export ~36 GB (ATTN=bf16: ~56 GB) + resume/ 10.7 GB; `start`
+# Disk: QUANT_ROOT ($B70_DATA/quant on the NVMe): the export ~36 GB (ATTN=bf16: ~56 GB) + resume/ 10.7 GB; `start`
 # wants DISK_MIN_GB (80) free. RAM: `start` wants MemAvailable >= RAM_MIN_GB (45); AutoRound runs in a systemd
-# scope capped at RAM_CAP_GB (64) with no swap, so an overrun kills the run (resumable), never the box.
+# scope capped at RAM_CAP_GB (64) with no swap, so an overrun kills the run (resumable), never the machine.
 #
 # AutoRound: the latest of our fork ~/auto-round (branch AR_REF, tools/quantize/ar_latest.sh), the same build rule
 # as the Flash-Next script; a run keeps the hash it started with ($OUT/ar_commit) and the attention arm ($OUT/attn).
 # Installed by tools/quantize/ar_pin.sh beside VENVPY (~/auto-round/.venv), transformers 5.19.0 in SITE.
 #
 # Overridables (environment): MODEL (the pinned snapshot below, or another snapshot dir), QUANT_ROOT
-# ($HOME/b70/quant), OUT (default: the run `ripple-current` points at - `start` points it at the run it starts - else
+# ($B70_DATA/quant), OUT (default: the run `ripple-current` points at - `start` points it at the run it starts - else
 # QUANT_ROOT/Ripple-65B-Preview-W4A16-g64[-attn-bf16]-<date>), ATTN (int4 | bf16), DEVICE (xpu: card CARD | cpu),
 # CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH, GAS, RAM_CAP_GB, RAM_MIN_GB, DISK_MIN_GB, DATASET, RELOAD, VENVPY, SITE, AR_REPO, AR_REF,
-# LOGDIR ($HOME/b70/logs/ripple-quant), SCRATCH ($HOME/b70/scratch/ripple-quant, the selftest's directory).
+# LOGDIR ($B70_DATA/logs/ripple-quant), SCRATCH ($B70_DATA/scratch/ripple-quant, the selftest's directory).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
 Q="$HERE/quantize/ripple"
 Q4="$HERE/quantize/qwen4exp"
 SELF="$HERE/quantize/quantize_ripple.sh"
-MODEL="${MODEL:-$HOME/b70/hdd/hf-hub/models--ricursiveAI--Ripple-65B-Preview/snapshots/d58dbcf43344e27494a40cec6727e180450f4a6b}"
-QUANT_ROOT="${QUANT_ROOT:-$HOME/b70/quant}"
-LOGDIR="${LOGDIR:-$HOME/b70/logs/ripple-quant}"
-SCRATCH="${SCRATCH:-$HOME/b70/scratch/ripple-quant}"
+MODEL="${MODEL:-${B70_DATA:?set B70_DATA, the data root}/hdd/hf-hub/models--ricursiveAI--Ripple-65B-Preview/snapshots/d58dbcf43344e27494a40cec6727e180450f4a6b}"
+QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/quant}"
+LOGDIR="${LOGDIR:-${B70_DATA:?set B70_DATA, the data root}/logs/ripple-quant}"
+SCRATCH="${SCRATCH:-${B70_DATA:?set B70_DATA, the data root}/scratch/ripple-quant}"
 ATTN="${ATTN:-int4}"
 DEVICE="${DEVICE:-xpu}"
 CARD="${CARD:-1}"
@@ -101,7 +101,9 @@ disk_free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
 locked() {
   local cap=(systemd-run --user --scope -q -p "MemoryMax=${RAM_CAP_GB}G" -p MemorySwapMax=0)
   if [ "$DEVICE" = xpu ]; then
-    "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+    # through a machine-wide GPU lock wrapper at tools/gpu_lock.sh where the machine has one, else by affinity alone
+    if [ -x "$HERE/gpu_lock.sh" ]; then "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+    else ZE_AFFINITY_MASK="$CARD" "${cap[@]}" "$@"; fi
   else
     flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
   fi
@@ -250,10 +252,11 @@ case "${1:-}" in
       echo "-- last log lines:"
       tr '\r' '\n' < "$OUT/run.log" | grep -v -E "^(Quantizing|packing|Writing|Map|Filter)" | grep -v '^\s*$' | tail -5
     fi ;;
-  stop)   # tools/box_stop.sh ripple-quant: the run $HOME/b70/quant/ripple-current points at (the last started)
-    [ "$QUANT_ROOT" = "$HOME/b70/quant" ] || die "stop finds the run through $HOME/b70/quant/ripple-current, not QUANT_ROOT=$QUANT_ROOT"
+  stop)   # the run $B70_DATA/quant/ripple-current points at (the last started)
+    [ "$QUANT_ROOT" = "${B70_DATA:?set B70_DATA, the data root}/quant" ] || die "stop finds the run through ${B70_DATA:?set B70_DATA, the data root}/quant/ripple-current, not QUANT_ROOT=$QUANT_ROOT"
     [ -z "${OUT:-}" ] || [ "$(readlink -m "$OUT")" = "$(readlink -f "$CURRENT")" ] ||
       die "OUT=$OUT is not the run $CURRENT points at (the last one started), which is the one stop stops"
+    [ -x "$HERE/box_stop.sh" ] || die "no stop helper on this machine: stop the run's AutoRound process yourself (pgrep -af autoround_run.py)"
     exec "$HERE/box_stop.sh" ripple-quant ;;
   selftest)
     W="$SCRATCH/selftest-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$W" "$LOGDIR"

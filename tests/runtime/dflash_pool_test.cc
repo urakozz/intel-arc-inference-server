@@ -34,11 +34,11 @@
 //       (verify_rows 4 x K 7, the greedy commits, ONE rows projection at 32 rows) - each slot's ring rows against the
 //       same verify done alone, worst cosine >= 0.999 (B6's); (d) the batched session of the four slots, kIters
 //       iterations, against A's ids - the first difference printed (B7's).
-//   T   (timing, informational, busy-box grade) the draft list of one slot at K = 7 against the batched draft of 2
+//   T   (timing, informational, busy-machine grade) the draft list of one slot at K = 7 against the batched draft of 2
 //       slots x K 3 and 4 slots x K 1 (and, with B8's pass, 4 slots x K 7), interleaved, medians of 15 rounds; the
 //       batched one in the lone draft's plain steps (0.217 at 4k, BENCHMARKS "the final form").
 //
-// usage: dflash_slots_test <target snapshot> <drafter> [--pool]   (cwd = the source tree; --pool: pool_main below)
+// usage: dflash_pool_test <target snapshot> <drafter> [--pool]   (cwd = the source tree; --pool: pool_main below)
 // SKIP (77) when either checkpoint is missing.
 #include <algorithm>
 #include <chrono>
@@ -219,7 +219,7 @@ int pool_main(l0::Context& ctx, const std::string& snap, const std::string& dsna
   }
   Rig r(ctx, snap, dsnap, std::vector<uint32_t>(kSeqs, kCap), kPoolPages);
   runtime::Engine& e = *r.e;
-  std::printf("dflash_slots_test --pool: 4 sequences up to %u sharing %u pages; %s\n", e.max_len(), e.kv_pool_pages(),
+  std::printf("dflash_pool_test --pool: 4 sequences up to %u sharing %u pages; %s\n", e.max_len(), e.kv_pool_pages(),
               e.memory_line().c_str());
   CHECK_EQ(e.pages_free(), kPoolPages);
   const auto reset_all = [&] {
@@ -350,7 +350,7 @@ int pool_main(l0::Context& ctx, const std::string& snap, const std::string& dsna
       request(1, std::vector<uint32_t>(longer.begin(), longer.begin() + 3425), 32);
     }
   }
-  std::printf("dflash_slots_test --pool: %s\n", ok ? "PASS" : "FAIL");
+  std::printf("dflash_pool_test --pool: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }
 
@@ -542,7 +542,7 @@ bool b8(Rig& r, const std::vector<uint32_t>& prompt, const Record& ref) {
     std::printf("B8 session slot %u: %zu ids in %u steps, the first %zu equal A's%s\n", q, seq[q].size(), kIters,
                 same, same == n ? " (all)" : "");
   }
-  // T8 (timing, informational, busy box): the four slots' greedy session, 96 steps, at K 1 each (the 8-row step the
+  // T8 (timing, informational, busy machine): the four slots' greedy session, 96 steps, at K 1 each (the 8-row step the
   // old deal gives four requests) against K 7 each (32 rows) - every id the engine keeps, a second, A B A B.
   double t1[2] = {0, 0}, t7[2] = {0, 0};
   for (int round = 0; round < 2; ++round) {
@@ -855,13 +855,13 @@ int main(int argc, char** argv) {
       return v[v.size() / 2];
     };
     std::printf("T: the draft pass, one slot K 7 %.3f ms; batched 2 x K 3 %.3f ms (%.3f plain), 4 x K 1 %.3f ms (%.3f "
-                "plain) - busy box\n",
+                "plain) - busy machine\n",
                 med(lone), med(two), 0.217 * med(two) / med(lone), med(four), 0.217 * med(four) / med(lone));
     if (wide)
       std::printf("T: batched 4 x K 7 (32 rows) %.3f ms (%.3f plain, %.2fx the lone K 7 draft)\n", med(four7),
                   0.217 * med(four7) / med(lone), med(four7) / med(lone));
   }
 
-  std::printf("dflash_slots_test: %s\n", ok ? "PASS" : "FAIL");
+  std::printf("dflash_pool_test: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }

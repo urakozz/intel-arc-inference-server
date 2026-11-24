@@ -91,6 +91,21 @@ struct Options {
 struct BatchEngineIface;
 class Scheduler;
 
+// The listener while the model loads: b70-serve starts it on Options' host and port before the load and stops it just
+// before Server::listen() binds the same port. GET /health answers 503 {"status":"loading"}, GET /version the version,
+// /v1/models and the completion routes 503 - a client polling /health (or /v1/models) gets 200 only from the Server.
+class LoadingListener {
+ public:
+  explicit LoadingListener(const Options& opts);
+  ~LoadingListener();
+  bool start();   // false: the port could not be bound
+  void stop();
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 class Server {
  public:
   // Plan 13b (spec 13 §11, b70-serve --parallel replica): with `batch` (an engine of more than one slot, e.g.
@@ -145,6 +160,8 @@ class Server {
   void release();
   bool bind();
   void handle(const httplib::Request& request, httplib::Response& response, bool chat);
+  void tokenize(const httplib::Request& request, httplib::Response& response);
+  void detokenize(const httplib::Request& request, httplib::Response& response);
   void log_request(bool chat, const std::string& body, double t_start, const Outcome& outcome);
   void finish_request();   // the request-end snapshot, after the last frame
 

@@ -536,12 +536,12 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   get_property(BS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_batch_step ${BS_KERNELS} ${BS_PF_KERNELS})
 endif()
-# --- probe_slots_speed: spec 13c Task 5, the decode speed of the engine's sequence slots (the engine API) ---
+# --- probe_pool_speed: spec 13c Task 5, the decode speed of the engine's sequence slots (the engine API) ---
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
-  add_executable(probe_slots_speed probe_slots_speed.cc)
-  target_include_directories(probe_slots_speed PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_slots_speed PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  add_dependencies(probe_slots_speed ${BS_KERNELS} ${BS_PF_KERNELS})
+  add_executable(probe_pool_speed probe_pool_speed.cc)
+  target_include_directories(probe_pool_speed PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_pool_speed PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  add_dependencies(probe_pool_speed ${BS_KERNELS} ${BS_PF_KERNELS})
 endif()
 # --- probe_kv_paged_attn: plan 19v3b Task 0, the decode attention's paged twin against the contiguous one ---
 if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
@@ -662,7 +662,7 @@ endif()
 
 # --- dflash_d1: spec 19 §6 D1 (plan 19b Task 3), the engine's half ---
 # The DFlash drafter beside the loaded target drafts at teacher-forced anchors of tap dumps; tools/oracle/dflash_d1.py
-# holds every draft to tools/oracle/dflash_ref.py on the same taps. Box queue row 54 (stage r54.d1).
+# holds every draft to tools/oracle/dflash_ref.py on the same taps. Validation queue row 54 (stage r54.d1).
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_executable(dflash_d1 dflash_d1.cc)
   target_include_directories(dflash_d1 PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -679,11 +679,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   target_link_libraries(probe_dflash_iter PRIVATE b70_dflash_runtime b70_prefill_host b70_server b70_third_party_json)
   b70_target_kernel_dir(probe_dflash_iter)
   add_dependencies(probe_dflash_iter ${D1_KERNELS})
-  add_test(NAME dflash_probe_cli_test COMMAND ${CMAKE_COMMAND} -E env
-    "DFLASH_PROBE=$<TARGET_FILE:probe_dflash_iter>" python3
-    "${CMAKE_SOURCE_DIR}/tools/box_validate/test_dflash_modes.py")
-  set_tests_properties(dflash_probe_cli_test PROPERTIES LABELS "host;dflash"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
 # --- probe_small_m: spec 28 P0 (plan 28a), small-M DPAS stand-ins against gemv ---------
@@ -1180,7 +1175,7 @@ target_include_directories(probe_tp PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURR
 target_link_libraries(probe_tp PRIVATE b70_l0 b70_model pthread)
 b70_target_kernel_dir(probe_tp)
 add_dependencies(probe_tp ptp_kernel_set)
-# the one-card production binaries `probe_tp step` times beside the per-card ones (only these: a new box tree
+# the one-card production binaries `probe_tp step` times beside the per-card ones (only these: a new tree
 # builds probe_tp without the whole kernel set)
 foreach(v gemv_M1_K5120_N16384_S1_L1 gemv_M1_K6144_N5120_S4_L0 gemv_M1_K5120_N14336_S2_L0
           gemv_M1_K5120_N34816_S8_L0 gemv_M1_K17408_N5120_S4_L0 gemv_i8w_M1_K5120_N248320)

@@ -121,7 +121,7 @@ int bench(l0::Context& d0, l0::Context& d1, const std::string& ckpt, model::TpCr
   while (ids.size() < depth) ids.push_back(prose[ids.size() % prose.size()]);
   e.ingest(ids);
   e.generate(tg);
-  // b70-decode --bench's row (tools/box_validate/summary.py reads it), the arm in the tag.
+  // b70-decode --bench's row (the validation summary reads it), the arm in the tag.
   std::printf("| b70-decode tp_decode_test int8-head%s tp2-%s | %u | %u | %.2f | %.2f |\n",
               kv == runtime::KvCache::Int8 ? " int8-kv" : "", model::tp_crossing_name(c), depth, tg,
               e.last_tok_per_s(), e.last_gen_ms() / tg);

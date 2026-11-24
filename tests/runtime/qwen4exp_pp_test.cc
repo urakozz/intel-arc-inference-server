@@ -1,4 +1,4 @@
-// Spec 21-QFN-v1c Task 4: Qwen3.8-Flash-Next across two cards on spec 16b's pieces (box only; label checkpoint;qwen4exp;pp).
+// Spec 21-QFN-v1c Task 4: Qwen3.8-Flash-Next across two cards on spec 16b's pieces (GPU only; label checkpoint;qwen4exp;pp).
 //   qwen4exp_pp_test <synthetic checkpoint> <Intel's checkpoint> <ids> [prompt length]
 //
 //   (a) the synthetic checkpoint (4 layers): --pp 1 against --pp 2 --pipeline-split 2: the prompt + 32 greedy tokens - the tokens and, after every phase, the logits, every route row,

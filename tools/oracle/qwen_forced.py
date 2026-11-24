@@ -53,7 +53,7 @@ Resumable: the hidden state is checkpointed after every layer in --work (a kille
 on, for the same set of contexts); keys listed in --done (one per line) or already in --out are skipped. Contexts
 with the same prompt, forced ids and head share one file (a hard link; the same ids split at another prompt length
 are another file: their rows differ). Run in the oracle container (run_in_container.sh) under
-/tmp/b70-cpu-model.lock - tools/box_validate/f32_refs.sh forced-qwen does both.
+/tmp/b70-cpu-model.lock.
 """
 import os
 import sys
@@ -71,12 +71,12 @@ import time  # noqa: E402
 
 # The tests that load the engine's int8 head (loader::LmHeadForm::Int8): every DFlash test, and mtp_gpu_test with
 # --lm-head int8 (its tags carry the head form: mtp_gpu_<form>_, mtp_gpu_rf1_<form>_), and b70-serve's speculative
-# arms (tools/box_validate/serve_judge.py: serve_int8_<set>_<name>; the server loads the int8 head, prefills with l0).
+# arms (the served rows' judge: serve_int8_<set>_<name>; the server loads the int8 head, prefills with l0).
 # mtp_verify_test's qwen3.8_int8 is the KV cache, not the head. Spec 17c's tp_prefill_test (tp_prefill_, both KV forms) and
 # spec 17d's tp_mtp_test (tp_mtp_)
-# runs b70-decode's int8 head; the TP twin count (tools/box_validate/twin_count.py: tp_twin_) b70-decode's and b70-serve's.
+# runs b70-decode's int8 head; the TP twin count (tp_twin_) b70-decode's and b70-serve's.
 # Open-work 27's mtp_lookup_gpu_test (mtp_lookup_gpu_int8_) loads the int8 head and prefills as the DFlash tests do.
-I8HEAD_RE = r"^(dflash_|mtp_gpu_(rf1_)?int8_|mtp_lookup_gpu_int8_|mtp_verify_qwen3\.8_wide_int8_|serve_int8_|slots_|tp_prefill_|tp_mtp_|tp_twin_|tp_dflash_)"
+I8HEAD_RE = r"^(dflash_|mtp_gpu_(rf1_)?int8_|mtp_lookup_gpu_int8_|mtp_verify_qwen3\.8_wide_int8_|serve_int8_|pool_|tp_prefill_|tp_mtp_|tp_twin_|tp_dflash_)"
 # The tests that prefill with l0-int8 (tests/CMakeLists.txt: mtp_gpu_test <snapshot> l0-int8 ..., every form).
 PFI8_RE = r"^mtp_gpu_"
 REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
@@ -350,7 +350,7 @@ def memory_plan(ctx, config, cap, chunk_rows=256, i8head_re=I8HEAD_RE, pfi8_re=N
 
 
 def estimate_hours(n_pos, n_rows, longest):
-    """Rough, from the box's f32 sgemm (2048x2560x2560 in 37.8 ms on ~19 threads, memory cpu-bf16-slow): ~54 GFLOP a
+    """Rough, from the test machine's f32 sgemm (2048x2560x2560 in 37.8 ms on ~19 threads, memory cpu-bf16-slow): ~54 GFLOP a
     position over the linears, the head 2.5 GFLOP a written row, attention over a segment's ancestors, the weight
     stream (~6.5 min); at a third of that rate for the GEMMs' shapes and the python-side segment loops."""
     gflops = 700.0 / 3

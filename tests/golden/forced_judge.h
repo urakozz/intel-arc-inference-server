@@ -1,7 +1,7 @@
 #pragma once
 // The f32 judges of the gates f32_oracle.sh's three golden prompts do not cover: a
 // test's engine run is the reference context - a prompt and the ids every compared row is teacher-forced on - and
-// the f32 reference is run on exactly that context afterwards, on the box CPU (tools/box_validate/f32_refs.sh
+// the f32 reference is run on exactly that context afterwards, on the CPU (tools/oracle/qwen_forced.py
 // forced <model> <dir>: ornith_ref.py run --lean --force).
 //
 //   B70_DUMP_FORCED=<dir>    the test writes <dir>/<key>.prompt.ids and <key>.force.ids for every context it
@@ -74,7 +74,7 @@ struct ForcedJudge {
     if (judge_dir.empty()) return nullptr;
     const std::string p = judge_dir + "/" + k + ".golden.safetensors";
     if (!exists(p)) {
-      std::printf("  no f32 judge for %s (%s; tools/box_validate/f32_refs.sh forced) - the old rule applies\n",
+      std::printf("  no f32 judge for %s (%s; tools/oracle/qwen_forced.py forced) - the old rule applies\n",
                   k.c_str(), p.c_str());
       return nullptr;
     }

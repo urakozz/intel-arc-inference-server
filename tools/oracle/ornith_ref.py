@@ -6,7 +6,7 @@ per-expert `mlp.experts.E.{gate,up,down}_proj`, a||b int4 too - spec 15 §13). A
 from the SAME int4 weights - dequantised by the repo's one rule (dequant.py, stream.py's
 bit-identical C++ dequant_t: bf16_rne(float(q - 8) x float(scale))) - is one the engine can match
 token for token. The model is transformers' own Qwen3_5MoeForCausalLM
-(transformers 5.15, the box image's and agnes-ref-img's version), built on `meta` from the
+(transformers 5.15, the reference image's and agnes-ref-img's version), built on `meta` from the
 checkpoint's text config and LAYER-STREAMED (stream.py): embed / final norm / lm_head resident,
 each decoder layer's weights made by a forward pre-hook and dropped after.
 
@@ -787,7 +787,7 @@ def main() -> None:
     r.add_argument("--max-prompt", type=int, default=4096)
     r.add_argument("--experts", default="grouped_mm", choices=["grouped_mm", "eager"])
     # A higher-precision CONTROL, not the reference: the same bf16 weight values held in float32
-    # and every activation in float32 (box 2026-10-23: is the engine's drift from the bf16
+    # and every activation in float32 (card run 2026-10-23: is the engine's drift from the bf16
     # reference larger than the bf16 reference's own distance from exact arithmetic?).
     r.add_argument("--dtype", default="bf16", choices=["bf16", "f32"])
     r.add_argument("--gemm", default="bf16", choices=["bf16", "f32"], help="f32: the bf16 run's GEMMs as fp32 matmuls "

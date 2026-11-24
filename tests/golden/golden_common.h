@@ -282,11 +282,11 @@ bool exists(const std::string& p) { return std::ifstream(p).good(); }
 
 // ---- the f32 judge (Ornith) -----------------------------------
 // The bf16 golden rounds where HF's bf16 model rounds; on Ornith its own determined rows
-// disagree with exact arithmetic on the same weights (box 2026-10-23: Ornith prose 18, cjk 14,
+// disagree with exact arithmetic on the same weights (card run 2026-10-23: Ornith prose 18, cjk 14,
 // code 3), and the engine took exact arithmetic's token at the rows it "failed". So
 // its token gates JUDGE against the f32 teacher-forced reference - the same weights in
 // float32, every generated step forced to the bf16 golden's token (ornith_ref.py --dtype f32
-// --force; tools/box_validate/f32_oracle.sh), so its logits rows
+// --force; tools/oracle/ornith_ref.py), so its logits rows
 // are the bf16 golden's contexts row for row - with the tie rule applied to ITS logits, widened
 // by the second ruling of the day to a top-2 gap within one bf16 ulp (judge_row
 // below). The bf16 golden stays a printed diagnostic beside it. Qwen3.8's
@@ -466,7 +466,7 @@ Judge open_judge(const std::string& dir, const std::string& prompt, const int32_
   Judge j;
   const std::string path = dir + "/" + prompt + ".golden.safetensors";
   if (!exists(path)) {
-    std::printf("SKIP: the f32 judge %s is absent (tools/box_validate/f32_oracle.sh)\n", path.c_str());
+    std::printf("SKIP: the f32 judge %s is absent (tools/oracle/ornith_ref.py)\n", path.c_str());
     std::exit(77);
   }
   j.g = std::make_unique<Golden>(path);

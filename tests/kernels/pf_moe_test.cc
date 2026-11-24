@@ -1,7 +1,7 @@
 // Spec 15d: the prefill MoE kernels on the card at Ornith's shape (256 experts, top-8,
 // hidden 2048, expert 512) - src/kernels/prefill/pf_moe.cl and pf_moe_gemm.cl - against
 // tests/kernels/pf_moe_ref.h and against the DENSE prefill GEMMs the grouped ones are
-// built from. Needs a B70; no checkpoint. Written blind on the Mac (box queue row 12).
+// built from. Needs a B70; no checkpoint. Written blind on the Mac (validation queue row 12).
 //
 // One chunk is walked exactly as runtime/prefill/moe.cc walks it (router GEMV, decode's
 // moe_route, sort, gather, weights, grouped GEMMs, combine), on random weights, then:
@@ -957,7 +957,7 @@ int main() {
     // The walk reads the WHOLE buffers (tmax x TM rows); the gathers write rows
     // [0, hdr[kHdrRows]) only and the reference holds exactly those, so the comparison is
     // over the used prefix - as check_sort's row_tok. Comparing the vectors whole compared
-    // two sizes (the box's first run: 824 x 16 rows read, fewer used) and failed on that alone.
+    // two sizes (the test machine's first run: 824 x 16 rows read, fewer used) and failed on that alone.
     pf_moe_ref::Sorted st = pf_moe_ref::sort(a.route.data(), C, kS);
     const size_t used = st.rows_used();
     CHECK_EQ(a.hdr[kernels::pf_moe::kHdrRows], uint32_t(used));

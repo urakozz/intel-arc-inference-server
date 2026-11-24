@@ -10,7 +10,7 @@
 //        tests/server/spec_judge.h), the golden tie rule without a judge; the tie census printed. Per prompt: lookup
 //        iterations / ids in lookup, MTP iterations, ids an iteration; per edit / copy prompt also plain --spec mtp's
 //        (per-step choice, no lookup) ids an iteration and the host-timed ms an id of plain / mtp / mtp-lookup
-//        (busy-box timing, informational: the server A/B is the measurement).
+//        (busy-machine timing, informational: the server A/B is the measurement).
 //   H    the head stays warm after an mtp-lookup run that used lookup (reemit-8k, 256 ids); open-work 30 (1):
 //        (a) no stale row, threshold-free: the run twice, the head's KV cache filled with two different junk patterns
 //            between reset and prefill - every K and V row the run writes (the prompt's and the generated positions')
@@ -318,7 +318,7 @@ int main(int argc, char** argv) {
   }
   std::printf("D2: %llu failing runs (spec 28 N6); tie census %llu near-ties, %llu beyond the 1-ulp rule, %llu judged "
               "by f32; %.2f ids an iteration, %.1f %% of the ids from lookup; lookup iterations on the "
-              "edit / copy prompts %llu (busy-box timing above, informational)\n",
+              "edit / copy prompts %llu (busy-machine timing above, informational)\n",
               (unsigned long long)fails, (unsigned long long)ties, (unsigned long long)beyond,
               (unsigned long long)judged, double(tot_ids) / double(tot_iters), 100.0 * tot_lookup_ids / tot_ids,
               (unsigned long long)far_lookup_iters);

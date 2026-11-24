@@ -145,7 +145,7 @@ struct Dev {
 // gemv_harness.h's recipe, minus the weight cycling: replay a closed list 8
 // times, drop the first 3 (warm-up / clock ramp), take the median of the last 5
 // and divide by the iterations recorded in it. Printed, never asserted - a
-// timing assertion would fail on a busy box for no useful reason.
+// timing assertion would fail on a busy machine for no useful reason.
 double median_us(Dev& d, l0::CmdList& list, int iters) {
   std::vector<double> us;
   for (int rep = 0; rep < 8; ++rep) {

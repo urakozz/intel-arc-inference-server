@@ -2,12 +2,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
 #include <utility>
 
 #include "check.h"
+#include "server/openai.h"
 #include "tokenizer/chat_template.h"
 
 #include <nlohmann/json.hpp>
@@ -148,6 +150,36 @@ int main(int argc, char** argv) {
     }
   }
   CHECK_EQ(bad, 0);
+
+  // An edited copy of the template (one harmless line more, so a new SHA-256) renders as the original: its
+  // `is undefined` tests are the renderer's own, not a rewrite keyed to the shipped file's bytes.
+  const std::string edited = (std::filesystem::temp_directory_path() / "b70_template_test_edited.jinja").string();
+  std::ofstream(edited, std::ios::binary) << slurp(snapshot() + "/chat_template.jinja") << "\n{#- an edited copy #}";
+  const chat::Template edited_tmpl(snapshot(), edited);
+  CHECK(edited_tmpl.source_sha256() != tmpl.source_sha256());
+  CHECK_EQ(edited_tmpl.render(messages, tools, false), slurp(dir + "/template_tools.txt"));
+  std::filesystem::remove(edited);
+
+  // A request whose instructions come as OpenAI's `developer` role renders exactly as the same request as `system`.
+  auto with_role = [&](const char* role) {
+    nlohmann::json body = {{"messages", messages}};
+    body["messages"][0]["role"] = role;
+    return tmpl.render(server::parse_request(body.dump(), true).messages, nullptr, true);
+  };
+  CHECK_EQ(messages.at(0).at("role").get<std::string>(), std::string("system"));
+  CHECK_EQ(with_role("developer"), with_role("system"));
+
+  // A template the renderer cannot evaluate fails at load, naming the file.
+  const std::string broken = (std::filesystem::temp_directory_path() / "b70_template_test_broken.jinja").string();
+  std::ofstream(broken, std::ios::binary) << "{% if messages is no_such_test %}x{% endif %}";
+  bool refused = false;
+  try {
+    chat::Template broken_tmpl(snapshot(), broken);
+  } catch (const std::runtime_error& error) {
+    refused = std::string(error.what()).find(broken) != std::string::npos;
+  }
+  std::filesystem::remove(broken);
+  CHECK(refused);
   std::printf("template_test OK\n");
   return 0;
 }

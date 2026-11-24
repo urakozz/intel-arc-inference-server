@@ -8,7 +8,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-# = the box venv's `tokenizers` Python package version (0.22.2, measured
+# = the reference venv's `tokenizers` Python package version (0.22.2, measured
 # 2026-09-06). Default features keep `onig` - the regex engine the Python
 # wheels use - so the pre-tokenizer runs the same code path as the dumps.
 tokenizers = "=0.22.2"

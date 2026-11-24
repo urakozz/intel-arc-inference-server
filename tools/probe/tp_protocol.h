@@ -2,7 +2,7 @@
 // Spec 17a: the TP all-reduce's crossing protocol, as host code over 32-bit words - the mirror of
 // tools/probe/probe_tp.cl's tp_send / tp_wait (line for line) and the CPU-sum step probe_tp's host thread runs for
 // routes (H) host-bar and (H') host-read. tests/runtime/tp_crossing_protocol_test.cc runs it on host threads (two
-// "cards" and the CPU); probe_tp uses cpu_sum_chunk itself on the box, with an sfence for the write-combined BAR.
+// "cards" and the CPU); probe_tp uses cpu_sum_chunk itself on the GPU machine, with an sfence for the write-combined BAR.
 // A change to one side is a change to both: probe_tp.cl's header points here.
 //
 // The message: one call's fp32 rows (M x hidden words), cut into `chunk`-word chunks, one work-group each. Every

@@ -2,7 +2,7 @@
 """Plan 19v3b Task 1: is DFlash with several slots a card worth building? Host arithmetic on saved records, no GPU.
 
     dflash_slots_projection.py <acceptance.json> <task8 dir>
-        (on the box: ~/b70/logs/dflash-v2/baseline/acceptance.json  ~/b70/logs/dflash-v2/task8/main-0b5ef628)
+        (e.g. $B70_DATA/logs/dflash-v2/baseline/acceptance.json  $B70_DATA/logs/dflash-v2/task8/main-0b5ef628)
 
 Tokens a step, per corpus:
   DFlash  acceptance.json's engine_E at K (ids a round: the accepted drafts and the target's own id; spec 19 v2
@@ -17,7 +17,7 @@ Tokens a step, per corpus:
           the opencode corpus is every request of the opencode-session* arms.
 Costs a step in plain steps (spec 19 v3 §5.4, plan 19v3b Task 1 Step 2):
   ROW[n]   the row step of 8 rows from n slots: 1.53 at four (probe-batching, measured); at two 1.40 - measured on
-           the paged-KV branch's probe_slots_speed "2 K=3,3" arm at 4k (int8 1.38, bf16 1.42; plan: "1.4 estimated")
+           the paged-KV branch's probe_pool_speed "2 K=3,3" arm at 4k (int8 1.38, bf16 1.42; plan: "1.4 estimated")
   DRAFT    the batched DFlash draft pass: 0.217 (plan 19v3d's re-measured one-card pass; the plan's 0.29 before it)
   MTP      0.15 a draft index (the row draft; 0.136 measured at 4k, same arm) + 0.05 the head's KV fill
 DFlash / MTP = (DFlash ids a step / DFlash cost) / (MTP ids a step / MTP cost). Gate (plan): geometric mean over the

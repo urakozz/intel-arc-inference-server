@@ -1,5 +1,5 @@
 #!/bin/bash
-# Spec 6 K3: passkey retrieval at ~120k context, run ON THE BOX from the repo root.
+# Spec 6 K3: passkey retrieval at ~120k context, run on the GPU machine from the repo root.
 #   tools/probe/passkey.sh [prefill-backend ...] default: l0-int8 l0
 # For each placement (0.05, 0.5, 0.95): tools/probe/passkey.py builds the prompt in the
 # oracle container, b70-decode prefills it at --max-len 131072 and generates 8 ids
@@ -11,7 +11,7 @@
 # Spec 6 §10: MAX_LEN=auto takes the largest length the memory plan fits (b70-decode
 # prints it as "max_len: auto -> N"; bf16 head, its default here); set N_TARGET to ~95%
 # of that N. DECODE_ARGS: extra b70-decode flags (word-split), e.g. DECODE_ARGS='--spec auto'
-# for spec 8 §12's passkey at 120k with MTP (box queue row 6); unset, the runs are as before.
+# for spec 8 §12's passkey at 120k with MTP (validation queue row 6); unset, the runs are as before.
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 export ZE_AFFINITY_MASK="${ZE_AFFINITY_MASK:-0}"

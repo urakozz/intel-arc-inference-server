@@ -73,8 +73,8 @@ data/
 prof/
 traces/
 bench-out/
-# Oracle golden dumps: hundreds of MB per prompt, produced on the box by
-# tools/oracle/dump.py and never committed (tools/box.sh excludes them from sync).
+# Oracle golden dumps: hundreds of MB per prompt, produced by tools/oracle/dump.py
+# and never committed.
 oracle-out/
 oracle-out-*/
 
@@ -104,7 +104,6 @@ Thumbs.db
 *~
 
 # ---- Local, do not share ---------------------------------------------------
-# .env holds the box's address for the remote build/bench helpers (copy .env.example).
 .env
 *.local
 local.*

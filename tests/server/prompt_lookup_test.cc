@@ -323,7 +323,7 @@ void cost_262144() {
                 static_cast<unsigned long long>(worst), step_bound,
                 static_cast<unsigned long long>(drafted), lk.table_bits());
     CHECK(worst <= step_bound);
-    // Generous wall-clock bars (Release; a loaded laptop or the box): a 262144-id prompt
+    // Generous wall-clock bars (Release; a loaded laptop or the test machine): a 262144-id prompt
     // indexes in well under a second, a proposal costs far below a 32 ms decode step.
     CHECK(append_ms < 1500.0);
     CHECK(1e3 * step_ms / kSteps < 500.0);

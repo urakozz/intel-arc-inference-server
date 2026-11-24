@@ -127,7 +127,7 @@ void stop(pid_t pid) {
 void wait_ready(uint16_t port) {
   httplib::Client client("127.0.0.1", port);
   // Spec 25e: B70_SERVE_WAIT_S (seconds, default 300) - a two-card model takes longer to load,
-  // and a busy box stretches Qwen3.8's (a 61.6 s load with builds beside it, 2026-11-06, missed the old 120 s).
+  // and a busy machine stretches Qwen3.8's (a 61.6 s load with builds beside it, 2026-11-06, missed the old 120 s).
   uint32_t seconds = 300;
   if (const char* wait = std::getenv("B70_SERVE_WAIT_S")) seconds = static_cast<uint32_t>(std::strtoul(wait, nullptr, 10));
   if (seconds == 0) seconds = 300;   // 0 or not a number: the default
@@ -221,7 +221,7 @@ int main(int argc, char** argv) {
     const std::string snapshot = argv[4];
     const uint16_t port = free_port();
     // Spec 16d: B70_SERVE_ARGS (whitespace-separated) are appended to b70-serve's command line -
-    // box stage r27.golden runs `--parallel pp` (two cards) against b70-decode on ONE card. Unset: `--parallel 1`
+    // validation stage r27.golden runs `--parallel pp` (two cards) against b70-decode on ONE card. Unset: `--parallel 1`
     // (below).
     // `--spec off`: the server's default is the model's MTP head (--spec auto), whose verify rows are not bitwise
     // the plain step's (doc 14's f32 judge grades those); this test is plain greedy against b70-decode's plain list.
@@ -258,7 +258,7 @@ int main(int argc, char** argv) {
       std::printf("%s: chat of %zu prompt ids (first %u), %zu/%u generated ids identical to b70-decode\n", name.c_str(),
                   prompt_ids.size(), prompt_ids.empty() ? 0u : prompt_ids[0], compared, kGenerated);
     };
-    // Plan 13b (box stage r77.b2): B70_SERVE_CLIENTS=N (chat mode) sends every prompt from N clients at once (one
+    // Plan 13b (validation stage r77.b2): B70_SERVE_CLIENTS=N (chat mode) sends every prompt from N clients at once (one
     // thread and connection each) - under --parallel replica the two cards serve them together - and every reply is
     // held to b70-decode's ids. Unset: one client, as before.
     size_t clients = 1;

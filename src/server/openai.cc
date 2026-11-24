@@ -147,6 +147,8 @@ ToolCallOut tool_call_out(const ToolCall& call) {
 // JSON string and the chat template iterates them as an object (parsed in its own key order, as vLLM's json.loads).
 ojson normalize_message(const ojson& message) {
   ojson out = message;
+  // OpenAI's `developer` role is the newer name for `system`; the chat templates know `system` only.
+  if (out.at("role") == "developer") out["role"] = "system";
   const ojson& content = message.at("content");
   if (content.is_array()) {
     for (const ojson& part : content) {

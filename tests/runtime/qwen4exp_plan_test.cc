@@ -532,7 +532,7 @@ int main(int argc, char** argv) {
   // The 4096-row scratch against the 2048-row one at the default settings (the int8 head, the MTP head, the 1.5 GB
   // reserve, 32.53 GB cards) - the whole model one card, pp (the split chosen at 2048) and tp (the embedding on card 0):
   // what it adds to each card's plan (the prompt pass's experts), what of that decode keeps out of the experts' reach,
-  // the projected decode either way and the rule's pick, with the routes uniform (no profile here: the box's profile,
+  // the projected decode either way and the rule's pick, with the routes uniform (no profile here: the test machine's profile,
   // beside the checkpoint, decides at load). --layers 18 on one card (every expert resident): the wide chunk.
   {
     const size_t xb = loader::q4_gate_up_block_bytes(ours) + loader::q4_down_block_bytes(ours);

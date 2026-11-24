@@ -454,7 +454,7 @@ int run_decode(const DecodeArgs& a) {
     std::print(stderr, "devices: {} + {} (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
-                             "the hand-off writes it (docs/10-the-box.md)");
+                             "the hand-off writes it (docs/01-hardware.md)");
   const Settled s = settle(full, a, dev, a.path);
   if (need > s.max_len)
     throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) + " generated ids exceeds max_len " +

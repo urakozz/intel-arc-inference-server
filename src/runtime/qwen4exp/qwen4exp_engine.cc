@@ -70,7 +70,7 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
     if (!devices[0]->can_access_peer(*devices[1]))
       throw std::runtime_error("--parallel pp: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
                                "(zeDeviceCanAccessPeer is false), and the hand-off writes it. Peer access needs the "
-                               "P2P-capable kernel and both cards under one root complex (docs/10-the-box.md)");
+                               "P2P-capable kernel and both cards under one root complex (docs/01-hardware.md)");
     if (opt.timeout_ms == 0)
       throw std::invalid_argument("runtime::qwen4exp::Qwen4ExpEngine: a hand-off needs a non-zero bound");
   }

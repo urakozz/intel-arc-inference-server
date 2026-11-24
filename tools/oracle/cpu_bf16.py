@@ -1,6 +1,6 @@
 """Exact-bf16 GEMMs for the CPU oracles on a CPU without bf16 units (shared by the *_ref.py tools).
 
-The box's Xeon E5-2696 v4 has AVX2 only: no AVX-512, no bf16. In the reference image (torch 2.16.0.dev+xpu) a bf16
+The test machine's CPU has AVX2 only: no AVX-512, no bf16. In the reference image (torch 2.16.0.dev+xpu) a bf16
 CPU matmul of 2048 x 2560 x 2560 takes 44.6 s on ONE core (the emulated path) against 38 ms in fp32 on 19 cores;
 torch._grouped_mm in bf16 takes 32 s on one core against 40 ms in fp32. A 32k-id golden that
 should take two hours took more than eight.

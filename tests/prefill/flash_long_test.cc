@@ -13,7 +13,7 @@
 //       §3.1, amplified by the model, the near-tie class of spec 5 §8).
 //       WITHOUT the oracle file (the registered form): the 32704-id prefill in both modes on
 //       both backends, every logit finite, the flash-vs-composed figures printed. The 32k
-//       CPU oracle is not affordable on the box: tools/oracle/last_logits.py measured 3799 s
+//       CPU oracle is not affordable on the GPU machine: tools/oracle/last_logits.py measured 3799 s
 //       to reach 4096 ids and 11359 s to reach 8192 (2026-09-26), so 32704 is a day-class
 //       run (the golden-set bar, flash_vs_oracle_test, went with B70_PREFILL_ATTN).
 //   flash_long_test <snapshot> --128k <ids>

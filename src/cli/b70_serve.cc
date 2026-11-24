@@ -71,6 +71,8 @@ namespace {
 using cli::StdoutToStderr;
 
 server::Server* g_server = nullptr;
+// The listener that answers while the model loads (GET /health 503); listen_until_stopped hands its port to the server.
+server::LoadingListener* g_loading = nullptr;
 
 void stop_server(int) {
   if (g_server != nullptr) g_server->stop();
@@ -143,7 +145,7 @@ struct Flags {
           "exact-copy tool calls changed.",
           "l0")]] Arg<std::string> prefill_backend;
   [[=Help("off|32k|64k|128k", "the MTP head's (or DFlash drafter's) draft vocabulary.")]]
-  std::string draft_vocab = "off";   // spec 8 §11: off until the box rows decide
+  std::string draft_vocab = "off";   // spec 8 §11: off until the measured rows decide
   [[=Help("FILE", "the draft vocabulary's ids (with --draft-vocab).")]] std::string draft_vocab_ids;
 };
 
@@ -243,6 +245,8 @@ int listen_until_stopped(server::Server& server, const server::Options& options)
   g_server = &server;
   std::signal(SIGTERM, stop_server);
   std::signal(SIGINT, stop_server);
+  if (g_loading != nullptr) g_loading->stop();
+  g_loading = nullptr;
   const bool listened = server.listen();
   g_server = nullptr;
   if (!listened)
@@ -306,7 +310,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
                c0->eu_count(), c1->name().c_str(), c1->eu_count());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
-                             "and the hand-off writes it (docs/10-the-box.md)");
+                             "and the hand-off writes it (docs/01-hardware.md)");
   const std::pair<model::KolPlacement, uint32_t> pl = cli::kolibri::settle(pre, da, dev);
   const uint32_t max_len = pl.second;
   loader::KolLoadedModel model = [&] {
@@ -405,7 +409,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                c0->eu_count(), c1->name().c_str(), c1->eu_count(), da.pipe.tp() ? "tp" : "pp");
   if (devs == 2 && !da.pipe.tp() && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
-                             "and the hand-off writes it (docs/10-the-box.md)");
+                             "and the hand-off writes it (docs/01-hardware.md)");
   const cq::Settled s = cq::settle(full, da, dev, a.snapshot_dir);
   loader::Q4LoadedModel model = [&] {
     StdoutToStderr redirect;
@@ -554,7 +558,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
     throw std::runtime_error(
         "--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 is false), "
         "and the hand-off writes it. Peer access needs the P2P-capable kernel and both cards "
-        "under one root complex (docs/10-the-box.md)");
+        "under one root complex (docs/01-hardware.md)");
   loader::LoadedModel full = [&] {
     StdoutToStderr redirect;
     return loader::load(d0, a.snapshot_dir, cli::load_len(a.max_len_arg, a.trained),
@@ -684,7 +688,7 @@ int serve_tp(const TpServe& a, server::Options options) {
     throw std::runtime_error(
         "--parallel tp: the cards cannot access each other's memory (zeDeviceCanAccessPeer 0 -> 1 and 1 -> 0), and "
         "every crossing writes the other card's VRAM. Peer access needs the P2P-capable kernel and both cards under "
-        "one root complex (docs/10-the-box.md)");
+        "one root complex (docs/01-hardware.md)");
   const bool head = a.mtp_k > 0 || a.spec_lookup;
   const model::TpCrossing crossing = runtime::kTpDefaultCrossing;
   runtime::PrefillPath path;
@@ -1003,6 +1007,14 @@ int run(int argc, char** argv) {
   if (have_q4_layers && !q4_layers_auto && q4_layers == 0) throw std::runtime_error("--layers 0 would load no layer");
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   options.served_model = cli::served_name(path);
+  // GET /health answers 503 from here until the model is loaded and the server takes the port over (port 0, a test's
+  // any port, has nothing to hand over).
+  server::LoadingListener loading(options);
+  if (options.port != 0) {
+    if (!loading.start())
+      throw std::runtime_error("failed to bind http://" + options.host + ":" + std::to_string(options.port));
+    g_loading = &loading;
+  }
   cli::resolve_overrides(pipe);   // --pipeline-split under --parallel auto: pp
   if (pipe.mode == cli::Parallel::One && pipe.have_split)   // before the model is even resolved
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");

@@ -367,7 +367,8 @@ why no prefill improvement moves the decode speed.
 ## Server
 
 The server is OpenAI-compatible. `src/server/` provides `/v1/models`, `/v1/chat/completions` and
-`/v1/completions`, including OpenAI-shaped errors and SSE streaming, against the interfaces `TokIface`,
+`/v1/completions` (beside `/health`, `/version`, `/tokenize` and `/detokenize`; `server::LoadingListener` answers
+them with 503 while the model loads), including OpenAI-shaped errors and SSE streaming, against the interfaces `TokIface`,
 `TemplateIface` and `EngineIface`. `b70-serve` wires those interfaces to the checkpoint's real tokenizer and template
 and to the engine its run mode needs. The one intentional parsing deviation is that an absent `temperature` means
 greedy sampling. The parser also accepts the extension fields `min_tokens`, `ignore_eos`, `return_token_ids`, `seed`

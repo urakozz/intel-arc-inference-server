@@ -10,7 +10,7 @@ MtpCost MtpCost::bf16_head() { return MtpCost{}; }
 
 // The int8 head, in units of the int8 plain step. Verify: spec 28b's gemm_sm rows, measured 2026-11-01 by
 // probe_mtp_steps' interleaved pairs at depth 4096 (1.037 / 1.086 / 1.131; before 28b 1.18 / 1.56 / 1.79, derived from
-// spec 9 H2); spec 19 v3d's GDN step at M >= 2 (2026-11-13, the same probe, busy box): 1.039 / 1.073 / 1.100. Drafts: spec 9 H2 (34 % cheaper than bf16's),
+// spec 9 H2); spec 19 v3d's GDN step at M >= 2 (2026-11-13, the same probe, busy machine): 1.039 / 1.073 / 1.100. Drafts: spec 9 H2 (34 % cheaper than bf16's),
 // which the same run measured at 0.133 / 0.256 / 0.369.
 MtpCost MtpCost::int8_head() {
   MtpCost c;
@@ -20,7 +20,7 @@ MtpCost MtpCost::int8_head() {
 }
 
 // Spec 17d: tensor parallel (`--parallel tp`), in units of the K = 0 iteration (verify(0) + commit: 18.93 ms at depth
-// 4096). Measured 2026-11-10 by tp_mtp_test `cost` (medians of 5 interleaved rounds of 16, box shared with a CPU
+// 4096). Measured 2026-11-10 by tp_mtp_test `cost` (medians of 5 interleaved rounds of 16, machine shared with a CPU
 // job): verify M = 1..4 18.93 / 20.60 / 21.43 / 22.66 ms, drafts k = 1..3 3.01 / 6.02 / 9.00 ms at 4096 (at 32768:
 // 1.010 / 1.070 / 1.128 and 0.151 a draft). The M-row crossings make TP's verify rows dearer than one card's
 // (1.04 / 1.09 / 1.13); the draft (the whole head's layer plus the card's half of the int8 head) is 0.16 of a TP step
@@ -69,7 +69,7 @@ MtpCost MtpCost::tp_dflash() {
 
 MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
   MtpCost c;
-  // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (the benchmark record); the candidate head's rows re-measured
+  // H1/B4 paired medians at depth4096, busy machine, 2026-11-12 (the benchmark record); the candidate head's rows re-measured
   // with spec 19 v3d's final form (2026-11-14, BENCHMARKS "Round cost (spec 19 v3d)").
   // The bf16 and int4 verify rows are derived equal to int8 (the packed drafter's measured 1.224 at 8 rows, 2026-11-14).
   c.verify = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};

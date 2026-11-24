@@ -409,7 +409,7 @@ struct Probe {
       replay(list(ta), ta);
       const std::vector<RowOut> alone = outputs(ta);
       // A one-row run alone is the M = 1 list (the GEMV); inside a step of several rows its linears are spec 28b's
-      // gemm_sm - a different rounding, which spec 13 section 11.3 judges by the f32 judge (plan 13c's slots_test
+      // gemm_sm - a different rounding, which spec 13 section 11.3 judges by the f32 judge (plan 13c's pool_test
       // S4, r78.batch), not here: counted and printed, not failed. Runs of two or more rows stay bitwise.
       if (ta.size() == 1 && t.size() > 1) {
         const RowOut &x = batch[m0], &y = alone[0];

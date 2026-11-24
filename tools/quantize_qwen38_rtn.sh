@@ -27,7 +27,7 @@
 #     engine loader's rules) passes, and README.md in the export records the
 #     auto-round version, commit and patch.
 #
-# Usage (on the box, from the repo):  bash tools/quantize_qwen38_rtn.sh
+# Usage (on the GPU machine, from the repo):  bash tools/quantize_qwen38_rtn.sh
 #   overridables: MODEL, OUT, DEVICE (default 1 = second B70), VENVPY,
 #                 AR_REPO (git URL or local clone containing AR_COMMIT), AR_PATCH (1 / 0),
 #                 RTN_MIN_RAM_GB (64), EXTRA (more auto_round flags; recorded in the README)

@@ -10,7 +10,7 @@
 // last 5. The output's checksum is printed (every accumulator converges to ~1, so the mean
 // stored sum is ~16: a kernel that computed nothing would not print it).
 //
-// Device: run under tools/gpu_lock.sh (card N or box); `l0::Context(0)` takes the first device
+// Device: run on one card (ZE_AFFINITY_MASK=N) or both; `l0::Context(0)` takes the first device
 // of the (possibly masked) enumeration.
 #include <algorithm>
 #include <cstdint>

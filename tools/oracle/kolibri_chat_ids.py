@@ -8,7 +8,7 @@
 de_chat.json). The ids are the checkpoint's own chat template through transformers:
 apply_chat_template(messages, tools=..., add_generation_prompt=True, reasoning_effort=...), tokenized
 without special tokens added (Kolibri has no BOS; the template writes every special token itself).
-Run it in the oracle container (tools/box_validate/kolibri_oracle.sh does).
+Run it in the oracle container (tools/oracle/run_in_container.sh).
 """
 import os
 import sys

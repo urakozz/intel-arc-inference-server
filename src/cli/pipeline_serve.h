@@ -1,7 +1,7 @@
 #pragma once
 // Spec 16d: b70-serve under --parallel pp - what the server refuses before any device, as device-free
 // checks (tests/cli/pipeline_args_test.cc runs them on any host; b70-serve's own refusals are
-// box tests, cli_reject_serve_pp_*). The device flow is b70_serve.cc's serve_pipeline().
+// card tests, cli_reject_serve_pp_*). The device flow is b70_serve.cc's serve_pipeline().
 //
 // b70-serve takes b70-decode's flags (cli/pipeline_args.h): --parallel auto|1|pp, and the overrides
 // --pipeline-split auto|N (pp's). Under pp:

@@ -5,7 +5,7 @@
 // plus the routing diagnostic for layers < N. The head is not graded (it reads layer N-1's residual).
 //
 // Bars per layer, over every prompt row: cosine median >= 0.9998 and min >= 0.99 (PROPOSED - set from the
-// first box run, printed per layer); routing: kolibri_golden_test's rule (a set difference beyond a
+// first card run, printed per layer); routing: kolibri_golden_test's rule (a set difference beyond a
 // near-tie at B70_KOL_TIE_TOL fails).
 //
 // **The f32 judge (round 2; `--judge=<dir>`, kolibri_oracle.sh real-f32)**: the engine
@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     if (golden::exists(gdir + "/" + p + ".golden.safetensors") && golden::exists(gdir + "/" + p + ".ids"))
       prompts.push_back(p);
   if (prompts.empty()) {
-    std::printf("SKIP: no golden set in %s (tools/box_validate/kolibri_oracle.sh real)\n", gdir.c_str());
+    std::printf("SKIP: no golden set in %s (tools/oracle/kolibri_ref.py real)\n", gdir.c_str());
     return 77;
   }
   kolibri_rig::Rig rig;
@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
     if (!judge_dir.empty()) {
       const std::string jp = judge_dir + "/" + pname + ".golden.safetensors";
       if (!golden::exists(jp)) {
-        std::printf("SKIP: the f32 judge %s is absent (tools/box_validate/kolibri_oracle.sh real-f32)\n", jp.c_str());
+        std::printf("SKIP: the f32 judge %s is absent (tools/oracle/kolibri_ref.py real-f32)\n", jp.c_str());
         return 77;
       }
       J = std::make_unique<golden::Golden>(jp);

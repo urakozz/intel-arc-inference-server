@@ -166,7 +166,7 @@ constexpr uint32_t kMinAutoMaxLen = 4096;
 // --mem-reserve-gb): device memory the plan does not count - the driver's
 // own allocations, the kernel modules and command lists (decode, MTP draft / verify,
 // prefill), the int8 sign tables, Int8State's per-weight colmax temporaries, the
-// allocator's slack. An estimate, NOT a measurement: the box has to confirm or tune
+// allocator's slack. An estimate, NOT a measurement: the test machine has to confirm or tune
 // it.
 constexpr double kDefaultReserveGb = 1.5;
 

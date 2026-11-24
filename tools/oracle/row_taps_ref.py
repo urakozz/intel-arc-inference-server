@@ -9,7 +9,7 @@ prompt + force[0, row) (spec_judge.h / forced_judge.h's row numbering); P: the l
 (eager attention, layer-streamed as dump_taps.py builds it) on the int4 checkpoint dequantised as every oracle
 dequantises it:
   --dtype bf16  bf16 weights and activations, standard transformers bf16 semantics; the bf16 GEMMs run as fp32 GEMMs of
-                the bf16 values rounded once to bf16 (cpu_bf16.py: the box CPU has no bf16 units)
+                the bf16 values rounded once to bf16 (cpu_bf16.py: the test machine's CPU has no bf16 units)
   --dtype f32   every weight upcast to f32, f32 throughout (the f32 judges' arithmetic, transformers' code)
   --exact-dequant  the int4 linears' weights (q - 8) x scale kept in f32, NOT rounded to bf16 (every oracle rounds
                 them once; the engine's kernels never do: gemv.cl accumulates (q - 8) x and scales in fp32). With

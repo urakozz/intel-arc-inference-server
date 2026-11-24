@@ -76,7 +76,7 @@ def ple_table_from_file(ple_dir: str) -> None:
     """The 95.4 GiB PLE table as a file-backed (mmap) tensor instead of AutoRound's in-memory concatenation.
 
     At the pinned commit, materialising layer 1 reads the 128 `ngram_embedding.shard_*` tensors and
-    `torch.cat`s them (`disk_stream_util._assemble_sharded_tensor`): ~190 GiB at the peak on a 121 GiB box. Here
+    `torch.cat`s them (`disk_stream_util._assemble_sharded_tensor`): ~190 GiB at the peak on a 121 GiB machine. Here
     the shards are streamed once into one raw bf16 file in `ple_dir` (reused on a resume) and the table is
     `torch.from_file` of it: pages are read when a lookup touches them and the kernel may drop them again, so only
     the rows the calibration tokens hit stay resident. The file must be on a fast disk (NVMe): the first lookups

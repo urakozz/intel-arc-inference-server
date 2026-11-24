@@ -116,17 +116,15 @@ one-function tools case 1547 bytes.
 
 ### Where minja is not Jinja
 
-The checkpoint's `chat_template.jinja` (SHA-256
-`c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041`) uses Jinja's `is undefined` test, which minja
-does not support. A per-model fallback is the usual way to handle such cases, and `chat::Template` does that:
-for exactly that template hash, and no other, it rewrites that one construct to minja's
-equivalent `is not defined`, without editing the checkpoint's file.
-
-Beyond that, the bundled minja is patched in the places where it behaved differently from Jinja: Undefined kept
-apart from None, `is sameas`, `str.split()`, the `replace` filter, `dict`, index attribute getters, empty mappings
-being falsy, `none`, and the tool-call capability probe. Each patch is listed in `third_party/VERSIONS` and tested
+The bundled minja is patched in the places where it behaved differently from Jinja: Undefined kept
+apart from None, `is undefined` (Qwen's templates use it), `is sameas`, `str.split()`, the `replace` filter, `dict`,
+index attribute getters, empty mappings being falsy, `none`, and the tool-call capability probe. Each patch is listed in `third_party/VERSIONS` and tested
 against Jinja2 by `minja_ext_test`. The patches were first needed by a model's template that has since been
-removed.
+removed. Any template, the model's own or an edited copy (`--chat-template FILE`), is rendered once at load: one
+that minja cannot evaluate stops the server at startup with the file's name and minja's error.
+
+A message with the OpenAI role `developer` (the newer name for `system`) reaches the template as `system`, for
+every model: the templates know `system`, `user`, `assistant` and `tool` only.
 
 A request's `chat_template_kwargs` reach the template through `chat::Template::render(..., kwargs)` for models
 whose `server::ChatFormat` reads them. Kolibri-1 reads them (including `reasoning_effort`); Qwen only takes

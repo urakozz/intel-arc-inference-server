@@ -12,7 +12,7 @@
 //      the rows (cosine >= 0.9999) and the scores (cosine >= 0.99); the top-16 order / sets and the walk printed. The
 //      int8 drafter + int8 head arm is reported only. The tiny random drafter's score margins are not the D1
 //      checkpoint's (measured here: rows 0.99996, scores 0.9989-0.99999, walks 7 / 9): D1 gates the real drafter on
-//      the box (tools/oracle/dflash_d1.py).
+//      the test machine (tools/oracle/dflash_d1.py).
 //   4. The pieces: the window bound per row (a key at p + r - WIN is invisible, at p + r - WIN + 1 visible), the conv's
 //      look-back (row 0 never reads row -1; row r reads r - 1 only), top-k's tie / NaN / mask rules, murmur3 against
 //      dflash_ref's values, the walk's tie rule, the attention's exp (attn_exp = df_exp: within 2 fp32 ulps).
@@ -128,7 +128,7 @@ Stats compare(const dffix::Fixture& fx, uint32_t version, const dfref::Weights& 
       CHECK(sd <= 1e-4);
     } else {
       // Engine numerics on tiny random weights: the rows and the scores are gated; the sets and the walk are reported
-      // (the fixture's margins are not D1's checkpoint's - D1 gates those on the real drafter, on the box).
+      // (the fixture's margins are not D1's checkpoint's - D1 gates those on the real drafter, on the GPU machine).
       CHECK(hc >= 0.9999);
       CHECK(sc >= cos_bar);
     }

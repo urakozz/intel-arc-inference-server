@@ -55,7 +55,7 @@ namespace cli::kolibri {
 // Aleph-Alpha/Kolibri-1-BF16 at 8c8b3489's tokenizer.json, which 20b's export copies unchanged; spec 20e
 // replaced 20c's placeholder ids). "Als im Frühjahr 1871 die ersten Vermessungstrupps in das Tal von
 // Rabenhausen kamen, glaubte kaum jemand im Ort, dass hier je ein Zug halten würde. Die Gemeinde lebte vom
-// Holz". tools/box_validate/kolibri_oracle.sh synth prints the same 42 and diffs them against the file.
+// Holz". tools/oracle/kolibri_ref.py synth prints the same 42 and diffs them against the file.
 inline constexpr uint32_t kKolibriBenchPrompt[] = {
     27498, 2625,  19919, 32,    49,    56,    55,    49,    346,   7524, 744,   38897, 573,  122340,
     622,   518,   23578, 493,   18022, 266,   22233, 20353, 44,    64304, 14358, 11536, 2625, 6565,
@@ -252,7 +252,7 @@ int run_decode(const DecodeArgs& a) {
     std::print(stderr, "devices: {} + {} (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
-                             "the hand-off writes it (docs/10-the-box.md)");
+                             "the hand-off writes it (docs/01-hardware.md)");
   const std::pair<model::KolPlacement, uint32_t> pl = settle(pre, a, dev);
   const model::KolPlacement placement = pl.first;
   const uint32_t max_len = pl.second;

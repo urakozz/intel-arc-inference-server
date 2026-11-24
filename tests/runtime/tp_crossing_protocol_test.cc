@@ -8,7 +8,7 @@
 //   - a skipped data write (flag without its data) is caught as stale - never consumed silently - and on (H) the CPU
 //     forwards it poisoned so the cards catch it too; a dropped write (no flag) is a bounded timeout;
 //   - the first failure is the one kept.
-// What it does not: the card's memory model over PCIe or through the BAR (the box: probe_tp ar / bar).
+// What it does not: the card's memory model over PCIe or through the BAR (the test machine: probe_tp ar / bar).
 #include <atomic>
 #include <chrono>
 #include <cstdint>

@@ -29,7 +29,7 @@ namespace cli {
 struct CardModel {
   uint32_t device_id;
   const char* name;
-  bool tested;   // has run on this box
+  bool tested;   // has run on this machine
 };
 inline constexpr uint32_t kIntelVendor = 0x8086;
 inline constexpr CardModel kCardModels[] = {
@@ -73,7 +73,7 @@ inline Hardware check_hardware(const std::vector<l0::GpuInfo>& gpus, bool peer) 
       throw std::runtime_error(which + " is not a supported card: b70 runs on the Intel Arc Pro B70 (device id " +
                                hex4(kCardModels[0].device_id) + ") only");
     if (!m->tested)
-      throw std::runtime_error(which + " is an " + m->name + ": not yet tested on this box - b70 runs on the Intel "
+      throw std::runtime_error(which + " is an " + m->name + ": not yet tested on this machine - b70 runs on the Intel "
                                "Arc Pro B70 only");
     if (g.xe_cores != kernels::kBuiltXeCores)
       throw std::runtime_error(which + " shows " + std::to_string(g.xe_cores) + " Xe-cores; the kernels are built for " +
@@ -82,7 +82,7 @@ inline Hardware check_hardware(const std::vector<l0::GpuInfo>& gpus, bool peer) 
   }
   if (gpus.size() == 2 && !peer)
     throw std::runtime_error("two GPUs visible but they cannot access each other's memory (zeDeviceCanAccessPeer is "
-                             "false; docs/10-the-box.md) - b70 needs peer access between its two cards; run on one "
+                             "false; docs/01-hardware.md) - b70 needs peer access between its two cards; run on one "
                              "with ZE_AFFINITY_MASK=0");
   return hw;
 }

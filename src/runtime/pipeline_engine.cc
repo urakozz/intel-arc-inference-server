@@ -72,7 +72,7 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
     throw std::runtime_error(
         "--parallel pp: device 0 (" + d0.name() + ") cannot access device 1's memory "
         "(zeDeviceCanAccessPeer is false), and the hand-off writes it. Peer access needs "
-        "the P2P-capable kernel and both cards under one root complex (docs/10-the-box.md)");
+        "the P2P-capable kernel and both cards under one root complex (docs/01-hardware.md)");
   const model::ModelDesc* desc = stages[0].desc;
   if (!desc || stages[1].desc != desc)
     throw std::invalid_argument("runtime::PipelineEngine: the two stage models are not one model");

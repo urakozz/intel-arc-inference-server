@@ -1,7 +1,7 @@
 # Environment variables
 
 This page lists what `b70-serve`, `b70-decode`, the tests and the scripts in `tools/` read from the environment. It is
-a reference for people who run experiments, tests or the box scripts.
+a reference for people who run experiments, tests or the scripts.
 
 You do not need any of these to run the engine. The engine configures itself, and a command-line flag always wins
 over a variable. Leave the experiment switches unset to run what the tests ran.
@@ -18,7 +18,7 @@ The page has four parts:
 | variable | default | what it does |
 |---|---|---|
 | `HF_HOME` | `~/.cache/huggingface` | where a model's repo id is looked up: `$HF_HOME/hub/models--<org>--<name>`, at the revision `refs/main` names. The same place `hf download` writes to |
-| `ZE_AFFINITY_MASK` | unset: every card visible | read by the Level Zero driver, not by the engine. It hides cards from the process: `ZE_AFFINITY_MASK=1` leaves only the second card, which the engine then sees as device 0. On the box, never set it by hand: `tools/gpu_lock.sh` sets it together with the card's lock |
+| `ZE_AFFINITY_MASK` | unset: every card visible | read by the Level Zero driver, not by the engine. It hides cards from the process: `ZE_AFFINITY_MASK=1` leaves only the second card, which the engine then sees as device 0. |
 
 ## Switches for experiments: the engine
 
@@ -31,7 +31,7 @@ The page has four parts:
 | `B70_KV_CACHE` | both CLIs | `bf16` | the default of `--kv-cache` (`bf16` or `int8`); any other value is refused. The tests use it to run the same binaries over the int8 cache |
 | `B70_PREFILL_PROFILE` | the prompt pass | off | `1` times every phase of the prompt pass, and `b70-decode --bench --prefill-length` prints the table on stderr; `2` also names the kernel of every launch. It adds a host wait per phase, so never use it for a recorded speed |
 | `B70_PF_GDN_DUMP` | the prompt pass | unset | a directory: the inputs of three delta-net calls are written there for debugging. It waits on the host, so never use it in a timed run |
-| `B70_GIT_SHA` | `b70-decode --bench` | `unknown` | the commit printed in the bench row. The box's tree has no `.git`, so `tools/bench_decode.sh` sets it |
+| `B70_GIT_SHA` | `b70-decode --bench` | `unknown` | the commit printed in the bench row. A tree copied without `.git` cannot know it, so whoever runs the bench sets it |
 
 ## Switches for experiments: single models
 
@@ -52,14 +52,7 @@ value not listed is refused.
 
 | variable | read by | default | what it does |
 |---|---|---|---|
-| `BOX` | `box.sh`, `bench_decode.sh`, `serve_bench.sh`, `box_validate.sh`, `box_check.sh`, `box_stop.sh`, `box_tidy.sh` | none, required | the ssh target (`BOX=user@host`) of the machine with the cards. Put it in the git-ignored `.env` in the main checkout's root (copy `.env.example`; worktrees read the same file through `tools/box_env.sh`). An exported `BOX` wins |
-| `REMOTE_DIR` | the same | from the branch | the tree on the box, relative to its `$HOME`: `b70-inference-server` for main, `b70/trees/<branch>` for any other branch (`tools/box_dir.sh` has the rules); `box_validate.sh` uses `b70-inference-server-validate` |
-| `BOX_SUFFIX` | the same | from the branch | overrides the tree's suffix; `none` forces the base tree |
-| `JOBS` | `box.sh` (and every script that builds through it) | `44` | parallelism of the remote build |
-| `BUILD_DIR`, `CMAKE_ARGS` | `box.sh` | `build`, empty | the build directory on the box and extra `-D` flags for the configure step |
-| `MODEL`, `DEPTH`, `TG`, `RUNS`, `PP`, `PP_CHUNK`, `PP_BACKEND`, `MAX_LEN` | `bench_decode.sh` | Qwen3.8's repo id, `4096`, `256`, `3`, the rest unset | the same as its flags (`--model`, `--depth`, ...). An unset variable adds nothing to the command, so the command stays the one every earlier row used. It also forwards `ZE_AFFINITY_MASK` |
-| `MODEL`, `PORT`, `SERVED_NAME`, `RUNS` | `serve_bench.sh` | Qwen3.8's snapshot in the box's HF cache, `8000`, `b70`, `3` | the served checkpoint (plain: `--spec off`), its port, the model name the requests carry, and the number of llama-benchy invocations |
-| `SNAP_QWEN`, `SNAP_ORNITH`, `SNAP_KOLIBRI`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the three checkpoints, `0`, `8013 + 100 x DEVICE` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
+| `B70_DATA` | tests (at configure time), `tools/ocloc_cache.py`, `tools/quantize/*.sh` | unset | the root of the reference data some tests and tools read (captures under `logs/` and `scratch/`, quantize output and logs). Unset, those tests skip (exit 77) and the quantize scripts stop and ask for it. It also places the ocloc cache at `$B70_DATA/cache/ocloc`, else `~/.cache/b70-ocloc` |
 | `ORACLE_MODEL` / `ORACLE_SNAP`, `ORACLE_THREADS`, `ORACLE_IMAGE`, `ORACLE_MEMORY`, `HF_CACHE`, `REPO_DIR` | `tools/oracle/run_in_container.sh` and the scripts that call it (`golden.sh`, `check.sh`) | Qwen3.8 in the HF cache, all threads, the script's reference image, `64g`, `~/.cache/huggingface`, this tree | the CPU reference's checkpoint (a repo directory in the cache, or an absolute snapshot path, which wins), its CPU threads, the container, its memory cap, and the two mounts. `golden.sh` adds `OUT_DIR` (`oracle-out`), `IDS_DIR` (`tests/golden/prompts`) and `PROMPTS` (`prose code cjk`) |
 
 ## Test-only

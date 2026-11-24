@@ -18,6 +18,7 @@
 #include <utility>
 
 #include <httplib.h>
+#include <nlohmann/json.hpp>
 
 #include "server/batch_engine.h"
 #include "server/lookup_in_dflash.h"
@@ -64,7 +65,64 @@ std::string server_error(const std::exception& error) {
 // during a long prefill writes nothing that could fail).
 constexpr auto kClientPoll = std::chrono::milliseconds(200);
 
+// Every route b70-serve answers - the Server's and, while the model loads, the LoadingListener's.
+constexpr const char* kChatRoute = "/v1/chat/completions";
+constexpr const char* kCompletionsRoute = "/v1/completions";
+constexpr const char* kModelsRoute = "/v1/models";
+constexpr const char* kTokenizeRoute = "/tokenize";
+constexpr const char* kDetokenizeRoute = "/detokenize";
+constexpr const char* kHealthRoute = "/health";
+constexpr const char* kVersionRoute = "/version";
+
+// GET /version: the project's version (CMake's project(VERSION)), the same before and after the load.
+void version_route(httplib::Server& svr) {
+  svr.Get(kVersionRoute, [](const httplib::Request&, httplib::Response& response) {
+    response.set_content(nlohmann::json{{"version", B70_VERSION}}.dump(), "application/json");
+  });
+}
+
 }  // namespace
+
+struct LoadingListener::Impl {
+  httplib::Server svr;
+  std::thread thread;
+  std::string host;
+  int port = 0;
+};
+
+LoadingListener::LoadingListener(const Options& opts) : impl_(std::make_unique<Impl>()) {
+  impl_->host = opts.host;
+  impl_->port = opts.port;
+  const auto loading = [](const httplib::Request&, httplib::Response& response) {
+    response.status = 503;
+    response.set_content(error_body("the model is still loading; GET /health answers 200 once it is ready",
+                                    "server_error"),
+                         "application/json");
+  };
+  impl_->svr.Post(kChatRoute, loading);
+  impl_->svr.Post(kCompletionsRoute, loading);
+  impl_->svr.Post(kTokenizeRoute, loading);
+  impl_->svr.Post(kDetokenizeRoute, loading);
+  impl_->svr.Get(kModelsRoute, loading);
+  impl_->svr.Get(kHealthRoute, [](const httplib::Request&, httplib::Response& response) {
+    response.status = 503;
+    response.set_content(R"({"status":"loading"})", "application/json");
+  });
+  version_route(impl_->svr);
+}
+
+LoadingListener::~LoadingListener() { stop(); }
+
+bool LoadingListener::start() {
+  if (!impl_->svr.bind_to_port(impl_->host, impl_->port)) return false;
+  impl_->thread = std::thread([this] { (void)impl_->svr.listen_after_bind(); });
+  return true;
+}
+
+void LoadingListener::stop() {
+  impl_->svr.stop();
+  if (impl_->thread.joinable()) impl_->thread.join();
+}
 
 struct Server::Impl {
   httplib::Server svr;
@@ -171,17 +229,28 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     impl_->sched->start();
   }
   impl_->svr.set_tcp_nodelay(opts_.tcp_nodelay);
-  impl_->svr.Post("/v1/chat/completions",
+  impl_->svr.Post(kChatRoute,
                   [this](const httplib::Request& request, httplib::Response& response) {
                     handle(request, response, true);
                   });
-  impl_->svr.Post("/v1/completions",
+  impl_->svr.Post(kCompletionsRoute,
                   [this](const httplib::Request& request, httplib::Response& response) {
                     handle(request, response, false);
                   });
-  impl_->svr.Get("/v1/models", [this](const httplib::Request&, httplib::Response& response) {
+  impl_->svr.Get(kModelsRoute, [this](const httplib::Request&, httplib::Response& response) {
     response.set_content(models_body(opts_.served_model, impl_->created), "application/json");
   });
+  impl_->svr.Post(kTokenizeRoute, [this](const httplib::Request& request, httplib::Response& response) {
+    tokenize(request, response);
+  });
+  impl_->svr.Post(kDetokenizeRoute, [this](const httplib::Request& request, httplib::Response& response) {
+    detokenize(request, response);
+  });
+  // The Server exists only once the model is loaded: it is ready (the LoadingListener answers 503 before it).
+  impl_->svr.Get(kHealthRoute, [this](const httplib::Request&, httplib::Response& response) {
+    response.set_content(nlohmann::json{{"status", "ok"}, {"model", opts_.served_model}}.dump(), "application/json");
+  });
+  version_route(impl_->svr);
 }
 
 Server::~Server() {
@@ -710,6 +779,61 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
   const std::string text = record.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
   std::fwrite(text.data(), 1, text.size(), f);
   std::fclose(f);
+}
+
+// vLLM's /tokenize: {"prompt": text} as /v1/completions reads it, or {"messages": [...]} rendered as
+// /v1/chat/completions renders them (the same parse, roles, template and kwargs) - the ids a request would prefill.
+// The prompt always ends with the assistant turn's start: add_generation_prompt false and continue_final_message are
+// refused.
+void Server::tokenize(const httplib::Request& request, httplib::Response& response) {
+  try {
+    const nlohmann::json body = nlohmann::json::parse(request.body, nullptr, /*allow_exceptions=*/false);
+    if (!body.is_object()) throw BadRequest("request body must be a JSON object");
+    if (body.contains("add_generation_prompt") && body.at("add_generation_prompt") == false)
+      throw BadRequest("add_generation_prompt false is not supported: the prompt always ends with the assistant "
+                       "turn's start, as a chat request's does");
+    if (body.contains("continue_final_message") && body.at("continue_final_message") == true)
+      throw BadRequest("continue_final_message is not supported: the prompt always ends with the assistant turn's "
+                       "start, as a chat request's does");
+    const Request parsed = parse_request(request.body, body.contains("messages"));
+    std::vector<uint32_t> ids;
+    {
+      std::lock_guard<std::mutex> lock(impl_->prompt_mutex);
+      ids = deps_.tok.encode(render_prompt(parsed));
+    }
+    const uint32_t max_len = impl_->batch ? impl_->batch->max_len() : deps_.engine.max_len();
+    response.set_content(nlohmann::json{{"count", ids.size()}, {"max_model_len", max_len}, {"tokens", ids}}.dump(),
+                         "application/json");
+  } catch (const BadRequest& error) {
+    response.status = 400;
+    response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");
+  } catch (const std::exception& error) {
+    response.status = 500;
+    response.set_content(server_error(error), "application/json");
+  }
+}
+
+// vLLM's /detokenize: {"tokens": [ids]} -> {"prompt": text}, special tokens kept (the text the ids are).
+void Server::detokenize(const httplib::Request& request, httplib::Response& response) {
+  try {
+    const nlohmann::json body = nlohmann::json::parse(request.body, nullptr, /*allow_exceptions=*/false);
+    if (!body.is_object()) throw BadRequest("request body must be a JSON object");
+    if (!body.contains("tokens") || !body.at("tokens").is_array()) throw BadRequest("tokens must be an array of ids");
+    const uint32_t vocab = deps_.tok.vocab_used();
+    std::vector<uint32_t> ids;
+    for (const nlohmann::json& id : body.at("tokens")) {
+      if (!id.is_number_integer() || id.get<int64_t>() < 0 || id.get<int64_t>() >= vocab)
+        throw BadRequest("tokens must be ids in [0, " + std::to_string(vocab) + "), got " + id.dump());
+      ids.push_back(id.get<uint32_t>());
+    }
+    response.set_content(nlohmann::json{{"prompt", deps_.tok.decode(ids)}}.dump(), "application/json");
+  } catch (const BadRequest& error) {
+    response.status = 400;
+    response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");
+  } catch (const std::exception& error) {
+    response.status = 500;
+    response.set_content(server_error(error), "application/json");
+  }
 }
 
 void Server::handle(const httplib::Request& request, httplib::Response& response, bool chat) {

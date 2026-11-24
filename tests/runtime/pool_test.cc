@@ -1,7 +1,7 @@
 // Spec 13c (plan 13c Tasks 2-3): runtime::Engine's sequence slots on the card - several requests on one B70.
 //
 // One engine: Qwen3.8 with its MTP head and the int8 lm_head (the served form), 4 sequences sharing a KV page pool of
-// 20 pages (40960 positions; a request up to 36864 - spec 31), the KV form B70_KV_CACHE's (slots_kv8_test: int8).
+// 20 pages (40960 positions; a request up to 36864 - spec 31), the KV form B70_KV_CACHE's (pool_kv8_test: int8).
 // Prompts: long32k / code / prose / long, cut per slot.
 //
 //   S1  a slot alone is today's engine: the same session (prefill, 32 plain steps, 8 MTP iterations at K = 3) in slot 0
@@ -18,7 +18,7 @@
 //       batched step leaves each slot as after its run alone.
 //   S4  B1 by the f32 judge (spec 13 §11.3): four requests decoded together (32 batched plain steps, then 8 batched
 //       greedy MTP iterations at K = 1 each - 8 rows) against each alone (the slot's own lists): identical, or
-//       spec_judge::streams' rule (tag slots_<kv>_<n>: the int8 head's references) - a divergence whose context has no
+//       spec_judge::streams' rule (tag pool_<kv>_<n>: the int8 head's references) - a divergence whose context has no
 //       f32 reference yet AWAITS it (exit 77).
 //   S5  determinism: the S4 batched run twice from the same state gives the same ids.
 //   S8  plan 40a Task 3, the row steps of 16 and 32 rows (an engine that has them: the MTP head, Qwen3.8): W1 bitwise -
@@ -29,7 +29,7 @@
 //       the f32 judge - the four requests decoded together at K 7 (32 rows) and K 3 (16 rows), the drafts each one's
 //       own plain stream (S4's), against each alone, S4's rule and tag; W4 (PERF-120) the same at K 1 (8 rows) on the
 //       16-row list (Engine::probe_rows_wide_from - what an 8-row step at depth runs).
-//   `--mtp off` (slots_nomtp_test): the engine without the head - one GDN state a slot (SlotBuffers' states): S1 and
+//   `--mtp off` (pool_nomtp_test): the engine without the head - one GDN state a slot (SlotBuffers' states): S1 and
 //   S2 with plain steps, S3's isolation over a plain four-row step, S4 / S5 plain rows only; no S6.
 //   S6  the batched drafts (Engine::draft_rows: one head pass per draft index for several slots): slots 0..2 at K 3 /
 //       2 / 1 against each slot's own draft lists from the same state - the drafts printed (equal unless a near-tie:
@@ -37,7 +37,7 @@
 //       drafting) and every slot's state and committed KV byte-identical (a draft writes only its slot's head KV
 //       rows past its last committed position).
 //   S1 prints its session's digest - the same line from another build is the "bitwise to main" check.
-//   `--pool` (slots_pool_test, slots_pool_kv8_test; spec 31 / plan 31 Task 5): the same engine; sequence 0's lone
+//   `--pool` (pool_pages_test, pool_pages_kv8_test; spec 31 / plan 31 Task 5): the same engine; sequence 0's lone
 //   session (a 5000-id prompt over three pages, 16 plain steps, 4 MTP iterations at K = 3) with its pages handed out
 //   in order is the reference:
 //   P1  the same session gives the reference's ids and every step's logits bitwise with its pages handed out reversed,
@@ -48,8 +48,8 @@
 //   P3  a request grows past 32768 while the others are empty, the same ids in sequence 3 as in sequence 0.
 //   P4  with no page free, max_verify_k() stops at the page's end and a verify that needs the next page is refused
 //       with nothing of the sequence written; it then continues as an uninterrupted request does.
-// Plan 31 Task 12 (ornith_slots_test): the same cases on Ornith (its MoE layers and MoE MTP head; the KV form
-// B70_KV_CACHE's - ornith_slots_kv8_test / ornith_slots_pool_kv8_test: int8, PERF-64), the S4 tag `ornith_slots_`.
+// Plan 31 Task 12 (ornith_pool_test): the same cases on Ornith (its MoE layers and MoE MTP head; the KV form
+// B70_KV_CACHE's - ornith_pool_kv8_test / ornith_pool_pages_kv8_test: int8, PERF-64), the S4 tag `ornith_pool_`.
 // `--one-slot` adds S0: S1's session in a one-request engine of 16384 positions first (loaded, run and freed before the
 // pool's engine) - slot 0's session of the pool's engine gives its ids bitwise (the lists differ: the one-request
 // engine's deferred delta-net rows and contiguous KV against the slots' state slots and pages).
@@ -525,7 +525,7 @@ bool pool_cases(Ctx& c, const std::vector<uint32_t>& prompt, const std::vector<u
   // The reference: in order.
   reset_all(e);
   const Session ref = session(c, 0, prompt);
-  std::printf("slots_test --pool: sequence 0's session, its pages in order (%s): ids %016llx logits %016llx\n",
+  std::printf("pool_test --pool: sequence 0's session, its pages in order (%s): ids %016llx logits %016llx\n",
               pages_str(e.pool_pages_of(0)).c_str(), (unsigned long long)fnv(ref.ids.data(), ref.ids.size() * 4),
               (unsigned long long)fnv(ref.logits.data(), ref.logits.size() * 8));
   // P1, reversed: sequences 1..3 take a page each and give them back in that order - the next three come out reversed.
@@ -942,7 +942,7 @@ int pool_main(const std::string& checkpoint) {
   Engine e(ctx, loader::load(ctx, checkpoint, total, true, loader::LmHeadForm::Int8), total, false,
            runtime::default_kv_cache(), nullptr, std::vector<uint32_t>(kSeqs, kCap), kPoolPages);
   e.prepare_prefill();
-  std::printf("slots_test --pool: 4 sequences up to %u sharing %u pages of %u, %s KV; %s\n", e.max_len(),
+  std::printf("pool_test --pool: 4 sequences up to %u sharing %u pages of %u, %s KV; %s\n", e.max_len(),
               e.kv_pool_pages(), runtime::kKvPage, runtime::kv_cache_name(e.kv_cache()), e.memory_line().c_str());
   CHECK_EQ(e.slots(), 4u);
   CHECK_EQ(e.slot_base(1), runtime::kv_pages(kCap) * runtime::kKvPage);
@@ -952,12 +952,12 @@ int pool_main(const std::string& checkpoint) {
   CHECK(dies([&] { e.kv_row(0, e.pages_held(0) * runtime::kKvPage); }));
   CHECK(dies([&] { e.select(e.slots()); }));
   CHECK(dies([&] { e.save_kv(0, 1, nullptr); }));
-  std::printf("slots_test --pool: kv_row, select and save_kv past their bounds end the process (contracts)\n");
+  std::printf("pool_test --pool: kv_row, select and save_kv past their bounds end the process (contracts)\n");
   Ctx c(ctx, e);
   const bool ok = pool_cases(c, prompt, cut(code, 0, 1200), cut(prose, 0, 2500), cut(long32k, 0, 33500),
                              cut(long32k, 0, runtime::kKvPage - 2));
   const bool shared = pool_share(c, cut(long32k, 0, 17000), cut(code, 0, 1000), cut(prose, 0, 2000), cut(long32k, 3, 3000));
-  std::printf("slots_test --pool: %s\n", ok && shared ? "PASS" : "FAIL");
+  std::printf("pool_test --pool: %s\n", ok && shared ? "PASS" : "FAIL");
   return ok && shared ? 0 : 1;
 }
 
@@ -983,7 +983,7 @@ int main(int argc, char** argv) {
   Engine e(ctx, loader::load(ctx, checkpoint, total, mtp, loader::LmHeadForm::Int8), total, false,
            runtime::default_kv_cache(), nullptr, std::vector<uint32_t>(kSeqs, kCap), kPoolPages);
   e.prepare_prefill();
-  std::printf("slots_test: %u sequences up to %u sharing %u KV pages, %s KV; %s\n", e.slots(), kCap, e.kv_pool_pages(),
+  std::printf("pool_test: %u sequences up to %u sharing %u KV pages, %s KV; %s\n", e.slots(), kCap, e.kv_pool_pages(),
               runtime::kv_cache_name(e.kv_cache()), e.memory_line().c_str());
   CHECK_EQ(e.slots(), kSeqs);
   CHECK_EQ(e.slot_base(2), 2 * runtime::kv_pages(kCap) * runtime::kKvPage);
@@ -998,12 +998,12 @@ int main(int argc, char** argv) {
   ok &= s1(c, p1, one_slot ? &one : nullptr);
   ok &= s2(c, p1, p2, p3);
   ok &= s3(c, p_deep, p1, p2, p3);
-  const std::string tag = std::string(e.model().desc->is_moe() ? "ornith_slots_" : "slots_") +
+  const std::string tag = std::string(e.model().desc->is_moe() ? "ornith_pool_" : "pool_") +
                           runtime::kv_cache_name(e.kv_cache()) + (e.mtp() ? "" : "_nomtp");
   Alone alone;
   ok &= s4(c, {p_deep, p1, p2, p3}, tag, alone);
   if (e.mtp()) ok &= s6(c, {p_deep, p1, p2, p3});
   if (e.max_rows() > Engine::kMaxRows) ok &= s8(c, {p_deep, p1, p2, p3}, tag, alone);
-  std::printf("slots_test: %s\n", ok ? "PASS" : "FAIL");
-  return spec_judge::exit_code(ok, "slots_test");
+  std::printf("pool_test: %s\n", ok ? "PASS" : "FAIL");
+  return spec_judge::exit_code(ok, "pool_test");
 }

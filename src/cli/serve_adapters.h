@@ -114,7 +114,7 @@ struct EngineAdapter : server::EngineIface {
     }
     if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--spec mtp needs the model's MTP head loaded");
     if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --spec mtp: pick one proposer");
-    // TODO(spec 19e Task 2, engine part, box): a model without an MTP head has no verify lists
+    // TODO(spec 19e Task 2, engine part, card): a model without an MTP head has no verify lists
     // today; it needs the M = 2..8 verify lists captured on their own.
     if (lookup_ && !eng.mtp())
       throw std::runtime_error("--spec lookup needs the verify lists, which runtime::Engine "
@@ -149,7 +149,7 @@ struct EngineAdapter : server::EngineIface {
   // one's generation is over: nothing calls prefill() again until the
   // previous request's last step() has returned to server.cc's loop and a
   // new one has been accepted). One request is therefore always exactly one
-  // line, delayed by one request -- `tools/serve_bench.sh`'s host-sampling
+  // line, delayed by one request -- the serve benchmark's host-sampling
   // measurement sends one trailing no-op request to flush the last line.
   void prefill(const std::vector<uint32_t>& ids) override {
     begin_request();
@@ -377,7 +377,7 @@ struct EngineAdapter : server::EngineIface {
   // verify list's inputs; Engine::draft writes the same slots) -> verify(k) -> accept on the
   // host (greedy: argmax; sampled: the point-mass rule) -> the commit deferred as above.
   // **Unvalidated on the card** (written on the Mac): D2 (greedy output == --spec off on the
-  // golden set and A4) and the sampled run's reproducibility are box rows (plan 19e Task 2).
+  // golden set and A4) and the sampled run's reproducibility are card rows (plan 19e Task 2).
   uint32_t verify_k() override { return lookup_ ? runtime::Engine::kMaxDraft : 0; }
 
   std::vector<uint32_t> step_drafts(const server::Sampling& sampling,
@@ -676,7 +676,7 @@ struct EngineAdapter : server::EngineIface {
   // prefill() and ingest() re-arm it - every request begins with one of them
   // (server::PrefixSession::begin) and nothing calls them mid-generation - so the same
   // seeded request draws the same ids however long the server has run, and an unseeded
-  // one never continues an earlier request's stream (the box's r12.d2, 2026-10-22: a
+  // one never continues an earlier request's stream (the test machine's r12.d2, 2026-10-22: a
   // second identical seeded request differed when the RNG seeded once per process).
   void sample_into_control(const server::Sampling& sampling, const void* row, std::span<const uint32_t> tail = {}) {
     seed_rng(sampling);

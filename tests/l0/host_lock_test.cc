@@ -5,7 +5,7 @@
 //     its size) and works like Host memory on every card of the one context: a copy out of it, and a kernel reading
 //     it through a pointer table (indirect access, the PLE gather's way).
 //  3. Under a limit that does not cover the plan, HostLocked is plain Host memory and nothing is locked.
-// Both cards when two are visible (run under tools/gpu_lock.sh box), else card 0.
+// Both cards when two are visible (nothing else on them), else card 0.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>

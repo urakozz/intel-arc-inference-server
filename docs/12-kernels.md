@@ -110,7 +110,7 @@ below, so most of the work in this doc is about reading the weights at the memor
 ### The first per-launch anatomy
 
 This is the only complete per-launch breakdown. The step then was 42.141 ms/token, with the bf16 `lm_head`, the
-first attention kernel and 645 launches, every row measured in situ on an idle box:
+first attention kernel and 645 launches, every row measured in situ on an idle machine:
 
 | group | ms/token | share |
 |---|---|---|
@@ -408,7 +408,7 @@ the other rows hold, and that is why the tuning table needs no M column.
 
 ### Measured
 
-On one card with the int8 head at depth 4096, on a busy box, the verify step costs 1.04 / 1.09 / 1.14 /
+On one card with the int8 head at depth 4096, on a busy machine, the verify step costs 1.04 / 1.09 / 1.14 /
 1.18 / 1.30 / 1.36 / 1.57 plain steps at M = 2..8, against `gemv`'s 1.16 up to 3.17.
 
 ### `gemm_sm_wide` - the same rows past 16
@@ -1077,7 +1077,7 @@ moved a DFlash verify row's logits by up to 9 and its argmax off the f32 top. Ra
 Which attention a list binds comes from the table in `runtime/verify_attn.h`, by M, KV form and key count: v2 at
 M = 1 always, and DPAS at M >= 2 from a measured depth. For bf16: M = 2 from 11585 keys, M = 3..5 from 4096, M =
 6..8 always. For int8: M = 2 from 11585, M = 3..4 from 4096. The paired v2/DPAS time ratio at 32768 keys is 1.22
-(bf16, M = 2), 1.71 (M = 4) and 8.22 (M = 8), timed on a busy box. A later long-context rework (int8 K by 2D reads,
+(bf16, M = 2), 1.71 (M = 4) and 8.22 (M = 8), timed on a busy machine. A later long-context rework (int8 K by 2D reads,
 S split by key atom, P·V by dimension atom) made the whole verify step at 150k keys 11.4% faster in bf16 and 20.5%
 faster in int8, bitwise the previous kernel. Re-timing on that kernel would move four of the thresholds, but each
 move changes rounding, so they stay until the f32 judge has checked them.

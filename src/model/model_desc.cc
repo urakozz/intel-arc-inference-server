@@ -27,7 +27,7 @@ struct TableTuning {
 };
 
 // Qwen3.8's (layout, S): the decision block of the
-// GEMV probe, measured on the box:
+// GEMV probe, measured on the GPU machine:
 //
 //   Task 4 production map: out/o_proj L0 S4, q||k||v L0 S2,
 //   qkv||z L1 S1, gate||up L0 S8, down L0 S4.

@@ -1,6 +1,6 @@
-// Spec 20c Task 3: load_kolibri1 on the card (box only; label `checkpoint;kolibri`), one device.
+// Spec 20c Task 3: load_kolibri1 on the card (GPU only; label `checkpoint;kolibri`), one device.
 //   kolibri1_load_checkpoint_test <snapshot> [int8|bf16] [layers]
-// Loads the checkpoint (a synthetic one from tools/box_validate/kolibri_oracle.sh synth, or the real
+// Loads the checkpoint (a synthetic one from tools/oracle/kolibri_ref.py synth, or the real
 // one truncated to its first `layers` - development mode), prints the report, and asserts: zero
 // unconsumed tensors, the part's bytes equal to kol_device_weight_bytes (the planner's figure), the
 // RoPE table's size, and device bytes read back against the mmapped source at the edges a wrong

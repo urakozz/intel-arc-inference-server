@@ -1,4 +1,4 @@
-// Spec 20c Task 6: Kolibri-1 across two cards on spec 16b's pieces (box only; label checkpoint;kolibri;pp).
+// Spec 20c Task 6: Kolibri-1 across two cards on spec 16b's pieces (GPU only; label checkpoint;kolibri;pp).
 //   kolibri_pp_test <synthetic checkpoint> <real checkpoint> <ids>
 //
 //   (a) the synthetic checkpoint: --pp 1 against --pp 2 --pipeline-split 3: the prompt + 32 greedy tokens - the tokens, logits, route rows, every full layer's KV and

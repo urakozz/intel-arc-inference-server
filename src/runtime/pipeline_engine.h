@@ -293,7 +293,7 @@ class PipelineEngine {
     double wall_ms = 0;
     std::array<double, kPpDevices> busy_ms{}, busy_max_ms{};
     std::array<size_t, kPpDevices> launches{};
-    // What the walk should have appended (step_stage_launches per chunk, the head) - the box
+    // What the walk should have appended (step_stage_launches per chunk, the head) - the test machine
     // test holds `launches` to it.
     std::array<size_t, kPpDevices> expected_launches{};
   };

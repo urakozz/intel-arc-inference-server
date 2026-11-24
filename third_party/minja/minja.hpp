@@ -1412,6 +1412,7 @@ public:
               if (name == "iterable") return l.is_iterable();
               if (name == "sequence") return l.is_array();
               if (name == "defined") return !l.is_undefined();   // b70 patch: None is defined
+              if (name == "undefined") return l.is_undefined();  // b70 patch: Jinja's `is undefined`
               if (name == "true") return l.to_bool();
               if (name == "false") return !l.to_bool();
               throw std::runtime_error("Unknown type for 'is' operator: " + name);

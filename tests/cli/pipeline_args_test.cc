@@ -1,8 +1,8 @@
 // Spec 16b: the --parallel flag and the pipeline's overrides (cli/pipeline_args.h) on the host -
 // the parse and every refusal that needs no device. The CLI's own registrations
-// (cli_reject_pipeline_*, cli_reject_pp_*) drive the shipped binary on the box; this is the same
+// (cli_reject_pipeline_*, cli_reject_pp_*) drive the shipped binary on the GPU machine; this is the same
 // logic without it. Spec 16d: and b70-serve's (cli/pipeline_serve.h) - what --parallel pp serves
-// and what it refuses before the device (the box's cli_reject_serve_pp_* drive the binary). The
+// and what it refuses before the device (the test machine's cli_reject_serve_pp_* drive the binary). The
 // served name (cli/served_name.h), the --spec rule (cli/spec_args.h) and the hardware gate's rule
 // (cli/hardware_check.h, on made-up driver reports) are checked here too.
 #include <cstdio>
@@ -238,9 +238,9 @@ void check_hardware_rule() {
   CHECK(says([&] { cli::check_hardware({g}, false); }, "is not an Intel GPU (vendor 0x10DE)"));
   g = b70();
   g.device_id = 0xE211;
-  CHECK(says([&] { cli::check_hardware({g}, false); }, "Intel Arc Pro B60: not yet tested on this box"));
+  CHECK(says([&] { cli::check_hardware({g}, false); }, "Intel Arc Pro B60: not yet tested on this machine"));
   g.device_id = 0xE222;
-  CHECK(says([&] { cli::check_hardware({g}, false); }, "Intel Arc Pro B65: not yet tested on this box"));
+  CHECK(says([&] { cli::check_hardware({g}, false); }, "Intel Arc Pro B65: not yet tested on this machine"));
   g.device_id = 0x56A0;
   CHECK(says([&] { cli::check_hardware({g}, false); }, "device id 0x56A0) is not a supported card"));
   g = b70();

@@ -448,7 +448,7 @@ class Engine {
   uint32_t slot_base(uint32_t slot) const { return seqs_.at(slot).base; }
   // Plan 19v3b Task 0 - the KV page table's host copy (empty with one slot).
   const std::vector<uint32_t>& kv_page_table() const { return pages_; }
-  // Probes (probe_slots_speed --profile-rows): what the row lists bind, to build them again with events.
+  // Probes (probe_pool_speed --profile-rows): what the row lists bind, to build them again with events.
   const BatchRowsBind& rows_bind() const { return rows_bind_; }
   // The cache row (every FA layer's, main and head) of slot q's position p: below the positions its pages hold with a
   // KV page pool, max_len with one sequence.

@@ -1,7 +1,7 @@
 // kolibri_golden_test - spec 20 §5 KL2 (decode): Kolibri-1's engine against tools/oracle/kolibri_ref.py
 // (spec 20a) - each golden prompt x 32 greedy tokens - with the per-layer ROUTING DIAGNOSTIC.
 //
-// **The golden files** (kolibri_ref.py `run`; tools/box_validate/kolibri_oracle.sh synth|real):
+// **The golden files** (kolibri_ref.py `run`; tools/oracle/kolibri_ref.py synth|real):
 //   <oracle dir>/<prompt>.ids                 Kolibri's tokenisation, no BOS
 //   <oracle dir>/<prompt>.golden.safetensors
 //     logits             F32  [T + gen][128000]   row t < T: prompt position t; row T + j: the forward
@@ -33,7 +33,7 @@
 // after it are decode's, as before.
 //
 // **The f32 judge (round 2; `--judge=<dir>`)**: kolibri_ref.py run --mode f32 --force
-// <the golden's tokens> (tools/box_validate/kolibri_oracle.sh synth-f32 | real-f32), its rows the golden's contexts.
+// <the golden's tokens> (tools/oracle/kolibri_ref.py synth-f32 | real-f32), its rows the golden's contexts.
 // The engine passes when it is no further from f32 than the bf16 golden, over all prompts together (the synthetic
 // checkpoints' 5 random layers are chaotic: the bf16 golden itself misses 15 / 32 of prose's rows against f32 and
 // differs from it in 43 % of the expert sets - one prompt's count is a coin toss):
@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
     if (golden::exists(gdir + "/" + p + ".golden.safetensors") && golden::exists(gdir + "/" + p + ".ids"))
       prompts.push_back(p);
   if (prompts.empty() || prompts[0] != "prose") {
-    std::printf("SKIP: %s/prose.{ids,golden.safetensors} is absent (tools/box_validate/kolibri_oracle.sh)\n", gdir.c_str());
+    std::printf("SKIP: %s/prose.{ids,golden.safetensors} is absent (tools/oracle/kolibri_ref.py)\n", gdir.c_str());
     return 77;
   }
   const model::Kolibri1Desc pre = loader::kolibri1_checkpoint_desc(snap);

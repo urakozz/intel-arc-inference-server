@@ -106,7 +106,7 @@ inline void check_int8_prefill_kv8(runtime::PrefillBackend backend, runtime::KvC
 // The startup notice while the int8 prompt pass is on - what it costs, measured against the bf16 prompt pass. Printed
 // once, with the startup lines (b70-serve, b70-decode), for a dense model only: a MoE model's l0-int8 is its W4A8
 // experts beside bf16 mixer linears (open-work 16), not what these numbers measured.
-// Measured 2026-11-21 on Qwen3.8-27B (PERF-114's box turn: every linear int8, the int8 context, int8 attention scores),
+// Measured 2026-11-21 on Qwen3.8-27B (PERF-114's card turn: every linear int8, the int8 context, int8 attention scores),
 // one card, served, MTP on, two interleaved rounds: 1.109 / 1.145 / 1.177 / 1.216x the earlier MLP-only int8 pass at
 // 3.9k / 30k / 61k / 122k ids (1.40-1.47x l0); top-1 582 / 585 over 4k-64k against l0 on the bf16 cache; 0 of 12
 // exact-copy requests (8k-99k) differ from l0; the golden gates 93 / 93 and the long gate 32 / 32.

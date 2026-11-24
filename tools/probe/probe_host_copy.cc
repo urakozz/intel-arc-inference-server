@@ -1,4 +1,4 @@
-// Spec 7 P0: pinned host memory on the T5810 - the largest l0 Host allocation the
+// Spec 7 P0: pinned host memory on the test machine - the largest l0 Host allocation the
 // driver gives, and device<->host copy bandwidth on an immediate list for the
 // shapes the prefix cache moves: one KV block (128 MiB), one state snapshot
 // (gdn_state 144 MiB + conv_ring 15 MiB, two copies), and a KV position range as

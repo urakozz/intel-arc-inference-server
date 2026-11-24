@@ -3,7 +3,7 @@
 // head KV fill (runtime/prefill/step.cc step_mtp_kv) - formed exactly as runtime/capture.cc
 // and step.cc form them, against the binaries CMake builds (passed as arguments,
 // `kernel_<name>`). Host only, no device: a name a list would ask for that no CMake line
-// builds fails here on the Mac instead of at capture on the box.
+// builds fails here on the Mac instead of at capture on the GPU machine.
 //
 // usage: ornith_mtp_names_test <15e block's kernel_*...> -- <every other kernel_* it needs>
 // The first list must be exactly bound (nothing in the 15e block is dead); the union must
@@ -202,7 +202,7 @@ int main(int argc, char** argv) {
     }
   CHECK_EQ(bad, 0);
   // A few names spelled out, so a change in a helper is seen here and not only as a
-  // missing binary on the box.
+  // missing binary on the GPU machine.
   CHECK(bound.count("gdn_step_slots_M1_G30_GK16V32") && bound.count("gdn_step_slots_M4_G30_GK16V32"));
   CHECK(bound.count("gdn_step_defer_M1_G30_GK16V32") && bound.count("gdn_step_defer_M4_G30_GK16V32"));
   CHECK(bound.count("moe_M4_E256_T8_D2048_I512") && bound.count("attn_prep_M2_Q16KV2_S1"));

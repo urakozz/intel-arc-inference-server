@@ -3,7 +3,7 @@
 # them - the writer's own asserts are not evidence. Checks `tokens` length and
 # distinctness, `resid.L63`/`logits` finiteness and range, the metadata, and
 # decodes the continuation back to text through tokenize.py. Run from the repo
-# root ON THE BOX, after tools/oracle/golden.sh. Output is the block quoted in
+# root on the GPU machine, after tools/oracle/golden.sh. Output is the block quoted in
 # "Sanity checks on the written files" in tools/oracle/README.md.
 #
 # OUT_DIR selects the golden set, and the checkpoint must be the one that set

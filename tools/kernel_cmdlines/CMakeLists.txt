@@ -1,7 +1,7 @@
 # Lists every device binary src/kernels declares - name | source | -D defines | options -
 # without ocloc, Level Zero or a GPU: add_ocloc_kernel is stubbed to append one line to
 # <build>/kernels.txt. Two trees' lists, sorted and diffed, show whether a change moved
-# any existing binary's command line (spec 14 G0's Mac-side pre-check; the box compares
+# any existing binary's command line (spec 14 G0's pre-check without a GPU; the GPU machine compares
 # the binaries' checksums).
 #
 #   cmake -S tools/kernel_cmdlines -B /tmp/kc -DTREE=$PWD && sort /tmp/kc/kernels.txt

@@ -71,7 +71,7 @@ sustained compute, not bandwidth. Neither card drives a display, both report ide
 fields, and reading the clock frequencies needs root.
 
 The most likely explanation is that a hardware monitoring tool (`hw-smi`) was open during that measurement; a monitor
-that holds forcewake keeps the cards out of their idle state ([10-the-box.md](10-the-box.md#after-a-reboot)). The
+that holds forcewake keeps the cards out of their idle state. The
 cards are treated as equal for new runs, but the gap has not been re-measured with the tool closed, so the
 validation tooling still keeps timed series rows on device 0, and a series row names its card.
 

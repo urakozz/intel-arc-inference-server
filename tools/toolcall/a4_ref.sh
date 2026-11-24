@@ -10,7 +10,7 @@
 #                                                   oracle_generate.py --model qwen on the bf16 original
 #                                                   Qwen/Qwen3.8-27B (54 GB): Qwen3_5ForCausalLM layer-streamed,
 #                                                   the first K layers kept once read (K from the memory plan
-#                                                   under the cap: ~54 of 64 at the box's 64g), bf16 GEMMs as fp32
+#                                                   under the cap: ~54 of 64 at a 64g cap), bf16 GEMMs as fp32
 #                                                   GEMMs rounded to bf16 (cpu_bf16.py), HF generate, 384 new ids,
 #                                                   one scenario at a time -> $OUT/<name>.bf16.{ids,txt}
 #                                                   (resumable; no .gap). OUT default oracle-out-qwen-a4.
@@ -48,12 +48,12 @@
 #           AutoRound checkpoint (Intel/Qwen3.8-Flash-Next-W4A16-AutoRound: int4 g128 experts
 #           dequantised, the PLE table from <snapshot>-ple-int8/ when present - the engine's format),
 #           384 new ids, transformers 5.19.0 from the qwen4exp site first on PYTHONPATH (SITE: the Mac
-#           oracle-out-q4exp/site, the box oracle-out-q4exp-site - tools/oracle/qwen4exp_env.sh makes
+#           oracle-out-q4exp/site, on Linux oracle-out-q4exp-site - tools/oracle/qwen4exp_env.sh makes
 #           it in the container once). Q4_LAYERS=N truncates as the engine's --layers N (a test run;
 #           the A4 reference is the whole model). Prepared for spec 22: the engine's A4 run on the
 #           whole model waits for it (validation row 34's r34.a4_ref makes the reference).
 #           Score with `score.py` (Qwen XML; 0 parse failures of the reference).
-# Then on the box: tools/toolcall/engine_generate.sh with the same set and N_NEW, and
+# Then on the GPU machine: tools/toolcall/engine_generate.sh with the same set and N_NEW, and
 # tools/toolcall/score.py <dir> bf16 <engine runs> (validation rows 16 / 25).
 #
 # Where it runs:
@@ -63,8 +63,8 @@
 #            while another container of that image runs (the Mac holds one 28 GB oracle at a
 #            time) unless FORCE=1. The checkpoint must be complete in the HF cache:
 #              uvx --from huggingface_hub hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
-#   the box  tools/oracle/run_in_container.sh (ORACLE_IMAGE), in the foreground (the runbook's
-#            stages run detached already): r16.a4_ref.
+#   Linux    tools/oracle/run_in_container.sh (ORACLE_IMAGE), in the foreground (run it detached
+#            yourself): r16.a4_ref.
 # Batched (BATCH, default auto; BATCH=1 is the old one-scenario-at-a-time run): oracle_generate.py
 # --batch runs up to BATCH scenarios through each layer together (layer-major), each layer's
 # weights dequantised once per pass for all of them, a finished scenario's slot refilled at once;
@@ -74,7 +74,7 @@
 # dequantised weights resident once read - every layer's dense part, then whole layers of
 # experts - in what the cap leaves (also bitwise: the same values, read from RAM instead of
 # re-dequantised). The memory plan (estimates, from config.json and the container's cap - MEM)
-# is the log's first lines (on the box: run_in_container.sh's cap, 64g by default, or MEM=<N>g). ONLY=a,b,...
+# is the log's first lines (on Linux: run_in_container.sh's cap, 64g by default, or MEM=<N>g). ONLY=a,b,...
 # runs just those scenarios (the cross-check);
 # NAME the container (a4-ref-<model>).
 #
@@ -89,7 +89,7 @@
 # layers resident) ~1.25x - ~14 h for 36, ~11.5 h for the 29 left. Each scenario's seconds,
 # and every prompt pass's (and every 25th pass's) seconds, are in $OUT/ref.log. Ornith batched
 # needs transformers 5.15 (agnes-ref-img; ornith_ref.layer_major refuses another version).
-# Qwen3.8 (qwen, ESTIMATED from the box's fp32 rate and memory bandwidth, not measured): a prompt pass
+# Qwen3.8 (qwen, ESTIMATED from the test machine's fp32 rate and memory bandwidth, not measured): a prompt pass
 # (960-2990 ids, mean ~1900) ~2-4 min, a decode step ~5-8 s (10 of 64 layers re-read, every bf16
 # weight upcast to fp32 per call), up to 384 steps a scenario - ~10-16 h the set, one scenario at a
 # time (the dense path does not batch).
@@ -226,12 +226,11 @@ same_ids() {
 }
 
 # The container sees this tree only (mounted at /ws): a run writes into a real directory inside
-# it. On the box OUT may be elsewhere (the runbook keeps data in the data tree, linked into the
-# trees): the run then works in oracle-out-<model>-a4.partial/, seeded with what OUT already
+# it. On Linux OUT may be elsewhere (a data directory linked into the tree): the run then works in oracle-out-<model>-a4.partial/, seeded with what OUT already
 # holds (so it resumes), and copies everything to OUT when the container exits.
 case "$OUT" in /*) inside=0 ;; *) inside=1 ;; esac
 [ -L "$OUT" ] && inside=0
-if [ $mac = 0 ]; then   # the box: the reference image, foreground
+if [ $mac = 0 ]; then   # Linux: the reference image, foreground
   work=$OUT
   if [ $inside = 0 ]; then
     work=oracle-out-$m-a4.partial

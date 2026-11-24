@@ -9,7 +9,7 @@
 //
 //   1. The lists capture to their formulas' launch counts (87 draft, 8 projection); 2053 positions of random taps
 //      are projected 8 a replay (the ring wraps at 2048); the last replay's rows equal the twin's projection
-//      (bitwise bf16 within an ulp: the GEMVs' contraction is the box compiler's).
+//      (bitwise bf16 within an ulp: the GEMVs' contraction is the device compiler's).
 //   2. A draft at p 2053 (rows reach the window's edge past the wrap), anchor 1234, K 7, T 0: the final-norm rows
 //      (cosine >= 0.99999) and the scores (cosine >= 0.99999) against the twin - the top-16 sets and the walk
 //      recorded, since the twin follows the DPAS attention part's order without being bitwise (spec 19 v3d,

@@ -2,7 +2,7 @@
 // tests/kernels/kolibri_pf_ref.h / kolibri_ref.h and against the dense prefill GEMMs the grouped ones are
 // built from. Needs a B70, no checkpoint (synthetic weights). Every binary is one
 // runtime/kolibri/kolibri_prefill.cc binds (kernels::kolibri names), plus pf_gemm_T0_SILU for the dense
-// comparison. Written blind on the Mac (box queue row 26).
+// comparison. Written blind on the Mac (validation queue row 26).
 //
 //   1. the slabs: pf_int4_slab_dequant at q||k||v 2560 x 7168 (the int4 arm) and kol_pf_bf16_slab at o_proj
 //      6144 x 2560 (1024 + 1024 + 512) exact; the bf16 o_proj through pf_gemm_T0 rows within cosine

@@ -119,7 +119,7 @@ inline void check_tp_model(const std::string& architecture, const std::string& m
 inline void require_two_devices_for_tp(uint32_t gpus) {
   if (gpus < 2)
     throw std::runtime_error("--parallel tp needs two GPUs and Level Zero shows " + std::to_string(gpus) +
-                             " - is ZE_AFFINITY_MASK hiding the second card (docs/10-the-box.md)?");
+                             " - is ZE_AFFINITY_MASK hiding the second card (docs/01-hardware.md)?");
 }
 
 // The override flag under --parallel auto means pipeline parallel (it has no meaning on one card).
@@ -213,7 +213,7 @@ inline void require_two_devices_for_replica(uint32_t gpus) {
   if (gpus < 2)
     throw std::runtime_error("--parallel replica needs two GPUs (one engine per card) and Level Zero shows " +
                              std::to_string(gpus) +
-                             " - is ZE_AFFINITY_MASK hiding the second card (docs/10-the-box.md)?");
+                             " - is ZE_AFFINITY_MASK hiding the second card (docs/01-hardware.md)?");
 }
 
 // --max-num-seqs N (vLLM's flag, the same meaning): how many requests run at once - the user's
@@ -267,7 +267,7 @@ inline void require_two_devices(uint32_t gpus) {
   if (gpus < 2)
     throw std::runtime_error("--parallel pp needs two GPUs and Level Zero shows " +
                              std::to_string(gpus) +
-                             " - is ZE_AFFINITY_MASK hiding the second card (docs/10-the-box.md)?");
+                             " - is ZE_AFFINITY_MASK hiding the second card (docs/01-hardware.md)?");
 }
 
 }  // namespace cli

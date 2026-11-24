@@ -69,7 +69,7 @@ int run_tp_decode(const TpDecodeArgs& a) {
     throw std::runtime_error(
         "--parallel tp: the cards cannot access each other's memory (zeDeviceCanAccessPeer 0 -> 1 and 1 -> 0), and "
         "every crossing writes the other card's VRAM. Peer access needs the P2P-capable kernel and both cards under "
-        "one root complex (docs/10-the-box.md)");
+        "one root complex (docs/01-hardware.md)");
 
   // Spec 17c: the prefill's chunk cap (2048, or 4096 when --prefill-chunk asks for more) is planned on each card.
   runtime::PrefillPath path;
@@ -174,7 +174,7 @@ int run_tp_decode(const TpDecodeArgs& a) {
                runtime::prefill_backend_name(a.backend), a.depth, a.chunk ? a.chunk : eng.prefill_chunk_cap(), ingest_ms,
                ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::print(stderr,
-             "(measured, one run. The recorded figure is the median of three on an idle box, interleaved with\n"
+             "(measured, one run. The recorded figure is the median of three on an idle machine, interleaved with\n"
              " the one-card row.)\n");
   return 0;
 }

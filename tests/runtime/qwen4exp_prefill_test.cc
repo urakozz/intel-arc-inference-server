@@ -1,5 +1,5 @@
-// Spec 21-QFN-v1d (F4 on prefill, Review Focus 1, 2, 4, 5): Qwen4ExpEngine::prefill on the card with a checkpoint - box only
-// (labels checkpoint;qwen4exp;prefill). The synthetic real-width checkpoints (tools/box_validate/qwen4exp_oracle.sh
+// Spec 21-QFN-v1d (F4 on prefill, Review Focus 1, 2, 4, 5): Qwen4ExpEngine::prefill on the card with a checkpoint - GPU only
+// (labels checkpoint;qwen4exp;prefill). The synthetic real-width checkpoints (tools/oracle/qwen4exp_ref.py
 // synth-ckpt: 4 layers - 3 GDN incl. the PLE layer, 1 QSA) carry it before Intel's; the golden gate itself is
 // qwen4exp_golden_test's `prefill` mode.
 //

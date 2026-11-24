@@ -1,6 +1,6 @@
-// Spec 20c Task 5 (KL3 on decode): KolibriEngine on one card. Box only (label checkpoint;golden;kolibri).
+// Spec 20c Task 5 (KL3 on decode): KolibriEngine on one card. GPU only (label checkpoint;golden;kolibri).
 //   kolibri_decode_test <checkpoint> <ids> [int8] [pp2]
-// <checkpoint>: a synthetic one (tools/box_validate/kolibri_oracle.sh synth) on one card, or the real one
+// <checkpoint>: a synthetic one (tools/oracle/kolibri_ref.py synth) on one card, or the real one
 // with `pp2` (spec 20c Task 6: two cards, the split by bytes) - one card cannot hold it (SKIP).
 //
 //   1. the plan == the allocation, component by component (runtime::kolibri::plan vs memory_use);

@@ -1,8 +1,8 @@
 #!/bin/bash
-# Run a command ON THE BOX detached from the ssh session (the WiFi drops long ones):
+# Run a command detached from the terminal / ssh session (a dropped connection does not stop it):
 #   tools/probe/detach.sh <log> <cmd> [args...]
-# from the repo root on the box (tools/box.sh run 'tools/probe/detach.sh ~/b70/logs/<topic>/x.log ...').
-# Logs go under ~/b70/logs/<topic>/, never loose in the box's $HOME; the log's directory is
+# from the repo root (e.g. tools/probe/detach.sh $B70_DATA/logs/<topic>/x.log ...).
+# Logs go under $B70_DATA/logs/<topic>/, never loose in $HOME; the log's directory is
 # made here. The log ends in "ALLDONE rc=<status>". Poll it.
 log="$1"
 shift

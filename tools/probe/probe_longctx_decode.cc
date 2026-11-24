@@ -2,7 +2,7 @@
 // probe_longctx_decode SNAPSHOT KV [device=0] [round=0] [depths=4096,32768,81920,150000]
 //                       [max_len=150272] [wall_calls=128] [profile_calls=32] [prefix_directory] [Ms=1,4]
 // 3l: Ms lists the rows per call (1 = the plain step, 2..4 = verify steps), each its own arm; arms rotate by round.
-// Use a card lock for smoke, or a whole-box lock and an explicit device for timings.
+// Use a card lock for smoke, or a lock on both cards and an explicit device for timings.
 #include <algorithm>
 #include <chrono>
 #include <cmath>

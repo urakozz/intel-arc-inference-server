@@ -56,7 +56,7 @@ _spec = importlib.util.spec_from_file_location("oracle_dequant", os.path.join(_H
 _dequant = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_dequant)
 dequant_gptq = _dequant.dequant_gptq
-# tools/oracle/cpu_bf16.py: fp32 GEMMs rounded once to bf16 - the box CPU has no bf16 units, and torch's own bf16
+# tools/oracle/cpu_bf16.py: fp32 GEMMs rounded once to bf16 - the test machine's CPU has no bf16 units, and torch's own bf16
 # GEMM runs single-threaded ~1000x slower. On by default for new references; the goldens made
 # before 2026-11-12 used torch's bf16 GEMM and are reproduced with --no-exact-bf16-gemm.
 _spec = importlib.util.spec_from_file_location("cpu_bf16", os.path.join(_HERE, "cpu_bf16.py"))
@@ -341,8 +341,8 @@ def main() -> None:
     torch.manual_seed(0)  # nothing samples, but pin it anyway
     # The CPU pool this run actually got. torch reads OMP_NUM_THREADS at import,
     # so this is the honest number after any cap the wrapper applied - printed
-    # because a dump's wall time is only interpretable next to it, and the box
-    # is shared (tools/oracle/run_in_container.sh, ORACLE_THREADS).
+    # because a dump's wall time is only interpretable next to it, and the machine
+    # may be shared (tools/oracle/run_in_container.sh, ORACLE_THREADS).
     print(f"torch intra-op threads: {torch.get_num_threads()} "
           f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')})")
     group_size = check_quant_config(args.snapshot)

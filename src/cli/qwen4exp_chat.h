@@ -4,8 +4,8 @@
 // and tests/server/qwen4exp_server_test.cc call the same function, so the test pins what the server runs.
 //
 //   - the chat format: server::ChatFormat::for_model_type("qwen4_exp") is Kind::Qwen (anything not listed): the
-//     template reads enable_thinking only (Qwen3.8's, byte for byte - sha256 c3cf9e34..., chat::Template's
-//     fallback), the output opens with reasoning when the prompt ends in "<think>\n", tool calls are Qwen XML
+//     template reads enable_thinking only (Qwen3.8's, byte for byte - sha256 c3cf9e34...),
+//     the output opens with reasoning when the prompt ends in "<think>\n", tool calls are Qwen XML
 //     (server::OutputStream). The template also reads `reasoning_effort`, which the Qwen kind does not forward
 //     (ChatFormat::template_kwargs() is false) - exactly as for Qwen3.8 today; forwarding chat_template_kwargs for
 //     the Qwen kind is a server-wide follow-up for both models, not spec 21-QFN-v1e's;

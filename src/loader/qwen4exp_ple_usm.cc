@@ -9,7 +9,7 @@
 
 // The Level Zero half of the PLE table (loader/qwen4exp_ple.h): pinning the int8 file into 32 host-USM ranges
 // (q and scales per head), the tag-and-readback alias check, the sampled readback of the data, and the device
-// pointer table. Box only (the Mac links no device); tests/loader/qwen4exp_load_checkpoint_test.cc runs it.
+// pointer table. GPU only (the Mac links no device); tests/loader/qwen4exp_load_checkpoint_test.cc runs it.
 namespace loader {
 namespace {
 

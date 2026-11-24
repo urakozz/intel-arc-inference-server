@@ -88,7 +88,7 @@ inline constexpr uint32_t kM = 1;   // decode builds M = 1 (21-QFN-v1e's verify 
 // reference's bf16 chain). `B70_Q4_ATTN=flash|eager`, read at each call; unset or empty is the default;
 // anything else throws.
 enum class Q4Attn { Flash, Eager };
-inline constexpr Q4Attn kDefaultQ4Attn = Q4Attn::Flash;   // until the box A/B
+inline constexpr Q4Attn kDefaultQ4Attn = Q4Attn::Flash;   // until the test machine A/B
 Q4Attn q4_attn();
 const char* q4_attn_name(Q4Attn a);
 // The QSA selection row (kernels::qwen4exp: kListMax / kListRow / kCountWord), the route row, the slices.

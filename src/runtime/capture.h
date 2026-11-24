@@ -351,7 +351,7 @@ struct BatchRowsBind {
   // MOE_UNION: every row bitwise the per-row block's); false: the per-row block. runtime::Engine binds it on a MoE model.
   bool moe_union = false;
 };
-// `prof` (probes only, probe_slots_speed --profile-rows): per-launch events exactly as build's - an observer only.
+// `prof` (probes only, probe_pool_speed --profile-rows): per-launch events exactly as build's - an observer only.
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
                         uint32_t M, ProfileEvents* prof = nullptr);
 // decode_launches(d), or with the head verify_launches(d) + 1 (the gather).

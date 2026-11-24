@@ -35,7 +35,7 @@ add_test(NAME event_test COMMAND event_test)
 
 # l0::MemKind::HostLocked (host memory locked against swap): mlock on a driver allocation locks nothing, a HostLocked
 # allocation under a covering limit is locked and read by a copy and an indirect kernel read on every card, and under a
-# limit that does not cover it is plain Host memory. Two cards when visible (tools/gpu_lock.sh box).
+# limit that does not cover it is plain Host memory. Two cards when visible.
 add_executable(host_lock_test l0/host_lock_test.cc)
 target_include_directories(host_lock_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(host_lock_test PRIVATE b70_l0)
@@ -477,7 +477,10 @@ add_test(NAME verify_attn_test COMMAND verify_attn_test ${_vattn_built})
 # Spec 28c (plan 28c Task 6): the production attn_verify_dpas binaries + v2's reduce on the card - N1, property R,
 # against v2 at M = 1. Part S always; part D on plan 28c Task 4's capture when B70_VERIFY_ATTN_DUMP names it.
 if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
-  set(B70_VERIFY_ATTN_DUMP "$ENV{HOME}/b70/logs/spec28c/vattn-dump" CACHE PATH "plan 28c's verify-attention capture")
+  set(B70_VERIFY_ATTN_DUMP "" CACHE PATH "plan 28c's verify-attention capture")
+  if(NOT B70_VERIFY_ATTN_DUMP AND DEFINED ENV{B70_DATA})
+    set(B70_VERIFY_ATTN_DUMP "$ENV{B70_DATA}/logs/spec28c/vattn-dump" CACHE PATH "plan 28c's verify-attention capture" FORCE)
+  endif()
   add_executable(attn_verify_dpas_test kernels/attn_verify_dpas_test.cc)
   target_include_directories(attn_verify_dpas_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
                              ${CMAKE_SOURCE_DIR}/tests/kernels)
@@ -711,9 +714,12 @@ add_dependencies(attn_test kernel_attn_prep_M1
 add_test(NAME attn_test COMMAND attn_test)
 
 # Spec 10 A1 (plan 10b Task 1): decode attention v2 against v1. Part S (synthetic)
-# always; part D on plan 10a's real capture when B70_ATTN_V2_DUMP names it (the box
-# keeps it at ~/b70/scratch/spec10a-dump).
-set(B70_ATTN_V2_DUMP "$ENV{HOME}/b70/scratch/spec10a-dump" CACHE PATH "plan 10a's decode-attention capture")
+# always; part D on plan 10a's real capture when B70_ATTN_V2_DUMP names it (default
+# $B70_DATA/scratch/spec10a-dump; without B70_DATA part D skips).
+set(B70_ATTN_V2_DUMP "" CACHE PATH "plan 10a's decode-attention capture")
+if(NOT B70_ATTN_V2_DUMP AND DEFINED ENV{B70_DATA})
+  set(B70_ATTN_V2_DUMP "$ENV{B70_DATA}/scratch/spec10a-dump" CACHE PATH "plan 10a's decode-attention capture" FORCE)
+endif()
 add_executable(attn_v2_test kernels/attn_v2_test.cc)
 target_include_directories(attn_v2_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(attn_v2_test PRIVATE b70_l0)
@@ -918,10 +924,10 @@ target_link_libraries(batch_rows_test PRIVATE b70_plan)
 add_test(NAME batch_rows_test COMMAND batch_rows_test)
 
 # Spec 13c / spec 31: the planner's sequences of one card (plan_pool, pool_that_fits), host only.
-add_executable(slot_plan_test runtime/slot_plan_test.cc)
-target_include_directories(slot_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(slot_plan_test PRIVATE b70_plan)
-add_test(NAME slot_plan_test COMMAND slot_plan_test)
+add_executable(pool_plan_test runtime/pool_plan_test.cc)
+target_include_directories(pool_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pool_plan_test PRIVATE b70_plan)
+add_test(NAME pool_plan_test COMMAND pool_plan_test)
 # Spec 31 (plan 31 Task 3): the slots' KV page allocator (runtime/kv_pool.h), host only.
 add_executable(kv_pool_test runtime/kv_pool_test.cc)
 target_include_directories(kv_pool_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -948,7 +954,7 @@ add_test(NAME kv_pool_test COMMAND kv_pool_test)
 # 2026-09-09 (ruling A31): the gate checkpoint is
 # urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ at snapshot 84575a1 (GPTQ g64
 # sym, bf16 lm_head, exclusion-only dynamic rules). The previous default,
-# Vishva007's 2a90776, was deleted from the box on 2026-09-09; its golden set in
+# Vishva007's 2a90776, was deleted from the test machine on 2026-09-09; its golden set in
 # `oracle-out/` belongs to THAT checkpoint's weights and is not reused - the
 # golden registrations below take B70_TEST_ORACLE_DIR, one golden set per
 # checkpoint (tools/oracle/README.md), and SKIP (77) until it has
@@ -961,7 +967,7 @@ endif()
 # b70_hf_snapshot(VAR REPO_DIR PINNED SUFFIX TYPE DOC): VAR = REPO_DIR's snapshot in the HF cache - the one refs/main
 # names (what is downloaded), PINNED when the cache has no refs/main - plus SUFFIX (a file inside, or empty). A cached
 # value that no longer exists (the snapshot moved on: a re-download, a new upstream revision) is replaced; one that
-# exists - an override with -D - is kept. (kolibri_tokenizer_test skipped for weeks on a pinned id the box no longer
+# exists - an override with -D - is kept. (kolibri_tokenizer_test skipped for weeks on a pinned id the test machine no longer
 # had, 2026-11-07.)
 function(b70_hf_snapshot var repo pinned suffix type doc)
   set(_sha "${pinned}")
@@ -1048,7 +1054,7 @@ set_tests_properties(profile_capture_test PROPERTIES LABELS checkpoint TIMEOUT 9
 # The golden gate (spec §11): the engine against the CPU oracle, 3 prompts x 32
 # greedy tokens, element-exact, plus the per-layer / GDN-state / logit-row
 # diagnostics. Needs what engine_smoke_test needs AND the ~1 GB of oracle dumps
-# that live only on the box - hence the second label and the SKIP_RETURN_CODE:
+# that live only on the GPU machine - hence the second label and the SKIP_RETURN_CODE:
 # absent goldens make the test exit 77, which ctest reports as SKIP rather than
 # a failure. Both directories are passed absolute so the test does not depend on
 # ctest's working directory; the prompt ids are committed, so a missing .ids
@@ -1323,7 +1329,7 @@ endif()
 # The long prompt's reference is in the primary golden set beside the short three
 # (`long.golden.safetensors`, `PROMPTS=long tools/oracle/golden.sh`, tools/oracle/README.md);
 # the test SKIPs (77) until it is there. It was wired to the RTN checkpoint until
-# 2026-11-12, which left the box, so neither test was registered.
+# 2026-11-12, which left the test machine, so neither test was registered.
 add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts
   ${B70_TEST_SNAPSHOT} long 1024)
@@ -1560,7 +1566,7 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME parity_test COMMAND parity_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
   add_executable(template_test tokenizer/template_test.cc)
   target_include_directories(template_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(template_test PRIVATE b70_tokenizer)
+  target_link_libraries(template_test PRIVATE b70_tokenizer b70_server)
   add_test(NAME template_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
   add_executable(streamer_test tokenizer/streamer_test.cc)
   target_include_directories(streamer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -1665,7 +1671,7 @@ if(B70_MTP)
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # M2 + Review Focus 1-5: verify at M = k + 1, per-row GDN slots, commit, snapshots, replay.
   # Spec 28 N4 / N6 (tests/server/spec_judge.h): Qwen3.8's speculative output graded by the f32 judges of its forced
-  # contexts - tools/box_validate/f32_refs.sh forced-qwen makes them on the box CPU into the data tree's
+  # contexts - tools/oracle/qwen_forced.py forced-qwen makes them on the CPU into the data tree's
   # oracle-out-qwen-f32{,-i8head}-forced (data.sh links them here); the bf16 head's for the checkpoint-head tests, the
   # int8 head's for the tests that load LmHeadForm::Int8. A divergence whose judge is not there yet AWAITS it: the
   # test exits 77 (SKIP) when nothing else failed.
@@ -1708,29 +1714,29 @@ if(B70_MTP)
   # engine, S2 the slots' isolation (prefill, decode, reset, snapshots), S3 B1 / B3 for the row kernels (bitwise, mixed K and depth), S4 B1
   # by the f32 judge (the int8 head's references; a divergence without one AWAITS it: 77), S5 determinism. Both KV forms.
   if(B70_VERIFY_M8 AND B70_KV8)   # the row builds (src/kernels: B70_MTP, B70_VERIFY_M8, B70_KV8)
-    add_executable(slots_test runtime/slots_test.cc)
-    target_include_directories(slots_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+    add_executable(pool_test runtime/pool_test.cc)
+    target_include_directories(pool_test PRIVATE ${CMAKE_SOURCE_DIR}/src
       ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden ${CMAKE_SOURCE_DIR}/tests/server)
-    target_link_libraries(slots_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-    add_dependencies(slots_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
-    add_test(NAME slots_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
-    add_test(NAME slots_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
-    add_test(NAME slots_nomtp_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --mtp off)
-    # Spec 31 (plan 31 Task 5): the KV page pool's own cases (slots_test.cc's --pool: pages in any order, reset, growth,
+    target_link_libraries(pool_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+    add_dependencies(pool_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
+    add_test(NAME pool_test COMMAND pool_test ${B70_TEST_SNAPSHOT})
+    add_test(NAME pool_kv8_test COMMAND pool_test ${B70_TEST_SNAPSHOT})
+    add_test(NAME pool_nomtp_test COMMAND pool_test ${B70_TEST_SNAPSHOT} --mtp off)
+    # Spec 31 (plan 31 Task 5): the KV page pool's own cases (pool_test.cc's --pool: pages in any order, reset, growth,
     # a full pool, shared prefix pages).
-    add_test(NAME slots_pool_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --pool)
-    add_test(NAME slots_pool_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --pool)
-    set_tests_properties(slots_pool_test PROPERTIES LABELS "checkpoint;mtp;slots" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    add_test(NAME pool_pages_test COMMAND pool_test ${B70_TEST_SNAPSHOT} --pool)
+    add_test(NAME pool_pages_kv8_test COMMAND pool_test ${B70_TEST_SNAPSHOT} --pool)
+    set_tests_properties(pool_pages_test PROPERTIES LABELS "checkpoint;mtp;pool" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
-    set_tests_properties(slots_pool_kv8_test PROPERTIES LABELS "checkpoint;mtp;slots;kv8" SKIP_RETURN_CODE 77 ENVIRONMENT "B70_KV_CACHE=int8"
+    set_tests_properties(pool_pages_kv8_test PROPERTIES LABELS "checkpoint;mtp;pool;kv8" SKIP_RETURN_CODE 77 ENVIRONMENT "B70_KV_CACHE=int8"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-    set_tests_properties(slots_nomtp_test PROPERTIES LABELS "checkpoint;slots" SKIP_RETURN_CODE 77
+    set_tests_properties(pool_nomtp_test PROPERTIES LABELS "checkpoint;pool" SKIP_RETURN_CODE 77
       ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-    set_tests_properties(slots_test PROPERTIES LABELS "checkpoint;mtp;slots" SKIP_RETURN_CODE 77
+    set_tests_properties(pool_test PROPERTIES LABELS "checkpoint;mtp;pool" SKIP_RETURN_CODE 77
       ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-    set_tests_properties(slots_kv8_test PROPERTIES LABELS "checkpoint;mtp;slots;kv8" SKIP_RETURN_CODE 77
+    set_tests_properties(pool_kv8_test PROPERTIES LABELS "checkpoint;mtp;pool;kv8" SKIP_RETURN_CODE 77
       ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   endif()
@@ -1773,15 +1779,15 @@ if(B70_MTP)
       ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
   endif()
-  # Spec 8 §12 (MTP at every context length; box queue row 6): mtp_verify_test (M2, RF3 at
+  # Spec 8 §12 (MTP at every context length; validation queue row 6): mtp_verify_test (M2, RF3 at
   # max_len - 4, RF4 deep - spec 7 C1 with MTP at ~70k on the 131072 run) and mtp_gpu_test's
   # M3 gate at max_len 32768 and 131072. Label `longctx`. Each exits 77 (SKIP) at once unless
-  # B70_LONGCTX_TESTS=1, so a plain `ctest` costs what it did; tools/box_validate (r6.mtp_long)
+  # B70_LONGCTX_TESTS=1, so a plain `ctest` costs what it did; the validation run (r6.mtp_long)
   # sets it. The variable is read here, by the wrapper, not by the tests.
   set(_b70_longctx_gate [==[
 if [ "${B70_LONGCTX_TESTS:-0}" != 1 ]
 then
-  echo "SKIP: a long-context MTP variant (box queue row 6); B70_LONGCTX_TESTS=1 runs it"
+  echo "SKIP: a long-context MTP variant (validation queue row 6); B70_LONGCTX_TESTS=1 runs it"
   exit 77
 fi
 exec "$@"
@@ -1855,7 +1861,7 @@ if(B70_ORNITH)
   set(B70_ORNITH_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith"
     CACHE PATH "The CPU-oracle golden set of Ornith (spec 15a), with router_logits.L* for R2")
   # the token gates' judge (tests/golden/golden_common.h, `--judge=`) -
-  # the f32 teacher-forced reference, tools/box_validate/f32_oracle.sh <data tree> ornith.
+  # the f32 teacher-forced reference, tools/oracle/ornith_ref.py <data tree> ornith.
   set(B70_ORNITH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32"
     CACHE PATH "Ornith's f32 teacher-forced reference (the golden gates' judge)")
   # ... and its quantisation-aware twins (tools/oracle/int8_sim.py; f32_oracle.sh ornith-i8head / ornith-pfi8):
@@ -1914,7 +1920,7 @@ if(B70_ORNITH)
 endif()
 
 # --- Spec 12b: the int8 KV cache (`--kv-cache int8`, src/kernels/kv8.cl) ----------------
-# Written blind on the Mac; the box validation queue row 11 is the order
+# Written blind on the Mac; the validation queue row 11 is the order
 # to run these in. `kv8` labels all of them: `ctest -L kv8`.
 if(B70_KV8)
   set(B70_KV8_KERNELS
@@ -2166,7 +2172,7 @@ if(B70_KV8)
 endif()
 
 # --- Spec 15d: Ornith 1.5 35B-A3B prefill (label `ornith`) ---------------------------------
-# Written blind on the Mac (the box validation queue row 13 is the
+# Written blind on the Mac (the validation queue row 13 is the
 # order to run these in). The host reference test runs everywhere; the rest need a B70, and
 # the checkpoint ones SKIP (77) until the Ornith int4 checkpoint (15a) and its golden set
 # `oracle-out-ornith` are on the machine, as 15c's do.
@@ -2177,7 +2183,7 @@ endif()
 #   R3 (prefill): prefill_gate_test on oracle-out-ornith, l0 and l0-int8, one chunk and
 #       chunks of 16;
 #   continuation: prefill_split_test on Ornith (splits at multiples of 64 bitwise; the other
-#       bars are Qwen3.8's, PROVISIONAL here until the box measures Ornith's);
+#       bars are Qwen3.8's, PROVISIONAL here until the test machine measures Ornith's);
 #   the walk, determinism + replay, chunking, prefill-vs-decode routes and tokens, R2 on the
 #       prefill path: ornith_prefill_test.
 add_executable(pf_moe_ref_test kernels/pf_moe_ref_test.cc)
@@ -2293,7 +2299,7 @@ if(B70_ORNITH)
       LABELS "checkpoint;prefill;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
     # the split runs judged by the f32 reference of long32k[0, 2600), no further from it
-    # than the bf16 reference (tools/box_validate/f32_refs.sh split; absent: the fixed bars).
+    # than the bf16 reference (tools/oracle/qwen_forced.py split; absent: the fixed bars).
     set_tests_properties(prefill_split_ornith_${b}_test PROPERTIES ENVIRONMENT
       "B70_SPLIT_REFS=${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-f32.golden.safetensors,${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-bf16.golden.safetensors")
     # PERF-64: the prompt pass over the int8 KV cache, by the same f32 judge; cjk row 15 at chunk 0 accepted by the
@@ -2332,7 +2338,7 @@ endif()
 
 # ==== Spec 15e: Ornith 1.5 35B-A3B served, and its MoE MTP head (label `ornith`) == (begin) ==
 # One delimited block for every 15e registration (the branches in flight beside it edit
-# their own blocks). Host tests first - they run on the Mac (tools/box_check.sh) - then the
+# their own blocks). Host tests first - they run on the Mac - then the
 # card's, which SKIP (77) until the Ornith int4 checkpoint (15a) is on the machine.
 #
 # Task 1: the chat template. Ornith's chat_template.jinja is Qwen3.5's, not Qwen3.8's (no
@@ -2462,7 +2468,7 @@ if(B70_ORNITH AND B70_MTP)
     set_tests_properties(ornith_mtp_test ornith_mtp_bf16head_test mtp_head_ornith_test PROPERTIES
       LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
-    # M1 judged by the f32 reference of the same rows (tools/box_validate/f32_refs.sh
+    # M1 judged by the f32 reference of the same rows (tools/oracle/qwen_forced.py
     # ornith-mtp), the engine missing no more rows than the bf16 reference.
     set_tests_properties(mtp_head_ornith_test PROPERTIES
       ENVIRONMENT "B70_MTP_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp-f32/m1")
@@ -2478,23 +2484,23 @@ if(B70_ORNITH AND B70_MTP)
     set_tests_properties(ornith_mtp_kv8_test PROPERTIES LABELS "checkpoint;mtp;ornith;kv8" SKIP_RETURN_CODE 77
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
       ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced;B70_KV_CACHE=int8")
-    # Plan 31 Task 12: Ornith's sequence slots - slots_test's cases on Ornith (slots_test.cc), with S0 against the
+    # Plan 31 Task 12: Ornith's sequence slots - pool_test's cases on Ornith (pool_test.cc), with S0 against the
     # one-request engine; S4 judged by the int8 head's f32 references of the forced contexts.
-    if(TARGET slots_test)
-      add_dependencies(slots_test ${_o15e_k} ${_o15e_pf})
-      add_test(NAME ornith_slots_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --one-slot)
-      set_tests_properties(ornith_slots_test PROPERTIES LABELS "checkpoint;mtp;slots;ornith" SKIP_RETURN_CODE 77
+    if(TARGET pool_test)
+      add_dependencies(pool_test ${_o15e_k} ${_o15e_pf})
+      add_test(NAME ornith_pool_test COMMAND pool_test ${B70_ORNITH_SNAPSHOT} --one-slot)
+      set_tests_properties(ornith_pool_test PROPERTIES LABELS "checkpoint;mtp;pool;ornith" SKIP_RETURN_CODE 77
         ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-      # Plan 31 Task 14: the KV page pool's cases on Ornith (slots_test.cc's --pool: P1-P5).
-      add_test(NAME ornith_slots_pool_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --pool)
-      set_tests_properties(ornith_slots_pool_test PROPERTIES LABELS "checkpoint;mtp;slots;ornith" SKIP_RETURN_CODE 77
+      # Plan 31 Task 14: the KV page pool's cases on Ornith (pool_test.cc's --pool: P1-P5).
+      add_test(NAME ornith_pool_pages_test COMMAND pool_test ${B70_ORNITH_SNAPSHOT} --pool)
+      set_tests_properties(ornith_pool_pages_test PROPERTIES LABELS "checkpoint;mtp;pool;ornith" SKIP_RETURN_CODE 77
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
       # PERF-64: both over the int8 KV cache (the restore and reset cases included: S2, P2).
-      add_test(NAME ornith_slots_kv8_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --one-slot)
-      add_test(NAME ornith_slots_pool_kv8_test COMMAND slots_test ${B70_ORNITH_SNAPSHOT} --pool)
-      set_tests_properties(ornith_slots_kv8_test ornith_slots_pool_kv8_test PROPERTIES
-        LABELS "checkpoint;mtp;slots;ornith;kv8" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
+      add_test(NAME ornith_pool_kv8_test COMMAND pool_test ${B70_ORNITH_SNAPSHOT} --one-slot)
+      add_test(NAME ornith_pool_pages_kv8_test COMMAND pool_test ${B70_ORNITH_SNAPSHOT} --pool)
+      set_tests_properties(ornith_pool_kv8_test ornith_pool_pages_kv8_test PROPERTIES
+        LABELS "checkpoint;mtp;pool;ornith;kv8" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
         ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced;B70_KV_CACHE=int8")
     endif()
   endif()
@@ -2581,8 +2587,8 @@ endif()
 
 
 # ==== Spec 16b: pipeline parallel decode across two B70s ================================
-# Written blind on the Mac (no box, and no multi-device Level Zero on a Mac at all);
-# the box validation queue row 22 is the order to run these in.
+# Written blind on the Mac (no B70, and no multi-device Level Zero on a Mac at all);
+# the validation queue row 22 is the order to run these in.
 # `pp` labels the device ones: `ctest -L pp`.
 #
 # Host, no device: the planner (stages, weights by device, the per-device plan, auto split
@@ -2605,7 +2611,7 @@ target_include_directories(pipeline_args_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(pipeline_args_test PRIVATE b70_plan)
 add_test(NAME pipeline_args_test COMMAND pipeline_args_test)
 
-# On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without
+# On the test machine, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without
 # peer access. P1 (pp_decode_test): ingest + 64 greedy ids and a spec 7 restore at 4395,
 # --parallel pp, the auto split and the cuts at 5 and 62 - ids, logits,
 # every layer's GDN state / conv ring / KV and both Control blocks BITWISE the single card on
@@ -2662,7 +2668,7 @@ set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60
 # ==== Spec 16b ============================================================= (end) ====
 
 # ==== Spec 17b: tensor parallel decode across two B70s (`--parallel tp`) ================================
-# Box queue row 79 (tools/box_validate/stages.sh). Host, no device: the per-card descriptor, plan and kernel names
+# Validation queue row 79 (the validation queue). Host, no device: the per-card descriptor, plan and kernel names
 # (tp_desc_test); the per-card slicing rules, card tiles = one-card tiles, the one-card gather of state and KV
 # (tp_slice_test); the crossing's protocol on two host threads, both forms, a stale and a dropped send
 # (tp_protocol_test).
@@ -2681,7 +2687,7 @@ target_link_libraries(tp_protocol_test PRIVATE b70_model Threads::Threads)
 add_test(NAME tp_protocol_test COMMAND tp_protocol_test)
 set_tests_properties(tp_protocol_test PROPERTIES TIMEOUT 300)
 
-# On the box, both cards (gpu_lock.sh box); SKIP (77) with fewer than two GPUs or without peer access both ways.
+# Both cards; SKIP (77) with fewer than two GPUs or without peer access both ways.
 # tp_kernels_test (no checkpoint): the crossing against prep_res_fold, bitwise (slices) / the host's sum (folded),
 # 300 replays. tp_decode_test (T1 / T2): the prose prompt + 64 greedy ids against one card on card 0 - both crossings
 # judged by the golden tie rule (slices since PERF-108's in-work-group K split of a card's qkv||z), both T1 bitwise
@@ -2740,7 +2746,7 @@ if(B70_KV8 AND COMMAND b70_kv8_twin)
   b70_kv8_twin(tp_decode)
 endif()
 
-# Spec 17c: tensor-parallel prefill on both cards (gpu_lock.sh box) - tp_prefill_test against one card's Engine::prefill
+# Spec 17c: tensor-parallel prefill on both cards (both cards visible) - tp_prefill_test against one card's Engine::prefill
 # on card 0: T1 (Controls, the following decode steps' residual taps) bitwise between the cards, T2 judged by the
 # golden tie rule (ids), chunk invariance (1024 vs 2048) and replay bitwise; bf16 and (the _kv8 twin) int8 KV.
 add_executable(tp_prefill_test runtime/tp_prefill_test.cc)
@@ -2749,7 +2755,7 @@ target_include_directories(tp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(tp_prefill_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(tp_prefill_test ${B70_PREFILL_KERNELS} ${B70_TP_KERNELS} ${B70_TP_PREFILL_KERNELS})
 # A divergence that is not a near-tie goes to the int8 head's f32 judge of its context (forced_judge.h; the judges:
-# tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_prefill_'), and awaits it as SKIP (77).
+# tools/oracle/qwen_forced.py forced-qwen with QWEN_KEYS_RE='^tp_prefill_'), and awaits it as SKIP (77).
 set(_tp_pf_judge "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-forced")
 add_test(NAME tp_prefill_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(tp_prefill_test PROPERTIES
@@ -2777,9 +2783,9 @@ if(B70_KV8)
     ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD_KV8}")
 endif()
 
-# Spec 17d: MTP, the snapshots' restore and the server's calls under tensor parallel (gpu_lock.sh box) - tp_mtp_test:
+# Spec 17d: MTP, the snapshots' restore and the server's calls under tensor parallel (both cards visible) - tp_mtp_test:
 # speculative greedy ids at K = 1..3 against plain TP decode (the golden tie rule, then the f32 judge of a non-tie's
-# context: tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_mtp_'), T1 of the head between the cards,
+# context: tools/oracle/qwen_forced.py forced-qwen with QWEN_KEYS_RE='^tp_mtp_'), T1 of the head between the cards,
 # the logits gathers (D9), the block hook and a restore bitwise the cold run, one card's snapshot into TP and back
 # (judged), a dropped verify step bounded; bf16 and (the _kv8 twin) int8 KV. `cost <depth>` measures the TP cost table.
 add_executable(tp_mtp_test runtime/tp_mtp_test.cc)
@@ -2798,7 +2804,7 @@ if(B70_KV8)
     ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD_KV8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
 endif()
 
-# Spec 19 v3c: DFlash under tensor parallel (gpu_lock.sh box) - tp_dflash_test: speculative greedy ids at K = 7, 3, 1
+# Spec 19 v3c: DFlash under tensor parallel (both cards visible) - tp_dflash_test: speculative greedy ids at K = 7, 3, 1
 # with the drafter split over both cards against plain TP decode (the golden tie rule, then the f32 judge:
 # QWEN_KEYS_RE='^tp_dflash_'), T1 of the drafter halves between the cards, a restore bitwise, a dropped draft list
 # bounded. `<ckpt> <drafter> cost <depth>` measures plan 19v3c's verify table and round. Built where the drafter's TP
@@ -2835,7 +2841,7 @@ set_tests_properties(cli_reject_tp_one_gpu PROPERTIES LABELS tp TIMEOUT 60)
 # ==== Spec 17b ============================================================= (end) ====
 
 # ==== Spec 16c: pipeline parallel PREFILL across two B70s (the chunk pipeline) ==========
-# Written blind on the Mac, like 16b; box-validation-queue.md row 23 is the order to run the
+# Written blind on the Mac, like 16b; the validation queue, row 23 is the order to run the
 # device ones in (`ctest -L pp`).
 #
 # Host, no device: the chunks (Engine::prefill's, exactly), the host's order and its rules
@@ -2854,7 +2860,7 @@ target_link_libraries(pp_prefill_protocol_test PRIVATE b70_plan Threads::Threads
 add_test(NAME pp_prefill_protocol_test COMMAND pp_prefill_protocol_test)
 set_tests_properties(pp_prefill_protocol_test PROPERTIES TIMEOUT 120)
 
-# On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without peer
+# On the test machine, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without peer
 # access. P1 / P2 (pp_prefill_test): 4103 ids (3 chunks), 32768 (16), 2, a prefill_split
 # continuation at 2500 with chunk 1000, spec 7's hooks at 2048 / 4096 (from the shadows) and
 # 5000, a hook that throws, a one-card snapshot continued on two cards - logits, every layer's
@@ -2891,7 +2897,7 @@ endif()
 # ==== Spec 16c ============================================================= (end) ====
 
 # ==== Spec 16d: pipeline parallel integration (b70-serve --parallel pp, MTP across the split) ====
-# Written blind on the Mac, like 16b / 16c; box-validation-queue.md row 27 is the order to run
+# Written blind on the Mac, like 16b / 16c; the validation queue, row 27 is the order to run
 # the device ones in (`ctest -L pp`).
 #
 # Host, no device: the planner's server terms (the MTP head + embedding replica + buffers on
@@ -2910,7 +2916,7 @@ target_link_libraries(pp_serve_test PRIVATE b70_server b70_plan)
 add_test(NAME pp_serve_test COMMAND pp_serve_test)
 set_tests_properties(pp_serve_test PROPERTIES TIMEOUT 300)
 
-# On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without peer
+# On the test machine, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without peer
 # access. Review Focus 1-3 (pp_mtp_test): MTP across the split BITWISE one card's on device 0 -
 # the prose prompt's prefill (the head's KV filled on device 1), 64 speculative iterations (K 3,
 # 1, 2, 0: every draft and verify logits row, the ids, the session with the live verify slot,
@@ -2989,9 +2995,9 @@ endif()
 
 # ==== Spec 20c: Kolibri-1 decode (label kolibri) ==== (begin) ====
 # One delimited block for every 20c registration (spec 16c's and 20d's blocks stay apart). Host
-# tests first (they run on the Mac: tools/box_check.sh), then the card's (box only; box-validation
+# tests first (they run on the Mac), then the card's (GPU only; validation
 # queue row 24). Real-checkpoint tests SKIP (77) until spec 20b's checkpoint exists; the synthetic
-# checkpoints (tools/box_validate/kolibri_oracle.sh synth) carry KL2 / KL3 before it.
+# checkpoints (tools/oracle/kolibri_ref.py synth) carry KL2 / KL3 before it.
 # Task 2: the model table.
 add_executable(kolibri1_test model/kolibri1_test.cc)
 target_include_directories(kolibri1_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3010,7 +3016,7 @@ foreach(t kolibri1_repack_test kolibri1_rope_test)
 endforeach()
 set(B70_KOLIBRI_SNAPSHOT "urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ" CACHE STRING "Kolibri-1 int4 checkpoint (spec 20b)")
 set(B70_KOLIBRI_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-synth" CACHE PATH
-  "Task 1's synthetic checkpoints and golden sets (tools/box_validate/kolibri_oracle.sh synth)")
+  "Task 1's synthetic checkpoints and golden sets (tools/oracle/kolibri_ref.py synth)")
 add_executable(kolibri1_load_checkpoint_test loader/kolibri1_load_checkpoint_test.cc)
 target_include_directories(kolibri1_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(kolibri1_load_checkpoint_test PRIVATE b70_kolibri_loader b70_l0)
@@ -3066,7 +3072,7 @@ set_tests_properties(kolibri_plan_test PROPERTIES LABELS kolibri)
 # ... and on the card: plan == allocation, K3 replay determinism and the ring (kolibri_decode_test); KL2,
 # the tie-aware gate with the routing diagnostic (kolibri_golden_test) on both synthetic arms, flash and
 # eager, and the int8 head; the real checkpoint truncated to 30 layers on one card (kolibri_partial_test,
-# development mode; needs spec 20b). SKIP 77 without the data (tools/box_validate/kolibri_oracle.sh).
+# development mode; needs spec 20b). SKIP 77 without the data (tools/oracle/kolibri_ref.py).
 if(B70_KOLIBRI)
   set(B70_KOLIBRI_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri"
     CACHE PATH "The real checkpoint's golden set (kolibri_oracle.sh real): <prompt>.ids + .golden.safetensors")
@@ -3151,8 +3157,8 @@ b70_cli_reject(cli_reject_kolibri_layers_qwen ${B70_NO_MODEL} --ids ${B70_OK_IDS
 # ==== Spec 20c: Kolibri-1 decode ==== (end) ====
 
 # ==== Spec 20d: Kolibri-1 prefill (labels kolibri;prefill) ==== (begin) ====
-# One delimited block for every 20d registration, after 20c's. Written blind on the Mac (box queue row
-# 26): host tests first (tools/box_check.sh runs them), then the card's; the checkpoint ones SKIP (77)
+# One delimited block for every 20d registration, after 20c's. Written blind on the Mac (validation queue row
+# 26): host tests first (the host checks run them), then the card's; the checkpoint ones SKIP (77)
 # until the synthetic sets (kolibri_oracle.sh synth) or, for the real checkpoint, spec 20b exist.
 # Task 1: the prefill kernels' host twin (tests/kernels/kolibri_pf_ref.h) - the 384-expert sort and its
 # adversaries, the combine == 20c's decode chain and torch's fixture row, the windowed flash walk over
@@ -3192,7 +3198,7 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_pf_kernels_test COMMAND kolibri_pf_kernels_test)
   set_tests_properties(kolibri_pf_kernels_test PROPERTIES LABELS "kolibri;prefill" TIMEOUT 1800)
 endif()
-# Task 3: the prefill walk on the card (box only; SKIP 77 without the synthetic sets / the real checkpoint).
+# Task 3: the prefill walk on the card (GPU only; SKIP 77 without the synthetic sets / the real checkpoint).
 #   kolibri_prefill_test: the walk's launches and the plan, K3 (two prefills, recorded == replayed, chunks
 #       of 16 == chunks of 2048, all bitwise), Review Focus 4 (KV / rings / routes / tokens against decode's
 #       fill); its `split` mode is prefill_split_kolibri_test (Review Focus 5), its `pp` mode one card
@@ -3319,7 +3325,7 @@ target_include_directories(kolibri_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(kolibri_snapshot_test PRIVATE b70_server b70_kolibri_plan)
 add_test(NAME kolibri_snapshot_test COMMAND kolibri_snapshot_test)
 set_tests_properties(kolibri_snapshot_test PROPERTIES LABELS kolibri)
-# On the card (box only; SKIP 77 without the synthetic sets / the real checkpoint): kolibri_snapshot_gpu_test -
+# On the card (GPU only; SKIP 77 without the synthetic sets / the real checkpoint): kolibri_snapshot_gpu_test -
 # KolibriEngine's snapshot calls (Review Focus 4): restores at the block end 4096 (bitwise the cold run), at the
 # request ends 2049 and 300 (bitwise the session that never left), on one card and on two (pp2:3); `cross`: a
 # snapshot taken on two cards continues on one, and the reverse (spec 16b's rule; two GPUs). The real
@@ -3360,9 +3366,9 @@ endif()
 
 # ==== Spec 21-QFN-v1b: Qwen3.8-Flash-Next descriptor and loader (label qwen4exp) ==== (begin) ====
 # One delimited block for every 21-QFN-v1b registration. Host tests first (they run on the Mac:
-# tools/box_check.sh), then the card's (box only; box-validation queue row 31): the loads SKIP (77)
+# the host checks), then the card's (GPU only; validation queue row 31): the loads SKIP (77)
 # until the synthetic checkpoints (tools/quantize/qwen4exp/make_synth.py + ple_int8.py, r31.synth) or
-# Intel's checkpoint and its PLE file (r31.ple_convert) are on the box.
+# Intel's checkpoint and its PLE file (r31.ple_convert) are on the GPU machine.
 # Task 2: the model table (the configs are built in code: the original's config.json is not vendored).
 add_executable(qwen4exp_test model/qwen4exp_test.cc)
 target_include_directories(qwen4exp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3393,11 +3399,11 @@ set_tests_properties(qwen4exp_plan_test PROPERTIES LABELS qwen4exp)
 # checkpoint at 18 layers (one card's fit with its bf16 dense layers, development mode); each with its PLE int8
 # file beside it (<snapshot>-ple-int8/). SKIP 77 without the data.
 set(B70_Q4EXP_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-synth" CACHE PATH
-  "Spec 21-QFN-v1b's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (box: r31.synth)")
+  "Spec 21-QFN-v1b's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (validation: r31.synth)")
 set(B70_Q4EXP_INTEL_SNAPSHOT "Intel/Qwen3.8-Flash-Next-W4A16-AutoRound" CACHE STRING
   "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint (181 GB; its PLE file: r31.ple_convert)")
 # The host half over the synthetic files themselves (make_synth.py's writer against the C++ reader; no device,
-# minutes: the MTP head's RTN dominates) - label checkpoint, so box_check leaves it to the box's r31.load.
+# minutes: the MTP head's RTN dominates) - label checkpoint, so the host checks leave it to the validation stage r31.load.
 add_executable(qwen4exp_synth_host_test loader/qwen4exp_synth_host_test.cc)
 target_include_directories(qwen4exp_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(qwen4exp_synth_host_test PRIVATE b70_qwen4exp_loader)
@@ -3414,9 +3420,9 @@ set_tests_properties(qwen4exp_load_synth_ours_test qwen4exp_load_synth_intel_tes
 # ==== Spec 21-QFN-v1b: Qwen3.8-Flash-Next descriptor and loader ==== (end) ====
 
 # ==== Spec 21-QFN-v1c: Qwen3.8-Flash-Next decode (label qwen4exp) ==== (begin) ====
-# One delimited block for every 21-QFN-v1c registration, after 21-QFN-v1b's. Written blind on the Mac (box queue row 32): host
-# tests first (tools/box_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
-# synthetic golden sets (tools/box_validate/qwen4exp_oracle.sh synth) or Intel's checkpoint and 21-QFN-v1a's sets exist.
+# One delimited block for every 21-QFN-v1c registration, after 21-QFN-v1b's. Written blind on the Mac (validation queue row 32): host
+# tests first (the host checks run them), then the card's (GPU only); the checkpoint ones SKIP (77) until the
+# synthetic golden sets (tools/oracle/qwen4exp_ref.py synth) or Intel's checkpoint and 21-QFN-v1a's sets exist.
 # Task 1: the kernels' host twin (tests/kernels/qwen4exp_ref.h) against qwen4exp_ref.py's restated ops and
 # transformers' modules (tests/kernels/qwen4exp_fixture.h) and the semantics' properties. Host only; the loader's
 # host half for the RoPE table (q4_rope_table) and the PLE hash.
@@ -3559,8 +3565,8 @@ b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv
 # ==== Spec 21-QFN-v1c: Qwen3.8-Flash-Next decode ==== (end) ====
 
 # ==== Spec 21-QFN-v1d: Qwen3.8-Flash-Next prefill (labels qwen4exp;prefill) ==== (begin) ====
-# One delimited block for every 21-QFN-v1d registration, after 21-QFN-v1c's. Written blind on the Mac (box queue row 33): host
-# tests first (tools/box_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
+# One delimited block for every 21-QFN-v1d registration, after 21-QFN-v1c's. Written blind on the Mac (validation queue row 33): host
+# tests first (the host checks run them), then the card's (GPU only); the checkpoint ones SKIP (77) until the
 # synthetic golden sets (qwen4exp_oracle.sh synth) or Intel's checkpoint and 21-QFN-v1a's sets exist.
 # Task 1: the prefill kernels' host twin (tests/kernels/qwen4exp_pf_ref.h) - the 512-expert sort and its adversaries,
 # the combine == 21-QFN-v1c's decode chain, dense / sparse rows, the sparse attention over row lists in fp64 and eager, the
@@ -3617,7 +3623,7 @@ if(B70_Q4EXP)
     kernel_q4_qsa_M2048_T512_W1024_PF)   # the bf16 reference form
   add_test(NAME qwen4exp_pf_kernels_test COMMAND qwen4exp_pf_kernels_test)
   set_tests_properties(qwen4exp_pf_kernels_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
-  # Task 3: the prefill walk on the card (box only; SKIP 77 without the synthetic checkpoints / Intel's).
+  # Task 3: the prefill walk on the card (GPU only; SKIP 77 without the synthetic checkpoints / Intel's).
   #   qwen4exp_prefill_test: the walk's launches and the plan, F4 (two prefills, recorded == replayed, chunks of 64 ==
   #       2048 bitwise, 16 printed), Review Focus 5 (the state, routes and selections against decode's fill, tokens),
   #       the injected run chunked == whole; its `split` mode (multiples of 64 bitwise, the rest within bars), its `pp`
@@ -3810,7 +3816,7 @@ endif()
 # tools/tokenizer/dump_qwen4exp.py's fixture (tests/tokenizer/qwen4exp_tokenizer.json: 24 texts, the added tokens
 # both ways, corpus.txt's digests, three renders' ids) and the template to its hash (c3cf9e34... = Qwen3.8's)
 # and the agnes_template_* renders (Qwen3.8's template, named after the dropped model they were first dumped for). Nothing of the release is vendored (its licence text unread): the original's small
-# files are the synthetic checkpoint's (21-QFN-v1b's make_synth.py copies them; box: r31.synth), or
+# files are the synthetic checkpoint's (21-QFN-v1b's make_synth.py copies them; validation: r31.synth), or
 # -DB70_Q4EXP_TOKENIZER_JSON / the environment variable of the same name (a directory holding the original's
 # tokenizer.json, tokenizer_config.json, chat_template.jinja and generation_config.json). Absent: disabled on the
 # Mac (host_only), SKIP (77) elsewhere.
@@ -3862,7 +3868,7 @@ set_tests_properties(gpu_state_unannotated_test PROPERTIES LABELS qwen4exp
                      PASS_REGULAR_EXPRESSION "Sizes::idx_q4 has no GPU state annotation")
 set_tests_properties(gpu_state_unplanned_test PROPERTIES LABELS qwen4exp
                      PASS_REGULAR_EXPRESSION "Bufs::idx_q4 is a buffer without exactly one sizes member")
-# On the card (box only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_snapshot_gpu_test - restores at
+# On the card (GPU only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_snapshot_gpu_test - restores at
 # the block ends 2048 / 4096 bitwise the cold run, at the request ends 2049..2052 (the QSA cut), 5000 and 1 bitwise the
 # session that never left; one card, two (pp2:2), and `cross` (a two-card snapshot continues on one card and the
 # reverse); Intel's --layers 18 when present.
@@ -3959,7 +3965,7 @@ if(B70_Q4EXP AND B70_MTP)
   add_dependencies(pf_attn_prep_kvo_test kernel_pf_attn_prep_q16_Q24KV2 kernel_pf_attn_prep_q16_Q24KV2_KVO)
   add_test(NAME pf_attn_prep_kvo_fn_test COMMAND pf_attn_prep_kvo_test 24 2)
   set_tests_properties(pf_attn_prep_kvo_fn_test PROPERTIES LABELS "qwen4exp;prefill;mtp")
-  # On the card (box only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_mtp_test - M1 the head
+  # On the card (GPU only; SKIP 77 without the synthetic checkpoints / Intel's): qwen4exp_mtp_test - M1 the head
   # against 21-QFN-v1a's port on tools/oracle/qwen4exp_mtp_fixture.py's data (both norm forms; SKIPs without the fixture),
   # M2 verify rows bitwise the plain steps, M3 greedy lossless at K = 1..3 (and the head off), the verify's cost and
   # per-layer expert union; one card and two (pp2:2); Intel's --layers 18 when present.
@@ -3970,7 +3976,7 @@ if(B70_Q4EXP AND B70_MTP)
   target_link_libraries(qwen4exp_mtp_test PRIVATE b70_qwen4exp_prefill b70_l0)
   add_dependencies(qwen4exp_mtp_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
   set(B70_Q4EXP_MTP_FIXTURE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-mtp" CACHE PATH
-    "tools/oracle/qwen4exp_mtp_fixture.py's M1 data: <dir>/<ours|intel>/mtp_{single,per_stream}.safetensors (box: r34.fixture)")
+    "tools/oracle/qwen4exp_mtp_fixture.py's M1 data: <dir>/<ours|intel>/mtp_{single,per_stream}.safetensors (validation: r34.fixture)")
   set(_q4m ${B70_Q4EXP_MTP_FIXTURE_DIR})
   set(_q4m_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
   add_test(NAME qwen4exp_mtp_synth_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours ${_q4m_ids})
@@ -4024,7 +4030,7 @@ if(B70_Q4EXP AND B70_MTP)
     add_test(NAME qwen4exp_moe_union_test COMMAND qwen4exp_moe_union_test)
     set_tests_properties(qwen4exp_moe_union_test PROPERTIES LABELS qwen4exp SKIP_RETURN_CODE 77 TIMEOUT 1800)
   endif()
-  # Plan 21-QFN-v2b Task 5 Step 0: the MTP head under --parallel tp (box only; our RTN export, 18 layers): the plain run's
+  # Plan 21-QFN-v2b Task 5 Step 0: the MTP head under --parallel tp (GPU only; our RTN export, 18 layers): the plain run's
   # greedy ids, then the head's plain steps, spec 8's loop at K 1..3 and a restored snapshot against them.
   if(B70_TP AND TARGET qwen4exp_tp_prefill_test)
     set(B70_Q4EXP_TP_MTP_KERNELS kernel_draft_prob_N124160_U124160 kernel_draft_prob_N124160_U123917)   # open-work 49
@@ -4282,7 +4288,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   endforeach()
 endif()
 # Host: the arithmetic the loop rests on
-# (the tap sites, the verify slots, the planner's terms, the cost table, the sparse-q acceptance). Box: the engine
+# (the tap sites, the verify slots, the planner's terms, the cost table, the sparse-q acceptance). On the card: the engine
 # with the real drafter beside the gate checkpoint (dflash_engine_test).
 # Task 3 / D4: lossless sampling with the drafter's sparse q (server::accept_sparse), 10^6 seeded draws. Host only.
 add_executable(dflash_accept_test server/dflash_accept_test.cc)
@@ -4312,19 +4318,19 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
   # Plan 19v3b Task 3: the drafter beside sequence slots - a session per slot, bitwise the one-slot engine, isolated.
-  add_executable(dflash_slots_test runtime/dflash_slots_test.cc)
-  target_include_directories(dflash_slots_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  add_executable(dflash_pool_test runtime/dflash_pool_test.cc)
+  target_include_directories(dflash_pool_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/golden)
-  target_link_libraries(dflash_slots_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader
+  target_link_libraries(dflash_pool_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader
     b70_l0 b70_model b70_server)
-  add_dependencies(dflash_slots_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
-  add_test(NAME dflash_slots_test COMMAND dflash_slots_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
-  set_tests_properties(dflash_slots_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+  add_dependencies(dflash_pool_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
+  add_test(NAME dflash_pool_test COMMAND dflash_pool_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_pool_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # Plan 40a Task 1: the drafter beside the KV page pool - pages in any order, reset, a longer prompt: bitwise the
   # one-slot engine.
-  add_test(NAME dflash_slots_pool_test COMMAND dflash_slots_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT} --pool)
-  set_tests_properties(dflash_slots_pool_test PROPERTIES LABELS "checkpoint;dflash;slots" SKIP_RETURN_CODE 77
+  add_test(NAME dflash_pool_pages_test COMMAND dflash_pool_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT} --pool)
+  set_tests_properties(dflash_pool_pages_test PROPERTIES LABELS "checkpoint;dflash;pool" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # The DFlash verify at M = 2..8 on the int8 KV cache against the plain loop: v2 + gemv lists bitwise (ids and the
   # KV rows they wrote) at every K, the production / gemm_sm / DPAS arms' first difference recorded.
@@ -4411,7 +4417,7 @@ endif()
 # ==== Spec 19c ==== (end) ====
 # ==== Spec 19d: DFlash in the server ==== (begin) ====
 # Host: the drafter's ring across a prefix-cache
-# restore through PrefixSession (decision 5), the store keyed by the drafter. Box: the same on the card.
+# restore through PrefixSession (decision 5), the store keyed by the drafter. On the card: the same.
 add_executable(dflash_prefix_test server/dflash_prefix_test.cc)
 target_include_directories(dflash_prefix_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dflash_prefix_test PRIVATE b70_server)
@@ -4513,7 +4519,7 @@ endif()
 
 # ==== Kolibri DSpark: speculative decoding for Kolibri-1 (label kolibri) ==== (begin) ====
 # intuit/Kolibri-1-dspark beside Kolibri-1 (docs/17-running-models.md "Kolibri-1 with DSpark"). Host tests run on the Mac's
-# build tree and the box's; the card tests wait for the first run (after Flash-Next).
+# build tree and the test machine's; the card tests wait for the first run (after Flash-Next).
 # The descriptor: the speculators config -> the DSpark form, held to its kernels and to Kolibri-1. Host only.
 add_executable(dspark_desc_test model/dspark_desc_test.cc)
 target_include_directories(dspark_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -4548,7 +4554,7 @@ target_include_directories(kolibri_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(kolibri_spec_test PRIVATE b70_server)
 add_test(NAME kolibri_spec_test COMMAND kolibri_spec_test)
 set_tests_properties(kolibri_spec_test PROPERTIES LABELS kolibri)
-# On the cards (box only, NOT YET RUN: the first card run after Flash-Next; SKIP 77 without the data):
+# On the cards (GPU only, NOT YET RUN: the first card run after Flash-Next; SKIP 77 without the data):
 #   kolibri_verify_test   the verify lists against the plain decode list - every row's argmax the plain run's, its logits row
 #                         cosine >= 0.99999 (bitwise expected, counted), partial commits, greedy lossless with the plain
 #                         run's own ids as drafts, the launches at M 2..8 - on the synthetic set (one card, two) and the real

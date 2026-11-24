@@ -21,7 +21,7 @@
 //                      adds card 0's row then card 1's - bitwise between the cards, another order than one card's.
 //
 // The protocol (runtime/tp_protocol.h is the host mirror, line for line; tests/runtime/tp_protocol_test.cc runs it on
-// threads). Spec 17a's route (P), the only one that works on this box: every
+// threads). Spec 17a's route (P), the only one that works on this machine: every
 // crossing lands in the READER's own VRAM, written by the peer with plain stores, published by a plain flag store
 // after a system-scope release fence; the reader polls its own memory with system-scope acquire loads and reads the
 // data with system-scope loads. Two slots a direction (call n uses slot n & 1): a writer at call n + 2 has consumed the

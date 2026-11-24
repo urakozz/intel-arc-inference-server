@@ -1,7 +1,7 @@
-// probe_slots_speed - spec 13c (plan 13c Task 5): the decode speed of runtime::Engine's sequence slots, through the
+// probe_pool_speed - spec 13c (plan 13c Task 5): the decode speed of runtime::Engine's sequence slots, through the
 // engine API (host writes, submit, fence - what the server pays per step, without HTTP and the scheduler).
 //
-//   probe_slots_speed <snapshot> [--kv bf16|int8] [--seqs 4] [--cap 32768] [--depth 4096] [--steps 48] [--rounds 3]
+//   probe_pool_speed <snapshot> [--kv bf16|int8] [--seqs 4] [--cap 32768] [--depth 4096] [--steps 48] [--rounds 3]
 //                     [--depths D0,D1,..] [--arms "NAME|NAME|.."]
 //
 // --seqs / --cap: the engine's sequences and each one's cap; they share a KV page pool of seqs x cap positions.
@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
   Engine e(ctx, loader::load(ctx, argv[1], total, /*mtp=*/true, loader::LmHeadForm::Int8), total, false, kv, nullptr,
            std::vector<uint32_t>(S, cap), total / runtime::kKvPage);
   e.prepare_prefill();
-  std::printf("probe_slots_speed: %u sequences up to %u sharing %u KV pages, %s KV, depth %u, %u steps an arm, median of "
+  std::printf("probe_pool_speed: %u sequences up to %u sharing %u KV pages, %s KV, depth %u, %u steps an arm, median of "
               "%u rounds\n%s\n",
               S, cap, e.kv_pool_pages(), runtime::kv_cache_name(kv), depth, steps, rounds, e.memory_line().c_str());
   if (depths.empty()) depths.assign(S, depth);

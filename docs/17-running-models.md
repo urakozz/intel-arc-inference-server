@@ -58,6 +58,11 @@ in host memory, so a conversation's next turn does not reprocess its whole histo
 Point opencode, or any other OpenAI-compatible client, at `http://<host>:8000/v1`. The server lists the model under its
 repo id (or the snapshot directory's name) and answers to any model name in a request.
 
+The port is open from startup: `GET /health` answers 503 `{"status":"loading"}` while the model loads and 200
+`{"status":"ok","model":"<id>"}` once requests are served (the default readiness check of llama-swap and similar);
+until then every other route but `GET /version` answers 503. `POST /tokenize` (a `prompt`, or chat `messages`
+rendered as a chat request's) and `POST /detokenize` (`tokens`) follow vLLM's.
+
 ### `--prefix-split-last` for agentic sessions
 
 Chat clients that drop the model's reasoning from the history (opencode does) change the prompt right after the last
@@ -308,8 +313,8 @@ bitwise.
 - Muse-Glimmer and Agnes 3.0 Flash are no longer supported. A `config.json` naming `AgnesForConditionalGeneration` is
   refused by name.
 
-A passing box test shows a configuration runs and is correct; it is not a speed row. The full box validation
-(`tools/box_validate.sh`: golden sets, serving, prefix cache, speculative decoding) runs on `main` on demand.
+A passing test on the GPU machine shows a configuration runs and is correct; it is not a speed row. The full
+validation (golden sets, serving, prefix cache, speculative decoding) runs on `main` on demand.
 
 | | Qwen3.8-27B | Ornith 1.5 35B-A3B | Kolibri-1 | Qwen3.8-Flash-Next |
 |---|---|---|---|---|
@@ -404,7 +409,7 @@ weights: the first token comes 0.06 s later on this prompt (0.41 against 0.35 s)
   holds about twice the positions in its pool; one request does not need it, since 262,144 fits in bf16. It runs on
   one card (and one copy a card with `--parallel replica`); `--parallel pp` refuses it, and so does `l0-int8`
 - Use the default prompt pass (`l0`). `l0-int8` is opt-in and slower than the bf16 pass on Ornith. It also loses
-  routing accuracy against f32: on the box, 1314 differing expert sets on the prefill path against the bf16
+  routing accuracy against f32: on the test machine, 1314 differing expert sets on the prefill path against the bf16
   reference's 1140, and no 8-bit activation scheme studied won that back. Its model-level accuracy checks are
   therefore printed, not gated; its kernels' own gate (`prefill_gate_ornith_l0-int8`, judged by the
   quantisation-aware f32 reference) still applies.
@@ -453,8 +458,6 @@ Two files have to sit beside the weights before the engine will load Flash-Next.
    ```sh
    python3 tools/quantize/qwen4exp/ple_int8.py <snapshot> <snapshot>-ple-int8/
    ```
-
-   `tools/box_validate/qwen4exp_oracle.sh <data> ple-int8` wraps the same converter for Intel's snapshot.
 
 2. The original model's tokenizer: `Qwen/Qwen3.8-Flash-Next`'s `tokenizer.json`, whose pre-tokenizer split adds
    `\p{M}`. It is read from the snapshot directory. Our own export already ships it. Intel's checkpoint ships
@@ -686,7 +689,7 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -
   [{"role": "user", "content": "Wie spät ist es in Berlin?"}], "chat_template_kwargs": {"reasoning_effort": "low"}}'
 ```
 
-Box checks: `tools/probe/kolibri_passkey.sh` (passkey 3 of 3 at 262,144 on two cards), and the German tool-call set
+Checks: a passkey run (passkey 3 of 3 at 262,144 on two cards), and the German tool-call set
 `tests/golden/toolcall-kolibri-de` (run `tools/toolcall/engine_generate.sh`, then `score.py --format hermes` against
 the bf16 source's reference made by `oracle_generate.py --model kolibri`).
 

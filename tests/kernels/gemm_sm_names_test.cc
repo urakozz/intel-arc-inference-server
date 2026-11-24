@@ -4,7 +4,7 @@
 // usage: gemm_sm_names_test <every kernel_gemm_sm_* target the block made> -- <the consumer builds it made>
 // Every (row, M) of the table at kernels::gemm_sm_built_m must be built, and the block builds nothing else -
 // a row whose knobs the block spells differently is a failure here on the Mac, not a missing file at
-// capture on the box. The consumers: gate||up's one-slice row needs prep_silu_mul's _S1 build at M 2..8
+// capture on the GPU machine. The consumers: gate||up's one-slice row needs prep_silu_mul's _S1 build at M 2..8
 // (kernels::gemm_sm_silu_variant), and nothing else. Spec 32e: gemm_sm_wide's rows at 32 / 64 are in the same list.
 #include <cstdio>
 #include <set>

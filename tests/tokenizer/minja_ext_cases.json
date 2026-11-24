@@ -55,6 +55,11 @@
    "expected": "True True True False False False True"
   },
   {
+   "name": "undefined",
+   "template": "{{ n is undefined }} {{ d.n is undefined }} {{ d.k is undefined }} {{ d.missing is undefined }} {{ missing is undefined }} {{ d['n'] is not undefined }} {{ d.get('missing') is undefined }}",
+   "expected": "False False False True True True False"
+  },
+  {
    "name": "defined_none",
    "template": "{{ n is none }} {{ d.n is none }} {% if d.n is defined %}[{{ d.n is none }}]{% endif %}{% set ns = namespace(v=d.missing) %}{{ ns.v is defined }}",
    "expected": "True True [True]False"

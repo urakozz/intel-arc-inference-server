@@ -1,4 +1,4 @@
-// Plan 21v2b Task 4: Qwen3.8-Flash-Next's prefill on `--parallel tp` against `--parallel pp` (box only; label
+// Plan 21v2b Task 4: Qwen3.8-Flash-Next's prefill on `--parallel tp` against `--parallel pp` (GPU only; label
 // checkpoint;qwen4exp;tp). One engine a process (each pins the 51.8 GB PLE table), so a comparison is two runs:
 //   qwen4exp_tp_prefill_test <checkpoint> <ids> pp|tp|ppdump|tpdump <rows file> [layers 18] [n 4500] [bench 0]
 // The prompt is <ids> cycled to n positions (4500: three chunks - all dense, straddling the dense range, a 404-row

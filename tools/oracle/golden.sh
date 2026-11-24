@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Regenerates the three golden dumps, one after another (61 GiB peak each), from
-# the repo root ON THE BOX - the Mac never loads the model. dump.py takes one
+# the repo root on the machine that holds the checkpoint. dump.py takes one
 # --prompt/--out pair, so this is three container invocations and the model
-# reloads (~2 min) per prompt; ~17 min serial on an idle box. No numerics are
+# reloads (~2 min) per prompt; ~17 min serial on an idle machine. No numerics are
 # touched here.
 #
-#   tools/box.sh sync && ssh <box>
-#   cd ~/b70-inference-server
+#   cd <the engine tree>
 #   OUT_DIR=... setsid nohup tools/oracle/golden.sh > "$OUT_DIR"/golden.log 2>&1 </dev/null &
 #
-# (detached, so the run outlives the ssh session). Prompt ids come from
+# (detached, so the run outlives the terminal session). Prompt ids come from
 # $IDS_DIR, which defaults to the COMMITTED tests/golden/prompts - see
 # "Running it" in tools/oracle/README.md.
 #
@@ -32,7 +31,7 @@
 #
 #   OUT_DIR=oracle-out-primary PROMPTS=long \
 #   ORACLE_THREADS=22 setsid nohup tools/oracle/golden.sh \
-#     > ~/b70/logs/oracle-long/golden.log 2>&1 </dev/null &
+#     > $B70_DATA/logs/oracle-long/golden.log 2>&1 </dev/null &
 #
 # `--max-prompt` below is the ceiling `PrefillScratch::kC` sets, not dump.py's
 # default 64: that default would abort at id 65 of a 2820-id prompt. It is

@@ -4,7 +4,7 @@
 // §9.1's method. Device-free and header-only. Plan 13a's probe (tools/probe/probe_batch_step) and, since plan 13c,
 // runtime::Engine's sequence slots (Engine::verify_rows, runtime::build_rows) use it; the planner's own arithmetic
 // for the engine's sequences is runtime::plan_pool (memory_plan.h) - batch_memory below is section 9.1's method,
-// which tests/runtime/slot_plan_test reconciles it with byte for byte.
+// which tests/runtime/pool_plan_test reconciles it with byte for byte.
 //
 // **The device layout.** BatchRowTable is 1 KB of shared memory (32 rows since plan 40a Task 3) the host writes before a replay; the kernels'
 // BATCH_ROWS builds (gdn_step.cl, attn.cl, attn_v2.cl, kv8.cl) read row m's words at m * kBatchRowWords with the

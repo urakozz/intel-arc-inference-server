@@ -1,7 +1,7 @@
 # name        source                              pin                                       sha256
 # json header: third_party/json/nlohmann/json.hpp (kept at the include path minja uses)
 json          https://github.com/nlohmann/json   v3.12.0                                  aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
-minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  bea23d548df8e07e883a3bd4d6c8201db9d603c07d556b8bd85a31b41dde819d 593f0f70d722074a0cb048f394e42e0ed480e803bc0ed06975ae2917f86ff395
+minja         https://github.com/google/minja    021c2293c187789ef13d56c6cfd89c9b134fd80f  acc444c5249c20b62f0bf916a553d1fc0616a854bfb1c1a800256faeb0fd0633 593f0f70d722074a0cb048f394e42e0ed480e803bc0ed06975ae2917f86ff395
 httplib       https://github.com/yhirose/cpp-httplib v0.54.1                                 5933c14b2d0f45212925ed18ca579841f5fce717f431fc20cec712423e905b10
 #
 # minja carries b70 patches (every one marked "b70 patch" in the source,
@@ -10,7 +10,8 @@ httplib       https://github.com/yhirose/cpp-httplib v0.54.1                    
 #   55df85289038d54566ac40903617725e82a9e07e60a21b38dc6de65f7b7e10b8 (minja.hpp)
 #   87db93c98fd215b70b6f8908f55015a696cd92564dd4fced19bb11f103d475d4 (chat-template.hpp)
 # The patches make chat templates render as transformers' Jinja does:
-#   minja.hpp          Jinja's Undefined apart from None (`{"default": null}` is defined);
+#   minja.hpp          Jinja's Undefined apart from None (`{"default": null}` is defined), and the
+#                      `is undefined` test;
 #                      `is [not] sameas <value>`; str.split() with no separator (Unicode
 #                      whitespace); the `replace` filter; the `dict` global; attribute getters
 #                      whose all-digit parts index (rejectattr('0', ...) on `| items` pairs);

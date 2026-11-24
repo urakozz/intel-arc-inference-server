@@ -28,8 +28,8 @@
 // Every host wait is bounded (TpOptions::timeout_ms); on a miss the host signals every event of the pair so the lists
 // drain on whatever they hold, throws by name, and the engine stays failed until reset().
 //
-// Without a copy-only queue group the crossings go on the compute lists in order (correct, no overlap) - not this
-// box (every B70 shows ordinal 1, COPY-only, one queue).
+// Without a copy-only queue group the crossings go on the compute lists in order (correct, no overlap) - not on a
+// B70 (every B70 shows ordinal 1, COPY-only, one queue).
 //
 // **Spec 17d: the MTP head and the block hook.** With the head (whole on each card) every row's hidden is needed - the
 // head's KV of a chunk is built over (h_{pos-1+r}, x[pos+r]) - so the last unit's halves cross for EVERY row of every

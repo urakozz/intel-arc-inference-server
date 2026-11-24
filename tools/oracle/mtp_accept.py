@@ -14,7 +14,7 @@
                                                  pool per-source results (also .partial files)
                                                  without the model; no container needed
 
-Rerun on the recorded opencode log (spec 7 plan 7a) in one command, on the box:
+Rerun on the recorded opencode log (spec 7 plan 7a) in one command, on the GPU machine:
     tools/oracle/run_in_container.sh 'python3 tools/oracle/mtp_accept.py "$SNAP" \
         --opencode /ws/tests/golden/opencode/session1 --out /ws/oracle-out-spec8a/accept_opencode.json'
 

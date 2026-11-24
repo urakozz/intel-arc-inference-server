@@ -13,7 +13,7 @@
 // Also here: an engine loaded WITHOUT the head allocates no MtpBuffers and throws on
 // every MTP call (the "MTP off is today's engine" half of Task 1's contract).
 //
-// The f32 judge: with B70_MTP_JUDGE=<dir> (tools/box_validate/f32_refs.sh ornith-mtp:
+// The f32 judge: with B70_MTP_JUDGE=<dir> (tools/oracle/qwen_forced.py ornith-mtp:
 // <dir>/<name>.mtp.safetensors, the same rows from the f32 reference teacher-forced on the same continuation) a
 // row's verdict is taken against the f32 rows by the same rule - cosine >= 0.999 and the f32 argmax (its one-bf16-ulp
 // tie set, golden_common.h judge_row) among the top 2 - for the engine and for the bf16 reference alike, and the
@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
     if (judge_dir) {
       const std::string jp = std::string(judge_dir) + "/" + n + ".mtp.safetensors";
       if (!golden::exists(jp)) {
-        std::fprintf(stderr, "SKIP: the f32 judge %s is missing (tools/box_validate/f32_refs.sh ornith-mtp)\n", jp.c_str());
+        std::fprintf(stderr, "SKIP: the f32 judge %s is missing (tools/oracle/qwen_forced.py ornith-mtp)\n", jp.c_str());
         return 77;
       }
       jg = std::make_unique<golden::Golden>(jp);

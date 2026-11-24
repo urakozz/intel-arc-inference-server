@@ -1,5 +1,5 @@
 // kv8_kernels_test - spec 12b: src/kernels/kv8.cl on the card against tests/kernels/kv8_ref.h.
-// Written blind on the Mac (2026-10-05); the box runs it first (box-validation-queue).
+// Written blind on the Mac (2026-10-05); the test machine runs it first (the validation queue).
 //
 //   W   the writers, BITWISE: attn_prep_kv8 at M = 1..8 (QKV_S = 2; n_active < M too), the
 //       MTP head's S1 build (B70_MTP), and the prefill build (PF = 1) at C = 37 - attn_q

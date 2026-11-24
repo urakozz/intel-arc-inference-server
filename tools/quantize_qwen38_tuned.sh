@@ -25,7 +25,7 @@
 #     engine loader's rules) passes, and README.md in the export records the
 #     auto-round version and commit.
 #
-# Usage (on the box, from the repo):  bash tools/quantize_qwen38_tuned.sh
+# Usage (on the GPU machine, from the repo):  bash tools/quantize_qwen38_tuned.sh
 #   overridables: MODEL, OUT, DEVICE (default 1 = second B70), VENVPY,
 #                 AR_REPO (git URL or local clone containing AR_COMMIT), AR_PATCH (1 / 0),
 #                 EXTRA (more auto_round flags, e.g. "--nsamples 512"; recorded in the README)

@@ -14,7 +14,7 @@ hooks alone would hold 192 x T x 5120 bf16 (64 GB at T = 32704) and its eager sc
 
 Output: `logits` f32 [len(at), vocab] (row i is prompt position at[i] - 1), `at` i32.
 Spec 6 K3a (the 2026-09-26 ruling): flash_long_test --oracle reads it.
-Cost, measured 2026-09-26 on the box (22 threads): 3799 s to 4096 ids, 11359 s to 8192,
+Cost, measured 2026-09-26 on the test machine (22 threads): 3799 s to 4096 ids, 11359 s to 8192,
 so 32704 is day-class. Run in the oracle container, detached:
     tools/oracle/run_in_container.sh 'python3 tools/oracle/last_logits.py "$SNAP" \
         --prompt tests/golden/prompts/long32k.ids --out /ws/oracle-out-long32k/last_logits.safetensors'
@@ -88,7 +88,7 @@ def main() -> None:
             rows.append(r)
             print(f"  at {end}: argmax {int(torch.argmax(r))}, {time.time() - t_fwd:.0f}s", flush=True)
             # Written after every point: the run is day-class at 32k (measured 11359 s to
-            # reach 8192 ids on the box), so an interrupted run keeps what it reached.
+            # reach 8192 ids on the test machine), so an interrupted run keeps what it reached.
             os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
             save_file({"logits": torch.stack(rows).contiguous(),
                        "at": torch.tensor(at[: len(rows)], dtype=torch.int32)},

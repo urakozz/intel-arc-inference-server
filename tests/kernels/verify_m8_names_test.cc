@@ -4,7 +4,7 @@
 // GEMVs (tools/probe/draft_cost_shapes.h) - formed as runtime/capture.cc and the probe form
 // them, against the binaries CMake builds (passed as arguments, `kernel_<name>`). Host
 // only, no device: a name a list would ask for that no CMake line builds fails here on the
-// Mac instead of at capture on the box.
+// Mac instead of at capture on the GPU machine.
 //
 // usage: verify_m8_names_test <the B70_VERIFY_M8 block's kernel_*...> -- <reused kernel_*>
 // The first list must be exactly bound (nothing in the block is dead); the union must cover
@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
     }
   CHECK_EQ(bad, 0);
   // A few names spelled out, so a change in a helper is seen here and not only as a
-  // missing file on the box.
+  // missing file on the GPU machine.
   CHECK_EQ(kernels::gdn_step_slots_variant(8, 48, 16, 48, 8), std::string("gdn_step_slots_M8_N8"));
   CHECK_EQ(kernels::gdn_step_slots_variant(4, 48), std::string("gdn_step_slots_M4"));
   CHECK_EQ(kernels::gdn_step_slots_variant(2, 30, 16, 32, 8),

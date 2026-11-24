@@ -40,7 +40,7 @@
 //
 // [--max-len L] (both modes; default 16384, the registrations' and every recorded row's
 // length): the engine's KV / RoPE capacity. Spec 8 §12 lifted A9's 16384-only MTP lists, so
-// mtp_gpu_{32k,128k}_test run the gate at 32768 / 131072 (box queue row 6) and a bench at
+// mtp_gpu_{32k,128k}_test run the gate at 32768 / 131072 (validation queue row 6) and a bench at
 // --depth past long32k.ids repeats that file as its filler.
 #include <algorithm>
 #include <chrono>

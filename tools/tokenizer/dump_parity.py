@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """tests/tokenizer/corpus.txt -> corpus.ids with Python `tokenizers` (the reference).
-Run ON THE BOX: ~/auto-round/.venv/bin/python tools/tokenizer/dump_parity.py <tokenizer.json>
+Run on the GPU machine: ~/auto-round/.venv/bin/python tools/tokenizer/dump_parity.py <tokenizer.json>
 Also asserts decode(encode(x)) == x for every case and prints the version used."""
 import sys
 

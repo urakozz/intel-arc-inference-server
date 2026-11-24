@@ -7,7 +7,7 @@
 Every tensor of the export that is not int4 (`.qweight` / `.scales` / `.qzeros`) and that the source has under the
 same name (all but the MTP head's split experts, which are int4) must equal the source tensor bit for bit: the
 ignore list's linears, the routers, the hyper-connections, norms, the embedding, the vision tower and the 128
-shards of the PLE table (which ple_int8.py then converts). On the box's XPU AutoRound writes them bf16 as it found
+shards of the PLE table (which ple_int8.py then converts). On an XPU AutoRound writes them bf16 as it found
 them; on a CPU without bf16 (DEVICE=cpu) it writes fp32 widenings - those are checked to be exactly the widened
 source and restored to the source's bf16 bytes (the shard rewritten, config.json's dtype set back to bfloat16).
 Anything else - a changed value, another dtype than the source's (the PLE's I64 constants included) - is

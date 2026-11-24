@@ -17,7 +17,7 @@
 #   1. `dump.py --prompt` takes an **ids file**, not text (`dump.py:220`), and
 #      so does `b70-decode --ids`. The text was only ever an intermediate.
 #   2. The tokenizer lives inside the oracle container and nowhere else on the
-#      box, and the L1-engine stage is operationally barred from starting
+#      machine, and the L1-engine stage is operationally barred from starting
 #      containers. Building the ids from the committed `.ids` files removes the
 #      dependency entirely and makes the artifact reproducible from a checkout
 #      with no model at all.

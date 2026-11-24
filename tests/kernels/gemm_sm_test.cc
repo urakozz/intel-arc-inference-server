@@ -1,4 +1,4 @@
-// gemm_sm_test - spec 28 N2 and N3 for the production small-M GEMM (plan 28b Task 1; box, one card).
+// gemm_sm_test - spec 28 N2 and N3 for the production small-M GEMM (plan 28b Task 1; one card).
 //
 // For every row of kernels::kSmallMTuning (src/kernels/kernels.h) at every M src/kernels/CMakeLists.txt builds
 // for it (M = 2..8, 16, 32 and 64; Ornith's rows at 2..4), on random weights

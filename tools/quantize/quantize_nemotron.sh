@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # One command: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 (bf16, 249 GB) -> our AutoRound int4 g64 symmetric
-# export, tuned, text-only, with the MTP layer - run on the box.
+# export, tuned, text-only, with the MTP layer - run on the GPU machine.
 #
 #   tools/quantize/quantize_nemotron.sh check-download [--sha]   the original complete? (sizes / sha256 vs the hub)
 #   tools/quantize/quantize_nemotron.sh start                    start (or resume) the run, detached
 #   tools/quantize/quantize_nemotron.sh status                   blocks done, s per block, RAM, disk, the result
-#   tools/quantize/quantize_nemotron.sh stop                     stop the run (tools/box_stop.sh nemotron-quant); start resumes
-#   tools/quantize/quantize_nemotron.sh selftest                 the whole pipeline on a tiny model (box CPU, ~10 min)
+#   tools/quantize/quantize_nemotron.sh stop                     stop the run; start resumes
+#   tools/quantize/quantize_nemotron.sh selftest                 the whole pipeline on a tiny model (CPU, ~10 min)
 #   tools/quantize/quantize_nemotron.sh run [--only S | --from S]   the stages in the foreground (what start runs)
 #
 # Stages of `run` (a finished stage leaves $OUT/.done-<stage>; a rerun skips it):
@@ -15,7 +15,7 @@
 #          (nvidia/OpenCodeInstruct through the chat template, from the HF cache; refused if any of its 50
 #          parquet shards is missing - the model is for agentic coding), low CPU memory (a meta skeleton, one block
 #          of the 249 GB original materialised at a time), low GPU memory; on card CARD (1, the quant card: card 0 stays free) through
-#          tools/gpu_lock.sh, or the box CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Quantised: every block's routed
+#          its lock, or the CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Quantised: every block's routed
 #          experts, shared expert, latent projections, Mamba in/out_proj, attention q/k/v/o; kept bf16: routers,
 #          conv1d, norms, A_log / D / dt_bias, the embedding, lm_head (the engine builds its int8 head at load).
 #          The MTP layer is copied by AutoRound at export, its 512 routed experts RTN int4 g64, the rest bf16.
@@ -38,7 +38,7 @@
 # (150) free. The source is read one block at a time (5.6 GB a MoE block) from wherever MODEL lives.
 # Guards: `start` refuses unless the download check passes, MemAvailable >= RAM_MIN_GB (80), QUANT_ROOT has
 # >= DISK_MIN_GB free; AutoRound runs in a systemd scope capped at RAM_CAP_GB (100) with no swap, so a memory
-# overrun kills the run (resumable) instead of the box.
+# overrun kills the run (resumable) instead of the machine.
 #
 # AutoRound: the LATEST of our fork ~/auto-round (AR_REPO, branch AR_REF local-patches-v2, ar_latest.sh), recorded
 # in $OUT/ar_commit; a run never switches AutoRound (resume with AR_COMMIT=<recorded hash>). Installed by
@@ -46,20 +46,20 @@
 # first on PYTHONPATH (the Flash-Next run's site).
 #
 # Overridables (environment): MODEL (the HF id, looked up in HF_HUB then ~/.cache/huggingface/hub, or a snapshot
-# dir), HF_HUB ($HOME/b70/hdd/hf-hub), QUANT_ROOT ($HOME/b70/hdd/quant), OUT (default: the run `nemotron-current`
+# dir), HF_HUB ($B70_DATA/hdd/hf-hub), QUANT_ROOT ($B70_DATA/hdd/quant), OUT (default: the run `nemotron-current`
 # points at - `start` points it at the run it starts - else QUANT_ROOT/Nemotron-3.5-Super-W4A16-g64-<date>), DEVICE
 # (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), RAM_CAP_GB, RAM_MIN_GB, DISK_MIN_GB, DATASET, VENVPY, SITE, AR_REPO, AR_REF,
-# LOGDIR ($HOME/b70/logs/nemotron-quant), SCRATCH ($HOME/b70/scratch/nemotron-quant: the selftest's files).
+# LOGDIR ($B70_DATA/logs/nemotron-quant), SCRATCH ($B70_DATA/scratch/nemotron-quant: the selftest's files).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
 Q="$HERE/quantize/nemotron"
 SELF="$HERE/quantize/quantize_nemotron.sh"
 MODEL="${MODEL:-nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16}"
-HF_HUB="${HF_HUB:-$HOME/b70/hdd/hf-hub}"
-QUANT_ROOT="${QUANT_ROOT:-$HOME/b70/hdd/quant}"
-LOGDIR="${LOGDIR:-$HOME/b70/logs/nemotron-quant}"
-SCRATCH="${SCRATCH:-$HOME/b70/scratch/nemotron-quant}"
+HF_HUB="${HF_HUB:-${B70_DATA:?set B70_DATA, the data root}/hdd/hf-hub}"
+QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/hdd/quant}"
+LOGDIR="${LOGDIR:-${B70_DATA:?set B70_DATA, the data root}/logs/nemotron-quant}"
+SCRATCH="${SCRATCH:-${B70_DATA:?set B70_DATA, the data root}/scratch/nemotron-quant}"
 DEVICE="${DEVICE:-xpu}"
 CARD="${CARD:-1}"
 ITERS="${ITERS:-200}"
@@ -107,7 +107,9 @@ disk_free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
 locked() {
   local cap=(systemd-run --user --scope -q -p "MemoryMax=${RAM_CAP_GB}G" -p MemorySwapMax=0)
   if [ "$DEVICE" = xpu ]; then
-    "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+    # through a machine-wide GPU lock wrapper at tools/gpu_lock.sh where the machine has one, else by affinity alone
+    if [ -x "$HERE/gpu_lock.sh" ]; then "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+    else ZE_AFFINITY_MASK="$CARD" "${cap[@]}" "$@"; fi
   else
     flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
   fi
@@ -263,10 +265,11 @@ case "${1:-}" in
       echo "-- last log lines:"
       tr '\r' '\n' < "$OUT/run.log" | grep -v -E "^(Quantizing|packing|Writing|Map|Filter)" | grep -v '^\s*$' | tail -5
     fi ;;
-  stop)   # tools/box_stop.sh nemotron-quant: the run $HOME/b70/hdd/quant/nemotron-current points at (the last started)
-    [ "$QUANT_ROOT" = "$HOME/b70/hdd/quant" ] || die "stop finds the run through $HOME/b70/hdd/quant/nemotron-current, not QUANT_ROOT=$QUANT_ROOT"
+  stop)   # the run $B70_DATA/hdd/quant/nemotron-current points at (the last started)
+    [ "$QUANT_ROOT" = "${B70_DATA:?set B70_DATA, the data root}/hdd/quant" ] || die "stop finds the run through ${B70_DATA:?set B70_DATA, the data root}/hdd/quant/nemotron-current, not QUANT_ROOT=$QUANT_ROOT"
     [ -z "${OUT:-}" ] || [ "$(readlink -m "$OUT")" = "$(readlink -f "$CURRENT")" ] ||
       die "OUT=$OUT is not the run $CURRENT points at (the last one started), which is the one stop stops"
+    [ -x "$HERE/box_stop.sh" ] || die "no stop helper on this machine: stop the run's AutoRound process yourself (pgrep -af autoround_run.py)"
     exec "$HERE/box_stop.sh" nemotron-quant ;;
   selftest)
     W="$SCRATCH/selftest-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$W" "$LOGDIR"

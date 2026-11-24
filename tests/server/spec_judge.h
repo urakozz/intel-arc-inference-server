@@ -3,7 +3,7 @@
 // run gemm_sm and are not bitwise the M = 1 rows, so speculative output is graded by the f32 JUDGE - it passes when it
 // is no further from f32 than plain decode on the same context. The judges are tests/golden/forced_judge.h's: the
 // test writes each context it would judge (B70_DUMP_FORCED=<dir>), the f32 reference is run on exactly that context
-// on the box CPU, and the test reads it back (B70_FORCED_JUDGE=<dir>). The bitwise and tie numbers stay printed.
+// on the CPU, and the test reads it back (B70_FORCED_JUDGE=<dir>). The bitwise and tie numbers stay printed.
 //
 //   N6 (streams)  a speculative id stream against the plain one: identical, or - from their first divergence d, where
 //                 the two share the context prompt + plain[0, d) - the judge (one reference per stream, forced on its
@@ -108,7 +108,7 @@ inline constexpr const char* kTpPrefillNarrowReason =
     "62 moves 4.26 logits toward 271 against one card's 2.50 (f32 lead 3.10)";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
 inline constexpr double kReviewedGapUlp = 0.01;
-// The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
+// The graded logs of $B70_DATA/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
 // registrations that share a head form (mtp_gpu_test and mtp_gpu_dv128k_bf16_test: the bf16 head;
 // mtp_gpu_dv128k_test: the int8 head). mtp_gpu_32k_test / mtp_gpu_128k_test (bf16 head) reach the bf16-head rows
 // with other keys (their streams differ after the row) and match by tag / row / ids / f32 gap.
@@ -502,14 +502,14 @@ inline std::string row_line(const RowVerdict& v) {
 
 // The test's exit code: 1 when anything failed; else 77 (ctest SKIP: SKIP_RETURN_CODE 77) when divergences await
 // their f32 reference; else 0. The awaiting count is printed loudly either way - it is what the next
-// tools/box_validate/f32_refs.sh run has to make.
+// tools/oracle/qwen_forced.py run has to make.
 inline int exit_code(bool ok, const char* test) {
   report_reviewed(test);
   const Awaiting& a = awaiting();
   if (a.divergences) {
     const char* jd = std::getenv("B70_FORCED_JUDGE");
     std::printf("\n*** %s: %llu divergence(s) in %zu context(s) AWAIT AN f32 REFERENCE - not judged, not failed "
-                "(B70_FORCED_JUDGE=%s; the contexts are dumped with B70_DUMP_FORCED, tools/box_validate/f32_refs.sh "
+                "(B70_FORCED_JUDGE=%s; the contexts are dumped with B70_DUMP_FORCED, tools/oracle/qwen_forced.py "
                 "forced / forced-qwen makes their references) ***\n",
                 test, (unsigned long long)a.divergences, a.contexts.size(), jd && *jd ? jd : "(unset)");
     for (const std::string& k : a.contexts) std::printf("    awaiting f32 reference: %s\n", k.c_str());

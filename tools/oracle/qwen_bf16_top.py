@@ -14,7 +14,7 @@ Keys already in --out are skipped (resumable). Contexts with the same ids share 
 
 The model is transformers' Qwen3_5ForCausalLM in bf16 (eager attention, layer-streamed: row_taps_ref.py's build), on
 the int4 checkpoint dequantised as every oracle dequantises it, its bf16 GEMMs as fp32 GEMMs of the bf16 values
-rounded once (cpu_bf16.py: the box CPU has no bf16 units). The logits: the final-normalised bf16 hidden times the
+rounded once (cpu_bf16.py: the test machine's CPU has no bf16 units). The logits: the final-normalised bf16 hidden times the
 head in f32 - the checkpoint's bf16 head, or for the keys qwen_forced.I8HEAD_RE matches the engine's per-row int8
 head (int8_sim.int8_head_weight), like the key's judge.
 
@@ -30,7 +30,7 @@ the key's prefix): the rows after it are the test's decode rows and stay standar
 Per key, <out>/<key>.bf16top.safetensors: `ids` int32 [1 + gen][K + 2] and `logits` f32 [1 + gen][K + 2] - row j is
 the decision of forced id j (the judge's row numbering); columns 0..K-1 the bf16 row's own top K (descending), K the
 judge's f32 top id, K + 1 the forced id, each with its bf16 logit. Run in the oracle container under
-/tmp/b70-cpu-model.lock (tools/box_validate/f32_refs.sh bf16top-qwen)."""
+/tmp/b70-cpu-model.lock."""
 import os
 import sys
 

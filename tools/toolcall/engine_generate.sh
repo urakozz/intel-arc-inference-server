@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Engine greedy runs for the tool-call set (spec 5 T0, gate A4), ON THE BOX.
+# Engine greedy runs for the tool-call set (spec 5 T0, gate A4), on the GPU machine.
 #   tools/toolcall/engine_generate.sh <snapshot> <set dir> <out dir> <backend>
 # For every scenario in <set dir>/manifest.json: check the .ids file's SHA-256
 # against the manifest (the bf16 and engine runs must see byte-identical ids),
@@ -8,7 +8,7 @@
 # <out>/<name>.<backend>.ids and decode it with the snapshot's tokenizer into
 # <out>/<name>.<backend>.txt (special tokens kept). Scenarios whose two outputs
 # exist are skipped. Device: pass ZE_AFFINITY_MASK as usual.
-# Decoding needs the `tokenizers` package. The box's host python3 has none, so
+# Decoding needs the `tokenizers` package. The GPU machine's host python3 may have none, so
 # when $PYTHON cannot import it the decode runs in the reference container
 # (ORACLE_IMAGE, as tools/oracle/run_in_container.sh), with only the output dir
 # and the resolved tokenizer.json mounted.

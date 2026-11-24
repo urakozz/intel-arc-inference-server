@@ -40,7 +40,7 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
   if (!d0.can_access_peer(d1) || !d1.can_access_peer(d0))
     throw std::runtime_error("--parallel tp: the cards cannot access each other's memory (zeDeviceCanAccessPeer is "
                              "false), and each card's all-reduce writes the other's. Peer access needs the P2P-capable "
-                             "kernel and both cards under one root complex (docs/10-the-box.md)");
+                             "kernel and both cards under one root complex (docs/01-hardware.md)");
   if (opt_.timeout_ms == 0 || opt_.spin_limit == 0)
     throw std::invalid_argument("runtime::qwen4exp::Qwen4ExpTpEngine: the waits need non-zero bounds");
   if (!model_.parts[0].embed) throw std::runtime_error("runtime::qwen4exp::Qwen4ExpTpEngine: card 0 holds no embedding");

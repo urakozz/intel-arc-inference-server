@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""A content-addressed cache in front of ocloc, shared by every tree on the box (cmake/ocloc.cmake runs each kernel
+"""A content-addressed cache in front of ocloc, shared by every source tree on the machine (cmake/ocloc.cmake runs each kernel
 compile through it).
 
     ocloc_cache.py <toolchain stamp> <ocloc> compile -file F ... -out_dir D -options "..."
-    ocloc_cache.py --stats | --zero-stats | --prune [GiB]   (evicted entries move to ~/b70/trash/<date>/ocloc-cache)
+    ocloc_cache.py --stats | --zero-stats | --prune [GiB]   (evicted entries move to $B70_DATA/trash/<date>/ocloc-cache)
 
 The key is the sha256 of: the compiler's identity (the stamp cmake/ocloc_stamp.cmake writes, plus the size and mtime
 of ocloc, libocloc and the two IGC libraries), every argument but the output directory, the IGC_* environment, and
@@ -16,7 +16,7 @@ A hit copies the stored outputs into -out_dir and prints ocloc's stored stdout /
 warnings included). A miss runs ocloc into a private directory, stores outputs + log on success and copies them out.
 Whatever the key cannot be computed for (an #include by macro, __has_include, a -include style option, NEO debug
 keys in the environment, no writable cache) runs ocloc as it is, uncached. B70_OCLOC_CACHE=0 does the same;
-B70_OCLOC_CACHE_DIR moves the cache (default ~/b70/cache/ocloc). Entries are written to a temporary directory and
+B70_OCLOC_CACHE_DIR moves the cache (default $B70_DATA/cache/ocloc, without B70_DATA ~/.cache/b70-ocloc). Entries are written to a temporary directory and
 renamed into place, so concurrent jobs never see a half-written one.
 """
 import hashlib
@@ -28,7 +28,9 @@ import sys
 import tempfile
 import time
 
-CACHE = os.environ.get("B70_OCLOC_CACHE_DIR") or os.path.expanduser("~/b70/cache/ocloc")
+DATA = os.environ.get("B70_DATA")
+CACHE = os.environ.get("B70_OCLOC_CACHE_DIR") or (os.path.join(DATA, "cache/ocloc") if DATA
+                                                  else os.path.expanduser("~/.cache/b70-ocloc"))
 INCLUDE = re.compile(rb'^\s*#\s*include\s*([<"])([^>"]+)[>"]')
 DIRECTIVE = re.compile(rb'^\s*#\s*(include|include_next|import|embed)\b')
 
@@ -214,7 +216,8 @@ def main() -> int:
     if sys.argv[1:2] == ["--prune"]:
         # Nothing is deleted: evicted entries and stale temp folders move to the trash, which the owner empties.
         cap = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0
-        trash = os.environ.get("B70_TRASH_DIR") or os.path.expanduser(f"~/b70/trash/{time.strftime('%Y-%m-%d')}")
+        trash = os.environ.get("B70_TRASH_DIR") or os.path.join(
+            DATA or os.path.expanduser("~/.cache/b70-ocloc-trash"), "trash", time.strftime('%Y-%m-%d'))
         trash = os.path.join(trash, "ocloc-cache")
         os.makedirs(trash, exist_ok=True)
 

@@ -1,5 +1,5 @@
 // qwen4exp_decode_test - spec 21-QFN-v1c Task 3, F4 on decode: Qwen3.8-Flash-Next's engine (runtime::qwen4exp) on a
-// checkpoint (the synthetic real-width ones: tools/box_validate/qwen4exp_oracle.sh synth-ckpt; Intel's at
+// checkpoint (the synthetic real-width ones: tools/oracle/qwen4exp_ref.py synth-ckpt; Intel's at
 // --layers N), no golden set needed.
 //
 //   1. plan == allocation: every device's memory_use() components equal runtime::qwen4exp::plan's (model, KV +

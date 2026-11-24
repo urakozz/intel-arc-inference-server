@@ -1,5 +1,5 @@
 #!/bin/bash
-# ctest on the box's build dir with extra environment, device 0:
+# ctest on the tree's build dir with extra environment, device 0:
 #   tools/probe/ctest_env.sh [VAR=value ...] -- <ctest args...>
 # e.g. tools/probe/ctest_env.sh B70_KV_CACHE=int8 -- -R prefill_gate_l0_test
 cd "$(dirname "$0")/../.."

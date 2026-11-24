@@ -357,7 +357,7 @@ std::unique_ptr<PathMem> make_path(l0::Context& ctx, const std::string& kind, si
 }
 
 int run_bar(const Opts& o) {
-  // one card: the visible device o.card (under tools/gpu_lock.sh card N it is index 0)
+  // one card: the visible device o.card (under ZE_AFFINITY_MASK=N it is index 0)
   Card card;
   card.owned = std::make_unique<l0::Context>(o.card);
   card.ctx = card.owned.get();

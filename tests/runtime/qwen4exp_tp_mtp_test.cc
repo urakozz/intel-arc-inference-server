@@ -1,4 +1,4 @@
-// Plan 21-QFN-v2b Task 5 Step 0: Qwen3.8-Flash-Next's MTP head under `--parallel tp` (box only; label
+// Plan 21-QFN-v2b Task 5 Step 0: Qwen3.8-Flash-Next's MTP head under `--parallel tp` (GPU only; label
 // checkpoint;qwen4exp;tp). One engine a process (each pins the 51.8 GB PLE table), so the comparison is two runs:
 //   qwen4exp_tp_mtp_test <checkpoint> <ids> plain|mtp <ids file> [layers 18] [n 64]
 // The prompts are <ids> cycled to 120 and 2100 positions, filled by decode (ingest, one id a step).

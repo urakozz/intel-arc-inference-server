@@ -1,18 +1,18 @@
 #!/bin/bash
-# Spec 9 P0 (plan 9a): the int8 lm_head probe's production run, ON THE BOX, from the repo root.
-#   tools/probe/detach.sh ~/b70/logs/probe/spec9a.log tools/oracle/lm_head_probe.sh
+# Spec 9 P0 (plan 9a): the int8 lm_head probe's production run, on the GPU machine, from the repo root.
+#   tools/probe/detach.sh $B70_DATA/logs/probe/spec9a.log tools/oracle/lm_head_probe.sh
 # Stages its inputs into oracle-out-spec9a/ (the container mounts only this tree):
 #   - golden: the three prompts + the 32 greedy golden tokens of the W4A16 g64
-#     checkpoint (~/b70-inference-server/oracle-out-primary/*.tokens);
+#     checkpoint (oracle-out-primary/*.tokens in the tree);
 #   - toolcall: A4 scenarios' prompts + the bf16 oracle's outputs
-#     (~/b70-toolcall/toolcall-out/*.bf16.ids): one per task type on `box` first,
+#     (TOOLCALL, the toolcall set's toolcall-out/*.bf16.ids): one per task type on `box` first,
 #     then t1/t2/t6 on the other five files (the short-context ones; the long
 #     t3/t4/t5 on the other files cost ~30 min of CPU forward each).
 # Then one dump (the model, ~60 GB) and one analyze (the head only).
 set -euo pipefail
 OUT=oracle-out-spec9a
-GOLDEN=${GOLDEN:-$HOME/b70-inference-server/oracle-out-primary}
-TOOLCALL=${TOOLCALL:-$HOME/b70-toolcall/toolcall-out}
+GOLDEN=${GOLDEN:-oracle-out-primary}
+TOOLCALL=${TOOLCALL:?set TOOLCALL to the toolcall-out directory of the toolcall set}
 THREADS=${ORACLE_THREADS:-40}
 mkdir -p "$OUT"
 src=""

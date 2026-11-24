@@ -1,4 +1,4 @@
-// probe_offload - spec 22 P0 (plan 22a Task 2): everything the expert-offload tier depends on, measured on the box
+// probe_offload - spec 22 P0 (plan 22a Task 2): everything the expert-offload tier depends on, measured on the GPU machine
 // before any engine work. One Level Zero binary on the repo's l0:: wrappers; device 1 is a view of device 0's
 // context (spec 16 decision 1: one context over both cards), so a host-USM range pinned once is read by both.
 //
@@ -1197,7 +1197,7 @@ int pin_mode() {
   const model::Qwen4ExpDesc& md = model::qwen4exp();
   const Sizes s = sizes();
   const uint64_t avail0 = mem_available();
-  if (avail0 == 0) throw Skip("no /proc/meminfo: the pinned arms run on the box only");
+  if (avail0 == 0) throw Skip("no /proc/meminfo: the pinned arms run on Linux only");
   double cap = double(avail0 > kMarginBytes ? avail0 - kMarginBytes : 0);
   if (g_opt.max_gb > 0) cap = std::min(cap, g_opt.max_gb * 1e9);
   std::printf("po pin dev=%s mem_available_gib=%.1f cap_gib=%.1f (MemAvailable - 16 GiB%s)\n", g_opt.dev.c_str(),
@@ -1606,7 +1606,7 @@ int usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::setvbuf(stdout, nullptr, _IOLBF, 0);   // stdout is a tee pipe on the box: every po line out as it is printed
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);   // stdout is often a tee pipe: every po line out as it is printed
   if (argc < 2) return usage();
   g_opt.mode = argv[1];
   try {

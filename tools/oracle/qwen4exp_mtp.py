@@ -361,7 +361,7 @@ def cmd_accept(argv) -> None:
     accept_by_depth[d] the expected tokens an iteration at K drafts. A source's continuation is CONT_IDS, or the
     golden set's `tokens` (--golden: q4exp_short, q4exp_agentic from <DIR>/<p>.golden.safetensors), or the
     reference's own greedy continuation of --gen ids. The head is the engine's (--experts rtn, the default) or the
-    checkpoint's bf16 experts. Box CPU (r34.accept), hours on Intel's checkpoint."""
+    checkpoint's bf16 experts. Test-machine CPU (r34.accept), hours on Intel's checkpoint."""
     import argparse
     import json
     import time

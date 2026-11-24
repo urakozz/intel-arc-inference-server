@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference renders for tests/tokenizer/template_test.
 
-Run on the box: ~/auto-round/.venv/bin/python tools/tokenizer/dump_template.py <snapshot_dir>
+Run in a venv with transformers: python tools/tokenizer/dump_template.py <snapshot_dir>
 """
 
 import json

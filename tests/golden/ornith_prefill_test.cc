@@ -66,7 +66,7 @@ namespace {
 using model::Qwen35;
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
-// PROPOSED (spec 15d, written blind): set from the first box run's printed distribution.
+// PROPOSED (spec 15d, written blind): set from the first card run's printed distribution.
 constexpr float kConsistTieRel = 5e-2f;    // decode's (p8 - p9) / p8 below this: a near-tie
 constexpr float kConsistWeightAbs = 1.0f / 32;   // |w_prefill - w_decode| (bf16 weights < 1)
 constexpr float kR2TieRel = 1e-3f;         // ornith_decode_test's R2, unchanged
@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
     (void)loader::resolve_snapshot(snap);
   } catch (const std::exception& e) {
     std::printf("SKIP: no Ornith int4 checkpoint at '%s' (%s). None is published; spec 15a "
-                "decides its source (AutoRound g64 proposed) - see the box validation queue.\n",
+                "decides its source (AutoRound g64 proposed) - see the validation queue.\n",
                 snap.c_str(), e.what());
     return 77;
   }
@@ -432,7 +432,7 @@ int main(int argc, char** argv) {
     if (!judge_dir.empty()) {
       const std::string jpath = judge_dir + "/" + pname + ".golden.safetensors";
       if (!golden::exists(jpath)) {
-        std::printf("SKIP: the f32 judge %s is absent (tools/box_validate/f32_oracle.sh)\n", jpath.c_str());
+        std::printf("SKIP: the f32 judge %s is absent (tools/oracle/ornith_ref.py)\n", jpath.c_str());
         return 77;
       }
       jg = std::make_unique<golden::Golden>(jpath);

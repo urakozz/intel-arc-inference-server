@@ -11,6 +11,18 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 
 One choice to make - how many requests run at once. The engine sizes everything else.
 
+## Supported models
+
+Each model runs from our own int4 quantisation (AutoRound, group 64, GPTQ format) on Hugging Face:
+
+- **[Qwen3.8-Flash-Next](https://huggingface.co/urakozz/Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ)** - MoE, 512
+  experts (10 a token), linear attention beside sparse attention, MTP head. Two cards and 128 GB of RAM.
+- **[Qwen3.8-27B](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ)** - dense, linear attention
+  beside full attention, MTP head. One card, the full 262,144-token context; with the
+  [DFlash drafter](https://huggingface.co/urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound) for faster writing.
+- **[Ornith 1.5 35B-A3B](https://huggingface.co/urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ)** - MoE (the
+  Qwen3.5-35B-A3B architecture, tuned for code), MTP head. One card.
+
 ## Speed
 
 **Prefill** is the model reading your prompt, **decode** is the model writing its answer, both in tokens per second
@@ -103,7 +115,7 @@ You need Linux with the `xe` driver; the fast single session on two cards needs 
 from kernel 7.4). The image brings the rest:
 
 ```sh
-docker pull urakozz/intel-arc-inference-server
+docker pull urakozz/intel-arc-inference-server:1.0.1
 
 # the engine never downloads; fetch the model into the Hugging Face cache once
 # Qwen3.8-Flash-Next, about 133 GB: skips 96 GB of the bf16 n-gram table, which only other engines read
@@ -134,9 +146,10 @@ weights with AutoRound, in groups of 64 rather than the usual 128 - better accur
 ## Run
 
 ```sh
-# an OpenAI-compatible server on port 8000 (built from source: ./build/src/cli/b70-serve in place of $B70)
+# an OpenAI-compatible server on port 8000 (built from source: ./build/src/cli/b70-serve in place of $B70);
+# GET /health answers 503 while the model loads, 200 once it serves
 B70="docker run --rm --device /dev/dri --group-add $(getent group render | cut -d: -f3) \
-    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server"
+    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server:1.0.1"
 
 # Qwen3.8-Flash-Next on two cards: every layer split over both (the fastest session), MTP on
 $B70 urakozz/Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ \

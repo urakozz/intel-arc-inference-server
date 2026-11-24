@@ -51,7 +51,7 @@ const PfSmallTile* pf_q4_tile(uint32_t M, bool silu) {
   // behind). One chunk's five linears: 51 ms at 1-8 rows, 56 at 16, 59 at 32, 76 at 64, 112 at
   // 128, 156 at 192, 247 at 384 (gate||up on the slab), against the slab walk's 236-297.
   static constexpr PfSmallTile kPlainTo32{4, 1, 1}, kPlain{8, 1, 2}, kSiluTo8{1, 2, 4}, kSilu{4, 2, 1};
-  // Open-work 3d (2026-11-09, whole box): paired A8_B1_S4 sub-groups exchange gate bf16 in
+  // Open-work 3d (2026-11-09, both cards): paired A8_B1_S4 sub-groups exchange gate bf16 in
   // SLM, then up folds SiLU into the output, all in one launch. Every row count 193-320 is
   // bitwise and 16.03-26.81% below the interleaved slab control; 321 misses the fixed 5% bar.
   // The earlier two-pass form gained in isolation but regressed on the real engine.

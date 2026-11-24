@@ -8,7 +8,7 @@ Prints the two ids' logits and their gap in bf16 ulps (of the row's top logit) i
 (<ref>.bf16 / .bf16x / .f32 / .f32x / .f32p / .f32xp.safetensors: row_taps_ref.py --dtype, x = --exact-dequant, p =
 --pfi8) and the judge; then, per layer, the relative L2 distance of the engine's tap and of each reference's from the
 f32 reference with the engine's own weights (f32x; f32 when absent; --base names another, e.g. f32p for an l0-int8
-engine row). Numpy only (no torch): runs on the box host."""
+engine row). Numpy only (no torch): runs on the host, outside the container."""
 import json
 import math
 import os

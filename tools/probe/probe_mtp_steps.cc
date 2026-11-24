@@ -19,7 +19,7 @@
 // Qwen3.8) and the lowest ids, no ranked list (the step time depends on |V'|
 // only). The draft arms then price `--mtp-cost`'s draft row for that size (spec 8 §10).
 //
-// `max_len` (spec 8 §12, box queue row 6): the engine's length - 16384 as before by default;
+// `max_len` (spec 8 §12, validation queue row 6): the engine's length - 16384 as before by default;
 // the cost table at depth runs e.g. `... 32768 32 3 int8 off 65536` and `... 120000 32 3 int8
 // off 131072`. It must leave room for the drift below (depth + 1024 <= max_len).
 //

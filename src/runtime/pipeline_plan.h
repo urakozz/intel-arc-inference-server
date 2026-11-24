@@ -181,7 +181,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
 // `base + g x layer` like every stage buffer, so slots 1 and 2 span the model's stride and
 // slot 3 only the stage's: (kSlots - 2) x gdn_state + stage_gdn x layer. No new binary; the
 // gaps cost (kSlots - 2) x (gdn_layers - stage_gdn) layers' state (Qwen3.8 at the even
-// split: 0.151 GB a card - a stage-stride variant would save it, a box decision).
+// split: 0.151 GB a card - a stage-stride variant would save it, a measured decision).
 // Spec 19d: `slots` = the verify lists' slot count (MtpDims::kSlots = 4 for MTP, TapVerifyDims::kSlots = 8 for a
 // drafter - the gdn_step_slots_M<M>_N<slots> binaries): (slots - 2) whole slots + the stage's share of the last.
 size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t slots = MtpDims::kSlots);

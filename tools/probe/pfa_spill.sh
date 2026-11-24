@@ -1,7 +1,7 @@
 #!/bin/bash
 # Per-arm spill lines for probe_flash_attn.cl: compiles each arm alone with the build's
 # ocloc and flags (a parallel build interleaves the warnings, so the build log cannot
-# attribute them). Run on the box: bash tools/probe/pfa_spill.sh ["KT RPW HPW QREG" ...]
+# attribute them). Run on the GPU machine: bash tools/probe/pfa_spill.sh ["KT RPW HPW QREG" ...]
 cd "$(dirname "$0")/../.."
 OC=$(grep OCLOC_EXECUTABLE: build/CMakeCache.txt | cut -d= -f2)
 DEV=$(grep B70_OCLOC_DEVICE build/CMakeCache.txt | head -1 | cut -d= -f2)

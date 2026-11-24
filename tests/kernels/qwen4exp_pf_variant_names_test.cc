@@ -3,7 +3,7 @@
 // forms and both PLE scale forms, against the ones the build makes for it (passed as arguments: tests/CMakeLists.txt's
 // B70_Q4EXP_PREFILL_KERNELS, `kernel_<name>` - src/kernels/CMakeLists.txt's spec 21-QFN-v1d block, plus the reused names other
 // blocks build: pf_gemm_T0, Qwen3.8's pf_gdn_*, 21-QFN-v1c's q4_route_M1, Kolibri's 6144 x 2560 slab). Host only: a
-// name the walk would ask for that no CMake line builds fails here on the Mac, not at prepare_prefill on the box; and
+// name the walk would ask for that no CMake line builds fails here on the Mac, not at prepare_prefill on the GPU machine; and
 // nothing listed is dead. Also pins the prefill constants the walk and the planner share with the kernels' names.
 #include <cstdio>
 #include <set>

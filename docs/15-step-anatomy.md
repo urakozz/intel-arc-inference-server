@@ -143,10 +143,10 @@ estimated (from a model or an extrapolation).
 ### How it was measured
 
 ```bash
-tools/box.sh run "./build/src/cli/b70-decode <checkpoint> --profile --depth 4096 --steps 32"
+./build/src/cli/b70-decode <checkpoint> --profile --depth 4096 --steps 32
 ```
 
-On an idle box, one Intel Arc Pro B70, `--max-len 16384`. `--profile` first ingests 4096 synthetic ids on
+On an idle machine, one Intel Arc Pro B70, `--max-len 16384`. `--profile` first ingests 4096 synthetic ids on
 an uninstrumented list (an ordinary decode), then builds a second, profiled list against the same buffers and replays
 32 instrumented steps, resetting every event before each replay and reading the durations only after the fence. The
 profiled positions were 4096 to 4127, so 17 attention blocks were live at the then `ATTN_BLOCK` of 256 positions.
@@ -269,7 +269,7 @@ Three independent processes of `--repeats 5` (480 replays, 774 launches each) sh
 - The step-level floor is 0.051 ms including `attn_reduce` and 0.011 ms without it. Quote both together; the first is
   dominated by that one family.
 - Repeats within a process are not repeats across processes. `attn_reduce` reproduces to 0.3% inside every process and
-  lands 31% apart between them (194.0, 193.6 and 254.1 us per step) on one binary and one box within twenty minutes. A
+  lands 31% apart between them (194.0, 193.6 and 254.1 us per step) on one binary and one machine within twenty minutes. A
   data dependence is ruled out (identical ids, identical arithmetic); the cause is unknown and probably outside the
   program. So repeats inside one process give only a lower bound on the floor: compare two binaries across processes,
   with at least 5 repeats each. Two binaries compared in one sitting resolve about 0.05 ms; across a day, about 0.15 ms.

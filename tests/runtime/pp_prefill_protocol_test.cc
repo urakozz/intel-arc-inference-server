@@ -18,7 +18,7 @@
 // is a bounded throw, the waiting device is released and a fresh run works; and (without
 // ThreadSanitizer) an order that drops the waits corrupts a slot, which the stamps catch -
 // the test can see what it guards against. What it does not: Level Zero's events on two
-// cards, the copy engine, PCIe (the box: queue row 23).
+// cards, the copy engine, PCIe (the validation queue, row 23).
 #include <algorithm>
 #include <array>
 #include <atomic>

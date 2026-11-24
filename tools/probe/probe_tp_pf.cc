@@ -17,7 +17,7 @@
 //             copy engine hides the crossing behind the GEMMs and what each costs the other
 //
 // Every wait is bounded (--timeout seconds); a miss prints the arm and exits 1. The data is checked once per arm
-// (the last crossing's bytes equal the source's). Run under `tools/gpu_lock.sh box --`.
+// (the last crossing's bytes equal the source's). Run with both cards visible.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -321,7 +321,7 @@ int main(int argc, char** argv) {
     }
   }
   try {
-    if (l0::Context::gpu_count() < 2) die("two visible GPUs are needed (run under tools/gpu_lock.sh box)");
+    if (l0::Context::gpu_count() < 2) die("two visible GPUs are needed (run with both cards visible)");
     l0::Context d0(0);
     l0::Context d1(d0, 1);
     if (!d0.can_access_peer(d1) || !d1.can_access_peer(d0)) die("no peer access both ways");

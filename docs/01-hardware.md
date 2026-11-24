@@ -189,27 +189,53 @@ intermediate buffers changed nothing.
 
 ## Two cards, and the software stack behind these numbers
 
-The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM.
+The numbers in this document were measured on a machine with two B70s on PCIe 3.0 x16 and 121 GB of host RAM.
+
+### Peer access between the cards
 
 Peer-to-peer access (P2P: one card writing straight into the other's memory over PCIe, without bouncing through
-host RAM) works natively on the mainline Linux 7.4.0-rc2 kernel. Both two-card modes use it:
+host RAM) needs a kernel that supports it natively - mainline Linux 7.4.0-rc2 does; earlier kernels needed a patch -
+and both cards under one PCIe root complex. The hardware check refuses two visible cards that cannot both reach each
+other's memory, with the advice to run on one card with `ZE_AFFINITY_MASK=0`. Both two-card modes use it:
 
 - tensor parallel (every layer split across both cards): each card writes its partial results straight into the
   other card's memory every layer;
 - pipeline parallel (the layers split between the cards): the first card copies the hidden state into the second
   card's memory once per step, ordered by a cross-device event.
 
-One measurement had prefill 3.2-3.4 % slower on the second card ([10-the-box.md](10-the-box.md)). The cause was never
-pinned down.
-
-The BAR is the window through which the CPU sees a card's memory. The firmware caps it at 16 GB per card
-(ReBarState 14; 15 does not boot), and the `xe` kernel driver resizes both cards to the full 32 GB when it loads.
+The BAR is the window through which the host or the other card reaches a card's memory. A firmware resizable-BAR
+setting may cap it at 16 GB per card; the `xe` kernel driver resizes both cards' BARs to the full 32 GB when it loads.
 
 A lasting "busy" is a hang. The Level Zero runtime retries an ioctl that returns EBUSY forever, so a lasting EBUSY
-never surfaces as an error. This is why any host allocation that both cards map stays at or below 4 GiB; the
-prefix cache, for one, is pinned in 2 GiB pieces.
+never surfaces as an error. One large pinned host allocation that the second card maps through a shared import (the
+prefix cache) triggered it. This is why any host allocation that both cards map stays at or below 4 GiB; the prefix
+cache, for one, is pinned in 2 GiB pieces.
 
-The box's driver stack is listed in [10-the-box.md](10-the-box.md#versions-on-the-box). The rates in this document
-were measured on earlier stacks. The hardware rates (DPAS, bandwidth) are properties of the silicon and are not
-expected to move. Kernel timings can move with the compiler; the current speed numbers are in the
-[README](../README.md#speed).
+### Device selection
+
+The CLIs have no device flag ([04-architecture.md](04-architecture.md)): `ZE_AFFINITY_MASK` decides which cards the
+driver enumerates; one card is device 0 of that view, and two are devices 0 and 1 (`ZE_AFFINITY_MASK=1` runs on the
+second card alone). Where one card also drives a display, the render nodes do not map to selector indices the way you
+would guess, and the display card is not the one you want under a benchmark.
+
+The two cards may not be interchangeable. In one session, with the same binary and checkpoint, prefill lost 3.2% to
+3.4% on the second card while decode lost only 0.2% to 0.4%: a difference in sustained compute rather than bandwidth.
+The likeliest cause is a hardware monitoring tool left open during that measurement, but it has not been re-measured
+([07-open-questions.md](07-open-questions.md)), so a timed row names its card.
+
+### Driver versions tested
+
+| | version |
+|---|---|
+| kernel | Linux 7.4.0-rc2 (mainline) |
+| IGC (Intel Graphics Compiler, which turns OpenCL C into GPU code) | 2.42.6 |
+| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.40.40196.15 |
+| Level Zero loader | 1.34 |
+
+Kernel binaries cannot go stale silently. `cmake/ocloc_stamp.cmake` records `ocloc --version` and the real paths of
+the `libigc` / `libigdfcl` libraries the loader resolves, and rewrites a stamp file only when they change. Every
+kernel target depends on that stamp, so a new compiler recompiles every kernel.
+
+The rates in this document were measured on earlier driver stacks. The hardware rates (DPAS, bandwidth) are
+properties of the silicon and are not expected to move. Kernel timings can move with the compiler; the current speed
+numbers are in the [README](../README.md#speed).

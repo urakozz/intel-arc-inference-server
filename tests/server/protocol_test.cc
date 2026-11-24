@@ -133,6 +133,116 @@ void case_models() {
   CHECK_EQ(body.at("data").at(0).at("id"), std::string("mock-model"));
 }
 
+// Issue 4: GET /health is 503 {"status":"loading"} from the LoadingListener b70-serve runs during the load (and every
+// model route 503 there), 200 with the model once the Server has the port; GET /version the same from both.
+void case_health_and_version() {
+  server::Options options = Fixture::make_options(4);
+  int port = 0;
+  {
+    // The listener takes a fixed port (b70-serve skips it at port 0): find a free one with a Server first.
+    Fixture probe;
+    port = probe.server.bound_port();
+  }
+  options.port = port;
+  httplib::Client client("127.0.0.1", port);
+  {
+    server::LoadingListener loading(options);
+    CHECK(loading.start());
+    auto health = client.Get("/health");
+    CHECK(health);
+    CHECK_EQ(health->status, 503);
+    CHECK_EQ(json::parse(health->body).at("status"), std::string("loading"));
+    auto head = client.Head("/health");
+    CHECK(head);
+    CHECK_EQ(head->status, 503);
+    auto version = client.Get("/version");
+    CHECK(version);
+    CHECK_EQ(version->status, 200);
+    CHECK(!json::parse(version->body).at("version").get<std::string>().empty());
+    for (const char* path : {"/v1/chat/completions", "/v1/completions", "/tokenize", "/detokenize"}) {
+      auto r = client.Post(path, chat_body().dump(), "application/json");
+      CHECK(r);
+      CHECK_EQ(r->status, 503);
+    }
+    auto models = client.Get("/v1/models");
+    CHECK(models);
+    CHECK_EQ(models->status, 503);
+    loading.stop();   // b70-serve's listen_until_stopped: the port goes to the Server
+    MockTok tok;
+    MockTemplate tmpl;
+    MockEngine engine;
+    server::Server ready({tok, tmpl, engine}, options);
+    CHECK(ready.start());
+    health = client.Get("/health");
+    CHECK(health);
+    CHECK_EQ(health->status, 200);
+    const json body = json::parse(health->body);
+    CHECK_EQ(body.at("status"), std::string("ok"));
+    CHECK_EQ(body.at("model"), std::string("mock-model"));
+    head = client.Head("/health");
+    CHECK(head);
+    CHECK_EQ(head->status, 200);
+    version = client.Get("/version");
+    CHECK(version);
+    CHECK_EQ(version->status, 200);
+    ready.stop();
+  }
+}
+
+// vLLM's /tokenize and /detokenize: text -> ids -> text, and a chat body's ids are the prompt a chat request prefills.
+void case_tokenize() {
+  Fixture fixture;
+  auto client = fixture.client();
+  auto r = client.Post("/tokenize", json{{"model", "mock-model"}, {"prompt", "the cat sat"}}.dump(), "application/json");
+  CHECK(r);
+  CHECK_EQ(r->status, 200);
+  json body = json::parse(r->body);
+  const std::vector<uint32_t> tokens = body.at("tokens");
+  CHECK(tokens == ids(fixture, "the cat sat"));
+  CHECK_EQ(body.at("count").get<size_t>(), tokens.size());
+  CHECK_EQ(body.at("max_model_len").get<uint32_t>(), 1024U);
+  r = client.Post("/detokenize", json{{"tokens", tokens}}.dump(), "application/json");
+  CHECK(r);
+  CHECK_EQ(r->status, 200);
+  CHECK_EQ(json::parse(r->body).at("prompt"), fixture.tok.decode(tokens));
+  CHECK(ids(fixture, json::parse(r->body).at("prompt").get<std::string>()) == tokens);
+
+  // Chat: the same ids as the chat request's own prompt_token_ids.
+  r = client.Post("/tokenize", json{{"messages", messages()}, {"add_generation_prompt", true}}.dump(),
+                  "application/json");
+  CHECK(r);
+  CHECK_EQ(r->status, 200);
+  body = json::parse(r->body);
+  fixture.engine.script = ids(fixture, "Paris <|im_end|>");
+  json chat = chat_body();
+  chat["return_token_ids"] = true;
+  const auto completion = client.Post("/v1/chat/completions", chat.dump(), "application/json");
+  CHECK(completion);
+  CHECK_EQ(completion->status, 200);
+  CHECK(body.at("tokens") == json::parse(completion->body).at("prompt_token_ids"));
+  CHECK_EQ(body.at("count").get<size_t>(), body.at("tokens").size());
+
+  // The developer role is rendered as system, as in a chat request.
+  const auto role_tokens = [&client](const std::string& role) {
+    const auto reply = client.Post(
+        "/tokenize", json{{"messages", json::array({{{"role", role}, {"content", "Be brief."}}})}}.dump(),
+        "application/json");
+    CHECK(reply);
+    CHECK_EQ(reply->status, 200);
+    return json::parse(reply->body).at("tokens");
+  };
+  CHECK(role_tokens("developer") == role_tokens("system"));
+
+  // Refusals: no generation prompt, an id outside the vocabulary.
+  r = client.Post("/tokenize", json{{"messages", messages()}, {"add_generation_prompt", false}}.dump(),
+                  "application/json");
+  CHECK(r);
+  CHECK_EQ(r->status, 400);
+  r = client.Post("/detokenize", json{{"tokens", {1, -1}}}.dump(), "application/json");
+  CHECK(r);
+  CHECK_EQ(r->status, 400);
+}
+
 void case_non_stream_chat() {
   Fixture fixture;
   fixture.engine.script = ids(fixture, "Paris is the capital <|im_end|>");
@@ -591,6 +701,8 @@ void case_request_log() {
 
 int main() {
   case_models();
+  case_health_and_version();
+  case_tokenize();
   case_non_stream_chat();
   case_max_tokens();
   case_stream_usage();
@@ -606,6 +718,6 @@ int main() {
   case_first_id_before_step();
   case_first_id_ends();
   case_first_id_sampled();
-  std::printf("protocol_test OK: 16 cases\n");
+  std::printf("protocol_test OK: 18 cases\n");
   return 0;
 }

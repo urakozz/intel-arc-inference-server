@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Plan 21-QFN-v2a Task 7: the quality of our Qwen3.8-Flash-Next export, on the box CPU with qwen4exp_ref.py's layer-streamed
-model in f32 (the box Xeon has no bf16 units: f32 is its fast path).
+"""Plan 21-QFN-v2a Task 7: the quality of our Qwen3.8-Flash-Next export, on the CPU with qwen4exp_ref.py's layer-streamed
+model in f32 (the test machine's CPU has no bf16 units: f32 is its fast path).
 
   qwen4exp_quality.py forced <snapshot> --ctx DIR --out DIR [--ple int8:/ple] [--batch 8] [--chunk 2048] [--match RE]
       every DIR/<key>.prompt.ids with its <key>.force.ids (serve_judge.py's dump; the key's FNV-1a hash is checked) ->

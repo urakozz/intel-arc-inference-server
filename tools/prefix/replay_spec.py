@@ -3,7 +3,7 @@
 
   python3 tools/prefix/replay_spec.py RECORDING OUT [--model SNAPSHOT] [--draft-model SNAPSHOT]
 
-Takes the whole-box GPU lock, or only --card N, and runs --parallel 1 (or --parallel tp: both cards, the box lock). The lock helper sets device affinity.
+Takes the GPU lock on both cards, or only --card N, and runs --parallel 1 (or --parallel tp: both cards, the both-card lock). The lock helper sets device affinity.
 For a card run beside another GPU job, first confirm more than 16 CPU threads are available. All arms use the same KV
 form (B70_KV_CACHE, bf16 by default),
 the CLI's fixed int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
@@ -191,10 +191,10 @@ def main(argv=None):
     ap.add_argument('--rounds', type=int, default=3)
     ap.add_argument('--resume', action='store_true', help='validate and reuse completed arms in OUT')
     ap.add_argument('--kernel-dir', type=Path, help='compiled kernels (default: beside the server build)')
-    ap.add_argument('--card', type=int, choices=(0, 1), help='reserve only this idle card; otherwise reserve the box')
+    ap.add_argument('--card', type=int, choices=(0, 1), help='reserve only this idle card; otherwise reserve both cards')
     ap.add_argument('--port', type=int, default=8218)
     # spec 19 v3c: the arms under tensor parallel (both cards); recorded in config.json, so --resume refuses a mixed set
-    ap.add_argument('--parallel', choices=('1', 'tp'), default='1', help='1 (one card) or tp (both cards, the box)')
+    ap.add_argument('--parallel', choices=('1', 'tp'), default='1', help='1 (one card) or tp (both cards)')
     ap.add_argument('--arms', help='comma list, off first (default off,mtp,dflash; + dflash-lookup)')
     ap.add_argument('--wait', type=float, default=900)
     ap.add_argument('--judge', type=Path, default=ROOT/'oracle-out-qwen-f32-i8head-forced')

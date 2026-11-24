@@ -21,7 +21,7 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `dequant.py` | The one meaning of the int4 GPTQ bits: `(q - 8) * scale`, product in fp32, one RNE cast to bf16. Also writes `tests/golden/dequant_fixture.safetensors`, which the C++ loader test matches bit-exactly. |
 | `tokenize.py` | `encode` a prompt file to ids / `decode` ids back. Raw text, no chat template, no special tokens - except `encode --bos` for a tokenizer that prepends its BOS, which checks that BOS is the only token added. |
 | `dump.py` | Builds `Qwen3_5ForCausalLM` from the config, loads a `dequant.py`-produced bf16 state dict `strict=True`, forwards the prompt with hooks, greedy-decodes, writes one safetensors file. |
-| `run_in_container.sh` | Wraps `docker run` for the box: read-only HF cache at `/hf`, repo at `/ws`, `$SNAP` resolved to the snapshot directory, **`-u $(id -u):$(id -g)`** so outputs are not root-owned, no memory limit. |
+| `run_in_container.sh` | Wraps `docker run` for the GPU machine: read-only HF cache at `/hf`, repo at `/ws`, `$SNAP` resolved to the snapshot directory, **`-u $(id -u):$(id -g)`** so outputs are not root-owned, no memory limit. |
 | `golden.sh` | The production run: the three prompts, serially, `--gen 32`. This is the script that made the files plan 3 compares against - committed rather than retyped. `PROMPTS` names which sets to build; `--max-prompt 4096` since spec 2. |
 | `make_long_prompt.sh` | Builds `tests/golden/prompts/long.ids` (2820 ids) and `long.txt` from the three committed prompts, on the Mac, with no model and no tokenizer. Spec 2 §6.2's ≥ 2048-id prompt. |
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
@@ -42,8 +42,8 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `qwen4exp_prompts.py` | Spec 21-QFN-v1a Task 5: `tests/golden/prompts/q4exp_*.ids` from the original's tokenizer (re-checks Qwen3.8's ids; renders `q4exp_agentic.json` through the checkpoint's template). |
 | `third_party/kolibri1/` | Our transformers 5.x port `Kolibri1ForCausalLM` (from Aleph Alpha's vLLM plugin `aleph-alpha-inference` @ `049a6a7b`, Apache-2.0) - what AutoRound loads (`tools/quantize_kolibri1.sh`) - with the checkpoint's `config.json`, `generation_config.json`, `tokenizer_config.json` and the chat template, unmodified. |
 | `kolibri_fixture.py` | Spec 20c Task 1: `kolibri_ref.py`'s own functions (rms_norm, q/k norm + RoPE, route, the combine, eager attention) on hash inputs at the real widths, written as `tests/kernels/kolibri_fixture.h` for `kolibri_ref_test` / `kolibri1_rope_test`; no checkpoint, seconds - the docker line is in its docstring. |
-| `kolibri_chat_ids.py` | Spec 20c Task 1: a chat-formatted golden prompt's ids through the checkpoint's own template (`apply_chat_template(messages, tools, add_generation_prompt, reasoning_effort)`) - `de_chat`'s, for `tools/box_validate/kolibri_oracle.sh real`. |
-| `../quantize/kolibri/make_synth.py` | Spec 20c Task 1: a synthetic Kolibri-1 checkpoint at the REAL widths, N layers, int4 or bf16 attention, RTN-packed into AutoRound's `auto_round:auto_gptq` export form (accepted by `check.py`) - what KL2 / KL3 run on before 20b's checkpoint exists. `tools/box_validate/kolibri_oracle.sh synth` builds both arms and their golden sets (prose, de_prose) on the box CPU; `real` the real checkpoint's (prose, code, de_prose, de_chat). |
+| `kolibri_chat_ids.py` | Spec 20c Task 1: a chat-formatted golden prompt's ids through the checkpoint's own template (`apply_chat_template(messages, tools, add_generation_prompt, reasoning_effort)`) - `de_chat`'s, for the real checkpoint's golden set. |
+| `../quantize/kolibri/make_synth.py` | Spec 20c Task 1: a synthetic Kolibri-1 checkpoint at the REAL widths, N layers, int4 or bf16 attention, RTN-packed into AutoRound's `auto_round:auto_gptq` export form (accepted by `check.py`) - what KL2 / KL3 run on before 20b's checkpoint exists. The maintainer's validation builds both arms and their golden sets (prose, de_prose) on the CPU, and the real checkpoint's (prose, code, de_prose, de_chat). |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. |
 | `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Takes the bf16 base checkpoint too (no `quantization_config`) and `--cont-ids` (teacher-forced ids from a file). |
 | `kv8_qwen38_repeat.sh` | Spec 12 §8 "Before 12b" on the Mac: the 12a probe on `Qwen/Qwen3.8-27B` (bf16) in a 28 GB container, golden rows, A4, long32k[:4096] + replay, resumable; how to run and what decides the tolerances: plan 12b "Task A". |
@@ -57,21 +57,18 @@ recorded run used and are what `n_prompt` in each golden file's metadata says.
 
 ## Running it
 
-Everything runs on the box; the Mac never loads the model. Sync from the Mac,
-then run the container commands **on the box** - wrapping them in
-`tools/box.sh run` adds a third layer of quoting around `"$SNAP"` and is easy
-to get wrong.
+Everything runs on the machine that holds the checkpoint, from the repo root. Run the
+container commands in a shell there - wrapping them in an ssh command line adds a
+third layer of quoting around `"$SNAP"` and is easy to get wrong.
 
 ```bash
-tools/box.sh sync                                  # on the Mac
-ssh "$BOX"                                         # everything below: on the box
-cd ~/b70-inference-server && mkdir -p oracle-out
+mkdir -p oracle-out
 
 # ids: seconds, tokenizer only
 tools/oracle/run_in_container.sh 'python3 tools/oracle/tokenize.py "$SNAP" \
   encode tests/golden/prompts/prose.txt > /ws/oracle-out/prose.ids'
 
-# the dump: ~5.5 min, ONE PROMPT AT A TIME (61 GiB peak, 121 GB box)
+# the dump: ~5.5 min, ONE PROMPT AT A TIME (61 GiB peak, 121 GB machine)
 tools/oracle/run_in_container.sh 'python3 tools/oracle/dump.py "$SNAP" \
   --prompt /ws/oracle-out/prose.ids \
   --out /ws/oracle-out/prose.golden.safetensors --gen 32'
@@ -83,22 +80,21 @@ run and its re-read are the two committed scripts - no retyping, and the recipe
 is under version control:
 
 ```bash
-# on the box, from the repo root, detached so the 17-min run outlives the ssh
+# from the repo root, detached so the 17-min run outlives the ssh
 setsid nohup tools/oracle/golden.sh > oracle-out/golden.log 2>&1 </dev/null &
 tail -f oracle-out/golden.log
 tools/oracle/check.sh          # re-read what was written, in a fresh process
 ```
 
 `cmake --build build --target golden` prints exactly this sequence; it does not
-run it (the oracle needs the container and 61 GiB, and never runs from the Mac
+run it (the oracle needs the container and 61 GiB, and never runs from a laptop
 - see the target's comment in `CMakeLists.txt`). Making `dump.py` accept
 repeated `--prompt`/`--out` pairs would save ~4 minutes per full re-run; it was
 not worth touching the numerics path for.
 
-**Outputs stay on the box**, in `~/b70-inference-server/oracle-out/` - hundreds
-of MB per prompt. `.gitignore` has `oracle-out/` and `oracle-out-*/`, and
-`tools/box.sh sync` excludes both, so a sync from the Mac neither deletes nor
-commits them.
+**Outputs stay where they were made**, in the tree's `oracle-out/` - hundreds
+of MB per prompt. `.gitignore` has `oracle-out/` and `oracle-out-*/`, so they are
+never committed.
 
 ### One golden set per checkpoint - 2026-08-26
 
@@ -121,13 +117,13 @@ be a chance to change the ids by accident. Verified byte-identical to the
 host path to a snapshot, mounted read-only at `/snap` - the way to reach a
 self-quantised checkpoint that never went through `hf download`; it takes
 precedence over `ORACLE_MODEL`. **`ORACLE_THREADS`** caps `OMP_NUM_THREADS` and
-`MKL_NUM_THREADS`, because the box is shared and torch's default is every
+`MKL_NUM_THREADS`, because the machine is shared and torch's default is every
 thread on it. `dump.py` prints `torch.get_num_threads()` so the cap that was
 actually applied is in the log rather than assumed - note that the reference
 image capped a requested 28 at **22**.
 
 ```bash
-# on the box, from the repo root
+# from the repo root
 OUT_DIR=oracle-out-rtn \
 ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
 ORACLE_THREADS=28 tools/oracle/golden.sh
@@ -137,9 +133,9 @@ ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
 tools/oracle/check.sh
 ```
 
-**Measured 2026-08-26**, three prompts serially, box under a 12-core vLLM XPU
+**Measured 2026-08-26**, three prompts serially, the machine under a 12-core vLLM XPU
 kernel compile: **25 min 14 s** (prose 7:28, code 9:49, cjk 7:57) against
-16 min 48 s on an idle box. The output files are within ~100 bytes of the
+16 min 48 s on an idle machine. The output files are within ~100 bytes of the
 `oracle-out/` ones - same 290-tensor manifest, same shapes.
 
 ### Two config vocabularies, and an int4 head
@@ -169,7 +165,7 @@ other:
 
 ### Exact commands and measured numbers
 
-Run 2026-08-24 21:42-21:58 on the box (121 GB of RAM),
+Run 2026-08-24 21:42-21:58 on the test machine (121 GB of RAM),
 image `vllm-xpu-env-next-p314-t214-vxkp0:latest`, serially, `--gen 32` for all
 three. The three commands were exactly the two-line `run_in_container.sh` form
 above with `prose` replaced by `code` / `cjk`. Every number below is from the
@@ -193,15 +189,15 @@ streams, which is not the tokenization of the concatenated text** - a real
 tokenizer would merge differently across each seam. That is irrelevant to the
 gate, which compares the engine against the oracle on the same ids.
 
-It is part of the primary checkpoint's golden set (the RTN checkpoint it was first staged for left the box; first
-run 2026-11-12). On the box, from the repo root, detached, behind the CPU model lock:
+It is part of the primary checkpoint's golden set (the RTN checkpoint it was first staged for was retired; first
+run 2026-11-12). From the repo root, detached, behind the CPU model lock:
 
 ```bash
 # the primary checkpoint is run_in_container.sh's default (ORACLE_MODEL, through the HF cache mount); ORACLE_SNAP
 # would mount only the snapshot folder, whose files are links into blobs/ outside that mount
-mkdir -p ~/b70/logs/oracle-long
+mkdir -p $B70_DATA/logs/oracle-long
 OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_THREADS=22 \
-  nohup setsid flock /tmp/b70-cpu-model.lock tools/oracle/golden.sh > ~/b70/logs/oracle-long/golden.log 2>&1 </dev/null &
+  nohup setsid flock /tmp/b70-cpu-model.lock tools/oracle/golden.sh > $B70_DATA/logs/oracle-long/golden.log 2>&1 </dev/null &
 OUT_DIR=oracle-out-primary PROMPTS=long tools/oracle/check.sh
 ```
 
@@ -214,7 +210,7 @@ OUT_DIR=oracle-out-primary PROMPTS=long tools/oracle/check.sh
 | prefill forward | ~900 s | **estimated** - 14.8 s at 42 ids scaled linearly in `T` (the MLP is 70% of the FLOPs and is linear) plus 10% for the quadratic attention term: 14.8 × (2820/42) × 1.1 ≈ 1093 s, and the fixed part of the 14.8 s is unknown, so this is an upper-ish bound |
 | 32 greedy | ~250 s | **estimated**, from ~5.8 s/token at 42 ids plus the deeper KV walk |
 | **total, one prompt** | **20-40 min** | **estimated**, plus ~18 s of container start (**measured**) |
-| peak RSS | ~70 GiB of the box's 121 GB | **estimated** - 61.4 GiB **measured** at 42 ids, plus the 192 hook activations (192 × 2820 × 5120 × 2 B = 5.54 GB, **derived**), `logits` ((2820+32) × 248320 × 4 B = 2.83 GB, **derived**) and the eager attention scores (24 × 2820² × 4 B = 763 MB, **derived**, transient) |
+| peak RSS | ~70 GiB of the machine's 121 GB | **estimated** - 61.4 GiB **measured** at 42 ids, plus the 192 hook activations (192 × 2820 × 5120 × 2 B = 5.54 GB, **derived**), `logits` ((2820+32) × 248320 × 4 B = 2.83 GB, **derived**) and the eager attention scores (24 × 2820² × 4 B = 763 MB, **derived**, transient) |
 | output file | ~8.5 GB | **estimated**, the three terms above plus 151 MB of GDN states and 4 MB of conv states |
 
 **Reconciliation with spec §6.2**, which said "hours-class - estimated from the
@@ -223,7 +219,7 @@ by prompt length; scaling the three terms separately (fixed load, linear
 prefill, 32 decodes) gives the 20-40 min above. Both are estimates and neither
 is measured yet; **the run's own `/usr/bin/time -v` is the number that goes in
 the record**, and whichever it lands on, this sentence stays. Check
-`df -h ~/b70-inference-server` first and give the container **no** memory limit.
+`df -h .` first and give the container **no** memory limit.
 
 `ctest -R prefill_gate_long` SKIPs (77) until `oracle-out-primary/long.golden.safetensors` exists,
 then gates the prefill path at **C = 1024** over 2820 ids - two chunk
@@ -330,7 +326,7 @@ docker exec agnes-ref sh -c 'apt-get update && apt-get install -y g++ procps'   
 
 Install torch from the CPU index **first** and never let a later `pip install` pull it
 from PyPI (a bare `pip install accelerate` resolves torch to the 2.14.1+cu130 build);
-`transformers==5.15.0` is the box image's version. Then, e.g. one golden prompt
+`transformers==5.15.0` is the reference image's version. Then, e.g. one golden prompt
 (`<snapshot>` the checkpoint's directory under `/hf/hub`):
 
 ```bash
@@ -402,7 +398,7 @@ docker run --rm --memory 28g --memory-swap 28g -v "$PWD":/ws -w /ws \
   agnes-ref-img:latest python3 tools/oracle/test_dflash_ref.py
 ```
 
-On the box: `tools/oracle/run_in_container.sh 'HF_HUB_CACHE=/hf/hub python3 tools/oracle/test_dflash_ref.py'`
+On the GPU machine: `tools/oracle/run_in_container.sh 'HF_HUB_CACHE=/hf/hub python3 tools/oracle/test_dflash_ref.py'`
 (the script points `HF_HOME` at a scratch dir; `HF_HUB_CACHE` sends `find_snapshot` to the
 read-only cache mount). Not yet run there.
 
@@ -511,7 +507,7 @@ Three pieces Ornith did not need:
 
 The image never changes: `tools/oracle/qwen4exp_env.sh <dir>` installs 5.19.0 + tokenizers 0.23.2 with
 `pip --no-deps --target <dir>` (inside the container, so the wheels match its Python) and every command
-runs with `PYTHONPATH=<dir>` first (Mac: `oracle-out-q4exp/site`; box: `<tree>/oracle-out-q4exp-site`).
+runs with `PYTHONPATH=<dir>` first (Mac: `oracle-out-q4exp/site`; GPU machine: `<tree>/oracle-out-q4exp-site`).
 Facts: `qwen4exp_facts.py` (torch-free, reads a snapshot or
 `hf:REPO` by range requests).
 
@@ -559,8 +555,8 @@ forms differ, acceptance and the head's trace routes. `qwen4exp_make_tiny.py` wr
 128, any layer pattern, experts / top-k, forms tiny / bf16 / intel / ours, tied router rows, `mtp.*`, a
 smaller indexer budget, a dequantised twin, 21-QFN-v1b's int8 PLE file).
 
-**The real runs (box CPU, queue row 30)**: `tools/box_validate/qwen4exp_oracle.sh <data tree> tests | tiny |
-intel | intel-layers N | ours | ppl | hfcheck | trace` (kolibri_oracle.sh's shape: per prompt resumable,
+**The real runs (CPU, queue row 30)**: the maintainer's validation runs them in the stages `tests | tiny |
+intel | intel-layers N | ours | ppl | hfcheck | trace` (per prompt resumable,
 `MemAvailable` floor 64 GB for real weights, exit 77 without the snapshot; `DRY_RUN=1` prints every command
 and the ESTIMATED times). Golden prompts: `tests/golden/prompts/q4exp_{short,4k,8k,32k,agentic}.ids`
 (`qwen4exp_prompts.py`, from the original's tokenizer; `q4exp_agentic.json` is an original coding session on
@@ -691,15 +687,15 @@ position - is `docs/14-golden-gate.md`; this section is how to run it and the
 one-line result.
 
 ```bash
-tools/box.sh test golden_gate_test          # sync + build + ctest, on the box
+ctest --test-dir build --output-on-failure -R golden_gate_test
 # the full diagnostic log (per-layer tables, attribution traces, every step):
-tools/box.sh run './build/tests/golden_gate_test "$PWD/oracle-out" "$PWD/tests/golden/prompts"'
+./build/tests/golden_gate_test "$PWD/oracle-out" "$PWD/tests/golden/prompts"
 ```
 
 The three prompt id files are **committed** as
 `tests/golden/prompts/{prose,code,cjk}.ids` - the same 42 / 61 / 38 ids the
 `prompt_ids` metadata above records, pulled from `oracle-out/` and small enough
-to version. The `.safetensors` are not committed and never leave the box; when
+to version. The `.safetensors` are not committed and never leave the machine that made them; when
 they are absent the test exits **77**, which ctest reports as SKIP.
 
 Per prompt the test ingests the ids one per replay (reading the per-layer
@@ -792,7 +788,7 @@ one, and it is worth being explicit about where the chain currently ends.
    files** - and as of **2026-08-25 it passes, 96/96 token ids exact** (re-read
    under the 2026-08-26 ruling as 94 determined-exact + 2 tie-agreements)
    (`docs/14-golden-gate.md`): `oracle-out/{prose,code,cjk}.golden.safetensors`
-   on the box, the ones produced by the run recorded above. Per-layer `resid`/`mixer`/`mlp`,
+   the ones produced by the run recorded above. Per-layer `resid`/`mixer`/`mlp`,
    the GDN and conv states after the prompt, the logits rows and the 32 greedy
    token ids. Their metadata pins the snapshot path, the prompt ids, `gen`, the
    attention implementation and the group size, so a golden file always says
@@ -868,7 +864,7 @@ Read a future three-way disagreement like this:
   `sys.path` before importing anything third-party; do the same in any new script
   in this directory, or run it with `python -P`.
 - **Never give the container a memory limit** and run one prompt at a time; the
-  box has 121 GB and the dequantised model wants a large fraction of it.
+  test machine has 121 GB and the dequantised model wants a large fraction of it.
 
 ### Inkling 2 Mini text oracle
 

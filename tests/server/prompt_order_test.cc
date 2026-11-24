@@ -2,7 +2,7 @@
 // snapshot's chat_template.jinja), the real tokenizer (tokenizer.json) and a scripted engine. Two halves:
 //
 //   1. the committed sets: every request of tests/golden/toolcall (A4) and tests/golden/edit-copy (spec 19f), sent as
-//      tools/box_validate/serve_client.py sends it, must come back with exactly the set's <name>.ids - the ids
+//      a client sends it, must come back with exactly the set's <name>.ids - the ids
 //      transformers' apply_chat_template gives for the same messages and tools (spec 19f's open question: they did not,
 //      because the request was held key-sorted and the template prints tools with tojson and arguments with | items);
 //   2. one agentic session per case of tests/server/prompt_order_cases.json (tools/tokenizer/dump_prompt_order.py):
