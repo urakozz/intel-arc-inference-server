@@ -96,6 +96,41 @@
 #if KV8_SHARE && !(PAIR && KV8 && HPW == 3)
 #error "kol_pf_attn KV8_SHARE: the KV8 PAIR form at HPW 3 (six sub-groups widen each tile once)"
 #endif
+// KV8_I8S (plan 41e Task 3, the int8 prompt pass `--prefill-backend l0-int8` on the int8 cache; undefined on every other
+// command line): int8 scores, kv8.cl's KV8_I8S rule at head_dim 128. Each row's rotated q is rounded to bf16 (as the
+// bf16 score's operand), then quantised per row and head over its 128 dims - s = amax / 127 (fp32), q8 = s == 0 ? 0 :
+// clamp(rint(q / s), -127, 127) - in the registers of the work-group that reads it; K's int8 rows are the int8 DPAS B
+// operand as read (no widening, no K tile in SLM), four 32-dim DPAS a row block and key atom into an int32 sum (exact:
+// |dot| <= 128 x 127 x 127 < 2^24); s = ((float(dot) x s_q) x s_k) x SCORE_SCALE. Softmax, P and P V (V widened once
+// a work-group, KV8_SHARE) unchanged.
+#ifndef KV8_I8S
+#define KV8_I8S 0
+#endif
+#if KV8_I8S && !KV8_SHARE
+#error "kol_pf_attn KV8_I8S: the KV8_SHARE PAIR form"
+#endif
+// SPLIT=1 (PERF-12, plan 41h): the split-K form for short chunks deep in the cache, on the full layers' PAIR form.
+// Grid (ceil(C / 16), KV_HEADS, (GQA / HPW) x n): work-group span i walks keys [i span, i span + span) only, the
+// last span to its rows' causal end, so every span but the last holds keys below pos, which every row sees. Each
+// span starts from no key (m -INF, l 0, no sink) and writes its unnormalised O, m and l to `part` [n][C][Q_HEADS]
+// {m, l, O[128]} (the KV8 O still rotated); kol_pf_flash_merge folds the sink and the spans in order (kol_attn.cl's
+// reduce rule), un-rotates (KV8) and gates. Not bitwise the unsplit walk: the f32 judge.
+#ifndef SPLIT
+#define SPLIT 0
+#endif
+#if SPLIT && (!PAIR || SLIDING || EXP2)
+#error "kol_pf_attn SPLIT: the full layers' PAIR form, natural exp"
+#endif
+// VERIFY=1 (plan 41h Task 2): the SPLIT form as a decode list's verify attention at depth - pos and the rows read
+// from the Control block (ctrl[CTRL_POS], ctrl[CTRL_NACT], at most 16 rows: one row group), the span from pos and
+// the grid's spans, so a recorded list replays at every position; the merge likewise. The rows' q, relative query,
+// sinks, gate and output in kol_attn's layouts, which are the prompt pass's at C = n_active.
+#ifndef VERIFY
+#define VERIFY 0
+#endif
+#if VERIFY && (!SPLIT || !defined(CTRL_POS) || !defined(CTRL_NACT))
+#error "kol_pf_attn VERIFY: the SPLIT form, with CTRL_POS and CTRL_NACT"
+#endif
 #define GQA (Q_HEADS / KV_HEADS)
 #define SG 16
 #define HD 128
@@ -113,6 +148,9 @@
 
 #include "bf16.h"
 #if KV8
+#if SPLIT
+#define KV8_N HD
+#endif
 #include "kv8_scheme.h"
 #define KV_T char
 // int8 -> bf16 bits, exact (|q| <= 127).
@@ -155,13 +193,32 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
 #if KV8
                                 __global const ushort* restrict Ks, __global const ushort* restrict Vs,
 #endif
-                                __global ushort* restrict out, uint pos, uint C,
+                                __global ushort* restrict out,
+#if VERIFY
+                                __global const uint* restrict ctrl,
+#else
+                                uint pos, uint C,
+#endif
                                 __global const float* restrict relative, __global const float* restrict table,
-                                __global const float* restrict sinks, __global const float* restrict gate) {
+                                __global const float* restrict sinks, __global const float* restrict gate
+#if VERIFY
+                                , __global float* restrict part
+#elif SPLIT
+                                , uint span, __global float* restrict part
+#endif
+                                ) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint k = s & 1u, hp = s >> 1;                                   // key half / dim half; the pair
   const uint j = get_group_id(1);                                       // kv head
+#if SPLIT
+  const uint span_i = get_group_id(2) / (GQA / HPW), spans = get_num_groups(2) / (GQA / HPW);
+  const uint h = j * GQA + get_group_id(2) % (GQA / HPW) * HPW + hp;   // q head
+#if VERIFY
+  const uint pos = ctrl[CTRL_POS], C = min(ctrl[CTRL_NACT], 16u), span = pos / spans / 64u * 64u;
+#endif
+#else
   const uint h = j * GQA + get_group_id(2) * HPW + hp;                  // q head
+#endif
   const uint r0 = get_group_id(0) * 16u;                                // first of 16 rows
   if (r0 >= C) return;                                                  // uniform over the work-group
   const uint depth = pos + C;
@@ -189,12 +246,48 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
 #define KV8_UNIT(u) (((u) < 8u ? kvw : (__local uint*)sbuf) + ((u) & 7u) * 256u)
 #endif
 
+#if KV8_I8S
+  // Q, 16 rows x 128 dims as int8: qi[rb][c].s_r = q8 of dims 32 c + 2 lane, + 1 (the int8 DPAS A operand), qsr[rb].s_r
+  // its row's scale.
+  short8 qi[2][NDA / 2];
+  float8 qsr[2];
+#else
   // Q, 16 rows x 128 dims: qa[rb][kk].s_r = q[r0 + 8 rb + r][h][16 kk + lane].
   short8 qa[2][NDA];
+#endif
   float8 m[2], lsum[2] = {(float8)(1.0f), (float8)(1.0f)};
   float rqv[2][8];   // row 8 rb + r's relative query, lane d holding component d
 #pragma unroll
   for (uint rb = 0; rb < 2u; ++rb) {
+#if KV8_I8S
+    ushort qw[NDA / 2][8];
+    float qsv[8];
+#pragma unroll
+    for (uint r = 0; r < 8; ++r) {
+      const uint row = min(r0 + 8u * rb + r, C - 1u);
+      const __global float* qr = Q + ((size_t)row * Q_HEADS + h) * HD + 2u * l;
+      float qv[NDA];
+      float amax = 0.0f;
+#pragma unroll
+      for (uint c = 0; c < NDA / 2; ++c) {
+        const float2 v = vload2(0, qr + 32u * c);
+        qv[2 * c] = bf16f(rne_bf16(v.s0));
+        qv[2 * c + 1] = bf16f(rne_bf16(v.s1));
+        amax = fmax(amax, fmax(fabs(qv[2 * c]), fabs(qv[2 * c + 1])));
+      }
+      const float sq = sub_group_reduce_max(amax) / 127.0f;
+      qsv[r] = sq;
+#pragma unroll
+      for (uint c = 0; c < NDA / 2; ++c) {
+        const float lo = sq == 0.0f ? 0.0f : fmin(fmax(rint(qv[2 * c] / sq), -127.0f), 127.0f);
+        const float hi = sq == 0.0f ? 0.0f : fmin(fmax(rint(qv[2 * c + 1] / sq), -127.0f), 127.0f);
+        qw[c][r] = (ushort)((uint)(uchar)(char)(int)lo | ((uint)(uchar)(char)(int)hi << 8));
+      }
+    }
+#pragma unroll
+    for (uint c = 0; c < NDA / 2; ++c) qi[rb][c] = as_short8(vload8(0, qw[c]));
+    qsr[rb] = vload8(0, qsv);
+#else
 #pragma unroll
     for (uint kk = 0; kk < NDA; ++kk) {
       ushort t[8];
@@ -205,6 +298,7 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
       }
       qa[rb][kk] = as_short8(vload8(0, t));
     }
+#endif
     float sink[8];
 #pragma unroll
     for (uint r = 0; r < 8; ++r) {
@@ -212,7 +306,12 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
       sink[r] = sinks[(size_t)row * 64 + h];
       rqv[rb][r] = relative[((size_t)row * Q_HEADS + h) * 16 + l];
     }
+#if SPLIT
+    m[rb] = (float8)(-INFINITY);
+    lsum[rb] = (float8)(0.0f);
+#else
     m[rb] = vload8(0, sink);
+#endif
   }
   float8 o[2][NDA / 2];
 #pragma unroll
@@ -220,13 +319,40 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
 #pragma unroll
     for (uint dd = 0; dd < NDA / 2; ++dd) o[rb][dd] = (float8)(0.0f);
   const uint last = min(depth, p0 + 16u);
+#if SPLIT
+  const uint t_first = tstart + span_i * span, t_end = span_i + 1u == spans ? last : min(last, t_first + span);
+#else
+  const uint t_first = tstart, t_end = last;
+#endif
 
-  for (uint t0 = tstart; t0 < last; t0 += KT) {
+  for (uint t0 = t_first; t0 < t_end; t0 += KT) {
     // S for this sub-group's key atoms b = 2k + bb (lane = key t0 + 16 b + l), both row blocks.
     float8 sacc[2][2];
 #pragma unroll
     for (uint rb = 0; rb < 2u; ++rb) sacc[rb][0] = sacc[rb][1] = (float8)(0.0f);
-#if KV8_SHARE
+#if KV8_I8S
+    int8 iacc[2][2];
+#pragma unroll
+    for (uint rb = 0; rb < 2u; ++rb) iacc[rb][0] = iacc[rb][1] = (int8)(0);
+#pragma unroll
+    for (uint c = 0; c < NDA / 2; ++c)
+#pragma unroll
+      for (uint bb = 0; bb < 2u; ++bb) {
+        uint k4[8];   // lane = key, word z = dims 32 c + 4 z .. + 3: the int8 DPAS B operand
+        intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)Kc, KV_HEADS * HD, (int)depth,
+            KV_HEADS * HD, (int2)((int)((j * HD + 32u * c) / 4u), (int)(t0 + 16u * (2u * k + bb))), k4);
+#pragma unroll
+        for (uint rb = 0; rb < 2u; ++rb)
+          iacc[rb][bb] = intel_sub_group_i8_i8_matrix_mad_k32(qi[rb][c], as_int8(vload8(0, k4)), iacc[rb][bb]);
+      }
+#pragma unroll
+    for (uint bb = 0; bb < 2u; ++bb) {
+      const float ksc = vload_half((size_t)min(t0 + 16u * (2u * k + bb) + l, depth - 1) * KV_HEADS + j,
+                                   (__global const half*)Ks);
+      sacc[0][bb] = (convert_float8(iacc[0][bb]) * qsr[0]) * ksc;
+      sacc[1][bb] = (convert_float8(iacc[1][bb]) * qsr[1]) * ksc;
+    }
+#elif KV8_SHARE
     barrier(CLK_LOCAL_MEM_FENCE);                                       // the last tile's V and P reads are done
     for (uint u = s; u < 16u; u += SGS) {
       uint k4[8], kb[16];
@@ -521,7 +647,35 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
     vstore8(lsum[1], 0, sl + hp * 16u + 8u);
   }
   barrier(CLK_LOCAL_MEM_FENCE);
-#if KV8
+#if SPLIT
+  // This span's partials, rows below C: O by its dim atoms, m and l by sub-group 0's lane 0.
+#pragma unroll
+  for (uint rb = 0; rb < 2u; ++rb) {
+    const uint rr = r0 + 8u * rb;
+    if (rr >= C) break;
+    float mv[8], lv[8];
+    vstore8(m[rb], 0, mv);
+    vstore8(vload8(0, sl + hp * 16u + 8u * rb), 0, lv);
+#pragma unroll
+    for (uint dd = 0; dd < NDA / 2; ++dd) {
+      float wv[8];
+      vstore8(o[rb][dd], 0, wv);
+      for (uint r = 0; r < 8; ++r) {
+        const uint row = rr + r;
+        if (row >= C) break;
+        part[(((size_t)span_i * C + row) * Q_HEADS + h) * (HD + 2) + 2u + 16u * (4u * k + dd) + l] = wv[r];
+      }
+    }
+    if (k == 0 && l == 0)
+      for (uint r = 0; r < 8; ++r) {
+        const uint row = rr + r;
+        if (row >= C) break;
+        __global float* p = part + (((size_t)span_i * C + row) * Q_HEADS + h) * (HD + 2);
+        p[0] = mv[r];
+        p[1] = lv[r];
+      }
+  }
+#elif KV8
   // The 8-row form's KV8 epilogue on this sub-group's dim atoms: O / l, the signs, the FWHT across the lanes, the
   // dim-atom stages 16 and 32 here, 64 with the other half through SLM, x 1/8, the gate.
   float8 u[2][NDA / 2];
@@ -1017,3 +1171,41 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
 #endif
 }
 #endif  // PAIR
+
+#if SPLIT
+// kol_pf_flash_merge (PERF-12): row `row`'s spans of q head h folded into out - grid (Q_HEADS, C), work-group 128,
+// work-item d = dim d. kol_attn_reduce's rule: from the sink (mx = sink, sm = 1), the spans ascending, a span that saw
+// no key (m -INF) skipped; rne(O / l) gated (KV8: un-rotated first).
+__attribute__((reqd_work_group_size(HD, 1, 1)))
+__kernel void kol_pf_flash_merge(__global const float* restrict part, __global ushort* restrict out,
+#if VERIFY
+                                 __global const uint* restrict ctrl,
+#else
+                                 uint C,
+#endif
+                                 uint spans, __global const float* restrict sinks, __global const float* restrict gate) {
+  const uint h = get_group_id(0), row = get_group_id(1), d = get_local_id(0);
+#if VERIFY
+  const uint C = min(ctrl[CTRL_NACT], 16u);
+  if (row >= C) return;
+#endif
+  float mx = sinks[(size_t)row * 64 + h], sm = 1.0f, acc = 0.0f;
+  for (uint sp = 0; sp < spans; ++sp) {
+    const __global float* p = part + (((size_t)sp * C + row) * Q_HEADS + h) * (HD + 2);
+    const float bmx = p[0];
+    if (!(bmx > -INFINITY)) continue;
+    const float nmx = fmax(mx, bmx);
+    const float a = exp(mx - nmx), bs = exp(bmx - nmx);
+    sm = fma(sm, a, p[1] * bs);
+    acc = fma(acc, a, p[2 + d] * bs);
+    mx = nmx;
+  }
+  const size_t i = ((size_t)row * Q_HEADS + h) * HD + d;
+#if KV8
+  __local float rot[HD];
+  out[i] = rne_bf16(kv8n_unrotate(acc / sm, d, rot) / (1.0f + exp(-gate[i])));
+#else
+  out[i] = rne_bf16((acc / sm) / (1.0f + exp(-gate[i])));
+#endif
+}
+#endif

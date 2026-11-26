@@ -37,6 +37,11 @@
 #if (K % 16) != 0
 #error "K must be a multiple of 16"
 #endif
+// INK_REL_N: the relative query's columns in the fused attention projections (Inkling 2 Mini: 24 heads x 16; a
+// `--parallel tp` card's 12 heads: 192).
+#ifndef INK_REL_N
+#define INK_REL_N 384
+#endif
 // PERF-111, both off by default. GEMV_KMAJOR 1: the 256 B steps ordered [k16][n_tile] instead of [n_tile][k16], so
 // at each step the launch's sub-groups read neighbouring bytes rather than each walking its own 80 KB slab - every
 // build at an output head's width gets it while loader::kInt8HeadKMajor holds (src/kernels/CMakeLists.txt, the
@@ -53,7 +58,22 @@
 #ifndef GEMV_KMAJOR_B
 #define GEMV_KMAJOR_B 1
 #endif
-#define I8_AT(k16, nt) ((((size_t)(k16) / GEMV_KMAJOR_B) * (N / 16) + (nt)) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B)
+// GEMV_KSPLIT S (off: 1): S sub-groups a 16-column tile, each over K16 / S consecutive 16-k steps, the partial sums
+// added in local memory in a fixed tree (slice order). Not the one-chain order: Inkling's verify rows of the
+// 64-column tap projections, which one work-group walking all of K left latency bound.
+#ifndef GEMV_KSPLIT
+#define GEMV_KSPLIT 1
+#endif
+#if GEMV_KSPLIT > 1 && ((GEMV_KSPLIT & (GEMV_KSPLIT - 1)) != 0 || K16 % GEMV_KSPLIT != 0 || (K16 / GEMV_KSPLIT) % GEMV_AHEAD != 0 || \
+                        GEMV_KMAJOR || QKV_NKV)
+#error "GEMV_KSPLIT: a power of two dividing K / 16 into whole GEMV_AHEAD runs, row-major tiles, one weight"
+#endif
+// I8_N_STRIDE (default N): the k-major order's columns a k-block, when the N columns read are a run of a wider
+// weight's (a `--parallel tp` card's half of Inkling's head: the pointer at its first tile, the stride the head's).
+#ifndef I8_N_STRIDE
+#define I8_N_STRIDE N
+#endif
+#define I8_AT(k16, nt) ((((size_t)(k16) / GEMV_KMAJOR_B) * (I8_N_STRIDE / 16) + (nt)) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B)
 #if (K16 % GEMV_AHEAD) != 0
 #error "GEMV_AHEAD must divide K / 16"
 #endif
@@ -61,7 +81,7 @@
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 __attribute__((intel_reqd_sub_group_size(SG)))
-__attribute__((reqd_work_group_size(WG_N, 1, 1)))
+__attribute__((reqd_work_group_size(WG_N * GEMV_KSPLIT, 1, 1)))
 __kernel void gemv_i8w(__global const uchar* restrict w,
                        __global const float* restrict scales,
                        __global const ushort* restrict x,
@@ -88,11 +108,11 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
       w = wg; scales = sgate; out = og;
     } else {
       group -= N / block;
-      if (group < 384 / block) {
-        columns = 384;
+      if (group < INK_REL_N / block) {
+        columns = INK_REL_N;
         w = wr; scales = sr; out = orr;
       } else {
-        group -= 384 / block;
+        group -= INK_REL_N / block;
         columns = 64;
         w = ws; scales = ss; out = os;
       }
@@ -113,6 +133,9 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
   const uint lane = get_sub_group_local_id();
 #if QKV_NKV
   const uint n_tile = group * TILES_PER_WG + get_sub_group_id();
+#elif GEMV_KSPLIT > 1
+  const uint n_tile = get_group_id(0) * TILES_PER_WG + get_sub_group_id() % TILES_PER_WG;
+  const uint slice = get_sub_group_id() / TILES_PER_WG;
 #else
   const uint n_tile = get_group_id(0) * TILES_PER_WG + get_sub_group_id();
 #endif
@@ -147,7 +170,12 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
 #else
   const size_t step = 256;
 #endif
+#if GEMV_KSPLIT > 1
+  tile += (size_t)slice * (K16 / GEMV_KSPLIT) * step;
+  for (uint k0 = slice * (K16 / GEMV_KSPLIT); k0 < (slice + 1) * (K16 / GEMV_KSPLIT); k0 += GEMV_AHEAD) {
+#else
   for (uint k0 = 0; k0 < K16; k0 += GEMV_AHEAD) {
+#endif
     uchar16 wq[GEMV_AHEAD];
     __attribute__((opencl_unroll_hint)) for (uint j = 0; j < GEMV_AHEAD; ++j)
 #if GEMV_KMAJOR && !QKV_NKV
@@ -168,6 +196,19 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
     const float16 wf = convert_float16(as_char16(intel_sub_group_block_read_uc16(tile)));
     I8W_STEP(wf, k16)
   }
+#endif
+#if GEMV_KSPLIT > 1
+  __local float red[GEMV_KSPLIT][M][WG_N];
+  const uint c = (get_sub_group_id() % TILES_PER_WG) * SG + lane;
+  for (int m = 0; m < M; ++m) red[slice][m][c] = acc[m];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = GEMV_KSPLIT / 2; stride > 0; stride >>= 1) {
+    if (slice < stride)
+      for (int m = 0; m < M; ++m) red[slice][m][c] += red[slice + stride][m][c];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (slice != 0) return;
+  for (int m = 0; m < M; ++m) acc[m] = red[0][m][c];
 #endif
   const float s = scales[n];
 #if QKV_NKV

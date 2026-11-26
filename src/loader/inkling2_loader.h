@@ -32,11 +32,21 @@ struct Inkling2WeightLayout {
 class Inkling2Checkpoint {
  public:
   using Sink = std::function<void(uint32_t arena, size_t offset, std::span<const std::byte>)>;
-  explicit Inkling2Checkpoint(const std::string& snapshot_or_repo);
+  // `dflash`: a DFlash 2 drafter's folder (incoai/Inkling-2-Mini-DFlash2, plan 41k) loaded in place of the release's
+  // DSpark head (mtp.safetensors) - one drafter, never both; desc().draft is then that drafter's (dflash()). Its 81
+  // tensors in the draft arena by their checkpoint names, in df_prep's forms (runtime/dflash/dflash_capture.cc): the
+  // linears int8 at load (one fp32 scale a row, the head's rule), q || k || v as layers.<l>.self_attn.qkv_proj.weight and gate || up as
+  // layers.<l>.mlp.gate_up_proj.weight (rows concatenated, so a context projection reads the k || v rows in place),
+  // layers.<l>.self_attn.kv_proj.weight the k || v rows of the first in place (no bytes of its own), q_norm || k_norm
+  // as layers.<l>.self_attn.qk_norm (fp32), the other norms and the conv bases fp32, the codebooks
+  // raw bf16, and "df2.mask_embed": the target's embed_norm(embed[mask_token_id]) rounded to bf16, computed here once
+  // (the block's mask rows).
+  explicit Inkling2Checkpoint(const std::string& snapshot_or_repo, const std::string& dflash = "");
   const std::string& directory() const { return dir_; }
   const model::Inkling2Desc& desc() const { return desc_; }
   const Inkling2WeightLayout& layout() const { return layout_; }
   bool has_drafter() const { return bool(draft_); }
+  bool dflash() const { return desc_.draft.form == model::DFlashForm::Vllm; }
   size_t tensor_count() const { return text_.tensors().size() - vision_ + draft_tensors_.size(); }
   void stream(const Sink& write, bool draft, unsigned threads = 0) const;
 
@@ -49,6 +59,15 @@ class Inkling2Checkpoint {
     uint32_t arena;
   };
   void add(std::string name, Source source, uint32_t padded_rows = 0);
+  void open_draft(const std::string& file);   // the draft file's header into draft_tensors_
+  void add_dflash(const std::string& dir);
+  // A weight made of several checkpoint tensors, rows concatenated (int8 with row scales, or fp32 with `floats`).
+  struct Cat {
+    std::string name;
+    std::vector<std::string> parts;
+    bool floats;
+  };
+  std::vector<Cat> cats_;
   const uint8_t* data(const std::string& name, const Source& s) const;
 
   std::string dir_;

@@ -28,6 +28,8 @@ not part of the text model (the MTP head is qwen4exp_mtp.py).
     qwen4exp_ref.py run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--layers N]
                         [--ple bf16|bf16:<snapshot>|int8:<dir>] [--chunk C] [--logits-tail L] [--act-tail A]
                         [--force <ids>]   (the continuation teacher-forced on these ids; `tokens` = them)
+        `run` writes <out>.ckpt after each prompt chunk; the same command run again continues from it (same arguments),
+        and the file is deleted when <out> is written.
     qwen4exp_ref.py ppl <snapshot> [--text NAME=FILE ...] [--ids NAME=FILE ...] [--layers N] [--max-tokens T]
     qwen4exp_ref.py trace <snapshot> --source NAME:IDS [...] [--opencode DIR] --out <dir> [--layers N]
     qwen4exp_ref.py hfcheck <snapshot> --layers N [--prompt <ids>] [--n 2100] [--gen 4]
@@ -1023,10 +1025,13 @@ def read_ids(path: str) -> list[int]:
 
 @torch.no_grad()
 def forward_chunks(model, ids: list[int], chunk: int, cache=None, rec: "Recorder | None" = None,
-                   on_logits=None, logits_to_keep: int = 0, route_replay=None):
+                   on_logits=None, logits_to_keep: int = 0, route_replay=None, pos0: int | None = None,
+                   after_chunk=None):
     """model(input_ids=chunk, past_key_values=cache) over `ids` in chunks (whole when chunk <= 0): the
-    reference's prefill. on_logits(row0, logits bf16 [c][V]) sees every chunk's logits. Returns the cache."""
-    pos = 0 if cache is None else cache.get_seq_length()
+    reference's prefill. on_logits(row0, logits bf16 [c][V]) sees every chunk's logits. Returns the cache.
+    pos0: the absolute position of ids[0] when it is not the cache's length (a run resumed from a checkpoint);
+    after_chunk(cache, next position) runs after each chunk."""
+    pos = pos0 if pos0 is not None else 0 if cache is None else cache.get_seq_length()
     c = chunk if chunk > 0 else len(ids)
     for a in range(0, len(ids), c):
         part = ids[a:a + c]
@@ -1039,6 +1044,8 @@ def forward_chunks(model, ids: list[int], chunk: int, cache=None, rec: "Recorder
         cache = out.past_key_values
         if on_logits is not None:
             on_logits(pos + a + len(part) - out.logits.shape[1], out.logits[0])
+        if after_chunk is not None:
+            after_chunk(cache, pos + a + len(part))
     return cache
 
 
@@ -1169,8 +1176,36 @@ def cmd_run(a) -> None:
                 nll[a_:b_] = -torch.log_softmax(lf[: b_ - a_], -1).gather(-1, ids_t[a_ + 1:b_ + 1, None])[:, 0]
             if r1 > log_from:
                 rows.append(lf[max(0, log_from - ra):].clone())
+    # <out>.ckpt: the cache, the recorder and the rows so far, written after each prompt chunk (write, then rename); a run
+    # with the same arguments continues from it, and it is deleted when the golden is saved
+    ckpt = a.out + ".ckpt"
+    ident = {"snapshot": os.path.abspath(a.snapshot), "ids": ids, "chunk": chunk, "dtype": a.dtype, "layers": a.layers,
+             "experts": a.experts, "ple": ple.kind, "lm_head": a.lm_head, "used": used, "gen": a.gen, "force": force,
+             "state_dump": bool(a.state_dump), "act_from": act_from, "log_from": log_from,
+             "engine_routes": os.path.abspath(a.engine_routes) if replay is not None else None}
+    cache, resume = None, 0
+    if os.path.exists(ckpt):
+        saved = torch.load(ckpt, weights_only=False)
+        if saved["ident"] == ident:
+            cache, resume = saved["cache"], saved["next"]
+            rec.rows, rec.qsa = saved["rec_rows"], saved["rec_qsa"]
+            rows[:] = saved["rows"]
+            nll.copy_(saved["nll"])
+            if state_dump is not None:
+                state_dump.ple.update(saved["ple"])
+            if replay is not None:
+                replay.bad = saved["bad"]
+            print(f"Resuming from {os.path.basename(ckpt)}: {resume} of {T} prompt tokens done", flush=True)
+        del saved
+
+    def save_ckpt(cache, nxt):
+        torch.save({"ident": ident, "cache": cache, "next": nxt, "rec_rows": rec.rows, "rec_qsa": rec.qsa,
+                    "rows": rows, "nll": nll, "ple": state_dump.ple if state_dump is not None else {},
+                    "bad": replay.bad if replay is not None else 0}, ckpt + ".tmp")
+        os.replace(ckpt + ".tmp", ckpt)
     t1 = time.time()
-    cache = forward_chunks(model, ids, chunk, rec=rec, on_logits=on_logits, route_replay=replay)
+    cache = forward_chunks(model, ids[resume:], chunk, cache=cache, rec=rec, on_logits=on_logits, route_replay=replay,
+                           pos0=resume, after_chunk=save_ckpt)
     state = state_dump.tensors(cache, tc, ids) if state_dump else {}
     print(f"prompt forward {time.time() - t1:.1f}s ({lazy.filled} expert dequants, {ple.reads} PLE rows)", flush=True)
     tokens: list[int] = []
@@ -1251,6 +1286,8 @@ def cmd_run(a) -> None:
             "model": "Qwen3.8-Flash-Next (Qwen4ExpForCausalLM, tools/oracle/qwen4exp_ref.py, layer-streamed)"}
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     save_file(t, a.out, metadata=meta)
+    if os.path.exists(ckpt):
+        os.remove(ckpt)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20
     print(f"wrote {a.out}: {len(t)} tensors; prompt ppl {meta['ppl']}")
     print(f"wall {time.time() - t0:.1f}s, peak RSS {rss:.1f} GiB, prefetch wait {pf.seconds:.1f}s")
@@ -1544,6 +1581,11 @@ def cmd_facts(a) -> None:
 
 
 def main() -> None:
+    import importlib.util as _cl_util
+    _cl = _cl_util.spec_from_file_location("cpu_lock", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpu_lock.py"))
+    _cl_mod = _cl_util.module_from_spec(_cl)
+    _cl.loader.exec_module(_cl_mod)
+    _cl_mod.hold()   # one CPU reference job at a time: refuse beside another
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 

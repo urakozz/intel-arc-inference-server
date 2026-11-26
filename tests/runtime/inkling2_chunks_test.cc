@@ -8,12 +8,14 @@
 #include "runtime/inkling2_prefill_test_access.h"
 
 int main(int argc, char** argv) {
-  CHECK(argc == 2 || (argc == 3 && std::string_view(argv[2]) == "repeat"));
+  // inkling2_chunks_test SNAPSHOT [repeat|int8]: int8 runs the int8 prompt pass (`--prefill-backend l0-int8`).
+  CHECK(argc == 2 || (argc == 3 && (std::string_view(argv[2]) == "repeat" || std::string_view(argv[2]) == "int8")));
+  const bool int8_pass = argc == 3 && std::string_view(argv[2]) == "int8";
   namespace ink = runtime::inkling2;
   using D = model::Inkling2Desc;
   l0::Context ctx(0);
   const loader::Inkling2Checkpoint checkpoint(argv[1]);
-  ink::Engine engine(ctx, checkpoint, 5056, true, ink::kPrefillRows);
+  ink::Engine engine(ctx, checkpoint, 5056, true, ink::kPrefillRows, int8_pass, int8_pass);
   auto copy = l0::CmdList::immediate(ctx);
   l0::Mem staging(ctx, l0::MemKind::Host, 32ul << 20);
   const auto download = [&](const l0::Mem& src, std::span<std::byte> dst) {
@@ -32,7 +34,7 @@ int main(int argc, char** argv) {
   std::vector<std::byte> actual;
   std::vector<float> logits(D::vocab_used), split(D::vocab_used);
   for (auto [length, cap] : {std::pair{1500u, 1500u}, std::pair{5000u, 512u}}) {
-    if (argc == 3 && length != 1500) break;
+    if (argc == 3 && !int8_pass && length != 1500) break;
     std::vector<uint32_t> ids(length);
     for (size_t i = 0; i < ids.size(); ++i) ids[i] = 20 + (i * 131) % 509;
     engine.reset();

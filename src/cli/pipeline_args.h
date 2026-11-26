@@ -79,8 +79,8 @@ inline void parse_parallel(const std::string& v, PipelineArgs& a) {
 // Spec 17b: --parallel tp's refusals that need no device. What 17b / 17c do not run under tensor parallel is refused
 // by name, with the plan that builds it (or why not).
 struct TpContext {
-  // A drafter the caller does not serve under TP: b70-decode's --spec dflash / dflash-lookup (spec 19 v3c: b70-serve
-  // --parallel tp serves the split drafter, with prompt lookup inside it too).
+  // A drafter the caller does not serve under TP: b70-decode's --spec dflash (spec 19 v3c: b70-serve
+  // --parallel tp serves the split drafter, with prompt lookup inside it).
   bool dflash = false;
   bool profile = false;        // --profile
   bool other_family = false;   // Kolibri-1 (Qwen3.8-Flash-Next runs its own tp flow: cli/qwen4exp_decode.h)
@@ -96,7 +96,7 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
                              "auto, 1 or pp");
   if (c.dflash)
     throw std::runtime_error("b70-decode --parallel tp drafts with the MTP head only - b70-serve --parallel tp --spec "
-                             "dflash / dflash-lookup serves the drafter split over both cards");
+                             "dflash serves the drafter split over both cards");
   if (c.draft_vocab)
     throw std::runtime_error("--parallel tp's draft head is each card's vocabulary half of lm_head; "
                              "--draft-vocab is not built under tensor parallel - drop it");
@@ -192,15 +192,12 @@ inline void check_replica_model(const std::string& architecture, const std::stri
                            (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
                            " has no replica engine - --parallel auto, 1 or pp");
 }
-// The override flag belongs to pp; --spec dflash runs a drafter on each card, lookup inside DFlash is one card's.
-inline void check_replica_flags(const PipelineArgs& a, bool dflash_lookup) {
+// The override flag belongs to pp.
+inline void check_replica_flags(const PipelineArgs& a) {
   if (!a.replica()) return;
   if (a.have_split)
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at); --parallel "
                              "replica loads the whole model on each card");
-  if (dflash_lookup)
-    throw std::runtime_error("--parallel replica serves --spec off, mtp, lookup or dflash; --spec dflash-lookup is "
-                             "built for one card - --spec dflash, or --parallel 1");
 }
 // b70-decode runs one sequence: two requests at once is the server's.
 inline void refuse_replica_in_decode(const PipelineArgs& a) {

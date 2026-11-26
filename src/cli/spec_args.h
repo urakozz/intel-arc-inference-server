@@ -1,5 +1,5 @@
 #pragma once
-// `--spec auto|off|mtp|lookup|dflash|dflash-lookup` and its one cap, `--spec-max K` - the speculative proposer
+// `--spec auto|off|mtp|dflash` and its one cap, `--spec-max K` - the speculative proposer
 // (spec 19 decision 3: one per server), shared by b70-serve and b70-decode. The zero-config cleanup (
 // 2026-11-06) merged the old `--mtp off|K|auto` into it and dropped the tuning flags (--mtp-max, --mtp-cost,
 // --spec-cost, --spec-min-match, --spec-history, --draft-format): the engine uses the measured defaults.
@@ -12,39 +12,33 @@
 //   off            no proposer.
 //   mtp            the checkpoint's MTP head: K <= --spec-max (1..3, default 3) per iteration, chosen per request
 //                  from its own acceptance (the Qwen family and Qwen3.8-Flash-Next).
-//   lookup         prompt lookup (spec 19e): the continuation of the longest earlier match (>= 3 ids) of the
-//                  request's own ids, verified through the MTP verify lists (the head is loaded for them); K <=
-//                  --spec-max (1..3, default 3) per iteration.
 //   dflash         the DFlash drafter (spec 19c, Qwen3.8 only; --draft-model PATH, required: no default
 //                  drafter, cli/dflash_args.h check_flags says which two): K <= --spec-max (1..7,
 //                  default 7) drafts a block.
-//                  b70-serve on one card folds prompt lookup into it (spec 19f, ruling 2026-11-14):
-//                  `dflash` there IS `dflash-lookup`; B70_SPEC_LOOKUP=0 turns the fold off (A/B runs).
-//   dflash-lookup  dflash with prompt lookup inside it (spec 19f); a developer value, `dflash`'s one-card default.
-// `lookup` and `dflash-lookup` stay accepted for b70-decode, tests and A/B runs; the user-facing values are auto, off,
-// mtp and dflash.
+//                  b70-serve on one card folds prompt lookup into it (spec 19f, ruling 2026-11-14), as it does
+//                  into the MTP head: prompt lookup is on inside every proposer, with no value or switch of its own.
 //
 // Kolibri-1 (Kolibri DSpark, SpecFamily::Kolibri; b70-serve only): no MTP head, its own verify lists at M = K + 1 <= 8
 // rows; `dflash` with --draft-model <a DSpark drafter> (intuit/Kolibri-1-dspark; no default: the drafter's config picks
 // DSpark) takes --spec-max 1..7 (default 7), K per iteration from the request's acceptance (cli/kolibri_spec.h).
-// `mtp`, `lookup` and `dflash-lookup` are refused; --spec auto stays off.
+// `mtp` is refused; --spec auto stays off.
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 
 namespace cli {
 
-// "auto" | "off" | "mtp" | "lookup" | "dflash" | "dflash-lookup"; anything else throws naming them.
+// "auto" | "off" | "mtp" | "dflash"; anything else throws naming them.
 inline std::string parse_spec(const std::string& v) {
-  if (v == "auto" || v == "off" || v == "mtp" || v == "lookup" || v == "dflash" || v == "dflash-lookup") return v;
-  throw std::runtime_error("--spec expects auto, off, mtp, lookup, dflash or dflash-lookup, got '" + v + "'");
+  if (v == "auto" || v == "off" || v == "mtp" || v == "dflash") return v;
+  throw std::runtime_error("--spec expects auto, off, mtp or dflash, got '" + v + "'");
 }
 
 // Which proposers a model family has: Qwen (Qwen3.8, Ornith: the MTP head and its cost table; the
 // drafter for Qwen3.8), Qwen4Exp (Qwen3.8-Flash-Next: the head and its own cost table), Kolibri (Kolibri-1: no head, its own
 // verify lists to M = 8 - the DSpark drafter), None (no head, no drafter).
 enum class SpecFamily { Qwen, Qwen4Exp, Kolibri, None };
-enum class SpecKind { Off, Mtp, Lookup, DFlash, DFlashLookup };
+enum class SpecKind { Off, Mtp, DFlash };
 
 struct Spec {
   SpecKind kind = SpecKind::Off;
@@ -57,7 +51,7 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
                          uint32_t max, bool have_draft_model) {
   std::string v = arg;
   if (v == "auto") v = family == SpecFamily::Qwen || family == SpecFamily::Qwen4Exp ? "mtp" : "off";
-  const bool dflash = v == "dflash" || v == "dflash-lookup";
+  const bool dflash = v == "dflash";
   if (have_draft_model && !dflash) throw std::runtime_error("--draft-model needs --spec dflash");
   Spec s;
   if (v == "off") {
@@ -66,9 +60,6 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
   }
   if (family == SpecFamily::Kolibri) {   // Kolibri DSpark: the DSpark drafter over Kolibri's verify lists (M <= 8)
     if (v == "mtp") throw std::runtime_error(model + " has no MTP head: drop --spec mtp (its --spec auto is off)");
-    if (v == "lookup" || v == "dflash-lookup")
-      throw std::runtime_error("--spec " + v + " is not built for " + model + ": its verify lists serve the DSpark "
-                               "drafter - --spec dflash --draft-model <the DSpark drafter>");
     if (have_max && (max == 0 || max > 7))
       throw std::runtime_error("--spec-max with " + model + " expects 1..7 (DSpark's block of 8 - 1; the verify lists' "
                                "M <= 8)");
@@ -79,9 +70,6 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
   }
   if (family == SpecFamily::None) {
     if (v == "mtp") throw std::runtime_error(model + " has no MTP head: drop --spec mtp (its --spec auto is off)");
-    if (v == "lookup")
-      throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which " + model +
-                               "'s engine does not capture (no MTP head): drop --spec lookup");
     throw std::runtime_error("b70-decode runs " + model + " plainly: drop --spec " + v +
                              " (b70-serve serves --spec dflash for Kolibri-1 with its DSpark drafter)");
   }
@@ -91,7 +79,7 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
                                " has none");
     if (have_max && (max == 0 || max > 7))
       throw std::runtime_error("--spec-max with --spec " + v + " expects 1..7 (the drafter's block of 8)");
-    s.kind = v == "dflash" ? SpecKind::DFlash : SpecKind::DFlashLookup;
+    s.kind = SpecKind::DFlash;
     s.max_k = have_max ? max : 7;
     s.adaptive = true;
     return s;
@@ -99,11 +87,6 @@ inline Spec resolve_spec(const std::string& arg, SpecFamily family, const std::s
   if (have_max && (max == 0 || max > 3))
     throw std::runtime_error("--spec-max with --spec " + v + " expects 1..3 (the verify lists' M <= 4)");
   s.max_k = have_max ? max : 3;
-  if (v == "lookup") {
-    s.kind = SpecKind::Lookup;
-    s.adaptive = true;
-    return s;
-  }
   s.kind = SpecKind::Mtp;
   s.adaptive = true;   // the Qwen family and Qwen3.8-Flash-Next: the families above returned
   return s;

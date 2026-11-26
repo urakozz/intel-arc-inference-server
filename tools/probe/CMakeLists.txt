@@ -32,7 +32,8 @@ set(PI8H_CELLS
     "gemv 5120 32768 1" "gemm 5120 32768 7 wg"
     "gemv 2560 248320 1" "gemm 2560 248320 4 wg" "gemv 2560 124160 1" "gemv 2560 124160 4"
     "gemv 2048 248320 1" "gemm 2048 248320 4" "gemm 2048 248320 32 wg g256" "gemm 2048 248320 64 wg g256"
-    "gemv 2560 128000 1" "gemv 2560 128000 4" "gemv 2560 128000 8")
+    "gemv 2560 128000 1" "gemv 2560 128000 4" "gemv 2560 128000 8"
+    "gemv 2304 200064 1" "gemm 2304 200064 8" "gemv 256 200064 1")
 foreach(cell IN LISTS PI8H_CELLS)
   separate_arguments(f UNIX_COMMAND "${cell}")
   list(GET f 0 kind)
@@ -48,6 +49,13 @@ foreach(cell IN LISTS PI8H_CELLS)
     list(GET o 1 km)
     list(GET o 2 kb)
     list(GET o 3 ahead)
+    # A block that does not divide the K walk (Inkling's K 2304 = 144 k16 steps; its fold's 256 = 16) is not built:
+    # probe_gemv prints n/a for it.
+    math(EXPR steps "${K} / 16")
+    math(EXPR rest "${steps} % ${kb}")
+    if(NOT rest EQUAL 0)
+      continue()
+    endif()
     set(km "${km};GEMV_KMAJOR_B=${kb};I8_AHEAD=${ahead}")
     if(kind STREQUAL "gemv")
       set(name pi8h_gemv_i8w_M${M}_K${K}_N${N}_${tag})
@@ -1675,3 +1683,112 @@ target_include_directories(probe_cpu_roundtrip PRIVATE ${CMAKE_SOURCE_DIR}/src $
 target_link_libraries(probe_cpu_roundtrip PRIVATE b70_cpu b70_l0)
 b70_target_kernel_dir(probe_cpu_roundtrip)
 add_dependencies(probe_cpu_roundtrip kernel_rt_probe)
+
+# Plan 41e Task 1 (Inkling): the NVFP4 expert GEMMs at the 4k chunk's shape, today's bf16 form against int8 DPAS forms
+# (ARM 1 exact per-16 block scales, 2 the refused per-32 fold, 3 the int8 core alone).
+set(PIW_TARGETS)
+foreach(kk 2304 1152)
+  foreach(arm 1 2 3)
+    add_ocloc_kernel(probe_ink_w4a8_K${kk}_A${arm} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_ink_w4a8.cl
+                     DEFINES K=${kk} N=2304 ARM=${arm} OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PIW_TARGETS kernel_probe_ink_w4a8_K${kk}_A${arm})
+  endforeach()
+endforeach()
+add_executable(probe_ink_w4a8 probe_ink_w4a8.cc)
+target_include_directories(probe_ink_w4a8 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_ink_w4a8 PRIVATE b70_l0)
+b70_target_kernel_dir(probe_ink_w4a8)
+add_dependencies(probe_ink_w4a8 ${PIW_TARGETS} kernel_pf_moe_q4gemm_K2304_N2304_F32_INK_NVFP4
+                 kernel_pf_moe_q4gemm_K1152_N2304_F32_INK_NVFP4)
+
+# --- probe_ink_pp_step: plan 41h, where Inkling's pp plain decode step spends its time over one card's (both cards).
+add_executable(probe_ink_pp_step probe_ink_pp_step.cc)
+target_include_directories(probe_ink_pp_step PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_ink_pp_step PRIVATE b70_inkling2_runtime)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(probe_ink_pp_step kernel_${name})
+endforeach()
+
+# --- probe_ink_replay: Inkling one card, a replayed decode list's time outside its kernels (host, launches).
+add_executable(probe_ink_replay probe_ink_replay.cc)
+target_include_directories(probe_ink_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_ink_replay PRIVATE b70_inkling2_runtime)
+add_dependencies(probe_ink_replay kernel_noop)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(probe_ink_replay kernel_${name})
+endforeach()
+
+# --- probe_ink_attn_depth: plan 41h Task 2, Inkling's full-visit decode / verify attention at depth (one card): the
+# production kol_attn pairs beside builds of the same source at more key blocks (TGT 64 / 128).
+add_executable(probe_ink_attn_depth probe_ink_attn_depth.cc)
+target_include_directories(probe_ink_attn_depth PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_ink_attn_depth PRIVATE b70_l0)
+b70_target_kernel_dir(probe_ink_attn_depth)
+set(PIAD_TARGETS)
+foreach(MM 1 8)
+  foreach(_v "T64|64|" "T128|128|")
+    string(REPLACE "|" ";" _v "${_v}")
+    list(GET _v 0 _tag)
+    list(GET _v 1 _t)
+    list(GET _v 2 _extra)
+    foreach(_kv "" "_KV8")
+      set(_kvdef "")
+      if(_kv)
+        set(_kvdef KV8=1)
+      endif()
+      set(_n kol_attn_M${MM}_${_tag}_Q24KV8_REL16E1024_SINK_GATE_F${_kv})
+      add_ocloc_kernel(${_n} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/kolibri/kol_attn.cl
+                       DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=${_t} Q_HEADS=24 KV_HEADS=8 WINDOW=0 RING=0
+                               REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1 ${_kvdef} ${_extra})
+      list(APPEND PIAD_TARGETS kernel_${_n})
+    endforeach()
+  endforeach()
+endforeach()
+foreach(name IN LISTS B70_INKLING_KERNELS)
+  if(name MATCHES "^kol_attn_M[18]_T32_.*_F(_KV8)?$")
+    list(APPEND PIAD_TARGETS kernel_${name})
+  endif()
+endforeach()
+add_dependencies(probe_ink_attn_depth ${PIAD_TARGETS})
+foreach(name IN LISTS B70_INKLING_PREFILL_KERNELS)
+  if(name MATCHES "^kol_pf_flash_attn_.*_F(_KV8|_KV8_I8S)?_PAIR(_SPLIT)?$")
+    add_dependencies(probe_ink_attn_depth kernel_${name})
+  endif()
+endforeach()
+
+# --- probe_ink_draft_attn: plan 41h, the Inkling drafter's full-layer attention at depth, scalar part against DPAS.
+add_executable(probe_ink_draft_attn probe_ink_draft_attn.cc)
+target_include_directories(probe_ink_draft_attn PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_ink_draft_attn PRIVATE b70_l0)
+b70_target_kernel_dir(probe_ink_draft_attn)
+add_dependencies(probe_ink_draft_attn kernel_df_attn_M8_Q24KV8_D128_FULL kernel_df_attn_M8_Q24KV8_D128_FULL_dpas)
+# Other partition counts a kv head (the production binaries' 128): the DPAS part and the scalar binary (its reduce).
+set(_pida_defs CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3
+    DCTL_SEED_LO=4 DCTL_SEED_HI=5 M=8 NH=24 NKV=8 HD=128 RING=0 WIN=0 PB=128)   # src/kernels' CTRL / INKLING_DCTL
+foreach(_t 32 64 256)
+  add_ocloc_kernel(df_attn_M8_Q24KV8_D128_FULL_T${_t} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/dflash/df_attn.cl
+                   DEFINES ${_pida_defs} WGA=128 FULL_TARGETS=${_t})
+  add_ocloc_kernel(df_attn_M8_Q24KV8_D128_FULL_dpas_T${_t} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/dflash/df_attn_dpas.cl
+                   DEFINES ${_pida_defs} FULL_TARGETS=${_t})
+  add_dependencies(probe_ink_draft_attn kernel_df_attn_M8_Q24KV8_D128_FULL_T${_t}
+                   kernel_df_attn_M8_Q24KV8_D128_FULL_dpas_T${_t})
+endforeach()
+
+# --- probe_ink_pp_race: plan 41h, the intermittent pp mismatch at 2,048-row chunks, repeated per arm (both cards).
+add_executable(probe_ink_pp_race probe_ink_pp_race.cc)
+target_include_directories(probe_ink_pp_race PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(probe_ink_pp_race PRIVATE b70_inkling2_runtime)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(probe_ink_pp_race kernel_${name})
+endforeach()
+
+# --- probe_d2h_check: plan 41h, each card's copies into host memory checked byte for byte (both cards).
+add_executable(probe_d2h_check probe_d2h_check.cc)
+target_include_directories(probe_d2h_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_d2h_check PRIVATE b70_l0)
+
+# --- probe_event_pool_check: the host's event resets / signals checked against the process's own heap, per
+# event-pool kind and list lifetime (both cards).
+add_executable(probe_event_pool_check probe_event_pool_check.cc)
+target_include_directories(probe_event_pool_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_event_pool_check PRIVATE b70_l0)

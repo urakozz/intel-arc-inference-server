@@ -146,13 +146,23 @@ struct BatchEngineIface {
     bool mtp_lookup = false;                                // open-work 27: lookup inside MTP (propose set)
     const EngineIface::DraftChoice* choose = nullptr;       // ... the request's per-step choice (server::StepK)
     const EngineIface::LookupConfirm* confirm = nullptr;    // ... open-work 28's confirmed entry
+    // Plan 41f under replica: lookup inside the card's tap drafter - EngineIface::step_drafts_or_many(*sampling, k,
+    // *propose), the serial server's lookup-inside-DFlash iteration (propose set).
+    bool dflash_lookup = false;
+    // Plan 41f: with a lookup inside the proposer, where the card writes EngineIface::lookup_cap before it proposes
+    // (the serial loop cuts the proposal to it).
+    uint32_t* lookup_cap = nullptr;
   };
   virtual uint32_t spec_k() { return 0; }
   virtual uint32_t verify_k() { return 0; }
   // Open-work 27 / 28 / 13 under replica: every slot's engine runs lookup inside MTP, slot `slot`'s deepest lookup
   // verify (EngineIface::lookup_wide_k), and every slot's engine chooses its drafts (EngineIface::chooses_drafts).
   virtual bool mtp_lookup() { return false; }
+  // Plan 41f: every card's tap drafter's window (EngineIface::dflash_window), 0 when a card has none.
+  virtual uint32_t dflash_window() { return 0; }
   virtual uint32_t lookup_wide_k(uint32_t /*slot*/) { return 0; }
+  // Plan 41f: slot `slot`'s deepest lookup verify beside it (EngineIface::lookup_deep_k, spec 32's 32- / 64-row lists).
+  virtual uint32_t lookup_deep_k(uint32_t /*slot*/) { return 0; }
   virtual bool chooses_drafts() { return false; }
   // Spec 13c (the 8-row budget, spec 13 §9): the most rows one step_spec may carry when `active` rows decode (each
   // row's pending id counts one, each draft one more); 0 = no limit, every engine before 13c. The scheduler clips the
@@ -171,6 +181,20 @@ struct BatchEngineIface {
     std::vector<std::vector<uint32_t>> out;
     for (uint32_t id : step_batch(plain)) out.push_back({id});
     return out;
+  }
+  // Per-card stepping (--parallel replica, plan 41f): steps_per_card() true means each card steps on its own -
+  // step_spec_begin(rows), every row on ONE card, starts that card's step_spec and returns; step_ready(card) polls it;
+  // step_spec_end(card) joins it and returns its runs (or throws what step_spec throws, SlotsFailed for some rows).
+  // The scheduler then starts a card's next step as soon as that card is free, so one card's 1-row step never waits for
+  // the other card's 8-row verify; each card sees the calls the joined step_spec made on it, in the same order. No
+  // other call touches a card between its step_spec_begin and step_spec_end. false (the default): step_spec only.
+  virtual bool steps_per_card() { return false; }
+  virtual void step_spec_begin(const std::vector<SpecRow>& /*rows*/) {
+    throw std::logic_error("BatchEngineIface::step_spec_begin: this engine steps every slot at once");
+  }
+  virtual bool step_ready(uint32_t /*card*/) { return true; }
+  virtual std::vector<std::vector<uint32_t>> step_spec_end(uint32_t /*card*/) {
+    throw std::logic_error("BatchEngineIface::step_spec_end: this engine steps every slot at once");
   }
   virtual void truncate_to(uint32_t slot, uint32_t pos) {
     if (pos != this->pos(slot))

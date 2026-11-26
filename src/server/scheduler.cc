@@ -201,6 +201,8 @@ struct Scheduler::Impl {
   bool spec = false;                          // step_spec rounds (a speculative engine or lookup)
   bool lookup = false;                        // plan 13b: prompt lookup per request
   bool mtp_lookup = false;                    // open-work 27: lookup inside MTP per request (replica)
+  bool dflash_lookup = false;                 // plan 41f: lookup inside the drafter per request (replica)
+  bool inside = false;                        // either: the request's LookupInDFlash proposes beside the engine
   std::vector<DraftCalib> calib;              // open-work 27 + 13: per card, the head's calibration there
   uint32_t cap = 0;                           // drafts per row at most (spec_k or verify_k)
   std::vector<std::unique_ptr<PromptLookup>> matchers;            // plan 13b: one per slot
@@ -216,6 +218,15 @@ struct Scheduler::Impl {
   std::vector<bool> card_pool;   // plan 31 Task 9: per card
   std::vector<uint64_t> ended;
   uint64_t ends = 0;
+  // Plan 41f: per-card stepping (BatchEngineIface::steps_per_card) - each card's step in flight: its requests and rows.
+  bool per_card = false;
+  struct CardStep {
+    bool on = false;
+    std::vector<std::shared_ptr<Job>> jobs;
+    std::vector<BatchEngineIface::SpecRow> rows;
+  };
+  std::vector<CardStep> steps;
+  size_t steps_inflight = 0;
 };
 
 struct Scheduler::PrefillCall {
@@ -243,11 +254,11 @@ Scheduler::Scheduler(BatchEngineIface& engine, SchedulerOptions opts, SlotCacheI
   for (uint32_t c = 0; impl_->pool && c < impl_->n_cards; ++c)   // plan 31 Task 9: which cards have a pool
     impl_->card_pool.push_back(engine_.card_pool_pages(c) != 0);
   impl_->ended.assign(impl_->n_slots, 0);
-  if (opts_.lookup) {   // plan 13b: server.cc's refusals for --spec lookup, per engine
+  if (opts_.lookup) {   // plan 13b: server.cc's refusals for external lookup, per engine
     if (engine_.verify_k() == 0)
-      throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
+      throw std::invalid_argument("external prompt-lookup drafts: this engine cannot verify them");
     if (engine_.spec_k() != 0)
-      throw std::invalid_argument("--spec lookup and --spec mtp are one proposer each; pick one");
+      throw std::invalid_argument("external prompt-lookup drafts and the MTP head are one proposer each; pick one");
     PromptLookup probe;
     if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
         opts_.lookup_min_match > probe.options().max_match)
@@ -258,16 +269,28 @@ Scheduler::Scheduler(BatchEngineIface& engine, SchedulerOptions opts, SlotCacheI
   }
   if (opts_.mtp_lookup) {   // open-work 27 under replica: server.cc's refusals, per engine
     if (opts_.lookup)
-      throw std::invalid_argument("prompt lookup inside MTP and --spec lookup are one proposer each");
+      throw std::invalid_argument("prompt lookup inside MTP and external prompt-lookup drafts are one proposer each");
     if (!engine_.mtp_lookup() || engine_.spec_k() == 0)
       throw std::invalid_argument("prompt lookup inside MTP needs every card's engine with the MTP head");
     impl_->mtp_lookup = true;
     for (uint32_t s = 0; s < impl_->n_slots; ++s) impl_->matchers.push_back(std::make_unique<PromptLookup>());
     impl_->history.resize(impl_->n_slots);
   }
+  if (opts_.dflash_lookup_window != 0) {   // plan 41f under replica: lookup inside each card's drafter
+    if (opts_.lookup || opts_.mtp_lookup)
+      throw std::invalid_argument("prompt lookup inside the drafter and external prompt-lookup drafts / lookup inside MTP are one each");
+    if (engine_.dflash_window() == 0 || engine_.spec_k() == 0)
+      throw std::invalid_argument("prompt lookup inside the drafter needs every card's engine with its drafter");
+    impl_->dflash_lookup = true;
+    for (uint32_t s = 0; s < impl_->n_slots; ++s) impl_->matchers.push_back(std::make_unique<PromptLookup>());
+    impl_->history.resize(impl_->n_slots);
+  }
+  impl_->inside = impl_->mtp_lookup || impl_->dflash_lookup;
   impl_->calib.resize(impl_->n_cards);   // the per-step draft choice's calibration, a card's (with or without lookup)
   impl_->spec = engine_.spec_k() > 0 || impl_->lookup;
   impl_->cap = impl_->lookup ? engine_.verify_k() : engine_.spec_k();
+  impl_->per_card = impl_->overlap && impl_->spec && engine_.steps_per_card();
+  impl_->steps.resize(impl_->n_cards);
 }
 
 // Requests still queued or holding a slot are dropped without on_done: the owner of the
@@ -337,6 +360,7 @@ double Scheduler::hold_remaining() const {
 // the card would wait behind it, so the tick grants and cancels nothing there (its steps: chunk_on_card).
 bool Scheduler::card_busy(uint32_t card) const {
   if (!impl_->overlap) return false;
+  if (impl_->per_card && impl_->steps[card].on) return true;   // its rows' results are not yet taken
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
     const std::shared_ptr<Job>& j = impl_->slots[s];
     if (impl_->slot_card[s] == card && j && j->inflight && !engine_.prefill_ready(s)) return true;
@@ -436,11 +460,12 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
       return d;
     };
   }
-  if (impl_->mtp_lookup) {   // open-work 27: server.cc's next_lookup_inside, on this request's own state
+  if (impl_->inside) {   // open-work 27 / plan 41f: server.cc's next_lookup_inside, on this request's own state
     LookupInDFlashOptions o;
-    o.window = 0;
+    o.window = impl_->dflash_lookup ? opts_.dflash_lookup_window : 0;   // a drafter's window; MTP sees the whole context
     o.max_k = impl_->cap;
-    o.wide_k = engine_.lookup_wide_k(slot);   // open-work 28: long runs in the card's wide verify list
+    o.wide_k = impl_->dflash_lookup ? 0 : engine_.lookup_wide_k(slot);   // open-work 28: MTP's wide verify list
+    o.deep_k = impl_->dflash_lookup ? 0 : engine_.lookup_deep_k(slot);   // spec 32: and its 32- and 64-row lists
     job->inside = std::make_unique<LookupInDFlash>(o);
     Job* raw = job.get();
     job->propose = [this, raw](uint32_t pending) {
@@ -449,6 +474,7 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
       m.append(pending);
       raw->head_indexed = true;
       std::vector<uint32_t> d = raw->inside->propose(m);
+      if (d.size() > raw->lookup_cap) d.resize(raw->lookup_cap);   // spec 32e, the serial loop's cut
       raw->proposed = static_cast<uint32_t>(d.size());
       return d;
     };
@@ -481,7 +507,7 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
       throw std::runtime_error("scheduler: no KV pages left on the card for this request's start");
     job->prefilled = restart;
     job->fin.cached_tokens = restart;
-    if (impl_->lookup || impl_->mtp_lookup)
+    if (impl_->lookup || impl_->inside)
       lookup_begin(*impl_->matchers[slot], impl_->history[slot], opts_.lookup_history, job->req.prompt);
   } catch (const std::exception& error) {
     finish(job, Finish::Error, error.what());
@@ -648,17 +674,20 @@ void Scheduler::peek_first(const std::shared_ptr<Job>& j) {
 // Spec 19d: one speculative iteration over every decoding slot; each row's run goes through the per-id rules in
 // order, and the ids past the one that ends a request are handed back before its request-end snapshot. Plan 13b:
 // with prompt lookup each row carries its request's proposer; a SlotsFailed fails only the rows it names.
-bool Scheduler::spec_round() {
-  std::vector<std::shared_ptr<Job>> jobs;
-  std::vector<BatchEngineIface::SpecRow> rows;
+// One speculative step's rows: every decoding request whose card `take` accepts (and has no chunk in flight), its K from
+// its own policy, dealt within the card's (or the engine's) row budget.
+void Scheduler::spec_rows(const std::function<bool(uint32_t card)>& take, std::vector<std::shared_ptr<Job>>& jobs,
+                          std::vector<BatchEngineIface::SpecRow>& rows) {
   const uint32_t cap = impl_->cap;
   std::vector<uint32_t> ks;
   const std::vector<bool> busy = chunk_on_card();
   for (const auto& j : impl_->slots) {
-    if (!j || j->state != Job::State::Decoding || busy[impl_->slot_card[static_cast<uint32_t>(j->slot)]]) continue;
+    if (!j || j->state != Job::State::Decoding) continue;
+    const uint32_t card = impl_->slot_card[static_cast<uint32_t>(j->slot)];
+    if (busy[card] || !take(card)) continue;
     jobs.push_back(j);
     const uint32_t k = j->step_k   ? j->step_k->begin()
-                       : j->policy ? j->policy->next()
+                       : j->policy ? j->policy->next(engine_.pos(static_cast<uint32_t>(j->slot)))
                                    : std::min(opts_.spec_fixed_k, cap);
     ks.push_back(std::min(k, cap));
   }
@@ -734,7 +763,7 @@ bool Scheduler::spec_round() {
   for (size_t i = 0; i < jobs.size(); ++i) {
     const auto& j = jobs[i];
     BatchEngineIface::SpecRow row{static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, ks[i], nullptr};
-    if (impl_->lookup || impl_->mtp_lookup) {
+    if (impl_->lookup || impl_->inside) {
       j->iter_k = row.k;
       j->proposed = 0;
       j->head_indexed = false;
@@ -744,15 +773,23 @@ bool Scheduler::spec_round() {
       row.mtp_lookup = true;
       row.confirm = &j->confirm;
     }
+    row.dflash_lookup = impl_->dflash_lookup;   // plan 41f: the same, inside the card's drafter
+    if (impl_->inside) row.lookup_cap = &j->lookup_cap;
     if (j->step_k) row.choose = &j->choose;
     rows.push_back(row);
   }
-  if (rows.empty()) return false;
+}
+
+// One speculative step's outcome over its rows: `step` runs it (step_spec, or a card's step_spec_end) and returns the
+// runs; server.cc's per-id rules for each row.
+void Scheduler::spec_results(const std::vector<std::shared_ptr<Job>>& jobs,
+                             const std::vector<BatchEngineIface::SpecRow>& rows,
+                             const std::function<std::vector<std::vector<uint32_t>>()>& step) {
   std::vector<std::vector<uint32_t>> runs;
   std::vector<std::string> failed(rows.size());
   try {
     try {
-      runs = engine_.step_spec(rows);
+      runs = step();
     } catch (const SlotsFailed& f) {
       runs = f.runs;
       runs.resize(rows.size());
@@ -771,7 +808,7 @@ bool Scheduler::spec_round() {
     }
   } catch (const std::exception& error) {
     for (const auto& j : jobs) finish(j, Finish::Error, error.what());
-    return true;
+    return;
   }
   for (size_t i = 0; i < jobs.size(); ++i) {
     const auto& j = jobs[i];
@@ -802,7 +839,7 @@ bool Scheduler::spec_round() {
       size_t used = 0;
       for (; used < run.size() && !ended;) {
         const uint32_t id = run[used++];
-        if ((impl_->lookup || impl_->mtp_lookup) && (used > 1 || !j->head_indexed))
+        if ((impl_->lookup || impl_->inside) && (used > 1 || !j->head_indexed))
           impl_->matchers[slot]->append(id);
         if (cache_) cache_->fed(slot, id);
         ++j->steps;
@@ -851,7 +888,62 @@ bool Scheduler::spec_round() {
       finish(j, Finish::Error, error.what());
     }
   }
+}
+
+
+bool Scheduler::spec_round() {
+  if (impl_->per_card) return spec_cards();
+  std::vector<std::shared_ptr<Job>> jobs;
+  std::vector<BatchEngineIface::SpecRow> rows;
+  spec_rows([](uint32_t) { return true; }, jobs, rows);
+  if (rows.empty()) return false;
+  spec_results(jobs, rows, [&] { return engine_.step_spec(rows); });
   return true;
+}
+
+// Per-card stepping (BatchEngineIface::steps_per_card, --parallel replica): each card's step starts as soon as that card
+// is free and is joined when it is done, so a card never waits for the other's step (a 1-row step beside an 8-row
+// verify). Each card's rows and calls are the ones the joined step gave them: the same policy calls, in the same order.
+bool Scheduler::spec_cards() {
+  bool did = false;
+  std::vector<bool> joined(impl_->n_cards, false);
+  for (uint32_t c = 0; c < impl_->n_cards; ++c) {
+    Impl::CardStep& st = impl_->steps[c];
+    if (!st.on || !engine_.step_ready(c)) continue;
+    st.on = false;
+    joined[c] = true;
+    --impl_->steps_inflight;
+    spec_results(st.jobs, st.rows, [&] { return engine_.step_spec_end(c); });
+    st.jobs.clear();
+    st.rows.clear();
+    did = true;
+  }
+  // A card with a request waiting to prefill runs that chunk first (overlapped_prefills after the step): chunk, step,
+  // chunk, step, as with the joined step.
+  std::vector<bool> prefilling(impl_->n_cards, false);
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    const std::shared_ptr<Job>& j = impl_->slots[s];
+    if (j && !j->inflight && j->state == Job::State::Prefilling && !j->cancelled_) prefilling[impl_->slot_card[s]] = true;
+  }
+  for (uint32_t c = 0; c < impl_->n_cards; ++c) {
+    Impl::CardStep& st = impl_->steps[c];
+    if (st.on || (joined[c] && prefilling[c])) continue;
+    spec_rows([c](uint32_t card) { return card == c; }, st.jobs, st.rows);
+    if (st.rows.empty()) continue;
+    try {
+      engine_.step_spec_begin(st.rows);
+    } catch (const std::exception& error) {   // nothing was started (the engine checks before it posts)
+      for (const auto& j : st.jobs) finish(j, Finish::Error, error.what());
+      st.jobs.clear();
+      st.rows.clear();
+      did = true;
+      continue;
+    }
+    st.on = true;
+    ++impl_->steps_inflight;
+    did = true;
+  }
+  return did;
 }
 
 bool Scheduler::decode_round() {
@@ -968,6 +1060,8 @@ bool Scheduler::overlapped_prefills(bool after_step) {
     if (j->inflight) taken[impl_->slot_card[s]] = true;
     if (j->state == Job::State::Decoding) decoding[impl_->slot_card[s]] = true;
   }
+  for (uint32_t c = 0; impl_->per_card && c < impl_->n_cards; ++c)
+    if (impl_->steps[c].on) taken[c] = true;   // plan 41f: the card's step runs; its chunk starts once it is joined
   std::vector<std::shared_ptr<Job>> oldest(impl_->n_cards);
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
     const std::shared_ptr<Job>& j = impl_->slots[s];
@@ -1190,7 +1284,7 @@ void Scheduler::start() {
       const double hold = hold_remaining();
       std::unique_lock<std::mutex> lock(impl_->mu);
       const auto woken = [&] { return impl_->stopping || impl_->wake != seen; };
-      if (impl_->inflight != 0)   // plan 13b: a card's chunk is running - poll it (tick thread's own count)
+      if (impl_->inflight != 0 || impl_->steps_inflight != 0)   // plan 13b / 41f: a card's chunk or step runs - poll it
         impl_->cv.wait_for(lock, std::chrono::microseconds(200), woken);
       else if (hold >= 0) impl_->cv.wait_for(lock, std::chrono::duration<double>(hold), woken);
       else impl_->cv.wait(lock, woken);

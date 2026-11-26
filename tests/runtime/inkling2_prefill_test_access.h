@@ -16,6 +16,7 @@ struct PrefillTestAccess {
     const auto& p = engine.buffers_.persistent;
     return {p.full_k_scale.get(), p.full_v_scale.get()};
   }
+  static l0::Context* context(Engine& engine) { return &engine.ctx_; }
   static const l0::Mem& trace(Engine& engine) {
     engine.trace_prelude_ = true;
     return *engine.buffers_.prefill.prelude_trace;

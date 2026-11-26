@@ -132,6 +132,7 @@ struct Server::Impl {
   std::set<uint32_t> eos;
   mutable std::mutex state_mutex;
   std::condition_variable queue_changed;
+  std::mutex store_mutex;   // held by a streamed request's request-end store, after its release()
   uint64_t next_ticket = 0;
   uint64_t serving = 0;
   size_t waiting = 0;
@@ -144,7 +145,7 @@ struct Server::Impl {
   // Spec 19e: the request's ids (and, with lookup_history, earlier requests' generated ids).
   PromptLookup lookup;
   std::deque<std::vector<uint32_t>> lookup_history;
-  // Spec 19f: --spec dflash-lookup's policy (its state is per request, its counters the server's).
+  // Spec 19f: prompt lookup inside DFlash's policy (its state is per request, its counters the server's).
   std::optional<LookupInDFlash> lookup_in_dflash;
   // Plan 13b: the scheduler path (an engine of more than one slot).
   BatchEngineIface* batch = nullptr;
@@ -163,8 +164,8 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());
   if (batch != nullptr && batch->slots() > 1) {
     impl_->batch = batch;
-    if (opts_.spec_dflash_lookup)
-      throw std::invalid_argument("--spec dflash-lookup runs on one engine; not under the scheduler");
+    if (opts_.spec_dflash_lookup && batch->dflash_window() == 0)   // plan 41f: replica's one request a card has it
+      throw std::invalid_argument("prompt lookup inside the drafter needs the drafter on every card's engine");
     if (opts_.spec_mtp_lookup && !batch->mtp_lookup())   // open-work 27: replica's one request a card has it
       throw std::invalid_argument("prompt lookup inside MTP needs the MTP head on every card's engine");
   }
@@ -186,6 +187,7 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     so.lookup_history = opts_.lookup_history;
     so.lookup_adaptive = opts_.lookup_adaptive;
     so.mtp_lookup = opts_.spec_mtp_lookup;   // open-work 27: per request on its card
+    so.dflash_lookup_window = opts_.spec_dflash_lookup ? b.dflash_window() : 0;   // plan 41f: the same in a drafter
     so.step_k = impl_->step_k;
     if (opts_.prefix_cache_bytes != 0) {
       if (opts_.prefix_alloc == nullptr) throw std::invalid_argument("Server: a prefix cache budget needs an allocator");
@@ -225,18 +227,18 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
 void Server::configure_spec() {
   if (opts_.spec_lookup) {
     if (deps_.engine.verify_k() == 0)
-      throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
+      throw std::invalid_argument("external prompt-lookup drafts: this engine cannot verify them");
     if (deps_.engine.mtp_k() != 0)
-      throw std::invalid_argument("--spec lookup and --spec mtp are one proposer each; pick one");
+      throw std::invalid_argument("external prompt-lookup drafts and the MTP head are one proposer each; pick one");
     if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
         opts_.lookup_min_match > impl_->lookup.options().max_match)
       throw std::invalid_argument("the lookup minimum match must be in [2, 64]");
   }
   if (opts_.spec_dflash_lookup) {   // spec 19f
     if (opts_.spec_lookup)
-      throw std::invalid_argument("--spec dflash-lookup and --spec lookup are one proposer each; pick one");
+      throw std::invalid_argument("prompt lookup inside DFlash and external prompt-lookup drafts are one proposer each; pick one");
     if (deps_.engine.mtp_k() == 0 || deps_.engine.dflash_window() == 0)
-      throw std::invalid_argument("--spec dflash-lookup: this engine has no DFlash drafter to fall back to");
+      throw std::invalid_argument("prompt lookup inside DFlash: this engine has no DFlash drafter to fall back to");
     LookupInDFlashOptions o;
     o.window = deps_.engine.dflash_window();
     o.max_k = deps_.engine.mtp_k();
@@ -245,7 +247,7 @@ void Server::configure_spec() {
   if (!opts_.spec_dflash_lookup && !opts_.spec_mtp_lookup) impl_->lookup_in_dflash.reset();
   if (opts_.spec_mtp_lookup) {   // open-work 27: the same policy, no window
     if (opts_.spec_lookup || opts_.spec_dflash_lookup)
-      throw std::invalid_argument("prompt lookup inside MTP and --spec lookup / dflash-lookup are one proposer each");
+      throw std::invalid_argument("prompt lookup inside MTP and the other prompt-lookup modes are one proposer each");
     if (!deps_.engine.mtp_lookup())
       throw std::invalid_argument("prompt lookup inside MTP: this engine has no MTP head to fall back to");
     LookupInDFlashOptions o;
@@ -356,6 +358,8 @@ bool Server::acquire(uint64_t& ticket, bool queue) {
   return true;
 }
 
+void Server::wait_stored() { std::lock_guard<std::mutex> stored(impl_->store_mutex); }
+
 void Server::release() {
   {
     std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -371,7 +375,8 @@ std::string Server::render_prompt(const Request& r) {
       prompt = r.prompt;
     } else if (opts_.chat_format.template_kwargs()) {   // spec 20e (Kolibri-1)
       // The top-level reasoning_effort becomes a template kwarg where the format reads one.
-      const nlohmann::json kwargs = request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort);
+      const nlohmann::json kwargs =
+          request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort, r.enable_thinking);
       check_template_kwargs(opts_.chat_format, kwargs);
       // Spec 25e: the kwargs after the reasoning_effort mapping may carry the enable_thinking the request did not; the
       // template variable is that one (otherwise the kwargs' value IS r.enable_thinking).
@@ -392,8 +397,11 @@ Server::Outcome Server::generate(const Request& r,
                                  const std::function<void(const Delta&)>& emit,
                                  const std::function<bool()>& gone) {
   Outcome outcome;
+  outcome.t_generate = steady_seconds();
   const std::string prompt = render_prompt(r);
-  outcome.prompt_ids = deps_.tok.encode(prompt);
+  outcome.t_rendered = steady_seconds();
+  outcome.prompt_ids = deps_.tok.encode_prompt(prompt);
+  outcome.t_encoded = steady_seconds();
   const uint32_t max_len = deps_.engine.max_len();
   if (outcome.prompt_ids.empty()) throw BadRequest("prompt encodes to zero tokens");
   if (outcome.prompt_ids.size() + 1 > max_len) {
@@ -408,22 +416,26 @@ Server::Outcome Server::generate(const Request& r,
   // Spec 7 §3.3: restart from the resident session or the deepest host snapshot, prefill
   // the tail (the block hook writes it through); with the cache off, reset() + prefill.
   PrefixSession& session = *impl_->prefix;
-  outcome.prefix = session.begin(outcome.prompt_ids, r.chat && opts_.prefix_split_last);
+  wait_stored();
+  outcome.t_stored = steady_seconds();
+  // The prompt-end snapshot's state and KV are stored after the first id is out (generate_tail).
+  outcome.prefix = session.begin(outcome.prompt_ids, r.chat && opts_.prefix_split_last, /*defer_prompt_end=*/true);
   outcome.usage.cached_tokens = outcome.prefix.restart;
-  if (session.enabled()) {
-    std::print(stderr,
-               "prefix: kind {} restart {:d} of {:d} kv_bytes {:d} restore_ms {:.1f} prefill_ms {:.1f}"
-               " store_ms {:.1f}\n",
-               plan_kind_name(outcome.prefix.kind), outcome.prefix.restart,
-               outcome.prompt_ids.size(), outcome.prefix.kv_bytes, outcome.prefix.restore_ms,
-               outcome.prefix.prefill_ms, outcome.prefix.store_ms);
-    std::fflush(stderr);
-  }
+  outcome.t_begun = steady_seconds();
   try {
     generate_tail(r, prompt, max_tokens, outcome, emit, gone);
   } catch (...) {
     session.fail();
     throw;
+  }
+  if (session.enabled()) {
+    std::print(stderr,
+               "prefix: kind {} restart {:d} of {:d} kv_bytes {:d} restore_ms {:.1f} prefill_ms {:.1f}"
+               " store_ms {:.1f} (after the first id {:.1f})\n",
+               plan_kind_name(outcome.prefix.kind), outcome.prefix.restart,
+               outcome.prompt_ids.size(), outcome.prefix.kv_bytes, outcome.prefix.restore_ms,
+               outcome.prefix.prefill_ms, outcome.prefix.store_ms, outcome.prefix.deferred_store_ms);
+    std::fflush(stderr);
   }
   // --max-num-seqs: a request cut by the slot's end, not its max_tokens, is said.
   if (!outcome.cancelled && outcome.finish_reason == "length" && max_tokens == budget)
@@ -522,11 +534,11 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
 
   outcome.finish_reason = "length";
   bool eos_stop = false;
-  std::optional<AdaptiveK> policy;   // --spec mtp (spec 8 §10) or --spec lookup (spec 19e)
+  std::optional<AdaptiveK> policy;   // --spec mtp (spec 8 §10) or external lookup (spec 19e)
   // Spec 8: with MTP a step yields a burst of ids; the loop below still sees them one
   // at a time, and ids past a stop are handed back with truncate_to() after it.
   const bool speculative = deps_.engine.mtp_k() > 0;
-  // Spec 19e: with --spec lookup the burst comes from step_drafts(), its drafts from the
+  // Spec 19e: with external lookup the burst comes from step_drafts(), its drafts from the
   // matcher, which holds exactly the prompt and every id consumed so far (the pending id x
   // is indexed when the engine hands it to the proposer: it is consumed next, always).
   const bool lookup = opts_.spec_lookup;
@@ -536,7 +548,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     o.max_k = std::min(o.max_k, deps_.engine.verify_k());
     policy.emplace(o);
   }
-  // Spec 19f: --spec dflash-lookup indexes the matcher as --spec lookup does; the DFlash iterations' K comes from the
+  // Spec 19f: prompt lookup inside DFlash indexes the matcher as external lookup does; the DFlash iterations' K comes from the
   // --spec mtp policy below.
   const bool dflash_lookup = opts_.spec_dflash_lookup;
   // Open-work 27: lookup inside MTP - the same matcher and policy; its MTP iterations keep the per-step choice below.
@@ -599,7 +611,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   const auto next_lookup_inside = [&]() -> uint32_t {
     if (burst_at == burst.size()) {
       LookupInDFlash& lid = *impl_->lookup_in_dflash;
-      const uint32_t k = step_k ? step_k->begin() : policy ? policy->next() : deps_.engine.mtp_k();
+      const uint32_t k = step_k ? step_k->begin() : policy ? policy->next(deps_.engine.pos()) : deps_.engine.mtp_k();
       uint32_t proposed = 0;
       burst_head_indexed = false;
       const EngineIface::Proposer propose = [&](uint32_t pending) {
@@ -657,7 +669,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       if (burst.empty()) throw std::runtime_error("EngineIface::step_chosen returned no ids");
       step_k->observe(uint32_t(burst.size() - 1));
     } else if (burst_at == burst.size()) {
-      const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
+      const uint32_t k = policy ? policy->next(deps_.engine.pos()) : deps_.engine.mtp_k();
       const double t0 = steady_seconds();
       burst = deps_.engine.step_many(sampling, k);
       burst_at = 0;
@@ -692,9 +704,12 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     first = deps_.engine.pending_id(sampling);
     if (first) {
       outcome.t_first_token = steady_seconds();
+      emit(Delta{});   // the first id is out, whatever text it shows
       first_ends = take(*first);
     }
   }
+  outcome.prefix.deferred_store_ms = session.store_deferred();
+  outcome.prefix.store_ms += outcome.prefix.deferred_store_ms;
   for (uint32_t generated = 0; generated < max_tokens; ++generated) {
     if (gone()) {   // the client hung up: stop here, the engine's state is every id fed so far
       outcome.cancelled = true;
@@ -762,6 +777,21 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
                prompt, cached, prompt - cached, first_s, read_tps, out, decode_s, gen_tps, used, capacity,
                capacity ? 100.0 * double(used) / double(capacity) : 0.0,
                outcome.slot >= 0 ? (std::string(", slot ") + std::to_string(outcome.slot)).c_str() : "");
+    // The serial path's host stages to the first id, in ms from arrival.
+    if (outcome.t_begun > 0 && outcome.t_first_token > 0) {
+      const auto ms = [](double a, double b) { return 1e3 * (b - a); };
+      const PrefixSession::Report& p = outcome.prefix;
+      std::print(stderr,
+                 "request: to the first id {:.1f} ms - parse and queue {:.1f}, template {:.1f}, tokenize {:.1f},"
+                 " the previous request's store {:.1f}, prefix lookup {:.1f}, restore {:.1f}, prefill {:.1f}, snapshot store {:.1f}, prefix other {:.1f},"
+                 " first id {:.1f}\n",
+                 ms(t_start, t_first), ms(t_start, outcome.t_generate), ms(outcome.t_generate, outcome.t_rendered),
+                 ms(outcome.t_rendered, outcome.t_encoded), ms(outcome.t_encoded, outcome.t_stored), p.plan_ms,
+                 p.restore_ms, p.prefill_ms, p.store_ms - p.deferred_store_ms,
+                 ms(outcome.t_stored, outcome.t_begun) - p.plan_ms - p.restore_ms - p.prefill_ms -
+                     (p.store_ms - p.deferred_store_ms),
+                 ms(outcome.t_begun, t_first));
+    }
     std::fflush(stderr);
   }
   if (opts_.log_requests_dir.empty()) return;
@@ -872,6 +902,7 @@ void Server::reconfigure(const httplib::Request& request, httplib::Response& res
                   "invalid_request_error");
   uint64_t ticket = 0;
   (void)acquire(ticket, /*queue=*/false);
+  wait_stored();
   try {
     const Reconfigured done = opts_.reconfigure(body, opts_);
     if (!done.applied.empty()) {
@@ -961,6 +992,8 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
         // The role frame goes out with the first delta, after prefill, as vLLM
         // sends it: clients time prefill to the first chunk with `choices`
         // (llama-benchy's est_ppt), so a frame before prefill reads as ~0 ms.
+        // The first id's delta may be empty (its text held back or a tag): the
+        // role frame still goes out with it.
         bool role_sent = !parsed.chat;
         bool ok = false;
         const auto send_role = [&] {
@@ -970,7 +1003,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
         };
         try {
           const Outcome outcome = generate(parsed, [&](const Delta& d) {
-            if (!d.text.empty() || d.kind == Delta::Call) send_role();
+            send_role();
             if (d.kind == Delta::Call) {
               (void)write(stream_frame_tool_call(parsed, id, created, d.call, d.index));
             } else if (d.text.empty()) {
@@ -992,9 +1025,12 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
           (void)write(std::string("data: ") + server_error(error) + "\n\n");
         }
         (void)write(kDone);
-        if (ok) finish_request();
         sink.done();
+        // The next request renders and tokenizes its prompt while this one stores its request-end snapshot; it waits
+        // for the store before it touches the engine (wait_stored).
+        std::unique_lock<std::mutex> storing(impl_->store_mutex);
         release();
+        if (ok) finish_request();
         return true;
       });
 }

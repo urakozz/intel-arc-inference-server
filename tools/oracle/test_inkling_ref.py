@@ -123,6 +123,15 @@ def test_kv_cache_forms(tiny):
     assert torch.equal(k16, k16.to(torch.bfloat16).float()) and not torch.equal(k16, k8)
     assert float((k8 - k16).norm() / k16.norm()) < 0.02
     assert torch.equal(k8, kv8_fq(k16))      # the first full visit's input is the window visits', unchanged
+    for kv in ("int8-k", "int8-v", f"int8~{v}"):   # one half int8, or the first full visit kept bf16
+        model = Inkling(tiny, torch.float32, kv)
+        caches[kv] = model.cache()
+        model.forward(ids, caches[kv])
+    k, val = caches["int8-k"].visits[v].kv
+    assert torch.equal(k, k8) and torch.equal(val, caches["bf16"].visits[v].kv[1])
+    k, val = caches["int8-v"].visits[v].kv
+    assert torch.equal(k, k16) and torch.equal(val, caches["int8"].visits[v].kv[1])
+    assert all(torch.equal(a, b) for a, b in zip(caches[f"int8~{v}"].visits[v].kv, caches["bf16"].visits[v].kv))
 
 
 def test_release_expert_formats():

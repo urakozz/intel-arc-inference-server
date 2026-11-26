@@ -197,6 +197,11 @@ DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture
     d.in_scale = float(num_or(dc, "input_embedding_scale", 1.0));
     d.out_mult = float(num_or(dc, "output_multiplier", 1.0));
     d.softcap = float(num_or(dc, "final_logit_softcapping", 0.0));
+    if (const Value* m = opt(dc, "selector_softcap_mode")) {
+      if (!m->is_string() || (m->str() != "before_correction" && m->str() != "after_correction"))
+        refuse("selector_softcap_mode must be before_correction or after_correction");
+      d.softcap_after = m->str() == "after_correction";
+    }
   } else {
     d.out_mult = float(num_or(c, "logit_scale", 1.0));
   }
@@ -329,6 +334,38 @@ void check_flash_next_dflash(const DFlashDesc& d) {
   if (d.eps != 1e-6f) bad("rms_norm_eps is not 1e-6 (df_prep bakes it)");
   if (d.vocab != 248320) bad("vocab_size " + std::to_string(d.vocab) + " is not 248320");
   if (d.mask_id != 248077) bad("mask_token_id " + std::to_string(d.mask_id) + " is not 248077");
+}
+
+void check_inkling_dflash2(const DFlashDesc& d) {
+  auto bad = [](const std::string& what) {
+    throw std::runtime_error("Inkling DFlash 2 drafter: " + what + " - the drafter's kernels are built for "
+                             "incoai/Inkling-2-Mini-DFlash2's shapes");
+  };
+  if (d.form != DFlashForm::Vllm || !d.v2()) bad("architectures[0] is " + d.architecture + ", not DFlash2DraftModel");
+  if (d.hidden != 2304) bad("hidden_size " + std::to_string(d.hidden) + " is not Inkling's 2304");
+  if (d.q_heads != 32 || d.kv_heads != 8 || d.head_dim != 128)
+    bad("heads " + std::to_string(d.q_heads) + " / " + std::to_string(d.kv_heads) + " x " + std::to_string(d.head_dim) +
+        " are not 32 / 8 x 128");
+  if (d.inter != 6912) bad("intermediate_size " + std::to_string(d.inter) + " is not 6912");
+  if (d.taps != std::vector<uint32_t>{5, 23, 41, 48})
+    bad("target_layer_ids are not 5, 23, 41, 48 (the engine's four tap slots over Inkling's 48 layer visits)");
+  if (d.num_target_layers && d.num_target_layers != 48)
+    bad("num_target_layers " + std::to_string(d.num_target_layers) + " is not Inkling's 48 layer visits");
+  if (!d.softcap_after || d.softcap != 30.0f)
+    bad("the selector must apply final_logit_softcapping 30 after the correction (selector_softcap_mode "
+        "after_correction)");
+  if (d.block != 8) bad("block_size " + std::to_string(d.block) + " is not 8");
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (d.window[l] == 0 || d.window[l] > 2048)
+      bad("layer " + std::to_string(l) + " is not sliding at most 2048 positions");
+    if (d.causal[l]) bad("layer " + std::to_string(l) + " is causal");
+  }
+  if (d.conv_group != 16 || d.conv_taps != 2) bad("the convolutions are not 16-wide groups of 2 taps");
+  if (d.sel_rank != 256 || d.sel_top_k != 16) bad("the selector is not rank 256, top 16");
+  if (d.in_scale != 1.0f || d.out_mult != 1.0f) bad("input_embedding_scale and output_multiplier must be 1");
+  if (d.eps != 1e-6f) bad("rms_norm_eps is not 1e-6 (the kernels bake it)");
+  if (d.vocab != 201024) bad("vocab_size " + std::to_string(d.vocab) + " is not Inkling's 201024 embedding rows");
+  if (d.mask_id >= 200058) bad("mask_token_id " + std::to_string(d.mask_id) + " is not a live token (below 200058)");
 }
 
 DFlashDesc dflash_tp_card_desc(const DFlashDesc& d) {

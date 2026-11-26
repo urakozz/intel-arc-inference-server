@@ -154,9 +154,10 @@ function(i8_order_defs N OUT)
     set(${OUT} "" PARENT_SCOPE)
   endif()
 endfunction()
+# Extra arguments are further defines of the one variant (Inkling's reads ahead below).
 function(add_gemv_i8w_variant M K N)
   i8_order_defs(${N} km)
-  add_ocloc_kernel(gemv_i8w_M${M}_K${K}_N${N} SOURCE ${GEMV_I8W_CL} DEFINES M=${M} K=${K} N=${N} ${km})
+  add_ocloc_kernel(gemv_i8w_M${M}_K${K}_N${N} SOURCE ${GEMV_I8W_CL} DEFINES M=${M} K=${K} N=${N} ${km} ${ARGN})
 endfunction()
 add_gemv_i8w_variant(1 5120 248320)
 # PERF-111: probe_gemv --tiles' head cells, never bound by the engine: steps k-major (_KM), with four reads in flight
@@ -3035,6 +3036,39 @@ add_ocloc_kernel(kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR SOURCE ${CM
                  DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=24 KV_HEADS=8 EXP2=0 EAGER=0 WINDOW=0 RING=0 INK_PREFILL=1 KV8=1
                          PAIR=1 KV8_SHARE=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
+# Plan 41e Task 3 (the int8 prompt pass, `--prefill-backend l0-int8`): the same form with int8 scores (KV8_I8S).
+add_ocloc_kernel(kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_I8S_PAIR
+                 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
+                 DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=24 KV_HEADS=8 EXP2=0 EAGER=0 WINDOW=0 RING=0 INK_PREFILL=1 KV8=1
+                         PAIR=1 KV8_SHARE=1 KV8_I8S=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+# PERF-12 (plan 41h): the split-K form of the three full-visit PAIR builds above, for a short chunk deep in the cache
+# (runtime::inkling2::attention_spans), with its merge kernel.
+foreach(v "F_PAIR|PAIR=1" "F_KV8_PAIR|KV8=1;PAIR=1;KV8_SHARE=1" "F_KV8_I8S_PAIR|KV8=1;PAIR=1;KV8_SHARE=1;KV8_I8S=1")
+  string(REPLACE "|" ";" v "${v}")
+  list(GET v 0 tag)
+  list(REMOVE_AT v 0)
+  add_ocloc_kernel(kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_${tag}_SPLIT SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
+                   DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=24 KV_HEADS=8 EXP2=0 EAGER=0 WINDOW=0 RING=0 INK_PREFILL=1 ${v}
+                           SPLIT=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+endforeach()
+# Plan 41h Task 2: the bf16 and int8-cache split forms as the verify lists' full-visit attention at depth.
+foreach(v "F_PAIR|PAIR=1" "F_KV8_PAIR|KV8=1;PAIR=1;KV8_SHARE=1")
+  string(REPLACE "|" ";" v "${v}")
+  list(GET v 0 tag)
+  list(REMOVE_AT v 0)
+  add_ocloc_kernel(kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_${tag}_VERIFY SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
+                   DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=24 KV_HEADS=8 EXP2=0 EAGER=0 WINDOW=0 RING=0 INK_PREFILL=1 ${v}
+                           SPLIT=1 VERIFY=1 ${CTRL_DEFINES}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND INKLING_KERNELS kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_${tag}_VERIFY)
+endforeach()
+# Plan 41e: the int8 prompt pass's linears - the activation quantiser and the load-time weight rotation at the two Ks
+# (hidden 2304, q_n 3072); the GEMM is pf_int8.cl's pf_gemm_i8.
+foreach(kk 2304 3072)
+  add_ocloc_kernel(ink_int8_K${kk} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_int8.cl DEFINES K=${kk})
+endforeach()
 add_ocloc_kernel(pf_ink_slab SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_dequant_slab.cl DEFINES INK_PREFILL=1)
 add_ocloc_kernel(pf_gemm_T0_CS SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_gemm.cl DEFINES TRANSB=0 COL_SCALE=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
@@ -3046,25 +3080,45 @@ add_ocloc_kernel(pf_gemm_small_A2_B2_S2_INK SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/p
 set(INKLING_KERNELS "")
 set(INKLING_SMALL_M "")
 foreach(M RANGE 1 8)
-  foreach(ctrl "4608;64;1" "64;2304;2")
+  # The controllers' down projection (K 4608 -> 64) is one column tile a work-group with 16 K slices
+  # (kernels::inkling2::controller), the up projection (K 64) whole columns.
+  foreach(ctrl "4608;64;1;16;16;_C16_S16" "64;2304;2;64;1;")
     list(GET ctrl 0 k)
     list(GET ctrl 1 n)
     list(GET ctrl 2 phase)
-    set(name gemv_bf16_M${M}_K${k}_N${n}_INKCTRL)
+    list(GET ctrl 3 cols)
+    list(GET ctrl 4 ksplit)
+    list(GET ctrl 5 tag)
+    set(name gemv_bf16_M${M}_K${k}_N${n}${tag}_INKCTRL)
     add_ocloc_kernel(${name} SOURCE ${GEMV_BF16_CL}
-                     DEFINES M=${M} K=${k} N=${n} COLS_PER_WG=64 KSPLIT=1 INK_CONTROLLER=${phase})
+                     DEFINES M=${M} K=${k} N=${n} COLS_PER_WG=${cols} KSPLIT=${ksplit} INK_CONTROLLER=${phase}
+                             GEMV_AHEAD=4)
     list(APPEND INKLING_KERNELS ${name})
   endforeach()
   foreach(kn "2304;3072" "2304;1024" "2304;384" "2304;64" "2304;200064" "3072;2304")
     list(GET kn 0 k)
     list(GET kn 1 n)
     if(M EQUAL 1)
-      add_gemv_i8w_variant(${M} ${k} ${n})
+      # One row: the narrow linears (o_proj, the taps) are too few work-groups to keep memory busy one read at a
+      # time, so each sub-group has eight reads in flight (GEMV_AHEAD, bitwise); the wide ones (the fused q / k / v
+      # projection, the head) were slower with it (q / k / v 1.86 -> 2.19 ms a token).
+      set(ahead GEMV_AHEAD=8)
+      if(n GREATER 2304)
+        set(ahead)
+      endif()
+      add_gemv_i8w_variant(${M} ${k} ${n} ${ahead})
       list(APPEND INKLING_KERNELS gemv_i8w_M${M}_K${k}_N${n})
     else()
-      add_gemm_sm_variant(${M} ${k} ${n} 1 2)
-      list(APPEND INKLING_KERNELS gemm_sm_i8w_M${M}_K${k}_N${n})
-      list(APPEND INKLING_SMALL_M kernel_gemm_sm_i8w_M${M}_K${k}_N${n})
+      # o_proj (K 3072, N 2304, 36 column work-groups): the in-work-group K split (kSmallMTuning's wg row).
+      set(wg "")
+      set(wg_tag "")
+      if(k EQUAL 3072)
+        set(wg WG)
+        set(wg_tag _wg)
+      endif()
+      add_gemm_sm_variant(${M} ${k} ${n} 1 2 ${wg})
+      list(APPEND INKLING_KERNELS gemm_sm_i8w_M${M}_K${k}_N${n}${wg_tag})
+      list(APPEND INKLING_SMALL_M kernel_gemm_sm_i8w_M${M}_K${k}_N${n}${wg_tag})
     endif()
   endforeach()
   foreach(kn "2304;128" "4608;64" "64;2304" "2304;1024")
@@ -3092,6 +3146,26 @@ foreach(M RANGE 1 8)
                      DEFINES M=${M} K=2304 N=3072 S=1 LAYOUT=2 QKV_NKV=1024 INK_ATTN_PROJECTIONS=1)
   endif()
   list(APPEND INKLING_KERNELS ${name})
+  if(NOT M EQUAL 1)   # the tap projections' verify rows (kernels::inkling2::kTapColumns)
+    add_gemv_i8w_variant(${M} 2304 64 GEMV_AHEAD=3 GEMV_KSPLIT=16)   # kernels::inkling2::kTapKSplit
+    list(APPEND INKLING_KERNELS gemv_i8w_M${M}_K2304_N64)
+  endif()
+  # PERF-123: the greedy head - the 2-bit candidate pass and the rescore at 512 columns with the full head's kernel.
+  add_gemm_sm_variant(${M} 2304 200064 1 3)
+  list(APPEND INKLING_KERNELS gemm_sm_M${M}_K2304_N200064_S1_L3)
+  if(M EQUAL 1)
+    add_gemv_i8w_variant(1 2304 512)
+    list(APPEND INKLING_KERNELS gemv_i8w_M1_K2304_N512)
+  else()
+    add_gemm_sm_variant(${M} 2304 512 1 2)
+    list(APPEND INKLING_KERNELS gemm_sm_i8w_M${M}_K2304_N512)
+  endif()
+  if(M EQUAL 1)
+    # o_proj with the output convolution and partial sum in its epilogue (INK_ATTN_POST).
+    add_ocloc_kernel(gemm_sm_i8w_M1_K3072_N2304_wg_INKPOST SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gemm_sm.cl
+                     DEFINES M=1 K=3072 N=2304 S=1 LAYOUT=2 SPLITK=1 INK_ATTN_POST=1)
+    list(APPEND INKLING_KERNELS gemm_sm_i8w_M1_K3072_N2304_wg_INKPOST)
+  endif()
   set(name ink_embed_gather_M${M}_D2304_V201024)
   add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
                    DEFINES ${CTRL_DEFINES} M=${M} HIDDEN=2304 VOCAB=201024)
@@ -3101,8 +3175,10 @@ foreach(M RANGE 1 8)
   list(APPEND INKLING_KERNELS ${name})
 
   set(ink_union)
+  set(ink_attn_split)
   if(M GREATER 1)
     set(ink_union MOE_UNION=1)
+    set(ink_attn_split ATTN_SPLIT=1)
   endif()
   foreach(row "NVFP4;1" "MXFP8;2")
     list(GET row 0 fmt)
@@ -3126,14 +3202,14 @@ foreach(M RANGE 1 8)
     set(name kol_attn_M${M}_T32_Q24KV8_REL16E1024_SINK_GATE_${tag})
     add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_attn.cl
                     DEFINES ${CTRL_DEFINES} M=${M} TGT=32 Q_HEADS=24 KV_HEADS=8 WINDOW=${w} RING=${ring}
-                    REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1)
+                    REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1 ${ink_attn_split})
     list(APPEND INKLING_KERNELS ${name})
   endforeach()
   # PERF-102: the full visits' reader over the int8 cache (`--kv-cache int8`).
   set(name kol_attn_M${M}_T32_Q24KV8_REL16E1024_SINK_GATE_F_KV8)
   add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_attn.cl
                   DEFINES ${CTRL_DEFINES} M=${M} TGT=32 Q_HEADS=24 KV_HEADS=8 WINDOW=0 RING=0
-                  REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1 KV8=1)
+                  REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1 KV8=1 ${ink_attn_split})
   list(APPEND INKLING_KERNELS ${name})
 endforeach()
 
@@ -3142,17 +3218,25 @@ add_ocloc_kernel(kol_route_E128_T8_N128_L128_RENORM SOURCE ${CMAKE_CURRENT_SOURC
 list(APPEND INKLING_KERNELS kol_route_E128_T8_N128_L128_RENORM)
 add_ocloc_kernel(kol_route_E128_T8_N128_L128_RENORM_M1_FUSED SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
                  DEFINES ROUTE_E=128 ROUTE_K=8 ROUTE_WG=128 ROUTE_EPL=1 ROUTE_LN=128
-                         ROUTE_RENORM=1 ROUTE_SCALE=8.0f INK_ROUTE_M1=1)
+                         ROUTE_RENORM=1 ROUTE_SCALE=8.0f INK_ROUTE_M1=1 ROUTE_KS=8)
 list(APPEND INKLING_KERNELS kol_route_E128_T8_N128_L128_RENORM_M1_FUSED)
-foreach(kn "2304;3072" "3072;2304" "2304;9216" "9216;2304")
+# The drafter's bf16 linears (kernels::inkling2::bf16_tiling): K split in 16 slices up to 3072 columns.
+foreach(kn "2304;3072;_C16_S16;16;16" "3072;2304;_C16_S16;16;16" "2304;9216;;64;1" "9216;2304;_C16_S16;16;16")
   list(GET kn 0 k)
   list(GET kn 1 n)
-  add_gemv_bf16_variant(8 ${k} ${n} 64 1)
-  list(APPEND INKLING_KERNELS gemv_bf16_M8_K${k}_N${n})
+  list(GET kn 2 tag)
+  list(GET kn 3 cols)
+  list(GET kn 4 ksplit)
+  add_gemv_bf16_variant(8 ${k} ${n} ${cols} ${ksplit})
+  list(APPEND INKLING_KERNELS gemv_bf16_M8_K${k}_N${n}${tag})
+endforeach()
+foreach(M RANGE 1 8)   # the context k / v projections at every committed width
+  add_gemv_bf16_variant(${M} 2304 1024 16 16)
+  list(APPEND INKLING_KERNELS gemv_bf16_M${M}_K2304_N1024_C16_S16)
 endforeach()
 add_gemv_i8w_variant(1 256 200064)
-add_gemv_bf16_variant(1 5120 768 64 1)
-list(APPEND INKLING_KERNELS gemv_i8w_M1_K256_N200064 gemv_bf16_M1_K5120_N768)
+add_gemv_bf16_variant(1 5120 768 16 16)
+list(APPEND INKLING_KERNELS gemv_i8w_M1_K256_N200064 gemv_bf16_M1_K5120_N768_C16_S16)
 set(INKLING_DCTL DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5)
 add_ocloc_kernel(df_prep_M8_H2304_I9216_Q24KV8_D128_R2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_prep.cl
                  DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 H=2304 WG=256 EPS=1e-06f INTER=9216 NH=24 NKV=8 HD=128 RING=2048 INK_CONTEXT=1)
@@ -3170,7 +3254,9 @@ add_ocloc_kernel(ink_glue_H2304_PREFILL_BF16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/
 add_ocloc_kernel(df_prep_H2304_INK_CONTEXT_PREFILL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_prep.cl
                  DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 H=2304 WG=256 EPS=1e-06f INTER=9216 NH=24
                          NKV=8 HD=128 RING=2048 INK_CONTEXT=1 INK_PREFILL=1)
-list(APPEND INKLING_KERNELS ink_glue_H2304_CTRL)
+add_ocloc_kernel(ink_glue_H2304_CTRL_SPLIT SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_glue.cl
+                 DEFINES H=2304 ${CTRL_DEFINES} INK_CONTROLLER_FUSION=1 INK_GLUE_SPLIT=1)
+list(APPEND INKLING_KERNELS ink_glue_H2304_CTRL ink_glue_H2304_CTRL_SPLIT)
 add_ocloc_kernel(ink_prep_Q24KV8_D128_REL16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl DEFINES ${CTRL_DEFINES})
 add_ocloc_kernel(ink_prep_Q24KV8_D128_REL16_FUSED SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl
                  DEFINES ${CTRL_DEFINES} INK_FUSED_PREP=1)
@@ -3179,11 +3265,236 @@ add_ocloc_kernel(ink_prep_Q24KV8_D128_REL16_FUSED_KV8 SOURCE ${CMAKE_CURRENT_SOU
 list(APPEND INKLING_KERNELS ink_prep_Q24KV8_D128_REL16_FUSED ink_prep_Q24KV8_D128_REL16_FUSED_KV8)
 add_ocloc_kernel(df_attn_M8_Q24KV8_D128_FULL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_attn.cl
                  DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 NH=24 NKV=8 HD=128 RING=0 WIN=0 PB=128 WGA=128
-                 FULL_TARGETS=32)
+                 FULL_TARGETS=128)   # runtime::inkling2::kDraftPartitions
+# Its part on DPAS (plan 41h: the scalar part was 1.1 plain steps of the pp step at 128k); the reduce stays the scalar
+# binary's.
+add_ocloc_kernel(df_attn_M8_Q24KV8_D128_FULL_dpas SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_attn_dpas.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 NH=24 NKV=8 HD=128 RING=0 WIN=0 PB=128 FULL_TARGETS=128)
+add_ocloc_kernel(df_candidate_R7_N200064_U200058_K64 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_candidate.cl
+                 DEFINES R=7 N=200064 USED=200058)
+i8_order_defs(200064 _ink_hc_km)   # the head's tile order (k-major at a head width, PERF-111)
+add_ocloc_kernel(head_cand_K2304_C64_NC512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/head_cand.cl
+                 DEFINES K=2304 C=64 NC=512 N=200064 GROUPS=196 ${_ink_hc_km})
+list(APPEND INKLING_KERNELS df_candidate_R7_N200064_U200058_K64 head_cand_K2304_C64_NC512)
 add_ocloc_kernel(df_inkling_markov_H2304_R256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_draft.cl
-                 DEFINES ${CTRL_DEFINES})
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL})
 list(APPEND INKLING_KERNELS ink_glue_H2304 ink_prep_Q24KV8_D128_REL16
-     df_attn_M8_Q24KV8_D128_FULL df_inkling_markov_H2304_R256)
+     df_attn_M8_Q24KV8_D128_FULL df_attn_M8_Q24KV8_D128_FULL_dpas df_inkling_markov_H2304_R256)
+# Inkling 2 Mini under `--parallel tp` (plan 41j): a card's half of every visit's heads (12 q / 4 kv: the fused q / k
+# / v / gate / relative projection at its rows, o_proj at its K) and of every expert's width (576), then the all-reduce
+# after o_proj and after the experts' down projection (tp.cl, the slices form at one slice: tp_send, then tp_sum into
+# fp32). The I576 MoE builds are tp's alone, so their union finish stops at the card's part of the sum (INK_MOE_TP_SUM).
+foreach(M RANGE 1 8)
+  if(M EQUAL 1)
+    set(name gemv_i8w_M1_K2304_N1536_QKV512_FULL)
+    add_ocloc_kernel(${name} SOURCE ${GEMV_I8W_CL}
+                     DEFINES M=1 K=2304 N=1536 QKV_NKV=512 INK_ATTN_PROJECTIONS=1 INK_REL_N=192)
+    list(APPEND INKLING_KERNELS ${name})
+    add_ocloc_kernel(gemm_sm_i8w_M1_K1536_N2304_wg SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gemm_sm.cl
+                     DEFINES M=1 K=1536 N=2304 S=1 LAYOUT=2 SPLITK=1)
+    list(APPEND INKLING_KERNELS gemm_sm_i8w_M1_K1536_N2304_wg)
+  else()
+    set(name gemm_sm_i8w_M${M}_K2304_N1536_QKV512_FULL)
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gemm_sm.cl
+                     DEFINES M=${M} K=2304 N=1536 S=1 LAYOUT=2 QKV_NKV=512 INK_ATTN_PROJECTIONS=1 INK_REL_N=192)
+    list(APPEND INKLING_KERNELS ${name})
+    add_gemm_sm_variant(${M} 1536 2304 1 2 WG)
+    list(APPEND INKLING_KERNELS gemm_sm_i8w_M${M}_K1536_N2304_wg)
+    list(APPEND INKLING_SMALL_M kernel_gemm_sm_i8w_M${M}_K1536_N2304_wg)
+  endif()
+  set(ink_tp_union)
+  set(ink_attn_split)
+  if(M GREATER 1)
+    set(ink_tp_union MOE_UNION=1 INK_MOE_TP_SUM=1)
+    set(ink_attn_split ATTN_SPLIT=1)
+  endif()
+  foreach(row "NVFP4;1" "MXFP8;2")
+    list(GET row 0 fmt)
+    list(GET row 1 wfmt)
+    set(name kol_moe_M${M}_E128_T8_D2304_I576_CAP_${fmt})
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_moe.cl
+                    DEFINES M=${M} WFMT=${wfmt} MOE_E=128 MOE_K=8 HIDDEN=2304 INTER=576 UP_KS=4 DN_KS=1
+                    MOE_SHARED=0 MOE_OUT_F32=1 SWIGLU_CAP_G=4.0f SWIGLU_CAP_U=25.0f ${ink_tp_union})
+    list(APPEND INKLING_KERNELS ${name})
+  endforeach()
+  foreach(window "W1024_R4096;1024;4096;KV8=0" "F;0;0;KV8=0" "F_KV8;0;0;KV8=1")
+    list(GET window 0 tag)
+    list(GET window 1 w)
+    list(GET window 2 ring)
+    list(GET window 3 kv8)
+    set(name kol_attn_M${M}_T32_Q12KV4_REL16E1024_SINK_GATE_${tag})
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_attn.cl
+                    DEFINES ${CTRL_DEFINES} M=${M} TGT=32 Q_HEADS=12 KV_HEADS=4 WINDOW=${w} RING=${ring}
+                    REL_BIAS=1024 REL_DIM=16 SINK_TOK=1 SINK_PITCH=64 GATE=1 ${kv8} ${ink_attn_split})
+    list(APPEND INKLING_KERNELS ${name})
+  endforeach()
+  foreach(R 0 1)
+    set(name tp_cross_M${M}_K2304_G9_S1_X_R${R}_sum)
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/tp.cl
+                     DEFINES TP_CROSS=1 M=${M} K=2304 FOLD_G=9 S_LOC=1 FOLDED=0 RANK=${R} TP_SUM=1)
+    list(APPEND INKLING_KERNELS ${name})
+  endforeach()
+endforeach()
+add_ocloc_kernel(ink_prep_Q12KV4_D128_REL16_FUSED SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl
+                 DEFINES ${CTRL_DEFINES} INK_FUSED_PREP=1 INK_TP=1)
+add_ocloc_kernel(ink_prep_Q12KV4_D128_REL16_FUSED_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl
+                 DEFINES ${CTRL_DEFINES} INK_FUSED_PREP=1 INK_KV8=1 INK_TP=1)
+add_ocloc_kernel(ink_glue_H2304_TP SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_glue.cl
+                 DEFINES H=2304 ${CTRL_DEFINES} INK_TP=1)
+list(APPEND INKLING_KERNELS ink_prep_Q12KV4_D128_REL16_FUSED ink_prep_Q12KV4_D128_REL16_FUSED_KV8 ink_glue_H2304_TP)
+# The tp prompt pass: the glue at the card's k / v width with the all-reduce's sum, the 12 q / 4 kv head prep and
+# flash (their PAIR forms, as one card binds), the experts' GEMMs at 576 columns (gate || up N 1,152, down K 576),
+# the SwiGLU at 48-wide work-groups and the combine that stops at the card's part of the sum, the int8 pass's K 1,536
+# rotation (o_proj's card half).
+add_ocloc_kernel(ink_glue_H2304_PREFILL_TP SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_glue.cl
+                 DEFINES H=2304 ${CTRL_DEFINES} INK_CONTROLLER_FUSION=1 INK_PREFILL=1 INK_TP=1)
+add_ocloc_kernel(ink_glue_H2304_PREFILL_BF16_TP SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_glue.cl
+                 DEFINES H=2304 ${CTRL_DEFINES} INK_CONTROLLER_FUSION=1 INK_PREFILL=1 INK_GLUE_BF16=1 INK_TP=1)
+add_ocloc_kernel(ink_prep_Q12KV4_D128_REL16_PREFILL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl
+                 DEFINES INK_FUSED_PREP=1 INK_PREFILL=1 INK_TP=1)
+add_ocloc_kernel(ink_prep_Q12KV4_D128_REL16_PREFILL_KV8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_prep.cl
+                 DEFINES INK_FUSED_PREP=1 INK_PREFILL=1 INK_KV8=1 INK_TP=1)
+foreach(window "W1024_R4096;1024;4096" "F;0;0")
+  list(GET window 0 tag)
+  list(GET window 1 w)
+  list(GET window 2 ring)
+  add_ocloc_kernel(kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_${tag}_PAIR
+                   SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
+                   DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=12 KV_HEADS=4 EXP2=0 EAGER=0 WINDOW=${w} RING=${ring}
+                           INK_PREFILL=1 PAIR=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+endforeach()
+add_ocloc_kernel(kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_F_KV8_PAIR SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
+                 DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=12 KV_HEADS=4 EXP2=0 EAGER=0 WINDOW=0 RING=0 INK_PREFILL=1 KV8=1
+                         PAIR=1 KV8_SHARE=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_F_KV8_I8S_PAIR
+                 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_attn.cl
+                 DEFINES KT=64 RPW=16 HPW=3 Q_HEADS=12 KV_HEADS=4 EXP2=0 EAGER=0 WINDOW=0 RING=0 INK_PREFILL=1 KV8=1
+                         PAIR=1 KV8_SHARE=1 KV8_I8S=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+foreach(fmt NVFP4 MXFP8)
+  if(fmt STREQUAL "NVFP4")
+    set(wfmt 1)
+  else()
+    set(wfmt 2)
+  endif()
+  foreach(out "F32;OUT_F32=1" "BF16;OUT_BF16_LANES=1")
+    list(GET out 0 tag)
+    list(GET out 1 def)
+    add_ocloc_kernel(pf_moe_q4gemm_K2304_N1152_${tag}_INK_${fmt} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_moe_q4gemm.cl
+                     DEFINES WFMT=${wfmt} K=2304 N=1152 EXPERTS=128 ${def} NA=4 NB=4 WGN=2 MS=8 NODB=1 PF_A=1 INK_PREFILL=1
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_moe_q4gemm_K576_N2304_${tag}_INK_${fmt} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_moe_q4gemm.cl
+                     DEFINES WFMT=${wfmt} K=576 N=2304 EXPERTS=128 ${def} NA=4 NB=4 WGN=2 MS=8 NODB=1 PF_A=1 INK_PREFILL=1
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+  endforeach()
+endforeach()
+add_ocloc_kernel(kol_pf_moe_E128_T8_D2304_I576_INK_TP SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_moe.cl
+                 DEFINES PF_E=128 PF_K=8 PF_WG=128 PF_EPL=1 PF_D=2304 PF_INTER=576 TM=32 KC=2048 INK_PREFILL=1
+                         SWIGLU_WG=48 INK_MOE_TP_SUM=1)
+add_ocloc_kernel(kol_pf_moe_E128_T8_D2304_I576_INK_TP_BF16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_pf_moe.cl
+                 DEFINES PF_E=128 PF_K=8 PF_WG=128 PF_EPL=1 PF_D=2304 PF_INTER=576 TM=32 KC=2048 INK_PREFILL=1
+                         INK_GLUE_BF16=1 SWIGLU_WG=48 INK_MOE_TP_SUM=1)
+add_ocloc_kernel(ink_int8_K1536 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_int8.cl DEFINES K=1536)
+# The drafter's layers under tp: a card's 12 q / 4 kv heads and 4,608 of the MLP's columns (q 1,536, k / v 512, o_proj
+# K 1,536, gate / up 4,608, down K 4,608; kernels::inkling2::bf16_tiling), the context k / v at 512 at every committed
+# width, the prep and the attention at 12 q / 4 kv heads; the prompt pass's context store at 4 kv heads.
+foreach(kn "2304;1536;_C16_S16;16;16" "1536;2304;_C16_S16;16;16" "2304;4608;;64;1" "4608;2304;_C16_S16;16;16")
+  list(GET kn 0 k)
+  list(GET kn 1 n)
+  list(GET kn 2 tag)
+  list(GET kn 3 cols)
+  list(GET kn 4 ksplit)
+  add_gemv_bf16_variant(8 ${k} ${n} ${cols} ${ksplit})
+  list(APPEND INKLING_KERNELS gemv_bf16_M8_K${k}_N${n}${tag})
+endforeach()
+foreach(M RANGE 1 8)
+  add_gemv_bf16_variant(${M} 2304 512 16 16)
+  list(APPEND INKLING_KERNELS gemv_bf16_M${M}_K2304_N512_C16_S16)
+endforeach()
+add_ocloc_kernel(df_prep_M8_H2304_I4608_Q12KV4_D128_R2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_prep.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 H=2304 WG=256 EPS=1e-06f INTER=4608 NH=12 NKV=4 HD=128 RING=2048 INK_CONTEXT=1)
+add_ocloc_kernel(df_attn_M8_Q12KV4_D128_R2048_W1024_P128 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_attn.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 NH=12 NKV=4 HD=128 RING=2048 WIN=1024 PB=128 WGA=128 FIXED_DRAFT_WINDOW=1)
+add_ocloc_kernel(df_attn_M8_Q12KV4_D128_FULL SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_attn.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 NH=12 NKV=4 HD=128 RING=0 WIN=0 PB=128 WGA=128
+                 FULL_TARGETS=128)   # runtime::inkling2::kDraftPartitions
+add_ocloc_kernel(df_attn_M8_Q12KV4_D128_FULL_dpas SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_attn_dpas.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 NH=12 NKV=4 HD=128 RING=0 WIN=0 PB=128 FULL_TARGETS=128)
+list(APPEND INKLING_KERNELS df_prep_M8_H2304_I4608_Q12KV4_D128_R2048 df_attn_M8_Q12KV4_D128_R2048_W1024_P128
+     df_attn_M8_Q12KV4_D128_FULL df_attn_M8_Q12KV4_D128_FULL_dpas)
+# The drafter's head and Markov fold under tp by rows: a card's 100,032 of the 200,064 (the head's k-major tiles read
+# at the whole head's stride, I8_N_STRIDE), the 7 draft rows' head on gemm_sm's knobs for the whole head, the fold on
+# gemv_i8w; each draft's pick over the card's rows, then the all-reduce and the same pick on both (TP_RANK).
+i8_order_defs(200064 _ink_half_km)
+add_ocloc_kernel(gemm_sm_i8w_M7_K2304_N100032_HS200064 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/gemm_sm.cl
+                 DEFINES M=7 K=2304 N=100032 S=1 LAYOUT=2 ${_ink_half_km} I8_N_STRIDE=200064)
+add_ocloc_kernel(gemv_i8w_M1_K256_N100032_HS200064 SOURCE ${GEMV_I8W_CL}
+                 DEFINES M=1 K=256 N=100032 ${_ink_half_km} I8_N_STRIDE=200064)
+foreach(R 0 1)
+  add_ocloc_kernel(df_inkling_markov_H2304_R256_TP${R} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/inkling2/ink_draft.cl
+                   DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} TP_RANK=${R} TP_HALF=100032)
+  list(APPEND INKLING_KERNELS df_inkling_markov_H2304_R256_TP${R})
+endforeach()
+list(APPEND INKLING_KERNELS gemm_sm_i8w_M7_K2304_N100032_HS200064 gemv_i8w_M1_K256_N100032_HS200064)
+add_ocloc_kernel(df_prep_H2304_INK_CONTEXT_PREFILL_Q12KV4 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/dflash/df_prep.cl
+                 DEFINES ${CTRL_DEFINES} ${INKLING_DCTL} M=8 H=2304 WG=256 EPS=1e-06f INTER=4608 NH=12
+                         NKV=4 HD=128 RING=2048 INK_CONTEXT=1 INK_PREFILL=1)
+# ==== Plan 41k: Inkling 2 Mini's DFlash 2 drafter ==== (begin) ====
+# Additive only: new names. incoai/Inkling-2-Mini-DFlash2 (kernels::dflash::kInkling): hidden 2304, 32 / 8 heads x 128,
+# FF 6912, block 8, the 2048 window over a 2048-slot ring, conv group 16 x 2 taps, selector rank 256 with the softcap 30
+# after the correction, four taps (fc K 9216). Built here: df_prep and df_proj_wide at its hidden and MLP, df_select's
+# capped walk over its 201024 codebook rows, df_rerank over the target head's 200064 rows (200058 live), the drafter's
+# int8 linears at M 8 and the context projection's (fc, k||v) at every committed width; bound by name from spec 19b's
+# block: df_attn (Qwen3.8's drafter has the same 32 / 8 x 128 attention). The int8 head at the 7 draft rows is the
+# DSpark drafter's.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_ocloc_kernel(df_prep_M8_H2304_I6912_Q32KV8_D128_G16T2_R2048_V201024 SOURCE ${DF_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=2304 WG=256 EPS=1e-06f VOCAB=201024 GROUP=16 CTAPS=2
+                           INTER=6912 NH=32 NKV=8 HD=128 RING=2048 ROPE_INV=1)
+  # L5: both take the RoPE angles on the card from inv_freq (ROPE_INV), no per-position table
+  add_ocloc_kernel(df_proj_wide_H2304_KV8_D128_R2048 SOURCE ${DF_DIR}/df_proj_wide.cl
+                   DEFINES H=2304 WG=256 EPS=1e-06f NKV=8 HD=128 RING=2048 ROPE_INV=1)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V201024_CAP30 SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=201024
+                           SEL_CAP=30.0f)
+  # L3: the 2-bit head's 64 candidates a row (df_candidate_R7_N200064_U200058_K64) rescored on the int8 head's tiles
+  i8_order_defs(200064 _ink_rr_km)
+  add_ocloc_kernel(df_rerank_R7_K2304_U200058_C64_Q4 SOURCE ${DF_DIR}/df_rerank.cl
+                   DEFINES K=2304 USED=200058 N=200064 ${_ink_rr_km})
+  # tp: df_topk over a card's 100032 of the head's rows (card 1's 100026 live), the lists merged on both cards
+  foreach(U 100032 100026)
+    add_ocloc_kernel(df_topk_R7_N100032_U${U} SOURCE ${DF_DIR}/df_topk.cl DEFINES R=7 N=100032 USED=${U} TOPK=16
+                     CH=4096 COMPACT=0)
+  endforeach()
+  # L1: the drafter's linears int8 (one scale a row) on gemm_sm_i8w (kSmallMTuning's plan 41k rows, unsplit): q||k||v,
+  # o, gate||up, down, the conv kernel projections and the selector's at the block's 8 rows; the context projection of
+  # a step's committed rows (fc over the four taps, a layer's k||v) at 1..8 rows (gemv_i8w at one)
+  foreach(kn "2304;6144" "4096;2304" "2304;13824" "6912;2304" "2304;576" "2304;256")
+    list(GET kn 0 _k)
+    list(GET kn 1 _n)
+    if(NOT TARGET kernel_gemm_sm_i8w_M8_K${_k}_N${_n})
+      add_gemm_sm_variant(8 ${_k} ${_n} 1 2)
+      list(APPEND INKLING_SMALL_M kernel_gemm_sm_i8w_M8_K${_k}_N${_n})
+    endif()
+  endforeach()
+  foreach(M RANGE 1 8)
+    foreach(kn "9216;2304" "2304;2048")
+      list(GET kn 0 _k)
+      list(GET kn 1 _n)
+      if(M EQUAL 1)
+        if(NOT TARGET kernel_gemv_i8w_M1_K${_k}_N${_n})
+          add_gemv_i8w_variant(1 ${_k} ${_n})
+        endif()
+      elseif(NOT TARGET kernel_gemm_sm_i8w_M${M}_K${_k}_N${_n})
+        add_gemm_sm_variant(${M} ${_k} ${_n} 1 2)
+        list(APPEND INKLING_SMALL_M kernel_gemm_sm_i8w_M${M}_K${_k}_N${_n})
+      endif()
+    endforeach()
+  endforeach()
+endif()
+# ==== Plan 41k: Inkling 2 Mini's DFlash 2 drafter ==== (end) ====
 set_property(GLOBAL APPEND PROPERTY B70_GEMM_SM_KERNELS ${INKLING_SMALL_M})
 set(B70_INKLING_KERNELS ${INKLING_KERNELS} CACHE INTERNAL "Inkling shared kernel variants")
 set(B70_INKLING_PREFILL_KERNELS
@@ -3193,10 +3504,22 @@ set(B70_INKLING_PREFILL_KERNELS
     kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_W1024_R4096 kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F
     kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8 ink_prep_Q24KV8_D128_REL16_PREFILL_KV8
     kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_W1024_R4096_PAIR kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_PAIR
-    kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR
+    kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_I8S_PAIR
+    kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_PAIR_SPLIT kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR_SPLIT
+    kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_I8S_PAIR_SPLIT
     ink_prep_Q24KV8_D128_REL16_PREFILL pf_ink_slab pf_gemm_T0 pf_gemm_T0_CS pf_gemm_small_A2_B2_S4 pf_gemm_small_A2_B2_S2_INK
     ink_glue_H2304_PREFILL df_prep_H2304_INK_CONTEXT_PREFILL
     pf_moe_q4gemm_K2304_N2304_BF16_INK_NVFP4 pf_moe_q4gemm_K2304_N2304_BF16_INK_MXFP8
     pf_moe_q4gemm_K1152_N2304_BF16_INK_NVFP4 pf_moe_q4gemm_K1152_N2304_BF16_INK_MXFP8
-    kol_pf_moe_E128_T8_D2304_I1152_INK_BF16 ink_glue_H2304_PREFILL_BF16
+    kol_pf_moe_E128_T8_D2304_I1152_INK_BF16 ink_glue_H2304_PREFILL_BF16 ink_int8_K2304 ink_int8_K3072 pf_gemm_i8
+    ink_glue_H2304_PREFILL_TP ink_glue_H2304_PREFILL_BF16_TP ink_prep_Q12KV4_D128_REL16_PREFILL
+    ink_prep_Q12KV4_D128_REL16_PREFILL_KV8 kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_W1024_R4096_PAIR
+    kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_F_PAIR kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_F_KV8_PAIR
+    kol_pf_flash_attn_Q12KV4_REL16_SINK_GATE_F_KV8_I8S_PAIR
+    pf_moe_q4gemm_K2304_N1152_F32_INK_NVFP4 pf_moe_q4gemm_K2304_N1152_F32_INK_MXFP8
+    pf_moe_q4gemm_K576_N2304_F32_INK_NVFP4 pf_moe_q4gemm_K576_N2304_F32_INK_MXFP8
+    pf_moe_q4gemm_K2304_N1152_BF16_INK_NVFP4 pf_moe_q4gemm_K2304_N1152_BF16_INK_MXFP8
+    pf_moe_q4gemm_K576_N2304_BF16_INK_NVFP4 pf_moe_q4gemm_K576_N2304_BF16_INK_MXFP8
+    kol_pf_moe_E128_T8_D2304_I576_INK_TP kol_pf_moe_E128_T8_D2304_I576_INK_TP_BF16 ink_int8_K1536
+    df_prep_H2304_INK_CONTEXT_PREFILL_Q12KV4
     CACHE INTERNAL "Inkling prompt kernel variants")

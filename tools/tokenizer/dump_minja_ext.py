@@ -28,7 +28,9 @@ env.filters["tojson"] = lambda x, indent=None, separators=None, sort_keys=False:
 ctx = {"n": None, "t": True, "f": False, "one": 1, "s": "text", "e": {}, "l": [],
        "d": {"k": "v", "n": None, "z": 0}, "pairs": [["a", 1], ["b", 2], ["a", 3]],
        "fl": [1.0, 2.5, 1e20, 1e-07, 0.1, 123456789.125, 1e16, 1e15, 0.0001, 0.00001, -0.0, -3.75, 100.0, 5e-324,
-              1.7976931348623157e308, 0.30000000000000004, 12345678901234567.0, 0.5]}
+              1.7976931348623157e308, 0.30000000000000004, 12345678901234567.0, 0.5],
+       "u": {"b": 1, "B": 2, "a": {"z": [1, {"y": "ü\"<", "x": 0.5}], "A": None}, "_": "x"},
+       "w": {"p": 3, "q": 1, "r": 2, "P": 1}}
 
 cases = [
     # undefined is not None: `defined` holds for a None value, fails for a missing one.
@@ -68,6 +70,21 @@ cases = [
     ("float_str", "{% for x in fl %}{{ x | string }} {% endfor %}| {% for x in fl %}{{ x }} {% endfor %}| "
                   "{{ 'a=' + (2.5 | string) + ',' + (1.0 | string) }}"),
     ("float_tojson", "{{ fl | tojson }}"),
+    # b70 patch (spec 41f): dictsort's case_sensitive / by / reverse (Inkling 2's template sorts call arguments with
+    # case_sensitive=true; Jinja's default folds case).
+    ("dictsort", "{% for k, v in u | dictsort %}{{ k }},{% endfor %}|{% for k, v in u | dictsort(case_sensitive=true) %}"
+                 "{{ k }},{% endfor %}|{% for k, v in u | dictsort(reverse=true) %}{{ k }},{% endfor %}|"
+                 "{% for k, v in w | dictsort(by='value') %}{{ k }}{% endfor %}|"
+                 "{% for k, v in w | dictsort(false, 'value', true) %}{{ k }}{% endfor %}"),
+    # b70 patch (spec 41f): tojson's separators and sort_keys (Inkling 2's tool declarations and call arguments).
+    ("tojson_sort_separators", "{{ u | tojson(sort_keys=true, separators=(',', ':')) }} {{ u | tojson(separators=(',', ':')) }} "
+                               "{{ u | tojson(sort_keys=true) }} {{ 'k\"x' | tojson(sort_keys=true, separators=(',', ':')) }} "
+                               "{{ fl[1:3] | tojson(separators=(',', ':')) }} {{ u | tojson }}"),
+    # b70 patch (spec 41f): a trailing comma in a dict or list literal.
+    ("trailing_comma", "{{ {'a': 1, 'b': [1, 2,],} | tojson }} {{ [3,] | length }}"),
+    # b70 patch (spec 41f): the float filter.
+    ("float_filter", "{{ 1 | float }} {{ 0.45 | float }} {{ ' 2.5 ' | float }} {{ 'x' | float }} {{ 'x' | float(1.5) }} "
+                     "{{ true | float }} {{ (0 | float) == 0.0 }}"),
     # an empty mapping is falsy.
     ("empty_mapping", "{% if e %}T{% else %}F{% endif %}{% if d %}T{% else %}F{% endif %}"
                       "{{ 'yes' if e else 'no' }}{{ (e or 'fallback') }}"),

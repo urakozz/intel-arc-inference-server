@@ -439,6 +439,43 @@ int main() {
     CHECK_EQ(refusal(qwen, {{"enable_thinking", 5}}, "anything"), std::string("(accepted)"));
     CHECK_EQ(server::request_template_kwargs(kol, nlohmann::json::object(), "low").dump(),
              std::string(R"({"reasoning_effort":"low"})"));
+    // Spec 41f: Inkling 2's effort - one of the seven names or a number in [0, 0.99], top-level or a kwarg (the kwarg
+    // wins); enable_thinking false is effort none where nothing names one.
+    const server::ChatFormat ink = server::ChatFormat::for_model_type("inkling2_loop");
+    CHECK(ink.kind == server::ChatFormat::Kind::Inkling && ink.template_kwargs() && !ink.string_content());
+    CHECK_EQ(std::string(ink.name()), std::string("inkling2"));
+    const std::string ink_says = "must be one of none, minimal, low, medium, high, xhigh, max, or a number from 0 to 0.99";
+    CHECK_EQ(refusal(ink, {{"reasoning_effort", "huge"}}, nullptr), "chat_template_kwargs.reasoning_effort " + ink_says);
+    CHECK_EQ(refusal(ink, {{"reasoning_effort", 1.5}}, nullptr), "chat_template_kwargs.reasoning_effort " + ink_says);
+    CHECK_EQ(refusal(ink, {{"reasoning_effort", true}}, nullptr), "chat_template_kwargs.reasoning_effort " + ink_says);
+    CHECK_EQ(refusal(ink, nlohmann::json::object(), -0.1), "reasoning_effort " + ink_says + " (Inkling 2)");
+    CHECK_EQ(refusal(ink, {{"reasoning_effort", 0.99}}, "minimal"), std::string("(accepted)"));
+    CHECK_EQ(server::request_template_kwargs(ink, nlohmann::json::object(), "minimal").dump(),
+             std::string(R"({"reasoning_effort":"minimal"})"));
+    CHECK_EQ(server::request_template_kwargs(ink, nlohmann::json::object(), 0.3).dump(),
+             std::string(R"({"reasoning_effort":0.3})"));
+    CHECK_EQ(server::request_template_kwargs(ink, {{"reasoning_effort", "low"}}, "max").dump(),
+             std::string(R"({"reasoning_effort":"low"})"));
+    CHECK_EQ(server::request_template_kwargs(ink, nlohmann::json::object(), nullptr).dump(), std::string("{}"));
+    CHECK_EQ(server::request_template_kwargs(ink, nlohmann::json::object(), nullptr, /*thinking=*/false).dump(),
+             std::string(R"({"reasoning_effort":"none"})"));
+    CHECK_EQ(server::request_template_kwargs(ink, {{"enable_thinking", false}}, nullptr).dump(),
+             std::string(R"({"enable_thinking":false,"reasoning_effort":"none"})"));
+    CHECK_EQ(server::request_template_kwargs(ink, {{"enable_thinking", false}}, "high").dump(),
+             std::string(R"({"enable_thinking":false,"reasoning_effort":"high"})"));
+    // Its image and audio parts are refused before the template (no encoder is loaded), by the shared media rule.
+    for (const char* type : {"image_url", "input_audio"}) {
+      bool refused = false;
+      try {
+        (void)server::parse_request(std::string(R"({"messages":[{"role":"user","content":[{"type":")") + type +
+                                        R"(","text":"x"}]}],"reasoning_effort":"low"})",
+                                    true);
+      } catch (const server::BadRequest& e) {
+        refused = std::string(e.what()).find(std::string("content part of type '") + type + "' is refused") !=
+                  std::string::npos;
+      }
+      CHECK(refused);
+    }
   }
 
   return 0;

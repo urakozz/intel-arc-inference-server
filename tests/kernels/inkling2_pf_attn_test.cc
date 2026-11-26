@@ -98,6 +98,49 @@ int main() {
       list.copy(split.data(), out.ptr(), out.size());
       CHECK(all == split);
     }
+    // PERF-12 (full layers): the split-K form, three key spans then the merge, within the FP32 twin's tolerance of the
+    // whole walk on every (row, head).
+    if (!local) {
+      constexpr uint32_t spans = 3, span = pos / spans / 64 * 64;
+      std::vector<float> partials(size_t(spans) * rows * D::q_heads * (D::head_dim + 2));
+      auto parts = upload(partials);
+      l0::Module split_module(ctx, kernels::path(ink::prefill_attn(false) + "_PAIR_SPLIT"));
+      auto sk = split_module.kernel("kol_pf_flash_attn");
+      sk.group_size(ink::kPrefillAttnGroup);
+      sk.arg_ptr(0, qd.ptr());
+      sk.arg_ptr(1, kd.ptr());
+      sk.arg_ptr(2, vd.ptr());
+      sk.arg_ptr(3, out.ptr());
+      sk.arg(4, pos);
+      sk.arg(5, rows);
+      sk.arg_ptr(6, rd.ptr());
+      sk.arg_ptr(7, td.ptr());
+      sk.arg_ptr(8, sd.ptr());
+      sk.arg_ptr(9, gd.ptr());
+      sk.arg(10, span);
+      sk.arg_ptr(11, parts.ptr());
+      list.launch(sk, (rows + 15) / 16, D::kv_heads, spans);
+      auto merge = split_module.kernel("kol_pf_flash_merge");
+      merge.group_size(D::head_dim);
+      merge.arg_ptr(0, parts.ptr());
+      merge.arg_ptr(1, out.ptr());
+      merge.arg(2, rows);
+      merge.arg(3, spans);
+      merge.arg_ptr(4, sd.ptr());
+      merge.arg_ptr(5, gd.ptr());
+      list.launch(merge, D::q_heads, rows);
+      list.copy(split.data(), out.ptr(), out.size());
+      for (size_t at = 0; at < all.size(); at += D::head_dim) {
+        double cross = 0., na = 0., nb = 0.;
+        for (uint32_t i = 0; i < D::head_dim; ++i) {
+          const double a = bf16_to_f32(all[at + i]), b = bf16_to_f32(split[at + i]);
+          cross += a * b;
+          na += a * a;
+          nb += b * b;
+        }
+        CHECK(cross / std::sqrt(na * nb) >= .99999);
+      }
+    }
     for (uint32_t row : {0u, 4u, 5u, 10u, 11u, rows - 1}) {
       const uint32_t p = pos + row, lo = local ? p - D::window + 1 : 0;
       for (uint32_t head : {0u, 2u, 7u, 23u}) {
@@ -139,5 +182,5 @@ int main() {
     }
   }
   std::puts("Inkling prompt attention matches the FP32 twin, is bitwise across a split at the window wrap, and the PAIR "
-            "form is bitwise the 8-row form");
+            "form is bitwise the 8-row form; the split-K form agrees with the whole walk");
 }

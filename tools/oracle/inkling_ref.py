@@ -164,8 +164,9 @@ def attention(inputs, w, c, positions, state, local, cache=None):
     v = convolve(v, w, "attn.v_sconv", state.conv, dynamic_input=None if local else vx, heads=kv)
     k = clip(k.view(1, t, kv, d), c["qk_l2_clip_threshold"]).transpose(1, 2)
     v = rms(v.view(1, t, kv, d), eps).transpose(1, 2)
-    if cache == "int8" and not local:
-        k, v = (kv8_fq(x).to(x.dtype) for x in (k, v))
+    if cache in ("int8", "int8-k", "int8-v") and not local:   # int8-k / int8-v: only K / only V int8, the other bf16
+        k, v = (kv8_fq(x).to(x.dtype) if cache in ("int8", "int8-" + n) else x.to(torch.bfloat16).to(x.dtype)
+                for x, n in ((k, "k"), (v, "v")))
     elif cache is not None:
         k, v = (x.to(torch.bfloat16).to(x.dtype) for x in (k, v))
     if state.kv is not None:
@@ -253,7 +254,7 @@ class Inkling:
         ordered = select.topk(self.c["num_experts_per_tok"] + 1).values
         return result.view_as(x).to(x.dtype), (top[None], coeff[None], (ordered[:, -2] - ordered[:, -1])[None])
 
-    def layer(self, x, blocks, i, state, pos, messages):
+    def layer(self, x, blocks, i, state, pos, messages, visit=None):
         c, w = self.c, {}
         for key in self.layers[i]:
             value = self.weights[f"{ROOT}layers.{i}.{key}"]
@@ -267,7 +268,11 @@ class Inkling:
         if messages is not None:
             z = tuple(controller(a, m, w, s, eps, self.dtype) for a, m, s in zip(z, messages, STREAMS))
         inp = tuple(rms(a, eps, w[k]).to(self.dtype) for a, k in zip(z, keys))
-        y = attention(inp, w, c, pos, state, local, self.kv)
+        kv = self.kv   # "<form>~V1+V2": the form, with visits V1, V2 (walk order) kept bf16
+        if kv and "~" in kv:
+            kv, keep = kv.split("~")
+            kv = "bf16" if str(visit) in keep.split("+") else kv
+        y = attention(inp, w, c, pos, state, local, kv)
         y = convolve(y, w, "attn_sconv", state.conv).float()
         if i % c["n_layers_per_attn_res_block"] == 0:
             blocks.append(x)
@@ -302,7 +307,7 @@ class Inkling:
                     kv = self.weights[ROOT + "middle_cycle_cross_pass_kv_queries"]
                     queries = torch.stack((q[a], kv[a], kv[a + 1], q[a + 1]))
                     msg = mix(*upstream, queries)
-                x, route = self.layer(x, blocks, i, cache.visits[v], pos, msg)
+                x, route = self.layer(x, blocks, i, cache.visits[v], pos, msg, v)
                 trace.outputs.append(x)
                 trace.routes.append(route)
 
@@ -403,6 +408,11 @@ def write_golden(model, ids, out, *, gen=0, chunk=64, force=None, prefill_tail=F
 
 
 def main():
+    import importlib.util as _cl_util
+    _cl = _cl_util.spec_from_file_location("cpu_lock", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpu_lock.py"))
+    _cl_mod = _cl_util.module_from_spec(_cl)
+    _cl.loader.exec_module(_cl_mod)
+    _cl_mod.hold()   # one CPU reference job at a time: refuse beside another
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
     for command in ("run", "acceptance"):

@@ -263,7 +263,7 @@ void refusals() {
     o.spec_lookup = true;
     CHECK(throws(engine, o));
   }
-  // Off (B70_SPEC_LOOKUP=0): the engine's lookup path is never asked.
+  // Off (spec_mtp_lookup unset, the test-only arm): the engine's lookup path is never asked.
   Fixture f(Mode::Mtp);
   f.engine.script = tok.encode("a b c");
   (void)post(f, "/v1/completions", completion("a b c a b", 3, false));

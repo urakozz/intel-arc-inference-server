@@ -120,7 +120,8 @@ __kernel void df_w_norm(__global const float* restrict src, __global const float
   }
 }
 
-// One head's RMSNorm over HD lanes and neox RoPE from the table [pos][cos HALF | sin HALF] (df_prep.cl's).
+// One head's RMSNorm over HD lanes and neox RoPE from the table [pos][cos HALF | sin HALF]
+// (ROPE_INV: from inv_freq [HALF], the angle computed) (df_prep.cl's).
 inline float head_norm_rope(float x, __global const float* restrict w, __global const float* restrict rope, uint pos,
                             __local float* y) {
   const uint i = get_local_id(0);
@@ -135,9 +136,15 @@ inline float head_norm_rope(float x, __global const float* restrict w, __global 
   const float v = (x * rstd) * w[i];
   y[i] = v;
   barrier(CLK_LOCAL_MEM_FENCE);
+#if ROPE_INV   /* the angles on the card: fp32 pos x inv_freq (the reference's product), `rope` its [HALF] */
+  const uint j = i % HALF;
+  const float a = (float)pos * rope[j], cj = cos(a), sj = sin(a);
+  const float o = i < HALF ? v * cj - y[i + HALF] * sj : v * cj + y[i - HALF] * sj;
+#else
   __global const float* c = rope + (size_t)pos * HD;
   const uint j = i % HALF;
   const float o = i < HALF ? v * c[j] - y[i + HALF] * c[HALF + j] : v * c[j] + y[i - HALF] * c[HALF + j];
+#endif
   barrier(CLK_LOCAL_MEM_FENCE);
   return o;
 }

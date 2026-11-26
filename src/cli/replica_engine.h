@@ -139,6 +139,8 @@ class ReplicaEngine : public server::BatchEngineIface {
             f.mtp_lookup = e->mtp_lookup();
             f.wide_k = e->lookup_wide_k();
             f.chooses = e->chooses_drafts();
+            f.dflash_window = e->dflash_window();
+            f.deep_k = e->lookup_deep_k();
           } else {
             server::BatchEngineIface& b = *cards_[c].slots;
             f.max_len = b.slot_max_len(l);
@@ -169,6 +171,8 @@ class ReplicaEngine : public server::BatchEngineIface {
   ~ReplicaEngine() override {
     for (auto& f : inflight_)
       if (f.valid()) f.wait();   // a prefill still on a card finishes before the threads go
+    for (auto& f : steps_)
+      if (f.valid()) f.wait();   // and a step (plan 41f)
     workers_.clear();   // joins every card's thread
   }
 
@@ -323,6 +327,13 @@ class ReplicaEngine : public server::BatchEngineIface {
     return true;
   }
   uint32_t lookup_wide_k(uint32_t slot) override { return facts_.at(slot).wide_k; }
+  uint32_t lookup_deep_k(uint32_t slot) override { return facts_.at(slot).deep_k; }
+  // Plan 41f: lookup inside every card's drafter needs it on all of them, at one window.
+  uint32_t dflash_window() override {
+    for (const Facts& f : facts_)
+      if (f.dflash_window == 0 || f.dflash_window != facts_[0].dflash_window) return 0;
+    return facts_[0].dflash_window;
+  }
   bool chooses_drafts() override {
     for (const Facts& f : facts_)
       if (!f.chooses) return false;
@@ -343,7 +354,9 @@ class ReplicaEngine : public server::BatchEngineIface {
       done.push_back({worker(row.slot).post([this, row, &runs, r] {
                         using E = server::EngineIface;
                         E& e = card(row.slot);
-                        if (row.mtp_lookup)
+                        if (row.lookup_cap != nullptr) *row.lookup_cap = e.lookup_cap(*row.sampling);
+                        if (row.dflash_lookup) runs[r] = e.step_drafts_or_many(*row.sampling, row.k, *row.propose);
+                        else if (row.mtp_lookup)
                           runs[r] = e.step_drafts_or_confirmed(*row.sampling, row.k, *row.propose,
                                                                row.choose ? *row.choose : E::DraftChoice{},
                                                                row.confirm ? *row.confirm : E::LookupConfirm{});
@@ -361,6 +374,25 @@ class ReplicaEngine : public server::BatchEngineIface {
                                }));
     join(done, errors, &runs);
     return runs;
+  }
+  // Plan 41f: per-card stepping - a card's step_spec on its own (a helper thread posts it to the card's worker and
+  // joins it there), so the scheduler starts each card's next step when that card is free.
+  bool steps_per_card() override { return true; }
+  void step_spec_begin(const std::vector<SpecRow>& rows) override {
+    if (rows.empty()) throw std::logic_error("ReplicaEngine::step_spec_begin: no rows");
+    const uint32_t c = slot_card_.at(rows[0].slot);
+    for (const SpecRow& r : rows)
+      if (slot_card_.at(r.slot) != c) throw std::logic_error("ReplicaEngine::step_spec_begin: rows of two cards");
+    if (steps_.size() < cards_.size()) steps_.resize(cards_.size());
+    if (steps_[c].valid()) throw std::logic_error("ReplicaEngine: card " + std::to_string(c) + " has a step in flight");
+    steps_[c] = std::async(std::launch::async, [this, rows] { return step_spec(rows); });
+  }
+  bool step_ready(uint32_t c) override {
+    return c >= steps_.size() || !steps_[c].valid() || steps_[c].wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+  }
+  std::vector<std::vector<uint32_t>> step_spec_end(uint32_t c) override {
+    std::future<std::vector<std::vector<uint32_t>>> done = std::move(steps_.at(c));   // the card is free whatever get() throws
+    return done.get();
   }
   void truncate_to(uint32_t slot, uint32_t p) override {
     on(slot, [&] {
@@ -459,6 +491,8 @@ class ReplicaEngine : public server::BatchEngineIface {
     uint64_t kv_form = 0, drafter_key = 0;
     bool mtp_lookup = false, chooses = false;   // open-work 27 / 13: single-sequence cards only
     uint32_t wide_k = 0;                        // open-work 28
+    uint32_t dflash_window = 0;                 // plan 41f: the card's tap drafter's window (single-sequence cards)
+    uint32_t deep_k = 0;                        // plan 41f: its deepest lookup verify (spec 32)
   };
   // A posted call and the rows (of the multi-slot call) it serves.
   struct Post {
@@ -563,7 +597,8 @@ class ReplicaEngine : public server::BatchEngineIface {
   bool hooked_, wide_;
   std::vector<Facts> facts_;
   std::vector<uint32_t> slot_card_, slot_local_;      // per slot: its card, its number on the card
-  std::vector<std::future<void>> inflight_;          // per slot: the prefill started, not yet joined
+  std::vector<std::future<void>> inflight_;
+  std::vector<std::future<std::vector<std::vector<uint32_t>>>> steps_;   // plan 41f: each card's step in flight          // per slot: the prefill started, not yet joined
   std::vector<std::unique_ptr<CardWorker>> workers_;   // one thread per card
 };
 

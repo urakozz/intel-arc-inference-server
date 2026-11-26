@@ -159,7 +159,20 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {2304, 384, 1, 2, false, false, false, false, kSmVerify8},
     {2304, 64, 1, 2, false, false, false, false, kSmVerify8},
     {2304, 200064, 1, 2, false, false, false, false, kSmVerify8},
-    {3072, 2304, 1, 2, false, false, false, false, kSmVerify8},
+    {3072, 2304, 1, 2, true, false, false, false, kSmVerify8},     // o_proj: 36 column groups took 62 us at 2 rows
+    {2304, 200064, 1, 3, false, false, false, false, kSmVerify8},  // PERF-123: the head's 2-bit candidate pass
+    {2304, 512, 1, 2, false, false, false, false, kSmVerify8},     // and the exact rescore (the full head's knobs)
+    {1536, 2304, 1, 2, true, false, false, false, kSmVerify8},     // o_proj on a `--parallel tp` card (its 12 heads)
+    // Plan 41k L1: Inkling's DFlash 2 drafter's int8 linears - the block's q||k||v, o, gate||up, down, the conv
+    // kernel projections and the selector's at 8 rows (kSmDraft8), the context's fc and k||v at 2..8 (kSmVerify8); unsplit
+    {2304, 6144, 1, 2, false, false, false, false, kSmDraft8},
+    {4096, 2304, 1, 2, false, false, false, false, kSmDraft8},
+    {2304, 13824, 1, 2, false, false, false, false, kSmDraft8},
+    {6912, 2304, 1, 2, false, false, false, false, kSmDraft8},
+    {2304, 576, 1, 2, false, false, false, false, kSmDraft8},
+    {2304, 256, 1, 2, false, false, false, false, kSmDraft8},
+    {9216, 2304, 1, 2, false, false, false, false, kSmVerify8},
+    {2304, 2048, 1, 2, false, false, false, false, kSmVerify8},
     // Qwen3.8
     // (g256_from 32, spec 32: at 32 rows gemm_sm spills at 128 GRF - qkv||z 1285 us against 99 at 256; the int4
     // rows take gemm_sm_wide at 32 and 64 rows instead, spec 32e: the per-shape best of plan 34a Task 1's arms, a

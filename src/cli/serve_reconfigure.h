@@ -2,7 +2,7 @@
 // b70-serve's reconfigure in place (POST /v1/control/reconfigure, server::Options::reconfigure): the settings that
 // change only how the loaded model runs, switched between requests without a reload; every other flag is refused as
 // needing a restart. A key is a flag of `Flags` (cli/flags.h) without "--", its value a string or a non-negative integer:
-//   spec           the proposer the server started with (mtp, lookup, dflash, dflash-lookup; auto when it started
+//   spec           the proposer the server started with (mtp, dflash; auto when it started
 //                  with auto) or off - the MTP head / the DFlash drafter stays loaded while off
 //   spec-max       that proposer's K, 1 up to the K it started with (kept while off)
 //   host-experts   auto|gpu|cpu (Qwen3.8-Flash-Next, where the CPU route was built: started with auto or cpu)
@@ -23,7 +23,7 @@ namespace cli {
 
 // What a b70-serve switches in place, as it started.
 struct InPlace {
-  std::string spec = "off";   // the proposer started (resolved: mtp, lookup, dflash, dflash-lookup), "off" none
+  std::string spec = "off";   // the proposer started (resolved: mtp, dflash), "off" none
   bool spec_auto = false;     // it came from --spec auto
   uint32_t spec_max = 0;      // its K at startup
   // The adapter: the started proposer at K, or none (on == false).

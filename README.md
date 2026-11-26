@@ -7,6 +7,9 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 - **Qwen3.8-27B:** **167 t/s** writing code for one session on one card (DFlash), **343 t/s** for 4 requests; **626 t/s** in total with 8 requests on two cards.
 - Prefill at **2,800 t/s** on one card / **3,467 t/s** on two cards with `tp` (opt-in int8 prefill engine).
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
+- **Inkling 2 Mini:** prefill at **4,987 t/s** on one card and **7,194 t/s** on two (`pp`, 16k prompt); prose written at
+  **248 t/s** and code at **194 t/s** on one card, **310 t/s** prose on two cards (`tp`, `--spec dflash`); the full **1,048,576-token**
+  context on two cards.
 - **Ornith 1.5 35B-A3B:** prefill at **11,223 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 
 One choice to make - how many requests run at once. The engine sizes everything else.
@@ -22,6 +25,10 @@ Each model runs from our own int4 quantisation (AutoRound, group 64, GPTQ format
   [DFlash drafter](https://huggingface.co/urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound) for faster writing.
 - **[Ornith 1.5 35B-A3B](https://huggingface.co/urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ)** - MoE (the
   Qwen3.5-35B-A3B architecture, tuned for code), MTP head. One card.
+- **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)** - looped MoE (24 layers run as 48
+  visits), the release itself (its NVFP4 / MXFP8 experts run exactly), its own DSpark drafter, or the faster
+  [DFlash 2 drafter](https://huggingface.co/incoai/Inkling-2-Mini-DFlash2) when downloaded (picked by itself). One card; two cards
+  `tp` for one faster session, `pp` for the 1,048,576-token context with `--kv-cache int8`.
 
 ## Speed
 
@@ -44,12 +51,34 @@ Generation, t/s:
 |---|---:|---:|---:|
 | MTP, two cards `pp` | 79 | 63 | 98-123 |
 | MTP, two cards `tp` | **99** | **64** | **84-126** |
-| MTP, two cards `tp`, PCIe 5.0 x16 + DDR5 4+ channels (estimate) | ~125-155 | | |
+| MTP, two cards `tp`, PCIe 5.0 x16 + DDR5 | ~125-155 | | |
 
 Flash-Next needs at least 128 GB of system RAM: the experts that do not fit VRAM, its n-gram table and the prefix
 cache take about 104 GB of it
 
 Measured on a PCIe 3.0 workstation with DDR4-2133 and P2P. PCIe 5.0 x16, DDR5 RAM, AVX-512 CPU speed it up
+
+### Inkling 2 Mini
+
+| setup | prefill, 4k prompt | code | prose | tool calls |
+|---|---:|---:|---:|---:|
+| one card, the DFlash 2 drafter | 4,780 | 193.5 | 247.6 | 147.2 |
+| one card, its own DSpark drafter | 4,780 | 174.6 | 204.3 | 144.4 |
+| two cards `pp`, the DFlash 2 drafter (`l0-int8` prompt pass) | 5,976 | 182.5 | 243.8 | 145.9 |
+| two cards `tp`, its own DSpark drafter (`l0-int8` prompt pass) | 6,173 | 202.8 | 260.2 | 196.0 |
+| two cards `tp`, the DFlash 2 drafter (`--spec dflash`) | 6,173 | 216.8 | 309.8 | 187.9 |
+| 2 requests, two cards `replica`, the DFlash 2 drafter (total) | - | 351 | 452 | 286 |
+
+| prefill (`l0-int8`, int8 cache), t/s | 4k | 16k | 32k | 64k |
+|---|---:|---:|---:|---:|
+| one card | 4,932 | 4,506 | 3,939 | 3,137 |
+| two cards `pp` | 5,976 | **7,194** | **6,908** | **5,842** |
+| two cards `tp` | **6,173** | 6,384 | 5,794 | 4,801 |
+
+| two cards `pp`, int8 cache, the drafter on | prompt | decode |
+|---|---:|---:|
+| 128k context | 3,710 | 47.2 |
+| 1 Mi context (a 1,039,565-id prompt) | 762 | 15.1 |
 
 ### Qwen3.8-27B
 
@@ -104,7 +133,7 @@ The host needs Linux with the `xe` kernel driver (the container uses the host's 
 from kernel 7.4). The image brings the rest:
 
 ```sh
-docker pull urakozz/intel-arc-inference-server:1.0.1
+docker pull urakozz/intel-arc-inference-server:1.1.0
 
 # the engine never downloads; fetch the model into the Hugging Face cache once
 # Qwen3.8-Flash-Next, about 133 GB: skips 96 GB of the bf16 n-gram table, which only other engines read
@@ -117,6 +146,10 @@ hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound   # the DFlash draft
 
 # Ornith 1.5 (Qwen3.5-35B-A3B architecture, code optimised)
 hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
+
+# Inkling 2 Mini (looped MoE, its drafter in the checkpoint), 20.2 GB
+hf download thinkingmachines/Inkling-2-Mini
+hf download incoai/Inkling-2-Mini-DFlash2   # optional, its faster drafter (used when present)
 ```
 
 Or build it yourself: the [Dockerfile](Dockerfile) (`docker build -t urakozz/intel-arc-inference-server .`), or
@@ -138,7 +171,7 @@ weights with AutoRound, in groups of 64 rather than the usual 128 - better accur
 # an OpenAI-compatible server on port 8000 (built from source: ./build/src/cli/b70-serve in place of $B70);
 # GET /health answers 503 while the model loads, 200 once it serves
 B70="docker run --rm --device /dev/dri --group-add $(getent group render | cut -d: -f3) \
-    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server:1.0.1"
+    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server:1.1.0"
 
 # Qwen3.8-Flash-Next on two cards: every layer split over both, the experts in host RAM computed on the CPU (the
 # defaults: the fastest session), MTP on
@@ -161,6 +194,9 @@ $B70 urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
 
 # Ornith 1.5 35B-A3B: its own MTP head, the default prompt pass
 $B70 urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ --prefix-split-last
+
+# Inkling 2 Mini: one card, its drafter on by default
+$B70 thinkingmachines/Inkling-2-Mini
 ```
 
 You choose one thing: **how many requests run at once**, `--max-num-seqs N`. The engine sizes everything else
@@ -206,34 +242,7 @@ Kolibri-1); Qwen3.8 is the one everything is tuned for.
 | `--layers N\|auto` | - | Qwen3.8-Flash-Next only: serve its first N layers |
 | `--host-experts auto\|gpu\|cpu` | `auto` | Qwen3.8-Flash-Next: how experts held in host RAM are served. `auto` picks per step from a startup measurement, `gpu` reads them over PCIe into the card, `cpu` computes them on the CPU. Same output either way |
 
-`b70-decode` (greedy decoding from token ids, benchmarks, profiles):
-
-| flag | default | what it does |
-|---|---|---|
-| `--ids FILE` | - | prompt ids, whitespace-separated; generated ids go to stdout |
-| `--n N` | - | ids to generate |
-| `--prefill` | off | run the prompt through the chunked prefill |
-| `--spec off\|mtp\|dflash`, `--spec-max K` | `off` | as for `b70-serve` |
-| `--max-len L\|auto`, `--parallel auto\|1\|pp\|tp`, `--kv-cache`, `--prefill-backend` | `16384`, ... | as for `b70-serve` |
-| `--layers N\|auto` | - | load only the first N layers (Kolibri-1, Qwen3.8-Flash-Next) |
-| `--host-experts auto\|gpu\|cpu` | `auto` | as for `b70-serve` |
-
-Developer flags (`b70-decode`):
-
-| flag | default | what it does |
-|---|---|---|
-| `--bench` | - | time `--tg` generated ids after `--depth` ids of context (or a `--prefill-length N` prompt); prints a markdown row |
-| `--depth D` | `4096` | context before decoding, for `--bench` / `--profile` |
-| `--prefill-length N` | - | `--bench`: prefill N ids and print the prefill row too |
-| `--tg N` | `256` | ids to generate in `--bench` |
-| `--prefill-chunk C` | `2048` | positions per prefill chunk, at most 4096 |
-| `--profile`, `--steps N`, `--repeats R` | -, `32`, `1` | per-launch timing of the decode step |
-| `--pipeline-split auto\|N` | `auto` | with `pp`: where the layers are cut |
-| `--draft-vocab off\|32k\|64k\|128k`, `--draft-vocab-ids FILE` | `off` | MTP guesses from a smaller vocabulary (`b70-serve`) |
-| `--spec lookup\|dflash-lookup` (`b70-serve`) | - | prompt lookup alone (verified through the MTP lists), or inside DFlash (what `dflash` already does) |
-| `--plan` | off | Inkling 2 Mini: print the one-card memory plan from the checkpoint's headers (with `--max-len`, `--spec`), then exit |
-
-Environment variables (test switches, tool settings, the Hugging Face cache): [docs/environment-variables.md](docs/environment-variables.md).
+`b70-decode` (benchmarks, profiles, decoding from token ids) and the environment variables: [docs/18-development.md](docs/18-development.md).
 
 ## Docs
 

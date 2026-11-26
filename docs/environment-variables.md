@@ -24,7 +24,6 @@ The page has four parts:
 
 | variable | read by | default | what it does |
 |---|---|---|---|
-| `B70_SPEC_LOOKUP` | `b70-serve` with `--spec auto`, `mtp` or `dflash` | on | `0` turns prompt lookup off, so the server runs plain MTP or plain DFlash. Prompt lookup copies earlier text as a guess (see [17-running-models.md](17-running-models.md#prompt-lookup)); this switch is the comparison arm against it. Only the exact value `0` counts. `--spec dflash-lookup` ignores it |
 | `B70_SPEC_LOOKUP_ROWS` | one card, MTP with prompt lookup | `64` | `16`, `32` or `64`: the widest verify list a long copied run may use. Any other value is refused |
 | `B70_MTP_ADAPTIVE` | `b70-serve` with the MTP head | on | `0` drafts a fixed K = `--spec-max` instead of choosing K from each request's acceptance. For A/B runs and for measuring the cost table |
 | `B70_MTP_STEP_K` | `b70-serve` with the MTP head | on | `0` goes back to choosing the number of MTP guesses once per request. By default the server decides at every step, from the head's own confidence, whether to guess again |

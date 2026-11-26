@@ -1,0 +1,124 @@
+{
+ "comment": "Inkling 2 Mini's chat template cases (spec 41f Task 1): tools/tokenizer/dump_inkling2.py renders each through transformers' apply_chat_template into inkling2_template_<name>.txt; template_inkling2_test compares the engine's render. A case with \"error\" must be refused by the template with that text.",
+ "bos_token": "",
+ "eos_token": "<|content_model_end_sampling|>",
+ "tools": {
+  "read": {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the workspace.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {"type": "string", "description": "Absolute path"},
+      "offset": {"type": "integer", "description": "First line, 1-based"},
+      "limit": {"type": "integer"}
+     },
+     "required": ["filePath"]
+    }
+   }
+  },
+  "grep": {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search files for a regular expression (\"quoted\", <tags> & ümlauts).",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {"type": "string"},
+      "path": {"type": "string"},
+      "Include": {"type": ["string", "null"]}
+     },
+     "required": ["pattern"]
+    }
+   }
+  },
+  "bash": {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {"type": "string"},
+      "timeout": {"type": "number"}
+     },
+     "required": ["command"]
+    }
+   }
+  },
+  "bare": {
+   "type": "function",
+   "function": {"name": "bare"}
+  }
+ },
+ "cases": [
+  {"name": "plain", "tools": null, "kwargs": {},
+   "messages": [{"role": "user", "content": "Hello! What is 2 + 2?"}]},
+  {"name": "system", "tools": null, "kwargs": {},
+   "messages": [{"role": "system", "content": "You are terse."}, {"role": "user", "content": "Name a prime."}]},
+  {"name": "effort_none", "tools": null, "kwargs": {"reasoning_effort": "none"},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_minimal", "tools": null, "kwargs": {"reasoning_effort": "minimal"},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_low", "tools": null, "kwargs": {"reasoning_effort": "low"},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_medium", "tools": null, "kwargs": {"reasoning_effort": "medium"},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_high", "tools": null, "kwargs": {"reasoning_effort": "high"},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_xhigh", "tools": null, "kwargs": {"reasoning_effort": "xhigh"},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_max", "tools": null, "kwargs": {"reasoning_effort": "max"},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_number", "tools": null, "kwargs": {"reasoning_effort": 0.45},
+   "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}]},
+  {"name": "effort_zero", "tools": null, "kwargs": {"reasoning_effort": 0},
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "effort_unknown", "tools": null, "kwargs": {"reasoning_effort": "huge"}, "error": "Unknown reasoning_effort: huge",
+   "messages": [{"role": "user", "content": "Hi"}]},
+  {"name": "tools", "tools": ["read", "grep", "bash", "bare"], "kwargs": {},
+   "messages": [{"role": "system", "content": "You are a coding agent in /work."},
+                {"role": "user", "content": "Find where the loader reads safetensors."}]},
+  {"name": "call_history", "tools": ["read", "grep", "bash"], "kwargs": {"reasoning_effort": "low"},
+   "messages": [
+    {"role": "system", "content": "You are a coding agent in /work."},
+    {"role": "user", "content": "Rename kBlock to kStoreBlock everywhere."},
+    {"role": "assistant", "content": "", "tool_calls": [
+     {"id": "call_1", "type": "function", "function": {"name": "grep", "arguments": {"pattern": "kBlock\\b", "path": "/work/src", "Include": null}}},
+     {"id": "call_2", "type": "function", "function": {"name": "read", "arguments": {"filePath": "/work/src/runtime/engine.h", "offset": 140, "limit": 20}}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "src/runtime/engine.h:152:  static constexpr uint32_t kBlock = 2048;\nsrc/server/deps.h:118:  virtual uint32_t block() { return 2048; }"},
+    {"role": "tool", "tool_call_id": "call_2", "content": "140\t// Spec 7's block\n141\tstatic constexpr uint32_t kBlock = 2048;"},
+    {"role": "assistant", "content": "", "tool_calls": [
+     {"id": "call_3", "type": "function", "function": {"name": "bash", "arguments": {"command": "sed -i 's/kBlock/kStoreBlock/g' src/runtime/engine.h && echo \"done ✓\"", "timeout": 30.5}}}]},
+    {"role": "tool", "tool_call_id": "call_3", "content": "done ✓"},
+    {"role": "assistant", "content": "Renamed in src/runtime/engine.h."},
+    {"role": "user", "content": "Now build."}]},
+  {"name": "tool_result_name", "tools": ["bash"], "kwargs": {},
+   "messages": [
+    {"role": "user", "content": "List the tree."},
+    {"role": "assistant", "content": "Listing it.", "tool_calls": [
+     {"id": "c9", "type": "function", "function": {"name": "bash", "arguments": {"command": "ls"}}}]},
+    {"role": "tool", "name": "bash", "content": "src\ntests"}]},
+  {"name": "thinking_history", "tools": null, "kwargs": {"reasoning_effort": "high"},
+   "messages": [
+    {"role": "user", "content": "Is 91 prime?"},
+    {"role": "assistant", "reasoning_content": "91 = 7 x 13.", "content": "No: 91 = 7 x 13."},
+    {"role": "user", "content": "And 97?"}]},
+  {"name": "reasoning_and_call", "tools": ["read"], "kwargs": {},
+   "messages": [
+    {"role": "user", "content": "Read the README."},
+    {"role": "assistant", "reasoning_content": "I should read it first.", "content": null, "tool_calls": [
+     {"id": "r1", "type": "function", "function": {"name": "read", "arguments": {"filePath": "/work/README.md"}}}]},
+    {"role": "tool", "tool_call_id": "r1", "content": "# b70"}]},
+  {"name": "content_parts", "tools": null, "kwargs": {},
+   "messages": [{"role": "user", "content": [{"type": "text", "text": "First part."}, {"type": "text", "text": "Second part."}]}]},
+  {"name": "image_part", "tools": null, "kwargs": {},
+   "messages": [{"role": "user", "content": [{"type": "text", "text": "What is this?"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]},
+  {"name": "audio_part", "tools": null, "kwargs": {}, "error": "Inkling 2 does not accept audio input",
+   "messages": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}]}]}
+ ]
+}

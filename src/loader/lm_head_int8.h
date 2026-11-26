@@ -39,7 +39,8 @@ const char* lm_head_form_name(LmHeadForm f);
 // src/kernels/CMakeLists.txt reads the two lines below (keep their spelling) to build every reader of a tensor of a
 // head width with GEMV_KMAJOR=1 - gemv_i8w, gemm_sm_i8w (the verify rows) and df_rerank. A head is an int8 tensor
 // of one of these widths: the full vocabulary (248320, Kolibri's 128000), a tp card's half (124160) and the compact
-// draft heads (32768 / 65536 / 131072, gathered by gather_int8_tiled_rows). No other int8 tiled tensor has one of
+// draft heads (32768 / 65536 / 131072, gathered by gather_int8_tiled_rows), Inkling 2's head and its folded Markov head
+// (200064, plan 41f). No other int8 tiled tensor has one of
 // them (the DFlash drafter's linears keep n-major: their k||v rows and df_w_slab_i8 read column ranges in place).
 // Flash-Next's hyper-connection mixers (quantise_int8_g32_tiled, q4_hc.cl) keep their own n-major tiles.
 // K-blocked (kInt8HeadKBlock, the kernels' GEMV_KMAJOR_B): kInt8HeadKBlock consecutive 16-k steps of a tile stay
@@ -49,7 +50,7 @@ const char* lm_head_form_name(LmHeadForm f);
 // (gemm_sm I8_AHEAD) keep those rows level and leave the gains at M 1 (probe_gemv --tiles i8head).
 inline constexpr bool kInt8HeadKMajor = true;
 inline constexpr uint32_t kInt8HeadKBlock = 8;
-inline constexpr uint32_t kInt8HeadWidths[] = {248320, 124160, 128000, 131072, 65536, 32768};
+inline constexpr uint32_t kInt8HeadWidths[] = {248320, 124160, 128000, 131072, 65536, 32768, 200064};
 inline constexpr bool int8_k_major(uint32_t N) {
   if (!kInt8HeadKMajor) return false;
   for (uint32_t w : kInt8HeadWidths)

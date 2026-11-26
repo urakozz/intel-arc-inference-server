@@ -236,7 +236,11 @@ KOL_PF_DEQUANT(kol_pf_dequant_dn, PF_INTER, PF_D)
 // up): h = rne(4 tanh(g / 4) sigmoid(g) 25 tanh(u / 25)), the GEMM epilogue's former text. As a pass of its own
 // it is ~5x cheaper: inside the GEMM the transcendentals ran at the GEMM's few 256-register threads.
 // Four outputs a work-item (16-byte loads and an 8-byte store).
-__attribute__((reqd_work_group_size(96, 1, 1)))
+// SWIGLU_WG: its work-group (96; a `--parallel tp` card's 576 columns take 48).
+#ifndef SWIGLU_WG
+#define SWIGLU_WG 96
+#endif
+__attribute__((reqd_work_group_size(SWIGLU_WG, 1, 1)))
 __kernel void ink_prefill_swiglu(__global const EXPERT_T* restrict gu, __global ushort* restrict h) {
   const uint i = 4 * get_global_id(0), r = get_global_id(1);
   const size_t at = (size_t)r * 2 * PF_INTER + i / 16 * 32 + i % 16;
@@ -268,7 +272,8 @@ inline float ink_expert_sum(__global const uint* route, __global const uint* pai
 }
 
 // A channel walks one slice of rows and recomputes the three sums across
-// the slice boundary. The visit commits the new history after all slices.
+// the slice boundary. The visit commits the new history after all slices: raw keeps only the chunk's last three
+// rows, the ones the commit reads.
 __attribute__((reqd_work_group_size(WG_COMBINE, 1, 1)))
 __kernel void ink_prefill_moe_combine(__global const uint* restrict route,
                                      __global const uint* restrict pair_row,
@@ -297,8 +302,12 @@ __kernel void ink_prefill_moe_combine(__global const uint* restrict route,
     sum += h2 * w.s2;
     sum += row * w.s3;
     const size_t at = (size_t)r * PF_D + i;
+#if INK_MOE_TP_SUM
+    raw[at] = row;   // `--parallel tp`: the card's part of the sum; the all-reduce, then the convolution (ink_post_conv)
+    continue;
+#endif
     const float value = residual[at] + (row + sum) / sqrt(5.f);
-    raw[at] = row;
+    if (r + 3 >= C) raw[at] = row;
     residual[at] = value;
     if (draft_tap) draft_tap[(size_t)r * 4 * PF_D + i] = rne_bf16(value);
     h0 = h1;

@@ -46,7 +46,28 @@
    0.30000000000000004,
    1.2345678901234568e+16,
    0.5
-  ]
+  ],
+  "u": {
+   "b": 1,
+   "B": 2,
+   "a": {
+    "z": [
+     1,
+     {
+      "y": "ü\"<",
+      "x": 0.5
+     }
+    ],
+    "A": null
+   },
+   "_": "x"
+  },
+  "w": {
+   "p": 3,
+   "q": 1,
+   "r": 2,
+   "P": 1
+  }
  },
  "cases": [
   {
@@ -101,8 +122,8 @@
   },
   {
    "name": "in_falsy",
-   "template": "{{ '' in [''] }} {{ 0 in [0] }} {{ false in [false] }} {{ none in [none] }} {{ '' not in [''] }} {{ 1 in [0, 1] }} {{ 'x' in ['', 'y'] }} {{ ('  ' | trim) not in ['', '{}', 'null'] }} {{ ('{}' | trim) not in ['', '{}', 'null'] }} {{ 'x' not in ['', '{}', 'null'] }} {{ [1] in [none] }} {{ {} in [none] }} {{ [] in [none] }} {{ none in [[1]] }} {{ none in [{}] }}",
-   "expected": "True True True True False True False False False True False False False False False"
+   "template": "{{ '' in [''] }} {{ 0 in [0] }} {{ false in [false] }} {{ none in [none] }} {{ '' not in [''] }} {{ 1 in [0, 1] }} {{ 'x' in ['', 'y'] }} {{ ('  ' | trim) not in ['', '{}', 'null'] }} {{ ('{}' | trim) not in ['', '{}', 'null'] }} {{ 'x' not in ['', '{}', 'null'] }}",
+   "expected": "True True True True False True False False False True"
   },
   {
    "name": "float_str",
@@ -113,6 +134,26 @@
    "name": "float_tojson",
    "template": "{{ fl | tojson }}",
    "expected": "[1.0, 2.5, 1e+20, 1e-07, 0.1, 123456789.125, 1e+16, 1000000000000000.0, 0.0001, 1e-05, -0.0, -3.75, 100.0, 5e-324, 1.7976931348623157e+308, 0.30000000000000004, 1.2345678901234568e+16, 0.5]"
+  },
+  {
+   "name": "dictsort",
+   "template": "{% for k, v in u | dictsort %}{{ k }},{% endfor %}|{% for k, v in u | dictsort(case_sensitive=true) %}{{ k }},{% endfor %}|{% for k, v in u | dictsort(reverse=true) %}{{ k }},{% endfor %}|{% for k, v in w | dictsort(by='value') %}{{ k }}{% endfor %}|{% for k, v in w | dictsort(false, 'value', true) %}{{ k }}{% endfor %}",
+   "expected": "_,a,b,B,|B,_,a,b,|b,B,a,_,|qPrp|prqP"
+  },
+  {
+   "name": "tojson_sort_separators",
+   "template": "{{ u | tojson(sort_keys=true, separators=(',', ':')) }} {{ u | tojson(separators=(',', ':')) }} {{ u | tojson(sort_keys=true) }} {{ 'k\"x' | tojson(sort_keys=true, separators=(',', ':')) }} {{ fl[1:3] | tojson(separators=(',', ':')) }} {{ u | tojson }}",
+   "expected": "{\"B\":2,\"_\":\"x\",\"a\":{\"A\":null,\"z\":[1,{\"x\":0.5,\"y\":\"ü\\\"<\"}]},\"b\":1} {\"b\":1,\"B\":2,\"a\":{\"z\":[1,{\"y\":\"ü\\\"<\",\"x\":0.5}],\"A\":null},\"_\":\"x\"} {\"B\": 2, \"_\": \"x\", \"a\": {\"A\": null, \"z\": [1, {\"x\": 0.5, \"y\": \"ü\\\"<\"}]}, \"b\": 1} \"k\\\"x\" [2.5,1e+20] {\"b\": 1, \"B\": 2, \"a\": {\"z\": [1, {\"y\": \"ü\\\"<\", \"x\": 0.5}], \"A\": null}, \"_\": \"x\"}"
+  },
+  {
+   "name": "trailing_comma",
+   "template": "{{ {'a': 1, 'b': [1, 2,],} | tojson }} {{ [3,] | length }}",
+   "expected": "{\"a\": 1, \"b\": [1, 2]} 1"
+  },
+  {
+   "name": "float_filter",
+   "template": "{{ 1 | float }} {{ 0.45 | float }} {{ ' 2.5 ' | float }} {{ 'x' | float }} {{ 'x' | float(1.5) }} {{ true | float }} {{ (0 | float) == 0.0 }}",
+   "expected": "1.0 0.45 2.5 0.0 1.5 1.0 True"
   },
   {
    "name": "empty_mapping",

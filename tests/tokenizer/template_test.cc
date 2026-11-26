@@ -86,6 +86,25 @@ int run_cases(const std::string& dir, const std::string& snap, const std::string
   int bad = 0;
   for (const auto& c : cases) {
     const std::string file = prefix + "_template_" + c.at("name").get<std::string>() + ".txt";
+    // Spec 41f: a case with "error" is one the template refuses (raise_exception): the render must throw that text.
+    if (c.contains("error")) {
+      const std::string want = c.at("error").get<std::string>();
+      nlohmann::json tools = c.at("tools");
+      std::string what;
+      try {
+        (void)tmpl.render(c.at("messages"), tools, true, c.contains("kwargs") ? c.at("kwargs") : nlohmann::json::object());
+      } catch (const std::exception& error) {
+        what = error.what();
+      }
+      if (what.find(want) == std::string::npos) {
+        std::fprintf(stderr, "%s: the render must refuse with \"%s\", got \"%s\"\n", c.at("name").get<std::string>().c_str(),
+                     want.c_str(), what.substr(0, 200).c_str());
+        ++bad;
+      } else {
+        std::printf("%s: refused (%s)\n", c.at("name").get<std::string>().c_str(), want.c_str());
+      }
+      continue;
+    }
     const std::string want = slurp(dir + "/" + file);
     nlohmann::json tools = c.at("tools");
     if (table && tools.is_array()) {

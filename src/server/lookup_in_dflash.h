@@ -1,5 +1,5 @@
 #pragma once
-// Spec 19f (spec 19 §13.1, `b70-serve --spec dflash-lookup`): prompt lookup inside DFlash - the policy. Pure host
+// Spec 19f (spec 19 §13.1, `b70-serve --spec dflash`): prompt lookup inside DFlash - the policy. Pure host
 // code over the server's matcher (server::PromptLookup, which holds the prompt and every id consumed so far, the
 // pending one included); unit-tested by tests/server/lookup_in_dflash_test.cc.
 //

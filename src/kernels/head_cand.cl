@@ -22,7 +22,9 @@
 #ifndef NC
 #define NC 512             /* the rescore's columns: 8 rows x C */
 #endif
+#ifndef GROUPS
 #define GROUPS 243         /* argmax.cl's stage-1 groups (248320 / 1024) */
+#endif
 // PERF-111: GEMV_KMAJOR 1 reads the full head (N columns) in the loader's k-major order, blocks of GEMV_KMAJOR_B
 // 16-k steps (loader::int8_tiled_index at a head width); the compact head stays n-major (NC is not a head width).
 #ifndef GEMV_KMAJOR

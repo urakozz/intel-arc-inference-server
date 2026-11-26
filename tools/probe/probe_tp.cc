@@ -8,7 +8,7 @@
 //                                                    kernel (tp_ping) waits for the CPU's row + stamp and acks; the
 //                                                    CPU times the round trip (median, p10 / p90) and its own store
 //                                                    time; the row's words checked on the card
-//   probe_tp ar   [--model qwen38] [--route all|p2p-push,p2p-pull,host-mbox,host-bar,host-read]
+//   probe_tp ar   [--model qwen38|inkling] [--route all|p2p-push,p2p-pull,host-mbox,host-bar,host-read]
 //                 [--rows 1,8] [--calls N] [--rounds 5] [--execs 20] [--replays N] [--inject skip-data|skip-all]
 //                 [--inject-at N] [--cpu C] [--chunk 1024] [--s 4] [--flag plain|atomic]
 //                 [--host-mem uncached|cached|wc] [--dev-mem cached|uncached] [--send kernel|copy]
@@ -809,8 +809,17 @@ uint32_t inject_kind(const std::string& s) {
 }
 
 int run_ar(const Opts& o) {
-  const model::ModelDesc& d = tp::model_by_name(o.model);
-  const tp::Shapes sh = tp::tp_shapes(d, 0, 2);
+  // --model inkling (plan 41j): Inkling 2 Mini's crossing, 2304-wide fp32 rows, two all-reduces a visit over 48 visits.
+  const bool inkling = o.model == "inkling";
+  tp::Shapes sh;
+  if (inkling) {
+    sh.hidden = 2304;
+    sh.calls = 96;
+    sh.row_bytes = 2304 * 4;
+  } else {
+    sh = tp::tp_shapes(tp::model_by_name(o.model), 0, 2);
+  }
+  const std::string name = inkling ? "Inkling 2 Mini" : tp::model_by_name(o.model).name;
   const uint32_t calls = o.calls ? o.calls : sh.calls;
   Card c[2];
   open_cards(c, true);
@@ -819,7 +828,7 @@ int run_ar(const Opts& o) {
   int failures = 0;
   std::printf("## ar - %s, %u calls a list (the model's all-reduces a token: %u), %u B a row, chunk %u words, S %u, "
               "flag %s, host memory %s, P2P buffers %s, send %s%s\n\n",
-              d.name.c_str(), calls, sh.calls, sh.row_bytes, o.chunk, o.S, o.flag_mode ? "plain" : "atomic",
+              name.c_str(), calls, sh.calls, sh.row_bytes, o.chunk, o.S, o.flag_mode ? "plain" : "atomic",
               o.host_mem.c_str(), o.dev_mem.c_str(), o.send_copy ? "copy" : "kernel", o.barrier ? ", barrier" : "");
   if (check)
     std::printf("| route | rows | lists replayed | calls checked | card 0 | card 1 | CPU | hashes equal | verdict |\n"

@@ -1,4 +1,4 @@
-// Spec 19e (plan 19e Task 2), host only: the server with --spec lookup over a scripted engine
+// Spec 19e (plan 19e Task 2), host only: the server with external prompt lookup over a scripted engine
 // that verifies external drafts (MockEngine::step_drafts, a greedy target whose output is the
 // script). Every response must be the plain server's bytes (modulo the `created` clock),
 // with the engine left at the same position; the drafts must be exactly what a fresh
@@ -129,7 +129,7 @@ json completion(const std::string& prompt, uint32_t max_tokens, bool stream,
 const char* kPrompt =
     "def f ( a , b ) : return a + b \n def g ( x ) : return f ( x , x ) \n print ( g ( 3 ) )";
 
-// The plain server and --spec lookup at several K and n give the same bytes and end at the
+// The plain server and external prompt lookup at several K and n give the same bytes and end at the
 // same position; lookup verified something and kept drafts (the script copies the prompt).
 template <class Script>
 size_t same_as_plain(const char* what, const std::string& path, const json& body, Script script) {
@@ -143,7 +143,7 @@ size_t same_as_plain(const char* what, const std::string& path, const json& body
       c.min_match = n;
       const Run spec = serve(c, path, body, script);
       if (spec.body != plain.body) {
-        std::fprintf(stderr, "%s: --spec lookup (K %u, n %u) differs from plain\nplain:  %s\n"
+        std::fprintf(stderr, "%s: external lookup (K %u, n %u) differs from plain\nplain:  %s\n"
                      "lookup: %s\n", what, k, n, plain.body.c_str(), spec.body.c_str());
         std::exit(1);
       }

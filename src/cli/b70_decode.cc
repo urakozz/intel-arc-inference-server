@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <optional>
 #include <stdexcept>
@@ -42,6 +44,9 @@
 #include "cli/stdout_to_stderr.h"
 #include "cli/inkling2_decode.h"
 #include "runtime/inkling2/inkling2_engine.h"
+#include "runtime/inkling2/inkling2_window.h"
+#include "runtime/inkling2/inkling2_pp_engine.h"
+#include "runtime/inkling2/inkling2_tp_engine.h"
 #include "cli/kolibri_decode.h"
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
@@ -105,14 +110,15 @@ using cli::flags::Arg;
 using cli::flags::Help;
 using cli::flags::Section;
 struct Flags {
-  [[=Help("", "print Inkling's one-card memory plan from checkpoint headers")]] bool plan = false;
+  [[=Help("", "print Inkling's memory plan from checkpoint headers (both cards' with --parallel pp or tp)")]] bool plan = false;
   [[=Help("<file>", "whitespace-separated token ids")]] std::string ids;
   [[=Help("<N>", "ids to generate, greedily; t/s on stderr")]] Arg<uint32_t> n;
   [[=Help("", "run the prompt through the engine's prefill instead of one decode replay per id")]] bool prefill = false;
   [[=Help("S", "off, mtp (the MTP head for --ids, adaptive K <= --spec-max 1..3;\n"
                "Qwen3.8, Ornith) or dflash (Qwen3.8's DFlash drafter, K <= --spec-max\n"
                "1..7, one card; --draft-model PATH, required). Inkling accepts mtp or auto\n"
-               "for its built-in DSpark drafter in --ids and --bench.")]]
+               "for its built-in DSpark drafter in --ids and --bench, and dflash with\n"
+               "--draft-model for the DFlash 2 drafter (one card).")]]
   Arg<std::string> spec{"off"};   // a developer tool: the plain list unless asked (cli/spec_args.h)
   [[=Help("K", "the proposer's cap (see --spec).", "the most")]] Arg<uint32_t> spec_max;
   [[=Help("PATH", "--spec dflash's drafter.")]] Arg<std::string> draft_model;   // spec 19c
@@ -148,11 +154,17 @@ struct Flags {
                "session's chunk cap; above 2048 the buffers hold 4096-row chunks, planned).", "2048")]]
   Arg<uint32_t> prefill_chunk;
   [[=Help("", "ingest --depth synthetic ids, then replay --steps INSTRUMENTED steps and print\n"
-              "the per-launch anatomy (never a bench row). Inkling times target steps with 1, 2, and 8"
-              " rows, committing one row per step.")]]
+              "the per-launch anatomy (never a bench row). Inkling times target steps with 1 to 8"
+              " rows, committing one row per step, and its drafter's pass,\n"
+              "then prints one step of 1, 2 and 8 rows and one drafter pass timed launch by launch.")]]
   bool profile = false;
   [[=Help("N", "--profile: instrumented steps.")]] Arg<uint32_t> steps{32};
   [[=Help("R", "--profile: R sessions over one ingest, a per-family mean +/- spread table.")]] Arg<uint32_t> repeats{1};
+  [[=Help("FILE", "Inkling, one card, with --ids and --n: a plain greedy run that writes FILE\n"
+                  "(<corpus>__<label>.taps.safetensors): every position's four drafter taps (the\n"
+                  "prompt's last 2048 and each generated one), the head's top 64 logits and their\n"
+                  "log-sum-exp - the input of an offline drafter acceptance measurement.")]]
+  std::string dump_taps;
   [[=Section("\nstill being measured (they go when their numbers decide):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
   std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
@@ -171,6 +183,7 @@ void usage() {
       "usage: b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill] [--spec mtp|dflash]\n"
       "                                     [--max-len 16384|auto] [--parallel auto|1|pp|tp]\n"
       "       b70-decode <Inkling snapshot-or-repo> --plan [--max-len auto] [--spec auto|off] [--kv-cache int8]\n"
+      "                                     [--parallel pp]\n"
       "\n"
       "  ids in, ids out (no tokenizer: tools/oracle/tokenize.py turns text into an --ids file);\n"
       "  stdout is one generated id per line, everything else goes to stderr. The model is chosen\n"
@@ -740,31 +753,151 @@ int generate_dflash(runtime::Engine& eng, uint32_t n, uint32_t max_k) {
   return 0;
 }
 
+template <class E>
+int run_inkling_on(E& engine, const Flags& f, const std::vector<uint32_t>& ids, uint32_t n, uint32_t cap, bool draft,
+                   bool prompt_pass, uint32_t chunk);
+
+// --dump-taps: the prompt by the prompt pass (a block hook copies each chunk's tap rows), then n plain greedy steps
+// on the full head (verify of one row: its logits readable), each step's tap row, top 64 logits (the served
+// softcapped values, ties to the lower id) and log-sum-exp over the live vocabulary. The file is
+// tools/oracle/dump_taps.py's layout: ids, tap.L<id> [N - tap_from, hidden] bf16 for DSpark's taps, greedy (the id
+// after each position; -1 on prompt rows but the last), top_ids, top_logits, lse; metadata name, n_prompt, n,
+// tap_from, layers, vocab_used, snapshot, kv.
+int dump_inkling_taps(runtime::inkling2::Engine& engine, const Flags& f, const std::vector<uint32_t>& prompt,
+                      uint32_t n, uint32_t chunk, const std::string& snapshot, const std::vector<uint32_t>& tap_ids) {
+  using D = model::Inkling2Desc;
+  constexpr uint32_t kTop = 64, kKeep = 2048;
+  constexpr size_t tap_row = 4 * size_t(D::hidden) * sizeof(uint16_t);
+  const auto np = uint32_t(prompt.size());
+  const uint32_t tap_from = np > kKeep ? np - kKeep : 0, rows = np + n - tap_from;
+  std::vector<uint8_t> taps(size_t(rows) * tap_row);
+  std::vector<int32_t> ids(prompt.begin(), prompt.end()), greedy(rows, -1), top_ids(size_t(rows) * kTop, -1);
+  std::vector<float> top_logits(size_t(rows) * kTop, 0.f), lse(rows, 0.f), logits(D::vocab_used);
+  uint32_t chunk_start = 0;
+  engine.set_block_hook([&](uint32_t end, bool) {
+    // the chunk's rows at or after tap_from
+    const uint32_t first = std::max(chunk_start, tap_from);
+    if (end > first) engine.read_taps(true, first - chunk_start, end - first, taps.data() + (first - tap_from) * tap_row);
+    chunk_start = end;
+  });
+  const auto head = [&](uint32_t row) {   // the row's top 64 and log-sum-exp from `logits`
+    std::vector<uint32_t> order(D::vocab_used);
+    for (uint32_t i = 0; i < D::vocab_used; ++i) order[i] = i;
+    std::partial_sort(order.begin(), order.begin() + kTop, order.end(), [&](uint32_t a, uint32_t b) {
+      return logits[a] > logits[b] || (logits[a] == logits[b] && a < b);
+    });
+    const double top = logits[order[0]];
+    double sum = 0.;
+    for (const float v : logits) sum += std::exp(double(v) - top);
+    lse[row] = float(top + std::log(sum));
+    for (uint32_t j = 0; j < kTop; ++j) {
+      top_ids[size_t(row) * kTop + j] = int32_t(order[j]);
+      top_logits[size_t(row) * kTop + j] = logits[order[j]];
+    }
+  };
+  uint32_t next = engine.prefill(prompt, chunk);
+  engine.set_block_hook({});
+  engine.read_prefill_logits(logits);
+  head(np - 1 - tap_from);
+  greedy[np - 1 - tap_from] = int32_t(next);
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t row = np + i - tap_from;
+    const uint32_t out = engine.verify({&next, 1})[0];
+    engine.read_logits(0, logits);
+    engine.read_taps(false, 0, 1, taps.data() + size_t(row) * tap_row);
+    engine.commit(1);
+    head(row);
+    greedy[row] = int32_t(out);
+    ids.push_back(int32_t(next));
+    next = out;
+  }
+  // safetensors: the header JSON padded to 8 bytes, then the tensors back to back in the header's order
+  std::string name = std::filesystem::path(f.dump_taps).filename().string();
+  if (const auto dot = name.find(".taps.safetensors"); dot != std::string::npos) name.resize(dot);
+  if (const auto sep = name.find("__"); sep != std::string::npos) name.replace(sep, 2, "/");
+  struct Tensor {
+    std::string name, dtype;
+    std::vector<uint64_t> shape;
+    const void* data;
+    size_t bytes;
+  };
+  std::vector<Tensor> tensors = {
+      {"ids", "I32", {ids.size()}, ids.data(), ids.size() * 4},
+      {"greedy", "I32", {rows}, greedy.data(), greedy.size() * 4},
+      {"top_ids", "I32", {rows, kTop}, top_ids.data(), top_ids.size() * 4},
+      {"top_logits", "F32", {rows, kTop}, top_logits.data(), top_logits.size() * 4},
+      {"lse", "F32", {rows}, lse.data(), lse.size() * 4}};
+  // tap t of every row: a strided copy out of [rows][4][hidden]
+  std::vector<std::vector<uint8_t>> planes(tap_ids.size(), std::vector<uint8_t>(size_t(rows) * D::hidden * 2));
+  std::string layers;
+  for (size_t t = 0; t < tap_ids.size(); ++t) {
+    for (uint32_t r = 0; r < rows; ++r)
+      std::memcpy(planes[t].data() + size_t(r) * D::hidden * 2, taps.data() + r * tap_row + t * D::hidden * 2,
+                  D::hidden * 2);
+    tensors.push_back({"tap.L" + std::to_string(tap_ids[t]), "BF16", {rows, D::hidden}, planes[t].data(),
+                       planes[t].size()});
+    layers += (t ? "," : "") + std::to_string(tap_ids[t]);
+  }
+  std::string header = "{\"__metadata__\":{\"name\":\"" + name + "\",\"n_prompt\":\"" + std::to_string(np) +
+                       "\",\"n\":\"" + std::to_string(ids.size()) + "\",\"tap_from\":\"" +
+                       std::to_string(tap_from) + "\",\"layers\":\"" + layers + "\",\"vocab_used\":\"" +
+                       std::to_string(D::vocab_used) + "\",\"snapshot\":\"" + snapshot + "\",\"kv\":\"" +
+                       (engine.kv8() ? "int8" : "bf16") + "\"}";
+  uint64_t offset = 0;
+  for (const auto& t : tensors) {
+    header += ",\"" + t.name + "\":{\"dtype\":\"" + t.dtype + "\",\"shape\":[";
+    for (size_t i = 0; i < t.shape.size(); ++i) header += (i ? "," : "") + std::to_string(t.shape[i]);
+    header += "],\"data_offsets\":[" + std::to_string(offset) + "," + std::to_string(offset + t.bytes) + "]}";
+    offset += t.bytes;
+  }
+  header += "}";
+  while (header.size() % 8) header += ' ';
+  const std::string tmp = f.dump_taps + ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::binary);
+    const uint64_t length = header.size();
+    out.write(reinterpret_cast<const char*>(&length), 8);
+    out.write(header.data(), std::streamsize(header.size()));
+    for (const auto& t : tensors) out.write(static_cast<const char*>(t.data), std::streamsize(t.bytes));
+    if (!out) throw std::runtime_error("Cannot write " + f.dump_taps);
+  }
+  std::filesystem::rename(tmp, f.dump_taps);
+  std::print(stderr, "Inkling tap dump {}: {} prompt ids (taps from {}), {} generated, {} kv cache\n", f.dump_taps, np,
+             tap_from, n, engine.kv8() ? "int8" : "bf16");
+  return 0;
+}
+
 int run_inkling(const std::string& path, const Flags& f) {
   const auto spec = f.spec.given ? f.spec.value : "auto";
-  if (spec != "off" && spec != "auto" && spec != "mtp")
-    throw std::runtime_error("Inkling accepts --spec off, auto or mtp");
+  if (spec != "off" && spec != "auto" && spec != "mtp" && spec != "dflash")
+    throw std::runtime_error("Inkling accepts --spec off, auto, mtp or dflash");
+  if ((spec == "dflash") != f.draft_model.given)
+    throw std::runtime_error("Inkling --spec dflash takes the DFlash 2 drafter's folder as --draft-model, and only it");
   const bool prompt_pass = !f.ids.empty() || f.prefill_length.given;
   if ((f.prefill && f.ids.empty()) || (f.prefill_length.given && (!f.bench || f.depth.given)))
     throw std::runtime_error("Use --ids for a prompt or --bench --prefill-length to time the prompt pass");
   if ((f.prefill_chunk.given || f.prefill_backend.given) && !prompt_pass)
     throw std::runtime_error("Prompt options require --ids or --bench --prefill-length");
-  if (f.prefill_backend.given && f.prefill_backend.value != "l0")
-    throw std::runtime_error("Inkling supports the l0 prompt backend");
+  runtime::PrefillBackend backend = runtime::PrefillBackend::L0;
+  if (f.prefill_backend.given && !runtime::parse_prefill_backend(f.prefill_backend.value, backend))
+    throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" + f.prefill_backend.value + "'");
+  const bool int8_pass = backend == runtime::PrefillBackend::L0Int8;
   const uint32_t chunk = f.prefill_chunk.given ? f.prefill_chunk.value : runtime::inkling2::kPrefillRows;
   if (chunk == 0 || chunk > runtime::inkling2::kPrefillRows)
     throw std::runtime_error("Inkling --prefill-chunk must be between 1 and " +
                              std::to_string(runtime::inkling2::kPrefillRows));
   const uint32_t depth = f.prefill_length.given ? f.prefill_length.value : f.depth.value;
-  const uint32_t planned_chunk = prompt_pass ? chunk : 0;
-  if (f.layers.given || f.draft_model.given || f.pipeline_split.given ||
-      (f.parallel != "auto" && f.parallel != "1"))
-    throw std::runtime_error("Inkling decode requires one card and the checkpoint's built-in drafter");
-  const bool kv8 = !f.kv_cache.empty() && cli::parse_kv_cache_arg(f.kv_cache) == runtime::KvCache::Int8;
+  uint32_t planned_chunk = prompt_pass || f.profile ? chunk : 0;   // --profile ingests by the prompt pass
+  if (f.layers.given || f.pipeline_split.given ||
+      (f.parallel != "auto" && f.parallel != "1" && f.parallel != "pp" && f.parallel != "tp"))
+    throw std::runtime_error("Inkling decode runs on one card, --parallel pp or --parallel tp");
+  // The int8 prompt pass runs on the int8 cache (its scores read the int8 keys), as on a dense model.
+  const auto kv_flag = f.kv_cache.empty() ? runtime::KvCache::Bf16 : cli::parse_kv_cache_arg(f.kv_cache);
+  const bool kv8 = cli::int8_pass_kv(backend, true, f.kv_cache, kv_flag) == runtime::KvCache::Int8;
   if (int(f.bench) + int(f.profile) + int(!f.ids.empty()) != 1)
     throw std::runtime_error("Choose one of --bench, --profile or --ids for Inkling decode");
   if ((f.n.given && f.ids.empty()) || (f.tg.given && !f.bench) || (f.depth.given && !f.ids.empty()) ||
-      ((f.steps.given || f.repeats.given) && !f.profile) || (f.profile && (f.spec.given || f.spec_max.given)))
+      ((f.steps.given || f.repeats.given) && !f.profile) || (f.profile && ((f.spec.given && spec != "dflash") || f.spec_max.given)))
     throw std::runtime_error("Use --steps and --repeats with --profile, --tg with --bench, and --n with --ids");
   const uint32_t n = f.bench ? f.tg.value : f.profile ? f.steps.value : f.n.value;
   const uint32_t cap = f.spec_max.given ? f.spec_max.value : 7;
@@ -772,13 +905,18 @@ int run_inkling(const std::string& path, const Flags& f) {
     throw std::runtime_error("Inkling requires a positive generation length and --spec-max from 1 to 7");
   if (f.profile && f.repeats.value == 0) throw std::runtime_error("Inkling --repeats must be positive");
 
-  const loader::Inkling2Checkpoint checkpoint(path);
-  const bool draft = !f.profile && spec != "off" && checkpoint.has_drafter();
+  if (!f.dump_taps.empty() && (f.ids.empty() || f.parallel == "pp" || f.parallel == "tp" || f.spec_max.given ||
+                               spec == "dflash"))
+    throw std::runtime_error("--dump-taps takes --ids and --n on one card");
+  const loader::Inkling2Checkpoint checkpoint(path, spec == "dflash" ? f.draft_model.value : "");
+  if (!f.dump_taps.empty() && !checkpoint.has_drafter())
+    throw std::runtime_error("--dump-taps needs the checkpoint's mtp.safetensors (the taps exist with a drafter)");
+  const bool draft = (f.profile || !f.dump_taps.empty() || spec != "off") && checkpoint.has_drafter();
   if (!f.profile && spec != "off" && !draft) std::print(stderr, "Inkling checkpoint has no mtp.safetensors. Using plain decode.\n");
   auto length = cli::parse_max_len(f.max_len.given ? f.max_len.value : "auto");
   cli::check_before_load(length, model::Inkling2Desc::trained_max_len, false);
   std::vector<uint32_t> ids;
-  const size_t needed = size_t(n) + (f.profile ? runtime::inkling2::kRows : 0);
+  const size_t needed = f.profile ? size_t(runtime::inkling2::kRows) * (n + 2) : size_t(n);
   if (f.bench || f.profile) {
     if (depth == 0 || depth + needed > model::Inkling2Desc::trained_max_len)
       throw std::runtime_error("Inkling --depth and --tg must fit the trained context");
@@ -793,15 +931,85 @@ int run_inkling(const std::string& path, const Flags& f) {
   const auto& weights = checkpoint.layout();
   const size_t card = ctx.memory_bytes();
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+  const auto one_card_fits = [&] {
+    return card > reserve &&
+           runtime::inkling2::sizes(desc, weights, length.value, draft, planned_chunk, kv8, int8_pass).memory().total() <=
+               card - reserve;
+  };
+  // --parallel auto: one card when the asked context fits it, else pp.
+  const bool tp = f.parallel == "tp";
+  const bool pp = f.parallel == "pp" ||
+                  (f.parallel == "auto" && !length.is_auto && !one_card_fits() && l0::Context::gpu_count() >= 2);
+  if (pp || tp) cli::require_two_devices(l0::Context::gpu_count());
+  std::optional<l0::Context> ctx1;
+  if (pp || tp) ctx1.emplace(ctx, 1);
+  const size_t cards = pp || tp ? std::min(card, ctx1->memory_bytes()) : card;
+  // pp without --prefill-chunk: the context at 2,048-row chunks, then 4,096 where both cards still hold it.
+  const bool pp_rows = pp && prompt_pass && !f.prefill_chunk.given;
+  if (pp_rows) planned_chunk = 2048;
   if (length.is_auto)
-    length.value = runtime::inkling2::max_len_that_fits(desc, weights, card, reserve, draft, planned_chunk, kv8);
+    length.value = tp   ? runtime::inkling2::tp_max_len_that_fits(desc, weights, cards, reserve, draft, planned_chunk,
+                                                                  kv8, int8_pass)
+                   : pp ? runtime::inkling2::pp_max_len_that_fits(desc, weights, cards, reserve, draft, planned_chunk,
+                                                                  kv8, int8_pass)
+                        : runtime::inkling2::max_len_that_fits(desc, weights, card, reserve, draft, planned_chunk, kv8,
+                                                               int8_pass);
   if (ids.empty() || ids.size() + needed > length.value)
     throw std::runtime_error("Set --max-len to fit the prompt and generated tokens");
-  if (card <= reserve ||
-      runtime::inkling2::sizes(desc, weights, length.value, draft, planned_chunk, kv8).memory().total() > card - reserve)
-    throw std::runtime_error(cli::inkling2::no_fit(desc, weights, card, reserve, draft, planned_chunk, length.value, kv8));
+  if (pp_rows)
+    planned_chunk = std::max(planned_chunk, runtime::inkling2::pp_prefill_rows(desc, weights, cards, reserve,
+                                                                               length.value, draft, kv8, int8_pass));
+  if (tp) {
+    const uint32_t fits = runtime::inkling2::tp_max_len_that_fits(desc, weights, cards, reserve, draft, planned_chunk,
+                                                                  kv8, int8_pass);
+    if (fits < length.value)
+      throw std::runtime_error("Inkling does not fit two cards under --parallel tp at --max-len " +
+                               std::to_string(length.value) + ". Use --max-len auto or at most " + std::to_string(fits) +
+                               ".");
+  } else if (pp) {
+    const uint32_t fits = runtime::inkling2::pp_max_len_that_fits(desc, weights, cards, reserve, draft, planned_chunk,
+                                                                  kv8, int8_pass);
+    if (fits < length.value)
+      throw std::runtime_error("Inkling does not fit two cards at --max-len " + std::to_string(length.value) +
+                               " with the " + (kv8 ? "int8" : "bf16") + " KV cache. Use --max-len auto or at most " +
+                               std::to_string(fits) + (kv8 ? "." : ", or add --kv-cache int8."));
+  } else if (!one_card_fits()) {
+    throw std::runtime_error(cli::inkling2::no_fit(desc, weights, card, reserve, draft, planned_chunk, length.value, kv8,
+                                                   int8_pass));
+  }
 
-  runtime::inkling2::Engine engine(ctx, checkpoint, length.value, draft, planned_chunk, kv8);
+  std::optional<runtime::inkling2::Engine> one;
+  std::optional<runtime::inkling2::PpEngine> two;
+  std::optional<runtime::inkling2::TpEngine> split;
+  if (tp) {
+    split.emplace(ctx, *ctx1, checkpoint, length.value, draft, planned_chunk, kv8, int8_pass);
+    for (uint32_t i = 0; i < 2; ++i)
+      std::print(stderr, "{}\n", runtime::format_memory(("Inkling tp, card " + std::to_string(i)).c_str(),
+                                                         split->memory(i), i ? ctx1->memory_bytes() : card));
+  } else if (pp) {
+    two.emplace(ctx, *ctx1, checkpoint, length.value, draft, planned_chunk, kv8, int8_pass);
+    for (uint32_t i = 0; i < 2; ++i)
+      std::print(stderr, "{}\n", runtime::format_memory(("Inkling pp, card " + std::to_string(i)).c_str(),
+                                                         two->memory(i), i ? ctx1->memory_bytes() : card));
+  } else {
+    one.emplace(ctx, checkpoint, length.value, draft, planned_chunk, kv8, int8_pass);
+    if (!f.dump_taps.empty()) return dump_inkling_taps(*one, f, ids, n, chunk, path, desc.draft.taps);
+  }
+  if (int8_pass)
+    std::print(stderr, "Inkling prompt pass: int8 - the attention linears int8 (rotated), int8 attention scores on the "
+               "int8 cache, the pass's intermediate rows in bf16; the experts as in the bf16 pass\n");
+  if (tp) return run_inkling_on(*split, f, ids, n, cap, draft, prompt_pass, chunk);
+  return pp ? run_inkling_on(*two, f, ids, n, cap, draft, prompt_pass, chunk)
+            : run_inkling_on(*one, f, ids, n, cap, draft, prompt_pass, chunk);
+}
+
+// run_inkling's loops over one card's engine or the two-card one (the same calls).
+template <class E>
+int run_inkling_on(E& engine, const Flags& f, const std::vector<uint32_t>& ids, uint32_t n, uint32_t cap, bool draft,
+                   bool prompt_pass, uint32_t chunk) {
+  constexpr const char* kMode = std::is_same_v<E, runtime::inkling2::PpEngine>   ? " pp"
+                               : std::is_same_v<E, runtime::inkling2::TpEngine> ? " tp"
+                                                                                : "";
   const auto ingest = [&] {
     uint32_t next = 0;
     for (size_t i = 0; i < ids.size();) {
@@ -813,76 +1021,112 @@ int run_inkling(const std::string& path, const Flags& f) {
     return next;
   };
   if (f.profile) {
-    std::array<double, runtime::inkling2::kRows> ms{};
-    for (const uint32_t rows : {1u, 2u, runtime::inkling2::kRows}) {
-      for (uint32_t repeat = 0; repeat < f.repeats.value; ++repeat) {
-        engine.reset();
-        ingest();
+    // Every verify width and the draft pass on one ingest a repeat (the window's cost table), then the anatomy of
+    // the 1-, 2- and 8-row steps.
+    constexpr uint32_t R = runtime::inkling2::kRows;
+    std::array<double, R> ms{};
+    double draft_ms = 0.;
+    std::array<uint32_t, 8 * model::Inkling2Desc::visit_count> last_route{};
+    uint64_t token_shared = 0, token_tried = 0, pass_shared = 0, pass_tried = 0;
+    const auto elapsed = [](auto start) {
+      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    };
+    for (uint32_t repeat = 0; repeat < f.repeats.value; ++repeat) {
+      engine.reset();
+      engine.prefill(ids, chunk);
+      for (uint32_t rows = 1; rows <= R; ++rows)
         for (uint32_t i = 0; i < n + 1; ++i) {
-          std::array<uint32_t, runtime::inkling2::kRows> input{};
+          std::array<uint32_t, R> input{};
           for (uint32_t j = 0; j < rows; ++j) input[j] = kBenchPrompt[(i + j) % kBenchPromptLen];
           const auto start = std::chrono::steady_clock::now();
           engine.verify({input.data(), rows});
           engine.commit(1);
-          if (i) ms[rows - 1] += std::chrono::duration<double, std::milli>(
-              std::chrono::steady_clock::now() - start).count();
+          if (i) ms[rows - 1] += elapsed(start);
+          if constexpr (std::is_same_v<E, runtime::inkling2::Engine>) if (rows == 1) {
+            // how often a visit's experts were already chosen: the token before, an earlier pass (one card)
+            const auto r = engine.routes();
+            const auto shared = [&](const auto& a, uint32_t va, const auto& b, uint32_t vb) {
+              uint32_t k = 0;
+              for (uint32_t x = 0; x < 8; ++x)
+                k += std::count(b.begin() + vb * 8, b.begin() + vb * 8 + 8, a[va * 8 + x]);
+              return k;
+            };
+            constexpr uint32_t core = model::Inkling2Desc::core_end - model::Inkling2Desc::core_start;
+            for (uint32_t v = 0; i && v < model::Inkling2Desc::visit_count; ++v) {
+              token_shared += shared(r, v, last_route, v);
+              token_tried += 8;
+            }
+            for (uint32_t v = model::Inkling2Desc::core_start + core; v < model::Inkling2Desc::core_start + 3 * core;
+                 ++v) {
+              pass_shared += shared(r, v, r, v - core);
+              pass_tried += 8;
+            }
+            last_route = r;
+          }
         }
+      for (uint32_t i = 0; draft && i < n + 1; ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        engine.propose(kBenchPrompt[i % kBenchPromptLen], R - 1);
+        if (i) draft_ms += elapsed(start);
       }
-      ms[rows - 1] /= double(n) * f.repeats.value;
+    }
+    for (auto& value : ms) value /= double(n) * f.repeats.value;
+    draft_ms /= double(n) * f.repeats.value;
+    for (uint32_t rows = 1; rows <= R; ++rows)
       std::println("Inkling {}-row target with one-row commit, {} kernel launches, {:.3f} ms per step, {:.3f}x plain",
                    rows, engine.launch_count(rows, 1), ms[rows - 1], ms[rows - 1] / ms[0]);
+    if (draft) std::println("Inkling draft pass {:.3f} ms, {:.3f}x plain", draft_ms, draft_ms / ms[0]);
+    std::println("Inkling experts already chosen: by the token before {:.1f}%, by the previous pass {:.1f}%",
+                 100. * token_shared / std::max<uint64_t>(token_tried, 1), 100. * pass_shared / std::max<uint64_t>(pass_tried, 1));
+    std::fflush(stdout);
+    if constexpr (std::is_same_v<E, runtime::inkling2::Engine>) {   // the launch-by-launch anatomy, one card
+      for (const uint32_t rows : {1u, 2u, R}) {
+        std::array<uint32_t, R> input{};
+        for (uint32_t j = 0; j < rows; ++j) input[j] = kBenchPrompt[j % kBenchPromptLen];
+        engine.profile_target({input.data(), rows});
+      }
+      if (draft) engine.profile_draft(kBenchPrompt[0]);
     }
+    if constexpr (std::is_same_v<E, runtime::inkling2::TpEngine>) if (draft) engine.profile_draft(kBenchPrompt[0]);
     return 0;
   }
   const auto prompt_start = std::chrono::steady_clock::now();
+  if constexpr (std::is_same_v<E, runtime::inkling2::PpEngine>) {
+    if (!f.prefill_chunk.given)
+      chunk = std::min(engine.prefill_rows(), runtime::inkling2::PpEngine::chunk_rows(ids.size()));
+  } else if constexpr (!std::is_same_v<E, runtime::inkling2::Engine>) {
+    if (!f.prefill_chunk.given) chunk = E::chunk_rows(ids.size());
+  }
   uint32_t next = prompt_pass ? engine.prefill(ids, chunk) : ingest();
-  if (f.bench) {
+  if (f.bench || prompt_pass) {   // --ids: on stderr, beside the ids
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - prompt_start).count();
-    std::println("Inkling prompt: {} ids, {:.2f} t/s, {:.2f} ms to first id", ids.size(), 1000. * ids.size() / ms, ms);
+    std::print(f.bench ? stdout : stderr, "Inkling{} prompt: {} ids, {:.2f} t/s, {:.2f} ms to first id ({}-row chunks)\n",
+               kMode, ids.size(), 1000. * ids.size() / ms, ms, chunk);
   }
   std::vector<uint32_t> output;
   output.reserve(n);
-  std::optional<server::AdaptiveK> policy;
-  double plain_ms = 0.;
+  namespace ri = runtime::inkling2;
+  const bool df2 = engine.dflash();
+  runtime::inkling2::DraftWindow window(
+      std::is_same_v<E, ri::PpEngine>   ? std::span<const ri::DepthCost>(df2 ? ri::kPpDflashCosts.data() : ri::kPpCosts.data(),
+                                                                         df2 ? ri::kPpDflashCosts.size() : ri::kPpCosts.size())
+      : std::is_same_v<E, ri::TpEngine> ? std::span<const ri::DepthCost>(df2 ? ri::kTpDflashCosts.data() : ri::kTpCosts.data(),
+                                                                         df2 ? ri::kTpDflashCosts.size() : ri::kTpCosts.size())
+      : df2 ? std::span<const ri::DepthCost>(ri::kOneCardDflashCosts) : std::span<const ri::DepthCost>(ri::kOneCardCosts));
   uint32_t iterations = 0, proposed = 0, accepted = 0, plain_steps = 0;
+  std::array<uint32_t, runtime::inkling2::DraftWindow::kMaxDrafts> tested_at{}, accepted_at{};
   const auto start = std::chrono::steady_clock::now();
   while (output.size() < n) {
     const auto previous = uint32_t(output.size());
-    const auto remaining = n - previous - 1;
-    // The first plain row records its list. The next measures a replay, then
-    // a two-row round measures the proposal and the cost of verifying it.
-    uint32_t drafts = 0;
-    if (draft && remaining) drafts = policy ? std::min(policy->next(), remaining) : uint32_t(iterations == 2);
-    double proposal_ms = 0.;
-    const auto round = std::chrono::steady_clock::now();
-    next = engine.step_drafted(next, drafts, output, draft && !policy && drafts ? &proposal_ms : nullptr);
+    const uint32_t drafts = draft ? window.next(std::min(cap, n - previous - 1), engine.position()) : 0;
+    next = engine.step_drafted(next, drafts, output);
     const auto kept = uint32_t(output.size()) - previous - 1;
-    if (draft) {
-      const double round_ms =
-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - round).count();
-      if (policy) {
-        policy->observe(drafts, kept, round_ms);
-      } else if (drafts) {
-        server::AdaptiveKOptions options;
-        options.max_k = cap;
-        options.prior = .65;
-        options.warmup = 0;
-        options.probe_every = 0;
-        options.hysteresis = 0.;
-        options.measure = true;
-        options.cost.verify.clear();
-        // Linear prior for unseen widths from the warmed one-/two-row 4k
-        // target probe. The session's own full-round samples replace it.
-        constexpr double per_extra_row = .653;
-        for (uint32_t k = 0; k <= cap; ++k) options.cost.verify.push_back(1. + k * per_extra_row);
-        options.cost.draft.assign(cap, proposal_ms / plain_ms);
-        policy.emplace(options);
-        policy->observe(0, 0, plain_ms);
-        policy->observe(drafts, kept, round_ms);
-      } else if (iterations == 1) {
-        plain_ms = round_ms;
-      }
+    window.observe(drafts, kept);
+    // Per draft position: tested (the earlier drafts accepted) and accepted, the rate a window policy reads.
+    for (uint32_t i = 0; i < std::min(kept + 1, drafts); ++i) {
+      ++tested_at[i];
+      accepted_at[i] += i < kept;
     }
     proposed += drafts;
     accepted += kept;
@@ -894,15 +1138,21 @@ int run_inkling(const std::string& path, const Flags& f) {
     }
   }
   const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-  std::print(stderr, "Inkling generated {} ids in {} iterations, {:.2f} t/s, {:.2f} ms/token, DSpark {}\n",
-             n, iterations, n * 1000.0 / ms, ms / n, draft ? "on" : "off");
+  const char* drafter = engine.dflash() ? "DFlash 2" : "DSpark";
+  std::print(stderr, "Inkling generated {} ids in {} iterations, {:.2f} t/s, {:.2f} ms/token, {} {}\n",
+             n, iterations, n * 1000.0 / ms, ms / n, drafter, draft ? "on" : "off");
   if (proposed)
-    std::print(stderr, "Inkling DSpark accepted {} of {} proposed ids ({:.1f}%), {} one-row steps\n",
-               accepted, proposed, 100.0 * accepted / proposed, plain_steps);
+  {
+    std::print(stderr, "Inkling {} accepted {} of {} proposed ids ({:.1f}%), {} one-row steps; by position:",
+               drafter, accepted, proposed, 100.0 * accepted / proposed, plain_steps);
+    for (uint32_t i = 0; i < tested_at.size() && tested_at[i]; ++i)
+      std::print(stderr, " {}/{}", accepted_at[i], tested_at[i]);
+    std::print(stderr, "\n");
+  }
   if (f.bench) {
     const char* sha = std::getenv("B70_GIT_SHA");
-    std::println("| b70-decode {} Inkling DSpark {} | {} | {} | {:.2f} | {:.2f} |",
-                 sha && *sha ? sha : "unknown", draft ? "on" : "off", ids.size(), n, n * 1000.0 / ms, ms / n);
+    std::println("| b70-decode {} Inkling{} {} {} | {} | {} | {:.2f} | {:.2f} |",
+                 sha && *sha ? sha : "unknown", kMode, drafter, draft ? "on" : "off", ids.size(), n, n * 1000.0 / ms, ms / n);
   }
   return 0;
 }
@@ -919,7 +1169,8 @@ int run(int argc, char** argv) {
     if (!inkling) throw std::runtime_error("--plan requires an Inkling 2 Mini checkpoint");
     return cli::inkling2::plan(path, cli::parse_max_len(f.max_len.given ? f.max_len.value : "auto"),
                                f.spec.given ? f.spec.value : "auto",
-                               !f.kv_cache.empty() && cli::parse_kv_cache_arg(f.kv_cache) == runtime::KvCache::Int8);
+                               !f.kv_cache.empty() && cli::parse_kv_cache_arg(f.kv_cache) == runtime::KvCache::Int8,
+                               f.parallel == "pp", f.parallel == "tp");
   }
   const auto host_experts = cli::qwen4exp::host_experts_mode(f.host_experts);
   if (f.host_experts != "auto" && !cli::qwen4exp::is_qwen4exp(path))
@@ -992,11 +1243,7 @@ int run(int argc, char** argv) {
   cli::refuse_replica_in_decode(pipe);   // plan 13b: two requests at once is b70-serve's
   cli::resolve_overrides(pipe);   // --pipeline-split under --parallel auto: pp
   const bool pp_given = pipe.given();
-  // The model family decides which proposers exist (cli/spec_args.h); --spec lookup is b70-serve's (it verifies
-  // a request's own repeats), so b70-decode has mtp and dflash.
-  if (spec_arg == "lookup" || spec_arg == "dflash-lookup")
-    throw std::runtime_error("--spec " + spec_arg + " is b70-serve's (prompt lookup over a request's own ids); "
-                             "b70-decode --ids runs --spec mtp or --spec dflash");
+  // The model family decides which proposers exist (cli/spec_args.h).
   const bool fam_kol = cli::kolibri::is_kolibri(path);
   const bool fam_q4 = !fam_kol && cli::qwen4exp::is_qwen4exp(path);
   const std::string model_name = fam_kol ? "Kolibri-1" : fam_q4 ? "Qwen3.8-Flash-Next" : "this model";
@@ -1009,7 +1256,7 @@ int run(int argc, char** argv) {
   // Spec 17b: --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp).
   // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash only in b70-serve
   // (spec 19 v3c).
-  cli::check_tp(pipe, {spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
+  cli::check_tp(pipe, {spec.kind == cli::SpecKind::DFlash, profile,
                        fam_kol});   // plan 21v2b: Qwen3.8-Flash-Next runs --parallel tp too (cli/qwen4exp_decode.h)
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other

@@ -65,6 +65,12 @@
 #error "kol_attn: REL_DIM must accompany the relative bias extent"
 #endif
 #define SLIDING (WINDOW != 0)
+// ATTN_SPLIT (Inkling's verify rows, M > 1): a pair's wave weights (the bias, the max, the exps, their sum) computed by
+// one sub-group - pair pr by sub-group pr % NSG - into local memory, not by all eight; each sub-group then takes its
+// dims' P V from them. The same values in the same order: bitwise the unsplit form.
+#ifndef ATTN_SPLIT
+#define ATTN_SPLIT 0
+#endif
 #if KV8 && (SLIDING || !GATE)
 #error "kol_attn KV8: the full layers' cache only (the rings stay bf16), with the output gate (Inkling's form)"
 #endif
@@ -246,8 +252,15 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
+#if ATTN_SPLIT
+  __local float smx[NPR], ssm[NPR], srs[NPR], swl[NPR][WAVE_P];   // each pair's running max and sum, its wave's weights
+  float acc[NPR];
+  for (uint q = 0; q < NPR; ++q) acc[q] = 0.0f;
+  if (lid < NPR) { smx[lid] = -INFINITY; ssm[lid] = 0.0f; }
+#else
   float mx[NPR], sm[NPR], acc[NPR];
   for (uint q = 0; q < NPR; ++q) { mx[q] = -INFINITY; sm[q] = 0.0f; acc[q] = 0.0f; }
+#endif
   uint wc = 0;
 
   for (uint g = 0; g < 2; ++g) {
@@ -290,6 +303,59 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
         }
       }
       barrier(CLK_LOCAL_MEM_FENCE);
+#if ATTN_SPLIT
+      for (uint pr = sgid; pr < NPR; pr += NSG) {   // the pair's owner sub-group
+        const uint m = pr / GQA;
+        if (m < mlo || m >= mhi) continue;    // uniform
+        const float mxp = smx[pr];
+        const uint bound = pos + m, lo = key_lo(bound);
+        const uint p = p0 + lane;
+#if REL_BIAS
+        float mine = -INFINITY;
+        if (p <= bound && p >= lo) {
+          mine = sc_x[buf][pr][lane] * SSCALE;
+          const uint distance = bound - p;
+          if (distance < REL_BIAS) {
+            const __global float* r = relative_q + ((size_t)m * Q_HEADS + j * GQA + pr % GQA) * REL_DIM;
+            float bias = 0.0f;
+#pragma unroll
+            for (uint d = 0; d < REL_DIM; ++d) bias = fma(r[d], relative_table[d * REL_BIAS + distance], bias);
+            mine += bias;
+          }
+        }
+#else
+        const float mine = (p <= bound && p >= lo) ? sc_x[buf][pr][lane] * SSCALE : -INFINITY;
+#endif
+        const float nmx = fmax(mxp, sub_group_reduce_max(mine));
+        float resc, wl;
+        if (nmx > -INFINITY) {
+          resc = exp(mxp - nmx);
+          wl = exp(mine - nmx);
+        } else {
+          resc = 1.0f;
+          wl = 0.0f;
+        }
+        float ssum = 0.0f;
+        for (uint s2 = 0; s2 < WAVE_P; ++s2) ssum += intel_sub_group_shuffle(wl, s2);   // ascending s
+        swl[pr][lane] = wl;
+        if (lane == 0) {
+          srs[pr] = resc;
+          if (nmx > -INFINITY) {
+            ssm[pr] = fma(ssm[pr], resc, ssum);
+            smx[pr] = nmx;
+          }
+        }
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+#pragma unroll
+      for (uint pr = 0; pr < NPR; ++pr) {
+        const uint m = pr / GQA;
+        if (m < mlo || m >= mhi) continue;    // uniform
+        float tsum = 0.0f;
+        for (uint s2 = 0; s2 < WAVE_P; ++s2) tsum = fma(swl[pr][s2], KVAL(vreg[s2]), tsum);   // ascending s
+        acc[pr] = fma(acc[pr], srs[pr], tsum);
+      }
+#else
 #pragma unroll
       for (uint pr = 0; pr < NPR; ++pr) {
         const uint m = pr / GQA;
@@ -333,6 +399,7 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
         }
         acc[pr] = fma(acc[pr], resc, tsum);
       }
+#endif
       if (w + 1 < nwaves) {
         for (uint pp = 0; pp < PPS; ++pp) {
           const uint p = p0 + WAVE_P + sgid + NSG * pp;
@@ -347,7 +414,11 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
       if (m < mlo || m >= mhi) continue;
       __global float* restrict out = attn_part + (((size_t)(j * GQA + qhl) * TGT + blk) * M + m) * PART;
       out[2 + lid] = acc[pr];
+#if ATTN_SPLIT
+      if (lid == 0) { out[0] = smx[pr]; out[1] = ssm[pr]; }
+#else
       if (lid == 0) { out[0] = mx[pr]; out[1] = sm[pr]; }
+#endif
     }
   }
 }

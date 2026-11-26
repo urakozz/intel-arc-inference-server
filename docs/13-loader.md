@@ -749,7 +749,7 @@ persistent state fit. The whole model does not fit two cards' VRAM, so its route
 pinned host memory (the expert tier, [17-running-models.md](17-running-models.md)).
 
 Serving adds no loader code. `b70-serve` loads through `load_qwen4exp` as `b70-decode` does, with `mtp = true` under
-`--spec mtp` or `--spec lookup`. The one file it checks besides the weights is `tokenizer.json`: it must be the
+`--spec mtp`. The one file it checks besides the weights is `tokenizer.json`: it must be the
 original model's, whose pre-tokenizer split includes `\p{M}` (combining marks). Intel's checkpoint ships Qwen3.8's
 file, so `b70-serve` refuses it, and the original's file has to be linked beside the snapshot
 ([17-running-models.md](17-running-models.md)).

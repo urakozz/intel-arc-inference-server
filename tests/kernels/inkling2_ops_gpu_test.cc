@@ -3,6 +3,8 @@
 #include <bit>
 #include <cstdio>
 #include <initializer_list>
+#include <span>
+#include <type_traits>
 #include <vector>
 
 #include "check.h"
@@ -165,6 +167,7 @@ int main() {
   for (uint32_t stream = 0; stream < widths.size(); ++stream) commit.arg_ptr(stream + 1, history_dev[stream].ptr());
   commit.arg(5, verify_rows);
   commit.arg(6, accepted);
+  commit.arg_ptr(7, nullptr);
   list.launch(commit, 2 * (K + H) / 128, visits);
   size_t offset = 0;
   for (uint32_t stream = 0; stream < widths.size(); ++stream) {
@@ -310,5 +313,103 @@ int main() {
       }
   }
 
-  std::puts("Inkling GPU depth mix, controller blend, short convolution, KV, relative attention and routing match host bits. Expert unions match per-row bits.");
+  {
+    // Decode's split mixes and norms (INK_GLUE_SPLIT) against the one-work-group kernels: 2 rows, 3 streams, 4 states.
+    constexpr uint32_t rows = 2, streams = 3, count = 4, split = 8;
+    uint32_t seed = 12345;
+    const auto next = [&](float scale) {
+      seed = seed * 1664525u + 1013904223u;
+      return (float(seed >> 8) / float(1u << 24) - .5f) * scale;
+    };
+    const auto values = [&](size_t n, float scale) {
+      std::vector<float> v(n);
+      for (auto& x : v) x = next(scale);
+      return v;
+    };
+    auto states_dev = upload(values((count - 1) * rows * H, 4.f)), last_dev = upload(values(rows * H, 4.f));
+    auto queries_dev = upload(values(streams * H, 1.f)), messages_dev = upload(values(streams * rows * H, 3.f));
+    auto fg_dev = upload(values(2 * streams * rows * H, 4.f));
+    std::vector<float> g(3 * H);
+    for (auto& x : g) x = 1.f + next(1.f);
+    auto g0 = upload(std::span(g).first(H)), g1 = upload(std::span(g).subspan(H, H)), g2 = upload(std::span(g).subspan(2 * H));
+    l0::Module ctrl_glue(ctx, kernels::path(std::string(ink::kControllerGlue)));
+    l0::Module split_glue(ctx, kernels::path(std::string(ink::kSplitGlue)));
+    const auto run = [&](l0::Module& module, const char* entry, uint32_t group, uint32_t gx, uint32_t gy, uint32_t gz,
+                         auto... args) {
+      auto k = module.kernel(entry);
+      k.group_size(group);
+      uint32_t i = 0;
+      const auto set = [&](auto a) {
+        if constexpr (std::is_pointer_v<decltype(a)> || std::is_null_pointer_v<decltype(a)>) k.arg_ptr(i++, a);
+        else k.arg(i++, a);
+      };
+      (set(args), ...);
+      list.launch(k, gx, gy, gz);
+    };
+    const auto read = [&](const l0::Mem& m, auto zero) {
+      std::vector<decltype(zero)> v(m.size() / sizeof(zero));
+      list.copy(v.data(), m.ptr(), m.size());
+      return v;
+    };
+    const auto same = [&](const auto& a, const auto& b) {
+      CHECK_EQ(a.size(), b.size());
+      for (size_t i = 0; i < a.size(); ++i) CHECK_EQ(a[i], b[i]);
+    };
+    l0::Mem parts(ctx, l0::MemKind::Device, streams * rows * 10 * 128 * sizeof(float));
+    l0::Mem norm_parts(ctx, l0::MemKind::Device, streams * rows * 2 * 128 * sizeof(float));
+    const float eps = 1e-6f;
+    void* st = states_dev.ptr(), *la = last_dev.ptr(), *qu = queries_dev.ptr(), *me = messages_dev.ptr();
+    void* pa = parts.ptr(), *np = norm_parts.ptr();
+    // ink_depth_mix_norm, three streams
+    l0::Mem want(ctx, l0::MemKind::Device, streams * rows * H * 2), got(ctx, l0::MemKind::Device, streams * rows * H * 2);
+    l0::Mem mixed(ctx, l0::MemKind::Device, streams * rows * H * 4), mixed2(ctx, l0::MemKind::Device, streams * rows * H * 4);
+    run(glue, "ink_depth_mix_norm", 128, rows, streams, 1, st, qu, want.ptr(), count, rows, eps, g0.ptr(), g1.ptr(),
+        g2.ptr(), la);
+    run(split_glue, "ink_split_sums", 16, split, rows, streams, st, la, qu, pa, count, rows, 0u);
+    run(split_glue, "ink_split_mix", 16, split, rows, streams, st, la, pa, mixed.ptr(), np, count, rows);
+    run(split_glue, "ink_split_norm", 16, split, rows, streams, mixed.ptr(), np, got.ptr(), rows, eps, g0.ptr(),
+        g1.ptr(), g2.ptr());
+    same(read(want, uint16_t{}), read(got, uint16_t{}));
+    // ink_post_mix_norm, one stream, no attention residual
+    run(ctrl_glue, "ink_post_mix_norm", 128, rows, 1, 1, st, la, qu, want.ptr(), g0.ptr(), count, rows, eps, nullptr,
+        nullptr, nullptr, nullptr);
+    run(split_glue, "ink_split_sums", 16, split, rows, 1, st, la, qu, pa, count, rows, 0u);
+    run(split_glue, "ink_split_mix", 16, split, rows, 1, st, la, pa, mixed.ptr(), np, count, rows);
+    run(split_glue, "ink_split_norm", 16, split, rows, 1, mixed.ptr(), np, got.ptr(), rows, eps, g0.ptr(), nullptr,
+        nullptr);
+    same(read(want, uint16_t{}), read(got, uint16_t{}));
+    // ink_mix_cat (a shared and a per-stream query), then ink_controller_norm on its mixed rows
+    for (const uint32_t shared : {1u, 0u}) {
+      l0::Mem cat(ctx, l0::MemKind::Device, streams * rows * 2 * H * 2), cat2(ctx, l0::MemKind::Device, cat.size());
+      run(ctrl_glue, "ink_mix_cat", 128, rows, streams, 1, st, la, qu, me, mixed.ptr(), cat.ptr(), count, rows, shared,
+          eps, nullptr, nullptr, nullptr, nullptr);
+      run(split_glue, "ink_split_sums", 16, split, rows, streams, st, la, qu, pa, count, rows, shared);
+      run(split_glue, "ink_split_mix_cat", 16, split, rows, streams, st, la, pa, me, mixed2.ptr(), np, count, rows);
+      run(split_glue, "ink_split_cat", 16, split, rows, streams, mixed2.ptr(), me, np, cat2.ptr(), rows, eps);
+      same(read(mixed, uint32_t{}), read(mixed2, uint32_t{}));
+      same(read(cat, uint16_t{}), read(cat2, uint16_t{}));
+      run(ctrl_glue, "ink_controller_norm", 128, rows, streams, 1, mixed.ptr(), me, fg_dev.ptr(), want.ptr(), g0.ptr(),
+          g1.ptr(), g2.ptr(), rows, eps);
+      run(split_glue, "ink_split_blend", 16, split, rows, streams, mixed2.ptr(), me, fg_dev.ptr(), np, rows, streams);
+      run(split_glue, "ink_split_norm", 16, split, rows, streams, mixed2.ptr(), np, got.ptr(), rows, eps, g0.ptr(),
+          g1.ptr(), g2.ptr());
+      same(read(want, uint16_t{}), read(got, uint16_t{}));
+    }
+    // The router: the fused one-work-group kernel against the per-tile logits and the unfused selection.
+    std::vector<uint16_t> rw(128 * H), rx(rows * H);
+    for (auto& v : rw) v = common::f32_to_bf16(next(.2f));
+    for (auto& v : rx) v = common::f32_to_bf16(next(2.f));
+    auto rw_dev = upload(rw), rx_dev = upload(rx), rb_dev = upload(values(128, .1f));
+    l0::Mem fused(ctx, l0::MemKind::Device, rows * 32 * 4), split_route(ctx, l0::MemKind::Device, rows * 32 * 4);
+    l0::Mem logits(ctx, l0::MemKind::Device, rows * 128 * 4);
+    list.fill(fused.ptr(), 0, fused.size());
+    list.fill(split_route.ptr(), 0, split_route.size());
+    l0::Module fused_route(ctx, kernels::path(ink::route() + "_M1_FUSED")), plain_route(ctx, kernels::path(ink::route()));
+    run(fused_route, "kol_route", 128 * ink::kRouteSplit, 1, rows, 1, rw_dev.ptr(), rx_dev.ptr(), rb_dev.ptr(), fused.ptr());
+    run(fused_route, "kol_route_logits", 16 * ink::kRouteSplit, 8, rows, 1, rw_dev.ptr(), rx_dev.ptr(), logits.ptr());
+    run(plain_route, "kol_route", 128, 1, rows, 1, logits.ptr(), rb_dev.ptr(), split_route.ptr());
+    same(read(fused, uint32_t{}), read(split_route, uint32_t{}));
+  }
+
+  std::puts("Inkling GPU depth mix, controller blend, short convolution, KV, relative attention and routing match host bits. Expert unions match per-row bits. Split mixes and norms match the one-work-group kernels' bits.");
 }

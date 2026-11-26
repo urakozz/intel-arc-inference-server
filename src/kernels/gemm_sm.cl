@@ -51,6 +51,14 @@
 #ifndef M
 #error "gemm_sm: M"
 #endif
+// INK_REL_N: the relative query's columns in the fused attention projections (Inkling 2 Mini: 24 heads x 16; a
+// `--parallel tp` card's 12 heads: 192).
+#ifndef INK_REL_N
+#define INK_REL_N 384
+#endif
+#if INK_ATTN_POST && (M != 1 || LAYOUT != 2 || SPLITK != 1 || QKV_NKV)
+#error "gemm_sm INK_ATTN_POST: one row of the int8 in-work-group split"
+#endif
 #ifndef LAYOUT
 #define LAYOUT 0
 #endif
@@ -71,7 +79,12 @@
 #ifndef GEMV_KMAJOR_B
 #define GEMV_KMAJOR_B 1
 #endif
-#define I8_AT(k16, nt) ((((size_t)(k16) / GEMV_KMAJOR_B) * (N / 16) + (nt)) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B)
+// I8_N_STRIDE (default N): the k-major order's columns a k-block, when the N columns read are a run of a wider
+// weight's (a `--parallel tp` card's half of Inkling's head: the pointer at its first tile, the stride the head's).
+#ifndef I8_N_STRIDE
+#define I8_N_STRIDE N
+#endif
+#define I8_AT(k16, nt) ((((size_t)(k16) / GEMV_KMAJOR_B) * (I8_N_STRIDE / 16) + (nt)) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B)
 // I8_AHEAD 1 (LAYOUT 2, PERF-111): the next k-group's four tiles read one iteration ahead, into registers, while
 // this group's DPAS run - the same tiles and arithmetic in the same order: bitwise.
 #ifndef I8_AHEAD
@@ -201,6 +214,10 @@ __kernel void gemm_sm_i8w(__global const uchar* restrict w,
                           __global const float* restrict scales,
                           __global const ushort* restrict x,
                           __global float* restrict out
+#if INK_ATTN_POST
+                          , __global const float* history, __global const float* taps,
+                            __global const float* residual, __global float* next
+#endif
 #if QKV_NKV
                           , __global const uchar* wk, __global const float* sk, __global const ushort* xk, __global float* ok
                           , __global const uchar* wv, __global const float* sv, __global const ushort* xv, __global float* ov
@@ -235,11 +252,11 @@ __kernel void gemm_sm(__global const uint* restrict w,
       w = wg; scales = sgate; out = og;
     } else {
       group -= N / block;
-      if (group < 384 / block) {
-        columns = 384;
+      if (group < INK_REL_N / block) {
+        columns = INK_REL_N;
         w = wr; scales = sr; out = orr;
       } else {
-        group -= 384 / block;
+        group -= INK_REL_N / block;
         columns = 64;
         w = ws; scales = ss; out = os;
       }
@@ -387,6 +404,17 @@ __kernel void gemm_sm(__global const uint* restrict w,
     v *= scales[n];
 #endif
     out[((size_t)s * M + e) * N + n] = v;
+#if INK_ATTN_POST
+    {
+      // Inkling's o_proj at one row (plan 41b part 2): gemv_i8w.cl INK_ATTN_POST's output convolution and partial
+      // sum, on this column's value.
+#pragma OPENCL FP_CONTRACT OFF
+      float sum = 0.f;
+      for (uint tap = 0; tap < 3; ++tap) sum += taps[n * 4 + tap] * history[tap * N + n];
+      sum += taps[n * 4 + 3] * v;
+      next[n] = (v + sum) / sqrt(5.f) + (residual ? residual[n] : 0.f);
+    }
+#endif
   }
 #else
 #if LAYOUT == 2

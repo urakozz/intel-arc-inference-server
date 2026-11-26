@@ -217,7 +217,8 @@ def test_run_over_dumps():
             f.write("# rank.py\n" + "\n".join(str(i) for i in range(299, 200, -1)) + "\n")
         ns = argparse.Namespace(dumps=dumps, out_dir=out, arms="bf16,int8", vocab="", vocab_on="bf16",
                                 draft_vocab_ids=rk, vocab_used=300, k="1-7", batch=4, drafter=dd,
-                                w4a16=None, target=td, sources=None, dry_run=False)
+                                w4a16=None, target=td, sources=None, dry_run=False, candidates="", costs=None,
+                                draft_cost=0.2)
         DA.VOCAB_SIZES["tiny"] = 64
         ns.vocab = "tiny"
         DA.cmd_run(ns)
@@ -282,8 +283,55 @@ def test_positive_alignment():
     print("alignment: greedy[p] = draft_block's d_0 -> E_1 = 2 exactly (taps from 3); a greedy-path text accepts K = 2")
 
 
+def test_inkling_whole_block():
+    """Inkling's form in the batch: one K = 7 block an anchor equals Drafter.draft_block (embed_norm, the softcap
+    after the correction, the live rows), the 2-bit candidate variant drafts live ids, and sampled_and_gtau's
+    arithmetic on a target that puts all its mass on the drafts."""
+    cd = T.v2_dict(window=6)
+    cd["dflash_config"] = dict(cd["dflash_config"], final_logit_softcapping=3.0,
+                               selector_softcap_mode="after_correction")
+    cfg = ref.config_from_dict(cd)
+    t, e, h = T.random_tensors(cfg, 3)
+    live = T.VOCAB - 40
+    w = torch.ones(T.HID).to(torch.bfloat16) * 1.5
+    d = ref.Drafter(cfg, t, e, h, embed_norm=(w, 1e-6), valid_vocab=live)
+    ctx, _ = _ctx(d, 20)
+    anchors_pos = [1, 8, 15]
+    anchor_ids = [5, 77, 140]
+    ps = torch.tensor(anchors_pos)
+    head = DA.Head(d.lm_head, int8=True)
+    out = DA.draft_batch(d, head, anchor_ids, ps, 7, ctx, {"full": None, "c": ("c", 64)}, walk=True)
+    ids, real, cand, chosen = out["full"]
+    for b, p in enumerate(anchors_pos):
+        hd = ref.Drafter(cfg, t, e, (head.q.float() * head.s[:, None]), embed_norm=(w, 1e-6), valid_vocab=live)
+        o = hd.draft_block(anchor_ids[b], p, 7, ctx)
+        assert torch.equal(ids[b], o.ids) and torch.equal(cand[b], o.cand_ids), (p, ids[b].tolist(), o.ids.tolist())
+    assert int(out["c"][0].max()) < live
+    # a target certain of every draft: point mass E_K = 1 + K; exact E from the selector's q of the drafts
+    A = len(anchors_pos)
+    n = 24
+    f = 0
+    rows = n - f
+    top_ids = torch.full((rows, 1), -1, dtype=torch.long)
+    for b, p in enumerate(anchors_pos):
+        for j in range(7):
+            if p + j < rows:
+                top_ids[p + j - f, 0] = ids[b, j]
+    dump = {"tap_from": f, "top_ids": top_ids, "top_logits": torch.zeros(rows, 1), "lse": torch.zeros(rows)}
+    length = torch.full((A,), 7)
+    x = DA.sampled_and_gtau(dump, (ids, real, cand, chosen), ps, length, torch.zeros(A, dtype=torch.bool),
+                            [0.0] + [1.0 + 0.1 * k for k in range(8)], 0.2)
+    assert [round(v / A, 6) for v in x["pm"]] == [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], x["pm"]
+    q = torch.softmax(real, -1).gather(-1, chosen[..., None])[..., 0]
+    assert abs(x["exact"][-1] - float((1 + torch.cumprod(q, 1).sum(1)).sum())) < 1e-6
+    g = x["gtau"]["0.5"]
+    assert g["ids"] <= 8 * A and g["rows"] <= 8 * A and g["given_up"] >= 0
+    print("Inkling: one K = 7 block an anchor == draft_block, 2-bit candidates live, T 1.0 / GTAU arithmetic")
+
+
 TESTS = [test_top_k_fast, test_select_draft_vocab, test_int8, test_accept_accounting,
-         test_batch_equals_draft_block, test_vocab_mask, test_positive_alignment, test_run_over_dumps]
+         test_batch_equals_draft_block, test_vocab_mask, test_positive_alignment, test_run_over_dumps,
+         test_inkling_whole_block]
 
 
 def main() -> None:

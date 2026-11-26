@@ -3,7 +3,8 @@
 
     python -m tools.oracle.inkling_kv8_kld ids SNAPSHOT OUT --wikitext TEST.parquet --session REQUEST.json \
         [--a4 SET_DIR] [--a4-every 6]
-    python -m tools.oracle.inkling_kv8_kld run SNAPSHOT OUT [--threads 40] [--chunk 512]
+    python -m tools.oracle.inkling_kv8_kld run SNAPSHOT OUT [--threads 40] [--chunk 512] [--arms int8,int8-k,int8-v]
+        [--only NAME]
     python -m tools.oracle.inkling_kv8_kld summary OUT
 
 `ids` writes the corpus into OUT as <name>.ids: 20 consecutive wikitext-2 (raw, test) chunks of 512 ids (wiki-00..19),
@@ -13,7 +14,10 @@ the recorded opencode session's last request rendered by the checkpoint's templa
 `run` reads each sequence twice through inkling_ref.Inkling in fp32 - `--kv bf16` (every cache row rounded to bf16, the
 engine's default) and `--kv int8` (the 8 full visits' K / V through the 128-point rotated int8, rings bf16) - chunk by
 chunk, the two caches side by side, and writes OUT/<name>.kld.json: per position KL(bf16 || int8) of the softmaxed
-logits and whether the top-1 ids agree. Resumable: a sequence with its json is skipped.
+logits and whether the top-1 ids agree. Resumable: a sequence with its json is skipped. `--arms` names the int8 forms
+compared against the one bf16 forward (int8; int8-k / int8-v: only K / only V int8, the other bf16; <arm>~V1+V2: the
+arm with visits V1, V2 in walk order kept bf16 - the full ones are 5, 11, 17, 23, 29, 35, 41, 47), each arm but int8
+written as OUT/<name>.<arm>.kld.json; `--only` runs the one sequence NAME.
 
 `summary` prints mean KLD and top-1 agreement per corpus (wiki, session, a4) and over all positions.
 """
@@ -93,28 +97,36 @@ def run(a):
     model = Inkling(a.snapshot, torch.float32)      # one model, its cache form switched a forward (Inkling.kv)
     for path in sorted(out.glob("*.ids")):
         name = path.stem
-        done = out / f"{name}.kld.json"
-        if done.exists():
+        if a.only and name != a.only:
+            continue
+        done = {arm: out / (f"{name}.kld.json" if arm == "int8" else f"{name}.{arm}.kld.json") for arm in a.arms}
+        arms = [arm for arm in a.arms if not done[arm].exists()]
+        if not arms:
             continue
         ids = list(map(int, path.read_text().split()))
-        caches = (model.cache(), model.cache())
-        kld, agree, t0 = [], [], time.monotonic()
+        caches = [model.cache() for _ in range(len(arms) + 1)]
+        kld, agree, t0 = {arm: [] for arm in arms}, {arm: [] for arm in arms}, time.monotonic()
         with torch.inference_mode():
             for s in range(0, len(ids), a.chunk):
                 x = torch.tensor([ids[s:s + a.chunk]])
                 model.kv = "bf16"
                 p = model.forward(x, caches[0])[0][0].log_softmax(-1)
-                model.kv = "int8"
-                q = model.forward(x, caches[1])[0][0].log_softmax(-1)
-                kld += (p.exp() * (p - q)).sum(-1).tolist()
-                agree += (p.argmax(-1) == q.argmax(-1)).tolist()
+                for arm, c in zip(arms, caches[1:]):
+                    model.kv = arm
+                    q = model.forward(x, c)[0][0].log_softmax(-1)
+                    kld[arm] += (p.exp() * (p - q)).sum(-1).tolist()
+                    agree[arm] += (p.argmax(-1) == q.argmax(-1)).tolist()
                 print(f"{name}: {s + x.shape[1]} / {len(ids)} ids, {time.monotonic() - t0:.0f} s", flush=True)
-        done.write_text(json.dumps({"name": name, "positions": len(kld), "kld": kld, "top1": agree}) + "\n")
+        for arm in arms:
+            done[arm].write_text(json.dumps({"name": name, "positions": len(kld[arm]), "kld": kld[arm],
+                                             "top1": agree[arm]}) + "\n")
 
 
 def summary(a):
     rows = {}
     for path in sorted(Path(a.out).glob("*.kld.json")):
+        if path.name.count(".") > 2:   # another arm's (<name>.<arm>.kld.json)
+            continue
         r = json.loads(path.read_text())
         for key in (corpus(r["name"]), "all"):
             k, t = rows.setdefault(key, ([], []))
@@ -126,6 +138,12 @@ def summary(a):
 
 
 def main():
+    import os
+    import importlib.util as _cl_util
+    _cl = _cl_util.spec_from_file_location("cpu_lock", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cpu_lock.py"))
+    _cl_mod = _cl_util.module_from_spec(_cl)
+    _cl.loader.exec_module(_cl_mod)
+    _cl_mod.hold()   # one CPU reference job at a time: refuse beside another
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
     q = sub.add_parser("ids")
@@ -140,6 +158,8 @@ def main():
     q.add_argument("out")
     q.add_argument("--threads", type=int, default=40)
     q.add_argument("--chunk", type=int, default=512)
+    q.add_argument("--arms", type=lambda v: v.split(","), default=["int8"])
+    q.add_argument("--only")
     q = sub.add_parser("summary")
     q.add_argument("out")
     a = p.parse_args()

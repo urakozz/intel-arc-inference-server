@@ -20,11 +20,12 @@ namespace kernels::dflash {
 // kM, kR, kTopK, kQs, kWg, kAttnPb, kAttnWg, kTopkChunk and the control block's indices: kernels/dflash_dims.h.
 
 // `M` the lists' rows (the block), `pb` df_attn's ring offsets a work-group, `win` df_attn's WIN define (its window
-// rule is |q - k| <= WIN - 1).
+// rule is |q - k| <= WIN - 1), `ntaps` the target taps fc concatenates (its K is ntaps H; plan 41k: Inkling has four).
 struct Shape {
   unsigned H = 5120, I = 17408, NH = 32, NKV = 8, HD = 128, ring = 2048, win = 2048, group = 16, ctaps = 2;
   unsigned rank = 256, vocab = 248320, used = 248077;
   unsigned M = kM, pb = kAttnPb;
+  unsigned ntaps = 5;
   constexpr unsigned R() const { return M - 1; }
 };
 inline constexpr Shape kQwen38{};
@@ -81,9 +82,11 @@ inline std::string rerank_half_variant(unsigned used, unsigned base, unsigned c)
 inline std::string tp_sum_variant(unsigned s, unsigned rank) {
   return "tp_cross_M8_K5120_G20_S" + s_(s) + "_F_R" + s_(rank) + "_sum";
 }
-inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false, unsigned M = kM) {
+// cap (plan 41k): the selector's softcap after the correction (df_select.cl SEL_CAP), 0 = none.
+inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false, unsigned M = kM,
+                                  unsigned cap = 0) {
   return v2 ? "df_select_M" + s_(M) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
-                   (split ? "_H16" : "")
+                   (split ? "_H16" : "") + (cap ? "_CAP" + s_(cap) : "")
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
 }
 // Plan 40a Task 4: the batched draft's block-aware binaries at `M` rows (kM or kSeqsRows; `split` the int4 drafter's
@@ -124,7 +127,7 @@ inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
                       {s.I, s.H},                                                            // down
-                      {5 * s.H, s.H},                                                        // fc (5 taps)
+                      {s.ntaps * s.H, s.H},                                                  // fc
                       {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
     v.push_back(linear_variant(fmt, kM, K, N, k));
   if (v2) {
@@ -162,7 +165,7 @@ inline std::vector<std::string> tp_draft_variants(unsigned fmt, unsigned rank, u
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
                       {s.I, s.H},                                                            // down
-                      {5 * s.H, s.H},                                                        // fc (replicated)
+                      {s.ntaps * s.H, s.H},                                                  // fc (replicated)
                       {s.H, 2 * s.NKV * s.HD},                                               // the context's k||v
                       {s.H, 2 * s.ctaps * (s.H / s.group)},                                  // conv kernel projections
                       {s.H, s.rank}})                                                        // the selector's
@@ -195,7 +198,7 @@ inline std::vector<std::string> dspark_draft_variants(bool int8_head) {
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
                       {s.I, s.H},                                                            // down
-                      {5 * s.H, s.H},                                                        // fc (5 taps)
+                      {s.ntaps * s.H, s.H},                                                  // fc
                       {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
     v.push_back(gemv_bf16_variant(kM, K, N, gemv_bf16_tiling(N)));
   v.push_back(int8_head ? gemv_i8w_variant(kR, s.H, s.vocab) : gemv_bf16_variant(kR, s.H, s.vocab, gemv_bf16_tiling(s.vocab)));
@@ -220,7 +223,7 @@ inline std::vector<std::string> flash_next_draft_variants(bool int8_head) {
                              {s.NH * s.HD, s.H},                                                    // o
                              {s.H, 2 * s.I},                                                        // gate||up
                              {s.I, s.H},                                                            // down
-                             {5 * s.H, s.H},                                                        // fc (5 taps)
+                             {s.ntaps * s.H, s.H},                                                  // fc
                              {s.H, 2 * s.NKV * s.HD},                                               // context k||v
                              {s.H, 2 * s.ctaps * (s.H / s.group)},                                  // conv kernels
                              {s.H, s.rank}})                                                        // selector
@@ -228,6 +231,49 @@ inline std::vector<std::string> flash_next_draft_variants(bool int8_head) {
   v.push_back(int8_head ? gemv_i8w_variant(kR, s.H, s.vocab)
                         : gemv_bf16_variant(kR, s.H, s.vocab, gemv_bf16_tiling(s.vocab)));
   return v;
+}
+
+// ==== Plan 41k: Inkling 2 Mini's DFlash 2 drafter (incoai/Inkling-2-Mini-DFlash2) ====
+// kInkling: hidden 2304 (the target's), 32 / 8 heads x 128 (Qwen3.8's drafter's attention: df_attn's binaries are shared),
+// FF 6912, the 2048 window over a 2048-slot ring, conv group 16 x 2 taps, selector rank 256 / top 16 with the softcap 30
+// after the correction (df_select's SEL_CAP), block 8, four taps (fc K 9216), the codebooks' 201024 rows; the candidates
+// over the target's head (its 200064 stored rows, 200058 live: the 2-bit copy's candidates, df_rerank at those). New
+// binaries where the hidden, the MLP, the taps or the cap is baked (df_prep, df_proj_wide, df_select) and the linears
+// at its K / N.
+inline constexpr Shape kInkling{2304, 6912, 32, 8, 128, 2048, 2048, 16, 2, 256, 201024, 200058, kM, kAttnPb, 4};
+inline constexpr unsigned kInklingHeadRows = 200064, kInklingCap = 30;
+inline std::string inkling_select_variant() { return select_variant(true, kInkling, false, kM, kInklingCap); }
+// One card and pp: the exact int8 rescore of the 2-bit head's 64 candidates a row (kernels::inkling2::kHeadCandidates),
+// the head's k-major tiles.
+inline std::string inkling_rerank_variant() { return "df_rerank_R7_K2304_U200058_C64_Q4"; }
+// `--parallel tp`: df_topk over a card's half of the head's rows (card 1's live ones end at 200058; ink_df_topk_merge
+// joins the two cards' lists).
+inline std::string inkling_tp_topk_variant(unsigned rank) {
+  constexpr unsigned half = kInklingHeadRows / 2;
+  return topk_variant(half, rank ? kInkling.used - half : half, false);
+}
+// The drafter's linears at the block's 8 rows (int8 at load, one scale a row; L1) - q || k || v and gate ||
+// up concatenated (loader::Inkling2Checkpoint) - and the context projection's at its 1..8 committed rows: fc over the
+// four taps, then each layer's k || v rows of its q || k || v weight in place.
+inline std::vector<std::pair<unsigned, unsigned>> inkling_linear_shapes() {
+  const Shape& s = kInkling;
+  return {{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
+          {s.NH * s.HD, s.H},                      // o
+          {s.H, 2 * s.I},                          // gate||up
+          {s.I, s.H},                              // down
+          {s.H, 2 * s.ctaps * (s.H / s.group)},    // the conv kernel projections
+          {s.H, s.rank}};                          // the selector's
+}
+inline std::pair<unsigned, unsigned> inkling_fc_shape() { return {kInkling.ntaps * kInkling.H, kInkling.H}; }
+inline std::pair<unsigned, unsigned> inkling_context_kv_shape() { return {kInkling.H, 2 * kInkling.NKV * kInkling.HD}; }
+// Every binary the one-card draft and context lists bind besides the engine's own linears (the int8 head at the 7 draft
+// rows is the DSpark drafter's): df_prep, df_proj_wide, the attention (the H1 / B4 reduce and the KS 4 DPAS part),
+// df_select's capped walk, the 2-bit head's candidates reranked exactly. tests/kernels/inkling2_dflash_names_test.cc holds the union to the
+// CMake block.
+inline std::vector<std::string> inkling_dflash2_variants() {
+  const Shape& s = kInkling;
+  return {prep_variant(s), proj_wide_variant(s), attn_variant(s, 1, 4), attn_dpas_variant(s, 4),
+          inkling_select_variant(), inkling_rerank_variant()};
 }
 
 }  // namespace kernels::dflash

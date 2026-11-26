@@ -1,4 +1,4 @@
-// Spec 19f on the card, through EngineAdapter - what b70-serve --spec dflash-lookup's loop calls, no HTTP: the engine
+// Spec 19f on the card, through EngineAdapter - what b70-serve --spec dflash's loop calls, no HTTP: the engine
 // with the DFlash drafter (int8, beside the gate checkpoint's int8 head, bf16 KV), server::LookupInDFlash over a
 // server::PromptLookup exactly as Server::generate drives them, AdaptiveK over MtpCost::dflash for the DFlash
 // iterations.

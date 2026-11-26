@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "server/json_struct.h"
+#include "server/toolcall_inkling2.h"
 #include "server/toolcall_kolibri.h"
 
 namespace server {
@@ -27,16 +28,26 @@ struct KolibriKwargs {
   std::optional<bool> preserve_thinking;
 };
 
+// Inkling's template: its seven effort names, or a number in [0, 0.99] (it raises outside), or null.
+bool inkling_effort(const json& e) {
+  if (e.is_null()) return true;
+  if (e.is_number()) return e.get<double>() >= 0.0 && e.get<double>() <= 0.99;
+  return e.is_string() && kolibri_effort(e.get<std::string>());
+}
+const char* const kInklingEfforts = "must be one of none, minimal, low, medium, high, xhigh, max, or a number from 0 to 0.99";
+
 }  // namespace
 
 ChatFormat ChatFormat::for_model_type(const std::string& model_type) {
   if (model_type == "kolibri1") return kolibri();
+  if (model_type == "inkling2_loop") return inkling();
   return ChatFormat{};
 }
 
 const char* ChatFormat::name() const {
   switch (kind) {
     case Kind::Kolibri: return "kolibri1";
+    case Kind::Inkling: return "inkling2";
     default: return "qwen";
   }
 }
@@ -67,9 +78,23 @@ void check_template_kwargs(const ChatFormat& format, const json& kwargs) {
     KolibriKwargs k;
     json_struct::read(kwargs, k, fail);
   }
+  if (format.kind == ChatFormat::Kind::Inkling && kwargs.is_object() && kwargs.contains("reasoning_effort") &&
+      !inkling_effort(kwargs.at("reasoning_effort")))
+    fail(std::string("reasoning_effort ") + kInklingEfforts);
 }
 
-json request_template_kwargs(const ChatFormat& format, const json& kwargs, const json& reasoning_effort) {
+json request_template_kwargs(const ChatFormat& format, const json& kwargs, const json& reasoning_effort, bool thinking) {
+  if (format.kind == ChatFormat::Kind::Inkling) {
+    if (!inkling_effort(reasoning_effort))
+      throw std::invalid_argument(std::string("reasoning_effort ") + kInklingEfforts + " (Inkling 2)");
+    json out = kwargs.is_object() ? kwargs : json::object();
+    const bool off = !thinking || (out.contains("enable_thinking") && out.at("enable_thinking") == false);
+    if (!out.contains("reasoning_effort") || out.at("reasoning_effort").is_null()) {
+      if (!reasoning_effort.is_null()) out["reasoning_effort"] = reasoning_effort;
+      else if (off) out["reasoning_effort"] = "none";
+    }
+    return out;
+  }
   if (format.kind == ChatFormat::Kind::Kolibri && !reasoning_effort.is_null()) {
     // Kolibri's template reads `reasoning_effort` itself (vLLM hands the top-level field to the template as this kwarg);
     // an explicit chat_template_kwargs.reasoning_effort wins.
@@ -88,6 +113,8 @@ std::unique_ptr<OutputParser> make_output_parser(const ChatFormat& format, const
                                                  const json& /*kwargs*/, const json& tools) {
   // Kolibri: the model opens its reasoning itself; the parser reads it from the output.
   if (format.kind == ChatFormat::Kind::Kolibri) return std::make_unique<KolibriOutputStream>(tools);
+  // Inkling: the model opens its blocks; the parser reads them from the output.
+  if (format.kind == ChatFormat::Kind::Inkling) return std::make_unique<Inkling2OutputStream>(tools);
   // Qwen: with thinking on, the prompt ends in "<think>\n" and the output opens with reasoning.
   return std::make_unique<OutputStream>(ends_with(prompt, "<think>\n"), tools);
 }

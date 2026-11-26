@@ -20,7 +20,21 @@ std::vector<PrefillChunk> prefill_chunks(const model::Inkling2Desc& desc, uint32
         rows <= model::Inkling2Desc::trained_max_len - position)
     pre(desc.visits.size() == model::Inkling2Desc::visit_count);
 
-PrefillSizes prefill_sizes(uint32_t max_len, uint32_t rows, bool draft)
+// PERF-12: a full visit's prompt attention over `rows` rows at `pos`, in this many key spans (split-K; 1: one walk).
+// The PAIR grid is ceil(rows / 16) x 8 kv heads work-groups; under half of kSplitGroups the keys split towards
+// kSplitGroups work-groups, a span at least kSplitKeys keys.
+inline constexpr uint32_t kSplitGroups = 256, kSplitKeys = 4096;
+constexpr uint32_t attention_spans(uint32_t rows, uint32_t pos) {
+  const uint32_t groups = (rows + 15) / 16 * model::Inkling2Desc::kv_heads;
+  if (groups >= kSplitGroups / 2) return 1;
+  const uint32_t want = (kSplitGroups + groups - 1) / groups, most = pos / kSplitKeys;
+  return want < most ? want : most > 1 ? most : 1;
+}
+
+// taps: the card writes the drafter's taps (the drafter's card, or under `--parallel pp` the card before it).
+// tp: a `--parallel tp` card's (its heads' and experts' widths, the all-reduce's part and landing).
+PrefillSizes prefill_sizes(uint32_t max_len, uint32_t rows, bool draft, bool taps, const Tp& tp = {},
+                           bool dflash = false)
     pre(max_len > 0 && max_len <= model::Inkling2Desc::trained_max_len)
     pre(rows > 0 && rows <= kPrefillRows);
 

@@ -245,9 +245,12 @@ void edge_cases() {
 
 // truncate(n) then appending gives the matcher a fresh build of the same ids would: a
 // session's next request reuses the index from the common prefix.
-void truncate_equals_rebuild() {
-  std::mt19937_64 g(7);
-  std::uniform_int_distribution<uint32_t> tok(0, 30);
+// Plan 41f: the walk too - its steps and whether it was cut - equals a fresh build's, so lookup never depends on what
+// the index held before (a table left larger by a longer earlier request had other collisions: another walk). Varied
+// and two-id text; the count of walks cut at a cap is printed.
+void truncate_equals_rebuild_text(uint32_t vocab, uint64_t seed, uint64_t& cut_walks) {
+  std::mt19937_64 g(seed);
+  std::uniform_int_distribution<uint32_t> tok(0, vocab - 1);
   std::vector<uint32_t> s(6000);
   for (size_t i = 0; i < s.size(); ++i) s[i] = (i > 500 && i % 400 < 150) ? s[i - 333] : tok(g);
   PromptLookup reused;
@@ -265,13 +268,21 @@ void truncate_equals_rebuild() {
       for (uint32_t n : {2u, 3u, 6u}) {
         PromptLookup::Match a, b;
         CHECK(reused.propose(5, n, &a) == fresh.propose(5, n, &b));
-        CHECK(a.end == b.end && a.length == b.length);
+        CHECK(a.end == b.end && a.length == b.length && a.steps == b.steps && a.truncated == b.truncated);
+        cut_walks += a.truncated;
       }
     }
     reused.truncate(cut);
     reused.append(std::vector<uint32_t>(s.begin() + long(cut), s.end()));   // back to s
   }
-  std::printf("truncate + append equals a fresh build: ok\n");
+}
+
+void truncate_equals_rebuild() {
+  uint64_t varied = 0, repetitive = 0;
+  truncate_equals_rebuild_text(31, 7, varied);
+  truncate_equals_rebuild_text(2, 11, repetitive);
+  std::printf("truncate + append equals a fresh build, walks included: ok (%llu / %llu walks cut)\n",
+              (unsigned long long)varied, (unsigned long long)repetitive);
 }
 
 double ms_since(std::chrono::steady_clock::time_point t0) {

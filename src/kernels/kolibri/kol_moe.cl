@@ -106,28 +106,83 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
 #endif
 #define ROUTE_SLOTS (ROUTE_WG * ROUTE_EPL)
 #if INK_ROUTE_M1
-// All logits of one row fit in a work-group, so the selection can consume
-// the tiled BF16 GEMV result directly from local memory.
-__attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
+// All logits of one row fit in a work-group, so the selection can consume the tiled BF16 GEMV result directly from
+// local memory. One work-group a row (grid (1, rows)) of ROUTE_KS x ROUTE_WG work-items: sub-group s sums tile s % 8
+// over K slice s / 8 (gemv_bf16's KSPLIT, its pairwise tree over the slices), reads ROUTE_AHEAD steps before using
+// them; the first ROUTE_WG work-items then select.
+#define ROUTE_AHEAD 4
+#define ROUTE_K8 (2304 / 8 / ROUTE_KS)
+#if ROUTE_WG != 128 || (ROUTE_KS & (ROUTE_KS - 1)) != 0 || ROUTE_K8 % ROUTE_AHEAD != 0
+#error "kol_route INK_ROUTE_M1: 8 tiles of 16 experts, a power-of-two K split of whole read groups"
+#endif
+// The same logits a work-group a tile (grid (8, rows), sub-group s = K slice s): each sub-group's sum and the tree
+// over the slices are kol_route's below, bitwise; the unfused kol_route then selects from `logits` (8 work-groups
+// in place of one, whose sub-groups waited on their loads together on one Xe core).
+__attribute__((reqd_work_group_size(16 * ROUTE_KS, 1, 1)))
+KOL_SG16
+__kernel void kol_route_logits(__global const ushort* restrict weights, __global const ushort* restrict x,
+                               __global float* restrict logits) {
+  const uint m = get_group_id(1), tile = get_group_id(0), slice = get_sub_group_id(), l = get_sub_group_local_id();
+  __local float red[ROUTE_KS][16];
+  const __global ushort* w = weights + ((size_t)tile * (2304 / 8) + slice * ROUTE_K8) * 128;
+  x += (size_t)m * 2304 + slice * ROUTE_K8 * 8;
+  float acc = 0.f;
+  for (uint k0 = 0; k0 < ROUTE_K8; k0 += ROUTE_AHEAD, w += ROUTE_AHEAD * 128) {
+    ushort8 wq[ROUTE_AHEAD], xq[ROUTE_AHEAD];
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < ROUTE_AHEAD; ++j) {
+      wq[j] = intel_sub_group_block_read_us8(w + j * 128);
+      xq[j] = vload8(0, x + (k0 + j) * 8);
+    }
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < ROUTE_AHEAD; ++j) {
+      const ushort8 wv = wq[j], xv = xq[j];
+      acc += bf16f(wv.s0) * bf16f(xv.s0); acc += bf16f(wv.s1) * bf16f(xv.s1);
+      acc += bf16f(wv.s2) * bf16f(xv.s2); acc += bf16f(wv.s3) * bf16f(xv.s3);
+      acc += bf16f(wv.s4) * bf16f(xv.s4); acc += bf16f(wv.s5) * bf16f(xv.s5);
+      acc += bf16f(wv.s6) * bf16f(xv.s6); acc += bf16f(wv.s7) * bf16f(xv.s7);
+    }
+  }
+  red[slice][l] = acc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = ROUTE_KS / 2; stride > 0; stride >>= 1) {
+    if (slice < stride) red[slice][l] += red[slice + stride][l];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (slice == 0) logits[(size_t)m * ROUTE_LN + tile * 16 + l] = red[0][l];
+}
+__attribute__((reqd_work_group_size(ROUTE_WG * ROUTE_KS, 1, 1)))
 KOL_SG16
 __kernel void kol_route(__global const ushort* restrict weights, __global const ushort* restrict x,
                         __global const float* restrict bias, __global uint* restrict route) {
-  const uint m = 0, lane = get_local_id(0);
-  const uint tile = get_sub_group_id();
-  __local float lsel[ROUTE_SLOTS], lr[ROUTE_SLOTS];
+  const uint m = get_group_id(1), lane = get_local_id(0);
+  const uint tile = get_sub_group_id() % 8, slice = get_sub_group_id() / 8;
+  __local float lsel[ROUTE_SLOTS], lr[ROUTE_SLOTS], red[ROUTE_KS][ROUTE_SLOTS];
   __local uint top_id[ROUTE_K + 1];
   __local float top_sel[ROUTE_K + 1];
-  const __global ushort* w = weights + (size_t)tile * (2304 / 8) * 128;
+  const __global ushort* w = weights + ((size_t)tile * (2304 / 8) + slice * ROUTE_K8) * 128;
+  x += (size_t)m * 2304 + slice * ROUTE_K8 * 8;
   float acc = 0.f;
-  for (uint k8 = 0; k8 < 2304 / 8; ++k8, w += 128) {
-    const ushort8 wv = intel_sub_group_block_read_us8(w);
-    const ushort8 xv = vload8(0, x + k8 * 8);
-    acc += bf16f(wv.s0) * bf16f(xv.s0); acc += bf16f(wv.s1) * bf16f(xv.s1);
-    acc += bf16f(wv.s2) * bf16f(xv.s2); acc += bf16f(wv.s3) * bf16f(xv.s3);
-    acc += bf16f(wv.s4) * bf16f(xv.s4); acc += bf16f(wv.s5) * bf16f(xv.s5);
-    acc += bf16f(wv.s6) * bf16f(xv.s6); acc += bf16f(wv.s7) * bf16f(xv.s7);
+  for (uint k0 = 0; k0 < ROUTE_K8; k0 += ROUTE_AHEAD, w += ROUTE_AHEAD * 128) {
+    ushort8 wq[ROUTE_AHEAD], xq[ROUTE_AHEAD];
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < ROUTE_AHEAD; ++j) {
+      wq[j] = intel_sub_group_block_read_us8(w + j * 128);
+      xq[j] = vload8(0, x + (k0 + j) * 8);
+    }
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < ROUTE_AHEAD; ++j) {
+      const ushort8 wv = wq[j], xv = xq[j];
+      acc += bf16f(wv.s0) * bf16f(xv.s0); acc += bf16f(wv.s1) * bf16f(xv.s1);
+      acc += bf16f(wv.s2) * bf16f(xv.s2); acc += bf16f(wv.s3) * bf16f(xv.s3);
+      acc += bf16f(wv.s4) * bf16f(xv.s4); acc += bf16f(wv.s5) * bf16f(xv.s5);
+      acc += bf16f(wv.s6) * bf16f(xv.s6); acc += bf16f(wv.s7) * bf16f(xv.s7);
+    }
   }
-  lr[lane] = acc;
+  const uint e0 = tile * 16 + get_sub_group_local_id();
+  red[slice][e0] = acc;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  for (uint stride = ROUTE_KS / 2; stride > 0; stride >>= 1) {
+    if (slice < stride) red[slice][e0] += red[slice + stride][e0];
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  if (lane < ROUTE_SLOTS) lr[lane] = red[0][lane];
   barrier(CLK_LOCAL_MEM_FENCE);
 #else
 __attribute__((reqd_work_group_size(ROUTE_WG, 1, 1)))
@@ -142,6 +197,9 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
 #endif
   for (uint q = 0; q < ROUTE_EPL; ++q) {
     const uint e = lane + q * ROUTE_WG;
+#if INK_ROUTE_M1
+    if (e >= ROUTE_SLOTS) continue;   // the K split's extra work-items
+#endif
 #if ROUTE_RENORM
     lsel[e] = e < ROUTE_E ? sigmoid_f32(lr[e]) + bias[e] : -INFINITY;
 #else
@@ -416,67 +474,98 @@ __kernel void kol_moe_union_plan(__global const uint* route, __global uint2* pla
   if (e >= total && e < M * MOE_K) plan[e] = (uint2)(MOE_E, 0);
 }
 
+// The rows of a plan item, compacted: rows[j] = row x MOE_K + slot of the j-th row (ascending) that chose the expert.
+// Constant indices only (each row compared with every place), so the list stays in registers.
+inline uint union_rows(uint slots, uint* rows) {
+  uint n = 0;
+#pragma unroll
+  for (uint j = 0; j < M; ++j) rows[j] = 0;
+#pragma unroll
+  for (uint r = 0; r < M; ++r) {
+    const uint slot = (slots >> (4 * r)) & 15u;
+#pragma unroll
+    for (uint j = 0; j < M; ++j)
+      if (slot < MOE_K && j == n) rows[j] = r * MOE_K + slot;
+    n += slot < MOE_K;
+  }
+  return n;
+}
+
+// Each expert of the union read once for the n rows that chose it, each row's sums exactly kol_moe_gate_up's (the
+// same K slices, chains and tree) - bitwise the one-row kernel's.
 __attribute__((reqd_work_group_size(WG_UP, 1, 1)))
 KOL_SG16
 __kernel void kol_moe_union_gate_up(__global const uint2* plan, __global const ushort* x,
                                    __global const uint* w, __global ushort* h) {
   const uint2 item = plan[get_group_id(1)];
   if (item.x >= MOE_E) return;
+  uint rows[M], xo[M];
+  const uint n = union_rows(item.y, rows);
+#pragma unroll
+  for (uint j = 0; j < M; ++j) xo[j] = (rows[j] / MOE_K) * HIDDEN;
   const uint lid = get_local_id(0), lane = lid % SG, sg = lid / SG;
   const uint blk = get_group_id(0), tile_idx = sg / UP_KS, q = sg % UP_KS;
   const uint n_tile = blk * 4 + tile_idx, g0 = q * (G_UP / UP_KS);
   const __global uint* expert = w + (size_t)item.x * UP_BLK_U32;
-  float acc[M] = {0};
-  tile_dot_rows(expert + ((size_t)n_tile * G_UP + g0) * TILE_U32, x, item.y,
-                HIDDEN, 0, g0, g0 + G_UP / UP_KS, lane, acc);
+  float acc[M];
+  tile_dot_n(expert + ((size_t)n_tile * G_UP + g0) * TILE_U32, x, xo, n, g0, g0 + G_UP / UP_KS, lane, acc);
   __local float red[M][4 * UP_KS][SG];
 #pragma unroll
-  for (uint r = 0; r < M; ++r) red[r][sg][lane] = acc[r];
+  for (uint j = 0; j < M; ++j)
+    if (j < n) red[j][sg][lane] = acc[j];
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = UP_KS / 2; stride; stride >>= 1) {
     if (q < stride)
 #pragma unroll
-      for (uint r = 0; r < M; ++r) red[r][sg][lane] += red[r][sg + stride][lane];
+      for (uint j = 0; j < M; ++j)
+        if (j < n) red[j][sg][lane] += red[j][sg + stride][lane];
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   if (q != 0 || (tile_idx & 1u)) return;
 #if WFMT == 1
   const float outer = as_float(expert[UP_BLK_U32 - 1]);
-#else
-  const float outer = 1.f;
 #endif
   const uint i = blk * 32 + (tile_idx / 2) * SG + lane;
 #pragma unroll
-  for (uint r = 0; r < M; ++r) {
-    const uint slot = (item.y >> (4 * r)) & 15u;
-    if (slot >= MOE_K) continue;
-    const float g = red[r][sg][lane] * outer, u = red[r][sg + UP_KS][lane] * outer;
+  for (uint j = 0; j < M; ++j) {
+    if (j >= n) break;
+#if WFMT == 1
+    const float g = red[j][sg][lane] * outer, u = red[j][sg + UP_KS][lane] * outer;
+#else
+    const float g = red[j][sg][lane], u = red[j][sg + UP_KS][lane];
+#endif
     const float a = tanh(g / SWIGLU_CAP_G) * SWIGLU_CAP_G;
     const float b = tanh(u / SWIGLU_CAP_U) * SWIGLU_CAP_U;
-    h[((size_t)r * MOE_K + slot) * INTER + i] = rne_bf16(a * sigmoid_f32(g) * b);
+    h[(size_t)rows[j] * INTER + i] = rne_bf16(a * sigmoid_f32(g) * b);
   }
 }
 
+// The down projection the same way: each row's full-K chain of kol_moe_down's slot, times the expert's outer scale.
 __attribute__((reqd_work_group_size(4 * SG, 1, 1)))
 KOL_SG16
 __kernel void kol_moe_union_down(__global const uint2* plan, __global const ushort* h,
                                 __global const uint* w, __global float* expert_out) {
   const uint2 item = plan[get_group_id(1)];
   if (item.x >= MOE_E) return;
+  uint rows[M], xo[M];
+  const uint n = union_rows(item.y, rows);
+#pragma unroll
+  for (uint j = 0; j < M; ++j) xo[j] = rows[j] * INTER;
   const uint n_tile = get_group_id(0) * 4 + get_sub_group_id(), lane = get_sub_group_local_id();
   const __global uint* expert = w + (size_t)item.x * DN_BLK_U32;
-  float acc[M] = {0};
-  tile_dot_rows(expert + (size_t)n_tile * G_DN * TILE_U32, h, item.y,
-                MOE_K * INTER, INTER, 0, G_DN, lane, acc);
+  float acc[M];
+  tile_dot_n(expert + (size_t)n_tile * G_DN * TILE_U32, h, xo, n, 0, G_DN, lane, acc);
 #if WFMT == 1
   const float outer = as_float(expert[DN_BLK_U32 - 1]);
-#else
-  const float outer = 1.f;
 #endif
 #pragma unroll
-  for (uint r = 0; r < M; ++r) {
-    const uint slot = (item.y >> (4 * r)) & 15u;
-    if (slot < MOE_K) expert_out[((size_t)r * MOE_K + slot) * HIDDEN + n_tile * SG + lane] = acc[r] * outer;
+  for (uint j = 0; j < M; ++j) {
+    if (j >= n) break;
+#if WFMT == 1
+    expert_out[(size_t)rows[j] * HIDDEN + n_tile * SG + lane] = acc[j] * outer;
+#else
+    expert_out[(size_t)rows[j] * HIDDEN + n_tile * SG + lane] = acc[j];
+#endif
   }
 }
 
@@ -494,6 +583,9 @@ __kernel void kol_moe_union_finish(__global const uint* route, __global const fl
     for (uint j = 0; j < MOE_K; ++j)
       rows[r] += expert_out[((size_t)r * MOE_K + j) * HIDDEN + i] * as_float(route[r * RW + R_W + j]);
     pending[(size_t)r * HIDDEN + i] = rows[r];
+#if INK_MOE_TP_SUM
+    continue;   // `--parallel tp`: the card's part of the sum; the all-reduce, then the convolution (ink_post_conv)
+#endif
     float sum = 0.f;
     for (uint tap = 0; tap < 4; ++tap) {
       const int t = (int)r + (int)tap - 3;
@@ -506,4 +598,5 @@ __kernel void kol_moe_union_finish(__global const uint* route, __global const fl
     if (draft_tap) draft_tap[(size_t)r * 4 * HIDDEN + i] = rne_bf16(value);
   }
 }
+
 #endif

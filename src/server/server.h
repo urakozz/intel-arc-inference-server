@@ -77,7 +77,7 @@ struct Options {
   // iteration drafts mtp_k(), as before.
   bool mtp_auto = false;
   AdaptiveKOptions mtp_adaptive;
-  // Spec 19e (`--spec lookup`): prompt-lookup speculative decoding. Each iteration's drafts
+  // Spec 19e (external drafts): prompt-lookup speculative decoding. Each iteration's drafts
   // are the continuation of the longest earlier match (>= lookup_min_match ids) of the
   // request's own ids (server::PromptLookup over the prompt and every id kept so far),
   // verified by EngineIface::step_drafts; K per iteration from a per-request
@@ -92,14 +92,14 @@ struct Options {
   // reused across requests from the common prefix.
   uint32_t lookup_history = 0;
   AdaptiveKOptions lookup_adaptive;
-  // Spec 19f (`--spec dflash-lookup`, spec 19 §13.1): prompt lookup inside DFlash. Each iteration first asks
+  // Spec 19f (spec 19 §13.1): prompt lookup inside DFlash. Each iteration first asks
   // server::LookupInDFlash (ENTER >= 8 ids beyond the drafter's window, STAY >= 3 kept) over the request's matcher
-  // (indexed as --spec lookup's, lookup_history 0): its drafts, when it has any, are verified at K up to mtp_k() with
+  // (indexed as external lookup's, lookup_history 0): its drafts, when it has any, are verified at K up to mtp_k() with
   // the drafter's draft pass skipped; otherwise the iteration is a DFlash one at K from mtp_auto's AdaptiveK (which
   // only DFlash iterations feed). Through EngineIface::step_drafts_or_many; needs an engine with mtp_k() > 0 and
   // dflash_window() > 0, and not spec_lookup - the Server constructor refuses anything else. Off: nothing here runs.
   bool spec_dflash_lookup = false;
-  // Open-work 27 (`--spec auto` / `mtp`, B70_SPEC_LOOKUP=0 off): prompt lookup inside MTP. spec_dflash_lookup's policy
+  // Open-work 27 (under `--spec auto` / `mtp`): prompt lookup inside MTP. spec_dflash_lookup's policy
   // with no window (the head attends to the whole context: any earlier source counts) and K up to mtp_k(); without
   // lookup drafts the iteration is an MTP one - the per-step draft choice (server::StepK) for greedy requests where
   // mtp_auto has it, AdaptiveK otherwise, each fed only by its own iterations. Through
@@ -157,6 +157,10 @@ class Server {
     ParsedOutput parsed;   // chat: reasoning, content and tool calls
     std::string raw_text;  // every generated piece, before any parsing or stop
     double t_first_token = 0;
+    // The serial path's host stages (steady seconds, 0 on the scheduler path): generate() entered, the template
+    // rendered, the prompt tokenized, the previous request's request-end store waited for, the prefix session begun
+    // (restore + prefill).
+    double t_generate = 0, t_rendered = 0, t_encoded = 0, t_stored = 0, t_begun = 0;
     PrefixSession::Report prefix;
     int slot = -1;         // plan 13b: the slot (card) that served it under the scheduler; -1 on the serial path
     bool cancelled = false;   // the client hung up: generation stopped early
@@ -185,6 +189,7 @@ class Server {
   // `queue`: refused (false) when the queue is full; the reconfigure route waits its turn whatever the queue holds.
   bool acquire(uint64_t& ticket, bool queue = true);
   void release();
+  void wait_stored();   // the previous streamed request's request-end store, done
   bool bind();
   void handle(const httplib::Request& request, httplib::Response& response, bool chat);
   void tokenize(const httplib::Request& request, httplib::Response& response);

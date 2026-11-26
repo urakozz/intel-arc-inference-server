@@ -1,4 +1,4 @@
-// Spec 19f (plan 19f Task 3, Review Focus 3-4), host only: the server with --spec dflash-lookup over a scripted DFlash
+// Spec 19f (plan 19f Task 3, Review Focus 3-4), host only: the server with prompt lookup inside DFlash over a scripted DFlash
 // engine with lookup inside it (MockEngine::step_drafts_or_many; a greedy target whose output is the script, a drafter
 // window of 16 so that a far copy fits a small prompt).
 //   - every response is byte-identical to the plain server's and to plain --spec dflash's (modulo `created`) across

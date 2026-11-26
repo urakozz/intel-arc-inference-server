@@ -33,6 +33,7 @@ struct TokAdapter : server::TokIface {
   explicit TokAdapter(const std::string& json) : t(json) {}
 
   std::vector<uint32_t> encode(std::string_view text) override { return t.encode(text, false); }
+  std::vector<uint32_t> encode_prompt(std::string_view text) override { return t.encode_extending(text, memo); }
   std::string decode(const std::vector<uint32_t>& ids) override { return t.decode(ids, false); }
 
   struct S : server::StreamerIface {
@@ -48,6 +49,7 @@ struct TokAdapter : server::TokIface {
   uint32_t vocab_used() override { return t.vocab_size(); }
 
   tok::Tokenizer t;
+  tok::Tokenizer::Memo memo;   // the last serial prompt's
 };
 
 struct TemplateAdapter : server::TemplateIface {
@@ -84,13 +86,13 @@ struct EngineAdapter : server::EngineIface {
   // Step 3): the immediate command list and the readback buffer are reused
   // across every sampled step for the life of the adapter.
   // `mtp_k` > 0 (spec 8, `b70-serve --spec mtp`) needs an engine with the head loaded.
-  // `lookup` (spec 19e, `b70-serve --spec lookup`) verifies the server's prompt-lookup drafts
+  // `lookup` (spec 19e; no b70-serve flag selects it now) verifies the server's prompt-lookup drafts
   // through the same verify lists, which the engine captures only with the head loaded.
   // `dflash` (spec 19c, `b70-serve --spec dflash`): draft with the drafter the engine was built with (attached -
   // runtime::Engine::tap_drafter()), `mtp_k` its deepest K (--spec-max, 1..7): step_many() then drafts with it
   // instead of the MTP head - the server's loop, the AdaptiveK policy and truncate_to() are the same. Through the
   // runtime::TapDrafter interface, so this header links nothing of the drafter's.
-  // `dflash_lookup` (spec 19f, `b70-serve --spec dflash-lookup`): with `dflash`, step_drafts_or_many() on - prompt
+  // `dflash_lookup` (spec 19f, on under `--spec dflash`): with `dflash`, step_drafts_or_many() on - prompt
   // lookup inside DFlash (server::LookupInDFlash decides; the lookup drafts go through the tap verify list).
   explicit EngineAdapter(runtime::Engine& engine, uint32_t vocab, uint32_t mtp_k = 0,
                          bool lookup = false, bool dflash = false, bool dflash_lookup = false)
@@ -102,9 +104,9 @@ struct EngineAdapter : server::EngineIface {
         lookup_(lookup),
         df_(dflash ? engine.tap_drafter() : nullptr),
         dflash_lookup_(dflash_lookup) {
-    if (dflash_lookup && !dflash) throw std::runtime_error("--spec dflash-lookup needs the DFlash drafter");
+    if (dflash_lookup && !dflash) throw std::runtime_error("prompt lookup inside DFlash needs the DFlash drafter");
     if (dflash) {
-      if (lookup_) throw std::runtime_error("--spec dflash and --spec lookup: pick one proposer");
+      if (lookup_) throw std::runtime_error("the DFlash drafter and external prompt-lookup drafts are one proposer each; pick one");
       if (!df_) throw std::runtime_error("--spec dflash: the engine was not built with a drafter");
       if (k_ == 0 || k_ > eng.max_draft())
         throw std::runtime_error("--spec-max " + std::to_string(k_) + ": the drafter verifies K in 1.." +
@@ -113,11 +115,11 @@ struct EngineAdapter : server::EngineIface {
       throw std::runtime_error("--spec mtp " + std::to_string(k_) + ": K is 0..3");
     }
     if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--spec mtp needs the model's MTP head loaded");
-    if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --spec mtp: pick one proposer");
+    if (lookup_ && k_ > 0) throw std::runtime_error("external prompt-lookup drafts and the MTP head are one proposer each; pick one");
     // TODO(spec 19e Task 2, engine part, card): a model without an MTP head has no verify lists
     // today; it needs the M = 2..8 verify lists captured on their own.
     if (lookup_ && !eng.mtp())
-      throw std::runtime_error("--spec lookup needs the verify lists, which runtime::Engine "
+      throw std::runtime_error("external prompt-lookup drafts need the verify lists, which runtime::Engine "
                                "captures with the MTP head loaded (Qwen3.8); this model has none");
     if (k_ > 0 || lookup_) {
       // Pinned readback rows (probe-mtp §3: pageable costs 2.5x): q [K][V], p [K+1][V] - MTP and lookup at
@@ -418,7 +420,7 @@ struct EngineAdapter : server::EngineIface {
     return spec_run(n, x, k, a, d);
   }
 
-  // --- spec 19f: prompt lookup inside DFlash (`--spec dflash-lookup`) --------------------------
+  // --- spec 19f: prompt lookup inside DFlash (prompt lookup inside DFlash) --------------------------
   //
   // At pos = n with x_n pending: propose(x_n) (server::LookupInDFlash over the server's matcher). Lookup drafts
   // d_1..d_k (k <= --spec-max, the engine's max_verify_k) go into cur_token[1..k] - the drafter's draft list is NOT
@@ -431,7 +433,7 @@ struct EngineAdapter : server::EngineIface {
 
   std::vector<uint32_t> step_drafts_or_many(const server::Sampling& sampling, uint32_t k_dflash,
                                             const Proposer& propose) override {
-    if (!dflash_lookup_) throw std::logic_error("EngineAdapter::step_drafts_or_many without --spec dflash-lookup");
+    if (!dflash_lookup_) throw std::logic_error("EngineAdapter::step_drafts_or_many without prompt lookup inside DFlash");
     sample_first(sampling);
     flush_commit();
     auto* control = eng.control();
@@ -441,7 +443,7 @@ struct EngineAdapter : server::EngineIface {
     return lookup_run(sampling, x, d);
   }
 
-  // --- open-work 27: prompt lookup inside MTP (`--spec auto` / `mtp`) ----------------------------------------------
+  // --- open-work 27: prompt lookup inside MTP (under `--spec auto` / `mtp`) ----------------------------------------------
   //
   // step_drafts_or_many's lookup iteration on the MTP head's verify lists (M <= kMaxDraft + 1 = 4: K <= 3 lookup
   // drafts, the head's --spec-max): the head's draft lists are not run, the verify rewrites the head's KV and hidden

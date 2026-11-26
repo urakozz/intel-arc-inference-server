@@ -179,7 +179,7 @@ target_include_directories(reconfigure_server_test PRIVATE ${CMAKE_SOURCE_DIR}/s
 target_link_libraries(reconfigure_server_test PRIVATE b70_server)
 add_test(NAME reconfigure_server_test COMMAND reconfigure_server_test)
 
-# Spec 19e (plan 19e Task 2): the server with --spec lookup over a mock engine that verifies
+# Spec 19e (plan 19e Task 2): the server with external prompt lookup over a mock engine that verifies
 # external drafts, host only.
 add_executable(lookup_server_test server/lookup_server_test.cc)
 target_include_directories(lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -2603,9 +2603,10 @@ for f in "$@"; do printf '%s\n' "$out" | grep -qF -- "$f" || { echo "cli_serve_h
 ]==] cli_serve_help $<TARGET_FILE:b70-serve> --spec --spec-max --draft-model --max-num-seqs --max-len --parallel
     --pipeline-split --host --port --log-requests --prefix-cache-gb --prefix-split-last --layers --kv-cache
     --prefill-backend --draft-vocab --draft-vocab-ids)
-  # README.md's flag tables against both binaries' generated --help: the same flags, the same defaults.
+  # The flag tables (README.md: b70-serve, docs/18-development.md: b70-decode) against both binaries' generated --help:
+  # the same flags, the same defaults.
   add_test(NAME cli_readme_flags COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/cli/readme_flags_test.py
-    ${CMAKE_SOURCE_DIR}/README.md $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode>)
+    ${CMAKE_SOURCE_DIR}/README.md ${CMAKE_SOURCE_DIR}/docs/18-development.md $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode>)
 endif()
 
 
@@ -3375,13 +3376,12 @@ endif()
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
   b70_serve_reject(cli_reject_serve_kolibri_spec_mtp ${_kol_cfg} --spec mtp EXPECT "no MTP head")
-  b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "is not built for Kolibri-1")
   b70_serve_reject(cli_reject_serve_kolibri_kv8 ${_kol_cfg} --kv-cache int8 EXPECT "bf16 only")
   b70_serve_reject(cli_reject_serve_kolibri_prefill_int8 ${_kol_cfg} --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
   b70_serve_reject(cli_reject_serve_kolibri_one_card ${_kol_cfg} --parallel 1 EXPECT "run it with --parallel pp")
   b70_serve_reject(cli_reject_serve_kolibri_max_len ${_kol_cfg} --max-len 524288 EXPECT "a longer context is not supported")
-  set_tests_properties(cli_reject_serve_kolibri_spec_mtp cli_reject_serve_kolibri_lookup
+  set_tests_properties(cli_reject_serve_kolibri_spec_mtp
     cli_reject_serve_kolibri_kv8 cli_reject_serve_kolibri_prefill_int8 cli_reject_serve_kolibri_one_card
     cli_reject_serve_kolibri_max_len PROPERTIES LABELS kolibri)
 endif()
@@ -4402,7 +4402,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   add_test(NAME dflash_gpu_test COMMAND dflash_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
-  # Spec 19f (Review Focus 3-4): --spec dflash-lookup through EngineAdapter - D2 against the plain loop on golden, A4
+  # Spec 19f (Review Focus 3-4): prompt lookup inside DFlash through EngineAdapter - D2 against the plain loop on golden, A4
   # and the edit / copy set's 8k / 32k prompts, the warm ring (bitwise the plain loop's after lookup runs), a seeded
   # sampled lookup run reproducible.
   add_executable(dflash_lookup_gpu_test server/dflash_lookup_gpu_test.cc)
@@ -4435,29 +4435,21 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_spec_max ${B70_NO_MODEL} --spec dflash --spec-max 8 EXPECT "expects 1..7")
   set_tests_properties(cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
     PROPERTIES LABELS dflash)
-  # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
-  b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
-    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup runs on one card")
   b70_serve_reject(cli_reject_serve_dflash_no_draft_model ${B70_NO_MODEL} --spec dflash
     EXPECT "needs --draft-model")
-  b70_serve_reject(cli_reject_serve_dflash_lookup_no_draft_model ${B70_NO_MODEL} --spec dflash-lookup
+  b70_serve_reject(cli_reject_serve_dflash_no_draft_model_hint ${B70_NO_MODEL} --spec dflash
     EXPECT "--draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound (our packed int4 drafter")
-  b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
-    --spec dflash-lookup EXPECT "its verify lists serve the DSpark drafter")
-  b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
-    EXPECT "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup")
-  set_tests_properties(cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
-    cli_reject_serve_spec_value cli_reject_serve_dflash_no_draft_model cli_reject_serve_dflash_lookup_no_draft_model
+  b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec lookup
+    EXPECT "--spec expects auto, off, mtp or dflash, got 'lookup'")
+  set_tests_properties(cli_reject_serve_spec_value cli_reject_serve_dflash_no_draft_model
+    cli_reject_serve_dflash_no_draft_model_hint
     PROPERTIES LABELS dflash)
   # --parallel replica serves --spec dflash (a drafter on each card, bf16 or int8 KV; plan 19v3b: several slots a card
-  # too); what it does not: lookup inside DFlash, on two cards or beside slots (Qwen3.8's config.json: the snapshot,
-  # read before the device).
-  b70_serve_reject(cli_reject_serve_dflash_replica_lookup ${B70_TEST_SNAPSHOT} --parallel replica
-    --spec dflash-lookup --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound EXPECT "--spec dflash-lookup is built for one card")
-  b70_serve_reject(cli_reject_serve_dflash_replica_slots ${B70_TEST_SNAPSHOT} --parallel 1 --spec dflash-lookup
-    --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound --max-num-seqs 2
-    EXPECT "--spec dflash-lookup / --draft-vocab beside slots are not built")
-  set_tests_properties(cli_reject_serve_dflash_replica_lookup cli_reject_serve_dflash_replica_slots
+  # too); what it does not: a draft vocabulary beside slots (Qwen3.8's config.json: the snapshot, read before the
+  # device).
+  b70_serve_reject(cli_reject_serve_dflash_replica_slots ${B70_TEST_SNAPSHOT} --parallel 1 --draft-vocab 32k
+    --max-num-seqs 2 EXPECT "--draft-vocab beside slots is not built")
+  set_tests_properties(cli_reject_serve_dflash_replica_slots
     PROPERTIES LABELS "dflash;checkpoint")
 endif()
 # ==== Spec 19c ==== (end) ====
@@ -4636,11 +4628,8 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "reads the whole lm_head")
   b70_serve_reject(cli_reject_serve_kolibri_dspark_spec_max ${_kds_cfg} --spec dflash --spec-max 8
     --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "expects 1..7")
-  b70_serve_reject(cli_reject_serve_kolibri_dflash_lookup ${_kds_cfg} --spec dflash-lookup
-    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "is not built for Kolibri-1")
   set_tests_properties(cli_reject_serve_kolibri_dspark_no_model cli_reject_serve_kolibri_dspark_draft_vocab
-    cli_reject_serve_kolibri_dspark_spec_max
-    cli_reject_serve_kolibri_dflash_lookup PROPERTIES LABELS kolibri)
+    cli_reject_serve_kolibri_dspark_spec_max PROPERTIES LABELS kolibri)
 endif()
 # Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark
 # block). Host only (reads the kernel directory).
@@ -4675,6 +4664,7 @@ target_include_directories(expert_fp_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(expert_fp_test PRIVATE b70_loader)
 add_test(NAME expert_fp_test COMMAND expert_fp_test)
 set(B70_INKLING_SNAPSHOT "" CACHE PATH "Inkling-2-Mini snapshot for the sampled expert format test")
+set(B70_INKLING_DFLASH2 "" CACHE PATH "incoai/Inkling-2-Mini-DFlash2 snapshot (the DFlash 2 drafter's tests; empty: skipped)")
 if(B70_INKLING_SNAPSHOT)
   add_test(NAME expert_fp_release_test COMMAND expert_fp_test "${B70_INKLING_SNAPSHOT}")
 endif()
@@ -4702,6 +4692,14 @@ foreach(fmt NVFP4 MXFP8)
 endforeach()
 add_test(NAME inkling2_pf_moe_test COMMAND inkling2_pf_moe_test)
 
+# Plan 41e: the int8 prompt pass's linears (rotation, quantiser, pf_gemm_i8) against the fp32 product.
+add_executable(inkling2_int8_linear_test kernels/inkling2_int8_linear_test.cc)
+target_include_directories(inkling2_int8_linear_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_int8_linear_test PRIVATE b70_l0)
+b70_target_kernel_dir(inkling2_int8_linear_test)
+add_dependencies(inkling2_int8_linear_test kernel_ink_int8_K2304 kernel_ink_int8_K3072 kernel_pf_gemm_i8)
+add_test(NAME inkling2_int8_linear_test COMMAND inkling2_int8_linear_test)
+
 add_executable(inkling2_pf_attn_test kernels/inkling2_pf_attn_test.cc)
 target_include_directories(inkling2_pf_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(inkling2_pf_attn_test PRIVATE b70_l0)
@@ -4722,7 +4720,8 @@ add_dependencies(inkling2_kv8_test kernel_ink_prep_Q24KV8_D128_REL16_FUSED kerne
                  kernel_kol_attn_M1_T32_Q24KV8_REL16E1024_SINK_GATE_F_KV8
                  kernel_kol_attn_M8_T32_Q24KV8_REL16E1024_SINK_GATE_F_KV8
                  kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8
-                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR)
+                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR
+                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_I8S_PAIR)
 add_test(NAME inkling2_kv8_test COMMAND inkling2_kv8_test)
 
 add_executable(inkling2_chunks_test runtime/inkling2_chunks_test.cc)
@@ -4749,10 +4748,65 @@ if(B70_INKLING_SNAPSHOT)
   add_test(NAME inkling2_prefill_plan_test COMMAND inkling2_prefill_plan_test "${B70_INKLING_SNAPSHOT}")
 endif()
 
+add_executable(inkling2_pp_plan_test runtime/inkling2_pp_plan_test.cc)
+target_include_directories(inkling2_pp_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_pp_plan_test PRIVATE b70_inkling2_plan)
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_pp_plan_test COMMAND inkling2_pp_plan_test "${B70_INKLING_SNAPSHOT}")
+endif()
+
+# `--parallel tp`'s placement and plan (host, the snapshot's headers).
+add_executable(inkling2_tp_plan_test runtime/inkling2_tp_plan_test.cc)
+target_include_directories(inkling2_tp_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_tp_plan_test PRIVATE b70_inkling2_plan)
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_tp_plan_test COMMAND inkling2_tp_plan_test "${B70_INKLING_SNAPSHOT}")
+endif()
+
 add_executable(inkling2_variant_names_test kernels/inkling2_variant_names_test.cc)
 target_include_directories(inkling2_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(inkling2_variant_names_test PRIVATE b70_inkling2_model)
 add_test(NAME inkling2_variant_names_test COMMAND inkling2_variant_names_test ${B70_INKLING_KERNELS})
+
+# ==== Plan 41k: Inkling 2 Mini's DFlash 2 drafter (label inkling) ==== (begin) ====
+# The descriptor: the published config held to its kernels and to Inkling. Host only.
+add_executable(inkling2_dflash_desc_test model/inkling2_dflash_desc_test.cc)
+target_include_directories(inkling2_dflash_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_dflash_desc_test PRIVATE b70_dflash_model)
+add_test(NAME inkling2_dflash_desc_test
+         COMMAND inkling2_dflash_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/inkling2_dflash/config.json)
+set_tests_properties(inkling2_dflash_desc_test PROPERTIES LABELS inkling)
+# Every binary the drafter's lists name is compiled (src/kernels/CMakeLists.txt's plan 41k block and spec 19b's). Host
+# only (reads the kernel directory).
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(inkling2_dflash_names_test kernels/inkling2_dflash_names_test.cc)
+  target_include_directories(inkling2_dflash_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(inkling2_dflash_names_test PRIVATE b70_inkling2_model)
+  b70_target_kernel_dir(inkling2_dflash_names_test)
+  add_test(NAME inkling2_dflash_names_test COMMAND inkling2_dflash_names_test)
+  set_tests_properties(inkling2_dflash_names_test PROPERTIES LABELS inkling)
+endif()
+# The loader arm on the real checkpoints (the drafter in DSpark's place, its device form bitwise; refusals). Host.
+add_executable(inkling2_dflash_loader_test loader/inkling2_dflash_loader_test.cc)
+target_include_directories(inkling2_dflash_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_dflash_loader_test PRIVATE b70_inkling2_loader)
+if(B70_INKLING_SNAPSHOT AND B70_INKLING_DFLASH2)
+  add_test(NAME inkling2_dflash_loader_test
+           COMMAND inkling2_dflash_loader_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_DFLASH2}")
+  set_tests_properties(inkling2_dflash_loader_test PROPERTIES LABELS inkling)
+endif()
+# The draft list on the card against the CPU reference on a tap dump's anchors (B70_INKLING_DFLASH2_DRAFTS: the text
+# dflash_accept.py drafts writes; the test skips 77 without it).
+set(B70_INKLING_DFLASH2_DRAFTS "" CACHE FILEPATH "dflash_accept.py drafts' reference drafts for inkling2_dflash_draft_test")
+add_executable(inkling2_dflash_draft_test golden/inkling2_dflash_draft_test.cc)
+target_include_directories(inkling2_dflash_draft_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_dflash_draft_test PRIVATE b70_inkling2_runtime)
+if(B70_INKLING_SNAPSHOT AND B70_INKLING_DFLASH2)
+  add_test(NAME inkling2_dflash_draft_test COMMAND inkling2_dflash_draft_test "${B70_INKLING_SNAPSHOT}"
+           "${B70_INKLING_DFLASH2}" "${B70_INKLING_DFLASH2_DRAFTS}")
+  set_tests_properties(inkling2_dflash_draft_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+endif()
+# ==== Plan 41k: Inkling 2 Mini's DFlash 2 drafter ==== (end) ====
 
 add_executable(inkling2_ops_test kernels/inkling2_ops_test.cc)
 target_include_directories(inkling2_ops_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -4770,8 +4824,9 @@ add_executable(inkling2_ops_gpu_test kernels/inkling2_ops_gpu_test.cc)
 target_include_directories(inkling2_ops_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(inkling2_ops_gpu_test PRIVATE b70_l0)
 b70_target_kernel_dir(inkling2_ops_gpu_test)
-add_dependencies(inkling2_ops_gpu_test kernel_ink_glue_H2304 kernel_ink_prep_Q24KV8_D128_REL16
-                 kernel_kol_route_E128_T8_N128_L128_RENORM
+add_dependencies(inkling2_ops_gpu_test kernel_ink_glue_H2304 kernel_ink_glue_H2304_CTRL kernel_ink_glue_H2304_CTRL_SPLIT
+                 kernel_ink_prep_Q24KV8_D128_REL16
+                 kernel_kol_route_E128_T8_N128_L128_RENORM kernel_kol_route_E128_T8_N128_L128_RENORM_M1_FUSED
                  kernel_kol_attn_M1_T32_Q24KV8_REL16E1024_SINK_GATE_F
                  kernel_kol_moe_M2_E128_T8_D2304_I1152_CAP_NVFP4
                  kernel_kol_moe_M2_E128_T8_D2304_I1152_CAP_MXFP8)
@@ -4784,11 +4839,128 @@ foreach(name IN LISTS B70_INKLING_KERNELS)
   add_dependencies(inkling2_decode_test kernel_${name})
 endforeach()
 set(B70_INKLING_PROMPT "" CACHE FILEPATH "Token IDs for the Inkling FP32 CPU golden")
+# The pp / tp tests' short prompt after their synthetic context: any real ids; the oracle set's golden code prompt.
+set(B70_INKLING_BRIEF "${B70_ORACLE}/inkling/golden/code.ids" CACHE FILEPATH "Token IDs the Inkling pp / tp tests end with")
 if(B70_INKLING_SNAPSHOT AND B70_INKLING_GOLDEN AND B70_INKLING_PROMPT)
   add_test(NAME inkling2_decode_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
            "${B70_INKLING_PROMPT}" "${B70_INKLING_GOLDEN}")
   add_test(NAME inkling2_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
            "${B70_INKLING_PROMPT}" "${B70_INKLING_GOLDEN}" draft)
+endif()
+
+# Drafted ids equal plain ids after a real prompt's prompt pass: 200 ids (bf16) and ~30k (both caches). A verify row is
+# not bitwise the one-row step, so drafted ids may leave plain's at a near-tie (the int8 cache's 200-id case does at
+# id 7): these prompts are the ones that meet none in 128 ids; the golden ones below judge a difference.
+if(B70_INKLING_SNAPSHOT)
+  foreach(c "200;prose-followup-200;bf16" "30000;prose-32768;bf16 kv8")
+    list(GET c 0 len)
+    list(GET c 1 file)
+    list(GET c 2 caches)
+    separate_arguments(caches)
+    foreach(kv IN LISTS caches)
+      add_test(NAME inkling2_same_ids_${len}_${kv}_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}" same
+               "${B70_ORACLE}/inkling/prose/${file}.ids" ${len} 128 ${kv})
+      set_tests_properties(inkling2_same_ids_${len}_${kv}_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+    endforeach()
+  endforeach()
+  # The two prompts with an f32 golden, both caches: where drafted ids leave plain's, the reference row accepts both.
+  foreach(g "compat;prose.compat" "4096;prose-4096.fp32")
+    list(GET g 0 tag)
+    list(GET g 1 file)
+    foreach(kv bf16 kv8)
+      add_test(NAME inkling2_same_ids_golden_${tag}_${kv}_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+               same-golden "${B70_ORACLE}/inkling/prose/${file}.golden.safetensors" ${kv})
+      set_tests_properties(inkling2_same_ids_golden_${tag}_${kv}_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+    endforeach()
+  endforeach()
+  # The int8 cache's ids, plain and drafted, judged by its own f32 reference (--kv int8; skipped, 77, until it is made).
+  foreach(s "code;golden/code" "chat;golden/chat" "agentic;golden/agentic" "prose4096;prose/prose-4096")
+    list(GET s 0 tag)
+    list(GET s 1 stem)
+    add_test(NAME inkling2_golden_${tag}_kv8_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+             "${B70_ORACLE}/inkling/${stem}.ids" "${B70_ORACLE}/inkling/${stem}.fp32-kv8.golden.safetensors" kv8)
+    add_test(NAME inkling2_golden_${tag}_kv8_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+             "${B70_ORACLE}/inkling/${stem}.ids" "${B70_ORACLE}/inkling/${stem}.fp32-kv8.golden.safetensors" draft kv8)
+    set_tests_properties(inkling2_golden_${tag}_kv8_test inkling2_golden_${tag}_kv8_draft_test
+                         PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+  endforeach()
+endif()
+
+# Plan 41k: the same judgements with the DFlash 2 drafter in DSpark's place (dflash=DIR) - drafted ids equal plain or
+# judged by the f32 golden, both caches, and the accept mode's one-submission round against the three calls.
+if(B70_INKLING_SNAPSHOT AND B70_INKLING_DFLASH2)
+  foreach(g "compat;prose.compat" "4096;prose-4096.fp32")
+    list(GET g 0 tag)
+    list(GET g 1 file)
+    foreach(kv bf16 kv8)
+      add_test(NAME inkling2_dflash_same_ids_golden_${tag}_${kv}_test COMMAND inkling2_decode_test
+               "${B70_INKLING_SNAPSHOT}" same-golden "${B70_ORACLE}/inkling/prose/${file}.golden.safetensors" ${kv}
+               "dflash=${B70_INKLING_DFLASH2}")
+      set_tests_properties(inkling2_dflash_same_ids_golden_${tag}_${kv}_test PROPERTIES LABELS inkling
+                           SKIP_RETURN_CODE 77)
+    endforeach()
+  endforeach()
+  foreach(s "code;golden/code" "chat;golden/chat" "agentic;golden/agentic" "prose4096;prose/prose-4096")
+    list(GET s 0 tag)
+    list(GET s 1 stem)
+    add_test(NAME inkling2_dflash_golden_${tag}_kv8_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+             "${B70_ORACLE}/inkling/${stem}.ids" "${B70_ORACLE}/inkling/${stem}.fp32-kv8.golden.safetensors" draft kv8
+             "dflash=${B70_INKLING_DFLASH2}")
+    set_tests_properties(inkling2_dflash_golden_${tag}_kv8_draft_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+  endforeach()
+  add_test(NAME inkling2_dflash_accept_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}" accept
+           "${B70_ORACLE}/inkling/golden/code.ids" "${B70_ORACLE}/inkling/golden/chat.ids"
+           "dflash=${B70_INKLING_DFLASH2}")
+  set_tests_properties(inkling2_dflash_accept_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+endif()
+
+# `--parallel pp` against one card, bitwise (both cards; skipped, 77, with one).
+add_executable(inkling2_pp_test runtime/inkling2_pp_test.cc)
+target_include_directories(inkling2_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_pp_test PRIVATE b70_inkling2_runtime)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(inkling2_pp_test kernel_${name})
+endforeach()
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_pp_test COMMAND inkling2_pp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}")
+  add_test(NAME inkling2_pp_kv8_test COMMAND inkling2_pp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}" kv8)
+  add_test(NAME inkling2_pp_int8_test COMMAND inkling2_pp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}" int8)
+  set_tests_properties(inkling2_pp_test inkling2_pp_kv8_test inkling2_pp_int8_test PROPERTIES SKIP_RETURN_CODE 77)
+  if(B70_INKLING_DFLASH2)   # plan 41k: the DFlash 2 drafter on card 1, both caches
+    add_test(NAME inkling2_dflash_pp_test COMMAND inkling2_pp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}"
+             "dflash=${B70_INKLING_DFLASH2}")
+    add_test(NAME inkling2_dflash_pp_kv8_test COMMAND inkling2_pp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}"
+             kv8 "dflash=${B70_INKLING_DFLASH2}")
+    set_tests_properties(inkling2_dflash_pp_test inkling2_dflash_pp_kv8_test PROPERTIES LABELS inkling
+                         SKIP_RETURN_CODE 77)
+  endif()
+endif()
+
+# `--parallel tp` against itself where the order is kept (two cards; skipped, 77, with one); its ids against the f32
+# judge are inkling2_tp_decode_test / inkling2_tp_draft_test.
+add_executable(inkling2_tp_test runtime/inkling2_tp_test.cc)
+target_include_directories(inkling2_tp_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_tp_test PRIVATE b70_inkling2_runtime)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(inkling2_tp_test kernel_${name})
+endforeach()
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_tp_test COMMAND inkling2_tp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}")
+  add_test(NAME inkling2_tp_kv8_test COMMAND inkling2_tp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}" kv8)
+  add_test(NAME inkling2_tp_int8_test COMMAND inkling2_tp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}" int8)
+  set_tests_properties(inkling2_tp_test inkling2_tp_kv8_test inkling2_tp_int8_test PROPERTIES SKIP_RETURN_CODE 77)
+  if(B70_INKLING_DFLASH2)   # plan 41k: the DFlash 2 drafter whole on both cards
+    add_test(NAME inkling2_dflash_tp_test COMMAND inkling2_tp_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_BRIEF}"
+             "dflash=${B70_INKLING_DFLASH2}")
+    set_tests_properties(inkling2_dflash_tp_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+  endif()
+endif()
+if(B70_INKLING_SNAPSHOT AND B70_INKLING_GOLDEN AND B70_INKLING_PROMPT)
+  add_test(NAME inkling2_tp_decode_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+           "${B70_INKLING_PROMPT}" "${B70_INKLING_GOLDEN}" tp)
+  add_test(NAME inkling2_tp_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+           "${B70_INKLING_PROMPT}" "${B70_INKLING_GOLDEN}" draft tp)
+  set_tests_properties(inkling2_tp_decode_test inkling2_tp_draft_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 add_executable(inkling2_prefill_test golden/inkling2_prefill_test.cc)
@@ -4809,13 +4981,19 @@ if(B70_INKLING_SNAPSHOT)
              "${_ink}/golden/${p}.fp32.golden.safetensors" "${_ink}/golden/${p}.bf16.golden.safetensors")
     add_test(NAME inkling2_prefill_${p}_kv8_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
              "${_ink}/golden/${p}.fp32-kv8.golden.safetensors" "${_ink}/golden/${p}.bf16-kv8.golden.safetensors" kv8)
-    set_tests_properties(inkling2_prefill_${p}_test inkling2_prefill_${p}_kv8_test PROPERTIES SKIP_RETURN_CODE 77)
+    # Plan 41e: the int8 prompt pass (on the int8 cache) against the same int8-aware references.
+    add_test(NAME inkling2_prefill_${p}_int8_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
+             "${_ink}/golden/${p}.fp32-kv8.golden.safetensors" "${_ink}/golden/${p}.bf16-kv8.golden.safetensors" int8)
+    set_tests_properties(inkling2_prefill_${p}_test inkling2_prefill_${p}_kv8_test inkling2_prefill_${p}_int8_test
+                         PROPERTIES SKIP_RETURN_CODE 77)
   endforeach()
   foreach(n 4096 32768)
-    add_test(NAME inkling2_prefill_prose${n}_kv8_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
-             "${_ink}/prose/prose-${n}.fp32-kv8.golden.safetensors" "${_ink}/prose/prose-${n}.bf16-kv8.golden.safetensors"
-             kv8)
-    set_tests_properties(inkling2_prefill_prose${n}_kv8_test PROPERTIES SKIP_RETURN_CODE 77)
+    foreach(mode kv8 int8)
+      add_test(NAME inkling2_prefill_prose${n}_${mode}_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
+               "${_ink}/prose/prose-${n}.fp32-kv8.golden.safetensors"
+               "${_ink}/prose/prose-${n}.bf16-kv8.golden.safetensors" ${mode})
+      set_tests_properties(inkling2_prefill_prose${n}_${mode}_test PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
   endforeach()
 endif()
 foreach(size 4K 32K)
@@ -4826,6 +5004,78 @@ foreach(size 4K 32K)
              "${B70_INKLING_PREFILL_${size}}" "${B70_INKLING_PREFILL_${size}_BF16}")
   endif()
 endforeach()
+# Plan 41f Task 1: Inkling's chat template (thinkingmachines/Inkling-2-Mini at b85c3cfa's chat_template.jinja, vendored with
+# its tokenizer_config / generation_config at tests/tokenizer/inkling2/, Apache-2.0) on 20 message lists (every effort level
+# and a number, tools, a call history, tool results, reasoning, content parts, an image part; an unknown effort and an
+# audio part refused by the template) against transformers' apply_chat_template (tools/tokenizer/dump_inkling2.py); and its
+# tokenizer against HF's (ignore_merges words, the corpus, every render's ids, the A4 set's ids once the CPU queue made it).
+if(B70_TOKENIZER_ENABLED)
+  add_test(NAME template_inkling2_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/inkling2 inkling2_template_cases.json inkling2)
+  b70_hf_snapshot(B70_INKLING2_TOKENIZER_JSON models--thinkingmachines--Inkling-2-Mini
+    b85c3cfa615fc413cc9af3379f491b963f3b586a /tokenizer.json FILEPATH
+    "Inkling 2 Mini's tokenizer.json for inkling2_tokenizer_test (-D or the environment variable)")
+  add_executable(inkling2_tokenizer_test tokenizer/inkling2_tokenizer_test.cc)
+  target_include_directories(inkling2_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(inkling2_tokenizer_test PRIVATE b70_tokenizer)
+  add_test(NAME inkling2_tokenizer_test COMMAND inkling2_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    ${CMAKE_SOURCE_DIR}/tests/tokenizer/inkling2 ${B70_INKLING2_TOKENIZER_JSON} ${B70_ORACLE}/inkling/a4/set)
+  set_tests_properties(template_inkling2_test inkling2_tokenizer_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+endif()
+# The serial server's prompt encode (tok::Tokenizer::encode_extending: the ids of the previous prompt's shared start
+# kept) equals encode on growing, edited, cut and unrelated conversations - Qwen3.8's (and Ornith's renders), Inkling's
+# and Kolibri's tokenizers; each one absent is skipped.
+if(B70_TOKENIZER_ENABLED)
+  add_executable(tokenizer_extend_test tokenizer/tokenizer_extend_test.cc)
+  target_include_directories(tokenizer_extend_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(tokenizer_extend_test PRIVATE b70_tokenizer)
+  add_test(NAME tokenizer_extend_test COMMAND tokenizer_extend_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
+    default=template_ default=ornith_template_ ${B70_INKLING2_TOKENIZER_JSON}=inkling2_template_
+    ${B70_KOLIBRI_TOKENIZER_JSON}=kolibri_template_)
+  set_tests_properties(tokenizer_extend_test PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+# Plan 41f Task 3 (host, the checkpoint's headers): Inkling's served context on one card - with and without the drafter,
+# bf16 and int8 cache (replica plans the same on each card), and the refusal of what does not fit.
+add_executable(inkling2_plan_test runtime/inkling2_plan_test.cc)
+target_include_directories(inkling2_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_plan_test PRIVATE b70_inkling2_plan b70_runtime)
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_plan_test COMMAND inkling2_plan_test "${B70_INKLING_SNAPSHOT}" ${B70_INKLING_DFLASH2})
+  set_tests_properties(inkling2_plan_test PROPERTIES LABELS inkling)
+endif()
+# Plan 41f Task 4 (card): Inkling's prefix-cache snapshots through server::PrefixSession and the serving adapter - a
+# follow-up turn, a fork after 4096, the same prompt again (the head image), --prefix-split-last and a reset after a
+# long session, each bitwise its cold run, plain and drafted; bf16 and int8 cache.
+add_executable(inkling2_snapshot_test runtime/inkling2_snapshot_test.cc)
+target_include_directories(inkling2_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_snapshot_test PRIVATE b70_inkling2_runtime b70_server)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(inkling2_snapshot_test kernel_${name})
+endforeach()
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_snapshot_test COMMAND inkling2_snapshot_test "${B70_INKLING_SNAPSHOT}")
+  add_test(NAME inkling2_snapshot_kv8_test COMMAND inkling2_snapshot_test "${B70_INKLING_SNAPSHOT}" kv8)
+  add_test(NAME inkling2_snapshot_pp_test COMMAND inkling2_snapshot_test "${B70_INKLING_SNAPSHOT}" pp)
+  add_test(NAME inkling2_snapshot_pp_kv8_test COMMAND inkling2_snapshot_test "${B70_INKLING_SNAPSHOT}" kv8 pp)
+  set_tests_properties(inkling2_snapshot_test inkling2_snapshot_kv8_test inkling2_snapshot_pp_test
+                       inkling2_snapshot_pp_kv8_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77
+                       TIMEOUT 3600)
+  if(B70_INKLING_DFLASH2)   # plan 41k: the DFlash 2 drafter's rings in the snapshots, one card, both caches
+    add_test(NAME inkling2_dflash_snapshot_test COMMAND inkling2_snapshot_test "${B70_INKLING_SNAPSHOT}"
+             "dflash=${B70_INKLING_DFLASH2}")
+    add_test(NAME inkling2_dflash_snapshot_kv8_test COMMAND inkling2_snapshot_test "${B70_INKLING_SNAPSHOT}" kv8
+             "dflash=${B70_INKLING_DFLASH2}")
+    set_tests_properties(inkling2_dflash_snapshot_test inkling2_dflash_snapshot_kv8_test PROPERTIES LABELS inkling
+                         SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  endif()
+endif()
+# Plan 41f Task 2 (host): Inkling's reasoning, text and JSON call blocks (server/toolcall_inkling2.h) - the template's
+# round trip, drift, refusals, cuts and a 1000-output fuzz, every parse split-invariant.
+add_executable(toolcall_inkling2_test server/toolcall_inkling2_test.cc)
+target_include_directories(toolcall_inkling2_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(toolcall_inkling2_test PRIVATE b70_server)
+add_test(NAME toolcall_inkling2_test COMMAND toolcall_inkling2_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+set_tests_properties(toolcall_inkling2_test PROPERTIES LABELS inkling)
 # PERF-124: the host-RAM expert on the CPU (src/cpu): AVX2 (and AVX-512 where present) against the scalar fp32 twin. Host only.
 add_executable(cpu_expert_test cpu/cpu_expert_test.cc)
 target_include_directories(cpu_expert_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests/cpu)

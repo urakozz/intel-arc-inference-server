@@ -32,7 +32,7 @@
 //      the same prompt (after a side request, and at once) is restored whole, nothing prefilled;
 //   5. the server (HTTP, the Qwen chat format): a greedy chat = the one-device decode run on
 //      the response's prompt_token_ids; again from the cache (cached_tokens > 0) with the same
-//      ids (PERF-92: the whole prompt); --mtp 2 and --spec lookup give the same ids;
+//      ids (PERF-92: the whole prompt); --mtp 2 and external lookup give the same ids;
 //      --prefix-split-last; a seeded sampled request reproducible on a fresh server (plain and
 //      MTP), every id a word, and again from the cache (PERF-92: the first id drawn from the
 //      restored row - the device row is the last step's by then);
@@ -797,7 +797,7 @@ void case_server() {
     CHECK(f.chat(greedy).at("choices").at(0).at("token_ids").get<Ids>() == served);
     CHECK(f.chat(greedy).at("choices").at(0).at("token_ids").get<Ids>() == served);   // from the cache
     std::printf("server --pp 2 %s: the same ids, twice (the second from the cache)\n",
-                lookup ? "--spec lookup" : ("--mtp " + std::to_string(mtp_k)).c_str());
+                lookup ? "external lookup" : ("--mtp " + std::to_string(mtp_k)).c_str());
   }
   {
     ServeFixture f(/*cache=*/true, 2, false, /*split_last=*/true);

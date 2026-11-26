@@ -20,7 +20,7 @@ std::vector<PrefillChunk> prefill_chunks(const D& desc, uint32_t position, uint3
   return chunks;
 }
 
-PrefillSizes prefill_sizes(uint32_t max_len, uint32_t rows, bool draft) {
+PrefillSizes prefill_sizes(uint32_t max_len, uint32_t rows, bool draft, bool taps, const Tp& tp, bool dflash) {
   const size_t m = rows;
   constexpr size_t bf16 = sizeof(uint16_t), f32 = sizeof(float), word = sizeof(uint32_t);
   const size_t pairs = m * D::top_k;
@@ -34,12 +34,17 @@ PrefillSizes prefill_sizes(uint32_t max_len, uint32_t rows, bool draft) {
   s.messages = 4 * m * D::hidden * f32;
   s.controller = m * (12 * D::hidden * f32 + 3 * D::controller_rank * bf16);
   s.inputs = 3 * m * D::hidden * bf16;
-  s.projections = m * (2 * D::q_n + D::q_heads * D::relative_dim + 64) * f32;
-  s.conv = 2 * m * (D::kv_n + D::hidden) * f32;
+  s.projections = m * (2 * tp.q_n() + tp.rel_n() + 64) * f32;
+  s.conv = 2 * m * (tp.kv_n() + D::hidden) * f32;
   s.full_taps = 2 * m * 64 * f32;
-  s.attention = m * D::q_n * bf16;
-  s.linear_slab = 2 * D::hidden * size_t(kPrefillSlab) * bf16;
-  s.linear_tail_input = 256 * 2 * D::hidden * bf16;
+  s.attention = m * tp.q_n() * bf16;
+  for (uint32_t n = 1; n <= std::min<uint32_t>(rows, kPrefillAttentionRows); ++n)   // PERF-12's partials
+    s.split_parts = std::max(s.split_parts,
+                             size_t(attention_spans(n, UINT32_MAX)) * n * (tp.q_n() / D::head_dim) * (D::head_dim + 2) * f32);
+  // the widest K a prompt linear reads: the controllers' 2 x hidden, or the DFlash 2 drafter's fc over four taps
+  const size_t widest = (draft && dflash ? 4 : 2) * size_t(D::hidden);
+  s.linear_slab = widest * size_t(kPrefillSlab) * bf16;
+  s.linear_tail_input = 256 * widest * bf16;
   s.linear_tail_output = 256 * kPrefillSlab * f32;
   s.route_logits = m * D::experts * f32;
   s.routes = m * 32 * word;
@@ -49,12 +54,15 @@ PrefillSizes prefill_sizes(uint32_t max_len, uint32_t rows, bool draft) {
   s.expert_pairs = pairs * word;
   s.expert_items = (sorted / kPrefillExpertTile) * 4 * word;
   s.expert_inputs = sorted * D::hidden * bf16;
-  s.expert_hidden = sorted * D::inter * bf16;
+  s.expert_hidden = sorted * tp.inter() * bf16;
   s.expert_output = sorted * D::hidden * f32;
   s.prelude_trace = D::core_start * D::hidden * f32;
-  if (draft) {
-    s.draft_taps = 4 * m * D::hidden * bf16;
-    s.draft_projection = m * (D::hidden * bf16 + 2 * D::kv_n * f32);
+  if (taps) s.draft_taps = 4 * m * D::hidden * bf16;
+  // DFlash 2 (plan 41k): the chunk's in-window rows through fc (fp32), hidden_norm (bf16) and a layer's k / v (fp32)
+  if (draft) s.draft_projection = m * (D::hidden * (dflash ? f32 + bf16 : bf16) + 2 * D::kv_n * f32);
+  if (tp.on()) {
+    s.tp_part = m * D::hidden * f32;
+    s.tp_landing = 2 * m * D::hidden * f32;
   }
   return s;
 }

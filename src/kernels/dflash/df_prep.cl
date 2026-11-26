@@ -202,7 +202,8 @@ __kernel void df_silu_mul(__global const float* restrict gu, __global ushort* re
 #define QN (NH * HD)
 #define KVN (NKV * HD)
 #define QKVN (QN + 2 * KVN)
-// One head's RMSNorm over HD lanes (Σ² by the pairwise tree) and neox RoPE from the table [pos][cos HALF | sin HALF].
+// One head's RMSNorm over HD lanes (Σ² by the pairwise tree) and neox RoPE from the table [pos][cos HALF | sin HALF]
+// (ROPE_INV: from inv_freq [HALF], the angle computed).
 // `y` is HD floats of local scratch; returns this lane's output.
 inline float head_norm_rope(float x, __global const float* restrict w, __global const float* restrict rope, uint pos,
                             __local float* y) {
@@ -218,9 +219,15 @@ inline float head_norm_rope(float x, __global const float* restrict w, __global 
   const float v = (x * rstd) * w[i];
   y[i] = v;
   barrier(CLK_LOCAL_MEM_FENCE);
+#if ROPE_INV   /* the angles on the card: fp32 pos x inv_freq (the reference's product), `rope` its [HALF] */
+  const uint j = i % HALF;
+  const float a = (float)pos * rope[j], cj = cos(a), sj = sin(a);
+  const float o = i < HALF ? v * cj - y[i + HALF] * sj : v * cj + y[i - HALF] * sj;
+#else
   __global const float* c = rope + (size_t)pos * HD;
   const uint j = i % HALF;
   const float o = i < HALF ? v * c[j] - y[i + HALF] * c[HALF + j] : v * c[j] + y[i - HALF] * c[HALF + j];
+#endif
   barrier(CLK_LOCAL_MEM_FENCE);
   return o;
 }

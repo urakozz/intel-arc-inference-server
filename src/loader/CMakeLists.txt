@@ -37,4 +37,4 @@ target_link_libraries(b70_dflash_loader PUBLIC b70_loader b70_dflash_model b70_l
 
 
 add_library(b70_inkling2_loader STATIC inkling2_loader.cc)
-target_link_libraries(b70_inkling2_loader PUBLIC b70_loader b70_inkling2_model)
+target_link_libraries(b70_inkling2_loader PUBLIC b70_loader b70_inkling2_model b70_dflash_model)

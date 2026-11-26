@@ -112,6 +112,34 @@ MtpCost MtpCost::kolibri_dspark(bool i8_head) {
   return c;
 }
 
+MtpCost MtpCost::inkling_dspark() {
+  MtpCost c;
+  c.verify = {1.000, 1.182, 1.380, 1.534, 1.731, 1.870, 2.008, 2.218};
+  c.draft.assign(7, 0.329);
+  return c;
+}
+
+MtpCost MtpCost::inkling_dflash2() {
+  MtpCost c;
+  c.verify = {1.000, 1.167, 1.355, 1.503, 1.679, 1.826, 1.963, 2.175};
+  c.draft.assign(7, 0.232);
+  return c;
+}
+
+MtpCost MtpCost::inkling_dflash2_tp() {
+  MtpCost c;
+  c.verify = {1.000, 1.134, 1.275, 1.405, 1.552, 1.663, 1.796, 2.027};
+  c.draft.assign(7, 0.290);
+  return c;
+}
+
+MtpCost MtpCost::inkling_dspark_tp() {
+  MtpCost c;
+  c.verify = {1.000, 1.102, 1.226, 1.328, 1.454, 1.535, 1.640, 1.835};
+  c.draft.assign(7, 0.310);
+  return c;
+}
+
 MtpCost MtpCost::with_free_drafts() const {
   MtpCost c = *this;
   c.draft.assign(verify.empty() ? 0 : verify.size() - 1, 0.0);
@@ -139,6 +167,7 @@ AdaptiveK::AdaptiveK(const AdaptiveKOptions& opts)
       sec_(max_k_ + 1, 0.0) {
   if (!(opts.prior_weight > 0) || !(opts.prior > 0 && opts.prior <= 1))
     throw std::invalid_argument("AdaptiveK: the prior needs 0 < prior <= 1 and a weight > 0");
+  if (o_.probe_backoff && o_.warmup == 0) cur_ = best(alpha());
 }
 
 double RowCost::verify(uint32_t rows) const {
@@ -211,7 +240,22 @@ uint32_t AdaptiveK::best(double alpha) const {
   return b;
 }
 
-uint32_t AdaptiveK::next() {
+uint32_t AdaptiveK::next(uint32_t pos) {
+  if (!o_.by_depth.empty()) {
+    const auto& d = o_.by_depth;
+    size_t i = 0;
+    while (i < d.size() && d[i].first < pos) ++i;
+    if (i == 0 || i == d.size()) {
+      o_.cost = d[i == 0 ? 0 : d.size() - 1].second;
+    } else {
+      const double t = double(pos - d[i - 1].first) / double(d[i].first - d[i - 1].first);
+      const auto mix = [t](auto& out, const auto& a, const auto& b) {
+        for (size_t n = 0; n < out.size(); ++n) out[n] = a[n] + t * (b[n] - a[n]);
+      };
+      mix(o_.cost.verify, d[i - 1].second.verify, d[i].second.verify);
+      mix(o_.cost.draft, d[i - 1].second.draft, d[i].second.draft);
+    }
+  }
   if (iters_ < o_.warmup) return max_k_;
   // Timed but no plain step yet: one, so the costs the request measures have their unit (it never runs one at K > 0).
   if (timed_ && sec_[0] == 0 && cur_ > 0) return 0;
@@ -244,6 +288,8 @@ void AdaptiveK::observe(uint32_t k, uint32_t accepted, double seconds) {
   if (b != cur_ && rate(a, b) > rate(a, cur_) * (1.0 + o_.hysteresis)) cur_ = b;
   if (cur_ > 0)
     probe_gap_ = o_.probe_every;
+  else if (probe && o_.probe_backoff)   // untimed: a rejected probe waits longer, a kept one keeps the short gap
+    probe_gap_ = accepted == 0 ? std::min(probe_gap_ * 2, std::max(o_.probe_max, o_.probe_every)) : o_.probe_every;
   else if (probe && sec_[1] > 0 && sec_[0] > 0)   // the probe did not pay at this request's own cost: wait longer
     probe_gap_ = std::min(probe_gap_ * 2, std::max(o_.probe_max, o_.probe_every));
 }

@@ -19,7 +19,7 @@
 //     host's acceptance (greedy argmax match; sampled: server::accept_sampled over the q rows
 //     of the drafts and the p rows of the verify), the commit deferred exactly as
 //     EngineAdapter defers it (truncate_to commits fewer);
-//   - spec 19e's prompt lookup (`--spec lookup`): the proposer's drafts written on both
+//   - spec 19e's external prompt lookup: the proposer's drafts written on both
 //     devices (set_draft_input), the same verify lists, server::accept_point_mass;
 //   - spec 19d's DFlash drafter on device 1 (`--spec dflash --parallel pp`): draft_tap (the drafter's block, its sparse q
 //     in the readback), the tap verify lists on both devices, the host's acceptance (greedy argmax match; sampled:
@@ -79,8 +79,8 @@ struct HasDeferredCommit : std::false_type {};
 template <class E>
 struct HasDeferredCommit<E, std::void_t<decltype(std::declval<E&>().commit(0u, 0u, true))>> : std::true_type {};
 
-// Spec 19 v3c: engines whose drafter can verify prompt-lookup drafts on its tap lists (runtime::TpEngine) - --spec
-// dflash-lookup (spec 19f) is compiled only for those.
+// Spec 19 v3c: engines whose drafter can verify prompt-lookup drafts on its tap lists (runtime::TpEngine) - prompt lookup
+// inside DFlash (spec 19f) is compiled only for those.
 template <class E, class = void>
 struct HasDrafterWindow : std::false_type {};
 template <class E>
@@ -100,12 +100,12 @@ struct PipelineEngineAdapterT : server::EngineIface {
                          bool dflash = false, bool dflash_lookup = false)
       : eng(engine), vocab_used(vocab), V_(V), k_(mtp_k), lookup_(lookup), df_(dflash), dflash_lookup_(dflash_lookup) {
     if (dflash_lookup_ && (!df_ || !HasDrafterWindow<Engine>::value))
-      throw std::runtime_error("--spec dflash-lookup: this engine's drafter does not verify lookup drafts");
+      throw std::runtime_error("prompt lookup inside DFlash: this engine's drafter does not verify lookup drafts");
     if (vocab_used == 0 || vocab_used > V_)
       throw std::runtime_error("PipelineEngineAdapter: vocab_used " + std::to_string(vocab_used) +
                                " is outside the logits row (" + std::to_string(V_) + ")");
     if (df_) {
-      if (lookup_) throw std::runtime_error("--spec dflash and --spec lookup: pick one proposer");
+      if (lookup_) throw std::runtime_error("the DFlash drafter and external prompt-lookup drafts are one proposer each; pick one");
       if constexpr (kTap) {
         if (eng.max_draft() == 0 || eng.mtp())
           throw std::runtime_error("--spec dflash: the pipeline was not built with a drafter");
@@ -119,9 +119,9 @@ struct PipelineEngineAdapterT : server::EngineIface {
       throw std::runtime_error("--spec mtp " + std::to_string(k_) + ": K is 0..3");
     }
     if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--spec mtp needs the model's MTP head loaded");
-    if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --spec mtp: pick one proposer");
+    if (lookup_ && k_ > 0) throw std::runtime_error("external prompt-lookup drafts and the MTP head are one proposer each; pick one");
     if (lookup_ && !eng.mtp())
-      throw std::runtime_error("--spec lookup needs the verify lists, which the pipeline captures "
+      throw std::runtime_error("external prompt-lookup drafts need the verify lists, which the pipeline captures "
                                "with the MTP head loaded; this model has none");
     // Pinned readback rows (EngineAdapter's): q [kMaxDraft][V], then p [kMaxDraft + 1][V]; spec 19d: DFlash's p rows
     // alone, up to [8][V] (its q is the 16-candidate readback).
@@ -360,7 +360,7 @@ struct PipelineEngineAdapterT : server::EngineIface {
   std::vector<uint32_t> step_drafts_or_many(const server::Sampling& sampling, uint32_t k_dflash,
                                             const Proposer& propose) override {
     if constexpr (HasDrafterWindow<Engine>::value && kTap) {
-      if (!dflash_lookup_) throw std::logic_error("PipelineEngineAdapter::step_drafts_or_many without --spec dflash-lookup");
+      if (!dflash_lookup_) throw std::logic_error("PipelineEngineAdapter::step_drafts_or_many without prompt lookup inside DFlash");
       sample_first(sampling);
       flush_commit(HasDeferredCommit<Engine>::value);
       const uint32_t x = eng.pending();

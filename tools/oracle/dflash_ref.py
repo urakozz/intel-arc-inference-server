@@ -47,6 +47,18 @@ mask row from the head, a rank-r bilinear edge score, and a sequential walk whos
 predecessor is the anchor token. DFlash (v1) samples each mask row independently from its own
 full-vocabulary logits. `cfg.version` picks the path.
 
+**Inkling's form** (incoai/Inkling-2-Mini-DFlash2; SGLang `srt/models/dflash.py` with the checkpoint's
+`sglang_inkling_dflash2.py` patch). Three differences, each a
+config value or a target property, not a fork: (1) the block rows go through the TARGET's input embedding, which for
+Inkling includes `embed_norm` (SGLang inkling2.py `get_input_embeddings`): pass `embed_norm=(weight, eps)`; (2)
+`selector_softcap_mode` "after_correction": the unary logits stay raw and the softcap is applied to the edge score
+(score = cap tanh((unary + edge) / cap)) - vLLM's and the image's default is "before_correction"; (3) candidates come
+from the head's first `valid_vocab` rows only (Inkling: the text config's 200,058; 201,024 is padded storage).
+Inkling's `target_layer_ids` count layer VISITS of its looped walk, and the taps are DSpark's (the stream entering
+visits 5 / 23 / 41, the final-normed state after visit 47 for 48): `taps_from_slots` maps the engine's four tap
+slots to them; vLLM's layer + 1 convention does not apply. The drafter always runs the whole block (SGLang and the
+engine draft 7 and verify a prefix), so K < 7 drafts are the K = 7 block's prefix (`draft_block(..., rows=7)`).
+
 Run in the oracle container (tools/oracle/README.md, "DFlash reference").
 """
 from __future__ import annotations
@@ -99,6 +111,7 @@ class DFlashConfig:
     input_embedding_scale: float = 1.0
     output_multiplier: float = 1.0
     final_logit_softcapping: float = 0.0
+    softcap_after: bool = False     # selector_softcap_mode after_correction (Inkling's): cap the edge score
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -195,6 +208,10 @@ def config_from_dict(c: dict) -> DFlashConfig:
         cfg.input_embedding_scale = float(dc.get("input_embedding_scale", 1.0))
         cfg.output_multiplier = float(dc.get("output_multiplier", 1.0))
         cfg.final_logit_softcapping = float(dc.get("final_logit_softcapping") or 0.0)
+        mode = dc.get("selector_softcap_mode", "before_correction")
+        if mode not in ("before_correction", "after_correction"):
+            raise ValueError(f"selector_softcap_mode {mode}")
+        cfg.softcap_after = mode == "after_correction"
         if hidden % cfg.conv_group_size:
             raise ValueError("conv_group_size must divide hidden_size")
         if cfg.draft_vocab != cfg.vocab:
@@ -337,6 +354,19 @@ def read_target_embed_head(target_dir: str) -> tuple[torch.Tensor, torch.Tensor]
     return e, (t[head[0]] if head else e)
 
 
+def read_inkling_target(target_dir: str) -> dict:
+    """The Inkling 2 Mini target's input embedding, head (bf16 as stored, both 201,024 rows), embed_norm and its eps,
+    and the live vocabulary (text_config unpadded_vocab_size, 200,058 - SGLang's text vocab_size): what the DFlash 2
+    drafter borrows."""
+    with open(os.path.join(target_dir, "config.json")) as f:
+        tc = json.load(f)["text_config"]
+    root = "model.llm."
+    t = _read(_weight_map(target_dir), [root + "embed.weight", root + "unembed.weight", root + "embed_norm.weight"])
+    return {"embed": t[root + "embed.weight"], "lm_head": t[root + "unembed.weight"],
+            "embed_norm": (t[root + "embed_norm.weight"], float(tc["rms_norm_eps"])),
+            "valid_vocab": int(tc.get("unpadded_vocab_size", tc["vocab_size"]))}
+
+
 def read_mask_embedding(drafter_dir: str, mask_token_id: int) -> torch.Tensor | None:
     """qwen3_dflash.py:910 `_read_mask_embedding`: optional `mask_embedding.pt`, a tensor or
     {'embedding', 'mask_token_id'}; replaces the embedding row of mask_token_id."""
@@ -353,7 +383,7 @@ def read_mask_embedding(drafter_dir: str, mask_token_id: int) -> torch.Tensor | 
 
 def load_drafter(drafter_dir: str, target_dir: str | None = None, *,
                  embed: torch.Tensor | None = None, lm_head: torch.Tensor | None = None,
-                 upcast_head: bool = False) -> "Drafter":
+                 upcast_head: bool = False, embed_norm=None, valid_vocab: int | None = None) -> "Drafter":
     """Drafter from a checkpoint directory. The embedding and head are the drafter's own if it
     ships them, else the target's (pass `target_dir`, or the tensors directly to share them
     between several drafters)."""
@@ -370,7 +400,8 @@ def load_drafter(drafter_dir: str, target_dir: str | None = None, *,
         embed = e if embed is None else embed
         lm_head = h if lm_head is None else lm_head
     mask = read_mask_embedding(drafter_dir, cfg.mask_token_id)
-    return Drafter(cfg, t, embed, lm_head, mask_embedding=mask, upcast_head=upcast_head)
+    return Drafter(cfg, t, embed, lm_head, mask_embedding=mask, upcast_head=upcast_head, embed_norm=embed_norm,
+                   valid_vocab=valid_vocab)
 
 
 # --------------------------------------------------------------------------------------------
@@ -380,6 +411,13 @@ def load_drafter(drafter_dir: str, target_dir: str | None = None, *,
 def taps_from_resid(tensors: dict, target_layer_ids) -> dict[int, torch.Tensor]:
     """dump.py's `resid.L{i}` (decoder layer i's output) IS the tap for target_layer_id i."""
     return {i: tensors[f"resid.L{i}"] for i in target_layer_ids}
+
+
+def taps_from_slots(slots: torch.Tensor, target_layer_ids) -> dict[int, torch.Tensor]:
+    """Inkling: the engine's tap slots [N, 4, H] (bf16 [rows][4][hidden], in target_layer_ids order) -> taps."""
+    if slots.shape[1] != len(target_layer_ids):
+        raise ValueError(f"{slots.shape[1]} tap slots for {len(target_layer_ids)} target_layer_ids")
+    return {i: slots[:, t] for t, i in enumerate(target_layer_ids)}
 
 
 def taps_from_hf_hidden_states(hidden_states, target_layer_ids) -> dict[int, torch.Tensor]:
@@ -572,8 +610,12 @@ class Drafter:
 
     def __init__(self, cfg: DFlashConfig, tensors: dict[str, torch.Tensor], embed: torch.Tensor,
                  lm_head: torch.Tensor, mask_embedding: torch.Tensor | None = None,
-                 upcast_head: bool = False):
+                 upcast_head: bool = False, embed_norm=None, valid_vocab: int | None = None):
+        """embed_norm: (weight, eps) when the target's input embedding includes an RMSNorm (Inkling);
+        valid_vocab: candidates from the head's first rows only (Inkling's live vocabulary)."""
         self.cfg = cfg
+        self.embed_norm = None if embed_norm is None else (embed_norm[0].float(), float(embed_norm[1]))
+        self.valid_vocab = valid_vocab
         keep = ("candidate_selector.predecessor_codebook", "candidate_selector.successor_codebook")
         self.w = {n: (v if n in keep else v.float()) for n, v in tensors.items()}
         self.embed = embed
@@ -668,18 +710,22 @@ class Drafter:
 
     # -- block forward ----------------------------------------------------------------------
 
-    def embed_block(self, anchor_id: int, K: int) -> torch.Tensor:
-        """[anchor, mask x K] through the target's embedding (qwen3_dflash.py:496; the mask row
-        replaced by mask_embedding.pt when shipped), times input_embedding_scale (DFlash 2,
-        qwen3_dflash2.py:391)."""
+    def embed_rows(self, ids: torch.Tensor) -> torch.Tensor:
+        """ids through the target's embedding (qwen3_dflash.py:496; Inkling's includes embed_norm), the mask row
+        replaced by mask_embedding.pt when shipped, times input_embedding_scale (DFlash 2, qwen3_dflash2.py:391)."""
         c = self.cfg
-        ids = torch.tensor([anchor_id] + [c.mask_token_id] * K)
         x = self.embed[ids].float()
+        if self.embed_norm is not None:
+            x = rms_norm(x, self.embed_norm[0], self.embed_norm[1])
         if self.mask_embedding is not None:
             x[ids == c.mask_token_id] = self.mask_embedding
         if c.version == 2:
             x = x * c.input_embedding_scale
         return x
+
+    def embed_block(self, anchor_id: int, K: int) -> torch.Tensor:
+        """[anchor, mask x K] (embed_rows)."""
+        return self.embed_rows(torch.tensor([anchor_id] + [self.cfg.mask_token_id] * K))
 
     def attention_mask(self, i: int, qpos: torch.Tensor, kpos: torch.Tensor) -> torch.Tensor:
         """[Q, Kv] bool, True = visible (module docstring 'Attention')."""
@@ -764,13 +810,28 @@ class Drafter:
         return rms_norm(resid, self.w["norm.weight"], c.eps)
 
     def head_logits(self, h: torch.Tensor) -> torch.Tensor:
-        """Raw lm_head logits [rows, draft_vocab] in float32."""
-        return linear(h, self.lm_head)
+        """Raw lm_head logits [rows, draft_vocab] in float32; rows at or past valid_vocab are -inf."""
+        y = linear(h, self.lm_head)
+        if self.valid_vocab is not None:
+            y[:, self.valid_vocab:] = float("-inf")
+        return y
+
+    def unary_and_cap(self, unary: torch.Tensor) -> tuple[torch.Tensor, float | None]:
+        """The selector's unary logits (output_multiplier; the softcap before the correction, vLLM's order) and the
+        cap still to apply to the edge scores (after_correction, Inkling's order), else None."""
+        c = self.cfg
+        unary = unary * c.output_multiplier                       # logits_processor.py:314-317
+        if c.final_logit_softcapping <= 0:
+            return unary, None
+        if c.softcap_after:
+            return unary, c.final_logit_softcapping
+        cap = c.final_logit_softcapping
+        return torch.tanh(unary / cap) * cap, None
 
     # -- one draft --------------------------------------------------------------------------
 
     def draft_block(self, anchor_id: int, p: int, K: int, ctx: ContextKV, temperature: float = 0.0,
-                    seed: int | None = None) -> DraftOut:
+                    seed: int | None = None, rows: int | None = None) -> DraftOut:
         """K drafts for positions p + 1 .. p + K, given the anchor (the token at p) and the
         context K/V (positions < p are used; later ones in `ctx` are ignored).
 
@@ -781,18 +842,23 @@ class Drafter:
         c = self.cfg
         if not 1 <= K <= c.max_k:
             raise ValueError(f"K={K} outside 1..{c.max_k} (block_size {c.block_size})")
+        if rows is not None:
+            # the whole block of `rows` mask rows, the first K drafts kept (Inkling's form, module docstring)
+            out = self.draft_block(anchor_id, p, rows, ctx, temperature, seed)
+            return DraftOut(ids=out.ids[:K], cand_ids=out.cand_ids[:K], unary=out.unary[:K], scores=out.scores[:K],
+                            edges=None if out.edges is None else out.edges[:K], chosen=out.chosen[:K], q=out.q[:K],
+                            hidden=out.hidden, positions=out.positions)
         h = self.forward_block(self.embed_block(anchor_id, K), p, ctx)
         hm = h[1:]
         T = temperature if temperature > 0 else 1.0
         if c.version == 2:
             cand, unary = top_k_stable(self.head_logits(hm), c.selector_top_k)
-            unary = unary * c.output_multiplier                   # logits_processor.py:314-317
-            if c.final_logit_softcapping > 0:
-                cap = c.final_logit_softcapping
-                unary = torch.tanh(unary / cap) * cap
+            unary, cap = self.unary_and_cap(unary)
             hid = linear(hm, self.w["candidate_selector.hidden_projection.weight"])
             S = score_edges(self.w["candidate_selector.predecessor_codebook"],
                             self.w["candidate_selector.successor_codebook"], cand, unary, hid, anchor_id)
+            if cap is not None:
+                S = torch.tanh(S / cap) * cap                     # the patch's post_softcap
             chosen, ids, real = selector_walk(S, cand, p, temperature, seed)
             q = torch.zeros(K, c.vocab)
             q.scatter_(1, cand, torch.softmax(real.double() / T, -1).float())

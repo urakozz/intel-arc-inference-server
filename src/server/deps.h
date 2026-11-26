@@ -23,6 +23,9 @@ struct StreamerIface {
 struct TokIface {
   virtual ~TokIface() = default;
   virtual std::vector<uint32_t> encode(std::string_view text) = 0;
+  // The serial server's prompts, one at a time: encode(text), which may reuse the ids of the previous prompt's shared
+  // start (tok::Tokenizer::encode_extending).
+  virtual std::vector<uint32_t> encode_prompt(std::string_view text) { return encode(text); }
   virtual std::string decode(const std::vector<uint32_t>& ids) = 0;
   virtual std::unique_ptr<StreamerIface> streamer() = 0;
   virtual uint32_t vocab_used() = 0;
@@ -165,7 +168,7 @@ struct EngineIface {
     return step_many(s, k);
   }
 
-  // Spec 19e (`--spec lookup`, spec 19 §3 C): verify drafts proposed OUTSIDE the engine
+  // Spec 19e (spec 19 §3 C): verify drafts proposed OUTSIDE the engine
   // (prompt lookup). verify_k() == 0 (the default) means the engine cannot, and the server
   // never calls step_drafts(). Otherwise step_drafts(s, propose) runs one iteration:
   //   1. it calls propose(x) exactly once, with x the pending id (what step() would return
@@ -183,7 +186,7 @@ struct EngineIface {
     return {step(s)};
   }
 
-  // Spec 19f (`--spec dflash-lookup`, spec 19 §13.1): prompt lookup inside DFlash. dflash_window() == 0 (the default)
+  // Spec 19f (spec 19 §13.1): prompt lookup inside DFlash. dflash_window() == 0 (the default)
   // means the engine has no tap drafter, and the server never calls step_drafts_or_many(); otherwise it is the
   // drafter's window (the positions its ring holds back from the pending one). step_drafts_or_many(s, k, propose) runs
   // one iteration: it calls propose(x) exactly once, with x the pending id, and then

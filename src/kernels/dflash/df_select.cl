@@ -15,6 +15,8 @@
 //           draft rows (spec 8 / 19e: Engine::verify reads cur_token[1..k]).
 //
 // hid is the selector's hidden_projection over the block's rows, [M][RANK]: row j + 1 is mask row j's.
+// SEL_CAP (plan 41k, V2): S[c] = SEL_CAP · tanh((unary[j][c] + Σ) / SEL_CAP) - selector_softcap_mode after_correction,
+// the unary logits uncapped (df_topk_stage2's softcap 0); without it S[c] as above.
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef TOPK
@@ -171,7 +173,11 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
     if (lid < TOPK) {
       float t = 0.0f;
       for (uint q = 0; q < QS; ++q) t = t + part[lid * QS + q];
+#ifdef SEL_CAP   // plan 41k: the softcap after the correction (Inkling's drafter; its unary arrives raw)
+      s[lid] = SEL_CAP * tanh((uj[lid] + t) / SEL_CAP);
+#else
       s[lid] = uj[lid] + t;
+#endif
     }
 #else
     if (lid < TOPK) s[lid] = uj[lid];

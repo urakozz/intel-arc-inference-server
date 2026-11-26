@@ -43,8 +43,10 @@ int main(int argc, char** argv) {
     CHECK(w.offset % 64 == 0 && w.offset + w.bytes <= weights.bytes[w.arena]);
     if (w.scales) CHECK(w.scales % 64 == 0 && w.scales + w.N * sizeof(float) <= weights.bytes[w.arena]);
   }
-  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("auto"), "auto", false), 0);
-  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("auto"), "auto", true), 0);
+  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("auto"), "auto", false, false), 0);
+  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("auto"), "auto", true, false), 0);
+  // Two cards hold the trained context with the int8 cache and the drafter.
+  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("1048576"), "auto", true, true), 0);
   const auto s = ink::sizes(d, weights, 4096, true);
   CHECK_EQ(s.persistent.full_k, size_t(8) * 4096 * 1024 * 2);
   CHECK_EQ(s.persistent.ring_k, size_t(40) * ink::kRing * 1024 * 2);

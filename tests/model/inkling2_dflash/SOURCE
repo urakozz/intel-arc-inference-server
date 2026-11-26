@@ -1,0 +1,7 @@
+config.json: incoai/Inkling-2-Mini-DFlash2 @ 4f9088ea66c21f2b99ed657d1941c306b03e84d2, config.json key for key (2026-11-26).
+model.safetensors (0.99 GB, 81 tensors, bf16): fc [2304, 9216] (the four taps 5 / 23 / 41 / 48 in that order, each 2304
+wide: the stream entering visits 5, 23 and 41 and the final-normed state after visit 47), hidden_norm, norm, no
+embed_tokens / lm_head (the target's, with its embed_norm), candidate_selector.{hidden_projection [256, 2304],
+predecessor_codebook / successor_codebook [201024, 256]}, per layer q [4096, 2304] / k / v [1024, 2304] / o [2304, 4096],
+q_norm / k_norm [128], gate / up [6912, 2304], down [2304, 6912], the two norms, attention_conv / mlp_conv (base_kernel
+[2, 2, 2304], kernel_projection [576, 2304]).

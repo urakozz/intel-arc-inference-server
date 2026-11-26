@@ -10,7 +10,7 @@
 //            split), with --max-len auto|N (both cards, each with the reserve), --prefill-backend
 //            l0|l0-int8, --kv-cache bf16|int8, the prefix cache (--prefix-cache-gb auto|N,
 //            --prefix-split-last: snapshots in the one-card layouts, the block hook from the
-//            pipeline's shadows), --spec mtp (the head on device 1), --draft-vocab, --spec lookup;
+//            pipeline's shadows), --spec mtp (the head on device 1), --draft-vocab;
 //   refused  B70_PREFILL_PROFILE=1 (its phase waits would serialise the pipeline).
 //   Kolibri-1 (spec 20e) is not this path: b70-serve dispatches it to its own engine before these
 //            checks (cli/kolibri_serve.h, runtime::kolibri::KolibriEngine on two cards by default), and

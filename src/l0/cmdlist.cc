@@ -81,4 +81,10 @@ void CmdList::reset_event(ze_event_handle_t e) { ZE_CHECK(zeCommandListAppendEve
 void CmdList::close() { ZE_CHECK(zeCommandListClose(l_)); }
 void CmdList::reset() { ZE_CHECK(zeCommandListReset(l_)); }
 void CmdList::host_synchronize() { ZE_CHECK(zeCommandListHostSynchronize(l_, UINT64_MAX)); }
+bool CmdList::host_synchronize(uint64_t timeout_ns) {
+  const ze_result_t r = zeCommandListHostSynchronize(l_, timeout_ns);
+  if (r == ZE_RESULT_NOT_READY) return false;
+  ZE_CHECK(r);
+  return true;
+}
 }  // namespace l0

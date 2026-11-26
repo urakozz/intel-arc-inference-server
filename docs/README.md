@@ -46,6 +46,7 @@ decided each design.
 | | |
 |---|---|
 | [17-running-models.md](17-running-models.md) | the commands to download, serve and benchmark each model, per number of cards, and what each model supports |
+| [18-development.md](18-development.md) | `b70-decode`: reproducible runs from token ids, speed rows, launch profiles; its flags and the environment variables |
 | [environment-variables.md](environment-variables.md) | what the programs, tests and scripts read from the environment (none of it needed to run the engine) |
 
 ## Background

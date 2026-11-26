@@ -5,7 +5,7 @@ and how fast it runs. Read it if you want to serve a model; read [04-architectur
 to know how the engine works.
 
 Qwen3.8-27B comes first, because everything is tuned for it. Ornith 1.5, Qwen3.8-Flash-Next and Kolibri-1 follow.
-Every flag is listed in the [README](../README.md#flags), and environment variables in
+Every `b70-serve` flag is listed in the [README](../README.md#flags), `b70-decode`'s in [18-development.md](18-development.md), and environment variables in
 [environment-variables.md](environment-variables.md).
 
 ## How to read the numbers
@@ -157,6 +157,12 @@ How several requests share a card with `--max-num-seqs N`:
 - Beside the DFlash drafter (`--spec dflash`) the requests share the pool the same way; every request has its own
   drafter session of a fixed size, whatever its length.
 - An explicit `--max-len` that does not fit is refused at startup, with the numbers.
+- Each card steps on its own: a card whose request runs one id a step does not wait for the other card's longer
+  verify.
+- Greedy output under `replica` can differ from run to run with MTP: the head's per-step draft choice learns its
+  calibration on each card from the requests that card served, and which card serves a request depends on timing.
+  Each request is still exactly what that card's engine gives it; with `B70_MTP_STEP_K=0` the output is the one-card
+  server's.
 - `tp` serves one request at a time.
 
 ### Two cards, pipeline parallel
@@ -241,7 +247,7 @@ Several requests on a card (`--max-num-seqs`, up to 4 per card):
 - Against `--spec mtp` in the same mode (one card, int8 KV cache) it is 1.15x with one request, 1.12x with two and
   0.97x with four.
 - The requests share the card's KV cache pages as without the drafter: any one may grow to the whole pool.
-- Refused, by name: `--spec dflash-lookup` and `--draft-vocab` with several requests on a card, more than four
+- Refused, by name: `--draft-vocab` with several requests on a card, more than four
   requests per card, and every model other than Qwen3.8.
 
 The prefix cache keeps the drafter's context (41.9 MB) with every snapshot. A conversation that gets a prefix cache
@@ -315,8 +321,7 @@ On one card inside MTP, a long copied run is checked in lists of 16, 32 or 64 ro
 copying runs at 636-650 t/s, against 356-364 with 16 rows only. Prompts that edit or copy code run 1.173x the 16-row
 speed, with identical output ids.
 
-Lookup is on by default. `B70_SPEC_LOOKUP=0` serves plain MTP or plain DFlash for comparisons. `--spec lookup` and
-`--spec dflash-lookup` remain as developer values.
+Lookup is always on inside the proposer; it has no value or switch of its own.
 
 ### How speculative output is judged
 
@@ -336,6 +341,8 @@ bitwise.
 - Ornith 1.5 35B-A3B is supported, with measured prefill and decode rows.
 - Qwen3.8-Flash-Next is served whole on two cards from our own export, with its routed experts partly in host memory
   (the expert tier). Tensor parallel is the default; pipeline parallel is faster at prefill and slower at decode.
+- Inkling 2 Mini is served on one card, as `replica`, as `pp` (two cards, for a longer context and a faster long
+  prompt) and as `tp` (two cards, one faster session), from the release's own expert codes, with its own drafter.
 - Kolibri-1 is supported by the code but not tuned, and has no speed rows.
 - Muse-Glimmer and Agnes 3.0 Flash are no longer supported. A `config.json` naming `AgnesForConditionalGeneration` is
   refused by name.
@@ -352,7 +359,6 @@ validation (golden sets, serving, prefix cache, speculative decoding) runs on `m
 | `--parallel pp` (two cards) | yes | yes | its default | yes, when asked: faster prefill |
 | `b70-decode` | yes | yes | decode and prefill, two cards by default | decode and prefill, the whole model or `--layers N` |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (an MoE head) | none (`auto` = off) | `b70-serve`: adaptive MTP by default, `--spec-max` 1 to 3; `b70-decode` decodes plain |
-| `--spec lookup` (developer value) | yes | yes | no | yes |
 | `--spec dflash` | yes: one card (with prompt lookup inside), up to 4 requests per card, `replica`, `tp` or `pp`, bf16 or int8 KV | no | `b70-serve`: the DSpark drafter (below); `b70-decode` refuses | refused |
 | `--kv-cache int8` | yes | not built | refused | refused |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default; use it); `l0-int8` opt-in and slower | `l0` only | `l0` only |
@@ -655,6 +661,96 @@ Variables for tests and timing only:
 | `B70_Q4_RESIDENT` | `all` \| `none` \| `random:<f>:<seed>` \| `adversarial` | a test placement of the routed experts, at any layer count |
 | `B70_Q4_EXPERTS` | `table` (default) \| `direct` | `direct`: the kernels without the address table, only when every expert is resident |
 
+## Inkling 2 Mini
+
+Thinking Machines' Inkling 2 Mini (`model_type inkling2_loop`, Apache-2.0) is a looped MoE model:
+
+- 24 layers run as 48 visits: layers 6-17 run three times, the later passes steered by loop controllers;
+- 20 sliding-window layers (1,024 keys) and 4 full-attention layers without RoPE (a relative bias, short convolutions
+  on K and V, per-token sinks, a gate) - the full layers are visited 8 times, so they hold 32 KiB of cache a position;
+- 128 experts, top 8, hidden size 2304, about 3.4 B parameters active a token;
+- its own speculative drafter (DSpark: three draft layers and a recurrent Markov head), shipped as `mtp.safetensors`.
+
+It runs from the release itself: the experts in their own NVFP4 / MXFP8 codes, decoded exactly in the kernels; the
+attention, gate and output projections int8 at load. Images and audio are refused (no encoder is loaded).
+
+```sh
+I=thinkingmachines/Inkling-2-Mini
+hf download $I                 # 20.2 GB, the drafter included
+
+# one card: the drafter on (it ships in the checkpoint), prompt lookup inside it, the prefix cache across turns
+./build/src/cli/b70-serve $I
+# two sessions at once on two cards (replica: a full copy a card, each with its drafter)
+./build/src/cli/b70-serve $I --max-num-seqs 2
+# the int8 cache for the full-attention visits: about 1.8x the context
+./build/src/cli/b70-serve $I --kv-cache int8
+# one session on two cards: the model split between them, 1,048,576 positions with the int8 cache
+./build/src/cli/b70-serve $I --parallel pp --kv-cache int8
+# one faster session on two cards: every visit's heads and experts split between them
+./build/src/cli/b70-serve $I --parallel tp
+
+./build/src/cli/b70-decode $I --plan
+./build/src/cli/b70-decode $I --ids prompt.ids --n 256 --prefill
+./build/src/cli/b70-decode $I --profile --depth 4096
+```
+
+What it supports:
+
+- `--spec auto` (the default) runs the drafter with a K each request's acceptance picks, up to `--spec-max` (1 to 7);
+  `--spec off` decodes one id a step. Greedy output is the drafter-off output where no verify width flips a near-tie.
+- The reasoning effort is the request's `reasoning_effort` (or `chat_template_kwargs.reasoning_effort`): `none`,
+  `minimal`, `low`, `medium`, `high` (the default, 0.9), `xhigh`, `max`, or a number from 0 to 0.99. The model has no
+  hard "thinking off": `none` (or `enable_thinking: false`) is effort 0. Its reasoning comes back as
+  `reasoning_content`, its tool calls as OpenAI tool calls (several a turn).
+- `--parallel 1`, `replica`, `pp` and `tp`. `--max-num-seqs` is 1 a card (`pp`, `tp`: 1).
+- `--parallel replica` (`--max-num-seqs 2` on two cards): a full engine a card, each with its drafter and prompt lookup
+  inside it; each request's ids are the one-card server's.
+- `--parallel pp` runs visits 0-23 on card 0 and 24-47 on card 1, the drafter beside the head on card 1; its output
+  is one card's, bit for bit. It holds 685,312 positions with the drafter in bf16 and the trained 1,048,576 with
+  `--kv-cache int8`. A long prompt runs on both cards at once (two chunks in flight): about 1.6x one card at 16k and
+  1.7x at 32k; decoding is one card's step plus about 0.3 ms. `--parallel auto` picks `pp` when the asked
+  `--max-len` does not fit one card. With the int8 cache a passkey at 10, 50 or 90 % of a 1,039,565-id prompt is
+  answered; that prompt reads at 762 t/s (23 minutes) and decoding runs at 15.1 t/s (128k: 3,710 and 47.2 t/s).
+- `--parallel tp` gives each card half of every visit's heads (12 q / 4 kv) and half of every expert's width (576 of
+  1,152 columns), and the drafter's three layers split the same way; the walk's mixes, controllers and norms, the head
+  and the drafter's Markov head run whole on both cards, and two all-reduces a visit (96 a token, six more a draft
+  pass) add the cards' halves. Its output is judged against the f32 reference (the halves' sums are added in another
+  order than one card's), and both cards' ids are checked equal every step. It holds the trained 1,048,576 positions
+  with the drafter, in bf16 and with `--kv-cache int8`. Decoding is 1.16x one card
+  (4k, drafter off) and 1.2-1.5x served with the drafter (code, prose, tool calls); a 4k prompt reads 1.25x one
+  card's and a little ahead of `pp`, but from 16k `pp` is faster (16k: 6,384 against 7,194 t/s): the walk's glue runs
+  whole on both cards under `tp`.
+- `--kv-cache int8` is opt-in, and so is the int8 prompt pass, `--prefill-backend l0-int8` (it runs on the int8 cache).
+- The prefix cache keeps each snapshot's window rows (the last 1,023 positions of the 40 window visits), the
+  convolution histories and the drafter's state: about 188 MB, plus the full visits' cache, 36 KiB a position (bf16)
+  or 20.25 KiB (int8). A restore continues bitwise.
+- `--max-len auto`: 262,144 positions on one card with the drafter (bf16 cache).
+
+### Speed and memory
+
+| | one card | two cards `tp` |
+|---|---:|---:|
+| prefill, 4k prompt (`b70-decode`, `l0-int8`) | 4,932 t/s | 6,173 t/s |
+| prefill, 32k prompt (`b70-decode`, `l0-int8`) | 3,939 t/s | 5,794 t/s |
+| prefill, 64k prompt (`b70-decode`, `l0-int8`) | 3,137 t/s | 4,801 t/s |
+| decode at 4k (`b70-decode`, drafter off) | 69.5 t/s | 80.6 t/s |
+| decode with the drafter, served: code / prose at ~4k ids | 100.5 / 157.9 t/s | 134.4 / 203.3 t/s |
+| the same at ~32k ids | 94.5 / 120.7 t/s | 180.1 / 144.9 t/s |
+| the same, 36 tool calls (geometric mean) | 131.2 t/s | 161.3 t/s |
+| two cards `replica`, 2 requests at once (golden + 36 tool calls, total) | 84.4 t/s |
+| first id of a 200-id follow-up turn at 32k (a prefix cache hit), served | 0.27 s (restore 16 ms + prefill 230 ms) |
+| a recorded 21-turn coding session (13k-107k prompts): time to first ids, the prefix cache on / off | 58.5 / 400.6 s |
+| load | 22-26 s (28.7 s from a cold page cache) |
+
+The two columns' decode and served rows are one build's, side by side (one request at a time, the prefix cache on);
+`pp` reads a 64k prompt at 5,842 t/s.
+
+The drafter pays where the text is predictable: at 4k on one card a verify of 2 rows costs 1.14 plain steps and one
+of 8 rows 1.99 (the drafter's pass 0.28), so the server drafts only while a request's acceptance pays for it and falls
+back to one id a step otherwise. The drafter's pass grows with the context (its full-attention layer reads every
+position): 0.41 plain steps at 128k on one card, 0.43 at 128k and 0.59 at 512k under `pp`; the server's K reads the
+measured costs at the request's depth. Weights are 17.8 GB on the card, the drafter 1.9 GB.
+
 ## Kolibri-1
 
 Aleph Alpha's Kolibri-1 (`model_type kolibri1`) is an MoE model:
@@ -766,7 +862,7 @@ card, plus verify scratch on both; `--max-len auto` takes them out of the contex
 log's `dspark:` line gives the accepted drafts and the tokens per verify. The model card reports about 3 tokens per
 verify on chat and about 4 on maths, on vLLM.
 
-Limits: `b70-serve` only (`b70-decode` decodes Kolibri plainly); `--spec lookup`, `dflash-lookup` and `mtp` are
+Limits: `b70-serve` only (`b70-decode` decodes Kolibri plainly); `--spec mtp` is
 refused; `B70_KOLIBRI_ATTN=eager` is refused with `--spec`, because the verify lists are flash only; the drafter runs
 in bf16. The speed is unmeasured: the cost table that picks the number of drafts is derived from the bytes a step
 reads, and each verified row reads its own six experts per layer, so deep blocks cost more than on a dense model.

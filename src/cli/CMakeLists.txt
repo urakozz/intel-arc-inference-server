@@ -63,6 +63,11 @@ if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_qwen4exp_runtime b70_qwen4exp_prefill)
 endif()
 
+# Plan 41f: b70-serve serves Inkling 2 Mini (src/cli/inkling2_serve.h over runtime::inkling2::Engine).
+if(TARGET b70-serve)
+  target_link_libraries(b70-serve PRIVATE b70_inkling2_runtime)
+endif()
+
 # Static reflection (P2996 + P3394 annotations, cli/flags.h): each binary's flags are one struct.
 target_compile_options(b70-decode PRIVATE -freflection)
 if(TARGET b70-serve)

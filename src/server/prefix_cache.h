@@ -37,6 +37,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "server/deps.h"
@@ -172,19 +173,26 @@ class PrefixSession {
     size_t kv_bytes = 0;                 // host to device for the restore
     double restore_ms = 0, prefill_ms = 0, store_ms = 0;   // prefill_ms: the tail to
                                                             // len - 1 and the last id's replay
+    double plan_ms = 0;                  // the cache lookup (the prompt's block hashes against the entries)
+    double deferred_store_ms = 0;        // the prompt-end snapshot's state and KV, after the first id (in store_ms)
   };
   // Leaves the engine at pos == prompt.size() with the first generated id pending.
   // Throws what the engine throws; the resident session is then unknown.
-  Report begin(const std::vector<uint32_t>& prompt, bool split_last = false);
+  // `defer_prompt_end` (without split_last): the prompt-end snapshot keeps its head image in the hook, its state and
+  // KV wait for store_deferred() - which the caller makes before the first decode step, after the first id is out.
+  Report begin(const std::vector<uint32_t>& prompt, bool split_last = false, bool defer_prompt_end = false);
+  // The deferred prompt-end snapshot's state and KV (nothing without one). Returns the store time in ms.
+  double store_deferred();
   void fed(uint32_t id);                 // every id step() returned: its KV is written
   // After the last frame: the request-end snapshot. Returns the store time in ms.
   double end();
-  void fail() { valid_ = false; }        // the request failed after begin()
+  void fail();                           // the request failed after begin()
 
   PrefixCache* cache() { return cache_.get(); }
 
  private:
   void store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end, bool head = false);
+  void fill(const PrefixCache::Slot& slot);   // the engine's state and KV into a reserved slot, then commit
 
   EngineIface& engine_;
   std::unique_ptr<PrefixCache> cache_;
@@ -193,6 +201,8 @@ class PrefixSession {
   const std::vector<uint32_t>* prompt_ = nullptr;   // the prompt being prefilled
   size_t head_at_ = 0;                  // PERF-92: the prompt-end hook's pos whose snapshot keeps the head (0: none)
   double store_ms_ = 0;
+  bool defer_ = false;                  // begin()'s defer_prompt_end, during its prefill
+  std::optional<PrefixCache::Slot> deferred_;   // the prompt-end snapshot awaiting store_deferred()
 };
 
 const char* plan_kind_name(PrefixCache::Plan::Kind k);

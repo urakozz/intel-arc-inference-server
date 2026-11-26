@@ -34,9 +34,9 @@ things:
 - commit(j, t): row j's recurrent state (the GDN state, the gated delta net's fixed-size memory) becomes the live one,
   and the position moves on by the number of ids kept.
 
-Prompt lookup (`--spec lookup`) proposes its drafts from earlier text instead of from the head and verifies them
+Prompt lookup, inside the MTP head, proposes its drafts from earlier text instead of from the head and verifies them
 through the same verify lists. The number of drafts per iteration follows the request's recent acceptance;
-`--spec-max` caps it, at 3 for MTP and lookup.
+`--spec-max` caps it, at 3 for MTP.
 
 ### Several requests on one card (sequence slots)
 

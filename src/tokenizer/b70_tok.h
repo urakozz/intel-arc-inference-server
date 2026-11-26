@@ -23,6 +23,13 @@ uint32_t b70_tok_vocab_size(const b70_tok* t);
 // prompts and the chat path use (the template already wrote <|im_start|>...).
 int b70_tok_encode(const b70_tok* t, const char* text, size_t len,
                    int add_special, uint32_t** out_ids, size_t* out_n);
+// b70_tok_encode without special additions, with each id's byte end in `text` where the id is a split point: an
+// added token matched on the raw text with no strip or word rule (the tokenizer splits the text at it before any
+// other rule, so the ids after it are the encode of the text after it); 0 for every other id.
+int b70_tok_encode_ends(const b70_tok* t, const char* text, size_t len,
+                        uint32_t** out_ids, uint32_t** out_ends, size_t* out_n);
+// The longest added token's bytes.
+uint32_t b70_tok_longest_added(const b70_tok* t);
 int b70_tok_decode(const b70_tok* t, const uint32_t* ids, size_t n,
                    int skip_special, char** out_utf8, size_t* out_len);
 

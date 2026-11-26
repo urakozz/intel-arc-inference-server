@@ -5,9 +5,21 @@
 
 #define HD 128
 #define REL 16
+// NH / KV: the heads a launch prepares - every head on one card; a `--parallel tp` card's half (12 / 4, INK_TP), whose
+// per-head weights the engine passes from the card's first head. STATIC_KW: the full layers' static taps' row pitch
+// ([4][kv channels] of the whole model).
+#if INK_TP
+#define NH 12
+#define KV 4
+#define STATIC_KW 1024
+#else
 #define NH 24
 #define KV 8
+#endif
 #define KW (KV * HD)
+#ifndef STATIC_KW
+#define STATIC_KW KW
+#endif
 #pragma OPENCL FP_CONTRACT OFF
 // INK_KV8 (PERF-102, `--kv-cache int8`; undefined on every other command line): the fused prep of a FULL visit with the
 // int8 cache - launched for the full visits only (ring 0), the window visits keep the default build. K and V as the
@@ -87,7 +99,7 @@ __kernel void ink_qkv_prep(__global float* q, __global float* relative,
     for (uint a = 0; a < 4; ++a) {
       const int t = projected ? (int)r - (int)a : (int)r + (int)a - 3;
       const float x = t < 0 ? history[(t + 3) * KW + i] : input[t * KW + i];
-      const float w = projected ? static_taps[a * KW + i] + projected[(size_t)r * 64 + h * 4 + a]
+      const float w = projected ? static_taps[a * STATIC_KW + i] + projected[(size_t)r * 64 + h * 4 + a]
                                  : static_taps[i * 4 + a];
       sum += x * w;
     }

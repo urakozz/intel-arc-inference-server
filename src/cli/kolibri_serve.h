@@ -27,7 +27,7 @@
 //     Gumbel-samples at the request's T with a seed drawn from the request's RNG, q_j = softmax(scores_j / T) over row j's
 //     16 candidates (server::dflash_q), then server::accept_sparse against the filtered p - lossless whatever q is. The
 //     commit is deferred to the next call that touches the engine (truncate_to may commit fewer). Without spec_k every path
-//     is 20e's (mtp_k() 0); there is no MTP head (--spec mtp refused) and no prompt lookup (--spec lookup refused).
+//     is 20e's (mtp_k() 0); there is no MTP head (--spec mtp refused) and no prompt lookup.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>

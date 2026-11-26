@@ -202,6 +202,10 @@ __kernel void gemv_bf16(__global const ushort* restrict w,
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   if (q == 0)
+#if INK_CONTROLLER == 1
+    for (int m = 0; m < M; ++m) out[(size_t)m * N + n] = rne_bf16(red[sg][m][lane]);
+#else
     for (int m = 0; m < M; ++m) out[(size_t)m * N + n] = red[sg][m][lane];
+#endif
 #endif
 }

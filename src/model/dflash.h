@@ -61,6 +61,9 @@ struct DFlashDesc {
   float in_scale = 1.0f;                // input_embedding_scale
   float out_mult = 1.0f;                // v2: output_multiplier; v1: logit_scale (the head's scale)
   float softcap = 0.0f;                 // v2: final_logit_softcapping (0 = none)
+  // v2: selector_softcap_mode "after_correction" - the unary logits stay raw and the softcap is applied to the edge
+  // score (cap tanh((unary + edge) / cap), Inkling 2 Mini's drafter); vLLM's default "before_correction" caps the unary.
+  bool softcap_after = false;
   std::string architecture;
   // Kolibri DSpark only: the confidence head's input width (hidden, + markov_rank with confidence_head_with_markov); 0 =
   // none shipped. The Markov head's rank is sel_rank (the codebooks pred / succ are markov_w1 / markov_w2).
@@ -120,6 +123,13 @@ void check_dspark(const DFlashDesc& d);
 // 5 / 15 / 25 / 35 / 45 (each the mean of the target's four hyper-connection streams after that layer: the authors' capture),
 // convolutions 16 x 2 taps, selector rank 256 / top 16, rms_norm_eps 1e-6, vocabulary 248320, mask 248077.
 void check_flash_next_dflash(const DFlashDesc& d);
+// Plan 41k: Inkling 2 Mini's DFlash 2 drafter (incoai/Inkling-2-Mini-DFlash2) is the one its kernels are built for
+// (kernels::dflash::kInkling) - before the device, each refusal naming the key in plain words: DFlash 2, hidden 2304
+// (the target's), 32 / 8 heads x 128, intermediate 6912, every layer sliding at most 2048 and non-causal, block 8,
+// target_layer_ids exactly 5, 23, 41, 48 against Inkling's 48 layer visits (the engine's four tap slots),
+// selector_softcap_mode after_correction, convolutions 16 x 2 taps, selector rank 256 / top 16, rms_norm_eps 1e-6,
+// vocabulary 201024 (the target's embedding rows), the mask id a live token (below 200058).
+void check_inkling_dflash2(const DFlashDesc& d);
 // Spec 19 v3c: one `--parallel tp` card's half of a drafter (runtime::dflash::TpDFlashDrafter) - half the q and kv heads
 // and half the MLP; every other field the whole drafter's (its hidden, layers, taps, window, convolutions, selector,
 // vocabulary). Throws unless the heads and the MLP halve into whole 16-row tiles.

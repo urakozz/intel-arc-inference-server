@@ -372,6 +372,8 @@ const I8HeadCell kI8HeadCells[] = {
     {"Ornith", true, 2048, 248320, 32, true},     {"Ornith", true, 2048, 248320, 64, true},
     {"Kolibri", false, 2560, 128000, 1, false},    {"Kolibri", false, 2560, 128000, 4, false},
     {"Kolibri", false, 2560, 128000, 8, false},
+    {"Inkling", false, 2304, 200064, 1, false},    {"Inkling", true, 2304, 200064, 8, false},
+    {"Inkling fold", false, 256, 200064, 1, false},
 };
 
 int run_i8head(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
@@ -394,6 +396,8 @@ int run_i8head(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
   std::unique_ptr<l0::Mem> sbuf;
   size_t weight_bytes = 0;
   int NB = 2;
+  // An order whose block does not divide the K walk is not built (n/a).
+  const auto fits = [&](size_t o) { return orders[o].block <= 1 || (K / 16) % uint32_t(orders[o].block) == 0; };
   for (const I8HeadCell& c : kI8HeadCells) {
     if (c.K != K || c.N != N) {   // a new shape: today's tiles and each reordered copy, NB copies of each
       K = c.K;
@@ -410,6 +414,7 @@ int run_i8head(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
       for (float& v : sc) v = sd(rng);
       NB = std::max(2, int((72u << 20) / w.size()) + 1);
       for (size_t o = 0; o < NO; ++o) {
+        if (!fits(o)) continue;
         if (orders[o].block) common::tiles_k_major(w.data(), N / 16, K / 16, 256, wo.data(), orders[o].block);
         const std::vector<uint8_t>& src = orders[o].block ? wo : w;
         for (int i = 0; i < NB; ++i) {
@@ -456,11 +461,13 @@ int run_i8head(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
       return double(weight_bytes) / (time_list(q, f, list, launches) * 1e3);
     };
     std::vector<float> ctl, out;
-    for (size_t o = 0; o < NO; ++o) run(o, out);   // warm-up, discarded
-    double g[2][NO];
+    for (size_t o = 0; o < NO; ++o)
+      if (fits(o)) run(o, out);   // warm-up, discarded
+    double g[2][NO] = {};
     bool same = true;
     for (int round = 0; round < 2; ++round)
       for (size_t o = 0; o < NO; ++o) {
+        if (!fits(o)) continue;
         g[round][o] = run(o, o == 0 ? ctl : out);
         if (o) same = same && std::memcmp(out.data(), ctl.data(), out.size() * 4) == 0;
       }
@@ -468,7 +475,10 @@ int run_i8head(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
     const double nm = (g[0][0] + g[1][0]) / 2;
     std::printf("| %s | %s | %u | %u×%u | %.0f |", c.model,
                 c.gemm ? (c.wg ? "gemm_sm_i8w wg" : "gemm_sm_i8w") : "gemv_i8w", c.M, K, N, nm);
-    for (size_t o = 1; o < NO; ++o) std::printf(" %+.1f%% |", 100.0 * ((g[0][o] + g[1][o]) / 2 / nm - 1.0));
+    for (size_t o = 1; o < NO; ++o) {
+      if (fits(o)) std::printf(" %+.1f%% |", 100.0 * ((g[0][o] + g[1][o]) / 2 / nm - 1.0));
+      else std::printf(" n/a |");
+    }
     std::printf(" %s |\n", same ? "identical" : "**DIFFER**");
     std::fflush(stdout);
   }

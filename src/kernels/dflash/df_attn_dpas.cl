@@ -41,7 +41,11 @@
 #define M 8
 #endif
 #define G (NH / NKV)
+#if FULL_TARGETS
+#define TGT FULL_TARGETS
+#else
 #define TGT (RING / PB)
+#endif
 #define PART (HD + 2)
 #define SG 16
 #define DA (HD / 16)   // dim atoms
@@ -119,6 +123,118 @@ inline float f8(float8 v, int i) {
 #endif
 #endif
 
+#if FULL_TARGETS
+// FULL_TARGETS (plan 41h, Inkling's drafter at depth): df_attn.cl's FULL_TARGETS partition on DPAS - TGT work-groups
+// a kv head, each a contiguous span of the context [0, p) (the cache row of position t at t, no ring), walked in
+// PB-key tiles: per tile S and P V as above, the row max and l carried over the span's tiles by the online softmax
+// (o and l rescaled by exp(m_old - m_new)). The partials are df_attn.cl's FULL ones, so its df_attn_reduce (the
+// scalar FULL binary) merges them. A row past K is -INF throughout (df_attn.cl's reduce writes it zero).
+__attribute__((reqd_work_group_size(SG * G, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void df_attn_part(__global const uint* restrict ctrl, __global const uint* restrict dctl,
+                           __global const float* restrict q, __global const ushort* restrict kv_k,
+                           __global const ushort* restrict kv_v, const float scale, __global float* restrict part) {
+  __local float s_all[G][M][PB];
+  const uint kvh = get_group_id(0), b = get_group_id(1);
+  const uint g = get_sub_group_id(), lane = get_sub_group_local_id(), h = kvh * G + g;
+  const uint p = ctrl[CTRL_POS], K = dctl[DCTL_K];
+  const uint stride = ((p + PB * TGT - 1) / (PB * TGT)) * PB;
+  const uint start = min(b * stride, p), end = min(start + stride, p);
+
+  short8 qh[DA], qm[DA], ql[DA];
+  for (uint a = 0; a < DA; ++a)
+    for (int i = 0; i < 8; ++i) {
+      ushort hi, mid, lo;
+      split3(q[((size_t)i * NH + h) * HD + a * 16 + lane], &hi, &mid, &lo);
+      set8(&qh[a], i, hi);
+      set8(&qm[a], i, mid);
+      set8(&ql[a], i, lo);
+    }
+
+  float8 o[DA];
+  for (uint a = 0; a < DA; ++a) o[a] = (float8)0.0f;
+  float lsum[8], mrun[8];
+  for (int i = 0; i < 8; ++i) {
+    lsum[i] = 0.0f;
+    mrun[i] = -INFINITY;
+  }
+  for (uint base = start; base < end; base += PB) {
+    const uint atoms = (min(end - base, (uint)PB) + 15) / 16;   // the tile's live key atoms
+    // ---- S: lane = key; a key past the span reads the span's last row and scores -INF ----------------------------
+    for (uint ka = 0; ka < KA; ++ka) {
+      const uint pos = base + ka * 16 + lane;
+      float8 acc = (float8)0.0f;
+      if (ka < atoms) {
+        __global const uint* krow = (__global const uint*)(kv_k + ((size_t)min(pos, end - 1) * NKV + kvh) * HD);
+        for (uint a = 0; a < DA; ++a) {
+          const int8 kb = as_int8(vload8(0, krow + a * 8));
+          acc = intel_sub_group_bf16_bf16_matrix_mad_k16(qh[a], kb, acc);
+          acc = intel_sub_group_bf16_bf16_matrix_mad_k16(qm[a], kb, acc);
+          acc = intel_sub_group_bf16_bf16_matrix_mad_k16(ql[a], kb, acc);
+        }
+      }
+      for (int i = 0; i < 8; ++i) s_all[g][i][ka * 16 + lane] = pos < end && (uint)i <= K ? f8(acc, i) * scale : -INFINITY;
+    }
+    sub_group_barrier(CLK_LOCAL_MEM_FENCE);
+
+    // ---- the running max: o and l rescaled to it -------------------------------------------------------------------
+    float alpha[8];
+    for (int i = 0; i < 8; ++i) {
+      float m = -INFINITY;
+      for (uint t = lane; t < PB; t += SG) m = fmax(m, s_all[g][i][t]);
+      const float next = fmax(mrun[i], sub_group_reduce_max(m));
+      alpha[i] = mrun[i] == -INFINITY ? 0.0f : df_exp(mrun[i] - next);
+      mrun[i] = next;
+      lsum[i] *= alpha[i];
+    }
+    const float8 scale8 = (float8)(alpha[0], alpha[1], alpha[2], alpha[3], alpha[4], alpha[5], alpha[6], alpha[7]);
+    for (uint a = 0; a < DA; ++a) o[a] *= scale8;
+
+    // ---- P V --------------------------------------------------------------------------------------------------------
+    for (uint ka = 0; ka < atoms; ++ka) {
+      short8 ph, pm, pl;
+      for (int i = 0; i < 8; ++i) {
+        const float sc = s_all[g][i][ka * 16 + lane];
+        const float e = (mrun[i] == -INFINITY || sc == -INFINITY) ? 0.0f : df_exp(sc - mrun[i]);
+        lsum[i] += e;
+        ushort hi, mid, lo;
+        split3(e, &hi, &mid, &lo);
+        set8(&ph, i, hi);
+        set8(&pm, i, mid);
+        set8(&pl, i, lo);
+      }
+      const uint first = base + ka * 16;
+      for (uint a = 0; a < DA; ++a) {
+        int8 vb;
+        for (int j = 0; j < 8; ++j) {
+          const uint t0 = min(first + 2 * j, end - 1), t1 = min(first + 2 * j + 1, end - 1);
+          const ushort v0 = kv_v[((size_t)t0 * NKV + kvh) * HD + a * 16 + lane];
+          const ushort v1 = kv_v[((size_t)t1 * NKV + kvh) * HD + a * 16 + lane];
+          const int w = (int)((uint)v0 | ((uint)v1 << 16));
+          switch (j) {
+            case 0: vb.s0 = w; break; case 1: vb.s1 = w; break; case 2: vb.s2 = w; break; case 3: vb.s3 = w; break;
+            case 4: vb.s4 = w; break; case 5: vb.s5 = w; break; case 6: vb.s6 = w; break; default: vb.s7 = w; break;
+          }
+        }
+        o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(ph, vb, o[a]);
+        o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pm, vb, o[a]);
+        o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pl, vb, o[a]);
+      }
+    }
+    sub_group_barrier(CLK_LOCAL_MEM_FENCE);   // s_all is the next tile's
+  }
+
+  for (int i = 0; i < 8; ++i) {
+    const float l = sub_group_reduce_add(lsum[i]);
+    __global float* dst = part + (((size_t)h * TGT + b) * M + i) * PART;
+    if (lane == 0) {
+      dst[0] = mrun[i];
+      dst[1] = l;
+    }
+    for (uint a = 0; a < DA; ++a) dst[2 + a * 16 + lane] = f8(o[a], i);
+  }
+}
+#else
 __attribute__((reqd_work_group_size(SG * G * KS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 #ifdef SEQS
@@ -303,3 +419,4 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     }
   }
 }
+#endif

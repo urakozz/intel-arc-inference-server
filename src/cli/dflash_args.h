@@ -59,11 +59,11 @@ struct Args {
   bool have_model = false;
 };
 
-// --draft-model belongs to --spec dflash, and Qwen3.8's --spec dflash / dflash-lookup needs it (no default drafter).
+// --draft-model belongs to --spec dflash, and Qwen3.8's --spec dflash needs it (no default drafter).
 inline void check_flags(const Args& a) {
   if (!a.on && a.have_model) throw std::runtime_error("--draft-model needs --spec dflash");
   if (a.on && !a.have_model)
-    throw std::runtime_error(std::string("--spec dflash / dflash-lookup needs --draft-model (the drafter's weights take "
+    throw std::runtime_error(std::string("--spec dflash needs --draft-model (the drafter's weights take "
                                          "memory from the context, so the model is your choice): --draft-model ") +
                              kPackedDrafter + " (our packed int4 drafter, 1.21 GB)");
   if (a.on && (a.max_k == 0 || a.max_k > 7))

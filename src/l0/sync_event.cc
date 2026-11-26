@@ -94,6 +94,13 @@ SyncEventPool::~SyncEventPool() {
 
 void SyncEventPool::host_reset(uint32_t i) { ZE_CHECK(zeEventHostReset(e_.at(i))); }
 void SyncEventPool::host_signal(uint32_t i) { ZE_CHECK(zeEventHostSignal(e_.at(i))); }
+bool SyncEventPool::host_wait(uint32_t i, uint64_t timeout_ns) const {
+  const ze_result_t r = zeEventHostSynchronize(e_.at(i), timeout_ns);
+  if (r == ZE_RESULT_NOT_READY) return false;
+  ZE_CHECK(r);
+  return true;
+}
+
 bool SyncEventPool::signalled(uint32_t i) const {
   const ze_result_t r = zeEventQueryStatus(e_.at(i));
   if (r == ZE_RESULT_NOT_READY) return false;

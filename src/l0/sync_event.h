@@ -52,6 +52,7 @@ class SyncEventPool {
   void host_reset(uint32_t i);
   void host_signal(uint32_t i);
   bool signalled(uint32_t i) const;
+  bool host_wait(uint32_t i, uint64_t timeout_ns) const;   // SyncEvent::host_wait's, for event i
 
  private:
   ze_event_pool_handle_t pool_ = nullptr;

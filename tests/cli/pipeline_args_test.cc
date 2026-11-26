@@ -78,16 +78,15 @@ void check_parse() {
   cli::check_replica_model("Qwen3_5MoeForConditionalGeneration", "Ornith");   // no throw
   CHECK(says([] { cli::require_two_devices_for_replica(1); }, "--parallel replica needs two GPUs"));
   cli::require_two_devices_for_replica(2);
-  cli::check_replica_flags(p, false);
-  CHECK(says([&] { cli::check_replica_flags(p, true); }, "--spec dflash-lookup is built for one card"));
+  cli::check_replica_flags(p);
   cli::PipelineArgs rs = p;
   cli::parse_pipeline_split("20", rs);
   cli::resolve_overrides(rs);
   CHECK(rs.replica());   // an override does not turn replica into pp
-  CHECK(says([&] { cli::check_replica_flags(rs, false); }, "--pipeline-split belongs to --parallel pp"));
+  CHECK(says([&] { cli::check_replica_flags(rs); }, "--pipeline-split belongs to --parallel pp"));
   cli::PipelineArgs none;
   cli::refuse_replica_in_decode(none);
-  cli::check_replica_flags(none, true);   // not replica: nothing to refuse here
+  cli::check_replica_flags(none);   // not replica: nothing to refuse here
   // An override under auto means pp; under 1 it stays a refusal (check_pipeline below).
   cli::PipelineArgs o;
   cli::parse_pipeline_split("30", o);
@@ -129,16 +128,15 @@ void check_names_and_spec() {
   CHECK(f.kind == SpecKind::Mtp && f.adaptive && f.max_k == 2u);
   const cli::Spec d = cli::resolve_spec("dflash", SpecFamily::Qwen, "Qwen3.8", false, 0, true);
   CHECK(d.kind == SpecKind::DFlash && d.max_k == 7u);
-  CHECK(cli::resolve_spec("lookup", SpecFamily::Qwen, "Qwen3.8", true, 1, false).max_k == 1u);
   CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::None, "Kolibri-1", false, 0, false); }, "Kolibri-1 has no MTP head"));
-  CHECK(says([] { cli::resolve_spec("lookup", SpecFamily::None, "Kolibri-1", false, 0, false); }, "--spec lookup verifies"));
   CHECK(says([] { cli::resolve_spec("dflash", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", false, 0, false); },
              "built for Qwen3.8 beside its drafter"));
   CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::Qwen, "Qwen3.8", true, 4, false); }, "expects 1..3"));
   CHECK(says([] { cli::resolve_spec("dflash", SpecFamily::Qwen, "Qwen3.8", true, 8, false); }, "expects 1..7"));
   CHECK(says([] { cli::resolve_spec("off", SpecFamily::Qwen, "Qwen3.8", true, 2, false); }, "--spec off has none"));
   CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::Qwen, "Qwen3.8", false, 0, true); }, "--draft-model needs --spec dflash"));
-  CHECK(says([] { cli::parse_spec("eagle"); }, "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup"));
+  CHECK(says([] { cli::parse_spec("eagle"); }, "--spec expects auto, off, mtp or dflash"));
+  CHECK(says([] { cli::parse_spec("lookup"); }, "got 'lookup'"));
 
 }
 

@@ -1,0 +1,1 @@
+<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>Is 91 prime?<|end_message|><|message_model|><|content_thinking|>91 = 7 x 13.<|end_message|><|message_model|><|content_text|>No: 91 = 7 x 13.<|end_message|><|content_model_end_sampling|><|message_user|><|content_text|>And 97?<|end_message|>

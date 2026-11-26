@@ -6,6 +6,7 @@
 #include <functional>
 #include <inplace_vector>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace server {
@@ -83,6 +84,21 @@ struct MtpCost {
   static constexpr double kKolPlainGB = 1.7696, kKolRowGB = 0.6267, kKolDrafterGB = 0.6946;
   static constexpr double kKolHeadInt8GB = 0.3282, kKolHeadBf16GB = 0.6554;
 
+  // Inkling 2 Mini's DSpark drafter on one card - b70-decode --profile at depth 4096 (card 1, 2026-11-26), the numbers
+  // of runtime::inkling2::kOneCardCost (b70-decode's draft window): a verify of 2..8 rows costs 1.143 .. 1.991 plain
+  // steps (15.09 ms), the drafter's pass 4.21 ms = 0.279, flat in K (one pass drafts all 7 rows).
+  static MtpCost inkling_dspark();
+  // Plan 41k: with the DFlash 2 drafter (runtime::inkling2::kOneCardDflashCost, depth 4096): a verify of 2..8
+  // rows 1.167 .. 2.175 plain steps (12.7 ms), the drafter's pass 2.94 ms = 0.232 (int8 linears, the 2-bit
+  // candidate head), flat in K.
+  static MtpCost inkling_dflash2();
+  // ... under `--parallel tp`, the drafter's head rows split over the cards (runtime::inkling2::kTpDflashCost): 1.134 ..
+  // 2.027, the drafter's pass 0.290 (3.13 ms against tp's 10.8 ms plain step).
+  static MtpCost inkling_dflash2_tp();
+  // Plan 41j: the same under `--parallel tp` (both cards, depth 4096, 2026-11-26, the drafter's layers split): 1.102 ..
+  // 1.835 plain steps for 2..8 rows, the drafter's pass 0.310 (served tp's table by depth: kTpCosts).
+  static MtpCost inkling_dspark_tp();
+
   uint32_t max_k() const;              // the deepest K both lists cover
   double cost(uint32_t k) const;       // K = 0: 1 (a plain step)
 };
@@ -126,14 +142,22 @@ struct AdaptiveKOptions {
   // The server times each iteration for observe(): only for an engine whose output does not depend on K (Flash-Next's
   // verify rows are its plain step's arithmetic) - elsewhere a timed K would make a request's output irreproducible.
   bool measure = false;
+  // Plan 41f (Inkling): an untimed request's probe whose draft is rejected doubles the gap to the next (a kept one
+  // keeps probe_every), not only a timed request's that did not pay - otherwise it probes every probe_every plain
+  // steps for good; and with no warm-up the first iteration's K is the prior's best, not the deepest.
+  bool probe_backoff = false;
   MtpCost cost;
+  // Costs that move with the context (Inkling under pp: its drafter's full layer and the full visits read every
+  // position): (depth, table) ascending; next(pos) uses the table interpolated at pos (the ends held) in place of cost.
+  // Each table has cost's rows.
+  std::vector<std::pair<uint32_t, MtpCost>> by_depth;
 };
 
 class AdaptiveK {
  public:
   explicit AdaptiveK(const AdaptiveKOptions& opts);
 
-  uint32_t next();                                // K for the coming iteration
+  uint32_t next(uint32_t pos = 0);                // K for the coming iteration at the request's position
   // What that iteration did (j of k kept) and, when the caller timed it, its seconds: the request's own iterations then
   // replace the table's cost of K (its seconds at K over its plain steps', once it has run both) - an iteration's cost
   // depends on the text (a verify row reads its own experts, some from host memory).

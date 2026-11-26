@@ -7,6 +7,7 @@
 // inkling2_kv8_test [BASELINE_KERNEL_DIR]: the readers also run from another build's binaries (an earlier reader form)
 // on the same inputs, and their outputs must be the same bits (PERF-42's carry: same values, same sum order).
 #include <bit>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -240,6 +241,28 @@ int main(int argc, char** argv) {
     };
     out = run_decode(false);
     if (!baseline.empty()) CHECK(run_decode(true) == out);
+    if (M > 1) {   // plan 41h: a deep verify's attention, the split prompt flash on Control (32 spans), matches too
+      l0::Module verify(ctx, kernels::path(ink::prefill_attn(false) + "_KV8_PAIR_VERIFY"));
+      auto flash = verify.kernel("kol_pf_flash_attn");
+      flash.group_size(ink::kPrefillAttnGroup);
+      args(flash, qd.ptr(), kc.ptr(), vc.ptr(), ksd.ptr(), vsd.ptr(), od.ptr(), ctrl.ptr(), rd.ptr(), td.ptr(), sd.ptr(),
+           gd.ptr(), pd.ptr());
+      list.launch(flash, 1, KV, ink::kPartitions);
+      auto merge = verify.kernel("kol_pf_flash_merge");
+      merge.group_size(HD);
+      args(merge, pd.ptr(), od.ptr(), ctrl.ptr(), ink::kPartitions, sd.ptr(), gd.ptr());
+      list.launch(merge, Q, M);
+      std::vector<uint16_t> got(out.size());
+      download(got, od);
+      std::vector<float> qb(q.begin(), q.begin() + got.size());
+      for (auto& x : qb) x = common::bf16_to_f32(common::f32_to_bf16(x));   // the flash's q
+      for (uint32_t m = 0; m < M; ++m)
+        for (uint32_t h : {0u, 2u, 7u, 23u}) {
+          const size_t at = (size_t(m) * Q + h) * HD;
+          compare(&got[at], twin(cache, &qb[at], &rel[(m * Q + h) * REL], table, sinks[m * 64 + h], &gate[at], pos + m, h),
+                  "deep verify");
+        }
+    }
     for (uint32_t m = 0; m < M; ++m)
       for (uint32_t h : {0u, 2u, 7u, 23u}) {
         const size_t at = (size_t(m) * Q + h) * HD;
@@ -247,7 +270,7 @@ int main(int argc, char** argv) {
                 "decode");
       }
   }
-  std::puts("Inkling int8 cache decode reader (M 1 and 8) matches its double twin");
+  std::puts("Inkling int8 cache decode reader (M 1 and 8) and the deep verify's split flash match their double twin");
 
   {
     std::vector<uint16_t> all(C * D::q_n), split(all.size());
@@ -311,6 +334,78 @@ int main(int argc, char** argv) {
         compare(&all[at], twin(cache, &qb[at], &rel[(row * Q + h) * REL], table, sinks[row * 64 + h], &gate[at],
                                pos + row, h), "prompt flash");
       }
+    // The int8 prompt pass's form (KV8_I8S): int8 scores from q quantised per row and head (amax / 127 over the bf16
+    // q), against the twin on that q8 x s; bitwise across a split.
+    {
+      l0::Module i8s_module(ctx, kernels::path(ink::prefill_attn(false) + "_KV8_I8S_PAIR"));
+      auto i8s = i8s_module.kernel("kol_pf_flash_attn");
+      i8s.group_size(ink::kPrefillAttnGroup);
+      const auto run_i8s = [&](uint32_t first, uint32_t n) {
+        args(i8s, static_cast<float*>(qd.ptr()) + first * D::q_n, kc.ptr(), vc.ptr(), ksd.ptr(), vsd.ptr(),
+             static_cast<uint16_t*>(od.ptr()) + first * D::q_n, pos + first, n,
+             static_cast<float*>(rd.ptr()) + first * Q * REL, td.ptr(), static_cast<float*>(sd.ptr()) + first * 64,
+             static_cast<float*>(gd.ptr()) + first * D::q_n);
+        list.launch(i8s, (n + 15) / 16, KV, 1);
+      };
+      std::vector<uint16_t> got(all.size()), parts(all.size());
+      run_i8s(0, C);
+      download(got, od);
+      run_i8s(0, 11);
+      run_i8s(11, C - 11);
+      download(parts, od);
+      CHECK(got == parts);
+      std::vector<float> q8(qb.size());
+      for (size_t at = 0; at < qb.size(); at += HD) {
+        float amax = 0.f;
+        for (uint32_t i = 0; i < HD; ++i) amax = std::max(amax, std::abs(qb[at + i]));
+        const float sq = amax / 127.f;
+        for (uint32_t i = 0; i < HD; ++i)
+          q8[at + i] = sq == 0.f ? 0.f : std::min(std::max(std::rint(qb[at + i] / sq), -127.f), 127.f) * sq;
+      }
+      for (uint32_t row : {0u, 4u, 5u, 10u, 11u, C - 1})
+        for (uint32_t h : {0u, 2u, 7u, 23u}) {
+          const size_t at = (size_t(row) * Q + h) * HD;
+          compare(&got[at], twin(cache, &q8[at], &rel[(row * Q + h) * REL], table, sinks[row * 64 + h], &gate[at],
+                                 pos + row, h), "int8-score prompt flash");
+        }
+    }
+    // PERF-12: the split-K forms (three key spans, then the merge) against the same twins.
+    {
+      constexpr uint32_t spans = 3, span = pos / spans / 64 * 64;
+      std::vector<float> partials(size_t(spans) * C * Q * (HD + 2));
+      auto parts = upload(partials);
+      for (const bool i8s : {false, true}) {
+        l0::Module split_module(ctx, kernels::path(ink::prefill_attn(false) + (i8s ? "_KV8_I8S_PAIR_SPLIT" : "_KV8_PAIR_SPLIT")));
+        auto flash = split_module.kernel("kol_pf_flash_attn");
+        flash.group_size(ink::kPrefillAttnGroup);
+        args(flash, qd.ptr(), kc.ptr(), vc.ptr(), ksd.ptr(), vsd.ptr(), od.ptr(), pos, C, rd.ptr(), td.ptr(), sd.ptr(),
+             gd.ptr(), span, parts.ptr());
+        list.launch(flash, (C + 15) / 16, KV, spans);
+        auto merge = split_module.kernel("kol_pf_flash_merge");
+        merge.group_size(HD);
+        args(merge, parts.ptr(), od.ptr(), C, spans, sd.ptr(), gd.ptr());
+        list.launch(merge, Q, C);
+        std::vector<uint16_t> got(all.size());
+        download(got, od);
+        std::vector<float> q8(qb);
+        if (i8s)
+          for (size_t at = 0; at < qb.size(); at += HD) {
+            float amax = 0.f;
+            for (uint32_t i = 0; i < HD; ++i) amax = std::max(amax, std::abs(qb[at + i]));
+            const float sq = amax / 127.f;
+            for (uint32_t i = 0; i < HD; ++i)
+              q8[at + i] = sq == 0.f ? 0.f : std::min(std::max(std::rint(qb[at + i] / sq), -127.f), 127.f) * sq;
+          }
+        for (uint32_t row : {0u, 4u, 5u, 10u, 11u, C - 1})
+          for (uint32_t h : {0u, 2u, 7u, 23u}) {
+            const size_t at = (size_t(row) * Q + h) * HD;
+            compare(&got[at], twin(cache, &q8[at], &rel[(row * Q + h) * REL], table, sinks[row * 64 + h], &gate[at],
+                                   pos + row, h), i8s ? "split-K int8-score prompt flash" : "split-K prompt flash");
+          }
+      }
+      std::puts("Inkling int8 cache split-K prompt flash (three key spans and the merge) matches its double twins");
+    }
   }
   std::puts("Inkling int8 cache prompt flash matches its double twin and is bitwise across a split");
+  std::puts("Inkling int8-score prompt flash matches its double twin on the quantised q and is bitwise across a split");
 }

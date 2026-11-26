@@ -1,4 +1,4 @@
-add_library(b70_server STATIC adaptive_k.cc step_k.cc chat_format.cc openai.cc lookup_in_dflash.cc prefix_cache.cc prompt_lookup.cc scheduler.cc server.cc spec_accept.cc toolcall.cc toolcall_kolibri.cc)
+add_library(b70_server STATIC adaptive_k.cc step_k.cc chat_format.cc openai.cc lookup_in_dflash.cc prefix_cache.cc prompt_lookup.cc scheduler.cc server.cc spec_accept.cc toolcall.cc toolcall_inkling2.cc toolcall_kolibri.cc)
 target_include_directories(b70_server PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_server PUBLIC b70_third_party_json b70_third_party_httplib)
 # GET /version answers the project's version (the top CMakeLists.txt's project(VERSION)).

@@ -106,6 +106,13 @@ void PromptLookup::truncate(size_t n) {
     ids_.pop_back();
     prefix_.pop_back();
   }
+  // Plan 41f: the tables as a fresh index of these n ids has them. They grow and never shrank, so after a longer
+  // request the same ids sat in more buckets with other collisions, and a walk that reaches max_steps answered with
+  // another candidate: lookup depended on what the matcher had held before (a request's output on one card differed
+  // from the same request under replica). rebuild inserts every position in order, as n pushes do.
+  uint32_t bits = kFirstBits;
+  while ((ids_.size() << 1) > (size_t(1) << bits)) ++bits;
+  if (bits != bits_) rebuild(bits);
 }
 
 PromptLookup::Match PromptLookup::match(uint32_t min_n, uint32_t source_before) const {

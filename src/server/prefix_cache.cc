@@ -412,18 +412,44 @@ PrefixSession::~PrefixSession() {
 
 void PrefixSession::store(const std::vector<uint32_t>& ids, uint32_t end, bool is_block_end, bool head) {
   const auto t0 = std::chrono::steady_clock::now();
-  const PrefixCache::Slot slot = cache_->reserve(ids, end, is_block_end, head);
+  PrefixCache::Slot slot = cache_->reserve(ids, end, is_block_end, head);
   if (!slot.empty()) {
-    if (slot.state) engine_.save_state(slot.state);
-    for (const auto& p : slot.kv) engine_.save_kv(p.begin, p.end, p.host);
-    if (slot.head) engine_.save_head(slot.head);
-    cache_->commit(slot);
+    if (slot.head) engine_.save_head(slot.head);   // before pending_id() settles the first id
+    if (defer_ && head) deferred_ = std::move(slot);
+    else fill(slot);
   }
   store_ms_ += ms_since(t0);
 }
 
+void PrefixSession::fill(const PrefixCache::Slot& slot) {
+  if (slot.state) engine_.save_state(slot.state);
+  for (const auto& p : slot.kv) engine_.save_kv(p.begin, p.end, p.host);
+  cache_->commit(slot);
+}
+
+double PrefixSession::store_deferred() {
+  if (!deferred_) return 0;
+  const auto t0 = std::chrono::steady_clock::now();
+  try {
+    fill(*deferred_);
+  } catch (...) {
+    fail();
+    throw;
+  }
+  deferred_.reset();
+  cache_->release();
+  return ms_since(t0);
+}
+
+void PrefixSession::fail() {
+  valid_ = false;
+  if (!deferred_) return;
+  deferred_.reset();
+  cache_->release();
+}
+
 PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt,
-                                           bool split_last) {
+                                           bool split_last, bool defer_prompt_end) {
   Report r;
   if (!cache_) {
     engine_.reset();
@@ -433,7 +459,9 @@ PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt,
     return r;
   }
   // PERF-92: the whole prompt may be restored only where its prompt-end snapshot sits at len (no split).
+  const auto t_plan = std::chrono::steady_clock::now();
   const PrefixCache::Plan plan = cache_->plan(prompt, resident_, valid_, !split_last);
+  r.plan_ms = ms_since(t_plan);
   valid_ = false;
   store_ms_ = 0;
   try {
@@ -459,13 +487,17 @@ PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt,
     if (plan.restart < end) {
       prompt_ = &prompt;
       head_at_ = split_last ? 0 : end;
+      defer_ = defer_prompt_end && !split_last;
       engine_.prefill(std::vector<uint32_t>(prompt.begin() + plan.restart, prompt.begin() + end));
+      defer_ = false;
       prompt_ = nullptr;
     }
     if (split_last) engine_.ingest({prompt.back()});
     r.prefill_ms = ms_since(t1) - store_ms_;
   } catch (...) {
     prompt_ = nullptr;
+    defer_ = false;
+    deferred_.reset();
     cache_->release();
     throw;
   }
@@ -474,7 +506,7 @@ PrefixSession::Report PrefixSession::begin(const std::vector<uint32_t>& prompt,
   r.store_ms = store_ms_;
   resident_ = prompt;
   valid_ = true;
-  cache_->release();
+  if (!deferred_) cache_->release();   // with one, store_deferred() releases
   return r;
 }
 

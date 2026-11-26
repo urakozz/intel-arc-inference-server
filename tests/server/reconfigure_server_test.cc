@@ -157,11 +157,56 @@ void switch_spec() {
               "flags, unknown keys and another proposer refused with their reasons\n");
 }
 
+// Plan 41f: Inkling 2 Mini's in-place switch as b70-serve sets it (serve_inkling): its drafter is the started proposer
+// under the name auto (on) / off, K 1..7; --host-experts refused with its reason (every expert is on the card).
+void switch_spec_inkling() {
+  MockTok tok;
+  MockTemplate tmpl;
+  MockEngine engine;
+  engine.script = tok.encode("w1 w2 w3 w4 w5 w6 w7 w8 w9 w10 w11 w12");
+  engine.mtp = 7;
+  engine.bursts = {4, 1, 3};
+  server::Options o = base();
+  o.mtp_auto = true;
+  o.mtp_adaptive.max_k = 7;
+  o.mtp_adaptive.cost = server::MtpCost::inkling_dspark();
+  cli::InPlace in;
+  in.spec = "auto";
+  in.spec_auto = true;
+  in.spec_max = 7;
+  in.host_experts_why = "Inkling 2 Mini keeps every expert on the card";
+  in.set_proposer = [&](uint32_t k, bool on) { engine.mtp = on ? k : 0; };
+  o.reconfigure = cli::reconfigure<Flags>(in, o);
+  server::Server s({tok, tmpl, engine}, o);
+  CHECK(s.start());
+  const std::string drafted = complete(s);
+  const auto r = post(s, "/v1/control/reconfigure", R"({"spec": "off", "host-experts": "cpu"})");
+  CHECK(r);
+  const json j = json::parse(r->body);
+  CHECK(j.at("applied")[0] == (json{{"setting", "spec"}, {"from", "auto"}, {"to", "off"}}));
+  CHECK(j.at("refused")[0] == (json{{"setting", "host-experts"}, {"reason", "Inkling 2 Mini keeps every expert on the card"}}));
+  CHECK_EQ(engine.mtp, 0U);
+  CHECK(complete(s) == drafted);
+  const auto back = post(s, "/v1/control/reconfigure", R"({"spec": "auto", "spec-max": 5})");
+  CHECK(back);
+  CHECK_EQ(json::parse(back->body).at("applied").size(), size_t(2));
+  CHECK_EQ(engine.mtp, 5U);
+  CHECK(complete(s) == drafted);
+  const auto mtp = post(s, "/v1/control/reconfigure", R"({"spec": "mtp"})");
+  CHECK(mtp);
+  CHECK(json::parse(mtp->body).at("refused")[0].at("reason") ==
+        "--spec mtp needs a restart: this server switches between auto and off");
+  s.stop();
+  std::printf("Inkling: the drafter auto -> off -> auto at K 5, every reply the same bytes; --host-experts and another "
+              "proposer refused with their reasons\n");
+}
+
 }  // namespace
 
 int main() {
   loopback();
   nothing_in_place();
   switch_spec();
+  switch_spec_inkling();
   return 0;
 }

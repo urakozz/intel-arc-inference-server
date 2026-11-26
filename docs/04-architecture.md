@@ -146,7 +146,7 @@ the context (an edit that copies a file, a tool call that quotes its input), the
 very good guess. Lookup runs inside both proposers on one card with one request at a time, inside `mtp` under
 `replica` with one request a card, and inside `dflash` under `tp`. When it finds a long enough match, its copied
 tokens are verified for that step and the proposer's own draft is skipped; otherwise the step is an ordinary MTP or
-DFlash one. It is on by default; `B70_SPEC_LOOKUP=0` turns it off for comparisons.
+DFlash one. It is always on.
 
 Inside MTP on one card with one request (bf16 KV, the int8 output head), a long copied run is checked in a wide
 verify: one batched step of 16, 32 or 64 rows, that is up to 15, 31 or 63 copied tokens at once instead of the

@@ -12,10 +12,12 @@
 #include "golden/forced_judge.h"
 #include "runtime/inkling2_prefill_test_access.h"
 
-// inkling2_prefill_test SNAPSHOT GOLDEN [BF16_TWIN] [kv8]: kv8 runs the engine with `--kv-cache int8` (the goldens
-// then are inkling_ref.py --kv int8's, and the full visit's cache rows are de-quantised and un-rotated to compare).
+// inkling2_prefill_test SNAPSHOT GOLDEN [BF16_TWIN] [kv8|int8]: kv8 runs the engine with `--kv-cache int8` (the goldens
+// then are inkling_ref.py --kv int8's, and the full visit's cache rows are de-quantised and un-rotated to compare);
+// int8 the int8 prompt pass (`--prefill-backend l0-int8`) on that cache.
 int main(int argc, char** argv) {
-  const bool kv8 = argc > 3 && std::string(argv[argc - 1]) == "kv8";
+  const bool int8_pass = argc > 3 && std::string(argv[argc - 1]) == "int8";
+  const bool kv8 = int8_pass || (argc > 3 && std::string(argv[argc - 1]) == "kv8");
   if (kv8) --argc;
   CHECK(argc == 3 || argc == 4);
   for (int i = 2; i < argc; ++i)
@@ -39,7 +41,7 @@ int main(int argc, char** argv) {
   const uint32_t row0 = thin ? 0 : length - 1;
   const loader::Inkling2Checkpoint checkpoint(argv[1]);
   l0::Context ctx(0);
-  ink::Engine engine(ctx, checkpoint, length + gen + ink::kRows, true, ink::kPrefillRows, kv8);
+  ink::Engine engine(ctx, checkpoint, length + gen + ink::kRows, true, ink::kPrefillRows, kv8, int8_pass);
   const auto& trace = ink::PrefillTestAccess::trace(engine);
   auto list = l0::CmdList::immediate(ctx);
 

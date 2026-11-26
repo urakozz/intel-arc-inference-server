@@ -13,7 +13,7 @@
 // the Markov walk takes the head's top 16 a row; the AdaptiveK cost table is server::MtpCost::kolibri_dspark (DERIVED -
 // TODO(card): the first card run measures it). --spec dflash is NOT Kolibri's `auto`.
 //
-// Refused before the device, each by name: by cli::resolve_spec --spec mtp / lookup / dflash-lookup and --spec-max outside
+// Refused before the device, each by name: by cli::resolve_spec --spec mtp and --spec-max outside
 // 1..7; by cli::dflash::check_flags --spec dflash without --draft-model; here a drafter that is not DSpark, not DSpark's
 // kernels' shapes (model::check_dspark) or does not fit Kolibri-1 (taps past its layers, another hidden or vocabulary).
 #include <cstdint>

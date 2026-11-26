@@ -543,6 +543,11 @@ def parse_args(argv: list[str]) -> dict:
 
 
 def main() -> None:
+    import importlib.util as _cl_util
+    _cl = _cl_util.spec_from_file_location("cpu_lock", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../oracle/cpu_lock.py"))
+    _cl_mod = _cl_util.module_from_spec(_cl)
+    _cl.loader.exec_module(_cl_mod)
+    _cl_mod.hold()   # one CPU reference job at a time: refuse beside another
     a = parse_args(sys.argv[1:])
     snap, set_dir, out, new_tokens = a["snapshot"], a["set_dir"], a["out"], a["new_tokens"]
     os.makedirs(out, exist_ok=True)
@@ -658,6 +663,8 @@ def inkling_main(snap: str, out: str, todo: list[dict], prompts: dict, new_token
 
     for i, e in enumerate(todo, 1):
         name = e["name"]
+        if all(os.path.exists(os.path.join(out, f"{name}.{RUN}.{x}")) for x in ("ids", "txt")):
+            continue   # another run of the same set (a second shard) finished it meanwhile
         ids = prompts[name]
         t = state["t0"] = time.time()
         state["name"] = name

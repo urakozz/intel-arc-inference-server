@@ -687,10 +687,59 @@ def test_real_checkpoint():
     print(f"  W4A16: fc cosine vs bf16 {float(cos):.4f}, ids {oq.ids.tolist()}")
 
 
+def test_inkling_form():
+    """Inkling's three differences (dflash_ref's docstring): embed_norm on the block rows, the selector's softcap
+    after the correction, candidates from the live rows only; and the tap slots in target_layer_ids order."""
+    cd = v2_dict()
+    cd["dflash_config"] = dict(cd["dflash_config"], final_logit_softcapping=3.0)
+    after = dict(cd, dflash_config=dict(cd["dflash_config"], selector_softcap_mode="after_correction"))
+    cb, ca = ref.config_from_dict(cd), ref.config_from_dict(after)
+    assert not cb.softcap_after and ca.softcap_after
+    try:
+        ref.config_from_dict(dict(cd, dflash_config=dict(cd["dflash_config"], selector_softcap_mode="sometimes")))
+        raise AssertionError("an unknown softcap mode was accepted")
+    except ValueError:
+        pass
+    t, e, h = random_tensors(cb, 0)
+    g = torch.Generator().manual_seed(9)
+    w = (1 + 0.3 * torch.randn(HID, generator=g)).to(torch.bfloat16)
+    live = VOCAB - 40
+    h = h.clone()
+    h[live:] = h[:VOCAB - live] * 50          # the padded rows would win every top-k if not cut
+    taps = {i: torch.randn(12, HT, generator=g) for i in cb.target_layer_ids}
+    db = ref.Drafter(cb, t, e, h, embed_norm=(w, 1e-6), valid_vocab=live)
+    da = ref.Drafter(ca, t, e, h, embed_norm=(w, 1e-6), valid_vocab=live)
+    ctx = db.context_kv(taps, torch.arange(12))
+    ob, oa = db.draft_block(5, 12, 7, ctx), da.draft_block(5, 12, 7, ctx)
+    # the top 16 are the same under either order (tanh is monotone), the scores are not
+    assert torch.equal(ob.cand_ids, oa.cand_ids)
+    assert int(oa.cand_ids.max()) < live and int(ob.cand_ids.max()) < live
+    assert not torch.allclose(ob.edges, oa.edges, atol=1e-3)
+    man = torch.tanh(ref.score_edges(da.w["candidate_selector.predecessor_codebook"],
+                                     da.w["candidate_selector.successor_codebook"], oa.cand_ids, oa.unary,
+                                     ref.linear(oa.hidden[1:], da.w["candidate_selector.hidden_projection.weight"]),
+                                     5) / 3.0) * 3.0
+    assert torch.allclose(oa.edges, man, atol=1e-5)
+    assert float(oa.unary.abs().max()) > 3.0          # raw unary: never capped before the correction
+    assert float(ob.unary.abs().max()) <= 3.0
+    # embed_norm: the anchor and mask rows normed with the target's weight
+    rows = da.embed_rows(torch.tensor([5, cb.mask_token_id]))
+    assert torch.allclose(rows, ref.rms_norm(e[[5, cb.mask_token_id]].float(), w, 1e-6))
+    assert not torch.allclose(rows, ref.Drafter(ca, t, e, h).embed_rows(torch.tensor([5, cb.mask_token_id])))
+    # K < 7 is the whole block's prefix
+    o3 = da.draft_block(5, 12, 3, ctx, rows=7)
+    assert torch.equal(o3.ids, oa.ids[:3])
+    # the engine's tap slots [N, 4, H] map to target_layer_ids in order
+    slots = torch.randn(12, 2, HT, generator=g)
+    tp = ref.taps_from_slots(slots, cb.target_layer_ids)
+    assert torch.equal(tp[cb.target_layer_ids[0]], slots[:, 0]) and torch.equal(tp[cb.target_layer_ids[1]], slots[:, 1])
+    print("Inkling form: softcap after the correction changes the scores, live rows cut, block rows embed-normed")
+
+
 TESTS = [test_real_configs, test_shapes_and_determinism, test_tap_offset_at_api, test_context_kv_and_rope,
          test_context_window, test_full_attention_layer, test_block_attention_causality, test_conv_lookback, test_v2_layer_wiring,
          test_short_K, test_score_edges_and_anchor, test_walk_tie_rule, test_gumbel, test_d2t,
-         test_mask_embedding_and_scale, test_dequant_pack_quantized, test_load_from_files, test_real_checkpoint]
+         test_mask_embedding_and_scale, test_dequant_pack_quantized, test_load_from_files, test_inkling_form, test_real_checkpoint]
 
 
 def main() -> None:

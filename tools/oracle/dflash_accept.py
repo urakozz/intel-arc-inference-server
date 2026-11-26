@@ -7,6 +7,9 @@
                      [--k 1-7] [--batch 32] [--drafter SNAP] [--w4a16 SNAP] [--target SNAP]
                      [--sources GLOB] [--dry-run]
     dflash_accept.py summary OUT/accept.*.json [--md OUT.md]
+    dflash_accept.py drafts --dump F --target SNAP [--drafter SNAP] [--anchors 32] --out F.txt
+                                                 Inkling: the first anchors' reference drafts (the engine's form:
+                                                 bf16 drafter, int8 head) - inkling2_dflash_draft_test's expectation
 
 **Protocol** (spec 19 §5's loop, teacher-forced; mtp_accept.py is the precedent). A dump
 (dump_taps.py) holds ids x[0..N-1] = prompt + recorded greedy continuation, the taps after the
@@ -49,6 +52,18 @@ context < its anchor plus its own rows); the head runs once per batch over all B
 (the README's warning: per-call head upcasts are slow); test_dflash_accept.py checks the batch
 against dflash_ref.Drafter.draft_block row by row. Greedy (T = 0) only.
 
+**Inkling's form** (the target a looped Inkling 2 Mini: its config's text_config has a loop_config; drafter
+incoai/Inkling-2-Mini-DFlash2; dumps from `b70-decode --dump-taps`, the engine's own tap rows): dflash_ref's Inkling
+form (embed_norm on the block rows, the softcap after the correction, candidates over the 200,058 live rows), and one
+whole 8-row block an anchor - SGLang and the engine always draft 7, so E_K for K < 7 reads the block's first K drafts.
+Arms there: bf16 (head bf16, the release's), bf16h8 (head int8, ours), int8 / int8h, int4g64h / int4g128h (RTN int4,
+s = amax / 7 a group, head int8: the round-to-nearest int4 form, which loses acceptance, and its g64 twin), and on int8h the 2-bit candidate head
+(`int8h-c64` / `-c80`: the int8 head's 2-bit copy, loader::dflash_candidate_head2's host twin, picks C candidates whose
+exact int8 logits the top 16 come from). Besides greedy E_K, per arm: T 1.0 along the greedy text under the point-mass
+rule (a draft accepted with the target's p of it) and the exact rule (sum_c min(p, q), q the selector's softmax of the
+realized 16 scores), and GTAU (verify up to the first draft where the walk's product of selector probabilities at T 1
+falls under tau) priced on the one-card verify costs (--costs) against the best fixed K.
+
 Resumable: OUT/accept.<arm>.json is rewritten after every source and a re-run skips the sources
 it already holds. --dry-run prints the planned anchors, the FLOP and a memory estimate.
 """
@@ -66,6 +81,10 @@ import time  # noqa: E402
 
 KMAX = 7
 VOCAB_USED = 248077
+INKLING_VOCAB_USED = 200058
+TAUS = (0.1, 0.25, 0.5)
+# T(1..8): one card's verify of 1..8 rows in plain steps at 4k (kOneCardCost, runtime/inkling2/inkling2_window.h)
+INKLING_COSTS = "1,1.182,1.380,1.534,1.731,1.870,2.008,2.218"
 VOCAB_SIZES = {"32k": 32768, "64k": 65536, "128k": 131072}
 ASSUMED_GFLOPS = 300.0
 LINEAR_SUFFIXES = ("fc.weight", "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
@@ -167,6 +186,26 @@ def rtn_int8_rows(w):
     return q, s
 
 
+def rtn_int4_groups(w, group: int):
+    """Symmetric int4 per group of `group` input columns: s = amax / 7, q = rne(w / s) clamped to [-8, 7]; returns
+    the dequantised float32 weight."""
+    wf = w.float()
+    o, i = wf.shape
+    g = wf.view(o, i // group, group)
+    s = g.abs().amax(-1, keepdim=True) / 7.0
+    safe = torch.where(s > 0, s, torch.ones_like(s))
+    return (torch.clamp(torch.round(g / safe), -8, 7) * s).view(o, i)
+
+
+def int4_simulate(drafter, group: int) -> int:
+    n = 0
+    for name in list(drafter.w):
+        if name.endswith(LINEAR_SUFFIXES) and drafter.w[name].dim() == 2:
+            drafter.w[name] = rtn_int4_groups(drafter.w[name], group)
+            n += 1
+    return n
+
+
 def int8_simulate(drafter) -> int:
     """Replace every drafter linear weight by its int8-RTN dequantisation (float32). Returns the
     count of tensors quantised."""
@@ -199,6 +238,22 @@ class Head:
             return ref.linear(h, self.w, chunk=self.chunk)
         return torch.cat([h @ (self.q[i:i + self.chunk].float() * self.s[i:i + self.chunk, None]).t()
                           for i in range(0, self.rows, self.chunk)], -1)
+
+    def two_bit_logits(self, h):
+        """The int8 head's 2-bit copy (loader::dflash_candidate_head2): per row and 64 k, scale = fp16(amax / 1.5) of
+        the int8 values times the row scale, code = clamp(rint(v / scale + 1.5), 0, 3), value (code - 1.5) scale."""
+        if not hasattr(self, "q2"):
+            parts = []
+            for i in range(0, self.rows, self.chunk):
+                v = (self.q[i:i + self.chunk].float() * self.s[i:i + self.chunk, None])
+                g = v.view(v.shape[0], -1, 64)
+                sc = (g.abs().amax(-1, keepdim=True) / 1.5).half().float()
+                code = torch.where(sc > 0, torch.clamp(torch.round(g / torch.where(sc > 0, sc, 1) + 1.5), 0, 3),
+                                   torch.ones_like(g))
+                parts.append(((code - 1.5) * sc).view_as(v).to(torch.bfloat16))
+            self.q2 = torch.cat(parts)
+        h = h.float()
+        return torch.cat([h @ self.q2[i:i + self.chunk].float().t() for i in range(0, self.rows, self.chunk)], -1)
 
 
 # ------------------------------------------------------------------------------ batched drafting
@@ -271,11 +326,7 @@ def forward_blocks(d, anchors, ps, K: int, ctx):
     B, R = len(anchors), K + 1
     ids = torch.cat([torch.as_tensor(anchors, dtype=torch.long)[:, None],
                      torch.full((B, K), c.mask_token_id, dtype=torch.long)], 1)
-    x = d.embed[ids.reshape(-1)].float()
-    if d.mask_embedding is not None:
-        x[ids.reshape(-1) == c.mask_token_id] = d.mask_embedding
-    if c.version == 2:
-        x = x * c.input_embedding_scale
+    x = d.embed_rows(ids.reshape(-1))
     ps = torch.as_tensor(ps, dtype=torch.long)
     qpos = ps[:, None] + torch.arange(R)[None]
     resid = x
@@ -300,11 +351,12 @@ def forward_blocks(d, anchors, ps, K: int, ctx):
     return ref.rms_norm(resid, d.w["norm.weight"], c.eps).view(B, R, -1)
 
 
-def select_ids(d, hm, logits, anchors, K: int):
+def select_ids(d, hm, logits, anchors, K: int, walk: bool = False):
     """Greedy draft ids [B, K] from the mask rows' hidden hm [B*K, H] and their head logits
     [B*K, V] (already masked for a draft vocabulary). DFlash 2: top-k, output_multiplier /
-    softcap, the bilinear edge scores, the argmax walk (ties to the lower candidate index);
-    DFlash (v1): argmax of the logits (ties to the lower id)."""
+    softcap (before or after the correction, dflash_ref.Drafter.unary_and_cap), the bilinear edge scores, the argmax
+    walk (ties to the lower candidate index); DFlash (v1): argmax of the logits (ties to the lower id).
+    walk (DFlash 2): also the realized score rows [B, K, k], the candidates [B, K, k] and the chosen index [B, K]."""
     c = d.cfg
     B = len(anchors)
     if c.version != 2:
@@ -315,11 +367,11 @@ def select_ids(d, hm, logits, anchors, K: int):
         idx = torch.where(lg == best, torch.arange(lg.shape[1])[None], lg.shape[1]).min(-1).values
         return idx.view(B, K)
     kk = c.selector_top_k
+    if d.valid_vocab is not None:
+        logits = logits.clone()
+        logits[:, d.valid_vocab:] = float("-inf")
     cand, unary = top_k_fast(logits, kk)
-    unary = unary * c.output_multiplier
-    if c.final_logit_softcapping > 0:
-        cap = c.final_logit_softcapping
-        unary = torch.tanh(unary / cap) * cap
+    unary, cap = d.unary_and_cap(unary)
     hid = ref.linear(hm, d.w["candidate_selector.hidden_projection.weight"])
     cand, unary, hid = cand.view(B, K, kk), unary.view(B, K, kk), hid.view(B, K, -1)
     anc = torch.as_tensor(anchors, dtype=torch.long)
@@ -327,29 +379,44 @@ def select_ids(d, hm, logits, anchors, K: int):
     P = d.w["candidate_selector.predecessor_codebook"][prev].float() * hid.float()[:, :, None, :]
     S_ = d.w["candidate_selector.successor_codebook"][cand].float()
     S = unary.float()[:, :, None, :] + torch.einsum("bjar,bjcr->bjac", P, S_)            # [B, K, k, k]
+    if cap is not None:
+        S = torch.tanh(S / cap) * cap
     chosen = torch.zeros(B, dtype=torch.long)
     ar = torch.arange(B)
-    out = []
+    out, rows, picks = [], [], []
     idx = torch.arange(kk)
     for j in range(K):
         row = S[ar, j, chosen].double()                                                  # [B, k]
         best = row.max(-1, keepdim=True).values
         chosen = torch.where(row == best, idx[None], kk).min(-1).values
         out.append(cand[ar, j, chosen])
+        rows.append(row)
+        picks.append(chosen)
+    if walk:
+        return torch.stack(out, 1), torch.stack(rows, 1), cand, torch.stack(picks, 1)
     return torch.stack(out, 1)
 
 
-def draft_batch(d, head, anchors, ps, K: int, ctx, masks: dict):
-    """{variant: ids [B, K]} for one batch; masks maps a variant name to a bool [V] keep-mask
-    (None = the full head)."""
+def draft_batch(d, head, anchors, ps, K: int, ctx, masks: dict, walk: bool = False):
+    """{variant: ids [B, K]} for one batch (walk: select_ids' walk tuple); masks maps a variant name to a bool [V]
+    keep-mask (None = the full head) or ("c", C): the C candidates of the head's 2-bit copy, their exact logits."""
     h = forward_blocks(d, anchors, ps, K, ctx)
     B = len(anchors)
     hm = h[:, 1:].reshape(B * K, -1)
     logits = head.logits(hm)
+    two_bit = None
     out = {}
     for name, keep in masks.items():
-        lg = logits if keep is None else logits.masked_fill(~keep[None], float("-inf"))
-        out[name] = select_ids(d, hm, lg, anchors, K)
+        if isinstance(keep, tuple):
+            if two_bit is None:
+                two_bit = head.two_bit_logits(hm)
+                if d.valid_vocab is not None:
+                    two_bit[:, d.valid_vocab:] = float("-inf")
+            top = torch.topk(two_bit, keep[1], dim=-1).indices
+            lg = torch.full_like(logits, float("-inf")).scatter_(1, top, logits.gather(1, top))
+        else:
+            lg = logits if keep is None else logits.masked_fill(~keep[None], float("-inf"))
+        out[name] = select_ids(d, hm, lg, anchors, K, walk)
     return out
 
 
@@ -394,8 +461,46 @@ def anchors_of(n_prompt: int, n: int):
     return list(range(n_prompt, n - KMAX + 1))
 
 
-def run_source(d, head, dump, ks, masks, batch: int, log=print):
-    """Per-variant, per-K stats for one dump."""
+def target_probs(dump, rows, ids):
+    """The target's p of ids [A, K] at dump rows [A, K] (the id after that position), from the top 64 and the
+    log-sum-exp; 0 outside the top 64."""
+    ti, tl, lse = dump["top_ids"][rows], dump["top_logits"][rows], dump["lse"][rows]
+    hit = ti == ids[..., None]
+    lp = torch.where(hit, tl, torch.full_like(tl, float("-inf"))).amax(-1)
+    return torch.exp(lp.double() - lse.double())
+
+
+def sampled_and_gtau(dump, walked, ps_all, length, censored, costs, draft_cost):
+    """T 1.0 along the greedy text and GTAU for one variant's K = 7 walk (module docstring)."""
+    ids, real, cand, chosen = walked
+    A, K, kk = real.shape
+    f = dump["tap_from"]
+    rows = ps_all[:, None] + torch.arange(K)[None] - f                           # the dump row of draft j's context
+    q = torch.softmax(real, -1)                                                  # the selector's q at T 1
+    pm = target_probs(dump, rows, ids)                                           # point mass: p(draft)
+    pc = target_probs(dump, rows[..., None].expand(A, K, kk), cand)              # p of every candidate
+    ex = torch.minimum(pc, q).sum(-1)                                            # exact: sum_c min(p, q)
+    e_pm = 1 + torch.cumprod(pm, 1).cumsum(1)                                    # [A, K]: E at K = 1..7
+    e_ex = 1 + torch.cumprod(ex, 1).cumsum(1)
+    conf = torch.cumprod(q.gather(-1, chosen[..., None])[..., 0], 1)             # the walk's confidence
+    out = {"rows": A, "pm": e_pm.sum(0).tolist(), "exact": e_ex.sum(0).tolist(), "gtau": {}}
+    ok = ~censored
+    L = length[ok]
+    out["fixed"] = {"n": int(ok.sum()), "ids": [float((1 + torch.clamp(L, max=k)).sum()) for k in range(1, K + 1)]}
+    for tau in TAUS:
+        below = conf[ok] < tau
+        k_tau = torch.where(below.any(1), below.float().argmax(1) + 1, torch.full((int(ok.sum()),), K))
+        got = 1 + torch.minimum(L, k_tau)
+        out["gtau"][str(tau)] = {"ids": float(got.sum()), "rows": float((k_tau + 1).sum()),
+                                 "cost": float(sum(costs[int(k) + 1] + draft_cost for k in k_tau.tolist())),
+                                 "given_up": float((torch.clamp(L, max=K) - torch.minimum(L, k_tau)).sum())}
+    return out
+
+
+def run_source(d, head, dump, ks, masks, batch: int, log=print, whole_block: bool = False, costs=None,
+               draft_cost: float = 0.0):
+    """Per-variant, per-K stats for one dump (whole_block: one K = 7 block an anchor, every K its prefix; with it
+    the T 1.0 and GTAU stats under the variant's '_extra')."""
     taps = dump["taps"]
     f = dump["tap_from"]
     pos = torch.arange(f, dump["n"])
@@ -406,6 +511,25 @@ def run_source(d, head, dump, ks, masks, batch: int, log=print):
     if not anchors:
         return res, 0
     ps_all = torch.tensor(anchors)
+    if whole_block:
+        walked = {name: [] for name in masks}
+        for b0 in range(0, len(anchors), batch):
+            ps = ps_all[b0:b0 + batch]
+            out = draft_batch(d, head, x[ps].tolist(), ps, KMAX, ctx, masks, walk=True)
+            for name in masks:
+                walked[name].append(out[name])
+        for name in masks:
+            w = tuple(torch.cat([o[i] for o in walked[name]]) for i in range(4))
+            for K in ks:
+                length, cens, counted, accepted = accept_rows(w[0][:, :K], ps_all, x, g, f)
+                hist = torch.bincount(length[~cens], minlength=K + 1).tolist()
+                res[name][str(K)] = {"rows": len(anchors), "censored": int(cens.sum()), "hist": hist,
+                                     "counted": counted, "accepted": accepted}
+            length, cens, _, _ = accept_rows(w[0], ps_all, x, g, f)
+            res[name]["_extra"] = sampled_and_gtau(dump, w, ps_all, length, cens, costs, draft_cost)
+        n_p = dump["n_prompt"]
+        agree = int((x[n_p:] == g[n_p - 1 - f: dump["n"] - 1 - f]).sum())
+        return res, agree
     for K in ks:
         drafts = {name: [] for name in masks}
         for b0 in range(0, len(anchors), batch):
@@ -444,7 +568,25 @@ def pool(entries, ks):
     return out
 
 
-def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
+def pool_extra(entries):
+    """Pool sampled_and_gtau's per-source stats (one variant)."""
+    es = [e["_extra"] for e in entries if "_extra" in e]
+    if not es:
+        return None
+    rows = sum(e["rows"] for e in es)
+    K = len(es[0]["pm"])
+    out = {"rows": rows, "pm": [sum(e["pm"][k] for e in es) / rows for k in range(K)],
+           "exact": [sum(e["exact"][k] for e in es) / rows for k in range(K)], "gtau": {}}
+    n = sum(e["fixed"]["n"] for e in es)
+    out["fixed_ids"] = [sum(e["fixed"]["ids"][k] for e in es) / max(1, n) for k in range(K)]
+    out["n"] = n
+    for tau in es[0]["gtau"]:
+        g = [e["gtau"][tau] for e in es]
+        out["gtau"][tau] = {k: sum(x[k] for x in g) / max(1, n) for k in ("ids", "rows", "cost", "given_up")}
+    return out
+
+
+def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1)), costs=None, draft_cost=0.0) -> dict:
     per_arm = {}
     agree = {}
     for fn in files:
@@ -481,6 +623,29 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
             rows = s.get(str(ks[0]), {}).get("rows", 0)
             lines.append(f"| {variant} | {rows} | " + " | ".join(f"{e:.2f}" if e is not None else "-" for e in es)
                          + f" | {best[1]} | " + " ".join(f"{a:.2f}" if a is not None else "-" for a in a7) + " |")
+    for corp in corpora:
+        rows_x = [(v, pool_extra([e for n_, e in per_arm[v].items() if corp == "all" or n_.split("/")[0] == corp]))
+                  for v in sorted(per_arm, key=_arm_order)]
+        rows_x = [(v, x) for v, x in rows_x if x]
+        if not rows_x:
+            continue
+        lines.append(f"\n### {corp}: T 1.0 along the greedy text (E at K = 1..7) and GTAU\n")
+        lines.append("| arm | point mass E_1..7 | exact E_1..7 | best fixed K: ids / cost | "
+                     + " | ".join(f"GTAU {t}: rows, ids, given up, ids / cost" for t in TAUS) + " |")
+        lines.append("|---|---|---|---|" + "---|" * len(TAUS))
+        for v, x in rows_x:
+            fixed = ""
+            if costs:
+                per = [(x["fixed_ids"][k] / (costs[k + 2] + draft_cost), k + 1) for k in range(len(x["fixed_ids"]))]
+                b = max(per)
+                fixed = f"K {b[1]}: {x['fixed_ids'][b[1] - 1]:.2f} / {b[0]:.3f}"
+            gt = []
+            for t in TAUS:
+                g = x["gtau"].get(str(t))
+                gt.append(f"{g['rows']:.2f}, {g['ids']:.2f}, {g['given_up']:.2f}, {g['ids'] / g['cost']:.3f}"
+                          if g and g["cost"] else "-")
+            lines.append(f"| {v} | " + " ".join(f"{e:.2f}" for e in x["pm"]) + " | "
+                         + " ".join(f"{e:.2f}" for e in x["exact"]) + f" | {fixed} | " + " | ".join(gt) + " |")
     text = "\n".join(lines)
     print(text)
     if md_out:
@@ -490,7 +655,7 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
 
 
 def _arm_order(v):
-    base = ["bf16", "int8", "int8h", "w4a16"]
+    base = ["bf16", "bf16h8", "int8", "int8h", "int4g64h", "int4g128h", "w4a16"]
     b = v.split("-")[0]
     return (base.index(b) if b in base else 9, v)
 
@@ -519,7 +684,7 @@ def dump_files(dumps_dir, pattern):
 
 def cmd_run(a) -> None:
     arms = [s for s in a.arms.split(",") if s]
-    bad = [s for s in arms if s not in ("bf16", "int8", "int8h", "w4a16")]
+    bad = [s for s in arms if s not in ("bf16", "bf16h8", "int8", "int8h", "int4g64h", "int4g128h", "w4a16")]
     if bad:
         raise SystemExit(f"unknown arms {bad}")
     vocab = [s for s in a.vocab.split(",") if s] if a.vocab else []
@@ -531,6 +696,9 @@ def cmd_run(a) -> None:
     if not (1 <= ks[0] and ks[-1] <= KMAX):
         raise SystemExit(f"--k within 1-{KMAX}")
     plan = plan_arms(arms, vocab, vocab_on, bool(a.draft_vocab_ids))
+    cands = [int(c) for c in a.candidates.split(",") if c]
+    if "int8h" in plan:
+        plan["int8h"] += [f"int8h-c{c}" for c in cands]
     files = dump_files(a.dumps, a.sources)
     os.makedirs(a.out_dir, exist_ok=True)
     # the planned work, from the dump headers (or sources.json before any dump exists)
@@ -563,13 +731,20 @@ def cmd_run(a) -> None:
     _load_deps()
     torch.set_grad_enabled(False)
     target = a.target or ref.find_snapshot("Qwen/Qwen3.8-27B", ("config.json", "tokenizer.json"))
-    drafter_dir = a.drafter or ref.find_snapshot("z-lab/Qwen3.8-27B-DFlash2", ("config.json", "model.safetensors"))
+    inkling = False
+    if target and os.path.isfile(os.path.join(target, "config.json")):
+        with open(os.path.join(target, "config.json"), encoding="utf-8") as f:
+            inkling = "loop_config" in (json.load(f).get("text_config") or {})
+    drafter_dir = a.drafter or ref.find_snapshot(
+        "incoai/Inkling-2-Mini-DFlash2" if inkling else "z-lab/Qwen3.8-27B-DFlash2", ("config.json", "model.safetensors"))
     w4_dir = a.w4a16 or ref.find_snapshot("syvai/Qwen3.8-27B-DFlash2-W4A16", ("config.json", "model.safetensors"))
     if target is None or drafter_dir is None:
         raise SystemExit(f"target {target} / drafter {drafter_dir} not found in {ref.hf_hub_dir()}")
     t0 = time.time()
-    embed, head_w = ref.read_target_embed_head(target)
-    vocab_used = a.vocab_used
+    tgt = ref.read_inkling_target(target) if inkling else None
+    embed, head_w = (tgt["embed"], tgt["lm_head"]) if inkling else ref.read_target_embed_head(target)
+    vocab_used = INKLING_VOCAB_USED if inkling and a.vocab_used == VOCAB_USED else a.vocab_used
+    costs = [0.0] + [float(c) for c in (a.costs or (INKLING_COSTS if inkling else "")).split(",") if c]
     added, eos = vocab_inputs(target)
     ranked = read_ranked(a.draft_vocab_ids) if a.draft_vocab_ids else []
     vmasks = {}
@@ -598,12 +773,15 @@ def cmd_run(a) -> None:
         if src_dir is None:
             print(f"[{arm}] SKIP: drafter not in the cache", flush=True)
             continue
-        d = ref.load_drafter(src_dir, embed=embed, lm_head=head_w)
-        nq = int8_simulate(d) if arm in ("int8", "int8h") else 0
-        head = Head(head_w, int8=(arm == "int8h"))
+        d = ref.load_drafter(src_dir, embed=embed, lm_head=head_w,
+                             embed_norm=tgt["embed_norm"] if inkling else None,
+                             valid_vocab=tgt["valid_vocab"] if inkling else None)
+        nq = (int8_simulate(d) if arm in ("int8", "int8h") else
+              int4_simulate(d, 64) if arm == "int4g64h" else int4_simulate(d, 128) if arm == "int4g128h" else 0)
+        head = Head(head_w, int8=arm in ("int8h", "bf16h8", "int4g64h", "int4g128h"))
         masks = {arm: None}
         for v in variants[1:]:
-            masks[v] = vmasks[v[len(arm) + 1:]]
+            masks[v] = ("c", int(v.rsplit("-c", 1)[1])) if "-c" in v else vmasks[v[len(arm) + 1:]]
         state["meta"] = {"drafter": src_dir, "target": target, "int8_tensors": nq, "head": "int8" if head.int8 else "bf16",
                          "ks": ks, "batch": a.batch, "vocab_used": vocab_used,
                          "draft_vocab_ids": a.draft_vocab_ids or "", "threads": torch.get_num_threads()}
@@ -611,7 +789,8 @@ def cmd_run(a) -> None:
         for fn in todo:
             dump = dt.load_dump(fn)
             ts = time.time()
-            res, agree = run_source(d, head, dump, ks, masks, a.batch)
+            res, agree = run_source(d, head, dump, ks, masks, a.batch, whole_block=inkling, costs=costs,
+                                    draft_cost=a.draft_cost)
             for v in variants:
                 state["variants"][v][dump["name"]] = res[v]
             state["agree"][dump["name"]] = [agree, dump["n"] - dump["n_prompt"]]
@@ -626,8 +805,31 @@ def cmd_run(a) -> None:
                   + (f", censored {r7['censored']}" if r7 else "") + f"; {time.time() - ts:.0f} s", flush=True)
         del d, head
     files_out = sorted(glob.glob(os.path.join(a.out_dir, "accept.*.json")))
-    summarize(files_out, os.path.join(a.out_dir, "summary.md"), ks)
+    summarize(files_out, os.path.join(a.out_dir, "summary.md"), ks, costs, a.draft_cost)
     print(f"wall {time.time() - t0:.0f} s", flush=True)
+
+
+def cmd_drafts(a) -> None:
+    """The reference drafts at a dump's first anchors (positions n_prompt ..), as text: line 1 the dump's ids (prompt +
+    text), line 2 n_prompt, then per anchor its position and its 7 drafts (the engine's form: bf16 drafter, int8 head)."""
+    _load_deps()
+    torch.set_grad_enabled(False)
+    tgt = ref.read_inkling_target(a.target)
+    drafter_dir = a.drafter or ref.find_snapshot("incoai/Inkling-2-Mini-DFlash2", ("config.json", "model.safetensors"))
+    d = ref.load_drafter(drafter_dir, embed=tgt["embed"], lm_head=tgt["lm_head"], embed_norm=tgt["embed_norm"],
+                         valid_vocab=tgt["valid_vocab"])
+    head = Head(tgt["lm_head"], int8=True)
+    dump = dt.load_dump(a.dump)
+    f = dump["tap_from"]
+    ctx = d.context_kv({i: dump["taps"][i] for i in d.cfg.target_layer_ids}, torch.arange(f, dump["n"]))
+    ps = torch.tensor(anchors_of(dump["n_prompt"], dump["n"])[:a.anchors])
+    x = dump["ids"]
+    ids = draft_batch(d, head, x[ps].tolist(), ps, KMAX, ctx, {"a": None})["a"]
+    with open(a.out, "w", encoding="utf-8") as out:
+        out.write(" ".join(map(str, x.tolist())) + "\n" + str(dump["n_prompt"]) + "\n")
+        for p, row in zip(ps.tolist(), ids.tolist()):
+            out.write(" ".join(map(str, [p] + row)) + "\n")
+    print(f"{len(ps)} anchors from {ps[0].item()}: drafts written to {a.out}")
 
 
 def main() -> None:
@@ -648,12 +850,25 @@ def main() -> None:
     r.add_argument("--target")
     r.add_argument("--sources", help="fnmatch over the dump file names")
     r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--candidates", default="64,80", help="int8h's 2-bit candidate variants (Inkling)")
+    r.add_argument("--costs", help="T(1..8) in plain steps for GTAU's pricing (Inkling: one card's at 4k)")
+    r.add_argument("--draft-cost", type=float, default=0.2, help="the draft pass in plain steps (GTAU's pricing)")
+    q = sub.add_parser("drafts")
+    q.add_argument("--dump", required=True)
+    q.add_argument("--target", required=True)
+    q.add_argument("--drafter")
+    q.add_argument("--anchors", type=int, default=32)
+    q.add_argument("--out", required=True)
     s = sub.add_parser("summary")
     s.add_argument("files", nargs="+")
     s.add_argument("--md")
+    s.add_argument("--costs", default=INKLING_COSTS)
+    s.add_argument("--draft-cost", type=float, default=0.2)
     a = ap.parse_args()
+    if a.cmd == "drafts":
+        return cmd_drafts(a)
     if a.cmd == "summary":
-        summarize(a.files, a.md)
+        summarize(a.files, a.md, costs=[0.0] + [float(c) for c in a.costs.split(",")], draft_cost=a.draft_cost)
     else:
         cmd_run(a)
 

@@ -45,6 +45,9 @@ class CmdList {
   void close();
   void reset();
   void host_synchronize();
+  // An immediate list's wait with a bound: true once every appended command completed, false when `timeout_ns`
+  // passed first.
+  bool host_synchronize(uint64_t timeout_ns);
   bool is_immediate() const { return immediate_; }
   ze_command_list_handle_t handle() const { return l_; }
 

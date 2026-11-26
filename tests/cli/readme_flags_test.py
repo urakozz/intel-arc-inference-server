@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""README.md's flag tables against the binaries' generated --help (src/cli/flags.h).
+"""The flag tables against the binaries' generated --help (src/cli/flags.h): README.md holds b70-serve's,
+docs/18-development.md b70-decode's.
 
 Every flag a table names is the binary's (a b70-decode table's row that names `b70-serve` is b70-serve's), every flag
 either --help names is in a table, and a row of one flag whose default is one `literal` has the default --help gives.
-Usage: readme_flags_test.py README.md <b70-serve> <b70-decode>
+Usage: readme_flags_test.py README.md docs/18-development.md <b70-serve> <b70-decode>
 """
 import re
 import subprocess
@@ -28,14 +29,15 @@ def help_flags(binary):
     return defaults
 
 
-def readme_rows(path):
-    rows, owner = [], None
+def readme_rows(path, fixed=None):
+    """Each table row with its binary: README.md's by the line above its table, a fixed owner's every row."""
+    rows, owner = [], fixed
     for line in open(path, encoding="utf-8"):
-        if line.startswith("`b70-serve`"):
+        if fixed is None and line.startswith("`b70-serve`"):
             owner = "serve"
-        elif line.startswith("`b70-decode`") or line.startswith("Developer flags (`b70-decode`)"):
+        elif fixed is None and (line.startswith("`b70-decode`") or line.startswith("Developer flags (`b70-decode`)")):
             owner = "decode"
-        elif line.startswith("## "):
+        elif fixed is None and line.startswith("## "):
             owner = None
         elif owner and line.startswith("| `"):
             cells = [c.strip() for c in re.split(r"(?<!\\)\|", line.strip())[1:-1]]
@@ -44,10 +46,10 @@ def readme_rows(path):
 
 
 def main():
-    readme, serve, decode = sys.argv[1:4]
+    readme, devdoc, serve, decode = sys.argv[1:5]
     helps = {"serve": help_flags(serve), "decode": help_flags(decode)}
     named, bad = set(), []
-    for owner, cells in readme_rows(readme):
+    for owner, cells in readme_rows(readme) + readme_rows(devdoc, "decode"):
         flags = re.findall(r"--[a-z0-9-]+", cells[0])
         named.update(flags)
         for f in flags:

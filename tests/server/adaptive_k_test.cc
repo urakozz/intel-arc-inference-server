@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "check.h"
+#include "runtime/inkling2/inkling2_window.h"
 #include "server/adaptive_k.h"
 
 namespace {
@@ -162,6 +163,77 @@ void test_measured_cost() {
   CHECK(probes <= 200 / 32 + 2);   // the gap at its cap
   std::print("measured costs: K 1 at 1.9 plain steps, acceptance 0.62: plain, {} probes in the last 200 iterations\n",
              probes);
+}
+
+// Plan 41f: Inkling's served policy (b70-serve's options) at its measured table - an untimed request's rejected
+// probes spread out toward the cap at low acceptance, and high acceptance still takes K up.
+void test_inkling_policy() {
+  AdaptiveKOptions o;
+  o.cost = MtpCost::inkling_dspark();
+  o.max_k = 7;
+  o.probe_max = 128;
+  o.probe_backoff = true;
+  AdaptiveK low(o);
+  Geometric g(11, 0.16);
+  size_t probes = 0;
+  for (int i = 0; i < 256; ++i) {
+    const uint32_t k = low.next();
+    low.observe(k, g(k));
+    probes += i >= 2 && k > 0;
+  }
+  CHECK_EQ(low.current(), 0U);
+  CHECK(probes <= 14);   // a rejected probe doubles the gap (4 .. 128), a kept one resets it; 50 without the backoff
+  AdaptiveK high(o);
+  Geometric h(13, 0.9);
+  for (int i = 0; i < 128; ++i) {
+    const uint32_t k = high.next();
+    high.observe(k, h(k));
+  }
+  CHECK(high.current() >= 3U);   // at 0.9 the table's best is K 7 (2.51 ids a plain step)
+  std::print("Inkling: acceptance 0.16 plain with {} probes in 254 iterations; at 0.9 K {}\n", probes, high.current());
+}
+
+// b70-serve's Inkling table and b70-decode's draft window read the same measured costs (written in both places).
+void test_inkling_tables_equal() {
+  // DSpark's and (plan 41k) the DFlash 2 drafter's
+  for (const auto& [c, w] : {std::pair{MtpCost::inkling_dspark(), runtime::inkling2::kOneCardCost},
+                             std::pair{MtpCost::inkling_dflash2(), runtime::inkling2::kOneCardDflashCost},
+                             std::pair{MtpCost::inkling_dflash2_tp(), runtime::inkling2::kTpDflashCost}}) {
+    CHECK_EQ(c.verify.size(), w.verify.size());
+    for (size_t i = 0; i < w.verify.size(); ++i) CHECK_EQ(c.verify[i], w.verify[i]);
+    CHECK_EQ(c.draft.size(), size_t(runtime::inkling2::DraftWindow::kMaxDrafts));
+    for (const double d : c.draft) CHECK_EQ(d, w.draft);
+  }
+}
+
+// Costs by depth: the draft window's table interpolated between its depths (the ends held), and AdaptiveK's K from the
+// table at the iteration's position - drafting where drafts are cheap, plain where the drafter's pass costs 5 steps.
+void test_depth_costs() {
+  namespace ink = runtime::inkling2;
+  const auto& t = ink::kPpCosts;
+  CHECK_EQ(ink::cost_at(t, 0).draft, t.front().cost.draft);
+  CHECK_EQ(ink::cost_at(t, 1u << 30).draft, t.back().cost.draft);
+  const uint32_t mid = (t[0].depth + t[1].depth) / 2;
+  CHECK_NEAR(ink::cost_at(t, mid).draft, (t[0].cost.draft + t[1].cost.draft) / 2, 1e-12);
+  CHECK_NEAR(ink::cost_at(t, mid).verify[7], (t[0].cost.verify[7] + t[1].cost.verify[7]) / 2, 1e-12);
+
+  AdaptiveKOptions o;
+  o.max_k = 3;
+  o.warmup = 0;
+  o.probe_every = 0;
+  MtpCost cheap, dear;
+  cheap.verify = dear.verify = {1.0, 1.1, 1.2, 1.3};
+  cheap.draft = {0.1, 0.1, 0.1};
+  dear.draft = {5.0, 5.0, 5.0};
+  o.cost = cheap;
+  o.by_depth = {{1000, cheap}, {100000, dear}};
+  AdaptiveK k(o);
+  (void)k.next(200000);
+  k.observe(3, 3);
+  CHECK_EQ(k.current(), 0u);
+  CHECK_EQ(k.next(500), 0u);
+  k.observe(0, 0);
+  CHECK(k.current() > 0);
 }
 
 void test_cost_table() {
@@ -361,6 +433,9 @@ int main() {
   test_dflash_measured_cost();
   test_flash_next_cost();
   test_cost_table();
+  test_depth_costs();
+  test_inkling_policy();
+  test_inkling_tables_equal();
   test_measured_cost();
   test_draft_vocab_cost();
   test_up_on_high_acceptance();

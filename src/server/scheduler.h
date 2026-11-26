@@ -48,7 +48,7 @@
 //     with mtp_lookup()): prompt lookup inside MTP per request, server.cc's lookup-inside loop
 //     per row - the request's own server::LookupInDFlash (stay / enter, open-work 28's hot run
 //     at the slot's lookup_wide_k) over its slot's matcher (re-indexed to the request's prompt at
-//     the grant, as lookup_begin does for --spec lookup), its own server::StepK for a greedy row
+//     the grant, as lookup_begin does for external lookup), its own server::StepK for a greedy row
 //     (SchedulerOptions::step_k; over its card's DraftCalib, the head's calibration on that card)
 //     or AdaptiveK; nothing of it is read by another request or card;
 //   - replica x slots (several slots per card, BatchEngineIface::card_of): at most one chunk in
@@ -99,7 +99,7 @@ struct SchedulerOptions {
   // for every iteration when spec_fixed_k > 0.
   AdaptiveKOptions spec;
   uint32_t spec_fixed_k = 0;
-  // Plan 13b: prompt lookup (`--spec lookup`, spec 19e) per request - server::Options'
+  // Plan 13b: prompt lookup (spec 19e) per request - server::Options'
   // spec_lookup / lookup_min_match / lookup_history / lookup_adaptive, with the server's
   // meaning, per slot. Needs an engine with verify_k() > 0 and spec_k() == 0.
   bool lookup = false;
@@ -111,6 +111,9 @@ struct SchedulerOptions {
   // spec's max_k and cost, the engine's chooses_drafts()).
   bool mtp_lookup = false;
   bool step_k = false;
+  // Plan 41f under replica: prompt lookup inside a tap drafter per request (server.cc's lookup inside DFlash, one
+  // request a card) - the drafter's window (BatchEngineIface::dflash_window); 0 = off. Not beside mtp_lookup or lookup.
+  uint32_t dflash_lookup_window = 0;
 };
 
 struct Finish {
@@ -176,6 +179,9 @@ class Job {
   EngineIface::DraftChoice choose;
   EngineIface::LookupConfirm confirm;
   std::vector<uint32_t> cand;
+  // Plan 41f: the most lookup drafts this iteration's verify checks on the card (EngineIface::lookup_cap, written by the
+  // card's engine before it proposes - the serial loop's cut, spec 32e).
+  uint32_t lookup_cap = UINT32_MAX;
   // Plan 13b, an overlapping engine: a chunk of this request is in flight (prefill_begin'd, not
   // yet joined), and which.
   bool inflight = false;
@@ -293,6 +299,12 @@ class Scheduler {
   std::vector<bool> chunk_on_card() const;     // replica x slots: a chunk not yet joined on the card
   bool decode_round();
   bool spec_round();   // spec 19d
+  // Plan 41f: a step's rows (the decoding requests on the cards `take` accepts) and its outcome; per-card stepping.
+  void spec_rows(const std::function<bool(uint32_t card)>& take, std::vector<std::shared_ptr<Job>>& jobs,
+                 std::vector<BatchEngineIface::SpecRow>& rows);
+  void spec_results(const std::vector<std::shared_ptr<Job>>& jobs, const std::vector<BatchEngineIface::SpecRow>& rows,
+                    const std::function<std::vector<std::vector<uint32_t>>()>& step);
+  bool spec_cards();
   void finish(const std::shared_ptr<Job>& job, Finish::Reason reason, std::string error = {});
   int pick_slot(const Job& job) const;   // -1: no free slot the prompt fits
   // Spec 31, a KV page pool: the reservation, the eviction of idle sessions, a running request's growth.

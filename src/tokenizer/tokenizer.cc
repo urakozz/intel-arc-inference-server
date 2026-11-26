@@ -1,5 +1,6 @@
 #include "tokenizer/tokenizer.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -32,6 +33,35 @@ std::vector<uint32_t> Tokenizer::encode(std::string_view text, bool add_special)
   std::vector<uint32_t> out(ids, ids + n);
   b70_tok_free_buf(ids, n, 1);
   return out;
+}
+
+std::vector<uint32_t> Tokenizer::encode_extending(std::string_view text, Memo& memo) const {
+  const size_t shared = size_t(std::mismatch(text.begin(), text.end(), memo.text.begin(), memo.text.end()).first -
+                               text.begin());
+  const size_t margin = b70_tok_longest_added(h_);
+  const auto kept = std::upper_bound(memo.splits.begin(), memo.splits.end(), shared, [margin](size_t s, const auto& p) {
+    return s < p.first + margin;
+  });
+  const size_t from = kept == memo.splits.begin() ? 0 : std::prev(kept)->first;
+  const size_t ids_kept = kept == memo.splits.begin() ? 0 : std::prev(kept)->second;
+  const std::string_view tail = text.substr(from);
+  uint32_t* ids = nullptr;
+  uint32_t* ends = nullptr;
+  size_t n = 0;
+  if (b70_tok_encode_ends(h_, tail.data(), tail.size(), &ids, &ends, &n) != 0) {
+    memo = Memo{};
+    fail("encode_extending");
+  }
+  memo.splits.erase(kept, memo.splits.end());
+  memo.ids.resize(ids_kept);
+  for (size_t i = 0; i < n; ++i) {
+    memo.ids.push_back(ids[i]);
+    if (ends[i] != 0) memo.splits.emplace_back(from + ends[i], memo.ids.size());
+  }
+  b70_tok_free_buf(ids, n, 1);
+  b70_tok_free_buf(ends, n, 1);
+  memo.text.assign(text);
+  return memo.ids;
 }
 
 std::string Tokenizer::decode(const std::vector<uint32_t>& ids, bool skip_special) const {

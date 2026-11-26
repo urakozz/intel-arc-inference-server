@@ -16,6 +16,14 @@
 //               message's list of text parts is joined with "\n" first (vLLM's "string" content
 //               format). EOS [127906, 127901] and the sampling defaults (generation_config.json:
 //               T 1.0, top-p 0.97, top-k 128 - Options::sampling_defaults) are b70-serve's.
+//   Inkling     Inkling 2 Mini (model_type inkling2_loop, spec 41f): the template reads the request's
+//               chat_template_kwargs - reasoning_effort (none | minimal | low | medium | high | xhigh | max, or
+//               a number in [0, 0.99]; the template's default 0.9), which it writes into a system message:
+//               there is no hard "thinking off", `none` is effort 0; enable_thinking false (top-level or a
+//               kwarg) is effort none unless the request names one. No generation prompt: the model opens its
+//               own blocks, so the parser keys reasoning on the output (server/toolcall_inkling2.h). Content
+//               parts are the template's own. EOS 200006 (<|content_model_end_sampling|>) and the sampling
+//               defaults (generation_config.json) are b70-serve's.
 
 #include <memory>
 #include <string>
@@ -27,15 +35,16 @@
 namespace server {
 
 struct ChatFormat {
-  enum class Kind { Qwen, Kolibri };
+  enum class Kind { Qwen, Kolibri, Inkling };
   Kind kind = Kind::Qwen;
 
-  // config.json's model_type -> the format; anything but "kolibri1" reads as Qwen.
+  // config.json's model_type -> the format; anything but "kolibri1" and "inkling2_loop" reads as Qwen.
   static ChatFormat for_model_type(const std::string& model_type);
   static ChatFormat kolibri() { return ChatFormat{Kind::Kolibri}; }
+  static ChatFormat inkling() { return ChatFormat{Kind::Inkling}; }
   const char* name() const;
   // The request's chat_template_kwargs reach the template beside enable_thinking.
-  bool template_kwargs() const { return kind == Kind::Kolibri; }
+  bool template_kwargs() const { return kind == Kind::Kolibri || kind == Kind::Inkling; }
   // The template reads every message's content as a string (spec 20e: Kolibri-1).
   bool string_content() const { return kind == Kind::Kolibri; }
 };
@@ -46,16 +55,18 @@ struct ChatFormat {
 nlohmann::ordered_json template_messages(const ChatFormat& format, const nlohmann::ordered_json& messages);
 
 // The request's chat_template_kwargs that this format reads, checked before anything runs
-// (a bad value is the client's error, a 400): Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool).
+// (a bad value is the client's error, a 400): Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool);
+// Inkling's reasoning_effort (one of its seven names, a number in [0, 0.99], or null).
 // Throws std::invalid_argument naming the field.
 void check_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs);
 
 // The kwargs this format's template gets for a request - its chat_template_kwargs, and the OpenAI top-level
 // `reasoning_effort` (null: absent) mapped where a format has one. Kolibri-1: the template's own `reasoning_effort` variable (one of its seven efforts, else
-// std::invalid_argument), unless the kwargs name it. Every other format: the kwargs unchanged (reasoning_effort
-// ignored, as before).
+// std::invalid_argument), unless the kwargs name it. Inkling: the same (one of its seven names or a number in [0, 0.99]),
+// and `enable_thinking` false (`thinking`, the request's) is effort none where neither names an effort. Every other
+// format: the kwargs unchanged (reasoning_effort ignored, as before).
 nlohmann::json request_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs,
-                                       const nlohmann::json& reasoning_effort);
+                                       const nlohmann::json& reasoning_effort, bool thinking = true);
 
 // The parser of one chat request's output. `prompt` is the rendered prompt (its ending says
 // whether the output opens with reasoning), `kwargs` the request's chat_template_kwargs,

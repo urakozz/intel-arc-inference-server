@@ -6,6 +6,9 @@
 //   probe_host_copy [--max-gb N]
 // Host RAM is shared with CPU oracle runs: allocations above MemAvailable - 16 GiB
 // are not attempted; the cap is printed. Median of 5 after 2 warm-ups.
+//   probe_host_copy --peer BYTES[,BYTES...]
+// Plan 41g Task 1 (both cards): one card-0 -> card-1 copy of each size, on card 0's compute list and on its copy
+// engine, then card 1's own copy of it into a second buffer (the landing into its scratch), median of 5.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -54,10 +57,48 @@ double gbps(size_t bytes, double ms) { return bytes / (ms * 1e6); }
 
 }  // namespace
 
+int peer(const std::string& list) {
+  std::vector<size_t> sizes;
+  for (size_t at = 0; at < list.size();) {
+    const size_t comma = std::min(list.find(',', at), list.size());
+    sizes.push_back(std::stoull(list.substr(at, comma - at)));
+    at = comma + 1;
+  }
+  if (l0::Context::gpu_count() < 2) {
+    std::printf("--peer needs two cards\n");
+    return 1;
+  }
+  l0::Context card0(0);
+  l0::Context card1(card0, 1);
+  std::printf("# probe_host_copy --peer: card 0 %s -> card 1 %s, peer access %s\n", card0.name().c_str(),
+              card1.name().c_str(), card0.can_access_peer(card1) ? "yes" : "NO");
+  const size_t most = *std::max_element(sizes.begin(), sizes.end());
+  l0::Mem src(card0, l0::MemKind::Device, most), dst(card1, l0::MemKind::Device, most),
+      local(card1, l0::MemKind::Device, most);
+  auto compute = l0::CmdList::immediate_async(card0);
+  auto copy = l0::CmdList::immediate_copy(card0);
+  auto on1 = l0::CmdList::immediate_async(card1);
+  compute.fill(src.ptr(), 0x3f803f81u, most);
+  compute.host_synchronize();
+  std::printf("\n| bytes | compute ms | GB/s | copy engine ms | GB/s | card 1 local ms |\n|---|---|---|---|---|---|\n");
+  for (const size_t bytes : sizes) {
+    const auto time = [&](l0::CmdList& l, l0::Mem& to, const l0::Mem& from) {
+      return median_ms([&] {
+        l.copy(to.ptr(), from.ptr(), bytes);
+        l.host_synchronize();
+      });
+    };
+    const double c = time(compute, dst, src), e = time(copy, dst, src), l = time(on1, local, dst);
+    std::printf("| %zu | %.4f | %.2f | %.4f | %.2f | %.4f |\n", bytes, c, gbps(bytes, c), e, gbps(bytes, e), l);
+  }
+  return 0;
+}
+
 int main(int argc, char** argv) {
   double max_gb = 48;
   for (int i = 1; i < argc; ++i) {
     if (std::string(argv[i]) == "--max-gb" && i + 1 < argc) max_gb = std::atof(argv[++i]);
+    if (std::string(argv[i]) == "--peer" && i + 1 < argc) return peer(argv[i + 1]);
   }
   l0::Context ctx(0);
   l0::CmdList list = l0::CmdList::immediate(ctx);

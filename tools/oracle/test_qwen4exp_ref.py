@@ -784,7 +784,62 @@ def test_fp32_state_dump():
     assert r.returncode == 0 and all(s in r.stdout for s in ("--dtype", "--cycle", "--state-dump"))
 
 
-TESTS = [test_fp32_dequant, test_fp32_state_dump, test_expected_names_tiny, test_real_names, test_hc_chain, test_ple_ids, test_sigmoid_gate, test_v_head_map,
+def test_run_resumes_from_checkpoint():
+    # A run killed after its 2nd prompt chunk and run again writes the very tensors and metadata an uninterrupted run writes, and the
+    # checkpoint is gone afterwards.
+    from argparse import Namespace
+    d = os.path.join(TMP, "resume-tiny")
+    mk.make(d, hidden=32, experts=4, topk=2, indexer_budget=16, ple_base=80,
+            vocab_size=256, eos_token_id=255, bos_token_id=255, hc_lowrank=16,
+            moe_intermediate_size=32, shared_expert_intermediate_size=32,
+            linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=16,
+            linear_value_head_dim=16, num_attention_heads=2, num_key_value_heads=1,
+            head_dim=32, indexer_head_dim=32, indexer_n_heads=2)
+    p = os.path.join(d, "p.ids")
+    open(p, "w").write("3 7 11 255 9")
+
+    def args(out):
+        return Namespace(snapshot=d, layers=4, experts="eager", ple="bf16", prompt=p, out=out, dtype="fp32",
+                         lm_head="bf16", vocab_used=None, cycle=35, state_dump=True, gen=3, max_prompt=100,
+                         chunk=16, act_tail=0, logits_tail=1)
+    whole, killed = os.path.join(d, "whole.safetensors"), os.path.join(d, "killed.safetensors")
+    ref.cmd_run(args(whole))
+    assert not os.path.exists(whole + ".ckpt")
+
+    class Killed(Exception):
+        pass
+    saves, real = [], torch.save
+
+    def dying_save(obj, path):
+        real(obj, path)
+        saves.append(path)
+        if len(saves) == 2:
+            raise Killed
+    torch.save = dying_save
+    try:
+        ref.cmd_run(args(killed))
+        raise AssertionError("the run was not interrupted")
+    except Killed:
+        pass
+    finally:
+        torch.save = real
+    assert os.path.exists(os.path.join(d, "killed.safetensors.ckpt.tmp")) and not os.path.exists(killed)
+    os.replace(os.path.join(d, "killed.safetensors.ckpt.tmp"), killed + ".ckpt")   # what a kill after the rename leaves
+    buf = io.StringIO()
+    from contextlib import redirect_stdout
+    with redirect_stdout(buf):
+        ref.cmd_run(args(killed))
+    assert "Resuming from killed.safetensors.ckpt: 32 of 35 prompt tokens done" in buf.getvalue(), buf.getvalue()
+    assert not os.path.exists(killed + ".ckpt")
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+    a, b = load_file(whole), load_file(killed)
+    assert a.keys() == b.keys() and all(torch.equal(a[k], b[k]) for k in a)
+    with safe_open(whole, framework="pt") as x, safe_open(killed, framework="pt") as y:
+        assert x.metadata() == y.metadata()
+
+
+TESTS = [test_fp32_dequant, test_fp32_state_dump, test_run_resumes_from_checkpoint, test_expected_names_tiny, test_real_names, test_hc_chain, test_ple_ids, test_sigmoid_gate, test_v_head_map,
          test_streamed_equals_hf_bf16, test_streamed_equals_hf_fp32, test_chunked_prefill_equals_hf,
          test_indexer_cache_bitwise, test_indexer_gaps_small_budget, test_layers_truncation, test_route_ties, test_int4_experts, test_fused_experts,
          test_ple_int8, test_trace_equals_run, test_cli_run_and_hfcheck]
