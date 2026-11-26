@@ -8,7 +8,7 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 - Prefill at **2,800 t/s** on one card / **3,467 t/s** on two cards with `tp` (opt-in int8 prefill engine).
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 - **Inkling 2 Mini:** prefill at **4,987 t/s** on one card and **7,194 t/s** on two (`pp`, 16k prompt); prose written at
-  **248 t/s** and code at **194 t/s** on one card, **310 t/s** prose on two cards (`tp`, `--spec dflash`); the full **1,048,576-token**
+  **248 t/s** and code at **194 t/s** on one card, **310 t/s** prose on two cards (`tp`); the full **1,048,576-token**
   context on two cards.
 - **Ornith 1.5 35B-A3B:** prefill at **11,223 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
 
@@ -26,8 +26,8 @@ Each model runs from our own int4 quantisation (AutoRound, group 64, GPTQ format
 - **[Ornith 1.5 35B-A3B](https://huggingface.co/urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ)** - MoE (the
   Qwen3.5-35B-A3B architecture, tuned for code), MTP head. One card.
 - **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)** - looped MoE (24 layers run as 48
-  visits), the release itself (its NVFP4 / MXFP8 experts run exactly), its own DSpark drafter, or the faster
-  [DFlash 2 drafter](https://huggingface.co/incoai/Inkling-2-Mini-DFlash2) when downloaded (picked by itself). One card; two cards
+  visits), the release itself (its NVFP4 / MXFP8 experts run exactly), with the
+  [DFlash 2 drafter](https://huggingface.co/incoai/Inkling-2-Mini-DFlash2) for faster writing. One card; two cards
   `tp` for one faster session, `pp` for the 1,048,576-token context with `--kv-cache int8`.
 
 ## Speed
@@ -62,12 +62,10 @@ Measured on a PCIe 3.0 workstation with DDR4-2133 and P2P. PCIe 5.0 x16, DDR5 RA
 
 | setup | prefill, 4k prompt | code | prose | tool calls |
 |---|---:|---:|---:|---:|
-| one card, the DFlash 2 drafter | 4,780 | 193.5 | 247.6 | 147.2 |
-| one card, its own DSpark drafter | 4,780 | 174.6 | 204.3 | 144.4 |
-| two cards `pp`, the DFlash 2 drafter (`l0-int8` prompt pass) | 5,976 | 182.5 | 243.8 | 145.9 |
-| two cards `tp`, its own DSpark drafter (`l0-int8` prompt pass) | 6,173 | 202.8 | 260.2 | 196.0 |
-| two cards `tp`, the DFlash 2 drafter (`--spec dflash`) | 6,173 | 216.8 | 309.8 | 187.9 |
-| 2 requests, two cards `replica`, the DFlash 2 drafter (total) | - | 351 | 452 | 286 |
+| one card | 4,780 | 193.5 | 247.6 | 147.2 |
+| two cards `pp` | 5,976 | 182.5 | 243.8 | 145.9 |
+| two cards `tp` | 6,173 | 216.8 | 309.8 | 187.9 |
+| 2 requests, two cards `replica` (total) | - | 351 | 452 | 286 |
 
 | prefill (`l0-int8`, int8 cache), t/s | 4k | 16k | 32k | 64k |
 |---|---:|---:|---:|---:|
@@ -147,9 +145,9 @@ hf download urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound   # the DFlash draft
 # Ornith 1.5 (Qwen3.5-35B-A3B architecture, code optimised)
 hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 
-# Inkling 2 Mini (looped MoE, its drafter in the checkpoint), 20.2 GB
+# Inkling 2 Mini (looped MoE), 20.2 GB, and its drafter
 hf download thinkingmachines/Inkling-2-Mini
-hf download incoai/Inkling-2-Mini-DFlash2   # optional, its faster drafter (used when present)
+hf download incoai/Inkling-2-Mini-DFlash2   # its drafter
 ```
 
 Or build it yourself: the [Dockerfile](Dockerfile) (`docker build -t urakozz/intel-arc-inference-server .`), or

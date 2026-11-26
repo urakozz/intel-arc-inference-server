@@ -458,10 +458,9 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   // The DFlash 2 drafter (incoai/Inkling-2-Mini-DFlash2): --draft-model, else the Hugging Face cache's copy. --spec
-  // auto takes it on one card, as replica and under pp; under tp (the drafter whole on each card, a dearer pass than
-  // DSpark's split one) auto keeps DSpark, which serves tool calls faster there - --spec dflash still runs it.
+  // auto takes it in every mode when it is downloaded; DSpark (the checkpoint's own) otherwise.
   std::string dflash_dir;
-  if (f.spec == "dflash" || (f.spec == "auto" && !tp)) {
+  if (f.spec == "dflash" || f.spec == "auto") {
     try {
       dflash_dir = loader::resolve_snapshot(f.draft_model.given ? f.draft_model.value : ci::kDflashRepo);
     } catch (const std::runtime_error& e) {
