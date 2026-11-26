@@ -174,9 +174,13 @@ void Qwen4ExpEngine::prepare_prefill() {
                    (res + D.lend->experts()) / all);
     }
   }
-  pf_lend_ = [ps] {
-    for (auto& D : ps->dev)
-      if (D->lend) D->lend->lend();
+  pf_lend_ = [this, ps] {
+    for (uint32_t i = 0; i < ps->dev.size(); ++i)
+      if (Q4LendState* L = ps->dev[i]->lend.get()) {
+        const bool was = L->state == Q4LendState::State::Lent;
+        L->lend();
+        if (cpu_ && !was && L->state == Q4LendState::State::Lent) cpu_->set_rows(i, L->lent);   // PERF-124 step 4
+      }
   };
   pf_dev_bytes_.assign(devices(), 0);
   pf_bytes_ = 0;
@@ -279,8 +283,12 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
 
   prepare_prefill();
   Qwen4ExpPrefillState& P = *pf_;
-  for (auto& D : P.dev)   // the lent experts' rows back: this prefill overwrites the scratch
-    if (D->lend) D->lend->reclaim();
+  for (uint32_t i = 0; i < P.dev.size(); ++i)   // the lent experts' rows back: this prefill overwrites the scratch
+    if (Q4LendState* L = P.dev[i]->lend.get()) {
+      const bool was = L->state == Q4LendState::State::Lent;
+      L->reclaim();
+      if (cpu_ && was) cpu_->set_rows(i, L->orig);   // PERF-124 step 4: the CPU's copy of the rows
+    }
   const bool eager = attn_ == Q4Attn::Eager;
   const uint32_t ndev = devices();
   Qwen4ExpMtpPrefill mp[kPfDepth];   // the head's pass, a slot each (its Control: the slot's)

@@ -14,8 +14,8 @@
 //                LAYOUT 3 (spec 19 v3d Task 7, the DFlash 2-bit candidate head): 288-byte tiles, a 16-column
 //                tile's g64 group as 16 lanes x 4 words of 16 two-bit codes (value (c - 1.5) x scale; word d holds
 //                k 16 d .. 16 d + 15) then its 16 f16 scales (loader/dflash_repack.h, dflash_candidate_head2)
-//   gemm_sm_i8w  LAYOUT 2: the int8 weights [N/16][K/16][16 k][16 n] + fp32 column scales [N]
-//                (loader/lm_head_int8.h; the int8 lm_head) -
+//   gemm_sm_i8w  LAYOUT 2: the int8 weights [N/16][K/16][16 k][16 n] ([K/16][N/16] under GEMV_KMAJOR) + fp32
+//                column scales [N] (loader/lm_head_int8.h; the int8 lm_head, the DFlash drafter's int8 linears) -
 //                gemv_i8w.cl's (w, scales, x, out); writes out[m N + n], scaled.
 //
 // Compile-time knobs (src/kernels/CMakeLists.txt, from kernels::small_m_tuning - one row per shape):
@@ -31,6 +31,9 @@
 //                Both produce the exact bf16 integer q - 8, so the DPAS inputs - and the output - are
 //                bit-identical; DEQ is a speed knob only
 //   BLK2D        LAYOUT 0: the weights by one 2D block read (gemv's GEMV_BLOCK2D cell)
+//   GEMV_KMAJOR  LAYOUT 2 (PERF-111): the 256-byte [16 k][16 n] tiles ordered [K/16][N/16] instead of
+//                [N/16][K/16] (gemv_i8w.cl's knob of the same name; set at an output head's width while
+//                loader::kInt8HeadKMajor holds) - the same tiles and arithmetic in the same order: bitwise
 //   (256 GRF is the ocloc option -cl-intel-256-GRF-per-thread on the variant's line, not a define)
 //
 // **Property R (spec 28 §2, held by tests/kernels/gemm_sm_test.cc at every built M):** a DPAS output
@@ -59,6 +62,28 @@
 #endif
 #ifndef BLK2D
 #define BLK2D 0
+#endif
+#ifndef GEMV_KMAJOR
+#define GEMV_KMAJOR 0
+#endif
+// GEMV_KMAJOR_B B (with GEMV_KMAJOR, PERF-111's K-blocked form): B consecutive k16 steps of a tile kept together,
+// the B-step blocks in k-major order - tile (k16, nt) at ((k16 / B) x N/16 + nt) x B + k16 % B; 1: plain k-major.
+#ifndef GEMV_KMAJOR_B
+#define GEMV_KMAJOR_B 1
+#endif
+#define I8_AT(k16, nt) ((((size_t)(k16) / GEMV_KMAJOR_B) * (N / 16) + (nt)) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B)
+// I8_AHEAD 1 (LAYOUT 2, PERF-111): the next k-group's four tiles read one iteration ahead, into registers, while
+// this group's DPAS run - the same tiles and arithmetic in the same order: bitwise.
+#ifndef I8_AHEAD
+#define I8_AHEAD 0
+#endif
+#if I8_AHEAD && LAYOUT != 2
+#error "gemm_sm: I8_AHEAD is the int8 form's (LAYOUT 2) only"
+#endif
+#if GEMV_KMAJOR
+#define I8_G(g, d) (w + I8_AT((g) * 4u + (d), n_tile) * 256u)
+#else
+#define I8_G(g, d) (w + ((size_t)n_tile * (K / 16) + (g) * 4u + (d)) * 256u)
 #endif
 #if SPLITK == 0
 #define NSGN 4
@@ -116,6 +141,9 @@
 #endif
 #if DEQ && LAYOUT == 2
 #error "gemm_sm: DEQ is an int4 knob"
+#endif
+#if GEMV_KMAJOR && LAYOUT != 2
+#error "gemm_sm: GEMV_KMAJOR is the int8 form's (LAYOUT 2) only"
 #endif
 
 // Component r of a float8 (r is a compile-time constant once the loops unroll).
@@ -245,6 +273,10 @@ __kernel void gemm_sm(__global const uint* restrict w,
 
   float8 acc[RB];
   for (int rb = 0; rb < RB; ++rb) acc[rb] = (float8)0.0f;
+#if I8_AHEAD
+  char16 wn[4];
+  for (int d = 0; d < 4; ++d) wn[d] = as_char16(intel_sub_group_block_read_uc16(I8_G(gbase, d)));
+#endif
 
   for (uint i = 0; i < G_PER_SG; ++i) {
     const uint g = gbase + i * KSL;
@@ -257,9 +289,19 @@ __kernel void gemm_sm(__global const uint* restrict w,
     }
 #if LAYOUT == 2
     // ---- int8: four 256-byte [16 k][16 n] tiles, k16 steps 4 g .. 4 g + 3 -------------------
+#if GEMV_KMAJOR
+#define I8_TILE(d) (w + I8_AT(g * 4u + (d), n_tile) * 256u)
+#else
     __global const uchar* tile = w + ((size_t)n_tile * (K / 16) + g * 4u) * 256u;
+#define I8_TILE(d) (tile + (d) * 256)
+#endif
     for (int d = 0; d < 4; ++d) {
-      const char16 c = as_char16(intel_sub_group_block_read_uc16(tile + d * 256));
+#if I8_AHEAD
+      const char16 c = wn[d];
+      if (i + 1 < G_PER_SG) wn[d] = as_char16(intel_sub_group_block_read_uc16(I8_G(g + KSL, d)));
+#else
+      const char16 c = as_char16(intel_sub_group_block_read_uc16(I8_TILE(d)));
+#endif
       int8 b;
       b.s0 = (int)(int_bf16_hi(c.s1) | int_bf16_lo(c.s0));
       b.s1 = (int)(int_bf16_hi(c.s3) | int_bf16_lo(c.s2));

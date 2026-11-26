@@ -173,6 +173,11 @@ add_executable(mtp_server_test server/mtp_server_test.cc)
 target_include_directories(mtp_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(mtp_server_test PRIVATE b70_server)
 add_test(NAME mtp_server_test COMMAND mtp_server_test)
+# b70-serve's reconfigure in place (POST /v1/control/reconfigure, cli/serve_reconfigure.h), host only.
+add_executable(reconfigure_server_test server/reconfigure_server_test.cc)
+target_include_directories(reconfigure_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(reconfigure_server_test PRIVATE b70_server)
+add_test(NAME reconfigure_server_test COMMAND reconfigure_server_test)
 
 # Spec 19e (plan 19e Task 2): the server with --spec lookup over a mock engine that verifies
 # external drafts, host only.
@@ -440,6 +445,8 @@ if(B70_MTP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_ORNITH AND B70_Q4EXP)
   target_link_libraries(gemm_sm_test PRIVATE b70_l0)
   b70_target_kernel_dir(gemm_sm_test)
   add_dependencies(gemm_sm_test ${B70_GEMM_SM_KERNELS})
+  get_property(_pi8h GLOBAL PROPERTY B70_PI8H_KERNELS)   # PERF-111: the head rows' n-major twins
+  add_dependencies(gemm_sm_test ${_pi8h})
   add_test(NAME gemm_sm_test COMMAND gemm_sm_test)
   set_tests_properties(gemm_sm_test PROPERTIES TIMEOUT 1800)
 endif()
@@ -585,7 +592,8 @@ add_executable(gemv_i8w_test kernels/gemv_i8w_test.cc)
 target_include_directories(gemv_i8w_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gemv_i8w_test PRIVATE b70_l0)
 b70_target_kernel_dir(gemv_i8w_test)
-add_dependencies(gemv_i8w_test kernel_gemv_i8w_M1_K5120_N248320 kernel_gemv_i8w_M4_K5120_N248320)
+add_dependencies(gemv_i8w_test kernel_gemv_i8w_M1_K5120_N248320 kernel_gemv_i8w_M4_K5120_N248320
+                 kernel_pi8h_gemv_i8w_M1_K5120_N248320_NM kernel_pi8h_gemv_i8w_M4_K5120_N248320_NM)   # PERF-111
 add_test(NAME gemv_i8w_test COMMAND gemv_i8w_test)
 set_tests_properties(gemv_i8w_test PROPERTIES TIMEOUT 900)
 
@@ -981,7 +989,22 @@ function(b70_hf_snapshot var repo pinned suffix type doc)
 endfunction()
 b70_hf_snapshot(B70_TEST_SNAPSHOT models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
   84575a18f209992ef96d819b31f924b489e3d55d "" PATH "Checkpoint snapshot directory the checkpoint-labelled tests load")
-set(B70_TEST_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-primary"
+# The CPU reference sets every golden / judged test reads: $B70_DATA/oracle-out/<model>/<set> (tools/oracle/README.md).
+# Without B70_DATA the root does not exist and those tests skip (77). A build tree configured before the sets moved
+# there caches their old in-tree paths (<source>/oracle-out-<name>): those entries are dropped, so the defaults below
+# apply.
+if(DEFINED ENV{B70_DATA})
+  set(B70_ORACLE "$ENV{B70_DATA}/oracle-out" CACHE PATH "The CPU reference sets' root" FORCE)
+elseif(NOT DEFINED CACHE{B70_ORACLE})
+  set(B70_ORACLE "${CMAKE_BINARY_DIR}/no-reference-data" CACHE PATH "The CPU reference sets' root (B70_DATA unset)")
+endif()
+get_cmake_property(_b70_cache CACHE_VARIABLES)
+foreach(v IN LISTS _b70_cache)
+  if("$CACHE{${v}}" MATCHES "^${CMAKE_SOURCE_DIR}/oracle-out-")
+    unset(${v} CACHE)
+  endif()
+endforeach()
+set(B70_TEST_ORACLE_DIR "${B70_ORACLE}/qwen38/golden"
   CACHE PATH "The CPU-oracle golden set dumped from B70_TEST_SNAPSHOT (tools/oracle/golden.sh OUT_DIR)")
 
 # Needs the real 19 GB checkpoint and a B70: label `checkpoint` so it can be
@@ -1306,7 +1329,7 @@ set(B70_RTN_SNAPSHOT "$ENV{HOME}/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64"
 
 if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
   add_test(NAME prefill_gate_rtn_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_ORACLE}/qwen38/golden-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
     ${B70_RTN_SNAPSHOT})
   set_tests_properties(prefill_gate_rtn_test PROPERTIES
     LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
@@ -1658,8 +1681,8 @@ if(B70_MTP)
   endforeach()
   # M1: the head's draft logits against tools/oracle/mtp_ref.py --dump (SKIP without it).
   add_test(NAME mtp_head_test COMMAND mtp_head_test ${B70_TEST_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${CMAKE_SOURCE_DIR}/oracle-out-spec8b/m1
-    ${CMAKE_SOURCE_DIR}/oracle-out-spec8b)
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_ORACLE}/qwen38/mtp-head/m1
+    ${B70_ORACLE}/qwen38/mtp-head)
   set_tests_properties(mtp_head_test PROPERTIES LABELS "checkpoint;golden;mtp"
     SKIP_RETURN_CODE 77 TIMEOUT 1800)
   # Task 3 / Review Focus 2: the head's KV after prefill against M = 1 fills.
@@ -1672,30 +1695,30 @@ if(B70_MTP)
   # M2 + Review Focus 1-5: verify at M = k + 1, per-row GDN slots, commit, snapshots, replay.
   # Spec 28 N4 / N6 (tests/server/spec_judge.h): Qwen3.8's speculative output graded by the f32 judges of its forced
   # contexts - tools/oracle/qwen_forced.py forced-qwen makes them on the CPU into the data tree's
-  # oracle-out-qwen-f32{,-i8head}-forced (data.sh links them here); the bf16 head's for the checkpoint-head tests, the
+  # $B70_DATA/oracle-out/qwen38/f32{,-i8head}-forced; the bf16 head's for the checkpoint-head tests, the
   # int8 head's for the tests that load LmHeadForm::Int8. A divergence whose judge is not there yet AWAITS it: the
   # test exits 77 (SKIP) when nothing else failed.
-  set(B70_QWEN_FORCED_JUDGE "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-forced" CACHE PATH
+  set(B70_QWEN_FORCED_JUDGE "${B70_ORACLE}/qwen38/f32-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts, bf16 head (spec_judge.h's B70_FORCED_JUDGE)")
-  set(B70_QWEN_FORCED_JUDGE_I8HEAD "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-forced" CACHE PATH
+  set(B70_QWEN_FORCED_JUDGE_I8HEAD "${B70_ORACLE}/qwen38/f32-i8head-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts, the engine's int8 head")
   # The judge by prefill form: the tests that prefill with l0-int8 (every mtp_gpu_test
   # registration) are judged by references whose prompt pass applies the same int8 rounding - f32_refs.sh
   # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form). PERF-113: int8
   # on every prompt linear, so a new dir and variable name - the old ones hold the MLP-only form's references, and a
   # build tree's cache would keep the old path.
-  set(B70_QWEN_FORCED_JUDGE_PFI8ALL "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8all-forced" CACHE PATH
+  set(B70_QWEN_FORCED_JUDGE_PFI8ALL "${B70_ORACLE}/qwen38/f32-pfi8all-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts with the l0-int8 prompt pass (the mtp_gpu_test registrations)")
   # The judge by KV form: the int8 KV cache's twins (mtp_gpu_kv8_test, the DFlash *_kv8_test) are judged by references
   # whose attention reads K / V through the same int8 rounding - f32_refs.sh forced-qwen-kv8 / forced-qwen-pfi8-kv8
   # (qwen_forced.py --kv8: int8_sim.kv8_fq, bitwise kv8.h's codes, kv8_sim_test).
-  set(B70_QWEN_FORCED_JUDGE_PFI8ALL_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8all-kv8-forced" CACHE PATH
+  set(B70_QWEN_FORCED_JUDGE_PFI8ALL_KV8 "${B70_ORACLE}/qwen38/f32-pfi8all-kv8-forced" CACHE PATH
     "Qwen3.8's f32 judges with the l0-int8 prompt pass and the int8 KV cache (mtp_gpu_kv8_test)")
-  set(B70_QWEN_FORCED_JUDGE_I8HEAD_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-kv8-forced" CACHE PATH
+  set(B70_QWEN_FORCED_JUDGE_I8HEAD_KV8 "${B70_ORACLE}/qwen38/f32-i8head-kv8-forced" CACHE PATH
     "Qwen3.8's f32 judges with the int8 head and the int8 KV cache (the DFlash *_kv8_test)")
   # The bf16-unstable rule (2026-11-04, spec_judge.h): standard transformers bf16 references, top-k only
   # (tools/oracle/qwen_bf16_top.py: <key>.bf16top.safetensors, both head forms in one dir), read as B70_FORCED_BF16.
-  set(B70_QWEN_FORCED_BF16TOP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-bf16top-forced" CACHE PATH
+  set(B70_QWEN_FORCED_BF16TOP "${B70_ORACLE}/qwen38/bf16top-forced" CACHE PATH
     "Qwen3.8's standard-bf16 top-k references of the forced contexts (spec_judge.h's bf16-unstable rule)")
   add_test(NAME mtp_verify_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
@@ -1849,7 +1872,7 @@ set_tests_properties(${_b70_plan_box_tests} PROPERTIES LABELS checkpoint
 # urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ (spec 15 decision 1, settled in §13);
 # B70_ORNITH_SNAPSHOT names it (resolved in the HF cache). Until it is on the machine
 # ornith_decode_test SKIPs (77), and the golden registrations SKIP on the absent
-# `oracle-out-ornith` (15a's golden set, plan 15a) before they load anything. Its
+# `$B70_DATA/oracle-out/ornith/golden` (15a's golden set, plan 15a) before they load anything. Its
 # tokenizer.json gives the committed tests/golden/prompts ids (checked, spec 15 §13), so
 # B70_ORNITH_PROMPTS_DIR stays the committed directory.
 #   R3 (decode): golden_gate_test, descriptor-driven since 15c (the tap is the layer
@@ -1858,17 +1881,17 @@ set_tests_properties(${_b70_plan_box_tests} PROPERTIES LABELS checkpoint
 if(B70_ORNITH)
   set(B70_ORNITH_SNAPSHOT "urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ"
     CACHE STRING "Ornith int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
-  set(B70_ORNITH_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith"
+  set(B70_ORNITH_ORACLE_DIR "${B70_ORACLE}/ornith/golden"
     CACHE PATH "The CPU-oracle golden set of Ornith (spec 15a), with router_logits.L* for R2")
   # the token gates' judge (tests/golden/golden_common.h, `--judge=`) -
   # the f32 teacher-forced reference, tools/oracle/ornith_ref.py <data tree> ornith.
-  set(B70_ORNITH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32"
+  set(B70_ORNITH_F32_DIR "${B70_ORACLE}/ornith/f32"
     CACHE PATH "Ornith's f32 teacher-forced reference (the golden gates' judge)")
   # ... and its quantisation-aware twins (tools/oracle/int8_sim.py; f32_oracle.sh ornith-i8head / ornith-pfi8):
   # the int8 head, and the prompt forward through spec 5's l0-int8 linears.
-  set(B70_ORNITH_F32_I8HEAD_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head"
+  set(B70_ORNITH_F32_I8HEAD_DIR "${B70_ORACLE}/ornith/f32-i8head"
     CACHE PATH "Ornith's f32 reference through the int8 head (the _i8head gate's judge)")
-  set(B70_ORNITH_F32_PFI8_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-pfi8"
+  set(B70_ORNITH_F32_PFI8_DIR "${B70_ORACLE}/ornith/f32-pfi8"
     CACHE PATH "Ornith's f32 reference with the l0-int8 prefill linears (the l0-int8 prefill gates' judge)")
   set(B70_ORNITH_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/tests/golden/prompts"
     CACHE PATH "Ornith's prompt ids (the committed ones: the int4 checkpoint's tokenizer gives them)")
@@ -2175,12 +2198,12 @@ endif()
 # Written blind on the Mac (the validation queue row 13 is the
 # order to run these in). The host reference test runs everywhere; the rest need a B70, and
 # the checkpoint ones SKIP (77) until the Ornith int4 checkpoint (15a) and its golden set
-# `oracle-out-ornith` are on the machine, as 15c's do.
+# `$B70_DATA/oracle-out/ornith/golden` are on the machine, as 15c's do.
 #   the reference itself: pf_moe_ref_test (host) - the sort's invariants and tile bound,
 #       row independence, the combine == decode's, the whole chunk against decode's chain;
 #   the kernels: pf_moe_test (a B70, no checkpoint) - sort / gathers / combine exact,
 #       grouped == dense GEMMs bitwise, row independence and replay on the card;
-#   R3 (prefill): prefill_gate_test on oracle-out-ornith, l0 and l0-int8, one chunk and
+#   R3 (prefill): prefill_gate_test on $B70_DATA/oracle-out/ornith/golden, l0 and l0-int8, one chunk and
 #       chunks of 16;
 #   continuation: prefill_split_test on Ornith (splits at multiples of 64 bitwise; the other
 #       bars are Qwen3.8's, PROVISIONAL here until the test machine measures Ornith's);
@@ -2301,7 +2324,7 @@ if(B70_ORNITH)
     # the split runs judged by the f32 reference of long32k[0, 2600), no further from it
     # than the bf16 reference (tools/oracle/qwen_forced.py split; absent: the fixed bars).
     set_tests_properties(prefill_split_ornith_${b}_test PROPERTIES ENVIRONMENT
-      "B70_SPLIT_REFS=${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-f32.golden.safetensors,${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-bf16.golden.safetensors")
+      "B70_SPLIT_REFS=${B70_ORACLE}/ornith/split/long32k-2600-f32.golden.safetensors,${B70_ORACLE}/ornith/split/long32k-2600-bf16.golden.safetensors")
     # PERF-64: the prompt pass over the int8 KV cache, by the same f32 judge; cjk row 15 at chunk 0 accepted by the
     # owner 2026-11-22 for the engine's 99737 (f32 97663 by 0.299 logit, 3.02 ulp - the row the c16 list accepts).
     if(b STREQUAL "l0")
@@ -2447,7 +2470,7 @@ if(B70_ORNITH AND B70_MTP)
   # On the card with the checkpoint (SKIP 77 without it): the lists, M2 bitwise rows
   # (logits, GDN slots, every layer's routes), M3 greedy --spec mtp == --spec off against a
   # head-less engine, the head's route row; both lm_head forms. And M1 - the head's draft
-  # logits against tools/oracle/mtp_ref.py's dump on Ornith (oracle-out-ornith-mtp, spec
+  # logits against tools/oracle/mtp_ref.py's dump on Ornith ($B70_DATA/oracle-out/ornith/mtp-head, spec
   # 15a's; SKIP without it) - through spec 8's own mtp_head_test.
   if(TARGET mtp_head_test)
     get_property(_o15e_k DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
@@ -2463,34 +2486,34 @@ if(B70_ORNITH AND B70_MTP)
     add_test(NAME ornith_mtp_bf16head_test COMMAND ornith_mtp_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR} bf16)
     add_test(NAME mtp_head_ornith_test COMMAND mtp_head_test ${B70_ORNITH_SNAPSHOT}
-      ${B70_ORNITH_PROMPTS_DIR} ${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp/m1
-      ${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp)
+      ${B70_ORNITH_PROMPTS_DIR} ${B70_ORACLE}/ornith/mtp-head/m1
+      ${B70_ORACLE}/ornith/mtp-head)
     set_tests_properties(ornith_mtp_test ornith_mtp_bf16head_test mtp_head_ornith_test PROPERTIES
       LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
     # M1 judged by the f32 reference of the same rows (tools/oracle/qwen_forced.py
     # ornith-mtp), the engine missing no more rows than the bf16 reference.
     set_tests_properties(mtp_head_ornith_test PROPERTIES
-      ENVIRONMENT "B70_MTP_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp-f32/m1")
+      ENVIRONMENT "B70_MTP_JUDGE=${B70_ORACLE}/ornith/mtp-head-f32/m1")
     # r16.mtp's f32 judges (spec 28 N6): the forced contexts of each head form (B70_DUMP_FORCED ->
     # oracle-forced-dumps/ornith-mtp, f32_refs.sh forced ornith ... [-i8head --lm-head int8]).
     set_tests_properties(ornith_mtp_test PROPERTIES
-      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced")
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_ORACLE}/ornith/f32-i8head-forced")
     set_tests_properties(ornith_mtp_bf16head_test PROPERTIES
-      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-forced")
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_ORACLE}/ornith/f32-forced")
     # PERF-64: the MTP verify and draft lists over the int8 KV cache, by the int8 head's forced judges.
     add_test(NAME ornith_mtp_kv8_test COMMAND ornith_mtp_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR} int8)
     set_tests_properties(ornith_mtp_kv8_test PROPERTIES LABELS "checkpoint;mtp;ornith;kv8" SKIP_RETURN_CODE 77
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
-      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced;B70_KV_CACHE=int8")
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_ORACLE}/ornith/f32-i8head-forced;B70_KV_CACHE=int8")
     # Plan 31 Task 12: Ornith's sequence slots - pool_test's cases on Ornith (pool_test.cc), with S0 against the
     # one-request engine; S4 judged by the int8 head's f32 references of the forced contexts.
     if(TARGET pool_test)
       add_dependencies(pool_test ${_o15e_k} ${_o15e_pf})
       add_test(NAME ornith_pool_test COMMAND pool_test ${B70_ORNITH_SNAPSHOT} --one-slot)
       set_tests_properties(ornith_pool_test PROPERTIES LABELS "checkpoint;mtp;pool;ornith" SKIP_RETURN_CODE 77
-        ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced"
+        ENVIRONMENT "B70_FORCED_JUDGE=${B70_ORACLE}/ornith/f32-i8head-forced"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
       # Plan 31 Task 14: the KV page pool's cases on Ornith (pool_test.cc's --pool: P1-P5).
       add_test(NAME ornith_pool_pages_test COMMAND pool_test ${B70_ORNITH_SNAPSHOT} --pool)
@@ -2501,7 +2524,7 @@ if(B70_ORNITH AND B70_MTP)
       add_test(NAME ornith_pool_pages_kv8_test COMMAND pool_test ${B70_ORNITH_SNAPSHOT} --pool)
       set_tests_properties(ornith_pool_kv8_test ornith_pool_pages_kv8_test PROPERTIES
         LABELS "checkpoint;mtp;pool;ornith;kv8" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600
-        ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced;B70_KV_CACHE=int8")
+        ENVIRONMENT "B70_FORCED_JUDGE=${B70_ORACLE}/ornith/f32-i8head-forced;B70_KV_CACHE=int8")
     endif()
   endif()
   # PERF-56: mtp_verify_test's W16 / W32 / W64 cases on Ornith one card - its int8 head, its int8-head forced judges
@@ -2509,7 +2532,7 @@ if(B70_ORNITH AND B70_MTP)
   if(TARGET mtp_verify_test AND B70_VERIFY_M8)
     add_test(NAME mtp_verify_wide_ornith_test COMMAND mtp_verify_test ${B70_ORNITH_SNAPSHOT} 16384 rule wide)
     set_tests_properties(mtp_verify_wide_ornith_test PROPERTIES LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77
-      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced"
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_ORACLE}/ornith/f32-i8head-forced"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
     add_test(NAME mtp_verify_deep_ornith_test COMMAND mtp_verify_test ${B70_ORNITH_SNAPSHOT} 16384 rule deep)
     set_tests_properties(mtp_verify_deep_ornith_test PROPERTIES LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77
@@ -2756,7 +2779,7 @@ target_link_libraries(tp_prefill_test PRIVATE b70_prefill_host b70_runtime b70_l
 add_dependencies(tp_prefill_test ${B70_PREFILL_KERNELS} ${B70_TP_KERNELS} ${B70_TP_PREFILL_KERNELS})
 # A divergence that is not a near-tie goes to the int8 head's f32 judge of its context (forced_judge.h; the judges:
 # tools/oracle/qwen_forced.py forced-qwen with QWEN_KEYS_RE='^tp_prefill_'), and awaits it as SKIP (77).
-set(_tp_pf_judge "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-forced")
+set(_tp_pf_judge "${B70_ORACLE}/qwen38/f32-i8head-forced")
 add_test(NAME tp_prefill_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(tp_prefill_test PROPERTIES
   LABELS "checkpoint;tp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
@@ -3015,7 +3038,7 @@ foreach(t kolibri1_repack_test kolibri1_rope_test)
   set_tests_properties(${t} PROPERTIES LABELS kolibri)
 endforeach()
 set(B70_KOLIBRI_SNAPSHOT "urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ" CACHE STRING "Kolibri-1 int4 checkpoint (spec 20b)")
-set(B70_KOLIBRI_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-synth" CACHE PATH
+set(B70_KOLIBRI_SYNTH_DIR "${B70_ORACLE}/kolibri/synth" CACHE PATH
   "Task 1's synthetic checkpoints and golden sets (tools/oracle/kolibri_ref.py synth)")
 add_executable(kolibri1_load_checkpoint_test loader/kolibri1_load_checkpoint_test.cc)
 target_include_directories(kolibri1_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3074,14 +3097,14 @@ set_tests_properties(kolibri_plan_test PROPERTIES LABELS kolibri)
 # eager, and the int8 head; the real checkpoint truncated to 30 layers on one card (kolibri_partial_test,
 # development mode; needs spec 20b). SKIP 77 without the data (tools/oracle/kolibri_ref.py).
 if(B70_KOLIBRI)
-  set(B70_KOLIBRI_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri"
+  set(B70_KOLIBRI_ORACLE_DIR "${B70_ORACLE}/kolibri/golden"
     CACHE PATH "The real checkpoint's golden set (kolibri_oracle.sh real): <prompt>.ids + .golden.safetensors")
   # Kolibri's golden gates judged by the f32 reference teacher-forced on each
   # golden's tokens (kolibri_oracle.sh real-f32 / synth-f32; kolibri_golden_test.cc / kolibri_partial_test.cc
   # `--judge=`): the engine no further from f32 than the bf16 golden.
-  set(B70_KOLIBRI_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-f32"
+  set(B70_KOLIBRI_F32_DIR "${B70_ORACLE}/kolibri/f32"
     CACHE PATH "The real checkpoint's f32 judge (kolibri_oracle.sh real-f32)")
-  set(B70_KOLIBRI_SYNTH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-synth-f32"
+  set(B70_KOLIBRI_SYNTH_F32_DIR "${B70_ORACLE}/kolibri/synth-f32"
     CACHE PATH "The synthetic arms' f32 judges, <arm>/ (kolibri_oracle.sh synth-f32)")
   foreach(t kolibri_decode_test kolibri_golden_test kolibri_partial_test)
     if(t STREQUAL "kolibri_decode_test")
@@ -3398,7 +3421,7 @@ set_tests_properties(qwen4exp_plan_test PROPERTIES LABELS qwen4exp)
 # Task 6: the loader on the card - the synthetic checkpoints (both forms, with the MTP head) and Intel's
 # checkpoint at 18 layers (one card's fit with its bf16 dense layers, development mode); each with its PLE int8
 # file beside it (<snapshot>-ple-int8/). SKIP 77 without the data.
-set(B70_Q4EXP_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-synth" CACHE PATH
+set(B70_Q4EXP_SYNTH_DIR "${B70_ORACLE}/flash-next/synth" CACHE PATH
   "Spec 21-QFN-v1b's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (validation: r31.synth)")
 set(B70_Q4EXP_INTEL_SNAPSHOT "Intel/Qwen3.8-Flash-Next-W4A16-AutoRound" CACHE STRING
   "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint (181 GB; its PLE file: r31.ple_convert)")
@@ -3487,7 +3510,7 @@ if(B70_Q4EXP)
   # q4exp_4k); F3 (tokens tie-aware, routing, gate S, PLE ids; free, int8 head, eager, injected) on both synthetic
   # golden sets (qwen4exp_oracle.sh synth); the development mode on Intel's checkpoint at --layers 18 against 21-QFN-v1a's
   # full and truncated sets. SKIP 77 without the data.
-  set(B70_Q4EXP_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp"
+  set(B70_Q4EXP_ORACLE_DIR "${B70_ORACLE}/flash-next/golden"
     CACHE PATH "21-QFN-v1a's golden sets on Intel's checkpoint (qwen4exp_oracle.sh intel): <prompt>.ids + .golden.safetensors")
   foreach(t qwen4exp_decode_test qwen4exp_decode_ref_probe qwen4exp_golden_test qwen4exp_partial_test)
     if(t STREQUAL "qwen4exp_decode_ref_probe")
@@ -3670,7 +3693,7 @@ if(B70_Q4EXP)
   foreach(n 18 37)
     set(_q4judge${n} "")
     # Relative counts require both complete routing audits; legacy single-reference dumps lack them.
-    set(_q4ref "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-f32-aligned-L${n}/q4exp_4k.state.safetensors")
+    set(_q4ref "${B70_ORACLE}/flash-next/f32-aligned-L${n}/q4exp_4k.state.safetensors")
     if(EXISTS "${_q4ref}")
       set(_q4judge${n} "judge:${_q4ref}")
     endif()
@@ -3975,7 +3998,7 @@ if(B70_Q4EXP AND B70_MTP)
     ${CMAKE_SOURCE_DIR}/tests/runtime ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(qwen4exp_mtp_test PRIVATE b70_qwen4exp_prefill b70_l0)
   add_dependencies(qwen4exp_mtp_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
-  set(B70_Q4EXP_MTP_FIXTURE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-mtp" CACHE PATH
+  set(B70_Q4EXP_MTP_FIXTURE_DIR "${B70_ORACLE}/flash-next/mtp-fixture" CACHE PATH
     "tools/oracle/qwen4exp_mtp_fixture.py's M1 data: <dir>/<ours|intel>/mtp_{single,per_stream}.safetensors (validation: r34.fixture)")
   set(_q4m ${B70_Q4EXP_MTP_FIXTURE_DIR})
   set(_q4m_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
@@ -4005,9 +4028,11 @@ if(B70_Q4EXP AND B70_MTP)
   add_test(NAME qwen4exp_tier_synth_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} 1)
   add_test(NAME qwen4exp_tier_synth_pp_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} pp2)
   add_test(NAME qwen4exp_tier_check_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} check)
+  # PERF-124: the host-memory experts on the CPU (--host-experts cpu: every one on the CPU), pp2, bitwise the direct run
+  add_test(NAME qwen4exp_tier_synth_pp_cpu_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} pp2 cpu)
   set_tests_properties(qwen4exp_tier_synth_test qwen4exp_tier_check_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  set_tests_properties(qwen4exp_tier_synth_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
+  set_tests_properties(qwen4exp_tier_synth_pp_test qwen4exp_tier_synth_pp_cpu_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77
     TIMEOUT 3600)
   # Open-work item 48: the union-read MoE (q4_moe_union.cl) bitwise the per-row q4_moe at M = 2..4, one card's I 640
   # (_SH4 / _SHB, direct / table with host-memory experts) and tp's I 320 halves; the counting builds (each chosen
@@ -4062,6 +4087,21 @@ if(B70_Q4EXP AND B70_MTP)
         TIMEOUT 3600)
     endforeach()
     set_tests_properties(qwen4exp_tp_mtp_mtp_test PROPERTIES DEPENDS qwen4exp_tp_mtp_plain_test)
+    # PERF-124 under tp (qwen4exp_tier_test tp2, the ours synthetic): each card's half experts in host memory read over
+    # PCIe, then (cpu) computed on the CPU; plain and with the head, bitwise tp's all-resident run, the ids pp2's.
+    set(_q4tp_cpu)
+    foreach(R 0 1)
+      list(APPEND _q4tp_cpu kernel_q4_moe_M1_E512_T10_D2560_I320_SH4_TBL_TP_R${R}_CPU)
+      foreach(MM 2 3 4)
+        list(APPEND _q4tp_cpu kernel_q4_moe_M${MM}_E512_T10_D2560_I320_SH4_TBL_TP_R${R}_U_CPU)
+      endforeach()
+    endforeach()
+    add_dependencies(qwen4exp_tier_test ${B70_Q4EXP_TP_MTP_KERNELS} ${B70_Q4EXP_TP_KERNELS} ${_q4tp_cpu})
+    add_test(NAME qwen4exp_tier_synth_tp_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids} tp2)
+    add_test(NAME qwen4exp_tier_synth_tp_cpu_test COMMAND qwen4exp_tier_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m_ids}
+      tp2 cpu)
+    set_tests_properties(qwen4exp_tier_synth_tp_test qwen4exp_tier_synth_tp_cpu_test PROPERTIES
+      LABELS "checkpoint;qwen4exp;tp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   endif()
 endif()
 # Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21-QFN-v1c's cli_reject_qwen4exp_serve is gone). The
@@ -4230,6 +4270,12 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   b70_target_kernel_dir(dflash_head_kernels_test)
   add_dependencies(dflash_head_kernels_test kernel_df_candidate_R7_N248320_U248077_K64
                    kernel_df_rerank_R7_K5120_U248077_C64_Q4)
+  # PERF-111: the rerank in today's n-major order, test-only twins - its output must be the production build's
+  foreach(CC 64 80)
+    add_ocloc_kernel(df_rerank_R7_K5120_U248077_C${CC}_Q4_NM SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/dflash/df_rerank.cl
+                     DEFINES K=5120 USED=248077 C=${CC} N=248320 GEMV_KMAJOR=0)
+    add_dependencies(dflash_head_kernels_test kernel_df_rerank_R7_K5120_U248077_C${CC}_Q4_NM)
+  endforeach()
   add_test(NAME dflash_head_kernels_test COMMAND dflash_head_kernels_test)
   set_tests_properties(dflash_head_kernels_test PROPERTIES LABELS dflash TIMEOUT 900)
   add_test(NAME dflash_kernels_test COMMAND dflash_kernels_test)
@@ -4644,11 +4690,63 @@ foreach(fmt NVFP4 MXFP8)
 endforeach()
 add_test(NAME expert_fp_gpu_test COMMAND expert_fp_gpu_test)
 
+add_executable(inkling2_pf_moe_test kernels/inkling2_pf_moe_test.cc)
+target_include_directories(inkling2_pf_moe_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_pf_moe_test PRIVATE b70_inkling2_loader b70_l0)
+b70_target_kernel_dir(inkling2_pf_moe_test)
+add_dependencies(inkling2_pf_moe_test kernel_kol_route_E128_T8_N128_L128_RENORM
+                 kernel_pf_moe_sort_mw_E128_T8_INK kernel_kol_pf_moe_E128_T8_D2304_I1152_INK)
+foreach(fmt NVFP4 MXFP8)
+  add_dependencies(inkling2_pf_moe_test kernel_pf_moe_q4gemm_K2304_N2304_F32_INK_${fmt}
+                   kernel_pf_moe_q4gemm_K1152_N2304_F32_INK_${fmt})
+endforeach()
+add_test(NAME inkling2_pf_moe_test COMMAND inkling2_pf_moe_test)
+
+add_executable(inkling2_pf_attn_test kernels/inkling2_pf_attn_test.cc)
+target_include_directories(inkling2_pf_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_pf_attn_test PRIVATE b70_l0)
+b70_target_kernel_dir(inkling2_pf_attn_test)
+add_dependencies(inkling2_pf_attn_test kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_W1024_R4096
+                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F kernel_ink_prep_Q24KV8_D128_REL16_PREFILL
+                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_W1024_R4096_PAIR
+                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_PAIR)
+add_test(NAME inkling2_pf_attn_test COMMAND inkling2_pf_attn_test)
+
+# PERF-102 (plan 41d): the int8 cache's writer bitwise kv8.h at head_dim 128, its decode and prompt readers against a
+# double twin.
+add_executable(inkling2_kv8_test kernels/inkling2_kv8_test.cc)
+target_include_directories(inkling2_kv8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_kv8_test PRIVATE b70_l0)
+b70_target_kernel_dir(inkling2_kv8_test)
+add_dependencies(inkling2_kv8_test kernel_ink_prep_Q24KV8_D128_REL16_FUSED kernel_ink_prep_Q24KV8_D128_REL16_FUSED_KV8
+                 kernel_kol_attn_M1_T32_Q24KV8_REL16E1024_SINK_GATE_F_KV8
+                 kernel_kol_attn_M8_T32_Q24KV8_REL16E1024_SINK_GATE_F_KV8
+                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8
+                 kernel_kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_F_KV8_PAIR)
+add_test(NAME inkling2_kv8_test COMMAND inkling2_kv8_test)
+
+add_executable(inkling2_chunks_test runtime/inkling2_chunks_test.cc)
+target_include_directories(inkling2_chunks_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_chunks_test PRIVATE b70_inkling2_runtime)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(inkling2_chunks_test kernel_${name})
+endforeach()
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_chunks_test COMMAND inkling2_chunks_test "${B70_INKLING_SNAPSHOT}")
+endif()
+
 add_executable(inkling2_host_test loader/inkling2_host_test.cc)
 target_include_directories(inkling2_host_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(inkling2_host_test PRIVATE b70_inkling2_plan)
 if(B70_INKLING_SNAPSHOT)
   add_test(NAME inkling2_host_test COMMAND inkling2_host_test "${B70_INKLING_SNAPSHOT}")
+endif()
+
+add_executable(inkling2_prefill_plan_test runtime/inkling2_prefill_plan_test.cc)
+target_include_directories(inkling2_prefill_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_prefill_plan_test PRIVATE b70_inkling2_plan)
+if(B70_INKLING_SNAPSHOT)
+  add_test(NAME inkling2_prefill_plan_test COMMAND inkling2_prefill_plan_test "${B70_INKLING_SNAPSHOT}")
 endif()
 
 add_executable(inkling2_variant_names_test kernels/inkling2_variant_names_test.cc)
@@ -4692,3 +4790,52 @@ if(B70_INKLING_SNAPSHOT AND B70_INKLING_GOLDEN AND B70_INKLING_PROMPT)
   add_test(NAME inkling2_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
            "${B70_INKLING_PROMPT}" "${B70_INKLING_GOLDEN}" draft)
 endif()
+
+add_executable(inkling2_prefill_test golden/inkling2_prefill_test.cc)
+target_include_directories(inkling2_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(inkling2_prefill_test PRIVATE b70_inkling2_runtime)
+foreach(name IN LISTS B70_INKLING_KERNELS B70_INKLING_PREFILL_KERNELS)
+  add_dependencies(inkling2_prefill_test kernel_${name})
+endforeach()
+if(B70_INKLING_SNAPSHOT AND B70_INKLING_GOLDEN)
+  add_test(NAME inkling2_prefill_prose_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_GOLDEN}")
+endif()
+# Plan 41d's judge sets (tools/oracle/inkling_refs.sh; skipped, 77, until they are made): the golden prompts with the
+# bf16 cache and every set with `--kv-cache int8` against its int8-aware references.
+if(B70_INKLING_SNAPSHOT)
+  set(_ink "${B70_ORACLE}/inkling")
+  foreach(p code chat agentic)
+    add_test(NAME inkling2_prefill_${p}_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
+             "${_ink}/golden/${p}.fp32.golden.safetensors" "${_ink}/golden/${p}.bf16.golden.safetensors")
+    add_test(NAME inkling2_prefill_${p}_kv8_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
+             "${_ink}/golden/${p}.fp32-kv8.golden.safetensors" "${_ink}/golden/${p}.bf16-kv8.golden.safetensors" kv8)
+    set_tests_properties(inkling2_prefill_${p}_test inkling2_prefill_${p}_kv8_test PROPERTIES SKIP_RETURN_CODE 77)
+  endforeach()
+  foreach(n 4096 32768)
+    add_test(NAME inkling2_prefill_prose${n}_kv8_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
+             "${_ink}/prose/prose-${n}.fp32-kv8.golden.safetensors" "${_ink}/prose/prose-${n}.bf16-kv8.golden.safetensors"
+             kv8)
+    set_tests_properties(inkling2_prefill_prose${n}_kv8_test PROPERTIES SKIP_RETURN_CODE 77)
+  endforeach()
+endif()
+foreach(size 4K 32K)
+  set(B70_INKLING_PREFILL_${size} "" CACHE FILEPATH "Inkling ${size} FP32 prompt golden")
+  set(B70_INKLING_PREFILL_${size}_BF16 "" CACHE FILEPATH "Inkling ${size} BF16 prompt golden twin")
+  if(B70_INKLING_SNAPSHOT AND B70_INKLING_PREFILL_${size} AND B70_INKLING_PREFILL_${size}_BF16)
+    add_test(NAME inkling2_prefill_${size}_test COMMAND inkling2_prefill_test "${B70_INKLING_SNAPSHOT}"
+             "${B70_INKLING_PREFILL_${size}}" "${B70_INKLING_PREFILL_${size}_BF16}")
+  endif()
+endforeach()
+# PERF-124: the host-RAM expert on the CPU (src/cpu): AVX2 (and AVX-512 where present) against the scalar fp32 twin. Host only.
+add_executable(cpu_expert_test cpu/cpu_expert_test.cc)
+target_include_directories(cpu_expert_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests/cpu)
+target_link_libraries(cpu_expert_test PRIVATE b70_cpu)
+add_test(NAME cpu_expert_test COMMAND cpu_expert_test)
+set_tests_properties(cpu_expert_test PROPERTIES LABELS cpu TIMEOUT 600)
+# PERF-124 step 4: the host-RAM expert from its layout-1 blocks (src/cpu/expert_q4.cc) against q4_moe.cl's host twin,
+# bitwise. Host only.
+add_executable(cpu_expert_q4_test cpu/cpu_expert_q4_test.cc)
+target_include_directories(cpu_expert_q4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(cpu_expert_q4_test PRIVATE b70_cpu b70_qwen4exp_loader)
+add_test(NAME cpu_expert_q4_test COMMAND cpu_expert_q4_test)
+set_tests_properties(cpu_expert_q4_test PROPERTIES LABELS cpu TIMEOUT 600)

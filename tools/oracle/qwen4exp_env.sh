@@ -6,7 +6,7 @@
 # -r tools/oracle/qwen4exp_requirements.txt - no dependency resolution, so the image's torch is never
 # replaced - then prints `PYTHONPATH=<dir>`; every qwen4exp command runs with that first on PYTHONPATH.
 # Idempotent: skips the install when <dir>/transformers-5.19.0.dist-info exists.
-#   Mac: oracle-out-q4exp/site (git-ignored)   GPU machine: $DATA/q4exp-site
+#   <dir>: $B70_DATA/oracle-out/flash-next/python-site (every caller's default)
 set -eu
 [ $# -eq 1 ] || { echo "usage: $0 <dir>" >&2; exit 2; }
 dir="$1"

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 #include "kernels/inkling2_kernels.h"
@@ -9,6 +11,12 @@
 
 namespace runtime::inkling2 {
 namespace {
+bool bf16_glue() {
+  const char* e = std::getenv("B70_INK_GLUE");
+  if (e == nullptr || *e == '\0' || std::strcmp(e, "f32") == 0) return false;
+  if (std::strcmp(e, "bf16") == 0) return true;
+  throw std::runtime_error(std::string("B70_INK_GLUE=") + e + ": expected bf16 or f32 (unset: f32)");
+}
 
 using D = model::Inkling2Desc;
 namespace k = kernels::inkling2;
@@ -35,10 +43,11 @@ Pending pending(const ScratchBuffers& s, size_t visit, size_t m) {
 
 }  // namespace
 
-Engine::Engine(l0::Context& ctx, const loader::Inkling2Checkpoint& checkpoint, uint32_t max_len, bool draft)
-    : ctx_(ctx), desc_(checkpoint.desc()), weights_(checkpoint.layout()), max_len_(max_len),
-      buffers_(ctx, sizes(desc_, weights_, max_len, draft), weights_),
-      ctrl_(static_cast<Control*>(buffers_.persistent.control.ptr())), queue_(ctx) {
+Engine::Engine(l0::Context& ctx, const loader::Inkling2Checkpoint& checkpoint, uint32_t max_len, bool draft,
+               uint32_t prefill_rows, bool kv8)
+    : ctx_(ctx), desc_(checkpoint.desc()), weights_(checkpoint.layout()), max_len_(max_len), prefill_rows_(prefill_rows),
+      kv8_(kv8), buffers_(ctx, sizes(desc_, weights_, max_len, draft, prefill_rows, kv8), weights_),
+      ctrl_(static_cast<Control*>(buffers_.persistent.control.ptr())), queue_(ctx), bf16_glue_(bf16_glue()) {
   buffers_.upload(ctx_, checkpoint);
   reset();
 }
@@ -47,6 +56,7 @@ void Engine::reset() {
   queue_.synchronize();
   buffers_.zero(ctx_);
   committed_ = pending_ = 0;
+  prefill_logits_ = false;
 }
 
 Engine::Modules::iterator Engine::add_module(const std::string& name) {
@@ -185,21 +195,33 @@ void Engine::record_target(l0::CmdList& list, uint32_t m) {
       linear(list, a + "v_sconv.weight_proj", m, av, vt);
     }
 
-    const size_t kv_off = size_t(v.kv_slot) * (v.window ? kRing : max_len_) * D::kv_n * bf16;
+    const bool kv8 = kv8_ && !v.window;
+    const size_t kv_off = size_t(v.kv_slot) * (v.window ? kRing : max_len_) * D::kv_n * (kv8 ? 1 : bf16);
     void* ck = at(v.window ? p.ring_k : p.full_k, kv_off), *cv = at(v.window ? p.ring_v : p.full_v, kv_off);
     const size_t kh = size_t(visit) * 3 * D::kv_n * f32, ah = size_t(visit) * 3 * D::hidden * f32;
     const char* taps = v.window ? "weight" : "static_w";
     const uint32_t ring = v.window ? kRing : 0;
-    launch(list, prep, "ink_qkv_prep", 128, D::q_heads + 2 * D::kv_heads, m,
-           q, relative, weight(a + "q_l2_clip.scale"), weight(a + "rel_l2_clip.scale"),
-           fresh.k, fresh.v, at(p.conv_k, kh), at(p.conv_v, kh), weight(a + "k_sconv." + taps),
-           weight(a + "v_sconv." + taps), kt, vt, ck, cv, ctrl_, ring, desc_.eps, desc_.qk_clip,
-           desc_.relative_clip, desc_.log_floor, desc_.log_alpha);
-
-    const auto attn = k::attn(m, bool(v.window));
+    const auto attn = k::attn(m, bool(v.window)) + (kv8 ? "_KV8" : "");
     auto* part = s.attention_parts->ptr();
-    launch(list, attn, "kol_attn_decode", 128, D::kv_heads, k::kPartitions, ctrl_, q, ck, cv, part,
-           relative, weight(a + "rel_logits_proj.proj"));
+    if (kv8) {
+      const size_t scale_off = size_t(v.kv_slot) * max_len_ * D::kv_heads * bf16;
+      void* ks = at(*p.full_k_scale, scale_off), *vs = at(*p.full_v_scale, scale_off);
+      launch(list, prep + "_KV8", "ink_qkv_prep", 128, D::q_heads + 2 * D::kv_heads, m,
+             q, relative, weight(a + "q_l2_clip.scale"), weight(a + "rel_l2_clip.scale"),
+             fresh.k, fresh.v, at(p.conv_k, kh), at(p.conv_v, kh), weight(a + "k_sconv." + taps),
+             weight(a + "v_sconv." + taps), kt, vt, ck, cv, ks, vs, ctrl_, ring, desc_.eps, desc_.qk_clip,
+             desc_.relative_clip, desc_.log_floor, desc_.log_alpha);
+      launch(list, attn, "kol_attn_decode", 128, D::kv_heads, k::kPartitions, ctrl_, q, ck, cv, ks, vs, part,
+             relative, weight(a + "rel_logits_proj.proj"));
+    } else {
+      launch(list, prep, "ink_qkv_prep", 128, D::q_heads + 2 * D::kv_heads, m,
+             q, relative, weight(a + "q_l2_clip.scale"), weight(a + "rel_l2_clip.scale"),
+             fresh.k, fresh.v, at(p.conv_k, kh), at(p.conv_v, kh), weight(a + "k_sconv." + taps),
+             weight(a + "v_sconv." + taps), kt, vt, ck, cv, ctrl_, ring, desc_.eps, desc_.qk_clip,
+             desc_.relative_clip, desc_.log_floor, desc_.log_alpha);
+      launch(list, attn, "kol_attn_decode", 128, D::kv_heads, k::kPartitions, ctrl_, q, ck, cv, part,
+             relative, weight(a + "rel_logits_proj.proj"));
+    }
     launch(list, attn, "kol_attn_reduce", 128, D::q_heads, m, ctrl_, part, s.attn_output->ptr(), sinks, g);
     linear(list, a + "wo_ud.weight", m, s.attn_output->ptr(), fresh.attn);
     if (v.block_boundary) list.copy(bank(finished++), current, hidden);
@@ -297,12 +319,17 @@ std::span<const uint32_t> Engine::verify(std::span<const uint32_t> ids) {
   queue_.execute(*list);
   queue_.synchronize();
   pending_ = m;
+  prefill_logits_ = false;
   return {ctrl_->out_token, pending_};
 }
 
 void Engine::read_logits(uint32_t row, std::span<float> out) {
   if (row >= pending_ || out.size() != D::vocab_used)
     throw std::invalid_argument("Inkling logit read requires a pending row and the live vocabulary");
+  copy_logits(row, out);
+}
+
+void Engine::copy_logits(uint32_t row, std::span<float> out) {
   auto list = l0::CmdList::immediate(ctx_);
   list.copy(out.data(), at(*buffers_.scratch.logits, size_t(row) * D::head_rows * f32), out.size_bytes());
   for (float& value : out) value = D::logit_cap * std::tanh(value / D::logit_cap);

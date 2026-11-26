@@ -408,7 +408,7 @@ void check_lm_int8(l0::Context& ctx, const std::string& arg) {
     CHECK_EQ(sgot, s);
     for (uint32_t k : {0u, 15u, 16u, 2047u, K - 1}) {
       int8_t got = 0;
-      imm.copy(&got, lh.mem.as<int8_t>() + loader::int8_tiled_index(K, k, n), 1);
+      imm.copy(&got, lh.mem.as<int8_t>() + loader::int8_tiled_index(K, N, k, n), 1);
       diff += got != want[k];
     }
   }

@@ -2,7 +2,9 @@
 // Host-only, on synthetic rows: the per-row scale (max|row| / 127, fp32), round to
 // nearest even, the clamp to [-127, 127], the round-trip bound plan 9a measured on
 // the real head, the tiled layout gemv_i8w reads, and that the thread count does not
-// change a byte.
+// change a byte. PERF-111: at an output head's width the tiles are k-major (while
+// loader::kInt8HeadKMajor holds) - today's n-major tiles reordered by common::tiles_k_major,
+// byte for byte; every other width keeps n-major.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -10,6 +12,7 @@
 #include <vector>
 #include "check.h"
 #include "common/bf16.h"
+#include "common/repack.h"
 #include "loader/lm_head_int8.h"
 #include "model/model_desc.h"
 #include "model/qwen35.h"
@@ -71,7 +74,7 @@ int main() {
     CHECK_EQ(s, amax / 127.0f);
     int qmax = 0;
     for (uint32_t k = 0; k < K; ++k) {
-      const int8_t v = tiled[loader::int8_tiled_index(K, k, n)];
+      const int8_t v = tiled[loader::int8_tiled_index(K, N, k, n)];
       layout_fail += v != row[k];
       CHECK(v >= -127 && v <= 127);
       qmax = std::max(qmax, std::abs(int(v)));
@@ -82,15 +85,52 @@ int main() {
   }
   CHECK_EQ(layout_fail, size_t(0));
   CHECK_EQ(bound_fail, size_t(0));
-  // The tiled index is a bijection onto [0, N K): [n/16][k/16][k%16][n%16].
+  // The tiled index is a bijection onto [0, N K): [n/16][k/16][k%16][n%16] at a width no head has.
   {
+    CHECK(!loader::int8_k_major(N));
     std::vector<uint8_t> seen(size_t(N) * K, 0);
     for (uint32_t n = 0; n < N; ++n)
-      for (uint32_t k = 0; k < K; ++k) ++seen[loader::int8_tiled_index(K, k, n)];
+      for (uint32_t k = 0; k < K; ++k) ++seen[loader::int8_tiled_index(K, N, k, n)];
     for (uint8_t c : seen) CHECK_EQ(int(c), 1);
-    CHECK_EQ(loader::int8_tiled_index(K, 1, 0), size_t(16));
-    CHECK_EQ(loader::int8_tiled_index(K, 16, 0), size_t(256));
-    CHECK_EQ(loader::int8_tiled_index(K, 0, 16), size_t(K) * 16);
+    CHECK_EQ(loader::int8_tiled_index(K, N, 1, 0), size_t(16));
+    CHECK_EQ(loader::int8_tiled_index(K, N, 16, 0), size_t(256));
+    CHECK_EQ(loader::int8_tiled_index(K, N, 0, 16), size_t(K) * 16);
+  }
+
+  // 2b. PERF-111: at a head width (the smallest, 32768; K 128, one K block) the quantised tiles are today's n-major tiles
+  //     reordered k-major in blocks of kInt8HeadKBlock steps by common::tiles_k_major, byte for byte, the scales
+  //     unchanged; the index is a bijection; 7 threads write the same bytes.
+  {
+    const uint32_t HN = 32768, HK = 128;
+    CHECK_EQ(loader::int8_k_major(HN), loader::kInt8HeadKMajor);
+    const std::vector<uint16_t> hw = random_rows(HN, HK, 77);
+    std::vector<int8_t> nm(size_t(HN) * HK), want(nm.size()), got(nm.size()), got7(nm.size());
+    std::vector<float> s_want(HN), s_got(HN), s_got7(HN);
+    for (uint32_t n = 0; n < HN; ++n) {
+      std::vector<int8_t> row(HK);
+      s_want[n] = loader::quantise_row_int8(hw.data() + size_t(n) * HK, HK, row.data());
+      for (uint32_t k = 0; k < HK; ++k)
+        nm[(size_t(n / 16) * (HK / 16) + k / 16) * 256 + size_t(k % 16) * 16 + n % 16] = row[k];
+    }
+    if (loader::kInt8HeadKMajor)
+      common::tiles_k_major(nm.data(), HN / 16, HK / 16, 256, want.data(), loader::kInt8HeadKBlock);
+    else want = nm;
+    loader::quantise_int8_tiled(hw.data(), HK, HN, got.data(), s_got.data(), 1);
+    loader::quantise_int8_tiled(hw.data(), HK, HN, got7.data(), s_got7.data(), 7);
+    CHECK(got == want);
+    CHECK(got7 == want);
+    CHECK(s_got == s_want && s_got7 == s_want);
+    std::vector<uint8_t> seen(size_t(HN) * HK, 0);
+    for (uint32_t n = 0; n < HN; ++n)
+      for (uint32_t k = 0; k < HK; ++k) ++seen[loader::int8_tiled_index(HK, HN, k, n)];
+    for (uint8_t c : seen) CHECK_EQ(int(c), 1);
+    if (loader::kInt8HeadKMajor) {
+      const size_t B = loader::kInt8HeadKBlock;
+      CHECK_EQ(loader::int8_tiled_index(HK, HN, 16, 0), size_t(B > 1 ? 256 : size_t(HN / 16) * 256));
+      CHECK_EQ(loader::int8_tiled_index(HK, HN, 16 * uint32_t(B), 0), size_t(HN / 16) * B * 256);
+      CHECK_EQ(loader::int8_tiled_index(HK, HN, 0, 16), B * 256);
+    }
+    for (uint32_t w : loader::kInt8HeadWidths) CHECK(w % 64 == 0);   // gemv_i8w's grid: N / 64 work-groups
   }
 
   // 3. Threads change nothing.

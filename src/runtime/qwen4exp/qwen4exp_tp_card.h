@@ -60,6 +60,9 @@ struct Qwen4ExpTpEngine::Card {
   // Task 5 Step 0 (the MTP head): the verify lists at M = 1..kVerifyRows and the draft steps (the head's card: spec
   // 21e's step on its half of the head; the other card: its half of the head over the peer's row, into dctl)
   std::vector<CapturedStep> verify, drafts;
+  // PERF-124: the plain and verify lists with the CPU's hand-offs (CpuExperts::on(M) picks them per step)
+  std::optional<CapturedStep> step_cpu;
+  std::vector<CapturedStep> verify_cpu;
   std::optional<CapturedStep> flush;   // PERF-51: the GDN flush list (the committed rows into the state)
   std::unique_ptr<l0::Mem> dctl;   // runtime::Control, shared: the card without the head's draft winner
 

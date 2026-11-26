@@ -8,33 +8,31 @@
 A recording is a directory of request JSONs (`prompt_ids`, `out_ids`) written by b70-serve's request log
 ($B70_DATA/logs/opencode-session-int8, $B70_DATA/logs/opencode-session). Each request with a prompt and at least 8
 continuation ids (the probe's floor) becomes a source `<recording>/<request>`: the prompt and the recorded
-continuation cut at `--max-cont` ids and at the first EOS (dflash_v2_sources.stopped). The probe teacher-forces
+continuation cut at `--max-cont` ids and at the first EOS (stopped). The probe teacher-forces
 that continuation and dumps the quantised target's taps at the drafter's tap layers over its last 2048 prompt
 positions and the continuation.
 
 Held out, refused here: the whole `opencode-session-2` recording (spec 19 v2's held-out acceptance source) and
-anything that is not a request recording - A4 / golden come from oracle-out-19a dumps and never pass through
+anything that is not a request recording - A4 / golden come from $B70_DATA/oracle-out/qwen38/dflash-p0 dumps and never pass through
 this script. `--done` skips every source whose dump is already complete in TAPS_DIR (a resumed `taps` stage).
 """
 from __future__ import annotations
 
 import argparse
 import glob
-import importlib.util
 import json
 import os
 import struct
 
-_TOOLS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 HELD_OUT = ("opencode-session-2",)
 
 
-def _stopped():
-    spec = importlib.util.spec_from_file_location(
-        "dflash_v2_sources", os.path.join(_TOOLS, "box_validate", "dflash_v2_sources.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.stopped
+def stopped(ids, eos):
+    """ids up to and including the first EOS."""
+    for i, token in enumerate(ids):
+        if token in eos:
+            return ids[:i + 1]
+    return ids
 
 
 def file_name(name: str) -> str:
@@ -56,7 +54,6 @@ def dump_complete(path: str) -> bool:
 
 
 def sources(recordings: list[str], eos: set[int], max_cont: int) -> list[dict]:
-    stopped = _stopped()
     out = []
     for d in recordings:
         rec = os.path.basename(os.path.normpath(d))

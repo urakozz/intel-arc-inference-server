@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <format>
+#include <future>
 #include <string_view>
 #include <print>
 #include <stdexcept>
@@ -25,6 +26,57 @@
 
 namespace loader {
 namespace {
+
+// The checkpoint read one layer ahead of the repack: layer l + 1's tensors go into the page cache
+// (SafetensorsSet::read_ahead, kReaders threads in large preads) while layer l is repacked and uploaded, so the repack
+// faults on cached pages. Before it the repack read the mappings a page fault at a time: 0.3 GB/s from a disk that reads
+// 1.1 GB/s sequentially.
+class LayerReadAhead {
+ public:
+  static constexpr unsigned kReaders = 4;
+  LayerReadAhead(const SafetensorsSet& set, const std::string& prefix, uint32_t layers) : set_(set), by_(layers) {
+    const std::string p = prefix + "layers.";
+    for (const auto& [name, t] : set.tensors()) {
+      if (!name.starts_with(p)) continue;
+      const unsigned long l = std::stoul(name.substr(p.size()));
+      if (l < layers) by_[l].push_back(&t);
+    }
+  }
+  ~LayerReadAhead() {
+    if (ahead_.valid()) ahead_.wait();
+  }
+  // Before layer l's repack: waits for its read (started here when it was not), then starts layer l + 1's.
+  void before(uint32_t l) {
+    if (!ahead_.valid() || next_ != l) start(l);
+    const auto t0 = std::chrono::steady_clock::now();
+    bytes_ += ahead_.get();
+    waited_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (l + 1 < by_.size()) start(l + 1);
+  }
+  std::string line() const {
+    return std::format("  disk        the layers' {:.3f} GB read ahead at {:.2f} GB/s ({:d} readers, one layer ahead); "
+                       "the repack waited {:.1f} s for it\n",
+                       bytes_ / 1e9, read_s_ > 0 ? bytes_ / 1e9 / read_s_ : 0.0, kReaders, waited_);
+  }
+
+ private:
+  void start(uint32_t l) {
+    if (ahead_.valid()) ahead_.wait();
+    next_ = l;
+    ahead_ = std::async(std::launch::async, [this, r = set_.ranges(by_[l])] {
+      const auto t0 = std::chrono::steady_clock::now();
+      const size_t b = set_.read_ahead(r, kReaders);
+      read_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      return b;
+    });
+  }
+  const SafetensorsSet& set_;
+  std::vector<std::vector<const TensorInfo*>> by_;
+  std::future<size_t> ahead_;
+  uint32_t next_ = 0;
+  size_t bytes_ = 0;
+  double read_s_ = 0, waited_ = 0;
+};
 std::unique_ptr<DeviceWeight> upload_w(l0::Context& ctx, l0::CmdList& imm, const Q4HostWeight& w, size_t& bytes) {
   bytes += w.bytes();
   if (w.kind == model::WeightKind::Int4)
@@ -256,7 +308,9 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
     if (m.expert_table) rows[r].assign(size_t(d.layers) * 2 * d.experts, 0);
   }
   Q4HostLayer host;
+  LayerReadAhead ahead(set, d.prefix, d.layers);
   for (uint32_t l = 0; l < d.layers; ++l) {
+    ahead.before(l);
     ck.repack_layer(l, host);
     for (uint32_t r = 0; r < 2; ++r) {
       const Q4HostLayer half = q4_tp_layer(d, l, host, r);
@@ -354,6 +408,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
   std::print("  host        the PLE table {:.3f} GB (pointer tables on both cards), the experts' halves {:.3f} GB pinned; "
              "read/token a card {:.3f} GB (derived); load {:.1f} s\n", m.ple.bytes / gb, m.mirror_bytes / gb,
              m.read_per_token / gb, m.seconds);
+  std::print("{}", ahead.line());
   return m;
 }
 
@@ -442,6 +497,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
                              " - the label and the bytes disagree");
   Q4Checkpoint ck(full, set);
   ck.check_names(mtp);   // by name, both ways, before a byte is repacked
+  const double checks_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
   const model::Qwen4ExpDesc d = limited(full, layers_limit);
   model::validate(placement, d);
@@ -510,6 +566,8 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
 
   const std::vector<float> rope = q4_rope_table(d, max_len);
   Q4HostLayer host;
+  double repack_s = 0, upload_s = 0;   // the layer loop's two halves (where a load's time goes)
+  LayerReadAhead ahead(set, d.prefix, d.layers);
   m.parts.resize(placement.devices);
   for (uint32_t dev = 0; dev < placement.devices; ++dev) {
     l0::Context& ctx = *devices[dev];
@@ -530,13 +588,18 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
     }
     std::vector<uint64_t> rows(m.expert_table ? size_t(P.end - P.first) * 2 * d.experts : 0);
     for (uint32_t l = P.first; l < P.end; ++l) {
+      ahead.before(l);
+      const auto r0 = std::chrono::steady_clock::now();
       ck.repack_layer(l, host);
+      const auto r1 = std::chrono::steady_clock::now();
       uint64_t* row = rows.empty() ? nullptr : rows.data() + size_t(l - P.first) * 2 * d.experts;
       if (T.n_vram(l) == d.experts && !row)
         P.layers.push_back(upload_layer(ctx, imm, host, P.bytes));
       else
         P.layers.push_back(upload_layer(ctx, imm, host, P.bytes, T.vram.data() + size_t(l) * d.experts, d.experts,
                                         &m.mirror_bytes, row));
+      repack_s += std::chrono::duration<double>(r1 - r0).count();
+      upload_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r1).count();
       if (!row) continue;
       // The load check's samples of this layer's 1024 blocks, from the checkpoint's bytes (Q4DevicePart::check_*).
       const auto s0 = std::chrono::steady_clock::now();
@@ -641,8 +704,10 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
                               : "the layer's range (direct)");
   }
   std::print("  read/token  {:13d} B {:7.3f} GB   (top-{:d} + shared experts, HC, mixers, routers, head; derived)\n"
-             "  load        {:.1f} s\n",
-             m.read_per_token, m.read_per_token / gb, d.top_k, m.seconds);
+             "{}"
+             "  load        {:.1f} s: the headers and the quantisation checks {:.1f} s, the layers repacked in {:.1f} s, "
+             "uploaded (and mirrored to host memory) in {:.1f} s\n",
+             m.read_per_token, m.read_per_token / gb, d.top_k, ahead.line(), m.seconds, checks_s, repack_s, upload_s);
   return m;
 }
 

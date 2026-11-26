@@ -80,6 +80,14 @@
 #if C_BF16 && (SILU_EPI || TRANSB)
 #error "pf_gemm: the bf16 C is the untransposed plain GEMM's"
 #endif
+// COL_SCALE 1 (Inkling's int8 linears): each fp32 sum times its column's scale before the store, the product the
+// separate pass (pf_ink_scale) formed from the stored sum; `col_scale` is the scale of C's column 0.
+#ifndef COL_SCALE
+#define COL_SCALE 0
+#endif
+#if COL_SCALE && (SILU_EPI || TRANSB || C_BF16)
+#error "pf_gemm: the column scale is the plain fp32 epilogue's"
+#endif
 //
 // **Storing `rne_bf16(acc)` for the OTHER linears was measured and rejected**
 // (parity program S2(b)). Every
@@ -115,7 +123,11 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
                       __global const ushort* restrict B_base,
                       __global float* restrict C_base,
                       uint M, uint K, uint N, uint lda, uint ldb, uint ldc,
+#if COL_SCALE
+                      ulong strideA, ulong strideB, ulong strideC, __global const float* restrict col_scale) {
+#else
                       ulong strideA, ulong strideB, ulong strideC) {
+#endif
 #if RASTER
   // The work-group order with the N axis fastest: the dispatch walks group ids x-first, so
   // consecutive work-groups take the same row block's column blocks (a 1024-column slab is 4
@@ -328,6 +340,14 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
     }
 #undef PF_B16_ROW
 #else
+#if COL_SCALE
+#pragma unroll
+  for (int b = 0; b < 4; ++b) {
+    const float cs = col_scale[n0 + 64u * sn + 16u * b + get_sub_group_local_id()];
+#pragma unroll
+    for (int a = 0; a < 4; ++a) acc[a][b] *= cs;
+  }
+#endif
   // epilogue: 16 stores per subgroup, 8 rows x 64 B each, no C read.
 #pragma unroll
   for (int a = 0; a < 4; ++a)

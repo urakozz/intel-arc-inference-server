@@ -4,6 +4,7 @@
 #include "loader/qwen4exp_loader.h"
 #include "runtime/capture.h"   // CapturedStep, StageLink - the same records
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
+#include "runtime/qwen4exp/qwen4exp_cpu_experts.h"
 
 // Spec 21-QFN-v1c: one device's Qwen3.8-Flash-Next decode step, captured once and replayed per token - Kolibri's
 // arrangement (runtime/kolibri/kolibri_capture.h: a straight walk, every per-token value read from
@@ -77,6 +78,11 @@ struct ListSpec {
   CaptureOptions opt;
   // Probes only: launch i signals prof->events[i] (runtime/capture.h's ProfileEvents; observes only).
   ProfileEvents* prof = nullptr;
+  // PERF-124 step 4 (Decode / Verify, one card, pp or tp): each MoE layer with a host mirror hands its host-RAM experts
+  // to the CPU (qwen4exp_cpu_experts.h: the copies out, `ready`, gate||up _CPU, the wait on `done`, down _CPU); `card` is
+  // this list's part (tp: its rank).
+  const CpuExperts* cpu = nullptr;
+  uint32_t card = 0;
 };
 // The head's pieces the Verify / Draft lists bind (the last device).
 struct MtpBinding {

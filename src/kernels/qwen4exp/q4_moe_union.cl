@@ -258,13 +258,49 @@ inline uint q4_pair_at(uint lane, uint k, __private const uint* mf, __private co
   return sub_group_reduce_max(pk);
 }
 
+// CPU_ROUTE (PERF-124 step 4, _TBL only; q4_moe.cl's CPU_ROUTE at M >= 2): the distinct experts whose gate||up table
+// address lies in the layer's host mirror [mlo, mlo + msz), in first-occurrence order (the union's rank order) - the
+// first dec[n] of the n such go to the CPU. gate||up skips those sets; the down takes each of their pairs' fp32 down
+// sum from cpu_y [M][SLOTS][HIDDEN] (K slice 0; the other slices -0, an exact identity in the tree). Under MOE_TP_PART
+// (a tp card's half experts) that sum is the pair's partial, written and sent to the peer as the card's own.
+#if CPU_ROUTE
+#if !Q4_EXPERT_TABLE || defined(UNION_COUNT)
+#error "q4_moe_union CPU_ROUTE: the table form"
+#endif
+#define CPU_ARGS , ulong mlo, ulong msz, __global const uint* restrict dec
+inline bool q4_on_host(__global const uint* restrict w_gu, uint e, ulong mlo, ulong msz) {
+  return (ulong)(intptr_t)Q4_EXPERT_GU(w_gu, e) - mlo < msz;
+}
+// Whether the expert of rank d (q4_union_sg's registers) is a CPU expert; uniform across the sub-group.
+inline bool q4_union_cpu(uint lane, uint d, __private const uint* id, __private const uint* fl,
+                         __private const uint* rk, __global const uint* restrict w_gu, ulong mlo, ulong msz,
+                         __global const uint* restrict dec) {
+  uint hf[PREG], hr[PREG], carry = 0;
+  #pragma unroll
+  for (uint i = 0; i < PREG; ++i) {
+    hf[i] = (fl[i] && q4_on_host(w_gu, id[i], mlo, msz)) ? 1u : 0u;
+    hr[i] = carry + sub_group_scan_exclusive_add(hf[i]);
+    carry += sub_group_reduce_add(hf[i]);
+  }
+  const uint lim = dec[carry];
+  uint c = 0;
+  #pragma unroll
+  for (uint i = 0; i < PREG; ++i)
+    if (fl[i] && rk[i] == d) c = (hf[i] && hr[i] < lim) ? 1u : 0u;
+  return sub_group_reduce_max(c) != 0u;
+}
+#else
+#define CPU_ARGS
+#endif
+
 // ---------------------------------------------------------------------------------------------------------------
 // gate||up: work-group (set, blk) owns n-tiles 4 blk .. 4 blk + 3 of its set's expert; sub-group (tile_idx, q): one
 // 16-column tile, K slice q, merged per pair by q4_moe_gate_up's pairwise tree.
 __attribute__((reqd_work_group_size(WG_UP, 1, 1)))
 Q4_SG16
 __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const ushort* restrict x,
-                             __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict h CNT_ARG) {
+                             __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict h CNT_ARG
+                             CPU_ARGS) {
   __local float red[M][4 * UP_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -275,6 +311,9 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   const uint blk = get_group_id(0) % (NT_UP / 4);
   const uint n_tile = blk * 4 + tile_idx;
   __local uint s_nd, s_e, s_n, s_rs[NPAIR > M ? NPAIR : M];   // the set's expert and its pairs' [row][slot] places
+#if CPU_ROUTE
+  __local uint s_cpu;
+#endif
   if (sg == 0) {   // the schedule once a work-group (sub-group 0's registers), shared through SLM
     uint id[PREG], own[PREG], fl[PREG], rk[PREG], mf[PREG], mpos[PREG];
     const uint nd = q4_union_sg(route, lane, id, own, fl, rk);
@@ -282,6 +321,10 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
     if (set == 0) {
       if (lane < M) s_rs[lane] = lane * SLOTS + SHARED_SLOT;
     } else if (set <= nd) {
+#if CPU_ROUTE
+      const bool cpu = q4_union_cpu(lane, set - 1, id, fl, rk, w, mlo, msz, dec);
+      if (lane == 0) s_cpu = cpu ? 1u : 0u;
+#endif
       n_all = q4_union_set(lane, set - 1, id, own, fl, rk, &e, mf, mpos);
       #pragma unroll
       for (uint i = 0; i < PREG; ++i) {
@@ -293,10 +336,16 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
       s_nd = nd;
       s_e = e;
       s_n = n_all;
+#if CPU_ROUTE
+      if (set == 0 || set > nd) s_cpu = 0u;
+#endif
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE);
   if (set > s_nd) return;   // uniform: fewer distinct experts than set
+#if CPU_ROUTE
+  if (s_cpu) return;        // uniform: the CPU computes this expert
+#endif
   const bool shared = set == 0;
   const uint e = s_e, n_all = s_n;
 #ifdef UNION_COUNT
@@ -370,7 +419,11 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
 #if MOE_TP_PART
                           , __global uint* land, __global uint* ctr
 #endif
-                          CNT_ARG) {
+                          CNT_ARG
+#if CPU_ROUTE
+                          CPU_ARGS, __global const uint* restrict w_gu, __global const float* restrict cpu_y
+#endif
+                          ) {
 #if !MOE_TP_PART
   __local float red[M * SLOTS * DN_KS][SG];   // [row][slot][K slice]
 #endif
@@ -394,6 +447,25 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
     const bool shared = set == 0;
     uint e = 0;
     const uint n_all = shared ? M : q4_union_set(lane, set - 1, id, own, fl, rk, &e, mf, mpos);
+#if CPU_ROUTE
+    if (!shared && q4_union_cpu(lane, set - 1, id, fl, rk, w_gu, mlo, msz, dec)) {   // uniform across the sub-group
+      for (uint k = 0; k < n_all; ++k) {
+        const uint p = q4_pair_at(lane, k, mf, mpos);
+        const uint rs = (p / MOE_K) * SLOTS + p % MOE_K;
+#if MOE_TP_PART
+        const uint m = p / MOE_K, slot = p % MOE_K;
+        const float v = cpu_y[(size_t)rs * HIDDEN + n_tile * SG + lane];
+        const size_t ey = ((size_t)slot * M + m) * HIDDEN + n_tile * SG + lane;
+        y[ey] = v;
+        land[(s_n[m] & 1u) * DATA_WORDS + ey] = as_uint(v);
+#else
+        red[rs * DN_KS][lane] = cpu_y[(size_t)rs * HIDDEN + n_tile * SG + lane];
+        for (uint q = 1; q < DN_KS; ++q) red[rs * DN_KS + q][lane] = -0.0f;
+#endif
+      }
+      continue;
+    }
+#endif
     for (uint base = 0; base < n_all; base += M) {
       const uint n = min((uint)M, n_all - base);
       uint xo[M], rs[M];   // the pair's h row and its [row][slot] place

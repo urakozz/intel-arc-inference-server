@@ -26,9 +26,10 @@ template <class S, class B>
 void allocate(l0::Context& ctx, B& b, const S& s) {
   template for (constexpr auto member : gs::fields<S>()) {
     constexpr auto dst = gs::field_named<B>(std::meta::identifier_of(member));
+    constexpr auto name = std::meta::identifier_of(member);
     if (s.[:member:])
       b.[:dst:] = std::make_unique<Mem>(ctx,
-          std::meta::identifier_of(member) == "draft_control" ? MemKind::Shared : MemKind::Device, s.[:member:]);
+          (name == "draft_control" || name == "ids") ? MemKind::Shared : MemKind::Device, s.[:member:]);
   }
 }
 
@@ -45,13 +46,19 @@ PersistentBuffers::PersistentBuffers(l0::Context& ctx, const PersistentSizes& s)
       full_v(ctx, MemKind::Device, s.full_v), ring_k(ctx, MemKind::Device, s.ring_k),
       ring_v(ctx, MemKind::Device, s.ring_v), conv_k(ctx, MemKind::Device, s.conv_k),
       conv_v(ctx, MemKind::Device, s.conv_v), conv_attn(ctx, MemKind::Device, s.conv_attn),
-      conv_mlp(ctx, MemKind::Device, s.conv_mlp) {}
+      conv_mlp(ctx, MemKind::Device, s.conv_mlp) {
+  if (s.full_k_scale) {
+    full_k_scale = std::make_unique<Mem>(ctx, MemKind::Device, s.full_k_scale);
+    full_v_scale = std::make_unique<Mem>(ctx, MemKind::Device, s.full_v_scale);
+  }
+}
 
 ScratchBuffers::ScratchBuffers(l0::Context& ctx, const ScratchSizes& s) { allocate(ctx, *this, s); }
 DraftBuffers::DraftBuffers(l0::Context& ctx, const DraftSizes& s) { allocate(ctx, *this, s); }
+PrefillBuffers::PrefillBuffers(l0::Context& ctx, const PrefillSizes& s) { allocate(ctx, *this, s); }
 
 Buffers::Buffers(l0::Context& ctx, const Sizes& s, const L& layout)
-    : persistent(ctx, checked(ctx, s, layout)), scratch(ctx, s.scratch), draft(ctx, s.draft) {
+    : persistent(ctx, checked(ctx, s, layout)), scratch(ctx, s.scratch), draft(ctx, s.draft), prefill(ctx, s.prefill) {
   weights.model = std::make_unique<Mem>(ctx, MemKind::Device, s.weights.model);
   for (uint32_t l = 0; l < weights.layers.size(); ++l)
     weights.layers[l] = std::make_unique<Mem>(ctx, MemKind::Device, layout.bytes[L::kFirstLayer + l]);

@@ -1325,7 +1325,7 @@ class Capture {
   }
 
   // gemv_i8w(w, scales, x, out) - src/kernels/gemv_i8w.cl (spec 9 §3), grid N/64, WG 64.
-  // The int8 `lm_head` only: int8 rows tiled [N/16][K/16][16][16] in `w.mem` and one
+  // The int8 `lm_head` only: int8 rows tiled in `w.mem` (loader::int8_tiled_index, k-major at a head width) and one
   // fp32 scale per row in `w.scales`. Writes the fp32 [M][N] result straight at `out`.
   // PERF-123: the head choice's word when this list carries both heads - a one-card verify list (a tap drafter's
   // too) at 2..8 rows over the int8 head, with its 2-bit copy loaded (LoadedModel::cand_head); null otherwise.

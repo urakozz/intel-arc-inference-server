@@ -19,6 +19,58 @@ b70_target_kernel_dir(probe_gemv)
 # depends on every gemv variant; the kernels target list is in src/kernels
 get_property(ALL_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_gemv ${ALL_KERNELS})
+# PERF-111: `probe_gemv --tiles i8head` - every int8 output head's kernel at the M its model binds, in today's
+# n-major tile order (_NM) and k-major (_KM), each order spelled out so the pair does not depend on the
+# production switch (loader::kInt8HeadKMajor). The rows are probe_gemv.cc's kI8HeadCells, in its order:
+# "kernel K N M [wg [g256]]" - gemv_i8w.cl or gemm_sm.cl's int8 form (the verify path, LAYOUT 2, S 1; g256: 256 GRF,
+# as the deep lists' 32 / 64 rows build it).
+set(PI8H_CELLS
+    "gemv 5120 248320 1" "gemv 5120 248320 4" "gemv 5120 248320 8" "gemv 5120 248320 16"
+    "gemm 5120 248320 4 wg" "gemm 5120 248320 8 wg" "gemm 5120 248320 16 wg" "gemm 5120 248320 32 wg g256"
+    "gemm 5120 248320 64 wg g256"
+    "gemv 5120 124160 1" "gemm 5120 124160 4 wg" "gemm 5120 124160 8 wg"
+    "gemv 5120 32768 1" "gemm 5120 32768 7 wg"
+    "gemv 2560 248320 1" "gemm 2560 248320 4 wg" "gemv 2560 124160 1" "gemv 2560 124160 4"
+    "gemv 2048 248320 1" "gemm 2048 248320 4" "gemm 2048 248320 32 wg g256" "gemm 2048 248320 64 wg g256"
+    "gemv 2560 128000 1" "gemv 2560 128000 4" "gemv 2560 128000 8")
+foreach(cell IN LISTS PI8H_CELLS)
+  separate_arguments(f UNIX_COMMAND "${cell}")
+  list(GET f 0 kind)
+  list(GET f 1 K)
+  list(GET f 2 N)
+  list(GET f 3 M)
+  list(LENGTH f nf)
+  # _KB<B>: the K-blocked form, B k16 steps of a tile together, the blocks k-major (GEMV_KMAJOR_B); a trailing A:
+  # gemm_sm's I8_AHEAD 1 (the next k-group's tiles read one iteration ahead; gemv_i8w ignores it)
+  foreach(o "NM;0;1;0" "KM;1;1;0" "KB4;1;4;0" "KB8;1;8;0" "KB16;1;16;0" "KB32;1;32;0"
+            "NMA;0;1;1" "KMA;1;1;1" "KB8A;1;8;1" "KB16A;1;16;1" "KB32A;1;32;1")
+    list(GET o 0 tag)
+    list(GET o 1 km)
+    list(GET o 2 kb)
+    list(GET o 3 ahead)
+    set(km "${km};GEMV_KMAJOR_B=${kb};I8_AHEAD=${ahead}")
+    if(kind STREQUAL "gemv")
+      set(name pi8h_gemv_i8w_M${M}_K${K}_N${N}_${tag})
+      add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemv_i8w.cl
+                       DEFINES M=${M} K=${K} N=${N} GEMV_KMAJOR=${km})
+    elseif(nf GREATER 5)
+      set(name pi8h_gemm_sm_i8w_M${M}_K${K}_N${N}_wg_${tag})
+      add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl
+                       DEFINES M=${M} K=${K} N=${N} S=1 LAYOUT=2 SPLITK=1 GEMV_KMAJOR=${km}
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+    elseif(nf GREATER 4)
+      set(name pi8h_gemm_sm_i8w_M${M}_K${K}_N${N}_wg_${tag})
+      add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl
+                       DEFINES M=${M} K=${K} N=${N} S=1 LAYOUT=2 SPLITK=1 GEMV_KMAJOR=${km})
+    else()
+      set(name pi8h_gemm_sm_i8w_M${M}_K${K}_N${N}_${tag})
+      add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl
+                       DEFINES M=${M} K=${K} N=${N} S=1 LAYOUT=2 GEMV_KMAJOR=${km})
+    endif()
+    add_dependencies(probe_gemv kernel_${name})
+    set_property(GLOBAL APPEND PROPERTY B70_PI8H_KERNELS kernel_${name})   # tests' n-major twins
+  endforeach()
+endforeach()
 
 # P3 is a plain g++/Level Zero probe: no SYCL dependency and no prefill runtime
 # dependency. It consumes every prefill dequant binary, including both store
@@ -709,6 +761,10 @@ function(psm_variant T O M K N S L B2D)   # ARGN: extra tag, then extra defines 
   else()
     list(APPEND defs ORIENT=1)
   endif()
+  if(L EQUAL 2)
+    i8_order_defs(${N} km)
+    list(APPEND defs ${km})
+  endif()
   set(name psm_${T}${O}${P_TAG}_M${M}_K${K}_N${N}_S${S}_L${L})
   if(NOT TARGET kernel_${name})
     if(P_OPTS)
@@ -771,8 +827,9 @@ add_ocloc_kernel(psm_ctl_gemv_M16_K5120_N34816_S8_L0 SOURCE ${PSM_GEMV_CL}
                  DEFINES M=16 K=5120 N=34816 S=8 LAYOUT=0 GEMV_DEQ_SHIFT=1)
 add_ocloc_kernel(psm_ctl_gemv_M16_K17408_N5120_S4_L0 SOURCE ${PSM_GEMV_CL}
                  DEFINES M=16 K=17408 N=5120 S=4 LAYOUT=0 GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+i8_order_defs(248320 _psm_km)
 add_ocloc_kernel(psm_ctl_gemv_i8w_M16_K5120_N248320 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemv_i8w.cl
-                 DEFINES M=16 K=5120 N=248320)
+                 DEFINES M=16 K=5120 N=248320 ${_psm_km})
 add_ocloc_kernel(psm_ctl_gemv_bf16_M16_K5120_N128_C16_S16 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemv_bf16.cl
                  DEFINES M=16 K=5120 N=128 COLS_PER_WG=16 KSPLIT=16)
 list(APPEND PSM_TARGETS kernel_psm_ctl_gemv_M16_K5120_N16384_S1_L1 kernel_psm_ctl_gemv_M16_K6144_N5120_S4_L0
@@ -1165,8 +1222,9 @@ foreach(row "5120 8192 1 1 -" "3072 5120 4 0 B" "5120 7168 2 0 B" "5120 17408 8 
   add_ocloc_kernel(ptp_gemv_M1_K${K}_N${N}_S${S}_L${L} SOURCE ${PTP_GEMV_CL} DEFINES ${defs})
   list(APPEND PTP_TARGETS kernel_ptp_gemv_M1_K${K}_N${N}_S${S}_L${L})
 endforeach()
+i8_order_defs(124160 _ptp_km)
 add_ocloc_kernel(ptp_gemv_i8w_M1_K5120_N124160 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemv_i8w.cl
-                 DEFINES M=1 K=5120 N=124160)
+                 DEFINES M=1 K=5120 N=124160 ${_ptp_km})
 list(APPEND PTP_TARGETS kernel_ptp_gemv_i8w_M1_K5120_N124160)
 add_custom_target(ptp_kernel_set DEPENDS ${PTP_TARGETS})
 
@@ -1605,3 +1663,15 @@ target_link_libraries(probe_pf_attn_long PRIVATE b70_prefill_host b70_runtime b7
 b70_target_kernel_dir(probe_pf_attn_long)
 get_property(PFAL_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_pf_attn_long ${PFAL_TARGETS} ${PFAL_KERNELS})
+
+# PERF-124: one host-RAM expert on the CPU, cold in RAM (src/cpu). No GPU.
+add_executable(cpu_expert_bench cpu_expert_bench.cc)
+target_include_directories(cpu_expert_bench PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(cpu_expert_bench PRIVATE b70_cpu)
+
+# PERF-124 step 3: the GPU -> CPU -> GPU hand-off of one MoE layer, per layer (cards: card 0 only, via tools/gpu_lock.sh).
+add_executable(probe_cpu_roundtrip probe_cpu_roundtrip.cc)
+target_include_directories(probe_cpu_roundtrip PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_cpu_roundtrip PRIVATE b70_cpu b70_l0)
+b70_target_kernel_dir(probe_cpu_roundtrip)
+add_dependencies(probe_cpu_roundtrip kernel_rt_probe)

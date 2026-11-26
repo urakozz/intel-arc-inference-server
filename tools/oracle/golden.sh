@@ -6,7 +6,7 @@
 # touched here.
 #
 #   cd <the engine tree>
-#   OUT_DIR=... setsid nohup tools/oracle/golden.sh > "$OUT_DIR"/golden.log 2>&1 </dev/null &
+#   OUT_DIR=... setsid nohup tools/oracle/golden.sh > golden.log 2>&1 </dev/null &
 #
 # (detached, so the run outlives the terminal session). Prompt ids come from
 # $IDS_DIR, which defaults to the COMMITTED tests/golden/prompts - see
@@ -19,17 +19,17 @@
 # snapshot are therefore both parameters, and neither has a default that
 # clobbers the other checkpoint's set:
 #
-#   the published bf16-lm_head checkpoint (default, HF cache):
+#   the published bf16-lm_head checkpoint (default, HF cache) -> $B70_DATA/oracle-out/qwen38/golden:
 #     tools/oracle/golden.sh
 #   the self-quantised int4-lm_head one:
-#     OUT_DIR=oracle-out-rtn \
+#     OUT_DIR=$B70_DATA/oracle-out/qwen38/golden-rtn \
 #     ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
 #     ORACLE_THREADS=28 tools/oracle/golden.sh
 #
 # **PROMPTS names which sets to build** (default: the three short ones). Spec
 # 2 §6.2's long prompt is one invocation of the same loop:
 #
-#   OUT_DIR=oracle-out-primary PROMPTS=long \
+#   OUT_DIR=$B70_DATA/oracle-out/qwen38/golden PROMPTS=long \
 #   ORACLE_THREADS=22 setsid nohup tools/oracle/golden.sh \
 #     > $B70_DATA/logs/oracle-long/golden.log 2>&1 </dev/null &
 #
@@ -43,7 +43,7 @@
 # (ORACLE_SNAP / ORACLE_MODEL, ORACLE_THREADS, ORACLE_IMAGE).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-OUT_DIR="${OUT_DIR:-oracle-out}"
+OUT_DIR="${OUT_DIR:-${B70_DATA:?set B70_DATA, the data root}/oracle-out/qwen38/golden}"
 # The prompt ids are the SAME file for every checkpoint - the tokenizer is
 # identical, so the committed tests/golden/prompts/*.ids are valid for both and
 # re-tokenizing would be a chance to change them by accident.
@@ -54,7 +54,7 @@ for p in ${PROMPTS:-prose code cjk}; do
   echo "=== $p  start $(date -Is)"
   /usr/bin/time -v tools/oracle/run_in_container.sh \
     'python3 tools/oracle/dump.py "$SNAP" --prompt /ws/'"$IDS_DIR/$p"'.ids \
-       --out /ws/'"$OUT_DIR/$p"'.golden.safetensors --gen 32 --max-prompt 4096' \
+       --out '"$OUT_DIR/$p"'.golden.safetensors --gen 32 --max-prompt 4096' \
     > "$OUT_DIR/$p".log 2>&1
   echo "=== $p  done  $(date -Is)  rc=$?"
   tail -3 "$OUT_DIR/$p".log

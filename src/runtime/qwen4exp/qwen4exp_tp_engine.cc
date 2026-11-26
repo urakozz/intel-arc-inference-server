@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -27,7 +28,7 @@ double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std
 }  // namespace
 
 Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4LoadedModel model, uint32_t max_len,
-                                   const Q4TpOptions& opt)
+                                   const Q4TpOptions& opt, CpuExperts::Mode cpu_experts)
     : model_(std::move(model)), max_len_(max_len), opt_(opt) {
   const model::Qwen4ExpDesc& d = model_.desc;
   if (!model_.placement.tp || model_.parts.size() != 2)
@@ -86,7 +87,17 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
   }
   ple_init();
   expert_check();
-  for (uint32_t r = 0; r < 2; ++r) cards_[r]->step.emplace(build_card(r, nullptr));
+  if (cpu_experts != CpuExperts::Mode::Off) {   // Qwen4ExpEngine's rule
+    if (CpuExperts::has_host_experts(model_))
+      cpu_ = std::make_unique<CpuExperts>(std::vector<l0::Context*>{&d0, &d1}, model_, cpu_experts);
+    else if (cpu_experts == CpuExperts::Mode::All)   // asked for by name (auto is silent)
+      std::fprintf(stderr, "experts: every routed expert is on the cards, so there is nothing for the CPU to compute "
+                   "(--host-experts cpu has no effect)\n");
+  }
+  for (uint32_t r = 0; r < 2; ++r) {
+    cards_[r]->step.emplace(build_card(r, nullptr));
+    if (cpu_) cards_[r]->step_cpu.emplace(build_card(r, nullptr, cpu_.get()));
+  }
   if (mtp)
     for (uint32_t r = 0; r < 2; ++r) {
       Card& c = *cards_[r];
@@ -97,6 +108,12 @@ Qwen4ExpTpEngine::Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4L
         ls.opt.force_per_row_moe = opt_.per_row_moe;
         c.verify.push_back(build(c.ctx, model_, model_.parts[r], c.buffers, nullptr, nullptr, nullptr, ls, &mtp_bind_,
                                  &c.binding));
+        if (cpu_) {
+          ls.cpu = cpu_.get();
+          ls.card = r;
+          c.verify_cpu.push_back(build(c.ctx, model_, model_.parts[r], c.buffers, nullptr, nullptr, nullptr, ls,
+                                       &mtp_bind_, &c.binding));
+        }
       }
       for (uint32_t i = 0; i < kMaxDraft; ++i) {
         ListSpec ls;
@@ -175,10 +192,12 @@ Qwen4ExpTpEngine::~Qwen4ExpTpEngine() {
     if (c && c->pending) c->fence.wait_for(uint64_t(opt_.timeout_ms) * 1000000ull);
 }
 
-CapturedStep Qwen4ExpTpEngine::build_card(uint32_t r, ProfileEvents* prof) {
+CapturedStep Qwen4ExpTpEngine::build_card(uint32_t r, ProfileEvents* prof, const CpuExperts* cpu) {
   Card& c = *cards_[r];
   ListSpec spec;
   spec.prof = prof;
+  spec.cpu = cpu;
+  spec.card = r;
   return build(c.ctx, model_, model_.parts[r], c.buffers, nullptr, nullptr, nullptr, spec, nullptr, &c.binding);
 }
 
@@ -218,6 +237,7 @@ void Qwen4ExpTpEngine::reset() {
     c->buffers.zero(c->imm);
     c->zero_own();   // spec 39: the crossings' landings and counters, the state words, the draft Control
   }
+  if (cpu_) cpu_->reset();
   if (mtp_) {
     mtp_->zero(cards_[1]->imm);   // the head's Control, KV, keys, tail, R rows
     draft_ev_->host_reset();
@@ -283,7 +303,13 @@ void Qwen4ExpTpEngine::set_token(uint32_t id) {
   for (auto& c : cards_) c->ctl->cur_token[0] = id;
 }
 
-void Qwen4ExpTpEngine::step_plain() { submit(&*cards_[0]->step, &*cards_[1]->step); }
+void Qwen4ExpTpEngine::step_plain() {
+  if (cpu_) cpu_->before_step(1);
+  if (cpu_ && cpu_->on(1))
+    submit(&*cards_[0]->step_cpu, &*cards_[1]->step_cpu);
+  else
+    submit(&*cards_[0]->step, &*cards_[1]->step);
+}
 
 void Qwen4ExpTpEngine::ingest(const std::vector<uint32_t>& ids) {
   for (uint32_t id : ids) {
@@ -669,7 +695,11 @@ void Qwen4ExpTpEngine::verify(uint32_t k) {
   for (uint32_t r = 0; r <= k; ++r) h->cur_token[r] = c0->cur_token[r];
   verify_pos_ = p;
   verify_k_ = k;
-  submit(&cards_[0]->verify[k], &cards_[1]->verify[k]);
+  if (cpu_) cpu_->before_step(k + 1);
+  if (cpu_ && cpu_->on(k + 1))
+    submit(&cards_[0]->verify_cpu[k], &cards_[1]->verify_cpu[k]);
+  else
+    submit(&cards_[0]->verify[k], &cards_[1]->verify[k]);
   // PERF-51: the lists replayed the committed rows; a second replay must not (gdn_step.cl, DEFERRED)
   for (auto& c : cards_) c->ctl->gdn_pend &= ~0xFFu;
 }

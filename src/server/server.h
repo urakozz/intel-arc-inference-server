@@ -22,6 +22,29 @@ struct Response;
 
 namespace server {
 
+// POST /v1/control/reconfigure (docs/17-running-models.md): b70-serve's settings switched on the loaded model. The
+// reply lists every key of the request as applied (the flag without "--", the old and the new value) or refused (why).
+struct Change {
+  std::string setting;
+  std::string from;
+  std::string to;
+};
+struct Refusal {
+  std::string setting;
+  std::string reason;
+};
+struct Reconfigured {
+  std::vector<Change> applied;
+  std::vector<Refusal> refused;
+};
+struct Options;
+// Applies `settings` (a JSON object, its keys b70-serve's flags without "--") to the engine and to `opts`' speculative
+// fields (spec_lookup .. spec_mtp_lookup, mtp_auto, mtp_adaptive, lookup_adaptive) - nothing else of `opts`. The server
+// calls it with no request running and re-derives its speculative state after it.
+using Reconfigure = std::function<Reconfigured(const nlohmann::json& settings, Options& opts)>;
+// The reconfigure route answers loopback clients only: 127.0.0.0/8, ::1 and their IPv4-mapped form.
+bool is_loopback(const std::string& address);
+
 struct Options {
   std::string host = "0.0.0.0";
   int port = 8000;
@@ -86,6 +109,9 @@ struct Options {
   // How b70-serve runs the model on the cards, for the startup line ("1 card", "pp - ...", "replica - ..."); empty
   // when the family's own runner says it.
   std::string parallel_desc;
+  // POST /v1/control/reconfigure's settings (b70-serve sets it where its engine switches some in place); empty: the
+  // route answers that this server switches nothing in place.
+  Reconfigure reconfigure;
 };
 
 struct BatchEngineIface;
@@ -156,12 +182,17 @@ class Server {
   void generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
                      Outcome& outcome, const std::function<void(const Delta&)>& emit,
                      const std::function<bool()>& gone);
-  bool acquire(uint64_t& ticket);
+  // `queue`: refused (false) when the queue is full; the reconfigure route waits its turn whatever the queue holds.
+  bool acquire(uint64_t& ticket, bool queue = true);
   void release();
   bool bind();
   void handle(const httplib::Request& request, httplib::Response& response, bool chat);
   void tokenize(const httplib::Request& request, httplib::Response& response);
   void detokenize(const httplib::Request& request, httplib::Response& response);
+  void reconfigure(const httplib::Request& request, httplib::Response& response);
+  // The speculative state the options and the engine decide (the constructor's checks, lookup inside DFlash / MTP,
+  // the per-step draft choice) - at construction and after a reconfigure.
+  void configure_spec();
   void log_request(bool chat, const std::string& body, double t_start, const Outcome& outcome);
   void finish_request();   // the request-end snapshot, after the last frame
 

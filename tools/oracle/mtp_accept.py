@@ -16,7 +16,7 @@
 
 Rerun on the recorded opencode log (spec 7 plan 7a) in one command, on the GPU machine:
     tools/oracle/run_in_container.sh 'python3 tools/oracle/mtp_accept.py "$SNAP" \
-        --opencode /ws/tests/golden/opencode/session1 --out /ws/oracle-out-spec8a/accept_opencode.json'
+        --opencode /ws/tests/golden/opencode/session1 --out $B70_DATA/oracle-out/qwen38/mtp-accept/accept_opencode.json'
 
 One teacher-forced CPU forward of the main model (mtp_ref.build_main, the same
 dequantised model as the golden oracle) over ctx[-ctx_max:] + cont gives, per

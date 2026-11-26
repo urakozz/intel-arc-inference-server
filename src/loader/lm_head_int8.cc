@@ -39,19 +39,24 @@ void quantise_int8_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* q_ti
                          float* scales, unsigned threads) {
   if (K % 16 != 0 || N % 16 != 0)
     throw std::runtime_error("quantise_int8_tiled: K and N must be multiples of 16");
+  if (int8_k_major(N) && K % (16 * kInt8HeadKBlock) != 0)
+    throw std::runtime_error("quantise_int8_tiled: an output head's K must be a multiple of " +
+                             std::to_string(16 * kInt8HeadKBlock));
   if (threads == 0) threads = std::max(1u, std::thread::hardware_concurrency());
   const uint32_t tiles = N / 16;
   threads = std::min<unsigned>(threads, tiles);
-  // Whole 16-row tiles per thread: a tile's bytes are one contiguous block, so no
-  // two threads write the same cache line.
+  // Whole 16-row tiles per thread: a tile's 256-byte steps are whole blocks (contiguous
+  // n-major, in blocks k-major), so no two threads write the same cache line.
   auto work = [&](uint32_t t0, uint32_t t1) {
     std::vector<int8_t> row(K);
     for (uint32_t t = t0; t < t1; ++t)
       for (uint32_t j = 0; j < 16; ++j) {
         const uint32_t n = t * 16 + j;
         scales[n] = quantise_row_int8(w + size_t(n) * K, K, row.data());
-        int8_t* dst = q_tiled + size_t(t) * K * 16 + j;
-        for (uint32_t k = 0; k < K; ++k) dst[size_t(k) * 16] = row[k];
+        for (uint32_t k0 = 0; k0 < K; k0 += 16) {
+          int8_t* dst = q_tiled + int8_tiled_index(K, N, k0, n);
+          for (uint32_t k = 0; k < 16; ++k) dst[size_t(k) * 16] = row[k0 + k];
+        }
       }
   };
   std::vector<std::thread> pool;
@@ -119,14 +124,14 @@ void quantise_int8_g32_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* 
 }
 
 namespace {
-// Both tiled layouts (int8 [N/16][K/16][16 k][16 n], bf16 [N/16][K/8][8 k][16 n]) put
-// element (k, n) at (n / 16) * 16K + 16k + n % 16, counted in elements: a 16-row tile is
-// K x 16 contiguous elements, row n's k-th element at stride 16. So one gather serves
-// both. One output tile per thread step: lane l of compact tile t is row ids[16t + l].
-template <class T>
+// Every tiled layout puts row n's k-th element at (k % 16) x 16 from the element (16 (k / 16), n): the n-major ones
+// (int8 [N/16][K/16][16 k][16 n], bf16 [N/16][K/8][8 k][16 n]) and the k-major int8 head (blocks of
+// loader::kInt8HeadKBlock steps). `index(N, k, n)` is the element offset at width N, so one gather serves all. One output tile per thread step: lane l of compact
+// tile t is row ids[16t + l].
+template <class T, class Index>
 void gather_tiled_rows(const char* what, const T* src_tiled, const float* scales, uint32_t K,
                        uint32_t N, const uint32_t* ids, uint32_t n, T* out_tiled,
-                       float* out_scales, unsigned threads) {
+                       float* out_scales, unsigned threads, Index index) {
   if (K % 16 != 0 || N % 16 != 0 || n % 16 != 0)
     throw std::runtime_error(std::string(what) + ": K, N and n must be multiples of 16");
   for (uint32_t j = 0; j < n; ++j)
@@ -135,16 +140,17 @@ void gather_tiled_rows(const char* what, const T* src_tiled, const float* scales
                                " is outside the head's " + std::to_string(N) + " rows");
   if (threads == 0) threads = std::max(1u, std::thread::hardware_concurrency());
   const uint32_t tiles = n / 16;
-  const size_t tile_elems = size_t(K) * 16;
   threads = std::max(1u, std::min<unsigned>(threads, tiles));
   auto work = [&](uint32_t t0, uint32_t t1) {
     for (uint32_t t = t0; t < t1; ++t) {
-      T* dst = out_tiled + size_t(t) * tile_elems;
       for (uint32_t l = 0; l < 16; ++l) {
         const uint32_t id = ids[t * 16 + l];
         if (out_scales) out_scales[t * 16 + l] = scales[id];
-        const T* src = src_tiled + size_t(id / 16) * tile_elems + id % 16;
-        for (uint32_t k = 0; k < K; ++k) dst[size_t(k) * 16 + l] = src[size_t(k) * 16];
+        for (uint32_t k0 = 0; k0 < K; k0 += 16) {
+          const T* src = src_tiled + index(N, k0, id);
+          T* dst = out_tiled + index(n, k0, t * 16 + l);
+          for (uint32_t k = 0; k < 16; ++k) dst[size_t(k) * 16] = src[size_t(k) * 16];
+        }
       }
     }
   };
@@ -162,14 +168,15 @@ void gather_tiled_rows(const char* what, const T* src_tiled, const float* scales
 void gather_int8_tiled_rows(const int8_t* q_tiled, const float* scales, uint32_t K, uint32_t N,
                             const uint32_t* ids, uint32_t n, int8_t* out_tiled,
                             float* out_scales, unsigned threads) {
-  gather_tiled_rows("gather_int8_tiled_rows", q_tiled, scales, K, N, ids, n, out_tiled, out_scales,
-                    threads);
+  gather_tiled_rows("gather_int8_tiled_rows", q_tiled, scales, K, N, ids, n, out_tiled, out_scales, threads,
+                    [K](uint32_t w, uint32_t k, uint32_t r) { return int8_tiled_index(K, w, k, r); });
 }
 
 void gather_bf16_tiled_rows(const uint16_t* w_tiled, uint32_t K, uint32_t N, const uint32_t* ids,
                             uint32_t n, uint16_t* out_tiled, unsigned threads) {
-  gather_tiled_rows<uint16_t>("gather_bf16_tiled_rows", w_tiled, nullptr, K, N, ids, n, out_tiled,
-                              nullptr, threads);
+  gather_tiled_rows<uint16_t>(
+      "gather_bf16_tiled_rows", w_tiled, nullptr, K, N, ids, n, out_tiled, nullptr, threads,
+      [K](uint32_t, uint32_t k, uint32_t r) { return size_t(r / 16) * 16 * K + size_t(k) * 16 + r % 16; });
 }
 
 }  // namespace loader

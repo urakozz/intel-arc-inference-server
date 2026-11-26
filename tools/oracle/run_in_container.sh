@@ -5,7 +5,8 @@
 #   * ORACLE_MODEL (default) - a repo under the read-only HF cache mount, whose
 #     single `snapshots/*/` is resolved inside the container;
 #   * ORACLE_SNAP - an absolute host path to a snapshot directory, mounted
-#     read-only at /snap. This is how a self-quantised checkpoint that never
+#     read-only at /snap (a snapshot inside $HF_CACHE/hub: the whole hub is mounted at its own path and $SNAP is
+#     that path, so the snapshot's links into blobs/ resolve). This is how a self-quantised checkpoint that never
 #     went through `hf download` is used (tools/quantize_qwen38_rtn.sh writes
 #     one), and it takes precedence when set.
 # Runs as the calling uid/gid so outputs are not root-owned (a root-owned file
@@ -21,10 +22,10 @@
 # to 32 GiB + weight staging in the driver), plus ~3 GiB for the OS and ~10 GiB
 # of page cache for the GPU job's weight reads. A run that truly needs more says
 # so (ORACLE_MEMORY=110g, at most MemTotal - 9 GiB: 4 for the OS + 5 buffer) and gets it only with the
-# cards idle: it takes the both-card GPU lock (${B70_LOCK_DIR:-~}/b70-gpu.lock, exclusive,
-# non-blocking) for its whole run, so no GPU job starts beside it, and it is
+# cards idle: when B70_GPU_LOCK names the machine's GPU lock file (the one its GPU jobs hold), it takes that
+# lock exclusive and non-blocking for its whole run, so no GPU job starts beside it, and it is
 # REFUSED (exit 75) while any GPU job holds that lock - never queued, so a
-# caller already holding the lock cannot deadlock on itself. The cap counts
+# caller already holding the lock cannot deadlock on itself. Without B70_GPU_LOCK no lock is taken. The cap counts
 # the container's anon memory, its tmpfs writes (/scratch is the host's /tmp,
 # a tmpfs) and its page cache; the page cache is reclaimed at the cap, so a
 # layer-streamed reference only re-reads from disk. The memory planners
@@ -37,9 +38,12 @@
 # ORACLE_PLE optionally mounts the engine's int8 PLE directory at /ple (read-only): a snapshot's PLE sibling
 # can be an absolute symlink outside the HF cache, so the /hf mount alone cannot expose it.
 # ORACLE_REF optionally mounts a second model directory at /ref (read-only) - a comparison against another checkpoint
-# (tools/oracle/qwen4exp_quality.py kl); a cache entry (models--X) keeps its snapshots' relative blob links inside it.
+# (a KL comparison); a cache entry (models--X) keeps its snapshots' relative blob links inside it.
+# The reference sets: with B70_DATA set, $B70_DATA/oracle-out is mounted read-write at its own path (and each model
+# directory there that is a link, at its target's path), so a command names a set by its host path
+# ($B70_DATA/oracle-out/<model>/<set>, tools/oracle/README.md) and B70_DATA is set inside too.
 # Env: ORACLE_IMAGE, HF_CACHE, REPO_DIR, ORACLE_MODEL, ORACLE_SNAP, ORACLE_PLE, ORACLE_REF, ORACLE_THREADS, ORACLE_MEMORY,
-#      B70_LOCK_DIR (the GPU lock files' directory, default $HOME).
+#      B70_DATA, B70_GPU_LOCK (the GPU lock file the machine's GPU jobs hold; unset: none).
 set -euo pipefail
 # t214 was the reference until 2026-09-09 and is no longer kept; every
 # golden set dumped before that date was produced by it and its rows still say
@@ -58,8 +62,15 @@ mounts=(-v "$REPO_DIR:/ws" -w /ws -v "$HF_CACHE:/hf:ro" -v /tmp:/scratch)
 if [ -n "$ORACLE_SNAP" ]; then
   [ -f "$ORACLE_SNAP/config.json" ] || {
     echo "ORACLE_SNAP=$ORACLE_SNAP has no config.json" >&2; exit 2; }
-  mounts+=(-v "$ORACLE_SNAP:/snap:ro")
-  resolve='SNAP=/snap'
+  if [ "${ORACLE_SNAP#"$HF_CACHE"/hub/}" != "$ORACLE_SNAP" ]; then
+    # A snapshot of the HF cache is relative links into its blobs/: mount the whole hub read-only at its own path
+    # and name the snapshot there, so the links resolve.
+    mounts+=(-v "$HF_CACHE/hub:$HF_CACHE/hub:ro")
+    resolve="SNAP=$ORACLE_SNAP"
+  else
+    mounts+=(-v "$ORACLE_SNAP:/snap:ro")
+    resolve='SNAP=/snap'
+  fi
 else
   resolve="SNAP=\$(ls -d /hf/hub/$ORACLE_MODEL/snapshots/*/ | head -1)"
 fi
@@ -74,6 +85,13 @@ if [ -n "${ORACLE_REF:-}" ]; then
 fi
 
 env_flags=(-e HF_HUB_OFFLINE=1 -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1)
+if [ -n "${B70_DATA:-}" ] && [ -d "$B70_DATA/oracle-out" ]; then
+  mounts+=(-v "$B70_DATA/oracle-out:$B70_DATA/oracle-out")
+  for d in "$B70_DATA"/oracle-out/*; do
+    [ -L "$d" ] && [ -d "$d" ] && mounts+=(-v "$(readlink -f "$d"):$(readlink -f "$d")")
+  done
+  env_flags+=(-e "B70_DATA=$B70_DATA")
+fi
 # ORACLE_MEMORY (<N>g): the container's memory cap, swap off (above). Linux: default CPU_CAP_GB.
 CPU_CAP_GB=64
 if [ -r /proc/meminfo ]; then   # Linux
@@ -89,15 +107,19 @@ if [ -r /proc/meminfo ] && [ "${ORACLE_MEMORY%g}" -gt "$CPU_CAP_GB" ]; then
   if [ "$want" -gt $((total - 9)) ]; then
     echo "run_in_container: REFUSED: ORACLE_MEMORY=${want}g > MemTotal ${total} GiB - 9 GiB (the OS 4 + a 5 GiB buffer)" >&2; exit 2
   fi
-  # Above the CPU cap only with the cards idle: the both-card GPU lock, exclusive, for the whole run
+  # Above the CPU cap only with the cards idle: the GPU lock, exclusive, for the whole run
   # (fd 8 stays open in docker's client, which waits for the container: --rm, foreground).
-  exec 8> "${B70_LOCK_DIR:-$HOME}/b70-gpu.lock" || exit 2
-  if ! flock -n -x 8; then
-    echo "run_in_container: REFUSED: ORACLE_MEMORY=${want}g is above the ${CPU_CAP_GB}g CPU-job cap, which needs" \
-         "the cards idle, and a GPU job holds ${B70_LOCK_DIR:-$HOME}/b70-gpu.lock; run it when no GPU job runs" >&2
-    exit 75
+  if [ -n "${B70_GPU_LOCK:-}" ]; then
+    exec 8> "$B70_GPU_LOCK" || exit 2
+    if ! flock -n -x 8; then
+      echo "run_in_container: REFUSED: ORACLE_MEMORY=${want}g is above the ${CPU_CAP_GB}g CPU-job cap, which needs" \
+           "the cards idle, and a GPU job holds $B70_GPU_LOCK; run it when no GPU job runs" >&2
+      exit 75
+    fi
+    echo "run_in_container: ORACLE_MEMORY=${want}g > ${CPU_CAP_GB}g: holding the GPU lock for this run" >&2
+  else
+    echo "run_in_container: ORACLE_MEMORY=${want}g > ${CPU_CAP_GB}g: no B70_GPU_LOCK set, so nothing keeps GPU jobs off" >&2
   fi
-  echo "run_in_container: ORACLE_MEMORY=${want}g > ${CPU_CAP_GB}g: holding the both-card GPU lock for this run" >&2
 fi
 if [ -n "$ORACLE_THREADS" ]; then
   # torch takes its intra-op pool from OMP_NUM_THREADS at import; MKL's own

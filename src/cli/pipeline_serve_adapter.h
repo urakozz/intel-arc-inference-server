@@ -131,6 +131,15 @@ struct PipelineEngineAdapterT : server::EngineIface {
   // The deepest K any proposer runs (spec 19d: DFlash's 7) - the per-K counters' size.
   static constexpr uint32_t kMaxIterK = 7;
 
+  // b70-serve's reconfigure in place (cli/serve_reconfigure.h), between requests: the proposer this adapter was built
+  // with at a K up to the one it was built with, or none (every argument 0 / false).
+  void set_spec(uint32_t mtp_k, bool lookup, bool dflash, bool dflash_lookup) {
+    k_ = mtp_k;
+    lookup_ = lookup;
+    df_ = dflash;
+    dflash_lookup_ = dflash_lookup;
+  }
+
   void reset() override {
     pending_ = false;   // the session is discarded; nothing to commit
     first_ = false;

@@ -23,6 +23,14 @@
 #define NC 512             /* the rescore's columns: 8 rows x C */
 #endif
 #define GROUPS 243         /* argmax.cl's stage-1 groups (248320 / 1024) */
+// PERF-111: GEMV_KMAJOR 1 reads the full head (N columns) in the loader's k-major order, blocks of GEMV_KMAJOR_B
+// 16-k steps (loader::int8_tiled_index at a head width); the compact head stays n-major (NC is not a head width).
+#ifndef GEMV_KMAJOR
+#define GEMV_KMAJOR 0
+#endif
+#ifndef GEMV_KMAJOR_B
+#define GEMV_KMAJOR_B 1
+#endif
 #define NO_IDX 0x7FFFFFFFu
 #define WG 256
 
@@ -33,7 +41,12 @@ __kernel void head_cand_gather(__global const uchar* restrict w, __global const 
   GATE_RETURN
   const uint gid = get_global_id(0), j = gid / (K / 16), kb = gid % (K / 16);
   const uint id = cand[j];
+#if GEMV_KMAJOR
+  __global const uchar* src =
+      w + (((size_t)kb / GEMV_KMAJOR_B * (N / 16) + id / 16) * GEMV_KMAJOR_B + kb % GEMV_KMAJOR_B) * 256 + id % 16;
+#else
   __global const uchar* src = w + ((size_t)(id / 16) * (K / 16) + kb) * 256 + id % 16;
+#endif
   __global uchar* dst = cw + ((size_t)(j / 16) * (K / 16) + kb) * 256 + j % 16;
   for (uint k = 0; k < 16; ++k) dst[k * 16] = src[k * 16];
   if (kb == 0) cs[j] = scales[id];

@@ -6,6 +6,15 @@
 #define C 64   /* the candidates a row (spec 19 v3d Task 7: 80 for the 2-bit head) */
 #endif
 #define Q 4
+// PERF-111: GEMV_KMAJOR 1 reads the head's tiles k-major in blocks of GEMV_KMAJOR_B 16-k steps
+// ([K/16/B][N/16][B][16 k][16 n], loader::int8_tiled_index at a head width; N the head's rows) - the same bytes in
+// the same order.
+#ifndef GEMV_KMAJOR
+#define GEMV_KMAJOR 0
+#endif
+#ifndef GEMV_KMAJOR_B
+#define GEMV_KMAJOR_B 1
+#endif
 #define WG (C * Q)
 #define NO_IDX 0x7FFFFFFFu
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -21,9 +30,15 @@ __kernel void df_rerank(__global const char* restrict w, __global const float* r
   __local uint tokens[C];
   float a = 0;
   if (id < USED) {
+#if GEMV_KMAJOR
+    __global const char* col = w + (size_t)(id / 16) * GEMV_KMAJOR_B * 256 + id % 16;
+#define I8_OFF(k16) (((size_t)(k16) / GEMV_KMAJOR_B * (N / 16) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B) * 256)
+#else
     __global const char* col = w + (size_t)(id / 16) * (K / 16) * 256 + id % 16;
+#define I8_OFF(k16) ((size_t)(k16) * 256)
+#endif
     for (uint k = q * (K / Q); k < (q + 1) * (K / Q); ++k)
-      a = a + (float)col[(size_t)(k / 16) * 256 + (k % 16) * 16] * bf16f(x[(size_t)r * K + k]);
+      a = a + (float)col[I8_OFF(k / 16) + (k % 16) * 16] * bf16f(x[(size_t)r * K + k]);
   }
   partial[lid] = a;
   barrier(CLK_LOCAL_MEM_FENCE);

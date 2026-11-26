@@ -71,7 +71,7 @@ endfunction()
 # history. Run `cmake --build build --target golden` (or `make golden`).
 add_custom_target(golden
   COMMAND ${CMAKE_COMMAND} -E echo "The oracle runs in the reference container (61 GiB peak, ~17 min), from the source tree's root:"
-  COMMAND ${CMAKE_COMMAND} -E echo "  setsid nohup tools/oracle/golden.sh > oracle-out/golden.log 2>&1 </dev/null &"
+  COMMAND ${CMAKE_COMMAND} -E echo "  setsid nohup tools/oracle/golden.sh > golden.log 2>&1 </dev/null &"
   COMMAND ${CMAKE_COMMAND} -E echo "  tools/oracle/check.sh                 # re-read what was written"
   COMMAND ${CMAKE_COMMAND} -E echo "Prompt ids first, and the measured numbers: tools/oracle/README.md, 'Running it'."
   VERBATIM)
@@ -84,6 +84,7 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
 endif()
 add_subdirectory(third_party)
 add_subdirectory(src/common)
+add_subdirectory(src/cpu)
 add_subdirectory(src/tokenizer)
 add_subdirectory(src/server)
 add_subdirectory(src/loader)

@@ -3,8 +3,11 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <fstream>
+#include <thread>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -149,6 +152,46 @@ SafetensorsSet::SafetensorsSet(const std::string& snapshot_dir, bool single_file
 
 const uint8_t* SafetensorsSet::data(const TensorInfo& t) const {
   return files_[t.file].data() + data_start_[t.file] + t.begin;
+}
+
+std::vector<FileRange> SafetensorsSet::ranges(const std::vector<const TensorInfo*>& ts) const {
+  std::vector<FileRange> r;
+  for (const TensorInfo* t : ts) r.push_back({t->file, data_start_[t->file] + t->begin, data_start_[t->file] + t->end});
+  std::sort(r.begin(), r.end(), [](const FileRange& a, const FileRange& b) {
+    return a.file != b.file ? a.file < b.file : a.begin < b.begin;
+  });
+  std::vector<FileRange> merged;
+  for (const FileRange& x : r) {
+    if (!merged.empty() && merged.back().file == x.file && x.begin <= merged.back().end)
+      merged.back().end = std::max(merged.back().end, x.end);
+    else
+      merged.push_back(x);
+  }
+  return merged;
+}
+
+size_t SafetensorsSet::read_ahead(const std::vector<FileRange>& r, unsigned readers) const {
+  constexpr uint64_t kBlock = uint64_t(8) << 20;
+  std::vector<FileRange> blocks;   // the ranges cut into kBlock pieces, in order: the readers take the next one
+  for (const FileRange& x : r)
+    for (uint64_t b = x.begin; b < x.end; b += kBlock) blocks.push_back({x.file, b, std::min(x.end, b + kBlock)});
+  std::atomic<size_t> next{0}, bytes{0};
+  std::vector<std::thread> pool;
+  for (unsigned i = 0; i < std::max(1u, readers); ++i)
+    pool.emplace_back([&] {
+      std::vector<uint8_t> buf(kBlock);
+      for (size_t k; (k = next++) < blocks.size();) {
+        const FileRange& b = blocks[k];
+        for (uint64_t at = b.begin; at < b.end;) {
+          const ssize_t n = ::pread(files_[b.file].fd(), buf.data(), size_t(b.end - at), off_t(at));
+          if (n <= 0) break;   // the repack's own read of the mapping reports a short file
+          at += uint64_t(n);
+          bytes += size_t(n);
+        }
+      }
+    });
+  for (std::thread& t : pool) t.join();
+  return bytes;
 }
 
 }  // namespace loader

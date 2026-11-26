@@ -32,12 +32,16 @@ inline void repack_int4_layout1(const uint32_t* qweight, const uint16_t* scales,
 // PERF-111: a gemv's tiles from the [n_tile][k] order above (k inner: one sub-group's slab of K contiguous) to
 // [k][n_tile] (GEMV_KMAJOR), so a launch's sub-groups read neighbouring tiles at each k step. tile_bytes is 544
 // for int4 layout 1 (k = 64-K group), 256 for gemv_i8w (k = 16-K step) and gemv_bf16 (k = 8-K step).
-inline void tiles_k_major(const void* src, size_t n_tiles, size_t k_steps, size_t tile_bytes, void* dst) {
+// `block` B > 1 (PERF-111's K-blocked form, the kernels' GEMV_KMAJOR_B): B consecutive k steps of a tile kept
+// together, the B-step blocks in k-major order - (k, nt) at ((k / B) n_tiles + nt) B + k % B; 1 is plain k-major.
+inline void tiles_k_major(const void* src, size_t n_tiles, size_t k_steps, size_t tile_bytes, void* dst,
+                          size_t block = 1) {
   const auto* s = static_cast<const uint8_t*>(src);
   auto* d = static_cast<uint8_t*>(dst);
   for (size_t nt = 0; nt < n_tiles; ++nt)
     for (size_t k = 0; k < k_steps; ++k)
-      std::memcpy(d + (k * n_tiles + nt) * tile_bytes, s + (nt * k_steps + k) * tile_bytes, tile_bytes);
+      std::memcpy(d + ((k / block * n_tiles + nt) * block + k % block) * tile_bytes,
+                  s + (nt * k_steps + k) * tile_bytes, tile_bytes);
 }
 
 // A fused linear's output column n sourced from one part's column.

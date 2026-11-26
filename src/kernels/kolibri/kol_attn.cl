@@ -34,6 +34,18 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 
+// KV8 (PERF-102, `--kv-cache int8`; undefined on every other command line): a FULL layer's int8 cache (kv8_scheme.h at
+// head_dim 128, written by ink_prep.cl's INK_KV8 build): kv_k / kv_v int8 [rows][KV_HEADS][128] and their fp16 scales
+// k_scale / v_scale [rows][KV_HEADS] after them in the argument list. attn_q is the ROTATED q. K and V are read exactly
+// (q8 x scale in fp32, kv8.cl's decode rule) into the same arithmetic as the bf16 build's values; the reduce un-rotates
+// each head's output before the gate. Every other value and order is the build without it.
+#ifndef KV8
+#define KV8 0
+#endif
+#if KV8
+#pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
+#endif
+
 #ifndef M
 #define M 1
 #endif
@@ -53,6 +65,9 @@
 #error "kol_attn: REL_DIM must accompany the relative bias extent"
 #endif
 #define SLIDING (WINDOW != 0)
+#if KV8 && (SLIDING || !GATE)
+#error "kol_attn KV8: the full layers' cache only (the rings stay bf16), with the output gate (Inkling's form)"
+#endif
 #if SLIDING && ((RING % 64) != 0 || RING < WINDOW + M || (WINDOW + M + 63) / 64 + 1 > TGT)
 #error "kol_attn: the ring is whole 64-key blocks holding the window, and the window's blocks fit TGT"
 #endif
@@ -70,6 +85,26 @@
 #define SSCALE 0.08838834764831845f   /* 1 / sqrt(128) */
 
 #include "bf16.h"
+#if KV8
+#define KV8_N HD
+#include "kv8_scheme.h"
+#define KV_T char
+#define KREG_T float
+#define KVAL(x) (x)
+#else
+#define KV_T ushort
+#define KREG_T ushort
+#define KVAL(x) bf16f(x)
+#endif
+#if KV8
+#define KV8_ARG(x) x,
+#define KV8_VARG(x) x, v4, vsc,
+#define KV8_VDECL uint v4[8]; float vsc[2];
+#else
+#define KV8_ARG(x)
+#define KV8_VARG(x)
+#define KV8_VDECL
+#endif
 
 inline uint v2_ppw(uint len) {
   uint p = (len + TGT - 1) / TGT;
@@ -93,6 +128,20 @@ inline uint key_row(uint p) {
 }
 
 // One K row's 8 elements for this lane: dim lane + 16 t, t ascending.
+#if KV8
+inline void load_k(__global const char* restrict kv_k, __global const ushort* restrict k_scale, uint p, uint j, bool ok,
+                   float* kreg) {
+  if (ok) {   // uniform within the sub-group
+    const uchar8 a = intel_sub_group_block_read_uc8((__global const uchar*)(kv_k + ((size_t)p * KV_HEADS + j) * HD));
+    const float s = vload_half((size_t)p * KV_HEADS + j, (__global const half*)k_scale);   // exact (kv8_f16f's value)
+    kreg[0] = (float)as_char(a.s0) * s; kreg[1] = (float)as_char(a.s1) * s; kreg[2] = (float)as_char(a.s2) * s;
+    kreg[3] = (float)as_char(a.s3) * s; kreg[4] = (float)as_char(a.s4) * s; kreg[5] = (float)as_char(a.s5) * s;
+    kreg[6] = (float)as_char(a.s6) * s; kreg[7] = (float)as_char(a.s7) * s;
+  } else {
+    for (uint t = 0; t < PER_LANE; ++t) kreg[t] = 0.0f;
+  }
+}
+#else
 inline void load_k(__global const ushort* restrict kv_k, uint p, uint j, bool ok, ushort* kreg) {
   if (ok) {   // uniform within the sub-group: p is the sub-group's position
     const ushort8 a = intel_sub_group_block_read_us8(kv_k + ((size_t)key_row(p) * KV_HEADS + j) * HD);
@@ -102,10 +151,36 @@ inline void load_k(__global const ushort* restrict kv_k, uint p, uint j, bool ok
     for (uint t = 0; t < PER_LANE; ++t) kreg[t] = (ushort)0;
   }
 }
+#endif
 
 // The wave's 16 V values of dim `lid` (sub-group sgid holds dims 16 sgid .. +15), position p0 + s at
 // register s; outside [first, last] 0. p0 is 16-aligned, so the 16 rows are contiguous (in the ring:
-// RING is whole 64-row blocks). The surface: the ring's RING rows, or the cache's last + 1.
+// RING is whole 64-row blocks). The surface: the ring's RING rows, or the cache's last + 1. KV8: one block read of 16
+// codes a position, times its scale.
+#if KV8
+// Two waves (32 positions, p0 32-aligned at the even wave) of this lane's dim in one transform read - uint z holds
+// positions 4 z .. 4 z + 3 - and their 32 scales one a lane (vsc[h]: position p0 + 16 h + lane), loaded at the even
+// wave; the odd wave reads the second half. The values are the one-position reader's: q8 x f16(scale), 0 past last.
+inline void load_v(__global const char* restrict kv_v, __global const ushort* restrict v_scale, __private uint* v4, __private float* vsc,
+                   uint p0, uint j, uint sgid, uint first, uint last, float* vreg) {
+  (void)first;   // 0: a full layer
+  const uint odd = (p0 >> 4) & 1u, lane = get_sub_group_local_id();
+  if (odd == 0u) {   // uniform
+    intel_sub_group_2d_block_read_transform_8b_32r16x1c((__global void*)(kv_v + (size_t)j * HD), HD, (int)last + 1,
+                                                        KV_HEADS * HD, (int2)((int)(SG * sgid), (int)p0), v4);
+    for (uint h = 0; h < 2u; ++h) {
+      const uint p = p0 + 16u * h + lane;
+      vsc[h] = p <= last ? vload_half((size_t)p * KV_HEADS + j, (__global const half*)v_scale) : 0.0f;
+    }
+  }
+  const float sc = odd ? vsc[1] : vsc[0];
+#pragma unroll
+  for (uint s = 0; s < WAVE_P; ++s) {
+    const uint w = odd ? v4[4u + (s >> 2)] : v4[s >> 2];
+    vreg[s] = (float)as_char((uchar)(w >> (8u * (s & 3u)))) * intel_sub_group_shuffle(sc, s);
+  }
+}
+#else
 inline void load_v(__global const ushort* restrict kv_v, uint p0, uint j, uint sgid, uint first, uint last,
                    ushort* vreg) {
   ushort vb[WAVE_P];
@@ -118,11 +193,15 @@ inline void load_v(__global const ushort* restrict kv_v, uint p0, uint j, uint s
                                              KV_HEADS * HD * 2, (int2)((int)(SG * sgid), (int)key_row(p0)), vb);
   for (uint s = 0; s < WAVE_P; ++s) vreg[s] = (p0 + s <= last && p0 + s >= first) ? vb[s] : (ushort)0;
 }
+#endif
 
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const float* restrict attn_q,
-                              __global const ushort* restrict kv_k, __global const ushort* restrict kv_v,
+                              __global const KV_T* restrict kv_k, __global const KV_T* restrict kv_v,
+#if KV8
+                              __global const ushort* restrict k_scale, __global const ushort* restrict v_scale,
+#endif
                               __global float* restrict attn_part
 #if REL_BIAS
                               , __global const float* restrict relative_q,
@@ -183,12 +262,13 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
     const uint first = key_lo(pos + mlo);   // the group's lowest visible key
     const uint nwaves = (bend - bstart + WAVE_P - 1) / WAVE_P;
 
-    ushort kreg[PPS][PER_LANE], vreg[WAVE_P];
+    KV8_VDECL
+    KREG_T kreg[PPS][PER_LANE], vreg[WAVE_P];
     for (uint pp = 0; pp < PPS; ++pp) {
       const uint p = bstart + sgid + NSG * pp;
-      load_k(kv_k, p, j, p <= last && p >= first, kreg[pp]);
+      load_k(kv_k, KV8_ARG(k_scale) p, j, p <= last && p >= first, kreg[pp]);
     }
-    load_v(kv_v, bstart, j, sgid, first, last, vreg);
+    load_v(kv_v, KV8_VARG(v_scale) bstart, j, sgid, first, last, vreg);
     for (uint w = 0; w < nwaves; ++w, ++wc) {
       const uint p0 = bstart + w * WAVE_P;
       const uint buf = wc & 1u;
@@ -203,7 +283,7 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
         qv[6] = as_float(qa.s6); qv[7] = as_float(qa.s7);
         for (uint pp = 0; pp < PPS; ++pp) {
           float a = 0.0f;
-          for (uint t = 0; t < PER_LANE; ++t) a = fma(qv[t], bf16f(kreg[pp][t]), a);
+          for (uint t = 0; t < PER_LANE; ++t) a = fma(qv[t], KVAL(kreg[pp][t]), a);
           for (uint stride = SG / 2; stride > 0; stride >>= 1)
             a += intel_sub_group_shuffle_down(a, a, stride);
           if (lane == 0) sc_x[buf][pr][sgid + NSG * pp] = a;
@@ -245,7 +325,7 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
         for (uint s2 = 0; s2 < WAVE_P; ++s2) {   // ascending s
           const float ws = intel_sub_group_shuffle(wl, s2);
           ssum += ws;
-          tsum = fma(ws, bf16f(vreg[s2]), tsum);
+          tsum = fma(ws, KVAL(vreg[s2]), tsum);
         }
         if (nmx > -INFINITY) {
           sm[pr] = fma(sm[pr], resc, ssum);
@@ -256,9 +336,9 @@ __kernel void kol_attn_decode(__global const uint* restrict ctrl, __global const
       if (w + 1 < nwaves) {
         for (uint pp = 0; pp < PPS; ++pp) {
           const uint p = p0 + WAVE_P + sgid + NSG * pp;
-          load_k(kv_k, p, j, p <= last && p >= first, kreg[pp]);
+          load_k(kv_k, KV8_ARG(k_scale) p, j, p <= last && p >= first, kreg[pp]);
         }
-        load_v(kv_v, p0 + WAVE_P, j, sgid, first, last, vreg);
+        load_v(kv_v, KV8_VARG(v_scale) p0 + WAVE_P, j, sgid, first, last, vreg);
       }
     }
 #pragma unroll
@@ -320,7 +400,11 @@ __kernel void kol_attn_reduce(__global const uint* restrict ctrl, __global const
     acc = fma(acc, a, bacc * bs);
     mx = nmx;
   }
-#if GATE
+#if KV8 && GATE
+  __local float rot[HD];
+  const size_t out = (size_t)m * OUT_N + (size_t)h * HD + d;
+  attn_out[out] = rne_bf16(kv8n_unrotate(acc / sm, d, rot) / (1.0f + exp(-gate[out])));
+#elif GATE
   const size_t out = (size_t)m * OUT_N + (size_t)h * HD + d;
   attn_out[out] = rne_bf16((acc / sm) / (1.0f + exp(-gate[out])));
 #else

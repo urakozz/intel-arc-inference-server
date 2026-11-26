@@ -63,6 +63,33 @@ The port is open from startup: `GET /health` answers 503 `{"status":"loading"}` 
 until then every other route but `GET /version` answers 503. `POST /tokenize` (a `prompt`, or chat `messages`
 rendered as a chat request's) and `POST /detokenize` (`tokens`) follow vLLM's.
 
+### Switching settings without a reload
+
+`POST /v1/control/reconfigure` switches the settings that only change how the loaded model runs, like
+`nginx -s reload`: the requests already running or queued finish, the change is applied, one log line says what changed
+(`b70-serve: reconfigured in place: --spec mtp -> off`), and the requests after it are served with the new setting -
+the same output as a server started with it. The prefix cache starts empty, as at startup. The keys are the flags
+without `--`, the values as on the command line:
+
+| Key | Switches |
+|---|---|
+| `spec` | the proposer the server started with (`mtp`, `dflash`, `lookup`; `auto` when it started with `auto`) and `off`. The MTP head or the draft model stays loaded while off; switching to another proposer needs a restart. |
+| `spec-max` | the proposer's drafts per iteration, from 1 up to the value it started with |
+| `host-experts` | `auto`, `gpu`, `cpu` (Qwen3.8-Flash-Next with experts in host memory, started with `auto` or `cpu`) |
+
+```sh
+curl -s localhost:8000/v1/control/reconfigure -d '{"spec": "off"}'
+# {"applied":[{"from":"mtp","setting":"spec","to":"off"}],"refused":[]}
+curl -s localhost:8000/v1/control/reconfigure -d '{"spec": "mtp", "kv-cache": "int8"}'
+# {"applied":[{"from":"off","setting":"spec","to":"mtp"}],
+#  "refused":[{"reason":"needs a restart: it changes the memory plan","setting":"kv-cache"}]}
+```
+
+Every other flag (`--kv-cache`, `--max-len`, `--max-num-seqs`, `--parallel`, `--prefill-backend`, the model, ...) is
+refused with the reason it needs a restart; the other keys of the same request still apply. The route answers
+clients on the same machine only (a loopback address; 403 otherwise), and 409 on a server that switches nothing in place:
+several requests at once (`--max-num-seqs` above 1, `--parallel replica`) and Kolibri-1.
+
 ### `--prefix-split-last` for agentic sessions
 
 Chat clients that drop the model's reasoning from the history (opencode does) change the prompt right after the last
@@ -308,7 +335,7 @@ bitwise.
   cache, MTP, DFlash, tensor parallel.
 - Ornith 1.5 35B-A3B is supported, with measured prefill and decode rows.
 - Qwen3.8-Flash-Next is served whole on two cards from our own export, with its routed experts partly in host memory
-  (the expert tier). Pipeline parallel is the default; tensor parallel is faster at decode and slower at prefill.
+  (the expert tier). Tensor parallel is the default; pipeline parallel is faster at prefill and slower at decode.
 - Kolibri-1 is supported by the code but not tuned, and has no speed rows.
 - Muse-Glimmer and Agnes 3.0 Flash are no longer supported. A `config.json` naming `AgnesForConditionalGeneration` is
   refused by name.
@@ -319,10 +346,10 @@ validation (golden sets, serving, prefix cache, speculative decoding) runs on `m
 | | Qwen3.8-27B | Ornith 1.5 35B-A3B | Kolibri-1 | Qwen3.8-Flash-Next |
 |---|---|---|---|---|
 | checkpoint | published (ours, int4 g64) | published (ours) | published (ours, int4 g64) | ours (int4 g64, not published) or Intel's interim W4A16 |
-| `b70-serve` | yes | yes | yes, two cards by default | the whole model on two cards (`--parallel auto` = pp), experts partly in pinned host memory |
-| `--parallel tp` | yes | refused | refused | yes, when asked: decode with MTP 0.99-1.35x pp's on text; prefill 0.69-0.81x pp's (32k / 128k-token prompt) |
+| `b70-serve` | yes | yes | yes, two cards by default | the whole model on two cards (`--parallel auto` = tp), experts partly in pinned host memory |
+| `--parallel tp` | yes | refused | refused | its default for the whole model: decode with MTP 1.0-1.25x pp's; prefill 0.69-0.81x pp's (32k / 128k-token prompt) |
 | `replica`, `--max-num-seqs` | yes | yes: up to 4 requests a card sharing a KV page pool, `replica` up to 8 | refused | refused |
-| `--parallel pp` (two cards) | yes | yes | its default | its default for the whole model |
+| `--parallel pp` (two cards) | yes | yes | its default | yes, when asked: faster prefill |
 | `b70-decode` | yes | yes | decode and prefill, two cards by default | decode and prefill, the whole model or `--layers N` |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (an MoE head) | none (`auto` = off) | `b70-serve`: adaptive MTP by default, `--spec-max` 1 to 3; `b70-decode` decodes plain |
 | `--spec lookup` (developer value) | yes | yes | no | yes |
@@ -485,7 +512,7 @@ Our export, two cards, at about 1-4k context:
 | prefill, 128k-token prompt | 2,918 t/s | 1,980 t/s |
 | first token, 43-token prompt | 0.30 s | 0.30 s |
 | decode, MTP off (code / prose / tool calls) | 54-59 / 48-49 / 52-63 t/s | 59-66 / 49-55 / 54-70 t/s |
-| decode, MTP (code / prose / tool calls) | 72-89 / 45-59 / 78-105 t/s | 84-92 / 49-70 / 74-114 t/s |
+| decode, MTP (code / prose / tool calls) | 79 / 63 / 98-123 t/s | 99 / 64 / 84-126 t/s |
 
 `--max-len auto` gives 65,536. Passkey retrieval is 3 of 3 at 61,955 ids, and a prefix cache hit's output is identical
 to the cold run.
@@ -508,6 +535,11 @@ whole (no `--layers`):
 - `--max-len auto` takes the longest of 32,768, 65,536, 131,072 and 262,144 whose projected decode speed stays within
   5 % of 32,768's.
 - The placement is static; experts are not swapped while serving.
+- `--host-experts auto` (the default) computes the experts in host memory on the CPU wherever a startup measurement
+  says that beats reading them over PCIe, per number of rows a step (1 for a plain step, 2-4 for a verify), and
+  re-decides from the observed CPU time while serving. Under `tp` each card's halves go to the CPU, both cards' in one
+  batch. `gpu` reads them over PCIe, `cpu` computes all of them on the CPU. The output is the same either way. The CPU
+  is shared: a busy CPU slows decode.
 
 Loading takes about 10 minutes and pins 63.2 GB of host memory. With the prefix cache the server holds about 104 GB,
 so the model needs at least 128 GB of system RAM. Run nothing else memory-hungry beside it: when RAM runs short the
@@ -556,14 +588,14 @@ MTP in `b70-serve`:
 
 Two cards split the model one of two ways:
 
-- `--parallel pp` (what `--parallel auto` picks for the whole model on two cards; one card when only one is visible)
-  gives each card half of the layers: 24 each, with the MTP head and the lm_head on the second.
-- `--parallel tp` gives each card half of every layer: half the attention and gated delta-net heads, half of every
+- `--parallel pp` gives each card half of the layers: 24 each, with the MTP head and the lm_head on the second.
+- `--parallel tp` (what `b70-serve`'s `--parallel auto` picks for the whole model on two cards; one card when only one
+  is visible) gives each card half of every layer: half the attention and gated delta-net heads, half of every
   expert (each card keeps its own experts' halves resident and reads the rest from host memory), and half the
   lm_head's vocabulary. The MTP head is whole on the second card. The two halves are summed after each mixer and each
   MoE block by peer writes.
 
-Decode with MTP is as fast or faster under `tp` (0.99-1.35x `pp`'s on text). Prefill is slower: 0.69x `pp`'s for a
+Decode with MTP is as fast or faster under `tp` (code 1.25x `pp`'s, prose 1.01x, tool calls 1.01x). Prefill is slower: 0.69x `pp`'s for a
 32k-token prompt and 0.81x for 128k. Both cards still run their own hyper-connections and part of the indexer's block
 scoring (the scoring itself is split across the cards). `tp` needs `--lm-head int8` in `b70-decode` (`b70-serve`
 always uses it) and `--layers N` rather than `--layers auto`, and has no `--pipeline-split`
@@ -571,8 +603,8 @@ always uses it) and `--layers N` rather than `--layers auto`, and has no `--pipe
 ```sh
 # every command below needs the PLE int8 file beside the snapshot (<snapshot>-ple-int8/)
 O=<our export>   # the whole model; experts that do not fit VRAM in pinned host memory (63.2 GB pinned with the PLE)
-./build/src/cli/b70-serve $O                     # two cards: pp
-./build/src/cli/b70-serve $O --parallel tp        # faster decode, slower prefill
+./build/src/cli/b70-serve $O                     # two cards: tp
+./build/src/cli/b70-serve $O --parallel pp        # faster prefill, slower decode
 ./build/src/cli/b70-decode $O --parallel pp --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $O --parallel tp --lm-head int8 --bench --prefill-length 4096 --tg 32
 

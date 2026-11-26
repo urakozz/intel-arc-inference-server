@@ -10,7 +10,7 @@
 // Compile-time knobs (tools/probe/CMakeLists.txt builds one binary per set):
 //   M, K, N, S   rows (1..16), the weight shape, grid split-K slices (S | K/64)
 //   LAYOUT       0: GPTQ qweight [K/8][N] u32 + f16 scales [K/64][N]; 1: 544-byte tiles
-//                (common/repack.h); 2: the int8 head [N/16][K/16][16 k][16 n] + fp32 [N]
+//                (common/repack.h); 2: the int8 head [N/16][K/16][16 k][16 n] ([K/16][N/16] under GEMV_KMAJOR) + fp32 [N]
 //   TYPE         1: bf16 DPAS (k16) - the weight dequantised to the bf16 integer q - 8 (int4)
 //                or q (int8), exact; 2: int DPAS (k32) on int8 activations (psm_quant's per-row
 //                scale) - i8 x i4 for int4, i8 x i8 for the head
@@ -79,6 +79,25 @@
 #endif
 #ifndef A2D
 #define A2D 0
+#endif
+// PERF-111: the int8 head's tiles k-major ([K/16][N/16], loader::int8_tiled_index at a head width) - the build
+// gets GEMV_KMAJOR=1 where the loader writes the head so (tools/probe/CMakeLists.txt psm_variant).
+#ifndef GEMV_KMAJOR
+#define GEMV_KMAJOR 0
+#endif
+#ifndef GEMV_KMAJOR_B
+#define GEMV_KMAJOR_B 1
+#endif
+#if GEMV_KMAJOR_B > 1 && GEMV_KMAJOR_B % 4 != 0
+#error "probe_small_m: a K block holds whole k-groups (4 steps)"
+#endif
+#if GEMV_KMAJOR
+#define I8_AT(k16) ((((size_t)(k16) / GEMV_KMAJOR_B) * (N / 16) + n_tile) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B)
+#define I8_TILE(g) (w + I8_AT((g) * 4u) * 256u)
+#define I8_STEP ((size_t)(GEMV_KMAJOR_B > 1 ? 1 : N / 16) * 256u)
+#else
+#define I8_TILE(g) (w + ((size_t)n_tile * (K / 16) + (g) * 4u) * 256u)
+#define I8_STEP 256
 #endif
 #ifndef NODQ
 #define NODQ 0
@@ -198,7 +217,11 @@ inline void prefetch_group(__global const uchar* w, uint n_tile, uint gp) {
 #elif LAYOUT == 1
   prefetch((__global const uint*)w + ((size_t)n_tile * G + gp) * TILE_U32, TILE_U32);
 #else
+#if GEMV_KMAJOR
+  for (int d = 0; d < 4; ++d) prefetch(I8_TILE(gp) + d * I8_STEP, 256);
+#else
   prefetch(w + ((size_t)n_tile * (K / 16) + gp * 4u) * 256u, 1024);
+#endif
 #endif
 #endif
 }
@@ -259,10 +282,10 @@ __kernel void psm(__global const uchar* restrict w,       // int4 words / tiles,
 #endif
     // ---- the weights: B operands, dequantised once for every row block -----------------
 #if LAYOUT == 2
-    __global const uchar* tile = w + ((size_t)n_tile * (K / 16) + g * 4u) * 256u;
+    __global const uchar* tile = I8_TILE(g);
 #if TYPE == 1
     for (int d = 0; d < 4; ++d) {
-      const char16 c = as_char16(intel_sub_group_block_read_uc16(tile + d * 256));
+      const char16 c = as_char16(intel_sub_group_block_read_uc16(tile + d * I8_STEP));
       int8 b;
       b.s0 = (int)(int_bf16_hi(c.s1) | int_bf16_lo(c.s0));
       b.s1 = (int)(int_bf16_hi(c.s3) | int_bf16_lo(c.s2));
@@ -281,8 +304,8 @@ __kernel void psm(__global const uchar* restrict w,       // int4 words / tiles,
     }
 #else
     for (int h = 0; h < 2; ++h) {
-      const int4 lo = as_int4(intel_sub_group_block_read_uc16(tile + (2 * h) * 256));
-      const int4 hi = as_int4(intel_sub_group_block_read_uc16(tile + (2 * h + 1) * 256));
+      const int4 lo = as_int4(intel_sub_group_block_read_uc16(tile + (2 * h) * I8_STEP));
+      const int4 hi = as_int4(intel_sub_group_block_read_uc16(tile + (2 * h + 1) * I8_STEP));
       const int8 b = (int8)(lo, hi);
       for (int rb = 0; rb < RB; ++rb) {
         short8 a;
@@ -416,11 +439,11 @@ __kernel void psm(__global const uchar* restrict w,       // int4 words / tiles,
     }
 #endif
 #if LAYOUT == 2
-    __global const uchar* tile = w + ((size_t)n_tile * (K / 16) + g * 4u) * 256u;
+    __global const uchar* tile = I8_TILE(g);
 #if TYPE == 1
     for (int d = 0; d < 4; ++d) {
       // lane l: k = (g*4 + d)*16 + l, the 16 columns' bytes contiguous
-      const char16 c = as_char16(vload16(0, tile + d * 256 + lane * 16));
+      const char16 c = as_char16(vload16(0, tile + d * I8_STEP + lane * 16));
       short8 a0, a1;
       a0.s0 = int_bf16_lo(c.s0); a0.s1 = int_bf16_lo(c.s1); a0.s2 = int_bf16_lo(c.s2); a0.s3 = int_bf16_lo(c.s3);
       a0.s4 = int_bf16_lo(c.s4); a0.s5 = int_bf16_lo(c.s5); a0.s6 = int_bf16_lo(c.s6); a0.s7 = int_bf16_lo(c.s7);
@@ -433,7 +456,7 @@ __kernel void psm(__global const uchar* restrict w,       // int4 words / tiles,
     for (int h = 0; h < 2; ++h) {
       // lane l: k = k0 + 2l (low byte) and k0 + 2l + 1 (high byte), k0 = (g*4 + 2h)*16
       const uint kk = 2u * lane;
-      __global const uchar* tt = tile + (2 * h + kk / 16) * 256 + (kk % 16) * 16;
+      __global const uchar* tt = tile + (2 * h + kk / 16) * I8_STEP + (kk % 16) * 16;
       const uchar16 lo = vload16(0, tt), hi = vload16(0, tt + 16);
       const ushort16 sh = convert_ushort16(lo) | (convert_ushort16(hi) << (ushort)8);
       const short8 a0 = as_short8(sh.lo), a1 = as_short8(sh.hi);

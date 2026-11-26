@@ -7,12 +7,13 @@ namespace l0 {
 class Kernel;
 class Event;
 
-// Two flavours. immediate(): synchronous - every append executes and completes
-// before returning; used for uploads and tests. regular(): in-order, recorded
-// once, closed, executed many times by Queue::execute - the decode list.
+// immediate(): synchronous appends, used for uploads and tests. immediate_async():
+// in-order submission with one host wait, used for prompt passes and overlap.
+// regular(): recorded once, closed and replayed by Queue::execute for decode.
 class CmdList {
  public:
   static CmdList immediate(Context& ctx, uint32_t ordinal = 0);
+  static CmdList immediate_async(Context& ctx, uint32_t ordinal = 0);
   static CmdList regular(Context& ctx, uint32_t ordinal = 0);
   // An asynchronous in-order immediate list on the device's copy-only engine (the compute
   // ordinal on a device without one): its copies run beside the compute lists, and
@@ -38,6 +39,9 @@ class CmdList {
   // is signalled. `e` is a l0::SyncEvent's handle (an event in a pool both devices see).
   void barrier_signal(ze_event_handle_t e);
   void wait_event(ze_event_handle_t e);
+  // PERF-124 step 4: resets `e` in list order (zeCommandListAppendEventReset) - an event the host signals and this
+  // list waits on is reset by the list itself before the step that hands off to the host.
+  void reset_event(ze_event_handle_t e);
   void close();
   void reset();
   void host_synchronize();

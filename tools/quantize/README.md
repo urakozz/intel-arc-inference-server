@@ -156,7 +156,7 @@ needs an `auto_round*` format):
 
 `--iters 0` is RTN - minutes, lower quality. Drop it for real AutoRound tuning.
 The loader asserts sym / g64 / gptq, so those are not optional. A fresh
-checkpoint needs its own `oracle-out-*` golden set before it can gate anything.
+checkpoint needs its own golden set (`$B70_DATA/oracle-out/<model>/`) before it can gate anything.
 
 Also present in 0.16.0 and relevant to the W4A8 probe:
 `--act_bits`,
@@ -257,10 +257,10 @@ tools/quantize/quantize_qwen4exp.sh selftest         # the whole pipeline on the
 
 - **Card:** one card (`CARD`, default 1): card 0 stays free for other card jobs. A job that needs both cards waits
   until the quantisation ends, so start such runs before, or `stop` and `start` around them.
-- **Output and disks:** `QUANT_ROOT` = `$B70_DATA/hdd/quant/` (a large disk) holds
+- **Output and disks:** `QUANT_ROOT` (default `$B70_DATA/quant/`; point it at a large disk) holds
   `Qwen3.8-Flash-Next-W4A16-g64-<date>/` (`flash-next-current` points at it): `export/<snapshot>-w4g64/` (the
   checkpoint), `export/<snapshot>-w4g64-ple-int8/` (the engine's PLE file), `resume/`, `work/`, `RESULT`, `run.log`
-  (-> `$B70_DATA/logs/flash-next-quant/run-<time>.log`). `PLE_DIR` = `$B70_DATA/scratch/flash-next-ple/` on a fast SSD holds the
+  (-> `$B70_DATA/logs/flash-next-quant/run-<time>.log`). Once uploaded, the export lives only in the HF cache snapshot of the model repo; this run folder is not kept. `PLE_DIR` = `$B70_DATA/scratch/flash-next-ple/` on a fast SSD holds the
   PLE table as one raw 102 GB file while `quant` runs (below). Growth (derived from the real-width probe and the tiny
   runs): `resume/` 21.5 GB from the first block on, overwritten each block (two fp32 files: 128 x 2048 x 10240 x 4 B
   each); the export ~1.4 GB a layer (512 experts 1.34 GB + the dense part), +102.4 GB of bf16 PLE table once layer 1
@@ -399,7 +399,7 @@ block far above ~60 min, or RAM in `status` near 115 GB, is the moment to `stop`
 
 `tools/quantize/qwen4exp/` holds what spec 21-QFN-v1's engine needs before (and beside) 21q's own AutoRound run.
 Every script runs in `agnes-ref-img` with 21-QFN-v1a's transformers 5.19.0 site first on `PYTHONPATH`
-(`tools/oracle/qwen4exp_env.sh`; on the Mac `oracle-out-q4exp/site`):
+(`tools/oracle/qwen4exp_env.sh`; default `$B70_DATA/oracle-out/flash-next/python-site`):
 
 - `make_synth.py <out> --form ours|intel --tokenizer <the original's small files> [--layers 4]
   [--ple-base 1000] [--mtp] [--seed 0]` - a checkpoint at the REAL widths with random weights, every tensor
@@ -432,15 +432,15 @@ Every script runs in `agnes-ref-img` with 21-QFN-v1a's transformers 5.19.0 site 
   builders. Small fixtures (16 experts, a 1024-row vocabulary): ~3-4 min in an 8 GB / 4-CPU container.
 
 ```sh
-docker run --rm --memory 8g --cpus 4 -e PYTHONPATH=/ws/oracle-out-q4exp/site \
-  -e TORCH_EXTENSIONS_DIR=/ws/oracle-out-q4exp/torch-ext -v "$PWD":/ws -w /ws agnes-ref-img:latest \
+docker run --rm --memory 8g --cpus 4 -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" -e PYTHONPATH=$B70_DATA/oracle-out/flash-next/python-site \
+  -e TORCH_EXTENSIONS_DIR=$B70_DATA/oracle-out/flash-next/torch-ext -v "$PWD":/ws -w /ws agnes-ref-img:latest \
   python3 tools/quantize/qwen4exp/test_qwen4exp_quant.py
 # a synthetic checkpoint, its PLE file beside it and the check - the layout qwen4exp_load_synth_*_test reads
-# (validation: r31.synth writes oracle-out-q4exp-synth/{ours,intel}/ckpt and ckpt-ple-int8 under $DATA)
-python3 tools/quantize/qwen4exp/make_synth.py oracle-out-q4exp-synth/ours/ckpt --form ours --mtp \
-  --tokenizer oracle-out-q4exp/orig-small
-python3 tools/quantize/qwen4exp/ple_int8.py oracle-out-q4exp-synth/ours/ckpt oracle-out-q4exp-synth/ours/ckpt-ple-int8
-python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple oracle-out-q4exp-synth/ours/ckpt-ple-int8
+# (validation: r31.synth writes $B70_DATA/oracle-out/flash-next/synth/{ours,intel}/ckpt and ckpt-ple-int8 under $DATA)
+python3 tools/quantize/qwen4exp/make_synth.py $B70_DATA/oracle-out/flash-next/synth/ours/ckpt --form ours --mtp \
+  --tokenizer $B70_DATA/oracle-out/flash-next/orig-small
+python3 tools/quantize/qwen4exp/ple_int8.py $B70_DATA/oracle-out/flash-next/synth/ours/ckpt $B70_DATA/oracle-out/flash-next/synth/ours/ckpt-ple-int8
+python3 tools/quantize/qwen4exp/check.py $B70_DATA/oracle-out/flash-next/synth/ours/ckpt --ple $B70_DATA/oracle-out/flash-next/synth/ours/ckpt-ple-int8
 ```
 
 ## The DFlash 2 drafter (`tools/quantize/quantize_dflash.sh`, the open-work list "DFlash drafter quant")

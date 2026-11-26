@@ -19,7 +19,7 @@
 //                       norm          fp32 (1 + w) [10240]                                    40,960 B
 //                     13,475,840 B each, 26,951,680 B a layer
 //                     int8 (Qwen4ExpDesc::hc_int8, PERF-66): each linear as int8 tiles [N/16][K/16][16 k][16 n]
-//                     (loader::int8_tiled_index) followed by its fp16 scales [K/32][N] (one per 32 k of a row,
+//                     (n-major always: not the heads' PERF-111 k-major order) followed by its fp16 scales [K/32][N] (one per 32 k of a row,
 //                     loader::quantise_int8_g32_tiled) - the kernels find the scales right after the tiles:
 //                       down||inject  3,440,640 + 215,040 B   up  3,276,800 + 204,800 B   norm  40,960 B
 //                     7,178,240 B each (the final mixer: 7,004,160 B)

@@ -406,7 +406,7 @@ int check_wide(Dev& d, const std::vector<float>& rope, const l0::Mem& brope) {
       size_t e = 0;
       for (uint32_t kk = 0; kk < K; ++kk)
         for (uint32_t j = 0; j < NS; ++j)
-          e += got[size_t(kk) * NS + j] != (i8 ? rne(float(q[dfref::i8_index(K, kk, n0 + j)]))
+          e += got[size_t(kk) * NS + j] != (i8 ? rne(float(q[dfref::i8_index(K, N, kk, n0 + j)]))
                                                : wb[dfref::bf16_tiled_index(K, kk, n0 + j)]);
       std::printf("%s: columns %u..%u of [%u][%u] - %zu slab values differ\n", i8 ? "df_w_slab_i8" : "df_w_slab_bf16",
                   n0, n0 + NS - 1, N, K, e);

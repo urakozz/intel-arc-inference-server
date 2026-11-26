@@ -153,7 +153,7 @@ int main(int argc, char** argv) {
   const std::string tap_dump = golden::take_flag(argc, argv, "--tap-dump=");   // debug (header)
   const std::string tap_at = golden::take_flag(argc, argv, "--tap-at=");
   const std::string arg = argc > 1 ? argv[1] : "";
-  const std::string gdir = argc > 2 ? argv[2] : "oracle-out-kolibri";
+  const std::string gdir = argc > 2 ? argv[2] : "oracle-out/kolibri/golden";
   kolibri_rig::Options o;
   o.max_len = kMaxLen;
   o.debug_tap = true;

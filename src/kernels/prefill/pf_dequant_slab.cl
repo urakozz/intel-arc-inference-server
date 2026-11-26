@@ -9,6 +9,36 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 
+#if INK_PREFILL
+// The two decode tile layouts into a BF16 GEMM slab. Int8 values widen
+// exactly. Their channel scales are applied once after the FP32 dot.
+__attribute__((reqd_work_group_size(64, 1, 1)))
+__kernel void pf_ink_slab(__global const uchar* restrict raw, __global ushort* restrict slab,
+                          uint K, uint n0, uint width, uint scaled) {
+  const uint j = get_global_id(0), n = n0 + j, k0 = get_group_id(1) * 8;
+  const size_t tile = (size_t)(n / 16) * K * 16 + n % 16;
+  for (uint i = 0; i < 8; ++i) {
+    const uint k = k0 + i;
+    const size_t src = tile + k * 16;
+    const ushort v = scaled ? (ushort)(as_uint((float)((__global const char*)raw)[src]) >> 16)
+                            : ((__global const ushort*)raw)[src];
+    slab[(size_t)k * width + j] = v;
+  }
+}
+
+__attribute__((reqd_work_group_size(64, 1, 1)))
+__kernel void pf_ink_scale(__global float* restrict y, __global const float* restrict scale, uint N) {
+  const uint n = get_global_id(0), row = get_group_id(1);
+  y[(size_t)row * N + n] *= scale[n];
+}
+
+__attribute__((reqd_work_group_size(64, 1, 1)))
+__kernel void pf_ink_tail(__global const float* restrict src, __global float* restrict dest,
+                          uint width, uint pitch) {
+  const uint n = get_global_id(0), row = get_group_id(1);
+  dest[(size_t)row * pitch + n] = src[(size_t)row * width + n];
+}
+#else
 #ifndef K
 #error "pf_dequant_slab: K must be defined"
 #endif
@@ -82,3 +112,4 @@ __kernel void pf_dequant_slab(__global const uint* restrict w,
   }
 #endif
 }
+#endif

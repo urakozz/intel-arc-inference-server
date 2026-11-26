@@ -6,7 +6,7 @@
 
 Run in agnes-ref-img with 21-QFN-v1a's transformers 5.19.0 site first on PYTHONPATH (qwen4exp_ref.text_config
 needs it); the original's small files (config.json, tokenizer files) at Q4EXP_ORIG (default
-oracle-out-q4exp/orig-small). The synthetic checkpoints here are the REAL widths with 16 experts and a
+$B70_DATA/oracle-out/flash-next/orig-small). The synthetic checkpoints here are the REAL widths with 16 experts and a
 1024-row vocabulary (make_synth's test-only knobs) so a test writes ~0.4 GB, not 6:
 
   test_synth_names      make_synth --layers 4 in both forms (and --mtp): the names equal
@@ -30,7 +30,6 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, HERE)
 
 import numpy as np  # noqa: E402
@@ -40,7 +39,7 @@ import check as CK  # noqa: E402
 import make_synth as MS  # noqa: E402
 import ple_int8 as PI  # noqa: E402
 
-ORIG = os.environ.get("Q4EXP_ORIG", os.path.join(REPO, "oracle-out-q4exp", "orig-small"))
+ORIG = os.environ.get("Q4EXP_ORIG", os.path.join(os.environ.get("B70_DATA", "/nonexistent"), "oracle-out", "flash-next", "orig-small"))
 SMALL = dict(experts=16, vocab=1024, verbose=False)   # 16 >= top-k 10 (the config validator)
 _dequant = MS._load(os.path.join(MS.ORACLE, "dequant.py"), "q4test_dequant")
 _tiny = None

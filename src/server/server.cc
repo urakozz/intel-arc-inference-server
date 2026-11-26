@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include "server/batch_engine.h"
+#include "server/json_struct.h"
 #include "server/lookup_in_dflash.h"
 #include "server/prompt_lookup.h"
 #include "server/scheduler.h"
@@ -73,6 +74,7 @@ constexpr const char* kTokenizeRoute = "/tokenize";
 constexpr const char* kDetokenizeRoute = "/detokenize";
 constexpr const char* kHealthRoute = "/health";
 constexpr const char* kVersionRoute = "/version";
+constexpr const char* kReconfigureRoute = "/v1/control/reconfigure";
 
 // GET /version: the project's version (CMake's project(VERSION)), the same before and after the load.
 void version_route(httplib::Server& svr) {
@@ -103,6 +105,7 @@ LoadingListener::LoadingListener(const Options& opts) : impl_(std::make_unique<I
   impl_->svr.Post(kCompletionsRoute, loading);
   impl_->svr.Post(kTokenizeRoute, loading);
   impl_->svr.Post(kDetokenizeRoute, loading);
+  impl_->svr.Post(kReconfigureRoute, loading);
   impl_->svr.Get(kModelsRoute, loading);
   impl_->svr.Get(kHealthRoute, [](const httplib::Request&, httplib::Response& response) {
     response.status = 503;
@@ -165,44 +168,7 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     if (opts_.spec_mtp_lookup && !batch->mtp_lookup())   // open-work 27: replica's one request a card has it
       throw std::invalid_argument("prompt lookup inside MTP needs the MTP head on every card's engine");
   }
-  if (opts_.spec_lookup) {
-    if (deps_.engine.verify_k() == 0)
-      throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
-    if (deps_.engine.mtp_k() != 0)
-      throw std::invalid_argument("--spec lookup and --spec mtp are one proposer each; pick one");
-    if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
-        opts_.lookup_min_match > impl_->lookup.options().max_match)
-      throw std::invalid_argument("the lookup minimum match must be in [2, 64]");
-  }
-  if (opts_.spec_dflash_lookup) {   // spec 19f
-    if (opts_.spec_lookup)
-      throw std::invalid_argument("--spec dflash-lookup and --spec lookup are one proposer each; pick one");
-    if (deps_.engine.mtp_k() == 0 || deps_.engine.dflash_window() == 0)
-      throw std::invalid_argument("--spec dflash-lookup: this engine has no DFlash drafter to fall back to");
-    LookupInDFlashOptions o;
-    o.window = deps_.engine.dflash_window();
-    o.max_k = deps_.engine.mtp_k();
-    impl_->lookup_in_dflash.emplace(o);
-  }
-  if (opts_.spec_mtp_lookup) {   // open-work 27: the same policy, no window
-    if (opts_.spec_lookup || opts_.spec_dflash_lookup)
-      throw std::invalid_argument("prompt lookup inside MTP and --spec lookup / dflash-lookup are one proposer each");
-    if (!deps_.engine.mtp_lookup())
-      throw std::invalid_argument("prompt lookup inside MTP: this engine has no MTP head to fall back to");
-    LookupInDFlashOptions o;
-    o.window = 0;
-    o.max_k = deps_.engine.mtp_k();
-    o.wide_k = deps_.engine.lookup_wide_k();   // open-work 28: long runs in the engine's wide verify list
-    o.deep_k = deps_.engine.lookup_deep_k();   // spec 32: and in its 32- and 64-row lists
-    impl_->lookup_in_dflash.emplace(o);
-  }
-  {
-    // Open-work 27 under replica: the scheduler's greedy rows choose their drafts per step beside lookup inside MTP,
-    // as the serial server's do.
-    const char* env = std::getenv("B70_MTP_STEP_K");
-    const bool chooses = impl_->batch ? impl_->batch->chooses_drafts() : deps_.engine.chooses_drafts();
-    impl_->step_k = opts_.mtp_auto && chooses && !(env != nullptr && std::string(env) == "0");
-  }
+  configure_spec();
   // Plan 13b: under the scheduler the cache is per slot (PrefixSlots) and deps_.engine is never hooked or driven.
   impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, impl_->batch ? 0 : opts_.prefix_cache_bytes,
                                                   opts_.prefix_alloc);
@@ -250,7 +216,52 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
   impl_->svr.Get(kHealthRoute, [this](const httplib::Request&, httplib::Response& response) {
     response.set_content(nlohmann::json{{"status", "ok"}, {"model", opts_.served_model}}.dump(), "application/json");
   });
+  impl_->svr.Post(kReconfigureRoute, [this](const httplib::Request& request, httplib::Response& response) {
+    reconfigure(request, response);
+  });
   version_route(impl_->svr);
+}
+
+void Server::configure_spec() {
+  if (opts_.spec_lookup) {
+    if (deps_.engine.verify_k() == 0)
+      throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
+    if (deps_.engine.mtp_k() != 0)
+      throw std::invalid_argument("--spec lookup and --spec mtp are one proposer each; pick one");
+    if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
+        opts_.lookup_min_match > impl_->lookup.options().max_match)
+      throw std::invalid_argument("the lookup minimum match must be in [2, 64]");
+  }
+  if (opts_.spec_dflash_lookup) {   // spec 19f
+    if (opts_.spec_lookup)
+      throw std::invalid_argument("--spec dflash-lookup and --spec lookup are one proposer each; pick one");
+    if (deps_.engine.mtp_k() == 0 || deps_.engine.dflash_window() == 0)
+      throw std::invalid_argument("--spec dflash-lookup: this engine has no DFlash drafter to fall back to");
+    LookupInDFlashOptions o;
+    o.window = deps_.engine.dflash_window();
+    o.max_k = deps_.engine.mtp_k();
+    impl_->lookup_in_dflash.emplace(o);
+  }
+  if (!opts_.spec_dflash_lookup && !opts_.spec_mtp_lookup) impl_->lookup_in_dflash.reset();
+  if (opts_.spec_mtp_lookup) {   // open-work 27: the same policy, no window
+    if (opts_.spec_lookup || opts_.spec_dflash_lookup)
+      throw std::invalid_argument("prompt lookup inside MTP and --spec lookup / dflash-lookup are one proposer each");
+    if (!deps_.engine.mtp_lookup())
+      throw std::invalid_argument("prompt lookup inside MTP: this engine has no MTP head to fall back to");
+    LookupInDFlashOptions o;
+    o.window = 0;
+    o.max_k = deps_.engine.mtp_k();
+    o.wide_k = deps_.engine.lookup_wide_k();   // open-work 28: long runs in the engine's wide verify list
+    o.deep_k = deps_.engine.lookup_deep_k();   // spec 32: and in its 32- and 64-row lists
+    impl_->lookup_in_dflash.emplace(o);
+  }
+  {
+    // Open-work 27 under replica: the scheduler's greedy rows choose their drafts per step beside lookup inside MTP,
+    // as the serial server's do.
+    const char* env = std::getenv("B70_MTP_STEP_K");
+    const bool chooses = impl_->batch ? impl_->batch->chooses_drafts() : deps_.engine.chooses_drafts();
+    impl_->step_k = opts_.mtp_auto && chooses && !(env != nullptr && std::string(env) == "0");
+  }
 }
 
 Server::~Server() {
@@ -330,10 +341,10 @@ int Server::bound_port() const {
   return impl_->port;
 }
 
-bool Server::acquire(uint64_t& ticket) {
+bool Server::acquire(uint64_t& ticket, bool queue) {
   std::unique_lock<std::mutex> lock(impl_->state_mutex);
   const bool busy = impl_->next_ticket != impl_->serving;
-  if (busy && impl_->waiting >= opts_.queue_depth) {
+  if (queue && busy && impl_->waiting >= opts_.queue_depth) {
     ticket = static_cast<uint64_t>(impl_->waiting);
     return false;
   }
@@ -834,6 +845,54 @@ void Server::detokenize(const httplib::Request& request, httplib::Response& resp
     response.status = 500;
     response.set_content(server_error(error), "application/json");
   }
+}
+
+bool is_loopback(const std::string& address) {
+  const std::string v4 = address.starts_with("::ffff:") ? address.substr(7) : address;
+  return address == "::1" || v4.starts_with("127.");
+}
+
+// POST /v1/control/reconfigure: the request takes its turn in the queue (the requests before it finish, those after it
+// wait), the settings are applied, the server's speculative state is derived again and the prefix cache emptied - as
+// a server started with the new settings would begin - and one line on the log says what changed.
+void Server::reconfigure(const httplib::Request& request, httplib::Response& response) {
+  const auto refuse = [&response](int status, const std::string& message, const char* type) {
+    response.status = status;
+    response.set_content(error_body(message, type), "application/json");
+  };
+  if (!is_loopback(request.remote_addr))
+    return refuse(403, "reconfigure answers clients on this machine only (a loopback address)", "permission_error");
+  const nlohmann::json body = nlohmann::json::parse(request.body, nullptr, /*allow_exceptions=*/false);
+  if (!body.is_object())
+    return refuse(400, "request body must be a JSON object of settings named as the flags, e.g. {\"spec\": \"off\"}",
+                  "invalid_request_error");
+  if (impl_->batch || !opts_.reconfigure)
+    return refuse(409, std::string(impl_->batch ? "a server of several requests at once" : "this server") +
+                           " switches no setting in place; restart it with the new flags",
+                  "invalid_request_error");
+  uint64_t ticket = 0;
+  (void)acquire(ticket, /*queue=*/false);
+  try {
+    const Reconfigured done = opts_.reconfigure(body, opts_);
+    if (!done.applied.empty()) {
+      configure_spec();
+      impl_->lookup.clear();
+      impl_->lookup_history.clear();
+      impl_->draft_calib = DraftCalib{};
+      impl_->prefix.reset();
+      impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, opts_.prefix_cache_bytes, opts_.prefix_alloc);
+      std::string what;
+      for (const Change& c : done.applied)
+        what += (what.empty() ? "" : ", ") + std::format("--{} {} -> {}", c.setting, c.from, c.to);
+      std::print(stderr, "b70-serve: reconfigured in place: {}{}\n", what,
+                 opts_.prefix_cache_bytes ? " (the prefix cache starts empty)" : "");
+      std::fflush(stderr);
+    }
+    response.set_content(json_struct::write(done).dump(), "application/json");
+  } catch (const std::exception& error) {
+    refuse(500, error.what(), "server_error");
+  }
+  release();
 }
 
 void Server::handle(const httplib::Request& request, httplib::Response& response, bool chat) {

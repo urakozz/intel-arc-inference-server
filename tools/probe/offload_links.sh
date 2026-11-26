@@ -13,7 +13,7 @@
 # the first device below it (the card's on-board switch upstream port): the endpoint behind the switch reports an
 # internal link, printed but not used. Then `lscpu`, `sudo -n dmidecode -t memory` (the command to run by hand when
 # sudo -n is refused), the derived host RAM ceiling = channels x MT/s x 8 B (channels: --channels, else the populated
-# DIMMs capped at 4 - a Xeon E5 v3 / v4 has 4 channels, ASSUMED unless given).
+# DIMMs capped at 4 - a 4-channel CPU, ASSUMED unless given).
 #
 # Prints `link <dev> bdf=.. role=root|bridge|endpoint cap=Gen<g> x<w> sta=Gen<g> x<w> state=idle|load`, one line
 # `links: dev0 Gen<g> x<w>, dev1 Gen<g> x<w>` (per state) and `STOP: <card> trains below Gen3 x8` when one does
@@ -146,7 +146,7 @@ memory() {
   [ -z "$mts" ] && mts=$(sed -nE 's/^[[:space:]]*Speed: ([0-9]+) MT\/s.*/\1/p' <<< "$txt" | sort -n | head -1)
   n=${channels:-$((dimms < 4 ? dimms : 4))}
   local src="--channels"
-  [ -z "$channels" ] && src="ASSUMED: populated DIMMs capped at the E5 v3 / v4's 4"
+  [ -z "$channels" ] && src="ASSUMED: populated DIMMs capped at 4"
   echo "memory: dimms=$dimms configured_mts=${mts:-unknown} channels=$n ($src)"
   if [ -n "$mts" ] && [ "$n" -gt 0 ]; then
     echo "memory: host RAM ceiling (derived) = $n x $mts MT/s x 8 B = $(awk -v n="$n" -v m="$mts" 'BEGIN { printf "%.1f", n * m * 8 / 1000 }') GB/s"

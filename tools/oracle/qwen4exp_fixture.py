@@ -9,7 +9,7 @@ tests/kernels/qwen4exp_ref_test.cc holds tests/kernels/qwen4exp_ref.h to.
 
 Run it in the oracle container with 21-QFN-v1a's 5.19.0 site first on PYTHONPATH (seconds, < 2 GB, no checkpoint):
 
-    docker run --rm --memory 8g --cpus 4 -v "$PWD:/ws" -w /ws -e PYTHONPATH=/ws/oracle-out-q4exp/site \\
+    docker run --rm --memory 8g --cpus 4 -v "$PWD:/ws" -w /ws -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" -e PYTHONPATH=$B70_DATA/oracle-out/flash-next/python-site \\
       --entrypoint python3 agnes-ref-img:latest tools/oracle/qwen4exp_fixture.py > tests/kernels/qwen4exp_fixture.h
 
 Inputs are not stored where a hash can make them: both sides draw them from the same integer hash (lowbias32:

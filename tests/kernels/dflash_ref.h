@@ -42,6 +42,7 @@
 
 #include "common/bf16.h"
 #include "kernels/dflash_dims.h"
+#include "loader/lm_head_int8.h"
 
 // No fma contraction in the twin. clang honours the ISO pragma; g++ does not know it (an
 // error under -Werror=unknown-pragmas) and needs none: the tree builds in ISO mode
@@ -423,8 +424,9 @@ inline void edge_scores(const uint16_t* pred, const uint16_t* succ, uint32_t ran
 }
 
 // --- the reused GEMVs' arithmetic (x bf16 [M][K] row-major, weights in the device forms) -----------------------------
-inline size_t i8_index(uint32_t K, uint32_t k, uint32_t n) {
-  return (size_t(n / 16) * (K / 16) + k / 16) * 256 + size_t(k % 16) * 16 + n % 16;
+// The loader's int8 order: k-major at an output head's width (PERF-111), n-major for the drafter's linears.
+inline size_t i8_index(uint32_t K, uint32_t N, uint32_t k, uint32_t n) {
+  return loader::int8_tiled_index(K, N, k, n);
 }
 inline size_t bf16_tiled_index(uint32_t K, uint32_t k, uint32_t n) {
   return ((size_t(n / 16) * (K / 8) + k / 8) * 8 + k % 8) * 16 + n % 16;
@@ -451,29 +453,31 @@ inline void gemv_i8w(const int8_t* q, const float* scales, uint32_t K, uint32_t 
   for (size_t i = 0; i < xf.size(); ++i) xf[i] = bf(x[i]);
   parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
     for (uint32_t n = n0; n < n1; ++n) {
-      const int8_t* col = q + size_t(n / 16) * (K / 16) * 256 + n % 16;   // + (k / 16) 256 + (k % 16) 16
+      std::vector<size_t> at(K / 16);   // each 16-k step's offset of column n (the loader's order, blocked k-major too)
+      for (uint32_t k16 = 0; k16 < K / 16; ++k16) at[k16] = i8_index(K, N, k16 * 16, n);
       for (uint32_t m = 0; m < M; ++m) {
         const float* xr = &xf[size_t(m) * K];
         float a = 0.0f;
-        for (uint32_t k = 0; k < K; ++k) a = a + float(col[size_t(k / 16) * 256 + (k % 16) * 16]) * xr[k];
+        for (uint32_t k = 0; k < K; ++k) a = a + float(q[at[k / 16] + (k % 16) * 16]) * xr[k];
         out[size_t(m) * N + n] = a * scales[n];
       }
     }
   });
 }
 // C3: exact int8 rows, four contiguous dot slices, then the best 16 real ids (before logit processing).
+// w: the head's N rows (the loader's order at width N); ids at or past `used` are never gathered.
 inline std::vector<Cand> rerank_candidates(const int8_t* w, const float* scales, uint32_t K, uint32_t N,
-                                           const uint16_t* x, const uint32_t* ids, float mult, float cap,
-                                           unsigned count = 64) {
+                                           uint32_t used, const uint16_t* x, const uint32_t* ids, float mult,
+                                           float cap, unsigned count = 64) {
   std::vector<Cand> scores;
   for (unsigned c = 0; c < count; ++c) {
     const uint32_t id = ids[c];
-    if (id >= N) continue;
+    if (id >= used) continue;
     float sum = 0;
     for (unsigned s = 0; s < 4; ++s) {
       float a = 0;
       for (unsigned k = s * (K / 4); k < (s + 1) * (K / 4); ++k)
-        a = a + float(w[i8_index(K, k, id)]) * bf(x[k]);
+        a = a + float(w[i8_index(K, N, k, id)]) * bf(x[k]);
       sum = sum + a;
     }
     const float v = sum * scales[id];

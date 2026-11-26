@@ -281,9 +281,16 @@ the default.
 (`src/loader/lm_head_int8.h`), so a token reads 1.272 GB of head instead of bf16's 2.543 GB.
 
 The structure is `gemv_bf16`'s at its `lm_head` tiling (`{64, 1}`: four 16-column tiles a work-group, no K split).
-The weight is stored `[n_tile][k16][16 k][16 n]`, so one `intel_sub_group_block_read_uc16` gives lane `n` its 16
-`k` bytes, and the scale is applied once to the fp32 sum, `(x · q) · s`, rather than per element. It is one
-ascending chain over `k` with no atomic and no data-dependent branch, so replays are bitwise.
+The weight is stored in 256-byte `[16 k][16 n]` tiles, so one `intel_sub_group_block_read_uc16` gives lane `n` its
+16 `k` bytes, and the scale is applied once to the fp32 sum, `(x · q) · s`, rather than per element. It is one
+ascending chain over `k` with no atomic and no data-dependent branch, so replays are bitwise. An output head's tiles
+are k-major in blocks of 8 steps, `[k16 / 8][n_tile][8]` (`GEMV_KMAJOR` + `GEMV_KMAJOR_B`, set for the loader and
+every head reader by `loader::kInt8HeadKMajor` / `kInt8HeadKBlock`); other int8 tensors stay n-major,
+`[n_tile][k16]`. On Qwen3.8's head (`probe_gemv --tiles i8head`, bitwise): +3.0 % at M = 1, +0.8 % at 4 and 8. Plain
+k-major (blocks of 1) lost 6-8 % on the 64-row `gemm_sm_i8w`: that build reads ~410 GB/s with one weight read in
+flight a thread, and a work-group's next k-group lands N/16 tiles away rather than continuing its slab. Blocks of 8
+plus reading the next k-group's tiles one iteration ahead (`I8_AHEAD`, the 32 / 64-row head builds) give +6.8 % at
+32 rows and -1 % at 64.
 
 Measured in situ: 2205 µs at 577 GB/s, 99.6% of
 the bf16 launch's rate, so the halved bytes are the whole 2.0 ms a token saved. The accuracy rules for the head

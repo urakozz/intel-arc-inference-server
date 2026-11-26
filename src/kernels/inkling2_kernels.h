@@ -37,10 +37,26 @@ inline std::string moe(unsigned m, common::ExpertFpFormat format) {
   return "kol_moe_M" + std::to_string(m) + "_E128_T8_D2304_I1152_CAP_" +
          (format == common::ExpertFpFormat::Nvfp4 ? "NVFP4" : "MXFP8");
 }
+// bf16: the bf16-glue prompt pass's rows (each sum rounded once to bf16) instead of fp32 sums.
+inline std::string prefill_expert(common::ExpertFpFormat format, bool gate_up, bool bf16 = false) {
+  return std::string(gate_up ? "pf_moe_q4gemm_K2304_N2304_" : "pf_moe_q4gemm_K1152_N2304_") +
+         (bf16 ? "BF16_INK_" : "F32_INK_") + (format == common::ExpertFpFormat::Nvfp4 ? "NVFP4" : "MXFP8");
+}
+// The expert GEMM's work item (the sort's MI) and work-group: 4 x 4 sub-groups, 64 rows by 32 columns each.
+inline constexpr unsigned kPrefillExpertRows = 256, kPrefillExpertGroup = 256;
+inline constexpr std::string_view kPrefillSort = "pf_moe_sort_mw_E128_T8_INK";
+inline constexpr std::string_view kPrefillMoe = "kol_pf_moe_E128_T8_D2304_I1152_INK";
 inline std::string attn(unsigned m, bool local) {
   return "kol_attn_M" + std::to_string(m) + "_T" + std::to_string(kPartitions) + "_Q24KV8_REL16E1024_SINK_GATE_" +
          (local ? "W1024_R4096" : "F");
 }
+inline std::string prefill_attn(bool local) {
+  return std::string("kol_pf_flash_attn_Q24KV8_REL16_SINK_GATE_") + (local ? "W1024_R4096" : "F");
+}
+// The bound form is prefill_attn's `_PAIR` (PERF-10 / PERF-11): a kv head's three q heads, two sub-groups each, on
+// 16 rows - grid (ceil(rows / 16), kv heads, 1).
+inline constexpr uint32_t kPrefillAttnGroup = 16 * 2 * (D::q_heads / D::kv_heads);
+inline constexpr std::string_view kPrefillPrep = "ink_prep_Q24KV8_D128_REL16_PREFILL";
 inline std::string embed(unsigned m) { return "ink_embed_gather_M" + std::to_string(m) + "_D2304_V201024"; }
 inline std::string argmax(unsigned m) { return "ink_argmax_stage1_M" + std::to_string(m) + "_N200064_V200058"; }
 

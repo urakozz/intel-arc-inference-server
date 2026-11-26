@@ -52,8 +52,8 @@ output copies; impossible caps are refused before weights are loaded. `plan` pri
 Resumable: the hidden state is checkpointed after every layer in --work (a killed run restarts at the layer it was
 on, for the same set of contexts); keys listed in --done (one per line) or already in --out are skipped. Contexts
 with the same prompt, forced ids and head share one file (a hard link; the same ids split at another prompt length
-are another file: their rows differ). Run in the oracle container (run_in_container.sh) under
-/tmp/b70-cpu-model.lock.
+are another file: their rows differ). Run in the oracle container (run_in_container.sh), one CPU model job at
+a time.
 """
 import os
 import sys

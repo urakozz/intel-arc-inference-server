@@ -2,7 +2,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "check.h"
@@ -85,42 +87,61 @@ void check_candidates(Env& e, unsigned C) {
               "the same\n", C);
 }
 
+// The rerank reads the real head's layout (N 248320 rows: k-major tiles at that width, PERF-111, loader::
+// int8_tiled_index); rows 0..127 hold random weights, the rest zero. Against the host reference, and byte for byte
+// against today's n-major order (the test's own df_rerank_*_NM build over the same rows tiled n-major).
 void check_rerank(Env& e, unsigned C) {
-  constexpr unsigned K = 5120, N = 128, R = 7;
+  constexpr unsigned K = 5120, N = 248320, ROWS = 128, USED = 248077, R = 7;
   std::mt19937 g(92);
-  std::vector<int8_t> w(size_t(N) * K);
-  for (auto& v : w) v = int8_t(int(g() % 255) - 127);
-  std::vector<float> scale(N);
-  for (auto& v : scale) v = 0.0007f + float(g() % 100) * 0.00001f;
+  std::vector<int8_t> w(size_t(N) * K, 0), wn(w.size(), 0);
+  for (unsigned n = 0; n < ROWS; ++n)
+    for (unsigned k = 0; k < K; ++k) {
+      const int8_t v = int8_t(int(g() % 255) - 127);
+      w[dfref::i8_index(K, N, k, n)] = v;
+      wn[(size_t(n / 16) * (K / 16) + k / 16) * 256 + size_t(k % 16) * 16 + n % 16] = v;
+    }
+  std::vector<float> scale(N, 0.0f);
+  for (unsigned n = 0; n < ROWS; ++n) scale[n] = 0.0007f + float(g() % 100) * 0.00001f;
   std::vector<uint16_t> x(size_t(R) * K);
   for (auto& v : x) v = dfref::rne(float(int(g() % 10001) - 5000) / 10000.0f);
   std::fill(x.begin(), x.begin() + K, uint16_t(0));   // all scores tie: lower real id wins
   std::vector<uint32_t> ids(size_t(R) * C);
   for (unsigned r = 0; r < R; ++r) {
-    for (unsigned c = 0; c < C; ++c) ids[r * C + c] = (c * 37 + r * 11) % N;
+    for (unsigned c = 0; c < C; ++c) ids[r * C + c] = (c * 37 + r * 11) % ROWS;
     ids[r * C] = 0x7FFFFFFFu;
-    ids[r * C + 1] = 248077;   // padded/masked vocabulary id, never gather it
+    ids[r * C + 1] = USED;   // padded/masked vocabulary id, never gather it
   }
-  auto bw = e.up(w), bs = e.up(scale), bx = e.up(x), bi = e.up(ids);
+  auto bs = e.up(scale), bx = e.up(x), bi = e.up(ids);
   auto out = e.up(std::vector<uint32_t>(R * 16));
   auto unary = e.up(std::vector<float>(R * 16));
-  l0::Module mod(e.ctx, kernels::path(kd::rerank_variant(C)));
-  l0::Kernel k(mod, "df_rerank");
-  k.group_size(C * 4);
-  k.arg_ptr(0, bw.ptr());
-  k.arg_ptr(1, bs.ptr());
-  k.arg_ptr(2, bx.ptr());
-  k.arg_ptr(3, bi.ptr());
-  k.arg_ptr(6, out.ptr());
-  k.arg_ptr(7, unary.ptr());
-  for (float cap : {0.0f, 30.0f}) {
+  // One rerank of build `v` over weights `w`: the candidates and their values.
+  auto rerank = [&](const std::string& v, const std::vector<int8_t>& wt, float cap, std::vector<uint32_t>& got,
+                    std::vector<float>& vals) {
+    l0::Mem bw = e.up(wt);
+    l0::Module mod(e.ctx, kernels::path(v));
+    l0::Kernel k(mod, "df_rerank");
+    k.group_size(C * 4);
+    k.arg_ptr(0, bw.ptr());
+    k.arg_ptr(1, bs.ptr());
+    k.arg_ptr(2, bx.ptr());
+    k.arg_ptr(3, bi.ptr());
     k.arg(4, 1.5f);
     k.arg(5, cap);
+    k.arg_ptr(6, out.ptr());
+    k.arg_ptr(7, unary.ptr());
     e.run(k, R);
-    const auto got = e.read<uint32_t>(out, R * 16);
-    const auto vals = e.read<float>(unary, R * 16);
+    got = e.read<uint32_t>(out, R * 16);
+    vals = e.read<float>(unary, R * 16);
+  };
+  for (float cap : {0.0f, 30.0f}) {
+    std::vector<uint32_t> got, got_nm;
+    std::vector<float> vals, vals_nm;
+    rerank(kd::rerank_variant(C), w, cap, got, vals);
+    rerank(kd::rerank_variant(C) + "_NM", wn, cap, got_nm, vals_nm);
+    CHECK(got == got_nm);
+    CHECK(std::memcmp(vals.data(), vals_nm.data(), vals.size() * 4) == 0);   // bitwise today's n-major order
     for (unsigned r = 0; r < R; ++r) {
-      const auto want = dfref::rerank_candidates(w.data(), scale.data(), K, N, x.data() + size_t(r) * K,
+      const auto want = dfref::rerank_candidates(w.data(), scale.data(), K, N, USED, x.data() + size_t(r) * K,
                                                 ids.data() + r * C, 1.5f, cap, C);
       for (unsigned c = 0; c < 16; ++c) {
         CHECK_EQ(got[r * 16 + c], want[c].i);
@@ -129,7 +150,8 @@ void check_rerank(Env& e, unsigned C) {
       }
     }
   }
-  std::printf("exact int8 rerank OK: all %u candidates, real K, masked ids, ties, scaling and softcap\n", C);
+  std::printf("exact int8 rerank OK: all %u candidates, real K, masked ids, ties, scaling and softcap; bitwise "
+              "today's n-major order\n", C);
 }
 
 int main() {

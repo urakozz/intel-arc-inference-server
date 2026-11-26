@@ -105,6 +105,26 @@ def test_golden_and_head(tiny, tmp_path):
     assert sum(result["accepted_by_position"]) == sum(result["accepted_lengths"])
 
 
+def test_kv_cache_forms(tiny):
+    """--kv int8 changes the full layers' cache only (rings bf16 as in --kv bf16), by kv8_fq's small error."""
+    from tools.oracle.int8_sim import kv8_fq
+
+    ids = torch.tensor([[3, 7, 11, 19, 31] * 4])
+    caches = {}
+    for kv in ("bf16", "int8"):
+        model = Inkling(tiny, torch.float32, kv)
+        caches[kv] = model.cache()
+        model.forward(ids, caches[kv])
+    local = model.c["local_layer_ids"]
+    window, full = caches["bf16"].visits[0].kv, caches["int8"].visits[0].kv
+    assert 0 in local and all(torch.equal(a, b) for a, b in zip(window, full))
+    v = next(i for i in range(len(caches["bf16"].visits)) if i not in local)   # the first full visit
+    k16, k8 = caches["bf16"].visits[v].kv[0], caches["int8"].visits[v].kv[0]
+    assert torch.equal(k16, k16.to(torch.bfloat16).float()) and not torch.equal(k16, k8)
+    assert float((k8 - k16).norm() / k16.norm()) < 0.02
+    assert torch.equal(k8, kv8_fq(k16))      # the first full visit's input is the window visits', unchanged
+
+
 def test_release_expert_formats():
     e2 = torch.tensor([0., .5, 1., 1.5, 2., 3., 4., 6., -0., -.5, -1., -1.5, -2., -3., -4., -6.])
     c4 = torch.arange(0, 16, 2, dtype=torch.uint8)

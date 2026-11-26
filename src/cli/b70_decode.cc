@@ -132,6 +132,10 @@ struct Flags {
                     "(development mode; Flash-Next also takes auto). Flash-Next without it loads whole: the\n"
                     "experts that do not fit the cards are read from pinned host memory.")]]
   Arg<std::string> layers;   // spec 20c, Kolibri-1; spec 21-QFN-v1c, Qwen3.8-Flash-Next
+  [[=Help("auto|gpu|cpu", "how experts held in host RAM are served: auto picks per step from a\n"
+                          "startup measurement (default), gpu reads them over PCIe into the card, cpu\n"
+                          "computes them on the CPU.")]]
+  std::string host_experts = "auto";   // PERF-124 (runtime/qwen4exp/qwen4exp_cpu_experts.h)
   [[=Section("\ndeveloper (benchmarks and profiles):\n"),
     =Help("", "ingest --depth synthetic ids, then time --tg generated ones; a markdown row\non stdout.")]]
   bool bench = false;
@@ -166,7 +170,7 @@ void usage() {
       stderr,
       "usage: b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill] [--spec mtp|dflash]\n"
       "                                     [--max-len 16384|auto] [--parallel auto|1|pp|tp]\n"
-      "       b70-decode <Inkling snapshot-or-repo> --plan [--max-len auto] [--spec auto|off]\n"
+      "       b70-decode <Inkling snapshot-or-repo> --plan [--max-len auto] [--spec auto|off] [--kv-cache int8]\n"
       "\n"
       "  ids in, ids out (no tokenizer: tools/oracle/tokenize.py turns text into an --ids file);\n"
       "  stdout is one generated id per line, everything else goes to stderr. The model is chosen\n"
@@ -740,11 +744,23 @@ int run_inkling(const std::string& path, const Flags& f) {
   const auto spec = f.spec.given ? f.spec.value : "auto";
   if (spec != "off" && spec != "auto" && spec != "mtp")
     throw std::runtime_error("Inkling accepts --spec off, auto or mtp");
-  if (f.prefill || f.prefill_length.given || f.prefill_chunk.given || f.prefill_backend.given)
-    throw std::runtime_error("Inkling supports decode and replay prompt ingestion. Use --bench with --depth to time decode.");
+  const bool prompt_pass = !f.ids.empty() || f.prefill_length.given;
+  if ((f.prefill && f.ids.empty()) || (f.prefill_length.given && (!f.bench || f.depth.given)))
+    throw std::runtime_error("Use --ids for a prompt or --bench --prefill-length to time the prompt pass");
+  if ((f.prefill_chunk.given || f.prefill_backend.given) && !prompt_pass)
+    throw std::runtime_error("Prompt options require --ids or --bench --prefill-length");
+  if (f.prefill_backend.given && f.prefill_backend.value != "l0")
+    throw std::runtime_error("Inkling supports the l0 prompt backend");
+  const uint32_t chunk = f.prefill_chunk.given ? f.prefill_chunk.value : runtime::inkling2::kPrefillRows;
+  if (chunk == 0 || chunk > runtime::inkling2::kPrefillRows)
+    throw std::runtime_error("Inkling --prefill-chunk must be between 1 and " +
+                             std::to_string(runtime::inkling2::kPrefillRows));
+  const uint32_t depth = f.prefill_length.given ? f.prefill_length.value : f.depth.value;
+  const uint32_t planned_chunk = prompt_pass ? chunk : 0;
   if (f.layers.given || f.draft_model.given || f.pipeline_split.given ||
-      (f.parallel != "auto" && f.parallel != "1") || !f.kv_cache.empty())
-    throw std::runtime_error("Inkling decode requires one card and the checkpoint's built-in drafter and KV format");
+      (f.parallel != "auto" && f.parallel != "1"))
+    throw std::runtime_error("Inkling decode requires one card and the checkpoint's built-in drafter");
+  const bool kv8 = !f.kv_cache.empty() && cli::parse_kv_cache_arg(f.kv_cache) == runtime::KvCache::Int8;
   if (int(f.bench) + int(f.profile) + int(!f.ids.empty()) != 1)
     throw std::runtime_error("Choose one of --bench, --profile or --ids for Inkling decode");
   if ((f.n.given && f.ids.empty()) || (f.tg.given && !f.bench) || (f.depth.given && !f.ids.empty()) ||
@@ -764,9 +780,9 @@ int run_inkling(const std::string& path, const Flags& f) {
   std::vector<uint32_t> ids;
   const size_t needed = size_t(n) + (f.profile ? runtime::inkling2::kRows : 0);
   if (f.bench || f.profile) {
-    if (f.depth.value == 0 || f.depth.value + needed > model::Inkling2Desc::trained_max_len)
+    if (depth == 0 || depth + needed > model::Inkling2Desc::trained_max_len)
       throw std::runtime_error("Inkling --depth and --tg must fit the trained context");
-    ids.resize(f.depth.value);
+    ids.resize(depth);
     for (size_t i = 0; i < ids.size(); ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
   } else {
     ids = read_ids(f.ids, model::Inkling2Desc::vocab);
@@ -778,13 +794,14 @@ int run_inkling(const std::string& path, const Flags& f) {
   const size_t card = ctx.memory_bytes();
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   if (length.is_auto)
-    length.value = runtime::inkling2::max_len_that_fits(desc, weights, card, reserve, draft);
+    length.value = runtime::inkling2::max_len_that_fits(desc, weights, card, reserve, draft, planned_chunk, kv8);
   if (ids.empty() || ids.size() + needed > length.value)
     throw std::runtime_error("Set --max-len to fit the prompt and generated tokens");
-  if (card <= reserve || runtime::inkling2::sizes(desc, weights, length.value, draft).memory().total() > card - reserve)
-    throw std::runtime_error("Inkling does not fit on this card at the requested --max-len");
+  if (card <= reserve ||
+      runtime::inkling2::sizes(desc, weights, length.value, draft, planned_chunk, kv8).memory().total() > card - reserve)
+    throw std::runtime_error(cli::inkling2::no_fit(desc, weights, card, reserve, draft, planned_chunk, length.value, kv8));
 
-  runtime::inkling2::Engine engine(ctx, checkpoint, length.value, draft);
+  runtime::inkling2::Engine engine(ctx, checkpoint, length.value, draft, planned_chunk, kv8);
   const auto ingest = [&] {
     uint32_t next = 0;
     for (size_t i = 0; i < ids.size();) {
@@ -817,7 +834,13 @@ int run_inkling(const std::string& path, const Flags& f) {
     }
     return 0;
   }
-  uint32_t next = ingest();
+  const auto prompt_start = std::chrono::steady_clock::now();
+  uint32_t next = prompt_pass ? engine.prefill(ids, chunk) : ingest();
+  if (f.bench) {
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - prompt_start).count();
+    std::println("Inkling prompt: {} ids, {:.2f} t/s, {:.2f} ms to first id", ids.size(), 1000. * ids.size() / ms, ms);
+  }
   std::vector<uint32_t> output;
   output.reserve(n);
   std::optional<server::AdaptiveK> policy;
@@ -895,8 +918,12 @@ int run(int argc, char** argv) {
   if (f.plan) {
     if (!inkling) throw std::runtime_error("--plan requires an Inkling 2 Mini checkpoint");
     return cli::inkling2::plan(path, cli::parse_max_len(f.max_len.given ? f.max_len.value : "auto"),
-                               f.spec.given ? f.spec.value : "auto");
+                               f.spec.given ? f.spec.value : "auto",
+                               !f.kv_cache.empty() && cli::parse_kv_cache_arg(f.kv_cache) == runtime::KvCache::Int8);
   }
+  const auto host_experts = cli::qwen4exp::host_experts_mode(f.host_experts);
+  if (f.host_experts != "auto" && !cli::qwen4exp::is_qwen4exp(path))
+    throw std::runtime_error(cli::qwen4exp::host_experts_refusal(f.host_experts));
   if (inkling) return run_inkling(path, f);
   const std::string ids_path = f.ids;
   uint32_t n = f.n.value, depth = f.depth.value, tg = f.tg.value, steps = f.steps.value,
@@ -1100,6 +1127,8 @@ int run(int argc, char** argv) {
     qa.pipe = pipe;
     qa.pp_given = pp_given;
     qa.prefill = prefill;           // spec 21-QFN-v1d: --ids through Qwen4ExpEngine::prefill
+    qa.host_experts = host_experts;
+    qa.host_experts_given = f.host_experts != "auto";
     qa.pp = have_prefill_len;       // --prefill-length N already set depth = N above
     qa.pp_chunk = pp_chunk;
     qa.pp_backend_given = have_pp_backend;

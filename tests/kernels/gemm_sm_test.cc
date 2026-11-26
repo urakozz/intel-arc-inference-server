@@ -11,6 +11,9 @@
 //       lane each) plus the first and last 512 - every work-group is checked, not three windows (28a's
 //       deferred review item).
 //   (spec 19 v3d) a row with the 2D block read is bitwise its plain-read twin at every M, where that twin is built.
+//   (PERF-111) an int8 row at an output head's width reads the loader's k-major tiles (loader::int8_tiled_index):
+//       bitwise today's n-major order at every M the probe builds that order for (tools/probe/CMakeLists.txt
+//       PI8H_CELLS, pi8h_gemm_sm_i8w_*_NM) over the same weights tiled n-major.
 //   N3  property R: every row of every M bitwise equal (every slice) to the same row at the largest built M;
 //       (spec 32e) where the row binds gemm_sm_wide past 16 rows, rows G..M-1 also bitwise gemm_sm at G rows over
 //       the same inputs placed in its rows 0..G-1 (G the largest built M up to 16: 16, or 8 for the drafter's batched
@@ -37,6 +40,7 @@
 #include "common/kv8.h"
 #include "common/bf16.h"
 #include "common/int4.h"
+#include "common/repack.h"
 #include "gemm_sm_levers.h"
 #include "gemm_sm_ref.h"
 #include "gemv_ref.h"
@@ -48,6 +52,7 @@
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "l0/queue.h"
+#include "loader/lm_head_int8.h"
 
 namespace {
 
@@ -152,6 +157,7 @@ Bound bind_gemv(Dev& d, const kernels::SmallMTuning& t, uint32_t M) {
 
 struct Buffers {
   std::unique_ptr<l0::Mem> w, sc, x, out;
+  std::unique_ptr<l0::Mem> w_nmajor;   // PERF-111: a head-width int8 row's weights in today's n-major order
   size_t out_bytes = 0;
 };
 
@@ -318,6 +324,37 @@ int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t s
         ++fails;
       } else if (M == Mmax) {
         std::printf("  %s: bitwise %s at every M\n", name0.c_str(), kernels::gemm_sm_variant(M, plain).c_str());
+      }
+    }
+    // PERF-111: today's n-major order, bitwise, where the probe builds it at this M
+    const std::string nmv = "pi8h_gemm_sm_i8w_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" +
+                            std::to_string(t.N) + (t.wg ? "_wg" : "") + "_NM";
+    if (t.layout == 2 && loader::int8_k_major(t.N) && exists(nmv)) {
+      if (!bf.w_nmajor) {   // the loader's k-major tiles back to [n_tile][k16], one 256 B tile at a time
+        std::vector<int8_t> nm(w.q8.size());
+        for (uint32_t nt = 0; nt < t.N / 16; ++nt)
+          for (uint32_t k16 = 0; k16 < t.K / 16; ++k16)
+            std::memcpy(&nm[(size_t(nt) * (t.K / 16) + k16) * 256],
+                        &w.q8[loader::int8_tiled_index(t.K, t.N, k16 * 16, nt * 16)], 256);
+        bf.w_nmajor = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, nm.size());
+        imm.copy(bf.w_nmajor->ptr(), nm.data(), nm.size());
+      }
+      Bound bn;
+      bn.mod = std::make_unique<l0::Module>(d.ctx, kernels::path(nmv));
+      bn.k = std::make_unique<l0::Kernel>(*bn.mod, "gemm_sm_i8w");
+      bn.k->group_size(kernels::gemm_sm_wg_size(M, t));
+      bn.gx = b.gx;
+      bn.gy = b.gy;
+      bn.S = b.S;
+      bn.M = M;
+      std::swap(bf.w, bf.w_nmajor);
+      const std::vector<float> pn = run(d, bf, bn, xm, t.N);
+      std::swap(bf.w, bf.w_nmajor);
+      if (!bitwise(p, pn)) {
+        std::printf("FAIL %s M=%u: not bitwise today's n-major order (%s)\n", name0.c_str(), M, nmv.c_str());
+        ++fails;
+      } else {
+        std::printf("  %s M=%u: bitwise today's n-major order (%s)\n", name0.c_str(), M, nmv.c_str());
       }
     }
     // R, part 1: each row equals the same row at Mmax, every slice

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Greedy bf16 baseline for the tool-call set (spec 5 T0, gate A4), on CPU.
 
-    oracle_generate.py [--model qwen|kolibri|qwen4exp]
+    oracle_generate.py [--model qwen|kolibri|qwen4exp|inkling]
                        [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
 
@@ -45,6 +45,10 @@ The model follows config.json's model_type:
                     experts dequantised, its bf16 dense layers, the PLE rows from <snapshot>-ple-int8
                     when present (the engine's format; Q4_PLE overrides) - greedy through its own
                     cache; Q4_LAYERS=N truncates as the engine's --layers N does.
+  inkling2_loop     Inkling 2 Mini (`--model inkling` says so and checks it): tools/oracle/inkling_ref.py's
+                    Inkling in bf16 on the release's own checkpoint (the CPU forward of the prompt checks:
+                    chunks of 128 ids through one cache), greedy through its cache, INK_THREADS threads
+                    (default 8), one scenario at a time (--batch and --resident are ignored).
 The MoE paths stop after an EOS id of generation_config.json (kept, as HF generate keeps it)
 or --new-tokens ids (default 192), and
 also write <out>/<name>.bf16.gap: each greedy step's top-1 minus top-2 logit (compare_ref.py).
@@ -353,14 +357,14 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
     if mtype in Q4_TYPES:
         # Spec 21-QFN-v1e: Qwen3.8-Flash-Next - tools/oracle/qwen4exp_ref.py's layer-streamed model (transformers 5.19.0 from
         # the qwen4exp site first on PYTHONPATH), the checkpoint's experts as stored (Intel's int4 g128 dequantised), the
-        # PLE rows from the engine's int8 file when it sits beside the snapshot (21-QFN-v1b's <snapshot>-ple-int8: the engine-
+        # PLE rows from the engine's int8 file when it sits in the snapshot (<snapshot>/ple-int8) or beside it (21-QFN-v1b's <snapshot>-ple-int8: the engine-
         # format reference, spec 21-QFN-v1 F3) - Q4_PLE overrides (bf16 | int8:<dir>) - greedy through its own cache. The
         # batched path: layer_major's pre-mixer rows -> final_logits of each sequence's LAST row (the sequential step
         # asks for the last row's logits only: logits_to_keep=1, the same one-row head).
         Q4 = load("qwen4exp_ref")
         tc = Q4.text_config(snap, int(os.environ["Q4_LAYERS"]) if os.environ.get("Q4_LAYERS") else None)
-        side = snap.rstrip("/") + "-ple-int8"
-        ple_spec = os.environ.get("Q4_PLE") or (f"int8:{side}" if os.path.isdir(side) else "bf16")
+        side = next((p for p in (snap.rstrip("/") + "/ple-int8", snap.rstrip("/") + "-ple-int8") if os.path.isdir(p)), None)
+        ple_spec = os.environ.get("Q4_PLE") or (f"int8:{side}" if side else "bf16")
         ple = Q4.PleTable(Q4.ple_source(snap, ple_spec), tc)
         kd = range(min(keep[0], tc.num_hidden_layers))
         ke = range(min(keep[1], tc.num_hidden_layers))
@@ -494,7 +498,8 @@ def dense_build(snap: str, keep: str = "auto"):
 MOE_TYPES = ("qwen3_5_moe", "kolibri1", "qwen4_exp", "qwen4_exp_text")
 # --model NAME -> the model_type(s) it must be (spec 21-QFN-v1e: qwen4exp - the checkpoints say qwen4_exp, a text-only
 # export qwen4_exp_text; qwen: Qwen3.8, the dense path)
-MODELS = {"qwen": ("qwen3_5",), "kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text")}
+MODELS = {"qwen": ("qwen3_5",), "kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"),
+          "inkling": ("inkling2_loop",)}
 
 
 def parse_args(argv: list[str]) -> dict:
@@ -560,6 +565,9 @@ def main() -> None:
         mtype = json.load(f).get("model_type", "")
     if a["model"] is not None and mtype not in MODELS[a["model"]]:
         sys.exit(f"--model {a['model']}: {snap} is model_type {mtype!r}, not {' or '.join(MODELS[a['model']])}")
+    if mtype == "inkling2_loop":
+        inkling_main(snap, out, todo, prompts, new_tokens)
+        return
     if mtype in MOE_TYPES:
         moe_main(snap, out, todo, prompts, new_tokens, mtype, a["device"], a["batch"], a["keep"])
         return
@@ -604,7 +612,7 @@ def save(out: str, name: str, new: list[int], text: str, i: int, n: int, n_promp
     if gaps is not None:      # the MoE paths: each greedy step's top-1 minus top-2 logit (fp32, exact)
         write_atomic(os.path.join(out, f"{name}.{RUN}.gap"), " ".join("%.9g" % g for g in gaps) + "\n")
     write_atomic(os.path.join(out, f"{name}.{RUN}.txt"), text)
-    call = "<tool_call>" in text or "<|tool_call_start|>" in text
+    call = "<tool_call>" in text or "<|tool_call_start|>" in text or "<|content_invoke_tool_json|>" in text
     low = f", min gap {min(gaps):.3g}" if gaps else ""
     print(f"[{i}/{n}] {name}: {n_prompt} prompt ids, {len(new)} new, {time.time() - t:.0f}s, call={call}{low}",
           flush=True)
@@ -615,6 +623,53 @@ def top2_gap(row) -> float:
     import torch
     v = torch.topk(row.float(), 2).values
     return float(v[0] - v[1])
+
+
+def inkling_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: int) -> None:
+    """Inkling 2 Mini: tools/oracle/inkling_ref.py's bf16 forward, prompt in chunks of 128 ids, greedy until
+    the EOS id of config.json or new_tokens ids, one scenario at a time."""
+    import torch
+    from tokenizers import Tokenizer
+    sys.path.insert(0, os.path.join(HERE, "..", ".."))
+    from tools.oracle import inkling_ref
+    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
+        eos = {json.load(f)["eos_token_id"]}
+    tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
+    tok.no_truncation()
+    tok.no_padding()
+    threads = int(os.environ.get("INK_THREADS", "8"))
+    torch.set_num_threads(threads)
+    print(f"torch {torch.__version__}, threads {threads}, eos {sorted(eos)}, model_type inkling2_loop, "
+          f"{new_tokens} new tokens", flush=True)
+    t = time.time()
+    model = inkling_ref.Inkling(snap, torch.bfloat16)
+    print(f"ready in {time.time() - t:.0f}s", flush=True)
+    state: dict = {}
+
+    def step(chunk: list[int], pos: int):
+        if pos == 0:
+            state["cache"] = model.cache()
+        for s in range(0, len(chunk), 128):
+            logits, _ = model.forward(torch.tensor([chunk[s:s + 128]]), state["cache"])
+        n = state["cache"].length
+        if len(chunk) > 1 or n % 32 == 0:
+            print(f"  {state['name']}: {n} ids in the cache, {time.time() - state['t0']:.0f}s", flush=True)
+        return logits[0, -1]
+
+    for i, e in enumerate(todo, 1):
+        name = e["name"]
+        ids = prompts[name]
+        t = state["t0"] = time.time()
+        state["name"] = name
+        gaps: list[float] = []
+
+        def argmax(row):
+            gaps.append(top2_gap(row))
+            return int(row.argmax())
+        with torch.no_grad():
+            new = greedy(step, ids, new_tokens, eos, argmax)
+        save(out, name, new, tok.decode(new, skip_special_tokens=False), i, len(todo), len(ids), t, gaps)
+    print("done", flush=True)
 
 
 def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: int, mtype: str,

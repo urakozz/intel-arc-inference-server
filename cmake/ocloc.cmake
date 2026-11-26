@@ -77,6 +77,9 @@ function(add_ocloc_kernel NAME)
   if(src MATCHES "(^|/)(moe|kol_moe)[.]cl$")
     list(APPEND K_DEPENDS "${B70_KERNEL_SRC_DIR}/expert_fp_gemv.h")
   endif()
+  if(src MATCHES "(^|/)(kv8|kol_attn|kol_pf_attn|ink_prep)[.]cl$")
+    list(APPEND K_DEPENDS "${B70_KERNEL_SRC_DIR}/kv8_scheme.h")
+  endif()
   set(out "${B70_KERNEL_DIR}/${NAME}.bin")
   add_custom_command(
     OUTPUT "${out}"

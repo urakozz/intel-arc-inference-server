@@ -10,12 +10,12 @@
 # was dumped from -- the decode step at the end reads the tokenizer out of
 # $SNAP, and the two checkpoints' tokenizers are identical, but the ids being
 # decoded are not. Same env as golden.sh:
-#   OUT_DIR=oracle-out-rtn \
+#   OUT_DIR=$B70_DATA/oracle-out/qwen38/golden-rtn \
 #   ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
 #   tools/oracle/check.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-OUT_DIR="${OUT_DIR:-oracle-out}"
+OUT_DIR="${OUT_DIR:-${B70_DATA:?set B70_DATA, the data root}/oracle-out/qwen38/golden}"
 cat > "$OUT_DIR"/_check.py <<'PY'
 import sys, torch
 from safetensors import safe_open
@@ -35,8 +35,8 @@ open(ids_out, "w").write(" ".join(str(i) for i in tok))
 PY
 for p in ${PROMPTS:-prose code cjk}; do
   echo "=== $p  ($(stat -c %s "$OUT_DIR/$p".golden.safetensors) bytes)"
-  tools/oracle/run_in_container.sh 'python3 -P /ws/'"$OUT_DIR"'/_check.py /ws/'"$OUT_DIR/$p"'.golden.safetensors /ws/'"$OUT_DIR/$p"'.tokens 2>/dev/null
-     python3 tools/oracle/tokenize.py "$SNAP" decode $(cat /ws/'"$OUT_DIR/$p"'.tokens) 2>/dev/null > /ws/'"$OUT_DIR/$p"'.cont.txt
-     echo "  decoded:"; sed "s/^/  | /" /ws/'"$OUT_DIR/$p"'.cont.txt
-     python3 -P -c "import sys; print(\"  repr:\", repr(open(sys.argv[1]).read()))" /ws/'"$OUT_DIR/$p"'.cont.txt'
+  tools/oracle/run_in_container.sh 'python3 -P '"$OUT_DIR"'/_check.py '"$OUT_DIR/$p"'.golden.safetensors '"$OUT_DIR/$p"'.tokens 2>/dev/null
+     python3 tools/oracle/tokenize.py "$SNAP" decode $(cat '"$OUT_DIR/$p"'.tokens) 2>/dev/null > '"$OUT_DIR/$p"'.cont.txt
+     echo "  decoded:"; sed "s/^/  | /" '"$OUT_DIR/$p"'.cont.txt
+     python3 -P -c "import sys; print(\"  repr:\", repr(open(sys.argv[1]).read()))" '"$OUT_DIR/$p"'.cont.txt'
 done

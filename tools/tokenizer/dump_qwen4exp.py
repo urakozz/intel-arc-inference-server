@@ -6,7 +6,7 @@
 <qwen4exp-snapshot-dir> holds the ORIGINAL checkpoint's small files (Qwen/Qwen3.8-Flash-Next):
 tokenizer.json (sha256 0997f410...), tokenizer_config.json, chat_template.jinja (sha256 c3cf9e34... =
 Qwen3.8's / Agnes's) and generation_config.json - 21-QFN-v1b's synthetic checkpoints copy them unchanged
-(oracle-out-q4exp-synth/{ours,intel}/ckpt). 21-QFN-v1a found the tokenizer NOT byte-identical to Qwen3.8's:
+($B70_DATA/oracle-out/flash-next/synth/{ours,intel}/ckpt). 21-QFN-v1a found the tokenizer NOT byte-identical to Qwen3.8's:
 same vocabulary, merges and added tokens, but the pre-tokenizer's split regex adds \\p{M} (combining
 marks) - so this writes a fixture rather than asserting Qwen3.8's file. Intel's checkpoint ships
 Qwen3.8's tokenizer.json; the engine serves the original's (plan 21-QFN-v1e Task 1).

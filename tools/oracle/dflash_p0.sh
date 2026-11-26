@@ -9,7 +9,7 @@
 #   STEPS="accept" ARMS=bf16 tools/oracle/dflash_p0.sh
 #
 # Detach it (it outlives the terminal): nohup tools/oracle/dflash_p0.sh > /dev/null 2>&1 &
-# then `tail -f oracle-out-19a/p0.log`. Every output is in OUT (git-ignored).
+# then `tail -f $B70_DATA/oracle-out/qwen38/dflash-p0/p0.log`. Every output is in OUT (git-ignored).
 #
 # It refuses to start a model step while the spec 12a repeat (kv8_qwen38_repeat.sh, also 28 GB)
 # runs: Docker has 62.8 GB on this Mac (IGNORE_REPEAT=1 overrides).
@@ -27,7 +27,7 @@
 #   accept   dflash_accept.py run, ARMS (default bf16,int8,int8h,w4a16), V' 32k/64k/128k on bf16
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
-OUT="${OUT:-oracle-out-19a}"
+OUT="${OUT:-${B70_DATA:?set B70_DATA, the data root}/oracle-out/qwen38/dflash-p0}"
 REPO_ID="${REPO_ID:-Qwen/Qwen3.8-27B}"
 IMAGE="${IMAGE:-agnes-ref-img:latest}"      # python 3.12, torch 2.14.1+cpu, transformers 5.15.0
 THREADS="${THREADS:-16}"
@@ -55,7 +55,7 @@ SNAP="/hf/hub/models--${REPO_ID//\//--}/snapshots/$(basename "$SNAP_HOST")"
 
 if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != "true" ]; then
   docker rm -f "$NAME" > /dev/null 2>&1
-  docker run -d --name "$NAME" --memory "$MEM" --memory-swap "$MEM" -v "$HF":/hf:ro -v "$PWD":/ws \
+  docker run -d --name "$NAME" --memory "$MEM" --memory-swap "$MEM" -v "$HF":/hf:ro -v "$PWD":/ws -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" \
     -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 \
     -e OMP_NUM_THREADS="$THREADS" -e MKL_NUM_THREADS="$THREADS" -w /ws "$IMAGE" sleep infinity > /dev/null ||
     { echo "docker run failed"; exit 2; }

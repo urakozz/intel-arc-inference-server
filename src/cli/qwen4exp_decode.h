@@ -108,6 +108,10 @@ struct DecodeArgs {
   // Spec 21-QFN-v1e: b70-serve's --spec mtp / --spec loads the MTP head - the planner (settle) then carries its weights, its
   // buffers and the verify rows (runtime::qwen4exp::plan(..., mtp)). b70-decode never sets it.
   bool load_mtp = false;
+  // --host-experts (PERF-124, runtime::qwen4exp::CpuExperts): auto = Adaptive, gpu = Off, cpu = All; `host_experts_given`:
+  // named on the command line (an explicit gpu / cpu where it cannot apply is refused or noted; auto is silent).
+  runtime::qwen4exp::CpuExperts::Mode host_experts = runtime::qwen4exp::CpuExperts::Mode::Adaptive;
+  bool host_experts_given = false;
   bool int8_head() const { return lm_head == loader::LmHeadForm::Int8; }
   bool prefills() const { return prefill || pp; }
 };
@@ -119,6 +123,20 @@ inline uint32_t devices_of(const DecodeArgs& a) {
 
 // Every refusal that needs no device and no tensor - in this order, each by name (tests/CMakeLists.txt's
 // cli_reject_qwen4exp_*).
+// --host-experts auto|gpu|cpu; anything else refused.
+inline runtime::qwen4exp::CpuExperts::Mode host_experts_mode(const std::string& v) {
+  using M = runtime::qwen4exp::CpuExperts::Mode;
+  if (v == "auto") return M::Adaptive;
+  if (v == "gpu") return M::Off;
+  if (v == "cpu") return M::All;
+  throw std::runtime_error("--host-experts " + v + ": use auto (picked per step from a startup measurement), gpu (read "
+                           "over PCIe into the card) or cpu (computed on the CPU)");
+}
+// An explicit --host-experts gpu / cpu on any other model: refused before the device (auto is silent there).
+inline std::string host_experts_refusal(const std::string& v) {
+  return "--host-experts " + v + " is for Qwen3.8-Flash-Next, whose experts that do not fit the cards sit in host "
+         "memory; this model keeps every weight on the cards - drop --host-experts";
+}
 inline void check_args(const DecodeArgs& a) {
   if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
     throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only, not l0-int8: its h8 linears "
@@ -469,7 +487,8 @@ int run_decode(const DecodeArgs& a) {
     std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the final mixer reads layer "
                "{:d}'s H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
   runtime::PipelineOptions opt;
-  runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
+  runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt, {},
+                                        a.host_experts);
   std::print(stderr, "engine: Qwen3.8-Flash-Next, {:d} device(s){}, {:d} launches a token ({} attention, B70_Q4_ATTN), "
              "max_len {:d}; the PLE table's {:d} host pages read back by the device; {:d} expert block words read "
              "back through the tables ({:.1f} ms)\n", eng.devices(),
@@ -581,7 +600,7 @@ int run_decode_tp(const DecodeArgs& a) {
                                  s.desc.layers == full.layers ? 0 : s.desc.layers, false, s.tier ? &*s.tier : nullptr,
                                  s.tier1 ? &*s.tier1 : nullptr, s.pf_rows);
   }();
-  runtime::qwen4exp::Qwen4ExpTpEngine eng(*c0, *c1, std::move(model), s.max_len);
+  runtime::qwen4exp::Qwen4ExpTpEngine eng(*c0, *c1, std::move(model), s.max_len, {}, a.host_experts);
   std::print(stderr, "engine: Qwen3.8-Flash-Next, --parallel tp, {:d} launches a token a card, max_len {:d}; {:d} expert "
              "block words read back through the tables\n", eng.launches(0), eng.max_len(), eng.expert_words_checked());
   const uint32_t chunk = a.pp_chunk ? a.pp_chunk : s.pf_rows;

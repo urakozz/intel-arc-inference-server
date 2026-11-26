@@ -1,5 +1,5 @@
 // ornith_decode_test - spec 15c's decode gates on the card that are not the golden gate
-// itself (R3 is golden_gate_test on oracle-out-ornith):
+// itself (R3 is golden_gate_test on oracle-out/ornith/golden):
 //
 //   1. the list: Ornith's captured decode step is decode_launches() = 526 launches
 //      (embed + 40 x 13 + 5), every MoE layer's four launches in place of the dense MLP;
@@ -199,7 +199,7 @@ int main(int argc, char** argv) {
       break;
     }
   const std::string snap = argc > 1 ? argv[1] : "";
-  const std::string gdir = argc > 2 ? argv[2] : "oracle-out-ornith";
+  const std::string gdir = argc > 2 ? argv[2] : "oracle-out/ornith/golden";
   const std::string pdir = argc > 3 ? argv[3] : "tests/golden/prompts";
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   if (argc > 4) CHECK(loader::parse_lm_head_form(argv[4], lm_head));
@@ -265,7 +265,7 @@ int main(int argc, char** argv) {
   for (const char* pname : kPrompts) {
     const std::string gpath = gdir + "/" + pname + ".golden.safetensors";
     if (!golden::exists(gpath)) {
-      std::printf("R2 SKIPPED for %s: %s is absent (spec 15a's golden set, oracle-out-ornith)\n",
+      std::printf("R2 SKIPPED for %s: %s is absent (spec 15a's golden set, oracle-out/ornith/golden)\n",
                   pname, gpath.c_str());
       continue;
     }

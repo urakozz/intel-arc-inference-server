@@ -19,7 +19,7 @@
 #          (AR_DISK_STREAM_MODEL=1: AutoRound does that by itself only for fused-MoE checkpoints, and 130 GB of
 #          bf16 does not fit the RAM); a guard refuses any decoder-layer call without its value residual; low GPU
 #          memory; on card CARD (1) under its lock, or the CPU (DEVICE=cpu,
-#          /tmp/b70-cpu-model.lock). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32 files of the
+#          the CPU lock B70_CPU_LOCK when set). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32 files of the
 #          calibration activations, 2 x 5.4 GB, overwritten each block) - after a stop, `start` again continues at
 #          the first unfinished block.
 #          ATTN=int4 (default): every linear of the 80 blocks int4. ATTN=bf16: self_attn q/k/v/o/g kept bf16
@@ -54,7 +54,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
 Q="$HERE/quantize/ripple"
 Q4="$HERE/quantize/qwen4exp"
 SELF="$HERE/quantize/quantize_ripple.sh"
-MODEL="${MODEL:-${B70_DATA:?set B70_DATA, the data root}/hdd/hf-hub/models--ricursiveAI--Ripple-65B-Preview/snapshots/d58dbcf43344e27494a40cec6727e180450f4a6b}"
+MODEL="${MODEL:-$HOME/.cache/huggingface/hub/models--ricursiveAI--Ripple-65B-Preview/snapshots/d58dbcf43344e27494a40cec6727e180450f4a6b}"
 QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/quant}"
 LOGDIR="${LOGDIR:-${B70_DATA:?set B70_DATA, the data root}/logs/ripple-quant}"
 SCRATCH="${SCRATCH:-${B70_DATA:?set B70_DATA, the data root}/scratch/ripple-quant}"
@@ -101,11 +101,11 @@ disk_free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
 locked() {
   local cap=(systemd-run --user --scope -q -p "MemoryMax=${RAM_CAP_GB}G" -p MemorySwapMax=0)
   if [ "$DEVICE" = xpu ]; then
-    # through a machine-wide GPU lock wrapper at tools/gpu_lock.sh where the machine has one, else by affinity alone
-    if [ -x "$HERE/gpu_lock.sh" ]; then "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+    # through the machine's card wrapper when B70_CARD_RUN names one (<wrapper> <card> -- <cmd>), else by affinity alone
+    if [ -n "${B70_CARD_RUN:-}" ]; then $B70_CARD_RUN "$CARD" -- "${cap[@]}" "$@"
     else ZE_AFFINITY_MASK="$CARD" "${cap[@]}" "$@"; fi
   else
-    flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
+    ${B70_CPU_LOCK:+flock "$B70_CPU_LOCK"} "${cap[@]}" "$@"
   fi
 }
 
@@ -138,7 +138,7 @@ stage_check() {
   local ex ok=1 reload=(); ex=$(export_dir)
   if [ "$RELOAD" = 1 ]; then
     reload=(--reload)
-    flock /tmp/b70-cpu-model.lock "$VENVPY" "$Q/check.py" "$ex" "$MODEL" --attn "$ATTN" "${reload[@]}" || ok=0
+    ${B70_CPU_LOCK:+flock "$B70_CPU_LOCK"} "$VENVPY" "$Q/check.py" "$ex" "$MODEL" --attn "$ATTN" "${reload[@]}" || ok=0
   else
     "$VENVPY" "$Q/check.py" "$ex" "$MODEL" --attn "$ATTN" || ok=0
   fi
@@ -252,12 +252,13 @@ case "${1:-}" in
       echo "-- last log lines:"
       tr '\r' '\n' < "$OUT/run.log" | grep -v -E "^(Quantizing|packing|Writing|Map|Filter)" | grep -v '^\s*$' | tail -5
     fi ;;
-  stop)   # the run $B70_DATA/quant/ripple-current points at (the last started)
-    [ "$QUANT_ROOT" = "${B70_DATA:?set B70_DATA, the data root}/quant" ] || die "stop finds the run through ${B70_DATA:?set B70_DATA, the data root}/quant/ripple-current, not QUANT_ROOT=$QUANT_ROOT"
+  stop)   # the run CURRENT points at (the last started): TERM to its process group
     [ -z "${OUT:-}" ] || [ "$(readlink -m "$OUT")" = "$(readlink -f "$CURRENT")" ] ||
       die "OUT=$OUT is not the run $CURRENT points at (the last one started), which is the one stop stops"
-    [ -x "$HERE/box_stop.sh" ] || die "no stop helper on this machine: stop the run's AutoRound process yourself (pgrep -af autoround_run.py)"
-    exec "$HERE/box_stop.sh" ripple-quant ;;
+    run=$(readlink -f "$CURRENT" 2>/dev/null || true); p=$(cat "$run/run.pid" 2>/dev/null || true)
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null || die "no run is running"
+    kill -TERM -- "-$p"
+    echo "stopped the run in $run (pid $p and its children); resume with: $SELF start" ;;
   selftest)
     W="$SCRATCH/selftest-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$W" "$LOGDIR"
     env_py

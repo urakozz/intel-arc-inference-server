@@ -1,5 +1,6 @@
-"""score.py's readers: Qwen XML and
-Kolibri-1's hermes JSON calls behind the reasoning the model opens (spec 20e, `--format hermes`).
+"""score.py's readers: Qwen XML,
+Kolibri-1's hermes JSON calls behind the reasoning the model opens (spec 20e, `--format hermes`) and
+Inkling 2 Mini's <|content_invoke_tool_json|> blocks (`--format inkling`).
 
     python3 tools/toolcall/test_score.py     (pytest also collects it, where installed)
 
@@ -94,6 +95,65 @@ def test_hermes_hf_renders_round_trip():
                                                         len(m["tool_calls"])), case["name"]
             n_turns += 1
     assert n_turns == 4, n_turns
+
+
+# ---- Inkling 2 Mini: <|content_invoke_tool_json|> blocks ------------------------------------
+
+def ink_call(name: str, args: dict, json_name: str | None = None) -> str:
+    """A call block as the checkpoint's template writes it: sorted keys, no spaces, HTML-safe escapes (tojson)."""
+    body = json.dumps(args, sort_keys=True, separators=(",", ":"))
+    for c, e in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"), ("'", "\\u0027")):
+        body = body.replace(c, e)
+    return (f"<|message_model|>{name}<|content_invoke_tool_json|>"
+            f'{{"name":{json.dumps(json_name or name)},"args":{body}}}<|end_message|>')
+
+
+END_TURN = "<|content_model_end_sampling|>"
+
+
+def test_inkling_first_call():
+    t = ("<|message_model|><|content_text|>Let me look.<|end_message|>"
+         + ink_call("read", {"filePath": "/work/a.cc", "limit": 40}) + ink_call("grep", {"pattern": "x"}) + END_TURN)
+    assert parse_first_call(t, "inkling") == ("call", "read", {"filePath": "/work/a.cc", "limit": 40}, 2)
+    headless = t[len("<|message_model|><|content_text|>Let me look.<|end_message|><|message_model|>"):]
+    assert parse_first_call(headless, "inkling")[:3] == ("call", "read", {"filePath": "/work/a.cc", "limit": 40})
+
+
+def test_inkling_escapes_and_multiline_values():
+    old = "if (a < b && c > 'd') {\n  return;\n}"
+    assert parse_first_call(ink_call("edit", {"oldString": old, "newString": "x"}), "inkling")[2]["oldString"] == old
+
+
+def test_inkling_thinking_none_and_broken():
+    think = "<|message_model|><|content_thinking|>I should read it" + ink_call("read", {"filePath": "a"})
+    assert parse_first_call(think, "inkling")[0] == "call"            # a closed-over block: the call follows it
+    assert parse_first_call("<|message_model|><|content_thinking|>still thinking", "inkling")[0] == "reasoning"
+    inside = "<|message_model|><|content_thinking|>read<|content_invoke_tool_json|>{}<|end_message|>"
+    assert parse_first_call(inside + "<|message_model|><|content_text|>no<|end_message|>", "inkling")[0] == "no call"
+    assert parse_first_call("<|message_model|><|content_text|>Done.<|end_message|>" + END_TURN, "inkling")[0] \
+        == "no call"
+    cut = ink_call("edit", {"oldString": "a"})[:-len("}<|end_message|>")]
+    assert parse_first_call(cut, "inkling")[0] == "incomplete"                     # cut off mid-way
+    assert parse_first_call(ink_call("edit", {"a": 1})[:-len("<|end_message|>")], "inkling")[0] == "incomplete"
+    assert parse_first_call(ink_call("read", {"a": 1}, "grep"), "inkling")[0] == "incomplete"   # names differ
+    bad_args = '<|message_model|>read<|content_invoke_tool_json|>{"name":"read","args":"x"}<|end_message|>'
+    assert parse_first_call(bad_args, "inkling")[0] == "incomplete"
+    assert parse_first_call(ink_call("read", {"a": 1}), "qwen")[0] == "no call"   # the default reads Qwen XML
+
+
+def test_inkling_round_trips_the_36_conversations():
+    """Every assistant call of the A4 conversations, rendered as Inkling's template writes it, reads back."""
+    d = os.path.join(TOK, "..", "golden", "toolcall")
+    n_calls = 0
+    for m in json.load(open(os.path.join(d, "manifest.json"))):
+        for msg in json.load(open(os.path.join(d, m["name"] + ".json")))["messages"]:
+            for c in msg.get("tool_calls") or []:
+                a = c["function"]["arguments"]
+                a = json.loads(a) if isinstance(a, str) else a
+                got = parse_first_call(ink_call(c["function"]["name"], a) + END_TURN, "inkling")
+                assert got == ("call", c["function"]["name"], a, 1), m["name"]
+                n_calls += 1
+    assert n_calls == 30, n_calls
 
 
 # ---- validity against the scenario's files (open-work 3o) ----------------------------------
@@ -199,6 +259,34 @@ def test_bar_fails_on_an_invalid_call():
                 got = e.code
             assert got == rc, (cands, out.getvalue())
         assert "| a | edit | invalid |" in out.getvalue() and "bad: 1 / 2 match bf16" in out.getvalue()
+
+
+def test_inkling_scores_row_by_row():
+    """--format inkling: the tree's validity rules apply (Inkling's set re-renders the same 36 conversations)."""
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+    good = ink_call("edit", {"filePath": LL, "oldString": T3_OLD, "newString": T3_NEW}) + END_TURN
+    typo = ink_call("edit", {"filePath": LL, "oldString": T3_OLD.replace("uint32_t", "uint3_t"),
+                             "newString": T3_NEW}) + END_TURN
+    other = ink_call("read", {"filePath": LL, "offset": 10}) + END_TURN
+    with tempfile.TemporaryDirectory() as d:
+        for n, cand in (("a", good), ("b", typo), ("c", other)):
+            open(os.path.join(d, f"{n}.ref.txt"), "w").write(good)
+            open(os.path.join(d, f"{n}.kv8.txt"), "w").write(cand)
+        sys.argv = ["score.py", "--format", "inkling", "--min", "1", d, "ref", "kv8"]
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                main()
+            rc = None
+        except SystemExit as e:
+            rc = e.code
+        o = out.getvalue()
+        assert rc == 1, o
+        for row in ("| a | edit | match |", "| b | edit | invalid |", "| c | edit | mismatch |",
+                    "kv8: 1 / 3 match ref", "kv8: 1 invalid call(s)", "ref: 0 parse failure(s)"):
+            assert row in o, (row, o)
 
 
 if __name__ == "__main__":

@@ -20,24 +20,38 @@
 //       refuses a wrong upload: under random:0.5:7, after the load, one word of a host mirror, one word of a VRAM
 //       arena, or two table entries swapped - the construction throws naming that layer and expert; the untouched
 //       load constructs and reports its words checked.
-// Exit 77 (SKIP) without the checkpoint or, for pp2, with one GPU.
+//   ... 1|pp2 cpu   PERF-124: the same with every host-memory expert computed on the CPU (CpuExperts::Mode::All: the
+//       decode and verify lists' hand-off at M = 1..4), still bitwise the direct run.
+//   qwen4exp_tier_test <checkpoint> <ids> tp2 [cpu]   --parallel tp (Qwen4ExpTpEngine; each card's half experts in its
+//       own tier, the same forced placement on both cards), plain and with the MTP head (whole on card 1). The prompt
+//       is fed by decode (tp's prefill is held to a cosine bar, not bitwise), its first kTpPrompt ids, then as above: 8
+//       forced decode steps (each step's logits, both cards' H and route rows), 8 generated ids; with the head, verify
+//       at M = 2, 3, 4 (every row's logits and id), commit(1), 4 generated ids. Each placement (all, none,
+//       random:0.5:7) bitwise tp's "all" run of the same kind, the first difference named; and every run's ids the pp2
+//       direct run's (the same flow on Qwen4ExpEngine, split 2) - tp's rule against pp. With `cpu` every host-memory
+//       half expert is computed on the CPU (each card's partial, the all-reduce unchanged).
+// Exit 77 (SKIP) without the checkpoint or, for pp2 / tp2, with one GPU.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "check.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
+#include "runtime/qwen4exp/qwen4exp_tp_engine.h"
 #include "runtime/qwen4exp_rig.h"
 
 namespace {
 namespace rq = runtime::qwen4exp;
 using Ids = std::vector<uint32_t>;
-constexpr uint32_t kPrompt = 2200, kMaxLen = 8192, kCheckLayer = 2;
+constexpr uint32_t kPrompt = 2200, kMaxLen = 8192, kCheckLayer = 2, kTpPrompt = 120;
+rq::CpuExperts::Mode g_cpu = rq::CpuExperts::Mode::Off;   // argv[4] "cpu": Mode::All
 
 // Named byte strings in run order; two runs compare part by part.
 struct Rec {
@@ -132,7 +146,8 @@ void build(qwen4exp_rig::Rig& rig, const std::string& snap, const qwen4exp_rig::
   runtime::PipelineOptions po;
   po.timeout_ms = o.timeout_ms;
   po.prefill_timeout_ms = o.prefill_timeout_ms;
-  rig.eng = std::make_unique<rq::Qwen4ExpEngine>(rig.ctx, std::move(m), o.max_len, false, po);
+  rig.eng = std::make_unique<rq::Qwen4ExpEngine>(rig.ctx, std::move(m), o.max_len, false, po,
+                                                 runtime::CaptureOptions{}, g_cpu);
 }
 
 rq::ExpertTier forced(const model::Qwen4ExpDesc& d, const char* spec) {
@@ -185,6 +200,108 @@ int residency(const std::string& snap, const Ids& prompt, const Ids& force, uint
                   rig.eng->model().mirror_bytes, rig.eng->expert_words_checked(),
                   diff.empty() ? "BITWISE the direct form's" : "DIFFERS first at ", diff.c_str());
       bad += !diff.empty();
+    }
+  return bad;
+}
+
+// tp2's flow on either engine (the header): the prompt fed by decode, the steps' records into `r` (tp: also both
+// cards' H and route rows) and every id it produced into `ids` (the pp comparison).
+template <class E>
+void run_fed(E& e, const Ids& prompt, const Ids& force, Rec& r, Ids& ids) {
+  const uint32_t V = e.model().desc.vocab;
+  e.reset();
+  e.ingest(prompt);
+  const auto logits = [&](const std::string& at, uint32_t rows) {
+    std::vector<float> l(size_t(rows) * V);
+    e.read_logits_into(l.data(), rows);
+    r.add(at + ": logits", l);
+    if constexpr (std::is_same_v<E, rq::Qwen4ExpTpEngine>)
+      for (uint32_t c = 0; c < 2; ++c) {
+        r.add(at + ": card " + std::to_string(c) + "'s H", e.read_H(c));
+        r.add(at + ": card " + std::to_string(c) + "'s route rows", e.read_routes(c));
+      }
+  };
+  const auto gen = [&](const std::string& at, uint32_t n) {
+    const Ids g = e.generate(n);
+    r.add(at, g);
+    ids.insert(ids.end(), g.begin(), g.end());
+  };
+  if (!e.mtp()) {
+    for (uint32_t j = 0; j < force.size(); ++j) {
+      e.ingest({force[j]});
+      logits("decode step " + std::to_string(j), 1);
+      ids.push_back(e.pending());
+    }
+    gen("8 generated ids", 8);
+    return;
+  }
+  const uint32_t x = e.pending();
+  for (uint32_t k = 1; k <= rq::kMaxDraft; ++k) {
+    const std::string at = "verify at M = " + std::to_string(k + 1);
+    e.set_token(x);
+    for (uint32_t i = 0; i < k; ++i) e.set_draft_input(i, force[i]);
+    e.verify(k);
+    logits(at, k + 1);
+    const Ids v(e.verify_ids(), e.verify_ids() + k + 1);
+    r.add(at + ": ids", v);
+    ids.insert(ids.end(), v.begin(), v.end());
+  }
+  e.commit(1, e.verify_ids()[1]);
+  gen("4 generated ids after commit(1)", 4);
+}
+
+int tensor_parallel(const std::string& snap, const Ids& prompt, const Ids& force) {
+  qwen4exp_rig::Rig rig;
+  qwen4exp_rig::Options o;
+  o.max_len = kMaxLen;
+  o.int8_head = true;
+  o.devices = 2;
+  o.split = 2;
+  const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, 0);
+  ::setenv("B70_Q4_EXPERT_CHECK", "off", 1);   // as residency(): nothing flagged runs before the lists
+  const Ids fed(prompt.begin(), prompt.begin() + kTpPrompt);
+  Ids pp_ids[2];
+  for (const bool mtp : {false, true}) {
+    o.mtp = mtp;
+    ::setenv("B70_Q4_EXPERTS", "direct", 1);
+    build(rig, snap, o, nullptr);
+    ::unsetenv("B70_Q4_EXPERTS");
+    Rec unused;
+    run_fed(*rig.eng, fed, force, unused, pp_ids[mtp]);
+    std::printf("tp2: pp2's direct form %s, %zu ids recorded\n", mtp ? "with the MTP head" : "plain", pp_ids[mtp].size());
+  }
+  rig.eng.reset();
+  const std::vector<std::pair<std::string, rq::ExpertTier>> placements = {
+      {"all", forced(d, "all")}, {"none", forced(d, "none")}, {"random:0.5:7", forced(d, "random:0.5:7")}};
+  Rec ref[2];
+  int bad = 0;
+  for (const auto& [name, tier] : placements)
+    for (const bool mtp : {false, true}) {
+      std::optional<rq::Qwen4ExpTpEngine> e;
+      e.emplace(*rig.c0, *rig.c1,
+                loader::load_qwen4exp(rig.ctx, snap, kMaxLen, model::Q4Placement::tp2(d, model::Q4TpEnds::Split),
+                                      loader::LmHeadForm::Int8, 0, mtp, &tier, &tier),
+                kMaxLen, rq::Q4TpOptions{}, g_cpu);
+      Rec got;
+      Ids ids;
+      run_fed(*e, fed, force, got, ids);
+      const char* kind = mtp ? "with the MTP head" : "plain";
+      const size_t host = size_t(d.layers) * d.experts - std::count(tier.vram.begin(), tier.vram.end(), uint8_t(1));
+      const bool same_ids = ids == pp_ids[mtp];
+      bad += !same_ids;
+      if (name == "all") {
+        ref[mtp] = std::move(got);
+        std::printf("tp2 %s %s: the reference; ids %s\n", name.c_str(), kind,
+                    same_ids ? "the pp2 direct run's" : "DIFFER from the pp2 direct run's");
+        continue;
+      }
+      const std::string diff = first_difference(got, ref[mtp]);
+      std::printf("tp2 %s %s: %zu experts' halves a card in host memory, the CPU %s - %s%s; ids %s\n", name.c_str(),
+                  kind, host, e->cpu_experts() ? "computes them" : "off (read over PCIe)",
+                  diff.empty() ? "BITWISE tp's all-resident run" : "DIFFERS first at ", diff.c_str(),
+                  same_ids ? "the pp2 direct run's" : "DIFFER from the pp2 direct run's");
+      bad += !diff.empty();
+      bad += g_cpu == rq::CpuExperts::Mode::All && host > 0 && !e->cpu_experts();   // asked for and none built
     }
   return bad;
 }
@@ -247,7 +364,7 @@ int check(const std::string& snap) {
 
 int main(int argc, char** argv) {
   if (argc < 4) {
-    std::fprintf(stderr, "usage: %s <checkpoint> <ids> 1|pp2|check\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <checkpoint> <ids> 1|pp2|tp2|check [cpu]\n", argv[0]);
     return 2;
   }
   std::string why;
@@ -257,7 +374,8 @@ int main(int argc, char** argv) {
     return 77;
   }
   const std::string mode = argv[3];
-  if (mode == "pp2" && l0::Context::gpu_count() < 2) {
+  if (argc > 4 && std::string(argv[4]) == "cpu") g_cpu = rq::CpuExperts::Mode::All;
+  if ((mode == "pp2" || mode == "tp2") && l0::Context::gpu_count() < 2) {
     std::printf("SKIP: two GPUs needed, Level Zero shows %u\n", l0::Context::gpu_count());
     return 77;
   }
@@ -268,7 +386,9 @@ int main(int argc, char** argv) {
   Ids prompt(kPrompt);
   for (uint32_t p = 0; p < kPrompt; ++p) prompt[p] = src[p % src.size()];
   const Ids force(src.begin(), src.begin() + 8);
-  const int bad = mode == "check" ? check(snap) : residency(snap, prompt, force, mode == "pp2" ? 2 : 1);
+  const int bad = mode == "check" ? check(snap)
+                  : mode == "tp2" ? tensor_parallel(snap, prompt, force)
+                                  : residency(snap, prompt, force, mode == "pp2" ? 2 : 1);
   if (bad) {
     std::fprintf(stderr, "qwen4exp_tier_test %s: %d FAIL(s)\n", mode.c_str(), bad);
     return 1;

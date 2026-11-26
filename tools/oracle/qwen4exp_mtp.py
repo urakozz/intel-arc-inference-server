@@ -400,8 +400,9 @@ def cmd_accept(argv) -> None:
     if not sources:
         raise SystemExit("no source: --source NAME:CTX[:CONT] or --golden DIR")
     tc = ref.text_config(a.checkpoint, a.layers)
-    ple_spec = a.ple or (f"int8:{a.checkpoint.rstrip('/')}-ple-int8"
-                         if os.path.isdir(a.checkpoint.rstrip("/") + "-ple-int8") else "bf16")
+    ck = a.checkpoint.rstrip("/")
+    side = next((p for p in (ck + "/ple-int8", ck + "-ple-int8") if os.path.isdir(p)), None)
+    ple_spec = a.ple or (f"int8:{side}" if side else "bf16")
     model, pf, _ = ref.build_streamed(a.checkpoint, tc, ple=ref.PleTable(ref.ple_source(a.checkpoint, ple_spec), tc))
     head = MtpHead(a.checkpoint, tc, norm=a.norm, model=model)
     if a.experts == "rtn":

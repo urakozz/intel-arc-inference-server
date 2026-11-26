@@ -7,11 +7,14 @@
 // hidden is not quantised (W8A16); the kernel accumulates `q x` in fp32 and
 // multiplies by `s` once per row. A zero row gets `s = 0` and `q = 0`.
 //
-// **The layout** is gemv_i8w's (src/kernels/gemv_i8w.cl): `[N/16][K/16][16 k][16 n]`
-// int8, so one `intel_sub_group_block_read_uc16` hands lane `n % 16` the 16 k of its
+// **The layout** is gemv_i8w's (src/kernels/gemv_i8w.cl): 256-byte `[16 k][16 n]` int8
+// tiles, so one `intel_sub_group_block_read_uc16` hands lane `n % 16` the 16 k of its
 // column - 256 contiguous bytes per subgroup per step, the same 256 B `gemv_bf16`
 // streams per step. Scales are a separate fp32 `[N]` allocation
-// (`DeviceWeight::scales`), 993 280 B at the real shape.
+// (`DeviceWeight::scales`), 993 280 B at the real shape. The tiles are ordered
+// `[N/16][K/16]` (n-major: a 16-column tile's K walk contiguous) or, for an output head
+// while kInt8HeadKMajor holds, `[K/16/B][N/16][B]` (k-major in blocks of B = kInt8HeadKBlock steps) -
+// int8_tiled_index below.
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -29,9 +32,37 @@ enum class LmHeadForm { Checkpoint, Int8 };
 bool parse_lm_head_form(const std::string& s, LmHeadForm& out);
 const char* lm_head_form_name(LmHeadForm f);
 
-// Byte offset of element (k, n) in the tiled int8 weight.
-inline size_t int8_tiled_index(uint32_t K, uint32_t k, uint32_t n) {
-  return (size_t(n / 16) * (K / 16) + k / 16) * 256 + size_t(k % 16) * 16 + n % 16;
+// PERF-111: an int8 output head's tiles in k-major order, so at each 16-k step the launch's sub-groups read
+// neighbouring 256 B rather than each walking its own K x 16 slab (int8 head 579 -> 591 GB/s on Qwen3.8, one card,
+// M = 1). The same tiles, the same arithmetic in the same order: every output is bitwise the n-major order's.
+// **The one switch for the whole layout:** the loader writes the heads by int8_tiled_index, and
+// src/kernels/CMakeLists.txt reads the two lines below (keep their spelling) to build every reader of a tensor of a
+// head width with GEMV_KMAJOR=1 - gemv_i8w, gemm_sm_i8w (the verify rows) and df_rerank. A head is an int8 tensor
+// of one of these widths: the full vocabulary (248320, Kolibri's 128000), a tp card's half (124160) and the compact
+// draft heads (32768 / 65536 / 131072, gathered by gather_int8_tiled_rows). No other int8 tiled tensor has one of
+// them (the DFlash drafter's linears keep n-major: their k||v rows and df_w_slab_i8 read column ranges in place).
+// Flash-Next's hyper-connection mixers (quantise_int8_g32_tiled, q4_hc.cl) keep their own n-major tiles.
+// K-blocked (kInt8HeadKBlock, the kernels' GEMV_KMAJOR_B): kInt8HeadKBlock consecutive 16-k steps of a tile stay
+// together and those blocks are k-major. Plain k-major (one step a block) lost 6-8 % on gemm_sm_i8w at 64 rows: that
+// build is latency-bound (one weight read in flight a thread, ~410 GB/s), and a work-group's successive k-groups
+// land N/16 tiles apart instead of continuing its own slab. Blocks of 8 and the 32 / 64-row builds' read ahead
+// (gemm_sm I8_AHEAD) keep those rows level and leave the gains at M 1 (probe_gemv --tiles i8head).
+inline constexpr bool kInt8HeadKMajor = true;
+inline constexpr uint32_t kInt8HeadKBlock = 8;
+inline constexpr uint32_t kInt8HeadWidths[] = {248320, 124160, 128000, 131072, 65536, 32768};
+inline constexpr bool int8_k_major(uint32_t N) {
+  if (!kInt8HeadKMajor) return false;
+  for (uint32_t w : kInt8HeadWidths)
+    if (w == N) return true;
+  return false;
+}
+
+// Byte offset of element (k, n) in a tiled int8 [N][K] weight: k-major for a head (int8_k_major), else n-major.
+inline size_t int8_tiled_index(uint32_t K, uint32_t N, uint32_t k, uint32_t n) {
+  const size_t B = kInt8HeadKBlock;
+  const size_t tile = int8_k_major(N) ? (size_t(k / 16) / B * (N / 16) + n / 16) * B + k / 16 % B
+                                      : size_t(n / 16) * (K / 16) + k / 16;
+  return tile * 256 + size_t(k % 16) * 16 + n % 16;
 }
 // Weight bytes plus scale bytes: K N + 4 N.
 inline size_t lm_head_int8_bytes(uint32_t K, uint32_t N) { return size_t(K) * N + size_t(N) * 4; }
@@ -39,7 +70,7 @@ inline size_t lm_head_int8_bytes(uint32_t K, uint32_t N) { return size_t(K) * N 
 // One bf16 row of K elements into q[K] (row order, not tiled); returns its scale.
 float quantise_row_int8(const uint16_t* w, uint32_t K, int8_t* q);
 
-// The whole [N][K] bf16 row-major tensor into the tiled layout above plus scales[N].
+// The whole [N][K] bf16 row-major tensor into the tiled layout above (int8_tiled_index) plus scales[N].
 // `threads` = 0 uses std::thread::hardware_concurrency(). The result does not depend
 // on the thread count (each row is one thread's, start to finish).
 void quantise_int8_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* q_tiled,
@@ -56,7 +87,8 @@ void quantise_int8_g32_tiled(const uint16_t* w, uint32_t K, uint32_t N, int8_t* 
 
 // Spec 8 §11: the draft vocabulary's compact head. Rows `ids[0..n)` of a tiled [N][K]
 // int8 head (the layout above) and their scales, gathered into the SAME tiled layout at
-// N' = n: compact row j is row ids[j], byte for byte, and out_scales[j] = scales[ids[j]].
+// N' = n (int8_tiled_index at N on the way in, at n on the way out - k-major both sides for
+// the head widths): compact row j is row ids[j], byte for byte, and out_scales[j] = scales[ids[j]].
 // So `gemv_i8w` at N = n over the result runs, for compact column j, the instruction
 // sequence it runs for column ids[j] over the full head - the bitwise property
 // draft_vocab_kernels_test checks on the card. n must be a multiple of 16 (whole tiles)
@@ -67,9 +99,8 @@ void gather_int8_tiled_rows(const int8_t* q_tiled, const float* scales, uint32_t
                             float* out_scales, unsigned threads = 0);
 
 // The same gather for a bf16 head in gemv_bf16's layout (common::repack_bf16_tiled,
-// [n_tile][k_octet][8 k][16 n]). That layout puts element (k, n) where the int8 one does,
-// counted in elements - (n / 16) * 16K + 16k + n % 16 - so the two gathers are one
-// algorithm over a 1- or 2-byte element; bf16 has no scales.
+// [n_tile][k_octet][8 k][16 n]: n-major, element (k, n) at (n / 16) * 16K + 16k + n % 16);
+// bf16 has no scales.
 void gather_bf16_tiled_rows(const uint16_t* w_tiled, uint32_t K, uint32_t N, const uint32_t* ids,
                             uint32_t n, uint16_t* out_tiled, unsigned threads = 0);
 

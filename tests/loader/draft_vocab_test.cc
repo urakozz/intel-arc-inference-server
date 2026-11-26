@@ -217,7 +217,7 @@ void test_gather() {
     // And element by element through the layout's own index.
     for (uint32_t j = 0; j < n; ++j)
       for (uint32_t k = 0; k < K; ++k)
-        CHECK_EQ(out[loader::int8_tiled_index(K, k, j)], full[loader::int8_tiled_index(K, k, ids[j])]);
+        CHECK_EQ(out[loader::int8_tiled_index(K, n, k, j)], full[loader::int8_tiled_index(K, N, k, ids[j])]);
   }
   std::vector<int8_t> out(size_t(n) * K);
   std::vector<float> out_s(n);
@@ -229,6 +229,27 @@ void test_gather() {
   CHECK(throws([&] {   // not whole tiles
     loader::gather_int8_tiled_rows(full.data(), s.data(), K, N, ids.data(), 24, out.data(), out_s.data());
   }));
+}
+
+// PERF-111: the same at the head widths, where the loader's tiles are k-major (loader::kInt8HeadKMajor) on both
+// sides - the full head at 65536 rows, the compact one at 32768 (every other row, a tile's rows split between two
+// compact tiles): the gather equals quantising the selected rows as their own head.
+void test_gather_head_widths() {
+  const uint32_t N = 65536, K = 256, n = 32768;   // K: two of the head's K blocks
+  const std::vector<uint16_t> w = random_rows(N, K, 79);
+  std::vector<int8_t> full(size_t(N) * K);
+  std::vector<float> s(N);
+  loader::quantise_int8_tiled(w.data(), K, N, full.data(), s.data(), 3);
+  std::vector<uint32_t> ids(n);
+  for (uint32_t j = 0; j < n; ++j) ids[j] = 2 * j + (j / 16) % 2;
+  std::vector<uint16_t> sel(size_t(n) * K);
+  for (uint32_t j = 0; j < n; ++j) std::memcpy(&sel[size_t(j) * K], &w[size_t(ids[j]) * K], size_t(K) * 2);
+  std::vector<int8_t> ref(size_t(n) * K), out(ref.size());
+  std::vector<float> ref_s(n), out_s(n);
+  loader::quantise_int8_tiled(sel.data(), K, n, ref.data(), ref_s.data(), 1);
+  loader::gather_int8_tiled_rows(full.data(), s.data(), K, N, ids.data(), n, out.data(), out_s.data(), 5);
+  CHECK(out == ref);
+  CHECK(std::memcmp(out_s.data(), ref_s.data(), n * sizeof(float)) == 0);
 }
 
 // The bf16 head (`--lm-head bf16 --draft-vocab`): gathering rows of the tiled head equals
@@ -267,6 +288,7 @@ int main() {
   test_ranked_file();
   test_added_tokens();
   test_gather();
+  test_gather_head_widths();
   test_gather_bf16();
   std::puts("draft_vocab_test OK");
   return 0;

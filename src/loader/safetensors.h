@@ -28,6 +28,7 @@ class MappedFile {
   MappedFile& operator=(const MappedFile&) = delete;
   const uint8_t* data() const { return data_; }
   size_t size() const { return size_; }
+  int fd() const { return fd_; }
 
  private:
   const uint8_t* data_ = nullptr;
@@ -36,6 +37,12 @@ class MappedFile {
 };
 
 // The checkpoint's sharded tensor set, manifest = the index (dedup by name).
+// Bytes [begin, end) of one file of a SafetensorsSet (file offsets), for read_ahead.
+struct FileRange {
+  uint32_t file = 0;
+  uint64_t begin = 0, end = 0;
+};
+
 class SafetensorsSet {
  public:
   explicit SafetensorsSet(const std::string& snapshot_dir);
@@ -50,6 +57,12 @@ class SafetensorsSet {
   const uint8_t* data(const TensorInfo& t) const;
   size_t bytes(const TensorInfo& t) const { return t.end - t.begin; }
   const std::vector<std::string>& file_names() const { return names_; }
+  // The bytes `ts` occupy, sorted by file and offset, touching ranges merged.
+  std::vector<FileRange> ranges(const std::vector<const TensorInfo*>& ts) const;
+  // Reads `r` into the page cache - `readers` threads, 8 MiB preads - and returns the bytes read. A loader that walks
+  // the checkpoint tensor by tensor then faults on cached pages instead of waiting on the disk a page fault at a time
+  // (MADV_SEQUENTIAL's readahead alone read a Flash-Next checkpoint at ~0.3 GB/s from a disk that reads 1.1 GB/s).
+  size_t read_ahead(const std::vector<FileRange>& r, unsigned readers) const;
 
   // Parses one safetensors header (8-byte LE length + JSON). Exposed for tests.
   static std::vector<std::pair<std::string, TensorInfo>> parse_header(const uint8_t* p, size_t n);

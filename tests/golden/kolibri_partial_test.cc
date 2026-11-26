@@ -15,7 +15,7 @@
 // than the golden's do. The proposed bars above are then printed, not gated. Under B70_KOLIBRI_ATTN=eager (flash
 // is the default) the judge's verdicts are DIAGNOSTIC, printed, not gated.
 //
-// argv: <real checkpoint> <oracle-out-kolibri> [N] [--judge=<dir>]. Exit 77 (SKIP) without the checkpoint (spec
+// argv: <real checkpoint> <oracle-out/kolibri/golden> [N] [--judge=<dir>]. Exit 77 (SKIP) without the checkpoint (spec
 // 20b), the golden set (kolibri_oracle.sh real) or, given, the judge.
 #include <algorithm>
 #include <cmath>
@@ -55,7 +55,7 @@ std::vector<uint32_t> ids_of(const T* p, uint32_t k, bool sorted = false) {
 int main(int argc, char** argv) {
   const std::string judge_dir = golden::take_judge(argc, argv);   // ruling 2026-10-31, round 2 (header)
   const std::string arg = argc > 1 ? argv[1] : "";
-  const std::string gdir = argc > 2 ? argv[2] : "oracle-out-kolibri";
+  const std::string gdir = argc > 2 ? argv[2] : "oracle-out/kolibri/golden";
   const uint32_t N = argc > 3 ? uint32_t(std::strtoul(argv[3], nullptr, 10)) : 30;
   const std::string snap = kolibri_rig::kolibri_snapshot(arg);
   if (snap.empty()) {

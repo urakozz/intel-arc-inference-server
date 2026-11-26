@@ -3,6 +3,10 @@
 
     python -m tools.oracle.inkling_ref run SNAPSHOT --prompt IDS.txt --out NAME.golden.safetensors --dtype fp32 --gen 64
 
+--kv bf16 stores every cache row rounded to bf16 (what the engine's caches hold); --kv int8 stores the window rings
+in bf16 and the 8 full visits' K / V as the engine's `--kv-cache int8` gives them back (PERF-102: kv8.h's 128-point
+rotated int8, int8_sim.kv8_fq at head_dim 128). Without --kv the caches keep the run's dtype, as before.
+
 The checkpoint stays memory-mapped. Attention and other dense weights are cast
 one layer at a time, and only routed experts are decoded. Trace layer suffixes
 index visits in execution order, including each pass over the middle cycle.
@@ -14,7 +18,9 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 import json
 import math
+import os
 from pathlib import Path
+import time
 
 import torch
 import torch.nn.functional as F
@@ -22,6 +28,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .dequant import mxfp8_to_f32, nvfp4_to_f32
+from .int8_sim import kv8_fq
 
 ROOT = "model.llm."
 STREAMS = ("attn", "k", "v", "mlp")
@@ -135,7 +142,7 @@ def convolve(x, w, key, state, *, dynamic_input=None, heads=None):
     return ((convolved + x.float()) / math.sqrt(2 * width + 1)).to(x.dtype)
 
 
-def attention(inputs, w, c, positions, state, local):
+def attention(inputs, w, c, positions, state, local, cache=None):
     qx, kx, vx = inputs
     h, kv, d = ((c["swa_num_attention_heads"], c["swa_num_key_value_heads"], c["swa_head_dim"])
                 if local else (c["num_attention_heads"], c["num_key_value_heads"], c["head_dim"]))
@@ -157,6 +164,10 @@ def attention(inputs, w, c, positions, state, local):
     v = convolve(v, w, "attn.v_sconv", state.conv, dynamic_input=None if local else vx, heads=kv)
     k = clip(k.view(1, t, kv, d), c["qk_l2_clip_threshold"]).transpose(1, 2)
     v = rms(v.view(1, t, kv, d), eps).transpose(1, 2)
+    if cache == "int8" and not local:
+        k, v = (kv8_fq(x).to(x.dtype) for x in (k, v))
+    elif cache is not None:
+        k, v = (x.to(torch.bfloat16).to(x.dtype) for x in (k, v))
     if state.kv is not None:
         k, v = (torch.cat((prior, new), dim=2) for prior, new in zip(state.kv, (k, v)))
     keep = window - 1 if local else k.shape[2]
@@ -180,8 +191,9 @@ def attention(inputs, w, c, positions, state, local):
 
 
 class Inkling:
-    def __init__(self, snapshot, dtype=torch.float32):
+    def __init__(self, snapshot, dtype=torch.float32, kv=None):
         self.snapshot = Path(snapshot)
+        self.kv = kv
         self.config = json.loads((self.snapshot / "config.json").read_text())
         self.c = self.config["text_config"]
         loop = self.c["loop_config"]
@@ -255,7 +267,7 @@ class Inkling:
         if messages is not None:
             z = tuple(controller(a, m, w, s, eps, self.dtype) for a, m, s in zip(z, messages, STREAMS))
         inp = tuple(rms(a, eps, w[k]).to(self.dtype) for a, k in zip(z, keys))
-        y = attention(inp, w, c, pos, state, local)
+        y = attention(inp, w, c, pos, state, local, self.kv)
         y = convolve(y, w, "attn_sconv", state.conv).float()
         if i % c["n_layers_per_attn_res_block"] == 0:
             blocks.append(x)
@@ -308,7 +320,7 @@ class Inkling:
         return softcap(F.linear(trace.final, self.head).float(), self.c["final_logit_softcapping"]), trace
 
 
-def write_golden(model, ids, out, *, gen=0, chunk=64, force=None):
+def write_golden(model, ids, out, *, gen=0, chunk=64, force=None, prefill_tail=False):
     prompt = len(ids)
     if prompt == 0 or chunk < 1 or gen < 0:
         raise ValueError("Expected a nonempty prompt, a positive chunk size, and nonnegative generation length")
@@ -319,9 +331,25 @@ def write_golden(model, ids, out, *, gen=0, chunk=64, force=None):
     data = defaultdict(list)
     cache = model.cache()
     taps = model.config.get("mtp_config", {}).get("target_layer_ids", [])
+    started = time.monotonic()
 
-    def record(tokens):
+    def progress(n):
+        if n > 1 or cache.length % 16 == 0:
+            print(f"Tokens in cache {cache.length}, elapsed {time.monotonic() - started:.1f} s", flush=True)
+
+    def record(tokens, prompt_tail=False):
         logits, trace = model.forward(torch.tensor([tokens]), cache)
+        progress(len(tokens))
+        if prefill_tail:
+            data["logits"].append(logits[0, -1:].clone())
+            if prompt_tail:
+                for visit, hidden in enumerate(trace.outputs[:model.start]):
+                    data[f"H.L{visit}"].append(hidden[0, -1:].float().clone())
+                for visit in dict.fromkeys((0, model.start - 1)):
+                    key, value = cache.visits[visit].kv
+                    for name, tensor in (("K", key), ("V", value)):
+                        data[f"prefill.{name}.L{visit}"].append(tensor[0, :, -4:, :].float().clone())
+            return int(logits[0, -1].argmax())
         data["logits"].append(logits[0])
         for visit, (hidden, route) in enumerate(zip(trace.outputs, trace.routes)):
             data[f"H.L{visit}"].append(hidden[0])
@@ -331,8 +359,28 @@ def write_golden(model, ids, out, *, gen=0, chunk=64, force=None):
             data[f"tap.{j}"].append((trace.final if v == model.n_visits else trace.inputs[v])[0])
         return int(logits[0, -1].argmax())
 
-    for start in range(0, prompt, chunk):
-        next_id = record(ids[start:start + chunk])
+    # <out>.ckpt: the cache, the rows so far and the next prompt chunk, written after each prompt chunk (write, then
+    # rename); a run with the same arguments continues from it, and it is deleted when the golden is saved
+    ckpt = out.with_name(out.name + ".ckpt")
+    ident = [model.snapshot.name, ids, chunk, gen, force, prefill_tail, str(model.dtype), model.kv]
+    resume = 0
+    if ckpt.exists():
+        saved = torch.load(ckpt, weights_only=False)
+        if saved["ident"] == ident:
+            cache, data, next_id, resume = saved["cache"], saved["data"], saved["next_id"], saved["next"]
+            print(f"Resuming from {ckpt.name}: {resume} of {prompt} prompt tokens done", flush=True)
+    next_id = None if not resume else next_id
+
+    for start in range(resume, prompt, chunk):
+        batch = ids[start:start + chunk]
+        if prefill_tail and start + len(batch) < prompt:
+            model.forward(torch.tensor([batch]), cache)
+            progress(len(batch))
+        else:
+            next_id = record(batch, prompt_tail=True)
+        torch.save({"ident": ident, "cache": cache, "data": data, "next_id": next_id, "next": start + len(batch)},
+                   ckpt.with_name(ckpt.name + ".tmp"))
+        os.replace(ckpt.with_name(ckpt.name + ".tmp"), ckpt)
     tokens = []
     for i in range(gen):
         token = force[i] if force is not None else next_id
@@ -341,13 +389,16 @@ def write_golden(model, ids, out, *, gen=0, chunk=64, force=None):
     values = {k: torch.cat(rows).contiguous() for k, rows in data.items()}
     values["prompt_ids"] = torch.tensor(ids, dtype=torch.int32)
     values["tokens"] = torch.tensor(tokens, dtype=torch.int32)
-    values["nll"] = -values["logits"][:prompt - 1].log_softmax(-1).gather(1, torch.tensor(ids[1:], dtype=torch.long)[:, None])[:, 0]
-    for visit, state in enumerate(cache.visits):
-        values[f"K.L{visit}"], values[f"V.L{visit}"] = (x[0].contiguous().clone() for x in state.kv)
+    if not prefill_tail:
+        values["nll"] = -values["logits"][:prompt - 1].log_softmax(-1).gather(1, torch.tensor(ids[1:], dtype=torch.long)[:, None])[:, 0]
+        for visit, state in enumerate(cache.visits):
+            values[f"K.L{visit}"], values[f"V.L{visit}"] = (x[0].contiguous().clone() for x in state.kv)
     save_file(values, out, metadata={"snapshot": str(model.snapshot), "n_prompt": str(prompt), "gen": str(gen),
                                      "dtype": "fp32" if model.dtype == torch.float32 else "bf16",
-                                     "layers": str(model.n_visits), "logits_row0": "0", "chunk": str(chunk),
-                                     "vocab_used": str(model.vocab)})
+                                     "layers": str(model.n_visits), "logits_row0": str(prompt - 1 if prefill_tail else 0),
+                                     "chunk": str(chunk),
+                                     "vocab_used": str(model.vocab), "kv": model.kv or "dtype"})
+    ckpt.unlink(missing_ok=True)
     return tokens
 
 
@@ -360,20 +411,23 @@ def main():
         q.add_argument("--prompt", type=Path, required=True, help="whitespace-separated token IDs")
         q.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
         q.add_argument("--threads", type=int, default=4)
+        q.add_argument("--kv", choices=("bf16", "int8"), help="the caches as the engine stores them (see above)")
         if command == "run":
             q.add_argument("--out", type=Path, required=True)
             q.add_argument("--gen", type=int, default=0)
             q.add_argument("--force", type=Path, help="teacher-force the candidate's whitespace-separated output IDs")
             q.add_argument("--chunk", type=int, default=32)
+            q.add_argument("--prefill-tail", action="store_true",
+                           help="save the last prompt logits, prelude outputs, and sample KV rows")
         else:
             q.add_argument("--rounds", type=int, default=8)
     a = p.parse_args()
     torch.set_num_threads(a.threads)
     ids = list(map(int, a.prompt.read_text().split()))
-    model = Inkling(a.snapshot, torch.float32 if a.dtype == "fp32" else torch.bfloat16)
+    model = Inkling(a.snapshot, torch.float32 if a.dtype == "fp32" else torch.bfloat16, a.kv)
     if a.command == "run":
         force = None if a.force is None else list(map(int, a.force.read_text().split()))
-        tokens = write_golden(model, ids, a.out, gen=a.gen, chunk=a.chunk, force=force)
+        tokens = write_golden(model, ids, a.out, gen=a.gen, chunk=a.chunk, force=force, prefill_tail=a.prefill_tail)
         print("teacher-forced:" if force is not None else "greedy:", tokens, flush=True)
     else:
         from .inkling_dspark_ref import DraftHead, offline_acceptance

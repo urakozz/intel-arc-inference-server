@@ -59,7 +59,9 @@ which one it means, and the section "The packed-head checkpoint" lists every dif
 The third form is made at load and is the one the command-line tools run. `load(..., LmHeadForm::Int8)` reads the
 bf16 `lm_head` and quantises it on the host (`src/loader/lm_head_int8.h`): per row, `s = max|row| / 127` in fp32 and
 `q = rne(w / s)` clamped to [-127, 127], using every host thread, in 0.35-0.75 s. The result goes into the
-`[N/16][K/16][16 k][16 n]` int8 tiles that `gemv_i8w` reads, with the fp32 `[N]` scales in `DeviceWeight::scales`.
+256-byte `[16 k][16 n]` int8 tiles that `gemv_i8w` reads, ordered `[K/16/8][N/16][8]` at an output head's width
+and `[N/16][K/16]` otherwise (`loader::int8_tiled_index`),
+with the fp32 `[N]` scales in `DeviceWeight::scales`.
 The report's `lm_head` line names the form and the quantisation time, and the `W` cross-check (below) itemises the
 -1.270 GB it saves. A checkpoint whose head is already int4 is refused.
 

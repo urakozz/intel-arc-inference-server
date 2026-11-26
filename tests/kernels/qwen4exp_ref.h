@@ -182,7 +182,7 @@ inline void hc_up_mix(const float* down_f32, bool inject, const uint16_t* up, co
 }
 
 // --- PERF-66: the int8 form (q4_hc.cl's _Q8 / q4_hc_down_i8 / q4_hc_slab_i8) ---------------------------------------
-// int8 tiles [N/16][K/16][16 k][16 n] (loader::int8_tiled_index); scales fp16 [K/32][N] right after them.
+// int8 tiles [N/16][K/16][16 k][16 n] (n-major always, quantise_int8_g32_tiled); scales fp16 [K/32][N] right after them.
 inline size_t i8_index(uint32_t K, uint32_t k, uint32_t n) { return (size_t(n / 16) * K + k) * 16 + n % 16; }
 // One column's group chain: t_g = fma over the group's 32 k ascending of f32(q) x v(k), acc = fma(t_g, f32(s_g), acc).
 template <class V>

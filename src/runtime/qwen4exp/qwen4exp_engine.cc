@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <format>
@@ -36,6 +37,9 @@ struct Qwen4ExpEngine::Stage {
   mutable l0::CmdList imm;
   Control* ctl;
   std::optional<CapturedStep> step, inj_step;
+  // PERF-124 step 4: the decode and verify lists with the CPU's hand-offs (CpuExperts::on(M) picks them per step).
+  std::optional<CapturedStep> step_cpu;
+  std::vector<CapturedStep> verify_cpu;
   // Spec 21-QFN-v1e, with the MTP head: the verify lists at M = 1..4 and (the last device) the draft steps; PERF-51 the
   // GDN flush list (the committed rows into the state).
   std::vector<CapturedStep> verify, drafts;
@@ -50,7 +54,8 @@ Qwen4ExpEngine::Stage& Qwen4ExpEngine::st(uint32_t dev) const {
 }
 
 Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4LoadedModel model, uint32_t max_len,
-                               bool debug_tap, const PipelineOptions& opt, const CaptureOptions& cap)
+                               bool debug_tap, const PipelineOptions& opt, const CaptureOptions& cap,
+                               CpuExperts::Mode cpu_experts)
     : model_(std::move(model)), max_len_(max_len), opt_(opt), cap_(cap), attn_(q4_attn()) {
   const model::Qwen4ExpDesc& d = model_.desc;
   const model::Q4Placement& p = model_.placement;
@@ -93,9 +98,24 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
   }
   ple_init();
   expert_check();
-  for (uint32_t i = 0; i < p.devices; ++i)
+  if (cpu_experts != CpuExperts::Mode::Off) {
+    if (CpuExperts::has_host_experts(model_))
+      cpu_ = std::make_unique<CpuExperts>(devices, model_, cpu_experts);
+    else if (cpu_experts == CpuExperts::Mode::All)   // asked for by name (auto is silent)
+      std::fprintf(stderr, "experts: every routed expert is on the cards, so there is nothing for the CPU to compute "
+                   "(--host-experts cpu has no effect)\n");
+  }
+  for (uint32_t i = 0; i < p.devices; ++i) {
     st(i).step.emplace(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
                              taps_[i].get(), nullptr));
+    if (cpu_) {
+      ListSpec ls;
+      ls.cpu = cpu_.get();
+      ls.card = i;
+      st(i).step_cpu.emplace(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
+                                   taps_[i].get(), nullptr, ls));
+    }
+  }
   if (mtp) {
     const uint32_t last = p.devices - 1;
     mtp_ = std::make_unique<Qwen4ExpMtpBuffers>(st(last).ctx, d, max_len);
@@ -110,6 +130,12 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
         ls.opt = cap_;
         st(i).verify.push_back(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
                                      nullptr, nullptr, ls, &mtp_bind_));
+        if (cpu_) {
+          ls.cpu = cpu_.get();
+          ls.card = i;
+          st(i).verify_cpu.push_back(build(st(i).ctx, model_, model_.parts[i], st(i).buffers,
+                                           link_ ? &binding_ : nullptr, nullptr, nullptr, ls, &mtp_bind_));
+        }
       }
     for (uint32_t i = 0; i < p.devices; ++i) {
       ListSpec ls;
@@ -279,6 +305,7 @@ void Qwen4ExpEngine::reset() {
       throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::reset: device " + std::to_string(i) +
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
+  if (cpu_) cpu_->reset();
   if (link_) link_->zero(st(1).imm);
   if (mtp_) mtp_->zero(st(uint32_t(st_.size()) - 1).imm);   // spec 21-QFN-v1e: the head's Control, KV, keys, tail, R rows
   verify_k_ = kNoVerify;
@@ -297,8 +324,10 @@ CapturedStep& Qwen4ExpEngine::active(uint32_t dev) const {
 }
 
 void Qwen4ExpEngine::step_once() {
+  const bool cpu = cpu_ && !injected_;
+  if (cpu) cpu_->before_step(1);
   std::vector<CapturedStep*> lists;
-  for (uint32_t i = 0; i < st_.size(); ++i) lists.push_back(&active(i));
+  for (uint32_t i = 0; i < st_.size(); ++i) lists.push_back(cpu && cpu_->on(1) ? &*st(i).step_cpu : &active(i));
   submit(lists);
 }
 
@@ -800,8 +829,10 @@ void Qwen4ExpEngine::verify(uint32_t k) {
   verify_pos_ = p;
   verify_k_ = k;
   last_verify_m_ = k + 1;
+  if (cpu_) cpu_->before_step(k + 1);
   std::vector<CapturedStep*> lists;
-  for (uint32_t i = 0; i < st_.size(); ++i) lists.push_back(&st(i).verify[k]);
+  for (uint32_t i = 0; i < st_.size(); ++i)
+    lists.push_back(cpu_ && cpu_->on(k + 1) ? &st(i).verify_cpu[k] : &st(i).verify[k]);
   submit(lists);
   // PERF-51: the lists replayed the committed rows; a second replay must not (gdn_step.cl, DEFERRED)
   for (auto& s : st_) s->ctl->gdn_pend &= ~0xFFu;

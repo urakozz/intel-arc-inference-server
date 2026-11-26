@@ -29,6 +29,9 @@
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
+#if defined(MS) && MS > 1
+#pragma OPENCL EXTENSION cl_intel_split_work_group_barrier : enable
+#endif
 
 #if !defined(K) || !defined(N) || !defined(EXPERTS)
 #error "pf_moe_q4gemm: K, N (one expert block) and EXPERTS must be defined (src/kernels/prefill/CMakeLists.txt)"
@@ -67,6 +70,17 @@
 // 32-row tiles, and x has the chunk cap's rows (a multiple of 256).
 #ifndef SH_X
 #define SH_X 0
+#endif
+// MS > 1 (Inkling's NVFP4 / MXFP8 binaries): MS sub-groups along m (an item of MS x 64 rows) share one decode of the
+// work-group's columns. Each 64-k group, the work-group's (16-column atom, k16 half) units are decoded once, each
+// sub-group taking its share, into local memory as the DPAS B register image, then every sub-group runs its rows'
+// DPAS from there. The decode decided the time (the FP codes take ~10 ALU ops a value, read by 64 rows only); the
+// same B words, the same chain.
+#ifndef MS
+#define MS 1
+#endif
+#if MS > 1 && (WFMT == 0 || (NB * 4) % MS != 0)
+#error "pf_moe_q4gemm: MS needs the FP formats, 64-row sub-groups and whole decode shares"
 #endif
 #if (PF_W || AK16) && !NODB
 #error "pf_moe_q4gemm: PF_W and AK16 build on NODB"
@@ -141,7 +155,11 @@ inline int8 fp_half(const __global uint* tile, uint lane, uint k) {
 }
 #endif
 
+#if MS > 1
+__attribute__((reqd_work_group_size(SG * WGN * MS, 1, 1)))
+#else
 __attribute__((reqd_work_group_size(SG * WGN, 1, 1)))
+#endif
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const ushort* restrict A,
                             __global const uint* restrict W, __global const uint* restrict W_sh,
@@ -155,11 +173,19 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
   if (e == NONE || (e == EXPERTS && W_sh == 0)) return;   // uniform; no barrier below (no W_sh: the shared block's
                                                           // bf16 form runs the batch path, Flash-Next's Intel form)
   if (e != EXPERTS && W == 0) return;   // no W: the shared block's items only (l0-int8's bf16 shared expert, open-work 16)
+#if MS > 1
+  const uint s = get_sub_group_id(), sm = s / WGN, sn = s % WGN;
+  const uint row0 = items[4 * it + 1] + R * sm;       // this sub-group's 64 rows of the item
+  const uint rows = items[4 * it + 2] > R * sm ? items[4 * it + 2] - R * sm : 0u;   // 0: decode only
+  const uint nb = get_group_id(0) * WG_N + CN * sn;
+  const uint mb = row0;
+#else
   const uint row0 = items[4 * it + 1];
   const uint rows = items[4 * it + 2];
   const uint s = get_sub_group_id();
   const uint nb = get_group_id(0) * WG_N + CN * s;    // this sub-group's first column
   const uint mb = row0;                               // its first row (one sub-group a column block)
+#endif
 #if Q4_EXPERT_TABLE
   // the _TBL binaries (Flash-Next's expert tier, plan 21-QFN-v2a Task 8): W is the layer's table row, block e's address
   // at W[e] (u64; VRAM or pinned host memory)
@@ -187,7 +213,77 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
 
 #if WFMT != 0
   const uint fp_lane = get_sub_group_local_id();
+#if MS > 1
+  // Unit u = (atom u / 4, k16 half u % 4) of the work-group's WGN NB atoms; sub-group s decodes u = s + MS WGN i.
+  // Three buffers and a split barrier a group: a sub-group decodes group g + 1, arrives, runs group g's DPAS, then
+  // waits, so one sub-group's decode runs beside the others' DPAS. Group g + 1's buffer was last read by group
+  // g - 2's DPAS, which every sub-group finished before it arrived at g - 1 (and the wait at g - 1 saw that).
+#define UNITS (WGN * NB * 4)
+#define UPS (UNITS / (MS * WGN))
+#define FPH (16 / FP_VALUES_PER_WORD)
+  __local uint slm[3][UNITS][128];   // lane l's VNNI word p at [p * 16 + l]
+  const uint n_wg = get_group_id(0) * WG_N / 16u;
+  uint uw[UPS][FPH], us[UPS];
+#define UNIT_LOAD(gg)                                                                              \
+  _Pragma("unroll") for (uint i = 0; i < UPS; ++i) {                                               \
+    const uint u = s + MS * WGN * i, k = 16u * (u % 4u);                                           \
+    const __global uint* tl = Wb + ((size_t)(n_wg + u / 4u) * G + (gg)) * TILE_U32;                \
+    _Pragma("unroll") for (uint w = 0; w < FPH; ++w) uw[i][w] = FP_TILE_WORD(tl, fp_lane, k + w * FP_VALUES_PER_WORD); \
+    us[i] = tl[32 * FP_CODE_BITS + (k / FP_BLOCK_K) * 4 + fp_lane / 4];                            \
+  }
+  UNIT_LOAD(0u)
+#if WFMT == 1
+  // NVFP4: a code byte's two E2M1 values as bf16 bits (exact), lo | hi << 16. An E2M1 x E4M3 product has at most 6
+  // significant bits, so the bf16 of fp_weight's value is the product's truncation: one table read a pair.
+  __local uint e2m1_pair[256];
+  for (uint i = get_local_id(0); i < 256; i += get_local_size(0)) {
+    const float lo = fp_weight(i, 0, 1.f), hi = fp_weight(i, 1, 1.f);
+    e2m1_pair[i] = (as_uint(lo) >> 16) | (as_uint(hi) & 0xFFFF0000u);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+#endif
   for (uint g = 0; g < G; ++g) {
+#if MS > 1
+    __local uint (*buf)[128] = slm[g % 3u];
+    for (uint dg = g == 0 ? 0u : g + 1; dg <= g + 1 && dg < G; ++dg) {   // group 0 first, then g + 1
+    __local uint (*dst)[128] = slm[dg % 3u];
+#pragma unroll
+    for (uint i = 0; i < UPS; ++i) {
+      const uint u = s + MS * WGN * i;
+      const uint byte = (us[i] >> (8 * (fp_lane % 4))) & 255u;
+#if WFMT == 1
+      const float scale = fp_e4m3(byte);
+      uint img[8];
+#pragma unroll
+      for (uint p = 0; p < 8; ++p) {
+        const uint pair = e2m1_pair[(uw[i][p / 4] >> (8 * (p % 4))) & 255u];
+        const float lo = as_float(pair << 16) * scale, hi = as_float(pair & 0xFFFF0000u) * scale;
+        img[p] = (as_uint(lo) >> 16) | (as_uint(hi) & 0xFFFF0000u);
+      }
+      intel_sub_group_block_write8(dst[u], vload8(0, img));
+#else
+      const float scale = as_float(byte ? byte << 23 : 0x00400000u);
+      uint img[8];
+#pragma unroll
+      for (uint p = 0; p < 8; ++p) {   // fp_half's pair p, from the registers
+        const uint word = uw[i][(2 * p) / FP_VALUES_PER_WORD];
+        const ushort lo = rne_bf16(fp_weight(word, (2 * p) % FP_VALUES_PER_WORD, scale));
+        const ushort hi = rne_bf16(fp_weight(word, (2 * p + 1) % FP_VALUES_PER_WORD, scale));
+        img[p] = (uint)lo | ((uint)hi << 16);
+      }
+      intel_sub_group_block_write8(dst[u], vload8(0, img));
+#endif
+    }
+    if (dg + 1 < G) { UNIT_LOAD(dg + 1) }
+    if (dg == 0) barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    intel_work_group_barrier_arrive(CLK_LOCAL_MEM_FENCE);
+    if (rows == 0) {
+      intel_work_group_barrier_wait(CLK_LOCAL_MEM_FENCE);
+      continue;
+    }
+#endif
 #else
   uint wq[NB][8];
   float sc[NB];
@@ -255,12 +351,22 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
 #pragma unroll
         for (int a = 0; a < NA; ++a) af[a] = as_short8(vload8(0, afrag[a / 4] + (uint)(8 * (a % 4))));
 #else
+#if INK_PREFILL
+        // A 32-row item has no second fragment to read.
+#pragma unroll
+        for (int a = 0; a < NA; ++a)
+          if (a < 4 || full)
+            af[a] = as_short8(vload8(0, afrag[a / 4] + (uint)(ks * 32 + 8 * (a % 4))));
+#else
 #pragma unroll
         for (int a = 0; a < NA; ++a) af[a] = as_short8(vload8(0, afrag[a / 4] + (uint)(ks * 32 + 8 * (a % 4))));
 #endif
+#endif
 #pragma unroll
         for (int b = 0; b < NB; ++b) {
-#if WFMT != 0
+#if WFMT != 0 && MS > 1
+          const int8 bv = as_int8(intel_sub_group_block_read8(buf[(NB * sn + (uint)b) * 4u + 2u * (uint)h + (uint)ks]));
+#elif WFMT != 0
           const __global uint* tile = Wb + ((size_t)(nb / 16 + (uint)b) * G + g) * TILE_U32;
           const int8 bv = fp_half(tile, fp_lane, 32u * h + 16u * ks);
 #else
@@ -272,6 +378,9 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
         }
       }
     }
+#if MS > 1
+    intel_work_group_barrier_wait(CLK_LOCAL_MEM_FENCE);
+#endif
 #if WFMT == 0 && !NODB
 #pragma unroll
     for (int b = 0; b < NB; ++b) {
@@ -283,6 +392,10 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
   }
 #undef LOAD_GROUP
 #undef PREFETCH_GROUP
+#if MS > 1
+#undef UNIT_LOAD
+  if (rows == 0) return;   // past the barriers
+#endif
 
 #if WFMT == 1
   const float outer = as_float(Wb[BLK_U32 - 1]);
@@ -315,6 +428,21 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
       intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, x_w, x_h, x_p, (int2)((int)(ng >> 1), 8 * a), xv);
     }
 #undef PF_SILU_ROW
+#elif defined(OUT_BF16_LANES)
+  // Inkling's bf16-glue prompt pass: OUT_F32's per-lane stores with each sum rounded once to bf16 (the hardware's
+  // round to nearest even). The 2D block-write epilogue below ran these shapes ~14 % slower than the fp32 stores.
+  __global ushort* restrict Y = out + (size_t)mb * N;
+  const uint lane = get_sub_group_local_id();
+#define PF_BF16_ROW(r)                                                                 \
+  if (8 * a + r < live_rows) Y[(size_t)(8 * a + r) * N + nb + 16u * (uint)b + lane] = intel_convert_bfloat16_as_ushort(v.s##r);
+#pragma unroll
+  for (int a = 0; a < NA; ++a)
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+      const float8 v = acc[a][b];
+      PF_BF16_ROW(0) PF_BF16_ROW(1) PF_BF16_ROW(2) PF_BF16_ROW(3) PF_BF16_ROW(4) PF_BF16_ROW(5) PF_BF16_ROW(6) PF_BF16_ROW(7)
+    }
+#undef PF_BF16_ROW
 #elif defined(OUT_F32)
   // Plan 21v2b Task 4 (a tensor-parallel card's down over its K half): the fp32 sums unrounded, [rows][N] float - the
   // two cards' partials are added before any rounding. Lane l owns column nb + 16 b + l; v.s<r> is row 8 a + r.

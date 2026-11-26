@@ -264,10 +264,9 @@ DFlashHostLinear dflash_candidate_head(const int8_t* tiled, const float* row_sca
   std::vector<uint16_t> scales(size_t(K / 64) * N);
   for (uint32_t n = 0; n < N; ++n)
     for (uint32_t g = 0; g < K / 64; ++g) {
-      const auto* p = tiled + (size_t(n / 16) * (K / 16) + g * 4) * 256 + n % 16;
+      auto at = [&](uint32_t k) { return tiled[int8_tiled_index(K, N, g * 64 + k, n)]; };   // the loader's order
       float amax = 0;
-      for (uint32_t k = 0; k < 64; ++k)
-        amax = std::fmax(amax, std::fabs(float(p[(k / 16) * 256 + (k % 16) * 16]) * row_scales[n]));
+      for (uint32_t k = 0; k < 64; ++k) amax = std::fmax(amax, std::fabs(float(at(k)) * row_scales[n]));
       const uint16_t sh = common::kv8::f32_to_f16_rne(2.0f * amax / 15.0f);
       scales[size_t(g) * N + n] = sh;
       const float scale = common::f16_to_f32(sh);
@@ -275,7 +274,7 @@ DFlashHostLinear dflash_candidate_head(const int8_t* tiled, const float* row_sca
         uint32_t word = 0;
         for (uint32_t t = 0; t < 8; ++t) {
           const uint32_t k = j * 8 + t;
-          const float v = float(p[(k / 16) * 256 + (k % 16) * 16]) * row_scales[n];
+          const float v = float(at(k)) * row_scales[n];
           const float code = scale > 0 ? std::rint(v / scale) + 8.0f : 8.0f;
           word |= uint32_t(std::fmin(std::fmax(code, 0.0f), 15.0f)) << (4 * t);
         }
@@ -302,8 +301,9 @@ DFlashHostLinear dflash_candidate_head2(const int8_t* tiled, const float* row_sc
     pool.emplace_back([&, t] {
   for (uint32_t n = blocks * t / threads * 16; n < blocks * (t + 1) / threads * 16; ++n)
     for (uint32_t g = 0; g < G; ++g) {
-      const auto* p = tiled + (size_t(n / 16) * (K / 16) + g * 4) * 256 + n % 16;
-      auto value = [&](uint32_t k) { return float(p[(k / 16) * 256 + (k % 16) * 16]) * row_scales[n]; };
+      auto value = [&](uint32_t k) {   // the loader's order (k-major at a head width, PERF-111)
+        return float(tiled[int8_tiled_index(K, N, g * 64 + k, n)]) * row_scales[n];
+      };
       float amax = 0;
       for (uint32_t k = 0; k < 64; ++k) amax = std::fmax(amax, std::fabs(value(k)));
       const uint16_t sh = common::kv8::f32_to_f16_rne(amax / 1.5f);

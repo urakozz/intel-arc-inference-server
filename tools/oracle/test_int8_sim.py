@@ -128,6 +128,21 @@ class Int8Sim(unittest.TestCase):
         # the rotation itself is orthonormal: unrot(rot(v)) == v
         self.assertLess(float((S._unrot(S._rot(x, d), d) - x).abs().max()), 1e-4)
 
+    def test_kv8_head_dim_128(self):
+        """PERF-102's form: the first 128 signs, y = s (.) FWHT(x) / 16, the un-rotation x 1/8; at 256 the same code
+        is the existing one (its factor 16 / 256 = 1/16)."""
+        torch.manual_seed(0)
+        x = torch.randn(3, 8, 128)
+        self.assertTrue(torch.equal(S.kv8_signs(128), S.kv8_signs()[:128]))
+        y = S.kv8_fwht(x.double()) * S.kv8_signs(128).double() / 16
+        self.assertLess(float((S.kv8_fwht(y * S.kv8_signs(128).double()) / 8 - x.double()).abs().max()), 1e-12)
+        q, s16 = S.kv8_encode(x.to(torch.bfloat16).float())
+        self.assertEqual(tuple(q.shape), (3, 8, 128))
+        self.assertEqual(int(q.abs().amax(-1).min()), 127)                     # the amax element takes the full code
+        fq = S.kv8_fq(x)
+        err = (fq - x.to(torch.bfloat16).float()).norm(dim=-1) / x.norm(dim=-1)
+        self.assertLess(float(err.max()), 0.01)                                # ~0.5 % for 128 Gaussian values
+
 
 if __name__ == "__main__":
     unittest.main()

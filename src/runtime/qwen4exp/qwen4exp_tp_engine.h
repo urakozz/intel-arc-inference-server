@@ -19,6 +19,7 @@
 #include "runtime/buffer_sizes.h"   // KvCache
 #include "runtime/qwen4exp/qwen4exp_buffers.h"
 #include "runtime/qwen4exp/qwen4exp_capture.h"   // MtpBinding
+#include "runtime/qwen4exp/qwen4exp_cpu_experts.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"   // SnapRun, kMaxDraft
 #include "runtime/tp_protocol.h"
 
@@ -39,6 +40,11 @@
 //
 // At construction: the PLE hash constants on both cards, the expert tier's table check on each card, one discarded
 // warm-up step.
+//
+// PERF-124 (`cpu_experts`, b70-decode / b70-serve --host-experts): each card's host-memory half experts computed on the
+// CPU (runtime/qwen4exp/qwen4exp_cpu_experts.h, under tp) - a second plain list and a second verify list a card with the
+// CPU's hand-offs, picked per step as Qwen4ExpEngine does; the draft steps run the head whole on card 1 (VRAM) and stay
+// as they are. The CPU's partials are the card's own bit for bit, so the ids are the GPU route's.
 //
 // Plan 21-QFN-v2b Task 5 Step 0, the MTP head (the model loaded with it: whole on card 1, the Split placement): spec 8's
 // draft / verify / commit as Qwen4ExpEngine's. A verify at k is both cards' verify lists at M = k + 1 (the crossings at
@@ -67,7 +73,7 @@ class Qwen4ExpTpEngine {
  public:
   // `d1` is a view of d0's context; both cards must access each other's memory. `model` was loaded at the tp placement.
   Qwen4ExpTpEngine(l0::Context& d0, l0::Context& d1, loader::Q4LoadedModel model, uint32_t max_len,
-                   const Q4TpOptions& opt = {});
+                   const Q4TpOptions& opt = {}, CpuExperts::Mode cpu_experts = CpuExperts::Mode::Off);
   ~Qwen4ExpTpEngine();
   Qwen4ExpTpEngine(const Qwen4ExpTpEngine&) = delete;
   Qwen4ExpTpEngine& operator=(const Qwen4ExpTpEngine&) = delete;
@@ -100,6 +106,8 @@ class Qwen4ExpTpEngine {
   std::vector<double> profile_verify(uint32_t card, uint32_t k, uint32_t replays, std::vector<std::string>* labels);
   // The expert tier's device read-back at construction: block words read through each card's table.
   size_t expert_words_checked() const { return words_checked_; }
+  // The host-memory experts on the CPU (null: not asked for, or none in host memory) - b70-serve's in-place switch.
+  CpuExperts* cpu_experts() { return cpu_.get(); }
 
   // --- plan 21v2b Task 4: prefill (b70_qwen4exp_prefill) ---------------------------------------------------------------
   // Runs `ids` from pos in chunks of `chunk` (0 = model().pf_rows) on both cards, then the head on the last row: pos +=
@@ -169,11 +177,13 @@ class Qwen4ExpTpEngine {
   [[noreturn]] void fail(const std::string& what);
   void ple_init();
   void expert_check();
-  CapturedStep build_card(uint32_t r, ProfileEvents* prof);
+  CapturedStep build_card(uint32_t r, ProfileEvents* prof, const CpuExperts* cpu = nullptr);
 
   loader::Q4LoadedModel model_;
   uint32_t max_len_;
   Q4TpOptions opt_;
+  // PERF-124: before cards_ - their lists wait on its events and read its host buffers, so it is destroyed after them.
+  std::unique_ptr<CpuExperts> cpu_;
   std::array<std::unique_ptr<Card>, 2> cards_;
   bool broken_ = false;
   size_t words_checked_ = 0;

@@ -1,14 +1,14 @@
 #!/bin/bash
 # On the GPU machine, from a tree root: C3. Replay a request log against b70-serve with the prefix
-# cache on and then off (same build, max_len 131072, device 0), under the shared GPU lock,
-# and compare the two runs.
+# cache on and then off (same build, max_len 131072, device 0), holding B70_GPU_LOCK (the machine's GPU lock file)
+# when it is set, and compare the two runs.
 #   tools/prefix/replay_ab.sh <log dir> <out prefix>
 # e.g. tools/probe/detach.sh $B70_DATA/logs/prefix/c3.log tools/prefix/replay_ab.sh tests/golden/opencode/session1 $B70_DATA/logs/prefix/c3
 # Writes <out prefix>.on.json, .off.json, .on.serve.log, .off.serve.log, the servers' request
 # logs <out prefix>.on.log/ and .off.log/, and judges every divergence by the tie rule
 # (<out prefix>.cases, tools/probe/probe_tie_judge). Env: MODEL, PORT
 # (8012), GB (the cache-on budget, 32), ARMS ("on off"), SERVE_ARGS (extra b70-serve flags,
-# e.g. "--log-requests DIR").
+# e.g. "--log-requests DIR"), B70_GPU_LOCK.
 # --spec off comes first: a recorded row measures the plain server unless its flags name a proposer (the last
 # --spec wins; b70-serve's own default is --spec auto).
 set -euo pipefail
@@ -18,8 +18,10 @@ out="$2"
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 PORT="${PORT:-8012}"
 GB="${GB:-32}"
-exec 9>"$HOME/b70-gpu.lock"
-echo "waiting for the GPU lock"; flock 9; echo "lock held"
+if [ -n "${B70_GPU_LOCK:-}" ]; then
+  exec 9>"$B70_GPU_LOCK"
+  echo "waiting for the GPU lock"; flock 9; echo "lock held"
+fi
 for arm in ${ARMS:-on off}; do
   gb=$GB; [ "$arm" = off ] && gb=0
   echo "== cache $arm (--prefix-cache-gb $gb) =="; uptime

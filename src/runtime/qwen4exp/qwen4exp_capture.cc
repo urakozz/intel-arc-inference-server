@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <string>
 
@@ -724,7 +725,23 @@ class Walk {
     // a verify (M >= 2) reads each distinct expert once for every row that chose it (q4_moe_union.cl, bitwise the
     // per-row form); q4_moe_finish is the per-row binary's
     const bool un = M_ > 1 && !spec_.opt.force_per_row_moe;
-    const std::string mv = tpm ? kq::tp_moe_variant(tbl, tp_->moe->rank, M_, un) : kq::moe_variant(M_, shb, tbl, un);
+    // PERF-124 step 4: this layer's host-RAM experts to the CPU (qwen4exp_cpu_experts.h) - x and the route out, `ready`;
+    // gate||up without the CPU's experts; the wait on `done` before the down, which reads the CPU's sums (tp: the card's
+    // half experts, the CPU's sums its partials, sent to the peer as its own)
+    const bool in_part = !part_.layers.empty() && std::less_equal<>()(&part_.layers.front(), &L) &&
+                         std::less_equal<>()(&L, &part_.layers.back());   // not the head's layer
+    const uint32_t li = in_part ? uint32_t(&L - part_.layers.data()) : 0;
+    const bool cpu = spec_.cpu && tbl && in_part && spec_.cpu->has(spec_.card, li) && (M_ == 1 || un);
+    CpuExperts::Channel ch;
+    if (cpu) {
+      ch = spec_.cpu->channel(spec_.card, M_, li);
+      step_.list.reset_event(ch.done);
+      step_.list.copy(ch.x, b_.x.ptr(), size_t(M_) * d_.hidden * 2);
+      step_.list.copy(ch.route, rt, size_t(M_) * kRouteWords * 4);
+      step_.list.barrier_signal(ch.ready);
+    }
+    const std::string mv =
+        tpm ? kq::tp_moe_variant(tbl, tp_->moe->rank, M_, un, cpu) : kq::moe_variant(M_, shb, tbl, un, cpu);
     {
       // q4_moe_gate_up(route, x, w_gu, w_sh_gu, h), grid (11 x 20, M) - tp: the card's half, 11 x 10
       l0::Kernel& k = kernel(mv, "q4_moe_gate_up", kq::moe_gate_up_wg());
@@ -734,8 +751,14 @@ class Walk {
       k.arg_ptr(2, tbl ? L.expert_row : L.gate_up->ptr());
       k.arg_ptr(3, L.shared->ptr());
       k.arg_ptr(4, b_.moe_h.ptr());
+      if (cpu) {
+        k.arg<uint64_t>(5, ch.mlo);
+        k.arg<uint64_t>(6, ch.msz);
+        k.arg_ptr(7, ch.dec);
+      }
       launch(k, tpm ? kq::tp_moe_gate_up_groups() : kq::moe_gate_up_groups(), M_);
     }
+    if (cpu) step_.list.wait_event(ch.done);
     {
       // q4_moe_down(route, h, w_dn, w_sh_dn, y), grid (2560 / 16, M) - y is NOT folded: the next combine does
       l0::Kernel& k =
@@ -749,6 +772,14 @@ class Walk {
       if (tpm) {   // and its chunk into the peer's landing
         k.arg_ptr(5, tp_->moe->peer_land);
         k.arg_ptr(6, tp_->moe->send_ctr);
+      }
+      if (cpu) {   // after tp's land / ctr
+        const uint32_t a = tpm ? 7 : 5;
+        k.arg<uint64_t>(a, ch.mlo);
+        k.arg<uint64_t>(a + 1, ch.msz);
+        k.arg_ptr(a + 2, ch.dec);
+        k.arg_ptr(a + 3, L.expert_row);
+        k.arg_ptr(a + 4, ch.cpu_y);
       }
       launch(k, d_.hidden / 16, M_);
     }

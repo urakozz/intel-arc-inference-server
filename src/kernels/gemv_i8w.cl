@@ -3,7 +3,7 @@
 // `gemv_bf16.cl`'s lane-per-n structure at its lm_head tiling (`{64, 1}`: four
 // 16-column tiles per work-group, no K split), with two changes:
 //
-//   - **The weight is int8 in `[n_tile][k16][16 k][16 n]`** (loader/lm_head_int8.h),
+//   - **The weight is int8 in `[n_tile][k16][16 k][16 n]`** (loader/lm_head_int8.h; `[k16][n_tile]` under GEMV_KMAJOR),
 //     so one `intel_sub_group_block_read_uc16` hands lane `n % 16` the 16 k of its
 //     column: 256 contiguous bytes per subgroup per step, as `gemv_bf16`'s us8 read.
 //   - **One fp32 scale per row (per output column n)**, read once per lane after the
@@ -37,16 +37,23 @@
 #if (K % 16) != 0
 #error "K must be a multiple of 16"
 #endif
-// PERF-111, both off by default (probe_gemv --tiles' cells). GEMV_KMAJOR 1: the 256 B steps ordered [k16][n_tile]
-// instead of [n_tile][k16] (common::tiles_k_major at load), so at each step the launch's sub-groups read
-// neighbouring bytes rather than each walking its own 80 KB slab. GEMV_AHEAD A: A steps' block reads issued before
-// the first is used. Neither changes the arithmetic or its order: bitwise the default build.
+// PERF-111, both off by default. GEMV_KMAJOR 1: the 256 B steps ordered [k16][n_tile] instead of [n_tile][k16], so
+// at each step the launch's sub-groups read neighbouring bytes rather than each walking its own 80 KB slab - every
+// build at an output head's width gets it while loader::kInt8HeadKMajor holds (src/kernels/CMakeLists.txt, the
+// loader writes those heads k-major: loader::int8_tiled_index). GEMV_AHEAD A: A steps' block reads issued before
+// the first is used (probe_gemv --tiles' cells). Neither changes the arithmetic or its order: bitwise the default.
 #ifndef GEMV_KMAJOR
 #define GEMV_KMAJOR 0
 #endif
 #ifndef GEMV_AHEAD
 #define GEMV_AHEAD 1
 #endif
+// GEMV_KMAJOR_B B (with GEMV_KMAJOR, PERF-111's K-blocked form): B consecutive k16 steps of a tile kept together,
+// the B-step blocks in k-major order - tile (k16, nt) at ((k16 / B) x N/16 + nt) x B + k16 % B; 1: plain k-major.
+#ifndef GEMV_KMAJOR_B
+#define GEMV_KMAJOR_B 1
+#endif
+#define I8_AT(k16, nt) ((((size_t)(k16) / GEMV_KMAJOR_B) * (N / 16) + (nt)) * GEMV_KMAJOR_B + (k16) % GEMV_KMAJOR_B)
 #if (K16 % GEMV_AHEAD) != 0
 #error "GEMV_AHEAD must divide K / 16"
 #endif
@@ -131,11 +138,11 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
   }
 #if GEMV_KMAJOR || GEMV_AHEAD > 1
 #if GEMV_KMAJOR
-  tile = w + (size_t)n_tile * 256;
 #if QKV_NKV
+  tile = w + (size_t)n_tile * 256;
   const size_t step = (size_t)(columns / SG) * 256;
 #else
-  const size_t step = (size_t)(N / SG) * 256;
+#define I8_TILE(k16) (w + I8_AT(k16, n_tile) * 256)
 #endif
 #else
   const size_t step = 256;
@@ -143,12 +150,18 @@ __kernel void gemv_i8w(__global const uchar* restrict w,
   for (uint k0 = 0; k0 < K16; k0 += GEMV_AHEAD) {
     uchar16 wq[GEMV_AHEAD];
     __attribute__((opencl_unroll_hint)) for (uint j = 0; j < GEMV_AHEAD; ++j)
+#if GEMV_KMAJOR && !QKV_NKV
+      wq[j] = intel_sub_group_block_read_uc16(I8_TILE(k0 + j));
+#else
       wq[j] = intel_sub_group_block_read_uc16(tile + j * step);
+#endif
     __attribute__((opencl_unroll_hint)) for (uint j = 0; j < GEMV_AHEAD; ++j) {
       const float16 wf = convert_float16(as_char16(wq[j]));
       I8W_STEP(wf, (k0 + j))
     }
+#if !GEMV_KMAJOR || QKV_NKV
     tile += GEMV_AHEAD * step;
+#endif
   }
 #else
   for (uint k16 = 0; k16 < K16; ++k16, tile += 256) {

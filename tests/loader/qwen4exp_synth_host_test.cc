@@ -1,6 +1,6 @@
 // Spec 21-QFN-v1b: the loader's host half over make_synth.py's synthetic checkpoints - the Python writer and the C++
 // reader held to each other on real files, no device (host only; SKIP 77 without the data).
-//   qwen4exp_synth_host_test <oracle-out-q4exp-synth>      (<dir>/{ours,intel}/ckpt and ckpt-ple-int8)
+//   qwen4exp_synth_host_test <oracle-out/flash-next/synth>      (<dir>/{ours,intel}/ckpt and ckpt-ple-int8)
 // For each form: config.json -> QuantConfig::parse and model::qwen4exp_desc at the checkpoint's 4 layers; the
 // forms from the names (ours: int4 dense / shared, g64; Intel's: bf16, g128) = the config's group_size;
 // assert_quant_invariants; every name both ways with the MTP head; every layer and the head repacked, each
@@ -147,7 +147,7 @@ void check_tp_halves(const model::Qwen4ExpDesc& d, uint32_t l, const loader::Q4H
 
 int main(int argc, char** argv) {
   namespace fs = std::filesystem;
-  const std::string root = argc > 1 ? argv[1] : "oracle-out-q4exp-synth";
+  const std::string root = argc > 1 ? argv[1] : "oracle-out/flash-next/synth";
   if (!fs::exists(fs::path(root) / "ours" / "ckpt" / "config.json") ||
       !fs::exists(fs::path(root) / "intel" / "ckpt" / "config.json")) {
     std::printf("SKIP: no synthetic checkpoints under %s (make_synth.py; validation: r31.synth)\n", root.c_str());

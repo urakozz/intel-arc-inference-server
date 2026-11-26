@@ -29,8 +29,8 @@ the key's prefix): the rows after it are the test's decode rows and stay standar
 
 Per key, <out>/<key>.bf16top.safetensors: `ids` int32 [1 + gen][K + 2] and `logits` f32 [1 + gen][K + 2] - row j is
 the decision of forced id j (the judge's row numbering); columns 0..K-1 the bf16 row's own top K (descending), K the
-judge's f32 top id, K + 1 the forced id, each with its bf16 logit. Run in the oracle container under
-/tmp/b70-cpu-model.lock."""
+judge's f32 top id, K + 1 the forced id, each with its bf16 logit. Run in the oracle container, one CPU model job
+at a time."""
 import os
 import sys
 

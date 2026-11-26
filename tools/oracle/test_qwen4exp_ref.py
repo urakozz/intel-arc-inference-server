@@ -4,7 +4,7 @@
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/test_qwen4exp_ref.py [test_name ...]   (pytest collects it too)
 
-The tiny model is qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next: $Q4EXP_TINY, else oracle-out-q4exp/tiny,
+The tiny model is qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next: $Q4EXP_TINY, else $B70_DATA/oracle-out/flash-next/tiny,
 else the HF cache (`$HF_HOME/hub/models--qikp--...`); every test that needs it SKIPs when it is absent.
 Everything is BITWISE (Review Focus 2): logits and every layer's 4-stream residual, prompt and cached
 decode, bf16 and fp32, at prompt lengths that cross the QSA cut (2051). One test per trap of spec 21-QFN-v1 §2:
@@ -40,7 +40,6 @@ def _load(name):
 
 ref = _load("qwen4exp_ref")
 mk = _load("qwen4exp_make_tiny")
-REPO = os.path.dirname(os.path.dirname(_HERE))
 BF, F32 = torch.bfloat16, torch.float32
 
 
@@ -56,7 +55,7 @@ def _skip(msg):
 
 
 def tiny_snapshot() -> str:
-    cands = [os.environ.get("Q4EXP_TINY", ""), os.path.join(REPO, "oracle-out-q4exp", "tiny")]
+    cands = [os.environ.get("Q4EXP_TINY", ""), os.path.join(os.environ.get("B70_DATA", "/nonexistent"), "oracle-out", "flash-next", "tiny")]
     hf = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
     cands += sorted(glob.glob(os.path.join(hf, "hub", "models--qikp--tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next",
                                            "snapshots", "*")))
@@ -600,11 +599,11 @@ def test_expected_names_tiny():
 def test_real_names():
     """expected_names(tc, "bf16") / ("intel") equal the real checkpoints' index (vision excluded) - read from
     directories holding their config.json + model.safetensors.index.json: Q4EXP_ORIG_INDEX / Q4EXP_INTEL_INDEX,
-    default oracle-out-q4exp/meta/{orig,intel} (small files only; SKIP when absent)."""
+    default $B70_DATA/oracle-out/flash-next/meta/{orig,intel} (small files only; SKIP when absent)."""
     import json
     done = 0
     for form, env, sub in (("bf16", "Q4EXP_ORIG_INDEX", "orig"), ("intel", "Q4EXP_INTEL_INDEX", "intel")):
-        d = os.environ.get(env) or os.path.join(REPO, "oracle-out-q4exp", "meta", sub)
+        d = os.environ.get(env) or os.path.join(os.environ.get("B70_DATA", "/nonexistent"), "oracle-out", "flash-next", "meta", sub)
         if not os.path.exists(os.path.join(d, "model.safetensors.index.json")):
             continue
         tc = ref.text_config(d)

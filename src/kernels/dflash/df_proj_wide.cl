@@ -4,7 +4,8 @@
 // shared df_prep binaries keep their bytes; the helpers below are df_prep.cl's, copied (same order, FP_CONTRACT off).
 //
 //   df_w_slab_i8    grid (NS / 256, K / 16), WG 256: NS columns from n0 of an int8 linear ([N/16][K/16][16 k][16 n],
-//                   loader/lm_head_int8.h) as pf_gemm's B, bf16 [K][NS] - the exact integers, unscaled
+//                   loader/lm_head_int8.h: a drafter linear, n-major, never a head) as pf_gemm's B, bf16 [K][NS] - the
+//                   exact integers, unscaled
 //   df_w_slab_bf16  grid (NS / 256, K / 8), WG 256: the same of a bf16 linear in gemv_bf16's tiled layout - a copy
 //   df_w_slab_q4    grid (NS / 256, K / 64), WG 256: the same of an int4 g64 linear in layout 1 ([N/16][K/64] tiles of
 //                   136 u32, common/repack.h) as TWO bf16 slabs, hi [K][NS] then lo [K][NS]: w = scale x (q - 8) (exact

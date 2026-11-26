@@ -33,7 +33,9 @@
 // (hc_combine_norm, hc_up_mix) agree bit for bit.
 //
 // **PERF-66: the int8 form** (spec 21-QFN-v2 §7 lever 5; loader::Q4HcOffsets under Qwen4ExpDesc::hc_int8): each
-// linear's weights are int8 tiles [N/16][K/16][16 k][16 n] (element (k, n) at (n / 16) x 16K + 16k + n % 16) and its
+// linear's weights are int8 tiles [N/16][K/16][16 k][16 n] (element (k, n) at (n / 16) x 16K + 16k + n % 16; n-major,
+// kept so: the output heads' k-major order, PERF-111, is not carried here - these kernels split a tile's K across
+// sub-groups over only 20-21 tiles (N 320 / 336), a shape the order was never measured on) and its
 // fp16 scales [K/32][N] follow the tiles directly (one per 32 k of a column: loader::quantise_int8_g32_tiled). Judged,
 // not bitwise against the bf16 form; each kernel below is bitwise its host twin (tests/kernels/qwen4exp_ref.h). With
 // g = a group of 32 k:  t_g = fma chain over the group's k ascending of f32(q) x v (exact products), then

@@ -120,7 +120,11 @@ __kernel void pf_moe_scan(__global uint* restrict cnt, __global uint* restrict h
   }
   barrier(CLK_LOCAL_MEM_FENCE);
   const uint ts = toff[EXPERTS];                 // the shared expert's first tile
+#if INK_PREFILL
+  const uint st = 0;                            // no shared expert
+#else
   const uint st = (C + TM - 1) / TM;             // its tiles
+#endif
   const uint ntiles = ts + st;
   const uint rs = ts * TM;                       // its first row
   for (uint j = 0; j < EPL; ++j) {

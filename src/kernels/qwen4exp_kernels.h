@@ -146,9 +146,11 @@ inline std::string route_variant(unsigned M) { return "q4_route" + m_(M) + "_E51
 // `table` (the expert tier, plan 21-QFN-v2a Task 8): w is the layer's u64 table row (_TBL). `union_read` (open-work
 // item 48, q4_moe_union.cl: _U): each distinct expert read once for every row that chose it - the same entry points,
 // arguments, grids and bits as the per-row binary at M rows.
-inline std::string moe_variant(unsigned M, bool shared_bf16, bool table = false, bool union_read = false) {
+// cpu (PERF-124 step 4, the table form): the host-RAM experts the CPU computes (q4_moe.cl / q4_moe_union.cl CPU_ROUTE).
+inline std::string moe_variant(unsigned M, bool shared_bf16, bool table = false, bool union_read = false,
+                               bool cpu = false) {
   return "q4_moe" + m_(M) + "_E512_T10_D2560_I640" + (shared_bf16 ? "_SHB" : "_SH4") + (table ? "_TBL" : "") +
-         (union_read ? "_U" : "");
+         (union_read ? "_U" : "") + (cpu ? "_CPU" : "");
 }
 inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head" + m_(M) + "_SIG"; }
 
@@ -157,9 +159,11 @@ inline std::string gated_head_sig_variant(unsigned M) { return "prep_gated_head"
 // Qwen3.8's card heads, QSA at 12 q / 1 kv heads, tp_sum at hidden 2560 (FOLD_G 20; S the local slices) after the
 // send-folded out_proj / o_proj gemv.
 inline constexpr unsigned kTpInter = kInter / 2;
-inline std::string tp_moe_variant(bool table, unsigned rank, unsigned M = 1, bool union_read = false) {
+// cpu (PERF-124 under tp, _TBL only): the card's host-RAM half experts computed on the CPU (q4_moe.cl CPU_ROUTE).
+inline std::string tp_moe_variant(bool table, unsigned rank, unsigned M = 1, bool union_read = false,
+                                  bool cpu = false) {
   return "q4_moe_M" + std::to_string(M) + "_E512_T10_D2560_I320_SH4" + (table ? "_TBL" : "") + "_TP_R" +
-         std::to_string(rank) + (union_read ? "_U" : "");
+         std::to_string(rank) + (union_read ? "_U" : "") + (cpu ? "_CPU" : "");
 }
 // MOE_TP_PART: q4_moe_down writes each slot's partial, fp32 [11][M][2560], and sends it to the peer's landing (one
 // chunk a down work-group: kTpMoeFoldG); q4_moe_finish waits for the peer's, sums the two and runs the epilogue.

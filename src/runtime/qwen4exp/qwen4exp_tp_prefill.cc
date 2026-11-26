@@ -211,9 +211,13 @@ void Qwen4ExpTpEngine::prepare_prefill() {
                    (res + D.lend->experts()) / all);
     }
   }
-  pf_lend_ = [ps] {
-    for (auto& D : ps->dev)
-      if (D->lend) D->lend->lend();
+  pf_lend_ = [this, ps] {
+    for (uint32_t r = 0; r < 2; ++r)
+      if (Q4LendState* L = ps->dev[r]->lend.get()) {
+        const bool was = L->state == Q4LendState::State::Lent;
+        L->lend();
+        if (cpu_ && !was && L->state == Q4LendState::State::Lent) cpu_->set_rows(r, L->lent);   // PERF-124
+      }
   };
   pf_settle_ = [ps] { return ps->settle(); };
 }
@@ -267,8 +271,12 @@ void Qwen4ExpTpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk)
   }
   prepare_prefill();
   Q4TpPrefillState& P = *pf_;
-  for (auto& D : P.dev)   // the lent experts' rows back: this prefill overwrites the scratch
-    if (D->lend) D->lend->reclaim();
+  for (uint32_t r = 0; r < 2; ++r)   // the lent experts' rows back: this prefill overwrites the scratch
+    if (Q4LendState* L = P.dev[r]->lend.get()) {
+      const bool was = L->state == Q4LendState::State::Lent;
+      L->reclaim();
+      if (cpu_ && was) cpu_->set_rows(r, L->orig);   // PERF-124: the CPU's copy of the rows
+    }
   std::array<Qwen4ExpMtpPrefill, kTpPfChunks> mp;   // the head's pass on card 1, a chunk each (qwen4exp_prefill.h)
   if (mtp_)
     for (uint32_t h = 0; h < kTpPfChunks; ++h) {

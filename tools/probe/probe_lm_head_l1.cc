@@ -20,6 +20,11 @@
 //   amendment's rule (a difference counts only if the bf16 rank-20/21 gap is >= 0.05);
 //   KL(p_bf16 || p_int8) unfiltered at T 1.0 and 0.6 (mean, p99, max; bars 1e-4 / 1e-3);
 //   and the dropped mass under generation_config's filter (top-k 20, top-p 0.95).
+// PERF-111's hybrid head question: the bf16 argmax's rank in the int8 head's order (the smallest top-K of int8
+// candidates that always holds it: max rank + 1, and how many rows each K in 1..64 misses), and the largest bf16
+// top-1 / int8-pick gap on a mismatching row (in bf16 ulps of the top-1).
+//   --long <ids file> <rows>: also one long replay - the file's ids prefilled up to its last <rows>, each of those
+//   one decode replay and one row (its own set, in `all`).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -107,6 +112,9 @@ double pct(std::vector<double> v, double q) {
 struct Acc {
   size_t rows = 0, am_mis = 0, am_tie = 0, top_eq = 0, top_eq_amended = 0;
   double cos_min = 1, cos_sum = 0, max_gap_mis = 0, drop1 = 0, drop06 = 0;
+  static constexpr uint32_t kKs[] = {1, 2, 4, 8, 16, 32, 64};
+  size_t miss_k[7] = {}, max_rank = 0;   // rows whose bf16 argmax is outside the int8 top-K; the worst rank
+  double max_ulps_mis = 0;               // the bf16 gap top-1 minus the int8 pick, in ulps of the top-1
   std::vector<double> kl1, kl06;
   void add(const float* a, const float* b) {
     ++rows;
@@ -123,7 +131,12 @@ struct Acc {
       int e = 0;
       std::frexp(std::fabs(a[ta]), &e);
       if (double(a[ta]) - double(a[tb]) <= std::ldexp(1.0, e - 8)) ++am_tie;
+      max_ulps_mis = std::max(max_ulps_mis, (double(a[ta]) - double(a[tb])) / std::ldexp(1.0, e - 8));
     }
+    size_t rank = 0;   // ids the int8 head puts before the bf16 argmax (argmax order: higher, then lower id)
+    for (uint32_t i = 0; i < kUsed; ++i) rank += b[i] > b[ta] || (b[i] == b[ta] && i < ta);
+    max_rank = std::max(max_rank, rank);
+    for (int j = 0; j < 7; ++j) miss_k[j] += rank >= kKs[j];
     std::vector<uint32_t> ia(kUsed), ib(kUsed);
     std::iota(ia.begin(), ia.end(), 0u);
     std::iota(ib.begin(), ib.end(), 0u);
@@ -160,6 +173,9 @@ struct Acc {
   }
   void merge(const Acc& o) {
     rows += o.rows, am_mis += o.am_mis, am_tie += o.am_tie, top_eq += o.top_eq;
+    for (int j = 0; j < 7; ++j) miss_k[j] += o.miss_k[j];
+    max_rank = std::max(max_rank, o.max_rank);
+    max_ulps_mis = std::max(max_ulps_mis, o.max_ulps_mis);
     top_eq_amended += o.top_eq_amended;
     cos_min = std::min(cos_min, o.cos_min), cos_sum += o.cos_sum;
     max_gap_mis = std::max(max_gap_mis, o.max_gap_mis);
@@ -178,7 +194,11 @@ struct Acc {
   void print(const char* name) const {
     std::printf("\n[%s] %zu rows\n", name, rows);
     std::printf("  cosine min %.7f mean %.7f  (bar >= 0.9999)\n", cos_min, cos_sum / double(rows));
-    std::printf("  argmax mismatches %zu (bf16 near-ties %zu)\n", am_mis, am_tie);
+    std::printf("  argmax mismatches %zu (bf16 near-ties %zu); largest bf16 gap on a mismatch %.2f ulps\n", am_mis,
+                am_tie, max_ulps_mis);
+    std::printf("  bf16 argmax outside the int8 top-K, rows:");
+    for (int j = 0; j < 7; ++j) std::printf(" K%u %zu", kKs[j], miss_k[j]);
+    std::printf("; worst rank %zu -> smallest K always holding it %zu\n", max_rank, max_rank + 1);
     std::printf("  top-20 equal %zu/%zu = %.1f%%; amended (gap >= 0.05 counts) %zu/%zu = %.1f%%"
                 " (bar 99%%); max bf16 rank-20/21 gap on a differing row %.4f\n",
                 top_eq, rows, 100.0 * double(top_eq) / double(rows), top_eq_amended, rows,
@@ -198,7 +218,7 @@ int main(int argc, char** argv) {
   if (argc < 4) {
     std::fprintf(stderr,
                  "usage: probe_lm_head_l1 <snapshot> <prompts dir> <golden dir> "
-                 "[<toolcall set dir> <toolcall out dir>]\n");
+                 "[<toolcall set dir> <toolcall out dir>] [--long <ids file> <rows>]\n");
     return 2;
   }
   const std::string snap = loader::resolve_snapshot(argv[1]);
@@ -261,7 +281,7 @@ int main(int argc, char** argv) {
     std::printf("golden %s: %zu ctx ids, rows so far %zu\n", p, c.size(), golden.rows);
   }
   golden.print("golden");
-  if (argc > 5) {
+  if (argc > 5 && std::string(argv[4]) != "--long") {
     std::ifstream man(std::string(argv[4]) + "/manifest.json");
     std::stringstream ss;
     ss << man.rdbuf();
@@ -278,8 +298,18 @@ int main(int argc, char** argv) {
     }
     tool.print("toolcall");
   }
+  Acc lng;
+  for (int i = 4; i + 2 < argc; ++i)
+    if (std::string(argv[i]) == "--long") {
+      const std::vector<uint32_t> ids = read_ids(argv[i + 1]);
+      const size_t n = std::min<size_t>(std::stoul(argv[i + 2]), ids.size() - 2);
+      source(std::vector<uint32_t>(ids.begin(), ids.end() - n), std::vector<uint32_t>(ids.end() - n, ids.end()), lng);
+      std::printf("long %s: %zu ids, %zu rows\n", argv[i + 1], ids.size(), lng.rows);
+      lng.print("long");
+    }
   Acc all = golden;
   all.merge(tool);
+  if (lng.rows) all.merge(lng);
   all.print("all");
   std::printf("L1/L2 (amended, all rows): %s\n", all.pass() ? "PASS" : "FAIL");
   return all.pass() ? 0 : 1;

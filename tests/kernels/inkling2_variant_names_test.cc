@@ -19,11 +19,13 @@ int main(int argc, char** argv) {
     want.insert(ink::moe(m, common::ExpertFpFormat::Mxfp8));
     want.insert(ink::attn(m, true));
     want.insert(ink::attn(m, false));
+    want.insert(ink::attn(m, false) + "_KV8");
   }
   for (const auto format : {common::ExpertFpFormat::Nvfp4, common::ExpertFpFormat::Mxfp8})
     want.insert(ink::moe(1, format) + "_POST");
   want.emplace(ink::kControllerGlue);
   want.emplace(std::string(ink::kPrep) + "_FUSED");
+  want.emplace(std::string(ink::kPrep) + "_FUSED_KV8");
   want.insert(ink::route());
   want.insert(ink::route() + "_M1_FUSED");
   want.insert(ink::markov_linear());

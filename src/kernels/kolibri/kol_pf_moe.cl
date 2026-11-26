@@ -223,6 +223,90 @@ KOL_PF_DEQUANT(kol_pf_dequant_dn, PF_INTER, PF_D)
 #undef KOL_PF_DEQUANT
 
 // ---------------------------------------------------------------------------------------
+#if INK_PREFILL
+// INK_GLUE_BF16 (lossy): the expert GEMMs' rows arrive as bf16 (OUT_BF16_LANES: each sum rounded once), not fp32.
+#if INK_GLUE_BF16
+#define EXPERT_T ushort
+#define EXPERT_LOAD(x) bf16f(x)
+#else
+#define EXPERT_T float
+#define EXPERT_LOAD(x) (x)
+#endif
+// The softcapped SwiGLU of the gate||up GEMM's fp32 rows (pf_moe_q4gemm's OUT_F32 form, atom 2p gate, 2p + 1 its
+// up): h = rne(4 tanh(g / 4) sigmoid(g) 25 tanh(u / 25)), the GEMM epilogue's former text. As a pass of its own
+// it is ~5x cheaper: inside the GEMM the transcendentals ran at the GEMM's few 256-register threads.
+// Four outputs a work-item (16-byte loads and an 8-byte store).
+__attribute__((reqd_work_group_size(96, 1, 1)))
+__kernel void ink_prefill_swiglu(__global const EXPERT_T* restrict gu, __global ushort* restrict h) {
+  const uint i = 4 * get_global_id(0), r = get_global_id(1);
+  const size_t at = (size_t)r * 2 * PF_INTER + i / 16 * 32 + i % 16;
+#if INK_GLUE_BF16
+  const ushort4 gb = vload4(0, gu + at), ub = vload4(0, gu + at + 16);
+  const float4 g4 = (float4)(bf16f(gb.s0), bf16f(gb.s1), bf16f(gb.s2), bf16f(gb.s3));
+  const float4 u4 = (float4)(bf16f(ub.s0), bf16f(ub.s1), bf16f(ub.s2), bf16f(ub.s3));
+#else
+  const float4 g4 = vload4(0, gu + at), u4 = vload4(0, gu + at + 16);
+#endif
+  ushort out[4];
+#pragma unroll
+  for (uint c = 0; c < 4; ++c) {
+    const float g = c == 0 ? g4.s0 : c == 1 ? g4.s1 : c == 2 ? g4.s2 : g4.s3;
+    const float u = c == 0 ? u4.s0 : c == 1 ? u4.s1 : c == 2 ? u4.s2 : u4.s3;
+    const float a = tanh(g / 4.f) * 4.f, b = tanh(u / 25.f) * 25.f;
+    out[c] = rne_bf16(a * (1.f / (1.f + exp(-g))) * b);
+  }
+  vstore4(vload4(0, out), 0, h + (size_t)r * PF_INTER + i);
+}
+
+#pragma OPENCL FP_CONTRACT OFF
+inline float ink_expert_sum(__global const uint* route, __global const uint* pair_row,
+                            __global const EXPERT_T* y, uint r, uint i) {
+  float value = 0.f;
+  for (uint j = 0; j < PF_K; ++j)
+    value += EXPERT_LOAD(y[(size_t)pair_row[(size_t)r * PF_K + j] * PF_D + i]) * as_float(route[(size_t)r * RW + R_W + j]);
+  return value;
+}
+
+// A channel walks one slice of rows and recomputes the three sums across
+// the slice boundary. The visit commits the new history after all slices.
+__attribute__((reqd_work_group_size(WG_COMBINE, 1, 1)))
+__kernel void ink_prefill_moe_combine(__global const uint* restrict route,
+                                     __global const uint* restrict pair_row,
+                                     __global const EXPERT_T* restrict y,
+                                     __global const float* restrict taps,
+                                     __global const float* restrict history,
+                                     __global float* restrict raw,
+                                     __global float* restrict residual,
+                                     __global ushort* restrict draft_tap, uint C) {
+  const uint i = get_global_id(0);
+  const uint first = get_group_id(1) * TM;
+  float h0, h1, h2;
+  if (first == 0) {
+    h0 = history[i]; h1 = history[PF_D + i]; h2 = history[2 * PF_D + i];
+  } else {
+    h0 = ink_expert_sum(route, pair_row, y, first - 3, i);
+    h1 = ink_expert_sum(route, pair_row, y, first - 2, i);
+    h2 = ink_expert_sum(route, pair_row, y, first - 1, i);
+  }
+  const float4 w = vload4(i, taps);
+  for (uint r = first; r < min(first + TM, C); ++r) {
+    const float row = ink_expert_sum(route, pair_row, y, r, i);
+    float sum = 0.f;
+    sum += h0 * w.s0;
+    sum += h1 * w.s1;
+    sum += h2 * w.s2;
+    sum += row * w.s3;
+    const size_t at = (size_t)r * PF_D + i;
+    const float value = residual[at] + (row + sum) / sqrt(5.f);
+    raw[at] = row;
+    residual[at] = value;
+    if (draft_tap) draft_tap[(size_t)r * 4 * PF_D + i] = rne_bf16(value);
+    h0 = h1;
+    h1 = h2;
+    h2 = row;
+  }
+}
+#else
 // kol_pf_moe_combine - token t, hidden column n = 256 x grid.x + lane: kol_moe_down's epilogue over the
 // down GEMM's sorted rows. y holds rne(down) per row (pf_moe_gemm's plain epilogue rounds once, as
 // kol_moe_down's rne(red)), so:
@@ -249,3 +333,4 @@ __kernel void kol_pf_moe_combine(__global const uint* restrict route, __global c
   const float sh = bf16f(y[(size_t)(hdr[H_SHARED_ROW] + t) * PF_D + n]);
   mo[(size_t)t * PF_D + n] = rne_bf16(acc + sh);
 }
+#endif

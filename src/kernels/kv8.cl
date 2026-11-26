@@ -17,7 +17,7 @@
 // under --kv-cache int8), so `--kv-cache bf16` runs today's binaries bit for bit.
 //
 // ---------------------------------------------------------------------------
-// The scheme (src/common/kv8.h is the host twin; edit the two together)
+// The scheme (src/common/kv8.h is the host twin, kv8_scheme.h the signs and scale format; edit them together)
 // ---------------------------------------------------------------------------
 //   R = H_256 diag(s) / 16, H Sylvester in natural order, s = KV8_SIGNS (the 12a probe's
 //   hadamard(256, 0): bit j of word j / 32 set when s[j] = -1).
@@ -169,39 +169,10 @@
 #endif
 #define KV8_WG 256        /* every KV8_PREP / KV8_DEC reduce / KV8_GATE work-group: one head */
 
-// The probe's signs (src/common/kv8.h kSignWords).
-__constant uint KV8_SIGNS[8] = {0xA197D809u, 0xA6850592u, 0xB205A73Eu, 0x20AFA769u,
-                                0x45C2CF64u, 0xBEAEAACBu, 0x75F39ADDu, 0x2385A70Cu};
-
 #include "bf16.h"
 inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
 
-// s[j] applied as the sign bit: exact, and the same bits as a multiply by -1.
-inline float kv8_flip(float v, uint j) {
-  return as_float(as_uint(v) ^ (((KV8_SIGNS[j >> 5] >> (j & 31u)) & 1u) << 31));
-}
-
-// binary16 <-> fp32 in integer arithmetic (kv8.h's f32_to_f16_rne / f16f, op for op): no
-// cl_khr_fp16 needed, subnormals kept, >= 65504 saturates. A scale is >= 0 and finite.
-inline ushort kv8_f16_rne(float f) {
-  uint u = as_uint(f);
-  const uint sign = (u >> 16) & 0x8000u;
-  u &= 0x7FFFFFFFu;
-  if (u >= 0x477FE000u) return (ushort)(sign | 0x7BFFu);
-  if (u < 0x38800000u) return (ushort)(sign | (uint)rint(as_float(u) * 16777216.0f));
-  const uint e = (u >> 23) - 112u;
-  const uint m = u & 0x7FFFFFu;
-  uint h = (e << 10) | (m >> 13);
-  const uint rem = m & 0x1FFFu;
-  if (rem > 0x1000u || (rem == 0x1000u && (h & 1u))) h += 1u;
-  return (ushort)(sign | h);
-}
-inline float kv8_f16f(ushort h) {
-  const uint e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
-  const float v = e == 0u ? (float)m * 5.9604644775390625e-08f
-                          : as_float(((e + 112u) << 23) | (m << 13));
-  return (h & 0x8000u) ? -v : v;
-}
+#include "kv8_scheme.h"
 
 #if KV8_PREP || KV8_DEC || KV8_GATE
 // The 256-point FWHT across a 256-work-item work-group, work-item i owning element i,

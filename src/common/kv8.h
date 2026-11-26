@@ -155,4 +155,31 @@ inline uint16_t encode(const float* x, int8_t* q) {
   return quantise(y, q);
 }
 
+// PERF-102: the scheme at head_dim N = 128 (Inkling's full visits; planned for Kolibri and Ripple), the device's
+// KV8 builds of kol_attn.cl / kol_pf_attn.cl / ink_prep.cl. The first N signs; K and V rotated by 1/16 as at 256
+// (y = s FWHT(x) / 16), so q is rotated, and the attention output un-rotated, by 16 / N (1/8): (q R_q) . (k R) =
+// q . k with every factor a power of two. At N = 256 every factor is the 1/16 above.
+template <uint32_t N>
+inline void rotate_n(const float* x, float* out, float factor = kInvSqrtN) {
+  float v[N];
+  std::memcpy(v, x, sizeof v);
+  fwht<N>(v);
+  for (uint32_t j = 0; j < N; ++j) out[j] = flip(v[j], sign_neg(j)) * factor;
+}
+template <uint32_t N>
+inline void rotate_q_n(const float* x, float* out) { rotate_n<N>(x, out, 16.0f / N); }
+template <uint32_t N>
+inline void unrotate_n(const float* y, float* out) {
+  float v[N];
+  for (uint32_t j = 0; j < N; ++j) v[j] = flip(y[j], sign_neg(j));
+  fwht<N>(v);
+  for (uint32_t i = 0; i < N; ++i) out[i] = v[i] * (16.0f / N);
+}
+template <uint32_t N>
+inline uint16_t encode_n(const float* x, int8_t* q) {
+  float y[N];
+  rotate_n<N>(x, y);
+  return quantise_n<N>(y, q);
+}
+
 }  // namespace common::kv8

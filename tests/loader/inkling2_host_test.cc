@@ -43,7 +43,8 @@ int main(int argc, char** argv) {
     CHECK(w.offset % 64 == 0 && w.offset + w.bytes <= weights.bytes[w.arena]);
     if (w.scales) CHECK(w.scales % 64 == 0 && w.scales + w.N * sizeof(float) <= weights.bytes[w.arena]);
   }
-  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("auto"), "auto"), 0);
+  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("auto"), "auto", false), 0);
+  CHECK_EQ(cli::inkling2::plan(argv[1], cli::parse_max_len("auto"), "auto", true), 0);
   const auto s = ink::sizes(d, weights, 4096, true);
   CHECK_EQ(s.persistent.full_k, size_t(8) * 4096 * 1024 * 2);
   CHECK_EQ(s.persistent.ring_k, size_t(40) * ink::kRing * 1024 * 2);
@@ -61,6 +62,17 @@ int main(int argc, char** argv) {
   CHECK(ink::sizes(d, weights, fit, true).memory().total() + reserve <= capacity);
   CHECK(ink::sizes(d, weights, fit + runtime::kMaxLenQuantum, true).memory().total() + reserve > capacity);
   CHECK_EQ(ink::max_len_that_fits(d, weights, reserve, reserve, true), 0u);
+  // `--kv-cache int8` (PERF-102): 1,024 + 16 B a full visit's K (or V) row instead of 2,048; spec 41 §3.2's ~450k.
+  const auto s8 = ink::sizes(d, weights, 4096, true, 0, true);
+  CHECK_EQ(s8.persistent.full_k, size_t(8) * 4096 * 1024);
+  CHECK_EQ(s8.persistent.full_k_scale, size_t(8) * 4096 * 8 * 2);
+  CHECK_EQ(s8.persistent.ring_k, s.persistent.ring_k);
+  CHECK_EQ(s8.draft.draft_full_k, s.draft.draft_full_k);
+  const uint32_t fit8 = ink::max_len_that_fits(d, weights, capacity, reserve, true, 0, true);
+  std::printf("Inkling one-card context with the drafter: %u bf16, %u int8 cache\n", fit, fit8);
+  CHECK(fit8 > fit * 3 / 2 && fit8 <= d.trained_max_len);
+  const auto refusal = cli::inkling2::no_fit(d, weights, capacity, reserve, true, 0, fit8, false);
+  CHECK(refusal.find("--kv-cache int8") != std::string::npos);
   const auto no_draft = ink::sizes(d, weights, 4096, false);
   CHECK_EQ(no_draft.memory().drafter, 0u);
   CHECK_EQ(no_draft.scratch.draft_taps, 0u);

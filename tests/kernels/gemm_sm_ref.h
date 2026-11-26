@@ -3,8 +3,8 @@
 //
 //   - weight views over the bytes the device reads: int4 g64 symmetric in layout 0
 //     (GPTQ qweight [K/8][N] + f16 scales [K/64][N]) or layout 1 (544-byte tiles,
-//     common/repack.h), and the int8 lm_head ([n_tile][k16][16 k][16 n] + fp32 [N]
-//     column scales, loader/lm_head_int8.h);
+//     common/repack.h), and the int8 lm_head ([n_tile][k16][16 k][16 n], k-major [k16][n_tile] at a head
+//     width - loader::int8_tiled_index - + fp32 [N] column scales, loader/lm_head_int8.h);
 //   - `ref`: the fp64 reference out[m][n] = sum_k w(k, n) x[m][k] and, beside it, the
 //     N2 bound's denominator sum_k |w(k, n) x[m][k]| (spec 28 §3);
 //   - `twin_gemv` / `twin_gemv_i8w`: gemv.cl's / gemv_i8w.cl's fp32 order on the host
@@ -22,6 +22,7 @@
 #include <cstring>
 #include <vector>
 #include "common/bf16.h"
+#include "loader/lm_head_int8.h"
 
 namespace gemm_sm {
 
@@ -48,7 +49,7 @@ struct WeightView {
       const uint32_t* tile = words + (size_t(n / 16) * (K / kGroup) + k / kGroup) * 72;
       return 2 * int((tile[((k % kGroup) / 16) * 16 + n % 16] >> (2 * (k % 16))) & 3u) - 3;
     }
-    return q8[(size_t(n / 16) * (K / 16) + k / 16) * 256 + size_t(k % 16) * 16 + n % 16];
+    return q8[loader::int8_tiled_index(K, N, k, n)];   // k-major at a head width (PERF-111)
   }
   // int4: the f16 group scale of (k, n); int8: the column scale.
   float scale(uint32_t k, uint32_t n) const {

@@ -315,6 +315,41 @@ __kernel void q4_route(__global const float* restrict logits, __global uint* res
 #endif
 // --------------------------------------------------------------------------------------------------------------
 
+// CPU_ROUTE (PERF-124 step 4, _TBL at M 1 only; runtime/qwen4exp/qwen4exp_cpu_experts.h): the host-RAM experts the
+// CPU computes. An expert is in host RAM when its gate||up table address lies in the layer's mirror [mlo, mlo + msz);
+// in slot order (the union's first-occurrence order at M 1) the first dec[n] of the n such experts go to the CPU, the
+// host thread deciding the same from the same table and route. gate||up skips those slots; the list waits for the
+// host before the down, which takes each CPU slot's fp32 down sum from cpu_y [M][SLOTS][HIDDEN] (host memory) in
+// place of its K slices (the other slices -0: an exact identity in the tree) - the CPU's sums are this file's, bit
+// for bit (src/cpu/expert_q4.cc). Under MOE_TP_PART (a tp card's half experts, DN_KS 1) the CPU's sum is the card's
+// partial for that slot, sent to the peer like the card's own.
+#if CPU_ROUTE
+#if !Q4_EXPERT_TABLE || M != 1
+#error "q4_moe CPU_ROUTE: the table form at M 1 (q4_moe_union.cl takes M >= 2)"
+#endif
+#define CPU_ARGS , ulong mlo, ulong msz, __global const uint* restrict dec
+inline bool q4_on_host(__global const uint* restrict w_gu, uint e, ulong mlo, ulong msz) {
+  return (ulong)(intptr_t)Q4_EXPERT_GU(w_gu, e) - mlo < msz;
+}
+// Whether routed slot `slot` of route row rr is a CPU slot.
+inline bool q4_cpu_slot(__global const uint* restrict rr, __global const uint* restrict w_gu, uint slot, ulong mlo,
+                        ulong msz, __global const uint* restrict dec) {
+  uint n = 0, idx = 0;
+  bool mine = false;
+  for (uint k = 0; k < MOE_K; ++k) {
+    const bool h = q4_on_host(w_gu, min(rr[R_IDS + k], (uint)(MOE_E - 1)), mlo, msz);
+    if (k == slot) {
+      mine = h;
+      idx = n;
+    }
+    n += h ? 1u : 0u;
+  }
+  return mine && idx < dec[n];
+}
+#else
+#define CPU_ARGS
+#endif
+
 // moe.cl's dot8 / tile_dot, verbatim.
 inline float dot8(uint word, ushort8 xv) {
   float a = 0.f;
@@ -373,7 +408,7 @@ inline float bf16_dot(const __global ushort* restrict tile, const __global ushor
 __attribute__((reqd_work_group_size(WG_UP, 1, 1)))
 Q4_SG16
 __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const ushort* restrict x,
-                             __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict h) {
+                             __global const uint* restrict w, SH_T restrict w_sh, __global ushort* restrict h CPU_ARGS) {
   __local float red[4 * UP_KS][SG];
   const uint lid = get_local_id(0);
   const uint lane = lid % SG;
@@ -385,6 +420,9 @@ __kernel void q4_moe_gate_up(__global const uint* restrict route, __global const
   const uint m = get_group_id(1);
   const uint n_tile = blk * 4 + tile_idx;
   const __global ushort* restrict xr = x + (size_t)m * HIDDEN;
+#if CPU_ROUTE
+  if (slot < MOE_K && q4_cpu_slot(route + (size_t)m * RW, w, slot, mlo, msz, dec)) return;   // the work-group's: uniform
+#endif
   float acc;
   if (slot < MOE_K) {   // uniform across the work-group
     uint e = route[(size_t)m * RW + R_IDS + slot];
@@ -442,6 +480,9 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
 #if MOE_TP_PART
                           , __global uint* land, __global uint* ctr
 #endif
+#if CPU_ROUTE
+                          CPU_ARGS, __global const uint* restrict w_gu, __global const float* restrict cpu_y
+#endif
                           ) {
   __local float red[SLOTS * DN_KS][SG];
   const uint lid = get_local_id(0);
@@ -454,6 +495,11 @@ __kernel void q4_moe_down(__global const uint* restrict route, __global const us
   const __global uint* restrict rr = route + (size_t)m * RW;
   const __global ushort* restrict hr = h + ((size_t)m * SLOTS + slot) * INTER;
   float acc;
+#if CPU_ROUTE
+  if (slot < MOE_K && q4_cpu_slot(rr, w_gu, slot, mlo, msz, dec)) {   // uniform across the sub-group
+    acc = q == 0 ? cpu_y[((size_t)m * SLOTS + slot) * HIDDEN + n_tile * SG + lane] : -0.0f;
+  } else
+#endif
   if (slot < MOE_K) {   // uniform across the sub-group
     uint e = rr[R_IDS + slot];
     e = min(e, (uint)(MOE_E - 1));

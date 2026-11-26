@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <random>
 #include <string>
 #include <utility>
@@ -211,7 +212,8 @@ int run_loads(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
 // `probe_gemv --tiles`: each layout-1 / head gemv against its GEMV_KMAJOR (and GEMV_AHEAD) builds, A B A B. The
 // control is the production binary over today's [n_tile][k] tiles; each variant reads the same tiles reordered
 // [k][n_tile] (common::tiles_k_major) or, for `_A4`, today's order. Every variant must match the control byte for
-// byte (same arithmetic, same order). GB/s counts weight bytes; ~604 is probe_bw's grid-stride read.
+// byte (same arithmetic, same order). GB/s counts weight bytes; ~604 is probe_bw's grid-stride read. The int8
+// head's control is the explicit n-major build (production follows loader::kInt8HeadKMajor).
 struct TileShape {
   const char* name;
   char kind;  // '4' int4 layout 1, '8' gemv_i8w, 'b' gemv_bf16
@@ -227,7 +229,7 @@ int run_tiles(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
        {"gemv_M1_K5120_N16384_S1_L1_KM", "gemv_M1_K5120_N16384_S1_L1_KM_A2"}},
       {"lm_head int4", '4', 5120, 248320, 10, "gemv_M1_K5120_N248320_S1_L1",
        {"gemv_M1_K5120_N248320_S1_L1_KM", "gemv_M1_K5120_N248320_S1_L1_KM_A2"}},
-      {"lm_head int8", '8', 5120, 248320, 10, "gemv_i8w_M1_K5120_N248320",
+      {"lm_head int8", '8', 5120, 248320, 10, "pi8h_gemv_i8w_M1_K5120_N248320_NM",
        {"gemv_i8w_M1_K5120_N248320_KM", "gemv_i8w_M1_K5120_N248320_KM_A4", "gemv_i8w_M1_K5120_N248320_A4"}},
       {"lm_head bf16", 'b', 5120, 248320, 10, "gemv_bf16_M1_K5120_N248320",
        {"gemv_bf16_M1_K5120_N248320_KM", "gemv_bf16_M1_K5120_N248320_KM_A4", "gemv_bf16_M1_K5120_N248320_A4"}},
@@ -343,6 +345,136 @@ int run_tiles(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
   std::printf("\nbyte compare against the control: %s\n", all_ok ? "every variant identical" : "**A VARIANT DIFFERS**");
   return all_ok ? 0 : 1;
 }
+// `probe_gemv --tiles i8head` (also the last part of `--tiles`): every int8 output head at the M its model binds -
+// gemv_i8w at decode and where a verify list binds it, gemm_sm_i8w where kSmallMTuning puts the verify rows - in
+// today's n-major order (_NM, the control) and k-major (_KM), both built with the order spelled out
+// (tools/probe/CMakeLists.txt PI8H_CELLS, this table's order). One weight a shape, random int8 and scales, the
+// k-major copy by common::tiles_k_major; M random activation rows. Warm-up, then NM KM NM KM; the KM output must be
+// the NM output byte for byte. The gate (PERF-111): no regression at any M a model's verify binds.
+struct I8HeadCell {
+  const char* model;
+  bool gemm;  // gemm_sm_i8w (else gemv_i8w)
+  uint32_t K, N, M;
+  bool wg;    // gemm_sm's in-work-group split-K (SPLITK 1)
+};
+const I8HeadCell kI8HeadCells[] = {
+    {"Qwen3.8", false, 5120, 248320, 1, false},  {"Qwen3.8", false, 5120, 248320, 4, false},
+    {"Qwen3.8", false, 5120, 248320, 8, false},  {"Qwen3.8", false, 5120, 248320, 16, false},
+    {"Qwen3.8", true, 5120, 248320, 4, true},    {"Qwen3.8", true, 5120, 248320, 8, true},
+    {"Qwen3.8", true, 5120, 248320, 16, true},   {"Qwen3.8", true, 5120, 248320, 32, true},
+    {"Qwen3.8", true, 5120, 248320, 64, true},
+    {"Qwen3.8 tp", false, 5120, 124160, 1, false}, {"Qwen3.8 tp", true, 5120, 124160, 4, true},
+    {"Qwen3.8 tp", true, 5120, 124160, 8, true},
+    {"Qwen3.8 32k draft", false, 5120, 32768, 1, false}, {"Qwen3.8 32k draft", true, 5120, 32768, 7, true},
+    {"Flash-Next", false, 2560, 248320, 1, false}, {"Flash-Next", true, 2560, 248320, 4, true},
+    {"Flash-Next tp", false, 2560, 124160, 1, false}, {"Flash-Next tp", false, 2560, 124160, 4, false},
+    {"Ornith", false, 2048, 248320, 1, false},     {"Ornith", true, 2048, 248320, 4, false},
+    {"Ornith", true, 2048, 248320, 32, true},     {"Ornith", true, 2048, 248320, 64, true},
+    {"Kolibri", false, 2560, 128000, 1, false},    {"Kolibri", false, 2560, 128000, 4, false},
+    {"Kolibri", false, 2560, 128000, 8, false},
+};
+
+int run_i8head(l0::Context& ctx, l0::Queue& q, l0::Fence& f) {
+  // The orders: n-major (the control), k-major, and the K-blocked k-major, B k16 steps of a tile together (_KB<B>).
+  struct Order { const char* tag; int block; };   // block 0: n-major, 1: plain k-major
+  // A trailing A: the same order, gemm_sm with I8_AHEAD 1.
+  const Order orders[] = {{"NM", 0},   {"KM", 1},   {"KB4", 4},   {"KB8", 8},     {"KB16", 16},    {"KB32", 32},
+                          {"NMA", 0},  {"KMA", 1},  {"KB8A", 8},  {"KB16A", 16},  {"KB32A", 32}};
+  constexpr size_t NO = sizeof(orders) / sizeof(orders[0]);
+  bool all_ok = true;
+  std::puts("\n# probe_gemv --tiles i8head - the int8 heads, n-major (control) vs k-major and K-blocked k-major\n");
+  std::printf("| model | kernel | M | K×N | NM GB/s |");
+  for (size_t o = 1; o < NO; ++o) std::printf(" Δ%% %s |", orders[o].tag);
+  std::printf(" bytes |\n|---|---|---|---|---|");
+  for (size_t o = 1; o < NO; ++o) std::printf("---|");
+  std::printf("---|\n");
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  uint32_t K = 0, N = 0;
+  std::vector<std::vector<l0::Mem>> wb(NO);
+  std::unique_ptr<l0::Mem> sbuf;
+  size_t weight_bytes = 0;
+  int NB = 2;
+  for (const I8HeadCell& c : kI8HeadCells) {
+    if (c.K != K || c.N != N) {   // a new shape: today's tiles and each reordered copy, NB copies of each
+      K = c.K;
+      N = c.N;
+      for (auto& v : wb) v.clear();
+      std::mt19937 rng(42);
+      std::vector<uint8_t> w(size_t(K) * N), wo(w.size());
+      for (size_t i = 0; i < w.size(); i += 4) {
+        const uint32_t r = rng();
+        std::memcpy(&w[i], &r, 4);
+      }
+      std::vector<float> sc(N);
+      std::uniform_real_distribution<float> sd(0.001f, 0.01f);
+      for (float& v : sc) v = sd(rng);
+      NB = std::max(2, int((72u << 20) / w.size()) + 1);
+      for (size_t o = 0; o < NO; ++o) {
+        if (orders[o].block) common::tiles_k_major(w.data(), N / 16, K / 16, 256, wo.data(), orders[o].block);
+        const std::vector<uint8_t>& src = orders[o].block ? wo : w;
+        for (int i = 0; i < NB; ++i) {
+          wb[o].emplace_back(ctx, l0::MemKind::Device, w.size());
+          imm.copy(wb[o].back().ptr(), src.data(), w.size());
+        }
+      }
+      sbuf = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sc.size() * 4);
+      imm.copy(sbuf->ptr(), sc.data(), sc.size() * 4);
+      weight_bytes = w.size() + sc.size() * 4;
+    }
+    std::vector<uint16_t> x = random_bf16(size_t(c.M) * K, 5);
+    l0::Mem xbuf(ctx, l0::MemKind::Device, x.size() * 2);
+    imm.copy(xbuf.ptr(), x.data(), x.size() * 2);
+    l0::Mem obuf(ctx, l0::MemKind::Device, size_t(c.M) * N * 4);
+    const std::string base = std::string(c.gemm ? "pi8h_gemm_sm_i8w" : "pi8h_gemv_i8w") + "_M" + std::to_string(c.M) +
+                             "_K" + std::to_string(K) + "_N" + std::to_string(N) + (c.wg ? "_wg" : "");
+    const uint32_t wg = c.gemm && c.wg ? 256 : 64, cols = c.gemm && c.wg ? 32 : 64;
+    const int launches = 10;
+    // One timed run of one order: the correctness launch over copy 0 (read back), then `launches` cycling the copies.
+    auto run = [&](size_t o, std::vector<float>& out) {
+      l0::Module mod(ctx, kernels::path(base + "_" + orders[o].tag));
+      l0::Kernel k = mod.kernel(c.gemm ? "gemm_sm_i8w" : "gemv_i8w");
+      k.group_size(wg);
+      auto bind = [&](int i) {
+        k.arg_ptr(0, wb[o][i].ptr());
+        k.arg_ptr(1, sbuf->ptr());
+        k.arg_ptr(2, xbuf.ptr());
+        k.arg_ptr(3, obuf.ptr());
+      };
+      {
+        l0::CmdList list = l0::CmdList::regular(ctx);
+        bind(0);
+        list.launch(k, N / cols);
+        list.close();
+        q.execute(list, &f);
+        f.wait();
+        out.resize(size_t(c.M) * N);
+        imm.copy(out.data(), obuf.ptr(), out.size() * 4);
+      }
+      l0::CmdList list = l0::CmdList::regular(ctx);
+      for (int i = 0; i < launches; ++i) { bind(i % NB); list.launch(k, N / cols); }
+      list.close();
+      return double(weight_bytes) / (time_list(q, f, list, launches) * 1e3);
+    };
+    std::vector<float> ctl, out;
+    for (size_t o = 0; o < NO; ++o) run(o, out);   // warm-up, discarded
+    double g[2][NO];
+    bool same = true;
+    for (int round = 0; round < 2; ++round)
+      for (size_t o = 0; o < NO; ++o) {
+        g[round][o] = run(o, o == 0 ? ctl : out);
+        if (o) same = same && std::memcmp(out.data(), ctl.data(), out.size() * 4) == 0;
+      }
+    all_ok = all_ok && same;
+    const double nm = (g[0][0] + g[1][0]) / 2;
+    std::printf("| %s | %s | %u | %u×%u | %.0f |", c.model,
+                c.gemm ? (c.wg ? "gemm_sm_i8w wg" : "gemm_sm_i8w") : "gemv_i8w", c.M, K, N, nm);
+    for (size_t o = 1; o < NO; ++o) std::printf(" %+.1f%% |", 100.0 * ((g[0][o] + g[1][o]) / 2 / nm - 1.0));
+    std::printf(" %s |\n", same ? "identical" : "**DIFFER**");
+    std::fflush(stdout);
+  }
+  std::printf("\nbyte compare against NM: %s\n", all_ok ? "every cell identical" : "**A CELL DIFFERS**");
+  return all_ok ? 0 : 1;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -350,7 +482,11 @@ int main(int argc, char** argv) {
   l0::Queue q(ctx);
   l0::Fence f(q);
   if (argc > 1 && std::string(argv[1]) == "--loads") return run_loads(ctx, q, f);
-  if (argc > 1 && std::string(argv[1]) == "--tiles") return run_tiles(ctx, q, f);
+  if (argc > 2 && std::string(argv[1]) == "--tiles" && std::string(argv[2]) == "i8head") return run_i8head(ctx, q, f);
+  if (argc > 1 && std::string(argv[1]) == "--tiles") {
+    const int rc = run_tiles(ctx, q, f);
+    return run_i8head(ctx, q, f) | rc;
+  }
   // --variants K N S <kernel>...: each named gemv.cl binary at one shape; the first is the control, every other one
   // must be its output byte for byte (the load knobs keep the arithmetic). Run twice in order, the first pass a warm-up.
   if (argc > 5 && std::string(argv[1]) == "--variants") {

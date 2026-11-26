@@ -285,6 +285,9 @@ class Ckpt:
         if os.path.exists(idx):
             with open(idx, encoding="utf-8") as f:
                 self.wm = json.load(f)["weight_map"]
+            # the bf16 n-gram table's shards are left out of a download (the engine's int8 PLE file replaces them)
+            self.wm = {k: v for k, v in self.wm.items()
+                       if ".ngram_embedding.shard_" not in k or os.path.exists(os.path.join(snapshot, v))}
         else:
             with safe_open(os.path.join(snapshot, "model.safetensors"), framework="pt") as h:
                 self.wm = {k: "model.safetensors" for k in h.keys()}

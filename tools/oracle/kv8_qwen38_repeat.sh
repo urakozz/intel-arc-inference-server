@@ -8,7 +8,7 @@
 #   STEPS="golden a4" tools/oracle/kv8_qwen38_repeat.sh   # a subset: check golden a4 long replay
 #
 # Detach it (it outlives the terminal): nohup tools/oracle/kv8_qwen38_repeat.sh > /dev/null 2>&1 &
-# then `tail -f oracle-out-12a-qwen38/repeat.log`. Every output is in OUT (git-ignored).
+# then `tail -f $B70_DATA/oracle-out/qwen38/kv8-repeat/repeat.log`. Every output is in OUT (git-ignored).
 #
 # Steps (each skipped when its output exists, so a re-run resumes):
 #   check   the probe's unit test (seconds, no weights) and the tokenizer round trip
@@ -24,7 +24,7 @@
 # Then `kv_int8_probe.py summary` over every run into OUT/summary.md.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
-OUT="${OUT:-oracle-out-12a-qwen38}"
+OUT="${OUT:-${B70_DATA:?set B70_DATA, the data root}/oracle-out/qwen38/kv8-repeat}"
 REPO_ID="${REPO_ID:-Qwen/Qwen3.8-27B}"
 IMAGE="${IMAGE:-agnes-ref-img:latest}"      # python 3.12, torch 2.14.1+cpu, transformers 5.15.0, g++
 NAME="${NAME:-kv8-ref}"
@@ -57,7 +57,7 @@ SNAP="/hf/hub/models--${REPO_ID//\//--}/snapshots/$(basename "$SNAP_HOST")"
 # "The Mac path": uncapped, the VM's page cache over the checkpoint swaps macOS to a crawl).
 if [ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" != "true" ]; then
   docker rm -f "$NAME" >/dev/null 2>&1
-  docker run -d --name "$NAME" --memory 28g --memory-swap 28g -v "$HF":/hf:ro -v "$PWD":/ws \
+  docker run -d --name "$NAME" --memory 28g --memory-swap 28g -v "$HF":/hf:ro -v "$PWD":/ws -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" \
     -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TORCH_EXTENSIONS_DIR=/root/torch_ext \
     -e OMP_NUM_THREADS="$THREADS" -e MKL_NUM_THREADS="$THREADS" -w /ws "$IMAGE" sleep infinity >/dev/null ||
     { echo "docker run failed"; exit 2; }

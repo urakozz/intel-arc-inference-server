@@ -42,6 +42,7 @@
 #include "cli/replica_engine.h"     // plan 13b: --parallel replica
 #include "cli/slots_engine.h"      // plan 13c: sequence slots on one card
 #include "cli/served_name.h"
+#include "cli/serve_reconfigure.h"
 #include "cli/spec_args.h"
 #include "cli/serve_adapters.h"
 #include "l0/context.h"
@@ -105,7 +106,8 @@ struct Flags {
                     "L, any multiple of 256 up to the trained context, refused if it does not fit.")]]
   std::string max_len = "auto";   // spec 6 §10
   [[=Help("P", "auto: Qwen3.8 on two cards runs tp at --max-num-seqs 1 with --max-len\n"
-               "auto and replica at --max-num-seqs above 1; otherwise one card when the model\n"
+               "auto and replica at --max-num-seqs above 1; Qwen3.8-Flash-Next on two\n"
+               "cards runs tp; otherwise one card when the model\n"
                "and the asked context fit it, else pp; 1: one card; pp: the\n"
                "layers split over two cards. Kolibri-1 runs on two cards by default\n"
                "(the model needs both).\n"
@@ -113,7 +115,7 @@ struct Flags {
                "--max-num-seqs 2 to 8 (2 when not given: one request a card), each\n"
                "exactly what it is alone; Qwen3.8's --spec dflash: a drafter on each card,\n"
                "--max-num-seqs 2.\n"
-               "tp (Qwen3.8): every layer split over both cards (needs peer\n"
+               "tp (Qwen3.8, Qwen3.8-Flash-Next): every layer split over both cards (needs peer\n"
                "access) - one request at a time, faster; --spec auto / mtp / lookup.")]]
   std::string parallel = "auto";
   [[=Help("auto|N", "pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
@@ -135,6 +137,10 @@ struct Flags {
                     "its routing profile <snapshot>/expert-profile.safetensors (in our model repo) or\n"
                     "<snapshot>-expert-profile.safetensors.")]]
   Arg<std::string> layers;   // spec 21-QFN-v1e (until spec 22)
+  [[=Help("auto|gpu|cpu", "how experts held in host RAM are served: auto picks per step from a\n"
+                          "startup measurement (default), gpu reads them over PCIe into the card, cpu\n"
+                          "computes them on the CPU.")]]
+  std::string host_experts = "auto";   // PERF-124 (runtime/qwen4exp/qwen4exp_cpu_experts.h)
   [[=Section("\n  Still being measured (they go when their numbers decide):\n"),
     =Help("bf16|int8", "the KV cache's form; int8 halves it.", "bf16")]]
   std::string kv_cache;   // spec 12b; empty: runtime::default_kv_cache()
@@ -148,6 +154,21 @@ struct Flags {
   std::string draft_vocab = "off";   // spec 8 §11: off until the measured rows decide
   [[=Help("FILE", "the draft vocabulary's ids (with --draft-vocab).")]] std::string draft_vocab_ids;
 };
+
+// POST /v1/control/reconfigure (cli/serve_reconfigure.h): what run() resolved - the proposer, --host-experts - for the
+// serve paths to complete with their adapter and engine.
+cli::InPlace g_in_place;
+
+// Sets options.reconfigure for a server over `adapter`: the proposer it was built with switched through set_spec. Last
+// before the server, after every speculative option (the options it started with are what "on" restores).
+template <class Adapter>
+void reconfigure_in_place(server::Options& options, Adapter& adapter, bool lookup, bool dflash, bool dflash_lookup,
+                          cli::InPlace in = g_in_place) {
+  in.set_proposer = [&adapter, lookup, dflash, dflash_lookup](uint32_t k, bool on) {
+    adapter.set_spec(on && !lookup ? k : 0, on && lookup, on && dflash, on && dflash_lookup);
+  };
+  options.reconfigure = cli::reconfigure<Flags>(std::move(in), options);
+}
 
 void usage() {
   std::print(stderr,
@@ -375,6 +396,18 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
+// --host-experts in place (one card, pp and tp): switchable when the engine built the CPU route; otherwise why not.
+void host_experts_switch(cli::InPlace& in, runtime::qwen4exp::CpuExperts* cpu,
+                         runtime::qwen4exp::CpuExperts::Mode started) {
+  if (cpu)
+    in.set_host_experts = [cpu](const std::string& v) { cpu->set_mode(cli::qwen4exp::host_experts_mode(v)); };
+  else
+    in.host_experts_why = started == runtime::qwen4exp::CpuExperts::Mode::Off
+                              ? "needs a restart: the server started with --host-experts gpu, which builds no CPU "
+                                "route; start it with auto or cpu to switch"
+                              : "every expert of this model sits on the cards: nothing is read from host memory";
+}
+
 // Spec 21-QFN-v1e: Qwen3.8-Flash-Next served (--layers N until spec 22) - runtime::qwen4exp::Qwen4ExpEngine (one card or two:
 // spec 16b's pieces as 21-QFN-v1c / 21-QFN-v1d built them) behind spec 16d's cli::pp::PipelineEngineAdapterT (EngineAdapter's logic
 // over the engine's host calls: greedy and sampled steps, spec 7's prefix cache over the engine's snapshots, spec 8's
@@ -418,7 +451,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                                  s.tier ? &*s.tier : nullptr, s.tier1 ? &*s.tier1 : nullptr, s.pf_rows);
   }();
   if (da.pipe.tp()) {   // plan 21v2b: tensor parallel - every layer's half on each card (Qwen4ExpTpEngine)
-    runtime::qwen4exp::Qwen4ExpTpEngine engine(*c0, *c1, std::move(model), s.max_len);
+    runtime::qwen4exp::Qwen4ExpTpEngine engine(*c0, *c1, std::move(model), s.max_len, {}, da.host_experts);
     engine.prepare_prefill();   // both cards' prefill scratch and the binaries' check at load, not in a request
     TokAdapter tokenizer(tok_path);
     TemplateAdapter chat_template(a.snapshot_dir);
@@ -427,6 +460,9 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     cq::chat_options(options, eos);
     const std::unique_ptr<PinnedAlloc> prefix_alloc =
         make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
+    cli::InPlace in = g_in_place;
+    host_experts_switch(in, engine.cpu_experts(), da.host_experts);
+    reconfigure_in_place(options, engine_adapter, a.spec_lookup, false, false, in);
     // After every pinned allocation (the prefix cache's too): the first request does not pay the mirrors' first reads.
     std::print(stderr, "experts: the host-memory experts read once on both cards in {:.0f} ms\n",
                engine.read_host_experts());
@@ -450,7 +486,8 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode)\n", model.desc.layers,
                model.checkpoint_layers);
   runtime::PipelineOptions opt;
-  runtime::qwen4exp::Qwen4ExpEngine engine(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
+  runtime::qwen4exp::Qwen4ExpEngine engine(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt, {},
+                                           da.host_experts);
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
   std::print(stderr, "{}\n", engine.memory_line().c_str());
   TokAdapter tokenizer(tok_path);
@@ -464,6 +501,9 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   // Pinned host memory of the one context both cards share: either device's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options, c1 != nullptr);
+  cli::InPlace in = g_in_place;
+  host_experts_switch(in, engine.cpu_experts(), da.host_experts);
+  reconfigure_in_place(options, engine_adapter, a.spec_lookup, false, false, in);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
       devs == 2 ? std::string("--parallel pp (split ") +
@@ -624,6 +664,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
   options.parallel_desc = "pp - the layers split over 2 cards";
+  reconfigure_in_place(options, engine_adapter, a.spec_lookup, a.dflash.on, false);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   std::print(stderr, "b70-serve: {} on http://{}:{:d}, max_len {:d}, eos ", options.served_model.c_str(),
              options.host.c_str(), options.port, settled.max_len);
@@ -767,6 +808,7 @@ int serve_tp(const TpServe& a, server::Options options) {
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options, /*two_cards=*/true);
   options.parallel_desc = "tp - every layer split over 2 cards";
+  reconfigure_in_place(options, engine_adapter, a.spec_lookup, a.dflash.on, a.dflash_lookup);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   std::print(stderr, "b70-serve: {} on http://{}:{:d}, max_len {:d}, eos ", options.served_model.c_str(),
              options.host.c_str(), options.port, len);
@@ -1019,7 +1061,7 @@ int run(int argc, char** argv) {
   if (pipe.mode == cli::Parallel::One && pipe.have_split)   // before the model is even resolved
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   max_num_seqs = cli::check_max_num_seqs(pipe, max_num_seqs, have_max_num_seqs);
-  // Flash-Next has no sequence slots yet (spec 21-QFN-v3f): one request at a time in every mode.
+  // Flash-Next serves one request at a time in every mode until several requests on the page pool (spec 21-QFN-v3d).
   if (max_num_seqs > 1 && cli::qwen4exp::is_qwen4exp(path))
     throw std::runtime_error("Qwen3.8-Flash-Next serves one request at a time for now (further requests wait their "
                              "turn) - drop --max-num-seqs");
@@ -1082,6 +1124,8 @@ int run(int argc, char** argv) {
 
   // The model family decides what `--spec auto` is and which proposers exist (cli/spec_args.h).
   const bool is_q4 = cli::qwen4exp::is_qwen4exp(path);
+  const auto host_experts = cli::qwen4exp::host_experts_mode(f.host_experts);
+  if (f.host_experts != "auto" && !is_q4) throw std::runtime_error(cli::qwen4exp::host_experts_refusal(f.host_experts));
   const bool is_kol = !is_q4 && cli::kolibri::is_kolibri(path);
   // A path that does not resolve is the Qwen family here: every flag refusal below keeps its order, and the
   // snapshot's own error comes after them.
@@ -1108,6 +1152,16 @@ int run(int argc, char** argv) {
   // --spec auto = the MTP head (no extra VRAM by default; DFlash only on an explicit --spec dflash).
   const cli::Spec spec = cli::resolve_spec(spec_arg, family, model_name, have_spec_max, spec_max, dflash.have_model);
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
+  g_in_place.spec = spec.kind == cli::SpecKind::Mtp            ? "mtp"
+                    : spec.kind == cli::SpecKind::Lookup       ? "lookup"
+                    : spec.kind == cli::SpecKind::DFlash       ? "dflash"
+                    : spec.kind == cli::SpecKind::DFlashLookup ? "dflash-lookup"
+                                                               : "off";
+  g_in_place.spec_auto = spec_arg == "auto";
+  g_in_place.spec_max = spec.max_k;
+  g_in_place.host_experts = f.host_experts;
+  g_in_place.host_experts_why = "it is for Qwen3.8-Flash-Next, whose experts that do not fit the cards sit in host "
+                                "memory; this model keeps every weight on the cards";
   const bool spec_lookup = spec.kind == cli::SpecKind::Lookup;
   const bool dflash_lookup = spec.kind == cli::SpecKind::DFlashLookup;
   dflash.on = spec.kind == cli::SpecKind::DFlash || dflash_lookup;   // spec 19c / 19f
@@ -1211,8 +1265,15 @@ int run(int argc, char** argv) {
     qa.layers = q4_layers;
     qa.layers_auto = q4_layers_auto;
     qa.pipe = pipe;
+    if (!pp_given && hw.cards == 2 && !have_q4_layers) {   // the whole model on two cards: tp, the fastest session
+      qa.pipe.mode = cli::Parallel::Tp;
+      std::print(stderr, "parallel: auto -> tp (one request at a time: every layer split over both cards, the fastest "
+                 "session)\n");
+    }
     qa.pp_given = pp_given;
     qa.prefill = true;      // every request prefills: the plan carries the prefill scratch
+    qa.host_experts = host_experts;
+    qa.host_experts_given = f.host_experts != "auto";
     qa.pp_backend_given = have_pp_backend;
     qa.pp_backend = pp_backend;
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
@@ -1484,6 +1545,7 @@ int run(int argc, char** argv) {
                                                       runtime::Engine::kMaxRows, dflash.on);
     options.parallel_desc = "1 card, " + std::to_string(engine.slots()) + " sequence slots (" + layout + ")";
   }
+  if (!slots_engine) reconfigure_in_place(options, engine_adapter, spec_lookup, dflash.on, lookup_inside);
   server::Server server({tokenizer, chat_template, slots_engine ? slots_engine->adapter(0) : engine_adapter}, options,
                         slots_engine.get());
 

@@ -32,7 +32,7 @@ separate.
 
     python3 tools/probe/moe_w4a8_accuracy.py <snapshot> --prompt tests/golden/prompts/prose.ids
         [--layers 1,8,15,22,29,36,39] [--out <json>]
-Run in the reference container (tools/oracle/run_in_container.sh), under /tmp/b70-cpu-model.lock.
+Run in the reference container (tools/oracle/run_in_container.sh), one CPU model job at a time.
 """
 import argparse
 import importlib.util

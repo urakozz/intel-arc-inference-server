@@ -62,16 +62,16 @@ container commands in a shell there - wrapping them in an ssh command line adds 
 third layer of quoting around `"$SNAP"` and is easy to get wrong.
 
 ```bash
-mkdir -p oracle-out
+mkdir -p $B70_DATA/oracle-out/qwen38/golden
 
 # ids: seconds, tokenizer only
 tools/oracle/run_in_container.sh 'python3 tools/oracle/tokenize.py "$SNAP" \
-  encode tests/golden/prompts/prose.txt > /ws/oracle-out/prose.ids'
+  encode tests/golden/prompts/prose.txt > $B70_DATA/oracle-out/qwen38/golden/prose.ids'
 
 # the dump: ~5.5 min, ONE PROMPT AT A TIME (61 GiB peak, 121 GB machine)
 tools/oracle/run_in_container.sh 'python3 tools/oracle/dump.py "$SNAP" \
-  --prompt /ws/oracle-out/prose.ids \
-  --out /ws/oracle-out/prose.golden.safetensors --gen 32'
+  --prompt $B70_DATA/oracle-out/qwen38/golden/prose.ids \
+  --out $B70_DATA/oracle-out/qwen38/golden/prose.golden.safetensors --gen 32'
 ```
 
 `dump.py` takes **one** `--prompt`/`--out` pair, so three prompts are three
@@ -81,8 +81,8 @@ is under version control:
 
 ```bash
 # from the repo root, detached so the 17-min run outlives the ssh
-setsid nohup tools/oracle/golden.sh > oracle-out/golden.log 2>&1 </dev/null &
-tail -f oracle-out/golden.log
+setsid nohup tools/oracle/golden.sh > golden.log 2>&1 </dev/null &
+tail -f golden.log
 tools/oracle/check.sh          # re-read what was written, in a fresh process
 ```
 
@@ -92,9 +92,14 @@ run it (the oracle needs the container and 61 GiB, and never runs from a laptop
 repeated `--prompt`/`--out` pairs would save ~4 minutes per full re-run; it was
 not worth touching the numerics path for.
 
-**Outputs stay where they were made**, in the tree's `oracle-out/` - hundreds
-of MB per prompt. `.gitignore` has `oracle-out/` and `oracle-out-*/`, so they are
-never committed.
+**Outputs live outside the tree**, one directory a set: `$B70_DATA/oracle-out/<model>/<set>/` (`qwen38/golden`,
+`qwen38/f32-i8head-forced`, `ornith/f32-forced`, `flash-next/a4-ours`, ...) - hundreds of MB per prompt.
+`$B70_DATA/oracle-out/README.md` on the machine lists every set: what it is, the script and mode that made it, the
+tests that read it, its date and size. A job's work in progress sits beside its set as `<set>.partial/` and is moved
+into place when complete. `run_in_container.sh` mounts `$B70_DATA/oracle-out` at its own path, so container commands
+name sets by their host paths. The tests read the same root (`B70_ORACLE`, from `B70_DATA` at configure time) and
+skip (77) without it. `.gitignore` still has `oracle-out/` and `oracle-out-*/`, so a set made inside a tree by hand
+is never committed.
 
 ### One golden set per checkpoint - 2026-08-26
 
@@ -104,8 +109,8 @@ changes what the gate means. Since spec 1.6 §5.1 there are two:
 
 | directory | checkpoint | `lm_head` |
 |---|---|---|
-| `oracle-out/` | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
-| `oracle-out-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
+| `qwen38/golden-vishva007/` (was `oracle-out/`) | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
+| `qwen38/golden-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
 
 `golden.sh` takes `OUT_DIR` and neither default clobbers the other. It reads the
 **committed** `tests/golden/prompts/*.ids` rather than re-tokenizing: the two
@@ -124,11 +129,11 @@ image capped a requested 28 at **22**.
 
 ```bash
 # from the repo root
-OUT_DIR=oracle-out-rtn \
+OUT_DIR=$B70_DATA/oracle-out/qwen38/golden-rtn \
 ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
 ORACLE_THREADS=28 tools/oracle/golden.sh
 
-OUT_DIR=oracle-out-rtn \
+OUT_DIR=$B70_DATA/oracle-out/qwen38/golden-rtn \
 ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
 tools/oracle/check.sh
 ```
@@ -177,7 +182,7 @@ per-prompt logs in `oracle-out/{prose,code,cjk}.log`.
 | code  | 61 | 324.9 s | 118.1 s | 19.0 s | 187.7 s | 61.5 GiB | 350.2 MiB (367,258,272 B) | 290 tensors |
 | cjk   | 38 | 316.1 s | 117.7 s | 13.9 s | 184.4 s | 61.4 GiB | 285.3 MiB (299,192,968 B) | 290 tensors |
 
-### The spec 2 §6.2 long prompt (`oracle-out-primary/long.*`)
+### The spec 2 §6.2 long prompt (`$B70_DATA/oracle-out/qwen38/golden/long.*`)
 
 `tools/oracle/make_long_prompt.sh` builds **`tests/golden/prompts/long.ids`,
 2820 ids** (20 repetitions of prose+code+cjk = 20 × 141), committed. It builds
@@ -190,15 +195,15 @@ tokenizer would merge differently across each seam. That is irrelevant to the
 gate, which compares the engine against the oracle on the same ids.
 
 It is part of the primary checkpoint's golden set (the RTN checkpoint it was first staged for was retired; first
-run 2026-11-12). From the repo root, detached, behind the CPU model lock:
+run 2026-11-12). From the repo root, detached, behind the machine's CPU job lock when it has one (`B70_CPU_LOCK`):
 
 ```bash
 # the primary checkpoint is run_in_container.sh's default (ORACLE_MODEL, through the HF cache mount); ORACLE_SNAP
 # would mount only the snapshot folder, whose files are links into blobs/ outside that mount
 mkdir -p $B70_DATA/logs/oracle-long
-OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_THREADS=22 \
-  nohup setsid flock /tmp/b70-cpu-model.lock tools/oracle/golden.sh > $B70_DATA/logs/oracle-long/golden.log 2>&1 </dev/null &
-OUT_DIR=oracle-out-primary PROMPTS=long tools/oracle/check.sh
+OUT_DIR=$B70_DATA/oracle-out/qwen38/golden PROMPTS=long ORACLE_THREADS=22 \
+  nohup setsid ${B70_CPU_LOCK:+flock "$B70_CPU_LOCK"} tools/oracle/golden.sh > $B70_DATA/logs/oracle-long/golden.log 2>&1 </dev/null &
+OUT_DIR=$B70_DATA/oracle-out/qwen38/golden PROMPTS=long tools/oracle/check.sh
 ```
 
 **Pre-registered cost, so the run has something to be scored against**
@@ -221,7 +226,7 @@ is measured yet; **the run's own `/usr/bin/time -v` is the number that goes in
 the record**, and whichever it lands on, this sentence stays. Check
 `df -h .` first and give the container **no** memory limit.
 
-`ctest -R prefill_gate_long` SKIPs (77) until `oracle-out-primary/long.golden.safetensors` exists,
+`ctest -R prefill_gate_long` SKIPs (77) until `$B70_DATA/oracle-out/qwen38/golden/long.golden.safetensors` exists,
 then gates the prefill path at **C = 1024** over 2820 ids - two chunk
 boundaries crossed in attention-over-cache and in the GDN state carry.
 
@@ -332,7 +337,7 @@ from PyPI (a bare `pip install accelerate` resolves torch to the 2.14.1+cu130 bu
 ```bash
 docker exec -d -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TORCH_EXTENSIONS_DIR=/root/torch_ext \
   agnes-ref sh -c 'python3 tools/oracle/dump.py <snapshot> --stream --prompt /ws/tests/golden/prompts/prose.ids \
-    --out /ws/oracle-out-<name>/prose.golden.safetensors --gen 32 --max-prompt 4096 > /ws/oracle-out-<name>/prose.log 2>&1'
+    --out /ws/<out dir>/prose.golden.safetensors --gen 32 --max-prompt 4096 > /ws/<out dir>/prose.log 2>&1'
 ```
 
 (`HF_HOME=/tmp/hf` for anything that loads remote code: `/hf` is read-only and
@@ -407,14 +412,14 @@ read-only cache mount). Not yet run there.
 Two scripts and a driver, on the Mac:
 
 ```bash
-# from the repo (or worktree) root; detached, resumable, log in oracle-out-19a/p0.log
+# from the repo (or worktree) root; detached, resumable, log in $B70_DATA/oracle-out/qwen38/dflash-p0/p0.log
 DRY_RUN=1 tools/oracle/dflash_p0.sh                       # the plan, ~1 min, 6 GB container
 nohup tools/oracle/dflash_p0.sh > /dev/null 2>&1 &        # the run (28 GB container)
 ```
 
 - **`dump_taps.py`** runs `Qwen/Qwen3.8-27B` (bf16, layer-streamed, fp32 matmuls as the 12a
   repeat) over each source's [prompt + recorded continuation] and writes
-  `oracle-out-19a/dumps/<corpus>__<label>.taps.safetensors`: the residual after layers 5, 19,
+  `$B70_DATA/oracle-out/qwen38/dflash-p0/dumps/<corpus>__<label>.taps.safetensors`: the residual after layers 5, 19,
   33, 47, 61 (`resid.L{i}`, the drafter's `taps[i]`) from `n_prompt - 2048` on (the drafter's
   window never reads older context from an anchor in the continuation), the bf16 greedy next id
   per position (ids < 248077, ties to the lower id), the top-64 logits and the logsumexp (a
@@ -456,10 +461,10 @@ the experts a forward routes to, in one buffer pair shared by all layers - bitwi
 materialised model (`test_ornith_ref.py`, both experts implementations), and a decode step
 dequantises 9 experts per layer instead of 257.
 
-Outputs: `oracle-out-ornith/<p>.golden.safetensors` - dump.py's tensors plus `router_logits.L*`
+Outputs: `$B70_DATA/oracle-out/ornith/golden/<p>.golden.safetensors` - dump.py's tensors plus `router_logits.L*`
 bf16 [T + gen, 256], `shared_gate_logits.L*` [T + gen, 1] (what ornith_decode_test's R2 reads),
 `route.{ids,w,gap}.L*` (the reference's top-8, their weights, p8 - p9; the log prints the gap
-distribution for R2's tolerance) - and `oracle-out-ornith-mtp/m1/<p>.mtp.safetensors` +
+distribution for R2's tolerance) - and `$B70_DATA/oracle-out/ornith/mtp-head/m1/<p>.mtp.safetensors` +
 `<p>.cont256.ids` (mtp_head_ornith_test's M1: the head on this run's post-norm hidden, its 257
 experts RTN-quantised exactly as loader/rtn.h does at load; `--mtp-experts bf16` for the shipped
 weights). The committed `tests/golden/prompts/{prose,code,cjk}.ids` are this checkpoint's
@@ -507,7 +512,7 @@ Three pieces Ornith did not need:
 
 The image never changes: `tools/oracle/qwen4exp_env.sh <dir>` installs 5.19.0 + tokenizers 0.23.2 with
 `pip --no-deps --target <dir>` (inside the container, so the wheels match its Python) and every command
-runs with `PYTHONPATH=<dir>` first (Mac: `oracle-out-q4exp/site`; GPU machine: `<tree>/oracle-out-q4exp-site`).
+runs with `PYTHONPATH=<dir>` first (`$B70_DATA/oracle-out/flash-next/python-site` by default).
 Facts: `qwen4exp_facts.py` (torch-free, reads a snapshot or
 `hf:REPO` by range requests).
 
@@ -523,17 +528,17 @@ below); `facts`. `--layers N` truncates the reference identically to the engine'
 cached run needs N >= 4 (transformers' `DynamicCache` takes the length from an attention layer) and N >= 2
 for the PLE layer.
 
-Tests (Mac, `agnes-ref-img` capped at 8 GB / 4 CPUs, the tiny model in `oracle-out-q4exp/tiny` or the HF
+Tests (Mac, `agnes-ref-img` capped at 8 GB / 4 CPUs, the tiny model in `$B70_DATA/oracle-out/flash-next/tiny` or the HF
 cache; measured 2026-10-09 on the Mac shared with another 16-core container: the reference suite about
 an hour - the 2100-row bf16 eager forwards dominate -, the MTP suite ~10 min, all pass):
 
 ```bash
 # from the repo (or worktree) root on the Mac, once: the 5.19.0 site
-docker run --rm --memory 8g --cpus 4 -v "$PWD":/ws -w /ws agnes-ref-img:latest \
-  tools/oracle/qwen4exp_env.sh oracle-out-q4exp/site
+docker run --rm --memory 8g --cpus 4 -v "$PWD":/ws -w /ws -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" \
+  agnes-ref-img:latest tools/oracle/qwen4exp_env.sh $B70_DATA/oracle-out/flash-next/python-site
 # the tests (TORCH_EXTENSIONS_DIR keeps dequant_t's compiled extension between runs)
 docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF_HUB_OFFLINE=1 \
-  -e PYTHONPATH=/ws/oracle-out-q4exp/site -e TORCH_EXTENSIONS_DIR=/ws/oracle-out-q4exp/torch-ext \
+  -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" -e PYTHONPATH=$B70_DATA/oracle-out/flash-next/python-site -e TORCH_EXTENSIONS_DIR=$B70_DATA/oracle-out/flash-next/torch-ext \
   -v "$PWD":/ws -w /ws agnes-ref-img:latest sh -c \
   'python3 tools/oracle/test_qwen4exp_ref.py && python3 tools/oracle/test_qwen4exp_mtp.py'
 ```
@@ -546,7 +551,7 @@ padding, a decode boundary, the I64 constants = the formula), the sigmoid gate, 
 router ties (16 experts top-4 with two identical router rows: `route.gap == 0` exactly where the pair
 straddles the cut - and torch did NOT always pick the lower id), `--layers N`, int4 g128 / g64 (the
 dequant rule; the forward = transformers on the dequantised twin), the original's fused experts, the int8
-PLE file, the real checkpoints' names = `expected_names` (from `oracle-out-q4exp/meta/{orig,intel}` - their
+PLE file, the real checkpoints' names = `expected_names` (from `$B70_DATA/oracle-out/flash-next/meta/{orig,intel}` - their
 config + index - when present), the trace = the run's routes, the CLI (`run`'s layout, `hfcheck`, `facts`).
 `test_qwen4exp_mtp.py`: the head = an independent build from transformers' modules (with transformers' own
 per-query indexer) wired as `V/nvidia/mtp.py` reads, bitwise for step 1 over every row and step 2 from three
@@ -593,8 +598,8 @@ own `forward` computes them (built on `meta`, its embedding swapped for a record
 against `qwen4exp_ref.ple_hash_ids`. Seconds; the output is committed:
 
 ```bash
-docker run --rm --memory 8g --cpus 4 -e PYTHONPATH=/ws/oracle-out-q4exp/site -v "$PWD":/ws -w /ws \
-  agnes-ref-img:latest python3 tools/oracle/qwen4exp_ple_fixture.py oracle-out-q4exp/orig-small/config.json \
+docker run --rm --memory 8g --cpus 4 -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" -e PYTHONPATH=$B70_DATA/oracle-out/flash-next/python-site -v "$PWD":/ws -w /ws \
+  agnes-ref-img:latest python3 tools/oracle/qwen4exp_ple_fixture.py $B70_DATA/oracle-out/flash-next/orig-small/config.json \
   tests/loader/qwen4exp_ple_fixture.h
 ```
 
@@ -667,12 +672,12 @@ the cross-check of the four scenarios the sequential run made first:
 ```bash
 docker stop a4-ref-ornith && docker rm a4-ref-ornith          # the owner's call
 # cross-check first (ESTIMATED ~2 h: the 4 prompts in one pass, then <= 126 decode passes)
-mkdir -p oracle-out-ornith-a4-xcheck && cp -R oracle-out-ornith-a4/set oracle-out-ornith-a4-xcheck/
-OUT=oracle-out-ornith-a4-xcheck NAME=a4-ref-ornith-xcheck MEM=60g BATCH=4 \
+mkdir -p $B70_DATA/oracle-out/ornith/a4-xcheck && cp -R $B70_DATA/oracle-out/ornith/a4/set $B70_DATA/oracle-out/ornith/a4-xcheck/
+OUT=$B70_DATA/oracle-out/ornith/a4-xcheck NAME=a4-ref-ornith-xcheck MEM=60g BATCH=4 \
   ONLY=t1_define-linear_l0,t2_explain-linear_l0,t3_rename-linear_l0,t4_comment-linear_l0 \
   tools/toolcall/a4_ref.sh ornith ref
-OUT=oracle-out-ornith-a4-xcheck NAME=a4-ref-ornith-xcheck tools/toolcall/a4_ref.sh ornith status   # until DONE
-python3 tools/toolcall/compare_ref.py oracle-out-ornith-a4 oracle-out-ornith-a4-xcheck \
+OUT=$B70_DATA/oracle-out/ornith/a4-xcheck NAME=a4-ref-ornith-xcheck tools/toolcall/a4_ref.sh ornith status   # until DONE
+python3 tools/toolcall/compare_ref.py $B70_DATA/oracle-out/ornith/a4 $B70_DATA/oracle-out/ornith/a4-xcheck \
   t1_define-linear_l0 t2_explain-linear_l0 t3_rename-linear_l0 t4_comment-linear_l0
 docker rm a4-ref-ornith-xcheck
 # then the rest, into the real directory (skips the scenarios already there)
@@ -689,7 +694,7 @@ one-line result.
 ```bash
 ctest --test-dir build --output-on-failure -R golden_gate_test
 # the full diagnostic log (per-layer tables, attribution traces, every step):
-./build/tests/golden_gate_test "$PWD/oracle-out" "$PWD/tests/golden/prompts"
+./build/tests/golden_gate_test "$B70_DATA/oracle-out/qwen38/golden" "$PWD/tests/golden/prompts"
 ```
 
 The three prompt id files are **committed** as
@@ -817,7 +822,7 @@ moves the engine and the oracle **together** and the golden test still passes.
 > bf16 - so every value in a golden `logits` tensor lands exactly on the bf16
 > grid (verified: zero low 16 bits, all six files). The reference therefore
 > carries ~8 mantissa bits at a decision, and **two candidates inside one ulp of
-> each other are indistinguishable to it**. Measured: `oracle-out-rtn/prose` has
+> each other are indistinguishable to it**. Measured: `$B70_DATA/oracle-out/qwen38/golden-rtn/prose` has
 > **3 decision rows where the top two logits are bit-identical**, and
 > `oracle-out/cjk` has **2** - the latter has been there since the sets were
 > made, and the engine happened to agree with `torch.argmax`'s lowest-index
@@ -877,13 +882,13 @@ forward weights are cast. This retains the release's FP32 NVFP4 outer scale.
 
 ```sh
 python -m pytest -q tools/oracle/test_inkling_ref.py
-python -m tools.oracle.inkling_make_tiny oracle-out-inkling2-tiny/checkpoint
-printf '%s\n' '3 7 11 19 31 3 7 11 19 31 3 7 11 19 31 3 7 11 19 31' > oracle-out-inkling2-tiny/prompt.ids
-python -m tools.oracle.inkling_ref run oracle-out-inkling2-tiny/checkpoint \
-  --prompt oracle-out-inkling2-tiny/prompt.ids --out oracle-out-inkling2-tiny/prose.golden.safetensors \
+python -m tools.oracle.inkling_make_tiny $B70_DATA/oracle-out/inkling/tiny/checkpoint
+printf '%s\n' '3 7 11 19 31 3 7 11 19 31 3 7 11 19 31 3 7 11 19 31' > $B70_DATA/oracle-out/inkling/tiny/prompt.ids
+python -m tools.oracle.inkling_ref run $B70_DATA/oracle-out/inkling/tiny/checkpoint \
+  --prompt $B70_DATA/oracle-out/inkling/tiny/prompt.ids --out $B70_DATA/oracle-out/inkling/tiny/prose.golden.safetensors \
   --dtype fp32 --gen 8 --chunk 8
-python -m tools.oracle.inkling_ref acceptance oracle-out-inkling2-tiny/checkpoint \
-  --prompt oracle-out-inkling2-tiny/prompt.ids --rounds 8
+python -m tools.oracle.inkling_ref acceptance $B70_DATA/oracle-out/inkling/tiny/checkpoint \
+  --prompt $B70_DATA/oracle-out/inkling/tiny/prompt.ids --rounds 8
 ```
 
 The golden file contains `logits`, `tokens`, `nll`, and the visit traces

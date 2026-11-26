@@ -1,5 +1,5 @@
 // ornith_prefill_test - spec 15d's prefill gates on the card that are not the golden gate
-// itself (R3 on prefill is prefill_gate_test on oracle-out-ornith):
+// itself (R3 on prefill is prefill_gate_test on oracle-out/ornith/golden):
 //
 //   1. the walk: Engine::prefill appends step_chunk_launches(desc, backend, C) per chunk
 //      and step_head's 5 - Ornith's chunk, MoE blocks included, as derived in step.cc;
@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
   const std::string snap = argv[1], pdir = argv[2];
   runtime::PrefillBackend backend = runtime::PrefillBackend::L0Int8;
   CHECK(runtime::parse_prefill_backend(argv[3], backend));
-  const std::string gdir = argc > 4 ? argv[4] : "oracle-out-ornith";
+  const std::string gdir = argc > 4 ? argv[4] : "oracle-out/ornith/golden";
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   if (argc > 5) CHECK(loader::parse_lm_head_form(argv[5], lm_head));
   try {

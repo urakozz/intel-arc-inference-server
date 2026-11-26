@@ -17,7 +17,7 @@ Spec 6 K3a (the 2026-09-26 ruling): flash_long_test --oracle reads it.
 Cost, measured 2026-09-26 on the test machine (22 threads): 3799 s to 4096 ids, 11359 s to 8192,
 so 32704 is day-class. Run in the oracle container, detached:
     tools/oracle/run_in_container.sh 'python3 tools/oracle/last_logits.py "$SNAP" \
-        --prompt tests/golden/prompts/long32k.ids --out /ws/oracle-out-long32k/last_logits.safetensors'
+        --prompt tests/golden/prompts/long32k.ids --out $B70_DATA/oracle-out/qwen38/long32k/last_logits.safetensors'
 """
 import importlib.util
 import os

@@ -1,6 +1,6 @@
 """Score tool calls: the first tool call of each output against a reference run.
 
-    score.py [--format qwen|hermes] [--min N] <out dir> <reference run> <candidate run>...
+    score.py [--format qwen|hermes|inkling] [--min N] <out dir> <reference run> <candidate run>...
 
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
@@ -9,7 +9,7 @@ Validity (open-work 3o): every first call is also checked against the scenario's
 files - tests/golden/toolcall/tree.json, the repository the 36 conversations were made from (its file
 list and the full text of the six files they read; revision in the file, the one whose lines every
 prompt's read results show; Ornith's, Agnes's and Flash-Next's sets re-render the same
-conversations). Not for `--format hermes`: Kolibri-1's German set was made from a later tree. A call is
+conversations, and so does Inkling 2 Mini's). Not for `--format hermes`: Kolibri-1's German set was made from a later tree. A call is
 'invalid' when it does not parse ('incomplete') or when its
 arguments would not work there:
   edit   filePath one of the six files; oldString occurs in it exactly once (opencode's edit refuses
@@ -32,9 +32,13 @@ Call syntaxes:
       may be a JSON string holding an object), the first block wins; reasoning the MODEL opens
       (optional whitespace, then <think> ... </think>) is skipped first, and an output that ends
       inside it is 'reasoning'. Arguments are kept as JSON values and compared as such.
+  Inkling 2 Mini (`--format inkling`): blocks opened by <|message_model|> and closed by <|end_message|>;
+      a call is NAME<|content_invoke_tool_json|>{"name":NAME,"args":{...}}, the first such block wins.
+      The JSON's name must be the block's NAME and "args" an object; values are compared as JSON values.
+      A <|content_thinking|> block is skipped, and an output that ends inside one is 'reasoning'.
 
 Kinds: 'call', 'no call', 'incomplete' (a call opened and not closed, or one that does not
-parse), 'reasoning' (hermes: generation ended inside the reasoning).
+parse), 'reasoning' (hermes, inkling: generation ended inside the reasoning).
 """
 import json
 import os
@@ -99,11 +103,48 @@ def parse_first_call_hermes(text: str):
     return ("call", got[0], got[1], len(calls))
 
 
+INK_HEADER = "<|message_model|>"
+INK_THINK = "<|content_thinking|>"
+INK_JSON = "<|content_invoke_tool_json|>"
+INK_END = "<|end_message|>"
+
+
+def inkling_parse_call(name: str, body: str):
+    """One Inkling call block -> (name, args) or None: the JSON names the block's tool and "args" is an object."""
+    try:
+        obj = json.loads(body)
+    except ValueError:
+        return None
+    name = name.strip()
+    if not isinstance(obj, dict) or obj.get("name") != name or not name or any(c.isspace() for c in name) \
+            or not isinstance(obj.get("args"), dict):
+        return None
+    return name, obj["args"]
+
+
+def parse_first_call_inkling(text: str):
+    """-> (kind, name, arguments, n_calls) for Inkling 2 Mini's output. Text before the first <|message_model|>
+    counts as a block too (a prompt that already opened the model's message)."""
+    blocks = text.split(INK_HEADER)
+    calls = [b for b in blocks if INK_JSON in b and not b.startswith(INK_THINK)]
+    if not calls:
+        last = blocks[-1]
+        return ("reasoning" if last.startswith(INK_THINK) and INK_END not in last else "no call", None, {}, 0)
+    name, rest = calls[0].split(INK_JSON, 1)
+    end = rest.find(INK_END)
+    got = inkling_parse_call(name, rest[:end]) if end >= 0 else None
+    if got is None:
+        return ("incomplete", None, {}, len(calls))
+    return ("call", got[0], got[1], len(calls))
+
+
 def parse_first_call(text: str, fmt: str = "auto"):
     """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (hermes)
-    'reasoning'. fmt 'hermes' reads Kolibri-1's calls; 'auto' (and 'qwen') Qwen XML."""
+    'reasoning'. fmt 'hermes' reads Kolibri-1's calls, 'inkling' Inkling 2 Mini's; 'auto' (and 'qwen') Qwen XML."""
     if fmt == "hermes":
         return parse_first_call_hermes(text)
+    if fmt == "inkling":
+        return parse_first_call_inkling(text)
     calls = CALL.findall(text)
     if not calls:
         return ("incomplete" if "<tool_call>" in text else "no call", None, {}, 0)
@@ -190,8 +231,8 @@ def main() -> None:
     args = sys.argv[1:]
     fmt = "auto"
     if args[:1] == ["--format"]:
-        if len(args) < 2 or args[1] not in ("qwen", "hermes"):
-            sys.exit("--format expects qwen or hermes")
+        if len(args) < 2 or args[1] not in ("qwen", "hermes", "inkling"):
+            sys.exit("--format expects qwen, hermes or inkling")
         fmt, args = args[1], args[2:]
     need = None
     if args[:1] == ["--min"]:
@@ -232,7 +273,7 @@ def main() -> None:
         print(f"{c}: {matches[c]} / {len(names)} match {ref}")
     for c in cands:
         print(f"{c}: {len(invalid[c])} invalid call(s)" + (": " + "; ".join(invalid[c]) if invalid[c] else ""))
-    if fmt == "hermes":   # KL4's bar: every reference call parses
+    if fmt in ("hermes", "inkling"):   # KL4's bar: every reference call parses
         bad = [n for n in names if parse_first_call(
             open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)[0] == "incomplete"]
         print(f"{ref}: {len(bad)} parse failure(s)" + (f": {', '.join(bad)}" if bad else ""))

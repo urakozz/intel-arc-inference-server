@@ -79,8 +79,9 @@ def main() -> None:
     H, hcn = tc.hidden_size, tc.hc_count
     model = None
     if a.R == "model":
-        ple_spec = a.ple or (f"int8:{a.checkpoint.rstrip('/')}-ple-int8"
-                             if os.path.isdir(a.checkpoint.rstrip("/") + "-ple-int8") else "bf16")
+        ck = a.checkpoint.rstrip("/")
+        side = next((p for p in (ck + "/ple-int8", ck + "-ple-int8") if os.path.isdir(p)), None)
+        ple_spec = a.ple or (f"int8:{side}" if side else "bf16")
         R_all, model = premixer_rows(a.checkpoint, tc, prompt, ple_spec)
         R = R_all[:S].to(torch.bfloat16)
     else:

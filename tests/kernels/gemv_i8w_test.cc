@@ -12,9 +12,15 @@
 // It also times the launch (weights cycled through two device copies, so L2 holds
 // none of it) and prints GB/s against the bytes read: 1 271 398 400 weight + 993 280
 // scale bytes (Review Focus 1). The in-situ number is the engine profile's.
+//
+// PERF-111: the production binary reads the head in the loader's order (loader::int8_tiled_index: k-major while
+// kInt8HeadKMajor holds); its output must be byte for byte today's n-major order's - probe_gemv's explicit
+// pi8h_gemv_i8w_M<M>_K5120_N248320_NM over the same weights tiled n-major.
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 #include "check.h"
 #include "gemv_harness.h"
@@ -30,7 +36,8 @@ constexpr uint32_t K = 5120, N = 248320;
 
 struct Case {
   std::vector<int8_t> q_rm;      // [N][K]
-  std::vector<int8_t> q_tiled;   // loader::int8_tiled_index
+  std::vector<int8_t> q_tiled;   // loader::int8_tiled_index (the head's order)
+  std::vector<int8_t> q_nmajor;  // [N/16][K/16][16 k][16 n], today's order
   std::vector<float> s;          // [N]
 };
 
@@ -38,6 +45,7 @@ Case make_weights() {
   Case c;
   c.q_rm.resize(size_t(N) * K);
   c.q_tiled.resize(c.q_rm.size());
+  c.q_nmajor.resize(c.q_rm.size());
   c.s.resize(N);
   std::mt19937 g(99);
   std::uniform_int_distribution<int> qd(-127, 127);
@@ -47,7 +55,8 @@ Case make_weights() {
     for (uint32_t k = 0; k < K; ++k) {
       const int8_t v = int8_t(qd(g));
       c.q_rm[size_t(n) * K + k] = v;
-      c.q_tiled[loader::int8_tiled_index(K, k, n)] = v;
+      c.q_tiled[loader::int8_tiled_index(K, N, k, n)] = v;
+      c.q_nmajor[(size_t(n / 16) * (K / 16) + k / 16) * 256 + size_t(k % 16) * 16 + n % 16] = v;
     }
   }
   return c;
@@ -90,6 +99,8 @@ int main() {
     wbufs.emplace_back(ctx, l0::MemKind::Device, wbytes);
     imm.copy(wbufs.back().ptr(), c.q_tiled.data(), wbytes);
   }
+  l0::Mem nmbuf(ctx, l0::MemKind::Device, wbytes);
+  imm.copy(nmbuf.ptr(), c.q_nmajor.data(), wbytes);
   l0::Mem sbuf(ctx, l0::MemKind::Device, size_t(N) * 4);
   imm.copy(sbuf.ptr(), c.s.data(), size_t(N) * 4);
 
@@ -118,6 +129,24 @@ int main() {
       imm.copy(out.data(), obuf.ptr(), out.size() * 4);
     }
     const double err = check_against_fp64(c, x, M, out);
+    bool same_as_nmajor = true;
+    {   // today's order: the n-major build over the n-major tiles, the same output bytes
+      l0::Module nm(ctx, kernels::path("pi8h_gemv_i8w_M" + std::to_string(M) + "_K5120_N248320_NM"));
+      l0::Kernel kn = nm.kernel("gemv_i8w");
+      kn.group_size(kernels::kGemvI8wCols);
+      kn.arg_ptr(0, nmbuf.ptr());
+      kn.arg_ptr(1, sbuf.ptr());
+      kn.arg_ptr(2, xbuf.ptr());
+      kn.arg_ptr(3, obuf.ptr());
+      l0::CmdList list = l0::CmdList::regular(ctx);
+      list.launch(kn, N / kernels::kGemvI8wCols);
+      list.close();
+      q.execute(list, &fence);
+      fence.wait();
+      std::vector<float> ref(out.size());
+      imm.copy(ref.data(), obuf.ptr(), ref.size() * 4);
+      same_as_nmajor = std::memcmp(ref.data(), out.data(), out.size() * 4) == 0;
+    }
     double us = 0;
     {
       const int launches = 20;
@@ -130,9 +159,10 @@ int main() {
       us = time_list(q, fence, list, launches);
     }
     const double bytes = double(wbytes) + double(N) * 4 + double(M) * K * 2;
-    std::printf("gemv_i8w M=%u K=%u N=%u: max rel err %.3g (bar 1e-5); %.1f us/launch, %.1f GB/s\n",
-                M, K, N, err, us, bytes / us / 1e3);
+    std::printf("gemv_i8w M=%u K=%u N=%u: max rel err %.3g (bar 1e-5); %.1f us/launch, %.1f GB/s; %s today's "
+                "n-major order\n", M, K, N, err, us, bytes / us / 1e3, same_as_nmajor ? "bitwise" : "NOT BITWISE");
     CHECK(err <= 1e-5);
+    CHECK(same_as_nmajor);
   }
   std::puts("gemv_i8w_test OK");
   return 0;

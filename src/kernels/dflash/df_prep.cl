@@ -279,14 +279,22 @@ __kernel void df_ink_qkv(__global const uint* ctrl, __global const float* q_raw,
 // Inkling's context K/V are projected independently from their layer's
 // target tap mix. A zero ring uses the full cache at the absolute position.
 __attribute__((reqd_work_group_size(HD, 1, 1)))
+#if INK_PREFILL
+__kernel void df_ink_context(uint pos0,
+#else
 __kernel void df_ink_context(__global const uint* restrict dctl,
+#endif
                              __global const float* restrict k, __global const float* restrict v,
                              __global const float* restrict norm, __global const float* restrict rope,
                              __global ushort* restrict cache_k, __global ushort* restrict cache_v,
                              uint ring) {
   const uint head = get_group_id(0), row = get_group_id(1), lane = get_local_id(0);
+#if INK_PREFILL
+  const uint pos = pos0 + row;
+#else
   if (row >= dctl[DCTL_PN]) return;
   const uint pos = dctl[DCTL_PPOS] + row;
+#endif
   const uint slot = ring ? pos % ring : pos;
   const size_t src = ((size_t)row * NKV + head) * HD + lane;
   const size_t dst = ((size_t)slot * NKV + head) * HD + lane;

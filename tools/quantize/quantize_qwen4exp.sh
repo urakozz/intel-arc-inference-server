@@ -15,7 +15,7 @@
 #          (nvidia/OpenCodeInstruct through the chat template, from the HF cache; refused if any of its 50
 #          parquet shards is missing -  the model is for agentic coding), low CPU memory (the fused-MoE checkpoint
 #          is read one block at a time), low GPU memory; on card CARD (1) under its lock, or the
-#          CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32
+#          CPU (DEVICE=cpu, the CPU lock B70_CPU_LOCK when set). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32
 #          files of the calibration activations, 21.5 GB, overwritten each block) - after a stop, `start` again
 #          continues at the first unfinished block. The PLE table (102 GB) is streamed once into a raw file in
 #          PLE_DIR (NVMe) and read from there by mmap (autoround_run.py: AutoRound's own load would need ~190 GB).
@@ -54,7 +54,7 @@
 # tools/oracle/qwen4exp_requirements.txt) in SITE first on PYTHONPATH.
 #
 # Overridables (environment): MODEL (Qwen/Qwen3.8-Flash-Next or a snapshot dir), QUANT_ROOT
-# ($B70_DATA/hdd/quant), OUT (default: the run `current` points at, else QUANT_ROOT/Qwen3.8-Flash-Next-
+# ($B70_DATA/quant), OUT (default: the run `current` points at, else QUANT_ROOT/Qwen3.8-Flash-Next-
 # W4A16-g64-<date>), PLE_DIR ($B70_DATA/scratch/flash-next-ple), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), GRAD_ACCUM (1: BATCH x GRAD_ACCUM rows a tuning step), RAM_CAP_GB, RAM_MIN_GB,
 # DISK_MIN_GB, DATASET, VENVPY, SITE, AR_REPO, AR_REF, LOGDIR ($B70_DATA/logs/flash-next-quant).
 set -euo pipefail
@@ -63,7 +63,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
 Q="$HERE/quantize/qwen4exp"
 SELF="$HERE/quantize/quantize_qwen4exp.sh"
 MODEL="${MODEL:-Qwen/Qwen3.8-Flash-Next}"
-QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/hdd/quant}"
+QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/quant}"
 LOGDIR="${LOGDIR:-${B70_DATA:?set B70_DATA, the data root}/logs/flash-next-quant}"
 DEVICE="${DEVICE:-xpu}"
 CARD="${CARD:-1}"
@@ -116,11 +116,11 @@ disk_free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
 locked() {
   local cap=(systemd-run --user --scope -q -p "MemoryMax=${RAM_CAP_GB}G" -p MemorySwapMax=0)
   if [ "$DEVICE" = xpu ]; then
-    # through a machine-wide GPU lock wrapper at tools/gpu_lock.sh where the machine has one, else by affinity alone
-    if [ -x "$HERE/gpu_lock.sh" ]; then "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+    # through the machine's card wrapper when B70_CARD_RUN names one (<wrapper> <card> -- <cmd>), else by affinity alone
+    if [ -n "${B70_CARD_RUN:-}" ]; then $B70_CARD_RUN "$CARD" -- "${cap[@]}" "$@"
     else ZE_AFFINITY_MASK="$CARD" "${cap[@]}" "$@"; fi
   else
-    AR_DISABLE_META_LOAD=1 flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
+    AR_DISABLE_META_LOAD=1 ${B70_CPU_LOCK:+flock "$B70_CPU_LOCK"} "${cap[@]}" "$@"
   fi
 }
 

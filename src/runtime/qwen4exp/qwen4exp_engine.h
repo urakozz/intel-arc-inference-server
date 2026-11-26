@@ -59,8 +59,12 @@ class Qwen4ExpEngine {
   // throws when device 0 cannot access device 1's memory (zeDeviceCanAccessPeer).
   // `cap` (spec 28d): the verify lists' capture override - tests and probes only (CaptureOptions::force_linear Gemv
   // binds the pre-28d gemv / gemv_i8w at M >= 2; the default binds gemm_sm there, runtime::gemv_kind).
+  // cpu_experts (PERF-124, b70-decode / b70-serve --host-experts auto|gpu|cpu): Adaptive (auto) computes the host-memory
+  // experts on the CPU where the startup measurement says it is faster; All (cpu) on the CPU always; Off (gpu) reads them
+  // over PCIe.
   Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4LoadedModel model, uint32_t max_len,
-                 bool debug_tap = false, const PipelineOptions& opt = {}, const CaptureOptions& cap = {});
+                 bool debug_tap = false, const PipelineOptions& opt = {}, const CaptureOptions& cap = {},
+                 CpuExperts::Mode cpu_experts = CpuExperts::Mode::Off);
   ~Qwen4ExpEngine();
   Qwen4ExpEngine(const Qwen4ExpEngine&) = delete;
   Qwen4ExpEngine& operator=(const Qwen4ExpEngine&) = delete;
@@ -68,6 +72,8 @@ class Qwen4ExpEngine {
   // Zeroes every device's persistent group (control, KV, indexer keys and tails, GDN state and rings, the PLE
   // rings) and the hand-off buffers; clears a failed hand-off.
   void reset();
+  // The host-memory experts' CPU route (--host-experts auto or cpu, where some layer has a host mirror); null without.
+  CpuExperts* cpu_experts() { return cpu_.get(); }
   // One replay per id; ids must be < vocab. pos advances by ids.size().
   void ingest(const std::vector<uint32_t>& ids);
   // Greedy-generates n ids (Engine::generate's contract: id i is the previous fence's, the (n+1)-th is left
@@ -313,6 +319,9 @@ class Qwen4ExpEngine {
   PipelineOptions opt_;
   CaptureOptions cap_;   // spec 28d: the verify lists' override (tests only)
   Q4Attn attn_;
+  // PERF-124 step 4: the host-RAM experts on the CPU (null: not asked for, or none in host RAM). Before st_:
+  // the lists wait on its events and read its host buffers, so it is destroyed after them.
+  std::unique_ptr<CpuExperts> cpu_;
   std::vector<std::unique_ptr<Stage>> st_;
   std::unique_ptr<PipelineLink> link_;
   StageLink binding_;

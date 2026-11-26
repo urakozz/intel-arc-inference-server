@@ -366,7 +366,7 @@ bool compare_selection(const std::vector<uint32_t>& eb, const std::vector<uint32
 
 int main(int argc, char** argv) {
   const std::string arg = argc > 1 ? argv[1] : "";
-  const std::string gdir = argc > 2 ? argv[2] : "oracle-out-q4exp";
+  const std::string gdir = argc > 2 ? argv[2] : "oracle-out/flash-next/golden";
   qwen4exp_rig::Options o;
   o.max_len = 16384;
   o.debug_tap = true;

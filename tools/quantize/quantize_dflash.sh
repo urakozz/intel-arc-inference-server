@@ -21,7 +21,7 @@
 #            forward (tools/quantize/dflash/model.py = tools/oracle/dflash_ref.py's, batched): W4A16, group 64,
 #            symmetric, auto_round:auto_gptq, ITERS (200) sign-SGD iterations, NSAMPLES (128) samples of
 #            ANCHORS (32) blocks of 8 at the recordings' continuation positions, BATCH (8), seed 42, no
-#            quant_lm_head; on card CARD, or the CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Restarts from
+#            quant_lm_head; on card CARD, or the CPU (DEVICE=cpu, the CPU lock B70_CPU_LOCK when set). Restarts from
 #            the beginning after a stop (the raw export moved to $B70_DATA/trash/<date>).
 #   export   tools/quantize/dflash/finalize.py: checkpoint names, unpacked tensors bitwise the source's, the
 #            source's config.json + quantization_config, dflash_recipe.json, README.md with the provenance
@@ -43,7 +43,7 @@
 #
 # Overridables (environment): DRAFTER (z-lab/Qwen3.8-27B-DFlash2 or a snapshot dir), TARGET
 # (urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ or a dir), RECORDINGS (space-separated dirs), QUANT_ROOT
-# ($B70_DATA/hdd/quant), OUT (default: the run `dflash-current` points at, else a new dated one), TAPS ($WORK/taps;
+# ($B70_DATA/quant), OUT (default: the run `dflash-current` points at, else a new dated one), TAPS ($WORK/taps;
 # another run's taps dir to reuse it), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, ANCHORS, BATCH,
 # CONTEXT (2304 context rows), RAM_CAP_GB (64), RAM_MIN_GB (40), DISK_MIN_GB (20), PROBE, VENVPY, SITE, AR_REPO, AR_REF,
 # LOGDIR ($B70_DATA/logs/dflash-quant).
@@ -56,7 +56,7 @@ SELF="$HERE/quantize/quantize_dflash.sh"
 DRAFTER="${DRAFTER:-z-lab/Qwen3.8-27B-DFlash2}"
 TARGET="${TARGET:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 RECORDINGS="${RECORDINGS:-${B70_DATA:?set B70_DATA, the data root}/logs/opencode-session-int8 ${B70_DATA:?set B70_DATA, the data root}/logs/opencode-session}"
-QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/hdd/quant}"
+QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/quant}"
 LOGDIR="${LOGDIR:-${B70_DATA:?set B70_DATA, the data root}/logs/dflash-quant}"
 DEVICE="${DEVICE:-xpu}"
 CARD="${CARD:-1}"
@@ -101,10 +101,10 @@ env_py() {     # the latest AutoRound beside VENVPY, transformers 5.19.0 in SITE
 mem_avail_gb() { awk '/MemAvailable/ {printf "%d", $2 / 1048576}' /proc/meminfo; }
 disk_free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
 
-# card_run <cmd...>: on card CARD - through a machine-wide GPU lock wrapper at tools/gpu_lock.sh where the machine
-# has one, else by device affinity alone
+# card_run <cmd...>: on card CARD - through the machine's card wrapper when B70_CARD_RUN names one
+# (<wrapper> <card> -- <cmd>), else by device affinity alone
 card_run() {
-  if [ -x "$HERE/gpu_lock.sh" ]; then "$HERE/gpu_lock.sh" card "$CARD" -- "$@"
+  if [ -n "${B70_CARD_RUN:-}" ]; then $B70_CARD_RUN "$CARD" -- "$@"
   else ZE_AFFINITY_MASK="$CARD" "$@"; fi
 }
 
@@ -114,7 +114,7 @@ locked() {
   if [ "$DEVICE" = xpu ]; then
     card_run "${cap[@]}" "$@"
   else
-    flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
+    ${B70_CPU_LOCK:+flock "$B70_CPU_LOCK"} "${cap[@]}" "$@"
   fi
 }
 
@@ -255,9 +255,11 @@ case "${1:-}" in
       echo "-- last log lines:"
       tr '\r' '\n' < "$WORK/run.log" | grep -v -E "^(Quantizing|packing|Writing)" | grep -v '^\s*$' | tail -5
     fi ;;
-  stop)
-    [ -x "$HERE/box_stop.sh" ] || die "no stop helper on this machine: stop the run's AutoRound process yourself (pgrep -af autoround_run.py)"
-    exec "$HERE/box_stop.sh" dflash-quant ;;
+  stop)   # the run CURRENT points at (the last started): TERM to its process group
+    run=$(readlink -f "$CURRENT" 2>/dev/null || true); p=$(cat "$run.work/run.pid" 2>/dev/null || true)
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null || die "no run is running"
+    kill -TERM -- "-$p"
+    echo "stopped the run in $run (pid $p and its children); resume with: $SELF start" ;;
   selftest)
     W="$QUANT_ROOT/selftest-dflash-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$W"
     env_py

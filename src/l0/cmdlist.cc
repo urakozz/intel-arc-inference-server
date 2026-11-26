@@ -17,17 +17,21 @@ CmdList CmdList::immediate(Context& ctx, uint32_t ordinal) {
   return CmdList(l, true);
 }
 
-CmdList CmdList::immediate_copy(Context& ctx) {
-  const std::vector<CopyEngine> e = ctx.copy_engines();
+CmdList CmdList::immediate_async(Context& ctx, uint32_t ordinal) {
   ze_command_queue_desc_t qd{};
   qd.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
-  qd.ordinal = e.empty() ? 0 : e[0].ordinal;
+  qd.ordinal = ordinal;
   qd.flags = ZE_COMMAND_QUEUE_FLAG_IN_ORDER;
   qd.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
   qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
   ze_command_list_handle_t l = nullptr;
   ZE_CHECK(zeCommandListCreateImmediate(ctx.handle(), ctx.device(), &qd, &l));
   return CmdList(l, true);
+}
+
+CmdList CmdList::immediate_copy(Context& ctx) {
+  const auto engines = ctx.copy_engines();
+  return immediate_async(ctx, engines.empty() ? 0 : engines.front().ordinal);
 }
 
 CmdList CmdList::regular(Context& ctx, uint32_t ordinal) {
@@ -73,6 +77,7 @@ void CmdList::barrier_signal(ze_event_handle_t e) {
 void CmdList::wait_event(ze_event_handle_t e) {
   ZE_CHECK(zeCommandListAppendWaitOnEvents(l_, 1, &e));
 }
+void CmdList::reset_event(ze_event_handle_t e) { ZE_CHECK(zeCommandListAppendEventReset(l_, e)); }
 void CmdList::close() { ZE_CHECK(zeCommandListClose(l_)); }
 void CmdList::reset() { ZE_CHECK(zeCommandListReset(l_)); }
 void CmdList::host_synchronize() { ZE_CHECK(zeCommandListHostSynchronize(l_, UINT64_MAX)); }

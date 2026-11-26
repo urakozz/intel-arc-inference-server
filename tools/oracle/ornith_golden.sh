@@ -9,8 +9,8 @@
 # g++ / ninja for stream.py's C++ dequant), capped at 28 GB like every Mac oracle run (the page
 # cache over the 23 GB checkpoint counts against the cap; uncapped, the VM grows and macOS swaps -
 # tools/oracle/README.md "The Mac path"). It runs `facts` first (stops if the checkpoint is not
-# the one spec 15 §13 read), then prose, code, cjk serially into oracle-out-ornith/
-# (<p>.golden.safetensors, <p>.log) with the MTP head's M1 reference into oracle-out-ornith-mtp/
+# the one spec 15 §13 read), then prose, code, cjk serially into $B70_DATA/oracle-out/ornith/golden/
+# (<p>.golden.safetensors, <p>.log) with the MTP head's M1 reference into $B70_DATA/oracle-out/ornith/mtp-head/
 # (m1/<p>.mtp.safetensors, <p>.cont256.ids). Resumable: a prompt whose golden file and M1 file
 # both exist is skipped. Detached (`docker run -d`): it outlives the terminal; poll with --status.
 #
@@ -26,8 +26,8 @@ cd "$(dirname "$0")/../.."
 IMAGE=${IMAGE:-agnes-ref-img:latest}
 MEM=${MEM:-28g}
 THREADS=${ORACLE_THREADS:-12}
-OUT=${OUT_DIR:-oracle-out-ornith}
-MTP=${MTP_OUT_DIR:-oracle-out-ornith-mtp}
+OUT=${OUT_DIR:-${B70_DATA:?set B70_DATA, the data root}/oracle-out/ornith/golden}
+MTP=${MTP_OUT_DIR:-$B70_DATA/oracle-out/ornith/mtp-head}
 PROMPTS=${PROMPTS:-prose code cjk}
 NAME=ornith-ref
 MODEL=models--urakozz--Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
@@ -62,17 +62,17 @@ fi
 mkdir -p "$OUT" "$MTP/m1"
 rel=${snap#"$HF/"}
 docker run -d --name "$NAME" --memory "$MEM" --memory-swap "$MEM" \
-  -v "$HF":/hf:ro -v "$PWD":/ws -w /ws \
+  -v "$HF":/hf:ro -v "$PWD":/ws -v "$B70_DATA/oracle-out:$B70_DATA/oracle-out" -w /ws \
   -e HF_HOME=/tmp/hf -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TORCH_EXTENSIONS_DIR=/tmp/torch_ext \
   -e OMP_NUM_THREADS="$THREADS" -e MKL_NUM_THREADS="$THREADS" \
   "$IMAGE" sh -c "
     S=/hf/$rel
-    python3 tools/oracle/ornith_ref.py facts \"\$S\" > /ws/$OUT/facts.log 2>&1 || exit 1
+    python3 tools/oracle/ornith_ref.py facts \"\$S\" > $OUT/facts.log 2>&1 || exit 1
     for p in $PROMPTS; do
-      [ -s /ws/$OUT/\$p.golden.safetensors ] && [ -s /ws/$MTP/m1/\$p.mtp.safetensors ] && continue
+      [ -s $OUT/\$p.golden.safetensors ] && [ -s $MTP/m1/\$p.mtp.safetensors ] && continue
       python3 tools/oracle/ornith_ref.py run \"\$S\" --prompt /ws/tests/golden/prompts/\$p.ids \
-        --out /ws/$OUT/\$p.golden.safetensors --gen 32 --mtp-out /ws/$MTP \
-        > /ws/$OUT/\$p.log 2>&1 || exit 1
+        --out $OUT/\$p.golden.safetensors --gen 32 --mtp-out $MTP \
+        > $OUT/\$p.log 2>&1 || exit 1
     done
-    echo done > /ws/$OUT/DONE"
+    echo done > $OUT/DONE"
 echo "started $NAME (detached): tools/oracle/ornith_golden.sh --status; logs in $OUT/"

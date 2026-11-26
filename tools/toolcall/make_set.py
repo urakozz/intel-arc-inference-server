@@ -44,7 +44,7 @@ WORK = "/work"
 MIN_IDS, MAX_IDS = 800, 3000
 # --from re-renders the SAME conversations: another tokenizer may need more or fewer ids for them; the conversations
 # are unchanged.
-MAX_IDS_FROM: dict = {}
+MAX_IDS_FROM: dict = {"inkling2_loop": 3200}   # Inkling 2 Mini's tokenizer needs a few more ids (3036 for rename-step)
 MIN_IDS_FROM: dict = {}
 
 FILES = [
