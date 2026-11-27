@@ -195,18 +195,18 @@ inline BatchMemory batch_memory(const model::ModelDesc& d, const std::vector<Slo
     m.kv += ps.kv_k + ps.kv_v;
     m.state += ps.gdn_state * (s.mtp ? MtpDims::kSlots : 1) + ps.conv_ring;
     if (s.mtp) {
-      const MtpSizes ms = MtpDims::sizes(s.max_len, d, 0, kv);
+      const MtpSizes ms = MtpDims::sizes(s.max_len, d, kv);
       m.kv += ms.kv_k + ms.kv_v;
     }
     longest = s.max_len > longest ? s.max_len : longest;
     any_mtp = any_mtp || s.mtp;
   }
   m.weights = weights + (any_mtp ? mtp_head : 0) + model::Qwen35::rope_table_bytes(longest);
-  const MemoryPlan p = plan(d, longest, any_mtp, 0, PrefillPath{}, DraftVocabPlan{}, kv);
+  const MemoryPlan p = plan(d, longest, any_mtp, 0, PrefillPath{}, kv);
   const PersistentSizes ps = PersistentDims::sizes(longest, d, kv);
   m.scratch = p.decode_state - ps.gdn_state - ps.conv_ring + p.prefill_scratch + p.int8;
   if (any_mtp) {
-    const MtpSizes ms = MtpDims::sizes(longest, d, 0, kv);
+    const MtpSizes ms = MtpDims::sizes(longest, d, kv);
     m.scratch -= ms.gdn_spec + ms.kv_k + ms.kv_v;
   }
   return m;

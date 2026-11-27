@@ -1,12 +1,14 @@
 #include "runtime/inkling2/inkling2_engine.h"
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstddef>
 #include <cstring>
 #include <functional>
+#include <print>
 #include <stdexcept>
 
 #include "kernels/dflash_kernels.h"
@@ -31,7 +33,6 @@ const std::string glue(k::kGlue), prep(std::string(k::kPrep) + "_FUSED"), root(m
 const std::string controller_glue(k::kControllerGlue), split_glue(k::kSplitGlue);
 const std::string draft_glue(k::kDraftRecurrent), draft_prep(k::kDraftPrep);
 namespace kd = kernels::dflash;
-const std::string df2_prep = kd::prep_variant(kd::kInkling), df2_wide = kd::proj_wide_variant(kd::kInkling);
 
 void* at(const l0::Mem& mem, size_t offset = 0) { return static_cast<std::byte*>(mem.ptr()) + offset; }
 
@@ -132,7 +133,15 @@ const void* Engine::weight(const std::string& name) const {
 void Engine::linear(l0::CmdList& list, const std::string& name, uint32_t rows, const void* input, void* output) {
   const auto& w = weights_.weights.at(name);
   const auto& mem = buffers_.weights.arena(w.arena);
-  if (!w.scales) {
+  if (w.arena == loader::Inkling2WeightLayout::kDraft && weights_.draft_format == loader::DraftFormat::Int4G64) {
+    // gemm_sm where kSmallMTuning has the shape (gemv's arguments, grid and output slices), else gemv (one row)
+    const uint32_t slices = kd::int4_slices(w.K, w.N);
+    const auto* packed = at(mem, w.offset);
+    const auto kind = kernels::gemv_kind(rows);
+    const bool sm = kind == kernels::LinearKind::SmallM && kernels::small_m_tuning(w.K, w.N, slices, 1);
+    launch(list, kd::linear_variant(2, rows, w.K, w.N, kind), sm ? "gemm_sm" : "gemv", 64, w.N / 64, slices, packed,
+           packed, input, output);
+  } else if (!w.scales) {
     const auto t = k::bf16_tiling(w.N);
     launch(list, k::bf16_linear(rows, w.K, w.N), "gemv_bf16", t.cols * t.ksplit, w.N / t.cols, 1, at(mem, w.offset),
            input, output);
@@ -180,7 +189,9 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
                             const void* k = nullptr, const void* v = nullptr) {
     stage("mix");
     split("ink_split_sums", queries, bank(0), last, query, parts, finished + 1, m, 0u);
-    split("ink_split_mix", queries, bank(0), last, parts, mixed, norm_parts, finished + 1, m);
+    launch_3d(list, split_glue, "ink_split_mix", 128, D::hidden / 128, m, queries, bank(0), last, parts, mixed,
+              finished + 1, m);
+    split("ink_split_squares", queries, mixed, norm_parts, m);
     split("ink_split_norm", queries, mixed, norm_parts, activ(0), m, desc_.eps, q, k, v);
   };
   const auto control = [&](const void* last, const void* query, const void* messages,
@@ -201,14 +212,17 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
     // The attention residual is already in `last` (o_proj's epilogue or ink_post_conv).
     contract_assert(raw == nullptr);
     split("ink_split_sums", streams, bank(0), last, query, parts, finished + 1, m, uint32_t(shared_mix));
-    split("ink_split_mix_cat", streams, bank(0), last, parts, messages, mixed, norm_parts, finished + 1, m);
+    launch_3d(list, split_glue, "ink_split_mix_cat", 128, D::hidden / 128, m, streams, bank(0), last, parts, mixed,
+              finished + 1, m);
+    split("ink_split_cat_squares", streams, mixed, messages, norm_parts, m);
     split("ink_split_cat", streams, mixed, messages, norm_parts, cat, m, desc_.eps);
     launch_3d(list, k::controller(m, true), "gemv_bf16", k::kControllerDown.cols * k::kControllerDown.ksplit,
               D::controller_rank / k::kControllerDown.cols, streams, 1,
               down[0], down[1], down[2], nullptr, nullptr, nullptr, cat, low);
     launch_3d(list, k::controller(m, false), "gemv_bf16", 64, D::hidden / 64, streams, 2,
               forget[0], forget[1], forget[2], gain[0], gain[1], gain[2], low, fg);
-    split("ink_split_blend", streams, mixed, messages, fg, norm_parts, m, streams);
+    launch_3d(list, split_glue, "ink_split_blend", 128, D::hidden / 128, m, streams, mixed, messages, fg, m, streams);
+    split("ink_split_squares", streams, mixed, norm_parts, m);
     split("ink_split_norm", streams, mixed, norm_parts, activ(0), m, desc_.eps, norms[0], norms[1], norms[2]);
   };
   for (const auto& v : desc_.visits) {
@@ -397,7 +411,9 @@ void Engine::record_target(l0::CmdList& list, uint32_t m, bool candidates, bool 
       stage("mix");
       contract_assert(raw == nullptr);
       split("ink_split_sums", 1, bank(0), next, mlp_query, parts, finished + 1, m, 0u);
-      split("ink_split_mix", 1, bank(0), next, parts, mixed, norm_parts, finished + 1, m);
+      launch_3d(list, split_glue, "ink_split_mix", 128, D::hidden / 128, m, 1, bank(0), next, parts, mixed,
+                finished + 1, m);
+      split("ink_split_squares", 1, mixed, norm_parts, m);
       split("ink_split_norm", 1, mixed, norm_parts, activ(0), m, desc_.eps, mlp_norm, nullptr, nullptr);
     }
 
@@ -561,7 +577,7 @@ void Engine::record_commit(l0::CmdList& list, uint32_t m, uint32_t accepted, boo
   if (buffers_.weights.draft) record_draft_context(list, on_device ? m : accepted, on_device);
 }
 
-std::span<const uint32_t> Engine::verify(std::span<const uint32_t> ids) {
+std::span<const uint32_t> Engine::verify(std::span<const uint32_t> ids, bool candidates) {
   if (pending_) throw std::logic_error("Commit pending Inkling rows before verifying again");
   if (ids.empty() || ids.size() > kRows || ids.size() > max_len_ - committed_)
     throw std::invalid_argument("Inkling input rows exceed the context or verify width");
@@ -569,15 +585,15 @@ std::span<const uint32_t> Engine::verify(std::span<const uint32_t> ids) {
     if (id >= D::vocab) throw std::invalid_argument("An Inkling input token is outside its embedding table");
   const auto m = uint32_t(ids.size());
   const bool deep = deep_verify(m, committed_);
-  auto& list = (deep ? deep_target_ : target_)[m - 1];
+  auto& list = target_[candidates][deep][m - 1];
   if (!list) {
     list = std::make_unique<l0::CmdList>(l0::CmdList::regular(ctx_));
     const auto first = kernels_.size();
-    record_target(*list, m, false, deep);
+    record_target(*list, m, candidates, deep);
     // A single row has exactly one legal commit. Keep its state update on
     // the target list and publish the cursor only when the caller commits.
     if (m == 1) record_commit(*list, m, 1);
-    target_launches_[m - 1] = kernels_.size() - first;
+    if (!candidates) target_launches_[m - 1] = kernels_.size() - first;
     list->close();
   }
   std::copy(ids.begin(), ids.end(), ctrl_->cur_token);
@@ -599,6 +615,29 @@ void Engine::profile_target(std::span<const uint32_t> ids) {
   ctrl_->n_active = m;
   profile_list("decode profile: " + std::to_string(m) + "-row target at " + std::to_string(committed_),
                [&](l0::CmdList& list) { record_target(list, m, true); });
+  // The expert weights the step read: each visit's union of its rows' choices, each expert once (the union kernels).
+  std::vector<uint32_t> words(size_t(D::visit_count) * m * 32);
+  {
+    auto list = l0::CmdList::immediate(ctx_);
+    list.copy(words.data(), buffers_.scratch.routes->ptr(), words.size() * sizeof(uint32_t));
+  }
+  std::array<uint64_t, 2> visits{}, experts{}, bytes{};
+  for (uint32_t v = 0; v < D::visit_count; ++v) {
+    std::bitset<D::experts> chosen;
+    for (uint32_t r = 0; r < m; ++r)
+      for (uint32_t j = 0; j < D::top_k; ++j) chosen.set(words[(size_t(v) * m + r) * 32 + j]);
+    const auto format = desc_.expert_format[desc_.visits[v].layer];
+    const uint32_t i = format == common::ExpertFpFormat::Nvfp4 ? 0 : 1;
+    const uint64_t tiles = 2 * D::inter / 16 * (D::hidden / 64) + D::hidden / 16 * (D::inter / 64);
+    ++visits[i];
+    experts[i] += chosen.count();
+    // NVFP4: each matrix's fp32 outer scale after its tiles
+    bytes[i] += chosen.count() * (tiles * common::expert_fp_tile_words(format) * sizeof(uint32_t) + (1 - i) * 2 * f32);
+  }
+  for (uint32_t i = 0; i < 2; ++i)
+    if (visits[i])
+      std::print(stderr, "Inkling {}-row experts {}: {} visits, {:.2f} experts a visit, {:.1f} MB of weights read\n", m,
+                 i ? "fp8" : "fp4", visits[i], double(experts[i]) / visits[i], bytes[i] / 1e6);
 }
 
 void Engine::profile_draft(uint32_t anchor) {
@@ -840,12 +879,13 @@ namespace {
 struct Df2Scratch {
   void *resid, *h, *x, *xa, *co, *gout, *q, *kb, *vb, *hid, *cand, *unary, *tpart;
 };
-Df2Scratch df2_scratch(const DraftBuffers& d, const model::DFlashDesc& f) {
+Df2Scratch df2_scratch(const DraftBuffers& d, const model::DFlashDesc& f, bool int4) {
   constexpr size_t m = kRows;
   const size_t H = f.hidden, wide = std::max({H, size_t(f.q_n()), size_t(f.inter)});
   const size_t HR = m * H * f32, XR = m * H * bf16, AR = m * wide * bf16;
-  const size_t GR = m * std::max(size_t(f.qkv_n()), size_t(f.gate_up_n())) * f32, QR = m * f.q_n() * f32;
-  const size_t KR = m * f.kv_n() * f32, RR = m * f.sel_rank * f32, CR = (m - 1) * kd::kTopK * f32;
+  const size_t QR = m * f.q_n() * f32, KR = m * f.kv_n() * f32;
+  const size_t GR = d.block_projections->size() - QR - 2 * KR, CR = (m - 1) * kd::kTopK * f32;
+  const size_t RR = m * f.sel_rank * f32 * (int4 ? kd::int4_slices(f.hidden, f.sel_rank) : 1);
   return {at(*d.block_hidden), at(*d.block_hidden, HR), at(*d.block_hidden, 2 * HR), at(*d.block_hidden, 2 * HR + XR),
           at(*d.block_hidden, 2 * HR + XR + AR), at(*d.block_projections), at(*d.block_projections, GR),
           at(*d.block_projections, GR + QR), at(*d.block_projections, GR + QR + KR), at(*d.markov),
@@ -858,7 +898,9 @@ void Engine::record_dflash_draft(l0::CmdList& list) {
   const auto& f = desc_.draft;
   constexpr uint32_t m = kRows;
   const uint32_t H = f.hidden, groups = (H + 255) / 256;
-  const auto s = df2_scratch(d, f);
+  const bool int4 = weights_.draft_format == loader::DraftFormat::Int4G64;
+  const auto df2_prep = kd::prep_variant(kd::kInkling, int4);
+  const auto s = df2_scratch(d, f, int4);
   auto* dctl = d.draft_control->ptr();
   const size_t ring = size_t(kDraftRing) * f.kv_n() * bf16;
   const float scale = 1.f / std::sqrt(float(f.head_dim));
@@ -877,7 +919,7 @@ void Engine::record_dflash_draft(l0::CmdList& list) {
     linear(list, a + "qkv_proj.weight", m, s.xa, s.gout);
     launch(list, df2_prep, "df_qkv_prep", f.head_dim, f.q_heads + 2 * f.kv_heads, m, ctrl_, s.gout,
            weight(a + "qk_norm"), d.rope->ptr(), s.q, s.kb, s.vb);
-    launch(list, kd::attn_dpas_variant(kd::kInkling, 4), "df_attn_part", 16 * (f.q_heads / f.kv_heads) * 4, f.kv_heads,
+    launch(list, kd::attn_dpas_variant(kd::kInkling, 2), "df_attn_part", 16 * (f.q_heads / f.kv_heads) * 2, f.kv_heads,
            kDraftRing / kd::kAttnPb, ctrl_, dctl, s.q, at(*d.draft_ring_k, l * ring), at(*d.draft_ring_v, l * ring),
            scale, d.draft_parts->ptr());
     launch(list, kd::attn_variant(kd::kInkling, 1, 4), "df_attn_reduce", f.head_dim, f.q_heads, m, ctrl_, dctl,
@@ -906,7 +948,7 @@ void Engine::record_dflash_draft(l0::CmdList& list) {
     const std::string topk = kd::inkling_tp_topk_variant(tp_.rank), recurrent = k::tp_draft_recurrent(tp_.rank);
     launch(list, topk, "df_topk_stage1", 256, (k::kTpHeadHalf + kd::kTopkChunk - 1) / kd::kTopkChunk, m - 1,
            d.draft_logits->ptr(), s.tpart);
-    launch(list, topk, "df_topk_stage2", 256, m - 1, 1, s.tpart, s.cand, 1.f, 0.f, s.cand, s.unary);
+    launch(list, topk, "df_topk_stage2", 256, m - 1, 1, s.tpart, 1.f, 0.f, s.cand, s.unary);
     auto* part = buffers_.tp.tp_part->ptr();
     launch(list, recurrent, "ink_df_topk_tp", 256, D::hidden / 256, 1, s.cand, s.unary, part);
     record_all_reduce(list, 1, part, s.tpart);
@@ -924,13 +966,14 @@ void Engine::record_dflash_draft(l0::CmdList& list) {
            buffers_.weights.candidate_head->ptr(), rows, d.draft_logits->ptr());
     launch(list, std::string(k::kHeadCandidates), "df_candidate_select1", 256, uint32_t(kCandidateChunks), m - 1,
            d.draft_logits->ptr(), part);
-    launch(list, std::string(k::kHeadCandidates), "df_candidate_stage2", 256, m - 1, 1, part, ids);
+    // the chunks' lists merged by the radix select (df_rerank does not read their order)
+    launch(list, std::string(k::kHeadCandidates), "df_candidate_select2", 256, m - 1, 1, part, ids);
     launch(list, kd::inkling_rerank_variant(), "df_rerank", kCandidates * 4, m - 1, 1, at(head_arena, head.offset),
            at(head_arena, head.scales), rows, ids, f.out_mult, 0.f, s.cand, s.unary);
   }
   profile_stage_ = "draft selector";
   linear(list, "candidate_selector.hidden_projection.weight", m, s.x, s.hid);
-  launch(list, kd::inkling_select_variant(), "df_select", 256, 1, 1, ctrl_, dctl, s.cand, s.unary, s.hid,
+  launch(list, kd::inkling_select_variant(int4), "df_select", 256, 1, 1, ctrl_, dctl, s.cand, s.unary, s.hid,
          weight("candidate_selector.predecessor_codebook"), weight("candidate_selector.successor_codebook"),
          static_cast<std::byte*>(dctl) + sizeof(dflash::DFlashCtl));
   profile_stage_.clear();
@@ -939,13 +982,17 @@ void Engine::record_dflash_draft(l0::CmdList& list) {
 void Engine::record_dflash_context(l0::CmdList& list, uint32_t rows) {
   const auto& d = buffers_.draft;
   const auto& f = desc_.draft;
-  const size_t H = f.hidden;
+  const bool int4 = weights_.draft_format == loader::DraftFormat::Int4G64;
+  const auto df2_prep = kd::prep_variant(kd::kInkling, int4);
+  const size_t H = f.hidden, fc_slices = int4 ? kd::int4_slices(f.fc_k(D::hidden), f.hidden) : 1;
   auto* fc = at(*d.context_mix);
-  auto* fcx = at(*d.context_mix, size_t(kRows) * H * f32);
-  auto* kv = at(*d.context_mix, size_t(kRows) * H * (f32 + bf16));
+  auto* fcx = at(*d.context_mix, size_t(kRows) * H * f32 * fc_slices);
+  auto* kv = at(*d.context_mix, size_t(kRows) * H * (f32 * fc_slices + bf16));
   const size_t ring = size_t(kDraftRing) * f.kv_n() * bf16;
   linear(list, "fc.weight", rows, buffers_.scratch.draft_taps->ptr(), fc);
-  launch(list, df2_prep, "df_norm", 256, 1, rows, fc, weight("hidden_norm.weight"), fc, fcx);
+  // The folded norm writes fp32 scratch as well as fc's bf16 rows. Reuse the KV region before its projection.
+  launch(list, df2_prep, int4 ? "df_norm_fc" : "df_norm", 256, 1, rows, fc, weight("hidden_norm.weight"),
+         int4 ? kv : fc, fcx);
   for (uint32_t l = 0; l < f.layers; ++l) {
     const auto a = "layers." + std::to_string(l) + ".self_attn.";
     linear(list, a + "kv_proj.weight", rows, fcx, kv);
@@ -954,7 +1001,7 @@ void Engine::record_dflash_context(l0::CmdList& list, uint32_t rows) {
   }
 }
 
-std::span<const uint32_t> Engine::propose(uint32_t anchor, uint32_t count) {
+std::span<const uint32_t> Engine::propose(uint32_t anchor, uint32_t count, float temperature, uint64_t seed) {
   if (!buffers_.weights.draft || pending_ || !committed_ || anchor >= D::vocab ||
       count >= kRows || count + 1 > max_len_ - committed_)
     throw std::invalid_argument("Inkling draft is outside the committed context or the draft width");
@@ -965,7 +1012,11 @@ std::span<const uint32_t> Engine::propose(uint32_t anchor, uint32_t count) {
   }
   ctrl_->cur_token[0] = anchor;
   ctrl_->pos = committed_;
-  static_cast<dflash::DFlashCtl*>(buffers_.draft.draft_control->ptr())->k = kRows - 1;
+  auto* dctl = static_cast<dflash::DFlashCtl*>(buffers_.draft.draft_control->ptr());
+  dctl->k = kRows - 1;
+  dctl->temperature = temperature;
+  dctl->seed_lo = uint32_t(seed);
+  dctl->seed_hi = uint32_t(seed >> 32);
   queue_.execute(*draft_list_);
   queue_.synchronize();
   return {ctrl_->cur_token + 1, count};

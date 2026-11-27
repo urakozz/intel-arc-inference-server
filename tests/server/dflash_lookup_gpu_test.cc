@@ -212,7 +212,7 @@ int main(int argc, char** argv) {
   const uint32_t head_rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
   runtime::dflash::DFlashDrafter d(ctx, std::move(w), head_rows, kMaxLen, kK);
   runtime::Engine e(ctx, std::move(model), kMaxLen, /*debug_resid=*/false, runtime::KvCache::Bf16, &d);
-  d.attach(e, false);
+  d.attach(e);
   EngineAdapter lk(e, model::Qwen35::kVocabUsed, kK, /*lookup=*/false, /*dflash=*/true, /*dflash_lookup=*/true);
   EngineAdapter df(e, model::Qwen35::kVocabUsed, kK, false, true);
   const uint32_t window = lk.dflash_window();

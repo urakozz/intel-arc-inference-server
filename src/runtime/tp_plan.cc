@@ -84,7 +84,7 @@ size_t tp_prefill_mtp_bytes(const model::ModelDesc& card, uint32_t chunk_cap) {
 
 MemoryPlan tp_card_plan(const model::ModelDesc& card, model::TpCrossing c, uint32_t max_len, size_t model_bytes,
                         KvCache kv, const PrefillPath& path, bool mtp, const DrafterPlan& drafter) {
-  MemoryPlan p = plan(card, max_len, /*mtp=*/false, model_bytes, path, {}, kv, drafter);
+  MemoryPlan p = plan(card, max_len, /*mtp=*/false, model_bytes, path, kv, drafter);
   p.decode_state += tp_crossing_bytes(card, c);
   if (path.prefill) p.prefill_scratch += tp_prefill_extra_bytes(card, path.chunk_cap);
   // Spec 39: a drafter's tap staging is the prompt's last window here (TpPfCard::df_taps), not plan()'s chunk.
@@ -120,7 +120,7 @@ uint32_t tp_max_len_that_fits(const model::ModelDesc& card, model::TpCrossing c,
     for (uint32_t r = 0; r < model::kTpSize; ++r) {
       if (device_bytes[r] < fixed) return 0;
       best = std::min(best, max_len_that_fits(card, false, model_bytes[r], device_bytes[r] - fixed, reserve_bytes,
-                                              cap, path, {}, kv, drafter));
+                                              cap, path, kv, drafter));
     }
     return best;
   }

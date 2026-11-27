@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <optional>
@@ -13,6 +14,7 @@
 #include "l0/module.h"
 #include "l0/queue.h"
 #include "runtime/control.h"
+#include "runtime/dflash/dflash_control.h"
 #include "runtime/inkling2/inkling2_buffers.h"
 #include "runtime/inkling2/inkling2_prefill.h"
 
@@ -37,15 +39,23 @@ class Engine {
   void read_prefill_logits(std::span<float> out)
       pre(prefill_logits_ && out.size() == model::Inkling2Desc::vocab_used);
   // Until commit, the caller owns the previous position and must not replay
-  // another target list. Each prediction follows the corresponding input.
-  std::span<const uint32_t> verify(std::span<const uint32_t> tokens);
+  // another target list. Each prediction follows the corresponding input. `candidates`: the greedy head, the plain
+  // step's (record_candidate_head) - the ids only, read_logits then has no full head rows.
+  std::span<const uint32_t> verify(std::span<const uint32_t> tokens, bool candidates = false);
   void commit(uint32_t rows);
   void read_logits(uint32_t row, std::span<float> out);
   // The drafter's tap slots (bf16 [rows][4][hidden], DSpark's taps) of rows [first, first + rows): the last verify's,
   // or with `prompt` the last prompt chunk's (b70-decode --dump-taps reads them from a block hook).
   void read_taps(bool prompt, uint32_t first, uint32_t rows, void* host)
       pre(buffers_.weights.draft != nullptr);
-  std::span<const uint32_t> propose(uint32_t anchor, uint32_t count);
+  // The DFlash 2 drafter's walk draws at `temperature` (0: the argmax walk) keyed by `seed` (df_select.cl's Gumbel
+  // keying); DSpark's head is greedy and ignores both.
+  std::span<const uint32_t> propose(uint32_t anchor, uint32_t count, float temperature = 0.f, uint64_t seed = 0);
+  // The last DFlash 2 draft pass's readback: its drafts, each row's 16 candidates and the walk's realized scores.
+  const dflash::DFlashDraftOut& draft_out() const pre(dflash()) {
+    return *reinterpret_cast<const dflash::DFlashDraftOut*>(static_cast<const std::byte*>(
+        buffers_.draft.draft_control->ptr()) + sizeof(dflash::DFlashCtl));
+  }
   // The anchor and up to max_drafts drafts verified and their accepted prefix committed in one submission (a plain
   // step when no draft fits); appends the committed ids to output and returns the next anchor.
   uint32_t step_drafted(uint32_t anchor, uint32_t max_drafts, std::vector<uint32_t>& output);
@@ -73,6 +83,7 @@ class Engine {
   bool drafter() const { return buffers_.weights.draft != nullptr; }
   // The drafter is the DFlash 2 one (plan 41k, loader::Inkling2Checkpoint's `dflash` folder), not the DSpark head.
   bool dflash() const { return desc_.draft.form == model::DFlashForm::Vllm; }
+  uint64_t packed_draft_key() const { return weights_.packed_draft_key; }
   bool kv8() const { return kv8_; }
   uint32_t prefill_rows() const { return prefill_rows_; }
   // The id the last prefill's head chose (its argmax over the live vocabulary), what prefill() returned.
@@ -155,8 +166,8 @@ class Engine {
   }
   using Modules = std::map<std::string, std::unique_ptr<l0::Module>>;
   Modules::iterator add_module(const std::string& name);
-  // candidates: the greedy head (record_candidate_head) - the plain and drafted steps; verify() keeps the full head,
-  // whose logits read_logits returns.
+  // candidates: the greedy head (record_candidate_head) - the plain and drafted steps and a greedy verify; the full
+  // head's logits are what read_logits returns.
   // deep: a verify for depth (deep_verify), its full visits' attention on the split prompt flash.
   void record_target(l0::CmdList& list, uint32_t rows, bool candidates = false, bool deep = false);
   // `--parallel tp`: the all-reduce of `rows` fp32 hidden rows - this card's `part` into the other card's landing
@@ -248,7 +259,7 @@ class Engine {
   l0::Queue queue_;
   Modules modules_;
   std::vector<l0::Kernel> kernels_;
-  std::array<std::unique_ptr<l0::CmdList>, kRows> target_, deep_target_;
+  std::array<std::array<std::array<std::unique_ptr<l0::CmdList>, kRows>, 2>, 2> target_;   // [candidates][deep]
   std::unique_ptr<l0::CmdList> draft_list_;
   std::array<std::array<std::unique_ptr<l0::CmdList>, kRows>, kRows> commits_;
   std::array<std::unique_ptr<l0::CmdList>, kRows - 1> rounds_, deep_rounds_;   // step_drafted's list a draft count

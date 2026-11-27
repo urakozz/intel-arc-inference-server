@@ -295,6 +295,77 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
 #error "kol_moe: DN_KS must be a power of two dividing INTER / 64"
 #endif
 
+#ifndef EXPERT_DPAS
+#define EXPERT_DPAS 0
+#endif
+#if EXPERT_DPAS
+#if !WFMT
+#error "kol_moe: EXPERT_DPAS is the floating-point experts' form"
+#endif
+// EXPERT_DPAS 1 (floating-point experts): every dot on the bf16 DPAS, 8 rows a sub-group (rows past n zero) - the
+// one-row kernels' single row and a union plan item's n rows alike, so a verify row stays bitwise the plain step's.
+// Each k16 step's codes once as the B operand (E2M1 or E4M3 values, exact in bf16), the rows' activations the A
+// operand, then the step's block scale on its sums. A row's sums do not depend on the other rows of the operand.
+// NVFP4: a code byte's two E2M1 values as bf16 bits, lo | hi << 16 (pf_moe_q4gemm's table); MXFP8 converts in place.
+#if WFMT == 2
+#define EXPERT_TABLE(e2m1_pair) __local const uint* e2m1_pair = 0;
+#else
+#define EXPERT_TABLE(e2m1_pair)                                                                     \
+  __local uint e2m1_pair[256];                                                                     \
+  for (uint i = get_local_id(0); i < 256; i += get_local_size(0)) {                                \
+    const float lo = fp_weight(i, 0, 1.f), hi = fp_weight(i, 1, 1.f);                              \
+    e2m1_pair[i] = (as_uint(lo) >> 16) | (as_uint(hi) & 0xFFFF0000u);                              \
+  }                                                                                                \
+  barrier(CLK_LOCAL_MEM_FENCE);
+#endif
+// k16 step d of a tile as the B operand, unscaled: lane = column, pair i = k 2i | 2i + 1 << 16 (exact bf16 codes).
+inline int8 expert_b(const __global uint* tile, uint lane, uint d, __local const uint* e2m1_pair) {
+  uint p[8];
+#if WFMT == 1
+#pragma unroll
+  for (uint i = 0; i < 8; ++i)
+    p[i] = e2m1_pair[(FP_TILE_WORD(tile, lane, 16 * d + 8 * (i / 4)) >> (8 * (i % 4))) & 255u];
+#else
+#pragma unroll
+  for (uint i = 0; i < 8; ++i) {
+    const uint t = FP_TILE_WORD(tile, lane, 16 * d + 4 * (i / 2)) >> (16 * (i % 2));
+    const uint two = (t & 0xFFu) | ((t & 0xFF00u) << 8);   // E4M3 codes k 2i, 2i + 1 at bits 0 and 16
+    const float2 v = convert_float2(as_half2(((two & 0x00800080u) << 8) | ((two & 0x007F007Fu) << 7)));
+    p[i] = (as_uint(v.x) >> 16) | (as_uint(v.y) & 0xFFFF0000u);
+  }
+#endif
+  return as_int8(vload8(0, p));
+}
+// Columns [64 g0, 64 g1) of the tile row: acc[j] = row j's sums, j < n. Each k16 step's codes on the DPAS, then its
+// block scale (the lane's column) times the step's sums.
+inline void expert_dpas(const __global uint* tile, const __global ushort* x, const uint* xo, uint n, uint g0, uint g1,
+                       uint lane, __local const uint* e2m1_pair, float* acc) {
+  float8 c = (float8)(0.f);
+  for (uint g = g0; g < g1; ++g, tile += TILE_U32) {
+    ushort xa[8][4];
+#pragma unroll
+    for (uint r = 0; r < 8; ++r) {
+      ushort4 v = (ushort4)(0);
+      if (r < M && r < n) v = intel_sub_group_block_read_us4(x + xo[r] + g * 64);
+      xa[r][0] = v.s0; xa[r][1] = v.s1; xa[r][2] = v.s2; xa[r][3] = v.s3;
+    }
+#pragma unroll
+    for (uint d = 0; d < 4; ++d) {
+      short8 a;
+      a.s0 = xa[0][d]; a.s1 = xa[1][d]; a.s2 = xa[2][d]; a.s3 = xa[3][d];
+      a.s4 = xa[4][d]; a.s5 = xa[5][d]; a.s6 = xa[6][d]; a.s7 = xa[7][d];
+#if WFMT == 1
+      const float scale = fp_tile_scale(tile, lane, 16 * d);
+#else
+      const float scale = fp_tile_scale(tile, lane, 16 * d) * 0x1p8f;
+#endif
+      c += scale * intel_sub_group_bf16_bf16_matrix_mad_k16(a, expert_b(tile, lane, d, e2m1_pair), (float8)(0.f));
+    }
+  }
+  vstore8(c, 0, acc);
+}
+#endif
+
 // gate||up: work-group (slot, blk) owns n-tiles 4 blk .. 4 blk + 3 of its slot (intermediate columns
 // [32 blk, 32 blk + 32)); sub-group (tile_idx, q): one 16-column tile, K slice q:
 //   h[m][slot][i] = rne(f32(rne(silu(f32(rne(Σ gate))))) · f32(rne(Σ up)))
@@ -321,7 +392,15 @@ __kernel void kol_moe_gate_up(__global const uint* restrict route, __global cons
     blk_w = w + (size_t)e * UP_BLK_U32;
   }
   const uint g0 = q * (G_UP / UP_KS);
+#if EXPERT_DPAS
+  EXPERT_TABLE(e2m1_pair)
+  const uint xo[1] = {0};
+  float dots[8];
+  expert_dpas(blk_w + ((size_t)n_tile * G_UP + g0) * TILE_U32, xr, xo, 1, g0, g0 + G_UP / UP_KS, lane, e2m1_pair, dots);
+  const float acc = dots[0];
+#else
   const float acc = tile_dot(blk_w + ((size_t)n_tile * G_UP + g0) * TILE_U32, xr, g0, g0 + G_UP / UP_KS, lane);
+#endif
   red[sg][lane] = acc;
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = UP_KS / 2; stride > 0; stride >>= 1) {
@@ -387,7 +466,15 @@ __kernel void kol_moe_down(__global const uint* restrict route, __global const u
     blk_w = w + (size_t)e * DN_BLK_U32;
   }
   const uint g0 = q * (G_DN / DN_KS);
+#if EXPERT_DPAS
+  EXPERT_TABLE(e2m1_pair)
+  const uint xo[1] = {0};
+  float dots[8];
+  expert_dpas(blk_w + ((size_t)n_tile * G_DN + g0) * TILE_U32, hr, xo, 1, g0, g0 + G_DN / DN_KS, lane, e2m1_pair, dots);
+  const float acc = dots[0];
+#else
   const float acc = tile_dot(blk_w + ((size_t)n_tile * G_DN + g0) * TILE_U32, hr, g0, g0 + G_DN / DN_KS, lane);
+#endif
   red[sg][lane] = acc;
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = DN_KS / 2; stride > 0; stride >>= 1) {
@@ -507,8 +594,14 @@ __kernel void kol_moe_union_gate_up(__global const uint2* plan, __global const u
   const uint blk = get_group_id(0), tile_idx = sg / UP_KS, q = sg % UP_KS;
   const uint n_tile = blk * 4 + tile_idx, g0 = q * (G_UP / UP_KS);
   const __global uint* expert = w + (size_t)item.x * UP_BLK_U32;
+#if EXPERT_DPAS
+  EXPERT_TABLE(e2m1_pair)
+  float acc[8];
+  expert_dpas(expert + ((size_t)n_tile * G_UP + g0) * TILE_U32, x, xo, n, g0, g0 + G_UP / UP_KS, lane, e2m1_pair, acc);
+#else
   float acc[M];
   tile_dot_n(expert + ((size_t)n_tile * G_UP + g0) * TILE_U32, x, xo, n, g0, g0 + G_UP / UP_KS, lane, acc);
+#endif
   __local float red[M][4 * UP_KS][SG];
 #pragma unroll
   for (uint j = 0; j < M; ++j)
@@ -553,8 +646,14 @@ __kernel void kol_moe_union_down(__global const uint2* plan, __global const usho
   for (uint j = 0; j < M; ++j) xo[j] = rows[j] * INTER;
   const uint n_tile = get_group_id(0) * 4 + get_sub_group_id(), lane = get_sub_group_local_id();
   const __global uint* expert = w + (size_t)item.x * DN_BLK_U32;
+#if EXPERT_DPAS
+  EXPERT_TABLE(e2m1_pair)
+  float acc[8];
+  expert_dpas(expert + (size_t)n_tile * G_DN * TILE_U32, h, xo, n, 0, G_DN, lane, e2m1_pair, acc);
+#else
   float acc[M];
   tile_dot_n(expert + (size_t)n_tile * G_DN * TILE_U32, h, xo, n, 0, G_DN, lane, acc);
+#endif
 #if WFMT == 1
   const float outer = as_float(expert[DN_BLK_U32 - 1]);
 #endif

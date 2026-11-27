@@ -97,11 +97,11 @@ int main() {
     CHECK_EQ(loader::int8_tiled_index(K, N, 0, 16), size_t(K) * 16);
   }
 
-  // 2b. PERF-111: at a head width (the smallest, 32768; K 128, one K block) the quantised tiles are today's n-major tiles
+  // 2b. PERF-111: at a head width (the TP half, 124160; K 128, one K block) the quantised tiles are today's n-major tiles
   //     reordered k-major in blocks of kInt8HeadKBlock steps by common::tiles_k_major, byte for byte, the scales
   //     unchanged; the index is a bijection; 7 threads write the same bytes.
   {
-    const uint32_t HN = 32768, HK = 128;
+    const uint32_t HN = 124160, HK = 128;
     CHECK_EQ(loader::int8_k_major(HN), loader::kInt8HeadKMajor);
     const std::vector<uint16_t> hw = random_rows(HN, HK, 77);
     std::vector<int8_t> nm(size_t(HN) * HK), want(nm.size()), got(nm.size()), got7(nm.size());

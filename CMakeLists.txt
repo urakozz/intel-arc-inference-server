@@ -9,7 +9,7 @@ if(NOT CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
   endif()
   set(CMAKE_CXX_COMPILER ${B70_GXX})
 endif()
-project(b70_inference_server VERSION 1.0.1 LANGUAGES CXX)
+project(b70_inference_server VERSION 1.2.0 LANGUAGES CXX)
 if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16)
   message(FATAL_ERROR "${CMAKE_CXX_COMPILER} is ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}: this build "
                       "needs GCC 16 (C++26 with -freflection), e.g. ${B70_GXX}")
@@ -19,7 +19,10 @@ execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so OUTP
                 OUTPUT_STRIP_TRAILING_WHITESPACE)
 file(REAL_PATH ${B70_LIBSTDCXX} B70_LIBSTDCXX)
 get_filename_component(B70_LIBSTDCXX_DIR ${B70_LIBSTDCXX} DIRECTORY)
-add_link_options(-Wl,-rpath,${B70_LIBSTDCXX_DIR})
+# The release tarball ships those libraries in lib/ beside bin/ as well; the $ORIGIN rpath is first, so the
+# tarball's own lib/ wins there, and the compiler's own directory (the Docker image's /usr/local/lib64) still
+# covers the image and build trees, where no lib/ sits beside the binaries.
+add_link_options(-Wl,-rpath,$ORIGIN/../lib -Wl,-rpath,${B70_LIBSTDCXX_DIR})
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,13 +53,15 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZE REQUIRED IMPORTED_TARGET level-zero)
 include(cmake/ocloc.cmake)
 
-# kernels::kernel_dir() (src/kernels/kernels.h) names the compiled device binaries' directory, so tests and probes
-# can find .bin files. The absolute path lives in this one generated file rather than in a -D on every target: a -D
+# kernels::compiled_kernel_dir() (src/kernels/kernels.h) names the compiled device binaries' directory as compiled
+# in; src/kernels/kernel_dir.cc resolves what the binaries actually read (the compiled-in path, else the one beside
+# the executable in an extracted release tarball). Tests and probes find .bin files through the same pair. The absolute path lives in this one generated file rather than in a -D on every target: a -D
 # differs between two trees and would keep ccache from sharing any object that includes kernels.h.
 file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/kernel_dir.cc"
-     CONTENT "namespace kernels {\nconst char* kernel_dir() { return \"@B70_KERNEL_DIR@\"; }\n}  // namespace kernels\n"
+     CONTENT "namespace kernels {\nconst char* compiled_kernel_dir() { return \"@B70_KERNEL_DIR@\"; }\n}  // namespace kernels\n"
      @ONLY)
-add_library(b70_kernel_dir STATIC "${CMAKE_BINARY_DIR}/kernel_dir.cc")
+add_library(b70_kernel_dir STATIC "${CMAKE_BINARY_DIR}/kernel_dir.cc" src/kernels/kernel_dir.cc)
+target_include_directories(b70_kernel_dir PRIVATE ${CMAKE_SOURCE_DIR}/src)
 function(b70_target_kernel_dir TARGET)
   target_link_libraries(${TARGET} PRIVATE b70_kernel_dir)
 endfunction()

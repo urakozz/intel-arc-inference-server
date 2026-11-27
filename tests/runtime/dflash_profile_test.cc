@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
   const auto rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
   runtime::dflash::DFlashDrafter d(ctx, std::move(weights), rows, max_len, 7);
   runtime::Engine e(ctx, std::move(model), max_len, false, runtime::KvCache::Bf16, &d);
-  d.attach(e, false);
+  d.attach(e);
   e.prefill({760, 72103, 506, 37119, 557, 11012, 3213, 310, 6512, 279, 61789, 272, 1072, 2272, 279, 197616});
   const runtime::dflash::DFlashDraftOut plain = d.draft(e, 7, 0.0f, 0);
   runtime::ProfileEvents draft_events(ctx), project_events(ctx);

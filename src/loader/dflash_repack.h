@@ -74,8 +74,9 @@ class DFlashCheckpoint {
   // drafter is one file), checks names / dtypes / shapes against the descriptor (fc's K is the checkpoint's, a
   // multiple of the tap count: the target's hidden is checked by check_target).
   explicit DFlashCheckpoint(const std::string& snapshot_or_repo);
-  // A hand-built descriptor (tests): the config's structure is not re-read; names, dtypes and shapes are.
-  DFlashCheckpoint(const model::DFlashDesc& d, const std::string& snapshot_dir);
+  // A descriptor already read by the caller. With require_packed_g64, a quantised folder must contain every
+  // linear in symmetric GPTQ g64 form (Inkling's export).
+  DFlashCheckpoint(const model::DFlashDesc& d, const std::string& snapshot_dir, bool require_packed_g64 = false);
 
   const model::DFlashDesc& desc() const { return d_; }
   const std::string& dir() const { return dir_; }
@@ -84,6 +85,8 @@ class DFlashCheckpoint {
   size_t tensors() const { return set_->tensors().size(); }
   // The checkpoint ships packed int4 linears (config.json's quantization_config): it loads as DraftFormat::Int4G64.
   bool packed() const { return packed_; }
+  // Fingerprint of the config and tensor bytes for a cache containing this drafter's projected context.
+  uint64_t content_key() const;
 
   // model::check_dflash_target, plus fc's K = taps x target.hidden.
   void check_target(const model::ModelDesc& target, uint32_t target_vocab_rows) const;
@@ -107,7 +110,7 @@ class DFlashCheckpoint {
   bool ships_mask_embedding() const { return !mask_path_.empty(); }
 
  private:
-  void open_and_check();
+  void open_and_check(bool require_packed_g64 = false);
   const uint16_t* bf16(const std::string& canonical) const;
   DFlashHostLinear make_linear(const std::vector<std::string>& parts, uint32_t K, DraftFormat f,
                                unsigned threads) const;

@@ -22,24 +22,22 @@
 //   2. DFlashDrafter d(ctx, std::move(weights), head rows, max_len)     buffers at the engine's max_len, the
 //                                                                       projection list
 //   3. runtime::Engine e(ctx, std::move(target), max_len, false, kv, &d)  verify lists with the taps; reset()
-//   4. d.attach(e, draft_vocab)                                         the draft list over e's model and Control
+//   4. d.attach(e)                                         the draft list over e's model and Control
 // then per iteration: d.draft(e, k, T, seed) -> e.verify(k) -> host acceptance -> e.commit(j, next) (which replays
 // the projection of rows 0..j). The drafter must outlive the Engine.
 namespace runtime::dflash {
 
 class DFlashDrafter final : public TapDrafter {
  public:
-  // `head_rows`: the rows of the target head the draft list reads - the full lm_head's (vocab_size) or a draft
-  // vocabulary's |V'| (LoadedModel::draft_vocab). `max_len`: the engine's (the RoPE rows). `max_k`: the deepest
+  // `head_rows`: the rows of the target head the draft list reads (vocab_size). `max_len`: the engine's (the RoPE rows). `max_k`: the deepest
   // block the engine verifies, 1 .. desc.max_k() (7 for DFlash 2's block of 8; `--spec-max`).
   // `seqs` (plan 40a Task 4): the engine's sequence slots - beside several, the scratch holds the batched pass's rows.
   DFlashDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t head_rows, uint32_t max_len, uint32_t max_k,
                 uint32_t seqs = 1);
 
-  // Captures the draft list against the engine's target model (embedding, head: the full one, or with
-  // `draft_vocab` the compact one LoadedModel::draft_vocab holds) and its Control block. `e` must have been built
-  // with this drafter. Once. Plan 19v3b: one draft list per engine slot, each over its slot's Control and session.
-  void attach(Engine& e, bool draft_vocab);
+  // Captures the draft list against the engine's target model (embedding and head) and its Control block.
+  // `e` must have been built with this drafter. Once. Plan 19v3b: one draft list per engine slot, each over its slot's Control and session.
+  void attach(Engine& e);
   bool attached() const { return draft_ != nullptr; }
 
   // One block at the engine's pos: the anchor cur_token[0], K = k drafts into cur_token[1..k] (what e.verify(k)
@@ -52,8 +50,7 @@ class DFlashDrafter final : public TapDrafter {
   bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const void* taps, uint32_t pos,
                     uint32_t n) override;
   // Spec 19d: the same beside any target (runtime::PipelineEngine's device 1) - runtime/tap_drafter.h.
-  void attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control, uint32_t max_len,
-                     bool draft_vocab) override;
+  void attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control, uint32_t max_len) override;
   const DFlashDraftOut& draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k, float temperature,
                                    uint64_t seed) override;
   void add_sessions(l0::Context& ctx, uint32_t n) override;

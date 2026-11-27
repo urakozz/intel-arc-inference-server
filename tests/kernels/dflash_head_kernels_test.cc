@@ -83,8 +83,26 @@ void check_candidates(Env& e, unsigned C) {
       for (unsigned c = 0; c < C; ++c) CHECK_EQ(got[r * C + c], want[c].i);
     }
   }
+  // plan 41k: stage 2 by radix select - the same ids as a set (in no order), ties at the C-th place included
+  l0::Kernel k2s(mod, "df_candidate_select2");
+  k2s.group_size(256);
+  k2s.arg_ptr(0, part.ptr());
+  k2s.arg_ptr(1, cand.ptr());
+  for (unsigned repeat = 0; repeat < 2; ++repeat) {
+    e.run(k1r, chunks, R);
+    e.run(k2s, R);
+    const auto got = e.read<uint32_t>(cand, size_t(R) * C);
+    for (unsigned r = 0; r < R; ++r) {
+      const auto want = dfref::topk(logits.data() + size_t(r) * N, used, C, 1, 0);
+      std::vector<uint32_t> a(got.begin() + r * C, got.begin() + (r + 1) * C), b;
+      for (unsigned c = 0; c < C; ++c) b.push_back(want[c].i);
+      std::sort(a.begin(), a.end());
+      std::sort(b.begin(), b.end());
+      CHECK(a == b);
+    }
+  }
   std::printf("candidate top%u OK: real shape, padding mask, NaN, ties and deterministic replay; the radix-select stage 1 "
-              "the same\n", C);
+              "the same, the radix-select stage 2 the same set\n", C);
 }
 
 // The rerank reads the real head's layout (N 248320 rows: k-major tiles at that width, PERF-111, loader::

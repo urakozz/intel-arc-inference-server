@@ -32,6 +32,7 @@ struct Options {
   runtime::LinearForce force_linear = runtime::LinearForce::Auto;
   bool per_row_moe = false;   // CaptureOptions::force_per_row_moe
   uint32_t pf_rows = runtime::qwen4exp::kPfC;   // the prefill scratch's chunk rows (Q4LoadedModel::pf_rows)
+  bool kv8 = false;     // plan 21-QFN-v3a: the int8 KV cache (--kv-cache int8, Qwen4ExpDesc::kv8)
 };
 
 struct Rig {
@@ -73,11 +74,11 @@ inline model::Q4Placement placement(const model::Qwen4ExpDesc& d, const Options&
 inline void build(Rig& r, const std::string& snap, const Options& o) {
   r.eng.reset();
   open(r, o.devices);
-  const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, o.layers);
+  const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, o.layers, o.kv8);
   const model::Q4Placement p = placement(d, o);
   loader::Q4LoadedModel m = loader::load_qwen4exp(r.ctx, snap, o.max_len, p,
                                                   o.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint,
-                                                  o.layers, o.mtp, nullptr, nullptr, o.pf_rows);
+                                                  o.layers, o.mtp, nullptr, nullptr, o.pf_rows, o.kv8);
   runtime::PipelineOptions po;
   po.timeout_ms = o.timeout_ms;
   po.prefill_timeout_ms = o.prefill_timeout_ms;

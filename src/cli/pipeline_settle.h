@@ -40,15 +40,11 @@ struct PpSettled {
   uint32_t split = 0, max_len = 0;
 };
 
-// What a loaded model adds to the plan (spec 16d): its MTP head and draft vocabulary, and
+// What a loaded model adds to the plan (spec 16d): its MTP head and
 // whether a prefix cache's block hook will run (b70-serve with the cache on).
 inline runtime::PpExtras pp_extras(const loader::LoadedModel& full, bool hook) {
   runtime::PpExtras x;
   x.mtp = full.mtp != nullptr;
-  if (full.draft_vocab) {
-    x.draft_vocab = full.draft_vocab->size();
-    x.draft_vocab_int8 = full.draft_vocab->head.kind == model::WeightKind::Int8;
-  }
   x.hook = hook;
   return x;
 }
@@ -100,7 +96,7 @@ inline uint32_t parallel_auto(const std::string& snapshot_dir, const MaxLenArg& 
   const size_t weights =
       runtime::pp_weights(d, model::WeightKind::Int8).total() + (mtp ? loader::mtp_head_bytes(d) : 0);
   const uint32_t len = max_len.is_auto ? runtime::kMinAutoMaxLen : max_len.value;
-  const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, pf, {}, kv);
+  const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, pf, kv);
   return p.total() + reserve <= card_bytes ? 1u : 2u;
 }
 

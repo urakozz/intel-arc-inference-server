@@ -307,7 +307,7 @@ int main(int argc, char** argv) {
   const uint32_t n_fa = model.desc->fa_layers;
   auto drafter = std::make_unique<runtime::dflash::DFlashDrafter>(ctx, std::move(dl.w), dl.head_rows, max_len, da.max_k);
   runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, runtime::KvCache::Bf16, drafter.get());
-  drafter->attach(eng, /*draft_vocab=*/false);
+  drafter->attach(eng);
   eng.prepare_prefill();
   eng.prefill(ids, 0);
   std::printf("prefill: %zu ids, pos %u, %u FA layers\n", ids.size(), eng.pos(), n_fa);

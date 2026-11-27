@@ -25,17 +25,34 @@ namespace server {
 // head's calibration, a property of the model, not of a request.
 class DraftCalib {
  public:
-  static constexpr uint32_t kPositions = 3;   // runtime::Engine::kMaxDraft
+  // runtime::Engine::kMaxDraft is 3 (StepK's MTP heads); Inkling's DFlash 2 round calibrates its 7 drafts.
+  static constexpr uint32_t kPositions = 7;
   static constexpr uint32_t kBins = 9;
   static constexpr double kDecay = 0.98;      // per tested draft of that bin
   static constexpr double kPriorN = 10;       // the stated probability is worth this many drafts
 
+  // A measured seed for the prior (plan 41k: the DFlash 2 drafter's rates, dflash2_calib_seed.h): cell i * kBins + b
+  // is (position i, bin b), the measured rate over its n tested drafts.
+  struct SeedCell {
+    float rate;
+    uint32_t n;
+  };
+  using SeedTable = std::array<SeedCell, kPositions * kBins>;
+  static constexpr uint32_t kSeedMinN = 20;   // below this many samples a cell falls back to the stated probability
+
+  DraftCalib() = default;
+  // The seed as the prior at `weight` (in place of the stated probability), `decay` per tested draft - the DFlash 2
+  // drafter for Inkling; every other caller keeps the default (the stated probability at kPriorN, kDecay).
+  explicit DraftCalib(const SeedTable& seed, double weight, double decay = kDecay);
+
   static uint32_t bin(float p);
-  double rate(uint32_t i, float p) const;     // q: (accepted + kPriorN p) / (tested + kPriorN)
+  double rate(uint32_t i, float p) const;     // q: (accepted + prior) / (tested + prior's weight)
   void observe(uint32_t i, float p, bool accepted);
 
  private:
   std::array<std::array<double, kBins>, kPositions> ok_{}, n_{};
+  const SeedTable* seed_ = nullptr;
+  double weight_ = 0, decay_ = kDecay;
 };
 
 struct StepKOptions {

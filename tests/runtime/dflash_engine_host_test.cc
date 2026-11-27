@@ -6,12 +6,10 @@
 //      unordered, repeated or out-of-range list is refused.
 //   2. TapVerifyDims (Task 1): 7 extra GDN slots of one gdn_state each (8 x 151 MB in all on Qwen3.8, slot 0 being
 //      gdn_state) and the prefill staging [kC][taps][hidden] bf16.
-//   3. The planner with a drafter (Task 2): a draft vocabulary without the MTP head is legal only with a drafter, and
-//      it counts once (the compact head + ids); the verify slots and the prefill taps follow the drafter.
+//   3. The planner counts the drafter's verify slots and prefill taps.
 //   4. The adaptive-K cost row (Task 2, spec 19 decision 4): MtpCost::dflash - verify to M = 8, a draft row flat in K
 //      - parses back from --spec-cost's syntax, and AdaptiveK over it picks K = 7 on agentic-tool-call acceptance
-//      (0.95, 19a's A4), stays shallow on prose (0.5) and plain on noise (0.1); a draft vocabulary scales the head's
-//      share of the draft row only.
+//      (0.95, 19a's A4), stays shallow on prose (0.5) and plain on noise (0.1).
 #include <cmath>
 #include <cstdio>
 #include <print>
@@ -65,7 +63,7 @@ void dims_case() {
   // One slot: 48 GDN layers x 48 v-heads x 128 x 128 fp32 = 150,994,944 B (MtpDims' slot).
   CHECK(runtime::TapVerifyDims::gdn_spec_bytes(d) == size_t(7) * 150994944u);
   CHECK(runtime::TapVerifyDims::gdn_spec_bytes(d) ==
-        runtime::MtpDims::sizes(16384, d, 0, runtime::KvCache::Bf16, 8).gdn_spec);
+        runtime::MtpDims::sizes(16384, d, runtime::KvCache::Bf16, 8).gdn_spec);
   CHECK(runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault) == size_t(2048) * 5 * 5120 * 2);
   std::print("TapVerifyDims: 7 slots {:d} B, prefill taps {:d} B\n", runtime::TapVerifyDims::gdn_spec_bytes(d),
              runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
@@ -78,46 +76,31 @@ void plan_case() {
   dr.fixed = 53'000'000;
   dr.per_position = 512;
   dr.n_taps = 5;
-  const runtime::DraftVocabPlan dv{32768, true};
-  bool threw = false;
-  try {
-    (void)runtime::plan(d, 32768, false, 17'000'000'000ull, {}, dv);
-  } catch (const std::invalid_argument&) {
-    threw = true;
-  }
-  CHECK(threw);   // no head, no drafter: nothing drafts over V'
-  const runtime::MemoryPlan with = runtime::plan(d, 32768, false, 17'000'000'000ull, {}, dv,
+  const runtime::MemoryPlan with = runtime::plan(d, 32768, false, 17'000'000'000ull, {},
                                                  runtime::KvCache::Bf16, dr);
-  const runtime::MemoryPlan without = runtime::plan(d, 32768, false, 17'000'000'000ull, {}, {},
-                                                    runtime::KvCache::Bf16, dr);
-  CHECK(with.draft_vocab > 0 && with.total() == without.total() + with.draft_vocab);
   CHECK(with.drafter_slots == runtime::TapVerifyDims::gdn_spec_bytes(d));
   // Spec 39: one sequence with a drafter on Qwen3.8's shapes makes the deferred GDN rows (Engine::own_.gdn_pend) -
   // planned now (103,022,592 B; plan() left them out before), without the head's deep chain scratch.
   CHECK(with.deep == 2 * runtime::MtpDims::kGdnPendParity && with.deep == size_t{103022592});
   // Plan 40a Task 2: several sequences beside a drafter each keep their committed rows pending.
   CHECK(runtime::plan_pool(d, {2, 32, 32768}, false, 17'000'000'000ull, {}, runtime::KvCache::Bf16, dr).deep ==
-        runtime::EngineDims::sizes(d, runtime::KvCache::Bf16, 0, 2, false, true).gdn_pend);
+        runtime::EngineDims::sizes(d, runtime::KvCache::Bf16, 2, false, true).gdn_pend);
   const runtime::MemoryPlan decode_only = runtime::plan(d, 32768, false, 17'000'000'000ull,
-                                                        runtime::PrefillPath{false}, {}, runtime::KvCache::Bf16, dr);
-  CHECK(decode_only.drafter_taps == 0 && without.drafter_taps == runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
+                                                        runtime::PrefillPath{false}, runtime::KvCache::Bf16, dr);
+  CHECK(decode_only.drafter_taps == 0 && with.drafter_taps == runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
   std::print("plan with a drafter at 32768: {}\n", runtime::describe(with, 32'530'000'000ull, 1'500'000'000ull).c_str());
 }
 
 void head_policy_case() {
-  CHECK(cli::dflash::candidate_head(true, 0));
-  CHECK(!cli::dflash::candidate_head(false, 0));
-  for (uint32_t n : {32768u, 65536u, 131072u}) {
-    CHECK(!cli::dflash::candidate_head(true, n));
-    CHECK(!cli::dflash::candidate_head(false, n));
-  }
+  CHECK(cli::dflash::candidate_head(true));
+  CHECK(!cli::dflash::candidate_head(false));
   CHECK(cli::dflash::Args{}.format == loader::DraftFormat::Int8);
   const auto full = server::MtpCost::dflash(true, true);
-  CHECK(cli::dflash::cost({}, loader::LmHeadForm::Int8, 0).draft[0] < full.draft[0]);
+  CHECK(cli::dflash::cost({}, loader::LmHeadForm::Int8).draft[0] < full.draft[0]);
   cli::dflash::Args int4;
   int4.format = loader::DraftFormat::Int4G64;
-  CHECK(cli::dflash::cost(int4, loader::LmHeadForm::Int8, 32768).draft[0] <
-        cli::dflash::cost({}, loader::LmHeadForm::Int8, 32768).draft[0]);
+  CHECK(cli::dflash::cost(int4, loader::LmHeadForm::Int8).draft[0] <
+        cli::dflash::cost({}, loader::LmHeadForm::Int8).draft[0]);
 
 }
 
@@ -146,9 +129,6 @@ void cost_case() {
   CHECK(std::fabs(c.draft[0] - (MtpCost::kDFlashDrafterInt8 + MtpCost::kDFlashHeadInt8)) < 1e-12);
   const MtpCost b = MtpCost::dflash(false, false);
   CHECK(b.draft[0] > c.draft[0] && b.verify[7] < c.verify[7] + 0.2);
-  // a draft vocabulary scales the head's share of the draft row only
-  const MtpCost v = c.with_draft_vocab(MtpCost::dflash_head_share(true, true), 32768.0 / 248320.0);
-  CHECK(v.verify == c.verify && v.draft[0] < c.draft[0] && v.draft[0] > MtpCost::kDFlashDrafterInt8);
   // the policy over it
   auto run = [&](double alpha) {
     server::AdaptiveKOptions o;
@@ -170,7 +150,7 @@ void cost_case() {
   };
   const uint32_t hi = run(0.95), mid = run(0.5), lo = run(0.1);
   std::print("adaptive K over MtpCost::dflash (int8 head, int8 drafter): alpha 0.95 -> K {:d}, 0.5 -> K {:d}, "
-             "0.1 -> K {:d}; draft row {:.3f} (32k V': {:.3f})\n", hi, mid, lo, c.draft[0], v.draft[0]);
+             "0.1 -> K {:d}; draft row {:.3f}\n", hi, mid, lo, c.draft[0]);
   // Spec 19 v2's measured rows keep the widest block worthwhile at high acceptance.
   CHECK(hi == 6 || hi == 7);
   CHECK(c.verify[7] == 1.246703 && c.verify[4] == 1.170806);

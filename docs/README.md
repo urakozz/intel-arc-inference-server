@@ -9,7 +9,7 @@ decided each design.
 
 ## Where to start
 
-- To run a model: [17-running-models.md](17-running-models.md).
+- To run a model: [17-running-models.md](17-running-models.md). Every measured speed: [benchmarks.md](benchmarks.md).
 - To understand the engine: [08-decode-vs-prefill.md](08-decode-vs-prefill.md), the central idea, then
   [04-architecture.md](04-architecture.md) for the engine as a whole.
 - To know what the card can do: [01-hardware.md](01-hardware.md).
@@ -46,6 +46,7 @@ decided each design.
 | | |
 |---|---|
 | [17-running-models.md](17-running-models.md) | the commands to download, serve and benchmark each model, per number of cards, and what each model supports |
+| [benchmarks.md](benchmarks.md) | every measured speed: prefill and generation per model, setup and number of requests |
 | [18-development.md](18-development.md) | `b70-decode`: reproducible runs from token ids, speed rows, launch profiles; its flags and the environment variables |
 | [environment-variables.md](environment-variables.md) | what the programs, tests and scripts read from the environment (none of it needed to run the engine) |
 

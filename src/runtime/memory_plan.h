@@ -25,16 +25,11 @@ namespace runtime {
 // hidden rows); `prefill_scratch` PrefillScratch, eager and lazy; `int8` the h8
 // path's Int8State.
 //
-// `draft_vocab` (spec 8 §11, `--draft-vocab`): the compact draft head and its id table,
-// which the loader allocates OUTSIDE LoadReport::total() (so `model` reads the same with
-// and without it), sized by loader::draft_vocab_bytes. 0 when off.
-//
 // `drafter` (spec 19b, 19c's `--spec dflash`): a DFlash drafter's weights and buffers (DrafterPlan below). 0 when off.
 struct MemoryComponents {
   size_t model = 0, kv = 0, decode_state = 0, prefill_scratch = 0, int8 = 0;
-  size_t draft_vocab = 0;
   size_t drafter = 0;
-  size_t total() const { return model + kv + decode_state + prefill_scratch + int8 + draft_vocab + drafter; }
+  size_t total() const { return model + kv + decode_state + prefill_scratch + int8 + drafter; }
 };
 
 // Spec 19b: a DFlash drafter beside the model - its weights (loader::dflash_weight_bytes) and its buffers
@@ -62,9 +57,7 @@ struct DrafterPlan {
 
 // "<label>: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch
 // 0.700 GB, int8 0.085 GB, total 28.081 GB of 32.530 GB" - memory_line()'s format
-// (GB = 1e9 B), one formatter for the measured line and the planned one. With a draft
-// vocabulary a "draft vocab <GB>," term precedes the total; without one the line is
-// exactly the above.
+// (GB = 1e9 B), one formatter for the measured line and the planned one.
 std::string format_memory(const char* label, const MemoryComponents& c, size_t device_bytes);
 
 // What a session's prefill allocates, which is a property of the backend and the
@@ -95,17 +88,6 @@ struct PrefillPath {
   PrefillBackend backend = PrefillBackend::L0;
   uint32_t chunk_cap = PrefillScratchDims::kCDefault;
   bool dense_bf16 = false;
-};
-
-// Spec 8 §11 (`--draft-vocab`): a draft vocabulary of `rows` ids, its compact head in
-// the lm_head's form (`int8`, else bf16). `rows` = 0 is off. With MTP it adds the
-// loader's compact head + id table (`MemoryComponents::draft_vocab`,
-// loader::draft_vocab_bytes) and MtpBuffers' compact logits (in decode_state,
-// MtpDims::sizes). Neither depends on max_len, but both come out of what auto can give
-// the context. cli::draft_vocab_plan reads it off a loaded model.
-struct DraftVocabPlan {
-  uint32_t rows = 0;
-  bool int8 = true;
 };
 
 struct MemoryPlan : MemoryComponents {
@@ -154,7 +136,7 @@ struct MemoryPlan : MemoryComponents {
 // `max_len`, so it equals memory_line()'s `model` once the table has that length.
 // `drafter` (spec 19b): a DFlash drafter's bytes at this max_len go to MemoryComponents::drafter.
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
-                const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
+                const PrefillPath& path = {},
                 KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
 // The max_len grid: the L0 prefill backends need max_len % 256 == 0 (spec 2.1 §3.1,
@@ -176,7 +158,7 @@ constexpr double kDefaultReserveGb = 1.5;
 // one quantum.
 uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
-                           const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
+                           const PrefillPath& path = {},
                            KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
 // Plan 5d, ruling (i) of 2026-10-27 (context first): the chunk cap a session at
@@ -188,7 +170,7 @@ uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_
 // auto value is the trained context with room to spare.
 uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                                      size_t device_bytes, size_t reserve_bytes, uint32_t max_len,
-                                     const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
+                                     const PrefillPath& path = {},
                                      KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
 // One line for the startup log: the plan's five components, the finer split where it

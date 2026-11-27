@@ -364,6 +364,7 @@ class ReplicaEngine : public server::BatchEngineIface {
                         else if (row.choose != nullptr) runs[r] = e.step_chosen(*row.sampling, row.k, *row.choose);
                         else if (facts_[row.slot].mtp_k > 0) runs[r] = e.step_many(*row.sampling, row.k);
                         else runs[r] = {e.step(*row.sampling)};
+                        if (row.drafted != nullptr) *row.drafted = e.drafted(row.k);
                       }),
                       {r}});
     }

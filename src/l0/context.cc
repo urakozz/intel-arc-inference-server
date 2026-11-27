@@ -1,12 +1,24 @@
 #include "l0/context.h"
 #include <cstddef>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include "l0/error.h"
 
 namespace l0 {
+namespace {
+// On a machine that requires the card lock (B70_REQUIRE_GPU_LOCK set), opening a device without holding it
+// fails before zeInit: the lock holder exports B70_GPU_LOCK_HELD to the command it runs.
+void require_gpu_lock_if_set() {
+  if (std::getenv("B70_REQUIRE_GPU_LOCK") && !std::getenv("B70_GPU_LOCK_HELD"))
+    throw std::runtime_error("this machine requires a GPU lock before a device opens (B70_REQUIRE_GPU_LOCK is set): "
+                             "run the command under the machine's lock helper, which sets B70_GPU_LOCK_HELD");
+}
+}  // namespace
+
 Context::Context(uint32_t device_index) {
+  require_gpu_lock_if_set();
   ZE_CHECK(zeInit(ZE_INIT_FLAG_GPU_ONLY));
   uint32_t n_drivers = 0;
   ZE_CHECK(zeDriverGet(&n_drivers, nullptr));
@@ -77,6 +89,7 @@ Context::Context(const Context& primary, uint32_t device_index)
 }
 
 uint32_t Context::gpu_count() {
+  require_gpu_lock_if_set();
   ZE_CHECK(zeInit(ZE_INIT_FLAG_GPU_ONLY));
   uint32_t n_drivers = 0;
   ZE_CHECK(zeDriverGet(&n_drivers, nullptr));
@@ -107,13 +120,23 @@ size_t device_memory(ze_device_handle_t dev) {
 }
 
 std::vector<ze_device_handle_t> visible_gpus() {
-  ZE_CHECK(zeInit(ZE_INIT_FLAG_GPU_ONLY));
+  // A host without the Level Zero loader or Intel's GPU driver gets one plain sentence here, not a raw
+  // ze_result: the release tarball ships neither, they come from the host's packages.
+  require_gpu_lock_if_set();
+  const ze_result_t init = zeInit(ZE_INIT_FLAG_GPU_ONLY);
   uint32_t n_drivers = 0;
-  ZE_CHECK(zeDriverGet(&n_drivers, nullptr));
-  if (n_drivers == 0) return {};
-  std::vector<ze_driver_handle_t> drivers(n_drivers);
-  ZE_CHECK(zeDriverGet(&n_drivers, drivers.data()));
-  return gpus_of(drivers[0]);
+  if (init == ZE_RESULT_SUCCESS) ZE_CHECK(zeDriverGet(&n_drivers, nullptr));
+  std::vector<ze_device_handle_t> gpus;
+  if (init == ZE_RESULT_SUCCESS && n_drivers > 0) {
+    std::vector<ze_driver_handle_t> drivers(n_drivers);
+    ZE_CHECK(zeDriverGet(&n_drivers, drivers.data()));
+    gpus = gpus_of(drivers[0]);
+  }
+  if (init != ZE_RESULT_SUCCESS || n_drivers == 0 || gpus.empty())
+    throw std::runtime_error("no GPU on Level Zero: the Level Zero loader (libze1) or Intel's compute runtime "
+                             "(libze-intel-gpu, the GPU driver) is missing - the release tarball needs both "
+                             "installed on the host (or ZE_AFFINITY_MASK is hiding the cards)");
+  return gpus;
 }
 }  // namespace
 

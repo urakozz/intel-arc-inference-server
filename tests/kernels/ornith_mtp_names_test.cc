@@ -1,5 +1,5 @@
 // Spec 15e: every binary Ornith's MTP lists bind - the verify lists at M = 1..4, the draft
-// lists (full head and the three draft vocabularies, both lm_head forms), and the prefill's
+// lists (both lm_head forms), and the prefill's
 // head KV fill (runtime/prefill/step.cc step_mtp_kv) - formed exactly as runtime/capture.cc
 // and step.cc form them, against the binaries CMake builds (passed as arguments,
 // `kernel_<name>`). Host only, no device: a name a list would ask for that no CMake line
@@ -23,7 +23,6 @@ namespace {
 // runtime::DecodeScratch::kAttnV2Blocks / kNormGroups (runtime/buffer_sizes.h), spelled as
 // the variant names carry them.
 constexpr unsigned kT = 32, kG = 20;
-constexpr unsigned kDraftVocab[] = {32768, 65536, 131072};   // loader::kDraftVocabSizes
 
 std::string bf16(unsigned M, unsigned K, unsigned N) {
   return kernels::gemv_bf16_variant(M, K, N, kernels::gemv_bf16_tiling(N));
@@ -121,7 +120,7 @@ void wide_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& ou
 
 // The draft list at M = 1 (capture.cc draft()): head_front, the attention pair, o, the
 // post norm (SP1), the MoE block on the head's weights, the final norm (SP0), the head.
-void draft_names(const model::ModelDesc& d, bool int8, unsigned nv, std::set<std::string>& out) {
+void draft_names(const model::ModelDesc& d, bool int8, std::set<std::string>& out) {
   const unsigned H = d.hidden;
   for (const std::string& n :   // head_front
        {kernels::embed_gather_variant(1, H), kernels::prep_res_fold_pair_variant(1, H, kG),
@@ -134,15 +133,10 @@ void draft_names(const model::ModelDesc& d, bool int8, unsigned nv, std::set<std
   out.insert(kernels::prep_res_fold_variant(1, H, 1, kG));
   out.insert(bf16(1, H, d.moe.router_n()));
   out.insert(kernels::moe_variant(1, d.moe.experts, d.moe.top_k, H, d.moe.expert_intermediate));
-  if (nv == 0) {
-    out.insert(int8 ? kernels::gemv_i8w_variant(1, H, model::Qwen35::kVocab)
-                    : bf16(1, H, model::Qwen35::kVocab));
-    out.insert(kernels::argmax_stage1_variant(1, d.vocab_used));
-    out.insert(kernels::argmax_stage2_variant());
-  } else {
-    out.insert(int8 ? kernels::gemv_i8w_variant(1, H, nv) : bf16(1, H, nv));
-    out.insert(kernels::dv_argmax_variant(nv));
-  }
+  out.insert(int8 ? kernels::gemv_i8w_variant(1, H, model::Qwen35::kVocab)
+                  : bf16(1, H, model::Qwen35::kVocab));
+  out.insert(kernels::argmax_stage1_variant(1, d.vocab_used));
+  out.insert(kernels::argmax_stage2_variant());
 }
 
 // step_mtp_kv (the prefill's head KV fill) beyond the main chunk's binaries.
@@ -177,8 +171,7 @@ int main(int argc, char** argv) {
   std::set<std::string> bound;
   for (bool int8 : {false, true}) {
     for (unsigned M = 1; M <= 4; ++M) verify_names(o, M, int8, bound);
-    draft_names(o, int8, 0, bound);
-    for (unsigned nv : kDraftVocab) draft_names(o, int8, nv, bound);
+    draft_names(o, int8, bound);
   }
   prefill_names(o, bound);
   // PERF-56: where CMake built the wide lists (B70_VERIFY_M8)

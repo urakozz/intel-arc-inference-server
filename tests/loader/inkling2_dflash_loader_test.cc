@@ -4,7 +4,7 @@
 // against the checkpoint read here independently: every linear int8 with one fp32 scale a row (quantise_int8_tiled),
 // q || k || v and gate || up rows concatenated first, q_norm || k_norm, the other norms and the conv bases as fp32, the codebooks as stored, and the mask
 // row embed_norm(embed[200056]) rounded to bf16. Refused in plain words: a folder that is not the drafter (its config
-// changed), a quantised one. No device.
+// changed), an incomplete quantization config. No device.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
   const std::string target = argv[1], dir = loader::resolve_snapshot(argv[2]);
   const loader::Inkling2Checkpoint c(target, dir);
   const auto& d = c.desc().draft;
+  CHECK(c.layout().draft_format == loader::DraftFormat::Int8);
   CHECK(c.has_drafter() && c.dflash() && d.v2() && d.softcap_after && d.layers == 5 && d.hidden == 2304);
   using L = loader::Inkling2WeightLayout;
   const auto& lay = c.layout();
@@ -137,7 +138,7 @@ int main(int argc, char** argv) {
   }
   std::printf("%zu weights bitwise the checkpoint's device form\n", checked);
 
-  // refusals: a changed config, a quantised folder (each a copy of the folder's config beside its weights' link)
+  // refusals: a changed config, an incomplete quantization config (each a copy of the folder's config beside its weights' link)
   const fs::path tmp = fs::temp_directory_path() / ("inkling2_dflash_loader_test_" + std::to_string(::getpid()));
   fs::create_directories(tmp);
   fs::create_symlink(fs::path(dir) / "model.safetensors", tmp / "model.safetensors");
@@ -150,7 +151,7 @@ int main(int argc, char** argv) {
   t = cfg;
   t.insert(t.find("\"attention_bias\""), "\"quantization_config\": {\"quant_method\": \"auto-round\"}, ");
   write(t);
-  CHECK(refused(target, tmp.string(), "quantis"));
+  CHECK(refused(target, tmp.string(), "bits"));
   fs::remove_all(tmp);
   std::printf("inkling2_dflash_loader_test OK\n");
   return 0;

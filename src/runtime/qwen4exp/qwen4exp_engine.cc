@@ -510,6 +510,13 @@ std::vector<uint32_t> Qwen4ExpEngine::read_routes() {
   return v;
 }
 
+uint32_t Qwen4ExpEngine::read_step_misses() {
+  const std::vector<uint32_t> routes = read_routes();
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < st_.size(); ++i) n += step_misses(st(i).imm, model_.parts[i], model_.desc, routes);
+  return n;
+}
+
 std::vector<uint32_t> Qwen4ExpEngine::read_selection(uint32_t layer) {
   const model::Qwen4ExpDesc& d = model_.desc;
   if (layer >= d.layers || !d.is_qsa(layer)) throw std::out_of_range("read_selection: layer " + std::to_string(layer) + " is not a QSA layer");
@@ -575,8 +582,8 @@ std::vector<uint16_t> Qwen4ExpEngine::read_kv(uint32_t layer, uint32_t first, ui
   if (size_t(first) + count > max_len_) throw std::out_of_range("read_kv: past max_len");
   Stage& s = st(model_.placement.device_of(layer));
   const uint8_t* base = static_cast<const uint8_t*>(v ? s.buffers.v_layer(layer) : s.buffers.k_layer(layer));
-  std::vector<uint16_t> out(size_t(count) * d.kv_n());
-  s.imm.copy(out.data(), base + size_t(first) * d.kv_n() * 2, out.size() * 2);
+  std::vector<uint16_t> out(size_t(count) * kv_row_bytes(d) / 2);
+  s.imm.copy(out.data(), base + size_t(first) * kv_row_bytes(d), out.size() * 2);
   return out;
 }
 
@@ -604,7 +611,8 @@ std::vector<uint8_t> Qwen4ExpEngine::read_layer_state(uint32_t layer) {
     s.imm.copy(out.data() + at0, p, n);
   };
   if (d.is_qsa(layer)) {
-    append(b.k_layer(layer), size_t(max_len_) * d.kv_n() * 2 * 2);   // K then V
+    append(b.k_layer(layer), size_t(max_len_) * kv_row_bytes(d) * 2);   // K then V
+    if (d.kv8) append(b.k_scale_layer(layer), size_t(max_len_) * kv_scale_row_bytes(d) * 2);   // their scales
     append(b.idx_keys_layer(layer), size_t(max_len_ / d.idx_compress) * idx_key_slot_bytes(d));
     append(b.tail_layer(layer), size_t(kIdxTail) * d.idx_dim * 2);
   } else {
@@ -1001,8 +1009,8 @@ size_t Qwen4ExpEngine::draft_list_launches(uint32_t i) const {
 std::vector<uint16_t> Qwen4ExpEngine::read_mtp_kv(uint32_t first, uint32_t count, bool v) {
   require_mtp("read_mtp_kv");
   if (size_t(first) + count > max_len_) throw std::out_of_range("read_mtp_kv: past max_len");
-  const size_t row = size_t(model_.desc.kv_n()) * 2;
-  std::vector<uint16_t> out(size_t(count) * model_.desc.kv_n());
+  const size_t row = kv_row_bytes(model_.desc);
+  std::vector<uint16_t> out(size_t(count) * row / 2);
   st(uint32_t(st_.size()) - 1).imm.copy(out.data(), static_cast<const uint8_t*>(v ? mtp_->v() : mtp_->k()) + first * row,
                                         count * row);
   return out;

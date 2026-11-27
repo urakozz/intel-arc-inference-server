@@ -199,7 +199,7 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
   runtime::MtpBuffers* mtp4 = e.mtp_buffers();
   // Ornith (30 GDN layers): its verify lists are built at M = 1..4 only (the 4-slot MtpBuffers).
   const uint32_t max_m = e.model().desc->gdn_layers == 48 ? 8 : 4;
-  auto mtp8 = max_m > 4 ? std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc, e.draft_vocab(),
+  auto mtp8 = max_m > 4 ? std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc,
                                                                 e.kv_cache(), runtime::MtpDims::kMaxSlots)
                         : nullptr;
   auto buf_for = [&](uint32_t M) -> runtime::MtpBuffers& { return M <= 4 ? *mtp4 : *mtp8; };

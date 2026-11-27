@@ -38,6 +38,30 @@ void test_calib() {
   CHECK_NEAR(c.rate(0, 0.95f), 0.95, 1e-6);   // so are bins
 }
 
+void test_seed() {
+  // The pinned rates are the ones tools/oracle/test_price_stop.py's Calib twin gives on the same
+  // observe sequences.
+  DraftCalib::SeedTable seed{};
+  seed[0 * DraftCalib::kBins + DraftCalib::bin(0.6f)] = {0.9f, 100};
+  seed[0 * DraftCalib::kBins + DraftCalib::bin(0.2f)] = {0.9f, DraftCalib::kSeedMinN - 1};
+  DraftCalib c(seed, 30.0, 0.995);
+  CHECK_NEAR(c.rate(0, 0.6f), 0.9, 1e-6);   // zero observations: the table
+  c.observe(0, 0.6f, true);
+  CHECK_NEAR(c.rate(0, 0.6f), (1.0 + 30 * 0.9) / 31.0, 1e-6);
+  c.observe(0, 0.6f, false);                // observations move it with the decay
+  CHECK_NEAR(c.rate(0, 0.6f), (0.995 + 30 * 0.9) / (0.995 + 1.0 + 30.0), 1e-6);
+  CHECK_NEAR(c.rate(0, 0.2f), 0.2, 1e-6);   // too few samples: the stated probability
+  // An unseeded DraftCalib is unchanged.
+  DraftCalib u;
+  CHECK_NEAR(u.rate(0, 0.6f), 0.6, 1e-6);
+  u.observe(0, 0.6f, true);
+  CHECK_NEAR(u.rate(0, 0.6f), 7.0 / 11.0, 1e-6);
+  u.observe(0, 0.6f, true);
+  CHECK_NEAR(u.rate(0, 0.6f), (0.98 + 1.0 + 6.0) / (0.98 + 1.0 + 10.0), 1e-6);
+  u.observe(0, 0.6f, false);
+  CHECK_NEAR(u.rate(0, 0.6f), (0.98 * 1.98 + 6.0) / (0.98 * 1.98 + 1.0 + 10.0), 1e-6);
+}
+
 void test_choice() {
   DraftCalib c;
   StepK s(opts(), c);
@@ -195,6 +219,7 @@ void test_beats_per_request() {
 
 int main() {
   test_calib();
+  test_seed();
   test_choice();
   test_low_acceptance_and_probe();
   test_order_checks();

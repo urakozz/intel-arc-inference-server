@@ -108,10 +108,9 @@ inline constexpr const char* kTpPrefillNarrowReason =
     "62 moves 4.26 logits toward 271 against one card's 2.50 (f32 lead 3.10)";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
 inline constexpr double kReviewedGapUlp = 0.01;
-// The graded logs of $B70_DATA/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
-// registrations that share a head form (mtp_gpu_test and mtp_gpu_dv128k_bf16_test: the bf16 head;
-// mtp_gpu_dv128k_test: the int8 head). mtp_gpu_32k_test / mtp_gpu_128k_test (bf16 head) reach the bf16-head rows
-// with other keys (their streams differ after the row) and match by tag / row / ids / f32 gap.
+// The graded logs of $B70_DATA/logs/spec28-int8-judge (main 0dc9b71). A key serves every K of a test
+// for the same head form. The longer bf16-head runs can have different stream keys after the row and
+// match by tag / row / ids / f32 gap.
 inline constexpr ReviewedRow kReviewedRows[] = {
     // tp_mtp_test / tp_dflash_test long, output 62: the TP verify rows (M = 2..4) pick 271 where f32 leads with 198
     // by 2.87 logits; identical to plain TP through layer 20, rounding-size drift after, no closer one-card verify

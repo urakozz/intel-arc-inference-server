@@ -64,7 +64,7 @@
 //   commit(j, t)  both cards: row j's GDN slot live, row j's hidden into hh row 0, pos, the pending id.
 // ingest() / generate() run verify(0) + commit(0) then (pos 0: the plain list and the hidden copy), as Engine's. The
 // verify lists bind DPAS attention by depth (spec 28c's second list), as Engine's. Built for the folded crossing
-// (kTpDefaultCrossing); the slices form runs plain decode. No draft vocabulary, no DFlash drafter (not built).
+// (kTpDefaultCrossing); the slices form runs plain decode.
 //
 // **The server's calls (spec 17d).** PipelineEngineAdapterT's interface (cli/pipeline_serve_adapter.h), so b70-serve
 // --parallel tp is that adapter over this engine: pending / set_draft_input / host_rows, read_logits_into gathering
@@ -183,7 +183,6 @@ class TpEngine {
   bool mtp() const { return mtp_; }
   // The deepest k verify() takes: kMaxDraft with the MTP head, the drafter's max_k() with a drafter (spec 19 v3c).
   uint32_t max_draft() const;
-  uint32_t draft_vocab() const { return 0; }
   uint32_t max_verify_k() const;
   // `more` (open-work 13): Engine::draft's - the head's probability for the merged draft from both cards' halves.
   void draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick = {},

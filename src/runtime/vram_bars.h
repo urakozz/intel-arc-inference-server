@@ -35,9 +35,8 @@ struct VramCard {
   size_t reserve = 0, total = 0;
 };
 
-// The used parts of memory_line()'s components, in the bar's order: weights (the draft vocabulary's compact head too,
-// unless a drafter drafts with it), KV cache, `state` (decode_state: the MTP head and the per-slot decode state),
-// `drafter` (its weights and buffers, with the draft vocabulary), the l0-int8 prefill state, prefill scratch.
+// The used parts of memory_line()'s components, in the bar's order: weights, KV, decode state,
+// `drafter` (its weights and buffers), the l0-int8 prefill state, prefill scratch.
 std::vector<VramPart> vram_parts(const MemoryComponents& c, const std::string& state, const std::string& drafter);
 // `state` for a one-card or tensor-parallel plan: "MTP × N slots" / "MTP head" with the head, else "decode state"
 // (× N slots beside sequence slots).

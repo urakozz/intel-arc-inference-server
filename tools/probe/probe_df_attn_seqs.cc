@@ -122,6 +122,11 @@ int main(int argc, char** argv) {
   l0::Module m_k4(ctx, kernels::path(kBase + "_dpas_k4")), m_k4g(ctx, kernels::path(kBase + "_dpas_k4_g256"));
   l0::Module m_k1g(ctx, kernels::path(kBase + "_dpas_g256")), m_red(ctx, kernels::path(kBase + "_H1_B4"));
   l0::Module m_spart(ctx, kernels::path(kBase + "_dpas_g256_SEQS")), m_sred(ctx, kernels::path(kBase + "_H1_B4_SEQS"));
+  // plan 41k: the 2D block read forms (BLK2D) at KS 1 / 2 / 4
+  const std::string kBlk = "pdfa_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k";
+  l0::Module m_b1(ctx, kernels::path(kBlk + "1_g256_blk")), m_b2(ctx, kernels::path(kBlk + "2_g256_blk")),
+      m_b4(ctx, kernels::path(kBlk + "4_g256_blk")), m_k2g(ctx, kernels::path(kBlk + "2_g256")),
+      m_b2s(ctx, kernels::path(kBlk + "2_blk"));
   // One Kernel object per launch (a list bakes the arguments at append time; per-launch objects keep the lists apart).
   std::vector<l0::Kernel> ks;
   ks.reserve(8192);
@@ -248,6 +253,35 @@ int main(int argc, char** argv) {
     std::printf("# check ks4 g256 against ks4, 8 rows one ring: %s\n", a == b ? "bitwise" : "DIFFERS");
     all_ok &= a == b;
   }
+  // the 2D block read forms against the same KS's per-lane loads, at every layout's positions (wrapping atoms included)
+  for (const Layout& L : lay)
+    for (uint32_t s = 0; s < L.blocks.size(); ++s) {
+      const void* c = L.c[s].ptr();
+      const void* dc = L.dc[s].ptr();
+      const auto k4 = out_of([&](l0::CmdList& li) { one_layer(li, 0, c, dc, s, m_k4g, 4); });
+      const auto k1 = out_of([&](l0::CmdList& li) { one_layer(li, 0, c, dc, s, m_k1g, 1); });
+      const auto b4 = out_of([&](l0::CmdList& li) { one_layer(li, 0, c, dc, s, m_b4, 4); });
+      const auto b1 = out_of([&](l0::CmdList& li) { one_layer(li, 0, c, dc, s, m_b1, 1); });
+      const auto k2 = out_of([&](l0::CmdList& li) { one_layer(li, 0, c, dc, s, m_k2g, 2); });
+      const auto b2 = out_of([&](l0::CmdList& li) { one_layer(li, 0, c, dc, s, m_b2, 2); });
+      const auto b2s = out_of([&](l0::CmdList& li) { one_layer(li, 0, c, dc, s, m_b2s, 2); });
+      double worst = 1.0;
+      for (uint32_t r = 0; r <= L.blocks[s].K && r < kM; ++r)
+        for (uint32_t h = 0; h < kNH; ++h) {
+          double xy = 0, xx = 0, yy = 0;
+          for (uint32_t d = 0; d < kHD; ++d) {
+            const size_t i = (size_t(r) * kNH + h) * kHD + d;
+            const double x = bf(b2[i]), y = bf(k4[i]);
+            xy += x * y, xx += x * x, yy += y * y;
+          }
+          if (xx > 0 && yy > 0) worst = std::min(worst, xy / std::sqrt(xx * yy));
+        }
+      std::printf("# check blk at pos %u K %u: KS 4 %s, KS 1 %s, KS 2 %s / %s (128 GRF); KS 2 against KS 4 worst "
+                  "cosine %.8f\n", L.blocks[s].pos, L.blocks[s].K, b4 == k4 ? "bitwise" : "DIFFERS",
+                  b1 == k1 ? "bitwise" : "DIFFERS", b2 == k2 ? "bitwise" : "DIFFERS", b2s == k2 ? "bitwise" : "DIFFERS",
+                  worst);
+      all_ok &= b4 == k4 && b1 == k1 && b2 == k2 && b2s == k2;
+    }
   for (Layout& L : lay) {
     set_inputs(q_h, kb_h, vb_h);
     const auto got = out_of([&](l0::CmdList& li) { seqs_layer(li, 0, L.tab.ptr(), uint32_t(L.blocks.size())); });
@@ -306,6 +340,11 @@ int main(int argc, char** argv) {
   add_arm("ks4, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_k4, 4); });
   add_arm("ks4 g256, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_k4g, 4); });
   add_arm("ks1 g256, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_k1g, 1); });
+  add_arm("ks4 g256 blk, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_b4, 4); });
+  add_arm("ks2 g256 blk, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_b2, 2); });
+  add_arm("ks2 g256, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_k2g, 2); });
+  add_arm("ks2 blk (128 GRF), 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_b2s, 2); });
+  add_arm("ks1 g256 blk, 8 rows, one ring", [&](l0::CmdList& li, uint32_t l) { one_layer(li, l, c0, d0, 0, m_b1, 1); });
   add_arm("SEQS 1 x 8", [&](l0::CmdList& li, uint32_t l) { seqs_layer(li, l, lay[0].tab.ptr(), 1); });
   add_arm("SEQS 2 x 4", [&](l0::CmdList& li, uint32_t l) { seqs_layer(li, l, lay[1].tab.ptr(), 2); });
   add_arm("SEQS 4 x 2", [&](l0::CmdList& li, uint32_t l) { seqs_layer(li, l, lay[2].tab.ptr(), 4); });

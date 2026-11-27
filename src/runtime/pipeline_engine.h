@@ -144,7 +144,7 @@ class PipelineEngine {
   // `drafter` (spec 19d): a tap drafter on device 1 (its buffers at max_len), borrowed - it must outlive the engine;
   // not with the MTP head; needs device 1's stage model holding the embedding replica
   // (place_stages(..., drafter = true)). Attach it afterwards: drafter->attach_target(context(1), model(1),
-  // buffers(1).control, max_len, draft_vocab).
+  // buffers(1).control, max_len).
   PipelineEngine(l0::Context& d0, l0::Context& d1, std::vector<loader::LoadedModel> stages,
                  uint32_t max_len, const PipelineOptions& opt = {},
                  KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr);
@@ -209,7 +209,6 @@ class PipelineEngine {
   void verify(uint32_t k);
   const uint32_t* verify_ids() const;
   void commit(uint32_t j, uint32_t next_token);
-  uint32_t draft_vocab() const;   // |V'| (spec 8 §11), 0 = the full head drafts
   const CapturedStep& verify_step(uint32_t dev, uint32_t M) const;
   // Spec 28c: the key count (pos + 1) from which verify() at M submits the deep lists (DPAS bound), or
   // kDpasNever (runtime/verify_attn.h's verify_attn_deep_from at this engine's KV form).

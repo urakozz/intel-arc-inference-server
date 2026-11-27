@@ -166,7 +166,7 @@ void TpEngine::read_logits(uint32_t row, std::span<float> out) {
 void TpEngine::read_prefill_logits(std::span<float> out) { lead().copy_logits(0, out); }
 
 // Both cards run the draft pass, its all-reduces crossing.
-std::span<const uint32_t> TpEngine::propose(uint32_t anchor, uint32_t count) {
+std::span<const uint32_t> TpEngine::propose(uint32_t anchor, uint32_t count, float temperature, uint64_t seed) {
   Engine& e0 = lead();
   if (!e0.buffers_.weights.draft || pending() || !position() || anchor >= D::vocab || count >= kRows ||
       count + 1 > max_len() - position())
@@ -179,12 +179,32 @@ std::span<const uint32_t> TpEngine::propose(uint32_t anchor, uint32_t count) {
     }
     e->ctrl_->cur_token[0] = anchor;
     e->ctrl_->pos = position();
-    static_cast<dflash::DFlashCtl*>(e->buffers_.draft.draft_control->ptr())->k = kRows - 1;
+    auto* dctl = static_cast<dflash::DFlashCtl*>(e->buffers_.draft.draft_control->ptr());
+    dctl->k = kRows - 1;
+    dctl->temperature = temperature;
+    dctl->seed_lo = uint32_t(seed);
+    dctl->seed_hi = uint32_t(seed >> 32);
   }
   run({e0.draft_list_.get(), cards_[1]->draft_list_.get()}, "a draft pass");
   if (!std::equal(e0.ctrl_->cur_token + 1, e0.ctrl_->cur_token + 1 + count, cards_[1]->ctrl_->cur_token + 1))
     fail("the two cards' drafts differ after a draft pass");
   return {e0.ctrl_->cur_token + 1, count};
+}
+
+void TpEngine::profile_target(std::span<const uint32_t> ids) {
+  // card 1's step beside card 0's profiled one, as profile_draft runs them
+  Engine& e1 = *cards_[1];
+  const auto m = uint32_t(ids.size());
+  auto list = l0::CmdList::regular(e1.ctx_);
+  e1.record_target(list, m, true);
+  list.close();
+  std::copy(ids.begin(), ids.end(), e1.ctrl_->cur_token);
+  e1.ctrl_->pos = position();
+  e1.ctrl_->n_active = m;
+  e1.queue_.execute(list, fences_[1].get());
+  lead().profile_target(ids);
+  if (!fences_[1]->wait_for(timeout_ns_)) fail("card 1's profiled target step did not finish");
+  check_crossings("a profiled target step");
 }
 
 void TpEngine::profile_draft(uint32_t anchor) {

@@ -16,24 +16,21 @@
 #
 # Steps (each resumable: dumps and accept results already written are skipped):
 #   check    the unit tests of both scripts (tiny models, seconds)
-#   sources  OUT/dumps/sources.json + rank.py request logs: the golden prompts with their
+#   sources  OUT/dumps/sources.json: the golden prompts with their
 #            recorded greedy continuations (GOLDEN_CONT_DIR/{prose,code,cjk}.ids, else the 32
 #            ids of the 2026-08-24 oracle below), the A4 set (34 scenarios, reference text
 #            re-encoded), EXTRA_SOURCES ("corpus/label:PROMPT_IDS:CONT_IDS ...", e.g. a
 #            prose / reasoning set the engine recorded)
 #   dump     dump_taps.py run (one streamed forward per batch of sources)
-#   rank     tools/draft_vocab/rank.py over the same sources -> OUT/draft_vocab.ranked.ids (the
-#            V' "-r" arms; in-sample, so an upper bound for a ranked V')
-#   accept   dflash_accept.py run, ARMS (default bf16,int8,int8h,w4a16), V' 32k/64k/128k on bf16
+#   accept   dflash_accept.py run, ARMS (default bf16,int8,int8h,w4a16)
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
 OUT="${OUT:-${B70_DATA:?set B70_DATA, the data root}/oracle-out/qwen38/dflash-p0}"
 REPO_ID="${REPO_ID:-Qwen/Qwen3.8-27B}"
 IMAGE="${IMAGE:-agnes-ref-img:latest}"      # python 3.12, torch 2.14.1+cpu, transformers 5.15.0
 THREADS="${THREADS:-16}"
-STEPS="${STEPS:-check sources dump rank accept}"
+STEPS="${STEPS:-check sources dump accept}"
 ARMS="${ARMS:-bf16,int8,int8h,w4a16}"
-VOCAB="${VOCAB:-32k,64k,128k}"
 BATCH_TOKENS="${BATCH_TOKENS:-8192}"
 DRY_RUN="${DRY_RUN:-}"
 if [ -n "$DRY_RUN" ]; then NAME="${NAME:-dflash-dry}"; MEM="${MEM:-6g}"; else NAME="${NAME:-dflash-ref}"; MEM="${MEM:-28g}"; fi
@@ -87,7 +84,7 @@ if has check; then
 fi
 
 if has sources || [ -n "$DRY_RUN" ]; then
-  x python3 tools/oracle/dump_taps.py sources --out-dir "$OUT/dumps" --rank-logs "$OUT/ranklogs" "${SRC[@]}" || exit 1
+  x python3 tools/oracle/dump_taps.py sources --out-dir "$OUT/dumps" "${SRC[@]}" || exit 1
 fi
 
 if has dump; then
@@ -95,18 +92,9 @@ if has dump; then
     ${DRY_RUN:+--dry-run} "${SRC[@]}" || { echo "dump FAILED"; exit 1; }
 fi
 
-if has rank; then
-  if [ -n "$DRY_RUN" ]; then echo "rank: rank.py over $OUT/ranklogs -> $OUT/draft_vocab.ranked.ids (skipped: dry run)"
-  elif [ -f "$OUT/draft_vocab.ranked.ids" ]; then echo "rank: done"
-  else x python3 tools/draft_vocab/rank.py "$OUT/ranklogs" --vocab-used 248077 -o "$OUT/draft_vocab.ranked.ids" || exit 1
-  fi
-fi
-
 if has accept; then
-  RANKED=()
-  [ -f "$OUT/draft_vocab.ranked.ids" ] || [ -n "$DRY_RUN" ] && RANKED=(--draft-vocab-ids "$OUT/draft_vocab.ranked.ids")
   x python3 tools/oracle/dflash_accept.py run --dumps "$OUT/dumps" --out-dir "$OUT/accept" --arms "$ARMS" \
-    --vocab "$VOCAB" "${RANKED[@]}" ${DRY_RUN:+--dry-run} || { echo "accept FAILED"; exit 1; }
+    ${DRY_RUN:+--dry-run} || { echo "accept FAILED"; exit 1; }
 fi
 if [ -n "$DRY_RUN" ]; then docker rm -f "$NAME" > /dev/null 2>&1; fi
 echo "=== $(date '+%F %T') done"

@@ -131,11 +131,13 @@ void Qwen4ExpEngine::prepare_prefill() {
   // A missing binary is named here, before anything is allocated or appended (the decode capture's rule); the head's
   // binaries are decode's, which the capture already checked.
   for (const std::string& v :
-       kernels::qwen4exp::prefill_variants(d, eager, model_.ple.scale == loader::Q4PleScale::Bf16, rows))
+       kernels::qwen4exp::kv8_variants(
+           kernels::qwen4exp::prefill_variants(d, eager, model_.ple.scale == loader::Q4PleScale::Bf16, rows), d.kv8))
     require(std::ifstream(kernels::path(v)).good(),
             v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON");
   if (mtp_)   // spec 21-QFN-v1e: the head's pass per chunk
-    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_norm_ == MtpNorm::Single, rows, d.hc_int8))
+    for (const std::string& v : kernels::qwen4exp::kv8_variants(
+             kernels::qwen4exp::mtp_prefill_variants(mtp_norm_ == MtpNorm::Single, rows, d.hc_int8), d.kv8))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_MTP=ON");
   auto* ps = new Qwen4ExpPrefillState();

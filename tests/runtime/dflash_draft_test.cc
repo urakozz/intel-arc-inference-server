@@ -17,13 +17,9 @@
 //   3. Determinism: a second replay's readback is bitwise the first's.
 //   4. K 3 by the control block alone (no recapture): rows past K masked, the twin at K 3 agrees.
 //   5. A sampled walk (T 0.8, a 64-bit seed): the twin's choices, ties within 1e-5 excused.
-//   6. Review Focus 3 at the real size: the same block over a 32768-id draft vocabulary (the compact int8 head
-//      gathered by loader::gather_int8_tiled_rows, df_topk COMPACT) holding every candidate of the full run - the
-//      candidates, unary logits, scores and walk BITWISE the full head's; with row 0's best id swapped out of V' (the
-//      table and the compact head rewritten in place, same list) the first row differs.
-//   7. The bf16 head (int8 drafter): the twin agrees as in 2.
-//   8. Spec 28d: the int8 linears and heads bind gemm_sm_i8w (DPAS, the in-work-group split-K), whose order the twin
-//      does not follow. For the int8 drafter 1, 2, 4, 5 and 7 are graded by the f32 JUDGE (judge_draft: the twin in
+//   6. The bf16 head (int8 drafter): the twin agrees as in 2.
+//   7. Spec 28d: the int8 linears and heads bind gemm_sm_i8w (DPAS, the in-work-group split-K), whose order the twin
+//      does not follow. For the int8 drafter 1, 2, 4, 5 and 6 are graded by the f32 JUDGE (judge_draft: the twin in
 //      Numerics::Reference over fp32 weights) - gemm_sm passes when it is no further from f32 than the same lists
 //      forced onto gemv_i8w (CaptureOptions::force_linear, the pre-28d binding), spec 28's N4 / N6 form; the twin
 //      comparisons of gemm_sm stay printed. The forced lists keep the old gate against the twin (the projection's
@@ -36,7 +32,6 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
-#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -614,55 +609,7 @@ int main(int argc, char** argv) {
     }
     b.ctl()->temperature = 0.0f;
 
-    // 6. a 32768-id draft vocabulary holding every candidate of the greedy run (Review Focus 3)
-    if (f == loader::DraftFormat::Int8) {
-      std::set<uint32_t> keep;
-      for (uint32_t j = 0; j < 7; ++j)
-        for (uint32_t k = 0; k < 16; ++k) keep.insert(first.cand[j][k]);
-      for (uint32_t id = 0; keep.size() < 32768; id += 7) keep.insert(id % USED);
-      std::vector<uint32_t> ids(keep.begin(), keep.end());
-      const uint32_t NV = uint32_t(ids.size());
-      std::vector<int8_t> cq(size_t(NV) * H);
-      std::vector<float> cs(NV);
-      loader::gather_int8_tiled_rows(head_q.data(), head_s.data(), H, V, ids.data(), NV, cq.data(), cs.data());
-      loader::DeviceWeight ch{e.upload(cq.data(), cq.size()),
-                              std::make_unique<l0::Mem>(e.upload(cs.data(), cs.size() * 4)), {H, NV, 1, 0},
-                              model::WeightKind::Int8};
-      l0::Mem ids_d = e.upload(ids.data(), ids.size() * 4);
-      runtime::dflash::DFlashTarget tc = t;
-      tc.head = &ch;
-      tc.ids = &ids_d;
-      runtime::dflash::DFlashBuffers bc(e.ctx, d, w.target_hidden, NV, 8192, w.format);
-      e.imm.copy(bc.ring_k.ptr(), b.ring_k.ptr(), b.ring_k.size());
-      e.imm.copy(bc.ring_v.ptr(), b.ring_v.ptr(), b.ring_v.size());
-      runtime::CapturedStep dc = runtime::dflash::build_dflash_draft(e.ctx, w, tc, bc, control);
-      bc.ctl()->k = 7;
-      bc.ctl()->temperature = 0.0f;
-      e.run(dc);
-      const runtime::dflash::DFlashDraftOut& o = *bc.readback();
-      const bool eq = std::memcmp(o.cand, first.cand, sizeof o.cand) == 0 &&
-                      std::memcmp(o.unary, first.unary, sizeof o.unary) == 0 &&
-                      std::memcmp(o.scores, first.scores, sizeof o.scores) == 0 &&
-                      std::memcmp(o.ids, first.ids, sizeof o.ids) == 0;
-      // swap row 0's best id out of V' (another id in its place, the table kept ascending), same list
-      const uint32_t best = first.cand[0][0];
-      uint32_t other = 1;
-      while (keep.count(other)) other += 2;
-      keep.erase(best);
-      keep.insert(other);
-      ids.assign(keep.begin(), keep.end());
-      loader::gather_int8_tiled_rows(head_q.data(), head_s.data(), H, V, ids.data(), NV, cq.data(), cs.data());
-      e.imm.copy(ch.mem.ptr(), cq.data(), cq.size());
-      e.imm.copy(ch.scales->ptr(), cs.data(), cs.size() * 4);
-      e.imm.copy(ids_d.ptr(), ids.data(), ids.size() * 4);
-      e.run(dc);
-      const bool differs = bc.readback()->cand[0][0] != best;
-      std::printf("draft vocabulary (32768 ids, compact int8 head): every candidate in V' -> %s the full head's; "
-                  "row 0's best removed -> %s\n", eq ? "BITWISE" : "NOT", differs ? "differs" : "SAME (wrong)");
-      bad += !eq || !differs;
-    }
-
-    // 7. the bf16 head (int8 drafter only: one arm is enough for the head's form)
+    // 6. the bf16 head (int8 drafter only: one arm is enough for the head's form)
     if (f == loader::DraftFormat::Int8) {
       std::vector<uint16_t> hb(size_t(V) * H);
       {

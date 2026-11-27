@@ -17,16 +17,20 @@ uint32_t DraftCalib::bin(float p) {
   return b;
 }
 
+DraftCalib::DraftCalib(const SeedTable& seed, double weight, double decay) : seed_(&seed), weight_(weight), decay_(decay) {}
+
 double DraftCalib::rate(uint32_t i, float p) const {
   const uint32_t b = bin(p);
+  if (seed_ != nullptr && seed_->at(i * kBins + b).n >= kSeedMinN)   // the measured rate is the prior
+    return (ok_.at(i)[b] + weight_ * seed_->at(i * kBins + b).rate) / (n_.at(i)[b] + weight_);
   const double c = std::clamp(static_cast<double>(p), 0.0, 1.0);
   return (ok_.at(i)[b] + kPriorN * c) / (n_.at(i)[b] + kPriorN);
 }
 
 void DraftCalib::observe(uint32_t i, float p, bool accepted) {
   const uint32_t b = bin(p);
-  ok_.at(i)[b] = kDecay * ok_[i][b] + (accepted ? 1.0 : 0.0);
-  n_.at(i)[b] = kDecay * n_[i][b] + 1.0;
+  ok_.at(i)[b] = decay_ * ok_[i][b] + (accepted ? 1.0 : 0.0);
+  n_.at(i)[b] = decay_ * n_[i][b] + 1.0;
 }
 
 StepK::StepK(const StepKOptions& opts, DraftCalib& calib)

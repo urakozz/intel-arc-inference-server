@@ -62,11 +62,11 @@ def rename_qc(qc: dict) -> dict:
     return qc
 
 
-def readme(recipe: dict, source: str) -> str:
+def readme(recipe: dict, source: str, repo: str) -> str:
     ar, s, c = recipe["autoround"], recipe["settings"], recipe["calibration"]
-    return f"""# Qwen3.8-27B-DFlash2, W4A16 g64 (AutoRound, tuned)
+    return f"""# {repo.split("/")[-1]}, W4A16 g64 (AutoRound, tuned)
 
-`z-lab/Qwen3.8-27B-DFlash2` (`{os.path.basename(os.path.normpath(source))}`) quantised by
+`{repo}` (`{os.path.basename(os.path.normpath(source))}`) quantised by
 `tools/quantize/quantize_dflash.sh`: int4 symmetric, group 64, `auto_round:auto_gptq`
 (`w = (q - 8) * scale`, qzeros 0x77777777, no act-order).
 
@@ -91,6 +91,7 @@ def main() -> None:
     ap.add_argument("raw")
     ap.add_argument("source")
     ap.add_argument("out")
+    ap.add_argument("--drafter-repo", default="z-lab/Qwen3.8-27B-DFlash2", help="the source drafter's repo id (the README)")
     a = ap.parse_args()
     raw = raw_dir(a.raw)
     with open(os.path.join(raw, "config.json")) as f:
@@ -142,7 +143,7 @@ def main() -> None:
         recipe = json.load(f)
     shutil.copyfile(recipe_path, os.path.join(a.out, "dflash_recipe.json"))
     with open(os.path.join(a.out, "README.md"), "w") as f:
-        f.write(readme(recipe, a.source))
+        f.write(readme(recipe, a.source, a.drafter_repo))
     packed = sum(1 for n in t if n.endswith(".qweight"))
     print(f"finalize: {packed} packed linears, {len(t) - 3 * packed} source tensors bitwise "
           f"({restored} restored from fp32) -> {a.out}")

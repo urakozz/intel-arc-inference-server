@@ -154,6 +154,9 @@ struct EngineIface {
     return {step(s)};
   }
   virtual void truncate_to(uint32_t pos) { (void)pos; }
+  // The drafts the last step_many(s, k) verified: k, or fewer when the engine's drafter stopped at a draft it was
+  // unsure of (Inkling's DFlash 2: the walk's confidence). The policy learns from the drafts that were verified.
+  virtual uint32_t drafted(uint32_t k) { return k; }
 
   // Open-work 13 (`--spec mtp` with auto K, greedy requests): the drafts chosen as they are made (server::StepK).
   // chooses_drafts() == false (the default) means the server never calls step_chosen(). Otherwise step_chosen(s, k,

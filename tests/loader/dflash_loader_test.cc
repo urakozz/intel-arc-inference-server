@@ -413,15 +413,21 @@ std::vector<uint8_t> bytes_of(const std::vector<T>& v) {
   return std::vector<uint8_t>(p, p + v.size() * sizeof(T));
 }
 
-void test_packed() {
+void test_packed(bool inkling = false) {
   fx::Shape s;
   s.inter = 128;
+  if (inkling) {
+    s.q_heads = 8;
+    s.kv_heads = 2;
+    s.taps = {1, 3, 5, 7};
+    s.target_layers = 8;
+  }
   const fx::Tensors ts = fx::make(s, 9);
   const std::string kept = "candidate_selector.hidden_projection.weight";   // left in bf16, as AutoRound may
   fx::Tensors pk;
   for (const auto& [n, t] : ts) {
     const bool linear = t.shape.size() == 2 && n.size() > 7 && n.compare(n.size() - 7, 7, ".weight") == 0;
-    if (!linear || n == kept) {
+    if (!linear || (!inkling && n == kept)) {
       pk[n] = t;
       continue;
     }
@@ -432,6 +438,11 @@ void test_packed() {
     const std::string b = n.substr(0, n.size() - 7);
     pk[b + ".qweight"] = {"I32", {K / 8, N}, bytes_of(q)};
     pk[b + ".scales"] = {"F16", {K / 64, N}, bytes_of(sc)};
+    if (inkling) {
+      std::vector<int32_t> idx(K);
+      for (uint32_t k = 0; k < K; ++k) idx[k] = int32_t(k / 64);
+      pk[b + ".g_idx"] = {"I32", {K}, bytes_of(idx)};
+    }
     pk[b + ".qzeros"] = {"I32", {K / 64, N / 8}, bytes_of(std::vector<uint32_t>(size_t(K / 64) * (N / 8), 0x77777777u))};
   }
   const std::string qc = "\"quantization_config\":{\"bits\":4,\"group_size\":64,\"sym\":true,"
@@ -445,7 +456,8 @@ void test_packed() {
   const fs::path dir = tmpdir("packed"), plain = tmpdir("plain");
   write(dir, pk, qc);
   fx::write(plain, s, ts);
-  const loader::DFlashCheckpoint ck(dir.string()), bf(plain.string());
+  const auto desc = model::dflash_desc_from_config(common::json::parse(fx::config_json(s)));
+  const loader::DFlashCheckpoint ck(desc, dir.string(), inkling), bf(plain.string());
   CHECK(ck.packed() && !bf.packed());
   const model::DFlashDesc& d = ck.desc();
   const loader::DraftFormat f = loader::DraftFormat::Int4G64;
@@ -461,13 +473,34 @@ void test_packed() {
   linears += same(ck.selector_projection(f), bf.selector_projection(f));
   CHECK_EQ(loader::dflash_weight_bytes(d, ck.target_hidden(), f).linears, linears);
   CHECK(ck.hidden_norm() == bf.hidden_norm() && ck.conv_bases() == bf.conv_bases());
+  if (inkling) {
+    const size_t int8 = loader::dflash_weight_bytes(d, ck.target_hidden(), loader::DraftFormat::Int8).linears;
+    CHECK(linears * 100 > int8 * 50 && linears * 100 < int8 * 54);
+    const auto check_fused = [&](loader::DFlashLinear which, const std::vector<std::string>& parts) {
+      std::vector<uint32_t> words;
+      for (const auto& name : parts) {
+        const auto& q = pk.at(name + ".qweight");
+        const auto& scales = pk.at(name + ".scales");
+        const uint32_t K = uint32_t(q.shape[0]) * 8, N = uint32_t(q.shape[1]);
+        std::vector<uint32_t> repacked(loader::dflash_linear_bytes(K, N, f) / 4);
+        common::repack_int4_layout1_cols(K, N,
+            common::cols_concat({{reinterpret_cast<const uint32_t*>(q.bytes.data()),
+                                  reinterpret_cast<const uint16_t*>(scales.bytes.data()), N}}), repacked.data());
+        words.insert(words.end(), repacked.begin(), repacked.end());
+      }
+      CHECK(ck.layer_linear(0, which, f).int4 == words);
+    };
+    check_fused(loader::DFlashLinear::Qkv,
+                {"layers.0.self_attn.q_proj", "layers.0.self_attn.k_proj", "layers.0.self_attn.v_proj"});
+    check_fused(loader::DFlashLinear::GateUp, {"layers.0.mlp.gate_proj", "layers.0.mlp.up_proj"});
+  }
   for (loader::DraftFormat other : {loader::DraftFormat::Int8, loader::DraftFormat::Bf16})
     CHECK(throws_with([&] { ck.fc(other); }, "loads as int4"));
 
   auto refused = [&](const fx::Tensors& t2, const std::string& q, const std::string& needle) {
     const fs::path d2 = tmpdir("packed_bad");
     write(d2, t2, q);
-    const bool ok = throws_with([&] { loader::DFlashCheckpoint x(d2.string()); }, needle);
+    const bool ok = throws_with([&] { loader::DFlashCheckpoint x(desc, d2.string(), inkling); }, needle);
     fs::remove_all(d2);
     return ok;
   };
@@ -477,6 +510,19 @@ void test_packed() {
     CHECK(refused(t2, qc, "qzeros"));
   }
   CHECK(refused(pk, with(qc, "\"sym\":true", "\"sym\":false"), "sym"));
+  if (inkling) {
+    CHECK(refused(pk, with(qc, "\"group_size\":64", "\"group_size\":128"), "group_size 64"));
+    CHECK(refused(pk, with(qc, "\"sym\":true", "\"sym\":true,\"desc_act\":true"), "desc_act"));
+    auto t2 = pk;
+    t2.at("fc.g_idx").bytes[0] = 1;
+    CHECK(refused(t2, qc, "identity"));
+    t2 = pk;
+    t2.erase("fc.qzeros");
+    CHECK(refused(t2, qc, "fc.qzeros"));
+    t2 = pk;
+    t2.at("fc.qzeros").bytes.resize(4);
+    CHECK(refused(t2, qc, "fc.qzeros"));
+  }
   {
     fx::Tensors t2 = pk;
     t2.erase("norm.weight");
@@ -499,6 +545,7 @@ int main(int argc, char** argv) {
   test_checkpoint(1);
   test_real_bytes(cfg);
   test_packed();
+  test_packed(true);
   std::printf("dflash_loader_test: PASS\n");
   return 0;
 }

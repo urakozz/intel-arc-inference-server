@@ -220,7 +220,7 @@ int main(int argc, char** argv) {
     const uint32_t rows = m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     runtime::dflash::DFlashDrafter d(d0, std::move(w), rows, kMaxLen, kK);
     runtime::Engine e(d0, std::move(m), kMaxLen, false, runtime::default_kv_cache(), &d);
-    d.attach(e, false);
+    d.attach(e);
     e.prepare_prefill();
     OneCard oc{e, d, l0::CmdList::immediate(d0)};
     run_all(oc, p3000, longp, ref, &snap_state, &snap_kv, &snap_pend);
@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
     runtime::dflash::DFlashDrafter d(d1, std::move(w), rows, kMaxLen, kK);
     runtime::PipelineOptions opt;
     runtime::PipelineEngine e(d0, d1, std::move(stages), kMaxLen, opt, runtime::default_kv_cache(), &d);
-    d.attach_target(d1, e.model(1), e.buffers(1).control, kMaxLen, false);
+    d.attach_target(d1, e.model(1), e.buffers(1).control, kMaxLen);
     e.prepare_prefill();
     TwoCards tc{e, d, l0::CmdList::immediate(d1)};
     Record got;

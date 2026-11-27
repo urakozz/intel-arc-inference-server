@@ -15,7 +15,7 @@
 // (tests/runtime/dflash_plan_test.cc).
 //
 // Rows: the block's M = kernels::dflash::kM (8: anchor + up to 7 drafts) and the head's R = M - 1. `head_rows` is what
-// the draft list's head GEMV produces per row: the target's lm_head rows, or a draft vocabulary's |V'|.
+// the draft list's head GEMV produces per row: the target's lm_head rows.
 //
 //   dctl, out    the control block and the readback (shared): runtime/dflash/dflash_control.h
 //   rope         fp32 [max_len + M][head_dim]: cos | sin halves at every position a block row can reach

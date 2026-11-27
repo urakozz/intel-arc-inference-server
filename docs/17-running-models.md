@@ -20,6 +20,30 @@ Every `b70-serve` flag is listed in the [README](../README.md#flags), `b70-decod
 
 The headline numbers are the same as in the [README](../README.md#speed).
 
+## b70-serve flags
+
+`b70-serve`:
+
+| flag | default | what it does |
+|---|---|---|
+| `<snapshot-or-repo>` | required | a Hugging Face repo id in the local cache, or a snapshot directory; never downloads |
+| `--max-num-seqs N` | `1` | how many requests run at once. They share the card's KV cache, and any one may use all of it; two cards run a model copy each, with its own cache. Up to 4 per card |
+| `--max-len auto\|L` | `auto` | context length (the most one request may use with `--max-num-seqs`). `auto`: the largest that fits, up to the model's 262,144 |
+| `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
+| `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; it also copies repeats of earlier text |
+| `--spec-max K` | the most | the proposer's cap on guesses per step |
+| `--draft-model PATH` | none; required with `--spec dflash` | the draft model: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB of the context's memory) |
+| `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
+| `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; Qwen3.8 and Ornith). On Qwen3.8 `int8` means every prompt linear, the context (it implies `--kv-cache int8`) and the attention scores in int8: 40-47 % faster prompts; measured against the bf16 pass, the most likely next token differs at 3 of 585 positions and 0 of 12 long exact-copy tool calls changed. On Ornith: its experts in int8 |
+| `--prefix-cache-gb auto\|N` | `auto` | the prefix cache in pinned system RAM, locked against swap when `ulimit -l` is unlimited; `auto` = up to 32 GiB from what is free, `0` = off |
+| `--prefix-split-last` | off | for chat clients that drop the reasoning (opencode): the next turn is a prefix cache hit exactly where it diverges. On for agentic sessions, off for benchmarks |
+| `--host H`, `--port P` | `0.0.0.0`, `8000` | where it listens |
+| `--log-requests DIR` | off | one JSON file per request: timings, body, ids, text |
+| `--layers N\|auto` | - | Qwen3.8-Flash-Next only: serve its first N layers |
+| `--host-experts auto\|gpu\|cpu` | `auto` | Qwen3.8-Flash-Next: how experts held in host RAM are served. `auto` picks per step from a startup measurement, `gpu` reads them over PCIe into the card, `cpu` computes them on the CPU. Same output either way |
+
+`b70-decode` (benchmarks, profiles, decoding from token ids) and the environment variables: [docs/18-development.md](18-development.md).
+
 ## Before you start
 
 Build as in the README (`cmake`, then `ctest`). The engine never downloads anything, so fetch each checkpoint into the
@@ -247,8 +271,7 @@ Several requests on a card (`--max-num-seqs`, up to 4 per card):
 - Against `--spec mtp` in the same mode (one card, int8 KV cache) it is 1.15x with one request, 1.12x with two and
   0.97x with four.
 - The requests share the card's KV cache pages as without the drafter: any one may grow to the whole pool.
-- Refused, by name: `--draft-vocab` with several requests on a card, more than four
-  requests per card, and every model other than Qwen3.8.
+- This multi-request DFlash mode supports Qwen3.8 with up to four requests per card.
 
 The prefix cache keeps the drafter's context (41.9 MB) with every snapshot. A conversation that gets a prefix cache
 hit at the end of a prompt or of a request therefore drafts exactly as an unbroken one would. A hit at a snapshot
@@ -360,7 +383,7 @@ validation (golden sets, serving, prefix cache, speculative decoding) runs on `m
 | `b70-decode` | yes | yes | decode and prefill, two cards by default | decode and prefill, the whole model or `--layers N` |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (an MoE head) | none (`auto` = off) | `b70-serve`: adaptive MTP by default, `--spec-max` 1 to 3; `b70-decode` decodes plain |
 | `--spec dflash` | yes: one card (with prompt lookup inside), up to 4 requests per card, `replica`, `tp` or `pp`, bf16 or int8 KV | no | `b70-serve`: the DSpark drafter (below); `b70-decode` refuses | refused |
-| `--kv-cache int8` | yes | not built | refused | refused |
+| `--kv-cache int8` | yes | not built | refused | yes, `pp` and `tp`: decode and prefill within 2 % of bf16, 12.84 KiB a position |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default; use it); `l0-int8` opt-in and slower | `l0` only | `l0` only |
 | KV cache per position (bf16) | 64 KiB | 20 KiB | 20 KiB (+ 335.5 MB of sliding-window rings) | 24.21 KiB (12 QSA layers: K + V 2 KiB + 18 B of indexer keys each) |
 | `--max-len auto`, one card, int8 head | 146,944 with MTP (the default; the context is sized for 4096-row prompt chunks); about 190k with `--spec off` (derived) | 262,144, with or without MTP (27.3 GB planned of 32.5, bf16 KV) | 262,144 on two cards (split at layer 25) | not served whole on one card; see below |
@@ -538,8 +561,8 @@ whole (no `--layers`):
   read. Without one, experts are kept by id. Ours counts 42 routing traces of the export itself:
   the 36 tool-call conversations, an agentic transcript and 7.5 % prose (repository docs, a novel, the golden prose
   prompts). It gives a derived 81 % of expert reads served from VRAM on two cards at 32,768.
-- `--max-len auto` takes the longest of 32,768, 65,536, 131,072 and 262,144 whose projected decode speed stays within
-  5 % of 32,768's.
+- `--max-len auto` takes the longest of 65,536, 131,072 and 262,144 whose projected decode speed stays within 1 % of
+  65,536's, and never less than 65,536.
 - The placement is static; experts are not swapped while serving.
 - `--host-experts auto` (the default) computes the experts in host memory on the CPU wherever a startup measurement
   says that beats reading them over PCIe, per number of rows a step (1 for a plain step, 2-4 for a verify), and
@@ -611,6 +634,7 @@ always uses it) and `--layers N` rather than `--layers auto`, and has no `--pipe
 O=<our export>   # the whole model; experts that do not fit VRAM in pinned host memory (63.2 GB pinned with the PLE)
 ./build/src/cli/b70-serve $O                     # two cards: tp
 ./build/src/cli/b70-serve $O --parallel pp        # faster prefill, slower decode
+./build/src/cli/b70-serve $O --parallel pp --kv-cache int8 --max-len 131072   # twice the context in the same memory
 ./build/src/cli/b70-decode $O --parallel pp --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $O --parallel tp --lm-head int8 --bench --prefill-length 4096 --tg 32
 
@@ -631,7 +655,9 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
 ### Prefill on two cards
 
 - Prefill runs on `l0` only. `--prefill-backend l0-int8` is refused, because its int8 linears rotate activations in
-  whole 1024-wide Hadamard blocks and this model's hidden size is 2560. `--prefill-chunk` is at most 2048.
+  whole 1024-wide Hadamard blocks and this model's hidden size is 2560. Under `pp` the prompt runs in 4096-row chunks
+  (4k prompts 4.7 % faster than in 2048-row chunks, decode after them as fast); `tp` keeps 2048-row chunks (a 4k
+  prompt in one 4096-row chunk has nothing to overlap with). `--prefill-chunk` is at most 4096.
 - Under `pp` each chunk crosses between the cards by copy, with card 0 running the next chunk while card 1 finishes
   this one. Under `tp` two chunks are in flight, each one's sums crossing on the copy engine beside the other's
   compute.
@@ -645,8 +671,12 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --sp
 - One request at a time, in every mode: `--max-num-seqs` above 1 is refused at startup; further requests wait their
   turn.
 - At least 128 GB of system RAM.
-- MTP in `b70-serve` only: `b70-decode --spec mtp` and `--draft-vocab` are refused.
-- bf16 KV cache only (`--kv-cache int8` is refused).
+- MTP in `b70-serve` only: `b70-decode --spec mtp` is refused.
+- `--kv-cache int8` (opt-in) stores the 12 sparse-attention layers' K and V rotated in int8 with one fp16 scale a head
+  and position: 13,152 B a position against 25,344 B (the indexer keys stay as they are). Measured served with MTP,
+  both modes: generation and prefill within 2 % of bf16, the most likely next token the same as the fp32 reference's
+  at every judged position. `--max-len auto` picks 65,536 with either cache; on `pp`, `--max-len 131072 --kv-cache
+  int8` fits and decodes as fast as bf16 at 65,536.
 - `reasoning_effort` is not forwarded to the template, as for Qwen3.8.
 - No `--profile`. Context is capped at the trained 262,144.
 

@@ -597,19 +597,20 @@ std::vector<uint32_t> load_q4_profile(const std::string& snapshot_or_repo, const
   throw std::runtime_error(path + " holds no 'counts' tensor (offload_curve.py profile writes it)");
 }
 
-model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit) {
+model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit, bool kv8) {
   const Opened o = open(snapshot_or_repo);
   const model::Qwen4ExpDesc pre = model::qwen4exp_desc(o.cfg, model::Q4Forms{});
   const SafetensorsSet set = q4_set(o.snap, pre);   // the headers only: the forms are read from the names
   model::Qwen4ExpDesc d = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
   d.hc_int8 = q4_hc_int8();
+  d.kv8 = kv8;
   return limited(d, layers_limit);
 }
 
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement, LmHeadForm lm_form,
                             uint32_t layers_limit, bool mtp, const runtime::qwen4exp::ExpertTier* tier,
-                            const runtime::qwen4exp::ExpertTier* tier1, uint32_t pf_rows) {
+                            const runtime::qwen4exp::ExpertTier* tier1, uint32_t pf_rows, bool kv8) {
   const auto t0 = std::chrono::steady_clock::now();
   const Opened o = open(snapshot_or_repo);
   const QuantConfig qc = check_qwen4exp_checkpoint_config(o.cfg);
@@ -619,6 +620,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   const double open_s = since(t0);
   model::Qwen4ExpDesc full = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
   full.hc_int8 = q4_hc_int8();
+  full.kv8 = kv8;
   if (max_len == 0) throw std::runtime_error(full.name + ": max_len 0 is not a model length");
   if (max_len > full.trained_max_len)
     throw std::runtime_error(full.name + ": max_len " + std::to_string(max_len) + " exceeds the trained context " +

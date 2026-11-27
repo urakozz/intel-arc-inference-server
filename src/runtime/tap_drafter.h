@@ -84,14 +84,13 @@ class TapDrafter : public TapSink {
   virtual const dflash::DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed) = 0;
 
   // Spec 19d (--parallel pp, runtime::PipelineEngine): the same proposer beside a target that is not a runtime::Engine.
-  // attach_target captures the draft list once against `target` (its embedding and head - the full one, or with
-  // `draft_vocab` the compact one - on the drafter's device) and that device's Control block `control` (the anchor
-  // pos / cur_token[0]; the drafts go to its cur_token[1..k]); the drafter's buffers must be at `max_len`.
+  // attach_target captures the draft list once against `target` (its embedding and head on the drafter's device) and
+  // that device's Control block `control` (the anchor pos / cur_token[0]; the drafts go to its cur_token[1..k]); the drafter's buffers must be at `max_len`.
   // draft_with drafts k ids (1 .. max_k(); the caller bounds k by its own max_verify_k) by handing the draft list to
   // `replay`, which runs it on the drafter's device and waits (it may also submit the target's verify); it returns
   // the draft readback after that fence.
   virtual void attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control,
-                             uint32_t max_len, bool draft_vocab) = 0;
+                             uint32_t max_len) = 0;
   virtual const dflash::DFlashDraftOut& draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k,
                                                   float temperature, uint64_t seed) = 0;
   // The prefill tail at prefill width: rows 0..n-1 of `taps` (bf16 [row][tap][hidden], the engine's staging - its

@@ -123,6 +123,7 @@ void check_dspark(const DFlashDesc& d);
 // 5 / 15 / 25 / 35 / 45 (each the mean of the target's four hyper-connection streams after that layer: the authors' capture),
 // convolutions 16 x 2 taps, selector rank 256 / top 16, rms_norm_eps 1e-6, vocabulary 248320, mask 248077.
 void check_flash_next_dflash(const DFlashDesc& d);
+inline const std::vector<uint32_t> kFlashNextDflashTaps = {5, 15, 25, 35, 45};
 // Plan 41k: Inkling 2 Mini's DFlash 2 drafter (incoai/Inkling-2-Mini-DFlash2) is the one its kernels are built for
 // (kernels::dflash::kInkling) - before the device, each refusal naming the key in plain words: DFlash 2, hidden 2304
 // (the target's), 32 / 8 heads x 128, intermediate 6912, every layer sliding at most 2048 and non-causal, block 8,

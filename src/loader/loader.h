@@ -6,7 +6,6 @@
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
-#include "loader/draft_vocab.h"
 #include "loader/lm_head_int8.h"
 #include "loader/quant.h"
 #include "loader/small_layout.h"
@@ -104,30 +103,6 @@ inline size_t mtp_norms_bytes(const model::ModelDesc& d) {
 // ModelDesc::mtp_checkpoint_tensors() when every tensor is bf16 (Ornith 785).
 constexpr size_t kMtpTensors = 15;
 
-// Spec 8 §11: the MTP draft's reduced vocabulary V' (`b70-serve --draft-vocab`), built
-// only when asked (`load(..., draft_vocab.size > 0)`, which needs the MTP head and an int8
-// or bf16 lm_head). The head's rows ids[0..|V'|) - and for int8 their fp32 scales -
-// gathered at load from the host copy the loader just made of the head (the int8
-// quantisation's, or the bf16 tiling's) into the same tiled layout at N = |V'|
-// (loader::gather_int8_tiled_rows / gather_bf16_tiled_rows), and the id table the draft's
-// argmax maps its compact index through. The verify list never reads any of it.
-//
-// **The compact head is the head's own form**, a byte-exact subset of what the verify
-// list reads, so the compact GEMV's column j is the full GEMV's column ids[j], bitwise
-// (draft_vocab_kernels_test, both forms): gemv_i8w or gemv_bf16 at N = |V'|. An int4
-// (`--quant_lm_head`) checkpoint head is refused - no int4 gather and no binaries for it.
-struct DraftVocab {
-  // int8: [|V'|/16][K/16][16][16] + fp32 scales [|V'|]; bf16: [|V'|/16][K/8][8][16], no
-  // scales (2x the int8 bytes). Kind Int8 or Bf16, shape {K = hidden, N = |V'|, S 1, layout 0}.
-  DeviceWeight head;
-  l0::Mem ids;                    // u32 [|V'|], ascending - the compact index -> id table
-  std::vector<uint32_t> host_ids; // the same table on the host
-  uint32_t size() const { return uint32_t(host_ids.size()); }
-  size_t bytes() const {
-    return head.mem.size() + (head.scales ? head.scales->size() : 0) + ids.size();
-  }
-};
-
 struct LoadReport {            // printed by load(); asserted by the checkpoint test
   size_t int4_bytes = 0, scale_bytes = 0, bf16_linear_bytes = 0;
   size_t embed_bytes = 0, lm_head_bytes = 0, pad_bytes = 0;
@@ -168,12 +143,6 @@ struct LoadReport {            // printed by load(); asserted by the checkpoint 
   std::string quant_note;
   // Spec 9: the host quantisation of an int8 `lm_head` (0 unless LmHeadForm::Int8).
   double lm_head_quant_seconds = 0;
-  // Spec 8 §11: the draft vocabulary's device bytes (DraftVocab::bytes(), 0 when off) and
-  // where its ids came from. NOT in total(): those eight fields are the model as loaded
-  // before §11, and Engine::memory_line() prints this as its own term.
-  size_t draft_vocab_bytes = 0;
-  DraftVocabCounts draft_vocab_counts;
-  double draft_vocab_seconds = 0;
   double seconds = 0;
   // Spec 15c: every MoE layer's device bytes (loader::moe_bytes(desc): routers, all
   // routed experts and the shared experts), in total(); 0 on a dense model. Only the
@@ -202,9 +171,6 @@ struct LoadedModel {
   // Spec 14 §3.1: the model this checkpoint is, chosen from config.json's
   // architectures[0] (model::desc_for_architecture). A process-lifetime singleton.
   const model::ModelDesc* desc = nullptr;
-  // Spec 8 §11: null unless a draft vocabulary was asked for. Last, so load()'s
-  // aggregate initialiser of the members above is unchanged.
-  std::unique_ptr<DraftVocab> draft_vocab;
   // Spec 15c: a MoE model's layers, indexed by layer (every layer of Ornith); empty
   // on a dense model. For a MoE model the table's GateUp / Down rows (the shared
   // expert, spec 15b) are NOT in `linears`: the shared expert is the last block here.
@@ -242,14 +208,8 @@ inline const DeviceWeight& prefill_ab(const LoadedModel& m, uint32_t layer) {
 // `lm_head` (spec 9 §3): Checkpoint loads the head as shipped; Int8 quantises a bf16
 // head to int8 rows + fp32 row scales on the host (loader/lm_head_int8.h) and throws
 // if the checkpoint's head is not bf16.
-// `draft_vocab` (spec 8 §11): size > 0 builds LoadedModel::draft_vocab - V' chosen by
-// loader::select_draft_vocab over the spec's lists at the model's vocab_used, gathered
-// from the head in its loaded form (int8 or bf16). Throws before a byte is read unless
-// `mtp` is on, the head is not the checkpoint's int4, and the size is one the kernels
-// are compiled for (kDraftVocabSizes).
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len = 16384,
-                 bool mtp = false, LmHeadForm lm_head = LmHeadForm::Checkpoint,
-                 const DraftVocabSpec& draft_vocab = DraftVocabSpec{});
+                 bool mtp = false, LmHeadForm lm_head = LmHeadForm::Checkpoint);
 
 // Spec 6 §10 (`--max-len auto`): the planner needs the loaded byte count, and load()
 // needs a max_len. So auto loads at a small max_len, plans, and then re-tables the
@@ -276,7 +236,7 @@ void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len, uint32_t lo
 // of a card is a byte of the one-card repack (tests/loader/tp_slice_test.cc) and the two cards' int4 bytes sum to
 // one card's. The checkpoint's a||b must be bf16 (Qwen3.8's). Spec 17d: `mtp` loads the MTP head WHOLE on the card
 // (LoadedModel::mtp at the checkpoint's one-card shapes - both cards hold the same head and run it on the same
-// residual); never a draft vocabulary.
+// residual).
 struct TpSlice {
   uint32_t rank = 0;
   model::TpCrossing crossing = model::TpCrossing::Slices;

@@ -90,6 +90,13 @@
 #error "kv8 KV_PAGED: the gate reads no KV"
 #endif
 
+// KV_ONLY (plan 21-QFN-v3a, PERF-85's form: the Flash-Next MTP head's prompt pass reads the cached K / V and never
+// attn_q; undefined on every other command line): the writer's grid is (KV_HEADS, rows), work-group w the full grid's
+// Q_HEADS + w, the same text; no q-head work-group runs.
+#if defined(KV_ONLY) && !KV8_PREP
+#error "kv8 KV_ONLY: the writer only"
+#endif
+
 // KV8_I8S (PERF-114, the int8 prompt pass; undefined on every other command line): int8 attention scores in the prompt pass. The
 // writer (KV8_PREP, PF = 1) quantises the rotated bf16 q per row and head over its 256 dims - s = amax / 127 (fp32),
 // q8 = s == 0 ? 0 : clamp(rint(q / s), -127, 127) - into attn_q as int8 [C][q-heads][256] and s into q_scale
@@ -308,7 +315,11 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
                             , __global const uint* restrict pages
 #endif
                             ) {
+#ifdef KV_ONLY
+  const uint wg = Q_HEADS + get_group_id(0);
+#else
   const uint wg = get_group_id(0);
+#endif
   const uint m = get_group_id(1);
   const uint i = get_local_id(0);
   __local float red[KV8_WG];   // the norm's sum of squares, then the amax tree

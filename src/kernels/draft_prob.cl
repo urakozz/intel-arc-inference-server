@@ -8,8 +8,7 @@
 //            and writes M and S (fp32 bits) to ctrl[CTRL_DSTAT], ctrl[CTRL_DSTAT + 1]
 //
 // One row (the draft list's M = 1). A tensor-parallel card reduces its own vocabulary half; the host merges the
-// two (M, S) pairs. Indices >= VOCAB_USED are masked as argmax.cl masks them, and -inf logits (a draft
-// vocabulary's row outside V') add nothing. The result steers only how many drafts are made and verified,
+// two (M, S) pairs. Indices >= VOCAB_USED are masked as argmax.cl masks them, and -inf logits add nothing. The result steers only how many drafts are made and verified,
 // never which id is drafted or kept: the fixed trees keep it deterministic all the same.
 
 #ifndef VOCAB

@@ -50,11 +50,14 @@
 
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
+#include "cli/tap_dump.h"
+#include "common/bf16.h"
 #include "l0/context.h"
 #include "loader/lm_head_int8.h"
 #include "loader/qwen4exp_layout.h"
 #include "loader/qwen4exp_loader.h"
 #include "loader/snapshot.h"
+#include "model/dflash.h"
 #include "model/qwen4exp.h"
 #include "runtime/vram_bars.h"
 #include "runtime/prefill_backend.h"
@@ -108,6 +111,8 @@ struct DecodeArgs {
   // Spec 21-QFN-v1e: b70-serve's --spec mtp / --spec loads the MTP head - the planner (settle) then carries its weights, its
   // buffers and the verify rows (runtime::qwen4exp::plan(..., mtp)). b70-decode never sets it.
   bool load_mtp = false;
+  // --dump-taps OUT[,OUT...] with --ids IN[,IN...] (one or two cards, the prompt pass on): dump_taps' files.
+  std::string dump_taps;
   // --host-experts (PERF-124, runtime::qwen4exp::CpuExperts): auto = Adaptive, gpu = Off, cpu = All; `host_experts_given`:
   // named on the command line (an explicit gpu / cpu where it cannot apply is refused or noted; auto is silent).
   runtime::qwen4exp::CpuExperts::Mode host_experts = runtime::qwen4exp::CpuExperts::Mode::Adaptive;
@@ -145,13 +150,15 @@ inline void check_args(const DecodeArgs& a) {
   if (a.mtp)
     throw std::runtime_error("b70-decode runs Qwen3.8-Flash-Next plain: its MTP head is served by b70-serve "
                              "--spec mtp and measured by qwen4exp_mtp_test - drop --spec mtp");
-  if (a.kv8)
-    throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (int8 later - kv8.cl "
-                             "hard-codes 24 q / 4 kv heads and this model has 2)");
+  if (a.kv8 && runtime::qwen4exp::q4_attn() == runtime::qwen4exp::Q4Attn::Eager)
+    throw std::runtime_error("--kv-cache int8 reads the cache with the flash attention: unset B70_Q4_ATTN (eager is "
+                             "the bf16 reference's form)");
   if (a.profile)
     throw std::runtime_error("--profile is not built for Qwen3.8-Flash-Next (--bench times it)");
   if (devices_of(a) == 1 && a.pipe.have_split)
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
+  if (!a.dump_taps.empty() && (a.bench || a.pipe.tp() || a.n == 0))
+    throw std::runtime_error("--dump-taps takes --ids and --n on one card or under --parallel pp");
   if (a.pipe.tp() && !a.int8_head())
     throw std::runtime_error("--parallel tp splits the int8 lm_head by vocabulary between the cards: add --lm-head int8");
 }
@@ -184,10 +191,11 @@ struct Settled {
   uint32_t pf_rows = runtime::qwen4exp::kPfC;          // the prefill scratch's chunk rows (runtime::qwen4exp::pf_chunk_choice)
 };
 
-// The whole model's --max-len auto (spec 21-QFN-v2 §9): each GB of context is a GB of experts out of VRAM, so the largest
-// of 32768 / 65536 / 131072 / 262144 whose projected decode stays within 5 % of 32768's (runtime::qwen4exp::
-// tier_decode_ms, derived).
-inline constexpr uint32_t kWholeMinLen = 32768;
+// The whole model's --max-len auto (spec 21-QFN-v2 §9; speed first with a 65536 floor, owner 2026-11-27): each GB of
+// context is a GB of experts out of VRAM, so the largest of 65536 / 131072 / 262144 whose projected decode stays within
+// 1 % of 65536's (runtime::qwen4exp::tier_decode_ms, derived), never below 65536.
+inline constexpr uint32_t kWholeMinLen = 65536;
+inline constexpr double kWholeAutoSlack = 1.01;
 using runtime::qwen4exp::tier_decode_ms;
 
 // The prefill chunk's line: what the 4096-row chunk's scratch keeps from the experts and the projected decode either way.
@@ -260,7 +268,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
       if (s.max_len > cap)
         throw std::runtime_error("--max-len " + std::to_string(s.max_len) + " exceeds Qwen3.8-Flash-Next's trained "
                                  "context " + std::to_string(cap));
-    } else if (whole) {   // the pp rule: the longest whose projected decode stays within 5 % of 32768's
+    } else if (whole) {   // the pp rule: the longest whose projected decode stays within 1 % of 65536's
       const rq::ExpertBudget b0 = budget(kWholeMinLen);
       const double t0 = tier_decode_ms(b0, tier(b0, 0), prof);
       s.max_len = kWholeMinLen;
@@ -275,11 +283,11 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
         }
         const double ms = tier_decode_ms(b, ta, prof);
         tried += std::format("{}{:d}: {:.2f} ms", tried.empty() ? "" : ", ", len, ms);
-        if (ms > 1.05 * t0) break;
+        if (ms > kWholeAutoSlack * t0) break;
         s.max_len = len;
       }
-      std::print(stderr, "max_len: auto -> {:d} (the longest whose projected decode stays within 5% of {:d}'s; derived "
-                 "ms a token: {})\n", s.max_len, kWholeMinLen, tried.c_str());
+      std::print(stderr, "max_len: auto -> {:d} (the longest whose projected decode stays within 1% of {:d}'s, never below "
+                 "it; derived ms a token: {})\n", s.max_len, kWholeMinLen, tried.c_str());
     } else {
       s.max_len = runtime::kMinAutoMaxLen;
       std::print(stderr, "max_len: auto -> {:d} (--layers N under --parallel tp)\n", s.max_len);
@@ -333,7 +341,8 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
     };
     if (a.max_len.is_auto) {
       rq::ExpertBudget b;
-      const double t0 = tier_decode_ms(b, tier_at(kWholeMinLen, &b), prof);
+      const bool cpu = a.host_experts != runtime::qwen4exp::CpuExperts::Mode::Off;   // the CPU takes a share of the misses
+      const double t0 = tier_decode_ms(b, tier_at(kWholeMinLen, &b), prof, cpu);
       s.max_len = kWholeMinLen;
       std::string tried;
       for (uint32_t len = kWholeMinLen; len <= cap; len *= 2) {
@@ -345,13 +354,13 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
           tried += std::format("{}{:d}: host memory", tried.empty() ? "" : ", ", len);
           break;
         }
-        const double ms = tier_decode_ms(b, t, prof);
+        const double ms = tier_decode_ms(b, t, prof, cpu);
         tried += std::format("{}{:d}: {:.2f} ms", tried.empty() ? "" : ", ", len, ms);
-        if (ms > 1.05 * t0) break;
+        if (ms > kWholeAutoSlack * t0) break;
         s.max_len = len;
       }
-      std::print(stderr, "max_len: auto -> {:d} (the longest whose projected decode stays within 5% of {:d}'s; derived "
-                 "ms a token: {})\n", s.max_len, kWholeMinLen, tried.c_str());
+      std::print(stderr, "max_len: auto -> {:d} (the longest whose projected decode stays within 1% of {:d}'s, never below "
+                 "it; derived ms a token: {})\n", s.max_len, kWholeMinLen, tried.c_str());
     } else {
       s.max_len = a.max_len.value;
       if (s.max_len > cap)
@@ -366,7 +375,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
         return rq::expert_budget(d, s.placement, s.max_len, int8, hd, pf, dev, a.reserve, rows);
       };
       const rq::PfChunkChoice c = rq::pf_chunk_choice(d, at(rq::kPfC), at(rq::kPfCWide), prof.empty() ? nullptr : &prof,
-                                                      false);
+                                                      false, a.host_experts != runtime::qwen4exp::CpuExperts::Mode::Off);
       s.pf_rows = c.rows;
       print_pf_rows(c);
     }
@@ -437,6 +446,91 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
   return s;
 }
 
+// Plan 21-QFN-v3a Task 0: after the timed steps (--bench) or the printed ids (--ids), up to kMissSamples more one at a
+// time (`room` positions left), each step's routed experts read from host memory counted (`misses`: per card under
+// tp, `cards` of them) - "misses a token". Off the timed path.
+inline constexpr uint32_t kMissSamples = 16;
+template <class Step, class Misses>
+void print_misses(uint32_t room, Step step, Misses misses, uint32_t cards) {
+  const uint32_t n = std::min(kMissSamples, room);
+  std::array<uint64_t, 2> sum{};
+  for (uint32_t i = 0; i < n; ++i) {
+    step();
+    const std::array<uint32_t, 2> m = misses();
+    sum[0] += m[0];
+    sum[1] += m[1];
+  }
+  if (n == 0) return;
+  if (cards == 1)
+    std::print(stderr, "misses: {:.2f} routed experts a token read from host memory ({:d} sampled steps after the timed "
+               "ones)\n", double(sum[0]) / n, n);
+  else
+    std::print(stderr, "misses: {:.2f} / {:.2f} routed expert halves a token read from host memory, card 0 / card 1 "
+               "({:d} sampled steps after the timed ones)\n", double(sum[0]) / n, double(sum[1]) / n, n);
+}
+
+// "a,b,c" -> {a, b, c}.
+inline std::vector<std::string> split_list(const std::string& s) {
+  std::vector<std::string> out;
+  for (size_t at = 0;;) {
+    const size_t comma = s.find(',', at);
+    out.push_back(s.substr(at, comma - at));
+    if (comma == std::string::npos) return out;
+    at = comma + 1;
+  }
+}
+
+// --dump-taps (cli/tap_dump.h's file, one a --ids file, the engine reset between them): the prompt up to its last
+// 2048 ids by the prompt pass, then one decode replay a position for the rest of the prompt and --n greedy ids. Per
+// replay the DFlash 2 drafter's taps - the mean of H's four hyper-connection streams after layers 5 / 15 / 25 / 35 / 45
+// (fp32 sum, one bf16 rounding: the drafter's authors' capture), read from the debug tap - and, on the prompt's last
+// row and every generated one, the head's top 64 and log-sum-exp.
+inline int dump_taps(runtime::qwen4exp::Qwen4ExpEngine& eng, const DecodeArgs& a, uint32_t chunk) {
+  const model::Qwen4ExpDesc& d = eng.model().desc;
+  const std::vector<uint32_t>& layers = model::kFlashNextDflashTaps;
+  const std::vector<std::string> ins = split_list(a.ids_path), outs = split_list(a.dump_taps);
+  std::vector<float> logits(d.vocab);
+  for (size_t s = 0; s < ins.size(); ++s) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<uint32_t> prompt = read_ids(ins[s], d.vocab);
+    const auto np = uint32_t(prompt.size());
+    TapDump dump(np, a.n, d.hidden, d.vocab_used, layers);
+    dump.ids.assign(prompt.begin(), prompt.end());
+    eng.reset();
+    if (dump.tap_from) eng.prefill(std::vector<uint32_t>(prompt.begin(), prompt.begin() + dump.tap_from), chunk);
+    uint32_t next = 0;
+    for (uint32_t row = 0; row < dump.rows; ++row) {
+      const uint32_t p = dump.tap_from + row;
+      const uint32_t id = p < np ? prompt[p] : next;
+      if (p >= np) dump.ids.push_back(int32_t(id));
+      eng.ingest({id});
+      const std::vector<uint16_t> H = eng.read_debug_H();
+      for (size_t t = 0; t < layers.size(); ++t) {
+        const uint16_t* h = H.data() + size_t(layers[t]) * d.hc_n();
+        uint16_t* out = dump.taps[t].data() + size_t(row) * d.hidden;
+        for (uint32_t c = 0; c < d.hidden; ++c) {
+          float sum = 0.f;
+          for (uint32_t k = 0; k < d.hc; ++k) sum += common::bf16_to_f32(h[size_t(k) * d.hidden + c]);
+          out[c] = common::f32_to_bf16(sum / float(d.hc));
+        }
+      }
+      next = eng.pending();
+      if (p + 1 >= np) {
+        eng.read_logits_into(logits.data());
+        dump.head(row, logits.data());
+        dump.greedy[row] = int32_t(next);
+      }
+    }
+    dump.snapshot = a.path;
+    dump.kv = a.kv8 ? "int8" : "bf16";
+    dump.write(outs[s]);
+    std::print(stderr, "Qwen3.8-Flash-Next tap dump {}: {:d} prompt ids (taps from {:d}), {:d} generated, {:.0f} s\n",
+               outs[s], np, dump.tap_from, a.n,
+               std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+  }
+  return 0;
+}
+
 // The loader prints its report to stdout (its convention); `Redirect` is the caller's StdoutToStderr so the report
 // joins the diagnostics on stderr.
 template <class Redirect>
@@ -447,9 +541,14 @@ int run_decode(const DecodeArgs& a) {
   check_args(a);   // before any tensor is read
   if (a.pipe.tp()) return run_decode_tp<Redirect>(a);
   const uint32_t devs = devices_of(a);
-  const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.path, 0);
+  const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.path, 0, a.kv8);
   std::vector<uint32_t> ids;
-  if (!a.bench) {
+  if (!a.dump_taps.empty()) {   // the longest prompt for the checks below
+    if (split_list(a.ids_path).size() != split_list(a.dump_taps).size())
+      throw std::runtime_error("--dump-taps names one output file a --ids file");
+    for (const std::string& in : split_list(a.ids_path))
+      if (std::vector<uint32_t> v = read_ids(in, full.vocab); v.size() > ids.size()) ids = std::move(v);
+  } else if (!a.bench) {
     ids = read_ids(a.ids_path, full.vocab);
   } else {
     ids.resize(a.depth);
@@ -481,14 +580,14 @@ int run_decode(const DecodeArgs& a) {
     Redirect redirect;
     return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head,
                                  s.desc.layers == full.layers ? 0 : s.desc.layers, false, s.tier ? &*s.tier : nullptr,
-                                 nullptr, s.pf_rows);
+                                 nullptr, s.pf_rows, a.kv8);
   }();
   if (model.desc.layers < model.checkpoint_layers)
     std::print(stderr, "layers: {:d} of the checkpoint's {:d} (--layers: development mode; the final mixer reads layer "
                "{:d}'s H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
   runtime::PipelineOptions opt;
-  runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt, {},
-                                        a.host_experts);
+  runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/!a.dump_taps.empty(), opt,
+                                        {}, a.host_experts);
   std::print(stderr, "engine: Qwen3.8-Flash-Next, {:d} device(s){}, {:d} launches a token ({} attention, B70_Q4_ATTN), "
              "max_len {:d}; the PLE table's {:d} host pages read back by the device; {:d} expert block words read "
              "back through the tables ({:.1f} ms)\n", eng.devices(),
@@ -511,6 +610,7 @@ int run_decode(const DecodeArgs& a) {
                devs == 2 ? "; each chunk crosses by copy, card 0 running the next chunk while card 1 finishes this one" : "");
   }
   std::print(stderr, "{}\n", eng.memory_line().c_str());
+  if (!a.dump_taps.empty()) return dump_taps(eng, a, chunk);
   const auto t0 = std::chrono::steady_clock::now();
   if (a.prefills())
     eng.prefill(ids, chunk);
@@ -534,7 +634,11 @@ int run_decode(const DecodeArgs& a) {
   std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token ({:.1f}% of it inside the fence)\n", n,
              eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
              eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
-  if (!a.bench) return 0;
+  if (!a.bench) {
+    print_misses(eng.max_len() - eng.pos(), [&] { eng.generate(1); },
+                 [&] { return std::array{eng.read_step_misses(), 0u}; }, 1);
+    return 0;
+  }
   // Probes only: B70_Q4_PROFILE=R prints each launch's mean device time over R profiled replays after the bench.
   if (const char* pr = std::getenv("B70_Q4_PROFILE"); pr != nullptr && *pr != '\0') {
     const std::vector<double> us = eng.profile_decode(uint32_t(std::stoul(pr)));
@@ -565,6 +669,8 @@ int run_decode(const DecodeArgs& a) {
                runtime::qwen4exp::q4_attn_name(eng.attention()),
                devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "", a.depth, chunk,
                ingest_ms, ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
+  print_misses(eng.max_len() - eng.pos(), [&] { eng.generate(1); }, [&] { return std::array{eng.read_step_misses(), 0u}; },
+               1);
   return 0;
 }
 
@@ -574,7 +680,7 @@ int run_decode(const DecodeArgs& a) {
 // greedy decode, the bench rows).
 template <class Redirect>
 int run_decode_tp(const DecodeArgs& a) {
-  const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.path, 0);
+  const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.path, 0, a.kv8);
   std::vector<uint32_t> ids;
   if (!a.bench) {
     ids = read_ids(a.ids_path, full.vocab);
@@ -598,7 +704,7 @@ int run_decode_tp(const DecodeArgs& a) {
     Redirect redirect;
     return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head,
                                  s.desc.layers == full.layers ? 0 : s.desc.layers, false, s.tier ? &*s.tier : nullptr,
-                                 s.tier1 ? &*s.tier1 : nullptr, s.pf_rows);
+                                 s.tier1 ? &*s.tier1 : nullptr, s.pf_rows, a.kv8);
   }();
   runtime::qwen4exp::Qwen4ExpTpEngine eng(*c0, *c1, std::move(model), s.max_len, {}, a.host_experts);
   std::print(stderr, "engine: Qwen3.8-Flash-Next, --parallel tp, {:d} launches a token a card, max_len {:d}; {:d} expert "
@@ -633,7 +739,11 @@ int run_decode_tp(const DecodeArgs& a) {
   });
   std::print(stderr, "generate: {:d} ids, {:.2f} t/s, {:.2f} ms/token\n", n, eng.last_tok_per_s(),
              n ? eng.last_gen_ms() / n : 0.0);
-  if (!a.bench) return 0;
+  if (!a.bench) {
+    print_misses(eng.max_len() - eng.pos(), [&] { eng.generate(1); },
+                 [&] { return std::array{eng.read_step_misses(0), eng.read_step_misses(1)}; }, 2);
+    return 0;
+  }
   const char* sha = std::getenv("B70_GIT_SHA");
   if (sha == nullptr || *sha == '\0') sha = "unknown";
   std::print("| b70-decode {} qwen4exp L{:d}{} flash tp2 | {:d} | {:d} | {:.2f} | {:.2f} |\n", sha,
@@ -643,6 +753,8 @@ int run_decode_tp(const DecodeArgs& a) {
     std::print("| b70-decode {} qwen4exp L{:d}{} flash tp2 l0 pp | {:d} | {:d} | {:.1f} | {:.2f} |\n", sha,
                eng.model().desc.layers, a.int8_head() ? " int8-head" : "", a.depth, chunk, ingest_ms,
                ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
+  print_misses(eng.max_len() - eng.pos(), [&] { eng.generate(1); },
+               [&] { return std::array{eng.read_step_misses(0), eng.read_step_misses(1)}; }, 2);
   return 0;
 }
 

@@ -52,6 +52,22 @@ inline ushort f2bf(float f) {
   return (ushort)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
 }
 
+#ifndef FOLD_GATE
+#define FOLD_GATE 8
+#endif
+#ifndef FOLD_CO
+#define FOLD_CO 16
+#endif
+#ifndef FOLD_KV
+#define FOLD_KV 8
+#endif
+// Inkling's committed rows are projected at their actual width.
+#ifdef CTX_DYNAMIC_ROWS
+#define CTX_ROWS get_num_groups(1)
+#else
+#define CTX_ROWS M
+#endif
+
 // FOLD (the int4 drafter's split-K consumers, spec 19v2): the producers leave S partial slices and each consumer sums
 // them as it reads; without FOLD a read is the plain element.
 #ifdef FOLD
@@ -129,11 +145,11 @@ __kernel void df_norm_fc(__global const float* restrict src, __global const floa
   const uint r = get_group_id(1), lid = get_local_id(0);
   __global const float* s = src + (size_t)r * H;
   float a = 0.0f;
-  for (uint i = lid; i < H; i += WG) { const float v = fold_at(src, (size_t)M * H, (size_t)r * H + i, 8); a = a + v * v; }
+  for (uint i = lid; i < H; i += WG) { const float v = fold_at(src, (size_t)CTX_ROWS * H, (size_t)r * H + i, 8); a = a + v * v; }
   const float ss = wg_sum(a, red);
   const float rstd = 1.0f / sqrt(ss / (float)H + EPS);
   for (uint i = lid; i < H; i += WG) {
-    const float v = (fold_at(src, (size_t)M * H, (size_t)r * H + i, 8) * rstd) * w[i];
+    const float v = (fold_at(src, (size_t)CTX_ROWS * H, (size_t)r * H + i, 8) * rstd) * w[i];
     h[(size_t)r * H + i] = v;
     x[(size_t)r * H + i] = f2bf(v);
   }
@@ -160,9 +176,9 @@ inline float conv_at(__global const float* src, __global const float* co, __glob
   const uint g = i / GROUP;
   __global const float* cs = co + (size_t)r * KPN + side * CTAPS * G;
   __global const float* bs = base + (size_t)side * CTAPS * H;
-  float o = (bs[i] + FOLD_AT(cs, (size_t)M * KPN, g, 16)) * FOLD_AT(src, (size_t)M * H, (size_t)r * H + i, slices);
+  float o = (bs[i] + FOLD_AT(cs, (size_t)M * KPN, g, FOLD_CO)) * FOLD_AT(src, (size_t)M * H, (size_t)r * H + i, slices);
   for (uint t = 1; t < CTAPS; ++t)
-    if (TAP_OK(r, t)) o = o + (bs[(size_t)t * H + i] + FOLD_AT(cs, (size_t)M * KPN, t * G + g, 16)) *
+    if (TAP_OK(r, t)) o = o + (bs[(size_t)t * H + i] + FOLD_AT(cs, (size_t)M * KPN, t * G + g, FOLD_CO)) *
                        FOLD_AT(src, (size_t)M * H, (size_t)(r - t) * H + i, slices);
   return o;
 }
@@ -191,8 +207,8 @@ __attribute__((reqd_work_group_size(WG, 1, 1)))
 __kernel void df_silu_mul(__global const float* restrict gu, __global ushort* restrict a) {
   const uint r = get_group_id(1), i = get_group_id(0) * WG + get_local_id(0);
   if (i >= INTER) return;
-  const float g = FOLD_AT(gu, (size_t)M * 2 * INTER, (size_t)r * 2 * INTER + i, 8),
-              u = FOLD_AT(gu, (size_t)M * 2 * INTER, (size_t)r * 2 * INTER + INTER + i, 8);
+  const float g = FOLD_AT(gu, (size_t)M * 2 * INTER, (size_t)r * 2 * INTER + i, FOLD_GATE),
+              u = FOLD_AT(gu, (size_t)M * 2 * INTER, (size_t)r * 2 * INTER + INTER + i, FOLD_GATE);
   a[(size_t)r * INTER + i] = f2bf(g / (1.0f + exp(-g)) * u);
 }
 #endif
@@ -344,8 +360,8 @@ __kernel void df_ctx_store(__global const uint* restrict dctl, __global const fl
   const uint pos = dctl[DCTL_PPOS] + r, slot = pos % RING;
 #endif
 #ifdef FOLD
-  const float x = fold_at(kv + (size_t)l * 8 * M * 2 * KVN, (size_t)M * 2 * KVN,
-                          (size_t)r * 2 * KVN + (is_v ? KVN : 0) + (size_t)head * HD + i, 8);
+  const float x = fold_at(kv + (size_t)l * FOLD_KV * CTX_ROWS * 2 * KVN, (size_t)CTX_ROWS * 2 * KVN,
+                          (size_t)r * 2 * KVN + (is_v ? KVN : 0) + (size_t)head * HD + i, FOLD_KV);
 #else
   const float x = kv[((size_t)l * M + r) * 2 * KVN + (is_v ? KVN : 0) + (size_t)head * HD + i];
 #endif

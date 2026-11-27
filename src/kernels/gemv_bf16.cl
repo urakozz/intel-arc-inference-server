@@ -96,6 +96,18 @@
 #error "GEMV_AHEAD must divide a sub-group's K / 8 steps"
 #endif
 
+// BF16_DPAS 1 (Inkling's controllers; Qwen3.8's a||b and the MTP head's fc and q||k||v, ROWG too): the tile's dots on
+// the bf16 DPAS, 8 rows an operand (rows past M zero) at every M, so a verify row's sums are the one-row build's (a
+// row's sums do not depend on the operand's other rows).
+// Each k16 step's two 8-k reads are the B operand as they come (lane = column, k pairs), the rows' 16 k the A
+// operand; two steps' reads in flight. Not the scalar chain's order: the f32 judge.
+#ifndef BF16_DPAS
+#define BF16_DPAS 0
+#endif
+#if BF16_DPAS && (M > 8 || (K8_PER_SG % 4) != 0 || GEMV_KMAJOR)
+#error "gemv_bf16: BF16_DPAS takes up to 8 rows, K slices of whole k32 pairs, the [n_tile][k8] order"
+#endif
+
 #if INK_CONTROLLER == 1
 #include "bf16.h"
 #else
@@ -162,7 +174,29 @@ __kernel void gemv_bf16(__global const ushort* restrict w,
     a += bf16f(wv.s6) * bf16f(xv.s6); a += bf16f(wv.s7) * bf16f(xv.s7); \
     acc[m] = a;                                                 \
   }
-#if GEMV_KMAJOR || GEMV_AHEAD > 1
+#if BF16_DPAS
+  float8 c = (float8)(0.f);
+  for (uint k16 = k8_0 / 2; k16 < (k8_0 + K8_PER_SG) / 2; k16 += 2, tile += 512) {
+    ushort8 wq[4];
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < 4; ++j)
+      wq[j] = intel_sub_group_block_read_us8(tile + j * 128);
+    __attribute__((opencl_unroll_hint)) for (uint j = 0; j < 2; ++j) {
+      short8 a = (short8)(0);
+      if (M > 0) a.s0 = intel_sub_group_block_read_us(x + (k16 + j) * 16);
+      if (M > 1) a.s1 = intel_sub_group_block_read_us(x + (size_t)K + (k16 + j) * 16);
+      if (M > 2) a.s2 = intel_sub_group_block_read_us(x + (size_t)2 * K + (k16 + j) * 16);
+      if (M > 3) a.s3 = intel_sub_group_block_read_us(x + (size_t)3 * K + (k16 + j) * 16);
+      if (M > 4) a.s4 = intel_sub_group_block_read_us(x + (size_t)4 * K + (k16 + j) * 16);
+      if (M > 5) a.s5 = intel_sub_group_block_read_us(x + (size_t)5 * K + (k16 + j) * 16);
+      if (M > 6) a.s6 = intel_sub_group_block_read_us(x + (size_t)6 * K + (k16 + j) * 16);
+      if (M > 7) a.s7 = intel_sub_group_block_read_us(x + (size_t)7 * K + (k16 + j) * 16);
+      c = intel_sub_group_bf16_bf16_matrix_mad_k16(a, as_int8((ushort16)(wq[2 * j], wq[2 * j + 1])), c);
+    }
+  }
+  float cs[8];
+  vstore8(c, 0, cs);
+  for (int m = 0; m < M; ++m) acc[m] = cs[m];
+#elif GEMV_KMAJOR || GEMV_AHEAD > 1
 #if GEMV_KMAJOR
   tile = w + ((size_t)k8_0 * (N / SG) + n_tile) * 128;
   const size_t step = (size_t)(N / SG) * 128;

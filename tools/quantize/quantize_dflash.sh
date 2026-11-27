@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One command: z-lab/Qwen3.8-27B-DFlash2 (bf16) -> our AutoRound W4A16 g64 symmetric drafter, tuned on the
 # QUANTISED target's taps over the training opencode recordings (the open-work list, "DFlash drafter quant").
+# MODEL=inkling does the same for incoai/Inkling-2-Mini-DFlash2 on thinkingmachines/Inkling-2-Mini (see below).
 #
 #   tools/quantize/quantize_dflash.sh start              start (or resume) the run, detached; on the GPU machine
 #   tools/quantize/quantize_dflash.sh status             stages done, taps dumped, AutoRound's block, the result
@@ -29,6 +30,18 @@
 #            selector projection included), norms / conv bases / codebooks the source's bytes, commit and
 #            recipe recorded; the last line is "DFLASH QUANT: OK <export>" or "DFLASH QUANT: FAIL ..."
 #
+# MODEL=inkling (Inkling 2 Mini's DFlash 2 drafter; everything else as above):
+#   sources  tools/quantize/dflash/inkling_sources.py: each training request's messages and tools rendered by
+#            Inkling's own chat template (the recordings' prompt_ids are Qwen3.8 tokens), one ids file a request in
+#            $WORK/ids; the same held-out rule
+#   taps     b70-decode --dump-taps on card CARD, one GPU command a request: the prompt by the prompt pass (its
+#            last 2048 positions' taps kept), then MAX_CONT greedy ids, the taps after visits 5 / 23 / 41 / 48.
+#            The continuation is the engine's own greedy text, the text the drafter predicts when serving
+#   quant / export / check  unchanged (calib.py feeds the block rows through Inkling's embed_norm)
+#   Output: QUANT_ROOT/Inkling-2-Mini-DFlash2-W4A16-g64-<date>/, QUANT_ROOT/dflash-inkling-current points at it.
+#   On the box, from the engine tree, under the card's lock:
+#     MODEL=inkling CARD=1 B70_CARD_RUN="tools/gpu_lock.sh card" tools/quantize/quantize_dflash.sh start
+#
 # Output: OUT = QUANT_ROOT/Qwen3.8-27B-DFlash2-W4A16-g64-<date>/ (the checkpoint only: config.json,
 # model.safetensors, dflash_recipe.json, README.md); the work beside it in $OUT.work/ (sources.json, taps/, raw/,
 # .done-*, RESULT, run.pid, run.log -> LOGDIR/run-<time>.log); QUANT_ROOT/dflash-current points at OUT.
@@ -53,8 +66,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
 REPO="$(cd "$HERE/.." && pwd)"
 Q="$HERE/quantize/dflash"
 SELF="$HERE/quantize/quantize_dflash.sh"
-DRAFTER="${DRAFTER:-z-lab/Qwen3.8-27B-DFlash2}"
-TARGET="${TARGET:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
+MODEL="${MODEL:-qwen}"
+case "$MODEL" in
+  qwen) DRAFTER="${DRAFTER:-z-lab/Qwen3.8-27B-DFlash2}"; TARGET="${TARGET:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
+        NAME=Qwen3.8-27B-DFlash2; CURRENT_LINK=dflash-current ;;
+  inkling) DRAFTER="${DRAFTER:-incoai/Inkling-2-Mini-DFlash2}"; TARGET="${TARGET:-thinkingmachines/Inkling-2-Mini}"
+        NAME=Inkling-2-Mini-DFlash2; CURRENT_LINK=dflash-inkling-current ;;
+  *) echo "quantize_dflash: MODEL=$MODEL - qwen or inkling" >&2; exit 2 ;;
+esac
+MAX_CONT="${MAX_CONT:-256}"
+DECODE="${DECODE:-$REPO/build/src/cli/b70-decode}"
+INK_SRC="${INK_SRC:-${B70_DATA:-$HOME/b70}/venvs/inkling2-src}"   # a transformers that reads Inkling's tokenizer
 RECORDINGS="${RECORDINGS:-${B70_DATA:?set B70_DATA, the data root}/logs/opencode-session-int8 ${B70_DATA:?set B70_DATA, the data root}/logs/opencode-session}"
 QUANT_ROOT="${QUANT_ROOT:-${B70_DATA:?set B70_DATA, the data root}/quant}"
 LOGDIR="${LOGDIR:-${B70_DATA:?set B70_DATA, the data root}/logs/dflash-quant}"
@@ -73,7 +95,7 @@ PROBE="${PROBE:-$REPO/build/tools/probe/probe_dflash_iter}"
 VENVPY="${VENVPY:-$HOME/auto-round/.venv/bin/python}"
 SITE="${SITE:-$HOME/.cache/q4exp-site-py312}"
 . "$HERE/quantize/ar_latest.sh"     # AR_COMMIT = the latest AutoRound (branch AR_REF of AR_REPO), see there
-CURRENT="$QUANT_ROOT/dflash-current"
+CURRENT="$QUANT_ROOT/$CURRENT_LINK"
 STAGES=(sources taps quant export check)
 
 die() { echo "quantize_dflash: $*" >&2; exit 2; }
@@ -124,20 +146,45 @@ to_trash() {   # move a leftover aside to $B70_DATA/trash (nothing is deleted)
 }
 
 stage_sources() {
+  if [ "$MODEL" = inkling ]; then
+    # shellcheck disable=SC2086
+    PYTHONPATH="$INK_SRC" HF_HUB_OFFLINE=1 "$VENVPY" "$Q/inkling_sources.py" $RECORDINGS --target "$TSNAP" \
+      --ids-dir "$WORK/ids" --out "$WORK/sources.json" --done "$TAPS"
+    return
+  fi
   # shellcheck disable=SC2086
   python3 "$Q/sources.py" $RECORDINGS --generation-config "$TSNAP/generation_config.json" \
     --out "$WORK/sources.json" --done "$TAPS"
 }
 
+build_tree() {   # $1 = the binary the stage needs; the tree is built if it is missing
+  [ -x "$1" ] && return
+  echo "building $REPO/build (the engine's kernel binaries come with it, so the whole tree)"
+  [ -f "$REPO/build/CMakeCache.txt" ] || cmake -S "$REPO" -B "$REPO/build" -DCMAKE_BUILD_TYPE=Release > /dev/null
+  cmake --build "$REPO/build" -j44 > "$WORK/probe-build.log" 2>&1 ||
+    die "building $REPO/build failed: $WORK/probe-build.log"
+}
+
+stage_taps_inkling() {   # one b70-decode --dump-taps a request (one GPU command each, the card's lock between them)
+  build_tree "$DECODE"
+  python3 -c 'import json, sys; [print(s["ids"], s["dump"]) for s in json.load(open(sys.argv[1]))]' "$WORK/sources.json" |
+  while read -r ids dump; do
+    (cd "$REPO" && card_run "$DECODE" "$TSNAP" --ids "$ids" --n "$MAX_CONT" --dump-taps "$TAPS/$dump") < /dev/null ||
+      die "taps: b70-decode failed on $ids"
+  done
+}
+
 stage_taps() {
   mkdir -p "$TAPS"
+  if [ "$MODEL" = inkling ]; then
+    stage_taps_inkling
+    stage_sources
+    python3 -c 'import json, sys; sys.exit(len(json.load(open(sys.argv[1]))) != 0)' "$WORK/sources.json" ||
+      die "taps: requests still without a complete dump (the lines above)"
+    return
+  fi
   if [ "$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$WORK/sources.json")" != 0 ]; then
-    if [ ! -x "$PROBE" ]; then
-      echo "building $REPO/build (the probe loads the engine's kernel binaries, so the whole tree)"
-      [ -f "$REPO/build/CMakeCache.txt" ] || cmake -S "$REPO" -B "$REPO/build" -DCMAKE_BUILD_TYPE=Release > /dev/null
-      cmake --build "$REPO/build" -j44 > "$WORK/probe-build.log" 2>&1 ||
-        die "building $REPO/build failed: $WORK/probe-build.log"
-    fi
+    build_tree "$PROBE"
     (cd "$REPO" && card_run "$PROBE" "$TSNAP" "$DSNAP" --format int8 \
       --engine-taps "$WORK/sources.json" "$TAPS" --anchors 1)
   fi
@@ -157,7 +204,7 @@ stage_quant() {
 stage_export() {
   [ -e "$OUT/model.safetensors" ] && to_trash "$OUT/model.safetensors"
   env_py
-  "$VENVPY" "$Q/finalize.py" "$WORK/raw" "$DSNAP" "$OUT"
+  "$VENVPY" "$Q/finalize.py" "$WORK/raw" "$DSNAP" "$OUT" --drafter-repo "$DRAFTER"
 }
 
 stage_check() {
@@ -187,7 +234,7 @@ run_stages() {
   mkdir -p "$WORK"
   ar_resolve || exit 2; ar_run_guard "$WORK" || exit 2
   DSNAP=$(snapshot "$DRAFTER"); TSNAP=$(snapshot "$TARGET")
-  echo "quantize_dflash: $(date -u +%FT%TZ) DRAFTER=$DRAFTER ($DSNAP) TARGET=$TARGET ($TSNAP) OUT=$OUT" \
+  echo "quantize_dflash: $(date -u +%FT%TZ) MODEL=$MODEL DRAFTER=$DRAFTER ($DSNAP) TARGET=$TARGET ($TSNAP) OUT=$OUT" \
        "TAPS=$TAPS DEVICE=$DEVICE CARD=$CARD ITERS=$ITERS NSAMPLES=$NSAMPLES ANCHORS=$ANCHORS BATCH=$BATCH" \
        "auto-round $AR_COMMIT (base ${AR_BASE:0:8}, $AR_REF)"
   for s in "${STAGES[@]}"; do
@@ -220,7 +267,7 @@ case "${1:-}" in
     m=$(mem_avail_gb); [ "$m" -ge "$RAM_MIN_GB" ] || die "MemAvailable ${m} GB < RAM_MIN_GB $RAM_MIN_GB - something else is using the RAM"
     d=$(disk_free_gb "$QUANT_ROOT"); [ "$d" -ge "$DISK_MIN_GB" ] || die "$QUANT_ROOT has ${d} GB free < DISK_MIN_GB $DISK_MIN_GB"
     if [ -z "$OUT" ]; then
-      OUT="$QUANT_ROOT/Qwen3.8-27B-DFlash2-W4A16-g64-$(date +%F)"
+      OUT="$QUANT_ROOT/$NAME-W4A16-g64-$(date +%F)"
       mkdir -p "$OUT.work"; ln -sfn "$OUT" "$CURRENT"
       echo "new run: $OUT"
     else

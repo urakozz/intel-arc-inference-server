@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -92,12 +93,13 @@ DFlashCheckpoint::DFlashCheckpoint(const std::string& snapshot_or_repo)
   open_and_check();
 }
 
-DFlashCheckpoint::DFlashCheckpoint(const model::DFlashDesc& d, const std::string& snapshot_dir)
+DFlashCheckpoint::DFlashCheckpoint(const model::DFlashDesc& d, const std::string& snapshot_dir,
+                                   bool require_packed_g64)
     : d_(d), dir_(with_slash(snapshot_dir)) {
-  open_and_check();
+  open_and_check(require_packed_g64);
 }
 
-void DFlashCheckpoint::open_and_check() {
+void DFlashCheckpoint::open_and_check(bool require_packed_g64) {
   if (exists(dir_ + "mask_embedding.pt"))
     refuse(dir_, "ships mask_embedding.pt (a torch pickle, not read here): convert it with "
                  "tools/oracle/dflash_mask_embedding.py to mask_embedding.safetensors");
@@ -109,6 +111,9 @@ void DFlashCheckpoint::open_and_check() {
     if (cfg.find("quantization_config")) qc = QuantConfig::parse(cfg);
   }
   packed_ = qc.has_value();
+  const bool strict_g64 = packed_ && require_packed_g64;
+  if (strict_g64 && (qc->compressed_tensors || qc->group_size != 64))
+    refuse(dir_, "quantization_config must describe symmetric 4-bit GPTQ with group_size 64");
   // Canonical names, refusing what a drafter must not ship.
   std::map<std::string, std::string> canon;
   for (const auto& [name, t] : set_->tensors()) {
@@ -184,12 +189,37 @@ void DFlashCheckpoint::open_and_check() {
     shape["confidence_head.proj.weight"] = {1, d_.conf_in};
     shape["confidence_head.proj.bias"] = {1};
   }
+  const auto elements = [](const std::vector<uint64_t>& dims) {
+    return std::accumulate(dims.begin(), dims.end(), size_t(1), std::multiplies<>{});
+  };
   for (const auto& [c, name] : canon) {
     const TensorInfo& t = set_->tensors().at(name);
     std::vector<uint64_t> want = shape.at(c);
     const bool q = name.size() > 8 && name.compare(name.size() - 8, 8, ".qweight") == 0;
+    if (strict_g64) {
+      const bool linear = want.size() == 2 && c.ends_with(".weight");
+      if (linear && !q) refuse(dir_, c + " must ship as a packed GPTQ linear");
+      if (q && linear) {
+        const uint64_t K = want[1], N = want[0];
+        if (K % 64 || N % 16) refuse(dir_, name + " does not fit the int4 g64 tiles");
+        const std::string base = name.substr(0, name.size() - 8);
+        const auto check = [&](const char* suffix, const char* dtype, std::vector<uint64_t> dims,
+                               size_t item_bytes, bool optional = false) {
+          const std::string key = base + suffix;
+          const auto it = set_->tensors().find(key);
+          if (optional && it == set_->tensors().end()) return;
+          if (it == set_->tensors().end() || it->second.dtype != dtype || it->second.shape != dims ||
+              set_->bytes(it->second) != elements(dims) * item_bytes)
+            refuse(dir_, key + " must have the " + dtype + " dtype and GPTQ g64 shape with matching data bytes");
+        };
+        check(".scales", "F16", {K / 64, N}, 2);
+        check(".qzeros", "I32", {K / 64, N / 8}, 4);
+        check(".g_idx", "I32", {K}, 4, true);
+      }
+    }
     if (q) {   // GPTQ's [K/8][N] words for the linear's [N][K]
-      if (want.size() != 2 || want[1] % 8) refuse(dir_, name + " is packed, but " + c + " is not a linear");
+      if (want.size() != 2 || want[1] % 8 || (strict_g64 && !c.ends_with(".weight")))
+        refuse(dir_, name + " is packed, but " + c + " is not a linear");
       want = {want[1] / 8, want[0]};
     }
     if (t.dtype != (q ? "I32" : "BF16"))
@@ -200,10 +230,12 @@ void DFlashCheckpoint::open_and_check() {
       for (uint64_t s : t.shape) got += (got.empty() ? "" : ", ") + std::to_string(s);
       refuse(dir_, name + " has shape [" + got + "], not the config's");
     }
+    if (set_->bytes(t) != elements(want) * (q ? 4 : 2))
+      refuse(dir_, name + " has data bytes that do not match its shape and dtype");
   }
   if (packed_) {
     const QuantScan scan = assert_quant_invariants(*set_);
-    if (!qc->desc_act_declared && scan.g_idx_tensors != 0)
+    if (!strict_g64 && !qc->desc_act_declared && scan.g_idx_tensors != 0)
       refuse(dir_, "config.json declares no desc_act but the checkpoint ships " + std::to_string(scan.g_idx_tensors) +
                        " g_idx tensors");
     check_quant_scan(*qc, scan);
@@ -235,6 +267,19 @@ void DFlashCheckpoint::open_and_check() {
     if (t.end - t.begin != n * (t.dtype == "F32" ? 4 : 2) || 8 + hlen + t.end > f.size())
       refuse(dir_, "mask_embedding.safetensors' embedding has inconsistent data_offsets");
   }
+}
+
+uint64_t DFlashCheckpoint::content_key() const {
+  uint64_t hash = 0xcbf29ce484222325ull;
+  const auto mix = [&](uint8_t v) { hash = (hash ^ v) * 0x100000001b3ull; };
+  std::ifstream config(dir_ + "config.json", std::ios::binary);
+  for (char c; config.get(c);) mix(uint8_t(c));
+  for (const auto& [name, tensor] : set_->tensors()) {
+    for (char c : name) mix(uint8_t(c));
+    const auto* data = set_->data(tensor);
+    for (size_t i = 0; i < set_->bytes(tensor); ++i) mix(data[i]);
+  }
+  return hash ? hash : 1;
 }
 
 void DFlashCheckpoint::check_target(const model::ModelDesc& target, uint32_t target_vocab_rows) const {

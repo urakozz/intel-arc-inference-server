@@ -15,8 +15,7 @@
 //                               head's vocabulary a card), the two halves added after each layer
 //                               by P2P writes; needs peer access both ways. Prefill by the
 //                               wavefront (17c), --spec mtp / auto / lookup with the MTP head whole
-//                               on each card, b70-serve with the prefix cache (17d); no DFlash, no
-//                               draft vocabulary, no l0-int8 prefill (refused by name).
+//                               on each card, b70-serve with the prefix cache (17d); no l0-int8 prefill (refused by name).
 //                               replica (b70-serve, Qwen3.8 and Ornith - spec 13 §11, plan 13b): the
 //                               model on both cards, one engine each, two requests served at once
 //                               (each bitwise what it is alone on its card); every other model and
@@ -84,7 +83,6 @@ struct TpContext {
   bool dflash = false;
   bool profile = false;        // --profile
   bool other_family = false;   // Kolibri-1 (Qwen3.8-Flash-Next runs its own tp flow: cli/qwen4exp_decode.h)
-  bool draft_vocab = false;    // --draft-vocab / --draft-vocab-ids (spec 17d: the draft head is the card's half)
 };
 inline void check_tp(const PipelineArgs& a, const TpContext& c) {
   if (!a.tp()) return;
@@ -97,9 +95,6 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
   if (c.dflash)
     throw std::runtime_error("b70-decode --parallel tp drafts with the MTP head only - b70-serve --parallel tp --spec "
                              "dflash serves the drafter split over both cards");
-  if (c.draft_vocab)
-    throw std::runtime_error("--parallel tp's draft head is each card's vocabulary half of lm_head; "
-                             "--draft-vocab is not built under tensor parallel - drop it");
   if (c.profile) throw std::runtime_error("--profile instruments one device's list; it has no --parallel tp");
 }
 // Spec 17d: b70-serve --parallel tp's model, by config.json's architecture before any device (Qwen3.8 only: its per-card
@@ -216,7 +211,7 @@ inline void require_two_devices_for_replica(uint32_t gpus) {
 // --max-num-seqs N (vLLM's flag, the same meaning): how many requests run at once - the user's
 // choice, and the context follows (the card's KV page pool, shared by its requests: cli::settle_pool). N = 1 (the default): one slot. N > 1: two cards run replica, each card its slots (card 0 the
 // odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Several slots a card are Qwen3.8's and
-// Ornith's (b70_serve.cc refuses the others by config.json, and a draft vocabulary beside slots).
+// Ornith's (b70_serve.cc refuses the others by config.json).
 inline constexpr uint32_t kSlotsPerCard = runtime::SlotDims::kMaxSeqs;
 // Before the device: --parallel tp keeps one slot (TP + slots was ruled out, 2026-11-11) and pp runs one request;
 // replica runs a request on each card, so N is 2 to 8 there and 2 (one slot a card) when not given. Returns N.

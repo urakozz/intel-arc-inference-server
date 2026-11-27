@@ -97,24 +97,24 @@ void DFlashDrafter::select(uint32_t slot) {
   cur_ = slot;
 }
 
-void DFlashDrafter::attach(Engine& e, bool draft_vocab) {
+void DFlashDrafter::attach(Engine& e) {
   require(draft_ == nullptr, "attach() twice");
   require(e.tap_drafter() == this, "the engine was not built with this drafter (Engine(..., &drafter))");
   require(e.slots() == sessions(), "the engine has " + std::to_string(e.slots()) + " slots, the drafter " +
                                        std::to_string(sessions()) + " sessions");
-  attach_target(e.context(), e.model(), e.buffers().control, e.buffers().max_len, draft_vocab);
+  attach_target(e.context(), e.model(), e.buffers().control, e.buffers().max_len);
   std::vector<const void*> ctrls{e.buffers().control.ptr()};
   for (uint32_t q = 1; q < e.slots(); ++q) {
-    drafts_.push_back(build_dflash_draft(e.context(), w_, dflash_target(e.model(), draft_vocab), b_,
+    drafts_.push_back(build_dflash_draft(e.context(), w_, dflash_target(e.model()), b_,
                                          e.slot_view(q).control, q));
     ctrls.push_back(e.slot_view(q).control);
   }
   if (e.slots() > 1)
     seqs_draft_ = std::make_unique<CapturedStep>(
-        build_dflash_draft_seqs(e.context(), w_, dflash_target(e.model(), draft_vocab), b_, ctrls));
+        build_dflash_draft_seqs(e.context(), w_, dflash_target(e.model()), b_, ctrls));
   if (e.slots() > 1 && b_.draft_rows > kernels::dflash::kM)   // plan 40a Task 4: four blocks
     seqs_draft_w_ = std::make_unique<CapturedStep>(build_dflash_draft_seqs(
-        e.context(), w_, dflash_target(e.model(), draft_vocab), b_, ctrls, {}, b_.draft_rows));
+        e.context(), w_, dflash_target(e.model()), b_, ctrls, {}, b_.draft_rows));
   engine_ = &e;
 }
 
@@ -160,12 +160,12 @@ void DFlashDrafter::draft_rows(Engine& e, const std::vector<DraftRun>& runs) {
 }
 
 void DFlashDrafter::attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control,
-                                  uint32_t max_len, bool draft_vocab) {
+                                  uint32_t max_len) {
   require(draft_ == nullptr, "attach() twice");
   require(max_len == b_.max_len, "the target's max_len " + std::to_string(max_len) +
                                      " is not the drafter's buffers' " + std::to_string(b_.max_len));
   draft_ = std::make_unique<CapturedStep>(
-      build_dflash_draft(ctx, w_, dflash_target(target, draft_vocab), b_, control));
+      build_dflash_draft(ctx, w_, dflash_target(target), b_, control));
 }
 
 const DFlashDraftOut& DFlashDrafter::draft(Engine& e, uint32_t k, float temperature, uint64_t seed) {

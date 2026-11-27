@@ -412,11 +412,18 @@ class Walk {
     linear(*L.qsa_qkvg, s_.x.ptr(), s_.partials.ptr(), pf_ld(c_.qkvg_n()));
     // pf_attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v) q16 - grid (24 + 2, C); the gate
     // is read by pf_attn_gate straight from the partials (no attn_gate write)
+    // d_.kv8 (plan 21-QFN-v3a): kv8.cl's PF = 1 writer - q16 the ROTATED q, K / V rotated int8 + their scales
     const std::string prep_v =
         tp_ ? kernels::pf_attn_prep_q16_variant(kq::kTpQHeads, kq::kTpKvHeads) : kq::pf_attn_prep_q4_variant();
-    launch(kc_(prep_v, "pf_attn_prep"), c_.q_heads + c_.kv_heads, C_, 1,
-           {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
-            PtrArg(s_.q16.ptr()), PtrArg(nullptr), PtrArg(b_.k_layer(l)), PtrArg(b_.v_layer(l))});
+    if (d_.kv8)
+      launch(kc_(kq::kv8_variant(prep_v), "attn_prep_kv8"), c_.q_heads + c_.kv_heads, C_, 1,
+             {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
+              PtrArg(s_.q16.ptr()), PtrArg(nullptr), PtrArg(b_.k_layer(l)), PtrArg(b_.v_layer(l)),
+              PtrArg(b_.k_scale_layer(l)), PtrArg(b_.v_scale_layer(l))});
+    else
+      launch(kc_(prep_v, "pf_attn_prep"), c_.q_heads + c_.kv_heads, C_, 1,
+             {PtrArg(ctrl()), PtrArg(s_.partials.ptr()), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()),
+              PtrArg(s_.q16.ptr()), PtrArg(nullptr), PtrArg(b_.k_layer(l)), PtrArg(b_.v_layer(l))});
     prefill::profile_wait(cx_, Phase::kAttnPrep);
   }
   // The indexer: its keys and queries of every row, then the scoring and the selection of the sparse rows - every row,
@@ -475,28 +482,43 @@ class Walk {
     void* lists = lists_(d_.qsa_before(l));
     void* kv_k = b_.k_layer(l);
     void* kv_v = b_.v_layer(l);
+    // d_.kv8 (plan 21-QFN-v3a): the int8 rows and their scales - kv8.cl's flash for the dense rows (pf_flash_attn's
+    // tiling, the scales in the score and in P), q4_pf_sparse_attn's KV8 build, kv8.cl's gate (un-rotation first)
+    void* ks = d_.kv8 ? b_.k_scale_layer(l) : nullptr;
+    void* vs = d_.kv8 ? b_.v_scale_layer(l) : nullptr;
     if (dense_ > 0) {
       // pf_flash_attn(Q, Kc, Vc, O, pos, C, rows) _Q24KV2 - grid (ceil(dense / 8), 2 kv heads, GQA 12 / HPW 6): the
-      // dense rows [0, dense) - causal over depth pos + dense
+      // dense rows [0, dense) - causal over depth pos + dense; int8: pf_flash_attn_kv8(Q, Kc, Ks, Vc, Vs, O, pos, C, rows)
       const std::string fv =
           tp_ ? kernels::pf_flash_attn_variant(kq::kTpQHeads, kq::kTpKvHeads) : kq::pf_flash_q4_variant();
-      launch(kc_(fv, "pf_flash_attn"), (dense_ + kq::kPfFlashRpw - 1) / kq::kPfFlashRpw, c_.kv_heads,
-             c_.q_heads / c_.kv_heads / kq::kPfFlashHpw,
-             {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s_.o.ptr()), arg_val(pos_), arg_val(dense_),
-              arg_val(R_)});
+      const uint32_t gx = (dense_ + kq::kPfFlashRpw - 1) / kq::kPfFlashRpw, gz = c_.q_heads / c_.kv_heads / kq::kPfFlashHpw;
+      if (d_.kv8)
+        launch(kc_(kq::kv8_variant(fv), "pf_flash_attn_kv8"), gx, c_.kv_heads, gz,
+               {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(ks), PtrArg(kv_v), PtrArg(vs), PtrArg(s_.o.ptr()),
+                arg_val(pos_), arg_val(dense_), arg_val(R_)});
+      else
+        launch(kc_(fv, "pf_flash_attn"), gx, c_.kv_heads, gz,
+               {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s_.o.ptr()), arg_val(pos_), arg_val(dense_),
+                arg_val(R_)});
     }
     if (sparse > 0) {
-      // q4_pf_sparse_attn(Q, Kc, Vc, lists, O, r0, rows) - grid (sparse rows, 2 kv heads), after the flash (whose last
-      // 8-row group may write rows past `dense`)
-      launch(kc_(tp_ ? kq::tp_pf_sparse_attn_variant() : kq::pf_sparse_attn_variant(eager_), "q4_pf_sparse_attn"), sparse,
-             c_.kv_heads, 1,
-             {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(kv_v), PtrArg(lists), PtrArg(s_.o.ptr()), arg_val(dense_),
-              arg_val(R_)});
+      // q4_pf_sparse_attn(Q, Kc, Vc, lists, O, r0, rows[, Ks, Vs]) - grid (sparse rows, 2 kv heads), after the flash
+      // (whose last 8-row group may write rows past `dense`)
+      const std::string sv = tp_ ? kq::tp_pf_sparse_attn_variant() : kq::pf_sparse_attn_variant(eager_);
+      if (d_.kv8)
+        launch(kc_(kq::kv8_variant(sv), "q4_pf_sparse_attn"), sparse, c_.kv_heads, 1,
+               {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(kv_v), PtrArg(lists), PtrArg(s_.o.ptr()), arg_val(dense_),
+                arg_val(R_), PtrArg(ks), PtrArg(vs)});
+      else
+        launch(kc_(sv, "q4_pf_sparse_attn"), sparse, c_.kv_heads, 1,
+               {PtrArg(s_.q16.ptr()), PtrArg(kv_k), PtrArg(kv_v), PtrArg(lists), PtrArg(s_.o.ptr()), arg_val(dense_),
+                arg_val(R_)});
     }
     prefill::profile_wait(cx_, Phase::kAttnFlash);
-    // pf_attn_gate(o, qkv_partials, out, stride_h) _Q24KV2 - grid (24, C): out = rne(rne(o) x sigmoid(gate))
-    launch(kc_(tp_ ? kernels::pf_attn_variant(kq::kTpQHeads, kq::kTpKvHeads) : kq::pf_gate_q4_variant(), "pf_attn_gate"),
-           c_.q_heads, C_, 1,
+    // pf_attn_gate(o, qkv_partials, out, stride_h) _Q24KV2 - grid (24, C): out = rne(rne(o) x sigmoid(gate)); int8:
+    // pf_attn_gate_kv8, the same arguments, o un-rotated first
+    const std::string gv = tp_ ? kernels::pf_attn_variant(kq::kTpQHeads, kq::kTpKvHeads) : kq::pf_gate_q4_variant();
+    launch(d_.kv8 ? kc_(kq::kv8_variant(gv), "pf_attn_gate_kv8") : kc_(gv, "pf_attn_gate"), c_.q_heads, C_, 1,
            {PtrArg(s_.o.ptr()), PtrArg(s_.partials.ptr()), PtrArg(s_.attn_out.ptr()), arg_val(uint32_t(R_ * d_.head_dim))});
     linear(*L.qsa_o, s_.attn_out.ptr(), row_out(), pf_ld(d_.hidden));
     src_ = HcSrc::Slices;
@@ -734,9 +756,15 @@ class Walk {
       bf16_cols(L.qsa_idx->mem.ptr(), d_.hidden, d_.idx_n(), 0, d_.idx_n(), rows, s_.x.ptr(), s_.idx_f32.ptr(), kq::kPfIdxLd);
       // pf_attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v) q16 _KVO - grid (2, rows): the
       // head's K / V at its positions; PERF-85: the kv heads only (the q heads' rows went to q16, which nothing reads)
-      launch(kc_(kernels::kv_only(kq::pf_attn_prep_q4_variant()), "pf_attn_prep"), kq::kKvHeads, rows, 1,
-             {PtrArg(ctrl()), PtrArg(part), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()), PtrArg(q16),
-              PtrArg(nullptr), PtrArg(mb.k()), PtrArg(mb.v())});
+      if (d_.kv8)   // kv8.cl's writer, the kv heads only (_KVO), and the scales
+        launch(kc_(kq::kv8_variant(kernels::kv_only(kq::pf_attn_prep_q4_variant())), "attn_prep_kv8"), kq::kKvHeads,
+               rows, 1,
+               {PtrArg(ctrl()), PtrArg(part), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()), PtrArg(q16),
+                PtrArg(nullptr), PtrArg(mb.k()), PtrArg(mb.v()), PtrArg(mb.k_scale()), PtrArg(mb.v_scale())});
+      else
+        launch(kc_(kernels::kv_only(kq::pf_attn_prep_q4_variant()), "pf_attn_prep"), kq::kKvHeads, rows, 1,
+               {PtrArg(ctrl()), PtrArg(part), PtrArg(L.qsa_small->ptr()), PtrArg(part_.rope->ptr()), PtrArg(q16),
+                PtrArg(nullptr), PtrArg(mb.k()), PtrArg(mb.v())});
       const std::string qv = kq::pf_qsa_variant(R_);
       // q4_qsa_prep(ctrl, idx_f32, small, rope, idx_q, tail, idx_keys) _PF - grid (5, rows); q4_qsa_ring - grid (1, 8)
       launch(kc_(qv, "q4_qsa_prep"), d_.idx_heads + 1, rows, 1,

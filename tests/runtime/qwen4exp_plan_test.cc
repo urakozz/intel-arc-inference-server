@@ -25,6 +25,9 @@
 //      (the embedding and the MTP head on both cards; the embedding on card 0, the head on card 1) at the bench's and
 //      the server's configurations: each card's plan, cache, resident count a layer and f, the pinned total.
 //   9. PERF-36: the 4096-row prefill scratch's cost (pf_chunk_choice) - one card, pp, tp at the default settings.
+//   10. plan 21-QFN-v3e Task 1: the DFlash drafter's rows under --spec dflash - one card and pp: the plan carries
+//       the drafter's weights and buffers (not the MTP head's), the total is the sum of the parts it lists, and the
+//       expert budget's cache on the drafter's card drops by them (f and the experts that fit before / after).
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -34,7 +37,9 @@
 #include <vector>
 
 #include "check.h"
+#include "loader/dflash_layout.h"
 #include "loader/qwen4exp_layout.h"
+#include "model/dflash.h"
 #include "model/qwen4exp.h"
 #include "runtime/control.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
@@ -567,6 +572,7 @@ int main(int argc, char** argv) {
         }
         std::printf("PERF-36: %s at %u: projected decode %.3f -> %.3f ms a token (%+.2f %%, uniform routes): %u rows\n",
                     f.what, L, c.ms_narrow, c.ms_wide, 100 * (c.ms_wide / c.ms_narrow - 1), c.rows);
+        if (!f.tp && bn.devices == 2) CHECK_EQ(c.rows, rq::kPfCWide);   // pp: the wide chunk at every length (2026-11-27)
       }
     }
     const Qwen4ExpDesc i18 = rq::truncated(ours, 18);
@@ -579,6 +585,70 @@ int main(int argc, char** argv) {
     CHECK(rq::fits(rq::plan(i18, p18, 32768, true, false, false, true, rq::kPfCWide), caps, kReserve));
     std::printf("PERF-36: --layers 18 one card at 32768 (every expert resident): %u rows, the scratch +%.3f GB\n", c18.rows,
                 c18.grow[0] / 1e9);
+  }
+  // --- 10. plan 21-QFN-v3e Task 1: the DFlash drafter's rows (--spec dflash) --------------------------------------
+  {
+    model::DFlashDesc dd;
+    dd.version = 2;
+    dd.layers = 5;
+    dd.hidden = ours.hidden;
+    dd.q_heads = 32;
+    dd.kv_heads = 8;
+    dd.head_dim = 128;
+    dd.inter = 7680;
+    dd.vocab = ours.vocab;
+    dd.block = 8;
+    dd.mask_id = 248077;
+    dd.num_target_layers = ours.layers;
+    dd.taps = {5, 15, 25, 35, 45};
+    dd.window.assign(5, 2048);
+    dd.causal.assign(5, false);
+    dd.conv_group = 16;
+    dd.conv_taps = 2;
+    dd.sel_rank = 256;
+    dd.sel_top_k = 16;
+    dd.eps = 1e-6f;
+    dd.theta = 1e4;
+    model::check_flash_next_dflash(dd);   // held to kFlashNext
+    const loader::DraftFormat i8 = loader::DraftFormat::Int8;
+    const uint32_t L = 32768;
+    const size_t weights = loader::dflash_weight_bytes(dd, ours.hidden, i8).total();
+    const size_t want = rq::dflash_plan_bytes(dd, ours.hidden, ours.vocab, L, i8);
+    CHECK(want > weights);
+    const size_t verify_extra =
+        rq::scratch_sizes(ours, L, rq::kDefaultQ4Attn, rq::kVerifyRows).total() -
+        rq::scratch_sizes(ours, L, rq::kDefaultQ4Attn, rq::kM).total();
+    // one card: the drafter's bytes in `drafter`, the head's not in `weights`, the total the sum of its parts
+    const auto p0 = rq::plan(ours, Q4Placement::one(ours), L, true, false);
+    const auto pm = rq::plan(ours, Q4Placement::one(ours), L, true, true);
+    const auto pd = rq::plan(ours, Q4Placement::one(ours), L, true, false, false, false, rq::kPfC, &dd, i8);
+    CHECK(pd[0].dflash && !pd[0].mtp && pd[0].drafter == want);
+    CHECK_EQ(pd[0].weights, p0[0].weights);      // the MTP head is not loaded under --spec dflash
+    CHECK(pd[0].weights != pm[0].weights);
+    CHECK_EQ(pd[0].scratch - p0[0].scratch, verify_extra);   // the verify rows stay
+    const rq::VerifySizes vs = rq::verify_sizes(ours, Q4Placement::one(ours), 0);
+    CHECK_EQ(pd[0].state - p0[0].state, vs.gdn_pend + vs.ple_gated + vs.ple_gn);
+    CHECK_EQ(pd[0].total(),
+             pd[0].model + pd[0].kv + pd[0].decode_state + pd[0].prefill_scratch + pd[0].int8 + pd[0].drafter);
+    // pp: the drafter lives on device 1, beside the output head
+    const Q4Placement p2 = Q4Placement::two(ours, rq::pp_split(ours, L, true, false, false, &dd, i8).split);
+    const auto pd2 = rq::plan(ours, p2, L, true, false, false, false, rq::kPfC, &dd, i8);
+    CHECK(!pd2[0].dflash && pd2[0].drafter == 0 && pd2[1].dflash && pd2[1].drafter == want);
+    CHECK_EQ(pd2[1].weights, rq::plan(ours, p2, L, true, false)[1].weights);
+    // the expert budget: the drafter's bytes lower the cache on its card, so fewer experts fit there
+    const auto pd_plain = rq::plan(ours, p2, L, true, false);
+    const size_t extra0 = pd2[0].total() - pd_plain[0].total();   // the verify rows, as with the MTP head
+    const size_t extra1 = pd2[1].total() - pd_plain[1].total();   // the verify rows + the drafter's bytes
+    CHECK(extra1 > extra0);   // device 1 also carries the drafter (pd2[1].drafter == want, checked above)
+    const auto b0 = rq::expert_budget(ours, p2, L, true, false, false, caps, kReserve);
+    const auto bd = rq::expert_budget(ours, p2, L, true, false, false, caps, kReserve, rq::kPfC, &dd, i8);
+    CHECK_EQ(bd.cache[0], b0.cache[0] >= extra0 ? b0.cache[0] - extra0 : 0);
+    CHECK_EQ(bd.cache[1], b0.cache[1] >= extra1 ? b0.cache[1] - extra1 : 0);
+    CHECK(bd.f() <= b0.f() + 1e-12);
+    std::printf("dflash (--spec dflash, int8 linears): weights %.3f GB + buffers %.3f GB = %.3f GB on the last device; "
+                "pp device 1 experts that fit %zu -> %zu (f %.4f -> %.4f); one card total %.3f GB\n",
+                weights / 1e9, (want - weights) / 1e9, want / 1e9, b0.cache[1] / b0.expert_bytes,
+                bd.cache[1] / bd.expert_bytes, b0.f(), bd.f(), pd[0].total() / 1e9);
   }
   std::printf("qwen4exp_plan_test OK: N at 32768 with Intel's forms = %u on one card, %u on two; the host PLE table "
               "%zu B (%.2f GB, bf16 scales) / %zu B (%.2f GB, f32); the full model refused without the expert tier\n",

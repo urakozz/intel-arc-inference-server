@@ -1,7 +1,7 @@
 // probe_draft_cost - spec 19a (plan 19a Task 4): what one DFlash2 block's weight reads cost
 // on the card - the drafter's linears at M = 8 rows in int8 (W8A16, gemv_i8w), bf16
 // (gemv_bf16) and our int4 W4A16 g64 (gemv.cl, layout 0), and the int8 target head over
-// the block's K = 7 draft rows (full vocabulary and a 32k draft vocabulary).
+// the block's K = 7 draft rows.
 //
 //   probe_draft_cost [--calls 20] [--rounds 3] [--device 0] [--plain-ms <ms>]
 //
@@ -17,7 +17,7 @@
 // gate||up, down, the commit's ctx k||v; then fc and the selector projection - 37 launches)
 // and each linear alone over the same weights (its 5 layers, or once; a small linear
 // repeated alone can stay L2-resident across calls, so read the pass row as the number);
-// the two head arms. Every round runs every arm in a rotated order after a warm-up pass;
+// the head arm. Every round runs every arm in a rotated order after a warm-up pass;
 // the median over rounds of each arm's mean ms per call is printed. NOT in these numbers:
 // the drafter's attention over its 2048-row ring, the norms, RoPE, the two convolutions,
 // top-16 and the selector walk (none streams more than ~50 MB per block), and the int4
@@ -250,15 +250,13 @@ int main(int argc, char** argv) {
       arms.push_back(std::move(one));
     }
   }
-  const size_t first_head = arms.size();
-  for (unsigned V : kHeadVocab) {
-    Arm h{"int8 head x" + std::to_string(kHeadRows) + " rows, V " + std::to_string(V), 0,
-          l0::CmdList::regular(ctx), {}};
-    const Weights w = weights(Fmt::Int8, kHidden, V);
-    append(h, make(Fmt::Int8, kHeadRows, kHidden, V, 1, w), w.mb);
-    h.list.close();
-    arms.push_back(std::move(h));
-  }
+  const size_t head_arm = arms.size();
+  Arm h{"int8 head x" + std::to_string(kHeadRows) + " rows, V " + std::to_string(kHeadVocab), 0,
+        l0::CmdList::regular(ctx), {}};
+  const Weights w = weights(Fmt::Int8, kHidden, kHeadVocab);
+  append(h, make(Fmt::Int8, kHeadRows, kHidden, kHeadVocab, 1, w), w.mb);
+  h.list.close();
+  arms.push_back(std::move(h));
   double dev_mb = 0;
   for (const auto& m : mems) dev_mb += m->size() / 1e6;
   std::printf("allocated %.2f GB (random weights and buffers), %zu arms\n", dev_mb / 1e3,
@@ -293,18 +291,16 @@ int main(int argc, char** argv) {
     if (plain_ms > 0) std::printf(" %.3f |", med / plain_ms);
     std::printf("\n");
   }
-  // One block's GEMVs = the pass + the head's K rows, per format and head size.
+  // One block's GEMVs = the pass + the head's K rows, per format.
   std::printf("one DFlash block, GEMVs only (the block pass + the int8 head's %u rows):\n",
               kHeadRows);
   for (size_t f = 0; f < 3; ++f) {
     const double pass = median(arms[f * (1 + kNumLinears)].ms);
-    for (size_t h = 0; h < sizeof(kHeadVocab) / sizeof(kHeadVocab[0]); ++h) {
-      const double head = median(arms[first_head + h].ms);
-      std::printf("| block %s, head V %u | %.3f ms |", fmt_name(fmts[f]), kHeadVocab[h],
-                  pass + head);
-      if (plain_ms > 0) std::printf(" x plain step %.3f |", (pass + head) / plain_ms);
-      std::printf("\n");
-    }
+    const double head = median(arms[head_arm].ms);
+    std::printf("| block %s, head V %u | %.3f ms |", fmt_name(fmts[f]), kHeadVocab,
+                pass + head);
+    if (plain_ms > 0) std::printf(" x plain step %.3f |", (pass + head) / plain_ms);
+    std::printf("\n");
   }
   return 0;
 }

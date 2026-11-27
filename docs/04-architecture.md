@@ -63,7 +63,7 @@ Per-model status and commands are in [17-running-models.md](17-running-models.md
 `b70-serve --parallel` picks how the cards are used. The default, `auto`, chooses by model and load:
 
 - Qwen3.8 on two cards runs `tp` for one request at a time, as long as the context is left at `auto` and nothing
-  asked for is something `tp` does not run (DFlash, a draft vocabulary, the `l0-int8` prefill). It runs `replica`
+  in the request selects DFlash or the `l0-int8` prefill backend. It runs `replica`
   when `--max-num-seqs` is above 1.
 - Any other model, or Qwen3.8 outside those conditions, runs on one card when the model and the asked context fit
   it, and otherwise as `pp`

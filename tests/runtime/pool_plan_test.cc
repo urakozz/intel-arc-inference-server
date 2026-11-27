@@ -44,7 +44,7 @@ void check_one_sequence() {
   // SlotDims and MtpDims at one sequence: nothing more than today.
   CHECK_EQ(runtime::SlotDims::sizes(q, 1, true).total(), size_t{0});
   CHECK_EQ(runtime::MtpDims::hh_rows(1), runtime::DecodeScratchDims::kDeepM + 1);   // spec 32
-  CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Bf16, 4, 1).total(),
+  CHECK_EQ(runtime::MtpDims::sizes(16384, q, KvCache::Bf16, 4, 1).total(),
            runtime::MtpDims::sizes(16384, q).total());
 }
 
@@ -68,15 +68,15 @@ void check_decided_layout() {
   CHECK_EQ(runtime::SlotDims::sizes(q, 4, true, 256).pages, pages);
   // spec 32: one sequence carries the deferred GDN rows (EngineSizes::gdn_pend); plan 31 Task 13: with MTP several
   // carry their own each
-  const size_t deep = runtime::EngineDims::sizes(q, KvCache::Int8, 0, 1, true, false).gdn_pend;
-  const size_t deep4 = runtime::EngineDims::sizes(q, KvCache::Int8, 0, 4, true, false).gdn_pend;
+  const size_t deep = runtime::EngineDims::sizes(q, KvCache::Int8, 1, true, false).gdn_pend;
+  const size_t deep4 = runtime::EngineDims::sizes(q, KvCache::Int8, 4, true, false).gdn_pend;
   CHECK_EQ(deep4, 4 * deep);
   CHECK_EQ(p.total(), size_t(int64_t(b.total() + rope + ctl + pages - deep + deep4 + wide) + hh));
   // 3e sized the widening scratch at the pool's positions: 384 MiB (98304 positions x 4 KiB) more than the cap needs.
-  CHECK_EQ(runtime::plan(q, 229376, true, kQwenInt8Weights + kMtpWeights, {}, {}, KvCache::Int8).prefill_lazy -
+  CHECK_EQ(runtime::plan(q, 229376, true, kQwenInt8Weights + kMtpWeights, {}, KvCache::Int8).prefill_lazy -
                p.prefill_lazy,
            size_t{402653184});
-  CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
+  CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
   // (spec 39: the deferred rows are plan()'s `deep`, not the slots' state)
   CHECK_EQ(p.slot_state, size_t(int64_t(size_t{3} * (4 * size_t{150994944} + 31457280) + ctl + pages) + hh));
@@ -95,10 +95,10 @@ void check_decided_layout() {
   CHECK_EQ(n.slot_state, size_t{3} * (size_t{150994944} + 31457280) + ctl + pages);
   // ... less the widening scratch's further 98304 positions (3j: at the cap, not the pool's positions).
   CHECK_EQ(n.total() - n.slot_state,
-           runtime::plan(q, 229376, false, kQwenInt8Weights, {}, {}, KvCache::Int8).total() - size_t{402653184});
+           runtime::plan(q, 229376, false, kQwenInt8Weights, {}, KvCache::Int8).total() - size_t{402653184});
   // bf16 KV widens nothing: plan() at the sum, unchanged by 3j.
   const runtime::MemoryPlan nb = runtime::plan_pool(q, s, false, kQwenInt8Weights, {}, KvCache::Bf16);
-  CHECK_EQ(nb.total() - nb.slot_state, runtime::plan(q, 229376, false, kQwenInt8Weights, {}, {}, KvCache::Bf16).total());
+  CHECK_EQ(nb.total() - nb.slot_state, runtime::plan(q, 229376, false, kQwenInt8Weights, {}, KvCache::Bf16).total());
 }
 
 // Spec 31 (plan 31 Task 4): the KV page pool. Its KV is plan()'s at the pool's positions; the pool that fits is the
@@ -112,7 +112,7 @@ void check_pool() {
     CHECK_EQ(runtime::pool_table_pages(s), 4u * 64);
     const runtime::MemoryPlan pool = runtime::plan_pool(q, s, true, w, {}, kv);
     CHECK_EQ(pool.max_len, 229376u);
-    CHECK_EQ(pool.kv, runtime::plan(q, 229376, true, w, {}, {}, kv).kv);
+    CHECK_EQ(pool.kv, runtime::plan(q, 229376, true, w, {}, kv).kv);
     CHECK_EQ(pool.pool_pages, 112u);
     CHECK(pool.slot_lens == (std::vector<uint32_t>(4, 131072)));
   }
@@ -166,8 +166,8 @@ void check_ornith() {
   const runtime::MemoryPlan p = runtime::plan_pool(o, four, true, w, {}, KvCache::Bf16);
   const runtime::SlotSizes ss = runtime::SlotDims::sizes(o, 4, true, runtime::pool_table_pages(four));
   CHECK_EQ(ss.rings, size_t{3} * 15728640);
-  CHECK_EQ(runtime::MtpDims::sizes(p.max_len, o, 0, KvCache::Bf16, runtime::MtpDims::kSlots, 4).gdn_spec -
-               runtime::MtpDims::sizes(p.max_len, o, 0, KvCache::Bf16).gdn_spec,
+  CHECK_EQ(runtime::MtpDims::sizes(p.max_len, o, KvCache::Bf16, runtime::MtpDims::kSlots, 4).gdn_spec -
+               runtime::MtpDims::sizes(p.max_len, o, KvCache::Bf16).gdn_spec,
            size_t{3} * 4 * 62914560);
   std::printf("Ornith 4 up to 262144 in 524288 positions, MTP: %s\n", runtime::describe(p, kDevice, kReserve).c_str());
   std::printf("| Ornith --max-num-seqs | pool (MTP, bf16, --max-len auto) | one request up to | total GB |\n");

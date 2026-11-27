@@ -83,8 +83,6 @@ std::vector<uint32_t> checked_slots(const loader::LoadedModel& m, uint32_t max_l
     if (!qwen38 && !ornith)
       throw std::runtime_error("runtime::Engine: sequence slots are built for Qwen3.8 and Ornith; " + d.name +
                                " serves one sequence");
-    if (m.draft_vocab)
-      throw std::runtime_error("runtime::Engine: a draft vocabulary beside sequence slots is not built");
   }
   return slots;
 }
@@ -92,7 +90,7 @@ std::vector<uint32_t> checked_slots(const loader::LoadedModel& m, uint32_t max_l
 // Spec 32e: where capture_wide builds the 16-, 32- and 64-row lists - DecodeScratchDims::rows' conditions and the
 // int8 head (gemm_sm_i8w's wide builds; the bf16 head has none). Only there is the decode scratch sized for 64 rows.
 bool wide_lists(const loader::LoadedModel& m, KvCache kv, size_t seqs) {
-  return DecodeScratchDims::rows(*m.desc, m.mtp != nullptr, kv, uint32_t(seqs), m.draft_vocab != nullptr) ==
+  return DecodeScratchDims::rows(*m.desc, m.mtp != nullptr, kv, uint32_t(seqs)) ==
              DecodeScratchDims::kDeepM &&
          m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind == model::WeightKind::Int8;
 }
@@ -100,7 +98,7 @@ bool wide_lists(const loader::LoadedModel& m, KvCache kv, size_t seqs) {
 // proposer (DecodeScratchDims::rows, as the planner counts them), else 16.
 uint32_t scratch_rows(const loader::LoadedModel& m, KvCache kv, size_t seqs, bool drafter) {
   if (wide_lists(m, kv, seqs)) return DecodeScratchDims::kDeepM;
-  return seqs > 1 ? DecodeScratchDims::rows(*m.desc, m.mtp != nullptr || drafter, kv, uint32_t(seqs), false)
+  return seqs > 1 ? DecodeScratchDims::rows(*m.desc, m.mtp != nullptr || drafter, kv, uint32_t(seqs))
                   : DecodeScratchDims::kWideM;
 }
 }  // namespace
@@ -115,13 +113,12 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
                                    drafter != nullptr)),
       buffers_(persist_, decode_scratch_),
       own_{.tap = debug_resid ? std::make_unique<l0::Mem>(
-                                    ctx, l0::MemKind::Device, EngineDims::sizes(*model_.desc, kv, 0, 1, false, false, true).tap)
+                                    ctx, l0::MemKind::Device, EngineDims::sizes(*model_.desc, kv, 1, false, false, true).tap)
                               : nullptr,
             .df_slots = nullptr, .gdn_pend = nullptr, .gdn_x = nullptr, .conv_x = nullptr,
             .head_gate = nullptr},
       mtp_(model_.mtp ? std::make_unique<MtpBuffers>(
                             ctx, persist_.max_len, *model_.desc,
-                            model_.draft_vocab ? model_.draft_vocab->size() : 0u,   // spec 8 §11
                             kv, MtpBuffers::kSlots,
                             static_cast<uint32_t>(checked_slots(model_, max_len, slot_lens, pool_pages).size()))   // spec 13c
                       : nullptr),
@@ -132,7 +129,7 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
       control_(buffers_.control.as<Control>()) {
   const std::vector<uint32_t> lens = checked_slots(model_, max_len, std::move(slot_lens), pool_pages);
   // Spec 39: the drafter's slots and the deferred GDN rows are made exactly when the plan counts them.
-  const EngineSizes es = EngineDims::sizes(*model_.desc, kv, model_.draft_vocab ? model_.draft_vocab->size() : 0u,
+  const EngineSizes es = EngineDims::sizes(*model_.desc, kv,
                                            uint32_t(lens.size()), mtp_ != nullptr, drafter != nullptr, debug_resid);
   if (drafter) {
     // Spec 19c: one proposer per engine, and the drafter's verify lists at M = 1 .. max_k + 1 over its 8 slots.
@@ -742,7 +739,7 @@ void Engine::capture_wide(const CaptureOptions& opt) {
   if (!own_.gdn_x) {
     // PERF-56: the ring copy at the model's conv channels (Qwen3.8 10240, Ornith 8192)
     const uint32_t conv = d.gdn_conv_dim();
-    const EngineSizes es = EngineDims::sizes(d, kv_cache(), 0, 1, true, false);   // wide_lists: one slot, the head
+    const EngineSizes es = EngineDims::sizes(d, kv_cache(), 1, true, false);   // wide_lists: one slot, the head
     own_.gdn_x = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device, es.gdn_x);
     own_.conv_x = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device, es.conv_x);
     ring_mod_ = std::make_unique<l0::Module>(ctx_, kernels::path(kernels::gdn_ring_commit_variant(conv)));

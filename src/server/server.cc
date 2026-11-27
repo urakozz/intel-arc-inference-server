@@ -650,7 +650,8 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       } else if (step_k) {
         step_k->observe(kept);
       } else if (policy) {
-        policy->observe(k, std::min(k, kept));
+        const uint32_t made = deps_.engine.drafted(k);
+        policy->observe(made, std::min(made, kept));
       }
     }
     const uint32_t id = burst[burst_at];
@@ -679,7 +680,8 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
       constexpr double kSettleSeconds = 0.3;
       const double t1 = steady_seconds();
       const bool settled = opts_.mtp_adaptive.measure && t_decode > 0 && t0 - t_decode > kSettleSeconds;
-      if (policy) policy->observe(k, std::min<uint32_t>(k, uint32_t(burst.size() - 1)), settled ? t1 - t0 : 0);
+      const uint32_t made = deps_.engine.drafted(k);
+      if (policy) policy->observe(made, std::min<uint32_t>(made, uint32_t(burst.size() - 1)), settled ? t1 - t0 : 0);
     }
     return burst[burst_at++];
   };

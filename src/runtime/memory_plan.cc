@@ -6,7 +6,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include "loader/draft_vocab.h"
 #include "loader/moe_layout.h"
 #include "runtime/buffer_sizes.h"
 
@@ -14,23 +13,19 @@ namespace runtime {
 
 std::string format_memory(const char* label, const MemoryComponents& c, size_t device_bytes) {
   const double gb = 1e9;
-  std::string dv, dr;
-  if (c.draft_vocab) dv = std::format(" draft vocab {:.3f} GB,", c.draft_vocab / gb);
+  std::string dr;
   if (c.drafter) dr = std::format(" drafter {:.3f} GB,", c.drafter / gb);   // spec 19b
   std::string buf;
   buf = std::format(
     "{}: model {:.3f} GB, kv {:.3f} GB, decode state {:.3f} GB, prefill scratch {:.3f} GB,"
-    " int8 {:.3f} GB,{}{} total {:.3f} GB of {:.3f} GB",
+    " int8 {:.3f} GB,{} total {:.3f} GB of {:.3f} GB",
     label, c.model / gb, c.kv / gb, c.decode_state / gb, c.prefill_scratch / gb,
-    c.int8 / gb, dv, dr, c.total() / gb, device_bytes / gb);
+    c.int8 / gb, dr, c.total() / gb, device_bytes / gb);
   return buf;
 }
 
 MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t model_bytes,
-                const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv, const DrafterPlan& drafter) {
-  // Spec 8 §11 / spec 19c: a draft vocabulary narrows the MTP head's or the DFlash drafter's head.
-  if (dv.rows != 0 && !mtp && !drafter.on())
-    throw std::invalid_argument("runtime::plan: a draft vocabulary drafts with the MTP head or a drafter");
+                const PrefillPath& path, KvCache kv, const DrafterPlan& drafter) {
   MemoryPlan p;
   p.drafter = drafter.bytes(max_len);   // spec 19b: 0 without a drafter
   p.max_len = max_len;
@@ -44,17 +39,13 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   p.kv = ps.kv_k + ps.kv_v;
   // Spec 32e: the decode scratch at the deep verify lists' 64 rows only where they can be built.
   p.decode_state = ps.total() - p.kv +
-                   DecodeScratchDims::sizes(max_len, desc, DecodeScratchDims::rows(desc, mtp, kv, 1, dv.rows != 0)).total();
+                   DecodeScratchDims::sizes(max_len, desc, DecodeScratchDims::rows(desc, mtp, kv, 1)).total();
   // Spec 15c: the MoE split (both already counted above - model_bytes is the loaded total,
   // DecodeScratchSizes::moe is in decode_state).
   p.moe_weights = loader::moe_bytes(desc);
   p.moe_scratch = moe_scratch_layout(desc).total;
-  // The loader's compact head and id table, outside model_bytes (LoadReport::total()) - for the MTP head's drafts or
-  // (spec 19c) the drafter's, whose own logits are in its buffers (DrafterPlan).
-  if (dv.rows != 0) p.draft_vocab = loader::draft_vocab_bytes(dv.rows, desc.hidden, dv.int8).total();
   if (mtp) {
-    // With a draft vocabulary MtpBuffers also holds its compact logits (spec 8 §11).
-    p.mtp_buffers = MtpDims::sizes(max_len, desc, dv.rows, kv).total();
+    p.mtp_buffers = MtpDims::sizes(max_len, desc, kv).total();
     // Allocated on the first prefill of an engine with the head (engine_prefill.cc).
     p.mtp_hidden = path.prefill ? engine_prefill_sizes(desc, path.chunk_cap, true, 0).mtp_hid : 0;
     p.decode_state += p.mtp_buffers + p.mtp_hidden;
@@ -78,7 +69,7 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   }
   // Spec 32: the deferred GDN rows (with either proposer: a drafter's too - spec 39 found them unplanned there) and
   // the deep lists' chain scratch - Engine's own (EngineSizes), as the engine allocates them.
-  const EngineSizes es = EngineDims::sizes(desc, kv, dv.rows, 1, mtp, drafter.on());
+  const EngineSizes es = EngineDims::sizes(desc, kv, 1, mtp, drafter.on());
   p.deep = es.gdn_pend + es.gdn_x + es.conv_x;
   p.decode_state += p.deep + es.head_gate;   // PERF-123: and the verify lists' head choice word
   // Spec 19c: the engine's side of a drafter - 7 more GDN slots, and the prefill's tap staging.
@@ -114,7 +105,7 @@ uint32_t largest_that_fits(uint32_t cap, const Fits& fits) {
 
 uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
-                           const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv,
+                           const PrefillPath& path, KvCache kv,
                            const DrafterPlan& drafter) {
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("max_len_that_fits: the cap " + std::to_string(cap) +
@@ -124,13 +115,13 @@ uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_
   // count, the RoPE table, the MTP head's KV, the composed pf_s / pf_p), so the
   // quanta that fit are a prefix and a bisection finds its end.
   return largest_that_fits(cap, [&](uint32_t len) {
-    return plan(desc, len, mtp, model_bytes, path, dv, kv, drafter).total() + reserve_bytes <= device_bytes;
+    return plan(desc, len, mtp, model_bytes, path, kv, drafter).total() + reserve_bytes <= device_bytes;
   });
 }
 
 uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
                                      size_t device_bytes, size_t reserve_bytes, uint32_t max_len,
-                                     const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv,
+                                     const PrefillPath& path, KvCache kv,
                                      const DrafterPlan& drafter) {
   PrefillPath wide = path;
   wide.chunk_cap = PrefillScratchDims::kCMax;
@@ -139,7 +130,7 @@ uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, siz
   } catch (const std::invalid_argument&) {
     return PrefillScratchDims::kCDefault;   // a model that refuses 4096-row chunks
   }
-  return plan(desc, max_len, mtp, model_bytes, wide, dv, kv, drafter).total() + reserve_bytes <= device_bytes
+  return plan(desc, max_len, mtp, model_bytes, wide, kv, drafter).total() + reserve_bytes <= device_bytes
              ? PrefillScratchDims::kCMax
              : PrefillScratchDims::kCDefault;
 }
@@ -153,15 +144,15 @@ MemoryPlan plan_sequences(const model::ModelDesc& desc, uint32_t positions, uint
                           const std::vector<uint32_t>& session_lens, uint32_t table_pages, bool mtp, size_t model_bytes,
                           const PrefillPath& path, KvCache kv, const DrafterPlan& drafter) {
   const uint32_t seqs = static_cast<uint32_t>(session_lens.size());
-  MemoryPlan p = plan(desc, positions, mtp, model_bytes, path, {}, kv, drafter);
+  MemoryPlan p = plan(desc, positions, mtp, model_bytes, path, kv, drafter);
   // Spec 31: the pool's drafter reaches one request's cap; the RoPE table stays at the pool's positions (the engine's
   // max_len, the loader's table - one number, runtime::Engine).
   if (reach != positions) p.drafter = drafter.bytes(reach);
   // Spec 32e: several slots build no deep verify list - their decode scratch keeps kWideM rows, not plan()'s; plan 40a
   // Task 3: kWideRowsM beside a proposer on Qwen3.8 (the 32-row lists across sequences).
   p.decode_state -=
-      DecodeScratchDims::sizes(positions, desc, DecodeScratchDims::rows(desc, mtp, kv, 1, false)).total() -
-      DecodeScratchDims::sizes(positions, desc, DecodeScratchDims::rows(desc, mtp || drafter.on(), kv, seqs, false)).total();
+      DecodeScratchDims::sizes(positions, desc, DecodeScratchDims::rows(desc, mtp, kv, 1)).total() -
+      DecodeScratchDims::sizes(positions, desc, DecodeScratchDims::rows(desc, mtp || drafter.on(), kv, seqs)).total();
   // 3j: int8 prefill's widening scratch holds one sequence's rows (one prefills at a time, slot-relative), so the
   // engine sizes it at the longest slot (PrefillScratch::kv8_len), not at the sum plan() counted.
   if (path.prefill && kv == KvCache::Int8) {
@@ -178,15 +169,15 @@ MemoryPlan plan_sequences(const model::ModelDesc& desc, uint32_t positions, uint
   for (uint32_t q = 1; q < seqs; ++q) p.slot_state += drafter.session(session_lens[q]);   // plan 19v3b: their sessions
   if (seqs > 1) p.slot_state += drafter.rows;   // spec 39: and the row tables and row taps (unplanned before)
   if (seqs > 1) {   // spec 32: several slots build no deep list; plan 31 Task 13 / 40a: each its deferred GDN rows
-    const EngineSizes es = EngineDims::sizes(desc, kv, 0, seqs, mtp, drafter.on());
+    const EngineSizes es = EngineDims::sizes(desc, kv, seqs, mtp, drafter.on());
     p.decode_state -= p.deep;
     p.deep = es.gdn_pend + es.gdn_x + es.conv_x;
     p.decode_state += p.deep;
   }
   if (mtp) {   // the further slots' GDN states and hh rows: MtpBuffers at `seqs`
     // Spec 32: may be negative - one sequence's hh rows (the deep lists' 65) outweigh the slots'.
-    const int64_t more = int64_t(MtpDims::sizes(p.max_len, desc, 0, kv, MtpDims::kSlots, seqs).total()) -
-                         int64_t(MtpDims::sizes(p.max_len, desc, 0, kv).total());
+    const int64_t more = int64_t(MtpDims::sizes(p.max_len, desc, kv, MtpDims::kSlots, seqs).total()) -
+                         int64_t(MtpDims::sizes(p.max_len, desc, kv).total());
     p.slot_state = size_t(int64_t(p.slot_state) + more);
     p.mtp_buffers = size_t(int64_t(p.mtp_buffers) + more);
   }

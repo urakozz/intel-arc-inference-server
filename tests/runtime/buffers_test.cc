@@ -328,7 +328,7 @@ int main() {
     runtime::DecodeBuffers view(p, s);
     CHECK(view.kv_lay.form == i8);
     CHECK_EQ(view.kv_lay.bytes(), p.kv_k.size());
-    runtime::MtpBuffers mb(ctx, 16384, model::qwen38(), 0, i8);
+    runtime::MtpBuffers mb(ctx, 16384, model::qwen38(), i8);
     CHECK_EQ(mb.kv_k.size(), size_t{16384} * 1032);
     CHECK_EQ(mb.kv_lay.layers, 1u);
     CHECK_EQ(mb.bytes(), size_t{523176064 + 573440 + 640} - 2 * size_t{16384} * (2048 - 1032));

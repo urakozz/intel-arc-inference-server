@@ -127,18 +127,17 @@ class Walk {
         launch(k, V / tl.cols);
       }
     }
-    {   // df_topk_stage1(logits, part), grid (chunks, R); df_topk_stage2(part, ids, out_mult, softcap, cand, unary), grid (R)
+    {   // df_topk_stage1(logits, part), grid (chunks, R); df_topk_stage2(part, out_mult, softcap, cand, unary), grid (R)
       l0::Kernel& k1 = kernel(kd::dspark_topk_variant(), "df_topk_stage1", kd::kWg);
       k1.arg_ptr(0, b_.logits.ptr());
       k1.arg_ptr(1, b_.tpart.ptr());
       launch(k1, (V + kd::kTopkChunk - 1) / kd::kTopkChunk, R);
       l0::Kernel& k2 = kernel(kd::dspark_topk_variant(), "df_topk_stage2", kd::kWg);
       k2.arg_ptr(0, b_.tpart.ptr());
-      k2.arg_ptr(1, b_.cand.ptr());   // the full head's build never reads it
-      k2.arg(2, d_.out_mult);
-      k2.arg(3, d_.softcap);
-      k2.arg_ptr(4, b_.cand.ptr());
-      k2.arg_ptr(5, b_.unary.ptr());
+      k2.arg(1, d_.out_mult);
+      k2.arg(2, d_.softcap);
+      k2.arg_ptr(3, b_.cand.ptr());
+      k2.arg_ptr(4, b_.unary.ptr());
       launch(k2, R);
     }
     {   // df_select(ctrl, dctl, cand, unary, hid, pred, succ, out), grid (1), WG 256: the Markov walk (V2, hid = ones)

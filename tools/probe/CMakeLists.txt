@@ -620,6 +620,26 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   foreach(V dpas_k4 dpas_k4_g256 dpas_g256 dpas_g256_SEQS H1_B4 H1_B4_SEQS)
     add_dependencies(probe_df_attn_seqs kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_${V})
   endforeach()
+  # plan 41k: the KS 4 part with its K / V atoms by 2D block reads (BLK2D), at KS 1 / 2 / 4, 256 GRF
+  foreach(_ks 1 2 4)
+    add_ocloc_kernel(pdfa_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k${_ks}_g256_blk SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/dflash/df_attn_dpas.cl
+                     DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2
+                             DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5 M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128
+                             KS=${_ks} BLK2D=1
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_dependencies(probe_df_attn_seqs kernel_pdfa_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k${_ks}_g256_blk)
+  endforeach()
+  # and KS 2 without the 2D reads (256 GRF) / with them at 128 GRF
+  add_ocloc_kernel(pdfa_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2_g256 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/dflash/df_attn_dpas.cl
+                   DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2
+                           DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5 M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=2
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pdfa_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2_blk SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/dflash/df_attn_dpas.cl
+                   DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2
+                           DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5 M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 KS=2
+                           BLK2D=1)
+  add_dependencies(probe_df_attn_seqs kernel_pdfa_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2_g256
+                   kernel_pdfa_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2_blk)
 endif()
 # --- probe_draft_cost: spec 19a Task 4, one DFlash2 block's GEMVs (int8 / bf16 / int4) ---
 # Random weights of
@@ -1792,3 +1812,49 @@ target_link_libraries(probe_d2h_check PRIVATE b70_l0)
 add_executable(probe_event_pool_check probe_event_pool_check.cc)
 target_include_directories(probe_event_pool_check PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_event_pool_check PRIVATE b70_l0)
+
+# --- probe_df2_linears: plan 41k, Inkling's DFlash 2 drafter's linears at the block's 8 rows - the int8 gemm_sm_i8w
+# under other in-work-group K splits (WG_KSL, 2 column sub-groups x KSL) and the next k-group's tiles read ahead
+# (I8_AHEAD), the packed int4 gemm_sm against gemv. pdf2_i8_M8_K<K>_N<N>_k<KSL 0: unsplit>_a<ahead>.
+add_executable(probe_df2_linears probe_df2_linears.cc)
+target_include_directories(probe_df2_linears PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_df2_linears PRIVATE b70_l0)
+b70_target_kernel_dir(probe_df2_linears)
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  foreach(kn "2304;6144;4 12" "4096;2304;4 8 16" "2304;13824;4 12" "6912;2304;4 12" "2304;576;4 12" "2304;256;4 12"
+             "9216;2304;4 8 16" "2304;2048;4 12")
+    list(GET kn 0 _k)
+    list(GET kn 1 _n)
+    list(GET kn 2 _ksl)
+    separate_arguments(_ksl UNIX_COMMAND "${_ksl}")
+    foreach(_s 0 ${_ksl})
+      foreach(_a 0 1)
+        set(_defs M=8 K=${_k} N=${_n} S=1 LAYOUT=2 I8_AHEAD=${_a})
+        if(NOT _s EQUAL 0)
+          list(APPEND _defs SPLITK=1 WG_KSL=${_s})
+        endif()
+        set(_name pdf2_gemm_sm_i8w_M8_K${_k}_N${_n}_k${_s}_a${_a})
+        add_ocloc_kernel(${_name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl DEFINES ${_defs})
+        add_dependencies(probe_df2_linears kernel_${_name})
+      endforeach()
+    endforeach()
+  endforeach()
+  foreach(kn "9216;2304" "2304;2048")   # the context projection at 4 committed rows, unsplit, with and without read-ahead
+    list(GET kn 0 _k)
+    list(GET kn 1 _n)
+    foreach(_a 0 1)
+      set(_name pdf2_gemm_sm_i8w_M4_K${_k}_N${_n}_k0_a${_a})
+      add_ocloc_kernel(${_name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl
+                       DEFINES M=4 K=${_k} N=${_n} S=1 LAYOUT=2 I8_AHEAD=${_a})
+      add_dependencies(probe_df2_linears kernel_${_name})
+    endforeach()
+  endforeach()
+  foreach(_m 1 7)   # the 2-bit candidate head (layout 3) at the plain step's row and the draft's 7, with the magic dequant
+    foreach(_l 0 1)
+      set(_name pdf2_gemm_sm_M${_m}_K2304_N200064_L3_mg${_l})
+      add_ocloc_kernel(${_name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl
+                       DEFINES M=${_m} K=2304 N=200064 S=1 LAYOUT=3 DEQ=${_l})
+      add_dependencies(probe_df2_linears kernel_${_name})
+    endforeach()
+  endforeach()
+endif()

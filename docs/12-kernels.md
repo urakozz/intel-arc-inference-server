@@ -697,9 +697,8 @@ may do. The loop bound `n_active` is read uniformly so all lanes reach the barri
 nothing rather than something plausible. The index travels as a float, which is lossless here: every integer below
 2^24 is exact in fp32, and the largest index is 248319.
 
-The other argmaxes share this design with different widths: `tp_argmax_stage1/2` (`tp.cl`, one card's half of the
-vocabulary under tensor parallel; the host merges the two winners, larger value first, ties to the lower id) and
-`dv_argmax_stage1/2` (`draft_vocab.cl`, the MTP draft's reduced vocabulary).
+Under tensor parallel, `tp_argmax_stage1/2` in `tp.cl` runs the same reduction over each card’s vocabulary half.
+The host picks the larger value and breaks ties in favor of the lower id.
 
 ### Test, rejected, measured
 
@@ -1515,6 +1514,5 @@ in a directory or file of `src/kernels/` and are described in their source heade
 | `kolibri/` | Kolibri-1: sliding-window and full attention, experts |
 | `qwen4exp/` | Qwen3.8-Flash-Next: the block-selection attention, experts, per-layer embeddings, multi-token head |
 | `dflash/` | the DFlash draft model |
-| `draft_vocab.cl` | the MTP draft's argmax over a reduced vocabulary |
 | `tp.cl`, `prefill/pf_tp.cl` | tensor parallel: the all-reduce after each row-parallel linear by P2P writes, and one card's half of the argmax |
 | `noop.cl`, `ctrl_read.cl`, `bw_sum.cl` | measurement helpers: per-launch fixed cost, a control-block read, a read-only bandwidth probe |

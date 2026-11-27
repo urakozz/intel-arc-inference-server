@@ -1,6 +1,6 @@
 // Open-work 13: draft_prob.cl - the draft's softmax max and normaliser against a double-precision host reference, on
 // the whole row (Qwen3.8's 248320 / 248077) and a TP card's half with a masked tail (124160 / 123917): a peaked row,
-// a flat one, a row whose largest logits are masked ids, a draft vocabulary's row (-inf outside a few ids), and the
+// a flat one, a row whose largest logits are masked ids, and the
 // two halves merged as runtime::TpEngine::draft merges them. Each probability within 1e-5 of the reference.
 #include <algorithm>
 #include <cmath>
@@ -112,13 +112,6 @@ int main() {
       v[used - 1] = 9.f;
       for (uint32_t k = used; k < rows; ++k) v[k] = 50.f;   // masked ids, never counted
       check_row(d, "largest logits masked", rows, used, v);
-    }
-    {
-      std::vector<float> v(rows, -std::numeric_limits<float>::infinity());   // a draft vocabulary's row
-      v[5] = 3.f;
-      v[6] = 2.f;
-      v[70000] = 1.f;
-      check_row(d, "-inf outside a few ids", rows, used, v);
     }
   }
   {

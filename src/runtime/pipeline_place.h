@@ -30,8 +30,7 @@
 //     replica of the embedding, which the head's drafts and KV fill gather. Device 1 holds
 //     the final norm, device 0 a 64-byte placeholder. Both hold the RoPE table (every FA
 //     layer reads it);
-//   - spec 16d: the MTP head (`mtp`) and a draft vocabulary (`draft_vocab`) are device 1's;
-//     device 0's model holds neither.
+//   - spec 16d: the MTP head (`mtp`) is device 1's.
 namespace runtime {
 
 // Device bytes of the weights a LOADED model holds, by where pipeline parallel puts them
@@ -46,11 +45,10 @@ size_t model_device_bytes(const loader::LoadedModel& m);
 
 // Splits `full` (loaded on `d0`) at `split`: returns {stage 0 on d0, stage 1 on d1}.
 // Throws for a split outside [1, layers - 1]. `d1` must be a view of d0's context
-// (l0::Context's view constructor). Spec 16d: the MTP head and a draft vocabulary move to
+// (l0::Context's view constructor). Spec 16d: the MTP head moves to
 // device 1 with lm_head, and the embedding is replicated there.
 // Spec 19d: `drafter` (--spec dflash --parallel pp) - the DFlash drafter will draft on device 1 beside lm_head: the
-// embedding is replicated there as for the head, and a draft vocabulary (the drafter's, built without the MTP
-// head) moves to device 1 too.
+// embedding is replicated there as for the head.
 std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
                                               loader::LoadedModel full, uint32_t split, bool drafter = false);
 

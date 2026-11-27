@@ -1,6 +1,7 @@
 // Plan 21-QFN-v2b Task 5 Step 0: Qwen3.8-Flash-Next's MTP head under `--parallel tp` (GPU only; label
 // checkpoint;qwen4exp;tp). One engine a process (each pins the 51.8 GB PLE table), so the comparison is two runs:
 //   qwen4exp_tp_mtp_test <checkpoint> <ids> plain|mtp <ids file> [layers 18] [n 64]
+//   (a mode ending in -kv8, plan 21-QFN-v3a: the same with the int8 KV cache - plain-kv8 writes, mtp-kv8 reads)
 // The prompts are <ids> cycled to 120 and 2100 positions, filled by decode (ingest, one id a step).
 //   plain  tp without the head: each prompt's n greedy ids (the plain decode list) -> <ids file>
 //   mtp    tp with the head whole on card 1:
@@ -77,7 +78,10 @@ int main(int argc, char** argv) {
   }
   const uint32_t layers = argc > 5 ? uint32_t(std::atoi(argv[5])) : 18;
   const uint32_t n = argc > 6 ? uint32_t(std::atoi(argv[6])) : 64;
-  const std::string mode = argv[3], path = argv[4];
+  std::string mode = argv[3];
+  const std::string path = argv[4];
+  const bool kv8 = mode.size() > 4 && mode.compare(mode.size() - 4, 4, "-kv8") == 0;   // plan 21-QFN-v3a: the int8 KV cache
+  if (kv8) mode.resize(mode.size() - 4);
   CHECK(mode == "plain" || mode == "mtp" || mode == "cost" || mode == "cost-rows");
   qwen4exp_rig::Rig rig;
   qwen4exp_rig::open(rig, 1);
@@ -87,7 +91,7 @@ int main(int argc, char** argv) {
   }
   qwen4exp_rig::open(rig, 2);
   const uint32_t max_len = 16384;
-  const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, layers);
+  const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, layers, kv8);
   const Ids src = qwen4exp_rig::read_ids(argv[2], d.vocab);
   CHECK(!src.empty());
   const bool head = mode != "plain";
@@ -95,7 +99,8 @@ int main(int argc, char** argv) {
   tp_opt.per_row_moe = mode == "cost-rows";
   rq::Qwen4ExpTpEngine e(*rig.c0, *rig.c1,
                          loader::load_qwen4exp(rig.ctx, snap, max_len, model::Q4Placement::tp2(d, model::Q4TpEnds::Split),
-                                               loader::LmHeadForm::Int8, layers, head),
+                                               loader::LmHeadForm::Int8, layers, head, nullptr, nullptr,
+                                               runtime::qwen4exp::kPfC, kv8),
                          max_len, tp_opt);
   CHECK_EQ(e.mtp(), head);
   const std::vector<size_t> lens = {120, 2100};

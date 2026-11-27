@@ -17,11 +17,12 @@
 //   --spec mtp|lookup      the MTP head (spec 21-QFN-v1e: draft / verify / commit through the adapter, a fixed K = --spec-max
 //                          (1..3, default 3); lookup's drafts through the same verify lists); the planner carries the
 //                          head's weights and buffers; --spec auto is off for this model
-//   the prefix cache       the existing flags (--prefix-cache-gb, --prefix-split-last): kv_form 0 (bf16); the
+//   --kv-cache int8        plan 21-QFN-v3a: the QSA layers' KV (and the head's) rotated int8 with fp16 scales
+//   the prefix cache       the existing flags (--prefix-cache-gb, --prefix-split-last): kv_form 0 (bf16) / 1 (int8); the
 //                          snapshots are runtime/qwen4exp/qwen4exp_sizes.h's (GDN, PLE and indexer state; KV and
 //                          compressed-key blocks; with the head its tail, R, KV and keys)
 // Refused before the device, each by name (the adaptive K waits for spec 22's full-model cost numbers: cli::resolve_spec
-// gives this family a fixed K), --draft-vocab (spec 8 §11's compact head is not built for this head), --kv-cache int8 (decision 8),
+// gives this family a fixed K),
 // --prefill-backend l0-int8 (b70-decode's message), --pipeline-split on one card.
 #include <cstdint>
 #include <fstream>
@@ -40,7 +41,7 @@ struct ServeArgs {
   std::string snapshot_dir;
   DecodeArgs args;                       // the planner's and the refusals' inputs (prefill on, lm_head int8)
   uint32_t mtp_k = 0;                    // --spec mtp's fixed K (0: no head)
-  bool spec_lookup = false, draft_vocab = false;
+  bool spec_lookup = false;
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
   bool loads_head() const { return mtp_k > 0 || spec_lookup; }
@@ -48,17 +49,10 @@ struct ServeArgs {
 
 // Every refusal that needs no device and no tensor, in this order (tests/CMakeLists.txt's cli_reject_serve_qwen4exp_*).
 inline void check_serve(const ServeArgs& s) {
-  if (s.draft_vocab)
-    throw std::runtime_error("--draft-vocab is not built for Qwen3.8-Flash-Next's MTP head (the compact head is "
-                             "Qwen3.8's): drop --draft-vocab");
-  if (s.args.kv8)
-    throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (int8 later - kv8.cl "
-                             "hard-codes 24 q / 4 kv heads and this model has 2)");
   if (s.mtp_k > runtime::qwen4exp::kMaxDraft)
     throw std::runtime_error("--spec-max " + std::to_string(s.mtp_k) + ": Qwen3.8-Flash-Next verifies at M <= 4 (K 1..3)");
   DecodeArgs a = s.args;   // b70-decode's refusals: the prefill backends, the --parallel sub-flags
   a.mtp = false;
-  a.kv8 = false;
   a.profile = false;
   check_args(a);
 }

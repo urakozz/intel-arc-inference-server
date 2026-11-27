@@ -61,11 +61,11 @@ void check_sizes_qwen38() {
   CHECK_EQ(d.logits, size_t{2} * 7946240);
   CHECK_EQ(d.total(), size_t{2} * (68652864 - 50724864 + 6340608));
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, q, 64).total(), size_t{8} * (68652864 - 50724864 + 6340608));
-  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 1, false), 64u);
-  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Int8, 1, false), 16u);
-  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 2, false), 32u);   // plan 40a Task 3
-  CHECK_EQ(runtime::DecodeScratchDims::rows(q, false, runtime::KvCache::Int8, 4, false), 16u);
-  CHECK_EQ(runtime::DecodeScratchDims::rows(q, false, runtime::KvCache::Bf16, 1, false), 16u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 1), 64u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Int8, 1), 16u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, true, runtime::KvCache::Bf16, 2), 32u);   // plan 40a Task 3
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, false, runtime::KvCache::Int8, 4), 16u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(q, false, runtime::KvCache::Bf16, 1), 16u);
   // 128k (spec 6): KV 8,589,934,592.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
   for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
@@ -85,17 +85,17 @@ void check_sizes_qwen38() {
   // spec 32: hh at 64 + 1 rows, hctl 768 B; the deferred GDN rows and the deep lists' chain scratch are Engine's own
   // (spec 39: EngineSizes, no longer a `deep` term of MtpSizes without an MtpBuffers member)
   CHECK_EQ(m.total(), size_t{523176064 + 81920 + 491520 + 640});
-  const runtime::EngineSizes e = runtime::EngineDims::sizes(q, runtime::KvCache::Bf16, 0, 1, true, false);
+  const runtime::EngineSizes e = runtime::EngineDims::sizes(q, runtime::KvCache::Bf16, 1, true, false);
   CHECK_EQ(e.gdn_pend + e.gdn_x + e.conv_x, size_t{103022592 + 150994944 + 47185920});
   // Spec 19a: probe_mtp_steps' 8-slot buffer (verify M = 5..8) - 7 gdn_state copies, the
   // rest as at 4 slots; the default stays the 4 slots above, and [4, 8] is the range.
-  const runtime::MtpSizes m8 = runtime::MtpDims::sizes(16384, q, 0, runtime::KvCache::Bf16, 8);
+  const runtime::MtpSizes m8 = runtime::MtpDims::sizes(16384, q, runtime::KvCache::Bf16, 8);
   CHECK_EQ(m8.gdn_spec, size_t{7} * 150994944);
   CHECK_EQ(m8.total() - m8.gdn_spec, m.total() - m.gdn_spec);
   for (uint32_t bad : {3u, 9u}) {
     bool threw = false;
     try {
-      runtime::MtpDims::sizes(16384, q, 0, runtime::KvCache::Bf16, bad);
+      runtime::MtpDims::sizes(16384, q, runtime::KvCache::Bf16, bad);
     } catch (const std::invalid_argument&) {
       threw = true;
     }
@@ -152,9 +152,9 @@ void check_sizes_ornith() {
   CHECK_EQ(d.x, size_t{16} * 4096 * 2);                             // 2 x hidden > 512, 16 rows
   CHECK_EQ(d.attn_part, size_t{16} * 32 * 16 * 258 * 4);            // v2 at 16 q-heads, 16 rows
   // PERF-120: several sequences with the MTP head keep the 32-row lists' scratch, either KV form
-  CHECK_EQ(runtime::DecodeScratchDims::rows(o, true, runtime::KvCache::Int8, 4, false), 32u);
-  CHECK_EQ(runtime::DecodeScratchDims::rows(o, true, runtime::KvCache::Bf16, 2, false), 32u);
-  CHECK_EQ(runtime::DecodeScratchDims::rows(o, false, runtime::KvCache::Bf16, 4, false), 16u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(o, true, runtime::KvCache::Int8, 4), 32u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(o, true, runtime::KvCache::Bf16, 2), 32u);
+  CHECK_EQ(runtime::DecodeScratchDims::rows(o, false, runtime::KvCache::Bf16, 4), 16u);
   // Dense models carry no MoE scratch: their sizes are what they were.
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
   // The plan (decode only: Ornith's prefill is spec 15d) carries both MoE terms, and the
@@ -333,67 +333,6 @@ void check_max_len_that_fits() {
   CHECK_EQ(runtime::max_len_that_fits(q, false, kQwenInt8Weights, kDevice, kReserve, 2048), 2048u);
 }
 
-// Spec 8 §11 (`--draft-vocab`): the compact draft head and its id table are the loader's,
-// outside LoadReport::total() (so outside the weights the CLI passes), and MtpBuffers
-// gains the compact logits. The plan's `draft_vocab` term is |V'| x 5120 x {1 B + a 4 B
-// row scale (int8), 2 B (bf16)} + 4 B ids per row; decode state grows by 4 B per row;
-// auto gives the context what is left.
-void check_draft_vocab() {
-  const model::ModelDesc& q = model::qwen38();
-  const size_t weights = kQwenInt8Weights + kMtpWeights;
-  const runtime::MemoryPlan off = runtime::plan(q, 65536, true, weights);
-  CHECK_EQ(off.draft_vocab, size_t{0});
-  for (uint32_t rows : {32768u, 65536u, 131072u}) {
-    for (bool int8 : {true, false}) {
-      const runtime::MemoryPlan p = runtime::plan(q, 65536, true, weights, {}, {rows, int8});
-      const size_t want = size_t(rows) * 5120 * (int8 ? 1 : 2) + (int8 ? size_t(rows) * 4 : 0) +
-                          size_t(rows) * 4;
-      CHECK_EQ(p.draft_vocab, want);
-      // Spec 32e: a draft vocabulary builds no deep verify list - its decode scratch keeps 16 rows, not 64, and
-      // the engine loses the deep lists' chain scratch (a GDN state and the conv rows; gdn_pend stays).
-      const size_t chain = size_t{128} * 128 * q.gdn_v_heads * q.gdn_layers * 4 +
-                           size_t{q.gdn_layers} * runtime::MtpDims::kGdnConvXLayer;
-      CHECK_EQ(p.mtp_buffers, off.mtp_buffers + size_t(rows) * 4);   // dv_logits fp32 [|V'|]
-      CHECK_EQ(p.deep, off.deep - chain);
-      CHECK_EQ(runtime::MtpDims::sizes(65536, q, rows).dv_logits, size_t(rows) * 4);
-      CHECK_EQ(p.total(), off.total() + want + size_t(rows) * 4 - chain -
-                              runtime::DecodeScratchDims::sizes(65536, q, 64).total() +
-                              runtime::DecodeScratchDims::sizes(65536, q).total());
-      CHECK_EQ(p.model, off.model);   // not in the weights
-    }
-  }
-  // 128k int8: 671,088,640 + 524,288 + 524,288; bf16: 1,342,177,280 + 524,288.
-  CHECK_EQ(runtime::plan(q, 4096, true, weights, {}, {131072, true}).draft_vocab, size_t{672137216});
-  CHECK_EQ(runtime::plan(q, 4096, true, weights, {}, {131072, false}).draft_vocab, size_t{1342701568});
-  // The memory line names the term only when it is there.
-  const std::string line = runtime::format_memory(
-      "memory", runtime::plan(q, 65536, true, weights, {}, {131072, true}), kDevice);
-  CHECK(line.find(" draft vocab 0.672 GB, total ") != std::string::npos);
-  CHECK(runtime::format_memory("memory", off, kDevice).find("draft vocab") == std::string::npos);
-  // Auto under a draft vocabulary: shorter than without, and the plan at the chosen
-  // length (the draft-vocab term included) fits with the reserve.
-  const uint32_t base = runtime::max_len_that_fits(q, true, weights, kDevice, kReserve, kTrained);
-  const uint32_t qb = runtime::max_len_that_fits(q, true, kQwenBf16Weights + kMtpWeights, kDevice,
-                                                 kReserve, kTrained);
-  for (bool int8 : {true, false}) {
-    const size_t w = int8 ? weights : kQwenBf16Weights + kMtpWeights;
-    const runtime::DraftVocabPlan dv{131072, int8};
-    const uint32_t L = runtime::max_len_that_fits(q, true, w, kDevice, kReserve, kTrained, {}, dv);
-    CHECK(L != 0 && L < (int8 ? base : qb));
-    CHECK(runtime::plan(q, L, true, w, {}, dv).total() + kReserve <= kDevice);
-    CHECK(runtime::plan(q, L + runtime::kMaxLenQuantum, true, w, {}, dv).total() + kReserve > kDevice);
-    std::printf("auto qwen3.8 %s head + MTP + --draft-vocab 128k -> max_len %6u (without: %u)\n",
-                int8 ? "int8" : "bf16", L, int8 ? base : qb);
-  }
-  // A draft vocabulary without the MTP head is a caller error.
-  bool threw = false;
-  try {
-    runtime::plan(q, 4096, false, weights, {}, {32768, true});
-  } catch (const std::invalid_argument&) {
-    threw = true;
-  }
-  CHECK(threw);
-}
 // Spec 12b (`--kv-cache int8`): the KV term follows the cache's form. One position of one
 // FA layer is 4 kv-heads x (256 int8 + one fp16 scale) = 1032 B for K and as much for V,
 // against 2048 + 2048 at bf16: 32 KiB + 256 B per position on Qwen3.8 (16 layers).
@@ -412,12 +351,12 @@ void check_kv_int8() {
   // 262144 (the trained context) at int8: 8,657,043,456 B - 0.8 % over bf16 at 131072.
   CHECK_EQ(runtime::PersistentDims::sizes(262144, q, KvCache::Int8).kv_k * 2, size_t{8657043456ull});
   // The MTP head's one layer in the same form.
-  CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Int8).kv_k, size_t{16384} * 1032);
-  CHECK_EQ(runtime::MtpDims::sizes(16384, q, 0, KvCache::Int8).total(),
-           runtime::MtpDims::sizes(16384, q, 0, KvCache::Bf16).total() - 2 * size_t{16384} * (2048 - 1032));
+  CHECK_EQ(runtime::MtpDims::sizes(16384, q, KvCache::Int8).kv_k, size_t{16384} * 1032);
+  CHECK_EQ(runtime::MtpDims::sizes(16384, q, KvCache::Int8).total(),
+           runtime::MtpDims::sizes(16384, q, KvCache::Bf16).total() - 2 * size_t{16384} * (2048 - 1032));
   // spec 32: no deep lists' chain scratch over int8 KV (Engine's: spec 39's EngineSizes)
-  CHECK_EQ(runtime::EngineDims::sizes(q, KvCache::Int8, 0, 1, true, false).total(),
-           runtime::EngineDims::sizes(q, KvCache::Bf16, 0, 1, true, false).total() - size_t{150994944 + 47185920});
+  CHECK_EQ(runtime::EngineDims::sizes(q, KvCache::Int8, 1, true, false).total(),
+           runtime::EngineDims::sizes(q, KvCache::Bf16, 1, true, false).total() - size_t{150994944 + 47185920});
 
   // The layout: rows where they always were, then every layer's scales.
   const runtime::KvLayout l8 = runtime::kv_layout(16384, q, q.fa_layers, KvCache::Int8);
@@ -442,9 +381,9 @@ void check_kv_int8() {
   }
 
   // The int8 prefill also widens one layer's raw K/V values exactly into bf16 scratch.
-  const runtime::MemoryPlan b16 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {}, {},
+  const runtime::MemoryPlan b16 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {},
                                                 KvCache::Bf16);
-  const runtime::MemoryPlan b8 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {}, {},
+  const runtime::MemoryPlan b8 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {},
                                                KvCache::Int8);
   CHECK_EQ(b16.kv, size_t{8589934592ull});
   CHECK_EQ(b8.kv, size_t{131072} * 33024);
@@ -455,7 +394,7 @@ void check_kv_int8() {
   CHECK_EQ(b8.prefill_lazy - b16.prefill_lazy, size_t{536870912});
   runtime::PrefillPath decode_only;
   decode_only.prefill = false;
-  CHECK_EQ(runtime::plan(q, 131072, false, kQwenInt8Weights, decode_only, {}, KvCache::Int8).prefill_scratch,
+  CHECK_EQ(runtime::plan(q, 131072, false, kQwenInt8Weights, decode_only, KvCache::Int8).prefill_scratch,
            size_t{0});
   CHECK_EQ(b16.int8, b8.int8);
   CHECK(runtime::describe(b8, kDevice, kReserve).find(", int8 KV cache)") != std::string::npos);
@@ -495,15 +434,13 @@ void check_kv_int8() {
       {&q, true, kQwenBf16Weights + kMtpWeights, "qwen3.8 bf16 head + MTP"},
   };
   for (const Row& r : rows) {
-    const uint32_t l16 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, {},
-                                                    {}, KvCache::Bf16);
-    const uint32_t l8 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, {},
-                                                   {}, KvCache::Int8);
+    const uint32_t l16 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, {}, KvCache::Bf16);
+    const uint32_t l8 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, {}, KvCache::Int8);
     CHECK(l8 >= l16 && l8 % runtime::kMaxLenQuantum == 0 && l8 <= kTrained);
-    const runtime::MemoryPlan p = runtime::plan(*r.d, l8, r.mtp, r.w, {}, {}, KvCache::Int8);
+    const runtime::MemoryPlan p = runtime::plan(*r.d, l8, r.mtp, r.w, {}, KvCache::Int8);
     CHECK(p.total() + kReserve <= kDevice);
     if (l8 < kTrained)
-      CHECK(runtime::plan(*r.d, l8 + runtime::kMaxLenQuantum, r.mtp, r.w, {}, {}, KvCache::Int8)
+      CHECK(runtime::plan(*r.d, l8 + runtime::kMaxLenQuantum, r.mtp, r.w, {}, KvCache::Int8)
                     .total() + kReserve > kDevice);
     std::printf("auto --kv-cache int8 %-26s -> max_len %6u (bf16 KV: %6u)  (%s)\n", r.what, l8,
                 l16, runtime::describe(p, kDevice, kReserve).c_str());
@@ -640,8 +577,8 @@ void check_chunk_cap() {
   runtime::DrafterPlan dr;
   dr.weights = 1;
   dr.n_taps = 5;
-  CHECK_EQ(runtime::plan(q, 65536, false, kQwenInt8Weights, i8c4, {}, runtime::KvCache::Bf16, dr).drafter_taps -
-               runtime::plan(q, 65536, false, kQwenInt8Weights, i8c2, {}, runtime::KvCache::Bf16, dr).drafter_taps,
+  CHECK_EQ(runtime::plan(q, 65536, false, kQwenInt8Weights, i8c4, runtime::KvCache::Bf16, dr).drafter_taps -
+               runtime::plan(q, 65536, false, kQwenInt8Weights, i8c2, runtime::KvCache::Bf16, dr).drafter_taps,
            size_t{104857600});
 
   // Ruling (i), context first: --max-len auto plans at 2048, and 4096 is taken only
@@ -662,24 +599,24 @@ void check_chunk_cap() {
   for (const Row& r : rows)
     for (PrefillBackend b : {PrefillBackend::L0, PrefillBackend::L0Int8}) {
       const runtime::PrefillPath path{true, b, 2048};
-      const uint32_t L = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, path, {}, r.kv);
+      const uint32_t L = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, path, r.kv);
       CHECK(L != 0);
       const uint32_t cap =
-          runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, L, path, {}, r.kv);
+          runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, L, path, r.kv);
       runtime::PrefillPath at = path;
       at.chunk_cap = cap;
       // Whatever the rule picks, the session's max_len still fits with its reserve.
-      CHECK(runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
+      CHECK(runtime::plan(*r.d, L, r.mtp, r.w, at, r.kv).total() + kReserve <= kDevice);
       // Below the trained context, auto leaves less than one quantum of slack: 2048.
       if (L < kTrained) CHECK_EQ(cap, 2048u);
       // 4096 exactly when its plan fits.
       at.chunk_cap = 4096;
-      CHECK_EQ(cap == 4096u, runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
+      CHECK_EQ(cap == 4096u, runtime::plan(*r.d, L, r.mtp, r.w, at, r.kv).total() + kReserve <= kDevice);
       std::printf("chunk cap %-26s %-7s auto max_len %6u -> cap %u\n", r.what,
                   b == PrefillBackend::L0 ? "l0" : "l0-int8", L, cap);
       // An explicit --max-len well below auto: 4096 (dense models).
       if (!r.d->is_moe())
-        CHECK_EQ(runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, 65536, path, {}, r.kv),
+        CHECK_EQ(runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, 65536, path, r.kv),
                  4096u);
     }
 
@@ -687,11 +624,11 @@ void check_chunk_cap() {
   // auto context below the trained one, and the chunk cap chosen at it is 4096.
   for (const Row& r : rows) {
     const runtime::PrefillPath at2{true, PrefillBackend::L0, 2048}, at4{true, PrefillBackend::L0, 4096};
-    const uint32_t L2 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, at2, {}, r.kv);
-    const uint32_t L4 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, at4, {}, r.kv);
+    const uint32_t L2 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, at2, r.kv);
+    const uint32_t L4 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, at4, r.kv);
     CHECK(L4 != 0 && L4 <= L2);
     if (L2 < kTrained) CHECK(L4 < L2);
-    CHECK_EQ(runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, L4, at4, {}, r.kv), 4096u);
+    CHECK_EQ(runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, L4, at4, r.kv), 4096u);
     std::printf("auto at 4096 %-26s l0      max_len %6u (at 2048: %6u)\n", r.what, L4, L2);
   }
 }
@@ -704,7 +641,6 @@ int main() {
   check_spec6_line();
   check_paths();
   check_max_len_that_fits();
-  check_draft_vocab();
   check_kv_int8();
   std::puts("memory_plan_test OK");
   return 0;

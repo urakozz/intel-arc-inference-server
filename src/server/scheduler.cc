@@ -775,6 +775,8 @@ void Scheduler::spec_rows(const std::function<bool(uint32_t card)>& take, std::v
     }
     row.dflash_lookup = impl_->dflash_lookup;   // plan 41f: the same, inside the card's drafter
     if (impl_->inside) row.lookup_cap = &j->lookup_cap;
+    j->drafted = row.k;
+    row.drafted = &j->drafted;
     if (j->step_k) row.choose = &j->choose;
     rows.push_back(row);
   }
@@ -829,10 +831,11 @@ void Scheduler::spec_results(const std::vector<std::shared_ptr<Job>>& jobs,
       } else if (j->step_k) {
         j->step_k->observe(kept_drafts, k);
       } else if (j->policy) {
-        j->policy->observe(k, std::min(k, kept_drafts));
+        const uint32_t made = std::min(k, j->drafted);
+        j->policy->observe(made, std::min(made, kept_drafts));
       }
       ++j->fin.spec_iters;
-      j->fin.spec_drafted += own ? j->proposed : k;
+      j->fin.spec_drafted += own ? j->proposed : std::min(k, j->drafted);
       // server.cc's per-id rules over the run; `end` = the reason, at the id that ends the request.
       bool ended = false;
       Finish::Reason reason = Finish::Length;

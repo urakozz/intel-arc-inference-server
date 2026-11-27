@@ -140,7 +140,8 @@ void Qwen4ExpTpEngine::prepare_prefill() {
   const model::Qwen4ExpDesc& d = model_.desc;
   const uint32_t rows = model_.pf_rows;   // the planner's chunk rows (kPfC or kPfCWide)
   for (const std::string& v :
-       kernels::qwen4exp::tp_prefill_variants(d, model_.ple.scale == loader::Q4PleScale::Bf16, rows))
+       kernels::qwen4exp::kv8_variants(
+           kernels::qwen4exp::tp_prefill_variants(d, model_.ple.scale == loader::Q4PleScale::Bf16, rows), d.kv8))
     require(std::ifstream(kernels::path(v)).good(),
             v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
   require(d.forms.shared == model::Q4Form::Int4,
@@ -158,7 +159,8 @@ void Qwen4ExpTpEngine::prepare_prefill() {
             "card " + std::to_string(r) + "'s prefill allocation is not the plan's (prefill_sizes + tp_prefill_bytes)");
   }
   if (mtp_) {   // Task 5: the head's pass on card 1
-    for (const std::string& v : kernels::qwen4exp::mtp_prefill_variants(mtp_bind_.single, rows, d.hc_int8))
+    for (const std::string& v :
+         kernels::qwen4exp::kv8_variants(kernels::qwen4exp::mtp_prefill_variants(mtp_bind_.single, rows, d.hc_int8), d.kv8))
       require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with B70_MTP=ON");
     Q4TpPrefillState::Dev& D = *ps->dev[1];
     l0::Context& c1 = cards_[1]->ctx;

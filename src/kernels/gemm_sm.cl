@@ -25,11 +25,12 @@
 //                work-group (gemv's 64 work-items, grid (N/64, S)); 1: the in-work-group split-K
 //                (spec 28 §2.1) - 2 column sub-groups x 8 K-slice sub-groups (256 work-items, grid
 //                (N/32, 1)), groups interleaved across the slices, the slices reduced through SLM in
-//                slice order; the output is then ONE slice (S must be 1)
+//                slice order; the output is then ONE slice (S must be 1). WG_KSL: another slice count than 8
 //   DEQ          0: xor + arithmetic shift (gemv's GEMV_DEQ_SHIFT); 1: the magic-exponent form - the
 //                nibble OR'd into the mantissa of bf16 0x4300 (= 128 + q) and 136 subtracted in fp32.
 //                Both produce the exact bf16 integer q - 8, so the DPAS inputs - and the output - are
-//                bit-identical; DEQ is a speed knob only
+//                bit-identical; DEQ is a speed knob only. LAYOUT 3: 1 + c / 4 and the offset after the
+//                DPAS (pair2m) - not bitwise DEQ 0
 //   BLK2D        LAYOUT 0: the weights by one 2D block read (gemv's GEMV_BLOCK2D cell)
 //   GEMV_KMAJOR  LAYOUT 2 (PERF-111): the 256-byte [16 k][16 n] tiles ordered [K/16][N/16] instead of
 //                [N/16][K/16] (gemv_i8w.cl's knob of the same name; set at an output head's width while
@@ -103,7 +104,12 @@
 #define KSL 1
 #else
 #define NSGN 2
-#define KSL 8
+// WG_KSL (SPLITK 1, plan 41k): the K-slice sub-groups a work-group (default 8); Inkling's drafter's K 2304 / 6912
+// (36 / 108 groups) split by 4 or 12
+#ifndef WG_KSL
+#define WG_KSL 8
+#endif
+#define KSL WG_KSL
 #endif
 
 #define SG 16
@@ -149,8 +155,8 @@
 #define WG_COLS (SG * NSGN)
 #include "tp_fold_send.h"
 #endif
-#if (DEQ || SPLITK) && LAYOUT == 3
-#error "gemm_sm: the 2-bit form has one dequant and no in-work-group split-K"
+#if SPLITK && LAYOUT == 3
+#error "gemm_sm: the 2-bit form has no in-work-group split-K"
 #endif
 #if DEQ && LAYOUT == 2
 #error "gemm_sm: DEQ is an int4 knob"
@@ -199,6 +205,18 @@ inline uint c2_bits(uint word, uint i) { return as_uint((float)((word >> (2u * i
 inline int pair2(uint word, uint p) {
   return (int)((c2_bits(word, 2u * p + 1u) & 0xFFFF0000u) | (c2_bits(word, 2u * p) >> 16));
 }
+// DEQ 1 (plan 41k): the codes as bf16 1 + c / 4 (the codes OR'd into 1.0's mantissa, both halves at once) and
+// c - 1.5 = 4 (1 + c / 4) - 5.5 taken after the DPAS: the group's 4 x DPAS(a, b') - 5.5 x DPAS(a, ones), then the
+// scale. Fewer instructions a code than pair2's convert; unlike int4's DEQ another rounding, so not bitwise DEQ 0.
+inline int pair2m(uint word, uint p) {
+  const uint n = word >> (4u * p);
+  return (int)(0x3F803F80u | ((n & 3u) << 5) | ((n & 12u) << 19));
+}
+#if DEQ
+#define PAIR2(w, p) pair2m(w, p)
+#else
+#define PAIR2(w, p) pair2(w, p)
+#endif
 #endif
 
 // The A operand of k16 step d for row block rb: lane l holds row (rb*8 + r)'s element 16 d + l in .s(r).
@@ -341,18 +359,29 @@ __kernel void gemm_sm(__global const uint* restrict w,
     const float scale = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(tile + 64)));
     float8 gacc[RB];
     for (int rb = 0; rb < RB; ++rb) gacc[rb] = (float8)0.0f;
+#if DEQ
+    float8 sacc[RB];
+    for (int rb = 0; rb < RB; ++rb) sacc[rb] = (float8)0.0f;
+#endif
     for (int d = 0; d < 4; ++d) {
       const uint w0 = d == 0 ? blk.s0 : d == 1 ? blk.s1 : d == 2 ? blk.s2 : blk.s3;
       int8 b;
-      b.s0 = pair2(w0, 0); b.s1 = pair2(w0, 1); b.s2 = pair2(w0, 2); b.s3 = pair2(w0, 3);
-      b.s4 = pair2(w0, 4); b.s5 = pair2(w0, 5); b.s6 = pair2(w0, 6); b.s7 = pair2(w0, 7);
+      b.s0 = PAIR2(w0, 0); b.s1 = PAIR2(w0, 1); b.s2 = PAIR2(w0, 2); b.s3 = PAIR2(w0, 3);
+      b.s4 = PAIR2(w0, 4); b.s5 = PAIR2(w0, 5); b.s6 = PAIR2(w0, 6); b.s7 = PAIR2(w0, 7);
       for (int rb = 0; rb < RB; ++rb) {
         short8 a;
         A_OPERAND(a, xa, rb, d)
         gacc[rb] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b, gacc[rb]);
+#if DEQ
+        sacc[rb] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, (int8)(0x3F803F80), sacc[rb]);
+#endif
       }
     }
+#if DEQ
+    for (int rb = 0; rb < RB; ++rb) acc[rb] += (gacc[rb] * 4.0f - sacc[rb] * 5.5f) * scale;
+#else
     for (int rb = 0; rb < RB; ++rb) acc[rb] += gacc[rb] * scale;
+#endif
 #else
     // ---- int4: the group's eight u32 rows of this lane's column and its scale -----------------
     uint wv[8];

@@ -136,6 +136,9 @@ struct Qwen4ExpDesc {
   // spec 21-QFN-v2 §7 lever 5, PERF-66). Both checkpoints ship them bf16; true = int8 with one fp16 scale per 32 k
   // (loader::Q4HcOffsets).
   bool hc_int8 = false;
+  // Not the checkpoint's: the QSA layers' KV form, chosen at load (`--kv-cache int8`, plan 21-QFN-v3a): false = bf16
+  // rows; true = kv8_scheme.h's rotated int8 codes with one fp16 scale a position and kv head (the MTP head's too).
+  bool kv8 = false;
   // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21-QFN-v1c's sweep - copied from Qwen3.8's measured map
   // at the nearest shapes (q||k||v S2); out_proj / o_proj S8 (PERF-109: a tp card's half at S4 launches 640 sub-groups
   // instead of 320, and a tp slice stays one card's). qkv||z is S 1, fixed: gdn_step and prep_gated_head read S 1

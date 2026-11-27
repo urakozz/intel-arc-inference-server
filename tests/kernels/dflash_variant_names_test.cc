@@ -1,5 +1,5 @@
 // Spec 19b: every binary the DFlash lists bind (kernels::dflash::draft_variants, every drafter form x head form x
-// draft vocabulary, both versions) is built, and the Spec 19b CMake block builds nothing they do not bind. Also:
+// both drafter versions) is built, and the Spec 19b CMake block builds nothing they do not bind. Also:
 // kernels::dflash::kQwen38 - the shapes the names spell - is z-lab/Qwen3.8-27B-DFlash2's config beside Qwen3.8.
 // Host only (names, no device).
 //
@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(defaults.dflash_attn_rows, 4u);
   CHECK(defaults.dflash_attn_dpas);
   CHECK_EQ(defaults.dflash_attn_ks, 4u);
-  const auto default_names = kd::draft_variants(true, 1u, true, 0u, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM);
+  const auto default_names = kd::draft_variants(true, 1u, true, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM);
   CHECK(std::find(default_names.begin(), default_names.end(), kd::attn_variant(kd::kQwen38, 1, 4)) != default_names.end());
   CHECK(argc > 2);
   std::ifstream f(argv[1]);
@@ -62,30 +62,34 @@ int main(int argc, char** argv) {
     CHECK((kernels::gemm_sm_built_m(*t) == std::vector<unsigned>{8, 32}));   // plan 40a Task 4: the batched pass's 32
     CHECK_EQ(kd::linear_variant(2u, 8, K, N), kernels::gemm_sm_variant(8, *t));
   }
+  for (const auto& [K, N, S] : {std::array<unsigned, 3>{2304, 6144, 4}, {4096, 2304, 4}, {2304, 13824, 4},
+                               {6912, 2304, 4}, {2304, 576, 12}, {2304, 256, 12}, {9216, 2304, 8}, {2304, 2048, 4}}) {
+    CHECK_EQ(kd::int4_slices(K, N), S);
+    CHECK_EQ(K % (64 * S), 0u);
+  }
   for (bool v2 : {true, false})
     for (unsigned fmt : {0u, 1u, 2u})
       for (bool int8_head : {true, false})
-        for (unsigned dv : {0u, 32768u, 65536u, 131072u})
-          for (kernels::LinearKind k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv})   // spec 28d + the override
-            for (const auto& [heads, rows] : {std::pair<unsigned, unsigned>{0, 0}, {1, 1}, {1, 2}, {1, 4}})
-              for (const auto& v : kd::draft_variants(v2, fmt, int8_head, dv, k, k, heads, rows))
-                bound.insert(v);
+        for (kernels::LinearKind k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv})   // spec 28d + the override
+          for (const auto& [heads, rows] : {std::pair<unsigned, unsigned>{0, 0}, {1, 1}, {1, 2}, {1, 4}})
+            for (const auto& v : kd::draft_variants(v2, fmt, int8_head, k, k, heads, rows))
+              bound.insert(v);
   const auto* candidate = kernels::small_m_tuning(5120, 248320, 1, 1);
   CHECK(candidate && kernels::gemm_sm_built_m(*candidate) == std::vector<unsigned>{7});
   for (bool v2 : {false, true})
     for (unsigned fmt : {0u, 1u, 2u})
       for (auto k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv})
         for (auto [bits, c] : {std::pair<unsigned, unsigned>{4, 64}, {2, 80}}) {   // spec 19 v3d: 2 / 80 the default
-          const auto names = kd::draft_variants(v2, fmt, true, 0, k, k, 0, 0, true, false, 1, bits, c);
+          const auto names = kd::draft_variants(v2, fmt, true, k, k, 0, 0, true, false, 1, bits, c);
           CHECK(std::find(names.begin(), names.end(), kd::candidate_topk_variant(c)) != names.end());
           CHECK(std::find(names.begin(), names.end(), kd::rerank_variant(c)) != names.end());
-          CHECK(std::find(names.begin(), names.end(), kd::topk_variant(248320, 248077, false)) == names.end());
+          CHECK(std::find(names.begin(), names.end(), kd::topk_variant(248320, 248077)) == names.end());
           bound.insert(names.begin(), names.end());
         }
   bound.insert(kd::proj_wide_variant());   // DFlashDrafter::project_wide
   {   // spec 19 v3d Task 6: the DPAS part beside the H1 / B4 reduce
     for (unsigned ks : {1u, 2u, 4u}) {
-      const auto names = kd::draft_variants(true, 1u, true, 0u, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM,
+      const auto names = kd::draft_variants(true, 1u, true, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM,
                                             1, 4, true, true, ks);
       CHECK(std::find(names.begin(), names.end(), kd::attn_dpas_variant(kd::kQwen38, ks)) != names.end());
       bound.insert(names.begin(), names.end());

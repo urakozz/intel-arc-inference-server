@@ -1,5 +1,5 @@
 // Plan 41k Task 3 (card): the DFlash 2 drafter's draft list on one card against the CPU reference on the same taps.
-//   inkling2_dflash_draft_test <Inkling snapshot> <DFlash 2 snapshot> <drafts.txt>
+//   inkling2_dflash_draft_test <Inkling snapshot> --draft-model <DFlash 2 snapshot> <drafts.txt>
 // drafts.txt (tools/oracle/dflash_accept.py drafts, from a b70-decode --dump-taps run): the run's ids, its prompt
 // length, then per anchor its position and the reference's 7 drafts (fp32 drafter over the dump's tap rows, the int8
 // head). The engine replays the same run - the prompt pass, then one-row verify steps of the run's own ids (the dump's
@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "check.h"
@@ -18,13 +19,15 @@
 #include "runtime/inkling2/inkling2_engine.h"
 
 int main(int argc, char** argv) {
-  if (argc != 4) {
-    std::fprintf(stderr, "usage: inkling2_dflash_draft_test <Inkling snapshot> <DFlash 2 snapshot> <drafts.txt>\n");
+  const bool named = argc == 5 && std::string_view(argv[2]) == "--draft-model";
+  if (argc != 4 && !named) {
+    std::fprintf(stderr, "usage: inkling2_dflash_draft_test <Inkling snapshot> --draft-model <DFlash 2 snapshot> <drafts.txt>\n");
     return 2;
   }
-  std::ifstream in(argv[3]);
+  const char* ref = argv[named ? 4 : 3];
+  std::ifstream in(ref);
   if (!in) {
-    std::printf("SKIP: no %s\n", argv[3]);
+    std::printf("SKIP: no %s\n", ref);
     return 77;
   }
   std::string line;
@@ -44,7 +47,7 @@ int main(int argc, char** argv) {
   }
   CHECK(!anchors.empty() && n_prompt > 0 && anchors.back().first < ids.size());
 
-  const loader::Inkling2Checkpoint checkpoint(argv[1], argv[2]);
+  const loader::Inkling2Checkpoint checkpoint(argv[1], argv[named ? 3 : 2]);
   l0::Context ctx(0);
   runtime::inkling2::Engine engine(ctx, checkpoint, uint32_t(ids.size() + 16), true, runtime::inkling2::kPrefillRows);
   CHECK(engine.dflash());

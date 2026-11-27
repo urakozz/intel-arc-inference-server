@@ -38,7 +38,7 @@ Developer flags:
 | `--prefill-chunk C` | `2048` | positions per prefill chunk, at most 4096 |
 | `--profile`, `--steps N`, `--repeats R` | -, `32`, `1` | per-launch timing of the decode step |
 | `--pipeline-split auto\|N` | `auto` | with `pp`: where the layers are cut |
-| `--draft-vocab off\|32k\|64k\|128k`, `--draft-vocab-ids FILE` | `off` | MTP guesses from a smaller vocabulary (`b70-serve`) |
+| `--dump-taps FILE` | - | Inkling 2 Mini, one card: write the drafter's tap rows (the prompt's last 2048 positions and each generated one), the head's top 64 logits and their log-sum-exp, for an offline drafter acceptance measurement |
 | `--plan` | off | print the memory plan from the checkpoint's headers (both cards' with `--parallel pp` or `tp`; with `--max-len`, `--spec`), then exit |
 
 Environment variables (test switches, tool settings, the Hugging Face cache): [environment-variables.md](environment-variables.md).

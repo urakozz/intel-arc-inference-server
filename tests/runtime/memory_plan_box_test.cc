@@ -6,13 +6,10 @@
 //
 //   memory_plan_box_test <snapshot-or-repo> [mtp] [--lm-head int8|bf16] [--prefill-backend l0|l0-int8]
 //   (plan 5d: the prefill chunk cap is the engine's default; --chunk-cap 4096 moves it, tests/chunk_cap_arg.h)
-//                        [--draft-vocab 32k|64k|128k] [max_len|auto ...]
+//                        [max_len|auto ...]
 //
 // `mtp` loads the MTP head (spec 8) and plans its buffers. `--lm-head` picks the head
-// form (default int8, b70-serve's). `--draft-vocab` (spec 8 §11, needs `mtp`) loads a
-// draft vocabulary from the snapshot's added tokens and the lowest ids, as b70-serve
-// builds it: the plan's `draft_vocab` term must equal the loader's compact head + id
-// table, and MtpBuffers' compact logits its MtpDims size. The lengths default to
+// form (default int8, b70-serve's). The lengths default to
 // "16384 auto". The default l0 backend and the flash attention are planned and run.
 // One prefill beyond the fused-linear range runs
 // first, so the lazy buffers (the MTP prefill hidden rows and the slab)
@@ -41,7 +38,6 @@ namespace {
 struct Opts {
   bool mtp = false;
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;   // the serving default (spec 9)
-  uint32_t draft_vocab = 0;
   runtime::PrefillBackend backend = runtime::PrefillBackend::L0;   // the engine's default (drop-sycl-tla)
 };
 
@@ -55,38 +51,18 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   const runtime::PrefillPath path{
       true, o.backend,   // l0 (the engine's default) or, plan 5d, --prefill-backend l0-int8
       runtime::default_prefill_chunk_cap()};   // plan 5d: the engine's default cap (--chunk-cap)
-  loader::DraftVocabSpec dvs;
-  if (o.draft_vocab != 0) {
-    dvs.size = o.draft_vocab;
-    dvs.added = loader::added_token_ids_file(snap + "tokenizer.json");
-  }
-
   loader::LoadedModel m = loader::load(ctx, snap, is_auto ? runtime::kMinAutoMaxLen
                                                           : uint32_t(std::stoul(len_arg)),
-                                       mtp, o.lm_head, dvs);
+                                       mtp, o.lm_head);
   const model::ModelDesc& d = *m.desc;
   const size_t weights = m.report.total() - m.report.rope_bytes;
-  // Spec 8 §11: what the planner is told about the draft vocabulary (cli::settle's rule).
-  runtime::DraftVocabPlan dv;
-  if (m.draft_vocab)
-    dv = {m.draft_vocab->size(), m.draft_vocab->head.kind == model::WeightKind::Int8};
-  CHECK_EQ(dv.rows, o.draft_vocab);
   uint32_t L = m.max_len;
   if (is_auto) {
-    L = runtime::max_len_that_fits(d, mtp, weights, ctx.memory_bytes(), reserve, trained, path, dv);
+    L = runtime::max_len_that_fits(d, mtp, weights, ctx.memory_bytes(), reserve, trained, path);
     CHECK(L != 0);
     loader::set_max_len(ctx, m, L);
   }
-  const runtime::MemoryPlan p = runtime::plan(d, L, mtp, weights, path, dv);
-  // The loader's compact head + id table are the plan's draft_vocab term, byte for byte.
-  CHECK_EQ(m.report.draft_vocab_bytes, p.draft_vocab);
-  if (m.draft_vocab) {
-    const loader::DraftVocabBytes nb =
-        loader::draft_vocab_bytes(dv.rows, d.hidden, dv.int8);
-    CHECK_EQ(m.draft_vocab->head.mem.size(), nb.head);
-    CHECK_EQ(m.draft_vocab->head.scales ? m.draft_vocab->head.scales->size() : size_t{0}, nb.scales);
-    CHECK_EQ(m.draft_vocab->ids.size(), nb.ids);
-  }
+  const runtime::MemoryPlan p = runtime::plan(d, L, mtp, weights, path);
   std::printf("%s\n", runtime::describe(p, ctx.memory_bytes(), reserve).c_str());
   // The table the loader holds is the planner's figure.
   CHECK_EQ(m.report.rope_bytes, p.rope);
@@ -115,7 +91,6 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   CHECK_EQ(u.decode_state, p.decode_state);
   CHECK_EQ(u.prefill_scratch, p.prefill_scratch);
   CHECK_EQ(u.int8, p.int8);
-  CHECK_EQ(u.draft_vocab, p.draft_vocab);
   CHECK_EQ(u.total(), p.total());
 
   // Buffer by buffer: every allocation is its size function's value.
@@ -128,7 +103,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   CHECK_EQ(b.kv_v.size(), ps.kv_v);
   // Spec 32e: the rows the engine sized its decode scratch for (64 where the deep verify lists can be built).
   const runtime::DecodeScratchSizes ds =
-      runtime::DecodeScratchDims::sizes(L, d, runtime::DecodeScratchDims::rows(d, mtp, eng.kv_cache(), 1, dv.rows != 0));
+      runtime::DecodeScratchDims::sizes(L, d, runtime::DecodeScratchDims::rows(d, mtp, eng.kv_cache(), 1));
   CHECK_EQ(b.resid.size(), ds.resid);
   CHECK_EQ(b.x.size(), ds.x);
   CHECK_EQ(b.partials.size(), ds.partials);
@@ -151,7 +126,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   if (mtp) {
     const runtime::MtpBuffers* mb = eng.mtp_buffers();
     CHECK(mb != nullptr);
-    const runtime::MtpSizes ms = runtime::MtpDims::sizes(L, d, dv.rows);
+    const runtime::MtpSizes ms = runtime::MtpDims::sizes(L, d);
     CHECK_EQ(mb->hctl.size(), ms.hctl);
     CHECK_EQ(mb->gdn_spec.size(), ms.gdn_spec);
     CHECK_EQ(mb->kv_k.size(), ms.kv_k);
@@ -159,17 +134,14 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
     CHECK_EQ(mb->hh.size(), ms.hh);
     CHECK_EQ(mb->dh.size(), ms.dh);
     CHECK_EQ(mb->logits.size(), ms.logits);
-    CHECK_EQ(mb->dv_logits ? mb->dv_logits->size() : size_t{0}, ms.dv_logits);   // spec 8 §11
     CHECK(eng.mtp_prefill_hidden() != nullptr);
     CHECK_EQ(eng.mtp_prefill_hidden()->size(), p.mtp_hidden);
   }
   // The engine decodes at this length: a few tokens after the prefill.
   const std::vector<uint32_t> out = eng.generate(4);
   CHECK_EQ(out.size(), size_t{4});
-  std::printf("%s %s%s%s at max_len %u: plan == allocation, %zu B (%.3f GB)\n", d.name.c_str(),
-              mtp ? "+ MTP" : "", dv.rows ? " + draft vocab " : "",
-              dv.rows ? (loader::draft_vocab_name(dv.rows) + (dv.int8 ? " int8" : " bf16")).c_str()
-                      : "",
+  std::printf("%s%s at max_len %u: plan == allocation, %zu B (%.3f GB)\n", d.name.c_str(),
+              mtp ? " + MTP" : "",
               L, p.total(), p.total() / 1e9);
 }
 
@@ -184,11 +156,9 @@ int main(int argc, char** argv) {
     const std::string a = argv[i];
     if (a == "mtp") o.mtp = true;
     else if (a == "--lm-head" && i + 1 < argc) CHECK(loader::parse_lm_head_form(argv[++i], o.lm_head));
-    else if (a == "--draft-vocab" && i + 1 < argc) CHECK(loader::parse_draft_vocab(argv[++i], o.draft_vocab));
     else if (a == "--prefill-backend" && i + 1 < argc) CHECK(runtime::parse_prefill_backend(argv[++i], o.backend));
     else lens.push_back(a);
   }
-  CHECK(o.draft_vocab == 0 || o.mtp);
   if (lens.empty()) lens = {"16384", "auto"};
   l0::Context ctx(0);
   std::printf("device: %s, %zu B (%.3f GB)\n", ctx.name().c_str(), ctx.memory_bytes(),

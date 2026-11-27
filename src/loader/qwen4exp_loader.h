@@ -101,7 +101,8 @@ bool is_qwen4exp_checkpoint(const std::string& snapshot_dir);
 
 // The descriptor load_qwen4exp would build, from config.json and the tensor names alone (no device, no tensor
 // read): the CLI's planner needs it before the load (--layers auto, --parallel, --max-len auto).
-model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit = 0);
+model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit = 0,
+                                             bool kv8 = false);
 
 // Loads the checkpoint (resolve_snapshot rules) onto `devices` (devices.size() == placement.devices; device 1 a
 // view of device 0's context). Before a byte is allocated: config.json held to model::qwen4exp() at its layer
@@ -125,13 +126,14 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 // through tp_fill_tier, else every expert resident); the final mixer and lm_head's vocabulary half (rows [124160 r,
 // + 124160), quantised per row: one card's rows' bytes) on both cards, the embedding where placement.holds_embed, the
 // PLE table pinned once with a pointer table on each card. Each part's bytes are the card plan's (runtime::qwen4exp::
-// tp_plan). The MTP head under tp is not built yet (refused by name).
+// tp_plan). The MTP head under tp is not built yet (refused by name). `kv8` (plan 21-QFN-v3a, `--kv-cache int8`): the
+// descriptor's KV form (Qwen4ExpDesc::kv8), which every KV byte of the plan counts.
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement,
                             LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false,
                             const runtime::qwen4exp::ExpertTier* tier = nullptr,
                             const runtime::qwen4exp::ExpertTier* tier1 = nullptr,
-                            uint32_t pf_rows = runtime::qwen4exp::kPfC);
+                            uint32_t pf_rows = runtime::qwen4exp::kPfC, bool kv8 = false);
 
 // The routing profile (`<snapshot>/expert-profile.safetensors`, shipped in our model repo, else
 // `<snapshot>-expert-profile.safetensors` beside the checkpoint: offload_curve.py profile's

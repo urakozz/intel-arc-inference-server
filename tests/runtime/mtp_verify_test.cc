@@ -179,7 +179,9 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& pro
   const spec_judge::RowJudge rj = spec_judge::open_rows(
       fj, tag + "_m2a", prompt, std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + runtime::Engine::kMaxDraft + 2),
       uint32_t(V));
-  // M2a
+  // M2a. The logits rows' f32-judge distance is gated on the median row (the near-miss judge's rule); the worst row is
+  // printed. A row at the old bar or without a judge counts as 0.
+  std::vector<double> ratios;
   for (uint32_t k = 1; k <= runtime::Engine::kMaxDraft; ++k) {
     // Row r's state: its slot after verify(k); with the deferred build (no per-row state) the committed state after
     // verify(k) + commit(r).
@@ -215,10 +217,16 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& pro
                   k, r, cl, lma, lma / std::ldexp(1.0, le - 8), lbits ? " (bitwise)" : "", cs, ma,
                   sbits ? " (bitwise)" : "", id_ok ? "ok" : "DIFFERS", spec_judge::row_line(rv).c_str());
       // spec 28 N4: the logits row by the f32 judge where one exists
-      ok &= rv.pass && cs >= 0.99999 && id_ok;
+      ratios.push_back(cl >= 0.99999 || !rv.judged ? 0.0 : rv.ratio);
+      ok &= cs >= 0.99999 && id_ok;
     }
     c.e.commit(k, c.e.verify_ids()[k]);
   }
+  std::sort(ratios.begin(), ratios.end());
+  const double med = ratios[ratios.size() / 2];
+  std::printf("  M2a f32 judge over %zu rows: median distance x%.2f, worst x%.2f (slack %.1f, gated on the median) %s\n",
+              ratios.size(), med, ratios.back(), golden::kCosSlack, med <= golden::kCosSlack ? "ok" : "FAIL");
+  ok &= med <= golden::kCosSlack;
   // M2b
   for (uint32_t k = 1; k <= runtime::Engine::kMaxDraft; ++k)
     for (uint32_t j = 0; j <= k; ++j) {

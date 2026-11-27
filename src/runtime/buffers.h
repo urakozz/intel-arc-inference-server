@@ -251,23 +251,15 @@ struct PrefillScratch : PrefillScratchDims {
 //              hidden at the last consumed position; rows 1..M = the verify rows' hidden.
 //   dh         bf16 [5120]: the draft chain's hidden (the head's own post-mtp.norm output).
 //   logits     fp32 [kMaxK][kVocab]: draft i's logits (q_i for the host sampler).
-//   dv_logits  spec 8 §11, a draft vocabulary only: fp32 [|V'|], the compact head's
-//              logits (the draft argmax's input; draft_vocab.cl scatters them into
-//              `logits` row i at V''s ids).
 struct MtpBuffers : MtpDims {
   // kSlots = 4 (M <= 4: K <= 3 drafts + the pending token), kMaxK = 3: MtpDims.
-  // -inf as the fp32 bit pattern zero() fills `logits` with under a draft vocabulary.
-  static constexpr uint32_t kNegInfBits = 0xFF800000u;
-
-  // `draft_vocab` = |V'| (spec 8 §11), 0 = the full head drafts (no dv_logits, and
-  // `logits` is zeroed as before). Every size is MtpDims::sizes(max_len, desc, draft_vocab).
   // `kv` (spec 12b): the head's KV is in the main cache's form - one layer of KvLayout.
   // `slots` (spec 19a, plan 19a Task 4): the GDN state slots, kSlots (4) for every engine
   // and pipeline stage; tools/probe/probe_mtp_steps alone builds a second set at 8 for its
   // verify lists at M = 5..8 (build_verify binds `gdn_step_slots_M<M>_N8` over them).
   // `seqs` (spec 13c): the engine's sequence slots - gdn_spec and hh hold every further sequence's too (MtpDims::sizes).
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-             uint32_t draft_vocab = 0, KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
+             KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
   // Spec 17d: a tensor-parallel card's (MtpDims::tp_sizes): the GDN slots at the card's shapes, the head's KV layer
   // at the whole head's.
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& card, const model::ModelDesc& head,
@@ -279,9 +271,7 @@ struct MtpBuffers : MtpDims {
   l0::Mem hh;
   l0::Mem dh;
   l0::Mem logits;
-  std::unique_ptr<l0::Mem> dv_logits;   // null unless draft_vocab > 0
   uint32_t max_len;
-  uint32_t draft_vocab = 0;
   KvLayout kv_lay;   // the head's kv_k / kv_v: one layer, the engine's form
   // GDN state slots: slot 0 is gdn_state, gdn_spec holds slots - 1 more. A verify list
   // at M rows needs M <= slots; row m writes slot (live + m) % slots.
@@ -291,16 +281,12 @@ struct MtpBuffers : MtpDims {
   size_t bytes() const;
   // What Engine::reset() zeroes when MTP is on (all of it: the head's KV rows are
   // only ever read after being written, but a reset session must not depend on it).
-  // **Under a draft vocabulary `logits` is filled with -inf instead** (spec 8 §11): the
-  // draft list writes only V''s entries of its row, so every other entry must read as
-  // q = 0 to the host's acceptance - -inf, which filter_probs turns into probability 0 -
-  // and nothing else ever writes them, so once per construction and reset is enough.
   // PERF-90: kv_end as PersistentBuffers::zero's.
   void zero(l0::CmdList& imm, uint32_t kv_end = UINT32_MAX);
 
  private:
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-             uint32_t draft_vocab, const KvLayout& kv, uint32_t slots, uint32_t seqs);   // the delegate
+             const KvLayout& kv, uint32_t slots, uint32_t seqs);   // the delegate
 };
 
 // Spec 13c (plan 13c Task 2): an engine's further sequence slots - what PersistentBuffers (slot 0's state, the KV at

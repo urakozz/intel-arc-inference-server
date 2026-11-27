@@ -29,7 +29,7 @@ struct DFlashSession {
 };
 
 struct DFlashBuffers {
-  // head_rows: the target's lm_head rows, or a draft vocabulary's |V'| (the head GEMV's N).
+  // head_rows: the target's lm_head rows (the head GEMV's N).
   // `host_candidates` (spec 19 v3c, a TP card's half): cand and unary in shared memory - the host merges the two
   // cards' top-16 lists between the draft list and the tail. `draft_rows` (plan 40a Task 4): the scratch's rows -
   // the block's kM, or the batched pass's seqs_rows() beside several sequences.

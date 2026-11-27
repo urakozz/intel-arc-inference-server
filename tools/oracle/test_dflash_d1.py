@@ -63,8 +63,8 @@ def _world(tmp, fmt="bf16", head="bf16"):
            "top_logits": torch.zeros(n, 4), "lse": torch.zeros(n),
            "taps": {i: fx.bf(n, fx.TH, std=1.0) for i in fx.TAPS}}
     dt.save_dump(os.path.join(dumps, "t.taps.safetensors"), "tiny/t", ids, n_prompt, 0, res, {})
-    run = {"format": fmt, "head": head, "draft_vocab": 0, "vocab_used": fx.USED, "k": 7, "launches": [0, 0],
-           "load": "test", "v_ids": []}
+    run = {"format": fmt, "head": head, "vocab_used": fx.USED, "k": 7, "launches": [0, 0],
+           "load": "test"}
     # the "engine": the reference itself on the same arm
     d = d1.reference_drafter(run, drafter, target)
     dump = dt.load_dump(os.path.join(dumps, "t.taps.safetensors"))

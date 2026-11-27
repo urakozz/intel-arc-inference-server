@@ -87,10 +87,6 @@ MemoryComponents Engine::memory_use() const {
   c.prefill_scratch = (pf_ ? pf_->bytes() + pf_->lazy_bytes() : 0) + (pf_own_.df_taps ? pf_own_.df_taps->size() : 0);
   c.drafter = drafter_ ? drafter_->bytes() : 0;
   c.int8 = pfx_ && pfx_->int8 ? pfx_->int8->bytes() : 0;
-  // Spec 8 §11: the draft vocabulary's compact head and id table - the loader's, but
-  // outside LoadReport::total(), so `model` reads as before; its compact logits are in
-  // MtpBuffers, i.e. decode state.
-  c.draft_vocab = model_.report.draft_vocab_bytes;
   return c;
 }
 

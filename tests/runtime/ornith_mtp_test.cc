@@ -295,8 +295,11 @@ int main(int argc, char** argv) {
   CHECK(e.mtp());
   CHECK_EQ(runtime::verify_launches(d), size_t(534));
   CHECK_EQ(runtime::draft_launches(d), size_t(22));
+  // The 4-row list reads its experts as the union (moe.cl MOE_UNION): two launches more a layer's MoE block (the
+  // plan and the combine).
   for (uint32_t M = 1; M <= runtime::MtpBuffers::kSlots; ++M)
-    CHECK_EQ(e.verify_step(M).kernel_count, runtime::verify_launches(d));
+    CHECK_EQ(e.verify_step(M).kernel_count,
+             runtime::verify_launches(d) + (M == 4 ? 2 * size_t(d.layers) : 0));
   for (uint32_t i = 0; i < runtime::Engine::kMaxDraft; ++i)
     CHECK_EQ(e.draft_step(i).kernel_count, runtime::draft_launches(d));
   std::printf("lists: verify M=1..4 %zu launches, draft %zu\n", e.verify_step(4).kernel_count,

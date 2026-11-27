@@ -16,7 +16,8 @@ engine's default) and `--kv int8` (the 8 full visits' K / V through the 128-poin
 chunk, the two caches side by side, and writes OUT/<name>.kld.json: per position KL(bf16 || int8) of the softmaxed
 logits and whether the top-1 ids agree. Resumable: a sequence with its json is skipped. `--arms` names the int8 forms
 compared against the one bf16 forward (int8; int8-k / int8-v: only K / only V int8, the other bf16; <arm>~V1+V2: the
-arm with visits V1, V2 in walk order kept bf16 - the full ones are 5, 11, 17, 23, 29, 35, 41, 47), each arm but int8
+arm with visits V1, V2 in walk order kept bf16 - the full ones are 5, 11, 17, 23, 29, 35, 41, 47; fp32: no cache
+rounding, the control of how far any change of the caches moves these contexts), each arm but int8
 written as OUT/<name>.<arm>.kld.json; `--only` runs the one sequence NAME.
 
 `summary` prints mean KLD and top-1 agreement per corpus (wiki, session, a4) and over all positions.
@@ -85,6 +86,21 @@ def make_ids(a):
         print(f"{n}: {len(s)} ids", flush=True)
 
 
+FULL_VISITS = ("5", "11", "17", "23", "29", "35", "41", "47")
+
+
+def arms(value):
+    """--arms: each name one of fp32, int8, int8-k, int8-v, or one of the int8 forms with ~V1+V2 of FULL_VISITS."""
+    names = value.split(",")
+    for name in names:
+        form, _, keep = name.partition("~")
+        if form not in ("fp32", "int8", "int8-k", "int8-v") or (keep and (form == "fp32" or not all(
+                v in FULL_VISITS for v in keep.split("+")))):
+            raise argparse.ArgumentTypeError(f"unknown arm {name!r}: fp32, int8, int8-k, int8-v, or an int8 form with"
+                                             f" ~V1+V2 of the full visits {', '.join(FULL_VISITS)}")
+    return names
+
+
 def run(a):
     import time
 
@@ -112,7 +128,7 @@ def run(a):
                 model.kv = "bf16"
                 p = model.forward(x, caches[0])[0][0].log_softmax(-1)
                 for arm, c in zip(arms, caches[1:]):
-                    model.kv = arm
+                    model.kv = None if arm == "fp32" else arm
                     q = model.forward(x, c)[0][0].log_softmax(-1)
                     kld[arm] += (p.exp() * (p - q)).sum(-1).tolist()
                     agree[arm] += (p.argmax(-1) == q.argmax(-1)).tolist()
@@ -158,7 +174,7 @@ def main():
     q.add_argument("out")
     q.add_argument("--threads", type=int, default=40)
     q.add_argument("--chunk", type=int, default=512)
-    q.add_argument("--arms", type=lambda v: v.split(","), default=["int8"])
+    q.add_argument("--arms", type=arms, default=["int8"])
     q.add_argument("--only")
     q = sub.add_parser("summary")
     q.add_argument("out")

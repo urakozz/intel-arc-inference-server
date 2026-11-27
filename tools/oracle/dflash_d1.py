@@ -8,8 +8,7 @@ DFlash drafter on the card) against tools/oracle/dflash_ref.py drafting from the
 The reference is built to the engine's arm (the run line of OUT.jsonl): the drafter bf16 as shipped, or int8 per-row
 RTN simulated (dflash_accept.int8_simulate - spec 9's quantiser, which the loader applies at load); the target's
 lm_head bf16 or int8 RTN (dflash_accept.Head); the head's rows >= vocab_used masked (argmax.cl's rule, the engine's
-top-16 applies it); with a draft vocabulary every id outside V' masked (the engine's compact head is the full head's
-rows at V''s ids, bitwise - spec 8 §11). Context: dump_taps.load_dump's taps from tap_from, context_kv over them,
+top-16 applies it). Context: dump_taps.load_dump's taps from tap_from, context_kv over them,
 draft_block(anchor, p, K) at T 0.
 
 D1's bars, per draft row:
@@ -141,7 +140,6 @@ def compare(rec: dict, out, logits_row) -> dict:
 
 def reference_drafter(run: dict, drafter_dir: str, target_dir: str):
     """dflash_ref's drafter built to the engine's arm (the module docstring), its head_logits masked."""
-    import torch
     ref = _load("dflash_ref")
     acc = _load("dflash_accept")
     acc._load_deps()
@@ -150,16 +148,10 @@ def reference_drafter(run: dict, drafter_dir: str, target_dir: str):
         acc.int8_simulate(d)
     head = acc.Head(d.lm_head, int8=run["head"] == "int8")
     used = int(run["vocab_used"])
-    vmask = None
-    if run["draft_vocab"]:
-        vmask = torch.ones(d.cfg.vocab, dtype=torch.bool)
-        vmask[torch.tensor(run["v_ids"], dtype=torch.long)] = False
 
     def head_logits(h):
         lg = head.logits(h)
         lg[:, used:] = float("-inf")
-        if vmask is not None:
-            lg[:, vmask] = float("-inf")
         return lg
     d.head_logits = head_logits
     return d
@@ -221,7 +213,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
     table = (f"| arm | drafts | top-16 sets (tie- and noise-aware) | scores cos >= {bar} | walk equal (or a near-tie split) | worst cos | "
              f"ties excused | of them by the row's logit difference |\n"
              f"|---|---:|---:|---:|---:|---:|---:|---:|\n"
-             f"| drafter {run['format']}, head {run['head']}, V' {run['draft_vocab'] or 'full'} | {n} | {n_sets} | "
+             f"| drafter {run['format']}, head {run['head']} | {n} | {n_sets} | "
              f"{n_cos} | {n_walk} | {worst:.7f} | {ties} | {noise_ties} |\n")
     log(table)
     for name, p, c in fails[:20]:

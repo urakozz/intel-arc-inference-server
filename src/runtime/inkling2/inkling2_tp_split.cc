@@ -31,13 +31,24 @@ uint32_t draft_rows(const std::string& name) {
 
 TpWeights tp_weights(const D& d, const L& one, uint32_t rank) {
   TpWeights out;
+  out.layout.draft_format = one.draft_format;
+  out.layout.packed_draft_key = one.packed_draft_key;
+  const bool whole_draft = d.draft.form == model::DFlashForm::Vllm;
+  if (whole_draft && one.bytes[L::kDraft])
+    out.pieces[L::kDraft].push_back({0, 0, one.bytes[L::kDraft]});
   std::vector<std::pair<const std::string*, const loader::Inkling2Weight*>> order;
   for (const auto& [name, w] : one.weights) order.push_back({&name, &w});
   std::ranges::sort(order, [](const auto& a, const auto& b) {
     return std::pair(a.second->arena, a.second->offset) < std::pair(b.second->arena, b.second->offset);
   });
   std::array<size_t, L::kDraft + 1> at{};
+  at[L::kDraft] = whole_draft ? one.bytes[L::kDraft] : 0;
   for (const auto& [name, w] : order) {
+    // Keep the k || v pointer into the full drafter's fused weight on both cards.
+    if (whole_draft && w->arena == L::kDraft) {
+      out.layout.weights.emplace(*name, *w);
+      continue;
+    }
     auto& c = at[w->arena];
     auto& pieces = out.pieces[w->arena];
     loader::Inkling2Weight cw = *w;

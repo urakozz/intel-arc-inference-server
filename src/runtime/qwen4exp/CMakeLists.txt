@@ -7,7 +7,8 @@
 # loader/qwen4exp_ple_hash.h). 21-QFN-v1c adds the engine (b70_qwen4exp_runtime) here.
 add_library(b70_qwen4exp_plan STATIC qwen4exp_sizes.cc)
 target_include_directories(b70_qwen4exp_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_qwen4exp_plan PUBLIC b70_qwen4exp_model b70_plan)
+# Plan 21-QFN-v3e: the DFlash drafter's rows in the plan (runtime::dflash::sizes) beside the MTP head's.
+target_link_libraries(b70_qwen4exp_plan PUBLIC b70_qwen4exp_model b70_plan b70_dflash_plan)
 
 # Spec 21-QFN-v1c: b70_qwen4exp_runtime - the buffers, the capture and the decode loop on one or two devices (Level
 # Zero). It links b70_runtime for spec 16b's pieces (runtime::PipelineLink, StageLink) and

@@ -6,6 +6,7 @@
 #include "runtime/control.h"
 #include "kernels/dflash_dims.h"
 #include "runtime/dflash/dflash_control.h"
+#include "runtime/dflash/dflash_sizes.h"
 #include "runtime/inkling2/inkling2_prefill.h"
 #include "runtime/inkling2/inkling2_tp_split.h"
 #include "runtime/tp_protocol.h"
@@ -124,17 +125,20 @@ Sizes sizes(const D& d, const L& layout, uint32_t max_len, bool draft, uint32_t 
     // unary logits and top-k parts; draft_logits the head over the 7 draft rows.
     namespace kd = kernels::dflash;
     const auto& f = d.draft;
-    const size_t H = f.hidden, wide = std::max({H, size_t(f.q_n()), size_t(f.inter)});
+    const auto sz = dflash::sizes(f, D::hidden, D::head_rows, max_len, layout.draft_format);
+    const bool int4 = layout.draft_format == loader::DraftFormat::Int4G64;
+    const uint32_t fc_slices = int4 ? kd::int4_slices(f.fc_k(D::hidden), f.hidden) : 1;
+    const size_t H = f.hidden;
     const size_t R = m - 1, chunks = (D::head_rows + kd::kTopkChunk - 1) / kd::kTopkChunk;
     auto& x = out.draft;
     x.draft_control = sizeof(dflash::DFlashCtl) + sizeof(dflash::DFlashDraftOut);
     x.draft_ring_k = x.draft_ring_v = size_t(f.layers) * kDraftRing * f.kv_n() * 2;
     x.rope = f.head_dim / 2 * 4;   // inv_freq: df_prep / df_proj_wide compute the angles (ROPE_INV)
-    x.block_hidden = m * (2 * H * 4 + H * 2 + wide * 2 + f.kproj_n() * 4);
-    x.block_projections = m * 4 * (std::max(size_t(f.qkv_n()), size_t(f.gate_up_n())) + f.q_n() + 2 * f.kv_n());
+    x.block_hidden = sz.resid + sz.h + sz.x + sz.xa + sz.co;
+    x.block_projections = sz.gout + sz.q + sz.kb + sz.vb;
     x.draft_parts = size_t(f.q_heads) * (kDraftRing / kd::kAttnPb) * m * (f.head_dim + 2) * 4;
-    x.context_mix = m * (H * 4 + H * 2 + 2 * f.kv_n() * 4);
-    x.markov = m * f.sel_rank * 4 + 2 * R * kd::kTopK * 4 + R * chunks * kd::kTopK * 2 * 4;
+    x.context_mix = m * H * (fc_slices * 4 + 2) + sz.kv / f.layers;
+    x.markov = sz.hid + 2 * R * kd::kTopK * 4 + R * chunks * kd::kTopK * 2 * 4;
     x.draft_logits = R * D::head_rows * 4;
   } else if (draft) {
     const size_t draft_kv_row = tp.draft_kv_n() * 2;   // the card's heads of the drafter's caches

@@ -51,13 +51,19 @@ class TpEngine {
   std::span<const uint32_t> verify(std::span<const uint32_t> tokens);
   void commit(uint32_t rows);
   void read_logits(uint32_t row, std::span<float> out);
-  std::span<const uint32_t> propose(uint32_t anchor, uint32_t count);
+  // Both cards draw with the same key, so their drafts stay equal.
+  std::span<const uint32_t> propose(uint32_t anchor, uint32_t count, float temperature = 0.f, uint64_t seed = 0);
+  const dflash::DFlashDraftOut& draft_out() const { return lead().draft_out(); }
+  // One target step of `rows` rows, card 0's launch by launch (--profile; the all-reduces' waits show as tp_sum).
+  void profile_target(std::span<const uint32_t> tokens)
+      pre(pending() == 0 && !tokens.empty() && tokens.size() <= kRows && tokens.size() <= max_len() - position());
   // The draft pass after `anchor`, card 0's launch by launch (--profile with the drafter).
   void profile_draft(uint32_t anchor) pre(pending() == 0 && position() > 0 && drafter());
   uint32_t step_drafted(uint32_t anchor, uint32_t max_drafts, std::vector<uint32_t>& output);
   size_t launch_count(uint32_t rows, uint32_t accepted) const { return lead().launch_count(rows, accepted); }
   bool drafter() const { return lead().drafter(); }
   bool dflash() const { return lead().dflash(); }
+  uint64_t packed_draft_key() const { return lead().packed_draft_key(); }
   bool kv8() const { return lead().kv8(); }
   uint32_t prefill_rows() const { return prefill_rows_; }
   uint32_t head_id() const pre(prefill_logits_) { return lead().ctrl_->out_token[0]; }

@@ -1,7 +1,6 @@
 // Spec 8 §10: the --mtp auto policy (server::AdaptiveK) on synthetic acceptance sequences,
 // host only: the cost model, the cost table's parser, K up on high acceptance, down to
-// 0 / 1 on low, the K = 0 probe, hysteresis against flapping, determinism; and the cost
-// table under a draft vocabulary (spec 8 §11, MtpCost::with_draft_vocab).
+// 0 / 1 on low, the K = 0 probe, hysteresis against flapping, determinism.
 #include <cstdio>
 #include <print>
 #include <random>
@@ -12,11 +11,13 @@
 #include "check.h"
 #include "runtime/inkling2/inkling2_window.h"
 #include "server/adaptive_k.h"
+#include "server/step_k.h"
 
 namespace {
 
 using server::AdaptiveK;
 using server::AdaptiveKOptions;
+using server::DraftCalib;
 using server::MtpCost;
 
 // Drives a policy for `n` iterations; `accept(k)` says how many of k drafts were kept.
@@ -106,14 +107,10 @@ void test_dflash_measured_cost() {
   CHECK(c.verify.size() == 8 && c.draft.size() == 7);
   for (size_t i = 0; i < 8; ++i) CHECK_NEAR(c.verify[i], verify[i], 1e-12);
   for (double d : c.draft) CHECK_NEAR(d, 0.298136, 1e-12);
-  CHECK_NEAR(c.draft[0] * MtpCost::dflash_head_share(true, true), 2.166354 / 29.222498, 1e-12);
   const auto candidate = MtpCost::dflash(true, 1u, true);
   const double verify_candidate[] = {1.000230, 1.041410, 1.073907, 1.105789, 1.151472, 1.180781, 1.205189, 1.221471};
   for (size_t i = 0; i < 8; ++i) CHECK_NEAR(candidate.verify[i], verify_candidate[i], 1e-12);
   for (double d : candidate.draft) CHECK_NEAR(d, 0.217462, 1e-12);
-  const auto int4 = MtpCost::dflash(true, 2u);
-  CHECK(int4.draft[0] < c.draft[0]);
-  CHECK(int4.draft[0] != MtpCost::dflash(true, 0u).draft[0]);
   AdaptiveKOptions o;
   o.cost = c;
   o.max_k = 7;
@@ -357,39 +354,13 @@ void test_deterministic() {
   std::print("determinism: the same history gives the same K sequence\n");
 }
 
-// Spec 8 §11: the cost table under a draft vocabulary - each draft's lm_head share scales
-// with |V'| / 248320, the rest of a draft and every verify stay (derived numbers).
-void test_draft_vocab_cost() {
-  const MtpCost i8 = MtpCost::int8_head(), bf = MtpCost::bf16_head();
-  const double h8 = MtpCost::kInt8DraftHeadShare, h16 = MtpCost::kBf16DraftHeadShare;
-  CHECK_NEAR(h8 * i8.draft[0], 0.067, 1e-12);   // the head's part of one int8 draft
-  CHECK_NEAR(h16 * bf.draft[0], 0.129, 1e-12);
-  const double want8[3] = {0.0718, 0.0807, 0.0984};   // 32k / 64k / 128k, one draft
-  const uint32_t sizes[3] = {32768, 65536, 131072};
-  for (int s = 0; s < 3; ++s) {
-    const double f = sizes[s] / 248320.0;
-    const MtpCost c = i8.with_draft_vocab(h8, f), b = bf.with_draft_vocab(h16, f);
-    CHECK_NEAR(c.draft[0], want8[s], 5e-4);
-    for (size_t k = 0; k < 3; ++k) {
-      CHECK_NEAR(c.draft[k] / i8.draft[k], c.draft[0] / i8.draft[0], 1e-12);   // one factor
-      CHECK(c.draft[k] < i8.draft[k] && b.draft[k] < bf.draft[k]);
-    }
-    CHECK(c.verify == i8.verify && b.verify == bf.verify);   // verify reads the full head
-    std::print("draft vocab {:6d}: int8 drafts {:.4f} {:.4f} {:.4f}, bf16 drafts {:.4f} {:.4f} {:.4f}\n",
-               sizes[s], c.draft[0], c.draft[1], c.draft[2], b.draft[0], b.draft[1], b.draft[2]);
-  }
-  // Off (fraction 1) is the table itself; a share of 0 changes nothing either.
-  CHECK(i8.with_draft_vocab(h8, 1.0).draft == i8.draft);
-  CHECK(bf.with_draft_vocab(0.0, 0.5).draft == bf.draft);
-  for (double bad_f : {0.0, -0.1, 1.5}) {
-    bool threw = false;
-    try {
-      (void)i8.with_draft_vocab(h8, bad_f);
-    } catch (const std::invalid_argument&) {
-      threw = true;
-    }
-    CHECK(threw);
-  }
+void test_default_calib_unchanged() {
+  // A default-constructed server::DraftCalib (the MTP StepK users') keeps the stated-probability
+  // prior: the same rates step_k_test.cc's test_seed pins on the seeded one.
+  DraftCalib c;
+  CHECK_NEAR(c.rate(0, 0.6f), 0.6, 1e-6);
+  c.observe(0, 0.6f, true);
+  CHECK_NEAR(c.rate(0, 0.6f), 7.0 / 11.0, 1e-6);
 }
 
 }  // namespace
@@ -437,12 +408,12 @@ int main() {
   test_inkling_policy();
   test_inkling_tables_equal();
   test_measured_cost();
-  test_draft_vocab_cost();
   test_up_on_high_acceptance();
   test_down_on_low_acceptance();
   test_recovers();
   test_hysteresis();
   test_deterministic();
+  test_default_calib_unchanged();
   std::print("adaptive_k_test: all cases passed\n");
   return 0;
 }

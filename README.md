@@ -1,22 +1,42 @@
-# b70-inference-server
+# intel-inference-server
 
-**A fast LLM server for one or two Intel Arc Pro B70 cards, written from scratch.** Hand-crafted GPU kernels,
-optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
+**A fast LLM server for one or two Intel Arc Pro B70 cards, written from scratch.** Hand-written Level Zero / OpenCL
+kernels tuned for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long
+coding-agent sessions (opencode and similar).
 
-- **Qwen3.8-Flash-Next:** prefill at **3,415 t/s**, code written at **99 t/s** (two cards, experts offloaded to RAM and computed on the CPU).
-- **Qwen3.8-27B:** **167 t/s** writing code for one session on one card (DFlash), **343 t/s** for 4 requests; **626 t/s** in total with 8 requests on two cards.
-- Prefill at **2,800 t/s** on one card / **3,467 t/s** on two cards with `tp` (opt-in int8 prefill engine).
-- The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
-- **Inkling 2 Mini:** prefill at **4,987 t/s** on one card and **7,194 t/s** on two (`pp`, 16k prompt); prose written at
-  **248 t/s** and code at **194 t/s** on one card, **310 t/s** prose on two cards (`tp`); the full **1,048,576-token**
-  context on two cards.
-- **Ornith 1.5 35B-A3B:** prefill at **11,223 t/s**, answers written at **312 t/s** on one card, **581 t/s** for two requests on two cards.
+## Key features
 
-One choice to make - how many requests run at once. The engine sizes everything else.
+- **Fast speculative decoding, on by default:** each model's MTP head, or a DFlash 2 drafter - **288 t/s** writing
+  prose with Inkling 2 Mini on one card, **377 t/s** on two; **167 t/s** writing code with Qwen3.8-27B on one card.
+- **Fast prompts:** up to **11,223 t/s** prefill on one card (Ornith 1.5), **7,194 t/s** on two (Inkling 2 Mini).
+- **Long context on modest hardware:** Qwen3.8-27B's full 262,144 tokens on **a single 32 GB card**; Inkling 2 Mini's
+  full **1M tokens** on two.
+- **Several requests at once:** up to 4 per card sharing one KV cache - **626 t/s** in total with 8 requests on two
+  cards (Qwen3.8-27B).
+- **One choice to make:** how many requests run at once. The engine sizes context, cards and caches from it, and
+  refuses at startup, naming why, anything that does not fit.
+- **Exact:** speculative decoding never changes the output, and the kernels are checked against float32 references.
 
-## Supported models
+## Performance
 
-Each model runs from our own int4 quantisation (AutoRound, group 64, GPTQ format) on Hugging Face:
+One session, greedy, served, tokens a second. All setups, more context lengths and several requests:
+[docs/benchmarks.md](docs/benchmarks.md).
+
+| model | setup | prefill | code | prose | tool calls |
+|---|---|---:|---:|---:|---:|
+| Inkling 2 Mini | one card, DFlash 2 | 4,932 (4k) | **221** | **288** | **176** |
+| Inkling 2 Mini | two cards, DFlash 2 (`tp`; prefill `pp`) | 7,194 (16k) | 218 | **377** | **219** |
+| Qwen3.8-27B | one card, DFlash 2 | 2,800 (4k, int8) | **167** | 67 | 118 |
+| Qwen3.8-27B | two cards `tp`, DFlash 2 | 3,467 (4k, int8) | 182 | **89** | **153** |
+| Ornith 1.5 35B-A3B | one card, MTP | **11,223** (4k) | **320** | **341** | **287** |
+| Qwen3.8-Flash-Next | two cards, MTP (`tp`; prefill `pp`) | 3,415 (32k) | 99 | 64 | 84-126 |
+
+Prefill is the model reading your prompt; code, prose and tool calls are it writing its answer.
+
+## Models
+
+The Qwen-family models run from our own int4 quantisation (AutoRound, group 64, GPTQ format) on Hugging Face;
+Inkling 2 Mini runs its own release:
 
 - **[Qwen3.8-Flash-Next](https://huggingface.co/urakozz/Qwen3.8-Flash-Next-W4A16-g64-AutoRound-GPTQ)** - MoE, 512
   experts (10 a token), linear attention beside sparse attention, MTP head. Two cards and 128 GB of RAM.
@@ -27,103 +47,8 @@ Each model runs from our own int4 quantisation (AutoRound, group 64, GPTQ format
   Qwen3.5-35B-A3B architecture, tuned for code), MTP head. One card.
 - **[Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini)** - looped MoE (24 layers run as 48
   visits), the release itself (its NVFP4 / MXFP8 experts run exactly), with the
-  [DFlash 2 drafter](https://huggingface.co/incoai/Inkling-2-Mini-DFlash2) for faster writing. One card; two cards
+  [DFlash 2 drafter](https://huggingface.co/urakozz/Inkling-2-Mini-DFlash2-W4A16-g64-AutoRound) for faster writing. One card; two cards
   `tp` for one faster session, `pp` for the 1,048,576-token context with `--kv-cache int8`.
-
-## Speed
-
-**Prefill** is the model reading your prompt, **decode** is the model writing its answer
-
-### Qwen3.8-Flash-Next
-
-Prefill, t/s:
-
-| setup | 32k-token prompt | 128k-token prompt |
-|---|---:|---:|
-| two cards `pp` | **3,415** | **2,918** |
-| two cards `tp` | 2,234 | 1,980 |
-
-A short prompt (43 tokens) gets its first token in 0.30 s on `pp` and on `tp`
-
-Generation, t/s:
-
-| setup | code | prose | tool calls |
-|---|---:|---:|---:|
-| MTP, two cards `pp` | 79 | 63 | 98-123 |
-| MTP, two cards `tp` | **99** | **64** | **84-126** |
-| MTP, two cards `tp`, PCIe 5.0 x16 + DDR5 | ~125-155 | | |
-
-Flash-Next needs at least 128 GB of system RAM: the experts that do not fit VRAM, its n-gram table and the prefix
-cache take about 104 GB of it
-
-Measured on a PCIe 3.0 workstation with DDR4-2133 and P2P. PCIe 5.0 x16, DDR5 RAM, AVX-512 CPU speed it up
-
-### Inkling 2 Mini
-
-| setup | prefill, 4k prompt | code | prose | tool calls |
-|---|---:|---:|---:|---:|
-| one card | 4,780 | 193.5 | 247.6 | 147.2 |
-| two cards `pp` | 5,976 | 182.5 | 243.8 | 145.9 |
-| two cards `tp` | 6,173 | 216.8 | 309.8 | 187.9 |
-| 2 requests, two cards `replica` (total) | - | 351 | 452 | 286 |
-
-| prefill (`l0-int8`, int8 cache), t/s | 4k | 16k | 32k | 64k |
-|---|---:|---:|---:|---:|
-| one card | 4,932 | 4,506 | 3,939 | 3,137 |
-| two cards `pp` | 5,976 | **7,194** | **6,908** | **5,842** |
-| two cards `tp` | **6,173** | 6,384 | 5,794 | 4,801 |
-
-| two cards `pp`, int8 cache, the drafter on | prompt | decode |
-|---|---:|---:|
-| 128k context | 3,710 | 47.2 |
-| 1 Mi context (a 1,039,565-id prompt) | 762 | 15.1 |
-
-### Qwen3.8-27B
-
-Prefill, t/s:
-
-| setup | 4k prompt | 16k prompt | 32k prompt | 64k prompt | 128k prompt |
-|---|---:|---:|---:|---:|---:|
-| one card, MTP on (the default server) | 1,908 | 1,771 | 1,634 | 1,395 | 1,072 |
-| one card, MTP on, `--prefill-backend l0-int8` (opt-in) | **2,800** | **2,564** | **2,346** | **1,985** | **1,500** |
-| two cards, `replica`, 2 requests (total), `--prefill-backend l0-int8` (opt-in; 32k derived) | **4,610** | - | ~4,000 | - | - |
-
-Generation, t/s (several requests: the total; llama-benchy tg128 after 4k / 32k / 128k tokens of context, median of 3):
-
-| setup | code | prose | tool calls | llama-benchy |
-|---|---:|---:|---:|---:|
-| MTP, 1 request, one card | 135 | 50 | 102 | 67 / 58 / 51 |
-| MTP, 1 request, two cards `tp` | 138 | 74 | 115 | 95 / 84 / **69** |
-| MTP, 4 requests, one card | 237 | 140 | 122 | |
-| MTP, 2 requests, two cards `replica` | 168 | 99 | 144 | |
-| MTP, 4 requests, two cards `replica` | 283 | 172 | 168 | |
-| MTP, 8 requests, two cards `replica` | 435 | 268 | 206 | |
-| DFlash, 1 request, one card | **167** | 66 | 117 | 94 / 83 / 55 (`--kv-cache int8`) |
-| DFlash, 1 request, two cards `tp` | - | - | - | **119** / **107** / 68 |
-| DFlash, 2 requests, one card | 233 | 98 | 114 | |
-| DFlash, 4 requests, one card | **343** | 156 | 128 | |
-| DFlash, 2 requests, two cards `replica` | 304 | 126 | 151 | |
-| DFlash, 4 requests, two cards `replica` | 433 | 189 | 199 | |
-| DFlash, 8 requests, two cards `replica` | **626** | **281** | **211** | |
-
-DFlash is `--spec dflash --draft-model urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound`
-
-### Ornith 1.5 35B-A3B
-
-Prefill, t/s:
-
-| setup | 4k prompt | 16k prompt | 32k prompt | 64k prompt | 128k prompt | 262k prompt |
-|---|---:|---:|---:|---:|---:|---:|
-| one card | 11,223 | 8,800 | 7,420 | 5,428 | 3,544 | 2,096 |
-| two cards `replica`, 2 requests (total) | **19,117** | **13,728** | - | - | - | - |
-
-Generation with MTP, t/s (llama-benchy as above):
-
-| setup | code | prose | tool calls | llama-benchy |
-|---|---:|---:|---:|---:|
-| 1 request, one card | 312 | 326 | 264 | **196** / 126 / 62 |
-| 2 requests, two cards `replica` (total) | **581** | **605** | **453** | |
-| 4 requests, one card | ~430 | | | |
 
 ## Install
 
@@ -131,7 +56,7 @@ The host needs Linux with the `xe` kernel driver (the container uses the host's 
 from kernel 7.4). The image brings the rest:
 
 ```sh
-docker pull urakozz/intel-arc-inference-server:1.1.0
+docker pull urakozz/intel-arc-inference-server:1.2.0
 
 # the engine never downloads; fetch the model into the Hugging Face cache once
 # Qwen3.8-Flash-Next, about 133 GB: skips 96 GB of the bf16 n-gram table, which only other engines read
@@ -147,7 +72,19 @@ hf download urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 
 # Inkling 2 Mini (looped MoE), 20.2 GB, and its drafter
 hf download thinkingmachines/Inkling-2-Mini
-hf download incoai/Inkling-2-Mini-DFlash2   # its drafter
+hf download urakozz/Inkling-2-Mini-DFlash2-W4A16-g64-AutoRound   # its drafter
+```
+
+Tarball (no Docker): `intel-inference-server-<version>-linux-x86_64.tar.gz`, extracting to
+`intel-inference-server-<version>/` with `bin/b70-serve`, `bin/b70-decode` and the compiled kernels. The host
+additionally needs the `xe` kernel driver, Intel's compute runtime (`libze-intel-gpu1`, 26.40.40196.15 or newer,
+from Intel's graphics PPA `ppa:kobuk-team/intel-graphics` or the distro) and the Level Zero loader (`libze1`,
+1.34.0 or newer); glibc 2.43 or newer. See the tarball's own README.md for details.
+
+```sh
+tar -xzf intel-inference-server-1.2.0-linux-x86_64.tar.gz
+./intel-inference-server-1.2.0/bin/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+    --prefix-split-last --kv-cache int8
 ```
 
 Or build it yourself: the [Dockerfile](Dockerfile) (`docker build -t urakozz/intel-arc-inference-server .`), or
@@ -160,16 +97,13 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-[The model](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ) is Qwen3.8-27B compressed to 4-bit
-weights with AutoRound, in groups of 64 rather than the usual 128 - better accuracy for about 2 % of prefill speed.
-
 ## Run
 
 ```sh
 # an OpenAI-compatible server on port 8000 (built from source: ./build/src/cli/b70-serve in place of $B70);
 # GET /health answers 503 while the model loads, 200 once it serves
 B70="docker run --rm --device /dev/dri --group-add $(getent group render | cut -d: -f3) \
-    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server:1.1.0"
+    -v $HOME/.cache/huggingface:/root/.cache/huggingface -p 8000:8000 urakozz/intel-arc-inference-server:1.2.0"
 
 # Qwen3.8-Flash-Next on two cards: every layer split over both, the experts in host RAM computed on the CPU (the
 # defaults: the fastest session), MTP on
@@ -210,37 +144,10 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
   card runs its own copy of the model (`--parallel replica`) and its requests share that card's KV cache the same
   way; so do they beside the DFlash draft model (`--spec dflash`).
 
-Speculative decoding (the model's MTP head) and the prefix cache are on by default; the DFlash draft model is
-`--spec dflash --draft-model ...`. Speculative decoding and `--host-experts` switch on a running server without a reload
-(`curl localhost:8000/v1/control/reconfigure -d '{"spec": "off"}'`). Ready-made recipes with their context sizes:
-[docs/17-running-models.md](docs/17-running-models.md).
+Speculative decoding and the prefix cache are on by default. Speculative decoding and `--host-experts` switch on a
+running server without a reload (`curl localhost:8000/v1/control/reconfigure -d '{"spec": "off"}'`).
 
-Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
-Kolibri-1); Qwen3.8 is the one everything is tuned for.
-
-## Flags
-
-`b70-serve`:
-
-| flag | default | what it does |
-|---|---|---|
-| `<snapshot-or-repo>` | required | a Hugging Face repo id in the local cache, or a snapshot directory; never downloads |
-| `--max-num-seqs N` | `1` | how many requests run at once. They share the card's KV cache, and any one may use all of it; two cards run a model copy each, with its own cache. Up to 4 per card |
-| `--max-len auto\|L` | `auto` | context length (the most one request may use with `--max-num-seqs`). `auto`: the largest that fits, up to the model's 262,144 |
-| `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
-| `--spec auto\|off\|mtp\|dflash` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` is the model's MTP head (no extra memory). `dflash` (with `--draft-model`) uses a draft model instead: faster, but its weights take ~1.2 GB of the context's memory; it also copies repeats of earlier text |
-| `--spec-max K` | the most | the proposer's cap on guesses per step |
-| `--draft-model PATH` | none; required with `--spec dflash` | the draft model: `urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound` (our packed int4 drafter, 1.21 GB of the context's memory) |
-| `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
-| `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; Qwen3.8 and Ornith). On Qwen3.8 `int8` means every prompt linear, the context (it implies `--kv-cache int8`) and the attention scores in int8: 40-47 % faster prompts; measured against the bf16 pass, the most likely next token differs at 3 of 585 positions and 0 of 12 long exact-copy tool calls changed. On Ornith: its experts in int8 |
-| `--prefix-cache-gb auto\|N` | `auto` | the prefix cache in pinned system RAM, locked against swap when `ulimit -l` is unlimited; `auto` = up to 32 GiB from what is free, `0` = off |
-| `--prefix-split-last` | off | for chat clients that drop the reasoning (opencode): the next turn is a prefix cache hit exactly where it diverges. On for agentic sessions, off for benchmarks |
-| `--host H`, `--port P` | `0.0.0.0`, `8000` | where it listens |
-| `--log-requests DIR` | off | one JSON file per request: timings, body, ids, text |
-| `--layers N\|auto` | - | Qwen3.8-Flash-Next only: serve its first N layers |
-| `--host-experts auto\|gpu\|cpu` | `auto` | Qwen3.8-Flash-Next: how experts held in host RAM are served. `auto` picks per step from a startup measurement, `gpu` reads them over PCIe into the card, `cpu` computes them on the CPU. Same output either way |
-
-`b70-decode` (benchmarks, profiles, decoding from token ids) and the environment variables: [docs/18-development.md](docs/18-development.md).
+All recipes with their context sizes, and every `b70-serve` flag: [docs/17-running-models.md](docs/17-running-models.md).
 
 ## Docs
 

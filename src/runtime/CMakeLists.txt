@@ -45,10 +45,10 @@ add_subdirectory(dflash)
 
 add_library(b70_inkling2_plan STATIC inkling2/inkling2_sizes.cc inkling2/inkling2_prefill.cc
             inkling2/inkling2_tp_split.cc)
-target_link_libraries(b70_inkling2_plan PUBLIC b70_plan b70_inkling2_loader)
+target_link_libraries(b70_inkling2_plan PUBLIC b70_plan b70_inkling2_loader b70_dflash_plan)
 
 add_library(b70_inkling2_buffers STATIC inkling2/inkling2_buffers.cc)
-target_link_libraries(b70_inkling2_buffers PUBLIC b70_inkling2_plan b70_dflash_plan b70_l0)
+target_link_libraries(b70_inkling2_buffers PUBLIC b70_inkling2_plan b70_l0)
 
 add_library(b70_inkling2_runtime STATIC inkling2/inkling2_engine.cc inkling2/inkling2_prefill_engine.cc
             inkling2/inkling2_snapshot.cc inkling2/inkling2_pp_engine.cc inkling2/inkling2_tp_engine.cc

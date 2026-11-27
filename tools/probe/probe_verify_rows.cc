@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
   cli::dflash::Loaded dl = cli::dflash::load(ctx, da, model);
   auto drafter = std::make_unique<runtime::dflash::DFlashDrafter>(ctx, std::move(dl.w), dl.head_rows, max_len, da.max_k);
   runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, runtime::default_kv_cache(), drafter.get());
-  drafter->attach(eng, /*draft_vocab=*/false);
+  drafter->attach(eng);
   eng.prepare_prefill();
   runtime::TapDrafter& d = *eng.tap_drafter();
   const uint32_t P = uint32_t(prompt.size()), H = 5120;

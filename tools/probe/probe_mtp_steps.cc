@@ -1,7 +1,7 @@
 // probe_mtp_steps - spec 8 plan 8b: the production MTP lists' wall time per call.
 //
 //   probe_mtp_steps <snapshot> [depth = 4096] [calls = 32] [rounds = 3] [lm_head = bf16]
-//                   [draft_vocab = off] [max_len = 16384] [max_m = 4] [mode = default]
+//                   [max_len = 16384] [max_m = 4] [mode = default]
 //
 // `mode` vattn (spec 28c, plan 28c Task 7; max_m 8, int8 head): per M = 2..8 the verify list over the 8-slot
 // MtpBuffers built three times - forced to v2, by the capture's rule and forced to DPAS (runtime::CaptureOptions::
@@ -14,14 +14,9 @@
 // chunk, the pair's order alternating by round, after a warm-up; median over rounds with the range.
 //
 // `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
-// `draft_vocab` (spec 8 §11): off, 32k, 64k or 128k (either head form) - the draft list reads
-// the compact head instead; V' = tokenizer.json's added tokens (the EOS ids among them on
-// Qwen3.8) and the lowest ids, no ranked list (the step time depends on |V'|
-// only). The draft arms then price `--mtp-cost`'s draft row for that size (spec 8 §10).
 //
 // `max_len` (spec 8 §12, validation queue row 6): the engine's length - 16384 as before by default;
-// the cost table at depth runs e.g. `... 32768 32 3 int8 off 65536` and `... 120000 32 3 int8
-// off 131072`. It must leave room for the drift below (depth + 1024 <= max_len).
+// the cost table at depth runs e.g. `... 32768 32 3 int8 65536` and `... 120000 32 3 int8 131072`. It must leave room for the drift below (depth + 1024 <= max_len).
 //
 // One engine with the head, `depth` ids of tests/golden/prompts/long32k.ids prefilled
 // (the file repeated past its end; cwd = the source tree). Arms, timed as the engine API runs them (host writes, submit,
@@ -59,7 +54,6 @@
 #include "l0/context.h"
 #include "l0/fence.h"
 #include "l0/queue.h"
-#include "loader/draft_vocab.h"
 #include "loader/loader.h"
 #include "loader/snapshot.h"
 #include "runtime/buffers.h"
@@ -86,7 +80,7 @@ double median_of(std::vector<double> v) {
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr,
-                 "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8] [off|32k|64k|128k]"
+                 "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8]"
                  " [max_len] [max_m 4..8] [default|vattn|wide16]\n",
                  argv[0]);
     return 2;
@@ -94,15 +88,15 @@ int main(int argc, char** argv) {
   const uint32_t depth = argc > 2 ? std::stoul(argv[2]) : 4096;
   const uint32_t calls = argc > 3 ? std::stoul(argv[3]) : 32;
   const uint32_t rounds = argc > 4 ? std::stoul(argv[4]) : 3;
-  const uint32_t max_len = argc > 7 ? std::stoul(argv[7]) : 16384;
-  const uint32_t max_m = argc > 8 ? std::stoul(argv[8]) : 4;
+  const uint32_t max_len = argc > 6 ? std::stoul(argv[6]) : 16384;
+  const uint32_t max_m = argc > 7 ? std::stoul(argv[7]) : 4;
   if (max_m < 4 || max_m > runtime::MtpDims::kMaxSlots) {
     std::fprintf(stderr, "max_m %u is outside [4, %u]\n", max_m, runtime::MtpDims::kMaxSlots);
     return 2;
   }
   const bool wide = max_m > 4;   // spec 19a: the M = 5..8 arms
-  // Spec 28c (plan 28c Task 7): a 9th positional `mode` - default | vattn.
-  const std::string mode = argc > 9 ? argv[9] : "default";
+  // Spec 28c (plan 28c Task 7): an 8th positional `mode` - default | vattn.
+  const std::string mode = argc > 8 ? argv[8] : "default";
   if (mode != "default" && mode != "vattn" && mode != "wide16" && mode != "wideprof") {
     std::fprintf(stderr, "mode %s: default, vattn, wide16 or wideprof\n", mode.c_str());
     return 2;
@@ -129,16 +123,9 @@ int main(int argc, char** argv) {
                          " (B70_VERIFY_M8, src/kernels/CMakeLists.txt) - pass int8\n", max_m);
     return 2;
   }
-  loader::DraftVocabSpec dv;
-  if (argc > 6) {
-    if (!loader::parse_draft_vocab(argv[6], dv.size)) return 2;
-    if (dv.size != 0)
-      dv.added = loader::added_token_ids_file(loader::resolve_snapshot(argv[1]) + "tokenizer.json");
-  }
-  std::printf("lm_head: %s, draft vocab %s\n", loader::lm_head_form_name(lm_head),
-              loader::draft_vocab_name(dv.size).c_str());
+  std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
   if (max_len != 16384) std::printf("max_len: %u\n", max_len);
-  runtime::Engine e(ctx, loader::load(ctx, argv[1], max_len, /*mtp=*/true, lm_head, dv), max_len);
+  runtime::Engine e(ctx, loader::load(ctx, argv[1], max_len, /*mtp=*/true, lm_head), max_len);
   e.prefill(ids);
   using Clock = std::chrono::steady_clock;
 
@@ -150,7 +137,7 @@ int main(int argc, char** argv) {
   std::unique_ptr<l0::CmdList> wimm;
   runtime::Control* ctl = e.buffers().control.as<runtime::Control>();
   if (wide) {
-    mtp8 = std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc, e.draft_vocab(),
+    mtp8 = std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc,
                                                  e.kv_cache(), runtime::MtpDims::kMaxSlots);
     for (uint32_t M = 5; M <= max_m; ++M)
       wide_lists.push_back(runtime::build_verify(ctx, e.model(), e.buffers(), *mtp8, M));

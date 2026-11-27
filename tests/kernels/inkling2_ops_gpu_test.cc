@@ -366,7 +366,8 @@ int main() {
     run(glue, "ink_depth_mix_norm", 128, rows, streams, 1, st, qu, want.ptr(), count, rows, eps, g0.ptr(), g1.ptr(),
         g2.ptr(), la);
     run(split_glue, "ink_split_sums", 16, split, rows, streams, st, la, qu, pa, count, rows, 0u);
-    run(split_glue, "ink_split_mix", 16, split, rows, streams, st, la, pa, mixed.ptr(), np, count, rows);
+    run(split_glue, "ink_split_mix", 128, H / 128, rows, streams, st, la, pa, mixed.ptr(), count, rows);
+    run(split_glue, "ink_split_squares", 16, split, rows, streams, mixed.ptr(), np, rows);
     run(split_glue, "ink_split_norm", 16, split, rows, streams, mixed.ptr(), np, got.ptr(), rows, eps, g0.ptr(),
         g1.ptr(), g2.ptr());
     same(read(want, uint16_t{}), read(got, uint16_t{}));
@@ -374,7 +375,8 @@ int main() {
     run(ctrl_glue, "ink_post_mix_norm", 128, rows, 1, 1, st, la, qu, want.ptr(), g0.ptr(), count, rows, eps, nullptr,
         nullptr, nullptr, nullptr);
     run(split_glue, "ink_split_sums", 16, split, rows, 1, st, la, qu, pa, count, rows, 0u);
-    run(split_glue, "ink_split_mix", 16, split, rows, 1, st, la, pa, mixed.ptr(), np, count, rows);
+    run(split_glue, "ink_split_mix", 128, H / 128, rows, 1, st, la, pa, mixed.ptr(), count, rows);
+    run(split_glue, "ink_split_squares", 16, split, rows, 1, mixed.ptr(), np, rows);
     run(split_glue, "ink_split_norm", 16, split, rows, 1, mixed.ptr(), np, got.ptr(), rows, eps, g0.ptr(), nullptr,
         nullptr);
     same(read(want, uint16_t{}), read(got, uint16_t{}));
@@ -384,13 +386,15 @@ int main() {
       run(ctrl_glue, "ink_mix_cat", 128, rows, streams, 1, st, la, qu, me, mixed.ptr(), cat.ptr(), count, rows, shared,
           eps, nullptr, nullptr, nullptr, nullptr);
       run(split_glue, "ink_split_sums", 16, split, rows, streams, st, la, qu, pa, count, rows, shared);
-      run(split_glue, "ink_split_mix_cat", 16, split, rows, streams, st, la, pa, me, mixed2.ptr(), np, count, rows);
+      run(split_glue, "ink_split_mix_cat", 128, H / 128, rows, streams, st, la, pa, mixed2.ptr(), count, rows);
+      run(split_glue, "ink_split_cat_squares", 16, split, rows, streams, mixed2.ptr(), me, np, rows);
       run(split_glue, "ink_split_cat", 16, split, rows, streams, mixed2.ptr(), me, np, cat2.ptr(), rows, eps);
       same(read(mixed, uint32_t{}), read(mixed2, uint32_t{}));
       same(read(cat, uint16_t{}), read(cat2, uint16_t{}));
       run(ctrl_glue, "ink_controller_norm", 128, rows, streams, 1, mixed.ptr(), me, fg_dev.ptr(), want.ptr(), g0.ptr(),
           g1.ptr(), g2.ptr(), rows, eps);
-      run(split_glue, "ink_split_blend", 16, split, rows, streams, mixed2.ptr(), me, fg_dev.ptr(), np, rows, streams);
+      run(split_glue, "ink_split_blend", 128, H / 128, rows, streams, mixed2.ptr(), me, fg_dev.ptr(), rows, streams);
+      run(split_glue, "ink_split_squares", 16, split, rows, streams, mixed2.ptr(), np, rows);
       run(split_glue, "ink_split_norm", 16, split, rows, streams, mixed2.ptr(), np, got.ptr(), rows, eps, g0.ptr(),
           g1.ptr(), g2.ptr());
       same(read(want, uint16_t{}), read(got, uint16_t{}));
@@ -409,7 +413,38 @@ int main() {
     run(fused_route, "kol_route_logits", 16 * ink::kRouteSplit, 8, rows, 1, rw_dev.ptr(), rx_dev.ptr(), logits.ptr());
     run(plain_route, "kol_route", 128, 1, rows, 1, logits.ptr(), rb_dev.ptr(), split_route.ptr());
     same(read(fused, uint32_t{}), read(split_route, uint32_t{}));
+    // The controllers' GEMVs on the DPAS: each row of the 8-row build is the one-row build's bits (down: the cat rows
+    // into the rank, bf16 out; up: the rank into the forget and gain rows, fp32 out).
+    {
+      constexpr uint32_t R = 8, rank = ink::D::controller_rank;
+      std::vector<uint16_t> dw(rank * 2 * H), uw(2 * H * rank), cx(R * 2 * H), lx(R * rank);
+      for (auto* v : {&dw, &uw, &cx, &lx})
+        for (auto& x : *v) x = common::f32_to_bf16(next(.5f));
+      auto dw_dev = upload(dw), uw_dev = upload(uw), cx_dev = upload(cx), lx_dev = upload(lx);
+      const auto* gain = static_cast<const uint16_t*>(uw_dev.ptr()) + size_t(H) * rank;
+      l0::Mem down_r(ctx, l0::MemKind::Device, R * rank * 2), down_1(ctx, l0::MemKind::Device, R * rank * 2);
+      l0::Mem up_r(ctx, l0::MemKind::Device, 2 * R * H * 4), up_1(ctx, l0::MemKind::Device, 2 * R * H * 4);
+      l0::Module dn8(ctx, kernels::path(ink::controller(R, true))), dn1(ctx, kernels::path(ink::controller(1, true)));
+      l0::Module up8(ctx, kernels::path(ink::controller(R, false))), up1(ctx, kernels::path(ink::controller(1, false)));
+      const uint32_t dg = ink::kControllerDown.cols * ink::kControllerDown.ksplit, dx = rank / ink::kControllerDown.cols;
+      const void* none = nullptr;
+      run(dn8, "gemv_bf16", dg, dx, 1, 1, dw_dev.ptr(), none, none, none, none, none, cx_dev.ptr(), down_r.ptr());
+      run(up8, "gemv_bf16", 64, H / 64, 1, 2, uw_dev.ptr(), none, none, gain, none, none, lx_dev.ptr(), up_r.ptr());
+      std::vector<float> up_rows(2 * R * H);
+      for (uint32_t r = 0; r < R; ++r) {
+        run(dn1, "gemv_bf16", dg, dx, 1, 1, dw_dev.ptr(), none, none, none, none, none,
+            static_cast<const uint16_t*>(cx_dev.ptr()) + size_t(r) * 2 * H, static_cast<uint16_t*>(down_1.ptr()) + r * rank);
+        run(up1, "gemv_bf16", 64, H / 64, 1, 2, uw_dev.ptr(), none, none, gain, none, none,
+            static_cast<const uint16_t*>(lx_dev.ptr()) + size_t(r) * rank, up_1.ptr());
+        const auto one = read(up_1, float{});
+        for (uint32_t g = 0; g < 2; ++g)
+          std::copy_n(one.begin() + size_t(g) * H, H, up_rows.begin() + (size_t(g) * R + r) * H);
+      }
+      same(read(down_r, uint16_t{}), read(down_1, uint16_t{}));
+      const auto up8_bits = read(up_r, float{});
+      for (size_t i = 0; i < up_rows.size(); ++i) CHECK_EQ(bits(up8_bits[i]), bits(up_rows[i]));
+    }
   }
 
-  std::puts("Inkling GPU depth mix, controller blend, short convolution, KV, relative attention and routing match host bits. Expert unions match per-row bits. Split mixes and norms match the one-work-group kernels' bits.");
+  std::puts("Inkling GPU depth mix, controller blend, short convolution, KV, relative attention and routing match host bits. Expert unions match per-row bits. Split mixes and norms match the one-work-group kernels' bits. The controllers' verify rows match the one-row GEMVs' bits.");
 }

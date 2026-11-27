@@ -109,73 +109,60 @@ void Inkling2Checkpoint::open_draft(const std::string& file) {
 
 // Plan 41k: the DFlash 2 drafter's tensors, its descriptor held to its kernels (model::check_inkling_dflash2).
 void Inkling2Checkpoint::add_dflash(const std::string& dir) {
-  using E = Encoding;
-  auto d = model::dflash_desc_from_config(read_json(dir + "config.json"));
+  const auto d = model::dflash_desc_from_config(read_json(dir + "config.json"));
   model::check_inkling_dflash2(d);
-  if (read_json(dir + "config.json").obj().contains("quantization_config"))
-    throw std::runtime_error("The Inkling DFlash 2 drafter loads from its bf16 release; this folder is quantised");
-  open_draft(dir + "model.safetensors");
+  dflash_ = std::make_unique<DFlashCheckpoint>(d, dir, /*require_packed_g64=*/true);
+  if (dflash_->target_hidden() != D::hidden)
+    throw std::runtime_error("Inkling DFlash 2 drafter fc.weight must take four 2304-channel target taps");
   desc_.draft = d;
+  const DraftFormat format = dflash_->packed() ? DraftFormat::Int4G64 : DraftFormat::Int8;
+  layout_.draft_format = format;
+  if (dflash_->packed()) layout_.packed_draft_key = dflash_->content_key();
   constexpr uint32_t a = L::kDraft;
   const uint32_t H = d.hidden, G = d.kproj_n();
-  // The checkpoint's names; add() keys the layout by them, stream() reads them from the draft file.
-  auto floats = [&](const std::string& n, std::vector<uint64_t> shape) { add(n, {E::Float, std::move(shape), "BF16", a}); };
-  // L1 (plan 41k): the drafter's linears int8 at load - one fp32 scale a row, the target head's rule (quantise_int8_tiled)
-  auto linear = [&](const std::string& n, uint32_t rows, uint32_t k) { add(n, {E::Int8Tile, {rows, k}, "BF16", a}, rows); };
-  // a part of a concatenated weight: its header checked, its bytes copied by stream()
-  auto part = [&](const std::string& n, std::vector<uint64_t> shape) { add(n, {E::FoldSource, std::move(shape), "BF16", a}); };
-  auto cat = [&](const std::string& n, std::vector<std::string> parts, uint32_t rows, uint32_t k, bool floats) {
-    auto& size = layout_.bytes[a];
-    Inkling2Weight w{a, size, size_t(rows) * k * (floats ? 4 : 1)};
-    if (!floats) w.K = k, w.N = rows;
+  auto& size = layout_.bytes[a];
+  auto raw = [&](const std::string& name, size_t bytes) {
+    layout_.weights.emplace(name, Inkling2Weight{a, size, bytes});
+    size = aligned(size + bytes);
+  };
+  auto linear = [&](const std::string& name, uint32_t N, uint32_t K) {
+    const bool int8 = format == DraftFormat::Int8;
+    Inkling2Weight w{a, size, int8 ? size_t(N) * K : dflash_linear_bytes(K, N, format), 0, K, N};
     size = aligned(size + w.bytes);
-    if (!floats) {   // int8 rows and their fp32 scales
+    if (int8) {
       w.scales = size;
-      size = aligned(size + size_t(rows) * sizeof(float));
+      size = aligned(size + size_t(N) * sizeof(float));
     }
-    layout_.weights.emplace(n, w);
-    cats_.push_back({n, std::move(parts), floats});
+    layout_.weights.emplace(name, w);
+    return w;
   };
   linear("fc.weight", H, d.fc_k(H));
-  floats("hidden_norm.weight", {H});
-  floats("norm.weight", {H});
+  raw("hidden_norm.weight", H * sizeof(float));
+  raw("norm.weight", H * sizeof(float));
   for (uint32_t l = 0; l < d.layers; ++l) {
     const auto p = "layers." + std::to_string(l) + ".", s = p + "self_attn.";
-    for (const char* n : {"input_layernorm.weight", "post_attention_layernorm.weight"}) floats(p + n, {H});
-    part(s + "q_norm.weight", {d.head_dim});
-    part(s + "k_norm.weight", {d.head_dim});
-    cat(s + "qk_norm", {s + "q_norm.weight", s + "k_norm.weight"}, 2, d.head_dim, true);
-    part(s + "q_proj.weight", {d.q_n(), H});
-    part(s + "k_proj.weight", {d.kv_n(), H});
-    part(s + "v_proj.weight", {d.kv_n(), H});
-    cat(s + "qkv_proj.weight", {s + "q_proj.weight", s + "k_proj.weight", s + "v_proj.weight"}, d.qkv_n(), H, false);
-    {   // its k || v rows in place (tiles of 16 rows: the rows from q_n on), the context projection's weight
-      Inkling2Weight kv = layout_.weights.at(s + "qkv_proj.weight");
-      kv.offset += size_t(d.q_n()) * H;   // int8 tiles of 16 rows: n-major, the rows from q_n on in place
-      kv.scales += size_t(d.q_n()) * sizeof(float);
-      kv.N = 2 * d.kv_n();
-      kv.bytes = size_t(kv.N) * H;
-      layout_.weights.emplace(s + "kv_proj.weight", kv);
-    }
+    for (const char* n : {"input_layernorm.weight", "post_attention_layernorm.weight"}) raw(p + n, H * sizeof(float));
+    raw(s + "qk_norm", 2 * d.head_dim * sizeof(float));
+    auto kv = linear(s + "qkv_proj.weight", d.qkv_n(), H);
+    // The context projection reads the k || v tiles of q || k || v in place.
+    const size_t skip = kv.scales ? size_t(d.q_n()) * H : dflash_linear_bytes(H, d.q_n(), format);
+    kv.offset += skip;
+    kv.bytes -= skip;
+    if (kv.scales) kv.scales += d.q_n() * sizeof(float);
+    kv.N = 2 * d.kv_n();
+    layout_.weights.emplace(s + "kv_proj.weight", kv);
     linear(s + "o_proj.weight", H, d.q_n());
-    part(p + "mlp.gate_proj.weight", {d.inter, H});
-    part(p + "mlp.up_proj.weight", {d.inter, H});
-    cat(p + "mlp.gate_up_proj.weight", {p + "mlp.gate_proj.weight", p + "mlp.up_proj.weight"}, d.gate_up_n(), H, false);
+    linear(p + "mlp.gate_up_proj.weight", d.gate_up_n(), H);
     linear(p + "mlp.down_proj.weight", H, d.inter);
     for (const char* c : {"attention_conv.", "mlp_conv."}) {
-      floats(p + c + "base_kernel", {2, d.conv_taps, H});
+      raw(p + c + "base_kernel", 2 * d.conv_taps * H * sizeof(float));
       linear(p + c + "kernel_projection.weight", G, H);
     }
   }
   linear("candidate_selector.hidden_projection.weight", d.sel_rank, H);
   for (const char* n : {"candidate_selector.predecessor_codebook", "candidate_selector.successor_codebook"})
-    add(n, {E::Raw, {d.vocab, d.sel_rank}, "BF16", a});
-  for (const auto& [name, info] : draft_tensors_)
-    if (!sources_.contains(name) || sources_.at(name).arena != a)
-      throw std::runtime_error("Unexpected Inkling DFlash 2 drafter tensor " + name);
-  auto& size = layout_.bytes[a];
-  layout_.weights.emplace("df2.mask_embed", Inkling2Weight{a, size, size_t(H) * 2});
-  size = aligned(size + size_t(H) * 2);
+    raw(n, size_t(d.vocab) * d.sel_rank * sizeof(uint16_t));
+  raw("df2.mask_embed", H * sizeof(uint16_t));
 }
 
 Inkling2Checkpoint::Inkling2Checkpoint(const std::string& arg, const std::string& dflash)
@@ -382,22 +369,45 @@ void Inkling2Checkpoint::stream(const Sink& write, bool with_draft, unsigned thr
   }
   if (!with_draft) return;
   if (dflash()) {
-    for (const auto& c : cats_) {   // the concatenated weights, their parts' rows in order
-      const auto& w = layout_.weights.at(c.name);
-      std::vector<uint16_t> rows;
-      for (const auto& n : c.parts) {
-        const auto& src = sources_.at(n);
-        const auto words = bf16(data(n, src), elements(src.shape));
-        rows.insert(rows.end(), words.begin(), words.end());
-      }
-      if (c.floats) {
-        std::vector<float> out(rows.size());
-        std::transform(rows.begin(), rows.end(), out.begin(), common::bf16_to_f32);
-        emit(w.arena, w.offset, out);
+    const auto& d = desc_.draft;
+    const auto format = layout_.draft_format;
+    const auto tensor = [&](const std::string& name, const auto& values) {
+      const auto& w = layout_.weights.at(name);
+      emit(w.arena, w.offset, values);
+    };
+    const auto linear = [&](const std::string& name, const DFlashHostLinear& values) {
+      const auto& w = layout_.weights.at(name);
+      if (format == DraftFormat::Int4G64) {
+        emit(w.arena, w.offset, values.int4);
       } else {
-        int8(w, 0, w.N, rows.data());
+        emit(w.arena, w.offset, values.i8);
+        emit(w.arena, w.scales, values.scales);
       }
+    };
+    linear("fc.weight", dflash_->fc(format, threads));
+    tensor("hidden_norm.weight", dflash_->hidden_norm());
+    tensor("norm.weight", dflash_->final_norm());
+    const auto qk = dflash_->qk_norms(), bases = dflash_->conv_bases();
+    const size_t base_size = size_t(2) * d.conv_taps * d.hidden;
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      const auto p = "layers." + std::to_string(l) + ".";
+      const auto norms = dflash_->layer_norms(l);
+      tensor(p + "input_layernorm.weight", std::span(norms).first(d.hidden));
+      tensor(p + "post_attention_layernorm.weight", std::span(norms).subspan(d.hidden));
+      tensor(p + "self_attn.qk_norm", std::span(qk).subspan(size_t(l) * 2 * d.head_dim, 2 * d.head_dim));
+      for (const auto& [name, which] : {
+               std::pair{"self_attn.qkv_proj.weight", DFlashLinear::Qkv}, {"self_attn.o_proj.weight", DFlashLinear::O},
+               {"mlp.gate_up_proj.weight", DFlashLinear::GateUp}, {"mlp.down_proj.weight", DFlashLinear::Down},
+               {"attention_conv.kernel_projection.weight", DFlashLinear::AttnKproj},
+               {"mlp_conv.kernel_projection.weight", DFlashLinear::MlpKproj}})
+        linear(p + name, dflash_->layer_linear(l, which, format, threads));
+      tensor(p + "attention_conv.base_kernel", std::span(bases).subspan(2 * l * base_size, base_size));
+      tensor(p + "mlp_conv.base_kernel", std::span(bases).subspan((2 * l + 1) * base_size, base_size));
     }
+    linear("candidate_selector.hidden_projection.weight", dflash_->selector_projection(format, threads));
+    const size_t codes = size_t(d.vocab) * d.sel_rank;
+    tensor("candidate_selector.predecessor_codebook", std::span(dflash_->codebook(false), codes));
+    tensor("candidate_selector.successor_codebook", std::span(dflash_->codebook(true), codes));
     // the block's mask rows: embed_norm(embed[mask]) as ink_draft_embed computes row 0, rounded to bf16
     const auto* row = text_.data(text_.tensors().at(model::kInkling2Prefix + std::string("embed.weight"))) +
                       size_t(desc_.draft.mask_id) * D::hidden * 2;

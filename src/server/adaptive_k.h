@@ -37,20 +37,6 @@ struct MtpCost {
   // head, fp32 crossings) - tp_dflash_test cost at depth 4096.
   static MtpCost tp_dflash();
 
-  // Spec 8 §11: the share of ONE draft's cost that is its lm_head read, per head form -
-  // what a reduced draft vocabulary scales. **Derived, not measured:** the head's bytes at
-  // ~570 GB/s in units of that form's plain step, over the table's one-draft cost.
-  //   int8: 1.27 GB -> ~2.2 ms of the 32.65 ms int8 plain step = 0.067 of draft[0] 0.13
-  //   bf16: 2.54 GB -> ~4.4 ms of the ~34 ms bf16 plain step   = 0.129 of draft[0] 0.19
-  // The rest of a draft (the MTP head's own layer, its norms, the argmax) does not move.
-  // `probe_mtp_steps ... <form> <size>` on the GPU machine replaces the result (via the cost table).
-  static constexpr double kInt8DraftHeadShare = 0.067 / 0.13;
-  static constexpr double kBf16DraftHeadShare = 0.129 / 0.19;
-  // This table with every draft[k - 1] scaled to draft[k - 1] * ((1 - head_share) +
-  // head_share * fraction), `fraction` = |V'| / 248320 (the rows a draft's head reads);
-  // verify is unchanged (it always reads the full head). fraction 1 returns the table.
-  MtpCost with_draft_vocab(double head_share, double fraction) const;
-
   // Spec 19e: the same verify rows with a free draft - prompt lookup proposes on the host in
   // microseconds (prompt_lookup.h), ~0 of a 32 ms plain step. draft[k - 1] = 0 for every K
   // the verify list covers.
@@ -67,13 +53,9 @@ struct MtpCost {
   // Spec 19 v3d (2026-11-14, card 0, busy machine): the DPAS attention at KS 4, the radix candidate selection and the
   // 2-bit head with 80 candidates - the draft pass 0.217462 of a plain step at depth 4096 (was 0.287036).
   static constexpr double kDFlashDraftCandidateInt8 = 0.217462;
-  // The full-head int4 row: the experimental PRE-H1/B4 RTN estimate (the draft-vocabulary path only).
-  static constexpr double kDFlashDrafterInt4 = 0.269526 - kDFlashHeadInt8;
   // The packed AutoRound drafter (urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound, the default; 2026-11-14, card 0,
   // busy machine): the draft pass 0.151481 of a plain step at depth 4096 (4.41 ms; int8 0.210086 in the same run).
   static constexpr double kDFlashDraftCandidateInt4 = 0.151481;
-  // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
-  static double dflash_head_share(bool i8_head, unsigned drafter_format);
 
   // Kolibri DSpark: Kolibri-1's rows with the bf16 DSpark drafter, DERIVED from the bytes a step reads (loader/kolibri1_layout.h
   // at 50 layers, int4 attention; TODO(card): the first card run measures them): a plain step reads 1.7696 GB of layers
@@ -129,6 +111,10 @@ struct RowCost {
 // step, its rows (each draft one, each row's pending id one) within `budget`. Rows in age order; returns their drafts.
 std::vector<uint32_t> deal_by_cost(const std::vector<double>& alpha, const std::vector<uint32_t>& want, uint32_t budget,
                                    const std::function<double(const std::vector<uint32_t>&)>& cost);
+
+// A (depth, table) list ascending (AdaptiveKOptions::by_depth): the table at pos, interpolated between the depths, the
+// ends held. Every table has the first's rows.
+MtpCost cost_at_depth(const std::vector<std::pair<uint32_t, MtpCost>>& by_depth, uint32_t pos);
 
 struct AdaptiveKOptions {
   uint32_t max_k = 3;

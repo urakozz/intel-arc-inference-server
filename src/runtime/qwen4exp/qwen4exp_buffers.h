@@ -37,7 +37,8 @@ struct Qwen4ExpBuffers {
 
   // --- persistent: zeroed by zero() (Qwen4ExpEngine::reset) -------------------------------------------------
   l0::Mem control;      // runtime::Control, shared memory
-  l0::Mem kv;           // bf16 [its QSA layers][K | V][max_len][2][256]
+  l0::Mem kv;           // bf16 [its QSA layers][K | V][max_len][2][256] (int8 codes with desc.kv8)
+  l0::Mem kv_scale;     // desc.kv8: fp16 [its QSA layers][K | V][max_len][2] (one line without)
   l0::Mem idx_keys;     // packed int4 [its QSA layers][max_len / 4][idx_key_slot_bytes]
   l0::Mem idx_tail;     // bf16 [its QSA layers][8][128]
   l0::Mem gdn_state;    // fp32 [its GDN layers][48][128][128]
@@ -63,6 +64,8 @@ struct Qwen4ExpBuffers {
   // Layer `layer`'s rows on this device (it must live here and be of the kind asked).
   void* k_layer(uint32_t layer) const;        // [max_len][2][256]
   void* v_layer(uint32_t layer) const;
+  void* k_scale_layer(uint32_t layer) const;  // desc.kv8: [max_len][2]
+  void* v_scale_layer(uint32_t layer) const;
   void* idx_keys_layer(uint32_t layer) const;  // [max_len / 4][idx_key_slot_bytes]
   void* tail_layer(uint32_t layer) const;      // [8][128]
   void* gdn_state_layer(uint32_t layer) const;
@@ -86,7 +89,8 @@ struct Qwen4ExpMtpBuffers {
   Qwen4ExpMtpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t max_len);
   // persistent (zeroed by zero()): the head's Control, its KV, compressed keys, tail ring, the R rows
   l0::Mem hctl;       // runtime::Control, shared memory: the head runs one position behind the main model
-  l0::Mem kv;         // bf16 [K | V][max_len][2][256]
+  l0::Mem kv;         // bf16 [K | V][max_len][2][256] (int8 codes with desc.kv8)
+  l0::Mem kv_scale;   // desc.kv8: fp16 [K | V][max_len][2] (one line without)
   l0::Mem idx_keys;   // bf16 [max_len / 4][128]
   l0::Mem idx_tail;   // bf16 [8][128]
   l0::Mem hh;         // bf16 [1 + kVerifyRows][10240]: row 0 R_{pos-1}, rows 1..M the last verify's pre-mixer H
@@ -98,7 +102,9 @@ struct Qwen4ExpMtpBuffers {
   const model::Qwen4ExpDesc& desc;
   uint32_t max_len;
   void* k() const { return kv.ptr(); }
-  void* v() const { return static_cast<uint8_t*>(kv.ptr()) + size_t(max_len) * desc.kv_n() * 2; }
+  void* v() const { return static_cast<uint8_t*>(kv.ptr()) + size_t(max_len) * kv_row_bytes(desc); }
+  void* k_scale() const { return kv_scale.ptr(); }
+  void* v_scale() const { return static_cast<uint8_t*>(kv_scale.ptr()) + size_t(max_len) * kv_scale_row_bytes(desc); }
   void* hh_row(uint32_t r) const { return static_cast<uint8_t*>(hh.ptr()) + size_t(r) * desc.hc_n() * 2; }
   size_t bytes() const;
   size_t bytes(gs::Group g) const;

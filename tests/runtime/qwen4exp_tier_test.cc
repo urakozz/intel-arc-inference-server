@@ -20,6 +20,8 @@
 //       refuses a wrong upload: under random:0.5:7, after the load, one word of a host mirror, one word of a VRAM
 //       arena, or two table entries swapped - the construction throws naming that layer and expert; the untouched
 //       load constructs and reports its words checked.
+//       Plan 21-QFN-v3a Task 0: after each plain decode step the engine's miss count (read_step_misses: the route rows
+//       against the device's expert table) equals the count from the placement's own table (ExpertTier::resident).
 //   ... 1|pp2 cpu   PERF-124: the same with every host-memory expert computed on the CPU (CpuExperts::Mode::All: the
 //       decode and verify lists' hand-off at M = 1..4), still bitwise the direct run.
 //   qwen4exp_tier_test <checkpoint> <ids> tp2 [cpu]   --parallel tp (Qwen4ExpTpEngine; each card's half experts in its
@@ -52,6 +54,8 @@ namespace rq = runtime::qwen4exp;
 using Ids = std::vector<uint32_t>;
 constexpr uint32_t kPrompt = 2200, kMaxLen = 8192, kCheckLayer = 2, kTpPrompt = 120;
 rq::CpuExperts::Mode g_cpu = rq::CpuExperts::Mode::Off;   // argv[4] "cpu": Mode::All
+int g_miss_bad = 0;                                        // plain steps whose miss count is not the placement's
+uint32_t g_misses = 0;                                     // the misses counted over a run's plain steps
 
 // Named byte strings in run order; two runs compare part by part.
 struct Rec {
@@ -107,6 +111,17 @@ Rec run(rq::Qwen4ExpEngine& e, const Ids& prompt, const Ids& force, std::vector<
     for (uint32_t j = 0; j < force.size(); ++j) {
       e.ingest({force[j]});
       add_state(r, e, "decode step " + std::to_string(j));
+      const std::vector<uint32_t> rt = e.read_routes();
+      uint32_t want = 0;
+      for (uint32_t l = 0; l < d.layers; ++l)
+        for (uint32_t k = 0; k < d.top_k; ++k)
+          want += !e.model().tier.resident(l, rt[size_t(l) * rq::kRouteWords + k]);
+      const uint32_t got = e.read_step_misses();
+      g_misses += got;
+      if (got != want) {
+        std::printf("FAIL decode step %u: %u misses read through the table, the placement's %u\n", j, got, want);
+        ++g_miss_bad;
+      }
     }
     r.add("8 generated ids", e.generate(8));
     return r;
@@ -192,8 +207,10 @@ int residency(const std::string& snap, const Ids& prompt, const Ids& force, uint
     for (const bool mtp : {false, true}) {
       o.mtp = mtp;
       build(rig, snap, o, &tier);
+      g_misses = 0;
       const Rec got = run(*rig.eng, prompt, force, nullptr);
       const std::string diff = first_difference(got, ref[mtp]);
+      if (!mtp) std::printf("  %u misses over %zu plain steps, each the placement's count\n", g_misses, force.size());
       std::printf("O1 %s %s, %u card(s): %zu experts in host memory (%zu B), %zu words checked at load (B70_Q4_EXPERT_CHECK=off) - %s%s\n",
                   name.c_str(), mtp ? "with the MTP head" : "plain", devices,
                   size_t(d.layers) * d.experts - std::count(tier.vram.begin(), tier.vram.end(), uint8_t(1)),
@@ -201,7 +218,7 @@ int residency(const std::string& snap, const Ids& prompt, const Ids& force, uint
                   diff.empty() ? "BITWISE the direct form's" : "DIFFERS first at ", diff.c_str());
       bad += !diff.empty();
     }
-  return bad;
+  return bad + g_miss_bad;
 }
 
 // tp2's flow on either engine (the header): the prompt fed by decode, the steps' records into `r` (tp: also both

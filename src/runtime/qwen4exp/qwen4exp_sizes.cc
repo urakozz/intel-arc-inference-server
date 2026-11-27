@@ -14,6 +14,7 @@
 #include "kernels/qwen4exp_kernels.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
+#include "runtime/dflash/dflash_sizes.h"   // the drafter's buffers (plan 21-QFN-v3e)
 #include "runtime/tp_protocol.h"   // tp::Layout (header-only)
 
 namespace runtime::qwen4exp {
@@ -38,7 +39,8 @@ uint32_t count_qsa(const model::Qwen4ExpDesc& d, uint32_t first, uint32_t end) {
 }
 
 size_t qsa_state_per_layer(const model::Qwen4ExpDesc& d, uint32_t max_len) {
-  return size_t(max_len) * 2 * d.kv_n() * 2 + size_t(max_len / d.idx_compress) * idx_key_slot_bytes(d) +
+  return size_t(max_len) * 2 * (kv_row_bytes(d) + kv_scale_row_bytes(d)) +
+         size_t(max_len / d.idx_compress) * idx_key_slot_bytes(d) +
          size_t(kIdxTail) * d.idx_dim * 2;
 }
 
@@ -61,7 +63,8 @@ PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Pl
   const uint32_t qsa = count_qsa(d, p.first(dev), p.end(dev)), gdn = p.count(dev) - qsa;
   PersistentSizes s;
   s.control = sizeof(Control);
-  s.kv = line(size_t(qsa) * max_len * 2 * d.kv_n() * 2);
+  s.kv = line(size_t(qsa) * max_len * 2 * kv_row_bytes(d));
+  s.kv_scale = line(size_t(qsa) * max_len * 2 * kv_scale_row_bytes(d));
   s.idx_keys = line(size_t(qsa) * (max_len / d.idx_compress) * idx_key_slot_bytes(d));
   s.idx_tail = line(size_t(qsa) * kIdxTail * d.idx_dim * 2);
   s.gdn_state = line(size_t(gdn) * gdn_state_bytes_per_layer(d));
@@ -72,8 +75,11 @@ PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Pl
 }
 
 size_t kv_bytes_per_pos(const model::Qwen4ExpDesc& d) {
-  return size_t(d.qsa_before(d.layers)) * (size_t(2) * d.kv_n() * 2 + idx_key_slot_bytes(d) / d.idx_compress);
+  return size_t(d.qsa_before(d.layers)) *
+         (size_t(2) * (kv_row_bytes(d) + kv_scale_row_bytes(d)) + idx_key_slot_bytes(d) / d.idx_compress);
 }
+size_t kv_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.kv_n()) * (d.kv8 ? 1 : 2); }
+size_t kv_scale_row_bytes(const model::Qwen4ExpDesc& d) { return d.kv8 ? size_t(d.kv_heads) * 2 : 0; }
 size_t idx_key_slot_bytes(const model::Qwen4ExpDesc& d) {
   return size_t(d.idx_dim) / 2 + 8;   // the packed key: nibbles, then two fp32 scales (q4_qsa.cl I4_KEY_BYTES)
 }
@@ -325,17 +331,27 @@ std::vector<size_t> pp_layer_bytes(const model::Qwen4ExpDesc& d, uint32_t max_le
   return v;
 }
 
-PpBalance pp_split(const model::Qwen4ExpDesc& d, uint32_t max_len, bool int8_head, bool mtp, bool prefill) {
+size_t dflash_plan_bytes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len,
+                         loader::DraftFormat f) {
+  return loader::dflash_weight_bytes(d, target_hidden, f).total() +
+         runtime::dflash::sizes(d, target_hidden, head_rows, max_len, f).total();
+}
+
+PpBalance pp_split(const model::Qwen4ExpDesc& d, uint32_t max_len, bool int8_head, bool mtp, bool prefill,
+                   const model::DFlashDesc* dflash, loader::DraftFormat df_format) {
   if (d.layers < 2) throw std::invalid_argument(d.name + ": " + std::to_string(d.layers) + " layer(s), nothing to split");
   const size_t rope = d.rope_table_bytes(max_len), ctl = sizeof(Control);
   const size_t dev0 = loader::q4_embed_bytes(d) + rope + ctl + (prefill ? prefill_state(d, 2, 0, max_len) : 0);
   const size_t dev1 = loader::q4_final_mixer_bytes(d) + loader::q4_lm_head_bytes(d, int8_head) +
-                      (mtp ? loader::q4_mtp_bytes(d) : 0) + rope + ctl + (prefill ? prefill_state(d, 2, 1, max_len) : 0);
+                      (mtp ? loader::q4_mtp_bytes(d) : 0) +
+                      (dflash ? dflash_plan_bytes(*dflash, d.hidden, d.vocab, max_len, df_format) : 0) + rope + ctl +
+                      (prefill ? prefill_state(d, 2, 1, max_len) : 0);
   return pp_balance(pp_layer_bytes(d, max_len), dev0, dev1);
 }
 
 std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
-                             bool int8_head, bool mtp, bool debug_tap, bool prefill, uint32_t pf_rows) {
+                             bool int8_head, bool mtp, bool debug_tap, bool prefill, uint32_t pf_rows,
+                             const model::DFlashDesc* dflash, loader::DraftFormat df_format) {
   model::validate(p, d);
   std::vector<DevicePlan> out(p.devices);
   for (uint32_t dev = 0; dev < p.devices; ++dev) {
@@ -344,8 +360,9 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     dp.first = p.first(dev);
     dp.end = p.end(dev);
     dp.mtp = mtp && dev + 1 == p.devices;
+    dp.dflash = dflash && dev + 1 == p.devices;
     dp.whole = d.layers == model::qwen4exp().layers;
-    dp.weights = loader::q4_device_weight_bytes(d, p, dev, int8_head, mtp);
+    dp.weights = loader::q4_device_weight_bytes(d, p, dev, int8_head, mtp && !dflash);
     dp.rope = loader::q4_device_has_qsa(d, p, dev, mtp) ? d.rope_table_bytes(max_len) : 0;
     dp.model = dp.weights + dp.rope;
     const PersistentSizes ps = persistent_sizes(d, p, dev, max_len);
@@ -353,12 +370,16 @@ std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placem
     dp.state = ps.state();
     // Spec 21-QFN-v1e: with the head, the scratch's verify rows, gdn_pend (PERF-51), the verify's PLE rows, the head's
     // buffers (the last device: its KV and keys go to `kv`), a link of kVerifyRows rows, and the prefill's R rows.
-    const uint32_t rows = mtp ? kVerifyRows : kM;
+    // Plan 21-QFN-v3e: with the drafter the verify rows stay (the 4-row lists are the same); the head is not loaded,
+    // and the drafter's weights and buffers (the ring, the taps' rows, the draft scratch) go into `drafter` on the
+    // last device - under pp device 1, beside the output head.
+    const uint32_t rows = (mtp || dflash) ? kVerifyRows : kM;
     dp.scratch = scratch_sizes(d, max_len, kDefaultQ4Attn, rows).total() + (debug_tap ? tap_bytes(d) : 0);
-    if (mtp) {
+    if (mtp || dflash) {
       add_groups(dp, verify_sizes(d, p, dev));
-      if (dev + 1 == p.devices) add_groups(dp, mtp_sizes(d, max_len));
+      if (mtp && dev + 1 == p.devices) add_groups(dp, mtp_sizes(d, max_len));
     }
+    if (dp.dflash) dp.drafter = dflash_plan_bytes(*dflash, d.hidden, d.vocab, max_len, df_format);
     dp.link = p.devices == 2 ? link_bytes_rows(d, dev, rows) : 0;
     dp.decode_state = dp.state + dp.scratch + dp.link;
     dp.prefill_scratch = prefill ? prefill_state(d, p.devices, dev, max_len, pf_rows) : 0;
@@ -384,41 +405,48 @@ model::Qwen4ExpDesc truncated(const model::Qwen4ExpDesc& d, uint32_t layers) {
 }
 
 model::Q4Placement placement_for(const model::Qwen4ExpDesc& t, uint32_t devices, uint32_t max_len, bool int8_head,
-                                 bool mtp, size_t device_bytes, size_t reserve, bool prefill) {
+                                 bool mtp, size_t device_bytes, size_t reserve, bool prefill,
+                                 const model::DFlashDesc* dflash, loader::DraftFormat df_format) {
   if (devices == 1) return model::Q4Placement::one(t);
   if (devices != 2) throw std::invalid_argument("qwen4exp: " + std::to_string(devices) + " devices (1 or 2)");
   if (t.layers < 2) throw std::invalid_argument("qwen4exp: one layer cannot split over two devices");
   const std::array<size_t, kPpDevices> caps = {device_bytes, device_bytes};
-  const model::Q4Placement balanced = model::Q4Placement::two(t, pp_split(t, max_len, int8_head, mtp, prefill).split);
-  if (fits(plan(t, balanced, max_len, int8_head, mtp, false, prefill), caps, reserve)) return balanced;
+  const model::Q4Placement balanced =
+      model::Q4Placement::two(t, pp_split(t, max_len, int8_head, mtp, prefill, dflash, df_format).split);
+  if (fits(plan(t, balanced, max_len, int8_head, mtp, false, prefill, kPfC, dflash, df_format), caps, reserve))
+    return balanced;
   for (uint32_t s = 1; s < t.layers; ++s) {
     const model::Q4Placement pl = model::Q4Placement::two(t, s);
-    if (fits(plan(t, pl, max_len, int8_head, mtp, false, prefill), caps, reserve)) return pl;
+    if (fits(plan(t, pl, max_len, int8_head, mtp, false, prefill, kPfC, dflash, df_format), caps, reserve)) return pl;
   }
   return balanced;   // nothing fits: the balanced split (the caller's require_fits names the bytes)
 }
 
 uint32_t layers_that_fit(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t max_len, bool int8_head, bool mtp,
-                         size_t device_bytes, size_t reserve, bool prefill) {
+                         size_t device_bytes, size_t reserve, bool prefill, const model::DFlashDesc* dflash,
+                         loader::DraftFormat df_format) {
   const std::array<size_t, kPpDevices> caps = {device_bytes, device_bytes};
   uint32_t best = 0;
   for (uint32_t n = d.ple_layer + 1; n <= d.layers; ++n) {
     if (devices == 2 && n < 2) continue;
     const model::Qwen4ExpDesc t = truncated(d, n);
-    const model::Q4Placement pl = placement_for(t, devices, max_len, int8_head, mtp, device_bytes, reserve, prefill);
-    if (fits(plan(t, pl, max_len, int8_head, mtp, false, prefill), caps, reserve)) best = n;
+    const model::Q4Placement pl =
+        placement_for(t, devices, max_len, int8_head, mtp, device_bytes, reserve, prefill, dflash, df_format);
+    if (fits(plan(t, pl, max_len, int8_head, mtp, false, prefill, kPfC, dflash, df_format), caps, reserve)) best = n;
   }
   return best;
 }
 
 uint32_t max_len_that_fits(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, bool int8_head, bool mtp,
                            const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap,
-                           bool prefill) {
+                           bool prefill, const model::DFlashDesc* dflash, loader::DraftFormat df_format) {
   if (cap == 0 || cap > d.trained_max_len) cap = d.trained_max_len;
   if (cap < kMaxLenQuantum)
     throw std::invalid_argument("qwen4exp::max_len_that_fits: the cap " + std::to_string(cap) + " is below one " +
                                 std::to_string(kMaxLenQuantum) + "-position quantum");
-  const auto ok = [&](uint32_t len) { return fits(plan(d, p, len, int8_head, mtp, false, prefill), device_bytes, reserve); };
+  const auto ok = [&](uint32_t len) {
+    return fits(plan(d, p, len, int8_head, mtp, false, prefill, kPfC, dflash, df_format), device_bytes, reserve);
+  };
   // Every term is non-decreasing in max_len on every device: the quanta that fit are a prefix.
   uint32_t lo = std::min(kMinAutoMaxLen, cap) / kMaxLenQuantum, hi = cap / kMaxLenQuantum;
   if (!ok(lo * kMaxLenQuantum)) return 0;
@@ -476,9 +504,11 @@ std::string describe(const std::vector<DevicePlan>& p, const model::Q4Placement&
     out += format_memory(label.c_str(), dp, device_bytes[dp.device]);
     std::string tail;
     tail = std::format("; + reserve {:.3f} GB = {:.3f} GB (weights {:.3f} GB{}, RoPE {:.3f} GB, KV + indexer "
-      "keys {:.3f} GB, GDN / PLE state {:.3f} GB, decode scratch {:.3f} GB{})", reserve / 1e9,
-      (dp.total() + reserve) / 1e9, dp.weights / 1e9, dp.mtp ? " with the MTP head" : "", dp.rope / 1e9,
-      dp.kv / 1e9, dp.state / 1e9, dp.scratch / 1e9, dp.link ? ", hand-off" : "");
+      "keys {:.3f} GB, GDN / PLE state {:.3f} GB, decode scratch {:.3f} GB{}{})", reserve / 1e9,
+      (dp.total() + reserve) / 1e9, dp.weights / 1e9,
+      dp.mtp ? " with the MTP head" : dp.dflash ? " beside the DFlash drafter" : "", dp.rope / 1e9,
+      dp.kv / 1e9, dp.state / 1e9, dp.scratch / 1e9, dp.link ? ", hand-off" : "",
+      dp.drafter ? std::format(", drafter {:.3f} GB", dp.drafter / 1e9) : "");
     out += tail;
     if (dp.host_experts)
       out += std::format("; routed experts {:d} of {:d} in VRAM (f {:.3f}), {:.3f} GB in pinned host memory",
@@ -498,8 +528,9 @@ double ExpertBudget::f() const {
 
 ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
                            bool int8_head, bool mtp, bool prefill,
-                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t pf_rows) {
-  const std::vector<DevicePlan> dp = plan(d, p, max_len, int8_head, mtp, false, prefill, pf_rows);
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t pf_rows,
+                           const model::DFlashDesc* dflash, loader::DraftFormat df_format) {
+  const std::vector<DevicePlan> dp = plan(d, p, max_len, int8_head, mtp, false, prefill, pf_rows, dflash, df_format);
   ExpertBudget b;
   b.max_len = max_len;
   b.pf_rows = pf_rows;
@@ -662,7 +693,7 @@ ExpertTier fill_tier(const model::Qwen4ExpDesc& d, const ExpertBudget& b, const 
   return t;
 }
 
-double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vector<uint32_t>& prof) {
+double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vector<uint32_t>& prof, bool cpu) {
   double hit = 0, all = 0;
   for (uint32_t l = 0; l < t.layers; ++l)
     for (uint32_t e = 0; e < t.experts; ++e) {
@@ -671,7 +702,8 @@ double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vec
       hit += t.resident(l, e) ? c : 0.0;
     }
   const double h = all > 0 ? hit / all : 1.0, R = double(b.read_routed);
-  return ((double(b.read_non_routed) + h * R) / kTierVramGbps + (1.0 - h) * R / kTierHostGbps) / 1e6;
+  const double host = kTierHostGbps + (cpu ? kTierCpuGbps : 0.0);
+  return ((double(b.read_non_routed) + h * R) / kTierVramGbps + (1.0 - h) * R / host) / 1e6;
 }
 
 void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const ExpertTier& t) {
@@ -852,7 +884,7 @@ size_t pf_lend_bytes(const model::Qwen4ExpDesc& c, uint32_t max_len, uint32_t ro
 }
 
 PfChunkChoice pf_chunk_choice(const model::Qwen4ExpDesc& d, const ExpertBudget& narrow, const ExpertBudget& wide,
-                              const std::vector<uint32_t>* counts, bool tp) {
+                              const std::vector<uint32_t>* counts, bool tp, bool cpu) {
   if (narrow.pf_rows != kPfC || wide.pf_rows != kPfCWide || narrow.devices != wide.devices ||
       narrow.max_len != wide.max_len)
     throw std::invalid_argument("qwen4exp::pf_chunk_choice: the budgets are not kPfC's and kPfCWide's of one plan");
@@ -864,7 +896,7 @@ PfChunkChoice pf_chunk_choice(const model::Qwen4ExpDesc& d, const ExpertBudget& 
     ExpertBudget dec = b;
     for (uint32_t i = 0; i < b.devices; ++i)
       if (b.cache[i] > 0) dec.cache[i] += pf_lend_bytes(c, b.max_len, b.pf_rows, tp ? &d : nullptr);
-    return tier_decode_ms(dec, tp ? tp_fill_tier(d, dec, 0, counts) : fill_tier(d, dec, counts), prof);
+    return tier_decode_ms(dec, tp ? tp_fill_tier(d, dec, 0, counts) : fill_tier(d, dec, counts), prof, cpu && !tp);
   };
   PfChunkChoice ch;
   ch.ms_narrow = decode_ms(narrow);
@@ -877,7 +909,10 @@ PfChunkChoice pf_chunk_choice(const model::Qwen4ExpDesc& d, const ExpertBudget& 
     ch.held[i] = ch.grow[i] - std::min(ch.grow[i], lend_grow);
     room = room && wide.cache[i] > 0;
   }
-  ch.rows = room && ch.ms_wide <= ch.ms_narrow * (1.0 + kPfWideDecodeBar) ? kPfCWide : kPfC;
+  // pp takes the wide chunk whenever every card keeps an expert cache (measured 2026-11-27 on our export: 4k +4.7 %, 32k
+  // flat, decode after it not slower); one card and tp by the projection
+  const bool pp = narrow.devices == 2 && !tp;
+  ch.rows = room && (pp || ch.ms_wide <= ch.ms_narrow * (1.0 + kPfWideDecodeBar)) ? kPfCWide : kPfC;
   return ch;
 }
 
@@ -896,7 +931,8 @@ MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   const size_t R = kVerifyRows;
   MtpSizes s;
   s.hctl = sizeof(Control);
-  s.kv = size_t(max_len) * 2 * d.kv_n() * 2;
+  s.kv = size_t(max_len) * 2 * kv_row_bytes(d);
+  s.kv_scale = line(size_t(max_len) * 2 * kv_scale_row_bytes(d));
   s.idx_keys = size_t(max_len / d.idx_compress) * idx_key_slot_bytes(d);
   s.idx_tail = size_t(kIdxTail) * d.idx_dim * 2;
   s.list = size_t(kListRow) * 4;
@@ -976,12 +1012,13 @@ const char* snap_tensor_name(SnapTensor t) {
     case SnapTensor::MtpIdxKeys: return "mtp_idx_keys";
     case SnapTensor::MtpIdxTail: return "mtp_idx_tail";
     case SnapTensor::MtpHidden: return "mtp_hidden";
+    case SnapTensor::KvScale: return "kv_scale";
+    case SnapTensor::MtpKvScale: return "mtp_kv_scale";
   }
   return "?";
 }
 
 namespace {
-size_t kv_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.kv_n()) * 2; }          // 1024: a K (or V) row
 size_t key_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.idx_dim) * 2; }            // 256: a raw key (a block key: idx_key_slot_bytes)
 size_t conv_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.conv_rows()) * 2; }   // 20,480
 size_t ple_row_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.hc_n()) * 2; }         // 20,480
@@ -1033,7 +1070,7 @@ size_t kv_snapshot_bytes(const model::Qwen4ExpDesc& d, uint32_t begin, uint32_t 
                                 std::to_string(end) + ") does not start at a whole indexer block");
   const size_t layers = size_t(d.qsa_before(d.layers)) + (mtp ? 1 : 0);
   const size_t n = end - begin, blocks = end / d.idx_compress - begin / d.idx_compress;
-  return layers * (n * 2 * kv_row_bytes(d) + blocks * idx_key_slot_bytes(d));
+  return layers * (n * 2 * (kv_row_bytes(d) + kv_scale_row_bytes(d)) + blocks * idx_key_slot_bytes(d));
 }
 
 std::vector<SnapRun> state_runs(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t pos, bool mtp) {
@@ -1089,6 +1126,14 @@ std::vector<SnapRun> kv_runs(const model::Qwen4ExpDesc& d, const model::Q4Placem
     runs.push_back({dev, SnapTensor::Kv, base + size_t(begin) * row, n * row, false, false});          // K
     runs.push_back({dev, SnapTensor::Kv, base + rows + size_t(begin) * row, n * row, false, false});   // V
   }
+  const size_t srow = kv_scale_row_bytes(d), scales = size_t(max_len) * srow;
+  if (srow != 0)   // int8 KV: each layer's K scales then its V scales, after every layer's rows
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (!d.is_qsa(l)) continue;
+      const size_t base = size_t(on_device_index(d, p, l)) * 2 * scales;
+      runs.push_back({p.device_of(l), SnapTensor::KvScale, base + size_t(begin) * srow, n * srow, false, false});
+      runs.push_back({p.device_of(l), SnapTensor::KvScale, base + scales + size_t(begin) * srow, n * srow, false, false});
+    }
   const size_t kb = idx_key_slot_bytes(d), keys = size_t(max_len / d.idx_compress) * kb;
   if (b1 > b0)
     for (uint32_t l = 0; l < d.layers; ++l) {
@@ -1096,10 +1141,14 @@ std::vector<SnapRun> kv_runs(const model::Qwen4ExpDesc& d, const model::Q4Placem
       runs.push_back({p.device_of(l), SnapTensor::IdxKeys, size_t(on_device_index(d, p, l)) * keys + size_t(b0) * kb,
                       size_t(b1 - b0) * kb, false, false});
     }
-  if (mtp) {   // the head's, last: K, V, then its keys
+  if (mtp) {   // the head's, last: K, V (int8: their scales), then its keys
     const uint32_t dev = p.devices - 1;
     runs.push_back({dev, SnapTensor::MtpKv, size_t(begin) * row, n * row, false, false});
     runs.push_back({dev, SnapTensor::MtpKv, rows + size_t(begin) * row, n * row, false, false});
+    if (srow != 0) {
+      runs.push_back({dev, SnapTensor::MtpKvScale, size_t(begin) * srow, n * srow, false, false});
+      runs.push_back({dev, SnapTensor::MtpKvScale, scales + size_t(begin) * srow, n * srow, false, false});
+    }
     if (b1 > b0) runs.push_back({dev, SnapTensor::MtpIdxKeys, size_t(b0) * kb, size_t(b1 - b0) * kb, false, false});
   }
   return runs;
@@ -1117,6 +1166,8 @@ size_t snap_tensor_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement&
     case SnapTensor::PleIds:
     case SnapTensor::PleRing: return s.ple;
     case SnapTensor::MtpKv: return size_t(max_len) * 2 * kv_row_bytes(d);
+    case SnapTensor::KvScale: return s.kv_scale;
+    case SnapTensor::MtpKvScale: return mtp_sizes(d, max_len).kv_scale;
     case SnapTensor::MtpIdxKeys: return size_t(max_len / d.idx_compress) * idx_key_slot_bytes(d);
     case SnapTensor::MtpIdxTail: return size_t(kIdxTail) * key_bytes(d);
     case SnapTensor::MtpHidden: return size_t(d.hc_n()) * 2;

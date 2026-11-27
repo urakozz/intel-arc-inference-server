@@ -99,7 +99,7 @@ struct Rig {
                                                          std::max<uint32_t>(1, uint32_t(lens.size())));
     e = std::make_unique<runtime::Engine>(ctx, std::move(model), max_len, false, runtime::default_kv_cache(), d.get(),
                                           lens, pool_pages);
-    d->attach(*e, false);
+    d->attach(*e);
   }
   uint64_t dev(const void* p, size_t n, uint64_t h) {
     std::vector<uint8_t> v(n);

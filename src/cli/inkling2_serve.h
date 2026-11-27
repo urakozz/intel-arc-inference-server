@@ -15,6 +15,15 @@
 //     longest agreeing prefix (greedy) or the point-mass rule (sampled: the drafts are deterministic,
 //     server::accept_point_mass - lossless). The commit is deferred to the next call that touches the engine, so
 //     truncate_to may keep fewer;
+//   - the DFlash 2 drafter (`--spec dflash`): the same round over its draft pass, with two differences. Of the K
+//     drafts the window asked for, the round verifies the count with the most expected ids per cost: draft j's odds of
+//     being kept are its selector probability (softmax of its 16 scores at the walk's temperature, T 1 for greedy)
+//     calibrated at its position by the drafts verified so far (server::DraftCalib, one per engine), their running
+//     product the odds the first j are all kept, the cost the mode's own table at the position (set_verify_costs) - so
+//     an unsure stretch costs fewer verify rows where rows are dear, and few are cut where they are cheap (drafted()
+//     says how many were verified).
+//     A sampled request's walk draws its drafts from that softmax (a fresh device key a round from the request's
+//     RNG) and keeps them by server::accept_sparse, the exact rule: lossless whatever the drafter proposes;
 //   - prompt lookup inside it (PERF-55, dflash_window(): the drafter's window): step_drafts_or_many verifies the
 //     matcher's drafts through the same verify rows (up to 7: Inkling's verify lists hold 8 rows, so no wide lookup
 //     verify), the drafter's draft pass skipped - its context projection runs on every commit, whoever proposed;
@@ -35,15 +44,20 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/dflash/dflash_control.h"   // DFlashDraftOut: a plain struct
 #include "server/deps.h"
+#include "server/dflash2_calib_seed.h"
 #include "server/spec_accept.h"
+#include "server/step_k.h"
 
 namespace cli::inkling2 {
 
 // The prefix cache's root for Inkling (PrefixCache's kv_form): "INKLING\0", the int8 cache "INKLING\1". Qwen3.8 /
 // Ornith keep 0 / 1 and Kolibri "KOLIBRI\0", so no chain crosses models or KV forms.
 inline constexpr uint64_t kInkling2StoreKey = 0x494E4B4C494E4700ull;
-// The DFlash 2 drafter's repository (plan 41k): b70-serve's --spec auto takes it when it is downloaded.
+// The DFlash 2 drafter's repositories (plan 41k), in b70-serve's --spec auto order: our packed int4 export (L2) when it
+// is downloaded, else the bf16 release (its linears int8 at load).
+inline constexpr const char* kDflashInt4Repo = "urakozz/Inkling-2-Mini-DFlash2-W4A16-g64-AutoRound";
 inline constexpr const char* kDflashRepo = "incoai/Inkling-2-Mini-DFlash2";
 
 template <class Engine>
@@ -58,6 +72,10 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     if (k_ > kMaxK) throw std::runtime_error("--spec-max " + std::to_string(k_) + ": Inkling's drafter verifies 1..7");
     if (k_ > 0 && !eng.drafter()) throw std::runtime_error("Inkling's drafter is not loaded (mtp.safetensors)");
   }
+
+  // The DFlash 2 round's verify costs by depth (b70-serve's AdaptiveKOptions::by_depth, the mode's table); none: every
+  // draft the window asked for is verified.
+  void set_verify_costs(std::vector<std::pair<uint32_t, server::MtpCost>> by_depth) { costs_ = std::move(by_depth); }
 
   // POST /v1/control/reconfigure: the drafter on (K) or off (0) between requests; lookup only beside it.
   void set_spec(uint32_t k, bool lookup) {
@@ -117,13 +135,55 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     flush_commit();
     settle_first(sampling);
     const uint32_t n = eng.position();
-    const uint32_t k = std::min({k_req, k_, room()});
+    uint32_t k = std::min({k_req, k_, room()});
+    verified_ = k;
+    if (k == 0) {
+      ++iters_at_k_[0];
+      return {step(sampling)};
+    }
+    if (!eng.dflash()) {
+      ++iters_at_k_[k];
+      const auto proposed = eng.propose(next_, k);
+      return verify_run(sampling, n, std::vector<uint32_t>(proposed.begin(), proposed.end()));
+    }
+    float T = 0.f;
+    uint64_t seed = 0;
+    if (!sampling.greedy) {   // RNG order: the walk's device key, then the acceptance's uniforms and its one draw
+      seed_rng(sampling);
+      T = server::dflash_temperature(sampling);
+      seed = rng_();
+    }
+    const auto proposed = eng.propose(next_, k, T, seed);
+    const runtime::dflash::DFlashDraftOut& o = eng.draft_out();
+    server::SparseQ q[kMaxK];
+    float p[kMaxK];
+    for (uint32_t j = 0; j < k; ++j) {
+      q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T > 0.f ? T : 1.f);
+      p[j] = float(q[j].prob(proposed[j]));
+    }
+    if (!costs_.empty()) {   // E(K) = 1 + c_1 + c_1 c_2 + ... over verify[K] + the draft pass, the best K <= k
+      const server::MtpCost c = server::cost_at_depth(costs_, n);
+      double kept = 1.0, ids = 1.0, best = 0.0;
+      uint32_t at = k;
+      for (uint32_t j = 0; j < k; ++j) {
+        kept *= calib_.rate(j, p[j]);
+        ids += kept;
+        const double rate = ids / (c.verify[j + 1] + c.draft[j]);
+        if (rate > best) {
+          best = rate;
+          at = j + 1;
+        }
+      }
+      k = at;
+    }
+    verified_ = k;
     ++iters_at_k_[k];
-    if (k == 0) return {step(sampling)};
-    const auto proposed = eng.propose(next_, k);
-    std::vector<uint32_t> drafts(proposed.begin(), proposed.end());
-    return verify_run(sampling, n, drafts);
+    auto out = verify_run(sampling, n, std::vector<uint32_t>(proposed.begin(), proposed.begin() + k), T > 0.f ? q : nullptr);
+    const uint32_t kept = uint32_t(out.size() - 1);
+    for (uint32_t j = 0; j < k && j <= kept; ++j) calib_.observe(j, p[j], j < kept);   // up to the first rejection
+    return out;
   }
+  uint32_t drafted(uint32_t k) override { return std::min(k, verified_); }
 
   void truncate_to(uint32_t p) override {
     if (!pending_) {
@@ -154,13 +214,19 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     settle_first(sampling);
     std::vector<uint32_t> d = propose(next_);
     if (d.empty()) return step_many(sampling, k_draft);
+    verified_ = 0;   // the proposer's drafts, not the drafter's
     d.resize(std::min<size_t>(d.size(), std::min(kMaxK, room())));
     ++lookup_iters_;
     if (d.empty()) return {step(sampling)};
     return verify_run(sampling, eng.position(), d);
   }
 
-  uint64_t drafter_key() override { return eng.drafter() ? (eng.dflash() ? kDflashKey : kDrafterKey) : 0; }
+  uint64_t drafter_key() override {
+    if (!eng.drafter()) return 0;
+    if (!eng.dflash()) return kDrafterKey;
+    const uint64_t packed = eng.packed_draft_key();
+    return packed ? packed : kDflashKey;
+  }
 
   // --- the prefix cache --------------------------------------------------------------------------------------------
   uint32_t block() override { return Engine::kBlock; }
@@ -240,7 +306,7 @@ struct Inkling2EngineAdapterT : server::EngineIface {
   // The drafter's window reach (its two window layers; prompt lookup's ENTER rule wants a source older than it).
   static constexpr uint32_t kLookupWindow = 1024;
   static constexpr uint64_t kDrafterKey = 0x494E4B4453504B31ull;   // "INKDSPK1": the checkpoint's own drafter
-  static constexpr uint64_t kDflashKey = 0x494E4B4446324231ull;    // "INKDF2B1": the DFlash 2 drafter, bf16
+  static constexpr uint64_t kDflashKey = 0x494E4B4446324231ull;    // "INKDF2B1": the DFlash 2 release loaded as int8
 
   // The drafts a verify may add here: the context left after the pending id, at most kMaxK.
   uint32_t room() const {
@@ -269,12 +335,20 @@ struct Inkling2EngineAdapterT : server::EngineIface {
     next_ = draw(sampling, host_logits_.data());
   }
 
-  // x = next_ and `drafts` verified at positions n .. n + k; the commit deferred.
-  std::vector<uint32_t> verify_run(const server::Sampling& sampling, uint32_t n, const std::vector<uint32_t>& drafts) {
+  // x = next_ and `drafts` verified at positions n .. n + k; the commit deferred. `q`: the drafts were drawn from these
+  // sparse rows (the DFlash 2 walk), the exact rule; none: deterministic drafts, the point-mass rule.
+  std::vector<uint32_t> verify_run(const server::Sampling& sampling, uint32_t n, const std::vector<uint32_t>& drafts,
+                                   const server::SparseQ* q = nullptr) {
     const uint32_t k = uint32_t(drafts.size()), x = next_;
     std::vector<uint32_t> rows{x};
     rows.insert(rows.end(), drafts.begin(), drafts.end());
-    const auto pred = eng.verify(rows);
+    // greedy: the plain step's candidate head (the same pick whenever the full head's winner is among its candidates);
+    // tp's head is split across the cards, whole.
+    std::span<const uint32_t> pred;
+    if constexpr (requires { eng.verify(rows, true); })
+      pred = eng.verify(rows, sampling.greedy);
+    else
+      pred = eng.verify(rows);
     server::AcceptResult a{};
     if (sampling.greedy) {
       a = server::accept_greedy(pred.data(), drafts.data(), k);
@@ -282,8 +356,11 @@ struct Inkling2EngineAdapterT : server::EngineIface {
       seed_rng(sampling);
       for (uint32_t r = 0; r <= k; ++r)
         eng.read_logits(r, {spec_logits_.data() + size_t(r) * vocab_used_, vocab_used_});
-      a = server::accept_point_mass(spec_logits_.data(), drafts.data(), k, vocab_used_, vocab_used_, sampling, rng_,
-                                    sampling.seen ? std::span<const uint32_t>(rows) : std::span<const uint32_t>{});
+      const auto history = sampling.seen ? std::span<const uint32_t>(rows) : std::span<const uint32_t>{};
+      a = q ? server::accept_sparse(spec_logits_.data(), q, drafts.data(), k, vocab_used_, vocab_used_, sampling, rng_,
+                                    history)
+            : server::accept_point_mass(spec_logits_.data(), drafts.data(), k, vocab_used_, vocab_used_, sampling, rng_,
+                                        history);
     }
     pending_ = true;
     pending_pos_ = n;
@@ -309,6 +386,12 @@ struct Inkling2EngineAdapterT : server::EngineIface {
   uint32_t gen_tokens_ = 0;
   std::chrono::steady_clock::time_point gen_start_{};
   uint32_t k_;
+  uint32_t verified_ = 0;     // the drafts the last step_many verified
+  std::vector<std::pair<uint32_t, server::MtpCost>> costs_;   // set_verify_costs
+  // The selector's probabilities against the drafts kept, by position. The DFlash 2 drafter starts from the
+  // measured per-(position, bin) rates (kDflash2CalibSeed) as its prior at weight 100, not the stated
+  // probability - chosen on the held-out sets by tools/oracle/price_stop.py.
+  server::DraftCalib calib_{server::kDflash2CalibSeed, 100.0};
   bool lookup_;
   bool pending_ = false;      // a run's commit is deferred
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;

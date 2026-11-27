@@ -53,17 +53,20 @@ class PpEngine {
       pre(pending() == 0 && !ids.empty() && ids.size() <= max_len() - position())
       pre(chunk > 0 && chunk <= prefill_rows_);
   void read_prefill_logits(std::span<float> out) pre(prefill_logits_ && out.size() == model::Inkling2Desc::vocab_used);
-  // The full head (read_logits gives its rows); append and step_drafted verify on card 1's candidate head, as one
-  // card's plain and drafted steps do, so their ids are one card's.
-  std::span<const uint32_t> verify(std::span<const uint32_t> tokens) { return verify(tokens, false); }
+  // The full head (read_logits gives its rows), or card 1's candidate head (`candidates`: a greedy verify's ids only);
+  // append and step_drafted verify on the candidate head, as one card's plain and drafted steps do, so their ids are
+  // one card's.
+  std::span<const uint32_t> verify(std::span<const uint32_t> tokens, bool candidates = false);
   void commit(uint32_t rows);
   void read_logits(uint32_t row, std::span<float> out);
-  std::span<const uint32_t> propose(uint32_t anchor, uint32_t count);
+  std::span<const uint32_t> propose(uint32_t anchor, uint32_t count, float temperature = 0.f, uint64_t seed = 0);
+  const dflash::DFlashDraftOut& draft_out() const { return head().draft_out(); }
   // One card's drafted round on two cards, one submission a card (the round's comment in the class comment).
   uint32_t step_drafted(uint32_t anchor, uint32_t max_drafts, std::vector<uint32_t>& output);
   size_t launch_count(uint32_t rows, uint32_t accepted) const;
   bool drafter() const { return head().drafter(); }
   bool dflash() const { return head().dflash(); }
+  uint64_t packed_draft_key() const { return head().packed_draft_key(); }
   bool kv8() const { return head().kv8(); }
   uint32_t prefill_rows() const { return prefill_rows_; }
   uint32_t head_id() const pre(prefill_logits_) { return head().ctrl_->out_token[0]; }
@@ -106,7 +109,6 @@ class PpEngine {
                             F f);
   // Appends `rows` rows of a card's handoff_rows to `list`: into `buffer` (out) or out of it (in).
   void pack(l0::CmdList& list, uint32_t card, uint32_t rows, bool prompt, std::byte* buffer, bool out);
-  std::span<const uint32_t> verify(std::span<const uint32_t> tokens, bool candidates);
 
   std::array<std::unique_ptr<Engine>, 2> cards_;
   const uint32_t prefill_rows_;

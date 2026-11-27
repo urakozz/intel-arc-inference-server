@@ -23,6 +23,11 @@ inline constexpr unsigned int4_slices(unsigned K, unsigned N) {
   // Spec 19 v3c: a TP card's half (16 q / 4 kv heads, the MLP's 8704) - the one-card linear's S (df_prep.cl's FOLD build folds it)
   if ((K == 5120 && N == 3072) || (K == 2048 && N == 5120) || (K == 8704 && N == 5120)) return 4;
   if (K == 5120 && (N == 17408 || N == 1024)) return 8;
+  // Inkling's 2304-wide inputs have 36 groups, so 8 and 16 cannot split them.
+  if ((K == 2304 && (N == 6144 || N == 13824 || N == 2048)) ||
+      (N == 2304 && (K == 4096 || K == 6912))) return 4;
+  if (K == 2304 && (N == 576 || N == 256)) return 12;
+  if (K == 9216 && N == 2304) return 8;
   return 1;
 }
 

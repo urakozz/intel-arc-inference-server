@@ -1,4 +1,7 @@
 #pragma once
+#include <vector>
+
+#include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
 #include "loader/qwen4exp_loader.h"
@@ -129,5 +132,11 @@ CapturedStep build(l0::Context& ctx, const loader::Q4LoadedModel& m, const loade
                    Qwen4ExpBuffers& b, const runtime::StageLink* link, l0::Mem* tap = nullptr,
                    const l0::Mem* injected = nullptr, const ListSpec& spec = {}, const MtpBinding* mtp = nullptr,
                    const Q4TpBinding* tp = nullptr);
+
+// Plan 21-QFN-v3a Task 0: of `routes` (u32 [layers][32]: the last plain step's route rows, read_routes()), the routed
+// experts part P's layers read from host memory - each route's gate||up entry of P's expert table as it stands (read
+// back through `imm`; a lent copy points into VRAM) inside the layer's host mirror. 0 without the table form.
+uint32_t step_misses(l0::CmdList& imm, const loader::Q4DevicePart& part, const model::Qwen4ExpDesc& d,
+                     const std::vector<uint32_t>& routes);
 
 }  // namespace runtime::qwen4exp

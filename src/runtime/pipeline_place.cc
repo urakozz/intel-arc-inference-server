@@ -47,8 +47,7 @@ class Mover {
                                 w.scales ? std::make_unique<l0::Mem>(move(*w.scales)) : nullptr,
                                 w.shape, w.kind};
   }
-  // Spec 16d: the MTP head's parts (its linears, norms, FA block, a MoE head's layer) and a
-  // draft vocabulary's compact head and id table.
+  // Spec 16d: the MTP head's parts (its linears, norms, FA block, a MoE head's layer).
   std::unique_ptr<loader::DeviceWeight> move_opt(const std::unique_ptr<loader::DeviceWeight>& w) {
     return w ? std::make_unique<loader::DeviceWeight>(move(*w)) : nullptr;
   }
@@ -84,9 +83,8 @@ PpWeights pp_weights(const loader::LoadedModel& m) {
   for (const auto& [layer, dw] : m.ab_prefill) w.layer.at(layer) += weight_bytes(dw);
   w.embed = m.embed.size();
   w.head += m.final_norm.size();
-  // Spec 16d: the head and the draft vocabulary go to the last device (place_stages).
+  // Spec 16d: the head goes to the last device (place_stages).
   if (m.mtp) w.mtp = mtp_head_device_bytes(*m.mtp);
-  if (m.draft_vocab) w.draft_vocab = m.draft_vocab->bytes();
   return w;
 }
 
@@ -96,7 +94,6 @@ size_t model_device_bytes(const loader::LoadedModel& m) {
   for (const loader::SmallTensors& s : m.layer_small) t += s.norms.size() + s.gdn.size();
   for (const loader::MoeLayer& l : m.moe) t += moe_layer_device_bytes(l);
   for (const auto& kv : m.ab_prefill) t += weight_bytes(kv.second);
-  if (m.draft_vocab) t += m.draft_vocab->bytes();
   if (m.mtp) t += mtp_head_device_bytes(*m.mtp);   // spec 16d
   return t;
 }
@@ -105,8 +102,6 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
                                               loader::LoadedModel full, uint32_t split, bool drafter) {
   if (!full.desc) throw std::invalid_argument("runtime::place_stages: the model has no descriptor");
   const model::ModelDesc& d = *full.desc;
-  if (full.draft_vocab && !full.mtp && !drafter)
-    throw std::invalid_argument("runtime::place_stages: a draft vocabulary without the MTP head or a drafter");
   if (full.mtp && drafter)
     throw std::invalid_argument("runtime::place_stages: the MTP head and a drafter are two proposers");
   if (d1.handle() != d0.handle())
@@ -134,7 +129,6 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
                          full.trained_max_len,
                          nullptr,
                          full.desc,
-                         nullptr,
                          {},
                          {},
                          nullptr};
@@ -171,8 +165,7 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
       ++it;
     }
   }
-  // Spec 16d: the MTP head (it shares lm_head, now on device 1, and the embedding replica)
-  // and the draft vocabulary's compact head and id table - moved, freed on device 0.
+  // Spec 16d: move the MTP head to device 1 with lm_head and the embedding replica.
   if (full.mtp) {
     const loader::MtpHead& h = *full.mtp;
     // MtpHead's members in declaration order (braced: left to right).
@@ -182,13 +175,6 @@ std::vector<loader::LoadedModel> place_stages(l0::Context& d0, l0::Context& d1,
         h.moe ? std::make_unique<loader::MoeLayer>(mv.move(*h.moe)) : nullptr});
     full.mtp.reset();
     s1.report.mtp_bytes = full.report.mtp_bytes;
-  }
-  if (full.draft_vocab) {
-    const loader::DraftVocab& dv = *full.draft_vocab;
-    s1.draft_vocab = std::unique_ptr<loader::DraftVocab>(
-        new loader::DraftVocab{mv.move(dv.head), mv.move(dv.ids), dv.host_ids});
-    s1.report.draft_vocab_bytes = full.report.draft_vocab_bytes;
-    full.draft_vocab.reset();
   }
   // What loader::set_max_len reads to re-table the RoPE later (its other fields describe the
   // load, which stage 0's report keeps).

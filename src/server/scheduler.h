@@ -182,6 +182,7 @@ class Job {
   // Plan 41f: the most lookup drafts this iteration's verify checks on the card (EngineIface::lookup_cap, written by the
   // card's engine before it proposes - the serial loop's cut, spec 32e).
   uint32_t lookup_cap = UINT32_MAX;
+  uint32_t drafted = 0;   // the drafts the card verified in this iteration (EngineIface::drafted), row.k until written
   // Plan 13b, an overlapping engine: a chunk of this request is in flight (prefill_begin'd, not
   // yet joined), and which.
   bool inflight = false;

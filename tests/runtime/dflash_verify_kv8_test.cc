@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
   const uint32_t head_rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
   runtime::dflash::DFlashDrafter d(ctx, std::move(w), head_rows, kMaxLen, kK);
   runtime::Engine e(ctx, std::move(model), kMaxLen, /*debug_resid=*/false, runtime::KvCache::Int8, &d);
-  d.attach(e, /*draft_vocab=*/false);
+  d.attach(e);
   std::printf("dflash_verify_kv8_test on %s: KV cache %s\n", ctx.name().c_str(), runtime::kv_cache_name(e.kv_cache()));
 
   auto opts = [](runtime::VerifyAttnForce a, runtime::LinearForce l) {

@@ -126,14 +126,6 @@ inline runtime::KvCache parse_kv_cache_arg(const std::string& v) {
   return runtime::parse_kv_cache(v.c_str());
 }
 
-// Spec 8 §11: the draft vocabulary a loaded model carries (load(..., DraftVocabSpec)
-// built it, before the plan), as the planner counts it: its compact head and id table are
-// outside LoadReport::total(), so `weights` below does not hold them.
-inline runtime::DraftVocabPlan draft_vocab_plan(const loader::LoadedModel& m) {
-  if (!m.draft_vocab) return {};
-  return {m.draft_vocab->size(), m.draft_vocab->head.kind == model::WeightKind::Int8};
-}
-
 // Step 4. Returns the max_len the Engine is built with; `m` is re-tabled to it for auto.
 // Prints the choice and the plan's breakdown to stderr. `kv` (spec 12b): the KV cache's
 // form - its KV term (and the MTP head's) is planned in it, so int8 roughly doubles what
@@ -146,19 +138,18 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
                        const runtime::DrafterPlan& drafter = {}) {
   const model::ModelDesc& d = *m.desc;
   const bool mtp = m.mtp != nullptr;
-  const runtime::DraftVocabPlan dv = draft_vocab_plan(m);
   const size_t weights = m.report.total() - m.report.rope_bytes;
   const size_t device = ctx.memory_bytes();
   const double gb = 1e9;
   uint32_t len = a.value;
   if (a.is_auto) {
     const uint32_t fit = runtime::max_len_that_fits(d, mtp, weights, device, reserve_bytes,
-                                                    m.trained_max_len, path, dv, kv, drafter);
+                                                    m.trained_max_len, path, kv, drafter);
     if (fit == 0)
       throw std::runtime_error(
           "--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
           " positions fit - " +
-          runtime::describe(runtime::plan(d, runtime::kMinAutoMaxLen, mtp, weights, path, dv, kv, drafter),
+          runtime::describe(runtime::plan(d, runtime::kMinAutoMaxLen, mtp, weights, path, kv, drafter),
                             device, reserve_bytes));
     len = fit;
     loader::set_max_len(ctx, m, len);
@@ -167,13 +158,13 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
                " reserve; trained context {:d})\n",
                len, runtime::kMaxLenQuantum, device / gb, reserve_bytes / gb, m.trained_max_len);
   } else {
-    const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, path, dv, kv, drafter);
+    const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, path, kv, drafter);
     if (p.total() + reserve_bytes > device) {
       const uint32_t cap = m.trained_max_len != 0 ? m.trained_max_len : len;
       const uint32_t fit =
           cap < runtime::kMaxLenQuantum
               ? 0
-              : runtime::max_len_that_fits(d, mtp, weights, device, reserve_bytes, cap, path, dv,
+              : runtime::max_len_that_fits(d, mtp, weights, device, reserve_bytes, cap, path,
                                            kv, drafter);
       throw std::runtime_error(
           "--max-len " + std::to_string(len) + " does not fit: " +
@@ -183,7 +174,7 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
     std::print(stderr, "max_len: {:d} (--max-len)\n", len);
   }
   std::print(stderr, "{}\n",
-             runtime::describe(runtime::plan(d, len, mtp, weights, path, dv, kv, drafter), device,
+             runtime::describe(runtime::plan(d, len, mtp, weights, path, kv, drafter), device,
                                reserve_bytes)
                  .c_str());
   return len;
@@ -285,14 +276,14 @@ inline runtime::PrefillPath settle_chunk_cap(l0::Context& ctx, const loader::Loa
   const size_t weights = m.report.total() - m.report.rope_bytes;
   const auto plan_at = [&](const runtime::PrefillPath& p) {
     return pool ? runtime::plan_pool(*m.desc, *pool, m.mtp != nullptr, weights, p, kv, drafter)
-                : runtime::plan(*m.desc, max_len, m.mtp != nullptr, weights, p, draft_vocab_plan(m), kv, drafter);
+                : runtime::plan(*m.desc, max_len, m.mtp != nullptr, weights, p, kv, drafter);
   };
   const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
   if (path.prefill && why == nullptr) {
     if (!pool) {
       cap = runtime::prefill_chunk_cap_that_fits(*m.desc, m.mtp != nullptr, weights, ctx.memory_bytes(),
-                                                 reserve_bytes, max_len, path, draft_vocab_plan(m), kv, drafter);
+                                                 reserve_bytes, max_len, path, kv, drafter);
     } else {   // the sequences' plan, not one request's alone
       runtime::PrefillPath wide = path;
       wide.chunk_cap = runtime::PrefillScratchDims::kCMax;

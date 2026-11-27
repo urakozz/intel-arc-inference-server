@@ -310,7 +310,13 @@ def read_drafter_tensors(drafter_dir: str, cfg: DFlashConfig) -> dict[str, torch
     raw = _read(wm, list(wm))
     qc = cfg.raw.get("quantization_config")
     group = bits = None
-    if qc is not None:
+    gptq = qc is not None and qc.get("quant_method") in ("gptq", "auto-round")
+    if gptq:
+        if (qc.get("bits") != 4 or qc.get("group_size") != 64 or qc.get("sym") is not True
+                or qc.get("desc_act") or qc.get("packing_format") not in (None, "auto_round:auto_gptq")):
+            raise ValueError("DFlash GPTQ needs symmetric int4, group_size 64 and no activation order")
+        group, bits = 64, 4
+    elif qc is not None:
         if qc.get("quant_method") != "compressed-tensors" or qc.get("format") != "pack-quantized":
             raise NotImplementedError(f"quantization {qc.get('quant_method')}/{qc.get('format')}")
         (g,) = qc["config_groups"].values()
@@ -318,16 +324,32 @@ def read_drafter_tensors(drafter_dir: str, cfg: DFlashConfig) -> dict[str, torch
         if not (w["symmetric"] and w["type"] == "int" and w["strategy"] == "group"):
             raise NotImplementedError(f"quant scheme {w}")
         group, bits = int(w["group_size"]), int(w["num_bits"])
-    packed = {n[: -len(".weight_packed")] for n in raw if n.endswith(".weight_packed")}
+    suffix = ".qweight" if gptq else ".weight_packed"
+    packed = {n[: -len(suffix)] for n in raw if n.endswith(suffix)}
     if packed and group is None:
         raise ValueError("packed weights without a quantization_config")
-    aux = {b + s for b in packed for s in (".weight_scale", ".weight_shape", ".weight_zero_point")}
+    aux_suffixes = (".scales", ".qzeros", ".g_idx") if gptq else (".weight_scale", ".weight_shape", ".weight_zero_point")
+    aux = {b + s for b in packed for s in aux_suffixes}
     t = {}
     for n, v in raw.items():
-        if n.endswith(".weight_packed"):
-            base = n[: -len(".weight_packed")]
-            t[_canon(base + ".weight")] = dequant_pack_quantized(
-                v, raw[base + ".weight_scale"], raw[base + ".weight_shape"].tolist(), group, bits)
+        if n.endswith(suffix):
+            base = n[: -len(suffix)]
+            if gptq:
+                # GPTQ packs the same eight input nibbles per word, but stores [K/8, N].
+                K, N = v.shape[0] * 8, v.shape[1]
+                scales, zeros = raw[base + ".scales"], raw[base + ".qzeros"]
+                if (base + ".weight" in raw or K % group or N % 8 or v.dtype != torch.int32 or
+                        scales.dtype != torch.float16 or scales.shape != (K // group, N) or
+                        zeros.dtype != torch.int32 or zeros.shape != (K // group, N // 8) or
+                        not torch.all(zeros == 0x77777777)):
+                    raise ValueError(f"{base}: invalid GPTQ weights, scales or qzeros")
+                idx = raw.get(base + ".g_idx")
+                if idx is not None and (idx.dtype != torch.int32 or not torch.equal(idx, torch.arange(K, dtype=torch.int32) // group)):
+                    raise ValueError(f"{base}.g_idx: expected identity k/{group}")
+                t[_canon(base + ".weight")] = dequant_pack_quantized(v.T, scales.T, [N, K], group, bits)
+            else:
+                t[_canon(base + ".weight")] = dequant_pack_quantized(
+                    v, raw[base + ".weight_scale"], raw[base + ".weight_shape"].tolist(), group, bits)
         elif n in aux:
             continue
         elif "t2d" in n:

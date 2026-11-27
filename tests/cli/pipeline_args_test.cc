@@ -53,7 +53,6 @@ void check_parse() {
   CHECK(says([&] { cli::check_tp(p, {true, false, false}); }, "b70-decode --parallel tp drafts with the MTP head only"));
   CHECK(says([&] { cli::check_tp(p, {false, true, false}); }, "it has no --parallel tp"));
   CHECK(says([&] { cli::check_tp(p, {false, false, true}); }, "--parallel tp supports Qwen3.8-27B and Qwen3.8-Flash-Next"));
-  CHECK(says([&] { cli::check_tp(p, {false, false, false, true}); }, "--draft-vocab is not built under tensor parallel"));
   CHECK(says([] { cli::require_two_devices_for_tp(1); }, "--parallel tp needs two GPUs and Level Zero shows 1"));
   cli::require_two_devices_for_tp(2);
   {
@@ -64,7 +63,7 @@ void check_parse() {
     CHECK(says([&] { cli::check_tp(ts, {}); }, "--pipeline-split belongs to --parallel pp"));
   }
   cli::PipelineArgs not_tp;
-  cli::check_tp(not_tp, {true, true, true, true});   // not tp: nothing to refuse here
+  cli::check_tp(not_tp, {true, true, true});   // not tp: nothing to refuse here
   for (const char* bad : {"0", "2", "3", "", "two", "PP", "TP", "4096"})
     CHECK(says([&] { cli::parse_parallel(bad, p); }, "--parallel expects auto, 1, pp, replica or tp"));
   // Plan 13b: replica - one engine per card, not pipeline parallel (on() stays false).

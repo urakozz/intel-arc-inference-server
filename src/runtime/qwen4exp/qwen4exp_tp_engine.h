@@ -96,6 +96,9 @@ class Qwen4ExpTpEngine {
   std::vector<uint16_t> read_H(uint32_t card);
   std::vector<float> read_logits();
   std::vector<uint32_t> read_routes(uint32_t card);
+  // Plan 21-QFN-v3a Task 0: of the last plain step's routed experts, those card `card` read from host memory
+  // (step_misses over its half) - a sample off the timed path.
+  uint32_t read_step_misses(uint32_t card);
   std::array<uint32_t, tp::kStateWords> state_words(uint32_t card) const;
   // Probes only: card `card`'s list rebuilt with a timestamp event a launch, both lists replayed `replays` times;
   // each launch's mean device time in us, walk order (step(card).labels).
@@ -136,11 +139,12 @@ class Qwen4ExpTpEngine {
   // Spec 7's snapshots in the ONE-CARD host layouts (runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs over
   // Q4Placement::one: an entry is the same bytes whichever of --parallel 1 / pp / tp wrote it). Each one-card run is
   // cut into the cards' pieces: a GDN layer's state is card 0's v-heads then card 1's; a conv ring row's channels q |
-  // k | v, each card 0's part then card 1's; a K / V row's two kv heads card 0's then card 1's; the replicated tensors
+  // k | v, each card 0's part then card 1's; a K / V row's two kv heads card 0's then card 1's (int8: a scale row's
+  // two scales the same way); the replicated tensors
   // (the indexer keys and tails, the PLE state) are card 0's on save and both cards' on load.
   size_t state_bytes() const;
   size_t kv_bytes(uint32_t n_pos) const;
-  KvCache kv_cache() const { return KvCache::Bf16; }
+  KvCache kv_cache() const { return model_.desc.kv8 ? KvCache::Int8 : KvCache::Bf16; }
   void save_state(void* host);
   void load_state(const void* host, uint32_t pos)
     pre(pos <= max_len_);

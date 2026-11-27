@@ -84,3 +84,14 @@ COPY --from=builder /opt/b70/build/kernels /opt/b70/build/kernels
 ENV HF_HOME=/root/.cache/huggingface
 EXPOSE 8000
 ENTRYPOINT ["/opt/b70/build/src/cli/b70-serve"]
+
+# ---- Tarball -------------------------------------------------------------------------------------------------------
+# The no-Docker release form, built in the same builder (Ubuntu 26.04, GCC 16.2, so the glibc floor is that
+# release's): tools/release/make_tarball.sh assembles intel-inference-server-<version>/ and writes
+# intel-inference-server-<version>-linux-x86_64.tar.gz to /out.
+#
+#   docker build --target tarball -t urakozz/intel-arc-inference-server:tarball .
+#   docker create --name tarball urakozz/intel-arc-inference-server:tarball
+#   docker cp tarball:/out/. <output dir>/ && docker rm tarball
+FROM builder AS tarball
+RUN mkdir -p /out && tools/release/make_tarball.sh build /out

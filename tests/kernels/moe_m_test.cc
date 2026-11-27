@@ -15,7 +15,7 @@
 //      does not depend on its neighbours or its position);
 //   3. the MoE scratch's own rows (kDeepM = 64 per layer slot, runtime::moe_scratch_layout) are
 //      where capture binds an M-row launch: the strides used here are its;
-//   4. PERF-120: the union read of the 16- and 32-row lists (moe_M<M>_..._U: moe_union_plan, moe_gate_up_union,
+//   4. PERF-120: the union read of the MTP verify list's 4 rows and the 16- and 32-row lists (moe_M<M>_..._U: moe_union_plan, moe_gate_up_union,
 //      moe_down_union, moe_finish) - every row below n_active bitwise moe_M1's on that row (route, h, resid; rows 20..28 route as row
 //      2 does, so an expert has more rows than a pass takes), every row past it left as it was; n_active M and M - 3.
 #include <algorithm>
@@ -231,7 +231,7 @@ int main() {
     }
     std::printf("  moe_M%u: every row bitwise moe_M1's, in order and reversed\n", M);
   }
-  for (uint32_t M : {16u, 32u})
+  for (uint32_t M : {4u, 16u, 32u})
     for (uint32_t n_act : {M, M - 3}) {
       const Out got = run_union(d, M, n_act, std::vector<float>(logits.begin(), logits.begin() + size_t(M) * LW),
                                 std::vector<uint16_t>(x.begin(), x.begin() + size_t(M) * kS.hidden),

@@ -152,6 +152,8 @@ struct BatchEngineIface {
     // Plan 41f: with a lookup inside the proposer, where the card writes EngineIface::lookup_cap before it proposes
     // (the serial loop cuts the proposal to it).
     uint32_t* lookup_cap = nullptr;
+    // Where the card writes EngineIface::drafted(k) after the row's iteration (the drafts it verified).
+    uint32_t* drafted = nullptr;
   };
   virtual uint32_t spec_k() { return 0; }
   virtual uint32_t verify_k() { return 0; }

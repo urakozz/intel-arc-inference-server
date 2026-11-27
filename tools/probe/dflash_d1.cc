@@ -5,7 +5,7 @@
 // (top-16 sets tie-aware, scores cosine >= 0.9999 bf16 / >= 0.999 int8, walk ids equal at T = 0).
 //
 //   dflash_d1 <target snapshot> <drafter> <out.jsonl> [--format int8|bf16|int4] [--head int8|bf16]
-//             [--draft-vocab 32k|64k|128k [--draft-vocab-ids FILE]] [--anchors N] [--k K|--all-k] [--candidate-head] [--max-len L]
+//             [--anchors N] [--k K|--all-k] [--candidate-head] [--max-len L]
 //             <dump.taps.safetensors>...
 //
 // Per dump (monotonic anchors, one ring): the projection list fills the ring with the dump's taps (8 positions a
@@ -13,8 +13,7 @@
 // continuation, dflash_accept.py's range n_prompt .. n - 8) the draft list runs at (p, ids[p], K, T 0). A line:
 //   {"dump": name, "p": p, "anchor": id, "k": K, "ids": [...], "chosen": [...], "cand": [[16]...], "unary": [[16]...],
 //    "scores": [[16]...]}
-// The first line is the run's: {"run": {"format", "head", "draft_vocab", "vocab_used", "v_ids": [...] (the draft
-// vocabulary's ids, when one is used), "launches": [draft, project], "load": the drafter's load line}}.
+// The first line is the run's: {"run": {"format", "head", "vocab_used", "launches": [draft, project], "load": the drafter's load line}}.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -30,7 +29,6 @@
 #include "l0/fence.h"
 #include "l0/queue.h"
 #include "loader/dflash_loader.h"
-#include "loader/draft_vocab.h"
 #include "loader/lm_head_int8.h"
 #include "loader/loader.h"
 #include "loader/safetensors.h"
@@ -114,8 +112,8 @@ int main(int argc, char** argv) {
   loader::DraftFormat fmt = loader::DraftFormat::Int8;
   bool fmt_given = false;
   loader::LmHeadForm head = loader::LmHeadForm::Int8;
-  uint32_t dv = 0, anchors = 16, K = 0, max_len = 8192;
-  std::string dv_ids, fmt_text;
+  uint32_t anchors = 16, K = 0, max_len = 8192;
+  std::string fmt_text;
   std::vector<std::string> dumps;
   bool candidate_head = false, all_k = false;
   for (int i = 4; i < argc; ++i) {
@@ -133,10 +131,6 @@ int main(int argc, char** argv) {
       candidate_head = true;
     } else if (a == "--head") {
       if (!loader::parse_lm_head_form(next(), head)) throw std::runtime_error("--head int8|bf16");
-    } else if (a == "--draft-vocab") {
-      if (!loader::parse_draft_vocab(next(), dv)) throw std::runtime_error("--draft-vocab 32k|64k|128k");
-    } else if (a == "--draft-vocab-ids") {
-      dv_ids = next();
     } else if (a == "--anchors") {
       anchors = uint32_t(std::stoul(next()));
     } else if (a == "--k") {
@@ -153,20 +147,12 @@ int main(int argc, char** argv) {
     if (fmt_text == "int4") fmt = loader::DraftFormat::Int4G64;
     else if (!loader::parse_draft_format(fmt_text, fmt)) throw std::runtime_error("--format int8|bf16|int4");
   }
-  if (candidate_head && dv) throw std::runtime_error("--candidate-head uses the full vocabulary");
   if (all_k && K) throw std::runtime_error("--all-k cannot be combined with --k");
   if (K == 0) K = kernels::dflash::kR;
   if (K < 1 || K > kernels::dflash::kR) throw std::runtime_error("--k is 1..7");
-  loader::DraftVocabSpec dvs;
-  if (dv) {
-    dvs.size = dv;
-    dvs.added = loader::added_token_ids_file(snap + "tokenizer.json");
-    if (!dv_ids.empty()) dvs.ranked = loader::read_ranked_ids(dv_ids);
-  }
-  // A draft vocabulary needs the MTP head loaded (loader::load's rule, spec 8 §11; 19c relaxes it for a drafter).
-  const loader::LoadedModel m = loader::load(ctx, snap, max_len, dv != 0, head, dvs);
+  const loader::LoadedModel m = loader::load(ctx, snap, max_len, false, head);
   const loader::DFlashWeights w = loader::load_drafter(ctx, drafter, m, fmt, 0, candidate_head);
-  const runtime::dflash::DFlashTarget t = runtime::dflash::dflash_target(m, dv != 0);
+  const runtime::dflash::DFlashTarget t = runtime::dflash::dflash_target(m);
   runtime::dflash::DFlashBuffers b(ctx, w.desc, w.target_hidden, t.head_rows(), max_len, w.format, bool(w.candidate_head));
   l0::Mem control(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
   std::memset(control.ptr(), 0, sizeof(runtime::Control));
@@ -177,13 +163,10 @@ int main(int argc, char** argv) {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   std::ofstream out(out_path);
   {
-    std::string v_ids = "[]";
-    if (m.draft_vocab) v_ids = arr(m.draft_vocab->host_ids.data(), m.draft_vocab->size());
     out << "{\"run\": {\"format\": \"" << loader::draft_format_name(fmt) << "\", \"head\": \""
-        << loader::lm_head_form_name(head) << "\", \"draft_vocab\": " << dv
-        << ", \"candidate_head\": " << (candidate_head ? "true" : "false") << ", \"vocab_used\": " << t.vocab_used
+        << loader::lm_head_form_name(head) << "\", \"candidate_head\": " << (candidate_head ? "true" : "false") << ", \"vocab_used\": " << t.vocab_used
         << ", \"k\": " << (all_k ? 0 : K) << ", \"all_k\": " << (all_k ? "true" : "false") << ", \"launches\": [" << draft.kernel_count << ", " << project.kernel_count
-        << "], \"load\": \"" << w.line << "\", \"v_ids\": " << v_ids << "}}\n";
+        << "], \"load\": \"" << w.line << "\"}}\n";
   }
   const uint32_t H = w.desc.hidden, ntap = uint32_t(w.desc.taps.size()), M = kernels::dflash::kM;
   double t_draft = 0;

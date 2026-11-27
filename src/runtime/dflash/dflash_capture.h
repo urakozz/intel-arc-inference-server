@@ -22,9 +22,8 @@
 //               df_attn_reduce (the ring's window + the block, non-causal) - o GEMV - df_conv_add (v1: df_add) -
 //               df_norm (post_attention_layernorm) - [v2: mlp_conv's kernel projection, df_conv_prep] - gate||up
 //               GEMV - df_silu_mul - down GEMV - df_conv_add (v1: df_add)
-//   df_norm (the final norm) - the TARGET's lm_head over rows 1..7 (gemm_sm_i8w / gemv_bf16 at M 7: the full head or
-//   the draft vocabulary's compact one, spec 8 §11) - df_topk_stage1/2 (the vocab mask; a draft vocabulary's indices
-//   mapped to ids) - [v2: the selector's hidden_projection GEMV] - df_select
+//   df_norm (the final norm) - the TARGET's lm_head over rows 1..7 (gemm_sm_i8w / gemv_bf16 at M 7) -
+//   df_topk_stage1/2 (the vocab mask) - [v2: the selector's hidden_projection GEMV] - df_select
 //
 // **The projection list** (build_dflash_project): dctl.proj_n <= 8 tap rows (DFlashBuffers::taps, bf16
 // [8][taps x target hidden]) at positions dctl.proj_pos .. + proj_n - 1 into the ring: fc GEMV, df_norm (hidden_norm),
@@ -42,14 +41,12 @@ namespace runtime::dflash {
 
 struct DFlashTarget {
   const l0::Mem* embed = nullptr;               // bf16 [rows][hidden]
-  const loader::DeviceWeight* head = nullptr;   // the lm_head (int8 or bf16) or the draft vocabulary's compact head
-  const l0::Mem* ids = nullptr;                 // the draft vocabulary's id table (u32, ascending); null: the full head
+  const loader::DeviceWeight* head = nullptr;   // the lm_head (int8 or bf16)
   uint32_t vocab_rows = 0;                      // the full head's rows (the codebooks' rows)
   uint32_t vocab_used = 0;                      // ids below it are tokens (the full head's mask)
   uint32_t head_rows() const { return head ? head->shape.N : 0; }
 };
-// The target's full head (`draft_vocab` false) or its draft vocabulary's compact one (LoadedModel::draft_vocab).
-DFlashTarget dflash_target(const loader::LoadedModel& m, bool draft_vocab = false);
+DFlashTarget dflash_target(const loader::LoadedModel& m);
 
 // Spec 28d: the int8 linears (the block's M = 8, the int8 head's 7 rows) bind gemm_sm_i8w (gemm_sm.cl, kSmallMTuning's
 // kSmDraft8 / kSmDraft7 rows and Qwen3.8's head row) - the lists are M >= 2, runtime::gemv_kind's rule; the bf16 forms

@@ -583,6 +583,27 @@ def test_dequant_pack_quantized():
     print("W4A16 unpack: low nibble first, q - 8, per-128 group scale")
 
 
+def test_read_gptq_drafter():
+    from safetensors.torch import save_file
+    g = torch.Generator().manual_seed(9)
+    q = torch.randint(-8, 8, (16, 128), generator=g)
+    s = torch.rand(16, 2, generator=g).half()
+    norm = torch.ones(16, dtype=torch.bfloat16)
+    with tempfile.TemporaryDirectory() as root:
+        tensors = {"fc.qweight": _pack_int4(q).T.contiguous(), "fc.scales": s.T.contiguous(),
+                   "fc.qzeros": torch.full((2, 2), 0x77777777, dtype=torch.int32),
+                   "fc.g_idx": torch.arange(128, dtype=torch.int32) // 64, "norm.weight": norm}
+        save_file(tensors, os.path.join(root, "model.safetensors"))
+        cfg = ref.config_from_dict({**v2_dict(), "quantization_config": {
+            "quant_method": "auto-round", "packing_format": "auto_round:auto_gptq",
+            "bits": 4, "group_size": 64, "sym": True}})
+        got = ref.read_drafter_tensors(root, cfg)
+    assert set(got) == {"fc.weight", "norm.weight"}
+    assert torch.equal(got["fc.weight"], q.float() * s.float().repeat_interleave(64, 1))
+    assert got["norm.weight"].dtype == norm.dtype and torch.equal(got["norm.weight"], norm)
+    print("GPTQ drafter: packed linears dequantized to float32, bf16 norms preserved")
+
+
 def _write_checkpoint(root, cfg_dict, tensors, embed, head, packed_names=()):
     from safetensors.torch import save_file
     dd, td = os.path.join(root, "drafter"), os.path.join(root, "target")
@@ -739,7 +760,8 @@ def test_inkling_form():
 TESTS = [test_real_configs, test_shapes_and_determinism, test_tap_offset_at_api, test_context_kv_and_rope,
          test_context_window, test_full_attention_layer, test_block_attention_causality, test_conv_lookback, test_v2_layer_wiring,
          test_short_K, test_score_edges_and_anchor, test_walk_tie_rule, test_gumbel, test_d2t,
-         test_mask_embedding_and_scale, test_dequant_pack_quantized, test_load_from_files, test_inkling_form, test_real_checkpoint]
+         test_mask_embedding_and_scale, test_dequant_pack_quantized, test_read_gptq_drafter, test_load_from_files,
+         test_inkling_form, test_real_checkpoint]
 
 
 def main() -> None:

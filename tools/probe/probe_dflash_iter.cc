@@ -229,7 +229,7 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
   records.exceptions(std::ios::failbit | std::ios::badbit);
   live.exceptions(std::ios::failbit | std::ios::badbit);
   records << Json{{"run", {{"format", loader::draft_format_name(d.weights().format)}, {"head", "int8"},
-                           {"draft_vocab", 0}, {"candidate_head", bool(d.weights().candidate_head)}, {"vocab_used", e.model().desc->vocab_used}, {"v_ids", Json::array()}}}}.dump() << '\n';
+                           {"candidate_head", bool(d.weights().candidate_head)}, {"vocab_used", e.model().desc->vocab_used}}}}.dump() << '\n';
   for (const auto& source : sources) {
     const std::string name = source.at("name");
     const auto prompt = source.at("prompt_ids").get<std::vector<uint32_t>>();
@@ -795,7 +795,7 @@ int main(int argc, char** argv) {
     const runtime::KvCache kv = runtime::default_kv_cache();
     runtime::Engine e(ctx, std::move(model), max_len, false, kv, &drafter);
     std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
-    drafter.attach(e, false);
+    drafter.attach(e);
     e.greedy_head(greedy_head);
     if (!tgt_ab.empty()) verify_tgt_ab(e, depth, calls, rounds, tgt_ab, vbase);
     else if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs, vbase);

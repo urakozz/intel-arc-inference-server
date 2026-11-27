@@ -38,7 +38,7 @@ inline std::string s_(unsigned v) { return std::to_string(v); }
 inline std::string prep_variant(const Shape& s = kQwen38, bool split = false, unsigned M = kM) {
   return "df_prep_M" + s_(M) + "_H" + s_(s.H) + "_I" + s_(s.I) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" +
          s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) +
-         (split ? "_F8Q4R4U8C16H16K8" : "");
+         (split ? (s.H == 2304 ? "_F8Q4R4U4C12H12K4" : "_F8Q4R4U8C16H16K8") : "");
 }
 inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, unsigned rows = 0) {
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
@@ -48,10 +48,14 @@ inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, un
 // Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl), one sub-group a q head; its reduce is attn_variant(s, 1, 4)'s.
 // ks > 1: the occupancy form, a head's block keys split ks ways (df_attn_dpas.cl's KS).
 // Plan 19v3b: the one-card KS 4 part is the 256-GRF build (_g256: the same arithmetic, bitwise, faster).
+// Plan 41k: the one-card KS 2 part is the 256-GRF build with K / V by 2D block reads (_k2_g256_blk, df_attn_dpas.cl
+// BLK2D: bitwise the per-lane loads).
 inline std::string attn_dpas_variant(const Shape& s = kQwen38, unsigned ks = 1) {
-  const bool g256 = ks == 4 && s.NH == kQwen38.NH && s.NKV == kQwen38.NKV;
+  const bool one_card = s.NH == kQwen38.NH && s.NKV == kQwen38.NKV;
+  const bool g256 = (ks == 4 || ks == 2) && one_card, blk = ks == 2 && one_card;
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
-         s_(s.win) + "_P" + s_(s.pb) + "_dpas" + (ks > 1 ? "_k" + s_(ks) : "") + (g256 ? "_g256" : "");
+         s_(s.win) + "_P" + s_(s.pb) + "_dpas" + (ks > 1 ? "_k" + s_(ks) : "") + (g256 ? "_g256" : "") +
+         (blk ? "_blk" : "");
 }
 // Plan 19v3b: the batched draft's row-table part (df_attn_dpas.cl SEQS, KS 1, 256 GRF) and its reduce.
 inline std::string attn_seqs_part_variant(const Shape& s = kQwen38) {
@@ -63,9 +67,9 @@ inline std::string attn_seqs_reduce_variant(const Shape& s = kQwen38) { return a
 inline std::string proj_wide_variant(const Shape& s = kQwen38) {
   return "df_proj_wide_H" + s_(s.H) + "_KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring);
 }
-// N: the head's rows (the full head, or a draft vocabulary's |V'|); used: indices below it are candidates.
-inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
-  return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
+// N: the head's rows; used: indices below it are candidates.
+inline std::string topk_variant(unsigned N, unsigned used) {
+  return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used);
 }
 inline std::string candidate_topk_variant(unsigned c = 64) {
   return "df_candidate_R7_N248320_U248077_K" + std::to_string(c);
@@ -86,7 +90,7 @@ inline std::string tp_sum_variant(unsigned s, unsigned rank) {
 inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false, unsigned M = kM,
                                   unsigned cap = 0) {
   return v2 ? "df_select_M" + s_(M) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
-                   (split ? "_H16" : "") + (cap ? "_CAP" + s_(cap) : "")
+                   (split ? "_H" + s_(int4_slices(s.H, s.rank)) : "") + (cap ? "_CAP" + s_(cap) : "")
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
 }
 // Plan 40a Task 4: the batched draft's block-aware binaries at `M` rows (kM or kSeqsRows; `split` the int4 drafter's
@@ -106,16 +110,10 @@ inline std::string linear_variant(unsigned fmt, unsigned M, unsigned K, unsigned
   return fmt == 1 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
 }
 
-// The draft vocabulary sizes (spec 8 §11's kDraftVocabSizes) the compact head's binaries exist for.
-inline const std::vector<unsigned>& draft_vocab_sizes() {
-  static const std::vector<unsigned> v = {32768, 65536, 131072};
-  return v;
-}
-
 // Every binary the draft list and the projection list bind for Qwen3.8's drafter: `v2` (DFlash 2 or v1), `int8`
-// (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
+// (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
-inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
+inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head,
                                                LinearKind k, LinearKind head, unsigned attn_heads = 1, unsigned attn_rows = 4,
                                                bool candidate_head = false,
                                                bool attn_dpas = false, unsigned attn_ks = 1,
@@ -134,7 +132,6 @@ inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_
     v.push_back(linear_variant(fmt, kM, s.H, 2 * s.ctaps * (s.H / s.group), k));   // the conv kernel projections
     v.push_back(linear_variant(fmt, kM, s.H, s.rank, k));                          // the selector's projection
   }
-  const unsigned N = dv ? dv : s.vocab;
   if (candidate_head) {   // spec 19 v3d: the 2-bit head (gemm_sm's layout 3) with 80 candidates by default
     if (candidate_bits == 2)
       v.push_back(gemm_sm_variant(kR, *small_m_tuning(s.H, s.vocab, 1, 3)));
@@ -143,14 +140,14 @@ inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_
     v.push_back(candidate_topk_variant(candidates));
     v.push_back(rerank_variant(candidates));
   } else {
-    v.push_back(linear_variant(int8_head, kR, s.H, N, head));
-    v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));
+    v.push_back(linear_variant(int8_head, kR, s.H, s.vocab, head));
+    v.push_back(topk_variant(s.vocab, s.used));
   }
   return v;
 }
-inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
+inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head,
                                                LinearKind k = LinearKind::SmallM) {
-  return draft_variants(v2, fmt, int8_head, dv, k, k);
+  return draft_variants(v2, fmt, int8_head, k, k);
 }
 
 // Spec 19 v3c: every binary a TP card's draft, tail and projection lists bind (runtime::dflash::TpDFlashDrafter) - the
@@ -188,7 +185,7 @@ inline std::vector<std::string> tp_draft_variants(unsigned fmt, unsigned rank, u
 // default) - acceptance only, never the output; measure the gap on the first run before a wider top-k.
 inline constexpr Shape kDSpark{2560, 6144, 20, 4, 128, 2048, 2048, 16, 2, 256, 128000, 127998, kM, kAttnPb};
 inline std::string dspark_attn_variant() { return attn_variant(kDSpark) + "_C"; }
-inline std::string dspark_topk_variant() { return topk_variant(kDSpark.vocab, kDSpark.used, false); }
+inline std::string dspark_topk_variant() { return topk_variant(kDSpark.vocab, kDSpark.used); }
 // Every binary the DSpark draft and projection lists bind for the target's head form (bf16 drafter linears).
 // tests/kernels/dspark_names_test.cc holds the union to the CMake Kolibri DSpark block.
 inline std::vector<std::string> dspark_draft_variants(bool int8_head) {
@@ -218,7 +215,7 @@ inline constexpr Shape kFlashNext{2560, 7680, 32, 8, 128, 2048, 2048, 16, 2, 256
 inline std::vector<std::string> flash_next_draft_variants(bool int8_head) {
   const Shape& s = kFlashNext;
   std::vector<std::string> v = {prep_variant(s), proj_wide_variant(s), attn_variant(s, 1, 4), attn_dpas_variant(s, 4),
-                                select_variant(true, s), topk_variant(s.vocab, s.used, false)};
+                                select_variant(true, s), topk_variant(s.vocab, s.used)};
   for (const auto& [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                              {s.NH * s.HD, s.H},                                                    // o
                              {s.H, 2 * s.I},                                                        // gate||up
@@ -242,7 +239,9 @@ inline std::vector<std::string> flash_next_draft_variants(bool int8_head) {
 // at its K / N.
 inline constexpr Shape kInkling{2304, 6912, 32, 8, 128, 2048, 2048, 16, 2, 256, 201024, 200058, kM, kAttnPb, 4};
 inline constexpr unsigned kInklingHeadRows = 200064, kInklingCap = 30;
-inline std::string inkling_select_variant() { return select_variant(true, kInkling, false, kM, kInklingCap); }
+inline std::string inkling_select_variant(bool split = false) {
+  return select_variant(true, kInkling, split, kM, kInklingCap);
+}
 // One card and pp: the exact int8 rescore of the 2-bit head's 64 candidates a row (kernels::inkling2::kHeadCandidates),
 // the head's k-major tiles.
 inline std::string inkling_rerank_variant() { return "df_rerank_R7_K2304_U200058_C64_Q4"; }
@@ -250,7 +249,7 @@ inline std::string inkling_rerank_variant() { return "df_rerank_R7_K2304_U200058
 // joins the two cards' lists).
 inline std::string inkling_tp_topk_variant(unsigned rank) {
   constexpr unsigned half = kInklingHeadRows / 2;
-  return topk_variant(half, rank ? kInkling.used - half : half, false);
+  return topk_variant(half, rank ? kInkling.used - half : half);
 }
 // The drafter's linears at the block's 8 rows (int8 at load, one scale a row; L1) - q || k || v and gate ||
 // up concatenated (loader::Inkling2Checkpoint) - and the context projection's at its 1..8 committed rows: fc over the
@@ -270,10 +269,17 @@ inline std::pair<unsigned, unsigned> inkling_context_kv_shape() { return {kInkli
 // rows is the DSpark drafter's): df_prep, df_proj_wide, the attention (the H1 / B4 reduce and the KS 4 DPAS part),
 // df_select's capped walk, the 2-bit head's candidates reranked exactly. tests/kernels/inkling2_dflash_names_test.cc holds the union to the
 // CMake block.
-inline std::vector<std::string> inkling_dflash2_variants() {
+inline std::vector<std::string> inkling_dflash2_variants(bool int4 = false) {
   const Shape& s = kInkling;
-  return {prep_variant(s), proj_wide_variant(s), attn_variant(s, 1, 4), attn_dpas_variant(s, 4),
-          inkling_select_variant(), inkling_rerank_variant()};
+  std::vector<std::string> v = {prep_variant(s, int4), proj_wide_variant(s), attn_variant(s, 1, 4),
+                                attn_dpas_variant(s, 2), inkling_select_variant(int4), inkling_rerank_variant()};
+  if (int4) {
+    for (const auto& [K, N] : inkling_linear_shapes()) v.push_back(linear_variant(2, kM, K, N));
+    for (unsigned m = 1; m <= kM; ++m)
+      for (const auto& [K, N] : {inkling_fc_shape(), inkling_context_kv_shape()})
+        v.push_back(linear_variant(2, m, K, N, gemv_kind(m)));
+  }
+  return v;
 }
 
 }  // namespace kernels::dflash

@@ -8,13 +8,17 @@
 #include "kernels/shape_suffix.h"
 
 namespace kernels {
-// Absolute path of the build's compiled device binaries; defined in the build's generated kernel_dir.cc, which
-// b70_target_kernel_dir in CMake links.
-const char* kernel_dir();
+// Absolute path of the build's compiled device binaries, as compiled in; defined in the build's generated
+// kernel_dir.cc, which b70_target_kernel_dir in CMake links.
+const char* compiled_kernel_dir();
+// The directory kernels are read from: the compiled-in path when it exists (the Docker image, a build tree),
+// else <the executable's directory>/../kernels (an extracted release tarball, found through /proc/self/exe).
+// resolve_kernel_dir is the lookup itself, pure apart from the two paths, so a host test drives it; kernel_dir()
+// applies it to this process and throws one plain sentence naming both places when neither exists.
+std::string resolve_kernel_dir(const std::string& compiled, const std::string& exe_path);
+const std::string& kernel_dir();
 // Absolute path of a compiled device binary by variant name.
-inline std::string path(const std::string& variant) {
-  return std::string(kernel_dir()) + "/" + variant + ".bin";
-}
+std::string path(const std::string& variant);
 // PERF-108: gemv.cl's in-work-group K split (GEMV_KSL) of a shape, at every M. A tensor parallel card's qkv||z (Qwen3.8
 // 5120 x 8192 L1, Qwen3.8-Flash-Next 2560 x 8192 L0, both S 1 - gdn_step and the gated head read one slice) launches
 // N / 16 = 512 sub-groups, a quarter of what the card holds, and read at 394 GB/s; four K-slice sub-groups a column tile
@@ -123,7 +127,8 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 //           consumer (prep_silu_mul, SILU_S baked) is bound at its _S1 build instead (capture.cc mlp(),
 //           kernels::gemm_sm_silu_variant) - spec 28 §2's "another S with the consumer variant it needs",
 //           taken because 28b measured it >= 5 % faster at M = 8. No other consumer may change S.
-//   magic   the magic-exponent dequant (bit-identical output to the shift form; speed only).
+//   magic   the magic-exponent dequant (bit-identical output to the shift form; speed only). Layout 3 (plan 41k):
+//           the codes as 1 + c / 4 and the offset after the DPAS - another rounding, f32-judged.
 //   grf256  the variant's ocloc line carries -cl-intel-256-GRF-per-thread.
 //   blk2d   layout 0: the 2D block weight read, copied from gemv's production cell of the shape.
 // The choices are plan 28b's lever measurement (spec 28, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
@@ -150,6 +155,8 @@ struct SmallMTuning {
   // Spec 32e: the gemm_sm_wide shape at 32 and at 64 rows (kWideNone: gemm_sm, which spills there). Same arguments,
   // output, grid and per-row arithmetic as gemm_sm, so every row is bitwise gemm_sm's at 16 rows (property R).
   unsigned char wide_32 = kWideNone, wide_64 = kWideNone;
+  // Plan 41k: wg's K-slice sub-groups a work-group (gemm_sm.cl WG_KSL; 8 the default, any other in the name: _wg<n>).
+  unsigned char wg_ksl = 8;
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
     // Inkling's row-scale int8 projections. Its K=2304 does not divide the
@@ -160,19 +167,32 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {2304, 64, 1, 2, false, false, false, false, kSmVerify8},
     {2304, 200064, 1, 2, false, false, false, false, kSmVerify8},
     {3072, 2304, 1, 2, true, false, false, false, kSmVerify8},     // o_proj: 36 column groups took 62 us at 2 rows
-    {2304, 200064, 1, 3, false, false, false, false, kSmVerify8},  // PERF-123: the head's 2-bit candidate pass
+    {2304, 200064, 1, 3, false, true, false, false, kSmVerify8},   // PERF-123: the head's 2-bit candidate pass
+                                                                   // (magic: plan 41k's 1 + c / 4 dequant)
     {2304, 512, 1, 2, false, false, false, false, kSmVerify8},     // and the exact rescore (the full head's knobs)
     {1536, 2304, 1, 2, true, false, false, false, kSmVerify8},     // o_proj on a `--parallel tp` card (its 12 heads)
     // Plan 41k L1: Inkling's DFlash 2 drafter's int8 linears - the block's q||k||v, o, gate||up, down, the conv
-    // kernel projections and the selector's at 8 rows (kSmDraft8), the context's fc and k||v at 2..8 (kSmVerify8); unsplit
-    {2304, 6144, 1, 2, false, false, false, false, kSmDraft8},
-    {4096, 2304, 1, 2, false, false, false, false, kSmDraft8},
-    {2304, 13824, 1, 2, false, false, false, false, kSmDraft8},
-    {6912, 2304, 1, 2, false, false, false, false, kSmDraft8},
-    {2304, 576, 1, 2, false, false, false, false, kSmDraft8},
-    {2304, 256, 1, 2, false, false, false, false, kSmDraft8},
-    {9216, 2304, 1, 2, false, false, false, false, kSmVerify8},
-    {2304, 2048, 1, 2, false, false, false, false, kSmVerify8},
+    // kernel projections and the selector's at 8 rows (kSmDraft8), the context's fc and k||v at 2..8 (kSmVerify8); the
+    // in-work-group K split at the probe's best slice count a shape (probe_df2_linears, 8 rows: down 58.0 -> 30.8 us,
+    // o 34.3 -> 18.5, the conv / selector projections 19.9 -> 4.1 / 3.2; the K sum in other order, f32-judged)
+    {2304, 6144, 1, 2, true, false, false, false, kSmDraft8, 0, kWideNone, kWideNone, 12},
+    {4096, 2304, 1, 2, true, false, false, false, kSmDraft8, 0, kWideNone, kWideNone, 4},
+    {2304, 13824, 1, 2, true, false, false, false, kSmDraft8, 0, kWideNone, kWideNone, 12},
+    {6912, 2304, 1, 2, true, false, false, false, kSmDraft8, 0, kWideNone, kWideNone, 12},
+    {2304, 576, 1, 2, true, false, false, false, kSmDraft8, 0, kWideNone, kWideNone, 12},
+    {2304, 256, 1, 2, true, false, false, false, kSmDraft8, 0, kWideNone, kWideNone, 12},
+    {9216, 2304, 1, 2, true, false, false, false, kSmVerify8, 0, kWideNone, kWideNone, 16},
+    {2304, 2048, 1, 2, true, false, false, false, kSmVerify8, 0, kWideNone, kWideNone, 12},
+    // Plan 41k: the packed int4 g64 drafter (layout 1) at the same sites, each at kernels::dflash::int4_slices' S (the
+    // split prep / selector folds); magic dequant (bit-identical to the shift form)
+    {2304, 6144, 4, 1, false, true, false, false, kSmDraft8},
+    {4096, 2304, 4, 1, false, true, false, false, kSmDraft8},
+    {2304, 13824, 4, 1, false, true, false, false, kSmDraft8},
+    {6912, 2304, 4, 1, false, true, false, false, kSmDraft8},
+    {2304, 576, 12, 1, false, true, false, false, kSmDraft8},
+    {2304, 256, 12, 1, false, true, false, false, kSmDraft8},
+    {9216, 2304, 8, 1, false, true, false, false, kSmVerify8},
+    {2304, 2048, 4, 1, false, true, false, false, kSmVerify8},
     // Qwen3.8
     // (g256_from 32, spec 32: at 32 rows gemm_sm spills at 128 GRF - qkv||z 1285 us against 99 at 256; the int4
     // rows take gemm_sm_wide at 32 and 64 rows instead, spec 32e: the per-shape best of plan 34a Task 1's arms, a
@@ -199,10 +219,8 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {2048, 248320, 1, 3, false, false, false, false, kSmVerify8},   // PERF-123: the head's 2-bit candidate pass
     {2048, 512, 1, 2, false, false, false, false, kSmVerify8},      // and the exact rescore (the full head's knobs)
     // Spec 28d: z-lab/Qwen3.8-27B-DFlash2's int8 linears at its block's M = 8 (the draft and projection lists,
-    // runtime/dflash/dflash_capture.cc) and the compact draft heads at its 7 draft rows (the full head is Qwen3.8's
-    // row above, built at 7). All in-work-group split-K: the int8 form has no grid split-K, and without it a column's
-    // K walk is one sub-group's (K up to 25600) - 28b's int8-head measurement chose wg too. Every head shares the
-    // knobs, so a column's output is the same whatever N (the draft vocabulary's head bitwise the full head's).
+    // runtime/dflash/dflash_capture.cc) (the full head is Qwen3.8's row above, built at 7). All in-work-group split-K: the int8 form has no grid split-K, and without it a column's
+    // K walk is one sub-group's (K up to 25600) - 28b's int8-head measurement chose wg too.
     {5120, 6144, 1, 2, true, false, false, false, kSmDraft8},        // q||k||v
     {4096, 5120, 1, 2, true, false, false, false, kSmDraft8},        // o_proj
     {5120, 34816, 1, 2, true, false, false, false, kSmDraft8},       // gate||up
@@ -211,9 +229,6 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 2048, 1, 2, true, false, false, false, kSmDraft8},        // the context's k||v (the projection list)
     {5120, 1280, 1, 2, true, false, false, false, kSmDraft8},        // the conv kernel projections (DFlash 2)
     {5120, 256, 1, 2, true, false, false, false, kSmDraft8},         // the selector's projection (DFlash 2)
-    {5120, 32768, 1, 2, true, false, false, false, kSmDraft7},       // the draft vocabulary's heads
-    {5120, 65536, 1, 2, true, false, false, false, kSmDraft7},
-    {5120, 131072, 1, 2, true, false, false, false, kSmDraft7},
     // Spec 19v2: the RTN int4 g64 drafter, layout 1 and one output slice. Only the block's M 8; other lists keep
     // their existing rows. Groups stay ascending as in gemv; magic dequant is exact. Device cost gates still apply.
     {5120, 6144, 1, 1, false, true, false, false, kSmDraft8},
@@ -238,7 +253,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 248320, 1, 1, false, true, false, false, kSmDraft7},
     // spec 19 v3d Task 7: the 2-bit candidate head (PERF-123: gated at the verify lists' 2..8); plan 40a Task 4: and
     // the batched pass's 31 head rows, 256 GRF
-    {5120, 248320, 1, 3, false, false, false, false, kSmDraft7W, 31},
+    {5120, 248320, 1, 3, false, true, false, false, kSmDraft7W, 31},   // magic: plan 41k
     {5120, 512, 1, 2, true, false, false, false, kSmVerify8},      // PERF-123: the exact rescore of the main head's
                                                                    // candidates (gated builds; the full head's knobs)
     // Spec 28d: Qwen3.8-Flash-Next's dense int4 projections (GPTQ layout 0, model::qwen4exp's S) and its int8 head at
@@ -275,7 +290,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {8704, 5120, 4, 1, false, true, false, false, kSmDraft8},
     {5120, 1024, 8, 1, false, true, false, false, kSmDraft8},
     {5120, 124160, 1, 1, false, true, false, false, kSmDraft7},      // the int4 candidate head's half
-    {5120, 124160, 1, 3, false, false, false, false, kSmDraft7},     // the 2-bit candidate head's half
+    {5120, 124160, 1, 3, false, true, false, false, kSmDraft7},      // the 2-bit candidate head's half
 };
 // The row of a shape, or null (that shape keeps gemv / gemv_i8w at every M). int8: layout 2, S 1.
 inline constexpr const SmallMTuning* small_m_tuning(unsigned K, unsigned N, unsigned S, unsigned layout) {
@@ -285,8 +300,8 @@ inline constexpr const SmallMTuning* small_m_tuning(unsigned K, unsigned N, unsi
 }
 // The output's split-K slices (what the consumer folds): gemv's S, or 1 under wg.
 inline constexpr unsigned gemm_sm_out_s(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
-// Work-group size and grid (N / cols, S): grid split-K 4 x 16 columns, wg 2 x 16 columns x 8 slices.
-inline constexpr unsigned gemm_sm_wg_size(const SmallMTuning& t) { return t.wg ? 256 : 64; }
+// Work-group size and grid (N / cols, S): grid split-K 4 x 16 columns, wg 2 x 16 columns x wg_ksl (8) slices.
+inline constexpr unsigned gemm_sm_wg_size(const SmallMTuning& t) { return t.wg ? 32u * t.wg_ksl : 64; }
 inline constexpr unsigned gemm_sm_cols(const SmallMTuning& t) { return t.wg ? 32 : 64; }
 inline constexpr unsigned gemm_sm_grid_y(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
 inline constexpr bool small_m_table_ok() {
@@ -295,7 +310,8 @@ inline constexpr bool small_m_table_ok() {
     if (t.wg && t.S != 1 && !(t.layout == 0 && t.K == 5120 && t.N == 2 * 17408)) return false;
     if (t.layout == 2 && (t.S != 1 || t.magic || t.blk2d)) return false;
     if (t.blk2d && t.layout != 0) return false;
-    if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % 8 != 0)) return false;
+    if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % t.wg_ksl != 0)) return false;
+    if (t.wg_ksl != 8 && (!t.wg || t.wg_ksl == 0 || 32u * t.wg_ksl > 1024)) return false;
     if (t.N % gemm_sm_cols(t) != 0) return false;
     if ((t.wide_32 || t.wide_64) && t.layout > 1) return false;   // gemm_sm_wide is int4 layouts 0 / 1
   }
@@ -303,7 +319,7 @@ inline constexpr bool small_m_table_ok() {
 }
 static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #error guards or changes a consumer's S");
 // gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256][_b2d] (int4; S the OUTPUT's slices, the binary's S define) /
-// gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8): every knob is in the name, so a table row CMake does not build is a
+// gemm_sm_i8w_M<M>_K<K>_N<N>[_wg[<ksl>]] (int8): every knob is in the name, so a table row CMake does not build is a
 // missing file at capture.
 // Spec 32e: gemm_sm_wide_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_b2d]_rc32_pf1_g256 | _sw_pf2 | _rc32_u2_sb_pf1_g256 |
 // _rc32_ah_u2_sb_pf1 where a row binds the wide form at M.
@@ -319,7 +335,8 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
             : a == kWideRc32U ? "_rc32_u2_sb_pf1_g256"
             : a == kWideRc32H ? "_rc32_ah_u2_sb_pf1"
                               : "_sw_pf2");
-  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 || (t.g256_from && M >= t.g256_from) ? "_g256" : "") +
+  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.wg && t.wg_ksl != 8 ? std::to_string(t.wg_ksl) : "") +
+                            (t.magic ? "_mg" : "") + (t.grf256 || (t.g256_from && M >= t.g256_from) ? "_g256" : "") +
                             (t.blk2d ? "_b2d" : "");
   if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
@@ -663,11 +680,4 @@ inline constexpr unsigned kProbs = 17;       // fp32 bits: p_k before renormalis
 inline constexpr unsigned kProb9 = 25;       // fp32 bits: p of rank top_k (first not taken)
 }  // namespace moe_route
 
-// Spec 8 §11: the draft's argmax over a reduced vocabulary of `nv` ids
-// (src/kernels/draft_vocab.cl) - `dv_argmax_stage1` (with the scatter into the full
-// row) and `dv_argmax_stage2` (the id-table mapping) in one binary per size, as prep.cl's
-// entry points share theirs. The compact GEMV before it is `gemv_i8w_variant(1, K, nv)` or,
-// for a bf16 head, `gemv_bf16_variant(1, K, nv, gemv_bf16_tiling(nv))` ({64, 1}).
-inline constexpr unsigned kDraftVocabChunk = 1024;   // draft_vocab.cl CHUNK: stage 1's grid is nv / 1024
-inline std::string dv_argmax_variant(unsigned nv) { return "dv_argmax_N" + std::to_string(nv); }
 }  // namespace kernels

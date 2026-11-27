@@ -43,8 +43,7 @@ inline constexpr Linear kLinears[] = {
 };
 inline constexpr unsigned kNumLinears = sizeof(kLinears) / sizeof(kLinears[0]);
 
-// The target's lm_head over the K draft rows, int8 (spec 9): the full vocabulary and a
-// 32k draft vocabulary (spec 8 §11's compact head; P0's ranked V' = 32768).
-inline constexpr unsigned kHeadVocab[] = {248320, 32768};
+// The target's int8 lm_head over the K draft rows.
+inline constexpr unsigned kHeadVocab = 248320;
 
 }  // namespace draft_cost

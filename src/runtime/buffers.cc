@@ -178,16 +178,16 @@ size_t PrefillScratch::lazy_bytes() const {
 // --- MtpBuffers (spec 8) -----------------------------------------------------
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-                       uint32_t draft_vocab_size, KvCache kv, uint32_t n_slots, uint32_t n_seqs)
-    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size, kv, n_slots, n_seqs),
-                 draft_vocab_size, kv_layout(max_len, desc, 1, kv), n_slots, n_seqs) {}
+                       KvCache kv, uint32_t n_slots, uint32_t n_seqs)
+    : MtpBuffers(ctx, max_len, sizes(max_len, desc, kv, n_slots, n_seqs),
+                 kv_layout(max_len, desc, 1, kv), n_slots, n_seqs) {}
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& card,
                        const model::ModelDesc& head, KvCache kv)
-    : MtpBuffers(ctx, max_len, tp_sizes(max_len, card, head, kv), 0, kv_layout(max_len, head, 1, kv), kSlots, 1) {}
+    : MtpBuffers(ctx, max_len, tp_sizes(max_len, card, head, kv), kv_layout(max_len, head, 1, kv), kSlots, 1) {}
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-                       uint32_t draft_vocab_size, const KvLayout& kv, uint32_t n_slots, uint32_t n_seqs)
+                       const KvLayout& kv, uint32_t n_slots, uint32_t n_seqs)
     : hctl(ctx, l0::MemKind::Shared, s.hctl),
       gdn_spec(ctx, l0::MemKind::Device, s.gdn_spec),
       kv_k(ctx, l0::MemKind::Device, s.kv_k),
@@ -195,11 +195,7 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
       hh(ctx, l0::MemKind::Device, s.hh),
       dh(ctx, l0::MemKind::Device, s.dh),
       logits(ctx, l0::MemKind::Device, s.logits),
-      // Spec 8 §11: sized by MtpDims::sizes (0 bytes, so no allocation, when off).
-      dv_logits(s.dv_logits ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, s.dv_logits)
-                            : nullptr),
       max_len(max_len),
-      draft_vocab(draft_vocab_size),
       kv_lay(kv),
       slots(n_slots),
       seqs(n_seqs) {
@@ -212,7 +208,7 @@ void MtpBuffers::zero(l0::CmdList& imm, uint32_t kv_end) {
     if (&m == &kv_k || &m == &kv_v)
       zero_kv(imm, m, kv_lay, kv_end);
     else
-      imm.fill(m.ptr(), (&m == &logits && draft_vocab) ? kNegInfBits : 0u, m.size());   // spec 8 §11
+      imm.fill(m.ptr(), 0u, m.size());
   });
 }
 

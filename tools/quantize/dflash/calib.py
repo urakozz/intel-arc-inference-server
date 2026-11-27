@@ -85,13 +85,27 @@ def rope_table(pos: torch.Tensor, head_dim: int, theta: float) -> torch.Tensor:
     return torch.cat([ang.cos(), ang.sin()], -1).float().view(torch.int32)
 
 
+def is_inkling(target_dir: str) -> bool:
+    with open(os.path.join(target_dir, "config.json")) as f:
+        return json.load(f).get("model_type") == "inkling2_loop"
+
+
 class EmbedRows:
-    """Rows of the target's input embedding, read one by one (the 2.5 GB table never loads whole)."""
+    """Rows of the target's input embedding, read one by one (the 2.5 GB table never loads whole). Inkling 2 Mini's
+    rows go through its embed_norm, as its own input embedding does (dflash_ref.py's Inkling form, difference 1)."""
 
     def __init__(self, target_dir: str, drafter_dir: str, cfg):
         wm = ref._weight_map(target_dir)
-        names = [n for n in wm if n.endswith("embed_tokens.weight") and not n.startswith(("mtp.", "model.visual", "visual"))]
-        if len(names) != 1:
+        self.norm = None
+        if is_inkling(target_dir):
+            names = ["model.llm.embed.weight"]
+            with open(os.path.join(target_dir, "config.json")) as f:
+                eps = float(json.load(f)["text_config"]["rms_norm_eps"])
+            with safe_open(wm["model.llm.embed_norm.weight"], framework="pt", device="cpu") as f:
+                self.norm = (f.get_tensor("model.llm.embed_norm.weight"), eps)
+        else:
+            names = [n for n in wm if n.endswith("embed_tokens.weight") and not n.startswith(("mtp.", "model.visual", "visual"))]
+        if len(names) != 1 or names[0] not in wm:
             raise ValueError(f"target embedding ambiguous: {names}")
         self.path, self.name = wm[names[0]], names[0]
         self.mask_id = cfg.mask_token_id
@@ -106,6 +120,8 @@ class EmbedRows:
                 for i in miss:
                     self.cache[i] = sl[i:i + 1][0].float()
         rows = torch.stack([self.cache[i] for i in ids])
+        if self.norm is not None:
+            rows = ref.rms_norm(rows, *self.norm)
         if self.mask is not None:
             rows[torch.tensor(ids) == self.mask_id] = self.mask.float()
         return rows

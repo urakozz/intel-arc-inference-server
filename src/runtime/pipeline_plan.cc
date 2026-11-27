@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <format>
 #include <stdexcept>
-#include "loader/draft_vocab.h"
 #include "loader/moe_layout.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
@@ -221,8 +220,6 @@ std::vector<PpKvRun> pp_kv_runs(const std::array<KvLayout, kPpDevices>& stage, c
 
 PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, const PpWeights& w,
                KvCache kv, const PrefillPath& pf, const PpExtras& x) {
-  if (x.draft_vocab != 0 && !x.mtp && !x.drafter.on())
-    throw std::invalid_argument("runtime::pp_plan: a draft vocabulary drafts with the MTP head or a drafter");
   if (x.mtp && x.drafter.on())
     throw std::invalid_argument("runtime::pp_plan: the MTP head and a drafter are two proposers");
   PpPlan p;
@@ -260,17 +257,12 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     }
     // Spec 16d (PpExtras, pipeline_plan.h).
     const bool last = st[i].has_head(d);
-    const size_t draft_vocab = x.draft_vocab == 0 ? 0
-                               : w.draft_vocab != 0
-                                   ? w.draft_vocab
-                                   : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
     if (x.mtp) {
       if (last) {
         dp.embed_replica = w.embed;
         dp.mtp_weights = w.mtp;
         dp.model += dp.embed_replica + dp.mtp_weights;
-        dp.mtp_buffers = MtpDims::sizes(max_len, d, x.draft_vocab, kv).total();
-        dp.draft_vocab = draft_vocab;
+        dp.mtp_buffers = MtpDims::sizes(max_len, d, kv).total();
         if (pf.prefill) {
           dp.mtp_prefill = pp_mtp_prefill_bytes(d, pf.chunk_cap);   // step_mtp_kv's bf16 linears: the slab above
         }
@@ -284,7 +276,6 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
         dp.embed_replica = w.embed;
         dp.model += dp.embed_replica;
         dp.drafter = x.drafter.bytes(max_len);
-        dp.draft_vocab = draft_vocab;
         if (pf.prefill) {
           dp.drafter_taps = kPpPfDepth * TapVerifyDims::prefill_taps_bytes(d, x.drafter.n_taps, pf.chunk_cap);
           dp.prefill_scratch += dp.drafter_taps;

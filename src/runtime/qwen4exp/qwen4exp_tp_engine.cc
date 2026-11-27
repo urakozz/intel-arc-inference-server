@@ -370,6 +370,10 @@ std::vector<uint32_t> Qwen4ExpTpEngine::read_routes(uint32_t card) {
   return r;
 }
 
+uint32_t Qwen4ExpTpEngine::read_step_misses(uint32_t card) {
+  return step_misses(cards_.at(card)->imm, model_.parts[card], model_.desc, read_routes(0));
+}
+
 std::array<uint32_t, tp::kStateWords> Qwen4ExpTpEngine::state_words(uint32_t card) const {
   std::array<uint32_t, tp::kStateWords> s{};
   std::memcpy(s.data(), cards_.at(card)->state.ptr(), sizeof(s));
@@ -423,7 +427,7 @@ namespace runtime::qwen4exp {
 namespace {
 // A K / V run: each card's rows are one contiguous range, copied through a host stage and interleaved there (a
 // position's row is card 0's kv head then card 1's).
-bool row_split(SnapTensor t) { return t == SnapTensor::Kv; }
+bool row_split(SnapTensor t) { return t == SnapTensor::Kv || t == SnapTensor::KvScale; }
 }  // namespace
 
 std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, bool load) const {
@@ -437,6 +441,7 @@ std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, 
   std::vector<Piece> out;
   switch (r.tensor) {
     case SnapTensor::MtpKv:
+    case SnapTensor::MtpKvScale:
     case SnapTensor::MtpIdxKeys:
     case SnapTensor::MtpIdxTail:
     case SnapTensor::MtpHidden:   // the head's, whole on card 1
@@ -466,8 +471,9 @@ std::vector<Qwen4ExpTpEngine::Piece> Qwen4ExpTpEngine::pieces(const SnapRun& r, 
             out.push_back({c, base(c) + (r.offset / row + i) * crow + card, i * row + one + c * bytes, bytes});
       return out;
     }
-    case SnapTensor::Kv: {   // a position's kv heads: card 0's row then card 1's (row_split: copied through staging)
-      const size_t row = size_t(d.kv_n()) * 2, crow = row / 2;
+    case SnapTensor::Kv:
+    case SnapTensor::KvScale: {   // a position's kv heads: card 0's row then card 1's (row_split: through staging)
+      const size_t row = r.tensor == SnapTensor::Kv ? kv_row_bytes(d) : kv_scale_row_bytes(d), crow = row / 2;
       contract_assert(r.offset % row == 0 && r.bytes % row == 0);   // a K / V run of whole rows
       for (uint32_t c = 0; c < 2; ++c) out.push_back({c, base(c) + r.offset / 2, c * crow, r.bytes / 2});
       return out;
@@ -538,8 +544,8 @@ void Qwen4ExpTpEngine::save_kv(uint32_t begin, uint32_t end, void* host) {
         stage[p.card].resize(p.bytes);
         cards_[p.card]->imm.copy(stage[p.card].data(), p.dev, p.bytes);
       }
-      const size_t row = size_t(model_.desc.kv_n()) * 2;   // one position's two kv heads, bf16
-      interleave(stage, h, row / 2, r.bytes / row);
+      const size_t row = r.tensor == SnapTensor::Kv ? kv_row_bytes(model_.desc) : kv_scale_row_bytes(model_.desc);
+      interleave(stage, h, row / 2, r.bytes / row);   // one position's two kv heads
     } else {
       for (const Piece& p : ps) cards_[p.card]->imm.copy(h + p.at, p.dev, p.bytes);
     }
@@ -555,7 +561,7 @@ void Qwen4ExpTpEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
     const std::vector<Piece> ps = pieces(r, true);
     if (row_split(r.tensor)) {
       for (auto& s : stage) s.resize(r.bytes / 2);
-      const size_t row = size_t(model_.desc.kv_n()) * 2;
+      const size_t row = r.tensor == SnapTensor::Kv ? kv_row_bytes(model_.desc) : kv_scale_row_bytes(model_.desc);
       deinterleave(h, stage, row / 2, r.bytes / row);
       for (const Piece& p : ps) cards_[p.card]->imm.copy(p.dev, stage[p.card].data(), p.bytes);
     } else {

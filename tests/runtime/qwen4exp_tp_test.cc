@@ -2,6 +2,7 @@
 // checkpoint;qwen4exp;tp), at --layers N with every expert resident, or the whole model with each engine's tier. One engine a process (each pins the 51.8 GB PLE
 // table; two do not fit beside a CPU job), so a comparison is two runs and a ratio is interleaved runs:
 //   qwen4exp_tp_test <checkpoint> <ids> pp|tp <rows file> [layers 18] [steps 10000] [bench 4] [profile replays]
+//   (pp-kv8 / tp-kv8, plan 21-QFN-v3a: the same with the int8 KV cache on both sides)
 //   (a) the first 32 ids forced one a replay: pp writes each row's logits to <rows file>; tp reads them and holds each
 //       row's argmax equal to pp's, or different only inside the near-tie window (pp's logit of tp's id within 2 bf16
 //       ulps of pp's top), printing each row's logits cosine and max difference and counting the rows whose logits are pp's
@@ -11,6 +12,8 @@
 //   (c) decode at the ids' length (4096 for q4exp_4k.ids): the prompt fed, a warm-up of 64, then `bench` runs of 64
 //       generated tokens; each run's t/s and the median
 //   (d) tp, with [profile replays]: card 0's list's device time a launch, summed by kernel
+//   with force:<ids> in that place instead: only the f32 judge's rows (below), no (a) - (d); forcepf:<ids> the same with
+//   the 4500 ids prefilled
 // Exit 77 (SKIP) with one GPU or without the checkpoint.
 #include <algorithm>
 #include <cmath>
@@ -69,10 +72,13 @@ int main(int argc, char** argv) {
   }
   qwen4exp_rig::open(rig, 2);
   const uint32_t max_len = 16384;
-  const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, layers);
+  std::string mode = argv[3];
+  const std::string rows_path = argv[4];
+  const bool kv8 = mode.size() > 4 && mode.compare(mode.size() - 4, 4, "-kv8") == 0;   // plan 21-QFN-v3a: the int8 KV cache
+  if (kv8) mode.resize(mode.size() - 4);
+  const model::Qwen4ExpDesc d = loader::qwen4exp_checkpoint_desc(snap, layers, kv8);
   const std::vector<uint32_t> ids = qwen4exp_rig::read_ids(argv[2], d.vocab);
   CHECK(ids.size() >= 32 && ids.size() + 64 * (pairs + 1) < max_len);
-  const std::string mode = argv[3], rows_path = argv[4];
   CHECK(mode == "pp" || mode == "tp");
   const size_t V = d.vocab;
   std::unique_ptr<rq::Qwen4ExpEngine> pp;
@@ -89,7 +95,8 @@ int main(int argc, char** argv) {
     std::optional<rq::ExpertTier> t;
     if (whole) t = rq::fill_tier(d, rq::expert_budget(d, pl, max_len, true, false, true, caps, reserve), pc);
     pp = std::make_unique<rq::Qwen4ExpEngine>(
-        rig.ctx, loader::load_qwen4exp(rig.ctx, snap, max_len, pl, loader::LmHeadForm::Int8, layers, false, t ? &*t : nullptr),
+        rig.ctx, loader::load_qwen4exp(rig.ctx, snap, max_len, pl, loader::LmHeadForm::Int8, layers, false, t ? &*t : nullptr,
+                                       nullptr, rq::kPfC, kv8),
         max_len);
   } else {
     const model::Q4Placement pl = model::Q4Placement::tp2(d, model::Q4TpEnds::Split);
@@ -104,7 +111,7 @@ int main(int argc, char** argv) {
     tp = std::make_unique<rq::Qwen4ExpTpEngine>(
         *rig.c0, *rig.c1,
         loader::load_qwen4exp(rig.ctx, snap, max_len, pl, loader::LmHeadForm::Int8, layers, false, t0 ? &*t0 : nullptr,
-                              t1 ? &*t1 : nullptr),
+                              t1 ? &*t1 : nullptr, rq::kPfC, kv8),
         max_len);
   }
   const auto ingest = [&](uint32_t id) { pp ? pp->ingest({id}) : tp->ingest({id}); };
@@ -120,6 +127,33 @@ int main(int argc, char** argv) {
     std::printf("tp: pp at %u layers, %zu launches (both devices)\n", layers, pp->launches());
   }
 
+  // force:<ids> (the f32 judge's rows, plan 21-QFN-v3a): <ids> cycled to 4500 positions fed one a replay (the f32
+  // reference's prompt, qwen4exp_oracle.sh intel-f32), then the reference's 32 forced ids; each of the 33 decision rows'
+  // logits -> <rows file> (pp) / <rows file>.tp (tp), judged by serve_judge.py rows against the reference's `logits`.
+  // forcepf:<ids>: the 4500 ids in one prefill (the int8 cache's prompt-pass writer and reader), then the same rows.
+  const std::string force_arg = argc > 8 ? argv[8] : "";
+  const bool force_pf = force_arg.rfind("forcepf:", 0) == 0;
+  if (force_pf || force_arg.rfind("force:", 0) == 0) {
+    const std::vector<uint32_t> forced = qwen4exp_rig::read_ids(force_arg.substr(force_arg.find(':') + 1), d.vocab);
+    CHECK_EQ(forced.size(), size_t(32));
+    std::vector<float> rows;
+    std::vector<uint32_t> cycled(4500);
+    for (uint32_t p = 0; p < 4500; ++p) cycled[p] = ids[p % ids.size()];
+    if (force_pf) pp ? pp->prefill(cycled) : tp->prefill(cycled);
+    else for (const uint32_t id : cycled) ingest(id);
+    for (uint32_t j = 0; j <= forced.size(); ++j) {
+      const std::vector<float> lt = logits();
+      rows.insert(rows.end(), lt.begin(), lt.end());
+      if (j < forced.size()) ingest(forced[j]);
+    }
+    const std::string out = pp ? rows_path : rows_path + ".tp";
+    FILE* f = std::fopen(out.c_str(), "wb");
+    CHECK(f && std::fwrite(rows.data(), 4, rows.size(), f) == rows.size());
+    std::fclose(f);
+    std::printf("tp: %s's 33 decision rows (4500 cycled ids%s + 32 forced) -> %s\n", mode.c_str(),
+                force_pf ? " prefilled" : "", out.c_str());
+    return 0;
+  }
   // (a) the forced rows; every row continues on pp's id (tp reads it from the rows file's argmax)
   std::vector<float> ref;
   if (tp) {

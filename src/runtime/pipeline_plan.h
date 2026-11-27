@@ -69,11 +69,11 @@ struct PpWeights {
   std::vector<size_t> layer;   // per layer: its linears, small blocks, MoE blocks
   size_t embed = 0;            // device 0: embed_tokens
   size_t head = 0;             // the last device: lm_head and the final norm
-  // Spec 16d: the MTP head's weights (its linears, norms, FA block, a MoE head's experts) and
-  // the draft vocabulary's compact head + id table, when loaded - both on the last device.
+  // Spec 16d: the MTP head's weights (its linears, norms, FA block, a MoE head's experts) on
+  // the last device.
   // Not in total() or stage(): pp_plan adds them (and the replicated embedding) under
   // PpExtras::mtp, so every spec 16b / 16c plan is unchanged.
-  size_t mtp = 0, draft_vocab = 0;
+  size_t mtp = 0;
   size_t total() const;
   // A stage's share: its layers, and the embedding / head when it holds them.
   size_t stage(const model::ModelDesc& d, const PpStage& st) const;
@@ -132,8 +132,7 @@ inline PrefillPath pp_no_prefill() {
 //         a REPLICA of the embedding (as 16b's placement anticipated:
 //         the drafts and the head's KV fill gather embed rows of ids produced on device 1) in
 //         `model`; MtpBuffers (its control, the verify slots of ITS GDN layers, the head's KV
-//         layer, hh / dh, the draft logits) in decode_state; the draft vocabulary's head in
-//         `draft_vocab`. On device 0 only the verify slots of its own GDN layers
+//         layer, hh / dh, the draft logits) in decode_state. On device 0 only the verify slots of its own GDN layers
 //         (pp_gdn_spec_bytes) in decode_state. With a prefill path, device 1 also holds the
 //         head's prefill hidden rows and two head Control blocks (decode_state) and, on
 //         l0-int8, the L0 slab step_mtp_kv's bf16 linears walk (prefill_scratch).
@@ -144,12 +143,9 @@ inline PrefillPath pp_no_prefill() {
 //         device beside lm_head: its weights and buffers (DrafterPlan, in `drafter`) and the embedding
 //         replica (in `model`) the draft list gathers; on EACH device the verify slots of its own GDN layers
 //         for TapVerifyDims::kSlots (pp_gdn_spec_bytes(d, gdn, 8), decode_state); with a prefill path, the
-//         last device's two tap stagings (one per chunk in flight, prefill_scratch). A draft vocabulary
-//         (draft_vocab) is the drafter's then.
+//         last device's two tap stagings (one per chunk in flight, prefill_scratch).
 struct PpExtras {
   bool mtp = false;
-  uint32_t draft_vocab = 0;        // |V'| (spec 8 §11), with mtp or a drafter; 0 = the full head drafts
-  bool draft_vocab_int8 = true;    // the compact head's form: the lm_head's (int8 or bf16)
   bool hook = false;
   DrafterPlan drafter;             // spec 19d: on() = a DFlash drafter on the last device
 };

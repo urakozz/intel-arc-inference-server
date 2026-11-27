@@ -163,6 +163,57 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
 
 #endif
 
+// EXPERT_DPAS 1 (the int4 experts): every dot on the bf16 DPAS, 8 rows a sub-group (rows past n zero) - the one-row
+// kernels' single row and a union item's rows alike, so a verify row stays bitwise the plain step's (a row's sums do
+// not depend on the operand's other rows). Each k16 step's codes once as the B operand (a code byte's two values
+// c - 8 as bf16 bits from a 256-entry table, exact), the rows' activations the A operand, the k-group's four steps
+// summed, then the group's scale (the lane's column) on the sums. Not tile_dot's order: the f32 judge.
+#ifndef EXPERT_DPAS
+#define EXPERT_DPAS 0
+#endif
+#if EXPERT_DPAS
+#if WFMT != 0
+#error "moe: EXPERT_DPAS is the int4 experts' form"
+#endif
+#pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
+#define EXPERT_TABLE(q4_pair)                                                                       \
+  __local uint q4_pair[256];                                                                       \
+  for (uint i = get_local_id(0); i < 256; i += get_local_size(0))                                  \
+    q4_pair[i] = (as_uint((float)((int)(i & 15u) - 8)) >> 16) |                                    \
+                 (as_uint((float)((int)(i >> 4) - 8)) & 0xFFFF0000u);                              \
+  barrier(CLK_LOCAL_MEM_FENCE);
+// k-groups [g0, g1) of one 16-column tile for rows x + xo[r], r < n: the result's element r is row r's sum.
+inline float8 tile_dpas(const __global uint* restrict tile, const __global ushort* restrict x, const uint* xo,
+                        uint n, uint g0, uint g1, uint lane, __local const uint* q4_pair) {
+  float8 acc = (float8)(0.f);
+  for (uint g = g0; g < g1; ++g, tile += TILE_U32) {
+    uint wv[8];
+    load_tile8(tile, lane, wv);
+    const float scale = vload_half(lane, (const __global half*)(tile + 128));
+    ushort xa[8][4];
+#pragma unroll
+    for (uint r = 0; r < 8; ++r) {
+      ushort4 v = (ushort4)(0);
+      if (r < M && r < n) v = intel_sub_group_block_read_us4(x + xo[r] + g * GROUP);
+      xa[r][0] = v.s0; xa[r][1] = v.s1; xa[r][2] = v.s2; xa[r][3] = v.s3;
+    }
+    float8 c = (float8)(0.f);
+#pragma unroll
+    for (uint d = 0; d < 4; ++d) {
+      short8 a;
+      a.s0 = xa[0][d]; a.s1 = xa[1][d]; a.s2 = xa[2][d]; a.s3 = xa[3][d];
+      a.s4 = xa[4][d]; a.s5 = xa[5][d]; a.s6 = xa[6][d]; a.s7 = xa[7][d];
+      uint p[8];
+#pragma unroll
+      for (uint i = 0; i < 8; ++i) p[i] = q4_pair[(wv[2 * d + i / 4] >> (8 * (i % 4))) & 255u];
+      c = intel_sub_group_bf16_bf16_matrix_mad_k16(a, as_int8(vload8(0, p)), c);
+    }
+    acc += c * scale;
+  }
+  return acc;
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // moe_route - one work-group per token, one expert per lane (lane e owns expert e).
 //
@@ -357,7 +408,13 @@ __kernel void moe_gate_up(__global const uint* restrict route,
   const uint g0 = q * (G_UP / UP_KS);
   const __global uint* restrict tile =
       w + (size_t)e * UP_BLK_U32 + ((size_t)n_tile * G_UP + g0) * TILE_U32;
+#if EXPERT_DPAS
+  EXPERT_TABLE(q4_pair)
+  const uint xo[1] = {0};
+  red[sg][lane] = tile_dpas(tile, x + (size_t)m * HIDDEN, xo, 1, g0, g0 + G_UP / UP_KS, lane, q4_pair).s0;
+#else
   red[sg][lane] = tile_dot(tile, x + (size_t)m * HIDDEN, g0, g0 + G_UP / UP_KS, lane);
+#endif
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = UP_KS / 2; stride > 0; stride >>= 1) {
     if (q < stride) red[sg][lane] += red[sg + stride][lane];
@@ -410,8 +467,15 @@ __kernel void moe_down(__global const uint* restrict route,
   const uint g0 = q * (G_DN / DN_KS);
   const __global uint* restrict tile =
       w + (size_t)e * DN_BLK_U32 + ((size_t)n_tile * G_DN + g0) * TILE_U32;
+#if EXPERT_DPAS
+  EXPERT_TABLE(q4_pair)
+  const uint xo[1] = {0};
+  red[sg][lane] =
+      tile_dpas(tile, h + ((size_t)m * SLOTS + slot) * INTER, xo, 1, g0, g0 + G_DN / DN_KS, lane, q4_pair).s0;
+#else
   red[sg][lane] =
       tile_dot(tile, h + ((size_t)m * SLOTS + slot) * INTER, g0, g0 + G_DN / DN_KS, lane);
+#endif
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = DN_KS / 2; stride > 0; stride >>= 1) {
     if (q < stride) red[sg][lane] += red[sg + stride][lane];
@@ -544,6 +608,12 @@ __kernel void moe_gate_up_union(__global const uint* restrict plan,
   const uint g0 = q * (G_UP / UP_KS);
   const __global uint* restrict tile = w + (size_t)e * UP_BLK_U32 + ((size_t)n_tile * G_UP + g0) * TILE_U32;
   float acc[UR];
+#if EXPERT_DPAS
+  EXPERT_TABLE(q4_pair)
+  uint xo[UR];
+  for (uint r = 0; r < UR; ++r) xo[r] = r < nr ? (pairs[r] >> 4) * HIDDEN : 0u;
+  vstore8(tile_dpas(tile, x, xo, nr, g0, g0 + G_UP / UP_KS, lane, q4_pair), 0, acc);
+#else
   for (uint r = 0; r < UR; ++r) acc[r] = 0.f;
   for (uint g = g0; g < g0 + G_UP / UP_KS; ++g, tile += TILE_U32) {
     uint wv[8];
@@ -557,6 +627,7 @@ __kernel void moe_gate_up_union(__global const uint* restrict plan,
         acc[r] += gacc * scale;
       }
   }
+#endif
   for (uint r = 0; r < nr; ++r) red[r][sg][lane] = acc[r];
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = UP_KS / 2; stride > 0; stride >>= 1) {
@@ -595,6 +666,12 @@ __kernel void moe_down_union(__global const uint* restrict plan,
   const uint g0 = q * (G_DN / DN_KS);
   const __global uint* restrict tile = w + (size_t)e * DN_BLK_U32 + ((size_t)n_tile * G_DN + g0) * TILE_U32;
   float acc[UR];
+#if EXPERT_DPAS
+  EXPERT_TABLE(q4_pair)
+  uint xo[UR];
+  for (uint r = 0; r < UR; ++r) xo[r] = r < nr ? ((pairs[r] >> 4) * SLOTS + (pairs[r] & 15u)) * INTER : 0u;
+  vstore8(tile_dpas(tile, h, xo, nr, g0, g0 + G_DN / DN_KS, lane, q4_pair), 0, acc);
+#else
   for (uint r = 0; r < UR; ++r) acc[r] = 0.f;
   for (uint g = g0; g < g0 + G_DN / DN_KS; ++g, tile += TILE_U32) {
     uint wv[8];
@@ -608,6 +685,7 @@ __kernel void moe_down_union(__global const uint* restrict plan,
         acc[r] += gacc * scale;
       }
   }
+#endif
   for (uint r = 0; r < nr; ++r) red[r][sg][lane] = acc[r];
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = DN_KS / 2; stride > 0; stride >>= 1) {

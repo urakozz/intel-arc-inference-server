@@ -11,7 +11,6 @@
 #include "kernels/dflash_kernels.h"
 #include "kernels/kernels.h"
 #include "loader/dflash_layout.h"
-#include "loader/draft_vocab.h"
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/prefill/gemm_l0.h"
@@ -77,32 +76,24 @@ class Walk {
     require(t.head->shape.K == d_.hidden, "the target's head is not [rows][hidden]");
     require(t.vocab_rows == d_.vocab && t.embed->size() >= size_t(t.vocab_rows) * d_.hidden * 2,
             "the target's embedding / vocabulary is not the drafter's (vocab_size " + std::to_string(d_.vocab) + ")");
-    const bool compact = t.ids != nullptr;
-    require(!w_.candidate_head || (!compact && t.head->kind == model::WeightKind::Int8),
+    require(!w_.candidate_head || t.head->kind == model::WeightKind::Int8,
             "the int4 candidate head requires a full int8 target head for exact rerank");
     const uint32_t N = t.head->shape.N;
-    if (compact) {
-      bool known = false;
-      for (uint32_t nv : kd::draft_vocab_sizes()) known |= nv == N;
-      require(known && t.ids->size() >= size_t(N) * 4,
-              "the draft vocabulary's head has " + std::to_string(N) + " rows: compiled for 32768 / 65536 / 131072");
-    } else {
-      // Spec 19 v3c: a TP card's head is its vocabulary half.
-      require(N == (tp_ ? kd::kTpVocabHalf : d_.vocab),
-              "the full head has " + std::to_string(N) + " rows, not vocab_size (a TP card's: its half)");
-    }
+    // Spec 19 v3c: a TP card's head is its vocabulary half.
+    require(N == (tp_ ? kd::kTpVocabHalf : d_.vocab),
+            "the full head has " + std::to_string(N) + " rows, not vocab_size (a TP card's: its half)");
     require(b_.head_rows == N, "the buffers were sized for a head of " + std::to_string(b_.head_rows) + " rows, not " +
                                    std::to_string(N));
     require(ctrl_bytes >= sizeof(Control), "the control block is smaller than runtime::Control");
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     // Spec 19 v3c: a TP card's half - the candidate head's path at its vocabulary half, the DPAS attention.
-    require(!tp_ || (w_.candidate_head && !compact && fmt != 0 && opt_.dflash_attn_dpas &&
+    require(!tp_ || (w_.candidate_head && fmt != 0 && opt_.dflash_attn_dpas &&
                      lkind() == kernels::LinearKind::SmallM && d_.v2()),
             "a TP card's draft list is built for DFlash 2 with the candidate head, int8 or int4 linears on gemm_sm and "
             "the DPAS attention");
     const std::vector<std::string> variants =
         tp_ ? kd::tp_draft_variants(fmt, tp_->rank, w_.candidate_bits, w_.candidates, opt_.dflash_attn_ks)
-            : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8, compact ? N : 0, lkind(),
+            : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8, lkind(),
                                  hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head),
                                  opt_.dflash_attn_dpas, opt_.dflash_attn_ks,
                                  w_.candidate_bits, w_.candidates);
@@ -247,7 +238,7 @@ class Walk {
       }
       {
         auto& k = kernel(tp_ ? kd::candidate_half_variant(used, w_.candidates) : kd::candidate_topk_variant(w_.candidates),
-                         "df_candidate_stage2", kd::kWg);
+                         "df_candidate_select2", kd::kWg);   // plan 41k: df_rerank does not read the order
         k.arg_ptr(0, b_.tpart.ptr());
         k.arg_ptr(1, b_.candidate->ptr());
         launch(k, M_ - 1);
@@ -281,21 +272,20 @@ class Walk {
           launch(k, N / tl.cols);
         }
       }
-      const std::string tv = kd::topk_variant(N, compact ? N : t.vocab_used, compact);
+      const std::string tv = kd::topk_variant(N, t.vocab_used);
       {   // df_topk_stage1(logits, part), grid (chunks, R)
         l0::Kernel& k = kernel(tv, "df_topk_stage1", kd::kWg);
         k.arg_ptr(0, b_.logits.ptr());
         k.arg_ptr(1, b_.tpart.ptr());
         launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
       }
-      {   // df_topk_stage2(part, ids, out_mult, softcap, cand, unary), grid (R)
+      {   // df_topk_stage2(part, out_mult, softcap, cand, unary), grid (R)
         l0::Kernel& k = kernel(tv, "df_topk_stage2", kd::kWg);
         k.arg_ptr(0, b_.tpart.ptr());
-        k.arg_ptr(1, compact ? t.ids->ptr() : b_.cand.ptr());   // the full head's build never reads it
-        k.arg(2, d_.out_mult);
-        k.arg(3, d_.softcap);
-        k.arg_ptr(4, b_.cand.ptr());
-        k.arg_ptr(5, b_.unary.ptr());
+        k.arg(1, d_.out_mult);
+        k.arg(2, d_.softcap);
+        k.arg_ptr(3, b_.cand.ptr());
+        k.arg_ptr(4, b_.unary.ptr());
         launch(k, kd::kR);
       }
     }
@@ -631,19 +621,13 @@ class Walk {
 
 }  // namespace
 
-DFlashTarget dflash_target(const loader::LoadedModel& m, bool draft_vocab) {
+DFlashTarget dflash_target(const loader::LoadedModel& m) {
   DFlashTarget t;
   t.embed = &m.embed;
   const loader::DeviceWeight& head = m.linears.at({loader::kTopLevel, model::LinearId::LmHead});
   t.vocab_rows = head.shape.N;
   t.vocab_used = m.desc ? m.desc->vocab_used : head.shape.N;
-  if (draft_vocab) {
-    if (!m.draft_vocab) throw std::runtime_error("dflash_target: the model was loaded without a draft vocabulary");
-    t.head = &m.draft_vocab->head;
-    t.ids = &m.draft_vocab->ids;
-  } else {
-    t.head = &head;
-  }
+  t.head = &head;
   return t;
 }
 

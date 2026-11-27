@@ -525,7 +525,7 @@ int main(int argc, char** argv) {
   const uint32_t head_rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
   runtime::dflash::DFlashDrafter d(ctx, std::move(w), head_rows, kMaxLen, kK);
   runtime::Engine e(ctx, std::move(model), kMaxLen, /*debug_resid=*/false, runtime::default_kv_cache(), &d);
-  d.attach(e, /*draft_vocab=*/false);
+  d.attach(e);
   const model::ModelDesc& md = *e.model().desc;
   kGdnBytes = size_t(md.gdn_layers) * md.gdn_v_heads * 128 * 128 * 4;
   kTapRow = d.tap_layers().size() * size_t(md.hidden);

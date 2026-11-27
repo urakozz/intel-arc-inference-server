@@ -60,7 +60,8 @@ struct CaptureOptions {
   // and probes clear it for the scalar part (the A/B, the grid forms above).
   bool dflash_attn_dpas = true;
   // The DPAS part's key split a head (df_attn_dpas.cl's KS: 1, 2 or 4). 4: the five attention parts 1.55 -> 0.50 ms;
-  // acceptance judged pooled (spec 19 v3d Task 6, occupancy).
+  // acceptance judged pooled (spec 19 v3d Task 6, occupancy). Plan 41k: KS 2 (the 2D-read build, 0.44 -> 0.32 ms the
+  // five parts) fails dflash_draft_test's f32 judge on the int8 drafter's bf16-head walk; it stays 4 here.
   uint32_t dflash_attn_ks = 4;
   // verify-cost-m8 probe only: a tap verify list binds gdn_step_slots_M<M>_N8_P1 (row 0's state stored alone - wrong
   // states, timing only).

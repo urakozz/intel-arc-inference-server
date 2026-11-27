@@ -4,9 +4,8 @@
     dump_taps.py run <snapshot> --out-dir DIR [SOURCES] [--layers 5,19,33,47,61]
                  [--batch-tokens 8192] [--keep-ctx 2048] [--topk 64] [--vocab-used 248077]
                  [--no-fp32-matmul] [--dry-run]
-    dump_taps.py sources --out-dir DIR [SOURCES] [--rank-logs DIR2]
-                                                     write DIR/sources.json only (no model); with
-                                                     --rank-logs, the sources as rank.py inputs
+    dump_taps.py sources --out-dir DIR [SOURCES]
+                                                     write DIR/sources.json without loading the model
 
 SOURCES (any mix, each a name `corpus/label`; the corpus is what dflash_accept.py pools by):
     --source NAME:PROMPT_IDS:CONT_IDS     whitespace-separated id files (the continuation is the
@@ -349,8 +348,6 @@ def main() -> None:
             p.add_argument("--vocab-used", type=int, default=VOCAB_USED)
             p.add_argument("--no-fp32-matmul", dest="fp32_matmul", action="store_false")
             p.add_argument("--dry-run", action="store_true")
-        else:
-            p.add_argument("--rank-logs", help="also write the sources as rank.py request logs here")
         p.add_argument("--out-dir", required=True)
         p.add_argument("--source", action="append")
         p.add_argument("--a4")
@@ -362,14 +359,6 @@ def main() -> None:
         src = parse_sources(a)
         print(f"wrote {write_sources_json(a.out_dir, src)}: {len(src)} sources, "
               f"{sum(len(s['cont_ids']) for s in src)} continuation ids")
-        if a.rank_logs:
-            # tools/draft_vocab/rank.py's request-log input: prompt ids at weight 1, the
-            # continuation as generated ids at weight 4 (its defaults)
-            os.makedirs(a.rank_logs, exist_ok=True)
-            for k, s in enumerate(src):
-                with open(os.path.join(a.rank_logs, f"{k + 1:06d}.json"), "w", encoding="utf-8") as f:
-                    json.dump({"name": s["name"], "prompt_ids": s["prompt_ids"], "out_ids": s["cont_ids"]}, f)
-            print(f"wrote {len(src)} rank.py request logs to {a.rank_logs}")
         return
     cmd_run(a)
 

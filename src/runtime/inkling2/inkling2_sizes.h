@@ -32,7 +32,7 @@ inline constexpr size_t kCandidateParts = size_t(kRows) * kCandidateChunks * kCa
 // A prompt chunk's rows (the experts' sort fills its 256-row items best at 4096); attention takes a chunk in parts
 // of kPrefillAttentionRows, which the window ring holds with their 1,023-key window.
 inline constexpr uint32_t kPrefillRows = 4096, kPrefillAttentionRows = 2048, kPrefillExpertTile = 32,
-                          kPrefillSlab = 1024;
+                          kPrefillSlab = 1024, kDraftInt4Slab = 256;
 // `--parallel pp`: the visits one card runs, [first, end) of the walk's 48, and whether the drafter on the last card
 // reads taps this card's visits write (they cross with the hand-off). A card holds the layers its visits read, the
 // caches and convolution histories of its visits (slots counted from the stage's first), the embedding when it runs

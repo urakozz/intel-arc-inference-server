@@ -80,7 +80,7 @@ void draft_names(std::set<std::string>& out) {
     out.insert(bf16(kRows, L.K, L.N));
     out.insert(kernels::gemv_variant(kRows, L.K, L.N, L.int4_s, 0));
   }
-  for (unsigned V : kHeadVocab) out.insert(kernels::gemv_i8w_variant(kHeadRows, kHidden, V));
+  out.insert(kernels::gemv_i8w_variant(kHeadRows, kHidden, kHeadVocab));
 }
 
 }  // namespace
@@ -128,7 +128,6 @@ int main(int argc, char** argv) {
   CHECK_EQ(kernels::attn_v2_variant(8, kT), std::string("attn_v2_M8_T32"));
   CHECK_EQ(bf16(8, 5120, 256), std::string("gemv_bf16_M8_K5120_N256_C16_S16"));
   CHECK_EQ(bf16(8, 5120, 2048), std::string("gemv_bf16_M8_K5120_N2048"));
-  CHECK_EQ(kernels::gemv_i8w_variant(7, 5120, 32768), std::string("gemv_i8w_M7_K5120_N32768"));
   std::printf("verify_m8_names_test OK: %zu names bound (verify M = 5..8 + the draft-cost "
               "probe), %zu in the block, all built\n",
               bound.size(), block.size());

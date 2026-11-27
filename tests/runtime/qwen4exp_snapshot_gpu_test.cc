@@ -4,7 +4,9 @@
 // model at --layers 18 when present. The host side (the layouts, round trips across placements) is
 // qwen4exp_snapshot_test's.
 //
-//   qwen4exp_snapshot_gpu_test <checkpoint> <ids> [pp2[:split]] [cross] [layers:N] [int8] [mtp]
+//   qwen4exp_snapshot_gpu_test <checkpoint> <ids> [pp2[:split]] [cross] [layers:N] [int8] [mtp] [kv8]
+//
+// `kv8` (plan 21-QFN-v3a): the int8 KV cache (its scales ride the snapshots as their own runs) - every check the same.
 //
 // `mtp` (Task 3): the head loaded - the snapshots carry its open-block keys, R_{p-1}, its K / V and compressed keys
 // (Review Focus 5: the head's last), every continuation runs draft / verify / commit at K = 2, and the head's R, K / V
@@ -306,8 +308,10 @@ int main(int argc, char** argv) {
       o.int8_head = true;
     } else if (x == "mtp") {
       o.mtp = true;
+    } else if (x == "kv8") {
+      o.kv8 = true;
     } else {
-      std::fprintf(stderr, "qwen4exp_snapshot_gpu_test: unknown flag %s (pp2[:split], cross, layers:N, int8, mtp)\n",
+      std::fprintf(stderr, "qwen4exp_snapshot_gpu_test: unknown flag %s (pp2[:split], cross, layers:N, int8, mtp, kv8)\n",
                    x.c_str());
       return 2;
     }

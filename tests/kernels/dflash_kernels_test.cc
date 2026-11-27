@@ -17,8 +17,7 @@
 //   df_attn_dpas   (spec 19 v3d Task 6) df_attn_part on DPAS + the H1 / B4 reduce, the same cases: cosine >= 0.99999
 //                  per (head, row) against the twin (q and p carried as bf16 hi + lo, DPAS's sums - not bitwise), rows
 //                  past K zero, and property R: a row bitwise unchanged when every other row's q changes
-//   df_topk        the full head (248320, the mask at 248077, planted ties / NaN / -inf rows) and a 32768-id draft
-//                  vocabulary (indices mapped through an ascending id table): ids and values exact
+//   df_topk        the full head (248320, the mask at 248077, planted ties / NaN / -inf rows): ids and values exact
 //   df_select      the walk at rank 256 over 248320-row codebooks, K 7: greedy - ids, choices, scores bitwise and
 //                  ctrl.cur_token[1..7] the ids; sampled (T 0.7, a 64-bit seed) - the choices equal wherever the
 //                  twin's top two Gumbel scores are 1e-5 apart (log / log1p are not correctly rounded)
@@ -107,12 +106,11 @@ std::vector<uint16_t> rnd_bf16(size_t n, float lo, float hi, uint32_t seed) {
 struct Bins {
   bool split;
   unsigned attn_heads, attn_rows;
-  l0::Module prep, attn, topk, topk_c, sel;
+  l0::Module prep, attn, topk, sel;
   Bins(Dev& d, bool split_k = false, unsigned heads = 0, unsigned rows = 0)
       : split(split_k), attn_heads(heads), attn_rows(rows), prep(d.ctx, kernels::path(kd::prep_variant(S, split))),
         attn(d.ctx, kernels::path(kd::attn_variant(S, heads, rows))),
-        topk(d.ctx, kernels::path(kd::topk_variant(S.vocab, S.used, false))),
-        topk_c(d.ctx, kernels::path(kd::topk_variant(32768, 32768, true))),
+        topk(d.ctx, kernels::path(kd::topk_variant(S.vocab, S.used))),
         sel(d.ctx, kernels::path(kd::select_variant(true, S, split))) {}
 };
 
@@ -711,58 +709,48 @@ int check_attn_dpas_masks(Dev& d, Bins& b, unsigned ks) {
 }
 
 int check_topk(Dev& d, Bins& b) {
-  int bad = 0;
   const uint32_t R = kd::kR;
-  for (bool compact : {false, true}) {
-    const uint32_t N = compact ? 32768 : S.vocab, used = compact ? N : S.used;
-    std::vector<float> lg = rnd_f32(size_t(R) * N, -10, 10, compact ? 30 : 31);
-    // planted: a top-value tie across chunks (row 0), the masked tail larger than everything (row 1), a NaN at the
-    // top (row 2), a row of -inf with three finite values (row 3), many equal values (row 4)
-    lg[5] = lg[100000 % N] = lg[N - 300] = 50.0f;
-    if (!compact)
-      for (uint32_t i = used; i < N; ++i) lg[size_t(1) * N + i] = 99.0f;
-    lg[size_t(2) * N + 7] = NAN;
-    for (uint32_t i = 0; i < N; ++i) lg[size_t(3) * N + i] = -INFINITY;
-    lg[size_t(3) * N + 9] = 1.0f;
-    lg[size_t(3) * N + 19] = 2.0f;
-    lg[size_t(3) * N + N - 1] = 1.0f;
-    for (uint32_t i = 0; i < N; i += 3) lg[size_t(4) * N + i] = 9.5f;
-    std::vector<uint32_t> ids(N);
-    for (uint32_t i = 0; i < N; ++i) ids[i] = i * 7 + 3;   // ascending, distinct
-    const uint32_t chunks = (N + kd::kTopkChunk - 1) / kd::kTopkChunk;
-    l0::Mem bl = d.up(lg), bid = d.up(ids), part = d.zeros(size_t(R) * chunks * kd::kTopK * 8),
-            cand = d.zeros(size_t(R) * kd::kTopK * 4), un = d.zeros(size_t(R) * kd::kTopK * 4);
-    l0::Module& m = compact ? b.topk_c : b.topk;
-    l0::Kernel k1(m, "df_topk_stage1"), k2(m, "df_topk_stage2");
-    k1.group_size(kd::kWg);
-    k1.arg_ptr(0, bl.ptr());
-    k1.arg_ptr(1, part.ptr());
-    k2.group_size(kd::kWg);
-    k2.arg_ptr(0, part.ptr());
-    k2.arg_ptr(1, bid.ptr());
-    k2.arg(2, 1.5f);
-    k2.arg(3, 30.0f);
-    k2.arg_ptr(4, cand.ptr());
-    k2.arg_ptr(5, un.ptr());
-    d.run(k1, chunks, R);
-    d.run(k2, R);
-    const std::vector<uint32_t> gc = d.read<uint32_t>(cand, size_t(R) * kd::kTopK);
-    const std::vector<float> gu = d.read<float>(un, size_t(R) * kd::kTopK);
-    int e = 0;
-    for (uint32_t j = 0; j < R; ++j) {
-      const std::vector<dfref::Cand> w =
-          dfref::topk(&lg[size_t(j) * N], used, kd::kTopK, 1.5f, 30.0f, compact ? ids.data() : nullptr);
-      for (uint32_t k = 0; k < kd::kTopK; ++k) {
-        const bool same_v = gu[j * kd::kTopK + k] == w[k].v ||
-                            std::fabs(gu[j * kd::kTopK + k] - w[k].v) <= 4e-7f * std::fabs(w[k].v);   // tanh
-        e += gc[j * kd::kTopK + k] != w[k].i || !same_v;
-      }
+  const uint32_t N = S.vocab, used = S.used;
+  std::vector<float> lg = rnd_f32(size_t(R) * N, -10, 10, 31);
+  // planted: a top-value tie across chunks (row 0), the masked tail larger than everything (row 1), a NaN at the
+  // top (row 2), a row of -inf with three finite values (row 3), many equal values (row 4)
+  lg[5] = lg[100000 % N] = lg[N - 300] = 50.0f;
+  for (uint32_t i = used; i < N; ++i) lg[size_t(1) * N + i] = 99.0f;
+  lg[size_t(2) * N + 7] = NAN;
+  for (uint32_t i = 0; i < N; ++i) lg[size_t(3) * N + i] = -INFINITY;
+  lg[size_t(3) * N + 9] = 1.0f;
+  lg[size_t(3) * N + 19] = 2.0f;
+  lg[size_t(3) * N + N - 1] = 1.0f;
+  for (uint32_t i = 0; i < N; i += 3) lg[size_t(4) * N + i] = 9.5f;
+  const uint32_t chunks = (N + kd::kTopkChunk - 1) / kd::kTopkChunk;
+  l0::Mem bl = d.up(lg), part = d.zeros(size_t(R) * chunks * kd::kTopK * 8),
+          cand = d.zeros(size_t(R) * kd::kTopK * 4), un = d.zeros(size_t(R) * kd::kTopK * 4);
+  l0::Kernel k1(b.topk, "df_topk_stage1"), k2(b.topk, "df_topk_stage2");
+  k1.group_size(kd::kWg);
+  k1.arg_ptr(0, bl.ptr());
+  k1.arg_ptr(1, part.ptr());
+  k2.group_size(kd::kWg);
+  k2.arg_ptr(0, part.ptr());
+  k2.arg(1, 1.5f);
+  k2.arg(2, 30.0f);
+  k2.arg_ptr(3, cand.ptr());
+  k2.arg_ptr(4, un.ptr());
+  d.run(k1, chunks, R);
+  d.run(k2, R);
+  const std::vector<uint32_t> gc = d.read<uint32_t>(cand, size_t(R) * kd::kTopK);
+  const std::vector<float> gu = d.read<float>(un, size_t(R) * kd::kTopK);
+  int e = 0;
+  for (uint32_t j = 0; j < R; ++j) {
+    const std::vector<dfref::Cand> w =
+        dfref::topk(&lg[size_t(j) * N], used, kd::kTopK, 1.5f, 30.0f);
+    for (uint32_t k = 0; k < kd::kTopK; ++k) {
+      const bool same_v = gu[j * kd::kTopK + k] == w[k].v ||
+                          std::fabs(gu[j * kd::kTopK + k] - w[k].v) <= 4e-7f * std::fabs(w[k].v);   // tanh
+      e += gc[j * kd::kTopK + k] != w[k].i || !same_v;
     }
-    std::printf("df_topk (%s, N %u): %d of %u (id, value) pairs differ\n", compact ? "a draft vocabulary" : "the full head",
-                N, e, R * kd::kTopK);
-    bad += e;
   }
-  return bad;
+  std::printf("df_topk (N %u): %d of %u (id, value) pairs differ\n", N, e, R * kd::kTopK);
+  return e;
 }
 
 int check_select(Dev& d, Bins& b) {

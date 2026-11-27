@@ -839,10 +839,31 @@ def test_run_resumes_from_checkpoint():
         assert x.metadata() == y.metadata()
 
 
+def test_cli_kv8():
+    """`kv8` (plan 21-QFN-v3a Task 0 Step 3): the three arms over 2060 ids (across the QSA cut) with a continuation;
+    the int8 arm's attention reads kv8_fq's K / V (it moves the logits), the bf16 arm is the plain forward."""
+    import subprocess
+    snap = tiny_snapshot()
+    d = os.path.join(TMP, "kv8")
+    os.makedirs(d, exist_ok=True)
+    ids = rand_ids(2060, seed=53)
+    open(os.path.join(d, "p.ids"), "w").write(" ".join(map(str, ids[:2050])) + "\n")
+    open(os.path.join(d, "c.ids"), "w").write(" ".join(map(str, ids[2050:])) + "\n")
+    r = subprocess.run([sys.executable, os.path.join(_HERE, "qwen4exp_ref.py"), "kv8", snap, "--ids",
+                        f"p={d}/p.ids+{d}/c.ids", "--out", d, "--row0", "2040"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-2000:] + r.stdout[-2000:]
+    md = open(os.path.join(d, "kv8.md")).read()
+    assert "| p | 2040..2059 | int8 |" in md and "| p | continuation 2050..2059 | f32attn |" in md, md
+    res = torch.load(os.path.join(d, "p.kv8.pt"))
+    assert res["rows"] == (2040, 2060, 2050) and res["int8"]["cos"].shape == (20,)
+    assert float(res["int8"]["kl"].max()) > 0.0, "the int8 arm left the logits unchanged"
+    print(f"  kv8: {md.splitlines()[-1]}")
+
+
 TESTS = [test_fp32_dequant, test_fp32_state_dump, test_run_resumes_from_checkpoint, test_expected_names_tiny, test_real_names, test_hc_chain, test_ple_ids, test_sigmoid_gate, test_v_head_map,
          test_streamed_equals_hf_bf16, test_streamed_equals_hf_fp32, test_chunked_prefill_equals_hf,
          test_indexer_cache_bitwise, test_indexer_gaps_small_budget, test_layers_truncation, test_route_ties, test_int4_experts, test_fused_experts,
-         test_ple_int8, test_trace_equals_run, test_cli_run_and_hfcheck]
+         test_ple_int8, test_trace_equals_run, test_cli_run_and_hfcheck, test_cli_kv8]
 
 
 def main() -> None:

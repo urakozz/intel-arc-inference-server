@@ -71,34 +71,17 @@ MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_he
   MtpCost c;
   // H1/B4 paired medians at depth4096, busy machine, 2026-11-12 (the benchmark record); the candidate head's rows re-measured
   // with spec 19 v3d's final form (2026-11-14, BENCHMARKS "Round cost (spec 19 v3d)").
-  // The bf16 and int4 verify rows are derived equal to int8 (the packed drafter's measured 1.224 at 8 rows, 2026-11-14).
+  // The bf16 verify rows use the int8 measurements.
   c.verify = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};
   if (candidate_head)
     c.verify = {1.000230, 1.041410, 1.073907, 1.105789, 1.151472, 1.180781, 1.205189, 1.221471};
-  const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
-                       drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
+  const double body = drafter_format == 0 ? kDFlashDrafterBf16 : kDFlashDrafterInt8;
   double d = body + (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
   if (candidate_head) {
     d = drafter_format == 2 ? kDFlashDraftCandidateInt4 : kDFlashDraftCandidateInt8;
     if (drafter_format == 0) d += kDFlashDrafterBf16 - kDFlashDrafterInt8;
   }
   c.draft.assign(7, d);
-  return c;
-}
-
-double MtpCost::dflash_head_share(bool i8_head, unsigned drafter_format) {
-  const double h = i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16;
-  const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
-                       drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
-  return h / (h + body);
-}
-
-MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {
-  if (!(head_share >= 0 && head_share <= 1) || !(fraction > 0 && fraction <= 1))
-    throw std::invalid_argument("MtpCost::with_draft_vocab: head_share in [0, 1], fraction in (0, 1]");
-  MtpCost c = *this;
-  const double scale = (1.0 - head_share) + head_share * fraction;
-  for (double& d : c.draft) d *= scale;
   return c;
 }
 
@@ -240,22 +223,23 @@ uint32_t AdaptiveK::best(double alpha) const {
   return b;
 }
 
+MtpCost cost_at_depth(const std::vector<std::pair<uint32_t, MtpCost>>& by_depth, uint32_t pos) {
+  const auto& d = by_depth;
+  size_t i = 0;
+  while (i < d.size() && d[i].first < pos) ++i;
+  if (i == 0 || i == d.size()) return d[i == 0 ? 0 : d.size() - 1].second;
+  MtpCost c = d[i - 1].second;
+  const double t = double(pos - d[i - 1].first) / double(d[i].first - d[i - 1].first);
+  const auto mix = [t](auto& out, const auto& a, const auto& b) {
+    for (size_t n = 0; n < out.size(); ++n) out[n] = a[n] + t * (b[n] - a[n]);
+  };
+  mix(c.verify, d[i - 1].second.verify, d[i].second.verify);
+  mix(c.draft, d[i - 1].second.draft, d[i].second.draft);
+  return c;
+}
+
 uint32_t AdaptiveK::next(uint32_t pos) {
-  if (!o_.by_depth.empty()) {
-    const auto& d = o_.by_depth;
-    size_t i = 0;
-    while (i < d.size() && d[i].first < pos) ++i;
-    if (i == 0 || i == d.size()) {
-      o_.cost = d[i == 0 ? 0 : d.size() - 1].second;
-    } else {
-      const double t = double(pos - d[i - 1].first) / double(d[i].first - d[i - 1].first);
-      const auto mix = [t](auto& out, const auto& a, const auto& b) {
-        for (size_t n = 0; n < out.size(); ++n) out[n] = a[n] + t * (b[n] - a[n]);
-      };
-      mix(o_.cost.verify, d[i - 1].second.verify, d[i].second.verify);
-      mix(o_.cost.draft, d[i - 1].second.draft, d[i].second.draft);
-    }
-  }
+  if (!o_.by_depth.empty()) o_.cost = cost_at_depth(o_.by_depth, pos);
   if (iters_ < o_.warmup) return max_k_;
   // Timed but no plain step yet: one, so the costs the request measures have their unit (it never runs one at K > 0).
   if (timed_ && sec_[0] == 0 && cur_ > 0) return 0;

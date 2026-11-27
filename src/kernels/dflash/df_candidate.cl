@@ -194,3 +194,88 @@ __kernel void df_candidate_select1(__global const float* restrict logits, __glob
     }
   }
 }
+
+// Plan 41k: stage 2 by the same radix select, for a consumer that does not read the candidates' order (df_rerank: it
+// scores each and takes its top 16 by value, then the lower id). The same C ids as df_candidate_stage2 - the best of
+// the chunks' lists by `better` - written in no particular order, NO_IDX past the live ones. Each live entry's key is
+// (its value's orderable bits, the complement of its id), unique, so the C best are the keys >= the C-th: eight 4-bit
+// passes over the value bits, then, only when the C-th value is tied past the count, eight over the id bits among the
+// entries of that value.
+inline void radix_step(const uint* key, const bool* in, int shift, uint* prefix, uint* need, uint* eq_count,
+                       __local uint (*hist)[16], __local uint* tot) {
+  const uint sg = get_sub_group_id(), lane = get_sub_group_local_id(), lid = get_local_id(0);
+  const uint hi_mask = shift == 28 ? 0u : ~((1u << (shift + 4)) - 1u);
+  uint cnt[16];
+  for (uint b = 0; b < 16; ++b) cnt[b] = 0;
+  for (uint k = 0; k < PER2; ++k)
+    if (in[k] && (key[k] & hi_mask) == *prefix) ++cnt[(key[k] >> shift) & 15u];
+  for (uint b = 0; b < 16; ++b) {
+    const uint s = sub_group_reduce_add(cnt[b]);
+    if (lane == 0) hist[sg][b] = s;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lid < 16) {
+    uint s = 0;
+    for (uint g = 0; g < WG / SG; ++g) s += hist[g][lid];
+    tot[lid] = s;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  uint b = 15;
+  for (;; --b) {
+    if (tot[b] >= *need || b == 0) break;
+    *need -= tot[b];
+  }
+  *prefix |= b << shift;
+  *eq_count = tot[b];
+  barrier(CLK_LOCAL_MEM_FENCE);
+}
+
+__attribute__((intel_reqd_sub_group_size(SG)))
+__attribute__((reqd_work_group_size(WG, 1, 1)))
+__kernel void df_candidate_select2(__global const float* restrict part, __global uint* restrict cand GATE_ARG) {
+  GATE_RETURN
+  const uint r = get_group_id(0), lid = get_local_id(0);
+  const uint sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  __local uint hist[WG / SG][16];
+  __local uint tot[16];
+  __local uint offs[WG / SG];
+  uint hk[PER2], lk[PER2];
+  bool live[PER2], tie[PER2];
+  for (uint k = 0; k < PER2; ++k) {
+    const uint i = k * WG + lid;
+    hk[k] = 0u;
+    lk[k] = 0u;
+    if (i < CHUNKS * C) {
+      const size_t at = ((size_t)r * CHUNKS * C + i) * 2;
+      const float fi = part[at + 1];
+      if (fi < (float)USED) {
+        hk[k] = okey(part[at]);
+        lk[k] = ~(uint)fi;
+      }
+    }
+    live[k] = hk[k] != 0u;
+  }
+  uint thi = 0, need = C, eq_count = 0;
+  for (int shift = 28; shift >= 0; shift -= 4) radix_step(hk, live, shift, &thi, &need, &eq_count, hist, tot);
+  // thi = the C-th best value's key; `need` of its eq_count entries are taken (the lower ids when fewer than all)
+  const bool all_eq = need >= eq_count;
+  uint tlo = 0;
+  if (!all_eq) {
+    for (uint k = 0; k < PER2; ++k) tie[k] = live[k] && hk[k] == thi;
+    for (int shift = 28; shift >= 0; shift -= 4) radix_step(lk, tie, shift, &tlo, &need, &eq_count, hist, tot);
+  }
+  uint mine = 0;
+  for (uint k = 0; k < PER2; ++k)
+    mine += live[k] && (hk[k] > thi || (hk[k] == thi && (all_eq || lk[k] >= tlo)));
+  const uint before = sub_group_scan_exclusive_add(mine);
+  if (lane == SG - 1) offs[sg] = before + mine;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  uint at_c = before, taken = 0;
+  for (uint g = 0; g < WG / SG; ++g) {
+    if (g < sg) at_c += offs[g];
+    taken += offs[g];
+  }
+  for (uint k = 0; k < PER2; ++k)
+    if (live[k] && (hk[k] > thi || (hk[k] == thi && (all_eq || lk[k] >= tlo)))) cand[(size_t)r * C + at_c++] = ~lk[k];
+  if (lid >= taken && lid < C) cand[(size_t)r * C + lid] = NO_IDX;
+}

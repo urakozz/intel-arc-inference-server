@@ -148,14 +148,6 @@ int main() {
   CHECK_EQ(kernels::gemv_variant(1, 4096, 2048, 4, 0), std::string("gemv_M1_K4096_N2048_S4_L0"));
   CHECK_EQ(kernels::prep_res_fold_variant(1, 2048, 0, 20), std::string("prep_res_fold_M1_K2048_SP0_G20"));
 
-  // Spec 8 §11: the draft-vocabulary binaries (src/kernels/CMakeLists.txt, B70_MTP), the
-  // names capture.cc's draft list binds at each compiled |V'|.
-  CHECK_EQ(kernels::gemv_i8w_variant(1, 5120, 32768), std::string("gemv_i8w_M1_K5120_N32768"));
-  CHECK_EQ(kernels::gemv_i8w_variant(1, 5120, 131072), std::string("gemv_i8w_M1_K5120_N131072"));
-  CHECK_EQ(kernels::dv_argmax_variant(32768), std::string("dv_argmax_N32768"));
-  CHECK_EQ(kernels::dv_argmax_variant(65536), std::string("dv_argmax_N65536"));
-  CHECK_EQ(kernels::dv_argmax_variant(131072), std::string("dv_argmax_N131072"));
-
   std::puts("variant_names_test OK");
   return 0;
 }

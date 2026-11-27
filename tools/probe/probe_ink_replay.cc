@@ -24,7 +24,7 @@
 namespace runtime::inkling2 {
 struct ReplayProbeAccess {
   static l0::CmdList& plain(Engine& e) { return *e.plain_; }
-  static l0::CmdList& target(Engine& e, uint32_t rows) { return *e.target_[rows - 1]; }
+  static l0::CmdList& target(Engine& e, uint32_t rows) { return *e.target_[0][0][rows - 1]; }
   static l0::Queue& queue(Engine& e) { return e.queue_; }
   static size_t kernels(const Engine& e) { return e.kernels_.size(); }
 };

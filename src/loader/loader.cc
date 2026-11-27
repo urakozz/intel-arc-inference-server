@@ -952,7 +952,7 @@ size_t LoadReport::total() const {
 namespace {
 // load() and load_tp(): `tp` null is one card, exactly as before.
 LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len, bool mtp,
-                      LmHeadForm lm_form, const DraftVocabSpec& draft_vocab, const TpSlice* tp) {
+                      LmHeadForm lm_form, const TpSlice* tp) {
   const auto t0 = std::chrono::steady_clock::now();
   const std::string snap = resolve_snapshot(snapshot_or_repo);
 
@@ -968,10 +968,7 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
     throw std::runtime_error(snap + "config.json has no architectures[0] string");
   const model::ModelDesc& one = model::desc_for_architecture(archs->arr()[0].str());
   // Spec 17b: under TP the card's descriptor; `one` stays the checkpoint's (the slices are cut from its rows).
-  // Spec 17d: the MTP head loads whole on each card (replicated at one card's shapes); a draft vocabulary does not.
-  if (tp && draft_vocab.size != 0)
-    throw std::runtime_error("tensor parallel loads no draft vocabulary (the draft's head is the card's "
-                             "vocabulary half of lm_head); drop --draft-vocab");
+  // Spec 17d: the MTP head loads whole on each card (replicated at one card's shapes).
   const model::ModelDesc& desc = tp ? model::tp_card_desc(one, tp->crossing) : one;
   // Spec 15b: a described model the engine cannot run yet (Ornith: "MoE not
   // implemented (spec 15c)") stops here, before a byte is read - and before the
@@ -1030,22 +1027,6 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
                 : (lm_form == LmHeadForm::Int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16));
   const bool lm_int4 = lm_row.kind == model::WeightKind::Int4;
   const bool lm_int8 = lm_row.kind == model::WeightKind::Int8;
-  // Spec 8 §11: a draft vocabulary is a subset of the MTP draft's head (int8 or bf16), at a
-  // size the compact GEMV and argmax are compiled for - all knowable before a byte is read.
-  if (draft_vocab.size != 0) {
-    if (!mtp && !draft_vocab.for_drafter)
-      throw std::runtime_error("--draft-vocab drafts with the MTP head or a DFlash drafter: it needs --spec mtp or "
-                               "--spec dflash");
-    if (lm_int4)
-      throw std::runtime_error(
-          "--draft-vocab gathers rows of an int8 or bf16 lm_head; this "
-          "checkpoint ships it int4");
-    if (std::find(std::begin(kDraftVocabSizes), std::end(kDraftVocabSizes), draft_vocab.size) ==
-        std::end(kDraftVocabSizes))
-      throw std::runtime_error("--draft-vocab " + std::to_string(draft_vocab.size) +
-                               ": the compiled sizes are 32768, 65536 and 131072");
-  }
-
   // embed_tokens is uploaded row-major and verbatim: it is gathered one row per
   // token, so no tiling helps and the mmap is already the canonical layout.
   // Copied, not bound by reference: gcc 13's -Wdangling-reference cannot see
@@ -1076,7 +1057,6 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
                 trained,
                 nullptr,
                 &desc,
-                nullptr,
                 {},
                 {},
                 nullptr};
@@ -1172,49 +1152,6 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
                     tp ? load_linear_tp(ctx, imm, set, view, "", one, one.lm_head(lm_row.kind), lm_row, tp->rank, st,
                                         m.report)
                        : load_linear(ctx, imm, set, view, "", lm_row, st, m.report));
-  // Spec 8 §11: V' and its compact head, gathered from the host copy of the head
-  // `load_linear` just made and uploaded - st.i8 / st.i8_scales for int8 (the
-  // quantisation), st.bf_tiled for bf16 (the tiling) - so no byte comes back from the
-  // device and the compact rows are byte-for-byte the uploaded head's. The selection masks
-  // at the model's vocab_used, the bound the main argmax masks at (argmax.cl VOCAB_USED).
-  if (draft_vocab.size != 0) {
-    const auto d0 = std::chrono::steady_clock::now();
-    const model::GemvShape& lm = lm_row.shape;
-    // Every size from loader::draft_vocab_bytes - the formula runtime::plan counts with
-    // (spec 6 §10: the planner must see these, as they are outside LoadReport::total()).
-    const DraftVocabBytes nb = draft_vocab_bytes(draft_vocab.size, lm.K, lm_int8);
-    auto dv = std::make_unique<DraftVocab>(DraftVocab{
-        {l0::Mem(ctx, l0::MemKind::Device, nb.head), nullptr,
-         model::GemvShape{lm.K, draft_vocab.size, 1, 0},
-         lm_int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16},
-        l0::Mem(ctx, l0::MemKind::Device, nb.ids),
-        select_draft_vocab(draft_vocab.added, draft_vocab.eos, draft_vocab.ranked, desc.vocab_used,
-                           draft_vocab.size, &m.report.draft_vocab_counts)});
-    if (lm_int8) {
-      std::vector<int8_t> rows(size_t(draft_vocab.size) * lm.K);
-      std::vector<float> scales(draft_vocab.size);
-      gather_int8_tiled_rows(st.i8.data(), st.i8_scales.data(), lm.K, lm.N, dv->host_ids.data(),
-                             draft_vocab.size, rows.data(), scales.data());
-      imm.copy(dv->head.mem.ptr(), rows.data(), nb.head);
-      dv->head.scales = std::make_unique<l0::Mem>(upload(ctx, imm, scales.data(), nb.scales));
-    } else {
-      if (st.bf_tiled.size() < size_t(lm.N) * lm.K)
-        throw std::runtime_error("--draft-vocab: the bf16 staging buffer does not hold lm_head");
-      std::vector<uint16_t> rows(size_t(draft_vocab.size) * lm.K);
-      gather_bf16_tiled_rows(st.bf_tiled.data(), lm.K, lm.N, dv->host_ids.data(),
-                             draft_vocab.size, rows.data());
-      imm.copy(dv->head.mem.ptr(), rows.data(), nb.head);
-    }
-    imm.copy(dv->ids.ptr(), dv->host_ids.data(), nb.ids);
-    m.report.draft_vocab_bytes = dv->bytes();
-    if (m.report.draft_vocab_bytes != nb.total())
-      throw std::logic_error("loader: the draft vocabulary allocated " +
-                             std::to_string(m.report.draft_vocab_bytes) + " B, not the " +
-                             std::to_string(nb.total()) + " B draft_vocab_bytes() plans");
-    m.report.draft_vocab_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - d0).count();
-    m.draft_vocab = std::move(dv);
-  }
   // The MTP head's widening goes into its own Widen: the W cross-check is over
   // the main model's read-per-token bytes, which the head is not part of.
   Widen mtp_widen;
@@ -1349,15 +1286,6 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
       mtp ? mtp_line.c_str() : "not loaded; --spec mtp loads it", r.total(), r.total() / gb, per_token / gb, expected / gb,
       desc.doc_w / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
       delta * 100.0, have_w ? "" : "   (void: no measured W for this model)", m.report.seconds);
-  if (m.draft_vocab) {
-    const DraftVocabCounts& c = r.draft_vocab_counts;
-    std::print("  draft vocab {}: {:d} ids ({:d} added/EOS + {:d} ranked + {:d} lowest), {:d} B {:.3f} GB"
-               " - {} + u32 ids, gathered from lm_head in {:.0f} ms (not in total)\n",
-               draft_vocab_name(m.draft_vocab->size()).c_str(), m.draft_vocab->size(), c.forced,
-               c.ranked, c.lowest, r.draft_vocab_bytes, r.draft_vocab_bytes / gb,
-               lm_int8 ? "int8 rows + fp32 scales" : "bf16 rows",
-               r.draft_vocab_seconds * 1e3);
-  }
 
   if (desc.is_moe()) {
     const MoeLayerBytes mb = moe_layer_bytes(desc);
@@ -1394,8 +1322,8 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
 }  // namespace
 
 LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len, bool mtp,
-                 LmHeadForm lm_form, const DraftVocabSpec& draft_vocab) {
-  return load_impl(ctx, snapshot_or_repo, max_len, mtp, lm_form, draft_vocab, nullptr);
+                 LmHeadForm lm_form) {
+  return load_impl(ctx, snapshot_or_repo, max_len, mtp, lm_form, nullptr);
 }
 
 LoadedModel load_tp(l0::Context& ctx, const std::string& snapshot_or_repo, const TpSlice& tp, uint32_t max_len,
@@ -1403,7 +1331,7 @@ LoadedModel load_tp(l0::Context& ctx, const std::string& snapshot_or_repo, const
   if (tp.rank >= model::kTpSize)
     throw std::invalid_argument("loader::load_tp: rank " + std::to_string(tp.rank) + " of " +
                                 std::to_string(model::kTpSize));
-  return load_impl(ctx, snapshot_or_repo, max_len, mtp, lm_head, DraftVocabSpec{}, &tp);
+  return load_impl(ctx, snapshot_or_repo, max_len, mtp, lm_head, &tp);
 }
 
 void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len, uint32_t longest) {

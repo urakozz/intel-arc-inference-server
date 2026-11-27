@@ -151,31 +151,59 @@ void Engine::prefill_linear(l0::CmdList& list, const std::string& name, uint32_t
     list.copy(padded_input, static_cast<const std::byte*>(input) + whole * input_row, tail * input_row);
     list.fill(padded_input + tail * input_row, 0, (tile - tail) * input_row);
   }
-  for (uint32_t n0 = 0; n0 < w.N; n0 += kPrefillSlab) {
-    const uint32_t width = std::min(kPrefillSlab, w.N - n0);
+  const bool int4 = w.arena == loader::Inkling2WeightLayout::kDraft &&
+                    weights_.draft_format == loader::DraftFormat::Int4G64;
+  // The packed path fits two full-precision weight parts and two output planes in the same slab.
+  static_assert(2 * (4 * D::hidden * bf16 + kPrefillRows * f32) * kDraftInt4Slab <=
+                4 * D::hidden * bf16 * kPrefillSlab);
+  const size_t bytes_per_col = 2 * (size_t(w.K) * bf16 + size_t(rows) * f32);
+  const uint32_t slab_width = int4 ? std::min<size_t>(kPrefillSlab, s.linear_slab->size() / bytes_per_col /
+                                                                     kDraftInt4Slab * kDraftInt4Slab)
+                                  : kPrefillSlab;
+  for (uint32_t n0 = 0; n0 < w.N; n0 += slab_width) {
+    const uint32_t width = std::min(slab_width, w.N - n0);
     auto* dest = static_cast<float*>(output) + n0;
-    launch(list, unpack, "pf_ink_slab", 64, width / 64, w.K / 8,
-           weights, slab, w.K, n0, width, uint32_t(w.scales != 0));
-    const auto project = [&](const void* a, void* c, uint32_t height, uint32_t pitch) {
+    const auto project = [&](const void* a, const void* b, void* c, uint32_t height, uint32_t pitch) {
       if (large && w.scales) {   // the channel scales in the epilogue
-        launch(list, "pf_gemm_T0_CS", "pf_gemm", 512, height / tile, width / 256, a, slab, c, height, w.K, width,
+        launch(list, "pf_gemm_T0_CS", "pf_gemm", 512, height / tile, width / 256, a, b, c, height, w.K, width,
                w.K, width, pitch, uint64_t(0), uint64_t(0), uint64_t(0),
                static_cast<const float*>(at(mem, w.scales)) + n0);
       } else if (large) {
         launch(list, kernels::pf_gemm_variant(false), "pf_gemm", 512, height / tile, width / 256,
-               a, slab, c, height, w.K, width, w.K, width, pitch, uint64_t(0), uint64_t(0), uint64_t(0));
+               a, b, c, height, w.K, width, w.K, width, pitch, uint64_t(0), uint64_t(0), uint64_t(0));
       } else {
         const uint32_t sn = width % 128 == 0 ? 4 : 2;
         const auto gemm = kernels::pf_gemm_small_variant(2, 2, sn, false) + (sn == 2 ? "_INK" : "");
         launch(list, gemm, "pf_gemm_small", 16 * sn, width / (32 * sn), height / tile,
-               a, slab, c, height, w.K, width, w.K, width, pitch);
+               a, b, c, height, w.K, width, w.K, width, pitch);
       }
     };
-    if (whole) project(input, dest, whole, w.N);
-    if (tail) {
-      project(padded_input, padded_output, tile, width);
-      launch(list, unpack, "pf_ink_tail", 64, width / 64, tail,
-             padded_output, dest + size_t(whole) * w.N, width, w.N);
+    const auto run = [&](const void* b, float* c, uint32_t pitch, uint32_t full_rows) {
+      if (full_rows) project(input, b, c, full_rows, pitch);
+      if (tail) {
+        project(padded_input, b, padded_output, tile, width);
+        launch(list, unpack, "pf_ink_tail", 64, width / 64, tail,
+               padded_output, c + size_t(whole) * pitch, width, pitch);
+      }
+    };
+    if (int4) {
+      // Preserve the full int4 dequantized value with the shared wide projection's hi and lo slabs.
+      auto* hi = static_cast<uint16_t*>(slab);
+      auto* lo = hi + size_t(w.K) * width;
+      auto* partials = reinterpret_cast<float*>(lo + size_t(w.K) * width);
+      const uint64_t plane = uint64_t(rows) * width;
+      launch(list, df2_wide, "df_w_slab_q4", 256, width / 256, w.K / 64, weights, hi, n0, w.K, width);
+      if (large && whole) {
+        launch_3d(list, kernels::pf_gemm_variant(false), "pf_gemm", 512, whole / tile, width / 256, 2,
+                  input, hi, partials, whole, w.K, width, w.K, width, width, uint64_t(0), uint64_t(w.K) * width, plane);
+      }
+      run(hi, partials, width, large ? 0 : whole);
+      run(lo, partials + plane, width, large ? 0 : whole);
+      launch(list, df2_wide, "df_w_add", 256, width / 256, rows, partials, dest, width, w.N, plane);
+    } else {
+      launch(list, unpack, "pf_ink_slab", 64, width / 64, w.K / 8, weights, slab, w.K, n0, width,
+             uint32_t(w.scales != 0));
+      run(slab, dest, w.N, whole);
     }
   }
   if (w.scales && !large) launch(list, unpack, "pf_ink_scale", 64, w.N / 64, rows, output, at(mem, w.scales), w.N);

@@ -47,6 +47,7 @@
 #include "cli/serve_reconfigure.h"
 #include "cli/spec_args.h"
 #include "cli/serve_adapters.h"
+#include "kernels/kernels.h"
 #include "l0/context.h"
 #include "loader/loader.h"
 #include "loader/qwen4exp_loader.h"
@@ -98,7 +99,7 @@ struct Flags {
   [[=Help("K", "the proposer's cap: 1..3 drafts (mtp), 1..7 (dflash).", "the most")]]
   Arg<uint32_t> spec_max;   // its range is the proposer's: checked below
   [[=Help("P", "--spec dflash's drafter. Qwen3.8: required, urakozz/Qwen3.8-27B-DFlash2-W4A16-g64-AutoRound\n"
-               "(packed int4).")]]
+               "(packed int4). Inkling DFlash 2: packed int4 g64 export or bf16 release (loaded as int8).")]]
   Arg<std::string> draft_model;
   [[=Help("N", "how many requests run at once (vLLM's flag); the context follows. 1:\n"
                "one request at the largest context that fits. N > 1 (Qwen3.8, Ornith): the\n"
@@ -156,9 +157,6 @@ struct Flags {
           "Qwen3.8-27B; the most likely next token differs at 3 of 585 positions, 0 of 12 long\n"
           "exact-copy tool calls changed.",
           "l0")]] Arg<std::string> prefill_backend;
-  [[=Help("off|32k|64k|128k", "the MTP head's (or DFlash drafter's) draft vocabulary.")]]
-  std::string draft_vocab = "off";   // spec 8 §11: off until the measured rows decide
-  [[=Help("FILE", "the draft vocabulary's ids (with --draft-vocab).")]] std::string draft_vocab_ids;
 };
 
 // POST /v1/control/reconfigure (cli/serve_reconfigure.h): what run() resolved - the proposer, --host-experts - for the
@@ -418,9 +416,6 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
                              "ships (mtp); auto picks DFlash 2 when it is downloaded, else DSpark; off decodes plain");
   if (f.draft_model.given && f.spec != "dflash" && f.spec != "auto")
     throw std::runtime_error("--draft-model names the DFlash 2 drafter: use it with --spec dflash or auto");
-  if (f.draft_vocab != "off" || !f.draft_vocab_ids.empty())
-    throw std::runtime_error("--draft-vocab narrows an MTP head's or a DFlash drafter's vocabulary; Inkling 2 Mini's "
-                             "drafter reads the whole head");
   if (f.layers.given) throw std::runtime_error("--layers belongs to Qwen3.8-Flash-Next; Inkling 2 Mini loads every layer");
   if (f.pipeline_split.given)
     throw std::runtime_error("--pipeline-split: Inkling 2 Mini's --parallel pp splits its walk at a fixed visit; drop "
@@ -457,21 +452,31 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
   if (replica && f.parallel == "auto") std::print(stderr, "parallel: auto -> replica (two B70s, one request a card)\n");
 
   const std::string snapshot_dir = loader::resolve_snapshot(path);
-  // The DFlash 2 drafter (incoai/Inkling-2-Mini-DFlash2): --draft-model, else the Hugging Face cache's copy. --spec
-  // auto takes it in every mode when it is downloaded; DSpark (the checkpoint's own) otherwise.
+  // The DFlash 2 drafter: --draft-model, else the Hugging Face cache's copy - our packed int4 export when it is
+  // downloaded, else the bf16 release. --spec auto takes it in every mode; DSpark (the checkpoint's own) otherwise.
   std::string dflash_dir;
   if (f.spec == "dflash" || f.spec == "auto") {
-    try {
-      dflash_dir = loader::resolve_snapshot(f.draft_model.given ? f.draft_model.value : ci::kDflashRepo);
-    } catch (const std::runtime_error& e) {
-      if (f.spec == "dflash" || f.draft_model.given) throw;
+    if (f.draft_model.given) {
+      dflash_dir = loader::resolve_snapshot(f.draft_model.value);
+    } else {
+      for (const char* repo : {ci::kDflashInt4Repo, ci::kDflashRepo}) {
+        try {
+          dflash_dir = loader::resolve_snapshot(repo);
+          break;
+        } catch (const std::runtime_error&) {
+        }
+      }
+      if (dflash_dir.empty() && f.spec == "dflash")
+        throw std::runtime_error("--spec dflash needs the DFlash 2 drafter: hf download " + std::string(ci::kDflashInt4Repo));
     }
   }
   const loader::Inkling2Checkpoint checkpoint(snapshot_dir, dflash_dir);
   const D& desc = checkpoint.desc();
   const bool draft = f.spec != "off" && checkpoint.has_drafter();
   if (f.spec != "off" && !draft) std::print(stderr, "spec: off - this checkpoint has no mtp.safetensors (its drafter)\n");
-  const char* drafter = checkpoint.dflash() ? "DFlash 2" : "DSpark";
+  const char* drafter = !checkpoint.dflash() ? "DSpark" :
+      checkpoint.layout().draft_format == loader::DraftFormat::Int4G64 ? "DFlash 2 (packed int4 g64)" :
+                                                                        "DFlash 2 (int8 at load)";
   cli::MaxLenArg length = cli::parse_max_len(f.max_len);
   cli::check_before_load(length, D::trained_max_len, false);
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
@@ -570,8 +575,7 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_load).count(), mode);
     if (draft)
       std::print(stderr, "spec: {} {}, up to {:d} drafts a step (the K a request's acceptance picks); prompt lookup "
-                 "inside it on\n", checkpoint.dflash() ? "the DFlash 2 drafter" : "the checkpoint's DSpark drafter",
-                 is_tp ? "on both cards" : "on card 1", spec_max);
+                 "inside it on\n", drafter, is_tp ? "on both cards" : "on card 1", spec_max);
     TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
     if (tokenizer.vocab_used() != D::vocab_used)
       throw std::runtime_error("tokenizer.json defines " + std::to_string(tokenizer.vocab_used()) + " ids; Inkling 2 "
@@ -580,6 +584,7 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
     TemplateAdapter chat_template(snapshot_dir);
     ci::Inkling2EngineAdapterT<E> adapter(engine, D::vocab_used, pp_chunk, draft ? spec_max : 0,
                                           options.spec_dflash_lookup);
+    if (draft && checkpoint.dflash()) adapter.set_verify_costs(options.mtp_adaptive.by_depth);
     const std::unique_ptr<PinnedAlloc> prefix_alloc =
         make_prefix_alloc(d0, prefix_auto, prefix_gb, options, /*two_cards=*/true);
     g_in_place.spec = draft ? "auto" : "off";
@@ -597,12 +602,9 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
                "max_len {:d}, eos ", options.served_model.c_str(), options.host.c_str(), options.port,
                options.chat_format.name(), mode, len);
     print_eos(eos);
-    std::print(stderr, ", prefill {} (chunk {:d}, two chunks in flight), spec {}, kv cache {}\n",
-               int8_pass ? "l0-int8" : "l0", pp_chunk,
-               draft ? (checkpoint.dflash() ? (is_tp ? "DFlash 2 on both cards" : "DFlash 2 on card 1")
-                                            : is_tp ? "DSpark on both cards" : "DSpark on card 1")
-                     : "off",
-               kv8 ? "int8 (the full-attention visits)" : "bf16");
+    std::print(stderr, ", prefill {} (chunk {:d}, two chunks in flight), spec {}{}, kv cache {}\n",
+               int8_pass ? "l0-int8" : "l0", pp_chunk, draft ? drafter : "off",
+               draft ? (is_tp ? " on both cards" : " on card 1") : "", kv8 ? "int8 (the full-attention visits)" : "bf16");
     return listen_until_stopped(server, options);
   };
   if (tp) return two_cards(std::type_identity<ri::TpEngine>{});
@@ -632,8 +634,7 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
     const size_t vram = ri::sizes(desc, checkpoint.layout(), lens[0], true, chunk, kv8, int8_pass).memory().drafter;
     std::print(stderr, "spec: {}, up to {:d} drafts a step (the K a request's acceptance picks), {:.2f} GB of card "
                "memory{}; prompt lookup inside it on\n",
-               checkpoint.dflash() ? "the DFlash 2 drafter (" + dflash_dir + ")" : std::string("the checkpoint's DSpark "
-                                                                                              "drafter"),
+               checkpoint.dflash() ? std::format("{} from {}", drafter, dflash_dir) : std::string(drafter),
                spec_max, vram / 1e9,
                length.is_auto && without > lens[0]
                    ? std::format(", {:d} positions of context ({:d} without it)", lens[0], without)
@@ -649,6 +650,8 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
   for (auto& e : engines)
     adapters.push_back(std::make_unique<Adapter>(*e, D::vocab_used, chunk, draft ? spec_max : 0,
                                                  options.spec_dflash_lookup));
+  if (draft && checkpoint.dflash())
+    for (auto& a : adapters) a->set_verify_costs(options.mtp_adaptive.by_depth);
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, prefix_auto, prefix_gb, options, replica);
   g_in_place.spec = draft ? "auto" : "off";
   g_in_place.spec_auto = true;
@@ -684,8 +687,8 @@ int serve_inkling(const std::string& path, const Flags& f, server::Options optio
              "once, max_len {:d} / {:d}, eos ", options.served_model.c_str(), options.host.c_str(), options.port,
              options.chat_format.name(), lens[0], lens[1]);
   print_eos(eos);
-  std::print(stderr, ", prefill {} (chunk {:d}), spec {}, kv cache {}\n", int8_pass ? "l0-int8" : "l0", chunk,
-             draft ? (checkpoint.dflash() ? "DFlash 2 on each card" : "DSpark on each card") : "off", kv);
+  std::print(stderr, ", prefill {} (chunk {:d}), spec {}{}, kv cache {}\n", int8_pass ? "l0-int8" : "l0", chunk,
+             draft ? drafter : "off", draft ? " on each card" : "", kv);
   return listen_until_stopped(server, options);
 }
 
@@ -717,7 +720,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   const std::string tok_path = a.snapshot_dir + "tokenizer.json";
   cq::check_tokenizer(tok_path);   // a file read, before the device: the snapshot's must be the original's
   const cq::DecodeArgs& da = a.args;
-  const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.snapshot_dir, 0);
+  const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.snapshot_dir, 0, da.kv8);
   if (!da.max_len.is_auto && da.max_len.value > full.trained_max_len)
     throw std::runtime_error("--max-len " + std::to_string(da.max_len.value) +
                              " exceeds Qwen3.8-Flash-Next's trained context " + std::to_string(full.trained_max_len));
@@ -741,7 +744,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     StdoutToStderr redirect;
     return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head,
                                  s.desc.layers == full.layers ? 0 : s.desc.layers, a.loads_head(),
-                                 s.tier ? &*s.tier : nullptr, s.tier1 ? &*s.tier1 : nullptr, s.pf_rows);
+                                 s.tier ? &*s.tier : nullptr, s.tier1 ? &*s.tier1 : nullptr, s.pf_rows, da.kv8);
   }();
   if (da.pipe.tp()) {   // plan 21v2b: tensor parallel - every layer's half on each card (Qwen4ExpTpEngine)
     runtime::qwen4exp::Qwen4ExpTpEngine engine(*c0, *c1, std::move(model), s.max_len, {}, da.host_experts);
@@ -765,14 +768,14 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
     print_eos(eos);
     std::print(stderr,
                ", Qwen3.8-Flash-Next {} ({} chat format), --parallel tp ({:d} launches a token a card), prefill "
-               "backend l0 (chunk {:d}), attention flash, mtp {:d}{}, lm_head {}, kv cache bf16, sampling defaults: "
+               "backend l0 (chunk {:d}), attention flash, mtp {:d}{}, lm_head {}, kv cache {}, sampling defaults: "
                "greedy unless the request samples, prefix snapshots: state {:d} B, blocks {:d} B a position\n",
                engine.model().desc.layers < engine.model().checkpoint_layers
                    ? "--layers " + std::to_string(engine.model().desc.layers)
                    : std::string("whole"),
                options.chat_format.name(), engine.launches(0), engine.model().pf_rows, engine.mtp() ? a.mtp_k : 0,
                engine.mtp() ? " (the head whole on card 1)" : "", loader::lm_head_form_name(da.lm_head),
-               engine.state_bytes(), engine.kv_bytes(4) / 4);
+               da.kv8 ? "int8" : "bf16", engine.state_bytes(), engine.kv_bytes(4) / 4);
     return listen_until_stopped(server, options);
   }
   if (model.desc.layers < model.checkpoint_layers)
@@ -807,7 +810,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   print_eos(eos);
   std::print(stderr,
              ", Qwen3.8-Flash-Next {} ({} chat format), {}, prefill backend l0 (chunk {:d}), attention {} "
-             "(B70_Q4_ATTN), mtp {:d}{}, lm_head {}, kv cache bf16, sampling defaults: greedy unless the request "
+             "(B70_Q4_ATTN), mtp {:d}{}, lm_head {}, kv cache {}, sampling defaults: greedy unless the request "
              "samples, prefix snapshots: state {:d} B (GDN, PLE, indexer tails{}), blocks {:d} B a "
              "position\n",
              engine.model().desc.layers < engine.model().checkpoint_layers
@@ -818,7 +821,8 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
              engine.mtp() ? (std::string(" (the head: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
                              " norm, reuse selection)").c_str()
                           : "",
-             loader::lm_head_form_name(da.lm_head), engine.state_bytes(), engine.mtp() ? ", the head's" : "",
+             loader::lm_head_form_name(da.lm_head), da.kv8 ? "int8" : "bf16", engine.state_bytes(),
+             engine.mtp() ? ", the head's" : "",
              engine.kv_bytes(4) / 4);
   return listen_until_stopped(server, options);
 }
@@ -862,7 +866,6 @@ struct PipeServe {
   size_t mem_reserve = 0;
   runtime::KvCache kv_cache = runtime::KvCache::Bf16;
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
-  loader::DraftVocabSpec dv_spec;
   uint32_t mtp_k = 0;
   bool mtp_auto = false;
   bool have_pp_backend = false;
@@ -888,14 +891,13 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   loader::LoadedModel full = [&] {
     StdoutToStderr redirect;
     return loader::load(d0, a.snapshot_dir, cli::load_len(a.max_len_arg, a.trained),
-                        /*mtp=*/a.mtp_k > 0, a.lm_head, a.dv_spec);
+                        /*mtp=*/a.mtp_k > 0, a.lm_head);
   }();
   model::require_prefill(*full.desc);   // spec 15c, as on one card
   // Spec 19d: the drafter's planner term, read off its checkpoint against the whole target (it loads onto device 1
   // after the placement, beside lm_head and the embedding replica).
   runtime::DrafterPlan drafter_plan;
   if (a.dflash.on) drafter_plan = cli::dflash::plan_only(a.dflash, full);
-  const bool draft_vocab_on = full.draft_vocab != nullptr;
   const model::ModelDesc& d = *full.desc;
   const runtime::PpWeights w = runtime::pp_weights(full);
   const std::array<size_t, runtime::kPpDevices> dev{d0.memory_bytes(), d1.memory_bytes()};
@@ -926,7 +928,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   runtime::PipelineOptions opt;
   runtime::PipelineEngine engine(d0, d1, std::move(stages), settled.max_len, opt, a.kv_cache, drafter.get());
   if (drafter)
-    drafter->attach_target(d1, engine.model(1), engine.buffers(1).control, settled.max_len, draft_vocab_on);
+    drafter->attach_target(d1, engine.model(1), engine.buffers(1).control, settled.max_len);
   if (a.have_pp_backend) engine.set_prefill_backend(a.pp_backend);
   engine.set_prefill_chunk_cap(pf.chunk_cap);   // plan 5d: the cap the plan counted
   // The two-card prefill set up at load, not in a request (each card's scratch, context and
@@ -957,15 +959,13 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   print_eos(a.eos);
   std::print(stderr,
              ", --parallel pp (split {:d}: device 0 layers [0, {:d}), device 1 [{:d}, {:d})), prefill "
-             "backend {}, mtp {}{:d}{}, lm_head {}{}{}, kv cache {}\n",
+             "backend {}, mtp {}{:d}{}, lm_head {}, kv cache {}\n",
              engine.split(), engine.split(),
              engine.stage(1).first, engine.stage(1).last,
              runtime::prefill_backend_name(engine.prefill_backend()), a.mtp_auto ? "auto, max " : "",
              a.mtp_k,
              engine.mtp() ? " (the head on device 1)" : engine.has_drafter() ? " (dflash: the drafter on device 1)" : "",
              loader::lm_head_form_name(a.lm_head),
-             engine.draft_vocab() ? ", draft vocab " : "",
-             engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
              runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, a.mtp_auto, served.is_moe(), served.name);
   cli::notice_int8_prefill(engine.prefill_backend(), served);
@@ -1135,7 +1135,6 @@ struct ReplicaServe {
   size_t mem_reserve = 0;
   runtime::KvCache kv_cache = runtime::KvCache::Bf16;
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
-  loader::DraftVocabSpec dv_spec;
   uint32_t mtp_k = 0;
   bool mtp_auto = false;
   bool have_pp_backend = false;
@@ -1167,7 +1166,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     loader::LoadedModel model = [&] {
       StdoutToStderr redirect;
       return loader::load(c, a.snapshot_dir, cli::load_len(a.max_len_arg, a.trained),
-                          /*mtp=*/a.mtp_k > 0, a.lm_head, a.dv_spec);
+                          /*mtp=*/a.mtp_k > 0, a.lm_head);
     }();
     // PERF-123 on each card, as on one card: the head's 2-bit copy the greedy verify lists scan (plan 41f: without it a
     // card's verify ranked the head otherwise, and replica's ids differed from one card's).
@@ -1207,12 +1206,11 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     if (drafter_load)
       drafter = std::make_unique<runtime::dflash::DFlashDrafter>(c, std::move(drafter_load->w), drafter_load->head_rows,
                                                                  max_len, a.dflash.max_k, uint32_t(slot_lens.size()));
-    const bool draft_vocab_on = model.draft_vocab != nullptr;
     auto engine = std::make_unique<runtime::Engine>(c, std::move(model), max_len, /*debug_resid=*/false, a.kv_cache,
                                                     drafter.get(),
                                                     slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{},
                                                     pool.pages);
-    if (drafter) drafter->attach(*engine, draft_vocab_on);
+    if (drafter) drafter->attach(*engine);
     if (a.have_pp_backend) engine->set_prefill_backend(a.pp_backend);
     engine->set_prefill_chunk_cap(chunk_cap);   // plan 5d
     engine->set_prefill_dense_bf16(settled.dense_bf16);   // open-work 38
@@ -1296,6 +1294,9 @@ int run(int argc, char** argv) {
     usage();
     return 0;
   }
+  // The compiled device binaries: the compiled-in directory (the Docker image, a build tree) or, in an extracted
+  // release tarball, the one beside this executable - resolved once here, so a missing one fails at startup.
+  (void)kernels::kernel_dir();
   server::Options options;
   options.host = f.host;
   if (f.port > 65535) throw std::runtime_error("--port is out of range");
@@ -1320,10 +1321,6 @@ int run(int argc, char** argv) {
   cli::dflash::Args dflash;   // spec 19c: --spec dflash's drafter (--draft-model)
   dflash.model = f.draft_model.value;
   dflash.have_model = f.draft_model.given;
-  uint32_t draft_vocab = 0;
-  if (!loader::parse_draft_vocab(f.draft_vocab, draft_vocab))
-    throw std::runtime_error("--draft-vocab expects off, 32k, 64k or 128k, got '" + f.draft_vocab + "'");
-  const std::string draft_vocab_ids = f.draft_vocab_ids;
   cli::PipelineArgs pipe;
   cli::parse_parallel(f.parallel, pipe);
   if (f.pipeline_split.given) cli::parse_pipeline_split(f.pipeline_split.value, pipe);
@@ -1400,8 +1397,6 @@ int run(int argc, char** argv) {
   const bool int8_dense = have_pp_backend && pp_backend == runtime::PrefillBackend::L0Int8 &&
                           cli::int8_context_model(path);
   if (have_pp_backend) kv_cache = cli::int8_pass_kv(pp_backend, int8_dense, f.kv_cache, kv_cache);
-  if (!draft_vocab_ids.empty() && draft_vocab == 0)
-    throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
   // The hardware gate (cli/hardware_gate.h): one or two Intel Arc Pro B70s, peer access between two - before
   // any model file is read. Its card memory is what the fit checks before a device opens plan against.
@@ -1456,26 +1451,16 @@ int run(int argc, char** argv) {
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
-  cli::check_tp(pipe, {false, false, is_kol,   // spec 19 v3c: dflash is served
-                       draft_vocab != 0 || !draft_vocab_ids.empty()});
-  // Kolibri DSpark: Kolibri-1's drafter by name, and no draft vocabulary (DSpark reads the whole lm_head).
+  cli::check_tp(pipe, {false, false, is_kol});
+  // Kolibri DSpark: Kolibri-1's drafter by name.
   if (is_kol && dflash.on && !dflash.have_model)
     throw std::runtime_error("--spec dflash on Kolibri-1 needs --draft-model: --draft-model intuit/Kolibri-1-dspark (the "
                              "DSpark drafter, bf16, from the HF cache)");
-  if (is_kol && dflash.on && (draft_vocab != 0 || !draft_vocab_ids.empty()))
-    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a DFlash drafter's vocabulary; "
-                             "Kolibri-1's DSpark drafter reads the whole lm_head");
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true);
-  // --max-num-seqs: a card's several slots run beside no draft vocabulary;
   // plan 19v3b: --spec dflash serves up to kDflashSlots requests a card (above it MTP is faster).
   const uint32_t per_card = pipe.replica() ? (max_num_seqs + 1) / 2 : max_num_seqs;
-  if (per_card > 1 && (draft_vocab != 0 || !draft_vocab_ids.empty()))
-    throw std::runtime_error("--max-num-seqs " + std::to_string(max_num_seqs) +
-                             " gives a card several slots, and --draft-vocab beside slots is "
-                             "not built - drop --draft-vocab, or --max-num-seqs " +
-                             (pipe.replica() ? "2" : "1"));
   if (dflash.on && per_card > cli::dflash::kDflashSlots)
     throw std::runtime_error("--max-num-seqs " + std::to_string(max_num_seqs) + " gives a card " +
                              std::to_string(per_card) + " requests at once; --spec dflash serves up to " +
@@ -1498,23 +1483,14 @@ int run(int argc, char** argv) {
     // Qwen3.8-Flash-Next's under tp (plan 21-QFN-v2b Task 7).
     if (pipe.tp())
       options.mtp_adaptive.cost = is_q4 ? server::MtpCost::tp_flash_next() : server::MtpCost::tp_int8_head();
-    // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head share scales with it
-    // (derived; MtpCost::kInt8DraftHeadShare).
-    if (draft_vocab != 0)
-      options.mtp_adaptive.cost = options.mtp_adaptive.cost.with_draft_vocab(
-          server::MtpCost::kInt8DraftHeadShare, double(draft_vocab) / model::Qwen35::kVocab);
   }
-  // Spec 8 §11: the draft vocabulary narrows the MTP head's or the drafter's drafts.
-  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && !mtp_on && !dflash.on)
-    throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --spec mtp (the default where the model has "
-                             "an MTP head) or --spec dflash");
   // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table). Kolibri DSpark sets
   // its own (serve_kolibri).
   if (dflash.on && !is_kol) {
     cli::dflash::resolve_format(dflash);
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;
-    options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab);
+    options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head);
   }
 
   // Spec 21-QFN-v1e: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's
@@ -1546,7 +1522,6 @@ int run(int argc, char** argv) {
     qa.pp_backend = pp_backend;
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
     qs.mtp_k = mtp_k;       // the deepest K; the server picks each iteration's (options.mtp_adaptive)
-    qs.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     qa.load_mtp = qs.loads_head();
     qs.prefix_auto = prefix_auto;
     qs.prefix_cache_gb = prefix_cache_gb;
@@ -1603,23 +1578,13 @@ int run(int argc, char** argv) {
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
   cli::check_before_load(max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
-  // Spec 8 §11: what V' is built from - tokenizer.json's added tokens, the EOS ids, the
-  // ranked file. Read before the device is touched, so a bad file fails fast.
-  loader::DraftVocabSpec dv_spec;
-  if (draft_vocab != 0) {
-    dv_spec.size = draft_vocab;
-    dv_spec.for_drafter = dflash.on;   // spec 19c: the drafter's head, no MTP head
-    dv_spec.added = loader::added_token_ids_file(snapshot_dir + "tokenizer.json");
-    dv_spec.eos = eos;
-    if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
-  }
   // Spec 17d: --parallel auto on two B70s serves Qwen3.8 under tensor parallel (cli::tp_auto,
   // on since the twin count, cli::kTpAuto) - one request at a time, faster; --max-num-seqs above 1 chose replica
   // (or one card's slots) above, cli::resolve_max_num_seqs.
   std::string tp_why;
   if (pipe.mode == cli::Parallel::Auto &&
       cli::tp_auto(snapshot_dir, max_len_arg, hw.cards,
-                   dflash.on || draft_vocab != 0 || !draft_vocab_ids.empty() ||
+                   dflash.on ||
                        (have_pp_backend && pp_backend != runtime::PrefillBackend::L0))) {
     pipe.mode = cli::Parallel::Tp;
     tp_why = " (auto: two B70s with peer access, Qwen3.8)";
@@ -1654,7 +1619,6 @@ int run(int argc, char** argv) {
     rs.mem_reserve = mem_reserve;
     rs.kv_cache = kv_cache;
     rs.lm_head = lm_head;
-    rs.dv_spec = dv_spec;
     rs.mtp_k = mtp_k;
     rs.mtp_auto = mtp_on && spec.adaptive;
     rs.have_pp_backend = have_pp_backend;
@@ -1692,7 +1656,6 @@ int run(int argc, char** argv) {
     ps.mem_reserve = mem_reserve;
     ps.kv_cache = kv_cache;
     ps.lm_head = lm_head;
-    ps.dv_spec = dv_spec;
     ps.mtp_k = mtp_k;
     ps.mtp_auto = mtp_on;
     ps.have_pp_backend = have_pp_backend;
@@ -1710,7 +1673,7 @@ int run(int argc, char** argv) {
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
-                        /*mtp=*/mtp_k > 0, lm_head, dv_spec);
+                        /*mtp=*/mtp_k > 0, lm_head);
   }();
   cli::dflash::main_candidate_head(context, model, mtp_k > 0);   // PERF-123: before the plan
   // Spec 19c: the drafter beside the target, before the plan (its weights and buffers, and the engine's verify
@@ -1758,10 +1721,9 @@ int run(int argc, char** argv) {
     drafter = std::make_unique<runtime::dflash::DFlashDrafter>(context, std::move(drafter_load->w),
                                                                drafter_load->head_rows, max_len, dflash.max_k,
                                                                uint32_t(slot_lens.size()));
-  const bool draft_vocab_on = model.draft_vocab != nullptr;
   runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get(),
                          slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{}, pool.pages);
-  if (drafter) drafter->attach(engine, draft_vocab_on);
+  if (drafter) drafter->attach(engine);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
   engine.set_prefill_chunk_cap(settled.chunk_cap);   // plan 5d
   engine.set_prefill_dense_bf16(settled.dense_bf16);   // open-work 38
@@ -1811,11 +1773,9 @@ int run(int argc, char** argv) {
   std::print(stderr, "b70-serve: {} on http://{}:{:d}, max_len {:d}, eos ", options.served_model.c_str(),
              options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::print(stderr, ", prefill backend {}, mtp {}{:d}, lm_head {}{}{}, kv cache {}\n",
+  std::print(stderr, ", prefill backend {}, mtp {}{:d}, lm_head {}, kv cache {}\n",
              runtime::prefill_backend_name(engine.prefill_backend()), mtp_on && spec.adaptive ? "auto, max " : "",
              mtp_k, loader::lm_head_form_name(lm_head),
-             engine.draft_vocab() ? ", draft vocab " : "",
-             engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
              runtime::kv_cache_name(engine.kv_cache()));
   print_proposer(options, mtp_on && spec.adaptive, served.is_moe(), served.name);
   cli::notice_int8_prefill(engine.prefill_backend(), served);

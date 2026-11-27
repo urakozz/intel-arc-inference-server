@@ -11,11 +11,10 @@
 namespace runtime {
 
 std::vector<VramPart> vram_parts(const MemoryComponents& c, const std::string& state, const std::string& drafter) {
-  const size_t dv_weights = c.drafter ? 0 : c.draft_vocab;
-  return {{"weights", c.model + dv_weights},
+  return {{"weights", c.model},
           {"KV cache", c.kv},
           {state, c.decode_state},
-          {drafter, c.drafter + (c.draft_vocab - dv_weights)},
+          {drafter, c.drafter},
           {"int8 prefill state", c.int8},
           {"prefill scratch", c.prefill_scratch}};
 }

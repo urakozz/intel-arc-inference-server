@@ -340,10 +340,8 @@ struct Cand {
 };
 inline bool better(const Cand& a, const Cand& b) { return a.v > b.v || (a.v == b.v && a.i < b.i); }
 
-// The TOPK best of logits[0, used) (NaN never selected), then scaled / capped. `ids` maps an index to its id (the
-// draft vocabulary's table; null: identity).
-inline std::vector<Cand> topk(const float* logits, uint32_t used, uint32_t k, float mult, float softcap,
-                              const uint32_t* ids = nullptr) {
+// The TOPK best of logits[0, used) (NaN never selected), then scaled / capped.
+inline std::vector<Cand> topk(const float* logits, uint32_t used, uint32_t k, float mult, float softcap) {
   std::vector<Cand> c;
   for (uint32_t i = 0; i < used; ++i)
     if (!std::isnan(logits[i])) c.push_back({logits[i], i});
@@ -353,7 +351,6 @@ inline std::vector<Cand> topk(const float* logits, uint32_t used, uint32_t k, fl
     float v = x.v * mult;
     if (softcap > 0.0f) v = std::tanh(v / softcap) * softcap;
     x.v = v;
-    if (ids) x.i = ids[x.i];
   }
   while (c.size() < k) c.push_back({-INFINITY, kNoIdx});
   return c;
@@ -609,12 +606,11 @@ struct Layer {
 
 struct Weights {
   Dims d;
-  Lin fc, sel, head;              // head: the target's lm_head ([V][H], or the compact one)
+  Lin fc, sel, head;              // head: the target's lm_head ([V][H])
   std::vector<Layer> layers;
   std::vector<float> hidden_norm, final_norm, mask_row;
   std::vector<uint16_t> embed;    // the target's bf16 [V][H]
   std::vector<uint16_t> pred, succ;
-  std::vector<uint32_t> head_ids; // compact head: index -> id (empty: identity)
 };
 
 // The drafter's per-layer context ring, positions at slot pos % ring (floats: bf16-widened under Engine).
@@ -775,11 +771,9 @@ inline DraftOut draft(const Weights& w, Numerics nm, const Ring& ring, const std
     hid.assign(size_t(M) * d.rank, 0.0f);
     w.sel.apply(x.data(), h.data(), M, hid.data());
   }
-  const uint32_t used = w.head_ids.empty() ? d.used : w.head.N;
   uint32_t prev = anchor_id;
   for (uint32_t j = 0; j < K; ++j) {
-    const std::vector<Cand> c = topk(&logits[size_t(j) * w.head.N], used, d.topk, d.out_mult, d.softcap,
-                                     w.head_ids.empty() ? nullptr : w.head_ids.data());
+    const std::vector<Cand> c = topk(&logits[size_t(j) * w.head.N], d.used, d.topk, d.out_mult, d.softcap);
     std::vector<uint32_t> cid(d.topk);
     std::vector<float> un(d.topk), s(d.topk);
     for (uint32_t i = 0; i < d.topk; ++i) {

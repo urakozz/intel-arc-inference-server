@@ -417,6 +417,13 @@ add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)
 
+# The kernel directory lookup (src/kernels/kernel_dir.cc): compiled-in path first, <executable>/../kernels in an
+# extracted release tarball, a plain sentence naming both when neither exists. Host only.
+add_executable(kernel_dir_test kernels/kernel_dir_test.cc)
+target_include_directories(kernel_dir_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(kernel_dir_test PRIVATE b70_kernel_dir)
+add_test(NAME kernel_dir_test COMMAND kernel_dir_test)
+
 # Spec 28 (plan 28a): the small-M GEMM's fp64 reference and gemv's fp32 host twin. Host only.
 add_executable(gemm_sm_ref_test kernels/gemm_sm_ref_test.cc)
 target_include_directories(gemm_sm_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
@@ -578,11 +585,14 @@ b70_target_kernel_dir(gemv_bf16_test)
 # to the reference tolerance (spec 1.5 lever L2 reorders the sum).
 add_dependencies(gemv_bf16_test kernel_gemv_bf16_M1_K5120_N128
   kernel_gemv_bf16_M1_K5120_N128_C16_S16 kernel_gemv_bf16_M1_K5120_N248320)
-# Item 40: the ROWG builds against the plain 16-row ones.
+# The verify rows on the DPAS: the 2..8-row and ROWG builds (item 40) against the one-row ones.
 if(B70_MTP AND B70_VERIFY_M8)
-  add_dependencies(gemv_bf16_test kernel_gemv_bf16_M16_K5120_N128_C16_S16 kernel_gemv_bf16_M16_K10240_N5120
-    kernel_gemv_bf16_M16_K5120_N14336 kernel_gemv_bf16_M8_K5120_N128_C16_S16_RG kernel_gemv_bf16_M8_K10240_N5120_RG
-    kernel_gemv_bf16_M8_K5120_N14336_RG)
+  foreach(_kn K5120_N128_C16_S16 K10240_N5120 K5120_N14336)
+    foreach(_m 1 2 3 4 5 6 7 8)
+      add_dependencies(gemv_bf16_test kernel_gemv_bf16_M${_m}_${_kn})
+    endforeach()
+    add_dependencies(gemv_bf16_test kernel_gemv_bf16_M8_${_kn}_RG)
+  endforeach()
 endif()
 add_test(NAME gemv_bf16_test COMMAND gemv_bf16_test)
 
@@ -596,26 +606,6 @@ add_dependencies(gemv_i8w_test kernel_gemv_i8w_M1_K5120_N248320 kernel_gemv_i8w_
                  kernel_pi8h_gemv_i8w_M1_K5120_N248320_NM kernel_pi8h_gemv_i8w_M4_K5120_N248320_NM)   # PERF-111
 add_test(NAME gemv_i8w_test COMMAND gemv_i8w_test)
 set_tests_properties(gemv_i8w_test PROPERTIES TIMEOUT 900)
-
-# Spec 8 §11: the draft vocabulary's kernels at every compiled |V'|, int8 and bf16 heads -
-# the compact GEMV bitwise equal to the full head's columns, the mapped argmax equal to the full
-# output's argmax restricted to V', the scatter row, planted ties / -inf / NaN. The
-# binaries are built with the MTP set (src/kernels/CMakeLists.txt, B70_MTP).
-if(B70_MTP)
-  add_executable(draft_vocab_kernels_test kernels/draft_vocab_kernels_test.cc)
-  target_include_directories(draft_vocab_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(draft_vocab_kernels_test PRIVATE b70_loader b70_l0)
-  b70_target_kernel_dir(draft_vocab_kernels_test)
-  add_dependencies(draft_vocab_kernels_test kernel_gemv_i8w_M1_K5120_N248320
-    kernel_gemv_i8w_M1_K5120_N32768 kernel_gemv_i8w_M1_K5120_N65536
-    kernel_gemv_i8w_M1_K5120_N131072 kernel_gemv_bf16_M1_K5120_N248320
-    kernel_gemv_bf16_M1_K5120_N32768 kernel_gemv_bf16_M1_K5120_N65536
-    kernel_gemv_bf16_M1_K5120_N131072 kernel_dv_argmax_N32768 kernel_dv_argmax_N65536
-    kernel_dv_argmax_N131072)
-  add_test(NAME draft_vocab_kernels_test COMMAND draft_vocab_kernels_test)
-  set_tests_properties(draft_vocab_kernels_test PROPERTIES TIMEOUT 900)
-endif()
 
 add_executable(prep_test kernels/prep_test.cc)
 target_include_directories(prep_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
@@ -684,8 +674,7 @@ if(B70_VERIFY_M8 AND B70_MTP)
   endforeach()
   list(APPEND B70_VERIFY_M8_KERNELS kernel_gemv_M8_K5120_N6144_S4_L0 kernel_gemv_M8_K4096_N5120_S4_L0
     kernel_gemv_M8_K5120_N1280_S16_L0 kernel_gemv_M8_K5120_N2048_S8_L0
-    kernel_gemv_M8_K25600_N5120_S8_L0 kernel_gemv_M8_K5120_N256_S16_L0
-    kernel_gemv_i8w_M7_K5120_N32768)
+    kernel_gemv_M8_K25600_N5120_S8_L0 kernel_gemv_M8_K5120_N256_S16_L0)
   set(_v19a_reused kernel_argmax_stage2)
   get_property(_v28b_gemm_sm GLOBAL PROPERTY B70_GEMM_SM_KERNELS)   # spec 28b: the verify lists' gemm_sm
   get_property(_v28b_cons GLOBAL PROPERTY B70_GEMM_SM_CONSUMERS)    # and gate||up's SiLU at S 1
@@ -818,13 +807,6 @@ add_executable(lm_head_int8_test loader/lm_head_int8_test.cc)
 target_include_directories(lm_head_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(lm_head_int8_test PRIVATE b70_loader)
 add_test(NAME lm_head_int8_test COMMAND lm_head_int8_test)
-
-# Spec 8 §11: the draft vocabulary's host half - which ids V' holds, the ranked-id file,
-# tokenizer.json's added tokens, and the compact head's gather from the int8 head.
-add_executable(draft_vocab_test loader/draft_vocab_test.cc)
-target_include_directories(draft_vocab_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(draft_vocab_test PRIVATE b70_loader)
-add_test(NAME draft_vocab_test COMMAND draft_vocab_test)
 
 add_executable(quant_test loader/quant_test.cc)
 target_include_directories(quant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -1776,18 +1758,6 @@ if(B70_MTP)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
       ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8ALL};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
-    # Spec 8 §11's M3 gate: drafts over a 128k draft vocabulary, greedy output identical to
-    # the plain loop (= --draft-vocab off) on the golden and A4 prompts at every K, and the
-    # sampled / replay checks with q = -inf outside V'. 32k / 64k run the same way by hand.
-    # Both head forms: the compact head is gathered from whichever one is loaded.
-    add_test(NAME mtp_gpu_dv128k_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8
-      --lm-head int8 --draft-vocab 128k)
-    add_test(NAME mtp_gpu_dv128k_bf16_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8
-      --lm-head bf16 --draft-vocab 128k)
-    set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES
-      LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
-    set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8ALL};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
     # Open-work 27: prompt lookup inside MTP through EngineAdapter - D2 against the plain loop on golden, A4 and the
     # edit / copy set's 8k / 32k prompts by the f32 judge (the int8 head's references), the warm head, a truncate
     # inside a lookup burst, a seeded sampled run reproducible.
@@ -1856,14 +1826,7 @@ add_test(NAME memory_plan_box_test COMMAND memory_plan_box_test ${B70_TEST_SNAPS
 set(_b70_plan_box_tests memory_plan_box_test)
 if(B70_MTP)
   add_test(NAME memory_plan_box_mtp_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT} mtp)
-  # Spec 8 §11: the draft vocabulary's compact head + id table and compact logits are
-  # planned and allocated alike, for both head forms (16384 and auto).
-  add_test(NAME memory_plan_box_dv128k_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT} mtp
-    --lm-head int8 --draft-vocab 128k)
-  add_test(NAME memory_plan_box_dv128k_bf16_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT}
-    mtp --lm-head bf16 --draft-vocab 128k)
-  list(APPEND _b70_plan_box_tests memory_plan_box_mtp_test memory_plan_box_dv128k_test
-    memory_plan_box_dv128k_bf16_test)
+  list(APPEND _b70_plan_box_tests memory_plan_box_mtp_test)
 endif()
 set_tests_properties(${_b70_plan_box_tests} PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
@@ -2416,9 +2379,6 @@ if(B70_ORNITH AND B70_MTP)
       kernel_prep_res_fold_M${MM}_K2048_SP0_G20_P2 kernel_prep_res_fold_M${MM}_K2048_SP1_G20_Z kernel_attn_prep_M${MM}_Q16KV2_S1)
   endforeach()
   list(APPEND B70_ORNITH_MTP_KERNELS kernel_prep_res_fold_M1_K2048_SP1_G20)
-  foreach(NV 32768 65536 131072)
-    list(APPEND B70_ORNITH_MTP_KERNELS kernel_gemv_i8w_M1_K2048_N${NV} kernel_gemv_bf16_M1_K2048_N${NV})
-  endforeach()
   # PERF-85: the head's prompt pass binds the one-launch forms; pf_res_fold _Z and pf_norm_finish _X4096 stay built
   # as pf_norm_fused_mtp_test's reference.
   list(APPEND B70_ORNITH_MTP_KERNELS kernel_pf_bf16_slab_K4096 kernel_pf_bf16_slab_K2048
@@ -2429,7 +2389,6 @@ if(B70_ORNITH AND B70_MTP)
   # What the lists reuse: 15c's decode list, 15d's prefill kernels, spec 8's shared ones.
   set(_o15e_reused ${B70_ORNITH_DECODE_KERNELS}
     kernel_argmax_stage1_M2 kernel_argmax_stage1_M3 kernel_argmax_stage1_M4
-    kernel_dv_argmax_N32768 kernel_dv_argmax_N65536 kernel_dv_argmax_N131072
     kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
     kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_embed_gather_D2048
     kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_res_norm_K2048_SP0_G20)
@@ -2462,7 +2421,8 @@ if(B70_ORNITH AND B70_MTP)
     kernel_moe_M3_E256_T8_D2048_I512 kernel_moe_M4_E256_T8_D2048_I512)
   if(B70_VERIFY_M8)   # PERF-56: the wide lookup verify lists' rows
     add_dependencies(moe_m_test kernel_moe_M16_E256_T8_D2048_I512 kernel_moe_M32_E256_T8_D2048_I512
-      kernel_moe_M64_E256_T8_D2048_I512 kernel_moe_M16_E256_T8_D2048_I512_U kernel_moe_M32_E256_T8_D2048_I512_U)
+      kernel_moe_M64_E256_T8_D2048_I512 kernel_moe_M16_E256_T8_D2048_I512_U kernel_moe_M32_E256_T8_D2048_I512_U
+      kernel_moe_M4_E256_T8_D2048_I512_U)
   endif()
   add_test(NAME moe_m_test COMMAND moe_m_test)
   set_tests_properties(moe_m_test PROPERTIES LABELS "ornith;mtp" TIMEOUT 900)
@@ -2582,8 +2542,6 @@ fi
   b70_serve_reject(cli_reject_serve_flag_seqs_zero ${B70_NO_MODEL} --max-num-seqs 0
     EXPECT "--max-num-seqs 0 would serve no request")
   b70_serve_reject(cli_reject_serve_flag_layers_zero ${B70_NO_MODEL} --layers 0 EXPECT "--layers 0 would load no layer")
-  b70_serve_reject(cli_reject_serve_flag_draft_vocab ${B70_NO_MODEL} --draft-vocab 7k
-    EXPECT "--draft-vocab expects off, 32k, 64k or 128k, got '7k'")
   b70_serve_reject(cli_reject_serve_flag_cache_gb ${B70_NO_MODEL} --prefix-cache-gb x
     EXPECT "--prefix-cache-gb expects a non-negative integer, got 'x'")
   b70_serve_reject(cli_reject_serve_flag_unknown ${B70_NO_MODEL} --bogus EXPECT "unknown option '--bogus'")
@@ -2593,7 +2551,7 @@ fi
     --log-requests /nonexistent/log --prefix-cache-gb 0 --prefix-split-last --spec mtp --spec-max 2 --prefill-backend l0
     --kv-cache bf16 --parallel 1 EXPECT "cannot create directories: Permission denied [/nonexistent/log]")
   b70_serve_reject(cli_accept_serve_flags_draft ${B70_NO_MODEL} --spec dflash --draft-model /nonexistent/drafter
-    --draft-vocab off --prefix-cache-gb auto --parallel auto --max-len auto
+    --prefix-cache-gb auto --parallel auto --max-len auto
     EXPECT "not a directory and not an <org>/<name> repo id: /nonexistent/drafter")
   add_test(NAME cli_serve_help COMMAND sh -c [==[
 bin=$1
@@ -2602,11 +2560,11 @@ out=$("$bin" --help 2>&1) || { echo "cli_serve_help: --help did not exit 0" >&2;
 for f in "$@"; do printf '%s\n' "$out" | grep -qF -- "$f" || { echo "cli_serve_help: --help does not name $f" >&2; exit 1; }; done
 ]==] cli_serve_help $<TARGET_FILE:b70-serve> --spec --spec-max --draft-model --max-num-seqs --max-len --parallel
     --pipeline-split --host --port --log-requests --prefix-cache-gb --prefix-split-last --layers --kv-cache
-    --prefill-backend --draft-vocab --draft-vocab-ids)
+    --prefill-backend)
   # The flag tables (README.md: b70-serve, docs/18-development.md: b70-decode) against both binaries' generated --help:
   # the same flags, the same defaults.
   add_test(NAME cli_readme_flags COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/cli/readme_flags_test.py
-    ${CMAKE_SOURCE_DIR}/README.md ${CMAKE_SOURCE_DIR}/docs/18-development.md $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode>)
+    ${CMAKE_SOURCE_DIR}/docs/17-running-models.md ${CMAKE_SOURCE_DIR}/docs/18-development.md $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode>)
 endif()
 
 
@@ -3560,7 +3518,7 @@ if(B70_Q4EXP)
     add_executable(qwen4exp_tp_test runtime/qwen4exp_tp_test.cc)
     target_include_directories(qwen4exp_tp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
       ${CMAKE_SOURCE_DIR}/tests/runtime)
-    target_link_libraries(qwen4exp_tp_test PRIVATE b70_qwen4exp_runtime b70_l0)
+    target_link_libraries(qwen4exp_tp_test PRIVATE b70_qwen4exp_prefill b70_l0)   # forcepf: prefills
     add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_gemv_M1_K2560_N8192_S1_L0_KS4
       kernel_gemv_M1_K2560_N6656_S2_L0 kernel_gemv_M1_K3072_N2560_S4_L0_TP kernel_gemv_i8w_M1_K2560_N124160
       kernel_prep_gated_head_M1_GK8V24_SIG kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV1
@@ -3583,7 +3541,6 @@ endif()
 # dispatch and the refusals read.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "its MTP head is served by b70-serve")
-b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
 # (spec 21-QFN-v1e removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21-QFN-v1e's block's)
 # ==== Spec 21-QFN-v1c: Qwen3.8-Flash-Next decode ==== (end) ====
 
@@ -3646,6 +3603,20 @@ if(B70_Q4EXP)
     kernel_q4_qsa_M2048_T512_W1024_PF)   # the bf16 reference form
   add_test(NAME qwen4exp_pf_kernels_test COMMAND qwen4exp_pf_kernels_test)
   set_tests_properties(qwen4exp_pf_kernels_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  # Plan 21-QFN-v3a Task 1: the int8 KV cache's writers (bitwise kv8.h) and readers (against an fp64 twin on the same
+  # codes) at 24 / 2 heads - tests/kernels/qwen4exp_kv8_test.cc (GPU only).
+  if(B70_KV8)
+    add_executable(qwen4exp_kv8_test kernels/qwen4exp_kv8_test.cc)
+    target_include_directories(qwen4exp_kv8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+    target_link_libraries(qwen4exp_kv8_test PRIVATE b70_l0)
+    b70_target_kernel_dir(qwen4exp_kv8_test)
+    add_dependencies(qwen4exp_kv8_test kernel_attn_prep_M1_Q24KV2 kernel_attn_prep_M1_Q24KV2_KV8
+      kernel_pf_attn_prep_q16_Q24KV2 kernel_pf_attn_prep_kv8_Q24KV2 kernel_pf_attn_prep_kv8_Q24KV2_KVO
+      kernel_q4_qsa_attn_M1_T32_KV8 kernel_pf_flash_attn_kv8_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_KV8
+      kernel_pf_attn_gate_kv8_Q24KV2)
+    add_test(NAME qwen4exp_kv8_test COMMAND qwen4exp_kv8_test)
+    set_tests_properties(qwen4exp_kv8_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  endif()
   # Task 3: the prefill walk on the card (GPU only; SKIP 77 without the synthetic checkpoints / Intel's).
   #   qwen4exp_prefill_test: the walk's launches and the plan, F4 (two prefills, recorded == replayed, chunks of 64 ==
   #       2048 bitwise, 16 printed), Review Focus 5 (the state, routes and selections against decode's fill, tokens),
@@ -3689,6 +3660,12 @@ if(B70_Q4EXP)
   # across two cards; Intel's truncated model on two cards at the planner's N with prefill (37 at 32768: 38 does not fit
   # beside the prefill scratch)
   add_test(NAME qwen4exp_prefill_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} pp pp2:2)
+  # plan 21-QFN-v3a: the int8 KV cache - F4, chunking, prefill against decode (all), the wide chunk, pp against one card
+  add_test(NAME qwen4exp_prefill_synth_kv8_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} all kv8)
+  add_test(NAME qwen4exp_prefill_wide_kv8_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} wide kv8)
+  add_test(NAME qwen4exp_prefill_pp_kv8_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} pp pp2:2 kv8)
+  set_tests_properties(qwen4exp_prefill_synth_kv8_test qwen4exp_prefill_wide_kv8_test qwen4exp_prefill_pp_kv8_test
+    PROPERTIES LABELS "checkpoint;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   add_test(NAME prefill_split_qwen4exp_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} split pp2:2)
   foreach(n 18 37)
     set(_q4judge${n} "")
@@ -3766,6 +3743,9 @@ if(B70_Q4EXP AND B70_TP)
   target_link_libraries(qwen4exp_tp_prefill_test PRIVATE b70_qwen4exp_prefill b70_l0)
   add_dependencies(qwen4exp_tp_prefill_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS}
     ${B70_Q4EXP_TP_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS})
+  if(TARGET qwen4exp_tp_test)   # its forcepf: rows prefill
+    add_dependencies(qwen4exp_tp_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_TP_PREFILL_KERNELS})
+  endif()
   foreach(mode pp tp)
     add_test(NAME qwen4exp_tp_prefill_${mode}_test COMMAND qwen4exp_tp_prefill_test ${B70_Q4EXP_RTN_SNAPSHOT}
       ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids ${mode} ${CMAKE_BINARY_DIR}/qwen4exp_tp_pf_rows.f32)
@@ -3917,9 +3897,15 @@ if(B70_Q4EXP)
     ${_q4snap_ids} mtp)
   add_test(NAME qwen4exp_snapshot_gpu_cross_mtp_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
     ${_q4snap_ids} cross mtp)
+  # plan 21-QFN-v3a: the int8 KV cache - a prefix cache hit bitwise cold, one card with the head, and pp
+  add_test(NAME qwen4exp_snapshot_gpu_synth_kv8_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
+    ${_q4snap_ids} mtp kv8)
+  add_test(NAME qwen4exp_snapshot_gpu_synth_pp_kv8_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
+    ${_q4snap_ids} pp2:2 kv8)
   set_tests_properties(qwen4exp_snapshot_gpu_synth_test qwen4exp_snapshot_gpu_synth_intel_test
     qwen4exp_snapshot_gpu_synth_pp_test qwen4exp_snapshot_gpu_cross_test qwen4exp_snapshot_gpu_intel_test
-    qwen4exp_snapshot_gpu_synth_mtp_test qwen4exp_snapshot_gpu_cross_mtp_test
+    qwen4exp_snapshot_gpu_synth_mtp_test qwen4exp_snapshot_gpu_cross_mtp_test qwen4exp_snapshot_gpu_synth_kv8_test
+    qwen4exp_snapshot_gpu_synth_pp_kv8_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # Task 3: the MTP head and spec 8's lists. B70_Q4EXP_MTP_KERNELS is src/kernels/CMakeLists.txt's spec 21-QFN-v1e block (the
@@ -4115,9 +4101,6 @@ if(B70_Q4EXP)
 endif()
 if(TARGET b70-serve)
   set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
-  b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --spec mtp --draft-vocab 32k
-    EXPECT "--draft-vocab is not built for Qwen3.8-Flash-Next")
-  b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "Qwen3.8-Flash-Next's KV is bf16")
   b70_serve_reject(cli_reject_serve_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
   b70_serve_reject(cli_reject_serve_qwen4exp_split_alone ${_q4_cfg} --layers 4 --parallel 1 --pipeline-split 2
@@ -4127,7 +4110,7 @@ if(TARGET b70-serve)
   b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --layers 4
     EXPECT "belongs to Qwen3.8-Flash-Next")
   set_tests_properties(
-    cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
+    cli_reject_serve_qwen4exp_prefill_int8
     cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
     cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)
 endif()
@@ -4211,14 +4194,10 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
        kernel_df_rerank_R7_K5120_U248077_C64_Q4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_candidate_R7_N248320_U248077_K80 kernel_df_rerank_R7_K5120_U248077_C80_Q4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas   # spec 19 v3d Task 6
-       kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2
+       kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k2_g256_blk   # plan 41k: KS 2 by 2D reads at 256 GRF
        kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas_k4_g256)   # plan 19v3b: KS 4 at 256 GRF
   list(APPEND B70_DFLASH_KERNELS kernel_df_proj_wide_H5120_KV8_D128_R2048)
-  foreach(NV 32768 65536 131072)
-    list(APPEND B70_DFLASH_KERNELS kernel_df_topk_R7_N${NV}_U${NV}_C kernel_gemv_bf16_M7_K5120_N${NV})
-  endforeach()
-  list(APPEND B70_DFLASH_KERNELS kernel_gemv_i8w_M7_K5120_N65536 kernel_gemv_i8w_M7_K5120_N131072)
-  set(_v19b_reused kernel_gemv_i8w_M7_K5120_N248320 kernel_gemv_i8w_M7_K5120_N32768)
+  set(_v19b_reused kernel_gemv_i8w_M7_K5120_N248320)
   foreach(KN K5120_N6144 K4096_N5120 K5120_N34816 K17408_N5120 K25600_N5120 K5120_N2048)
     list(APPEND _v19b_reused kernel_gemv_i8w_M8_${KN} kernel_gemv_bf16_M8_${KN})
   endforeach()
@@ -4239,11 +4218,9 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N2048_S8_L1_mg kernel_gemv_M8_K5120_N2048_S8_L1)
   list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N1280_S16_L1_mg kernel_gemv_M8_K5120_N1280_S16_L1)
   list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N256_S16_L1_mg kernel_gemv_M8_K5120_N256_S16_L1)
-  foreach(NV 32768 65536 131072 248320)
-    list(APPEND _v19b_reused kernel_gemm_sm_i8w_M7_K5120_N${NV}_wg)
-  endforeach()
+  list(APPEND _v19b_reused kernel_gemm_sm_i8w_M7_K5120_N248320_wg)
   list(APPEND _v19b_reused kernel_gemm_sm_M7_K5120_N248320_S1_L1_mg kernel_gemv_M7_K5120_N248320_S1_L1
-       kernel_gemm_sm_M7_K5120_N248320_S1_L3)   # spec 19 v3d: the 2-bit candidate head
+       kernel_gemm_sm_M7_K5120_N248320_S1_L3_mg)   # spec 19 v3d: the 2-bit candidate head
   foreach(t ${B70_DFLASH_KERNELS} ${_v19b_reused})
     if(NOT TARGET ${t})
       message(FATAL_ERROR "spec 19b: ${t} is not built (src/kernels/CMakeLists.txt)")
@@ -4291,7 +4268,7 @@ set_tests_properties(dflash_plan_test PROPERTIES LABELS dflash)
 # Task 3 on the card: the draft and projection lists end to end - the real drafter (B70_DFLASH_SNAPSHOT, both formats)
 # beside a synthetic target (random embedding, random int8 / bf16 heads at Qwen3.8's shapes) against the host twin:
 # the projection across the ring's wrap, a draft at p 2053, determinism, K by the control block, a sampled walk, a
-# 32768-id draft vocabulary bitwise the full head (Review Focus 3). SKIP 77 without the drafter.
+# SKIP 77 without the drafter.
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_executable(dflash_buffers_test runtime/dflash_buffers_test.cc)
   target_include_directories(dflash_buffers_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -4444,13 +4421,6 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_serve_spec_value cli_reject_serve_dflash_no_draft_model
     cli_reject_serve_dflash_no_draft_model_hint
     PROPERTIES LABELS dflash)
-  # --parallel replica serves --spec dflash (a drafter on each card, bf16 or int8 KV; plan 19v3b: several slots a card
-  # too); what it does not: a draft vocabulary beside slots (Qwen3.8's config.json: the snapshot, read before the
-  # device).
-  b70_serve_reject(cli_reject_serve_dflash_replica_slots ${B70_TEST_SNAPSHOT} --parallel 1 --draft-vocab 32k
-    --max-num-seqs 2 EXPECT "--draft-vocab beside slots is not built")
-  set_tests_properties(cli_reject_serve_dflash_replica_slots
-    PROPERTIES LABELS "dflash;checkpoint")
 endif()
 # ==== Spec 19c ==== (end) ====
 # ==== Spec 19d: DFlash in the server ==== (begin) ====
@@ -4544,6 +4514,27 @@ target_link_libraries(flash_next_dflash_desc_test PRIVATE b70_dflash_model b70_q
 add_test(NAME flash_next_dflash_desc_test
          COMMAND flash_next_dflash_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/flash_next_dflash/config.json)
 set_tests_properties(flash_next_dflash_desc_test PROPERTIES LABELS "qwen4exp;dflash")
+# The loader arm at kFlashNext (loader::flash_next): the published config, the shape set's linear pairs, a tiny
+# synthetic checkpoint in both load forms (Int8 at load, packed Int4G64). Host only. With the release in the HF
+# cache, the header check runs against it too (the snapshot as the test's second argument).
+add_executable(flash_next_dflash_loader_test loader/flash_next_dflash_loader_test.cc)
+target_include_directories(flash_next_dflash_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(flash_next_dflash_loader_test PRIVATE b70_dflash_loader b70_qwen4exp_model)
+if(NOT DEFINED CACHE{B70_FLASH_NEXT_DFLASH2})
+  b70_hf_snapshot(B70_FLASH_NEXT_DFLASH2 models--incoai--Qwen3.8-Flash-Next-DFlash2
+    "" "" PATH "Qwen3.8-Flash-Next-DFlash2 snapshot for the loader arm's header check (empty: the synthetic parts only)")
+  if(NOT EXISTS "${B70_FLASH_NEXT_DFLASH2}")
+    set(B70_FLASH_NEXT_DFLASH2 "" CACHE PATH "Qwen3.8-Flash-Next-DFlash2 snapshot for the loader arm's header check (empty: the synthetic parts only)" FORCE)
+  endif()
+endif()
+if(B70_FLASH_NEXT_DFLASH2)
+  add_test(NAME flash_next_dflash_loader_test COMMAND flash_next_dflash_loader_test
+           ${CMAKE_CURRENT_SOURCE_DIR}/model/flash_next_dflash/config.json "${B70_FLASH_NEXT_DFLASH2}")
+else()
+  add_test(NAME flash_next_dflash_loader_test COMMAND flash_next_dflash_loader_test
+           ${CMAKE_CURRENT_SOURCE_DIR}/model/flash_next_dflash/config.json)
+endif()
+set_tests_properties(flash_next_dflash_loader_test PROPERTIES LABELS "qwen4exp;dflash")
 # Every binary the drafter's lists name is compiled (src/kernels/CMakeLists.txt's PERF-53 block and spec 19b's). Host
 # only (reads the kernel directory).
 if(B70_Q4EXP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
@@ -4624,11 +4615,9 @@ endif()
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_kds_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
   b70_serve_reject(cli_reject_serve_kolibri_dspark_no_model ${_kds_cfg} --spec dflash EXPECT "intuit/Kolibri-1-dspark")
-  b70_serve_reject(cli_reject_serve_kolibri_dspark_draft_vocab ${_kds_cfg} --spec dflash --draft-vocab 32k
-    --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "reads the whole lm_head")
   b70_serve_reject(cli_reject_serve_kolibri_dspark_spec_max ${_kds_cfg} --spec dflash --spec-max 8
     --draft-model ${CMAKE_CURRENT_SOURCE_DIR}/model/dspark EXPECT "expects 1..7")
-  set_tests_properties(cli_reject_serve_kolibri_dspark_no_model cli_reject_serve_kolibri_dspark_draft_vocab
+  set_tests_properties(cli_reject_serve_kolibri_dspark_no_model
     cli_reject_serve_kolibri_dspark_spec_max PROPERTIES LABELS kolibri)
 endif()
 # Every binary the verify lists and the drafter's lists name is compiled (src/kernels/CMakeLists.txt's Kolibri DSpark
@@ -4663,8 +4652,36 @@ add_executable(expert_fp_test loader/expert_fp_test.cc)
 target_include_directories(expert_fp_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(expert_fp_test PRIVATE b70_loader)
 add_test(NAME expert_fp_test COMMAND expert_fp_test)
-set(B70_INKLING_SNAPSHOT "" CACHE PATH "Inkling-2-Mini snapshot for the sampled expert format test")
-set(B70_INKLING_DFLASH2 "" CACHE PATH "incoai/Inkling-2-Mini-DFlash2 snapshot (the DFlash 2 drafter's tests; empty: skipped)")
+# The Inkling tests' model snapshots: a -D value always wins; otherwise the HF cache's refs/main
+# snapshot of the model (b70_hf_snapshot, like B70_TEST_SNAPSHOT above) - the drafter preferring our
+# packed int4 export over the bf16 release. Not in the cache: empty, the tests stay unregistered.
+if(NOT B70_INKLING_SNAPSHOT)
+  b70_hf_snapshot(B70_INKLING_SNAPSHOT models--thinkingmachines--Inkling-2-Mini
+    b85c3cfa615fc413cc9af3379f491b963f3b586a "" PATH "Inkling-2-Mini snapshot for the sampled expert format test")
+  if(NOT EXISTS "${B70_INKLING_SNAPSHOT}")
+    set(B70_INKLING_SNAPSHOT "" CACHE PATH "Inkling-2-Mini snapshot for the sampled expert format test" FORCE)
+  endif()
+endif()
+if(NOT B70_INKLING_DFLASH2)
+  b70_hf_snapshot(B70_INKLING_DFLASH2 models--urakozz--Inkling-2-Mini-DFlash2-W4A16-g64-AutoRound
+    8844a79cdd01d2d6094d8abea416ab6346fee112 "" PATH "the DFlash 2 drafter's snapshot (the DFlash 2 drafter's tests; empty: skipped)")
+  if(NOT EXISTS "${B70_INKLING_DFLASH2}")
+    b70_hf_snapshot(B70_INKLING_DFLASH2 models--incoai--Inkling-2-Mini-DFlash2
+      4f9088ea66c21f2b99ed657d1941c306b03e84d2 "" PATH "the DFlash 2 drafter's snapshot (the DFlash 2 drafter's tests; empty: skipped)")
+  endif()
+  if(NOT EXISTS "${B70_INKLING_DFLASH2}")
+    set(B70_INKLING_DFLASH2 "" CACHE PATH "the DFlash 2 drafter's snapshot (the DFlash 2 drafter's tests; empty: skipped)" FORCE)
+  endif()
+endif()
+# The bf16 release on its own (the int8-at-load path's loader test checks its bytes): a -D value wins, else the cache's.
+if(NOT B70_INKLING_DFLASH2_BF16)
+  b70_hf_snapshot(B70_INKLING_DFLASH2_BF16 models--incoai--Inkling-2-Mini-DFlash2
+    4f9088ea66c21f2b99ed657d1941c306b03e84d2 "" PATH "the bf16 DFlash 2 release's snapshot (the int8-at-load loader test; empty: skipped)")
+  if(NOT EXISTS "${B70_INKLING_DFLASH2_BF16}")
+    set(B70_INKLING_DFLASH2_BF16 "" CACHE PATH "the bf16 DFlash 2 release's snapshot (the int8-at-load loader test; empty: skipped)" FORCE)
+  endif()
+endif()
+message(STATUS "Inkling model snapshots: Inkling-2-Mini=${B70_INKLING_SNAPSHOT} DFlash2=${B70_INKLING_DFLASH2} DFlash2 bf16=${B70_INKLING_DFLASH2_BF16}")
 if(B70_INKLING_SNAPSHOT)
   add_test(NAME expert_fp_release_test COMMAND expert_fp_test "${B70_INKLING_SNAPSHOT}")
 endif()
@@ -4790,27 +4807,35 @@ endif()
 add_executable(inkling2_dflash_loader_test loader/inkling2_dflash_loader_test.cc)
 target_include_directories(inkling2_dflash_loader_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(inkling2_dflash_loader_test PRIVATE b70_inkling2_loader)
-if(B70_INKLING_SNAPSHOT AND B70_INKLING_DFLASH2)
+if(B70_INKLING_SNAPSHOT AND B70_INKLING_DFLASH2_BF16)
   add_test(NAME inkling2_dflash_loader_test
-           COMMAND inkling2_dflash_loader_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_DFLASH2}")
+           COMMAND inkling2_dflash_loader_test "${B70_INKLING_SNAPSHOT}" "${B70_INKLING_DFLASH2_BF16}")
   set_tests_properties(inkling2_dflash_loader_test PROPERTIES LABELS inkling)
 endif()
-# The draft list on the card against the CPU reference on a tap dump's anchors (B70_INKLING_DFLASH2_DRAFTS: the text
-# dflash_accept.py drafts writes; the test skips 77 without it).
-set(B70_INKLING_DFLASH2_DRAFTS "" CACHE FILEPATH "dflash_accept.py drafts' reference drafts for inkling2_dflash_draft_test")
+# The draft list on the card against the CPU reference on a tap dump's anchors: the code and chat sets'
+# $B70_ORACLE/inkling/df2-drafts/<set>.txt (dflash_accept.py drafts' text; the test skips 77 without it).
 add_executable(inkling2_dflash_draft_test golden/inkling2_dflash_draft_test.cc)
 target_include_directories(inkling2_dflash_draft_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(inkling2_dflash_draft_test PRIVATE b70_inkling2_runtime)
 if(B70_INKLING_SNAPSHOT AND B70_INKLING_DFLASH2)
-  add_test(NAME inkling2_dflash_draft_test COMMAND inkling2_dflash_draft_test "${B70_INKLING_SNAPSHOT}"
-           "${B70_INKLING_DFLASH2}" "${B70_INKLING_DFLASH2_DRAFTS}")
-  set_tests_properties(inkling2_dflash_draft_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+  foreach(set code chat)
+    add_test(NAME inkling2_dflash_draft_${set}_test COMMAND inkling2_dflash_draft_test "${B70_INKLING_SNAPSHOT}"
+             --draft-model "${B70_INKLING_DFLASH2}" "${B70_ORACLE}/inkling/df2-drafts/${set}.txt")
+    set_tests_properties(inkling2_dflash_draft_${set}_test PROPERTIES LABELS "inkling;gpu" SKIP_RETURN_CODE 77)
+  endforeach()
 endif()
 # ==== Plan 41k: Inkling 2 Mini's DFlash 2 drafter ==== (end) ====
 
 add_executable(inkling2_ops_test kernels/inkling2_ops_test.cc)
 target_include_directories(inkling2_ops_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME inkling2_ops_test COMMAND inkling2_ops_test)
+
+# Plan 21-QFN-v3e Task 1: the taps kernel's host twin (tests/kernels/tap_mean_ref.h, the same arithmetic as
+# kernels/tap_mean.cl) on random data. Host only; the card test comes with the lists (Task 2).
+add_executable(tap_mean_test kernels/tap_mean_test.cc)
+target_include_directories(tap_mean_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME tap_mean_test COMMAND tap_mean_test)
+set_tests_properties(tap_mean_test PROPERTIES LABELS "qwen4exp;dflash")
 
 add_executable(inkling2_golden_test golden/inkling2_golden_test.cc)
 target_include_directories(inkling2_golden_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
@@ -4877,12 +4902,17 @@ if(B70_INKLING_SNAPSHOT)
   foreach(s "code;golden/code" "chat;golden/chat" "agentic;golden/agentic" "prose4096;prose/prose-4096")
     list(GET s 0 tag)
     list(GET s 1 stem)
+    # the bf16 cache by the plain f32 reference beside them: the int8 cache's comparison
+    add_test(NAME inkling2_golden_${tag}_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+             "${B70_ORACLE}/inkling/${stem}.ids" "${B70_ORACLE}/inkling/${stem}.fp32.golden.safetensors")
+    add_test(NAME inkling2_golden_${tag}_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
+             "${B70_ORACLE}/inkling/${stem}.ids" "${B70_ORACLE}/inkling/${stem}.fp32.golden.safetensors" draft)
     add_test(NAME inkling2_golden_${tag}_kv8_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
              "${B70_ORACLE}/inkling/${stem}.ids" "${B70_ORACLE}/inkling/${stem}.fp32-kv8.golden.safetensors" kv8)
     add_test(NAME inkling2_golden_${tag}_kv8_draft_test COMMAND inkling2_decode_test "${B70_INKLING_SNAPSHOT}"
              "${B70_ORACLE}/inkling/${stem}.ids" "${B70_ORACLE}/inkling/${stem}.fp32-kv8.golden.safetensors" draft kv8)
-    set_tests_properties(inkling2_golden_${tag}_kv8_test inkling2_golden_${tag}_kv8_draft_test
-                         PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
+    set_tests_properties(inkling2_golden_${tag}_test inkling2_golden_${tag}_draft_test inkling2_golden_${tag}_kv8_test
+                         inkling2_golden_${tag}_kv8_draft_test PROPERTIES LABELS inkling SKIP_RETURN_CODE 77)
   endforeach()
 endif()
 

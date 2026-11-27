@@ -198,7 +198,7 @@ class Walk {
     else if (spec_.kind == ListKind::Verify)
       need = kq::verify_variants(d_, M_, int8, eager, bf16s, mtp_->single, lkind());
     else
-      need = kq::draft_variants(int8, eager, mtp_->single, d_.hc_int8);
+      need = kq::kv8_variants(kq::draft_variants(int8, eager, mtp_->single, d_.hc_int8), d_.kv8);
     for (const std::string& v : need)   // a missing binary is named before a command is appended
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON" +
@@ -255,7 +255,7 @@ class Walk {
                                       ? kq::draft_variants(true, false, mtp_->single, d_.hc_int8)
                                       : std::vector<std::string>{kq::mtp_variant(M_, mtp_->single)})
         need.push_back(v);
-    for (const std::string& v : need)
+    for (const std::string& v : kq::kv8_variants(need, d_.kv8))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON and B70_TP=ON");
   }
@@ -587,6 +587,8 @@ class Walk {
     void* v;
     void* tail;
     void* keys;
+    void* ks = nullptr;   // d.kv8: the K / V rows' scales
+    void* vs = nullptr;
   };
   // q||gate||k||v and the indexer GEMVs; returns q||gate||k||v's split-K.
   uint32_t qsa_proj(const loader::Q4Layer& L) {
@@ -601,7 +603,10 @@ class Walk {
   void qsa_prep(const loader::Q4Layer& L, uint32_t S, const QsaTarget& t) {
     {
       // attn_prep(ctrl, qkv_partials, fa_small, rope, attn_q, attn_gate, kv_k, kv_v), grid (24 + 2, M)
-      l0::Kernel& k = kernel(card() ? kq::tp_attn_prep_variant(M_) : kq::attn_prep_q4_variant(M_, S), "attn_prep", kWgAttnPrep);
+      // d.kv8: kv8.cl's attn_prep_kv8 (q rotated; K, V rotated int8 + their scales, two more arguments)
+      const std::string pv = card() ? kq::tp_attn_prep_variant(M_) : kq::attn_prep_q4_variant(M_, S);
+      l0::Kernel& k = d_.kv8 ? kernel(kq::kv8_variant(pv), "attn_prep_kv8", kWgAttnPrep)
+                             : kernel(pv, "attn_prep", kWgAttnPrep);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, L.qsa_small->ptr());
@@ -610,6 +615,10 @@ class Walk {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, t.k);
       k.arg_ptr(7, t.v);
+      if (d_.kv8) {
+        k.arg_ptr(8, t.ks);
+        k.arg_ptr(9, t.vs);
+      }
       launch(k, card() ? c_.q_heads + c_.kv_heads : d_.q_heads + d_.kv_heads, M_);
     }
     {
@@ -653,6 +662,8 @@ class Walk {
   }
   // The attention over each row's list (flash: q4_qsa_attn + q4_qsa_reduce; eager: q4_qsa_attn_eager) -> attn_out.
   void qsa_attend(const QsaTarget& t, const void* listp) {
+    require(!(d_.kv8 && b_.attn == Q4Attn::Eager), "the int8 KV cache is read by the flash attention (B70_Q4_ATTN=eager "
+                                                   "is the bf16 reference's form)");
     if (b_.attn == Q4Attn::Eager) {
       // q4_qsa_attn_eager(ctrl, attn_q, attn_gate, kv_k, kv_v, list, attn_out), grid (24, M)
       l0::Kernel& k = kernel(kq::qsa_attn_variant(M_, true), "q4_qsa_attn_eager", kq::kEagerWg);
@@ -666,9 +677,10 @@ class Walk {
       launch(k, d_.q_heads, M_);
       return;
     }
-    const std::string av = card() ? kq::tp_qsa_attn_variant(M_) : kq::qsa_attn_variant(M_, false);
+    const std::string av0 = card() ? kq::tp_qsa_attn_variant(M_) : kq::qsa_attn_variant(M_, false);
+    const std::string av = d_.kv8 ? kq::kv8_variant(av0) : av0;
     {
-      // q4_qsa_attn(ctrl, attn_q, kv_k, kv_v, list, part), grid (2 kv heads, TGT, M)
+      // q4_qsa_attn(ctrl, attn_q, kv_k, kv_v, list, part[, k_scale, v_scale]), grid (2 kv heads, TGT, M)
       l0::Kernel& k = kernel(av, "q4_qsa_attn", kq::kAttnWg);
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.attn_q.ptr());
@@ -676,6 +688,10 @@ class Walk {
       k.arg_ptr(3, t.v);
       k.arg_ptr(4, listp);
       k.arg_ptr(5, b_.attn_part.ptr());
+      if (d_.kv8) {
+        k.arg_ptr(6, t.ks);
+        k.arg_ptr(7, t.vs);
+      }
       launch(k, card() ? c_.kv_heads : d_.kv_heads, kq::kAttnTgt, M_);
     }
     {
@@ -693,7 +709,8 @@ class Walk {
   void qsa(uint32_t l, const loader::Q4Layer& L) {
     require(L.qsa_qkvg && L.qsa_idx && L.qsa_o && L.qsa_small, "QSA layer " + std::to_string(l) + " is not loaded");
     const uint32_t qi = d_.qsa_before(l);
-    const QsaTarget t{b_.k_layer(l), b_.v_layer(l), b_.tail_layer(l), b_.idx_keys_layer(l)};
+    const QsaTarget t{b_.k_layer(l), b_.v_layer(l), b_.tail_layer(l), b_.idx_keys_layer(l), b_.k_scale_layer(l),
+                      b_.v_scale_layer(l)};
     const uint32_t S = qsa_proj(L);
     qsa_prep(L, S, t);
     void* listp = injected_ ? at(*injected_, list_at(qi)) : at(b_.list, b_.list_off(qi));
@@ -948,7 +965,7 @@ class Walk {
     hc(*L.hc_attn, true);
     const uint32_t S = qsa_proj(L);
     require(S == 1, "the head's q||gate||k||v is bf16 (S 1)");
-    qsa_prep(L, S, QsaTarget{mb.k(), mb.v(), mb.idx_tail.ptr(), mb.idx_keys.ptr()});
+    qsa_prep(L, S, QsaTarget{mb.k(), mb.v(), mb.idx_tail.ptr(), mb.idx_keys.ptr(), mb.k_scale(), mb.v_scale()});
     ctrl_ = b_.control.ptr();
     layer_ = -1;
   }
@@ -964,7 +981,7 @@ class Walk {
     hc(*L.hc_attn, true);
     const uint32_t S = qsa_proj(L);
     require(S == 1, "the head's q||gate||k||v is bf16 (S 1)");
-    const QsaTarget t{mb.k(), mb.v(), mb.idx_tail.ptr(), mb.idx_keys.ptr()};
+    const QsaTarget t{mb.k(), mb.v(), mb.idx_tail.ptr(), mb.idx_keys.ptr(), mb.k_scale(), mb.v_scale()};
     qsa_prep(L, S, t);
     if (spec_.select) qsa_select(t, mb.list.ptr(), mb.diag.ptr());
     qsa_attend(t, mb.list.ptr());   // steps after a selecting one attend its list as it is (decision 5)
@@ -1034,6 +1051,25 @@ CapturedStep build(l0::Context& ctx, const loader::Q4LoadedModel& m, const loade
                    Qwen4ExpBuffers& b, const StageLink* link, l0::Mem* tap, const l0::Mem* injected, const ListSpec& spec,
                    const MtpBinding* mtp, const Q4TpBinding* tp) {
   return Walk(ctx, m, part, b, link, tap, injected, spec, mtp, tp).run();
+}
+
+uint32_t step_misses(l0::CmdList& imm, const loader::Q4DevicePart& part, const model::Qwen4ExpDesc& d,
+                     const std::vector<uint32_t>& routes) {
+  if (!part.expert_table) return 0;
+  std::vector<uint64_t> table(part.expert_table->size() / 8);
+  imm.copy(table.data(), part.expert_table->ptr(), table.size() * 8);
+  uint32_t n = 0;
+  for (uint32_t l = part.first; l < part.end; ++l) {
+    const loader::Q4Layer& L = part.layer(l);
+    if (!L.mirror) continue;
+    const uint64_t lo = reinterpret_cast<uint64_t>(L.mirror->ptr()), hi = lo + L.mirror->size();
+    for (uint32_t k = 0; k < d.top_k; ++k) {
+      const uint64_t a = table[size_t(l - part.first) * 2 * d.experts +
+                               routes[size_t(l) * kRouteWords + kernels::qwen4exp::route::kIds + k]];
+      n += a >= lo && a < hi;
+    }
+  }
+  return n;
 }
 
 }  // namespace runtime::qwen4exp

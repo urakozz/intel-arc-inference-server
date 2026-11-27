@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
   const runtime::KvCache kv = runtime::KvCache::Bf16;
 
   runtime::PersistentBuffers ps(ctx, small, d, kv), pb(ctx, big, d, kv);
-  runtime::MtpBuffers ms(ctx, small, d, 0, kv), mb(ctx, big, d, 0, kv);
+  runtime::MtpBuffers ms(ctx, small, d, kv), mb(ctx, big, d, kv);
   std::printf("max_len %u / %u, bf16 KV\n", small, big);
   std::printf("  persistent: control %zu  gdn_state %.3f GB  conv_ring %.3f GB  kv_k %.3f / %.3f GB  kv_v same\n",
               ps.control.size(), gb(ps.gdn_state.size()), gb(ps.conv_ring.size()), gb(ps.kv_k.size()),

@@ -295,7 +295,7 @@ void check_plan() {
         const runtime::PpPlan dec = runtime::pp_plan(*d, s, len, w, KvCache::Bf16);
         const runtime::PpPlan pf = runtime::pp_plan(*d, s, len, w, KvCache::Bf16, path(b));
         // One card's prefill terms (memory_plan.cc), per device, plus the hand-off.
-        const runtime::MemoryPlan one = runtime::plan(*d, len, false, w.total(), path(b), {}, KvCache::Bf16);
+        const runtime::MemoryPlan one = runtime::plan(*d, len, false, w.total(), path(b), KvCache::Bf16);
         size_t int8 = 0;
         for (uint32_t i = 0; i < 2; ++i) {
           CHECK_EQ(pf.dev[i].model, dec.dev[i].model);

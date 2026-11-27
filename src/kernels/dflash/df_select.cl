@@ -47,6 +47,10 @@
 #error "V2 needs VROWS (the codebooks' rows) and RANK a multiple of QS"
 #endif
 
+#ifndef FOLD_HID
+#define FOLD_HID 16
+#endif
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 inline uint rotl32(uint v, uint s) { return (v << s) | (v >> (32u - s)); }
@@ -100,7 +104,7 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
                         __global const float* restrict hid, __global const ushort* restrict pred,
                         __global const ushort* restrict succ, __global uint* restrict out) {
 #endif
-#ifdef FOLD   // spec 19v2: the int4 selector projection's 16 split-K slices, folded once a row for every candidate
+#ifdef FOLD   // spec 19v2: the int4 selector projection's split-K slices, folded once a row for every candidate
   __local float folded[RANK];
 #endif
   __local float part[TOPK * QS];
@@ -148,7 +152,7 @@ __kernel void df_select(__global uint* restrict ctrl, __global const uint* restr
 #ifdef FOLD
     for (uint r = lid; r < RANK; r += WG) {
       float a = 0.0f;
-      for (uint s = 0; s < 16; ++s) a = a + hid[((size_t)s * ROWS + RJ(j) + 1) * RANK + r];
+      for (uint s = 0; s < FOLD_HID; ++s) a = a + hid[((size_t)s * ROWS + RJ(j) + 1) * RANK + r];
       folded[r] = a;
     }
     barrier(CLK_LOCAL_MEM_FENCE);

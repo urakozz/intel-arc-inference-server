@@ -320,7 +320,7 @@ void check_figures() {
   CHECK_EQ(model::qwen38().mtp_checkpoint_tensors(), size_t(15));
 
   // The head's buffers at Ornith's shapes (MtpDims::sizes), 262144 positions, bf16 KV.
-  const runtime::MtpSizes m = runtime::MtpDims::sizes(262144, o, 0, runtime::KvCache::Bf16);
+  const runtime::MtpSizes m = runtime::MtpDims::sizes(262144, o, runtime::KvCache::Bf16);
   CHECK_EQ(m.gdn_spec, size_t{3} * 30 * 32 * 128 * 128 * 4);   // 3 slots x 62,914,560
   CHECK_EQ(m.kv_k, size_t{262144} * 2 * 256 * 2);              // one layer, 2 kv-heads
   CHECK_EQ(m.hh, size_t{65} * 2048 * 2);                      // (64 + 1) rows: the wide verify lists' (spec 32)
@@ -330,9 +330,9 @@ void check_figures() {
   for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0Int8, runtime::PrefillBackend::L0}) {
     runtime::PrefillPath path;
     path.backend = b;
-    const runtime::MemoryPlan off = runtime::plan(o, 262144, false, kOrnithInt8Weights, path, {},
+    const runtime::MemoryPlan off = runtime::plan(o, 262144, false, kOrnithInt8Weights, path,
                                                   runtime::KvCache::Bf16);
-    const runtime::MemoryPlan on = runtime::plan(o, 262144, true, weights, path, {},
+    const runtime::MemoryPlan on = runtime::plan(o, 262144, true, weights, path,
                                                  runtime::KvCache::Bf16);
     CHECK_EQ(on.mtp_buffers, m.total());
     CHECK_EQ(on.mtp_hidden, runtime::mtp_prefill_hidden_bytes(o, runtime::PrefillScratchDims::kCDefault));
@@ -349,7 +349,7 @@ void check_figures() {
     // Both backends also keep the router / a||b slabs (phase 3: route_slab_bytes).
     CHECK_EQ(on.prefill_lazy, ps.slab + runtime::route_slab_bytes(o, 0, o.layers));
     CHECK(ps.slab >= size_t{4096} * 1024 * 2);   // fc's K 4096 fits the slab (step_mtp_kv)
-    CHECK_EQ(runtime::max_len_that_fits(o, true, weights, kDevice, kReserve, 262144, path, {},
+    CHECK_EQ(runtime::max_len_that_fits(o, true, weights, kDevice, kReserve, 262144, path,
                                         runtime::KvCache::Bf16),
              uint32_t(262144));
     std::printf("ornith + MTP (int8 head, %s prefill): %s\n", runtime::prefill_backend_name(b),

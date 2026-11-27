@@ -34,7 +34,8 @@ uint32_t ingest(E& engine, std::span<const uint32_t> prompt) {
   return next;
 }
 
-// The three-call round (propose, verify, commit), step_drafted's form before its one submission.
+// The three-call round (propose, verify, commit), step_drafted's form before its one submission and the served greedy
+// round's (its verify on the candidate head).
 template <class E>
 uint32_t step_split(E& engine, uint32_t anchor, uint32_t k, std::vector<uint32_t>& output,
                     uint64_t* drafts = nullptr) {
@@ -44,7 +45,11 @@ uint32_t step_split(E& engine, uint32_t anchor, uint32_t k, std::vector<uint32_t
   if (drafts)   // FNV-1a over every proposed id: two builds' drafts compared byte for byte
     for (uint32_t id : proposed) *drafts = (*drafts ^ id) * 1099511628211ull;
   std::copy(proposed.begin(), proposed.end(), ids.begin() + 1);
-  const auto predicted = engine.verify({ids.data(), k + 1});
+  std::span<const uint32_t> predicted;
+  if constexpr (requires { engine.verify(std::span<const uint32_t>{}, true); })
+    predicted = engine.verify({ids.data(), k + 1}, true);
+  else   // tp: its split head, whole
+    predicted = engine.verify({ids.data(), k + 1});
   uint32_t accepted = 1;
   while (accepted <= k && ids[accepted] == predicted[accepted - 1]) ++accepted;
   const uint32_t next = predicted[accepted - 1];
@@ -237,9 +242,10 @@ int main(int argc, char** argv) {
     prompt.resize(length);
     return same_ids(checkpoint, prompt, uint32_t(std::stoul(argv[5])), kv8, nullptr);
   }
-  // Last arguments `kv8` (the int8 cache, judged by its own f32 reference, GOLDEN <set>.fp32-kv8: the plain ids by the
-  // near-miss rule against its bf16 twin <set>.bf16-kv8) and `tp` (the same judgements under `--parallel tp`, cards 0
-  // and 1; skipped, 77, with one), in either order.
+  // Last arguments `kv8` (the int8 cache, judged by its own f32 reference GOLDEN <set>.fp32-kv8) and `tp` (the same
+  // judgements under `--parallel tp`, cards 0 and 1; skipped, 77, with one), in either order. A judge set's GOLDEN
+  // <set>.fp32 / <set>.fp32-kv8 has its bf16 twin <set>.bf16 / <set>.bf16-kv8 beside it: the ids are then judged by the
+  // near-miss rule against it.
   std::setvbuf(stdout, nullptr, _IOLBF, 0);
   bool tp = false, kv8 = false;
   for (; argc >= 5; --argc) {
@@ -251,8 +257,8 @@ int main(int argc, char** argv) {
   CHECK(argc == 4 || (argc >= 5 && std::string_view(argv[4]) == "draft"));
   const bool draft = argc >= 5;
   std::string twin_path;
-  if (const std::string g = argv[3]; kv8 && g.find(".fp32-kv8.") != std::string::npos)
-    twin_path = g.substr(0, g.find(".fp32-kv8.")) + ".bf16-kv8." + g.substr(g.find(".fp32-kv8.") + 10);
+  if (const std::string g = argv[3], form = kv8 ? ".fp32-kv8." : ".fp32."; g.find(form) != std::string::npos)
+    twin_path = g.substr(0, g.find(form)) + (kv8 ? ".bf16-kv8." : ".bf16.") + g.substr(g.find(form) + form.size());
   for (const std::string& path : {std::string(argv[2]), std::string(argv[3]), twin_path})
     if (!path.empty() && !std::filesystem::exists(path)) {
       std::printf("SKIP: %s not found\n", path.c_str());
@@ -408,9 +414,10 @@ int judged(E& engine, const loader::Inkling2Checkpoint& checkpoint, int argc, ch
     engine.commit(1);
     input = uint32_t(tokens[i]);
   }
-  std::printf("Inkling CPU golden judged %u/%u decisions, %u f32 near-ties, logit cosine min/median %s\n",
-              graded - misses, graded, ties, drift.str().c_str());
-  if (twin) CHECK(near.verdict("Inkling int8 cache", "engine"));
+  const auto worst = uint32_t(std::min_element(drift.c.begin(), drift.c.end()) - drift.c.begin());
+  std::printf("Inkling CPU golden judged %u/%u decisions, %u f32 near-ties, logit cosine min/median %s (min at row %u)\n",
+              graded - misses, graded, ties, drift.str().c_str(), worst);
+  if (twin) CHECK(near.verdict("Inkling", "engine"));
   else CHECK_EQ(misses, 0u);
   return 0;
 }

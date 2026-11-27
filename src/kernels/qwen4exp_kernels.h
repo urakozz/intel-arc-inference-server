@@ -225,6 +225,24 @@ inline std::string out_variant(bool int4, unsigned S = 8) {   // GDN out_proj an
 // Decision 10's evidence only (qwen4exp_kernels_test --bench-attn): attention v2 at the QSA shape, dense.
 inline std::string attn_v2_q4_variant(unsigned M) { return attn_v2_variant(M, kAttnTgt, kQHeads, kKvHeads); }
 
+// Plan 21-QFN-v3a (--kv-cache int8, Qwen4ExpDesc::kv8): a binary's int8-KV twin - attn_prep_* (kv8.cl's writer at
+// these heads), q4_qsa_attn_M* and q4_pf_sparse_attn_* (their KV8 builds): name + "_KV8"; the prompt pass's q16 writer
+// (and its _KVO), dense flash and gate: kv8.cl's pf_attn_prep_kv8[_KVO] / pf_flash_attn_kv8 / pf_attn_gate_kv8 at the
+// same heads. Every other name (the eager attention has no int8 form) is returned as it is.
+inline std::string kv8_variant(const std::string& v) {
+  const auto starts = [&](const char* p) { return v.rfind(p, 0) == 0; };
+  if (starts("attn_prep_M") || starts("q4_qsa_attn_M") || starts("q4_pf_sparse_attn_Q")) return v + "_KV8";
+  if (starts("pf_attn_prep_q16_")) return "pf_attn_prep_kv8" + v.substr(std::string("pf_attn_prep_q16").size());
+  if (starts("pf_flash_attn_Q")) return "pf_flash_attn_kv8" + v.substr(std::string("pf_flash_attn").size());
+  if (starts("pf_attn_Q")) return "pf_attn_gate_kv8" + v.substr(std::string("pf_attn").size());
+  return v;
+}
+inline std::vector<std::string> kv8_variants(std::vector<std::string> v, bool kv8) {
+  if (kv8)
+    for (std::string& n : v) n = kv8_variant(n);
+  return v;
+}
+
 // Every binary an M = 1 decode list binds, for a dense arm (int4 / bf16), a shared-expert form, a head
 // form, an attention form (`eager`: B70_Q4_ATTN=eager binds q4_qsa_attn_eager for q4_qsa_attn + reduce) and
 // the PLE scale form. Two-card lists add nothing new (the materialising _Y_NN is in every list: the PLE
@@ -275,8 +293,9 @@ inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf1
 inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bool int8_head, bool eager, bool two_cards,
                                                 bool ple_bf16_scale = true) {
   (void)two_cards;
-  return decode_variants(d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
-                         ple_bf16_scale, d.hc_int8);
+  return kv8_variants(decode_variants(d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16,
+                                      int8_head, eager, ple_bf16_scale, d.hc_int8),
+                      d.kv8);
 }
 
 // =================================================================================================================
@@ -597,8 +616,9 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
 }
 inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, unsigned M, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single, LinearKind k) {
-  return verify_variants(M, d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
-                         ple_bf16_scale, single, k, d.hc_int8);
+  return kv8_variants(verify_variants(M, d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16,
+                                      int8_head, eager, ple_bf16_scale, single, k, d.hc_int8),
+                      d.kv8);
 }
 inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, unsigned M, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single) {

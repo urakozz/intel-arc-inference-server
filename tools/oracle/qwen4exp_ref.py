@@ -31,6 +31,8 @@ not part of the text model (the MTP head is qwen4exp_mtp.py).
         `run` writes <out>.ckpt after each prompt chunk; the same command run again continues from it (same arguments),
         and the file is deleted when <out> is written.
     qwen4exp_ref.py ppl <snapshot> [--text NAME=FILE ...] [--ids NAME=FILE ...] [--layers N] [--max-tokens T]
+    qwen4exp_ref.py kv8 <snapshot> --ids NAME=PROMPT[+CONT] [...] --out <dir> [--arms bf16,int8,f32attn] [--row0 R]
+                        (the int8 KV cache's flips against bf16 KV beside an fp32-attention control, cmd_kv8)
     qwen4exp_ref.py trace <snapshot> --source NAME:IDS [...] [--opencode DIR] --out <dir> [--layers N]
     qwen4exp_ref.py hfcheck <snapshot> --layers N [--prompt <ids>] [--n 2100] [--gen 4]
     qwen4exp_ref.py facts <snapshot> [--qwen38-tokenizer FILE]
@@ -1344,6 +1346,123 @@ def cmd_ppl(a) -> None:
 
 
 # ------------------------------------------------------------------------------------------------
+# kv8: the int8 KV cache's error on this model (plan 21-QFN-v3a Task 0 Step 3) - Qwen3.8's method
+# (docs/probes/probe-int8-kv-qwen38-2026-10-06.md, kv_int8_probe.py): one teacher-forced forward per arm over the same
+# ids, every arm's logits against the bf16-KV arm's, row by row. Arms (the QSA layers' attention, eager_attention_forward
+# patched; the indexer's compressed keys are untouched in every arm):
+#   bf16     the reference's own eager attention (the reference arm)
+#   int8     K and V as the rotated int8 cache gives them back (int8_sim.kv8_fq: Qwen3.8's rotkv, kv8.h's codes and
+#            fp16 scales, per position and KV head over 256), rounded to bf16 as a widened row is
+#   f32attn  the control: the attention in fp32 with no quantisation (q, K, V and the softmax's P in fp32)
+# A flip is a row whose argmax differs from the reference's; a near tie when the reference's own logit gap between the
+# two ids is <= 0.05.
+
+KV8_ARMS = ("bf16", "int8", "f32attn")
+
+
+def kv8_attention(arm: str):
+    m = mq()
+    orig = m.eager_attention_forward
+    if arm == "bf16":
+        return orig
+    if arm == "int8":
+        fq = _load("int8_sim").kv8_fq
+
+        def attn(module, query, key, value, attention_mask, scaling, dropout=0.0, **kw):
+            return orig(module, query, fq(key).to(key.dtype), fq(value).to(value.dtype), attention_mask, scaling,
+                        dropout, **kw)
+        return attn
+
+    def attn(module, query, key, value, attention_mask, scaling, dropout=0.0, **kw):
+        k = m.repeat_kv(key.float(), module.num_key_value_groups)
+        v = m.repeat_kv(value.float(), module.num_key_value_groups)
+        w = torch.matmul(query.float(), k.transpose(2, 3)) * scaling
+        if attention_mask is not None:
+            w = w + attention_mask.float()
+        w = torch.softmax(w, -1)
+        return torch.matmul(w, v).to(query.dtype).transpose(1, 2).contiguous(), None
+    return attn
+
+
+def kv8_compare(ref: torch.Tensor, lg: torch.Tensor) -> dict:
+    """Per row of fp32 logits [n][V] against the reference arm's: argmax differs, the reference's gap between its
+    argmax and lg's, cosine, KL(p_ref || p_lg) in fp64."""
+    am0, am = ref.argmax(-1), lg.argmax(-1)
+    gap = ref.gather(-1, am0[:, None])[:, 0] - ref.gather(-1, am[:, None])[:, 0]
+    lp0, lp = torch.log_softmax(ref.double(), -1), torch.log_softmax(lg.double(), -1)
+    return {"diff": am0 != am, "gap": gap, "cos": F.cosine_similarity(ref.double(), lg.double(), -1),
+            "kl": (lp0.exp() * (lp0 - lp)).sum(-1)}
+
+
+def kv8_line(name: str, arm: str, rows: str, c: dict) -> str:
+    diff = c["diff"]
+    near = diff & (c["gap"] <= 0.05)
+    return (f"| {name} | {rows} | {arm} | {int(diff.sum())} | {int((diff & ~near).sum())} | {float(c['cos'].min()):.6f} | "
+            f"{float(c['cos'].mean()):.8f} | {float(c['kl'].mean()):.3e} | {float(c['kl'].max()):.3e} |")
+
+
+def cmd_kv8(a) -> None:
+    t0 = time.time()
+    arms = a.arms.split(",")
+    if arms[0] != "bf16" or any(x not in KV8_ARMS for x in arms):
+        die(f"--arms {a.arms}: bf16 first (the reference), then any of {KV8_ARMS[1:]}")
+    tc = text_config(a.snapshot, a.layers, a.experts)
+    require_cacheable(tc)
+    model, pf, lazy = build_streamed(a.snapshot, tc, PleTable(ple_source(a.snapshot, a.ple), tc))
+    srcs = []
+    for x in a.ids:   # NAME=PROMPT[+CONTINUATION]: the continuation's rows are counted apart
+        name, files = x.split("=", 1)
+        parts = [read_ids(p) for p in files.split("+")]
+        srcs.append((name, parts[0] + (parts[1] if len(parts) > 1 else []), len(parts[0])))
+    if not srcs:
+        die("kv8: no --ids")
+    m = mq()
+    orig = m.eager_attention_forward
+    os.makedirs(a.out, exist_ok=True)
+    lines = ["| source | rows | arm | argmax diff | of them gap > 0.05 | cos min | cos mean | KL mean | KL max |",
+             "|---|---|---|---:|---:|---:|---:|---:|---|"]
+    try:
+        for name, ids, n_prompt in srcs:
+            ids = ids[: a.max_tokens]
+            row0 = max(0, min(a.row0, len(ids) - 1))
+            ref, res = None, {}
+            for arm in arms:
+                m.eager_attention_forward = kv8_attention(arm)
+                got = []
+
+                def on_logits(r0, lg):
+                    if r0 + lg.shape[0] > row0:
+                        got.append(lg[max(0, row0 - r0):].float().clone())
+                t1 = time.time()
+                forward_chunks(model, ids, auto_chunk(len(ids), a.chunk), on_logits=on_logits)
+                lg = torch.cat(got, 0)
+                print(f"kv8 {name} {arm}: {len(ids)} ids, rows {row0}..{len(ids) - 1}, {time.time() - t1:.0f}s",
+                      flush=True)
+                if ref is None:
+                    ref = lg
+                    continue
+                blocks = [kv8_compare(ref[i:i + 256], lg[i:i + 256]) for i in range(0, len(lg), 256)]
+                res[arm] = {k: torch.cat([b[k] for b in blocks]) for k in blocks[0]}
+                del lg
+            torch.save({"rows": (row0, len(ids), n_prompt), "argmax": ref.argmax(-1), **res},
+                       os.path.join(a.out, f"{name}.kv8.pt"))
+            for arm, c in res.items():
+                p = max(0, n_prompt - row0)
+                lines.append(kv8_line(name, arm, f"{row0}..{len(ids) - 1}", c))
+                if 0 < p < len(c["diff"]):
+                    lines.append(kv8_line(name, arm, f"continuation {n_prompt}..{len(ids) - 1}",
+                                          {k: v[p:] for k, v in c.items()}))
+            del ref
+            print("\n".join(lines), flush=True)
+    finally:
+        m.eager_attention_forward = orig
+    with open(os.path.join(a.out, "kv8.md"), "w") as f:
+        f.write(f"{tc.num_hidden_layers} layers, chunk {a.chunk}, arms {a.arms}\n\n" + "\n".join(lines) + "\n")
+    print(f"wall {time.time() - t0:.0f}s, peak RSS {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.1f} GiB, "
+          f"{lazy.filled} expert dequants, prefetch wait {pf.seconds:.1f}s")
+
+
+# ------------------------------------------------------------------------------------------------
 # hfcheck: transformers' own indexer against the port's cache, on any weights (--layers N)
 
 def cmd_hfcheck(a) -> None:
@@ -1615,6 +1734,13 @@ def main() -> None:
     p.add_argument("--text", action="append", default=[], help="NAME=FILE (tokenized by the snapshot's tokenizer.json)")
     p.add_argument("--ids", action="append", default=[], help="NAME=FILE")
     p.add_argument("--max-tokens", type=int, default=4096)
+    k = sub.add_parser("kv8")
+    common(k)
+    k.add_argument("--ids", action="append", default=[], help="NAME=PROMPT[+CONTINUATION] (ids files)")
+    k.add_argument("--out", required=True)
+    k.add_argument("--arms", default="bf16,int8,f32attn")
+    k.add_argument("--row0", type=int, default=0, help="compare rows from this one (all: 0)")
+    k.add_argument("--max-tokens", type=int, default=8192)
     h = sub.add_parser("hfcheck")
     common(h)
     h.add_argument("--prompt")
@@ -1635,7 +1761,7 @@ def main() -> None:
         cpu_bf16.add_argument(_p)
     a = ap.parse_args()
     cpu_bf16.install(a.exact_bf16_gemm)
-    {"run": cmd_run, "ppl": cmd_ppl, "hfcheck": cmd_hfcheck, "trace": cmd_trace, "facts": cmd_facts}[a.cmd](a)
+    {"run": cmd_run, "ppl": cmd_ppl, "kv8": cmd_kv8, "hfcheck": cmd_hfcheck, "trace": cmd_trace, "facts": cmd_facts}[a.cmd](a)
 
 
 if __name__ == "__main__":

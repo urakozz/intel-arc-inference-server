@@ -5,7 +5,9 @@
 #include <string>
 #include <vector>
 
+#include "loader/dflash_layout.h"     // DraftFormat
 #include "loader/qwen4exp_ple_hash.h"   // Q4PleScale (header-only)
+#include "model/dflash.h"             // DFlashDesc
 #include "model/qwen4exp.h"
 #include "runtime/memory_plan.h"
 #include "runtime/gpu_state.h"
@@ -29,12 +31,16 @@ namespace gs = runtime::gpu_state;
 // Spec 7's snapshot runs' tensors (the snapshot section below): each is claimed by exactly one sizes member's
 // gpu_state::Snapshot annotation (spec 39), which is how the engines find a run's allocation.
 enum class SnapTensor : uint32_t {
-  Kv, IdxKeys, IdxTail, GdnState, ConvRing, PleIds, PleRing, MtpKv, MtpIdxKeys, MtpIdxTail, MtpHidden
+  Kv, IdxKeys, IdxTail, GdnState, ConvRing, PleIds, PleRing, MtpKv, MtpIdxKeys, MtpIdxTail, MtpHidden, KvScale,
+  MtpKvScale
 };
 using Snap = gs::Snapshot<SnapTensor>;
 
 // One device's persistent state at max_len (zeroed by reset):
 //   kv          bf16 [its QSA layers][max_len][2 kv heads][256], K and V    2048 B a position a layer
+//               (plan 21-QFN-v3a, d.kv8: the rotated int8 codes [its QSA layers][K | V][max_len][2][256], 1024 B)
+//   kv_scale    d.kv8 only: fp16 [its QSA layers][K | V][max_len][2 kv heads], the codes' scales  8 B a position a
+//               layer (kv8_scheme.h; one 64-byte line with a bf16 cache)
 //   idx_keys    packed int4 [its QSA layers][max_len / 4][72 B]            the compressed indexer keys, 18 B a
 //                                                                          position a layer
 //   idx_tail    bf16 [its QSA layers][8][128]                              the raw keys of the open block, slot
@@ -58,6 +64,7 @@ struct PersistentSizes {
     =gs::NotSnapshotted("load_state writes pos, n_active and gdn_pend; the prefill after a restore the pending id")]]
   size_t control = 0;
   [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::Kv}]] size_t kv = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::KvScale}]] size_t kv_scale = 0;
   [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::IdxKeys}]] size_t idx_keys = 0;
   [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::IdxTail}]] size_t idx_tail = 0;
   [[=gs::state, =gs::zero_on_reset, =Snap{SnapTensor::GdnState}]] size_t gdn_state = 0;
@@ -70,8 +77,12 @@ struct PersistentSizes {
 static_assert(gs::sizes_problem<PersistentSizes, SnapTensor>().empty(), gs::sizes_problem<PersistentSizes, SnapTensor>());
 PersistentSizes persistent_sizes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev,
                                  uint32_t max_len);
-// The KV and compressed keys of one position over the descriptor's QSA layers: 12 x (2048 + 18) = 24,792 B.
+// The KV and compressed keys of one position over the descriptor's QSA layers: 12 x (2048 + 18) = 24,792 B (int8
+// KV, d.kv8: 12 x (1024 + 8 + 18) = 12,600 B).
 size_t kv_bytes_per_pos(const model::Qwen4ExpDesc& d);
+// One position's K (or V) row over the kv heads - bf16 1024 B, int8 512 B - and its scales (int8: 4 B; bf16: 0).
+size_t kv_row_bytes(const model::Qwen4ExpDesc& d);
+size_t kv_scale_row_bytes(const model::Qwen4ExpDesc& d);
 // A compressed key's slot in the indexer cache: the packed int4 key alone (nibbles, then two fp32 scales: 72 B).
 size_t idx_key_slot_bytes(const model::Qwen4ExpDesc& d);
 size_t gdn_state_bytes_per_layer(const model::Qwen4ExpDesc& d);   // 3,145,728
@@ -418,6 +429,7 @@ struct MtpSizes {
   [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("draft() writes pos, n_active and the token before each chain")]]
   size_t hctl = 0;
   [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::MtpKv}]] size_t kv = 0;
+  [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::MtpKvScale}]] size_t kv_scale = 0;   // d.kv8: its scales
   [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::MtpIdxKeys}]] size_t idx_keys = 0;
   [[=gs::kv, =gs::zero_on_reset, =Snap{SnapTensor::MtpIdxTail}]] size_t idx_tail = 0;
   [[=gs::scratch]] size_t list = 0;
@@ -553,13 +565,25 @@ std::vector<SnapRun> kv_runs(const model::Qwen4ExpDesc& d, const model::Q4Placem
 size_t snap_tensor_bytes(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len,
                          SnapTensor t);
 
+// --- plan 21-QFN-v3e Task 1: the DFlash drafter's rows (`--spec dflash`) -------------------------------------------
+// Under `--spec dflash` the MTP head is not loaded: on the last device (under pp: device 1, beside the output head)
+// the drafter's weights (loader::dflash_weight_bytes at its load format) and its buffers - the ring, the taps' rows,
+// the RoPE table and the draft list's scratch, the whole of runtime::dflash::sizes - go into DevicePlan::drafter in
+// place of the head's weights and MtpSizes. The verify rows (the kVerifyRows scratch, gdn_pend, the PLE rows) stay:
+// the 4-row verify lists are the same. The drafter's bytes lower the expert budget's cache on its card.
+// `dflash` is the drafter's descriptor (the loader arm holds it to kernels::dflash::kFlashNext); null = no drafter.
+size_t dflash_plan_bytes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len,
+                         loader::DraftFormat f);   // its weights + buffers
+
 // --- the split by bytes (16b's rule) ---------------------------------------------------------------------
 // layer_bytes[l] = loader::q4_layer_bytes(d, l).total() + its state at max_len (QSA: KV, keys, tail; GDN:
 // state, ring; the PLE layer: + the PLE state).
 std::vector<size_t> pp_layer_bytes(const model::Qwen4ExpDesc& d, uint32_t max_len);
 // dev0_fixed = the embedding + the RoPE table + control; dev1_fixed = the final mixer + lm_head (+ the MTP
-// head) + the RoPE table + control - then runtime::pp_balance.
-PpBalance pp_split(const model::Qwen4ExpDesc& d, uint32_t max_len, bool int8_head, bool mtp, bool prefill = false);
+// head, or the DFlash drafter with `dflash`) + the RoPE table + control - then runtime::pp_balance.
+PpBalance pp_split(const model::Qwen4ExpDesc& d, uint32_t max_len, bool int8_head, bool mtp, bool prefill = false,
+                   const model::DFlashDesc* dflash = nullptr,
+                   loader::DraftFormat df_format = loader::DraftFormat::Int8);
 
 // --- the planner ---------------------------------------------------------------------------------------
 // One device's plan in memory_line()'s components: model = weights + RoPE; kv = KV + indexer keys + tails;
@@ -569,6 +593,7 @@ struct DevicePlan : MemoryComponents {
   uint32_t device = 0, first = 0, end = 0;   // its layers [first, end)
   size_t weights = 0, rope = 0, state = 0, scratch = 0, link = 0;
   bool mtp = false;                          // the MTP head's weights are in `weights` (the last device)
+  bool dflash = false;                       // the DFlash drafter's weights and buffers are in `drafter` (the last device)
   bool whole = false;                        // the descriptor is the published 48 layers (not --layers N)
   // plan 21-QFN-v2a Task 8 (apply_tier): its layers' routed experts in VRAM / all of them, and the non-resident ones'
   // bytes (in pinned host memory, not in `weights`)
@@ -579,24 +604,30 @@ struct DevicePlan : MemoryComponents {
 // `pf_rows` chunk rows (PERF-36).
 std::vector<DevicePlan> plan(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
                              bool int8_head, bool mtp, bool debug_tap = false, bool prefill = false,
-                             uint32_t pf_rows = kPfC);
+                             uint32_t pf_rows = kPfC, const model::DFlashDesc* dflash = nullptr,
+                             loader::DraftFormat df_format = loader::DraftFormat::Int8);
 // Whether every device's plan + reserve fits its capacity.
 bool fits(const std::vector<DevicePlan>& p, const std::array<size_t, kPpDevices>& device_bytes, size_t reserve);
 // `--layers auto`: the largest N in [ple_layer + 1, d.layers] whose truncated model (layers [0, N), the final
 // mixer, lm_head, with mtp the head) fits `devices` cards of `device_bytes` at max_len - on two cards under
 // the best split for that N (any split that fits); 0 when not even N = ple_layer + 1 does.
 uint32_t layers_that_fit(const model::Qwen4ExpDesc& d, uint32_t devices, uint32_t max_len, bool int8_head, bool mtp,
-                         size_t device_bytes, size_t reserve, bool prefill = false);
+                         size_t device_bytes, size_t reserve, bool prefill = false,
+                         const model::DFlashDesc* dflash = nullptr,
+                         loader::DraftFormat df_format = loader::DraftFormat::Int8);
 // The truncated descriptor and the placement layers_that_fit plans: N layers; two cards at the pp_split
 // balance when it fits, else the first split that does.
 model::Qwen4ExpDesc truncated(const model::Qwen4ExpDesc& d, uint32_t layers);
 model::Q4Placement placement_for(const model::Qwen4ExpDesc& truncated, uint32_t devices, uint32_t max_len,
-                                 bool int8_head, bool mtp, size_t device_bytes, size_t reserve, bool prefill = false);
+                                 bool int8_head, bool mtp, size_t device_bytes, size_t reserve, bool prefill = false,
+                                 const model::DFlashDesc* dflash = nullptr,
+                                 loader::DraftFormat df_format = loader::DraftFormat::Int8);
 // The largest multiple of kMaxLenQuantum, at most min(cap, 262144), whose plan + reserve fits every device
 // (`--max-len auto`); 0 when not even min(kMinAutoMaxLen, cap) does.
 uint32_t max_len_that_fits(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, bool int8_head, bool mtp,
                            const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,
-                           bool prefill = false);
+                           bool prefill = false, const model::DFlashDesc* dflash = nullptr,
+                           loader::DraftFormat df_format = loader::DraftFormat::Int8);
 // Throws std::runtime_error naming the bytes, each device's capacity and spec 22 when the placement does not
 // fit - the full model's refusal ("Qwen3.8-Flash-Next holds ~69 GB of weights at int4 g64 and two B70s
 // ~62 GB: it runs whole only with spec 22's expert-offload tier; use --layers N").
@@ -636,7 +667,9 @@ struct ExpertBudget {
 };
 ExpertBudget expert_budget(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t max_len,
                            bool int8_head, bool mtp, bool prefill,
-                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t pf_rows = kPfC);
+                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t pf_rows = kPfC,
+                           const model::DFlashDesc* dflash = nullptr,
+                           loader::DraftFormat df_format = loader::DraftFormat::Int8);
 // One line: {"max_len":..,"devices":..,"mtp":..,"prefill":..,"int8_head":..,"dense":"int4"|"bf16",..,"cache":[..],
 // "f":..}.
 std::string budget_json(const ExpertBudget& b);
@@ -670,10 +703,15 @@ void apply_tier(std::vector<DevicePlan>& p, const model::Qwen4ExpDesc& d, const 
 // The decode projection (derived; the whole model's --max-len auto and PERF-36's chunk rule): a token reads the
 // non-routed bytes and h of the routed ones from VRAM at kTierVramGbps and the rest from host memory at kTierHostGbps,
 // one after the other (measured on the card: a kernel's host reads add to its VRAM time); h is the share of the
-// profile's routes `t` keeps resident (without a profile: the resident fraction). Milliseconds a token.
+// profile's routes `t` keeps resident (without a profile: the resident fraction). Milliseconds a token. `cpu` (one card
+// and pp with --host-experts auto / cpu, PERF-124): the CPU computes a share of a step's misses while the card reads the
+// rest, so the misses go at the two rates' sum - kTierCpuGbps is an expert's bytes over the box's startup measurement
+// at one row (2026-11-27: 80 us an expert against PCIe's 246). Not under tp: a card's half expert at one row costs the
+// CPU more than PCIe there (296 us), so plain steps read every miss over the link.
 inline constexpr double kTierVramGbps = 457.8;   // 77.6 % of the B70's 590 GB/s (Qwen3.8's decode)
 inline constexpr double kTierHostGbps = 11.2;    // one expert read in place from pinned host memory (PCIe 3.0 x16)
-double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vector<uint32_t>& prof);
+inline constexpr double kTierCpuGbps = 32.6;     // an expert's 2.61 MB in 80 us on the CPU (one row, 22 cores)
+double tier_decode_ms(const ExpertBudget& b, const ExpertTier& t, const std::vector<uint32_t>& prof, bool cpu = false);
 
 // --- plan 21-QFN-v2b: tensor parallel (`--parallel tp`) -----------------------------------------------------------------
 // The crossings' device bytes on a card (Qwen3.8's runtime::tp::Layout at hidden 2560, the slices form): for each of
@@ -776,7 +814,9 @@ double tp_card_f(const ExpertBudget& b, uint32_t rank);
 // buffers, tp's fold slots and down rows - pf_lend_bytes), so DECODE loses only the rest: the score, selection, route
 // and diagnostic rows, H, the ids, the pp hand-off's landing slots and the pair's own rows (PERF-30: +52.5 MB a card at
 // 4096) and the head pass's R rows - 0.38-0.52 GB a card at 32768 (145-197 experts), 0.40-0.57 under tp, more with the
-// context (the score rows). The rule (no flag): the wide chunk when the projected decode (tier_decode_ms over the
+// context (the score rows). The rule (no flag): under pp the wide chunk whenever the wide plan leaves every card an
+// expert cache (measured on our export 2026-11-27: 4k +4.7 %, 32k flat, decode not slower); else the wide chunk when
+// the projected decode (tier_decode_ms over the
 // residents decode sees - the budget's cache plus the lent bytes, filled in the profile's rank) is at most
 // kPfWideDecodeBar slower than at kPfC, and the wide plan leaves every card an expert cache; else kPfC. Every expert
 // resident at both: the wide chunk costs decode nothing. With uniform routes (no profile) it keeps 2048 under pp and tp
@@ -796,6 +836,6 @@ struct PfChunkChoice {
 // `narrow` / `wide`: the budgets at kPfC / kPfCWide (expert_budget or tp_expert_budget - `tp_one` set - at the same
 // length and placement form); `counts` the routing profile or null (id order, every expert alike).
 PfChunkChoice pf_chunk_choice(const model::Qwen4ExpDesc& d, const ExpertBudget& narrow, const ExpertBudget& wide,
-                              const std::vector<uint32_t>* counts, bool tp);
+                              const std::vector<uint32_t>* counts, bool tp, bool cpu = false);
 
 }  // namespace runtime::qwen4exp

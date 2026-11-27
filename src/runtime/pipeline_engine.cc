@@ -86,11 +86,10 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
       throw std::runtime_error("runtime::PipelineEngine: a stage model was loaded with max_len " +
                                std::to_string(m.max_len) + " but the engine was asked for " +
                                std::to_string(max_len));
-  // Spec 16d: the MTP head (and a draft vocabulary) is device 1's, with lm_head
-  // (runtime::place_stages); device 0's model holds neither.
-  if (stages[0].mtp || stages[0].draft_vocab || (stages[1].draft_vocab && !stages[1].mtp && !drafter))
-    throw std::invalid_argument("runtime::PipelineEngine: the MTP head and a draft vocabulary "
-                                "belong to device 1's stage (runtime::place_stages)");
+  // Spec 16d: the MTP head is device 1's, with lm_head
+  // (runtime::place_stages); device 0 holds only a placeholder for lm_head.
+  if (stages[0].mtp)
+    throw std::invalid_argument("runtime::PipelineEngine: the MTP head belongs on device 1");
   if (drafter) {   // spec 19d
     if (stages[1].mtp)
       throw std::invalid_argument("runtime::PipelineEngine: a tap drafter and the MTP head are two proposers - "
@@ -127,7 +126,7 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
     Stage& s0 = st(0);
     Stage& s1 = st(1);
     s1.mtp = std::make_unique<MtpBuffers>(
-        d1, max_len, *desc, s1.model.draft_vocab ? s1.model.draft_vocab->size() : 0u, kv);
+        d1, max_len, *desc, kv);
     s0.gdn_spec = std::make_unique<l0::Mem>(d0, l0::MemKind::Device, pp_gdn_spec_bytes(*desc, s0.range.gdn));
     s0.imm.fill(s0.gdn_spec->ptr(), 0u, s0.gdn_spec->size());
     for (uint32_t M = 1; M <= MtpBuffers::kSlots; ++M)
@@ -516,10 +515,6 @@ void PipelineEngine::require_mtp(const char* what) const {
                              " = true)) before place_stages");
 }
 
-uint32_t PipelineEngine::draft_vocab() const {
-  return mtp() && st(1).model.draft_vocab ? st(1).model.draft_vocab->size() : 0;
-}
-
 MtpBuffers* PipelineEngine::mtp_buffers() { return mtp() ? st(1).mtp.get() : nullptr; }
 
 void PipelineEngine::require_spec(const char* what) const {
@@ -762,13 +757,9 @@ MemoryComponents PipelineEngine::memory_use(uint32_t dev) const {
   c.kv = s.persist.kv_k.size() + s.persist.kv_v.size();
   c.decode_state = s.persist.bytes() - c.kv + s.scratch.bytes() + link_->bytes(dev);
   // Spec 16d: the MTP state (device 1's MtpBuffers, device 0's verify slots) is decode
-  // state, the draft vocabulary its own term - Engine::memory_use's split, per device.
+  // state, as in Engine::memory_use.
   c.decode_state += (s.mtp ? s.mtp->bytes() : 0) + gs::buffer_bytes<l0::Mem, StageSizes>(s);
   if (dev == kPpDevices - 1 && drafter_) c.drafter = drafter_->bytes();   // spec 19d
-  if (s.model.draft_vocab) {
-    c.draft_vocab = s.model.draft_vocab->bytes();
-    c.model -= c.draft_vocab;
-  }
   if (pf_) {   // spec 16c: the prefill half, once prepared
     const MemoryComponents p = pf_->memory(dev);
     c.prefill_scratch += p.prefill_scratch;

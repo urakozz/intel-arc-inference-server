@@ -103,6 +103,9 @@ class Qwen4ExpEngine {
   std::vector<float> read_debug_router();
   // u32 [layers][32]: every layer's route row of the last replay (kernels::qwen4exp::route).
   std::vector<uint32_t> read_routes();
+  // Plan 21-QFN-v3a Task 0: of the last plain step's routed experts, those read from host memory (step_misses over
+  // every device's part) - a sample off the timed path.
+  uint32_t read_step_misses();
   // QSA layer `layer`'s selection of the last replay: positions [0, count) then the count (count + 1 words).
   std::vector<uint32_t> read_selection(uint32_t layer);
   // fp32 [qsa layers][2]: the 512th / 513th block scores of the last replay (+INF / -INF without a cut).
@@ -115,7 +118,8 @@ class Qwen4ExpEngine {
   // fp32 [vocab]: the last replay's logits (the last device's).
   std::vector<float> read_logits();
   void read_logits_into(float* host);
-  // bf16 [count][2][256] of QSA layer `layer`'s K (or V) for positions [first, first + count).
+  // bf16 [count][2][256] of QSA layer `layer`'s K (or V) for positions [first, first + count) (--kv-cache int8: the
+  // int8 codes, two a word).
   std::vector<uint16_t> read_kv(uint32_t layer, uint32_t first, uint32_t count, bool v);
   // bf16 [count][128] of QSA layer `layer`'s compressed indexer keys for blocks [first_block, + count).
   std::vector<uint16_t> read_idx_keys(uint32_t layer, uint32_t first_block, uint32_t count);
@@ -205,11 +209,11 @@ class Qwen4ExpEngine {
   // restore, spec 7 §3.3 step 4, sets the pending id). save_kv / load_kv copy [begin, end), begin a multiple of 4 (the
   // cache's is of kBlock); begin == end copies nothing. Every
   // call runs on the devices' immediate lists with no step in flight (a failed hand-off is reset by load_state,
-  // which overwrites everything a session reads). KV bf16 (spec 21-QFN-v1 decision 8): kv_cache() is KvCache::Bf16, the
-  // prefix cache's kv_form 0.
+  // which overwrites everything a session reads). kv_cache() is the descriptor's KV form (plan 21-QFN-v3a: Int8 with
+  // --kv-cache int8, its scales runs of their own), the prefix cache's kv_form 0 / 1.
   size_t state_bytes() const;
   size_t kv_bytes(uint32_t n_pos) const;
-  KvCache kv_cache() const { return KvCache::Bf16; }
+  KvCache kv_cache() const { return model_.desc.kv8 ? KvCache::Int8 : KvCache::Bf16; }
   void save_state(void* host);
   void load_state(const void* host, uint32_t pos)
     pre(pos <= max_len_);
@@ -280,7 +284,8 @@ class Qwen4ExpEngine {
   MtpNorm mtp_norm() const { return mtp_norm_; }
   size_t verify_list_launches(uint32_t M) const;   // every device's verify list at M
   size_t draft_list_launches(uint32_t i) const;
-  // The head's KV / compressed keys of positions [first, first + count) (bf16 [count][2][256] / blocks [count][128]).
+  // The head's KV / compressed keys of positions [first, first + count) (bf16 [count][2][256] - int8: the codes, two
+  // a word - / blocks [count][128]).
   std::vector<uint16_t> read_mtp_kv(uint32_t first, uint32_t count, bool v);
   std::vector<uint16_t> read_mtp_idx_keys(uint32_t first_block, uint32_t count);
 

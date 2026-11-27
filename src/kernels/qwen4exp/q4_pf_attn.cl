@@ -29,6 +29,14 @@
 // the row's max and sum, pass 2 p = rne(exp(s - m) / l) (the softmax's bf16 output), O = sum p v rounded once
 // (written as its bf16 value: pf_attn_gate's own rounding of O is then exact).
 //
+// **KV8** (plan 21-QFN-v3a, `--kv-cache int8`; the `_KV8` binaries, unset in every other): Q is the ROTATED q
+// (kv8.cl's attn_prep_kv8, PF = 1), Kc / Vc the rotated int8 cache with fp16 scales Ks / Vs [max_len][KV_HEADS] (two
+// more arguments, last), O still in the rotated basis (pf_attn_gate_kv8 un-rotates it). A key's 16 codes of a dim atom
+// are one 16-byte load, each code exactly its bf16 (kv8.cl's kv8_bf4), so S = Q K^T is the integer dot; the score is
+// times the key's scale (lane = key), then 1/16. V's codes likewise (the lane's dim of the atom's keys); the key's V
+// scale goes into P before its bf16 rounding (pa = rne(p x sv)), the row sum stays sum p - kv8.cl's flash rule. The
+// work-group holds all 12 q heads of its kv head, so each gathered row is read and widened once. EAGER 0 only.
+//
 // tests/kernels/qwen4exp_pf_ref.h sparse_attn_fp64 is the default form's walk in fp64 (the cosine >= 0.99999 bar of
 // spec 6 K1, qwen4exp_pf_kernels_test on the card); sparse_row_eager the eager chain. Card only: DPAS and sub-group
 // broadcasts / reductions.
@@ -61,6 +69,31 @@
 #define SSCALE 0.0625f         /* 1 / sqrt(256) */
 
 #include "bf16.h"
+#ifndef KV8
+#define KV8 0
+#endif
+#if KV8
+#if EAGER
+#error "q4_pf_sparse_attn: KV8 is the flash form only (EAGER 0)"
+#endif
+#include "kv8_scheme.h"
+#define KV_T char
+#define KV8_SCALE_ARGS , __global const ushort* restrict Ks, __global const ushort* restrict Vs
+// An int8 as its exact bf16 bits; four codes as two bf16 pairs (kv8.cl's kv8_bf / kv8_bf4).
+inline uint kv8_bf(char c) { return as_uint((float)c) >> 16; }
+inline uint2 kv8_bf4(uint w) {
+  const char4 c = as_char4(w);
+  return (uint2)(kv8_bf(c.s0) | (kv8_bf(c.s1) << 16), kv8_bf(c.s2) | (kv8_bf(c.s3) << 16));
+}
+// 16 codes (one key's dim atom) as the DPAS B operand's 8 bf16 pairs
+inline uint8 kv8_atom(__global const char* p) {
+  const uint4 w = vload4(0, (__global const uint*)p);
+  return (uint8)(kv8_bf4(w.s0), kv8_bf4(w.s1), kv8_bf4(w.s2), kv8_bf4(w.s3));
+}
+#else
+#define KV_T ushort
+#define KV8_SCALE_ARGS
+#endif
 inline float score_of(float dot) {
 #if EAGER
   return bf16f(rne_bf16(bf16f(rne_bf16(dot)) * SSCALE));
@@ -72,9 +105,9 @@ inline float8 m_safe(float8 m) { return select(m, (float8)(0.0f), isequal(m, (fl
 
 __attribute__((reqd_work_group_size(2 * SG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
-__kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global const ushort* restrict Kc,
-                                __global const ushort* restrict Vc, __global const uint* restrict lists,
-                                __global float* restrict O, uint r0, uint rows) {
+__kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global const KV_T* restrict Kc,
+                                __global const KV_T* restrict Vc, __global const uint* restrict lists,
+                                __global float* restrict O, uint r0, uint rows KV8_SCALE_ARGS) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint m = r0 + get_group_id(0);                 // the chunk's row
   const uint j = get_group_id(1);                      // kv head
@@ -88,6 +121,16 @@ __kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global cons
   for (uint dd = 0; dd < NDA; ++dd) o[dd] = (float8)(0.0f);
   float8 mrow = (float8)(-INFINITY), lsum = (float8)(0.0f);
 
+#if KV8
+  // a key's dims 16 kk .. 16 kk + 15 as 8 bf16 pairs from one 16-byte load; its K scale into the scores' lane
+#define K_ATOM(p, kk) kv8_atom(Kc + ((size_t)(p) * KV_HEADS + j) * HD + 16u * (kk))
+#define K_SCALE(b) sacc[b] *= kv8_f16f(Ks[(size_t)kp[b] * KV_HEADS + j]);
+#define V_ELT(c) kv8_bf(c)
+#else
+#define K_ATOM(p, kk) vload8(0, (__global const uint*)(Kc + ((size_t)(p) * KV_HEADS + j) * HD + 16u * (kk)))
+#define K_SCALE(b)
+#define V_ELT(c) (c)
+#endif
   // Q as the DPAS A operand for dims 16 kk .. 16 kk + 15: component r = head hb + r (zero past nh), lane = the dim.
 #define Q_ATOM(kk, qa)                                                                       \
   {                                                                                          \
@@ -107,12 +150,13 @@ __kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global cons
     short8 qa;                                                                               \
     Q_ATOM(kk, qa)                                                                           \
     _Pragma("unroll") for (uint b = 0; b < NKA; ++b) {                                       \
-      const uint8 kb = vload8(0, (__global const uint*)(Kc + ((size_t)kp[b] * KV_HEADS + j) * HD + 16u * kk)); \
+      const uint8 kb = K_ATOM(kp[b], kk);                                                    \
       sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa, as_int8(kb), sacc[b]);          \
     }                                                                                        \
   }                                                                                          \
   _Pragma("unroll") for (uint b = 0; b < NKA; ++b) {                                         \
     const bool live = (t0) + 16u * b + l < count;                                            \
+    K_SCALE(b)                                                                               \
     sacc[b].s0 = live ? score_of(sacc[b].s0) : -INFINITY;                                    \
     sacc[b].s1 = live ? score_of(sacc[b].s1) : -INFINITY;                                    \
     sacc[b].s2 = live ? score_of(sacc[b].s2) : -INFINITY;                                    \
@@ -155,8 +199,8 @@ __kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global cons
     for (uint dd = 0; dd < NDA; ++dd) {                                                      \
       uint vb[8];                                                                            \
       _Pragma("unroll") for (uint i = 0; i < 8; ++i) {                                       \
-        const uint lo = Vc[((size_t)kq[2 * i] * KV_HEADS + j) * HD + 16u * dd + l];          \
-        const uint hi = Vc[((size_t)kq[2 * i + 1] * KV_HEADS + j) * HD + 16u * dd + l];      \
+        const uint lo = V_ELT(Vc[((size_t)kq[2 * i] * KV_HEADS + j) * HD + 16u * dd + l]);   \
+        const uint hi = V_ELT(Vc[((size_t)kq[2 * i + 1] * KV_HEADS + j) * HD + 16u * dd + l]); \
         vb[i] = lo | (hi << 16);                                                             \
       }                                                                                      \
       o[dd] = intel_sub_group_bf16_bf16_matrix_mad_k16(pa[b], as_int8(vload8(0, vb)), o[dd]); \
@@ -174,7 +218,12 @@ __kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global cons
     for (uint b = 0; b < NKA; ++b) {
       const float8 p = exp(sacc[b] - msafe);     // masked: exp(-INF) = 0
       psum += p;
+#if KV8
+      const float8 pv = p * kv8_f16f(Vs[(size_t)kp[b] * KV_HEADS + j]);
+      TO_BF16(pa[b], pv)
+#else
       TO_BF16(pa[b], p)
+#endif
     }
     ROWSUM(psum, rsum)
     lsum = lsum * corr + rsum;
@@ -214,6 +263,9 @@ __kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global cons
 #undef ROWSUM
 #undef TO_BF16
 #undef PV
+#undef K_ATOM
+#undef K_SCALE
+#undef V_ELT
 
   // The epilogue: O[h][m][16 dd + lane], h = hb + r for the sub-group's live heads.
 #pragma unroll

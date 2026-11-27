@@ -4,13 +4,10 @@
 //
 //   df_topk_stage1  grid (CHUNKS, R), WG 256: chunk c of row j - logits[j][c·CH, +CH) - to its TOPK best
 //                   (value, index) pairs, best first, in part[j][c][TOPK][2] (the index as a float: exact below 2^24)
-//   df_topk_stage2  grid (R), WG 256: the CHUNKS·TOPK pairs of row j to the row's TOPK best; ids through the
-//                   draft vocabulary's table when COMPACT (Review Focus 3: the selector, the walk and the readback see
-//                   real ids, never compact indices); values · out_mult, then softcap · tanh(v / softcap) when softcap
+//   df_topk_stage2  grid (R), WG 256: the CHUNKS·TOPK pairs of row j to the row's TOPK best; values · out_mult, then softcap · tanh(v / softcap) when softcap
 //                   > 0 (dflash_ref: the head's logits_processor). Writes cand[j][TOPK] (u32) and unary[j][TOPK].
 //
-// **The order** is one comparator everywhere: a larger value wins, an equal value goes to the lower index (so the
-// lower id - the draft vocabulary's table is ascending), NaN never wins. An index >= USED (the target's padded head
+// **The order** is one comparator everywhere: a larger value wins, an equal value goes to the lower id, NaN never wins. An index >= USED (the target's padded head
 // rows, argmax.cl's VOCAB_USED) is never a candidate. Both stages pick by TOPK rounds of a fixed pairwise tree over
 // the lanes' sorted private lists: every comparison is between fixed slots in a fixed sequence.
 // A row with fewer than TOPK candidates fills with (-inf, NO_IDX); stage 2 writes NO_IDX as the id.
@@ -24,9 +21,6 @@
 #endif
 #ifndef CH
 #define CH 4096
-#endif
-#ifndef COMPACT
-#define COMPACT 0
 #endif
 #define WG 256
 #define CHUNKS ((N + CH - 1) / CH)
@@ -106,7 +100,7 @@ __kernel void df_topk_stage1(__global const float* restrict logits, __global flo
 }
 
 __attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void df_topk_stage2(__global const float* restrict part, __global const uint* restrict ids,
+__kernel void df_topk_stage2(__global const float* restrict part,
                              const float out_mult, const float softcap, __global uint* restrict cand,
                              __global float* restrict unary) {
   __local float sv[WG];
@@ -132,11 +126,7 @@ __kernel void df_topk_stage2(__global const float* restrict part, __global const
     for (uint k = 0; k < TOPK; ++k) {
       float v = ov[k] * out_mult;
       if (softcap > 0.0f) v = tanh(v / softcap) * softcap;
-#if COMPACT
-      cand[(size_t)j * TOPK + k] = oi[k] == NO_IDX ? NO_IDX : ids[oi[k]];
-#else
       cand[(size_t)j * TOPK + k] = oi[k];
-#endif
       unary[(size_t)j * TOPK + k] = oi[k] == NO_IDX ? -INFINITY : v;
     }
 }

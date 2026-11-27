@@ -11,8 +11,6 @@
 //                          z-lab's drafter) or z-lab/Qwen3.8-27B-DFlash2 (loads as int8 at load); never downloaded
 //                          here
 //   --spec-max K           the deepest block, 1..7 (default 7: DFlash 2's block of 8 - 1)
-//   --draft-vocab N        (b70-serve) the drafter's head over a draft vocabulary (spec 8 §11's, built without the
-//                          MTP head)
 // The drafter's linears are int4 g64 for an AutoRound int4 export, the default (its own packed linears,
 // resolve_format), else int8 (spec 19 decision 2: per-row RTN at load; --draft-format went in the zero-config cleanup -
 // Args::format stays the tests' seam). Its AdaptiveK cost table is MtpCost::dflash's (--spec-cost went with it).
@@ -85,28 +83,24 @@ inline void resolve_format(Args& a) {
   if (a.on && loader::DFlashCheckpoint(a.model).packed()) a.format = loader::DraftFormat::Int4G64;
 }
 
-// Spec 19v2 C3: ranked32k failed quality; full int8 heads use the candidate64/exact-rerank fallback.
-inline bool candidate_head(bool int8_head, uint32_t draft_vocab) {
-  return int8_head && draft_vocab == 0;
+// Spec 19v2 C3: int8 heads use the 2-bit candidate head with exact rescore.
+inline bool candidate_head(bool int8_head) {
+  return int8_head;
 }
 
-// The AdaptiveK cost table: MtpCost::dflash for the head and drafter forms, a draft vocabulary scaling the head's
-// share of the draft row (derived, as the MTP head's).
-inline server::MtpCost cost(const Args& a, loader::LmHeadForm head, uint32_t draft_vocab) {
+// The AdaptiveK cost table for the head and drafter forms.
+inline server::MtpCost cost(const Args& a, loader::LmHeadForm head) {
   const bool i8h = head == loader::LmHeadForm::Int8;
   const unsigned format = a.format == loader::DraftFormat::Int4G64 ? 2u : a.format == loader::DraftFormat::Int8 ? 1u : 0u;
-  server::MtpCost c = server::MtpCost::dflash(i8h, format, candidate_head(i8h, draft_vocab));
-  if (draft_vocab != 0)
-    c = c.with_draft_vocab(server::MtpCost::dflash_head_share(i8h, format), double(draft_vocab) / model::Qwen35::kVocab);
+  server::MtpCost c = server::MtpCost::dflash(i8h, format, candidate_head(i8h));
   if (c.max_k() < a.max_k)
     throw std::runtime_error("the drafter's cost table covers K up to " + std::to_string(c.max_k()) +
                              ", below --spec-max " + std::to_string(a.max_k));
   return c;
 }
 
-// The drafter's weights beside the loaded target, the head rows its draft list reads (the full head's, or the
-// draft vocabulary's) and its planner term (runtime::dflash::drafter_plan: weights, buffers; the plan adds the
-// engine's verify slots and prefill taps).
+// The drafter's weights beside the loaded target, the head rows its draft list reads, and its planner term
+// (runtime::dflash::drafter_plan: weights and buffers; the plan adds the engine's verify slots and prefill taps).
 struct Loaded {
   loader::DFlashWeights w;
   uint32_t head_rows = 0;
@@ -117,23 +111,19 @@ struct Loaded {
 // weights are then loaded onto device 1 beside the stage model (load(), below).
 inline runtime::DrafterPlan plan_only(const Args& a, const loader::LoadedModel& target) {
   const loader::DFlashCheckpoint ck(a.model);
-  const uint32_t head_rows = target.draft_vocab ? target.draft_vocab->size()
-                                                : target.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
-  ck.check_target(*target.desc, target.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N);
+  const loader::DeviceWeight& head = target.linears.at({loader::kTopLevel, model::LinearId::LmHead});
+  ck.check_target(*target.desc, head.shape.N);
   if (a.max_k > ck.desc().max_k())
     throw std::runtime_error("--spec-max " + std::to_string(a.max_k) + " exceeds the drafter's block (" +
                              std::to_string(ck.desc().max_k()) + " drafts)");
-  const bool candidate = candidate_head(target.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind ==
-                                           model::WeightKind::Int8, target.draft_vocab ? target.draft_vocab->size() : 0);
-  return runtime::dflash::drafter_plan(ck.desc(), ck.target_hidden(), head_rows, a.format, candidate);
+  const bool candidate = candidate_head(head.kind == model::WeightKind::Int8);
+  return runtime::dflash::drafter_plan(ck.desc(), ck.target_hidden(), head.shape.N, a.format, candidate);
 }
 
 inline Loaded load(l0::Context& ctx, const Args& a, const loader::LoadedModel& target) {
-  const bool candidate = candidate_head(target.linears.at({loader::kTopLevel, model::LinearId::LmHead}).kind ==
-                                           model::WeightKind::Int8, target.draft_vocab ? target.draft_vocab->size() : 0);
-  Loaded l{loader::load_drafter(ctx, a.model, target, a.format, 0, candidate), 0, {}};
-  l.head_rows = target.draft_vocab ? target.draft_vocab->size()
-                                   : target.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
+  const loader::DeviceWeight& head = target.linears.at({loader::kTopLevel, model::LinearId::LmHead});
+  const bool candidate = candidate_head(head.kind == model::WeightKind::Int8);
+  Loaded l{loader::load_drafter(ctx, a.model, target, a.format, 0, candidate), head.shape.N, {}};
   l.plan = runtime::dflash::drafter_plan(l.w.desc, l.w.target_hidden, l.head_rows, a.format, candidate);
   if (a.max_k > l.w.desc.max_k())
     throw std::runtime_error("--spec-max " + std::to_string(a.max_k) + " exceeds the drafter's block (" +

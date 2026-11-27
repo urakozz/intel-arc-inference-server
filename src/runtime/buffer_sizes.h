@@ -235,10 +235,10 @@ struct DecodeScratchDims {
   static constexpr uint32_t kNormGroups = 20;
 
   // Spec 32e: the decode scratch's rows - kDeepM where the deep verify lists can be built (one sequence, the MTP head
-  // without a draft vocabulary, bf16 KV, Qwen3.8's attention and delta-net shapes - PERF-56: or Ornith's; the engine
+  // bf16 KV, Qwen3.8's attention and delta-net shapes - PERF-56: or Ornith's; the engine
   // also needs the int8 head), kWideM elsewhere. Plan 40a Task 3: kWideRowsM for several Qwen3.8 sequences with a
   // proposer (`mtp`: the MTP head or a drafter), whose row lists reach 32 rows.
-  static uint32_t rows(const model::ModelDesc& desc, bool mtp, KvCache kv, uint32_t seqs, bool draft_vocab);
+  static uint32_t rows(const model::ModelDesc& desc, bool mtp, KvCache kv, uint32_t seqs);
   static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t rows = kWideM);
 };
 
@@ -394,11 +394,8 @@ struct MtpSizes {
   [[=gs::state, =gs::zero_on_reset, =EngSnap{EngineSnap::HeadHidden}]] size_t hh = 0;   // the snapshot holds row 0
   [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft chain writes it before reading it")]]
   size_t dh = 0;
-  // Under a draft vocabulary reset fills it with -inf (MtpBuffers::zero), which nothing but V''s entries overwrites.
   [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft writes its row's entries before they are read")]]
   size_t logits = 0;
-  [[=gs::state, =gs::zero_on_reset, =gs::NotSnapshotted("each draft writes it before reading it")]]
-  size_t dv_logits = 0;   // spec 8 §11: fp32 [|V'|], 0 without a draft vocabulary
   size_t total() const { return gs::bytes(*this); }
 };
 static_assert(gs::sizes_problem<MtpSizes, EngineSnap>().empty(), gs::sizes_problem<MtpSizes, EngineSnap>());
@@ -416,7 +413,6 @@ struct MtpDims {
   // Spec 19a (plan 19a Task 4): the most GDN state slots a buffer may carry - a verify
   // list at M rows needs M slots, and DecodeScratchDims::kM = 8 bounds M.
   static constexpr uint32_t kMaxSlots = 8;
-  // `draft_vocab` = |V'| (spec 8 §11, `--draft-vocab`), 0 when the full head drafts.
   // `kv`: the head's KV follows the main cache's form (spec 12b), one layer.
   // `slots` (spec 19a): the GDN state slots, kSlots for every engine; only
   // tools/probe/probe_mtp_steps' M = 5..8 lists ask for more (gdn_spec grows by one
@@ -426,11 +422,9 @@ struct MtpDims {
   // first sequence's kSlots - 1: sequence q's state k is GDN index q x kSlots + k, index 0 being
   // PersistentBuffers::gdn_state and index i > 0 gdn_spec's state i - 1 - the row lists' GDN
   // index) and its hh rows (hh_rows).
-  static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0,
-                        KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
+  static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
   // Spec 17d: a tensor-parallel card's - the GDN state slots at the card's shapes (`card`, model::tp_card_desc), the
-  // head's KV layer at the head's own (`head`: the one-card descriptor - the MTP head is whole on each card). No draft
-  // vocabulary, one sequence, kSlots.
+  // head's KV layer at the head's own (`head`: the one-card descriptor - the MTP head is whole on each card). One sequence, kSlots.
   static MtpSizes tp_sizes(uint32_t max_len, const model::ModelDesc& card, const model::ModelDesc& head, KvCache kv);
   // Spec 13c: MtpBuffers::hh's rows. One sequence: kM + 1 (row 0 = h_{pos-1}, rows 1..M the
   // verify rows' hidden). `seqs` > 1: each sequence's kM + 1 rows (sequence q's from row
@@ -517,7 +511,7 @@ struct TapVerifyDims {
 //             (kernels::gdn_defer_built: Qwen3.8's, Ornith's): the pending GDN rows, two parities of
 //             kernels::gdn_pend_parity_bytes (verify-cost-m8, PERF-51)
 //   gdn_x, conv_x  spec 32: the deep verify lists' chain scratch - one sequence with the MTP head on Qwen3.8's GDN
-//             shapes (PERF-56: or Ornith's) over the bf16 cache without a draft vocabulary (DecodeScratchDims::rows'
+//             shapes (PERF-56: or Ornith's) over the bf16 cache (DecodeScratchDims::rows'
 //             kDeepM); a GDN state and the conv rows 16.. (kernels::gdn_conv_x_layer_bytes at the model's conv
 //             channels a layer). The engine makes them on its first capture of those lists (the int8 head's:
 //             Engine::capture_wide); the plan counts them where they can be.
@@ -540,7 +534,7 @@ static_assert(gs::snapshot_problem<EngineSnap, PersistentSizes, DecodeScratchSiz
               gs::snapshot_problem<EngineSnap, PersistentSizes, DecodeScratchSizes, MtpSizes, SlotSizes, EngineSizes>());
 struct EngineDims {
   // `seqs` the engine's sequence slots; `mtp` / `drafter` its proposer; `debug_tap` Engine's debug_resid.
-  static EngineSizes sizes(const model::ModelDesc& desc, KvCache kv, uint32_t draft_vocab, uint32_t seqs, bool mtp,
+  static EngineSizes sizes(const model::ModelDesc& desc, KvCache kv, uint32_t seqs, bool mtp,
                            bool drafter, bool debug_tap = false);
 };
 
@@ -549,10 +543,6 @@ struct EngineDims {
 // after the final norm's fold (the last layer's output). Throws std::invalid_argument unless `layers` is
 // non-empty, strictly ascending and every entry < desc.layers. Host only (tests/runtime/dflash_engine_host_test).
 std::vector<std::vector<uint32_t>> tap_sites(const model::ModelDesc& desc, const std::vector<uint32_t>& layers);
-
-// The draft vocabulary's compact head and id table (spec 8 §11) are the LOADER's
-// allocations, sized by loader::draft_vocab_bytes (loader/draft_vocab.h, header-only
-// so this archive needs no loader); memory_plan.h adds them as their own term.
 
 // Spec 8 (plan 8b Task 3): `Engine::prefill`'s MTP hidden rows, bf16 [chunk_cap + 1][hidden],
 // allocated on the first prefill of an engine that carries the head.

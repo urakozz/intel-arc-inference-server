@@ -30,6 +30,16 @@
 // Flash keeps the probabilities in fp32 (one rounding at the end); the reference rounds scores and
 // probabilities to bf16 (q4_qsa_attn_eager.cl behind B70_Q4_ATTN=eager). Card only: sub-group shuffles,
 // reductions and block reads.
+//
+// **KV8** (plan 21-QFN-v3a, `--kv-cache int8`; the `_KV8` binaries, unset in every other): the rotated int8 cache
+// (kv8_scheme.h, src/common/kv8.h's scheme: kv8.cl's attn_prep_kv8 writes it at this family's heads). attn_q is the
+// ROTATED q (fp32); kv_k / kv_v are int8 [max_len][KV_HEADS][256] with fp16 scales k_scale / v_scale
+// [max_len][KV_HEADS] (two more arguments, last). A position's K row is one 16-byte block read a lane (the same dims a
+// lane as the bf16 form's two reads); the 16-fma dot runs on the integer codes (exact in fp32) and the lane-reduced
+// dot is multiplied by the key's scale, then by 1/16. V of dim d at a position is code x scale (exact in fp32): a
+// wave's 16 positions and V scales one a lane, each position's codes one block read a sub-group. The
+// reduce un-rotates o = acc / sm per head (kv8_scheme.h's 256-point form: FWHT(s (.) o) / 16, fp32) before the gate.
+// q4_qsa_attn_ref.h's twin is kv8.h's arithmetic in the same order.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 
@@ -65,6 +75,19 @@
 #define SSCALE 0.0625f         /* 1 / sqrt(256) */
 
 #include "bf16.h"
+#ifndef KV8
+#define KV8 0
+#endif
+#if KV8
+#pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
+#define KV8_N HD
+#include "kv8_scheme.h"
+#define KV_T char
+#define KV8_SCALE_ARGS , __global const ushort* restrict k_scale, __global const ushort* restrict v_scale
+#else
+#define KV_T ushort
+#define KV8_SCALE_ARGS
+#endif
 inline float rf(float f) { return bf16f(rne_bf16(f)); }
 inline float exp_torch(float d) {
   const int q = convert_int_rte(d * 1.442695040888963407359924681001892137426645954152985934135449406931f);
@@ -98,8 +121,8 @@ inline uint slice_len(uint c) {
 __attribute__((reqd_work_group_size(WG, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void q4_qsa_attn(__global const uint* restrict ctrl, __global const float* restrict attn_q,
-                          __global const ushort* restrict kv_k, __global const ushort* restrict kv_v,
-                          __global const uint* restrict list, __global float* restrict part) {
+                          __global const KV_T* restrict kv_k, __global const KV_T* restrict kv_v,
+                          __global const uint* restrict list, __global float* restrict part KV8_SCALE_ARGS) {
   const uint j = get_group_id(0);
   const uint blk = get_group_id(1);
   const uint m = get_group_id(2);
@@ -129,6 +152,23 @@ __kernel void q4_qsa_attn(__global const uint* restrict ctrl, __global const flo
     const uint e = w0 + sgid;
     const bool ok = e < end;
     const uint pk = ok ? row[e] : 0u;
+#if KV8
+    float kreg[PER_LANE];
+    float ks = 0.0f;
+    if (ok) {
+      const uchar16 a = intel_sub_group_block_read_uc16((__global const uchar*)(kv_k + ((size_t)pk * KV_HEADS + j) * HD));
+      ks = kv8_f16f(k_scale[(size_t)pk * KV_HEADS + j]);
+      kreg[0] = (float)as_char(a.s0); kreg[1] = (float)as_char(a.s1); kreg[2] = (float)as_char(a.s2);
+      kreg[3] = (float)as_char(a.s3); kreg[4] = (float)as_char(a.s4); kreg[5] = (float)as_char(a.s5);
+      kreg[6] = (float)as_char(a.s6); kreg[7] = (float)as_char(a.s7); kreg[8] = (float)as_char(a.s8);
+      kreg[9] = (float)as_char(a.s9); kreg[10] = (float)as_char(a.sa); kreg[11] = (float)as_char(a.sb);
+      kreg[12] = (float)as_char(a.sc); kreg[13] = (float)as_char(a.sd); kreg[14] = (float)as_char(a.se);
+      kreg[15] = (float)as_char(a.sf);
+    } else {
+      for (uint t = 0; t < PER_LANE; ++t) kreg[t] = 0.0f;
+    }
+#define KV_ELT(x) (x)
+#else
     ushort kreg[PER_LANE];
     if (ok) {
       __global const ushort* kr = kv_k + ((size_t)pk * KV_HEADS + j) * HD;
@@ -141,26 +181,48 @@ __kernel void q4_qsa_attn(__global const uint* restrict ctrl, __global const flo
     } else {
       for (uint t = 0; t < PER_LANE; ++t) kreg[t] = (ushort)0;
     }
+#define KV_ELT(x) bf16f(x)
+#endif
     for (uint qh = 0; qh < GQA; ++qh) {
       const uint8 qa = intel_sub_group_block_read8((__local const uint*)&qpack[qh * HD]);
       const uint8 qb = intel_sub_group_block_read8((__local const uint*)&qpack[qh * HD + 128]);
       float a = 0.0f;
-      a = fma(as_float(qa.s0), bf16f(kreg[0]), a);  a = fma(as_float(qa.s1), bf16f(kreg[1]), a);
-      a = fma(as_float(qa.s2), bf16f(kreg[2]), a);  a = fma(as_float(qa.s3), bf16f(kreg[3]), a);
-      a = fma(as_float(qa.s4), bf16f(kreg[4]), a);  a = fma(as_float(qa.s5), bf16f(kreg[5]), a);
-      a = fma(as_float(qa.s6), bf16f(kreg[6]), a);  a = fma(as_float(qa.s7), bf16f(kreg[7]), a);
-      a = fma(as_float(qb.s0), bf16f(kreg[8]), a);  a = fma(as_float(qb.s1), bf16f(kreg[9]), a);
-      a = fma(as_float(qb.s2), bf16f(kreg[10]), a); a = fma(as_float(qb.s3), bf16f(kreg[11]), a);
-      a = fma(as_float(qb.s4), bf16f(kreg[12]), a); a = fma(as_float(qb.s5), bf16f(kreg[13]), a);
-      a = fma(as_float(qb.s6), bf16f(kreg[14]), a); a = fma(as_float(qb.s7), bf16f(kreg[15]), a);
+      a = fma(as_float(qa.s0), KV_ELT(kreg[0]), a);  a = fma(as_float(qa.s1), KV_ELT(kreg[1]), a);
+      a = fma(as_float(qa.s2), KV_ELT(kreg[2]), a);  a = fma(as_float(qa.s3), KV_ELT(kreg[3]), a);
+      a = fma(as_float(qa.s4), KV_ELT(kreg[4]), a);  a = fma(as_float(qa.s5), KV_ELT(kreg[5]), a);
+      a = fma(as_float(qa.s6), KV_ELT(kreg[6]), a);  a = fma(as_float(qa.s7), KV_ELT(kreg[7]), a);
+      a = fma(as_float(qb.s0), KV_ELT(kreg[8]), a);  a = fma(as_float(qb.s1), KV_ELT(kreg[9]), a);
+      a = fma(as_float(qb.s2), KV_ELT(kreg[10]), a); a = fma(as_float(qb.s3), KV_ELT(kreg[11]), a);
+      a = fma(as_float(qb.s4), KV_ELT(kreg[12]), a); a = fma(as_float(qb.s5), KV_ELT(kreg[13]), a);
+      a = fma(as_float(qb.s6), KV_ELT(kreg[14]), a); a = fma(as_float(qb.s7), KV_ELT(kreg[15]), a);
       for (uint stride = SG / 2; stride > 0; stride >>= 1) a += intel_sub_group_shuffle_down(a, a, stride);
+#if KV8
+      if (lane == 0) sc[qh][sgid] = a * ks;
+#else
       if (lane == 0) sc[qh][sgid] = a;
+#endif
     }
     // the wave's V values of dim lid at its 16 positions (zero past the slice)
     float vreg[WAVE_P];
+#if KV8
+    // lane l holds position w0 + l and its V scale; each position's 16 codes of this sub-group's dims one block read
+    const bool lv = w0 + lane < end;
+    const uint pl = lv ? row[w0 + lane] : 0u;
+    const float vsl = lv ? kv8_f16f(v_scale[(size_t)pl * KV_HEADS + j]) : 0.0f;
+#endif
     for (uint s = 0; s < WAVE_P; ++s) {
       const uint es = w0 + s;
+#if KV8
+      if (es < end) {   // uniform
+        const uint ps = sub_group_broadcast(pl, s);
+        const uchar cv = intel_sub_group_block_read_uc((__global const uchar*)(kv_v + ((size_t)ps * KV_HEADS + j) * HD) + SG * sgid);
+        vreg[s] = (float)as_char(cv) * sub_group_broadcast(vsl, s);
+      } else {
+        vreg[s] = 0.0f;
+      }
+#else
       vreg[s] = es < end ? bf16f(kv_v[((size_t)row[es] * KV_HEADS + j) * HD + lid]) : 0.0f;
+#endif
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     for (uint qh = 0; qh < GQA; ++qh) {
@@ -230,5 +292,10 @@ __kernel void q4_qsa_reduce(__global const uint* restrict ctrl, __global const f
   }
   const float g = attn_gate[((size_t)m * Q_HEADS + h) * HD + d];
   const float sg = rf(1.0f / (1.0f + exp_torch(-g)));
+#if KV8
+  __local float xch[HD];
+  attn_out[(size_t)m * OUT_N + (size_t)h * HD + d] = rne_bf16(rf(kv8n_unrotate(acc / sm, d, xch)) * sg);
+#else
   attn_out[(size_t)m * OUT_N + (size_t)h * HD + d] = rne_bf16(rf(acc / sm) * sg);
+#endif
 }

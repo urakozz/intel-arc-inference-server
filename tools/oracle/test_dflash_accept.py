@@ -9,9 +9,6 @@
   DFlash (v1, incl. a full-attention and a causal layer), K = 1..7, with anchors before and past
   the sliding window and context positions >= the anchor present (Review Focus 2-4);
 - top_k_fast == top_k_stable, ties across the k-th value included;
-- select_draft_vocab == src/loader/draft_vocab.cc on tests/loader/draft_vocab_test.cc's cases
-  and Qwen3.8's shape; a masked head drafts only V' ids and the full mask changes nothing
-  (Review Focus 5);
 - the int8 RTN (loader/lm_head_int8.cc's rule) and the int8 head;
 - the acceptance accounting: lengths, censoring where the text leaves the greedy path, the
   per-depth counts and E_K;
@@ -93,46 +90,6 @@ def test_top_k_fast():
     print("top_k_fast == top_k_stable (ties across the boundary, -inf rows)")
 
 
-def test_select_draft_vocab():
-    s = DA.select_draft_vocab
-    v = s([95, 96], [97, 98], [50, 50, 99, 120, 3, 95, 10], 100, 32)
-    assert len(v) == 32 and v == sorted(set(v)) and max(v) < 100
-    assert all(i in v for i in (95, 96, 97, 98, 50, 99, 3, 10)) and 120 not in v
-    assert all(i in v for i in range(26)) and not any(i in v for i in range(26, 95) if i != 50)
-    assert s([1], [2], [60, 61, 62, 63, 64, 65, 66, 67], 100, 5) == [1, 2, 60, 61, 62]
-    m = s([150, 7], [99, 100], [], 100, 16)
-    assert 7 in m and 99 in m and 100 not in m and len(m) == 16
-    assert s([5], [], [9], 64, 64) == list(range(64))
-    for bad in (lambda: s([], [], [], 100, 0), lambda: s([], [], [], 100, 101), lambda: s([1, 2, 3], [4], [], 100, 3)):
-        try:
-            bad()
-            raise AssertionError("no throw")
-        except ValueError:
-            pass
-    assert s([3, 1, 2], [], [], 100, 3) == [1, 2, 3]
-    added = list(range(248044, 248077))
-    for size in (32768, 65536, 131072):
-        v = s(added, [248046, 248044], [], 248077, size)
-        assert len(v) == size and v[size - 34] == size - 34 and v[size - 33] == 248044
-    print("select_draft_vocab == loader::select_draft_vocab on draft_vocab_test.cc's cases + Qwen3.8's shape")
-
-
-def test_vocab_mask():
-    d = T.make(T.v2_dict(window=6))
-    ctx, _ = _ctx(d, 16)
-    head = DA.Head(d.lm_head)
-    keep_ids = DA.select_draft_vocab([290, 291], [292], [], 300, 40)
-    keep = torch.zeros(T.VOCAB, dtype=torch.bool)
-    keep[torch.tensor(keep_ids)] = True
-    full = torch.ones(T.VOCAB, dtype=torch.bool)
-    ps = torch.tensor([4, 9, 15])
-    out = DA.draft_batch(d, head, [1, 2, 3], ps, 7, ctx, {"none": None, "v": keep, "all": full})
-    assert torch.equal(out["none"], out["all"])
-    assert keep[out["v"].flatten()].all()
-    assert not torch.equal(out["none"], out["v"])
-    print(f"V' mask: drafts only V' ids ({len(keep_ids)} of {T.VOCAB}); an all-true mask changes nothing")
-
-
 def test_int8():
     g = torch.Generator().manual_seed(1)
     w = (torch.randn(37, 70, generator=g) * torch.rand(37, 1, generator=g) * 3).to(torch.bfloat16)
@@ -202,28 +159,19 @@ def test_run_over_dumps():
     t, e, h = T.random_tensors(cfg, 2)
     with tempfile.TemporaryDirectory() as root:
         dd, td = T._write_checkpoint(root, cd, t, e, h)
-        with open(os.path.join(td, "tokenizer.json"), "w") as f:
-            json.dump({"added_tokens": [{"id": 290}, {"id": 291}]}, f)
-        with open(os.path.join(td, "generation_config.json"), "w") as f:
-            json.dump({"eos_token_id": [291, 292]}, f)
         d = ref.load_drafter(dd, td)
         dumps = os.path.join(root, "dumps")
         os.makedirs(dumps)
         _fake_dump(os.path.join(dumps, "prose__a.taps.safetensors"), "prose/a", d, 8, 20, 1)
         _fake_dump(os.path.join(dumps, "code__b.taps.safetensors"), "code/b", d, 5, 15, 2)
         out = os.path.join(root, "out")
-        rk = os.path.join(root, "ranked.ids")
-        with open(rk, "w") as f:
-            f.write("# rank.py\n" + "\n".join(str(i) for i in range(299, 200, -1)) + "\n")
-        ns = argparse.Namespace(dumps=dumps, out_dir=out, arms="bf16,int8", vocab="", vocab_on="bf16",
-                                draft_vocab_ids=rk, vocab_used=300, k="1-7", batch=4, drafter=dd,
+        ns = argparse.Namespace(dumps=dumps, out_dir=out, arms="bf16,int8", vocab_used=300,
+                                k="1-7", batch=4, drafter=dd,
                                 w4a16=None, target=td, sources=None, dry_run=False, candidates="", costs=None,
                                 draft_cost=0.2)
-        DA.VOCAB_SIZES["tiny"] = 64
-        ns.vocab = "tiny"
         DA.cmd_run(ns)
         r = json.load(open(os.path.join(out, "accept.bf16.json")))
-        assert sorted(r["variants"]) == ["bf16", "bf16-vtiny", "bf16-vtiny-r"] and sorted(r["variants"]["bf16"]) == ["code/b", "prose/a"]
+        assert sorted(r["variants"]) == ["bf16"] and sorted(r["variants"]["bf16"]) == ["code/b", "prose/a"]
         st = r["variants"]["bf16"]["prose/a"]
         assert st["7"]["rows"] == len(DA.anchors_of(8, 20)) == 6 and st["7"]["censored"] == 0
         assert sum(st["3"]["hist"]) == 6 and len(st["3"]["hist"]) == 4
@@ -234,13 +182,12 @@ def test_run_over_dumps():
         assert os.path.getmtime(os.path.join(out, "accept.bf16.json")) == mt
         assert os.path.isfile(os.path.join(out, "summary.md"))
         summ = DA.summarize([os.path.join(out, "accept.bf16.json"), os.path.join(out, "accept.int8.json")])
-        assert set(summ) == {"bf16", "bf16-vtiny", "bf16-vtiny-r", "int8"} and "all" in summ["bf16"]
+        assert set(summ) == {"bf16", "int8"} and "all" in summ["bf16"]
         assert summ["bf16"]["all"]["sources"] == 2
         ns.dry_run, ns.out_dir = True, os.path.join(root, "dry")
         DA.cmd_run(ns)
         assert not os.listdir(ns.out_dir)
-        del DA.VOCAB_SIZES["tiny"]
-    print("run: two dumps x bf16 / int8 (+ a V' arm), JSON per arm, resumed, summary, dry run writes nothing")
+    print("run: two dumps x bf16 / int8, JSON per arm, resumed, summary, dry run writes nothing")
 
 
 def test_positive_alignment():
@@ -300,7 +247,7 @@ def test_inkling_whole_block():
     anchor_ids = [5, 77, 140]
     ps = torch.tensor(anchors_pos)
     head = DA.Head(d.lm_head, int8=True)
-    out = DA.draft_batch(d, head, anchor_ids, ps, 7, ctx, {"full": None, "c": ("c", 64)}, walk=True)
+    out = DA.draft_batch(d, head, anchor_ids, ps, 7, ctx, {"full": None, "c": 64}, walk=True)
     ids, real, cand, chosen = out["full"]
     for b, p in enumerate(anchors_pos):
         hd = ref.Drafter(cfg, t, e, (head.q.float() * head.s[:, None]), embed_norm=(w, 1e-6), valid_vocab=live)
@@ -324,13 +271,16 @@ def test_inkling_whole_block():
     assert [round(v / A, 6) for v in x["pm"]] == [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], x["pm"]
     q = torch.softmax(real, -1).gather(-1, chosen[..., None])[..., 0]
     assert abs(x["exact"][-1] - float((1 + torch.cumprod(q, 1).sum(1)).sum())) < 1e-6
+    an = x["anchors"]
+    assert an["length"] == [7] * A and an["censored"] == [False] * A
+    assert all(abs(a - b) < 1e-4 for r, t in zip(an["q"], q.tolist()) for a, b in zip(r, t)), "per-anchor q"
     g = x["gtau"]["0.5"]
     assert g["ids"] <= 8 * A and g["rows"] <= 8 * A and g["given_up"] >= 0
     print("Inkling: one K = 7 block an anchor == draft_block, 2-bit candidates live, T 1.0 / GTAU arithmetic")
 
 
-TESTS = [test_top_k_fast, test_select_draft_vocab, test_int8, test_accept_accounting,
-         test_batch_equals_draft_block, test_vocab_mask, test_positive_alignment, test_run_over_dumps,
+TESTS = [test_top_k_fast, test_int8, test_accept_accounting,
+         test_batch_equals_draft_block, test_positive_alignment, test_run_over_dumps,
          test_inkling_whole_block]
 
 

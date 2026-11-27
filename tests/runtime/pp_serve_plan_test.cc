@@ -7,7 +7,7 @@
 //   1. PpExtras{} is spec 16b / 16c's plan exactly, for every model, split, length, KV form and
 //      prefill path;
 //   2. each term where it belongs: device 1 gains the head's weights + the embedding replica
-//      (model), MtpBuffers (decode state), the draft vocabulary (its own term), the head's
+//      (model), MtpBuffers (decode state), the head's
 //      prefill rows (decode state) and on l0-int8 the L0 slab (prefill scratch); device 0 gains
 //      only its verify slots - pp_gdn_spec_bytes, against the binaries' SPEC_SLOT_STRIDE;
 //   3. the block shadows: two of each device's GDN state + conv ring (+ device 1's hidden row
@@ -32,7 +32,6 @@
 #include <vector>
 
 #include "check.h"
-#include "loader/draft_vocab.h"
 #include "model/model_desc.h"
 #include "runtime/buffer_sizes.h"
 #include "runtime/control.h"
@@ -76,7 +75,6 @@ void same(const runtime::PpDevicePlan& a, const runtime::PpDevicePlan& b) {
   CHECK_EQ(a.decode_state, b.decode_state);
   CHECK_EQ(a.prefill_scratch, b.prefill_scratch);
   CHECK_EQ(a.int8, b.int8);
-  CHECK_EQ(a.draft_vocab, b.draft_vocab);
   CHECK_EQ(a.weights, b.weights);
 }
 
@@ -144,42 +142,32 @@ void check_gdn_spec() {
 void check_mtp_terms() {
   for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()})
     for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
-      for (const runtime::PrefillPath& pf : paths())
-        for (uint32_t dv : {0u, 32768u}) {
-          const runtime::PpWeights w = weights_with_head(*d, WeightKind::Int8);
-          const uint32_t s = d->layers / 2, len = 16384;
-          runtime::PpExtras x;
-          x.mtp = true;
-          x.draft_vocab = dv;
-          const runtime::PpPlan base = runtime::pp_plan(*d, s, len, w, kv, pf);
-          const runtime::PpPlan p = runtime::pp_plan(*d, s, len, w, kv, pf, x);
-          const runtime::PpDevicePlan &b0 = base.dev[0], &b1 = base.dev[1], &p0 = p.dev[0], &p1 = p.dev[1];
-          // Device 0: its verify slots only.
-          CHECK_EQ(p0.model, b0.model);
-          CHECK_EQ(p0.kv, b0.kv);
-          CHECK_EQ(p0.decode_state, b0.decode_state + runtime::pp_gdn_spec_bytes(*d, p0.stage.gdn));
-          CHECK_EQ(p0.prefill_scratch, b0.prefill_scratch);
-          CHECK_EQ(p0.draft_vocab, size_t{0});
-          // Device 1: the head, the embedding replica, MtpBuffers, the head's prefill state.
-          CHECK_EQ(p1.model, b1.model + w.mtp + w.embed);
-          CHECK_EQ(p1.embed_replica, w.embed);
-          CHECK_EQ(p1.kv, b1.kv);
-          // The head's prefill rows and its two Control blocks (one per chunk in flight).
-          const size_t mtp_pf =
-              pf.prefill ? runtime::mtp_prefill_hidden_bytes(*d, runtime::PrefillScratchDims::kCDefault) + runtime::kPpPfDepth * sizeof(runtime::Control) : 0;
-          // Spec 39: MtpBuffers only - a stage makes none of Engine's deferred GDN rows or deep chain scratch, which
-          // MtpSizes' former `deep` term put here.
-          CHECK_EQ(p1.decode_state, b1.decode_state + runtime::MtpDims::sizes(len, *d, dv, kv).total() + mtp_pf);
-          // The head's slab: every backend's mixer linears hold it already (open-work 16 / 17).
-          CHECK_EQ(p1.prefill_scratch, b1.prefill_scratch);
-          CHECK_EQ(p1.draft_vocab, dv ? loader::draft_vocab_bytes(dv, d->hidden, true).total() : size_t{0});
-        }
-  CHECK(throws([] {
-    runtime::PpExtras x;
-    x.draft_vocab = 32768;   // without the head
-    runtime::pp_plan(model::qwen38(), 32, 4096, runtime::pp_weights(model::qwen38(), WeightKind::Int8),
-                     KvCache::Bf16, runtime::pp_no_prefill(), x);
-  }));
+      for (const runtime::PrefillPath& pf : paths()) {
+        const runtime::PpWeights w = weights_with_head(*d, WeightKind::Int8);
+        const uint32_t s = d->layers / 2, len = 16384;
+        runtime::PpExtras x;
+        x.mtp = true;
+        const runtime::PpPlan base = runtime::pp_plan(*d, s, len, w, kv, pf);
+        const runtime::PpPlan p = runtime::pp_plan(*d, s, len, w, kv, pf, x);
+        const runtime::PpDevicePlan &b0 = base.dev[0], &b1 = base.dev[1], &p0 = p.dev[0], &p1 = p.dev[1];
+        // Device 0: its verify slots only.
+        CHECK_EQ(p0.model, b0.model);
+        CHECK_EQ(p0.kv, b0.kv);
+        CHECK_EQ(p0.decode_state, b0.decode_state + runtime::pp_gdn_spec_bytes(*d, p0.stage.gdn));
+        CHECK_EQ(p0.prefill_scratch, b0.prefill_scratch);
+        // Device 1: the head, the embedding replica, MtpBuffers, the head's prefill state.
+        CHECK_EQ(p1.model, b1.model + w.mtp + w.embed);
+        CHECK_EQ(p1.embed_replica, w.embed);
+        CHECK_EQ(p1.kv, b1.kv);
+        // The head's prefill rows and its two Control blocks (one per chunk in flight).
+        const size_t mtp_pf =
+            pf.prefill ? runtime::mtp_prefill_hidden_bytes(*d, runtime::PrefillScratchDims::kCDefault) + runtime::kPpPfDepth * sizeof(runtime::Control) : 0;
+        // Spec 39: MtpBuffers only - a stage makes none of Engine's deferred GDN rows or deep chain scratch, which
+        // MtpSizes' former `deep` term put here.
+        CHECK_EQ(p1.decode_state, b1.decode_state + runtime::MtpDims::sizes(len, *d, kv).total() + mtp_pf);
+        // The head's slab: every backend's mixer linears hold it already (open-work 16 / 17).
+        CHECK_EQ(p1.prefill_scratch, b1.prefill_scratch);
+      }
   // The describe line names the head and the replica only when they are there.
   const runtime::PpWeights w = weights_with_head(model::qwen38(), WeightKind::Int8);
   runtime::PpExtras x;
@@ -222,7 +210,7 @@ void check_shadows() {
       }
     }
   const runtime::PpPlan q = runtime::pp_plan(model::qwen38(), 32, 16384, runtime::pp_weights(model::qwen38(), WeightKind::Int8),
-                                             KvCache::Bf16, paths()[1], runtime::PpExtras{false, 0, true, true, {}});
+                                             KvCache::Bf16, paths()[1], runtime::PpExtras{false, true, {}});
   std::printf("block shadows (b70-serve's prefix cache), Qwen3.8 split 32: %.3f / %.3f GB\n",
               q.dev[0].shadows / 1e9, q.dev[1].shadows / 1e9);
 }
@@ -377,7 +365,7 @@ void check_serve_auto() {
     // One card at the same flags (its planner: no shadows - one card snapshots straight to the
     // host - and the head's buffers with its weights in model_bytes).
     const size_t one_weights = w.total() + (r.mtp ? w.mtp : 0);
-    const uint32_t one = runtime::max_len_that_fits(*r.d, r.mtp, one_weights, kDevice, kReserve, cap, pf, {}, r.kv);
+    const uint32_t one = runtime::max_len_that_fits(*r.d, r.mtp, one_weights, kDevice, kReserve, cap, pf, r.kv);
     CHECK(c.max_len >= one);
     std::printf("  %-34s split %2u, max_len %6u (one card %6u); device 0 %.3f GB, device 1 %.3f GB\n", r.name,
                 c.split, c.max_len, one, p.dev[0].total() / 1e9, p.dev[1].total() / 1e9);
@@ -395,36 +383,33 @@ void check_drafter_terms() {
   dr.per_position = 512;
   dr.n_taps = 5;
   const runtime::PpWeights w = runtime::pp_weights(d, WeightKind::Int8);
-  for (const runtime::PrefillPath& pf : paths())
-    for (uint32_t dv : {0u, 32768u}) {
-      runtime::PpExtras x;
-      x.drafter = dr;
-      x.draft_vocab = dv;
-      const uint32_t s = 32, len = 16384;
-      const runtime::PpPlan base = runtime::pp_plan(d, s, len, w, KvCache::Bf16, pf);
-      const runtime::PpPlan p = runtime::pp_plan(d, s, len, w, KvCache::Bf16, pf, x);
-      for (uint32_t i = 0; i < 2; ++i) {
-        const runtime::PpDevicePlan &b = base.dev[i], &q = p.dev[i];
-        const size_t slots = runtime::pp_gdn_spec_bytes(d, q.stage.gdn, runtime::TapVerifyDims::kSlots);
-        CHECK_EQ(slots, size_t(6) * runtime::TapVerifyDims::gdn_spec_bytes(d) / 7 + size_t(q.stage.gdn) *
-                                                                                       (runtime::TapVerifyDims::gdn_spec_bytes(d) / 7 / d.gdn_layers));
-        CHECK_EQ(q.drafter_slots, slots);
-        CHECK_EQ(q.decode_state, b.decode_state + slots);
-        CHECK_EQ(q.kv, b.kv);
-        if (i == 0) {
-          CHECK_EQ(q.model, b.model);
-          CHECK_EQ(q.drafter, size_t{0});
-          CHECK_EQ(q.prefill_scratch, b.prefill_scratch);
-        } else {
-          CHECK_EQ(q.model, b.model + w.embed);
-          CHECK_EQ(q.drafter, dr.bytes(len));
-          const size_t taps = pf.prefill ? 2 * runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault) : 0;
-          CHECK_EQ(q.drafter_taps, taps);
-          CHECK_EQ(q.prefill_scratch, b.prefill_scratch + taps);
-          CHECK_EQ(q.draft_vocab, dv ? loader::draft_vocab_bytes(dv, d.hidden, true).total() : size_t{0});
-        }
+  for (const runtime::PrefillPath& pf : paths()) {
+    runtime::PpExtras x;
+    x.drafter = dr;
+    const uint32_t s = 32, len = 16384;
+    const runtime::PpPlan base = runtime::pp_plan(d, s, len, w, KvCache::Bf16, pf);
+    const runtime::PpPlan p = runtime::pp_plan(d, s, len, w, KvCache::Bf16, pf, x);
+    for (uint32_t i = 0; i < 2; ++i) {
+      const runtime::PpDevicePlan &b = base.dev[i], &q = p.dev[i];
+      const size_t slots = runtime::pp_gdn_spec_bytes(d, q.stage.gdn, runtime::TapVerifyDims::kSlots);
+      CHECK_EQ(slots, size_t(6) * runtime::TapVerifyDims::gdn_spec_bytes(d) / 7 + size_t(q.stage.gdn) *
+                                                                                     (runtime::TapVerifyDims::gdn_spec_bytes(d) / 7 / d.gdn_layers));
+      CHECK_EQ(q.drafter_slots, slots);
+      CHECK_EQ(q.decode_state, b.decode_state + slots);
+      CHECK_EQ(q.kv, b.kv);
+      if (i == 0) {
+        CHECK_EQ(q.model, b.model);
+        CHECK_EQ(q.drafter, size_t{0});
+        CHECK_EQ(q.prefill_scratch, b.prefill_scratch);
+      } else {
+        CHECK_EQ(q.model, b.model + w.embed);
+        CHECK_EQ(q.drafter, dr.bytes(len));
+        const size_t taps = pf.prefill ? 2 * runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault) : 0;
+        CHECK_EQ(q.drafter_taps, taps);
+        CHECK_EQ(q.prefill_scratch, b.prefill_scratch + taps);
       }
     }
+  }
   CHECK(throws([&] {
     runtime::PpExtras x;
     x.drafter = dr;
@@ -435,7 +420,7 @@ void check_drafter_terms() {
   x.drafter = dr;
   x.hook = true;
   const runtime::PpChoice c = runtime::pp_auto_split_and_len(d, w, kTwo, kReserve, 262144, KvCache::Bf16, paths()[1], x);
-  const uint32_t one = runtime::max_len_that_fits(d, false, w.total(), kDevice, kReserve, 262144, paths()[1], {},
+  const uint32_t one = runtime::max_len_that_fits(d, false, w.total(), kDevice, kReserve, 262144, paths()[1],
                                                   KvCache::Bf16, dr);
   CHECK(c.max_len > one);
   const std::string line =

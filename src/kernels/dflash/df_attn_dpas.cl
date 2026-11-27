@@ -70,6 +70,20 @@
 #if (HD % 16) != 0 || (PB % 16) != 0 || (RING % PB) != 0 || RING < WIN
 #error "df_attn_dpas: HD and PB multiples of 16, RING a multiple of PB and >= WIN"
 #endif
+// BLK2D (plan 41k, the ring form): a key atom's K and V by 2D block reads - K transposed (lane = key, its 16 dims as
+// 8 words: the per-lane load's layout), V transformed (key pairs a word, lane = dim: the packed pairs' layout) - in
+// place of 16 lanes' loads and the 2 x 16 per-lane V gathers; an atom whose 16 slots wrap the ring keeps the per-lane
+// loads. The same operands, so the same DPAS results: bitwise.
+#ifndef BLK2D
+#define BLK2D 0
+#endif
+#if BLK2D && FULL_TARGETS
+#error "df_attn_dpas: BLK2D is the ring form's"
+#endif
+#if BLK2D
+#pragma OPENCL EXTENSION cl_intel_subgroup_2d_block_io : enable
+#define RING_ROW_BYTES (NKV * HD * 2)
+#endif
 
 inline ushort f2bf(float f) {
   const uint u = as_uint(f);
@@ -296,6 +310,20 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     const uint slot = (uint)(((ulong)p + off) % RING);
     __global const uint* krow = (__global const uint*)(ring_k + ((size_t)slot * NKV + kvh) * HD);
     float8 acc = (float8)0.0f;
+#if BLK2D
+    const uint slot0 = (uint)(((ulong)p + b * PB + ka * 16) % RING);   // the atom's first slot (uniform)
+    if (slot0 + 16 <= RING) {
+      for (uint a = 0; a < DA; ++a) {
+        uint kw[8];
+        intel_sub_group_2d_block_read_transpose_32b_16r8x1c((__global void*)ring_k, RING_ROW_BYTES, RING, RING_ROW_BYTES,
+                                                            (int2)((int)((kvh * HD + a * 16) / 2), (int)slot0), kw);
+        const int8 kb = as_int8(vload8(0, kw));
+        acc = intel_sub_group_bf16_bf16_matrix_mad_k16(qh[a], kb, acc);
+        acc = intel_sub_group_bf16_bf16_matrix_mad_k16(qm[a], kb, acc);
+        acc = intel_sub_group_bf16_bf16_matrix_mad_k16(ql[a], kb, acc);
+      }
+    } else
+#endif
     for (uint a = 0; a < DA; ++a) {
       const int8 kb = as_int8(vload8(0, krow + a * 8));
       acc = intel_sub_group_bf16_bf16_matrix_mad_k16(qh[a], kb, acc);
@@ -360,6 +388,21 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
       set8(&pm, i, mid);
       set8(&pl, i, lo);
     }
+#if BLK2D
+    const uint vs0 = (uint)(((ulong)p + b * PB + ka * 16) % RING);
+    if (vs0 + 16 <= RING) {
+      for (uint a = 0; a < DA; ++a) {
+        uint vw[8];
+        intel_sub_group_2d_block_read_transform_16b_16r16x1c((__global void*)ring_v, RING_ROW_BYTES, RING, RING_ROW_BYTES,
+                                                             (int2)((int)(kvh * HD + a * 16), (int)vs0), vw);
+        const int8 vb = as_int8(vload8(0, vw));
+        o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(ph, vb, o[a]);
+        o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pm, vb, o[a]);
+        o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pl, vb, o[a]);
+      }
+      continue;
+    }
+#endif
     uint vslot[16];
     for (int t = 0; t < 16; ++t) vslot[t] = (uint)(((ulong)p + b * PB + ka * 16 + t) % RING);
     for (uint a = 0; a < DA; ++a) {

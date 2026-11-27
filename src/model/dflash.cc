@@ -321,7 +321,7 @@ void check_flash_next_dflash(const DFlashDesc& d) {
     bad("heads " + std::to_string(d.q_heads) + " / " + std::to_string(d.kv_heads) + " x " + std::to_string(d.head_dim) +
         " are not 32 / 8 x 128");
   if (d.inter != 7680) bad("intermediate_size " + std::to_string(d.inter) + " is not 7680");
-  if (d.taps != std::vector<uint32_t>{5, 15, 25, 35, 45})
+  if (d.taps != kFlashNextDflashTaps)
     bad("target_layer_ids are not 5, 15, 25, 35, 45 (the engine taps those layers)");
   if (d.block != 8) bad("block_size " + std::to_string(d.block) + " is not 8");
   for (uint32_t l = 0; l < d.layers; ++l) {

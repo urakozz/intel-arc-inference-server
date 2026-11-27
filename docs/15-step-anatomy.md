@@ -56,7 +56,7 @@ checks everyone's drafts at once.
 A batched step carries at most 8 rows, and MTP drafts share them with the pending ids. Every decoding slot's pending
 id takes one row. The remaining rows go to drafts, dealt one at a time round the slots, longest-running request first,
 each slot up to its own draft limit. At four requests, one draft each measured faster than three drafts for the oldest
-request alone. With more than one slot on a card, a DFlash drafter or a draft vocabulary is refused at startup.
+request alone.
 
 A batched row is not bitwise equal to the same row run alone: the M-row kernels round the last bf16 digit differently
 from the M = 1 GEMV. So a batched row is judged against its lone run by the f32 judge, a float32 CPU reference

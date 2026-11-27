@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""The flag tables against the binaries' generated --help (src/cli/flags.h): README.md holds b70-serve's,
+"""The flag tables against the binaries' generated --help (src/cli/flags.h): docs/17-running-models.md holds b70-serve's,
 docs/18-development.md b70-decode's.
 
 Every flag a table names is the binary's (a b70-decode table's row that names `b70-serve` is b70-serve's), every flag
 either --help names is in a table, and a row of one flag whose default is one `literal` has the default --help gives.
-Usage: readme_flags_test.py README.md docs/18-development.md <b70-serve> <b70-decode>
+Usage: readme_flags_test.py docs/17-running-models.md docs/18-development.md <b70-serve> <b70-decode>
 """
 import re
 import subprocess

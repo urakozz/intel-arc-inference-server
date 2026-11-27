@@ -129,8 +129,7 @@ uint32_t check_auto(const char* label, const model::ModelDesc& d, WeightKind hea
   }
   // Both devices together hold the model, its state at `len`, two scratches, two RoPE
   // tables and the hand-off buffers.
-  const runtime::MemoryPlan one = runtime::plan(d, len, false, w.total(), runtime::PrefillPath{false},
-                                                {}, kv);
+  const runtime::MemoryPlan one = runtime::plan(d, len, false, w.total(), runtime::PrefillPath{false}, kv);
   CHECK_EQ(p.dev[0].kv + p.dev[1].kv, one.kv);
   CHECK_EQ(p.dev[0].weights + p.dev[1].weights, w.total());
   // = one card's plan + a second RoPE table, control block and decode scratch + the link.

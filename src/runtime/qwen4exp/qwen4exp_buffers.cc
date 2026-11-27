@@ -16,7 +16,7 @@ uint32_t kind_index(const model::Qwen4ExpDesc& d, uint32_t first, uint32_t layer
   for (uint32_t l = first; l < layer; ++l) n += d.is_qsa(l) == qsa ? 1 : 0;
   return n;
 }
-size_t kv_rows_bytes(const model::Qwen4ExpDesc& d, uint32_t max_len) { return size_t(max_len) * d.kv_n() * 2; }
+size_t kv_rows_bytes(const model::Qwen4ExpDesc& d, uint32_t max_len) { return size_t(max_len) * kv_row_bytes(d); }
 }  // namespace
 
 #define Q4_PS persistent_sizes(d, p, dev, len)
@@ -25,6 +25,7 @@ Qwen4ExpBuffers::Qwen4ExpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d,
                                  uint32_t dev, uint32_t len, Q4Attn at, bool mtp, const model::Qwen4ExpDesc* scratch)
     : control(ctx, l0::MemKind::Shared, Q4_PS.control),
       kv(ctx, l0::MemKind::Device, Q4_PS.kv),
+      kv_scale(ctx, l0::MemKind::Device, Q4_PS.kv_scale),
       idx_keys(ctx, l0::MemKind::Device, Q4_PS.idx_keys),
       idx_tail(ctx, l0::MemKind::Device, Q4_PS.idx_tail),
       gdn_state(ctx, l0::MemKind::Device, Q4_PS.gdn_state),
@@ -95,6 +96,14 @@ void* Qwen4ExpBuffers::k_layer(uint32_t layer) const {
 void* Qwen4ExpBuffers::v_layer(uint32_t layer) const {
   return static_cast<uint8_t*>(k_layer(layer)) + kv_rows_bytes(desc, max_len);
 }
+void* Qwen4ExpBuffers::k_scale_layer(uint32_t layer) const {
+  require_kind(*this, layer, true, "k_scale_layer");
+  const uint32_t i = kind_index(desc, placement.first(device), layer);
+  return static_cast<uint8_t*>(kv_scale.ptr()) + size_t(i) * 2 * max_len * kv_scale_row_bytes(desc);
+}
+void* Qwen4ExpBuffers::v_scale_layer(uint32_t layer) const {
+  return static_cast<uint8_t*>(k_scale_layer(layer)) + size_t(max_len) * kv_scale_row_bytes(desc);
+}
 void* Qwen4ExpBuffers::idx_keys_layer(uint32_t layer) const {
   require_kind(*this, layer, true, "idx_keys_layer");
   const uint32_t i = kind_index(desc, placement.first(device), layer);
@@ -144,6 +153,7 @@ const l0::Mem* snap_mem(const Qwen4ExpBuffers& b, const Qwen4ExpMtpBuffers* mtp,
 Qwen4ExpMtpBuffers::Qwen4ExpMtpBuffers(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t len)
     : hctl(ctx, l0::MemKind::Shared, Q4_MS.hctl),
       kv(ctx, l0::MemKind::Device, Q4_MS.kv),
+      kv_scale(ctx, l0::MemKind::Device, Q4_MS.kv_scale),
       idx_keys(ctx, l0::MemKind::Device, Q4_MS.idx_keys),
       idx_tail(ctx, l0::MemKind::Device, Q4_MS.idx_tail),
       hh(ctx, l0::MemKind::Device, Q4_MS.hh),

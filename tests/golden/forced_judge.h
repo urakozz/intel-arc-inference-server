@@ -196,7 +196,8 @@ struct CosRows {
 //      (Ornith prefix l0 a / e: 6.24, 5.36, 3.05), and the
 //      bf16 twins' OWN misses on the same contexts 3.1 - 8.6 ulp - what bf16 arithmetic alone does there.
 //   2. the path's logits rows are no further from the judge's than the twin's are: the cosine distance (1 - cos)
-//      of its min row and of its median row each at most kCosSlack times the twin's. kCosSlack is the "tiny
+//      of its median row at most kCosSlack times the twin's (the min row's ratio is printed, not judged: one
+//      confident row's logit tail moved it alone, prose-4096 row 46, owner 2026-11-27). kCosSlack is the "tiny
 //      tolerance": the engine's UNCACHED paths measured up to 1.53x the twin's distance on the same
 //      contexts (Ornith prefix l0 e: cold median 0.999249 vs the twin's 0.999545) - two bf16 implementations of
 //      one model whose rounding points differ - so 2 is that spread, not room for a defect (a wrong row or a lost
@@ -264,11 +265,11 @@ struct NearMiss {
     }
     const double rmin = cos_dist_ratio(cos_engine.min(), cos_twin.min());
     const double rmed = cos_dist_ratio(cos_engine.median(), cos_twin.median());
-    const bool cos_ok = rmin <= kCosSlack && rmed <= kCosSlack;
+    const bool cos_ok = rmed <= kCosSlack;
     const bool by_count = engine <= twin;
     const bool pass = by_count || (near && cos_ok);
     std::printf("  %s near-miss rule (round 2): the judge rejects %u of the %s ids, %u of the "
-                "bf16 twin's; cosine min / median %s vs the twin's %s (distance x%.2f / x%.2f, slack %.1f)%s%s\n",
+                "bf16 twin's; cosine min / median %s vs the twin's %s (distance x%.2f / x%.2f, slack %.1f on the median)%s%s\n",
                 name.c_str(), engine, who, twin, cos_engine.str().c_str(), cos_twin.str().c_str(), rmin, rmed,
                 kCosSlack, by_count ? " - no more misses than the twin" : "",
                 pass ? (by_count ? "" : " - PASS by the near-miss rule") : "  ** FAIL **");

@@ -196,7 +196,9 @@ void PpEngine::read_logits(uint32_t row, std::span<float> out) {
 
 void PpEngine::read_prefill_logits(std::span<float> out) { head().copy_logits(0, out); }
 
-std::span<const uint32_t> PpEngine::propose(uint32_t anchor, uint32_t count) { return head().propose(anchor, count); }
+std::span<const uint32_t> PpEngine::propose(uint32_t anchor, uint32_t count, float temperature, uint64_t seed) {
+  return head().propose(anchor, count, temperature, seed);
+}
 
 uint32_t PpEngine::step_drafted(uint32_t anchor, uint32_t max_drafts, std::vector<uint32_t>& output) {
   const uint32_t room = max_len() - position();

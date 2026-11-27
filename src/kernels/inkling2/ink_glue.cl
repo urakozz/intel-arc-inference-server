@@ -792,24 +792,22 @@ __kernel void ink_split_sums(__global const float* restrict states, __global con
   }
 }
 
-// Phase 2 of ink_depth_mix_norm / ink_post_mix_norm: the mixed row into `mixed` (fp32) and its squares.
-__attribute__((reqd_work_group_size(16, 1, 1)))
+// Phase 2 of ink_depth_mix_norm / ink_post_mix_norm: the mixed row into `mixed` (fp32), a work-item a value over
+// the row (grid (H / WG, rows, streams); each sub-group its own copy of the scales); its squares are
+// ink_split_squares' launch. On the split lanes each lane's 18 values ran one after another (~5 us a launch at any
+// row count). The same values and sums, so bitwise.
+__attribute__((reqd_work_group_size(WG, 1, 1)))
 GLUE_SG
 __kernel void ink_split_mix(__global const float* restrict states, __global const float* restrict last,
-                            __global const float* restrict parts, __global float* restrict mixed,
-                            __global float* restrict out_parts, uint count, uint rows) {
-  const uint r = SPLIT_ROW, stream = SPLIT_STREAM, lane = SPLIT_LANE;
+                            __global const float* restrict parts, __global float* restrict mixed, uint count,
+                            uint rows) {
+  const uint r = get_group_id(1), stream = get_group_id(2);
   const size_t row = (size_t)stream * rows + r;
   SPLIT_ROWS(rowp, states, last, count, rows, r)
   float scale[BANK];
   ink_split_scales(parts + row * SPLIT_SCALE_SUMS * WG, count, 1e-6f, scale);
-  float sum = 0.f;
-  ROW_LOOP(i) {
-    const float value = ink_split_value(rowp, scale, count, i);
-    mixed[row * H + i] = value;
-    sum += value * value;
-  }
-  out_parts[row * WG + lane] = sum;
+  const uint i = get_global_id(0);
+  mixed[row * H + i] = ink_split_value(rowp, scale, count, i);
 }
 
 // Phase 3: the weighted norm and bf16 pack (gamma by stream, as ink_depth_mix_norm).
@@ -827,25 +825,37 @@ __kernel void ink_split_norm(__global const float* restrict mixed, __global cons
     output[row * H + i] = rne_bf16((mixed[row * H + i] * inv) * gamma[i]);
 }
 
-// Phase 2 of ink_mix_cat: the mixed row into `mixed`, its squares and the message's.
-__attribute__((reqd_work_group_size(16, 1, 1)))
+// Phase 2 of ink_mix_cat: the mixed row into `mixed`, a work-item a value as ink_split_mix; then each lane's squares
+// of it and of the message (ink_split_cat_squares).
+__attribute__((reqd_work_group_size(WG, 1, 1)))
 GLUE_SG
 __kernel void ink_split_mix_cat(__global const float* restrict bank, __global const float* restrict last,
-                                __global const float* restrict parts, __global const float* restrict messages,
-                                __global float* restrict mixed, __global float* restrict out_parts, uint states,
+                                __global const float* restrict parts, __global float* restrict mixed, uint states,
                                 uint rows) {
-  const uint r = SPLIT_ROW, stream = SPLIT_STREAM, lane = SPLIT_LANE;
-  const size_t row = (size_t)stream * rows + r, start = row * H;
+  const uint r = get_group_id(1), stream = get_group_id(2);
+  const size_t row = (size_t)stream * rows + r;
   SPLIT_ROWS(rowp, bank, last, states, rows, r)
   float scale[BANK];
   ink_split_scales(parts + row * SPLIT_SCALE_SUMS * WG, states, 1e-6f, scale);
+  const uint i = get_global_id(0);
+  mixed[row * H + i] = ink_split_value(rowp, scale, states, i);
+}
+
+__attribute__((reqd_work_group_size(16, 1, 1)))
+GLUE_SG
+__kernel void ink_split_cat_squares(__global const float* restrict mixed, __global const float* restrict messages,
+                                    __global float* restrict out_parts, uint rows) {
+  const uint r = SPLIT_ROW, stream = SPLIT_STREAM, lane = SPLIT_LANE;
+  const size_t row = (size_t)stream * rows + r, start = row * H;
+  float x[H / WG], msg[H / WG];
+  ROW_LOOP(i) {
+    x[i_step] = mixed[start + i];
+    msg[i_step] = messages[start + i];
+  }
   float sx = 0.f, sm = 0.f;
   ROW_LOOP(i) {
-    const float x = ink_split_value(rowp, scale, states, i);
-    const float msg = messages[start + i];
-    mixed[start + i] = x;
-    sx += x * x;
-    sm += msg * msg;
+    sx += x[i_step] * x[i_step];
+    sm += msg[i_step] * msg[i_step];
   }
   out_parts[(2 * row) * WG + lane] = sx;
   out_parts[(2 * row + 1) * WG + lane] = sm;
@@ -866,31 +876,26 @@ __kernel void ink_split_cat(__global const float* restrict mixed, __global const
   }
 }
 
-// ink_controller_norm in two phases: the blend written back over `mixed` (each word by the lane that read it), its
-// squares; then the weighted norm.
+// ink_controller_norm in three phases: the blend written back over `mixed`, a work-item a value over the whole row
+// (on the split lanes each lane's 18 values' tanh pairs ran one after another: ~14 us a launch at any row count);
+// then each lane's squares in ROW_LOOP's order; then the weighted norm. The same values and sums, so bitwise.
+__attribute__((reqd_work_group_size(WG, 1, 1)))
+__kernel void ink_split_blend(__global float* restrict mixed, __global const float* restrict messages,
+                              __global const float* restrict fg, uint rows, uint streams) {
+  const size_t j = ((size_t)get_group_id(2) * rows + get_group_id(1)) * H + get_global_id(0);
+  const size_t gain = (size_t)streams * rows * H;
+  mixed[j] = (1.f - tanh(fg[j])) * mixed[j] + tanh(fg[gain + j]) * messages[j];
+}
+
 __attribute__((reqd_work_group_size(16, 1, 1)))
 GLUE_SG
-__kernel void ink_split_blend(__global float* restrict mixed, __global const float* restrict messages,
-                              __global const float* restrict fg, __global float* restrict out_parts, uint rows,
-                              uint streams) {
+__kernel void ink_split_squares(__global const float* restrict mixed, __global float* restrict out_parts, uint rows) {
   const uint r = SPLIT_ROW, stream = SPLIT_STREAM, lane = SPLIT_LANE;
   const size_t row = (size_t)stream * rows + r, start = row * H;
-  const size_t gain = (size_t)streams * rows * H;
-  // Every load first, then the arithmetic: tanh's branches between the loads kept them one after another.
-  float f[H / WG], g[H / WG], m[H / WG], u[H / WG];
-  ROW_LOOP(i) {
-    const size_t j = start + i;
-    f[i_step] = fg[j];
-    g[i_step] = fg[gain + j];
-    m[i_step] = mixed[j];
-    u[i_step] = messages[j];
-  }
+  float x[H / WG];
+  ROW_LOOP(i) x[i_step] = mixed[start + i];
   float sum = 0.f;
-  ROW_LOOP(i) {
-    const float x = (1.f - tanh(f[i_step])) * m[i_step] + tanh(g[i_step]) * u[i_step];
-    mixed[start + i] = x;
-    sum += x * x;
-  }
+  ROW_LOOP(i) sum += x[i_step] * x[i_step];
   out_parts[row * WG + lane] = sum;
 }
 #endif

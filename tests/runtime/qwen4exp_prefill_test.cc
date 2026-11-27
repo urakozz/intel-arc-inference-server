@@ -3,7 +3,8 @@
 // synth-ckpt: 4 layers - 3 GDN incl. the PLE layer, 1 QSA) carry it before Intel's; the golden gate itself is
 // qwen4exp_golden_test's `prefill` mode.
 //
-//   qwen4exp_prefill_test <checkpoint> <ids> [all | split | pp | wide | gdn] [pp2[:split]] [int8] [layers:N] [judge:<file>]
+//   qwen4exp_prefill_test <checkpoint> <ids> [all | split | pp | wide | gdn] [pp2[:split]] [int8] [kv8] [layers:N] [judge:<file>]
+//   (`kv8`, plan 21-QFN-v3a: the int8 KV cache - every mode's checks the same)
 //
 // The prompt: <ids> cycled to kN = 4500 positions - three chunks at the default width: 0..2047 (all dense), 2048..4095
 // (rows 2048..2050 dense, the rest sparse: Review Focus 1's straddling chunk) and 4096..4499 (all sparse, a 404-row
@@ -93,6 +94,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "common/kv8.h"
 #include "golden/forced_judge.h"
 #include "kernels/kernels.h"
 #include "kernels/qwen4exp_kernels.h"
@@ -219,6 +221,37 @@ struct StateCmp {
   uint32_t tail_words_differ = 0, tail_max_ulp = 0;   // the QSA tail rings (raw keys: a linear's rounding)
   std::vector<double> layer_worst, layer_median;
 };
+// A QSA layer's K (which 0) or V (1) row of position p as floats: bf16 values, or (d.kv8) the int8 codes x their fp16
+// scales - the rotated basis, whose cosines are the original's (the rotation is orthogonal up to a power of two).
+std::vector<float> kv_row(const model::Qwen4ExpDesc& d, const uint8_t* layer, uint32_t max_len, int which, uint32_t p) {
+  std::vector<float> r(d.kv_n());
+  const size_t row = rq::kv_row_bytes(d);
+  const uint8_t* at = layer + (size_t(which) * max_len + p) * row;
+  if (!d.kv8) {
+    for (uint32_t i = 0; i < d.kv_n(); ++i) r[i] = common::bf16_to_f32(reinterpret_cast<const uint16_t*>(at)[i]);
+    return r;
+  }
+  const auto* sc = reinterpret_cast<const uint16_t*>(layer + size_t(2) * max_len * row) +
+                   (size_t(which) * max_len + p) * d.kv_heads;
+  for (uint32_t i = 0; i < d.kv_n(); ++i) r[i] = common::kv8::dequant(int8_t(at[i]), sc[i / d.head_dim]);
+  return r;
+}
+// The bytes of a QSA layer's K / V rows (and, d.kv8, their scales) at the head of read_layer_state's layout.
+size_t kv_layer_bytes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
+  return size_t(2) * max_len * (rq::kv_row_bytes(d) + rq::kv_scale_row_bytes(d));
+}
+// Positions [0, n)'s K (which 0) or V (1) rows in the model's basis: bf16 values, or (d.kv8) each head's de-quantised
+// codes un-rotated (kv8.h) - what the f32 judge's reference state holds.
+std::vector<float> kv_values(const model::Qwen4ExpDesc& d, const uint8_t* layer, uint32_t max_len, int which, uint32_t n) {
+  std::vector<float> out(size_t(n) * d.kv_n());
+  for (uint32_t p = 0; p < n; ++p) {
+    std::vector<float> r = kv_row(d, layer, max_len, which, p);
+    if (d.kv8)
+      for (uint32_t h = 0; h < d.kv_heads; ++h) common::kv8::unrotate(&r[size_t(h) * d.head_dim], &r[size_t(h) * d.head_dim]);
+    std::copy(r.begin(), r.end(), out.begin() + size_t(p) * d.kv_n());
+  }
+  return out;
+}
 StateCmp compare_state(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& b, uint32_t n, uint32_t max_len) {
   StateCmp c;
   std::vector<double> all;
@@ -238,10 +271,17 @@ StateCmp compare_state(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& 
     };
     size_t off = 0;   // in bf16 elements
     if (d.is_qsa(l)) {
-      const size_t row = d.kv_n();
-      for (uint32_t p = 0; p < n; ++p) add(std::min(cos_bf16(A + p * row, B + p * row, row),
-                                                    cos_bf16(A + (size_t(max_len) + p) * row, B + (size_t(max_len) + p) * row, row)));
-      off = size_t(max_len) * row * 2;
+      const auto* la = a.layers[l].data();
+      const auto* lb = b.layers[l].data();
+      for (uint32_t p = 0; p < n; ++p) {
+        double w = 1.0;
+        for (int which = 0; which < 2; ++which) {
+          const std::vector<float> x = kv_row(d, la, max_len, which, p), y = kv_row(d, lb, max_len, which, p);
+          w = std::min(w, cos_f32(x.data(), y.data(), d.kv_n()));
+        }
+        add(w);
+      }
+      off = kv_layer_bytes(d, max_len) / 2;
       const size_t slot = rq::idx_key_slot_bytes(d);
       for (uint32_t blk = 0; blk < n / 4; ++blk) {   // the packed keys, unpacked, a cosine row a block
         std::vector<float> ka(d.idx_dim), kb(d.idx_dim);
@@ -306,10 +346,15 @@ void print_diffs(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& b, uin
     const uint8_t* B = b.layers[l].data();
     size_t off = 0;
     if (d.is_qsa(l)) {
-      const size_t row = size_t(d.kv_n()) * 2;
+      const size_t row = rq::kv_row_bytes(d), srow = rq::kv_scale_row_bytes(d);
       region("K rows", l, A, B, row, max_len);
       region("V rows", l, A + size_t(max_len) * row, B + size_t(max_len) * row, row, max_len);
       off = size_t(max_len) * row * 2;
+      if (srow) {
+        region("K scales", l, A + off, B + off, srow, max_len);
+        region("V scales", l, A + off + size_t(max_len) * srow, B + off + size_t(max_len) * srow, srow, max_len);
+        off += size_t(max_len) * srow * 2;
+      }
       region("indexer key blocks", l, A + off, B + off, rq::idx_key_slot_bytes(d), max_len / d.idx_compress);
       off += size_t(max_len / d.idx_compress) * rq::idx_key_slot_bytes(d);
       region("tail slots", l, A + off, B + off, size_t(d.idx_dim) * 2, rq::kIdxTail);
@@ -462,14 +507,18 @@ struct F32Judge {
       const uint8_t* p = pf.layers[l].data();
       const uint8_t* v = dec.layers[l].data();
       size_t off = 0;
-      const auto compare = [&](const char* kind, size_t elems, bool fp32 = false, bool packed = false) {
+      // kv: 0 / 1 - a QSA layer's K / V rows in the original basis (kv_values: the int8 form un-rotated)
+      const auto compare = [&](const char* kind, size_t elems, bool fp32 = false, bool packed = false, int kv = -1) {
         const std::string key = "state.L" + std::to_string(l) + "." + kind;
         const float* pr = file.f32(this->key("prefill", key), elems);
         const float* dr = file.f32(this->key("decode", key), elems);
         CHECK(q4judge::finite_reference(pr, elems));
         CHECK(q4judge::finite_reference(dr, elems));
-        std::vector<float> pk, dk;   // `packed`: the blocks' packed keys, unpacked
-        if (packed) {
+        std::vector<float> pk, dk;   // `packed`: the blocks' packed keys, unpacked; `kv`: the rows as floats
+        if (kv >= 0) {
+          pk = kv_values(d, p, max_len, kv, uint32_t(elems / d.kv_n()));
+          dk = kv_values(d, v, max_len, kv, uint32_t(elems / d.kv_n()));
+        } else if (packed) {
           pk.resize(elems);
           dk.resize(elems);
           for (size_t blk = 0; blk < elems / d.idx_dim; ++blk) {
@@ -479,9 +528,9 @@ struct F32Judge {
         }
         q4judge::Cosine pc, dc;
         for (size_t i = 0; i < elems; ++i) {
-          const double pv = packed ? pk[i] : fp32 ? reinterpret_cast<const float*>(p + off)[i]
+          const double pv = packed || kv >= 0 ? pk[i] : fp32 ? reinterpret_cast<const float*>(p + off)[i]
                                  : common::bf16_to_f32(reinterpret_cast<const uint16_t*>(p + off)[i]);
-          const double dv = packed ? dk[i] : fp32 ? reinterpret_cast<const float*>(v + off)[i]
+          const double dv = packed || kv >= 0 ? dk[i] : fp32 ? reinterpret_cast<const float*>(v + off)[i]
                                  : common::bf16_to_f32(reinterpret_cast<const uint16_t*>(v + off)[i]);
           pc.add(pv, pr[i]);
           dc.add(dv, dr[i]);
@@ -489,10 +538,9 @@ struct F32Judge {
         report(l, kind, pc.distance(), dc.distance());
       };
       if (d.is_qsa(l)) {
-        compare("k", size_t(pf.pos) * d.kv_n());
-        off += size_t(max_len) * d.kv_n() * 2;
-        compare("v", size_t(pf.pos) * d.kv_n());
-        off += size_t(max_len) * d.kv_n() * 2;
+        compare("k", size_t(pf.pos) * d.kv_n(), false, false, 0);
+        compare("v", size_t(pf.pos) * d.kv_n(), false, false, 1);
+        off += kv_layer_bytes(d, max_len);
         compare("ckeys", size_t(pf.pos / d.idx_compress) * d.idx_dim, false, true);
         off += size_t(max_len / d.idx_compress) * rq::idx_key_slot_bytes(d);
         compare("tail", size_t(rq::kIdxTail) * d.idx_dim);
@@ -1246,7 +1294,7 @@ int run_gdn_pb() {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [all|split|pp|wide|gdn|gdn-pb] [pp2[:split]] [int8] [layers:N] [judge:<file>]\n",
+    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [all|split|pp|wide|gdn|gdn-pb] [pp2[:split]] [int8] [kv8] [layers:N] [judge:<file>]\n",
                  argv[0]);
     return 2;
   }
@@ -1262,6 +1310,7 @@ int main(int argc, char** argv) {
     else if (a == "pp2") o.devices = 2;
     else if (a.rfind("pp2:", 0) == 0) { o.devices = 2; o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10)); }
     else if (a == "int8") o.int8_head = true;
+    else if (a == "kv8") o.kv8 = true;
     else if (a.rfind("layers:", 0) == 0) o.layers = uint32_t(std::strtoul(a.c_str() + 7, nullptr, 10));
     else if (a.rfind("judge:", 0) == 0) judge_path = a.substr(6);
     else if (a.rfind("dump-routes:", 0) == 0) dump_path = a.substr(12);

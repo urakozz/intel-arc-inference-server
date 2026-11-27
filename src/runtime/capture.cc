@@ -582,10 +582,9 @@ class Capture {
     // Spec 13c: a row draft list - its table, Control, rows and logits; the main cache's form. Plan 31 Task 12: a MoE
     // head too (Ornith's: moe.cl routes each row on its own, the head's route rows its layer slot's M rows).
     require(mode_ != Mode::DraftRows ||
-                (dr_ != nullptr && dr_->hctl && dr_->head_rows && dr_->dh && dr_->logits && !m_.draft_vocab &&
+                (dr_ != nullptr && dr_->hctl && dr_->head_rows && dr_->dh && dr_->logits &&
                  stage_ == nullptr),
-            "a row draft list needs its head Control, row table, hidden rows and logits rows (no draft vocabulary, "
-            "one card)");
+            "a row draft list needs its head Control, row table, hidden rows and logits rows (one card)");
     // Spec 13c: an engine with sequence slots holds every further sequence's kSlots states after them.
     require(mtp_->gdn_spec.size() ==
                 gdn_state_stride() * d_.gdn_layers * ((mtp_->slots - 1) + size_t(mtp_->slots) * (mtp_->seqs - 1)),
@@ -595,12 +594,6 @@ class Capture {
                 mtp_->kv_v.size() == mtp_->kv_lay.bytes(),
             "the head's KV is not one [max_len][kv-heads][256] layer in the main cache's form");
     require(mtp_->hh.size() >= size_t(kCapM + 1) * d_.hidden * kBf16, "hh is too small");
-    // Spec 8 §11: the buffers were sized for the model's draft vocabulary, or for none.
-    const uint32_t nv = m_.draft_vocab ? m_.draft_vocab->size() : 0;
-    require(mtp_->draft_vocab == nv && bool(mtp_->dv_logits) == (nv != 0) &&
-                (!mtp_->dv_logits || mtp_->dv_logits->size() >= size_t(nv) * kFp32),
-            "MtpBuffers' draft vocabulary (" + std::to_string(mtp_->draft_vocab) +
-                ") is not the loaded model's (" + std::to_string(nv) + ")");
   }
 
   // One launch site: load (or reuse) the variant's device binary, make a fresh
@@ -1238,7 +1231,7 @@ class Capture {
   // intermediate at M = 1. Checked, not assumed; the head's lm_head is the card's int8 vocabulary half.
   void check_tp_head() {
     const model::ModelDesc& h = hd();
-    require(tp_->head != nullptr && h.hidden == d_.hidden && !h.mtp_head_moe() && !m_.draft_vocab,
+    require(tp_->head != nullptr && h.hidden == d_.hidden && !h.mtp_head_moe(),
             "a TP card's head lists need the head's descriptor at the card's hidden (a dense head, no draft "
             "vocabulary)");
     const size_t M = kCapM, qv = size_t(h.fa_value_dim());
@@ -1496,7 +1489,10 @@ class Capture {
     head_gemv(w.router, b_.x.ptr(), lg);   // gemv_bf16; the [M][router_n] fp32 logits
     // PERF-120: the wide row lists' union read (BatchRowsBind::moe_union) - `_U`'s route, its plan (each expert's rows),
     // the experts' items each a work-group over its rows, and the per-row combine (moe_finish): two launches more.
-    const bool uni = mode_ == Mode::Rows && kCapM > DecodeScratchDims::kM && br_->moe_union;
+    // PERF-140: the MTP verify list's 4 rows too - on the DPAS an expert's rows cost one decode of its codes (Ornith,
+    // 4k: verify(4) 10.98 -> 10.52 ms; at 2 / 3 rows the plan and the combine cost what the shared reads save).
+    const bool uni = (mode_ == Mode::Rows && kCapM > DecodeScratchDims::kM && br_->moe_union) ||
+                     (mode_ == Mode::Verify && kCapM == 4);
     const std::string v =
         kernels::moe_variant(kCapM, md.experts, md.top_k, d_.hidden, md.expert_intermediate) + (uni ? "_U" : "");
     {
@@ -2098,11 +2094,8 @@ class Capture {
 
   // The draft list: the whole head at M = 1 on (hctl.cur_token[0], dh) at hctl.pos,
   // its post-mtp.norm hidden back into dh (the chain's next `h`), its logits into
-  // MtpBuffers::logits row draft_i_, the argmax into hctl. 21 launches and one copy -
-  // with a draft vocabulary too (spec 8 §11: the compact GEMV and the two dv_argmax
-  // stages replace lm_head and the two argmax stages one for one; mtp_gpu_test's gate
-  // checks 21 on whichever head it loaded, mtp_gpu_dv128k_test with V'). Spec 15e: a MoE
-  // head's FFN is the four-launch MoE block in place of gate||up, SiLU, down - 22.
+  // MtpBuffers::logits row draft_i_, the argmax into hctl. 21 launches and one copy.
+  // A MoE head uses a four-launch FFN in place of gate||up, SiLU, down, for 22 launches.
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
     const model::ModelDesc& hd_ = hd();   // spec 17d: the head's own shapes under TP
@@ -2142,10 +2135,6 @@ class Capture {
     step_.list.copy(dh, b_.x.ptr(), size_t(H) * kBf16 * kCapM);
     float* logits = mode_ == Mode::DraftRows ? static_cast<float*>(dr_->logits)
                                              : mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
-    if (m_.draft_vocab) {
-      draft_vocab_head(logits);
-      return;
-    }
     const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
     if (mode_ == Mode::TpDraft) {
       // Spec 17d: the card's int8 vocabulary half and tp.cl's argmax over it into hctl (out_token, out_value,
@@ -2197,7 +2186,7 @@ class Capture {
   }
 
   // Open-work 13: the draft's probability, after the draft list's argmax - draft_prob.cl over the logits row this
-  // list wrote (a TP card's vocabulary half, or the whole row: under a draft vocabulary -inf outside V'), its softmax
+  // list wrote (a TP card's vocabulary half, or the whole row), its softmax
   // max and normaliser into hctl.draft_stat. argmax_part is free again once the argmax's stage 2 has read it.
   void draft_prob() {
     require(mode_ == Mode::Draft || mode_ == Mode::TpDraft, "the draft probability is a draft list's (one card or TP)");
@@ -2215,60 +2204,6 @@ class Capture {
       l0::Kernel& k = kernel(v, "draft_prob_stage2", kWgArgmax);
       k.arg_ptr(0, hctl());
       k.arg_ptr(1, b_.argmax_part.ptr());
-      launch(k, 1, 1);
-    }
-  }
-
-  // Spec 8 §11: the draft's head over the reduced vocabulary V' (loader::DraftVocab) in
-  // place of the full one - three launches for three:
-  //
-  //   gemv_i8w(w', s', x, dv_logits)                  gemv_i8w.cl at N = |V'|, grid |V'|/64
-  //     or gemv_bf16(w', x, dv_logits)                gemv_bf16.cl at N = |V'|, {64, 1}
-  //   dv_argmax_stage1(dv_logits, ids, part, row_i)   draft_vocab.cl, grid |V'|/1024, WG 256
-  //   dv_argmax_stage2(hctl, part, ids)               draft_vocab.cl, grid 1, WG 256
-  //
-  // The GEMV is the head's own form (`--lm-head`): int8 reads |V'| x 5120 + 4|V'| B of
-  // scales instead of 248320 x 5120 - 168 / 336 / 671 MB at 32k / 64k / 128k against
-  // 1.27 GB; bf16 twice that against 2.54 GB (derived). The bf16 tiling is
-  // kernels::gemv_bf16_tiling(|V'|) = lm_head's {64, 1} at all three sizes (>= 512
-  // work-groups), so column j runs the full head's code for column ids[j]. Stage 1 also
-  // scatters the compact logits into `row_i` (MtpBuffers::logits row draft_i_) at V''s ids, the rest of
-  // which MtpBuffers::zero() holds at -inf; stage 2 maps the winning compact index through
-  // `ids` into hctl.out_token[0] and cur_token[0] and advances hctl.pos, as argmax_stage2
-  // does for the full head. `part` is the decode scratch's argmax_part ([kM][243][2] fp32;
-  // |V'|/1024 <= 128 pairs used), free here as in the full-head draft.
-  void draft_vocab_head(float* row_i) {
-    const loader::DraftVocab& dv = *m_.draft_vocab;
-    const uint32_t nv = dv.size();
-    require(nv % kernels::kDraftVocabChunk == 0 && nv / kernels::kDraftVocabChunk <= kWgArgmax,
-            "the draft vocabulary's size " + std::to_string(nv) +
-                " is not a multiple of 1024 up to 262144 (draft_vocab.cl's grid)");
-    require(dv.head.shape.N == nv && dv.head.shape.K == d_.hidden && dv.ids.size() >= size_t(nv) * 4,
-            "the draft vocabulary's head is not [|V'|][hidden] with a |V'| id table");
-    require(b_.argmax_part.size() >= size_t(nv / kernels::kDraftVocabChunk) * 2 * kFp32,
-            "argmax_part is smaller than the draft vocabulary's stage-1 pairs");
-    if (dv.head.kind == model::WeightKind::Int8) {
-      gemv_i8w(dv.head, b_.x.ptr(), mtp_->dv_logits->ptr());
-    } else {
-      require(kernels::gemv_bf16_tiling(nv).ksplit == 1 &&
-                  kernels::gemv_bf16_tiling(nv).cols == kernels::kGemvBf16Cols,
-              "the bf16 draft head's tiling is not lm_head's {64, 1}");
-      head_gemv(dv.head, b_.x.ptr(), mtp_->dv_logits->ptr());   // requires kind Bf16
-    }
-    const std::string v = kernels::dv_argmax_variant(nv);
-    {
-      l0::Kernel& k = kernel(v, "dv_argmax_stage1", kWgArgmax);
-      k.arg_ptr(0, mtp_->dv_logits->ptr());
-      k.arg_ptr(1, dv.ids.ptr());
-      k.arg_ptr(2, b_.argmax_part.ptr());
-      k.arg_ptr(3, row_i);
-      launch(k, nv / kernels::kDraftVocabChunk);
-    }
-    {
-      l0::Kernel& k = kernel(v, "dv_argmax_stage2", kWgArgmax);
-      k.arg_ptr(0, hctl());
-      k.arg_ptr(1, b_.argmax_part.ptr());
-      k.arg_ptr(2, dv.ids.ptr());
       launch(k, 1, 1);
     }
   }

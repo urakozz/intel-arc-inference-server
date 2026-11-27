@@ -41,7 +41,7 @@ inline std::string restart_reason(const std::string& key) {
   if (key == "parallel" || key == "pipeline-split") return "needs a restart: it decides how the model sits on the cards";
   if (key == "prefill-backend")
     return "needs a restart: the prompt pass's buffers (and with l0-int8 the KV cache's form) are planned at startup";
-  if (key == "draft-model" || key == "layers" || key == "draft-vocab" || key == "draft-vocab-ids")
+  if (key == "draft-model" || key == "layers")
     return "needs a restart: it changes what is loaded";
   return "needs a restart: it is read at startup only";
 }
