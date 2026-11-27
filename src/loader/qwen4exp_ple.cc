@@ -78,6 +78,8 @@ Q4PleHost::Q4PleHost(const std::string& d) : dir(with_slash(d)) {
     }
     check_align(set_->data(s), sc == Q4PleScale::Bf16 ? 2 : 4, sn);
     rows_.push_back(q.shape[0]);
+    qt_.push_back(q);
+    st_.push_back(s);
     q_.push_back(reinterpret_cast<const int8_t*>(set_->data(q)));
     s_.push_back(set_->data(s));
   }
@@ -96,6 +98,17 @@ size_t Q4PleHost::bytes() const {
   size_t b = 0;
   for (uint32_t h = 0; h < heads(); ++h) b += q_bytes(h) + s_bytes(h);
   return b;
+}
+
+void Q4PleHost::read(uint32_t h, void* q_dst, void* s_dst, unsigned readers) const {
+  set_->read_into(qt_.at(h), q_dst, readers);
+  set_->read_into(st_.at(h), s_dst, readers);
+}
+
+void Q4PleHost::read_row(uint32_t h, uint64_t r, int8_t* q_dst, void* s_dst) const {
+  const size_t sb = q4_ple_scale_bytes(scale_);
+  set_->read_bytes(qt_.at(h), r * dim_, dim_, q_dst);
+  set_->read_bytes(st_.at(h), r * sb, sb, s_dst);
 }
 
 void Q4PleHost::dequant_row(uint32_t h, uint64_t r, uint16_t* out) const {

@@ -2,6 +2,7 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -13,6 +14,7 @@
 #include <print>
 #include <stdexcept>
 
+#include "common/copy_chunks.h"
 #include "common/json.h"
 #include "common/repack.h"
 #include "l0/cmdlist.h"
@@ -27,14 +29,19 @@
 namespace loader {
 namespace {
 
-// The checkpoint read one layer ahead of the repack: layer l + 1's tensors go into the page cache
-// (SafetensorsSet::read_ahead, kReaders threads in large preads) while layer l is repacked and uploaded, so the repack
-// faults on cached pages. Before it the repack read the mappings a page fault at a time: 0.3 GB/s from a disk that reads
-// 1.1 GB/s sequentially.
+double since(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+}
+
+// The checkpoint read one layer ahead of the repack: layer l + 1's tensors are read from the disk into the mapping
+// (SafetensorsSet::read_mapped, kReaders O_DIRECT readers) while layer l is repacked, and layer l - 1's memory is given
+// back to the file once layer l's read is in. Before it the repack read the mappings a page fault at a time (0.3 GB/s),
+// then through the page cache with buffered preads (0.5-0.9 GB/s beside the PLE table's reads).
 class LayerReadAhead {
  public:
   static constexpr unsigned kReaders = 4;
-  LayerReadAhead(const SafetensorsSet& set, const std::string& prefix, uint32_t layers) : set_(set), by_(layers) {
+  LayerReadAhead(const SafetensorsSet& set, const std::string& prefix, uint32_t layers)
+      : set_(set), by_(layers), read_(layers) {
     const std::string p = prefix + "layers.";
     for (const auto& [name, t] : set.tensors()) {
       if (!name.starts_with(p)) continue;
@@ -45,16 +52,22 @@ class LayerReadAhead {
   ~LayerReadAhead() {
     if (ahead_.valid()) ahead_.wait();
   }
-  // Before layer l's repack: waits for its read (started here when it was not), then starts layer l + 1's.
+  // Before layer l's repack (layer l - 1's is done): waits for its read (started here when it was not), gives layer
+  // l - 1's memory back, then starts layer l + 1's.
   void before(uint32_t l) {
     if (!ahead_.valid() || next_ != l) start(l);
     const auto t0 = std::chrono::steady_clock::now();
     bytes_ += ahead_.get();
     waited_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (l > 0 && !read_[l - 1].empty()) {
+      set_.release_mapped(read_[l - 1]);
+      read_[l - 1].clear();
+    }
     if (l + 1 < by_.size()) start(l + 1);
   }
+  double waited() const { return waited_; }
   std::string line() const {
-    return std::format("  disk        the layers' {:.3f} GB read ahead at {:.2f} GB/s ({:d} readers, one layer ahead); "
+    return std::format("  disk        the layers' {:.3f} GB read at {:.2f} GB/s ({:d} O_DIRECT readers, one layer ahead); "
                        "the repack waited {:.1f} s for it\n",
                        bytes_ / 1e9, read_s_ > 0 ? bytes_ / 1e9 / read_s_ : 0.0, kReaders, waited_);
   }
@@ -63,15 +76,17 @@ class LayerReadAhead {
   void start(uint32_t l) {
     if (ahead_.valid()) ahead_.wait();
     next_ = l;
-    ahead_ = std::async(std::launch::async, [this, r = set_.ranges(by_[l])] {
+    read_[l] = set_.ranges(by_[l]);
+    ahead_ = std::async(std::launch::async, [this, &r = read_[l]] {
       const auto t0 = std::chrono::steady_clock::now();
-      const size_t b = set_.read_ahead(r, kReaders);
+      const size_t b = set_.read_mapped(r, kReaders);
       read_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       return b;
     });
   }
   const SafetensorsSet& set_;
   std::vector<std::vector<const TensorInfo*>> by_;
+  std::vector<std::vector<FileRange>> read_;   // per layer: the ranges read_mapped holds until the release
   std::future<size_t> ahead_;
   uint32_t next_ = 0;
   size_t bytes_ = 0;
@@ -89,9 +104,10 @@ std::unique_ptr<DeviceWeight> upload_w(l0::Context& ctx, l0::CmdList& imm, const
 
 // Plan 21-QFN-v2a Task 8: a layer's routed experts by the tier's row `res` ([experts], 1 = VRAM): the resident experts'
 // blocks into the layer's VRAM arena (id order), the rest into its pinned host mirror (gate||up blocks, then down
-// blocks, id order); `row` gets the 1024 block addresses (gate||up of expert e at [e], down at [512 + e]).
+// blocks, id order); `row` gets the 1024 block addresses (gate||up of expert e at [e], down at [512 + e]). `host_s`
+// adds the mirror's allocation and copy time.
 void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, uint32_t experts, const uint8_t* res,
-                    Q4Layer& L, size_t& bytes, size_t& host_bytes, uint64_t* row) {
+                    Q4Layer& L, size_t& bytes, size_t& host_bytes, double& host_s, uint64_t* row) {
   const size_t gu = h.gate_up.size() * 4 / experts, dn = h.down.size() * 4 / experts;
   const uint8_t* gsrc = reinterpret_cast<const uint8_t*>(h.gate_up.data());
   const uint8_t* dsrc = reinterpret_cast<const uint8_t*>(h.down.data());
@@ -111,6 +127,7 @@ void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, ui
     bytes += g.size() + dd.size();
   }
   if (nh != 0) {
+    const auto h0 = std::chrono::steady_clock::now();
     // One pinned range a layer, at most experts x 2.6 MB (1.34 GB): under the 4 GiB a range both cards may map.
     // Plain Host, not HostLocked: a locked mirror failed tp's startup copies (OUT_OF_DEVICE_MEMORY); it waits for the
     // two-card startup fix (PERF-70).
@@ -123,6 +140,7 @@ void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, ui
         ++s;
       }
     host_bytes += L.mirror->size();
+    host_s += since(h0);
   }
   if (!row) return;
   for (uint32_t e = 0, s = 0, t = 0; e < experts; ++e) {
@@ -142,7 +160,7 @@ void upload_experts(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, ui
 // (upload_experts); null `res`: every expert in one VRAM range, as before the tier.
 Q4Layer upload_layer(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, size_t& bytes,
                      const uint8_t* res = nullptr, uint32_t experts = 0, size_t* host_bytes = nullptr,
-                     uint64_t* row = nullptr) {
+                     double* host_s = nullptr, uint64_t* row = nullptr) {
   Q4Layer L;
   const auto blob = [&](const std::vector<uint8_t>& v) {
     bytes += v.size();
@@ -164,7 +182,7 @@ Q4Layer upload_layer(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, s
   }
   L.router = upload_w(ctx, imm, h.router, bytes);
   if (res) {
-    upload_experts(ctx, imm, h, experts, res, L, bytes, *host_bytes, row);
+    upload_experts(ctx, imm, h, experts, res, L, bytes, *host_bytes, *host_s, row);
   } else {
     L.gate_up = upload_u(ctx, imm, h.gate_up.data(), h.gate_up.size() * 4);
     L.down = upload_u(ctx, imm, h.down.data(), h.down.size() * 4);
@@ -174,6 +192,87 @@ Q4Layer upload_layer(l0::Context& ctx, l0::CmdList& imm, const Q4HostLayer& h, s
   L.shared_down_offset = h.shared_gate_up;
   L.ple = blob(h.ple);
   return L;
+}
+
+// The embedding's rows into the page cache before its upload faults on them, many reads in flight (faulted in one at a
+// time beside the PLE table's reads it took ~45 s of a start).
+void read_embed_ahead(const SafetensorsSet& set, const model::Qwen4ExpDesc& d) {
+  const auto it = set.tensors().find(d.prefix + "embed_tokens.weight");
+  if (it != set.tensors().end()) set.read_ahead(set.ranges({&it->second}), 4);
+}
+
+// B70_Q4_LOAD_HASH=1: one line of hashes of every loaded buffer, in a fixed order (device memory read back, host
+// memory as it is; the expert tables hold addresses and are left out) - for comparing two loader versions byte for byte.
+class LoadHash {
+ public:
+  void mem(l0::CmdList& imm, const l0::Mem* m) {
+    if (!m) return;
+    ++buffers_;
+    bytes_ += m->size();
+    if (m->kind() != l0::MemKind::Device) return add(m->as<uint8_t>(), m->size());
+    std::vector<uint8_t> buf(std::min(m->size(), common::kMaxCopyChunk));
+    for (size_t off = 0; off < m->size(); off += buf.size()) {
+      const size_t n = std::min(buf.size(), m->size() - off);
+      imm.copy(buf.data(), m->as<uint8_t>() + off, n);
+      add(buf.data(), n);
+    }
+  }
+  void weight(l0::CmdList& imm, const DeviceWeight* w) {
+    if (!w) return;
+    mem(imm, &w->mem);
+    mem(imm, w->scales.get());
+  }
+  void layer(l0::CmdList& imm, const Q4Layer& L) {
+    for (const l0::Mem* m : {L.hc_attn.get(), L.hc_mlp.get(), L.gdn_small.get(), L.qsa_small.get(), L.gate_up.get(),
+                             L.down.get(), L.mirror.get(), L.shared.get(), L.ple.get()})
+      mem(imm, m);
+    for (const DeviceWeight* w : {L.gdn_qkvz.get(), L.gdn_ab.get(), L.gdn_out.get(), L.qsa_qkvg.get(), L.qsa_idx.get(),
+                                  L.qsa_o.get(), L.router.get()})
+      weight(imm, w);
+  }
+  std::string done() {
+    const std::string r = std::format("{:016x} ({:d} buffers, {:d} B)", h_, buffers_, bytes_);
+    h_ = 0xcbf29ce484222325ull;
+    buffers_ = bytes_ = 0;
+    return r;
+  }
+
+ private:
+  void add(const uint8_t* p, size_t n) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+      uint64_t w;
+      std::memcpy(&w, p + i, 8);
+      h_ = (h_ ^ w) * 0x100000001b3ull;
+    }
+    for (; i < n; ++i) h_ = (h_ ^ p[i]) * 0x100000001b3ull;
+  }
+  uint64_t h_ = 0xcbf29ce484222325ull;
+  size_t buffers_ = 0, bytes_ = 0;
+};
+
+void print_load_hash(const std::vector<l0::Context*>& devices, const Q4LoadedModel& m) {
+  const char* e = std::getenv("B70_Q4_LOAD_HASH");
+  if (!e || std::string_view(e) != "1") return;
+  const auto t0 = std::chrono::steady_clock::now();
+  LoadHash h;
+  std::string line = "  hash       ";
+  for (const Q4DevicePart& P : m.parts) {
+    l0::CmdList imm = l0::CmdList::immediate(*devices[P.device]);
+    h.mem(imm, P.embed.get());
+    h.mem(imm, P.rope.get());
+    for (const Q4Layer& L : P.layers) h.layer(imm, L);
+    h.mem(imm, P.final_mixer.get());
+    h.weight(imm, P.lm_head.get());
+    if (P.mtp) h.layer(imm, *P.mtp);
+    h.mem(imm, P.mtp_fc.get());
+    h.mem(imm, P.mtp_mixer.get());
+    line += std::format(" device {:d} {};", P.device, h.done());
+  }
+  l0::CmdList imm = l0::CmdList::immediate(*devices[m.ple_device]);
+  for (const auto& q : m.ple.q) h.mem(imm, q.get());
+  for (const auto& s : m.ple.s) h.mem(imm, s.get());
+  std::print("{} PLE {}; {:.1f} s\n", line, h.done(), since(t0));
 }
 
 // The checkpoint's PLE I64 tensors against the formula for `d` (Review Focus 3): refused naming the tensor.
@@ -225,7 +324,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
                       const QuantScan& scan, uint32_t max_len, const model::Q4Placement& placement, LmHeadForm lm_form,
                       const std::array<size_t, runtime::kPpDevices>& caps, size_t reserve, const char* forced,
                       const runtime::qwen4exp::ExpertTier* tier, const runtime::qwen4exp::ExpertTier* tier1, bool mtp,
-                      uint32_t pf_rows, std::chrono::steady_clock::time_point t0) {
+                      uint32_t pf_rows, std::chrono::steady_clock::time_point t0, double open_s, double checks_s) {
   namespace rq = runtime::qwen4exp;
   const bool int8 = lm_form == LmHeadForm::Int8;
   const model::Qwen4ExpDesc card[2] = {model::q4_tp_card(d, 0), model::q4_tp_card(d, 1)};
@@ -274,10 +373,10 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
   if (d.layers < full.layers) m.skipped += ck.skip_layers_from(d.layers);
   const size_t visual = ck.skip_prefix("model.visual."), shards = ck.skip_ple_shards();
   const size_t mtp_skipped = mtp ? 0 : ck.skip_prefix("mtp.");
-  check_q4_host_fit(Q4PleHost(ple_dir).bytes(), T[0].host_bytes(card[0]) + T[1].host_bytes(card[1]), 0,
-                    q4_mem_available());
+  const Q4PleHost ple_host(ple_dir);
+  check_q4_host_fit(ple_host.bytes(), T[0].host_bytes(card[0]) + T[1].host_bytes(card[1]), 0, q4_mem_available());
   m.ple_device = 0;
-  m.ple = load_q4_ple(*devices[0], d, ple_dir);
+  m.ple = q4_ple_alloc(*devices[0], d, ple_host);
   {
     std::vector<uint64_t> ptrs(m.ple.ptrs->size() / 8);
     l0::CmdList imm0 = l0::CmdList::immediate(*devices[0]);
@@ -290,6 +389,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
   m.expert_table = form == "table";
 
   const std::vector<float> rope = q4_rope_table(d, max_len);
+  read_embed_ahead(set, d);
   std::vector<l0::CmdList> imm;
   std::vector<std::vector<uint64_t>> rows(2);
   m.parts.resize(2);
@@ -307,21 +407,41 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
     P.rope_bytes = rope.size() * 4;
     if (m.expert_table) rows[r].assign(size_t(d.layers) * 2 * d.experts, 0);
   }
-  Q4HostLayer host;
+  // Where the layer loop's time goes (the stages line): the repack, then each card's cut into its half, VRAM uploads
+  // and copies into the host experts' mirrors - the two cards on two threads, layer l's while layer l + 1 is repacked
+  // into the other host layer.
+  Q4HostLayer hosts[2];
+  double repack_s = 0, split_s[2] = {0, 0}, host_s[2] = {0, 0}, upload_s[2] = {0, 0}, check_ms[2] = {0, 0};
+  size_t mirror_bytes[2] = {0, 0};
+  const auto layers0 = std::chrono::steady_clock::now();
+  const double before_s = std::chrono::duration<double>(layers0 - t0).count() - checks_s;
+  // The table's rows are read from the disk while the layers load (one disk: its time is the two reads' bytes).
+  std::future<void> ple_fill = std::async(std::launch::async, [&] { q4_ple_fill(m.ple, ple_host); });
   LayerReadAhead ahead(set, d.prefix, d.layers);
+  std::future<void> cards[2];
   for (uint32_t l = 0; l < d.layers; ++l) {
     ahead.before(l);
-    ck.repack_layer(l, host);
-    for (uint32_t r = 0; r < 2; ++r) {
+    const auto r0 = std::chrono::steady_clock::now();
+    ck.repack_layer(l, hosts[l % 2]);
+    repack_s += since(r0);
+    for (std::future<void>& c : cards)
+      if (c.valid()) c.get();
+    const auto card_layer = [&, l](uint32_t r) {
+      const Q4HostLayer& host = hosts[l % 2];
+      const auto c0 = std::chrono::steady_clock::now();
       const Q4HostLayer half = q4_tp_layer(d, l, host, r);
+      split_s[r] += since(c0);
       Q4DevicePart& P = m.parts[r];
       uint64_t* row = rows[r].empty() ? nullptr : rows[r].data() + size_t(l) * 2 * d.experts;
+      const auto u0 = std::chrono::steady_clock::now();
+      const double h0 = host_s[r];
       if (T[r].n_vram(l) == d.experts && !row)
         P.layers.push_back(upload_layer(*devices[r], imm[r], half, P.bytes));
       else
         P.layers.push_back(upload_layer(*devices[r], imm[r], half, P.bytes, T[r].vram.data() + size_t(l) * d.experts,
-                                        d.experts, &m.mirror_bytes, row));
-      if (!row) continue;
+                                        d.experts, &mirror_bytes[r], &host_s[r], row));
+      upload_s[r] += since(u0) - (host_s[r] - h0);
+      if (!row) return;
       const auto s0 = std::chrono::steady_clock::now();
       const uint32_t base = uint32_t(row - rows[r].data());
       for (uint32_t i = 0; i < 2 * d.experts; ++i) {   // the load check's samples, as one card's
@@ -339,9 +459,19 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
         for (size_t off = 0; off + 8 < B; off += size_t(1) << 20) take(off);
         take(B - 8);
       }
-      m.expert_check_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s0).count();
-    }
+      check_ms[r] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s0).count();
+    };
+    for (uint32_t r = 0; r < 2; ++r) cards[r] = std::async(std::launch::async, card_layer, r);
   }
+  for (std::future<void>& c : cards)
+    if (c.valid()) c.get();
+  m.mirror_bytes = mirror_bytes[0] + mirror_bytes[1];
+  m.expert_check_ms = check_ms[0] + check_ms[1];
+  const double layers_s = since(layers0);
+  const auto pw0 = std::chrono::steady_clock::now();
+  ple_fill.get();
+  const double ple_wait_s = since(pw0);
+  const auto tail0 = std::chrono::steady_clock::now();
   const std::vector<uint8_t> fm = ck.final_mixer();
   const uint16_t* lm = ck.lm_head();
   for (uint32_t r = 0; r < 2; ++r) {
@@ -363,8 +493,8 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
                                m.lm_head_quant_seconds, P.bytes);
     const bool head = mtp && placement.holds_mtp(r);   // the MTP head whole, one card's layer (Task 5 Step 0)
     if (head) {
-      ck.repack_mtp(host);
-      P.mtp = std::make_unique<Q4Layer>(upload_layer(ctx, imm[r], host, P.bytes));
+      ck.repack_mtp(hosts[0]);
+      P.mtp = std::make_unique<Q4Layer>(upload_layer(ctx, imm[r], hosts[0], P.bytes));
       const std::vector<uint8_t> fc = ck.mtp_fc(), mx = ck.mtp_mixer();
       P.mtp_fc = upload_u(ctx, imm[r], fc.data(), fc.size());
       P.mtp_mixer = upload_u(ctx, imm[r], mx.data(), mx.size());
@@ -380,6 +510,7 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
       throw std::logic_error("load_qwen4exp: card " + std::to_string(r) + " allocated " + std::to_string(P.bytes) +
                              " B of weights, the card plan says " + std::to_string(want));
   }
+  const double tail_s = since(tail0);
   std::string names;
   m.unconsumed = ck.unconsumed(&names);
   if (m.unconsumed != 0)
@@ -409,6 +540,17 @@ Q4LoadedModel load_tp(const std::vector<l0::Context*>& devices, const Opened& o,
              "read/token a card {:.3f} GB (derived); load {:.1f} s\n", m.ple.bytes / gb, m.mirror_bytes / gb,
              m.read_per_token / gb, m.seconds);
   std::print("{}", ahead.line());
+  std::print("  stages      the files opened {:.1f} s, checks {:.1f} s, the PLE ranges, the embedding and the tier {:.1f} s; "
+             "the layers {:.1f} s: waited for the disk {:.1f} s, repacked {:.1f} s, then on a thread a card: cut into halves {:.1f} / {:.1f} s, uploaded {:.1f} / {:.1f} s, "
+             "host experts copied {:.1f} / {:.1f} s; beside them the PLE table {:.1f} s (ranges allocated {:.1f} s, rows "
+             "read {:.1f} s = {:.2f} GB/s, page tags {:.1f} s, rows compared {:.1f} s), waited for after the layers {:.1f} s; "
+             "final mixer, head and MTP head {:.1f} s\n",
+             open_s, checks_s - open_s, before_s, layers_s, ahead.waited(), repack_s, split_s[0], split_s[1], upload_s[0],
+             upload_s[1], host_s[0], host_s[1], m.ple.seconds, m.ple.alloc_seconds, m.ple.copy_seconds,
+             m.ple.copy_seconds > 0 ? m.ple.bytes / gb / m.ple.copy_seconds : 0.0,
+             m.ple.tag_seconds,
+             m.ple.seconds - m.ple.alloc_seconds - m.ple.tag_seconds - m.ple.copy_seconds, ple_wait_s, tail_s);
+  print_load_hash(devices, m);
   return m;
 }
 
@@ -474,6 +616,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   // The checkpoint's own descriptor (every layer), then its forms from the names.
   const model::Qwen4ExpDesc pre = model::qwen4exp_desc(o.cfg, model::Q4Forms{});
   SafetensorsSet set = q4_set(o.snap, pre);
+  const double open_s = since(t0);
   model::Qwen4ExpDesc full = model::qwen4exp_desc(o.cfg, q4_forms(set, pre));
   full.hc_int8 = q4_hc_int8();
   if (max_len == 0) throw std::runtime_error(full.name + ": max_len 0 is not a model length");
@@ -483,6 +626,14 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   if (max_len % runtime::kMaxLenQuantum != 0)
     throw std::runtime_error(full.name + ": max_len " + std::to_string(max_len) + " is not a multiple of " +
                              std::to_string(runtime::kMaxLenQuantum) + " (the indexer's blocks of 4 and the prefill grid)");
+  {
+    // The scan reads every scale, zero point and g_idx: read ahead first, in file order with many reads in flight
+    // (walked in name order, a page fault at a time, they took 55 s of a start). The layer loop finds them cached.
+    std::vector<const TensorInfo*> scanned;
+    for (const auto& [name, t] : set.tensors())
+      if (name.ends_with(".scales") || name.ends_with(".qzeros") || name.ends_with(".g_idx")) scanned.push_back(&t);
+    set.read_ahead(set.ranges(scanned), 16);
+  }
   const QuantScan scan = assert_quant_invariants(set);
   if (!qc.desc_act_declared && scan.g_idx_tensors != 0)
     throw std::runtime_error("load_qwen4exp: config.json declares no desc_act but the checkpoint ships " +
@@ -514,7 +665,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   const char* forced = std::getenv("B70_Q4_RESIDENT");
   if (placement.tp) {
     return load_tp(devices, o, ck, set, full, d, scan, max_len, placement, lm_form, caps, reserve, forced, tier, tier1, mtp,
-                   pf_rows, t0);
+                   pf_rows, t0, open_s, checks_s);
   }
   const runtime::qwen4exp::ExpertTier T =
       tier ? *tier
@@ -557,16 +708,20 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
   const size_t mtp_skipped = mtp ? 0 : ck.skip_prefix("mtp.");
   // Everything this load pins - the PLE table and the experts' mirrors - against host memory before the first pin.
   // The prefix cache is 0 here: settle counted an explicit --prefix-cache-gb, and auto sizes itself after the load.
-  check_q4_host_fit(Q4PleHost(ple_dir).bytes(), T.host_bytes(d), 0, q4_mem_available());
-  // The PLE table, once, through the context of the device holding the PLE layer.
+  const Q4PleHost ple_host(ple_dir);
+  check_q4_host_fit(ple_host.bytes(), T.host_bytes(d), 0, q4_mem_available());
+  // The PLE table, once, through the context of the device holding the PLE layer; its rows are read from the disk
+  // while the layers load.
   m.ple_device = placement.device_of(d.ple_layer);
-  m.ple = load_q4_ple(*devices[m.ple_device], d, ple_dir);
+  m.ple = q4_ple_alloc(*devices[m.ple_device], d, ple_host);
+  read_embed_ahead(set, d);
+  std::future<void> ple_fill = std::async(std::launch::async, [&] { q4_ple_fill(m.ple, ple_host); });
   m.tier = T;
   m.expert_table = form == "table";
 
   const std::vector<float> rope = q4_rope_table(d, max_len);
-  Q4HostLayer host;
-  double repack_s = 0, upload_s = 0;   // the layer loop's two halves (where a load's time goes)
+  Q4HostLayer hosts[2];
+  double repack_s = 0, upload_s = 0, host_s = 0;   // the layer loop's parts (where a load's time goes)
   LayerReadAhead ahead(set, d.prefix, d.layers);
   m.parts.resize(placement.devices);
   for (uint32_t dev = 0; dev < placement.devices; ++dev) {
@@ -587,40 +742,46 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
         throw std::logic_error("load_qwen4exp: the RoPE table is not Qwen4ExpDesc::rope_table_bytes");
     }
     std::vector<uint64_t> rows(m.expert_table ? size_t(P.end - P.first) * 2 * d.experts : 0);
+    std::future<void> uploading;   // layer l's uploads on a thread while layer l + 1 is repacked into the other host layer
     for (uint32_t l = P.first; l < P.end; ++l) {
       ahead.before(l);
       const auto r0 = std::chrono::steady_clock::now();
-      ck.repack_layer(l, host);
-      const auto r1 = std::chrono::steady_clock::now();
-      uint64_t* row = rows.empty() ? nullptr : rows.data() + size_t(l - P.first) * 2 * d.experts;
-      if (T.n_vram(l) == d.experts && !row)
-        P.layers.push_back(upload_layer(ctx, imm, host, P.bytes));
-      else
-        P.layers.push_back(upload_layer(ctx, imm, host, P.bytes, T.vram.data() + size_t(l) * d.experts, d.experts,
-                                        &m.mirror_bytes, row));
-      repack_s += std::chrono::duration<double>(r1 - r0).count();
-      upload_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - r1).count();
-      if (!row) continue;
-      // The load check's samples of this layer's 1024 blocks, from the checkpoint's bytes (Q4DevicePart::check_*).
-      const auto s0 = std::chrono::steady_clock::now();
-      const uint32_t base = uint32_t(row - rows.data());
-      for (uint32_t i = 0; i < 2 * d.experts; ++i) {
-        const bool up = i < d.experts;
-        const size_t B = (up ? host.gate_up.size() : host.down.size()) * 4 / d.experts;
-        const uint8_t* src = reinterpret_cast<const uint8_t*>(up ? host.gate_up.data() : host.down.data()) +
-                             size_t(up ? i : i - d.experts) * B;
-        const auto take = [&](size_t o) {
-          uint64_t w = 0;
-          std::memcpy(&w, src + o, 8);
-          P.check_idx.push_back(base + i);
-          P.check_off.push_back(uint32_t(o));
-          P.check_words.push_back(w);
-        };
-        for (size_t o = 0; o + 8 < B; o += size_t(1) << 20) take(o);
-        take(B - 8);
-      }
-      m.expert_check_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s0).count();
+      ck.repack_layer(l, hosts[l % 2]);
+      repack_s += since(r0);
+      if (uploading.valid()) uploading.get();
+      uploading = std::async(std::launch::async, [&, l] {
+        const Q4HostLayer& host = hosts[l % 2];
+        const auto u0 = std::chrono::steady_clock::now();
+        uint64_t* row = rows.empty() ? nullptr : rows.data() + size_t(l - P.first) * 2 * d.experts;
+        if (T.n_vram(l) == d.experts && !row)
+          P.layers.push_back(upload_layer(ctx, imm, host, P.bytes));
+        else
+          P.layers.push_back(upload_layer(ctx, imm, host, P.bytes, T.vram.data() + size_t(l) * d.experts, d.experts,
+                                          &m.mirror_bytes, &host_s, row));
+        upload_s += since(u0);
+        if (!row) return;
+        // The load check's samples of this layer's 1024 blocks, from the checkpoint's bytes (Q4DevicePart::check_*).
+        const auto s0 = std::chrono::steady_clock::now();
+        const uint32_t base = uint32_t(row - rows.data());
+        for (uint32_t i = 0; i < 2 * d.experts; ++i) {
+          const bool up = i < d.experts;
+          const size_t B = (up ? host.gate_up.size() : host.down.size()) * 4 / d.experts;
+          const uint8_t* src = reinterpret_cast<const uint8_t*>(up ? host.gate_up.data() : host.down.data()) +
+                               size_t(up ? i : i - d.experts) * B;
+          const auto take = [&](size_t o) {
+            uint64_t w = 0;
+            std::memcpy(&w, src + o, 8);
+            P.check_idx.push_back(base + i);
+            P.check_off.push_back(uint32_t(o));
+            P.check_words.push_back(w);
+          };
+          for (size_t o = 0; o + 8 < B; o += size_t(1) << 20) take(o);
+          take(B - 8);
+        }
+        m.expert_check_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - s0).count();
+      });
     }
+    if (uploading.valid()) uploading.get();
     if (!rows.empty()) {
       // The table, then read back: the rows the kernels will read are the rows the map says.
       P.expert_table = upload_u(ctx, imm, rows.data(), rows.size() * 8);
@@ -639,8 +800,8 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
       // lm_head: spec 9's int8 rows + fp32 scales for gemv_i8w, or bf16 tiles for gemv_bf16.
       P.lm_head = upload_lm_head(ctx, imm, ck.lm_head(), d.hidden, d.vocab, int8, m.lm_head_quant_seconds, P.bytes);
       if (mtp) {
-        ck.repack_mtp(host);
-        P.mtp = std::make_unique<Q4Layer>(upload_layer(ctx, imm, host, P.bytes));
+        ck.repack_mtp(hosts[0]);
+        P.mtp = std::make_unique<Q4Layer>(upload_layer(ctx, imm, hosts[0], P.bytes));
         const std::vector<uint8_t> fc = ck.mtp_fc(), mm = ck.mtp_mixer();
         P.mtp_fc = upload_u(ctx, imm, fc.data(), fc.size());
         P.mtp_mixer = upload_u(ctx, imm, mm.data(), mm.size());
@@ -656,6 +817,10 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
                              " B of weights, loader::q4_device_weight_bytes less the experts in host memory says " +
                              std::to_string(want));
   }
+
+  const auto pw0 = std::chrono::steady_clock::now();
+  ple_fill.get();
+  const double ple_wait_s = since(pw0);
 
   std::string names;
   m.unconsumed = ck.unconsumed(&names);
@@ -708,6 +873,14 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
              "  load        {:.1f} s: the headers and the quantisation checks {:.1f} s, the layers repacked in {:.1f} s, "
              "uploaded (and mirrored to host memory) in {:.1f} s\n",
              m.read_per_token, m.read_per_token / gb, d.top_k, ahead.line(), m.seconds, checks_s, repack_s, upload_s);
+  std::print("  stages      the files opened {:.1f} s; of the uploads, host experts copied {:.1f} s; beside the layers "
+             "the PLE table {:.1f} s (ranges allocated {:.1f} s, rows read {:.1f} s = {:.2f} GB/s, page tags {:.1f} s, rows "
+             "compared {:.1f} s), waited for after them {:.1f} s\n",
+             open_s, host_s, m.ple.seconds, m.ple.alloc_seconds, m.ple.copy_seconds,
+             m.ple.copy_seconds > 0 ? m.ple.bytes / gb / m.ple.copy_seconds : 0.0,
+             m.ple.tag_seconds,
+             m.ple.seconds - m.ple.alloc_seconds - m.ple.tag_seconds - m.ple.copy_seconds, ple_wait_s);
+  print_load_hash(devices, m);
   return m;
 }
 

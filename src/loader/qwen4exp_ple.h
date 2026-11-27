@@ -42,6 +42,10 @@ struct Q4PleHost {
   size_t q_bytes(uint32_t h) const { return size_t(rows(h)) * dim_; }
   size_t s_bytes(uint32_t h) const { return size_t(rows(h)) * q4_ple_scale_bytes(scale_); }
   size_t bytes() const;   // every head's q + s
+  // Head h's q and s rows from the disk into `q_dst` / `s_dst` (SafetensorsSet::read_into, `readers` threads).
+  void read(uint32_t h, void* q_dst, void* s_dst, unsigned readers) const;
+  // Row r of head h's q and s bytes, one pread each (the load's sampled comparison).
+  void read_row(uint32_t h, uint64_t r, int8_t* q_dst, void* s_dst) const;
   // Row r of head h as bf16(float(q) x float(s)) - the reference's dequant (the test's and 21-QFN-v1c's check).
   void dequant_row(uint32_t h, uint64_t r, uint16_t* out) const;
   std::array<uint64_t, 3> multipliers{};   // the file's I64 tensors
@@ -55,6 +59,7 @@ struct Q4PleHost {
   std::vector<uint64_t> rows_;
   std::vector<const int8_t*> q_;
   std::vector<const void*> s_;
+  std::vector<TensorInfo> qt_, st_;
 };
 
 // The file against the descriptor, before a byte is pinned: heads = d.ple_heads, dim = d.ple_dim, the I64
@@ -98,11 +103,18 @@ struct Q4PleTable {                        // 16 host-USM ranges (q) + 16 (scale
   size_t rows_checked = 0;                 // sampled rows compared with the file after the copy
   size_t mem_before = 0, mem_after = 0;    // MemAvailable around the pinning (0: unknown)
   double seconds = 0;
+  double alloc_seconds = 0, tag_seconds = 0, copy_seconds = 0;   // of `seconds`: the ranges and the pointer table
+                                                                  // allocated; the page tags; the rows read
 };
 // Checks the file against the descriptor (check_q4_ple), refuses when the bytes do not fit the host
 // (check_q4_ple_host_fit), then per range: allocates host USM (`zeMemAllocHost` through `ctx`), writes and
 // reads back a tag per 2 MiB page (all ranges before any data), copies the head's rows, compares sampled rows
 // with the file and records each page's first word; finally the device pointer table on `ctx`'s device.
 Q4PleTable load_q4_ple(l0::Context& ctx, const model::Qwen4ExpDesc& d, const std::string& ple_dir);
+// load_q4_ple in two halves, so that the file's 52 GB are read while the layers load: q4_ple_alloc checks `h` and
+// allocates the ranges and the device pointer table (Level Zero, the loader's thread); q4_ple_fill tags, reads the
+// rows from the disk, compares and records (no Level Zero: any thread). `h` outlives both.
+Q4PleTable q4_ple_alloc(l0::Context& ctx, const model::Qwen4ExpDesc& d, const Q4PleHost& h);
+void q4_ple_fill(Q4PleTable& t, const Q4PleHost& h);
 
 }  // namespace loader

@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "common/parallel_for.h"
 #include "loader/qwen4exp_layout.h"
 
 // qwen4exp_tp_split.cc - plan 21-QFN-v2b Task 1: the header has the cuts in one table.
@@ -187,9 +188,10 @@ Q4HostLayer q4_tp_layer(const Qwen4ExpDesc& one, uint32_t layer, const Q4HostLay
           "the one-card layer holds every expert's blocks");
   o.gate_up.resize(guc * one.experts);
   o.down.resize(dnc * one.experts);
-  for (uint32_t e = 0; e < one.experts; ++e)
+  common::parallel_for(one.experts, 0, [&](size_t e) {   // each expert its own blocks: the bytes of a plain loop
     l1_halves(&full.gate_up[e * gu1], &full.down[e * dn1], one, one.moe_inter, rank, &o.gate_up[e * guc],
               &o.down[e * dnc]);
+  });
   // The shared expert: int4 the experts' cuts; Intel's bf16 tiles {2560, 1280} gate||up interleave16 (the card's
   // n-tiles a contiguous half, as layout 1's) then {640, 2560} by K.
   const size_t sg1 = q4_shared_gate_up_bytes(one), sgc = q4_shared_gate_up_bytes(card);

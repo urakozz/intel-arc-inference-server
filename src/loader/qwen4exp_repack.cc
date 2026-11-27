@@ -1,5 +1,6 @@
 #include "loader/qwen4exp_repack.h"
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -7,6 +8,7 @@
 #include <stdexcept>
 
 #include "common/bf16.h"
+#include "common/parallel_for.h"
 #include "common/repack.h"
 #include "loader/lm_head_int8.h"
 #include "loader/rope_table.h"
@@ -448,31 +450,38 @@ void Q4Checkpoint::moe(const Qwen4ExpDesc& d, const std::string& lp, bool mtp, Q
     sd.resize(size_t(I / 64) * H);
   }
   const uint32_t group = mtp ? 64 : d.forms.expert_group;
-  for (uint32_t e = 0; e < E; ++e) {
-    const std::string ep = lp + "mlp.experts." + std::to_string(e) + ".";
-    common::Part pg{}, pu{}, pd{};
-    if (rtn) {
-      const LinearSrc g = bf16(ep + "gate_proj", H, I), u = bf16(ep + "up_proj", H, I);
-      const LinearSrc dn = bf16(ep + "down_proj", I, H);
-      rtn_int4_g64(g.weight, H, I, qg.data(), sg.data());
-      rtn_int4_g64(u.weight, H, I, qu.data(), su.data());
-      rtn_int4_g64(dn.weight, I, H, qd.data(), sd.data());
-      pg = {qg.data(), sg.data(), I};
-      pu = {qu.data(), su.data(), I};
-      pd = {qd.data(), sd.data(), H};
-      L.src_bf16_bytes += size_t(3) * I * H * 2;
-      common::repack_int4_layout1_cols(H, 2 * I, common::cols_interleave16(pg, pu), L.gate_up.data() + size_t(e) * gu_words);
-      common::repack_int4_layout1_cols(I, H, common::cols_concat({pd}), L.down.data() + size_t(e) * dn_words);
-      continue;
+  if (!rtn) {
+    // The names are looked up (and marked consumed) in order, then the experts repacked on the cores: each writes its
+    // own blocks, so the bytes are the one-thread loop's.
+    std::vector<std::array<LinearSrc, 3>> src;
+    src.reserve(E);
+    for (uint32_t e = 0; e < E; ++e) {
+      const std::string ep = lp + "mlp.experts." + std::to_string(e) + ".";
+      src.push_back({int4(ep + "gate_proj", H, I, group), int4(ep + "up_proj", H, I, group),
+                     int4(ep + "down_proj", I, H, group)});
+      for (const LinearSrc& x : src.back()) L.src_int4_bytes += int4_src_bytes(x);
     }
-    const LinearSrc g = int4(ep + "gate_proj", H, I, group), u = int4(ep + "up_proj", H, I, group);
-    const LinearSrc dn = int4(ep + "down_proj", I, H, group);
-    L.src_int4_bytes += int4_src_bytes(g) + int4_src_bytes(u) + int4_src_bytes(dn);
-    common::repack_int4_layout1_cols(H, 2 * I,
-                                     common::cols_interleave16({g.qweight, g.scales, g.N}, {u.qweight, u.scales, u.N}),
-                                     L.gate_up.data() + size_t(e) * gu_words);
-    common::repack_int4_layout1_cols(I, H, common::cols_concat({{dn.qweight, dn.scales, dn.N}}),
-                                     L.down.data() + size_t(e) * dn_words);
+    common::parallel_for(E, 0, [&](size_t e) {
+      const auto& [g, u, dn] = src[e];
+      common::repack_int4_layout1_cols(H, 2 * I,
+                                       common::cols_interleave16({g.qweight, g.scales, g.N}, {u.qweight, u.scales, u.N}),
+                                       L.gate_up.data() + e * gu_words);
+      common::repack_int4_layout1_cols(I, H, common::cols_concat({{dn.qweight, dn.scales, dn.N}}),
+                                       L.down.data() + e * dn_words);
+    });
+    return;
+  }
+  for (uint32_t e = 0; e < E; ++e) {   // the MTP head's bf16 experts, RTN first
+    const std::string ep = lp + "mlp.experts." + std::to_string(e) + ".";
+    const LinearSrc g = bf16(ep + "gate_proj", H, I), u = bf16(ep + "up_proj", H, I);
+    const LinearSrc dn = bf16(ep + "down_proj", I, H);
+    rtn_int4_g64(g.weight, H, I, qg.data(), sg.data());
+    rtn_int4_g64(u.weight, H, I, qu.data(), su.data());
+    rtn_int4_g64(dn.weight, I, H, qd.data(), sd.data());
+    const common::Part pg{qg.data(), sg.data(), I}, pu{qu.data(), su.data(), I}, pd{qd.data(), sd.data(), H};
+    L.src_bf16_bytes += size_t(3) * I * H * 2;
+    common::repack_int4_layout1_cols(H, 2 * I, common::cols_interleave16(pg, pu), L.gate_up.data() + size_t(e) * gu_words);
+    common::repack_int4_layout1_cols(I, H, common::cols_concat({pd}), L.down.data() + size_t(e) * dn_words);
   }
 }
 

@@ -63,6 +63,20 @@ class SafetensorsSet {
   // the checkpoint tensor by tensor then faults on cached pages instead of waiting on the disk a page fault at a time
   // (MADV_SEQUENTIAL's readahead alone read a Flash-Next checkpoint at ~0.3 GB/s from a disk that reads 1.1 GB/s).
   size_t read_ahead(const std::vector<FileRange>& r, unsigned readers) const;
+  // Copies tensor `t`'s bytes to `dst` straight from the disk (O_DIRECT, 8 MiB aligned reads through a bounce buffer
+  // a reader; buffered preads where the file system refuses O_DIRECT) on `readers` threads: no page cache is filled
+  // and no copy of the mapping faulted in a page at a time.
+  void read_into(const TensorInfo& t, void* dst, unsigned readers) const;
+  // Reads `r` straight from the disk into the mapping: each range's whole pages are replaced by anonymous memory that
+  // O_DIRECT reads fill (`readers` threads, 8 MiB reads: 1.4-1.5 GB/s from the box's disk against 0.9-1.1 for buffered
+  // preads), its partial end pages go through the page cache. The mapping shows the file's
+  // bytes either way; a range's whole pages read as zeros only until this returns, so nothing may read them meanwhile.
+  // Where the file system refuses O_DIRECT, read_ahead's buffered reads. Returns the bytes read.
+  size_t read_mapped(const std::vector<FileRange>& r, unsigned readers) const;
+  // Maps the files back over read_mapped's whole pages of `r`, freeing their memory.
+  void release_mapped(const std::vector<FileRange>& r) const;
+  // Bytes [off, off + n) of tensor `t` by one pread, the file read as random access (no read-ahead around them).
+  void read_bytes(const TensorInfo& t, uint64_t off, size_t n, void* dst) const;
 
   // Parses one safetensors header (8-byte LE length + JSON). Exposed for tests.
   static std::vector<std::pair<std::string, TensorInfo>> parse_header(const uint8_t* p, size_t n);

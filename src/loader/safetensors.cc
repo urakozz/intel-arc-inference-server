@@ -5,6 +5,9 @@
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
+#include <memory>
+#include <string>
 #include <cstring>
 #include <fstream>
 #include <thread>
@@ -192,6 +195,134 @@ size_t SafetensorsSet::read_ahead(const std::vector<FileRange>& r, unsigned read
     });
   for (std::thread& t : pool) t.join();
   return bytes;
+}
+
+namespace {
+constexpr uint64_t kPage = 4096;
+// A range's whole pages [lo, hi) (lo >= hi: none).
+std::pair<uint64_t, uint64_t> whole_pages(const FileRange& x) {
+  return {(x.begin + kPage - 1) / kPage * kPage, x.end / kPage * kPage};
+}
+}  // namespace
+
+size_t SafetensorsSet::read_mapped(const std::vector<FileRange>& r, unsigned readers) const {
+  constexpr uint64_t kBlock = uint64_t(8) << 20;
+  std::map<uint32_t, int> direct;   // file -> its O_DIRECT descriptor (-1: refused)
+  for (const FileRange& x : r)
+    if (!direct.contains(x.file)) {
+      const std::string self = "/proc/self/fd/" + std::to_string(files_[x.file].fd());
+      direct[x.file] = ::open(self.c_str(), O_RDONLY | O_DIRECT);
+    }
+  struct Block {
+    FileRange b;
+    bool direct;
+  };
+  std::vector<Block> blocks;
+  std::vector<std::pair<uint8_t*, size_t>> overlays;
+  const auto buffered = [&](uint32_t f, uint64_t begin, uint64_t end) {
+    for (uint64_t b = begin; b < end; b += kBlock) blocks.push_back({{f, b, std::min(end, b + kBlock)}, false});
+  };
+  for (const FileRange& x : r) {
+    const auto [lo, hi] = whole_pages(x);
+    if (direct[x.file] < 0 || lo >= hi) {
+      buffered(x.file, x.begin, x.end);
+      continue;
+    }
+    buffered(x.file, x.begin, lo);
+    buffered(x.file, hi, x.end);
+    uint8_t* at = const_cast<uint8_t*>(files_[x.file].data()) + lo;
+    if (::mmap(at, hi - lo, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED)
+      throw std::runtime_error(names_[x.file] + ": cannot map memory over bytes [" + std::to_string(lo) + ", " +
+                               std::to_string(hi) + ") to read them into");
+    overlays.emplace_back(at, hi - lo);
+    for (uint64_t b = lo; b < hi; b += kBlock) blocks.push_back({{x.file, b, std::min(hi, b + kBlock)}, true});
+  }
+  std::atomic<size_t> next{0}, bytes{0};
+  std::atomic<bool> short_read{false};
+  std::vector<std::thread> pool;
+  for (unsigned i = 0; i < std::max(1u, readers); ++i)
+    pool.emplace_back([&] {
+      std::vector<uint8_t> buf(kBlock);
+      for (size_t k; (k = next++) < blocks.size() && !short_read;) {
+        const auto& [b, d] = blocks[k];
+        uint8_t* dst = d ? const_cast<uint8_t*>(files_[b.file].data()) + b.begin : buf.data();
+        const int fd = d ? direct[b.file] : files_[b.file].fd();
+        for (uint64_t at = b.begin; at < b.end;) {
+          const ssize_t n = ::pread(fd, dst + (at - b.begin), size_t(b.end - at), off_t(at));
+          if (n <= 0) {
+            short_read = short_read || d;   // a buffered piece: the repack's own read reports a short file
+            break;
+          }
+          at += uint64_t(n);
+          bytes += size_t(n);
+        }
+      }
+    });
+  for (std::thread& t : pool) t.join();
+  for (const auto& [f, fd] : direct)
+    if (fd >= 0) ::close(fd);
+  for (const auto& [at, n] : overlays) ::mprotect(at, n, PROT_READ);
+  if (short_read) throw std::runtime_error("a checkpoint file is shorter than its header says (an O_DIRECT read came back short)");
+  return bytes;
+}
+
+void SafetensorsSet::release_mapped(const std::vector<FileRange>& r) const {
+  for (const FileRange& x : r) {
+    const auto [lo, hi] = whole_pages(x);
+    if (lo >= hi) continue;
+    uint8_t* at = const_cast<uint8_t*>(files_[x.file].data()) + lo;
+    if (::mmap(at, hi - lo, PROT_READ, MAP_PRIVATE | MAP_FIXED, files_[x.file].fd(), off_t(lo)) == MAP_FAILED)
+      throw std::runtime_error(names_[x.file] + ": cannot map the file back over bytes [" + std::to_string(lo) + ", " +
+                               std::to_string(hi) + ")");
+  }
+}
+
+void SafetensorsSet::read_bytes(const TensorInfo& t, uint64_t off, size_t n, void* dst) const {
+  const uint64_t at = data_start_[t.file] + t.begin + off;
+  ::posix_fadvise(files_[t.file].fd(), 0, 0, POSIX_FADV_RANDOM);
+  if (off + n > t.end - t.begin || ::pread(files_[t.file].fd(), dst, n, off_t(at)) != ssize_t(n))
+    throw std::runtime_error(names_[t.file] + ": a read of " + std::to_string(n) + " B at " + std::to_string(at) +
+                             " came back short");
+}
+
+void SafetensorsSet::read_into(const TensorInfo& t, void* dst, unsigned readers) const {
+  constexpr uint64_t kBlock = uint64_t(8) << 20, kAlign = 4096;
+  const uint64_t begin = data_start_[t.file] + t.begin, end = data_start_[t.file] + t.end;
+  if (begin == end) return;
+  const std::string self = "/proc/self/fd/" + std::to_string(files_[t.file].fd());
+  int fd = ::open(self.c_str(), O_RDONLY | O_DIRECT);
+  const bool direct = fd >= 0;
+  if (!direct) fd = files_[t.file].fd();
+  const uint64_t first = begin / kAlign * kAlign, blocks = (end - first + kBlock - 1) / kBlock;
+  std::atomic<uint64_t> next{0};
+  std::atomic<bool> short_read{false};
+  std::vector<std::thread> pool;
+  for (unsigned i = 0; i < std::max(1u, readers); ++i)
+    pool.emplace_back([&] {
+      const std::unique_ptr<uint8_t, decltype(&std::free)> buf(static_cast<uint8_t*>(std::aligned_alloc(kAlign, kBlock)),
+                                                               &std::free);
+      for (uint64_t k; (k = next++) < blocks && !short_read;) {
+        const uint64_t at = first + k * kBlock, want = std::min(kBlock, end - at);
+        const uint64_t len = (want + kAlign - 1) / kAlign * kAlign;   // O_DIRECT reads whole sectors; EOF cuts it
+        uint64_t got = 0;
+        while (got < want) {
+          const ssize_t n = ::pread(fd, buf.get() + got, size_t(len - got), off_t(at + got));
+          if (n <= 0) break;
+          got += uint64_t(n);
+        }
+        if (got < want) {
+          short_read = true;
+          break;
+        }
+        const uint64_t lo = std::max(at, begin);
+        std::memcpy(static_cast<uint8_t*>(dst) + (lo - begin), buf.get() + (lo - at), size_t(at + want - lo));
+      }
+    });
+  for (std::thread& th : pool) th.join();
+  if (direct) ::close(fd);
+  if (short_read)
+    throw std::runtime_error(names_[t.file] + ": a read of bytes [" + std::to_string(begin) + ", " +
+                             std::to_string(end) + ") came back short - the file is shorter than its header says");
 }
 
 }  // namespace loader
