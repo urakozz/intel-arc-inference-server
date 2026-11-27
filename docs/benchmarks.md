@@ -40,7 +40,7 @@ Measured on a PCIe 3.0 workstation with DDR4-2133 and P2P. PCIe 5.0 x16, DDR5 RA
 |---|---:|---:|---:|
 | one card | 220.5 | 287.9 | 176.4 |
 | two cards `pp` | 207.7 | 281.3 | 177.3 |
-| two cards `tp` | 217.5 | 376.6 | 219.1 |
+| two cards `tp` | 274.8 | 376.6 | 219.1 |
 | 2 requests, two cards `replica` (total) | 351 | 452 | 286 |
 
 | prefill (`l0-int8`, int8 cache), t/s | 16k | 32k | 64k |

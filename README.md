@@ -24,8 +24,8 @@ One session, greedy, served, tokens a second. All setups, more context lengths a
 
 | model | setup | prefill | code | prose | tool calls |
 |---|---|---:|---:|---:|---:|
-| Inkling 2 Mini | one card, DFlash 2 | 4,932 (4k) | **221** | **288** | **176** |
-| Inkling 2 Mini | two cards, DFlash 2 (`tp`; prefill `pp`) | 7,194 (16k) | 218 | **377** | **219** |
+| Inkling 2 Mini | one card, DFlash 2 | 4,932 (4k, int8) | **221** | **288** | **176** |
+| Inkling 2 Mini | two cards, DFlash 2 (`tp`; prefill `pp`) | 7,194 (16k, int8) | **275** | **377** | **219** |
 | Qwen3.8-27B | one card, DFlash 2 | 2,800 (4k, int8) | **167** | 67 | 118 |
 | Qwen3.8-27B | two cards `tp`, DFlash 2 | 3,467 (4k, int8) | 182 | **89** | **153** |
 | Ornith 1.5 35B-A3B | one card, MTP | **11,223** (4k) | **320** | **341** | **287** |
